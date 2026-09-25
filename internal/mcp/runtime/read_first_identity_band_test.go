@@ -37,14 +37,14 @@ import (
 // callClass asks the classification site directly for the class it would assign, starting from the
 // conservative OpWrite default the protocol mapping produces for a tools/call.
 //
-// It calls classifyReadFirstToolCall rather than driving Process end to end deliberately: the live
+// It calls classifyReadFirstForPrincipal rather than driving Process end to end deliberately: the live
 // path cannot produce AssuranceUnknown today (see the file header), so an end-to-end gate could
 // only assert the coincidence that keeps the override unreachable — not the rule that must hold
 // when it becomes reachable.
 func callClass(t *testing.T, p *pipeline, assurance policy.Assurance) policy.OperationClass {
 	t.Helper()
 	op := policy.Operation{Method: "tools/call", Class: policy.OpWrite}
-	p.classifyReadFirstToolCall(&op, testServerID, "x", assurance)
+	p.classifyReadFirstForPrincipal(&op, testServerID, "x", assurance)
 	return op.Class
 }
 

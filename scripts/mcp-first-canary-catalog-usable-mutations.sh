@@ -1,0 +1,552 @@
+#!/usr/bin/env bash
+# mcp-first-canary-catalog-usable-mutations.sh — the §12 campaign for GOVERNED CATALOG
+# USABILITY AS A FIRST-CANARY ACTIVATION FACT (blocker #13).
+#
+# The defect this closes: the exact First-Canary tool was catalog.Quarantined, the policy
+# engine hard-overrides a Quarantined tool to ActionQuarantine before any operator rule is
+# consulted, and NOTHING in the activation preflight said so. A node could hold a valid live
+# approval, a reviewed target, an exact scope and a read-first class, report Ready:true, and
+# then have every request die at that override.
+#
+# Each mutation reintroduces ONE specific way that could come back, then runs the NAMED gate
+# that must catch it. A mutation no test rejects is not a passing mutation: it is a hole.
+#
+#   M01  the readiness row is deleted from the activation table
+#   M02  the fact is hard-coded true at the wiring step
+#   M03  the production probe stops resolving it
+#   M04  the commit path drops the resolved fact
+#   M05  the restart-reconcile path drops the resolved fact
+#   M06  the row is classified node-level, so EvaluateNode starts asserting it
+#   M07  the resolver accepts any eligibility that is not the sticky floor
+#   M08  the resolver stops comparing the scope's pinned fingerprint
+#   M09  the resolver stops checking tenant ownership
+#   M10  the resolver reports true for an empty scope
+#   M11  the resolver reports true when the inventory is absent
+#   M12  a live_execution approval promotes to catalog.Usable (authority collapse)
+#   M13  the digest stops folding the fingerprint FORMAT version
+#   M14  a data-plane file gains a promotion call (structural wall)
+#   M15  the resolver reads the catalog without materializing expiry first
+#   M16  the resolver straddles two snapshots for one decision
+#
+# A COMPILE FAILURE IS NOT PROOF unless the mutation targets a structural wall whose stated
+# purpose is compile-time prevention (those declare --compile-wall).
+#
+# Usage:  scripts/mcp-first-canary-catalog-usable-mutations.sh [-k]
+#         (-k: keep going after a surviving mutation; default stops at the first survivor)
+set -uo pipefail
+cd "$(dirname "$0")/.."
+
+KEEP=0
+[ "${1:-}" = "-k" ] && KEEP=1
+
+# The campaign mutates tracked files IN PLACE and reverts them with `git checkout`.
+# Running it against a dirty tree therefore DESTROYS uncommitted work.
+if ! git diff --quiet || ! git diff --cached --quiet; then
+  printf 'refusing to run: the working tree has uncommitted changes to tracked files.\n'
+  git status --short
+  exit 2
+fi
+
+PASS=0; SURVIVED=0; SKIPPED=0
+declare -a SURVIVORS=()
+
+revert() { git checkout -- "$@" 2>/dev/null || true; }
+
+# IN-FLIGHT MUTATION RECOVERY (Codex P2 round 8, PR #1378).
+#
+# revert runs only AFTER `go test` returns. If the run is interrupted or killed in between --
+# Ctrl-C, a harness reaping the process, the OOM killer, or the disk filling so the toolchain dies
+# -- the shell exits with a DELIBERATELY DEFECTIVE production change still in the worktree. Later
+# builds then compile against the wrong source, and the mutation can be committed by accident.
+#
+# This is not hypothetical: during this PR a run died mid-M12 and left ApproveLive rewritten to call
+# promoteFor -- the exact authority-separation violation the Canary design forbids -- sitting
+# uncommitted in a tracked file. It was noticed by `git status`, not by anything here.
+#
+# So the file under mutation is recorded before the first edit and cleared after the revert, and an
+# EXIT/INT/TERM trap restores whatever is still recorded. EXIT covers the ordinary and `set -e`
+# paths; INT and TERM cover the signals that skip it. SIGKILL cannot be trapped by anyone, which is
+# why the campaign also refuses to start on a dirty tree -- a stranded mutation from a SIGKILLed run
+# stops the next run rather than being silently re-measured.
+MUTATING_FILE=""
+restore_in_flight() {
+  local rc=$?
+  if [ -n "$MUTATING_FILE" ]; then
+    printf "\n!! interrupted with %s still mutated — restoring it\n" "$MUTATING_FILE" >&2
+    revert "$MUTATING_FILE"
+    MUTATING_FILE=""
+  fi
+  return $rc
+}
+trap restore_in_flight EXIT
+trap 'restore_in_flight; exit 130' INT
+trap 'restore_in_flight; exit 143' TERM
+
+# has_re / has_fixed use a herestring, never a producer pipe: under `set -o pipefail` a
+# matched grep kills printf with SIGPIPE and the PIPELINE scores as failed.
+has_re()    { grep -qE -- "$1" <<<"$2"; }
+has_fixed() { grep -qF -- "$1" <<<"$2"; }
+
+build_or_vet_failed() {
+  has_re '\[build failed\]|\[setup failed\]|^vet: |^# github\.com/KidCarmi' "$1"
+}
+
+# gate_ran reports whether a `go test` invocation actually REACHED an assertion. The two
+# ways it does not — the -run pattern matched nothing (exit 0, looks like a pass) and the
+# package did not build (nonzero, looks like a catch) — are both misread by a bare status
+# check, so every result decision goes through here.
+gate_ran() {
+  local id="$1" label="$2" out="$3"
+  if has_fixed 'no tests to run' "$out"; then
+    printf '      BROKEN GATE — %s matched no tests; this proves NOTHING\n' "$label"
+    SKIPPED=$((SKIPPED+1)); SURVIVORS+=("$id: BROKEN GATE ($label matched no tests)")
+    return 1
+  fi
+  if build_or_vet_failed "$out"; then
+    printf '      NOT PROVEN — %s did not BUILD, so no gate ran; this proves NOTHING\n' "$label"
+    SKIPPED=$((SKIPPED+1)); SURVIVORS+=("$id: NOT PROVEN ($label build/vet failure, not an assertion)")
+    return 1
+  fi
+  return 0
+}
+
+# run_mutation <id> <description> [--compile-wall] <gate-regex> <package> <file> <perl-script...>
+run_mutation() {
+  local id="$1" desc="$2"; shift 2
+  local compile_wall=0
+  [ "${1:-}" = "--compile-wall" ] && { compile_wall=1; shift; }
+  local gate="$1" pkg="$2" file="$3"; shift 3
+
+  printf '\n[%s] %s\n' "$id" "$desc"
+  printf '      gate: %s  (%s)\n' "$gate" "$pkg"
+
+  local before; before="$(git rev-parse HEAD:"$file" 2>/dev/null || echo none)"
+  MUTATING_FILE="$file" # armed BEFORE the first edit; the trap restores it if we die here
+  for script in "$@"; do
+    perl -0pi -e "$script" "$file"
+  done
+  local after; after="$(git hash-object "$file")"
+  if [ "$before" = "$after" ]; then
+    printf '      SKIPPED — the mutation did not change %s (pattern drifted)\n' "$file"
+    SKIPPED=$((SKIPPED+1)); SURVIVORS+=("$id: SKIPPED (pattern drifted in $file)")
+    revert "$file"; MUTATING_FILE=""
+    [ $KEEP -eq 0 ] && exit 1
+    return
+  fi
+
+  local out; out="$(go test -count=1 -run "$gate" "$pkg" 2>&1)"
+  local rc=$?
+  revert "$file"; MUTATING_FILE=""
+
+  if [ $compile_wall -eq 1 ]; then
+    if build_or_vet_failed "$out"; then
+      printf '      CAUGHT (structural wall: the mutation does not compile, as required)\n'
+      PASS=$((PASS+1))
+    else
+      printf '      *** SURVIVED *** a compile-time wall must REJECT this at build time\n'
+      SURVIVED=$((SURVIVED+1)); SURVIVORS+=("$id: $desc")
+      [ $KEEP -eq 0 ] && { printf '\nstopping at first survivor (pass -k to continue)\n'; exit 1; }
+    fi
+    return
+  fi
+
+  if ! gate_ran "$id" "the gate in $pkg" "$out"; then
+    printf '%s\n' "$out" | tail -8 | sed 's/^/        /'
+    [ $KEEP -eq 0 ] && exit 1
+    return
+  fi
+
+  if [ $rc -ne 0 ]; then
+    printf '      CAUGHT (gate failed as required)\n'
+    PASS=$((PASS+1))
+  else
+    printf '      *** SURVIVED *** the gate passed with the defect reintroduced\n'
+    printf '%s\n' "$out" | tail -5 | sed 's/^/        /'
+    SURVIVED=$((SURVIVED+1)); SURVIVORS+=("$id: $desc")
+    [ $KEEP -eq 0 ] && { printf '\nstopping at first survivor (pass -k to continue)\n'; exit 1; }
+  fi
+}
+
+printf 'MCP FIRST-CANARY GOVERNED CATALOG USABILITY mutation campaign\n'
+printf '============================================================\n'
+
+READINESS=internal/mcp/canary/readiness.go
+FPRINT=internal/mcp/catalog/fingerprint.go
+PREFLIGHT=mcp_canary_preflight.go
+TOOLTRUST=mcp_tooltrust.go
+ROLLOUT=mcp_rollout.go
+READINESS=internal/mcp/canary/readiness.go
+POLICYENGINE=internal/mcp/policy/engine.go
+TRUST=mcp_tooltrust.go
+POLICYENG=internal/mcp/policy/engine.go
+
+# M01 — THE ROW IS DELETED. The pure readiness table stops asserting usability at all, which is
+# exactly the pre-#13 shape: every other activation fact still holds and the verdict is Ready.
+run_mutation M01 \
+  'the catalog-usability row is deleted from the activation readiness table' \
+  'TestEvaluate_EachFactIsIndependentlyLoadBearing|TestEvaluate_ReasonVocabularyParity' \
+  ./internal/mcp/canary "$READINESS" \
+  's/\t\{func\(f Facts\) bool \{ return f\.ToolCatalogUsable \}, ReasonToolNotCatalogUsable, factActivation\},\n//'
+
+# M02 — THE FACT IS ASSERTED, NOT RESOLVED. The wiring step hard-codes true, so the row is
+# permanently met however Quarantined the tool is. This is the "runbook step" failure in code.
+run_mutation M02 \
+  'the activation wiring hard-codes the fact true instead of taking the resolved value' \
+  'TestCatalogUsable_ProductionPreflightCarriesTheRow' \
+  . "$PREFLIGHT" \
+  's/\tf\.ToolCatalogUsable = in\.ToolCatalogUsable/\tf.ToolCatalogUsable = true/'
+
+# M03 — THE PROBE STOPS RESOLVING IT. Authoritative node state is no longer consulted; the input
+# arrives zero-valued, which fails closed — so the CONTROL half of the gate (a governed promotion
+# must MEET the row) is what catches this. A defect that only ever fails closed is still a defect:
+# it makes the fact unsatisfiable and the experiment un-runnable.
+run_mutation M03 \
+  'the production probe stops resolving the fact from authoritative catalog state' \
+  'TestCatalogUsable_ProductionPreflightCarriesTheRow' \
+  . "$PREFLIGHT" \
+  's/\t\tToolCatalogUsable: canaryScopedToolsCatalogUsable\(scope\),/\t\tToolCatalogUsable: false,/'
+
+# M04 — THE COMMIT PATH DROPS IT. The probe resolves the fact and the transition commit throws it
+# away, so the serialized re-evaluation inside the commit never sees it.
+run_mutation M04 \
+  'the transition commit drops the resolved fact before re-evaluating the preflight' \
+  'TestCatalogUsable_EveryActivationInputFieldReachesEveryPreflightCall' \
+  . "$ROLLOUT" \
+  's/\t\t\tToolCatalogUsable:  ai\.ToolCatalogUsable,\n//'
+
+# M05 — THE RESTART PATH DROPS IT. A restart re-runs the activation preflight over the restored
+# config; dropping the fact there lets a node resume a live mode a fresh commit would now reject.
+run_mutation M05 \
+  'the restart-reconcile preflight drops the resolved fact' \
+  'TestCatalogUsable_EveryActivationInputFieldReachesEveryPreflightCall' \
+  . "$ROLLOUT" \
+  's/\t\t\t\t\tToolCatalogUsable: ai\.ToolCatalogUsable, Now: time\.Now\(\),/\t\t\t\t\tNow: time.Now(),/'
+
+# M06 — THE ROW IS RECLASSIFIED NODE-LEVEL. EvaluateNode answers "is this NODE ready", a question
+# no scope is supplied for, so a scope-derived fact there is answered against a zero value and
+# reports every node un-ready for a scope nobody named.
+run_mutation M06 \
+  'the row is classified node-level, so EvaluateNode starts asserting a scope-derived fact' \
+  'TestEvaluateNode_ExcludesActivationInputs' \
+  ./internal/mcp/canary "$READINESS" \
+  's/\{func\(f Facts\) bool \{ return f\.ToolCatalogUsable \}, ReasonToolNotCatalogUsable, factActivation\}/{func(f Facts) bool { return f.ToolCatalogUsable }, ReasonToolNotCatalogUsable, factNode}/'
+
+# M07 — "NOT QUARANTINED" IS ACCEPTED AS USABLE. ReviewRequired and PendingNarrowing are also
+# hard-overridden by the policy engine, so anything short of exactly Usable is the same outage.
+run_mutation M07 \
+  'the resolver accepts any eligibility that is merely not the sticky Quarantined floor' \
+  'TestCatalogUsable_SeededToolIsQuarantinedAndNotUsable|TestCatalogUsable_LiveApprovalAloneNeverPromotes' \
+  . "$PREFLIGHT" \
+  's/\t\t\tif rec\.Eligibility != catalog\.Usable \{/\t\t\tif rec.Eligibility == catalog.ServerDisabled {/'
+
+# M08 — THE PIN IS NOT COMPARED. A Usable record for SOME revision of the tool satisfies a scope
+# pinned to a different one — F2 riding F1's promotion, the §5 defect.
+run_mutation M08 \
+  'the resolver stops comparing the record digest against the scope pinned fingerprint' \
+  'TestCatalogUsable_UsableRecordDoesNotSatisfyAScopePinnedElsewhere' \
+  . "$PREFLIGHT" \
+  's/if !strings\.EqualFold\(hex\.EncodeToString\(sum\[:\]\), st\.Fingerprint\) \{/if !strings.EqualFold(hex.EncodeToString(sum[:]), hex.EncodeToString(sum[:])) {/'
+
+# M09 — TENANT OWNERSHIP IS NOT CHECKED. A scope naming any tenant satisfies the fact for a server
+# that tenant does not own.
+#
+# RE-ANCHORED after the round-2 fix replaced loadTarget with a direct registry-snapshot lookup. The
+# first run after that fix scored this mutation SKIPPED — its old pattern no longer matched — which
+# proves nothing, and is the same class of campaign defect M09 itself was repaired for once already:
+# a mutation is only evidence while its pattern still describes the code it targets.
+#
+# The replacement keeps BOTH `tenant` and `srv` used. Simply deleting the comparison leaves them
+# unused and the mutation fails to BUILD, which under this campaign's header rule proves nothing --
+# the same trap M08 was repaired for. The guard written here is never true for a real tenant, so
+# ownership goes unchecked while the tree still compiles.
+run_mutation M09 \
+  'the resolver stops checking that the naming tenant owns the server' \
+  'TestCatalogUsable_TenantThatDoesNotOwnTheServerIsNotUsable' \
+  . "$PREFLIGHT" \
+  's/\t\t\tif !sok \|\| string\(srv\.OwnerScope\) != tenant \{/\t\t\tif !sok || (tenant == "\\x00never" \&\& string(srv.OwnerScope) != tenant) {/'
+
+# M10 — AN EMPTY SCOPE IS "USABLE". Vacuous truth: a scope admitting no tool satisfies a fact about
+# every tool it admits, so the row is met for an experiment with no reviewed target at all.
+run_mutation M10 \
+  'the resolver reports the fact satisfied for an empty scope (vacuous truth)' \
+  'TestCatalogUsable_EmptyScopeIsNotVacuouslyUsable' \
+  . "$PREFLIGHT" \
+  's/\tif len\(scope\.Tools\) == 0 \|\| len\(scope\.Tenants\) == 0 \{\n\t\treturn false\n\t\}/\tif len(scope.Tools) == 0 || len(scope.Tenants) == 0 {\n\t\treturn true\n\t}/'
+
+# M11 — AN ABSENT INVENTORY IS "USABLE". Fail-open on the exact condition under which nothing is
+# known about the tool.
+run_mutation M11 \
+  'the resolver reports the fact satisfied when no inventory is published (fail-open)' \
+  'TestCatalogUsable_AbsentInventoryFailsClosed' \
+  . "$PREFLIGHT" \
+  's/\tsnap, servers, ok := mcpToolTrustReconcileSnapshotFor\(\)\n\tif !ok \{\n\t\treturn false\n\t\}/\tsnap, servers, ok := mcpToolTrustReconcileSnapshotFor()\n\tif !ok {\n\t\treturn true\n\t}/'
+
+# M12 — AUTHORITY COLLAPSE. ApproveLive gains the promotion ApproveShadow performs, so a
+# live_execution approval makes a tool catalog.Usable. This is §2's central rule: the two approvals
+# answer different questions and one must never satisfy the other.
+run_mutation M12 \
+  'a live_execution approval promotes the tool to catalog.Usable' \
+  'TestCatalogUsable_LiveApprovalAloneNeverPromotes|TestCatalogUsable_ShadowAndLiveAreIndependentFacts' \
+  . "$TRUST" \
+  's/\t\/\/ Deliberately NO promoteFor \/ catalog mutation: live trust never materializes catalog\.Usable\.\n\treturn granted, nil/\tif _, perr := c.promoteFor(granted); perr != nil {\n\t\treturn nil, perr\n\t}\n\treturn granted, nil/'
+
+# M13 — THE DIGEST STOPS BINDING THE FORMAT. The resolver has no separate format comparison BY
+# DESIGN, because Sum folds FormatVersion in before any other segment. Remove that and the format
+# binding silently disappears from every caller that rests on it — which is the whole point of
+# pinning the property directly rather than restating it as a check.
+run_mutation M13 \
+  'the fingerprint digest stops folding the fingerprint FORMAT version' \
+  'TestCatalogUsable_FingerprintFormatIsFoldedIntoTheBoundDigest' \
+  . "$FPRINT" \
+  's/\tvar ver \[2\]byte\n\tbinary\.BigEndian\.PutUint16\(ver\[:\], f\.FormatVersion\)\n\th\.Write\(ver\[:\]\)\n/\tvar ver [2]byte\n\th.Write(ver[:])\n/'
+
+# M14 — THE DATA PLANE PROMOTES. A request-path file gains a catalog.Promote call, which is §8's
+# forbidden shape: request traffic must never mutate catalog eligibility. The wall is by CALLER,
+# so any promoter outside the governed coordinator fails it.
+run_mutation M14 \
+  'a data-plane file gains a catalog promotion call' \
+  'TestCatalogUsable_OnlyTheGovernedCoordinatorPromotes' \
+  . "$PREFLIGHT" \
+  's/(func canaryScopedToolsCatalogUsable\(scope rollout\.ScopeSpec\) bool \{\n)/$1\tif false {\n\t\t_, c := mcpInventory.sharedInventory()\n\t\t_, _ = c.Promote(catalog.ToolKey{}, catalog.Fingerprint{})\n\t}\n/'
+
+# M15 — EXPIRY IS PASSIVE, so a read that does not reconcile first answers "usable" for a grant
+# that has already lapsed. Revocation demotes inline and hides this; only expiry exposes it.
+# (Codex P2, PR #1378 — a real finding, not a hypothetical: the gate below was written against the
+# defect and verified failing before the fix.)
+run_mutation M15 \
+  'the resolver reads the catalog without materializing expiry first' \
+  'TestCatalogUsable_ExpiredPromotionIsNotUsableBeforeTheReconcileTick' \
+  . "$PREFLIGHT" \
+  's/\tsnap, servers, ok := mcpToolTrustReconcileSnapshotFor\(\)\n\tif !ok \{\n\t\treturn false\n\t\}/\trg, ct := mcpInventory.sharedInventory()\n\tif rg == nil || ct == nil {\n\t\treturn false\n\t}\n\tsnap := ct.Current()\n\tservers := rg.Current()/'
+
+# M16 — THE DECISION STRADDLES TWO SNAPSHOTS. Resolving ownership through loadTarget re-reads
+# cat.Current() AND reg.Current(), so a republish landing mid-scan pairs an old Usable F1 record
+# with ownership from the new snapshot and the resolver answers "usable" for a target the current
+# catalog has already re-quarantined. (Codex P2 round 2, PR #1378 — a real finding, and one this PR
+# first created by DELETING the cross-check as "vacuous": same catalog, different reads.)
+#
+# --compile-wall is NOT used: the mutation compiles, and the structural gate is what rejects it.
+# RE-ANCHORED (round 6): the original form replaced the ownership lookup with loadTarget AND
+# deleted `servers := reg.Current()`, which stopped compiling once the repin/usable checks below
+# began using srv — so it reported NOT PROVEN and the campaign proved nothing about this gate.
+# That is the third time on this PR that a code change silently moved a mutation's target (M08's
+# unused-variable trap, M09 after the single-snapshot fix, now M16), and a NOT-PROVEN mutation is
+# the same silent failure as a SKIP.
+#
+# The re-anchored form keeps srv defined and expresses the defect directly: a per-iteration
+# reg.Current() IS the second read, so the decision can again straddle two snapshots.
+run_mutation M16 \
+  'the resolver re-reads the registry snapshot inside the scan' \
+  'TestCatalogUsable_ResolverReadsEachSnapshotExactlyOnce' \
+  . "$PREFLIGHT" \
+  's/\t\t\tsrv, sok := servers\.Get\(registry\.ServerID\(st\.Server\)\)/\t\t\t_ = servers\n\t\t\trg, _ := mcpInventory.sharedInventory()\n\t\t\tsrv, sok := rg.Current().Get(registry.ServerID(st.Server))/'
+
+# M17 — THE REPIN WINDOW IS NOT DETECTED. Registry.Repin and the catalog re-ingest that follows it
+# are SEPARATE publications, so between them the registry pins I2 while the catalog record describes
+# I1. Removing the comparison lets the row report met for a target whose requests the runtime then
+# refuses as AnchorLost/RegistryPinDiverged (C18) — a Canary that activates and cannot execute.
+#
+# Note what this mutation does NOT break: the single-snapshot invariant. The decision still reads
+# each source exactly once. That is the point — one read of each source is necessary and NOT
+# sufficient, because the inconsistency lives in the published state rather than in the reading of
+# it. (Codex P2 round 6, PR #1378.)
+run_mutation M17 \
+  'the resolver accepts a catalog record whose identity the registry no longer pins' \
+  'TestCatalogUsable_RepinWindowIsNotUsable' \
+  . "$PREFLIGHT" \
+  's/\t\t\tif rec\.Fingerprint\.Identity != srv\.PinnedIdentity \{\n\t\t\t\treturn false\n\t\t\t\}\n//'
+
+# M18 — THE REGISTRY'S OWN USABILITY VERDICT IS DROPPED. rec.Eligibility is the CATALOG's last
+# ingested opinion of the server. The registry publishes independently, so a disable — or a
+# mismatching VerifyIdentity, whose branch clears Enabled WITHOUT touching PinnedIdentity — can land
+# after mcpToolTrustReconcile() returns and before reg.Current() is read. In that window the record
+# is still Usable, ownership matches, the digest matches, and the identity pin matches, so this is
+# the ONLY check that rejects it.
+#
+# The gate is STRUCTURAL by necessity: reaching that state behaviourally needs a production seam
+# interposing between the reconcile and the registry read, and adding one purely to let a test drive
+# a race is the worse trade. (Codex P2 round 7, PR #1378 — raised against a comment of mine that had
+# called this guard unreachable.)
+run_mutation M18 \
+  'the resolver stops asking the registry whether the server is usable' \
+  'TestCatalogUsable_ServerUsabilityGuardIsPresent' \
+  . "$PREFLIGHT" \
+  's/\t\t\tif !srv\.Usable\(\) \{\n\t\t\t\treturn false\n\t\t\t\}\n//'
+
+# M19 — THE SNAPSHOT CAPTURE LEAVES THE DERIVATION SECTION. Reconciling and THEN reading is not
+# equivalent to doing both under one deriveMu hold. Revoke holds that lock across store.Revoke AND
+# the catalog demotion so the pair moves together; a reader that reconciles, releases, and only then
+# reads cat.Current() can be scheduled into the middle of that section and observe a durably-revoked
+# approval whose tool is still catalog.Usable — every other check passes and the row is reported met.
+#
+# The gate is STRUCTURAL because a behavioural one does not discriminate here: mcpToolTrustReconcile
+# also takes deriveMu, so the pre-fix shape blocks on the lock exactly as the fixed one does (that
+# was measured, not assumed — the first version of the behavioural test passed against the defect).
+# (Codex P2 round 8, PR #1378.)
+run_mutation M19 \
+  'the resolver reconciles, releases the derivation lock, then reads the snapshots' \
+  'TestCatalogUsable_ResolverReadsEachSnapshotExactlyOnce' \
+  . "$PREFLIGHT" \
+  's/\tsnap, servers, ok := mcpToolTrustReconcileSnapshotFor\(\)\n\tif !ok \{\n\t\treturn false\n\t\}/\tmcpToolTrustReconcile()\n\treg, cat := mcpInventory.sharedInventory()\n\tif reg == nil || cat == nil {\n\t\treturn false\n\t}\n\tsnap := cat.Current()\n\tservers := reg.Current()/'
+
+# M20 — THE CAPTURE UNLOCKS BEFORE IT CAPTURES. This is M19's defect one layer in, and it is the
+# shape that defeated the FIRST version of the M19 gate: reconcileAndSnapshot still takes deriveMu
+# exactly once and still reads each source exactly once, so a wall counting calls sees nothing
+# wrong — while Revoke can persist a revoked approval in the window between the unlock and the two
+# Current() reads, leaving the catalog reporting the tool Usable. The gate therefore asserts the
+# CRITICAL SECTION (deriveMu by name, unlock DEFERRED, no bare unlock) rather than call counts: a
+# deferred unlock runs after the return expression is evaluated, so both captures are inside the
+# section by construction. (Codex P2 round 10, PR #1378 — raised against my own round-8 gate.)
+run_mutation M20 \
+  'the coherent capture releases deriveMu before reading either snapshot' \
+  'TestCatalogUsable_ResolverReadsEachSnapshotExactlyOnce' \
+  . "$TOOLTRUST" \
+  's/\tc\.deriveMu\.Lock\(\)\n\tdefer c\.deriveMu\.Unlock\(\)\n\tc\.reconcileLocked\(\)\n\treg, cat := mcpInventory\.sharedInventory\(\)\n/\tc.deriveMu.Lock()\n\tc.reconcileLocked()\n\treg, cat := mcpInventory.sharedInventory()\n\tc.deriveMu.Unlock()\n/'
+
+# M21 — THE ACTIVATION FACT IS NAMED BUT NOT FORWARDED. The commit and restart call sites HAND-SPREAD
+# the probe result into a CanaryActivationInput, so a field can be present and carry something the
+# probe never resolved. `ToolCatalogUsable: true` type-checks, reads correctly at a glance, and lets
+# a quarantined tool through both preflights once the other facts hold. The wall used to record only
+# the KEYS in each literal, which is why this shape passed it. (Codex P2 round 11, PR #1378.)
+run_mutation M21 \
+  'an activation call site sets ToolCatalogUsable from a literal instead of the probe result' \
+  'TestCatalogUsable_EveryActivationInputFieldReachesEveryPreflightCall' \
+  . "$ROLLOUT" \
+  's/ToolCatalogUsable: ai\.ToolCatalogUsable/ToolCatalogUsable: true/'
+
+# M22 — THE USABILITY VERDICT IS COMPUTED AND DISCARDED. Strictly weaker than M18's deletion and
+# strictly more plausible: the call is still there, so a reader — and a wall that looked only for a
+# selector named Usable — sees a guard. Nothing rejects, so a VerifyIdentity mismatch published after
+# the reconcile is accepted. Caught twice now: structurally (receiver + negation + `return false`)
+# and BEHAVIOURALLY, by driving the round-8 snapshot seam with a disabled server beside a still
+# Usable record — an interleaving round 7 called unreachable without a new production seam, which
+# stopped being true the moment round 8 added one. (Codex P2 round 11, PR #1378.)
+run_mutation M22 \
+  'the server-usability verdict is computed and thrown away instead of rejecting' \
+  'TestCatalogUsable_DisabledServerInTheRegistryWindowIsNotUsable' \
+  . "$PREFLIGHT" \
+  's/\t\t\tif !srv\.Usable\(\) \{\n\t\t\t\treturn false\n\t\t\t\}\n/\t\t\t_ = srv.Usable()\n/'
+
+# M23 — THE DATA PLANE PROMOTES THROUGH A METHOD VALUE. M14 covers a direct c.Promote(...) call in a
+# request-path file; this is the same defect one indirection out. The ownership scan used to match
+# only calls whose callee is a selector, so binding the method to a variable first made the promotion
+# invisible while the governed call kept the anti-vacuity half satisfied. A method value is still a
+# selector, so the scan walks selectors rather than call callees. (Codex P2 round 11, PR #1378.)
+run_mutation M23 \
+  'a request-path file promotes through a method value rather than a direct call' \
+  'TestCatalogUsable_OnlyTheGovernedCoordinatorPromotes' \
+  . "$PREFLIGHT" \
+  's/(func canaryScopedToolsCatalogUsable\(scope rollout\.ScopeSpec\) bool \{\n)/$1\tif false {\n\t\t_, c := mcpInventory.sharedInventory()\n\t\tpromote := c.Promote\n\t\t_, _ = promote(catalog.ToolKey{}, catalog.Fingerprint{})\n\t}\n/'
+
+# M24 — AN ACCESSOR IS SATISFIED BY SOMETHING OTHER THAN ITS OWN FACT. The pure-package tests flip
+# ONE field off an all-true fixture, so every other fact is true in every case they run; an accessor
+# reading `f.ToolCatalogUsable || !f.LiveExecutorComposed` is therefore invisible to all of them. On
+# the SHIPPED node the live executor is absent, so that accessor reports the tool catalog-usable
+# whatever the catalog says and Unmet silently stops listing a missing prerequisite. Caught by the
+# all-false derived gate, which is the opposite fixture. (Codex P2 round 12, PR #1378.)
+run_mutation M24 \
+  'the catalog-usability accessor is satisfied by an unrelated fact being false' \
+  'TestEvaluate_EveryUnmetFactIsReportedTogether' \
+  ./internal/mcp/canary "$READINESS" \
+  's/\{func\(f Facts\) bool \{ return f\.ToolCatalogUsable \}/{func(f Facts) bool { return f.ToolCatalogUsable || !f.LiveExecutorComposed }/'
+
+# M25 — THE ACTIVATION FACT IS SATISFIED BY THE APPROVAL IT ALREADY REQUIRES. Every real activation
+# carries a live approval, so `in.ToolCatalogUsable || len(in.ToolApprovals) > 0` makes the row
+# unreachable in production while passing any fixture that carries no approvals — which the preflight
+# fixture did. The fixture now issues a VALID live approval first and holds it constant, so the only
+# thing changing between the two evaluations is catalog usability. (Codex P2 round 12, PR #1378.)
+run_mutation M25 \
+  'the preflight satisfies catalog usability from the presence of a live approval' \
+  'TestCatalogUsable_ProductionPreflightCarriesTheRow' \
+  . "$PREFLIGHT" \
+  's/\tf\.ToolCatalogUsable = in\.ToolCatalogUsable\n/\tf.ToolCatalogUsable = in.ToolCatalogUsable || len(in.ToolApprovals) > 0\n/'
+
+# M26 — THE CATALOG DISPOSITION STOPS HARD-OVERRIDING. This is the premise the whole policy E2E rests
+# on: a Quarantined tool must be pre-empted BEFORE ordinary rule matching, independent of drift. Drop
+# the disposition arm and a quarantined tool falls through to the rules — where the fixture's ALLOW
+# would match it. The E2E's `before` leg is what refuses it.
+run_mutation M26 \
+  'the policy engine stops hard-overriding a catalog-quarantined tool' \
+  'TestCatalogUsable_PolicyQuarantineOverrideClearsAfterGovernedPromotion' \
+  . "$POLICYENGINE" \
+  's/case in\.Tool\.Drift == DriftUnknownTool \|\| in\.Tool\.Disposition == DispQuarantined:/case in.Tool.Drift == DriftUnknownTool:/'
+
+# M27 — CATALOG USABILITY IS DERIVED FROM ANOTHER REQUIRED INPUT. M25 closed the approval axis and
+# left three open: with ServerUsable, FingerprintCurrent and Budget at their zero values, a fixture
+# cannot tell `in.ToolCatalogUsable` from `in.ToolCatalogUsable || in.ServerUsable`. Every real
+# activation has ServerUsable true, so that wiring makes the row unreachable in production while
+# passing a zero-valued fixture. The preflight fixture now sets every other activation input VALID
+# (with anti-vacuity checks that they are) and re-asserts the row. (Codex P2 round 13, PR #1378.)
+run_mutation M27 \
+  'catalog usability is satisfied by another required activation input' \
+  'TestCatalogUsable_ProductionPreflightCarriesTheRow' \
+  . "$PREFLIGHT" \
+  's/\tf\.ToolCatalogUsable = in\.ToolCatalogUsable\n/\tf.ToolCatalogUsable = in.ToolCatalogUsable || in.ServerUsable\n/'
+
+# M28 — AN ACCESSOR AGREES AT EVERY VERTEX AND DISAGREES IN BETWEEN. The all-false gate (M24) is
+# sound only if each accessor is a plain positive field read; without that, all-false is merely a
+# THIRD vertex. This shape agrees at all-true, at every single-false, AND at all-false, while on a
+# partially composed node with healthy policy it suppresses the reason with the catalog fact false.
+# 2^23 combinations is not enumerable and any hand-picked subset is another proxy, so the gate
+# asserts the accessor SHAPE directly instead of sampling. (Codex P2 round 13, PR #1378.)
+run_mutation M28 \
+  'a readiness accessor agrees at every fixture vertex and disagrees in between' \
+  'TestReadinessChecks_EveryAccessorReadsOnlyItsOwnFact' \
+  ./internal/mcp/canary "$READINESS" \
+  's/\{func\(f Facts\) bool \{ return f\.ToolCatalogUsable \}/{func(f Facts) bool { return f.ToolCatalogUsable || (!f.LiveExecutorComposed \&\& !f.UpstreamCallerPresent \&\& f.PolicyHealthy) }/'
+
+# M29 — THE CAPTURES HAPPEN BEFORE THE LOCK. M20 closed "unlock moved ahead of the captures"; this is
+# the same escape from the other side, and it defeated M20's gate: reconcile, read BOTH snapshots
+# unlocked, and only then take deriveMu with a deferred unlock. One Lock, one deferred Unlock, one
+# read of each source — every count M20 asserts is unchanged, and Revoke is free to run between the
+# captures and the lock. The gate now compares POSITIONS: the lock must precede both reads, which
+# with the deferred unlock and the no-bare-unlock rule puts them inside the section by construction.
+# (Codex P2 round 14, PR #1378 — the syntax-to-behaviour inference the gate rested on.)
+run_mutation M29 \
+  'the coherent capture reads both snapshots before it takes deriveMu' \
+  'TestCatalogUsable_ResolverReadsEachSnapshotExactlyOnce' \
+  . "$TOOLTRUST" \
+  's/\tc\.deriveMu\.Lock\(\)\n\tdefer c\.deriveMu\.Unlock\(\)\n\tc\.reconcileLocked\(\)\n\treg, cat := mcpInventory\.sharedInventory\(\)\n\tif reg == nil \|\| cat == nil \{\n\t\treturn nil, nil, false\n\t\}\n\treturn reg\.Current\(\), cat\.Current\(\), true\n/\tc.reconcile()\n\treg, cat := mcpInventory.sharedInventory()\n\tif reg == nil || cat == nil {\n\t\treturn nil, nil, false\n\t}\n\ts, t := reg.Current(), cat.Current()\n\tc.deriveMu.Lock()\n\tdefer c.deriveMu.Unlock()\n\treturn s, t, true\n/'
+
+# M30 — THE READS FOLLOW THE LOCK AND STILL ESCAPE THE SECTION. Source order alone is not the
+# property: a read placed after the lock but inside a closure (or a goroutine) satisfies every
+# positional assertion while running outside the critical section — and a structural gate cannot
+# prove when such a body executes. The capture is therefore required to be STRAIGHT-LINE, which is
+# the honest form of the claim. (Codex P2 round 14's class, closed proactively in the same change.)
+run_mutation M30 \
+  'the coherent capture defers its reads into a closure' \
+  'TestCatalogUsable_ResolverReadsEachSnapshotExactlyOnce' \
+  . "$TOOLTRUST" \
+  's/\treturn reg\.Current\(\), cat\.Current\(\), true\n/\tgrab := func() (*registry.Snapshot, *catalog.Snapshot) { return reg.Current(), cat.Current() }\n\ts, t := grab()\n\treturn s, t, true\n/'
+
+# M31 — THE MUTEX IS RELEASED THROUGH AN ALIAS. The round-14 positional fix asserts the lock precedes
+# both reads; it says nothing about a release in between, and `mu := &c.deriveMu; mu.Unlock()` is
+# invisible to a check keyed on the receiver being c.deriveMu. One direct Lock, one deferred direct
+# Unlock, zero bare direct unlocks, correct order, no closure — and Revoke interleaves with the
+# captures exactly as before the round-8 fix. Closed by making the mutex UNALIASABLE: it may be
+# mentioned exactly twice, in its two canonical statements. (Codex P2 round 15, PR #1378.)
+run_mutation M31 \
+  'the coherent capture releases deriveMu through an alias' \
+  'TestCatalogUsable_ResolverReadsEachSnapshotExactlyOnce' \
+  . "$TOOLTRUST" \
+  's/\tif reg == nil \|\| cat == nil \{\n\t\treturn nil, nil, false\n\t\}\n\treturn reg\.Current\(\), cat\.Current\(\), true\n/\tif reg == nil || cat == nil {\n\t\treturn nil, nil, false\n\t}\n\tmu := \&c.deriveMu\n\tmu.Unlock()\n\ts, t := reg.Current(), cat.Current()\n\tmu.Lock()\n\treturn s, t, true\n/'
+
+# M32 — THE MUTEX IS RELEASED THROUGH A HELPER METHOD. One level past the alias and found by asking
+# the question of M31's fix rather than waiting: a method on the coordinator can unlock deriveMu in a
+# body this gate never parses, so no assertion about THIS function's syntax can see it. The capture
+# is therefore allowed exactly one collaborator (reconcileLocked); every lock operation must be
+# visible in the function the gate reads.
+run_mutation M32 \
+  'the coherent capture releases deriveMu through a helper method' \
+  'TestCatalogUsable_ResolverReadsEachSnapshotExactlyOnce' \
+  . "$TOOLTRUST" \
+  's/\tif reg == nil \|\| cat == nil \{\n\t\treturn nil, nil, false\n\t\}\n\treturn reg\.Current\(\), cat\.Current\(\), true\n\}\n/\tif reg == nil || cat == nil {\n\t\treturn nil, nil, false\n\t}\n\tc.unlockDeriveMut()\n\ts, t := reg.Current(), cat.Current()\n\tc.relockDeriveMut()\n\treturn s, t, true\n}\n\nfunc (c *mcpToolTrustCoordinator) unlockDeriveMut() { c.deriveMu.Unlock() }\nfunc (c *mcpToolTrustCoordinator) relockDeriveMut() { c.deriveMu.Lock() }\n/'
+
+printf '\n===========================================\n'
+printf 'caught: %d   survived: %d   skipped: %d\n' "$PASS" "$SURVIVED" "$SKIPPED"
+if [ "$SKIPPED" -gt 0 ]; then
+  printf 'A SKIPPED mutation proves nothing: its pattern no longer matches the source.\n'
+fi
+for s in "${SURVIVORS[@]:-}"; do [ -n "$s" ] && printf 'SURVIVOR: %s\n' "$s"; done
+[ "$SURVIVED" -eq 0 ] && [ "$SKIPPED" -eq 0 ] && exit 0
+exit 1

@@ -19,7 +19,7 @@ import "testing"
 //
 // These gates pin BOTH halves of that fact so the coupling is visible from this side too: whoever
 // widens the band, or teaches another class to be promotable, sees the runtime-side guard named
-// here (classifyReadFirstToolCall, and its
+// here (classifyReadFirstForPrincipal, and its
 // TestReadFirstRuntime_AmbiguousIdentityIsNeverPromoted gate) in a failing test rather than in a
 // design document.
 

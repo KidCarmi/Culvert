@@ -418,6 +418,68 @@ func validCDRFailMode(fm string) bool {
 	return fm == "" || fm == "open" || fm == "closed"
 }
 
+// validIPFilterMode validates the "security.ip_filter_mode" / -ip-filter-mode
+// value shared by the YAML (validateEnums) and CLI (loadFileConfigAndFlags,
+// main.go) paths: "" (disabled), "allow" (allowlist), and "block" (blocklist)
+// are the only accepted values — the same set IPFilter.Allowed (security.go)
+// treats as meaningful. Any other value reaching IPFilter.SetMode is treated
+// as corruption and DENIES ALL proxied traffic (fail closed) with no error at
+// the time it is set — that fail-closed behavior exists for state that can be
+// corrupted after the fact (a config-version rollback, a CP->DP snapshot), not
+// as a substitute for validating operator input up front. Mirrors
+// validCDRFailMode.
+func validIPFilterMode(mode string) bool {
+	return mode == "" || mode == "allow" || mode == "block"
+}
+
+// validCDRServerFingerprint validates the "cdr.server_fingerprint" /
+// -cdr-server-fingerprint value shared by the YAML (validateCDR) and CLI (initCDR,
+// main.go) paths: empty (unset) is valid; otherwise it must decode to
+// exactly a SHA-256-sized (32-byte / 64-hex-char) digest after stripping an
+// optional "sha256:"/"SHA256:" prefix and colon separators — the same
+// normalization buildCDRTLSConfig (cdr.go) applies at connect time. Returns
+// "" when valid, else a message describing why (without the "cdr.xxx:" /
+// "-cdr-server-fingerprint" field prefix, which each caller supplies itself).
+func validCDRServerFingerprint(fp string) string {
+	fp = strings.TrimSpace(fp)
+	if fp == "" {
+		return ""
+	}
+	fp = strings.TrimPrefix(fp, "sha256:")
+	fp = strings.TrimPrefix(fp, "SHA256:")
+	fp = strings.ReplaceAll(fp, ":", "")
+	if len(fp) != 64 {
+		return fmt.Sprintf("expected 64 hex chars (SHA-256), got %d", len(fp))
+	}
+	// Length alone isn't enough: a 64-character value that isn't valid hex
+	// would otherwise sail through validation and only surface later as a
+	// non-fatal CDR client-dial failure (loadCDR, cdr_startup.go) — CDR
+	// silently never comes up (and, under the default fail-open FailMode,
+	// content silently skips CDR sanitization) instead of a clear, immediate
+	// startup error naming the bad field. buildCDRTLSConfig (cdr.go) enforces
+	// the same hex requirement at connect time; this mirrors it here so the
+	// failure is loud and immediate regardless of which path supplied it.
+	if _, err := hex.DecodeString(fp); err != nil {
+		return "expected 64 hex chars (SHA-256), got non-hex characters"
+	}
+	return ""
+}
+
+// validCDRTimeoutSec validates the "cdr.timeout_sec" / -cdr-timeout-sec value
+// shared by the YAML (validateCDR) and CLI (initCDR, main.go) paths: 0
+// (unset — defaults to cdrDefaultTimeout, cdr.go) is valid; otherwise it must
+// be at least 30 (Sluice's own per-file processing cap — a shorter client
+// deadline aborts before Sluice can finish scanning an ordinary file).
+// Returns "" when valid, else a message describing why (without the
+// "cdr.xxx:" / "-cdr-timeout-sec" field prefix, which each caller supplies
+// itself).
+func validCDRTimeoutSec(t int) string {
+	if t != 0 && t < 30 {
+		return fmt.Sprintf("must be >= 30 (Sluice's own cap), got %d", t)
+	}
+	return ""
+}
+
 func loadFileConfig(path string) (*FileConfig, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -501,7 +563,7 @@ func (fc *FileConfig) validateEnums() []string { //nolint:cyclop // flat switch-
 	}
 
 	// ip_filter_mode
-	if m := fc.Security.IPFilterMode; m != "" && m != "allow" && m != "block" {
+	if m := fc.Security.IPFilterMode; !validIPFilterMode(m) {
 		errs = append(errs, fmt.Sprintf("security.ip_filter_mode: must be \"allow\" or \"block\", got %q", m))
 	}
 
@@ -611,8 +673,8 @@ func (fc *FileConfig) validateCDR() []string { //nolint:cyclop // flat switch-st
 	if m := fc.CDR.DefaultMode; m != "" && m != "ENFORCE" && m != "REPORT_ONLY" && m != "BYPASS_WITH_REPORT" {
 		errs = append(errs, fmt.Sprintf("cdr.default_mode: must be ENFORCE | REPORT_ONLY | BYPASS_WITH_REPORT, got %q", m))
 	}
-	if t := fc.CDR.TimeoutSec; t != 0 && t < 30 {
-		errs = append(errs, fmt.Sprintf("cdr.timeout_sec: must be >= 30 (Sluice's own cap), got %d", t))
+	if msg := validCDRTimeoutSec(fc.CDR.TimeoutSec); msg != "" {
+		errs = append(errs, "cdr.timeout_sec: "+msg)
 	}
 	if s := fc.CDR.MaxFileSizeMB; s < 0 {
 		errs = append(errs, fmt.Sprintf("cdr.max_file_size_mb: must be >= 0, got %d", s))
@@ -621,22 +683,8 @@ func (fc *FileConfig) validateCDR() []string { //nolint:cyclop // flat switch-st
 		// 3072 KB = 3 MiB, a safe ceiling under the 4 MiB gRPC frame cap.
 		errs = append(errs, fmt.Sprintf("cdr.chunk_size_kb: must be 16–3072, got %d", s))
 	}
-	if fp := strings.TrimSpace(fc.CDR.ServerFingerprint); fp != "" {
-		fp = strings.TrimPrefix(fp, "sha256:")
-		fp = strings.TrimPrefix(fp, "SHA256:")
-		fp = strings.ReplaceAll(fp, ":", "")
-		if len(fp) != 64 {
-			errs = append(errs, fmt.Sprintf("cdr.server_fingerprint: expected 64 hex chars (SHA-256), got %d", len(fp)))
-		} else if _, err := hex.DecodeString(fp); err != nil {
-			// Length alone isn't enough: a 64-character value that isn't valid
-			// hex would otherwise sail through startup validation and only
-			// surface later as a non-fatal CDR client-dial failure (loadCDR,
-			// cdr_startup.go) — CDR silently never comes up instead of a clear
-			// startup error naming the bad field. buildCDRTLSConfig (cdr.go)
-			// enforces the same hex requirement at connect time; this mirrors
-			// it at config-load time so the failure is loud and immediate.
-			errs = append(errs, "cdr.server_fingerprint: expected 64 hex chars (SHA-256), got non-hex characters")
-		}
+	if msg := validCDRServerFingerprint(fc.CDR.ServerFingerprint); msg != "" {
+		errs = append(errs, "cdr.server_fingerprint: "+msg)
 	}
 	if p := fc.CDR.CertsDir; p != "" && strings.Contains(p, "..") {
 		errs = append(errs, "cdr.certs_dir: must not contain path traversal (..)")

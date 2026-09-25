@@ -148,18 +148,19 @@ unknown. The request keeps `OpWrite`, MCP-ID-005 denies it exactly as it did bef
 classifier existed, and nothing about a properly identified principal changes:
 
 ```go
-func (p *pipeline) classifyReadFirstToolCall(op *policy.Operation, serverID, toolName string, assurance policy.Assurance) {
-    if p.capability != protocol.Gateway {
-        return
-    }
+func (p *pipeline) classifyReadFirstForPrincipal(op *policy.Operation, serverID, toolName string, assurance policy.Assurance) {
     if assurance == policy.AssuranceUnknown {
         return // never promote out of the MCP-ID-005 band
     }
-    if p.deps.canaryReviewedReadFirst(p.capability.String(), serverID, toolName) {
-        op.Class = policy.OpRead
-    }
+    classifyReadFirstToolCall(op, p.capability, p.deps.canaryReviewedReadFirst, serverID, toolName)
 }
 ```
+
+(After main made `classifyReadFirstToolCall` a free function shared with the Canary activation
+preflight, the guard lives in this request-path wrapper; the shared function stays the one
+`op.Class` writer. The preflight carries no principal assurance by design — its permit is
+certified for an identified principal, and at runtime an unidentified one keeps `OpWrite` and is
+denied by MCP-ID-005, so the runtime can only be stricter than the permit.)
 
 Three properties make this the safe shape:
 
@@ -201,7 +202,7 @@ for, from the engine's own side, so the coupling is visible in both directions:
 | `TestIdentityBand_AmbiguousIdentityIsDeniedForEveryWriteOrHigherClass` | the band is `OpWrite`/`OpDestructive`/`OpControl` and the denial is a hard override |
 | `TestIdentityBand_ReadIsOutsideTheBandSoAPromotionEscapesIt` | `OpRead` is outside it — i.e. a promotion alone is enough to escape |
 
-The runtime gates call `classifyReadFirstToolCall` directly rather than driving `Process` end
+The runtime gates call `classifyReadFirstForPrincipal` directly rather than driving `Process` end
 to end. That is deliberate and documented in the file: the live path cannot produce
 `AssuranceUnknown` today, so an end-to-end gate could only assert the coincidence that keeps
 the override unreachable, not the rule that must hold when it becomes reachable.
