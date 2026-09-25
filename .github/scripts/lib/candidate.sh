@@ -96,6 +96,20 @@ index_platforms() {
   ' 2>&1 | sort || return 1
 }
 
+# platform_digest <index_platforms output> <platform>
+#   The manifest digest of exactly one platform of the index. Pull, create and
+#   run the candidate by THIS digest, never by the index digest once per
+#   platform: Docker's classic image store keeps ONE image per digest
+#   reference, so pulling <image>@<index digest> for a second platform fails
+#   with "cannot overwrite digest" (main run 36111817278). Fails unless the
+#   platform appears exactly once with a well-formed digest.
+platform_digest() {
+  local d
+  d="$(printf '%s\n' "$1" | awk -v p="$2" '$1 == p { print $2 }')"
+  [ "$(printf '%s\n' "$d" | grep -c .)" -eq 1 ] && valid_digest "$d" || return 1
+  printf '%s' "$d"
+}
+
 # platform_violations <index_platforms output>
 #   Prints one line per violation of "exactly the required platforms, each
 #   exactly once, each with a well-formed digest". Empty output = compliant.
