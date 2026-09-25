@@ -45,12 +45,12 @@ package urlcat
 // BenchmarkRLockHot, which isolates the lock from all surrounding work:
 //
 //	  cores            │   1       2       4    │ scaling 1→4
-//	  single RWMutex   │  15.7    38.8    44.2  │  0.36x  ← cores SUBTRACT
-//	  sharded          │  22.9    18.0    14.3  │  1.60x     3.08x faster at 4
+//	  single RWMutex   │  15.9    39.8    43.7  │  0.36x  ← cores SUBTRACT
+//	  sharded          │  23.5    18.0    13.9  │  1.69x     3.14x faster at 4
 //
 // That middle row is the finding in its purest form: the pre-fix read lock did
-// not merely fail to scale, it INVERTED — 63.5M acquisitions/s on one core
-// against 22.6M on four, because every added core only contributed more
+// not merely fail to scale, it INVERTED — 62.8M acquisitions/s on one core
+// against 22.9M on four, because every added core only contributed more
 // coherence traffic to the one word all of them had to write.
 //
 // END TO END, cross-run (before measured on the pre-fix tree) — a 50-rule

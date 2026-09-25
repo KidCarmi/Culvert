@@ -326,23 +326,38 @@ func BenchmarkMatchesHostScaling_Baseline(b *testing.B) {
 
 // BenchmarkHotRWWriteLockCost measures the write-side trade hotread.go records:
 // a writer now takes every shard instead of one.
+//
+// Both arms mutate a guarded counter inside the critical section — see
+// internal/hotlock's BenchmarkWriteLock for why (an empty critical section is a
+// staticcheck SA2001 finding, and the assertion keeps the body from being
+// reasoned away); both pay it, so the multiple is unaffected.
 func BenchmarkHotRWWriteLockCost(b *testing.B) {
 	b.Run("sharded", func(b *testing.B) {
 		s := New(DefaultEntries())
+		guarded := 0
 		b.ReportAllocs()
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
 			s.mu.Lock()
-			s.mu.Unlock() //nolint:staticcheck // SA2001: measuring the lock pair itself
+			guarded++
+			s.mu.Unlock()
+		}
+		if guarded != b.N {
+			b.Fatalf("guarded = %d, want %d", guarded, b.N)
 		}
 	})
 	b.Run("single", func(b *testing.B) {
 		var mu sync.RWMutex
+		guarded := 0
 		b.ReportAllocs()
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
 			mu.Lock()
-			mu.Unlock() //nolint:staticcheck // SA2001: measuring the lock pair itself
+			guarded++
+			mu.Unlock()
+		}
+		if guarded != b.N {
+			b.Fatalf("guarded = %d, want %d", guarded, b.N)
 		}
 	})
 }

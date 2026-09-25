@@ -143,23 +143,41 @@ func TestConcurrentReadersAndWriters(t *testing.T) {
 // BenchmarkWriteLock measures the write-side trade both adopters record: a
 // writer takes ShardCount locks instead of one. Both shapes run in the same
 // binary so the multiple is reproducible in-tree.
+//
+// Each arm increments a guarded counter INSIDE the critical section. That is
+// deliberate on two counts: an empty critical section is a staticcheck SA2001
+// finding (and suppressing it would need one dialect for golangci-lint and
+// another for the standalone gate), and the assertion afterwards consumes the
+// value so the compiler cannot reason the body away. One non-atomic increment
+// is noise against a ~33 ns lock pair and nothing at all against a ~2 us one,
+// and BOTH arms pay it, so the multiple is unaffected.
 func BenchmarkWriteLock(b *testing.B) {
 	b.Run("sharded", func(b *testing.B) {
 		var h HotRW
+		guarded := 0
 		b.ReportAllocs()
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
 			h.Lock()
+			guarded++
 			h.Unlock()
+		}
+		if guarded != b.N {
+			b.Fatalf("guarded = %d, want %d", guarded, b.N)
 		}
 	})
 	b.Run("single", func(b *testing.B) {
 		var mu sync.RWMutex
+		guarded := 0
 		b.ReportAllocs()
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
 			mu.Lock()
-			mu.Unlock() //nolint:staticcheck // SA2001: measuring the lock pair itself
+			guarded++
+			mu.Unlock()
+		}
+		if guarded != b.N {
+			b.Fatalf("guarded = %d, want %d", guarded, b.N)
 		}
 	})
 }
@@ -167,14 +185,27 @@ func BenchmarkWriteLock(b *testing.B) {
 // BenchmarkRLockHot is the read fast path, and the -cpu sweep is the point:
 //
 //	go test -run '^$' -bench 'BenchmarkRLockHot|BenchmarkRLockSingle' -cpu 1,2,4 ./internal/hotlock/
+//
+// Both read arms read the same guarded value inside the section, for the same
+// reasons BenchmarkWriteLock's arms increment one — and identically, because an
+// asymmetry in the work inside the section would invalidate the comparison the
+// two benchmarks exist to make. Each worker accumulates into its OWN local: a
+// shared sink would make false sharing the thing being measured, the trap
+// recorded on internal/blocklist's hot-read benchmarks.
 func BenchmarkRLockHot(b *testing.B) {
 	var h HotRW
+	guarded := 1
 	b.ReportAllocs()
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
+		local := 0
 		for pb.Next() {
 			sh := h.RLockHot()
+			local += guarded
 			sh.RUnlock()
+		}
+		if local < 0 {
+			b.Fatal("impossible: guarded reads went negative")
 		}
 	})
 }
@@ -183,12 +214,18 @@ func BenchmarkRLockHot(b *testing.B) {
 // comparison.
 func BenchmarkRLockSingle(b *testing.B) {
 	var mu sync.RWMutex
+	guarded := 1
 	b.ReportAllocs()
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
+		local := 0
 		for pb.Next() {
 			mu.RLock()
+			local += guarded
 			mu.RUnlock()
+		}
+		if local < 0 {
+			b.Fatal("impossible: guarded reads went negative")
 		}
 	})
 }

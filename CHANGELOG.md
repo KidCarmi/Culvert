@@ -359,7 +359,7 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   COUNT on every core serving traffic. `RLock` is an atomic read-modify-write on
   a single shared word, so the pre-fix read lock did not merely fail to scale,
   it INVERTED: isolated in one run on a 4-core Xeon @2.10GHz, a single `RWMutex`
-  read pair delivered 63.5M acquisitions/s on one core against 22.6M on four,
+  read pair delivered 62.8M acquisitions/s on one core against 22.9M on four,
   because every added core only contributed coherence traffic to the one word
   all of them had to write. Sharded, the store-level probe goes
   135.3 / 117.4 / 118.1 → 150.7 / 89.9 / 50.5 ns/op at 1/2/4 cores (scaling

@@ -85,10 +85,37 @@ const RWMutexSize = 24
 // line: taking one shard's lock would invalidate its neighbour and hand back
 // most of what splitting the lock just bought. Same false-sharing reasoning,
 // and the same measured conclusion, as internal/connlimit's shard.
+//
+// The mutex is a NAMED FIELD rather than embedded, deliberately. Embedding it
+// promotes the whole sync.RWMutex API onto an exported type (gocritic's
+// exposedSyncMutex), which would let a caller write shard.Lock() — meaningless
+// for exclusion here, since a writer's guarantee comes from holding EVERY shard.
+// internal/blocklist got away with embedding only because its shard type was
+// unexported. Production code needs exactly one method on a Shard, RUnlock, to
+// release what RLockHot handed it; the three below it exist for the structural
+// gates and cannot be used to acquire the lock in a way that matters.
 type Shard struct {
-	sync.RWMutex
-	_ [CacheLineBytes - RWMutexSize]byte
+	mu sync.RWMutex
+	_  [CacheLineBytes - RWMutexSize]byte
 }
+
+// RUnlock releases the read lock RLockHot took on this shard. This is the only
+// Shard method production code uses.
+func (s *Shard) RUnlock() { s.mu.RUnlock() }
+
+// TryRLock reports whether a read lock could be taken, acquiring it if so. For
+// the structural gates: it is how "a writer holds every shard" is asserted
+// exhaustively rather than by drawing a random shard and hoping.
+func (s *Shard) TryRLock() bool { return s.mu.TryRLock() }
+
+// TryLock reports whether the write lock could be taken, acquiring it if so.
+// For the structural gates: a shard held for reading cannot be write-locked, so
+// this is how "a cold reader took exactly shard 0" is proven.
+func (s *Shard) TryLock() bool { return s.mu.TryLock() }
+
+// Unlock releases a write lock acquired by TryLock. It has no Lock counterpart
+// on purpose — nothing may write-lock a single shard outright.
+func (s *Shard) Unlock() { s.mu.Unlock() }
 
 // HotRW is an RWMutex whose read side is sharded. The zero value is ready to
 // use and must not be copied once used, exactly like sync.RWMutex.
@@ -108,7 +135,7 @@ type HotRW struct {
 // no worse; with 64 shards that is ~1 in 64.
 func (h *HotRW) RLockHot() *Shard {
 	sh := &h.shards[rand.Uint64()&(ShardCount-1)] // #nosec G404 -- cache-line spread, not crypto; the index cannot affect any verdict
-	sh.RLock()
+	sh.mu.RLock()
 	return sh
 }
 
@@ -117,10 +144,10 @@ func (h *HotRW) RLockHot() *Shard {
 // shard selection. They all share shard 0, which is correct because a writer
 // holds every shard: what they get is a plain RWMutex, and they never contend
 // with the hot path except through a writer.
-func (h *HotRW) RLock() { h.shards[0].RLock() }
+func (h *HotRW) RLock() { h.shards[0].mu.RLock() }
 
 // RUnlock releases the cold read lock taken by RLock.
-func (h *HotRW) RUnlock() { h.shards[0].RUnlock() }
+func (h *HotRW) RUnlock() { h.shards[0].mu.RUnlock() }
 
 // ShardAt returns the i'th reader lock. It exists for the STRUCTURAL gates each
 // adopter carries — "cold readers take exactly shard 0", "hot reads spread
@@ -136,7 +163,7 @@ func (h *HotRW) ShardAt(i int) *Shard { return &h.shards[i] }
 // Lock takes the write lock: every shard, in ascending order.
 func (h *HotRW) Lock() {
 	for i := range h.shards {
-		h.shards[i].Lock()
+		h.shards[i].mu.Lock()
 	}
 }
 
@@ -144,6 +171,6 @@ func (h *HotRW) Lock() {
 // descending simply mirrors the acquisition.
 func (h *HotRW) Unlock() {
 	for i := len(h.shards) - 1; i >= 0; i-- {
-		h.shards[i].Unlock()
+		h.shards[i].mu.Unlock()
 	}
 }
