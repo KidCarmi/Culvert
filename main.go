@@ -624,6 +624,24 @@ func loadFileConfigAndFlags(s *startupState) {
 	s.cert, s.key = resolveUITLSCertKey(s.cert, s.key)
 	s.rlRPM = firstNonZero(*s.rateLimitRPM, s.fc.Security.RateLimit)
 	s.ipModeVal = firstStr(*s.ipMode, s.fc.Security.IPFilterMode)
+	// config.yaml's security.ip_filter_mode is validated at load time
+	// (FileConfig.validateEnums, via loadFileConfig -> fc.validate()) — an
+	// unrecognized value there refuses to start with a clear error. The CLI
+	// flag -ip-filter-mode reaches the exact same merged value with no
+	// equivalent gate: it was stored verbatim and handed straight to
+	// IPFilter.SetMode (connlimit_startup.go), which treats any value other
+	// than "", "allow", or "block" as CORRUPTION and fails closed — denying
+	// ALL proxied traffic — with no startup error naming the bad flag (see
+	// IPFilter.Allowed, security.go). A simple case typo like
+	// "-ip-filter-mode Allow" would silently blackhole every request instead
+	// of refusing to boot, the same silent-failure shape closed for
+	// -cdr-fail-mode / -cdr-server-fingerprint above. Checked on the RESOLVED
+	// value (mirrors validatePortRanges/validatePortCollisions just above) so
+	// a CLI override and a config.yaml value are held to the same standard
+	// regardless of which one supplied it.
+	if !validIPFilterMode(s.ipModeVal) {
+		log.Fatalf("Invalid -ip-filter-mode %q: must be \"allow\" or \"block\" (empty disables the filter)", s.ipModeVal)
+	}
 }
 
 // initUIExtras is the PR3 expansion shim: resolve the UI-extras slice
