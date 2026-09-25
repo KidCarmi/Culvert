@@ -10,6 +10,7 @@ package bootstrap
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -50,7 +51,12 @@ func tagFor(version string) string {
 // current version.
 func Image(settingsPath, version string) string {
 	if base := registryURL(settingsPath); base != "" {
-		return base + ":" + tagFor(version)
+		// The reference is rendered into the compose document a DP node runs.
+		// An override that is not a plain image reference is ignored rather
+		// than propagated (SEC-BOOTSTRAP-HOST-1, defence in depth).
+		if ref := base + ":" + tagFor(version); SafeImageRef(ref) {
+			return ref
+		}
 	}
 	return DefaultImage + ":" + tagFor(version)
 }
@@ -64,8 +70,8 @@ var scriptTmpl = template.Must(template.New("bootstrap").Parse(`#!/bin/bash
 set -euo pipefail
 
 COMPOSE_DIR="/opt/culvert-dp"
-CP_BASE="{{.CPBase}}"
-TOKEN_PATH="{{.TokenPath}}"
+CP_BASE='{{.CPBase}}'
+TOKEN_PATH='{{.TokenPath}}'
 
 echo "╔══════════════════════════════════════════╗"
 echo "║   Culvert Data Plane Bootstrap           ║"
@@ -188,7 +194,7 @@ services:
       - dp-data:/data
     environment:
       - TZ=UTC
-      - ENROLL_URL={{.EnrollURL}}
+      - "ENROLL_URL={{.EnrollURL}}"
     command: >
       sh -c '
         ARGS="-port 8080
@@ -220,9 +226,31 @@ volumes:
   dp-data:
 `))
 
+// ErrUnsafeArtifactValue is returned when a value handed to a renderer is not
+// provably safe to interpolate into a root-executed artifact. It is a refusal,
+// never a request to sanitise and continue: callers must abandon the render.
+var ErrUnsafeArtifactValue = errors.New("bootstrap: refusing to render an artifact from an unvalidated value")
+
 // RenderScript writes the install script for the given CP host/base and
 // enrollment token.
+//
+// FAIL-CLOSED (SEC-BOOTSTRAP-HOST-1): cpHost/cpBase are derived from request
+// headers and token from the URL path, and the output is documented to be piped
+// into `sudo bash`. Every one of them is re-validated HERE, at the sink, even
+// though the handler validated at the source — the renderer is the last place
+// that can still refuse, and it must not depend on a caller having done so. A
+// caller that has not validated gets an error and an unwritten stream, never a
+// partially-rendered script.
 func RenderScript(w io.Writer, cpHost, cpBase, token string) error {
+	if _, ok := SafeAuthority(cpHost); !ok {
+		return ErrUnsafeArtifactValue
+	}
+	if !safeBaseURL(cpBase) {
+		return ErrUnsafeArtifactValue
+	}
+	if !SafeToken(token) {
+		return ErrUnsafeArtifactValue
+	}
 	return scriptTmpl.Execute(w, map[string]string{
 		"CPHost":    cpHost,
 		"CPBase":    cpBase,
@@ -230,13 +258,80 @@ func RenderScript(w io.Writer, cpHost, cpBase, token string) error {
 	})
 }
 
+// safeBaseURL reports whether base is exactly "http://<authority>" or
+// "https://<authority>" for an authority SafeAuthority accepts. It exists so
+// the sink check is over the value that actually reaches the template rather
+// than over the parts it was built from.
+func safeBaseURL(base string) bool {
+	rest, ok := strings.CutPrefix(base, "https://")
+	if !ok {
+		rest, ok = strings.CutPrefix(base, "http://")
+	}
+	if !ok {
+		return false
+	}
+	_, valid := SafeAuthority(rest)
+	return valid
+}
+
 // RenderCompose writes the docker-compose.yml for the given image ref and
 // enrollment URL.
+//
+// FAIL-CLOSED for the same reason RenderScript is (SEC-BOOTSTRAP-HOST-1): the
+// enrollment URL carries a request-derived authority and the compose document
+// is run by the DP node. Both values are re-validated at the sink.
 func RenderCompose(w io.Writer, image, enrollURL string) error {
+	if !SafeImageRef(image) {
+		return ErrUnsafeArtifactValue
+	}
+	if !SafeEnrollURL(enrollURL) {
+		return ErrUnsafeArtifactValue
+	}
 	return composeTmpl.Execute(w, map[string]string{
 		"Image":     image,
 		"EnrollURL": enrollURL,
 	})
+}
+
+// SafeEnrollURL reports whether u is a culvert:// enrollment URL built from
+// values this appliance controls: an authority SafeAuthority accepts, a token
+// SafeToken accepts, and a lowercase-hex SHA-256 CA fingerprint.
+//
+// It parses the shape rather than scanning a charset, because "no dangerous
+// byte" is a claim that has to be re-argued every time the sink changes, while
+// "this is the URL we build" stays true.
+func SafeEnrollURL(u string) bool {
+	const scheme = "culvert://enroll/"
+	rest, ok := strings.CutPrefix(u, scheme)
+	if !ok || len(u) > 512 {
+		return false
+	}
+	addr, rest, ok := strings.Cut(rest, "/")
+	if !ok {
+		return false
+	}
+	if _, valid := SafeAuthority(addr); !valid {
+		return false
+	}
+	tok, fp, ok := strings.Cut(rest, "?ca-fp=sha256:")
+	if !ok || !SafeToken(tok) {
+		return false
+	}
+	return isLowerHex(fp, 64)
+}
+
+// isLowerHex reports whether s is exactly n lowercase hex digits.
+func isLowerHex(s string, n int) bool {
+	if len(s) != n {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 // ── Pure request-derivation helpers ─────────────────────────────────────
@@ -261,7 +356,10 @@ func ExtractToken(path, prefix string) string {
 // BaseURL derives the CP's external base URL from the incoming request.
 // trustForwarded is main's trustForwardedHeaders setting, passed in so the
 // package stays free of main's globals.
-func BaseURL(r *http.Request, trustForwarded bool) string {
+// It is FAIL-CLOSED: the derived authority must be a plain host[:port]
+// (SafeAuthority). A caller that ignores the second return value and renders
+// the first anyway reintroduces SEC-BOOTSTRAP-HOST-1 — see hostsafety.go.
+func BaseURL(r *http.Request, trustForwarded bool) (string, bool) {
 	scheme := "https"
 	if r.TLS == nil {
 		scheme = "http"
@@ -275,7 +373,11 @@ func BaseURL(r *http.Request, trustForwarded bool) string {
 			host = fh
 		}
 	}
-	return scheme + "://" + host
+	safe, ok := SafeAuthority(host)
+	if !ok {
+		return "", false
+	}
+	return scheme + "://" + safe, true
 }
 
 // EnrollmentAddr derives the gRPC Control Plane address for the enrollment
@@ -283,12 +385,14 @@ func BaseURL(r *http.Request, trustForwarded bool) string {
 // access the UI) combined with the gRPC port from the configured listen
 // address. IPv6-safe: strips brackets before net.JoinHostPort to prevent
 // double-bracketing.
-func EnrollmentAddr(r *http.Request, grpcListenAddr string, trustForwarded bool) string {
+// It is FAIL-CLOSED for the same reason BaseURL is: the result is interpolated
+// into the compose document a DP node runs (SEC-BOOTSTRAP-HOST-1).
+func EnrollmentAddr(r *http.Request, grpcListenAddr string, trustForwarded bool) (string, bool) {
 	// If grpcAddr already contains a routable host (not just :port), use it as-is.
 	if grpcListenAddr != "" {
 		gHost, _, err := net.SplitHostPort(grpcListenAddr)
 		if err == nil && gHost != "" && gHost != "0.0.0.0" && gHost != "::" {
-			return grpcListenAddr
+			return SafeAuthority(grpcListenAddr)
 		}
 	}
 
@@ -314,5 +418,5 @@ func EnrollmentAddr(r *http.Request, grpcListenAddr string, trustForwarded bool)
 	}
 
 	// net.JoinHostPort adds brackets for IPv6 automatically.
-	return net.JoinHostPort(host, grpcPort)
+	return SafeAuthority(net.JoinHostPort(host, grpcPort))
 }
