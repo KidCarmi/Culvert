@@ -130,6 +130,13 @@ func TestBuildOnce_QualificationRunsOnTheCandidateItself(t *testing.T) {
 	if !strings.Contains(compose.Run, "--no-build") || strings.Contains(compose.Run, "compose -f docker-compose.yml -f docker-compose.ci.yml build") {
 		t.Error("the compose smoke must start the candidate with --no-build, never build a replacement")
 	}
+	// Docker's classic image store keeps ONE image per digest reference: the
+	// run checks pull both platforms of the index before this step, so pulling
+	// "${IMAGE}@${DIGEST}" (the index) here fails with "cannot overwrite
+	// digest" — main run 36111817278. Pull the amd64 manifest by its own digest.
+	if !strings.Contains(compose.Run, "candidate-platform-ref.sh") || strings.Contains(compose.Run, `"${IMAGE}@${DIGEST}"`) {
+		t.Error("the compose smoke must pull the amd64 manifest by its own digest (candidate-platform-ref.sh), never the index digest")
+	}
 	ri, rec := stepNamed(t, q, "qualify-candidate", "Record the qualification")
 	if !strings.Contains(rec.If, "refs/heads/main") || !strings.Contains(rec.If, "push") {
 		t.Errorf("only the main push may sign a qualification record; if=%q", rec.If)

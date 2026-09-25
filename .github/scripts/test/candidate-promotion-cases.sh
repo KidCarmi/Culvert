@@ -81,7 +81,25 @@ if [ "$1 $2" = "buildx imagetools" ]; then
   fi
 fi
 case "$1" in
-  pull) printf '%s\n' "$*" >> "${DOCKER_PULLS:-/dev/null}"; exit 0 ;;
+  pull)
+    printf '%s\n' "$*" >> "${DOCKER_PULLS:-/dev/null}"
+    # Docker's classic image store (the runners' default) keeps ONE image per
+    # digest reference: pulling another platform under a digest it already
+    # holds fails. That is what broke main run 36111817278.
+    plat=""; ref=""
+    shift
+    while [ $# -gt 0 ]; do
+      case "$1" in --platform) plat="$2"; shift ;; --quiet) ;; *) ref="$1" ;; esac
+      shift
+    done
+    case "$ref" in
+      *@sha256:*)
+        d="${ref##*@}"
+        held="$(awk -F'|' -v d="$d" '$1 == d {print $2}' "${DOCKER_STORE:-/dev/null}" | head -n1)"
+        if [ -n "$held" ] && [ "$held" != "$plat" ]; then echo "cannot overwrite digest ${d}" >&2; exit 1; fi
+        [ -n "$held" ] || printf '%s|%s\n' "$d" "$plat" >> "${DOCKER_STORE:-/dev/null}" ;;
+    esac
+    exit 0 ;;
   run)
     # -d → the proxy container; --entrypoint …culvert-maint → the agent's -version.
     case " $* " in
@@ -181,7 +199,8 @@ TAG_ID="https://github.com/KidCarmi/Culvert/.github/workflows/ci.yml@refs/tags/v
 
 reset() {
   : > "$WORK/tags"; : > "$WORK/index"; : > "$WORK/labels"; : > "$WORK/att"; : > "$WORK/creates"
-  : > "$WORK/gittags"; : > "$WORK/pushes"; : > "$WORK/gitcalls"; : > "$WORK/out"
+  : > "$WORK/gittags"; : > "$WORK/pushes"; : > "$WORK/gitcalls"; : > "$WORK/out"; : > "$WORK/store"
+  export DOCKER_STORE="$WORK/store"
   export DOCKER_TAGS="$WORK/tags" DOCKER_INDEX="$WORK/index" DOCKER_LABELS="$WORK/labels" \
     DOCKER_CREATES="$WORK/creates" COSIGN_ATT="$WORK/att" GIT_TAGS="$WORK/gittags" \
     GIT_PUSHES="$WORK/pushes" GIT_CALLS="$WORK/gitcalls" GITHUB_OUTPUT="$WORK/out"
@@ -432,10 +451,10 @@ refused "a candidate missing a platform fails qualification" "want exactly 1" ve
 
 echo "── candidate-run-check.sh ──"
 runcheck() { RUN_CHECK_TRIES=2 RUN_CHECK_DELAY=0 DOCKER_PULLS="$WORK/pulls" bash "$SCRIPTS/candidate-run-check.sh" "$IMG" "$D1" v1.0.5 linux/arm64 >"$WORK/log" 2>&1; }
-reset; : > "$WORK/pulls"; export RUN_AGENT_VERSION=v1.0.5 RUN_PROXY_VERSION=v1.0.5
-if runcheck && grep -q -- "--platform linux/arm64 ${IMG}@${D1}" "$WORK/pulls"; then
-  ok "the running candidate reports its version on the platform it was pulled for"
-else bad "the running candidate reports its version on the platform it was pulled for" "$(cat "$WORK/log")"; fi
+reset; index "$D1"; : > "$WORK/pulls"; export RUN_AGENT_VERSION=v1.0.5 RUN_PROXY_VERSION=v1.0.5
+if runcheck && grep -q -- "--platform linux/arm64 ${IMG}@${R1}" "$WORK/pulls"; then
+  ok "the running candidate reports its version on the platform it was pulled for, by that platform's digest"
+else bad "the running candidate reports its version on the platform it was pulled for, by that platform's digest" "$(cat "$WORK/log")"; fi
 export RUN_AGENT_VERSION=v1.0.4
 refused "a running agent reporting another version fails qualification" "culvert-maint -version reports 'v1.0.4'" runcheck
 export RUN_AGENT_VERSION=v1.0.5 RUN_PROXY_VERSION=dev
@@ -443,6 +462,34 @@ refused "a running proxy reporting another version fails qualification" "reports
 export RUN_PROXY_VERSION=v1.0.5 RUN_HEALTH_STATUS=degraded
 refused "a proxy that is not healthy fails qualification" "status 'degraded'" runcheck
 unset RUN_AGENT_VERSION RUN_PROXY_VERSION RUN_HEALTH_STATUS
+reset; : > "$WORK/index"; index "$D1" linux/amd64; export RUN_AGENT_VERSION=v1.0.5 RUN_PROXY_VERSION=v1.0.5
+refused "a platform missing from the index is never run" "no single manifest digest" runcheck
+unset RUN_AGENT_VERSION RUN_PROXY_VERSION
+
+echo "── the qualification sequence on one image store ──"
+# qualify-candidate pulls every platform of ONE index on ONE runner: contents
+# (amd64, arm64), execution (amd64, arm64), then the compose smoke (amd64).
+# Against a store that keeps one image per digest reference this sequence
+# failed on main run 36111817278 ("cannot overwrite digest").
+qualify_sequence() {
+  bash "$SCRIPTS/candidate-verify-contents.sh" "$IMG" "$D1" "$SHA" v1.0.5 go1.26.8 &&
+  RUN_CHECK_TRIES=2 RUN_CHECK_DELAY=0 bash "$SCRIPTS/candidate-run-check.sh" "$IMG" "$D1" v1.0.5 linux/amd64 &&
+  RUN_CHECK_TRIES=2 RUN_CHECK_DELAY=0 bash "$SCRIPTS/candidate-run-check.sh" "$IMG" "$D1" v1.0.5 linux/arm64 &&
+  ref="$(bash "$SCRIPTS/candidate-platform-ref.sh" "$IMG" "$D1" linux/amd64)" &&
+  [ "$ref" = "${IMG}@${A1}" ] && "$BIN/docker" pull --platform linux/amd64 "$ref"
+}
+reset; index "$D1"; printf '%s|%s\n' "$D1" "$SHA" >> "$WORK/labels"; contents go1.26.8 go1.26.8 arm64 v1.0.5
+export RUN_AGENT_VERSION=v1.0.5 RUN_PROXY_VERSION=v1.0.5
+if qualify_sequence >"$WORK/log" 2>&1 && ! grep -q "@${D1}|" "$WORK/store"; then
+  ok "every platform is pulled by its own manifest digest, so one store holds them all"
+else bad "every platform is pulled by its own manifest digest, so one store holds them all" "$(tr '\n' ' ' < "$WORK/log") store: $(tr '\n' ' ' < "$WORK/store")"; fi
+: > "$WORK/store"; "$BIN/docker" pull --platform linux/amd64 "${IMG}@${D1}" >/dev/null
+refused "the store model refuses a second platform under one index digest (the main-run failure)" "cannot overwrite digest" \
+  "$BIN/docker" pull --platform linux/arm64 "${IMG}@${D1}"
+: > "$WORK/index"; index "$D1" linux/amd64
+refused "the platform reference refuses a platform the index lacks" "no single manifest digest" \
+  bash "$SCRIPTS/candidate-platform-ref.sh" "$IMG" "$D1" linux/arm64
+unset RUN_AGENT_VERSION RUN_PROXY_VERSION
 
 echo "── decide-release-version.sh ──"
 decide() { PUSH_SHA="$SHA" bash "$SCRIPTS/decide-release-version.sh" "$SHA" "$@" >"$WORK/log" 2>&1; }

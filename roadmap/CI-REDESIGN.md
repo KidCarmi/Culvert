@@ -14,7 +14,7 @@ tense disagrees with this table, this table wins.
 |---|---|---|---|---|
 | Lane architecture, retirement steps 2–7 (§1–§3) | Yes | Yes: Fast/Deep gates carry every PR; QA/Security are pass-through on PRs | — | Step 1 (branch protection names Fast/Deep only; admin) and step 8 (traffic-smoke promotion, then retire `proxy-pr-gate.yml`) |
 | Release publication gating (§5a) | Yes: one predicate over `.github/release-evidence.txt` via `require-release-evidence.sh`; `docker` pushes candidate tags only; `promote-image` moves `latest`/`main`/semver onto the tested digest; every asset is staged as a draft | Yes: on `3febe59` main QA failed, so `Auto-Tag Release` and `Promote moving channels (main)` both refused at their evidence step and nothing was promoted (CI run 35905503220) | — | — (build-once promotion: §21) |
-| Build-once image promotion (§21) | Yes: the main push builds + qualifies one signed candidate; the tag run reuses it by digest (binding → published alias → main candidate → owner-authorized rebuild), re-qualifies it and signs it in the tag context; auto-tag consumes the candidate's version | Locally: 52 mocked state-transition cases + workflow walls, each defect gate mutation-proven; no live run yet | The first main push after merge and the first normal release are the live acceptance (§21.7) | Security/QA workflows still build their own scan images from source (§21.8) |
+| Build-once image promotion (§21) | Yes: the main push builds + qualifies one signed candidate; the tag run reuses it by digest (binding → published alias → main candidate → owner-authorized rebuild), re-qualifies it and signs it in the tag context; auto-tag consumes the candidate's version | Locally: 56 mocked state-transition cases, a real-Docker qualification test (§21.7.1) and workflow walls, each defect gate mutation-proven. Live: the first main push (36111817278) built, recorded and pointed correctly, then qualification failed on a #1496 defect (per-platform pulls of one index digest); fixed (§21.7.1), nothing public moved | Qualification on a runner, record verification on reuse, and the tag run are still pending natural runs (§21.7.1) | Security/QA workflows still build their own scan images from source (§21.8) |
 | Stage 1: QA scheduling (§8) | Yes | Yes | — | — |
 | Stages 2A/2B: coverage from the race run, race ownership by event (§9–§10) | Yes | Yes | — | — |
 | Stage 3: native cross-compilation in the production image (§11) | Yes: `FROM --platform=$BUILDPLATFORM`, `-trimpath -buildvcs=false` | Yes (byte-identical binaries, measured) | — | — |
@@ -3063,6 +3063,73 @@ verify on that signature; the first main re-run reusing a candidate; and the
 latency of the new chain. The first merge's main push and the next normal
 release are that acceptance; failures there are fail-closed (nothing public
 moves) and recoverable by the §21.6 paths.
+
+#### 21.7.1 First main push: CI run 36111817278 (2026-09-25, `87acf31`)
+
+[Run 36111817278](https://github.com/KidCarmi/Culvert/actions/runs/36111817278),
+attempt 1, the push of #1496's merge commit.
+
+| Check | Result | Evidence |
+| --- | --- | --- |
+| Candidate built once, version decided once | **passed** | `docker` job 08:16:00–08:20:18 (build step 192 s); plan `mode=build`, version `v1.0.244` (highest tag `v1.0.243` + 1) |
+| Index and platform digests | **passed** | index `sha256:5094ab1f…6f057b9a`; `linux/amd64` `sha256:5bcc9d3a…d753dd65`, `linux/arm64` `sha256:901af903…ba12fc149` (read back from GHCR; the record carries the same) |
+| Candidate record signed, pointer written last | **passed** | record step 08:19:55–08:20:04 logged the predicate (SHA, run 36111817278 attempt 1, version, index + platform digests, build inputs); `candidate-commit-87acf31c…` → the index, pushed after the attestation. Three Sigstore bundles hang off the index (two image signatures, one record) |
+| Record verification | **not exercised**: this run built, it did not reuse | verified only by a re-run or a tag run |
+| Qualification, amd64 contents | **passed** | proxy and agent record `go1.26.8`, `linux/amd64` |
+| Qualification, arm64 and everything after | **FAILED: defect in #1496** | `cannot overwrite digest sha256:5094ab…` (job 107998632374) |
+| Fail-closed | **passed** | `Auto-Tag Release`, `Release`, both promote jobs and the catalog gate skipped; no `v1.0.244` tag; `latest`/`main` still `sha256:1f1421aa…` |
+
+**The defect.** Qualification pulled `<image>@<index digest>` once per
+platform. The runners' Docker (29.x) uses the classic image store, which
+keeps one image per digest reference, so the second platform's pull fails.
+The same pattern was in `candidate-run-check.sh` and the compose-smoke step.
+The mocked cases passed because the docker mock did not model the store.
+Reproduced locally with the same error on Docker 29.3.1 (classic store)
+against a local registry serving a two-platform index.
+
+**The fix.** Every pull, create and run of one platform uses that platform's
+own manifest digest, read from the verified index (`platform_digest` in
+`lib/candidate.sh`, `candidate-platform-ref.sh` for the compose step). The
+identity chain is unchanged: the index digest is still the bound, recorded
+and signed value, and the platform digests come from it. Regression coverage, both
+halves failing on the #1496 scripts with the main-run error:
+
+* **Real Docker** (`candidate_qualification_docker_test.go`): an in-process,
+  stdlib-only registry serves a two-platform candidate index (static
+  binaries that answer `-version` and `/health`, the revision label, the
+  version file). Against the real daemon, the test first asserts that the
+  classic store still refuses a second platform under one index digest (the
+  original failure, so a pass cannot mean "this daemon never had the
+  problem"). It then runs the real scripts in `qualify-candidate`'s order:
+  contents on both platforms, execution on amd64 and arm64 (under QEMU when
+  a binfmt handler exists; otherwise the arm64 pull must still succeed),
+  then the compose reference, pull and tag. It skips without a daemon; the
+  CI runners have one. Verified locally on Docker 29.3.1 (classic store) with
+  QEMU: passes fixed; fails with `cannot overwrite digest` when either
+  pre-fix script is restored, with and without QEMU.
+* **Mocked cases**: the docker mock now models the store, and a sequence case
+  runs contents, both run checks and the compose reference against one
+  store.
+* A workflow wall forbids the compose step from pulling the index digest.
+
+**Observed, harmless:** cosign v3.0.6 annotates every bundle it attaches
+through a signing config as `dev.sigstore.bundle.predicateType:
+https://sigstore.dev/cosign/sign/v1`, including `cosign attest` bundles
+(`attest.go` passes `CosignSignPredicateType` to the new-bundle writer). The
+signed statement inside keeps the real predicate type, and `verify-attestation`
+reads every referrer and filters on the verified statement
+(`AttestationToPayloadJSON`), not on the annotation.
+
+**Recovery.** Do not re-run 36111817278: a re-run executes the workflow at
+`87acf31` and fails the same way. The fix's own main push builds and
+qualifies a new candidate for its merge commit, which gets the next version
+(`v1.0.244` is not taken). The `87acf31` candidate stays unqualified and
+unreleased.
+
+**Still pending (natural runs only):** the fixed qualification on a runner
+(both platforms, compose smoke, trivy, qualification record); record
+verification on a reuse (a main re-run or a tag run); the tag run's reuse,
+tag-context signing and catalog digest check; retry reuse; net latency.
 
 ### 21.8 Not in this change
 
