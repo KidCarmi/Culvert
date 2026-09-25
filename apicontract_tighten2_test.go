@@ -8,6 +8,7 @@ import (
 )
 
 func TestConformance_Tighten2_Response(t *testing.T) {
+	spec := loadContract(t)
 	cases := []struct {
 		name, path string
 		h          http.HandlerFunc
@@ -20,7 +21,7 @@ func TestConformance_Tighten2_Response(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			assertResponseConformsAdmin(t, http.MethodGet, c.path, c.h)
+			assertResponseConformsAdmin(t, spec, http.MethodGet, c.path, c.h)
 		})
 	}
 }

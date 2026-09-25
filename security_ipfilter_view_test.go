@@ -5,6 +5,7 @@ import (
 	"math/rand"
 	"net"
 	"reflect"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -551,6 +552,17 @@ func TestBenchGate_IPFilterBulkLoadIsLinear(t *testing.T) {
 		list := entries(n)
 		f := &IPFilter{single: map[string]bool{}}
 		f.SetMode("allow")
+		// Settle the collector BEFORE the clock starts, as testing.B does before
+		// every benchmark run. This test runs inside a process whose heap every
+		// earlier test has grown, so without it a GC cycle (concurrent mark +
+		// assists) lands inside some timed loads and not others, and a ratio of
+		// two sub-millisecond samples inherits that. Measured with the gate's own
+		// sizes and best-of-three, 60 repetitions each, 4 cores + 6 CPU hogs:
+		// median 4.44x either way, but the unsettled form reached 13.66x and
+		// exceeded 8x in 16/60 repetitions (CI saw 8.28x in the shuffled
+		// determinism run), while the settled form's worst was 4.98x (0/60).
+		// It changes nothing the gate measures: AddAll still has to be linear.
+		runtime.GC()
 		start := time.Now()
 		f.AddAll(list)
 		return time.Since(start)
