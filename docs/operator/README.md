@@ -88,6 +88,7 @@ Operator runbooks:
 - [`mcp-observe-acceptance-harness.md`](mcp-observe-acceptance-harness.md) — the Observe acceptance test harness (QUAL-6).
 - [`mcp-observe-acceptance-runbook.md`](mcp-observe-acceptance-runbook.md) — running the Observe acceptance harness.
 - [`mcp-observe-acceptance-decisions.md`](mcp-observe-acceptance-decisions.md) — the Observe acceptance decision worksheet.
+- [`examples/README.md`](examples/README.md) — copyable Observe acceptance inputs, including the [`mcp-observe-acceptance-authoritative.json`](examples/mcp-observe-acceptance-authoritative.json) specification template.
 - [`mcp-tool-trust-approvals.md`](mcp-tool-trust-approvals.md) — MCP tool-trust approvals (ADR-0034).
 
 Point-in-time rollout evidence and review reports (historical record of a specific
