@@ -7307,6 +7307,70 @@ reaching the request log.
 > carry an example of *every* representation the input can arrive in, because a
 > control that samples one of them will pass while the other is broken.
 
+### The second review round: a bound is a property of its POSITION, too
+
+Found by review (Codex, two P2 findings on `d40c083`), and they are one defect
+wearing two faces: **the RAW tier was applied at all four entry points from the
+start; the CANONICAL tier was applied only where a normalized host already
+happened to be in scope.**
+
+**Face 1 — the canonical tier sat behind Stage-1 authentication.** The gate lived
+~60 lines below the raw one, at the RISK-013 canonicalization point, and the
+section above justifies that placement: the raw pre-cap has already bounded what
+`IP_BLOCKED` and `RATE_LIMITED` can RETAIN to 1 KiB. That reasoning is correct and
+it is **about retention only**. The canonical tier's other job — the one that
+motivated adding it — is bounding the **quadratic matcher walk**, and Stage-1
+authentication runs a matcher:
+
+    authRuleMatchesScratch  (authpolicy.go:643)
+      → matchDestNorm(rule, s.ctx.Host, s.normHost(), s.hostCat())
+        → the same urlcat + catdb fusion §39 exists to bound
+
+So a category-scoped Stage-1 auth rule paid the walk for a 1 000-byte dot-dense
+authority before the bound ran — and a **terminal** auth outcome returned without
+reaching the bound at all. Measured against the pre-fix tree: the request answered
+**407** and `culvert_proxy_oversize_host_rejected_total` stayed **0**, so the
+operator surface an admin would watch was blind to it.
+
+**Face 2 — both admin entry points enforced the raw tier only.** `apiURLCatLookup`
+and `apiPolicyTest` capped at 1 KiB and went straight into `lookupHostCategory`
+and `walkPolicyTestRules`. Measured pre-fix: **HTTP 200, uncounted, from a VIEWER**
+— the lowest role the product has — for the exact 1 000-byte dot-dense shape the
+canonical tier was added to reject, and `apiPolicyTest` can invoke the fusion more
+than once per call. This directly contradicted this section's own claim that the
+completeness of the entry-point inventory is a security property: four entry
+points, two of them enforcing half the contract.
+
+**What shipped for it.** `canonicalDestHost` — one shared derivation (strip port,
+`normalizeHostStrict`) — so the four entry points cannot compute that value
+differently, which is the whole reason the drift was possible. The proxy gate is
+hoisted to sit immediately after the raw tier, ahead of connlimit, the IP filter,
+the rate limiter, authentication and policy. It costs nothing: the host is
+normalized ONCE per request and the value reused at the IDNA gate, which no longer
+normalizes. Nothing between the two points mutates `r.Host`, so the hoist is
+value-preserving, and the RISK-013 **INVALID_HOST** refusal deliberately stays in
+its original position — the hoisted gate decides LENGTH only, never validity.
+`rejectOversizeCanonicalHost` now takes the protocol, so an admin refusal no longer
+reports itself as `HTTP`. SOCKS5 needed no change: its canonical gate (socks5.go:487)
+already precedes its first matcher (`bl.IsBlocked`, :495) — verified rather than
+assumed, since the finding was about position.
+
+**Gates 17 → 19**, both verified failing against the pre-fix shape with the
+measurements above: `DefectCanonicalTierPrecedesStage1Auth` (which carries a
+PRECONDITION asserting that Stage-1 really would have answered 407, so it cannot
+pass vacuously — the rule this section learned from shipping an unreachable SOCKS5
+gate) and `DefectAdminEntryPointsApplyTheCanonicalTier` (both handlers, viewer role).
+
+> **The lesson, and it is the TWIN of the round above.** That round: a bound governs
+> a REPRESENTATION, and the control sampled one of them. This round: a bound is a
+> property of its POSITION, and the gate sampled one PATH —
+> `DefectDotDenseASCIIIsStillRefusedByTheCanonicalTier` drove the plain-HTTP proxy
+> path and passed while the auth path and both admin paths were wide open. "Behind
+> these two sinks is safe" was answered for the SINKS and never asked of the
+> MATCHERS. Enumerate every path that reaches the cost, not every place you happen
+> to be standing — and when a contract has two parts, check both at every site,
+> because enforcing one tier of a two-tier bound is not enforcing the bound.
+
 ### What is deliberately left
 
 - **PX-22 — the inner inspected request's URI is unbounded.** `SSL_INNER` logs

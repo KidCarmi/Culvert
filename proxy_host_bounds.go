@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"net"
 	"net/http"
 	"sync"
 	"sync/atomic"
@@ -179,6 +180,25 @@ func canonicalHostOversize(normHost string) bool {
 	return len(normHost) > maxDestHostLen
 }
 
+// canonicalDestHost strips any port from a client-supplied authority and returns
+// its CANONICAL A-label form, plus whether normalization succeeded.
+//
+// It exists so that every entry point derives the value the canonical bound is
+// measured against IDENTICALLY. The raw tier was applied at all four entry points
+// from the start; the canonical tier was not, and the reason was that it had no
+// shared derivation — it was written inline at the one place in handleRequest
+// where a normalized host already happened to be in scope (Codex P2 x2, PR #1446).
+// Two entry points therefore enforced one tier of a two-tier contract. A caller
+// that needs the normalized host for its own purposes should use this and reuse
+// the result rather than normalizing again.
+func canonicalDestHost(authority string) (normHost string, ok bool) {
+	h := authority
+	if bare, _, err := net.SplitHostPort(h); err == nil {
+		h = bare
+	}
+	return normalizeHostStrict(h)
+}
+
 // noteOversizeHostLog reports whether this rejection may emit a log line,
 // arming the window when it does.
 func noteOversizeHostLog() bool {
@@ -267,18 +287,21 @@ func rejectOversizeDestHost(w http.ResponseWriter, r *http.Request, clientIP str
 // it would be an unused parameter (unparam). The raw-tier gate above does take
 // one, because r.Host is the value it measures.
 //
-// It runs immediately after hostutil.NormalizeHostStrict succeeds, on both the
-// HTTP and SOCKS5 paths, and is the tier that makes the bound tight: the raw
+// It runs at EVERY entry point, ahead of every matcher on that path — which for
+// handleRequest means ahead of Stage-1 authentication, because a category-scoped
+// auth rule resolves the same quadratic fusion and a terminal auth outcome can
+// return before the canonicalization gate is ever reached (Codex P2, PR #1446).
+// It is the tier that makes the bound tight: the raw
 // pre-cap has to be generous enough for IDN expansion (1 KiB), which on its own
 // still admits a 1 000-byte dot-dense ASCII authority costing ~1.3 ms. Measuring
 // the canonical form instead refuses exactly that, because ASCII does not shrink
 // under IDNA — while the 899-byte IDN it protects normalizes to 255 and passes.
-func rejectOversizeCanonicalHost(w http.ResponseWriter, clientIP, normHost string) bool {
+func rejectOversizeCanonicalHost(w http.ResponseWriter, proto, clientIP, normHost string) bool {
 	if !canonicalHostOversize(normHost) {
 		return false
 	}
 	atomic.AddInt64(&statBlocked, 1)
-	noteOversizeHostRejection("HTTP", clientIP, len(normHost), "canonical")
+	noteOversizeHostRejection(proto, clientIP, len(normHost), "canonical")
 	http.Error(w, fmt.Sprintf("Bad Request: destination host must be at most %d bytes", maxDestHostLen),
 		http.StatusBadRequest)
 	return true

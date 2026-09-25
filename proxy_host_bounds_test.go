@@ -704,3 +704,115 @@ func TestChaos69_ControlLogIsRateLimited(t *testing.T) {
 		t.Errorf("proxyOversizeHostRejected = %d, want %d — the counter must carry the magnitude the log suppresses", got, attempts)
 	}
 }
+
+// ─────────────── DEFECT GATES: the canonical tier's POSITION ───────────────
+//
+// Both gates below close Codex P2 findings on PR #1446, and they share one root
+// cause: the RAW tier was applied at all four entry points from the start, the
+// CANONICAL tier was applied only where a normalized host already happened to be
+// in scope. Enforcing one tier of a two-tier contract is not enforcing it.
+//
+// They are also the THIRD instance of one lesson in this sweep. The IDN
+// regression happened because the control sampled one REPRESENTATION of the
+// input; these happened because the gates sampled one PATH to the matcher.
+// DefectDotDenseASCIIIsStillRefusedByTheCanonicalTier drove the plain-HTTP proxy
+// path and passed, while the auth path and both admin paths were open.
+
+// TestChaos69_DefectCanonicalTierPrecedesStage1Auth pins that the canonical bound
+// runs ahead of Stage-1 authentication.
+//
+// The canonical tier used to sit at the RISK-013 canonicalization gate, ~60 lines
+// below the raw one, justified by the raw pre-cap having already bounded what the
+// sinks in between could RETAIN. That justification is about retention only. The
+// canonical tier's other job is bounding the QUADRATIC MATCHER WALK, and Stage-1
+// auth runs a matcher: authRuleMatchesScratch calls matchDestNorm with
+// authMatchScratch.hostCat(), the same category fusion. Worse, a terminal auth
+// outcome returns before the gate is reached at all, so a 1 000-byte dot-dense
+// authority collected a 407 and the refusal never happened — uncounted, so an
+// operator watching culvert_proxy_oversize_host_rejected_total saw nothing.
+func TestChaos69_DefectCanonicalTierPrecedesStage1Auth(t *testing.T) {
+	setupAuthGateTest(t) // configures auth; an uncredentialed request is challenged
+	resetOversizeHostStateForTest()
+	t.Cleanup(resetOversizeHostStateForTest)
+	chaos66CaptureLog(t)
+
+	// PRECONDITION. Without this the gate could pass vacuously on a build where
+	// Stage-1 never challenges — the not-vacuous-check rule this sweep recorded
+	// after shipping a SOCKS5 gate that could not fire.
+	w := httptest.NewRecorder()
+	handleRequest(w, makeRequest("http://ordinary-precondition.example.test/", nil))
+	if w.Code != http.StatusProxyAuthRequired {
+		t.Fatalf("precondition failed: an uncredentialed request must terminate in Stage-1 with 407, got %d — "+
+			"this gate proves nothing about ordering unless auth really would have answered first", w.Code)
+	}
+
+	host := chaos66Host(1000) // inside the 1 KiB raw pre-cap, far outside DNS
+	if rawAuthorityOversize(host) {
+		t.Fatalf("a %d-byte authority is refused by the RAW tier, so this gate cannot reach the canonical one", len(host))
+	}
+	before := proxyOversizeHostRejected.Load()
+
+	w = httptest.NewRecorder()
+	handleRequest(w, makeRequest("http://"+host+"/", nil))
+
+	if w.Code == http.StatusProxyAuthRequired {
+		t.Fatalf("a %d-byte dot-dense authority terminated in Stage-1 auth with a 407: the canonical tier sits BEHIND "+
+			"authentication, so a category-scoped auth rule pays the quadratic walk and the bound never runs", len(host))
+	}
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want %d — the canonical tier did not refuse ahead of authentication", w.Code, http.StatusBadRequest)
+	}
+	if got := proxyOversizeHostRejected.Load(); got != before+1 {
+		t.Errorf("proxyOversizeHostRejected = %d, want %d — the refusal is uncounted, so the operator surface is blind to it",
+			got, before+1)
+	}
+}
+
+// TestChaos69_DefectAdminEntryPointsApplyTheCanonicalTier pins that both admin
+// matcher entry points enforce BOTH tiers, not just the raw pre-cap.
+//
+// The raw cap is deliberately generous (1 KiB) so IDN expansion is not refused,
+// which on its own still admits the 1 000-byte dot-dense ASCII shape costing
+// ~1.3 ms of fusion — and apiPolicyTest can invoke the fusion more than once per
+// call. Both are reachable by a VIEWER, the lowest role the product has.
+func TestChaos69_DefectAdminEntryPointsApplyTheCanonicalTier(t *testing.T) {
+	host := chaos66Host(1000)
+	if rawAuthorityOversize(host) {
+		t.Fatalf("a %d-byte host is refused by the RAW tier, so this gate cannot reach the canonical one", len(host))
+	}
+
+	t.Run("url-category-lookup", func(t *testing.T) {
+		chaos66Isolate(t)
+		chaos66CaptureLog(t)
+		before := proxyOversizeHostRejected.Load()
+
+		r := withRole(httptest.NewRequest(http.MethodGet, "/api/url-categories/lookup?host="+host, http.NoBody), RoleViewer)
+		w := httptest.NewRecorder()
+		apiURLCatLookup(w, r)
+
+		if w.Code != http.StatusBadRequest {
+			t.Errorf("status = %d, want %d — a viewer reached lookupHostCategory with a %d-byte dot-dense host",
+				w.Code, http.StatusBadRequest, len(host))
+		}
+		if got := proxyOversizeHostRejected.Load(); got != before+1 {
+			t.Errorf("proxyOversizeHostRejected = %d, want %d — the admin-plane canonical refusal is uncounted", got, before+1)
+		}
+	})
+
+	t.Run("policy-test", func(t *testing.T) {
+		chaos66Isolate(t)
+		chaos66CaptureLog(t)
+		before := proxyOversizeHostRejected.Load()
+
+		w := httptest.NewRecorder()
+		apiPolicyTest(w, testerRoleReq(t, RoleViewer, map[string]any{"host": host}))
+
+		if w.Code != http.StatusBadRequest {
+			t.Errorf("status = %d, want %d — a viewer reached walkPolicyTestRules and the fusion with a %d-byte dot-dense host",
+				w.Code, http.StatusBadRequest, len(host))
+		}
+		if got := proxyOversizeHostRejected.Load(); got != before+1 {
+			t.Errorf("proxyOversizeHostRejected = %d, want %d — the admin-plane canonical refusal is uncounted", got, before+1)
+		}
+	})
+}

@@ -186,10 +186,23 @@ the walk on length would change the verdict — **fail-open for a block rule**,
 which is worse than the cost it saves.
 
 The practical consequence for you: **any new code path that hands a
-client-supplied host to the policy, blocklist or category engines must apply this
-same bound at its own entry point.** The four that exist today (proxy dispatch,
-SOCKS5, the admin URL-lookup endpoint and the admin policy-test endpoint) all go
-through one shared predicate so they cannot drift apart.
+client-supplied host to the policy, blocklist or category engines must apply BOTH
+tiers at its own entry point, ahead of every matcher on that path.** The four that
+exist today (proxy dispatch, SOCKS5, the admin URL-lookup endpoint and the admin
+policy-test endpoint) all go through shared predicates and one shared normalizer
+(`canonicalDestHost`) so they cannot drift apart.
+
+That wording is deliberately emphatic because review found the original shape
+enforcing only half of it. Both admin endpoints applied the raw tier and not the
+canonical one, so a **viewer-role** caller could still drive the 1 000-byte
+dot-dense shape into the category fusion; and on the proxy path the canonical tier
+sat behind Stage-1 authentication, which runs the same fusion for a
+category-scoped auth rule and can terminate the request (407) before the bound is
+reached at all — refused nothing, counted nothing. Both are fixed: the proxy gate
+is hoisted ahead of authentication, and both admin endpoints apply both tiers.
+Operationally this is why you may now see `tier=canonical` refusals attributed to
+`api/url-lookup` and `api/policy-test`, which previously could only report
+`tier=raw`.
 
 **What went wrong in review, recorded because it is the useful part.** The first
 version of this bound applied the DNS limit to the client's *raw bytes*. That is

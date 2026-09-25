@@ -1418,6 +1418,18 @@ func apiURLCatLookup(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("host must be at most %d bytes", maxRawDestAuthorityBytes), http.StatusBadRequest)
 		return
 	}
+	// And the CANONICAL tier, which this endpoint was missing: the raw pre-cap is
+	// deliberately generous (1 KiB) so IDN expansion is not refused, which on its
+	// own still admits the 1 000-byte dot-dense ASCII shape costing ~1.3 ms of
+	// fusion — exactly what the canonical tier exists to reject. Enforcing one
+	// tier of a two-tier contract is not enforcing the contract (Codex P2,
+	// PR #1446). Normalization failure is NOT refused here: validity is this
+	// endpoint's existing business, and this gate decides length only.
+	if normHost, ok := canonicalDestHost(host); ok && canonicalHostOversize(normHost) {
+		noteOversizeHostRejection("api/url-lookup", realClientIP(r), len(normHost), "canonical")
+		http.Error(w, fmt.Sprintf("host must be at most %d bytes", maxDestHostLen), http.StatusBadRequest)
+		return
+	}
 	category, tier, matchedBy := lookupHostCategory(host)
 	// Also check the blocklist so the lookup tool gives a complete picture.
 	blocked := bl.IsBlocked(host)
@@ -2790,6 +2802,18 @@ func apiPolicyTest(w http.ResponseWriter, r *http.Request) {
 	if rawAuthorityOversize(body.Host) {
 		noteOversizeHostRejection("api/policy-test", realClientIP(r), len(body.Host), "raw")
 		http.Error(w, fmt.Sprintf("host must be at most %d bytes", maxRawDestAuthorityBytes), http.StatusBadRequest)
+		return
+	}
+	// And the CANONICAL tier, which this endpoint was missing: the raw pre-cap is
+	// deliberately generous (1 KiB) so IDN expansion is not refused, which on its
+	// own still admits the 1 000-byte dot-dense ASCII shape costing ~1.3 ms of
+	// fusion — exactly what the canonical tier exists to reject. Enforcing one
+	// tier of a two-tier contract is not enforcing the contract (Codex P2,
+	// PR #1446). Normalization failure is NOT refused here: validity is this
+	// endpoint's existing business, and this gate decides length only.
+	if normHost, ok := canonicalDestHost(body.Host); ok && canonicalHostOversize(normHost) {
+		noteOversizeHostRejection("api/policy-test", realClientIP(r), len(normHost), "canonical")
+		http.Error(w, fmt.Sprintf("host must be at most %d bytes", maxDestHostLen), http.StatusBadRequest)
 		return
 	}
 
