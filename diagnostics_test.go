@@ -1092,7 +1092,7 @@ func TestApiDiagnostics_SessionSecretMissingFail(t *testing.T) {
 //     flips the verdict to fail under -shuffle/-count; e.g. a leaked
 //     CredentialRequired rule with no credential-capable provider configured
 //     trips the auth_cr_no_credential_provider diagFail check.
-//   - the CHAOS-66 session-revocation health record — the session_revocation
+//   - the CHAOS-67 session-revocation health record — the session_revocation
 //     row reports diagFail when a revocation could not be persisted or the
 //     persisted list did not load, and both are process-globals that latch.
 //   - the CHAOS-45 durable-write failure record — several tests inject REAL
@@ -1118,7 +1118,7 @@ func resetDiagVerdictGlobals(t *testing.T) {
 	// same class of process-global and also folds into the aggregate verdict.
 	resetAuthCostHealthForTest()
 	t.Cleanup(resetAuthCostHealthForTest)
-	// CHAOS-66: the session-revocation health record is the same class again,
+	// CHAOS-67: the session-revocation health record is the same class again,
 	// and it is the one that FAILS rather than warns — a revocation that could
 	// not be written down means the operator was told a session was withdrawn
 	// and it was not. In the test binary that is cross-talk: any test whose

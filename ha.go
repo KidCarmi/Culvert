@@ -828,7 +828,7 @@ func applyHABundle(bundle *HAStateBundle, token string) bool {
 	// armVersionPersistence at promotion.
 	globalConfigStore.seedReplicatedSnapshot(bundle.Config)
 
-	// Apply the leader's session revocations (CHAOS-66). This runs AFTER the
+	// Apply the leader's session revocations (CHAOS-67). This runs AFTER the
 	// bundle has been accepted, so it inherits the same trust decision as the
 	// CA, the cluster state and the config — one boundary, not two.
 	//

@@ -14,13 +14,13 @@ import (
 	"github.com/KidCarmi/Culvert/internal/session"
 )
 
-// CHAOS-66 root gates — the Control Plane's place in the revocation plane, and
+// CHAOS-67 root gates — the Control Plane's place in the revocation plane, and
 // the visibility of a revocation that is not durable.
 //
 // The defect gates were verified failing against their reintroduced pre-fix
 // shapes.
 
-func withChaos66Revocations(t *testing.T) {
+func withChaos67Revocations(t *testing.T) {
 	t.Helper()
 	restore := sessionRevoked.SwapForTest()
 	resetSessionRevocationHealthForTest()
@@ -32,7 +32,7 @@ func withChaos66Revocations(t *testing.T) {
 	})
 }
 
-func withChaos66Aggregator(t *testing.T) {
+func withChaos67Aggregator(t *testing.T) {
 	t.Helper()
 	globalRevAggregator.mu.Lock()
 	prevPerNode, prevLocal := globalRevAggregator.perNode, globalRevAggregator.cpLocal
@@ -50,8 +50,8 @@ func withChaos66Aggregator(t *testing.T) {
 // Control Plane, which is the node the admin UI runs on, contributed nothing
 // to the fleet-wide merge. An admin revoking a session on the CP revoked it on
 // the CP alone.
-func TestChaos66_ControlPlaneOwnRevocationsReachTheFleet(t *testing.T) {
-	withChaos66Aggregator(t)
+func TestChaos67_ControlPlaneOwnRevocationsReachTheFleet(t *testing.T) {
+	withChaos67Aggregator(t)
 
 	cpLocal := []RevocationEntry{
 		{Token: "cp-logout-token", Expiry: time.Now().Add(time.Hour).Unix()},
@@ -80,8 +80,8 @@ func TestChaos66_ControlPlaneOwnRevocationsReachTheFleet(t *testing.T) {
 
 // STRUCTURAL. The CP's slot must not be addressable as a node id, or an
 // enrolled node could overwrite it — or be excluded from its own merge.
-func TestChaos66_CPSlotIsNotAddressableByANodeID(t *testing.T) {
-	withChaos66Aggregator(t)
+func TestChaos67_CPSlotIsNotAddressableByANodeID(t *testing.T) {
+	withChaos67Aggregator(t)
 
 	globalRevAggregator.UpdateLocal([]RevocationEntry{
 		{Token: "cp-entry", Expiry: time.Now().Add(time.Hour).Unix()},
@@ -105,8 +105,8 @@ func TestChaos66_CPSlotIsNotAddressableByANodeID(t *testing.T) {
 
 // CONTROL. The requesting node must still not be sent its own entries back —
 // the CP contribution must not defeat the exclusion the merge exists for.
-func TestChaos66_RequesterStillExcludedFromItsOwnEntries(t *testing.T) {
-	withChaos66Aggregator(t)
+func TestChaos67_RequesterStillExcludedFromItsOwnEntries(t *testing.T) {
+	withChaos67Aggregator(t)
 
 	globalRevAggregator.Update("dp-1", []RevocationEntry{
 		{Token: "dp1-token", Expiry: time.Now().Add(time.Hour).Unix()},
@@ -123,8 +123,8 @@ func TestChaos66_RequesterStillExcludedFromItsOwnEntries(t *testing.T) {
 }
 
 // Expired entries in the CP's own slot must not ride the merge forever.
-func TestChaos66_ExpiredCPEntriesAreNotMerged(t *testing.T) {
-	withChaos66Aggregator(t)
+func TestChaos67_ExpiredCPEntriesAreNotMerged(t *testing.T) {
+	withChaos67Aggregator(t)
 
 	globalRevAggregator.UpdateLocal([]RevocationEntry{
 		{Token: "stale-cp", Expiry: time.Now().Add(-time.Hour).Unix()},
@@ -139,8 +139,8 @@ func TestChaos66_ExpiredCPEntriesAreNotMerged(t *testing.T) {
 // DEFECT. An account deletion must leave a DURABLE revocation. Before this,
 // apiAuthUsers' DELETE branch revoked in memory only, so the next restart
 // resurrected the deleted account's live sessions for the rest of their TTL.
-func TestChaos66_AccountDeletionRevocationIsDurable(t *testing.T) {
-	withChaos66Revocations(t)
+func TestChaos67_AccountDeletionRevocationIsDurable(t *testing.T) {
+	withChaos67Revocations(t)
 	path := filepath.Join(t.TempDir(), "revocations.json")
 	session.SetRevocationsPath(path)
 
@@ -162,8 +162,8 @@ func TestChaos66_AccountDeletionRevocationIsDurable(t *testing.T) {
 // DEFECT. A revocation that could not be written down must be countable and
 // must turn the operator-contract row to fail — the admin action reports
 // success either way, so this row is the only thing that disagrees with them.
-func TestChaos66_PersistFailureIsVisibleToTheOperator(t *testing.T) {
-	withChaos66Revocations(t)
+func TestChaos67_PersistFailureIsVisibleToTheOperator(t *testing.T) {
+	withChaos67Revocations(t)
 
 	if got := checkSessionRevocation(); got.Status == diagFail {
 		t.Fatalf("row already failing before the fault: %+v", got)
@@ -186,8 +186,8 @@ func TestChaos66_PersistFailureIsVisibleToTheOperator(t *testing.T) {
 // stated, not silent. It is the shipped posture, and combined with a stable
 // signing key (which every clustered deployment sets) it means a cookie
 // outlives the restart that discards its revocation.
-func TestChaos66_UnconfiguredPersistenceIsReported(t *testing.T) {
-	withChaos66Revocations(t)
+func TestChaos67_UnconfiguredPersistenceIsReported(t *testing.T) {
+	withChaos67Revocations(t)
 	session.SetRevocationsPath("")
 
 	row := checkSessionRevocation()
@@ -204,8 +204,8 @@ func TestChaos66_UnconfiguredPersistenceIsReported(t *testing.T) {
 
 // A failed LOAD means revocations the operator already applied are not in
 // force on this node, which must not read as healthy either.
-func TestChaos66_DegradedLoadIsReported(t *testing.T) {
-	withChaos66Revocations(t)
+func TestChaos67_DegradedLoadIsReported(t *testing.T) {
+	withChaos67Revocations(t)
 	noteRevocationPersistenceConfigured(filepath.Join(t.TempDir(), "revocations.json"))
 	noteRevocationLoadDegraded(session.ErrRevocationsCorrupt)
 
@@ -219,8 +219,8 @@ func TestChaos66_DegradedLoadIsReported(t *testing.T) {
 
 // CONTROL. A healthy, configured node must read OK — a row that always fails
 // is worth nothing, and would train an operator to ignore it.
-func TestChaos66_HealthyNodeReadsOK(t *testing.T) {
-	withChaos66Revocations(t)
+func TestChaos67_HealthyNodeReadsOK(t *testing.T) {
+	withChaos67Revocations(t)
 	noteRevocationPersistenceConfigured(filepath.Join(t.TempDir(), "revocations.json"))
 
 	row := checkSessionRevocation()
@@ -234,8 +234,8 @@ func TestChaos66_HealthyNodeReadsOK(t *testing.T) {
 
 // The row is a viewer-reachable surface, so it must carry counts and a remedy
 // but never the revoked usernames themselves.
-func TestChaos66_ContractRowDoesNotLeakRevokedIdentities(t *testing.T) {
-	withChaos66Revocations(t)
+func TestChaos67_ContractRowDoesNotLeakRevokedIdentities(t *testing.T) {
+	withChaos67Revocations(t)
 	sessionRevoked.RevokeUser("secret-person")
 	sessionRevoked.Revoke("secret-token-payload", time.Now().Add(time.Hour))
 
@@ -249,7 +249,7 @@ func TestChaos66_ContractRowDoesNotLeakRevokedIdentities(t *testing.T) {
 
 // The row must be registered in the operator contract, or none of the above
 // reaches an operator.
-func TestChaos66_ContractRowIsRegistered(t *testing.T) {
+func TestChaos67_ContractRowIsRegistered(t *testing.T) {
 	oc := buildOperatorContract()
 	for i := range oc.Checks {
 		if oc.Checks[i].Code == "session_revocation" {
@@ -268,7 +268,7 @@ func TestChaos66_ContractRowIsRegistered(t *testing.T) {
 // TestSOCKS5_EveryDestinationSinkIsAudited. Both directions are required: a
 // Control Plane that contributes but does not consume still fails to enforce a
 // logout performed on a Data Plane.
-func TestChaos66_SyncRevocationsWiresBothDirections(t *testing.T) {
+func TestChaos67_SyncRevocationsWiresBothDirections(t *testing.T) {
 	fset := token.NewFileSet()
 	f, err := parser.ParseFile(fset, "controlplane_server.go", nil, 0)
 	if err != nil {
@@ -320,7 +320,7 @@ func TestChaos66_SyncRevocationsWiresBothDirections(t *testing.T) {
 //
 // This gate drives every branch of the row deterministically and applies the
 // same forbidden list, so the order dependence cannot hide a leak here again.
-func TestChaos66_ContractRowNeverEchoesSensitiveTokens(t *testing.T) {
+func TestChaos67_ContractRowNeverEchoesSensitiveTokens(t *testing.T) {
 	forbidden := []string{"sessionSecret", "CULVERT_SESSION_SECRET", "-----BEGIN", "/data/"}
 
 	branches := []struct {
@@ -343,7 +343,7 @@ func TestChaos66_ContractRowNeverEchoesSensitiveTokens(t *testing.T) {
 
 	for _, b := range branches {
 		t.Run(b.name, func(t *testing.T) {
-			withChaos66Revocations(t)
+			withChaos67Revocations(t)
 			b.setup(t)
 			row := checkSessionRevocation()
 			blob := row.Code + " " + row.Message + " " + row.OperatorAction
@@ -363,8 +363,8 @@ func TestChaos66_ContractRowNeverEchoesSensitiveTokens(t *testing.T) {
 // when the volume is repaired. Keyed on the cumulative counter they never did,
 // and this file's own comment claimed the opposite — the ca_health.go mistake,
 // reproduced in the change that cites ca_health.go as its model.
-func TestChaos66_DurabilityRecoversWhenWritesSucceedAgain(t *testing.T) {
-	withChaos66Revocations(t)
+func TestChaos67_DurabilityRecoversWhenWritesSucceedAgain(t *testing.T) {
+	withChaos67Revocations(t)
 	noteRevocationPersistenceConfigured(filepath.Join(t.TempDir(), "revocations.json"))
 
 	noteRevocationPersistFailure(os.ErrPermission)
@@ -392,8 +392,8 @@ func TestChaos66_DurabilityRecoversWhenWritesSucceedAgain(t *testing.T) {
 
 // A failure AFTER a recovery must degrade again — the flag is state, not a
 // one-shot latch in either direction.
-func TestChaos66_DurabilityDegradesAgainAfterRecovery(t *testing.T) {
-	withChaos66Revocations(t)
+func TestChaos67_DurabilityDegradesAgainAfterRecovery(t *testing.T) {
+	withChaos67Revocations(t)
 	noteRevocationPersistenceConfigured(filepath.Join(t.TempDir(), "revocations.json"))
 
 	noteRevocationPersistFailure(os.ErrPermission)
@@ -413,7 +413,7 @@ func TestChaos66_DurabilityDegradesAgainAfterRecovery(t *testing.T) {
 // carrier of revocations, is fenced on a standby. Without revocations in the
 // bundle, a session revoked on the leader authenticated against the standby and
 // survived a promotion with full authority.
-func TestChaos66_HABundleCarriesRevocationsToTheStandby(t *testing.T) {
+func TestChaos67_HABundleCarriesRevocationsToTheStandby(t *testing.T) {
 	leader := session.NewRevocationList()
 	leader.Revoke("leader-logout", time.Now().Add(time.Hour))
 	leader.RevokeUser("fired-admin")
@@ -443,7 +443,7 @@ func TestChaos66_HABundleCarriesRevocationsToTheStandby(t *testing.T) {
 
 // The bundle must stay byte-identical when there is nothing to replicate, so a
 // standby predating this field is unaffected.
-func TestChaos66_HABundleOmitsEmptyRevocations(t *testing.T) {
+func TestChaos67_HABundleOmitsEmptyRevocations(t *testing.T) {
 	raw, err := json.Marshal(HAStateBundle{})
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
@@ -457,7 +457,7 @@ func TestChaos66_HABundleOmitsEmptyRevocations(t *testing.T) {
 // leader fills it and the standby applies it. applyHABundle and the HASync
 // handler both need live HA state to drive behaviourally, so the wiring is
 // pinned by shape — the same instrument as SyncRevocationsWiresBothDirections.
-func TestChaos66_HAWiresRevocationsInBothDirections(t *testing.T) {
+func TestChaos67_HAWiresRevocationsInBothDirections(t *testing.T) {
 	for _, tc := range []struct{ file, fn, call string }{
 		{"controlplane_server.go", "HASync", "ExportRevocations"},
 		{"ha.go", "applyHABundle", "MergeRevocations"},
@@ -511,8 +511,8 @@ func TestChaos66_HAWiresRevocationsInBothDirections(t *testing.T) {
 // CHAOS-45, CHAOS-47 and CHAOS-57 each had to register theirs when they added a
 // diagFail-capable row. This sweep added one and did not — the same "a second
 // thing was added beside an existing one and the existing machinery was never
-// taught about it" shape §36.8 names.
-func TestChaos66_RevocationHealthIsIsolatedFromTheAggregateVerdict(t *testing.T) {
+// taught about it" shape §37.8 names.
+func TestChaos67_RevocationHealthIsIsolatedFromTheAggregateVerdict(t *testing.T) {
 	// Dirty the record the way a failing-volume test does, WITHOUT the
 	// per-test isolation helper — this is the cross-talk, not a tidy test.
 	noteRevocationPersistenceConfigured(filepath.Join(t.TempDir(), "revocations.json"))

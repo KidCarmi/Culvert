@@ -1,7 +1,7 @@
 # Session revocation — durability, cluster reach, and recovery
 
-**Applies to:** every Culvert deployment. **Introduced by:** CHAOS-66
-(`roadmap/CHAOS-ENGINEERING-REVIEW.md` §36).
+**Applies to:** every Culvert deployment. **Introduced by:** CHAOS-67
+(`roadmap/CHAOS-ENGINEERING-REVIEW.md` §37).
 
 ---
 
@@ -34,14 +34,14 @@ That makes the revocation list a security control whose *durability* and
 | `DELETE /api/auth/users?username=…` | **account** — every session for that user | The node serving the delete, then the fleet |
 
 Both kinds are now persisted to the revocations file and both ride the CP↔DP
-gossip. Before CHAOS-66 only the token kind did either.
+gossip. Before CHAOS-67 only the token kind did either.
 
 Propagation reaches three places, and all three matter because each of them
 verifies the same cookies (the session signing key is replicated to all of them):
 
 * **Data Plane nodes** — via the `SyncRevocations` sync, every 3 s.
 * **The Control Plane itself** — it both contributes its own revocations to the
-  fleet and applies what Data Planes report. Before CHAOS-66 it did neither,
+  fleet and applies what Data Planes report. Before CHAOS-67 it did neither,
   which mattered because the admin UI runs on the CP.
 * **An HA standby CP** — via the HA state bundle. `SyncRevocations` is fenced on
   a standby, so without this the standby held the replicated signing key and no

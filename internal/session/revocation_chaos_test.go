@@ -11,7 +11,7 @@ import (
 	"time"
 )
 
-// CHAOS-66 — the session revocation plane.
+// CHAOS-67 — the session revocation plane.
 //
 // A Culvert session cookie is self-contained and is trusted on its HMAC alone,
 // so the revocation list is the ONLY way to withdraw authority from a session
@@ -32,7 +32,7 @@ func chaosRevocationsPath(t *testing.T) string {
 // DEFECT (persistence). RevokeUser wrote only to the in-memory `users` map,
 // and SaveRevocations exported only `tokens` — so deleting an account revoked
 // its live sessions until the process exited and no longer.
-func TestChaos66_UserRevocationSurvivesARestart(t *testing.T) {
+func TestChaos67_UserRevocationSurvivesARestart(t *testing.T) {
 	chaosRevocationsPath(t)
 
 	before := NewRevocationList()
@@ -56,7 +56,7 @@ func TestChaos66_UserRevocationSurvivesARestart(t *testing.T) {
 
 // DEFECT (gossip). ExportRevocations walked `tokens` only, so a deleted
 // account was revoked on the one node that served the DELETE and nowhere else.
-func TestChaos66_UserRevocationCrossesTheGossip(t *testing.T) {
+func TestChaos67_UserRevocationCrossesTheGossip(t *testing.T) {
 	src := NewRevocationList()
 	src.Revoke("tok-b", time.Now().Add(time.Hour))
 	src.RevokeUser("bob")
@@ -77,7 +77,7 @@ func TestChaos66_UserRevocationCrossesTheGossip(t *testing.T) {
 // de-duplicates the fleet-wide merge on Token alone. If user entries shared a
 // Token value, every user revocation in the cluster would collapse into one
 // and the fleet would learn about a single deleted account.
-func TestChaos66_UserEntriesHaveDistinctTokens(t *testing.T) {
+func TestChaos67_UserEntriesHaveDistinctTokens(t *testing.T) {
 	r := NewRevocationList()
 	r.RevokeUser("alice")
 	r.RevokeUser("bob")
@@ -107,7 +107,7 @@ func TestChaos66_UserEntriesHaveDistinctTokens(t *testing.T) {
 // cookie payload, in BOTH directions: a downgraded node files it under
 // tokens[] and must never match a live session with it, and MergeRevocations
 // classifies by the prefix and must never swallow a genuine token revocation.
-func TestChaos66_UserRevocationTokenCannotCollideWithACookiePayload(t *testing.T) {
+func TestChaos67_UserRevocationTokenCannotCollideWithACookiePayload(t *testing.T) {
 	// A real token is the RawURLEncoding of a Session payload; that alphabet
 	// is [A-Za-z0-9-_], so a prefix containing any other byte is unreachable.
 	const b64Alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
@@ -134,7 +134,7 @@ func TestChaos66_UserRevocationTokenCannotCollideWithACookiePayload(t *testing.T
 // A user entry that has passed through a node predating this change loses the
 // `user` JSON field but keeps the token. Recovering the username from the
 // prefix means one hop through an old node degrades nothing.
-func TestChaos66_UserRevocationSurvivesAHopThroughAnOldNode(t *testing.T) {
+func TestChaos67_UserRevocationSurvivesAHopThroughAnOldNode(t *testing.T) {
 	src := NewRevocationList()
 	src.RevokeUser("dave")
 	entries := src.ExportRevocations()
@@ -159,14 +159,14 @@ func TestChaos66_UserRevocationSurvivesAHopThroughAnOldNode(t *testing.T) {
 	dst := NewRevocationList()
 	dst.MergeRevocations(relayed)
 	if !dst.IsUserRevoked("dave") {
-		t.Error("user revocation was erased by a hop through a node predating CHAOS-66")
+		t.Error("user revocation was erased by a hop through a node predating CHAOS-67")
 	}
 }
 
 // DOWNGRADE. The document must stay a JSON array so a binary predating this
 // change still parses the TOKEN revocations it does understand. Promoting the
 // file to an object would trade a gap for a regression.
-func TestChaos66_PersistedDocumentStaysDowngradeParseable(t *testing.T) {
+func TestChaos67_PersistedDocumentStaysDowngradeParseable(t *testing.T) {
 	chaosRevocationsPath(t)
 	r := NewRevocationList()
 	r.Revoke("tok-c", time.Now().Add(time.Hour))
@@ -183,7 +183,7 @@ func TestChaos66_PersistedDocumentStaysDowngradeParseable(t *testing.T) {
 		Expiry int64  `json:"expiry"`
 	}
 	if err := json.Unmarshal(data, &legacy); err != nil {
-		t.Fatalf("a binary predating CHAOS-66 cannot parse the document: %v", err)
+		t.Fatalf("a binary predating CHAOS-67 cannot parse the document: %v", err)
 	}
 	var sawToken bool
 	for _, e := range legacy {
@@ -199,7 +199,7 @@ func TestChaos66_PersistedDocumentStaysDowngradeParseable(t *testing.T) {
 // DEFECT (corruption). A file that was read and could not be parsed must be
 // reported as corrupt, so the caller quarantines it instead of silently
 // booting with an EMPTY list — the fail-OPEN direction for this file.
-func TestChaos66_CorruptFileIsReportedAsCorrupt(t *testing.T) {
+func TestChaos67_CorruptFileIsReportedAsCorrupt(t *testing.T) {
 	path := chaosRevocationsPath(t)
 	if err := os.WriteFile(path, []byte("{ this is not a revocation list"), 0o600); err != nil {
 		t.Fatalf("write: %v", err)
@@ -216,7 +216,7 @@ func TestChaos66_CorruptFileIsReportedAsCorrupt(t *testing.T) {
 // CONTROL. A file we could NOT READ must not be classified as corrupt: the
 // content may be intact behind a transient permission or I/O fault, and
 // quarantining would move a healthy security-critical file aside.
-func TestChaos66_UnreadableFileIsNotReportedAsCorrupt(t *testing.T) {
+func TestChaos67_UnreadableFileIsNotReportedAsCorrupt(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("running as root: mode bits do not deny reads")
 	}
@@ -240,7 +240,7 @@ func TestChaos66_UnreadableFileIsNotReportedAsCorrupt(t *testing.T) {
 
 // DEFECT (durability reporting). A revocation that could not be written down
 // must reach the observer, because the admin action reports success either way.
-func TestChaos66_PersistFailureIsObserved(t *testing.T) {
+func TestChaos67_PersistFailureIsObserved(t *testing.T) {
 	// A directory where the file should be: AtomicWrite cannot replace it.
 	dir := t.TempDir()
 	path := filepath.Join(dir, "revocations.json")
@@ -265,7 +265,7 @@ func TestChaos66_PersistFailureIsObserved(t *testing.T) {
 
 // CONTROL. A panicking observer must never take down the admin plane it is
 // reporting on (the internal/audit observer rule).
-func TestChaos66_PanickingObserverIsContained(t *testing.T) {
+func TestChaos67_PanickingObserverIsContained(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "revocations.json")
 	if err := os.Mkdir(path, 0o750); err != nil {
@@ -286,7 +286,7 @@ func TestChaos66_PanickingObserverIsContained(t *testing.T) {
 
 // CONTROL. No observer installed must not be a failure path, and a persisted
 // save on a healthy volume must not charge the counter.
-func TestChaos66_HealthySaveDoesNotChargeTheObserver(t *testing.T) {
+func TestChaos67_HealthySaveDoesNotChargeTheObserver(t *testing.T) {
 	chaosRevocationsPath(t)
 	var seen int
 	SetPersistFailureObserver(func(error) { seen++ })
@@ -305,7 +305,7 @@ func TestChaos66_HealthySaveDoesNotChargeTheObserver(t *testing.T) {
 
 // An expired user revocation must not be exported or re-merged: without this a
 // revocation that has served its purpose rides the gossip forever.
-func TestChaos66_ExpiredUserRevocationsArePruned(t *testing.T) {
+func TestChaos67_ExpiredUserRevocationsArePruned(t *testing.T) {
 	r := NewRevocationList()
 	r.mu.Lock()
 	r.users["stale"] = time.Now().Add(-time.Hour)
@@ -332,7 +332,7 @@ func TestChaos66_ExpiredUserRevocationsArePruned(t *testing.T) {
 
 // A re-delete of the same account must EXTEND the window, never shorten it on
 // a gossip round trip.
-func TestChaos66_MergeKeepsTheLaterUserExpiry(t *testing.T) {
+func TestChaos67_MergeKeepsTheLaterUserExpiry(t *testing.T) {
 	r := NewRevocationList()
 	late := time.Now().Add(6 * time.Hour)
 	r.MergeRevocations([]RevocationEntry{
@@ -349,7 +349,7 @@ func TestChaos66_MergeKeepsTheLaterUserExpiry(t *testing.T) {
 
 // CONTROL. The cheapest way to pass every gate above is to revoke everything,
 // which would lock every operator out of their own gateway.
-func TestChaos66_UnrevokedSessionsStillDecode(t *testing.T) {
+func TestChaos67_UnrevokedSessionsStillDecode(t *testing.T) {
 	chaosRevocationsPath(t)
 	restore := Revoked.SwapForTest()
 	t.Cleanup(restore)
@@ -387,7 +387,7 @@ func TestChaos66_UnrevokedSessionsStillDecode(t *testing.T) {
 //
 // This is the same bug ca_health.go records having already fixed once, which is
 // why the seam exists rather than the call site being trusted to notice.
-func TestChaos66_SuccessfulSaveIsObservedAsRecovery(t *testing.T) {
+func TestChaos67_SuccessfulSaveIsObservedAsRecovery(t *testing.T) {
 	dir := t.TempDir()
 	bad := filepath.Join(dir, "blocked")
 	if err := os.Mkdir(bad, 0o750); err != nil {
@@ -435,7 +435,7 @@ func TestChaos66_SuccessfulSaveIsObservedAsRecovery(t *testing.T) {
 
 // CONTROL. Persistence is opt-in; an unconfigured path writes nothing, so it
 // must NOT be reported as a recovery — that would clear a real degradation.
-func TestChaos66_UnconfiguredSaveIsNotARecovery(t *testing.T) {
+func TestChaos67_UnconfiguredSaveIsNotARecovery(t *testing.T) {
 	withRevocationsPath(t, "")
 
 	var recoveries int
@@ -454,7 +454,7 @@ func TestChaos66_UnconfiguredSaveIsNotARecovery(t *testing.T) {
 
 // CONTROL. A panicking success observer must be contained too, on the same
 // reasoning as the failure one.
-func TestChaos66_PanickingSuccessObserverIsContained(t *testing.T) {
+func TestChaos67_PanickingSuccessObserverIsContained(t *testing.T) {
 	withRevocationsPath(t, filepath.Join(t.TempDir(), "revocations.json"))
 	SetPersistSuccessObserver(func() { panic("observer blew up") })
 	t.Cleanup(func() { SetPersistSuccessObserver(nil) })

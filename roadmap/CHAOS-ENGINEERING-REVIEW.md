@@ -95,6 +95,35 @@ everything else is triaged below with a suggested PR and required tests for foll
 > in a committed placeholder row at the START of a sweep), and at six
 > occurrences it is well past overdue.
 
+**2026-09-12 — CHAOS-66 sweep (the SOCKS5 listener's BIND). Id claimed in this
+row before the implementation commit**, per the convention above; `CHAOS-66` was
+free (65 was the highest merged) and did not move. The sweep closes the row §33
+left open in as many words: *"`startSOCKS5`'s BIND failure is still fatal — an
+occupied SOCKS5 port takes down HTTP proxying."* It does, and worse than the
+sentence suggests — `initSOCKS5` runs BEFORE `startAdminUI` and
+`buildAndStartProxyServer`, so an OPTIONAL, off-by-default listener that cannot
+get its port kills the PRIMARY data plane, the management plane and the health
+endpoints before any of them exist. Reproduced against the real binary: exit 1,
+`proxy http_code=000`, zero admin-UI log lines; under `restart: unless-stopped`
+an unattended crash loop recoverable only with shell access. The triggers are
+routine (a draining predecessor holding the port, a privileged port after
+`CAP_NET_BIND_SERVICE` was dropped, an interface not yet up) and none is visible
+to `validatePortCollisions`, which compares Culvert's own three ports to each
+other only. Fixed by a supervisor owning bind → serve → rebind, borrowing
+CHAOS-54/55/57's mechanism wholesale rather than inventing a second dialect;
+`socks5Server` is byte-identical, so §22's 18 accept-loop gates are untouched.
+Two consequences worth the reader's attention: an observed bind now CLEARS the
+accept plane's `down` (§22 recorded it as terminal, correct only while nothing
+re-opened the socket) and the `down` row stopped telling operators to restart
+the node, which after this change would cost a production outage to achieve what
+happens on its own. A second, smaller finding rode along: `network_error` in
+`classifyAdminUIListenError` was unreachable-by-accident in the other direction
+— `*net.OpError` satisfies `net.Error` unconditionally, so every unrecognised
+errno was reported as a network fault and `listen_failed` could only be reached
+by an error the net package had NOT produced; the shipped gate passed exactly
+that one shape. Both classifiers now require `Timeout()`. See §36 and
+`docs/operator/socks5-listener-health.md`.
+
 **2026-09-11 — CHAOS-65 sweep (the OCSP revocation path). FIRST SWEEP TO CLAIM
 ITS ID BEFORE WRITING CODE.** The id was committed as a placeholder row in this
 file as commit one, which is the remedy the header above reaches twice
@@ -127,10 +156,12 @@ the evidence column named the property that makes all seven reachable, and the
 verdict looked past it. Re-scored **H** and split. See §35, rows CA-6/CA-6b and
 OCSP-1…OCSP-10, and `docs/operator/ocsp-revocation-checking.md`.
 
-**2026-09-19 — CHAOS-66 sweep (the session revocation plane). ID CLAIMED BEFORE ANY CODE
+**2026-09-19 — CHAOS-67 sweep (the session revocation plane). ID CLAIMED BEFORE ANY CODE
 WAS WRITTEN,** as the header above recommends after ten collisions and as the CHAOS-65 sweep
-first did. This row was commit one of the sweep; the id never moved. That is now two sweeps in
-a row for which the remedy worked exactly as the header predicts, at a cost of one line each.
+first did. This row was commit one of the sweep — and the id still moved: it was claimed as
+CHAOS-66 on the branch, and the SOCKS5 BIND sweep shipped to main under CHAOS-66 (§36) first, so
+on merging main this sweep was renumbered CHAOS-67 (§37; test gates `TestChaos67_*`). A claim
+made on an unmerged branch reserves nothing — only a claim that lands on main does.
 Scope: the one mechanism in Culvert that can withdraw authority from a session that is already
 issued — `internal/session`'s `RevocationList`, its persistence, its CP↔DP gossip, and the two
 admin actions that reach it.
@@ -166,7 +197,7 @@ one. Defaulting the path starts writing a new file on every appliance, which is 
 decision, so what shipped is the warning that names the coupling. 26 gates; every defect gate
 verified failing against its reintroduced pre-fix shape, with two controls (revoking everything
 passes every gate while locking every operator out; a row that always fails trains operators to
-ignore it). See rows AU-18…AU-23, §36, and `docs/operator/session-revocation.md`.
+ignore it). See rows AU-18…AU-23, §37, and `docs/operator/session-revocation.md`.
 
 **2026-09-02 — CHAOS-58 sweep (the directory that accepts and then stops answering).**
 CHAOS-47 solved the *unreachable* directory: fail closed, arm a provider-wide cooldown, deny
@@ -1130,14 +1161,14 @@ Severity key: **C**ritical / **H**igh / **M**edium / **L**ow / **✓** handled w
 | AU-13 | Registry introspection also lacks **negative caching / circuit breaker** — a permanently-invalid token amplifies one IdP call per provider per request forever. | GAP | M | `auth_oidc_flow.go:623-636`; breaker exists unused `internal/upstream/upstream.go:89-96` |
 | AU-15 | **The public admin-login endpoint accepted an UNBOUNDED username and copied it verbatim into durable state.** `apiAuthLogin` is on `uiAuthMiddleware`'s public allowlist; nothing between the 1 MiB body cap and the handler limited `body.User`, and every failed attempt wrote it into the two lockout maps (retained ≥ `lockout.Window`), the 500-entry audit ring, and the **durable audit JSONL** — a 50 MB rotating file keeping exactly ONE archive. At the endpoint's own rate limit (60 mutating POSTs/min/IP) one unauthenticated client commits ~60 MiB/min of chosen bytes, rotating the entire 100 MB retained compliance record away in **under two minutes**, with no disk fault and every write SUCCEEDING (so `writeErrors`/`storage_write_failed` never fire). Measured by the gate: **4,195,672 bytes into the audit file from 8 requests.** | NEW → **CLOSED** (CHAOS-63: bounded at the handler; `lockout.MaxUsernameKeyLen` is the structural half; `culvert_login_oversize_rejected_total`) | **H** | was: `ui_auth.go` `apiAuthLogin`; `internal/audit/audit.go:213` (`NewRotatingFile(path, 50)`); see §32 |
 | AU-16 | **`internal/lockout` bounded its maps by ENTRY COUNT but not by KEY SIZE.** `Cleanup`'s own doc claims the maps are bounded "against an unbounded-memory DoS" — true on the count axis, and the janitor cannot sweep an entry before its `Window` elapses, so the SIZE axis was the whole exposure: one caller retained (rate × Window × username size) bytes in a leaf package whose stated contract is to be bounded. | NEW → **CLOSED** (CHAOS-63: `boundUsername` applied at every public entry point; consistency pinned so `Check` and `RecordFailure` cannot disagree on the key) | M/H | was: `internal/lockout/lockout.go`; see §32 |
-| AU-18 | **An account-level revocation was never persisted.** A Culvert cookie is self-contained and trusted on its HMAC alone — nothing re-consults the roster on a request — so the revocation list is the ONLY way to withdraw a live session's authority, and the TTL it otherwise runs to is up to 7 days. `RevokeUser` wrote to an in-memory `users` map that `SaveRevocations` did not export, so deleting a compromised or departing account revoked its live sessions in the memory of one process and no longer. An ordinary redeploy, an OOM or a SIGKILL resurrected them. | NEW → **CLOSED** (CHAOS-66: both maps reach disk; `DELETE /api/auth/users` persists like a logout does) | **H** | was: `internal/session/session.go` `ExportRevocations` (tokens only), `ui_auth.go` DELETE branch (no save); see §36 |
-| AU-19 | **An account-level revocation was never gossiped**, for the same reason: `ExportRevocations`/`MergeRevocations` handled only the token map. On a cluster, deleting an account revoked its sessions on the ONE node that served the DELETE; every other node kept honouring the cookie — including for identity- and group-scoped **proxy policy**, not just the admin UI. | NEW → **CLOSED** (CHAOS-66: user entries ride the existing CP↔DP sync; downgrade-parseable array preserved) | **H** | was: `internal/session/session.go`; see §36 |
-| AU-20 | **The Control Plane was isolated from the revocation plane in BOTH directions.** `globalRevAggregator` had exactly one writer — a Data Plane push — so the CP contributed nothing to the fleet-wide merge, and `SyncRevocations` never merged what it received, so it consumed nothing either. The admin UI runs on the CP, which makes it the node where logouts and account deletions actually happen: the direction that propagated (DP→fleet) is the one nobody uses, and the direction an operator uses did not exist. | NEW → **CLOSED** (CHAOS-66: the handler contributes the CP's live list and merges the DP's, on the sync tick that already runs; the CP slot is a dedicated field, not a reserved map key) | **H** | was: `controlplane.go` `revocationAggregator`, `controlplane_server.go` `SyncRevocations`; see §36 |
-| AU-21 | **A corrupt revocations file resurrected every revocation, silently.** `initSession` logged the parse error and booted with an EMPTY list, and the next `SaveRevocations` atomically OVERWROTE the evidence. `state_corruption.go` has handled exactly this for `ui_users.json` and `cluster.json` since CHAOS-05/07; the revocations file — the one whose loss is a security-control failure rather than a roster inconvenience — was simply never wired into it. | NEW → **CLOSED** (CHAOS-66: `ErrRevocationsCorrupt` + `quarantineCorruptStateFile("session_revocations", …)`; a READ failure is deliberately NOT quarantined) | **H** | was: `session_startup.go`, `main.go` `initSession`; see §36 |
-| AU-22 | **Revocation persistence is opt-in and ships OFF** (`-revocations-file` defaults to `""`), and the danger is the COUPLING rather than the default alone: with a per-restart signing key every cookie breaks on restart anyway, but the shipped `docker-compose.yml` sets `CULVERT_SESSION_SECRET` and every clustered deployment MUST — so the stable key that makes sessions survive a restart is exactly what lets a cookie outlive the restart that discards its revocation. Defaulting the path to `<dataDir>/revocations.json` is the obvious fix and starts writing a new file on every appliance, so it is an OWNER decision, not a side effect of this sweep. Made VISIBLE rather than changed: the `session_revocation` row warns and names the coupling. | NEW, **REPORTED not changed** (CHAOS-66) | M/H | `main.go:320`, `docker-compose.yml` `CULVERT_SESSION_SECRET`; see §36 |
-| AU-23 | **A role or password change revokes nothing.** `POST /api/auth/users` re-writes the roster, but the role lives IN the cookie (`ui_middleware.go` reads `sess.Role`, it does not re-resolve), so a demoted admin keeps admin authority until the session expires, and the classic "my password was stolen, I changed it" action does not invalidate the stolen session. Only DELETE revokes. Closing it means revoking on a role/password edit, which changes an admin workflow and deserves its own review. | NEW, **REPORTED not changed** (CHAOS-66) | M | `ui_auth.go` POST branch; `ui_middleware.go:276`; see §36 |
-| AU-24 | **The HA standby CP was the one node with no route into the revocation plane at all.** The HA state bundle replicates `SessionHMAC` (inside `Config`), so a standby verifies exactly the cookies the leader does — while `SyncRevocations`, the only other carrier of revocations, is fenced on a standby by `haIssuanceAllowed`. So a session revoked on the leader authenticated against the standby, and kept full authority across a promotion until some Data Plane happened to push the entry back, or forever if none reconnected. Same defect as AU-20, one node over, and it survived AU-20's fix. | NEW → **CLOSED** (CHAOS-66 round 2, Codex P1: `HAStateBundle.Revocations`, `omitempty`, merged + persisted by `applyHABundle` inside the bundle's existing trust boundary) | **H** | was: `controlplane_server.go` `HAStateBundle`/`HASync`, `ha.go` `applyHABundle`; see §36 |
-| AU-25 | **A health row keyed on a CUMULATIVE failure counter can never recover.** `revocationsAreDurable` read `persistFailures == 0`, so one transient write failure pinned `culvert_session_revocation_durable` at 0 and the `session_revocation` row at `fail` for the life of the process — after the volume was repaired and a later save had written the complete live list. The row's own comment claimed the opposite ("evaluated, never latched"). `ca_health.go` records having fixed this exact bug once already, in the file CHAOS-66 cites as its model. | NEW (introduced by CHAOS-66) → **CLOSED in the same PR** (Codex P2: cumulative counter kept for magnitude, separate current-state flag cleared by a `SetPersistSuccessObserver` recovery seam) | M | was: `session_revocation_health.go`; precedent `ca_health.go` `caRotationPersistDegraded`; see §36 |
+| AU-18 | **An account-level revocation was never persisted.** A Culvert cookie is self-contained and trusted on its HMAC alone — nothing re-consults the roster on a request — so the revocation list is the ONLY way to withdraw a live session's authority, and the TTL it otherwise runs to is up to 7 days. `RevokeUser` wrote to an in-memory `users` map that `SaveRevocations` did not export, so deleting a compromised or departing account revoked its live sessions in the memory of one process and no longer. An ordinary redeploy, an OOM or a SIGKILL resurrected them. | NEW → **CLOSED** (CHAOS-67: both maps reach disk; `DELETE /api/auth/users` persists like a logout does) | **H** | was: `internal/session/session.go` `ExportRevocations` (tokens only), `ui_auth.go` DELETE branch (no save); see §37 |
+| AU-19 | **An account-level revocation was never gossiped**, for the same reason: `ExportRevocations`/`MergeRevocations` handled only the token map. On a cluster, deleting an account revoked its sessions on the ONE node that served the DELETE; every other node kept honouring the cookie — including for identity- and group-scoped **proxy policy**, not just the admin UI. | NEW → **CLOSED** (CHAOS-67: user entries ride the existing CP↔DP sync; downgrade-parseable array preserved) | **H** | was: `internal/session/session.go`; see §37 |
+| AU-20 | **The Control Plane was isolated from the revocation plane in BOTH directions.** `globalRevAggregator` had exactly one writer — a Data Plane push — so the CP contributed nothing to the fleet-wide merge, and `SyncRevocations` never merged what it received, so it consumed nothing either. The admin UI runs on the CP, which makes it the node where logouts and account deletions actually happen: the direction that propagated (DP→fleet) is the one nobody uses, and the direction an operator uses did not exist. | NEW → **CLOSED** (CHAOS-67: the handler contributes the CP's live list and merges the DP's, on the sync tick that already runs; the CP slot is a dedicated field, not a reserved map key) | **H** | was: `controlplane.go` `revocationAggregator`, `controlplane_server.go` `SyncRevocations`; see §37 |
+| AU-21 | **A corrupt revocations file resurrected every revocation, silently.** `initSession` logged the parse error and booted with an EMPTY list, and the next `SaveRevocations` atomically OVERWROTE the evidence. `state_corruption.go` has handled exactly this for `ui_users.json` and `cluster.json` since CHAOS-05/07; the revocations file — the one whose loss is a security-control failure rather than a roster inconvenience — was simply never wired into it. | NEW → **CLOSED** (CHAOS-67: `ErrRevocationsCorrupt` + `quarantineCorruptStateFile("session_revocations", …)`; a READ failure is deliberately NOT quarantined) | **H** | was: `session_startup.go`, `main.go` `initSession`; see §37 |
+| AU-22 | **Revocation persistence is opt-in and ships OFF** (`-revocations-file` defaults to `""`), and the danger is the COUPLING rather than the default alone: with a per-restart signing key every cookie breaks on restart anyway, but the shipped `docker-compose.yml` sets `CULVERT_SESSION_SECRET` and every clustered deployment MUST — so the stable key that makes sessions survive a restart is exactly what lets a cookie outlive the restart that discards its revocation. Defaulting the path to `<dataDir>/revocations.json` is the obvious fix and starts writing a new file on every appliance, so it is an OWNER decision, not a side effect of this sweep. Made VISIBLE rather than changed: the `session_revocation` row warns and names the coupling. | NEW, **REPORTED not changed** (CHAOS-67) | M/H | `main.go:320`, `docker-compose.yml` `CULVERT_SESSION_SECRET`; see §37 |
+| AU-23 | **A role or password change revokes nothing.** `POST /api/auth/users` re-writes the roster, but the role lives IN the cookie (`ui_middleware.go` reads `sess.Role`, it does not re-resolve), so a demoted admin keeps admin authority until the session expires, and the classic "my password was stolen, I changed it" action does not invalidate the stolen session. Only DELETE revokes. Closing it means revoking on a role/password edit, which changes an admin workflow and deserves its own review. | NEW, **REPORTED not changed** (CHAOS-67) | M | `ui_auth.go` POST branch; `ui_middleware.go:276`; see §37 |
+| AU-24 | **The HA standby CP was the one node with no route into the revocation plane at all.** The HA state bundle replicates `SessionHMAC` (inside `Config`), so a standby verifies exactly the cookies the leader does — while `SyncRevocations`, the only other carrier of revocations, is fenced on a standby by `haIssuanceAllowed`. So a session revoked on the leader authenticated against the standby, and kept full authority across a promotion until some Data Plane happened to push the entry back, or forever if none reconnected. Same defect as AU-20, one node over, and it survived AU-20's fix. | NEW → **CLOSED** (CHAOS-67 round 2, Codex P1: `HAStateBundle.Revocations`, `omitempty`, merged + persisted by `applyHABundle` inside the bundle's existing trust boundary) | **H** | was: `controlplane_server.go` `HAStateBundle`/`HASync`, `ha.go` `applyHABundle`; see §37 |
+| AU-25 | **A health row keyed on a CUMULATIVE failure counter can never recover.** `revocationsAreDurable` read `persistFailures == 0`, so one transient write failure pinned `culvert_session_revocation_durable` at 0 and the `session_revocation` row at `fail` for the life of the process — after the volume was repaired and a later save had written the complete live list. The row's own comment claimed the opposite ("evaluated, never latched"). `ca_health.go` records having fixed this exact bug once already, in the file CHAOS-67 cites as its model. | NEW (introduced by CHAOS-67) → **CLOSED in the same PR** (Codex P2: cumulative counter kept for magnitude, separate current-state flag cleared by a `SetPersistSuccessObserver` recovery seam) | M | was: `session_revocation_health.go`; precedent `ca_health.go` `caRotationPersistDegraded`; see §37 |
 
 ### 2.6 Background Workers / Feeds / Scanning / Alerting
 
@@ -6454,7 +6485,482 @@ mutation-checked by flipping the claim and confirming the failure.
 
 ---
 
-## 36. CHAOS-66 — The session revocation plane
+## 36. CHAOS-66 — The SOCKS5 listener's BIND, and which plane may kill which
+
+**Date:** 2026-09-12
+**Scope:** `startSOCKS5` / `initSOCKS5` / the SOCKS5 listener lifecycle, and the
+classifier it shares with the admin UI listener.
+**Status:** Shipped. Closes the register row CHAOS-57 (§33) left open:
+*"`startSOCKS5`'s BIND failure is still fatal — an occupied SOCKS5 port takes
+down HTTP proxying."*
+
+### The finding
+
+`startSOCKS5` bound its listener with exactly one error branch:
+
+```go
+ln, err := lc.Listen(context.Background(), "tcp", fmt.Sprintf(":%d", port))
+if err != nil {
+        logFatalf("SOCKS5 listen error: %v", err)   // ← os.Exit(1)
+}
+```
+
+So every way the OPTIONAL SOCKS5 listener could fail to bind terminated the
+whole appliance. And it did so from `initSOCKS5`, which `main.go` runs at line
+239 — **before `startAdminUI` and before `buildAndStartProxyServer`** — so the
+HTTP/HTTPS proxy and the admin UI never start at all.
+
+This is §33's finding one plane over, and it lands strictly harder. There the
+MANAGEMENT plane killed the DATA plane. Here a **secondary, opt-in data plane**
+— SOCKS5 is off by default (`-socks5-port 0`) — kills the **primary** data
+plane, the management plane and the health endpoints, before any of them exist.
+
+### Reproduction (real binary, not reasoned about)
+
+Port 11080 held by an unrelated process:
+
+```
+$ ./culvert -port 18080 -ui-port 19090 -socks5-port 11080
+...
+SOCKS5 listen error: listen tcp :11080: bind: address already in use
+EXIT CODE: 1
+
+$ curl -x http://127.0.0.1:18080 http://example.com
+proxy http_code=000                    ← the HTTP proxy port never listened
+$ grep -c 'UIHTTP\|Admin UI' boot.log
+0                                      ← startAdminUI never ran
+```
+
+Three routine triggers, none of them visible to the one check that looks like it
+should catch them — `validatePortCollisions` compares Culvert's own three ports
+to EACH OTHER only, and nothing else on the host is in its field of view:
+
+- **`port_in_use` (EADDRINUSE)** — a predecessor container still draining, a
+  host-network service, an operator collision, a second Culvert instance.
+- **`permission_denied` (EACCES/EPERM)** — a privileged SOCKS5 port on a
+  deployment that dropped `CAP_NET_BIND_SERVICE` or stopped running as root.
+- **`address_unavailable` (EADDRNOTAVAIL)** — binding before the interface the
+  address lives on is up: an ordinary host-boot race.
+
+Under `restart: unless-stopped` (three services in the shipped
+`docker-compose.yml`) each becomes an unattended **crash loop**: no proxy, no
+admin UI, no `/health`, no `/ready`, recoverable only with shell access. That is
+the terminal state §19 closed for the category store and §33 for the admin UI,
+reached this time from a subsystem the customer may not even be using.
+
+**"It exits, so it fails closed" is wrong here and must not be re-argued.**
+§33 states the reason: process death picks NO posture, it delegates the choice
+to the topology. An explicit-proxy fleet loses all egress; a PAC/WPAD fleet with
+a `DIRECT` fallback, or a transparent deployment that bypasses a dead next hop,
+goes **unfiltered**.
+
+### The fix
+
+A `socks5Supervisor` (`socks5_bind.go`) owns bind → serve → rebind.
+`socks5Server` — the unit §22's 18 accept-loop gates construct directly from a
+pre-bound listener — is **byte-identical**, which is what lets this change add a
+lifecycle without disturbing the semantics those gates pin.
+
+Five rules, all borrowed from CHAOS-54/55/57 rather than invented as a second
+dialect:
+
+1. **No bind path is fatal.** `startSOCKS5` always returns a live handle.
+2. **Retry is RATE-bounded, never COUNT-bounded** (1 s doubling to 30 s, ±20%
+   jitter). The terminal state of "give up" is a configured service that is gone
+   until someone restarts the appliance — the outcome this change removes.
+   *"Avoid infinite retries"* is satisfied the CHAOS-54/55 way: the retry is
+   never SILENT (onset logged immediately, then ≤1 line/60 s, then a recovery
+   line naming the suppressed count, magnitude in a counter).
+3. **Recovery is declared on OBSERVED evidence only** — a listener that actually
+   bound. Elapsed time never clears the state, because a loop that stopped
+   failing because it stopped attempting looks identical to a bound one.
+4. **The sleep is INTERRUPTIBLE**, so the 2 s `socks5-listener-stop` shutdown
+   budget is never spent waiting out a 30 s backoff.
+5. **Reason classes are BOUNDED**, matched with `errors.As` on `syscall.Errno`,
+   never by string. The raw error reaches the rate-limited log and nowhere else:
+   an unbounded reason gives the alert dedup key one value per failure (the
+   WK-12/RS-5 defect) and would put the listener address on a viewer-role
+   surface.
+
+Three further decisions worth recording because each had a plausible
+alternative:
+
+**`noteSOCKS5Configured` moved BEFORE the first bind attempt.** It gates every
+SOCKS5 surface, so leaving it after a successful bind means a listener that has
+NEVER come up reports *"SOCKS5 listener not configured"* — byte-identical to the
+ordinary appliance that never asked for SOCKS5, on precisely the node where an
+operator is trying to find out why SOCKS5 is unreachable. This is the same
+reasoning CHAOS-54 applied one step later when it moved the call ahead of the
+accept loop.
+
+**An observed bind now CLEARS the accept plane's `down`.** §22 recorded `down`
+as terminal for the process, which was correct when nothing re-opened the
+socket. Something does now, and a fresh socket is exactly the recovery for an
+unrecoverable one. Had it not been cleared, a listener that recovered would keep
+reporting a fail row, a `listener_up 0` gauge and a page until the node
+restarted — reporting an outage that is over. The `down` row's operator action
+moved with it: it used to read *"Restart this node to rebind the SOCKS5
+listener"*, which after this change would be advice that costs a production
+outage to achieve what already happens on its own.
+
+**The backoff is never reset inside the loop**, exactly as
+`serveAdminUIWithRetry` does it. Resetting on every successful bind would let a
+socket that dies immediately after each bind settle into a steady
+one-bind-per-floor cadence forever; letting it escalate monotonically to the
+ceiling bounds that pathological case at one attempt per 30 s. The cost — a
+listener that recovers after a long outage and only later loses its socket
+rebinds at the escalated rate rather than the floor — is bounded by the ceiling
+and strictly better than the pre-change behaviour, which never rebound at all.
+
+### A second, smaller finding: `network_error` was unreachable-by-accident
+
+`classifyAdminUIListenError` (shipped in §33) ends:
+
+```go
+var ne net.Error
+if errors.As(err, &ne) { return "network_error" }
+return "listen_failed"
+```
+
+Every bind failure arrives as `*net.OpError`, which satisfies `net.Error`
+**unconditionally** (verified: `Timeout()` is false for a bind `EINVAL`). So the
+branch swallowed every unrecognised errno into a class naming the wrong
+subsystem — sending an operator down a network-troubleshooting path for a socket
+or permission fault — and made `listen_failed` unreachable for any error the net
+package produced. The original gate passed only a bare `errors.New`, which is
+the one shape that *does* reach `listen_failed`, so the branch looked correct.
+
+Both classifiers now require `ne.Timeout()`. The lesson is the §35 one in a
+different costume: *a table-driven classifier gate proves only as much as the
+shapes it feeds in* — and the shape that mattered here is the one the production
+path actually produces.
+
+### Verification
+
+The fix was verified against the real binary, not only in test. With the port
+held at boot:
+
+```
+proxy http_code=403        ← the proxy is serving and enforcing policy
+adminui http_code=200      ← the admin UI is serving
+/health: {"status":"ok", ..., "socks5":"degraded", "admin_ui":"ready"}
+ERROR SOCKS5 listener on port 11080 could not bind (port_in_use): ... —
+  retrying in 878ms; the HTTP/HTTPS proxy data plane and the admin UI are unaffected
+```
+
+…and after releasing the port, with **no restart**:
+
+```
+SOCKS5: listener on port 11080 bound and accepting again (4 suppressed bind-failure log line(s))
+SOCKS5 OK 127.0.0.1 -> "104.20.23.154:80"
+```
+
+Note the jitter (878 ms against a 1 s floor) and the rate gate (one line, four
+suppressed, across 31 s) are both visible in the real run.
+
+### Surfaces
+
+All reuse existing operator vocabulary; **no new alert event**, because a new
+name would be silently unsubscribed on every configured webhook (the §27 rule).
+`socks5_listener_down` now carries the bind case too, with a Detail that states
+explicitly that the rest of the appliance is serving — the single most important
+fact for whoever it pages, since before this change the condition meant the
+whole gateway was gone.
+
+- `/api/diagnostics` — the existing `socks5_listener` row, with bind branches
+  ahead of the accept branches (a listener with no socket at all is a more
+  fundamental state, and while unbound the accept-plane fields describe the
+  PREVIOUS socket).
+- `/readyz` — the existing report-only `socks5` row. Report-only stays
+  load-bearing: a node whose SOCKS5 listener cannot bind proxies HTTP/HTTPS
+  perfectly, and failing the default verdict would eject a healthy gateway over
+  an optional subsystem. Fixed detail strings — `/readyz` is unauthenticated.
+- `/healthz` — the existing `socks5` field; the enum is unchanged
+  (`disabled`/`ready`/`degraded`/`down`), so no dashboard or probe changes.
+- `/metrics` — `culvert_socks5_unavailable`, `_bind_failures_total`,
+  `_binds_total`, `_bind_backoff_seconds`, emitted **only when configured** (the
+  CHAOS-54 rule: a flat 0 from every appliance that never enabled SOCKS5 is
+  indistinguishable from a broken listener, and the paging rule is `== 0`).
+  `culvert_socks5_listener_up` extends symmetrically — 0 when the accept loop
+  stopped OR the bind has failed past the threshold; a listener merely retrying
+  stays 1, so an ordinary redeploy does not page.
+
+### Gates
+
+`socks5_bind_chaos_test.go` — 26 gates. "Verified failing against the pre-fix
+shape" has a stronger meaning than usual here: the pre-fix shape calls
+`os.Exit(1)`, which kills the TEST BINARY mid-run and takes the whole package
+with it, so the defect cannot be reintroduced and kept green (the §33 property).
+
+EIGHT mutations were each applied to the fixed tree and confirmed to fail their
+gate: a non-interruptible backoff sleep; `adopt` ignoring a concurrent `Stop`;
+`configured` recorded only after a successful bind; a rebind that does not clear
+the accept-plane `down`; unavailability keyed on a COUNT instead of a DURATION;
+the reverted classifier narrowing; `startSOCKS5` spawning and returning without
+waiting for its first bind attempt; and the first-attempt marker released BEFORE
+the note call that records the state rather than after.
+
+**One gate was found vacuous and replaced, which is worth recording.** The
+adopt/Stop race was first gated end-to-end — start the supervisor, `Stop`
+immediately, assert the port is free — and it passed against the broken build,
+because the loop exits at its top `stopRequested` check before ever reaching the
+bind, so the window was never entered. The window is real (`go s.run()` can be
+scheduled onto another P and be inside `lc.Listen` while the caller is already
+in `Stop`) but is microseconds wide and cannot be scheduled from a test, and a
+gate that can flake gets muted. It is now pinned as a UNIT on `adopt`'s
+invariant — `Stop` sets `stopped` under the same lock BEFORE it reads `cur` —
+which catches the mutation deterministically; the end-to-end version was kept,
+renamed to what it actually proves.
+
+Two CONTROLS, because the cheapest way to pass every "it did not exit"
+assertion is to delete the fatal and report the listener healthy — strictly
+WORSE than the defect, trading a loud crash loop for a SOCKS5 service that is
+silently absent forever on a node whose every probe reads green:
+`ControlUnboundListenerIsNeverReportedReady` (every surface must say so, in both
+the transient and the sustained state) and `ControlHealthyBindIsSilent` (the
+fault plane must not tax the healthy plane — no alert, no warn row, no counter
+movement, and the listener genuinely accepts).
+
+A STRUCTURAL wall (`TheSOCKS5ListenerPathHasNoFatal`) scans the three listener
+sources for `logFatalf`/`log.Fatal`, with a not-vacuous line-count check.
+Behavioural coverage cannot name this reintroduction — a returning `logFatalf`
+kills the test binary rather than failing an assertion, so the signal would be
+an unexplained package-wide crash. It deliberately does NOT cover `main.go`'s
+`logFatalf("Proxy error")`, which is correct and must stay: the proxy IS the
+product, and a gateway that cannot serve must exit loudly rather than linger as
+a black hole. **That asymmetry — an optional listener degrades, the primary one
+does not — is the whole finding.**
+
+### Codex round — the window between "configured" and the first bind
+
+`noteSOCKS5Configured` is called BEFORE the first bind attempt, and that
+ordering is deliberate (see above): it gates every SOCKS5 surface, so recording
+it after a successful bind reports a listener that has never come up as "not
+configured". Codex review on PR #1376 found the cost of that ordering, which the
+first draft dismissed in a sentence as "a sub-millisecond window": `startSOCKS5`
+returned as soon as `go s.run()` was spawned, so until the goroutine was
+scheduled `configured` was true with no failure recorded and nothing bound —
+and every surface then described a listener that does not exist (`/healthz`
+`ready`, the report-only `/readyz` row `ok`, the contract row "accepting
+connections", `culvert_socks5_listener_up` 1).
+
+The dismissal was wrong on its own terms. The window is not bounded by a
+syscall; it is bounded by the SCHEDULER, and `main.go` goes straight on to
+`startAdminUI` and `buildAndStartProxyServer`, so the health endpoints can
+become reachable before that goroutine has run at all — on a loaded boot,
+exactly when an operator is most likely to look.
+
+**The fix is to remove the window, not to report it.** Reporting it accurately
+(a "pending" state) was the obvious remedy and is the weaker one: it would have
+added a fifth state to a `/healthz` enum this change had deliberately left
+alone, and it would still have shipped a surface that says "not serving yet"
+where the honest answer is available for the cost of one syscall. `startSOCKS5`
+now waits for the loop to RESOLVE its first bind attempt — success or failure —
+before returning, which is also what the pre-CHAOS-66 code did (it bound
+synchronously); only the fatal on failure is gone. The wait is bounded by one
+non-blocking `bind(2)`, and `run` closes the handshake channel from a deferred
+call as well as after each attempt, so a panic before the first attempt cannot
+hang startup.
+
+The general lesson is the one §35 records three times in a row, arriving from a
+different direction: *a state that is only briefly wrong is still wrong, and
+"briefly" is a claim about the scheduler, not about the code.* Pinned by
+`StartSOCKS5ResolvesItsFirstBindBeforeReturning`, which asserts with NO waiting
+in both arms and was verified failing against the spawn-and-return shape.
+
+### Codex round 2 — the stale restart instruction, and why a blanket reword was wrong
+
+An observed bind clears the accept plane's `down`, so the operator action on the
+`socks5_listener` contract row was changed from *"Restart this node to rebind the
+SOCKS5 listener"* to *"the listener rebinds automatically"*. Codex review found
+that only ONE of the three surfaces carrying that instruction had been updated:
+`noteSOCKS5ListenerDown`'s alert Detail still said *"unavailable until this node
+restarts"*, and both accept-loop log lines still said *"unavailable until
+restart"*. An operator following either would restart a gateway carrying
+production traffic to achieve something already in progress.
+
+This is the rule the SOCKS5 log-injection note records one level up, in a new
+costume: *fixing one surface does not fix the call.* When a behavioural change
+invalidates a piece of operator guidance, the unit of work is every surface that
+carries it, not the one the change happened to touch.
+
+**But the obvious fix — reword all three — would have been wrong in the other
+direction.** `noteSOCKS5ListenerDown` had four call sites, and one of them is the
+SUPERVISOR's own contained panic (`socks5_bind.go`'s recover block). That path is
+still terminal: the loop has exited, nothing rebinds, and a restart genuinely is
+the remedy. Promising an automatic rebind there sends an operator away from the
+one restart that is needed — the same defect inverted, and strictly worse,
+because it is silent.
+
+So the recorder is SPLIT by what is true of each plane:
+`noteSOCKS5ListenerDown` (accept plane, rebind pending) and
+`noteSOCKS5SupervisorDown` (terminal). Two named functions rather than a bool
+parameter, so the call site states which it means; a `downRecoveryPending` field
+carries it to the contract row, and the alert's outlook clause branches on it
+while the Detail stays bounded in both directions (it is the dedup key).
+
+**A gate on the recorders was not enough, and mutation testing is what showed
+it.** Swapping which recorder the supervisor's panic guard calls left both
+behavioural subtests passing — they exercise the functions, not the wiring, and
+the panic guard is a defensive path with no injection seam. That is the same
+vacuity class as the adopt/`Stop` gate above. The wiring is now pinned
+structurally (each plane's file calls its own recorder and not the other's),
+verified failing against that swap, alongside a source scan for the phrase
+itself — behavioural coverage cannot reach the two log lines, which need a live
+socket fault to emit.
+
+One process note, because it cost a cycle: restoring a file from a mutation with
+`git checkout <file>` discarded the uncommitted fix in it. The structural wall
+caught the regression immediately, which is the argument for having written it.
+
+### Codex round 3 — the outage clock, and the remedy that did not match the fault
+
+Two findings, both on the health plane rather than the lifecycle, and the first
+is this sweep's own subject arriving from a direction it had not looked.
+
+**(1) A threshold that elapses must be OBSERVED, and both halves of that were
+missing.** Every episode duration was computed as `lastFailure - firstFailure`,
+so it stopped advancing the instant an attempt returned and only resumed on the
+next one. The bind plane retries at a 30 s ceiling with ±20% jitter against a
+30 s threshold, so a failure landing at 29 s was followed by up to 36 s of
+silence during which `/healthz` still said *degraded*,
+`culvert_socks5_listener_up` was still `1`, the contract row still said
+*retrying*, and the page did not fire — for an outage that had already crossed
+the line the runbook documents. A duration derived from two stored stamps needs
+no clock and is therefore frozen between them, which is precisely why nothing
+noticed: the READ path had no clock at all, while every `note*` function took
+its `now` from the caller.
+
+This is **CHAOS-61's rule in a second place** — *freshness is EVALUATED, never
+latched* (the `ca_health.go` `Usable()` discipline) — and it needed BOTH halves,
+which is the transferable part. Deriving the duration from the clock
+(`socks5ElapsedSince`, via the `socks5HealthNow` seam) fixes every READ surface
+continuously. It does not fix the ALERT, because the alert is produced by an
+ATTEMPT — `noteSOCKS5BindFailure` holds the fire-once latch and nothing else
+wakes the loop. So the retry sleep is also clamped so it cannot straddle the
+threshold (`clampSOCKS5BindSleep`), which is **CHAOS-55's `recoveryPollCeiling`
+reasoning**: an interval that can straddle a state transition must be capped
+below it, and that is a correctness bound rather than tuning. It costs at most
+one extra attempt per episode, so the 30 s ceiling still bounds the pathological
+case it was chosen for; capping the ceiling itself was rejected as paying
+permanently for a property that matters on one sleep.
+
+`socks5ElapsedSince` takes the LATER of the stored and clock-derived ends, so a
+clock rollback cannot shrink — or un-report — an outage already observed. That
+asymmetry is deliberate and is the OPPOSITE of CHAOS-61's, which rules a
+broadcast on a rolled-back clock stale: there the fail-safe answer is to
+distrust a remote value, here it is the longer duration, because the failure
+being closed is an outage going unpaged.
+
+The ACCEPT plane carried the identical shape with a 1 s ceiling, so its exposure
+was ~1 s rather than 36 s. It is fixed in the same line rather than recorded as
+a residual: two dialects for one question inside one struct is the trap this
+file keeps closing, and whoever reads `FailingFor` next must not have to know
+which plane freezes.
+
+**(2) A bounded classifier is worth nothing if one remedy is printed for every
+class.** The `socks5_listener` row's operator action was a single string naming
+port ownership and bind permission, emitted whatever `BindLastReason` said — so
+a node out of file descriptors, or one whose interface had not come up, was sent
+to hunt the owner of a port nobody holds. The classifier exists precisely to
+tell these apart (it matches errnos through `errors.As` rather than reporting one
+generic failure), so discarding that at the one surface an operator reads
+undoes the reason it was built. `socks5BindRemedy` now selects per class, with
+two clauses invariant across every branch — that the listener rebinds by itself,
+and that the proxy and admin UI are unaffected — and the unrecognised classes
+(`network_error`, `listen_failed`) pointing at the log line, the only place the
+raw error is written.
+
+This is the same family as the CHAOS-57 recovery lesson already recorded here:
+*the evidence must match the claim.* A counter, a row or an action an operator
+is told to act on must be derived from evidence supporting the specific claim it
+makes.
+
+Gates: seven added (file → 33), each verified failing against the shape it
+replaces — the frozen duration on both planes, the missing rollback floor, the
+unclamped sleep, the hard-coded row action, and a CONTROL requiring the four
+diagnosable classes to carry DISTINCT remedies (a switch returning one string
+per branch satisfies every "names its own remedy" assertion otherwise).
+`TestChaos66_ContractRowCarriesTheReasonSpecificRemedy` exists because testing
+the helper alone passes while the row still hard-codes its action — the
+vacuity lesson from round 2, applied before it could cost a cycle this time.
+
+**The fix broke the determinism gate, and how is the lesson worth more than
+the fix.** Giving the READ path a clock while every gate drives the WRITE path
+with synthetic stamps MIXES two clocks, and `socks5ElapsedSince`'s max() lets
+the real one dominate. A gate that records failures 19 s apart synthetically
+and asserts "not yet degraded" was then also asserting, invisibly, that under
+30 s of WALL time passed between two of its own statements. True in
+milliseconds locally; false on a shared runner under `-count=2`.
+
+**What made it diagnosable was that it did NOT reproduce.** Re-running the
+whole package locally under CI's own printed shuffle seed passed, which rules
+out ordering — the thing a determinism failure looks like — and leaves the
+environment. Then it reproduces on demand: remove the freeze, insert 31 s of
+wall time between the recording and the assertion, and the gate fails with `a
+5s burst of bind failures was reported as unavailable`; restore the freeze and
+the identical delay passes.
+
+So `socks5ChaosSetup` now FREEZES the read clock at test start, which restores
+the pre-round-3 semantics for every existing gate while making them
+deterministic, and a gate that wants an episode to age advances the injected
+clock explicitly — as the condition under test rather than an accident of
+scheduling. `TestChaos66_HealthSnapshotDependsOnlyOnTheInjectedClock` is the
+wall: it holds the clock still across real elapsed time and requires the
+reported duration not to move, then advances the injected clock alone and
+requires that it does (the second half is not optional — without it a read
+path that ignored the clock entirely would pass).
+
+The transferable rule: **a snapshot must be a pure function of recorded state
+and an INJECTED clock.** The moment a read path reads the wall clock, every
+test that drives the write path synthetically acquires a hidden timing
+dependency — and it will surface on the busiest machine, which is CI, not the
+one you developed on.
+
+### Governance note: a lint gate this sweep did not actually run
+
+The PR claimed `golangci-lint run` was clean on every changed file. It was not
+run. The locally installed binary is built against an older Go than the module
+targets and aborts before linting; the first invocation's output was passed
+through a filename filter, so the abort produced no matching lines and read as
+success. CI then reported a real `funlen` finding the local run had never
+looked at.
+
+The finding itself is PRE-EXISTING and untouched by this sweep — `main` is
+byte-identical to the base branch — and CI surfaced it only because
+`--new-from-rev` attributes issues by diff HUNK, so a two-line edit to
+`startupState` pulled in `func main()` three lines below it. It is suppressed
+with a reason rather than split, on the in-repo precedent for orchestration
+functions (`ui.go`'s `newAdminUIHandler`, the maintenance agent's apply
+handlers): the startup ORDER is load-bearing throughout `main.go` and
+extracting the sequence hides it. Splitting `main` deserves its own change.
+
+The transferable rule: *filtering a tool's output to the files you care about
+converts every hard failure of that tool into a silent pass.* Check the exit
+status, or read the unfiltered output, before claiming a gate is green.
+
+### Residual risk / deliberately left
+
+- **The other boot-path fatals are untouched** (register row R-F): `catStore`
+  (`urlcategories_startup.go`), the blocklist file (`blocklist_startup.go`) and
+  the policy file (`main.go`) still `logFatalf` on a load error that is not
+  `IsNotExist`. These are POLICY-load-bearing — a gateway that silently starts
+  with no policy is a worse failure than one that refuses to start — so the
+  posture is defensible, unlike a listener's. It deserves its own sweep with an
+  owner decision on each, not a drive-by change inside this one.
+- **`startUI`'s sibling faults** are already closed by §33; the CP gRPC bind
+  (`cluster_startup.go`) remains fatal and is the closest unexamined analogue —
+  recorded, not changed here (one concern per change).
+- **SOCKS5 still never consults the policy engine** (no category/GeoIP/schedule
+  rules, no default-deny) — §22's residual, unchanged.
+- A listener that binds successfully and whose socket dies instantly on every
+  accept will cycle at the 30 s ceiling indefinitely. It is rate-bounded, loudly
+  reported (`down`, alert, gauge at zero) and strictly better than the previous
+  terminal state, but it is a cycle rather than a convergence.
+
+---
+
+## 37. CHAOS-67 — The session revocation plane
 
 **Date:** 2026-09-19. **Scope:** `internal/session`'s `RevocationList`, its
 persistence, its CP↔DP gossip, and the two admin actions that reach it.
@@ -6492,7 +6998,7 @@ the memory of one process, and a restart — a redeploy, an OOM, a SIGKILL, a
 `docker compose up -d` — brought them back for the remainder of their TTL. The
 admin was told the deletion succeeded, and it had: the *account* was durable
 (`SaveUIUsersFile`), the *revocation* was not. Reproduced:
-`TestChaos66_UserRevocationSurvivesARestart`, failing against the pre-fix tree.
+`TestChaos67_UserRevocationSurvivesARestart`, failing against the pre-fix tree.
 
 **AU-19 — and it was never gossiped**, for the identical reason. Culvert has a
 working cluster-wide revocation path (DP → CP aggregator → other DPs, every 3 s)
@@ -6570,18 +7076,18 @@ already used. Three constraints shaped the wire format and each is load-bearing:
    (`user:<name>`), because `MergedExcluding` de-duplicates the fleet-wide merge
    on `e.Token` alone. An empty token would collapse **every** user revocation in
    the cluster into one entry, and the fleet would learn about a single deleted
-   account. Pinned by `TestChaos66_UserEntriesHaveDistinctTokens`.
+   account. Pinned by `TestChaos67_UserEntriesHaveDistinctTokens`.
 3. **The prefix contains a byte outside base64url**, so it can never equal a
    cookie's payload segment. That is a security property, not a convenience: a
    downgraded node files the entry under `tokens[]` and must never match a live
    session with it, and `MergeRevocations` classifies by the prefix and must
    never swallow a genuine token revocation. Pinned in both directions by
-   `TestChaos66_UserRevocationTokenCannotCollideWithACookiePayload`, which
+   `TestChaos67_UserRevocationTokenCannotCollideWithACookiePayload`, which
    asserts the property against a real `Encode`d session rather than by
    inspection.
 
 Recovering the username from the prefix also means a hop through an old node
-degrades nothing (`TestChaos66_UserRevocationSurvivesAHopThroughAnOldNode`).
+degrades nothing (`TestChaos67_UserRevocationSurvivesAHopThroughAnOldNode`).
 
 **The Control Plane.** `SyncRevocations` now contributes the CP's live list and
 consumes the reporting node's, on the sync tick that already runs — no new loop,
@@ -6594,7 +7100,7 @@ no enrolled node is ever named it — and node ids reach that map from an
 enrollment. A field cannot be addressed by `Update(nodeID, …)` at all, so a node
 can neither overwrite the CP's slot nor be excluded from its own merge,
 *regardless of what it is called*. Collision is structurally absent rather than
-merely unlikely, and `TestChaos66_CPSlotIsNotAddressableByANodeID` drives the
+merely unlikely, and `TestChaos67_CPSlotIsNotAddressableByANodeID` drives the
 hostile names to prove it.
 
 **Corruption.** A file that was READ and could not be PARSED is wrapped in
@@ -6634,8 +7140,8 @@ UI listener.
 ### 36.5 Gates
 
 36 in total: 17 in `internal/session/revocation_chaos_test.go`, 19 in
-`session_revocation_chaos_test.go` (the round-2 findings in §36.6 added 8, and
-the CI-found isolation defect in §36.6b one more).
+`session_revocation_chaos_test.go` (the round-2 findings in §37.6 added 8, and
+the CI-found isolation defect in §37.6b one more).
 
 Every defect gate was verified **failing against its reintroduced pre-fix
 shape** — six in the engine (persistence, gossip, distinct tokens, old-node hop,
@@ -6646,14 +7152,14 @@ the same run, since they are not statements about that half.
 Two controls exist because the cheapest ways to pass everything above are both
 worse than the defect:
 
-* `TestChaos66_UnrevokedSessionsStillDecode` — revoking everything satisfies
+* `TestChaos67_UnrevokedSessionsStillDecode` — revoking everything satisfies
   every assertion about revocations being enforced, while locking every operator
   out of their own gateway.
-* `TestChaos66_HealthyNodeReadsOK` — a row that always fails satisfies every
+* `TestChaos67_HealthyNodeReadsOK` — a row that always fails satisfies every
   assertion about the degradation being visible, and trains an operator to
   ignore it.
 
-`TestChaos66_SyncRevocationsWiresBothDirections` is a **structural wall**, not a
+`TestChaos67_SyncRevocationsWiresBothDirections` is a **structural wall**, not a
 behavioural gate: `SyncRevocations` cannot be reached without an mTLS peer
 context, an enrolled node and an unfenced HA lease, so the wiring is pinned by
 shape — the same instrument, and the same reason, as
@@ -6661,7 +7167,7 @@ shape — the same instrument, and the same reason, as
 because a Control Plane that contributes but does not consume still fails to
 enforce a logout performed on a Data Plane.
 
-`TestChaos66_ContractRowDoesNotLeakRevokedIdentities` pins the viewer-role
+`TestChaos67_ContractRowDoesNotLeakRevokedIdentities` pins the viewer-role
 contract: the row carries counts and a remedy, never a revoked username or token.
 
 **One regression was introduced by this sweep and caught inside it, and how it
@@ -6674,7 +7180,7 @@ unshuffled suite passed; `-shuffle=on` failed.** The wall can only fire when
 this row is in its *warn* branch, and whether it is depends on whether an
 earlier test left revocation persistence configured, so the wall's coverage of
 any one row is a function of test ORDER. The substance moved to the runbook,
-and `TestChaos66_ContractRowNeverEchoesSensitiveTokens` now drives all four
+and `TestChaos67_ContractRowNeverEchoesSensitiveTokens` now drives all four
 branches deterministically against the same forbidden list — verified failing
 against the original wording. The general point: **a global content wall over a
 composed document only tests the branches that composition happens to select,
@@ -6688,7 +7194,7 @@ would have merged green.
 Codex's review of the first push found two real defects. Both are recorded
 because of what they have in common: **each is a rule this repository had
 already written down, applied in one place and not carried to the neighbouring
-one** — the same shape §36.7 names below, found twice more inside the fix for it.
+one** — the same shape §37.7 names below, found twice more inside the fix for it.
 
 **AU-24 (P1) — the HA standby.** The sweep closed the Control Plane's isolation
 (AU-20) and left the standby CP isolated in exactly the same way. The bundle
@@ -6737,7 +7243,7 @@ enough that it read as evidence the rule had been followed.
 
 The Deep-determinism and `-race` gates went red on three consecutive CI runs and
 could not be reproduced locally in ten full-suite attempts. The cause is the
-same shape as §36.8 for the third time, and both halves are worth recording.
+same shape as §37.8 for the third time, and both halves are worth recording.
 
 **The defect.** `resetDiagVerdictGlobals` (`diagnostics_test.go`) enumerates the
 process-globals the aggregate `/api/diagnostics` verdict folds in, because, in
@@ -6778,7 +7284,7 @@ recorded here rather than made.
 `resetDiagVerdictGlobals` in the same change. The row's severity is a
 production decision; its globals are a test-isolation obligation, and the two
 are decided at the same moment.
-`TestChaos66_RevocationHealthIsIsolatedFromTheAggregateVerdict` pins it,
+`TestChaos67_RevocationHealthIsIsolatedFromTheAggregateVerdict` pins it,
 verified failing against the unregistered shape with the production symptom
 (`aggregate verdict = "fail"`).
 

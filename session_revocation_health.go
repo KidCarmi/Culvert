@@ -1,6 +1,6 @@
 package main
 
-// session_revocation_health.go — CHAOS-66: observability for the one control
+// session_revocation_health.go — CHAOS-67: observability for the one control
 // that can withdraw authority from a session that has already been issued.
 //
 // A Culvert session cookie is SELF-CONTAINED: it carries the subject, the
@@ -182,7 +182,7 @@ func resetSessionRevocationHealthForTest() {
 // natural it is to spell the remedy that way — the substance goes in the
 // runbook instead. The first draft of this row named both and tripped that
 // wall, which is itself order-dependent (it only fires when this row reaches
-// its warn branch), so TestChaos66_ContractRowNeverEchoesSensitiveTokens
+// its warn branch), so TestChaos67_ContractRowNeverEchoesSensitiveTokens
 // drives every branch deterministically.
 //   - otherwise → OK, naming the live counts so an operator can tell a node
 //     that is enforcing revocations from one that merely has the file.

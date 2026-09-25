@@ -175,7 +175,7 @@ func (r *RevocationList) IsUserRevoked(username string) bool {
 }
 
 // userRevocationTokenPrefix namespaces the Token field of a USER-level
-// revocation entry (CHAOS-66).
+// revocation entry (CHAOS-67).
 //
 // A user entry needs a Token value for two independent reasons, and both are
 // load-bearing:
@@ -208,7 +208,7 @@ const userRevocationTokenPrefix = "user:"
 //     Token to userRevocationTokenPrefix+User.
 //
 // User is `omitempty` and Token is always populated, so the document stays a
-// JSON array that a binary predating CHAOS-66 parses without error. That
+// JSON array that a binary predating CHAOS-67 parses without error. That
 // downgrade compatibility is deliberate: promoting the file to an object would
 // make an older binary fail the whole parse and lose the TOKEN revocations it
 // does understand — trading a gap for a regression.
@@ -222,7 +222,7 @@ type RevocationEntry struct {
 // ExportRevocations returns all non-expired revocation entries — BOTH kinds —
 // for syncing and for persistence.
 //
-// CHAOS-66: this used to walk `r.tokens` only, which made the `users` map
+// CHAOS-67: this used to walk `r.tokens` only, which made the `users` map
 // invisible to every durable and distributed surface the list has. A deleted
 // account's live sessions were rejected in the memory of the one node that
 // served the DELETE, until that process exited. Both maps are exported now, so
@@ -259,7 +259,7 @@ func (r *RevocationList) ExportRevocations() []RevocationEntry {
 //
 // An entry is classified as a USER revocation when it carries an explicit User
 // field, OR when its Token carries userRevocationTokenPrefix. The second form
-// only arises when the entry has passed through a node predating CHAOS-66,
+// only arises when the entry has passed through a node predating CHAOS-67,
 // which drops the unknown `user` JSON field but preserves the token verbatim;
 // recovering the username from the prefix means one hop through an old node
 // degrades nothing. A token that merely LOOKS like a user entry cannot be a
@@ -360,7 +360,7 @@ func RevocationsPath() string {
 // ErrRevocationsCorrupt wraps a revocations file that was READ successfully and
 // could not be PARSED.
 //
-// The distinction is the caller's whole decision (CHAOS-66): a file we could
+// The distinction is the caller's whole decision (CHAOS-67): a file we could
 // not read may be perfectly intact behind a transient permission or I/O fault,
 // and quarantining it would move a healthy security-critical file aside; a file
 // we read and could not parse is corrupt, and the next SaveRevocations would

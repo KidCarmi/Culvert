@@ -414,7 +414,7 @@ func apiClusterRevocations(w http.ResponseWriter, r *http.Request) {
 	}
 	jsonOK(w, map[string]any{
 		"local_revoked": sessionRevoked.Count(),
-		// CHAOS-66: account-level revocations were invisible on every surface.
+		// CHAOS-67: account-level revocations were invisible on every surface.
 		// `local_revoked` counts TOKENS only, so a node holding a hundred
 		// deleted-account revocations and a node holding none serialised
 		// identically — and this endpoint was the only place any revocation
