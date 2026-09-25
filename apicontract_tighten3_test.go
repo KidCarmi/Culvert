@@ -8,8 +8,9 @@ import (
 )
 
 func TestConformance_Tighten3_Response(t *testing.T) {
-	assertResponseConformsAdmin(t, http.MethodGet, "/api/blockpage", apiBlockPage)
-	assertResponseConformsAdmin(t, http.MethodGet, "/api/auth/lockouts", apiAuthLockouts)
+	spec := loadContract(t)
+	assertResponseConformsAdmin(t, spec, http.MethodGet, "/api/blockpage", apiBlockPage)
+	assertResponseConformsAdmin(t, spec, http.MethodGet, "/api/auth/lockouts", apiAuthLockouts)
 }
 
 func TestConformance_Tighten3_Request(t *testing.T) {
