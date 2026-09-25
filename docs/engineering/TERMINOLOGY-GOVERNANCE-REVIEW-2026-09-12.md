@@ -212,6 +212,8 @@ this report merged rather than after.
   risk, so unlike the Go/JSON rename this needed no coordinated PR and was applied immediately, consistent
   with this program's practice of fixing trivial, zero-compat-risk gaps on sight — see e.g. T-53 and the
   panel-title fix in the 2026-09-09 report).
+  *Post-merge note:* `main` independently landed both rows (with more precise wording) before this report
+  merged, so the branch now keeps `main`'s table verbatim and this report no longer changes that file.
 - **Affected Configuration:** none.
 - **Migration Complexity:** Small-Medium (three identifier renames — `UnknownTotal`, `malformedResponseTotal`,
   `staleResponseTotal` — plus one generated-spec regen, plus a naming decision for the `responder_blocked`
