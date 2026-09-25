@@ -1019,3 +1019,71 @@ func TestChaos72_LateWriteOnADisplacedWriterReachesItsSuccessor(t *testing.T) {
 		t.Errorf("the displaced writer charged the handed-off event as its own drop (%d -> %d)", staleDrops, stale.Drops())
 	}
 }
+
+// TestChaos72_RowNeverClaimsDeliveryItCannotShow pins the contract row's
+// message against the two states it used to describe with the same sentence it
+// uses for a healthy feed.
+//
+// The `Drops > 0` warn branch said "remote syslog/SIEM forwarding is delivering
+// (last event %s ago, %d delivered)". For a target whose very first events were
+// lost that renders as "is delivering (last event 3s ago, 0 delivered)" — a
+// delivery claim, and a last-event timestamp, for a feed that has never got a
+// single line out. For a feed failing RIGHT NOW it describes the last success
+// while the current events are being destroyed (Codex P2, PR #1494).
+//
+// Both became reachable when P1-D moved the degradation window from
+// time-since-delivery to the failure episode: before that they were already
+// FAIL. Moving a boundary in one place changes what every branch downstream of
+// it has to say.
+func TestChaos72_RowNeverClaimsDeliveryItCannotShow(t *testing.T) {
+	// The state under test is "drops recorded, nothing ever delivered, episode
+	// still young". Reaching it needs care: InitSyslog refuses a target it
+	// cannot dial, and the FIRST write to a TCP socket whose peer has gone
+	// still succeeds locally (the RST arrives later), which would move
+	// Delivered off zero and describe a different state. Closing the writer
+	// before any write makes every send a counted loss with no delivery.
+	col := startSyslogCollector(t)
+	armSyslogFeed(t, "tcp://"+col.addr)
+	col.stop()
+
+	sw := activeSyslog()
+	if err := sw.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	for i := 0; i < 3; i++ {
+		sw.WriteAudit(map[string]string{"evt": "policy.change"})
+	}
+	waitForDrops(t, 1)
+
+	snap := syslogFeedState()
+	if !snap.NeverDelivered || snap.Delivered != 0 {
+		t.Fatalf("fixture did not produce a never-delivered feed: neverDelivered=%v delivered=%d",
+			snap.NeverDelivered, snap.Delivered)
+	}
+	if snap.Degraded {
+		t.Skip("episode already past the degradation window; this gate is about the branch BELOW it")
+	}
+
+	row := checkSyslogFeed()
+	if row.Status != diagWarn {
+		t.Errorf("never-delivered feed with drops = %v; want warn", row.Status)
+	}
+	// The defect, stated as the thing the row must not say.
+	if strings.Contains(row.Message, "is delivering") {
+		t.Errorf("row claims delivery for a feed that has never delivered: %q", row.Message)
+	}
+	if strings.Contains(row.Message, "0 delivered") {
+		t.Errorf("row reports a delivery count of zero as evidence of delivery: %q", row.Message)
+	}
+	if !strings.Contains(row.Message, "NEVER delivered") {
+		t.Errorf("row does not say the feed has never delivered: %q", row.Message)
+	}
+	// CONTROL: it must still name the loss, or the cheapest way to pass the
+	// assertions above is to stop reporting anything an operator can act on.
+	if !strings.Contains(row.Message, "dropped") {
+		t.Errorf("row no longer names the dropped events: %q", row.Message)
+	}
+	if row.OperatorAction == "" {
+		t.Error("row carries no operator action")
+	}
+}

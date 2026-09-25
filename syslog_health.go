@@ -509,14 +509,55 @@ func checkSyslogFeedDelivery() (OperatorContractCheck, bool) {
 			OperatorAction: "Restore the collector (host/port, listener, network path, and for tcp:// the collector's connection limit), then confirm with POST /api/syslog/test — recovery is declared only on an event that actually reaches the collector, so a quiet node stays reported as down until one does. Events dropped while the feed was down are NOT replayed.",
 		}, true
 	}
+	// Drops, but not degraded. Three DIFFERENT states reach here and only one
+	// of them is "delivering with some history of loss" — saying that sentence
+	// for the other two is the false statement this whole sweep exists to
+	// remove, pointing at its own row (Codex P2, PR #1494).
+	//
+	// The second and third cases became reachable when the degradation window
+	// moved from time-since-delivery to the failure EPISODE (P1-D): before
+	// that, a feed failing right now on a node quiet for five minutes was
+	// already FAIL, so this branch only ever saw healed history. Fixing the
+	// window widened what this branch has to describe — a boundary moved in
+	// one place has to be re-read everywhere downstream of it.
 	if snap.Drops > 0 {
-		return OperatorContractCheck{
-			Code:   "syslog_feed",
-			Status: diagWarn,
-			Message: fmt.Sprintf("remote syslog/SIEM forwarding is delivering (last event %s ago, %d delivered) but %d event(s) have been dropped since startup (last failure: %s) — those events are not in the SIEM and are not replayed",
-				snap.Age.Round(time.Second), snap.Delivered, snap.Drops, reasonOrUnknown(snap.Reason)),
-			OperatorAction: "Transient collector stalls are absorbed by the writer's reconnect; a rising drop count means the collector is slower than this node's event rate. Check collector ingest capacity and the network path.",
-		}, true
+		switch {
+		case snap.NeverDelivered:
+			// No delivery has EVER happened, so there is no "last event" to
+			// date and no delivery to claim. Distinct from the degraded branch
+			// only by how long it has been failing.
+			return OperatorContractCheck{
+				Code:   "syslog_feed",
+				Status: diagWarn,
+				Message: fmt.Sprintf("remote syslog/SIEM forwarding has NEVER delivered an event since this target was configured %s ago, and %d event(s) have already been dropped (last failure: %s)",
+					snap.Age.Round(time.Second), snap.Drops, reasonOrUnknown(snap.Reason)),
+				OperatorAction: "Treat this as a misconfigured or unreachable target rather than a transient stall: check the host/port, that the collector is listening, the network path, and for tcp:// the collector's connection limit. Confirm with POST /api/syslog/test. Nothing has reached the SIEM yet, and the dropped events are not replayed.",
+			}, true
+
+		case snap.ConsecutiveFailures > 0:
+			// Failing RIGHT NOW, just not for long enough to page. Reporting
+			// "is delivering" here would describe the last success while the
+			// current events are being destroyed.
+			return OperatorContractCheck{
+				Code:   "syslog_feed",
+				Status: diagWarn,
+				Message: fmt.Sprintf("remote syslog/SIEM forwarding is FAILING NOW: %d event(s) lost since the last delivery %s ago (failing for %s, %d dropped in total, last failure: %s). This is below the %s threshold that reports the feed down",
+					snap.ConsecutiveFailures, snap.Age.Round(time.Second), snap.FailingFor.Round(time.Second),
+					snap.Drops, reasonOrUnknown(snap.Reason), syslogDegradedAfter),
+				OperatorAction: "The writer reconnects on its own and a single delivery ends the episode, so a short stall needs no action. If this persists it becomes a DOWN verdict; check collector ingest capacity, the listener and the network path now rather than after the threshold. Events lost during the stall are not replayed.",
+			}, true
+
+		default:
+			// Delivering, with a healed history of loss — the only state the
+			// original sentence was ever true for.
+			return OperatorContractCheck{
+				Code:   "syslog_feed",
+				Status: diagWarn,
+				Message: fmt.Sprintf("remote syslog/SIEM forwarding is delivering (last event %s ago, %d delivered) but %d event(s) have been dropped since startup (last failure: %s) — those events are not in the SIEM and are not replayed",
+					snap.Age.Round(time.Second), snap.Delivered, snap.Drops, reasonOrUnknown(snap.Reason)),
+				OperatorAction: "Transient collector stalls are absorbed by the writer's reconnect; a rising drop count means the collector is slower than this node's event rate. Check collector ingest capacity and the network path.",
+			}, true
+		}
 	}
 	msg := fmt.Sprintf("remote syslog/SIEM forwarding is active (%d events delivered, last %s ago)", snap.Delivered, snap.Age.Round(time.Second))
 	if snap.NeverDelivered {
