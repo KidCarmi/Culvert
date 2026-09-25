@@ -1,8 +1,14 @@
 # Culvert Language & Terminology Governance Review — 2026-09-19
 
 > **Owner:** Language & Terminology Governance routine · **Status:** Point-in-time review (repeatable)
+> **Snapshot scope (read this first):** this is a HISTORICAL record of `origin/main` at `36628eb` on
+> 2026-09-19. It was merged later, after `main` had moved on, so the tree it ships in contains commits it
+> never audited. Its findings, carried-over backlog and health score describe `36628eb` only. They are
+> not a statement about the tree this file is published in; the current governance state is whatever the
+> most recent review in this series says. Later windows are audited by later reports, never
+> retroactively by this one.
 > **Method:** Audited `574d265..36628eb` — the window since the 2026-09-11 report's merge point,
-> confirmed as the current `origin/main` HEAD by a fetch immediately before this report was written (the
+> confirmed as the then-current `origin/main` HEAD by a fetch immediately before this report was written on 2026-09-19 (the
 > DEBT-014 lesson: sync against `main` right before opening a PR, not only at review-start). Targeted
 > re-checks of the seven previously-declared-clean categories (SSL/TLS naming, blocklist/blacklist
 > cleanup, allowlist/exempt/bypass vocabulary, upstream/parent-proxy naming, node/CP/DP naming, category
@@ -129,7 +135,7 @@ backlog entry; carried here as context for T-13's residual instead.
 ## Carried-Over Findings (unchanged)
 
 All fourteen previously-open finding IDs (thirteen backlog entries, since T-21 and T-32 are tracked as one
-paired item) remain open, unchanged, and re-confirmed against the current tree:
+paired item) remain open, unchanged, and re-confirmed against the then-current tree (`36628eb`):
 T-9, T-11, T-12, T-13 (residual), T-17, T-18, T-21+T-32 (paired), T-25 (residual), T-29, T-30, T-33, T-34,
 T-39. Full descriptions and the priority-ordered refactoring plan are unchanged from
 `TERMINOLOGY-GOVERNANCE-REVIEW-2026-09-09.md` (and re-confirmed as unchanged by the 2026-09-11 report) and
