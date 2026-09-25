@@ -24,8 +24,11 @@ import (
 // confidence.
 //
 // (2) It is keyed on ALLOCATIONS PER OP, not ns/op: alloc counts are deterministic
-// and hardware-independent, so the gate means the same thing on any runner, under
-// -race, at any load. ns/op on a shared CI box does not.
+// and hardware-independent, so the gate means the same thing on any runner and at
+// any load. ns/op on a shared CI box does not. One exception is recorded on the
+// redacted row below: under -race the keyed HMAC path allocates more (the race
+// build's instrumentation adds heap allocations on the pseudonymization path), so that
+// row's bound is enforced only in the non-race build CI's benchgate job runs.
 //
 // The bounds are CONSTANTS and tight rather than padded. toBlock's ONE allocation
 // is the returned *logstore.DecryptionBlock itself, which the caller keeps — there
@@ -52,9 +55,11 @@ func TestBenchGate_DecryptionProjectionAllocs(t *testing.T) {
 		// func. Only the redacted case needs one; see its comment.
 		setup func(t *testing.T)
 		run   func()
+		// raceSkip: the bound is not enforced under -race (see the design note).
+		raceSkip bool
 	}{
-		{"toBlock/inspected", 1, nil, func() { decSink = decBenchInspected.toBlock(false) }},
-		{"toBlock/bypassed", 1, nil, func() { decSink = decBenchBypassed.toBlock(false) }},
+		{"toBlock/inspected", 1, nil, func() { decSink = decBenchInspected.toBlock(false) }, false},
+		{"toBlock/bypassed", 1, nil, func() { decSink = decBenchBypassed.toBlock(false) }, false},
 		// The redacted row MUST run with a real pseudonym key installed, and its
 		// bound is 2 rather than 1 for that reason.
 		//
@@ -75,7 +80,11 @@ func TestBenchGate_DecryptionProjectionAllocs(t *testing.T) {
 		// redactHost returns "" for it without hashing. If a constructor ever
 		// starts setting SNI, this row will report 3 and fail — correctly, because
 		// the per-session cost really will have grown.
-		{"toBlock/inspected+redacted", 2, benchgateInstallPseudonymKey, func() { decSink = decBenchInspected.toBlock(true) }},
+		//
+		// Under -race this row measured 4 allocs/op / 548 B/op: the race build's
+		// instrumentation adds allocations on the keyed HMAC path. That is a property of
+		// the instrumented build, not of production, so the bound is skipped there.
+		{"toBlock/inspected+redacted", 2, benchgateInstallPseudonymKey, func() { decSink = decBenchInspected.toBlock(true) }, true},
 		// Three calls because recordDecryptSession makes three, each into its own
 		// strSinks slot — writing them all into one variable would make the first
 		// two dead stores the compiler may drop along with their calls, quietly
@@ -85,7 +94,7 @@ func TestBenchGate_DecryptionProjectionAllocs(t *testing.T) {
 			strSinks[0] = decEnumOr(o.Outcome, decryptobs.OutcomeNotDecrypted)
 			strSinks[1] = decEnumOr(o.DecisionSource, decryptobs.DecisionNonTLSFallback)
 			strSinks[2] = decEnumOr(o.TLSVersion, decryptobs.TLSVersionUnknown)
-		}},
+		}, false},
 	}
 
 	for _, tc := range cases {
@@ -101,6 +110,10 @@ func TestBenchGate_DecryptionProjectionAllocs(t *testing.T) {
 		allocs := res.AllocsPerOp()
 		t.Logf("%s: %d allocs/op (bound %d), %d B/op, %d ns/op",
 			tc.name, allocs, tc.maxAllocs, res.AllocedBytesPerOp(), res.NsPerOp())
+		if tc.raceSkip && raceDetectorOn {
+			t.Logf("%s: bound not enforced under -race (instrumented build)", tc.name)
+			continue
+		}
 		if allocs > tc.maxAllocs {
 			t.Errorf("REGRESSION: the per-session %s projection allocates %d/op, exceeds bound %d — "+
 				"an allocation has returned to the decryption-outcome projection on the tunnel hot "+
