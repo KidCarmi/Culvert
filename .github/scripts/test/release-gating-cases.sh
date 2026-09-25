@@ -785,5 +785,78 @@ else ok "a provenance-only release is refused"; fi
 
 unset DOCKER_LABELS
 
+# ─── STAGE 2B: the release verdict is the CONJUNCTION, from QA's side ────────
+#
+# Stage 2B stops security-release-gate.yml running the race suite on a main
+# push and leaves it to qa-gate.yml. Nothing about the predicate changes — but
+# that is now load-bearing in a way it was not before, because a green Security
+# run on main no longer carries any race evidence of its own. If QA's row could
+# ever be satisfied by something other than a successful main-push run of
+# qa-gate.yml for the EXACT release SHA, stage 2B would have moved race
+# coverage out of the release verdict rather than out of Security.
+#
+# The cases above vary Security with QA green. These mirror them: Security is
+# GREEN throughout and only QA moves, so each refusal is attributable to QA's
+# row alone.
+sec_green_qa() {  # $1..$n = extra fixture lines for qa-gate.yml (may be none)
+  local lines=("security-release-gate.yml|$GREEN|push|main|completed|success")
+  lines+=("install-lifecycle-e2e.yml|$GREEN|push|main|completed|success")
+  local extra
+  for extra in "$@"; do lines+=("$extra"); done
+  fixture "${lines[@]}"
+}
+
+# QA absent entirely — the shape a "Security is green, ship it" mistake makes.
+sec_green_qa
+if predicate "$GREEN" assert >/dev/null 2>&1; then
+  bad "2B: Security green + QA ABSENT refuses" "predicate APPROVED with no QA evidence at all"
+else ok "2B: Security green + QA ABSENT refuses"; fi
+
+# QA present but not successful, including the SKIPPED shape — which is exactly
+# what a QA run whose jobs were all skipped would look like.
+for qa_concl in failure cancelled timed_out startup_failure stale skipped neutral; do
+  sec_green_qa "qa-gate.yml|$GREEN|push|main|completed|$qa_concl"
+  if predicate "$GREEN" assert >/dev/null 2>&1; then
+    bad "2B: Security green + QA '$qa_concl' refuses" "predicate APPROVED a '$qa_concl' QA run"
+  else ok "2B: Security green + QA '$qa_concl' refuses"; fi
+done
+
+# QA still running: assert mode must refuse now rather than assume it will pass.
+sec_green_qa "qa-gate.yml|$GREEN|push|main|in_progress|null"
+if predicate "$GREEN" assert >/dev/null 2>&1; then
+  bad "2B: Security green + QA PENDING refuses in assert mode" "predicate APPROVED a still-running QA run"
+else ok "2B: Security green + QA PENDING refuses in assert mode"; fi
+
+# QA green — but for another commit. Race evidence must bind to the release SHA.
+sec_green_qa "qa-gate.yml|$OTHER|push|main|completed|success"
+if predicate "$GREEN" assert >/dev/null 2>&1; then
+  bad "2B: Security green + QA green for the WRONG SHA refuses" "predicate APPROVED using $OTHER's QA run"
+else ok "2B: Security green + QA green for the WRONG SHA refuses"; fi
+
+# QA green for this SHA, but from a tag-triggered re-run rather than the main
+# push. qa-gate.yml has no tag trigger at all, so this cannot arise today —
+# which is precisely why it is worth pinning: it is the shape a future tag
+# trigger would introduce, and it must not authorise a release.
+sec_green_qa "qa-gate.yml|$GREEN|push|refs/tags/v9.9.9|completed|success"
+if predicate "$GREEN" assert >/dev/null 2>&1; then
+  bad "2B: Security green + QA green on a TAG ref refuses" "predicate APPROVED a non-main head_branch QA run"
+else ok "2B: Security green + QA green on a TAG ref refuses"; fi
+
+# QA green for this SHA on main, but from a workflow_dispatch rather than the
+# push. Stage 2B validation dispatches QA on branches by design, so a dispatch
+# run must never be mistaken for main-push evidence.
+sec_green_qa "qa-gate.yml|$GREEN|workflow_dispatch|main|completed|success"
+if predicate "$GREEN" assert >/dev/null 2>&1; then
+  bad "2B: Security green + QA green from a DISPATCH refuses" "predicate APPROVED a workflow_dispatch QA run as push evidence"
+else ok "2B: Security green + QA green from a DISPATCH refuses"; fi
+
+# CONTROL. Every case above refuses; a predicate that simply always refused
+# would pass all of them and block every release. Both green, both main-push,
+# both this SHA must APPROVE.
+sec_green_qa "qa-gate.yml|$GREEN|push|main|completed|success"
+if predicate "$GREEN" assert >/dev/null 2>&1; then
+  ok "2B: CONTROL both workflows green on the main push APPROVES"
+else bad "2B: CONTROL both workflows green on the main push APPROVES" "predicate refused a fully valid conjunction"; fi
+
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]
