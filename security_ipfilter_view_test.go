@@ -2,15 +2,11 @@ package main
 
 import (
 	"fmt"
-	"go/ast"
-	"go/parser"
-	"go/token"
 	"math/rand"
 	"net"
 	"reflect"
 	"runtime"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -230,8 +226,9 @@ func TestIPFilterView_MutatorInventoryIsComplete(t *testing.T) {
 	// so a new mutator cannot be classified without being exercised. Codex
 	// review, PR #1382 — a separate hand-kept name map could be satisfied by
 	// adding the name alone, which is exactly the forgetting this wall exists
-	// to catch. TestIPFilterView_RepublishCasesCallTheirMutator closes the
-	// remaining gap: each case must actually CALL the method it is filed under.
+	// to catch. TestIPFilterView_EveryMutatorRepublishes closes the
+	// remaining gap: it proves at runtime that each case's filed method
+	// actually ran and published.
 	mutators := ipFilterExercisedMutators()
 	// Readers answer from the published view or from the write-side state under
 	// a read lock. They publish nothing and must not.
@@ -283,10 +280,9 @@ func TestIPFilterView_MutatorInventoryIsComplete(t *testing.T) {
 // may have several cases (Add has a single-IP and a CIDR case).
 var ipFilterRepublishCases = []struct {
 	name, mutator string
-	run           func(t *testing.T)
+	run           func(t *testing.T, f *IPFilter)
 }{
-	{name: "SetMode", mutator: "SetMode", run: func(t *testing.T) {
-		f := &IPFilter{single: map[string]bool{}}
+	{name: "SetMode", mutator: "SetMode", run: func(t *testing.T, f *IPFilter) {
 		if err := f.Add("203.0.113.47"); err != nil {
 			t.Fatal(err)
 		}
@@ -298,8 +294,7 @@ var ipFilterRepublishCases = []struct {
 			t.Error("SetMode did not republish: blocklisted IP still allowed")
 		}
 	}},
-	{name: "Add", mutator: "Add", run: func(t *testing.T) {
-		f := &IPFilter{single: map[string]bool{}}
+	{name: "Add", mutator: "Add", run: func(t *testing.T, f *IPFilter) {
 		f.SetMode("block")
 		if !f.Allowed("203.0.113.47") {
 			t.Fatal("empty blocklist must allow")
@@ -311,8 +306,7 @@ var ipFilterRepublishCases = []struct {
 			t.Error("Add did not republish: newly blocked IP still allowed")
 		}
 	}},
-	{name: "AddCIDR", mutator: "Add", run: func(t *testing.T) {
-		f := &IPFilter{single: map[string]bool{}}
+	{name: "AddCIDR", mutator: "Add", run: func(t *testing.T, f *IPFilter) {
 		f.SetMode("block")
 		if err := f.Add("203.0.113.0/24"); err != nil {
 			t.Fatal(err)
@@ -321,8 +315,7 @@ var ipFilterRepublishCases = []struct {
 			t.Error("Add(CIDR) did not republish: newly blocked range still allowed")
 		}
 	}},
-	{name: "Remove", mutator: "Remove", run: func(t *testing.T) {
-		f := &IPFilter{single: map[string]bool{}}
+	{name: "Remove", mutator: "Remove", run: func(t *testing.T, f *IPFilter) {
 		f.SetMode("allow")
 		if err := f.Add("203.0.113.0/24"); err != nil {
 			t.Fatal(err)
@@ -335,8 +328,7 @@ var ipFilterRepublishCases = []struct {
 			t.Error("Remove did not republish: revoked allowlist entry still admits")
 		}
 	}},
-	{name: "ClearAll", mutator: "ClearAll", run: func(t *testing.T) {
-		f := &IPFilter{single: map[string]bool{}}
+	{name: "ClearAll", mutator: "ClearAll", run: func(t *testing.T, f *IPFilter) {
 		f.SetMode("allow")
 		if err := f.Add("203.0.113.47"); err != nil {
 			t.Fatal(err)
@@ -349,8 +341,7 @@ var ipFilterRepublishCases = []struct {
 			t.Error("ClearAll did not republish: cleared allowlist still admits")
 		}
 	}},
-	{name: "AddAll", mutator: "AddAll", run: func(t *testing.T) {
-		f := &IPFilter{single: map[string]bool{}}
+	{name: "AddAll", mutator: "AddAll", run: func(t *testing.T, f *IPFilter) {
 		f.SetMode("block")
 		f.AddAll([]string{"203.0.113.0/24"})
 		if f.Allowed("203.0.113.47") {
@@ -371,186 +362,135 @@ func ipFilterExercisedMutators() map[string]bool {
 
 func TestIPFilterView_EveryMutatorRepublishes(t *testing.T) {
 	for _, c := range ipFilterRepublishCases {
-		t.Run(c.name, c.run)
-	}
-}
-
-// TestIPFilterView_RepublishCasesCallTheirMutator makes filing a case under a
-// method mean something: the case's run func must contain a call to that
-// method. Without it, a case named after a new mutator but exercising some
-// other method would satisfy the inventory wall while never observing whether
-// the new method publishes. It is an AST check over this file's case table.
-func TestIPFilterView_RepublishCasesCallTheirMutator(t *testing.T) {
-	fset := token.NewFileSet()
-	file, err := parser.ParseFile(fset, "security_ipfilter_view_test.go", nil, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	checked := 0
-	if lit := findRepublishCasesLiteral(t, file); lit != nil {
-		for _, el := range lit.Elts {
-			mutator, run := parseRepublishCase(t, fset, el)
-			if !funcLitCallsMethod(run, mutator) {
-				t.Errorf("%s: case filed under %q never calls %s — it cannot observe whether that "+
-					"method republishes", fset.Position(el.Pos()), mutator, mutator)
+		t.Run(c.name, func(t *testing.T) {
+			if err := proveRepublish(t, c.mutator, c.run); err != nil {
+				t.Error(err)
 			}
-			checked++
-		}
-	}
-	// Not-vacuous control: the table was found and every case was walked.
-	if checked == 0 || checked != len(ipFilterRepublishCases) {
-		t.Fatalf("walked %d case(s) but the table holds %d — this check is no longer reading it",
-			checked, len(ipFilterRepublishCases))
-	}
-}
-
-// findRepublishCasesLiteral returns the composite literal assigned to
-// ipFilterRepublishCases, or nil when the declaration is not found (the
-// caller's not-vacuous control then fails).
-func findRepublishCasesLiteral(t *testing.T, file *ast.File) *ast.CompositeLit {
-	t.Helper()
-	var found *ast.CompositeLit
-	ast.Inspect(file, func(n ast.Node) bool {
-		if found != nil {
-			return false
-		}
-		vs, ok := n.(*ast.ValueSpec)
-		if !ok || len(vs.Names) != 1 || vs.Names[0].Name != "ipFilterRepublishCases" || len(vs.Values) != 1 {
-			return true
-		}
-		lit, ok := vs.Values[0].(*ast.CompositeLit)
-		if !ok {
-			t.Fatal("ipFilterRepublishCases is no longer a composite literal; update this check")
-		}
-		found = lit
-		return false
-	})
-	return found
-}
-
-// parseRepublishCase extracts the literal mutator name and the inline run func
-// from one keyed case literal, failing the test on any other shape.
-func parseRepublishCase(t *testing.T, fset *token.FileSet, el ast.Expr) (string, *ast.FuncLit) {
-	t.Helper()
-	entry, ok := el.(*ast.CompositeLit)
-	if !ok {
-		t.Fatalf("%s: case is not a keyed literal", fset.Position(el.Pos()))
-	}
-	var mutator string
-	var run *ast.FuncLit
-	for _, kv := range entry.Elts {
-		kve, ok := kv.(*ast.KeyValueExpr)
-		if !ok {
-			t.Fatalf("%s: case fields must be keyed", fset.Position(kv.Pos()))
-		}
-		switch kve.Key.(*ast.Ident).Name {
-		case "mutator":
-			if bl, ok := kve.Value.(*ast.BasicLit); ok {
-				mutator, _ = strconv.Unquote(bl.Value)
-			}
-		case "run":
-			run, _ = kve.Value.(*ast.FuncLit)
-		}
-	}
-	if mutator == "" || run == nil {
-		t.Fatalf("%s: case needs a literal mutator name and an inline run func", fset.Position(entry.Pos()))
-	}
-	return mutator, run
-}
-
-// funcLitCallsMethod reports whether run's own body calls the named method on
-// an *IPFilter the case itself binds (`f := &IPFilter{...}`). A same-named
-// method on another receiver (timer.Reset, other.Add) does not count, and
-// nested func literals are not descended into: a call inside a closure the
-// case never invokes cannot observe anything.
-func funcLitCallsMethod(run *ast.FuncLit, method string) bool {
-	receivers := ipFilterReceivers(run.Body)
-	called := false
-	for _, stmt := range run.Body.List {
-		ast.Inspect(stmt, func(m ast.Node) bool {
-			if called {
-				return false
-			}
-			if _, nested := m.(*ast.FuncLit); nested {
-				return false
-			}
-			if call, ok := m.(*ast.CallExpr); ok {
-				called = isIPFilterMethodCall(call, receivers, method)
-			}
-			return !called
 		})
 	}
-	return called
 }
 
-// isIPFilterMethodCall reports whether call is `<recv>.<method>(...)` with recv
-// one of the case's bound *IPFilter identifiers.
-func isIPFilterMethodCall(call *ast.CallExpr, receivers map[string]bool, method string) bool {
-	sel, ok := call.Fun.(*ast.SelectorExpr)
-	if !ok || sel.Sel.Name != method {
-		return false
-	}
-	id, ok := sel.X.(*ast.Ident)
-	return ok && receivers[id.Name]
+// ─── Runtime publish attribution ────────────────────────────────────────────
+//
+// Filing a case under a mutator must mean the mutator really ran and really
+// republished. That is proved at RUNTIME, not by matching the case's source:
+// publishView reports every publish through ipFilterPublishHook, the hook
+// attributes it to the nearest exported *IPFilter method on the call stack,
+// and only publishes of the case's own filter are recorded. A case that calls
+// a different method, calls the right one on another receiver, or never
+// reaches its call (dead branch, uninvoked closure) records no publish under
+// the filed name and fails. Codex review, PR #1382 — two rounds of static
+// AST matching were each evadable by the next shape.
+
+type ipFilterPublishEvent struct {
+	method string
+	view   *ipFilterView
 }
 
-// ipFilterReceivers returns the identifiers a body's direct statements bind to
-// `&IPFilter{...}` with `:=`.
-func ipFilterReceivers(body *ast.BlockStmt) map[string]bool {
-	out := map[string]bool{}
-	for _, stmt := range body.List {
-		as, ok := stmt.(*ast.AssignStmt)
-		if !ok || as.Tok != token.DEFINE || len(as.Lhs) != len(as.Rhs) {
-			continue
+type ipFilterPublishRecorder struct {
+	mu     sync.Mutex
+	events []ipFilterPublishEvent
+}
+
+var (
+	ipFilterRecorders       sync.Map // *IPFilter -> *ipFilterPublishRecorder
+	ipFilterPublishHookOnce sync.Once
+)
+
+func installIPFilterPublishHook() {
+	ipFilterPublishHookOnce.Do(func() {
+		h := func(f *IPFilter) {
+			r, ok := ipFilterRecorders.Load(f)
+			if !ok {
+				return
+			}
+			rec := r.(*ipFilterPublishRecorder)
+			rec.mu.Lock()
+			rec.events = append(rec.events, ipFilterPublishEvent{
+				method: publishingIPFilterMethod(), view: f.view.Load(),
+			})
+			rec.mu.Unlock()
 		}
-		for i, rhs := range as.Rhs {
-			id, ok := as.Lhs[i].(*ast.Ident)
-			if ok && isIPFilterAddrLit(rhs) {
-				out[id.Name] = true
+		ipFilterPublishHook.Store(&h)
+	})
+}
+
+// publishingIPFilterMethod walks the stack to the nearest EXPORTED *IPFilter
+// method — the mutator that caused this publish.
+func publishingIPFilterMethod() string {
+	pcs := make([]uintptr, 64)
+	frames := runtime.CallersFrames(pcs[:runtime.Callers(1, pcs)])
+	for {
+		fr, more := frames.Next()
+		if i := strings.LastIndex(fr.Function, ".(*IPFilter)."); i >= 0 {
+			name := fr.Function[i+len(".(*IPFilter)."):]
+			if name != "" && name[0] >= 'A' && name[0] <= 'Z' {
+				return name
 			}
 		}
+		if !more {
+			return ""
+		}
 	}
-	return out
 }
 
-func isIPFilterAddrLit(e ast.Expr) bool {
-	u, ok := e.(*ast.UnaryExpr)
-	if !ok || u.Op != token.AND {
-		return false
+// proveRepublish runs one case against a fresh filter and returns an error
+// unless the named mutator published a NEW view of that filter during it.
+func proveRepublish(t *testing.T, mutator string, run func(*testing.T, *IPFilter)) error {
+	t.Helper()
+	installIPFilterPublishHook()
+	f := &IPFilter{single: map[string]bool{}}
+	rec := &ipFilterPublishRecorder{}
+	ipFilterRecorders.Store(f, rec)
+	defer ipFilterRecorders.Delete(f)
+
+	run(t, f)
+
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	var prev *ipFilterView
+	var seen []string
+	for _, ev := range rec.events {
+		if ev.method == mutator && ev.view != nil && ev.view != prev {
+			return nil
+		}
+		seen = append(seen, ev.method)
+		prev = ev.view
 	}
-	lit, ok := u.X.(*ast.CompositeLit)
-	if !ok {
-		return false
-	}
-	typ, ok := lit.Type.(*ast.Ident)
-	return ok && typ.Name == "IPFilter"
+	return fmt.Errorf("case filed under %q: %s never published a new view of the case's filter "+
+		"(publishes observed: %v) — either the case does not execute it, or it does not call "+
+		"publishView", mutator, mutator, seen)
 }
 
-// TestIPFilterView_FuncLitCallsMethodRejectsLookalikes is the negative control
-// for the AST check above: only a direct call on the case's own *IPFilter
-// counts.
-func TestIPFilterView_FuncLitCallsMethodRejectsLookalikes(t *testing.T) {
+// TestIPFilterView_RepublishProofRejectsEvasions is the negative control for
+// proveRepublish: every shape that names a mutator without executing it on
+// the case's filter must be rejected, and the honest shape accepted.
+func TestIPFilterView_RepublishProofRejectsEvasions(t *testing.T) {
 	cases := []struct {
-		name, src string
-		want      bool
+		name    string
+		mutator string
+		run     func(*testing.T, *IPFilter)
+		wantErr bool
 	}{
-		{"direct call on bound filter", `func(t *testing.T) { f := &IPFilter{}; f.Reset() }`, true},
-		{"call in if-init on bound filter", `func(t *testing.T) { f := &IPFilter{}; if err := f.Reset(); err != nil {} }`, true},
-		{"same-named method on another receiver", `func(t *testing.T) { f := &IPFilter{}; timer.Reset(); _ = f }`, false},
-		{"receiver not bound to an IPFilter", `func(t *testing.T) { f := &other{}; f.Reset() }`, false},
-		{"call only inside a nested closure", `func(t *testing.T) { f := &IPFilter{}; _ = func() { f.Reset() } }`, false},
+		{"honest call", "ClearAll", func(_ *testing.T, f *IPFilter) { f.ClearAll() }, false},
+		{"calls a different method", "Remove", func(_ *testing.T, f *IPFilter) { f.ClearAll() }, true},
+		{"unreachable call", "ClearAll", func(_ *testing.T, f *IPFilter) {
+			if len(f.List()) > 0 { // a fresh filter is empty: never taken
+				f.ClearAll()
+			}
+		}, true},
+		{"uninvoked closure", "ClearAll", func(_ *testing.T, f *IPFilter) { _ = func() { f.ClearAll() } }, true},
+		{"shadowed receiver", "ClearAll", func(_ *testing.T, f *IPFilter) {
+			_ = f
+			f = &IPFilter{single: map[string]bool{}}
+			f.ClearAll()
+		}, true},
+		{"reader filed as mutator", "Mode", func(_ *testing.T, f *IPFilter) { _ = f.Mode() }, true},
 	}
 	for _, c := range cases {
-		expr, err := parser.ParseExpr(c.src)
-		if err != nil {
-			t.Fatalf("%s: %v", c.name, err)
-		}
-		fl, ok := expr.(*ast.FuncLit)
-		if !ok {
-			t.Fatalf("%s: not a func literal", c.name)
-		}
-		if got := funcLitCallsMethod(fl, "Reset"); got != c.want {
-			t.Errorf("%s: funcLitCallsMethod = %v, want %v", c.name, got, c.want)
+		err := proveRepublish(t, c.mutator, c.run)
+		if (err != nil) != c.wantErr {
+			t.Errorf("%s: proveRepublish error = %v, wantErr %v", c.name, err, c.wantErr)
 		}
 	}
 }
