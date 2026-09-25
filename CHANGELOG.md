@@ -61,6 +61,30 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   admin account or strip an existing one. No behavioural change today (nothing
   matched it); the class is now walled by a test requiring every allowlist
   entry to cover at least one registered route.
+- **A request header could name a root-executed artifact (SEC-BOOTSTRAP-HOST-1).**
+  The Control Plane's one-click DP bootstrap renders two artifacts a human is
+  told to run with root authority — the install script it documents as
+  `curl -fsSL … | sudo bash`, and the `docker-compose.yml` that script
+  downloads. Two of the values interpolated into them came straight off the
+  wire (`r.Host`, and `X-Forwarded-Host` when `proxy.trust_forwarded_headers`
+  is on), and the script carried them inside a **double-quoted** shell word:
+  `CP_BASE="{{.CPBase}}"`. A double-quoted shell word still performs command
+  substitution, so a request whose Host header was `cp.example.com$(…)`
+  produced a script that ran the attacker's command, as root, before it did
+  anything else. Go's header validation is not a mitigation — measured against
+  `net/http`, it rejects `"`, a backtick, `{` and space but accepts
+  `$ ( ) ' ;`, and `X-Forwarded-Host` is filtered not at all.
+
+  Both bootstrap endpoints and `POST /api/cluster/token` now **refuse** a
+  derived authority that is not a plain `host[:port]` (400, nothing rendered),
+  the renderers re-validate at the sink, and the templates single-quote what
+  they interpolate. A compose document is also refused (503) when the cluster
+  CA has no fingerprint to pin, rather than served with an unpinned enrollment
+  URL. Refusals are counted on `culvert_bootstrap_host_refused_total` and
+  logged once a minute; the caller is told only `invalid host`. Operators
+  behind a reverse proxy should confirm it sets `Host` / `X-Forwarded-Host`
+  explicitly rather than appending a client value — see
+  `docs/operator/dp-bootstrap-artifact-safety.md`.
 
 - Public release promotion ran ahead of the evidence that was supposed to
   authorize it. On `ci.yml` run 35507615339 (SHA `3d8c9bb`) the `docker` job
@@ -364,6 +388,15 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 - `google.golang.org/grpc` bumped `v1.83.1` → `v1.83.2` (CVE-2026-84445,
   HIGH: gRPC-Go xDS servers, denial of service via crash). Module graph
   only; no code change.
+- The Cluster panel's Distributed Rate Limiting card now shows **Stale
+  Episodes** — the number of times this node's cluster-wide rate-limit
+  broadcast has gone fresh→stale since startup (`GET /api/cluster/rate-limits`
+  already returned `remote_counts_stale_episodes`; the panel never rendered
+  it). The existing stale banner only appears while the broadcast is
+  *currently* stale, so an operator reviewing the panel after a Control Plane
+  blip had recovered saw a fully healthy panel with no way to tell "did this
+  happen once overnight, or six times" without SSHing in and grepping the
+  process log for the CHAOS-61 transition line. Read-only, no behavior change.
 
 ### Performance
 
