@@ -1166,7 +1166,7 @@ table.mcpx-cat-tbl td{padding:6px 10px;border-bottom:1px solid var(--border)}
         </div>
         <div class="panel" style="margin-bottom:0">
           <div class="panel-header">
-            <span class="panel-title">Recent Requests</span>
+            <span class="panel-title">Recent requests</span>
             <span style="font-size:.75rem;color:var(--muted)">last 10</span>
           </div>
           <div class="tbl-wrap">
@@ -1300,7 +1300,7 @@ table.mcpx-cat-tbl td{padding:6px 10px;border-bottom:1px solid var(--border)}
 
       <div class="panel">
         <div class="panel-header">
-          <span class="panel-title">Live Request Log</span>
+          <span class="panel-title">Live traffic</span>
           <div style="display:flex;align-items:center;gap:8px">
             <span class="topbar-meta" id="log-count">0 entries</span>
             <button class="btn ghost sm" data-click="exportLogs" data-arg="csv"><svg class="ico" aria-hidden="true"><use href="#i-download"/></svg> CSV</button>
@@ -2545,6 +2545,10 @@ Firefox (all platforms):
               <span class="info-key">Process Log I/O Backpressure</span>
               <span class="info-val" id="s-process-log-backpressure">-</span>
             </div>
+            <div class="info-item" title="Client-supplied X-Request-Id / Traceparent headers that were replaced with a generated value because they were over-long or carried bytes that must not reach a log line (control characters, whitespace). The request itself is never refused - only the correlation id is Culvert's instead of the client's. Sustained growth means a source is attempting log forgery or trying to flood the process log through the proxy data plane.">
+              <span class="info-key">Tracing Headers Replaced</span>
+              <span class="info-val" id="s-tracing-header-rejected">-</span>
+            </div>
           </div>
         </div>
 
@@ -2627,12 +2631,13 @@ Firefox (all platforms):
         <div class="panel-header"><span class="panel-title">Config Versions</span></div>
         <div class="panel-body">
           <p class="hint">
-            Every configuration change creates a numbered snapshot. You can compare versions and roll back to any previous state.
+            Changes to versioned settings create a numbered snapshot. You can compare versions and roll back the settings captured in a snapshot; settings listed below the version table are not restored by rollback.
           </p>
           <div id="config-versions-list" style="margin-bottom:12px">
             <em style="color:var(--muted);font-size:.82rem">Loading versions...</em>
           </div>
           <div id="config-diff-result" style="display:none;margin-top:12px"></div>
+          <div id="config-rollback-scope-note" style="display:none;margin-top:10px;font-size:.78rem;color:var(--muted)"></div>
         </div>
       </div>
 
@@ -4476,7 +4481,7 @@ Firefox (all platforms):
         </div>
       </div>
       <div class="panel" style="margin-top:16px">
-        <div class="panel-header"><span class="panel-title">OCSP / CRL Revocation</span></div>
+        <div class="panel-header"><span class="panel-title">OCSP revocation</span></div>
         <div style="padding:16px;display:flex;align-items:center;gap:16px;font-size:.85rem;flex-wrap:wrap">
           <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
             <input type="checkbox" id="ocsp-toggle" data-change="toggleOCSP"> Enable OCSP checking
@@ -5184,7 +5189,7 @@ Firefox (all platforms):
               <option value="4">L4</option>
             </select>
             <input id="support-case" class="input sm" type="text" placeholder="case id (optional)" data-min-role="admin" maxlength="64" style="width:140px" title="Bind this bundle to a support case (letters/digits/._-, ≤64)">
-            <button class="btn primary sm" data-click="supportCreateBundle" data-min-role="admin" title="Collect a redacted diagnostic bundle for support">＋ Create bundle</button>
+            <button class="btn primary sm" data-click="supportCreateBundle" data-min-role="admin" title="Collect a redacted diagnostic support bundle">＋ Create bundle</button>
             <button class="btn ghost sm" data-click="loadSupport"><svg class="ico" aria-hidden="true"><use href="#i-refresh"/></svg> Refresh</button>
           </div>
         </div>
@@ -6122,7 +6127,7 @@ const viewMeta = {
   audit:          { title: 'Audit Log',        meta: 'Configuration change history with actor, action and diff' },
   releases:       { title: 'Release Management', meta: 'Dispatch verified catalog releases to agents' },
   governance:     { title: 'Governance',      meta: 'Control-plane route metadata, RBAC enforcement counters and parity-test health' },
-  support:        { title: 'Support',         meta: 'Collect redacted diagnostic bundles and review the collector inventory' },
+  support:        { title: 'Support',         meta: 'Collect redacted diagnostic support bundles and review the collector inventory' },
 };
 
 document.querySelectorAll('.nav-item').forEach(el => {
@@ -8162,8 +8167,45 @@ async function importConfig(input) {
 }
 
 // ── Config Versioning ────────────────────────────────────────────────────
+// configRollbackExcluded caches the settings a config-version rollback
+// deliberately never touches (Finding 10.3 exclusions, AdminSettings-only
+// operational settings, and known off-registry state). null = not yet resolved, [] = known-empty, array =
+// known list. configRollbackScopePromise lets rollbackConfigVersion() await
+// an in-flight fetch instead of racing it (a click before the panel's own
+// background fetch resolves must not silently show an "everything moves"
+// dialog with no exclusion note).
+let configRollbackExcluded = null;
+let configRollbackScopeError = false;
+let configRollbackScopePromise = null;
+
+function loadConfigRollbackScope() {
+  const el = document.getElementById('config-rollback-scope-note');
+  configRollbackScopePromise = (async () => {
+    try {
+      const data = await api('/api/config/rollback-scope');
+      configRollbackExcluded = (data && data.excluded) || [];
+      configRollbackScopeError = false;
+      if (configRollbackExcluded.length === 0) { el.style.display = 'none'; return; }
+      const items = configRollbackExcluded.map(e =>
+        `<li><code>${escHtml(e.id)}</code> — ${escHtml(e.reason)}</li>`).join('');
+      // "including": the list is the set this appliance KNOWS about, not a
+      // proof that everything else rolls back.
+      el.innerHTML = `<details><summary>Settings not restored by rollback (by design), including these ${configRollbackExcluded.length}</summary>` +
+        `<ul style="margin:6px 0 0 18px;padding:0">${items}</ul></details>`;
+      el.style.display = 'block';
+    } catch (err) {
+      configRollbackExcluded = null;
+      configRollbackScopeError = true;
+      el.innerHTML = '<em style="color:var(--red);font-size:.82rem">Could not determine which settings rollback excludes — treat the scope as unknown.</em>';
+      el.style.display = 'block';
+    }
+  })();
+  return configRollbackScopePromise;
+}
+
 async function loadConfigVersions() {
   const el = document.getElementById('config-versions-list');
+  loadConfigRollbackScope();
   try {
     const versions = await api('/api/config/versions');
     if (!versions || versions.length === 0) {
@@ -8228,7 +8270,20 @@ function fmtDiffCell(v) {
 }
 
 async function rollbackConfigVersion(version) {
-  if (!await confirmAction('Rollback Configuration', `Roll back to config version v${version}? This will replace ALL current settings with the snapshot from v${version}. A new version will be created to record this rollback.`, 'Rollback')) return;
+  // Await rather than trust the cache: a click can arrive before the
+  // panel's own background fetch (loadConfigRollbackScope) resolves, and a
+  // stale/absent list must never be silently read as "nothing is excluded".
+  if (configRollbackScopePromise) { await configRollbackScopePromise; }
+  else { await loadConfigRollbackScope(); }
+  let scopeNote;
+  if (configRollbackScopeError) {
+    scopeNote = ' Note: could not determine which settings are excluded from rollback by design — treat the scope as unknown and check the list below the version table before relying on this rollback.';
+  } else if (configRollbackExcluded && configRollbackExcluded.length > 0) {
+    scopeNote = ` Note: some settings are not restored by rollback by design and will keep their current values, including ${configRollbackExcluded.slice(0, 3).map(e => e.id).join(', ')} — see the list below the version table.`;
+  } else {
+    scopeNote = '';
+  }
+  if (!await confirmAction('Rollback Configuration', `Roll back to config version v${version}? Rollback replaces only the settings captured in the v${version} snapshot; settings listed below the version table are not restored.${scopeNote} A new version will be created to record this rollback.`, 'Rollback')) return;
   try {
     const data = await api('/api/config/versions', {
       method: 'POST',
@@ -8375,6 +8430,16 @@ async function fetchStats() {
       const pbp = s.processLogBackpressure || 0;
       splbp.textContent = pbp > 0 ? fmt(pbp) + ' lines delayed' : 'None';
       splbp.style.color = pbp > 0 ? 'var(--warn,#b8860b)' : '';
+    }
+    // Replaced client tracing headers (SEC-REQID-1): the request still succeeds,
+    // so nothing else an admin can see changes when a source feeds the data
+    // plane hostile X-Request-Id / Traceparent values. Shown beside the log I/O
+    // rows because what it protects is the integrity of the process log.
+    const sthr = document.getElementById('s-tracing-header-rejected');
+    if (sthr) {
+      const thr = s.tracingHeaderRejected || 0;
+      sthr.textContent = thr > 0 ? fmt(thr) + ' replaced' : 'None';
+      sthr.style.color = thr > 0 ? 'var(--warn,#b8860b)' : '';
     }
     // Oversized-username login attempts (CHAOS-63): each one is refused with a
     // plain 400 and otherwise leaves no trace an admin would see without a
@@ -16283,7 +16348,7 @@ async function supportCreateBundle() {
   if (caseID && !/^[A-Za-z0-9._-]{1,64}$/.test(caseID)) { toast('Invalid case id (letters/digits/._-, ≤64)', 'error'); return; }
   const ok = await confirmAction(
     'Create support bundle?',
-    'A redacted diagnostic bundle (scope: ' + scope + ', level: ' + levelLabel + (caseID ? ', case: ' + caseID : '') + ') will be collected and written to disk - internal, non-secret operational detail.',
+    'A redacted diagnostic support bundle (scope: ' + scope + ', level: ' + levelLabel + (caseID ? ', case: ' + caseID : '') + ') will be collected and written to disk - internal, non-secret operational detail.',
     'Create bundle',
     { okStyle: 'primary', impact: 'Collects and persists internal diagnostic data; oldest bundles beyond the retention cap are evicted.' });
   if (!ok) return;
