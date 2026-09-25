@@ -227,23 +227,33 @@ Later review rounds found more errors, also fixed:
   Culvert deploys as binary/container; the UI says **node** or **instance**." T-51 (2026-08-29) removed
   the last labeled uses and deliberately left internal names alone (code comments, the
   `x-culvert-tenant-scope: appliance` vendor-extension value, component-module names).
-- **Names found in this window's diff** (customer-facing only):
-  - OpenAPI `GET /api/ocsp` field `uncheckedEnforcingPaths` description: "Paths where this appliance
-    validates…" (`api/openapi/openapi.yaml`, carried into `openapi.json` and
-    `frontend/src/api/types.gen.ts`).
-  - `docs/operator/ocsp-revocation-checking.md:22` ("The appliance states it in three places") and `:154`
-    ("go out directly from the appliance").
-  - `docs/operator/geoip-resolution-health.md:36` ("on an appliance with no GeoIP database").
-  - `docs/operator/release-publication-gating.md:662` ("Because the appliance verifies the signature").
-  - `CHANGELOG.md:285`, the CHAOS-65 release note ("The appliance now says so").
-- **Fix applied**: each now says "node", except the release-gating sentence and the CHANGELOG note, which
-  say "Culvert" because their subject is the product. `make api-bundle` regenerated `openapi.json` and
-  `make api-bundle-check` passes. `types.gen.ts` was regenerated to match, and it is byte-identical to
-  the output of the pinned generator (openapi-typescript v7.13.0).
-- **Not actioned** (T-51's disposition): the window's other new uses are code comments and tests
-  (`ocsp_coverage.go`, `ocsp_metrics.go`, `geoip_resolve_health.go`, `internal/ocsp/ocsp_chaos_test.go`,
-  `mcp_live_execution_e2e_test.go`), workflow comments/CI log text (`publish-catalog-r2.yml`,
-  `resign-catalog.yml`), `CLAUDE.md` and `roadmap/CHAOS-ENGINEERING-REVIEW.md`.
+- **Complete inventory.** `git diff 46410c3 6c46ebd -U0 | grep -i appliance` finds 24 added lines. Line
+  numbers below are at `6c46ebd`. Each one is classified here:
+  - **User- or operator-visible text — fixed to "node" or "Culvert":**
+    - OpenAPI `GET /api/ocsp` `uncheckedEnforcingPaths` description: `api/openapi/openapi.yaml:483`,
+      regenerated into `api/openapi/openapi.json:2735` and `frontend/src/api/types.gen.ts:6240`
+      ("Paths where this node validates…").
+    - `docs/operator/ocsp-revocation-checking.md:22` and `:122` → "node".
+    - `docs/operator/geoip-resolution-health.md:36` → "node".
+    - `docs/operator/release-publication-gating.md:547` → "Culvert" (its subject is the product).
+    - `CHANGELOG.md:276`, the CHAOS-65 release note → "Culvert now says so".
+    - `.github/workflows/publish-catalog-r2.yml:104`, an `::error::` message printed in the Actions log →
+      "being served to any node".
+  - **Left as is — internal comments, tests and engineering records, not read by an operator in the
+    product** (T-51's disposition):
+    - Code comments: `geoip_resolve_health.go:292`, `ocsp_coverage.go:19` and `:84`, `ocsp_metrics.go:16`.
+      None is part of an emitted string.
+    - Test comments: `internal/ocsp/ocsp_chaos_test.go:1051`, `mcp_live_execution_e2e_test.go:66` and
+      `:82`, `ocsp_coverage_test.go:87`.
+    - Workflow YAML comments (not printed): `.github/workflows/publish-catalog-r2.yml:75`,
+      `.github/workflows/resign-catalog.yml:124`.
+    - `CLAUDE.md:181` and `:227`: contributor and agent instructions, not product documentation.
+    - `roadmap/CHAOS-ENGINEERING-REVIEW.md:1002`, `:6107` and `:6163`: the engineering review register.
+- **How the fix was verified**: `make api-bundle` regenerated `openapi.json`, and `make api-bundle-check`
+  passes. `types.gen.ts` is byte-identical to the output of the pinned generator (openapi-typescript
+  v7.13.0).
+- **Review note**: earlier review rounds found these one at a time. This inventory is the complete list
+  for the window, so a later pass can check it rather than rediscover it.
 - **Compatibility risk**: none — description text and prose only; no field, path or schema changed.
 
 ---
