@@ -1573,6 +1573,9 @@ func TestApiDiagnostics_OversizeUsernameSurfacedOnContract(t *testing.T) {
 	if found.OperatorAction == "" {
 		t.Error("admin_username_length warn row has no operator_action")
 	}
+	if strings.Contains(found.OperatorAction, "legacy single-user login") {
+		t.Error("admin_username_length operator_action names the legacy login when only a roster account is oversize")
+	}
 	if strings.Contains(found.Message, longName) {
 		t.Error("admin_username_length message should not echo the username itself")
 	}
@@ -1626,6 +1629,9 @@ func TestApiDiagnostics_OversizeLegacyUsernameSurfacedOnContract(t *testing.T) {
 	}
 	if found.Status != diagWarn {
 		t.Errorf("admin_username_length status = %q, want warn for an oversize legacy login name with no roster entry", found.Status)
+	}
+	if !strings.Contains(found.OperatorAction, "/api/settings") || !strings.Contains(found.OperatorAction, "auth.user") {
+		t.Errorf("admin_username_length operator_action = %q, want the legacy-login remediation (Settings + -user/auth.user) — Admin Users cannot change cfg.user", found.OperatorAction)
 	}
 	if strings.Contains(found.Message, longName) {
 		t.Error("admin_username_length message should not echo the username itself")
