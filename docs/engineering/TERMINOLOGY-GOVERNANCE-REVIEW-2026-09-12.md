@@ -45,16 +45,26 @@
 > than hidden**: the fixes below are complete as far as this report currently knows, and the process
 > lesson (this routine's own single-pass audits are not reliably complete without adversarial review) is
 > more durable than any one of the three individual OCSP/CHANGELOG/compose findings.
+> **Fourth correction round, same PR, when the PR was brought up to date with `main` on 2026-09-25:**
+> further "@codex review" passes found five more gaps, all now fixed: (1) the CHAOS-65 OCSP entries in
+> `CHANGELOG.md` — the largest changelog addition in the window — were never audited (now Part 2 item 5;
+> clean, with one pre-existing GUI-label observation); (2) T-54 recommended a plain rename of two fields in
+> the stable `GET /api/ocsp` schema, which `docs/api/API-VERSIONING-POLICY.md` classifies as breaking (now
+> additive + deprecate); (3) Reviewed Operation Class was described as a read/write/control classification
+> when it is deliberately binary (`read_only`/`mutating`); (4) the report credited itself with the OCSP
+> operator-doc table fix after `main` had landed those rows independently; (5) the summary counted four
+> audits while enumerating five. Four review rounds on one terminology report strengthens, rather than
+> changes, the process lesson above.
 
 ---
 
 ## Executive Summary
 
-**One new finding (T-54, queued to the backlog) and one small doc-only fix made this pass; the large new
-MCP Canary surface introduced no drift.**
+**One new finding (T-54, queued to the backlog; its doc-table half was resolved independently on `main`
+before this report merged); the large new MCP Canary surface introduced no drift.**
 
-Four bounded audits were run against the diff since the last review (up from two in the first draft, after
-two more rounds of review found real coverage gaps — see the corrections above):
+Five bounded audits were run against the diff since the last review (up from two in the first draft, after
+later review rounds found real coverage gaps — see the corrections above):
 
 1. **Full naming audit of the new MCP-First Controlled Canary surface**, the largest new user/operator-
    facing vocabulary introduced since the last review. Three concept groups that could plausibly have
@@ -163,7 +173,7 @@ this report merged rather than after.
 
 ## Findings
 
-### T-54 — OCSP "discarded response" reason vocabulary disagrees across Go accessors, `/metrics` labels, and the new admin/OpenAPI JSON fields (new — queued, not fixed this pass; one sub-part fixed)
+### T-54 — OCSP "discarded response" reason vocabulary disagrees across Go accessors, `/metrics` labels, and the new admin/OpenAPI JSON fields (new — queued; its doc-table sub-part was resolved independently on `main`)
 
 - **Business concept:** the reason a fetched OCSP response was discarded rather than treated as an
   affirmative revocation verdict (`internal/ocsp/ocsp.go`, CHAOS-65) — **with one scope correction**:
@@ -225,13 +235,11 @@ this report merged rather than after.
   `deprecated: true`, then regenerate via `make api-bundle` — this is a documented, already-shipped stable
   API surface, so the old names must keep working).
 - **Affected GUI:** `static/index.html:17515` (read the new JSON keys).
-- **Affected Documentation:** `docs/operator/ocsp-revocation-checking.md` §2 — **fixed in this pass** (two
-  rows added to the rejection-reasons table for `malformed` and `unauthorized_responder`; zero code/API
-  risk, so unlike the Go/JSON rename this needed no coordinated PR and was applied immediately, consistent
-  with this program's practice of fixing trivial, zero-compat-risk gaps on sight — see e.g. T-53 and the
-  panel-title fix in the 2026-09-09 report).
-  *Post-merge note:* `main` independently landed both rows (with more precise wording) before this report
-  merged, so the branch now keeps `main`'s table verbatim and this report no longer changes that file.
+- **Affected Documentation:** `docs/operator/ocsp-revocation-checking.md` §2 — the rejection-reasons table
+  was missing rows for `malformed` and `unauthorized_responder`. **Resolved independently on `main`**, not
+  by this report: an earlier draft of this PR added the two rows, but `main` landed them first (with more
+  precise wording), so the branch keeps `main`'s table verbatim and this report changes no file other than
+  itself. The doc half of T-54 is therefore closed; only the code/API half remains queued.
 - **Affected Configuration:** none.
 - **Migration Complexity:** Small-Medium (the Go accessor rename `UnknownTotal`→`UnknownStatusTotal` is
   internal; the two JSON fields `malformedResponseTotal` / `staleResponseTotal` must be handled as an API
@@ -287,7 +295,7 @@ added for the new finding:
 | Medium | T-9 (carried over) | Rename `exportedAt` → `capturedAt` with read-compat alias | Low-medium | Medium |
 | Medium | T-11 (carried over) | Reconcile `allow`/`deny` default-action vocabulary vs. the four-value `PolicyAction` enum | Low / Medium-large | Small / Medium-large |
 | Medium | T-12 (carried over) | Alias Maintenance Agent wire routes `/v1/upgrades/*` → `/v1/updates/*` | Medium | Medium |
-| Low-Medium | **T-54 (new)** | Add OCSP admin JSON fields `malformedTotal` and `staleTotal` alongside `malformedResponseTotal` / `staleResponseTotal` and deprecate the old names (removal only via the API-versioning MAJOR exception — a plain rename is breaking); rename Go accessor `UnknownTotal`→`UnknownStatusTotal`; regenerate the OpenAPI bundle; update the two GUI references; decide and apply a fix for `responder_blocked`'s metric-family scope mismatch (narrow the HELP text or split it into its own series). (Doc-table gap already fixed this pass.) | Medium (stable API field — additive only) | Small |
+| Low-Medium | **T-54 (new)** | Add OCSP admin JSON fields `malformedTotal` and `staleTotal` alongside `malformedResponseTotal` / `staleResponseTotal` and deprecate the old names (removal only via the API-versioning MAJOR exception — a plain rename is breaking); rename Go accessor `UnknownTotal`→`UnknownStatusTotal`; regenerate the OpenAPI bundle; update the two GUI references; decide and apply a fix for `responder_blocked`'s metric-family scope mismatch (narrow the HELP text or split it into its own series). (Doc-table gap already resolved on `main`.) | Medium (stable API field — additive only) | Small |
 | Low | T-34 (carried over) | Standardize `apiURLCatFeedStatus`'s SaaS block field names on the F3b-4 status endpoint's vocabulary | Low | Small |
 | Low | T-13 residual (carried over) | Decide whether README/enterprise-doc "TLS Inspection" branding should unify with in-app "SSL" | Low | Small |
 
@@ -302,8 +310,8 @@ Terminology is **not** fully consistent. This pass found one genuinely new, smal
 item (T-54: the OCSP discarded-response reason vocabulary disagrees across Go/`/metrics`/admin-JSON for
 three identifiers, two of six reasons were missing from the operator doc's own reference table, and one
 reason — `responder_blocked` — is charged under a metric family whose own business-concept framing does
-not fit it, since it fires before any response is ever received) and fixed the doc-table half of it on the
-spot, at zero code/compat risk; the code/API half (a Go accessor rename plus an additive, deprecating JSON/OpenAPI change, plus a
+not fit it, since it fires before any response is ever received). Its doc-table half was resolved
+independently on `main` before this report merged; the code/API half (a Go accessor rename plus an additive, deprecating JSON/OpenAPI change, plus a
 naming decision for the metric-family scope correction) is queued to the backlog rather than rushed into
 this documentation PR, consistent with how this program has always treated renames that touch a shipped,
 documented API surface (see T-29/T-30/T-12). The 9-merge window's dominant new feature — MCP-First
@@ -311,21 +319,25 @@ Controlled Canary (ADR-0035) — was checked in depth across code, API, and all 
 (including `CANARY-READINESS-MATRIX.md`'s new row 4a, which reinforces rather than contradicts the
 conclusion) and found internally consistent throughout: the Canary/First-Canary/Review trio, the
 Tool-Trust/Tool-Approval/Reviewed-Operation trio, and the Live-Gate/Live-Execution/Read-First trio are each
-genuinely distinct concepts used consistently, not drift. The four other new/changed surfaces in the
+genuinely distinct concepts used consistently, not drift. The five other new/changed surfaces in the
 window (`loginOversizeRejected`, expanded `trust_forwarded_headers` documentation, `CHANGELOG.md`'s
-rate-limit-exemption entry, and `docker-compose.yml`'s YARA-directory fix) were all checked directly and
-are clean — the last one is a genuine, already-fixed, now test-pinned pre-existing defect, not new drift.
+rate-limit-exemption entry, `docker-compose.yml`'s YARA-directory fix, and `CHANGELOG.md`'s CHAOS-65 OCSP
+entries) were all checked directly and are clean — the YARA one is a genuine, already-fixed, now
+test-pinned pre-existing defect, not new drift, and the OCSP entries carry one pre-existing GUI-label
+observation recorded in Part 2 item 5.
 The carry-over backlog grew from thirteen to fourteen entries (T-54 added, now covering three identifiers
 plus the metric-family correction); T-39's evidence was refreshed without changing its finding or
 priority. No cosmetic or preference-driven renames are proposed. **Process note, recorded rather than
-smoothed over, across all three correction rounds:** this report's own first draft initially missed the
+smoothed over, across all four correction rounds:** this report's own first draft initially missed the
 `loginOversizeRejected`/`trust_forwarded_headers` surfaces and mischaracterized the OCSP naming as
 casing-only; the immediate fix then still missed `staleResponseTotal`'s identical mismatch; the fix after
 that still missed the `responder_blocked` metric-family scope issue and the `CHANGELOG.md`/
-`docker-compose.yml` coverage gaps. All three rounds were caught and corrected by automated review
+`docker-compose.yml` coverage gaps; and the fourth round found the unaudited OCSP changelog entries, a
+breaking-rename recommendation, a mis-described binary field, a self-credited fix that `main` had made, and
+an audit miscount. All four rounds were caught and corrected by automated review
 (`chatgpt-codex-connector`) on this report's own PR before it merged, not by a parallel run — a concrete
 instance of the scheduled-review-can-be-incomplete risk DEBT-014 already tracks, and evidence that this
 routine's own single-pass audits should not be trusted as complete without adversarial review, independent
-of how thorough any one pass feels while writing it. This report was written, and then corrected three
-times, only after a fresh sync against `origin/main` immediately before opening (and before addressing
+of how thorough any one pass feels while writing it. This report was written, and then corrected in four
+review rounds, only after a fresh sync against `origin/main` immediately before opening (and before addressing
 each round of review comments on) its PR.
