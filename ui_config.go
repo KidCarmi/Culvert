@@ -2390,10 +2390,11 @@ func registerSettingsRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/export", apiExport)
 
 	// ── Backup / restore / config versioning ──────────────────────────────
-	mux.HandleFunc("/api/config/export", apiConfigExport)     // GET — download exported config JSON
-	mux.HandleFunc("/api/config/import", apiConfigImport)     // POST — restore from exported config JSON
-	mux.HandleFunc("/api/config/versions", apiConfigVersions) // GET list / POST rollback
-	mux.HandleFunc("/api/config/diff", apiConfigDiff)         // GET diff between versions
+	mux.HandleFunc("/api/config/export", apiConfigExport)                // GET — download exported config JSON
+	mux.HandleFunc("/api/config/import", apiConfigImport)                // POST — restore from exported config JSON
+	mux.HandleFunc("/api/config/versions", apiConfigVersions)            // GET list / POST rollback
+	mux.HandleFunc("/api/config/diff", apiConfigDiff)                    // GET diff between versions
+	mux.HandleFunc("/api/config/rollback-scope", apiConfigRollbackScope) // GET settings excluded from rollback
 
 	// ── Auth / network / session settings ─────────────────────────────────
 	mux.HandleFunc("/api/settings/default-auth-outcome", apiDefaultAuthOutcome) // PUT — toggle proxy auth requirement
