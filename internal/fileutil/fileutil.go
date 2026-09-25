@@ -161,7 +161,7 @@ func AtomicWrite(path string, data []byte, perm os.FileMode) error {
 }
 
 // ── Predictable-path secret writes (SEC-SECRETWRITE-1) ───────────────────────
-//
+
 // WriteFileExclusive is the safe counterpart to AtomicWrite for the few
 // callers that CANNOT use a random temp name because the path itself is a
 // rendezvous another code path looks for by name (the CDR renewal's

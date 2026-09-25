@@ -91,7 +91,7 @@ func TestInstallRenewedPEMs_StagingDoesNotFollowAPlantedSymlink(t *testing.T) {
 		}
 	}
 	got, err := os.ReadFile(inst.ClientKeyPath)
-	if err != nil || string(got) != "-----BEGIN EC PRIVATE KEY-----" {
+	if err != nil || string(got) != "-----BEGIN EC PRIVATE KEY-----" { //nolint:gosec // G101: PEM header placeholder, no key material
 		t.Fatalf("the key did not land at its own path: %q err=%v", got, err)
 	}
 }

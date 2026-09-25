@@ -1,6 +1,7 @@
 package fileutil
 
 import (
+	"bytes"
 	"errors"
 	"os"
 	"path/filepath"
@@ -60,7 +61,7 @@ func TestWriteFileExclusive_DanglingSymlinkDoesNotRedirectTheWrite(t *testing.T)
 func TestWriteFileExclusive_ExistingTargetSymlinkDoesNotRedirectTheWrite(t *testing.T) {
 	dir := t.TempDir()
 	outside := filepath.Join(t.TempDir(), "attacker-owned")
-	if err := os.WriteFile(outside, []byte("placeholder"), 0o666); err != nil {
+	if err := os.WriteFile(outside, []byte("placeholder"), 0o666); err != nil { //nolint:gosec // G306: deliberately world-readable — the planted file this test defends against
 		t.Fatalf("seed: %v", err)
 	}
 	path := filepath.Join(dir, ".secret_key")
@@ -100,7 +101,7 @@ func TestWriteFileExclusive_LegacyWriterFollowsSymlinks(t *testing.T) {
 func TestWriteFileExclusive_DoesNotInheritAPreExistingMode(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "client.key.tmp")
-	if err := os.WriteFile(path, []byte("planted"), 0o666); err != nil {
+	if err := os.WriteFile(path, []byte("planted"), 0o666); err != nil { //nolint:gosec // G306: deliberately world-readable — the planted file this test defends against
 		t.Fatalf("seed: %v", err)
 	}
 	if err := os.Chmod(path, 0o666); err != nil {
@@ -121,7 +122,7 @@ func TestWriteFileExclusive_DoesNotInheritAPreExistingMode(t *testing.T) {
 func TestWriteFileExclusive_LegacyWriterInheritsAPreExistingMode(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "client.key.tmp")
-	if err := os.WriteFile(path, []byte("planted"), 0o666); err != nil {
+	if err := os.WriteFile(path, []byte("planted"), 0o666); err != nil { //nolint:gosec // G306: deliberately world-readable — the planted file this test defends against
 		t.Fatalf("seed: %v", err)
 	}
 	if err := os.Chmod(path, 0o666); err != nil {
@@ -186,7 +187,7 @@ func TestWriteFileExclusive_CreatesAtTheRequestedModeAndContent(t *testing.T) {
 			if err != nil {
 				t.Fatalf("read: %v", err)
 			}
-			if string(got) != string(tc.data) {
+			if !bytes.Equal(got, tc.data) {
 				t.Fatalf("content mismatch (%d vs %d bytes)", len(got), len(tc.data))
 			}
 		})
