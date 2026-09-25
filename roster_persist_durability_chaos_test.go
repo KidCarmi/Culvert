@@ -22,7 +22,7 @@ import (
 	"github.com/KidCarmi/Culvert/internal/fileutil"
 )
 
-// CHAOS-66 — the admin-roster mutations that respond "success" on a durable
+// CHAOS-67 — the admin-roster mutations that respond "success" on a durable
 // write that never landed.
 //
 // cfg.SaveUIUsersFile is the ONLY durable home of ui_users.json: the admin
@@ -98,7 +98,7 @@ func durableRoster(t *testing.T, path string) map[string]any {
 	return out
 }
 
-// TestChaos66_DeleteUser_PersistFailure_DoesNotClaimSuccess
+// TestChaos67_DeleteUser_PersistFailure_DoesNotClaimSuccess
 //
 // Deleting an admin account is how an operator revokes a departing or
 // compromised administrator. On a failing volume the handler deletes the user
@@ -106,7 +106,7 @@ func durableRoster(t *testing.T, path string) map[string]any {
 // auditEvent records the delete as done. Nothing in the response, the audit
 // trail or the UI says the account is still on disk. On the next restart the
 // account returns with its original password hash and role.
-func TestChaos66_DeleteUser_PersistFailure_DoesNotClaimSuccess(t *testing.T) {
+func TestChaos67_DeleteUser_PersistFailure_DoesNotClaimSuccess(t *testing.T) {
 	snapshotAuthGlobals(t)
 	path := seedRoster(t)
 	breakRosterWrites(t)
@@ -128,12 +128,12 @@ func TestChaos66_DeleteUser_PersistFailure_DoesNotClaimSuccess(t *testing.T) {
 	}
 }
 
-// TestChaos66_SetUser_PersistFailure_DoesNotClaimSuccess
+// TestChaos67_SetUser_PersistFailure_DoesNotClaimSuccess
 //
 // POST /api/auth/users creates accounts, sets passwords and changes roles.
 // A role downgrade (admin -> viewer) is a privilege revocation; on a failing
 // volume it answers {"ok":true} and reverts to admin on restart.
-func TestChaos66_SetUser_PersistFailure_DoesNotClaimSuccess(t *testing.T) {
+func TestChaos67_SetUser_PersistFailure_DoesNotClaimSuccess(t *testing.T) {
 	snapshotAuthGlobals(t)
 	path := seedRoster(t)
 	breakRosterWrites(t)
@@ -152,13 +152,13 @@ func TestChaos66_SetUser_PersistFailure_DoesNotClaimSuccess(t *testing.T) {
 	}
 }
 
-// TestChaos66_ChangePassword_PersistFailure_DoesNotClaimSuccess
+// TestChaos67_ChangePassword_PersistFailure_DoesNotClaimSuccess
 //
 // Self-service password change is the documented remediation for a leaked
 // admin credential. On a failing volume it answers 200 and the OLD password
 // still authenticates after a restart — the leak is not closed, and the
 // operator was told it was.
-func TestChaos66_ChangePassword_PersistFailure_DoesNotClaimSuccess(t *testing.T) {
+func TestChaos67_ChangePassword_PersistFailure_DoesNotClaimSuccess(t *testing.T) {
 	snapshotAuthGlobals(t)
 	_ = seedRoster(t)
 	breakRosterWrites(t)
@@ -176,10 +176,10 @@ func TestChaos66_ChangePassword_PersistFailure_DoesNotClaimSuccess(t *testing.T)
 	}
 }
 
-// TestChaos66_BackupCodeConsumption_FailureIsCountedNotDiscarded
+// TestChaos67_BackupCodeConsumption_FailureIsCountedNotDiscarded
 //
 // A TOTP backup code is a SINGLE-USE credential. ConsumeBackupCode removes it
-// from memory and the login path persists the removal; before CHAOS-66 that
+// from memory and the login path persists the removal; before CHAOS-67 that
 // write's error was discarded outright (//nolint:errcheck), so a code whose
 // removal never reached disk was valid again after the next restart — the same
 // "a revoked token can be honored again after crash/disk-full" shape the
@@ -191,7 +191,7 @@ func TestChaos66_ChangePassword_PersistFailure_DoesNotClaimSuccess(t *testing.T)
 // very incident they need it for, the terminal state CHAOS-55/57 refuse. So the
 // gate pins the half that IS required: the failure must be counted, never
 // silently discarded.
-func TestChaos66_BackupCodeConsumption_FailureIsCountedNotDiscarded(t *testing.T) {
+func TestChaos67_BackupCodeConsumption_FailureIsCountedNotDiscarded(t *testing.T) {
 	snapshotAuthGlobals(t)
 	resetRosterPersistCountersForTest()
 	t.Cleanup(resetRosterPersistCountersForTest)
@@ -228,9 +228,9 @@ func TestChaos66_BackupCodeConsumption_FailureIsCountedNotDiscarded(t *testing.T
 // outright, or to roll back so aggressively that a legitimate change is lost.
 // These controls make that fail.
 
-// TestChaos66_Control_HealthyDiskStillApplies proves the durable-or-refused
+// TestChaos67_Control_HealthyDiskStillApplies proves the durable-or-refused
 // wrapper did not break ordinary administration.
-func TestChaos66_Control_HealthyDiskStillApplies(t *testing.T) {
+func TestChaos67_Control_HealthyDiskStillApplies(t *testing.T) {
 	snapshotAuthGlobals(t)
 	path := seedRoster(t)
 
@@ -254,12 +254,12 @@ func TestChaos66_Control_HealthyDiskStillApplies(t *testing.T) {
 	}
 }
 
-// TestChaos66_Control_MutationErrorIsNotMaskedAsPersistFailure proves the
+// TestChaos67_Control_MutationErrorIsNotMaskedAsPersistFailure proves the
 // mutation's own refusals keep their own status codes. DeleteUIUser's "cannot
 // delete the last admin user" guard must stay a 409 Conflict: turning every
 // refusal into the persistence 500 would tell an operator to go check their
 // disk over a policy decision that has nothing to do with it.
-func TestChaos66_Control_MutationErrorIsNotMaskedAsPersistFailure(t *testing.T) {
+func TestChaos67_Control_MutationErrorIsNotMaskedAsPersistFailure(t *testing.T) {
 	snapshotAuthGlobals(t)
 	resetRosterPersistCountersForTest()
 	t.Cleanup(resetRosterPersistCountersForTest)
@@ -283,12 +283,12 @@ func TestChaos66_Control_MutationErrorIsNotMaskedAsPersistFailure(t *testing.T) 
 	}
 }
 
-// TestChaos66_RollbackRestoresTheWholeAccount proves the rollback is exact.
+// TestChaos67_RollbackRestoresTheWholeAccount proves the rollback is exact.
 // A partial restore is worse than no rollback: an account left without its
 // password hash, role or TOTP enrolment is an account its owner can no longer
 // use and an operator cannot see is broken. This is why the primitive snapshots
 // the roster wholesale instead of asking each caller for an inverse operation.
-func TestChaos66_RollbackRestoresTheWholeAccount(t *testing.T) {
+func TestChaos67_RollbackRestoresTheWholeAccount(t *testing.T) {
 	snapshotAuthGlobals(t)
 	resetRosterPersistCountersForTest()
 	t.Cleanup(resetRosterPersistCountersForTest)
@@ -325,13 +325,13 @@ func TestChaos66_RollbackRestoresTheWholeAccount(t *testing.T) {
 	}
 }
 
-// TestChaos66_ReplacedNotSyncedIsNotRolledBack pins the one error that must NOT
+// TestChaos67_ReplacedNotSyncedIsNotRolledBack pins the one error that must NOT
 // be treated as a failed write. fileutil.ErrReplacedNotSynced means the rename
 // already landed the new content and only the parent-directory fsync failed, so
 // every future reader — including a restart — sees the new roster. Rolling back
 // there would leave memory contradicting the file, and refusing the request
 // would be a false negative: the operator's change DID take effect.
-func TestChaos66_ReplacedNotSyncedIsNotRolledBack(t *testing.T) {
+func TestChaos67_ReplacedNotSyncedIsNotRolledBack(t *testing.T) {
 	if !rosterChangeCommitted(fmt.Errorf("atomic write: %w", fileutil.ErrReplacedNotSynced)) {
 		t.Error("ErrReplacedNotSynced must count as committed: the content is already on disk")
 	}
@@ -343,13 +343,13 @@ func TestChaos66_ReplacedNotSyncedIsNotRolledBack(t *testing.T) {
 	}
 }
 
-// TestChaos66_Wall_NoRosterPersistErrorIsDiscarded is a STRUCTURAL gate, not a
+// TestChaos67_Wall_NoRosterPersistErrorIsDiscarded is a STRUCTURAL gate, not a
 // behavioural one: it AST-walks ui_auth.go and fails when any call to
 // cfg.SaveUIUsersFile appears as a bare expression statement — that is, with
 // its error thrown away.
 //
 // Behavioural coverage cannot reach this. A future call site that discards the
-// error reintroduces exactly the defect CHAOS-66 closed (a security-relevant
+// error reintroduces exactly the defect CHAOS-67 closed (a security-relevant
 // roster change reported as done while the durable state disagrees), and no
 // existing test would notice, because the handler it sits in would keep
 // answering 2xx on a healthy disk. The wall makes the question unavoidable:
@@ -359,7 +359,7 @@ func TestChaos66_ReplacedNotSyncedIsNotRolledBack(t *testing.T) {
 // This is the repo's own lesson from SEC-SOCKS5-LOG-1 round 2 — walling one
 // call shape does not wall the path — applied to the shape that matters here:
 // a discarded error.
-func TestChaos66_Wall_NoRosterPersistErrorIsDiscarded(t *testing.T) {
+func TestChaos67_Wall_NoRosterPersistErrorIsDiscarded(t *testing.T) {
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(fset, "ui_auth.go", nil, parser.ParseComments)
 	if err != nil {
@@ -403,7 +403,7 @@ func TestChaos66_Wall_NoRosterPersistErrorIsDiscarded(t *testing.T) {
 
 	for _, pos := range discarded {
 		t.Errorf("a roster-persisting call's error is discarded at %s — a roster change that did not "+
-			"reach disk reverts at the next restart while the handler reports success (CHAOS-66). "+
+			"reach disk reverts at the next restart while the handler reports success (CHAOS-67). "+
 			"Check the error, or pass it to noteRosterPersistBestEffort and record why fail-open is "+
 			"correct at that call site.", pos)
 	}
@@ -422,7 +422,7 @@ func TestChaos66_Wall_NoRosterPersistErrorIsDiscarded(t *testing.T) {
 
 // ─── Codex review round 1 ────────────────────────────────────────────────────
 
-// TestChaos66_RollbackDoesNotDiscardConcurrentLoginMutation is the P1 gate.
+// TestChaos67_RollbackDoesNotDiscardConcurrentLoginMutation is the P1 gate.
 //
 // mutateRosterDurably restores a WHOLE-ROSTER snapshot when its write fails.
 // That is only sound if no other writer can mutate the roster inside the
@@ -433,15 +433,15 @@ func TestChaos66_Wall_NoRosterPersistErrorIsDiscarded(t *testing.T) {
 // saveUIUsersMu and therefore runs AFTER the rollback, it then persisted the
 // reverted state, making the resurrection durable.
 //
-// That is the exact property CHAOS-66 exists to protect (a consumed single-use
-// credential must not come back), broken by the rollback CHAOS-66 introduced.
+// That is the exact property CHAOS-67 exists to protect (a consumed single-use
+// credential must not come back), broken by the rollback CHAOS-67 introduced.
 //
 // The interleaving is forced, not raced: the admin mutation blocks inside
 // mutateRosterDurably until the login goroutine has been started, so the test
 // is deterministic. Against the pre-fix tree the consume completes immediately
 // and is discarded; with the fix it blocks on the transaction lock and its
 // effect survives.
-func TestChaos66_RollbackDoesNotDiscardConcurrentLoginMutation(t *testing.T) {
+func TestChaos67_RollbackDoesNotDiscardConcurrentLoginMutation(t *testing.T) {
 	snapshotAuthGlobals(t)
 	resetRosterPersistCountersForTest()
 	t.Cleanup(resetRosterPersistCountersForTest)
@@ -501,15 +501,15 @@ func TestChaos66_RollbackDoesNotDiscardConcurrentLoginMutation(t *testing.T) {
 	// The consumed single-use code must NOT be usable again.
 	if cfg.ConsumeBackupCode("doomed", "code-one") {
 		t.Error("a consumed single-use backup code was resurrected by the admin mutation's rollback: " +
-			"the rollback discarded a concurrent login-path mutation (CHAOS-66 Codex P1)")
+			"the rollback discarded a concurrent login-path mutation (CHAOS-67 Codex P1)")
 	}
 }
 
-// TestChaos66_Control_BestEffortSkipsWriteWhenNothingChanged proves the
+// TestChaos67_Control_BestEffortSkipsWriteWhenNothingChanged proves the
 // transaction does not reintroduce the vestigial write this change removed: a
 // REJECTED backup code must not re-serialise the whole roster (every account
 // and bcrypt hash, plus an fsync'd rename) on the brute-force path.
-func TestChaos66_Control_BestEffortSkipsWriteWhenNothingChanged(t *testing.T) {
+func TestChaos67_Control_BestEffortSkipsWriteWhenNothingChanged(t *testing.T) {
 	snapshotAuthGlobals(t)
 	_ = seedRoster(t)
 	breakRosterWrites(t) // any real write would fail and be observable
@@ -522,7 +522,7 @@ func TestChaos66_Control_BestEffortSkipsWriteWhenNothingChanged(t *testing.T) {
 	}
 }
 
-// TestChaos66_Wall_LogRateGateClaimsIntervalAtomically is the P2 gate, and it
+// TestChaos67_Wall_LogRateGateClaimsIntervalAtomically is the P2 gate, and it
 // is STRUCTURAL rather than behavioural — deliberately, and the measurement is
 // why. The defect is a TOCTOU on an atomic stamp: every caller that finishes
 // concurrently can read the same expired value before any of them stores, and
@@ -542,7 +542,7 @@ func TestChaos66_Control_BestEffortSkipsWriteWhenNothingChanged(t *testing.T) {
 // copy of the pre-fix body and must REJECT it, so a selector that matches
 // nothing cannot pass forever. This mirrors sanitizeLog's scan-count gate,
 // which reached the same conclusion for the same reason.
-func TestChaos66_Wall_LogRateGateClaimsIntervalAtomically(t *testing.T) {
+func TestChaos67_Wall_LogRateGateClaimsIntervalAtomically(t *testing.T) {
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(fset, "roster_persist_durability.go", nil, parser.ParseComments)
 	if err != nil {
@@ -564,7 +564,7 @@ func TestChaos66_Wall_LogRateGateClaimsIntervalAtomically(t *testing.T) {
 	if !cas {
 		t.Error("the log-rate gate must CLAIM its interval with rosterPersistLogLast.CompareAndSwap: " +
 			"a load/compare/store lets every concurrent caller emit a line at once, which is the log " +
-			"amplification the gate exists to prevent (CHAOS-66 Codex P2)")
+			"amplification the gate exists to prevent (CHAOS-67 Codex P2)")
 	}
 	if bareStore {
 		t.Error("rosterPersistLogLast is written with a bare Store inside the rate gate; the claim must " +
@@ -629,13 +629,13 @@ func legacyNoteRosterPersistBestEffort() {
 }
 `
 
-// TestChaos66_Control_LogRateGateCountsEveryCaller is a CONTROL, not a defect
+// TestChaos67_Control_LogRateGateCountsEveryCaller is a CONTROL, not a defect
 // gate (it passes against the pre-fix shape too — see the wall above for why
 // the defect is not behaviourally reachable). What it does pin, deterministically,
 // is the half that makes rate-limiting a security-relevant log acceptable at
 // all: the line is suppressed but the COUNT never is, so the magnitude survives
 // in the counter an operator alerts on.
-func TestChaos66_Control_LogRateGateCountsEveryCaller(t *testing.T) {
+func TestChaos67_Control_LogRateGateCountsEveryCaller(t *testing.T) {
 	resetRosterPersistCountersForTest()
 	t.Cleanup(resetRosterPersistCountersForTest)
 

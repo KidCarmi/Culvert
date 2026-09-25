@@ -10,7 +10,7 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 ### Security
 
 - Admin-roster changes reported success on a durable write that never landed
-  (CHAOS-66). `ui_users.json` is the only durable home of the admin roster,
+  (CHAOS-67). `ui_users.json` is the only durable home of the admin roster,
   password hashes, roles, TOTP secrets, consumed backup codes and the TOTP
   replay counter, and every mutation changes memory first and persists second.
   Three handlers logged the persist error and answered 2xx anyway — precisely

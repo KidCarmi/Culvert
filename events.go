@@ -292,7 +292,7 @@ func liveFeedWritePrometheus(w *strings.Builder) {
 	fmt.Fprintf(w, "# TYPE culvert_login_oversize_rejected_total counter\nculvert_login_oversize_rejected_total %d\n",
 		loginOversizeRejected.Load())
 
-	// CHAOS-66: admin-roster durability. These are deliberately distinct from
+	// CHAOS-67: admin-roster durability. These are deliberately distinct from
 	// the storage plane's generic storage_write_failed, which says only that
 	// SOME durable write failed; these say WHICH administrative decision was
 	// affected and therefore what the operator must redo.
