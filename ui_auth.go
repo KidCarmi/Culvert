@@ -318,7 +318,7 @@ func apiAuthUsers(w http.ResponseWriter, r *http.Request) {
 		}
 		// Revoke all active sessions for the deleted user (Finding 5.2).
 		//
-		// CHAOS-67: the revocation must be made DURABLE here, exactly as a
+		// CHAOS-68: the revocation must be made DURABLE here, exactly as a
 		// logout's is (revokeSessionCookie, session.go). Without this the
 		// account deletion was reported as complete while the only record that
 		// its live sessions had been withdrawn lived in this process's memory:

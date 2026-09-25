@@ -1103,7 +1103,7 @@ culvert_catfeeddb_quarantined_copies %d
 		cfdb.ResidualCopies,
 	)
 
-	// CHAOS-67: the session revocation plane. Emitted UNCONDITIONALLY, which is
+	// CHAOS-68: the session revocation plane. Emitted UNCONDITIONALLY, which is
 	// the deliberate exception to the "omit when the feature is off" rule the
 	// socks5/cluster_ca/geo series follow.
 	//

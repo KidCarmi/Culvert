@@ -229,7 +229,7 @@ func (a *rateLimitAggregator) Stats() (nodes int, hotIPs int) {
 type revocationAggregator struct {
 	mu      sync.Mutex
 	perNode map[string][]RevocationEntry // nodeID → latest entries
-	// cpLocal holds the Control Plane's OWN revocations (CHAOS-67).
+	// cpLocal holds the Control Plane's OWN revocations (CHAOS-68).
 	//
 	// It is a SEPARATE FIELD rather than a reserved key in perNode, and that is
 	// the whole point: a reserved key is only as safe as the guarantee that no
@@ -252,7 +252,7 @@ func (a *revocationAggregator) Update(nodeID string, entries []RevocationEntry) 
 	a.mu.Unlock()
 }
 
-// UpdateLocal stores the Control Plane's own revocation entries (CHAOS-67).
+// UpdateLocal stores the Control Plane's own revocation entries (CHAOS-68).
 //
 // Before this, the aggregator had exactly one writer — a Data Plane push — so
 // the CP contributed nothing to the fleet-wide merge. The admin UI runs on the

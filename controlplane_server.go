@@ -361,7 +361,7 @@ func (s *controlPlaneServer) SyncRevocations(ctx context.Context, raw json.RawMe
 	}
 	globalRevAggregator.Update(req.NodeID, req.Entries)
 
-	// CHAOS-67: the CP is a session-bearing node like any other, and it is the
+	// CHAOS-68: the CP is a session-bearing node like any other, and it is the
 	// node the admin UI runs on — so it is where a logout and an account
 	// deletion actually happen. Before this, the aggregator had exactly ONE
 	// writer (the line above) and the CP's own list was neither contributed nor
@@ -726,7 +726,7 @@ type HAStateBundle struct {
 	// The PULLER verifies it against its own lease backend before importing
 	// (Finding 7 — a zombie leader serving stale state cannot be imported).
 	Epoch int64 `json:"epoch,omitempty"`
-	// Revocations is the leader's live session-revocation set (CHAOS-67).
+	// Revocations is the leader's live session-revocation set (CHAOS-68).
 	//
 	// Without it the standby was the one CP-class node with NO route into the
 	// revocation plane, and the consequence is specific rather than
@@ -896,7 +896,7 @@ func (s *controlPlaneServer) HASync(ctx context.Context, raw json.RawMessage) (j
 		PromoteRequested: globalHA.plannedPromotion.Load(),   // ADR-0004 Slice 1e: coordinated handoff
 		LeaderTerm:       globalHA.Status().Term,             // ADR-0004 Slice 1c/P2: seed standby epoch
 		Epoch:            globalHA.CurrentEpoch(),            // ADR-0005 S3: puller-side fence input
-		Revocations:      sessionRevoked.ExportRevocations(), // CHAOS-67: the standby verifies the same cookies
+		Revocations:      sessionRevoked.ExportRevocations(), // CHAOS-68: the standby verifies the same cookies
 	}
 
 	resp, _ := json.Marshal(bundle)

@@ -34,7 +34,7 @@ func loadSession(cfg sessionStartupConfig) error {
 		// going green over a lost revocation list is the failure being closed.
 		noteResidualQuarantine("session_revocations", cfg.RevocationsFile)
 		if err := sessionRevoked.LoadRevocations(); err != nil {
-			// CHAOS-67: a revocations file that was READ and could not be
+			// CHAOS-68: a revocations file that was READ and could not be
 			// PARSED is corrupt, and the pre-existing posture — log it, boot
 			// with an empty list — is fail-OPEN on the one control that can
 			// withdraw an already-issued session: every revoked cookie and

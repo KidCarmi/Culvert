@@ -10,7 +10,7 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 ### Security
 
 - Session revocations did not survive a restart and did not reach the cluster
-  (CHAOS-67). A Culvert session cookie is self-contained and is trusted on its
+  (CHAOS-68). A Culvert session cookie is self-contained and is trusted on its
   HMAC alone — nothing re-consults the user roster on a request, and the admin
   role is read out of the cookie — so the revocation list is the only way to
   withdraw authority from a session that is already issued, for up to seven
