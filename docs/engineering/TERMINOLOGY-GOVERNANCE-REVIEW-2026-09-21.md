@@ -186,7 +186,7 @@ Later review rounds found more errors, also fixed:
   here (a business-facing label promising more than the implementation delivers), but it is the same class
   of harm: an admin, a security engineer, or a support engineer trusts a label that does not describe what
   the product does.
-- **Canonical direction, applied in this same PR**: renamed the panel to **"OCSP Revocation"** (dropped
+- **Canonical direction, applied in this same PR**: renamed the panel to **"OCSP revocation"**, in sentence case per `PRODUCT-TERMINOLOGY.md`'s casing rule (dropped
   "/ CRL" until CRL fallback, register row OCSP-10, actually ships; OCSP-9 is stapling, a separate gap) and
   updated `docs/operator/ocsp-revocation-checking.md`'s one reference to match
   (`static/index.html:4477`, `docs/operator/ocsp-revocation-checking.md:4`). Roadmap text that describes the
