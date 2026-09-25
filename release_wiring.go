@@ -101,9 +101,11 @@ type releaseStartupConfig struct {
 	sigstoreWarn   string            // loud one-line note (identity set without a root) ("" ⇒ none)
 	sigstoreErr    error             // fatal Sigstore config error ⇒ Release Management disabled
 	// sigstoreIdentitySource / sigstoreRootSource are "default" or "override",
-	// set only when sigstoreActive — positive confirmation of which trust
-	// material is actually enforcing, distinct from sigstoreWarn's negative
-	// signal for a BROKEN override.
+	// set only when sigstoreActive AND the resolved verify mode can actually
+	// reach the Sigstore verifier (i.e. NOT VerifyDisabled, whose break-glass
+	// short-circuit in verifyIndexSignature never consults it) — positive
+	// confirmation of which trust material is actually enforcing, distinct
+	// from sigstoreWarn's negative signal for a BROKEN override.
 	sigstoreIdentitySource string
 	sigstoreRootSource     string
 	verifyMode             VerifyMode
@@ -142,6 +144,18 @@ func resolveReleaseStartupConfigFrom(getenv func(string) string) releaseStartupC
 	mode, warn := resolveCatalogVerifyMode(getenv(envReleaseCatalogVerify), nSchemes)
 	interval := resolveRefreshInterval(getenv(envReleaseRefreshInterval))
 	catalogURL, catalogURLSource := resolveCatalogURL(getenv(envReleaseCatalogURL))
+	// The identity/root SOURCE fields exist to positively confirm which trust
+	// material is actually ENFORCING (as opposed to sigstore_warn's negative
+	// signal for a broken override). In VerifyDisabled, verifyIndexSignature's
+	// own break-glass short-circuit returns before ever consulting trust.sigstore
+	// (release_catalog_verify.go) — nothing is enforcing ANY trust material, so
+	// reporting a resolved source here would claim enforcement that isn't
+	// happening. Withhold both fields in that one mode; VerifyPermissive still
+	// consults Sigstore for a present signature, so it keeps reporting sources.
+	identitySource, rootSource := sig.identitySource, sig.rootSource
+	if mode == VerifyDisabled {
+		identitySource, rootSource = "", ""
+	}
 	return releaseStartupConfig{
 		proxyRepo:              proxyRepo,
 		catalogDir:             catalogDir,
@@ -154,8 +168,8 @@ func resolveReleaseStartupConfigFrom(getenv func(string) string) releaseStartupC
 		sigstoreActive:         sig.active,
 		sigstoreWarn:           sig.warn,
 		sigstoreErr:            sig.err,
-		sigstoreIdentitySource: sig.identitySource,
-		sigstoreRootSource:     sig.rootSource,
+		sigstoreIdentitySource: identitySource,
+		sigstoreRootSource:     rootSource,
 		verifyMode:             mode,
 		verifyModeWarn:         warn,
 		refreshInterval:        interval,
