@@ -93,10 +93,11 @@ notes; spot-checked the runbook title against the workflow name (`resign-catalog
 Runbook") and the R2 terminology against CLAUDE.md's existing "R2 (`https://catalog.culvertlabs.com`)"
 description — consistent, no drift.
 
-**Spot-checked three carry-over items directly** against the then-current tree (`6c46ebd`), as prior reports have done,
-rather than assuming the backlog is unchanged just because no fix commit was seen in the window:
+**Spot-checked three carry-over items (four IDs: T-12, T-13, T-29, T-30) at their cited locations** in the
+then-current tree (`6c46ebd`), as prior reports have done. The other carry-over findings were not
+re-verified; they are carried over with their original evidence.
 - **T-13**: `docs/enterprise/TLS-INSPECTION-DEPLOYMENT.md:1` is still titled "TLS Inspection Deployment"
-  (in-app/API/GUI still say "SSL Inspection" throughout `static/index.html`, e.g. `healthcheck.go`'s
+  (in-app/API/GUI still say "SSL Inspection", e.g. in `static/index.html`, `healthcheck.go`'s
   `ssl_inspection` field, `policy.go`'s `SSLAction`) — unchanged.
 - **T-29/T-30**: `config.go:56-57` still spells the two settings `rate_limit`/`max_conns_per_ip` in YAML
   with no `rate_limit_rpm`/`conn_limit_max_per_ip`-style alias; the live admin API (`ui_config.go`), the
@@ -194,8 +195,12 @@ Later review rounds found more errors, also fixed:
   toggle", and the two places `roadmap/CHAOS-ENGINEERING-REVIEW.md` state the panel title (register row
   OCSP-10 and the §35 residuals list) are annotated as the title at the time, since renamed. The
   historical description itself is kept. This was a pure label
-  correction — no API field, metric name, config key, or audit event uses "CRL" anywhere (confirmed by the
-  same-subsystem grep above), so there was no wire-compatibility obligation and no migration plan needed.
+  correction. No API field, metric name, config key or audit event of the OCSP revocation checker uses
+  "CRL" (per the same-subsystem grep above), so there was no wire-compatibility obligation and no
+  migration plan was needed. "CRL" does appear elsewhere in the tree, but not for this checker: the
+  cluster enrollment revocation list for node certificates (`enrollment.go`, `controlplane_server.go`) is
+  a separate mechanism, and code comments in `mtls_ocsp_startup.go`/`mtls_ocsp_startup_config.go` still
+  say "OCSP/CRL". Those comments are internal and were not changed.
   If CRL fallback is added in the future, "OCSP / CRL Revocation" becomes accurate again and can be
   restored at that time.
 - **Affected surfaces**: GUI (`static/index.html:4477`), one operator-doc reference
@@ -227,7 +232,8 @@ Later review rounds found more errors, also fixed:
   Culvert deploys as binary/container; the UI says **node** or **instance**." T-51 (2026-08-29) removed
   the last labeled uses and deliberately left internal names alone (code comments, the
   `x-culvert-tenant-scope: appliance` vendor-extension value, component-module names).
-- **Complete inventory.** `git diff 46410c3 6c46ebd -U0 | grep -i appliance` finds 24 added lines. Line
+- **Complete inventory.** `git diff 46410c3 6c46ebd -U0 | grep -i '^+.*appliance'` finds 24 added lines
+  (the unfiltered grep also matches one removed line). Line
   numbers below are at `6c46ebd`. Each one is classified here:
   - **User- or operator-visible text — fixed to "node" or "Culvert":**
     - OpenAPI `GET /api/ocsp` `uncheckedEnforcingPaths` description: `api/openapi/openapi.yaml:483`,
@@ -261,7 +267,8 @@ Later review rounds found more errors, also fixed:
 ## Carried-Over Findings (unchanged)
 
 All fourteen previously-open finding IDs (thirteen backlog entries, since T-21 and T-32 are tracked as one
-paired item) remain open, unchanged, and re-confirmed against the then-current tree (`6c46ebd`):
+paired item) remain open with their original evidence. T-12, T-13, T-29 and T-30 were spot-checked at
+their cited locations in `6c46ebd` (see the Executive Summary); the rest were not re-verified:
 T-9, T-11, T-12, T-13 (residual), T-17, T-18, T-21+T-32 (paired), T-25 (residual), T-29, T-30, T-33, T-34,
 T-39. Full descriptions and the priority-ordered refactoring plan are unchanged from
 `TERMINOLOGY-GOVERNANCE-REVIEW-2026-09-09.md` and are not restated here to avoid drift between two
@@ -285,9 +292,9 @@ implementation, corrected in this same PR (XS, no migration risk, no wire surfac
 of the closed T-51 ("appliance" in customer-facing text) was also fixed. One new low-priority finding,
 T-60 (a documented audit event the tool-trust decision handler never emits), is left open for an
 API-contract change. The MCP
-canary-execution stream introduced no new drift once correctly re-audited (see "Corrections made in
-review"). The fourteen-ID carry-over backlog is otherwise unchanged and was independently re-confirmed (not
-merely assumed unchanged) for its three highest-visibility pre-existing items (T-12, T-13, T-29/T-30). No
+canary-execution stream produced one finding once re-audited, T-60 (see "Corrections made in review").
+The fourteen-ID carry-over backlog remains open with its original evidence. T-12, T-13, T-29 and T-30 were
+spot-checked at their cited locations; the others were not re-verified. No
 cosmetic or preference-driven renames are proposed. This report's first revision contained two factual
 errors, and later review rounds found more; all were caught by automated PR review before merge
 and corrected above rather than silently fixed —
