@@ -89,12 +89,15 @@ genuine, previously-undocumented mismatches between the legacy GUI (canonical, p
   recorded contracts, not a mechanical fix.
 - **T-56** (new): PAC's named traffic-steering ruleset is the **"steering profile"** in
   `docs/design/PRODUCT-TERMINOLOGY.md`'s canonical table (*"the fourth distinct 'Profile' concept ...
-  always say 'steering profile,' never bare 'profile,' on this screen"*), consistently applied in the
-  legacy GUI since T-50 (2026-08-29, confirmed still live: `static/index.html:2311-2312,2323,2347,2394`)
-  — but the new frontend's PAC screens say bare **"PAC profile"** / **"profile"** throughout, with no
-  "steering" qualifier anywhere in the four files that make up that surface
-  (`frontend/src/features/network/pac/ProfilesTab.tsx:1,297,324,384`, `ProfileDetail.tsx:1`,
-  `ProfileDraftEditor.tsx:1`, `PACPage.tsx:39`). This is the exact defect class T-50 fixed in the
+  always say 'steering profile,' never bare 'profile,' on this screen"*). The legacy GUI applies it in its
+  titles and labels since T-50 (`static/index.html:2311-2312,2323,2347,2394`) but NOT in its panel
+  description, which still says "Each profile" and "The **default** profile" (`:2316-2317`); the new
+  frontend's PAC screens say bare **"PAC profile"** / **"profile"** throughout, with no "steering"
+  qualifier anywhere — `frontend/src/features/network/pac/ProfilesTab.tsx:1,297,324,384`,
+  `ProfileDetail.tsx:1`, `ProfileDraftEditor.tsx:1`, `PACPage.tsx:39`, and also user-facing copy in
+  `ExceptionsTab.tsx:182,237,250,253`, `PoolsTab.tsx:173,196,236-237,266,381-382,406,410` and
+  `pacShared.tsx:22` (an earlier draft of this report listed only the first four files — found in
+  review). This is the exact defect class T-50 fixed in the
   legacy GUI, reintroduced independently in a surface T-50's own audit never covered — `docs/operator/
   pac-traffic-steering.md`, the operator runbook for this same feature, had the identical drift in its
   own prose (mixing a "## Steering profiles" heading with bare "a **profile** is..." sentences
@@ -116,11 +119,13 @@ same document's own heading already used, and now carries an explicit note recor
 frontend's outstanding wording gap (T-56) so a reader of the runbook is not misled into thinking the
 two UIs use consistent language today.
 
-**Not fixed this pass, queued to the backlog:** the code/GUI-string halves of T-55 and T-56 both
-require a change to `frontend/src/**` followed by a `frontend/dist` rebuild (the committed,
-deterministic production bundle CLAUDE.md documents as the only frontend artifact actually embedded
-into the binary) to take effect — this is a real build step with its own verification burden, not a
-same-PR drive-by text edit, so both are queued rather than rushed in here. This mirrors how this
+**Not fixed this pass, queued to the backlog:** the code/GUI-string halves of T-55 and T-56. Both are
+naming decisions (see each finding), and what they cost depends on the direction chosen: a direction
+that changes the new frontend needs a `frontend/src/**` edit plus a `frontend/dist` rebuild (the
+committed, deterministic production bundle CLAUDE.md documents as the only frontend artifact embedded
+into the binary); a direction that keeps the frontend's wording changes the legacy GUI and the
+canonical docs instead and needs no rebuild. Either way it is more than a same-PR drive-by text edit,
+so both are queued rather than decided here. This mirrors how this
 program has always treated a rename that needs more than a documentation edit to land (see T-29/T-30/
 T-12, and T-54's own code half in the still-open 2026-09-12 report).
 
@@ -196,12 +201,15 @@ and one is now partially fixed.
   *"the fourth distinct 'Profile' concept alongside file/decryption/CDR profiles — always say
   'steering profile,' never bare 'profile,' on this screen."*
 - **Current names:**
-  - Legacy GUI (canonical, T-50-compliant, confirmed live today): "Steering Profiles" (panel title,
+  - Legacy GUI (T-50-compliant in its titles and labels): "Steering Profiles" (panel title,
     `static/index.html:2311`), "+ New Steering Profile" (`:2312`), "Steering Profile ID"
     (`:2323`), "Save Steering Profile" (`:2347`), "Steering Profile" (simulator dropdown label,
-    `:2394`).
+    `:2394`) — but its panel description still says bare "Each profile" and "The **default** profile"
+    (`:2316-2317`), so the legacy screen is not fully compliant either.
   - New frontend (`frontend/src/features/network/pac/`): bare **"PAC profile(s)"** / **"profile"**
-    throughout, with the word "steering" appearing nowhere in any of the four files —
+    throughout, with the word "steering" appearing nowhere. Beyond the four files below, user-facing bare
+    "profile" copy also appears in `ExceptionsTab.tsx:182,237,250,253`,
+    `PoolsTab.tsx:173,196,236-237,266,381-382,406,410` and `pacShared.tsx:22` —
     `ProfilesTab.tsx:1` ("2F-E — PAC profiles: the listing..."), `:297` ("The PAC profiles could not be
     read."), `:324` ("PAC profiles" table caption), `:384` ("New PAC profile" dialog title);
     `ProfileDetail.tsx:1` ("2F-E — one PAC profile's lifecycle..."); `ProfileDraftEditor.tsx:1` ("2F-E
@@ -230,10 +238,11 @@ and one is now partially fixed.
   re-touching T-50's fix), and the operator runbook fixed in this same pass, which is why this report
   does not unilaterally pick a direction and instead records both options for whoever picks up the
   backlog item.
-- **Affected code:** `frontend/src/features/network/pac/ProfilesTab.tsx`, `ProfileDetail.tsx`,
-  `ProfileDraftEditor.tsx`, `PACPage.tsx` (comments + user-visible strings) if the "steering profile"
-  direction is chosen; alternatively `static/index.html` (5 strings) + `docs/design/
-  PRODUCT-TERMINOLOGY.md` (1 row) if the "PAC profile" direction is chosen instead.
+- **Affected code:** if the "steering profile" direction is chosen — every PAC file in
+  `frontend/src/features/network/pac/` carrying bare "profile" copy (`ProfilesTab.tsx`, `ProfileDetail.tsx`,
+  `ProfileDraftEditor.tsx`, `PACPage.tsx`, `ExceptionsTab.tsx`, `PoolsTab.tsx`, `pacShared.tsx`) AND the
+  legacy panel description at `static/index.html:2316-2317`; alternatively, if the "PAC profile" direction
+  is chosen, `static/index.html` (the five titled strings) + `docs/design/PRODUCT-TERMINOLOGY.md` (1 row).
 - **Affected API:** none either way — `/api/pac/profiles` and the `Profile` JSON shape are unaffected.
 - **Affected GUI:** the new frontend's PAC screens (or, under the alternative direction, the legacy
   GUI's PAC panel).
@@ -242,7 +251,7 @@ and one is now partially fixed.
   alternative direction, `docs/design/PRODUCT-TERMINOLOGY.md`'s Steering profile row would need
   updating instead.
 - **Affected Configuration:** none.
-- **Migration Complexity:** Small in either direction (a batch of string/comment edits in 4-5 files);
+- **Migration Complexity:** Small in either direction (a batch of string/comment edits in up to 8 files);
   Small-Medium once the "steering profile" direction's required `frontend/dist` rebuild + verification
   is counted, or once the "PAC profile" direction's canonical-doc update + legacy-GUI re-edit is
   counted.
