@@ -362,7 +362,10 @@ conflated banner, both fixed or queued under T-54). The roadmap section (found i
 `GET /api/ocsp` exposes "four rejection counters" (`roadmap/CHAOS-ENGINEERING-REVIEW.md:6159`) when
 `ui_security.go:1841-1846` exposes six rejection-reason counters; that line is corrected in this PR. Its
 description of the red banner as the signal that "something is answering with borrowed responses" is the
-same conflation T-54 now covers, so it is fixed with T-54's GUI work rather than here.
+same conflation T-54 now covers, so it is fixed with T-54's GUI work rather than here. The CHAOS-65 bullet added to
+`CLAUDE.md` (found in review) named the responder pre-flight guard `ssrf.PrivateHost` twice. The code
+calls `ssrf.PrivateHostContext` (`internal/ocsp/ocsp.go:596-601`) and its comment explains why the plain
+form is wrong there, so both mentions are corrected in this PR.
 The carry-over backlog grew from thirteen to fourteen entries (T-54 added, now covering three identifiers
 plus the metric-family correction); T-39 was re-confirmed unchanged. No cosmetic or preference-driven renames are proposed. **Process note, recorded rather than
 smoothed over, across every correction round:** this report's own first draft initially missed the
