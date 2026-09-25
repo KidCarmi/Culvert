@@ -287,11 +287,11 @@ and one is now partially fixed.
 All fifteen previously-open finding IDs (fourteen backlog entries, since T-21 and T-32 are tracked as
 one paired item) remain open and unchanged, re-confirmed where the audited window could have touched
 them (it did not): T-9, T-11, T-12, T-13 (residual), T-17, T-18, T-21+T-32 (paired), T-25 (residual),
-T-29, T-30, T-33, T-34, T-39, and T-54 (still queued on the still-unmerged 2026-09-12 report — see the
-Program Note). Full descriptions and the priority-ordered refactoring plan for all of these are
+T-29, T-30, T-33, T-34, T-39, and T-54 (queued on the 2026-09-12 report, which was still unmerged at
+this snapshot — see the Program Note — and has since merged to `main`). Full descriptions and the priority-ordered refactoring plan for all of these are
 unchanged from `TERMINOLOGY-GOVERNANCE-REVIEW-2026-09-09.md` (T-9 … T-39) and
-`TERMINOLOGY-GOVERNANCE-REVIEW-2026-09-12.md` (T-54 — added by PR #1372, which merges before this report;
-until then its full text is readable on that PR) and are not restated here to avoid drift between
+`TERMINOLOGY-GOVERNANCE-REVIEW-2026-09-12.md` (T-54 — added by PR #1372, merged to `main` before this report;
+that file is the authoritative text for T-54) and are not restated here to avoid drift between
 two descriptions of the same open items. **T-55 and T-56 (above) are new this pass**, bringing the
 open count to seventeen IDs (sixteen backlog entries).
 
