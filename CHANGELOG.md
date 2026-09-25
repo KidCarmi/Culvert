@@ -260,7 +260,7 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   was cached for a fixed hour regardless of the response's own `NextUpdate`, so
   a response a minute from expiry kept admitting the certificate for another 59;
   cache lifetime is now capped at the responder's own deadline.
-- **Behaviour change for operators running `security.ocsp_check: true`:**
+- **Behaviour change for operators running `proxy.ocsp_check: true`:**
   responder queries are now made directly and no longer honour `HTTP(S)_PROXY`
   from the environment, and a responder on a private address is refused. An
   egress-restricted deployment must allow the responder hosts named in its
