@@ -9,6 +9,64 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Security
 
+- Client-supplied tracing headers reached the process log unbounded
+  (SEC-REQID-1). `setupRequestTracing` runs on 100% of proxied traffic — the
+  second statement in `handleRequest`, ahead of the connection limiter, the IP
+  filter and authentication — and reads two headers the *client* chooses,
+  `X-Request-Id` and `Traceparent`. It bounded neither. The accepted request id
+  then reached roughly twenty process-log sites (every `POLICY_*` decision line
+  plus `AUTH_FAIL` / `IP_BLOCKED` / `RATE_LIMITED` / `BLOCKED` / `INVALID_HOST`)
+  as a bare `%s` inside the `{req_id=… identity=… action=…}` block, the response
+  header, and the forwarded request. The only sanitisation was `strings.ReplaceAll`
+  for CR and LF — the CWE-117 barrier, which correctly stops whole-record forgery
+  but is not what `sanitizeLog` does, since `sanitizeLog` scrubs every byte below
+  `0x20` and `0x7F`. So `ESC`, `NUL`, `BEL`, `VT`, `FF` and `DEL` reached the
+  forensic log verbatim, and a space could inject extra `key=value` tokens into
+  the decision line's brace block. Nothing bounded the length at all: the proxy
+  listener sets no `MaxHeaderBytes`, so net/http's 1 MiB default was the only
+  ceiling, and eight requests carrying a 512 KiB request id wrote 4,194,968 bytes
+  into the process log — the same amplification CHAOS-63 measured against the
+  audit log, reached here through the unauthenticated data plane rather than the
+  admin API, and invisible to every storage-health surface because each of those
+  writes succeeds (CWE-778, OWASP A09:2021). Both headers are now bounded and
+  charset-checked where they are read: at most 128 bytes (request id) or 255
+  (traceparent), visible ASCII with no whitespace. A value that fails is treated
+  exactly as an absent one — a fresh id is minted and overwrites the hostile value
+  on the request, the response and the wire — so a tracing header can never decide
+  whether traffic flows. Rejections are counted as
+  `culvert_tracing_header_rejected_total{header=…}`, surfaced on `GET /api/stats`
+  and in the admin UI, and logged once per minute without ever echoing the
+  refused value. A repeated header is refused on the same grounds — `Header.Get`
+  validates only the first field value, so an acceptable first `X-Request-Id`
+  paired with a hostile second one previously reached the upstream uncounted —
+  and the minted value replaces the whole field, so exactly one value is
+  forwarded.
+
+- **A request header could name a root-executed artifact (SEC-BOOTSTRAP-HOST-1).**
+  The Control Plane's one-click DP bootstrap renders two artifacts a human is
+  told to run with root authority — the install script it documents as
+  `curl -fsSL … | sudo bash`, and the `docker-compose.yml` that script
+  downloads. Two of the values interpolated into them came straight off the
+  wire (`r.Host`, and `X-Forwarded-Host` when `proxy.trust_forwarded_headers`
+  is on), and the script carried them inside a **double-quoted** shell word:
+  `CP_BASE="{{.CPBase}}"`. A double-quoted shell word still performs command
+  substitution, so a request whose Host header was `cp.example.com$(…)`
+  produced a script that ran the attacker's command, as root, before it did
+  anything else. Go's header validation is not a mitigation — measured against
+  `net/http`, it rejects `"`, a backtick, `{` and space but accepts
+  `$ ( ) ' ;`, and `X-Forwarded-Host` is filtered not at all.
+
+  Both bootstrap endpoints and `POST /api/cluster/token` now **refuse** a
+  derived authority that is not a plain `host[:port]` (400, nothing rendered),
+  the renderers re-validate at the sink, and the templates single-quote what
+  they interpolate. A compose document is also refused (503) when the cluster
+  CA has no fingerprint to pin, rather than served with an unpinned enrollment
+  URL. Refusals are counted on `culvert_bootstrap_host_refused_total` and
+  logged once a minute; the caller is told only `invalid host`. Operators
+  behind a reverse proxy should confirm it sets `Host` / `X-Forwarded-Host`
+  explicitly rather than appending a client value — see
+  `docs/operator/dp-bootstrap-artifact-safety.md`.
+
 - Public release promotion ran ahead of the evidence that was supposed to
   authorize it. On `ci.yml` run 35507615339 (SHA `3d8c9bb`) the `docker` job
   published and cosign-signed the `latest`, `v0.0.N` and `0.0.N` image tags at
@@ -260,7 +318,7 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   was cached for a fixed hour regardless of the response's own `NextUpdate`, so
   a response a minute from expiry kept admitting the certificate for another 59;
   cache lifetime is now capped at the responder's own deadline.
-- **Behaviour change for operators running `security.ocsp_check: true`:**
+- **Behaviour change for operators running `proxy.ocsp_check: true`:**
   responder queries are now made directly and no longer honour `HTTP(S)_PROXY`
   from the environment, and a responder on a private address is refused. An
   egress-restricted deployment must allow the responder hosts named in its
@@ -282,7 +340,7 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   forward proxy means the handshake to an `https://` parent proxy — inspected
   HTTPS origin handshakes build their own TLS config and are **not**
   revocation-checked. Because every counter reads zero either way, "found
-  nothing wrong" and "never consulted" were the same reading. The appliance now
+  nothing wrong" and "never consulted" were the same reading. Culvert now
   says so in a warning at the moment the control is enabled, in a banner on the
   OCSP panel, in `coverage`/`uncheckedEnforcingPaths` on `GET /api/ocsp`, and
   in `culvert_ocsp_path_checked{path}` — alongside a new `culvert_ocsp_*`
@@ -311,6 +369,15 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 - `google.golang.org/grpc` bumped `v1.83.1` → `v1.83.2` (CVE-2026-84445,
   HIGH: gRPC-Go xDS servers, denial of service via crash). Module graph
   only; no code change.
+- The Cluster panel's Distributed Rate Limiting card now shows **Stale
+  Episodes** — the number of times this node's cluster-wide rate-limit
+  broadcast has gone fresh→stale since startup (`GET /api/cluster/rate-limits`
+  already returned `remote_counts_stale_episodes`; the panel never rendered
+  it). The existing stale banner only appears while the broadcast is
+  *currently* stale, so an operator reviewing the panel after a Control Plane
+  blip had recovered saw a fully healthy panel with no way to tell "did this
+  happen once overnight, or six times" without SSHing in and grepping the
+  process log for the CHAOS-61 transition line. Read-only, no behavior change.
 
 ### Performance
 
@@ -366,6 +433,10 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   `/api/upstream/entries/{id}/credential`) and the CDR enrollment recovery
   endpoints (`/api/cdr/instances/enroll/recover`,
   `/api/cdr/instances/enroll/receipts`).
+- Admin API operations (contract 2.1.0): `GET/PUT /api/traffic/redaction` —
+  the canonical name for the traffic-log destination-privacy posture
+  (terminology governance T-17); `/api/decryption/redaction` remains a
+  fully supported, non-deprecated alias of the same operations.
 
 ### Changed — API contract 1.2.0 → 2.0.0 (BREAKING)
 
@@ -411,6 +482,36 @@ endpoints for credentialed parents.
 
 ### Performance
 
+- Concurrent leaf-certificate cache misses for one host are collapsed onto a
+  single sign. `Manager.GetCert` is the `tls.Config.GetCertificate` callback
+  for every SSL-inspected CONNECT, so a miss there is the most expensive unit
+  of work the appliance performs per connection — `signLeaf` measures 144 µs,
+  19.6 KB and 327 allocations on the reference box, 85% of it the irreducible
+  P-256 sign inside `x509.CreateCertificate`. Nothing stood between the cache
+  probe and the sign, so every handshake that arrived for a host while the
+  first was still signing started its own, and the duplicates were pure waste:
+  same host, same CA, same shared leaf key, same 24-hour window, with the last
+  writer simply overwriting the others in the cache. The amplification grew
+  with core count, because what bounded the herd was how many signs could be
+  in flight at once — 64 workers over 256 cold hosts measured 1.00 signs per
+  host at `GOMAXPROCS=1`, 1.35 at 2 and 1.61 at 4, so the 16/32-core hardware
+  the appliance ships to sat further up that curve. It landed during exactly
+  the cold-cache burst the cache exists to absorb: a restart, a TTL boundary
+  (entries are created by traffic and expire on one uniform 1-hour TTL, so a
+  working set goes cold together), or a traffic spike. A leader/follower
+  single flight — the same shape already used for `hostIPCache`, `jwksCache`
+  and `internal/ocsp` — takes that cold burst from 28.13 ms to 14.37 ms
+  (−48.9%), 157,550 allocations to 92,329 (−41.4%) and 9.75 MB to 5.85 MB
+  (−40.0%), at exactly 1.00 signs per host. A follower receives the leader's
+  certificate, which is the one it would have signed itself, so the cache, its
+  TTL, the LRU, the CA-validity refusal and the fail-closed posture are
+  unchanged, and the steady-state hit path is at parity (190.1 ns against
+  189.6 ns, same 32 B and one allocation). New counter
+  `culvert_cert_sign_singleflight_joined_total` reports the duplicate signs
+  avoided; `culvert_cert_cache_misses_total` keeps its meaning — hits plus
+  misses is still the number of `GetCert` calls — but is no longer the same
+  thing as the sign count, for which
+  `culvert_cert_sign_duration_seconds_count` is exact.
 - The per-request policy decision line is built by appending rather than by
   `logger.Printf`, and the benchmark that measured it was measuring a disabled
   logger. `applyPolicyDecision` emits exactly one `POLICY_*` line per proxied
@@ -498,6 +599,25 @@ endpoints for credentialed parents.
   metric, or dashboard change.
 
 ### Fixed
+
+- A leaf-certificate sign already in flight could outlive the CA it was started
+  against. Replacing the root CA (`InitCA`, `ImportBundle`, `LoadCustomCA`, and
+  `ClearCache`) cleared the leaf cache, which is not sufficient on its own: a
+  sign that began before the replacement was still running against the outgoing
+  CA, and when it completed it repopulated the just-cleared cache with that
+  outgoing CA's leaf — served to every client for the full one-hour cache TTL,
+  and rejected by any client that trusts only the newly installed CA. A CA
+  replacement is exactly the moment an operator expects the old CA to stop
+  being used. The cache now carries a CA *generation* retired in the same
+  locked step that clears it, a sign records the generation it started under,
+  and a result whose generation has been retired is dropped rather than cached;
+  a new CA-install path that cleared the cache without retiring the generation
+  would silently reintroduce this, so that is pinned structurally rather than
+  behaviourally. Found by Codex review on the leaf-sign single flight above,
+  which briefly widened the same window: a caller arriving *after* the
+  replacement could join the pre-replacement sign and be handed its leaf, where
+  previously it would have signed against the new CA itself. Flights are now
+  scoped to the generation, so generations never join each other.
 
 - A SOCKS5 listener bind failure no longer terminates the whole appliance
   (CHAOS-66). `startSOCKS5` bound with a single `logFatalf` branch, and
