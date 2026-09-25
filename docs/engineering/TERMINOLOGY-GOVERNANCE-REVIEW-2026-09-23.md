@@ -171,7 +171,9 @@ for holding the score rather than moving it for a small net-positive pass.
   labels and status messages coupled to those two flows, so the same panel does not rename the button
   and then report "Sync complete": the per-feed row button ("Sync" → "Refresh"), the blocklist toast
   ("Sync complete - …" → "Refresh complete - …"), and the threat-feed status line ("Syncing threat
-  feeds…"/"Sync complete."/"Sync failed:" → "Refreshing…"/"Refresh complete."/"Refresh failed:"). The
+  feeds…"/"Sync complete."/"Sync failed:" → "Refreshing…"/"Refresh complete."/"Refresh failed:"). A
+  failed blocklist refresh used to toast the server's raw "Error: sync failed: …" body; the client now
+  shows "Refresh failed: …" and drops the server's prefix, leaving the API error text unchanged. The
   periodic-schedule wording ("Blocklist Feed Auto-Sync", "Sync Interval", "Last Sync") describes the
   automatic cadence, not the manual action, and is left as is. (The coupled strings were added after
   review; see the Process Note.) Updated the one Go doc-comment quoting the old label
@@ -324,7 +326,8 @@ both verified against the source and corrected before merge:
   action and risk scaled down to match.
 - T-55 renamed two buttons but left the flows they start reporting "Sync complete"/"Sync failed" and a
   per-feed "Sync" row button on the same panel, which created a same-panel mismatch. The coupled labels
-  and status messages now say "Refresh" as well. API paths, JS handler names and audit action strings
+  and status messages now say "Refresh" as well, including the failed-refresh toast, which used to
+  echo the server's "sync failed:" prefix. API paths, JS handler names and audit action strings
   are unchanged.
 
 ---

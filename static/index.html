@@ -11326,7 +11326,11 @@ async function syncBlocklistFeed(url) {
     toast(`Refresh complete - ${d.domains_synced} new domains imported`, 'success');
     fetchBlocklistFeed();
     fetchBlocklist();
-  } catch(e) { toast('Error: ' + e.message, 'error'); }
+  } catch(e) {
+    // The server's error body is "sync failed: <cause>" (API text, unchanged);
+    // show it under the button's own verb instead of echoing the old prefix.
+    toast('Refresh failed: ' + String(e.message || '').trim().replace(/^sync failed:\s*/i, ''), 'error');
+  }
 }
 
 async function saveSettings() {
