@@ -361,8 +361,8 @@ func (ps *PolicyStore) Load(path string) error {
 			// way, on the next rule mutation's own persist attempt.
 			ps.mu.Lock()
 			ps.path = path
-			ps.mu.Unlock()
 			ps.adoptUnsaved.Store(false)
+			ps.mu.Unlock()
 			if saveErr := ps.SaveErr(); saveErr != nil {
 				ps.adoptUnsaved.Store(true)
 				logWarnf("Policy: adopted %s but could not persist current rules yet: %v", sanitizeLog(path), saveErr)
@@ -417,9 +417,9 @@ func (ps *PolicyStore) Load(path string) error {
 		}
 	}
 	ps.sortLocked()
-	ps.mu.Unlock()
 	// A successfully parsed, existing file is durable by definition.
 	ps.adoptUnsaved.Store(false)
+	ps.mu.Unlock()
 	// Restore persisted version from sidecar .meta file.
 	ps.loadMeta()
 	// One-time idempotent ID migration: persist newly-assigned stable IDs so
@@ -536,6 +536,15 @@ func (ps *PolicyStore) SaveErr() error {
 	if path == "" {
 		return nil
 	}
+	return ps.saveTo(path)
+}
+
+// saveTo persists the current rules to path, a value SaveErr snapshotted
+// before waiting on saveMu. A concurrent Load may adopt a DIFFERENT path in
+// that window, so a successful write clears adoptUnsaved only when path is
+// still the store's current path — a save that landed on a superseded path
+// says nothing about whether the current one is durable.
+func (ps *PolicyStore) saveTo(path string) error {
 	// Mutations may proceed while persistence runs, but saves themselves must be
 	// ordered end-to-end. Otherwise an older snapshot can rename after a newer
 	// save and regress durable policy state.
@@ -562,7 +571,11 @@ func (ps *PolicyStore) SaveErr() error {
 	if err := atomicWriteFile(path, data, 0o600); err != nil {
 		return fmt.Errorf("write policy rules: %w", err)
 	}
-	ps.adoptUnsaved.Store(false)
+	ps.mu.Lock()
+	if ps.path == path {
+		ps.adoptUnsaved.Store(false)
+	}
+	ps.mu.Unlock()
 	ps.saveMetaSnapshot(path, meta)
 	return nil
 }

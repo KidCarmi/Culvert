@@ -299,3 +299,33 @@ func TestAPIPolicy_GET_DraftPersistedReflectsCandidateNotRunning(t *testing.T) {
 		t.Errorf("persisted = %v, want false — the draft candidate has no persistence path even though the running store does", resp["persisted"])
 	}
 }
+
+// TestPolicyStore_StalePathSaveDoesNotClearAdoptionFailure pins a Codex
+// finding (PR #1445): a save that snapshotted the OLD path before a SIGHUP
+// adopted a new, unwritable one must not clear the adoption-failure flag when
+// it later succeeds — it wrote a superseded path, and the current one still
+// holds nothing.
+func TestPolicyStore_StalePathSaveDoesNotClearAdoptionFailure(t *testing.T) {
+	resetStorageWriteHealthForTest()
+	t.Cleanup(resetStorageWriteHealthForTest)
+
+	oldPath := filepath.Join(t.TempDir(), "old-policy.json")
+	ps := &PolicyStore{}
+	ps.ReplaceAll([]PolicyRule{{Priority: 1, Name: "r", Action: ActionAllow}})
+
+	newPath := filepath.Join(t.TempDir(), "no-such-dir", "policy.json")
+	if err := ps.Load(newPath); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if ps.Persisted() {
+		t.Fatal("precondition: adoption of an unwritable path must report Persisted()=false")
+	}
+	// The in-flight mutation's save, which snapshotted oldPath earlier,
+	// now completes successfully.
+	if err := ps.saveTo(oldPath); err != nil {
+		t.Fatalf("saveTo(oldPath): %v", err)
+	}
+	if ps.Persisted() {
+		t.Fatal("a successful save to a SUPERSEDED path cleared the adoption failure — the warning is hidden while the current path holds no policy file")
+	}
+}
