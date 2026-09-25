@@ -27,8 +27,9 @@ import (
 // WHAT IS RESOLVED HERE, AND WHAT IS NOT. This file resolves the tuple and runs the engine. It
 // decides NOTHING: the verdict is canary.EvaluateExactPermit, a pure function in the readiness
 // engine, and enforcement stays exactly where it was — the policy engine decides every real
-// request, unchanged. This row only stops a node reporting Ready for an experiment whose every
-// call would be refused.
+// request, unchanged. This row only stops the next FULL ACTIVATION PREFLIGHT admitting an
+// experiment whose every call would be refused. NOT the node's own readiness surface — the fact is
+// factActivation, so EvaluateNode skips it.
 //
 // NO SECOND EVALUATOR. The tuple is built by mcpruntime.ExactPermitTuple, which shares
 // GatewayServerRef / GatewayToolRef with the live request path and routes the operation class
@@ -56,26 +57,62 @@ import (
 // not the exact one-of-everything shape, a missing registry or catalog record, a tuple that
 // cannot be built, or an engine error all yield false with a bounded reason.
 func canaryExactPolicyPermit(scope rollout.ScopeSpec, reviewed []canary.ReviewedTarget, now time.Time) (bool, canary.PermitReason) {
-	r := canary.EvaluateExactPermit(buildExactPermitInput(scope, reviewed, now))
-	return r == canary.PermitOK, r
+	f := canaryExactRequestFacts(scope, reviewed, now)
+	return f.Permit, f.PermitReason
+}
+
+// exactRequestFacts carries both activation facts the exact First-Canary request decides, each
+// with its own bounded refusal reason. They are returned together because they are two questions
+// about ONE request and must be answered from ONE observation of node state.
+type exactRequestFacts struct {
+	// Permit — blocker #14. The exact tuple resolves to a plain, executable, invariant ALLOW.
+	Permit       bool
+	PermitReason canary.PermitReason
+	// CredentialFree — blocker #9, first disjunct. Every authoritative credential layer for that
+	// same request is empty, so no credential planning, materialization, provider access or
+	// Authorization header can arise from it.
+	CredentialFree       bool
+	CredentialFreeReason canary.CredentialFreeReason
+}
+
+// canaryExactRequestFacts resolves BOTH exact-request activation facts from ONE coherent capture.
+//
+// THE SHARED CAPTURE IS THE POINT, not a micro-optimisation. Resolving them separately would take
+// two reconcile+snapshot pairs, and between them the registry and catalog publish independently —
+// so the permit could be decided against an inventory in which the tool needs no credential while
+// the credential fact is decided against one in which it does, or the reverse. Each verdict would
+// be individually true and their conjunction would describe no state that ever existed. One
+// capture makes the pair a statement about a single observed inventory.
+//
+// It is a pure READ with the same properties as canaryExactPolicyPermit: it promotes nothing, arms
+// nothing, publishes nothing, and fails closed on every step it cannot establish.
+func canaryExactRequestFacts(scope rollout.ScopeSpec, reviewed []canary.ReviewedTarget, now time.Time) exactRequestFacts {
+	pi, cf := buildExactPermitInput(scope, reviewed, now)
+	pr := canary.EvaluateExactPermit(pi)
+	cr := canary.EvaluateCredentialFree(cf)
+	return exactRequestFacts{
+		Permit: pr == canary.PermitOK, PermitReason: pr,
+		CredentialFree: cr == canary.CredFreeOK, CredentialFreeReason: cr,
+	}
 }
 
 // buildExactPermitInput gathers everything canary.EvaluateExactPermit needs for the exact
 // First-Canary request. Split from the caller so the resolution reads top-to-bottom and the
 // verdict stays a single call to the pure engine.
-func buildExactPermitInput(scope rollout.ScopeSpec, reviewed []canary.ReviewedTarget, now time.Time) canary.PermitInput {
+func buildExactPermitInput(scope rollout.ScopeSpec, reviewed []canary.ReviewedTarget, now time.Time) (canary.PermitInput, canary.CredentialFreeInput) {
 	unavailable := canary.PermitInput{TupleBuilt: false}
+	noCredFacts := canary.CredentialFreeInput{Resolved: false}
 	// EXACTLY ONE of each. The permit speaks about ONE request; a scope admitting two tenants or
 	// two tools has no single exact request to speak about. This is not a re-implementation of
 	// blocker #5's gate (canary.ValidateFirstCanaryScope, its own readiness row) — it is this
 	// resolver refusing to pick one element out of an ambiguous scope and call it "the" request.
 	if len(scope.Tenants) != 1 || len(scope.Tools) != 1 || len(scope.Principals) != 1 {
-		return unavailable
+		return unavailable, noCredFacts
 	}
 	tenant, principal, st := scope.Tenants[0], scope.Principals[0], scope.Tools[0]
 	snap := mcpGatewayPolicySnapshot()
 	if snap == nil {
-		return unavailable
+		return unavailable, noCredFacts
 	}
 	// ONE COHERENT CAPTURE of the registry and the catalog, reconciled first — the same seam
 	// and the same reasoning as the blocker-#13 row: reconcile-then-read across two lock
@@ -84,12 +121,12 @@ func buildExactPermitInput(scope rollout.ScopeSpec, reviewed []canary.ReviewedTa
 	// two values and nothing re-reads the inventory.
 	cat, servers, ok := mcpToolTrustReconcileSnapshotFor()
 	if !ok {
-		return unavailable
+		return unavailable, noCredFacts
 	}
 	rec, recOK := cat.Get(catalog.ToolKey{Server: registry.ServerID(st.Server), Name: st.Name})
 	srv, srvOK := servers.Get(registry.ServerID(st.Server))
 	if !recOK || !srvOK {
-		return unavailable
+		return unavailable, noCredFacts
 	}
 	// The reviewed determination is asked against the CANDIDATE set the activation would bind,
 	// not the active one: at preflight time nothing is armed, which is the question being
@@ -110,7 +147,7 @@ func buildExactPermitInput(scope rollout.ScopeSpec, reviewed []canary.ReviewedTa
 		ReviewedReadFirst: readFirst,
 	})
 	if !built {
-		return unavailable
+		return unavailable, noCredFacts
 	}
 	dec, trace, err := mcpruntime.EvaluateExactPermitTuple(snap, in)
 	pi := canary.PermitInput{
@@ -128,7 +165,26 @@ func buildExactPermitInput(scope rollout.ScopeSpec, reviewed []canary.ReviewedTa
 			pi.WinnerResolved, pi.WinnerConditionFields = true, rule.ConditionFields()
 		}
 	}
-	return pi
+	// Blocker #9. The three authoritative credential statements, taken from the SAME decision and
+	// the SAME two snapshots the permit was decided on, so the two facts can never disagree about
+	// which state they describe. Resolved is true only when all three were actually established;
+	// every early return above leaves it false.
+	//
+	// AN ENGINE ERROR IS NOT A CREDENTIAL-FREE ANSWER, and getting this wrong is subtle. On that
+	// path `dec` is the zero Decision, so the POLICY statement reads "" — and against an empty
+	// inventory the verdict would be CredFreeOK: "provably credential-free" for a tuple whose
+	// policy verdict could not be computed at all. The tempting defence is that the permit row
+	// refuses the same tuple (PermitEvaluationFailed) so the node cannot be Ready anyway. That is
+	// true today and is exactly the wrong shape of argument: it makes THIS row's soundness depend
+	// on ANOTHER row staying required, and it overstates what was established on a surface an
+	// operator reads. So an engine error is reported as NOT ESTABLISHED, self-contained.
+	cf := canary.CredentialFreeInput{
+		Resolved:                 err == nil,
+		PolicyCredentialProfile:  dec.Obligations.CredentialProfile,
+		ServerCredentialProfile:  string(srv.CredentialProfile),
+		CatalogCredentialProfile: string(rec.Fingerprint.CredentialProfile),
+	}
+	return pi, cf
 }
 
 // exactPermitCurrentTarget projects the CURRENT authoritative target for the exact tool from the

@@ -33,6 +33,7 @@ func allTrueFacts() Facts {
 		ToolFingerprintCurrent:       true,
 		ToolCatalogUsable:            true,
 		ExactPolicyPermit:            true,
+		FirstCanaryCredentialFree:    true,
 		RollbackPathHealthy:          true,
 		RollbackCoordinatorRehearsed: true,
 		BudgetConfigured:             true,
@@ -96,6 +97,7 @@ func TestEvaluate_EachFactIsIndependentlyLoadBearing(t *testing.T) {
 		{"ToolFingerprintCurrent", ReasonToolFingerprintStale},
 		{"ToolCatalogUsable", ReasonToolNotCatalogUsable},
 		{"ExactPolicyPermit", ReasonExactPolicyNotExecutable},
+		{"FirstCanaryCredentialFree", ReasonCredentialPathRequired},
 		{"RollbackPathHealthy", ReasonRollbackPathUnhealthy},
 		{"RollbackCoordinatorRehearsed", ReasonRollbackCoordinatorRehearsalPending},
 		{"BudgetConfigured", ReasonBudgetNotConfigured},
@@ -143,6 +145,7 @@ func TestEvaluate_ReasonVocabularyParity(t *testing.T) {
 		"LiveApprovalValid": ReasonLiveApprovalInvalid, "ServerUsable": ReasonServerNotUsable,
 		"ToolFingerprintCurrent": ReasonToolFingerprintStale, "ToolCatalogUsable": ReasonToolNotCatalogUsable,
 		"ExactPolicyPermit":            ReasonExactPolicyNotExecutable,
+		"FirstCanaryCredentialFree":    ReasonCredentialPathRequired,
 		"RollbackPathHealthy":          ReasonRollbackPathUnhealthy,
 		"RollbackCoordinatorRehearsed": ReasonRollbackCoordinatorRehearsalPending,
 		"BudgetConfigured":             ReasonBudgetNotConfigured,
@@ -170,7 +173,7 @@ func TestEvaluate_ReasonVocabularyParity(t *testing.T) {
 // approval/server/fingerprint/catalog-usability/budget) as unmet, so node_ready reflects NODE
 // deficiencies alone. With every node fact satisfied but every activation fact false,
 // EvaluateNode must be Ready with an empty Unmet set, while the full Evaluate reports exactly
-// the eight activation reasons.
+// the ten activation reasons.
 //
 // The expected set and the constructed Facts are both checked AGAINST readinessChecks rather
 // than trusted as hand-written enumeration (Codex P2, PR #1378). Without those two derived
@@ -184,7 +187,8 @@ func TestEvaluateNode_ExcludesActivationInputs(t *testing.T) {
 		ReasonScopeNotBounded: true, ReasonScopeNotReadFirst: true, ReasonScopeNotExactFirstCanary: true,
 		ReasonLiveApprovalInvalid: true, ReasonServerNotUsable: true, ReasonToolFingerprintStale: true,
 		ReasonToolNotCatalogUsable: true, ReasonExactPolicyNotExecutable: true,
-		ReasonBudgetNotConfigured: true,
+		ReasonCredentialPathRequired: true,
+		ReasonBudgetNotConfigured:    true,
 	}
 
 	// DERIVED CHECK 1 -- membership. The hand-written map above must equal the factActivation
@@ -206,12 +210,13 @@ func TestEvaluateNode_ExcludesActivationInputs(t *testing.T) {
 		}
 	}
 
-	// Node facts all true; the nine activation facts all false.
+	// Node facts all true; the ten activation facts all false.
 	f := allTrueFacts()
 	f.ScopeBounded, f.ScopeReadFirst, f.ScopeExactFirstCanary = false, false, false
 	f.LiveApprovalValid, f.ServerUsable = false, false
 	f.ToolFingerprintCurrent, f.BudgetConfigured = false, false
 	f.ToolCatalogUsable, f.ExactPolicyPermit = false, false
+	f.FirstCanaryCredentialFree = false
 
 	// DERIVED CHECK 2 -- the fixture matches its own description. Asked directly, every
 	// factActivation accessor must answer false and every factNode accessor true. Check 1 alone
@@ -228,7 +233,7 @@ func TestEvaluateNode_ExcludesActivationInputs(t *testing.T) {
 	if !node.Ready || len(node.Unmet) != 0 {
 		t.Fatalf("node readiness must be Ready when every NODE fact holds regardless of activation inputs, got ready=%v unmet=%v", node.Ready, node.Unmet)
 	}
-	// The full verdict must surface exactly the nine activation reasons (nothing node-level).
+	// The full verdict must surface exactly the ten activation reasons (nothing node-level).
 	full := Evaluate(f)
 	if full.Ready {
 		t.Fatal("full readiness must not be ready with activation inputs unmet")
