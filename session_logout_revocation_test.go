@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -25,10 +27,30 @@ func logoutTestSession(t *testing.T, sub string) (value, key string) {
 	if !session.HasSigningKey() {
 		initSessionSecret()
 	}
+	// The Jti MUST be unique per call, and this is the one line in the file
+	// worth reading twice. `Exp` has second granularity and every other field
+	// here is fixed, so a deterministic Jti makes the whole payload
+	// byte-identical between two mints in the same wall-clock second — which
+	// under `-count=2` means the second "freshly minted" cookie is exactly the
+	// one the first run just revoked, and the precondition fails with
+	// "session: revoked".
+	//
+	// That is the C5.1 defect reproduced inside the test written to check
+	// revocation: `Session.Jti`'s own doc comment records that it was added
+	// because "without Jti the (Sub, Role, Exp-in-seconds) tuple yielded a
+	// byte-identical payload, identical b64, identical HMAC, and an
+	// effectively-revoked cookie if any prior login of that tuple had been
+	// revoked". A fixture that hard-codes the uniqueness field defeats the
+	// mechanism it exists to provide (caught by CI's determinism lane, which
+	// runs -count=2; a plain -shuffle=on run passes).
+	jti := make([]byte, 16)
+	if _, err := rand.Read(jti); err != nil {
+		t.Fatalf("rand: %v", err)
+	}
 	raw, err := encodeSession(&Session{
 		Sub: sub,
 		Exp: time.Now().Add(time.Hour).Unix(),
-		Jti: sub + "-jti",
+		Jti: hex.EncodeToString(jti),
 	})
 	if err != nil {
 		t.Fatalf("encodeSession: %v", err)
