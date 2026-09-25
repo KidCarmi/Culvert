@@ -37,6 +37,8 @@ import (
 	"time"
 
 	pb "github.com/KidCarmi/Sluice/proto/sluicev1"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 // ─── Outcome + result shape ─────────────────────────────────────────────────
@@ -442,15 +444,135 @@ func runCDRStage(r *http.Request, req *http.Request, body, scanBody []byte, ct, 
 func cdrHandleCallError(err error, profile, mode string, ms int64, cfg CDRConfig) *cdrRunResult {
 	if IsFileTooLarge(err) {
 		atomic.AddInt64(&statCDROversizeSkipped, 1)
-		logger.Printf("CDR: sluice rejected oversize — %v", err)
+		// CWE-117: a gRPC status description is written by Sluice, not by this
+		// process, so it is sanitised like any other non-local value.
+		logger.Printf("CDR: sluice rejected oversize — %s", sanitizeLog(err.Error()))
 		return cdrPassSkipped("SKIPPED_OVERSIZE")
 	}
-	logger.Printf("CDR: call error: %v", err)
+	noteCDRCallError(err)
+	return cdrErrorOutcome(err.Error(), profile, mode, ms, cfg)
+}
+
+// cdrCallErrorLogInterval bounds the CDR call-error log line. safeCDRSanitize
+// runs once per inspected response body, so an unbounded line here is a
+// request-path amplifier: internal/logsink BLOCKS a producer on a full queue,
+// so logging every failed Sanitize adds latency to every proxied response for
+// as long as Sluice is unwell.
+const cdrCallErrorLogInterval = time.Minute
+
+// cdrCallErrorLogAt is the UnixNano of the last emitted line. The magnitude
+// the gated line no longer repeats is already carried by statCDRErrors
+// (culvert_cdr_errors_total), which cdrErrorOutcome increments for this same
+// event — no second counter, no second dialect.
+var cdrCallErrorLogAt atomic.Int64
+
+// cdrMaxCanonicalStatusCode is the highest code gRPC defines. codes.Code is a
+// uint32 and the library's own `_maxCode` is unexported, so the bound is named
+// here and PINNED AGAINST THE LIBRARY by
+// TestCDRCallErrorClass_CanonicalRangeMatchesTheLibrary: if grpc-go ever adds a
+// code above this one, that test fails rather than this file silently folding a
+// real status into "unknown".
+const cdrMaxCanonicalStatusCode = codes.Unauthenticated // 16
+
+// cdrCallErrorClass is the BOUNDED reason class the cdr_unavailable alert
+// carries in its Detail: the gRPC status code, CLAMPED to the canonical range.
+//
+// The bound is load-bearing. The alert store dedups on "event:detail" within a
+// 30 s window (internal/alerts, Q17/CHAOS-27), and a gRPC transport error's
+// text embeds the ephemeral local port and, for a server-produced status, a
+// remote-supplied description. Passing it through made a distinct key per
+// request, so dedup could not suppress a Sluice outage by construction and
+// every failed sanitize landed a delivery in the 500-entry retry queue — where
+// a CDR fault evicts real threat_detected alerts (register rows WK-12/RS-5,
+// the same defect internal/secscan's remoteScanFail documents). The full cause
+// goes to the rate-limited log line and nowhere else.
+//
+// THE CLAMP IS THE WHOLE BOUND, and taking "the protocol fixes the cardinality"
+// on trust is what made the first version of this fix wrong (Codex review, PR
+// #1483). grpc-go parses the `grpc-status` header with
+// strconv.ParseInt(hf.Value, 10, 32) and stores codes.Code(uint32(code)) with
+// NO range check (internal/transport/http2_client.go) — only a NON-NUMERIC
+// value is refused — and Code.String() renders anything outside 0..16 as
+// "Code(" + the integer + ")" (codes/code_string.go). So a faulty or hostile
+// Sluice varying that number per response minted a distinct dedup key per
+// response, which is precisely the flooding this change exists to close,
+// reintroduced inside its own fix. The library validates the range on its JSON
+// path (codes.go's UnmarshalJSON refuses `ci >= _maxCode`) and not on the wire
+// path, so the peer's number reaches String() unchecked.
+//
+// The lesson generalises and is the same one CHAOS-65 records four times: a
+// value is bounded only where something ACTUALLY bounds it — never because the
+// format it arrived in is said to have a fixed alphabet.
+func cdrCallErrorClass(err error) string {
+	if err == nil {
+		return "unknown"
+	}
+	st, ok := status.FromError(err)
+	if !ok || st.Code() > cdrMaxCanonicalStatusCode {
+		return "unknown"
+	}
+	return st.Code().String()
+}
+
+// noteCDRCallError logs (rate-limited, with the cause) and alerts (gated, with
+// a bounded class) one failed Sluice Sanitize call. The count is
+// cdrErrorOutcome's, which the caller reaches for this same event.
+// The logged total comes from cdrCallErrorReportedTotal, which counts the
+// triggering failure; see that function for why.
+func noteCDRCallError(err error) {
+	now := time.Now().UnixNano()
+	if prev := cdrCallErrorLogAt.Load(); (prev == 0 || now-prev >= int64(cdrCallErrorLogInterval)) &&
+		cdrCallErrorLogAt.CompareAndSwap(prev, now) {
+		logger.Print(cdrCallErrorLogLine(err, cdrCallErrorReportedTotal()))
+	}
+	// The HasSubscriber gate is the contract fireDNSFailureAlert documents,
+	// applied to the other producer whose rate is set by a fault rather than by
+	// the operator: in the default posture (no webhooks configured) it removes
+	// a goroutine, a payload build and a round trip through the process-wide
+	// dedup mutex from every inspected response of a node that is already
+	// degraded.
+	if !globalAlertStore.HasSubscriber("cdr_unavailable") {
+		return
+	}
 	go fireAlert("cdr_unavailable", AlertPayload{
 		Source: "cdr",
-		Detail: fmt.Sprintf("sluice call failed: %v", err),
+		Detail: cdrCallErrorClass(err),
 	})
-	return cdrErrorOutcome(err.Error(), profile, mode, ms, cfg)
+}
+
+// cdrCallErrorReportedTotal is the error total the rate-limited diagnostic
+// prints. It counts the TRIGGERING failure: the caller runs noteCDRCallError
+// and only then cdrErrorOutcome, which owns the atomic increment, so a bare
+// Load() reports the count EXCLUDING the very failure the line describes —
+// "errors total 0" beside a reported error on the first failure of an outage.
+// The rate gate makes that the reachable case rather than a corner one: it
+// emits at the onset and then at most one line per interval, so the line an
+// operator actually reads is precisely the one a bare Load() understates. A
+// magnitude that contradicts the event beside it is worse than no magnitude,
+// and this producer's contract is that the cause goes to the log and the
+// magnitude to the counter (Codex review, PR #1483).
+//
+// The increment is deliberately NOT moved into the producer: cdrErrorOutcome is
+// also reached from the non-call-error paths (an ErrorMessage result, an
+// unknown status), which never pass through noteCDRCallError, so incrementing
+// in both places would double-count exactly the number being corrected. Under
+// concurrent failures the value stays approximate — other goroutines may
+// already have incremented — but it can never fall below the event reported.
+func cdrCallErrorReportedTotal() int64 {
+	return atomic.LoadInt64(&statCDRErrors) + 1
+}
+
+// cdrCallErrorLogLine formats the rate-limited diagnostic. It is split out so
+// its CONTENT can be gated without swapping the process-global logger: async
+// alert-dispatch goroutines read that logger through internal/obs, so a test
+// that swaps it races any dispatch still in flight — the straggler-goroutine
+// class this PR already closed twice (commits 17b9edf and ba596ac).
+//
+// The cause is sanitised because a gRPC status description is written by
+// Sluice, not by this process (CWE-117).
+func cdrCallErrorLogLine(err error, total int64) string {
+	return fmt.Sprintf("CDR: call error (%s): %s; errors total %d",
+		cdrCallErrorClass(err), sanitizeLog(err.Error()), total)
 }
 
 // cdrErrorOutcome applies the configured fail_mode to an error event.
