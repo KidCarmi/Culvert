@@ -4,7 +4,9 @@ import (
 	"fmt"
 	"math/rand"
 	"net"
+	"reflect"
 	"runtime"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -192,14 +194,95 @@ func TestIPFilterView_DifferentialRandomized(t *testing.T) {
 
 // ─── The publish contract ───────────────────────────────────────────────────
 
+// TestIPFilterView_MutatorInventoryIsComplete is what makes the publish
+// contract SELF-ENFORCING rather than a convention.
+//
+// Its sibling below covers every mutator that exists TODAY, but it is a
+// hand-maintained list, and its own doc comment asks the next author to
+// remember to extend it. That is the one instruction a wall must never depend
+// on: a mutator added without publishView is a SILENT security failure in both
+// filter modes — in "allow" a revoked allowlist entry keeps admitting traffic,
+// in "block" a newly added entry never denies any — and neither shows up as a
+// test failure, a log line, or a metric. It shows up as a filter that is
+// configured and not enforcing.
+//
+// So this test enumerates the type's exported methods by reflection and
+// requires each one to be CLASSIFIED, mutator or reader. A new method fails the
+// build until somebody answers which it is, exactly as
+// TestRLExemptView_MutatorInventoryIsComplete does for the RateLimiter exempt
+// view (security_ratelimit_exempt_view_test.go) and
+// TestRuleView_MutatorInventoryIsComplete does for internal/rewrite. IPFilter
+// was the one read-view subsystem of the three without one, and it is the most
+// exposed of them: Allowed() is the FIRST gate on every proxied request, ahead
+// of the rate limiter, authentication and policy.
+//
+// Unlike the RateLimiter's version this needs no name-token filter — every
+// exported method on *IPFilter is part of the filter surface.
+func TestIPFilterView_MutatorInventoryIsComplete(t *testing.T) {
+	// Mutators change the f.mu-guarded write-side state and MUST call
+	// publishView before releasing the lock. The set is DERIVED from the
+	// executed republish case table (ipFilterRepublishCases), never declared by
+	// hand here: naming a method as a mutator IS giving it a behavioural case,
+	// so a new mutator cannot be classified without being exercised. Codex
+	// review, PR #1382 — a separate hand-kept name map could be satisfied by
+	// adding the name alone, which is exactly the forgetting this wall exists
+	// to catch. TestIPFilterView_EveryMutatorRepublishes closes the
+	// remaining gap: it proves at runtime that each case's filed method
+	// actually ran and published.
+	mutators := ipFilterExercisedMutators()
+	// Readers answer from the published view or from the write-side state under
+	// a read lock. They publish nothing and must not.
+	readers := map[string]bool{"Mode": true, "List": true, "Allowed": true}
+
+	for name := range mutators {
+		if readers[name] {
+			t.Fatalf("%s is both exercised as a mutator and declared a reader — pick one", name)
+		}
+	}
+
+	var unclassified []string
+	rt := reflect.TypeOf(&IPFilter{})
+	for i := 0; i < rt.NumMethod(); i++ {
+		name := rt.Method(i).Name
+		if !mutators[name] && !readers[name] {
+			unclassified = append(unclassified, name)
+		}
+	}
+	sort.Strings(unclassified)
+	if len(unclassified) > 0 {
+		t.Fatalf("unclassified IPFilter method(s) %v: if it MUTATES the filter it must call "+
+			"publishView() before releasing f.mu and be given a case in ipFilterRepublishCases "+
+			"(the mutator set is derived from that table); if it only reads, add it to `readers`. "+
+			"An unpublished mutation is a silent security failure — a revoked allowlist entry "+
+			"that keeps admitting, or a new blocklist entry that never denies.",
+			unclassified)
+	}
+
+	// Not-vacuous control. A classification wall that enumerated nothing would
+	// pass forever; this fails if reflection stops seeing the surface (a type
+	// rename, a move to an interface, a build-tag split).
+	if got := rt.NumMethod(); got < len(mutators)+len(readers) {
+		t.Fatalf("the inventory saw only %d exported method(s) on *IPFilter but %d are classified — "+
+			"the wall is no longer reading the type it claims to guard", got, len(mutators)+len(readers))
+	}
+}
+
 // TestIPFilterView_EveryMutatorRepublishes is the security half of the read-
 // view contract. A mutator that changes the write-side state without calling
 // publishView leaves readers on a stale view: a revoked allowlist entry keeps
 // admitting traffic, a removed blocklist entry keeps denying it. Every mutator
-// gets a case here, and a new one must be added alongside.
-func TestIPFilterView_EveryMutatorRepublishes(t *testing.T) {
-	t.Run("SetMode", func(t *testing.T) {
-		f := &IPFilter{single: map[string]bool{}}
+// gets a case here, and a new one must be added alongside —
+// TestIPFilterView_MutatorInventoryIsComplete above is what makes forgetting
+// fail the build rather than ship silently.
+// ipFilterRepublishCases is the behavioural half of the publish contract, and
+// the ONLY source of the mutator set TestIPFilterView_MutatorInventoryIsComplete
+// accepts. Each case is filed under the exported method it exercises; a method
+// may have several cases (Add has a single-IP and a CIDR case).
+var ipFilterRepublishCases = []struct {
+	name, mutator string
+	run           func(t *testing.T, f *IPFilter)
+}{
+	{name: "SetMode", mutator: "SetMode", run: func(t *testing.T, f *IPFilter) {
 		if err := f.Add("203.0.113.47"); err != nil {
 			t.Fatal(err)
 		}
@@ -210,10 +293,8 @@ func TestIPFilterView_EveryMutatorRepublishes(t *testing.T) {
 		if f.Allowed("203.0.113.47") {
 			t.Error("SetMode did not republish: blocklisted IP still allowed")
 		}
-	})
-
-	t.Run("Add", func(t *testing.T) {
-		f := &IPFilter{single: map[string]bool{}}
+	}},
+	{name: "Add", mutator: "Add", run: func(t *testing.T, f *IPFilter) {
 		f.SetMode("block")
 		if !f.Allowed("203.0.113.47") {
 			t.Fatal("empty blocklist must allow")
@@ -224,10 +305,8 @@ func TestIPFilterView_EveryMutatorRepublishes(t *testing.T) {
 		if f.Allowed("203.0.113.47") {
 			t.Error("Add did not republish: newly blocked IP still allowed")
 		}
-	})
-
-	t.Run("AddCIDR", func(t *testing.T) {
-		f := &IPFilter{single: map[string]bool{}}
+	}},
+	{name: "AddCIDR", mutator: "Add", run: func(t *testing.T, f *IPFilter) {
 		f.SetMode("block")
 		if err := f.Add("203.0.113.0/24"); err != nil {
 			t.Fatal(err)
@@ -235,10 +314,8 @@ func TestIPFilterView_EveryMutatorRepublishes(t *testing.T) {
 		if f.Allowed("203.0.113.47") {
 			t.Error("Add(CIDR) did not republish: newly blocked range still allowed")
 		}
-	})
-
-	t.Run("Remove", func(t *testing.T) {
-		f := &IPFilter{single: map[string]bool{}}
+	}},
+	{name: "Remove", mutator: "Remove", run: func(t *testing.T, f *IPFilter) {
 		f.SetMode("allow")
 		if err := f.Add("203.0.113.0/24"); err != nil {
 			t.Fatal(err)
@@ -250,10 +327,8 @@ func TestIPFilterView_EveryMutatorRepublishes(t *testing.T) {
 		if f.Allowed("203.0.113.47") {
 			t.Error("Remove did not republish: revoked allowlist entry still admits")
 		}
-	})
-
-	t.Run("ClearAll", func(t *testing.T) {
-		f := &IPFilter{single: map[string]bool{}}
+	}},
+	{name: "ClearAll", mutator: "ClearAll", run: func(t *testing.T, f *IPFilter) {
 		f.SetMode("allow")
 		if err := f.Add("203.0.113.47"); err != nil {
 			t.Fatal(err)
@@ -265,7 +340,159 @@ func TestIPFilterView_EveryMutatorRepublishes(t *testing.T) {
 		if f.Allowed("203.0.113.47") {
 			t.Error("ClearAll did not republish: cleared allowlist still admits")
 		}
+	}},
+	{name: "AddAll", mutator: "AddAll", run: func(t *testing.T, f *IPFilter) {
+		f.SetMode("block")
+		f.AddAll([]string{"203.0.113.0/24"})
+		if f.Allowed("203.0.113.47") {
+			t.Error("AddAll did not republish: newly blocked range still allowed")
+		}
+	}},
+}
+
+// ipFilterExercisedMutators is the mutator set the inventory wall accepts: the
+// methods that have at least one executed republish case.
+func ipFilterExercisedMutators() map[string]bool {
+	m := map[string]bool{}
+	for _, c := range ipFilterRepublishCases {
+		m[c.mutator] = true
+	}
+	return m
+}
+
+func TestIPFilterView_EveryMutatorRepublishes(t *testing.T) {
+	for _, c := range ipFilterRepublishCases {
+		t.Run(c.name, func(t *testing.T) {
+			if err := proveRepublish(t, c.mutator, c.run); err != nil {
+				t.Error(err)
+			}
+		})
+	}
+}
+
+// ─── Runtime publish attribution ────────────────────────────────────────────
+//
+// Filing a case under a mutator must mean the mutator really ran and really
+// republished. That is proved at RUNTIME, not by matching the case's source:
+// publishView reports every publish through ipFilterPublishHook, the hook
+// attributes it to the nearest exported *IPFilter method on the call stack,
+// and only publishes of the case's own filter are recorded. A case that calls
+// a different method, calls the right one on another receiver, or never
+// reaches its call (dead branch, uninvoked closure) records no publish under
+// the filed name and fails. Codex review, PR #1382 — two rounds of static
+// AST matching were each evadable by the next shape.
+
+type ipFilterPublishEvent struct {
+	method string
+	view   *ipFilterView
+}
+
+type ipFilterPublishRecorder struct {
+	mu     sync.Mutex
+	events []ipFilterPublishEvent
+}
+
+var (
+	ipFilterRecorders       sync.Map // *IPFilter -> *ipFilterPublishRecorder
+	ipFilterPublishHookOnce sync.Once
+)
+
+func installIPFilterPublishHook() {
+	ipFilterPublishHookOnce.Do(func() {
+		h := func(f *IPFilter) {
+			r, ok := ipFilterRecorders.Load(f)
+			if !ok {
+				return
+			}
+			rec := r.(*ipFilterPublishRecorder)
+			rec.mu.Lock()
+			rec.events = append(rec.events, ipFilterPublishEvent{
+				method: publishingIPFilterMethod(), view: f.view.Load(),
+			})
+			rec.mu.Unlock()
+		}
+		ipFilterPublishHook.Store(&h)
 	})
+}
+
+// publishingIPFilterMethod walks the stack to the nearest EXPORTED *IPFilter
+// method — the mutator that caused this publish.
+func publishingIPFilterMethod() string {
+	pcs := make([]uintptr, 64)
+	frames := runtime.CallersFrames(pcs[:runtime.Callers(1, pcs)])
+	for {
+		fr, more := frames.Next()
+		if i := strings.LastIndex(fr.Function, ".(*IPFilter)."); i >= 0 {
+			name := fr.Function[i+len(".(*IPFilter)."):]
+			if name != "" && name[0] >= 'A' && name[0] <= 'Z' {
+				return name
+			}
+		}
+		if !more {
+			return ""
+		}
+	}
+}
+
+// proveRepublish runs one case against a fresh filter and returns an error
+// unless the named mutator published a NEW view of that filter during it.
+func proveRepublish(t *testing.T, mutator string, run func(*testing.T, *IPFilter)) error {
+	t.Helper()
+	installIPFilterPublishHook()
+	f := &IPFilter{single: map[string]bool{}}
+	rec := &ipFilterPublishRecorder{}
+	ipFilterRecorders.Store(f, rec)
+	defer ipFilterRecorders.Delete(f)
+
+	run(t, f)
+
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	var prev *ipFilterView
+	var seen []string
+	for _, ev := range rec.events {
+		if ev.method == mutator && ev.view != nil && ev.view != prev {
+			return nil
+		}
+		seen = append(seen, ev.method)
+		prev = ev.view
+	}
+	return fmt.Errorf("case filed under %q: %s never published a new view of the case's filter "+
+		"(publishes observed: %v) — either the case does not execute it, or it does not call "+
+		"publishView", mutator, mutator, seen)
+}
+
+// TestIPFilterView_RepublishProofRejectsEvasions is the negative control for
+// proveRepublish: every shape that names a mutator without executing it on
+// the case's filter must be rejected, and the honest shape accepted.
+func TestIPFilterView_RepublishProofRejectsEvasions(t *testing.T) {
+	cases := []struct {
+		name    string
+		mutator string
+		run     func(*testing.T, *IPFilter)
+		wantErr bool
+	}{
+		{"honest call", "ClearAll", func(_ *testing.T, f *IPFilter) { f.ClearAll() }, false},
+		{"calls a different method", "Remove", func(_ *testing.T, f *IPFilter) { f.ClearAll() }, true},
+		{"unreachable call", "ClearAll", func(_ *testing.T, f *IPFilter) {
+			if len(f.List()) > 0 { // a fresh filter is empty: never taken
+				f.ClearAll()
+			}
+		}, true},
+		{"uninvoked closure", "ClearAll", func(_ *testing.T, f *IPFilter) { _ = func() { f.ClearAll() } }, true},
+		{"shadowed receiver", "ClearAll", func(_ *testing.T, f *IPFilter) {
+			_ = f
+			f = &IPFilter{single: map[string]bool{}}
+			f.ClearAll()
+		}, true},
+		{"reader filed as mutator", "Mode", func(_ *testing.T, f *IPFilter) { _ = f.Mode() }, true},
+	}
+	for _, c := range cases {
+		err := proveRepublish(t, c.mutator, c.run)
+		if (err != nil) != c.wantErr {
+			t.Errorf("%s: proveRepublish error = %v, wantErr %v", c.name, err, c.wantErr)
+		}
+	}
 }
 
 // TestIPFilterView_UnpublishedFilterAllowsAll pins the nil-view fallback: a

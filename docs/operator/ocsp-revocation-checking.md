@@ -1,6 +1,6 @@
 # OCSP revocation checking — what it covers, how it fails, how to read it
 
-**Audience:** operators running Culvert with `security.ocsp_check: true` (or the
+**Audience:** operators running Culvert with `proxy.ocsp_check: true` (or the
 **OCSP / CRL Revocation** toggle in the admin UI).
 **Related:** `roadmap/CHAOS-ENGINEERING-REVIEW.md` §35 (CHAOS-65),
 `docs/operator/root-ca-expiry.md`.
@@ -41,10 +41,12 @@ following is discarded, not treated as a pass:
 
 | Discarded because | Counter (`reason=` label) |
 |---|---|
-| the signed response is about a **different certificate** | `not_for_certificate` |
+| the signed response is about a **different certificate** (issuer-chained signature, different serial) — either a genuine response borrowed from another certificate or a faulty responder answering for the wrong serial; the signer's authorization is not re-checked on this path, so it needs investigation rather than proving an attack | `not_for_certificate` |
+| the response's **signer is not authorized** for this issuer — no `id-kp-OCSPSigning` on the embedded certificate, or a delegate outside its own validity window (RFC 6960 §4.2.2.2); this is what stops a certificate vouching for its own revocation status | `unauthorized_responder` |
 | the response is outside its `ThisUpdate`/`NextUpdate` window | `stale` |
 | the responder answered `unknown` — the issuer does not recognise the certificate | `unknown_status` |
 | the responder URL was refused before any request (bad scheme, private address) | `responder_blocked` |
+| the response could not be parsed for this certificate at all — an HTML error page, truncated DER, a bad signature; an ordinary broken responder, not an attack signal | `malformed` |
 
 When nothing affirmative comes back, the verdict is fail-closed and cached for
 **2 minutes** (not the 1-hour verdict TTL), so recovery tracks the responder
@@ -57,6 +59,25 @@ traffic. Under the CA/Browser Forum baseline requirements a CA must not answer
 mis-issued or forged certificate draws. If a legitimate upstream trips it, the
 `unknown_status` counter names it; the remedy is to fix the responder or the
 chain, not to relax the check.
+
+`not_for_certificate` is charged only when a response is demonstrably about
+someone else's certificate — the response parses and its signature verifies,
+and the serial belongs to a different certificate. Anything that merely fails
+to parse, including a multi-status response this check cannot re-examine, is
+charged to `malformed` instead, never to this reason.
+
+`unauthorized_responder` is **not** the same kind of signal and the two must
+not be read as equivalent (Codex review, PR #1433): the table above lists two
+distinct causes and only one of them is hostile. A delegate whose certificate
+has simply expired, or was issued without the `id-kp-OCSPSigning` extension,
+is an ordinary CA-side misconfiguration — check that delegate's EKU and
+validity window before assuming anything else. The case this check exists to
+catch is a certificate signing a `good` response about its own serial and
+embedding its own leaf as the "responder" — needing no other party at all —
+and the counter cannot tell the two apart on its own. Treat a first hit as a
+responder-configuration bug to chase down; a rate that persists once the
+responder chain checks out clean is the one worth escalating as a possible
+bypass attempt.
 
 ---
 
@@ -101,9 +122,20 @@ that never turned it on is indistinguishable from a broken one.
 # or egress problem, not a wave of revocations — compare against revoked_total.
 rate(culvert_ocsp_fail_closed_total[10m]) > 0.1
 
-# Something is answering with responses borrowed from other certificates.
-# Any sustained rate here deserves a human.
+# A signed response named a different certificate's serial. That is the
+# shape of a borrowed-response bypass, but a faulty responder (or an expired /
+# no-EKU delegate — signer authorization is not re-checked on this path) can
+# produce it too, so investigate before treating it as an attack. Any
+# sustained rate here deserves a human. (malformed is excluded on purpose:
+# it is the ordinary broken-responder bucket, not an accusation — see §2.)
 increase(culvert_ocsp_response_rejected_total{reason="not_for_certificate"}[1h]) > 0
+
+# A response's signer failed RFC 6960 §4.2.2.2 authorization. Usually an
+# expired or misconfigured delegate responder certificate — check its EKU
+# and validity window first. Only treat this as a possible bypass attempt
+# (a certificate vouching for its own revocation status) once that chain
+# has been ruled out — see §2.
+increase(culvert_ocsp_response_rejected_total{reason="unauthorized_responder"}[1h]) > 0
 
 # Certificates engineered to amplify outbound requests.
 increase(culvert_ocsp_responders_truncated_total[1h]) > 0
@@ -138,10 +170,17 @@ climbing, `culvert_ocsp_revoked_total` flat.
    `culvert_ocsp_fail_closed_total` with no rejection reason, which is step 1
    above (reachability), not this step. If you see `responder_blocked` climbing,
    the resolution succeeded and the answer was private.
-3. **Is it the clock?** `reason="stale"` climbing with no other symptom is
+3. **Is it a delegate responder?** `reason="unauthorized_responder"` climbing
+   is almost always a CA-side certificate problem, not an attack: pull the
+   responder's own certificate (from the OCSP response, or your CA's docs) and
+   check it carries `id-kp-OCSPSigning` and is inside its validity window. A
+   renewed or reissued delegate fixes it immediately. Only escalate this as a
+   possible bypass attempt if the delegate chain checks out clean and the rate
+   persists — see §2.
+4. **Is it the clock?** `reason="stale"` climbing with no other symptom is
    usually NTP. Five minutes of skew is tolerated in both directions; more is
    not. Fix the clock; do not widen the tolerance.
-4. **Recovery is automatic.** The fail-closed verdict is cached for 2 minutes,
+5. **Recovery is automatic.** The fail-closed verdict is cached for 2 minutes,
    so connections resume within that window once responders answer again. There
    is nothing to clear by hand.
 

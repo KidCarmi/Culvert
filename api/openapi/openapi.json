@@ -1368,6 +1368,37 @@
         ],
         "type": "object"
       },
+      "ConfigRollbackScope": {
+        "additionalProperties": false,
+        "properties": {
+          "excluded": {
+            "description": "Operator-facing settings a config version rollback deliberately never captures, applies or diffs, with why. Empty when every setting participates in rollback.",
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "id": {
+                  "description": "Stable snake_case setting identifier.",
+                  "type": "string"
+                },
+                "reason": {
+                  "description": "Why rollback leaves this setting unchanged: the setting's recorded rollback-exclusion reason when one exists, otherwise an explicit generic explanation (not captured in snapshots; secret-bearing settings are never snapshotted).",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "id",
+                "reason"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "excluded"
+        ],
+        "type": "object"
+      },
       "ConfigVersionList": {
         "items": {
           "additionalProperties": true,
@@ -2554,6 +2585,15 @@
             },
             "nullable": true,
             "type": "array"
+          },
+          "ui_tls_cert_days_remaining": {
+            "description": "Days until ui_tls_cert_not_after (negative once expired). Present under the same condition as ui_tls_cert_not_after.",
+            "type": "integer"
+          },
+          "ui_tls_cert_not_after": {
+            "description": "Expiry (NotAfter, RFC3339 UTC) of the admin UI's own serving certificate — a custom pair set via -tls-cert/-tls-key or uploaded here, never the auto self-signed fallback. Present only once a custom pair has bound successfully at least once in this process's lifetime. Distinct from the MITM inspection root CA expiry (GET /api/ca/status) and the outbound upstream mTLS client cert expiry (GET /api/ocsp).",
+            "format": "date-time",
+            "type": "string"
           },
           "ui_tls_fallback": {
             "description": "True when self-signed TLS setup failed at startup and the admin UI fell back to plain HTTP.",
@@ -11623,6 +11663,45 @@
         "x-culvert-idempotency": "non-idempotent",
         "x-culvert-introduced-version": "1.0.0",
         "x-culvert-permission": "admin",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/config/rollback-scope": {
+      "get": {
+        "description": "Lists operator-facing settings that a config version rollback deliberately never captures, applies or diffs (e.g. alert-webhook delivery config, block-page HTML, upstream proxy pools, connection-limit settings), plus why. Lets the admin UI's rollback confirmation accurately describe what will and will not change, instead of overclaiming that rollback replaces every setting.",
+        "operationId": "getConfigRollbackScope",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConfigRollbackScope"
+                }
+              }
+            },
+            "description": "Settings excluded from config version rollback."
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Settings excluded from rollback",
+        "tags": [
+          "config"
+        ],
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "2.0.0",
+        "x-culvert-permission": "viewer",
         "x-culvert-stability": "stable",
         "x-culvert-tenant-scope": "appliance",
         "x-culvert-visibility": "admin-supported"

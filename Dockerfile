@@ -18,11 +18,22 @@
 # sets $BUILDPLATFORM, so it stops HERE with `failed to parse platform : ""`.
 # There is no default that would keep it working: the legacy builder does not
 # expose the host platform at all, and hardcoding one breaks the other arch.
-FROM --platform=$BUILDPLATFORM golang:1.27-alpine AS builder
+# COMPILER (CI-REDESIGN §20): the image is pinned by DIGEST, so a rebuild
+# cannot silently pick up a different Go. The version comes from the root
+# go.mod `toolchain` line, which also drives CI; toolchain_consistency_test.go
+# fails a Dockerfile whose tag disagrees with it. GOTOOLCHAIN=local (the image
+# default, stated here so it cannot be lost) forbids the go command from
+# downloading or switching to another toolchain, and the RUN below refuses to
+# build with any compiler other than the one go.mod names.
+FROM --platform=$BUILDPLATFORM golang:1.26.8-alpine@sha256:8ac98ca534ac3f51e1f420a1dd2c15e74c75cfa0f23f3ad27eb5d7236c349a0c AS builder
+ENV GOTOOLCHAIN=local
 
 WORKDIR /app
 RUN apk add --no-cache git
 COPY go.mod go.sum ./
+RUN want="$(sed -n 's/^toolchain //p' go.mod)" && have="$(go env GOVERSION)" && \
+    echo "compiler: ${have} (go.mod toolchain: ${want})" && \
+    [ -n "${want}" ] && [ "${have}" = "${want}" ]
 RUN go mod download
 
 COPY . .
@@ -43,6 +54,12 @@ RUN if [ -z "$VERSION" ] && [ -d .git ]; then \
     COMMIT=$(git rev-parse --short=12 HEAD 2>/dev/null || echo "") && \
     echo "$VERSION" > /app/VERSION && \
     CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -buildvcs=false -ldflags="-s -w -X main.version=${VERSION} -X main.buildCommit=${COMMIT}" -o culvert .
+# The binary records the compiler that built it; prove it is the PINNED one.
+# Compared with the go.mod toolchain line, not `go env GOVERSION`: the active
+# compiler is what a later GOTOOLCHAIN switch would change, so checking against
+# it could only prove the binary matches whatever ran, not what was pinned.
+RUN want="$(sed -n 's/^toolchain //p' go.mod)" && go version culvert && \
+    [ -n "${want}" ] && [ "$(go version culvert | cut -d' ' -f2)" = "${want}" ]
 # No `go mod tidy` here — the image must build from the EXACT reviewed module
 # graph (go.mod/go.sum COPYed + `go mod download`ed above), not re-resolve deps
 # at build time (a divergent-recipe supply-chain smell). Tidiness is enforced in
@@ -69,10 +86,19 @@ RUN if [ -z "$VERSION" ] && [ -d .git ]; then \
 # image-bundled installs exactly like signed-release downloads.
 # Cross-compiled on the build platform like `builder` above — an arm64 image
 # must bundle an arm64 agent, and a proxy-only check would not catch this one.
-FROM --platform=$BUILDPLATFORM golang:1.27-alpine AS maintbuilder
+# Same pinned image and compiler as `builder`. The agent's own go.mod carries
+# no `toolchain` line on purpose (the installer's offline build fallback must
+# not be sent to download one), so the assertion reads the ROOT go.mod, copied
+# here under a separate name.
+FROM --platform=$BUILDPLATFORM golang:1.26.8-alpine@sha256:8ac98ca534ac3f51e1f420a1dd2c15e74c75cfa0f23f3ad27eb5d7236c349a0c AS maintbuilder
+ENV GOTOOLCHAIN=local
 
 WORKDIR /src
 COPY cmd/culvert-maint/go.mod cmd/culvert-maint/go.sum ./
+COPY go.mod /tmp/culvert-root.go.mod
+RUN want="$(sed -n 's/^toolchain //p' /tmp/culvert-root.go.mod)" && have="$(go env GOVERSION)" && \
+    echo "compiler: ${have} (go.mod toolchain: ${want})" && \
+    [ -n "${want}" ] && [ "${have}" = "${want}" ]
 RUN go mod download
 
 COPY cmd/culvert-maint/ ./
@@ -84,6 +110,8 @@ RUN VER="${VERSION:-}" && \
     CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -buildvcs=false \
       -ldflags="-s -w -X culvert-maint/internal/server.Version=${VER}" \
       -o /culvert-maint .
+RUN want="$(sed -n 's/^toolchain //p' /tmp/culvert-root.go.mod)" && go version /culvert-maint && \
+    [ -n "${want}" ] && [ "$(go version /culvert-maint | cut -d' ' -f2)" = "${want}" ]
 
 # ── GeoIP stage ───────────────────────────────────────────────────────────────
 # Downloads the DB-IP free country database (CC BY 4.0, ~6 MB) at image build
