@@ -7,10 +7,10 @@
 > not a statement about the tree this file is published in; the current governance state is whatever the
 > most recent review in this series says. Later windows are audited by later reports, never
 > retroactively by this one.
-> **Finding-ID note:** T-54–T-56 were numbered from the reports on `main` at `3febe59`. The 2026-09-19
-> report (PR #1434, unmerged at the time) independently used **T-54** for an unrelated Rule Editor
-> SSL/TLS label finding. Cite this report's identity-backend finding as "T-54 (2026-09-23)" to keep
-> the two apart.
+> **Finding-ID note:** series finding IDs are assigned in report-date order. This report's three
+> findings were first published as T-54, T-55 and T-56, which belong to earlier reports in the series.
+> They are renumbered **T-61** (identity-backend metric prefix), **T-62** (Sync vs Refresh) and **T-63**
+> (decryption-exclusion audit search).
 > **Method:** Audited `46410c3..3febe59` — the window since the 2026-09-11 report's own branch head
 > (`46410c3`, PR #1363, merged to `main` in `0665453`),
 > confirmed as the then-current `origin/main` HEAD by a fetch immediately before this report was written on 2026-09-23 (per
@@ -29,13 +29,13 @@
 
 ## Executive Summary
 
-**Three genuinely new findings this pass (T-54, T-55, T-56), none previously tracked.** Two are partially
-addressed now with zero-risk fixes; the underlying compat-sensitive halves of both, plus T-56 in full, are
+**Three genuinely new findings this pass (T-61, T-62, T-63), none previously tracked.** Two are partially
+addressed now with zero-risk fixes; the underlying compat-sensitive halves of both, plus T-63 in full, are
 recorded to the backlog rather than force-fixed, consistent with this program's standing rule to weigh
 migration cost before renaming anything with a compatibility surface (Prometheus metric names, audit
 action strings, generated OpenAPI operation IDs).
 
-1. **T-54 — CHAOS-47 identity-backend outage: metric prefix disagrees with its own alert and
+1. **T-61 — CHAOS-47 identity-backend outage: metric prefix disagrees with its own alert and
    operator-contract row.** `culvert_auth_backend_unavailable{,_total}` / `culvert_auth_backend_gated_denials_total`
    (metrics.go) name the exact condition the `identity_backend_unreachable` alert
    (`internal/alerts/store.go:28`, `auth_backend_health.go`) and the `identity_backend` operator-contract
@@ -51,7 +51,7 @@ action strings, generated OpenAPI operation IDs).
    mismatch itself remains; renaming it is a genuine compatibility break and is left to the backlog as a
    deliberate, considered non-action rather than an oversight.
 
-2. **T-55 — "manually re-fetch this feed now" uses two different verbs across four peer feed panels
+2. **T-62 — "manually re-fetch this feed now" uses two different verbs across four peer feed panels
    in the same admin UI.** Blocklist feed and Threat feed panels said "Sync" (GUI buttons *and* their
    audit actions `blocklist.feed.sync` / `threatfeed.sync`); the SaaS URL-category feed and Release
    Catalog panels — the two newest additions — already say "Refresh" (GUI buttons *and* audit actions
@@ -78,7 +78,7 @@ action strings, generated OpenAPI operation IDs).
    regeneration — out of scope for this pass's zero-risk-only fix; recorded to the backlog as the larger
    half of this finding.
 
-3. **T-56 — "Decryption Exclusions" (GUI/API) vs `decryption.autoexclude.*` (audit action prefix):
+3. **T-63 — "Decryption Exclusions" (GUI/API) vs `decryption.autoexclude.*` (audit action prefix):
    the one event the feature exists for is not findable by the feature's displayed name.** The nav label
    (`static/index.html:773`, `data-view="decexclusions"`), the REST route (`/api/decryption-exclusions`,
    `ui_policy.go:3014`) and its JSON response field (`"exclusions"`, `ui_policy.go:970`) all say
@@ -94,7 +94,7 @@ action strings, generated OpenAPI operation IDs).
 
 **A candidate considered and declined:** a hand-coded "exclusion" ↔ "autoexclude" synonym in the Audit
 Log's client-side filter. Declined as a one-term workaround rather than a naming decision that
-generalizes; see T-56's recommended action.
+generalizes; see T-63's recommended action.
 
 **Terminology Health Score: 8.7 / 10** (unchanged from 2026-09-08 through 2026-09-11). The carry-over
 backlog (fourteen IDs, thirteen entries) is unchanged (three of its higher-visibility items — T-12, T-29,
@@ -106,7 +106,7 @@ for holding the score rather than moving it for a small net-positive pass.
 
 ## Findings
 
-### T-54 — CHAOS-47 identity-backend metric prefix diverges from its own alert and operator-contract row (new — partially fixed this pass)
+### T-61 — CHAOS-47 identity-backend metric prefix diverges from its own alert and operator-contract row (new — partially fixed this pass)
 
 - **Business concept:** an external identity backend (LDAP/OIDC) being unreachable, causing proxy
   authentication to fail closed (CHAOS-47).
@@ -149,7 +149,7 @@ for holding the score rather than moving it for a small net-positive pass.
 - **Priority:** Low for the rename itself (compat risk exceeds the confusion it resolves, given the
   comment now bridges the gap for a reader); the documentation half is already resolved.
 
-### T-55 — "Sync" vs "Refresh" for the same manual-refetch action across four peer feed panels (new — partially fixed this pass)
+### T-62 — "Sync" vs "Refresh" for the same manual-refetch action across four peer feed panels (new — partially fixed this pass)
 
 - **Business concept:** an admin manually forcing an on-demand re-fetch of an externally-sourced feed
   (blocklist feed, threat-intel feed, SaaS URL-category feed, or the release catalog) outside its normal
@@ -216,7 +216,7 @@ for holding the score rather than moving it for a small net-positive pass.
   audit-string and frontend work is worth doing but is not urgent — the feature works correctly today, the
   drift is discoverability/documentation-grade confusion, not a functional defect).
 
-### T-56 — "Decryption Exclusions" (GUI/API) vs `decryption.autoexclude.*` (audit action) — the learn event can't be found by the feature's displayed name (new — not fixed this pass)
+### T-63 — "Decryption Exclusions" (GUI/API) vs `decryption.autoexclude.*` (audit action) — the learn event can't be found by the feature's displayed name (new — not fixed this pass)
 
 - **Business concept:** the volatile, runtime-learned decryption-exclusion cache (fail-open auto-learn,
   `internal/autoexclude`) — the same subsystem T-53 (2026-09-09) touched from the opposite angle (a
@@ -229,7 +229,7 @@ for holding the score rather than moving it for a small net-positive pass.
   `.surge` (`autoexclude_surge.go:101`).
 - **Recommended canonical name:** not force-decided by this report — see recommended action below.
   CLAUDE.md already documents "autoexclude" as the deliberately-chosen *internal/package/metric*
-  vocabulary (`internal/autoexclude`, `culvert_decrypt_autoexclude_*`), so unlike T-54/T-55 this is not a
+  vocabulary (`internal/autoexclude`, `culvert_decrypt_autoexclude_*`), so unlike T-61/T-62 this is not a
   case of two competing business names; it is one deliberately-named internal concept whose vocabulary
   happens to also be the only vocabulary present in the one admin-visible surface — the Audit Log — that
   is supposed to be searchable by the *displayed* feature name.
@@ -248,7 +248,7 @@ for holding the score rather than moving it for a small net-positive pass.
 - **Why this pass declined both an audit-string rename and a client-side synonym patch:** an audit-action
   rename carries the same SIEM/audit-trail compatibility caution this program has consistently applied to
   every other audit-string finding (see T-18's carried-over recommendation, and the caution taken with
-  T-55's residual half above). A narrow client-side synonym special-case in the Audit Log's text filter
+  T-62's residual half above). A narrow client-side synonym special-case in the Audit Log's text filter
   (treating "exclusion" and "autoexclude" as equivalent search terms) was considered and declined as a
   band-aid for one term rather than a canonical naming fix — see the note above the findings table.
 - **Recommended action (for the backlog, not executed this pass):** the smallest fix is (a) to word the
@@ -295,15 +295,15 @@ numbered backlog, per 2026-09-09's reasoning.
 
 ## Recommended Refactoring Plan (priority order)
 
-Unchanged from 2026-09-09/09-11 for the carried-over items (see that report for the full table); T-54 and
-the shipped half of T-55 are resolved to the extent zero-risk action allows and do not appear on the
+Unchanged from 2026-09-09/09-11 for the carried-over items (see that report for the full table); T-61 and
+the shipped half of T-62 are resolved to the extent zero-risk action allows and do not appear on the
 priority table below. New backlog entries from this pass:
 
 | Priority | Finding | Action | Migration risk | Est. PR size |
 |---|---|---|---|---|
-| Medium | T-55 residual | Align `blocklist.feed.sync`/`threatfeed.sync` audit actions to the `.refresh` verb (needs a safe audit-action alias approach, not a blind rename); separately, realign the new React frontend's Threat Intelligence tab wording/state to "Refresh" and regenerate the OpenAPI bundle only if the operation IDs are touched for another reason | Medium (audit strings); Low (frontend, default-off) | Small-Medium (audit); Medium (frontend, gated by full verify pipeline) |
-| Low | T-56 | Mention the exclusion in the `decryption.autoexclude.learn` (and absent-entry evict) audit detail text so a search for "exclusion" finds them; or cross-reference "autoexclude" in `docs/operator/decryption-auto-exclusions.md` | Low | Small |
-| Low | T-54 residual | Rename `culvert_auth_backend_*` → `culvert_identity_backend_*` with a doubled-emission deprecation window, only if a dedicated metrics-naming pass is ever scoped | High | Medium-Large |
+| Medium | T-62 residual | Align `blocklist.feed.sync`/`threatfeed.sync` audit actions to the `.refresh` verb (needs a safe audit-action alias approach, not a blind rename); separately, realign the new React frontend's Threat Intelligence tab wording/state to "Refresh" and regenerate the OpenAPI bundle only if the operation IDs are touched for another reason | Medium (audit strings); Low (frontend, default-off) | Small-Medium (audit); Medium (frontend, gated by full verify pipeline) |
+| Low | T-63 | Mention the exclusion in the `decryption.autoexclude.learn` (and absent-entry evict) audit detail text so a search for "exclusion" finds them; or cross-reference "autoexclude" in `docs/operator/decryption-auto-exclusions.md` | Low | Small |
+| Low | T-61 residual | Rename `culvert_auth_backend_*` → `culvert_identity_backend_*` with a doubled-emission deprecation window, only if a dedicated metrics-naming pass is ever scoped | High | Medium-Large |
 
 The full carried-over priority table (T-9 through T-39) is unchanged from 2026-09-09 and is not repeated
 here — see that report.
@@ -320,11 +320,11 @@ overlap between this pass's three findings and any file touched in the audited w
 The automated PR review (`chatgpt-codex-connector`) found two errors in this report's first draft,
 both verified against the source and corrected before merge:
 
-- T-56 claimed a search for "exclusion" returns zero hits for every event of the feature. The Audit
+- T-63 claimed a search for "exclusion" returns zero hits for every event of the feature. The Audit
   Log filter also matches `detail`, and most of the feature's details contain the word; only the
-  `learn` event and the absent-entry evict are missed. T-56 was narrowed to that, and its recommended
+  `learn` event and the absent-entry evict are missed. T-63 was narrowed to that, and its recommended
   action and risk scaled down to match.
-- T-55 renamed two buttons but left the flows they start reporting "Sync complete"/"Sync failed" and a
+- T-62 renamed two buttons but left the flows they start reporting "Sync complete"/"Sync failed" and a
   per-feed "Sync" row button on the same panel, which created a same-panel mismatch. The coupled labels
   and status messages now say "Refresh" as well, including the failed-refresh toast, which used to
   echo the server's "sync failed:" prefix. API paths, JS handler names and audit action strings
@@ -334,12 +334,12 @@ both verified against the source and corrected before merge:
 
 ## Stop-Condition Assessment
 
-Terminology is **not** fully consistent. This pass found three genuinely new findings (T-54, T-55, T-56),
+Terminology is **not** fully consistent. This pass found three genuinely new findings (T-61, T-62, T-63),
 none previously tracked by any prior review in this program. Two were partially addressed with small,
-zero-risk fixes (a cross-referencing code comment for T-54; two GUI button-label edits plus one doc-comment
-correction for T-55) that add no API, audit, or metrics compatibility surface — confirmed via a clean
+zero-risk fixes (a cross-referencing code comment for T-61; two GUI button-label edits plus one doc-comment
+correction for T-62) that add no API, audit, or metrics compatibility surface — confirmed via a clean
 `go build ./...`, `go vet ./...`, and `gofmt -l` after the change. The compatibility-sensitive halves of
-all three findings (a Prometheus metric rename, the feed audit-action-string alignment, T-56's audit
+all three findings (a Prometheus metric rename, the feed audit-action-string alignment, T-63's audit
 detail wording, and one React-frontend text/state pass) were deliberately **not** force-fixed, consistent with this program's standing rule to
 weigh migration cost — each is recorded to the backlog with an explicit recommended action rather than
 silently dropped. The carry-over backlog (fourteen IDs, thirteen entries: T-9, T-11, T-12, T-13, T-17,
