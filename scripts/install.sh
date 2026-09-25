@@ -1530,18 +1530,27 @@ env_put() {
 }
 
 gen_passphrase() {
-  local p
-  p="$(openssl rand -base64 48 2>/dev/null | tr -dc 'A-Za-z0-9' | head -c 40 || true)"
-  # Require the FULL 40 characters, not merely "non-empty". A degraded openssl
-  # (FIPS-mode engine warning, a stubbed binary in a hardened image) can print
-  # a short deterministic diagnostic to stdout ahead of — or instead of — the
-  # base64 data; filtered to alnum that can easily still be >=12 characters
-  # (e.g. "FIPSmodeselftestfailed", 22 chars), which would sail past
-  # validate_passphrase_for_env_file's length floor as if it were a proper
-  # high-entropy random passphrase. Falling back to /dev/urandom whenever the
-  # first generator falls short of its own target length catches that case
-  # instead of accepting whatever it happened to produce (Codex review, PR #1491).
-  [[ "${#p}" -eq 40 ]] || p="$(head -c 48 /dev/urandom 2>/dev/null | base64 | tr -dc 'A-Za-z0-9' | head -c 40 || true)"
+  local raw p=""
+  # Validate the GENERATOR's raw output BEFORE filtering/truncating it. A
+  # degraded openssl (FIPS-mode engine warning, a stubbed binary in a hardened
+  # image) can print a deterministic diagnostic to stdout ahead of — or
+  # instead of — the base64 data. Filtering to alnum and truncating to 40 first
+  # hides that: a short diagnostic ("FIPSmodeselftestfailed", 22 chars) would
+  # pass validate_passphrase_for_env_file's 12-char floor, and a LONG one (50
+  # zeroes) would be cut to exactly 40 and look like real key material (Codex
+  # review, PR #1491). 48 random bytes base64-encode to exactly 64 characters
+  # of [A-Za-z0-9+/] on ONE line with no padding, so anything else — a
+  # non-zero exit, extra lines, a different length, foreign characters — is
+  # rejected and the /dev/urandom path is tried instead.
+  if raw="$(openssl rand -base64 48 2>/dev/null)" && [[ "$raw" =~ ^[A-Za-z0-9+/]{64}$ ]]; then
+    p="$(printf '%s' "$raw" | tr -dc 'A-Za-z0-9' | head -c 40)"
+  fi
+  if [[ "${#p}" -ne 40 ]]; then
+    p=""
+    if raw="$(head -c 48 /dev/urandom 2>/dev/null | base64 2>/dev/null)" && [[ "$raw" =~ ^[A-Za-z0-9+/]{64}$ ]]; then
+      p="$(printf '%s' "$raw" | tr -dc 'A-Za-z0-9' | head -c 40)"
+    fi
+  fi
   [[ "${#p}" -eq 40 ]] || error "Could not generate a 40-character passphrase (openssl and /dev/urandom both unavailable or degraded)."
   printf '%s' "$p"
 }

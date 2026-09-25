@@ -187,3 +187,35 @@ func TestInstallScript_SetupAtRestEncryption_AutoGenerateAcceptsNormalPassphrase
 		t.Fatalf(".env does not contain the expected auto-generated passphrase; .env content:\n%s", envContent)
 	}
 }
+
+// TestInstallScript_GenPassphrase_FallsBackWhenOpensslOutputIsLong pins the
+// truncation half of the degraded-openssl case (Codex review, PR #1491): a
+// generator that prints MORE than 40 allowed characters of deterministic text
+// must not be cut down to exactly 40 and accepted as key material — the raw
+// output is validated before any truncation.
+func TestInstallScript_GenPassphrase_FallsBackWhenOpensslOutputIsLong(t *testing.T) {
+	long := strings.Repeat("0", 50)
+	pass, output := runGenPassphrase(t, `printf '%s\n' '`+long+`'`)
+	if pass == long[:40] {
+		t.Fatalf("gen_passphrase truncated a degraded openssl's 50-character output to 40 zeroes and accepted it; output:\n%s", output)
+	}
+	if len(pass) != 40 {
+		t.Fatalf("gen_passphrase returned a %d-character passphrase (%q); want 40 from the fallback; output:\n%s", len(pass), pass, output)
+	}
+}
+
+// TestInstallScript_GenPassphrase_FallsBackWhenOpensslPrefixesAWarning covers
+// the other degraded shape: a diagnostic line written to stdout AHEAD of an
+// otherwise-valid base64 block. Filtering would splice the warning's letters
+// into the passphrase; the raw-shape check must reject it instead.
+func TestInstallScript_GenPassphrase_FallsBackWhenOpensslPrefixesAWarning(t *testing.T) {
+	const warning = "WARNINGFIPSengineselftestfailed"
+	valid := strings.Repeat("Ab1", 21) + "Z" // 64 chars of the base64 alphabet
+	pass, output := runGenPassphrase(t, `printf '%s\n%s\n' '`+warning+`' '`+valid+`'`)
+	if strings.HasPrefix(pass, warning[:20]) || strings.HasPrefix(pass, valid[:20]) {
+		t.Fatalf("gen_passphrase accepted a warning-prefixed openssl output (%q); output:\n%s", pass, output)
+	}
+	if len(pass) != 40 {
+		t.Fatalf("gen_passphrase returned a %d-character passphrase (%q); want 40 from the fallback; output:\n%s", len(pass), pass, output)
+	}
+}
