@@ -74,7 +74,7 @@ culvert_cdr_backend_available == 0 for 5m
 - `CDR: all N enrolled instance(s) unavailable — applying fail_mode (failOpen=…)`
 - `CDR: call error reason="…": <full error>`
 
-Both are **rate-limited to one line per minute, independently per reason
+All three are **rate-limited to one line per minute, independently per reason
 class**: the first sighting of a class logs immediately, then at most one
 line per minute for that class, and the magnitude lives in the counters.
 The per-class timestamp matters — a single shared one plus "did the reason
@@ -83,6 +83,13 @@ classes (a load-balanced pool answering `unavailable` from one node and
 `backend_internal` from another), which is the amplification the limit
 exists to prevent. A mitigation for a log-amplification problem must not be
 one itself.
+
+`CDR_ERROR` carries its **own independent gate**, so it cannot be silenced
+by — and cannot silence — the `all … unavailable` line that fires for the
+same event; seeing only one of the two would give you half the picture. The
+structured request-log entry behind `CDR_ERROR` is **not** rate-limited:
+that is the traffic record, and every file delivered under `fail_mode: open`
+still appears in it.
 
 ### Alerts
 
