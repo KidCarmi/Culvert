@@ -608,6 +608,8 @@ var uiRoutes = []uiRouteMetadata{
 		}},
 	{Path: "/api/config/diff", Handler: "apiConfigDiff", Domain: "settings", Public: false,
 		Methods: []uiRouteMethod{{Method: "GET", MinRole: RoleViewer}}},
+	{Path: "/api/config/rollback-scope", Handler: "apiConfigRollbackScope", Domain: "settings", Public: false,
+		Methods: []uiRouteMethod{{Method: "GET", MinRole: RoleViewer}}},
 	{Path: "/api/settings/default-auth-outcome", Handler: "apiDefaultAuthOutcome", Domain: "settings", Public: false,
 		Methods: []uiRouteMethod{{Method: "PUT", MinRole: RoleAdmin, Mutating: true, AuditExpected: true}}},
 	{Path: "/api/settings/unauth-mode", Handler: "apiDefaultAuthOutcome", Domain: "settings", Public: false,
