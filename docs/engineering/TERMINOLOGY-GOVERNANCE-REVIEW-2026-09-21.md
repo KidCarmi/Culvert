@@ -76,12 +76,13 @@ was wrong and is corrected here.
 2. **CHAOS-65 OCSP engine** (`internal/ocsp/ocsp.go` +655/-70, `ocsp_coverage.go`, `ocsp_metrics.go`): the
    `culvert_ocsp_*` metric family, the `coverage`/`uncheckedEnforcingPaths` fields on
    `GET /api/ocsp`, and `docs/operator/ocsp-revocation-checking.md` were spot-checked for cross-surface
-   naming and match byte-for-byte (metric names ↔ HELP text ↔ doc section headings) — that part of the
-   original audit was correct. **Correction**: the original report went on to conclude "internal engine, no
+   naming, and the names line up (metric names ↔ HELP text ↔ doc section headings). That name check was
+   correct, but it did not read the surrounding prose against the glossary; the glossary sweep below
+   records the "verdict" and "appliance" wording it missed. **Correction**: the original report went on to conclude "internal engine, no
    independent GUI panel — not a finding," which is factually wrong — `static/index.html:4477` carries a live
    panel titled **"OCSP / CRL Revocation"** (the title predates this window; the window added its coverage
    counter and banners). The panel is an "Enable OCSP checking" toggle plus four counters and three status
-   banners, all OCSP-only. Auditing that panel directly, as it should have
+   banners, all about OCSP. Auditing that panel directly, as it should have
    been the first time, surfaces a real finding: see **T-59** below. The same stream also added
    "appliance" to the OCSP operator runbook and to an OpenAPI field description on `GET /api/ocsp`; see
    the T-51 recurrence below.
@@ -91,7 +92,8 @@ Release-pipeline changes in the window (`resign-catalog.yml`, `docs/operator/cat
 surfaces already covered by CLAUDE.md's "Release catalog weekly re-sign (M1-4)" and "single origin (R2)"
 notes; spot-checked the runbook title against the workflow name (`resign-catalog.yml` ↔ "Catalog Re-sign
 Runbook") and the R2 terminology against CLAUDE.md's existing "R2 (`https://catalog.culvertlabs.com`)"
-description — consistent, no drift.
+description — the names are consistent. The glossary sweep below records the release-gating runbook's
+"verdict" and "appliance" wording.
 
 **Spot-checked three carry-over items (four IDs: T-12, T-13, T-29, T-30) at their cited locations** in the
 then-current tree (`6c46ebd`), as prior reports have done. The other carry-over findings were not
@@ -203,6 +205,18 @@ Later review rounds found more errors, also fixed:
   say "OCSP/CRL". Those comments are internal and were not changed.
   If CRL fallback is added in the future, "OCSP / CRL Revocation" becomes accurate again and can be
   restored at that time.
+- **Sub-item — "verdict" in the OCSP copy (recorded, not fixed in this report PR).** The glossary
+  reserves "verdict" for Diagnostics checks (`PRODUCT-TERMINOLOGY.md`, Decision row). The window's OCSP
+  copy uses it for a responder's answer. Required rewording: "response" where the text means what the
+  responder sent, "status" where it means `good`/`revoked`. Hits (line numbers at `6c46ebd`):
+  - `static/index.html:4484` "Fail-closed (no usable verdict)" → "(no usable response)"; `:4491`
+    "revocation verdicts from the affected upstream" → "revocation responses"; `:4494` "a usable,
+    affirmative verdict" → "a usable, affirmative status".
+  - `api/openapi/openapi.yaml:488` (`unauthorizedResponderTotal`) "a certificate signing a verdict about
+    itself" → "a response about itself" (carried into `openapi.json` and `types.gen.ts` on regeneration).
+  - `docs/operator/ocsp-revocation-checking.md:39`, `:49`, `:50`, `:91`, `:95`, `:144` → "status" or
+    "response" as above ("cached verdicts" → "cached statuses").
+  - `CHANGELOG.md:226`, `:232`, `:259` (the CHAOS-65 entry).
 - **Affected surfaces**: GUI (`static/index.html:4477`), one operator-doc reference
   (`docs/operator/ocsp-revocation-checking.md:4`), and three roadmap lines. No API/config/audit/metric
   surface uses "CRL."
@@ -263,6 +277,37 @@ Later review rounds found more errors, also fixed:
 - **Compatibility risk**: none — description text and prose only; no field, path or schema changed.
 
 ---
+
+## Glossary term sweep
+
+Every term `docs/design/PRODUCT-TERMINOLOGY.md` forbids, reserves or replaces was checked against the
+lines this window ADDED. Command, per term (with the term's pattern in place of `<re>`):
+`git diff 46410c3 6c46ebd -U0 | grep -iE '^\+.*<re>'`. "Visible" means `static/index.html`, non-test
+`frontend/src`, `api/openapi/openapi.yaml`, `docs/` outside `docs/engineering`, `docs/design` and
+`docs/adr`, `CHANGELOG.md` and `README.md`. Generated copies (`openapi.json`, `types.gen.ts`) follow the
+YAML and are not counted twice.
+
+| Term (glossary rule) | Added lines | Visible | Outcome |
+|---|---|---|---|
+| appliance ("not used") | 24 | 6, plus one workflow `::error::` line | Fixed; the T-51-recurrence list counts 9 because it also lists the generated `openapi.json` and `types.gen.ts` copies |
+| verdict (reserved for Diagnostics) | 315 | 53 | Recorded: 13 OCSP lines under T-59; 40 others below |
+| result (replaced by "decision" for a request's outcome) | 63 | 7 | None means a request's decision (campaign, query and release results) — no violation |
+| incident (no incident entity) | 3 | 1 | Plain English ("during an incident"), no entity invented — no violation |
+| scanner (replaced by "engine") | 5 | 3 | Means a code scanner in a test wall, not a scanning engine — no violation |
+| policy rule (replaced by "rule") | 6 | 1 | An MCP gateway policy rule, not a Stage-2 `PolicyRule` — no violation |
+| exclusion (bypass vocabulary) | 23 | 6 | The MCP rollout-scope "exclusions" field, not an inspection bypass — no violation |
+| kill switch (must be qualified) | 2 | 0 | Test identifiers only |
+| unauth mode, threat engine, Cluster Nodes, blacklist/whitelist, Live Feed, Live Request Log, Recent Requests, Users & Roles, proxy pool | 0 each | 0 | — |
+
+**Recorded, not yet numbered — "verdict" outside OCSP (40 visible lines).** These use "verdict" for
+something other than a Diagnostics check, so they break the same reservation:
+- `docs/operator/mcp-first-controlled-canary-review.md`: 35 lines. The review uses "verdict" for its own
+  conclusions and for a policy decision.
+- `docs/operator/release-publication-gating.md:22`, `:60`, `:455`: a CI gate's outcome.
+- `CHANGELOG.md:15` (a CI gate's outcome) and `:391` (rate-limit exemption verdicts).
+
+They are not fixed in this report PR. Rewording the MCP review would touch many lines of a document that
+other PRs edit, so it needs its own change.
 
 ## Carried-Over Findings (unchanged)
 
