@@ -983,6 +983,16 @@ routes:
     audit_expected: false
     danger_level: none
     documented: true
+  - route: "/api/config/rollback-scope"
+    method: "GET"
+    handler: "apiConfigRollbackScope"
+    domain: "settings"
+    visibility: admin-supported
+    min_role: "viewer"
+    mutating: false
+    audit_expected: false
+    danger_level: none
+    documented: true
   - route: "/api/config/export"
     method: "GET"
     handler: "apiConfigExport"

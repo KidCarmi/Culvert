@@ -1378,20 +1378,55 @@ func scanInspectBody(r, req *http.Request, resp *http.Response, br blockResponde
 	return scanClean
 }
 
+// hopByHopHeaderNames are the RFC 7230 §6.1 hop-by-hop header names an
+// intermediary must strip before forwarding, spelled EXACTLY as
+// textproto.CanonicalMIMEHeaderKey renders them — note "Te", not "TE".
+//
+// The spelling is load-bearing, not cosmetic. http.Header.Del routes its
+// argument through CanonicalMIMEHeaderKey, which has a fast path that scans an
+// already-canonical key and returns it verbatim, and a slow path that copies
+// the key into a []byte and rewrites the casing — allocating. "TE" fails the
+// scan, so the pre-change spelling paid that rewrite on every call, i.e. four
+// times per proxied exchange. This is the same finding, and the same fix, as
+// the "X-Request-ID" vs "X-Request-Id" one in setupRequestTracing.
+//
+// Changing a name here is BYTE-IDENTICAL on the wire: Del canonicalises either
+// way, so only the re-derivation is removed. TestHopByHopHeaderNames_AreCanonical
+// pins the table against net/textproto itself so a future respelling — or an
+// upstream Go change — fails the build instead of silently reintroducing the
+// cost, and TestHopByHopHeaderNames_CoverRFC7230 pins the set so that gate can
+// never be satisfied by dropping a name.
+var hopByHopHeaderNames = [...]string{
+	"Connection", "Keep-Alive", "Proxy-Authenticate",
+	"Proxy-Authorization", "Te", "Trailer", "Transfer-Encoding", "Upgrade",
+}
+
 func removeHopHeaders(h http.Header) {
 	// RFC 7230 §6.1: the Connection header itself lists additional hop-by-hop
 	// headers that intermediaries MUST remove before forwarding.
+	//
+	// The comma-separated list is walked in place rather than through
+	// strings.Split, which allocates a slice per Connection value on a path
+	// that runs four times per exchange. The two forms are equivalent,
+	// including for the degenerate values Split renders as a one-element slice
+	// (""), a lone "," and a trailing "," — pinned by the divergence shapes in
+	// TestRemoveHopHeaders_MatchesLegacy. The field names themselves are
+	// peer-supplied and arbitrarily spelled, so their Del stays on the
+	// canonicalising path by necessity.
 	for _, v := range h["Connection"] {
-		for _, f := range strings.Split(v, ",") {
+		for v != "" {
+			f := v
+			if i := strings.IndexByte(v, ','); i >= 0 {
+				f, v = v[:i], v[i+1:]
+			} else {
+				v = ""
+			}
 			if f = strings.TrimSpace(f); f != "" {
 				h.Del(f)
 			}
 		}
 	}
-	for _, hdr := range []string{
-		"Connection", "Keep-Alive", "Proxy-Authenticate",
-		"Proxy-Authorization", "TE", "Trailer", "Transfer-Encoding", "Upgrade",
-	} {
+	for _, hdr := range hopByHopHeaderNames {
 		h.Del(hdr)
 	}
 }
