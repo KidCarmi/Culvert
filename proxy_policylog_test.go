@@ -317,6 +317,34 @@ func TestPolicyDecisionLine_EveryFieldIsSanitized(t *testing.T) {
 	}
 }
 
+// TestPolicyDecisionLine_RedirectTargetIsByteIdenticalAndSanitized closes the
+// one string position the render-case matrix above cannot reach: the redirect
+// target has its own sanitize-and-quote path, and plRenderCases pins it to a
+// benign constant. Drive the whole awkward-value corpus through it, against the
+// frozen template, and require a forging payload never to split the line.
+func TestPolicyDecisionLine_RedirectTargetIsByteIdenticalAndSanitized(t *testing.T) {
+	targets := append([]string{
+		"https://portal.example.com/blocked?x=1",
+		`https://p.example/"quoted"\path`,
+		"https://p.example/ünïcode/路径",
+		"a\nPOLICY_ALLOW forged",
+	}, plAwkwardStrings...)
+	for _, v := range targets {
+		got := plCapture(func() {
+			logPolicyRedirect(plRule, 1, plClientIP, plHost, v, plCond, plReqID, plIdentity)
+		})
+		want := plCapture(func() {
+			plPrintfRedirectLine(plRule, 1, plClientIP, plHost, v, plCond, plReqID, plIdentity)
+		})
+		if got != want {
+			t.Fatalf("redirect line diverged (target=%q):\n frozen: %q\ncurrent: %q", v, want, got)
+		}
+		if strings.Contains(strings.TrimSuffix(got, "\n"), "\n") {
+			t.Errorf("redirect target %q forged a second physical line: %q", v, got)
+		}
+	}
+}
+
 // ── The quoter ──────────────────────────────────────────────────────────────
 
 // TestAppendQuotedForLog_MatchesStrconvAppendQuote is the differential that
