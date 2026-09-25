@@ -139,7 +139,7 @@ func judgeUniverse(in verdictInput, c *Completeness, fail func(string, ...any)) 
 	if meta.Kind != universeRun.name {
 		fail("universe: evidence is of kind %q, not %q", meta.Kind, universeRun.name)
 	}
-	checkPackageRunIdentity("universe", in, meta, fail)
+	checkPackageRunIdentity("universe", in, meta, in.lanePkgs, fail)
 	prof, err := readProfile(filepath.Join(in.universeDir, universeRun.profile))
 	if err != nil {
 		fail("universe: unusable coverage profile: %v", err)
@@ -219,7 +219,7 @@ func judgeUniverseEvents(in verdictInput, empty map[string]bool, fail func(strin
 // checkPackageRunIdentity: a run over the non-root packages must come from the
 // build's commit and toolchain, exit 0, and cover exactly `go list ./...`
 // minus the root import path.
-func checkPackageRunIdentity(what string, in verdictInput, meta LaneMeta, fail func(string, ...any)) {
+func checkPackageRunIdentity(what string, in verdictInput, meta LaneMeta, want []string, fail func(string, ...any)) {
 	m := in.manifest
 	if meta.Commit != m.Commit || meta.GoVersion != m.GoVersion || meta.GOOS != m.GOOS || meta.GOARCH != m.GOARCH {
 		fail("%s: identity %s %s %s/%s differs from the build %s %s %s/%s", what, meta.Commit, meta.GoVersion, meta.GOOS, meta.GOARCH, m.Commit, m.GoVersion, m.GOOS, m.GOARCH)
@@ -230,7 +230,7 @@ func checkPackageRunIdentity(what string, in verdictInput, meta LaneMeta, fail f
 	if meta.Excluded != m.Package || in.laneRoot != m.Package {
 		fail("%s excluded %q (expected root %q per go list: %q)", what, meta.Excluded, m.Package, in.laneRoot)
 	}
-	if d := diffNames(in.lanePkgs, meta.Packages); d != "" {
+	if d := diffNames(want, meta.Packages); d != "" {
 		fail("%s package set differs from `go list ./...` minus the root: %s", what, d)
 	}
 }

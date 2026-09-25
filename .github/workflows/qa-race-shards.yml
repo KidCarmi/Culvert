@@ -240,7 +240,22 @@ jobs:
         # `go list ./...` minus the EXACT root import path — cmd/, internal/
         # and any future package, whole packages. Evidence goes to RUNNER_TEMP,
         # outside the tree the tests walk.
-        run: go run ./cmd/rootshard run-lane -out-dir "$RUNNER_TEMP/race-lane" -commit "$GITHUB_SHA" -timeout 40m
+        # EXPERIMENT (CI-REDESIGN §18.5): a Fast-gate dispatch may choose the
+        # lane layout; every other caller and event runs the whole lane.
+        env:
+          LANE_LAYOUT: ${{ github.event.inputs.lane_layout || 'whole' }}
+          LANE_PKG: github.com/KidCarmi/Culvert/internal/mcp/execution
+        run: |
+          set -euo pipefail
+          sel=()
+          case "$LANE_LAYOUT" in
+            whole) ;;
+            split-execution) sel=(-exclude "$LANE_PKG") ;;
+            execution-first) sel=(-first "$LANE_PKG") ;;
+            *) echo "::error::unknown lane layout '$LANE_LAYOUT'"; exit 1 ;;
+          esac
+          echo "lane layout: $LANE_LAYOUT"
+          go run ./cmd/rootshard run-lane -out-dir "$RUNNER_TEMP/race-lane" -commit "$GITHUB_SHA" -timeout 40m "${sel[@]}"
 
       - name: Upload lane evidence
         if: always()
@@ -248,6 +263,42 @@ jobs:
         with:
           name: qa-race-lane
           path: ${{ runner.temp }}/race-lane/
+          retention-days: 7
+          if-no-files-found: warn
+
+  race-lane-part:
+    name: "Race · non-root packages (split part)"
+    # EXPERIMENT (CI-REDESIGN §18.5, arm B): the package the split-execution
+    # layout takes out of race-lane, run whole in its own job with the same
+    # command. Skipped for every other layout.
+    if: github.event.inputs.lane_layout == 'split-execution'
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    steps:
+      - name: Harden runner (egress audit)
+        if: inputs.harden-runner
+        uses: step-security/harden-runner@05e31511f85b41b11d1cf0ef85d0992719546e2c # v2.21.0
+        with:
+          egress-policy: audit
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: ./.github/actions/setup-go-cache
+
+      - name: Download dependencies
+        run: go mod download
+
+      - name: Race + coverage over the split package
+        env:
+          LANE_PKG: github.com/KidCarmi/Culvert/internal/mcp/execution
+        run: go run ./cmd/rootshard run-lane -out-dir "$RUNNER_TEMP/race-lane-part" -commit "$GITHUB_SHA" -timeout 40m -only "$LANE_PKG"
+
+      - name: Upload lane part evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: qa-race-lane-part
+          path: ${{ runner.temp }}/race-lane-part/
           retention-days: 7
           if-no-files-found: warn
 
@@ -342,7 +393,7 @@ jobs:
 
   race-verdict:
     name: "Race · verdict + coverage evidence"
-    needs: [race-build, race-shard, race-lane, race-universe, race-privileged]
+    needs: [race-build, race-shard, race-lane, race-lane-part, race-universe, race-privileged]
     # always(): a failed or cancelled producer must still produce a verdict
     # that names it — never a silently skipped check.
     if: always()
@@ -384,6 +435,14 @@ jobs:
           name: qa-race-lane
           path: race-lane
 
+      - name: Download lane part evidence
+        if: github.event.inputs.lane_layout == 'split-execution'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        continue-on-error: true
+        with:
+          name: qa-race-lane-part
+          path: race-lane-part
+
       - name: Download universe evidence
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         continue-on-error: true
@@ -395,10 +454,14 @@ jobs:
         # Runs from source, not the uploaded tool binary: the verdict must not
         # depend on an artifact it is judging. -commit is THIS checkout, which
         # the source-enumerated expectations are derived from.
+        env:
+          LANE_LAYOUT: ${{ github.event.inputs.lane_layout || 'whole' }}
         run: |
           set -o pipefail
+          lanes=race-lane
+          [ "$LANE_LAYOUT" != split-execution ] || lanes=race-lane,race-lane-part
           go run ./cmd/rootshard verdict -build-dir race-build -shards-dir race-shards \
-            -lane-dir race-lane -universe-dir race-universe -commit "$GITHUB_SHA" \
+            -lane-dir "$lanes" -universe-dir race-universe -commit "$GITHUB_SHA" \
             -out-dir race-verdict | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Every producer must have succeeded
@@ -408,6 +471,7 @@ jobs:
         if: always()
         env:
           PRIV_TEST: ${{ inputs.privileged-test }}
+          LANE_LAYOUT: ${{ github.event.inputs.lane_layout || 'whole' }}
         run: |
           set -eu
           fail=0
@@ -423,6 +487,11 @@ jobs:
           want=skipped; [ -z "$PRIV_TEST" ] || want=success
           echo "race-privileged=${{ needs.race-privileged.result }} (want $want)"
           [ "${{ needs.race-privileged.result }}" = "$want" ] || { echo "::error::race-privileged is ${{ needs.race-privileged.result }}, want $want"; fail=1; }
+          # The split part must have run and succeeded exactly when the lane
+          # was split.
+          want=skipped; [ "$LANE_LAYOUT" != split-execution ] || want=success
+          echo "race-lane-part=${{ needs.race-lane-part.result }} (want $want)"
+          [ "${{ needs.race-lane-part.result }}" = "$want" ] || { echo "::error::race-lane-part is ${{ needs.race-lane-part.result }}, want $want"; fail=1; }
           exit $fail
 
       - name: Assert the coverage profile is usable

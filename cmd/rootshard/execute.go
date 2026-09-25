@@ -440,8 +440,13 @@ func copyEvents(r io.Reader, w, log io.Writer) error {
 		_, _ = bw.Write(line)
 		_ = bw.WriteByte('\n')
 		var ev testEvent
-		if json.Unmarshal(line, &ev) == nil && ev.Action == "output" {
-			say(log, "%s", ev.Output)
+		if json.Unmarshal(line, &ev) == nil {
+			if ev.Action == "output" {
+				say(log, "%s", ev.Output)
+			}
+			if pc, ok := log.(*packageClock); ok {
+				pc.event(ev)
+			}
 		}
 	}
 	if err := sc.Err(); err != nil {
@@ -602,6 +607,12 @@ func runPackageSet(args []string, stdout io.Writer, run packageRun) error {
 	commit := fs.String("commit", os.Getenv("GITHUB_SHA"), "commit this job checked out")
 	timeout := fs.String("timeout", "40m", "per-binary -timeout (the reference's)")
 	goBin := fs.String("go", "go", "go command")
+	var sel laneSelection
+	if run.name == laneRun.name {
+		fs.StringVar(&sel.first, "first", "", "comma-separated lane packages to hand `go test` first")
+		fs.StringVar(&sel.exclude, "exclude", "", "comma-separated lane packages another lane part runs")
+		fs.StringVar(&sel.only, "only", "", "comma-separated lane packages this part runs (all others belong to another part)")
+	}
 	if err := fs.Parse(args); err != nil {
 		return fmt.Errorf("%w: %w", errUsage, err)
 	}
@@ -620,6 +631,9 @@ func runPackageSet(args []string, stdout io.Writer, run packageRun) error {
 	root, pkgs, err := nonRootPackages(ctx, *goBin)
 	if err != nil {
 		return err
+	}
+	if pkgs, err = sel.apply(pkgs); err != nil {
+		return fmt.Errorf("%w: %w", errUsage, err)
 	}
 	if err := os.MkdirAll(*outDir, 0o750); err != nil {
 		return fmt.Errorf("mkdir: %w", err)
@@ -644,8 +658,12 @@ func runPackageSet(args []string, stdout io.Writer, run packageRun) error {
 	if err := c.Start(); err != nil {
 		return fmt.Errorf("start go test: %w", err)
 	}
-	copyErr := copyEvents(out, f, stdout)
+	clock := &packageClock{log: stdout, start: start}
+	copyErr := copyEvents(out, f, clock)
 	meta.ExitCode = exitCode(c.Wait())
+	if run.name == laneRun.name {
+		clock.summary()
+	}
 	if copyErr != nil && meta.ExitCode == 0 {
 		meta.ExitCode = -2
 		say(stdout, "::error::%s events: %v\n", run.name, copyErr)
@@ -700,4 +718,126 @@ func fileSHA256(path string) (sum string, size int64, err error) {
 
 func since(t time.Time) float64 {
 	return float64(time.Since(t).Milliseconds()) / 1000
+}
+
+// laneSelection splits or reorders the lane's package list. Every named
+// package must be a lane package: a typo must not silently select nothing.
+type laneSelection struct{ first, exclude, only string }
+
+func splitNames(s string) []string {
+	var out []string
+	for _, n := range strings.Split(s, ",") {
+		if n = strings.TrimSpace(n); n != "" {
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
+func (sel laneSelection) apply(pkgs []string) ([]string, error) {
+	first, exclude, only := splitNames(sel.first), splitNames(sel.exclude), splitNames(sel.only)
+	if len(exclude) > 0 && len(only) > 0 {
+		return nil, errors.New("-exclude and -only are exclusive")
+	}
+	known := map[string]bool{}
+	for _, p := range pkgs {
+		known[p] = true
+	}
+	for _, n := range append(append(append([]string{}, first...), exclude...), only...) {
+		if !known[n] {
+			return nil, fmt.Errorf("%s is not a lane package", n)
+		}
+	}
+	drop := map[string]bool{}
+	for _, n := range exclude {
+		drop[n] = true
+	}
+	if len(only) > 0 {
+		keep := map[string]bool{}
+		for _, n := range only {
+			keep[n] = true
+		}
+		for _, p := range pkgs {
+			drop[p] = !keep[p]
+		}
+	}
+	var head, tail []string
+	isFirst := map[string]bool{}
+	for _, n := range first {
+		if drop[n] {
+			return nil, fmt.Errorf("%s is both first and not run here", n)
+		}
+		if !isFirst[n] {
+			head = append(head, n)
+		}
+		isFirst[n] = true
+	}
+	for _, p := range pkgs {
+		if !drop[p] && !isFirst[p] {
+			tail = append(tail, p)
+		}
+	}
+	return append(head, tail...), nil
+}
+
+// packageClock writes package milestones into the job log with the
+// lane-relative time. `go test -json` emits a package's "start" event when its
+// run action begins, and run actions begin in ARGUMENT order by construction,
+// so "start" alone restates the argument order. The first output event is the
+// test binary itself running, which is the evidence of when a package ran.
+type packageClock struct {
+	log   io.Writer
+	start time.Time
+	ran   map[string]bool
+	order []packageMark // first output, in the order it was seen
+	done  []packageMark // package results, in completion order
+}
+
+type packageMark struct {
+	pkg     string
+	at      float64
+	elapsed float64
+}
+
+// summary writes the order evidence as workflow annotations, which stay
+// readable from the job's check-run when the full log is not: the first
+// packages whose test binaries ran, and the last packages to finish.
+func (p *packageClock) summary() {
+	var first []string
+	for i := 0; i < len(p.order) && i < 5; i++ {
+		first = append(first, fmt.Sprintf("%d. %s at %.1fs", i+1, p.order[i].pkg, p.order[i].at))
+	}
+	say(p.log, "::notice title=lane order (first test output)::%s\n", strings.Join(first, "; "))
+	ranAt := map[string]float64{}
+	for _, m := range p.order {
+		ranAt[m.pkg] = m.at
+	}
+	for i := len(p.done) - 1; i >= 0 && i >= len(p.done)-3; i-- {
+		m := p.done[i]
+		say(p.log, "::notice title=lane finish #%d from last::%s ran at %.1fs, finished at %.1fs (elapsed %.1fs)\n",
+			len(p.done)-i, m.pkg, ranAt[m.pkg], m.at, m.elapsed)
+	}
+}
+
+func (p *packageClock) Write(b []byte) (int, error) { return p.log.Write(b) }
+
+func (p *packageClock) event(ev testEvent) {
+	if ev.Action == "output" && ev.Test != "" && !p.ran[ev.Package] {
+		if p.ran == nil {
+			p.ran = map[string]bool{}
+		}
+		p.ran[ev.Package] = true
+		p.order = append(p.order, packageMark{pkg: ev.Package, at: since(p.start)})
+		say(p.log, "LANE-PACKAGE running %s at %.1fs\n", ev.Package, since(p.start))
+	}
+	if ev.Test != "" {
+		return
+	}
+	switch ev.Action {
+	case "start":
+		say(p.log, "LANE-PACKAGE start %s at %.1fs\n", ev.Package, since(p.start))
+	case "pass", "fail", "skip":
+		p.done = append(p.done, packageMark{pkg: ev.Package, at: since(p.start), elapsed: ev.Elapsed})
+		say(p.log, "LANE-PACKAGE %s %s at %.1fs (elapsed %.1fs)\n", ev.Action, ev.Package, since(p.start), ev.Elapsed)
+	}
 }

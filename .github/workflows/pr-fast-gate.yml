@@ -63,6 +63,16 @@ on:
           - shard-profile-truncated
           - producer-fails
           - coverage-floor-fails
+      lane_layout:
+        # EXPERIMENT (CI-REDESIGN §18.5): the non-root lane's layout, read by
+        # qa-race-shards.yml. whole = the current lane (control).
+        description: "Experiment: non-root lane layout"
+        type: choice
+        default: whole
+        options:
+          - whole
+          - split-execution
+          - execution-first
 
 concurrency:
   group: fast-gate-${{ github.ref }}

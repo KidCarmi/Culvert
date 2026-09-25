@@ -277,47 +277,89 @@ func checkChunkResults(pkg, where string, names []string, res Results, fail func
 // completeness against the universe is checked by the caller).
 func judgeLane(in verdictInput, c *Completeness, fail func(string, ...any)) (LaneReport, Results, *Profile) {
 	rep := LaneReport{Elapsed: map[string]float64{}}
-	var meta LaneMeta
-	if err := readJSON(filepath.Join(in.laneDir, "meta.json"), &meta); err != nil {
-		fail("lane: no usable evidence (%v) — failed, cancelled or never uploaded", err)
+	dirs := splitNames(in.laneDir)
+	if len(dirs) == 0 {
+		fail("lane: no evidence directory named")
 		return rep, Results{}, nil
 	}
-	if meta.Kind != laneRun.name {
-		fail("lane: evidence is of kind %q, not %q", meta.Kind, laneRun.name)
+	// A lane may run as several parts (disjoint package subsets of ONE
+	// command); together they must be exactly the lane, judged as one.
+	res := Results{}
+	var prof *Profile
+	var pkgs []string
+	usable := true
+	for _, dir := range dirs {
+		meta, pres, pprof, ok := judgeLanePart(in, dir, fail)
+		if !ok {
+			usable = false
+			continue
+		}
+		pkgs = append(pkgs, meta.Packages...)
+		rep.Packages += len(meta.Packages)
+		if meta.Seconds > rep.Seconds {
+			rep.Seconds = meta.Seconds
+		}
+		res.merge(pres)
+		if pprof != nil {
+			prof = mergeInto(prof, pprof, fail)
+		}
 	}
-	checkPackageRunIdentity("lane", in, meta, fail)
-	rep.Packages, rep.Seconds = len(meta.Packages), meta.Seconds
-	f, err := os.Open(filepath.Join(in.laneDir, laneRun.events))
-	if err != nil {
-		fail("lane: no test events (%v)", err)
+	if !usable {
 		return rep, Results{}, nil
 	}
-	res, err := parseTestJSON(f)
-	f.Close()
-	if err != nil {
-		fail("lane: %v", err)
-		return rep, Results{}, nil
+	if d := diffNames(in.lanePkgs, pkgs); d != "" {
+		fail("lane package set differs from `go list ./...` minus the root: %s", d)
 	}
 	rep.Elapsed = checkLaneResults(in, res, c.empty(), fail)
 	checkLaneEntries(in, res, c, fail)
-	prof, err := readProfile(filepath.Join(in.laneDir, laneRun.profile))
-	if err != nil {
-		fail("lane: unusable coverage profile: %v", err)
+	if prof == nil {
 		return rep, res, nil
-	}
-	if prof.Mode != "atomic" {
-		fail("lane: coverage mode %q, the race reference is atomic", prof.Mode)
 	}
 	if len(prof.Blocks) == 0 {
 		fail("lane: coverage profile has no blocks")
 	}
+	return rep, res, prof
+}
+
+// judgeLanePart reads one lane part's evidence: its identity, events and a
+// usable atomic profile with no root-package blocks. Package-set equality is
+// judged over the union by judgeLane.
+func judgeLanePart(in verdictInput, dir string, fail func(string, ...any)) (LaneMeta, Results, *Profile, bool) {
+	var meta LaneMeta
+	if err := readJSON(filepath.Join(dir, "meta.json"), &meta); err != nil {
+		fail("lane %s: no usable evidence (%v) — failed, cancelled or never uploaded", dir, err)
+		return meta, nil, nil, false
+	}
+	if meta.Kind != laneRun.name {
+		fail("lane %s: evidence is of kind %q, not %q", dir, meta.Kind, laneRun.name)
+	}
+	checkPackageRunIdentity("lane "+dir, in, meta, meta.Packages, fail)
+	f, err := os.Open(filepath.Join(dir, laneRun.events))
+	if err != nil {
+		fail("lane %s: no test events (%v)", dir, err)
+		return meta, nil, nil, false
+	}
+	res, err := parseTestJSON(f)
+	f.Close()
+	if err != nil {
+		fail("lane %s: %v", dir, err)
+		return meta, nil, nil, false
+	}
+	prof, err := readProfile(filepath.Join(dir, laneRun.profile))
+	if err != nil {
+		fail("lane %s: unusable coverage profile: %v", dir, err)
+		return meta, res, nil, true
+	}
+	if prof.Mode != "atomic" {
+		fail("lane %s: coverage mode %q, the race reference is atomic", dir, prof.Mode)
+	}
 	for k := range prof.Blocks {
 		if rootFile(in.manifest.Package, k.File) {
-			fail("lane: coverage block %s belongs to the root package", k)
+			fail("lane %s: coverage block %s belongs to the root package", dir, k)
 			break
 		}
 	}
-	return rep, res, prof
+	return meta, res, prof, true
 }
 
 // checkLaneResults: every expected package passed; the root never ran here.
@@ -349,7 +391,7 @@ func cmdVerdict(args []string, stdout io.Writer) error {
 	fl := newFlags("verdict")
 	buildDir := fl.String("build-dir", "", "directory with manifest.json, list.txt, plan.json")
 	shardsDir := fl.String("shards-dir", "", "directory holding shard-<i>/ evidence")
-	laneDir := fl.String("lane-dir", "", "non-root lane evidence directory")
+	laneDir := fl.String("lane-dir", "", "non-root lane evidence directory (comma-separated when the lane runs in parts)")
 	universeDir := fl.String("universe-dir", "", "non-root lane universe evidence directory")
 	outDir := fl.String("out-dir", "", "where to write verdict.json, results.json, merged.cover.out")
 	commit := fl.String("commit", os.Getenv("GITHUB_SHA"), "commit THIS job checked out (the source the expectations are enumerated from)")

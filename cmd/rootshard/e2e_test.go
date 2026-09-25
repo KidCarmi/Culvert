@@ -6,6 +6,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -259,6 +261,7 @@ func TestPilot_EndToEnd(t *testing.T) {
 	// Every way evidence can be incomplete must be refused by the standalone
 	// verdict — no unsharded reference exists at this point.
 	t.Run("incomplete evidence", func(t *testing.T) { incompleteEvidence(t, f) })
+	t.Run("split and reordered lane", func(t *testing.T) { splitLane(t, f, v) })
 
 	if err := writeJSON(f.path("no-exceptions.json"), CoverageExceptions{Schema: 1}); err != nil {
 		t.Fatal(err)
@@ -456,4 +459,70 @@ func unusableProfile(t *testing.T, f *fixture, commit string) {
 		t.Fatal(err)
 	}
 	wantRejected(t, f, "belongs to the root package")
+}
+
+func (f *fixture) verdictLanes(dir, lanes string) (code int, v Verdict, output string) {
+	code, output = f.rs("verdict", "-build-dir", f.path("build"), "-shards-dir", f.path("shards"),
+		"-lane-dir", lanes, "-universe-dir", f.path("universe"), "-commit", f.commit, "-out-dir", f.path(dir))
+	_ = readJSON(f.path(dir, "verdict.json"), &v)
+	return code, v, output
+}
+
+// splitLane: the lane may run as disjoint parts, or with chosen packages handed
+// to `go test` first. Either way the verdict judges the UNION as the one lane:
+// the same package set, results and block universe as the single-process lane,
+// and a missing or duplicated part is refused.
+func splitLane(t *testing.T, f *fixture, whole Verdict) {
+	const sub = "example.com/pilot/sub"
+	f.mustRS("run-lane", "-out-dir", f.path("lane-rest"), "-commit", f.commit, "-timeout", "2m", "-exclude", sub)
+	f.mustRS("run-lane", "-out-dir", f.path("lane-sub"), "-commit", f.commit, "-timeout", "2m", "-only", sub)
+	code, v, out := f.verdictLanes("verdict-split", f.path("lane-rest")+","+f.path("lane-sub"))
+	if code != 0 || !v.OK {
+		t.Fatalf("split lane rejected (exit %d):\n%s", code, out)
+	}
+	if v.Merged != whole.Merged || v.Lane.Packages != whole.Lane.Packages || !reflect.DeepEqual(v.Completeness, whole.Completeness) {
+		t.Fatalf("split lane differs from the whole lane:\nsplit %+v %+v %+v\nwhole %+v %+v %+v",
+			v.Merged, v.Lane.Packages, v.Completeness, whole.Merged, whole.Lane.Packages, whole.Completeness)
+	}
+	if code, _, out := f.verdictLanes("verdict-part", f.path("lane-rest")); code == 0 {
+		t.Fatalf("a lane missing its other part was accepted:\n%s", out)
+	}
+	if code, _, out := f.verdictLanes("verdict-dup", f.path("lane")+","+f.path("lane-sub")); code == 0 || !strings.Contains(out, "unexpected 1 ["+sub+"]") {
+		t.Fatalf("a package run by two parts was accepted (exit %d):\n%s", code, out)
+	}
+
+	log := f.mustRS("run-lane", "-out-dir", f.path("lane-first"), "-commit", f.commit, "-timeout", "2m", "-first", sub)
+	var meta LaneMeta
+	if err := readJSON(f.path("lane-first", "meta.json"), &meta); err != nil {
+		t.Fatal(err)
+	}
+	if len(meta.Packages) == 0 || meta.Packages[0] != sub {
+		t.Fatalf("-first did not put %s first: %v", sub, meta.Packages)
+	}
+	if !strings.Contains(log, "LANE-PACKAGE start "+sub+" at ") || !strings.Contains(log, "LANE-PACKAGE running "+sub+" at ") || !strings.Contains(log, "LANE-PACKAGE pass "+sub+" at ") {
+		t.Fatalf("the lane log does not record package start/end:\n%s", log)
+	}
+	// Which fixture package prints first is a race between tiny binaries; the
+	// annotation's presence and content are what matter here.
+	if !regexp.MustCompile(`::notice title=lane order \(first test output\)::1\. \S+ at [0-9.]+s;[^\n]*`+regexp.QuoteMeta(sub)).MatchString(log) &&
+		!strings.Contains(log, "::notice title=lane order (first test output)::1. "+sub+" at ") ||
+		!strings.Contains(log, "::notice title=lane finish #1 from last::") {
+		t.Fatalf("the lane does not annotate its package order:\n%s", log)
+	}
+	if code, v, out := f.verdictLanes("verdict-first", f.path("lane-first")); code != 0 || !v.OK || v.Merged != whole.Merged {
+		t.Fatalf("reordered lane rejected or different (exit %d):\n%s", code, out)
+	}
+	for _, bad := range [][]string{
+		{"-first", "example.com/pilot/nope"},
+		{"-exclude", sub, "-only", sub},
+		{"-only", sub, "-first", "example.com/pilot/notest"},
+	} {
+		args := append([]string{"run-lane", "-out-dir", f.path("lane-bad"), "-commit", f.commit}, bad...)
+		if code, out := f.rs(args...); code == 0 {
+			t.Fatalf("run-lane %v accepted:\n%s", bad, out)
+		}
+	}
+	if code, out := f.rs("universe", "-out-dir", f.path("universe-bad"), "-commit", f.commit, "-exclude", sub); code == 0 {
+		t.Fatalf("the universe accepted a lane selection — it must stay the whole lane:\n%s", out)
+	}
 }
