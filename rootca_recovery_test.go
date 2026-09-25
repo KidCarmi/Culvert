@@ -11,6 +11,7 @@ package main
 import (
 	"context"
 	"crypto/ecdsa"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -464,5 +465,192 @@ func TestChaos50_ManualRecoveryIsNotOverwrittenByRetry(t *testing.T) {
 		t.Errorf("live Root CA %v != persisted Root CA %v — a recovery attempt overwrote a manual one "+
 			"(the admin was told the rotation landed; the process is signing with a different root)",
 			live, persisted)
+	}
+}
+
+// TestChaos50_RecoveredSnapshotCarriesItsAttempt pins the consistency of the
+// recovery record: EVERY attempt is recorded as ONE transition that carries its
+// count together with its outcome.
+//
+// The successful attempt used to set `recovered` INSIDE the attempt
+// (noteSSLInspectionRecovered) while the campaign loop counted the attempt only
+// AFTER it returned, so a status reader landing between the two writes saw
+// {Recovered: true, Attempts: N-1} — a recovery attributed to an attempt the
+// record said had not happened. It surfaced once, under a loaded
+// `-race -count=3` run, as TestChaos50_TransientLoadFailureSelfHeals reading
+// {Attempts: 0, Recovered: true}, and passed 30/30 in isolation — exactly the
+// shape a polling assertion cannot pin. The first fix counted BEFORE the attempt
+// and only moved the window to the failure path: a reader then paired attempt
+// N's count with attempt N-1's error for as long as N ran (review finding).
+//
+// This gate is DETERMINISTIC: the observer runs under caLoadRecovery.mu at
+// EVERY transition, so it sees each snapshot a concurrent reader could have
+// seen, on any hardware and under any load. The good bundle is written only
+// after the first attempt has been recorded as FAILED, so the campaign always
+// carries at least one failure transition and the success is never attempt 1.
+// Invariants, each verified failing against the shape it names:
+//   - a Recovered snapshot carries at least one attempt, and the count never
+//     moves once Recovered is seen (count-after-in-loop shape);
+//   - a transition that counts a FAILED attempt carries that attempt's error in
+//     the same snapshot, i.e. the count never advances with the previous
+//     attempt's error still in place (count-before shape);
+//   - the sslInspectionLoadError latch agrees with Recovered in every snapshot
+//     (a control: the observer sees post-transition state, so the ORDERING of
+//     the latch clear against the lock is pinned separately by
+//     TestChaos50_LatchClearsInsideTheRecordTransition);
+//   - the count advances by at most one per transition and never regresses.
+func TestChaos50_RecoveredSnapshotCarriesItsAttempt(t *testing.T) {
+	swapInspectionCA(t)
+	captureStartupAlerts(t)
+	fastCARetries(t, 20)
+
+	var (
+		mu              sync.Mutex
+		transitions     int
+		violations      []string
+		prev            caLoadRecoverySnapshot
+		recoveredAt     int64 // attempts carried by the FIRST Recovered snapshot
+		sawRecovered    bool
+		failedAttempts  int
+		maxAttemptsSeen int64
+	)
+	setCALoadRecoveryObserverForTest(func(rec caLoadRecoverySnapshot) {
+		mu.Lock()
+		defer mu.Unlock()
+		transitions++
+		switch d := rec.Attempts - prev.Attempts; {
+		case d < 0:
+			violations = append(violations, fmt.Sprintf("attempt count regressed (%d → %d): %+v", prev.Attempts, rec.Attempts, rec))
+		case d > 1:
+			violations = append(violations, fmt.Sprintf("attempt count jumped by %d in one transition: %+v", d, rec))
+		case d == 1 && !rec.Recovered:
+			// A counted, unrecovered attempt is a FAILED one: its error must land
+			// in the same write as its count, not in a later one.
+			failedAttempts++
+			if rec.LastErr == "" {
+				violations = append(violations, fmt.Sprintf("attempt %d counted without its error: %+v", rec.Attempts, rec))
+			}
+		}
+		if rec.Attempts > maxAttemptsSeen {
+			maxAttemptsSeen = rec.Attempts
+		}
+		if rec.Recovered && rec.Attempts < 1 {
+			violations = append(violations, fmt.Sprintf("Recovered with no attempt: %+v", rec))
+		}
+		// The latch is part of the same transition: in this campaign it starts
+		// failed, stays failed through every failed attempt, and clears in the
+		// SAME snapshot that latches Recovered — never one transition apart.
+		if rec.Recovered != (rec.LoadFailure == "") {
+			violations = append(violations, fmt.Sprintf("latch and record disagree: %+v", rec))
+		}
+		if rec.Recovered && !sawRecovered {
+			sawRecovered, recoveredAt = true, rec.Attempts
+		}
+		if sawRecovered && rec.Attempts != recoveredAt {
+			violations = append(violations, fmt.Sprintf("attempt count moved after recovery (%d → %d): %+v",
+				recoveredAt, rec.Attempts, rec))
+		}
+		prev = rec
+	})
+	t.Cleanup(func() { setCALoadRecoveryObserverForTest(nil) })
+
+	path := writeCorruptBundle(t)
+	loadRootCA(rootCAStartupConfig{Path: path}, t.Context())
+	if certMgr.Ready() {
+		t.Fatal("precondition: load must fail")
+	}
+	// Let the campaign record at least one FAILED attempt before the fault
+	// clears, so the failure-transition invariant is exercised on every run.
+	waitForCA(t, "the first recovery attempt to fail", 10*time.Second, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return failedAttempts >= 1
+	})
+	writeGoodBundle(t, path) // the fault clears
+
+	awaitCARecoveryTerminal(t)
+	// Read the public snapshot BEFORE taking the test mutex: the observer runs
+	// under caLoadRecovery.mu and then takes mu, so the reverse order here would
+	// be a lock-order inversion against any late transition.
+	final := caLoadRecoveryStatus()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if transitions == 0 {
+		t.Fatal("observer saw no transitions — the gate is vacuous")
+	}
+	if failedAttempts == 0 {
+		t.Fatal("no failed attempt was observed — the failure-transition invariant was not exercised")
+	}
+	if !sawRecovered {
+		t.Fatalf("campaign did not recover (violations=%v)", violations)
+	}
+	for _, v := range violations {
+		t.Error(v)
+	}
+	// The recovering attempt is the LAST one counted: nothing ran after it.
+	if recoveredAt != maxAttemptsSeen {
+		t.Errorf("Recovered snapshot carried %d attempts but the campaign counted %d", recoveredAt, maxAttemptsSeen)
+	}
+	// And the public reader agrees with what the observer saw.
+	if !final.Recovered || final.Attempts != recoveredAt {
+		t.Errorf("caLoadRecoveryStatus() = %+v, want Recovered with Attempts=%d", final, recoveredAt)
+	}
+}
+
+// TestChaos50_LatchClearsInsideTheRecordTransition pins the OTHER half of the
+// consistency claim: the sslInspectionLoadError latch is cleared inside the
+// record's locked transition, never before it. /api/ca/status and the metrics
+// writer read the latch beside the attempt count through caLoadRecoveryStatus,
+// and that read is consistent only if no writer can move the latch while the
+// record's lock is held.
+//
+// The gate HOLDS caLoadRecovery.mu and triggers a recovery on another
+// goroutine: on a correct build the latch cannot clear until the lock is
+// released, so the assertion below is invariant-based and cannot flake; on the
+// pre-fix shape the goroutine clears the latch before contending for the lock,
+// which the bounded watch observes (verified failing 3/3).
+func TestChaos50_LatchClearsInsideTheRecordTransition(t *testing.T) {
+	swapInspectionCA(t)
+	captureStartupAlerts(t)
+
+	noteSSLInspectionUnavailable("/data/ca.bundle", os.ErrPermission)
+	if sslInspectionLoadFailure() == "" {
+		t.Fatal("precondition: the failure must be recorded")
+	}
+	if err := certMgr.InitCA(); err != nil {
+		t.Fatalf("InitCA: %v", err)
+	}
+
+	caLoadRecovery.mu.Lock()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		noteSSLInspectionRecovered("test recovery under a held record lock")
+	}()
+	// While the record lock is held, the latch must not move — the paired
+	// reader's whole guarantee rests on this.
+	deadline := time.Now().Add(100 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if sslInspectionLoadFailure() == "" {
+			caLoadRecovery.mu.Unlock()
+			<-done
+			t.Fatal("latch cleared while caLoadRecovery.mu was held: the clear runs outside the record transition")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	caLoadRecovery.mu.Unlock()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("recovery did not complete after the lock was released")
+	}
+	rec := caLoadRecoveryStatus()
+	if rec.LoadFailure != "" || !rec.Recovered {
+		t.Errorf("after release: %+v, want an empty latch and Recovered", rec)
+	}
+	if sslInspectionLoadFailure() != "" {
+		t.Error("the lock-free latch reader disagrees with the snapshot")
 	}
 }

@@ -1570,13 +1570,16 @@ func apiCAStatus(w http.ResponseWriter, r *http.Request) {
 	// loaded and every inspect-matched CONNECT is being forwarded UNINSPECTED" —
 	// opposite operator instructions from the same field. `inspectBypassed` is
 	// the fail-OPEN counterpart to `inspectBlocked` above.
-	loadFailure := sslInspectionLoadFailure()
+	// ONE locked snapshot for the latch and the recovery record: read as two
+	// separate values they can disagree (an empty latch beside an attempt count
+	// one short) while a recovery attempt is landing.
+	rec := caLoadRecoveryStatus()
+	loadFailure := rec.LoadFailure
 	info["loadFailed"] = loadFailure != ""
 	if loadFailure != "" {
 		info["loadFailureReason"] = loadFailure
 	}
 	info["inspectBypassed"] = caInspectBypassCount()
-	rec := caLoadRecoveryStatus()
 	info["loadRecoveryAttempts"] = rec.Attempts
 	info["loadRecoveryGaveUp"] = rec.GaveUp
 	if rec.LastErr != "" {

@@ -58,3 +58,25 @@ func (s *Snapshot) RuleIDs() []RuleID {
 	}
 	return out
 }
+
+// Rule returns the compiled rule with this id, or nil when the snapshot has none.
+//
+// It exists for the CANARY ACTIVATION PERMIT (blocker #14), which must know which policy
+// FIELDS the winning rule actually consulted. A preflight evaluates one constructed tuple;
+// that verdict generalises to every request the activation scope admits only if the winner
+// was decided entirely by fields the activation BINDS. Without this accessor the caller
+// could observe that a rule won but not what it read, and would have to treat its own tuple
+// as representative — which is a sample, not a proof.
+//
+// It is READ-ONLY and leaks nothing: *Rule's fields are unexported and its accessors expose
+// only the closed, developer-authored vocabulary (id, priority, action, reason, obligations,
+// condition ids). No rule VALUE — the operator-supplied right-hand side of a condition — is
+// reachable through it.
+func (s *Snapshot) Rule(id RuleID) *Rule {
+	for _, r := range s.rules {
+		if r.id == id {
+			return r
+		}
+	}
+	return nil
+}
