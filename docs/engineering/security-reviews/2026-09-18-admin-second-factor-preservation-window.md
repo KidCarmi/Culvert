@@ -191,7 +191,7 @@ authentication decision.**
 
 ### Required tests — all present
 
-`auth_totp_preservation_test.go` (21 gates). Every defect gate was verified **failing** against the
+`auth_totp_preservation_test.go` (21 gates) + `internal/totp/keyidentity_test.go` (8 gates). Every defect gate was verified **failing** against the
 unfixed tree before the fix, and the fix was then mutated twice to prove the gates are not
 decorative:
 
@@ -211,6 +211,36 @@ decorative:
 | Key identity (correction round 2) | `TestSetTOTPSecret_SameKeyDifferentSpellingKeepsCounter` (5 spellings), `TestSetTOTPSecret_TrailingBitSpellingKeepsCounter` (case folding alone is insufficient), `TestSetTOTPSecret_UnusableSecretKeepsCounter` (4 shapes) |
 | Key identity — availability half | `TestSetTOTPSecret_FreshEnrolmentOverUnusableSecretResets` |
 | Key identity — ANTI-DRIFT WALL | `TestTOTPSameKey_AgreesWithTheVerifier` (asserts the agreement, not the rule; fails against drift from either side) |
+
+`internal/totp/keyidentity_test.go` pins the same properties **where the primitives live**. The
+caller-side gates above prove `SetTOTPSecret` decides correctly; these prove the primitives it
+decides with are correct in their own right. Every assertion is routed through the production
+verifier (`kiAccepts` → `verifyTOTPAt`), so a gate here cannot drift from what authentication
+really does:
+
+| Category | Gate |
+|---|---|
+| Positive | `TestUsable_AcceptsEveryVerifierAcceptedSpelling`, `TestSameKey_SpellingsOfOneSecretAreOneKey` |
+| Boundary — non-canonical base32 | `TestSameKey_TrailingBitTwinsAreOneKey` (`MZXW6`/`MZXW7` decode to one key; proven by minting under one spelling and verifying under the other) |
+| Negative / malformed | `TestUsable_RejectsSecretsThatAuthenticateNothing`, `TestSameKey_UnusableIsNeverTheSameKey` (fail-closed both ways, **including against itself** — two blank secrets name no key, so "unchanged" is not a claim `SameKey` may make) |
+| Control | `TestSameKey_DifferentKeysAreNotTheSame` (a `SameKey` that always answers true never resets a counter, so a genuinely new device is refused) |
+| ANTI-DRIFT WALL | `TestDecodeSecret_IsTheOnlyCanonicalisation` (the pin named in `decodeSecret`'s own doc comment — which, until this round, **did not exist**), `TestSameKey_AgreesWithTheVerifier` |
+
+Five mutations verified **RED**: `SameKey` comparing raw strings; `SameKey` case-folding without
+decoding (caught by the trailing-bit gate and the wall, and — the reason the two gates are not
+redundant — it **passes** the case/whitespace gate); `decodeSecret` dropping its `ToUpper`;
+and controls for a `SameKey` and a `Usable` that simply answer `true`.
+
+**Why this file was needed, and the general rule.** `internal/totp/totp.go` carries a gate-critical
+**85% per-file coverage floor** (`.github/scripts/coverage-floor.sh`), computed as an unweighted
+*mean of per-function coverage* — so a few small new functions move it a long way. Round 2 added
+three functions called only from package `main`; the caller-side gates exercised their behaviour
+thoroughly, but the floor saw `Usable` and `SameKey` at 0% and the file at **69.4%**, and refused
+the PR. The floor was right, and its own header says why: *"a drop below a floor usually means a new
+branch was added without tests."* A new exported function in a floored file needs tests **in its own
+package** — exercise from another package does not count toward it, and should not: these are part
+of the package's API surface now, and the next caller will not be the one that happened to motivate
+them. The file is back to **100.0%**.
 
 **Mutation evidence.**
 Reintroducing the bare `&uiAdminUser{passHash, role}` literal in `SetUIUser` fails the wall **and**
