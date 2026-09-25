@@ -460,3 +460,84 @@ func TestRosterToSession_UnenrolledDiskRoleNeverReachesAdmin(t *testing.T) {
 		t.Fatalf("requireRole wrote %d, want 403", rec.Code)
 	}
 }
+
+// savedRole re-reads the roster file and returns bob's persisted role.
+func savedRole(t *testing.T, path string) string {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read roster: %v", err)
+	}
+	var env struct {
+		Users []struct {
+			Username string `json:"username"`
+			Role     string `json:"role"`
+		} `json:"users"`
+	}
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatalf("unmarshal roster: %v", err)
+	}
+	for _, u := range env.Users {
+		if u.Username == "bob" {
+			return u.Role
+		}
+	}
+	t.Fatalf("bob missing from saved roster")
+	return ""
+}
+
+// DEFECT GATE (Codex review). The clamp governs AUTHORIZATION only: an
+// ordinary save on a downgraded build — including a password change, which
+// re-writes the record with the unchanged effective role — must write the
+// newer build's role back verbatim, or a temporary downgrade permanently
+// destroys the assignment and upgrading again cannot restore it.
+func TestRosterLoad_ClampIsNeverPersisted(t *testing.T) {
+	path, pass := seedRoster(t, "auditor")
+	c := &Config{cache: authCacheStore{entries: map[string]*authCacheEntry{}}}
+	c.SetUIUsersFile(path)
+	if err := c.LoadUIUsersFile(); err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if got, ok := c.VerifyUIUser("bob", pass); !ok || got != RoleViewer {
+		t.Fatalf("precondition: clamped role = %q ok=%v, want %q", got, ok, RoleViewer)
+	}
+	if err := c.SaveUIUsersFile(); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	if got := savedRole(t, path); got != "auditor" {
+		t.Fatalf("plain save persisted role %q, want the original %q — the clamp overwrote a newer build's assignment", got, "auditor")
+	}
+	// Password change keeps the effective role, so the persisted role survives.
+	if err := c.SetUIUser("bob", "N3wSecret!pass", RoleViewer); err != nil {
+		t.Fatalf("password change: %v", err)
+	}
+	if err := c.SaveUIUsersFile(); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	if got := savedRole(t, path); got != "auditor" {
+		t.Fatalf("password change persisted role %q, want %q", got, "auditor")
+	}
+	if got, _ := c.VerifyUIUser("bob", "N3wSecret!pass"); got != RoleViewer {
+		t.Fatalf("authorization role after password change = %q, want the clamp %q", got, RoleViewer)
+	}
+}
+
+// CONTROL. An explicit reassignment by an admin must win over the preserved
+// raw role, or the admin could never repair the account on this build.
+func TestRosterLoad_ExplicitReassignmentReplacesPersistedRole(t *testing.T) {
+	path, _ := seedRoster(t, "auditor")
+	c := &Config{cache: authCacheStore{entries: map[string]*authCacheEntry{}}}
+	c.SetUIUsersFile(path)
+	if err := c.LoadUIUsersFile(); err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if err := c.SetUIUser("bob", "", RoleOperator); err != nil {
+		t.Fatalf("reassign: %v", err)
+	}
+	if err := c.SaveUIUsersFile(); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	if got := savedRole(t, path); got != string(RoleOperator) {
+		t.Fatalf("explicit reassignment persisted %q, want %q", got, RoleOperator)
+	}
+}

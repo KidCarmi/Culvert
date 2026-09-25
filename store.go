@@ -798,6 +798,14 @@ type uiAdminUser struct {
 	totpSecret      string   // base32 TOTP secret; empty = TOTP not enrolled
 	backupCodes     []string // bcrypt-hashed backup codes
 	totpLastCounter int64    // last successfully-used TOTP time-step; prevents replay
+	// persistedRole is the raw role read from disk when loadedRosterRole had
+	// to clamp it (a role this build does not enroll). role carries the
+	// clamped AUTHORIZATION value; persistedRole is what SaveUIUsersFile
+	// writes back, so an ordinary save on a downgraded build (a password
+	// change, a TOTP login, an unrelated roster edit) never destroys the
+	// assignment a newer build made. Empty when nothing was clamped; cleared
+	// by any explicit role change.
+	persistedRole UIRole
 }
 
 // UIUserInfo is the public (no hash) view of a UI admin user.
@@ -1284,8 +1292,17 @@ func (c *Config) SetUIUser(username, password string, role UIRole) error {
 		if err != nil {
 			return err
 		}
-		c.uiUsers[username] = &uiAdminUser{passHash: hash, role: role}
+		next := &uiAdminUser{passHash: hash, role: role}
+		if existing != nil && role == existing.role {
+			// Effective role unchanged (e.g. a password change): keep the
+			// persisted role a newer build assigned — see persistedRole.
+			next.persistedRole = existing.persistedRole
+		}
+		c.uiUsers[username] = next
 	} else if existing != nil {
+		if role != existing.role {
+			existing.persistedRole = "" // an explicit reassignment wins
+		}
 		existing.role = role
 	} else {
 		return fmt.Errorf("password is required to create a new user")
@@ -1412,13 +1429,19 @@ func (c *Config) LoadUIUsersFile() error {
 		if err != nil {
 			continue
 		}
+		rawRole := rec.Role
 		rec.Role = loadedRosterRole(rec.Username, rec.Role)
+		var persistedRole UIRole
+		if rec.Role != rawRole {
+			persistedRole = rawRole
+		}
 		c.uiUsers[rec.Username] = &uiAdminUser{
 			passHash:        hash,
 			role:            rec.Role,
 			totpSecret:      rec.TOTPSecret,
 			backupCodes:     rec.BackupCodes,
 			totpLastCounter: rec.TOTPLastCounter,
+			persistedRole:   persistedRole,
 		}
 		// Keep legacy single-user in sync with the first admin found.
 		if rec.Role == RoleAdmin && c.user == "" {
@@ -1504,10 +1527,14 @@ func (c *Config) SaveUIUsersFile() error {
 		Users:              make([]uiUserRecord, 0, len(c.uiUsers)),
 	}
 	for name, u := range c.uiUsers {
+		role := u.role
+		if u.persistedRole != "" {
+			role = u.persistedRole // never serialize the compatibility clamp
+		}
 		env.Users = append(env.Users, uiUserRecord{
 			Username:        name,
 			PassHash:        hex.EncodeToString(u.passHash),
-			Role:            u.role,
+			Role:            role,
 			TOTPSecret:      u.totpSecret,
 			BackupCodes:     u.backupCodes,
 			TOTPLastCounter: u.totpLastCounter,
