@@ -400,6 +400,12 @@ func TestCheckStateFileIntegrity_SurfacesOnAuthenticatedDiagnostics(t *testing.T
 	if row.OperatorAction == "" {
 		t.Fatal("a warn/fail row must carry an OperatorAction")
 	}
+	// Codex P2 (PR #1408): a kind can span several files (per-capability MCP
+	// journals) and some quarantines happen lazily on an admin request, so the
+	// row must not claim a startup quarantine or a whole-store wipe.
+	if strings.Contains(row.Message, "at startup") || strings.Contains(row.Message, "empty") {
+		t.Fatalf("row overstates the posture (startup/empty-store claim): %q", row.Message)
+	}
 
 	// A rename-aside failure (path already gone) is the most urgent shape —
 	// the NEXT save would silently overwrite the corrupt file — and must be
@@ -426,6 +432,9 @@ func TestCheckStateFileIntegrity_SurfacesOnAuthenticatedDiagnostics(t *testing.T
 	rows = checkStateFileIntegrity()
 	if len(rows) != 1 || rows[0].Status != diagWarn || !strings.Contains(rows[0].Message, "unreconciled") {
 		t.Fatalf("residual quarantine must surface distinctly, got %+v", rows)
+	}
+	if strings.Contains(rows[0].Message, "empty") {
+		t.Fatalf("residual row overstates the posture (empty-store claim): %q", rows[0].Message)
 	}
 }
 
@@ -547,8 +556,8 @@ func TestGlobEscapeLiteral_MatchesOnlyTheLiteral(t *testing.T) {
 func TestCheckStateFileIntegrity_DoesNotDiscloseValueBearingErrors(t *testing.T) {
 	isolateStateCorruption(t)
 	path := filepath.Join(t.TempDir(), "policy_learning.json")
-	secret := "g:Finance-Payroll-Admins\x1fSocial Media"
-	quarantineCorruptStateFile("policy_learning", path, fmt.Errorf("session s1: cell %q is null", secret))
+	cellKey := "g:Finance-Payroll-Admins\x1fSocial Media"
+	quarantineCorruptStateFile("policy_learning", path, fmt.Errorf("session s1: cell %q is null", cellKey))
 	rows := checkStateFileIntegrity()
 	if len(rows) != 1 {
 		t.Fatalf("want one row, got %+v", rows)

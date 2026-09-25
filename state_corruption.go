@@ -271,8 +271,8 @@ func checkStateFileIntegrity() []OperatorContractCheck {
 			checks = append(checks, OperatorContractCheck{
 				Code:   "state_file_" + kind,
 				Status: diagWarn,
-				Message: fmt.Sprintf("%s: %d unreconciled quarantined copy/copies remain from a prior corrupt load; the node may still be running with an empty %s store",
-					kind, rec.ResidualCount, kind),
+				Message: fmt.Sprintf("%s: %d unreconciled quarantined copy/copies remain from a prior corrupt load; the state they held may not have been restored on this node",
+					kind, rec.ResidualCount),
 				OperatorAction: "Restore the quarantined copy or a backup on this node's data volume, then restart; once reconciled, remove the leftover quarantine file(s) to clear this row.",
 			})
 		case rec.QuarantineFailed:
@@ -287,8 +287,14 @@ func checkStateFileIntegrity() []OperatorContractCheck {
 			checks = append(checks, OperatorContractCheck{
 				Code:   "state_file_" + kind,
 				Status: diagWarn,
-				Message: fmt.Sprintf("%s state file was corrupt (%s) and has been quarantined at startup; the node is running with an empty %s store",
-					kind, rec.ParseErr, kind),
+				// Scoped to the affected FILE on purpose: a kind can span
+				// several files (the MCP journals are per capability, and one
+				// capability's runtime can be quarantined while another's
+				// restores), and some MCP loads happen lazily on an admin
+				// request rather than at boot — so neither "at startup" nor
+				// "the whole store is empty" is true in general.
+				Message: fmt.Sprintf("%s state file was corrupt (%s) and has been quarantined; the state it held was not loaded",
+					kind, rec.ParseErr),
 				OperatorAction: "Restore the quarantined copy or a backup on this node's data volume, then restart.",
 			})
 		}
