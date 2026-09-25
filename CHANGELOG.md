@@ -385,6 +385,36 @@ endpoints for credentialed parents.
 
 ### Performance
 
+- The per-request policy decision line is built by appending rather than by
+  `logger.Printf`, and the benchmark that measured it was measuring a disabled
+  logger. `applyPolicyDecision` emits exactly one `POLICY_*` line per proxied
+  request — HTTP, CONNECT, WebSocket and SOCKS5 all reach it — and the
+  end-to-end allocation profile ranked it the largest Culvert-owned allocation
+  site in the run, 7 objects per request. `log.Logger.output` returns
+  immediately when its writer *is* `io.Discard`, so every benchmark that
+  silenced the logger that way never formatted anything and under-reported the
+  line by 3.6x (283 ns/op against `io.Discard`, 1042 ns/op against a sink
+  `log.Logger` cannot recognise); the shared `benchSilenceLogger` behind the
+  end-to-end proxy qualification had the same defect, so that figure was
+  omitting ~1 µs of real per-request work. Measured correctly, the nine boxed
+  format arguments were two thirds of the line's CPU profile before `fmt`
+  parsed a verb, and the two `%q` verbs cost ~200 ns on their own
+  (`strconv.AppendQuote` decodes rune-by-rune through `strconv.IsPrint`: 99 ns
+  for a 17-byte ASCII host). The emitters now append into a stack buffer and
+  `appendQuotedForLog` settles printable ASCII with one byte scan, falling back
+  to `strconv.AppendQuote` for `"`, `\`, control bytes and everything at or
+  above 0x80. Serial cost goes 1042 → 428 ns/op (-59%) and allocations 8 → 1;
+  bytes per op rise 128 → 192 deliberately, one right-sized string in place of
+  eight small objects, because GC mark cost is per object. The parallel gain is
+  smaller (462 → 374 ns) because four cores queue on `log.Logger`'s own mutex,
+  which this does not touch, and the end-to-end benchmark cannot resolve ~614 ns
+  inside a 148 µs in-process operation — what it does show exactly is the
+  allocation drop, 185 → 179 per request overall and 7.0 → 1.0 at this site.
+  Emitted bytes are unchanged, which is the acceptance condition for lines that
+  SIEM forwarders and log parsers consume: the four format strings survive as an
+  executable specification and every branch is rendered both ways over a corpus
+  of control characters, quotes, backslashes, and multi-byte and invalid UTF-8.
+
 - The rate-limit exempt check is lock-free and flat in the exempt-CIDR count.
   `RateLimiter.IsExempt` is the first decision inside `Allow`, so once a rate
   limit is configured it runs on every proxied request; it took a
@@ -416,6 +446,70 @@ endpoints for credentialed parents.
 
 ### Fixed
 
+- A SOCKS5 listener bind failure no longer terminates the whole appliance
+  (CHAOS-66). `startSOCKS5` bound with a single `logFatalf` branch, and
+  `initSOCKS5` runs *before* the admin UI and the proxy listener start — so an
+  occupied SOCKS5 port meant the HTTP/HTTPS proxy and the admin UI never came
+  up at all, and under `restart: unless-stopped` an unattended crash loop
+  recoverable only with shell access. This is the CHAOS-57 fault one plane
+  over and it lands harder: there the management plane killed the data plane,
+  here an *optional*, off-by-default listener killed the primary data plane,
+  the management plane and the health endpoints together. The triggers are
+  routine and invisible to `validatePortCollisions`, which only compares
+  Culvert's own three ports to each other: a predecessor container still
+  draining, a privileged port after `CAP_NET_BIND_SERVICE` was dropped, an
+  interface not yet up. The listener now rebinds with a jittered,
+  interruptible backoff for as long as the process lives, and an accept-loop
+  failure that invalidates the socket — previously terminal until a restart —
+  recovers the same way. **No SOCKS5 fault requires a node restart any more**,
+  and the `socks5_listener` diagnostics row no longer tells operators to
+  perform one. New read-only surfaces: `culvert_socks5_unavailable`,
+  `culvert_socks5_bind_failures_total`, `culvert_socks5_binds_total` and
+  `culvert_socks5_bind_backoff_seconds`, emitted only on a node with a
+  configured listener. `runProxyUntilShutdown`'s fatal proxy-listener branch
+  is deliberately unchanged. See `docs/operator/socks5-listener-health.md`.
+- A SOCKS5 listener outage is now reported the moment its threshold elapses,
+  not on the next retry. Both episode durations were measured between the first
+  and *last* recorded failure, so they stopped advancing between attempts: with
+  the rebind backoff at its 30 s ceiling (±20% jitter), a failure landing at
+  29 s left `/healthz` reporting *degraded*, `culvert_socks5_listener_up` at
+  `1`, the `socks5_listener` row saying *retrying* and the `socks5_listener_down`
+  alert unfired for up to 36 s after the documented 30 s outage threshold had
+  passed. Durations are now aged against the clock, and one sleep per outage is
+  shortened so it cannot carry the supervisor past the threshold without an
+  attempt to observe it (the alert is attempt-driven). A clock that jumps
+  backwards can no longer shrink an outage already observed. The accept plane
+  carried the same shape with a 1 s ceiling and is fixed identically.
+- The `socks5_listener` row's suggested action now matches the failure reason.
+  One action string — check the port owner and bind permission — was printed for
+  every class, so a node out of file descriptors, or one whose interface had not
+  come up, was directed to hunt the owner of a port nobody holds. Each bounded
+  reason class now carries its own remedy; `network_error` and `listen_failed`
+  remain the unrecognised classes and point at the log line.
+- Listener failures are no longer misreported as network faults. Every bind
+  error arrives wrapped in `*net.OpError`, which satisfies `net.Error`
+  unconditionally, so the admin UI listener's classifier labelled every
+  unrecognised errno `network_error` — pointing an operator at network
+  troubleshooting for a socket or permission fault — and could reach
+  `listen_failed` only for an error the `net` package had not produced. Both
+  listener classifiers now require an actual timeout for `network_error`.
+- A `config.yaml` `auth.user` (or CLI `-user`) value written with a YAML
+  literal block scalar (`user: |` instead of `user: admin`) silently
+  appended a trailing newline to the stored admin username. Every other
+  local-admin-credential entry point (the web setup wizard) already trims
+  this field; the CLI/config.yaml startup path did not, so the operator was
+  permanently locked out of the admin UI — nothing typed at a login prompt
+  can produce a trailing newline — with no error at startup and no
+  indication of the cause. `resolveAuthStartupConfig` now trims the
+  resolved username (never the password, which may legitimately carry
+  whitespace) before it reaches `cfg.SetAuth`. Two review-round follow-ups
+  closed the same gap at its other two edges: the CLI/YAML precedence pick
+  (`s.authU = firstStr(...)`) now trims both candidates first, so a
+  whitespace-only `-user` can no longer shadow a real `config.yaml`
+  `auth.user`; and a resolved-empty username paired with a non-empty
+  password is now a fatal startup error instead of silently reaching
+  `cfg.SetAuth("", pass)`, which disabled local authentication entirely
+  and discarded the configured password.
 - The root-CA recovery record (CHAOS-50) could report a recovery with the
   wrong attempt count. A successful attempt set `recovered` from inside the
   attempt while the campaign loop counted it only after the attempt returned,
