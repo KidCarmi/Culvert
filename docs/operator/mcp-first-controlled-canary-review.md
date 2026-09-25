@@ -3019,12 +3019,11 @@ The DIRECTORY axis was itself an unrecorded gap for one round. The first inverte
 `frontend`, `dist` and `testdata` and wrote none of them down, while this paragraph claimed every
 Go and Markdown file was covered — the same overclaim, on the axis introduced to close it, invisible
 to every staleness check because nothing represented it. Codex round 6 found it. Those three are now
-SCANNED (2,601 files), and the two that remain excluded are named with a reason each. The
-count is a property of the WHOLE tree, not of this section's subject: the FE-6 frontend branch's
-merge with `main` (2026-09-20) moved it from 2,554 to 2,600 by adding 46 Go and Markdown files that
-have nothing to do with MCP, and the FE-6A recovery follow-up (record 6AR, the same day) moved it
-to 2,601 with one Go proof file (`fe6ar_resend_red_test.go`); the gate — not a human — is what
-keeps the stated number true.
+SCANNED (2,655 files), and the two that remain excluded are named with a reason each. The
+count is a property of the WHOLE tree, not of this section's subject: on `main` alone it stands at
+2,608, and the FE-6 frontend branch carries 47 further Go and Markdown files (its proof matrices and
+records, none about MCP), so the branch's refresh merges state 2,655; the gate — not a human — is
+what keeps the stated number true on whichever tree it runs.
 
 That number was wrong by one for a round, in two different ways at once, and both are worth
 keeping. It was TRANSCRIBED as 2,555 when the walk returns one fewer — it removes the wall's own

@@ -9,11 +9,13 @@ package feedsync
 // the failure the missing backoff then holds for 24 hours.
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
 
+	"github.com/KidCarmi/Culvert/internal/catdb"
 	"github.com/KidCarmi/Culvert/internal/feedsched"
 )
 
@@ -124,5 +126,31 @@ func TestHealth_OnAFreshSyncerIsZeroNotGarbage(t *testing.T) {
 	}
 	if h.SyncInterval != 24*time.Hour {
 		t.Fatalf("SyncInterval = %s, want 24h", h.SyncInterval)
+	}
+}
+
+// Wait joins the loop Start launched once its context is cancelled, and is a
+// no-op on a syncer that was never started. Tests that swap the process logger
+// rely on it: an unjoined round logging after its test ended was a data race.
+func TestSyncer_WaitJoinsTheLoop(t *testing.T) {
+	New(nil, "x", time.Hour).Wait() // never started: must not block
+
+	db, err := catdb.Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	// An empty store runs a round at once; the unparseable URL fails it fast.
+	ctx, cancel := context.WithCancel(context.Background())
+	fs := New(db, "\x7f", time.Hour)
+	fs.Start(ctx)
+	cancel()
+	done := make(chan struct{})
+	go func() { fs.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Wait did not return after the context was cancelled")
 	}
 }
