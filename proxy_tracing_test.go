@@ -324,6 +324,10 @@ func TestRequestTracing_CanonicalKeysMatchGoCanonicalisation(t *testing.T) {
 	for _, tc := range []struct{ literal, constant string }{
 		{"X-Request-ID", headerRequestID},
 		{"Traceparent", headerTraceparent},
+		// headerTracestate is deleted via a direct map index, which skips
+		// CanonicalMIMEHeaderKey — so a drifted spelling would silently stop
+		// deleting and leave the orphaned tracestate on the wire.
+		{"tracestate", headerTracestate},
 	} {
 		h := http.Header{}
 		h.Set(tc.literal, "v")

@@ -744,3 +744,94 @@ func TestSecReqID1_ConcurrentRejectionsAreRaceFree(t *testing.T) {
 type safeDiscard struct{}
 
 func (*safeDiscard) Write(p []byte) (int, error) { return len(p), nil }
+
+// TestSecReqID1_MintedTraceparentDropsTracestate pins the W3C pairing rule that
+// SEC-REQID-1's replacement arm would otherwise break: tracestate is meaningful
+// only relative to its traceparent, so when an unusable traceparent is replaced
+// the tracestate it was issued under must not survive. Leaving it forwards a
+// combination the client never sent — Culvert's minted trace context carrying
+// the client's arbitrary vendor state — which an upstream may accept as part of
+// that new trace (Codex P2).
+//
+// Every sub-case is a shape that REACHES the mint arm, so each is a distinct way
+// to orphan a tracestate, not a restatement of one.
+func TestSecReqID1_MintedTraceparentDropsTracestate(t *testing.T) {
+	const vendorState = "congo=t61rcWkgMzE,rojo=00f067aa0ba902b7"
+
+	for _, tc := range []struct {
+		name string
+		vals []string // Traceparent values the client sends (nil = header absent)
+	}{
+		{"oversize traceparent", []string{"00-" + strings.Repeat("a", 300) + "-b-01"}},
+		{"control character in traceparent", []string{"00-0af7651916cd43dd8448eb211c80319c-b7ad6b71\x1b69203331-01"}},
+		{"whitespace in traceparent", []string{"00-0af7651916cd 43dd8448eb211c80319c-b7ad6b7169203331-01"}},
+		{"duplicate traceparent", []string{
+			"00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01",
+			"00-1bf7651916cd43dd8448eb211c80319c-c7ad6b7169203331-01",
+		}},
+		// A tracestate with NO traceparent at all is malformed by the same rule,
+		// and this is the arm that mints without any rejection being counted.
+		{"tracestate with no traceparent", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resetTracingBoundsStateForTest()
+			r := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "http://example.com/", http.NoBody)
+			for _, v := range tc.vals {
+				r.Header.Add(headerTraceparent, v)
+			}
+			r.Header.Set(headerTracestate, vendorState)
+
+			setupRequestTracing(httptest.NewRecorder(), r)
+
+			if got := r.Header.Values(headerTracestate); len(got) != 0 {
+				t.Errorf("forwarded %s = %q, want it dropped alongside the replaced traceparent",
+					headerTracestate, got)
+			}
+			// The traceparent must actually have been replaced — otherwise this
+			// test could pass against a build that simply deletes tracestate and
+			// never mints, which is not the contract.
+			tp := r.Header.Values(headerTraceparent)
+			if len(tp) != 1 {
+				t.Fatalf("forwarded %s carries %d values, want exactly 1", headerTraceparent, len(tp))
+			}
+			if len(tp[0]) != traceparentLen {
+				t.Errorf("forwarded %s = %q (len %d), want a minted %d-char value",
+					headerTraceparent, tp[0], len(tp[0]), traceparentLen)
+			}
+			for _, sent := range tc.vals {
+				if tp[0] == sent {
+					t.Errorf("forwarded %s = %q, want a freshly minted value", headerTraceparent, tp[0])
+				}
+			}
+		})
+	}
+}
+
+// TestSecReqID1_ValidTraceparentKeepsTracestate is the CONTROL for the test
+// above. The cheapest way to pass it is to delete tracestate unconditionally,
+// which would silently break ordinary W3C propagation through the proxy for
+// every well-behaved client — a far worse outcome than the defect. A client that
+// supplies a USABLE traceparent must keep its tracestate byte-for-byte.
+func TestSecReqID1_ValidTraceparentKeepsTracestate(t *testing.T) {
+	resetTracingBoundsStateForTest()
+	const (
+		validTP     = "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"
+		vendorState = "congo=t61rcWkgMzE,rojo=00f067aa0ba902b7"
+	)
+	r := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "http://example.com/", http.NoBody)
+	r.Header.Set(headerTraceparent, validTP)
+	r.Header.Set(headerTracestate, vendorState)
+
+	setupRequestTracing(httptest.NewRecorder(), r)
+
+	if got := r.Header.Get(headerTraceparent); got != validTP {
+		t.Fatalf("forwarded %s = %q, want the client's value propagated unchanged", headerTraceparent, got)
+	}
+	if got := r.Header.Get(headerTracestate); got != vendorState {
+		t.Errorf("forwarded %s = %q, want %q — a usable traceparent must keep its tracestate",
+			headerTracestate, got, vendorState)
+	}
+	if n := traceparentRejected.Load(); n != 0 {
+		t.Errorf("valid traceparent counted %d rejections, want 0", n)
+	}
+}

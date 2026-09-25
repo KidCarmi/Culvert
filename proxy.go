@@ -1165,6 +1165,35 @@ func setupRequestTracing(w http.ResponseWriter, r *http.Request) string {
 		noteRejectedTraceparent(r, tracingHeaderBytes(tpVals))
 	}
 
+	// A minted traceparent ORPHANS any client tracestate, so the tracestate goes
+	// with it (Codex P2). W3C Trace Context makes tracestate meaningful only
+	// relative to its traceparent and requires a receiver that cannot use the
+	// traceparent to discard the tracestate with it; keeping it would forward a
+	// pair the client never sent — Culvert's freshly minted trace context
+	// carrying the client's arbitrary vendor state — which an upstream may then
+	// accept as belonging to that new trace.
+	//
+	// This mismatch is one THIS bound introduced. Before it, an unusable
+	// traceparent was forwarded verbatim alongside its own tracestate, which is
+	// at least self-consistent; replacing the traceparent is what breaks the
+	// pairing, so repairing it belongs to the same change.
+	//
+	// The delete covers the no-traceparent mint arm too, deliberately: a
+	// tracestate arriving WITHOUT a traceparent is malformed by the same rule,
+	// and on the overwhelmingly common shape (client sent neither) deleting an
+	// absent key is a no-op that allocates nothing. Indexing the map directly
+	// rather than Header.Del skips CanonicalMIMEHeaderKey's scan, for the reason
+	// recorded on the reads above; headerTracestate is already canonical
+	// (pinned by TestRequestTracing_CanonicalKeysMatchGoCanonicalisation).
+	//
+	// Scope is exactly the mint: a client that supplied a USABLE traceparent
+	// keeps its tracestate untouched, which is ordinary W3C propagation through
+	// a forward proxy and must not be broken —
+	// TestSecReqID1_ValidTraceparentKeepsTracestate is the control.
+	if needTraceparent {
+		delete(r.Header, headerTracestate)
+	}
+
 	switch {
 	case reqID == "" && needTraceparent:
 		// The overwhelmingly common shape for direct client traffic: one

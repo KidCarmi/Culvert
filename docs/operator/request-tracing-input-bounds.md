@@ -34,6 +34,16 @@ When a value is refused, the freshly minted one **replaces the whole field**, so
 exactly one value is forwarded upstream and mirrored on the response. A rejection
 reports the total bytes across every value the client sent, not just the first.
 
+Replacing a `Traceparent` also **drops any `Tracestate`** the client sent. W3C
+Trace Context makes `tracestate` meaningful only relative to its `traceparent`,
+so keeping it would forward a pair the client never sent — Culvert's minted trace
+context carrying the client's vendor state — which an upstream may accept as
+belonging to that new trace. The same applies to a `Tracestate` that arrives with
+no `Traceparent` at all. A client whose `Traceparent` is **accepted** keeps its
+`Tracestate` byte-for-byte: ordinary propagation through a forward proxy is not
+disturbed. Culvert never reads `tracestate` — it is deleted or forwarded, never
+parsed, logged or exported.
+
 That admits every correlation-id encoding in real use: UUIDs (36 bytes), nginx
 `$request_id` (32), ULIDs (26), base64url, and a W3C version-00 traceparent
 (55). Culvert's own generated request id is 16 hex characters.
