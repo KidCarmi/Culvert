@@ -1882,7 +1882,12 @@ else
       if sudo docker compose ps -a --format '{{.State}}' 2>/dev/null | grep -qw exited; then
         break
       fi
-      if sudo docker compose ps --format '{{.Health}}' 2>/dev/null | grep -qw healthy; then
+      # Scoped to the `proxy` service specifically — an unscoped `ps
+      # --format '{{.Health}}'` prints one line per service, so ClamAV
+      # reporting healthy alone would satisfy a bare `grep -qw healthy` while
+      # the proxy itself is still starting (or stuck there, e.g.
+      # crash-looping), declaring a broken install a success.
+      if sudo docker compose ps proxy --format '{{.Health}}' 2>/dev/null | grep -qw healthy; then
         COMPOSE_UP_OK=1
         break
       fi
