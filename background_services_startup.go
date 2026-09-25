@@ -30,7 +30,7 @@ func loadBackgroundServices(cfg backgroundServicesStartupConfig, ctx context.Con
 	// persistent-admin-state loader, immediately after LoadAdminSettings, to avoid a
 	// boot sweep running the default caps for up to one tick.
 
-	// CHAOS-66: the SIEM feed's degradation transition. The drop observer is
+	// CHAOS-72: the SIEM feed's degradation transition. The drop observer is
 	// driven by traffic, and traffic stops — a collector that dies and is then
 	// followed by a quiet period would cross the threshold with nothing left
 	// to fire the alert. Detection only; no-ops when no collector is

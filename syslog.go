@@ -100,7 +100,7 @@ func InitSyslog(addr, syslogFmt string) error {
 }
 
 // releaseReplacedSyslogWriter closes the Writer that InitSyslog is about to
-// replace (CHAOS-66).
+// replace (CHAOS-72).
 //
 // Overwriting globalSyslog used to be the whole handover, which stranded the
 // old Writer's drain goroutine parked forever on a queue nobody can reach any

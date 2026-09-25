@@ -55,7 +55,7 @@ type Writer struct {
 	panicObserver atomic.Pointer[func(recovered any)] // optional; see SetPanicObserver
 	dialFunc      func() (net.Conn, error)            // test seam; nil = real dialer
 
-	// CHAOS-66 delivery evidence. Drops alone is a CUMULATIVE counter with no
+	// CHAOS-72 delivery evidence. Drops alone is a CUMULATIVE counter with no
 	// time axis: an operator reading "drops: 40213" cannot tell a collector
 	// that is dark right now from one that healed last Tuesday, and every
 	// health surface that wanted to answer "is the SIEM feed delivering?" had

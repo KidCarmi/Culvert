@@ -2,7 +2,7 @@ package syslog
 
 import "time"
 
-// testhooks.go — test seams for the delivery-freshness plane (CHAOS-66).
+// testhooks.go — test seams for the delivery-freshness plane (CHAOS-72).
 //
 // The engine stamps its own timestamps (noteDelivered / noteDrop) while the
 // plane in package main measures age against its own clock seam. A test that

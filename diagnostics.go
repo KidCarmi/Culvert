@@ -854,7 +854,7 @@ func checkSyslogFeed() OperatorContractCheck {
 			OperatorAction: "Verify the collector host/port and network path, then re-save the syslog target (POST /api/syslog) or restart the proxy; use POST /api/syslog/test to confirm connectivity.",
 		}
 	}
-	// CHAOS-66: everything above decides on state fixed at INIT time, and was
+	// CHAOS-72: everything above decides on state fixed at INIT time, and was
 	// the whole row. It answers "did we connect once?" and then reports
 	// "forwarding is active" for the rest of the process lifetime — including
 	// for a collector that died an hour later and has been swallowing every

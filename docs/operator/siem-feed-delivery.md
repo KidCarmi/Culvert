@@ -1,4 +1,4 @@
-# SIEM / syslog feed delivery health (CHAOS-66)
+# SIEM / syslog feed delivery health (CHAOS-72)
 
 Culvert forwards two streams to a remote syslog collector when one is
 configured: every **audit event** (who changed what on the admin plane) and
@@ -12,7 +12,7 @@ it says the feed is down.
 
 ---
 
-## What changed in CHAOS-66
+## What changed in CHAOS-72
 
 Before this sweep the node could tell you only whether it had **connected once,
 at startup**. The `syslog_feed` operator-contract row was a function of two
@@ -31,7 +31,7 @@ is dark right now from one that healed last week. There was no Prometheus
 series (so no alerting rule could exist), no `/healthz` field, no alert, and no
 log line.
 
-CHAOS-66 adds the delivery axis and wires it to every surface. It changes
+CHAOS-72 adds the delivery axis and wires it to every surface. It changes
 nothing about what is sent or how.
 
 ---
@@ -163,7 +163,7 @@ POST /api/syslog/test        (admin)
 | `unknown` | still queued after the 3-second probe window — retry |
 | `unconfigured` | no collector is configured |
 
-> Before CHAOS-66 this endpoint answered `{"ok": true, "message": "test message
+> Before CHAOS-72 this endpoint answered `{"ok": true, "message": "test message
 > sent"}` unconditionally. Once delivery became asynchronous that confirmed
 > only that a channel send had succeeded: it returned `ok` for a collector that
 > had been dead for a week, while the diagnostics row pointed operators here to
@@ -203,7 +203,7 @@ protocol, not a limitation of the node.
    that the network path (firewall, route, NAT) is intact from this node.
 2. **For `tcp://`, check the collector's connection limit.** Some SIEMs cap
    concurrent sources; a node that re-pointed repeatedly on older builds could
-   leave phantom `ESTABLISHED` sessions behind (fixed in CHAOS-66 — see below),
+   leave phantom `ESTABLISHED` sessions behind (fixed in CHAOS-72 — see below),
    and those count against the cap.
 3. **Re-save the target** (`POST /api/syslog`) or restart the proxy if the
    address itself is wrong. Re-saving reconnects immediately and resets the
@@ -269,4 +269,4 @@ simply safe now where before it was undefined.
 - `roadmap/CHAOS-ENGINEERING-REVIEW.md` §13 (ST-8, local audit write loss) and
   §30 (CHAOS-61, DP→CP audit push drops) — the other two members of this
   compliance-record family
-- `roadmap/CHAOS-ENGINEERING-REVIEW.md` §36 — the CHAOS-66 write-up
+- `roadmap/CHAOS-ENGINEERING-REVIEW.md` §36 — the CHAOS-72 write-up

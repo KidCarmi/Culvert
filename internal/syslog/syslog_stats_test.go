@@ -49,11 +49,11 @@ func newStubWriter(t *testing.T, c *stubConn, dialErr error) *Writer {
 	return w
 }
 
-// DEFECT GATE. Before CHAOS-66 the engine exposed only a cumulative Drops()
+// DEFECT GATE. Before CHAOS-72 the engine exposed only a cumulative Drops()
 // counter: there was no way for any surface to answer "is the feed delivering
 // RIGHT NOW?", which is why every health surface either had nothing to read or
 // reported init-time state. Delivery must carry a timestamp.
-func TestChaos66_DeliverySetsLastSuccess(t *testing.T) {
+func TestChaos72_DeliverySetsLastSuccess(t *testing.T) {
 	c := &stubConn{}
 	w := newStubWriter(t, c, nil)
 
@@ -77,7 +77,7 @@ func TestChaos66_DeliverySetsLastSuccess(t *testing.T) {
 // DEFECT GATE. Every drop site must move the reason and the timestamp, not
 // only the counter — a drop that moves Drops() alone is invisible to a
 // freshness surface, which is the shape that made the pre-fix counter useless.
-func TestChaos66_EveryDropCarriesABoundedReason(t *testing.T) {
+func TestChaos72_EveryDropCarriesABoundedReason(t *testing.T) {
 	cases := []struct {
 		name string
 		want string
@@ -145,7 +145,7 @@ func TestChaos66_EveryDropCarriesABoundedReason(t *testing.T) {
 
 // DEFECT GATE. ConsecutiveFailures must reset on delivery, otherwise the
 // recovery edge never fires and the plane latches a healed feed as down.
-func TestChaos66_ConsecutiveFailuresResetOnDelivery(t *testing.T) {
+func TestChaos72_ConsecutiveFailuresResetOnDelivery(t *testing.T) {
 	c := &stubConn{failAll: true}
 	w := newStubWriter(t, c, nil)
 	w.writeMsg(14, "x")
@@ -168,7 +168,7 @@ func TestChaos66_ConsecutiveFailuresResetOnDelivery(t *testing.T) {
 // DEFECT GATE. The observer is the seam the freshness plane is driven from
 // (this package cannot log, alert or hold a timer). It must fire on every drop
 // and exactly once on the recovery edge.
-func TestChaos66_DeliveryObserverFiresOnDropAndOnRecoveryEdge(t *testing.T) {
+func TestChaos72_DeliveryObserverFiresOnDropAndOnRecoveryEdge(t *testing.T) {
 	c := &stubConn{failAll: true}
 	w := newStubWriter(t, c, nil)
 
@@ -203,7 +203,7 @@ func TestChaos66_DeliveryObserverFiresOnDropAndOnRecoveryEdge(t *testing.T) {
 // CONTROL. The cheapest way to pass every gate above is to stop delivering and
 // report nothing, or to notify on every line. Pin the healthy steady state:
 // a working collector produces deliveries, no drops, and no observer traffic.
-func TestChaos66_HealthyFeedIsUnchangedAndSilent(t *testing.T) {
+func TestChaos72_HealthyFeedIsUnchangedAndSilent(t *testing.T) {
 	c := &stubConn{}
 	w := newStubWriter(t, c, nil)
 	notified := 0
@@ -230,7 +230,7 @@ func TestChaos66_HealthyFeedIsUnchangedAndSilent(t *testing.T) {
 // CONTROL. A panicking observer must never take down the drain goroutine: the
 // SIEM plane is an observability surface and may not become a way to kill an
 // in-line gateway (CHAOS-24's rule, already applied to SetPanicObserver).
-func TestChaos66_PanickingObserverCannotKillDelivery(t *testing.T) {
+func TestChaos72_PanickingObserverCannotKillDelivery(t *testing.T) {
 	c := &stubConn{failAll: true}
 	w := newStubWriter(t, c, nil)
 	w.SetDeliveryObserver(func(bool) { panic("bad observer") })
@@ -242,7 +242,7 @@ func TestChaos66_PanickingObserverCannotKillDelivery(t *testing.T) {
 
 // Stats must be readable without contending with the drain goroutine's socket
 // writes: /metrics, /healthz and the diagnostics row all reach it.
-func TestChaos66_StatsIsReadableWhileTheWriteLockIsHeld(t *testing.T) {
+func TestChaos72_StatsIsReadableWhileTheWriteLockIsHeld(t *testing.T) {
 	c := &stubConn{}
 	w := newStubWriter(t, c, nil)
 	w.mu.Lock()

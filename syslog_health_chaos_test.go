@@ -1,6 +1,6 @@
 package main
 
-// syslog_health_chaos_test.go — CHAOS-66 gates for the SIEM forwarding plane.
+// syslog_health_chaos_test.go — CHAOS-72 gates for the SIEM forwarding plane.
 //
 // Every DEFECT gate here was verified failing against the pre-fix tree before
 // the fix was written; the two headline ones were reproduced against the real
@@ -184,7 +184,7 @@ func waitForDrops(t *testing.T, n uint64) {
 // collector that had been swallowing every audit event for as long as the
 // process had been up. Measured against the pre-fix tree: 49 of 49 audit lines
 // dropped, row still ok.
-func TestChaos66_ContractRowSeesARuntimeCollectorOutage(t *testing.T) {
+func TestChaos72_ContractRowSeesARuntimeCollectorOutage(t *testing.T) {
 	col := startSyslogCollector(t)
 	armSyslogFeed(t, "tcp://"+col.addr)
 
@@ -207,7 +207,7 @@ func TestChaos66_ContractRowSeesARuntimeCollectorOutage(t *testing.T) {
 
 	row := checkSyslogFeed()
 	if row.Status != diagFail {
-		t.Fatalf("syslog_feed = %v (%q) with a dead collector and %d drops; want fail — the pre-CHAOS-66 row reported \"forwarding is active\" here",
+		t.Fatalf("syslog_feed = %v (%q) with a dead collector and %d drops; want fail — the pre-CHAOS-72 row reported \"forwarding is active\" here",
 			row.Status, row.Message, activeSyslog().Stats().Drops)
 	}
 	if strings.Contains(row.Message, "is active") {
@@ -221,7 +221,7 @@ func TestChaos66_ContractRowSeesARuntimeCollectorOutage(t *testing.T) {
 // Pre-fix the ONLY consumer of Drops() in the whole tree was an admin-only JSON
 // blob: no Prometheus series existed, so no alerting rule could exist, and the
 // compliance feed could be dark indefinitely with every scrape green.
-func TestChaos66_DropsReachMetricsAndHealthz(t *testing.T) {
+func TestChaos72_DropsReachMetricsAndHealthz(t *testing.T) {
 	col := startSyslogCollector(t)
 	armSyslogFeed(t, "tcp://"+col.addr)
 	col.stop()
@@ -253,7 +253,7 @@ func TestChaos66_DropsReachMetricsAndHealthz(t *testing.T) {
 // The emission rule every gauge in this tree follows: a `culvert_syslog_up 0`
 // on a node that forwards nowhere is indistinguishable from a dark feed, and
 // the documented paging rule is `== 0`.
-func TestChaos66_NoSeriesWhenNoCollectorConfigured(t *testing.T) {
+func TestChaos72_NoSeriesWhenNoCollectorConfigured(t *testing.T) {
 	ensureObservabilityStartupTestLogger(t)
 	snapshotObservabilityGlobals(t)
 	resetSyslogHealthForTest()
@@ -277,7 +277,7 @@ func TestChaos66_NoSeriesWhenNoCollectorConfigured(t *testing.T) {
 // the abandoned collector (a read on the far end timed out instead of seeing
 // EOF). Reached on EVERY boot of an appliance that has both a YAML target and a
 // persisted admin target, not only on an admin re-point.
-func TestChaos66_InitSyslogClosesTheWriterItReplaces(t *testing.T) {
+func TestChaos72_InitSyslogClosesTheWriterItReplaces(t *testing.T) {
 	first := startSyslogCollector(t)
 	second := startSyslogCollector(t)
 	armSyslogFeed(t, "tcp://"+first.addr)
@@ -319,7 +319,7 @@ func TestChaos66_InitSyslogClosesTheWriterItReplaces(t *testing.T) {
 // because nothing is being logged looks identical to a feed that started
 // delivering again — the discipline ca_health.go and storage_health.go both
 // record by name.
-func TestChaos66_RecoveryRequiresADeliveredEvent(t *testing.T) {
+func TestChaos72_RecoveryRequiresADeliveredEvent(t *testing.T) {
 	col := startSyslogCollector(t)
 	armSyslogFeed(t, "tcp://"+col.addr)
 	col.stop()
@@ -387,7 +387,7 @@ func startSyslogCollectorOn(t *testing.T, addr string) *syslogTestCollector {
 // the ephemeral local port — a per-failure-unique Detail defeats the dedup
 // window by construction and evicts real threat alerts from the bounded retry
 // queue (WK-12/RS-5, recorded twice already in this tree).
-func TestChaos66_AlertDetailCarriesOnlyABoundedReason(t *testing.T) {
+func TestChaos72_AlertDetailCarriesOnlyABoundedReason(t *testing.T) {
 	col := startSyslogCollector(t)
 	armSyslogFeed(t, "tcp://"+col.addr)
 	host, port, _ := net.SplitHostPort(col.addr)
@@ -427,7 +427,7 @@ func TestChaos66_AlertDetailCarriesOnlyABoundedReason(t *testing.T) {
 // became asynchronous — it confirmed only that a channel send succeeded, and
 // checkSyslogFeed's own OperatorAction pointed operators at it to "confirm
 // connectivity". A probe that cannot fail is worse than no probe.
-func TestChaos66_ProbeReportsTheRealOutcome(t *testing.T) {
+func TestChaos72_ProbeReportsTheRealOutcome(t *testing.T) {
 	col := startSyslogCollector(t)
 	armSyslogFeed(t, "tcp://"+col.addr)
 
@@ -439,7 +439,7 @@ func TestChaos66_ProbeReportsTheRealOutcome(t *testing.T) {
 	waitForDrops(t, 1)
 	outcome, detail := syslogDeliveryProbe(activeSyslog())
 	if outcome == "delivered" || outcome == "sent" {
-		t.Errorf("probe reported %q against a dead collector (%s) — the pre-CHAOS-66 endpoint answered ok:true here", outcome, detail)
+		t.Errorf("probe reported %q against a dead collector (%s) — the pre-CHAOS-72 endpoint answered ok:true here", outcome, detail)
 	}
 }
 
@@ -449,7 +449,7 @@ func TestChaos66_ProbeReportsTheRealOutcome(t *testing.T) {
 // subsystem writers, so this pins the WIRING structurally (source scan, the
 // convention the C1 route-parity tests use) rather than by standing up a
 // scrape. Deterministic on any hardware, under -race, at any load.
-func TestChaos66_MetricsExpositionCallsTheSyslogWriter(t *testing.T) {
+func TestChaos72_MetricsExpositionCallsTheSyslogWriter(t *testing.T) {
 	src, err := os.ReadFile(filepath.Join(pkgSourceDir(), "metrics.go"))
 	if err != nil {
 		t.Fatalf("read metrics.go: %v", err)
@@ -465,13 +465,13 @@ func TestChaos66_MetricsExpositionCallsTheSyslogWriter(t *testing.T) {
 
 // Walling the PROBE FUNCTION is not walling the PATH. The gate above exercises
 // syslogDeliveryProbe directly, so it passes unchanged against a handler that
-// never calls it — verified: reverting apiSyslogTest to its pre-CHAOS-66 body
+// never calls it — verified: reverting apiSyslogTest to its pre-CHAOS-72 body
 // left that gate green. This one drives the real handler an operator reaches,
 // which is the only thing that proves the endpoint stopped lying. Same lesson
 // the SOCKS5 log-injection note records one subsystem over: sanitising one
 // argument does not sanitise the call, and walling one call shape does not wall
 // the path.
-func TestChaos66_TestEndpointReportsFailureAgainstADeadCollector(t *testing.T) {
+func TestChaos72_TestEndpointReportsFailureAgainstADeadCollector(t *testing.T) {
 	col := startSyslogCollector(t)
 	armSyslogFeed(t, "tcp://"+col.addr)
 	col.stop()
@@ -495,13 +495,13 @@ func TestChaos66_TestEndpointReportsFailureAgainstADeadCollector(t *testing.T) {
 }
 
 // The writer handle is MUTATED AT RUNTIME by the admin plane while the request
-// path reads it, and before CHAOS-66 it was a bare package-level pointer with
+// path reads it, and before CHAOS-72 it was a bare package-level pointer with
 // no synchronisation at all. Confirmed under -race against the real
 // apiSyslogConfig and recordRequest shapes: nothing in the suite happened to
 // exercise both at once, which is the only reason it had never been reported.
 // This gate is that exercise, and it is the reason the handle is now an
 // atomic.Pointer.
-func TestChaos66_WriterHandleIsSafeUnderConcurrentRepointAndTraffic(t *testing.T) {
+func TestChaos72_WriterHandleIsSafeUnderConcurrentRepointAndTraffic(t *testing.T) {
 	col := startSyslogCollector(t)
 	armSyslogFeed(t, "tcp://"+col.addr)
 
@@ -568,7 +568,7 @@ func TestChaos66_WriterHandleIsSafeUnderConcurrentRepointAndTraffic(t *testing.T
 
 // A plane that reported every feed as degraded would satisfy every defect gate
 // above while being far worse than the defect.
-func TestChaos66_HealthyFeedStillReportsActive(t *testing.T) {
+func TestChaos72_HealthyFeedStillReportsActive(t *testing.T) {
 	col := startSyslogCollector(t)
 	armSyslogFeed(t, "tcp://"+col.addr)
 
@@ -601,7 +601,7 @@ func TestChaos66_HealthyFeedStillReportsActive(t *testing.T) {
 // The predicate must require BOTH halves. An idle gateway forwards nothing, so
 // its last-success timestamp ages without limit — inventing a fault from
 // silence is how a health plane loses its audience.
-func TestChaos66_IdleNodeIsNeverDegraded(t *testing.T) {
+func TestChaos72_IdleNodeIsNeverDegraded(t *testing.T) {
 	col := startSyslogCollector(t)
 	armSyslogFeed(t, "tcp://"+col.addr)
 
@@ -622,7 +622,7 @@ func TestChaos66_IdleNodeIsNeverDegraded(t *testing.T) {
 
 // A UDP feed cannot prove delivery; every surface that reports one as healthy
 // must say so, or a green gauge is read as proof the SIEM has the events.
-func TestChaos66_UDPFeedCarriesTheUnprovableDeliveryCaveat(t *testing.T) {
+func TestChaos72_UDPFeedCarriesTheUnprovableDeliveryCaveat(t *testing.T) {
 	var lc net.ListenConfig
 	pc, err := lc.ListenPacket(context.Background(), "udp", "127.0.0.1:0")
 	if err != nil {
@@ -649,7 +649,7 @@ func TestChaos66_UDPFeedCarriesTheUnprovableDeliveryCaveat(t *testing.T) {
 // writer doing pointless work through a stale callback) and this test does not
 // prove it; what it does pin is the property an operator depends on, which is
 // that re-pointing a collector does not make the new target look broken.
-func TestChaos66_ReplacedWriterDoesNotCorruptTheSuccessorsState(t *testing.T) {
+func TestChaos72_ReplacedWriterDoesNotCorruptTheSuccessorsState(t *testing.T) {
 	first := startSyslogCollector(t)
 	second := startSyslogCollector(t)
 	armSyslogFeed(t, "tcp://"+first.addr)
@@ -683,7 +683,7 @@ func TestChaos66_ReplacedWriterDoesNotCorruptTheSuccessorsState(t *testing.T) {
 // switched-off feed that keeps exporting culvert_syslog_up 1 and a clean row is
 // the same class of false statement this plane exists to remove, pointing the
 // other way.
-func TestChaos66_DisablingForwardingRemovesEverySurface(t *testing.T) {
+func TestChaos72_DisablingForwardingRemovesEverySurface(t *testing.T) {
 	col := startSyslogCollector(t)
 	armSyslogFeed(t, "tcp://"+col.addr)
 
@@ -725,7 +725,7 @@ func TestChaos66_DisablingForwardingRemovesEverySurface(t *testing.T) {
 // The original IdleNodeIsNeverDegraded control did not catch this because it
 // used a feed with ZERO drops — the control was too weak, which is exactly what
 // the reviewer pointed out.
-func TestChaos66_AHealedBlipDoesNotDegradeAnIdleFeed(t *testing.T) {
+func TestChaos72_AHealedBlipDoesNotDegradeAnIdleFeed(t *testing.T) {
 	col := startSyslogCollector(t)
 	armSyslogFeed(t, "tcp://"+col.addr)
 
@@ -789,7 +789,7 @@ func TestChaos66_AHealedBlipDoesNotDegradeAnIdleFeed(t *testing.T) {
 // quiet period crosses the threshold with nothing left to fire the alert: the
 // metrics and the row compute the truth on READ, but the paging surfaces never
 // fired. The watchdog is the independent driver.
-func TestChaos66_WatchdogFiresTheAlertWhenTrafficHasStopped(t *testing.T) {
+func TestChaos72_WatchdogFiresTheAlertWhenTrafficHasStopped(t *testing.T) {
 	col := startSyslogCollector(t)
 	armSyslogFeed(t, "tcp://"+col.addr)
 	col.stop()
@@ -834,7 +834,7 @@ func TestChaos66_WatchdogFiresTheAlertWhenTrafficHasStopped(t *testing.T) {
 // own not-vacuous control — the same treatment the metrics-exposition wiring
 // gets, and for the same reason: a watchdog nobody starts satisfies a test that
 // calls its body directly.
-func TestChaos66_BackgroundServicesStartsTheHealthWatchdog(t *testing.T) {
+func TestChaos72_BackgroundServicesStartsTheHealthWatchdog(t *testing.T) {
 	src, err := os.ReadFile(filepath.Join(pkgSourceDir(), "background_services_startup.go"))
 	if err != nil {
 		t.Fatalf("read background_services_startup.go: %v", err)
@@ -852,7 +852,7 @@ func TestChaos66_BackgroundServicesStartsTheHealthWatchdog(t *testing.T) {
 // concurrent line's delivery could be reported as the probe's own success while
 // the probe's message was still queued behind a collector about to drop it.
 // WriteProbe reports the outcome of THAT message, from the drain goroutine.
-func TestChaos66_ProbeTracksItsOwnMessageNotTheWriterTotals(t *testing.T) {
+func TestChaos72_ProbeTracksItsOwnMessageNotTheWriterTotals(t *testing.T) {
 	col := startSyslogCollector(t)
 	armSyslogFeed(t, "tcp://"+col.addr)
 	sw := activeSyslog()

@@ -1117,7 +1117,7 @@ func addRequestLogHealth(resp map[string]any) {
 	if n := auditPendingDrops(); n > 0 {
 		resp["auditClusterPushDrops"] = n
 	}
-	// CHAOS-66: the SIEM half of the same compliance record. A collector that
+	// CHAOS-72: the SIEM half of the same compliance record. A collector that
 	// is unreachable, not draining, or slower than this node's event rate
 	// loses audit and request events on the way OUT — they are in the local
 	// JSONL but never reach the customer's SIEM, and are never replayed.

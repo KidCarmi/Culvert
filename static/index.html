@@ -2452,6 +2452,7 @@ table.mcpx-cat-tbl td{padding:6px 10px;border-bottom:1px solid var(--border)}
             </div>
             <button class="btn" data-click="uploadCustomCert"><svg class="ico" aria-hidden="true"><use href="#i-upload"/></svg> Upload & Activate</button>
             <div id="ui-cert-status" style="margin-top:10px;font-size:.78rem;color:var(--muted)"></div>
+            <div id="ui-cert-expiry" style="margin-top:4px;font-size:.78rem"></div>
           </div>
         </div>
 
@@ -4848,6 +4849,7 @@ Firefox (all platforms):
             <div class="stat-card"><div class="stat-val" id="crl-nodes">-</div><div class="stat-label">Syncing Nodes</div></div>
             <div class="stat-card"><div class="stat-val" id="crl-hot">-</div><div class="stat-label">Hot IPs</div></div>
             <div class="stat-card"><div class="stat-val" id="crl-rpm">-</div><div class="stat-label">Limit (RPM)</div></div>
+            <div class="stat-card" title="Fresh-to-stale transitions since this node started — how many separate times the Control Plane broadcast has gone stale, not just whether it is stale right now"><div class="stat-val" id="crl-episodes">-</div><div class="stat-label">Stale Episodes</div></div>
           </div>
           <div id="crl-stale-banner" style="display:none;margin-top:12px;padding:10px 12px;border-radius:6px;background:rgba(255,176,32,.12);border:1px solid var(--yellow,#ffb020);color:var(--yellow,#ffb020)">
             <strong>Cluster counts not applied.</strong>
@@ -13462,6 +13464,7 @@ async function loadUICertStatus() {
   if (!el) return;
   try {
     const n = await api('/api/settings/network');
+    renderUICertExpiry(n);
     if (!n.ui_custom_cert_uploaded) { el.textContent = ''; el.style.color = ''; return; }
     if (n.ui_custom_cert_corrupt) {
       // The saved pair failed to parse as a matching cert/key (interrupted or
@@ -13481,6 +13484,27 @@ async function loadUICertStatus() {
       ? 'Custom certificate uploaded and active.'
       : 'Custom certificate saved — restart the proxy to activate it.';
   } catch(e) { el.textContent = ''; el.style.color = ''; }
+}
+
+// Surfaces the admin UI's OWN serving-certificate expiry — a DIFFERENT
+// certificate from the MITM inspection root CA (Certificates panel, above)
+// and the outbound upstream mTLS client cert (Security > OCSP panel), both
+// of which already show theirs. Populated only once a custom cert/key pair
+// (uploaded here, or set via -tls-cert/-tls-key) has actually bound; the
+// auto self-signed fallback is 10 years and intentionally not tracked.
+// Before this, an operator-supplied UI certificate could expire with no
+// warning anywhere in the product — only a rate-limited process-log line
+// once browsers had already started refusing the connection.
+function renderUICertExpiry(n) {
+  const el = document.getElementById('ui-cert-expiry');
+  if (!el) return;
+  const days = n.ui_tls_cert_days_remaining;
+  if (typeof days !== 'number') { el.textContent = ''; return; }
+  const expired = days < 0;
+  el.style.color = expired ? 'var(--red,#dc3545)' : (days < 30 ? 'var(--yellow)' : 'var(--muted)');
+  el.textContent = 'Admin UI serving certificate ' + (expired ? 'EXPIRED' : 'expires') +
+    ' ' + (n.ui_tls_cert_not_after || '-') + ' (' + days + 'd)' +
+    (expired ? ' — browsers will refuse this connection; replace it and restart.' : '');
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -16303,12 +16327,14 @@ function renderDiagnoseStorage(d) {
   const color = d.ok ? 'var(--green)' : 'var(--red)';
   const hdr = '<p class="hint">Storage <strong style="color:' + color + '">' + (d.ok ? 'OK' : 'DEGRADED') +
     '</strong> · free ' + escHtml(String(Math.round((d.free_bytes || 0) / (1024 * 1024)))) + ' MiB / used ' +
-    escHtml((d.used_pct || 0).toFixed(1)) + '%</p>';
+    escHtml((d.used_pct || 0).toFixed(1)) + '%</p>' +
+    '<p class="hint">Data directory: <code>' + escHtml(String(d.data_dir || '')) + '</code></p>';
   const rows = (d.checks || []).map(c =>
-    '<tr><td>' + escHtml(String(c.name)) + '</td><td style="color:' + (c.ok ? 'var(--green)' : 'var(--red)') + '">' +
+    '<tr><td>' + escHtml(String(c.name)) + '</td><td class="hint">' + escHtml(String(c.path || '')) +
+    '</td><td style="color:' + (c.ok ? 'var(--green)' : 'var(--red)') + '">' +
     (c.ok ? 'ok' : 'fail') + '</td><td class="hint">' + escHtml(String(c.detail || '')) + '</td></tr>').join('');
   el.innerHTML = hdr + '<div style="overflow-x:auto"><table class="tbl" style="width:100%"><thead><tr>' +
-    '<th>Check</th><th>Result</th><th>Detail</th></tr></thead><tbody>' + rows + '</tbody></table></div>';
+    '<th>Check</th><th>Path</th><th>Result</th><th>Detail</th></tr></thead><tbody>' + rows + '</tbody></table></div>';
 }
 
 async function diagnoseUpstream() {
@@ -18388,6 +18414,12 @@ async function loadClusterRateLimits(show) {
     document.getElementById('crl-nodes').textContent = r.syncing_nodes || 0;
     document.getElementById('crl-hot').textContent = r.hot_ips || 0;
     document.getElementById('crl-rpm').textContent = r.rate_limit_rpm || 'Off';
+    // CHAOS-61: the gauge above (crl-stale-banner) only shows while the broadcast
+    // is CURRENTLY stale, so an operator reviewing after the fact sees a healthy
+    // panel even if the link flapped repeatedly overnight. This counter is the
+    // "has this happened before" signal the API already computes (Episodes) but
+    // the panel never rendered — a running total survives recovery.
+    document.getElementById('crl-episodes').textContent = r.remote_counts_stale_episodes || 0;
     // CHAOS-61: a stale broadcast is not an error — it is the gate that stops a
     // frozen Control Plane snapshot from denying a client forever — but it IS a
     // degradation of the distributed limit, and a 429 on this node no longer
