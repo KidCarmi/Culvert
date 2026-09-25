@@ -1656,25 +1656,24 @@ func (c *Config) mutateRosterBestEffort(mutate func() bool) error {
 // pair is still set, and those are not in ui_users.json, so the next restart
 // reopens unauthenticated first-time setup.
 //
-// The compensation is the CALLER'S, not restoreRoster's, and that distinction
-// is load-bearing: SetAuth also sets c.user/c.passHash, which rosterSnapshot
-// does not capture, so a wholesale roster restore would undo the account while
-// leaving the legacy pair set — IsConfigured() true with nothing persisted,
-// exactly the state RollbackFailedSetupAuth exists to clear.
+// CHAOS-70 round 3 made this a thin delegation to mutateRosterDurably, and
+// round 2's reasoning for NOT doing so is recorded here as SUPERSEDED: it held
+// that the compensation had to be the caller's, because SetAuth also sets
+// c.user/c.passHash and rosterSnapshot did not capture that pair, so a wholesale
+// restore would undo the account while leaving IsConfigured() true with nothing
+// persisted. The premise was true; the conclusion was the wrong fix. The caller's
+// inverse (RollbackFailedSetupAuth) DELETES the account — correct for a
+// first-time setup, and wrong for the rotation of an existing one, where a
+// refused write left the admin with no roster entry at all, locked out until a
+// restart. A CONTROL caught exactly that. COMPLETING THE SNAPSHOT was the answer
+// rather than a second inverse, so both callers now share one rollback, one
+// transaction lock and one ErrReplacedNotSynced rule.
 //
-// It is a thin delegation to mutateRosterDurably, and CHAOS-70 round 3 made it
-// one deliberately. The first version carried its own inverse
-// (RollbackFailedSetupAuth) because rosterSnapshot did not capture the legacy
-// c.user/c.passHash pair — and that inverse DELETES the account, which is
-// correct for first-time setup and wrong for the rotation of an existing one: a
-// refused rotation left the admin with no roster entry, locking them out until a
-// restart. Completing the snapshot (see rosterSnapshot) removed the need for a
-// second inverse, so both callers now share one rollback, one transaction lock
-// and one ErrReplacedNotSynced rule. That also resolves an inconsistency rather
-// than preserving it: compensating on ANY persist error diverged from
-// setDefaultAuthOutcomeChecked in apiSetupComplete's other branch, which was
-// acceptable while this served setup alone and stopped being so when apiSettings
-// — a LIVE admin endpoint — became the second caller.
+// That also resolves an inconsistency rather than preserving it: compensating on
+// ANY persist error diverged from setDefaultAuthOutcomeChecked in
+// apiSetupComplete's other branch, which was acceptable while this served setup
+// alone and stopped being so when apiSettings — a LIVE admin endpoint — became
+// the second caller.
 //
 // For setup the snapshot is the pre-setup state (no accounts, empty legacy pair),
 // so a rollback still reverts IsConfigured() to false and keeps the wizard
