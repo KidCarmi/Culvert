@@ -626,3 +626,5 @@
   and already correct. This is flagged directly to the repository owner outside the PR queue for
   this reason — recommend merging #1372 and #1373 now, and leaving #1380/#1395 open pending the
   content-accuracy fixes their own review threads already specify.
+  *Postscript (added when this entry merged):* #1372 and #1380 have since merged to `main`; the
+  2026-09-16 terminology report reconciles its backlog and score against both.
