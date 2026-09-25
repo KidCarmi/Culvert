@@ -10,11 +10,13 @@
 > CLI/YAML merge; PR #1374: a new `geo_resolution` operator-contract row surfacing the existing
 > CHAOS-60 GeoIP warm-pool state on `GET /api/diagnostics`, with a same-window Codex-review
 > follow-up dropping a false-positive comparison). Part A audits this window directly. **Part B is a
-> scope extension**: this pass is the first in this series to systematically check
-> `frontend/src/**` (the new React admin frontend, gated by `CULVERT_EXPERIMENTAL_UI`) against
-> `docs/design/PRODUCT-TERMINOLOGY.md`'s already-established canonical vocabulary, rather than only
-> `static/index.html` (the legacy GUI) — see the Program Note below for why this gap existed and two
-> genuine findings it surfaced.
+> scope extension**: this pass checks the new React admin frontend's (`frontend/src/**`, gated by
+> `CULVERT_EXPERIMENTAL_UI`) **PAC and Policy Learning screens** against
+> `docs/design/PRODUCT-TERMINOLOGY.md`'s already-established canonical vocabulary. The frontend as a
+> whole is not new to this series — the 2026-08-22 report audited it when it first landed (PR #1194),
+> and the 2026-08-29 report fixed an `AuthScreen.tsx` violation — but these two feature surfaces were
+> added or reworked after those passes and had not been checked against the canon since; see Part B
+> for the two genuine findings this surfaced.
 
 ---
 
@@ -61,10 +63,12 @@ naming changes, and both are already internally self-consistent as merged:
 
 **Part B (scope extension): two new findings, one fixed on the spot.** This program's methodology
 notes (e.g. 2026-08-30: *"`static/index.html` is byte-unchanged in this window ... so there is no new
-GUI copy to check"*) show that "check the GUI" has, in practice, meant grepping `static/index.html`
-only. `frontend/src/**` is a second, independently-maintained GUI surface governed by the exact same
-`docs/design/PRODUCT-TERMINOLOGY.md` canon, and it has apparently never been checked against that
-canon by this series. A direct audit of it against two already-established canonical rules found two
+GUI copy to check"*) show that "check the GUI" has, in routine window passes, usually meant grepping
+`static/index.html`. `frontend/src/**` is a second, independently-maintained GUI surface governed by
+the exact same `docs/design/PRODUCT-TERMINOLOGY.md` canon; it was audited when it landed (2026-08-22)
+and again partially on 2026-08-29 (`AuthScreen.tsx`), but its PAC (`features/network/pac/`) and Policy
+Learning (`features/learning/`) screens have not been checked against the canon since. A direct audit
+of those two surfaces against two already-established canonical rules found two
 genuine, previously-undocumented mismatches between the legacy GUI (canonical, per CLAUDE.md and
 `PRODUCT-TERMINOLOGY.md`) and the new frontend:
 
@@ -95,8 +99,10 @@ new one opt-in via `CULVERT_EXPERIMENTAL_UI` — sees two different names for th
 depending on which UI build is active, with nothing telling them the two labels refer to one thing.
 
 **Fixed this pass (doc-only, zero risk):** `docs/operator/pac-traffic-steering.md` now consistently
-says "steering profile" in the prose under its "## Steering profiles" heading (previously "a
-**profile**...", "Custom profiles...", "the same profiles"), matching the already-canonical term this
+says "steering profile" throughout its prose (previously "a **profile**...", "Custom profiles...",
+"the same profiles", "Each profile carries", "Profile PACs", "Profiles and pools", and ~40 further bare
+uses across the lifecycle, simulator, and DIRECT-governance sections — code identifiers, API paths,
+metric/alert names and file names are left as-is), plus its Part 2 heading, matching the already-canonical term this
 same document's own heading already used, and now carries an explicit note recording the new
 frontend's outstanding wording gap (T-56) so a reader of the runbook is not misled into thinking the
 two UIs use consistent language today.
@@ -112,7 +118,8 @@ T-12, and T-54's own code half in the still-open 2026-09-12 report).
 **Process recommendation:** future passes of this routine should explicitly include `frontend/src/**`
 in the standard "check the GUI" step alongside `static/index.html`, not only when a diff happens to
 touch it. Both are live, user-facing surfaces governed by the same canonical terminology document, and
-this pass shows the second one has accumulated at least two real mismatches while going unchecked.
+this pass shows feature screens added to the second one after its initial audit have accumulated at
+least two real mismatches.
 
 **Terminology Health Score: 8.5 / 10** (down from 8.7, the score last recorded on merged `main` by the
 2026-09-11 report; the 2026-09-12 report proposes 8.6 but remains unmerged — see the Program Note).
@@ -288,9 +295,9 @@ Also flagged (design-document reconciliation, not a numbered backlog item): "Con
 Terminology is **not** fully consistent. This pass's audited merge window (`2833db3..993b390`, PR
 #1371 + PR #1374) introduced no new drift — both PRs are correctness fixes with internally consistent
 naming, and PR #1371's own same-window Codex review caught and fixed a real flag-name mismatch before
-it ever reached `main`. Extending this program's audit scope to `frontend/src/**` for the first time —
-a surface governed by the same `docs/design/PRODUCT-TERMINOLOGY.md` canon as `static/index.html` but
-evidently never checked against it directly by this series — found two genuine, well-evidenced,
+it ever reached `main`. Re-checking the new frontend's PAC and Policy Learning screens — surfaces of
+`frontend/src/**` governed by the same `docs/design/PRODUCT-TERMINOLOGY.md` canon as `static/index.html`
+but added or reworked after the frontend's initial 2026-08-22 audit — found two genuine, well-evidenced,
 previously-undocumented mismatches between Culvert's two coexisting admin UIs (T-55: "Accept to Draft"
 vs. "Accept to Policy Draft"; T-56: "Steering Profile" vs. bare "PAC profile", the same defect class
 T-50 already fixed once, elsewhere). The doc-only half of T-56 was fixed on the spot at zero risk,
@@ -301,6 +308,6 @@ direction decision this report does not make unilaterally. No cosmetic or prefer
 proposed — both new findings are real, cross-checked against the codebase's own established canonical
 terminology document, and are things a real administrator moving between Culvert's two admin UIs would
 actually notice. This report recommends future passes fold `frontend/src/**` into the routine audit
-scope rather than treating it as a special case, since a single direct check surfaced two real items on
-a first pass. This report was written after a fresh sync against `origin/main` immediately before
+scope rather than treating it as a special case, since a single direct re-check of two feature
+surfaces surfaced two real items. This report was written after a fresh sync against `origin/main` immediately before
 opening its PR, per the DEBT-014 process lesson.
