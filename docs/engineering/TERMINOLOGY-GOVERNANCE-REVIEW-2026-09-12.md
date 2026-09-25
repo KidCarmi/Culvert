@@ -60,7 +60,7 @@
 
 ## Executive Summary
 
-**One new finding (T-54, queued to the backlog; its doc-table half was resolved independently on `main`
+**One new finding (T-54, queued to the backlog; its missing-doc-table-rows half was resolved independently on `main`
 before this report merged); the large new MCP Canary surface introduced no drift.**
 
 Five bounded audits were run against the diff since the last review (up from two in the first draft, after
@@ -237,12 +237,18 @@ this report merged rather than after.
   in the description, a `Deprecated` CHANGELOG entry), then `make api-bundle`. The old names must keep
   working. This report records the requirement; the implementing change owns the exact steps, which the
   repository's API-governance checks enforce.
-- **Affected GUI:** `static/index.html:17515` (read the new JSON keys).
+- **Affected GUI:** `static/index.html:17515` (read the new JSON keys) AND the OCSP panel's aggregate
+  (`:4485,17514-17517`), which today adds `responderBlockedTotal` into "Responses rejected" — once the
+  split lands it must be shown separately (e.g. "Responders refused"), or the GUI keeps the same
+  mismatch the metric split removes.
 - **Affected Documentation:** `docs/operator/ocsp-revocation-checking.md` §2 — the rejection-reasons table
   was missing rows for `malformed` and `unauthorized_responder`. **Resolved independently on `main`**, not
   by this report: an earlier draft of this PR added the two rows, but `main` landed them first (with more
   precise wording), so the branch keeps `main`'s table verbatim and this report changes no file other than
-  itself. The doc half of T-54 is therefore closed; only the code/API half remains queued.
+  itself. That closes the MISSING-ROWS gap only. When the `responder_blocked` split lands, the same
+  runbook must also move `responder_blocked` out of its discarded-response table and out of the old
+  family's description (`docs/operator/ocsp-revocation-checking.md:38-49,107-114`) — that part is queued
+  with the code/API half.
 - **Affected Configuration:** none.
 - **Migration Complexity:** Small-Medium (the Go accessor rename `UnknownTotal`→`UnknownStatusTotal` is
   internal; the two JSON fields `malformedResponseTotal` / `staleResponseTotal` must be handled as an API
@@ -298,7 +304,7 @@ added for the new finding:
 | Medium | T-9 (carried over) | Rename `exportedAt` → `capturedAt` with read-compat alias | Low-medium | Medium |
 | Medium | T-11 (carried over) | Reconcile `allow`/`deny` default-action vocabulary vs. the four-value `PolicyAction` enum | Low / Medium-large | Small / Medium-large |
 | Medium | T-12 (carried over) | Alias Maintenance Agent wire routes `/v1/upgrades/*` → `/v1/updates/*` | Medium | Medium |
-| Low-Medium | **T-54 (new)** | Add OCSP admin JSON fields `malformedTotal` and `staleTotal` alongside `malformedResponseTotal` / `staleResponseTotal` and deprecate the old names (removal only via the API-versioning MAJOR exception — a plain rename is breaking); rename Go accessor `UnknownTotal`→`UnknownStatusTotal`; regenerate the OpenAPI bundle; update the two GUI references; move `responder_blocked` out of the `response_rejected` family into its own series with a compatibility window (a HELP-text change alone does not fix it); follow `API-DEPRECATION-POLICY.md` in full and bump the MINOR contract version. (Doc-table gap already resolved on `main`.) | Medium (stable API field — additive only) | Small |
+| Low-Medium | **T-54 (new)** | Add OCSP admin JSON fields `malformedTotal` and `staleTotal` alongside `malformedResponseTotal` / `staleResponseTotal` and deprecate the old names (removal only via the API-versioning MAJOR exception — a plain rename is breaking); rename Go accessor `UnknownTotal`→`UnknownStatusTotal`; regenerate the OpenAPI bundle; update the two GUI references; move `responder_blocked` out of the `response_rejected` family into its own series with a compatibility window (a HELP-text change alone does not fix it), and carry that split through the GUI aggregate and the operator runbook's table; follow `API-DEPRECATION-POLICY.md` in full and bump the MINOR contract version. (Missing doc-table rows already resolved on `main`; the runbook update for the `responder_blocked` split is part of this item.) | Medium (stable API field — additive only) | Small |
 | Low | T-34 (carried over) | Standardize `apiURLCatFeedStatus`'s SaaS block field names on the F3b-4 status endpoint's vocabulary | Low | Small |
 | Low | T-13 residual (carried over) | Decide whether README/enterprise-doc "TLS Inspection" branding should unify with in-app "SSL" | Low | Small |
 
@@ -313,7 +319,7 @@ Terminology is **not** fully consistent. This pass found one genuinely new, smal
 item (T-54: the OCSP discarded-response reason vocabulary disagrees across Go/`/metrics`/admin-JSON for
 three identifiers, two of six reasons were missing from the operator doc's own reference table, and one
 reason — `responder_blocked` — is charged under a metric family whose own business-concept framing does
-not fit it, since it fires before any response is ever received). Its doc-table half was resolved
+not fit it, since it fires before any response is ever received). Its missing-doc-table-rows half was resolved
 independently on `main` before this report merged; the code/API half (a Go accessor rename plus an additive, deprecating JSON/OpenAPI change, plus a
 naming decision for the metric-family scope correction) is queued to the backlog rather than rushed into
 this documentation PR, consistent with how this program has always treated renames that touch a shipped,
