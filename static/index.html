@@ -16360,12 +16360,14 @@ function renderDiagnoseStorage(d) {
   const color = d.ok ? 'var(--green)' : 'var(--red)';
   const hdr = '<p class="hint">Storage <strong style="color:' + color + '">' + (d.ok ? 'OK' : 'DEGRADED') +
     '</strong> · free ' + escHtml(String(Math.round((d.free_bytes || 0) / (1024 * 1024)))) + ' MiB / used ' +
-    escHtml((d.used_pct || 0).toFixed(1)) + '%</p>';
+    escHtml((d.used_pct || 0).toFixed(1)) + '%</p>' +
+    '<p class="hint">Data directory: <code>' + escHtml(String(d.data_dir || '')) + '</code></p>';
   const rows = (d.checks || []).map(c =>
-    '<tr><td>' + escHtml(String(c.name)) + '</td><td style="color:' + (c.ok ? 'var(--green)' : 'var(--red)') + '">' +
+    '<tr><td>' + escHtml(String(c.name)) + '</td><td class="hint">' + escHtml(String(c.path || '')) +
+    '</td><td style="color:' + (c.ok ? 'var(--green)' : 'var(--red)') + '">' +
     (c.ok ? 'ok' : 'fail') + '</td><td class="hint">' + escHtml(String(c.detail || '')) + '</td></tr>').join('');
   el.innerHTML = hdr + '<div style="overflow-x:auto"><table class="tbl" style="width:100%"><thead><tr>' +
-    '<th>Check</th><th>Result</th><th>Detail</th></tr></thead><tbody>' + rows + '</tbody></table></div>';
+    '<th>Check</th><th>Path</th><th>Result</th><th>Detail</th></tr></thead><tbody>' + rows + '</tbody></table></div>';
 }
 
 async function diagnoseUpstream() {
