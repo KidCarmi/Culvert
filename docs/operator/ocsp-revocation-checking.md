@@ -1,6 +1,6 @@
 # OCSP revocation checking — what it covers, how it fails, how to read it
 
-**Audience:** operators running Culvert with `security.ocsp_check: true` (or the
+**Audience:** operators running Culvert with `proxy.ocsp_check: true` (or the
 **OCSP / CRL Revocation** toggle in the admin UI).
 **Related:** `roadmap/CHAOS-ENGINEERING-REVIEW.md` §35 (CHAOS-65),
 `docs/operator/root-ca-expiry.md`.
