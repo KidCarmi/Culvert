@@ -15,9 +15,11 @@
 
 This runbook turns the **dormant** R2 catalog publisher
 (`.github/workflows/publish-catalog-r2.yml`, shipped in M0-PR3) **live**. Until you
-complete it, that workflow skips cleanly (green, no writes) and — **at the time this
-runbook was written** — GitHub Pages remained the authoritative catalog host (Pages
-has since been retired; see the correction above). Every step here requires
+complete it, the workflow does not publish. **At the time this runbook was written**
+it skipped cleanly (green, no writes) and GitHub Pages remained the authoritative
+catalog host; today it FAILS (red) via `assert-publication-target` while
+`R2_PUBLISH_ENABLED` is not `true`, and Pages has been retired (see the correction
+above). Every step here requires
 **owner** credentials — none of it is done by CI.
 
 > Trust model reminder: R2 (staging and live) is **untrusted transport**. Integrity
