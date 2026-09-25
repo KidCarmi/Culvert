@@ -7,8 +7,11 @@
 > not a statement about the tree this file is published in; the current governance state is whatever the
 > most recent review in this series says. Later windows are audited by later reports, never
 > retroactively by this one.
-> **Method:** Audited `0665453..6ec745d` — the window since the 2026-09-11 report's merge point (PR
-> #1363). The end commit `6ec745d` was confirmed as the then-current `origin/main` HEAD by a fetch
+> **Method:** Audited `574d265..6ec745d` — the window since the 2026-09-11 report's audited snapshot
+> `574d265`. That report itself merged later, in `0665453` (PR #1363). The first revision started at
+> `0665453`, which left two merges that landed between the two commits unaudited by either report:
+> #1362 (`2d86f19`, MCP first-canary exact scope) and #1366 (`dcc6aa3`, the compose YARA rules path).
+> The window was widened in review to cover them; see "Merges added in review" below. The end commit `6ec745d` was confirmed as the then-current `origin/main` HEAD by a fetch
 > immediately before this report was written on 2026-09-24 (per the DEBT-014 lesson: sync against `main` right before opening a PR, not only at
 > review-start, so a fix landed by a parallel branch is credited rather than re-claimed — no such
 > landing occurred this pass; the branch was created directly from a synced `origin/main`, so no merge
@@ -17,7 +20,7 @@
 > windows: 2026-09-19 (#1434), 2026-09-21 (#1456) and 2026-09-23 (#1482). This report is therefore a
 > parallel run of the DEBT-014 kind; see "Overlap with parallel reports" below.
 >
-> The window covers 31 first-parent merges / 248 files / ~53.1k insertions, dominated by two
+> The window covers 34 first-parent merges / 256 files / ~55.7k insertions, dominated by two
 > unrelated backend tracks: (a) CI-REDESIGN pipeline work (`cmd/cireport`, `cmd/rootshard`,
 > `.github/workflows/*`, release-publication gating, the R2-only catalog-origin retirement of GitHub
 > Pages) — CI/release-engineering internals with no operator-facing surface — and (b) MCP "first
@@ -66,12 +69,12 @@ parts of the same window did find drift this pass missed; see "Overlap with para
    - The release-publication-gating and R2-only-catalog work (`promote-image`, `candidate-<run_id>`,
      `resolve-candidate`) is CI/release-engineering internals with no operator-GUI or config-surface
      exposure, out of this glossary's scope.
-2. **None of this window's 248 changed files touch any of the fourteen carry-over finding locations**
+2. **None of this window's 256 changed files touch any of the fourteen carry-over finding locations**
    (`docs/enterprise/TLS-INSPECTION-DEPLOYMENT.md`, `internal/sealbox`, the Cluster panel's `cp_version`/
    `snapshot_sha256` sites, `internal/support`'s recipient/TAC-trust-key stores, the `PolicyAction`/
    `PolicyReason` overwrite sites in `policy.go`, `apiURLCatFeedStatus`, or the
    `qualification_inventory_file`/`qualification_telemetry`/`qualification_policy_file` trio) — cross-
-   checked against `git diff --stat 0665453..origin/main`'s full file list. None was touched, so none was
+   checked against `git diff --name-only 574d265..6ec745d`'s full file list. None was touched, so none was
    incidentally resolved or worsened.
 3. **Spot-checked three carry-over items directly** (rather than trusting the prior report alone), the
    same discipline the 2026-09-08/09/11 reports used: **T-11** — `config.go`'s `default_action`
@@ -84,7 +87,7 @@ parts of the same window did find drift this pass missed; see "Overlap with para
    `security.max_conns_per_ip` exist. All three confirmed exactly as the prior reports left them.
 
 **Terminology Health Score: 8.7 / 10** (unchanged from 2026-09-08/09/11). This pass's checks found no new
-drift in a 248-file, backend-and-CI-heavy window, and no carry-over item moved, so the score neither rises
+drift in a 256-file, backend-and-CI-heavy window, and no carry-over item moved, so the score neither rises
 nor falls. It does not account for the parallel reports' findings (see "Overlap with parallel reports");
 the series' later reports reconcile the score.
 
@@ -105,6 +108,22 @@ deliberate, independently-documented naming decisions — legacy GUI per
 `docs/design/INFORMATION-ARCHITECTURE.md`, new frontend per `docs/design/FRONTEND-MIGRATION-PLAN.md` —
 not a mechanical rename) also remains unresolved and is not queued to the numbered backlog, per the
 2026-09-09 report's reasoning.
+
+---
+
+## Merges added in review
+
+- **#1362 (`2d86f19`, MCP first-canary exact scope)** — 13 files: `internal/mcp/canary/firstcanary_scope.go`,
+  `mcp_canary_preflight.go`, tests, a mutation script, ADR-0035, `docs/design/mcp/CANARY-FIRST-RUNBOOK.md`,
+  `CANARY-READINESS-MATRIX.md` and `docs/operator/mcp-first-controlled-canary-review.md`. No GUI, REST
+  route, OpenAPI or config surface changed. The new vocabulary ("exact scope", `ExactScope`) is internal
+  canary-review language used the same way in code and docs, and no added line uses "appliance".
+  No finding.
+- **#1366 (`dcc6aa3`, compose YARA rules path)** — `docker-compose.yml` comments and an example mount now
+  say `/data/yara` instead of `/app/yara`, plus a test pinning it. That is a path correction, not a naming
+  change. No finding.
+
+Neither merge touches a carry-over finding location.
 
 ---
 
@@ -130,7 +149,7 @@ their ID notes.
 ## Stop-Condition Assessment
 
 No production-worthy NEW terminology improvement was identified by this pass's checks (parallel reports
-found some in the same window; see above): the 31-merge window audited
+found some in the same window; see above): the 34-merge window audited
 was CI/release-pipeline engineering plus MCP-canary and reliability (CHAOS-60/63/65) work, all internally
 consistent where these checks looked. The 2026-09-21 report found that the window did add "appliance"
 to customer-facing docs and an OpenAPI description, which this pass missed.
