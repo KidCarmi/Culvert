@@ -72,8 +72,10 @@ two more rounds of review found real coverage gaps — see the corrections above
      experiment). All three are used consistently for their own, distinct referents everywhere checked.
    - **"Tool Trust"** (the subsystem, `internal/mcp/tooltrust`) vs. **"Tool Approval"** (the reviewed grant
      record, `tooltrust.ToolApproval`, exposed at `/api/mcp/tool-approvals`) vs. **"Reviewed Operation
-     Class"** (a narrower field *on* a Tool Approval — the read/write/control classification stated at
-     review time, `ToolApproval.ReviewedOperationClass`) — three altitudes of one coherent hierarchy, not
+     Class"** (a narrower field *on* a Tool Approval — the deliberately BINARY read-only-versus-mutating
+     determination stated at review time, `ToolApproval.ReviewedOperationClass`, wire labels `read_only` /
+     `mutating` with a fail-closed `unset` zero value; it intentionally does not mirror the richer policy
+     operation taxonomy, `internal/mcp/tooltrust/reviewed_operation.go`) — three altitudes of one coherent hierarchy, not
      rival names for one thing. Test-file phrases like "trust binding" / "atomic binding" describe
      behavior, not a fourth noun; no production code or doc promotes them to first-class vocabulary.
    - **"Live Gate"** (the execution-layer admission check, `internal/mcp/execution/livegate.go`) vs. **"Live
@@ -212,16 +214,17 @@ this report merged rather than after.
   all six reasons, not four.
 - **Affected code:** `internal/ocsp/ocsp.go` (rename `UnknownTotal`→`UnknownStatusTotal` to match its own
   metric label — `MalformedTotal`/`UnauthorizedResponderTotal`/`StaleTotal` already match their labels
-  and need no Go change); `ui_security.go` (rename JSON fields `malformedResponseTotal`→`malformedTotal`
-  and `staleResponseTotal`→`staleTotal`); `ocsp_metrics.go`'s `culvert_ocsp_response_rejected_total` HELP
+  and need no Go change); `ui_security.go` (ADD JSON fields `malformedTotal` and `staleTotal` alongside
+  the existing `malformedResponseTotal` / `staleResponseTotal`, which stay and are deprecated — see
+  Compatibility Risk); `ocsp_metrics.go`'s `culvert_ocsp_response_rejected_total` HELP
   text and/or `responder_blocked`'s membership in that series (the metric-family scope correction above —
   either narrow the HELP text to say "or refused before any request" or split `responder_blocked` into
   its own, differently-named series; a naming decision, not a mechanical rename, so it is recorded here
   rather than pre-decided).
-- **Affected API:** `api/openapi/openapi.yaml`/`openapi.json` (regenerate via `make api-bundle` after the
-  JSON field renames — this is a documented, already-shipped API surface, not a same-PR drive-by rename).
-- **Affected GUI:** `static/index.html:17515` (update the two field references to match the renamed JSON
-  keys).
+- **Affected API:** `api/openapi/openapi.yaml`/`openapi.json` (add the two new properties and mark the old ones
+  `deprecated: true`, then regenerate via `make api-bundle` — this is a documented, already-shipped stable
+  API surface, so the old names must keep working).
+- **Affected GUI:** `static/index.html:17515` (read the new JSON keys).
 - **Affected Documentation:** `docs/operator/ocsp-revocation-checking.md` §2 — **fixed in this pass** (two
   rows added to the rejection-reasons table for `malformed` and `unauthorized_responder`; zero code/API
   risk, so unlike the Go/JSON rename this needed no coordinated PR and was applied immediately, consistent
@@ -230,12 +233,17 @@ this report merged rather than after.
   *Post-merge note:* `main` independently landed both rows (with more precise wording) before this report
   merged, so the branch now keeps `main`'s table verbatim and this report no longer changes that file.
 - **Affected Configuration:** none.
-- **Migration Complexity:** Small-Medium (three identifier renames — `UnknownTotal`, `malformedResponseTotal`,
-  `staleResponseTotal` — plus one generated-spec regen, plus a naming decision for the `responder_blocked`
-  family-scope correction; the JSON fields are new this same window and have exactly one known consumer,
-  `static/index.html`, updated in the same change).
-- **Compatibility Risk:** Low — the fields are documented in the OpenAPI spec but shipped only in this same
-  merge window, so no external consumer has had time to depend on the specific spelling being changed.
+- **Migration Complexity:** Small-Medium (the Go accessor rename `UnknownTotal`→`UnknownStatusTotal` is
+  internal; the two JSON fields `malformedResponseTotal` / `staleResponseTotal` must be handled as an API
+  change — see Compatibility Risk — plus one generated-spec regen and a naming decision for the
+  `responder_blocked` family-scope correction).
+- **Compatibility Risk:** Medium for the JSON half. Both fields are published in the `OCSPStatus` schema of
+  the stable `GET /api/ocsp` operation, and `docs/api/API-VERSIONING-POLICY.md` classifies renaming or
+  removing a field as BREAKING (Gate 7). An earlier draft of this report called the rename low-risk because
+  the fields were new; that is not a safe assumption once a field is in a published stable schema. The
+  recommended path is ADDITIVE: emit the new names `malformedTotal` / `staleTotal` alongside the old ones,
+  mark the old ones deprecated in the OpenAPI spec, and remove them only through the policy's MAJOR-version
+  exception process. The Go accessor rename carries no external compatibility risk.
 - **Estimated PR Size:** Small.
 - **Priority:** Low-Medium (admin-only telemetry naming; not a security or correctness issue, but the doc
   gap it's paired with directly affects an operator's ability to diagnose OCSP rejections, which is why it
@@ -279,7 +287,7 @@ added for the new finding:
 | Medium | T-9 (carried over) | Rename `exportedAt` → `capturedAt` with read-compat alias | Low-medium | Medium |
 | Medium | T-11 (carried over) | Reconcile `allow`/`deny` default-action vocabulary vs. the four-value `PolicyAction` enum | Low / Medium-large | Small / Medium-large |
 | Medium | T-12 (carried over) | Alias Maintenance Agent wire routes `/v1/upgrades/*` → `/v1/updates/*` | Medium | Medium |
-| Low-Medium | **T-54 (new)** | Rename OCSP admin JSON fields `malformedResponseTotal`→`malformedTotal` and `staleResponseTotal`→`staleTotal`, and Go accessor `UnknownTotal`→`UnknownStatusTotal`; regenerate the OpenAPI bundle; update the two GUI references; decide and apply a fix for `responder_blocked`'s metric-family scope mismatch (narrow the HELP text or split it into its own series). (Doc-table gap already fixed this pass.) | Low | Small |
+| Low-Medium | **T-54 (new)** | Add OCSP admin JSON fields `malformedTotal` and `staleTotal` alongside `malformedResponseTotal` / `staleResponseTotal` and deprecate the old names (removal only via the API-versioning MAJOR exception — a plain rename is breaking); rename Go accessor `UnknownTotal`→`UnknownStatusTotal`; regenerate the OpenAPI bundle; update the two GUI references; decide and apply a fix for `responder_blocked`'s metric-family scope mismatch (narrow the HELP text or split it into its own series). (Doc-table gap already fixed this pass.) | Medium (stable API field — additive only) | Small |
 | Low | T-34 (carried over) | Standardize `apiURLCatFeedStatus`'s SaaS block field names on the F3b-4 status endpoint's vocabulary | Low | Small |
 | Low | T-13 residual (carried over) | Decide whether README/enterprise-doc "TLS Inspection" branding should unify with in-app "SSL" | Low | Small |
 
@@ -295,7 +303,7 @@ item (T-54: the OCSP discarded-response reason vocabulary disagrees across Go/`/
 three identifiers, two of six reasons were missing from the operator doc's own reference table, and one
 reason — `responder_blocked` — is charged under a metric family whose own business-concept framing does
 not fit it, since it fires before any response is ever received) and fixed the doc-table half of it on the
-spot, at zero code/compat risk; the code/API half (a small, coordinated Go+JSON+OpenAPI rename, plus a
+spot, at zero code/compat risk; the code/API half (a Go accessor rename plus an additive, deprecating JSON/OpenAPI change, plus a
 naming decision for the metric-family scope correction) is queued to the backlog rather than rushed into
 this documentation PR, consistent with how this program has always treated renames that touch a shipped,
 documented API surface (see T-29/T-30/T-12). The 9-merge window's dominant new feature — MCP-First
