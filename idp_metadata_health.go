@@ -229,7 +229,23 @@ var fireIdPMetadataAlert = func(detail string) {
 // bounded class that reaches metrics, the contract row and the alert.
 func noteIdPMetadataOutcome(profileID string, outcome idpMetadataOutcome, cause error) {
 	if outcome == idpMetaInline {
-		return // no network was involved; this plane has nothing to say about it
+		// No network was involved, so this plane has nothing to COUNT — but an
+		// inline profile may be one an admin just switched AWAY from a remote
+		// metadata_url, and if that profile had an open failure episode there
+		// will never be another remote fetch to clear it. The episode would
+		// then hold `culvert_idp_metadata_degraded` and the contract row at a
+		// permanent outage for a dependency that no longer exists. The
+		// transition to inline IS the resolution, so it clears the episode —
+		// and nothing else: no attempt, no outcome, no counter.
+		idpMetadata.mu.Lock()
+		_, had := idpMetadata.episodes[profileID]
+		delete(idpMetadata.episodes, profileID)
+		idpMetadata.mu.Unlock()
+		if had {
+			logger.Printf("IDP_METADATA_RECOVERED idp=%q (profile now uses inline metadata; its remote-fetch failure episode no longer applies)",
+				sanitizeLog(profileID))
+		}
+		return
 	}
 	idpMetadataEverUsed.Store(true)
 

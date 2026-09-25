@@ -96,8 +96,15 @@ func fetchOIDCDiscovery(profileID, issuer string) (*oidcDiscoveryDoc, error) {
 	issuer = strings.TrimRight(issuer, "/")
 	wellKnown := issuer + "/.well-known/openid-configuration"
 
-	// Security: ensure the discovery URL is safe (non-private HTTPS).
-	if err := validateExternalURL(wellKnown); err != nil {
+	// CONFIGURATION errors fail fast and are never answered from cache; a
+	// RESOLUTION failure is not one. validateExternalURL resolves the host, so
+	// using it here made "DNS is down" indistinguishable from "this issuer is
+	// misconfigured" and returned BEFORE the last-known-good document could be
+	// consulted — the OIDC half of this sweep's own headline defect, left in
+	// place by the fix that closed the SAML half. The DNS-backed check still
+	// runs, inline in fetchOIDCDiscoveryOverNetwork, where its failure is a
+	// failed FETCH and routes to the cache.
+	if err := validateExternalURLStructure(wellKnown); err != nil {
 		return nil, fmt.Errorf("oidc discovery: %w", err)
 	}
 
@@ -105,9 +112,9 @@ func fetchOIDCDiscovery(profileID, issuer string) (*oidcDiscoveryDoc, error) {
 	// destroy the provider. acquireIdPDocument prefers the network and falls
 	// back to the last successfully fetched document within
 	// idpmeta.StaleMaxAge. The bytes are decoded and RE-VALIDATED below by the
-	// same code either way — in particular every discovered endpoint is put
-	// back through validateExternalURL, so a cached document cannot name an
-	// endpoint the network path would have refused.
+	// same code either way — every discovered endpoint is put back through
+	// validateExternalURLStructure, so a cached document cannot name an
+	// endpoint the network path would have accepted on structure.
 	fetched, fetchErr := fetchOIDCDiscoveryOverNetwork(wellKnown)
 	raw, err := resolveIdPDocument(profileID, idpmeta.KindOIDCDiscovery, wellKnown, fetched, fetchErr, func(b []byte) error {
 		_, vErr := parseAndValidateOIDCDiscovery(b)
@@ -147,7 +154,15 @@ func parseAndValidateOIDCDiscovery(raw []byte) (*oidcDiscoveryDoc, error) {
 		if u == "" {
 			continue
 		}
-		if err := validateExternalURL(u); err != nil {
+		// STRUCTURAL only, and deliberately: this parser runs on the cached
+		// document too, so a DNS-backed check here would make the fallback
+		// unusable during exactly the outage it exists for. Everything this
+		// appliance DIALS from the discovery document goes out through
+		// ssrfSafeDialContext (the provider's transport and the JWKS client),
+		// which refuses a private resolved address at connect time and is
+		// rebinding-proof; the authorization endpoint is a browser redirect and
+		// is re-checked by isSafeCaptiveRedirect at the moment it is issued.
+		if err := validateExternalURLStructure(u); err != nil {
 			return nil, fmt.Errorf("oidc discovery endpoint %q: %w", u, err)
 		}
 	}

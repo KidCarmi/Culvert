@@ -767,3 +767,127 @@ func certCNOf(t *testing.T, p *SAMLProvider) string {
 	t.Fatal("no certificate in IdP metadata")
 	return ""
 }
+
+// ── Codex review round (2026-09-25) ─────────────────────────────────────────
+
+// P1. A RESOLUTION failure must route to the cache, not be reported as a
+// configuration error before the cache can be consulted. validateExternalURL
+// resolves the host, so using it as the OIDC admission gate made "DNS is down"
+// return early — leaving the OIDC half of this sweep's headline defect open
+// after the SAML half was closed.
+func TestChaos71_StructuralValidatorDecidesWithoutAResolver(t *testing.T) {
+	// A name that cannot resolve is a RESOLUTION question: structural
+	// validation must accept it and leave the verdict to the fetch, which is
+	// what lets the cached document answer during a DNS outage.
+	unresolvable := "https://idp-that-does-not-resolve.invalid/.well-known/openid-configuration"
+	if err := validateExternalURLStructure(unresolvable); err != nil {
+		t.Fatalf("an unresolvable HOST is not a configuration error: %v", err)
+	}
+	// The DNS-backed form is what must refuse it — the two are not
+	// interchangeable, which is the whole point of the split.
+	if err := validateExternalURL(unresolvable); err == nil {
+		t.Fatal("validateExternalURL must still fail closed on an unresolvable host")
+	}
+
+	// CONFIGURATION errors still fail fast, from the string alone.
+	for _, bad := range []string{
+		"",                    // empty
+		"not-a-url",           // not absolute
+		"ftp://idp.example/x", // wrong scheme
+		"https://127.0.0.1/x", // private IP literal
+		"https://10.0.0.1/x",  // private IP literal
+		"https://[::1]/x",     // private IP literal, v6
+	} {
+		if err := validateExternalURLStructure(bad); err == nil {
+			t.Errorf("structural validation must refuse %q", bad)
+		}
+	}
+	// ...and a public literal is still fine.
+	if err := validateExternalURLStructure("https://93.184.216.34/x"); err != nil {
+		t.Fatalf("a public IP literal must pass structurally: %v", err)
+	}
+}
+
+// P2. The pre-flight host check must not outlive the operation it guards.
+// isPrivateHost resolves under context.Background(), so on a wedged resolver
+// it blocked for the OS budget BEFORE the request context existed.
+func TestChaos71_SAMLPreflightIsBoundedByTheRequestBudget(t *testing.T) {
+	if samlMetadataFetchBudget <= 0 {
+		t.Fatal("the shared budget must be positive")
+	}
+	// The guard and the request must share ONE budget: a guard with its own
+	// (or no) deadline is how an unbounded step re-enters a bounded operation.
+	src, err := os.ReadFile(filepath.Join(pkgSourceDir(), "auth_saml.go"))
+	if err != nil {
+		t.Fatalf("read source: %v", err)
+	}
+	body := string(src)
+	fn := body[strings.Index(body, "func fetchSAMLMetadataOverNetwork"):]
+	fn = fn[:strings.Index(fn, "\n}\n")]
+	if strings.Contains(fn, "isPrivateHost(") && !strings.Contains(fn, "isPrivateHostContext(") {
+		t.Fatal("the SAML pre-flight must use the ctx-bounded form, not the Background() one")
+	}
+	if !strings.Contains(fn, "isPrivateHostContext(ctx,") {
+		t.Fatal("the pre-flight must be bounded by the SAME ctx the request uses")
+	}
+	if strings.Count(fn, "context.WithTimeout") != 1 {
+		t.Fatal("guard and request must share ONE deadline, not one each")
+	}
+}
+
+// P2. An inline transition is the resolution of a remote-fetch episode: with
+// no remote fetch left, nothing else can ever clear it, so the episode would
+// hold the degraded gauge and the contract row at a permanent outage for a
+// dependency that no longer exists.
+func TestChaos71_InlineTransitionClearsAStaleEpisode(t *testing.T) {
+	chaos71Env(t)
+	idpMetadataEverUsed.Store(true)
+
+	noteIdPMetadataOutcome("switching", idpMetaUnavailable, fmt.Errorf("down"))
+	if !idpMetadataState().Failing {
+		t.Fatal("precondition: the profile must have an open episode")
+	}
+	// The admin switches that profile to inline metadata_xml.
+	noteIdPMetadataOutcome("switching", idpMetaInline, nil)
+	if idpMetadataState().Failing {
+		t.Fatal("an inline transition must clear the profile's now-unresolvable episode")
+	}
+	// It must clear ONLY that episode, and must not fabricate an attempt.
+	before := idpMetadataState().RemoteAttempts
+	noteIdPMetadataOutcome("other", idpMetaUnavailable, fmt.Errorf("down"))
+	noteIdPMetadataOutcome("switching", idpMetaInline, nil)
+	if !idpMetadataState().Failing {
+		t.Fatal("one profile going inline must not clear another profile's episode")
+	}
+	if got := idpMetadataState().RemoteAttempts; got != before+1 {
+		t.Fatalf("RemoteAttempts = %d, want %d — inline must count no attempt", got, before+1)
+	}
+}
+
+// P1, behavioural. The structural check above is worth nothing unless the OIDC
+// compile path actually consults it: a DNS outage must reach the cache. This is
+// the gate that fails against the pre-fix shape, where validateExternalURL —
+// which resolves — was the admission gate and returned before the cache.
+func TestChaos71_OIDCDNSOutageIsAnsweredFromCache(t *testing.T) {
+	store := chaos71Env(t)
+
+	const issuer = "https://idp-that-does-not-resolve.invalid"
+	wellKnown := issuer + "/.well-known/openid-configuration"
+	doc := []byte(`{"issuer":"` + issuer + `",` +
+		`"authorization_endpoint":"https://idp-that-does-not-resolve.invalid/authorize",` +
+		`"token_endpoint":"https://idp-that-does-not-resolve.invalid/token"}`)
+	if err := store.Put("dns-out", idpmeta.KindOIDCDiscovery, wellKnown, doc); err != nil {
+		t.Fatalf("seed last-known-good: %v", err)
+	}
+
+	got, err := fetchOIDCDiscovery("dns-out", issuer)
+	if err != nil {
+		t.Fatalf("a resolvable-yesterday issuer must still compile from cache: %v", err)
+	}
+	if got.TokenEndpoint != "https://idp-that-does-not-resolve.invalid/token" {
+		t.Fatalf("token endpoint = %q, want the cached one", got.TokenEndpoint)
+	}
+	if st := idpMetadataState(); !st.Failing || st.StaleServed == 0 {
+		t.Fatalf("a cache-served compile must be reported stale, got %+v", st)
+	}
+}

@@ -8,6 +8,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"context"
 	"github.com/KidCarmi/Culvert/internal/hostutil"
 	"github.com/KidCarmi/Culvert/internal/ssrf"
 )
@@ -36,6 +37,19 @@ func isPrivateIP(ip net.IP) bool { return ssrf.PrivateIP(ip) }
 // resolved IP falls within a private/internal range (30s-TTL DNS cache;
 // fail-closed on resolution errors).
 func isPrivateHost(hostport string) error { return ssrf.PrivateHost(hostport) }
+
+// isPrivateHostContext is isPrivateHost with the DNS lookup bounded by ctx.
+//
+// CHAOS-71: isPrivateHost resolves under context.Background(), so a wedged
+// resolver blocks for the OS budget. On a path that already owns a deadline —
+// an IdP metadata fetch during boot or a config sync — a pre-flight guard that
+// outlives that deadline is the unbounded-resolver-call shape CHAOS-60/64
+// closed, reintroduced by the guard rather than by the request. Use this form
+// wherever the caller has a deadline; the guard must never be the unbounded
+// step in a bounded operation.
+func isPrivateHostContext(ctx context.Context, hostport string) error {
+	return ssrf.PrivateHostContext(ctx, hostport)
+}
 
 // ssrfControl is the connect-time guard (net.Dialer.Control) — rejects dials
 // whose resolved address is private/internal. Re-exposed for the CONNECT and

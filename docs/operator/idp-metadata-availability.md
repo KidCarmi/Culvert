@@ -137,6 +137,18 @@ Providers are running from cached documents. Nobody is locked out **yet**.
 3. Fix egress to the IdP. Recovery is automatic and is declared only on an
    actual successful fetch.
 
+There is one other way the gauge clears, and it is the only case where no fetch
+is involved: if you switch that profile from a remote `metadataUrl` to inline
+`metadataXml`, the profile no longer has a remote fetch to recover, so its
+episode is closed at the next compile and one `IDP_METADATA_RECOVERED` line is
+logged. Other profiles' episodes are untouched, and no attempt is counted.
+
+A DNS failure at the IdP's host reaches this gauge rather than refusing the
+config: an unresolvable IdP hostname is a *resolution* failure, so it fails the
+fetch and falls back to the cached document. A **configuration** error — a
+non-absolute URL, a scheme other than http/https, or a private IP literal — is
+rejected outright at compile time and is never answered from cache.
+
 ### After a restore onto a fresh volume
 
 The document cache lives under `<dataDir>/idp_metadata_cache/` and is *not*

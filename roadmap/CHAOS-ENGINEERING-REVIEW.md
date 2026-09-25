@@ -147,8 +147,23 @@ revocation lever). Two are REPORTED, NOT FIXED: a node that has never compiled
 a profile still has no fallback (IDP-5), and the SAML SP key pair is still
 ephemeral per process and per node (IDP-6). Governance note: construction-time
 dependencies are invisible to request-path chaos testing by definition — the
-component either exists or the test does not run. See §41, rows IDP-1…IDP-7,
-and `docs/operator/idp-metadata-availability.md`.
+component either exists or the test does not run. **A review round found three
+more, one of them this sweep's own headline defect left open on the OIDC half**:
+`fetchOIDCDiscovery` gated on `validateExternalURL`, which RESOLVES, so a DNS
+outage returned a *configuration* error before the cache could be consulted —
+the SAML half fixed, the OIDC half not, and the operator pointed at their config
+for a fault in their resolver. A guard that answers two different questions with
+one verdict will be placed correctly for one of them; the configuration question
+is now `validateExternalURLStructure` (resolver-free, fail-fast) and the
+resolution question stays inline on the fetch (fail-back). The second: the SAML
+pre-flight `isPrivateHost` added for the CodeQL convention resolved under
+`context.Background()` — an unbounded step immediately AHEAD of a bounded
+operation, the CHAOS-60/64 shape reintroduced inside a fix for something else.
+The third: an `idpMetaInline` early return left an episode nothing could ever
+clear, so a profile switched to inline `metadataXml` warned forever about a
+remote fetch that no longer existed — the observed-evidence rule forbids clearing
+on elapsed TIME, not on evidence the dependency is GONE. See §41, rows
+IDP-1…IDP-7, and `docs/operator/idp-metadata-availability.md`.
 
 **2026-09-12 — CHAOS-66 sweep (the SOCKS5 listener's BIND). Id claimed in this
 row before the implementation commit**, per the convention above; `CHAOS-66` was
@@ -6961,6 +6976,28 @@ status, or read the unfiltered output, before claiming a gate is green.
   accept will cycle at the 30 s ceiling indefinitely. It is rate-bounded, loudly
   reported (`down`, alert, gauge at zero) and strictly better than the previous
   terminal state, but it is a cycle rather than a convergence.
+- **The bind is RECORDED before the listener is ADOPTED** (found by §41's full-suite
+  run, reported here, not changed — one concern per change). `socks5_bind.go`
+  calls `noteSOCKS5Bound()` and then `markFirstAttempt()` at lines 374–375,
+  before `newSOCKS5Server` / `adopt` / `srv.Start()` at 383–386, so there is a
+  window in which `Binds`, `everBound`, `/healthz socks5 = ready` and
+  `culvert_socks5_listener_up 1` all say bound and serving while `s.cur` is
+  still nil, `Addr()` returns nil, and the accept loop has not started.
+  `markFirstAttempt`'s own comment states the rule it breaks — it exists so
+  `startSOCKS5` "cannot return while every SOCKS5 surface still describes a
+  listener that does not exist yet". The customer-visible cost is small and this
+  is not the §33 defect: the SOCKET really is bound at that point, so a client
+  completes its handshake and waits in the kernel backlog for the microseconds
+  until `Start()` runs. What is briefly untrue is that the supervisor has
+  adopted it. It is nonetheless the same inversion this sweep names as its rule
+  — *keep the announcement strictly downstream of the evidence* — applied to the
+  log line and not to the health record, and it makes
+  `TestChaos66_ListenerRebindsOnceThePortIsFree` flaky under load: it waits on
+  `Binds > 0` and then asserts `srv.Addr() != nil`, which is precisely the
+  window (observed once in a full `go test ./...` run, passes in isolation).
+  Moving `noteSOCKS5Bound`/`markFirstAttempt` to after a successful `adopt`
+  closes both, but it also changes what a failed adopt reports, which is an
+  owner decision on this sweep's own state machine.
 
 ---
 
@@ -7082,7 +7119,13 @@ Four further rules the design carries, each with its own gate:
   load-bearing: the discovery document names the authorization and token
   endpoints this appliance sends users and credentials to, so
   `parseAndValidateOIDCDiscovery` — now the single parser for both origins —
-  puts every discovered endpoint back through `validateExternalURL`. A cache
+  puts every discovered endpoint back through `validateExternalURLStructure`
+  (structural, deliberately — a DNS-backed re-check on the parser would make
+  the fallback unusable during exactly the outage it exists for; everything
+  this appliance DIALS from the document goes out through `ssrfSafeDialContext`,
+  which refuses a private RESOLVED address at connect time and is
+  rebinding-proof, and the authorization endpoint is a browser redirect
+  re-checked by `isSafeCaptiveRedirect` at the instant it is issued). A cache
   file edited by anything that got write access to `dataDir` cannot widen a
   trust decision.
 * **A NEGATIVE age is STALE, not fresh.** A document stamped in the future,
@@ -7152,8 +7195,8 @@ a cache keyed on one would be a seeding surface.
 
 ### Gates
 
-`internal/idpmeta/idpmeta_test.go` (12) and `idp_metadata_chaos_test.go` (20
-functions). Five DEFECT gates were verified failing against the reintroduced
+`internal/idpmeta/idpmeta_test.go` (12) and `idp_metadata_chaos_test.go` (26
+functions). Eight DEFECT gates were verified failing against the reintroduced
 pre-fix shape and the four security gates plus three controls pass against it —
 the correct signature, since the security properties are new rather than
 regressions. The CONTROL `FreshDocumentAlwaysBeatsTheCache` was separately
@@ -7165,6 +7208,61 @@ One defect was introduced by this change and caught by its own gates:
 struct's own mutex**, so the deferred `Unlock` released a fresh mutex and the
 runtime killed the process with `sync: unlock of unlocked mutex`. Fields are
 now cleared individually, with the reason recorded at the site.
+
+### Codex review round (2026-09-25) — three findings, one of them the sweep's own headline defect left half-closed
+
+**P1 — a RESOLUTION failure was still reported as a CONFIGURATION error on the
+OIDC half.** `fetchOIDCDiscovery` gated on `validateExternalURL`, which
+**resolves the host**, so a DNS outage returned early with "URL must be https://
+and must not point to a private address" *before* `resolveIdPDocument` could be
+reached. The SAML half had been fixed and the OIDC half had not, so the sweep
+shipped with its own primary defect open on one of the two interactive
+protocols — and the error text pointed the operator at their configuration for a
+fault in their resolver. The fix splits the two questions that
+`validateExternalURL` had conflated: `validateExternalURLStructure`
+(`auth_idp.go`) answers the *configuration* question with no resolver at all
+(absolute, http/https, host present, and — for an IP literal, where no
+resolution is needed — not private), and the DNS-backed check stays INLINE in
+`fetchOIDCDiscoveryOverNetwork`, where its failure is a failed FETCH and
+therefore routes to the cache. Nothing is lost on the trust side: the
+authorization endpoint is re-checked by `isSafeCaptiveRedirect` at the instant
+the redirect is issued, and everything dialled goes out through
+`ssrfSafeDialContext`. The lesson is the one this file keeps relearning in a new
+costume: **a guard that answers two different questions with one verdict will be
+placed correctly for one of them.** "Is this string a legal configuration?" and
+"does this name resolve to somewhere I may talk to?" have different answers,
+different remedies and different *failure postures* — the first must fail fast,
+the second must fall back.
+
+**P2 — the pre-flight outlived the operation it guarded.** The SAML fix added an
+inline `isPrivateHost(metaURL.Host)` to satisfy the repo's CodeQL convention,
+and `isPrivateHost` resolves under `context.Background()`: an unbounded resolver
+call placed immediately *ahead* of a 15 s request context, i.e. exactly the
+CHAOS-60/64 shape this same file documents, reintroduced by this sweep inside a
+fix for a different fault. Guard and request now share ONE deadline
+(`samlMetadataFetchBudget`, via `isPrivateHostContext`). **A bounded operation
+is only as bounded as its first step**, and a guard added for a static-analysis
+convention is still a step.
+
+**P2 — an episode nothing could ever clear.** `noteIdPMetadataOutcome` returned
+early for `idpMetaInline`, so a profile switched from a remote `metadataUrl` to
+inline `metadataXml` kept its open failure episode forever: `culvert_idp_metadata_degraded`
+pinned at 1 and the `idp_metadata` contract row warning about a remote fetch
+that no longer exists. An inline transition *is* the resolution of a
+remote-fetch episode — the only one available, since with no remote fetch left
+nothing else can produce the evidence — so it now clears that profile's episode
+(only that profile's) and logs `IDP_METADATA_RECOVERED`, while still counting no
+attempt. This is the recovery-on-observed-evidence rule read the right way
+round: **the rule forbids clearing on elapsed time, not clearing on evidence
+that the dependency is gone.**
+
+All three were confirmed by direct inspection, not taken on the reviewer's word,
+and each is pinned by a gate verified failing against its reintroduced pre-fix
+shape (`OIDCDNSOutageIsAnsweredFromCache`,
+`SAMLPreflightIsBoundedByTheRequestBudget`,
+`InlineTransitionClearsAStaleEpisode`), with
+`StructuralValidatorDecidesWithoutAResolver` as the wall that keeps the
+structural validator from being "fixed" back into a resolver.
 
 ### Register rows
 

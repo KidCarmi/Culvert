@@ -6,6 +6,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/KidCarmi/Culvert/internal/ssrf"
+	"net"
+	"net/url"
 	"os"
 	"sync"
 )
@@ -849,6 +852,45 @@ func (r *IdPRegistry) HasEnabledOIDC() bool {
 
 // validateExternalURL rejects URLs that target private/internal addresses or
 // use non-HTTPS schemes.  This prevents SSRF via admin-configured IdP URLs.
+// validateExternalURLStructure is validateExternalURL WITHOUT the DNS-backed
+// private-address check: it decides everything that can be decided from the
+// string alone (absolute, http/https, and — when the host is an IP LITERAL —
+// not a private address).
+//
+// CHAOS-71: validateExternalURL resolves the host, and a resolver that cannot
+// answer makes it fail. Used as an admission gate it therefore turns "DNS is
+// down" into "this IdP does not exist", which is precisely the outage the
+// last-known-good cache exists to survive — the gate ran before the cache
+// could be consulted, so an OIDC profile still went dark on a reboot during a
+// DNS outage and a config snapshot could still be aborted by one.
+//
+// So the two halves are separated by WHAT THEY DECIDE, not by how strict they
+// are: a CONFIGURATION error (not a URL, wrong scheme, private literal) is
+// permanent and must fail fast from the string; a RESOLUTION failure is
+// transient and must be reported as a failed fetch so the cache can answer.
+// The authoritative anti-SSRF guard for anything this appliance then dials is
+// ssrf.SafeDialContext at connect time, which is rebinding-proof and which a
+// pre-flight lookup never was.
+func validateExternalURLStructure(raw string) error {
+	if raw == "" {
+		return fmt.Errorf("URL is required")
+	}
+	u, err := url.Parse(raw)
+	if err != nil || !u.IsAbs() || (u.Scheme != "http" && u.Scheme != "https") {
+		return fmt.Errorf("URL must be an absolute http:// or https:// URL")
+	}
+	host := u.Hostname()
+	if host == "" {
+		return fmt.Errorf("URL must name a host")
+	}
+	// Only an IP LITERAL can be classified without a resolver. A name is left
+	// to the dial-time guard.
+	if ip := net.ParseIP(host); ip != nil && ssrf.PrivateIP(ip) {
+		return fmt.Errorf("URL must not point to a private address")
+	}
+	return nil
+}
+
 func validateExternalURL(raw string) error {
 	if raw == "" {
 		return fmt.Errorf("URL is required")

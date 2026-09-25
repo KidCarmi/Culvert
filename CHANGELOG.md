@@ -295,7 +295,13 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   `culvert_idp_enabled_not_live` (page on `> 0`) and `culvert_idp_metadata_*`,
   and the existing `identity_backend_unreachable` alert with source
   `idp_metadata`. Nothing is added to `/readyz`: an IdP outage is fleet-wide,
-  and failing readiness would eject a fleet that is still proxying fine. See
+  and failing readiness would eject a fleet that is still proxying fine. An
+  unresolvable IdP hostname now falls back to the cached document instead of
+  being reported as a configuration error (an OIDC discovery URL is admitted on
+  structure; the DNS-backed check runs on the fetch, where its failure routes to
+  the cache), the SAML pre-flight host check shares the fetch's deadline instead
+  of resolving unbounded ahead of it, and switching a profile to inline
+  `metadataXml` clears its now-unresolvable remote-fetch failure episode. See
   `docs/operator/idp-metadata-availability.md`.
 
 ### Changed

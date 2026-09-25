@@ -264,6 +264,11 @@ func validateSAMLMetadataDocument(doc []byte) error {
 	return err
 }
 
+// samlMetadataFetchBudget bounds ONE metadata acquisition end to end — the
+// pre-flight host check AND the HTTP request share it, so the guard can never
+// outlive the operation it guards.
+const samlMetadataFetchBudget = 15 * time.Second
+
 // validateSAMLMetadataURL reports whether a configured metadata URL is
 // well-formed and carries a scheme this appliance will fetch. It returns no
 // parsed value on purpose: nothing derived from it may reach an outbound
@@ -310,7 +315,15 @@ func fetchSAMLMetadataOverNetwork(raw string) ([]byte, error) {
 	// two layers are complementary rather than redundant: this one refuses a
 	// host that resolves private NOW, the dialer catches one that resolves
 	// public here and private at connect time (DNS rebinding).
-	if err := isPrivateHost(metaURL.Host); err != nil {
+	// BOUNDED by the same 15 s budget as the request below. isPrivateHost
+	// resolves under context.Background(), so on a wedged resolver this
+	// pre-flight blocked for the OS budget BEFORE the request context existed
+	// — an unbounded step introduced into a bounded operation by the guard
+	// itself, which is the CHAOS-60/64 shape this sweep cites and must not
+	// reintroduce.
+	ctx, cancel := context.WithTimeout(context.Background(), samlMetadataFetchBudget)
+	defer cancel()
+	if err := isPrivateHostContext(ctx, metaURL.Host); err != nil {
 		return nil, fmt.Errorf("metadata URL host refused: %w", err)
 	}
 
@@ -318,13 +331,11 @@ func fetchSAMLMetadataOverNetwork(raw string) ([]byte, error) {
 	// the dial level — even if DNS changes between validation and
 	// connection, the transport blocks the request.
 	client := &http.Client{
-		Timeout: 15 * time.Second,
+		Timeout: samlMetadataFetchBudget,
 		Transport: &http.Transport{
 			DialContext: ssrfSafeDialContext,
 		},
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, metaURL.String(), http.NoBody)
 	if err != nil {
 		return nil, fmt.Errorf("metadata request: %w", err)
