@@ -54,30 +54,67 @@ func TestLogBenchHarness_DiscardShortCircuitsTheLogger(t *testing.T) {
 
 	sink := &plNullSink{}
 	logger = log.New(sink, "[Culvert] ", log.LstdFlags)
+	if !loggerFormats(logger) {
+		t.Fatal("a logger over plNullSink is not formatting: it is being treated as a discard " +
+			"writer, so every benchmark using it is measuring a no-op logger")
+	}
 	logPolicyAllow(plRule, plPriority, plArgs.clientIP, plArgs.method, plArgs.host, plArgs.cond, plArgs.reqID, plArgs.identity)
 	if sink.n == 0 {
-		t.Fatal("plNullSink received nothing: it is being treated as a discard writer, " +
-			"so every benchmark using it is measuring a no-op logger")
+		t.Fatal("plNullSink received no bytes from a real decision line")
 	}
 
-	// io.Discard: the whole call is skipped inside log.Logger.
-	logger = log.New(io.Discard, "[Culvert] ", log.LstdFlags)
-	if !loggerIsDiscarding(logger) {
-		t.Error("log.New(io.Discard, …) no longer short-circuits; the benchmark harness " +
-			"note above plNullSink in proxy_policylog_bench_test.go is stale")
+	// io.Discard: the whole call is skipped inside log.Logger, formatting included.
+	if loggerFormats(log.New(io.Discard, "[Culvert] ", log.LstdFlags)) {
+		t.Error("log.New(io.Discard, …) no longer short-circuits: it formatted its argument. " +
+			"The benchmark harness note above plNullSink in proxy_policylog_bench_test.go is " +
+			"stale, and the io.Discard-vs-real figures it quotes no longer hold")
 	}
 }
 
-// loggerIsDiscarding reports whether l skips formatting entirely. There is no
-// exported accessor for log.Logger.isDiscard, so it is observed behaviourally:
-// a logger that formats calls Writer.Write, a discarding one does not.
-func loggerIsDiscarding(l *log.Logger) bool {
-	probe := &plNullSink{}
-	saved := l.Writer()
-	l.SetOutput(io.Discard)
-	l.Printf("probe %s", "value")
-	l.SetOutput(saved)
-	return probe.n == 0
+// formatProbe records whether fmt was asked to render it.
+type formatProbe struct{ rendered bool }
+
+func (p *formatProbe) String() string { p.rendered = true; return "probe" }
+
+// loggerFormats reports whether l formats its arguments at all. There is no
+// exported accessor for log.Logger.isDiscard, so the property is observed
+// directly at the step it governs: fmt calls String() only if it renders the
+// verb, and log.Logger.output returns before the formatting closure runs when
+// it is discarding.
+//
+// OBSERVE THE FORMATTING, NOT THE WRITER. The first version of this helper
+// probed the sink — it allocated a plNullSink, never installed it, and returned
+// `sink.n == 0`, which is true unconditionally, so the helper could not return
+// false and the test below could not fail (Codex P2, PR #1495). Even installed,
+// a writer probe would not distinguish the two states that matter: a logger
+// that formats and then throws the bytes away writes nothing either, so a
+// future Go release that dropped the short-circuit and kept writing to
+// io.Discard would still read as "discarding". That is the same
+// cannot-fail-for-its-own-regression defect this PR exists to document,
+// reintroduced in the test written to pin it.
+func loggerFormats(l *log.Logger) bool {
+	p := &formatProbe{}
+	l.Printf("%s", p)
+	return p.rendered
+}
+
+// TestLogBenchHarness_ProbeIsNotATautology is the CONTROL for the test above.
+//
+// That test is only evidence if its probe can answer BOTH ways, and the version
+// it replaces could not: it returned `sink.n == 0` for a sink it never
+// installed, so it was true unconditionally and the test passed no matter what
+// log.Logger did. A control that pins the probe's discrimination directly is
+// the cheapest way to stop that from coming back — an assertion that something
+// is detected means nothing until you have shown the detector can also fail.
+func TestLogBenchHarness_ProbeIsNotATautology(t *testing.T) {
+	if !loggerFormats(log.New(&plNullSink{}, "[Culvert] ", log.LstdFlags)) {
+		t.Error("loggerFormats reported no formatting for a logger over a real sink; " +
+			"the probe cannot answer true, so the discard test above proves nothing")
+	}
+	if loggerFormats(log.New(io.Discard, "[Culvert] ", log.LstdFlags)) {
+		t.Error("loggerFormats reported formatting for an io.Discard logger; either the " +
+			"probe cannot answer false, or Go's short-circuit is gone (the test above says which)")
+	}
 }
 
 // ── Byte identity, every branch ─────────────────────────────────────────────
