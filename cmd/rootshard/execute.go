@@ -416,7 +416,7 @@ func (r chunkRunner) stream(args []string, gocoverdir, eventsPath string) int {
 		say(r.stdout, "::error::start chunk: %v\n", err)
 		return -2
 	}
-	copyErr := copyEvents(convOut, f, r.stdout)
+	copyErr := copyEvents(convOut, f, r.stdout, nil)
 	binErr := bin.Wait()
 	convErr := conv.Wait()
 	code := exitCode(binErr)
@@ -429,8 +429,9 @@ func (r chunkRunner) stream(args []string, gocoverdir, eventsPath string) int {
 
 // copyEvents tees test2json lines to w and prints their Output fields to log.
 // A failed write to w is RETURNED — a truncated events file would read as a
-// shorter run — while a failed write to the log is not (see say).
-func copyEvents(r io.Reader, w, log io.Writer) error {
+// shorter run — while a failed write to the log is not (see say). onEvent, when
+// set, sees every decoded event.
+func copyEvents(r io.Reader, w, log io.Writer, onEvent func(testEvent)) error {
 	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 1024*1024), 64*1024*1024)
 	bw := bufio.NewWriter(w)
@@ -440,8 +441,14 @@ func copyEvents(r io.Reader, w, log io.Writer) error {
 		_, _ = bw.Write(line)
 		_ = bw.WriteByte('\n')
 		var ev testEvent
-		if json.Unmarshal(line, &ev) == nil && ev.Action == "output" {
+		if json.Unmarshal(line, &ev) != nil {
+			continue
+		}
+		if ev.Action == "output" {
 			say(log, "%s", ev.Output)
+		}
+		if onEvent != nil {
+			onEvent(ev)
 		}
 	}
 	if err := sc.Err(); err != nil {
@@ -602,6 +609,10 @@ func runPackageSet(args []string, stdout io.Writer, run packageRun) error {
 	commit := fs.String("commit", os.Getenv("GITHUB_SHA"), "commit this job checked out")
 	timeout := fs.String("timeout", "40m", "per-binary -timeout (the reference's)")
 	goBin := fs.String("go", "go", "go command")
+	var first *string
+	if run.name == laneRun.name {
+		first = fs.String("first", "", "comma-separated lane packages to hand `go test` first (§18.5)")
+	}
 	if err := fs.Parse(args); err != nil {
 		return fmt.Errorf("%w: %w", errUsage, err)
 	}
@@ -620,6 +631,11 @@ func runPackageSet(args []string, stdout io.Writer, run packageRun) error {
 	root, pkgs, err := nonRootPackages(ctx, *goBin)
 	if err != nil {
 		return err
+	}
+	if first != nil {
+		if pkgs, err = orderFirst(pkgs, *first); err != nil {
+			return fmt.Errorf("%w: %w", errUsage, err)
+		}
 	}
 	if err := os.MkdirAll(*outDir, 0o750); err != nil {
 		return fmt.Errorf("mkdir: %w", err)
@@ -644,8 +660,10 @@ func runPackageSet(args []string, stdout io.Writer, run packageRun) error {
 	if err := c.Start(); err != nil {
 		return fmt.Errorf("start go test: %w", err)
 	}
-	copyErr := copyEvents(out, f, stdout)
+	var firstRan firstOutput
+	copyErr := copyEvents(out, f, stdout, func(ev testEvent) { firstRan.see(ev, start) })
 	meta.ExitCode = exitCode(c.Wait())
+	firstRan.report(stdout, run.name)
 	if copyErr != nil && meta.ExitCode == 0 {
 		meta.ExitCode = -2
 		say(stdout, "::error::%s events: %v\n", run.name, copyErr)
@@ -700,4 +718,60 @@ func fileSHA256(path string) (sum string, size int64, err error) {
 
 func since(t time.Time) float64 {
 	return float64(time.Since(t).Milliseconds()) / 1000
+}
+
+// orderFirst moves the named lane packages to the front of the `go test`
+// argument list, keeping everything else in `go list` order. `go test`
+// schedules its first package argument first, so this is how the lane's
+// longest package (internal/mcp/execution) starts at the beginning instead of
+// ~200 s in (§18.5, arm C). Every name must be a lane package: a renamed or
+// mistyped package must fail the job, not silently reorder nothing.
+func orderFirst(pkgs []string, list string) ([]string, error) {
+	isLane := make(map[string]bool, len(pkgs))
+	for _, p := range pkgs {
+		isLane[p] = true
+	}
+	var head []string
+	isFirst := map[string]bool{}
+	for _, n := range strings.Split(list, ",") {
+		n = strings.TrimSpace(n)
+		switch {
+		case n == "":
+			continue
+		case !isLane[n]:
+			return nil, fmt.Errorf("-first: %s is not a lane package", n)
+		case isFirst[n]:
+			return nil, fmt.Errorf("-first: %s named twice", n)
+		}
+		isFirst[n] = true
+		head = append(head, n)
+	}
+	out := make([]string, 0, len(pkgs))
+	out = append(out, head...)
+	for _, p := range pkgs {
+		if !isFirst[p] {
+			out = append(out, p)
+		}
+	}
+	return out, nil
+}
+
+// firstOutput records the first package whose test binary produced output.
+// `go test -json` emits "start" events in argument order by construction, so
+// only a test's own output shows which package actually ran first.
+type firstOutput struct {
+	pkg string
+	at  float64
+}
+
+func (f *firstOutput) see(ev testEvent, start time.Time) {
+	if f.pkg == "" && ev.Action == "output" && ev.Test != "" {
+		f.pkg, f.at = ev.Package, since(start)
+	}
+}
+
+func (f *firstOutput) report(w io.Writer, name string) {
+	if f.pkg != "" {
+		say(w, "%s: first test output from %s at %.1fs\n", name, f.pkg, f.at)
+	}
 }
