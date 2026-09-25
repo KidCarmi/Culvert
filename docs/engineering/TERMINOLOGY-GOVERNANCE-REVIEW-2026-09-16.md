@@ -166,7 +166,7 @@ does not re-derive that triage; it re-verifies the PR list is unchanged and esca
 recommendation directly rather than adding a sixth open PR asking for the same thing.
 
 *Subsequent state (not part of the 2026-09-16 audit):* #1372 (the 2026-09-12 report) and #1380 (the
-2026-09-13 report, after its disputed content was corrected) have since merged to `main`; this report's
+2026-09-13 report) have since merged to `main`; this report's
 backlog and score above are reconciled against both.
 
 ---
