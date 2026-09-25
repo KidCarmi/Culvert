@@ -306,6 +306,16 @@ func liveFeedWritePrometheus(w *strings.Builder) {
 	fmt.Fprintf(w, "\n# HELP culvert_admin_roster_persist_degraded_total Login-path admin-roster writes that failed while the login was allowed to proceed (TOTP replay counter, backup-code consumption). Non-zero means a single-use credential or replay counter may not survive a restart\n")
 	fmt.Fprintf(w, "# TYPE culvert_admin_roster_persist_degraded_total counter\nculvert_admin_roster_persist_degraded_total %d\n",
 		rosterPersistBestEffort.Load())
+
+	// SEC-REQID-1: client-supplied tracing headers replaced because they were
+	// over-long or carried bytes that must not reach a log line. The request
+	// still proceeds — only the correlation id is ours instead of theirs — so
+	// this counter is the operator's ONLY signal that a source is feeding the
+	// data plane hostile tracing headers. Two fixed series, never a label
+	// derived from the rejected value.
+	fmt.Fprintf(w, "\n# HELP culvert_tracing_header_rejected_total Client-supplied tracing headers replaced with a generated value because they exceeded the byte limit or carried non-visible-ASCII bytes. Sustained growth means a source is attempting log forgery or log-write amplification through the proxy data plane\n")
+	fmt.Fprintf(w, "# TYPE culvert_tracing_header_rejected_total counter\nculvert_tracing_header_rejected_total{header=\"x_request_id\"} %d\nculvert_tracing_header_rejected_total{header=\"traceparent\"} %d\n",
+		requestIDRejected.Load(), traceparentRejected.Load())
 }
 
 // apiCountryTraffic returns the top destination countries for the dashboard.
