@@ -501,6 +501,10 @@ func (c *DataPlaneClient) buildMetricsReport() MetricsReport {
 		Epoch:          dpLastSeenEpoch.Load(),
 		CulvertVersion: version,
 		SyncedFP:       bl.SyncedFingerprint(),
+		// CHAOS-61: report this node's own DP->CP audit-queue drop count so the
+		// CP can aggregate it (auditClusterPushDropsTotal, controlplane.go)
+		// instead of the fact only being visible on this DP's own /healthz.
+		AuditClusterPushDrops: auditPendingDrops(),
 	}
 }
 
