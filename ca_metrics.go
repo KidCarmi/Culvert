@@ -186,13 +186,16 @@ func caWriteUsabilityPrometheus(w *strings.Builder) {
 func caWriteLoadFailurePrometheus(w *strings.Builder) {
 	w.WriteString("\n# HELP culvert_ca_load_failed Whether a configured Root CA failed to load or persist and has not recovered (1 = failed)\n")
 	w.WriteString("# TYPE culvert_ca_load_failed gauge\n")
+	// One locked snapshot for the latch and the attempt count, so a scrape
+	// never renders load_failed 0 beside a count one short of the recovering
+	// attempt.
+	rec := caLoadRecoveryStatus()
 	failed := 0
-	if sslInspectionLoadFailure() != "" {
+	if rec.LoadFailure != "" {
 		failed = 1
 	}
 	fmt.Fprintf(w, "culvert_ca_load_failed %d\n", failed)
 
-	rec := caLoadRecoveryStatus()
 	w.WriteString("\n# HELP culvert_ca_load_recovery_attempts_total Bounded retry attempts made to recover a failed Root CA load\n")
 	w.WriteString("# TYPE culvert_ca_load_recovery_attempts_total counter\n")
 	fmt.Fprintf(w, "culvert_ca_load_recovery_attempts_total %d\n", rec.Attempts)

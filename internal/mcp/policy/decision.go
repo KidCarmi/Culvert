@@ -134,7 +134,14 @@ type TraceEntry struct {
 // ExplainTrace is the internal, deterministic decision explanation the simulator
 // and (later) Management MCP consume. It is bounded and sanitized.
 type ExplainTrace struct {
-	Entries         []TraceEntry
+	Entries []TraceEntry
+	// Truncated reports that the entry cap was reached and later entries were DROPPED.
+	// It is load-bearing for any caller that reasons about the rules NOT listed: a
+	// truncated trace is silent about them, so "no entry says otherwise" stops being
+	// evidence. The Canary activation permit refuses on it for exactly that reason
+	// (canary.permitVerdictInvariant) — deterministic truncation is a size guard, never
+	// a proof.
+	Truncated       bool
 	Winner          RuleID     // "" for hard override / default deny
 	Decisive        string     // decisive condition id or override/default label
 	Final           ReasonCode // the final reason code
