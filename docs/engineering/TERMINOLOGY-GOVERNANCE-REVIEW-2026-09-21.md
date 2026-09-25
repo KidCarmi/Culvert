@@ -44,8 +44,8 @@ revocation mechanism (CRL) Culvert does not implement. **One recurrence of a clo
 the window reintroduced "appliance" in customer-facing text (T-51 recurrence, below), which
 `docs/design/PRODUCT-TERMINOLOGY.md` forbids ("Appliance: *Not used* … the UI says node or instance").
 **Three new open findings:** T-60 (the tool-trust decision route's OpenAPI entry names an audit event the
-handler never emits), T-59b ("verdict" outside Diagnostics in 53 visible lines and 5 emitted OCSP
-strings) and T-59c ("policy rules" in the GeoIP diagnostics warning). T-59b and T-59c are lettered
+handler never emits), T-59b ("verdict" outside Diagnostics in 53 visible lines, 5 emitted OCSP
+strings and 1 release-gate step-summary line) and T-59c ("policy rules" in the GeoIP diagnostics warning). T-59b and T-59c are lettered
 sub-items of T-59 because they came out of the same glossary check of this window's new copy; they are
 separate backlog entries.
 
@@ -233,7 +233,8 @@ Later review rounds found more errors, also fixed:
 
 - **Rule**: the glossary reserves "verdict" for Diagnostics checks (`PRODUCT-TERMINOLOGY.md`, Decision
   row). This window's new copy uses it for other things. Counts come from the "Glossary term sweep" below.
-- **Scope at `6c46ebd`**: 53 visible lines plus 5 strings the OCSP code emits.
+- **Scope at `6c46ebd`**: 53 visible lines, 5 strings the OCSP code emits, and 1 line of CI output that an
+  operator runbook tells the reader to read (59 lines in all).
   - OCSP (13 visible lines + 5 emitted strings). Required rewording: "response" where the text means what
     the responder sent, "status" where it means `good`/`revoked`. Line numbers at `6c46ebd`:
     - `static/index.html:4484` "Fail-closed (no usable verdict)" → "(no usable response)"; `:4491`
@@ -251,6 +252,11 @@ Later review rounds found more errors, also fixed:
   - Outside OCSP (40 visible lines): 35 in `docs/operator/mcp-first-controlled-canary-review.md`, 3 in
     `docs/operator/release-publication-gating.md` (`:22`, `:60`, `:455`) and 2 in `CHANGELOG.md` (`:15`,
     `:391`). The file:line list and the 2 exempt identifier lines are in the sweep below.
+  - Release-gate step summary (1 line): `.github/scripts/require-release-evidence.sh:94` writes the table
+    header `| workflow | class | verdict |` to `$GITHUB_STEP_SUMMARY`. The release-gating runbook sends
+    operators to that table ("open the step summary. It prints a table of every row and its verdict",
+    `docs/operator/release-publication-gating.md:454-455`), and the runbook's own uses already count
+    above. Rewording: "outcome". Found by the third sweep pass below.
 - **Not fixed in this PR**: rewording the MCP review touches many lines of a document other PRs edit, and
   the OCSP HELP and error strings are code changes. It needs its own change.
 
@@ -377,6 +383,22 @@ grep -iE '^\+.*"[^"]*<pattern>[^"]*"'`, checked added string literals for each t
   `"exclusions"` map key in the MCP scope code).
 - "appliance", "result", "incident", "scanner", "kill switch": 0 lines.
 
+**Emitted text outside Go.** Neither pass above covers text that non-Go files print: workflow
+`::error::`/`::warning::` annotations, `$GITHUB_STEP_SUMMARY` writes, and shell or installer output. A
+third pass covers them: `git diff 46410c3 6c46ebd -U0 -- '.github/**' 'scripts/**' 'packaging/**' '*.sh'
+'Dockerfile*' 'Makefile' 'docker-compose*.yml' ':!*.json' | grep -v '^+++' | grep -iE '^\+.*(<any term
+above>)' | grep -vE '^\+\s*#'` finds 11 added non-comment lines for all the terms together (JSON data files
+such as the shard-timing tables are excluded; they hold test names, not printed text). Such output counts as
+operator-visible only when a page under `docs/operator/` tells the reader to read it; otherwise it is CI
+or contributor tooling output read by maintainers, which the glossary does not govern. The 11 lines:
+- `.github/scripts/require-release-evidence.sh:94`, `summary "| workflow | class | verdict |"`: operator-
+  visible under that rule (`release-publication-gating.md:454-455`). A hit, recorded under **T-59b**.
+- `.github/workflows/publish-catalog-r2.yml`, the `::error::` line with "appliance": already in the T-51
+  recurrence and fixed.
+- 9 lines in `scripts/mcp-*-mutations.sh`: mutation-test descriptions and `sed` patterns (2 "verdict", 3
+  identifier `PermitVerdictNotInvariant`, 3 "exclusion", 1 "result"). These are contributor test tooling,
+  not operator output. No violation.
+
 **Recorded under T-59b — "verdict" outside OCSP (40 visible prose lines).** These use "verdict"
 for something other than a Diagnostics check, which breaks the same reservation:
 - `docs/operator/mcp-first-controlled-canary-review.md`: 35 of the 37 lines listed above. The review uses
@@ -393,7 +415,7 @@ reproduce with `git diff 46410c3 6c46ebd -U0 -- docs/operator/mcp-first-controll
 grep -v '^+++' | grep -iE '^\+.*verdict' | grep -viE '(^|[^a-z])verdict'`. Of the 55 visible lines, 53 are
 therefore violations (all under T-59b: 13 OCSP and 40 recorded here) and 2 are exempt identifiers.
 
-None of the 53 is fixed in this report PR; see T-59b.
+None of the 53, and none of the emitted lines in T-59b, is fixed in this report PR; see T-59b.
 
 ## Carried-Over Findings (unchanged)
 
