@@ -7,6 +7,8 @@
 > not a statement about the tree this file is published in; the current governance state is whatever the
 > most recent review in this series says. Later windows are audited by later reports, never
 > retroactively by this one.
+> **Finding-ID note:** this report's finding was first published as "T-54". Series IDs are assigned
+> in report-date order, and T-54 belongs to the 2026-09-12 report, so it is renumbered **T-58** here.
 > **Method:** Audited `574d265..36628eb` — the window since the previous report's audited snapshot
 > (`574d265`, the `origin/main` endpoint the 2026-09-11 report names; that report itself merged later, in `0665453`).
 > The end commit `36628eb` was confirmed as the then-current `origin/main` HEAD by a fetch immediately before this report was written on 2026-09-19 (the
@@ -65,7 +67,7 @@ unchanged and the broader SSL-vs-TLS branding question (T-13 residual) remains o
 
 ## Findings
 
-### T-54 — New admin frontend's Rule Editor disagreed with itself, across two fieldsets of the same dialog, about what to call the TLS-inspection mechanism (new to the backlog; pre-existing in code — fixed this pass)
+### T-58 — New admin frontend's Rule Editor disagreed with itself, across two fieldsets of the same dialog, about what to call the TLS-inspection mechanism (new to the backlog; pre-existing in code — fixed this pass)
 
 - **Business concept:** the TLS-MITM decrypt/inspect action a policy rule applies to matching tunnels
   (`docs/design/PRODUCT-TERMINOLOGY.md`'s "Inspection" row: TLS MITM / "SSL inspect"; wire field
@@ -120,7 +122,7 @@ unchanged and the broader SSL-vs-TLS branding question (T-13 residual) remains o
 - **Priority:** Medium (a real, visible same-screen contradiction in a rule-editing surface, confined to a
   disabled-by-default preview surface with no external consumers yet — same priority band as T-53).
 
-### Observed, not fixed — isolated (non-contradictory) "SSL" mentions near the T-54 fix
+### Observed, not fixed — isolated (non-contradictory) "SSL" mentions near the T-58 fix
 
 Recorded so a future pass recognizes these rather than re-discovering them:
 
@@ -157,7 +159,7 @@ numbered backlog, per 2026-09-09's reasoning.
 
 ## Recommended Refactoring Plan (priority order)
 
-Unchanged from 2026-09-09/09-11 for the still-open carry-over items; T-54 is resolved in this pass and
+Unchanged from 2026-09-09/09-11 for the still-open carry-over items; T-58 is resolved in this pass and
 does not appear on the plan.
 
 | Priority | Item | Business impact if left unfixed | Compatibility risk | Est. size |
@@ -171,11 +173,11 @@ T-39) is unchanged from `TERMINOLOGY-GOVERNANCE-REVIEW-2026-09-09.md`; see that 
 
 ## Process Note — UI-hierarchy claim corrected after review
 
-This report's first draft (as opened in the PR) described T-54 as one fieldset's two controls
+This report's first draft (as opened in the PR) described T-58 as one fieldset's two controls
 disagreeing with the fieldset's own legend. `chatgpt-codex-connector`'s automated PR review correctly
 flagged that only the "TLS action" control is inside the "TLS / Decryption" fieldset
 (`RuleEditor.tsx:434-481`); the full-request-URI-logging checkbox that says "SSL Inspect" is in a
-separate "Logging" fieldset starting at line 498. The underlying finding and fix (T-54 itself — two
+separate "Logging" fieldset starting at line 498. The underlying finding and fix (T-58 itself — two
 outlier "SSL" labels relabeled to "TLS," no code beyond the two-string change) are unaffected: the
 component still disagreed with itself, just across two of its fieldsets rather than within one. Verified
 directly against the source (`RuleEditor.tsx:434-514`) before revising this report's every claim of
