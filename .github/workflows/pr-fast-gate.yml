@@ -313,7 +313,7 @@ jobs:
     if: needs.changes.outputs.code == 'true'
     steps:
       - name: Harden runner (egress audit)
-        uses: step-security/harden-runner@05e31511f85b41b11d1cf0ef85d0992719546e2c # v2.21.0
+        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
         with:
           egress-policy: audit
 
@@ -542,7 +542,7 @@ jobs:
     timeout-minutes: 50  # > the 40m per-binary test budget below (compile + tee + upload)
     steps:
       - name: Harden runner (egress audit)
-        uses: step-security/harden-runner@05e31511f85b41b11d1cf0ef85d0992719546e2c # v2.21.0
+        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
         with:
           egress-policy: audit
 
@@ -581,7 +581,7 @@ jobs:
     timeout-minutes: 15
     steps:
       - name: Harden runner (egress audit)
-        uses: step-security/harden-runner@05e31511f85b41b11d1cf0ef85d0992719546e2c # v2.21.0
+        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
         with:
           egress-policy: audit
 

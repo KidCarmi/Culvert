@@ -10,7 +10,8 @@
 #     for any run id: one versioned report (report.json + summary.md) for
 #     that run attempt, plus, for a PASSED same-SHA audit, a timing-refresh
 #     CANDIDATE for review.
-#   · trend      — weekly, after a scheduled audit run, or on dispatch: groups
+#   · trend      — weekly, after a scheduled audit run, or on a dispatch
+#     WITHOUT a run_id (a dispatch with one reports that run only): groups
 #     equivalent executions, keeps statistics provisional below the sample
 #     floor, flags sustained regressions as ADVICE (::warning::), and FAILS
 #     when the weekly equivalence audit failed, went stale or never ran.
@@ -22,9 +23,11 @@
 #     workflow (ci_perf_report_test.go pins both).
 #   · Trusted code only: workflow_run checks out the DEFAULT branch, never the
 #     PR head, so the collector is reviewed code. It downloads ZIPs into memory
-#     and decodes an allowlist of JSON members; the artifact carrying the
-#     prebuilt test binary is never downloaded, and nothing downloaded is
-#     executed, restored as a cache or written as anything but a report.
+#     and decodes an allowlist of JSON members, and reads the first 16 KB of
+#     each measured job's log for its "Runner Image" lines; the artifact
+#     carrying the prebuilt test binary is never downloaded, and nothing
+#     downloaded is executed, restored as a cache or written as anything but
+#     a report.
 #   · Least privilege: actions:read + contents:read, no cache (a cache restored
 #     here could be written by a PR run), and the collector builds with
 #     GOPROXY=off (it imports only the standard library, so no module is ever
@@ -53,7 +56,7 @@ on:
   workflow_dispatch:
     inputs:
       run_id:
-        description: "Report on this workflow run id (empty = trend only)"
+        description: "Report on this workflow run id only (empty = trend only)"
         type: string
         default: ""
 
@@ -136,11 +139,17 @@ jobs:
     # After run-report when both run, so the audit's own report is readable;
     # always() because run-report is skipped on the schedule and a failed
     # report must not hide the audit-freshness verdict.
+    # A dispatch WITH a run_id is a targeted report and skips the trend: the
+    # trend reads the whole recent history, so running it per dispatch made
+    # N targeted reports cost N full trends against the repository's shared
+    # API budget — 28 of them exhausted it and failed an unrelated automatic
+    # report (roadmap §18.3.1). Enrich runs with run_id, then dispatch once
+    # with an empty run_id for the trend.
     needs: run-report
     if: >-
       always() && (
       github.event_name == 'schedule' ||
-      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'workflow_dispatch' && inputs.run_id == '') ||
       (github.event_name == 'workflow_run' && github.event.workflow_run.event == 'schedule'))
     runs-on: ubuntu-latest
     timeout-minutes: 15

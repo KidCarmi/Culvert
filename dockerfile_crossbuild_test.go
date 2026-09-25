@@ -238,9 +238,12 @@ func TestDockerfileCrossBuild_BothBinariesTargetThePlatform(t *testing.T) {
 func TestDockerfileCrossBuild_RejectsHostArchMutations(t *testing.T) {
 	src := readDockerfile(t)
 
+	// The builder image reference (tag + digest) is owned by
+	// toolchain_consistency_test.go, so it is read from the file here rather
+	// than restated: this wall is about the PLATFORM, not the version.
+	builderFrom := dockerfileFromLine(t, src, "builder")
+	maintFrom := dockerfileFromLine(t, src, "maintbuilder")
 	const (
-		builderFrom = "FROM --platform=$BUILDPLATFORM golang:1.27-alpine AS builder"
-		maintFrom   = "FROM --platform=$BUILDPLATFORM golang:1.27-alpine AS maintbuilder"
 		maintEnv    = "CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -buildvcs=false \\\n      -ldflags=\"-s -w -X culvert-maint"
 		maintArgs   = "ARG VERSION=\nARG TARGETOS\nARG TARGETARCH\nRUN VER="
 		proxyEnv    = "CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -buildvcs=false -ldflags=\"-s -w -X main.version"
@@ -250,8 +253,10 @@ func TestDockerfileCrossBuild_RejectsHostArchMutations(t *testing.T) {
 	mutations := []struct {
 		name, old, new string
 	}{
-		{"builder back on the target platform (emulated compile)", builderFrom, "FROM golang:1.27-alpine AS builder"},
-		{"maintbuilder back on the target platform (emulated compile)", maintFrom, "FROM golang:1.27-alpine AS maintbuilder"},
+		{"builder back on the target platform (emulated compile)", builderFrom,
+			strings.Replace(builderFrom, "--platform=$BUILDPLATFORM ", "", 1)},
+		{"maintbuilder back on the target platform (emulated compile)", maintFrom,
+			strings.Replace(maintFrom, "--platform=$BUILDPLATFORM ", "", 1)},
 		{"agent GOARCH dropped (builds for the host)", maintEnv,
 			strings.Replace(maintEnv, " GOARCH=${TARGETARCH}", "", 1)},
 		{"proxy GOARCH dropped (builds for the host)", proxyEnv,
@@ -322,4 +327,20 @@ func TestDockerfileCrossBuild_ControlAcceptsEquivalentSpellings(t *testing.T) {
 	for _, msg := range crossBuildViolations(t, src) {
 		t.Errorf("correct Dockerfile rejected: %s", msg)
 	}
+}
+
+// dockerfileFromLine returns the single `FROM ... AS <stage>` line of src.
+func dockerfileFromLine(t *testing.T, src, stage string) string {
+	t.Helper()
+	var found []string
+	for _, line := range strings.Split(src, "\n") {
+		f := strings.Fields(line)
+		if len(f) >= 3 && strings.EqualFold(f[0], "FROM") && strings.EqualFold(f[len(f)-2], "AS") && f[len(f)-1] == stage {
+			found = append(found, line)
+		}
+	}
+	if len(found) != 1 {
+		t.Fatalf("want exactly one FROM line for stage %q, found %d", stage, len(found))
+	}
+	return found[0]
 }
