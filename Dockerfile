@@ -54,8 +54,12 @@ RUN if [ -z "$VERSION" ] && [ -d .git ]; then \
     COMMIT=$(git rev-parse --short=12 HEAD 2>/dev/null || echo "") && \
     echo "$VERSION" > /app/VERSION && \
     CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -buildvcs=false -ldflags="-s -w -X main.version=${VERSION} -X main.buildCommit=${COMMIT}" -o culvert .
-# The binary records the compiler that built it; prove it is the pinned one.
-RUN go version culvert && [ "$(go version culvert | cut -d' ' -f2)" = "$(go env GOVERSION)" ]
+# The binary records the compiler that built it; prove it is the PINNED one.
+# Compared with the go.mod toolchain line, not `go env GOVERSION`: the active
+# compiler is what a later GOTOOLCHAIN switch would change, so checking against
+# it could only prove the binary matches whatever ran, not what was pinned.
+RUN want="$(sed -n 's/^toolchain //p' go.mod)" && go version culvert && \
+    [ -n "${want}" ] && [ "$(go version culvert | cut -d' ' -f2)" = "${want}" ]
 # No `go mod tidy` here — the image must build from the EXACT reviewed module
 # graph (go.mod/go.sum COPYed + `go mod download`ed above), not re-resolve deps
 # at build time (a divergent-recipe supply-chain smell). Tidiness is enforced in
@@ -106,7 +110,8 @@ RUN VER="${VERSION:-}" && \
     CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -buildvcs=false \
       -ldflags="-s -w -X culvert-maint/internal/server.Version=${VER}" \
       -o /culvert-maint .
-RUN go version /culvert-maint && [ "$(go version /culvert-maint | cut -d' ' -f2)" = "$(go env GOVERSION)" ]
+RUN want="$(sed -n 's/^toolchain //p' /tmp/culvert-root.go.mod)" && go version /culvert-maint && \
+    [ -n "${want}" ] && [ "$(go version /culvert-maint | cut -d' ' -f2)" = "${want}" ]
 
 # ── GeoIP stage ───────────────────────────────────────────────────────────────
 # Downloads the DB-IP free country database (CC BY 4.0, ~6 MB) at image build
