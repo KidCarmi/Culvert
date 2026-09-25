@@ -218,6 +218,26 @@ code prints. A second pass checked added string literals:
   `cmd/rootshard/{compare,completeness,main,results,verdict}.go`.
 - "appliance", "incident", "scanner", "kill switch", "unauth mode": 0 lines.
 
+**Emitted text outside Go.** A third pass covers text that non-Go files print (workflow `::error::`
+annotations, `$GITHUB_STEP_SUMMARY` writes, shell and installer output), with the same method as #1456:
+`git diff 574d265 6ec745d -U0 -- '.github/**' 'scripts/**' 'packaging/**' '*.sh' 'Dockerfile*' 'Makefile'
+'docker-compose*.yml' ':!*.json' | grep -v '^+++' | grep -iE '^\+.*(<any term in the table>)' | grep -vE
+'^\+\s*#'` finds 54 added non-comment lines. JSON data files (the shard-timing tables) are excluded; they
+hold test names, not printed text. Such output counts as operator-visible only when a page under
+`docs/operator/` tells the reader to read it; otherwise it is CI or contributor tooling output read by
+maintainers.
+- **Also in #1456's window (11 lines), recorded there:** the `| workflow | class | verdict |` step-summary
+  header in `.github/scripts/require-release-evidence.sh`, which `release-publication-gating.md:454-455`
+  sends operators to (its open T-59b); the `publish-catalog-r2.yml` "appliance" `::error::` line (its T-51
+  recurrence); and 9 contributor mutation-test lines in `scripts/mcp-*-mutations.sh` (no violation).
+- **Only in this window (43 lines):** the sharded race-gate plumbing in `pr-fast-gate.yml`, `qa-gate.yml`
+  and `qa-race-shards.yml` (job and step names, artifact paths such as `race-verdict/`, `needs.*.result`
+  expressions, and `::error::` lines about the race verdict), and one step-summary line in
+  `security-release-gate.yml` ("Scope of this verdict"). No page under `docs/operator/` tells the reader to
+  read any of them (`release-publication-gating.md:57` names `qa-gate.yml` and `security-release-gate.yml`
+  as mandatory evidence but does not send the reader to their output), so they are CI vocabulary, like the
+  `cmd/rootshard` output above. No violation.
+
 This report mints no IDs and changes no product copy. Line numbers here are at `6ec745d` and can differ
 from #1456's, which are at `6c46ebd`.
 
