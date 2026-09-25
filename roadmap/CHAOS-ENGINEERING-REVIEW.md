@@ -7195,7 +7195,7 @@ a cache keyed on one would be a seeding surface.
 
 ### Gates
 
-`internal/idpmeta/idpmeta_test.go` (12) and `idp_metadata_chaos_test.go` (27
+`internal/idpmeta/idpmeta_test.go` (12) and `idp_metadata_chaos_test.go` (28
 functions). Eight DEFECT gates were verified failing against the reintroduced
 pre-fix shape and the four security gates plus three controls pass against it —
 the correct signature, since the security properties are new rather than
@@ -7280,6 +7280,32 @@ build of it — including with `GOTOOLCHAIN=local`, a cleared `GOCACHE` and
 `go: "1.25"` outright or panics inside `go/types` on Go 1.26 source. The local
 lint gate is therefore structurally unavailable, and the only signal is a CI
 round trip.
+
+**The CodeQL stand-down was reversed, correctly, by a later session.** This
+sweep argued at length that no amount of guarding at the SAML metadata call
+site would clear `go/request-forgery`, having tried three reshapings, and
+recommended the owner simply accept the alert. That reasoning had a hole: it
+concluded *"CodeQL's Go SSRF query treats neither a scheme comparison nor an
+error-returning host check as a sanitiser"* and stopped there, without asking
+what this repository's OTHER outbound-request sites do about the same query.
+Two of them — `internal/otlp` and `internal/alerts` — already carry a
+`regexp.MustCompile("^https?://[^/]")` + `MatchString` barrier with a comment
+naming it as exactly that, for exactly this query, on exactly this kind of
+operator-configured endpoint. The fix was one in-repo precedent away the whole
+time (`22197c9`, adding `samlMetadataURLShape` with `(?i)` so an uppercase
+scheme — which `url.Parse` lowercases and the scheme check accepts — is not
+refused, a correct refinement of the precedent rather than drift).
+
+The lesson is not "try harder before standing down"; three attempts was
+reasonable. It is that **the attempts were all reshapings of the same call
+site, and none was a search for how the codebase already answers this**. A
+stand-down argued from the tool's behaviour should not be written before
+grepping for the tool's name in the tree: the barrier the query wants may
+already be a documented convention two packages over. The regexp admits
+strictly less than the scheme check that follows it, so nothing is traded for
+the static-analysis result — which is the one condition under which this
+sweep's own objection ("a static-analysis result is not worth an unbounded
+resolver call") does not apply.
 
 The workable substitute is to run the individual linters, which build against
 the current toolchain without complaint: `goimports -l` over the changed files,
