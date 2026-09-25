@@ -7,10 +7,9 @@
 > not a statement about the tree this file is published in; the current governance state is whatever the
 > most recent review in this series says. Later windows are audited by later reports, never
 > retroactively by this one.
-> **Finding-ID note:** this report's panel-title finding was first published as "T-40", which the
-> 2026-08-07 report had already used (the `idp_unreachable` alert rename). It is renumbered **T-57** here,
-> and a finding added in review is **T-58**.
-> On `main` at `6c46ebd` the highest ID was T-53, and the other open reports in the series claim T-54–T-56.
+> **Finding-ID note:** series finding IDs are assigned in report-date order. This report's panel-title
+> finding was first published as "T-40" (already used by the 2026-08-07 report) and then as "T-57"
+> (assigned to the 2026-09-16 report). It is **T-59**, and the finding added in review is **T-60**.
 > **Method:** Audited `46410c3..6c46ebd` — the window since the 2026-09-11 report's own branch head
 > (`46410c3`, PR #1363, merged to `main` in `0665453`). The end commit `6c46ebd` was confirmed as the then-current `origin/main` HEAD by a fetch immediately before this report was written on 2026-09-21 (the
 > DEBT-014 lesson carried forward again: sync against `main` right before opening a PR). The window covers
@@ -32,11 +31,11 @@
 
 ## Executive Summary
 
-**One new terminology defect found and fixed this pass (T-57)** — a live admin-UI panel title named a
+**One new terminology defect found and fixed this pass (T-59)** — a live admin-UI panel title named a
 revocation mechanism (CRL) Culvert does not implement. **One recurrence of a closed finding, also fixed:**
 the window reintroduced "appliance" in customer-facing text (T-51 recurrence, below), which
 `docs/design/PRODUCT-TERMINOLOGY.md` forbids ("Appliance: *Not used* … the UI says node or instance").
-**One new open finding (T-58):** the tool-trust decision route's OpenAPI entry names an audit event the
+**One new open finding (T-60):** the tool-trust decision route's OpenAPI entry names an audit event the
 handler never emits.
 
 Two bounded audits were run against the diff since the last review; the second one's original conclusion
@@ -72,7 +71,7 @@ was wrong and is corrected here.
    first correction said there were zero wire uses; it searched only the unhyphenated spellings. A second
    review round caught it.) "Tool-trust approval" is used consistently across those surfaces as the name
    of the approval workflow, so the name itself is not drift. One real mismatch did turn up, recorded as
-   **T-58** below: the OpenAPI spec says the decision route emits `mcp.tooltrust.decision`, an audit
+   **T-60** below: the OpenAPI spec says the decision route emits `mcp.tooltrust.decision`, an audit
    event the handler never writes.
 2. **CHAOS-65 OCSP engine** (`internal/ocsp/ocsp.go` +655/-70, `ocsp_coverage.go`, `ocsp_metrics.go`): the
    `culvert_ocsp_*` metric family, the `coverage`/`uncheckedEnforcingPaths` fields on
@@ -83,7 +82,7 @@ was wrong and is corrected here.
    panel titled **"OCSP / CRL Revocation"** (the title predates this window; the window added its coverage
    counter and banners). The panel is an "Enable OCSP checking" toggle plus four counters and three status
    banners, all OCSP-only. Auditing that panel directly, as it should have
-   been the first time, surfaces a real finding: see **T-57** below. The same stream also added
+   been the first time, surfaces a real finding: see **T-59** below. The same stream also added
    "appliance" to the OCSP operator runbook and to an OpenAPI field description on `GET /api/ocsp`; see
    the T-51 recurrence below.
 
@@ -107,7 +106,7 @@ rather than assuming the backlog is unchanged just because no fix commit was see
   `POST /v1/upgrades/check`/`apply` with no `/v1/updates/*` alias, while the GUI still says "Dispatch
   Release" — unchanged.
 
-**Terminology Health Score: 8.7 / 10** (unchanged). One new defect (T-57) was found and fixed within the
+**Terminology Health Score: 8.7 / 10** (unchanged). One new defect (T-59) was found and fixed within the
 same pass — a security-adjacent admin-UI label overclaiming a capability — so, following 2026-09-08's
 precedent that a single item's discovery and its resolution are symmetric ±0.1 moves, the two cancel out
 rather than compounding; the T-51 recurrence was likewise fixed within the pass. The pre-existing
@@ -137,7 +136,7 @@ this report's first published revision before merge, both now fixed above:
    fallback. Verified directly (`Read static/index.html:4470-4499`; `grep -rn "CRL" internal/ocsp/*.go
    ocsp_coverage.go ocsp_metrics.go docs/operator/ocsp-revocation-checking.md` — the runbook's one hit is
    itself just quoting the panel title back, confirming no CRL logic exists anywhere in the subsystem) and
-   promoted to a new finding, **T-57**, below.
+   promoted to a new finding, **T-59**, below.
 
 Both errors trace to the same root cause: the original audit searched only the files the diff touched
 directly for GUI/API surfacing (`ui_mcp_tooltrust.go` for routes; the diff's own `.go` files for a GUI
@@ -149,11 +148,11 @@ rendered surface directly, not inferred from which files a diff touched.
 Later review rounds found more errors, also fixed:
 - The report itself used "appliance", which the glossary forbids. It also declared the window clean of
   that word, when the window had added it to customer-facing text (now the T-51 recurrence below).
-- The report reused the ID T-40 (now T-57).
+- The report reused the ID T-40 (now T-59).
 - Roadmap text still described the current panel as "OCSP / CRL" (now annotated as historical or
-  corrected; see T-57).
+  corrected; see T-59).
 - The "zero wire uses of tool trust" claim missed the hyphenated "tool-trust" in the OpenAPI/TS text
-  and the `mcp.tooltrust.*` audit actions (corrected in item 1; the check turned up T-58).
+  and the `mcp.tooltrust.*` audit actions (corrected in item 1; the check turned up T-60).
 - Two citations were wrong: the admin-settings connection-limit field is `admin_settings.go:36`, not
   `:33`, and the `/api/ocsp` field is `coverage`, not `ocsp_coverage`.
 
@@ -161,7 +160,7 @@ Later review rounds found more errors, also fixed:
 
 ## New Findings This Pass
 
-### T-57 — Admin-UI panel titled "OCSP / CRL Revocation" names a capability that does not exist (High) — FIXED this pass
+### T-59 — Admin-UI panel titled "OCSP / CRL Revocation" names a capability that does not exist (High) — FIXED this pass
 
 - **Concept**: certificate-revocation checking for upstream/inspected TLS connections, and which
   mechanisms Culvert actually uses to perform it.
@@ -205,7 +204,7 @@ Later review rounds found more errors, also fixed:
 - **Migration complexity**: trivial (label and prose only, no wire contract) — applied. **Compatibility
   risk**: none. **Actual PR size**: XS.
 
-### T-58 — The tool-trust decision route documents an audit event the handler never emits (Low) — OPEN
+### T-60 — The tool-trust decision route documents an audit event the handler never emits (Low) — OPEN
 
 - **Names found**: `POST /api/mcp/tool-approval-decision` declares `x-culvert-audit-event:
   mcp.tooltrust.decision` (`api/openapi/openapi.yaml:13103`). `docs/api/API-STYLE-GUIDE.md:35` defines that
@@ -257,10 +256,10 @@ T-9, T-11, T-12, T-13 (residual), T-17, T-18, T-21+T-32 (paired), T-25 (residual
 T-39. Full descriptions and the priority-ordered refactoring plan are unchanged from
 `TERMINOLOGY-GOVERNANCE-REVIEW-2026-09-09.md` and are not restated here to avoid drift between two
 descriptions of the same open items — see that report (or its predecessors, cited therein) for the
-canonical text of each. **T-57 (above) was found and fixed within this same pass and does not join the
-open backlog** — the thirteen-entry carry-over backlog is unchanged; T-57 is recorded here only as a closed finding
+canonical text of each. **T-59 (above) was found and fixed within this same pass and does not join the
+open backlog** — the thirteen-entry carry-over backlog is unchanged; T-59 is recorded here only as a closed finding
 ID, for the same reason closed items stay in the numbering series rather than being silently dropped.
-**T-58 (above) is new and open**, so the open backlog after this pass is fourteen entries (fifteen IDs).
+**T-60 (above) is new and open**, so the open backlog after this pass is fourteen entries (fifteen IDs).
 
 The "Content & Scanning" (legacy GUI) vs. "Content Security" (new React frontend) soft finding — a
 non-mechanical naming-policy reconciliation between two deliberate design decisions, not a numbered backlog
@@ -270,11 +269,11 @@ item — also remains unresolved, per 2026-09-09's reasoning, and was not revisi
 
 ## Stop-Condition Assessment
 
-**Does not apply cleanly this pass — a production-worthy terminology defect (T-57) was identified and
+**Does not apply cleanly this pass — a production-worthy terminology defect (T-59) was identified and
 fixed**: a security-adjacent GUI label naming a revocation mechanism (CRL) that does not exist in the
 implementation, corrected in this same PR (XS, no migration risk, no wire surface affected). A recurrence
 of the closed T-51 ("appliance" in customer-facing text) was also fixed. One new low-priority finding,
-T-58 (a documented audit event the tool-trust decision handler never emits), is left open for an
+T-60 (a documented audit event the tool-trust decision handler never emits), is left open for an
 API-contract change. The MCP
 canary-execution stream introduced no new drift once correctly re-audited (see "Corrections made in
 review"). The fourteen-ID carry-over backlog is otherwise unchanged and was independently re-confirmed (not
