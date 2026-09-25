@@ -31,36 +31,26 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   answered with `429` + `Retry-After`. **Basic Auth still does not enforce
   TOTP** — a valid password alone reaches the full admin API — tracked as
   RISK-030; see `docs/operator/admin-api-credential-lockout.md`.
-- The first version of that lockout fix opened a different unauthenticated hole
-  on the same endpoint, found in review and closed in the same change
-  (SEC-BASICAUTH-2). Recording a failure creates two lockout map entries keyed
-  by a caller-chosen username, retained for ten minutes, on a public GET that no
-  rate limit covers — 800 entries from 400 requests, measured. The rationale
-  first recorded for leaving it unbounded ("entry creation is bcrypt-rate
-  bounded") was wrong: `VerifyUIUser` runs bcrypt only for a *configured*
-  username, so an unknown one costs ~106 ns rather than ~66.7 ms. A client that
-  has burned its per-client failure budget in the current window is now refused
-  **before** its credentials are verified — charged by failures only, keyed on
-  the client and never on the username, so a valid client is never throttled and
-  an over-budget one is refused identically for a right and a wrong password.
-  Surfaced as `culvert_admin_basic_auth_fail_shed_total` and
-  `culvert_login_limiter_entries`.
-- That budget was itself a read-then-act pair, so it bounded concurrency rather
-  than rate (SEC-BASICAUTH-3, found in review). The probe and the charge were
-  each mutex-safe but the sequence between them was not, so every request in a
-  simultaneous cohort saw the same un-incremented count and passed. Measuring it
-  moved the impact: limiter-state growth is largely self-bounding (state growth
-  needs distinct usernames, which verify in ~100 ns, so a 500-request cohort
-  admitted 63), but against the *real* admin username the gap is a full bcrypt
-  and all 500 were admitted — an unbounded number of simultaneous bcrypt
-  comparisons from one IP, defeating the "a locked attempt costs no bcrypt"
-  guarantee that is the CPU-exhaustion half of the original finding. Admission
-  and charge are now one atomic step (`lockout.Reserve`), with the charge
-  released when verification succeeds so a valid client is still never billed;
-  the read-only probe is removed rather than left available. A client issuing
-  more than 60 *simultaneous* Basic-Auth requests can now see some refused with
-  `429`; the refusal is retryable and is never recorded as a failure, so it
-  cannot lock the account.
+- Two residuals on that path are recorded rather than closed, after a per-client
+  failure budget was tried in review and withdrawn (SEC-BASICAUTH-2/-3/-4).
+  Recording a failure creates lockout state keyed by a caller-chosen username, on
+  a public GET no rate limit covers (800 entries from 400 requests, measured), so
+  a budget was added that refused a client which had exceeded it. Because the
+  budget was keyed on the **client**, an unauthenticated flood of unknown
+  usernames — which cost no bcrypt — from a shared egress (a NAT, or an L7 proxy
+  with no `trusted_proxy_cidrs` configured) denied every administrator behind
+  that address, including ones presenting correct credentials. That is the
+  lockout-as-denial-of-service the two-tier design exists to prevent, so the
+  budget is withdrawn rather than patched again; any bound on this path must
+  delay or evict, never deny a request whose credentials were never checked. The
+  brute-force and "a locked attempt costs no bcrypt" bounds are the lockout
+  itself and are unaffected. What is now recorded open: **limiter-state growth**
+  (AU-17b — bounded per key by the username clamp, in time by the janitor, and
+  newly visible as `culvert_login_limiter_entries`; the fix is fair-share
+  eviction, which evicts without refusing) and **concurrent verification cost**
+  (AU-18 — the fix is the existing credential-cost governor, which makes an
+  over-cap client wait rather than refusing it). Builds that briefly exported
+  `culvert_admin_basic_auth_fail_shed_total` no longer do.
 - Removed a public-allowlist prefix that pre-authorised routes nobody had
   written (SEC-PUBLICPATH-1). `isPublicUIAuthPath` matched any path under
   `/api/auth/totp`, and no such route exists: TOTP is verified inside

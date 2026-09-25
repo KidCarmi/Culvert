@@ -6,8 +6,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-
-	"github.com/KidCarmi/Culvert/internal/lockout"
 )
 
 // ---------------------------------------------------------------------------
@@ -99,60 +97,97 @@ import (
 //     entry point.
 //
 // ---------------------------------------------------------------------------
-// SEC-BASICAUTH-2 — the hole the fix above opened, and why the budget sits
-// where it does (Codex review, PR #1399).
+// SEC-BASICAUTH-2 / -3 / -4 — THREE ITERATIONS ON A PER-CLIENT FAILURE BUDGET
+// THAT WAS WITHDRAWN. The record is kept because the reasoning is the useful
+// part, and because the third iteration is the one that says DO NOT REBUILD IT.
 //
-// Wiring loginLimiter.RecordFailure into a path with no rate limit means every
-// failed attempt CREATES STATE: the tier-1 (ip, user) pair AND the tier-2
-// account entry, both keyed by an ATTACKER-CHOSEN username, both retained for
-// at least lockout.Window (10 min) because Cleanup cannot sweep them sooner.
-// /api/auth/status is a public GET, so securityMiddleware's mutating-only
-// apiLimiter never sees it — an unauthenticated caller could cycle unique
-// usernames at line rate and grow admin-plane memory without bound, and trip an
-// audit write every fifth repeat. That is the CHAOS-63 amplifier, rebuilt on an
-// endpoint that previously created NO state at all.
+// SEC-BASICAUTH-2 observed, correctly, that wiring loginLimiter.RecordFailure
+// into a path with no rate limit means every failed attempt CREATES STATE: the
+// tier-1 (ip, user) pair AND the tier-2 account entry, both keyed by an
+// ATTACKER-CHOSEN username, both retained for at least lockout.Window (10 min)
+// because Cleanup cannot sweep them sooner. /api/auth/status is a public GET, so
+// securityMiddleware's mutating-only apiLimiter never sees it (measured: 800
+// limiter entries from 400 unauthenticated requests). It also corrected a false
+// premise worth keeping: "entry creation is bcrypt-rate-bounded" is wrong,
+// because cfg.VerifyUIUser bcrypts ONLY for a CONFIGURED username — an unknown
+// one is a map miss returning in ~106 ns against ~66.7 ms, measured, 629,518x
+// cheaper, and unlike the proxy path this one has no RISK-008 dummyBcryptHash
+// equaliser. A claim about a bound must name the branch the attacker walks.
 //
-// THE RATIONALE FIRST RECORDED FOR LEAVING IT UNBOUNDED WAS WRONG, and the
-// correction is the useful part: "entry creation is bcrypt-rate-bounded because
-// RecordFailure runs only after a verification". cfg.VerifyUIUser bcrypts ONLY
-// when the username names a configured account — an UNKNOWN one is a map miss
-// that returns in ~106 ns against ~66.7 ms for a real account, measured, 629,518x
-// cheaper. (Note the asymmetry with the PROXY path, which has RISK-008's
-// dummyBcryptHash equaliser; this admin path has never had one.) A cost that
-// only applies to the branch an attacker never takes bounds nothing. The lesson
-// is CHAOS-57's, one subsystem over: a claim about a bound must name the branch
-// the attacker actually walks.
+// The remedy chosen was a per-client failure budget (lockout.APIRateLimiter,
+// Burst/RateWindow) consulted BEFORE verification. SEC-BASICAUTH-3 then found
+// that budget was a read-then-act pair and bounded the caller's CONCURRENCY
+// rather than its rate — against the real admin username with wrong passwords
+// the probe→charge gap is a full bcrypt, so 500 concurrent attempts all ran
+// bcrypt (3.49 s vs 1.11 s for the bounded shape) — and replaced it with an
+// atomic Reserve/Release.
 //
-// TWO PROPERTIES ARE LOAD-BEARING and the first cost a rewrite to get right:
+// SEC-BASICAUTH-4 — THE BUDGET WAS THE DEFECT, NOT ITS IMPLEMENTATION (Codex
+// review round 3, PR #1399). Reproduced against the real handler: 60 cheap
+// UNKNOWN-username probes from one client key, then a VALID credential answers
+// 429 / loggedIn=false. The budget is keyed on the client, so on any shared
+// egress — a NAT, a CGNAT range, or (per "Behind a reverse proxy" in the
+// runbook) an L7 proxy with no trusted_proxy_cidrs configured — an
+// unauthenticated attacker denies every admin sharing that key, and it is
+// materially WORSE than the tier-1 lockout it sat beside: username-INDEPENDENT
+// (all usernames from that key, not a targeted pair), CHEAP (no bcrypt, no
+// knowledge of any account), and with NO trusted-IP bypass equivalent. It also
+// terminates in-flight Basic-auth SSE streams via sseAuthStillValid.
 //
-//  1. THE BUDGET IS CONSULTED BEFORE VERIFICATION, NOT AFTER. The first version
-//     charged the budget on the failure and then declined to RECORD it — the
-//     attempt was still verified and still answered, so the caller still learned
-//     "wrong" while the account never accumulated failures and therefore NEVER
-//     LOCKED. An attacker could burn the budget on ghost usernames and then
-//     guess a real password indefinitely at the window rate: strictly WEAKER
-//     than the 5-then-15-minutes the lockout gives. Shedding the RECORD of an
-//     answered attempt weakens the bound it exists to protect; shedding the
-//     ATTEMPT does not. Hence APIRateLimiter.Over — a read-only probe, because
-//     Allow charges and would bill the requests we mean to admit.
-//  2. THE BUDGET IS CHARGED BY FAILURES ONLY and keyed on the CLIENT, never on
-//     the username. Charging every request would throttle a legitimate CLI on
-//     work it is not doing; keying on whether the username exists would hand
-//     back an enumeration oracle (the CHAOS-57 admission-ordering lesson). An
-//     over-budget client is refused identically for a right and a wrong
-//     password, so the refusal itself tells an attacker nothing.
+// That contradicts a property SEC-BASICAUTH-1 above states outright — "an
+// attacker's flood cannot lock the real operator's IP (the lockout-as-DoS the
+// two-tier design exists to prevent)" — and the control written for it
+// (TestSecBasicAuth1_Control_AttackerCannotLockOutTheRealAdminsIP) covered the
+// LOCKOUT path, not the budget path: the control existed and did not cover the
+// mechanism added beside it. THE STANDING LESSON: a control pins the mechanism
+// it names, so a NEW refusal path needs its own control, and when one mechanism
+// needs a third correction the instrument is wrong rather than under-patched.
 //
-// The limiter is its own instance rather than the shared apiLimiter so an
-// attacker's failed GETs cannot consume the budget a legitimate admin's POSTs
-// need from the same NAT egress; it reuses lockout.APIRateLimiter's type and
-// constants so an operator meets one rate vocabulary, and its Cleanup is wired
-// into the shared janitor (connlimit_startup.go).
+// EVERY PATCH SHAPE CONSIDERED REOPENS SOMETHING THIS FILE ALREADY CLOSED, which
+// is why the budget is withdrawn rather than fixed a fourth time:
 //
-// Surfaces: culvert_admin_basic_auth_fail_shed_total (the refusals) and
-// culvert_login_limiter_entries (the live size of the state being protected —
-// the observable an operator watches to confirm the bound holds, and the first
-// signal the admin plane has ever had for lockout-map growth, open register row
-// AU-17).
+//   - Gate only UNKNOWN usernames ⇒ over-budget becomes fast for a ghost name
+//     and slow for a real one: the enumeration oracle CHAOS-57's admission
+//     ordering exists to prevent, and SEC-BASICAUTH-2 rule (2) forbids.
+//   - Exempt clients with a recent success ⇒ still denies first contact, and an
+//     attacker holding ANY valid credential exempts themselves.
+//   - Key on the username ⇒ hands back enumeration AND lets an attacker deny one
+//     named admin.
+//
+// WHAT BOUNDS THE TWO AXES NOW, and what is recorded open rather than papered
+// over. The brute-force and the "a locked attempt costs no bcrypt" CPU bound are
+// unaffected — they are the loginLimiter.Check above, which predates all three
+// iterations. What the budget additionally claimed, and what replaces it:
+//
+//   - STATE GROWTH (open register row AU-17b). An unauthenticated caller can
+//     still create tier-1 + tier-2 entries on a public GET. It is bounded per
+//     KEY by internal/lockout's injective boundUsername clamp
+//     (MaxUsernameKeyLen, ~4000x smaller than CHAOS-63's unbounded key) and in
+//     TIME by Cleanup's window, and it is now VISIBLE for the first time via
+//     culvert_login_limiter_entries. The designed fix is internal/authstate's
+//     fair-share eviction ported into internal/lockout — attribute each entry to
+//     a client key and evict the oldest entry of the key holding the MOST, so a
+//     flooding source evicts ITSELF. That bounds state WITHOUT EVER REFUSING A
+//     REQUEST, which is precisely the property the budget lacked. It also closes
+//     AU-17 (no entry-count cap, because evicting at a cap evicts a REAL lock).
+//   - CONCURRENT VERIFICATION COST (open register row AU-18). Simultaneous
+//     bcrypt comparisons on the admin plane are unbounded. The designed fix is
+//     internal/authcost, the governor CHAOS-57 built for exactly this and
+//     recorded the admin plane as "deliberately left" from: it makes an
+//     over-cap client WAIT for its own earlier verification instead of refusing
+//     it — CHAOS-57's own finding that "one source, one slot" is a correct
+//     FAIRNESS rule and an incorrect ADMISSION rule, which is the same mistake
+//     the budget made one plane over. Reusing it also avoids a third dialect for
+//     one question (the internal/audit + CHAOS-53 rule).
+//
+// Both are deliberately left for a change of their own rather than landed as a
+// fourth iteration here. DO NOT REINTRODUCE A REFUSAL KEYED ON THE CLIENT ON
+// THIS PATH: any bound on the admin Basic-auth path must be one that DELAYS or
+// EVICTS, never one that denies a request whose credentials were never checked.
+//
+// Surface kept from the withdrawn work: culvert_login_limiter_entries, the live
+// size of the state AU-17b describes and the first signal the admin plane has
+// ever had for lockout-map growth.
 // ---------------------------------------------------------------------------
 
 // basicAuthLockoutRefused counts admin-plane Basic Auth attempts refused by the
@@ -161,25 +196,6 @@ import (
 // 429, so a climbing counter is the operator's signal that a source is
 // grinding credentials against the admin API rather than the login form.
 var basicAuthLockoutRefused atomic.Int64
-
-// basicAuthFailLimiter bounds how fast ONE client may create admin-plane
-// credential state (SEC-BASICAUTH-2). It is charged immediately before
-// loginLimiter.RecordFailure — the only call on this path that WRITES anything
-// — so it bounds exactly the state-creating step and never touches a client
-// whose credentials are valid.
-//
-// It is a SEPARATE instance rather than the shared apiLimiter so an attacker's
-// failed GETs cannot consume the budget a legitimate admin's POSTs need from
-// the same NAT egress, and it uses the same lockout.APIRateLimiter type and
-// constants as that limiter so an operator meets one rate vocabulary.
-var basicAuthFailLimiter = lockout.NewAPIRateLimiter()
-
-// basicAuthFailShed counts credential failures dropped WITHOUT being recorded
-// because the client was over its failure budget. Exported on /metrics as
-// culvert_admin_basic_auth_fail_shed_total: the caller sees an ordinary 401, so
-// a climbing counter is the only signal that a source is flooding the admin
-// plane with unusable credentials.
-var basicAuthFailShed atomic.Int64
 
 // basicAuthLockoutLog rate-limits the refusal log line to one per window —
 // onset immediately, then at most one line, with the magnitude in the counter.
@@ -249,53 +265,23 @@ func verifyUIBasicAuth(r *http.Request, user, pass string) basicAuthResult {
 		return basicAuthResult{Outcome: basicAuthLockedOut, RetryAfter: secs}
 	}
 
-	// SEC-BASICAUTH-2/3: a client that has already burned its failure budget in
-	// this window is REFUSED HERE — before verification, exactly like the
-	// lockout above — and the reasons it must be here and not after are the
-	// whole finding. See the file header.
-	//
-	// The admission and the charge are ONE atomic step (SEC-BASICAUTH-3). The
-	// first shape of this gate read a budget probe and charged after the work,
-	// which bounded nothing under concurrency: every request in a synchronised
-	// cohort saw the same not-yet-incremented count and passed, so the attempts
-	// admitted per window were the attacker's concurrency rather than Burst.
-	res, ok := basicAuthFailLimiter.Reserve(clientIP)
-	if !ok {
-		basicAuthFailShed.Add(1)
-		if noteBasicAuthShedLog() {
-			logWarnf("Auth: refused admin API basic-auth from %s — over the per-client credential-failure budget; %d refused since boot",
-				sanitizeLog(clientIP), basicAuthFailShed.Load())
-		}
-		return basicAuthResult{Outcome: basicAuthLockedOut, RetryAfter: int(lockout.RateWindow.Seconds())}
-	}
-	// A reservation outlives a panic inside verification; releasing it there is
-	// correct, because a verification that did not complete produced no failure
-	// for the budget to bound. Release is idempotent, so the success path below
-	// can release early and this cannot double-credit.
-	defer basicAuthFailLimiter.Release(&res)
+	// NOTHING ELSE REFUSES HERE. The per-client failure budget that used to sit
+	// on this line was withdrawn (SEC-BASICAUTH-4, see the file header): keyed on
+	// the client, it let an unauthenticated flood from a shared egress deny a
+	// VALID credential, which is the lockout-as-DoS the two-tier design exists to
+	// prevent. The two axes it claimed to bound are recorded open as AU-17b
+	// (limiter-state growth ⇒ fair-share eviction) and AU-18 (concurrent bcrypt
+	// ⇒ internal/authcost, which WAITS rather than refusing). Any future bound on
+	// this path must delay or evict, never deny an unverified request.
 
 	role, valid := cfg.VerifyUIUser(user, pass)
 	if valid {
-		// RELEASE the charge: the budget bounds credential FAILURES, so a valid
-		// client must not be billed for work it is not doing. Holding the
-		// charge only for the duration of the verification is what lets the gate
-		// sit ahead of the work without throttling legitimate callers — the
-		// residual is that more than Burst SIMULTANEOUS in-flight attempts from
-		// one client can be refused, which is a retryable 429 and never a
-		// recorded failure, so it cannot feed the account lock.
-		basicAuthFailLimiter.Release(&res)
 		// Clears the tier-1 pair and marks this IP trusted for the user, so a
 		// legitimate client making many API calls is never throttled and stays
 		// exempt from the tier-2 account lock an attacker flood can trip.
 		loginLimiter.RecordSuccess(clientIP, user)
 		return basicAuthResult{Outcome: basicAuthValid, Role: role}
 	}
-
-	// KEEP the charge on the failure path — the reservation taken above IS the
-	// charge, so there is deliberately no second increment here. The deferred
-	// Release is inert once this function returns without releasing, because a
-	// failure is exactly what the budget exists to count.
-	res.Keep()
 
 	if loginLimiter.RecordFailure(clientIP, user) {
 		// ONE entry per trip (RecordFailure reports only the transition), with
@@ -346,42 +332,13 @@ func noteBasicAuthLockoutLog() bool {
 	return true
 }
 
-// noteBasicAuthShedLog reports whether this shed may emit a log line, arming
-// the window when it does. Same one-per-minute discipline as the lockout line:
-// a bound against a flood must not itself be a log-bandwidth flood.
-func noteBasicAuthShedLog() bool {
-	now := time.Now()
-	basicAuthShedLogMu.Lock()
-	defer basicAuthShedLogMu.Unlock()
-	if !basicAuthShedLogLast.IsZero() && now.Sub(basicAuthShedLogLast) < basicAuthLockoutLogWindow {
-		return false
-	}
-	basicAuthShedLogLast = now
-	return true
-}
-
-var (
-	basicAuthShedLogMu   sync.Mutex
-	basicAuthShedLogLast time.Time
-)
-
-// resetBasicAuthLockoutStateForTest clears the process-global counters and log
-// gates so tests do not inherit each other's state. Production never calls it.
+// resetBasicAuthLockoutStateForTest clears the process-global counter and log
+// gate so tests do not inherit each other's state. Production never calls it.
 func resetBasicAuthLockoutStateForTest() {
 	basicAuthLockoutRefused.Store(0)
-	basicAuthFailShed.Store(0)
 	basicAuthLockoutLogMu.Lock()
 	basicAuthLockoutLogLast = time.Time{}
 	basicAuthLockoutLogMu.Unlock()
-	basicAuthShedLogMu.Lock()
-	basicAuthShedLogLast = time.Time{}
-	basicAuthShedLogMu.Unlock()
-}
-
-// swapBasicAuthFailLimiterForTest installs a fresh failure limiter so a test
-// starts with a full per-client budget. Test support only.
-func swapBasicAuthFailLimiterForTest() {
-	basicAuthFailLimiter = lockout.NewAPIRateLimiter()
 }
 
 // loginLimiterEntriesForTest reports how much state the shared login limiter is

@@ -27,6 +27,21 @@ A second, latent finding came out of the same file: the public allowlist
 carried a **prefix** for routes that do not exist, which would have made the
 first handler written beneath it public by default.
 
+**The fix for the first finding then went through three review rounds of its
+own, and the third one removed a mechanism I had added rather than correcting
+it again** (§1a, §1b, §1c). The short version: wiring failure-recording into a
+public unrated GET creates attacker-keyed state, so I added a per-client failure
+budget; it bounded concurrency rather than rate, so I made it atomic; and then it
+turned out that *any* refusal keyed on the client lets an unauthenticated flood
+from a shared egress deny a valid credential — the lockout-as-denial-of-service
+the two-tier design exists to prevent, and a property this document already
+claimed and tested for the neighbouring mechanism. The budget is withdrawn, the
+two axes it claimed are recorded open with a designed fix each (**AU-17b**,
+**AU-18**), and §1's own bounds are unaffected. Two rules came out of it that
+generalise beyond this file: *a control pins the mechanism it names*, and *when
+one mechanism needs a third correction the instrument is wrong, not
+under-patched*.
+
 ---
 
 ## 1. SEC-BASICAUTH-1 — admin credential brute-force bound applied to one of four entry points
@@ -354,6 +369,127 @@ rejects the reviewer's literal prescription),
 `TestSecBasicAuth3_Control_OrdinaryLockoutStillTrips` (the cheapest way to pass
 the defect gate is to refuse everything, which would delete the lockout), and
 `TestSecBasicAuth3_ResidualConcurrentValidClientCanBeRefused`.
+
+---
+
+## 1c. SEC-BASICAUTH-4 — the §1a budget was the defect, not its implementation
+
+**Codex review round 3, PR #1399. This is a regression I introduced, it was
+found by a reviewer rather than by me, and my own control for the very property
+it broke did not cover it.**
+
+### The defect
+
+The per-client failure budget from §1a/§1b is keyed on the client. A flood of
+**unknown** usernames costs no bcrypt (§1a: ~106 ns), so an unauthenticated
+caller can exhaust one client key's budget for nothing — after which every
+request from that key is refused *before verification*, including one carrying
+correct credentials.
+
+Reproduced against the real handler:
+
+```
+60 unknown-username probes from 198.51.100.x, then:
+valid credential from the shared IP after the flood: code=429 loggedIn=false
+```
+
+On a shared egress — a NAT, a CGNAT range, or (per the runbook's own "Behind a
+reverse proxy" section) an L7 proxy with no `trusted_proxy_cidrs` configured —
+that denies **every administrator behind that address**. It also terminates
+in-flight Basic-auth SSE streams, which revalidate through the same chokepoint
+(`sseAuthStillValid`).
+
+| Property | tier-1 lockout | the withdrawn budget |
+| --- | --- | --- |
+| Scope of the denial | one (IP, username) pair | **every username from that key** |
+| Cost to the attacker | 5 bcrypt-verified attempts | **60 map misses, ~100 ns each** |
+| Knowledge required | a username that exists | **none** |
+| Operator escape hatch | 30-day trusted-IP bypass on tier 2 | **none** |
+
+So on all four axes it is worse than the mechanism it was placed beside.
+
+### The control existed and did not cover the new mechanism
+
+§1's fix is documented with this property, and it is asserted by
+`TestSecBasicAuth1_Control_AttackerCannotLockOutTheRealAdminsIP`:
+
+> an attacker's flood cannot lock the real operator's IP (the lockout-as-DoS the
+> two-tier design exists to prevent)
+
+That control drives the **lockout** path. The budget is a *second, independent*
+refusal path added next to it, and nothing re-ran that question against the new
+mechanism. The transferable rule:
+
+> A control pins the mechanism it names. A new refusal path needs its own
+> control — inheriting the neighbouring one is how a property that is written
+> down and tested stops being true.
+
+### Why it is withdrawn rather than patched
+
+Every patch shape reopens something this file already closed:
+
+| Shape | What it reopens |
+| --- | --- |
+| Gate only unknown usernames | Over-budget becomes fast for a ghost name and slow for a real one — the enumeration oracle CHAOS-57's admission ordering prevents, and §1a rule (2) forbids |
+| Exempt clients with a recent success | Still denies first contact; and an attacker holding *any* valid credential exempts themselves |
+| Key on the username | Hands back enumeration **and** lets an attacker deny one named admin |
+
+This was the third correction to one mechanism in one review cycle. At that
+point the honest reading is that the instrument is wrong, not under-patched:
+
+> When one mechanism needs a third correction, stop correcting it. And on this
+> path specifically: **any bound must DELAY or EVICT, never DENY a request whose
+> credentials were never checked.**
+
+`lockout.Reserve`/`Release`/`Keep`/`Charged` are deleted with it. Leaving a
+ready-made atomic-refusal primitive next to a "do not refuse here" note is the
+same footgun `Over` was (§1b) — an unused primitive on a security path invites
+exactly the call site that produced the defect.
+
+### What still holds, and what is now recorded open
+
+The bounds from §1 are **unaffected**: the brute-force barrier and the "a locked
+attempt costs no bcrypt" CPU bound are `loginLimiter.Check`, which runs before
+verification and predates all three budget iterations.
+
+What the budget additionally claimed, now open with a designed fix each:
+
+| ID | Residual | What still bounds it | Designed fix |
+| --- | --- | --- | --- |
+| **AU-17b** | An unauthenticated caller can grow the lockout maps through the public GET | Per key: `boundUsername`'s injective clamp (`MaxUsernameKeyLen`, ~4000x smaller than CHAOS-63's unbounded key). In time: `Cleanup`'s window. In visibility: `culvert_login_limiter_entries`, new | `internal/authstate`'s fair-share eviction ported into `internal/lockout` — attribute each entry to a client key, evict the oldest entry of the key holding the **most**, so a flooding source evicts itself. Bounds state **without refusing any request**, which is precisely the property the budget lacked. Also closes AU-17 |
+| **AU-18** | Concurrent bcrypt on the admin plane is unbounded below the lockout threshold | The lockout caps attempts per client per window | `internal/authcost` — the governor CHAOS-57 built for this and recorded the admin plane as *"deliberately left"* from. It makes an over-cap client **wait** for its own earlier verification rather than refusing it, which is CHAOS-57's own finding that *"one source, one slot" is a correct FAIRNESS rule and an incorrect ADMISSION rule* — the same mistake the budget made one plane over |
+
+Both are left for a change of their own rather than landed as a fourth iteration
+on a PR already carrying this much: each touches a shared engine
+(`internal/lockout`, `internal/authcost`) whose other callers need their own
+regression proof.
+
+### Tests
+
+`ui_basicauth_lockout_test.go`:
+
+- `TestSecBasicAuth4_UnauthenticatedFloodCannotDenyAValidCredential` — the
+  DEFECT GATE and the durable protection against rebuilding the budget.
+  **Verified failing against a reintroduced client-keyed budget**
+  (`code=429 loggedIn=false`), on both the public endpoint and the middleware
+  fallback.
+- `TestSecBasicAuth4_Control_TargetedBruteForceStillLocks` — the CONTROL. The
+  cheapest way to pass the gate above is to stop refusing anything, which would
+  delete §1 entirely. It asserts a targeted run still locks, that a correct
+  password cannot walk past the lock, and that the refusal was the *lockout*
+  (`culvert_admin_basic_auth_lockout_refused_total` moved).
+- `TestSecBasicAuth4_ResidualUnauthenticatedStateGrowth` — pins AU-17b as a
+  FACT, the `TestNormalizeHostStrict_IsNotALogSanitiser` way: it asserts the
+  growth **is** still reachable, so nobody reads the withdrawal as closure, and
+  separately that the growth cannot deny a valid credential — the property that
+  distinguishes this residual from the withdrawn budget's defect. It also drives
+  a 4 KiB username, so a regression in the key clamp fails here too.
+
+Removed with the mechanism: `internal/lockout/lockout_reserve_test.go` (9) and
+the `TestSecBasicAuth2_*` / `TestSecBasicAuth3_*` gates. These are not
+quarantined tests — the code they exercise no longer exists, so they could not
+compile; §1's gates, both structural walls and all of §1's controls are
+unchanged and green.
 
 ---
 

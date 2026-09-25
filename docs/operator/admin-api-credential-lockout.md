@@ -54,51 +54,60 @@ A request with **no** `Authorization` header never consults the lockout and
 never creates a key, so the login overlay's anonymous `GET /api/auth/status`
 poll is unaffected.
 
-## The per-client failure budget (SEC-BASICAUTH-2 / -3)
+## Limiter-state growth on the public endpoint (AU-17b)
 
 Recording a failure creates limiter state, and the state is keyed by a username
-the *caller* chooses. On a public GET with no rate limit that is a memory
-amplifier, so a client that has already burned its failure budget in the current
-window is **refused before its credentials are verified** — the same
-`lockout.Burst` / `lockout.RateWindow` budget the mutating admin API uses.
+the *caller* chooses. `GET /api/auth/status` is on the public allowlist and is
+not a mutating request, so nothing rate-limits it: an unauthenticated caller can
+cycle distinct usernames and grow the lockout maps.
 
-The admission and the charge are **one atomic step** (`Reserve`). They have to
-be: the first form read a budget probe and charged after verification, which
-bounded nothing when several requests arrived at once — every one of them saw
-the same not-yet-incremented count and passed. Against the real admin username
-that meant an unbounded number of *simultaneous* bcrypt comparisons from a
-single IP, which is the CPU bound this page's "costs no bcrypt" guarantee is
-about.
+What bounds it today:
 
-Three properties matter operationally:
+- **Per key** — the submitted username is clamped to a fixed maximum before it
+  becomes a map key, so the *size* of an entry never scales with what the caller
+  sends (a 4 KiB username produces the same key footprint as a short one).
+- **In time** — an entry whose window has expired is swept by the background
+  janitor.
+- **In visibility** — `culvert_login_limiter_entries` reports the live count of
+  tier-1 and tier-2 entries. Sustained growth with no corresponding
+  `auth.lockout` audit activity means a source is cycling usernames rather than
+  guessing passwords.
 
-- **Only failures are charged.** A client with valid credentials has its charge
-  released as soon as verification succeeds, so it is never budgeted for work it
-  is not doing, however many calls it makes.
-- **An over-budget client is refused identically for a right and a wrong
-  password**, so the refusal reveals nothing about the credential — and, because
-  the refusal happens *before* verification, an attacker cannot use it to keep
-  guessing without the account ever locking.
-- **The charge is held for the duration of one verification**, so the effective
-  rule is *failures + in-flight attempts < 60 per client per minute*. A client
-  that issues more than 60 **simultaneous** Basic-Auth requests can therefore
-  see some refused with `429` even when its credentials are correct. That is
-  expected: the refusal is retryable, carries `Retry-After`, and is never
-  recorded as a failure, so it cannot lock the account. A client that needs more
-  parallelism should use a session cookie rather than Basic Auth on every call.
+The growth is in entry **count** only, and it never affects whether a valid
+credential is accepted. The planned fix is fair-share eviction — evict the oldest
+entry belonging to whichever client is holding the most, so a flooding source
+evicts itself — which bounds the state without refusing any request.
 
-Watch `culvert_login_limiter_entries` to confirm the bound is holding: it is the
-live count of tier-1 and tier-2 entries the lockout is carrying. Sustained
-growth with a climbing `culvert_admin_basic_auth_fail_shed_total` means a source
-is flooding the admin plane with unusable credentials and being shed.
+> **A per-client refusal was tried here and withdrawn.** An earlier release
+> refused a client that had exceeded a per-window failure budget. Because the
+> budget was keyed on the client, an unauthenticated flood from a shared egress —
+> a NAT, a CGNAT range, or an L7 reverse proxy with no `trusted_proxy_cidrs`
+> configured — denied *every* administrator behind that address, including ones
+> presenting correct credentials. It was withdrawn for that reason. If you are
+> upgrading from a build that exported
+> `culvert_admin_basic_auth_fail_shed_total`, that series is gone; watch
+> `culvert_login_limiter_entries` instead.
+
+## Concurrent verification cost (AU-18)
+
+A **locked** attempt still costs no bcrypt — that bound is the lockout check and
+is unchanged. What is not bounded is how many *unlocked* attempts may verify at
+the same instant, so a client below the lockout threshold can drive several
+concurrent bcrypt comparisons. The planned fix is to route this path through the
+same credential-cost governor the proxy credential path already uses, which makes
+an over-cap client **wait** for its own earlier verification rather than refusing
+it.
+
+Until then, restricting the admin port with `-ui-allow-ip` is the operator
+control, and the lockout still caps how many attempts any one client can make
+per window.
 
 ## Signals
 
 - **Metric** — `culvert_admin_basic_auth_lockout_refused_total` (lockout
-  refusals), `culvert_admin_basic_auth_fail_shed_total` (over-budget refusals)
-  and `culvert_login_limiter_entries` (the live lockout-state size). Sustained
-  growth means a source is grinding credentials against the admin **API**
-  rather than the login form. Pair it with
+  refusals) and `culvert_login_limiter_entries` (the live lockout-state size).
+  Sustained growth means a source is grinding credentials against the admin
+  **API** rather than the login form. Pair it with
   `culvert_login_oversize_rejected_total` (CHAOS-63) when triaging a probe.
 - **Audit** — one `auth.lockout` entry per trip, never one per attempt (a
   per-attempt entry would rebuild the CHAOS-63 durable-log amplifier). The actor

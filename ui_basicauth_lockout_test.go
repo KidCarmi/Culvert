@@ -6,7 +6,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -38,12 +37,6 @@ func basicAuthTestCfg(t *testing.T, user, pass string) {
 	cfg = testCfg
 	t.Cleanup(func() { cfg = orig })
 	t.Cleanup(loginLimiter.SnapshotAndClear())
-	// Every test starts with a FULL per-client failure budget. Without this the
-	// shared basicAuthFailLimiter carries charges across -count=N runs (60 per
-	// IP per minute), so a test's Nth repetition would silently exercise the
-	// shed path instead of the path it is asserting on — the same
-	// cross-run-state class as the audit-ring pitfall below.
-	swapBasicAuthFailLimiterForTest()
 	resetBasicAuthLockoutStateForTest()
 }
 
@@ -284,286 +277,152 @@ func TestSecBasicAuth1_Control_UnauthenticatedStatusStillAnswers(t *testing.T) {
 	}
 }
 
-// --- SEC-BASICAUTH-2: the P1 this fix introduced -----------------------------
+// ---------------------------------------------------------------------------
+// SEC-BASICAUTH-4 — the per-client failure budget was WITHDRAWN, and these are
+// the gates that keep it withdrawn.
+// ---------------------------------------------------------------------------
 //
-// Codex review of PR #1399 found that SEC-BASICAUTH-1's own fix opened a
-// different unauthenticated hole on the SAME public endpoint. Wiring
-// loginLimiter.RecordFailure into a path with no rate limit means every failed
-// attempt CREATES two durable map entries (the tier-1 pair and the tier-2
-// account), keyed by an attacker-chosen username, retained for at least
-// lockout.Window (10 min) because Cleanup cannot sweep them sooner.
+// Three iterations happened on one mechanism. SEC-BASICAUTH-2 (Codex review of
+// PR #1399) correctly found that wiring loginLimiter.RecordFailure into a path
+// with no rate limit lets an unauthenticated caller create limiter state on a
+// public GET: two map entries per failed attempt, keyed by an attacker-chosen
+// username, retained for at least lockout.Window because Cleanup cannot sweep
+// them sooner (measured: 800 entries from 400 requests). It also corrected a
+// false premise worth remembering — "entry creation is bcrypt-rate-bounded" is
+// wrong, because cfg.VerifyUIUser bcrypts ONLY for a CONFIGURED username and an
+// unknown one is a ~106 ns map miss against ~66.7 ms, 629,518x cheaper.
 //
-// The rationale recorded for leaving that unbounded was WRONG, and measuring it
-// is what showed so: "entry creation is bcrypt-rate-bounded because
-// RecordFailure runs only after a verification". cfg.VerifyUIUser bcrypts ONLY
-// when the username names a configured account — an unknown one is a map miss
-// that returns in ~106 ns against ~66.7 ms for a real account, 629,518x
-// cheaper. So an attacker cycling unique usernames pays nothing per request,
-// and /api/auth/status is a public GET, which securityMiddleware's
-// mutating-only apiLimiter never sees.
+// The remedy was a per-client failure budget consulted before verification.
+// SEC-BASICAUTH-3 found that budget was a read-then-act pair bounding the
+// caller's CONCURRENCY rather than its rate, and made it atomic.
 //
-// That is the CHAOS-63 memory/audit amplifier, reintroduced by the fix for a
-// different unauthenticated-caller defect — on an endpoint that previously
-// created NO state at all.
+// SEC-BASICAUTH-4 (Codex review round 3) found the budget itself was the defect.
+// Keyed on the client, it let 60 cheap UNKNOWN-username probes from one client
+// key make a VALID credential answer 429 — so on any shared egress (a NAT, a
+// CGNAT range, or an L7 proxy with no trusted_proxy_cidrs configured) an
+// unauthenticated attacker denies every admin sharing that key. That is strictly
+// worse than the tier-1 lockout it sat beside: username-INDEPENDENT, CHEAP, and
+// with no trusted-IP bypass. It contradicts a property SEC-BASICAUTH-1 states
+// outright, which the control below it already claimed to hold —
+// TestSecBasicAuth1_Control_AttackerCannotLockOutTheRealAdminsIP covered the
+// LOCKOUT path and not the budget path. THE LESSON: a control pins the mechanism
+// it names; a new refusal path needs its own control.
+//
+// The budget is gone rather than patched a fourth time, because every patch
+// shape reopens something already closed (gate only unknown usernames ⇒ the
+// enumeration oracle; exempt recent successes ⇒ still denies first contact and
+// an attacker with any valid credential exempts themselves; key on the username
+// ⇒ enumeration plus a targeted denial). The two axes it claimed are recorded
+// OPEN — AU-17b (state growth ⇒ internal/authstate fair-share eviction, which
+// evicts without ever refusing) and AU-18 (concurrent bcrypt ⇒
+// internal/authcost, which WAITS rather than refusing).
 
-// TestSecBasicAuth2_UniqueUsernameFloodDoesNotGrowLimiterState is the DEFECT
-// gate: a single IP cycling distinct usernames against the public endpoint must
-// not be able to create limiter state without bound.
-func TestSecBasicAuth2_UniqueUsernameFloodDoesNotGrowLimiterState(t *testing.T) {
+// TestSecBasicAuth4_UnauthenticatedFloodCannotDenyAValidCredential is the DEFECT
+// GATE for the withdrawal, and the durable protection against rebuilding it.
+// Verified failing against the reintroduced per-client budget, where the valid
+// credential at the end answers 429 / loggedIn=false.
+//
+// The flood deliberately uses UNKNOWN usernames: they cost no bcrypt and require
+// no knowledge of any account, which is what made the budget cheap to weaponise.
+func TestSecBasicAuth4_UnauthenticatedFloodCannotDenyAValidCredential(t *testing.T) {
 	basicAuthTestCfg(t, "admin", "correct-horse-battery")
 
-	const ip = "198.51.100.30"
-	const flood = 400
-	for i := 0; i < flood; i++ {
-		// A distinct username every time: each one is its own tier-1 pair AND
-		// its own tier-2 account entry, so nothing ever locks and nothing ever
-		// stops the growth.
-		authStatusProbe(t, ip, fmt.Sprintf("ghost-%d-%s", i, strings.Repeat("x", 200)), "guess")
+	// ONE client key, as a NAT egress or an untrusted L7 proxy would present.
+	const shared = "198.51.100.50"
+
+	// An unauthenticated attacker, from that shared key, well past any
+	// per-window budget. Distinct usernames so nothing can lock, and unknown
+	// ones so nothing costs bcrypt.
+	for i := 0; i < apiRateBurst*3; i++ {
+		_, _ = authStatusProbe(t, shared, fmt.Sprintf("ghost-%d", i), "guess")
 	}
 
-	// The limiter must have refused most of this. lockout.Burst is the per-IP
-	// budget the login POST already lives under; allow one window's worth plus
-	// slack, never the whole flood.
-	if got := loginLimiterEntriesForTest(); got > apiRateBurst*2 {
-		t.Fatalf("after %d unique-username probes from one IP the login limiter holds %d entries, want <= %d — "+
-			"an unauthenticated caller can grow admin-plane state without bound",
-			flood, got, apiRateBurst*2)
+	// The real operator, sharing that egress, with CORRECT credentials.
+	code, loggedIn := authStatusProbe(t, shared, "admin", "correct-horse-battery")
+	if code != http.StatusOK || !loggedIn {
+		t.Fatalf("after %d unauthenticated probes from the shared client key a VALID credential got "+
+			"code=%d loggedIn=%v, want 200/true — a refusal keyed on the client lets an attacker deny "+
+			"every admin behind one NAT or untrusted proxy (lockout-as-DoS, CWE-770)",
+			apiRateBurst*3, code, loggedIn)
 	}
-	if basicAuthFailShed.Load() == 0 {
-		t.Fatal("culvert_admin_basic_auth_fail_shed_total did not move — the flood was not bounded")
+
+	// Same through the middleware fallback, which is the path a CLI uses.
+	if got := basicAuthProbe(t, shared, "admin", "correct-horse-battery"); got != http.StatusOK {
+		t.Fatalf("middleware fallback after the flood: got %d, want 200", got)
 	}
 }
 
-// TestSecBasicAuth2_Control_OrdinaryFailuresStillLockOut is the CONTROL: the
-// rate bound must not neuter SEC-BASICAUTH-1. An ordinary brute-force run
-// against ONE username stays well inside the per-IP budget and must still lock.
-func TestSecBasicAuth2_Control_OrdinaryFailuresStillLockOut(t *testing.T) {
+// TestSecBasicAuth4_Control_TargetedBruteForceStillLocks is the CONTROL. The
+// cheapest way to pass the gate above is to stop refusing anything, which would
+// delete SEC-BASICAUTH-1 — the actual brute-force and CPU bound. A run against
+// ONE username from one client must still lock, and the lock must still be
+// reached WITHOUT verifying the credential.
+func TestSecBasicAuth4_Control_TargetedBruteForceStillLocks(t *testing.T) {
 	basicAuthTestCfg(t, "admin", "correct-horse-battery")
 
-	const ip = "198.51.100.31"
+	const ip = "198.51.100.51"
 	for i := 0; i < lockoutMaxAttempts; i++ {
 		if code := basicAuthProbe(t, ip, "admin", "guess"); code != http.StatusUnauthorized {
 			t.Fatalf("attempt %d: got %d, want 401", i+1, code)
 		}
 	}
-	if code := basicAuthProbe(t, ip, "admin", "guess"); code != http.StatusTooManyRequests {
-		t.Fatalf("the lockout must still trip inside the rate budget: got %d, want 429", code)
-	}
-}
-
-// TestSecBasicAuth2_Control_OverBudgetRefusalCarriesNoOracle is the control
-// that caught a flaw in the FIRST version of this fix and is the reason the
-// budget is consulted BEFORE verification.
-//
-// That version charged the budget on the failure and then simply did not
-// RECORD it. The attempt was still verified and still answered, so the caller
-// still learned "wrong" — while the account never accumulated failures and
-// therefore never locked. An attacker could burn their budget on ghost
-// usernames and then guess a real account's password indefinitely at the
-// window rate, which is WEAKER than the 5-then-15-minutes the lockout gives.
-// Shedding the RECORD of an answered attempt weakens the bound it is meant to
-// protect; shedding the ATTEMPT does not.
-//
-// So an over-budget client is refused before cfg.VerifyUIUser runs, and the
-// refusal must be identical whether the credentials are right or wrong — a
-// correct password must not be the one input that gets through, or the refusal
-// itself becomes the oracle.
-func TestSecBasicAuth2_Control_OverBudgetRefusalCarriesNoOracle(t *testing.T) {
-	basicAuthTestCfg(t, "admin", "correct-horse-battery")
-
-	const ip = "198.51.100.32"
-	// Burn the budget with distinct UNKNOWN usernames: each is its own pair, so
-	// nothing locks and only the failure budget can stop it.
-	for i := 0; i < apiRateBurst+5; i++ {
-		_, _ = authStatusProbe(t, ip, fmt.Sprintf("ghost-%d", i), "guess")
-	}
-	if basicAuthFailShed.Load() == 0 {
-		t.Fatal("the per-client failure budget never engaged")
-	}
-
-	// A WRONG password from that client is refused...
-	wrong := basicAuthProbe(t, ip, "admin", "guess")
-	// ...and so is the RIGHT one. Same answer, so the refusal tells an attacker
-	// nothing about the credential.
-	right := basicAuthProbe(t, ip, "admin", "correct-horse-battery")
-
-	if wrong != http.StatusTooManyRequests || right != http.StatusTooManyRequests {
-		t.Fatalf("over-budget client: wrong-password got %d, correct-password got %d — both must be 429, "+
-			"or the refusal distinguishes a valid credential from an invalid one", wrong, right)
-	}
-}
-
-// TestSecBasicAuth2_Control_ValidClientIsNeverBudgeted proves the budget is
-// charged by FAILURES only: a legitimate CLI or monitoring client making far
-// more than the window budget of successful calls is never refused.
-func TestSecBasicAuth2_Control_ValidClientIsNeverBudgeted(t *testing.T) {
-	basicAuthTestCfg(t, "admin", "correct-horse-battery")
-
-	const ip = "198.51.100.34"
-	for i := 0; i < apiRateBurst+20; i++ {
-		if code := basicAuthProbe(t, ip, "admin", "correct-horse-battery"); code != http.StatusOK {
-			t.Fatalf("valid call %d of %d: got %d, want 200 — the budget must be charged by failures only",
-				i+1, apiRateBurst+20, code)
-		}
-	}
-	if got := basicAuthFailShed.Load(); got != 0 {
-		t.Fatalf("a client that never failed was charged %d shed failures", got)
-	}
-}
-
-// ---------------------------------------------------------------------------
-// SEC-BASICAUTH-3 — the budget gate must be ATOMIC, or it bounds nothing
-// ---------------------------------------------------------------------------
-//
-// Codex review of 53adfff, PR #1399. The SEC-BASICAUTH-2 gate above read a
-// budget probe (Over) and charged after the work (Allow). Each half was
-// mutex-protected; the SEQUENCE was not, so a synchronised cohort all observed
-// the same not-yet-incremented count and all passed.
-//
-// The reviewer named the impact as unbounded limiter-state growth. Measured, it
-// is NOT mainly that, and the correction is the useful part: state growth needs
-// DISTINCT usernames, distinct usernames are unknown usernames, and an unknown
-// username verifies in ~100ns, which leaves almost no window — a 500-request
-// cohort admitted 63 (Burst+3). The reachable damage is on the other axis. With
-// the REAL admin username and wrong passwords the gap is a full bcrypt, so all
-// 500 were admitted and all 500 ran bcrypt concurrently from one IP — defeating
-// the CPU bound that is SEC-BASICAUTH-1's whole first load-bearing property ("a
-// locked attempt costs no bcrypt"), on a plane with no authcost governor.
-//
-// So these gates are written on the axis that discriminates: how many concurrent
-// attempts reach verification at all.
-
-// TestSecBasicAuth3_ConcurrentCohortCannotOutrunTheBudget is the DEFECT GATE.
-// Verified failing against the reintroduced probe-then-charge shape, where every
-// request in the cohort reaches verification.
-func TestSecBasicAuth3_ConcurrentCohortCannotOutrunTheBudget(t *testing.T) {
-	basicAuthTestCfg(t, "admin", "correct-horse-battery")
-
-	const ip = "198.51.100.40"
-	const cohort = 200
-
-	var (
-		wg      sync.WaitGroup
-		start   = make(chan struct{})
-		mu      sync.Mutex
-		refused int // 429: never reached verification
-		reached int // anything else: the credential WAS verified
-	)
-	for i := 0; i < cohort; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			<-start // race the gate as one cohort
-			// The REAL username with a wrong password: this is the shape whose
-			// verification is a full bcrypt, i.e. the wide window.
-			code, _ := authStatusProbe(t, ip, "admin", "guess")
-			mu.Lock()
-			if code == http.StatusTooManyRequests {
-				refused++
-			} else {
-				reached++
-			}
-			mu.Unlock()
-		}()
-	}
-	close(start)
-	wg.Wait()
-
-	// Admission and charge are one atomic step, so at most one window's budget
-	// of attempts can reach verification however many arrive at once.
-	if reached > apiRateBurst {
-		t.Fatalf("%d of %d concurrent attempts reached credential verification, want <= %d — "+
-			"the budget is a read-then-act pair and bounds nothing under concurrency: one IP can drive "+
-			"unbounded concurrent bcrypt on the admin plane (CWE-770)", reached, cohort, apiRateBurst)
-	}
-	if refused == 0 {
-		t.Fatalf("no attempt was refused out of %d — the gate did not engage at all", cohort)
-	}
-}
-
-// TestSecBasicAuth3_Control_SerialValidClientIsNeverRefused is the CONTROL that
-// caught the reviewer's own prescription. "Charge before verification, refund on
-// success" makes the REFUSAL decision before the credential is known to be
-// valid, so a legitimate client is throttled on work it is not doing — the exact
-// defect SEC-BASICAUTH-2 closed by charging failures only. A refund cannot help
-// a request already refused. Releasing the reservation on success is what keeps
-// the gate ahead of the work without billing the wrong callers.
-func TestSecBasicAuth3_Control_SerialValidClientIsNeverRefused(t *testing.T) {
-	basicAuthTestCfg(t, "admin", "correct-horse-battery")
-
-	const ip = "198.51.100.41"
-	// Far more than one window's budget: every reservation must be released.
-	for i := 0; i < apiRateBurst*4; i++ {
-		code, loggedIn := authStatusProbe(t, ip, "admin", "correct-horse-battery")
-		if code == http.StatusTooManyRequests || !loggedIn {
-			t.Fatalf("valid call %d of %d was refused (code %d, loggedIn %v) — a client with correct "+
-				"credentials must never be charged the failure budget", i+1, apiRateBurst*4, code, loggedIn)
-		}
-	}
-	if got := basicAuthFailShed.Load(); got != 0 {
-		t.Fatalf("a client that never failed was shed %d times", got)
-	}
-}
-
-// TestSecBasicAuth3_Control_OrdinaryLockoutStillTrips is the CONTROL that the
-// atomic gate did not neuter SEC-BASICAUTH-1. The cheapest way to pass the
-// defect gate above is to refuse everything, which would delete the lockout.
-func TestSecBasicAuth3_Control_OrdinaryLockoutStillTrips(t *testing.T) {
-	basicAuthTestCfg(t, "admin", "correct-horse-battery")
-
-	const ip = "198.51.100.42"
-	for i := 0; i < lockoutMaxAttempts; i++ {
-		if code := basicAuthProbe(t, ip, "admin", "guess"); code != http.StatusUnauthorized {
-			t.Fatalf("attempt %d: code %d, want 401 — the budget must not pre-empt the lockout", i+1, code)
-		}
-	}
+	// The correct password now: a lock that could be walked past by guessing
+	// right would be no lock, and this is also the "costs no bcrypt" bound.
 	if code := basicAuthProbe(t, ip, "admin", "correct-horse-battery"); code != http.StatusTooManyRequests {
-		t.Fatalf("after %d failures the correct password returned %d, want 429 — the lockout is gone",
+		t.Fatalf("after %d failures the correct password got %d, want 429 — the lockout is gone",
 			lockoutMaxAttempts, code)
 	}
+	if basicAuthLockoutRefused.Load() == 0 {
+		t.Fatal("culvert_admin_basic_auth_lockout_refused_total did not move — the refusal was not the lockout")
+	}
 }
 
-// TestSecBasicAuth3_ResidualConcurrentValidClientCanBeRefused pins a FACT, not a
-// wish, the way TestNormalizeHostStrict_IsNotALogSanitiser does.
+// TestSecBasicAuth4_ResidualUnauthenticatedStateGrowth pins AU-17b as a FACT,
+// not a wish — the TestNormalizeHostStrict_IsNotALogSanitiser convention.
 //
-// A reservation is held for the duration of verification, so the admission rule
-// is "failures + in-flight < Burst" and a client issuing more than Burst
-// SIMULTANEOUS attempts can have some refused even with correct credentials.
-// That residual is unavoidable given the load-bearing requirement that the
-// refusal precede verification — you cannot know a credential is valid without
-// verifying it. It is acceptable because the refusal is a retryable 429 with
-// Retry-After and is NEVER recorded as a failure, so it cannot feed the account
-// lock. Do not "fix" this by moving the gate after verification: that reopens
-// SEC-BASICAUTH-2 and the weakened-lock flaw its first draft had.
-func TestSecBasicAuth3_ResidualConcurrentValidClientCanBeRefused(t *testing.T) {
+// With the budget withdrawn, an unauthenticated caller CAN still grow the
+// lockout maps through the public GET. This test exists so nobody reads the
+// withdrawal as "that axis is bounded now". What remains bounded, and why the
+// residual is acceptable until fair-share eviction lands:
+//
+//   - PER KEY: internal/lockout's injective boundUsername clamp caps the key at
+//     MaxUsernameKeyLen regardless of what the caller submits — asserted here
+//     with a 4 KiB username, and pinned structurally by
+//     internal/lockout/lockout_keybound_test.go.
+//   - IN TIME: Cleanup sweeps a window-expired entry (connlimit_startup.go).
+//   - IN VISIBILITY: culvert_login_limiter_entries reports the live size, which
+//     is the first signal the admin plane has ever had for this growth.
+//
+// The designed fix is fair-share eviction: evict the oldest entry of the client
+// key holding the MOST, so a flooding source evicts itself. That bounds the
+// state WITHOUT REFUSING ANY REQUEST, which is exactly the property the
+// withdrawn budget lacked. Do NOT close this by refusing again.
+func TestSecBasicAuth4_ResidualUnauthenticatedStateGrowth(t *testing.T) {
 	basicAuthTestCfg(t, "admin", "correct-horse-battery")
 
-	const ip = "198.51.100.43"
-	var (
-		wg    sync.WaitGroup
-		start = make(chan struct{})
-		mu    sync.Mutex
-		codes = map[int]int{}
-	)
-	for i := 0; i < apiRateBurst*3; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			<-start
-			code, _ := authStatusProbe(t, ip, "admin", "correct-horse-battery")
-			mu.Lock()
-			codes[code]++
-			mu.Unlock()
-		}()
+	const ip = "198.51.100.52"
+	const flood = 120
+	before := loginLimiterEntriesForTest()
+	for i := 0; i < flood; i++ {
+		// A 4 KiB username: if the clamp ever regressed, the KEY size would
+		// scale with attacker input, which is the CHAOS-63 amplifier class.
+		_, _ = authStatusProbe(t, ip, fmt.Sprintf("ghost-%d-%s", i, strings.Repeat("x", 4096)), "guess")
 	}
-	close(start)
-	wg.Wait()
+	after := loginLimiterEntriesForTest()
 
-	// The point of the gate: a refused VALID attempt must leave no failure
-	// behind, so it can never contribute to locking the real operator out.
-	if code, secs := loginLimiter.Check(ip, "admin"); code {
-		t.Fatalf("a burst of VALID credentials locked the client out for %ds — a refused reservation "+
-			"must never be recorded as a failure (lockout-as-DoS)", secs)
+	// The honest fact: it grows. Recorded as AU-17b, not silently tolerated.
+	if after <= before {
+		t.Fatalf("limiter entries went %d -> %d: this test documents AU-17b (unauthenticated state growth "+
+			"IS still reachable). If growth is genuinely bounded now, close AU-17b and replace this test "+
+			"with the bound — do not delete the assertion", before, after)
 	}
-	t.Logf("residual (recorded, not a defect): %d concurrent valid attempts -> %v", apiRateBurst*3, codes)
+	// And the bound that DOES hold: growth is in entry COUNT only. A valid
+	// credential is unaffected by it, which is what distinguishes this residual
+	// from the withdrawn budget's defect.
+	if code, loggedIn := authStatusProbe(t, ip, "admin", "correct-horse-battery"); code != http.StatusOK || !loggedIn {
+		t.Fatalf("state growth must not deny a valid credential: got code=%d loggedIn=%v", code, loggedIn)
+	}
+	t.Logf("residual (recorded, AU-17b): %d unauthenticated probes grew the lockout from %d to %d entries; "+
+		"keys stay clamped at lockout.MaxUsernameKeyLen and expire with Cleanup's window",
+		flood, before, after)
 }

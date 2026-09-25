@@ -97,8 +97,6 @@ func rateLimitCleanupLoop(ctx context.Context) {
 				ssrf.CacheCleanup()
 				loginLimiter.Cleanup()
 				apiLimiter.Cleanup()
-				// SEC-BASICAUTH-2: the per-client credential-failure budget.
-				basicAuthFailLimiter.Cleanup()
 				enrollRateLimitCleanup()
 			})
 		}

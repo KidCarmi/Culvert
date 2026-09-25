@@ -306,16 +306,13 @@ func liveFeedWritePrometheus(w *strings.Builder) {
 	fmt.Fprintf(w, "# TYPE culvert_admin_basic_auth_lockout_refused_total counter\nculvert_admin_basic_auth_lockout_refused_total %d\n",
 		basicAuthLockoutRefused.Load())
 
-	// SEC-BASICAUTH-2: credential failures dropped WITHOUT being recorded
-	// because the client was over its per-client failure budget, and the live
-	// size of the state that budget protects. The caller sees an ordinary 401,
-	// so the counter is the only signal that a source is flooding the admin
-	// plane with unusable credentials; the gauge is what an operator watches to
-	// confirm the bound is holding.
-	fmt.Fprintf(w, "\n# HELP culvert_admin_basic_auth_fail_shed_total Admin-plane credential failures dropped without being recorded because the client exceeded its failure budget\n")
-	fmt.Fprintf(w, "# TYPE culvert_admin_basic_auth_fail_shed_total counter\nculvert_admin_basic_auth_fail_shed_total %d\n",
-		basicAuthFailShed.Load())
-	fmt.Fprintf(w, "# HELP culvert_login_limiter_entries Live tier-1 pair + tier-2 account entries held by the admin credential lockout\n")
+	// AU-17b: the live size of the lockout state an unauthenticated caller can
+	// grow through the public GET on /api/auth/status. This is the admin plane's
+	// only signal for lockout-map growth, and it is deliberately a GAUGE rather
+	// than a refusal — the per-client budget that used to refuse here was
+	// withdrawn as a shared-egress DoS lever (SEC-BASICAUTH-4), so visibility is
+	// what remains until fair-share eviction lands.
+	fmt.Fprintf(w, "\n# HELP culvert_login_limiter_entries Live tier-1 pair + tier-2 account entries held by the admin credential lockout\n")
 	fmt.Fprintf(w, "# TYPE culvert_login_limiter_entries gauge\nculvert_login_limiter_entries %d\n",
 		loginLimiter.EntryCount())
 }
