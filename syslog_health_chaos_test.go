@@ -150,6 +150,25 @@ func armSyslogFeed(t *testing.T, addr string) {
 		t.Fatalf("InitSyslog(%q): %v", addr, err)
 	}
 	syslogConfigured = addr
+
+	// CLOSE the writer this gate installed. snapshotObservabilityGlobals
+	// restores the POINTER (setActiveSyslog(old)) and nothing closes what it
+	// displaces, so without this every gate leaves a live drain goroutine
+	// behind — and the ones whose collector the gate then kills sit in the
+	// engine's 5 s reconnect loop re-dialling a dead address for the rest of
+	// the process. One leaked writer is invisible; this file installs ~19, and
+	// the determinism contract runs the package TWICE, so the tail of the root
+	// suite was executing against a background of steady dial churn that no
+	// test asked for. That is the `swapAutoExclude` fence-pollution rule in a
+	// new costume: a global a test installs is a global the test must take
+	// back, not merely stop pointing at.
+	//
+	// Cleanups run LIFO and this one is registered after the snapshot's, so it
+	// runs BEFORE the pointer is restored — the writer being closed is always
+	// the one this call installed, never a predecessor the suite still needs.
+	if installed := activeSyslog(); installed != nil {
+		t.Cleanup(func() { _ = installed.Close() })
+	}
 }
 
 // waitForDrops blocks until the writer has recorded at least n drops.
