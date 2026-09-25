@@ -7264,6 +7264,32 @@ shape (`OIDCDNSOutageIsAnsweredFromCache`,
 `StructuralValidatorDecidesWithoutAResolver` as the wall that keeps the
 structural validator from being "fixed" back into a resolver.
 
+**A fourth round was pure tooling, and it is worth recording because it is why
+the first three shipped.** The review round's fixes introduced four lint
+regressions — `goimports` twice (an import appended to the wrong group in
+`security.go` and `auth_idp.go`), `funlen` (the inline branch pushed
+`noteIdPMetadataOutcome` to 52 statements against a limit of 50) and `gocritic`
+`offBy1` twice (the SAML pre-flight wall sliced its target function out with
+bare `strings.Index` calls, which return -1 when the anchor is absent and would
+have left every assertion in that gate **vacuously true** — a wall that passes
+because it stopped looking). None was visible locally and `gofmt` sees none of
+them, because **the repo's pinned `golangci-lint` cannot be run against this
+module at all**: v2.5.0's own `go.mod` pins `toolchain go1.24.7`, so every local
+build of it — including with `GOTOOLCHAIN=local`, a cleared `GOCACHE` and
+`GOFLAGS=-a` — gets a Go 1.24 type checker, which either refuses the config's
+`go: "1.25"` outright or panics inside `go/types` on Go 1.26 source. The local
+lint gate is therefore structurally unavailable, and the only signal is a CI
+round trip.
+
+The workable substitute is to run the individual linters, which build against
+the current toolchain without complaint: `goimports -l` over the changed files,
+and `gocritic check -enable=offBy1,rangeValCopy,httpNoBody` over the package
+(filtering to the diff, since the CI gate is `--new-from-rev` and the tree
+carries ~137 legacy findings). That covers every class that bit this sweep.
+The general point is the one this file keeps making about gates: *a check that
+cannot be run before the push is not a gate, it is a notification* — and a
+sweep that adds walls should be most suspicious of the walls it cannot test.
+
 The new validator's one security-relevant job is classifying an IP LITERAL with
 no resolver, and the direction it must not get wrong is admitting a private one,
 so `StructuralValidatorClassifiesOnlyLiterals` pins the IPv4-mapped IPv6 forms
