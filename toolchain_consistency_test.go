@@ -170,6 +170,36 @@ func toolchainViolations(in toolchainInputs) []string {
 	return v
 }
 
+// binaryCheckRe is the post-build check: the compiler recorded in the binary
+// must equal the go.mod toolchain PIN, read from the file. Comparing with `go
+// env GOVERSION` instead only proves the binary matches whatever compiler ran,
+// which is exactly what a later GOTOOLCHAIN switch would change.
+var binaryCheckRe = regexp.MustCompile(`(?m)^RUN want="\$\(sed -n 's/\^toolchain //p' \S+\)" && go version (\S+) && \\\n\s+\[ -n "\$\{want\}" \] && \[ "\$\(go version (\S+) \| cut -d' ' -f2\)" = "\$\{want\}" \]`)
+
+// gotoolchainAssignRe finds any GOTOOLCHAIN assignment in a Dockerfile stage:
+// an ENV/ARG instruction or a `GOTOOLCHAIN=` prefix inside a RUN.
+var gotoolchainAssignRe = regexp.MustCompile(`GOTOOLCHAIN\s*=\s*(\S*)`)
+
+// gotoolchainReassignments rejects every GOTOOLCHAIN assignment in a golang
+// builder stage other than the single `ENV GOTOOLCHAIN=local`. A later
+// `ENV GOTOOLCHAIN=auto`, an `ARG GOTOOLCHAIN=…` or a `RUN GOTOOLCHAIN=go1.x go
+// build` would let the go command pick another compiler after the assertion
+// passed; the binary check would then catch it only by accident of ordering.
+func gotoolchainReassignments(where, body string) []string {
+	var v []string
+	seenLocal := false
+	for _, ins := range dockerInstructions(body) {
+		for _, m := range gotoolchainAssignRe.FindAllStringSubmatch(ins, -1) {
+			if !seenLocal && regexp.MustCompile(`^ENV\s+GOTOOLCHAIN=local\s*$`).MatchString(strings.TrimSpace(ins)) {
+				seenLocal = true
+				continue
+			}
+			v = append(v, fmt.Sprintf("%s: conflicting GOTOOLCHAIN assignment %q (only the one `ENV GOTOOLCHAIN=local` is allowed)", where, "GOTOOLCHAIN="+m[1]))
+		}
+	}
+	return v
+}
+
 func dockerToolchainViolations(docker map[string]string, want string) []string {
 	var v []string
 	var stages []golangStage
@@ -213,9 +243,10 @@ func dockerToolchainViolations(docker map[string]string, want string) []string {
 		case build >= 0 && assert > build:
 			v = append(v, where+": the compiler assertion runs after `go build`")
 		}
-		if !regexp.MustCompile(`(?m)^RUN go version \S+ && `).MatchString(s.body) {
-			v = append(v, where+": missing the check of the compiler recorded in the built binary")
+		if !binaryCheckRe.MatchString(s.body) {
+			v = append(v, where+": missing the check of the compiler recorded in the built binary against the go.mod toolchain line")
 		}
+		v = append(v, gotoolchainReassignments(where, s.body)...)
 	}
 	if len(images) > 1 {
 		list := make([]string, 0, len(images))
@@ -371,7 +402,18 @@ func TestToolchain_RejectsConflictingDeclarations(t *testing.T) {
 		{"E2E builder drops the compiler assertion", "missing the compiler assertion",
 			replaceDocker("test/e2e/maint-agent/Dockerfile.e2e", "go env GOVERSION)\" && \\", "true)\" && \\")},
 		{"maintbuilder drops the recorded-compiler check", "missing the check of the compiler recorded",
-			replaceDocker("Dockerfile", "RUN go version /culvert-maint && ", "RUN true && ")},
+			replaceDocker("Dockerfile", "&& go version /culvert-maint && \\", "&& true && \\")},
+		{"binary check compares with the active compiler, not the pin", "missing the check of the compiler recorded",
+			replaceDocker("Dockerfile", `= "${want}" ]
+# No `+"`go mod tidy`", `= "$(go env GOVERSION)" ]
+# No `+"`go mod tidy`")},
+		{"a later ENV reassigns GOTOOLCHAIN", "conflicting GOTOOLCHAIN assignment \"GOTOOLCHAIN=auto\"",
+			replaceDocker("Dockerfile", "ARG TARGETOS\nARG TARGETARCH\nRUN if", "ARG TARGETOS\nARG TARGETARCH\nENV GOTOOLCHAIN=auto\nRUN if")},
+		{"the build RUN overrides GOTOOLCHAIN", "conflicting GOTOOLCHAIN assignment \"GOTOOLCHAIN=go",
+			replaceDocker("Dockerfile", "CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -buildvcs=false -ldflags=\"-s -w -X main.version",
+				"CGO_ENABLED=0 GOTOOLCHAIN=go"+other+" GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -buildvcs=false -ldflags=\"-s -w -X main.version")},
+		{"an ARG declares a GOTOOLCHAIN default", "conflicting GOTOOLCHAIN assignment",
+			replaceDocker("test/e2e/maint-agent/Dockerfile.e2e", "ENV GOTOOLCHAIN=local\n", "ENV GOTOOLCHAIN=local\nARG GOTOOLCHAIN=auto\n")},
 		{"agent go.mod names another toolchain", "cmd/culvert-maint/go.mod toolchain",
 			func(in *toolchainInputs) bool {
 				return replaceIn(&in.maintGoMod, "\ngo 1.25\n", "\ngo 1.25\n\ntoolchain go"+other+"\n")
