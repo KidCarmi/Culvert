@@ -2,7 +2,8 @@
 
 ## 0. Current status (authoritative)
 
-As of 2026-09-24, main `75dbb8b` (#1486: targeted report dispatches skip the
+As of 2026-09-24, main `6ec745d` (#1487) plus the toolchain-consistency
+change (§20); before it, main `75dbb8b` (#1486: targeted report dispatches skip the
 trend) plus the first natural-run measurements (§18.3–§18.5) and the
 conformance-fixture change (§19). This table
 is the one place that says where the plan stands. The sections below it are
@@ -15,7 +16,8 @@ tense disagrees with this table, this table wins.
 | Release publication gating (§5a) | Yes: one predicate over `.github/release-evidence.txt` via `require-release-evidence.sh`; `docker` pushes candidate tags only; `promote-image` moves `latest`/`main`/semver onto the tested digest; every asset is staged as a draft | Yes: on `3febe59` main QA failed, so `Auto-Tag Release` and `Promote moving channels (main)` both refused at their evidence step and nothing was promoted (CI run 35905503220) | — | Main-to-tag build-once promotion: a tag still rebuilds the image the main push already built and tested |
 | Stage 1: QA scheduling (§8) | Yes | Yes | — | — |
 | Stages 2A/2B: coverage from the race run, race ownership by event (§9–§10) | Yes | Yes | — | — |
-| Stage 3: native cross-compilation in the production image (§11) | Yes: `FROM --platform=$BUILDPLATFORM`, `-trimpath -buildvcs=false` | Yes (byte-identical binaries, measured) | — | Toolchain consistency: CI and `go.mod` use Go 1.26.6; the production and E2E images build with `golang:1.27-alpine` |
+| Stage 3: native cross-compilation in the production image (§11) | Yes: `FROM --platform=$BUILDPLATFORM`, `-trimpath -buildvcs=false` | Yes (byte-identical binaries, measured) | — | — |
+| Toolchain consistency (§20) | Yes: the root `go.mod` `toolchain go1.26.8` line drives CI, release binaries and every builder image (`golang:1.26.8-alpine` pinned by digest); walled with negative controls | Locally (both arches reproducible, both binaries record `go1.26.8`); CI qualification on this change's PR | Performance samples before this change ran Go 1.26.6 (§20) | Moving to Go 1.27 needs a lint-tool upgrade first (§20); the installer's operator-side source-build fallback stays unpinned |
 | Stage 4: E2E image dependency discipline and recipe parity (§12) | Yes | Yes | — | — |
 | Stages 5A–5C: sharded race + coverage in QA and in the Fast PR Gate (§13–§15) | Yes: 4 root shards + a non-root lane on one engine | Yes | — | The non-root lane is now the Fast gate's critical path (§18.5); root-state/package isolation (`internal/mcp/execution` is 72 % of the lane) |
 | Stage 6A: small restore fixtures by default (§16) | Yes | Yes | — | — |
@@ -38,8 +40,9 @@ Remaining backlog, in the order the measurements support (§18.5):
    same workflow and source files independently.
 5. **Main-to-tag build-once promotion** — a tag still rebuilds the image the
    main push already built and tested.
-6. **Toolchain consistency** — CI and `go.mod` use Go 1.26.6; the production
-   and E2E images build with `golang:1.27-alpine`.
+6. ~~**Toolchain consistency**~~ — done (§20): one pinned compiler, Go
+   1.26.8. Follow-up: adopting Go 1.27 needs the pinned golangci-lint
+   upgraded first.
 
 None is implemented by the closeout. Unrelated test investigations stay
 outside this plan.
@@ -984,7 +987,8 @@ is current), the runtime `apk upgrade`/`apk add` against the live Alpine
 repositories, and the module proxy (bounded by `go.sum`, which now cannot
 change during the build). CI logs record the digests and `go version` each run
 actually resolved. Pinning base images by digest is a production-wide decision
-and is not taken here.
+and is not taken here. *(Superseded for the Go builder image by §20: it is now
+pinned by digest. `alpine:3.24` and the runtime `apk` steps remain mutable.)*
 
 ### Measurement
 
@@ -2734,3 +2738,168 @@ discarded and repeated after freeing space.
 files on disk, so every new test file changes the MCP ledger's
 `SCANNED (N files)` claim. That is its design. This change moves it to
 2,605.
+
+## 20. Toolchain consistency: one pinned Go compiler
+
+**Before (main `6ec745d`).** Nothing tied the compiler that CI qualifies to
+the compiler that ships:
+
+| Path | How it chose Go | What it actually used |
+|---|---|---|
+| CI jobs (`setup-go-cache`, `go-version-file: go.mod`) | the `go 1.26.6` line | Go 1.26.6 (`Setup go version spec 1.26.6`) |
+| Release binaries (`build-release-binaries`) | same setup | Go 1.26.6 |
+| Production `builder` + `maintbuilder` | floating `golang:1.27-alpine` | Go 1.27.1: digest `8a5910f3…` resolved in main's publish (run 35880661983) and E2E (run 36041845052) logs, `go version go1.27.1` |
+| Maintenance E2E builder | same floating tag | Go 1.27.1 |
+| Agent module | `go 1.25` is its language minimum, not a compiler | built by whichever of the above ran it |
+
+So every image binary came from an unqualified compiler, and govulncheck
+scanned a different standard library from the one shipped.
+
+**Choice: Go 1.26.8.** It is the latest patch of the 1.26 line, published
+2026-08-28, the same day as 1.27.1 (Go module proxy
+`golang.org/toolchain` metadata). Security fixes ship to both supported lines
+together, and 1.26 stays supported until Go 1.28.
+
+Go 1.27.1 was tried first, because production already used it. Both modules
+`go vet` clean on it, and the agent's tests pass. But the Fast gate's pinned
+`golangci-lint` v2.5.0, even rebuilt with 1.27.1, cannot type-check the 1.27
+standard library:
+
+> could not load export data … export data version 4 is greater than maximum
+> supported version 2
+
+Taking 1.27 therefore means a lint-tool upgrade first, a separate change.
+Choosing 1.26.8 moves the shipped compiler back from 1.27.1 to the line CI
+qualifies. That is deliberate, not a match of numbers: after this change
+every shipped binary comes from the compiler the tests, race runs, lint and
+govulncheck ran on. The module minimums (`go 1.26.6`, agent `go 1.25`) are
+unchanged.
+
+**What changed.**
+
+- **One source.** The root `go.mod` has `toolchain go1.26.8`.
+  `actions/setup-go` reads that line, but only while `GOTOOLCHAIN` is not yet
+  `local`; it exports `GOTOOLCHAIN=local` itself afterwards. So no workflow
+  may set `GOTOOLCHAIN` before it runs.
+- **Pinned images.** `builder`, `maintbuilder` and the E2E builder use
+  `golang:1.26.8-alpine@sha256:8ac98ca534ac3f51e1f420a1dd2c15e74c75cfa0f23f3ad27eb5d7236c349a0c`.
+  Its index covers linux/amd64 and linux/arm64 (plus others), and the image
+  config says `GOLANG_VERSION=1.26.8`, `GOTOOLCHAIN=local`.
+- **Checks inside each builder stage.** Every stage:
+  - states `ENV GOTOOLCHAIN=local`;
+  - refuses to build unless `go env GOVERSION` equals the go.mod toolchain
+    line (`maintbuilder` reads the root go.mod, copied to
+    `/tmp/culvert-root.go.mod`);
+  - checks the compiler recorded in the built binary.
+- **CI checks.**
+  - `setup-go-cache` prints and verifies the compiler in every job that uses
+    it.
+  - `build-release-binaries` verifies the compiler recorded in the proxy and
+    agent binaries before they are hashed, attested or signed.
+- **The agent module deliberately has no `toolchain` line.** With the default
+  `GOTOOLCHAIN=auto`, one would send an older host Go to download 1.26.8, and
+  the installer's offline source-build fallback would lose its fast host path.
+  The agent's controlled builds are pinned through the root line and the
+  checks above.
+
+**The wall.** `toolchain_consistency_test.go` requires:
+
+- go.mod has exactly one stable `toolchain` line, not older than the `go`
+  line;
+- the agent go.mod has no toolchain line, or the same one;
+- every golang stage in every Dockerfile uses a digest-pinned
+  `golang:<X.Y.Z>-alpine` matching that version, the same image everywhere,
+  `ENV GOTOOLCHAIN=local`, the assertion before `go build`, and the
+  recorded-compiler check;
+- every `actions/setup-go` use reads `go-version-file: go.mod`, with no
+  literal version;
+- no workflow or action sets or assigns `GOTOOLCHAIN`;
+- the last step of both composite actions is the verification.
+
+It also fails if any Dockerfile that builds Go is not on its list. Sixteen
+negative controls feed it conflicting declarations derived from the real
+files, and each must be rejected:
+
+- a different compiler in go.mod, a missing toolchain line, a release
+  candidate;
+- a floating tag, a tag without a digest, another version's tag, divergent
+  digests between stages or between production and E2E;
+- a dropped `GOTOOLCHAIN=local`, compiler assertion or binary check;
+- an agent toolchain conflict;
+- `GOTOOLCHAIN` set in a workflow `env`, a literal `go-version`;
+- either composite action no longer verifying.
+
+The cross-build wall (§11) now reads the builder `FROM` lines from the file
+instead of restating the tag.
+
+**Validation (local, Go 1.26.8).**
+
+| Check | Result |
+|---|---|
+| Proxy + agent, linux/amd64 and linux/arm64, each built twice with the release flags | byte-identical per arch; `go version` reports `go1.26.8` for all four; arm64 binaries are static AArch64 ELF |
+| In-build assertion, as in the Dockerfile | passes on go1.26.8; exits 1 on go1.27.1 |
+| `go mod tidy -diff`, root and agent | clean |
+| `golangci-lint` v2.5.0 `--new-from-rev origin/main` | 0 issues on go1.26.8; typecheck failure on go1.27.1 (above) |
+| Agent module tests (`cd cmd/culvert-maint && go test ./...`) | pass on go1.26.8 and on go1.27.1 |
+| Full suite, `go test -count=1 -shuffle=20260421 ./...`, `GOTOOLCHAIN=local` go1.26.8 | **passed**: all 110 packages, 517 s wall (root package 466 s), no failures |
+
+**Validation (CI, PR #1488, head `c3d07f2`).** Docker image builds need
+BuildKit, which the authoring session cannot run, so they were qualified on
+the PR. Every compiler line in every job reads go1.26.8. The only other
+version in the logs is go1.23.7, the runner's Docker Engine, not a Culvert
+build.
+
+| Job | Evidence from its log |
+|---|---|
+| Deep · build image (production `Dockerfile`, amd64) | `builder`: `compiler: go1.26.8 (go.mod toolchain: go1.26.8)`, then `culvert: go1.26.8`; `maintbuilder`: the same assertion, then `/culvert-maint: go1.26.8` |
+| Fast · fmt + vet + build | `Setup go version spec 1.26.8`; `Go compiler: go1.26.8 (go.mod toolchain: go1.26.8, GOTOOLCHAIN=local)`; the `GOARCH=arm64` compile passed |
+| Agent-driven container update (maintenance E2E, `Dockerfile.e2e`) | host: the same `Go compiler:` line; image: `compiler: go1.26.8 (go.mod toolchain: go1.26.8)`, `culvert: go1.26.8` in both the v1 and v2 builds |
+| Deep · determinism (shuffle, count=2) | the same `Go compiler:` line; `build determinism OK (proxy)` and `(maint)`; root package passed in 636 s on the re-run |
+| Fast · go test -race (sharded), coverage floors, lint, govulncheck + gosec; the other maintenance and catalog E2E jobs | passed |
+
+The first determinism attempt failed in the root package after 752 s; every
+other package passed. Which test failed is not known: its block lies outside
+the retrievable log tail, and the log artifact's storage host is not
+reachable from the authoring session. Replaying the same commit with the
+same shuffle seed (`-count=2 -shuffle=1790277421444712900`, go1.26.8) passed
+locally in 904 s. The one permitted re-run passed. The failure is recorded
+here as unattributed and load-dependent; it was not fixed or suppressed.
+
+**Performance comparisons.** Every sample in §18.4 and §19 ran Go 1.26.6.
+The report's cohort key records the release line (`go1.26`) by design (§18.1),
+so 1.26.6 and 1.26.8 runs share a cohort; the exact version stays in each
+report's `toolchain` field. Any before/after comparison across this change
+must state both exact versions. No timing benefit is claimed: this is a
+consistency change.
+
+**Upgrade procedure** (one reviewable change):
+
+1. Pick the release from the Go module proxy (`golang.org/toolchain` list,
+   or go.dev/dl). Confirm the CI analysis tools support it: build the pinned
+   golangci-lint with the new compiler and run it. That is the step 1.27
+   fails today.
+2. Set `toolchain goX.Y.Z` in the root `go.mod`.
+3. Resolve the digest of `golang:X.Y.Z-alpine` (the manifest-list digest,
+   for example `docker buildx imagetools inspect golang:X.Y.Z-alpine`), check
+   that the index has linux/amd64 and linux/arm64, and replace the three
+   builder `FROM` lines with `golang:X.Y.Z-alpine@sha256:<digest>`.
+4. Run `go test -run 'TestToolchain_|TestDockerfileCrossBuild' .`. It fails
+   on any line left behind.
+5. Let the PR's gates qualify it; the logs name the compiler at every step.
+
+**Rollback.** Revert the PR. Images then build on the floating
+`golang:1.27-alpine` (Go 1.27.1 today) and CI on the go.mod `go` line (Go
+1.26.6), the unqualified split described above.
+
+**Remaining, outside this change.**
+
+- Adopting Go 1.27 needs the golangci-lint upgrade first.
+- The installer's operator-side source-build fallback
+  (`scripts/install.sh`, `CULVERT_GO_IMAGE` default `golang:1.25`, or host
+  Go) builds an unsigned local agent with its own compiler. It is kept as is,
+  so its air-gap behaviour is unchanged.
+- The runtime `alpine:3.24` image and its `apk` steps remain mutable (a
+  runtime-image refresh).
+- `api-contract.yml` and `pr-api-governance.yml` call `actions/setup-go@v7`
+  by tag. They read the same go.mod line, so their compiler agrees, but the
+  action itself is not SHA-pinned.

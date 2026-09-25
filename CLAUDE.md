@@ -127,7 +127,7 @@ docker compose up -d
 ## Code Conventions
 
 - **Package**: Everything is `package main` (flat layout)
-- **Go version**: 1.26 (go.mod; bumped from the prior 1.25.12 govulncheck pin as a side effect of the go.etcd.io/etcd/server/v3 v3.7.1 dependency update, which raised its own minimum Go requirement)
+- **Go version**: the build compiler is the root `go.mod` `toolchain` line (go1.26.8) — CI (setup-go reads it), the release binaries and every Docker builder stage (`golang:1.26.8-alpine@sha256:…`, pinned by digest) use exactly that compiler, each verifies it, and `toolchain_consistency_test.go` fails any disagreement; the `go 1.26.6` line is the module's minimum language version (raised by the go.etcd.io/etcd/server/v3 v3.7.1 update), not the compiler. Never set `GOTOOLCHAIN` in a workflow (setup-go then ignores the toolchain line). Upgrade procedure: `roadmap/CI-REDESIGN.md` §20
 - **Logging**: Use `logger.Printf()`, never `log.Printf()` or `fmt.Printf()`
 - **User input in logs**: Wrap with `sanitizeLog(s)` and use `%q` format verb (CWE-117 prevention; sanitizeLog's leading `strings.ReplaceAll` is the sanitiser CodeQL recognises — it is the FIRST statement and therefore on every return path, and it must stay that way: see the single-pass note in Architecture Notes)
 - **CodeQL compliance**: For values that flow through objects (e.g. `rl.Limit()`, `added.Priority`), inline `strings.ReplaceAll` or `fmt.Sprintf` + `strings.ReplaceAll` at the call site so CodeQL sees the sanitiser
