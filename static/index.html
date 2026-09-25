@@ -2626,12 +2626,13 @@ Firefox (all platforms):
         <div class="panel-header"><span class="panel-title">Config Versions</span></div>
         <div class="panel-body">
           <p class="hint">
-            Every configuration change creates a numbered snapshot. You can compare versions and roll back to any previous state.
+            Changes to versioned settings create a numbered snapshot. You can compare versions and roll back the settings captured in a snapshot; settings listed below the version table are not restored by rollback.
           </p>
           <div id="config-versions-list" style="margin-bottom:12px">
             <em style="color:var(--muted);font-size:.82rem">Loading versions...</em>
           </div>
           <div id="config-diff-result" style="display:none;margin-top:12px"></div>
+          <div id="config-rollback-scope-note" style="display:none;margin-top:10px;font-size:.78rem;color:var(--muted)"></div>
         </div>
       </div>
 
@@ -8105,8 +8106,45 @@ async function importConfig(input) {
 }
 
 // ── Config Versioning ────────────────────────────────────────────────────
+// configRollbackExcluded caches the settings a config-version rollback
+// deliberately never touches (Finding 10.3 exclusions, AdminSettings-only
+// operational settings, and known off-registry state). null = not yet resolved, [] = known-empty, array =
+// known list. configRollbackScopePromise lets rollbackConfigVersion() await
+// an in-flight fetch instead of racing it (a click before the panel's own
+// background fetch resolves must not silently show an "everything moves"
+// dialog with no exclusion note).
+let configRollbackExcluded = null;
+let configRollbackScopeError = false;
+let configRollbackScopePromise = null;
+
+function loadConfigRollbackScope() {
+  const el = document.getElementById('config-rollback-scope-note');
+  configRollbackScopePromise = (async () => {
+    try {
+      const data = await api('/api/config/rollback-scope');
+      configRollbackExcluded = (data && data.excluded) || [];
+      configRollbackScopeError = false;
+      if (configRollbackExcluded.length === 0) { el.style.display = 'none'; return; }
+      const items = configRollbackExcluded.map(e =>
+        `<li><code>${escHtml(e.id)}</code> — ${escHtml(e.reason)}</li>`).join('');
+      // "including": the list is the set this appliance KNOWS about, not a
+      // proof that everything else rolls back.
+      el.innerHTML = `<details><summary>Settings not restored by rollback (by design), including these ${configRollbackExcluded.length}</summary>` +
+        `<ul style="margin:6px 0 0 18px;padding:0">${items}</ul></details>`;
+      el.style.display = 'block';
+    } catch (err) {
+      configRollbackExcluded = null;
+      configRollbackScopeError = true;
+      el.innerHTML = '<em style="color:var(--red);font-size:.82rem">Could not determine which settings rollback excludes — treat the scope as unknown.</em>';
+      el.style.display = 'block';
+    }
+  })();
+  return configRollbackScopePromise;
+}
+
 async function loadConfigVersions() {
   const el = document.getElementById('config-versions-list');
+  loadConfigRollbackScope();
   try {
     const versions = await api('/api/config/versions');
     if (!versions || versions.length === 0) {
@@ -8171,7 +8209,20 @@ function fmtDiffCell(v) {
 }
 
 async function rollbackConfigVersion(version) {
-  if (!await confirmAction('Rollback Configuration', `Roll back to config version v${version}? This will replace ALL current settings with the snapshot from v${version}. A new version will be created to record this rollback.`, 'Rollback')) return;
+  // Await rather than trust the cache: a click can arrive before the
+  // panel's own background fetch (loadConfigRollbackScope) resolves, and a
+  // stale/absent list must never be silently read as "nothing is excluded".
+  if (configRollbackScopePromise) { await configRollbackScopePromise; }
+  else { await loadConfigRollbackScope(); }
+  let scopeNote;
+  if (configRollbackScopeError) {
+    scopeNote = ' Note: could not determine which settings are excluded from rollback by design — treat the scope as unknown and check the list below the version table before relying on this rollback.';
+  } else if (configRollbackExcluded && configRollbackExcluded.length > 0) {
+    scopeNote = ` Note: some settings are not restored by rollback by design and will keep their current values, including ${configRollbackExcluded.slice(0, 3).map(e => e.id).join(', ')} — see the list below the version table.`;
+  } else {
+    scopeNote = '';
+  }
+  if (!await confirmAction('Rollback Configuration', `Roll back to config version v${version}? Rollback replaces only the settings captured in the v${version} snapshot; settings listed below the version table are not restored.${scopeNote} A new version will be created to record this rollback.`, 'Rollback')) return;
   try {
     const data = await api('/api/config/versions', {
       method: 'POST',
