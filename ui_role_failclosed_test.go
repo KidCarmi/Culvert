@@ -311,7 +311,7 @@ func driveMiddleware(t *testing.T, sessionRole string) (int, UIRole, bool) {
 		reached, seen = true, uiRole(r)
 	}))
 	req := httptest.NewRequest(http.MethodGet, "/api/stats", http.NoBody)
-	req.AddCookie(&http.Cookie{Name: uiSessionCookieName, Value: value})
+	req.AddCookie(&http.Cookie{Name: uiSessionCookieName, Value: value}) // #nosec G124 -- request-side test cookie, never sent to a browser
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	return rec.Code, seen, reached
@@ -396,7 +396,7 @@ func TestAuthStatus_UnenrolledSessionIsNotReportedAsAdmin(t *testing.T) {
 		t.Fatalf("encodeSession: %v", err)
 	}
 	req := httptest.NewRequest(http.MethodGet, "/api/auth/status", http.NoBody)
-	req.AddCookie(&http.Cookie{Name: uiSessionCookieName, Value: value})
+	req.AddCookie(&http.Cookie{Name: uiSessionCookieName, Value: value}) // #nosec G124 -- request-side test cookie, never sent to a browser
 	rec := httptest.NewRecorder()
 	apiAuthStatus(rec, req)
 

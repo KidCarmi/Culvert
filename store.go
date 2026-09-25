@@ -765,9 +765,9 @@ func roleEnrolled(r UIRole) bool {
 	return ok
 }
 
-// HasRole returns true when r's level is at least the level of min.
+// HasRole returns true when r's level is at least the level of minRole.
 //
-// BOTH SIDES FAIL CLOSED, and the `min` side is the half that used to not.
+// BOTH SIDES FAIL CLOSED, and the `minRole` side is the half that used to not.
 // rolePriority is a map, so an unenrolled key read as a plain index yields 0 —
 // which on the RECEIVER side is correct (an unknown role satisfies nothing) and
 // on the MIN side was inverted: a requirement nobody enrolled became a
@@ -783,8 +783,8 @@ func roleEnrolled(r UIRole) bool {
 // C2's uiMetadataEnforcement) and as the ROLE VALIDATOR on POST /api/auth/users
 // — where it already relied on the receiver half failing closed — so denying a
 // requirement no role can be checked against can only ever refuse, never admit.
-func (r UIRole) HasRole(min UIRole) bool {
-	required, ok := rolePriority[min]
+func (r UIRole) HasRole(minRole UIRole) bool {
+	required, ok := rolePriority[minRole]
 	if !ok {
 		return false
 	}
