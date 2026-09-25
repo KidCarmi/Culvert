@@ -10,7 +10,7 @@
 # /health is 200 — the Sev-1 safety property of a self-updating appliance.
 #
 # Kept as a tiny standalone image (no Go build) so it is cheap to build + push.
-FROM alpine:3.22
+FROM alpine:3.24
 RUN apk upgrade --no-cache && apk add --no-cache ca-certificates
 # A marker file makes the content (and therefore the registry digest) distinct
 # from any other alpine-based image in the repo.

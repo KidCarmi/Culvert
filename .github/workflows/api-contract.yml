@@ -4,8 +4,9 @@
 # The CORE contract gates (spec validation, style-lint, route coverage,
 # request/response/authz conformance, generated-artifact drift, exemption
 # expiry) are ordinary Go tests and therefore ALSO run inside the REQUIRED
-# `go test -race ./...` in pr-fast-gate.yml — so drift is already merge-blocking
-# there. This advisory workflow adds the fast, Go-native `make api-verify`
+# race suite in pr-fast-gate.yml (sharded since CI-REDESIGN stage 5C; every
+# test still runs, and the verdict refuses a missing one) — so drift is already
+# merge-blocking there. This advisory workflow adds the fast, Go-native `make api-verify`
 # summary plus the out-of-band breaking-change check (oasdiff), and is scoped to
 # PRs that touch the API surface. It is intentionally NOT a required check.
 # ─────────────────────────────────────────────────────────────────────────────
