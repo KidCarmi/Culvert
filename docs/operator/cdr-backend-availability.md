@@ -1,4 +1,4 @@
-# CDR backend availability (CHAOS-66)
+# CDR backend availability (CHAOS-67)
 
 How Culvert behaves when the Sluice CDR backend becomes slow, unreachable
 or unavailable — what it does to your traffic, what you will see, and how
@@ -20,7 +20,7 @@ When Culvert cannot reach any Sluice instance it applies **`fail_mode`**:
 | `closed` | The response is refused and the client receives a block page. |
 
 `fail_mode` governs **both** an in-flight call that fails **and** the case
-where every enrolled instance is already known to be down. Before CHAOS-66
+where every enrolled instance is already known to be down. Before CHAOS-67
 only the first honoured it: once the per-instance circuit breaker tripped,
 files were delivered regardless of `fail_mode`, silently. If you rely on
 `fail_mode: closed` as a compliance control, that is the behaviour change
@@ -118,7 +118,7 @@ the breaker or re-opens it.
 
 ### The recovery bug this document exists for
 
-Before CHAOS-66 that half-open probe slot was a **reservation that was
+Before CHAOS-67 that half-open probe slot was a **reservation that was
 never given back** unless a call outcome was reported — and almost nothing
 reported one. The admin CDR panel, the diagnostics row, the `/api/cdr/*`
 status endpoints and the proxy's own pre-flight check all took a slot and

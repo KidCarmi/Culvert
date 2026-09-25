@@ -247,7 +247,7 @@ func TestSafeCDRSanitize_BreakerOpenReturnsSkipped(t *testing.T) {
 		cdrClientMu.Unlock()
 	})
 
-	// CHAOS-66 INVERSION. This gate previously asserted SKIPPED, which
+	// CHAOS-67 INVERSION. This gate previously asserted SKIPPED, which
 	// pinned the DEFECT: an enrolled pool that can serve nothing means the
 	// CDR backend is DOWN, and passing the file through under a bare
 	// "SKIPPED" made the outcome independent of fail_mode, uncounted and

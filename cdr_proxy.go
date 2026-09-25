@@ -201,7 +201,7 @@ func safeCDRSanitize(ctx context.Context, req cdrRequestContext, body []byte, ct
 	// means CDR was never deployed on this node, while an enrolled pool
 	// that can serve nothing means the CDR backend is DOWN -- which is
 	// precisely the condition fail_mode governs.  cdrUnavailableOutcome
-	// makes that split (CHAOS-66).
+	// makes that split (CHAOS-67).
 	if !cfg.Enabled {
 		return cdrPassSkipped("SKIPPED")
 	}
@@ -407,7 +407,7 @@ func runCDRStage(r *http.Request, req *http.Request, body, scanBody []byte, ct, 
 	// path that carries production traffic, and a node configured
 	// `fail_mode: closed` still delivered every file during an outage.
 	// Availability is decided in safeCDRSanitize, once, where fail_mode is.
-	// Do not reintroduce an availability test here (CHAOS-66, Codex P1).
+	// Do not reintroduce an availability test here (CHAOS-67, Codex P1).
 	cfg := cdrActiveConfig()
 	if !cfg.Enabled {
 		return cdrStageDecision{body: body, scanBody: scanBody}

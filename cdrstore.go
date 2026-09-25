@@ -493,7 +493,7 @@ func setCDREnabledRuntime(on bool) error {
 //
 // Every caller of this function is an OBSERVER or an admin-triggered
 // one-off (status panels, the diagnostics row, the manual health probe,
-// the admin test upload).  Before CHAOS-66 it called Pick(), whose
+// the admin test upload).  Before CHAOS-67 it called Pick(), whose
 // Allow() RESERVES the breaker's half-open probe budget -- so an admin
 // refreshing the CDR panel consumed the single probe the breaker uses to
 // discover that Sluice recovered, then discarded the client without ever

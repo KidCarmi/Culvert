@@ -18,7 +18,7 @@ package main
 // reserving call site in the tree and it always releases.  Everything that
 // only needs "is CDR live?" -- cdrActiveClient(), the admin panels, the
 // diagnostics row -- goes through PeekAvailable(), which reserves nothing
-// and changes no breaker state (CHAOS-66).
+// and changes no breaker state (CHAOS-67).
 
 import (
 	"errors"
@@ -252,7 +252,7 @@ func (p *cdrClientPool) shutdown() {
 // every path (defer it), including the paths that never reach the wire:
 // a cache hit, an oversize skip, or a recovered panic.  Releasing after a
 // reported outcome is a harmless no-op; NOT releasing leaks the half-open
-// probe budget permanently (CHAOS-66).
+// probe budget permanently (CHAOS-67).
 func cdrPickForCall() (client *cdrPooledClient, release func()) {
 	pc, reserved, gen := cdrPool.Pick()
 	if pc == nil || !reserved {

@@ -1,6 +1,6 @@
 package main
 
-// CHAOS-66 — the CDR plane when the Sluice backend goes away.
+// CHAOS-67 — the CDR plane when the Sluice backend goes away.
 //
 // Three defects, each reproduced against the pre-fix tree:
 //
@@ -52,7 +52,7 @@ func openBreakerPastReset(t *testing.T, name string) (pc *cdrPooledClient, advan
 
 // ─── D1: the leaked half-open reservation ──────────────────────────────────
 
-func TestChaos66_ObserverDoesNotConsumeHalfOpenProbe(t *testing.T) {
+func TestChaos67_ObserverDoesNotConsumeHalfOpenProbe(t *testing.T) {
 	pc, _ := openBreakerPastReset(t, "sluice-1")
 	withTempPool(t, pc)
 
@@ -73,7 +73,7 @@ func TestChaos66_ObserverDoesNotConsumeHalfOpenProbe(t *testing.T) {
 	}
 }
 
-func TestChaos66_BreakerRecoversAfterTheRequestPathDeclinesToCall(t *testing.T) {
+func TestChaos67_BreakerRecoversAfterTheRequestPathDeclinesToCall(t *testing.T) {
 	// The pre-fix request path picked twice per request (runCDRStage's
 	// nil-check, then safeCDRSanitize) and threw the first away.
 	pc, advance := openBreakerPastReset(t, "sluice-1")
@@ -98,7 +98,7 @@ func TestChaos66_BreakerRecoversAfterTheRequestPathDeclinesToCall(t *testing.T) 
 	}
 }
 
-func TestChaos66_ReleaseIsIdempotentAndNeverGoesNegative(t *testing.T) {
+func TestChaos67_ReleaseIsIdempotentAndNeverGoesNegative(t *testing.T) {
 	pc, _ := openBreakerPastReset(t, "sluice-1")
 	withTempPool(t, pc)
 
@@ -118,7 +118,7 @@ func TestChaos66_ReleaseIsIdempotentAndNeverGoesNegative(t *testing.T) {
 	}
 }
 
-func TestChaos66_PermitsChangesNoBreakerState(t *testing.T) {
+func TestChaos67_PermitsChangesNoBreakerState(t *testing.T) {
 	pc, _ := openBreakerPastReset(t, "sluice-1")
 	before := pc.Breaker.Stats()
 	for i := 0; i < 50; i++ {
@@ -137,7 +137,7 @@ func TestChaos66_PermitsChangesNoBreakerState(t *testing.T) {
 	}
 }
 
-func TestChaos66_ReleaseOnlyGivesBackASlotThisCallTook(t *testing.T) {
+func TestChaos67_ReleaseOnlyGivesBackASlotThisCallTook(t *testing.T) {
 	// A pick admitted in the CLOSED state reserves nothing.  Releasing on
 	// its behalf would decrement a slot another goroutine is holding,
 	// handing out more concurrent probes than the budget allows -- the
@@ -171,7 +171,7 @@ func TestChaos66_ReleaseOnlyGivesBackASlotThisCallTook(t *testing.T) {
 	holderRelease()
 }
 
-func TestChaos66_ReleaseDoesNotCrossAnOpenGeneration(t *testing.T) {
+func TestChaos67_ReleaseDoesNotCrossAnOpenGeneration(t *testing.T) {
 	// A release that arrives after the breaker has completed a further
 	// open cycle belongs to a generation that no longer owns the counter.
 	pc := &cdrPooledClient{
@@ -202,7 +202,7 @@ func TestChaos66_ReleaseDoesNotCrossAnOpenGeneration(t *testing.T) {
 
 // ─── D2: an unavailable backend must obey fail_mode ────────────────────────
 
-func TestChaos66_AllInstancesUnavailableAppliesFailModeClosed(t *testing.T) {
+func TestChaos67_AllInstancesUnavailableAppliesFailModeClosed(t *testing.T) {
 	resetCDRAvailabilityForTest()
 	pc, _ := openBreakerPastReset(t, "sluice-1")
 	withTempPool(t, pc)
@@ -220,7 +220,7 @@ func TestChaos66_AllInstancesUnavailableAppliesFailModeClosed(t *testing.T) {
 	}
 }
 
-func TestChaos66_AllInstancesUnavailableAppliesFailModeOpen(t *testing.T) {
+func TestChaos67_AllInstancesUnavailableAppliesFailModeOpen(t *testing.T) {
 	resetCDRAvailabilityForTest()
 	pc, _ := openBreakerPastReset(t, "sluice-1")
 	withTempPool(t, pc)
@@ -237,7 +237,7 @@ func TestChaos66_AllInstancesUnavailableAppliesFailModeOpen(t *testing.T) {
 	}
 }
 
-func TestChaos66_UnavailableBypassIsCounted(t *testing.T) {
+func TestChaos67_UnavailableBypassIsCounted(t *testing.T) {
 	resetCDRAvailabilityForTest()
 	pc, _ := openBreakerPastReset(t, "sluice-1")
 	withTempPool(t, pc)
@@ -249,11 +249,11 @@ func TestChaos66_UnavailableBypassIsCounted(t *testing.T) {
 	_ = cdrUnavailableOutcome(CDRConfig{Enabled: true, FailMode: "open"})
 	if got := loadCDRStat(&statCDRUnavailable); got != before+1 {
 		t.Fatalf("culvert_cdr_unavailable_total did not move (%d -> %d); the bypass "+
-			"was silent on every surface before CHAOS-66", before, got)
+			"was silent on every surface before CHAOS-67", before, got)
 	}
 }
 
-func TestChaos66_EmptyPoolIsNotDeployedRatherThanAnOutage(t *testing.T) {
+func TestChaos67_EmptyPoolIsNotDeployedRatherThanAnOutage(t *testing.T) {
 	resetCDRAvailabilityForTest()
 	withTempPool(t) // nothing enrolled
 
@@ -278,7 +278,7 @@ func TestChaos66_EmptyPoolIsNotDeployedRatherThanAnOutage(t *testing.T) {
 
 // ─── D3: the alert's gate and its bounded dedup key ────────────────────────
 
-func TestChaos66_ErrorReasonClassIsBoundedAndNeverEchoesTheError(t *testing.T) {
+func TestChaos67_ErrorReasonClassIsBoundedAndNeverEchoesTheError(t *testing.T) {
 	allowed := map[string]bool{
 		"none": true, "file_too_large": true, "timeout": true, "unavailable": true,
 		"resource_exhausted": true, "unauthenticated": true, "permission_denied": true,
@@ -311,7 +311,7 @@ func TestChaos66_ErrorReasonClassIsBoundedAndNeverEchoesTheError(t *testing.T) {
 	}
 }
 
-func TestChaos66_CallFailureLogIsRateLimited(t *testing.T) {
+func TestChaos67_CallFailureLogIsRateLimited(t *testing.T) {
 	resetCDRAvailabilityForTest()
 	now := time.Unix(0, 0)
 	if !noteCDRCallFailure("unavailable", now) {
@@ -338,7 +338,7 @@ func TestChaos66_CallFailureLogIsRateLimited(t *testing.T) {
 	}
 }
 
-func TestChaos66_AlternatingReasonsCannotBypassTheRateLimit(t *testing.T) {
+func TestChaos67_AlternatingReasonsCannotBypassTheRateLimit(t *testing.T) {
 	// An unhealthy backend routinely alternates classes — a load-balanced
 	// pool answering Unavailable from one node and Internal from another.
 	// With one shared timestamp plus a last-reason field, every alternation
@@ -364,7 +364,7 @@ func TestChaos66_AlternatingReasonsCannotBypassTheRateLimit(t *testing.T) {
 	}
 }
 
-func TestChaos66_RateLimitTableIsBounded(t *testing.T) {
+func TestChaos67_RateLimitTableIsBounded(t *testing.T) {
 	// The reason vocabulary is closed, but the table must not be a memory
 	// leak if a future caller passes an unbounded string.
 	resetCDRAvailabilityForTest()
@@ -383,7 +383,7 @@ func TestChaos66_RateLimitTableIsBounded(t *testing.T) {
 	}
 }
 
-func TestChaos66_AlertIsGatedOnSubscriber(t *testing.T) {
+func TestChaos67_AlertIsGatedOnSubscriber(t *testing.T) {
 	// No webhook subscribes to cdr_unavailable — the default posture. The
 	// producer must not spawn a goroutine or build a payload.
 	prev := globalAlertStore
@@ -410,7 +410,7 @@ func TestChaos66_AlertIsGatedOnSubscriber(t *testing.T) {
 
 // ─── Contract row ──────────────────────────────────────────────────────────
 
-func TestChaos66_DiagnosticsRowReportsADarkBackend(t *testing.T) {
+func TestChaos67_DiagnosticsRowReportsADarkBackend(t *testing.T) {
 	pc, _ := openBreakerPastReset(t, "sluice-1")
 	withTempPool(t, pc) // enrolled, but nothing pickable
 	if p, _ := cdrPickForCall(); p == nil {
@@ -434,7 +434,7 @@ func TestChaos66_DiagnosticsRowReportsADarkBackend(t *testing.T) {
 
 // ─── CONTROLS ──────────────────────────────────────────────────────────────
 
-func TestChaos66_Control_HealthyBackendIsUntouched(t *testing.T) {
+func TestChaos67_Control_HealthyBackendIsUntouched(t *testing.T) {
 	pc := &cdrPooledClient{Name: "sluice-1", Breaker: newCDRCircuitBreaker(cdrBreakerConfig{})}
 	withTempPool(t, pc)
 
@@ -453,7 +453,7 @@ func TestChaos66_Control_HealthyBackendIsUntouched(t *testing.T) {
 	}
 }
 
-func TestChaos66_Control_ObserverStillReportsAnOpenBreaker(t *testing.T) {
+func TestChaos67_Control_ObserverStillReportsAnOpenBreaker(t *testing.T) {
 	// The cheapest way to pass the observer gates is to make PeekAvailable
 	// always true, which would delete the outage signal entirely.
 	pc := &cdrPooledClient{
@@ -473,7 +473,7 @@ func TestChaos66_Control_ObserverStillReportsAnOpenBreaker(t *testing.T) {
 	}
 }
 
-func TestChaos66_Control_HalfOpenBudgetStillBoundsConcurrentProbes(t *testing.T) {
+func TestChaos67_Control_HalfOpenBudgetStillBoundsConcurrentProbes(t *testing.T) {
 	// The cheapest way to pass every leak gate is to delete the budget,
 	// which would aim the full request rate at a recovering Sluice.
 	pc, _ := openBreakerPastReset(t, "sluice-1")
@@ -537,7 +537,7 @@ func runCDRStageForTest(t *testing.T, br blockResponder) cdrStageDecision {
 	return runCDRStage(r, r, body, body, "application/pdf", "", br, "example.com", "10.0.0.1", sampleID)
 }
 
-func TestChaos66_EntryPointAppliesFailModeClosedWhenBackendIsDown(t *testing.T) {
+func TestChaos67_EntryPointAppliesFailModeClosedWhenBackendIsDown(t *testing.T) {
 	resetCDRAvailabilityForTest()
 	pc, _ := openBreakerPastReset(t, "sluice-1")
 	withTempPool(t, pc)
@@ -561,7 +561,7 @@ func TestChaos66_EntryPointAppliesFailModeClosedWhenBackendIsDown(t *testing.T) 
 	}
 }
 
-func TestChaos66_EntryPointCountsTheBypassWhenFailModeIsOpen(t *testing.T) {
+func TestChaos67_EntryPointCountsTheBypassWhenFailModeIsOpen(t *testing.T) {
 	resetCDRAvailabilityForTest()
 	pc, _ := openBreakerPastReset(t, "sluice-1")
 	withTempPool(t, pc)
@@ -581,7 +581,7 @@ func TestChaos66_EntryPointCountsTheBypassWhenFailModeIsOpen(t *testing.T) {
 	}
 }
 
-func TestChaos66_Control_EntryPointStillSkipsWhenCDRIsDisabled(t *testing.T) {
+func TestChaos67_Control_EntryPointStillSkipsWhenCDRIsDisabled(t *testing.T) {
 	// The cheapest wrong fix is to stop short-circuiting at all, which would
 	// run the CDR stage on every inspected response of every appliance that
 	// never enabled CDR.

@@ -170,7 +170,7 @@ func (b *cdrCircuitBreaker) allowReserve() (allowed, reserved bool, gen int64) {
 // reported outcome gives back, so an observer that called Allow() would
 // consume the single probe the breaker uses to discover that the backend
 // recovered and then throw it away -- leaving the breaker wedged in
-// half-open forever (CHAOS-66).  Observing a control must never change it.
+// half-open forever (CHAOS-67).  Observing a control must never change it.
 func (b *cdrCircuitBreaker) Permits() bool {
 	switch b.state.Load() {
 	case cbStateClosed:

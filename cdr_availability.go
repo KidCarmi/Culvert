@@ -1,6 +1,6 @@
 package main
 
-// CDR backend-availability plane (CHAOS-66).
+// CDR backend-availability plane (CHAOS-67).
 //
 // Three rules live here, and they are coupled:
 //

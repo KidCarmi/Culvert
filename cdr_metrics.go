@@ -130,7 +130,7 @@ func cdrWriteOperationalMetrics(w *strings.Builder) {
 	w.WriteString("\n# HELP culvert_cdr_panics_total Panics caught by the CDR defer-recover (always fail-closed regardless of fail_mode)\n")
 	w.WriteString("# TYPE culvert_cdr_panics_total counter\n")
 	fmt.Fprintf(w, "culvert_cdr_panics_total %d\n", atomic.LoadInt64(&statCDRPanics))
-	// CHAOS-66: the two ways a request finds no instance to call.  Kept
+	// CHAOS-67: the two ways a request finds no instance to call.  Kept
 	// apart because they call for different operator actions -- a
 	// provisioning gap versus a backend outage -- and because only the
 	// second is governed by fail_mode.

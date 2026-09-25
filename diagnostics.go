@@ -884,7 +884,7 @@ func checkCDR() OperatorContractCheck {
 			OperatorAction: "Enrol at least one Sluice instance under CDR, or disable CDR if not in use.",
 		}
 	case !cdrBackendAvailable():
-		// CHAOS-66: this row used to key on pool LENGTH alone, so an
+		// CHAOS-67: this row used to key on pool LENGTH alone, so an
 		// enrolled instance whose breaker was open -- or permanently
 		// wedged -- still reported "enabled-healthy" while every file on
 		// the node was being delivered undisarmed.  Availability is what
