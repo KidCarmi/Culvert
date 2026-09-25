@@ -124,21 +124,20 @@ func TestBenchGate_PolicyDecisionLineAllocs(t *testing.T) {
 // change and simultaneously loosened the number. Measuring the production
 // emitter against the frozen pre-change shape in the SAME run, on the same
 // hardware, makes the comparison self-contained: the production line must
-// allocate strictly less AND run measurably faster. Strictly-less is a real
-// assertion and not a tautology — the two render byte-identical output
+// allocate strictly less. Strictly-less is a real assertion and not a
+// tautology — the two render byte-identical output
 // (TestPolicyDecisionLine_RenderIsByteIdentical), so nothing but the removed
 // waste separates them.
 //
-// The timing half is expressed as a RATIO measured in one run, never an
-// absolute ns bound, for the reason recorded throughout this repo: an absolute
-// bound is hardware-dependent and a gate that can flake gets muted. Both arms
-// run on the same box, under the same load, in the same process, so the ratio
-// cancels the clock. The measured ratio is ~0.43 (1014 -> 435 ns on a 4-core
-// Xeon @2.10GHz); the bound is 0.85, which a full revert (ratio 1.0) fails
-// while leaving ample headroom for a loaded runner or -race.
+// The timing ratio is LOGGED, never asserted. A same-run ratio of two
+// sequential testing.Benchmark calls cancels the clock but not scheduling or
+// load changes between the two arms, so on a shared runner it can cross any
+// bound tight enough to catch a revert — the lesson this repo already recorded
+// for sanitizeLog's scan-count gate (a gate that can flake gets muted). The
+// allocation comparison is deterministic and is what this gate enforces; the
+// ns/op saving (~0.43x, 1014 -> 435 ns on a 4-core Xeon @2.10GHz) stays with
+// the benchmarks in proxy_policylog_bench_test.go and benchstat.
 func TestBenchGate_PolicyDecisionLineBeatsPrintf(t *testing.T) {
-	const maxRatio = 0.85
-
 	restore := plSwapBenchLogger()
 	printf := testing.Benchmark(func(b *testing.B) {
 		b.ReportAllocs()
@@ -155,20 +154,13 @@ func TestBenchGate_PolicyDecisionLineBeatsPrintf(t *testing.T) {
 	restore()
 
 	ratio := float64(current.NsPerOp()) / float64(printf.NsPerOp())
-	t.Logf("printf shape %d allocs/op %d B/op %d ns/op → production %d allocs/op %d B/op %d ns/op (ratio %.2f, bound %.2f)",
+	t.Logf("printf shape %d allocs/op %d B/op %d ns/op → production %d allocs/op %d B/op %d ns/op (ratio %.2f, informational)",
 		printf.AllocsPerOp(), printf.AllocedBytesPerOp(), printf.NsPerOp(),
-		current.AllocsPerOp(), current.AllocedBytesPerOp(), current.NsPerOp(), ratio, maxRatio)
+		current.AllocsPerOp(), current.AllocedBytesPerOp(), current.NsPerOp(), ratio)
 
 	if current.AllocsPerOp() >= printf.AllocsPerOp() {
 		t.Errorf("REGRESSION: the production decision line allocates %d/op, not fewer than the frozen "+
 			"logger.Printf shape's %d/op — the nine-argument Printf call has returned to the policy "+
 			"decision path.", current.AllocsPerOp(), printf.AllocsPerOp())
-	}
-	if printf.NsPerOp() > 0 && ratio > maxRatio {
-		t.Errorf("REGRESSION: the production decision line costs %.2f of the frozen logger.Printf shape "+
-			"(%d ns/op vs %d ns/op), above the %.2f bound — the formatting saving this change exists for "+
-			"is gone. Check that the emitters still append into a stack buffer and that "+
-			"appendQuotedForLog still has its printable-ASCII fast path.",
-			ratio, current.NsPerOp(), printf.NsPerOp(), maxRatio)
 	}
 }
