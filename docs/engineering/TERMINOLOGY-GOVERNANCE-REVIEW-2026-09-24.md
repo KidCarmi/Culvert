@@ -61,7 +61,8 @@ parts of the same window did find drift this pass missed; see "Overlap with para
        coverage banner (`static/index.html:17519`).
      - Similar wording is shared between the GUI fail-closed banner ("No OCSP responder returned a usable, affirmative verdict",
        `static/index.html:4494`) and the `culvert_ocsp_fail_closed_total` HELP text ("no responder returned
-       a usable, affirmative verdict", `ocsp_metrics.go:38`).
+       a usable, affirmative verdict", `ocsp_metrics.go:38`). Both use "verdict", which the glossary
+       reserves for Diagnostics checks. That use is recorded in "Glossary term sweep" below.
    - **GeoIP (CHAOS-60):** the new `geo_resolution` diagnostics-contract row mirrors the pre-existing
      `dns_resolution` row's naming and severity convention (both emit only `diagOK`/`diagWarn`,
      `geoip_resolve_health.go:320-335`, `dns_health.go:459-484`), and `docs/operator/
@@ -140,6 +141,45 @@ deliberate, independently-documented naming decisions — legacy GUI per
 `docs/design/INFORMATION-ARCHITECTURE.md`, new frontend per `docs/design/FRONTEND-MIGRATION-PLAN.md` —
 not a mechanical rename) also remains unresolved and is not queued to the numbered backlog, per the
 2026-09-09 report's reasoning.
+
+---
+
+## Glossary term sweep
+
+Every term `docs/design/PRODUCT-TERMINOLOGY.md` forbids, reserves or replaces was checked against the
+lines this window ADDED. The counts come from the tool: for each term,
+`git diff 574d265 6ec745d -U0 | grep -ciE '^\+.*<pattern>'` gives "Added lines" (a case-insensitive
+substring match). The file:line lists come from the same diff, with line numbers at `6ec745d`. "Visible"
+means `static/index.html`, non-test `frontend/src`, `api/openapi/openapi.yaml`, `docs/` outside
+`docs/engineering`, `docs/design` and `docs/adr`, `CHANGELOG.md` and `README.md`; generated copies are
+not counted.
+
+| Term (pattern) | Added lines | Visible | Visible lines (file:line) | Outcome |
+|---|---|---|---|---|
+| appliance (`appliance`) | 30 | 6 | `CHANGELOG.md`: 285; `api/openapi/openapi.yaml`: 483; `docs/operator/geoip-resolution-health.md`: 36; `docs/operator/ocsp-revocation-checking.md`: 22,122; `docs/operator/release-publication-gating.md`: 547 | Same 6 lines as #1456's window; fixed there (T-51 recurrence). See "Forbidden term: appliance" below |
+| verdict (`verdict`) | 783 | 55 | `CHANGELOG.md`: 15,226,232,259,400; `api/openapi/openapi.yaml`: 488; `docs/operator/mcp-first-controlled-canary-review.md`: 51,392,970,1111,1124,1133,1251,1252,1253,2196,2203,2223,2228,2273,2489,2502,2533,2542,2543,2545,2558,2592,2646,2693,2702,2818,2902,2916,2992,3072,3080,3118,3293,3358,3559,3589,3635; `docs/operator/ocsp-revocation-checking.md`: 39,49,50,91,95,144; `docs/operator/release-publication-gating.md`: 22,60,455; `static/index.html`: 4484,4491,4494 | Same 55 lines as #1456's window; recorded there (13 OCSP lines under its T-59, 42 others as not yet numbered) |
+| result (`result`) | 286 | 7 | `CHANGELOG.md`: 426; `docs/operator/mcp-first-controlled-canary-review.md`: 2255,2402,2908,3116; `docs/operator/ocsp-revocation-checking.md`: 77; `docs/operator/release-publication-gating.md`: 362 | Same 7 lines as #1456's window; none means a request's decision — no violation |
+| incident (`incident`) | 6 | 1 | `docs/operator/mcp-first-controlled-canary-review.md`: 886 | Same line as #1456's window; plain English, no entity — no violation |
+| scanner (`scanner`) | 63 | 3 | `docs/operator/mcp-first-controlled-canary-review.md`: 2967,3212,3236 | Same 3 lines as #1456's window; a code scanner — no violation |
+| policy rule (`policy rule`) | 6 | 1 | `docs/operator/mcp-first-controlled-canary-review.md`: 3476 | Same line as #1456's window; an MCP gateway rule — no violation |
+| exclusion (`exclusion`) | 48 | 6 | `docs/operator/mcp-first-controlled-canary-review.md`: 397,795,816,1104,1248,2807 | Same 6 lines as #1456's window; the MCP rollout-scope field — no violation |
+| kill switch (`kill.?switch`) | 24 | 0 | — | Internal only (identifiers, test names) |
+| unauth mode (`unauth.?mode`) | 2 | 0 | — | Internal only: two test names in `.github/qa-root-shard-timings.json` |
+| threat engine, Cluster Nodes, blacklist/whitelist, Live Feed, Live Request Log, Recent Requests, Users & Roles, proxy pool | 0 each | 0 | — | — |
+
+**Overlap with #1456.** Every visible hit above also appears, with the same file and text, among the
+lines the 2026-09-21 report's window (`46410c3..6c46ebd`) adds. The check: compare the (file, line text)
+pairs of both diffs; this window has 0 visible hits for any term that are not in that window. They are
+therefore recorded once, in #1456's report, and not again here:
+- "verdict" in OCSP copy — `static/index.html:4484`, `:4491`, `:4494`, `api/openapi/openapi.yaml:488`, six
+  lines of `docs/operator/ocsp-revocation-checking.md`, three CHANGELOG lines — under its T-59 sub-item,
+  with the required "response"/"status" rewording;
+- "verdict" elsewhere (the MCP canary review, the release-gating runbook, two CHANGELOG lines) — its
+  "recorded, not yet numbered" item;
+- "appliance" — its T-51 recurrence, fixed in that PR.
+
+This report mints no IDs and changes no product copy. Line numbers here are at `6ec745d` and can differ
+from #1456's, which are at `6c46ebd`.
 
 ---
 
