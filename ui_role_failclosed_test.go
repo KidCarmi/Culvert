@@ -588,3 +588,38 @@ func TestRosterLoad_ActiveClampCountClearsAfterRepair(t *testing.T) {
 		t.Fatal("the cumulative _total counter must not move on repair")
 	}
 }
+
+// TestRosterLoad_PasswordChangeKeepsPersistedRoleAndTOTP pins that the
+// SEC-TOTP-1 record constructor and the persisted-role carry compose: a
+// password change on a clamped account keeps BOTH the raw role a newer build
+// assigned and the account's TOTP enrolment (secret + replay counter).
+func TestRosterLoad_PasswordChangeKeepsPersistedRoleAndTOTP(t *testing.T) {
+	path, _ := seedRoster(t, "auditor")
+	c := &Config{cache: authCacheStore{entries: map[string]*authCacheEntry{}}}
+	c.SetUIUsersFile(path)
+	if err := c.LoadUIUsersFile(); err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	const secret = "JBSWY3DPEHPK3PXP"
+	if !c.SetTOTPSecret("bob", secret, []string{"code-one"}) {
+		t.Fatal("precondition: enrol TOTP")
+	}
+	if !c.SetTOTPLastCounter("bob", 42) {
+		t.Fatal("precondition: set counter")
+	}
+	if err := c.SetUIUser("bob", "N3wSecret!pass", RoleViewer); err != nil {
+		t.Fatalf("password change: %v", err)
+	}
+	if got := c.GetTOTPSecret("bob"); got != secret {
+		t.Fatalf("TOTP secret after password change = %q, want %q", got, secret)
+	}
+	if got := c.GetTOTPLastCounter("bob"); got != 42 {
+		t.Fatalf("TOTP counter after password change = %d, want 42", got)
+	}
+	if err := c.SaveUIUsersFile(); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	if got := savedRole(t, path); got != "auditor" {
+		t.Fatalf("password change persisted role %q, want %q", got, "auditor")
+	}
+}
