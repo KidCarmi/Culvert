@@ -102,7 +102,7 @@ free in the merged tree that morning; the SOCKS5-bind sweep (the row below)
 claimed the same id from the same tree on the same day and merged first, so per
 the rule this header already states — *an id is rewritable for free right up
 until its first merge, so the sweep that is still an open PR renumbers ITSELF* —
-this one moved to `CHAOS-72` / §37 while still unmerged, and a third open sweep
+this one moved to `CHAOS-72` / §42 (the coordinator's allocation; §37–§41 are reserved for other open sweeps) while still unmerged, and a third open sweep
 was concurrently titled `chaos-66` as well.
 
 **That is the sharpest evidence yet about what the placeholder row does and does
@@ -143,7 +143,7 @@ The seventh was found while wiring the plane and is a plain concurrency defect:
 read on the REQUEST PATH (`recordRequest`'s `WriteRequest`, the audit fan-out's
 `WriteAudit`), confirmed under `-race` — nothing in the suite exercised both at
 once, and this sweep would have added two more readers to it. Written up in
-§37.
+§42.
 
 **2026-09-12 — CHAOS-66 sweep (the SOCKS5 listener's BIND). Id claimed in this
 row before the implementation commit**, per the convention above; `CHAOS-66` was
@@ -6959,7 +6959,7 @@ status, or read the unfiltered output, before claiming a gate is green.
 
 ---
 
-## 37. CHAOS-72 — The SIEM forwarding path under a collector outage
+## 42. CHAOS-72 — The SIEM forwarding path under a collector outage
 
 **Sweep date:** 2026-09-24. **Scope:** `internal/syslog`, `syslog.go`,
 `checkSyslogFeed` (diagnostics.go), the `/api/syslog` + `/api/syslog/test`
