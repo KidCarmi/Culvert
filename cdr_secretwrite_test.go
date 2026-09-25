@@ -30,7 +30,7 @@ func newRenewalInstance(t *testing.T) CDREnrolledInstance {
 func TestInstallRenewedPEMs_KeyStagingDoesNotInheritAPlantedMode(t *testing.T) {
 	inst := newRenewalInstance(t)
 	keyTmp := inst.ClientKeyPath + ".tmp"
-	if err := os.WriteFile(keyTmp, []byte("planted"), 0o666); err != nil {
+	if err := os.WriteFile(keyTmp, []byte("planted"), 0o600); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 	if err := os.Chmod(keyTmp, 0o666); err != nil {
@@ -52,7 +52,7 @@ func TestInstallRenewedPEMs_KeyStagingDoesNotInheritAPlantedMode(t *testing.T) {
 func TestInstallRenewedPEMs_CertStagingDoesNotInheritAPlantedMode(t *testing.T) {
 	inst := newRenewalInstance(t)
 	certTmp := inst.ClientCertPath + ".tmp"
-	if err := os.WriteFile(certTmp, []byte("planted"), 0o666); err != nil {
+	if err := os.WriteFile(certTmp, []byte("planted"), 0o600); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 	if err := os.Chmod(certTmp, 0o666); err != nil {

@@ -55,8 +55,13 @@ func TestOpenKey_MintDoesNotInheritAPlantedMode(t *testing.T) {
 	path := filepath.Join(dir, KeyFileName)
 	// A 31-byte file is not a usable key, so OpenKey refuses it rather than
 	// minting — that refusal is itself the fail-closed contract.
-	if err := os.WriteFile(path, make([]byte, 31), 0o666); err != nil {
+	// Seed at 0600 (gosec G306), then widen explicitly: WriteFile's mode is
+	// umask-filtered anyway, so the Chmod is what actually plants 0666.
+	if err := os.WriteFile(path, make([]byte, 31), 0o600); err != nil {
 		t.Fatalf("seed: %v", err)
+	}
+	if err := os.Chmod(path, 0o666); err != nil {
+		t.Fatalf("chmod: %v", err)
 	}
 	if _, err := OpenKey(dir, true); err == nil {
 		t.Fatal("expected OpenKey to refuse a wrong-length key file rather than overwrite it")
