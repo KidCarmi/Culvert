@@ -72,18 +72,23 @@ parts of the same window did find drift this pass missed; see "Overlap with para
    - The release-publication-gating and R2-only-catalog work (`promote-image`, `candidate-<run_id>`,
      `resolve-candidate`) is CI/release-engineering internals with no operator-GUI or config-surface
      exposure, out of this glossary's scope.
-2. **No change in this window touches a carry-over finding location.** Most of those locations sit in
-   files the window did not change (`docs/enterprise/TLS-INSPECTION-DEPLOYMENT.md`, `internal/sealbox`,
-   `internal/support`, `policy.go`, `apiURLCatFeedStatus`). Two files that hold carry-over sites did
-   change, and their hunks (`git diff 574d265 6ec745d`) were read:
-   - `config.go` (the T-11 `default_action`, T-29/T-30 rate/connection-limit and T-39 `qualification_*`
-     keys): two hunks, both CDR server-fingerprint validation (`validCDRServerFingerprint` and its use in
-     `validateCDR`). None of those keys is touched.
-   - `static/index.html` (the Cluster panel's `cp_version`/`snapshot_sha256` sites for T-21+T-32, and the
-     T-39 qualification strings): four hunks — the oversized-login hint, the OCSP panel counters and banners,
+2. **Carry-over findings were spot-checked at their cited locations, not exhaustively re-verified.**
+   This pass did not trace every changed file that a carry-over finding depends on. It checked the
+   cited locations of T-11, T-12, T-29 and T-30 directly (item 3 below), and read the window's hunks in
+   three files that hold carry-over sites (`git diff 574d265 6ec745d`):
+   - `config.go` (T-11 `default_action`, T-29/T-30 rate/connection-limit keys, T-39 `qualification_*`
+     keys): two hunks, both CDR server-fingerprint validation. None of those keys is touched.
+   - `static/index.html` (the Cluster panel's `cp_version`/`snapshot_sha256` for T-21+T-32, and the T-39
+     qualification strings): four hunks — the oversized-login hint, the OCSP panel counters and banners,
      `fetchStats` and `loadCAMgmt`. None touches the Cluster panel or a qualification string.
+   - `admin_settings.go` (T-29/T-30): one hunk in `applyAdminSecurity`, which replaces the per-entry
+     `AddExemption` loop for rate-limit exemptions with a bulk `AddExemptions` call. That is a
+     performance change; `RateLimitRPM`, `rate_limit_rpm` and the connection-limit fields keep their names.
 
-   So no carry-over item was incidentally resolved or worsened.
+   Other dependency files also changed (for example `main.go` and `internal/mcp/runtime/policy.go`) and
+   were not traced. Every carry-over finding therefore remains open with its original evidence, which
+   this report neither re-verifies in full nor changes.
+
 3. **Spot-checked three carry-over items directly** (rather than trusting the prior report alone), the
    same discipline the 2026-09-08/09/11 reports used: **T-11** — `config.go`'s `default_action`
    validation still accepts only `"allow"`/`"deny"` strings while `policy.go`'s `PolicyAction` enum still
@@ -95,7 +100,7 @@ parts of the same window did find drift this pass missed; see "Overlap with para
    `security.max_conns_per_ip` exist. All three confirmed exactly as the prior reports left them.
 
 **Terminology Health Score: 8.7 / 10** (unchanged from 2026-09-08/09/11). This pass's checks found no new
-drift in a 256-file, backend-and-CI-heavy window, and no carry-over item moved, so the score neither rises
+drift in a 256-file, backend-and-CI-heavy window, and no spot-checked carry-over item moved, so the score neither rises
 nor falls. It does not account for the parallel reports' findings (see "Overlap with parallel reports");
 the series' later reports reconcile the score.
 
@@ -104,7 +109,7 @@ the series' later reports reconcile the score.
 ## Carried-Over Findings (unchanged)
 
 All fourteen previously-open finding IDs (thirteen backlog entries, since T-21 and T-32 are tracked as
-one paired item) remain open, unchanged, and re-confirmed against the then-current tree (`6ec745d`): T-9, T-11, T-12,
+one paired item) remain open with their original evidence, spot-checked as described in item 2 above: T-9, T-11, T-12,
 T-13 (residual), T-17, T-18, T-21+T-32 (paired), T-25 (residual), T-29, T-30, T-33, T-34, T-39. Full
 descriptions and the priority-ordered refactoring plan are unchanged from
 `TERMINOLOGY-GOVERNANCE-REVIEW-2026-09-09.md` and are not restated here, to avoid drift between two
@@ -164,8 +169,9 @@ found some in the same window; see above): the 34-merge window audited
 was CI/release-pipeline engineering plus MCP-canary and reliability (CHAOS-60/63/65) work, all internally
 consistent where these checks looked. The 2026-09-21 report found that the window did add "appliance"
 to customer-facing docs and an OpenAPI description, which this pass missed.
-The fourteen-ID (thirteen-entry) carry-over backlog is unchanged and was independently re-confirmed (not
-merely assumed unchanged) for three of its items via direct file inspection. No cosmetic or
+The fourteen-ID (thirteen-entry) carry-over backlog remains open with its original evidence. Four of its
+IDs (T-11, T-12, T-29, T-30) were spot-checked at their cited locations; the backlog was not exhaustively
+re-verified. No cosmetic or
 preference-driven renames are proposed. This report itself — the audit record and backlog
 reconciliation — is the deliverable of this pass; per the DEBT-014 process lesson, it was written only
 after a fresh sync against `origin/main` immediately before opening its PR, and the branch was confirmed
