@@ -769,17 +769,7 @@ func TestChaos70_Wall_CredentialedSetupIsInsideTheTransaction(t *testing.T) {
 // that widening honest by requiring the pre-fix body — which neither locks nor
 // delegates — to be rejected.
 func setAuthDurablyShape(fn *ast.FuncDecl) (locksFirst, delegates, lockingSave bool) {
-	if fn.Body != nil && len(fn.Body.List) > 0 {
-		if expr, ok := fn.Body.List[0].(*ast.ExprStmt); ok {
-			if call, ok := expr.X.(*ast.CallExpr); ok {
-				if lock, ok := call.Fun.(*ast.SelectorExpr); ok && lock.Sel.Name == "Lock" {
-					if mu, ok := lock.X.(*ast.SelectorExpr); ok && mu.Sel.Name == "saveUIUsersMu" {
-						locksFirst = true
-					}
-				}
-			}
-		}
-	}
+	locksFirst = firstStmtLocksSaveUIUsersMu(fn)
 	ast.Inspect(fn, func(n ast.Node) bool {
 		call, ok := n.(*ast.CallExpr)
 		if !ok {
@@ -796,6 +786,31 @@ func setAuthDurablyShape(fn *ast.FuncDecl) (locksFirst, delegates, lockingSave b
 		return true
 	})
 	return locksFirst, delegates, lockingSave
+}
+
+// firstStmtLocksSaveUIUsersMu reports whether fn's FIRST statement is
+// `<recv>.saveUIUsersMu.Lock()`. Split out of setAuthDurablyShape with early
+// returns rather than nested ifs: the AST walk down to the selector is five
+// type assertions deep, which reads as one guarded question here and as a
+// complexity finding when inlined.
+func firstStmtLocksSaveUIUsersMu(fn *ast.FuncDecl) bool {
+	if fn.Body == nil || len(fn.Body.List) == 0 {
+		return false
+	}
+	expr, ok := fn.Body.List[0].(*ast.ExprStmt)
+	if !ok {
+		return false
+	}
+	call, ok := expr.X.(*ast.CallExpr)
+	if !ok {
+		return false
+	}
+	lock, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok || lock.Sel.Name != "Lock" {
+		return false
+	}
+	mu, ok := lock.X.(*ast.SelectorExpr)
+	return ok && mu.Sel.Name == "saveUIUsersMu"
 }
 
 // legacySetupSaveSource is the VERBATIM pre-fix credentialed-setup persist
@@ -1015,7 +1030,7 @@ func TestChaos70_SettingsAuthChangeIsDurable(t *testing.T) {
 		t.Fatalf("seed: %v", err)
 	}
 	seeded := durableRoster(t, rosterPath)
-	seededHash, _ := seeded["rotateme"]
+	seededHash := seeded["rotateme"]
 
 	if w := settingsPost(t, "rotateme", "Rotat3dPass!"); w.Code != http.StatusOK {
 		t.Fatalf("a healthy rotation must succeed; got %d: %s", w.Code, w.Body.String())
