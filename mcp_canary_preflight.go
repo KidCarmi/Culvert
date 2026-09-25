@@ -222,7 +222,12 @@ type CanaryActivationInput struct {
 	// invariant over every unbound field (blocker #14). Resolved from authoritative state by
 	// canaryExactPolicyPermit, never supplied by a request.
 	ExactPolicyPermit bool
-	Now               time.Time
+	// FirstCanaryCredentialFree — every authoritative credential layer for the exact request is
+	// empty, so no credential planning, materialization, provider access or Authorization header
+	// can arise from it (blocker #9, first disjunct). Resolved from authoritative state by
+	// canaryExactRequestFacts alongside ExactPolicyPermit, never supplied by a request.
+	FirstCanaryCredentialFree bool
+	Now                       time.Time
 }
 
 // evaluateCanaryNodeReadiness returns the scope-independent Canary node readiness verdict.
@@ -247,6 +252,9 @@ type canaryActivationInputs struct {
 	FingerprintCurrent bool
 	ToolCatalogUsable  bool
 	ExactPolicyPermit  bool
+	// FirstCanaryCredentialFree — blocker #9. Every authoritative credential layer for the exact
+	// request is empty. Resolved from the same capture as ExactPolicyPermit.
+	FirstCanaryCredentialFree bool
 }
 
 // canaryActivationInputsProbe derives the authoritative activation-level inputs for a Canary
@@ -269,7 +277,7 @@ var canaryActivationInputsProbe = productionCanaryActivationInputs
 // pure READ (the tool-trust store + the catalog observation); it arms nothing.
 func productionCanaryActivationInputs(_ rollout.Capability, scope rollout.ScopeSpec, _ uint64) canaryActivationInputs {
 	bindings := buildLiveApprovalBindings(scope)
-	permit, _ := canaryExactPolicyPermit(scope, reviewedTargetsFromBindings(bindings), mcpToolTrust.now())
+	exact := canaryExactRequestFacts(scope, reviewedTargetsFromBindings(bindings), mcpToolTrust.now())
 	return canaryActivationInputs{
 		ToolApprovals: bindings,
 		// Blocker #13: catalog usability is an ACTIVATION FACT, resolved here from the
@@ -281,7 +289,14 @@ func productionCanaryActivationInputs(_ rollout.Capability, scope rollout.ScopeS
 		// the activation would bind — because at preflight time no activation is armed, which is
 		// the question being decided. Also a pure read: it runs the engine, which is I/O-free and
 		// decides nothing outside its own return value.
-		ExactPolicyPermit: permit,
+		ExactPolicyPermit: exact.Permit,
+		// Blocker #9 (first disjunct): the same exact request must be provably CREDENTIAL-FREE at
+		// every authoritative layer, not merely free of a policy CredentialProfile obligation.
+		// Resolved from the SAME capture as the permit above, so the two facts can never describe
+		// different inventories. A credential-required experiment is refused outright — no
+		// production credential Provider adapter exists, so "requires a credential" and "cannot
+		// execute safely" are the same statement for the First Canary.
+		FirstCanaryCredentialFree: exact.CredentialFree,
 	}
 }
 
@@ -391,6 +406,7 @@ func evaluateActivationOnFacts(f canary.Facts, in CanaryActivationInput) canary.
 	f.ToolFingerprintCurrent = in.FingerprintCurrent
 	f.ToolCatalogUsable = in.ToolCatalogUsable
 	f.ExactPolicyPermit = in.ExactPolicyPermit
+	f.FirstCanaryCredentialFree = in.FirstCanaryCredentialFree
 	f.BudgetConfigured = canary.ValidateBudget(in.Budget) == canary.BudgetOK
 	return canary.Evaluate(f)
 }

@@ -22,6 +22,8 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+
+	"github.com/goccy/go-yaml"
 )
 
 var authStartupLoggerMu sync.Mutex
@@ -120,6 +122,82 @@ func TestResolveAuthStartupConfig_PropagatesAllFields(t *testing.T) {
 	}
 }
 
+// TestResolveAuthStartupConfig_TrimsUsernameWhitespace proves the resolver
+// strips leading/trailing whitespace from the resolved admin username before
+// it ever reaches cfg.SetAuth. Every OTHER local-admin-credential entry point
+// (apiSetupComplete's web setup wizard) already does this trim on the exact
+// same field; this resolver — the CLI -user flag / config.yaml auth.user
+// merge — did not, which is reachable with plain, syntactically valid YAML:
+// a literal block scalar (`user: |` instead of `user: admin`) always carries
+// a trailing "\n" per the YAML spec, a common habit when a value is
+// templated or copy-pasted from a multi-line-safe style guide. The stored
+// admin username then becomes "admin\n" verbatim — permanently unusable,
+// since nothing typed into the login form can produce a trailing newline —
+// with no error at startup and no indication of the cause (see
+// TestLoadAuth_YAMLBlockScalarUsernameStillLogsIn for the full round-trip).
+// The password field is deliberately NOT trimmed here: unlike a username, a
+// password may legitimately contain leading/trailing whitespace, and
+// trimming it would silently narrow what operators can configure.
+func TestResolveAuthStartupConfig_TrimsUsernameWhitespace(t *testing.T) {
+	tests := []struct {
+		name     string
+		rawUser  string
+		wantUser string
+	}{
+		{"trailing newline (YAML literal block scalar)", "admin\n", "admin"},
+		{"leading and trailing spaces", "  admin  ", "admin"},
+		{"trailing carriage return + newline", "admin\r\n", "admin"},
+		{"clean value unaffected", "admin", "admin"},
+		{"whitespace-only collapses to empty (clear/unconfigured)", "   ", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := resolveAuthStartupConfig(8080, 9090, tt.rawUser, "Sup3rSecret!", "")
+			if got.AuthUser != tt.wantUser {
+				t.Errorf("resolveAuthStartupConfig(.., %q, ..).AuthUser = %q; want %q", tt.rawUser, got.AuthUser, tt.wantUser)
+			}
+		})
+	}
+}
+
+// TestLoadAuth_YAMLBlockScalarUsernameStillLogsIn reproduces the production
+// scenario end to end: a config.yaml written with a YAML literal block
+// scalar for auth.user (legal, common styling for a "no special characters
+// to escape" string) is unmarshaled with the REAL parser this codebase uses
+// (goccy/go-yaml, config.go), merged exactly as main.go's loadFileConfigAndFlags
+// does (CLI flag empty ⇒ FileConfig wins, unchanged), and loaded via loadAuth.
+// The admin operator then does the only thing they can do at a login prompt:
+// type the username with no trailing newline. Before the fix, the stored
+// username carried the YAML-inserted "\n" and cfg.VerifyAuth("admin", ...)
+// returned false — a silent, total lockout traceable only by inspecting the
+// raw bytes of config.yaml.
+func TestLoadAuth_YAMLBlockScalarUsernameStillLogsIn(t *testing.T) {
+	ensureAuthStartupTestLogger(t)
+	snapshotAuthGlobals(t)
+
+	const testPass = "P4-4-block-scalar-pw!" // #nosec G101 -- synthetic test fixture; never leaves this test
+
+	yamlSrc := []byte("auth:\n  user: |\n    admin\n  pass: " + testPass + "\n")
+	var fc FileConfig
+	if err := yaml.Unmarshal(yamlSrc, &fc); err != nil {
+		t.Fatalf("yaml.Unmarshal: %v", err)
+	}
+	if fc.Auth.User != "admin\n" {
+		t.Fatalf("fixture assumption broken: fc.Auth.User = %q; want the literal block scalar's trailing newline (\"admin\\n\") — otherwise this test is not exercising the YAML footgun it claims to", fc.Auth.User)
+	}
+
+	// Mirrors main.go: s.authU = firstStr(*s.user, s.fc.Auth.User) with the
+	// CLI flag left at its unset default "".
+	cliUserFlag := ""
+	authU := firstStr(cliUserFlag, fc.Auth.User)
+
+	loadAuth(resolveAuthStartupConfig(8080, 9090, authU, fc.Auth.Pass, ""))
+
+	if !cfg.VerifyAuth("admin", testPass) {
+		t.Error(`cfg.VerifyAuth("admin", ...) = false after loading a config.yaml auth.user written as a YAML literal block scalar; the admin can never log in because nothing typed at a login prompt can carry the block scalar's trailing newline`)
+	}
+}
+
 // ─── Credential validation ─────────────────────────────────────────────
 //
 // Every other place a local admin credential is set — the web setup
@@ -156,6 +234,19 @@ func TestValidateAuthStartupCredentials(t *testing.T) {
 		{
 			name: "non-empty user with a complexity-satisfying password is accepted",
 			auth: authStartupConfig{AuthUser: "admin", AuthPass: "Sup3rSecret!"},
+		},
+		{
+			// Codex review, PR #1443: resolveAuthStartupConfig trims
+			// AuthUser, so a whitespace-only -user/auth.user value now
+			// resolves to "". Silently treating that the same as "never
+			// configured" would call cfg.SetAuth("", pass) — which DISABLES
+			// local auth entirely, discarding the password that was
+			// supplied, with no error pointing at the cause. An empty
+			// username paired with a real password must be rejected, not
+			// silently exempted.
+			name:    "empty user with a non-empty password is rejected, not silently exempted",
+			auth:    authStartupConfig{AuthUser: "", AuthPass: "Sup3rSecret!"},
+			wantErr: true,
 		},
 	}
 	for _, tt := range tests {

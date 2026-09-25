@@ -27,7 +27,7 @@ Eleven workflows in `.github/workflows/`:
 | `maint-agent-backup-upgrade-e2e.yml` | Agent encrypted backup + backup-gated upgrade | PR/main/tag |
 | `maint-agent-update-e2e.yml` | Agent image pull/retag/replace upgrade | PR/main/tag |
 | `auth-idp-interop.yml` | Keycloak OIDC + SimpleSAMLphp SAML interop | nightly/manual |
-| `publish-catalog-pages.yml` | Publish signed catalog to GitHub Pages | release |
+| `publish-catalog-r2.yml` | Publish signed catalog to the R2 origin (sole target) | release |
 
 **Strengths (preserve):** supply-chain maturity (Sigstore keyless + pinned
 identity, SLSA L3, deterministic catalog, dual CVE scan, gitleaks full history,

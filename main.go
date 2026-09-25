@@ -621,13 +621,44 @@ func loadFileConfigAndFlags(s *startupState) {
 	s.lPath = firstStr(*s.logFilePath, s.fc.Proxy.LogFile)
 	s.blPath = firstStr(*s.blockFile, s.fc.Proxy.Blocklist)
 	s.lMaxMB = firstNonZero(*s.logMaxMB, s.fc.Proxy.LogMaxMB, 50)
-	s.authU = firstStr(*s.user, s.fc.Auth.User)
+	// TrimSpace BOTH candidates before the precedence pick, not just the
+	// winner afterward: firstStr treats any non-empty string — including one
+	// that is pure whitespace — as "the CLI flag was set", so an untrimmed
+	// merge lets a whitespace-only -user (e.g. a deployment wrapper's
+	// -user "$ADMIN_USER" with an unset $ADMIN_USER rendering inside a
+	// literal-space placeholder) silently shadow a real config.yaml
+	// auth.user with a value that itself collapses to nothing (Codex
+	// review, PR #1443 — the CDR-fingerprint whitespace bug's shape, applied
+	// to this field's CLI/YAML precedence rather than its final storage;
+	// resolveAuthStartupConfig's own TrimSpace on the winning value handles
+	// a whitespace-carrying YAML value, such as a literal block scalar's
+	// trailing newline, but cannot recover a YAML value this precedence
+	// pick already discarded).
+	s.authU = firstStr(strings.TrimSpace(*s.user), strings.TrimSpace(s.fc.Auth.User))
 	s.authP = firstStr(*s.pass, s.fc.Auth.Pass)
 	s.cert = firstStr(*s.tlsCert, s.fc.Proxy.TLSCert)
 	s.key = firstStr(*s.tlsKey, s.fc.Proxy.TLSKey)
 	s.cert, s.key = resolveUITLSCertKey(s.cert, s.key)
 	s.rlRPM = firstNonZero(*s.rateLimitRPM, s.fc.Security.RateLimit)
 	s.ipModeVal = firstStr(*s.ipMode, s.fc.Security.IPFilterMode)
+	// config.yaml's security.ip_filter_mode is validated at load time
+	// (FileConfig.validateEnums, via loadFileConfig -> fc.validate()) — an
+	// unrecognized value there refuses to start with a clear error. The CLI
+	// flag -ip-filter-mode reaches the exact same merged value with no
+	// equivalent gate: it was stored verbatim and handed straight to
+	// IPFilter.SetMode (connlimit_startup.go), which treats any value other
+	// than "", "allow", or "block" as CORRUPTION and fails closed — denying
+	// ALL proxied traffic — with no startup error naming the bad flag (see
+	// IPFilter.Allowed, security.go). A simple case typo like
+	// "-ip-filter-mode Allow" would silently blackhole every request instead
+	// of refusing to boot, the same silent-failure shape closed for
+	// -cdr-fail-mode / -cdr-server-fingerprint above. Checked on the RESOLVED
+	// value (mirrors validatePortRanges/validatePortCollisions just above) so
+	// a CLI override and a config.yaml value are held to the same standard
+	// regardless of which one supplied it.
+	if !validIPFilterMode(s.ipModeVal) {
+		log.Fatalf("Invalid -ip-filter-mode %q: must be \"allow\" or \"block\" (empty disables the filter)", s.ipModeVal)
+	}
 }
 
 // initUIExtras is the PR3 expansion shim: resolve the UI-extras slice
@@ -942,18 +973,51 @@ func initCDR(s *startupState) {
 	if msg := validCDRServerFingerprint(*s.cdrFingerprintFlag); msg != "" {
 		log.Fatalf("Invalid -cdr-server-fingerprint %q: %s", *s.cdrFingerprintFlag, msg)
 	}
+	resolved := resolveCDRStartupConfig(s.fc, dataDir, cdrCLIFlags{
+		Enabled:     *s.cdrEnabledFlag,
+		Endpoint:    *s.cdrEndpointFlag,
+		FailMode:    *s.cdrFailModeFlag,
+		Profile:     *s.cdrProfileFlag,
+		Mode:        *s.cdrModeFlag,
+		TimeoutSec:  *s.cdrTimeoutFlag,
+		MaxSizeMB:   *s.cdrMaxSizeFlag,
+		Fingerprint: *s.cdrFingerprintFlag,
+		CertsDir:    *s.cdrCertsDirFlag,
+	})
+	// Same mirroring for cdr.timeout_sec / -cdr-timeout-sec: config.yaml's
+	// value is range-validated at load time (validateCDR), but ONLY when
+	// cdr.enabled is already true IN THE FILE — validateCDR returns
+	// immediately for a disabled block, so a config.yaml shipped with
+	// cdr.enabled: false and an out-of-range cdr.timeout_sec (e.g. staged
+	// ahead of turning CDR on later) passes load-time validation untouched.
+	// Checking only the raw -cdr-timeout-sec flag (as a first pass here did)
+	// misses that value entirely when the operator instead flips CDR on via
+	// -cdr-enabled without ever touching -cdr-timeout-sec: the CLI flag
+	// reads as 0 ("unset"), so the bad YAML value survives the merge in
+	// resolveCDRStartupConfig untouched (Codex review, PR #1480). Validating
+	// the RESOLVED value — after CLI/YAML merge, gated on the RESOLVED
+	// (post-merge) Enabled — closes both the CLI-flag typo and the
+	// dormant-then-enabled config.yaml case; a value that will never take
+	// effect (CDR stays disabled) is deliberately left unvalidated, matching
+	// validateCDR's own posture. An out-of-range value here isn't merely
+	// rejected late: left unvalidated, it becomes the per-file gRPC deadline
+	// (cdr_pool.go/cdr_proxy.go), shorter than Sluice's own 30s processing
+	// cap, so ordinary files reliably miss the deadline and every scan comes
+	// back as a client-side timeout — which, under the default fail-open
+	// FailMode, silently skips CDR sanitization on every request that hits
+	// it, with nothing at startup naming the cause.
+	//
+	// "Enabled" here must be the EFFECTIVE enablement loadCDR will act on,
+	// which also includes the runtime sentinel (/data/cdr_enabled, written by
+	// the GUI toggle or first-enrollment auto-enable). The resolver
+	// deliberately excludes the sentinel, so gating on resolved.CDR.Enabled
+	// alone let a sentinel-enabled node boot with an invalid dormant
+	// config.yaml timeout (Codex review, PR #1480).
+	if msg := cdrStartupTimeoutError(resolved, cdrRuntimeEnabled()); msg != "" {
+		log.Fatalf("Invalid cdr.timeout_sec/-cdr-timeout-sec %d: %s", resolved.CDR.TimeoutSec, msg)
+	}
 	loadCDR(
-		resolveCDRStartupConfig(s.fc, dataDir, cdrCLIFlags{
-			Enabled:     *s.cdrEnabledFlag,
-			Endpoint:    *s.cdrEndpointFlag,
-			FailMode:    *s.cdrFailModeFlag,
-			Profile:     *s.cdrProfileFlag,
-			Mode:        *s.cdrModeFlag,
-			TimeoutSec:  *s.cdrTimeoutFlag,
-			MaxSizeMB:   *s.cdrMaxSizeFlag,
-			Fingerprint: *s.cdrFingerprintFlag,
-			CertsDir:    *s.cdrCertsDirFlag,
-		}),
+		resolved,
 		appLifecycleCtx,
 	)
 }
