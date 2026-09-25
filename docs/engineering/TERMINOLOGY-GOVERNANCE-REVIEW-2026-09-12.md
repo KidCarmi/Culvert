@@ -158,6 +158,15 @@ later review rounds found real coverage gaps — see the corrections above):
    capability the product does not have (no CRL fallback exists — register row OCSP-10). That is a
    pre-existing GUI label, not drift introduced this window; it belongs with T-54's GUI follow-up when that
    is scheduled.
+   A second GUI observation IS drift introduced in this window (`d58bce1d`, found in review): the red
+   `ocsp-borrowed-banner` (`static/index.html:4490-4491`) is driven by the SUM of `notForCertificateTotal`
+   and `unauthorizedResponderTotal` (`:17526-17527`), and says the responses were ones "nobody was
+   authorized to give" and that "this is not a broken responder". That is stronger than either counter
+   supports. `not_for_certificate` is an issuer-signed answer about another serial, which a faulty
+   responder can produce. `unauthorized_responder` also covers an expired or misconfigured delegated
+   responder, as the operator runbook now explains. So an ordinary CA-side fault is shown to the admin
+   as an accusation. It is recorded under T-54, whose GUI follow-up must present the two counters
+   separately or in neutral wording that matches the runbook, not as one combined accusation.
 
 **Carry-over backlog re-verified (no finding, evidence base or priority changed by this window).**
 T-29 (`rate_limit`/`rate_limit_rpm`) was re-checked directly against the current tree and is unchanged
