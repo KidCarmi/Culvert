@@ -260,7 +260,7 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   was cached for a fixed hour regardless of the response's own `NextUpdate`, so
   a response a minute from expiry kept admitting the certificate for another 59;
   cache lifetime is now capped at the responder's own deadline.
-- **Behaviour change for operators running `security.ocsp_check: true`:**
+- **Behaviour change for operators running `proxy.ocsp_check: true`:**
   responder queries are now made directly and no longer honour `HTTP(S)_PROXY`
   from the environment, and a responder on a private address is refused. An
   egress-restricted deployment must allow the responder hosts named in its
@@ -352,6 +352,13 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   including the config-version store, registry settings, the CDR
   enrollment certs root and runtime marker, and the alert retry queue —
   follows the override.
+- The admin UI's own serving certificate now reports its expiry
+  (`ui_tls_cert_not_after`/`ui_tls_cert_days_remaining` on
+  `GET /api/settings/network`, shown on the Certificates panel) whenever a
+  custom pair (`-tls-cert`/`-tls-key`, or one uploaded via the panel) has
+  bound — the one certificate in the product whose expiry was previously
+  untracked; the MITM inspection root CA and the outbound upstream mTLS
+  client cert already surfaced theirs.
 - Admin API operations (contract 2.0.0): `GET /api/rewrite/state`,
   `GET /api/fileblock/profiles/state`, `GET /api/urlcat/state`,
   `GET /api/pac/profiles/{name}/lifecycle`, the Upstream v2 entry endpoints
