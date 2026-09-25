@@ -54,21 +54,36 @@ parts of the same window did find drift this pass missed; see "Overlap with para
        rejected" counter (`static/index.html:4485`, filled at `:17517`).
      - `respondersTruncatedTotal` ↔ `culvert_ocsp_responders_truncated_total`. It is not shown in the GUI.
      - `coverage` and `uncheckedEnforcingPaths` ↔ the separate `culvert_ocsp_path_checked{path}` gauge
-       (`ocsp_metrics.go:77-84`). The GUI renders `uncheckedEnforcingPaths` as its coverage banner
-       (`static/index.html:17519`).
+       (`ocsp_metrics.go:77-84`). The path values (`upstream_transport`, `ssl_inspect_origin`,
+       `connect_bypass`) come from one source, `ocspCoverage()` in `ocsp_coverage.go`, for both the API and
+       the metric label. `uncheckedEnforcingPaths` lists the unchecked ones and always leaves out
+       `connect_bypass` (`ocsp_coverage.go:89-93`). The GUI renders `uncheckedEnforcingPaths` as its
+       coverage banner (`static/index.html:17519`).
      - Similar wording is shared between the GUI fail-closed banner ("No OCSP responder returned a usable, affirmative verdict",
        `static/index.html:4494`) and the `culvert_ocsp_fail_closed_total` HELP text ("no responder returned
        a usable, affirmative verdict", `ocsp_metrics.go:38`).
    - **GeoIP (CHAOS-60):** the new `geo_resolution` diagnostics-contract row mirrors the pre-existing
-     `dns_resolution` row's naming and severity convention exactly, and `docs/operator/
+     `dns_resolution` row's naming and severity convention (both emit only `diagOK`/`diagWarn`,
+     `geoip_resolve_health.go:320-335`, `dns_health.go:459-484`), and `docs/operator/
      geoip-resolution-health.md` uses the same vocabulary.
    - **Admin-login bounds (CHAOS-63):** the new `/api/stats` field `loginOversizeRejected` and its GUI
      hint text both trace to the pre-existing `culvert_login_oversize_rejected_total` metric — this is
      GUI-parity work for an already-named concept, not a new name.
-   - **MCP canary (`reviewed_operation_class`, `read_only|mutating`):** documented identically in the Go
-     struct comments, `api/openapi/openapi.{json,yaml}`, and `frontend/src/api/types.gen.ts`. It is **not
-     yet surfaced in the MCP Command Center GUI** in this window, so there is no cross-surface GUI-vs-API
-     name to compare yet, and therefore nothing to flag. The readiness-matrix row renumbering and the
+   - **MCP canary (`reviewed_operation_class`):** the request and response carry different value sets.
+     This was corrected after review; the first revision said the values were documented identically.
+     - Request (`POST /api/mcp/tool-approvals`): OpenAPI enum `read_only | mutating`
+       (`api/openapi/openapi.yaml:13078`), parsed by `tooltrust.ParseReviewedOperationClass`, which accepts
+       only those two (`internal/mcp/tooltrust/reviewed_operation.go`).
+     - Response (`GET /api/mcp/tool-approvals`): `ui_mcp_tooltrust.go` serializes
+       `ReviewedOperationClass.String()` (`ui_mcp_tooltrust.go:95,123`). That returns `read_only`,
+       `mutating` or `unset`, the last for the zero value (`reviewed_operation.go:67-75`).
+       A `shadow_evaluation` request may leave the class unset, so an admin can see `unset`. The OpenAPI
+       response schema is an untyped `additionalProperties: true` object, so `unset` is documented only in
+       the Go struct comment (`ui_mcp_tooltrust.go:91-94`, "read_only | mutating | unset").
+     - The field is not shown in the legacy GUI (`static/index.html` has no occurrence).
+
+     The name is consistent. The response's third value is undocumented in the API schema. That is a
+     documentation gap, recorded here and not numbered. The readiness-matrix row renumbering and the
      canary-review design doc are internal row-ID/function-name jargon, not administrator-facing product
      vocabulary, and stay internally self-consistent.
    - The release-publication-gating and R2-only-catalog work: its job and tag names (`promote-image`,
