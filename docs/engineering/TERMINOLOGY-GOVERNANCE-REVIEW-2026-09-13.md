@@ -177,7 +177,11 @@ and one is now partially fixed.
   "Accept to Draft" is shorter and is the CLAUDE.md/legacy wording; "Accept to Policy Draft" names the
   object explicitly and is what the frontend contract specifies. This report does not pre-decide it.
 - **Affected code:** whichever UI loses — `frontend/src/features/learning/LearningRecommendations.tsx`
-  (3 UI strings + 1 comment) or `static/index.html:7030,7044-7045`.
+  (3 UI strings + 1 comment) or `static/index.html:7030,7044-7045`. These are the product strings, not an
+  exhaustive change list: tests pin the current wording too (e.g.
+  `frontend/src/test/policy-learning-page.test.tsx` matches "Accept to Policy Draft" in 12 places), so the
+  implementing change must grep the losing wording across `frontend/src`, `static/`, the Go tests and
+  `docs/`, and update every reference — including selectors that would otherwise silently stop matching.
 - **Affected API:** none — no field, route, or payload shape changes.
 - **Affected GUI:** the new frontend's Policy Learning recommendations screen (button label, confirm
   dialog title, confirm button label).
@@ -244,6 +248,12 @@ and one is now partially fixed.
   `ProfileDraftEditor.tsx`, `PACPage.tsx`, `ExceptionsTab.tsx`, `PoolsTab.tsx`, `pacShared.tsx`) AND the
   legacy panel description at `static/index.html:2316-2317`; alternatively, if the "PAC profile" direction
   is chosen, `static/index.html` (the five titled strings) + `docs/design/PRODUCT-TERMINOLOGY.md` (1 row).
+  Either list is the product copy only, not an exhaustive change list: frontend tests select controls by
+  their current labels (e.g. `frontend/src/test/pac-2fe-c-red-page.test.tsx:441-445` "All profiles", and
+  `pac-2fe-red-page.test.tsx:359-386` "New profile", where a renamed label would make a forbidden-control
+  check silently stop matching). The implementing change must grep every changed label across source AND
+  tests and keep each test's intent — especially negative assertions — rather than letting it pass
+  vacuously.
 - **Affected API:** none either way — `/api/pac/profiles` and the `Profile` JSON shape are unaffected.
 - **Affected GUI:** the new frontend's PAC screens (or, under the alternative direction, the legacy
   GUI's PAC panel).
