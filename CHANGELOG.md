@@ -268,6 +268,15 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Changed
 
+- The production image now cross-compiles the proxy and the bundled
+  maintenance agent on the build platform instead of compiling them under QEMU
+  for arm64. The shipped binaries are byte-identical to before; only the build
+  got faster. **Building the image now requires BuildKit.** It has been
+  Docker's default builder since Engine 23.0 and is the only builder Compose v2
+  uses. The deprecated legacy builder (`DOCKER_BUILDKIT=0`) stops at the first
+  `FROM` with `failed to parse platform : ""`. Pulling the published image is
+  unaffected.
+
 - OCSP now reports which TLS handshakes it actually covers. Enabling it
   installs the check on the shared upstream transport only, which for a
   forward proxy means the handshake to an `https://` parent proxy — inspected
@@ -407,6 +416,23 @@ endpoints for credentialed parents.
 
 ### Fixed
 
+- A `config.yaml` `auth.user` (or CLI `-user`) value written with a YAML
+  literal block scalar (`user: |` instead of `user: admin`) silently
+  appended a trailing newline to the stored admin username. Every other
+  local-admin-credential entry point (the web setup wizard) already trims
+  this field; the CLI/config.yaml startup path did not, so the operator was
+  permanently locked out of the admin UI — nothing typed at a login prompt
+  can produce a trailing newline — with no error at startup and no
+  indication of the cause. `resolveAuthStartupConfig` now trims the
+  resolved username (never the password, which may legitimately carry
+  whitespace) before it reaches `cfg.SetAuth`. Two review-round follow-ups
+  closed the same gap at its other two edges: the CLI/YAML precedence pick
+  (`s.authU = firstStr(...)`) now trims both candidates first, so a
+  whitespace-only `-user` can no longer shadow a real `config.yaml`
+  `auth.user`; and a resolved-empty username paired with a non-empty
+  password is now a fatal startup error instead of silently reaching
+  `cfg.SetAuth("", pass)`, which disabled local authentication entirely
+  and discarded the configured password.
 - The root-CA recovery record (CHAOS-50) could report a recovery with the
   wrong attempt count. A successful attempt set `recovered` from inside the
   attempt while the campaign loop counted it only after the attempt returned,

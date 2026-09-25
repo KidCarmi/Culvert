@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 
@@ -30,6 +31,11 @@ import (
 // distinction is the invariant this file pins (`qaAllowedJobEdges`), rather
 // than a blanket "no edges" rule that would have to be deleted to ship 2A.
 //
+// STAGE 5B moved the race + coverage run — and with it the profile — from
+// qa-logic to the new qa-race job (4 root shards + every other package), so
+// the one justified edge is now qa-coverage → qa-race. qa-logic keeps the
+// whole-module build and vet.
+//
 // This file is the anti-drift wall for that change. It parses the real
 // workflow (never a substring scan of the whole file) and drives the REAL
 // aggregate verdict implementation — the composite action the aggregate job
@@ -38,13 +44,15 @@ import (
 // KNOWN LIMITATION, deliberately NOT changed here and NOT asserted away:
 // .github/actions/needs-verdict treats a `skipped` need as a pass on EVERY
 // event, not only on pull requests, unless the caller passes `require-success`.
-// The QA aggregate passes no `require-success`, so an all-skipped main-push run
-// would report APPROVED. That is pre-existing behaviour shared by every gate
+// The QA aggregate passes no `require-success` on ordinary runs, so an
+// all-skipped main-push run would report APPROVED. (Audit runs — the stage-6B
+// weekly schedule and an `unsharded_audit` dispatch — DO pass one; see
+// ci_perf_report_test.go.) That is pre-existing behaviour shared by every gate
 // aggregate in the repository; tightening it is a policy change to a shared
 // action and belongs in its own reviewed diff (recorded as a follow-up in
 // roadmap/CI-REDESIGN.md §8). TestQAGateVerdict_RealActionBehaviour pins the
 // behaviour as it IS, including that gap, so a future fix is a visible diff.
-// Live validation of this stage must therefore confirm that all eight jobs
+// Live validation of this stage must therefore confirm that all nine jobs
 // EXECUTED successfully, not merely that the aggregate went green.
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -57,10 +65,13 @@ const (
 	qaPRSkipCondition     = "github.event_name != 'pull_request'"
 )
 
-// qaSubstantiveJobs are the eight jobs the aggregate must wait for. Order is
-// the workflow's own layer order (A–H) so a failure message reads like the file.
+// qaSubstantiveJobs are the nine jobs every non-PR run executes and the
+// aggregate must wait for. Order is the workflow's own layer order (A, A2,
+// B–H) so a failure message reads like the file. Stage 5B added qa-race: the
+// race + coverage suite moved out of qa-logic into it.
 var qaSubstantiveJobs = []string{
 	"qa-logic",
+	"qa-race",
 	"qa-determinism",
 	"qa-coverage",
 	"qa-infra-compose",
@@ -92,8 +103,12 @@ var qaFreedJobs = []string{
 // map is a scheduling regression; anything inside it must be justified by data
 // crossing the edge, never by ordering preference.
 var qaAllowedJobEdges = map[string]string{
-	"qa-coverage": "qa-logic", // the coverage profile artifact (stage 2A)
+	"qa-coverage": "qa-race", // the coverage profile artifact (stage 2A; producer moved to qa-race in 5B)
 }
+
+// qaAuditJobs are the dispatch-only qualification jobs (stage 5B): skipped on
+// every ordinary run, judged by the aggregate when requested.
+var qaAuditJobs = []string{"qa-unsharded-audit", "qa-unsharded-audit-compare"}
 
 func qaGateJob(t *testing.T, doc wfDoc, name string) wfJob {
 	t.Helper()
@@ -115,8 +130,8 @@ func TestQAGateScheduling_FreedJobsAreIndependent(t *testing.T) {
 	for _, name := range qaFreedJobs {
 		j := qaGateJob(t, doc, name)
 
-		if needs := jobNeeds(j); needs["qa-logic"] {
-			t.Errorf("job %q declares `needs: qa-logic` again — it consumes no output or artifact from it, "+
+		if needs := jobNeeds(j); needs["qa-logic"] || needs["qa-race"] {
+			t.Errorf("job %q declares `needs:` on qa-logic/qa-race again — it consumes no output or artifact from either, "+
 				"so the edge only serialises the longest job in front of it (CI-REDESIGN stage 1)", name)
 		}
 
@@ -172,8 +187,10 @@ func TestQAGateScheduling_SubstantiveGraphHasOnlyJustifiedEdges(t *testing.T) {
 	}
 
 	// Control: only the aggregate and the justified consumers may join. A wall
-	// that passed because every job had been deleted would fail here.
-	wantJoiners := map[string]bool{qaGateAggregateJob: true}
+	// that passed because every job had been deleted would fail here. The
+	// dispatch-only stage-5B audit comparison joins qa-race and the unsharded
+	// reference for their DATA; it is pinned by qa_race_shards_test.go.
+	wantJoiners := map[string]bool{qaGateAggregateJob: true, qaAuditCompareJob: true}
 	for consumer := range qaAllowedJobEdges {
 		wantJoiners[consumer] = true
 	}
@@ -256,10 +273,15 @@ func TestQAGateScheduling_TriggerMatrixPreserved(t *testing.T) {
 			}
 		}
 	}
-	if _, ok := keyed.On["schedule"]; ok {
-		t.Error("qa-gate.yml has no scheduled trigger and stage 1 does not add one")
+	// Stage 6B added exactly ONE schedule: the weekly same-SHA equivalence
+	// audit (ci_perf_report_test.go pins what it runs). A second cron, or a
+	// daily one, would be a cost decision this test makes visible.
+	if sched, ok := keyed.On["schedule"].([]interface{}); !ok || len(sched) != 1 {
+		t.Errorf("qa-gate.yml must carry exactly one scheduled trigger (the stage-6B weekly audit); got %v", keyed.On["schedule"])
+	} else if cron := toStr(asMap(sched[0])["cron"]); len(strings.Fields(cron)) != 5 || strings.Fields(cron)[4] == "*" {
+		t.Errorf("the scheduled audit must be WEEKLY (a fixed day-of-week); got cron %q", cron)
 	}
-	want := map[string]bool{"push": true, "pull_request": true, "workflow_dispatch": true}
+	want := map[string]bool{"push": true, "pull_request": true, "workflow_dispatch": true, "schedule": true}
 	for k := range keyed.On {
 		if !want[k] {
 			t.Errorf("unexpected trigger %q — the stage-1 change must not widen the event matrix", k)
@@ -267,7 +289,7 @@ func TestQAGateScheduling_TriggerMatrixPreserved(t *testing.T) {
 	}
 }
 
-// ─── 3. The aggregate still joins all eight and stays fail-closed ────────────
+// ─── 3. The aggregate still joins every job and stays fail-closed ────────────
 
 // TestQAGateScheduling_AggregateStillJoinsEveryJob pins that detaching the six
 // jobs did not detach them from the VERDICT. This is the half that keeps a
@@ -285,14 +307,15 @@ func TestQAGateScheduling_AggregateStillJoinsEveryJob(t *testing.T) {
 	}
 
 	needs := jobNeeds(agg)
-	for _, name := range qaSubstantiveJobs {
+	all := append(append([]string{}, qaSubstantiveJobs...), qaAuditJobs...)
+	for _, name := range all {
 		if !needs[name] {
 			t.Errorf("aggregate no longer needs %q — its failure would stop blocking the gate", name)
 		}
 	}
-	if len(needs) != len(qaSubstantiveJobs) {
-		t.Errorf("aggregate needs %d jobs, want exactly the %d substantive jobs (%v); got %v",
-			len(needs), len(qaSubstantiveJobs), qaSubstantiveJobs, needs)
+	if len(needs) != len(all) {
+		t.Errorf("aggregate needs %d jobs, want exactly the %d substantive + audit jobs (%v); got %v",
+			len(needs), len(all), all, needs)
 	}
 
 	// The verdict must be delegated to the SHARED action, not hand-rolled: a
@@ -385,7 +408,12 @@ func needsVerdictScript(t *testing.T) string {
 func needsJSON(results map[string]string) string {
 	var b strings.Builder
 	b.WriteString("{")
-	for i, name := range qaSubstantiveJobs {
+	names := make([]string, 0, len(results))
+	for name := range results {
+		names = append(names, name)
+	}
+	sort.Strings(names) // every job the caller supplied, in a stable order
+	for i, name := range names {
 		if i > 0 {
 			b.WriteString(",")
 		}
@@ -400,12 +428,26 @@ func allQAResults(result string) map[string]string {
 	for _, n := range qaSubstantiveJobs {
 		m[n] = result
 	}
+	// The audit jobs skip on every ordinary run — that is the shape the
+	// aggregate sees on a main push.
+	for _, n := range qaAuditJobs {
+		m[n] = "skipped"
+	}
 	return m
 }
 
 // runNeedsVerdict executes the real action body against a needs payload and
 // returns (combined output, exit-was-zero).
 func runNeedsVerdict(t *testing.T, script, payload string) (string, bool) {
+	t.Helper()
+	// An ordinary QA run passes no require-success (audit runs do — see
+	// ci_perf_report_test.go).
+	return runNeedsVerdictRequiring(t, script, payload, "")
+}
+
+// runNeedsVerdictRequiring is runNeedsVerdict with the action's
+// require-success input set to require.
+func runNeedsVerdictRequiring(t *testing.T, script, payload, require string) (string, bool) {
 	t.Helper()
 	dir := t.TempDir()
 	sh := filepath.Join(dir, "verdict.sh")
@@ -422,7 +464,7 @@ func runNeedsVerdict(t *testing.T, script, payload string) (string, bool) {
 	cmd := exec.CommandContext(t.Context(), "bash", sh)
 	cmd.Env = append(os.Environ(),
 		"NEEDS_JSON="+payload,
-		"REQUIRE=", // the QA aggregate passes no require-success
+		"REQUIRE="+require,
 		"TITLE="+qaGateAggregateName,
 		"EXTRA=",
 		"GITHUB_STEP_SUMMARY="+summary,
@@ -468,7 +510,8 @@ func TestQAGateVerdict_RealActionBehaviour(t *testing.T) {
 	// freed jobs included, which is exactly what "the approval must still fail"
 	// means once a qa-logic failure no longer suppresses them.
 	for _, bad := range []string{"failure", "cancelled"} {
-		for _, name := range qaSubstantiveJobs {
+		// A REQUESTED audit that fails must refuse too.
+		for _, name := range append(append([]string{}, qaSubstantiveJobs...), qaAuditJobs...) {
 			t.Run(bad+"/"+name, func(t *testing.T) {
 				results := allQAResults("success")
 				results[name] = bad

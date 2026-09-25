@@ -94,6 +94,51 @@ func TestLoadFileConfigAndFlags_LogMaxMB_YAMLHonoredWhenFlagUnset(t *testing.T) 
 	}
 }
 
+// TestLoadFileConfigAndFlags_AuthUser_WhitespaceOnlyCLIFallsBackToYAML proves
+// a whitespace-only -user CLI value does not shadow a real config.yaml
+// auth.user (Codex review, PR #1443). s.authU = firstStr(*s.user,
+// s.fc.Auth.User) treats ANY non-empty string — including one that is pure
+// whitespace — as "the CLI flag was set", so an operator whose deployment
+// wrapper passes -user "$ADMIN_USER" with $ADMIN_USER unexpectedly rendering
+// to spaces (an unset template variable inside a literal-space placeholder,
+// for instance) would silently discard a real config.yaml auth.user in
+// favor of a value that itself collapses to nothing — the same shape as the
+// CDR-fingerprint whitespace bug (resolveCDRStartupConfig), applied to the
+// admin username's CLI/YAML precedence rather than its final storage.
+func TestLoadFileConfigAndFlags_AuthUser_WhitespaceOnlyCLIFallsBackToYAML(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yaml")
+	yamlBody := "auth:\n  user: realadmin\n  pass: Sup3rSecret!\n"
+	if err := os.WriteFile(cfgPath, []byte(yamlBody), 0o600); err != nil {
+		t.Fatalf("write config.yaml: %v", err)
+	}
+
+	zero := 0
+	empty := ""
+	whitespaceUser := "   "
+	s := &startupState{
+		configPath:   &cfgPath,
+		proxyPort:    &zero,
+		uiPortFlag:   &zero,
+		socks5Port:   &zero,
+		logFilePath:  &empty,
+		blockFile:    &empty,
+		logMaxMB:     &zero,
+		user:         &whitespaceUser, // whitespace-only -user, never explicitly cleared
+		pass:         &empty,
+		tlsCert:      &empty,
+		tlsKey:       &empty,
+		rateLimitRPM: &zero,
+		ipMode:       &empty,
+	}
+
+	loadFileConfigAndFlags(s)
+
+	if s.authU != "realadmin" {
+		t.Errorf("s.authU = %q, want %q (config.yaml's auth.user); a whitespace-only -user must not shadow it", s.authU, "realadmin")
+	}
+}
+
 // ── Port-collision validation (validatePortCollisions) ──────────────────────
 //
 // validatePortCollisions runs on the RESOLVED listener ports — after CLI
@@ -391,5 +436,275 @@ func TestValidCDRServerFingerprint(t *testing.T) {
 					tt.fp, got, validCDRServerFingerprint(tt.fp), tt.want)
 			}
 		})
+	}
+}
+
+// ── CDR timeout_sec CLI/YAML validation parity (validCDRTimeoutSec) ─────────
+//
+// config.yaml's cdr.timeout_sec is range-validated by FileConfig.validateCDR
+// at load time (0 is valid/unset; otherwise must be >= 30, Sluice's own
+// per-file processing cap) — but the CLI flag -cdr-timeout-sec reaches the
+// exact same CDRConfig.TimeoutSec field (merged in
+// cdr_startup_config.go's resolveCDRStartupConfig, CLI wins over config.yaml)
+// with no equivalent gate, the same CLI/YAML parity gap TestValidCDRFailMode
+// and TestValidCDRServerFingerprint close for -cdr-fail-mode /
+// -cdr-server-fingerprint.
+//
+// A too-low CLI value (e.g. "-cdr-timeout-sec 5") is not rejected at startup:
+// it becomes the per-file gRPC deadline in cdr_pool.go/cdr_proxy.go
+// (`context.WithTimeout(ctx, c.cfg.Timeout)`), which is shorter than Sluice's
+// own 30s cap, so ordinary (non-trivial) files reliably miss the deadline and
+// every scan returns a client-side timeout. Because cdr.fail_mode defaults to
+// fail-OPEN, that silently disables CDR content sanitization on every request
+// that hits it, with no startup error naming the bad flag — the same failure
+// mode validateCDR's own comment says the YAML-side check exists to prevent,
+// just reached via the other input path.
+//
+// validCDRTimeoutSec is the shared predicate (mirroring validCDRFailMode /
+// validCDRServerFingerprint): used by validateCDR (config.go) for the YAML
+// path and by initCDR (main.go) for the CLI path, so both channels reject the
+// same invalid values instead of only one of them.
+func TestValidCDRTimeoutSec(t *testing.T) {
+	tests := []struct {
+		name string
+		t    int
+		want bool // true = accepted (validCDRTimeoutSec returns "")
+	}{
+		{"unset (0)", 0, true},
+		{"minimum valid (30)", 30, true},
+		{"well above minimum (35, the engine default)", 35, true},
+		{"one below minimum (29)", 29, false},
+		{"far too low (5)", 5, false},
+		{"negative", -1, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := validCDRTimeoutSec(tt.t) == ""
+			if got != tt.want {
+				t.Errorf("validCDRTimeoutSec(%d) accepted=%v (msg=%q), want accepted=%v",
+					tt.t, got, validCDRTimeoutSec(tt.t), tt.want)
+			}
+		})
+	}
+}
+
+// TestValidateCDR_RejectsTimeoutSecBelowMinimum pins the YAML-side oracle
+// (FileConfig.validateCDR) that validCDRTimeoutSec now backs, and — combined
+// with resolveCDRStartupConfig — demonstrates the parity gap directly: a
+// timeout_sec value that config.yaml has always refused to boot with reaches
+// CDRConfig.TimeoutSec identically whether it was set in config.yaml or, before
+// this fix, on the CLI-only path (initCDR had no gate for -cdr-timeout-sec).
+func TestValidateCDR_RejectsTimeoutSecBelowMinimum(t *testing.T) {
+	tests := []struct {
+		name string
+		t    int
+		want bool // true = validate() should accept
+	}{
+		{"unset (0)", 0, true},
+		{"valid (30)", 30, true},
+		{"too low (5)", 5, false},
+		{"one below minimum (29)", 29, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fc := &FileConfig{}
+			fc.CDR.Enabled = true
+			fc.CDR.Endpoint = "sluice:8443"
+			fc.CDR.TimeoutSec = tt.t
+			err := fc.validate()
+			if tt.want && err != nil {
+				t.Errorf("validate() rejected a valid timeout_sec %d: %v", tt.t, err)
+			}
+			if !tt.want && err == nil {
+				t.Errorf("validate() accepted an invalid timeout_sec %d, want a rejection", tt.t)
+			}
+		})
+	}
+}
+
+// TestResolveCDRStartupConfig_CLIOnlyTimeoutBypassesYAMLValidation documents
+// the exact shape of the bug this change closes: resolveCDRStartupConfig
+// (the CLI/YAML merge, cdr_startup_config.go) has no opinion on validity — it
+// just merges — so a CLI-only timeout that config.yaml would refuse to boot
+// with merges through untouched. It is initCDR's post-merge
+// validCDRTimeoutSec(resolved.CDR.TimeoutSec) check — not the merge itself —
+// that must catch the value on the real startup path.
+func TestResolveCDRStartupConfig_CLIOnlyTimeoutBypassesYAMLValidation(t *testing.T) {
+	fc := &FileConfig{} // no config.yaml timeout_sec at all
+	got := resolveCDRStartupConfig(fc, t.TempDir(), cdrCLIFlags{
+		Enabled:    true,
+		Endpoint:   "sluice:8443",
+		TimeoutSec: 5, // below Sluice's own 30s cap
+	})
+	if got.CDR.TimeoutSec != 5 {
+		t.Fatalf("resolved TimeoutSec = %d, want 5 (the merge itself must not silently drop or clamp it)", got.CDR.TimeoutSec)
+	}
+	// The merged value alone is exactly the shape validateCDR already
+	// refuses when it arrives via config.yaml — proving the CLI path used to
+	// let through a value the equivalent YAML config could never boot with.
+	asIfFromYAML := &FileConfig{CDR: got.CDR}
+	if err := asIfFromYAML.validate(); err == nil {
+		t.Fatalf("a merged CDR config with timeout_sec=5 must fail validate() — validCDRTimeoutSec regressed")
+	}
+	// And the RESOLVED value — what initCDR actually validates today — must
+	// independently be rejected too, not just the raw CLI flag in isolation.
+	if !got.CDR.Enabled {
+		t.Fatalf("resolved CDR.Enabled = false, want true (Enabled: true was passed via CLI flags)")
+	}
+	if msg := validCDRTimeoutSec(got.CDR.TimeoutSec); msg == "" {
+		t.Fatalf("validCDRTimeoutSec(%d) accepted a value below Sluice's 30s cap", got.CDR.TimeoutSec)
+	}
+}
+
+// TestResolveCDRStartupConfig_DormantYAMLTimeoutSurvivesCLIEnable pins the
+// specific gap a review of this change found (Codex, PR #1480): config.yaml
+// can ship with cdr.enabled: false and an out-of-range cdr.timeout_sec —
+// validateCDR (config.go) returns immediately for a disabled block, so that
+// value passes load-time validation completely unexamined. An operator who
+// later flips CDR on purely via -cdr-enabled (never touching
+// -cdr-timeout-sec, which then reads as the CLI "unset" sentinel 0) merges
+// straight through to the dormant, invalid YAML value — checking only the
+// raw -cdr-timeout-sec flag (as an earlier version of this fix did) never
+// sees it. initCDR must validate the value AFTER the CLI/YAML merge, gated
+// on the RESOLVED (post-merge) Enabled, so this exact path is caught too.
+func TestResolveCDRStartupConfig_DormantYAMLTimeoutSurvivesCLIEnable(t *testing.T) {
+	fc := &FileConfig{}
+	fc.CDR.Enabled = false // dormant in the file — validateCDR never looked at TimeoutSec
+	fc.CDR.Endpoint = "sluice:8443"
+	fc.CDR.TimeoutSec = 5 // below Sluice's own 30s cap
+	if err := fc.validate(); err != nil {
+		t.Fatalf("a disabled CDR block with an out-of-range timeout_sec must still load: %v", err)
+	}
+
+	// Operator turns CDR on purely via -cdr-enabled; -cdr-timeout-sec is
+	// never passed, so its flag value is the CLI "unset" sentinel (0).
+	got := resolveCDRStartupConfig(fc, t.TempDir(), cdrCLIFlags{
+		Enabled: true,
+		// TimeoutSec deliberately omitted (zero value): flag not passed.
+	})
+
+	if !got.CDR.Enabled {
+		t.Fatalf("resolved CDR.Enabled = false, want true (-cdr-enabled was passed)")
+	}
+	if got.CDR.TimeoutSec != 5 {
+		t.Fatalf("resolved TimeoutSec = %d, want 5 (the dormant config.yaml value must survive the merge, not be silently dropped)", got.CDR.TimeoutSec)
+	}
+	// This is the crux: the RESOLVED, now-effective value must fail the same
+	// check config.yaml would have failed had cdr.enabled been true from the
+	// start. Checking only the raw CLI flag (0, "unset") would miss this.
+	if msg := validCDRTimeoutSec(got.CDR.TimeoutSec); msg == "" {
+		t.Fatalf("validCDRTimeoutSec(%d) accepted a dormant-then-enabled value below Sluice's 30s cap", got.CDR.TimeoutSec)
+	}
+}
+
+// TestCDRStartupTimeoutError_RuntimeSentinelEnables pins the second gap a
+// review of this change found (Codex, PR #1480): with cdr.enabled false in
+// config.yaml and no -cdr-enabled flag, the runtime sentinel alone still turns
+// CDR on inside loadCDR. The startup timeout check must therefore gate on the
+// sentinel-adjusted enablement, or an invalid dormant timeout reaches the
+// client unvalidated.
+func TestCDRStartupTimeoutError_RuntimeSentinelEnables(t *testing.T) {
+	fc := &FileConfig{}
+	fc.CDR.Enabled = false
+	fc.CDR.Endpoint = "sluice:8443"
+	fc.CDR.TimeoutSec = 5
+	got := resolveCDRStartupConfig(fc, t.TempDir(), cdrCLIFlags{})
+	if got.CDR.Enabled {
+		t.Fatalf("resolved CDR.Enabled = true, want false (neither YAML nor CLI enables it)")
+	}
+
+	if msg := cdrStartupTimeoutError(got, false); msg != "" {
+		t.Fatalf("CDR effectively disabled: a dormant timeout must stay unvalidated, got %q", msg)
+	}
+	if msg := cdrStartupTimeoutError(got, true); msg == "" {
+		t.Fatalf("runtime sentinel enables CDR: timeout_sec=5 must be rejected")
+	}
+
+	// Control: a valid timeout passes whichever way CDR is enabled.
+	got.CDR.TimeoutSec = 30
+	if msg := cdrStartupTimeoutError(got, true); msg != "" {
+		t.Fatalf("valid timeout rejected under the sentinel: %q", msg)
+	}
+}
+
+// ── ip_filter_mode CLI/YAML validation parity (validIPFilterMode) ───────────
+//
+// config.yaml's security.ip_filter_mode is validated by
+// FileConfig.validateEnums at load time (TestConfigValidate_InvalidIPFilterMode,
+// p5_test.go): an unrecognized value (e.g. a typo like "Allow") fails the
+// whole config load with a clear error naming the field.
+//
+// The CLI flag -ip-filter-mode reaches the exact same merged value (resolved
+// in loadFileConfigAndFlags, CLI wins over config.yaml) but had no equivalent
+// gate: an invalid CLI value was stored verbatim as s.ipModeVal and handed
+// straight to IPFilter.SetMode (connlimit_startup.go). IPFilter.Allowed
+// (security.go) treats any mode other than "", "allow", or "block" as
+// CORRUPTION and denies ALL proxied traffic (fail closed) — a deliberate
+// posture for STATE that gets corrupted after the fact (e.g. a config-version
+// rollback), not a substitute for validating fresh operator input. A simple
+// case typo such as "-ip-filter-mode Allow" therefore silently blackholed
+// every request behind the proxy with no startup error pointing at the
+// mistake, while the identical typo in config.yaml already refused to boot.
+//
+// validIPFilterMode is the shared predicate (mirroring validCDRFailMode):
+// used by validateEnums (config.go) for the YAML path and by
+// loadFileConfigAndFlags (main.go) for the CLI path, so both channels reject
+// the same invalid values instead of only one of them.
+func TestValidIPFilterMode(t *testing.T) {
+	tests := []struct {
+		mode string
+		want bool
+	}{
+		{"", true},       // unset — filter disabled
+		{"allow", true},  // explicit allowlist
+		{"block", true},  // explicit blocklist
+		{"Allow", false}, // case typo — must be rejected, not silently deny-all
+		{"BLOCK", false},
+		{"alow", false}, // misspelling
+		{"deny", false}, // plausible-sounding but wrong value
+		{"whitelist", false},
+	}
+	for _, tt := range tests {
+		if got := validIPFilterMode(tt.mode); got != tt.want {
+			t.Errorf("validIPFilterMode(%q) = %v, want %v", tt.mode, got, tt.want)
+		}
+	}
+}
+
+// TestLoadFileConfigAndFlags_IPFilterMode_ValidCLIOverrideResolves proves the
+// happy path still works end to end through the same merge point the fatal
+// check above was added to: a valid -ip-filter-mode CLI value overrides an
+// unset config.yaml field and loadFileConfigAndFlags must not abort.
+func TestLoadFileConfigAndFlags_IPFilterMode_ValidCLIOverrideResolves(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(cfgPath, []byte("proxy:\n  port: 8080\n"), 0o600); err != nil {
+		t.Fatalf("write config.yaml: %v", err)
+	}
+
+	zero := 0
+	empty := ""
+	blockMode := "block"
+	s := &startupState{
+		configPath:   &cfgPath,
+		proxyPort:    &zero,
+		uiPortFlag:   &zero,
+		socks5Port:   &zero,
+		logFilePath:  &empty,
+		blockFile:    &empty,
+		logMaxMB:     &zero,
+		user:         &empty,
+		pass:         &empty,
+		tlsCert:      &empty,
+		tlsKey:       &empty,
+		rateLimitRPM: &zero,
+		ipMode:       &blockMode, // -ip-filter-mode block
+	}
+
+	// Must not call log.Fatalf (would os.Exit the test binary) — "block" is valid.
+	loadFileConfigAndFlags(s)
+
+	if s.ipModeVal != "block" {
+		t.Errorf("s.ipModeVal = %q, want %q", s.ipModeVal, "block")
 	}
 }
