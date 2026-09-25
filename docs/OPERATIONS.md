@@ -283,11 +283,26 @@ linked above is the only supported reference.
 
 * `ca.bundle` — encrypted root CA (passphrase required to use)
 * `policy.json[.meta]` — policy ruleset and version
-* `blocklist.json`, `urlcat.json`, `cdr_policies.json` — content controls
-* `cluster.json`, `cluster_ca.crt/key` — cluster identity
+* `blocklist.txt`, `category_groups.json`, `cdr_policies.json` — content
+  controls. `categories.json` (Layer-1 URL categories) defaults to a path
+  relative to the working directory (`/app` in the shipped image), **not**
+  `/data`. To make it survive a container recreate **and** be captured
+  by `--backup`, set `proxy.url_categories_file: /data/categories.json`
+  in `config.yaml` — that exact path, because `--backup` archives only
+  `<dataDir>/categories.json` and silently skips any other filename. The
+  shipped `docker-compose.yml` does not pass `-config`, so a mounted
+  `config.yaml` is ignored until you also uncomment its
+  `./config.yaml:/app/config.yaml:ro` volume and add
+  `"-config", "/app/config.yaml"` to the proxy `command`. On an existing
+  deployment, copy the live store across **first**
+  (`docker compose exec proxy cp /app/categories.json /data/categories.json`):
+  once the path changes, a missing `/data/categories.json` is re-seeded
+  with the built-in defaults, and recreating the container discards the
+  old `/app` copy, so customised categories would otherwise be lost.
+* `cluster.json`, `cluster-ca.crt/key` — cluster identity
 * `config_versions/v{N}.json` — automatic config snapshots (50 kept)
 * `ui_users.json` — admin accounts (bcrypt hashes)
-* `audit.json`, `requests.log` — audit and request logs
+* `audit.jsonl`, `requests.jsonl` — audit and request logs
 
 The config-version snapshots under `config_versions/` are an in-place
 rollback mechanism — separate from your full backup, but useful for
@@ -498,8 +513,8 @@ compose file. See `docs/operator/release-management-agent.md` and
 | Liveness / readiness probes  | `:8080/health`, `:8080/ready`                                  |
 | Operator contract (GUI)      | Admin UI → Infrastructure → Diagnostics                       |
 | Operator contract (API)      | `GET :9090/api/diagnostics` (viewer role)                      |
-| Backup                       | snapshot `/data`                                              |
+| Backup                       | `cli` service (`--backup`, see §4 / `docker-compose-backup-restore.md`) |
 | Config rollback              | Admin UI → Settings → Config Versions                         |
 | Config-version health        | Diagnostics rows `config_versions_present` / `_readable` / `config_rollback_validation` |
 | Cluster rolling update       | Admin UI → Updates → Cluster Rolling Update                   |
-| Audit log                    | Admin UI → Audit Log, or `audit.json` in `/data`              |
+| Audit log                    | Admin UI → Audit Log, or `audit.jsonl` in `/data`             |
