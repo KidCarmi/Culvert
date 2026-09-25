@@ -6133,7 +6133,7 @@ The engine, in `internal/ocsp`:
    No new posture, no second dialect: CHAOS-53's rule for the scan sidecar.
 4. **`certKey` = RFC 6960's CertID fields** (SHA-256 over issuer subject,
    issuer SPKI, plus the serial).
-5. **SSRF**: scheme allow-list + `ssrf.PrivateHost` inline at the call site
+5. **SSRF**: scheme allow-list + `ssrf.PrivateHostContext` inline at the call site
    (so CodeQL sees the guard, per repo convention), a dedicated client whose
    `DialContext` is `ssrf.SafeDialContext` — closing the rebinding window the
    pre-flight lookup leaves open — and `CheckRedirect` refusing outright.
