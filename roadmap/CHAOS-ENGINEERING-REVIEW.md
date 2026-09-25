@@ -7125,6 +7125,43 @@ the rate limiter into the memory leak it is meant to prevent.
 
 Both were verified failing against the exact shapes they replace.
 
+### Codex round 2 — two more, both introduced BY this fix
+
+**P2a — the fix for a log-amplification defect became one.** Routing the
+all-instances-open pool through `cdrErrorOutcome` gave it `Status: "ERROR"`,
+and `runCDRStage`'s `cdrPass` branch logs `CDR_ERROR` UNCONDITIONALLY — so
+under `fail_mode: open` a sustained outage emitted one process line per
+DELIVERED FILE, where before this sweep the same pool produced a bare
+`SKIPPED` and no line at all. The new per-reason gate only covered the
+"all N enrolled instances unavailable" line, one layer up. The terminal line
+now has its OWN gate (a second `cdrFailureLogGate` instance, not a share of
+the first: both fire for the same event, so one gate would let whichever ran
+first silence the other and leave the operator with half the picture). The
+structured `recordRequest` entry stays per-request — that is the traffic
+record, bounded by request rate by definition.
+
+**P2b — the observer fix left the REAL RPC callers unbounded.** Repointing
+`cdrActiveClient` at the non-reserving `PeekAvailable` is right for the five
+boolean nil-checks and wrong for the two admin handlers that go on to issue
+`Health` and `Sanitize` RPCs (`apiCDRHealth`, `apiCDRTest`). Before, they at
+least reserved (and leaked — that was D1); after, they reserved nothing, so
+repeated polls of a viewer-visible status panel could herd the very instance
+the breaker is trying to probe, bypassing `HalfOpenProbes` entirely.
+`cdrClientForAdminRPC` gives them the reserving picker plus a deferred
+release. It deliberately reports NO outcome: the reservation is there to
+BOUND concurrency, not to vote on health — an admin test with an odd file
+must not trip production CDR, and a lucky admin probe must not close a
+breaker the request path has not re-validated. Advancing open→half-open is
+not a vote and is left alone (the request path's next pick would do it
+anyway); pinned by a control asserting the breaker never reaches CLOSED and
+that neither `consecFails` nor `totalOpens` moves.
+
+The shape of both is the same one this section already records twice: **a
+rule enforced at one layer and not carried to the next.** Round 1 was the
+`fail_mode` decision not reaching the entry point; round 2 is the log gate
+not reaching the terminal line, and the reserve/observe split not reaching
+the callers that actually issue RPCs.
+
 ### Deliberately left, and recorded
 
 - **`fail_mode: open` remains a real exposure window** during an outage —

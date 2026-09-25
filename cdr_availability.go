@@ -140,39 +140,67 @@ type cdrFailureLogGate struct {
 	suppressed int64
 }
 
-var cdrCallFailureGate cdrFailureLogGate
+var (
+	cdrCallFailureGate   cdrFailureLogGate
+	cdrTerminalErrorGate cdrFailureLogGate
+)
 
-// noteCDRCallFailure reports whether this failure should be logged.  The
-// first sighting of a reason class logs immediately; after that, at most one
-// line per cdrUnavailableLogInterval FOR THAT CLASS.  The magnitude lives in
-// the counters.
-func noteCDRCallFailure(reason string, now time.Time) bool {
-	cdrCallFailureGate.mu.Lock()
-	defer cdrCallFailureGate.mu.Unlock()
-	if cdrCallFailureGate.lastLogged == nil {
-		cdrCallFailureGate.lastLogged = make(map[string]time.Time, cdrFailureReasonCap)
+// allow reports whether a line for this reason class should be logged.  The
+// first sighting of a class logs immediately; after that, at most one line
+// per cdrUnavailableLogInterval FOR THAT CLASS.  The magnitude lives in the
+// counters.
+func (g *cdrFailureLogGate) allow(reason string, now time.Time) bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.lastLogged == nil {
+		g.lastLogged = make(map[string]time.Time, cdrFailureReasonCap)
 	}
 	key := reason
-	if _, known := cdrCallFailureGate.lastLogged[key]; !known &&
-		len(cdrCallFailureGate.lastLogged) >= cdrFailureReasonCap {
+	if _, known := g.lastLogged[key]; !known && len(g.lastLogged) >= cdrFailureReasonCap {
 		key = cdrFailureReasonOverflow
 	}
-	last, seen := cdrCallFailureGate.lastLogged[key]
+	last, seen := g.lastLogged[key]
 	if !seen || now.Sub(last) >= cdrUnavailableLogInterval {
-		cdrCallFailureGate.lastLogged[key] = now
+		g.lastLogged[key] = now
 		return true
 	}
-	cdrCallFailureGate.suppressed++
+	g.suppressed++
 	return false
+}
+
+// noteCDRCallFailure gates the "why the backend is unhappy" line.
+func noteCDRCallFailure(reason string, now time.Time) bool {
+	return cdrCallFailureGate.allow(reason, now)
+}
+
+// noteCDRTerminalErrorLog gates runCDRStage's per-response CDR_ERROR line.
+//
+// It needs its OWN gate, not a share of the one above: during an outage both
+// fire for the same event, and a single gate would let one line suppress the
+// other, so an operator would see "all instances unavailable" without the
+// CDR_ERROR that names the host, or vice versa, depending on ordering.
+//
+// Rate-limiting this line at all is the point (Codex P2, round 2). Before
+// CHAOS-67 an all-breakers-open pool produced a bare "SKIPPED" and NO process
+// log; routing it through cdrErrorOutcome gave it Status "ERROR", and
+// runCDRStage logs that unconditionally — so the fix for a log-amplification
+// defect introduced one line per delivered file on exactly the sustained
+// outage it was meant to quieten. The structured recordRequest entry stays
+// per-request: that is the traffic record, and it is bounded by request rate
+// by definition, not by this gate.
+func noteCDRTerminalErrorLog(reason string, now time.Time) bool {
+	return cdrTerminalErrorGate.allow(reason, now)
 }
 
 // resetCDRAvailabilityForTest clears the process-global gate + counters so
 // tests do not inherit each other's rate-limit state.
 func resetCDRAvailabilityForTest() {
-	cdrCallFailureGate.mu.Lock()
-	cdrCallFailureGate.lastLogged = nil
-	cdrCallFailureGate.suppressed = 0
-	cdrCallFailureGate.mu.Unlock()
+	for _, g := range []*cdrFailureLogGate{&cdrCallFailureGate, &cdrTerminalErrorGate} {
+		g.mu.Lock()
+		g.lastLogged = nil
+		g.suppressed = 0
+		g.mu.Unlock()
+	}
 	atomic.StoreInt64(&statCDRUnavailable, 0)
 	atomic.StoreInt64(&statCDRNotDeployed, 0)
 }

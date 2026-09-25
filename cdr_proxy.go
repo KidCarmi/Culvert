@@ -443,9 +443,18 @@ func runCDRStage(r *http.Request, req *http.Request, body, scanBody []byte, ct, 
 		return cdrStageDecision{body: newBody, scanBody: newScan}
 	case cdrPass:
 		if res.Status == "ERROR" {
+			// The structured entry is the TRAFFIC record and stays
+			// per-request. The PROCESS line is rate-limited per reason
+			// class: an all-instances-down pool under fail_mode=open
+			// reaches this branch for every delivered file, so an
+			// ungated line here reintroduces the per-file amplification
+			// cdr_availability.go's gate exists to prevent (CHAOS-67,
+			// Codex P2 round 2).
 			recordRequest(clientIP, "CONNECT", hostOnly, "CDR_ERROR", res.ProfileName, res.BlockReason, id.Identity, "inspect")
-			logger.Printf("CDR_ERROR %s -> %q (fail-open) reason=%q",
-				clientIP, sanitizeLog(hostOnly), sanitizeLog(res.BlockReason))
+			if noteCDRTerminalErrorLog(res.BlockReason, time.Now()) {
+				logger.Printf("CDR_ERROR %s -> %q (fail-open) reason=%q",
+					clientIP, sanitizeLog(hostOnly), sanitizeLog(res.BlockReason))
+			}
 		}
 		return cdrStageDecision{body: body, scanBody: scanBody}
 	}

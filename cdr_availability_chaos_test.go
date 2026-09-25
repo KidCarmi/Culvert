@@ -408,6 +408,106 @@ func TestChaos67_AlertIsGatedOnSubscriber(t *testing.T) {
 	}
 }
 
+// ─── Codex round 2 ─────────────────────────────────────────────────────────
+
+func TestChaos67_TerminalErrorLogIsRateLimitedDuringAnOutage(t *testing.T) {
+	// fail_mode=open + every instance down reaches runCDRStage's cdrPass
+	// "ERROR" branch for EVERY delivered file. Ungated, that is one process
+	// log line per file — the amplification this sweep exists to prevent,
+	// and strictly worse than the pre-CHAOS-67 behaviour, which produced a
+	// bare SKIPPED and no line at all.
+	resetCDRAvailabilityForTest()
+	now := time.Unix(0, 0)
+	logged := 0
+	for i := 0; i < 600; i++ {
+		now = now.Add(time.Second)
+		if noteCDRTerminalErrorLog("cdr_unavailable", now) {
+			logged++
+		}
+	}
+	if logged > 12 {
+		t.Fatalf("%d CDR_ERROR lines for 600 delivered files; want <= 12 "+
+			"(onset + one per minute)", logged)
+	}
+	if logged == 0 {
+		t.Fatal("every line suppressed — the fail-open bypass must stay visible")
+	}
+}
+
+func TestChaos67_TerminalAndFailureGatesDoNotSuppressEachOther(t *testing.T) {
+	// Both fire for the same event during an outage. Sharing one gate would
+	// let whichever ran first silence the other, so an operator would see
+	// only half the picture.
+	resetCDRAvailabilityForTest()
+	now := time.Unix(0, 0)
+	if !noteCDRCallFailure("all_instances_unavailable", now) {
+		t.Fatal("failure-gate onset must log")
+	}
+	if !noteCDRTerminalErrorLog("cdr_unavailable", now) {
+		t.Fatal("terminal-gate onset must log even though the failure gate just did")
+	}
+}
+
+func TestChaos67_AdminRPCCallersReserveTheProbeBudget(t *testing.T) {
+	// apiCDRHealth / apiCDRTest issue real RPCs. Repointing cdrActiveClient
+	// at the non-reserving PeekAvailable left them unbounded against a
+	// recovering backend, so a polled status panel could herd the very
+	// instance the breaker is probing.
+	pc, _ := openBreakerPastReset(t, "sluice-1")
+	pc.Client = &CDRClient{} // non-nil so the helper returns it
+	withTempPool(t, pc)
+
+	client, release := cdrClientForAdminRPC()
+	if client == nil {
+		t.Fatal("first admin RPC should be permitted")
+	}
+	// While it holds the probe, a second admin RPC must be refused.
+	if second, rel2 := cdrClientForAdminRPC(); second != nil {
+		rel2()
+		release()
+		t.Fatal("a second concurrent admin RPC bypassed HalfOpenProbes — " +
+			"repeated status polls can herd a recovering Sluice")
+	}
+	release()
+	// After release the budget is available again.
+	third, rel3 := cdrClientForAdminRPC()
+	defer rel3()
+	if third == nil {
+		t.Fatal("the probe slot was not returned after the admin RPC finished")
+	}
+}
+
+func TestChaos67_Control_AdminRPCDoesNotVoteOnBreakerHealth(t *testing.T) {
+	// The reservation bounds concurrency; it must NOT let an admin test
+	// trip or close the production breaker.
+	pc, _ := openBreakerPastReset(t, "sluice-1")
+	pc.Client = &CDRClient{}
+	withTempPool(t, pc)
+
+	// Taking a probe legitimately advances open -> half-open; that IS what
+	// reserving means, and the request path would have done it on its next
+	// pick anyway. What must not happen is the admin call reporting an
+	// OUTCOME: no verdict, so no close, no re-open, no failure charged.
+	before := pc.Breaker.Stats()
+	client, release := cdrClientForAdminRPC()
+	if client == nil {
+		t.Fatal("expected a client")
+	}
+	release()
+	after := pc.Breaker.Stats()
+	if pc.Breaker.State() == cbStateClosed {
+		t.Fatal("an admin RPC closed the breaker — it must not vote the backend healthy")
+	}
+	if after.ConsecFails != before.ConsecFails {
+		t.Fatalf("admin RPC charged a failure (consecFails %d -> %d)",
+			before.ConsecFails, after.ConsecFails)
+	}
+	if after.TotalOpens != before.TotalOpens {
+		t.Fatalf("admin RPC re-opened the breaker (totalOpens %d -> %d)",
+			before.TotalOpens, after.TotalOpens)
+	}
+}
+
 // ─── Contract row ──────────────────────────────────────────────────────────
 
 func TestChaos67_DiagnosticsRowReportsADarkBackend(t *testing.T) {
