@@ -8105,8 +8105,8 @@ async function importConfig(input) {
 
 // ── Config Versioning ────────────────────────────────────────────────────
 // configRollbackExcluded caches the settings a config-version rollback
-// deliberately never touches (Finding 10.3 exclusions plus AdminSettings-only
-// operational settings). null = not yet resolved, [] = known-empty, array =
+// deliberately never touches (Finding 10.3 exclusions, AdminSettings-only
+// operational settings, and known off-registry state). null = not yet resolved, [] = known-empty, array =
 // known list. configRollbackScopePromise lets rollbackConfigVersion() await
 // an in-flight fetch instead of racing it (a click before the panel's own
 // background fetch resolves must not silently show an "everything moves"
@@ -8125,7 +8125,9 @@ function loadConfigRollbackScope() {
       if (configRollbackExcluded.length === 0) { el.style.display = 'none'; return; }
       const items = configRollbackExcluded.map(e =>
         `<li><code>${escHtml(e.id)}</code> — ${escHtml(e.note)}</li>`).join('');
-      el.innerHTML = `<details><summary>Rollback does not restore ${configRollbackExcluded.length} setting${configRollbackExcluded.length === 1 ? '' : 's'} (by design)</summary>` +
+      // "including": the list is the set this appliance KNOWS about, not a
+      // proof that everything else rolls back.
+      el.innerHTML = `<details><summary>Settings not restored by rollback (by design), including these ${configRollbackExcluded.length}</summary>` +
         `<ul style="margin:6px 0 0 18px;padding:0">${items}</ul></details>`;
       el.style.display = 'block';
     } catch (err) {
@@ -8214,7 +8216,7 @@ async function rollbackConfigVersion(version) {
   if (configRollbackScopeError) {
     scopeNote = ' Note: could not determine which settings are excluded from rollback by design — treat the scope as unknown and check the list below the version table before relying on this rollback.';
   } else if (configRollbackExcluded && configRollbackExcluded.length > 0) {
-    scopeNote = ` Note: ${configRollbackExcluded.length} setting${configRollbackExcluded.length === 1 ? '' : 's'} (e.g. ${configRollbackExcluded.slice(0, 3).map(e => e.id).join(', ')}) are excluded by design and will keep their current values — see the list below the version table.`;
+    scopeNote = ` Note: some settings are not restored by rollback by design and will keep their current values, including ${configRollbackExcluded.slice(0, 3).map(e => e.id).join(', ')} — see the list below the version table.`;
   } else {
     scopeNote = '';
   }

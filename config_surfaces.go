@@ -589,6 +589,10 @@ var configSurfaces = []configSurfaceRow{
 type rollbackExcludedSetting struct {
 	ID   string `json:"id"`
 	Note string `json:"note"`
+	// sources names the "file:func" sites whose "not on the rollback
+	// surface" source comments this entry answers for. Never serialized;
+	// TestRollbackScope_EveryOffSurfaceMarkerIsClaimed pins it.
+	sources []string
 }
 
 // rollbackExcludedConfigSurfaces derives, from the registry above, EVERY
@@ -600,7 +604,10 @@ type rollbackExcludedSetting struct {
 // to click "Rollback" has no way to tell them apart from the ones that DO
 // move, so both belong in one accurate answer to "what will this not
 // change?" Deriving rather than hand-listing means a future registry row
-// can never drift out of sync with what the UI tells the operator.
+// can never drift out of sync with what the UI tells the operator. It then
+// appends the known off-registry state (offRegistryRollbackExclusions). The
+// result is the KNOWN exclusion set, not a proof of completeness, and callers
+// must present it that way.
 func rollbackExcludedConfigSurfaces() []rollbackExcludedSetting {
 	out := make([]rollbackExcludedSetting, 0, len(configSurfaces))
 	for i := range configSurfaces {
@@ -617,14 +624,65 @@ func rollbackExcludedConfigSurfaces() []rollbackExcludedSetting {
 	return append(out, offRegistryRollbackExclusions...)
 }
 
-// offRegistryRollbackExclusions lists operator-facing configuration that lives
+// offRegistryRollbackExclusions lists operator-managed state that lives
 // OUTSIDE the configSurfaces registry and is therefore invisible to the
-// derivation above, yet is equally untouched by a version rollback. Without it
-// the rollback-scope answer would understate what a rollback leaves in place.
-// CDR state is per-CP local and neither captured nor applied by
-// captureConfigBackup/applyConfigBackup (see the header of cdr_ui.go).
+// derivation above, yet is equally untouched by a version rollback
+// (captureConfigBackup neither reads nor restores it). It is best-effort, not
+// a proof of completeness — the UI therefore presents the list as "including",
+// never as the whole set — but it is WALLED: every handler whose source says it
+// is off the rollback surface must be claimed here, by a registry row, or as
+// runtime-only (TestRollbackScope_EveryOffSurfaceMarkerIsClaimed).
 var offRegistryRollbackExclusions = []rollbackExcludedSetting{
-	{ID: "cdr_enabled", Note: "CDR enablement is per-CP local state outside the config registry; rollback never captures or restores it"},
-	{ID: "cdr_instances", Note: "CDR instances (cdr_instances.json) are per-CP local state; rollback never captures or restores them, and must never silently un-revoke a credential"},
+	{ID: "cdr_enabled", Note: "CDR enablement is per-CP local state outside the config registry; rollback never captures or restores it",
+		sources: []string{"cdr_ui.go:<file>"}},
+	{ID: "cdr_instances", Note: "CDR instances (cdr_instances.json) are per-CP local state; rollback never captures or restores them, and must never silently un-revoke a credential",
+		sources: []string{"cdr_ui.go:apiCDRRevokeRPC"}},
 	{ID: "cdr_policies", Note: "CDR policies (cdr_policies.json) are per-CP local state; rollback never captures or restores them"},
+	{ID: "admin_users", Note: "admin accounts, roles, password hashes and 2FA (ui_users.json); restoring an old password hash would be a security regression",
+		sources: []string{"ui_auth.go:apiAuthChangePassword"}},
+	{ID: "scan_exclusions", Note: "scan-exclusion hashes/hosts are trust-elevation lists; a rollback could re-trust a binary or host the operator chose to scan",
+		sources: []string{"ui_security.go:apiSecScanExclusions"}},
+	{ID: "yara_rules", Note: "YARA rule files are filesystem artifacts compiled at engine load, typically managed in external version control",
+		sources: []string{"ui_security.go:apiSecYARARules"}},
+	{ID: "inspection_root_ca", Note: "the SSL-inspection root CA and its rotation are forward-only trust decisions; rollback would restore a superseded CA",
+		sources: []string{"ui_security.go:apiCARotate"}},
+	{ID: "custom_tls_certificates", Note: "uploaded admin-UI and MITM certificates are forward-only trust mutations; rollback would restore superseded certificates",
+		sources: []string{"ui_security.go:apiCertsUpload"}},
+	{ID: "ocsp_revocation_checking", Note: "relaxing revocation checking via rollback would silently re-permit certificates the admin tightened against",
+		sources: []string{"ui_security.go:apiOCSPConfig"}},
+	{ID: "cluster_mode", Note: "control-plane / data-plane role (cluster.json); rolling back a role flip is meaningless once the control plane is active",
+		sources: []string{"ui_cluster.go:apiClusterMode"}},
+	{ID: "cluster_enrollment_tokens", Note: "enrollment tokens are membership artifacts; rollback could resurrect a consumed token",
+		sources: []string{"ui_cluster.go:apiClusterTokenCreate"}},
+	{ID: "cluster_node_revocations", Note: "un-revoking a banned node via rollback is a security regression",
+		sources: []string{"ui_cluster.go:apiClusterRevoke"}},
+	{ID: "cluster_ca", Note: "cluster CA material is a forward-only trust artifact; its private key must never enter a version snapshot",
+		sources: []string{"ui_cluster.go:apiClusterCA"}},
+	{ID: "cluster_node_labels", Note: "node labels are operational topology, not versioned policy",
+		sources: []string{"ui_cluster.go:apiClusterLabels"}},
+	{ID: "cluster_node_drain", Note: "drain/maintenance state is operational topology; reverting it after traffic has shifted is wrong",
+		sources: []string{"ui_cluster.go:apiClusterDrain"}},
+	{ID: "pac_exceptions", Note: "PAC exception governance metadata (pac_exceptions.json) is node-local and not on the capture/apply surface",
+		sources: []string{"pac_exceptions_api.go:pacExceptionPut"}},
+	{ID: "bootstrap_registry_settings", Note: "the custom container-registry settings for node bootstrap (registry_settings.json) are not captured by a version snapshot"},
+	{ID: "mcp_gateway_state", Note: "MCP Agent Security Gateway policies, approvals, tool trust and rollout mode have their own durable stores and are not captured by a version snapshot"},
+	{ID: "policy_learning_state", Note: "Policy Learning sessions and recommendations (policy_learning.json) are node-local advisory state, not versioned policy"},
+}
+
+// rollbackMarkersCoveredByRegistry maps off-rollback source markers whose
+// state IS a configSurfaces row (so it is already reported by the derivation)
+// to that row's ID.
+var rollbackMarkersCoveredByRegistry = map[string]string{
+	"ui_config.go:apiNetworkSettings":             "base_url",
+	"ui_policy.go:apiDecryptionExclusionTunables": "autoexclude_confirm_n",
+	"ui_policy.go:<file>":                         "alert_webhooks",
+	"ui_security.go:apiSecYARASettings":           "yara_enabled",
+	"ui_security.go:apiDomainAllowlist":           "threat_domain_allowlist",
+}
+
+// rollbackMarkersRuntimeOnly are off-rollback markers on handlers that change
+// no durable setting at all, so there is nothing a rollback could restore.
+var rollbackMarkersRuntimeOnly = map[string]string{
+	"ui_security.go:apiCACacheClear": "flushes the in-memory leaf-certificate cache",
+	"ha.go:apiClusterHAEnable":       "HA leader-election state is ephemeral",
 }
