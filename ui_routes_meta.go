@@ -314,8 +314,13 @@ var uiRoutes = []uiRouteMetadata{
 		}},
 	{Path: "/api/decryption/redaction", Handler: "apiDecryptionRedaction", Domain: "policy", Public: false,
 		Methods: []uiRouteMethod{
-			{Method: "GET", MinRole: RoleViewer, Note: "ADR-0011 §4: read the traffic-log destination-privacy posture (host/URI/dec.*/top_hosts)"},
-			{Method: "PUT", MinRole: RoleAdmin, Mutating: true, AuditExpected: true, Note: "ADR-0011 §4: toggle destination-privacy posture or rotate its pseudonym key; node-local (admin_settings-durable, off export/import/rollback/CP→DP)"},
+			{Method: "GET", MinRole: RoleViewer, Note: "deprecated alias of /api/traffic/redaction (T-17); ADR-0011 §4: read the traffic-log destination-privacy posture (host/URI/dec.*/top_hosts)"},
+			{Method: "PUT", MinRole: RoleAdmin, Mutating: true, AuditExpected: true, Note: "deprecated alias of /api/traffic/redaction (T-17); ADR-0011 §4: toggle destination-privacy posture or rotate its pseudonym key; node-local (admin_settings-durable, off export/import/rollback/CP→DP)"},
+		}},
+	{Path: "/api/traffic/redaction", Handler: "apiDecryptionRedaction", Domain: "policy", Public: false,
+		Methods: []uiRouteMethod{
+			{Method: "GET", MinRole: RoleViewer, Note: "canonical path (T-17); ADR-0011 §4: read the traffic-log destination-privacy posture (host/URI/dec.*/top_hosts)"},
+			{Method: "PUT", MinRole: RoleAdmin, Mutating: true, AuditExpected: true, Note: "canonical path (T-17); ADR-0011 §4: toggle destination-privacy posture or rotate its pseudonym key; node-local (admin_settings-durable, off export/import/rollback/CP→DP)"},
 		}},
 	{Path: "/api/decryption-exclusions", Handler: "apiDecryptionExclusions", Domain: "policy", Public: false,
 		Methods: []uiRouteMethod{
@@ -607,6 +612,8 @@ var uiRoutes = []uiRouteMetadata{
 			{Method: "POST", MinRole: RoleAdmin, Mutating: true, Note: "rollback; audit delegated"},
 		}},
 	{Path: "/api/config/diff", Handler: "apiConfigDiff", Domain: "settings", Public: false,
+		Methods: []uiRouteMethod{{Method: "GET", MinRole: RoleViewer}}},
+	{Path: "/api/config/rollback-scope", Handler: "apiConfigRollbackScope", Domain: "settings", Public: false,
 		Methods: []uiRouteMethod{{Method: "GET", MinRole: RoleViewer}}},
 	{Path: "/api/settings/default-auth-outcome", Handler: "apiDefaultAuthOutcome", Domain: "settings", Public: false,
 		Methods: []uiRouteMethod{{Method: "PUT", MinRole: RoleAdmin, Mutating: true, AuditExpected: true}}},

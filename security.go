@@ -231,6 +231,11 @@ var emptyIPFilterView = ipFilterView{}
 
 var ipf = &IPFilter{single: map[string]bool{}}
 
+// ipFilterPublishHook is a TEST-ONLY observer of publishView (nil in
+// production: one atomic load per publish, which is admin-rate). It lets the
+// republish tests prove at RUNTIME which mutator published.
+var ipFilterPublishHook atomic.Pointer[func(*IPFilter)]
+
 // loadView returns the current read-side snapshot, never nil.
 func (f *IPFilter) loadView() *ipFilterView {
 	if v := f.view.Load(); v != nil {
@@ -261,6 +266,9 @@ func (f *IPFilter) publishView() {
 	v.nets = buildPrefixSet(f.nets)
 
 	f.view.Store(v)
+	if h := ipFilterPublishHook.Load(); h != nil {
+		(*h)(f)
+	}
 }
 
 // sortedPrefixLens returns the prefix lengths in ascending order, for a
