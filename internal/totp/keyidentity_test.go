@@ -18,8 +18,7 @@ import (
 	"testing"
 )
 
-// #nosec G101 -- RFC 6238 test vector, not a real credential
-const kiSecret = "JBSWY3DPEHPK3PXP"
+const kiSecret = "JBSWY3DPEHPK3PXP" // #nosec G101 -- RFC 6238 test vector, not a real credential
 
 // kiSpellings are the ways one authenticator's secret can legitimately reach
 // the store: the verifier upper-cases and trims before decoding, so every one
