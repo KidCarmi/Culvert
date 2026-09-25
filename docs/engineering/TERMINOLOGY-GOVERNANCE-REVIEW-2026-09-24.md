@@ -178,6 +178,24 @@ therefore recorded once, in #1456's report, and not again here:
   "recorded, not yet numbered" item;
 - "appliance" — its T-51 recurrence, fixed in that PR.
 
+**Strings emitted by Go code.** The file-based "visible" rule does not cover strings that non-test Go
+code prints. A second pass checked added string literals:
+`git diff 574d265 6ec745d -U0 -- '*.go' ':!*_test.go' | grep -iE '^\+.*"[^"]*<pattern>[^"]*"'`.
+- **Also in #1456's window, recorded there:**
+  - 7 "verdict" lines: the OCSP error, log line and three `/metrics` HELP texts (`internal/ocsp/ocsp.go`,
+    `ocsp_metrics.go`), under its T-59 sub-item; a code comment; and the MCP reason code
+    `policy_verdict_not_invariant`.
+  - 1 "policy rule" line: the GeoIP diagnostics warning "country-scoped policy rules…"
+    (`geoip_resolve_health.go`), recorded there as not yet numbered.
+  - 2 "exclusion" identifiers in the MCP scope code.
+- **Only in this window:** 31 "verdict" and 23 "result" lines, all in `cmd/cireport` and `cmd/rootshard`.
+  These are the CI performance reporter and the race-shard tool. Their output is read by maintainers in
+  the Actions log and step summary, and their "verdict" is the race job's `verdict.json` artifact. The
+  glossary governs what an administrator of Culvert reads, so this is CI vocabulary, not product copy,
+  and not a violation. Files: `cmd/cireport/{analyze,evidence,main,model,summary,trend}.go`,
+  `cmd/rootshard/{compare,completeness,main,results,verdict}.go`.
+- "appliance", "incident", "scanner", "kill switch", "unauth mode": 0 lines.
+
 This report mints no IDs and changes no product copy. Line numbers here are at `6ec745d` and can differ
 from #1456's, which are at `6c46ebd`.
 
