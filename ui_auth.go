@@ -47,7 +47,7 @@ func verifyLoginTOTP(w http.ResponseWriter, r *http.Request, clientIP, user, cod
 	if totpOK {
 		// Persist the matched counter to close the replay window for this
 		// step and all earlier steps within the skew tolerance.
-		// CHAOS-67: fail-open but never silent — see noteRosterPersistBestEffort
+		// CHAOS-70: fail-open but never silent — see noteRosterPersistBestEffort
 		// for why the login is not refused when this write does not land. The
 		// mutate and the persist run as ONE transaction (mutateRosterBestEffort)
 		// so a concurrent admin mutation's rollback cannot discard this update.
@@ -59,7 +59,7 @@ func verifyLoginTOTP(w http.ResponseWriter, r *http.Request, clientIP, user, cod
 	// Backup code consumed — persist the removal in the same transaction. A
 	// code whose removal does not reach disk is valid again after a restart
 	// (single-use violated); counted and logged rather than discarded, and
-	// never rolled back by a concurrent admin write (CHAOS-67).
+	// never rolled back by a concurrent admin write (CHAOS-70).
 	consumedBackupCode := false
 	backupPersistErr := cfg.mutateRosterBestEffort(func() bool {
 		consumedBackupCode = cfg.ConsumeBackupCode(user, code)
@@ -73,7 +73,7 @@ func verifyLoginTOTP(w http.ResponseWriter, r *http.Request, clientIP, user, cod
 	// who has (or guesses) a valid password can brute-force the 6-digit OTP
 	// (1M possibilities) with only the 300 ms delay as a barrier.
 	nowLocked := loginLimiter.RecordFailure(clientIP, user)
-	// No roster write here (CHAOS-67): loginLimiter is internal/lockout, an
+	// No roster write here (CHAOS-70): loginLimiter is internal/lockout, an
 	// in-memory, deliberately non-persisted store (register row AU-4), so
 	// RecordFailure changes nothing ui_users.json carries. The removed
 	// SaveUIUsersFile() re-serialised every account and bcrypt hash and fsync'd
@@ -308,7 +308,7 @@ func apiAuthUsers(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "role must be admin, operator, or viewer", http.StatusBadRequest)
 			return
 		}
-		// CHAOS-67: durable-or-refused. A role change is a privilege
+		// CHAOS-70: durable-or-refused. A role change is a privilege
 		// decision; reporting it done while the roster on disk still grants
 		// the old role means a restart silently restores the privilege.
 		if err := cfg.mutateRosterDurably(func() error {
@@ -332,7 +332,7 @@ func apiAuthUsers(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "missing username param", http.StatusBadRequest)
 			return
 		}
-		// CHAOS-67: durable-or-refused. Deleting an account is how an
+		// CHAOS-70: durable-or-refused. Deleting an account is how an
 		// operator revokes a compromised or departing administrator. A 204
 		// over a failed write means the account — password hash, role, TOTP
 		// enrolment intact — returns at the next restart, with the audit trail
@@ -447,7 +447,7 @@ func apiAuthChangePassword(w http.ResponseWriter, r *http.Request) {
 	if role == "" {
 		role = RoleAdmin // legacy single-user fallback
 	}
-	// CHAOS-67: durable-or-refused. A password change is the documented
+	// CHAOS-70: durable-or-refused. A password change is the documented
 	// remediation for a leaked admin credential; a 200 over a failed write
 	// leaves the OLD password authenticating after the next restart while the
 	// operator believes the leak is closed.

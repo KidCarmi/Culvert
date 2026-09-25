@@ -1123,7 +1123,7 @@ func (c *Config) setDefaultAuthOutcomeChecked(outcome AuthOutcome) error {
 	if outcome == OutcomeExempt {
 		resolved = OutcomeExempt
 	}
-	// CHAOS-67 (Codex P1): the mutate and the persist are ONE transaction.
+	// CHAOS-70 (Codex P1): the mutate and the persist are ONE transaction.
 	// mutateRosterDurably restores a whole-roster snapshot when its write
 	// fails, so any roster mutation that is not serialised against it can be
 	// silently reverted by that rollback — and this setter's own compensating
@@ -1521,7 +1521,7 @@ var ErrRosterNotPersisted = errors.New("admin roster change was not persisted")
 // mutateRosterDurably applies mutate to the admin roster and commits it to
 // disk, rolling the in-memory change back when the write does not land.
 //
-// CHAOS-67. ui_users.json is the ONLY durable home of the admin roster,
+// CHAOS-70. ui_users.json is the ONLY durable home of the admin roster,
 // password hashes, roles, TOTP secrets, consumed backup codes and the TOTP
 // replay counter. Every mutation changes memory first and persists second, so
 // the two can disagree; the disagreement is resolved at the next restart, when
@@ -1581,13 +1581,13 @@ func (c *Config) mutateRosterDurably(mutate func() error) error {
 // correct there).
 //
 // Holding saveUIUsersMu across the mutate is what makes the sibling's rollback
-// sound (CHAOS-67, Codex P1). Before this, ConsumeBackupCode and
+// sound (CHAOS-70, Codex P1). Before this, ConsumeBackupCode and
 // SetTOTPLastCounter took only c.mu, so a login that consumed a single-use
 // backup code between a failing admin mutation's snapshot and its rollback had
 // that consumption DISCARDED — the code became reusable, and the login's own
 // save (which blocks on this mutex) then persisted the reverted state, making
-// it durable. That is precisely the property CHAOS-67 exists to protect,
-// broken by the rollback CHAOS-67 introduced.
+// it durable. That is precisely the property CHAOS-70 exists to protect,
+// broken by the rollback CHAOS-70 introduced.
 //
 // mutate reports whether it changed anything; when it did not, no write is
 // issued at all — a rejected backup code must not re-serialise the roster.

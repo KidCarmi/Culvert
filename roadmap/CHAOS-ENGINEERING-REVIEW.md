@@ -95,12 +95,13 @@ everything else is triaged below with a suggested PR and required tests for foll
 > in a committed placeholder row at the START of a sweep), and at six
 > occurrences it is well past overdue.
 
-**2026-09-22 — CHAOS-67 sweep (the admin roster as a durability surface).**
-Written up as `CHAOS-66` and renumbered to `CHAOS-67` (§37) when main was merged
+**2026-09-22 — CHAOS-70 sweep (the admin roster as a durability surface).**
+Written up as `CHAOS-66` and renumbered to `CHAOS-70` (§40) when main was merged
 in, because the SOCKS5-bind sweep below had taken 66 first — another
-occurrence of the collision described above. At the time of this merge several
-other open sweeps also carry `CHAOS-66` in their titles; each needs its own id
-allocated at merge time rather than by the conflict resolver.
+occurrence of the collision described above. Several other open sweeps had
+also claimed `CHAOS-66`; ids 67–72 were allocated across them in one pass
+(this sweep: 70), so §§37–39 are reserved for sweeps that had not merged when
+this one did.
 
 **2026-09-12 — CHAOS-66 sweep (the SOCKS5 listener's BIND). Id claimed in this
 row before the implementation commit**, per the convention above; `CHAOS-66` was
@@ -1057,7 +1058,7 @@ Severity key: **C**ritical / **H**igh / **M**edium / **L**ow / **✓** handled w
 | CA-18 | **Expired cluster CA kept signing node certs** (CA-1 analogue in the enrollment CA) and node cert `NotAfter` was an unconditional `now+365d`, **not clamped to the issuer** — so a node enrolled anywhere in the CA's final year held a cert overclaiming by up to a YEAR, and every expiry surface (nodes API, DP `checkDPCertExpiry`) reported validity that did not exist. Worse than CA-1: `Enroll` uses `VerifyClientCertIfGiven`, so the operator's *re-enroll* recovery succeeded and returned a certificate that was dead on arrival. | NEW → **CLOSED** (CHAOS-50: `clusterCAUsable` gate in `SignCSR` fails closed with `errClusterCAUnusable`; `clampNodeCertValidity` on both ends; `culvert_cluster_ca_{usable,expires_in_seconds,sign_refused_total,node_certs_clamped_total}`) | **H** | was: `enrollment.go` `SignCSR`; now `cluster_ca_validity.go` — see §17 |
 | CA-19 | **The cluster CA's ONLY rotation driver was gated on the INSPECTION CA being ready** (`loadRootCA`: `if certMgr.Ready() { StartCAAutoRotation(…) }`). A corrupt bundle / wrong `CULVERT_CA_PASSPHRASE` / unreadable `-ca-path` silently disabled cluster-CA auto-rotation AND secondary-overlap cleanup on a node whose cluster CA was healthy. Two independent trust roots, one shared failure — and because the cluster CA is a 10-YEAR cert, the consequence surfaces years after the fault that caused it, with nothing left to connect them. | NEW → **CLOSED** (CHAOS-50: loop started unconditionally; both halves are already no-ops when their CA is absent; pinned by `TestChaos50_ClusterRotationSurvivesInspectionCALoadFailure`, verified FAILING pre-fix) | M/H | was: `rootca_startup.go` `loadRootCA`; see §17.5 |
 | CA-20 | `ImportCA` **nil-dereferenced `ca.secondaryCert`** on a first-ever import (a node that never ran `InitOrLoad`, e.g. a non-cluster node whose admin posts `/api/cluster/ca`) — and it fired AFTER `ca.cert`/`ca.key` were swapped in, so the panic left the new CA installed with the TLS pool never rebuilt and no rotation tracking: a partially applied trust change. | NEW → **CLOSED** (CHAOS-50: guarded — a first import is a bootstrap, not a rotation) | M | was: `enrollment.go` `ImportCA`; see §17 |
-| CA-14 | Revocation persistence uses `os.WriteFile`+rename with **no fsync** (unlike the CA bundle's `AtomicWrite`) — a revoked token can be honored again after crash/disk-full. | GAP → **CLOSED** for the revocation list (`fileutil.AtomicWrite`); the SAME sentence was never checked for the credential store beside it — the consumed-backup-code and TOTP-replay-counter writes had the identical shape, now surfaced + counted by CHAOS-67 §37 (posture deliberately fail-open, owned there) | L/M | `internal/session/session.go:272-276`, caller `session.go:106-108` |
+| CA-14 | Revocation persistence uses `os.WriteFile`+rename with **no fsync** (unlike the CA bundle's `AtomicWrite`) — a revoked token can be honored again after crash/disk-full. | GAP → **CLOSED** for the revocation list (`fileutil.AtomicWrite`); the SAME sentence was never checked for the credential store beside it — the consumed-backup-code and TOTP-replay-counter writes had the identical shape, now surfaced + counted by CHAOS-70 §40 (posture deliberately fail-open, owned there) | L/M | `internal/session/session.go:272-276`, caller `session.go:106-108` |
 | CA-15 | CA loader **accepts a plain-PEM bundle even when a passphrase is set** (magic absent) — a downgrade footgun; logged, not alerted/rejected. | GAP (minor) | L | `internal/ca/ca.go:221-229` |
 
 ### 2.3 Cluster / HA / Control-Plane ↔ Data-Plane
@@ -6916,7 +6917,7 @@ status, or read the unfiltered output, before claiming a gate is green.
 
 ---
 
-## 37. CHAOS-67 — The admin-roster mutations that report success on a write that never landed
+## 40. CHAOS-70 — The admin-roster mutations that report success on a write that never landed
 
 **Date:** 2026-09-22 · **Domain:** Authentication / persistence / configuration
 (the admin credential store; never previously swept as a durability surface) ·
@@ -6925,7 +6926,7 @@ status, or read the unfiltered output, before claiming a gate is green.
 `docs/operator/admin-roster-durability.md`
 
 > **Id claimed before the write-up, per §35's standing recommendation.**
-> Claimed as `CHAOS-66`; renumbered to `CHAOS-67` (§37) on merging main, where
+> Claimed as `CHAOS-66`; renumbered to `CHAOS-70` (§40) on merging main, where
 > `CHAOS-66` (§36) had since been taken by the SOCKS5 listener-bind sweep.
 
 ### Executive summary
@@ -7130,7 +7131,7 @@ That is precisely the property this section exists to protect — *a consumed
 single-use credential must not come back* — **broken by the rollback this
 section introduced**. The lesson is the one this file keeps relearning, in a new
 place: *a mechanism that restores state is only as sound as the boundary that
-stops anyone else writing it*, and CHAOS-67 added the first mechanism in this
+stops anyone else writing it*, and CHAOS-70 added the first mechanism in this
 file that can un-apply a mutation without adding the boundary that makes it safe.
 
 `saveUIUsersMu` is now the transaction lock for **every** persisted roster

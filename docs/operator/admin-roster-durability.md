@@ -1,4 +1,4 @@
-# Admin-roster durability (CHAOS-67)
+# Admin-roster durability (CHAOS-70)
 
 **Applies to:** every node running the admin UI · **Operator action required:**
 none by default; two alerting rules are recommended.
@@ -158,5 +158,5 @@ administrative decision was affected, and therefore what the operator must redo.
   endpoint's input bounds.
 - `docs/operator/credential-verification-cost.md` (CHAOS-57) — credential
   verification as a bounded resource.
-- `roadmap/CHAOS-ENGINEERING-REVIEW.md` §37 — the full finding, evidence and the
+- `roadmap/CHAOS-ENGINEERING-REVIEW.md` §40 — the full finding, evidence and the
   register rows it closes.

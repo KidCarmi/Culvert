@@ -9,7 +9,7 @@ import (
 	"github.com/KidCarmi/Culvert/internal/fileutil"
 )
 
-// CHAOS-67 — durable-or-refused admin-roster mutations.
+// CHAOS-70 — durable-or-refused admin-roster mutations.
 //
 // ui_users.json is the ONLY durable home of the admin roster: every account,
 // password hash, role, TOTP secret, consumed-backup-code list and TOTP replay
@@ -143,7 +143,7 @@ func noteRosterPersistBestEffort(what string, err error) {
 	}
 	n := rosterPersistBestEffort.Add(1)
 	now := time.Now()
-	// CHAOS-67 (Codex P2): CLAIM the interval atomically. A plain load/compare/
+	// CHAOS-70 (Codex P2): CLAIM the interval atomically. A plain load/compare/
 	// store lets every caller that finishes concurrently read the same expired
 	// stamp and all emit a line — which is the log amplification this gate
 	// exists to prevent, arriving exactly when the volume is already failing
