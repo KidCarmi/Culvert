@@ -130,7 +130,7 @@ func composeToolTrustBounded(t *testing.T, clk func() time.Time, maxRecords, max
 	mcpToolTrust.reason = ""
 	mcpToolTrust.nowFn = clk
 	mcpToolTrust.mu.Unlock()
-	mcpToolTrustReconcile = mcpToolTrust.reconcile
+	installToolTrustReadHooks(mcpToolTrust)
 	execution.SetReconcileHook(func() { mcpToolTrustReconcile() })    // mirror the production wiring
 	execution.SetIngestGuard(mcpToolTrust.runCatalogIngestSerialized) // mirror the production wiring
 	mcpToolTrust.reconcile()
