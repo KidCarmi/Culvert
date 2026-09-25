@@ -1137,7 +1137,11 @@ func TestChaos70_SettingsRefusesEmptyUser(t *testing.T) {
 // the default-auth-outcome control instead and refuse the empty field itself
 // rather than advertise a workflow that now answers 400.
 func TestChaos70_SettingsFormDoesNotAdvertiseEmptyUserDisable(t *testing.T) {
-	raw, err := os.ReadFile("static/index.html")
+	// Anchored via staticIndexHTMLPath(), never a CWD-relative read: a
+	// concurrent test's os.Chdir would otherwise make this pick up a scratch
+	// dir's stub, which is the flake class TestTestFileReadsAreCWDIndependent
+	// walls off (and which caught this gate on its first CI run).
+	raw, err := os.ReadFile(staticIndexHTMLPath())
 	if err != nil {
 		t.Fatalf("read static/index.html: %v", err)
 	}
