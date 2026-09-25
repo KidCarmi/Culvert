@@ -92,7 +92,9 @@ parts of the same window did find drift this pass missed; see "Overlap with para
      - The field is not shown in the legacy GUI (`static/index.html` has no occurrence).
 
      The name is consistent. The response's third value is undocumented in the API schema. That is a
-     documentation gap, recorded here and not numbered. The readiness-matrix row renumbering and the
+     documentation gap. It is folded into #1456's open T-60 (the tool-trust OpenAPI entries do not
+     describe what the handlers return), since the route and its Go comment were added in that report's
+     window too; it gets no new ID here. The readiness-matrix row renumbering and the
      canary-review design doc are internal row-ID/function-name jargon, not administrator-facing product
      vocabulary, and stay internally self-consistent.
    - The release-publication-gating and R2-only-catalog work: its job and tag names (`promote-image`,
@@ -102,7 +104,8 @@ parts of the same window did find drift this pass missed; see "Overlap with para
      "Forbidden term: appliance" below.
 2. **Carry-over findings were spot-checked at their cited locations, not exhaustively re-verified.**
    This pass did not trace every changed file that a carry-over finding depends on. It checked the
-   cited locations of T-11, T-12, T-29 and T-30 directly (item 3 below), and read the window's hunks in
+   cited locations of T-11, T-12, T-29 and T-30 directly (item 3 below) and of T-54 (the OCSP bullet
+   in item 1, at `ui_security.go:1843-1845` and `ocsp_metrics.go:59-62`), and read the window's hunks in
    three files that hold carry-over sites (`git diff 574d265 6ec745d`):
    - `config.go` (T-11 `default_action`, T-29/T-30 rate/connection-limit keys, T-39 `qualification_*`
      keys): two hunks, both CDR server-fingerprint validation. None of those keys is touched.
@@ -176,7 +179,7 @@ the table, or a zero count, is not evidence that those rules hold.
 | Term (pattern) | Added lines | Visible | Visible lines (file:line) | Outcome |
 |---|---|---|---|---|
 | appliance (`appliance`) | 30 | 6 | `CHANGELOG.md`: 285; `api/openapi/openapi.yaml`: 483; `docs/operator/geoip-resolution-health.md`: 36; `docs/operator/ocsp-revocation-checking.md`: 22,122; `docs/operator/release-publication-gating.md`: 547 | Same 6 lines as #1456's window; fixed there (T-51 recurrence). See "Forbidden term: appliance" below |
-| verdict (`verdict`) | 783 | 55 | `CHANGELOG.md`: 15,226,232,259,400; `api/openapi/openapi.yaml`: 488; `docs/operator/mcp-first-controlled-canary-review.md`: 51,392,970,1111,1124,1133,1251,1252,1253,2196,2203,2223,2228,2273,2489,2502,2533,2542,2543,2545,2558,2592,2646,2693,2702,2818,2902,2916,2992,3072,3080,3118,3293,3358,3559,3589,3635; `docs/operator/ocsp-revocation-checking.md`: 39,49,50,91,95,144; `docs/operator/release-publication-gating.md`: 22,60,455; `static/index.html`: 4484,4491,4494 | Same 55 lines as #1456's window; recorded there (13 OCSP lines under its T-59, 40 others as not yet numbered, and 2 identifier-only lines, `mcp-first-controlled-canary-review.md:2558`/`:2592`, exempt as backend identifiers) |
+| verdict (`verdict`) | 783 | 55 | `CHANGELOG.md`: 15,226,232,259,400; `api/openapi/openapi.yaml`: 488; `docs/operator/mcp-first-controlled-canary-review.md`: 51,392,970,1111,1124,1133,1251,1252,1253,2196,2203,2223,2228,2273,2489,2502,2533,2542,2543,2545,2558,2592,2646,2693,2702,2818,2902,2916,2992,3072,3080,3118,3293,3358,3559,3589,3635; `docs/operator/ocsp-revocation-checking.md`: 39,49,50,91,95,144; `docs/operator/release-publication-gating.md`: 22,60,455; `static/index.html`: 4484,4491,4494 | Same 55 lines as #1456's window; recorded there as its open T-59b (13 OCSP lines and 40 others; the 2 identifier-only lines, `mcp-first-controlled-canary-review.md:2558`/`:2592`, are exempt as backend identifiers) |
 | result (`result`) | 286 | 7 | `CHANGELOG.md`: 426; `docs/operator/mcp-first-controlled-canary-review.md`: 2255,2402,2908,3116; `docs/operator/ocsp-revocation-checking.md`: 77; `docs/operator/release-publication-gating.md`: 362 | Same 7 lines as #1456's window; none means a request's decision — no violation |
 | incident (`incident`) | 6 | 1 | `docs/operator/mcp-first-controlled-canary-review.md`: 886 | Same line as #1456's window; plain English, no entity — no violation |
 | scanner (`scanner`) | 63 | 3 | `docs/operator/mcp-first-controlled-canary-review.md`: 2967,3212,3236 | Same 3 lines as #1456's window; a code scanner — no violation |
@@ -191,10 +194,10 @@ lines the 2026-09-21 report's window (`46410c3..6c46ebd`) adds. The check: compa
 pairs of both diffs; this window has 0 visible hits for any term that are not in that window. They are
 therefore recorded once, in #1456's report, and not again here:
 - "verdict" in OCSP copy — `static/index.html:4484`, `:4491`, `:4494`, `api/openapi/openapi.yaml:488`, six
-  lines of `docs/operator/ocsp-revocation-checking.md`, three CHANGELOG lines — under its T-59 sub-item,
+  lines of `docs/operator/ocsp-revocation-checking.md`, three CHANGELOG lines — under its open T-59b,
   with the required "response"/"status" rewording;
-- "verdict" elsewhere (the MCP canary review, the release-gating runbook, two CHANGELOG lines) — its
-  "recorded, not yet numbered" item;
+- "verdict" elsewhere (the MCP canary review, the release-gating runbook, two CHANGELOG lines) — also its
+  T-59b;
 - "appliance" — its T-51 recurrence, fixed in that PR.
 
 **Strings emitted by Go code.** The file-based "visible" rule does not cover strings that non-test Go
@@ -202,10 +205,10 @@ code prints. A second pass checked added string literals:
 `git diff 574d265 6ec745d -U0 -- '*.go' ':!*_test.go' | grep -v '^+++' | grep -iE '^\+.*"[^"]*<pattern>[^"]*"'`.
 - **Also in #1456's window, recorded there:**
   - 7 "verdict" lines: the OCSP error, log line and three `/metrics` HELP texts (`internal/ocsp/ocsp.go`,
-    `ocsp_metrics.go`), under its T-59 sub-item; a code comment; and the MCP reason code
+    `ocsp_metrics.go`), under its T-59b; a code comment; and the MCP reason code
     `policy_verdict_not_invariant`.
   - 1 "policy rule" line: the GeoIP diagnostics warning "country-scoped policy rules…"
-    (`geoip_resolve_health.go`), recorded there as not yet numbered.
+    (`geoip_resolve_health.go`), recorded there as its open T-59c.
   - 2 "exclusion" identifiers in the MCP scope code.
 - **Only in this window:** 31 "verdict" and 23 "result" lines, all in `cmd/cireport` and `cmd/rootshard`.
   These are the CI performance reporter and the race-shard tool. Their output is read by maintainers in
@@ -287,7 +290,9 @@ part of this window. They recorded findings this pass did not:
   exists (its T-59), and the OCSP work added "appliance", which the glossary forbids, to an OpenAPI field
   description and operator docs (a T-51 recurrence). It also found that the MCP tool-trust decision
   route's OpenAPI entry names an audit event, `mcp.tooltrust.decision`, that the handler never emits
-  (its T-60). This report's OCSP check compared field spellings and did not read the panel title or
+  (its T-60, which also covers the `reviewed_operation_class` `unset` response value this report found).
+  Its glossary sweep records the "verdict" uses outside Diagnostics as its open T-59b and the GeoIP
+  "policy rules" warning as its open T-59c. This report's OCSP check compared field spellings and did not read the panel title or
   prose against the glossary, and its MCP check did not compare the spec's audit-event names with the
   handler.
 - **2026-09-23 (#1482)**: T-61–T-63 (identity-backend metric prefix, Sync vs Refresh verbs, the
