@@ -181,7 +181,10 @@ var d0KnownRoutes = func() []string {
 //     version rollback by design — Finding 10.3 exclusions surfaced to the
 //     operator instead of only being discoverable in config_surfaces.go
 //     source).
-//   - 247 — added /api/backups/operations/ (poll an on-demand backup
+//   - +1 (→ 247) — Terminology governance T-17: added canonical
+//     /api/traffic/redaction alongside the retained legacy /api/decryption/redaction
+//     alias (same handler, apiDecryptionRedaction), mirroring the T-10 DPI pattern.
+//   - +1 (→ 248) — added /api/backups/operations/ (poll an on-demand backup
 //     triggered by the new POST method on the existing /api/backups path).
 //
 // POST-C1 FAILURE MATRIX (the table below is the FULL contract; the
@@ -199,7 +202,7 @@ var d0KnownRoutes = func() []string {
 //   - Remove an entry from uiRoutes only             → fails C1 reverse
 //     (helper-registered route has no metadata) AND this D0 count test.
 func TestD0_RouteInventory_Locked141(t *testing.T) {
-	const want = 247 // 246 (245 (241 (240 (the 2E-C trust-lifecycle-era branch baseline: 238 (the 2E-C-era baseline: 237 (the 2E-B-era baseline: 222 incl. the 3 ADR-0027 LDAP IdP routes + 6 /api/policy-learning/* + 1 /api/backups + 3 FrontendV2 preview routes + 1 /api/urlcat/state + 2 ADR-0034 tool-trust routes + 2 2D-C v2 state reads) + 1 Canary-activation-gate route (/api/mcp/canary/shadow-exit-review — Shadow Exit Review attestation)) + 2 2E-C trust-lifecycle routes (/api/cdr/instances/enroll/recover + /api/cdr/instances/enroll/receipts)) + 1 authoritative rollback rehearsal route merged from main (/api/mcp/rollout/rehearse-rollback-authoritative)) + 2 2F-C Upstream v2 routes (/api/upstream/entries + /api/upstream/entries/)  // +1: maintenance-agent health visibility route (/api/maintenance-agent)  // +1: Auth Exempt runtime kill-switch route) + 1: /api/config/rollback-scope) + 1 on-demand backup trigger poll route (/api/backups/operations/ — POST /api/backups itself reuses the existing /api/backups path, adding a method not a route)
+	const want = 248 // 247 (246 (245 (241 (240 (the 2E-C trust-lifecycle-era branch baseline: 238 (the 2E-C-era baseline: 237 (the 2E-B-era baseline: 222 incl. the 3 ADR-0027 LDAP IdP routes + 6 /api/policy-learning/* + 1 /api/backups + 3 FrontendV2 preview routes + 1 /api/urlcat/state + 2 ADR-0034 tool-trust routes + 2 2D-C v2 state reads) + 1 Canary-activation-gate route (/api/mcp/canary/shadow-exit-review — Shadow Exit Review attestation)) + 2 2E-C trust-lifecycle routes (/api/cdr/instances/enroll/recover + /api/cdr/instances/enroll/receipts)) + 1 authoritative rollback rehearsal route merged from main (/api/mcp/rollout/rehearse-rollback-authoritative)) + 2 2F-C Upstream v2 routes (/api/upstream/entries + /api/upstream/entries/)  // +1: maintenance-agent health visibility route (/api/maintenance-agent)  // +1: Auth Exempt runtime kill-switch route) + 1: /api/config/rollback-scope)  // +1: terminology governance T-17 canonical route alias (/api/traffic/redaction, same handler as /api/decryption/redaction)) + 1 on-demand backup trigger poll route (/api/backups/operations/ — POST /api/backups reuses the existing /api/backups path)
 	if got := len(d0KnownRoutes); got != want {
 		t.Fatalf("d0KnownRoutes has %d entries; want %d (route added or removed?)", got, want)
 	}
