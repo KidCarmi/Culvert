@@ -226,14 +226,17 @@ this report merged rather than after.
   metric label — `MalformedTotal`/`UnauthorizedResponderTotal`/`StaleTotal` already match their labels
   and need no Go change); `ui_security.go` (ADD JSON fields `malformedTotal` and `staleTotal` alongside
   the existing `malformedResponseTotal` / `staleResponseTotal`, which stay and are deprecated — see
-  Compatibility Risk); `ocsp_metrics.go`'s `culvert_ocsp_response_rejected_total` HELP
-  text and/or `responder_blocked`'s membership in that series (the metric-family scope correction above —
-  either narrow the HELP text to say "or refused before any request" or split `responder_blocked` into
-  its own, differently-named series; a naming decision, not a mechanical rename, so it is recorded here
-  rather than pre-decided).
-- **Affected API:** `api/openapi/openapi.yaml`/`openapi.json` (add the two new properties and mark the old ones
-  `deprecated: true`, then regenerate via `make api-bundle` — this is a documented, already-shipped stable
-  API surface, so the old names must keep working).
+  Compatibility Risk); `ocsp_metrics.go` (the metric-family scope correction above:
+  `responder_blocked` must MOVE OUT of `culvert_ocsp_response_rejected_total` into an appropriately named
+  series, with a compatibility window for dashboards and alerts that read the old label. Changing only the
+  HELP text is NOT sufficient — the family name itself would still say "response rejected" for a case in
+  which no response existed. The new series' name is a naming decision left to the implementing change).
+- **Affected API:** `api/openapi/openapi.yaml`/`openapi.json` — an additive MINOR contract change
+  (`docs/api/API-VERSIONING-POLICY.md`) that must follow `docs/api/API-DEPRECATION-POLICY.md` in full for
+  the two old properties (`deprecated: true`, `x-culvert-deprecated-since`, replacement and migration text
+  in the description, a `Deprecated` CHANGELOG entry), then `make api-bundle`. The old names must keep
+  working. This report records the requirement; the implementing change owns the exact steps, which the
+  repository's API-governance checks enforce.
 - **Affected GUI:** `static/index.html:17515` (read the new JSON keys).
 - **Affected Documentation:** `docs/operator/ocsp-revocation-checking.md` §2 — the rejection-reasons table
   was missing rows for `malformed` and `unauthorized_responder`. **Resolved independently on `main`**, not
@@ -295,7 +298,7 @@ added for the new finding:
 | Medium | T-9 (carried over) | Rename `exportedAt` → `capturedAt` with read-compat alias | Low-medium | Medium |
 | Medium | T-11 (carried over) | Reconcile `allow`/`deny` default-action vocabulary vs. the four-value `PolicyAction` enum | Low / Medium-large | Small / Medium-large |
 | Medium | T-12 (carried over) | Alias Maintenance Agent wire routes `/v1/upgrades/*` → `/v1/updates/*` | Medium | Medium |
-| Low-Medium | **T-54 (new)** | Add OCSP admin JSON fields `malformedTotal` and `staleTotal` alongside `malformedResponseTotal` / `staleResponseTotal` and deprecate the old names (removal only via the API-versioning MAJOR exception — a plain rename is breaking); rename Go accessor `UnknownTotal`→`UnknownStatusTotal`; regenerate the OpenAPI bundle; update the two GUI references; decide and apply a fix for `responder_blocked`'s metric-family scope mismatch (narrow the HELP text or split it into its own series). (Doc-table gap already resolved on `main`.) | Medium (stable API field — additive only) | Small |
+| Low-Medium | **T-54 (new)** | Add OCSP admin JSON fields `malformedTotal` and `staleTotal` alongside `malformedResponseTotal` / `staleResponseTotal` and deprecate the old names (removal only via the API-versioning MAJOR exception — a plain rename is breaking); rename Go accessor `UnknownTotal`→`UnknownStatusTotal`; regenerate the OpenAPI bundle; update the two GUI references; move `responder_blocked` out of the `response_rejected` family into its own series with a compatibility window (a HELP-text change alone does not fix it); follow `API-DEPRECATION-POLICY.md` in full and bump the MINOR contract version. (Doc-table gap already resolved on `main`.) | Medium (stable API field — additive only) | Small |
 | Low | T-34 (carried over) | Standardize `apiURLCatFeedStatus`'s SaaS block field names on the F3b-4 status endpoint's vocabulary | Low | Small |
 | Low | T-13 residual (carried over) | Decide whether README/enterprise-doc "TLS Inspection" branding should unify with in-app "SSL" | Low | Small |
 
