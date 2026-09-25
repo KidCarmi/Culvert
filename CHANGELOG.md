@@ -312,6 +312,25 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   HIGH: gRPC-Go xDS servers, denial of service via crash). Module graph
   only; no code change.
 
+### Performance
+
+- The threat feed's full-URL check no longer re-parses a URL it was handed
+  already parsed. `preDispatchBlocked` runs it on every forwarded plain-HTTP
+  request, on the request goroutine, before the policy engine — and called it
+  as `CheckURL(r.URL.String())`, so a `*url.URL` net/http had just parsed was
+  serialised and the feed immediately parsed it back, purely to read the three
+  fields (scheme, host, path) the caller already had. Measured against a
+  100k-entry feed for an ordinary destination that misses — what every
+  *allowed* request pays — the check cost **887 ns and 4 allocations**, against
+  **109 ns and 0 allocations** for the domain check beside it doing the same
+  amount of real work. The new `CheckRequestURL` takes the parsed URL:
+  **376 ns / 112 B / 2 allocations** (330 → 162 ns at 4× parallel). Verdicts
+  are unchanged and the equivalence is structural: the fast path is taken only
+  for the URL shape on which `String()` followed by `Parse()` is provably the
+  identity for those fields, and every other shape falls through to the
+  verbatim string derivation. Only deployments with threat intelligence
+  enabled are affected; with the feed off the check already returned early.
+
 ### Added
 
 - New React/TypeScript admin frontend, Batch 2 (`CULVERT_EXPERIMENTAL_UI`,
@@ -333,6 +352,13 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   including the config-version store, registry settings, the CDR
   enrollment certs root and runtime marker, and the alert retry queue —
   follows the override.
+- The admin UI's own serving certificate now reports its expiry
+  (`ui_tls_cert_not_after`/`ui_tls_cert_days_remaining` on
+  `GET /api/settings/network`, shown on the Certificates panel) whenever a
+  custom pair (`-tls-cert`/`-tls-key`, or one uploaded via the panel) has
+  bound — the one certificate in the product whose expiry was previously
+  untracked; the MITM inspection root CA and the outbound upstream mTLS
+  client cert already surfaced theirs.
 - Admin API operations (contract 2.0.0): `GET /api/rewrite/state`,
   `GET /api/fileblock/profiles/state`, `GET /api/urlcat/state`,
   `GET /api/pac/profiles/{name}/lifecycle`, the Upstream v2 entry endpoints
@@ -443,6 +469,33 @@ endpoints for credentialed parents.
   ns/op — 6.0x at four cores and a curve that improves with core count. The
   distinct-host cap, the decay pass and `Top` are unchanged and still
   serialised. No API, metric, or dashboard change.
+- Destination-category rules no longer allocate once per rule per request.
+  `urlcat.Store.MatchesHost` / `MatchesHostAdmin` answer "is this host in
+  category C?" and are called once per category-scoped access rule per proxied
+  request. Both derived their index key with
+  `strings.ToLower(string(cat))`, which allocates whenever the name carries an
+  uppercase letter — and all 21 shipped SaaS category names do — so a rulebase
+  with N `destCategory` rules charged N heap allocations to every proxied
+  request to re-derive a value that is pure configuration: the rule's category
+  name is fixed when the admin writes the rule. The key is now folded into a
+  caller-owned stack buffer and the map is probed against those bytes
+  directly. A category name too long for that buffer (the admin API accepts up
+  to 256 bytes) or carrying non-ASCII keeps the string `strings.ToLower`
+  already produced and is probed as a string, so no supported name became more
+  expensive than it was before the optimization. On a 4-core box, with both
+  arms benchmarked in one session (medians of n=5), the probe goes
+  204.4 → 137.4 ns on a miss and 170.1 → 105.7 ns on a hit, at 1 alloc → 0 in
+  every posture; through the real policy
+  scan against an uncategorized destination it goes 2420 → 1635 ns at 10
+  rules, 8572 → 5524 ns at 50, and 31670 → 19106 ns at 200, with 10 / 50 / 200
+  allocs → 0. Under 4-way concurrency the same probe moves only 94.3 → 88.2 ns,
+  because the per-call read lock — untouched here — dominates once several
+  cores contend. Matching semantics are unchanged exactly: a pure-ASCII name
+  folds byte-wise as `strings.ToLower` already did, and anything non-ASCII
+  falls back to `strings.ToLower` itself, so Unicode folding is never
+  reimplemented. Pinned by a differential against the verbatim pre-fix key
+  expression, a fuzz target, and a deterministic zero-allocation gate. No API,
+  metric, or dashboard change.
 
 ### Fixed
 
