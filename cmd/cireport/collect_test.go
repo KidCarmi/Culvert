@@ -26,13 +26,20 @@ type fakeGitHub struct {
 	files     map[string][]byte // "path@ref"
 	wfRuns    map[string][]apiRun
 	failJobs  map[int64]bool // runs whose jobs endpoint answers 500
-	mu        sync.Mutex
-	fetched   []string
+	// attempts overrides the attempt endpoint ("id/n"); unset, it answers
+	// with the run itself, as GitHub does for attempt 1.
+	attempts map[string]apiRun
+	// jobLogs serves job logs by job id, behind a storage redirect that
+	// ignores the Range header (the client must cut the read itself).
+	jobLogs map[int64]string
+	mu      sync.Mutex
+	fetched []string
 }
 
 func newFake(t *testing.T) *fakeGitHub {
 	return &fakeGitHub{t: t, runs: map[int64]fixture{}, artifacts: map[int64][]apiArtifact{}, zips: map[int64][]byte{},
-		named: map[string][]apiArtifact{}, files: map[string][]byte{}, wfRuns: map[string][]apiRun{}, failJobs: map[int64]bool{}}
+		named: map[string][]apiArtifact{}, files: map[string][]byte{}, wfRuns: map[string][]apiRun{}, failJobs: map[int64]bool{},
+		attempts: map[string]apiRun{}, jobLogs: map[int64]string{}}
 }
 
 func (f *fakeGitHub) addArtifact(runID, id int64, name string, zipData []byte) {
@@ -51,6 +58,8 @@ var (
 	reWfRuns    = regexp.MustCompile(`^actions/workflows/([^/]+)/runs$`)
 	reRun       = regexp.MustCompile(`^actions/runs/(\d+)$`)
 	reRunAttmpt = regexp.MustCompile(`^actions/runs/(\d+)/attempts/(\d+)$`)
+	reJobLog    = regexp.MustCompile(`^actions/jobs/(\d+)/logs$`)
+	reLogBlob   = regexp.MustCompile(`^/log-blob/(\d+)$`)
 )
 
 func atoi(s string) int64 { n, _ := strconv.ParseInt(s, 10, 64); return n }
@@ -68,6 +77,19 @@ func (f *fakeGitHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		jobs := f.runs[atoi(m[1])].Jobs
 		write(map[string]any{"total_count": len(jobs), "jobs": jobs})
+		return
+	}
+	if m := reJobLog.FindStringSubmatch(p); m != nil {
+		if _, ok := f.jobLogs[atoi(m[1])]; !ok {
+			http.NotFound(w, r)
+			return
+		}
+		// #nosec G710 -- test double: the target is this server's own /log-blob path and m[1] matched \d+
+		http.Redirect(w, r, "/log-blob/"+m[1], http.StatusFound)
+		return
+	}
+	if m := reLogBlob.FindStringSubmatch(r.URL.Path); m != nil {
+		_, _ = w.Write([]byte(f.jobLogs[atoi(m[1])]))
 		return
 	}
 	if m := reRunArts.FindStringSubmatch(p); m != nil {
@@ -106,6 +128,12 @@ func (f *fakeGitHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		write(map[string]any{"encoding": "base64", "content": base64.StdEncoding.EncodeToString(b)})
 		return
+	}
+	if m := reRunAttmpt.FindStringSubmatch(p); m != nil {
+		if a, ok := f.attempts[m[1]+"/"+m[2]]; ok {
+			write(a)
+			return
+		}
 	}
 	m := reRun.FindStringSubmatch(p)
 	if m == nil {
@@ -175,6 +203,18 @@ func TestCollectRun_EndToEnd(t *testing.T) {
 	if rep.Config.TimingFileSource != "qa-gate run 35866546559 @ a606f82" {
 		t.Errorf("timing file source %q", rep.Config.TimingFileSource)
 	}
+	wantRead := []string{"qa-audit-compare/comparison.json", "qa-audit-compare/qa-root-shard-timings.json",
+		"qa-race-shard-0/meta.json", "qa-race-shard-1/meta.json", "qa-race-shard-2/meta.json", "qa-race-shard-3/meta.json",
+		"qa-race-verdict/results.json", "qa-race-verdict/verdict.json"}
+	if rep.Evidence.Source != "artifacts" || strings.Join(rep.Evidence.Read, " ") != strings.Join(wantRead, " ") {
+		t.Errorf("evidence source %q read %v, want artifacts / %v", rep.Evidence.Source, rep.Evidence.Read, wantRead)
+	}
+	line := reportLogLine(rep)
+	for _, want := range []string{"cireport run: run=", "attempt=1", "evidence=artifacts", "qa-race-verdict/verdict.json", "verdict=ok", "audit=passed"} {
+		if !strings.Contains(line, want) {
+			t.Errorf("log line %q lacks %q", line, want)
+		}
+	}
 	for _, p := range fake.fetched {
 		if strings.HasSuffix(p, fmt.Sprintf("/artifacts/%d/zip", buildID)) {
 			t.Fatal("the reporter downloaded qa-race-build — the artifact that carries the test binary")
@@ -214,6 +254,9 @@ func TestCollectRun_NoArtifactsIsUnknownNotHealthy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if rep.Evidence.Source != "metadata-only" || len(rep.Evidence.Read) != 0 {
+		t.Errorf("no artifacts decoded: source %q read %v, want metadata-only / none", rep.Evidence.Source, rep.Evidence.Read)
+	}
 	if rep.Evidence.Verdict != "missing" || rep.Race != nil {
 		t.Errorf("verdict %s race %v, want missing/nil", rep.Evidence.Verdict, rep.Race)
 	}
@@ -222,5 +265,23 @@ func TestCollectRun_NoArtifactsIsUnknownNotHealthy(t *testing.T) {
 		if !strings.Contains(joined, want) {
 			t.Errorf("unknowns lack %q: %v", want, rep.Unknowns)
 		}
+	}
+}
+
+// The log line is the report's externally checkable record, and some of its
+// values come from artifacts a run uploaded. None may start a workflow
+// command or break the line.
+func TestReportLogLine_CannotInjectWorkflowCommands(t *testing.T) {
+	var r RunReport
+	r.Run.RunID, r.Run.Attempt = 1, 1
+	r.Run.TestedSHA = "abc\n::add-mask::x\r\n::error::forged"
+	r.Class = "pr-code"
+	r.Evidence.Read = []string{"qa-race-verdict/verdict.json"}
+	line := reportLogLine(r)
+	if strings.ContainsAny(line, "\r\n") || strings.Contains(line, "::") || !strings.HasPrefix(line, "cireport run: ") {
+		t.Errorf("unsafe log line %q", line)
+	}
+	if !strings.Contains(line, "tested=abc_") {
+		t.Errorf("the value must survive in reduced form: %q", line)
 	}
 }

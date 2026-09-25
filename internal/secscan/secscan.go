@@ -34,6 +34,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -190,6 +191,10 @@ type YARAMatcher interface {
 type ThreatChecker interface {
 	Enabled() bool
 	CheckURL(rawURL string) (bool, string)
+	// CheckRequestURL is CheckURL for a URL the caller has already parsed —
+	// same verdict, without the serialise-and-reparse round trip. See the
+	// contract on threatfeed.Feed.CheckRequestURL.
+	CheckRequestURL(u *url.URL) (bool, string)
 	CheckDomain(domain string) (bool, string)
 }
 
@@ -433,6 +438,25 @@ func (ss *Scanner) CheckURL(rawURL string) *Result {
 		return nil
 	}
 	if ok, source := feed.CheckURL(rawURL); ok {
+		atomic.AddInt64(&statThreatFeedBlocked, 1)
+		return &Result{
+			Blocked: true,
+			Reason:  "threat intelligence (" + source + ")",
+			Source:  "threatfeed",
+		}
+	}
+	return nil
+}
+
+// CheckRequestURL is CheckURL for a URL the request path has already parsed.
+// The verdict is identical; it just does not serialise the URL so the feed can
+// parse it back. This is the form the proxy's per-request call site uses.
+func (ss *Scanner) CheckRequestURL(u *url.URL) *Result {
+	feed := ss.feed
+	if feed == nil || !feed.Enabled() {
+		return nil
+	}
+	if ok, source := feed.CheckRequestURL(u); ok {
 		atomic.AddInt64(&statThreatFeedBlocked, 1)
 		return &Result{
 			Blocked: true,

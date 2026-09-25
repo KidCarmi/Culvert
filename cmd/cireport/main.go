@@ -102,9 +102,38 @@ func cmdRun(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	_, err = collectRun(ctx, c, runOpts{repo: cf.repo, runID: *runID, attempt: *attempt, committedTimings: *committed,
+	rep, err := collectRun(ctx, c, runOpts{repo: cf.repo, runID: *runID, attempt: *attempt, committedTimings: *committed,
 		outDir: cf.outDir, summary: cf.summary, collector: Collector{RunID: cf.collectorRun, SHA: cf.collectorSHA}})
-	return err
+	if err != nil {
+		return err
+	}
+	fmt.Println(reportLogLine(rep))
+	return nil
+}
+
+// reportLogLine is one line in the collector's job log saying what the report
+// rests on. Job logs are readable through the API where artifacts and step
+// summaries may not be, so this is the report's externally checkable record.
+// Every value is reduced to a safe character set and the line starts with a
+// fixed prefix, so no value from an artifact can form a workflow command.
+func reportLogLine(r RunReport) string {
+	return fmt.Sprintf("cireport run: run=%d attempt=%d event=%s head=%s tested=%s class=%s evidence=%s read=%s image-logs=%d/%d verdict=%s audit=%s cohort=%s verified=%v",
+		r.Run.RunID, r.Run.Attempt, logSafe(r.Run.Event), logSafe(r.Run.HeadSHA), logSafe(r.Run.TestedSHA), logSafe(r.Class),
+		logSafe(r.Evidence.Source), logSafe(strings.Join(r.Evidence.Read, ",")), r.RunnerImage.JobsObserved, r.RunnerImage.JobsMeasured,
+		logSafe(r.Evidence.Verdict), logSafe(r.Evidence.Audit.State), logSafe(r.Cohort.Key), r.Cohort.Verified)
+}
+
+func logSafe(s string) string {
+	if s == "" {
+		return "-"
+	}
+	return strings.Map(func(r rune) rune {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', strings.ContainsRune("._/@+=;,-", r):
+			return r
+		}
+		return '_'
+	}, s)
 }
 
 func cmdTrend(ctx context.Context, args []string) (int, error) {

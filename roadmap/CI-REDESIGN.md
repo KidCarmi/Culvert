@@ -1,6 +1,56 @@
 # CI/CD Redesign — Lane Architecture & Retirement Checklist
 
-Status: **retirement steps 2–4, §3.9 docker-skip, AND steps 5–7 in
+## 0. Current status (authoritative)
+
+As of 2026-09-25, main `b59c054` (#1497: per-platform qualification pulls,
+§21.7.1; the first build-once release, `v1.0.244`, §21.7.2) plus the lane
+start-order change measured in §18.5.1; before it, main `0cf1245` (#1488,
+toolchain consistency, §20) plus build-once image promotion (§21); before it, main `6ec745d` (#1487); before that, main `75dbb8b` (#1486: targeted report dispatches skip the
+trend) plus the first natural-run measurements (§18.3–§18.5) and the
+conformance-fixture change (§19). This table
+is the one place that says where the plan stands. The sections below it are
+the record of how each stage was built and measured; where their present
+tense disagrees with this table, this table wins.
+
+| Stage | Implemented | Operationally verified | Awaiting natural samples | Remaining backlog |
+|---|---|---|---|---|
+| Lane architecture, retirement steps 2–7 (§1–§3) | Yes | Yes: Fast/Deep gates carry every PR; QA/Security are pass-through on PRs | — | Step 1 (branch protection names Fast/Deep only; admin) and step 8 (traffic-smoke promotion, then retire `proxy-pr-gate.yml`) |
+| Release publication gating (§5a) | Yes: one predicate over `.github/release-evidence.txt` via `require-release-evidence.sh`; `docker` pushes candidate tags only; `promote-image` moves `latest`/`main`/semver onto the tested digest; every asset is staged as a draft | Yes: on `3febe59` main QA failed, so `Auto-Tag Release` and `Promote moving channels (main)` both refused at their evidence step and nothing was promoted (CI run 35905503220) | — | — (build-once promotion: §21) |
+| Build-once image promotion (§21) | Yes: the main push builds + qualifies one signed candidate; the tag run reuses it by digest (binding → published alias → main candidate → owner-authorized rebuild), re-qualifies it and signs it in the tag context; auto-tag consumes the candidate's version | Locally: 56 mocked state-transition cases, a real-Docker qualification test (§21.7.1) and workflow walls, each defect gate mutation-proven. Live: the first main push (36111817278) failed qualification on a #1496 defect, fixed by #1497 with nothing public moved (§21.7.1); the fixed chain then released `v1.0.244` end to end — candidate qualified on both architectures, the tag run reused it without rebuilding (record + qualification verified), signed it in the tag context, and the catalog digest matched (§21.7.2) | Retry reuse (a main re-run reusing its own candidate) has not occurred naturally; latency has one sample (tag run 701 s against a 861 s median) (§21.7.2) | Security/QA workflows still build their own scan images from source (§21.8) |
+| Stage 1: QA scheduling (§8) | Yes | Yes | — | — |
+| Stages 2A/2B: coverage from the race run, race ownership by event (§9–§10) | Yes | Yes | — | — |
+| Stage 3: native cross-compilation in the production image (§11) | Yes: `FROM --platform=$BUILDPLATFORM`, `-trimpath -buildvcs=false` | Yes (byte-identical binaries, measured) | — | — |
+| Toolchain consistency (§20) | Yes: the root `go.mod` `toolchain go1.26.8` line drives CI, release binaries and every builder image (`golang:1.26.8-alpine` pinned by digest); walled with negative controls | Yes: CI-qualified on #1488 (both arches reproducible, every builder and binary records `go1.26.8`); the Dockerfile binary checks now compare against the pin (§21.2) | Performance samples before this change ran Go 1.26.6 (§20) | Moving to Go 1.27 needs a lint-tool upgrade first (§20); the installer's operator-side source-build fallback stays unpinned |
+| Stage 4: E2E image dependency discipline and recipe parity (§12) | Yes | Yes | — | — |
+| Stages 5A–5C: sharded race + coverage in QA and in the Fast PR Gate (§13–§15) | Yes: 4 root shards + a non-root lane on one engine | Yes | — | Lane start order adopted (§18.5.1): `internal/mcp/execution` is handed to `go test` first — Fast runner time −7 %, Fast −118 s median, PR completion unchanged (Deep bounds it); root-state/package isolation remains |
+| Stage 6A: small restore fixtures by default (§16) | Yes | Yes | — | — |
+| Stage 6B: reporting + weekly equivalence audit (§17, §18) | Yes | Schema v2 verified live: 28 on-demand PR reports read their evidence from artifacts and named a verified cohort; a metadata-only report stays `unknown`/unverified. The first automatic v2 report on main failed closed (HTTP 403, rate limit suspected) and its re-run verified it (§18.3.1) | Scheduler: the first audit (Sunday 2026-09-27 06:23 UTC) and its 09:43 backstop have not fired — **pending**. Verified cohorts: **1**. Successful executions: Fast `race` 16, Fast `race+frontend+mcp` 8, main QA 1. The PR samples all come from one 12-hour window, so every baseline stays provisional (§18.4) | — (the dispatch fix is confirmed live: a targeted dispatch skipped the trend, an empty one ran it; §18.3.1) |
+
+Remaining backlog, in the order the measurements support (§18.5):
+
+1. ~~**The non-root lane**~~ — measured (§18.5.1): starting
+   `internal/mcp/execution` first cut the lane in every trial (median 769 →
+   418 s) and Fast runner time by 7 %; a separate job cut Fast more but saved
+   no runner time. Neither moved PR completion: Deep finished last in 8 of 9
+   trials. Start order adopted; the separate job rejected.
+2. **Determinism** — the longest job on both QA (≈860 s) and the Deep PR
+   gate (median 897 s). First slice done: repeated OpenAPI fixture
+   preparation in the conformance tests (§19).
+3. **Root-state/package isolation** — packages whose tests share process or
+   on-disk state cannot be split or reordered safely; this bounds items 1–2.
+4. **Repeated static-contract work** — many walls re-read and re-parse the
+   same workflow and source files independently.
+5. ~~**Main-to-tag build-once promotion**~~ — implemented (§21) and
+   released end to end as `v1.0.244` (§21.7.2); retry reuse not yet
+   observed.
+6. ~~**Toolchain consistency**~~ — done (§20): one pinned compiler, Go
+   1.26.8. Follow-up: adopting Go 1.27 needs the pinned golangci-lint
+   upgraded first.
+
+None is implemented by the closeout. Unrelated test investigations stay
+outside this plan.
+
+Historical status (2026-07-03; superseded by the table above): **retirement steps 2–4, §3.9 docker-skip, AND steps 5–7 in
 PASS-THROUGH MODE applied** (2026-07-03). The heavy installer/maint e2e
 workflows are nightly + path-filtered on PRs; catalog-e2e and CodeQL are
 PR-path-scoped; the QEMU image build no longer runs on PRs. Steps 5–7 were
@@ -155,12 +205,14 @@ only via the tag-path gates.
 
 ### 5a. Release-gate integrity (PANW audit item 1 — REQUIRED admin step)
 
-The signing/publish jobs (`docker`, `catalog-pipeline`, `release`) and
-`auto-tag` gate on the gate **workflow files** concluding success for the
-commit on its main push, via `.github/scripts/require-gate.sh` (bound to the
-workflow path + main-push provenance — a spoofed check-run *name* or a
-tag-triggered re-run of the same SHA can no longer self-approve). This is the
-in-repo backstop.
+Every release-publishing job gates on ONE predicate over ONE manifest:
+`.github/scripts/require-release-evidence.sh` reads
+`.github/release-evidence.txt` and resolves each row through
+`.github/scripts/require-gate.sh`, which binds the verdict to the workflow
+**file** path and to a main-push run of the exact commit (a spoofed check-run
+*name* or a tag-triggered re-run of the same SHA cannot self-approve). A
+`mandatory` row refuses on failed, cancelled, pending, skipped, neutral or
+absent. This is the in-repo backstop.
 
 It is a BACKSTOP, not the primary control. On the tag path `require-gate.sh`
 is checked out from the **tagged tree**, so anyone able to push an arbitrary
@@ -175,10 +227,15 @@ Until that ruleset exists, a maintainer with push access can still hand-push a
 tag on a *reviewed, green* commit (the in-repo guard allows exactly that and
 refuses a non-green commit). Set the ruleset to close the arbitrary-tree class.
 
-**Deferred (same class, Phase 2):** on a *main* push the `docker` job publishes
-+ cosign-signs `ghcr:latest` in parallel with the gate, with no gate
-dependency — a commit that later fails the gate has already shipped a signed
-`latest`. Fix by gating the main-push publish/sign the same way (wait mode).
+**Closed (was deferred, Phase 2).** A *main* push used to publish and
+cosign-sign `ghcr:latest` in parallel with the gate, so a commit that later
+failed the gate had already shipped a signed `latest` (run 35507615339
+published 29 minutes before the QA/Security verdict existed). Now `docker`
+pushes only non-channel candidate tags (`candidate-<run_id>`, `sha-<short>`),
+and the evidence-gated `promote-image` job moves `latest`/`main`/semver onto
+that exact tested digest; every release asset is staged as a draft and only
+`publish-release` turns it public. Runbook:
+`docs/operator/release-publication-gating.md`.
 
 ### 5b. Egress control on the signing jobs (PANW audit item 2)
 
@@ -229,18 +286,18 @@ release. The build is a **shared composite** (`.github/actions/build-release-bin
 that BOTH the `release` job and `verify-reproducible` call, so the independent
 rebuild can never drift from the real build (a two-copy build command would make
 the check tautological or falsely-red). Honest scope: this is **same-image,
-same-pinned-toolchain** reproduction (`setup-go-cache` pins Go 1.25.11 for both),
+same-pinned-toolchain** reproduction (`setup-go-cache` reads `go-version-file:
+go.mod` for both; Go 1.26.6 today),
 not an independent-environment rebuild — SLSA's trusted builder covers build
 integrity; F1 verifies *determinism* (catches dep/toolchain-drift/tampering
 nondeterrminism between hashing and signing). The verify job is `contents: read`
 only (signs nothing — deliberately no `id-token`). **Guardrail:** never add
 `always()`/`success()`/a status function to `provenance`'s `if:`, or the gate
-silently opens. **Remaining follow-up** — the **Docker image binary**
-(`Dockerfile`) still builds with default `-buildvcs=auto`, and its `.dockerignore`
-strips tracked files (`*_test.go`, `*.md`, …) while keeping `.git`, so the
-in-container `git status` sees those as deleted and the image binary ships
-`vcs.modified=true` (not tree-state reproducible). Disjoint provenance surface
-(the image has its own cosign signature), tracked separately.
+silently opens. **Image binary (closed).** The production `Dockerfile` used to
+build with the default `-buildvcs=auto`; its `.dockerignore` strips tracked
+files while keeping `.git`, so the image binary shipped `vcs.modified=true`.
+Both Go stages now build with `-trimpath -buildvcs=false` (§11), so the image
+binary is tree-state reproducible too.
 
 **F2 — runtime version stamp (DONE).** Prompted by the first LIVE
 authoritative MCP Observe Acceptance (v1.0.202), which failed its required
@@ -831,15 +888,14 @@ now lists `golang@1.27-alpine?platform=linux/amd64` as a material (previously
 provenance materials; an external policy that pins the toolchain material to the
 image's platform would need updating.
 
-### Next original-plan follow-up (NOT in this stage)
+### Next original-plan follow-up (done in stage 4, §12)
 
-`test/e2e/maint-agent/Dockerfile.e2e` — used by the maint-agent update,
-backup-upgrade, install-lifecycle and appliance-catalog-update E2E workflows —
-has drifted from production: `golang:1.26-alpine` (production 1.27),
+At the time of this stage, `test/e2e/maint-agent/Dockerfile.e2e` — used by the
+maint-agent update, backup-upgrade, install-lifecycle and
+appliance-catalog-update E2E workflows — had drifted from production: `golang:1.26-alpine` (production 1.27),
 `alpine:3.22` (production 3.24), a build-time `go mod tidy` (the divergent-recipe
-step production removed), and no `-trimpath`/`-buildvcs=false`. Aligning it is
-the next step; it was left alone here to keep this change to the production
-image.
+step production removed), and no `-trimpath`/`-buildvcs=false`. Stage 4
+aligned it (§12).
 
 ### Rollback
 
@@ -934,7 +990,8 @@ is current), the runtime `apk upgrade`/`apk add` against the live Alpine
 repositories, and the module proxy (bounded by `go.sum`, which now cannot
 change during the build). CI logs record the digests and `go version` each run
 actually resolved. Pinning base images by digest is a production-wide decision
-and is not taken here.
+and is not taken here. *(Superseded for the Go builder image by §20: it is now
+pinned by digest. `alpine:3.24` and the runtime `apk` steps remain mutable.)*
 
 ### Measurement
 
@@ -1889,7 +1946,7 @@ already exists. No test is re-run to produce a number.
 
 | Piece | Where | What it does |
 |---|---|---|
-| Collector | `cmd/cireport` (stdlib only) | `run` → one versioned report (`culvert.ci-run-report/v1`) + step summary per run attempt. `trend` → equivalence groups, provisional statistics, advisory regressions, audit freshness (`culvert.ci-trend-report/v1`). |
+| Collector | `cmd/cireport` (stdlib only) | `run` → one versioned report (`culvert.ci-run-report/v2` since §18) + step summary per run attempt. `trend` → equivalence groups, provisional statistics, advisory regressions, audit freshness (`culvert.ci-trend-report/v2`). |
 | Reporter workflow | `.github/workflows/ci-perf-report.yml` | Runs the collector after gate runs complete, weekly, or on dispatch. |
 | Weekly audit | `qa-gate.yml` `schedule: "23 6 * * 0"` | The existing unsharded reference and `rootshard compare`, on the default branch, every Sunday. |
 | Baseline | `.github/ci-perf-baseline.json` | Reviewed performance targets. Ships `provisional` and empty. |
@@ -1906,6 +1963,9 @@ already exists. No test is re-run to produce a number.
 - **Attempt scoping.** A re-run attempt lists the earlier attempt's jobs.
   A job that started before this attempt did is *carried over*: it is listed
   but never timed. Skipped jobs never count.
+- **Attempt queue** (§18.2) = the attempt's enqueue time → the first start
+  among this attempt's own jobs. It is `null` (unknown), never zero, when the
+  attempt's enqueue time was not observed.
 - **Phases.** Queue is job `created_at` → `started_at`. Setup, work and
   teardown come from step names. Anything else is recorded under `unknowns`.
   Cache state is **not inferred**.
@@ -1940,10 +2000,12 @@ already exists. No test is re-run to produce a number.
   - `fault-injection`
   - `other`
 
-  Groups are keyed `workflow|class|job set`. The job set comes from what
-  actually executed: `race`, `race-unsharded`, `audit`, `qa-layers`,
-  `frontend`, `mcp`, `maint`. So a PR that ran the frontend and MCP lanes is
-  never compared with one that did not.
+  Groups are keyed `workflow|class|job set|cohort` (the cohort was added in
+  §18.1). The job set comes from what actually executed: `race`,
+  `race-unsharded`, `audit`, `qa-layers`, `frontend`, `mcp`, `maint`. So a PR
+  that ran the frontend and MCP lanes is never compared with one that did
+  not, and a run on another runner image, shard count or Go release line is
+  never compared with this one.
 - **Run-names.** A dispatch publishes its inputs in its title, which the runs
   API returns:
   - Fast PR Gate: `… · dispatch · audit=<bool> · fault=<choice>`
@@ -1989,8 +2051,9 @@ succeeded" step. Nothing in the comparison changed.
 - **Off the PR critical path.** It runs on `workflow_run`, after the gate has
   finished, on the default branch, and posts no check to the PR. Nothing
   requires it, and no workflow chains from it (pinned).
-- **Trusted code only.** `actions/checkout` takes the default branch with no
-  `ref:` and `persist-credentials: false`.
+- **Trusted code only.** `actions/checkout` pins `ref:` to the repository's
+  default branch, with `persist-credentials: false`, so a dispatch on another
+  branch still runs the reviewed collector.
 - **Least privilege.** The token has `actions: read` and `contents: read`, and
   no secret is used. `setup-go` runs with `cache: false`, because a cache here
   could have been written by a PR run.
@@ -2029,11 +2092,16 @@ succeeded" step. Nothing in the comparison changed.
 | `ci-run-report-<run>-<attempt>` (`report.json`, `summary.md`) | After every **non-PR, non-cancelled** Fast/QA run: main pushes, dispatches, the schedule | 90 days |
 | `timing-refresh-candidate-<run>-<attempt>` | Only for a **passed** audit: the refreshed timing file + `diff.json` against the committed one | 90 days |
 | `ci-trend-report-<collector run>` (`trend.json`, `summary.md`) | Sundays 09:43 UTC, after a scheduled audit completes, or on dispatch | 90 days |
-| Raw evidence the reports are built from | Race shard/build artifacts | 7 days |
-| | `qa-race-verdict` | 30 days |
-| | Audit reference/compare artifacts | 14 days |
+| Raw evidence the reports are built from | Race shard/build/lane/universe artifacts | 7 days |
+| | `qa-race-verdict`, audit reference/compare artifacts | 14 days |
+| | `qa-coverage` | 30 days |
 
-The 90-day reports outlive the evidence they were built from.
+The 90-day reports outlive the evidence they were built from. The retention
+periods are the ones observed on run 35874102885 (`expires_at`). A run can
+therefore be enriched on demand (dispatch with `run_id`) only within **7
+days**: after that its shard `meta.json` — the only source of the toolchain
+— is gone, and the report can no longer verify its cohort. Job logs, the
+source of the runner image, are kept longer (90 days by default).
 
 - **Report on any run, including a PR run:** dispatch *CI Performance Report*
   with `run_id`. The trend already lists PR runs from metadata.
@@ -2194,3 +2262,1049 @@ follow §16.6–16.7. Coverage exceptions are never generated.
   Do **not** remove only `require-success`: a scheduled audit would then pass
   with its audit jobs skipped.
 - Fast's `run-name` can stay or go independently.
+
+## 18. Stage 6B closeout — operational acceptance
+
+Stage 6B merged as PR #1477 (`3febe59`). This closeout corrects two
+measurement defects found in review of the merged code, verifies the
+reporting on GitHub, and starts the observation period. It changes reporting
+only. No required check, gate, release step, permission or race-engine
+output changes.
+
+### 18.1 Cohort identity
+
+**Finding.** The trend grouped executions by workflow, class and job set
+only. Runs on a different runner platform, shard count or Go toolchain could
+therefore enter the same reviewed baseline.
+
+**Change.** Each report derives a **cohort** from what was observed, and the
+trend groups by `workflow|class|job set|cohort`:
+
+| Component | Source | Value when not observed |
+|---|---|---|
+| `platform` | the executed jobs' runner labels + runner group (job metadata), separators percent-escaped so distinct label sets never share a string | `unknown` |
+| `image` | the runner image **every measured job** reported in its own log (the "Runner Image" group the runner writes first, e.g. `ubuntu-24.04`) | `unknown` when any measured job was not observed; `mixed:…` when jobs ran on different images |
+| `shards` | the root-shard jobs GitHub scheduled | `none` when no race engine ran |
+| `toolchain` | Go release line + GOOS/GOARCH from the shards' `meta.json` | `unknown`; `n/a` when no race engine ran |
+
+- **Why the image is keyed.** GitHub annotates every `ubuntu-latest` job on
+  this repository: *"The ubuntu-latest label will migrate to Ubuntu 26
+  beginning October 19, 2026."* A label is not a platform identity, and the
+  job metadata exposes no image.
+- **Why every measured job, not just the shards.** A rollout can move one
+  job and not another. Elapsed time, runner-minutes and the lane's time come
+  from jobs outside the root shards, so an image read only from the shards
+  would pool a run whose lane ran on 26.04 under 24.04 (Codex review, PR
+  #1478; the first version of this closeout read the image from the shards'
+  `meta.json` and was reverted for exactly this). The collector reads the
+  first 16 KB of each measured job's log with a byte-range request and
+  parses only the `Image:` and `Version:` lines of the "Runner Image" group,
+  as data, in a safe character set. It reads nothing else and executes
+  nothing. Every hosted job prints the group, so runs without a race engine
+  (docs-only, pass-through) get an observed image too.
+- **What stays comparable.** Source commits, durations, Go patch releases
+  and the weekly runner image build do not split a cohort. The exact Go and
+  image versions (including the weekly image build, the value that tells two
+  samples of one cohort apart) stay in each report and trend sample row,
+  stated only when every shard (or job) reported the same one.
+- **Complete evidence only.** The toolchain counts as observed only when the
+  `meta.json` of **every** scheduled shard was read — matched shard for
+  shard, not by count (documents for shards `{0,1,2,4}` do not cover
+  scheduled `{0,1,2,3}`), and each document must name the shard whose
+  artifact carried it; the image only when
+  **every** measured job's log was. An unread one may have run elsewhere,
+  and the others do not speak for it. Shards that disagree on the Go release
+  line or GOOS/GOARCH make the toolchain `mixed:…`, like the image, and
+  never verified (Codex review, PR #1478).
+- **Unknown stays separate.** A component that was not observed reads
+  `unknown` (never a guessed value), forms its own unverified cohort, and the
+  baseline loader refuses a reviewed median unless the key parses as exactly
+  `platform=…;image=…;shards=…;toolchain=…`, every field is non-empty and
+  observed, and no field is `mixed:` (Codex review, PR #1478).
+- **The image build is stated only when all jobs agree.** During a rollout
+  jobs can share an image but not a build; the report then leaves the build
+  unstated and says so, and the cohort (keyed on the image) is unaffected
+  (Codex review, PR #1478).
+- **Metadata-only PR reporting is unchanged.** PR runs are still measured
+  from metadata in the trend. A selected natural run is enriched with the
+  existing on-demand report (dispatch *CI Performance Report* with `run_id`),
+  within the 7-day shard-artifact retention (§17.5). The workflow's
+  `actions: read` already covers job logs; no permission changes.
+
+### 18.2 Attempt queue
+
+**Finding.** `runQueueSeconds` was `run_started_at − created_at`. On attempt
+1 GitHub stamps both at enqueue, so it was always 0. On a re-run,
+`created_at` is attempt 1's, so it measured the gap between attempts.
+Observed on run 35034671115: the runs endpoint reports `created_at`
+23:13:20, while `/attempts/2` reports 23:47:37 — 34 minutes that are not
+queueing.
+
+**Change.** The collector reads through the attempt endpoint, whose
+`created_at` is that attempt's enqueue time, keeps the run's own `created_at`
+as identity (what the trend compares), and reports
+`attemptQueueSeconds` = attempt enqueue → the first start among this
+attempt's own jobs — every job that has started, completed or still running
+(a run reported in progress), excluding skipped jobs and jobs carried over
+from an earlier attempt (Codex review, PR #1478). When the enqueue time was not observed (a re-run read
+through the runs list) it is `null` with an `unknowns` entry, never zero.
+Elapsed time and runner-minutes are unchanged. Report schemas move to `v2`;
+the trend refuses `v1` reports and measures those runs from metadata.
+
+### 18.3 Live verification on GitHub
+
+| Check | Evidence | Result |
+|---|---|---|
+| First automatic report on main | *CI Performance Report* 35907140269 (`workflow_run`), triggered by *QA Gate* push 35905503217 on `3febe59` | Checked out main `3febe59` (trusted code). Collected in 14 s and published `ci-run-report-35905503217-1` (3,607 bytes, `report.json` + `summary.md`). The `-1` suffix is read from the report's own `run.attempt`, so the report names attempt 1. The trend job was skipped, as designed for a push. |
+| It ran on a failed run | The QA run concluded `failure` | Reported, as designed: only cancelled runs are skipped. |
+| Evidence it could read | The QA run published `qa-race-verdict` and `qa-race-shard-0…3`, plus `qa-race-build` (56 MB), which the allowlist never reads | Present and unexpired. |
+| Report contents | — | **Not verified from the authoring session**: artifact storage (`*.blob.core.windows.net`) is refused by the session's egress policy, and GitHub exposes no API for step summaries. The collector now also prints one sanitized line to its job log (`cireport run: … evidence=… read=… tested=…`), so from the first run after this merges the report's evidence and tested SHA are checkable through the logs API. |
+| Pre-merge `workflow_run` triggers | 35905794603, 35906657765 | `skipped`: pull-request runs, as designed. |
+| Manual reporting path, known successful audit | Dispatch 35907858252 on main, `run_id` 35874102885 (same-SHA audit at `fef1fd0`) | Published `ci-run-report-35874102885-1` (3,959 bytes) **and `timing-refresh-candidate-35874102885-1` (81,945 bytes)**. The candidate is uploaded only when the collector downloaded and decoded the verdict (ok) and the comparison (passed) and the candidate's provenance names this run — so this is artifact verification, not the metadata fallback. The trend job on the same dispatch succeeded. |
+| Audit scheduling | `qa-gate.yml` and `ci-perf-report.yml` are `active`; each has **0** scheduled runs | The first audit is due Sunday 2026-09-27 06:23 UTC and the backstop trend 09:43. Neither has fired yet; nothing here claims it has. |
+| Separate concurrency | `qa-gate.yml` on main, lines 120–122 | Audit runs use `qa-audit-<ref>` with `cancel-in-progress: false`; ordinary runs keep `qa-gate-<ref>`. Failure semantics (a skipped, failed, cancelled or absent audit job refuses) are pinned by the walls that drive the real `needs-verdict` shell. |
+| `audit.introduced` | `2026-09-23`, the merge date | Left unchanged. The trend reads `pending-first`: the only past due slot, 2026-09-20, predates it. |
+| Release safeguards | CI 35905503220 on `3febe59` | Main QA failed, so `Auto-Tag Release` and `Promote moving channels (main)` both refused at their evidence step. Nothing was tagged or promoted. |
+
+The main QA failure is `TestUpgradeApply_RejectsInvalidRef` in
+`cmd/culvert-maint` (a separate module untouched since #1300): `connection
+refused` on the agent socket in the shuffled double run. The seven previous
+main QA runs were green. It is outside this plan, it was not re-run, and it
+is left to the separate flaky-test investigation.
+
+### 18.3.1 Schema v2 on natural runs (2026-09-24)
+
+Collector revision for every report below: `ci-perf-report.yml` checks out
+the default branch, main `9450d33` (#1478). Each report prints one
+`cireport run:` line to its job log, which is how its contents were read
+(artifact storage is still refused by the authoring session's egress).
+
+| Check | Evidence | Result |
+|---|---|---|
+| First automatic v2 report | *CI Performance Report* 35990426653, job 107602944435, for *QA Gate* push 35989051459 on `9450d33` (QA succeeded) | Attempt 1 **failed closed**: `GET …/actions/runs/35989051459: HTTP 403` at 11:00 UTC. No report was published and nothing claimed success. **Cause suspected, not established:** it came minutes after the enrichment burst below, but the collector logs only the status code. The response body and `x-ratelimit-*` headers were not recorded, so the log cannot prove a rate limit. Attempt 2 (re-run of the failed job, 12:06 UTC, job 107624053905) **succeeded**: `attempt=1 event=push tested=9450d33 class=main-qa evidence=artifacts` (same six documents), `image-logs=17/17 verdict=ok verified=true`, same cohort as the PR samples. It published `ci-run-report-35989051459-1` (4,021 bytes). Attempt 1 remains in the run's history. |
+| On-demand v2 reports, Fast PR runs | 28 dispatches with `run_id`, e.g. 35990137756 / job 107602002719 for Fast run 35937792762 | All 28 report jobs succeeded. Every line reads `attempt=1 evidence=artifacts image-logs=18/18 verified=true` and names six documents (`qa-race-shard-0…3/meta.json`, `qa-race-verdict/{results,verdict}.json`). Example: `head=c96f0b60 tested=3a99c2be` — the tested SHA is the merge commit, not the PR head, and the report keeps both. |
+| Missing evidence stays unknown | The same collector run locally against Fast run 35937792762 without artifact access | `evidence=metadata-only image-logs=0/18`, image and toolchain `unknown`, `verified=false`. It lands in its own cohort and is never pooled. |
+| Targeted dispatch after #1486 | *CI Performance Report* 36017569814 on main `75dbb8b`, `run_id` 35989051459 (a run already reported, so nothing new was enriched) | `Report · one run` succeeded and published `ci-run-report-35989051459-1` (4,053 bytes); `Report · trend + audit freshness` was **skipped**. |
+| Empty dispatch after #1486 | *CI Performance Report* 36018809544 on main `75dbb8b`, empty `run_id` | `Report · one run` was **skipped** and the trend **ran and succeeded** (2 min 50 s) despite it, publishing `ci-trend-report-36018809544` (6,653 bytes). This is the one deliberate trend over the verified samples. Its verdict is in the artifact and step summary, which the authoring session's egress cannot read; the trend prints no summary line to its log. |
+| Trend on those dispatches | The 28 trend jobs of the same dispatches | **All failed** on `HTTP 403` (`list pr-fast-gate.yml push runs`). A dispatch with `run_id` also runs the full trend (the trend job's `if:` accepts any `workflow_dispatch`), so 28 dispatches were 28 trends reading the same history. |
+
+**Finding — enrichment was not bounded.** Enriching N runs cost N full
+trends against the shared budget of about 1,000 API requests per hour, and
+the likely casualty was an unrelated automatic report. **Fixed:** a dispatch
+with a `run_id` now reports that run and skips the trend; an empty dispatch
+is the trend. The weekly schedule, the scheduled-audit trigger, `needs:
+run-report`, `always()`, the default-branch checkout and the read-only token
+are unchanged. `ci_perf_report_dispatch_test.go` evaluates both jobs' real
+`if:` conditions, including GitHub's rule that an `if:` without a status
+function skips when a `needs` job was skipped or failed. The matrix covers:
+
+- a targeted dispatch;
+- an empty dispatch with run-report skipped;
+- a scheduled-audit completion whose report failed;
+- a cancelled scheduled audit;
+- main push completions: success, failure and cancelled;
+- pull-request runs.
+
+It rejects the pre-fix condition and the fixed condition without `always()`.
+
+**Enrichment rule until the fix is live on main:** no bulk enrichment.
+After it, enrich in small sequential batches (at most five dispatches, each
+waiting for the previous one), then dispatch once with an empty `run_id` for
+the trend. The 28 reports above are reused and not re-collected.
+
+**Follow-up, not in this change:** have the collector log the status,
+`x-ratelimit-remaining`/`-reset` and a bounded API message on failure, so
+a 403 can be attributed from its own evidence.
+
+### 18.4 Observation period
+
+Baselines stay `provisional` until a **verified** cohort has 10–20
+comparable natural executions. No suite is re-run to produce samples.
+
+Samples available now (trend over 102 executions, newest 25 per workflow and
+event; counted = completed, first attempt, success, consistent evidence):
+
+| Workflow | Class | Job set | Executions | Counted | Elapsed to aggregate, median / p90 |
+|---|---|---|---|---|---|
+| Fast | `pr-code` | `race+frontend+mcp` | 10 | 8 | 754 / 927 s |
+| Fast | `pr-code` | `race` | 9 | 6 | 856 / 869 s |
+| QA | `main-qa` | `race+qa-layers` | 4 | 3 | 877 / 922 s |
+| QA | `manual-audit` | `race+audit+qa-layers` | 9 | 2 | 1,614 / 1,939 s |
+| QA | `pr-pass-through` | `minimal` | 25 | 20 | 12 / 14 s |
+
+The rest are pre-5C engine runs (`race-unsharded`), pre-5B QA runs
+(`qa-layers` only), fault injections and qualification dispatches, which are
+listed and never pooled with the current engine.
+
+**Verified cohorts, 2026-09-24: 1.** Cohort
+`platform=ubuntu-latest@GitHub Actions; image=ubuntu-24.04; shards=4;
+toolchain=go1.26 linux/amd64`. It holds 28 enriched Fast PR runs
+(2026-09-23 12:19 to 2026-09-24 00:18 UTC, 10 branches, all first attempts)
+and the first main QA run after #1478 (§18.3.1). Durations are job
+metadata; runner-minutes sum every job in the run. Statistics cover
+successful executions only.
+
+| Workflow · class · job set | Successful | Failed | Cancelled | Elapsed median / p90 | Race path median / p90 | Runner-min median | Queue median / p90 |
+|---|---|---|---|---|---|---|---|
+| Fast · `pr-code` · `race` | 16 | 4 (3 with `verdict=failed`, 1 in another job) | 14 | 856 / 951 s | 815 / 908 s | 62.3 | 4 / 99 s |
+| Fast · `pr-code` · `race+frontend+mcp` | 8 | 0 | 0 | 754 / 856 s | 712 / 810 s | 67.3 | 4 / 77 s |
+| QA · `main-qa` | 1 | 0 | 0 | one sample, not a statistic | — | — | — |
+
+- `race` and `race+frontend+mcp` stay separate groups and are never pooled.
+- Cancelled executions are counted from run metadata only; the collector
+  does not report them, so they are not verified samples. Another 2
+  cancelled code-PR runs in the window stopped before their job set was
+  known and belong to neither group.
+- Every group stays **provisional**. `race` reaches 10 successes, but they
+  all come from one 12-hour window. "Counted" also requires no
+  contradictory evidence, which only the trend checks, and no trend has run
+  over these samples yet.
+- The 101 older-engine and docs-only runs in the same window are
+  metadata-only and stay out of every verified cohort.
+- PR artifacts expire after 7 days, the first on 2026-09-30. Main QA
+  reports are produced automatically.
+
+**Missing evidence:**
+- main QA samples beyond the first; they accrue with each main push;
+- the first scheduled audit and backstop (due 2026-09-27, **pending** until
+  they actually execute);
+- the verdict of the one deliberate trend over the verified samples
+  (36018809544, §18.3.1): it ran and succeeded, but its artifact has not
+  been read from the authoring session.
+
+### 18.5 Observed bottlenecks and the next optimization
+
+Critical path of the counted current-engine runs (job metadata, medians):
+
+| Run kind | Build | Root shards (4) | Non-root lane | Verdict | Aggregate done |
+|---|---|---|---|---|---|
+| Fast `pr-code`, `race` (6) | 138 s, done at 150 s | 449 s, done at 605 s | **758 s, done at 770 s** | 42 s | 855 s |
+| Fast `pr-code`, `race+frontend+mcp` (8) | 141 s | 456 s, done at 611 s | 590 s, done at 605 s | 37 s | 720 s |
+| QA `main-qa` (3) | 122 s | 469 s, done at 590 s | 753 s, done at 756 s | 41 s, done at 800 s | 874 s; **Determinism 859 s** |
+
+- **The non-root lane is the Fast gate's critical path.** Across the 14
+  counted code-PR runs, the lane finished after the root shards in 10. Those
+  runs took a median **854 s** to the aggregate, against **702 s** when the
+  shards finished last. The lane added a median 154 s (max 191 s). Its
+  duration varies from 476 to 763 s between runs of similar code, while the
+  shards stay at 433–499 s.
+- **One package dominates the lane.** In audit run 35874102885,
+  `internal/mcp/execution` took **436 s of the lane's 610 s**; the other 110
+  packages run beside it. §14.8 recorded this split as unmeasured and
+  optional; it is now measured.
+- **Queueing is not a bottleneck.** The median job queue is 3 s.
+- **On main QA the determinism job is last** (≈860 s), after the race
+  verdict (≈800 s).
+
+**Next optimization — a hypothesis, re-assessed 2026-09-24.** The original
+proposal was to take `internal/mcp/execution` off the non-root lane's
+critical path by giving it its own lane job or sharding its tests. The 28
+verified runs (§18.4) confirm the lane is the Fast race path's bound, but
+not the size of the saving:
+
+- The lane bounds 23 of 24 successful runs: median 752 s against 454 s for
+  the slowest root shard in `race` runs.
+- In three inspected lane logs, `internal/mcp/execution` was the last
+  package to finish (312, 407 and 528 s). It started 160–235 s into the
+  lane and ran alone for the final 227–393 s. Its neighbours in
+  `internal/mcp` slowed in step, so part of the variance is runner speed or
+  contention, not the package alone.
+- `go test` already runs packages concurrently. Moving the same package to
+  another job removes its contention with the rest of the lane but not its
+  own run time; the ≈150 s estimate from §18.5 is unproven.
+- **A faster Fast gate does not by itself make PRs green sooner.** Deep
+  finished after Fast in 25 of 28 PR runs (median 928 s against 853 s), and
+  its determinism job is Deep's longest (median 897 s, p90 913 s, 27
+  runs). Main QA ends
+  on determinism too (≈860 s). Until determinism shrinks, a lane saving
+  moves runner-minutes and Fast's own check, not time to both-green.
+
+**The end-to-end critical path.** A code PR is mergeable when both
+required gates are green, so its completion time is the later of Fast and
+Deep:
+
+| Path | Median | Bound by |
+|---|---|---|
+| Fast · `race` race path | 815 s | the non-root lane (median 752 s) |
+| Deep | 928 s | determinism (median 897 s) |
+| Main QA | ≈870–920 s | determinism (≈860 s), then the lane (≈750 s) |
+
+Any experiment must therefore report three results separately and never
+substitute one for another:
+
+1. the **Fast-only** change (lane end and Fast elapsed);
+2. the change in **PR completion time**, the later of Fast and Deep;
+3. the **runner-minute** cost.
+
+A Fast-only gain with PR completion unchanged is a runner-time result, not
+a latency result.
+
+**A bounded comparison comes before any implementation, outside the change
+that records this evidence.** Pair same-SHA runs of the arms in one time
+window, without re-running failed work:
+
+| Arm | Change |
+|---|---|
+| A | Current lane (control) |
+| B | `internal/mcp/execution` in its own job |
+| C | Same lane, with `internal/mcp/execution` started first |
+
+Arm C needs proof from the lane log that the package actually started
+first. Package order and `-p` do not establish it, because `go test`
+decides when packages start.
+
+A handful of pairs can show whether the median moves. It cannot show that
+p90 does not regress; that claim waits for the provisional baselines to
+mature. A determinism comparison of the same shape is the candidate that
+can move PR completion time. Neither is implemented here; the lane
+comparison has since run (§18.5.1).
+
+#### 18.5.1 Lane experiment result (2026-09-25): arm C adopted, B rejected
+
+**Setup.** All three arms ran on one experiment branch that was never
+merged, `claude/culvert-ci-stage-1-z2xzzo-lane-exp`: `30ccddcc` →
+`9fd7fb31` → **`0442f390`**, based on main `87acf31`. The branch added a
+`lane_layout` dispatch input and the lane code for each arm; the
+application and test source was identical across arms. Every counted trial
+ran at `0442f390` on the pinned toolchain (go1.26.8) and on the same
+`ubuntu-latest` runner class. Every job restored main's setup-go cache by
+exact key, and the branch saved no cache. The budget was fixed at 9 counted
+trials, 3 per arm, in the rotating order A B C / B C A / C A B. Each trial
+was one Fast + Deep dispatch pair, one pair at a time, and nothing was
+re-run. Deep is the same workflow in every arm; only Fast's lane layout
+varies. Trial 0 (A at `9fd7fb31`) failed lint on the experiment's own code
+(cyclop 16), which is unrelated to timing. It is kept below and excluded
+from the medians, and the budget restarted at `0442f390`.
+
+| Arm | Lane layout |
+|---|---|
+| A | current lane (control) |
+| B | `internal/mcp/execution` in its own job (`-only`), the rest in the lane (`-exclude`); the verdict judges the union as one lane |
+| C | same lane, `internal/mcp/execution` passed to `go test` first (`-first`) |
+
+**Start-order proof for C.** Argument order proves nothing about start
+order, so the lane recorded the first test output of every package as
+check-run annotations. In C, `internal/mcp/execution` produced the lane's
+first test output at 18.3, 28.4 and 18.5 s. In A it started at 201.8–203.0
+s and ran alone for its last ~400 s. `go test -json` emits package "start"
+events in argument order by construction (`runTestActor`), so only a test's
+own output shows when its binary ran.
+
+Per trial (s from run creation; runner-s = the sum of job durations):
+
+| # | Arm | Fast | Deep | Both done | Lane end | Root shards end | Fast runner-s | Total runner-s | Fast / Deep run |
+|---|---|---|---|---|---|---|---|---|---|
+| 0 | A (invalid: lint) | 818 ✗ | 902 | 903 | 756 | 593 | 3942 | 5233 | [36124817301](https://github.com/KidCarmi/Culvert/actions/runs/36124817301) / [36124819629](https://github.com/KidCarmi/Culvert/actions/runs/36124819629) |
+| 1 | A | 882 | 902 | 904 | 803 | 619 | 4126 | 5399 | [36126623223](https://github.com/KidCarmi/Culvert/actions/runs/36126623223) / [36126626357](https://github.com/KidCarmi/Culvert/actions/runs/36126626357) |
+| 2 | B | 637 | 902 | 904 | 519 | 557 | 4073 | 5321 | [36128063488](https://github.com/KidCarmi/Culvert/actions/runs/36128063488) / [36128066104](https://github.com/KidCarmi/Culvert/actions/runs/36128066104) |
+| 3 | C | 655 | 913 | 915 | 404 | 578 | 3681 | 4896 | [36129507269](https://github.com/KidCarmi/Culvert/actions/runs/36129507269) / [36129510096](https://github.com/KidCarmi/Culvert/actions/runs/36129510096) |
+| 4 | B | 640 | 820 | 821 | 530 | 552 | 3975 | 5131 | [36130960090](https://github.com/KidCarmi/Culvert/actions/runs/36130960090) / [36130962582](https://github.com/KidCarmi/Culvert/actions/runs/36130962582) |
+| 5 | C | 749 | 896 | 898 | 679 | 569 | 3852 | 5080 | [36132258464](https://github.com/KidCarmi/Culvert/actions/runs/36132258464) / [36132262223](https://github.com/KidCarmi/Culvert/actions/runs/36132262223) |
+| 6 | A | 835 | 913 | 914 | 757 | 563 | 4076 | 5314 | [36133733069](https://github.com/KidCarmi/Culvert/actions/runs/36133733069) / [36133735768](https://github.com/KidCarmi/Culvert/actions/runs/36133735768) |
+| 7 | C | 844 | 1037 | 1039 | 418 | **753** | 3776 | 5148 | [36135225156](https://github.com/KidCarmi/Culvert/actions/runs/36135225156) / [36135228189](https://github.com/KidCarmi/Culvert/actions/runs/36135228189) |
+| 8 | A | 867 | 846 | 867 | 769 | 586 | 3971 | 5187 | [36136969321](https://github.com/KidCarmi/Culvert/actions/runs/36136969321) / [36136972239](https://github.com/KidCarmi/Culvert/actions/runs/36136972239) |
+| 9 | B | 673 | 915 | 917 | 537 | 586 | 4002 | 5286 | [36138475229](https://github.com/KidCarmi/Culvert/actions/runs/36138475229) / [36138478826](https://github.com/KidCarmi/Culvert/actions/runs/36138478826) |
+
+For B, "lane end" is the later of the lane and the `execution` job. In
+trial 7 root shard 1 took 601 s (usually ~400–450 s), so the shards, not
+the lane, bounded that Fast run.
+
+Medians over the counted trials (n = 3 per arm; ranges in brackets):
+
+| | A (control) | B (own job) | C (execution first) |
+|---|---|---|---|
+| **1. Lane end** | 769 [757–803] | 530 [519–537] | 418 [404–679] |
+| **1. Fast elapsed** | 867 [835–882] | **640** [637–673] | 749 [655–844] |
+| **2. Both Fast and Deep done** | 904 [867–914] | 904 [821–917] | 915 [898–1039] |
+| **3. Fast runner-s** | 4076 [3971–4126] | 4002 [3975–4073] | **3776** [3681–3852] |
+| **3. Fast + Deep runner-s** | 5314 [5187–5399] | 5286 [5131–5321] | **5080** [4896–5148] |
+| Fast jobs | 22 | 23 | 22 |
+| Fast setup-step s (sum over jobs) | 253 [248–259] | 268 [258–271] | 267 [253–274] |
+| Fast queue s (sum over jobs; median job 3 s) | 98 [63–127] | 62 [62–68] | 71 [59–160] |
+
+`internal/mcp/execution` itself took 520–522 s in A, where it runs alone
+at the end; 457–473 s in its own job (B); and 343, 618 and 359 s in C,
+where it runs beside everything else from the start.
+
+**What the numbers say.**
+
+* **PR completion does not move, in any arm.** Deep finished after Fast in
+  8 of 9 trials, and "both done" is 904 / 904 / 915 s. Every Fast saving
+  below is a Fast-check and runner-time result, not a latency result. The
+  bound is still Deep's determinism job (§18.5).
+* **B** shortens Fast the most (−227 s median) and most consistently, but
+  adds a job. Its runner time is roughly unchanged (−74 s Fast, −28 s
+  total), because the extra job pays its own setup and checkout. It also
+  needs a multi-part lane verdict, which is more code on the path that
+  proves completeness. It buys a faster Fast check and nothing else.
+* **C** keeps the job graph, inventory and verdict unchanged, and changes
+  only which package `go test` starts first. Against A:
+  * The lane ended earlier in 3 of 3 trials: the worst C, 679 s, beat the
+    best A, 757 s.
+  * Fast runner time was lower in 3 of 3: −300 s median, about 5
+    runner-minutes (7 %) per Fast run; −234 s including Deep.
+  * Fast elapsed fell to a median 749 s (−118 s). The gain varies: once
+    the lane shrinks, the root shards are the next bound (trial 7).
+
+**Decision: adopt C, reject B.** C is kept for its runner time: in every
+trial it cost less runner time without adding a job or verdict code. The
+Fast latency gain comes with it but varies. It is not a PR-latency change
+and is not reported as one. B's larger Fast gain does not justify a new
+job and a split verdict while Deep bounds PR completion.
+
+**What C changes.** `rootshard run-lane` takes `-first <pkg>[,<pkg>…]`
+(lane only; the universe refuses it). The named packages lead the
+`go test` argument list and the rest keep `go list` order. A name that is
+not a lane package, or appears twice, fails the job rather than silently
+reordering nothing, so a rename of `internal/mcp/execution` breaks the
+lane loudly. The lane logs one line, `run-lane: first test output from
+<pkg> at <s>`, so start order stays checkable from the job log. The shared
+`qa-race-shards.yml` lane step passes
+`-first github.com/KidCarmi/Culvert/internal/mcp/execution`, so the Fast
+gate and QA both get it. QA was not measured separately; main QA ends on
+determinism anyway.
+
+**Equivalence.** In all 9 counted trials the standalone verdict passed its
+completeness checks (package set, test inventory, block universe), coverage
+floors passed, and the aggregate approved. The coverage percentages
+themselves are artifact data this environment could not read. The
+reordered lane is judged by the same verdict, which compares the lane's
+package set as a set. Locally, `TestPilot_EndToEnd`'s
+`lane package handed first` case runs a `-first` lane and requires the
+same merged coverage, package count and completeness as the plain lane.
+It also refuses an unknown package, a duplicate, and `-first` on the
+universe. `TestOrderFirst` pins the ordering and the refusals. Both
+mutations (no reordering; no name validation) fail these tests. Race
+detection, the failure path (`go test`'s exit code into the lane's
+`meta.json` and exit status) and the weekly audit are untouched.
+
+**Not claimed.** Nothing about p90 or stability: three samples per arm
+cannot show it, and the §18.4 baselines stay provisional. The PR's own
+runs and the first natural runs after merge are the next samples.
+
+**Rollback.** Remove the `-first …` argument from the lane step in
+`.github/workflows/qa-race-shards.yml`. The flag is inert when unused, so
+nothing else needs to change.
+
+The experiment branch is deleted after this lands; its SHAs, run IDs and
+measurements are this section.
+
+### 18.6 Validation
+
+- `cmd/cireport` tests:
+  - **Separation:** another runner label, a self-hosted group, another shard
+    count, another Go release line, another GOARCH, another runner image
+    under the same label.
+  - **Unverified, never reviewed:** a non-shard job (the lane) on another
+    image, one measured job's log not read, one shard's metadata not read,
+    four documents for four shards that are not the scheduled four, a
+    shard's `meta.json` naming another shard, nothing read, platform not
+    observed.
+  - **Verified without an engine:** a real docs-only run whose jobs were
+    all observed (toolchain `n/a`).
+  - **Log parsing:** the real log head of job 107340167293 parses to
+    `ubuntu-24.04` / `20260907.300.1`; the provisioner's `Version:` line
+    before the group is ignored; an unclosed group, a missing group and a
+    hostile value are refused. Through the fake API the collector follows
+    the storage redirect, cuts a 1 MB log that ignores the byte range, and
+    reads a missing log as unknown with a note.
+  - **Still grouped:** another commit, slower jobs, a Go patch release and
+    next week's image build.
+  - **Trend and baseline:** the trend keeps verified and unknown cohorts
+    apart; the baseline refuses an unverified, mixed, incomplete,
+    reordered or empty-field reviewed key, and the old key shape.
+  - **Re-run queue:** the real 34-minute re-run reads 33 s through the
+    attempt endpoint, unknown through the runs list, with elapsed (222 s)
+    and runner-minutes (3.1) unchanged. The collector reads the attempt
+    endpoint and still matches the runs list's identity.
+  - **Evidence source:** the report says `artifacts` or `metadata-only` and
+    names every document decoded. The log line cannot carry a workflow
+    command (tested with an injection payload).
+- `cmd/rootshard` is unchanged from main.
+- **Mutation proof.** Each of these was injected and failed a test:
+  1. the cohort dropped from the group key;
+  2. the full Go version keyed;
+  3. a re-run falling back to attempt 1's `created_at`;
+  4. a reviewed unknown cohort accepted;
+  5. the collector ignoring the attempt endpoint;
+  6. the attempt's `created_at` replacing identity;
+  7. the runner group ignored;
+  8. the image dropped from the key;
+  9. jobs on different images not detected;
+  10. a cohort verified from a subset of the shards' metadata;
+  11. an image accepted from a subset of the measured jobs;
+  12. a reviewed `mixed:` cohort accepted;
+  13. cohort field names and emptiness unchecked;
+  14. one job's image build presented as the run's;
+  15. the attempt queue read only from completed jobs;
+  16. a skipped job's stamp counted as a start;
+  17. shards on different toolchain lines verified, or accepted by a
+      reviewed baseline;
+  18. the image read from the root shards only;
+  19. the parser matching the provisioner group;
+  20. an unsafe image value accepted;
+  21. shard metadata matched to the scheduled shards by count, not index;
+  22. a `meta.json` accepted for a shard it does not name;
+  23. one shard's exact Go version presented as the run's when shards
+      differ by patch release;
+  24. runner labels joined without escaping their separators (including
+      the trend's `|`);
+  25. the observed image build dropped from the trend sample row;
+  26. a toolchain value carrying a key separator accepted as observed;
+  27. the run's exact toolchain stated from a partial shard-metadata read.
+- `golangci-lint` reports 0 issues; the root CI walls pass.
+
+### 18.7 Rollback
+
+Revert the closeout commits. The trend returns to `workflow|class|job set`
+groups and the old queue field, and job logs are no longer read.
+No gate, check, release step or permission depends on any of it. A `v2`
+report left in retention is refused by a reverted `v1` trend, which then
+measures that run from metadata.
+
+## 19. Conformance fixture reuse (first determinism slice)
+
+The determinism job runs the whole module unsharded, shuffled, twice in one
+package process (`go test -count=2 -shuffle=on ./...`). It is the longest job
+of the Deep PR gate and of main QA (§18.5), and the root package dominates it.
+
+**Evidence (Deep run 35999698583).** The determinism job took 14 min 51 s, of
+which the shuffled double run took 13 min 49 s. The root package took
+750.2 s; `internal/mcp/execution` 98.7 s.
+
+**What cost the time.** `assertResponseConforms`,
+`assertResponseConformsAdmin` and `mutatingResponseCase` each called
+`loadContract` for every subtest. `loadContract` calls
+`apicontract.LoadSpec`, which loads, parses and validates the entire OpenAPI
+document every time. Measured before any edit (4-core box, Go 1.26.6, one
+prebuilt test binary per side, fixed shuffle seeds):
+
+| Measure | Value |
+|---|---|
+| One `LoadSpec` | ≈183 ms (5×20 iterations, 174–190 ms) |
+| `loadContract` calls, root package, one pass | 129, of which 99 from per-subtest helpers |
+| Share of the `TestConformance_` family's CPU in `LoadSpec` | 72 % (CPU profile). Handlers and response/request validation do not show up among the top entries. |
+
+**Change (test helpers only).**
+
+- Each top-level test loads the spec once and passes it explicitly to its
+  subtests. `-count=2` runs each top-level test twice, so every invocation
+  still gets a freshly loaded fixture.
+- There is no global cache, no `sync.Once` and no `t.Parallel`, and no
+  production code changes.
+- The response check moved into `checkResponseConforms`, which returns the
+  violation instead of failing the test. The helpers call it and fail as
+  before.
+- Tests that load or modify their own specification are untouched: the
+  request-conformance tests, the drift and live gates, and `internal/apicontract`.
+
+**Sharing is safe, and pinned.**
+
+- `kin-openapi`'s `VisitJSON` only fills a package-level regex cache (a
+  `sync.Map` keyed by pattern); the schema setters that assign fields are
+  builders, not on the validation path.
+- `apicontract_shared_spec_test.go` validates every documented JSON response
+  status and request body against seven good and bad bodies (8,813
+  validations). It then requires the loaded document to marshal
+  byte-identically.
+- The same file interleaves conforming and malformed responses on one shared
+  spec, for both roles. The malformed cases are a wrong status, a wrong
+  content type, a wrong field type, a missing required field, an
+  undocumented field and a non-JSON body.
+- Three injected defects each fail those tests: schema validation off,
+  content-type check off, and a spec mutated during validation.
+- Every test and subtest name of the root package is unchanged; the full
+  `-v` result lists differ only by the two new tests.
+
+**Measured result** (same machine, toolchain and binaries; runs
+interleaved base/candidate).
+
+| Level | Baseline | Candidate | Change |
+|---|---|---|---|
+| Fixture: `loadContract` calls per `-count=2` run of the contract tests | 258 | 92 | −166 (≈30 s of loading at 183 ms) |
+| Family: `TestConformance_`, `-count=2`, 5 recorded seeds (101…505), median wall | 41.75 s | 14.31 s | −27.4 s (−66 %) |
+| Suite: root package, `-count=2 -shuffle=20260421`, one run each (test-binary time) | 906.2 s (917.3 s in an earlier run) | 889.5 s | ≈−17 s; two baseline runs differ by 11 s, so this single sample does not separate the saving from noise |
+| Gate: Deep determinism job on CI (job / shuffled double-run step / root package inside it) | 891 s / 829 s / 750.2 s (35999698583) | 884 s / 820 s / 744.6 s (36035947389, #1487) | −7 s / −9 s / −5.6 s; one sample each, within runner variation |
+
+**Reading the result.** The saving is real and large where it lives: 166
+fewer contract loads and −66 % on the conformance family. It is small at
+the package and gate level. The root package's double run gained ≈17 s
+locally and 5.6 s on CI, one sample each, both within run-to-run variation
+(≈11 s between two local baseline runs). So this change removes a named,
+repeated cost, but it is **not** a measurable determinism-gate speedup. It
+does not move PR completion time or p90, and Deep determinism stays the
+PR's longest job (§18.5).
+
+The gap between the family (−27 s) and the package (−6 to −17 s) is
+unexplained. Profile the whole root package before the next determinism
+slice rather than assume the next family behaves like this one.
+
+**Validation.**
+
+- Targeted race run of the contract tests, `-count=2 -shuffle=303`: passed.
+- Complete unsharded shuffled double run, `go test -count=2
+  -shuffle=20260421 ./...` with `TEST_SEED=20260421` (the CI seed): **passed**, all
+  110 packages, 1,000 s wall, the root package 941.6 s.
+- `-count=2` stays in one package process; nothing is split or sharded, so
+  state-leak detection across repetitions is unchanged.
+
+**Unrelated test race found, not fixed here.** The root-package-only
+candidate run failed once, in `TestChaos64_StaleServesDoNotStackRefreshes`:
+`used 1 resolver calls, want 2`. The failure is in the test, not in this
+change:
+
+- The test reads the resolver call counter right after its 100 stale serves
+  return. It never waits for the asynchronous refresh they started
+  (`refreshAsync`) to reach the resolver.
+- The log shows the refresh did call the resolver afterwards: its
+  `i/o timeout` line comes just before the failure.
+- Alone, the test passes 10/10 on both sides, and it passed in the full
+  run with the same seed and order.
+- The fix is to wait for the second call with the existing
+  `waitForResolverCalls` helper. It is recorded for the flaky-test
+  investigation and deliberately not bundled here.
+
+The first attempt at these runs also failed 16 support-bundle tests with
+`insufficient disk headroom`: the session's disk was full. Those runs were
+discarded and repeated after freeing space.
+
+**Side note.** `TestCredWall_LedgerStatesTheRealScanCount` counts source
+files on disk, so every new test file changes the MCP ledger's
+`SCANNED (N files)` claim. That is its design. This change moves it to
+2,605.
+
+## 20. Toolchain consistency: one pinned Go compiler
+
+**Before (main `6ec745d`).** Nothing tied the compiler that CI qualifies to
+the compiler that ships:
+
+| Path | How it chose Go | What it actually used |
+|---|---|---|
+| CI jobs (`setup-go-cache`, `go-version-file: go.mod`) | the `go 1.26.6` line | Go 1.26.6 (`Setup go version spec 1.26.6`) |
+| Release binaries (`build-release-binaries`) | same setup | Go 1.26.6 |
+| Production `builder` + `maintbuilder` | floating `golang:1.27-alpine` | Go 1.27.1: digest `8a5910f3…` resolved in main's publish (run 35880661983) and E2E (run 36041845052) logs, `go version go1.27.1` |
+| Maintenance E2E builder | same floating tag | Go 1.27.1 |
+| Agent module | `go 1.25` is its language minimum, not a compiler | built by whichever of the above ran it |
+
+So every image binary came from an unqualified compiler, and govulncheck
+scanned a different standard library from the one shipped.
+
+**Choice: Go 1.26.8.** It is the latest patch of the 1.26 line, published
+2026-08-28, the same day as 1.27.1 (Go module proxy
+`golang.org/toolchain` metadata). Security fixes ship to both supported lines
+together, and 1.26 stays supported until Go 1.28.
+
+Go 1.27.1 was tried first, because production already used it. Both modules
+`go vet` clean on it, and the agent's tests pass. But the Fast gate's pinned
+`golangci-lint` v2.5.0, even rebuilt with 1.27.1, cannot type-check the 1.27
+standard library:
+
+> could not load export data … export data version 4 is greater than maximum
+> supported version 2
+
+Taking 1.27 therefore means a lint-tool upgrade first, a separate change.
+Choosing 1.26.8 moves the shipped compiler back from 1.27.1 to the line CI
+qualifies. That is deliberate, not a match of numbers: after this change
+every shipped binary comes from the compiler the tests, race runs, lint and
+govulncheck ran on. The module minimums (`go 1.26.6`, agent `go 1.25`) are
+unchanged.
+
+**What changed.**
+
+- **One source.** The root `go.mod` has `toolchain go1.26.8`.
+  `actions/setup-go` reads that line, but only while `GOTOOLCHAIN` is not yet
+  `local`; it exports `GOTOOLCHAIN=local` itself afterwards. So no workflow
+  may set `GOTOOLCHAIN` before it runs.
+- **Pinned images.** `builder`, `maintbuilder` and the E2E builder use
+  `golang:1.26.8-alpine@sha256:8ac98ca534ac3f51e1f420a1dd2c15e74c75cfa0f23f3ad27eb5d7236c349a0c`.
+  Its index covers linux/amd64 and linux/arm64 (plus others), and the image
+  config says `GOLANG_VERSION=1.26.8`, `GOTOOLCHAIN=local`.
+- **Checks inside each builder stage.** Every stage:
+  - states `ENV GOTOOLCHAIN=local`;
+  - refuses to build unless `go env GOVERSION` equals the go.mod toolchain
+    line (`maintbuilder` reads the root go.mod, copied to
+    `/tmp/culvert-root.go.mod`);
+  - checks the compiler recorded in the built binary.
+- **CI checks.**
+  - `setup-go-cache` prints and verifies the compiler in every job that uses
+    it.
+  - `build-release-binaries` verifies the compiler recorded in the proxy and
+    agent binaries before they are hashed, attested or signed.
+- **The agent module deliberately has no `toolchain` line.** With the default
+  `GOTOOLCHAIN=auto`, one would send an older host Go to download 1.26.8, and
+  the installer's offline source-build fallback would lose its fast host path.
+  The agent's controlled builds are pinned through the root line and the
+  checks above.
+
+**The wall.** `toolchain_consistency_test.go` requires:
+
+- go.mod has exactly one stable `toolchain` line, not older than the `go`
+  line;
+- the agent go.mod has no toolchain line, or the same one;
+- every golang stage in every Dockerfile uses a digest-pinned
+  `golang:<X.Y.Z>-alpine` matching that version, the same image everywhere,
+  `ENV GOTOOLCHAIN=local`, the assertion before `go build`, and the
+  recorded-compiler check;
+- every `actions/setup-go` use reads `go-version-file: go.mod`, with no
+  literal version;
+- no workflow or action sets or assigns `GOTOOLCHAIN`;
+- the last step of both composite actions is the verification.
+
+It also fails if any Dockerfile that builds Go is not on its list. Sixteen
+negative controls feed it conflicting declarations derived from the real
+files, and each must be rejected:
+
+- a different compiler in go.mod, a missing toolchain line, a release
+  candidate;
+- a floating tag, a tag without a digest, another version's tag, divergent
+  digests between stages or between production and E2E;
+- a dropped `GOTOOLCHAIN=local`, compiler assertion or binary check;
+- an agent toolchain conflict;
+- `GOTOOLCHAIN` set in a workflow `env`, a literal `go-version`;
+- either composite action no longer verifying.
+
+The cross-build wall (§11) now reads the builder `FROM` lines from the file
+instead of restating the tag.
+
+**Validation (local, Go 1.26.8).**
+
+| Check | Result |
+|---|---|
+| Proxy + agent, linux/amd64 and linux/arm64, each built twice with the release flags | byte-identical per arch; `go version` reports `go1.26.8` for all four; arm64 binaries are static AArch64 ELF |
+| In-build assertion, as in the Dockerfile | passes on go1.26.8; exits 1 on go1.27.1 |
+| `go mod tidy -diff`, root and agent | clean |
+| `golangci-lint` v2.5.0 `--new-from-rev origin/main` | 0 issues on go1.26.8; typecheck failure on go1.27.1 (above) |
+| Agent module tests (`cd cmd/culvert-maint && go test ./...`) | pass on go1.26.8 and on go1.27.1 |
+| Full suite, `go test -count=1 -shuffle=20260421 ./...`, `GOTOOLCHAIN=local` go1.26.8 | **passed**: all 110 packages, 517 s wall (root package 466 s), no failures |
+
+**Validation (CI, PR #1488, head `c3d07f2`).** Docker image builds need
+BuildKit, which the authoring session cannot run, so they were qualified on
+the PR. Every compiler line in every job reads go1.26.8. The only other
+version in the logs is go1.23.7, the runner's Docker Engine, not a Culvert
+build.
+
+| Job | Evidence from its log |
+|---|---|
+| Deep · build image (production `Dockerfile`, amd64) | `builder`: `compiler: go1.26.8 (go.mod toolchain: go1.26.8)`, then `culvert: go1.26.8`; `maintbuilder`: the same assertion, then `/culvert-maint: go1.26.8` |
+| Fast · fmt + vet + build | `Setup go version spec 1.26.8`; `Go compiler: go1.26.8 (go.mod toolchain: go1.26.8, GOTOOLCHAIN=local)`; the `GOARCH=arm64` compile passed |
+| Agent-driven container update (maintenance E2E, `Dockerfile.e2e`) | host: the same `Go compiler:` line; image: `compiler: go1.26.8 (go.mod toolchain: go1.26.8)`, `culvert: go1.26.8` in both the v1 and v2 builds |
+| Deep · determinism (shuffle, count=2) | the same `Go compiler:` line; `build determinism OK (proxy)` and `(maint)`; root package passed in 636 s on the re-run |
+| Fast · go test -race (sharded), coverage floors, lint, govulncheck + gosec; the other maintenance and catalog E2E jobs | passed |
+
+The first determinism attempt failed in the root package after 752 s; every
+other package passed. Which test failed is not known: its block lies outside
+the retrievable log tail, and the log artifact's storage host is not
+reachable from the authoring session. Replaying the same commit with the
+same shuffle seed (`-count=2 -shuffle=1790277421444712900`, go1.26.8) passed
+locally in 904 s. The one permitted re-run passed. The failure is recorded
+here as unattributed and load-dependent; it was not fixed or suppressed.
+
+**Performance comparisons.** Every sample in §18.4 and §19 ran Go 1.26.6.
+The report's cohort key records the release line (`go1.26`) by design (§18.1),
+so 1.26.6 and 1.26.8 runs share a cohort; the exact version stays in each
+report's `toolchain` field. Any before/after comparison across this change
+must state both exact versions. No timing benefit is claimed: this is a
+consistency change.
+
+**Upgrade procedure** (one reviewable change):
+
+1. Pick the release from the Go module proxy (`golang.org/toolchain` list,
+   or go.dev/dl). Confirm the CI analysis tools support it: build the pinned
+   golangci-lint with the new compiler and run it. That is the step 1.27
+   fails today.
+2. Set `toolchain goX.Y.Z` in the root `go.mod`.
+3. Resolve the digest of `golang:X.Y.Z-alpine` (the manifest-list digest,
+   for example `docker buildx imagetools inspect golang:X.Y.Z-alpine`), check
+   that the index has linux/amd64 and linux/arm64, and replace the three
+   builder `FROM` lines with `golang:X.Y.Z-alpine@sha256:<digest>`.
+4. Run `go test -run 'TestToolchain_|TestDockerfileCrossBuild' .`. It fails
+   on any line left behind.
+5. Let the PR's gates qualify it; the logs name the compiler at every step.
+
+**Rollback.** Revert the PR. Images then build on the floating
+`golang:1.27-alpine` (Go 1.27.1 today) and CI on the go.mod `go` line (Go
+1.26.6), the unqualified split described above.
+
+**Remaining, outside this change.**
+
+- Adopting Go 1.27 needs the golangci-lint upgrade first.
+- The installer's operator-side source-build fallback
+  (`scripts/install.sh`, `CULVERT_GO_IMAGE` default `golang:1.25`, or host
+  Go) builds an unsigned local agent with its own compiler. It is kept as is,
+  so its air-gap behaviour is unchanged.
+- The runtime `alpine:3.24` image and its `apk` steps remain mutable (a
+  runtime-image refresh).
+- `api-contract.yml` and `pr-api-governance.yml` call `actions/setup-go@v7`
+  by tag. They read the same go.mod line, so their compiler agrees, but the
+  action itself is not SHA-pinned.
+
+## 21. Build-once image promotion: main candidate → tag release
+
+Baseline: main `0cf1245a4b75054612df0f51471ed16ce608f475` (#1488). Operator
+view: `docs/operator/release-publication-gating.md` §4a.
+
+### 21.1 Before
+
+| step | what it did |
+| --- | --- |
+| main `smoke` | built an amd64 image **from source** (compose), started it, discarded it |
+| main `docker` | built the multi-platform candidate, computed a *speculative* version (highest `v*` + 1) and baked it in |
+| main `auto-tag` | computed the version **again**, tagged it |
+| tag `smoke` | built another amd64 image from source |
+| tag `docker` | **rebuilt** the multi-platform image — non-reproducibly (floating `alpine:3.24`, `apk upgrade`, a monthly GeoIP URL) — and bound the version to *those* bytes |
+| Security gate `vuln-trivy-image` | scanned yet another image, built from source |
+
+So the digest a release published was never the digest that had been tested,
+`latest` (main build) and `X.Y.Z` (tag build) named different images, and two
+independent version computations could disagree.
+
+### 21.2 What changed
+
+**One candidate, one identity, one version.** The main push's `docker` job runs
+`candidate-plan-main.sh`: reuse the commit's verified candidate (a re-run never
+rebuilds), else build one. The version is decided there, once — the `v*` tag
+already naming the commit, else highest + 1 — and baked in. A new candidate is
+signed with a **candidate record** (in-toto, keyless, type
+`…/attestations/release-candidate/v1`) binding the full SHA, repository,
+`ci.yml`, `refs/heads/main`, `push`, producer run id + attempt, version,
+index digest, each required platform digest (read back from the registry) and
+the build inputs (toolchain pin, builder image digest, input hashes); then the
+discovery pointer `candidate-commit-<sha>` is written **last**, so a present
+pointer implies a signed record.
+
+**Qualification of the candidate itself** (`qualify-candidate`, new, main and
+tag): exactly `linux/amd64` + `linux/arm64`; source revision label; the compiler
+both binaries record == the go.mod pin, per platform; GOOS/GOARCH; `/app/VERSION`;
+the proxy's `/health` version and `culvert-maint -version` on **both** platforms
+(arm64 under QEMU); the compose smoke on amd64 (`--no-build`); trivy on both
+platforms with the Security gate's policy. On main a pass is signed as a
+**qualification record**. The source-built `smoke` job is removed.
+
+**The tag run reuses** (`candidate-plan-tag.sh`): version binding → published
+exact alias → main candidate (record **and** qualification verified against the
+producer identity at the tag's full SHA, version == tag, compiler == pin,
+platforms == live index) → owner-authorized rebuild
+(`RELEASE_REBUILD_AUTHORIZED_TAG` == this exact tag) → refuse with the recovery.
+The tag run then re-qualifies the digest with a fresh vulnerability DB, and
+`catalog-pipeline` signs it **in the tag context** before verifying the release
+identity. `release_identity.env` is unchanged: it still accepts only `ci.yml` on
+`v*` tags, and a wall fails if it ever accepts the main identity.
+
+**auto-tag consumes the version** (`decide-release-version.sh`, in a cross-run
+`release-version-decision` lock): re-reads the remote; no-op if the version
+already names the commit; refuses if the commit already carries another
+version, if the version names another commit, or if a higher version exists;
+the tag push is the atomic step and a concurrent same-commit winner is success.
+
+**Every public act needs qualification**: `auto-tag`, `promote-image`,
+`catalog-pipeline`, `release`, `promote-release-channels` and `publish-release`
+depend on `qualify-candidate` with no status-function escape. The graph stays a
+DAG (walled).
+
+**Compiler check against the pin** (the §20 gap): the Dockerfile's post-build
+binary checks (proxy, agent, E2E) now compare the recorded compiler with the
+go.mod `toolchain` line instead of `go env GOVERSION`, and the toolchain wall
+rejects any GOTOOLCHAIN assignment in a builder stage other than the one
+`ENV GOTOOLCHAIN=local` (ENV, ARG, or a `RUN GOTOOLCHAIN=…` prefix). The agent's
+offline source-build exception is unchanged (its go.mod still has no toolchain
+line; the image stage reads the root pin from a copy).
+
+Unchanged: standalone release binaries and `verify-reproducible`, the evidence
+predicate, write-once exact aliases (both on one digest), channel anti-rollback,
+draft/final barriers, published-release protection, resign-only tag dispatch,
+R2, and the Pages retirement.
+
+### 21.3 Why this shape
+
+* **Attestations, not names.** A registry tag can be moved by any job with
+  `packages: write`, and an artifact or run output is not durable across runs.
+  A keyless attestation's certificate is issued by Fulcio to the exact
+  workflow, ref, event and commit, so cosign's certificate flags do the trust
+  work; the pointer only finds the digest.
+* **Two records.** The build is recorded before qualification; qualification is
+  recorded only after it passes. A tag run needs both, so a failed or skipped
+  qualification can never be released, even by a hand-pushed tag.
+* **The main identity is not the release identity.** Accepting a main
+  signature as a release signature would turn every main build into a
+  potential release. The tag run signs the digest itself instead.
+* **Reuse order.** A bound or published version is final: no attestation, and
+  no authorization, may substitute other bytes under it.
+* **Embedded version by execution.** `-trimpath` makes Go omit `-ldflags` from
+  the build info (measured: a `-trimpath` binary lists GOOS/GOARCH but no
+  `-ldflags` line), so the `-X main.version` value is not readable statically.
+  Running the binaries is also the stronger claim.
+
+### 21.4 Eliminated build executions (per release: one main push + its tag run)
+
+Measured baseline (6 most recent successful tag runs v1.0.237–v1.0.242 and
+3 successful main pushes; all attempt 1):
+
+| build | before | after | baseline duration (median) |
+| --- | --- | --- | --- |
+| main compose smoke, amd64 from source | 1 | 0 (candidate pulled) | smoke job 81 s |
+| main multi-platform candidate | 1 | 1 (0 on a re-run: reused) | build step 238 s |
+| tag compose smoke, amd64 from source | 1 | 0 | smoke job 79 s |
+| tag multi-platform rebuild | 1 | 0 (only an owner-authorized rebuild) | docker job 199.5 s, build step 151.5 s |
+
+Image builds in `ci.yml` per release: **4 → 1**. Not touched: the Security
+gate's source-built scan image (main and tag pushes) and QA's infra-compose
+image (§21.8).
+
+**Latency is not claimed.** The tag run's serial chain loses the compose job
+and the image build (≈ 280 s of job time in the baseline) but gains
+`qualify-candidate` (pulls, arm64 execution under QEMU, two trivy scans) and
+candidate verification in `docker`. Neither has run on a runner yet; the net
+effect is measured on the first normal release (§21.7), with the §18 caveat
+that the Go 1.26.8 cohort still has few samples.
+
+### 21.5 Validation (local, disposable, nothing published)
+
+| check | result |
+| --- | --- |
+| `.github/scripts/test/candidate-promotion-cases.sh` (driven by `TestCandidatePromotion_Behaviour`) — mocked registry, Sigstore, git, go | **52/52** — handoff, retry reuse, partial publication (binding wins; published alias adopted), superseded and concurrent candidates, wrong identity / version / digest / subject, missing platform, unavailable evidence (registry and Sigstore), failed and absent qualification, manual and pre-rollout tags with and without authorization, the running candidate reporting a wrong version or an unhealthy status, auto-tag conflicts and races |
+| every refusal case asserts its **reason** | added after the first run exposed a seam bug (`DOCKER_BIN` unset) that made unrelated refusals pass |
+| mutation proof, scripts | 6 injected defects (binding checked after the candidate, qualification skipped, authorization not bound to the tag, subject digest unchecked, overtaken version not checked, unverifiable pointer rebuilds) — each fails ≥ 1 case |
+| workflow walls (`release_build_once_promotion_test.go`) | pass; 3 injected defects (qualification dropped from the public jobs' needs, an unconditional build step, signing after verification) each fail |
+| real BuildKit index (`ghcr.io/kidcarmi/culvert:latest`) through `index_platforms` | both platforms parsed, attestation manifests excluded, no violations |
+| Dockerfile compiler snippet | passes a go1.26.8 binary, refuses a go1.25.0 one |
+| toolchain wall | 20 negative controls pass, incl. the 4 new ones (active-compiler comparison, later `ENV`, `RUN` prefix, `ARG`) |
+| existing release-gating walls + cases, actionlint | pass; actionlint shellcheck findings 10 → 9 |
+| full suite, `go test -count=1 -shuffle=20260925 ./...`, go1.26.8 | **passed**: all 110 packages, 0 failures (root package 527 s) |
+| golangci-lint v2.5.0 `--new-from-rev origin/main` | 0 issues |
+| cosign flags | read from the pinned cosign v3.0.6 source: `verify-attestation` accepts the `--certificate-github-workflow-*` flags and prints the verified DSSE payloads; `attest` and `verify-attestation` both default to the new bundle format |
+
+### 21.6 Migration and recovery
+
+* **Nothing to do for normal releases.** The first main push after merge builds
+  a candidate with a record; its auto-tag and tag run use it.
+* **Tags created before this change** carry no candidate record. A re-run of
+  one reuses its existing `candidate-vX.Y.Z` binding or published alias; one
+  that never got that far refuses — set `RELEASE_REBUILD_AUTHORIZED_TAG=<tag>`,
+  re-run, clear it.
+* **Hand-pushed tags** whose commit's candidate carries another version refuse
+  the same way (the image embeds the other version).
+* **Rollback:** revert the PR. The tag run then rebuilds again; bindings written
+  meanwhile are still honoured by `resolve-release-candidate.sh`.
+
+### 21.7 Live acceptance
+
+Not exercised by this change, because it would need real tags, public channels
+or the live catalog: keyless `cosign attest` / `verify-attestation` against
+GHCR from a runner; the arm64 execution under QEMU on a runner; the tag run
+reusing a real main candidate and signing it in the tag context; the catalog
+verify on that signature; the first main re-run reusing a candidate; and the
+latency of the new chain. The first merge's main push and the next normal
+release are that acceptance; failures there are fail-closed (nothing public
+moves) and recoverable by the §21.6 paths.
+
+#### 21.7.1 First main push: CI run 36111817278 (2026-09-25, `87acf31`)
+
+[Run 36111817278](https://github.com/KidCarmi/Culvert/actions/runs/36111817278),
+attempt 1, the push of #1496's merge commit.
+
+| Check | Result | Evidence |
+| --- | --- | --- |
+| Candidate built once, version decided once | **passed** | `docker` job 08:16:00–08:20:18 (build step 192 s); plan `mode=build`, version `v1.0.244` (highest tag `v1.0.243` + 1) |
+| Index and platform digests | **passed** | index `sha256:5094ab1f…6f057b9a`; `linux/amd64` `sha256:5bcc9d3a…d753dd65`, `linux/arm64` `sha256:901af903…ba12fc149` (read back from GHCR; the record carries the same) |
+| Candidate record signed, pointer written last | **passed** | record step 08:19:55–08:20:04 logged the predicate (SHA, run 36111817278 attempt 1, version, index + platform digests, build inputs); `candidate-commit-87acf31c…` → the index, pushed after the attestation. Three Sigstore bundles hang off the index (two image signatures, one record) |
+| Record verification | **not exercised**: this run built, it did not reuse | verified only by a re-run or a tag run |
+| Qualification, amd64 contents | **passed** | proxy and agent record `go1.26.8`, `linux/amd64` |
+| Qualification, arm64 and everything after | **FAILED: defect in #1496** | `cannot overwrite digest sha256:5094ab…` (job 107998632374) |
+| Fail-closed | **passed** | `Auto-Tag Release`, `Release`, both promote jobs and the catalog gate skipped; no `v1.0.244` tag; `latest`/`main` still `sha256:1f1421aa…` |
+
+**The defect.** Qualification pulled `<image>@<index digest>` once per
+platform. The runners' Docker (29.x) uses the classic image store, which
+keeps one image per digest reference, so the second platform's pull fails.
+The same pattern was in `candidate-run-check.sh` and the compose-smoke step.
+The mocked cases passed because the docker mock did not model the store.
+Reproduced locally with the same error on Docker 29.3.1 (classic store)
+against a local registry serving a two-platform index.
+
+**The fix.** Every pull, create and run of one platform uses that platform's
+own manifest digest, read from the verified index (`platform_digest` in
+`lib/candidate.sh`, `candidate-platform-ref.sh` for the compose step). The
+identity chain is unchanged: the index digest is still the bound, recorded
+and signed value, and the platform digests come from it. Regression coverage, both
+halves failing on the #1496 scripts with the main-run error:
+
+* **Real Docker** (`candidate_qualification_docker_test.go`): an in-process,
+  stdlib-only registry serves a two-platform candidate index (static
+  binaries that answer `-version` and `/health`, the revision label, the
+  version file). Against the real daemon, the test first asserts that the
+  classic store still refuses a second platform under one index digest (the
+  original failure, so a pass cannot mean "this daemon never had the
+  problem"). It then runs the real scripts in `qualify-candidate`'s order:
+  contents on both platforms, execution on amd64 and arm64 (under QEMU when
+  a binfmt handler exists; otherwise the arm64 pull must still succeed),
+  then the compose reference, pull and tag. It skips without a daemon; the
+  CI runners have one. Verified locally on Docker 29.3.1 (classic store) with
+  QEMU: passes fixed; fails with `cannot overwrite digest` when either
+  pre-fix script is restored, with and without QEMU.
+* **Mocked cases**: the docker mock now models the store, and a sequence case
+  runs contents, both run checks and the compose reference against one
+  store.
+* A workflow wall forbids the compose step from pulling the index digest.
+
+**Observed, harmless:** cosign v3.0.6 annotates every bundle it attaches
+through a signing config as `dev.sigstore.bundle.predicateType:
+https://sigstore.dev/cosign/sign/v1`, including `cosign attest` bundles
+(`attest.go` passes `CosignSignPredicateType` to the new-bundle writer). The
+signed statement inside keeps the real predicate type, and `verify-attestation`
+reads every referrer and filters on the verified statement
+(`AttestationToPayloadJSON`), not on the annotation.
+
+**Recovery.** Do not re-run 36111817278: a re-run executes the workflow at
+`87acf31` and fails the same way. The fix's own main push builds and
+qualifies a new candidate for its merge commit, which gets the next version
+(`v1.0.244` is not taken). The `87acf31` candidate stays unqualified and
+unreleased.
+
+**Still pending (natural runs only):** the fixed qualification on a runner
+(both platforms, compose smoke, trivy, qualification record); record
+verification on a reuse (a main re-run or a tag run); the tag run's reuse,
+tag-context signing and catalog digest check; retry reuse; net latency.
+All but retry reuse have since passed on the first release (§21.7.2).
+
+#### 21.7.2 Fixed chain, first release: main 36122288997 → tag v1.0.244 (2026-09-25, `b59c054`)
+
+The push of #1497's merge commit built and qualified a candidate, auto-tag
+cut `v1.0.244` from it, and the tag run published that exact digest. Every
+result below is from a natural run; nothing was re-run or dispatched to get
+it.
+
+| Check | Result | Evidence |
+| --- | --- | --- |
+| Candidate built once, version decided once | **passed** | [main run 36122288997](https://github.com/KidCarmi/Culvert/actions/runs/36122288997), `docker` job 10:09:48–10:14:24 (276 s); version `v1.0.244` |
+| Index and platform digests | **passed** | index `sha256:df4ff54daea8e13aff733d0bec6c34d961849393da142cf65de3f85d0db360b0`; `linux/amd64` `sha256:a6c9d526…`, `linux/arm64` `sha256:fc500d10…` |
+| Qualification on a runner, both architectures | **passed** | `Qualify candidate image` 81 s: both platforms pulled by their own manifest digest, `culvert` executed under `qemu-aarch64` (runner egress audit), two trivy scans, compose smoke `--no-build`; qualification record signed with 9 checks |
+| Auto-tag consumes the candidate's version | **passed** | `Auto-Tag Release` created `v1.0.244` at `b59c054` (412 s, most of it waiting for the QA and Security verdicts) |
+| Tag run reuses, does not rebuild | **passed** | [tag run 36123679563](https://github.com/KidCarmi/Culvert/actions/runs/36123679563), `docker` 47 s with Build, QEMU and signing skipped: "v1.0.244 → sha256:df4ff54d… (source: main-candidate, record + qualification verified, producer run 36122288997/1) — reused, not rebuilt." |
+| Record verification on reuse | **passed** | the same notice: the candidate record and qualification record verified before reuse |
+| Re-qualification with a fresh DB | **passed** | `Qualify candidate image` 58 s on the tag run |
+| Tag-context signing before the release-identity verify | **passed** | catalog gate (135 s) ran "Sign the release digest in the tag context", then "Verify pushed image signature" |
+| Catalog digest consistency | **passed** | the catalog gate's `list_digest` check matched the pushed digest; the published release `v1.0.244` carries `culvert-release-catalog-v1.0.244.tar.gz`; the tags `v1.0.244`, `1.0.244`, `latest`, `main`, `candidate-v1.0.244` and `candidate-commit-b59c054c…` all resolve to `df4ff54d…` |
+| Reproducibility, SLSA, publication | **passed** | five reproducible-build jobs, SLSA provenance, `Publish (post-evidence)` at 10:34:41; R2 publisher [36124741514](https://github.com/KidCarmi/Culvert/actions/runs/36124741514) and [catalog verify 36124921450](https://github.com/KidCarmi/Culvert/actions/runs/36124921450) passed |
+| Retry reuse (a main re-run reusing its own candidate) | **pending** | not observed on a natural run; not forced |
+
+**Timing (one sample, not a baseline).**
+
+| | Before (§21.4 baseline window) | This release |
+| --- | --- | --- |
+| Tag run, created → done | median 861 s (v1.0.237–v1.0.243, 7 runs, 840–887 s) | **701 s** |
+| Tag `docker` job | median 199.5 s (build step 151.5 s) | **47 s** (no build) |
+| Tag compose smoke | 79 s | 0 (folded into qualification, 58 s) |
+| Main push, created → done | 850–927 s (4 recent successful pushes) | 928 s |
+
+The main push's end is set by auto-tag waiting on the QA and Security
+verdicts, not by the build, so it is unchanged within noise. The tag run lost
+its rebuild and its compose job and gained the re-qualification. One sample
+does not make a latency claim; §18's rule applies.
+
+### 21.8 Not in this change
+
+* `security-release-gate.yml` still scans an image it builds from source (as
+  release evidence, on main and tag pushes), and QA's infra-compose job builds
+  its own. Pointing them at the candidate needs cross-workflow digest handoff.
+* The runtime base (`alpine:3.24`) and the GeoIP download stay unpinned, so a
+  rebuild is still not reproducible — which is exactly why the version binds a
+  digest rather than a build.
