@@ -418,6 +418,20 @@ func validCDRFailMode(fm string) bool {
 	return fm == "" || fm == "open" || fm == "closed"
 }
 
+// validIPFilterMode validates the "security.ip_filter_mode" / -ip-filter-mode
+// value shared by the YAML (validateEnums) and CLI (loadFileConfigAndFlags,
+// main.go) paths: "" (disabled), "allow" (allowlist), and "block" (blocklist)
+// are the only accepted values — the same set IPFilter.Allowed (security.go)
+// treats as meaningful. Any other value reaching IPFilter.SetMode is treated
+// as corruption and DENIES ALL proxied traffic (fail closed) with no error at
+// the time it is set — that fail-closed behavior exists for state that can be
+// corrupted after the fact (a config-version rollback, a CP->DP snapshot), not
+// as a substitute for validating operator input up front. Mirrors
+// validCDRFailMode.
+func validIPFilterMode(mode string) bool {
+	return mode == "" || mode == "allow" || mode == "block"
+}
+
 // validCDRServerFingerprint validates the "cdr.server_fingerprint" /
 // -cdr-server-fingerprint value shared by the YAML (validateCDR) and CLI (initCDR,
 // main.go) paths: empty (unset) is valid; otherwise it must decode to
@@ -447,6 +461,21 @@ func validCDRServerFingerprint(fp string) string {
 	// failure is loud and immediate regardless of which path supplied it.
 	if _, err := hex.DecodeString(fp); err != nil {
 		return "expected 64 hex chars (SHA-256), got non-hex characters"
+	}
+	return ""
+}
+
+// validCDRTimeoutSec validates the "cdr.timeout_sec" / -cdr-timeout-sec value
+// shared by the YAML (validateCDR) and CLI (initCDR, main.go) paths: 0
+// (unset — defaults to cdrDefaultTimeout, cdr.go) is valid; otherwise it must
+// be at least 30 (Sluice's own per-file processing cap — a shorter client
+// deadline aborts before Sluice can finish scanning an ordinary file).
+// Returns "" when valid, else a message describing why (without the
+// "cdr.xxx:" / "-cdr-timeout-sec" field prefix, which each caller supplies
+// itself).
+func validCDRTimeoutSec(t int) string {
+	if t != 0 && t < 30 {
+		return fmt.Sprintf("must be >= 30 (Sluice's own cap), got %d", t)
 	}
 	return ""
 }
@@ -534,7 +563,7 @@ func (fc *FileConfig) validateEnums() []string { //nolint:cyclop // flat switch-
 	}
 
 	// ip_filter_mode
-	if m := fc.Security.IPFilterMode; m != "" && m != "allow" && m != "block" {
+	if m := fc.Security.IPFilterMode; !validIPFilterMode(m) {
 		errs = append(errs, fmt.Sprintf("security.ip_filter_mode: must be \"allow\" or \"block\", got %q", m))
 	}
 
@@ -644,8 +673,8 @@ func (fc *FileConfig) validateCDR() []string { //nolint:cyclop // flat switch-st
 	if m := fc.CDR.DefaultMode; m != "" && m != "ENFORCE" && m != "REPORT_ONLY" && m != "BYPASS_WITH_REPORT" {
 		errs = append(errs, fmt.Sprintf("cdr.default_mode: must be ENFORCE | REPORT_ONLY | BYPASS_WITH_REPORT, got %q", m))
 	}
-	if t := fc.CDR.TimeoutSec; t != 0 && t < 30 {
-		errs = append(errs, fmt.Sprintf("cdr.timeout_sec: must be >= 30 (Sluice's own cap), got %d", t))
+	if msg := validCDRTimeoutSec(fc.CDR.TimeoutSec); msg != "" {
+		errs = append(errs, "cdr.timeout_sec: "+msg)
 	}
 	if s := fc.CDR.MaxFileSizeMB; s < 0 {
 		errs = append(errs, fmt.Sprintf("cdr.max_file_size_mb: must be >= 0, got %d", s))
