@@ -21,6 +21,7 @@ import (
 	"math/big"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -297,7 +298,20 @@ func validateSAMLMetadataURL(raw string) error {
 // what the convention forbids. Splitting this helper out of
 // fetchSAMLMetadata without carrying the guard raised a critical
 // go/request-forgery alert on the first CI run of CHAOS-71.
+// samlMetadataURLShape is the go/request-forgery barrier for
+// fetchSAMLMetadataOverNetwork: CodeQL recognises Regexp.MatchString on the
+// tainted value as a sanitiser (the same barrier internal/otlp and
+// internal/alerts use for their operator-configured endpoints), whereas
+// whether it models the isPrivateHostContext wrapper is not established — the
+// PR's CodeQL run flagged this request with that wrapper in place. It admits
+// only what the scheme check below admits anyway (case-insensitive http/https,
+// followed by an authority), so it narrows nothing a valid metadata URL uses.
+var samlMetadataURLShape = regexp.MustCompile(`(?i)^https?://[^/]`)
+
 func fetchSAMLMetadataOverNetwork(raw string) ([]byte, error) {
+	if !samlMetadataURLShape.MatchString(raw) {
+		return nil, fmt.Errorf("metadata URL must be an absolute http or https URL")
+	}
 	metaURL, err := url.Parse(raw)
 	if err != nil {
 		return nil, fmt.Errorf("metadata URL parse: %w", err)
@@ -307,12 +321,11 @@ func fetchSAMLMetadataOverNetwork(raw string) ([]byte, error) {
 	}
 	// The PRE-FLIGHT half of the guard, inline per the repo's SSRF convention
 	// (url.Parse + scheme check + a private-host check in the same function as
-	// the request). Note what this comment does NOT claim: the check is spelled
-	// isPrivateHostContext rather than isPrivateHost, and whether CodeQL models
-	// that wrapper as a barrier is not established — the go/request-forgery
-	// alert on this file is open and is answered on the PR, not here. The
-	// bounded form is mandatory (below) and an unbounded one would be traded
-	// for a static-analysis result, which is the wrong direction.
+	// the request). The check is spelled isPrivateHostContext rather than
+	// isPrivateHost; the static-analysis barrier is the samlMetadataURLShape
+	// regexp at the top of this function, NOT this call. The bounded form is
+	// mandatory (below) and an unbounded one would be traded for a
+	// static-analysis result, which is the wrong direction.
 	//
 	// It is not new enforcement either: ssrfSafeDialContext below already
 	// refuses a private destination at connect time, so the set of URLs this

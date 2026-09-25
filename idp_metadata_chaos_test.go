@@ -958,3 +958,44 @@ func TestChaos71_StructuralValidatorClassifiesOnlyLiterals(t *testing.T) {
 		}
 	}
 }
+
+// CodeQL go/request-forgery (PR #1485): the SAML metadata fetch carries a
+// Regexp.MatchString barrier on the raw URL, ahead of url.Parse, and that
+// barrier admits exactly the shapes the scheme check admits.
+func TestChaos71_SAMLMetadataURLShapeBarrier(t *testing.T) {
+	for _, ok := range []string{
+		"https://idp.example.com/metadata",
+		"http://idp.example.com:8080/saml/metadata",
+		"HTTPS://IDP.example.com/metadata",
+	} {
+		if !samlMetadataURLShape.MatchString(ok) {
+			t.Errorf("barrier refused a valid metadata URL %q", ok)
+		}
+	}
+	for _, bad := range []string{
+		"", "ftp://idp.example.com/m", "file:///etc/passwd", "https:///path-only",
+		"//idp.example.com/m", "idp.example.com/metadata", "gopher://x",
+	} {
+		if samlMetadataURLShape.MatchString(bad) {
+			t.Errorf("barrier admitted %q", bad)
+		}
+		if _, err := fetchSAMLMetadataOverNetwork(bad); err == nil {
+			t.Errorf("fetch accepted %q", bad)
+		}
+	}
+	src, err := os.ReadFile(filepath.Join(pkgSourceDir(), "auth_saml.go"))
+	if err != nil {
+		t.Fatalf("read source: %v", err)
+	}
+	body := string(src)
+	start := strings.Index(body, "func fetchSAMLMetadataOverNetwork")
+	if start < 0 {
+		t.Fatal("fetchSAMLMetadataOverNetwork not found")
+	}
+	fn := body[start:]
+	guard := strings.Index(fn, "samlMetadataURLShape.MatchString(raw)")
+	parse := strings.Index(fn, "url.Parse(raw)")
+	if guard < 0 || parse < 0 || guard > parse {
+		t.Fatal("the regexp barrier must run on raw BEFORE url.Parse, in the same function as the request")
+	}
+}
