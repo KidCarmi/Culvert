@@ -106,11 +106,12 @@ Rate-limited to **one line per minute**, with the cumulative count on every
 line — a mitigation for a write-amplification defect must not be one itself:
 
 ```
-OVERSIZE_HOST HTTP 10.4.2.19 {bytes=1048310 limit=261 total=4127 action=block}
+OVERSIZE_HOST HTTP 10.4.2.19 {tier=raw bytes=1048310 limit=1024 total=4127 action=block}
 ```
 
-The line names the **protocol**, the **client IP**, the **length** and the
-**running total**. It deliberately does **not** echo the authority, not even a
+The line names the **protocol**, the **client IP**, the **tier** that fired,
+the **length**, that tier's **limit** (1024 for `raw`, 253 for `canonical`)
+and the **running total**. It deliberately does **not** echo the authority, not even a
 prefix: a copy of the value would reopen the amplification on the rate-limited
 path, and for a name past 253 bytes the length is the only fact that
 distinguishes a probe from a broken client.
