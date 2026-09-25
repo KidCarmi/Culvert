@@ -891,3 +891,57 @@ func TestChaos71_OIDCDNSOutageIsAnsweredFromCache(t *testing.T) {
 		t.Fatalf("a cache-served compile must be reported stale, got %+v", st)
 	}
 }
+
+// The structural validator's ONLY security-relevant job is classifying an IP
+// LITERAL without a resolver, and the direction it must not get wrong is
+// admitting a private one. IPv4-mapped IPv6 is the form that gets this wrong in
+// the fail-open direction (the same class the shared prefixSet normaliser in
+// security.go carries a differential test for), so it is pinned explicitly
+// rather than left to the reader of ssrf.PrivateIP.
+//
+// A non-literal host is deliberately NOT this function's problem and is pinned
+// as such: obfuscated forms (decimal, octal, abbreviated) are resolved by the
+// guards downstream, whose refusal is based on the RESOLVED address and is
+// therefore robust to spelling in a way no string check can be. Go's pure
+// resolver rejects them outright; cgo's getaddrinfo accepts them and the
+// pre-flight then refuses them by resolved address. Both are closed, which is
+// why this gate asserts only that they are passed ON rather than misclassified.
+func TestChaos71_StructuralValidatorClassifiesOnlyLiterals(t *testing.T) {
+	private := []string{
+		"https://[::ffff:10.0.0.1]/x",            // IPv4-mapped, RFC1918
+		"https://[::ffff:127.0.0.1]/x",           // IPv4-mapped, loopback
+		"https://[0:0:0:0:0:ffff:192.168.1.1]/x", // IPv4-mapped, long form
+		"https://[::ffff:a00:1]/x",               // IPv4-mapped, hex spelling
+		"https://[fc00::1]/x",                    // IPv6 unique-local
+		"https://[fe80::1]/x",                    // IPv6 link-local
+		"https://[::1]/x",                        // IPv6 loopback
+		"https://169.254.169.254/x",              // cloud metadata
+	}
+	for _, u := range private {
+		if err := validateExternalURLStructure(u); err == nil {
+			t.Errorf("a private IP literal must be refused without a resolver: %q", u)
+		}
+	}
+
+	// Public literals must still pass — refusing them would break an operator
+	// who addresses their IdP by address.
+	for _, u := range []string{"https://93.184.216.34/x", "https://[2606:2800:220:1::1]/x"} {
+		if err := validateExternalURLStructure(u); err != nil {
+			t.Errorf("a public IP literal must pass structurally: %q: %v", u, err)
+		}
+	}
+
+	// Non-literals are passed on, whatever they are spelled like. The verdict
+	// belongs to the resolving guards, not to this function.
+	for _, u := range []string{
+		"https://2130706433/x", // decimal 127.0.0.1
+		"https://0177.0.0.1/x", // octal
+		"https://127.1/x",      // abbreviated
+		"https://localhost/x",
+		"https://idp.example.com/x",
+	} {
+		if err := validateExternalURLStructure(u); err != nil {
+			t.Errorf("a NAME is not this function's verdict to make: %q: %v", u, err)
+		}
+	}
+}

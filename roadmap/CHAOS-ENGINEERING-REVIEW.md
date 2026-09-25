@@ -7195,7 +7195,7 @@ a cache keyed on one would be a seeding surface.
 
 ### Gates
 
-`internal/idpmeta/idpmeta_test.go` (12) and `idp_metadata_chaos_test.go` (26
+`internal/idpmeta/idpmeta_test.go` (12) and `idp_metadata_chaos_test.go` (27
 functions). Eight DEFECT gates were verified failing against the reintroduced
 pre-fix shape and the four security gates plus three controls pass against it —
 the correct signature, since the security properties are new rather than
@@ -7263,6 +7263,20 @@ shape (`OIDCDNSOutageIsAnsweredFromCache`,
 `InlineTransitionClearsAStaleEpisode`), with
 `StructuralValidatorDecidesWithoutAResolver` as the wall that keeps the
 structural validator from being "fixed" back into a resolver.
+
+The new validator's one security-relevant job is classifying an IP LITERAL with
+no resolver, and the direction it must not get wrong is admitting a private one,
+so `StructuralValidatorClassifiesOnlyLiterals` pins the IPv4-mapped IPv6 forms
+explicitly — the same fail-open reading that `security.go`'s shared `prefixSet`
+normaliser carries a differential test for, verified failing here against the
+naive "16 bytes means IPv6" shape. It also pins what the function deliberately
+does NOT decide: a decimal, octal or abbreviated host (`2130706433`,
+`0177.0.0.1`, `127.1`) is passed on, because the guards downstream refuse on the
+RESOLVED address and are therefore robust to spelling in a way no string check
+is. Verified in both directions rather than assumed: Go's pure resolver rejects
+all three outright, cgo's `getaddrinfo` accepts them and the pre-flight then
+refuses them by resolved address (`localhost` measured as *"resolves to private
+address 127.0.0.1"*). Both closed.
 
 ### Register rows
 
