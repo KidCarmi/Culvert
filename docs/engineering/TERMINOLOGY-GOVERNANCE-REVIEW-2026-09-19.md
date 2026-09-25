@@ -34,11 +34,12 @@ larger, deliberately deferred branding call): here the fix required no branding 
 the component already disagreed with **itself** — its "TLS / Decryption" fieldset's own legend, its own
 inline comment (`RuleEditor.tsx:5`, "TLS/decryption controls"), and its own sibling help text ("inline TLS
 toggles below," line 455) all said "TLS," and only the two visible labels (one in that fieldset, one in
-the dialog's separate "Logging" fieldset) said "SSL." Every other page in the same
-frontend that discusses this feature in prose (`DecryptionPage.tsx`, `AutoExclusionsTab.tsx`,
-`DestinationPrivacyTab.tsx`, `api/decryption.ts`, `api/types.gen.ts`) also says "TLS inspection." The two
+the dialog's separate "Logging" fieldset) said "SSL." The decryption-specific surfaces enumerated
+below (`DecryptionPage.tsx`, `AutoExclusionsTab.tsx`, `DestinationPrivacyTab.tsx`, `api/decryption.ts`,
+`api/types.gen.ts`) also say "TLS inspection" — but not every page does: `DecryptionProfilesPage.tsx`,
+the PAC bypass explainer and the component gallery still say "SSL" (listed in the next paragraph). The two
 outlier labels were changed to match — "TLS action" / "TLS Inspect" — bringing the component back into
-agreement with itself and with the rest of the new frontend, without touching the wire field name
+agreement with itself and with those enumerated TLS-using surfaces, without touching the wire field name
 (`sslAction` stays `sslAction`, per the API-stability rule below), the legacy GUI (`static/index.html`,
 which consistently says "SSL" and is out of scope here), or the T-13 residual's larger question.
 
@@ -76,12 +77,13 @@ unchanged and the broader SSL-vs-TLS branding question (T-13 residual) remains o
   - Contrast within the *same file*: `RuleEditor.tsx:5` (comment, "TLS/decryption controls") and
     `RuleEditor.tsx:455` (help text, "inline TLS toggles below," itself inside the "TLS / Decryption"
     fieldset) both already said "TLS."
-  - Contrast within the *same frontend*: `DecryptionPage.tsx:40`, `AutoExclusionsTab.tsx:597`,
+  - Contrast with other surfaces of the *same frontend* (not all of them — see "Observed, not fixed"
+    below for the ones that still say "SSL"): `DecryptionPage.tsx:40`, `AutoExclusionsTab.tsx:597`,
     `DestinationPrivacyTab.tsx:790,820`, `api/decryption.ts:8`, and `api/types.gen.ts:4339` all say "TLS
     inspection" in prose.
 - **Recommended canonical name (for this fix's scope):** "TLS" — the "TLS / Decryption" fieldset's own
-  legend, the file's own surrounding comments/help text, and the rest of the frontend's prose all already
-  agreed on it; the two "SSL"-labeled controls were the outliers, not the legend.
+  legend, the file's own surrounding comments/help text, and the enumerated TLS-using surfaces above all
+  already agreed on it; the two "SSL"-labeled controls were the outliers, not the legend.
 - **Why the current naming was problematic:** an admin editing a policy rule would read a fieldset
   labeled "TLS / Decryption," configure an "SSL action" inside it, then scroll to an unrelated-looking
   "Logging" fieldset and be told that behavior needs "SSL Inspect" — three names (two of them "SSL," one
@@ -180,13 +182,13 @@ than left for a future review pass to catch.
 ## Stop-Condition Assessment
 
 Terminology is **not** fully consistent, but this pass found only one small, genuinely new,
-zero-compatibility-risk issue in a ~25-day, low-admin-facing-change window (the audited window was
-dominated by the CHAOS-50–65 reliability/observability sweep and the MCP-first-canary work per `CLAUDE.md`
-and the PR title at the window's tip, neither of which touch admin-facing rule-editing copy except for
+zero-compatibility-risk issue in an ~8-day (2026-09-11 → 2026-09-19, 15 first-parent merges),
+low-admin-facing-change window (the audited window was dominated by the MCP-first-canary work plus a few
+CHAOS-series reliability fixes, per `CLAUDE.md` and the PR titles in the window, neither of which touch admin-facing rule-editing copy except for
 this one instance). It was fixed in this pass: `RuleEditor.tsx`'s two outlier "SSL" labels — one inside
 its "TLS / Decryption" fieldset, one in its separate "Logging" fieldset — now read "TLS," matching that
-first fieldset's own legend, the file's own surrounding comments, and the rest of the new
-frontend's established prose convention — with zero effect on the wire API, the legacy GUI, or the
+first fieldset's own legend, the file's own surrounding comments, and the enumerated TLS-using
+decryption surfaces of the new frontend (not every page — see "Observed, not fixed") — with zero effect on the wire API, the legacy GUI, or the
 separately-tracked, deliberately-deferred T-13 branding residual. No cosmetic or preference-driven
 renames were proposed. All thirteen other carry-over backlog entries (fourteen IDs, T-21+T-32 paired) are
 unchanged and were spot-checked, not merely assumed unchanged, against the post-sync tree.
