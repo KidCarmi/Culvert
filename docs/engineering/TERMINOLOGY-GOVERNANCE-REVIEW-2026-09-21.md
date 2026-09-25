@@ -109,14 +109,16 @@ re-verified; they are carried over with their original evidence.
   `POST /v1/upgrades/check`/`apply` with no `/v1/updates/*` alias, while the GUI still says "Dispatch
   Release" — unchanged.
 
-**Terminology Health Score: 8.6 / 10** (down from 8.7). One new defect (T-59) was found and fixed within
-the same pass — a security-adjacent admin-UI label overclaiming a capability — so, following 2026-09-08's
-precedent that a single item's discovery and its resolution are symmetric ±0.1 moves, the two cancel out
-rather than compounding; the T-51 recurrence was likewise fixed within the pass. T-60 was also found in
-this pass and is left OPEN, growing the backlog from thirteen to fourteen entries; under the same ±0.1
-per-item precedent an unresolved new defect is a −0.1 move with nothing to cancel it, hence 8.6. The
-score is not raised above that despite the same-day T-59 fix, since a defect that reached production
-before this review is not evidence of improving health, only of this review doing its job.
+**Terminology Health Score: 8.5 / 10** (down from 8.6). The starting point is the 2026-09-12 report's
+8.6, which already charged its own new open finding T-54 (backlog 13 → 14); T-54 is not charged again here.
+One new defect (T-59) was found and fixed within the same pass — a security-adjacent admin-UI label
+overclaiming a capability — so, following 2026-09-08's precedent that a single item's discovery and its
+resolution are symmetric ±0.1 moves, the two cancel out rather than compounding; the T-51 recurrence was
+likewise fixed within the pass. T-60 was also found in this pass and is left OPEN, growing the backlog
+from fourteen to fifteen entries; under the same ±0.1 per-item precedent an unresolved new defect is a
+−0.1 move with nothing to cancel it, hence 8.5. The score is not raised despite the same-day T-59 fix,
+since a defect that reached production before this review is not evidence of improving health, only of
+this review doing its job.
 
 ---
 
@@ -356,17 +358,30 @@ other PRs edit, so it needs its own change. The 13 OCSP lines (`static/index.htm
 
 ## Carried-Over Findings (unchanged)
 
-All fourteen previously-open finding IDs (thirteen backlog entries, since T-21 and T-32 are tracked as one
+All fifteen previously-open finding IDs (fourteen backlog entries, since T-21 and T-32 are tracked as one
 paired item) remain open with their original evidence. T-12, T-13, T-29 and T-30 were spot-checked at
-their cited locations in `6c46ebd` (see the Executive Summary); the rest were not re-verified:
+their cited locations in `6c46ebd` (see the Executive Summary), and so was T-54 (below); the rest were not
+re-verified:
 T-9, T-11, T-12, T-13 (residual), T-17, T-18, T-21+T-32 (paired), T-25 (residual), T-29, T-30, T-33, T-34,
-T-39. Full descriptions and the priority-ordered refactoring plan are unchanged from
-`TERMINOLOGY-GOVERNANCE-REVIEW-2026-09-09.md` and are not restated here to avoid drift between two
+T-39, T-54. Full descriptions and the priority-ordered refactoring plan are unchanged from
+`TERMINOLOGY-GOVERNANCE-REVIEW-2026-09-09.md` (T-9..T-39) and
+`TERMINOLOGY-GOVERNANCE-REVIEW-2026-09-12.md` (T-54) and are not restated here to avoid drift between two
 descriptions of the same open items — see that report (or its predecessors, cited therein) for the
 canonical text of each. **T-59 (above) was found and fixed within this same pass and does not join the
-open backlog** — the thirteen-entry carry-over backlog is unchanged; T-59 is recorded here only as a closed finding
+open backlog** — the fourteen-entry carry-over backlog is unchanged; T-59 is recorded here only as a closed finding
 ID, for the same reason closed items stay in the numbering series rather than being silently dropped.
-**T-60 (above) is new and open**, so the open backlog after this pass is fourteen entries (fifteen IDs).
+**T-60 (above) is new and open**, so the open backlog after this pass is fifteen entries (sixteen IDs).
+
+**T-54 at `6c46ebd`.** The 2026-09-12 report (audited `d378dff..2833db3`; `2833db3` is an ancestor of
+`6c46ebd`) opened T-54, and nothing in this window closed it. Checked at `6c46ebd`: the admin JSON in
+`ui_security.go:1843-1845` still says `malformedResponseTotal`, `staleResponseTotal` and
+`unknownStatusTotal`, against the Go accessors `MalformedTotal()`/`StaleTotal()`/`UnknownTotal()`
+(`internal/ocsp/ocsp.go`) and the `/metrics` labels `malformed`/`stale`/`unknown_status`
+(`ocsp_metrics.go:59-61`); and `reason="responder_blocked"` (`ocsp_metrics.go:62`) is still reported in
+the same "responses discarded" series. Reproduce with `git grep -n
+'malformedResponseTotal\|staleResponseTotal\|UnknownTotal()' 6c46ebd -- ui_security.go
+internal/ocsp/ocsp.go` and `git show 6c46ebd:ocsp_metrics.go | sed -n 55,62p`. It stays open. The first
+revisions of this report left T-54 out of the backlog; that was an omission, now corrected.
 
 The "Content & Scanning" (legacy GUI) vs. "Content Security" (new React frontend) soft finding — a
 non-mechanical naming-policy reconciliation between two deliberate design decisions, not a numbered backlog
@@ -383,8 +398,9 @@ of the closed T-51 ("appliance" in customer-facing text) was also fixed. One new
 T-60 (a documented audit event the tool-trust decision handler never emits), is left open for an
 API-contract change. The MCP
 canary-execution stream produced one finding once re-audited, T-60 (see "Corrections made in review").
-The fourteen-ID carry-over backlog remains open with its original evidence. T-12, T-13, T-29 and T-30 were
-spot-checked at their cited locations; the others were not re-verified. No
+The fifteen-ID (fourteen-entry) carry-over backlog, including T-54, remains open with its original
+evidence. T-12, T-13, T-29, T-30 and T-54 were spot-checked at their cited locations; the others were not
+re-verified. No
 cosmetic or preference-driven renames are proposed. This report's first revision contained two factual
 errors, and later review rounds found more; all were caught by automated PR review before merge
 and corrected above rather than silently fixed —
