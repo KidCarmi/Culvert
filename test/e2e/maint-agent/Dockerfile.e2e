@@ -1,6 +1,17 @@
 # Fast proxy image for the maintenance-agent E2E.
 #
-# Differences from the production Dockerfile:
+# Recipe parity with the production Dockerfile (pinned by
+# e2e_image_recipe_test.go, which DERIVES every expectation from the production
+# Dockerfile — there is no third copy of the version list to drift):
+#   - the same golang builder image and the same alpine runtime image;
+#   - the same compile: CGO_ENABLED=0, GOOS/GOARCH from TARGETOS/TARGETARCH on
+#     $BUILDPLATFORM (CI-REDESIGN §11), -trimpath, -buildvcs=false;
+#   - builds from the COMMITTED module graph only: no `go mod tidy` at build
+#     time, `-mod=readonly`, and go.mod/go.sum proven unchanged across both the
+#     download and the compile (depfiles-guard.sh). Tidiness itself is enforced
+#     where it belongs, by the Fast Gate's `go mod tidy -diff`.
+#
+# INTENTIONAL differences from the production Dockerfile — keep them:
 #   - NO GeoIP download stage (db-ip.com is often blocked on CI runners and is
 #     irrelevant to the update flow).
 #   - A BUILD_VARIANT build-arg baked into the binary (`-X main.version`), the
@@ -8,21 +19,44 @@
 #     DISTINCT content digests deterministically. We cannot fabricate a
 #     `repo@sha256:` via `docker tag`; the agent's resolve_target/pull/verify
 #     compare REAL registry digests, so the two versions must genuinely differ.
-#   - wget is present (alpine base) for the compose healthcheck.
-FROM golang:1.26-alpine AS builder
+#   - NO /app/deploy bundle and NO maintbuilder stage. Without the bundled agent
+#     binary, scripts/install.sh takes its source/release FALLBACK path, which is
+#     exactly what the installer-lifecycle job exercises. Adding the bundle to
+#     make this image "look like production" would silently stop testing it.
+#   - wget is installed explicitly for the compose healthcheck.
+FROM --platform=$BUILDPLATFORM golang:1.26.8-alpine@sha256:8ac98ca534ac3f51e1f420a1dd2c15e74c75cfa0f23f3ad27eb5d7236c349a0c AS builder
+# Same pinned compiler and assertion as production (CI-REDESIGN §20).
+ENV GOTOOLCHAIN=local
 WORKDIR /app
 RUN apk add --no-cache git
+COPY test/e2e/maint-agent/depfiles-guard.sh /usr/local/bin/depfiles-guard
 COPY go.mod go.sum ./
-RUN go mod download
+RUN want="$(sed -n 's/^toolchain //p' go.mod)" && have="$(go env GOVERSION)" && \
+    echo "compiler: ${have} (go.mod toolchain: ${want})" && \
+    [ -n "${want}" ] && [ "${have}" = "${want}" ]
+# The guard runs in the SAME RUN as the download: the `COPY . .` below
+# overwrites go.mod/go.sum with the committed copies, so a download-induced
+# change checked any later would already be concealed.
+RUN depfiles-guard snapshot \
+    && go mod download \
+    && depfiles-guard verify "go mod download"
 COPY . .
 ARG BUILD_VARIANT=v1
+# Declared after the download/COPY layers (a build ARG joins the cache key of
+# every later RUN), exactly as in the production Dockerfile.
+ARG TARGETOS
+ARG TARGETARCH
 RUN : "${BUILD_VARIANT}" \
+    && go version \
     && echo "e2e-${BUILD_VARIANT}" > /app/VERSION \
-    && go mod tidy \
-    && CGO_ENABLED=0 GOOS=linux go build \
-       -ldflags="-s -w -X main.version=e2e-${BUILD_VARIANT}" -o culvert .
+    && depfiles-guard snapshot \
+    && CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -mod=readonly -trimpath -buildvcs=false \
+       -ldflags="-s -w -X main.version=e2e-${BUILD_VARIANT}" -o culvert . \
+    && depfiles-guard verify "go build"
+RUN want="$(sed -n 's/^toolchain //p' go.mod)" && go version culvert && \
+    [ -n "${want}" ] && [ "$(go version culvert | cut -d' ' -f2)" = "${want}" ]
 
-FROM alpine:3.22
+FROM alpine:3.24
 ARG BUILD_VARIANT=v1
 # The label + file make the two image variants differ in content, so their
 # registry digests differ. The label is applied LAST so the layer it adds is

@@ -308,3 +308,19 @@ func parsePower(s string) (CredentialPower, bool) {
 		return PowerUnset, false
 	}
 }
+
+// FieldIsKnown reports whether name is a field a compiled condition may read: a member of the
+// closed scalar/set/bool vocabulary above, or a bounded resource-attribute selector
+// ("resource.attr:<key>"). Compile rejects anything else.
+//
+// It is exported so a caller that reasons about WHICH fields a rule consulted — the Canary
+// activation permit's bound-field set — can prove its own list names real fields. A typo there
+// fails closed (an unrecognised field is treated as unbound), but it would also make the list a
+// lie to the next reader, so the list is checked against this predicate rather than trusted.
+func FieldIsKnown(name string) bool {
+	if _, ok := fieldKinds[name]; ok {
+		return true
+	}
+	_, ok := resourceAttrField(name)
+	return ok
+}
