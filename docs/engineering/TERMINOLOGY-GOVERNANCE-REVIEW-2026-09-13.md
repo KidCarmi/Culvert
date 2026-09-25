@@ -186,12 +186,17 @@ and one is now partially fixed.
 - **Affected GUI:** the new frontend's Policy Learning recommendations screen (button label, confirm
   dialog title, confirm button label).
 - **Affected Documentation:** the losing side's contract — either `docs/design/FRONTEND-FEATURE-PARITY.md`
-  FE-V18 + `docs/design/FRONTEND-MIGRATION-PLAN.md:713-718`, or CLAUDE.md's M5B text and the operator doc.
+  FE-V18 + `docs/design/FRONTEND-MIGRATION-PLAN.md:713-718`, or CLAUDE.md's M5B text and the operator guide
+  (`docs/operator/policy-learning-mode.md:127`). Not exhaustive — see Migration Complexity.
 - **Affected Configuration:** none.
 - **Migration Complexity:** Trivial in code either way (3 string literals). If the frontend's wording
   loses, add the `frontend/dist` rebuild + its verification (build, lint, the existing Playwright/Vitest
-  Policy-Learning coverage); if the legacy wording loses, only `static/index.html` and CLAUDE.md's M5B
-  text change and no rebuild is involved.
+  Policy-Learning coverage); if the legacy wording loses, no rebuild is involved but the change is NOT
+  confined to `static/index.html` and CLAUDE.md — the operator guide (`docs/operator/policy-learning-mode.md:127`)
+  and a Go wording pin (`policy_learning_m5b_test.go:506-523`, `TestM5B_GUIDecisionWording`) carry it too.
+  In EITHER direction the implementing change must grep the losing wording repo-wide (Go and frontend
+  source and tests, `static/`, `docs/`, CLAUDE.md) and converge every reference; the files named in this
+  finding are evidence, not the change list.
 - **Compatibility Risk:** None — display-only text behind an experimental, disabled-by-default flag
   (`CULVERT_EXPERIMENTAL_UI`); no external consumer depends on the exact button string.
 - **Estimated PR Size:** Small.
@@ -259,8 +264,10 @@ and one is now partially fixed.
   GUI's PAC panel).
 - **Affected Documentation:** `docs/operator/pac-traffic-steering.md` — **fixed in this pass**
   (prose now says "steering profile" consistently, plus a note recording the frontend gap); under the
-  alternative direction, `docs/design/PRODUCT-TERMINOLOGY.md`'s Steering profile row would need
-  updating instead.
+  alternative ("PAC profile") direction, `docs/design/PRODUCT-TERMINOLOGY.md`'s Steering profile row would
+  need updating AND this runbook's ~50 "steering profile" occurrences would have to be converged back, or the
+  canonical term and the operator documentation would disagree. In either direction the implementing change
+  must grep the losing term repo-wide (source, tests, GUI, docs) and converge every reference.
 - **Affected Configuration:** none.
 - **Migration Complexity:** Small in either direction (a batch of string/comment edits in up to 8 files);
   Small-Medium once the "steering profile" direction's required `frontend/dist` rebuild + verification
