@@ -1105,6 +1105,19 @@ background:#2563eb;color:#fff;text-decoration:none;text-align:center}a.btn:hover
 
 // POST /auth/logout — clear session cookie.
 func authLogout(w http.ResponseWriter, r *http.Request) {
+	// REVOKE, then clear. Clearing a cookie is a request to the browser, not a
+	// withdrawal of authority: the token stays valid until its natural expiry,
+	// so anyone who kept a copy — or stole one — can replay it against this
+	// node or any other in the fleet. This is the PROXY/portal session, which
+	// proxy.go's identity arm reads for identity- and group-scoped policy on
+	// the DATA plane, so the replay window is an enforcement gap and not just
+	// an admin-console one.
+	//
+	// The admin logout (apiAuthLogout) has always revoked; this path only
+	// cleared, which made §2 of docs/operator/session-revocation.md — "admin or
+	// user logs out → token revoked" — false for exactly half of the table
+	// (Codex P1, PR #1437).
+	revokeSessionCookie(sessionCookieName, r)
 	clearSessionCookie(w, r)
 	http.Redirect(w, r, "/", http.StatusFound)
 }

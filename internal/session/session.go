@@ -536,6 +536,29 @@ func (r *RevocationList) LoadRevocations() error {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
+			// An ABSENT file is a legitimate first run, but "the file is not
+			// there yet" and "the path works" are different claims, and the
+			// health plane reports the second one. Configured is already true
+			// at this point, so returning here made revocationsAreDurable say
+			// a revocation would survive a restart while the parent directory
+			// was missing, read-only or unwritable — green on the cluster API,
+			// on /api/diagnostics and on the metric, until some operator's
+			// logout hours later became the first thing to discover the path
+			// was bad. The unearned green is the defect, not the missing file
+			// (Codex P2, PR #1437).
+			//
+			// So PROVE it with the real write path rather than inferring it:
+			// SaveRevocations creates the file with the current (empty) list
+			// and drives notePersistSuccess/notePersistFailure, so a bad path
+			// sets the same degradation a failed logout-save would and every
+			// surface lights up at BOOT. Deliberately not returned as a load
+			// error: "could not read" and "cannot write" are tracked as
+			// separate states (LoadDegraded vs the persist-degraded flag), and
+			// conflating them would report a corrupt-file remedy for a
+			// permissions fault.
+			if probeErr := r.SaveRevocations(); probeErr != nil {
+				obs.Printf("Session: revocations path is not writable: %v", probeErr)
+			}
 			return nil
 		}
 		return fmt.Errorf("read revocations: %w", err)

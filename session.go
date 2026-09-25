@@ -9,9 +9,7 @@ package main
 // Identity hub type), and the Session→Identity conversion.
 
 import (
-	"encoding/base64"
 	"encoding/hex"
-	"encoding/json"
 	"net/http"
 	"os"
 	"strings"
@@ -101,25 +99,45 @@ func sessionIdentity(s *Session) *Identity {
 }
 
 // revokeSessionCookie adds the cookie from r to the revocation list.
+//
+// THE COOKIE IS AUTHENTICATED FIRST, and that is a security requirement rather
+// than tidiness. Both call sites are logout handlers on the PUBLIC allowlist
+// (`/api/auth/logout` and `/auth/logout` — see uiAuthMiddleware), so the cookie
+// value reaching this function is attacker-chosen. The revocation map is
+// uncapped, its entries expire only at an expiry taken FROM THE COOKIE, and
+// every call marshals the whole list to disk and gossips it fleet-wide — so
+// revoking on an UNVERIFIED value let one unauthenticated caller mint
+// arbitrarily many permanent entries, in memory, on disk and on every node.
+// That is CHAOS-63's write-amplification shape (a public endpoint reaching a
+// durable sink with unbounded caller-chosen bytes) pointed at the one control
+// that withdraws session authority.
+//
+// The earlier body read the expiry with a bare base64+JSON decode and its
+// comment claimed "HMAC already verified by decodeSession" — true of the
+// value's ORIGIN on the admin path, never of this function, which re-reads the
+// cookie off the request itself and verified nothing.
+//
+// decodeSession splits on the same final dot and keys its own revocation check
+// on the same b64 payload, so authenticating here changes no key and no
+// behaviour for a genuine logout. A cookie that fails to verify needs no
+// revocation by construction: every consumer already rejects it. Expired and
+// already-revoked land in the same branch for the same reason.
 func revokeSessionCookie(cookieName string, r *http.Request) {
 	c, err := r.Cookie(cookieName)
 	if err != nil {
+		return
+	}
+	sess, err := decodeSession(c.Value)
+	if err != nil || sess == nil {
 		return
 	}
 	dot := strings.LastIndex(c.Value, ".")
 	if dot < 0 {
 		return
 	}
-	b64part := c.Value[:dot]
-	// Decode just to get the expiry (HMAC already verified by decodeSession).
-	if payload, decErr := base64.RawURLEncoding.DecodeString(b64part); decErr == nil {
-		var s Session
-		if json.Unmarshal(payload, &s) == nil {
-			sessionRevoked.Revoke(b64part, time.Unix(s.Exp, 0))
-			if err := sessionRevoked.SaveRevocations(); err != nil {
-				logger.Printf("Session: failed to persist revocations: %v", err)
-			}
-		}
+	sessionRevoked.Revoke(c.Value[:dot], time.Unix(sess.Exp, 0))
+	if err := sessionRevoked.SaveRevocations(); err != nil {
+		logger.Printf("Session: failed to persist revocations: %v", err)
 	}
 }
 

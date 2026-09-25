@@ -38,6 +38,33 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   the restart that discards its revocation. Operators running a cluster should
   set `-revocations-file`. See `docs/operator/session-revocation.md`.
 
+- The proxy/portal logout did not revoke the session it ended (CHAOS-68,
+  AU-29). `/auth/logout` cleared the cookie and nothing else — which is a
+  request to the browser, not a withdrawal of authority — so the token stayed
+  valid until its natural expiry and a retained or stolen copy replayed
+  against this node or any other in the fleet. This is the proxy session,
+  which feeds identity- and group-scoped policy on the data plane, so the
+  window was an enforcement gap rather than an admin-console one; the admin
+  logout had always revoked. Both paths now revoke.
+
+  Closing it required hardening the shared helper first (AU-30):
+  `revokeSessionCookie` read the expiry out of the cookie without verifying
+  its signature, and both logout routes are on the public allowlist, while the
+  revocation map is uncapped, each entry expires at a time taken from the
+  cookie, and every call writes the whole list to disk and gossips it
+  fleet-wide. One unauthenticated caller could therefore mint arbitrarily many
+  effectively permanent entries across the fleet. The cookie is now
+  authenticated before anything is revoked; a genuine logout is unchanged.
+
+- Revocation durability was reported from configuration rather than evidence
+  (CHAOS-68, AU-31). A configured-but-absent revocations file counted as a
+  clean first run, so the diagnostics row, the cluster API and the metric read
+  healthy even when the parent directory was missing, read-only or otherwise
+  unwritable and the first save was certain to fail — the fault surfaced only
+  when some operator's logout, hours later, happened to be the first write.
+  The node now proves the path at startup by writing the file, so a bad path
+  degrades at boot.
+
 - Client-supplied tracing headers reached the process log unbounded
   (SEC-REQID-1). `setupRequestTracing` runs on 100% of proxied traffic — the
   second statement in `handleRequest`, ahead of the connection limiter, the IP

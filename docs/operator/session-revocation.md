@@ -36,6 +36,15 @@ That makes the revocation list a security control whose *durability* and
 Both kinds are now persisted to the revocations file and both ride the CP↔DP
 gossip. Before CHAOS-68 only the token kind did either.
 
+**Both logout paths revoke.** The admin console (`POST /api/auth/logout`) always
+did; the proxy/portal logout (`/auth/logout`) used to only *clear* the cookie,
+which is a request to the browser and not a withdrawal of authority — the token
+stayed replayable until its natural expiry, on this node and every other. That
+is closed (register row **AU-29**). A logout whose cookie does not verify is not
+revoked and does not need to be: every consumer already rejects it, and
+accepting unverified values on a public endpoint is how the revocation list
+itself becomes a denial-of-service target (**AU-30**).
+
 Propagation reaches three places, and all three matter because each of them
 verifies the same cookies (the session signing key is replicated to all of them):
 
@@ -162,6 +171,14 @@ cause that is a fault (writes failing) and nothing else. The contract row on
 `_durable == 0` a page, which would have paged permanently on every default
 installation — and contradicted `metrics.go`, whose own comment called it a
 warn. Reported by Codex on PR #1437 as a P2.
+
+**Durability is proven at boot, not assumed.** When the configured file does
+not exist yet, the node writes it immediately rather than reporting a clean
+first run: an absent file and a working path are different claims, and the
+surfaces below report the second. So a missing parent directory, a read-only
+mount or a permissions fault degrades the moment the node starts, instead of
+staying green until some operator's logout hours later turns out to be the
+first write (**AU-31**).
 
 ### Cluster revocations — `GET /api/cluster/revocations`
 
