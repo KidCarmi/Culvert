@@ -1,5 +1,10 @@
 package policy
 
+import (
+	"sort"
+	"strings"
+)
+
 // RuleID is an opaque, stable rule identifier. It is never a display name — the
 // engine stamps it onto a matched decision and the explain trace.
 type RuleID string
@@ -67,4 +72,59 @@ func (r *Rule) matches(in *DecisionInput) (matched bool, failCond string) {
 		}
 	}
 	return true, ""
+}
+
+// ConditionFields returns the POLICY FIELD each of this rule's conditions reads, in
+// declaration order, deduplicated, sorted. A rule with no conditions returns nil — it
+// matches every input of its namespace and therefore reads nothing.
+//
+// The values are drawn from the CLOSED field vocabulary in fields.go ("tool.name",
+// "principal.tenant", …); a compiled condition cannot name anything else, because compile
+// rejects an unknown field. No operator-supplied VALUE is exposed — only which field was
+// consulted.
+//
+// It exists for the Canary activation permit (see Snapshot.Rule): a preflight verdict over
+// one constructed tuple generalises to every request the scope admits ONLY IF the winning
+// rule read nothing the activation does not bind. The caller compares this set against the
+// fields it bound authoritatively and refuses the permit on any field outside it, so a rule
+// conditioned on a request-variable field (session assurance, client id, inspection
+// evidence) can never be certified as an executable permit.
+//
+// The stable condition id is "field|op" (see compiledCond), so the field is the segment
+// before the first "|". That format is part of the package's explain-trace contract — the
+// same ids appear in TraceEntry.ConditionID, and the permit caller parses them there too.
+func (r *Rule) ConditionFields() []string {
+	if len(r.conditions) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(r.conditions))
+	out := make([]string, 0, len(r.conditions))
+	for _, c := range r.conditions {
+		f := ConditionField(c.id)
+		if f == "" {
+			continue
+		}
+		if _, dup := seen[f]; dup {
+			continue
+		}
+		seen[f] = struct{}{}
+		out = append(out, f)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// ConditionField extracts the policy field from a stable condition id ("field|op"), as it
+// appears on a compiled condition and on TraceEntry.ConditionID. It returns "" for an id
+// that carries no field — the trace uses a few fixed non-field labels ("expiry", "",
+// override labels), and a caller must not mistake one of those for a bound field.
+//
+// It is exported so the Canary activation permit reads the SAME id format from the trace
+// and from Rule.ConditionFields through one parser, rather than two that could drift.
+func ConditionField(conditionID string) string {
+	i := strings.IndexByte(conditionID, '|')
+	if i <= 0 {
+		return ""
+	}
+	return conditionID[:i]
 }
