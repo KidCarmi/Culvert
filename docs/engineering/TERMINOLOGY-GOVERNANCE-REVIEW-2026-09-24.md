@@ -36,8 +36,11 @@
 **No new terminology drift found by this pass, and no new fixes made.** Parallel reports covering
 parts of the same window did find drift this pass missed; see "Overlap with parallel reports" below.
 
-1. **Every new admin-facing name this window introduced was checked for cross-surface consistency and
-   found internally consistent:**
+1. **The new admin-facing field, row and metric names below were checked for cross-surface
+   consistency and found consistent.** This check covered names and their mappings only. It did not
+   read description prose against the glossary, and it did not compare the OpenAPI audit-event names
+   with the handlers, which is how it missed the "appliance" prose and the tool-trust audit-event
+   mismatch (see "Overlap with parallel reports").
    - **OCSP (CHAOS-65):** the window added nine `/api/ocsp` fields in `ui_security.go`, each spelled
      identically in `api/openapi/openapi.{json,yaml}` and the auto-generated `frontend/src/api/types.gen.ts`.
      They map to other surfaces as follows:
