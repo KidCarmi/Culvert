@@ -247,13 +247,22 @@ the mount and restart.
 * **Role and password changes do not revoke.** `POST /api/auth/users` changing a
   role or password leaves existing cookies untouched — a demotion does not take
   effect until the session expires, and a password change does not invalidate a
-  stolen session. Delete the account to force it, and recreate it under a
-  different username (or after the revocation expires, up to the session TTL):
-  an account revocation rejects every session for that username regardless of
-  issue time, so an immediate same-name recreate locks the new account out.
-  Recorded as
-  register row **AU-23**; closing it changes an admin workflow and needs its own
-  review.
+  stolen session. Deleting the account forces both, subject to the next bullet.
+  Recorded as register row **AU-23**; closing it changes an admin workflow and
+  needs its own review.
+* **An account revocation locks out a same-name replacement.** `RevokeUser`
+  records the *username* until `now + TTL`, and every session carrying that
+  subject is rejected regardless of when it was issued — the signed cookie
+  payload has no issued-at field to check, only `Exp`. So deleting an account
+  and immediately recreating it under the same name produces a replacement
+  whose brand-new cookies are refused on every node holding the revocation, for
+  up to the session TTL, and no admin API withdraws a revocation early.
+  **Recreate under a different username, or wait for the revocation to
+  expire.** The behaviour predates this sweep, but the sweep made its
+  consequences durable and fleet-wide — a restart or a different node used to
+  end the lockout by accident and no longer does. Recorded as register row
+  **AU-28**; the principled fix is an issuance-time cutoff, which is a
+  wire-format change to a security control and needs its own review.
 * **Persistence is opt-in.** Defaulting `--revocations-file` to
   `<dataDir>/revocations.json` is the obvious improvement and is recorded as
   **AU-22**; it starts writing a new file on every appliance, which is a default
