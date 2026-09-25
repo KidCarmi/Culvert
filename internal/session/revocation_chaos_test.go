@@ -4,9 +4,11 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -465,4 +467,117 @@ func TestChaos67_PanickingSuccessObserverIsContained(t *testing.T) {
 		t.Fatalf("save: %v", err)
 	}
 	// Reaching here without a panic is the assertion.
+}
+
+// DEFECT (Codex P1, PR #1437). SaveRevocations was snapshot-then-write with the
+// lock released in between: ExportRevocations takes and releases mu on its own,
+// so export → marshal → AtomicWrite were three individually-atomic steps that
+// were jointly not.
+//
+// Two savers could therefore interleave so that the one holding the OLDER
+// snapshot renamed LAST, and the file lost a revocation that both callers had
+// been told was applied. Every surface stayed green — both calls return nil,
+// both count as a successful write, the durability row reads OK — and the loss
+// only becomes visible at the next boot, when the dropped account's sessions
+// authenticate again. That is precisely the failure this sweep exists to close,
+// sitting inside the function that closes it.
+//
+// It is reachable because of this change, not in spite of it: SaveRevocations
+// had ONE caller before and now has five, three of them in background loops
+// (the CP SyncRevocations handler, the DP sync loop, the HA bundle apply) that
+// run concurrently with an admin's DELETE.
+//
+// The gate is many-trial rather than single-shot because whether the stale
+// writer wins the rename is a scheduling race — one trial passes a broken build
+// most of the time (the TestChaos54_StopIsPromptDuringAcceptBackoff precedent).
+// Verified failing against the reintroduced pre-fix shape.
+func TestChaos67_ConcurrentSavesNeverDropARevocation(t *testing.T) {
+	const (
+		trials = 12
+		savers = 16
+	)
+	for trial := 0; trial < trials; trial++ {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "revocations.json")
+		prev := RevocationsPath()
+		SetRevocationsPath(path)
+
+		r := NewRevocationList()
+		want := make([]string, 0, savers)
+		for i := 0; i < savers; i++ {
+			want = append(want, fmt.Sprintf("user-%02d", i))
+		}
+
+		// Every goroutine revokes its own account and then persists, exactly as
+		// the DELETE handler does. Whatever order they land in, the file that
+		// survives must contain every revocation that was reported applied.
+		var wg sync.WaitGroup
+		for i := range want {
+			wg.Add(1)
+			go func(user string) {
+				defer wg.Done()
+				r.RevokeUser(user)
+				if err := r.SaveRevocations(); err != nil {
+					t.Errorf("SaveRevocations: %v", err)
+				}
+			}(want[i])
+		}
+		wg.Wait()
+
+		data, err := os.ReadFile(path) //nolint:gosec // test-owned temp path
+		if err != nil {
+			SetRevocationsPath(prev)
+			t.Fatalf("read persisted revocations: %v", err)
+		}
+		var got []RevocationEntry
+		if err := json.Unmarshal(data, &got); err != nil {
+			SetRevocationsPath(prev)
+			t.Fatalf("parse persisted revocations: %v", err)
+		}
+		persisted := make(map[string]bool, len(got))
+		for _, e := range got {
+			if e.User != "" {
+				persisted[e.User] = true
+			}
+		}
+		SetRevocationsPath(prev)
+
+		for _, user := range want {
+			if !persisted[user] {
+				t.Fatalf("trial %d: account revocation for %q was reported applied but is "+
+					"NOT in the persisted file (%d of %d survived) — a stale snapshot "+
+					"overwrote it, and that account's sessions come back at the next restart",
+					trial, user, len(persisted), len(want))
+			}
+		}
+	}
+}
+
+// CONTROL. The cheapest way to pass the gate above is to stop writing
+// concurrently at all — or to stop writing anything a reader can lose, e.g. by
+// never pruning. This pins that an ordinary single save still produces a file
+// that round-trips, so serialization did not buy correctness by writing less.
+func TestChaos67_SerializedSaveStillRoundTrips(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "revocations.json")
+	prev := RevocationsPath()
+	SetRevocationsPath(path)
+	defer SetRevocationsPath(prev)
+
+	r := NewRevocationList()
+	r.RevokeUser("solo-admin")
+	r.Revoke("solo-token", time.Now().Add(time.Hour))
+	if err := r.SaveRevocations(); err != nil {
+		t.Fatalf("SaveRevocations: %v", err)
+	}
+
+	reloaded := NewRevocationList()
+	if err := reloaded.LoadRevocations(); err != nil {
+		t.Fatalf("LoadRevocations: %v", err)
+	}
+	if !reloaded.IsUserRevoked("solo-admin") {
+		t.Error("account revocation did not survive a save/load round trip")
+	}
+	if !reloaded.IsRevoked("solo-token") {
+		t.Error("token revocation did not survive a save/load round trip")
+	}
 }
