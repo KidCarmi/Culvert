@@ -23,7 +23,8 @@
 #            must already exist; qa-gate.yml doesn't even run on tags, so its
 #            only possible run for this SHA is the main-push one).
 #
-# Fail-closed everywhere: a red conclusion fails NOW; a gh-api error aborts
+# Fail-closed everywhere: a red conclusion fails NOW; a SKIPPED or NEUTRAL
+# conclusion fails NOW (nothing ran is not approval); a gh-api error aborts
 # (never parsed as "pending"); an empty/absent main run is pending (wait) or a
 # hard refusal (assert). Needs `actions: read` (list-workflow-runs endpoint).
 #
@@ -67,6 +68,18 @@ for i in $(seq 1 "$attempts"); do
       exit 0 ;;
     failure|cancelled|timed_out|action_required|startup_failure|stale)
       echo "::error::${WF} main-push run for ${SHA} concluded '${CONCL}' — refusing"
+      exit 1 ;;
+    skipped|neutral)
+      # An UNEXPECTED SKIP IS NOT APPROVAL. A whole-workflow `skipped`
+      # conclusion means every job was skipped — a path filter, a job-level
+      # `if:` or a manual cancellation before any job started. None of those
+      # produce the evidence this gate exists to demand, and treating "nothing
+      # ran" as "nothing was wrong" is the exact fail-open this script is for.
+      # `neutral` is likewise a non-verdict. Both used to fall through to the
+      # not-concluded-yet branch, where `assert` refused but `wait` polled for
+      # the full 30 min before refusing; naming them explicitly makes the
+      # refusal immediate and the reason legible in both modes.
+      echo "::error::${WF} main-push run for ${SHA} concluded '${CONCL}' — a skipped/neutral gate is NOT approval; refusing"
       exit 1 ;;
   esac
 
