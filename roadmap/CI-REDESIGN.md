@@ -2992,12 +2992,27 @@ every run and is not Go's shuffle seed. All 6 runs passed.
   larger, so it is not runner noise. This is the attribution §19 could not
   make for its own change.
 
-**CI result (this PR's own runs).** Pending: the Deep determinism job,
-the time until both PR gates finish, and runner-minutes are reported from
-this PR's runs below, separately from the local package result. One CI
-sample cannot separate a ≈175 s saving from the ±50 s spread the
-determinism step shows between identical-source runs (§18.5.1: 752–965 s),
-so no gate speedup is claimed until natural runs accumulate.
+**CI result (PR #1501, head `eeeba4c`, one sample).**
+
+| Measure | This PR | Reference |
+|---|---|---|
+| Deep determinism job ([36163090082](https://github.com/KidCarmi/Culvert/actions/runs/36163090082)) | 734 s | median ≈880 s; 794–1,008 s over 10 identical-source dispatches (§18.5.1) |
+| Shuffled double-run step | 691 s | 752–965 s over the same 10 |
+| Root package inside it | 611.6 s | 750.2 s and 744.6 s (§19) |
+| Deep runner-seconds | 888 | 1,156–1,372 in the §18.5.1 trials |
+| Time until both PR gates finish | not comparable | see below |
+
+- **Gate completion time is not comparable on this sample.** Runners
+  queued jobs for up to 683 s (Fast) and 352 s (Deep) that day, against a
+  median job queue of 3 s in §18.5.1.
+- **Fast needed one re-run for an unrelated failure.** The first attempt
+  failed in root shard 0 on `TestChaos64_StaleServesDoNotStackRefreshes`:
+  the DNS-resolver test race recorded in §19, in a test this change does
+  not touch. The re-run of the failed jobs was green.
+- The shuffled step landed below the whole identical-source range,
+  consistent with the local −175 s. One sample still cannot establish a
+  gate speedup, so none is claimed. Natural runs after merge are the
+  evidence.
 
 **Rollback.** Revert this change. The production resume path is
 byte-for-byte the same when the override is unset, so nothing but test
