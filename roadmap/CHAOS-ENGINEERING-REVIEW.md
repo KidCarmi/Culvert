@@ -70,6 +70,27 @@ everything else is triaged below with a suggested PR and required tests for foll
 > claim its id in a committed placeholder row in this file as its FIRST commit,
 > before any code is written — that is the whole remedy, and it costs one line.
 >
+> **AMENDED 2026-09-25 — the placeholder is NECESSARY BUT NOT SUFFICIENT, and
+> the CHAOS-71 sweep (§41) is the proof.** It did exactly what the paragraph
+> above prescribes: claimed `CHAOS-66` in a committed placeholder row as commit
+> one, before any code. It collided anyway. The reason is the part the remedy
+> never stated: **a placeholder reserves an id only against sweeps that branch
+> AFTER it merges.** The SOCKS5-bind sweep had claimed `CHAOS-66` on 2026-09-12
+> in *its* placeholder, on *its* branch, and merged to main after §41's branch
+> point — so at claim time §41 grepped its own working tree, found the id free,
+> and was correct about the tree and wrong about the world. Two correct
+> placeholders, mutually invisible, because a branch is not a registry.
+>
+> So the rule gains a second half, and it is the half that does the work:
+> **check `origin/main`, not the working tree.** `git fetch origin main && git
+> show origin/main:roadmap/CHAOS-ENGINEERING-REVIEW.md | grep CHAOS-<n>` is the
+> claim-time test; a `grep -rn` over the checkout is not, and neither is a
+> placeholder that will sit unmerged for days. This does not make the
+> placeholder pointless — it is still what lets a colliding sweep prove it
+> claimed first, and it is still what the renumber convention below keys on —
+> it means the placeholder is the RECORD and the origin/main check is the
+> RESERVATION. Doing only the first is what happened here.
+>
 > Both sweeps independently arrived at the same rule, which is the one to
 > follow until the durable fix exists: **an id is rewritable for free right up
 > until its first merge, and needs owner sign-off the moment after — so the
