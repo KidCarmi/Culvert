@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"net"
 	"net/netip"
 	"sort"
@@ -8,7 +9,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"context"
 	"github.com/KidCarmi/Culvert/internal/hostutil"
 	"github.com/KidCarmi/Culvert/internal/ssrf"
 )

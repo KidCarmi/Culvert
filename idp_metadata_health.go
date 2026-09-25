@@ -227,24 +227,35 @@ var fireIdPMetadataAlert = func(detail string) {
 //
 // profileID and cause reach the rate-limited LOG line only. `outcome` is the
 // bounded class that reaches metrics, the contract row and the alert.
+// noteIdPMetadataInline resolves the failure episode of a profile that now uses
+// inline metadata_xml.
+//
+// No network was involved, so this plane has nothing to COUNT — but an inline
+// profile may be one an admin just switched AWAY from a remote metadata_url,
+// and if that profile had an open failure episode there will never be another
+// remote fetch to clear it. The episode would then hold
+// `culvert_idp_metadata_degraded` and the contract row at a permanent outage
+// for a dependency that no longer exists.
+//
+// The transition to inline IS the resolution — which is the recovery-on-
+// observed-evidence rule read the right way round: it forbids clearing on
+// elapsed TIME, not on evidence that the dependency is GONE. It clears this
+// profile's episode and nothing else: no attempt, no outcome, no counter, and
+// no other profile's episode.
+func noteIdPMetadataInline(profileID string) {
+	idpMetadata.mu.Lock()
+	_, had := idpMetadata.episodes[profileID]
+	delete(idpMetadata.episodes, profileID)
+	idpMetadata.mu.Unlock()
+	if had {
+		logger.Printf("IDP_METADATA_RECOVERED idp=%q (profile now uses inline metadata; its remote-fetch failure episode no longer applies)",
+			sanitizeLog(profileID))
+	}
+}
+
 func noteIdPMetadataOutcome(profileID string, outcome idpMetadataOutcome, cause error) {
 	if outcome == idpMetaInline {
-		// No network was involved, so this plane has nothing to COUNT — but an
-		// inline profile may be one an admin just switched AWAY from a remote
-		// metadata_url, and if that profile had an open failure episode there
-		// will never be another remote fetch to clear it. The episode would
-		// then hold `culvert_idp_metadata_degraded` and the contract row at a
-		// permanent outage for a dependency that no longer exists. The
-		// transition to inline IS the resolution, so it clears the episode —
-		// and nothing else: no attempt, no outcome, no counter.
-		idpMetadata.mu.Lock()
-		_, had := idpMetadata.episodes[profileID]
-		delete(idpMetadata.episodes, profileID)
-		idpMetadata.mu.Unlock()
-		if had {
-			logger.Printf("IDP_METADATA_RECOVERED idp=%q (profile now uses inline metadata; its remote-fetch failure episode no longer applies)",
-				sanitizeLog(profileID))
-		}
+		noteIdPMetadataInline(profileID)
 		return
 	}
 	idpMetadataEverUsed.Store(true)

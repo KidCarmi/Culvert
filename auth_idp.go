@@ -6,11 +6,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/KidCarmi/Culvert/internal/ssrf"
 	"net"
 	"net/url"
 	"os"
 	"sync"
+
+	"github.com/KidCarmi/Culvert/internal/ssrf"
 )
 
 // ---------------------------------------------------------------------------

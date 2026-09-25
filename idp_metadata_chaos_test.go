@@ -821,9 +821,22 @@ func TestChaos71_SAMLPreflightIsBoundedByTheRequestBudget(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read source: %v", err)
 	}
+	// Slice the function out by hand rather than with a bare strings.Index:
+	// Index returns -1 when the anchor is absent, which slices from the END of
+	// the file and silently makes every assertion below vacuous — a wall that
+	// passes because it stopped looking is worse than no wall (gocritic
+	// offBy1 flags exactly this).
 	body := string(src)
-	fn := body[strings.Index(body, "func fetchSAMLMetadataOverNetwork"):]
-	fn = fn[:strings.Index(fn, "\n}\n")]
+	start := strings.Index(body, "func fetchSAMLMetadataOverNetwork")
+	if start < 0 {
+		t.Fatal("fetchSAMLMetadataOverNetwork not found — this wall is pinning nothing")
+	}
+	fn := body[start:]
+	end := strings.Index(fn, "\n}\n")
+	if end < 0 {
+		t.Fatal("could not find the end of fetchSAMLMetadataOverNetwork")
+	}
+	fn = fn[:end]
 	if strings.Contains(fn, "isPrivateHost(") && !strings.Contains(fn, "isPrivateHostContext(") {
 		t.Fatal("the SAML pre-flight must use the ctx-bounded form, not the Background() one")
 	}
