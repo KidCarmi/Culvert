@@ -458,19 +458,101 @@ func parseRepublishCase(t *testing.T, fset *token.FileSet, el ast.Expr) (string,
 	return mutator, run
 }
 
-// funcLitCallsMethod reports whether run's body contains a call whose selector
-// is the named method.
+// funcLitCallsMethod reports whether run's own body calls the named method on
+// an *IPFilter the case itself binds (`f := &IPFilter{...}`). A same-named
+// method on another receiver (timer.Reset, other.Add) does not count, and
+// nested func literals are not descended into: a call inside a closure the
+// case never invokes cannot observe anything.
 func funcLitCallsMethod(run *ast.FuncLit, method string) bool {
+	receivers := ipFilterReceivers(run.Body)
 	called := false
-	ast.Inspect(run.Body, func(m ast.Node) bool {
-		if call, ok := m.(*ast.CallExpr); ok {
-			if sel, ok := call.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == method {
-				called = true
+	for _, stmt := range run.Body.List {
+		ast.Inspect(stmt, func(m ast.Node) bool {
+			if called {
+				return false
+			}
+			if _, nested := m.(*ast.FuncLit); nested {
+				return false
+			}
+			if call, ok := m.(*ast.CallExpr); ok {
+				called = isIPFilterMethodCall(call, receivers, method)
+			}
+			return !called
+		})
+	}
+	return called
+}
+
+// isIPFilterMethodCall reports whether call is `<recv>.<method>(...)` with recv
+// one of the case's bound *IPFilter identifiers.
+func isIPFilterMethodCall(call *ast.CallExpr, receivers map[string]bool, method string) bool {
+	sel, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok || sel.Sel.Name != method {
+		return false
+	}
+	id, ok := sel.X.(*ast.Ident)
+	return ok && receivers[id.Name]
+}
+
+// ipFilterReceivers returns the identifiers a body's direct statements bind to
+// `&IPFilter{...}` with `:=`.
+func ipFilterReceivers(body *ast.BlockStmt) map[string]bool {
+	out := map[string]bool{}
+	for _, stmt := range body.List {
+		as, ok := stmt.(*ast.AssignStmt)
+		if !ok || as.Tok != token.DEFINE || len(as.Lhs) != len(as.Rhs) {
+			continue
+		}
+		for i, rhs := range as.Rhs {
+			id, ok := as.Lhs[i].(*ast.Ident)
+			if ok && isIPFilterAddrLit(rhs) {
+				out[id.Name] = true
 			}
 		}
-		return !called
-	})
-	return called
+	}
+	return out
+}
+
+func isIPFilterAddrLit(e ast.Expr) bool {
+	u, ok := e.(*ast.UnaryExpr)
+	if !ok || u.Op != token.AND {
+		return false
+	}
+	lit, ok := u.X.(*ast.CompositeLit)
+	if !ok {
+		return false
+	}
+	typ, ok := lit.Type.(*ast.Ident)
+	return ok && typ.Name == "IPFilter"
+}
+
+// TestIPFilterView_FuncLitCallsMethodRejectsLookalikes is the negative control
+// for the AST check above: only a direct call on the case's own *IPFilter
+// counts.
+func TestIPFilterView_FuncLitCallsMethodRejectsLookalikes(t *testing.T) {
+	cases := []struct {
+		name, src string
+		want      bool
+	}{
+		{"direct call on bound filter", `func(t *testing.T) { f := &IPFilter{}; f.Reset() }`, true},
+		{"call in if-init on bound filter", `func(t *testing.T) { f := &IPFilter{}; if err := f.Reset(); err != nil {} }`, true},
+		{"same-named method on another receiver", `func(t *testing.T) { f := &IPFilter{}; timer.Reset(); _ = f }`, false},
+		{"receiver not bound to an IPFilter", `func(t *testing.T) { f := &other{}; f.Reset() }`, false},
+		{"call only inside a nested closure", `func(t *testing.T) { f := &IPFilter{}; _ = func() { f.Reset() } }`, false},
+	}
+	for _, c := range cases {
+		expr, err := parser.ParseExpr(c.src)
+		if err != nil {
+			t.Fatalf("%s: %v", c.name, err)
+		}
+		fl, ok := expr.(*ast.FuncLit)
+		if !ok {
+			t.Fatalf("%s: not a func literal", c.name)
+		}
+		if got := funcLitCallsMethod(fl, "Reset"); got != c.want {
+			t.Errorf("%s: funcLitCallsMethod = %v, want %v", c.name, got, c.want)
+		}
+	}
 }
 
 // TestIPFilterView_UnpublishedFilterAllowsAll pins the nil-view fallback: a
