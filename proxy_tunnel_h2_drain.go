@@ -44,6 +44,7 @@ import (
 // inspected native-H2 tunnel. Built once at startup (initH2InspectServer) so it is
 // never nil when a tunnel or the shutdown hook needs it.
 type h2InspectShared struct {
+	//lint:ignore SA1019 temporary compatibility bridge: x/net v0.59 deprecated this x/net/http2 API; kept until the inspected-H2 path migrates to Go's stdlib HTTP/2 APIs.
 	srv  *http2.Server
 	base *http.Server
 }
@@ -87,6 +88,7 @@ func warnH2InspectFallbackOnce() {
 // newH2InspectServer builds and ConfigureServer-wires a shared server. Split from
 // initH2InspectServer so tests can build a LOCAL instance without driving the global.
 func newH2InspectServer() *h2InspectShared {
+	//lint:ignore SA1019 temporary compatibility bridge: x/net v0.59 deprecated this x/net/http2 API; kept until the inspected-H2 path migrates to Go's stdlib HTTP/2 APIs.
 	srv := &http2.Server{
 		MaxConcurrentStreams: h2MaxConcurrentStreams,
 		IdleTimeout:          tunnelIdleTimeout,
@@ -100,6 +102,7 @@ func newH2InspectServer() *h2InspectShared {
 	// wired regardless; we log the (unreachable-for-us) error for completeness. It
 	// preserves our non-zero caps and only defaults IdleTimeout when zero (ours is
 	// tunnelIdleTimeout).
+	//lint:ignore SA1019 temporary compatibility bridge: x/net v0.59 deprecated this x/net/http2 API; kept until the inspected-H2 path migrates to Go's stdlib HTTP/2 APIs.
 	if err := http2.ConfigureServer(base, srv); err != nil {
 		logger.Printf("SSL_INSPECT(h2) ConfigureServer: %v", err)
 	}
