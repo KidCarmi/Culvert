@@ -540,7 +540,7 @@ expected HTTP 200 response.
 
 ```bash
 docker compose -f docker-compose.yml -f docker-compose.monitoring.yml up -d
-# Grafana → http://localhost:3000 (admin / culvert)
+# Grafana → http://localhost:3000 (user: admin, password: $GF_ADMIN_PASSWORD, default "changeme")
 ```
 
 ### Prometheus Scrape Config

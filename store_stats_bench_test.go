@@ -352,7 +352,7 @@ func TestTopHosts_ConcurrentRecordDecayAndTop(t *testing.T) {
 	// says this test means by "the flood is the clock".
 	//
 	// Without the pacing this test was FLAKY under CPU contention (chaos register
-	// row ST-9, found by the CHAOS-66 sweep's determinism gate). The flood
+	// row ST-9, found by the CHAOS-67 sweep's determinism gate). The flood
 	// goroutine could complete all 20 000 inserts — ~156 decay passes at this cap
 	// — while the scheduler starved the four hot workers, so hot-a/hot-b were
 	// halved to 1 and lost an arbitrary tie to a count-1 junk entry. Measured

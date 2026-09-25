@@ -1407,7 +1407,7 @@ func apiURLCatLookup(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "host query param required", http.StatusBadRequest)
 		return
 	}
-	// CHAOS-66: lookupHostCategory below is the SAME quadratic two-tier fusion
+	// CHAOS-67: lookupHostCategory below is the SAME quadratic two-tier fusion
 	// the proxy data path reaches — urlcat's suffix walk plus one BadgerDB
 	// transaction per label. This endpoint takes the host from a query string
 	// inside the 1 MiB header block, so an authenticated VIEWER could park an
@@ -2784,7 +2784,7 @@ func apiPolicyTest(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "host is required", http.StatusBadRequest)
 		return
 	}
-	// CHAOS-66: this handler reaches walkPolicyTestRules and lookupHostCategory
+	// CHAOS-67: this handler reaches walkPolicyTestRules and lookupHostCategory
 	// with a caller-supplied host — the same quadratic fusion the proxy data
 	// path bounds. Same predicate, same reason (see proxy_host_bounds.go).
 	if rawAuthorityOversize(body.Host) {

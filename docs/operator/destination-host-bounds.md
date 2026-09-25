@@ -1,4 +1,4 @@
-# Destination-host bounds on the proxy data path (CHAOS-66)
+# Destination-host bounds on the proxy data path (CHAOS-67)
 
 **Audience:** operators running Culvert as an in-line forward proxy.
 **Scope:** the bound Culvert applies to the client-supplied destination authority
@@ -202,5 +202,5 @@ bound derived from a specification governs whichever representation the
 specification is about — check which one you are measuring, and make the control
 test carry an example of every representation the input can arrive in.**
 
-See `roadmap/CHAOS-ENGINEERING-REVIEW.md` §36 for the full failure analysis,
+See `roadmap/CHAOS-ENGINEERING-REVIEW.md` §37 for the full failure analysis,
 register rows PX-21…PX-25, and the gate inventory.

@@ -19,7 +19,7 @@ import (
 	"github.com/KidCarmi/Culvert/internal/reqlog"
 )
 
-// ─── CHAOS-66 — the client-supplied destination authority on the proxy path ───
+// ─── CHAOS-67 — the client-supplied destination authority on the proxy path ───
 //
 // The proxy port is reachable by every client on the network and nothing bounded
 // the destination authority. net/http admits its 1 MiB default of request line
@@ -31,8 +31,8 @@ import (
 // ~16 minutes of a core at the 1 MiB header default, spent before
 // authentication, with all three front-door limiters shipping disabled.
 //
-// The gates below split deliberately. TestChaos66_Defect* FAIL against the
-// pre-fix tree. TestChaos66_Control* prove the bound did not break the data
+// The gates below split deliberately. TestChaos67_Defect* FAIL against the
+// pre-fix tree. TestChaos67_Control* prove the bound did not break the data
 // plane it sits in front of — a gate that refused every destination would pass
 // every defect gate while being a total egress outage, which is far worse than
 // the defect.
@@ -75,11 +75,11 @@ func chaos66Isolate(t *testing.T) {
 
 // ───────────────────────── DEFECT GATES ─────────────────────────
 
-// TestChaos66_DefectOversizeAuthorityRefusedBeforeAnyState is the primary gate.
+// TestChaos67_DefectOversizeAuthorityRefusedBeforeAnyState is the primary gate.
 // Pre-fix the request ran the whole pipeline and answered 403 (default deny)
 // after writing the megabyte into both sinks; post-fix it is refused 400 with
 // nothing retained.
-func TestChaos66_DefectOversizeAuthorityRefusedBeforeAnyState(t *testing.T) {
+func TestChaos67_DefectOversizeAuthorityRefusedBeforeAnyState(t *testing.T) {
 	chaos66Isolate(t)
 	chaos66CaptureLog(t)
 
@@ -101,14 +101,14 @@ func TestChaos66_DefectOversizeAuthorityRefusedBeforeAnyState(t *testing.T) {
 	}
 }
 
-// TestChaos66_DefectConnectFormIsBounded covers the DOMINANT traffic class. A
+// TestChaos67_DefectConnectFormIsBounded covers the DOMINANT traffic class. A
 // CONNECT request carries its authority in the request target rather than a Host
 // header, net/http puts it in r.Host either way, and every HTTPS request through
 // this proxy is one — so a gate proven only against the plain-HTTP form is
 // proven against the minority of traffic. It also pins that the refusal happens
 // BEFORE the tunnel is established: a 400 on the CONNECT means no 200, no
 // hijack, and no drain registration.
-func TestChaos66_DefectConnectFormIsBounded(t *testing.T) {
+func TestChaos67_DefectConnectFormIsBounded(t *testing.T) {
 	chaos66Isolate(t)
 	chaos66CaptureLog(t)
 
@@ -133,12 +133,12 @@ func TestChaos66_DefectConnectFormIsBounded(t *testing.T) {
 	}
 }
 
-// TestChaos66_ControlRefusalIsAccountedAsABlock pins that the two gates agree
+// TestChaos67_ControlRefusalIsAccountedAsABlock pins that the two gates agree
 // about whether the refusal happened. The first version of this change counted
 // statBlocked on the SOCKS5 path and not on the HTTP one — two refusals of the
 // same class disagreeing about their own accounting, which is the kind of split
 // that makes a dashboard figure quietly wrong.
-func TestChaos66_ControlRefusalIsAccountedAsABlock(t *testing.T) {
+func TestChaos67_ControlRefusalIsAccountedAsABlock(t *testing.T) {
 	chaos66Isolate(t)
 	chaos66CaptureLog(t)
 
@@ -150,7 +150,7 @@ func TestChaos66_ControlRefusalIsAccountedAsABlock(t *testing.T) {
 	}
 }
 
-// TestChaos66_DefectProcessLogStaysBounded measures the BYTES one oversize
+// TestChaos67_DefectProcessLogStaysBounded measures the BYTES one oversize
 // request commits to the process log — a rotating file capped at 50 MB keeping
 // ONE archive, which also holds the diagnostics for every other incident.
 //
@@ -158,7 +158,7 @@ func TestChaos66_ControlRefusalIsAccountedAsABlock(t *testing.T) {
 // eight requests here would cost ~2 MiB. Post-fix the whole run is a few hundred
 // bytes, because the rate-limited rejection line names the LENGTH and never the
 // value.
-func TestChaos66_DefectProcessLogStaysBounded(t *testing.T) {
+func TestChaos67_DefectProcessLogStaysBounded(t *testing.T) {
 	chaos66Isolate(t)
 	logs := chaos66CaptureLog(t)
 
@@ -181,10 +181,10 @@ func TestChaos66_DefectProcessLogStaysBounded(t *testing.T) {
 	}
 }
 
-// TestChaos66_DefectRequestLogNeverCarriesOversizeHost pins the durable JSONL
+// TestChaos67_DefectRequestLogNeverCarriesOversizeHost pins the durable JSONL
 // feed. The Host field is written verbatim; pre-fix it carried the full 262 143
 // bytes on the default-deny path.
-func TestChaos66_DefectRequestLogNeverCarriesOversizeHost(t *testing.T) {
+func TestChaos67_DefectRequestLogNeverCarriesOversizeHost(t *testing.T) {
 	chaos66Isolate(t)
 	chaos66CaptureLog(t)
 
@@ -200,14 +200,14 @@ func TestChaos66_DefectRequestLogNeverCarriesOversizeHost(t *testing.T) {
 	}
 }
 
-// TestChaos66_DefectIPBlockedPathDoesNotRetainTheAuthority is the ORDERING gate,
+// TestChaos67_DefectIPBlockedPathDoesNotRetainTheAuthority is the ORDERING gate,
 // and it is the one that decides where the bound may live. IP_BLOCKED and
 // RATE_LIMITED both write r.Host into the request log, and they run BEFORE the
 // host-canonicalization step where RISK-013's IDNA gate sits — so a bound placed
 // at that gate (the intuitive home for a host check) would sit behind two sinks
 // that had already retained the value. This test fails against that shape as
 // well as against the pre-fix tree.
-func TestChaos66_DefectIPBlockedPathDoesNotRetainTheAuthority(t *testing.T) {
+func TestChaos67_DefectIPBlockedPathDoesNotRetainTheAuthority(t *testing.T) {
 	chaos66Isolate(t)
 	chaos66CaptureLog(t)
 
@@ -245,7 +245,7 @@ func TestChaos66_DefectIPBlockedPathDoesNotRetainTheAuthority(t *testing.T) {
 	}
 }
 
-// TestChaos66_DefectCostIsFlatInAuthorityLength is the CPU gate, expressed as a
+// TestChaos67_DefectCostIsFlatInAuthorityLength is the CPU gate, expressed as a
 // RATIO measured in ONE run so it is machine-independent (the repo's standing
 // rule after the sanitizeLog and connlimit episodes: a gate whose bound has to
 // be re-baselined per machine gets muted).
@@ -253,7 +253,7 @@ func TestChaos66_DefectIPBlockedPathDoesNotRetainTheAuthority(t *testing.T) {
 // Pre-fix the ratio was ~8 700x (3.94 s against 0.45 ms). Post-fix the oversize
 // request takes the O(1) reject path and is CHEAPER than the ordinary one, so
 // the ratio is below 1. The bound of 20x is orders of magnitude clear of both.
-func TestChaos66_DefectCostIsFlatInAuthorityLength(t *testing.T) {
+func TestChaos67_DefectCostIsFlatInAuthorityLength(t *testing.T) {
 	chaos66Isolate(t)
 	chaos66CaptureLog(t)
 
@@ -297,14 +297,14 @@ func TestChaos66_DefectCostIsFlatInAuthorityLength(t *testing.T) {
 	}
 }
 
-// TestChaos66_DefectTopHostsNeverRetainsAnOversizeKey pins the KEY-SIZE axis of
+// TestChaos67_DefectTopHostsNeverRetainsAnOversizeKey pins the KEY-SIZE axis of
 // the top-hosts counter. Its documented bound is topHostsMaxEntries (10 000)
 // distinct hosts, which is a bound on the ENTRY COUNT and never was one on the
 // key size — the identical blindness §32 found in internal/lockout, whose
 // Cleanup doc claimed the maps were bounded "against an unbounded-memory DoS".
 // At the cap, 1 MiB keys are ~10 GiB of resident heap in an in-line gateway
 // whose OOM is a total traffic outage.
-func TestChaos66_DefectTopHostsNeverRetainsAnOversizeKey(t *testing.T) {
+func TestChaos67_DefectTopHostsNeverRetainsAnOversizeKey(t *testing.T) {
 	chaos66Isolate(t)
 	chaos66CaptureLog(t)
 
@@ -333,7 +333,7 @@ func TestChaos66_DefectTopHostsNeverRetainsAnOversizeKey(t *testing.T) {
 	}
 }
 
-// TestChaos66_DefectSOCKS5RefusesOversizeDestination covers the other data-path
+// TestChaos67_DefectSOCKS5RefusesOversizeDestination covers the other data-path
 // protocol, and it is deliberately written to be NON-VACUOUS. RFC 1928 §4
 // length-prefixes DOMAINNAME with one byte, so the protocol caps the destination
 // at 255 — BELOW the 261-byte authority bound. The first version of this fix
@@ -341,7 +341,7 @@ func TestChaos66_DefectTopHostsNeverRetainsAnOversizeKey(t *testing.T) {
 // code, and the first version of this test asserted only "no oversize host
 // reached the request log", which passes vacuously at 255 bytes. So this now
 // asserts the REFUSAL and the counter: a gate that cannot fire fails here.
-func TestChaos66_DefectSOCKS5RefusesOversizeDestination(t *testing.T) {
+func TestChaos67_DefectSOCKS5RefusesOversizeDestination(t *testing.T) {
 	chaos66Isolate(t)
 	chaos66CaptureLog(t)
 
@@ -414,11 +414,11 @@ func TestChaos66_DefectSOCKS5RefusesOversizeDestination(t *testing.T) {
 	}
 }
 
-// TestChaos66_DefectAdminURLLookupIsBounded covers the admin plane. The
+// TestChaos67_DefectAdminURLLookupIsBounded covers the admin plane. The
 // url-lookup endpoint reaches the SAME two-tier fusion from a query string
 // inside the 1 MiB header block, so pre-fix an authenticated VIEWER could park
 // an admin-plane goroutine for minutes with one GET.
-func TestChaos66_DefectAdminURLLookupIsBounded(t *testing.T) {
+func TestChaos67_DefectAdminURLLookupIsBounded(t *testing.T) {
 	chaos66Isolate(t)
 	chaos66CaptureLog(t)
 
@@ -438,10 +438,10 @@ func TestChaos66_DefectAdminURLLookupIsBounded(t *testing.T) {
 
 // ───────────────────────── CONTROLS ─────────────────────────
 
-// TestChaos66_ControlBoundIsInclusiveAndDerived pins the arithmetic in code, so
+// TestChaos67_ControlBoundIsInclusiveAndDerived pins the arithmetic in code, so
 // the derivation stays checkable rather than living only in a comment, and pins
 // that the limit is INCLUSIVE — an off-by-one here refuses a legal destination.
-func TestChaos66_ControlBoundIsInclusiveAndDerived(t *testing.T) {
+func TestChaos67_ControlBoundIsInclusiveAndDerived(t *testing.T) {
 	// "[" + host + "]" + ":" + "65535"
 	if want := 1 + maxDestHostLen + 1 + 1 + 5; maxDestAuthorityLen != want {
 		t.Errorf("maxDestAuthorityLen = %d, want %d (1 + %d + 1 + 1 + 5) — the constant no longer matches its stated derivation",
@@ -478,11 +478,11 @@ func TestChaos66_ControlBoundIsInclusiveAndDerived(t *testing.T) {
 	}
 }
 
-// TestChaos66_ControlOrdinaryDestinationStillProxies is the control that matters
+// TestChaos67_ControlOrdinaryDestinationStillProxies is the control that matters
 // most: the cheapest way to pass every defect gate above is to refuse every
 // destination, which is a total egress outage. This drives the real allow path
 // end to end against a live backend.
-func TestChaos66_ControlOrdinaryDestinationStillProxies(t *testing.T) {
+func TestChaos67_ControlOrdinaryDestinationStillProxies(t *testing.T) {
 	chaos66Isolate(t)
 	chaos66CaptureLog(t)
 
@@ -504,7 +504,7 @@ func TestChaos66_ControlOrdinaryDestinationStillProxies(t *testing.T) {
 	}
 }
 
-// TestChaos66_ControlLegitimateAuthorityShapesAreAccepted pins the shapes the
+// TestChaos67_ControlLegitimateAuthorityShapesAreAccepted pins the shapes the
 // register warned the bound had to answer for before it could ship.
 //
 // **The IDN cases are here because their absence let a real regression through.**
@@ -515,7 +515,7 @@ func TestChaos66_ControlOrdinaryDestinationStillProxies(t *testing.T) {
 // proxy that cannot reach international destinations is a customer outage, so
 // these cases are not decoration: they are the control that makes the raw tier's
 // generosity load-bearing rather than arbitrary.
-func TestChaos66_ControlLegitimateAuthorityShapesAreAccepted(t *testing.T) {
+func TestChaos67_ControlLegitimateAuthorityShapesAreAccepted(t *testing.T) {
 	for _, tc := range []struct{ what, authority string }{
 		{"plain", "example.com"},
 		{"with port", "example.com:8443"},
@@ -608,12 +608,12 @@ func chaos66MaxIDN(t *testing.T) string {
 	return best
 }
 
-// TestChaos66_ControlRawCapExceedsMaximumIDNExpansion is the DERIVATION control
+// TestChaos67_ControlRawCapExceedsMaximumIDNExpansion is the DERIVATION control
 // for the raw pre-cap. The cap is only safe if no host whose canonical form fits
 // in DNS can exceed it in raw UTF-8 — otherwise the proxy refuses a destination
 // that resolves. It measures the widest expansion this build's idna actually
 // produces rather than trusting the arithmetic in the comment.
-func TestChaos66_ControlRawCapExceedsMaximumIDNExpansion(t *testing.T) {
+func TestChaos67_ControlRawCapExceedsMaximumIDNExpansion(t *testing.T) {
 	maxIDN := chaos66MaxIDN(t)
 	canonical, err := idna.ToASCII(maxIDN)
 	if err != nil {
@@ -633,12 +633,12 @@ func TestChaos66_ControlRawCapExceedsMaximumIDNExpansion(t *testing.T) {
 	}
 }
 
-// TestChaos66_DefectDotDenseASCIIIsStillRefusedByTheCanonicalTier is the gate
+// TestChaos67_DefectDotDenseASCIIIsStillRefusedByTheCanonicalTier is the gate
 // that keeps the raw tier's generosity from being a hole. The raw pre-cap has to
 // be 1 KiB to admit IDN expansion, and on its own that still admits a 1 000-byte
 // dot-dense ASCII authority costing ~1.3 ms of matcher walk. ASCII does not
 // shrink under IDNA, so the canonical tier refuses exactly that shape.
-func TestChaos66_DefectDotDenseASCIIIsStillRefusedByTheCanonicalTier(t *testing.T) {
+func TestChaos67_DefectDotDenseASCIIIsStillRefusedByTheCanonicalTier(t *testing.T) {
 	chaos66Isolate(t)
 	chaos66CaptureLog(t)
 
@@ -662,12 +662,12 @@ func TestChaos66_DefectDotDenseASCIIIsStillRefusedByTheCanonicalTier(t *testing.
 	}
 }
 
-// TestChaos66_ControlRejectionIsStillRecorded is the evidence control. Bounding
+// TestChaos67_ControlRejectionIsStillRecorded is the evidence control. Bounding
 // the bytes must not delete the fact that the proxy port is being probed —
 // exactly the trade §32 made for the audit entry. The line carries the LENGTH
 // and the cumulative count; the magnitude must never live only in the counter
 // with nothing in the log to point at it.
-func TestChaos66_ControlRejectionIsStillRecorded(t *testing.T) {
+func TestChaos67_ControlRejectionIsStillRecorded(t *testing.T) {
 	chaos66Isolate(t)
 	logs := chaos66CaptureLog(t)
 
@@ -686,9 +686,9 @@ func TestChaos66_ControlRejectionIsStillRecorded(t *testing.T) {
 	}
 }
 
-// TestChaos66_ControlLogIsRateLimited pins that the mitigation is not itself a
+// TestChaos67_ControlLogIsRateLimited pins that the mitigation is not itself a
 // write amplifier: a flood must cost at most one line per window.
-func TestChaos66_ControlLogIsRateLimited(t *testing.T) {
+func TestChaos67_ControlLogIsRateLimited(t *testing.T) {
 	chaos66Isolate(t)
 	logs := chaos66CaptureLog(t)
 
