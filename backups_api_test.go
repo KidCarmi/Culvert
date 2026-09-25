@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"regexp"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -386,7 +387,7 @@ func TestAPIBackupOperationStatus_TerminalStateInvalidatesListingCache(t *testin
 			backupsCache.mu.Unlock()
 			agent := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("Content-Type", "application/json")
-				_, _ = w.Write([]byte(`{"op_id":"01ARZ3NDEKTSV4RRFFQ69G5FAV","state":"` + tc.state + `"}`))
+				_, _ = w.Write([]byte(`{"op_id":"01ARZ3NDEKTSV4RRFFQ69G5FAV","kind":"backup.create","state":"` + tc.state + `"}`))
 			}))
 			defer agent.Close()
 			t.Setenv(envMaintAgentURL, agent.URL)
@@ -451,5 +452,45 @@ func TestAPIBackupOperationStatus_PassesThroughAgentRecord(t *testing.T) {
 	_ = json.Unmarshal([]byte(opJSON), &want)
 	if got["state"] != want["state"] || got["op_id"] != want["op_id"] {
 		t.Fatalf("body = %s, want a verbatim pass-through of %s", w.Body.String(), opJSON)
+	}
+}
+
+// TestAPIBackupOperationStatus_NonBackupOpIsNotFound pins that the viewer-role
+// backup poll route does not disclose other agent operations (an upgrade's
+// params/progress/result) whose op id a viewer can learn elsewhere — the
+// agent's operation endpoint is global. A non-backup or undecodable record is
+// answered like an unknown id, and does not touch the listing cache.
+func TestAPIBackupOperationStatus_NonBackupOpIsNotFound(t *testing.T) {
+	for name, body := range map[string]string{
+		"upgrade":      `{"op_id":"01ARZ3NDEKTSV4RRFFQ69G5FAV","kind":"upgrade.apply","state":"succeeded","params":{"target":"v9"}}`,
+		"missing_kind": `{"op_id":"01ARZ3NDEKTSV4RRFFQ69G5FAV","state":"succeeded"}`,
+		"not_json":     `not json`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			resetBackupsCache(t)
+			backupsCache.mu.Lock()
+			backupsCache.payload, backupsCache.at = map[string]any{"available": true, "count": 0}, time.Now()
+			backupsCache.mu.Unlock()
+			agent := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(body))
+			}))
+			defer agent.Close()
+			t.Setenv(envMaintAgentURL, agent.URL)
+
+			w := getAPIBackupOperationStatus(t, RoleViewer, "01ARZ3NDEKTSV4RRFFQ69G5FAV")
+			if w.Code != http.StatusNotFound {
+				t.Fatalf("status = %d, want 404 (body=%s)", w.Code, w.Body.String())
+			}
+			if strings.Contains(w.Body.String(), "upgrade") || strings.Contains(w.Body.String(), "v9") {
+				t.Fatalf("non-backup op record leaked: %s", w.Body.String())
+			}
+			backupsCache.mu.Lock()
+			kept := backupsCache.payload != nil
+			backupsCache.mu.Unlock()
+			if !kept {
+				t.Fatal("a refused non-backup op must not invalidate the listing cache")
+			}
+		})
 	}
 }

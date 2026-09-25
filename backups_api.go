@@ -221,6 +221,31 @@ type backupCreateUIRequest struct {
 // / state / deduped — a few hundred bytes of JSON).
 const backupTriggerReadBound = 1 << 16
 
+// backupCreateEnvVar validates that encrypt and passphraseEnvVar agree and
+// returns the trimmed env var name, or a non-empty 400 message.
+func backupCreateEnvVar(body backupCreateUIRequest) (envVar, errMsg string) {
+	envVar = strings.TrimSpace(body.PassphraseEnvVar)
+	switch {
+	case body.Encrypt && envVar == "":
+		return "", "encrypt requires passphraseEnvVar (the name of an env var the maintenance agent is allowed to read)"
+	case !body.Encrypt && envVar != "":
+		return "", "passphraseEnvVar must be omitted unless encrypt is true"
+	}
+	return envVar, ""
+}
+
+// backupArchiveName generates the on-demand archive filename. An encrypted
+// archive is an AES-GCM blob, not gzip, so it carries the repository's
+// *.tar.gz.enc convention (the agent's own pre-upgrade backups use it too) —
+// tooling that selects by suffix must not mistake it for gzip.
+func backupArchiveName(now time.Time, encrypt bool) string {
+	suffix := ".tar.gz"
+	if encrypt {
+		suffix = ".tar.gz.enc"
+	}
+	return fmt.Sprintf("culvert-backup-%s-%06d%s", now.Format("20060102-150405"), now.Nanosecond()/1000, suffix)
+}
+
 // apiBackupsCreate triggers a new backup via the maintenance agent's
 // existing POST /v1/backups and returns its op_id for polling. Caller has
 // already checked RoleAdmin. Failure to reach or use the agent is reported
@@ -234,13 +259,9 @@ func apiBackupsCreate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid JSON body: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	envVar := strings.TrimSpace(body.PassphraseEnvVar)
-	switch {
-	case body.Encrypt && envVar == "":
-		http.Error(w, "encrypt requires passphraseEnvVar (the name of an env var the maintenance agent is allowed to read)", http.StatusBadRequest)
-		return
-	case !body.Encrypt && envVar != "":
-		http.Error(w, "passphraseEnvVar must be omitted unless encrypt is true", http.StatusBadRequest)
+	envVar, verr := backupCreateEnvVar(body)
+	if verr != "" {
+		http.Error(w, verr, http.StatusBadRequest)
 		return
 	}
 	ep, ok := resolveLocalMaintAgentEndpoint()
@@ -248,15 +269,7 @@ func apiBackupsCreate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "maintenance agent not configured", http.StatusServiceUnavailable)
 		return
 	}
-	now := time.Now().UTC()
-	// An encrypted archive is an AES-GCM blob, not gzip, so it carries the
-	// repository's *.tar.gz.enc convention (the agent's own pre-upgrade backups
-	// use it too) — tooling that selects by suffix must not mistake it for gzip.
-	suffix := ".tar.gz"
-	if body.Encrypt {
-		suffix = ".tar.gz.enc"
-	}
-	filename := fmt.Sprintf("culvert-backup-%s-%06d%s", now.Format("20060102-150405"), now.Nanosecond()/1000, suffix)
+	filename := backupArchiveName(time.Now().UTC(), body.Encrypt)
 	agentReq := backupCreateAgentRequest{Filename: filename, Encrypt: body.Encrypt}
 	if envVar != "" {
 		agentReq.PassphraseRef = "env:" + envVar
@@ -309,15 +322,20 @@ func apiBackupsCreate(w http.ResponseWriter, r *http.Request) {
 // being rejected there, and surfacing as a misleading 502 upstream failure.
 var backupOpIDRE = regexp.MustCompile(`^[0-7][0-9A-HJKMNP-TV-Za-hjkmnp-tv-z]{25}$`)
 
-// backupOpTerminal reports whether an agent op record (ops.Op) has reached a
-// terminal state. Kept in step with cmd/culvert-maint/internal/ops State*.
-func backupOpTerminal(data []byte) bool {
-	var op struct {
-		State string `json:"state"`
-	}
-	if json.Unmarshal(data, &op) != nil {
-		return false
-	}
+// backupOpKind is the agent's op kind for a backup this API can trigger
+// (cmd/culvert-maint/internal/ops KindBackupCreate).
+const backupOpKind = "backup.create"
+
+// backupOpRecord is the subset of the agent's op record (ops.Op) this API
+// inspects before passing the record through.
+type backupOpRecord struct {
+	Kind  string `json:"kind"`
+	State string `json:"state"`
+}
+
+// terminal reports whether the op has reached a terminal state. Kept in step
+// with cmd/culvert-maint/internal/ops State*.
+func (op backupOpRecord) terminal() bool {
 	switch op.State {
 	case "succeeded", "failed", "cancelled":
 		return true
@@ -361,11 +379,20 @@ func apiBackupOperationStatus(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("maintenance agent returned HTTP %d", status), http.StatusBadGateway)
 		return
 	}
+	// The agent's operation endpoint is GLOBAL — it also answers upgrade and
+	// restore ops, whose params/progress/result this viewer-role backup route
+	// must not disclose. Anything that is not a backup op (or cannot be
+	// decoded as one) is answered exactly like an unknown id.
+	var op backupOpRecord
+	if json.Unmarshal(data, &op) != nil || op.Kind != backupOpKind {
+		http.Error(w, "operation not found", http.StatusNotFound)
+		return
+	}
 	// A terminal op means the archive set may have changed since the listing
 	// was cached — possibly re-cached by a Refresh WHILE the backup was still
 	// running, which the trigger-time invalidation cannot cover. Drop it so
 	// the GUI's completion refresh shows the new archive.
-	if backupOpTerminal(data) {
+	if op.terminal() {
 		backupsCache.mu.Lock()
 		backupsCache.payload = nil
 		backupsCache.mu.Unlock()

@@ -6824,7 +6824,9 @@ paths:
         terminal state, sourced from the CP-local maintenance agent's
         existing GET /v1/operations/{id}. The op record's params only ever
         carry the backup filename, whether it is encrypted, and the
-        passphrase env var NAME (never a secret value).
+        passphrase env var NAME (never a secret value). An operation that is
+        not a backup (the agent's operation endpoint is global) is answered
+        404 exactly like an unknown id.
       security:
         - sessionCookie: []
         - basicAuth: []
@@ -6843,6 +6845,14 @@ paths:
         '400': { $ref: '#/components/responses/PlainBadRequest' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
         '404': { $ref: '#/components/responses/PlainNotFound' }
+        '502':
+          description: Maintenance agent unreachable or returned an unexpected status. Body is plain text.
+          content:
+            text/plain: { schema: { type: string } }
+        '503':
+          description: Maintenance agent not configured. Body is plain text.
+          content:
+            text/plain: { schema: { type: string } }
 
   /api/support/status:
     get:

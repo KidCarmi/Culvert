@@ -7968,7 +7968,7 @@
     },
     "/api/backups/operations/{id}": {
       "get": {
-        "description": "Polls a backup operation (as created by POST /api/backups) to a terminal state, sourced from the CP-local maintenance agent's existing GET /v1/operations/{id}. The op record's params only ever carry the backup filename, whether it is encrypted, and the passphrase env var NAME (never a secret value).",
+        "description": "Polls a backup operation (as created by POST /api/backups) to a terminal state, sourced from the CP-local maintenance agent's existing GET /v1/operations/{id}. The op record's params only ever carry the backup filename, whether it is encrypted, and the passphrase env var NAME (never a secret value). An operation that is not a backup (the agent's operation endpoint is global) is answered 404 exactly like an unknown id.",
         "operationId": "getBackupOperationStatus",
         "responses": {
           "200": {
@@ -7989,6 +7989,26 @@
           },
           "404": {
             "$ref": "#/components/responses/PlainNotFound"
+          },
+          "502": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Maintenance agent unreachable or returned an unexpected status. Body is plain text."
+          },
+          "503": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Maintenance agent not configured. Body is plain text."
           }
         },
         "security": [
