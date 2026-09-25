@@ -101,7 +101,7 @@ jobs:
           if [ "${ENABLED:-}" != "true" ]; then
             echo "::error::R2_PUBLISH_ENABLED is '${ENABLED:-<unset>}', so no release catalog was published."
             echo "::error::R2 is the SOLE catalog origin — GitHub Pages was retired — so this release is not"
-            echo "::error::being served to any appliance, and installed nodes will go stale."
+            echo "::error::being served to any Culvert instance, and installed instances will go stale."
             echo "::error::RECOVERY: set the repository variable R2_PUBLISH_ENABLED=true and provision"
             echo "::error::R2_PUBLIC_BASE plus the R2/Cloudflare secrets (see this workflow's header),"
             echo "::error::then re-run. Nothing is retried automatically."
