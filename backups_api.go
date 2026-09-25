@@ -249,7 +249,14 @@ func apiBackupsCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	now := time.Now().UTC()
-	filename := fmt.Sprintf("culvert-backup-%s-%06d.tar.gz", now.Format("20060102-150405"), now.Nanosecond()/1000)
+	// An encrypted archive is an AES-GCM blob, not gzip, so it carries the
+	// repository's *.tar.gz.enc convention (the agent's own pre-upgrade backups
+	// use it too) — tooling that selects by suffix must not mistake it for gzip.
+	suffix := ".tar.gz"
+	if body.Encrypt {
+		suffix = ".tar.gz.enc"
+	}
+	filename := fmt.Sprintf("culvert-backup-%s-%06d%s", now.Format("20060102-150405"), now.Nanosecond()/1000, suffix)
 	agentReq := backupCreateAgentRequest{Filename: filename, Encrypt: body.Encrypt}
 	if envVar != "" {
 		agentReq.PassphraseRef = "env:" + envVar

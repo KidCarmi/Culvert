@@ -16,6 +16,10 @@ import (
 // filename shape (culvert-backup-YYYYMMDD-HHMMSS-<microseconds>.tar.gz).
 var generatedBackupFilenameRE = regexp.MustCompile(`^culvert-backup-\d{8}-\d{6}-\d{6}\.tar\.gz$`)
 
+// generatedEncryptedBackupFilenameRE is the same shape for an encrypted
+// trigger, which carries the *.tar.gz.enc suffix.
+var generatedEncryptedBackupFilenameRE = regexp.MustCompile(`^culvert-backup-\d{8}-\d{6}-\d{6}\.tar\.gz\.enc$`)
+
 // resetBackupsCache isolates the process-global listing cache per test.
 func resetBackupsCache(t *testing.T) {
 	t.Helper()
@@ -97,7 +101,7 @@ func TestAPIBackups_AgentDownIsHTTP200Unavailable(t *testing.T) {
 
 // postAPIBackups drives POST /api/backups with the given role and JSON body
 // (nil for no body).
-func postAPIBackups(t *testing.T, role UIRole, body map[string]any) (*httptest.ResponseRecorder, map[string]any) {
+func postAPIBackups(t *testing.T, role UIRole, body map[string]any) (w *httptest.ResponseRecorder, parsed map[string]any) {
 	t.Helper()
 	var reqBody *bytes.Reader
 	if body != nil {
@@ -112,9 +116,8 @@ func postAPIBackups(t *testing.T, role UIRole, body map[string]any) (*httptest.R
 	ctx := context.WithValue(context.Background(), uiRoleKey{}, role)
 	r := httptest.NewRequestWithContext(ctx, http.MethodPost, "/api/backups", reqBody)
 	r.Header.Set("Content-Type", "application/json")
-	w := httptest.NewRecorder()
+	w = httptest.NewRecorder()
 	apiBackups(w, r)
-	var parsed map[string]any
 	_ = json.Unmarshal(w.Body.Bytes(), &parsed) // error bodies are plain text, not JSON
 	return w, parsed
 }
@@ -285,6 +288,11 @@ func TestAPIBackupsCreate_EncryptSendsEnvPrefixedRef(t *testing.T) {
 	}
 	if gotReq.PassphraseRef != "env:CULVERT_BACKUP_PASSPHRASE" {
 		t.Fatalf("agent request PassphraseRef = %q, want %q", gotReq.PassphraseRef, "env:CULVERT_BACKUP_PASSPHRASE")
+	}
+	// An encrypted archive is AES-GCM ciphertext, not gzip: it must carry the
+	// *.tar.gz.enc suffix so suffix-based tooling never treats it as gzip.
+	if !generatedEncryptedBackupFilenameRE.MatchString(gotReq.Filename) {
+		t.Fatalf("encrypted backup filename %q, want the culvert-backup-…%s shape", gotReq.Filename, ".tar.gz.enc")
 	}
 }
 
