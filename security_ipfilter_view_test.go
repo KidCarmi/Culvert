@@ -387,7 +387,33 @@ func TestIPFilterView_RepublishCasesCallTheirMutator(t *testing.T) {
 		t.Fatal(err)
 	}
 	checked := 0
+	if lit := findRepublishCasesLiteral(t, file); lit != nil {
+		for _, el := range lit.Elts {
+			mutator, run := parseRepublishCase(t, fset, el)
+			if !funcLitCallsMethod(run, mutator) {
+				t.Errorf("%s: case filed under %q never calls %s — it cannot observe whether that "+
+					"method republishes", fset.Position(el.Pos()), mutator, mutator)
+			}
+			checked++
+		}
+	}
+	// Not-vacuous control: the table was found and every case was walked.
+	if checked == 0 || checked != len(ipFilterRepublishCases) {
+		t.Fatalf("walked %d case(s) but the table holds %d — this check is no longer reading it",
+			checked, len(ipFilterRepublishCases))
+	}
+}
+
+// findRepublishCasesLiteral returns the composite literal assigned to
+// ipFilterRepublishCases, or nil when the declaration is not found (the
+// caller's not-vacuous control then fails).
+func findRepublishCasesLiteral(t *testing.T, file *ast.File) *ast.CompositeLit {
+	t.Helper()
+	var found *ast.CompositeLit
 	ast.Inspect(file, func(n ast.Node) bool {
+		if found != nil {
+			return false
+		}
 		vs, ok := n.(*ast.ValueSpec)
 		if !ok || len(vs.Names) != 1 || vs.Names[0].Name != "ipFilterRepublishCases" || len(vs.Values) != 1 {
 			return true
@@ -396,52 +422,55 @@ func TestIPFilterView_RepublishCasesCallTheirMutator(t *testing.T) {
 		if !ok {
 			t.Fatal("ipFilterRepublishCases is no longer a composite literal; update this check")
 		}
-		for _, el := range lit.Elts {
-			entry, ok := el.(*ast.CompositeLit)
-			if !ok {
-				t.Fatalf("%s: case is not a keyed literal", fset.Position(el.Pos()))
-			}
-			var mutator string
-			var run *ast.FuncLit
-			for _, kv := range entry.Elts {
-				kve, ok := kv.(*ast.KeyValueExpr)
-				if !ok {
-					t.Fatalf("%s: case fields must be keyed", fset.Position(kv.Pos()))
-				}
-				switch kve.Key.(*ast.Ident).Name {
-				case "mutator":
-					if bl, ok := kve.Value.(*ast.BasicLit); ok {
-						mutator, _ = strconv.Unquote(bl.Value)
-					}
-				case "run":
-					run, _ = kve.Value.(*ast.FuncLit)
-				}
-			}
-			if mutator == "" || run == nil {
-				t.Fatalf("%s: case needs a literal mutator name and an inline run func", fset.Position(entry.Pos()))
-			}
-			called := false
-			ast.Inspect(run.Body, func(m ast.Node) bool {
-				if call, ok := m.(*ast.CallExpr); ok {
-					if sel, ok := call.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == mutator {
-						called = true
-					}
-				}
-				return !called
-			})
-			if !called {
-				t.Errorf("%s: case filed under %q never calls %s — it cannot observe whether that "+
-					"method republishes", fset.Position(entry.Pos()), mutator, mutator)
-			}
-			checked++
-		}
+		found = lit
 		return false
 	})
-	// Not-vacuous control: the table was found and every case was walked.
-	if checked == 0 || checked != len(ipFilterRepublishCases) {
-		t.Fatalf("walked %d case(s) but the table holds %d — this check is no longer reading it",
-			checked, len(ipFilterRepublishCases))
+	return found
+}
+
+// parseRepublishCase extracts the literal mutator name and the inline run func
+// from one keyed case literal, failing the test on any other shape.
+func parseRepublishCase(t *testing.T, fset *token.FileSet, el ast.Expr) (string, *ast.FuncLit) {
+	t.Helper()
+	entry, ok := el.(*ast.CompositeLit)
+	if !ok {
+		t.Fatalf("%s: case is not a keyed literal", fset.Position(el.Pos()))
 	}
+	var mutator string
+	var run *ast.FuncLit
+	for _, kv := range entry.Elts {
+		kve, ok := kv.(*ast.KeyValueExpr)
+		if !ok {
+			t.Fatalf("%s: case fields must be keyed", fset.Position(kv.Pos()))
+		}
+		switch kve.Key.(*ast.Ident).Name {
+		case "mutator":
+			if bl, ok := kve.Value.(*ast.BasicLit); ok {
+				mutator, _ = strconv.Unquote(bl.Value)
+			}
+		case "run":
+			run, _ = kve.Value.(*ast.FuncLit)
+		}
+	}
+	if mutator == "" || run == nil {
+		t.Fatalf("%s: case needs a literal mutator name and an inline run func", fset.Position(entry.Pos()))
+	}
+	return mutator, run
+}
+
+// funcLitCallsMethod reports whether run's body contains a call whose selector
+// is the named method.
+func funcLitCallsMethod(run *ast.FuncLit, method string) bool {
+	called := false
+	ast.Inspect(run.Body, func(m ast.Node) bool {
+		if call, ok := m.(*ast.CallExpr); ok {
+			if sel, ok := call.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == method {
+				called = true
+			}
+		}
+		return !called
+	})
+	return called
 }
 
 // TestIPFilterView_UnpublishedFilterAllowsAll pins the nil-view fallback: a
