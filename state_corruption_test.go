@@ -21,6 +21,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/KidCarmi/Culvert/internal/mcp/rollout"
 )
 
 // isolateStateCorruption resets the recorded-corruption map for one test
@@ -421,5 +423,70 @@ func TestCheckStateFileIntegrity_SurfacesOnAuthenticatedDiagnostics(t *testing.T
 	rows = checkStateFileIntegrity()
 	if len(rows) != 1 || rows[0].Status != diagWarn || !strings.Contains(rows[0].Message, "unreconciled") {
 		t.Fatalf("residual quarantine must surface distinctly, got %+v", rows)
+	}
+}
+
+// TestResidualQuarantine_PolicyLearningAndMCPResurfaceAcrossRestart pins
+// the Codex P2 on PR #1408: policy_learning and the MCP canary journals
+// quarantine through quarantineCorruptStateFile but, unlike ui_users /
+// cluster / admin_settings, never re-scanned their .corrupt.* siblings, so
+// their row vanished from /api/diagnostics (and /readyz, and the alert
+// stream) on the next boot while the evidence stayed on disk. Both
+// per-capability files of one MCP kind must count into one record.
+func TestResidualQuarantine_PolicyLearningAndMCPResurfaceAcrossRestart(t *testing.T) {
+	captureStartupAlerts(t)
+	isolateStateCorruption(t)
+
+	dir := t.TempDir()
+	prevDir := dataDir
+	dataDir = dir
+	t.Cleanup(func() { dataDir = prevDir })
+
+	prevPaths := policyLearnPaths
+	t.Cleanup(func() {
+		policyLearnAdminMu.Lock()
+		policyLearnPaths = prevPaths
+		policyLearnAdminMu.Unlock()
+	})
+
+	plStore := filepath.Join(dir, "policy_learning.json")
+	leftovers := []string{
+		plStore + ".corrupt.1",
+		canaryRuntimeStatePath(rollout.CapabilityGateway) + ".corrupt.1",
+		canaryRuntimeStatePath(rollout.CapabilityManagement) + ".corrupt.2",
+		shadowExitAttestationPath() + ".corrupt.3",
+	}
+	for _, f := range leftovers {
+		if err := os.WriteFile(f, []byte("stale"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Simulated restart: the feature is disabled (default), yet the
+	// leftover quarantine must still surface.
+	loadPolicyLearning(policyLearningStartupConfig{StorePath: plStore})
+	noteResidualMCPStateQuarantines()
+
+	recs := stateCorruptionRecordsSnapshot()
+	want := map[string]int{"policy_learning": 1, "mcp_canary_runtime": 2, "mcp_shadow_exit_review": 1}
+	for kind, n := range want {
+		rec, ok := recs[kind]
+		if !ok || !rec.Residual || rec.ResidualCount != n {
+			t.Fatalf("%s: want residual record with count %d, got %+v (ok=%v)", kind, n, rec, ok)
+		}
+	}
+	for _, kind := range []string{"mcp_rollback_rehearsal", "mcp_coordinator_rollback_rehearsal"} {
+		if _, ok := recs[kind]; ok {
+			t.Fatalf("%s: no leftover on disk, must not be recorded", kind)
+		}
+	}
+	codes := map[string]bool{}
+	for _, row := range checkStateFileIntegrity() {
+		codes[row.Code] = true
+	}
+	for kind := range want {
+		if !codes["state_file_"+kind] {
+			t.Fatalf("diagnostics must carry state_file_%s, got %v", kind, codes)
+		}
 	}
 }

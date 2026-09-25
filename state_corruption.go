@@ -139,11 +139,31 @@ func quarantineCorruptStateFile(kind, path string, parseErr error) string {
 // removes the quarantined file. Fires at most once per boot, and never
 // clobbers a richer same-boot record from quarantineCorruptStateFile.
 func noteResidualQuarantine(kind, path string) {
-	if path == "" {
-		return
+	noteResidualQuarantinePaths(kind, path)
+}
+
+// noteResidualQuarantinePaths is noteResidualQuarantine for a kind whose
+// state lives in more than one file (the per-capability MCP journals share
+// one kind): the leftover quarantine siblings of every path are counted
+// together into ONE record, so the second capability's residual is never
+// dropped by the once-per-kind guard. Empty paths are ignored.
+func noteResidualQuarantinePaths(kind string, paths ...string) {
+	var matches []string
+	path := "" // the first path that has leftover siblings, named in the detail
+	for _, p := range paths {
+		if p == "" {
+			continue
+		}
+		m, err := filepath.Glob(p + ".corrupt.*")
+		if err != nil || len(m) == 0 {
+			continue
+		}
+		if path == "" {
+			path = p
+		}
+		matches = append(matches, m...)
 	}
-	matches, err := filepath.Glob(path + ".corrupt.*")
-	if err != nil || len(matches) == 0 {
+	if len(matches) == 0 {
 		return
 	}
 
