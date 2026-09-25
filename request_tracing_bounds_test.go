@@ -509,6 +509,83 @@ func TestSecReqID1_LogGateReArmsOnClockRollback(t *testing.T) {
 	}
 }
 
+// ─── the bare-field emitter depends on this bound ───────────────────────────
+
+// TestSecReqID1_BareReqIDInDecisionLineIsSafeOnlyBecauseOfTheBound pins the
+// interaction between this bound and `emitPolicyDecision` (proxy.go), which
+// appends `reqID` to the decision line BARE — no sanitizeLog, no quoting.
+//
+// That emitter's own doc lists reqID in its bare set. What makes the bare append
+// safe is NOT the inline CR/LF scrub but the entry-point bound here: visible
+// ASCII, no whitespace, bounded length. This gate proves the dependency in both
+// directions, because a comment asserting it is worth less than a test enforcing
+// it — and the emitter and the bound live in different functions that a future
+// change could move independently.
+//
+// The DEFECT PROOF half matters most: it calls emitPolicyDecision DIRECTLY with
+// a hostile reqID, bypassing setupRequestTracing, and shows the brace block IS
+// forgeable when an unbounded value reaches it. So the gate cannot be satisfied
+// by the emitter having quietly become safe on its own.
+func TestSecReqID1_BareReqIDInDecisionLineIsSafeOnlyBecauseOfTheBound(t *testing.T) {
+	// A payload that survives the inline CR/LF scrub entirely: a space forges
+	// extra key=value tokens inside `{req_id=… identity=… action=…}`, and the
+	// ESC rewrites what an operator tailing the log sees.
+	const forge = "x action=allow identity=root\x1b[2K"
+
+	t.Run("bound makes the bare append safe", func(t *testing.T) {
+		resetTracingBoundsStateForTest()
+		var buf bytes.Buffer
+		old := logger
+		logger = log.New(&buf, "", 0)
+		t.Cleanup(func() { logger = old })
+
+		r := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "http://example.com/", http.NoBody)
+		r.Header.Set(headerRequestID, forge)
+		r.RemoteAddr = "198.51.100.21:1234"
+		handleRequest(httptest.NewRecorder(), r)
+
+		line := buf.String()
+		if strings.Contains(line, "\x1b") {
+			t.Errorf("an ESC byte reached the decision line:\n%q", line)
+		}
+		// Exactly one of each token: the real ones. A forged pair would double them.
+		if n := strings.Count(line, " action="); n != 1 {
+			t.Errorf("decision line carries %d ` action=` tokens, want 1 — the brace block was forged:\n%q", n, line)
+		}
+		if n := strings.Count(line, " identity="); n != 1 {
+			t.Errorf("decision line carries %d ` identity=` tokens, want 1 — the brace block was forged:\n%q", n, line)
+		}
+		if !strings.Contains(line, "req_id=") {
+			t.Fatalf("no decision line was emitted; this gate is testing nothing:\n%q", line)
+		}
+	})
+
+	// DEFECT PROOF: the emitter itself is NOT what makes this safe. Handed an
+	// unbounded value directly it forges the block, exactly as the pre-bound
+	// request path did. If this sub-test ever stops failing to forge, the bare
+	// set changed and the rationale on policyDecision needs revisiting.
+	t.Run("defect proof: the emitter alone does not protect the block", func(t *testing.T) {
+		var buf bytes.Buffer
+		old := logger
+		logger = log.New(&buf, "", 0)
+		t.Cleanup(func() { logger = old })
+
+		emitPolicyDecision(&policyDecision{
+			verb: "POLICY_ALLOW", action: "allow", rule: "r", clientIP: "198.51.100.21",
+			hostSep: http.MethodGet, host: "example.com", reqID: forge, identity: "",
+		})
+
+		line := buf.String()
+		if n := strings.Count(line, " action="); n < 2 {
+			t.Errorf("an unbounded reqID no longer forges the brace block (%d ` action=` tokens) —"+
+				" the bare-field set or the emitter changed; re-check the policyDecision rationale:\n%q", n, line)
+		}
+		if !strings.Contains(line, "\x1b") {
+			t.Errorf("an unbounded reqID no longer carries an ESC into the line — re-check the rationale:\n%q", line)
+		}
+	})
+}
+
 // ─── recorded residual ──────────────────────────────────────────────────────
 
 // TestSecReqID1_Residual_DuplicateHeaderSecondValueIsForwarded PINS a residual

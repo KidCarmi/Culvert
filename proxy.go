@@ -872,14 +872,27 @@ const policyLineCallDepth = 2
 //   - hostSep is either the literal "->" or r.Method, and net/http's request
 //     parser admits only RFC 9110 token bytes as a method, so no control
 //     character can reach it.
-//   - reqID is the ONE of the five that can be client-chosen: setupRequestTracing
-//     passes an inbound X-Request-Id through, scrubbed INLINE of CR and LF (the
-//     repo's CodeQL-visible convention) rather than through sanitizeLog. That
-//     strips exactly what could forge a second record, which is why it is safe
-//     here — but it is narrower than sanitizeLog, so a TAB or an ANSI escape
-//     still survives into the line. That is pre-existing and unchanged by this
-//     shape; widening it would alter the emitted bytes and so belongs in its own
-//     change, not one whose acceptance condition is byte-identity.
+//   - reqID is the ONE of the five that can be client-chosen, and what makes it
+//     safe bare is NOT the inline CR/LF scrub but the entry-point BOUND:
+//     setupRequestTracing admits an inbound X-Request-Id only when it is at most
+//     maxClientRequestIDLen bytes of VISIBLE ASCII WITH NO WHITESPACE
+//     (0x21..0x7E) and otherwise replaces it with a freshly minted id, so no
+//     control byte, no space and no unbounded length can reach this buffer
+//     (SEC-REQID-1, request_tracing_bounds.go). IF THAT BOUND IS EVER REMOVED OR
+//     WIDENED, THIS FIELD MUST STOP BEING BARE.
+//
+// The reqID entry previously read that stripping CR/LF "strips exactly what could
+// forge a second record, which is why it is safe here", with a TAB or an ANSI
+// escape surviving as an accepted pre-existing residual. Both halves were wrong in
+// the same direction. The residual was not only a TAB: a SPACE forged extra
+// key=value tokens inside this very `{req_id=… identity=… action=…}` block, which a
+// first-wins parser reads in preference to the real ones. And the value was
+// UNBOUNDED, so one request could write ~1 MiB here — measured at 4,194,968 bytes
+// into the process log from eight requests, against a 50 MB rotating file that
+// keeps one archive. Both are closed at the entry point now, and the dependency is
+// pinned from both sides by
+// TestSecReqID1_BareReqIDInDecisionLineIsSafeOnlyBecauseOfTheBound, whose defect
+// proof calls this emitter directly to show the bare append is NOT self-protecting.
 //
 // Do not add a field to this bare set without stating why its bytes cannot
 // forge a record — the SOCKS5 destination is the standing example of a value
