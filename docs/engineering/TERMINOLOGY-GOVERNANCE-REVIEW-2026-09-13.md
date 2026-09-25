@@ -67,15 +67,16 @@ naming changes, and both are already internally self-consistent as merged:
   condition; this is a correctness fix (the check would have latched `warn` on any node ever serving
   one geo-scoped request) with no naming dimension.
 
-**Part B (scope extension): two new findings, one fixed on the spot.** This program's methodology
+**Part B (scope extension): two new findings, one fixed on the spot, plus one reopened residual (T-51).** This program's methodology
 notes (e.g. 2026-08-30: *"`static/index.html` is byte-unchanged in this window ... so there is no new
 GUI copy to check"*) show that "check the GUI" has, in routine window passes, usually meant grepping
 `static/index.html`. `frontend/src/**` is a second, independently-maintained GUI surface governed by
 the exact same `docs/design/PRODUCT-TERMINOLOGY.md` canon; it was audited when it landed (2026-08-22)
 and again partially on 2026-08-29 (`AuthScreen.tsx`), but its PAC (`features/network/pac/`) and Policy
 Learning (`features/learning/`) screens have not been checked against the canon since. A direct audit
-of those two surfaces against two already-established canonical rules found two
-genuine, previously-undocumented mismatches between the legacy GUI (canonical, per CLAUDE.md and
+of those two surfaces against the canon found two
+genuine, previously-undocumented mismatches (and, separately, a residual of the already-recorded
+"Appliance: not used" rule, T-51 — listed after them) between the legacy GUI (canonical, per CLAUDE.md and
 `PRODUCT-TERMINOLOGY.md`) and the new frontend:
 
 - **T-55** (new): the Policy Learning "accept a recommendation into Policy Draft" action is labeled
@@ -90,8 +91,13 @@ genuine, previously-undocumented mismatches between the legacy GUI (canonical, p
 - **T-56** (new): PAC's named traffic-steering ruleset is the **"steering profile"** in
   `docs/design/PRODUCT-TERMINOLOGY.md`'s canonical table (*"the fourth distinct 'Profile' concept ...
   always say 'steering profile,' never bare 'profile,' on this screen"*). The legacy GUI applies it in its
-  titles and labels since T-50 (`static/index.html:2311-2312,2323,2347,2394`) but NOT in its panel
-  description, which still says "Each profile" and "The **default** profile" (`:2316-2317`); the new
+  titles and editor labels since T-50 (`static/index.html:2311-2312,2323,2347,2394`) but NOT in its panel
+  description, which still says "Each profile" and "The **default** profile" (`:2316-2317`), nor in much
+  of its script-rendered PAC copy — the DIRECT-inventory summary and empty state, both "Profile" table
+  headers, "No custom profiles yet", "(profile pool)", the DIRECT-path confirmation, and the
+  "Profile saved/deleted/validation failed", "Profile PAC URL copied" and "Delete profile?" toasts and
+  dialogs (`static/index.html:14398,14408,14412,14496,14720,14761,14770,14908,14932,14937,14943,14951,15040`; an earlier draft of this report called the legacy labels T-50-compliant —
+  found in review); the new
   frontend's PAC screens say bare **"PAC profile"** / **"profile"** throughout, with no "steering"
   qualifier anywhere — `frontend/src/features/network/pac/ProfilesTab.tsx:1,297,324,384`,
   `ProfileDetail.tsx:1`, `ProfileDraftEditor.tsx:1`, `PACPage.tsx:39`, and also user-facing copy in
@@ -103,6 +109,13 @@ genuine, previously-undocumented mismatches between the legacy GUI (canonical, p
   own prose (mixing a "## Steering profiles" heading with bare "a **profile** is..." sentences
   immediately under it) despite being written after T-50 shipped; **fixed in this pass** (doc-only,
   zero risk — see below).
+- **T-51 (residual — reopened, not a new ID):** `PRODUCT-TERMINOLOGY.md:28` rules that "Appliance" is
+  *not used* and UI copy says **node** or **instance**; T-51 (2026-08-29) fixed the leaks known then. At
+  `993b390` both re-checked surfaces render "appliance" again in user-visible copy — e.g.
+  `ProfileDetail.tsx:381,464,472-473,624,632,639`, `pacShared.tsx:22,55-56,93`,
+  `LearningRecommendations.tsx:254,282` and `PolicyLearningPage.tsx:187,212,246,269,299,401,605` (full
+  inventory in the finding below). An earlier draft of this report missed this rule entirely (found in
+  review). Queued, not fixed here — it is frontend copy and needs a `frontend/dist` rebuild.
 
 Both new findings are cosmetic (neither changes any API, JSON field, config key, or backend behavior —
 both surfaces call the identical endpoints) but real: an admin, support engineer, or documentation
@@ -135,9 +148,10 @@ touch it. Both are live, user-facing surfaces governed by the same canonical ter
 this pass shows feature screens added to the second one after its initial audit have accumulated at
 least two real mismatches.
 
-**Terminology Health Score: 8.5 / 10** (down from 8.7, the score last recorded on merged `main` by the
+**Terminology Health Score: 8.4 / 10** (down from 8.7, the score last recorded on merged `main` by the
 2026-09-11 report; the 2026-09-12 report proposes 8.6 but remains unmerged — see the Program Note).
-The drop reflects two new, real, well-evidenced findings (T-55, T-56) surfaced by extending this
+The drop reflects two new, real, well-evidenced findings (T-55, T-56) and one reopened residual (T-51)
+surfaced by extending this
 program's own audit scope to a previously under-checked surface, not new drift introduced by the
 window's two merged PRs (which introduced none). Both findings are Low-Medium priority, cosmetic-only,
 and one is now partially fixed.
@@ -211,11 +225,18 @@ and one is now partially fixed.
   *"the fourth distinct 'Profile' concept alongside file/decryption/CDR profiles — always say
   'steering profile,' never bare 'profile,' on this screen."*
 - **Current names:**
-  - Legacy GUI (T-50-compliant in its titles and labels): "Steering Profiles" (panel title,
-    `static/index.html:2311`), "+ New Steering Profile" (`:2312`), "Steering Profile ID"
+  - Legacy GUI (T-50-compliant only in its static titles and editor labels): "Steering Profiles" (panel
+    title, `static/index.html:2311`), "+ New Steering Profile" (`:2312`), "Steering Profile ID"
     (`:2323`), "Save Steering Profile" (`:2347`), "Steering Profile" (simulator dropdown label,
-    `:2394`) — but its panel description still says bare "Each profile" and "The **default** profile"
-    (`:2316-2317`), so the legacy screen is not fully compliant either.
+    `:2394`). Its panel description still says bare "Each profile" and "The **default** profile"
+    (`:2316-2317`), and its script-rendered PAC copy says bare "profile" throughout: "profiles can emit
+    DIRECT" (`:14398`), "No profile can emit DIRECT" (`:14408`), the "Profile" column headers
+    (`:14412`, `:14496`), "No custom profiles yet" (`:14720`), "Profile PAC URL copied" (`:14761`),
+    "(profile pool)" (`:14770`), "This profile introduces new DIRECT path(s)" (`:14908`), "Profile
+    validation failed" / "Profile saved" (`:14932`, `:14937`), "Delete profile?" (`:14943`), "Profile
+    deleted" (`:14951`) and "Profiles referencing it block deletion" (`:15040`). The legacy screen is
+    therefore far from compliant; an earlier draft of this report listed only the description lines
+    (found in review).
   - New frontend (`frontend/src/features/network/pac/`): bare **"PAC profile(s)"** / **"profile"**
     throughout, with the word "steering" appearing nowhere. Beyond the four files below, user-facing bare
     "profile" copy also appears in `ExceptionsTab.tsx:182,237,250,253`,
@@ -244,15 +265,16 @@ and one is now partially fixed.
   shorter "PAC profile" should become the going-forward canonical term instead (it is arguably no less
   clear, and CLAUDE.md's own file-structure notes already describe this frontend surface using "PAC
   profile" language) — that is a legitimate directional choice, but it is a **decision**, not a
-  mechanical fix: it would mean updating `PRODUCT-TERMINOLOGY.md` itself, the legacy GUI (five strings,
-  re-touching T-50's fix), and the operator runbook fixed in this same pass, which is why this report
+  mechanical fix: it would mean updating `PRODUCT-TERMINOLOGY.md` itself, the legacy GUI (the five
+  "Steering Profile" strings, re-touching T-50's fix, while its already-bare rendered copy could stay), and the operator runbook fixed in this same pass, which is why this report
   does not unilaterally pick a direction and instead records both options for whoever picks up the
   backlog item.
 - **Affected code:** if the "steering profile" direction is chosen — every PAC file in
   `frontend/src/features/network/pac/` carrying bare "profile" copy (`ProfilesTab.tsx`, `ProfileDetail.tsx`,
   `ProfileDraftEditor.tsx`, `PACPage.tsx`, `ExceptionsTab.tsx`, `PoolsTab.tsx`, `pacShared.tsx`, and
   `pacLifecycle.ts:241`, whose bare-"profile" refusal sentence `ProfileDetail.tsx:519-520,932-934` shows
-  verbatim) AND the legacy panel description at `static/index.html:2316-2317`; alternatively, if the "PAC profile" direction
+  verbatim) AND every rendered bare-"profile" string in the legacy PAC panel — the description at
+  `static/index.html:2316-2317` plus `static/index.html:14398,14408,14412,14496,14720,14761,14770,14908,14932,14937,14943,14951,15040`; alternatively, if the "PAC profile" direction
   is chosen, `static/index.html` (the five titled strings) + `docs/design/PRODUCT-TERMINOLOGY.md` (1 row).
   Either list is the product copy only, not an exhaustive change list: frontend tests select controls by
   their current labels (e.g. `frontend/src/test/pac-2fe-c-red-page.test.tsx:441-445` "All profiles", and
@@ -280,6 +302,36 @@ and one is now partially fixed.
   the exact defect class T-50 already fixed once, which is worth resolving before a third surface
   (a doc, a training deck, a support macro) independently invents a third spelling.
 
+### T-51 (residual) — "Appliance" is rendered again in the new frontend's PAC and Policy Learning copy (reopened residual — queued, not fixed this pass)
+
+- **Rule:** `docs/design/PRODUCT-TERMINOLOGY.md:28` — "**Appliance** | *Not used.* Culvert deploys as
+  binary/container; the UI says **node** or **instance** | avoid inventing appliance language". T-51
+  (2026-08-29 report) fixed the two leaks known then and is recorded there as fixed; this is a residual of
+  the same rule in surfaces that pass did not re-check, so it reuses T-51 rather than minting a new ID.
+- **Current rendered copy at `993b390`** (source comments excluded):
+  - PAC (`frontend/src/features/network/pac/`): `ProfileDetail.tsx:381,464,472,473,624,632,639,648,657,
+    667,669,673,727,883,884,968,972,979,1409,1458,1510,1540,1573,1603`, `pacShared.tsx:22,55,56,93`,
+    `pacLifecycle.ts:239,241,333`, `ProfileDraftEditor.tsx:133,138,398`, `ProfilesTab.tsx:254`,
+    `PoolsTab.tsx:406`, `LegacyPacTab.tsx:119`, `discardGuard.tsx:34` — e.g. "The appliance answered for
+    operation …", "Outcome ambiguous on the appliance", "… live on this appliance only".
+  - Policy Learning (`frontend/src/features/learning/`): `LearningRecommendations.tsx:254,282` and
+    `PolicyLearningPage.tsx:187,212,246,269,299,401,605` — e.g. "The appliance refused the accept.",
+    "… refused by the appliance.".
+  - The line list is a grep of these two directories for "appliance" outside comments; a few hits may be
+    non-rendered string literals, and the implementing change must re-grep rather than trust it.
+- **Scope limit:** this pass re-checked only the PAC and Policy Learning screens; `frontend/src/features/**`
+  contains "appliance" (including comments) in 61 non-test files at `993b390`, so the same rule is very
+  likely violated elsewhere in the new frontend. That wider sweep is left to the next pass and is NOT
+  claimed clean here.
+- **Recommended wording:** "node" where the text means this Culvert instance's own state ("… live on
+  this node only", "Outcome ambiguous on the node"), or "the server" where it means an HTTP refusal
+  ("The server refused the accept.").
+- **Affected code:** the files above, plus frontend tests that assert on these strings (grep source and
+  tests together, keep each test's intent), and a `frontend/dist` rebuild.
+- **Affected API / Configuration:** none. **Compatibility Risk:** None — display-only text.
+- **Estimated PR Size:** Small-Medium (many strings, mechanical once the replacement words are agreed).
+- **Priority:** Low — cosmetic, but it is a rule the canon states explicitly and T-51 already enforced once.
+
 ---
 
 ## Carried-Over Findings (unchanged)
@@ -292,8 +344,8 @@ this snapshot — see the Program Note — and has since merged to `main`). Full
 unchanged from `TERMINOLOGY-GOVERNANCE-REVIEW-2026-09-09.md` (T-9 … T-39) and
 `TERMINOLOGY-GOVERNANCE-REVIEW-2026-09-12.md` (T-54 — added by PR #1372, merged to `main` before this report;
 that file is the authoritative text for T-54) and are not restated here to avoid drift between
-two descriptions of the same open items. **T-55 and T-56 (above) are new this pass**, bringing the
-open count to seventeen IDs (sixteen backlog entries).
+two descriptions of the same open items. **T-55 and T-56 (above) are new this pass, and T-51 is
+reopened as a residual (above)**, bringing the open count to eighteen IDs (seventeen backlog entries).
 
 The "Content & Scanning" vs. "Content Security" soft finding (design-document reconciliation between
 two deliberate naming decisions, not a mechanical rename) also remains unresolved and is not queued to
@@ -303,8 +355,8 @@ the numbered backlog, per 2026-09-09's reasoning.
 
 ## Recommended Refactoring Plan (priority order)
 
-Unchanged from 2026-09-09/09-12 for the carried-over rows — no existing item moved this pass. Two rows
-added for the new findings:
+Unchanged from 2026-09-09/09-12 for the carried-over rows — no carried-over item moved this pass. Two rows
+added for the new findings, and one for the reopened T-51 residual:
 
 | Priority | Finding | Action | Migration risk | Est. PR size |
 |---|---|---|---|---|
@@ -322,6 +374,7 @@ added for the new findings:
 | Low-Medium | T-54 (carried over; defined in the 2026-09-12 report, PR #1372) | Add OCSP admin JSON fields `malformedTotal`/`staleTotal` alongside the old names and deprecate those per `API-DEPRECATION-POLICY.md` (a plain rename is breaking); rename Go accessor `UnknownTotal`→`UnknownStatusTotal`; move `responder_blocked` into its own metric series and carry that through the GUI and runbook. The 2026-09-12 report is authoritative for the details | Medium | Small |
 | Low-Medium | **T-56 (new)** | Decide "steering profile" vs. "PAC profile" as the going-forward canonical term for the new frontend's PAC screens; converge the losing surface (new frontend, or legacy GUI + `PRODUCT-TERMINOLOGY.md`) onto the winner. Doc half already fixed. | Low | Small |
 | Low | **T-55 (new)** | Naming decision: pick one of "Accept to Draft" (legacy GUI + CLAUDE.md M5B text) or "Accept to Policy Draft" (frontend implementation + FRONTEND-FEATURE-PARITY FE-V18 + FRONTEND-MIGRATION-PLAN), then change the losing UI and its written contract together (rebuild `frontend/dist` if the frontend loses) | None | Small (after the decision) |
+| Low | **T-51 residual (reopened)** | Replace rendered "appliance" copy in the new frontend's PAC and Policy Learning screens with "node" (or "server" for HTTP refusals), update dependent tests, rebuild `frontend/dist`; then sweep the rest of `frontend/src/features/**` for the same rule | None | Small-Medium |
 | Low | T-34 (carried over) | Standardize `apiURLCatFeedStatus`'s SaaS block field names on the F3b-4 status endpoint's vocabulary | Low | Small |
 | Low | T-13 residual (carried over) | Decide whether README/enterprise-doc "TLS Inspection" branding should unify with in-app "SSL" | Low | Small |
 
@@ -340,7 +393,8 @@ it ever reached `main`. Re-checking the new frontend's PAC and Policy Learning s
 but added or reworked after the frontend's initial 2026-08-22 audit — found two genuine, well-evidenced,
 previously-undocumented mismatches between Culvert's two coexisting admin UIs (T-55: "Accept to Draft"
 vs. "Accept to Policy Draft"; T-56: "Steering Profile" vs. bare "PAC profile", the same defect class
-T-50 already fixed once, elsewhere). The doc-only half of T-56 was fixed on the spot at zero risk,
+T-50 already fixed once, elsewhere) — plus a residual of the explicit "Appliance: not used" rule (T-51,
+reopened; only the two re-checked screens were inventoried). The doc-only half of T-56 was fixed on the spot at zero risk,
 consistent with this program's established practice for trivial, zero-compatibility-risk gaps; both
 findings' code/GUI halves are queued to the backlog rather than rushed into this documentation PR,
 since both are naming decisions this report does not make unilaterally (and a direction that changes the

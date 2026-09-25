@@ -170,9 +170,12 @@ spec are the cluster-synced part, and the page says so on the Pools tab.
 > **Known wording gap (tracked, not yet fixed):** the new admin frontend's
 > own PAC screens (`frontend/src/features/network/pac/*.tsx`) currently say
 > bare "PAC profile" throughout their labels and headings, never "steering
-> profile". The legacy GUI uses **steering profile** in its titles and labels,
-> but its panel description still says bare "Each profile" and "default
-> profile". This runbook uses the canonical **steering profile** term per
+> profile". The legacy GUI uses **steering profile** in its panel title,
+> editor labels and simulator dropdown, but its panel description ("Each
+> profile", "default profile") and much of its rendered table, toast and
+> confirmation copy (for example the "Profile" column headers, "No custom
+> profiles yet", "Profile saved", "Delete profile?") still say bare
+> "profile". This runbook uses the canonical **steering profile** term per
 > `docs/design/PRODUCT-TERMINOLOGY.md`. The mismatch is cosmetic (both
 > surfaces manage the identical `/api/pac/profiles` object) but is real: see
 > the terminology governance backlog (T-56). Which wording becomes canonical
