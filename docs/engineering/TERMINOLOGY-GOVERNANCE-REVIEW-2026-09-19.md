@@ -58,7 +58,7 @@ are not added as a new backlog item; they are noted so a future pass doesn't re-
 
 **Terminology Health Score: 8.8 / 10** (up from 8.7 in the 2026-09-08/09/11 reports). The increment
 reflects one genuinely new, verified, zero-risk fix with no compatibility surface (see Migration
-Complexity below); it is not raised further because the fourteen-item carry-over backlog is otherwise
+Complexity below); it is not raised further because the carry-over backlog of thirteen entries (fourteen IDs) is otherwise
 unchanged and the broader SSL-vs-TLS branding question (T-13 residual) remains open by deliberate choice.
 
 ---
@@ -197,5 +197,5 @@ its "TLS / Decryption" fieldset, one in its separate "Logging" fieldset — now 
 first fieldset's own legend, the file's own surrounding comments, and the enumerated TLS-using
 decryption surfaces of the new frontend (not every page — see "Observed, not fixed") — with zero effect on the wire API, the legacy GUI, or the
 separately-tracked, deliberately-deferred T-13 branding residual. No cosmetic or preference-driven
-renames were proposed. All thirteen other carry-over backlog entries (fourteen IDs, T-21+T-32 paired) are
+renames were proposed. All thirteen carry-over backlog entries (fourteen IDs, T-21+T-32 paired) are
 unchanged and were re-confirmed, not merely assumed unchanged, against the then-current tree (`36628eb`).
