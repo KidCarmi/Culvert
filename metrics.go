@@ -1117,9 +1117,23 @@ culvert_catfeeddb_quarantined_copies %d
 	// most deployments are in. The `session_revocation` contract row carries
 	// which of the two causes applies.
 	//
-	// Paging rule: `culvert_session_revocation_durable == 0` is a warn;
-	// `culvert_session_revocation_persist_failures_total > 0` is a page (an
-	// admin was told a session was withdrawn and it was not).
+	// Paging rule, and BOTH halves are load-bearing because this gauge is
+	// two-valued over three causes (unconfigured, load-degraded, write-failing):
+	//
+	//   warn: culvert_session_revocation_durable == 0
+	//   page: culvert_session_revocation_durable == 0
+	//           and increase(culvert_session_revocation_persist_failures_total[15m]) > 0
+	//
+	// The bare gauge must NOT page: persistence is opt-in, so every default
+	// appliance reports 0 and would page forever. The counter must not page on
+	// its own either — it is cumulative and never reset, so one transient
+	// failure would latch until the process restarted, which is exactly the bug
+	// AU-25 fixed in the contract row. The conjunction says "failing NOW" and
+	// clears when a write lands, because the gauge returns to 1.
+	//
+	// docs/operator/session-revocation.md carries the same three rules; its
+	// first draft disagreed with this comment and called the bare gauge a page
+	// (Codex P2 on PR #1437). Keep the two in step.
 	srDurable := 0
 	if revocationsAreDurable() {
 		srDurable = 1

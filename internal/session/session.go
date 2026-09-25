@@ -317,7 +317,7 @@ func (r *RevocationList) MergeRevocations(entries []RevocationEntry) int {
 func (r *RevocationList) Count() int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return len(r.tokens)
+	return pruneExpiredLocked(r.tokens)
 }
 
 // UserCount returns the number of active user-level revocations.
@@ -329,7 +329,34 @@ func (r *RevocationList) Count() int {
 func (r *RevocationList) UserCount() int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return len(r.users)
+	return pruneExpiredLocked(r.users)
+}
+
+// pruneExpiredLocked drops every entry whose expiry has passed and returns how
+// many remain. The caller must hold r.mu.
+//
+// Counting live entries rather than map length is not cosmetic. Expiry in this
+// list is otherwise LAZY — IsRevoked drops an entry only when something asks
+// about that exact token, and ExportRevocations drops them only when something
+// persists or gossips — so on a standalone node with persistence off and no
+// cluster peer, nothing ever asks, and an expired revocation sits in the map for
+// the life of the process. Both counts feed gauges whose HELP text says
+// "currently in force" and the /api/cluster/revocations surface, so an expired
+// entry reported there is a WRONG answer, not merely a stale one: it tells an
+// operator that sessions are still being denied when they are not.
+//
+// Pruning rather than skipping also bounds the map on exactly that node, which
+// is the one where nothing else would ever collect it.
+//
+// Reported by Codex on PR #1437 as a P2.
+func pruneExpiredLocked(m map[string]time.Time) int {
+	now := time.Now()
+	for k, exp := range m {
+		if now.After(exp) {
+			delete(m, k)
+		}
+	}
+	return len(m)
 }
 
 // SwapForTest replaces the list's maps with empty ones and returns a restore

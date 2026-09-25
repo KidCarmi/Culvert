@@ -581,3 +581,65 @@ func TestChaos68_SerializedSaveStillRoundTrips(t *testing.T) {
 		t.Error("token revocation did not survive a save/load round trip")
 	}
 }
+
+// DEFECT (Codex P2, PR #1437). Count and UserCount returned raw map lengths, so
+// they reported revocations that had already EXPIRED as still in force.
+//
+// Expiry in this list is lazy: IsRevoked drops an entry only when something asks
+// about that exact token, and ExportRevocations drops them only when something
+// persists or gossips. On a standalone node with persistence off and no cluster
+// peer, nothing ever asks — so an expired revocation sat in the map for the life
+// of the process and kept being counted.
+//
+// Both counts feed gauges whose HELP text says "currently in force" and the
+// /api/cluster/revocations surface, so this is a WRONG answer rather than a
+// stale one: it tells an operator that sessions are still being denied when they
+// are not. Verified failing against the reintroduced len()-returning shape.
+func TestChaos68_CountsExcludeExpiredRevocations(t *testing.T) {
+	r := NewRevocationList()
+
+	// One of each kind already lapsed, one of each still live.
+	r.Revoke("expired-token", time.Now().Add(-time.Minute))
+	r.Revoke("live-token", time.Now().Add(time.Hour))
+	r.RevokeUser("live-admin")
+	// Whitebox: RevokeUser stamps its own TTL, so an already-lapsed account
+	// entry is written directly (same package, the repo's whitebox convention).
+	r.mu.Lock()
+	r.users["expired-admin"] = time.Now().Add(-time.Minute)
+	r.mu.Unlock()
+
+	if got := r.Count(); got != 1 {
+		t.Errorf("Count() = %d, want 1 — an expired token revocation is being "+
+			"reported as currently in force", got)
+	}
+	if got := r.UserCount(); got != 1 {
+		t.Errorf("UserCount() = %d, want 1 — an expired account revocation is being "+
+			"reported as currently in force", got)
+	}
+
+	// And it must PRUNE, not merely skip: this node is the one where nothing
+	// else would ever collect the entry.
+	if !r.IsRevoked("live-token") || !r.IsUserRevoked("live-admin") {
+		t.Fatal("pruning dropped a LIVE revocation — enforcement must be unaffected")
+	}
+	if r.IsRevoked("expired-token") || r.IsUserRevoked("expired-admin") {
+		t.Error("an expired revocation is still being enforced")
+	}
+}
+
+// CONTROL for the gate above: the cheapest way to make the counts stop
+// over-reporting is to make them under-report. A list holding only live entries
+// must count every one of them.
+func TestChaos68_CountsReportEveryLiveRevocation(t *testing.T) {
+	r := NewRevocationList()
+	for i := 0; i < 5; i++ {
+		r.Revoke(fmt.Sprintf("tok-%d", i), time.Now().Add(time.Hour))
+		r.RevokeUser(fmt.Sprintf("user-%d", i))
+	}
+	if got := r.Count(); got != 5 {
+		t.Errorf("Count() = %d, want 5", got)
+	}
+	if got := r.UserCount(); got != 5 {
+		t.Errorf("UserCount() = %d, want 5", got)
+	}
+}

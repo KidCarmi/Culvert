@@ -114,27 +114,56 @@ one. Here the two causes mean the same thing to you — *a revocation applied on
 this node does not survive a restart* — and that is exactly the condition worth
 watching. The contract row tells you which cause applies.
 
-Suggested rules:
+Suggested rules — and note that **`_durable == 0` on its own is a warning, not
+a page**:
 
 ```
-# Page: writes are failing RIGHT NOW — an admin was told a session was
-# withdrawn and it was not written down. Clears on a successful write.
+# Warn: a revocation applied on this node does NOT survive a restart. On a
+# default appliance this is TRUE AND EXPECTED — persistence is opt-in, so the
+# unconfigured posture and an actively failing volume both report 0. Alerting
+# on this alone pages every default install forever.
 culvert_session_revocation_durable == 0
+
+# Page: writes are failing RIGHT NOW — an admin was told a session was
+# withdrawn and it was not written down. The conjunction is what separates an
+# active fault from the unconfigured default; it clears on a successful write,
+# because _durable returns to 1.
+culvert_session_revocation_durable == 0
+  and increase(culvert_session_revocation_persist_failures_total[15m]) > 0
 
 # Investigate: a durability incident happened in this process. Cumulative and
 # never reset, so it stays visible after the condition above has cleared.
 increase(culvert_session_revocation_persist_failures_total[1h]) > 0
 ```
 
-The two are deliberately different instruments. `_durable` is **current state**
-and recovers on its own when the volume is repaired; the counter is the
-**magnitude** of an incident and is never reset. Alerting on the counter alone
+The three are deliberately different instruments. `_durable` is **current
+state** and recovers on its own when the volume is repaired, but it is
+*two-valued over three causes* — unconfigured, load-degraded, and write-failing
+all read 0 — so it identifies the condition and not the fault. The counter is
+the **magnitude** of an incident and is never reset, so alerting on it alone
 would latch until the process restarts, which is the bug this row was fixed for
-(and the same one `ca_health.go` records having already fixed once).
+(and the same one `ca_health.go` records having already fixed once). The page
+uses both: current state to say it is happening now, the counter to say which
+cause. The contract row on `/api/diagnostics` names the cause in words.
 
-### Cluster status — `GET /api/cluster/status`
+**The first draft of this file got this wrong** and labelled the bare
+`_durable == 0` a page, which would have paged permanently on every default
+installation — and contradicted `metrics.go`, whose own comment called it a
+warn. Reported by Codex on PR #1437 as a P2.
+
+### Cluster revocations — `GET /api/cluster/revocations`
 
 `local_revoked` (tokens), `local_user_revoked` (accounts), `revocations_durable`.
+
+These are on `/api/cluster/revocations`, **not** `/api/cluster/status` — an
+earlier draft of this runbook named the wrong endpoint, which is a valid route
+that simply does not carry these fields, so an operator following it would find
+nothing and have no way to tell a missing field from a missing feature. The
+OpenAPI document (`ClusterRevocations`) had it right throughout. Reported by
+Codex on PR #1437 as a P2.
+
+The counts are **live** entries: expired revocations are pruned as they are
+read, so a count never reports a revocation that has already lapsed.
 
 ### Alerts and `/readyz`
 

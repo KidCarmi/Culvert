@@ -539,3 +539,53 @@ func TestChaos68_RevocationHealthIsIsolatedFromTheAggregateVerdict(t *testing.T)
 	// silently disarm the production signal for the rest of the binary.
 	t.Cleanup(resetSessionRevocationHealthForTest)
 }
+
+// DEFECT (Codex P2, PR #1437) — a docs defect with a behavioural root, so it is
+// pinned behaviourally rather than by grepping the runbook.
+//
+// The runbook's first draft told operators to PAGE on
+// `culvert_session_revocation_durable == 0`, describing it as "writes are
+// failing RIGHT NOW". That gauge is derived from revocationsAreDurable(), which
+// is deliberately false when persistence is simply UNCONFIGURED — the shipped
+// default, and the posture most appliances are in. So the suggested page would
+// have fired permanently on every default installation, for a node with a
+// perfectly healthy disk and zero write failures, while metrics.go's own comment
+// called the same expression a warn.
+//
+// This gate pins the fact the documentation has to reflect: the gauge is
+// two-valued over three causes, so `durable == 0` alone cannot distinguish the
+// default posture from an active fault. The page therefore needs the
+// conjunction with a RECENT persist failure, and that is what the runbook and
+// metrics.go now both say.
+func TestChaos68_DurableZeroDoesNotImplyAWriteFailure(t *testing.T) {
+	withChaos68Revocations(t)
+
+	// The shipped default: no revocations file configured, nothing wrong.
+	if revocationsAreDurable() {
+		t.Fatal("precondition: an unconfigured node must not report durable")
+	}
+	if got := sessionRevocationPersistFailures.Load(); got != 0 {
+		t.Fatalf("precondition: a healthy default node must have 0 persist failures, got %d", got)
+	}
+
+	// So an alert keyed on the gauge ALONE fires here — on a healthy appliance.
+	// That is the whole finding: the expression is true, and nothing is wrong.
+	if sessionRevocationPersistDegraded.Load() {
+		t.Error("an unconfigured node must not be reported as write-degraded — " +
+			"conflating the two is what made the bare gauge look pageable")
+	}
+
+	// The conjunction the runbook and metrics.go now document does NOT fire
+	// here, which is the property that makes it safe to page on.
+	pageWouldFire := !revocationsAreDurable() && sessionRevocationPersistFailures.Load() > 0
+	if pageWouldFire {
+		t.Error("the documented page fires on a healthy default appliance")
+	}
+
+	// And it DOES fire once a write actually fails, so the conjunction has not
+	// been tightened into something that never pages.
+	noteRevocationPersistFailure(os.ErrPermission)
+	if !(!revocationsAreDurable() && sessionRevocationPersistFailures.Load() > 0) {
+		t.Error("the documented page does not fire when writes are actually failing")
+	}
+}
