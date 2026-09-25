@@ -1177,11 +1177,12 @@ func apiCDRHealth(w http.ResponseWriter, r *http.Request) {
 		jsonOK(w, out)
 		return
 	}
-	client := cdrActiveClient()
+	client, releaseProbe := cdrClientForAdminRPC()
 	if client == nil {
 		http.Error(w, "no active CDR client", http.StatusServiceUnavailable)
 		return
 	}
+	defer releaseProbe()
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
 	resp, err := client.Health(ctx)
@@ -1256,11 +1257,12 @@ func apiCDRTest(w http.ResponseWriter, r *http.Request) {
 	if !requireRole(w, r, RoleAdmin) {
 		return
 	}
-	client := cdrActiveClient()
+	client, releaseProbe := cdrClientForAdminRPC()
 	if client == nil {
 		http.Error(w, "no active CDR client", http.StatusServiceUnavailable)
 		return
 	}
+	defer releaseProbe()
 
 	body, filename, ct, err := readCDRTestUpload(r)
 	if err != nil {

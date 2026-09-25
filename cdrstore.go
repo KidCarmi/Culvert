@@ -488,8 +488,46 @@ func setCDREnabledRuntime(on bool) error {
 // Backwards-compat: callers that just want "is CDR live?" treat nil as
 // "no" and keep working.  The proxy hot path should call cdrPickPooled()
 // instead to pick a healthy instance with circuit-breaker awareness.
+// cdrActiveClient returns a live client, or nil when none is currently
+// available.  NON-RESERVING: it goes through PeekAvailable, never Pick.
+//
+// Every caller of this function is an OBSERVER or an admin-triggered
+// one-off (status panels, the diagnostics row, the manual health probe,
+// the admin test upload).  Before CHAOS-67 it called Pick(), whose
+// Allow() RESERVES the breaker's half-open probe budget -- so an admin
+// refreshing the CDR panel consumed the single probe the breaker uses to
+// discover that Sluice recovered, then discarded the client without ever
+// reporting an outcome.  The reservation is released only by a reported
+// outcome, so one status read wedged the breaker in half-open permanently:
+// the observability surface killed the recovery of the control it observes.
+//
+// Reserving the probe budget belongs to exactly one call site, the request
+// path's cdrPickForCall (cdr_pool.go), which always releases it.
+// cdrClientForAdminRPC returns a client for an ADMIN-TRIGGERED RPC, plus a
+// release the caller must defer.
+//
+// Unlike cdrActiveClient — a pure observer that reserves nothing — this
+// RESERVES the breaker's half-open probe budget, because its callers
+// (apiCDRHealth's live probe, apiCDRTest's Sanitize) actually put load on
+// Sluice. Repointing cdrActiveClient at PeekAvailable fixed the leaked
+// reservation but left those two issuing unbounded RPCs at a recovering
+// backend: a polled status panel could herd the very instance the breaker
+// is trying to probe (Codex P2, round 2).
+//
+// It deliberately does NOT report an outcome to the breaker. An admin test
+// with an odd file must not trip production CDR, and a lucky admin probe
+// must not close a breaker the request path has not re-validated — the
+// reservation is here to BOUND concurrency, not to vote on health.
+func cdrClientForAdminRPC() (client *CDRClient, release func()) {
+	pc, rel := cdrPickForCall()
+	if pc == nil {
+		return nil, rel
+	}
+	return pc.Client, rel
+}
+
 func cdrActiveClient() *CDRClient {
-	if pc := cdrPool.Pick(); pc != nil {
+	if pc := cdrPool.PeekAvailable(); pc != nil {
 		return pc.Client
 	}
 	return nil

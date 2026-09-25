@@ -35,7 +35,7 @@ func withTempPool(t *testing.T, members ...*cdrPooledClient) {
 
 func TestPool_PickReturnsNilWhenEmpty(t *testing.T) {
 	withTempPool(t)
-	if pc := cdrPool.Pick(); pc != nil {
+	if pc, _, _ := cdrPool.Pick(); pc != nil {
 		t.Fatalf("empty pool returned %+v", pc)
 	}
 }
@@ -52,7 +52,7 @@ func TestPool_PickRoundRobin(t *testing.T) {
 
 	names := []string{}
 	for i := 0; i < 6; i++ {
-		pc := cdrPool.Pick()
+		pc, _, _ := cdrPool.Pick()
 		if pc == nil {
 			t.Fatalf("pick returned nil at iter %d", i)
 		}
@@ -79,7 +79,7 @@ func TestPool_PickSkipsOpenBreaker(t *testing.T) {
 	a.Breaker.OnFailure()
 
 	for i := 0; i < 5; i++ {
-		pc := cdrPool.Pick()
+		pc, _, _ := cdrPool.Pick()
 		if pc == nil || pc.Name != "b" {
 			t.Fatalf("pick %d returned %v, want b", i, pc)
 		}
@@ -97,7 +97,7 @@ func TestPool_PickReturnsNilWhenAllOpen(t *testing.T) {
 	a.Breaker.OnFailure()
 	b.Breaker.OnFailure()
 
-	if pc := cdrPool.Pick(); pc != nil {
+	if pc, _, _ := cdrPool.Pick(); pc != nil {
 		t.Fatalf("all-open pool returned %+v", pc)
 	}
 }
@@ -247,10 +247,31 @@ func TestSafeCDRSanitize_BreakerOpenReturnsSkipped(t *testing.T) {
 		cdrClientMu.Unlock()
 	})
 
+	// CHAOS-67 INVERSION. This gate previously asserted SKIPPED, which
+	// pinned the DEFECT: an enrolled pool that can serve nothing means the
+	// CDR backend is DOWN, and passing the file through under a bare
+	// "SKIPPED" made the outcome independent of fail_mode, uncounted and
+	// unlogged. The config here leaves FailMode unset, which CDRFailOpen
+	// reads as OPEN, so the file is still delivered — but now as a
+	// first-class ERROR that fail_mode governs and that every counter,
+	// log line and alert can see.
 	out := safeCDRSanitize(context.Background(), sampleReq("example.com"), []byte("x"),
 		"application/pdf", sampleID, cdrActiveConfig())
-	if out.Outcome != cdrPass || out.Status != "SKIPPED" {
-		t.Fatalf("all-open pool should yield SKIPPED, got %+v", out)
+	if out.Outcome != cdrPass {
+		t.Fatalf("all-open pool with fail_mode unset (=open) should still pass, got %+v", out)
+	}
+	if out.Status != "ERROR" {
+		t.Fatalf("all-open pool should surface ERROR (fail_mode applied), got status=%q", out.Status)
+	}
+
+	// The same pool under an explicit fail_mode=closed must BLOCK.
+	cdrClientMu.Lock()
+	cdrActiveCfg = CDRConfig{Enabled: true, FailMode: "closed"}
+	cdrClientMu.Unlock()
+	closed := safeCDRSanitize(context.Background(), sampleReq("example.com"), []byte("x"),
+		"application/pdf", sampleID, cdrActiveConfig())
+	if closed.Outcome != cdrBlock {
+		t.Fatalf("all-open pool with fail_mode=closed must block, got %+v", closed)
 	}
 }
 

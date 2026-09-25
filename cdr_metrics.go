@@ -130,6 +130,29 @@ func cdrWriteOperationalMetrics(w *strings.Builder) {
 	w.WriteString("\n# HELP culvert_cdr_panics_total Panics caught by the CDR defer-recover (always fail-closed regardless of fail_mode)\n")
 	w.WriteString("# TYPE culvert_cdr_panics_total counter\n")
 	fmt.Fprintf(w, "culvert_cdr_panics_total %d\n", atomic.LoadInt64(&statCDRPanics))
+	// CHAOS-67: the two ways a request finds no instance to call.  Kept
+	// apart because they call for different operator actions -- a
+	// provisioning gap versus a backend outage -- and because only the
+	// second is governed by fail_mode.
+	w.WriteString("\n# HELP culvert_cdr_unavailable_total Requests where every enrolled instance was unavailable (fail_mode applied)\n")
+	w.WriteString("# TYPE culvert_cdr_unavailable_total counter\n")
+	fmt.Fprintf(w, "culvert_cdr_unavailable_total %d\n", atomic.LoadInt64(&statCDRUnavailable))
+	w.WriteString("\n# HELP culvert_cdr_not_deployed_total Requests where CDR is enabled but no instance is enrolled\n")
+	w.WriteString("# TYPE culvert_cdr_not_deployed_total counter\n")
+	fmt.Fprintf(w, "culvert_cdr_not_deployed_total %d\n", atomic.LoadInt64(&statCDRNotDeployed))
+	// Emitted only when CDR is enabled AND at least one instance is
+	// enrolled: a flat 0 from every appliance that never turned CDR on is
+	// indistinguishable from one whose backend is dark, and the documented
+	// paging rule is `== 0` (the socks5/cluster_ca/dns emission rule).
+	if cfg := cdrActiveConfig(); cfg.Enabled && cdrPool.Len() > 0 {
+		w.WriteString("\n# HELP culvert_cdr_backend_available 1 when at least one enrolled CDR instance can currently serve a request\n")
+		w.WriteString("# TYPE culvert_cdr_backend_available gauge\n")
+		avail := 0
+		if cdrBackendAvailable() {
+			avail = 1
+		}
+		fmt.Fprintf(w, "culvert_cdr_backend_available %d\n", avail)
+	}
 }
 
 func cdrWriteCacheMetrics(w *strings.Builder) {

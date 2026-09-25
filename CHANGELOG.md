@@ -215,6 +215,46 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   FAILS in that state rather than skipping green. Disabling the Pages site
   itself is a repository-settings action an owner must still take; this change
   touches repository content only.
+- A CDR (Content Disarm and Reconstruction) backend outage silently and
+  permanently switched the control off, regardless of the configured
+  `fail_mode` (CHAOS-67). Three coupled defects. **(1)** The per-instance
+  circuit breaker's half-open probe budget is a *reservation* that only a
+  reported call outcome gives back, and eight of the nine `Pick()` call
+  sites never reported one — `cdrActiveClient()` was `cdrPool.Pick()`, and
+  it is called from seven admin-panel status sites plus the proxy's own
+  pre-flight check. On a single-instance pool this was a certainty rather
+  than a race: the request path picked twice, reserved the slot in its
+  nil-check, discarded the client, then found the budget exhausted and made
+  no call — so no outcome was ever reported and the breaker stayed in
+  half-open **forever**. Measured against the pre-fix tree, after 50
+  simulated hours of a fully healthy Sluice the picker still returned
+  nothing; CDR never ran again until the process was restarted, and an
+  administrator merely *opening the CDR status panel* was enough to cause
+  it. **(2)** When the picker returned nothing the file was passed through
+  unconditionally, so a node configured `fail_mode: closed` failed closed
+  for the first few transient errors and then failed **open** for the whole
+  rest of the outage — the moment its own breaker concluded the backend was
+  down — with no counter, log line or alert anywhere. **(3)** The
+  `cdr_unavailable` alert was not subscriber-gated and carried the raw gRPC
+  error as its deduplication key; because a transport error embeds the
+  ephemeral local port, every failure minted a distinct key that the
+  suppression window could not collapse, evicting real threat alerts from
+  the retry queue. The `cdr` diagnostics row keyed on how many instances
+  were *enrolled*, so it reported `enabled-healthy` throughout.
+
+  Observation no longer changes the control it observes (status surfaces
+  take no probe slot, advance no timer and charge no counter), exactly one
+  call site reserves and it always releases, an unavailable-but-enrolled
+  backend now routes through `fail_mode`, and the row reports
+  `enabled-dark`. New surfaces: `culvert_cdr_backend_available`,
+  `culvert_cdr_unavailable_total`, `culvert_cdr_not_deployed_total`.
+  **Behaviour change:** `fail_mode: closed` now blocks during a CDR backend
+  outage, where it previously passed the file. Operators relying on
+  fail-closed as a compliance control should read
+  `docs/operator/cdr-backend-availability.md`. A node with CDR enabled but
+  no instance enrolled is deliberately *not* treated as an outage — it
+  still passes, counted separately, since blocking every download over a
+  provisioning gap would be self-inflicted.
 
 - OCSP revocation checking accepted responses it should have refused
   (CHAOS-65). Every input the checker acts on comes from the peer's own

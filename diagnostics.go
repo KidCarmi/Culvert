@@ -883,6 +883,19 @@ func checkCDR() OperatorContractCheck {
 			Message:        "enabled-broken: CDR is enabled but no Sluice instance is connected",
 			OperatorAction: "Enrol at least one Sluice instance under CDR, or disable CDR if not in use.",
 		}
+	case !cdrBackendAvailable():
+		// CHAOS-67: this row used to key on pool LENGTH alone, so an
+		// enrolled instance whose breaker was open -- or permanently
+		// wedged -- still reported "enabled-healthy" while every file on
+		// the node was being delivered undisarmed.  Availability is what
+		// the request path actually consults, so it is what the row must
+		// report.
+		return OperatorContractCheck{
+			Code:           "cdr",
+			Status:         diagFail,
+			Message:        "enabled-dark: CDR is enabled and instances are enrolled, but none can currently serve a request",
+			OperatorAction: "Check Sluice reachability and the per-instance circuit-breaker state under CDR → Instances. Files are being handled per fail_mode until an instance recovers.",
+		}
 	case cfg.FailMode == "" || cfg.DefaultProfile == "":
 		return OperatorContractCheck{
 			Code:           "cdr",

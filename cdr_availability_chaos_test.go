@@ -1,0 +1,700 @@
+package main
+
+// CHAOS-67 — the CDR plane when the Sluice backend goes away.
+//
+// Three defects, each reproduced against the pre-fix tree:
+//
+//   D1  Pick() RESERVES a half-open probe slot that only a reported call
+//       outcome gives back, and 8 of its 9 call sites never report one.
+//       On a single-instance pool the reservation leaked on the FIRST
+//       request after the reset timeout, wedging the breaker in half-open
+//       permanently: CDR never ran again until a process restart.
+//   D2  A pool that can serve nothing passed the file through regardless
+//       of `fail_mode: closed`, with no counter, no log and no alert.
+//   D3  The `cdr_unavailable` alert was ungated and carried a raw
+//       err.Error() as its Dispatch dedup key.
+//
+// The CONTROLS matter as much as the gates: the cheapest way to pass every
+// defect gate is to delete the half-open budget outright (a thundering
+// herd onto a recovering Sluice) or to make PeekAvailable always true (a
+// status surface that never reports an outage).
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"net/http"
+	"strings"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+)
+
+// openBreakerPastReset builds a pooled instance whose breaker has opened
+// and whose reset timeout has already elapsed — i.e. the exact moment the
+// breaker is willing to issue one recovery probe.
+func openBreakerPastReset(t *testing.T, name string) (pc *cdrPooledClient, advance func(time.Duration)) {
+	t.Helper()
+	client := &cdrPooledClient{
+		Name:    name,
+		Breaker: newCDRCircuitBreaker(cdrBreakerConfig{FailureThreshold: 1, ResetTimeout: 10 * time.Second}),
+	}
+	current := time.Unix(0, 0)
+	client.Breaker.setNowFn(func() time.Time { return current })
+	client.Breaker.OnFailure()
+	step := func(d time.Duration) { current = current.Add(d) }
+	step(11 * time.Second)
+	return client, step
+}
+
+// ─── D1: the leaked half-open reservation ──────────────────────────────────
+
+func TestChaos67_ObserverDoesNotConsumeHalfOpenProbe(t *testing.T) {
+	pc, _ := openBreakerPastReset(t, "sluice-1")
+	withTempPool(t, pc)
+
+	// Eight admin/status reads — each one called Pick() before the fix.
+	for i := 0; i < 8; i++ {
+		_ = cdrActiveClient()
+		_ = cdrBackendAvailable()
+	}
+	if got := pc.Breaker.halfOpenTried.Load(); got != 0 {
+		t.Fatalf("observer reads consumed %d probe slot(s); want 0 — "+
+			"an observation must never change the control it observes", got)
+	}
+	// The request path must still be able to take its probe.
+	picked, release := cdrPickForCall()
+	defer release()
+	if picked == nil {
+		t.Fatal("request path denied its recovery probe after status reads — breaker wedged")
+	}
+}
+
+func TestChaos67_BreakerRecoversAfterTheRequestPathDeclinesToCall(t *testing.T) {
+	// The pre-fix request path picked twice per request (runCDRStage's
+	// nil-check, then safeCDRSanitize) and threw the first away.
+	pc, advance := openBreakerPastReset(t, "sluice-1")
+	withTempPool(t, pc)
+
+	_ = cdrActiveClient() // the nil-check, now non-reserving
+	picked, release := cdrPickForCall()
+	if picked == nil {
+		t.Fatal("real pick denied — the nil-check stole the probe")
+	}
+	// The call never reaches the wire (cache hit / oversize skip): release
+	// runs from safeCDRSanitize's defer without any reported outcome.
+	release()
+
+	advance(time.Hour)
+	again, release2 := cdrPickForCall()
+	defer release2()
+	if again == nil {
+		t.Fatalf("breaker never issued another probe (state=%d halfOpenTried=%d) — "+
+			"an unreported pick leaked its reservation permanently",
+			pc.Breaker.State(), pc.Breaker.halfOpenTried.Load())
+	}
+}
+
+func TestChaos67_ReleaseIsIdempotentAndNeverGoesNegative(t *testing.T) {
+	pc, _ := openBreakerPastReset(t, "sluice-1")
+	withTempPool(t, pc)
+
+	picked, release := cdrPickForCall()
+	if picked == nil {
+		t.Fatal("expected a probe to be permitted")
+	}
+	// A reported outcome already zeroed the counter; the deferred release
+	// then runs anyway. Over-releasing would hand out more concurrent
+	// probes than the configured budget.
+	pc.Breaker.OnSuccess()
+	release()
+	release()
+	pc.Breaker.ReleaseProbe()
+	if got := pc.Breaker.halfOpenTried.Load(); got != 0 {
+		t.Fatalf("halfOpenTried = %d after over-release; want 0 (never negative)", got)
+	}
+}
+
+func TestChaos67_PermitsChangesNoBreakerState(t *testing.T) {
+	pc, _ := openBreakerPastReset(t, "sluice-1")
+	before := pc.Breaker.Stats()
+	for i := 0; i < 50; i++ {
+		_ = pc.Breaker.Permits()
+	}
+	after := pc.Breaker.Stats()
+	if after.State != before.State {
+		t.Fatalf("Permits advanced the state machine: %s -> %s", before.State, after.State)
+	}
+	if after.TotalTrips != before.TotalTrips {
+		t.Fatalf("Permits charged totalTrips %d -> %d — status reads must not "+
+			"inflate culvert_cdr_pool_breaker_trips_total", before.TotalTrips, after.TotalTrips)
+	}
+	if got := pc.Breaker.halfOpenTried.Load(); got != 0 {
+		t.Fatalf("Permits reserved %d probe slot(s); want 0", got)
+	}
+}
+
+func TestChaos67_ReleaseOnlyGivesBackASlotThisCallTook(t *testing.T) {
+	// A pick admitted in the CLOSED state reserves nothing.  Releasing on
+	// its behalf would decrement a slot another goroutine is holding,
+	// handing out more concurrent probes than the budget allows -- the
+	// inverse of the defect the budget exists to prevent.
+	pc := &cdrPooledClient{
+		Name:    "sluice-1",
+		Breaker: newCDRCircuitBreaker(cdrBreakerConfig{FailureThreshold: 1, ResetTimeout: 10 * time.Second}),
+	}
+	current := time.Unix(0, 0)
+	pc.Breaker.setNowFn(func() time.Time { return current })
+	withTempPool(t, pc)
+
+	// Picked while CLOSED: no reservation taken.
+	_, releaseClosed := cdrPickForCall()
+
+	// The breaker now opens and reaches half-open; a concurrent request
+	// takes the one real slot.
+	pc.Breaker.OnFailure()
+	current = current.Add(11 * time.Second)
+	holder, holderRelease := cdrPickForCall()
+	if holder == nil {
+		t.Fatal("setup: expected the half-open probe to be granted")
+	}
+
+	// The closed-state pick's deferred release must NOT free the holder's slot.
+	releaseClosed()
+	if extra, _ := cdrPickForCall(); extra != nil {
+		t.Fatal("a release from a pick that reserved nothing freed another " +
+			"goroutine's probe slot — the budget was over-released")
+	}
+	holderRelease()
+}
+
+func TestChaos67_ReleaseDoesNotCrossAnOpenGeneration(t *testing.T) {
+	// A release that arrives after the breaker has completed a further
+	// open cycle belongs to a generation that no longer owns the counter.
+	pc := &cdrPooledClient{
+		Name:    "sluice-1",
+		Breaker: newCDRCircuitBreaker(cdrBreakerConfig{FailureThreshold: 1, ResetTimeout: 10 * time.Second}),
+	}
+	current := time.Unix(0, 0)
+	pc.Breaker.setNowFn(func() time.Time { return current })
+	pc.Breaker.OnFailure()
+	current = current.Add(11 * time.Second)
+	withTempPool(t, pc)
+
+	_, staleRelease := cdrPickForCall() // generation N
+	pc.Breaker.OnSuccess()              // closes
+	pc.Breaker.OnFailure()              // generation N+1: open
+	current = current.Add(11 * time.Second)
+	holder, holderRelease := cdrPickForCall() // takes N+1's slot
+	if holder == nil {
+		t.Fatal("setup: expected a probe in the new generation")
+	}
+
+	staleRelease() // must be inert
+	if extra, _ := cdrPickForCall(); extra != nil {
+		t.Fatal("a stale release freed a newer generation's probe slot")
+	}
+	holderRelease()
+}
+
+// ─── D2: an unavailable backend must obey fail_mode ────────────────────────
+
+func TestChaos67_AllInstancesUnavailableAppliesFailModeClosed(t *testing.T) {
+	resetCDRAvailabilityForTest()
+	pc, _ := openBreakerPastReset(t, "sluice-1")
+	withTempPool(t, pc)
+	// Burn the probe so nothing is pickable — a sustained outage.
+	if picked, _ := cdrPickForCall(); picked == nil {
+		t.Fatal("setup: expected one probe")
+	}
+
+	res := cdrUnavailableOutcome(CDRConfig{Enabled: true, FailMode: "closed"})
+	if res.Outcome != cdrBlock {
+		t.Fatalf("fail_mode=closed with every instance down produced outcome=%d (%s); "+
+			"want cdrBlock — the operator explicitly asked for fail-closed and the "+
+			"breaker tripping is exactly the condition that setting governs",
+			res.Outcome, res.Status)
+	}
+}
+
+func TestChaos67_AllInstancesUnavailableAppliesFailModeOpen(t *testing.T) {
+	resetCDRAvailabilityForTest()
+	pc, _ := openBreakerPastReset(t, "sluice-1")
+	withTempPool(t, pc)
+	if p, _ := cdrPickForCall(); p == nil {
+		t.Fatal("setup: expected one probe")
+	}
+
+	res := cdrUnavailableOutcome(CDRConfig{Enabled: true, FailMode: "open"})
+	if res.Outcome != cdrPass {
+		t.Fatalf("fail_mode=open produced outcome=%d; want cdrPass", res.Outcome)
+	}
+	if res.Status != "ERROR" {
+		t.Fatalf("status = %q; want ERROR so the bypass is visible in the request log", res.Status)
+	}
+}
+
+func TestChaos67_UnavailableBypassIsCounted(t *testing.T) {
+	resetCDRAvailabilityForTest()
+	pc, _ := openBreakerPastReset(t, "sluice-1")
+	withTempPool(t, pc)
+	if p, _ := cdrPickForCall(); p == nil {
+		t.Fatal("setup: expected one probe")
+	}
+
+	before := loadCDRStat(&statCDRUnavailable)
+	_ = cdrUnavailableOutcome(CDRConfig{Enabled: true, FailMode: "open"})
+	if got := loadCDRStat(&statCDRUnavailable); got != before+1 {
+		t.Fatalf("culvert_cdr_unavailable_total did not move (%d -> %d); the bypass "+
+			"was silent on every surface before CHAOS-67", before, got)
+	}
+}
+
+func TestChaos67_EmptyPoolIsNotDeployedRatherThanAnOutage(t *testing.T) {
+	resetCDRAvailabilityForTest()
+	withTempPool(t) // nothing enrolled
+
+	// fail_mode=closed must NOT block here: CDR was never deployed on this
+	// node, and blocking every download over a provisioning gap would be a
+	// self-inflicted outage. The `cdr` diagnostics row already FAILs on it.
+	res := cdrUnavailableOutcome(CDRConfig{Enabled: true, FailMode: "closed"})
+	if res.Outcome != cdrPass {
+		t.Fatalf("empty pool produced outcome=%d; want cdrPass", res.Outcome)
+	}
+	if res.Status != "SKIPPED_NOT_DEPLOYED" {
+		t.Fatalf("status = %q; want SKIPPED_NOT_DEPLOYED — a provisioning gap and a "+
+			"backend outage need different operator actions", res.Status)
+	}
+	if loadCDRStat(&statCDRNotDeployed) == 0 {
+		t.Fatal("culvert_cdr_not_deployed_total did not move")
+	}
+	if loadCDRStat(&statCDRUnavailable) != 0 {
+		t.Fatal("an undeployed CDR was charged as a backend outage")
+	}
+}
+
+// ─── D3: the alert's gate and its bounded dedup key ────────────────────────
+
+func TestChaos67_ErrorReasonClassIsBoundedAndNeverEchoesTheError(t *testing.T) {
+	allowed := map[string]bool{
+		"none": true, "file_too_large": true, "timeout": true, "unavailable": true,
+		"resource_exhausted": true, "unauthenticated": true, "permission_denied": true,
+		"unimplemented": true, "backend_internal": true, "tls_error": true,
+		"call_failed": true,
+	}
+	// A transport error embeds the peer address AND the ephemeral local
+	// port — the value that made every failure a distinct Dispatch dedup key.
+	noisy := errors.New(`rpc error: code = Unavailable desc = connection error: ` +
+		`dial tcp 10.0.0.7:8443->10.0.0.9:51234: connect: connection refused`)
+	cases := []error{
+		nil,
+		noisy,
+		status.Error(codes.DeadlineExceeded, "deadline"),
+		status.Error(codes.ResourceExhausted, "queue full"),
+		status.Error(codes.Internal, "boom"),
+		errors.New("x509: certificate has expired"),
+		errors.New("something nobody classified"),
+	}
+	for _, err := range cases {
+		got := cdrErrorReasonClass(err)
+		if !allowed[got] {
+			t.Fatalf("cdrErrorReasonClass(%v) = %q — outside the bounded vocabulary; "+
+				"an unbounded class gives Dispatch one dedup key per request", err, got)
+		}
+	}
+	if got := cdrErrorReasonClass(noisy); strings.Contains(got, "51234") ||
+		strings.Contains(got, "10.0.0.") {
+		t.Fatalf("reason class %q leaked the transport error's addresses/ports", got)
+	}
+}
+
+func TestChaos67_CallFailureLogIsRateLimited(t *testing.T) {
+	resetCDRAvailabilityForTest()
+	now := time.Unix(0, 0)
+	if !noteCDRCallFailure("unavailable", now) {
+		t.Fatal("onset must log immediately")
+	}
+	logged := 0
+	for i := 0; i < 500; i++ {
+		now = now.Add(time.Second)
+		if noteCDRCallFailure("unavailable", now) {
+			logged++
+		}
+	}
+	// 500s at one line per minute.
+	if logged > 9 {
+		t.Fatalf("%d lines in 500s; want <= 9 — a mitigation for write "+
+			"amplification must not be one itself", logged)
+	}
+	if logged == 0 {
+		t.Fatal("rate limit suppressed everything — the outage must stay visible")
+	}
+	// A change of reason class is news and logs immediately.
+	if !noteCDRCallFailure("timeout", now) {
+		t.Fatal("a new reason class must log immediately")
+	}
+}
+
+func TestChaos67_AlternatingReasonsCannotBypassTheRateLimit(t *testing.T) {
+	// An unhealthy backend routinely alternates classes — a load-balanced
+	// pool answering Unavailable from one node and Internal from another.
+	// With one shared timestamp plus a last-reason field, every alternation
+	// counts as "the reason changed" and logs, restoring the per-file
+	// amplification the gate exists to stop (Codex P2).
+	resetCDRAvailabilityForTest()
+	now := time.Unix(0, 0)
+	reasons := []string{"unavailable", "backend_internal"}
+	logged := 0
+	for i := 0; i < 600; i++ {
+		now = now.Add(time.Second)
+		if noteCDRCallFailure(reasons[i%len(reasons)], now) {
+			logged++
+		}
+	}
+	// 600s, two classes, one line per class per minute ⇒ ~20 plus onsets.
+	if logged > 24 {
+		t.Fatalf("%d lines in 600s while alternating two reason classes; want <= 24 — "+
+			"alternation reset the gate and reproduced the amplification", logged)
+	}
+	if logged == 0 {
+		t.Fatal("rate limit suppressed everything — the outage must stay visible")
+	}
+}
+
+func TestChaos67_RateLimitTableIsBounded(t *testing.T) {
+	// The reason vocabulary is closed, but the table must not be a memory
+	// leak if a future caller passes an unbounded string.
+	resetCDRAvailabilityForTest()
+	now := time.Unix(0, 0)
+	for i := 0; i < 5000; i++ {
+		now = now.Add(time.Second)
+		noteCDRCallFailure(fmt.Sprintf("unbounded_%d", i), now)
+	}
+	cdrCallFailureGate.mu.Lock()
+	n := len(cdrCallFailureGate.lastLogged)
+	cdrCallFailureGate.mu.Unlock()
+	// cap distinct reason classes plus the one shared overflow bucket.
+	if n > cdrFailureReasonCap+1 {
+		t.Fatalf("rate-limit table grew to %d entries; bound is %d",
+			n, cdrFailureReasonCap+1)
+	}
+}
+
+func TestChaos67_AlertIsGatedOnSubscriber(t *testing.T) {
+	// No webhook subscribes to cdr_unavailable — the default posture. The
+	// producer must not spawn a goroutine or build a payload.
+	prev := globalAlertStore
+	globalAlertStore = &AlertStore{}
+	t.Cleanup(func() { globalAlertStore = prev })
+
+	if globalAlertStore.HasSubscriber("cdr_unavailable") {
+		t.Skip("unexpected subscriber in a fresh store")
+	}
+	// The gate is about COST, so cost is what the gate asserts: ungated,
+	// this producer pays a goroutine spawn, a payload build and a round
+	// trip through the process-wide dedup mutex on every file during an
+	// outage. Allocation-free is the observable that distinguishes the two
+	// shapes deterministically, on any hardware, under any load.
+	avg := testing.AllocsPerRun(200, func() {
+		fireCDRUnavailableAlert("unavailable")
+	})
+	if avg != 0 {
+		t.Fatalf("fireCDRUnavailableAlert allocated %.1f objects/call with no "+
+			"subscriber; want 0 — the HasSubscriber gate must short-circuit "+
+			"BEFORE the goroutine spawn and payload build", avg)
+	}
+}
+
+// ─── Codex round 2 ─────────────────────────────────────────────────────────
+
+func TestChaos67_TerminalErrorLogIsRateLimitedDuringAnOutage(t *testing.T) {
+	// fail_mode=open + every instance down reaches runCDRStage's cdrPass
+	// "ERROR" branch for EVERY delivered file. Ungated, that is one process
+	// log line per file — the amplification this sweep exists to prevent,
+	// and strictly worse than the pre-CHAOS-67 behaviour, which produced a
+	// bare SKIPPED and no line at all.
+	resetCDRAvailabilityForTest()
+	now := time.Unix(0, 0)
+	logged := 0
+	for i := 0; i < 600; i++ {
+		now = now.Add(time.Second)
+		if noteCDRTerminalErrorLog("cdr_unavailable", now) {
+			logged++
+		}
+	}
+	if logged > 12 {
+		t.Fatalf("%d CDR_ERROR lines for 600 delivered files; want <= 12 "+
+			"(onset + one per minute)", logged)
+	}
+	if logged == 0 {
+		t.Fatal("every line suppressed — the fail-open bypass must stay visible")
+	}
+}
+
+func TestChaos67_TerminalAndFailureGatesDoNotSuppressEachOther(t *testing.T) {
+	// Both fire for the same event during an outage. Sharing one gate would
+	// let whichever ran first silence the other, so an operator would see
+	// only half the picture.
+	resetCDRAvailabilityForTest()
+	now := time.Unix(0, 0)
+	if !noteCDRCallFailure("all_instances_unavailable", now) {
+		t.Fatal("failure-gate onset must log")
+	}
+	if !noteCDRTerminalErrorLog("cdr_unavailable", now) {
+		t.Fatal("terminal-gate onset must log even though the failure gate just did")
+	}
+}
+
+func TestChaos67_AdminRPCCallersReserveTheProbeBudget(t *testing.T) {
+	// apiCDRHealth / apiCDRTest issue real RPCs. Repointing cdrActiveClient
+	// at the non-reserving PeekAvailable left them unbounded against a
+	// recovering backend, so a polled status panel could herd the very
+	// instance the breaker is probing.
+	pc, _ := openBreakerPastReset(t, "sluice-1")
+	pc.Client = &CDRClient{} // non-nil so the helper returns it
+	withTempPool(t, pc)
+
+	client, release := cdrClientForAdminRPC()
+	if client == nil {
+		t.Fatal("first admin RPC should be permitted")
+	}
+	// While it holds the probe, a second admin RPC must be refused.
+	if second, rel2 := cdrClientForAdminRPC(); second != nil {
+		rel2()
+		release()
+		t.Fatal("a second concurrent admin RPC bypassed HalfOpenProbes — " +
+			"repeated status polls can herd a recovering Sluice")
+	}
+	release()
+	// After release the budget is available again.
+	third, rel3 := cdrClientForAdminRPC()
+	defer rel3()
+	if third == nil {
+		t.Fatal("the probe slot was not returned after the admin RPC finished")
+	}
+}
+
+func TestChaos67_Control_AdminRPCDoesNotVoteOnBreakerHealth(t *testing.T) {
+	// The reservation bounds concurrency; it must NOT let an admin test
+	// trip or close the production breaker.
+	pc, _ := openBreakerPastReset(t, "sluice-1")
+	pc.Client = &CDRClient{}
+	withTempPool(t, pc)
+
+	// Taking a probe legitimately advances open -> half-open; that IS what
+	// reserving means, and the request path would have done it on its next
+	// pick anyway. What must not happen is the admin call reporting an
+	// OUTCOME: no verdict, so no close, no re-open, no failure charged.
+	before := pc.Breaker.Stats()
+	client, release := cdrClientForAdminRPC()
+	if client == nil {
+		t.Fatal("expected a client")
+	}
+	release()
+	after := pc.Breaker.Stats()
+	if pc.Breaker.State() == cbStateClosed {
+		t.Fatal("an admin RPC closed the breaker — it must not vote the backend healthy")
+	}
+	if after.ConsecFails != before.ConsecFails {
+		t.Fatalf("admin RPC charged a failure (consecFails %d -> %d)",
+			before.ConsecFails, after.ConsecFails)
+	}
+	if after.TotalOpens != before.TotalOpens {
+		t.Fatalf("admin RPC re-opened the breaker (totalOpens %d -> %d)",
+			before.TotalOpens, after.TotalOpens)
+	}
+}
+
+// ─── Contract row ──────────────────────────────────────────────────────────
+
+func TestChaos67_DiagnosticsRowReportsADarkBackend(t *testing.T) {
+	pc, _ := openBreakerPastReset(t, "sluice-1")
+	withTempPool(t, pc) // enrolled, but nothing pickable
+	if p, _ := cdrPickForCall(); p == nil {
+		t.Fatal("setup: expected one probe")
+	}
+
+	prevCfg := cdrActiveConfig()
+	setCDRConfigForTest(t, CDRConfig{Enabled: true, FailMode: "closed", DefaultProfile: "default"})
+	t.Cleanup(func() { setCDRConfigForTest(t, prevCfg) })
+
+	row := checkCDR()
+	if row.Status == diagOK {
+		t.Fatalf("cdr row = OK (%q) while no instance can serve a request — "+
+			"the row keyed on pool LENGTH, so a dark backend read as enabled-healthy",
+			row.Message)
+	}
+	if !strings.Contains(row.Message, "enabled-dark") {
+		t.Fatalf("row message = %q; want the enabled-dark classification", row.Message)
+	}
+}
+
+// ─── CONTROLS ──────────────────────────────────────────────────────────────
+
+func TestChaos67_Control_HealthyBackendIsUntouched(t *testing.T) {
+	pc := &cdrPooledClient{Name: "sluice-1", Breaker: newCDRCircuitBreaker(cdrBreakerConfig{})}
+	withTempPool(t, pc)
+
+	for i := 0; i < 100; i++ {
+		picked, release := cdrPickForCall()
+		if picked == nil {
+			t.Fatalf("closed breaker denied request %d", i)
+		}
+		release()
+	}
+	if !cdrBackendAvailable() {
+		t.Fatal("a healthy pool reported unavailable")
+	}
+	if checkCDRStatusFor(t, CDRConfig{Enabled: true, FailMode: "closed", DefaultProfile: "default"}) != diagOK {
+		t.Fatal("a healthy CDR did not report OK")
+	}
+}
+
+func TestChaos67_Control_ObserverStillReportsAnOpenBreaker(t *testing.T) {
+	// The cheapest way to pass the observer gates is to make PeekAvailable
+	// always true, which would delete the outage signal entirely.
+	pc := &cdrPooledClient{
+		Name:    "sluice-1",
+		Breaker: newCDRCircuitBreaker(cdrBreakerConfig{FailureThreshold: 1, ResetTimeout: time.Hour}),
+	}
+	current := time.Unix(0, 0)
+	pc.Breaker.setNowFn(func() time.Time { return current })
+	pc.Breaker.OnFailure() // open, reset timeout NOT elapsed
+	withTempPool(t, pc)
+
+	if cdrBackendAvailable() {
+		t.Fatal("an open breaker inside its reset window reported available")
+	}
+	if cdrActiveClient() != nil {
+		t.Fatal("cdrActiveClient returned a client from an open breaker")
+	}
+}
+
+func TestChaos67_Control_HalfOpenBudgetStillBoundsConcurrentProbes(t *testing.T) {
+	// The cheapest way to pass every leak gate is to delete the budget,
+	// which would aim the full request rate at a recovering Sluice.
+	pc, _ := openBreakerPastReset(t, "sluice-1")
+	withTempPool(t, pc)
+
+	granted := 0
+	releases := []func(){}
+	for i := 0; i < 20; i++ {
+		picked, release := cdrPickForCall()
+		if picked != nil {
+			granted++
+			releases = append(releases, release) // held, as an in-flight call would
+		}
+	}
+	for _, r := range releases {
+		r()
+	}
+	if granted != 1 {
+		t.Fatalf("half-open granted %d concurrent probes; want exactly 1 (HalfOpenProbes default) — "+
+			"the budget must still bound the herd onto a recovering backend", granted)
+	}
+}
+
+// ─── Local test helpers ────────────────────────────────────────────────────
+
+func loadCDRStat(p *int64) int64 { return atomic.LoadInt64(p) }
+
+func setCDRConfigForTest(t *testing.T, cfg CDRConfig) {
+	t.Helper()
+	cdrClientMu.Lock()
+	cdrActiveCfg = cfg
+	cdrClientMu.Unlock()
+}
+
+func checkCDRStatusFor(t *testing.T, cfg CDRConfig) string {
+	t.Helper()
+	prev := cdrActiveConfig()
+	setCDRConfigForTest(t, cfg)
+	t.Cleanup(func() { setCDRConfigForTest(t, prev) })
+	return checkCDR().Status
+}
+
+// ─── Entry-point gates (Codex P1) ──────────────────────────────────────────
+//
+// The D2 gates above exercise cdrUnavailableOutcome and safeCDRSanitize
+// directly, and they passed while the PRODUCTION entry point still bypassed
+// both: runCDRStage short-circuited on `cdrActiveClient() == nil`, which is
+// exactly the all-breakers-open state, so fail_mode was never consulted and
+// the counters/log/alert never fired.  Testing the helper is not testing the
+// path — the same altitude mistake CHAOS-65 recorded as "the control is not
+// on the path that handshakes".  These gates drive runCDRStage itself.
+
+func runCDRStageForTest(t *testing.T, br blockResponder) cdrStageDecision {
+	t.Helper()
+	r, err := http.NewRequestWithContext(context.Background(), http.MethodGet,
+		"https://example.com/file.pdf", http.NoBody)
+	if err != nil {
+		t.Fatalf("build request: %v", err)
+	}
+	body := []byte("%PDF-1.4 test")
+	return runCDRStage(r, r, body, body, "application/pdf", "", br, "example.com", "10.0.0.1", sampleID)
+}
+
+func TestChaos67_EntryPointAppliesFailModeClosedWhenBackendIsDown(t *testing.T) {
+	resetCDRAvailabilityForTest()
+	pc, _ := openBreakerPastReset(t, "sluice-1")
+	withTempPool(t, pc)
+	if p, _ := cdrPickForCall(); p == nil {
+		t.Fatal("setup: expected one probe")
+	}
+	setCDRConfigForTest(t, CDRConfig{Enabled: true, FailMode: "closed", DefaultProfile: "default"})
+	t.Cleanup(func() { setCDRConfigForTest(t, CDRConfig{}) })
+
+	spy := &spyResponder{}
+	dec := runCDRStageForTest(t, spy)
+	if !dec.blocked {
+		t.Fatal("runCDRStage delivered the file with fail_mode=closed and every " +
+			"instance down — the production entry point bypassed cdrUnavailableOutcome")
+	}
+	if spy.calls == 0 {
+		t.Fatal("no block page was emitted")
+	}
+	if got := loadCDRStat(&statCDRUnavailable); got == 0 {
+		t.Fatal("culvert_cdr_unavailable_total did not move from the entry point")
+	}
+}
+
+func TestChaos67_EntryPointCountsTheBypassWhenFailModeIsOpen(t *testing.T) {
+	resetCDRAvailabilityForTest()
+	pc, _ := openBreakerPastReset(t, "sluice-1")
+	withTempPool(t, pc)
+	if p, _ := cdrPickForCall(); p == nil {
+		t.Fatal("setup: expected one probe")
+	}
+	setCDRConfigForTest(t, CDRConfig{Enabled: true, FailMode: "open", DefaultProfile: "default"})
+	t.Cleanup(func() { setCDRConfigForTest(t, CDRConfig{}) })
+
+	dec := runCDRStageForTest(t, &spyResponder{})
+	if dec.blocked {
+		t.Fatal("fail_mode=open blocked")
+	}
+	if got := loadCDRStat(&statCDRUnavailable); got == 0 {
+		t.Fatal("the fail-open bypass was not counted at the entry point — " +
+			"it stayed silent on every surface")
+	}
+}
+
+func TestChaos67_Control_EntryPointStillSkipsWhenCDRIsDisabled(t *testing.T) {
+	// The cheapest wrong fix is to stop short-circuiting at all, which would
+	// run the CDR stage on every inspected response of every appliance that
+	// never enabled CDR.
+	resetCDRAvailabilityForTest()
+	withTempPool(t)
+	setCDRConfigForTest(t, CDRConfig{Enabled: false})
+	t.Cleanup(func() { setCDRConfigForTest(t, CDRConfig{}) })
+
+	dec := runCDRStageForTest(t, &spyResponder{})
+	if dec.blocked {
+		t.Fatal("a disabled CDR blocked a response")
+	}
+	if loadCDRStat(&statCDRUnavailable) != 0 || loadCDRStat(&statCDRNotDeployed) != 0 {
+		t.Fatal("a disabled CDR charged an availability counter")
+	}
+}
