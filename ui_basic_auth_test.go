@@ -438,3 +438,66 @@ func TestSECBASIC1_SuccessesDoNotConsumeTheFailureBudget(t *testing.T) {
 		}
 	}
 }
+
+// ── 9. Atomic reservation + TOTP refusals (Codex review, round 2) ─────────
+
+// TestSECBASIC1_ConcurrentWaveCannotExceedTheFailureBudget pins that the
+// per-IP budget is RESERVED atomically before verification. A probe-then-
+// charge pair let a concurrent wave all observe "not exhausted" before any
+// bcrypt finished, so far more than Burst failures reached bcrypt, the
+// lockout maps and the audit trail.
+func TestSECBASIC1_ConcurrentWaveCannotExceedTheFailureBudget(t *testing.T) {
+	secBasicEnv(t)
+	const wave = lockout.Burst * 3
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	for i := 0; i < wave; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			secBasicRequest(t, fmt.Sprintf("wave-guess-%d", i), "wrong")
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/api/policy", http.NoBody)
+	ip := realClientIP(req)
+	reached := 0
+	for i := 0; i < wave; i++ {
+		if loginLimiter.AttemptsLeft(ip, fmt.Sprintf("wave-guess-%d", i)) != lockout.MaxAttempts {
+			reached++
+		}
+	}
+	if reached > lockout.Burst {
+		t.Fatalf("%d concurrent failures reached verification, want <= %d — the per-IP budget is not an atomic reservation",
+			reached, lockout.Burst)
+	}
+}
+
+// TestSECBASIC1_TOTPRefusalsAreChargedToTheIPBudget pins that a correct
+// password for a TOTP-enrolled account — the compromised-first-factor case —
+// cannot be replayed without bound: each refusal costs a bcrypt and a durable
+// audit line, so it consumes the per-IP budget (while still never locking the
+// account, see TestSECBASIC1_TOTPRefusalIsNotAnEnrolmentOracle).
+func TestSECBASIC1_TOTPRefusalsAreChargedToTheIPBudget(t *testing.T) {
+	secBasicEnv(t)
+	const user, pass = "totp-replayed", "Correct-Horse-Battery-21!"
+	secBasicUser(t, user, pass, RoleAdmin, true)
+	// One refusal, then probe the remaining budget directly: looping Burst
+	// bcrypts under -race can outlive the 1-minute window and reset it.
+	secBasicRequest(t, user, pass)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/api/policy", http.NoBody)
+	ip := realClientIP(req)
+	for i := 1; i < lockout.Burst; i++ {
+		if !basicAuthFailLimiter.Reserve(ip) {
+			t.Fatalf("budget exhausted after %d units; want exactly Burst", i)
+		}
+	}
+	if basicAuthFailLimiter.Reserve(ip) {
+		t.Fatalf("a TOTP refusal left the per-IP Basic budget unconsumed — a compromised first factor is an unbounded bcrypt/audit amplifier")
+	}
+	if left := loginLimiter.AttemptsLeft(realClientIP(req), user); left != lockout.MaxAttempts {
+		t.Errorf("TOTP refusals charged the per-account lockout (attempts_left=%d, want %d)", left, lockout.MaxAttempts)
+	}
+}

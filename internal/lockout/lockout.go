@@ -564,18 +564,40 @@ func (a *APIRateLimiter) Allow(ip string) bool {
 	return e.count <= Burst
 }
 
-// Exhausted reports, WITHOUT recording anything, whether ip has already used
-// its Burst allowance in the current window. It lets a caller that charges
-// only some events (e.g. failures) refuse the next attempt before doing any
-// expensive or state-retaining work for it.
-func (a *APIRateLimiter) Exhausted(ip string) bool {
+// Reserve ATOMICALLY claims one unit of ip's Burst allowance in the current
+// window and reports whether it succeeded. Unlike Allow, a refusal records
+// nothing, so a caller that charges only some outcomes (e.g. failures) can
+// reserve BEFORE doing expensive or state-retaining work and Refund the unit
+// once the outcome turns out not to be chargeable. A check-then-charge pair
+// (probe, work, then Allow) is not a bound: a concurrent wave all passes the
+// probe before any of it is charged.
+func (a *APIRateLimiter) Reserve(ip string) bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	e := a.entries[ip]
-	if e == nil || time.Since(e.windowStart) > RateWindow {
+	now := time.Now()
+	if e == nil || now.Sub(e.windowStart) > RateWindow {
+		a.entries[ip] = &apiRateEntry{count: 1, windowStart: now}
+		return true
+	}
+	if e.count >= Burst {
 		return false
 	}
-	return e.count >= Burst
+	e.count++
+	return true
+}
+
+// Refund returns one unit previously claimed by Reserve. A refund landing
+// after the window rolled over is a no-op (the unit already expired with it),
+// and the count never goes negative.
+func (a *APIRateLimiter) Refund(ip string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	e := a.entries[ip]
+	if e == nil || time.Since(e.windowStart) > RateWindow || e.count <= 0 {
+		return
+	}
+	e.count--
 }
 
 // Cleanup removes expired entries.

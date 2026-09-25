@@ -57,7 +57,9 @@ package main
 // the account out by replaying any Basic request — and would lock the real
 // operator out of the login flow as a side effect of their own misconfigured
 // script. It is audited (so the operator sees why their tooling broke) and
-// left uncharged.
+// left uncharged to the per-account lockout — but it IS charged to the per-IP
+// Basic failure budget, which locks no account and bounds the bcrypt + audit
+// cost of replaying a compromised first factor.
 
 import (
 	"fmt"
@@ -88,29 +90,34 @@ func verifyUIBasicAuth(r *http.Request, user, pass string) (UIRole, bool) {
 	// every admin.
 	clientIP := realClientIP(r)
 
-	// Per-IP FAILURE budget, checked before anything retains state or costs
+	// Per-IP FAILURE budget, RESERVED before anything retains state or costs
 	// a bcrypt. The two-tier lockout below is keyed by (IP, username), so a
 	// caller rotating a fresh username per request never trips it, and
 	// apiLimiter gates only mutating methods — without this, GET
 	// /api/auth/status would let one unauthenticated client mint unbounded
-	// lockout-map entries and durable auth.basic.fail audit lines. Only
-	// failures are charged, so a correctly-configured script is never
-	// throttled; the refusal itself is silent (auditing it would rebuild the
-	// write amplifier this bounds).
-	if basicAuthFailLimiter.Exhausted(clientIP) {
+	// lockout-map entries and durable auth.basic.fail audit lines. The unit
+	// is claimed atomically up front (a probe-then-charge pair lets a
+	// concurrent wave all pass the probe before any bcrypt finishes) and
+	// REFUNDED on success and on a lockout refusal, so only outcomes that cost
+	// a bcrypt without granting access are charged — a correctly-configured
+	// script is never throttled. The refusal itself is silent (auditing it
+	// would rebuild the write amplifier this bounds).
+	if !basicAuthFailLimiter.Reserve(clientIP) {
 		return "", false
 	}
 
 	// Two-tier lockout BEFORE any credential verification — same order as
 	// apiAuthLogin, and the reason the ~80 ms bcrypt is no longer reachable at
-	// an unbounded rate.
+	// an unbounded rate. A locked refusal costs no bcrypt and retains
+	// nothing, so it does not consume the failure budget.
 	if locked, _ := loginLimiter.Check(clientIP, user); locked {
+		basicAuthFailLimiter.Refund(clientIP)
 		return "", false
 	}
 
 	role, ok := cfg.VerifyUIUser(user, pass)
 	if !ok {
-		basicAuthFailLimiter.Allow(clientIP) // charge the failure; result read via Exhausted
+		// The reserved unit stays charged.
 		loginLimiter.RecordFailure(clientIP, user)
 		auditEvent(r, "auth.basic.fail", truncateForAudit(user),
 			fmt.Sprintf("invalid credentials over HTTP Basic, attempts_left=%d",
@@ -120,13 +127,17 @@ func verifyUIBasicAuth(r *http.Request, user, pass string) (UIRole, bool) {
 
 	// Correct password, but the account carries a second factor the Basic
 	// scheme cannot carry. Refuse rather than silently downgrade. Deliberately
-	// NOT charged to the lockout counter — see the header.
+	// NOT charged to the per-ACCOUNT lockout — see the header — but the
+	// reserved per-IP unit stays charged: the refusal still cost a bcrypt and
+	// a durable audit line, and the compromised-first-factor case is exactly
+	// the one 2FA must keep bounded.
 	if cfg.UserHasTOTP(user) {
 		auditEvent(r, "auth.basic.refused", truncateForAudit(user),
 			"HTTP Basic refused: account has TOTP enrolled — use the session login flow")
 		return "", false
 	}
 
+	basicAuthFailLimiter.Refund(clientIP)
 	loginLimiter.RecordSuccess(clientIP, user)
 	return role, true
 }
