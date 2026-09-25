@@ -1,0 +1,182 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Culvert — CI Performance Report (CI-REDESIGN stage 6B, roadmap §17)
+# ─────────────────────────────────────────────────────────────────────────────
+# Measures CI executions from evidence that ALREADY exists — GitHub's run/job
+# metadata and the race engine's published JSON artifacts — and never reruns a
+# test to get a number. Two jobs:
+#
+#   · run-report — after a Fast PR Gate / QA Gate run that is not a pull
+#     request completes (main push, dispatch, scheduled audit), or on demand
+#     for any run id: one versioned report (report.json + summary.md) for
+#     that run attempt, plus, for a PASSED same-SHA audit, a timing-refresh
+#     CANDIDATE for review.
+#   · trend      — weekly, after a scheduled audit run, or on a dispatch
+#     WITHOUT a run_id (a dispatch with one reports that run only): groups
+#     equivalent executions, keeps statistics provisional below the sample
+#     floor, flags sustained regressions as ADVICE (::warning::), and FAILS
+#     when the weekly equivalence audit failed, went stale or never ran.
+#
+# Isolation, and why each property holds:
+#   · Not on any PR's critical path and not evidence: workflow_run runs AFTER
+#     the gate finished, in the default branch's context, and posts no check
+#     to the PR head. No branch protection or release manifest names this
+#     workflow (ci_perf_report_test.go pins both).
+#   · Trusted code only: workflow_run checks out the DEFAULT branch, never the
+#     PR head, so the collector is reviewed code. It downloads ZIPs into memory
+#     and decodes an allowlist of JSON members, and reads the first 16 KB of
+#     each measured job's log for its "Runner Image" lines; the artifact
+#     carrying the prebuilt test binary is never downloaded, and nothing
+#     downloaded is executed, restored as a cache or written as anything but
+#     a report.
+#   · Least privilege: actions:read + contents:read, no cache (a cache restored
+#     here could be written by a PR run), and the collector builds with
+#     GOPROXY=off (it imports only the standard library, so no module is ever
+#     fetched).
+#   · Nothing is committed: timing candidates are artifacts for a human.
+# ─────────────────────────────────────────────────────────────────────────────
+
+name: CI Performance Report
+
+permissions:
+  actions: read
+  contents: read
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+on:
+  workflow_run:
+    workflows: ["Fast PR Gate", "QA Gate"]
+    types: [completed]
+  # Weekly backstop, three hours after the Sunday 06:23 UTC audit is due, so
+  # an audit that never ran (and so never triggered workflow_run) is reported
+  # the same day.
+  schedule:
+    - cron: "43 9 * * 0"
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: "Report on this workflow run id only (empty = trend only)"
+        type: string
+        default: ""
+
+# One report per (run, attempt); never cancelled, so every attempt of every
+# gate run keeps its report.
+concurrency:
+  group: ci-perf-report-${{ github.event.workflow_run.id || inputs.run_id || github.run_id }}-${{ github.event.workflow_run.run_attempt || 0 }}
+  cancel-in-progress: false
+
+jobs:
+  run-report:
+    name: "Report · one run"
+    # Automatic reports cover the executions evidence is kept for: main
+    # pushes, dispatches and the scheduled audit that COMPLETED. Pull-request
+    # runs (~240 a week, about half cancelled by a newer push) and cancelled
+    # runs are measured by the weekly trend from run metadata instead — a job
+    # per PR run would cost more runner time than the audit it reports on
+    # (roadmap §17.6). Any single run can still be reported on demand by
+    # dispatching with run_id.
+    if: >-
+      (github.event_name == 'workflow_run' &&
+       github.event.workflow_run.event != 'pull_request' &&
+       github.event.workflow_run.conclusion != 'cancelled') ||
+      (github.event_name == 'workflow_dispatch' && inputs.run_id != '')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Pinned: a dispatch with --ref <branch> would otherwise check out
+          # and run that branch's unreviewed collector.
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Collect the report (API + artifacts, parsed as data)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GOPROXY: "off"
+          RUN_ID: ${{ github.event.workflow_run.id || inputs.run_id }}
+          RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt || 0 }}
+        run: |
+          set -eu
+          case "$RUN_ID" in ''|*[!0-9]*) echo "::error::run id must be numeric"; exit 1;; esac
+          case "$RUN_ATTEMPT" in ''|*[!0-9]*) echo "::error::attempt must be numeric"; exit 1;; esac
+          go run ./cmd/cireport run -run-id "$RUN_ID" -attempt "$RUN_ATTEMPT" \
+            -out-dir out -collector-run-id "$GITHUB_RUN_ID"
+          # The artifact is named by the attempt the REPORT describes, which a
+          # dispatch with attempt 0 learns from the report itself.
+          echo "ARTIFACT_SUFFIX=${RUN_ID}-$(jq -r .run.attempt out/report.json)" >> "$GITHUB_ENV"
+
+      - name: Upload the report
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ci-run-report-${{ env.ARTIFACT_SUFFIX }}
+          path: |
+            out/report.json
+            out/summary.md
+          retention-days: 90
+          if-no-files-found: error
+
+      - name: Upload the timing-refresh candidate (review only; never committed)
+        if: hashFiles('out/timing-candidate/qa-root-shard-timings.json') != ''
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: timing-refresh-candidate-${{ env.ARTIFACT_SUFFIX }}
+          path: out/timing-candidate/
+          retention-days: 90
+          if-no-files-found: error
+
+  trend:
+    name: "Report · trend + audit freshness"
+    # A scheduled QA run IS the weekly audit, so its completion refreshes the
+    # trend immediately; the Sunday 09:43 schedule is the backstop that notices an
+    # audit that never ran at all.
+    # After run-report when both run, so the audit's own report is readable;
+    # always() because run-report is skipped on the schedule and a failed
+    # report must not hide the audit-freshness verdict.
+    # A dispatch WITH a run_id is a targeted report and skips the trend: the
+    # trend reads the whole recent history, so running it per dispatch made
+    # N targeted reports cost N full trends against the repository's shared
+    # API budget — 28 of them exhausted it and failed an unrelated automatic
+    # report (roadmap §18.3.1). Enrich runs with run_id, then dispatch once
+    # with an empty run_id for the trend.
+    needs: run-report
+    if: >-
+      always() && (
+      github.event_name == 'schedule' ||
+      (github.event_name == 'workflow_dispatch' && inputs.run_id == '') ||
+      (github.event_name == 'workflow_run' && github.event.workflow_run.event == 'schedule'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Pinned: a dispatch with --ref <branch> would otherwise check out
+          # and run that branch's unreviewed collector.
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Trend, reviewed-baseline comparison and audit freshness
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GOPROXY: "off"
+        run: go run ./cmd/cireport trend -out-dir trend -collector-run-id "$GITHUB_RUN_ID"
+
+      - name: Upload the trend report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ci-trend-report-${{ github.run_id }}
+          path: trend/
+          retention-days: 90
+          if-no-files-found: warn
