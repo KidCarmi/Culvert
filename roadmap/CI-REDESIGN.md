@@ -3036,6 +3036,8 @@ that the Go 1.26.8 cohort still has few samples.
 | Dockerfile compiler snippet | passes a go1.26.8 binary, refuses a go1.25.0 one |
 | toolchain wall | 20 negative controls pass, incl. the 4 new ones (active-compiler comparison, later `ENV`, `RUN` prefix, `ARG`) |
 | existing release-gating walls + cases, actionlint | pass; actionlint shellcheck findings 10 → 9 |
+| full suite, `go test -count=1 -shuffle=20260925 ./...`, go1.26.8 | **passed**: all 110 packages, 0 failures (root package 527 s) |
+| golangci-lint v2.5.0 `--new-from-rev origin/main` | 0 issues |
 | cosign flags | read from the pinned cosign v3.0.6 source: `verify-attestation` accepts the `--certificate-github-workflow-*` flags and prints the verified DSSE payloads; `attest` and `verify-attestation` both default to the new bundle format |
 
 ### 21.6 Migration and recovery
