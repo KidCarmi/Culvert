@@ -103,3 +103,23 @@ func TestUIContract_ChangePasswordButtonSharesLogoutVisibility(t *testing.T) {
 		t.Error("change-pw-btn is not toggled by applySession using the same (user || role) condition as logout-btn — a role-gated regression would strand operator/viewer self-service password rotation")
 	}
 }
+
+// TestUIContract_ChangePasswordInputsHaveAccessibleNames pins that each
+// password field is programmatically labelled: without a `for`/`id` pair a
+// screen reader or voice-control user gets three indistinguishable generic
+// password fields (Codex review).
+func TestUIContract_ChangePasswordInputsHaveAccessibleNames(t *testing.T) {
+	html, err := os.ReadFile(staticIndexHTMLPath())
+	if err != nil {
+		t.Fatalf("read index.html: %v", err)
+	}
+	s := string(html)
+	for _, id := range []string{"cp-current", "cp-new", "cp-confirm"} {
+		if !strings.Contains(s, `id="`+id+`"`) {
+			t.Errorf("input %q missing", id)
+		}
+		if !strings.Contains(s, `<label class="form-label" for="`+id+`">`) {
+			t.Errorf("input %q has no associated <label for=%q> — it has no accessible name", id, id)
+		}
+	}
+}
