@@ -5,8 +5,11 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -554,9 +557,9 @@ func TestChaos68_RevocationHealthIsIsolatedFromTheAggregateVerdict(t *testing.T)
 //
 // This gate pins the fact the documentation has to reflect: the gauge is
 // two-valued over three causes, so `durable == 0` alone cannot distinguish the
-// default posture from an active fault. The page therefore needs the
-// conjunction with a RECENT persist failure, and that is what the runbook and
-// metrics.go now both say.
+// default posture from an active fault. The page therefore keys on the
+// current write-degraded state (culvert_session_revocation_persist_degraded),
+// and that is what the runbook and metrics.go now both say.
 func TestChaos68_DurableZeroDoesNotImplyAWriteFailure(t *testing.T) {
 	withChaos68Revocations(t)
 
@@ -577,7 +580,7 @@ func TestChaos68_DurableZeroDoesNotImplyAWriteFailure(t *testing.T) {
 
 	// The conjunction the runbook and metrics.go now document does NOT fire
 	// here, which is the property that makes it safe to page on.
-	pageWouldFire := !revocationsAreDurable() && sessionRevocationPersistFailures.Load() > 0
+	pageWouldFire := sessionRevocationPersistDegraded.Load()
 	if pageWouldFire {
 		t.Error("the documented page fires on a healthy default appliance")
 	}
@@ -585,8 +588,59 @@ func TestChaos68_DurableZeroDoesNotImplyAWriteFailure(t *testing.T) {
 	// And it DOES fire once a write actually fails, so the conjunction has not
 	// been tightened into something that never pages.
 	noteRevocationPersistFailure(os.ErrPermission)
-	pageFiresOnRealFailure := !revocationsAreDurable() && sessionRevocationPersistFailures.Load() > 0
+	pageFiresOnRealFailure := sessionRevocationPersistDegraded.Load()
 	if !pageFiresOnRealFailure {
 		t.Error("the documented page does not fire when writes are actually failing")
+	}
+}
+
+// scrapeSessionRevocationPersistDegraded returns the value of
+// culvert_session_revocation_persist_degraded on /metrics, or -1 if absent.
+func scrapeSessionRevocationPersistDegraded(t *testing.T) int {
+	t.Helper()
+	prevTok := metricsToken
+	metricsToken = ""
+	t.Cleanup(func() { metricsToken = prevTok })
+	w := httptest.NewRecorder()
+	handleMetrics(w, httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/metrics", http.NoBody))
+	for _, line := range strings.Split(w.Body.String(), "\n") {
+		if v, ok := strings.CutPrefix(line, "culvert_session_revocation_persist_degraded "); ok {
+			n, err := strconv.Atoi(strings.TrimSpace(v))
+			if err != nil {
+				t.Fatalf("unparseable persist_degraded value %q", v)
+			}
+			return n
+		}
+	}
+	return -1
+}
+
+// DEFECT (Codex P2, PR #1437, second round). The runbook's page was
+// `durable == 0 and increase(persist_failures_total[15m]) > 0`. After ONE
+// failed save with no further logout/sync to trigger another write, the
+// degradation is still in force (durable stays 0) but increase() over the
+// window drops to 0 after 15 minutes — so the page cleared while durability
+// had NOT recovered. The page must be driven by CURRENT write state that only
+// a landed save clears; this pins that the series exists, is 0 on a healthy
+// default node, latches on a failure with no further writes, and clears only
+// on a successful save.
+func TestChaos68_WriteDegradedPageLatchesUntilASaveLands(t *testing.T) {
+	withChaos68Revocations(t)
+
+	if got := scrapeSessionRevocationPersistDegraded(t); got != 0 {
+		t.Fatalf("culvert_session_revocation_persist_degraded = %d on a healthy default node; want 0 "+
+			"(-1 means the series is missing, so there is nothing current-state to page on)", got)
+	}
+	noteRevocationPersistFailure(os.ErrPermission)
+	// No further write happens — the increase()-window shape would clear here
+	// once the window passes. The state-based series must not.
+	for i := 0; i < 3; i++ {
+		if got := scrapeSessionRevocationPersistDegraded(t); got != 1 {
+			t.Fatalf("scrape %d after an unresolved save failure: persist_degraded = %d; want 1", i, got)
+		}
+	}
+	noteRevocationPersistSuccess()
+	if got := scrapeSessionRevocationPersistDegraded(t); got != 0 {
+		t.Fatalf("persist_degraded = %d after a save landed; want 0", got)
 	}
 }

@@ -51,8 +51,15 @@ verifies the same cookies (the session signing key is replicated to all of them)
 **Not revoked by anything** (see §7): changing a user's **role** or **password**
 via `POST /api/auth/users`. A demoted admin keeps `role: admin` in their
 existing cookie until it expires, and a password change does not invalidate a
-stolen session. Delete-and-recreate the account if you need either to take
-effect immediately.
+stolen session. To take either away immediately, delete the account — but
+do **not** recreate it under the same username straight away: an account
+revocation is keyed on the username and rejects *every* session carrying that
+subject until it expires (the configured session TTL, up to seven days),
+regardless of when the session was issued. Recreating the same name
+immediately therefore locks the replacement account out across the fleet —
+and, with persistence on, across restarts — for up to that TTL. Recreate the
+account under a **different** username, or wait for the revocation to expire
+before reusing the name.
 
 ---
 
@@ -106,6 +113,7 @@ token — it is reachable at viewer role.
 | `culvert_session_revocation_tokens` | gauge | Logout revocations in force on this node |
 | `culvert_session_revocation_users` | gauge | Deleted-account revocations in force on this node |
 | `culvert_session_revocation_persist_failures_total` | counter | Revocations applied in memory that could not be written |
+| `culvert_session_revocation_persist_degraded` | gauge | `1` while the latest revocation save failed and none has landed since (the page signal) |
 
 These are emitted **unconditionally**, which is the deliberate exception to
 Culvert's usual "omit the series when the feature is off" rule. Elsewhere a flat
@@ -125,11 +133,14 @@ a page**:
 culvert_session_revocation_durable == 0
 
 # Page: writes are failing RIGHT NOW — an admin was told a session was
-# withdrawn and it was not written down. The conjunction is what separates an
-# active fault from the unconfigured default; it clears on a successful write,
-# because _durable returns to 1.
-culvert_session_revocation_durable == 0
-  and increase(culvert_session_revocation_persist_failures_total[15m]) > 0
+# withdrawn and it was not written down. _persist_degraded is CURRENT write
+# state: set by a failed save and cleared ONLY by a save that lands, so the
+# page stays active for exactly as long as the fault is unresolved — even if
+# no further logout or sync ever triggers another write. (An increase()
+# window over the failure counter is NOT equivalent: it empties after the
+# window and clears the page while durability is still lost.) It is 0 on an
+# unconfigured default appliance, so it never pages there.
+culvert_session_revocation_persist_degraded == 1
 
 # Investigate: a durability incident happened in this process. Cumulative and
 # never reset, so it stays visible after the condition above has cleared.
@@ -143,8 +154,9 @@ all read 0 — so it identifies the condition and not the fault. The counter is
 the **magnitude** of an incident and is never reset, so alerting on it alone
 would latch until the process restarts, which is the bug this row was fixed for
 (and the same one `ca_health.go` records having already fixed once). The page
-uses both: current state to say it is happening now, the counter to say which
-cause. The contract row on `/api/diagnostics` names the cause in words.
+therefore keys on `_persist_degraded`, which is current state for the one
+cause that is a fault (writes failing) and nothing else. The contract row on
+`/api/diagnostics` names the cause in words.
 
 **The first draft of this file got this wrong** and labelled the bare
 `_durable == 0` a page, which would have paged permanently on every default
@@ -192,7 +204,8 @@ restart those sessions are live again.
 2. **Fix the volume.** Recovery is automatic and needs no restart: the next
    successful save writes the *complete* live list, so every revocation still
    in memory becomes durable again. At that point
-   `culvert_session_revocation_durable` returns to `1` and the
+   `culvert_session_revocation_durable` returns to `1`,
+   `culvert_session_revocation_persist_degraded` returns to `0`, and the
    `session_revocation` row returns to `ok`.
    `culvert_session_revocation_persist_failures_total` is cumulative and
    deliberately does **not** reset, so the incident stays visible on `/metrics`
@@ -234,7 +247,11 @@ the mount and restart.
 * **Role and password changes do not revoke.** `POST /api/auth/users` changing a
   role or password leaves existing cookies untouched — a demotion does not take
   effect until the session expires, and a password change does not invalidate a
-  stolen session. Delete and recreate the account to force it. Recorded as
+  stolen session. Delete the account to force it, and recreate it under a
+  different username (or after the revocation expires, up to the session TTL):
+  an account revocation rejects every session for that username regardless of
+  issue time, so an immediate same-name recreate locks the new account out.
+  Recorded as
   register row **AU-23**; closing it changes an admin workflow and needs its own
   review.
 * **Persistence is opt-in.** Defaulting `--revocations-file` to

@@ -1121,15 +1121,18 @@ culvert_catfeeddb_quarantined_copies %d
 	// two-valued over three causes (unconfigured, load-degraded, write-failing):
 	//
 	//   warn: culvert_session_revocation_durable == 0
-	//   page: culvert_session_revocation_durable == 0
-	//           and increase(culvert_session_revocation_persist_failures_total[15m]) > 0
+	//   page: culvert_session_revocation_persist_degraded == 1
 	//
-	// The bare gauge must NOT page: persistence is opt-in, so every default
-	// appliance reports 0 and would page forever. The counter must not page on
-	// its own either — it is cumulative and never reset, so one transient
-	// failure would latch until the process restarted, which is exactly the bug
-	// AU-25 fixed in the contract row. The conjunction says "failing NOW" and
-	// clears when a write lands, because the gauge returns to 1.
+	// The bare durable gauge must NOT page: persistence is opt-in, so every
+	// default appliance reports 0 and would page forever. The counter must not
+	// page on its own either — it is cumulative and never reset, so one
+	// transient failure would latch until the process restarted, which is
+	// exactly the bug AU-25 fixed in the contract row. An increase() window
+	// over the counter is ALSO wrong: after one failed save with no later write
+	// the window empties and the page clears while durability has not
+	// recovered (Codex P2, PR #1437). `_persist_degraded` is the CURRENT write
+	// state — set by a failed save, cleared only by one that landed — so it
+	// pages exactly as long as the fault is unresolved.
 	//
 	// docs/operator/session-revocation.md carries the same three rules; its
 	// first draft disagreed with this comment and called the bare gauge a page
@@ -1137,6 +1140,10 @@ culvert_catfeeddb_quarantined_copies %d
 	srDurable := 0
 	if revocationsAreDurable() {
 		srDurable = 1
+	}
+	srPersistDegraded := 0
+	if sessionRevocationPersistDegraded.Load() {
+		srPersistDegraded = 1
 	}
 	_, _ = fmt.Fprintf(w, `# HELP culvert_session_revocation_durable 1 when a session revocation applied on this node survives a restart
 # TYPE culvert_session_revocation_durable gauge
@@ -1153,11 +1160,16 @@ culvert_session_revocation_users %d
 # HELP culvert_session_revocation_persist_failures_total Session revocations that were applied in memory but could not be written to disk
 # TYPE culvert_session_revocation_persist_failures_total counter
 culvert_session_revocation_persist_failures_total %d
+
+# HELP culvert_session_revocation_persist_degraded 1 while the most recent revocation save failed and no save has landed since
+# TYPE culvert_session_revocation_persist_degraded gauge
+culvert_session_revocation_persist_degraded %d
 `,
 		srDurable,
 		sessionRevoked.Count(),
 		sessionRevoked.UserCount(),
 		sessionRevocationPersistFailures.Load(),
+		srPersistDegraded,
 	)
 
 	// CHAOS-60: GeoIP resolution health. Emitted ONLY when a GeoIP database is
