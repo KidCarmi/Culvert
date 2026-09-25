@@ -241,6 +241,7 @@ type c16Resolution struct {
 	resolved  bool     // a requireRole call was reached
 	viaDirect bool     // found without following any delegate
 	chain     []string // delegate chain followed, for diagnostics
+	rejects   bool     // the handler does not serve this method (no switch case; guard-free default)
 }
 
 // c16Resolve walks the statements governing one route/method and returns the
@@ -261,35 +262,153 @@ func c16Resolve(idx map[string]*c16Func, name, method string, depth int, seen ma
 		return c16Resolution{}
 	}
 
-	direct, delegates := c16BranchCalls(idx, fn, method)
-	if len(direct) > 0 {
-		return c16Resolution{role: c16Weakest(direct), resolved: true, viaDirect: true}
+	bc := c16BranchCalls(idx, fn, method)
+	if len(bc.delegates) == 0 {
+		if len(bc.direct) > 0 {
+			return c16Resolution{role: c16Weakest(bc.direct), resolved: true, viaDirect: true}
+		}
+		return c16Resolution{rejects: c16MethodUnserved(fn.decl, method)}
 	}
 
-	// No direct check in this branch — inherit from the delegates it calls.
-	// Once delegated, the delegate owns its own method dispatch, so it is
-	// resolved for the SAME method.
-	var out c16Resolution
-	for _, d := range delegates {
+	// The branch delegates. A direct check in the same branch governs a
+	// delegated path only when it DOMINATES it (an unconditional top-level
+	// guard ahead of the first delegate call); any other direct check is just
+	// one more path, folded weakest-wins with the delegates. Once delegated,
+	// the delegate owns its own method dispatch, so it is resolved for the
+	// SAME method.
+	paths := append([]UIRole{}, bc.pathDirect...)
+	unguarded := false
+	var chain []string
+	for _, d := range bc.delegates {
 		sub := c16Resolve(idx, d, method, depth+1, seen)
-		if !sub.resolved {
+		if sub.rejects {
+			// The delegate does not serve this method at all (its method
+			// switch answers it only through a guard-free default) — that
+			// path grants nothing, so it is neither a floor nor unguarded.
 			continue
 		}
-		if !out.resolved || rolePriorityOf(sub.role) < rolePriorityOf(out.role) {
-			out = c16Resolution{
-				role:     sub.role,
-				resolved: true,
-				chain:    append([]string{d}, sub.chain...),
+		if !sub.resolved {
+			unguarded = true
+			continue
+		}
+		if len(paths) == 0 || rolePriorityOf(sub.role) < rolePriorityOf(c16Weakest(paths)) {
+			chain = append([]string{d}, sub.chain...)
+		}
+		paths = append(paths, sub.role)
+	}
+
+	var pathFloor UIRole
+	if !unguarded && len(paths) > 0 {
+		pathFloor = c16Weakest(paths)
+	}
+	if len(bc.dominating) > 0 {
+		role := c16Weakest(bc.dominating)
+		if pathFloor != "" && rolePriorityOf(pathFloor) > rolePriorityOf(role) {
+			role = pathFloor
+		} else {
+			chain = nil
+		}
+		return c16Resolution{role: role, resolved: true, chain: chain}
+	}
+	if pathFloor == "" {
+		// Some delegated path reaches no requireRole and no direct check
+		// dominates it: conservatively unresolved, never a guessed pass.
+		return c16Resolution{}
+	}
+	return c16Resolution{role: pathFloor, resolved: true, chain: chain}
+}
+
+// c16MethodUnserved reports whether fn dispatches on r.Method and has NO case
+// for method, so the method reaches only a default arm that itself calls no
+// handler and no requireRole (the method-not-allowed shape).
+func c16MethodUnserved(fn *ast.FuncDecl, method string) bool {
+	if method == MethodAny {
+		return false
+	}
+	for _, st := range fn.Body.List {
+		sw, ok := st.(*ast.SwitchStmt)
+		if !ok || !c16IsMethodSwitch(sw) {
+			continue
+		}
+		for _, cs := range sw.Body.List {
+			cc, ok := cs.(*ast.CaseClause)
+			if !ok {
+				continue
+			}
+			for _, expr := range cc.List {
+				if c16HTTPMethodLiteral(expr) == method {
+					return false
+				}
 			}
 		}
+		return true
 	}
-	return out
+	return false
+}
+
+// c16Calls is what one method branch of a handler calls.
+type c16Calls struct {
+	direct     []UIRole // every requireRole in the branch
+	dominating []UIRole // requireRole guards that run unconditionally before any delegate call
+	pathDirect []UIRole // requireRole calls that do NOT dominate the delegates
+	delegates  []string
+}
+
+// c16IsDominatingGuard reports whether a top-level branch statement is an
+// UNCONDITIONAL requireRole guard — `if !requireRole(...) { ... }`, a bare
+// call, or an assignment from one — and returns its role. A guard behind a
+// compound condition is conditional, and so is not dominating.
+func c16IsDominatingGuard(st ast.Stmt) UIRole {
+	var e ast.Expr
+	switch s := st.(type) {
+	case *ast.IfStmt:
+		if s.Init != nil {
+			return ""
+		}
+		e = s.Cond
+		// The LEFTMOST operand of a && / || chain is always evaluated, so
+		// `if !requireRole(...) || !other(w) { return }` is still an
+		// unconditional guard.
+		for {
+			b, ok := e.(*ast.BinaryExpr)
+			if !ok || (b.Op != token.LOR && b.Op != token.LAND) {
+				break
+			}
+			e = b.X
+		}
+		if u, ok := e.(*ast.UnaryExpr); ok && u.Op == token.NOT {
+			e = u.X
+		}
+	case *ast.ExprStmt:
+		e = s.X
+	case *ast.AssignStmt:
+		if len(s.Rhs) != 1 {
+			return ""
+		}
+		e = s.Rhs[0]
+	default:
+		return ""
+	}
+	call, ok := e.(*ast.CallExpr)
+	if !ok {
+		return ""
+	}
+	if id, ok := call.Fun.(*ast.Ident); ok && id.Name == "requireRole" {
+		return extractRequireRoleArg(call)
+	}
+	return ""
 }
 
 // c16BranchCalls collects the requireRole roles and the delegate handler
-// calls found in the statements governing one method of fn.
-func c16BranchCalls(idx map[string]*c16Func, fn *c16Func, method string) (direct []UIRole, delegates []string) {
+// calls found in the statements governing one method of fn, classifying each
+// requireRole as dominating (an unconditional top-level guard ahead of the
+// first statement that calls a delegate) or not.
+func c16BranchCalls(idx map[string]*c16Func, fn *c16Func, method string) c16Calls {
+	var out c16Calls
+	seenDelegate := false
 	for _, st := range c16MethodBranch(fn.decl, method) {
+		var stDirect []UIRole
+		var stDelegates []string
 		ast.Inspect(st, func(n ast.Node) bool {
 			call, ok := n.(*ast.CallExpr)
 			if !ok {
@@ -302,15 +421,25 @@ func c16BranchCalls(idx map[string]*c16Func, fn *c16Func, method string) (direct
 			switch {
 			case id.Name == "requireRole":
 				if role := extractRequireRoleArg(call); role != "" {
-					direct = append(direct, role)
+					stDirect = append(stDirect, role)
 				}
 			case idx[id.Name] != nil && idx[id.Name].isHandler && len(call.Args) == 2:
-				delegates = append(delegates, id.Name)
+				stDelegates = append(stDelegates, id.Name)
 			}
 			return true
 		})
+		out.direct = append(out.direct, stDirect...)
+		if guard := c16IsDominatingGuard(st); guard != "" && !seenDelegate && len(stDelegates) == 0 {
+			out.dominating = append(out.dominating, guard)
+		} else {
+			out.pathDirect = append(out.pathDirect, stDirect...)
+		}
+		out.delegates = append(out.delegates, stDelegates...)
+		if len(stDelegates) > 0 {
+			seenDelegate = true
+		}
 	}
-	return direct, delegates
+	return out
 }
 
 // c16Weakest returns the least-privileged role in a non-empty list.
@@ -595,5 +724,78 @@ func TestC16_WholeBodyFoldInventory(t *testing.T) {
 		if !inFound[p] {
 			t.Errorf("C1.6: %s is listed in c16FoldExemptRoutes but no longer needs the exemption (its handler now switches on r.Method, or it is no longer a multi-method route) — remove the entry", p)
 		}
+	}
+}
+
+// TestC16_MixedDirectAndDelegatedBranchIsPathAware pins that a direct
+// requireRole in a branch does NOT automatically govern the delegates the same
+// branch calls. A CONDITIONAL direct check beside a viewer-only or unguarded
+// delegate must resolve to the delegate's weak floor (or stay unresolved); an
+// UNCONDITIONAL guard ahead of the delegate call still governs it.
+func TestC16_MixedDirectAndDelegatedBranchIsPathAware(t *testing.T) {
+	const src = `package main
+
+import "net/http"
+
+func fixtureMixedWeak(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodPost:
+		if r.URL.Query().Get("x") == "1" {
+			if !requireRole(w, r, RoleAdmin) {
+				return
+			}
+			return
+		}
+		fixtureViewerOnly(w, r)
+	}
+}
+
+func fixtureMixedUnguarded(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodPost:
+		if r.URL.Query().Get("x") == "1" {
+			if !requireRole(w, r, RoleAdmin) {
+				return
+			}
+			return
+		}
+		fixtureNoCheck(w, r)
+	}
+}
+
+func fixtureMixedDominated(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodPost:
+		if !requireRole(w, r, RoleAdmin) {
+			return
+		}
+		fixtureNoCheck(w, r)
+	}
+}
+
+func fixtureViewerOnly(w http.ResponseWriter, r *http.Request) {
+	if !requireRole(w, r, RoleViewer) {
+		return
+	}
+}
+
+func fixtureNoCheck(w http.ResponseWriter, r *http.Request) {
+	_ = r
+	_ = w
+}
+`
+	idx := c16ParseFixture(t, src)
+
+	weak := c16Resolve(idx, "fixtureMixedWeak", "POST", 0, map[string]bool{})
+	if !weak.resolved || weak.role != RoleViewer {
+		t.Fatalf("conditional admin check + viewer-only delegate resolved to (%v, %q), want (true, %q) — the direct check hid the weak delegated path",
+			weak.resolved, weak.role, RoleViewer)
+	}
+	if un := c16Resolve(idx, "fixtureMixedUnguarded", "POST", 0, map[string]bool{}); un.resolved {
+		t.Fatalf("conditional admin check + unguarded delegate resolved to %q; it must stay unresolved so a privileged route fails", un.role)
+	}
+	dom := c16Resolve(idx, "fixtureMixedDominated", "POST", 0, map[string]bool{})
+	if !dom.resolved || dom.role != RoleAdmin {
+		t.Fatalf("an unconditional admin guard ahead of the delegate resolved to (%v, %q), want (true, %q)", dom.resolved, dom.role, RoleAdmin)
 	}
 }

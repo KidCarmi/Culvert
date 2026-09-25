@@ -102,7 +102,8 @@ func verifyUIBasicAuth(r *http.Request, user, pass string) (UIRole, bool) {
 	// a bcrypt without granting access are charged — a correctly-configured
 	// script is never throttled. The refusal itself is silent (auditing it
 	// would rebuild the write amplifier this bounds).
-	if !basicAuthFailLimiter.Reserve(clientIP) {
+	resv, reserved := basicAuthFailLimiter.Reserve(clientIP)
+	if !reserved {
 		return "", false
 	}
 
@@ -111,7 +112,7 @@ func verifyUIBasicAuth(r *http.Request, user, pass string) (UIRole, bool) {
 	// an unbounded rate. A locked refusal costs no bcrypt and retains
 	// nothing, so it does not consume the failure budget.
 	if locked, _ := loginLimiter.Check(clientIP, user); locked {
-		basicAuthFailLimiter.Refund(clientIP)
+		basicAuthFailLimiter.Refund(resv)
 		return "", false
 	}
 
@@ -137,7 +138,7 @@ func verifyUIBasicAuth(r *http.Request, user, pass string) (UIRole, bool) {
 		return "", false
 	}
 
-	basicAuthFailLimiter.Refund(clientIP)
+	basicAuthFailLimiter.Refund(resv)
 	loginLimiter.RecordSuccess(clientIP, user)
 	return role, true
 }

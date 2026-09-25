@@ -490,11 +490,11 @@ func TestSECBASIC1_TOTPRefusalsAreChargedToTheIPBudget(t *testing.T) {
 	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/api/policy", http.NoBody)
 	ip := realClientIP(req)
 	for i := 1; i < lockout.Burst; i++ {
-		if !basicAuthFailLimiter.Reserve(ip) {
+		if _, ok := basicAuthFailLimiter.Reserve(ip); !ok {
 			t.Fatalf("budget exhausted after %d units; want exactly Burst", i)
 		}
 	}
-	if basicAuthFailLimiter.Reserve(ip) {
+	if _, ok := basicAuthFailLimiter.Reserve(ip); ok {
 		t.Fatalf("a TOTP refusal left the per-IP Basic budget unconsumed — a compromised first factor is an unbounded bcrypt/audit amplifier")
 	}
 	if left := loginLimiter.AttemptsLeft(realClientIP(req), user); left != lockout.MaxAttempts {
