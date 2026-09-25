@@ -1600,6 +1600,57 @@ func (c *Config) mutateRosterBestEffort(mutate func() bool) error {
 	return c.saveUIUsersLocked()
 }
 
+// SetAuthDurably performs first-time-setup credential creation as ONE
+// transaction: it installs the initial admin and persists it with
+// saveUIUsersMu held across both, compensating with RollbackFailedSetupAuth
+// when the write does not land.
+//
+// CHAOS-70 (Codex round 2). SetAuth mirrors the new admin into c.uiUsers
+// (see its body) while taking only c.mu, so it IS a roster mutation and must
+// sit inside the same transaction as every other one. Round 1 left it out on
+// the recorded reasoning that first-time setup and admin user-management are
+// mutually exclusive, because the latter requires a configured appliance.
+// That was WRONG, and the gate said to be excluding them is what makes them
+// overlap: uiAuthMiddleware injects RoleAdmin into EVERY request while
+// !cfg.IsConfigured(), so POST /api/auth/users is reachable, with admin
+// authority, precisely DURING setup.
+//
+// The interleaving that follows is the hazard apiSetupComplete's own rollback
+// exists to prevent, reached from the opposite direction: an admin mutation
+// snapshots the still-empty roster, SetAuth inserts the initial admin, the
+// admin mutation's write fails and its wholesale restore DELETES that account,
+// and setup's own write — which has been queued behind saveUIUsersMu the whole
+// time — then persists the empty roster and answers 200. IsConfigured() stays
+// true for the rest of the process only because the legacy c.user/c.passHash
+// pair is still set, and those are not in ui_users.json, so the next restart
+// reopens unauthenticated first-time setup.
+//
+// The compensation is the CALLER'S, not restoreRoster's, and that distinction
+// is load-bearing: SetAuth also sets c.user/c.passHash, which rosterSnapshot
+// does not capture, so a wholesale roster restore would undo the account while
+// leaving the legacy pair set — IsConfigured() true with nothing persisted,
+// exactly the state RollbackFailedSetupAuth exists to clear.
+//
+// fileutil.ErrReplacedNotSynced is deliberately NOT carved out here, unlike
+// mutateRosterDurably: this preserves the credentialed branch's pre-existing
+// behaviour of compensating on any persist error. That it diverges from
+// setDefaultAuthOutcomeChecked beside it is a PRE-EXISTING inconsistency in
+// apiSetupComplete's two branches, recorded rather than changed inside a fix
+// about the transaction boundary.
+func (c *Config) SetAuthDurably(user, pass string) error {
+	c.saveUIUsersMu.Lock()
+	defer c.saveUIUsersMu.Unlock()
+
+	if err := c.SetAuth(user, pass); err != nil {
+		return err
+	}
+	if err := c.saveUIUsersLocked(); err != nil {
+		c.RollbackFailedSetupAuth(user)
+		return fmt.Errorf("%w: %w", ErrRosterNotPersisted, err)
+	}
+	return nil
+}
+
 // VerifyUIUser checks credentials against the admin user roster and returns
 // the user's role.  Falls back to the legacy single-user when the roster is
 // empty, assigning RoleAdmin for backwards compatibility.

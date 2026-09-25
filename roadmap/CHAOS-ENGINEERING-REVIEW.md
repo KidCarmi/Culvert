@@ -7173,6 +7173,69 @@ unserialised shape with the consumed code resurrected),
 dropped its match count and it failed rather than passing against nothing, so the
 selector was widened to every roster-persisting call.
 
+### Codex review round 2 — the transaction had one writer left outside it, and the runbook named a route that does not exist
+
+**P1 — first-time setup was still outside the transaction, and the reason round 1
+left it out was wrong.** `SetAuth` mirrors the new admin into `c.uiUsers` (it
+takes only `c.mu`), so credentialed first-time setup IS a roster mutation, and
+`apiSetupComplete` ran it as an unserialised `SetAuth` + `SaveUIUsersFile` pair.
+Round 1 dismissed this on the recorded reasoning that setup and admin
+user-management are mutually exclusive, because the latter requires a configured
+appliance. **That reasoning was false, and the gate said to be separating them is
+exactly what makes them overlap**: `uiAuthMiddleware` injects `RoleAdmin` into
+EVERY request while `!cfg.IsConfigured()`, so `POST /api/auth/users` is reachable,
+with admin authority, precisely DURING setup.
+
+The reachable interleaving is the hazard `apiSetupComplete`'s own rollback exists
+to prevent, arrived at from the opposite direction: an admin mutation snapshots
+the still-empty roster, `SetAuth` inserts the initial admin, the admin mutation's
+write fails and its wholesale restore DELETES that account, and setup's own write
+— queued behind `saveUIUsersMu` the whole time — then persists the empty roster
+and answers **200**. `IsConfigured()` stays true for the rest of the process only
+because the legacy `c.user`/`c.passHash` pair is still set, and those are not in
+`ui_users.json`, so the next restart reopens **unauthenticated first-time setup**.
+`SetAuthDurably` now holds `saveUIUsersMu` across mutate+persist. Its
+compensation stays `RollbackFailedSetupAuth` rather than `restoreRoster`, and that
+distinction is load-bearing: `SetAuth` also sets the legacy pair, which
+`rosterSnapshot` does not capture, so a wholesale roster restore would undo the
+account while leaving `IsConfigured()` true with nothing persisted — exactly the
+state that rollback exists to clear.
+
+**The P1 gate is STRUCTURAL, and once again the measurement is the reason.** The
+first draft held an admin transaction open, called `SetAuthDurably` concurrently,
+slept 50 ms and asserted the roster was untouched. It **PASSED against the
+verbatim pre-fix shape** — and not because of the lock: `SetAuth` runs bcrypt at
+`DefaultCost` (~80–100 ms) BEFORE it touches `c.mu`, so the observation window
+closed while the defect was still hashing. This is the round-1 P2 lesson from the
+opposite end — there the window was too NARROW to observe, here the observation
+was taken too EARLY — and the standing rule is the same: *a behavioural gate that
+passes against the defect is worse than no gate.* The shipped wall asserts the
+mechanism (`saveUIUsersMu.Lock()` as the FIRST statement, never the self-locking
+`SaveUIUsersFile`) and carries a control rejecting a verbatim copy of the pre-fix
+body. The behavioural half is kept and made **SELF-CALIBRATING**: the wait is
+derived from a measured `DefaultCost` hash on the machine running it, not from a
+constant, so it fails against the defect on fast and slow hardware alike
+(verified failing on both assertions).
+
+**P2 — the runbook named a route that does not exist.** The new operator runbook
+and the CHANGELOG entry both said `POST /api/auth/password`; the registered route
+is `POST /api/auth/change-password` (`ui_routes_meta.go`, `ui_auth.go`). An
+operator following the recovery steps gets a 404 in the middle of an incident,
+which is the failure mode a runbook exists to remove. Both corrected, and
+`Wall_RunbookNamesRegisteredEndpoints` now parses every `/api/` path out of the
+runbook and requires each to be present in `uiRoutes`, so a future rename cannot
+leave the documentation pointing at nothing (verified failing against the wrong
+path).
+
+The existing structural wall's **not-vacuous check fired a second time** — round 2
+moved the credentialed-setup persist out from under its previous spelling exactly
+as round 1 had — and was widened rather than weakened, to `SaveUIUsersFile`,
+`mutateRosterDurably`, `mutateRosterBestEffort` and `SetAuthDurably`.
+`SetAuthDurably_PersistFailureRollsBackLegacyPair` is labelled a **CONTROL**, not
+a defect gate: the pre-fix shape compensated the same way and it passes against it
+(verified), so what it pins is that moving setup inside the transaction did not
+quietly swap its compensation for the generic one.
+
 ### Register rows
 
 - **CA-14** — the session-revocation half was already closed (`AtomicWrite`); the

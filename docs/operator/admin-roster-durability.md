@@ -18,7 +18,7 @@ cannot be written, the in-memory change is rolled back and the request fails:
 |---|---|---|---|
 | Create account / set password / change role | `POST /api/auth/users` | `200 {"ok":true}` | `500`, nothing changed |
 | Delete account | `DELETE /api/auth/users` | `204 No Content` | `500`, nothing changed |
-| Self-service password change | `POST /api/auth/password` | `200 {"ok":true}` | `500`, nothing changed |
+| Self-service password change | `POST /api/auth/change-password` | `200 {"ok":true}` | `500`, nothing changed |
 
 The refusal body names the remedy and states plainly that nothing was modified:
 

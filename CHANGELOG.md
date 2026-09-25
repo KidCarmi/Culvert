@@ -24,7 +24,7 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   and disk stayed invisible until a restart materialised it. The same rule was
   already written down, reasoned out and tested twenty lines away — for the
   one-time setup wizard only. `POST/DELETE /api/auth/users` and
-  `POST /api/auth/password` are now durable-or-refused: the in-memory change is
+  `POST /api/auth/change-password` are now durable-or-refused: the in-memory change is
   rolled back wholesale (hash, role, TOTP secret, backup codes and replay
   counter together), the request fails with an actionable `500`, and the
   refusal is audited as `<action>.refused`. `fileutil.ErrReplacedNotSynced` is

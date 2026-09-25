@@ -577,11 +577,17 @@ func apiSetupComplete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := cfg.SetAuth(body.User, body.Pass); err != nil {
-		http.Error(w, "internal error: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-	if err := cfg.SaveUIUsersFile(); err != nil {
+	// CHAOS-70 (Codex round 2): ONE transaction. SetAuth mirrors the new admin
+	// into the roster, so it must be serialised against every other roster
+	// mutation — uiAuthMiddleware grants RoleAdmin to all requests while
+	// !IsConfigured(), so POST /api/auth/users is reachable DURING setup and a
+	// failing admin mutation's rollback could otherwise delete this account.
+	// See SetAuthDurably for the full interleaving.
+	if err := cfg.SetAuthDurably(body.User, body.Pass); err != nil {
+		if !errors.Is(err, ErrRosterNotPersisted) {
+			http.Error(w, "internal error: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
 		// SetAuth already mutated in-memory state, which would otherwise make
 		// IsConfigured() true for the rest of this process's lifetime even
 		// though the credential was never durably saved — a restart before a
@@ -592,8 +598,8 @@ func apiSetupComplete(w http.ResponseWriter, r *http.Request) {
 		// operator's retry goes through the normal (retryable) setup path
 		// rather than hitting "setup already complete" with no session and no
 		// persisted credential.
+		// (rolled back inside SetAuthDurably, under the transaction lock).
 		logger.Printf("UIUsers: failed to persist: %v", err)
-		cfg.RollbackFailedSetupAuth(body.User)
 		http.Error(w, "internal error: admin credentials could not be saved to disk; setup did not complete — check disk space/permissions and retry", http.StatusInternalServerError)
 		return
 	}

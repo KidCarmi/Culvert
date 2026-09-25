@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -263,8 +264,8 @@ func TestChaos70_Control_MutationErrorIsNotMaskedAsPersistFailure(t *testing.T) 
 	snapshotAuthGlobals(t)
 	resetRosterPersistCountersForTest()
 	t.Cleanup(resetRosterPersistCountersForTest)
-	dir := t.TempDir()
-	cfg.SetUIUsersFile(filepath.Join(dir, "ui_users.json"))
+	rosterPath := filepath.Join(t.TempDir(), "ui_users.json")
+	cfg.SetUIUsersFile(rosterPath)
 	cfg.mu.Lock()
 	cfg.uiUsers = map[string]*uiAdminUser{}
 	cfg.mu.Unlock()
@@ -374,6 +375,7 @@ func TestChaos70_Wall_NoRosterPersistErrorIsDiscarded(t *testing.T) {
 		"SaveUIUsersFile":        true,
 		"mutateRosterDurably":    true,
 		"mutateRosterBestEffort": true,
+		"SetAuthDurably":         true,
 	}
 	isRosterSave := func(call *ast.CallExpr) bool {
 		sel, ok := call.Fun.(*ast.SelectorExpr)
@@ -410,10 +412,12 @@ func TestChaos70_Wall_NoRosterPersistErrorIsDiscarded(t *testing.T) {
 
 	// Not-vacuous: if the selector ever stops matching, the wall must fail
 	// rather than pass forever against nothing.
-	// Not-vacuous: ui_auth.go carries one SaveUIUsersFile (first-time setup),
-	// two mutateRosterBestEffort (login path) and three mutateRosterDurably
-	// (the administrative mutations). A selector that stops matching them must
-	// fail rather than pass forever against nothing.
+	// Not-vacuous: ui_auth.go carries three mutateRosterDurably (the
+	// administrative mutations), two mutateRosterBestEffort (login path) and one
+	// SetAuthDurably (first-time setup) — no raw SaveUIUsersFile remains. A
+	// selector that stops matching them must fail rather than pass forever
+	// against nothing, which is how it caught BOTH round-1 and round-2 moving
+	// the persisting call out from under its previous spelling.
 	if found < 6 {
 		t.Fatalf("wall matched only %d roster-persisting call sites in ui_auth.go (want >= 6); the "+
 			"selector has gone stale and is no longer proving anything", found)
@@ -660,5 +664,292 @@ func TestChaos70_Control_LogRateGateCountsEveryCaller(t *testing.T) {
 	}
 	if got := rosterPersistBestEffort.Load(); got != callers {
 		t.Errorf("counter = %d, want %d: rate-limiting the log must never drop the count", got, callers)
+	}
+}
+
+// ─── Codex review round 2 ────────────────────────────────────────────────────
+
+// TestChaos70_Wall_CredentialedSetupIsInsideTheTransaction is the round-2 P1
+// gate, and it is STRUCTURAL rather than behavioural for a reason the first
+// draft of it measured the hard way.
+//
+// SetAuth mirrors the new admin into c.uiUsers, so first-time setup IS a roster
+// mutation and must sit inside the same transaction as every other one. Round 1
+// left it out on the recorded reasoning that setup and admin user-management
+// cannot overlap, because the latter requires a configured appliance — and the
+// gate said to be separating them is exactly what makes them overlap:
+// uiAuthMiddleware injects RoleAdmin into EVERY request while
+// !cfg.IsConfigured(), so POST /api/auth/users is reachable, with admin
+// authority, precisely DURING setup.
+//
+// Unserialised, an admin mutation can snapshot the still-empty roster, setup can
+// insert the initial admin, and the admin mutation's failed write can restore
+// that empty snapshot — deleting the account — after which setup's own write
+// (queued behind saveUIUsersMu the whole time) persists the empty roster and
+// answers 200. IsConfigured() then holds only via the legacy c.user/c.passHash
+// pair, which ui_users.json does not carry, so the next restart reopens
+// unauthenticated first-time setup.
+//
+// The first version of this gate held an admin transaction open, called
+// SetAuthDurably concurrently, slept 50ms and asserted the roster was
+// untouched. It PASSED against the verbatim pre-fix shape (measured), and not
+// because of the lock: SetAuth runs bcrypt at DefaultCost — ~80-100ms —
+// BEFORE it takes c.mu, so the observation window closed while the defect was
+// still hashing. A gate that passes against the defect is worse than no gate,
+// which is the same conclusion the log-rate wall above reached from the
+// opposite direction (a window too NARROW to observe rather than an observation
+// taken too EARLY).
+//
+// So this gate asserts the MECHANISM: SetAuthDurably must take the transaction
+// lock as its FIRST statement — before SetAuth, whose hash it must not race —
+// and must never reach the self-locking SaveUIUsersFile, which would deadlock
+// under it. Deterministic on any hardware, at any load, with or without -race.
+// The behavioural half is pinned, self-calibrated against measured bcrypt cost,
+// by the gate below.
+//
+// It carries its own CONTROL: the same predicate is run against a verbatim copy
+// of the pre-fix body and must REJECT it, so a selector that matches nothing
+// cannot pass forever.
+func TestChaos70_Wall_CredentialedSetupIsInsideTheTransaction(t *testing.T) {
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "store.go", nil, parser.ParseComments)
+	if err != nil {
+		t.Fatalf("parse store.go: %v", err)
+	}
+
+	var fn *ast.FuncDecl
+	for _, d := range file.Decls {
+		if f, ok := d.(*ast.FuncDecl); ok && f.Name.Name == "SetAuthDurably" {
+			fn = f
+			break
+		}
+	}
+	if fn == nil {
+		t.Fatal("SetAuthDurably not found; the gate's selector has gone stale")
+	}
+
+	locksFirst, lockingSave := setAuthDurablyShape(fn)
+	if !locksFirst {
+		t.Error("SetAuthDurably must take saveUIUsersMu as its FIRST statement: SetAuth mutates the " +
+			"roster, so acquiring the transaction lock after it (or not at all) lets a concurrent admin " +
+			"mutation's wholesale rollback delete the initial admin, after which setup's own queued write " +
+			"persists the empty roster and answers 200 (CHAOS-70 Codex round 2)")
+	}
+	if lockingSave {
+		t.Error("SetAuthDurably calls the self-locking SaveUIUsersFile; inside the transaction it must " +
+			"call saveUIUsersLocked, or it deadlocks on its own lock")
+	}
+
+	// CONTROL: the pre-fix shape must be rejected by this same predicate.
+	legacyFset := token.NewFileSet()
+	legacyFile, err := parser.ParseFile(legacyFset, "legacy.go", legacySetupSaveSource, 0)
+	if err != nil {
+		t.Fatalf("parse legacy control: %v", err)
+	}
+	legacyFn, _ := legacyFile.Decls[0].(*ast.FuncDecl)
+	if legacyFn == nil {
+		t.Fatal("legacy control did not parse into a function")
+	}
+	legacyLocks, legacySave := setAuthDurablyShape(legacyFn)
+	if legacyLocks || !legacySave {
+		t.Error("the control failed: the verbatim pre-fix (unserialised SetAuth + SaveUIUsersFile) shape " +
+			"must be REJECTED by this gate, otherwise the gate is matching nothing and proves nothing")
+	}
+}
+
+// setAuthDurablyShape reports whether fn takes saveUIUsersMu as its first
+// statement and whether it reaches the self-locking SaveUIUsersFile.
+func setAuthDurablyShape(fn *ast.FuncDecl) (locksFirst, lockingSave bool) {
+	if fn.Body != nil && len(fn.Body.List) > 0 {
+		if expr, ok := fn.Body.List[0].(*ast.ExprStmt); ok {
+			if call, ok := expr.X.(*ast.CallExpr); ok {
+				if lock, ok := call.Fun.(*ast.SelectorExpr); ok && lock.Sel.Name == "Lock" {
+					if mu, ok := lock.X.(*ast.SelectorExpr); ok && mu.Sel.Name == "saveUIUsersMu" {
+						locksFirst = true
+					}
+				}
+			}
+		}
+	}
+	ast.Inspect(fn, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		if sel, ok := call.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "SaveUIUsersFile" {
+			lockingSave = true
+		}
+		return true
+	})
+	return locksFirst, lockingSave
+}
+
+// legacySetupSaveSource is the VERBATIM pre-fix credentialed-setup persist
+// shape, kept only as the control above. It must never be called.
+const legacySetupSaveSource = `package legacy
+
+func legacySetAuthDurably(user, pass string) error {
+	if err := c.SetAuth(user, pass); err != nil {
+		return err
+	}
+	if err := c.SaveUIUsersFile(); err != nil {
+		c.RollbackFailedSetupAuth(user)
+		return err
+	}
+	return nil
+}
+`
+
+// TestChaos70_CredentialedSetupWaitsForTheTransaction is the behavioural half of
+// the wall above, and it is SELF-CALIBRATING so it can fail against the defect
+// on any machine.
+//
+// The observation the first draft got wrong is that SetAuth's bcrypt hash runs
+// BEFORE it touches the roster, so any fixed sleep shorter than that cost
+// observes an untouched roster whether or not the lock is held. The wait is
+// therefore derived from a measured DefaultCost hash on this machine, not from
+// a constant: under the fix SetAuthDurably cannot return at all while the
+// transaction is held, under the defect it returns after roughly one hash plus
+// one write.
+func TestChaos70_CredentialedSetupWaitsForTheTransaction(t *testing.T) {
+	snapshotAuthGlobals(t)
+	resetRosterPersistCountersForTest()
+	t.Cleanup(resetRosterPersistCountersForTest)
+
+	// Calibrate against this machine: SetAuth spends one DefaultCost hash
+	// before it reaches the roster at all.
+	hashStart := time.Now()
+	if _, err := bcrypt.GenerateFromPassword([]byte("calibration"), bcrypt.DefaultCost); err != nil {
+		t.Fatalf("calibration hash: %v", err)
+	}
+	wait := 4 * time.Since(hashStart)
+	if wait < 200*time.Millisecond {
+		wait = 200 * time.Millisecond
+	}
+
+	// Unconfigured appliance: no roster, no legacy credential.
+	rosterPath := filepath.Join(t.TempDir(), "ui_users.json")
+	cfg.SetUIUsersFile(rosterPath)
+	cfg.mu.Lock()
+	cfg.uiUsers = map[string]*uiAdminUser{}
+	cfg.mu.Unlock()
+	if err := cfg.SetAuth("", ""); err != nil {
+		t.Fatalf("clear auth: %v", err)
+	}
+
+	entered := make(chan struct{})
+	proceed := make(chan struct{})
+	adminDone := make(chan error, 1)
+	go func() {
+		adminDone <- cfg.mutateRosterDurably(func() error {
+			close(entered)
+			<-proceed
+			return nil // a no-op admin mutation is enough; the lock is the subject
+		})
+	}()
+	<-entered
+
+	setupDone := make(chan error, 1)
+	go func() { setupDone <- cfg.SetAuthDurably("setupadmin", "Sup3rSecret1") }()
+
+	select {
+	case err := <-setupDone:
+		t.Fatalf("first-time setup completed (err=%v) while an admin roster transaction was in flight: "+
+			"a failing admin mutation's wholesale rollback would delete the initial admin, and setup's "+
+			"own write would then persist the empty roster and answer 200 (CHAOS-70 Codex round 2)", err)
+	case <-time.After(wait):
+	}
+	if cfg.UIUserExists("setupadmin") {
+		t.Error("first-time setup mutated the roster while an admin roster transaction was in flight " +
+			"(CHAOS-70 Codex round 2)")
+	}
+
+	close(proceed)
+	if err := <-adminDone; err != nil {
+		t.Fatalf("the admin transaction should have succeeded on a healthy volume; got %v", err)
+	}
+	if err := <-setupDone; err != nil {
+		t.Fatalf("setup should have completed once the transaction released; got %v", err)
+	}
+
+	// Healthy-path control: setup actually took effect, in memory and on disk.
+	if !cfg.UIUserExists("setupadmin") {
+		t.Error("setup must install the initial admin once it acquires the transaction")
+	}
+	if !cfg.IsConfigured() {
+		t.Error("setup must leave the appliance configured")
+	}
+	if _, ok := durableRoster(t, rosterPath)["setupadmin"]; !ok {
+		t.Error("the initial admin must be durable, not memory-only — otherwise a restart reopens " +
+			"unauthenticated first-time setup")
+	}
+}
+
+// TestChaos70_SetAuthDurably_PersistFailureRollsBackLegacyPair is a CONTROL, not
+// a defect gate: the pre-fix shape compensated the same way and it passes
+// against it (verified). What it pins is that moving setup INSIDE the
+// transaction did not quietly swap its compensation for the generic one.
+//
+// The compensation is the CALLER'S and is more complete than a roster restore.
+//
+// SetAuth sets c.user/c.passHash as well as the roster entry, and rosterSnapshot
+// captures neither. A wholesale roster restore would therefore undo the account
+// while leaving the legacy pair set — IsConfigured() true with nothing
+// persisted, which is the precise state RollbackFailedSetupAuth exists to
+// clear and the reason setup keeps its own undo inside the transaction.
+func TestChaos70_SetAuthDurably_PersistFailureRollsBackLegacyPair(t *testing.T) {
+	snapshotAuthGlobals(t)
+	cfg.mu.Lock()
+	cfg.uiUsers = map[string]*uiAdminUser{}
+	cfg.mu.Unlock()
+	if err := cfg.SetAuth("", ""); err != nil {
+		t.Fatalf("clear auth: %v", err)
+	}
+	breakRosterWrites(t)
+
+	err := cfg.SetAuthDurably("setupadmin", "Sup3rSecret1")
+	if !errors.Is(err, ErrRosterNotPersisted) {
+		t.Fatalf("a failed setup write must report ErrRosterNotPersisted so the handler can pick its "+
+			"disk-specific message; got %v", err)
+	}
+	if cfg.IsConfigured() {
+		t.Error("setup must roll back to UNCONFIGURED when the credential could not be persisted, or " +
+			"IsConfigured() stays true for this process's lifetime and reverts on the next restart")
+	}
+	if cfg.UIUserExists("setupadmin") {
+		t.Error("the half-created admin must not survive a failed setup write")
+	}
+}
+
+// TestChaos70_Wall_RunbookNamesRegisteredEndpoints is the round-2 P2 gate.
+//
+// The runbook sent operators to POST /api/auth/password, which is registered
+// nowhere — the handler lives at /api/auth/change-password — so anyone following
+// the recovery steps got a 404 instead of the behaviour being documented. Prose
+// cannot catch that class, and uiRoutes is the single source of truth for what
+// exists, so the two are compared directly.
+func TestChaos70_Wall_RunbookNamesRegisteredEndpoints(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join(pkgSourceDir(), "docs", "operator", "admin-roster-durability.md")) // #nosec G304 -- fixed in-repo path
+	if err != nil {
+		t.Fatalf("read runbook: %v", err)
+	}
+
+	registered := map[string]bool{}
+	for i := range uiRoutes {
+		registered[uiRoutes[i].Path] = true
+	}
+
+	found := 0
+	for _, m := range regexp.MustCompile(`/api/[A-Za-z0-9/_-]+`).FindAllString(string(data), -1) {
+		path := strings.TrimRight(m, "/-_")
+		if registered[path] {
+			found++
+			continue
+		}
+		t.Errorf("the runbook names %q, which is not registered in uiRoutes — an operator following "+
+			"these steps gets a 404 (CHAOS-70 Codex round 2)", path)
+	}
+	if found == 0 {
+		t.Fatal("the wall matched no /api/ paths in the runbook; its selector has gone stale")
 	}
 }
