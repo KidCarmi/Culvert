@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"regexp"
 	"strconv"
+	"strings"
 )
 
 // The subset of cmd/rootshard's published documents this reporter reads. They
@@ -88,7 +89,13 @@ type runEvidence struct {
 	TimingFileSource string
 	// Present are the artifact names the run published (expired included).
 	Present []string
-	Notes   []string
+	// Read are the "artifact/member" documents actually downloaded and
+	// decoded. Empty means the report rests on run metadata alone.
+	Read []string
+	// JobImages is the runner image each job's log reported, by job id;
+	// a job absent from the map was not observed.
+	JobImages map[int64]runnerImage
+	Notes     []string
 }
 
 func decodeStrict(name string, b []byte, v any) error {
@@ -137,6 +144,7 @@ func (ev *runEvidence) ingest(name string, members map[string][]byte) {
 			ev.ShardMetas = map[int]*evShardMeta{}
 		}
 		ev.ShardMetas[idx] = &meta
+		ev.Read = append(ev.Read, name+"/meta.json")
 		return
 	}
 	switch name {
@@ -146,6 +154,7 @@ func (ev *runEvidence) ingest(name string, members map[string][]byte) {
 			note(err)
 		} else {
 			ev.Verdict = &v
+			ev.Read = append(ev.Read, name+"/verdict.json")
 		}
 		if b, ok := members["results.json"]; ok {
 			var r map[string]*evPkgResult
@@ -153,6 +162,7 @@ func (ev *runEvidence) ingest(name string, members map[string][]byte) {
 				note(err)
 			} else {
 				ev.Results = r
+				ev.Read = append(ev.Read, name+"/results.json")
 			}
 		}
 	case "qa-audit-compare", "fast-audit-compare":
@@ -161,6 +171,7 @@ func (ev *runEvidence) ingest(name string, members map[string][]byte) {
 			note(err)
 		} else {
 			ev.Comparison = &c
+			ev.Read = append(ev.Read, name+"/comparison.json")
 		}
 		if b, ok := members["qa-root-shard-timings.json"]; ok {
 			var t evTimings
@@ -168,7 +179,51 @@ func (ev *runEvidence) ingest(name string, members map[string][]byte) {
 				note(err)
 			} else {
 				ev.Candidate, ev.CandidateRaw = &t, b
+				ev.Read = append(ev.Read, name+"/qa-root-shard-timings.json")
 			}
 		}
 	}
+}
+
+// runnerImage is what the runner printed in a job log's "Runner Image" group.
+type runnerImage struct {
+	Image   string // e.g. ubuntu-24.04
+	Version string // the image build, e.g. 20260907.300.1
+}
+
+// jobLogHeadBytes bounds how much of each job log is read. The runner prints
+// the image group within the first few lines (about 2 KB observed).
+const jobLogHeadBytes = 16 << 10
+
+var imageValueRE = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
+
+// parseRunnerImage finds the "Runner Image" group the runner writes at the top
+// of every hosted job's log and reads its Image and Version lines. Each log
+// line starts with a timestamp, which is dropped. Only values in a safe
+// character set are accepted; anything else leaves the image unobserved.
+func parseRunnerImage(head []byte) (runnerImage, bool) {
+	var ri runnerImage
+	in := false
+	for _, raw := range strings.Split(string(head), "\n") {
+		line := strings.TrimRight(raw, "\r")
+		if i := strings.IndexByte(line, ' '); i > 0 && strings.HasSuffix(line[:i], "Z") {
+			line = line[i+1:]
+		}
+		switch {
+		case line == "##[group]Runner Image":
+			in = true
+		case !in:
+		case strings.HasPrefix(line, "##[endgroup]"):
+			return ri, ri.Image != ""
+		case strings.HasPrefix(line, "Image: "):
+			if v := strings.TrimSpace(strings.TrimPrefix(line, "Image: ")); imageValueRE.MatchString(v) {
+				ri.Image = v
+			}
+		case strings.HasPrefix(line, "Version: "):
+			if v := strings.TrimSpace(strings.TrimPrefix(line, "Version: ")); imageValueRE.MatchString(v) {
+				ri.Version = v
+			}
+		}
+	}
+	return runnerImage{}, false
 }
