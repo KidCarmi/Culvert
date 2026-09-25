@@ -240,7 +240,14 @@ jobs:
         # `go list ./...` minus the EXACT root import path — cmd/, internal/
         # and any future package, whole packages. Evidence goes to RUNNER_TEMP,
         # outside the tree the tests walk.
-        run: go run ./cmd/rootshard run-lane -out-dir "$RUNNER_TEMP/race-lane" -commit "$GITHUB_SHA" -timeout 40m
+        # -first hands the lane's longest package to `go test` first, so it
+        # starts at ~20 s instead of ~200 s. Same packages, same verdict; only
+        # the start order changes (roadmap/CI-REDESIGN.md §18.5 — measured
+        # there; rollback = drop the flag). The log line "run-lane: first test
+        # output from …" shows which package actually ran first.
+        run: >-
+          go run ./cmd/rootshard run-lane -out-dir "$RUNNER_TEMP/race-lane" -commit "$GITHUB_SHA" -timeout 40m
+          -first github.com/KidCarmi/Culvert/internal/mcp/execution
 
       - name: Upload lane evidence
         if: always()

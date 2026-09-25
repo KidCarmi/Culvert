@@ -20,16 +20,28 @@ IMAGE="${1:?usage: candidate-run-check.sh <image> <digest> <version> <platform>}
 DIGEST="${2:?digest required}"
 VERSION="${3:?version required}"
 PLATFORM="${4:?platform required}"
+HERE="$(dirname "$0")"
+# lib/registry.sh reads DOCKER_BIN unguarded; set the default before sourcing it.
+DOCKER_BIN="${DOCKER_BIN:-docker}"
+# shellcheck source=.github/scripts/lib/registry.sh
+. "$HERE/lib/registry.sh"
+# shellcheck source=.github/scripts/lib/candidate.sh
+. "$HERE/lib/candidate.sh"
 DOCKER="${DOCKER_BIN:-docker}"
 CURL="${CURL_BIN:-curl}"
 PORT="${RUN_CHECK_PORT:-18080}"
 TRIES="${RUN_CHECK_TRIES:-90}"
 DELAY="${RUN_CHECK_DELAY:-2}"
-REF="${IMAGE}@${DIGEST}"
 
-# Pull THIS platform first: the local store keeps one image per reference, and
-# a run with --platform against a store holding the other platform's image is
-# not guaranteed to re-pull — it could execute the wrong architecture.
+# Run THIS platform's manifest, by its own digest from the index <digest>.
+# Pulling the index digest once per platform fails on Docker's classic store
+# ("cannot overwrite digest": one image per digest reference), and a run by the
+# index digest could execute whichever platform the store already holds.
+LINES="" ; LRC=0
+LINES="$(index_platforms "$IMAGE" "$DIGEST")" || LRC=$?
+[ "$LRC" -eq 0 ] || { echo "::error::cannot read the index ${IMAGE}@${DIGEST}: ${LINES}"; exit 1; }
+PD="$(platform_digest "$LINES" "$PLATFORM")" || { echo "::error::${PLATFORM}: no single manifest digest in the index ${IMAGE}@${DIGEST}"; exit 1; }
+REF="${IMAGE}@${PD}"
 "$DOCKER" pull --quiet --platform "$PLATFORM" "$REF" >/dev/null
 
 AGENT="$("$DOCKER" run --rm --platform "$PLATFORM" --entrypoint /app/deploy/bin/culvert-maint "$REF" -version 2>&1 | tr -d '[:space:]')" || true
