@@ -148,7 +148,7 @@ not a mechanical rename) also remains unresolved and is not queued to the number
 
 Every term `docs/design/PRODUCT-TERMINOLOGY.md` forbids, reserves or replaces was checked against the
 lines this window ADDED. The counts come from the tool: for each term,
-`git diff 574d265 6ec745d -U0 | grep -ciE '^\+.*<pattern>'` gives "Added lines" (a case-insensitive
+`git diff 574d265 6ec745d -U0 | grep -v '^+++' | grep -ciE '^\+.*<pattern>'` gives "Added lines" (a case-insensitive
 substring match). The file:line lists come from the same diff, with line numbers at `6ec745d`. "Visible"
 means `static/index.html`, non-test `frontend/src`, `api/openapi/openapi.yaml`, `docs/` outside
 `docs/engineering`, `docs/design` and `docs/adr`, `CHANGELOG.md` and `README.md`; generated copies are
@@ -180,7 +180,7 @@ therefore recorded once, in #1456's report, and not again here:
 
 **Strings emitted by Go code.** The file-based "visible" rule does not cover strings that non-test Go
 code prints. A second pass checked added string literals:
-`git diff 574d265 6ec745d -U0 -- '*.go' ':!*_test.go' | grep -iE '^\+.*"[^"]*<pattern>[^"]*"'`.
+`git diff 574d265 6ec745d -U0 -- '*.go' ':!*_test.go' | grep -v '^+++' | grep -iE '^\+.*"[^"]*<pattern>[^"]*"'`.
 - **Also in #1456's window, recorded there:**
   - 7 "verdict" lines: the OCSP error, log line and three `/metrics` HELP texts (`internal/ocsp/ocsp.go`,
     `ocsp_metrics.go`), under its T-59 sub-item; a code comment; and the MCP reason code
@@ -204,12 +204,13 @@ from #1456's, which are at `6c46ebd`.
 ## Forbidden term: appliance
 
 `docs/design/PRODUCT-TERMINOLOGY.md` says "Appliance: *Not used*" for UI labels and docs.
-`git diff 574d265 6ec745d -U0 | grep -i '^+.*appliance'` finds 30 added lines in this window (the
-unfiltered grep also matches one removed line). Line numbers
+`git diff 574d265 6ec745d -U0 | grep -v '^+++' | grep -iE '^\+.*appliance'` finds 30 added lines in
+this window. `grep -v '^+++'` drops diff file headers (some file names contain a searched term), and
+`^\+` drops the one removed line that also matches. Line numbers
 below are at `6ec745d`, so a few differ from the 2026-09-21 report's list, which uses `6c46ebd`.
 
 **User- or operator-visible text (9 lines).** All nine were added in the 2026-09-21 report's window,
-and that report's PR (#1456, its T-51 recurrence) changes them to "node" or "Culvert". This PR does not
+and that report's PR (#1456, its T-51 recurrence) changes them to "Culvert" or "instance" ("node" means an enrolled cluster member in the glossary). This PR does not
 edit them, so the same line is never changed in two PRs:
 - `api/openapi/openapi.yaml:483`, `api/openapi/openapi.json:2735`, `frontend/src/api/types.gen.ts:6240`
   (the `uncheckedEnforcingPaths` description)
