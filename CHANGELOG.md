@@ -35,6 +35,80 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   surfaced as `culvert_ui_roster_role_clamped_total` and as
   `uiRosterRoleClamped` on `/healthz` and `/api/stats` when non-zero.
 
+- An ordinary password change silently destroyed the account's TOTP second
+  factor (SEC-TOTP-1 / RISK-029). `apiAuthLogin` refuses to issue a session for
+  an enrolled account until `verifyLoginTOTP` accepts a code, so the enrolment
+  is a real second factor whose purpose is to survive a password compromise —
+  but `Config.SetUIUser` and `Config.SetAuth` assigned a freshly-built
+  `uiAdminUser` record over the stored one, so every credential write dropped
+  `totpSecret`, `backupCodes` and `totpLastCounter`. The removal was durable
+  (the next roster save persisted it), carried no audit entry naming the
+  de-enrolment, gave the account holder no signal, and required no proof of
+  possession of the authenticator. Whoever held the current password could
+  therefore permanently remove the control that outranks it, turning a
+  temporary session or credential compromise into durable password-only access
+  to the admin plane. Reachable from `POST /api/auth/change-password` (any
+  principal from viewer up, for its own account), `POST /api/auth/users`
+  (admin, any account) and `POST /api/settings/auth`. Resetting
+  `totpLastCounter` to zero was a second defect on the same line: it reopens
+  the one-time-password replay window (RFC 6238 §5.2) that the restore path
+  refuses to reopen without `--allow-counter-rollback`. Every credential write
+  now goes through one constructor that carries the enrolment across;
+  de-enrolment stays the job of the explicit `ClearTOTP` primitive. The
+  `--reset-password` break-glass keeps its outcome — an operator who lost the
+  authenticator as well as the password depends on it — but now clears
+  deliberately and prints that the account became single-factor. The replay
+  counter is part of the enrolment, not a separate durable fact: `ClearTOTP`
+  now clears it too, and `SetTOTPSecret` resets it when the KEY changes
+  (but not when backup codes are re-issued for the same key, which would
+  reopen the replay window for a live secret). Without that, the counter
+  outlived de-enrolment and refused the re-enrolment the break-glass warning
+  instructs the operator to perform — it had been zeroed only as a side effect
+  of the record replacement this change removes. That comparison asks whether
+  the KEY changed, not whether the stored string did: the verifier folds case
+  and trims whitespace before base32-decoding, and Go's decoder ignores a
+  secret's non-canonical trailing bits, so spellings that differ as strings can
+  name one authenticator (`MZXW6` and `MZXW7` decode to the same key). A
+  string comparison read a backup-code re-issue in a different spelling as a
+  key change and zeroed the counter for a live key. The canonicalisation is now
+  one function that the verifier itself uses and that backs the exported
+  `totp.SameKey`/`totp.Usable`, so the comparison and the code generator cannot
+  disagree, and an unusable incoming secret never counts as evidence that the
+  key changed.
+
+- Client-supplied tracing headers reached the process log unbounded
+  (SEC-REQID-1). `setupRequestTracing` runs on 100% of proxied traffic — the
+  second statement in `handleRequest`, ahead of the connection limiter, the IP
+  filter and authentication — and reads two headers the *client* chooses,
+  `X-Request-Id` and `Traceparent`. It bounded neither. The accepted request id
+  then reached roughly twenty process-log sites (every `POLICY_*` decision line
+  plus `AUTH_FAIL` / `IP_BLOCKED` / `RATE_LIMITED` / `BLOCKED` / `INVALID_HOST`)
+  as a bare `%s` inside the `{req_id=… identity=… action=…}` block, the response
+  header, and the forwarded request. The only sanitisation was `strings.ReplaceAll`
+  for CR and LF — the CWE-117 barrier, which correctly stops whole-record forgery
+  but is not what `sanitizeLog` does, since `sanitizeLog` scrubs every byte below
+  `0x20` and `0x7F`. So `ESC`, `NUL`, `BEL`, `VT`, `FF` and `DEL` reached the
+  forensic log verbatim, and a space could inject extra `key=value` tokens into
+  the decision line's brace block. Nothing bounded the length at all: the proxy
+  listener sets no `MaxHeaderBytes`, so net/http's 1 MiB default was the only
+  ceiling, and eight requests carrying a 512 KiB request id wrote 4,194,968 bytes
+  into the process log — the same amplification CHAOS-63 measured against the
+  audit log, reached here through the unauthenticated data plane rather than the
+  admin API, and invisible to every storage-health surface because each of those
+  writes succeeds (CWE-778, OWASP A09:2021). Both headers are now bounded and
+  charset-checked where they are read: at most 128 bytes (request id) or 255
+  (traceparent), visible ASCII with no whitespace. A value that fails is treated
+  exactly as an absent one — a fresh id is minted and overwrites the hostile value
+  on the request, the response and the wire — so a tracing header can never decide
+  whether traffic flows. Rejections are counted as
+  `culvert_tracing_header_rejected_total{header=…}`, surfaced on `GET /api/stats`
+  and in the admin UI, and logged once per minute without ever echoing the
+  refused value. A repeated header is refused on the same grounds — `Header.Get`
+  validates only the first field value, so an acceptable first `X-Request-Id`
+  paired with a hostile second one previously reached the upstream uncounted —
+  and the minted value replaces the whole field, so exactly one value is
+  forwarded.
+
 - **A request header could name a root-executed artifact (SEC-BOOTSTRAP-HOST-1).**
   The Control Plane's one-click DP bootstrap renders two artifacts a human is
   told to run with root authority — the install script it documents as
@@ -333,7 +407,7 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   forward proxy means the handshake to an `https://` parent proxy — inspected
   HTTPS origin handshakes build their own TLS config and are **not**
   revocation-checked. Because every counter reads zero either way, "found
-  nothing wrong" and "never consulted" were the same reading. The appliance now
+  nothing wrong" and "never consulted" were the same reading. Culvert now
   says so in a warning at the moment the control is enabled, in a banner on the
   OCSP panel, in `coverage`/`uncheckedEnforcingPaths` on `GET /api/ocsp`, and
   in `culvert_ocsp_path_checked{path}` — alongside a new `culvert_ocsp_*`
@@ -426,6 +500,10 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   `/api/upstream/entries/{id}/credential`) and the CDR enrollment recovery
   endpoints (`/api/cdr/instances/enroll/recover`,
   `/api/cdr/instances/enroll/receipts`).
+- Admin API operations (contract 2.1.0): `GET/PUT /api/traffic/redaction` —
+  the canonical name for the traffic-log destination-privacy posture
+  (terminology governance T-17); `/api/decryption/redaction` remains a
+  fully supported, non-deprecated alias of the same operations.
 
 ### Changed — API contract 1.2.0 → 2.0.0 (BREAKING)
 

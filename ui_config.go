@@ -196,6 +196,12 @@ func apiStats(w http.ResponseWriter, r *http.Request) {
 		// metrics scraper wired up. A climbing count means an unauthenticated
 		// source is probing /api/auth/login.
 		"loginOversizeRejected": loginOversizeRejected.Load(),
+		// SEC-REQID-1: client-supplied X-Request-Id / Traceparent headers
+		// replaced because they were over-long or carried bytes that must not
+		// reach the process log. The request itself is never refused, so
+		// without this count the probing is invisible to an operator who has
+		// no metrics scraper or shell access to the log.
+		"tracingHeaderRejected": requestIDRejected.Load() + traceparentRejected.Load(),
 	})
 }
 
