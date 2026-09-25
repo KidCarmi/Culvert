@@ -1,9 +1,18 @@
-name: Verify Dual Publish (Pages + R2)
+name: Verify Release Catalog Publication (R2)
 
-# M1-1 (Slice A): after the R2 publisher completes for a release, PROVE that BOTH
-# public origins — GitHub Pages and Cloudflare R2 — serve the SAME catalog as the
-# release's signed bundle, and that those served bytes verify through the REAL
-# in-binary baked-root path. Read-only: this workflow never mutates either origin.
+# After the R2 publisher completes for a release, PROVE that the public catalog
+# origin serves the SAME catalog as the release's signed bundle, and that those
+# served bytes verify through the REAL in-binary baked-root path. Read-only:
+# this workflow never mutates the origin.
+#
+# R2 (https://catalog.culvertlabs.com) is the SOLE publication target. GitHub
+# Pages was retired as a catalog origin: it was a second host of the same bytes
+# with no trust value — integrity comes from the signature, not the host — and
+# a second origin only added a divergence surface and a second thing to keep
+# fresh. This workflow used to compare the two; it now verifies the one, and the
+# checks it applies (signature through the baked root, content match against the
+# release bundle, availability, weekly freshness) are the same ones it applied
+# per-origin before. Nothing about the trust contract changed.
 #
 # SECURITY INVARIANTS (pinned by TestWorkflowInvariants):
 #   - contents: read only; NO id-token; NO `secrets.*` reference anywhere (the only
@@ -15,12 +24,12 @@ name: Verify Dual Publish (Pages + R2)
 #     Publisher runs whose publish job was gated off conclude `skipped`, so the
 #     conclusion==success guard filters branch-CI and dormant completions.
 #   - workflow_dispatch — manual/scheduler use (M1-4's resign flow sequences this
-#     after both publishers).
+#     after the publisher).
 #
-# Divergence or verify failure ⇒ RED run (operator signal; M1-3 wires alerting).
-# Pages/CDN can lag the publishers, and with two tags in flight the older publish
-# can complete after the newer release exists — the convergence loop re-resolves
-# the latest release each round (bounded ~12 min) so neither case false-diverges.
+# Mismatch or verify failure ⇒ RED run (operator signal; M1-3 wires alerting).
+# The CDN can lag the publisher, and with two tags in flight the older publish can
+# complete after the newer release exists — the convergence loop re-resolves the
+# latest release each round (bounded ~12 min) so neither case false-fails.
 
 on:
   workflow_run:
@@ -44,12 +53,12 @@ permissions:
   contents: read
 
 concurrency:
-  group: verify-dual-publish
+  group: verify-catalog-publish
   cancel-in-progress: false
 
 jobs:
   verify:
-    name: Verify Pages + R2 serve the verified catalog
+    name: "Verify R2 serves the verified catalog"
     timeout-minutes: 30
     runs-on: ubuntu-latest
     # Proceed for manual dispatch, or when the R2 publisher run completed with
@@ -78,7 +87,6 @@ jobs:
             sum.golang.org:443
             storage.googleapis.com:443
             catalog.culvertlabs.com:443
-            kidcarmi.github.io:443
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -135,18 +143,18 @@ jobs:
             # catalogfetch returns the served index.json's SHA-256 (empty on any
             # non-200 / transport error, so `|| VAR=""` keeps the loop retrying).
             R2="$("$FETCH" https://catalog.culvertlabs.com/release-catalog/index.json)" || R2=""
-            PAGES="$("$FETCH" https://kidcarmi.github.io/Culvert/release-catalog/index.json)" || PAGES=""
-            if [ "$R2" = "$WANT" ] && [ "$PAGES" = "$WANT" ]; then
-              echo "Both origins match release $TAG ($WANT)"; exit 0
+            if [ "$R2" = "$WANT" ]; then
+              echo "R2 origin matches release $TAG ($WANT)"; exit 0
             fi
-            echo "attempt $attempt/24: tag=$TAG want=$WANT r2=$R2 pages=$PAGES — waiting 30s"
+            echo "attempt $attempt/24: tag=$TAG want=$WANT r2=$R2 — waiting 30s"
             sleep 30
           done
-          echo "FATAL: origins did not converge to the latest release bundle"; exit 1
+          echo "FATAL: the R2 origin did not converge to the latest release bundle"; exit 1
 
-      # Both origins byte-match the bundle; now prove the SERVED bytes verify through
-      # the REAL in-binary baked-root path (pinned identity, enforce mode) — for EACH
-      # origin, with the fail-open-proof pass assertion (M0 posture).
+      # The origin byte-matches the bundle; now prove the SERVED bytes verify
+      # through the REAL in-binary baked-root path (pinned identity, enforce
+      # mode), with the fail-open-proof pass assertion (M0 posture) — a SKIP is
+      # not a pass.
       - name: Baked-root served verify — R2 origin (must PASS, not skip)
         run: |
           set -euo pipefail
@@ -154,13 +162,6 @@ jobs:
           go test -json -run '^TestServedVerify_BakedRootGate$' -count=1 . | tee verify-r2.jsonl
           jq -e 'select(.Test=="TestServedVerify_BakedRootGate" and .Action=="pass")' verify-r2.jsonl >/dev/null \
             || { echo "FATAL: R2 served verify did not PASS"; exit 1; }
-      - name: Baked-root served verify — Pages origin (must PASS, not skip)
-        run: |
-          set -euo pipefail
-          export CULVERT_RELEASE_SERVED_URL="https://kidcarmi.github.io/Culvert/release-catalog"
-          go test -json -run '^TestServedVerify_BakedRootGate$' -count=1 . | tee verify-pages.jsonl
-          jq -e 'select(.Test=="TestServedVerify_BakedRootGate" and .Action=="pass")' verify-pages.jsonl >/dev/null \
-            || { echo "FATAL: Pages served verify did not PASS"; exit 1; }
 
       # SEC-F5 (M1-4): the publish-side freshness canary. The weekly re-sign
       # slides generated_at every Monday; if the LIVE catalog's generated_at is

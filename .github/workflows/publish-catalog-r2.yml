@@ -5,11 +5,13 @@ name: Publish Release Catalog (R2)
 # Publishes the SAME signed release-catalog bundle that ci.yml's `catalog-pipeline`
 # attaches to the GitHub Release, to Cloudflare R2, as a fail-closed
 # stage -> verify-staged-bytes-through-the-real-baked-root -> promote-by-server-side-copy
-# pipeline. GitHub Pages remains the authoritative host for all of M0 (Pages
-# retirement is M3); this workflow is inert until an owner sets
-# `vars.R2_PUBLISH_ENABLED=true` AND provisions the R2/Cloudflare secrets.
+# pipeline. R2 is the SOLE catalog origin: GitHub Pages has been retired, and the
+# baked default client URL (release_wiring.go defaultReleaseCatalogURL) already
+# pointed here. Publication requires `vars.R2_PUBLISH_ENABLED=true` plus the
+# R2/Cloudflare secrets; with Pages gone, an unset variable is no longer a quiet
+# no-op — assert-publication-target below turns the run RED.
 #
-# SECURITY MODEL (identical to Pages): R2 (staging and live) is UNTRUSTED transport.
+# SECURITY MODEL (unchanged by the Pages retirement): R2 is UNTRUSTED transport.
 # Integrity comes from the catalog's keyless Sigstore signature, verified IN-BINARY
 # against the baked trusted root + pinned ci.yml identity (offline Rekor timestamp).
 # The trust boundary is step "verify": the STAGED bytes are fetched over HTTPS and
@@ -25,7 +27,7 @@ name: Publish Release Catalog (R2)
 #   - verify precedes promote; the verify step proves a non-skip PASS and has no
 #     `continue-on-error`; the promote step has no `if: always()` bypass.
 #
-# Triggers (mirrors publish-catalog-pages.yml): workflow_run after "CI" completes on
+# Triggers: workflow_run after "CI" completes on
 # a tag push (the run that ATTACHES the signed bundle), or manual workflow_dispatch.
 #
 # OWNER ACTIVATION (full runbook: docs/operator/catalog-hosting-r2-activation.md, M0-PR5):
@@ -67,13 +69,56 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # R2 IS NOW THE SOLE CATALOG ORIGIN, so "publish silently skipped" is no longer
+  # a safe default. While GitHub Pages also served the catalog, a dormant R2 cost
+  # nothing; with Pages retired, an unset `R2_PUBLISH_ENABLED` means NOTHING is
+  # published and every appliance keeps serving an ageing catalog until the
+  # 30-day stale alert fires. This job makes that state LOUD instead: it is the
+  # only way the pipeline can tell the difference between "the owner disabled
+  # publication on purpose" and "the variable was never set".
+  #
+  # It fails rather than warns because it is downstream of the release (a
+  # workflow_run consumer), so a red run is an operator signal and does not block
+  # or unpublish anything.
+  assert-publication-target:
+    name: "Assert a catalog origin is configured"
+    timeout-minutes: 5
+    runs-on: ubuntu-latest
+    if: >-
+      ${{ github.event_name == 'workflow_dispatch' ||
+          (github.event.workflow_run.conclusion == 'success' &&
+           github.event.workflow_run.event == 'push' &&
+           startsWith(github.event.workflow_run.head_branch, 'v')) }}
+    permissions:
+      contents: read
+    steps:
+      - name: R2 publication must be enabled
+        env:
+          ENABLED: ${{ vars.R2_PUBLISH_ENABLED }}
+          PUBLIC_BASE: ${{ vars.R2_PUBLIC_BASE }}
+        run: |
+          set -euo pipefail
+          if [ "${ENABLED:-}" != "true" ]; then
+            echo "::error::R2_PUBLISH_ENABLED is '${ENABLED:-<unset>}', so no release catalog was published."
+            echo "::error::R2 is the SOLE catalog origin — GitHub Pages was retired — so this release is not"
+            echo "::error::being served to any appliance, and installed nodes will go stale."
+            echo "::error::RECOVERY: set the repository variable R2_PUBLISH_ENABLED=true and provision"
+            echo "::error::R2_PUBLIC_BASE plus the R2/Cloudflare secrets (see this workflow's header),"
+            echo "::error::then re-run. Nothing is retried automatically."
+            exit 1
+          fi
+          test -n "${PUBLIC_BASE:-}" || { echo "::error::R2_PUBLISH_ENABLED=true but R2_PUBLIC_BASE is unset — refusing"; exit 1; }
+          echo "catalog origin configured: ${PUBLIC_BASE}"
+
   publish:
-    name: Publish signed catalog to R2 (dormant)
+    name: Publish signed catalog to R2
+    needs: [assert-publication-target]
     timeout-minutes: 15
     runs-on: ubuntu-latest
-    # Dormant gate: keyed on a repository VARIABLE (secrets.* is unavailable in `if:`).
-    # Absent/!= 'true' => the job is skipped => the workflow is green + neutral, no
-    # secret is ever read. When active, only a SUCCESSFUL CI run on a tag push (or a
+    # Enablement gate: keyed on a repository VARIABLE (secrets.* is unavailable in
+    # `if:`). Absent/!= 'true' => this job is skipped and no secret is ever read —
+    # but assert-publication-target above has already turned the run RED, so the
+    # skip is visible rather than silent. When active, only a SUCCESSFUL CI run on a tag push (or a
     # manual dispatch) proceeds; branch/PR CI completions are filtered by the
     # head_branch `v`-prefix guard, and the tag is re-confirmed to be a real tag ref
     # in the "Resolve release tag" step (closes the "branch named v-evil" gap).
@@ -117,7 +162,7 @@ jobs:
           persist-credentials: false
       - uses: ./.github/actions/setup-go-cache
 
-      # Resolve + STRICTLY validate the target tag. Unlike the Pages publisher (where
+      # Resolve + STRICTLY validate the target tag. Unlike the retired Pages publisher (where
       # TAG only feeds `gh release download` and a bad value 404s harmlessly), here TAG
       # is interpolated into an R2 object key and a URL segment, so a loose `v[0-9]*`
       # glob would allow `v1/../../live` path traversal. Anchor to an exact vX.Y.Z

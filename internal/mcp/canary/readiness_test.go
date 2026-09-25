@@ -1,6 +1,9 @@
 package canary
 
 import (
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"reflect"
 	"testing"
 )
@@ -28,6 +31,9 @@ func allTrueFacts() Facts {
 		LiveApprovalValid:            true,
 		ServerUsable:                 true,
 		ToolFingerprintCurrent:       true,
+		ToolCatalogUsable:            true,
+		ExactPolicyPermit:            true,
+		FirstCanaryCredentialFree:    true,
 		RollbackPathHealthy:          true,
 		RollbackCoordinatorRehearsed: true,
 		BudgetConfigured:             true,
@@ -89,6 +95,9 @@ func TestEvaluate_EachFactIsIndependentlyLoadBearing(t *testing.T) {
 		{"LiveApprovalValid", ReasonLiveApprovalInvalid},
 		{"ServerUsable", ReasonServerNotUsable},
 		{"ToolFingerprintCurrent", ReasonToolFingerprintStale},
+		{"ToolCatalogUsable", ReasonToolNotCatalogUsable},
+		{"ExactPolicyPermit", ReasonExactPolicyNotExecutable},
+		{"FirstCanaryCredentialFree", ReasonCredentialPathRequired},
 		{"RollbackPathHealthy", ReasonRollbackPathUnhealthy},
 		{"RollbackCoordinatorRehearsed", ReasonRollbackCoordinatorRehearsalPending},
 		{"BudgetConfigured", ReasonBudgetNotConfigured},
@@ -134,7 +143,10 @@ func TestEvaluate_ReasonVocabularyParity(t *testing.T) {
 		"PolicyHealthy": ReasonPolicyUnhealthy, "EmergencyKillClear": ReasonEmergencyKillActive,
 		"KillBoundaryGuardPresent": ReasonKillBoundaryGuardAbsent, "ToolFreshnessGuardPresent": ReasonToolFreshnessGuardAbsent,
 		"LiveApprovalValid": ReasonLiveApprovalInvalid, "ServerUsable": ReasonServerNotUsable,
-		"ToolFingerprintCurrent": ReasonToolFingerprintStale, "RollbackPathHealthy": ReasonRollbackPathUnhealthy,
+		"ToolFingerprintCurrent": ReasonToolFingerprintStale, "ToolCatalogUsable": ReasonToolNotCatalogUsable,
+		"ExactPolicyPermit":            ReasonExactPolicyNotExecutable,
+		"FirstCanaryCredentialFree":    ReasonCredentialPathRequired,
+		"RollbackPathHealthy":          ReasonRollbackPathUnhealthy,
 		"RollbackCoordinatorRehearsed": ReasonRollbackCoordinatorRehearsalPending,
 		"BudgetConfigured":             ReasonBudgetNotConfigured,
 	}
@@ -157,27 +169,71 @@ func TestEvaluate_ReasonVocabularyParity(t *testing.T) {
 }
 
 // TestEvaluateNode_ExcludesActivationInputs is the Codex P2 regression: the scope-independent
-// node dry run must never report an activation-input fact (scope/approval/budget/server/
-// fingerprint) as unmet, so node_ready reflects NODE deficiencies alone. With every node fact
-// satisfied but every activation fact false, EvaluateNode must be Ready with an empty Unmet
-// set, while the full Evaluate reports exactly the seven activation reasons.
+// node dry run must never report an activation-input fact (scope/read-first/exact-first-Canary/
+// approval/server/fingerprint/catalog-usability/budget) as unmet, so node_ready reflects NODE
+// deficiencies alone. With every node fact satisfied but every activation fact false,
+// EvaluateNode must be Ready with an empty Unmet set, while the full Evaluate reports exactly
+// the ten activation reasons.
+//
+// The expected set and the constructed Facts are both checked AGAINST readinessChecks rather
+// than trusted as hand-written enumeration (Codex P2, PR #1378). Without those two derived
+// assertions this test is self-referential: a newly added factActivation row that allTrueFacts
+// initializes true, and that neither the map nor the explicit false assignments below mention,
+// leaves Evaluate reporting the same count as the stale map and the test passes while proving
+// nothing about the new row. That is not a hypothetical -- CANARY-READINESS-MATRIX.md drifted
+// to an undercount by exactly this route and stayed wrong across two reviews.
 func TestEvaluateNode_ExcludesActivationInputs(t *testing.T) {
 	activationReasons := map[Reason]bool{
 		ReasonScopeNotBounded: true, ReasonScopeNotReadFirst: true, ReasonScopeNotExactFirstCanary: true,
 		ReasonLiveApprovalInvalid: true, ReasonServerNotUsable: true, ReasonToolFingerprintStale: true,
-		ReasonBudgetNotConfigured: true,
+		ReasonToolNotCatalogUsable: true, ReasonExactPolicyNotExecutable: true,
+		ReasonCredentialPathRequired: true,
+		ReasonBudgetNotConfigured:    true,
 	}
-	// Node facts all true; the seven activation facts all false.
+
+	// DERIVED CHECK 1 -- membership. The hand-written map above must equal the factActivation
+	// rows of readinessChecks exactly, so adding a row without listing it here fails the build
+	// rather than silently shrinking what this test covers.
+	fromTable := map[Reason]bool{}
+	for i := range readinessChecks {
+		if readinessChecks[i].scope == factActivation {
+			fromTable[readinessChecks[i].reason] = true
+		}
+	}
+	if len(fromTable) != len(activationReasons) {
+		t.Fatalf("activationReasons lists %d reasons but readinessChecks marks %d rows factActivation: %v vs %v",
+			len(activationReasons), len(fromTable), activationReasons, fromTable)
+	}
+	for r := range fromTable {
+		if !activationReasons[r] {
+			t.Fatalf("readinessChecks marks %q factActivation but activationReasons omits it -- add it here and to the explicit false assignments below", r)
+		}
+	}
+
+	// Node facts all true; the ten activation facts all false.
 	f := allTrueFacts()
 	f.ScopeBounded, f.ScopeReadFirst, f.ScopeExactFirstCanary = false, false, false
 	f.LiveApprovalValid, f.ServerUsable = false, false
 	f.ToolFingerprintCurrent, f.BudgetConfigured = false, false
+	f.ToolCatalogUsable, f.ExactPolicyPermit = false, false
+	f.FirstCanaryCredentialFree = false
+
+	// DERIVED CHECK 2 -- the fixture matches its own description. Asked directly, every
+	// factActivation accessor must answer false and every factNode accessor true. Check 1 alone
+	// does not get here: a row can be listed in the map and still left true in the Facts above,
+	// which would drop it out of Unmet and make the count assertion pass for the wrong reason.
+	for i := range readinessChecks {
+		c := readinessChecks[i]
+		if got, want := c.ok(f), c.scope == factNode; got != want {
+			t.Fatalf("fixture is wrong for %q (scope=%d): accessor returned %v, want %v -- node facts must be true and activation facts false", c.reason, c.scope, got, want)
+		}
+	}
 
 	node := EvaluateNode(f)
 	if !node.Ready || len(node.Unmet) != 0 {
 		t.Fatalf("node readiness must be Ready when every NODE fact holds regardless of activation inputs, got ready=%v unmet=%v", node.Ready, node.Unmet)
 	}
-	// The full verdict must surface exactly the seven activation reasons (nothing node-level).
+	// The full verdict must surface exactly the ten activation reasons (nothing node-level).
 	full := Evaluate(f)
 	if full.Ready {
 		t.Fatal("full readiness must not be ready with activation inputs unmet")
@@ -242,4 +298,138 @@ func containsReason(rs []Reason, want Reason) bool {
 		}
 	}
 	return false
+}
+
+// ── every unmet prerequisite is reported TOGETHER, not one at a time ─────────
+//
+// Codex P2 round 12. The single-field flips above prove each accessor in ISOLATION: they
+// start from allTrueFacts() and turn exactly one fact off, so every OTHER fact is true in
+// every case they run. That makes them blind to an accessor that consults another fact —
+// `return f.ToolCatalogUsable || !f.LiveExecutorComposed` passes the whole package, because
+// the disjunct is false in every fixture those tests build. On the SHIPPED node the live
+// executor is absent, so that accessor would report the tool catalog-usable no matter what
+// the catalog says, and Unmet would silently stop listing a missing prerequisite.
+//
+// Verified: the mutation above was applied and `go test ./internal/mcp/canary/` returned ok.
+//
+// This gate is the opposite fixture — every prerequisite FALSE — and it is DERIVED: the
+// expected reason set is read off readinessChecks, so a new row is covered the moment it
+// exists. Every accessor in the table is a plain positive field read, so all-false must
+// yield all-unmet exactly; an accessor that consults a second fact breaks that, whichever
+// direction it leans.
+func TestEvaluate_EveryUnmetFactIsReportedTogether(t *testing.T) {
+	// Capability holds so evaluate() reaches the table; every prerequisite is false.
+	got := Evaluate(Facts{CapabilityGateway: true})
+
+	want := map[Reason]bool{}
+	for _, c := range readinessChecks {
+		want[c.reason] = true
+	}
+	if len(want) == 0 {
+		t.Fatal("gate is vacuous: readinessChecks is empty")
+	}
+
+	have := map[Reason]bool{}
+	for _, r := range got.Unmet {
+		have[r] = true
+	}
+	for r := range want {
+		if !have[r] {
+			t.Errorf("SECURITY: with EVERY prerequisite false, %s is missing from Unmet — its "+
+				"accessor is satisfied by something other than its own fact, so on a node where "+
+				"that other fact happens to hold the prerequisite stops being reported", r)
+		}
+	}
+	for r := range have {
+		if !want[r] {
+			t.Errorf("Unmet reports %s, which is not a row in readinessChecks", r)
+		}
+	}
+	if got.Ready {
+		t.Fatal("CONTROL: a node with every prerequisite false must not be Ready")
+	}
+}
+
+// ── every accessor reads exactly ONE fact: its own ───────────────────────────
+//
+// Codex P2 round 13, and it lands on an assumption I stated in the gate above without
+// asserting it. TestEvaluate_EveryUnmetFactIsReportedTogether is only sound if every
+// accessor is a plain positive field read — otherwise all-false is just a third VERTEX,
+// and an accessor can be made to agree at all-true, every single-false, AND all-false
+// while disagreeing in between. Measured: replacing the catalog accessor with
+//
+//	f.ToolCatalogUsable || (!f.LiveExecutorComposed && !f.UpstreamCallerPresent && f.PolicyHealthy)
+//
+// passes the entire internal/mcp/canary package (ok, 0.018s), and on a partially composed
+// node with healthy policy it suppresses ReasonToolNotCatalogUsable even though the catalog
+// fact is false — a missing prerequisite silently dropped from Unmet on exactly the kind of
+// node a Canary would first meet.
+//
+// Vertex coverage cannot close this: 2^23 combinations is not enumerable and any hand-picked
+// subset is another proxy. So the SHAPE is asserted directly — each accessor body must be a
+// single `return f.<Field>` — which makes the property true by construction rather than
+// sampled, and makes the all-false gate's assumption load-bearing text instead of a hope.
+func TestReadinessChecks_EveryAccessorReadsOnlyItsOwnFact(t *testing.T) {
+	file, err := parser.ParseFile(token.NewFileSet(), "readiness.go", nil, 0)
+	if err != nil {
+		t.Fatalf("parse readiness.go: %v", err)
+	}
+	var table *ast.CompositeLit
+	ast.Inspect(file, func(n ast.Node) bool {
+		vs, ok := n.(*ast.ValueSpec)
+		if !ok || len(vs.Names) != 1 || vs.Names[0].Name != "readinessChecks" {
+			return true
+		}
+		if len(vs.Values) == 1 {
+			table, _ = vs.Values[0].(*ast.CompositeLit)
+		}
+		return false
+	})
+	if table == nil {
+		t.Fatal("gate is vacuous: readinessChecks table literal not found")
+	}
+	if len(table.Elts) != len(readinessChecks) {
+		t.Fatalf("gate is vacuous: found %d literal rows for %d table entries",
+			len(table.Elts), len(readinessChecks))
+	}
+
+	for i, el := range table.Elts {
+		lit, ok := el.(*ast.CompositeLit)
+		if !ok || len(lit.Elts) == 0 {
+			t.Errorf("row %d is not a composite literal", i)
+			continue
+		}
+		fn, ok := lit.Elts[0].(*ast.FuncLit)
+		if !ok {
+			t.Errorf("row %d's accessor is not a function literal — it may be a named function "+
+				"or a wrapper, and this gate cannot see what it reads", i)
+			continue
+		}
+		if field := soleFactFieldRead(fn); field == "" {
+			t.Errorf("SECURITY: row %d (%s) is not a plain `return f.<Field>`. An accessor that "+
+				"consults more than its own fact can agree with every fixture this package builds "+
+				"and still suppress its reason on a node in between — which is a missing "+
+				"prerequisite silently dropped from Unmet",
+				i, readinessChecks[i].reason)
+		}
+	}
+}
+
+// soleFactFieldRead returns the field name when the body is exactly `return f.<Field>`, else "".
+func soleFactFieldRead(fn *ast.FuncLit) string {
+	if fn.Body == nil || len(fn.Body.List) != 1 {
+		return ""
+	}
+	ret, ok := fn.Body.List[0].(*ast.ReturnStmt)
+	if !ok || len(ret.Results) != 1 {
+		return ""
+	}
+	sel, ok := ret.Results[0].(*ast.SelectorExpr)
+	if !ok {
+		return ""
+	}
+	if id, ok := sel.X.(*ast.Ident); !ok || id.Name != "f" {
+		return ""
+	}
+	return sel.Sel.Name
 }
