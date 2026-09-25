@@ -190,7 +190,7 @@ jobs:
 
     steps:
       - name: Harden runner (egress audit — baseline for the block flip, Phase 2b)
-        uses: step-security/harden-runner@05e31511f85b41b11d1cf0ef85d0992719546e2c # v2.21.0
+        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
         with:
           egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -469,7 +469,7 @@ jobs:
       candidate_tag: ${{ steps.candidate.outputs.candidate_tag }}
     steps:
       - name: Harden runner (egress audit — baseline for the block flip, Phase 2b)
-        uses: step-security/harden-runner@05e31511f85b41b11d1cf0ef85d0992719546e2c # v2.21.0
+        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
         with:
           egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -530,7 +530,7 @@ jobs:
       id-token: write   # cosign keyless signing of the qualification record (main)
     steps:
       - name: Harden runner (egress audit — baseline for the block flip, Phase 2b)
-        uses: step-security/harden-runner@05e31511f85b41b11d1cf0ef85d0992719546e2c # v2.21.0
+        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
         with:
           egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -724,7 +724,7 @@ jobs:
       actions: read       # require-gate.sh (tag-path guard)
     steps:
       - name: Harden runner (egress audit — baseline for the block flip, Phase 2b)
-        uses: step-security/harden-runner@05e31511f85b41b11d1cf0ef85d0992719546e2c # v2.21.0
+        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
         with:
           egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -956,7 +956,7 @@ jobs:
       actions: read     # require-gate.sh (list-workflow-runs)
     steps:
       - name: Harden runner (egress audit — baseline for the block flip, Phase 2b)
-        uses: step-security/harden-runner@05e31511f85b41b11d1cf0ef85d0992719546e2c # v2.21.0
+        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
         with:
           egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -1137,7 +1137,7 @@ jobs:
       actions: read     # require-gate.sh (list-workflow-runs)
     steps:
       - name: Harden runner (egress audit — baseline for the block flip, Phase 2b)
-        uses: step-security/harden-runner@05e31511f85b41b11d1cf0ef85d0992719546e2c # v2.21.0
+        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
         with:
           egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -1281,7 +1281,7 @@ jobs:
       id-token: write     # cosign keyless blob signing of the re-signed index.json
     steps:
       - name: Harden runner (egress audit — same baseline as catalog-pipeline)
-        uses: step-security/harden-runner@05e31511f85b41b11d1cf0ef85d0992719546e2c # v2.21.0
+        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
         with:
           egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -1517,7 +1517,7 @@ jobs:
 
     steps:
       - name: Harden runner (egress audit — baseline for the block flip, Phase 2b)
-        uses: step-security/harden-runner@05e31511f85b41b11d1cf0ef85d0992719546e2c # v2.21.0
+        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
         with:
           egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -1766,7 +1766,7 @@ jobs:
           - { goos: windows, goarch: amd64, ext: .exe }
     steps:
       - name: Harden runner (egress audit — baseline for the block flip, Phase 2b)
-        uses: step-security/harden-runner@05e31511f85b41b11d1cf0ef85d0992719546e2c # v2.21.0
+        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
         with:
           # Needs module-proxy egress: the composite runs `go mod download` for
           # BOTH modules (cmd/culvert-maint deps are not in the root-go.sum
@@ -1887,7 +1887,7 @@ jobs:
       actions: read     # require-release-evidence.sh
     steps:
       - name: Harden runner (egress audit — baseline for the block flip, Phase 2b)
-        uses: step-security/harden-runner@05e31511f85b41b11d1cf0ef85d0992719546e2c # v2.21.0
+        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
         with:
           egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
