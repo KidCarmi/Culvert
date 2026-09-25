@@ -35,15 +35,22 @@ parts of the same window did find drift this pass missed; see "Overlap with para
 
 1. **Every new admin-facing name this window introduced was checked for cross-surface consistency and
    found internally consistent:**
-   - **OCSP (CHAOS-65):** the new `/api/ocsp` fields (`notForCertificateTotal`,
-     `unauthorizedResponderTotal`, `malformedResponseTotal`, `staleResponseTotal`, `unknownStatusTotal`,
-     `responderBlockedTotal`, `coverage`, `uncheckedEnforcingPaths`) are spelled identically in
-     `ui_security.go`, `static/index.html`, `api/openapi/openapi.{json,yaml}` and the auto-generated
-     `frontend/src/api/types.gen.ts`. The six rejection counters correspond one-to-one with
-     `ocsp_metrics.go`'s `culvert_ocsp_response_rejected_total{reason=...}` labels (camelCase field ↔
-     snake_case label, e.g. `notForCertificateTotal` ↔ `not_for_certificate`). The wording "no responder
-     returned a usable, affirmative verdict" is reused verbatim between the GUI fail-closed banner
-     (`static/index.html:4494`) and the `culvert_ocsp_fail_closed_total` HELP text (`ocsp_metrics.go:38`).
+   - **OCSP (CHAOS-65):** the window added nine `/api/ocsp` fields in `ui_security.go`, each spelled
+     identically in `api/openapi/openapi.{json,yaml}` and the auto-generated `frontend/src/api/types.gen.ts`.
+     They map to other surfaces as follows:
+     - The six rejection counters (`notForCertificateTotal`, `unauthorizedResponderTotal`,
+       `malformedResponseTotal`, `staleResponseTotal`, `unknownStatusTotal`, `responderBlockedTotal`)
+       correspond one-to-one with `culvert_ocsp_response_rejected_total{reason=...}` labels in
+       `ocsp_metrics.go` (camelCase field ↔ snake_case label, e.g. `notForCertificateTotal` ↔
+       `not_for_certificate`). The GUI does not show them individually. It sums them into one "Responses
+       rejected" counter (`static/index.html:4485`, filled at `:17517`).
+     - `respondersTruncatedTotal` ↔ `culvert_ocsp_responders_truncated_total`. It is not shown in the GUI.
+     - `coverage` and `uncheckedEnforcingPaths` ↔ the separate `culvert_ocsp_path_checked{path}` gauge
+       (`ocsp_metrics.go:77-84`). The GUI renders `uncheckedEnforcingPaths` as its coverage banner
+       (`static/index.html:17519`).
+     - The wording "no responder returned a usable, affirmative verdict" is reused verbatim between the
+       GUI fail-closed banner (`static/index.html:4494`) and the `culvert_ocsp_fail_closed_total` HELP text
+       (`ocsp_metrics.go:38`).
    - **GeoIP (CHAOS-60):** the new `geo_resolution` diagnostics-contract row mirrors the pre-existing
      `dns_resolution` row's naming and severity convention exactly, and `docs/operator/
      geoip-resolution-health.md` uses the same vocabulary.
