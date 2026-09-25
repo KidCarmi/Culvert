@@ -728,12 +728,13 @@ func TestChaos70_Wall_CredentialedSetupIsInsideTheTransaction(t *testing.T) {
 		t.Fatal("SetAuthDurably not found; the gate's selector has gone stale")
 	}
 
-	locksFirst, lockingSave := setAuthDurablyShape(fn)
-	if !locksFirst {
-		t.Error("SetAuthDurably must take saveUIUsersMu as its FIRST statement: SetAuth mutates the " +
-			"roster, so acquiring the transaction lock after it (or not at all) lets a concurrent admin " +
-			"mutation's wholesale rollback delete the initial admin, after which setup's own queued write " +
-			"persists the empty roster and answers 200 (CHAOS-70 Codex round 2)")
+	locksFirst, delegates, lockingSave := setAuthDurablyShape(fn)
+	if !locksFirst && !delegates {
+		t.Error("SetAuthDurably must run inside the roster transaction — either taking saveUIUsersMu as " +
+			"its FIRST statement or delegating wholly to mutateRosterDurably, which does. SetAuth mutates " +
+			"the roster, so running it outside the transaction lets a concurrent admin mutation's " +
+			"wholesale rollback delete the initial admin, after which setup's own queued write persists " +
+			"the empty roster and answers 200 (CHAOS-70 Codex round 2)")
 	}
 	if lockingSave {
 		t.Error("SetAuthDurably calls the self-locking SaveUIUsersFile; inside the transaction it must " +
@@ -750,16 +751,24 @@ func TestChaos70_Wall_CredentialedSetupIsInsideTheTransaction(t *testing.T) {
 	if legacyFn == nil {
 		t.Fatal("legacy control did not parse into a function")
 	}
-	legacyLocks, legacySave := setAuthDurablyShape(legacyFn)
-	if legacyLocks || !legacySave {
+	legacyLocks, legacyDelegates, legacySave := setAuthDurablyShape(legacyFn)
+	if legacyLocks || legacyDelegates || !legacySave {
 		t.Error("the control failed: the verbatim pre-fix (unserialised SetAuth + SaveUIUsersFile) shape " +
 			"must be REJECTED by this gate, otherwise the gate is matching nothing and proves nothing")
 	}
 }
 
 // setAuthDurablyShape reports whether fn takes saveUIUsersMu as its first
-// statement and whether it reaches the self-locking SaveUIUsersFile.
-func setAuthDurablyShape(fn *ast.FuncDecl) (locksFirst, lockingSave bool) {
+// statement, whether it instead delegates to mutateRosterDurably (which takes
+// that lock across mutate+persist), and whether it reaches the self-locking
+// SaveUIUsersFile.
+//
+// Delegation is accepted because round 3 collapsed this function onto the single
+// primitive: the property the wall exists to pin is that the mutation runs
+// INSIDE the transaction, not which line acquires it. The control below keeps
+// that widening honest by requiring the pre-fix body — which neither locks nor
+// delegates — to be rejected.
+func setAuthDurablyShape(fn *ast.FuncDecl) (locksFirst, delegates, lockingSave bool) {
 	if fn.Body != nil && len(fn.Body.List) > 0 {
 		if expr, ok := fn.Body.List[0].(*ast.ExprStmt); ok {
 			if call, ok := expr.X.(*ast.CallExpr); ok {
@@ -776,12 +785,17 @@ func setAuthDurablyShape(fn *ast.FuncDecl) (locksFirst, lockingSave bool) {
 		if !ok {
 			return true
 		}
-		if sel, ok := call.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "SaveUIUsersFile" {
-			lockingSave = true
+		if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
+			switch sel.Sel.Name {
+			case "SaveUIUsersFile":
+				lockingSave = true
+			case "mutateRosterDurably":
+				delegates = true
+			}
 		}
 		return true
 	})
-	return locksFirst, lockingSave
+	return locksFirst, delegates, lockingSave
 }
 
 // legacySetupSaveSource is the VERBATIM pre-fix credentialed-setup persist
@@ -951,5 +965,194 @@ func TestChaos70_Wall_RunbookNamesRegisteredEndpoints(t *testing.T) {
 	}
 	if found == 0 {
 		t.Fatal("the wall matched no /api/ paths in the runbook; its selector has gone stale")
+	}
+}
+
+// ─── CHAOS-70 round 3: the fourth roster mutator, on a live admin endpoint ────
+//
+// POST /api/settings is the GUI Settings panel's save (saveSettings(),
+// static/index.html). It called cfg.SetAuth and nothing else, which made it the
+// fourth writer of the admin roster and the only one that never even attempted
+// a durable write. All three gates below were verified failing against that
+// pre-fix shape.
+
+// settingsPost drives the real apiSettings POST branch with admin authority.
+func settingsPost(t *testing.T, user, pass string) *httptest.ResponseRecorder {
+	t.Helper()
+	body, err := json.Marshal(map[string]string{"user": user, "pass": pass})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	r := httptest.NewRequest(http.MethodPost, "/api/settings", strings.NewReader(string(body)))
+	r.Header.Set("Content-Type", "application/json")
+	r.RemoteAddr = "198.51.100.7:5555"
+	r = r.WithContext(context.WithValue(r.Context(), uiRoleKey{}, RoleAdmin))
+	w := httptest.NewRecorder()
+	apiSettings(w, r)
+	return w
+}
+
+// TestChaos70_SettingsAuthChangeIsDurable is the round-3 defect gate for the
+// unconditional half: a rotated admin credential that answers 200, authenticates
+// live and reverts at the next restart, where the OLD password works again.
+//
+// This is strictly worse than the three handlers the rest of this sweep fixed.
+// They persisted and mis-reported only when the write failed; this one never
+// wrote at all, so the revert needed no disk fault — only a restart. AdminSettings
+// does not carry the admin credential, and the only writers of ui_users.json are
+// the roster primitives, so nothing else made it durable.
+func TestChaos70_SettingsAuthChangeIsDurable(t *testing.T) {
+	snapshotAuthGlobals(t)
+	resetRosterPersistCountersForTest()
+	t.Cleanup(resetRosterPersistCountersForTest)
+
+	rosterPath := filepath.Join(t.TempDir(), "ui_users.json")
+	cfg.SetUIUsersFile(rosterPath)
+	cfg.mu.Lock()
+	cfg.uiUsers = map[string]*uiAdminUser{}
+	cfg.mu.Unlock()
+	if err := cfg.SetAuthDurably("rotateme", "Or1ginalPass!"); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	seeded := durableRoster(t, rosterPath)
+	seededHash, _ := seeded["rotateme"]
+
+	if w := settingsPost(t, "rotateme", "Rotat3dPass!"); w.Code != http.StatusOK {
+		t.Fatalf("a healthy rotation must succeed; got %d: %s", w.Code, w.Body.String())
+	}
+
+	// In memory the rotation took effect...
+	if _, ok := cfg.VerifyUIUser("rotateme", "Rotat3dPass!"); !ok {
+		t.Error("the new password must authenticate after a successful rotation")
+	}
+	if _, ok := cfg.VerifyUIUser("rotateme", "Or1ginalPass!"); ok {
+		t.Error("the old password must stop authenticating after a successful rotation")
+	}
+
+	// ...and it must be DURABLE, or the next restart reinstates the credential
+	// the operator just rotated away from.
+	after := durableRoster(t, rosterPath)
+	rotated, ok := after["rotateme"]
+	if !ok {
+		t.Fatal("the rotated admin is absent from the durable roster")
+	}
+	if fmt.Sprint(rotated) == fmt.Sprint(seededHash) {
+		t.Error("POST /api/settings answered 200 for a password rotation it never persisted: the " +
+			"durable roster still holds the ORIGINAL hash, so the next restart reinstates the " +
+			"password the operator rotated away from — unconditionally, with no disk fault " +
+			"required (CHAOS-70 round 3)")
+	}
+}
+
+// TestChaos70_SettingsRefusesEmptyPassword is the round-3 defect gate for the
+// input half, and it is the reason the durability fix could not ship alone.
+//
+// Complexity was validated only `if body.Pass != ""`, so an empty password
+// skipped it entirely and bcrypt("") was installed as an ADMIN credential — for
+// a new username, an admin ACCOUNT that authenticates with no password at all.
+// The GUI form posts whatever its password box holds, so an operator editing only
+// the username reached this by accident. Persisting that (the fix for the gate
+// above) would have turned a restart-bounded weakness into a permanent one, which
+// is why the two are one change.
+func TestChaos70_SettingsRefusesEmptyPassword(t *testing.T) {
+	snapshotAuthGlobals(t)
+	rosterPath := filepath.Join(t.TempDir(), "ui_users.json")
+	cfg.SetUIUsersFile(rosterPath)
+	cfg.mu.Lock()
+	cfg.uiUsers = map[string]*uiAdminUser{}
+	cfg.mu.Unlock()
+	if err := cfg.SetAuthDurably("keepme", "Or1ginalPass!"); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	w := settingsPost(t, "blankpass", "")
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("POST /api/settings accepted an EMPTY admin password (status %d): complexity was "+
+			"validated only when the field was non-empty, so bcrypt(\"\") became an admin "+
+			"credential (CHAOS-70 round 3)", w.Code)
+	}
+	if _, ok := cfg.VerifyUIUser("blankpass", ""); ok {
+		t.Error("an admin account authenticating with an EMPTY password was installed (CHAOS-70 round 3)")
+	}
+	if cfg.UIUserExists("blankpass") {
+		t.Error("a refused settings change must create no account at all")
+	}
+	if _, ok := durableRoster(t, rosterPath)["blankpass"]; ok {
+		t.Error("a refused settings change must not reach the durable roster")
+	}
+	// The pre-existing admin is untouched by the refusal.
+	if _, ok := cfg.VerifyUIUser("keepme", "Or1ginalPass!"); !ok {
+		t.Error("a refused settings change must not disturb the existing admin")
+	}
+}
+
+// TestChaos70_SettingsRefusesEmptyUser is the round-3 defect gate for the third
+// face of the same branch: SetAuth("") is its documented way to DISABLE local
+// authentication, so clearing both GUI fields switched off local admin auth
+// behind a "Settings saved" toast. Running unmatched traffic without credentials
+// stays supported through the defaultAuthOutcome endpoint, which says so.
+func TestChaos70_SettingsRefusesEmptyUser(t *testing.T) {
+	snapshotAuthGlobals(t)
+	rosterPath := filepath.Join(t.TempDir(), "ui_users.json")
+	cfg.SetUIUsersFile(rosterPath)
+	cfg.mu.Lock()
+	cfg.uiUsers = map[string]*uiAdminUser{}
+	cfg.mu.Unlock()
+	if err := cfg.SetAuthDurably("keepme", "Or1ginalPass!"); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	w := settingsPost(t, "", "")
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("POST /api/settings accepted an EMPTY user (status %d), which is SetAuth's way to "+
+			"DISABLE local authentication — a blanked text field must not switch off the admin "+
+			"credential (CHAOS-70 round 3)", w.Code)
+	}
+	if !cfg.AuthEnabled() {
+		t.Error("local authentication was disabled by a settings POST with empty fields (CHAOS-70 round 3)")
+	}
+	if _, ok := cfg.VerifyUIUser("keepme", "Or1ginalPass!"); !ok {
+		t.Error("the existing admin must still authenticate after a refused settings change")
+	}
+}
+
+// TestChaos70_Control_SettingsPersistFailureIsRefused is a CONTROL for the
+// round-3 shape: on a volume that cannot be written the endpoint must refuse
+// rather than report the rotation it could not persist, and it must charge the
+// same counter the other three handlers charge — so an operator reading
+// culvert_admin_roster_persist_failures_total sees this endpoint too.
+func TestChaos70_Control_SettingsPersistFailureIsRefused(t *testing.T) {
+	snapshotAuthGlobals(t)
+	resetRosterPersistCountersForTest()
+	t.Cleanup(resetRosterPersistCountersForTest)
+
+	rosterPath := filepath.Join(t.TempDir(), "ui_users.json")
+	cfg.SetUIUsersFile(rosterPath)
+	cfg.mu.Lock()
+	cfg.uiUsers = map[string]*uiAdminUser{}
+	cfg.mu.Unlock()
+	if err := cfg.SetAuthDurably("keepme", "Or1ginalPass!"); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	breakRosterWrites(t)
+	before := rosterPersistRefused.Load()
+	w := settingsPost(t, "keepme", "Rotat3dPass!")
+	if w.Code != http.StatusInternalServerError {
+		t.Errorf("status = %d, want 500: a rotation that could not be persisted must be refused, "+
+			"not reported as done", w.Code)
+	}
+	if got := rosterPersistRefused.Load(); got != before+1 {
+		t.Errorf("refusal counter = %d, want %d: the operator's only way to know WHICH decision was "+
+			"lost is this counter", got, before+1)
+	}
+	// Rolled back: the old password still works, the new one does not.
+	if _, ok := cfg.VerifyUIUser("keepme", "Or1ginalPass!"); !ok {
+		t.Error("a refused rotation must leave the previous credential usable — otherwise the " +
+			"operator is locked out by a failed write")
+	}
+	if _, ok := cfg.VerifyUIUser("keepme", "Rotat3dPass!"); ok {
+		t.Error("a refused rotation must not leave the new credential live in memory: memory would " +
+			"then contradict the file the next restart reads")
 	}
 }

@@ -7236,6 +7236,106 @@ a defect gate: the pre-fix shape compensated the same way and it passes against 
 (verified), so what it pins is that moving setup inside the transaction did not
 quietly swap its compensation for the generic one.
 
+### Codex review round 3 (self-found) — the fourth roster mutator, on a live admin endpoint
+
+Auditing the remaining `cfg.SetAuth` call sites while answering round 2 turned up
+a **fourth** writer of the admin roster that this sweep had not covered, and it is
+**worse than the three it fixed**. `apiSettings`' POST branch (`ui_config.go`) —
+the GUI **Settings panel's Save button** (`saveSettings()`, `static/index.html`) —
+called `cfg.SetAuth` and nothing else. The admin credential is not carried in
+`admin_settings.json`, and the only writers of `ui_users.json` are the roster
+primitives, so **nothing persisted it at all**. Three faults, each measured
+against the real handler before being claimed:
+
+1. **A rotated admin password reverted at the next restart.** `200 {"ok":true}`,
+   audited as `settings.update`, the new password authenticating live, the durable
+   roster still holding the ORIGINAL hash — so after a restart the **previous
+   password authenticated again**. That is the same "rotate a leaked password"
+   hazard §40 exists for, except **unconditional**: the other three needed a disk
+   fault, this one needed only a restart.
+2. **An EMPTY password was accepted.** Complexity was validated only
+   `if body.Pass != ""`, so `{"user":"x","pass":""}` installed `bcrypt("")` as an
+   ADMIN credential — and for a new username, an admin ACCOUNT authenticating with
+   no password (measured: `VerifyUIUser("newadmin", "")` returned role `admin`,
+   ok `true`). The GUI form posts whatever its password box holds, so an operator
+   editing only the username reached this **by accident**.
+3. **An EMPTY user was accepted**, which is `SetAuth`'s documented way to DISABLE
+   local authentication — so clearing both fields switched off the admin
+   credential behind a *"Settings saved"* toast.
+
+**Fixing (1) alone would have been a regression, and that coupling is the point:**
+persisting is exactly what would have made (2) and (3) survive a restart, turning
+two restart-bounded weaknesses into permanent ones. So the three are one change.
+Running unmatched traffic without credentials stays supported through the
+`defaultAuthOutcome` endpoint, which is explicit about it, rather than by blanking
+a text field.
+
+**A CONTROL caught the first version of this fix locking the administrator out,
+and the lesson is this sweep's own rule turned back on it.** Routing `apiSettings`
+through `SetAuthDurably` inherited setup's dedicated inverse,
+`RollbackFailedSetupAuth`, which **deletes** the account — correct for a
+first-time setup (there is no prior account) and wrong for the rotation of an
+existing one: a refused rotation left the admin with **no roster entry at all**,
+locked out until a restart. That is precisely the "a PARTIAL restore is worse than
+no rollback" hazard rule (1) of this section states, reached because the snapshot
+was incomplete: `rosterSnapshot` captured the roster but not the legacy
+`c.user`/`c.passHash` pair that `SetAuth` also writes, which was why setup needed
+its own inverse in the first place. **Completing the snapshot** removed the need
+for a second inverse entirely — `SetAuthDurably` is now a one-line delegation to
+`mutateRosterDurably`, so both callers share one rollback, one transaction lock
+and one `ErrReplacedNotSynced` rule. `RollbackFailedSetupAuth` has no production
+callers left and is documented as the hazard it now is.
+
+That also **resolves** the `ErrReplacedNotSynced` inconsistency round 2 recorded as
+pre-existing rather than preserving it. Compensating on ANY persist error was
+acceptable while the function served first-time setup alone; it stopped being so
+the moment a LIVE admin endpoint became the second caller, because a rollback
+after a landed rename leaves memory contradicting the file — the new password
+refused now and accepted after a restart, worse than either consistent answer.
+
+The structural wall's not-vacuous check fired a **third** time, for the third
+consecutive round, as the lock moved from `SetAuthDurably`'s own body into the
+shared primitive. It was **widened, not weakened**: the property it pins is that
+the mutation runs inside the transaction, so it now accepts either acquiring
+`saveUIUsersMu` first or delegating wholly to `mutateRosterDurably`, with the
+control still requiring the pre-fix body — which neither locks nor delegates — to
+be rejected.
+
+Gates added (each verified failing against the pre-fix `apiSettings` shape):
+`SettingsAuthChangeIsDurable`, `SettingsRefusesEmptyPassword`,
+`SettingsRefusesEmptyUser`, and `Control_SettingsPersistFailureIsRefused` — the
+control that found the lockout, and which additionally pins that this endpoint
+charges the same refusal counter as the other three, so one metric still answers
+"which administrative decision did I lose?".
+
+**The published API contract was RIGHT and the handler did not enforce it.**
+`SetInitialAdmin` (`api/openapi/openapi.yaml`) already declares
+`required: [user, pass]` with `pass` carrying `minLength: 8`, so every body this
+branch accepted for faults (2) and (3) was a body its own contract forbids. The
+conformance test that covers it (`apicontract_request_slice3j_test.go`) asserts
+that the SPEC rejects `{"user":"admin"}` — and never that the HANDLER does, so
+it passed throughout. A request-conformance suite that validates the schema in
+isolation proves the document is strict; it says nothing about the code. Live
+request validation against the contract would have caught all three faults, and is
+recorded as a follow-up rather than built here.
+
+**Recorded, NOT fixed — the contract omits the `500` these handlers return.**
+Neither `/api/settings` nor its three siblings document a `500` response, though
+all four now return one on a refused persist (the earlier rounds of this sweep
+shipped that on `/api/auth/users` and `/api/auth/change-password`). The omission is
+pre-existing and family-wide, and closing it means editing the spec for four
+operations plus a `make api-bundle` regeneration through the API-governance and
+breaking-change gates — a wider blast radius than the finding warrants inside a
+durability sweep. Additive, so it is not a breaking change when someone takes it.
+
+**The governance note worth carrying forward:** §40 shipped with an architecture
+note claiming `saveUIUsersMu` was the transaction lock for *every* persisted roster
+mutation, and a structural wall that AST-walks `ui_auth.go` only. The claim was
+broader than the wall, and the mutator that escaped both lived in a different
+file. When a sweep states a rule over a CLASS of call sites, enumerate the class
+from the primitive (`cfg.SetAuth`, `SaveUIUsersFile`) rather than from the file
+the sweep happens to be editing.
+
 ### Register rows
 
 - **CA-14** — the session-revocation half was already closed (`AtomicWrite`); the

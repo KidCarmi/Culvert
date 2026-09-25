@@ -885,6 +885,14 @@ func (c *Config) SetAuth(user, pass string) error {
 // must not survive a failed persist (leaving it in place while telling the
 // operator setup failed would make a retry hit "setup already complete" with
 // no session and no durable credential — a dead end).
+//
+// CHAOS-70 round 3: this has NO production callers left. SetAuthDurably now
+// rolls back through the completed rosterSnapshot, which RESTORES the previous
+// credential instead of deleting the account — the difference that matters once
+// the same primitive serves a rotation and not only a first-time setup. It is
+// kept because it is exported and is still the correct inverse for the narrow
+// case it documents, but prefer mutateRosterDurably: reaching for this on an
+// appliance that already has an admin DELETES that admin.
 func (c *Config) RollbackFailedSetupAuth(user string) {
 	c.mu.Lock()
 	c.user = ""
@@ -1474,9 +1482,22 @@ func (c *Config) saveUIUsersLocked() error {
 // a DeleteUIUser, for instance, means restoring the account's password hash,
 // role, TOTP secret, backup codes AND replay counter, which no caller has in
 // hand by the time the write fails.
+//
+// "Every piece of state" includes the legacy c.user/c.passHash pair, which
+// CHAOS-70 round 3 added — and a CONTROL is what found it missing. SetAuth
+// writes both the roster entry and that pair, so a snapshot holding only the
+// roster could not undo a credential change, which is why first-time setup
+// carried its own inverse (RollbackFailedSetupAuth). That inverse DELETES the
+// account: right for setup, where there is no prior account, and wrong for the
+// rotation of an existing one, where a refused write left the admin with no
+// roster entry at all — locked out until a restart. Completing the snapshot is
+// what lets ONE primitive serve both, which is this file's own rule: a
+// per-caller inverse operation is where the bugs live.
 type rosterSnapshot struct {
-	users   map[string]*uiAdminUser
-	outcome AuthOutcome
+	users      map[string]*uiAdminUser
+	outcome    AuthOutcome
+	legacyUser string
+	legacyHash []byte
 }
 
 // snapshotRoster deep-copies the roster. Takes c.mu itself, so the caller must
@@ -1484,7 +1505,11 @@ type rosterSnapshot struct {
 func (c *Config) snapshotRoster() rosterSnapshot {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	snap := rosterSnapshot{outcome: c.defaultAuthOutcome}
+	snap := rosterSnapshot{
+		outcome:    c.defaultAuthOutcome,
+		legacyUser: c.user,
+		legacyHash: append([]byte(nil), c.passHash...),
+	}
 	if c.uiUsers != nil {
 		snap.users = make(map[string]*uiAdminUser, len(c.uiUsers))
 		for k, v := range c.uiUsers {
@@ -1504,6 +1529,11 @@ func (c *Config) restoreRoster(snap rosterSnapshot) {
 	c.mu.Lock()
 	c.uiUsers = snap.users
 	c.defaultAuthOutcome = snap.outcome
+	// The legacy pair is restored too: SetAuth sets it alongside the roster
+	// entry, and IsConfigured() reads it, so leaving it behind would report a
+	// configured appliance whose credential was never persisted.
+	c.user = snap.legacyUser
+	c.passHash = snap.legacyHash
 	// A rolled-back password change may have cached a positive verdict for the
 	// NEW password; leaving it would let a credential the roster no longer
 	// contains keep authenticating for the cache TTL. authRevision additionally
@@ -1600,10 +1630,11 @@ func (c *Config) mutateRosterBestEffort(mutate func() bool) error {
 	return c.saveUIUsersLocked()
 }
 
-// SetAuthDurably performs first-time-setup credential creation as ONE
-// transaction: it installs the initial admin and persists it with
-// saveUIUsersMu held across both, compensating with RollbackFailedSetupAuth
-// when the write does not land.
+// SetAuthDurably installs a local admin credential as ONE transaction: it runs
+// SetAuth and persists the roster with saveUIUsersMu held across both, rolling
+// the in-memory change back when the write does not land. It serves first-time
+// setup (apiSetupComplete) and the live credential-change endpoint
+// (apiSettings).
 //
 // CHAOS-70 (Codex round 2). SetAuth mirrors the new admin into c.uiUsers
 // (see its body) while taking only c.mu, so it IS a roster mutation and must
@@ -1631,24 +1662,25 @@ func (c *Config) mutateRosterBestEffort(mutate func() bool) error {
 // leaving the legacy pair set — IsConfigured() true with nothing persisted,
 // exactly the state RollbackFailedSetupAuth exists to clear.
 //
-// fileutil.ErrReplacedNotSynced is deliberately NOT carved out here, unlike
-// mutateRosterDurably: this preserves the credentialed branch's pre-existing
-// behaviour of compensating on any persist error. That it diverges from
-// setDefaultAuthOutcomeChecked beside it is a PRE-EXISTING inconsistency in
-// apiSetupComplete's two branches, recorded rather than changed inside a fix
-// about the transaction boundary.
+// It is a thin delegation to mutateRosterDurably, and CHAOS-70 round 3 made it
+// one deliberately. The first version carried its own inverse
+// (RollbackFailedSetupAuth) because rosterSnapshot did not capture the legacy
+// c.user/c.passHash pair — and that inverse DELETES the account, which is
+// correct for first-time setup and wrong for the rotation of an existing one: a
+// refused rotation left the admin with no roster entry, locking them out until a
+// restart. Completing the snapshot (see rosterSnapshot) removed the need for a
+// second inverse, so both callers now share one rollback, one transaction lock
+// and one ErrReplacedNotSynced rule. That also resolves an inconsistency rather
+// than preserving it: compensating on ANY persist error diverged from
+// setDefaultAuthOutcomeChecked in apiSetupComplete's other branch, which was
+// acceptable while this served setup alone and stopped being so when apiSettings
+// — a LIVE admin endpoint — became the second caller.
+//
+// For setup the snapshot is the pre-setup state (no accounts, empty legacy pair),
+// so a rollback still reverts IsConfigured() to false and keeps the wizard
+// retryable, exactly as the dedicated inverse did.
 func (c *Config) SetAuthDurably(user, pass string) error {
-	c.saveUIUsersMu.Lock()
-	defer c.saveUIUsersMu.Unlock()
-
-	if err := c.SetAuth(user, pass); err != nil {
-		return err
-	}
-	if err := c.saveUIUsersLocked(); err != nil {
-		c.RollbackFailedSetupAuth(user)
-		return fmt.Errorf("%w: %w", ErrRosterNotPersisted, err)
-	}
-	return nil
+	return c.mutateRosterDurably(func() error { return c.SetAuth(user, pass) })
 }
 
 // VerifyUIUser checks credentials against the admin user roster and returns

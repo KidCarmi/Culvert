@@ -37,6 +37,28 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   operator out of the appliance during the incident they need it to diagnose —
   but no longer discard their error. See
   `docs/operator/admin-roster-durability.md`.
+- **Security (admin UI): the Settings panel's Save button changed the admin
+  credential without ever writing it to disk, accepted an empty password, and
+  could disable local authentication.** `POST /api/settings` called the
+  credential setter and nothing else, and the admin credential is not carried in
+  `admin_settings.json`, so a rotated admin password answered `200 {"ok":true}`,
+  was audited as a successful `settings.update`, authenticated immediately — and
+  **reverted at the next restart, where the previous (possibly leaked) password
+  authenticated again**. No disk fault was required, which makes it worse than
+  the three handlers above. Password complexity was validated only when the field
+  was non-empty, so saving the panel with a blank password box installed
+  `bcrypt("")` as an admin credential — and, for a changed username, a new admin
+  account that authenticated with no password; clearing both fields disabled local
+  admin authentication outright, behind a *"Settings saved"* toast. Empty user and
+  empty password are now refused with `400` (run unmatched traffic without
+  credentials via `defaultAuthOutcome=Exempt`, which says so), and the credential
+  change is durable-or-refused through the same transaction as the other three.
+  Fixing the persistence alone would have been a regression, because persisting is
+  what would have made the two input faults survive a restart. The roster snapshot
+  now also captures the legacy credential pair, so a refused rotation **restores
+  the previous credential** instead of deleting the account — a control caught
+  that the first version of this fix locked the administrator out.  See
+  `docs/operator/admin-roster-durability.md`.
 
 - Public release promotion ran ahead of the evidence that was supposed to
   authorize it. On `ci.yml` run 35507615339 (SHA `3d8c9bb`) the `docker` job

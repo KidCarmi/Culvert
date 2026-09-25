@@ -11,7 +11,7 @@ next restart, when the file wins.
 
 ## What changed
 
-Three administrative mutations are now **durable-or-refused**. If the roster
+Four administrative mutations are now **durable-or-refused**. If the roster
 cannot be written, the in-memory change is rolled back and the request fails:
 
 | Action | Endpoint | Before | Now |
@@ -19,6 +19,40 @@ cannot be written, the in-memory change is rolled back and the request fails:
 | Create account / set password / change role | `POST /api/auth/users` | `200 {"ok":true}` | `500`, nothing changed |
 | Delete account | `DELETE /api/auth/users` | `204 No Content` | `500`, nothing changed |
 | Self-service password change | `POST /api/auth/change-password` | `200 {"ok":true}` | `500`, nothing changed |
+| Admin credential (Settings panel) | `POST /api/settings` | `200 {"ok":true}`, **never persisted** | persisted, or `500` with nothing changed |
+
+### `POST /api/settings` — read this one if you have ever used the Settings panel
+
+The first three endpoints above persisted and mis-reported only when the write
+*failed*. `POST /api/settings` — the **Settings panel's Save button** — did not
+write the roster at all, and there was no other writer: the admin credential is
+not carried in `admin_settings.json`. Three consequences, all of which needed no
+disk fault:
+
+1. **A rotated admin password reverted at the next restart.** The panel answered
+   *"Settings saved"*, the new password worked immediately, and after a restart
+   the **previous password authenticated again**. If you rotated because a
+   credential leaked, the leaked one came back.
+2. **A blank password field installed an empty password.** Complexity was only
+   checked when the field was non-empty, so saving the panel with the password
+   box blank set the admin password to the empty string — and, if you had also
+   edited the username, created a *new* admin account that authenticated with no
+   password. Until restart.
+3. **Clearing both fields disabled local admin authentication**, again behind a
+   *"Settings saved"* toast.
+
+Both input faults are now refused with `400`, and the credential change is
+durable-or-refused like the other three. To run unmatched traffic without
+credentials, set `defaultAuthOutcome=Exempt`
+(`PUT /api/settings/default-auth-outcome`) — that endpoint is explicit about it;
+blanking a text field is not.
+
+**What to check on an appliance that used the Settings panel before this fix:**
+confirm the admin credential you expect is the one in effect *after a restart*,
+not just now. If a rotation was lost, redo it; if an empty or unintended password
+was installed, it will already have reverted at the first restart — but any
+account created by that path never existed on disk, so re-create it deliberately
+through `POST /api/auth/users`.
 
 The refusal body names the remedy and states plainly that nothing was modified:
 

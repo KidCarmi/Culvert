@@ -583,7 +583,7 @@ func apiSetupComplete(w http.ResponseWriter, r *http.Request) {
 	// !IsConfigured(), so POST /api/auth/users is reachable DURING setup and a
 	// failing admin mutation's rollback could otherwise delete this account.
 	// See SetAuthDurably for the full interleaving.
-	if err := cfg.SetAuthDurably(body.User, body.Pass); err != nil {
+	if err := cfg.SetAuthDurably(body.User, body.Pass); err != nil && !rosterChangeCommitted(err) {
 		if !errors.Is(err, ErrRosterNotPersisted) {
 			http.Error(w, "internal error: "+err.Error(), http.StatusInternalServerError)
 			return
