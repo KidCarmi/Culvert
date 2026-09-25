@@ -50,6 +50,39 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   disagree, and an unusable incoming secret never counts as evidence that the
   key changed.
 
+- Client-supplied tracing headers reached the process log unbounded
+  (SEC-REQID-1). `setupRequestTracing` runs on 100% of proxied traffic — the
+  second statement in `handleRequest`, ahead of the connection limiter, the IP
+  filter and authentication — and reads two headers the *client* chooses,
+  `X-Request-Id` and `Traceparent`. It bounded neither. The accepted request id
+  then reached roughly twenty process-log sites (every `POLICY_*` decision line
+  plus `AUTH_FAIL` / `IP_BLOCKED` / `RATE_LIMITED` / `BLOCKED` / `INVALID_HOST`)
+  as a bare `%s` inside the `{req_id=… identity=… action=…}` block, the response
+  header, and the forwarded request. The only sanitisation was `strings.ReplaceAll`
+  for CR and LF — the CWE-117 barrier, which correctly stops whole-record forgery
+  but is not what `sanitizeLog` does, since `sanitizeLog` scrubs every byte below
+  `0x20` and `0x7F`. So `ESC`, `NUL`, `BEL`, `VT`, `FF` and `DEL` reached the
+  forensic log verbatim, and a space could inject extra `key=value` tokens into
+  the decision line's brace block. Nothing bounded the length at all: the proxy
+  listener sets no `MaxHeaderBytes`, so net/http's 1 MiB default was the only
+  ceiling, and eight requests carrying a 512 KiB request id wrote 4,194,968 bytes
+  into the process log — the same amplification CHAOS-63 measured against the
+  audit log, reached here through the unauthenticated data plane rather than the
+  admin API, and invisible to every storage-health surface because each of those
+  writes succeeds (CWE-778, OWASP A09:2021). Both headers are now bounded and
+  charset-checked where they are read: at most 128 bytes (request id) or 255
+  (traceparent), visible ASCII with no whitespace. A value that fails is treated
+  exactly as an absent one — a fresh id is minted and overwrites the hostile value
+  on the request, the response and the wire — so a tracing header can never decide
+  whether traffic flows. Rejections are counted as
+  `culvert_tracing_header_rejected_total{header=…}`, surfaced on `GET /api/stats`
+  and in the admin UI, and logged once per minute without ever echoing the
+  refused value. A repeated header is refused on the same grounds — `Header.Get`
+  validates only the first field value, so an acceptable first `X-Request-Id`
+  paired with a hostile second one previously reached the upstream uncounted —
+  and the minted value replaces the whole field, so exactly one value is
+  forwarded.
+
 - **A request header could name a root-executed artifact (SEC-BOOTSTRAP-HOST-1).**
   The Control Plane's one-click DP bootstrap renders two artifacts a human is
   told to run with root authority — the install script it documents as
@@ -441,6 +474,10 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   `/api/upstream/entries/{id}/credential`) and the CDR enrollment recovery
   endpoints (`/api/cdr/instances/enroll/recover`,
   `/api/cdr/instances/enroll/receipts`).
+- Admin API operations (contract 2.1.0): `GET/PUT /api/traffic/redaction` —
+  the canonical name for the traffic-log destination-privacy posture
+  (terminology governance T-17); `/api/decryption/redaction` remains a
+  fully supported, non-deprecated alias of the same operations.
 
 ### Changed — API contract 1.2.0 → 2.0.0 (BREAKING)
 
@@ -486,6 +523,36 @@ endpoints for credentialed parents.
 
 ### Performance
 
+- Concurrent leaf-certificate cache misses for one host are collapsed onto a
+  single sign. `Manager.GetCert` is the `tls.Config.GetCertificate` callback
+  for every SSL-inspected CONNECT, so a miss there is the most expensive unit
+  of work the appliance performs per connection — `signLeaf` measures 144 µs,
+  19.6 KB and 327 allocations on the reference box, 85% of it the irreducible
+  P-256 sign inside `x509.CreateCertificate`. Nothing stood between the cache
+  probe and the sign, so every handshake that arrived for a host while the
+  first was still signing started its own, and the duplicates were pure waste:
+  same host, same CA, same shared leaf key, same 24-hour window, with the last
+  writer simply overwriting the others in the cache. The amplification grew
+  with core count, because what bounded the herd was how many signs could be
+  in flight at once — 64 workers over 256 cold hosts measured 1.00 signs per
+  host at `GOMAXPROCS=1`, 1.35 at 2 and 1.61 at 4, so the 16/32-core hardware
+  the appliance ships to sat further up that curve. It landed during exactly
+  the cold-cache burst the cache exists to absorb: a restart, a TTL boundary
+  (entries are created by traffic and expire on one uniform 1-hour TTL, so a
+  working set goes cold together), or a traffic spike. A leader/follower
+  single flight — the same shape already used for `hostIPCache`, `jwksCache`
+  and `internal/ocsp` — takes that cold burst from 28.13 ms to 14.37 ms
+  (−48.9%), 157,550 allocations to 92,329 (−41.4%) and 9.75 MB to 5.85 MB
+  (−40.0%), at exactly 1.00 signs per host. A follower receives the leader's
+  certificate, which is the one it would have signed itself, so the cache, its
+  TTL, the LRU, the CA-validity refusal and the fail-closed posture are
+  unchanged, and the steady-state hit path is at parity (190.1 ns against
+  189.6 ns, same 32 B and one allocation). New counter
+  `culvert_cert_sign_singleflight_joined_total` reports the duplicate signs
+  avoided; `culvert_cert_cache_misses_total` keeps its meaning — hits plus
+  misses is still the number of `GetCert` calls — but is no longer the same
+  thing as the sign count, for which
+  `culvert_cert_sign_duration_seconds_count` is exact.
 - The per-request policy decision line is built by appending rather than by
   `logger.Printf`, and the benchmark that measured it was measuring a disabled
   logger. `applyPolicyDecision` emits exactly one `POLICY_*` line per proxied
@@ -573,6 +640,25 @@ endpoints for credentialed parents.
   metric, or dashboard change.
 
 ### Fixed
+
+- A leaf-certificate sign already in flight could outlive the CA it was started
+  against. Replacing the root CA (`InitCA`, `ImportBundle`, `LoadCustomCA`, and
+  `ClearCache`) cleared the leaf cache, which is not sufficient on its own: a
+  sign that began before the replacement was still running against the outgoing
+  CA, and when it completed it repopulated the just-cleared cache with that
+  outgoing CA's leaf — served to every client for the full one-hour cache TTL,
+  and rejected by any client that trusts only the newly installed CA. A CA
+  replacement is exactly the moment an operator expects the old CA to stop
+  being used. The cache now carries a CA *generation* retired in the same
+  locked step that clears it, a sign records the generation it started under,
+  and a result whose generation has been retired is dropped rather than cached;
+  a new CA-install path that cleared the cache without retiring the generation
+  would silently reintroduce this, so that is pinned structurally rather than
+  behaviourally. Found by Codex review on the leaf-sign single flight above,
+  which briefly widened the same window: a caller arriving *after* the
+  replacement could join the pre-replacement sign and be handed its leaf, where
+  previously it would have signed against the new CA itself. Flights are now
+  scoped to the generation, so generations never join each other.
 
 - A SOCKS5 listener bind failure no longer terminates the whole appliance
   (CHAOS-66). `startSOCKS5` bound with a single `logFatalf` branch, and
