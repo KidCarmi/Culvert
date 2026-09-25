@@ -19,6 +19,8 @@ import (
 // net.Pipe) avoids the synchronous-pipe deadlock h2's concurrent preface/SETTINGS
 // exchange can hit. Returns the client conn and the server-side net.Conn. Everything
 // is torn down via t.Cleanup.
+//
+//lint:ignore SA1019 temporary compatibility bridge: x/net v0.59 deprecated this x/net/http2 API; kept until the inspected-H2 path migrates to Go's stdlib HTTP/2 APIs.
 func h2cLoopback(t *testing.T, sh *h2InspectShared, handler http.Handler) (*http2.ClientConn, net.Conn) {
 	t.Helper()
 	ln, err := (&net.ListenConfig{}).Listen(context.Background(), "tcp", "127.0.0.1:0")
@@ -45,7 +47,9 @@ func h2cLoopback(t *testing.T, sh *h2InspectShared, handler http.Handler) (*http
 		t.Fatalf("accept failed")
 	}
 	t.Cleanup(func() { _ = srvConn.Close() })
+	//lint:ignore SA1019 temporary compatibility bridge: x/net v0.59 deprecated this x/net/http2 API; kept until the inspected-H2 path migrates to Go's stdlib HTTP/2 APIs.
 	go sh.srv.ServeConn(srvConn, &http2.ServeConnOpts{Handler: handler, BaseConfig: sh.base})
+	//lint:ignore SA1019 temporary compatibility bridge: x/net v0.59 deprecated this x/net/http2 API; kept until the inspected-H2 path migrates to Go's stdlib HTTP/2 APIs.
 	cc, err := (&http2.Transport{}).NewClientConn(cliConn)
 	if err != nil {
 		t.Fatalf("client conn: %v", err)
