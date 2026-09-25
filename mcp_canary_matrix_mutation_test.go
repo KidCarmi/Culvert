@@ -100,7 +100,8 @@ func TestCanaryMatrix_EveryReasonReachable(t *testing.T) {
 		DurableEventsHealthy: true, ResponseInspectionReady: true, RegistryHealthy: true, CatalogHealthy: true,
 		PolicyHealthy: true, EmergencyKillClear: true, KillBoundaryGuardPresent: true, ToolFreshnessGuardPresent: true,
 		LiveApprovalValid: true, ServerUsable: true, ToolFingerprintCurrent: true,
-		ToolCatalogUsable: true, ExactPolicyPermit: true, RollbackPathHealthy: true,
+		ToolCatalogUsable: true, ExactPolicyPermit: true, FirstCanaryCredentialFree: true,
+		RollbackPathHealthy:          true,
 		RollbackCoordinatorRehearsed: true,
 		BudgetConfigured:             true,
 	}
@@ -128,6 +129,7 @@ func TestCanaryMatrix_EveryReasonReachable(t *testing.T) {
 		canary.ReasonToolFingerprintStale:                func(f *canary.Facts) { f.ToolFingerprintCurrent = false },
 		canary.ReasonToolNotCatalogUsable:                func(f *canary.Facts) { f.ToolCatalogUsable = false },
 		canary.ReasonExactPolicyNotExecutable:            func(f *canary.Facts) { f.ExactPolicyPermit = false },
+		canary.ReasonCredentialPathRequired:              func(f *canary.Facts) { f.FirstCanaryCredentialFree = false },
 		canary.ReasonRollbackPathUnhealthy:               func(f *canary.Facts) { f.RollbackPathHealthy = false },
 		canary.ReasonRollbackCoordinatorRehearsalPending: func(f *canary.Facts) { f.RollbackCoordinatorRehearsed = false },
 		canary.ReasonBudgetNotConfigured:                 func(f *canary.Facts) { f.BudgetConfigured = false },
