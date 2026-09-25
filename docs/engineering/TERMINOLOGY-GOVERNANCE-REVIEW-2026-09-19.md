@@ -58,13 +58,20 @@ the PAC bypass explainer and the component gallery still say "SSL" (listed in th
 outlier labels were changed to match — "TLS action" / "TLS Inspect" — bringing the component back into
 agreement with itself and with those enumerated TLS-using surfaces, without touching the wire field name
 (`sslAction` stays `sslAction`, per the API-stability rule below), the legacy GUI (`static/index.html`,
-which consistently says "SSL" and is out of scope here), or the T-13 residual's larger question.
+out of scope here), or the T-13 residual's larger question. The legacy GUI's policy-rule editor says
+"SSL" for this mechanism ("SSL Action", "Inspect (MITM / SSL decryption)", `static/index.html:3162,3165`)
+and uses "TLS" there only for the protocol itself ("Skip TLS Verify", the TLS fingerprint note). The
+legacy GUI as a whole is NOT uniform: 19 lines say "SSL inspect…", but the Decryption Coverage panel
+says "How much of this node's TLS is actually being inspected" (`static/index.html:3873`) and a
+request-log badge tooltip says "TLS decryption handshake failed" (`:8483`). That split is part of the
+same repo-wide question the T-13 residual tracks.
 
 Two more standalone "SSL" mentions were found nearby during this pass (`DecryptionProfilesPage.tsx:2,160`
 comment/subtitle prose, and `pacShared.tsx:19`'s PAC-bypass explainer) and one on the disabled-by-default
-component gallery page (`GalleryPage.tsx:216`, a demo `<Switch>` with no real API binding). None of these
-are self-contradictions the way `RuleEditor.tsx` was — each is an isolated, internally-consistent mention
-— so they are recorded here as **observed but not fixed**, and are exactly the shape of question T-13's
+component gallery page (`GalleryPage.tsx:216`, a demo `<Switch>` with no real API binding). `pacShared.tsx`
+and `GalleryPage.tsx` contain no other SSL or TLS wording, so their mentions are isolated;
+`DecryptionProfilesPage.tsx` is not (see "Observed, not fixed" below). All are recorded here as
+**observed but not fixed**, and are exactly the shape of question T-13's
 residual already covers (a repo-wide SSL-vs-TLS branding decision, not a mechanical same-screen fix). They
 are not added as a new backlog item; they are noted so a future pass doesn't re-discover them as if new.
 
@@ -154,7 +161,7 @@ already recorded against the audited window; corrected here.)
 - **Priority:** Medium (a real, visible same-screen contradiction in a rule-editing surface, confined to a
   disabled-by-default preview surface with no external consumers yet — same priority band as T-53).
 
-### Observed, not fixed — isolated (non-contradictory) "SSL" mentions near the T-58 fix
+### Observed, not fixed — other in-app "SSL" mentions near the T-58 fix
 
 Recorded so a future pass recognizes these rather than re-discovering them:
 
@@ -166,8 +173,17 @@ Recorded so a future pass recognizes these rather than re-discovering them:
   inspection" defaultChecked />` with no backing API call (a design-system showcase page, not a real
   settings surface).
 
-None of these contradict a sibling string in the same component the way `RuleEditor.tsx` did before this
-fix — each reads consistently on its own. Folding them into "TLS" would be the same repo-wide branding
+These, plus `RuleEditor.tsx:437,508`, are every user-visible "SSL" string under `frontend/src` at
+`36628eb` outside tests and `api/types.gen.ts` (`git grep -n SSL 36628eb -- frontend/src ':!*.test.*'
+':!frontend/src/api/types.gen.ts'`, ignoring the `sslAction`/`SSL_ACTIONS` identifiers).
+
+`pacShared.tsx:19` and `GalleryPage.tsx:216` are the only SSL/TLS wording in their files.
+`DecryptionProfilesPage.tsx` is different, and an earlier draft of this report wrongly called it
+"internally consistent": most of its "TLS" strings name the protocol (TLS 1.2/1.3, "Minimum TLS version",
+"origin TLS cannot be inspected"), but `:64` labels the inherit option "Inherit (rule's TLS setting)",
+calling the rule's inspection setting "TLS" on the same page whose subtitle (`:160`) says
+"SSL-inspected". That is a same-page mix of the kind T-58 fixed. This report does not assign it an ID or
+charge it to the score; it is flagged here so the next pass can decide whether to number it. Folding them into "TLS" would be the same repo-wide branding
 call T-13's residual already tracks as an open, deliberately-deferred Low-priority item (the in-app
 "SSL" vs. doc-branding "TLS Inspection" question), not a new, independent finding. Not queued as a new
 backlog entry; carried here as context for T-13's residual instead.
@@ -273,7 +289,7 @@ plan.
 
 | Priority | Item | Business impact if left unfixed | Compatibility risk | Est. size |
 |---|---|---|---|---|
-| Low | T-13 residual (carried over) | Decide whether README/enterprise-doc "TLS Inspection" branding should unify with in-app "SSL" — now with three more observed (non-contradictory) in-app "SSL" mentions noted above as context | Low | Small |
+| Low | T-13 residual (carried over) | Decide whether README/enterprise-doc "TLS Inspection" branding should unify with in-app "SSL" — now with the other in-app "SSL" mentions, the legacy GUI's own SSL/TLS split and the `DecryptionProfilesPage.tsx` same-page mix noted above as context | Low | Small |
 
 The rest of the carry-over plan (T-9, T-11, T-12, T-17, T-18, T-21+T-32, T-25, T-29, T-30, T-33, T-34,
 T-39; T-54, T-55, T-56, T-51 residual) is unchanged from the reports named above; see them for the full
