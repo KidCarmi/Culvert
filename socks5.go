@@ -486,8 +486,11 @@ func handleSOCKS5(conn net.Conn) {
 	// rate-limited line carry the LENGTH, never the value.
 	if canonicalHostOversize(normSOCKS5Host) {
 		atomic.AddInt64(&statBlocked, 1) // same accounting as the INVALID_HOST twin above
-		socks5Reply(conn, 0x02)
+		// Charge BEFORE replying: the reply is what the client observes, so
+		// an accounting that lands after it races any reader (and a test)
+		// that acts on the refusal.
 		noteOversizeHostRejection("SOCKS5", clientIP, len(normSOCKS5Host), "canonical")
+		socks5Reply(conn, 0x02)
 		return
 	}
 
