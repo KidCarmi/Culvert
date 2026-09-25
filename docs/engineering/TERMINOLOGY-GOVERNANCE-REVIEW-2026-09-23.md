@@ -1,8 +1,19 @@
 # Culvert Language & Terminology Governance Review — 2026-09-23
 
 > **Owner:** Language & Terminology Governance routine · **Status:** Point-in-time review (repeatable)
-> **Method:** Audited `46410c3..3febe59` — the window since the 2026-09-11 report's merge point,
-> confirmed as the current `origin/main` HEAD by a fetch immediately before this report was written (per
+> **Snapshot scope (read this first):** this is a HISTORICAL record of `origin/main` at `3febe59` on
+> 2026-09-23. It was merged later, after `main` had moved on, so the tree it ships in contains commits it
+> never audited. Its findings, carried-over backlog and health score describe `3febe59` only. They are
+> not a statement about the tree this file is published in; the current governance state is whatever the
+> most recent review in this series says. Later windows are audited by later reports, never
+> retroactively by this one.
+> **Finding-ID note:** T-54–T-56 were numbered from the reports on `main` at `3febe59`. The 2026-09-19
+> report (PR #1434, unmerged at the time) independently used **T-54** for an unrelated Rule Editor
+> SSL/TLS label finding. Cite this report's identity-backend finding as "T-54 (2026-09-23)" to keep
+> the two apart.
+> **Method:** Audited `46410c3..3febe59` — the window since the 2026-09-11 report's own branch head
+> (`46410c3`, PR #1363, merged to `main` in `0665453`),
+> confirmed as the then-current `origin/main` HEAD by a fetch immediately before this report was written on 2026-09-23 (per
 > the DEBT-014 lesson: sync against `main` right before opening a PR, not only at review-start, so a fix
 > landed by a parallel branch is credited rather than re-claimed — re-confirmed clean this pass: `HEAD` is
 > an ancestor of `origin/main` with zero unmerged local work). The window covers 31 first-parent merges,
@@ -49,8 +60,9 @@ action strings, generated OpenAPI operation IDs).
    one page does not carry to another — and the legacy threat-feed button's own icon (`#i-refresh`) already
    pointed at "refresh" as the more natural word before this fix. **Fixed this pass, GUI-copy only:**
    `static/index.html`'s "Sync All Now" → "Refresh All Now" (blocklist feed) and "Sync Feeds Now" →
-   "Refresh Feeds Now" (threat feed), plus the one doc-comment in
-   `internal/blocklistfeed/blocklistfeed.go` that quoted the old button label. Zero API/audit/compat
+   "Refresh Feeds Now" (threat feed), the per-feed row button, toast and status messages those two
+   flows display, plus the one doc-comment in `internal/blocklistfeed/blocklistfeed.go` that quoted the
+   old button label. Zero API/audit/compat
    surface — button text only; the underlying route paths, JS handler names, and audit action strings are
    unchanged. **Not fixed, recorded as residual:** the audit action strings themselves
    (`blocklist.feed.sync` / `threatfeed.sync` vs `saasfeed.refresh` / `release.catalog.refresh`) still
@@ -66,31 +78,27 @@ action strings, generated OpenAPI operation IDs).
    regeneration — out of scope for this pass's zero-risk-only fix; recorded to the backlog as the larger
    half of this finding.
 
-3. **T-56 — "Decryption Exclusions" (GUI/API) vs `decryption.autoexclude.*` (audit action prefix)
-   makes the feature's own audit trail unsearchable by its own displayed name.** The nav label
+3. **T-56 — "Decryption Exclusions" (GUI/API) vs `decryption.autoexclude.*` (audit action prefix):
+   the one event the feature exists for is not findable by the feature's displayed name.** The nav label
    (`static/index.html:773`, `data-view="decexclusions"`), the REST route (`/api/decryption-exclusions`,
    `ui_policy.go:3014`) and its JSON response field (`"exclusions"`, `ui_policy.go:970`) all say
-   "exclusions" — but every audit action for the identical feature is prefixed `decryption.autoexclude.*`
-   (`ui_policy.go:995,1000,1100`), and the Audit Log UI renders and text-filters on the raw action string
-   verbatim (`static/index.html`, `renderAuditLog`). CLAUDE.md documents "autoexclude" extensively as the
-   *deliberate internal engine/package name* (`internal/autoexclude`, `culvert_decrypt_autoexclude_*`
-   metrics) — but that documented intent covers the internal/metric vocabulary, not this specific
-   admin-facing consequence: an admin who knows the feature only as "Decryption Exclusions" and searches
-   the Audit Log for "exclusion" gets zero hits for every one of its own events, because none of the audit
-   strings contain that word. **Not fixed this pass** — renaming audit action strings carries the same
-   SIEM/audit-trail compatibility caution this program has applied to every prior audit-string finding;
-   recorded to the backlog with a narrower recommendation than a rename (see below).
+   "exclusions", while every audit action for the feature is prefixed `decryption.autoexclude.*`.
+   CLAUDE.md documents "autoexclude" as the *deliberate internal engine/package name*. The Audit Log's
+   text filter (`renderAuditLog`) matches `detail` as well as `action`, and most of this feature's
+   detail strings do say "exclusion" (manual evict, clear, tunables, surge, rescue), so a search for
+   "exclusion" finds them. It misses two: `decryption.autoexclude.learn` — the automatic promotion of
+   a host into the cache, whose detail reads "SSL inspection auto-disabled…" — and an evict request for
+   an entry that was not present. (Corrected from this report's first draft, which claimed zero hits
+   for every event; see the Process Note.) **Not fixed this pass**, recorded to the backlog as a
+   narrow, low-priority item (see below).
 
-**A candidate considered and declined before drafting a fix, per this program's standing check-the-docs-first
-discipline:** whether to also normalize the Audit Log UI's client-side text filter to treat "exclusion" and
-"autoexclude" as synonyms (a purely front-end, zero-backend-risk change). Declined: a hand-coded synonym
-pair for one term is a narrow workaround for the underlying vocabulary gap, not a canonical fix, and this
-program's Implementation Rules explicitly exclude band-aid-style changes in favor of naming decisions that
-generalize — recorded as part of T-56's recommended action instead (see the refactoring plan).
+**A candidate considered and declined:** a hand-coded "exclusion" ↔ "autoexclude" synonym in the Audit
+Log's client-side filter. Declined as a one-term workaround rather than a naming decision that
+generalizes; see T-56's recommended action.
 
-**Terminology Health Score: 8.7 / 10** (unchanged from 2026-09-08 through 2026-09-11). The fourteen-item
-carry-over backlog is unchanged (three of its higher-visibility items — T-12, T-29, T-30 — were directly
-spot-checked against the current tree this pass, not merely assumed unchanged) and this pass's own two
+**Terminology Health Score: 8.7 / 10** (unchanged from 2026-09-08 through 2026-09-11). The carry-over
+backlog (fourteen IDs, thirteen entries) is unchanged (three of its higher-visibility items — T-12, T-29,
+T-30 — were directly spot-checked against the then-current tree (`3febe59`) this pass, not merely assumed unchanged) and this pass's own two
 small GUI-copy fixes are real but modest against it, matching the same reasoning the 2026-09-09 report gave
 for holding the score rather than moving it for a small net-positive pass.
 
@@ -159,9 +167,16 @@ for holding the score rather than moving it for a small net-positive pass.
   reason to look for "Refresh" on the SaaS feed panel for the equivalent action, and vice versa.
 - **Why the new name is better:** one verb for one concept across every peer panel that offers it.
 - **What was actually done (zero-risk half):** `static/index.html` button labels: "Sync All Now" →
-  "Refresh All Now" (blocklist feed), "Sync Feeds Now" → "Refresh Feeds Now" (threat feed). Updated the one
-  Go doc-comment quoting the old label (`internal/blocklistfeed/blocklistfeed.go`, `SyncAll`'s doc
-  comment). No route, JS handler name, or audit action string was touched. `go build ./...` and `go vet
+  "Refresh All Now" (blocklist feed), "Sync Feeds Now" → "Refresh Feeds Now" (threat feed), plus the
+  labels and status messages coupled to those two flows, so the same panel does not rename the button
+  and then report "Sync complete": the per-feed row button ("Sync" → "Refresh"), the blocklist toast
+  ("Sync complete - …" → "Refresh complete - …"), and the threat-feed status line ("Syncing threat
+  feeds…"/"Sync complete."/"Sync failed:" → "Refreshing…"/"Refresh complete."/"Refresh failed:"). The
+  periodic-schedule wording ("Blocklist Feed Auto-Sync", "Sync Interval", "Last Sync") describes the
+  automatic cadence, not the manual action, and is left as is. (The coupled strings were added after
+  review; see the Process Note.) Updated the one Go doc-comment quoting the old label
+  (`internal/blocklistfeed/blocklistfeed.go`, `SyncAll`'s doc comment). No route, JS handler name, or
+  audit action string was touched. `go build ./...` and `go vet
   ./...` both pass clean after the change; `gofmt -l` reports no diff.
 - **What remains (recorded, not fixed):**
   - The audit action strings `blocklist.feed.sync` / `threatfeed.sync` still disagree with
@@ -176,7 +191,8 @@ for holding the score rather than moving it for a small net-positive pass.
     verify` (787 unit tests, lint, format, strict typecheck) + two-build determinism-gate cycle the
     2026-09-09 report's T-53 fix required, and, only if the operation IDs themselves are renamed, an
     OpenAPI bundle regeneration — none of which is a same-pass, zero-risk change.
-- **Affected code:** `static/index.html` (2 button labels), `internal/blocklistfeed/blocklistfeed.go`
+- **Affected code:** `static/index.html` (2 button labels + the coupled row button, toast and status
+  strings), `internal/blocklistfeed/blocklistfeed.go`
   (1 doc comment) — this pass. Residual: `frontend/src/features/security/ThreatIntelTab.tsx` and the
   OpenAPI bundle, for a future pass.
 - **Affected API:** none this pass (residual: OpenAPI operation IDs, if ever renamed).
@@ -198,7 +214,7 @@ for holding the score rather than moving it for a small net-positive pass.
   audit-string and frontend work is worth doing but is not urgent — the feature works correctly today, the
   drift is discoverability/documentation-grade confusion, not a functional defect).
 
-### T-56 — "Decryption Exclusions" (GUI/API) vs `decryption.autoexclude.*` (audit action) — the feature's own audit trail can't be found by its own displayed name (new — not fixed this pass)
+### T-56 — "Decryption Exclusions" (GUI/API) vs `decryption.autoexclude.*` (audit action) — the learn event can't be found by the feature's displayed name (new — not fixed this pass)
 
 - **Business concept:** the volatile, runtime-learned decryption-exclusion cache (fail-open auto-learn,
   `internal/autoexclude`) — the same subsystem T-53 (2026-09-09) touched from the opposite angle (a
@@ -206,48 +222,52 @@ for holding the score rather than moving it for a small net-positive pass.
 - **Current names:** nav label "Decryption Exclusions" (`static/index.html:773-774`,
   `data-view="decexclusions"`); REST route `/api/decryption-exclusions` and JSON field `"exclusions"`
   (`ui_policy.go:3014`, `ui_policy.go:970`); audit actions `decryption.autoexclude.evict`,
-  `decryption.autoexclude.clear`, `decryption.autoexclude.tunables` (`ui_policy.go:995,1000,1100`).
+  `decryption.autoexclude.clear`, `decryption.autoexclude.tunables` (`ui_policy.go:995,1000,1100`), plus
+  the system-emitted `decryption.autoexclude.learn`, `.rescue` (`autoexclude_resolve.go:276,369`) and
+  `.surge` (`autoexclude_surge.go:101`).
 - **Recommended canonical name:** not force-decided by this report — see recommended action below.
   CLAUDE.md already documents "autoexclude" as the deliberately-chosen *internal/package/metric*
   vocabulary (`internal/autoexclude`, `culvert_decrypt_autoexclude_*`), so unlike T-54/T-55 this is not a
   case of two competing business names; it is one deliberately-named internal concept whose vocabulary
   happens to also be the only vocabulary present in the one admin-visible surface — the Audit Log — that
   is supposed to be searchable by the *displayed* feature name.
-- **Why the current naming is problematic:** the Audit Log UI renders and text-filters on the raw
-  `action` string verbatim (`static/index.html`, `renderAuditLog`'s filter over `e.action`). An admin who
-  knows this feature only by its nav label and API name — "Decryption Exclusions" / "exclusions" — and
-  searches the Audit Log for "exclusion" gets **zero hits** for every eviction, clear, or tunable change
-  this feature has ever made, because none of its three audit action strings contain that word.
-- **Why a fix would be better:** makes the feature's own compliance/audit trail discoverable by the name
-  an admin actually sees on the page that triggers it, without touching the deliberately-chosen internal
-  engine vocabulary CLAUDE.md documents.
+- **Why the current naming is problematic:** the Audit Log UI text-filters on `action`, `object`,
+  `objectId`, `actor` and `detail` (`static/index.html`, `renderAuditLog`). No action string contains
+  "exclusion", but most details do: evict ("manual eviction of a learned exclusion"), clear ("cleared N
+  learned exclusion(s)"), tunables ("updated adaptive decryption-exclusion tunables"), surge ("…SSL-inspection
+  exclusions promoted…") and rescue ("…the persistent exclusion still requires…"). A search for
+  "exclusion" therefore finds those. It misses `decryption.autoexclude.learn` — the automatic promotion
+  of a host into the cache, the event an operator most needs to find — whose detail says "SSL inspection
+  auto-disabled for this profile+host until TTL", and an evict request for an absent entry ("eviction
+  requested; entry was not present"). The gap is narrow: one system event and one no-op admin event.
+- **Why a fix would be better:** makes every event of the feature's audit trail discoverable by the
+  name an admin sees on the page, without touching the deliberately-chosen internal engine vocabulary
+  CLAUDE.md documents.
 - **Why this pass declined both an audit-string rename and a client-side synonym patch:** an audit-action
   rename carries the same SIEM/audit-trail compatibility caution this program has consistently applied to
   every other audit-string finding (see T-18's carried-over recommendation, and the caution taken with
   T-55's residual half above). A narrow client-side synonym special-case in the Audit Log's text filter
   (treating "exclusion" and "autoexclude" as equivalent search terms) was considered and declined as a
   band-aid for one term rather than a canonical naming fix — see the note above the findings table.
-- **Recommended action (for the backlog, not executed this pass):** either (a) alias the three audit
-  action strings to a `decryption.exclusion.*` spelling using the same safe-rename pattern this codebase
-  already has for alert names (`normalizeEventNames` in `internal/alerts`) — the audit-log equivalent would
-  need its own such normalization seam, since none currently exists for audit actions, which is itself
-  worth scoping as a small, general-purpose mechanism rather than a one-off; or (b), lower-effort, add a
-  one-line cross-reference in `docs/operator/decryption-auto-exclusions.md` (which already exists) noting
-  that this feature's audit trail is searchable under "autoexclude," not "exclusion." Recommend (a) as the
-  eventual canonical fix and (b) as an immediate stop-gap for a future pass, if a maintainer wants a
-  same-day zero-risk mitigation before the audit-normalization seam is built.
-- **Affected code:** `ui_policy.go` (3 audit call sites, if renamed).
+- **Recommended action (for the backlog, not executed this pass):** the smallest fix is (a) to word the
+  `learn` (and absent-entry evict) detail strings so they mention the exclusion, matching their siblings —
+  a detail-text change that leaves the action strings SIEM rules key on untouched. A lower-effort
+  alternative is (b), a one-line note in `docs/operator/decryption-auto-exclusions.md` that the audit
+  trail is also searchable under "autoexclude". An action-string rename (a `decryption.exclusion.*`
+  spelling behind an audit-action alias seam, the audit-log analogue of `normalizeEventNames`) is not
+  justified by a gap this narrow.
+- **Affected code:** `autoexclude_resolve.go` (the `learn` detail) and `ui_policy.go` (the
+  absent-entry evict detail), if option (a) is taken.
 - **Affected API:** none (the REST route/JSON field are not the mismatch; only the audit actions are).
-- **Affected GUI:** the Audit Log's rendered/filtered action strings, if renamed.
+- **Affected GUI:** the Audit Log's rendered/filtered detail text, if option (a) is taken.
 - **Affected Documentation:** `docs/operator/decryption-auto-exclusions.md` (stop-gap option).
 - **Affected Configuration:** none.
-- **Migration Complexity:** Medium (needs a general audit-action-alias mechanism to do safely, not a blind
-  string rename, given SIEM-forwarding consumers of the existing strings).
-- **Compatibility Risk:** Medium (audit actions are forwarded to external SIEM via syslog — CLAUDE.md's own
-  `syslog.go` section — so any rename needs an alias/compat period, the same reasoning already applied to
-  T-18's carried-over recommendation).
-- **Estimated PR Size:** Small for the documentation stop-gap; Medium for the audit-alias mechanism plus
-  the rename.
+- **Migration Complexity:** Low for option (a) or (b). An action-string rename would be Medium (audit
+  actions are forwarded to external SIEM via syslog, so it would need an alias/compat period, the same
+  reasoning applied to T-18).
+- **Compatibility Risk:** Low for (a) — detail text is free-form and not a keyed identifier — and none for
+  (b).
+- **Estimated PR Size:** Small.
 - **Priority:** Low (the internal vocabulary is deliberate and documented; this is a narrow,
   audit-log-search-only consequence of that choice, not a cross-cutting business-concept collision).
 
@@ -256,7 +276,7 @@ for holding the score rather than moving it for a small net-positive pass.
 ## Carried-Over Findings (unchanged)
 
 All fourteen previously-open finding IDs (thirteen backlog entries, since T-21 and T-32 are tracked as one
-paired item) remain open, unchanged, and were re-confirmed against the current tree: T-9, T-11, T-12,
+paired item) remain open, unchanged, and were re-confirmed against the then-current tree (`3febe59`): T-9, T-11, T-12,
 T-13 (residual), T-17, T-18, T-21+T-32 (paired), T-25 (residual), T-29, T-30, T-33, T-34, T-39. Three were
 spot-checked directly rather than assumed (`T-12`: `cmd/culvert-maint/internal/server/handlers_upgrade.go`
 still serves `/v1/upgrades/check` unchanged; `T-29`: `rate_limit_rpm` is still absent from `config.go`;
@@ -280,7 +300,7 @@ priority table below. New backlog entries from this pass:
 | Priority | Finding | Action | Migration risk | Est. PR size |
 |---|---|---|---|---|
 | Medium | T-55 residual | Align `blocklist.feed.sync`/`threatfeed.sync` audit actions to the `.refresh` verb (needs a safe audit-action alias approach, not a blind rename); separately, realign the new React frontend's Threat Intelligence tab wording/state to "Refresh" and regenerate the OpenAPI bundle only if the operation IDs are touched for another reason | Medium (audit strings); Low (frontend, default-off) | Small-Medium (audit); Medium (frontend, gated by full verify pipeline) |
-| Low | T-56 | Build a general audit-action alias mechanism (the audit-log analogue of `normalizeEventNames`) and migrate `decryption.autoexclude.*` toward a `decryption.exclusion.*` spelling; or, as an immediate stop-gap, cross-reference the vocabulary gap in `docs/operator/decryption-auto-exclusions.md` | Medium | Small (doc stop-gap); Medium (alias mechanism + rename) |
+| Low | T-56 | Mention the exclusion in the `decryption.autoexclude.learn` (and absent-entry evict) audit detail text so a search for "exclusion" finds them; or cross-reference "autoexclude" in `docs/operator/decryption-auto-exclusions.md` | Low | Small |
 | Low | T-54 residual | Rename `culvert_auth_backend_*` → `culvert_identity_backend_*` with a doubled-emission deprecation window, only if a dedicated metrics-naming pass is ever scoped | High | Medium-Large |
 
 The full carried-over priority table (T-9 through T-39) is unchanged from 2026-09-09 and is not repeated
@@ -293,6 +313,22 @@ overlap between this pass's three findings and any file touched in the audited w
 
 ---
 
+## Process Note — two claims corrected after review
+
+The automated PR review (`chatgpt-codex-connector`) found two errors in this report's first draft,
+both verified against the source and corrected before merge:
+
+- T-56 claimed a search for "exclusion" returns zero hits for every event of the feature. The Audit
+  Log filter also matches `detail`, and most of the feature's details contain the word; only the
+  `learn` event and the absent-entry evict are missed. T-56 was narrowed to that, and its recommended
+  action and risk scaled down to match.
+- T-55 renamed two buttons but left the flows they start reporting "Sync complete"/"Sync failed" and a
+  per-feed "Sync" row button on the same panel, which created a same-panel mismatch. The coupled labels
+  and status messages now say "Refresh" as well. API paths, JS handler names and audit action strings
+  are unchanged.
+
+---
+
 ## Stop-Condition Assessment
 
 Terminology is **not** fully consistent. This pass found three genuinely new findings (T-54, T-55, T-56),
@@ -300,9 +336,9 @@ none previously tracked by any prior review in this program. Two were partially 
 zero-risk fixes (a cross-referencing code comment for T-54; two GUI button-label edits plus one doc-comment
 correction for T-55) that add no API, audit, or metrics compatibility surface — confirmed via a clean
 `go build ./...`, `go vet ./...`, and `gofmt -l` after the change. The compatibility-sensitive halves of
-all three findings (a Prometheus metric rename, two audit-action-string alignments, and one React-frontend
-text/state pass) were deliberately **not** force-fixed, consistent with this program's standing rule to
+all three findings (a Prometheus metric rename, the feed audit-action-string alignment, T-56's audit
+detail wording, and one React-frontend text/state pass) were deliberately **not** force-fixed, consistent with this program's standing rule to
 weigh migration cost — each is recorded to the backlog with an explicit recommended action rather than
-silently dropped. The fourteen-item carry-over backlog (T-9, T-11, T-12, T-13, T-17, T-18, T-21+T-32, T-25,
-T-29, T-30, T-33, T-34, T-39) is unchanged, with three higher-visibility items independently spot-checked
-against the current tree rather than assumed. No cosmetic or preference-driven renames were proposed.
+silently dropped. The carry-over backlog (fourteen IDs, thirteen entries: T-9, T-11, T-12, T-13, T-17,
+T-18, T-21+T-32, T-25, T-29, T-30, T-33, T-34, T-39) is unchanged, with three higher-visibility items
+independently spot-checked against the then-current tree (`3febe59`) rather than assumed. No cosmetic or preference-driven renames were proposed.

@@ -9572,15 +9572,15 @@ async function syncThreatFeeds() {
   const statusEl = document.getElementById('sec-scan-action-status');
   statusEl.style.display = 'block';
   statusEl.style.color = 'var(--muted)';
-  statusEl.textContent = 'Syncing threat feeds…';
+  statusEl.textContent = 'Refreshing threat feeds…';
   try {
     await api('/api/security-scan/feeds/sync', { method: 'POST' });
     statusEl.style.color = 'var(--green)';
-    statusEl.textContent = 'Sync complete.';
+    statusEl.textContent = 'Refresh complete.';
     loadSecScanStatus();
   } catch(e) {
     statusEl.style.color = 'var(--red)';
-    statusEl.textContent = 'Sync failed: ' + e.message;
+    statusEl.textContent = 'Refresh failed: ' + e.message;
   }
 }
 
@@ -11240,7 +11240,7 @@ async function fetchBlocklistFeed() {
         <td>${f.imported_count || 0}</td>
         <td>${f.attributed_count || 0}</td>
         <td class="text-right" style="white-space:nowrap">
-          <button class="btn ghost sm" style="font-size:.72rem" data-click="syncBlocklistFeed" data-arg="${escHtml(f.url)}">Sync</button>
+          <button class="btn ghost sm" style="font-size:.72rem" data-click="syncBlocklistFeed" data-arg="${escHtml(f.url)}">Refresh</button>
           <button class="btn ghost sm" style="font-size:.72rem" data-click="editBlocklistFeed" data-arg="${escHtml(f.url)}" data-arg2="${escHtml(f.interval)}">Edit</button>
           <button class="btn ghost sm" style="font-size:.72rem;color:var(--red)" data-click="deleteBlocklistFeed" data-arg="${escHtml(f.url)}" data-arg2="${f.attributed_count || 0}">Delete</button>
         </td>
@@ -11323,7 +11323,7 @@ async function syncBlocklistFeed(url) {
   try {
     const qs = url ? '?url=' + encodeURIComponent(url) : '';
     const d = await api('/api/blocklist/feed/sync' + qs, {method: 'POST'});
-    toast(`Sync complete - ${d.domains_synced} new domains imported`, 'success');
+    toast(`Refresh complete - ${d.domains_synced} new domains imported`, 'success');
     fetchBlocklistFeed();
     fetchBlocklist();
   } catch(e) { toast('Error: ' + e.message, 'error'); }
