@@ -294,11 +294,29 @@ func apiBackupsCreate(w http.ResponseWriter, r *http.Request) {
 
 // ─── GET /api/backups/operations/{id} (poll a triggered backup) ──────────
 
-// backupOpIDRE bounds the op id accepted from the URL before it is appended
-// to the agent request path — the agent's own validOpID is the authority
-// (strict ULID), this is defense-in-depth against building a request path
-// out of unbounded caller input.
-var backupOpIDRE = regexp.MustCompile(`^[0-9A-Za-z]{1,64}$`)
+// backupOpIDRE accepts exactly the shape the agent's validOpID accepts — a
+// canonical 26-character Crockford-base32 ULID (ulid.ParseStrict: no I/L/O/U,
+// first character 0-7 so the 128-bit value cannot overflow). Matching the
+// agent's contract here, rather than a looser alphanumeric bound, means a
+// malformed id is answered 400 by the CP instead of reaching the agent,
+// being rejected there, and surfacing as a misleading 502 upstream failure.
+var backupOpIDRE = regexp.MustCompile(`^[0-7][0-9A-HJKMNP-TV-Za-hjkmnp-tv-z]{25}$`)
+
+// backupOpTerminal reports whether an agent op record (ops.Op) has reached a
+// terminal state. Kept in step with cmd/culvert-maint/internal/ops State*.
+func backupOpTerminal(data []byte) bool {
+	var op struct {
+		State string `json:"state"`
+	}
+	if json.Unmarshal(data, &op) != nil {
+		return false
+	}
+	switch op.State {
+	case "succeeded", "failed", "cancelled":
+		return true
+	}
+	return false
+}
 
 // apiBackupOperationStatus lets the GUI poll a triggered backup (or any
 // other op_id the agent knows about) to a terminal state via the agent's
@@ -336,6 +354,15 @@ func apiBackupOperationStatus(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("maintenance agent returned HTTP %d", status), http.StatusBadGateway)
 		return
 	}
+	// A terminal op means the archive set may have changed since the listing
+	// was cached — possibly re-cached by a Refresh WHILE the backup was still
+	// running, which the trigger-time invalidation cannot cover. Drop it so
+	// the GUI's completion refresh shows the new archive.
+	if backupOpTerminal(data) {
+		backupsCache.mu.Lock()
+		backupsCache.payload = nil
+		backupsCache.mu.Unlock()
+	}
 	// Pass the agent's op record through verbatim (op_id/kind/state/actor/
 	// started_at/finished_at/failure_reason/params/progress, ops.Op) — params
 	// only ever carries filename/encrypt/passphrase_ref (an env var NAME,
@@ -350,7 +377,7 @@ func apiBackupOperationStatus(w http.ResponseWriter, r *http.Request) {
 // endpoint and returns the raw status + body, bounded by readBound. Shared
 // by every backups_api.go handler that talks to the agent (fetchAgentBackups
 // predates this helper and is left as-is to keep this change scoped).
-func callMaintAgent(ctx context.Context, ep AgentEndpoint, method, path string, body []byte, readBound int64) (int, []byte, error) {
+func callMaintAgent(ctx context.Context, ep AgentEndpoint, method, path string, body []byte, readBound int64) (status int, data []byte, err error) {
 	u, err := url.Parse(ep.BaseURL)
 	if err != nil {
 		return 0, nil, fmt.Errorf("parse agent base URL: %w", err)
@@ -376,7 +403,7 @@ func callMaintAgent(ctx context.Context, ep AgentEndpoint, method, path string, 
 		return 0, nil, fmt.Errorf("maintenance agent unreachable: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
-	data, err := io.ReadAll(io.LimitReader(resp.Body, readBound))
+	data, err = io.ReadAll(io.LimitReader(resp.Body, readBound))
 	if err != nil {
 		return 0, nil, err
 	}

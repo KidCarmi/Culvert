@@ -217,7 +217,7 @@ func TestAPIBackupsCreate_Success(t *testing.T) {
 	t.Setenv(envMaintAgentURL, agent.URL)
 
 	baselineTS := time.Now().UnixMilli()
-	req := httptest.NewRequest(http.MethodPost, "/api/backups", bytes.NewReader(nil))
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/api/backups", bytes.NewReader(nil))
 	req.RemoteAddr = "198.51.100.60:0"
 	req = req.WithContext(context.WithValue(req.Context(), uiRoleKey{}, RoleAdmin))
 	w := httptest.NewRecorder()
@@ -338,9 +338,62 @@ func TestAPIBackupOperationStatus_InvalidID(t *testing.T) {
 	defer agent.Close()
 	t.Setenv(envMaintAgentURL, agent.URL)
 
-	w := getAPIBackupOperationStatus(t, RoleViewer, "..%2Fetc%2Fpasswd")
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want 400 (body=%s)", w.Code, w.Body.String())
+	// Alphanumeric but not a canonical ULID: each would pass a loose
+	// [0-9A-Za-z] bound, reach the agent, be refused there and surface as a
+	// misleading 502. The CP must answer 400 itself.
+	for _, id := range []string{
+		"..%2Fetc%2Fpasswd",
+		"foo",
+		"01ARZ3NDEKTSV4RRFFQ69G5FA",   // 25 chars
+		"01ARZ3NDEKTSV4RRFFQ69G5FAVX", // 27 chars
+		"01ARZ3NDEKTSV4RRFFQ69G5FAU",  // U is not Crockford base32
+		"81ARZ3NDEKTSV4RRFFQ69G5FAV",  // first char > 7 overflows 128 bits
+	} {
+		w := getAPIBackupOperationStatus(t, RoleViewer, id)
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("id %q: status = %d, want 400 (body=%s)", id, w.Code, w.Body.String())
+		}
+	}
+}
+
+// TestAPIBackupOperationStatus_TerminalStateInvalidatesListingCache pins that
+// a listing re-cached WHILE the backup ran (e.g. a Refresh click) is dropped
+// once the poll observes a terminal state, so the GUI's completion refresh
+// shows the new archive; a non-terminal poll leaves the cache alone.
+func TestAPIBackupOperationStatus_TerminalStateInvalidatesListingCache(t *testing.T) {
+	for _, tc := range []struct {
+		state       string
+		invalidates bool
+	}{
+		{"running", false},
+		{"pending", false},
+		{"succeeded", true},
+		{"failed", true},
+		{"cancelled", true},
+	} {
+		t.Run(tc.state, func(t *testing.T) {
+			resetBackupsCache(t)
+			backupsCache.mu.Lock()
+			backupsCache.payload, backupsCache.at = map[string]any{"available": true, "count": 0}, time.Now()
+			backupsCache.mu.Unlock()
+			agent := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"op_id":"01ARZ3NDEKTSV4RRFFQ69G5FAV","state":"` + tc.state + `"}`))
+			}))
+			defer agent.Close()
+			t.Setenv(envMaintAgentURL, agent.URL)
+
+			w := getAPIBackupOperationStatus(t, RoleViewer, "01ARZ3NDEKTSV4RRFFQ69G5FAV")
+			if w.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200 (body=%s)", w.Code, w.Body.String())
+			}
+			backupsCache.mu.Lock()
+			invalidated := backupsCache.payload == nil
+			backupsCache.mu.Unlock()
+			if invalidated != tc.invalidates {
+				t.Fatalf("state %q: cache invalidated = %v, want %v", tc.state, invalidated, tc.invalidates)
+			}
+		})
 	}
 }
 

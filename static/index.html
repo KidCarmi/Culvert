@@ -15900,7 +15900,14 @@ function backupNowPollStart(opId, filename) {
   const el = document.getElementById('support-backup-progress');
   if (!opId || !el) return;
   if (backupNowPollTimer) clearTimeout(backupNowPollTimer);
-  let elapsed = 0;
+  // Wall-clock deadline, checked on EVERY reschedule (success and error
+  // alike): a status endpoint that keeps failing must not keep an open
+  // browser polling forever.
+  const deadline = Date.now() + 600000;
+  const giveUp = () => {
+    el.innerHTML += '<p class="hint">Still running - check back with Refresh.</p>';
+    backupNowPollTimer = null;
+  };
   const poll = async () => {
     el.style.display = '';
     let op;
@@ -15908,6 +15915,7 @@ function backupNowPollStart(opId, filename) {
       op = await api('/api/backups/operations/' + encodeURIComponent(opId));
     } catch (err) {
       el.innerHTML = '<p class="hint">Backing up ' + escHtml(filename || '') + '… (status check failed: ' + escHtml(err.message) + ')</p>';
+      if (Date.now() >= deadline) { giveUp(); return; }
       backupNowPollTimer = setTimeout(poll, 5000);
       return;
     }
@@ -15923,11 +15931,7 @@ function backupNowPollStart(opId, filename) {
       return;
     }
     el.innerHTML = '<p class="hint">Backing up ' + escHtml(filename || '') + '… (' + escHtml(op.state || 'running') + ')</p>';
-    elapsed += 3;
-    if (elapsed > 600) {
-      el.innerHTML += '<p class="hint">Still running - check back with Refresh.</p>';
-      return;
-    }
+    if (Date.now() >= deadline) { giveUp(); return; }
     backupNowPollTimer = setTimeout(poll, 3000);
   };
   poll();
