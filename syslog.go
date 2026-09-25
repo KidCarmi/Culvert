@@ -93,7 +93,7 @@ func InitSyslog(addr, syslogFmt string) error {
 	// the other is about to leak) or clobber each other's publication. The
 	// swap makes "publish the new one and hand me exactly the one I displaced"
 	// a single step, so every displaced writer is released exactly once.
-	releaseReplacedSyslogWriter(globalSyslog.Swap(sw))
+	releaseReplacedSyslogWriter(globalSyslog.Swap(sw), sw)
 	noteSyslogWriterInstalled(sw, addr)
 	logger.Printf("Syslog: forwarding to %s://%q (format=%s)", network, sanitizeLog(target), sanitizeLog(sw.Format()))
 	return nil
@@ -124,10 +124,19 @@ func InitSyslog(addr, syslogFmt string) error {
 // listener is up) or the admin request that is fixing it. Close is idempotent
 // and releases the socket itself when its write deadline fires, so nothing
 // here needs to wait for it.
-func releaseReplacedSyslogWriter(old *syslogWriter) {
+//
+// The displaced writer is HANDED OFF to its successor before it is closed. A
+// caller on the request or admin path may have loaded the old handle just
+// before the swap and call WriteAudit/WriteRequest on it after it is closed;
+// without the handoff that security event was dropped against a writer no
+// health surface reads any more — lost AND invisible. With it, such a late
+// line (and anything still queued on the old writer) is re-routed to the live
+// writer, whose counters every surface reads (Codex review, PR #1494).
+func releaseReplacedSyslogWriter(old, successor *syslogWriter) {
 	if old == nil {
 		return
 	}
+	old.HandOffTo(successor)
 	// Detach the delivery observer FIRST. This is HYGIENE, not a fix for an
 	// observed defect: the plane reads its counters from whichever writer is
 	// live, so a displaced writer's final-flush drops land on its own Stats and

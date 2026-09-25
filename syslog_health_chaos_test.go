@@ -913,3 +913,90 @@ func TestChaos72_ProbeTracksItsOwnMessageNotTheWriterTotals(t *testing.T) {
 		t.Error("probe reported its own line as DELIVERED against a dead collector — the outcome was inferred from another line's success")
 	}
 }
+
+// waitDelivered waits until sw has delivered more than base lines.
+func waitDelivered(t *testing.T, sw *syslogWriter, base uint64, within time.Duration) bool {
+	t.Helper()
+	deadline := time.Now().Add(within)
+	for time.Now().Before(deadline) {
+		if sw.Stats().Delivered > base {
+			return true
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	return false
+}
+
+// Codex P1 (second round, PR #1494): degradation must be timed from the start
+// of the CURRENT failure episode, not only from the last delivery. A feed that
+// was healthy but idle for longer than the window used to page on its very
+// next transient drop — the episode was seconds old, Age was already past the
+// threshold, and the fire-once alert went out for a blip.
+func TestChaos72_IdleFeedDoesNotPageOnItsFirstFreshDrop(t *testing.T) {
+	col := startSyslogCollector(t)
+	armSyslogFeed(t, "tcp://"+col.addr)
+	sw := activeSyslog()
+	sw.SetDeliveryObserver(nil) // isolate: this test is about the predicate
+
+	sw.WriteAudit(map[string]string{"evt": "policy.change"})
+	if !waitDelivered(t, sw, 0, 10*time.Second) {
+		t.Fatal("precondition: nothing was delivered to a live collector")
+	}
+
+	// The node then sits idle for an hour; the next line is lost.
+	idleUntil := time.Now().Add(time.Hour)
+	restore := syslog.SetNowForTest(func() time.Time { return idleUntil })
+	defer restore()
+	_ = sw.Close() // no successor: the next send is a counted closed-writer loss
+	sw.WriteAudit(map[string]string{"evt": "policy.change"})
+	if sw.Stats().ConsecutiveFailures == 0 {
+		t.Fatal("precondition: the post-idle line was not counted as a loss")
+	}
+
+	setSyslogHealthNowForTest(func() time.Time { return idleUntil.Add(time.Second) })
+	if snap := syslogFeedState(); snap.Degraded {
+		t.Fatalf("a feed idle for %s was reported DOWN one second into its first failure (FailingFor=%s) — "+
+			"the episode itself must last the window", snap.Age, snap.FailingFor)
+	}
+
+	// Once the episode HAS lasted the window, the same feed is down.
+	setSyslogHealthNowForTest(func() time.Time { return idleUntil.Add(syslogDegradedAfter + time.Second) })
+	if snap := syslogFeedState(); !snap.Degraded {
+		t.Fatalf("an unresolved failure lasting %s was not reported down (Age=%s)", snap.FailingFor, snap.Age)
+	}
+}
+
+// Codex P1 (second round, PR #1494): a caller that loaded the writer just
+// before a runtime re-point can call WriteAudit on it after it was closed. The
+// event used to be dropped against the displaced writer — whose observer is
+// detached and whose counters no surface reads — so it was lost AND invisible.
+// It must instead reach the writer that replaced it.
+func TestChaos72_LateWriteOnADisplacedWriterReachesItsSuccessor(t *testing.T) {
+	first := startSyslogCollector(t)
+	second := startSyslogCollector(t)
+	armSyslogFeed(t, "tcp://"+first.addr)
+
+	stale := activeSyslog() // loaded "just before the swap"
+	syslogConfiguredAddr = "tcp://" + second.addr
+	if err := InitSyslog("tcp://"+second.addr, "rfc3164"); err != nil {
+		t.Fatalf("re-point: %v", err)
+	}
+	syslogConfigured = "tcp://" + second.addr
+	_ = stale.Close() // make the race deterministic: the stale handle is closed
+	live := activeSyslog()
+	if live == stale {
+		t.Fatal("precondition: re-point did not install a new writer")
+	}
+
+	staleDrops := stale.Drops()
+	base := live.Stats().Delivered
+	stale.WriteAudit(map[string]string{"evt": "policy.change"})
+
+	if !waitDelivered(t, live, base, 10*time.Second) {
+		t.Fatalf("a security event written through the displaced writer never reached its successor "+
+			"(displaced drops %d -> %d)", staleDrops, stale.Drops())
+	}
+	if stale.Drops() != staleDrops {
+		t.Errorf("the displaced writer charged the handed-off event as its own drop (%d -> %d)", staleDrops, stale.Drops())
+	}
+}

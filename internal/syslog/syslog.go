@@ -71,6 +71,12 @@ type Writer struct {
 	lastSuccessNano atomic.Int64
 	lastFailureNano atomic.Int64
 	lastFailReason  atomic.Pointer[string]
+	// failSinceNano stamps the FIRST loss of the current unresolved failure
+	// episode (the drop that took consecutiveFail from 0 to 1). It is never
+	// cleared; Stats reports it only while an episode is open, and never
+	// earlier than the last success, so a stale stamp from a healed episode
+	// cannot leak into a new one.
+	failSinceNano atomic.Int64
 
 	// deliveryObserver is the freshness seam; see SetDeliveryObserver.
 	deliveryObserver atomic.Pointer[func(delivered bool)]
@@ -79,9 +85,38 @@ type Writer struct {
 	queue     chan queuedLine // formatted lines awaiting delivery (bounded at queueCap)
 	stop      chan struct{}   // closed by Close; tells drainLoop to flush and exit
 	done      chan struct{}   // closed by drainLoop on exit (conn released)
-	closed    atomic.Bool     // post-Close sends drop instead of enqueueing
+	closed    atomic.Bool     // post-Close sends drop (or hand off) instead of enqueueing
 	closeOnce sync.Once
+
+	// sendMu makes "check closed, then enqueue" atomic with respect to Close.
+	// Senders hold it SHARED for that check-and-enqueue only (never across a
+	// network write); Close takes it EXCLUSIVELY to flip closed. Without it a
+	// caller that loaded this Writer just before a runtime re-point could pass
+	// the closed check, lose the CPU, and enqueue after the drain goroutine's
+	// final flush had already returned — a line stranded in a queue nobody
+	// reads, not even counted as a drop.
+	sendMu sync.RWMutex
+
+	// successor is the Writer that replaced this one (HandOffTo). Once set, a
+	// line that arrives after Close, and every line still queued when the
+	// drain goroutine stops, is re-routed to it rather than dropped against —
+	// or delivered to — the collector the operator has just replaced. That
+	// keeps the loss accounting on the LIVE writer every health surface reads.
+	successor atomic.Pointer[Writer]
 }
+
+// maxHandoffHops bounds how far a line follows successor links (a run of
+// back-to-back re-points). Past it the line is dropped and counted.
+const maxHandoffHops = 8
+
+// enqueueResult is the outcome of one tryEnqueue.
+type enqueueResult int
+
+const (
+	enqAccepted enqueueResult = iota // queued for the drain goroutine
+	enqDropped                       // queue full; already counted as a drop
+	enqClosed                        // writer closed; NOT counted — caller decides
+)
 
 // queuedLine is one formatted line awaiting delivery.
 //
@@ -172,6 +207,9 @@ func (s *Writer) drainLoop() {
 			for {
 				select {
 				case item := <-s.queue:
+					if s.handOffQueued(item) {
+						continue
+					}
 					if time.Now().Before(deadline) {
 						s.deliverTracked(item)
 					} else {
@@ -192,28 +230,94 @@ func (s *Writer) drainLoop() {
 // timestamp is the EVENT time, not the (possibly later) delivery time. A
 // zero-value Writer (no queue) delivers synchronously — the pre-async
 // behavior, kept for the direct writeMsg tests.
+//
+// A caller that loaded this Writer just before a runtime re-point may reach
+// here after it was closed; the line then follows the successor link to the
+// Writer that replaced it (formatted in THAT writer's format) instead of being
+// dropped invisibly against a displaced writer no surface reads any more.
 func (s *Writer) send(pri int, msg string) {
 	if s.queue == nil {
 		s.writeMsg(pri, msg)
 		return
 	}
-	s.enqueue(s.formatMsg(pri, msg), nil)
+	w := s
+	for hop := 0; hop < maxHandoffHops; hop++ {
+		if w.tryEnqueue(w.formatMsg(pri, msg), nil) != enqClosed {
+			return
+		}
+		nx := w.successor.Load()
+		if nx == nil || nx.queue == nil {
+			break
+		}
+		w = nx
+	}
+	w.noteDrop(&reasonClosed)
+}
+
+// tryEnqueue hands one formatted line to the drain goroutine without
+// blocking. A full queue is counted here; a closed writer is NOT, so the
+// caller can hand the line off instead.
+func (s *Writer) tryEnqueue(line string, ack chan bool) enqueueResult {
+	s.sendMu.RLock()
+	defer s.sendMu.RUnlock()
+	if s.closed.Load() {
+		return enqClosed
+	}
+	select {
+	case s.queue <- queuedLine{line: line, ack: ack}:
+		return enqAccepted
+	default:
+		s.noteDrop(&reasonQueueFull)
+		return enqDropped
+	}
 }
 
 // enqueue hands one formatted line to the drain goroutine without blocking.
 // Reports whether it was accepted; a rejected line is already counted.
 func (s *Writer) enqueue(line string, ack chan bool) bool {
-	if s.closed.Load() {
-		s.noteDrop(&reasonClosed)
-		return false
-	}
-	select {
-	case s.queue <- queuedLine{line: line, ack: ack}:
+	switch s.tryEnqueue(line, ack) {
+	case enqAccepted:
 		return true
-	default:
-		s.noteDrop(&reasonQueueFull)
-		return false
+	case enqClosed:
+		s.noteDrop(&reasonClosed)
 	}
+	return false
+}
+
+// handOffQueued re-routes one line still queued on a displaced Writer to its
+// successor chain. Reports whether some successor accepted it; a line no
+// successor accepts is counted (on the last writer tried) and its prober, if
+// any, told it was not delivered.
+func (s *Writer) handOffQueued(item queuedLine) bool {
+	w := s.successor.Load()
+	for hop := 0; w != nil && w.queue != nil && hop < maxHandoffHops; hop++ {
+		switch w.tryEnqueue(item.line, item.ack) {
+		case enqAccepted:
+			return true
+		case enqDropped:
+			ackQueued(item, false)
+			return true // counted on the live writer by tryEnqueue
+		}
+		nx := w.successor.Load()
+		if nx == nil {
+			w.noteDrop(&reasonClosed)
+			ackQueued(item, false)
+			return true
+		}
+		w = nx
+	}
+	return false
+}
+
+// HandOffTo records next as the Writer that replaces s. Call it BEFORE Close:
+// from then on a send that races the close, and every line still queued when
+// the drain goroutine stops, goes to next rather than being dropped against
+// (or delivered to) the collector being replaced. nil or s itself is ignored.
+func (s *Writer) HandOffTo(next *Writer) {
+	if next == nil || next == s {
+		return
+	}
+	s.successor.Store(next)
 }
 
 // ackQueued reports one line's outcome to a waiting prober. The channel is
@@ -510,8 +614,11 @@ func now() time.Time {
 // split that made the cumulative counter unreadable in the first place.
 func (s *Writer) noteDrop(reason *string) {
 	s.drops.Add(1)
-	s.consecutiveFail.Add(1)
-	s.lastFailureNano.Store(now().UnixNano())
+	t := now().UnixNano()
+	if s.consecutiveFail.Add(1) == 1 {
+		s.failSinceNano.Store(t)
+	}
+	s.lastFailureNano.Store(t)
 	s.lastFailReason.Store(reason)
 	s.notifyDelivery(false)
 }
@@ -590,6 +697,12 @@ type Stats struct {
 	// pointed at a dead collector from the start.
 	LastSuccess time.Time
 	LastFailure time.Time
+	// FailingSince is when the CURRENT unresolved failure episode began — the
+	// first loss after the last delivery. Zero when ConsecutiveFailures is 0.
+	// A duration-based degradation predicate must be timed from here, not
+	// from LastSuccess: a feed idle for an hour whose next line happens to
+	// drop has been failing for zero seconds, not for an hour.
+	FailingSince time.Time
 	// LastFailureReason is one of the Reason* constants, or "" before the
 	// first failure. Never a raw error.
 	LastFailureReason string
@@ -619,9 +732,21 @@ func (s *Writer) Stats() Stats {
 	if n := s.lastFailureNano.Load(); n > 0 {
 		st.LastFailure = time.Unix(0, n)
 	}
+	fs := s.failSinceNano.Load()
 	st.Delivered = s.delivered.Load()
-	if n := s.lastSuccessNano.Load(); n > 0 {
-		st.LastSuccess = time.Unix(0, n)
+	ls := s.lastSuccessNano.Load()
+	if ls > 0 {
+		st.LastSuccess = time.Unix(0, ls)
+	}
+	// An episode's start is never earlier than the delivery that ended the
+	// previous one: noteDelivered stores lastSuccess before resetting the
+	// failure count, so clamping here keeps a concurrent reader from pairing
+	// a new episode with the previous episode's (older) start.
+	if st.ConsecutiveFailures > 0 && fs > 0 {
+		if ls > fs {
+			fs = ls
+		}
+		st.FailingSince = time.Unix(0, fs)
 	}
 	return st
 }
@@ -657,7 +782,12 @@ func (s *Writer) Close() error {
 		}
 		return nil
 	}
+	// Exclusive: once this returns, no sender can be between its closed
+	// check and its enqueue, so nothing lands in the queue after the drain
+	// goroutine's final flush.
+	s.sendMu.Lock()
 	s.closed.Store(true)
+	s.sendMu.Unlock()
 	s.closeOnce.Do(func() { close(s.stop) })
 	select {
 	case <-s.done:

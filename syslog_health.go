@@ -386,6 +386,9 @@ type syslogFeedSnapshot struct {
 	Reason              string
 	QueueDepth          int
 	QueueCap            int
+	// FailingFor is how long the CURRENT unresolved failure episode has
+	// lasted (zero when ConsecutiveFailures is 0).
+	FailingFor time.Duration
 	// UDP records that this feed cannot prove delivery; see the header.
 	UDP bool
 }
@@ -453,7 +456,21 @@ func syslogFeedState() syslogFeedSnapshot {
 	// The age half still measures from the last DELIVERY, which is what makes
 	// the pair unable to fire on an idle node: no traffic means no failures,
 	// so the first half is false however old the last delivery is.
-	snap.Degraded = snap.ConsecutiveFailures > 0 && snap.Age >= syslogDegradedAfter
+	//
+	// And the failing episode ITSELF must have lasted the window. Timing only
+	// from the last delivery meant a feed that had been healthy but idle for
+	// longer than the window paged on the very next transient drop — the
+	// episode was seconds old but Age was already past the threshold (Codex
+	// P1, PR #1494). FailingSince is the first loss after the last delivery.
+	if snap.ConsecutiveFailures > 0 && !st.FailingSince.IsZero() {
+		snap.FailingFor = now.Sub(st.FailingSince)
+		if snap.FailingFor < 0 {
+			snap.FailingFor = 0
+		}
+	}
+	snap.Degraded = snap.ConsecutiveFailures > 0 &&
+		snap.Age >= syslogDegradedAfter &&
+		snap.FailingFor >= syslogDegradedAfter
 	return snap
 }
 
