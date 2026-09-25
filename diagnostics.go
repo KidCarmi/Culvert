@@ -817,10 +817,28 @@ func checkRewriteIdentity() OperatorContractCheck {
 	return OperatorContractCheck{
 		Code:   "rewrite_identity",
 		Status: diagWarn,
-		Message: fmt.Sprintf("rewrite-rule management identity is not durable on this node — %s (traffic rewrite enforcement is unaffected; Rewrite Rules management is refused until this is fixed)",
-			d.reason),
+		Message: fmt.Sprintf("rewrite-rule management identity is not durable on this node — %s (traffic rewrite enforcement is unaffected; Rewrite Rules management is refused until this is fixed; the full cause is in the process log)",
+			rewriteIdentityReasonClass(d.reason)),
 		OperatorAction: "Fix the underlying settings-file/volume persistence issue and restart this node to re-establish durable rewrite-rule identity. There is no in-process retry: the Rewrite Rules panel (and its API) stays read-only-refused until then.",
 	}
+}
+
+// rewriteIdentityReasonClass reduces a latched rewrite-identity reason to its
+// code-controlled prefix. Every setRewriteIdentityDegraded caller formats the
+// reason as "<fixed description>: <wrapped error>", and the wrapped error can
+// carry raw filesystem paths (fileutil.AtomicWrite embeds the settings path
+// and its temp-file path). /api/diagnostics is viewer-reachable and walled
+// against raw paths (TestApiDiagnostics_NoSensitiveValues), so only the
+// fixed description is surfaced here; the full cause stays in the WARN log
+// line setRewriteIdentityDegraded already emits.
+func rewriteIdentityReasonClass(reason string) string {
+	if i := strings.Index(reason, ": "); i > 0 {
+		reason = reason[:i]
+	}
+	if reason == "" || strings.ContainsAny(reason, "/\\") {
+		return "identity could not be established"
+	}
+	return reason
 }
 
 // checkOIDCJWKSTrust reports whether any live OIDC provider's JWKS key set is
