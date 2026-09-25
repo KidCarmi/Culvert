@@ -739,28 +739,10 @@ func (sel laneSelection) apply(pkgs []string) ([]string, error) {
 	if len(exclude) > 0 && len(only) > 0 {
 		return nil, errors.New("-exclude and -only are exclusive")
 	}
-	known := map[string]bool{}
-	for _, p := range pkgs {
-		known[p] = true
+	if err := allKnown(pkgs, first, exclude, only); err != nil {
+		return nil, err
 	}
-	for _, n := range append(append(append([]string{}, first...), exclude...), only...) {
-		if !known[n] {
-			return nil, fmt.Errorf("%s is not a lane package", n)
-		}
-	}
-	drop := map[string]bool{}
-	for _, n := range exclude {
-		drop[n] = true
-	}
-	if len(only) > 0 {
-		keep := map[string]bool{}
-		for _, n := range only {
-			keep[n] = true
-		}
-		for _, p := range pkgs {
-			drop[p] = !keep[p]
-		}
-	}
+	drop := dropped(pkgs, exclude, only)
 	var head, tail []string
 	isFirst := map[string]bool{}
 	for _, n := range first {
@@ -778,6 +760,41 @@ func (sel laneSelection) apply(pkgs []string) ([]string, error) {
 		}
 	}
 	return append(head, tail...), nil
+}
+
+// allKnown refuses a name that is not a lane package.
+func allKnown(pkgs []string, lists ...[]string) error {
+	known := map[string]bool{}
+	for _, p := range pkgs {
+		known[p] = true
+	}
+	for _, l := range lists {
+		for _, n := range l {
+			if !known[n] {
+				return fmt.Errorf("%s is not a lane package", n)
+			}
+		}
+	}
+	return nil
+}
+
+// dropped is the set of lane packages this part does not run.
+func dropped(pkgs, exclude, only []string) map[string]bool {
+	drop := map[string]bool{}
+	for _, n := range exclude {
+		drop[n] = true
+	}
+	if len(only) == 0 {
+		return drop
+	}
+	keep := map[string]bool{}
+	for _, n := range only {
+		keep[n] = true
+	}
+	for _, p := range pkgs {
+		drop[p] = !keep[p]
+	}
+	return drop
 }
 
 // packageClock writes package milestones into the job log with the
