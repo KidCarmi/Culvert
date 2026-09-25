@@ -394,6 +394,194 @@ func TestValidCDRServerFingerprint(t *testing.T) {
 	}
 }
 
+// ── CDR timeout_sec CLI/YAML validation parity (validCDRTimeoutSec) ─────────
+//
+// config.yaml's cdr.timeout_sec is range-validated by FileConfig.validateCDR
+// at load time (0 is valid/unset; otherwise must be >= 30, Sluice's own
+// per-file processing cap) — but the CLI flag -cdr-timeout-sec reaches the
+// exact same CDRConfig.TimeoutSec field (merged in
+// cdr_startup_config.go's resolveCDRStartupConfig, CLI wins over config.yaml)
+// with no equivalent gate, the same CLI/YAML parity gap TestValidCDRFailMode
+// and TestValidCDRServerFingerprint close for -cdr-fail-mode /
+// -cdr-server-fingerprint.
+//
+// A too-low CLI value (e.g. "-cdr-timeout-sec 5") is not rejected at startup:
+// it becomes the per-file gRPC deadline in cdr_pool.go/cdr_proxy.go
+// (`context.WithTimeout(ctx, c.cfg.Timeout)`), which is shorter than Sluice's
+// own 30s cap, so ordinary (non-trivial) files reliably miss the deadline and
+// every scan returns a client-side timeout. Because cdr.fail_mode defaults to
+// fail-OPEN, that silently disables CDR content sanitization on every request
+// that hits it, with no startup error naming the bad flag — the same failure
+// mode validateCDR's own comment says the YAML-side check exists to prevent,
+// just reached via the other input path.
+//
+// validCDRTimeoutSec is the shared predicate (mirroring validCDRFailMode /
+// validCDRServerFingerprint): used by validateCDR (config.go) for the YAML
+// path and by initCDR (main.go) for the CLI path, so both channels reject the
+// same invalid values instead of only one of them.
+func TestValidCDRTimeoutSec(t *testing.T) {
+	tests := []struct {
+		name string
+		t    int
+		want bool // true = accepted (validCDRTimeoutSec returns "")
+	}{
+		{"unset (0)", 0, true},
+		{"minimum valid (30)", 30, true},
+		{"well above minimum (35, the engine default)", 35, true},
+		{"one below minimum (29)", 29, false},
+		{"far too low (5)", 5, false},
+		{"negative", -1, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := validCDRTimeoutSec(tt.t) == ""
+			if got != tt.want {
+				t.Errorf("validCDRTimeoutSec(%d) accepted=%v (msg=%q), want accepted=%v",
+					tt.t, got, validCDRTimeoutSec(tt.t), tt.want)
+			}
+		})
+	}
+}
+
+// TestValidateCDR_RejectsTimeoutSecBelowMinimum pins the YAML-side oracle
+// (FileConfig.validateCDR) that validCDRTimeoutSec now backs, and — combined
+// with resolveCDRStartupConfig — demonstrates the parity gap directly: a
+// timeout_sec value that config.yaml has always refused to boot with reaches
+// CDRConfig.TimeoutSec identically whether it was set in config.yaml or, before
+// this fix, on the CLI-only path (initCDR had no gate for -cdr-timeout-sec).
+func TestValidateCDR_RejectsTimeoutSecBelowMinimum(t *testing.T) {
+	tests := []struct {
+		name string
+		t    int
+		want bool // true = validate() should accept
+	}{
+		{"unset (0)", 0, true},
+		{"valid (30)", 30, true},
+		{"too low (5)", 5, false},
+		{"one below minimum (29)", 29, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fc := &FileConfig{}
+			fc.CDR.Enabled = true
+			fc.CDR.Endpoint = "sluice:8443"
+			fc.CDR.TimeoutSec = tt.t
+			err := fc.validate()
+			if tt.want && err != nil {
+				t.Errorf("validate() rejected a valid timeout_sec %d: %v", tt.t, err)
+			}
+			if !tt.want && err == nil {
+				t.Errorf("validate() accepted an invalid timeout_sec %d, want a rejection", tt.t)
+			}
+		})
+	}
+}
+
+// TestResolveCDRStartupConfig_CLIOnlyTimeoutBypassesYAMLValidation documents
+// the exact shape of the bug this change closes: resolveCDRStartupConfig
+// (the CLI/YAML merge, cdr_startup_config.go) has no opinion on validity — it
+// just merges — so a CLI-only timeout that config.yaml would refuse to boot
+// with merges through untouched. It is initCDR's post-merge
+// validCDRTimeoutSec(resolved.CDR.TimeoutSec) check — not the merge itself —
+// that must catch the value on the real startup path.
+func TestResolveCDRStartupConfig_CLIOnlyTimeoutBypassesYAMLValidation(t *testing.T) {
+	fc := &FileConfig{} // no config.yaml timeout_sec at all
+	got := resolveCDRStartupConfig(fc, t.TempDir(), cdrCLIFlags{
+		Enabled:    true,
+		Endpoint:   "sluice:8443",
+		TimeoutSec: 5, // below Sluice's own 30s cap
+	})
+	if got.CDR.TimeoutSec != 5 {
+		t.Fatalf("resolved TimeoutSec = %d, want 5 (the merge itself must not silently drop or clamp it)", got.CDR.TimeoutSec)
+	}
+	// The merged value alone is exactly the shape validateCDR already
+	// refuses when it arrives via config.yaml — proving the CLI path used to
+	// let through a value the equivalent YAML config could never boot with.
+	asIfFromYAML := &FileConfig{CDR: got.CDR}
+	if err := asIfFromYAML.validate(); err == nil {
+		t.Fatalf("a merged CDR config with timeout_sec=5 must fail validate() — validCDRTimeoutSec regressed")
+	}
+	// And the RESOLVED value — what initCDR actually validates today — must
+	// independently be rejected too, not just the raw CLI flag in isolation.
+	if !got.CDR.Enabled {
+		t.Fatalf("resolved CDR.Enabled = false, want true (Enabled: true was passed via CLI flags)")
+	}
+	if msg := validCDRTimeoutSec(got.CDR.TimeoutSec); msg == "" {
+		t.Fatalf("validCDRTimeoutSec(%d) accepted a value below Sluice's 30s cap", got.CDR.TimeoutSec)
+	}
+}
+
+// TestResolveCDRStartupConfig_DormantYAMLTimeoutSurvivesCLIEnable pins the
+// specific gap a review of this change found (Codex, PR #1480): config.yaml
+// can ship with cdr.enabled: false and an out-of-range cdr.timeout_sec —
+// validateCDR (config.go) returns immediately for a disabled block, so that
+// value passes load-time validation completely unexamined. An operator who
+// later flips CDR on purely via -cdr-enabled (never touching
+// -cdr-timeout-sec, which then reads as the CLI "unset" sentinel 0) merges
+// straight through to the dormant, invalid YAML value — checking only the
+// raw -cdr-timeout-sec flag (as an earlier version of this fix did) never
+// sees it. initCDR must validate the value AFTER the CLI/YAML merge, gated
+// on the RESOLVED (post-merge) Enabled, so this exact path is caught too.
+func TestResolveCDRStartupConfig_DormantYAMLTimeoutSurvivesCLIEnable(t *testing.T) {
+	fc := &FileConfig{}
+	fc.CDR.Enabled = false // dormant in the file — validateCDR never looked at TimeoutSec
+	fc.CDR.Endpoint = "sluice:8443"
+	fc.CDR.TimeoutSec = 5 // below Sluice's own 30s cap
+	if err := fc.validate(); err != nil {
+		t.Fatalf("a disabled CDR block with an out-of-range timeout_sec must still load: %v", err)
+	}
+
+	// Operator turns CDR on purely via -cdr-enabled; -cdr-timeout-sec is
+	// never passed, so its flag value is the CLI "unset" sentinel (0).
+	got := resolveCDRStartupConfig(fc, t.TempDir(), cdrCLIFlags{
+		Enabled: true,
+		// TimeoutSec deliberately omitted (zero value): flag not passed.
+	})
+
+	if !got.CDR.Enabled {
+		t.Fatalf("resolved CDR.Enabled = false, want true (-cdr-enabled was passed)")
+	}
+	if got.CDR.TimeoutSec != 5 {
+		t.Fatalf("resolved TimeoutSec = %d, want 5 (the dormant config.yaml value must survive the merge, not be silently dropped)", got.CDR.TimeoutSec)
+	}
+	// This is the crux: the RESOLVED, now-effective value must fail the same
+	// check config.yaml would have failed had cdr.enabled been true from the
+	// start. Checking only the raw CLI flag (0, "unset") would miss this.
+	if msg := validCDRTimeoutSec(got.CDR.TimeoutSec); msg == "" {
+		t.Fatalf("validCDRTimeoutSec(%d) accepted a dormant-then-enabled value below Sluice's 30s cap", got.CDR.TimeoutSec)
+	}
+}
+
+// TestCDRStartupTimeoutError_RuntimeSentinelEnables pins the second gap a
+// review of this change found (Codex, PR #1480): with cdr.enabled false in
+// config.yaml and no -cdr-enabled flag, the runtime sentinel alone still turns
+// CDR on inside loadCDR. The startup timeout check must therefore gate on the
+// sentinel-adjusted enablement, or an invalid dormant timeout reaches the
+// client unvalidated.
+func TestCDRStartupTimeoutError_RuntimeSentinelEnables(t *testing.T) {
+	fc := &FileConfig{}
+	fc.CDR.Enabled = false
+	fc.CDR.Endpoint = "sluice:8443"
+	fc.CDR.TimeoutSec = 5
+	got := resolveCDRStartupConfig(fc, t.TempDir(), cdrCLIFlags{})
+	if got.CDR.Enabled {
+		t.Fatalf("resolved CDR.Enabled = true, want false (neither YAML nor CLI enables it)")
+	}
+
+	if msg := cdrStartupTimeoutError(got, false); msg != "" {
+		t.Fatalf("CDR effectively disabled: a dormant timeout must stay unvalidated, got %q", msg)
+	}
+	if msg := cdrStartupTimeoutError(got, true); msg == "" {
+		t.Fatalf("runtime sentinel enables CDR: timeout_sec=5 must be rejected")
+	}
+
+	// Control: a valid timeout passes whichever way CDR is enabled.
+	got.CDR.TimeoutSec = 30
+	if msg := cdrStartupTimeoutError(got, true); msg != "" {
+		t.Fatalf("valid timeout rejected under the sentinel: %q", msg)
+	}
+}
+
 // ── ip_filter_mode CLI/YAML validation parity (validIPFilterMode) ───────────
 //
 // config.yaml's security.ip_filter_mode is validated by
