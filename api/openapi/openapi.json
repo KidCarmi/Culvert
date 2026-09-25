@@ -1368,6 +1368,37 @@
         ],
         "type": "object"
       },
+      "ConfigRollbackScope": {
+        "additionalProperties": false,
+        "properties": {
+          "excluded": {
+            "description": "Operator-facing settings a config version rollback deliberately never captures, applies or diffs, with why. Empty when every setting participates in rollback.",
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "id": {
+                  "description": "Stable snake_case setting identifier.",
+                  "type": "string"
+                },
+                "reason": {
+                  "description": "Why rollback leaves this setting unchanged: the setting's recorded rollback-exclusion reason when one exists, otherwise an explicit generic explanation (not captured in snapshots; secret-bearing settings are never snapshotted).",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "id",
+                "reason"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "excluded"
+        ],
+        "type": "object"
+      },
       "ConfigVersionList": {
         "items": {
           "additionalProperties": true,
@@ -6449,8 +6480,8 @@
       "url": "https://github.com/KidCarmi/Culvert"
     },
     "title": "Culvert Admin API",
-    "version": "2.0.0",
-    "x-culvert-api-contract-version": "2.0.0"
+    "version": "2.1.0",
+    "x-culvert-api-contract-version": "2.1.0"
   },
   "openapi": "3.0.4",
   "paths": {
@@ -11637,6 +11668,45 @@
         "x-culvert-visibility": "admin-supported"
       }
     },
+    "/api/config/rollback-scope": {
+      "get": {
+        "description": "Lists operator-facing settings that a config version rollback deliberately never captures, applies or diffs (e.g. alert-webhook delivery config, block-page HTML, upstream proxy pools, connection-limit settings), plus why. Lets the admin UI's rollback confirmation accurately describe what will and will not change, instead of overclaiming that rollback replaces every setting.",
+        "operationId": "getConfigRollbackScope",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConfigRollbackScope"
+                }
+              }
+            },
+            "description": "Settings excluded from config version rollback."
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Settings excluded from rollback",
+        "tags": [
+          "config"
+        ],
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "2.0.0",
+        "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
     "/api/config/versions": {
       "get": {
         "description": "Returns the saved configuration version snapshots.",
@@ -12818,7 +12888,7 @@
     },
     "/api/decryption/redaction": {
       "get": {
-        "description": "Returns the node-local destination-privacy posture (traffic-log destination pseudonymization) as ONE coherent snapshot: posture, non-secret pseudonym generation (key_id), the durable rotation sequence + bounded non-secret rotation receipts (operation-identity truth for resolving a lost rotation response), and the revision that fingerprints exactly the returned state.",
+        "description": "Destination-privacy posture (legacy alias — same handler and response as GET /api/traffic/redaction, terminology governance T-17).",
         "operationId": "getDecryptionRedaction",
         "responses": {
           "200": {
@@ -12829,7 +12899,7 @@
                 }
               }
             },
-            "description": "Decryption redaction hosts."
+            "description": "Traffic-log destination-privacy posture."
           },
           "403": {
             "$ref": "#/components/responses/PlainForbidden"
@@ -12843,7 +12913,7 @@
             "basicAuth": []
           }
         ],
-        "summary": "Destination-privacy posture",
+        "summary": "Destination-privacy posture (legacy alias)",
         "tags": [
           "policy"
         ],
@@ -12855,7 +12925,7 @@
         "x-culvert-visibility": "admin-supported"
       },
       "put": {
-        "description": "EXACTLY ONE ACTION per request: sets the destination-privacy posture (redact_hosts present) OR rotates the node-local pseudonym key (rotate_key:true + operation_id + ifRevision) — never both (persist-before-apply: the durable write, including the rotation receipt, lands first; a persist failure leaves the running posture untouched). This governs destination information in logs/observability — NOT whether traffic is decrypted, and the pseudonym key is NOT the TLS inspection Root CA.",
+        "description": "Set destination privacy / rotate pseudonym key (legacy alias — same handler and semantics as PUT /api/traffic/redaction, terminology governance T-17).",
         "operationId": "setDecryptionRedaction",
         "requestBody": {
           "content": {
@@ -12877,7 +12947,7 @@
                 }
               }
             },
-            "description": "Updated ({redact_hosts, key_rotated, key_id, rotation_seq, revision} plus, for a rotation, {operation_id, already_applied} — the state THIS PUT installed; a rotation and its receipt are durable before this response. An idempotent replay of an already-landed operation_id returns already_applied:true with that operation's receipt facts and mutates nothing)."
+            "description": "Updated ({redact_hosts, key_rotated, key_id, rotation_seq, revision} plus, for a rotation, {operation_id, already_applied} — the state THIS PUT installed; same semantics as PUT /api/traffic/redaction)."
           },
           "400": {
             "$ref": "#/components/responses/PlainBadRequest"
@@ -12907,7 +12977,7 @@
             "basicAuth": []
           }
         ],
-        "summary": "Set destination privacy / rotate pseudonym key",
+        "summary": "Set destination privacy / rotate pseudonym key (legacy alias)",
         "tags": [
           "policy"
         ],
@@ -24869,6 +24939,111 @@
         "x-culvert-idempotency": "safe",
         "x-culvert-introduced-version": "1.0.0",
         "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/traffic/redaction": {
+      "get": {
+        "description": "Returns the node-local destination-privacy posture (traffic-log destination pseudonymization) as ONE coherent snapshot: posture, non-secret pseudonym generation (key_id), the durable rotation sequence + bounded non-secret rotation receipts (operation-identity truth for resolving a lost rotation response), and the revision that fingerprints exactly the returned state. Canonical path (terminology governance T-17); /api/decryption/redaction is a legacy alias — the posture governs EVERY traffic-log sink (plain HTTP and TUNNEL_CLOSED entries included), not just decrypted sessions.",
+        "operationId": "getTrafficRedaction",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DecryptionRedaction"
+                }
+              }
+            },
+            "description": "Traffic-log destination-privacy posture."
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Destination-privacy posture",
+        "tags": [
+          "policy"
+        ],
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "2.1.0",
+        "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      },
+      "put": {
+        "description": "EXACTLY ONE ACTION per request: sets the destination-privacy posture (redact_hosts present) OR rotates the node-local pseudonym key (rotate_key:true + operation_id + ifRevision) — never both (persist-before-apply: the durable write, including the rotation receipt, lands first; a persist failure leaves the running posture untouched). This governs destination information in logs/observability — NOT whether traffic is decrypted, and the pseudonym key is NOT the TLS inspection Root CA. Canonical path (terminology governance T-17); /api/decryption/redaction is a legacy alias.",
+        "operationId": "setTrafficRedaction",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetRedaction"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Updated ({redact_hosts, key_rotated, key_id, rotation_seq, revision} plus, for a rotation, {operation_id, already_applied} — the state THIS PUT installed; a rotation and its receipt are durable before this response. An idempotent replay of an already-landed operation_id returns already_applied:true with that operation's receipt facts and mutates nothing)."
+          },
+          "400": {
+            "$ref": "#/components/responses/PlainBadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          },
+          "409": {
+            "description": "Stale-writer fence conflict ({error, currentRevision, yourRevision}) — the posture or pseudonym generation changed since the asserted revision; nothing mutated and no key was minted."
+          },
+          "500": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Key provisioning/rotation failed, or the durable write failed — the running posture and key are unchanged. Body is plain text."
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Set destination privacy / rotate pseudonym key",
+        "tags": [
+          "policy"
+        ],
+        "x-culvert-audit-event": "decryption.redaction.set",
+        "x-culvert-danger-level": "medium",
+        "x-culvert-idempotency": "idempotent",
+        "x-culvert-introduced-version": "2.1.0",
+        "x-culvert-permission": "admin",
         "x-culvert-stability": "stable",
         "x-culvert-tenant-scope": "appliance",
         "x-culvert-visibility": "admin-supported"
