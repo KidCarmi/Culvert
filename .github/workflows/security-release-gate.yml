@@ -34,7 +34,7 @@
 ##
 ## RACE + COVERAGE OWNERSHIP MATRIX (`tests-race`):
 ##   pull_request           → skip  (pass-through, unchanged)
-##   push → refs/heads/main → SKIP  — owned by qa-gate.yml's `qa-logic`
+##   push → refs/heads/main → SKIP  — owned by qa-gate.yml's `qa-race`
 ##   push → refs/tags/v*    → RUN   — qa-gate.yml has no tag trigger
 ##   schedule (weekly)      → RUN   — ref is main, but QA has no schedule
 ##   workflow_dispatch      → RUN   — including on main
@@ -419,11 +419,14 @@ jobs:
   # ─── 9. Race-condition & coverage tests ────────────────────────────────────
   #
   # OWNERSHIP BY EVENT (CI-REDESIGN stage 2B). On a main push this suite is
-  # owned by qa-gate.yml's `qa-logic`, which since stage 2A runs the identical
-  # command — `-race -count=1 -timeout=40m -coverprofile=… -v ./...` with the
-  # same TEST_SEED — and publishes the authoritative `qa-coverage` profile that
-  # `qa-coverage` enforces the floors on. Running it here as well executed the
-  # whole suite twice per main push for one verdict.
+  # owned by qa-gate.yml. Stage 2A made its single race run also produce the
+  # coverage profile; stage 5B moved that run from `qa-logic` to `qa-race`,
+  # which executes the same suite — the same -race, -count=1, per-binary
+  # 40m -timeout, coverage scope and TEST_SEED — as 4 isolated root-package
+  # shards plus every other package, proves the evidence complete, and
+  # publishes the authoritative `qa-coverage` profile that `qa-coverage`
+  # enforces the floors on. Running it here as well executed the whole suite
+  # twice per main push for one verdict.
   #
   # It is NOT removed, because the two workflows do not run on the same events:
   #
@@ -488,7 +491,7 @@ jobs:
 
       - name: Upload coverage report
         # ARTIFACT OWNERSHIP (stage 2B). `qa-coverage`, published by
-        # qa-gate.yml's qa-logic, is the AUTHORITATIVE coverage profile for a
+        # qa-gate.yml's qa-race (qa-logic until stage 5B), is the AUTHORITATIVE coverage profile for a
         # main push and the one the floors are enforced against. This
         # `coverage-report` artifact belongs to THIS workflow's standalone runs
         # — version tags, the weekly schedule and manual dispatch — where QA
