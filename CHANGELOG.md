@@ -216,30 +216,28 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   itself is a repository-settings action an owner must still take; this change
   touches repository content only.
 
-- The MCP live side-effect boundary's pre-send re-ask handed its refusal back
-  through a data race. PR #1370 added a second authority re-ask inside the
-  upstream client's TLS dialer, after the handshake and before anything is
-  written — the right place for the check, but net/http runs a dial on its own
-  goroutine (`Transport.queueForDial` → `go dialConnFor`), and that goroutine is
-  not joined to the request. When the caller's context is cancelled while a dial
-  is in flight — an ordinary client disconnect or request timeout — `Call`
-  unwinds at once while the dial goroutine completes its handshake and invokes
-  the hook, so the hook can still be running after `Call` has returned (now
-  pinned deterministically by `TestPreSend_MayStillBeRunningAfterCallReturns`).
-  The executor recorded each pre-send refusal into plain captured variables and
-  read them immediately after `Call` returned, racing that write. It was never a
-  fail-open — the dialer still closes the socket with nothing written, and the
-  physical send is refused in every interleaving — but it corrupted the block
-  record: whether the attempt is classified as a boundary refusal, under which
-  bounded reason, and whether a drift observed at that re-ask reaches
-  `Safety.Breach`. Synchronising the variables would have removed the race
-  without establishing a hand-off, since a late hook can still write after the
-  only reader has gone; the hook is therefore now a pure predicate, and the
-  verdict is read back from `Call`'s own error, which the client already returns
-  verbatim. The one fact the error did not carry — a tool drift observed in the
-  same pass as an emergency kill, which the kill outranks in the reported reason
-  but which must still latch the experiment — now rides on the kill error beside
-  the sentinel.
+- The MCP live side-effect boundary's pre-send re-ask is documented and its
+  concurrency premise is now pinned. PR #1370 added a second authority re-ask
+  inside the upstream client's TLS dialer, after the handshake and before
+  anything is written — the right place for the check, but net/http runs a dial
+  on its own goroutine (`Transport.queueForDial` → `go dialConnFor`), and that
+  goroutine is not joined to the request. When the caller's context is cancelled
+  while a dial is in flight — an ordinary client disconnect or request timeout —
+  `Call` unwinds at once while the dial goroutine completes its handshake and
+  invokes the hook, so `CallOptions.PreSend` can still be running after `Call`
+  has returned. Reading a refusal back out of variables the hook captured is
+  therefore a data race, and synchronising them removes the race without
+  establishing a hand-off, since a late hook can still write after the only
+  reader has gone; the executor consequently carries the verdict in the returned
+  error instead. That correction shipped with the read-first identity-band change;
+  what is added here is the evidence and the contract it rests on.
+  `TestPreSend_MayStillBeRunningAfterCallReturns` pins the lifetime property
+  deterministically against the real transport — the executor's own gates use a
+  fixture that joins the hook's goroutine, which is exactly the happens-before
+  edge production lacks, so nothing else asserts it — and `CallOptions.PreSend`
+  now states the contract for every future caller: it is a pure predicate whose
+  lifetime is not `Call`'s, so everything a verdict needs in order to be
+  diagnosed belongs on the error.
 
 - OCSP revocation checking accepted responses it should have refused
   (CHAOS-65). Every input the checker acts on comes from the peer's own
@@ -409,6 +407,36 @@ now-required identity parameters and body fields; use the per-entry Upstream
 endpoints for credentialed parents.
 
 ### Performance
+
+- The per-request policy decision line is built by appending rather than by
+  `logger.Printf`, and the benchmark that measured it was measuring a disabled
+  logger. `applyPolicyDecision` emits exactly one `POLICY_*` line per proxied
+  request — HTTP, CONNECT, WebSocket and SOCKS5 all reach it — and the
+  end-to-end allocation profile ranked it the largest Culvert-owned allocation
+  site in the run, 7 objects per request. `log.Logger.output` returns
+  immediately when its writer *is* `io.Discard`, so every benchmark that
+  silenced the logger that way never formatted anything and under-reported the
+  line by 3.6x (283 ns/op against `io.Discard`, 1042 ns/op against a sink
+  `log.Logger` cannot recognise); the shared `benchSilenceLogger` behind the
+  end-to-end proxy qualification had the same defect, so that figure was
+  omitting ~1 µs of real per-request work. Measured correctly, the nine boxed
+  format arguments were two thirds of the line's CPU profile before `fmt`
+  parsed a verb, and the two `%q` verbs cost ~200 ns on their own
+  (`strconv.AppendQuote` decodes rune-by-rune through `strconv.IsPrint`: 99 ns
+  for a 17-byte ASCII host). The emitters now append into a stack buffer and
+  `appendQuotedForLog` settles printable ASCII with one byte scan, falling back
+  to `strconv.AppendQuote` for `"`, `\`, control bytes and everything at or
+  above 0x80. Serial cost goes 1042 → 428 ns/op (-59%) and allocations 8 → 1;
+  bytes per op rise 128 → 192 deliberately, one right-sized string in place of
+  eight small objects, because GC mark cost is per object. The parallel gain is
+  smaller (462 → 374 ns) because four cores queue on `log.Logger`'s own mutex,
+  which this does not touch, and the end-to-end benchmark cannot resolve ~614 ns
+  inside a 148 µs in-process operation — what it does show exactly is the
+  allocation drop, 185 → 179 per request overall and 7.0 → 1.0 at this site.
+  Emitted bytes are unchanged, which is the acceptance condition for lines that
+  SIEM forwarders and log parsers consume: the four format strings survive as an
+  executable specification and every branch is rendered both ways over a corpus
+  of control characters, quotes, backslashes, and multi-byte and invalid UTF-8.
 
 - The rate-limit exempt check is lock-free and flat in the exempt-CIDR count.
   `RateLimiter.IsExempt` is the first decision inside `Allow`, so once a rate

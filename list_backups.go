@@ -101,7 +101,15 @@ func runListBackups(dir string, out io.Writer) error {
 //
 // Open uses O_NOFOLLOW so a symlink-replacement race after the
 // caller's DirEntry.Type() / Lstat checks cannot trick us into
-// reading from an unintended target.
+// reading from an unintended target. It also carries O_NONBLOCK: the
+// same post-check swap race can substitute a FIFO for the regular file
+// the caller already Lstat'd, and opening a FIFO for read with no
+// O_NONBLOCK blocks until a writer appears — one swapped entry would
+// hang the whole --list-backups one-shot (and, through it, the
+// Maintenance Agent's synchronous GET /v1/backups handler) forever,
+// with nothing on the other end to ever write to the pipe. Mirrors
+// readTelemetryConfigBytes (support_telemetry_config.go), which pairs
+// oNoFollow with oNonBlock for exactly this reason.
 //
 // PLATFORM: O_NOFOLLOW is defined on Linux (and most other POSIX-y
 // systems Go supports), but NOT on Windows. The Maintenance Agent
@@ -113,9 +121,10 @@ func runListBackups(dir string, out io.Writer) error {
 // constant (nofollow_unix.go / nofollow_windows.go): the real
 // syscall.O_NOFOLLOW on Unix, a no-op on Windows where it does not exist.
 // The caller's Lstat/DirEntry.Type() checks remain the primary symlink
-// guard; O_NOFOLLOW is defense-in-depth against a post-check swap race.
+// guard; O_NOFOLLOW/O_NONBLOCK are defense-in-depth against a post-check
+// swap race.
 func peekEncryptedMagic(path string) bool {
-	f, err := os.OpenFile(path, os.O_RDONLY|oNoFollow, 0) //nolint:gosec // intentional: classify the operator-supplied backup file
+	f, err := os.OpenFile(path, os.O_RDONLY|oNoFollow|oNonBlock, 0) //nolint:gosec // intentional: classify the operator-supplied backup file
 	if err != nil {
 		return false
 	}

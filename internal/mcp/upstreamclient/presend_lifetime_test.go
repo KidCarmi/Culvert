@@ -23,9 +23,15 @@ import (
 // Call returns races the abandoned dial goroutine's write (reproduced under -race, the write
 // attributed to pinnedDialTLS), and synchronising those variables removes the race without
 // establishing a hand-off — a late hook can still write after the only reader has gone. So
-// internal/mcp/execution keeps the hook a PURE PREDICATE and reads the verdict off Call's own
-// error instead. This test is the reason it must: it pins the PROPERTY, against the real
-// transport, so the contract cannot quietly stop being true.
+// internal/mcp/execution writes NOTHING from the hook: it returns the verdict inside the error
+// (preSendGuardErr) and reads it back off Call's own error with errors.As.
+//
+// That design is correct only while THIS property holds, and nothing else asserts it: the
+// executor's own gates run against a fixture that joins the hook's goroutine, which is exactly
+// the happens-before edge production lacks. This test pins the property against the REAL
+// transport, so the premise the carrier rests on cannot quietly stop being true — if a future
+// net/http or client change made the hook complete before Call returns, the carrier's
+// justification would silently become false and no other test would notice.
 //
 // It is DETERMINISTIC rather than timing-based: the hook is parked on a channel at the exact
 // moment the test needs it parked, so "the hook has not finished" is observed, never sampled.

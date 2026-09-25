@@ -32,37 +32,6 @@ var errToolDriftedBeforeCall = errors.New("mcp: tool drifted between decision an
 // on BOTH the credential and no-credential paths.
 var errKilledAtBoundary = errors.New("mcp: emergency kill engaged before upstream call")
 
-// killedErr carries the DRIFT OBSERVATION alongside the kill sentinel. The sentinel stays
-// the thing every errors.Is in this package matches on, so the classification chain is
-// unchanged; the observation rides beside it for the same reason withdrawnErr carries its
-// reason — so a refusal can be fully diagnosed from the error alone, on whichever goroutine
-// ends up holding it.
-//
-// It exists because the kill is the ONE refusal whose drift bit is not implied by the
-// sentinel: errToolDriftedBeforeCall always means drifted, a withdrawal never does, but the
-// kill outranks a drift that was ALSO observed, and that observation must still reach
-// Safety.Breach (Codex round 15). Without this the bit needed a side channel — and the
-// pre-send re-ask runs on a goroutine net/http can abandon, where no side channel can be
-// read back reliably (Codex P2, PR #1411).
-type killedErr struct{ drifted bool }
-
-func (e *killedErr) Error() string { return errKilledAtBoundary.Error() }
-func (e *killedErr) Unwrap() error { return errKilledAtBoundary }
-
-// killedAtBoundary builds the kill refusal, recording whether the tool had ALSO drifted.
-func killedAtBoundary(drifted bool) error { return &killedErr{drifted: drifted} }
-
-// driftObservedAtBoundary reports whether a boundary refusal carries a tool-drift
-// observation — either because drift IS the refusal, or because it was seen alongside a
-// kill that outranked it. It is the single decoder, so no call site re-derives the rule.
-func driftObservedAtBoundary(err error) bool {
-	if errors.Is(err, errToolDriftedBeforeCall) {
-		return true
-	}
-	var ke *killedErr
-	return errors.As(err, &ke) && ke.drifted
-}
-
 // runExecute performs the real guarded upstream execution for an in-scope
 // executing mode. The mandatory order is preserved: policy already ran, then
 // credential planning, then a DURABLE P-CRIT commit BEFORE any cache decrypt /
@@ -214,9 +183,8 @@ func (e *Executor) runExecute(ctx context.Context, in runtime.ExecInput, _ rollo
 		// It deliberately does NOT touch sendState: it is provable only at the first site, and the
 		// pre-send path gets it from the client's own never-sent evidence, which is correct on a
 		// retry leg where an earlier leg may already have reached the peer.
-		applyBoundaryRefusal := func(gerr error) {
+		applyBoundaryRefusal := func(gerr error, driftObserved bool) {
 			cls := classifyBoundaryError(gerr)
-			driftObserved := driftObservedAtBoundary(gerr)
 			// A DRIFT REFUSAL AT THE BOUNDARY IS THE SAME BREACH THE ADMISSION GATE REPORTS.
 			//
 			// Tool drift is detectable at three points — before the executor, at admission, and
@@ -250,11 +218,12 @@ func (e *Executor) runExecute(ctx context.Context, in runtime.ExecInput, _ rollo
 			}
 		}
 
-		if gerr := e.preCallGuard(in, admKillGen, revalidate); gerr != nil {
+		gerr, driftObserved := e.preCallGuard(in, admKillGen, revalidate)
+		if gerr != nil {
 			// The physical call never began, so this is the ONE case where
 			// definitely_not_sent is mechanically provable rather than inferred.
 			sendState = model.SendDefinitelyNotSent
-			applyBoundaryRefusal(gerr)
+			applyBoundaryRefusal(gerr, driftObserved)
 			return gerr
 		}
 		// THE GUARDS ABOVE ARE RE-ASKED IMMEDIATELY BEFORE EACH PHYSICAL SEND.
@@ -272,19 +241,28 @@ func (e *Executor) runExecute(ctx context.Context, in runtime.ExecInput, _ rollo
 		// resolution, and again after the TCP connect and TLS handshake, with the connection
 		// established (CallOptions.PreSend). "The last authoritative state read before the send" is
 		// now literally true rather than nearly true.
+		// Refusals are classified through the SAME applyBoundaryRefusal as the guard above.
 		//
-		// THE HOOK CARRIES NOTHING BACK BY SIDE CHANNEL, AND THAT IS THE WHOLE POINT. It does not
-		// always run on this goroutine: net/http dials on its own (Transport.queueForDial -> go
-		// dialConnFor), and when this goroutine stops waiting for that dial — an ordinary context
-		// cancellation — Call unwinds while the dial goroutine keeps going and calls the hook.
-		// Recording the refusal into captured locals was a data race; a mutex fixed the race and
-		// still left the hand-off scheduling-dependent, because a late hook can write after the
-		// only reader has gone (Codex P2, PR #1411). So the hook is a PURE PREDICATE, and the
-		// refusal is read back from Call's own error below — which is a real hand-off: the client
-		// returns the executor's error verbatim (roundTrip returns it directly; the dialer site
-		// rides out through preSendRefusalErr), and an error that reached this goroutine
-		// necessarily happened-before this goroutine reads it.
-		preSend := func() error { return e.preCallGuard(in, admKillGen, revalidate) }
+		// THE REFUSAL TRAVELS IN THE ERROR, NEVER IN A CAPTURED VARIABLE. One of the two re-ask
+		// sites lives inside the TLS dialer, and net/http may dial on a goroutine of its own — so
+		// a closure that wrote its verdict into locals here and had them read after Call returned
+		// would be a data race, and on an abandoned dial (the request context ends while the
+		// handshake is finishing) it would also attribute that dial's refusal to a request that
+		// actually failed on the context. The upstream client made exactly this argument for its
+		// own marker type and then this side reintroduced the shape it had just avoided.
+		//
+		// Carrying both facts IN the error needs no synchronisation: the value is delivered to the
+		// waiting goroutine by net/http through a channel, so it is properly ordered before Call
+		// returns, and an abandoned dial's error is discarded rather than read. A pre-send refusal
+		// is never retryable (it is marked never-sent, so retryable()'s pre-response requirement
+		// fails), so the error Call returns is always the refusal itself when one happened.
+		preSend := func() error {
+			perr, drift := e.preCallGuard(in, admKillGen, revalidate)
+			if perr == nil {
+				return nil
+			}
+			return &preSendGuardErr{err: perr, drifted: drift}
+		}
 
 		// Once the call BEGINS, request bytes may already be on the wire. Assume the
 		// conservative state up front so any panic, cancellation or transport fault
@@ -299,24 +277,13 @@ func (e *Executor) runExecute(ctx context.Context, in runtime.ExecInput, _ rollo
 			Idempotent: idempotent, AuthHeader: authHeader, WireID: "u-" + target.ServerID,
 			AttemptID: attemptIDOf(attempt), PreSend: preSend,
 		})
-		if isBoundaryRefusal(err) {
+		var preSendRefusal *preSendGuardErr
+		if errors.As(err, &preSendRefusal) {
 			// A pre-send refusal is a BOUNDARY refusal that happened to be detected inside the
 			// client. Classify it exactly as the pre-call guard's, so the Canary still hears about
 			// a drift observed there and the client still reads the gate's own bounded reason.
 			// sendState is left to the never-sent evidence below, which is correct on a retry leg.
-			//
-			// Reading it from the RETURNED ERROR — rather than from anything the hook wrote —
-			// makes this deterministic: the refusal is classified exactly when it governed the
-			// leg, and a hook whose connection was abandoned mid-cancellation classifies nothing,
-			// because it stopped nothing. That loses no signal the experiment needs: the pre-call
-			// guard runs on this goroutine before every call, so a kill, a drift or a withdrawal
-			// that persists is caught there on the very next request.
-			//
-			// Nor can a retry hide one. A refused leg carries neverSent with preResponse FALSE, and
-			// retryable() requires preResponse, so the client never starts another leg after a
-			// refusal — the refusal is always the error the Call ends on, in retry-free mode and
-			// in retrying mode alike.
-			applyBoundaryRefusal(err)
+			applyBoundaryRefusal(preSendRefusal.err, preSendRefusal.drifted)
 		}
 		if upstreamclient.SendNeverStarted(err) {
 			// The call was refused before any request bytes existed — method not
@@ -414,7 +381,7 @@ func (e *Executor) finishUpstreamLeg(ctx context.Context, in runtime.ExecInput, 
 // Folding them together lost the breach exactly when two things went wrong at once — and since a
 // kill can later be CLEARED, the activation would resume unlatched against the new fingerprint
 // (Codex round 15).
-func (e *Executor) preCallGuard(in runtime.ExecInput, admKillGen uint64, liveRevalidate func() mcperr.Reason) error {
+func (e *Executor) preCallGuard(in runtime.ExecInput, admKillGen uint64, liveRevalidate func() mcperr.Reason) (err error, driftObserved bool) {
 	drifted := in.ToolStillCurrent != nil && !in.ToolStillCurrent()
 	// The composition-layer live-generation revalidation is evaluated BEFORE the kill re-read (like the
 	// freshness callback), so the kill generation stays the LAST authoritative state read before
@@ -426,20 +393,20 @@ func (e *Executor) preCallGuard(in runtime.ExecInput, admKillGen uint64, liveRev
 	}
 	if e.cfg.State.KillGeneration() != admKillGen {
 		// Emergency stop is paramount in the REASON reported to the client, even if the tool also
-		// drifted or lost its rollout authority — but the drift rides out ON the error, so the
-		// Canary hears about it wherever the refusal is finally read.
-		return killedAtBoundary(drifted)
+		// drifted or lost its rollout authority — but the drift is still returned, so the Canary
+		// hears about it.
+		return errKilledAtBoundary, drifted
 	}
 	if drifted {
-		return errToolDriftedBeforeCall
+		return errToolDriftedBeforeCall, true
 	}
 	if withdrawnReason != mcperr.ReasonNone {
 		// The generation, the scope or the approval the reservation rests on changed mid-flight.
 		// The gate's own bounded reason rides out with the sentinel so the refusal is diagnosed as
 		// what it was, not as whichever rollout reason happened to be the default.
-		return withdrawnAtBoundary(withdrawnReason)
+		return withdrawnAtBoundary(withdrawnReason), false
 	}
-	return nil
+	return nil, false
 }
 
 // classifyBoundaryRefusal maps a boundary drift/kill refusal detected by callUpstream to its
@@ -874,6 +841,28 @@ func executePreconditionFailure(e *Executor, in runtime.ExecInput) (mcperr.Reaso
 	return mcperr.ReasonNone, true
 }
 
+// preSendGuardErr carries a pre-call-guard refusal raised from INSIDE the upstream client — its
+// underlying guard error, and whether tool drift was observed alongside it — back out through the
+// value Call returns.
+//
+// It exists so those two facts never travel in a variable captured by the pre-send closure. The
+// closure runs at two sites, and one of them is the TLS dialer, which net/http may run on a
+// goroutine of its own; a captured variable written there and read after Call returns is a data
+// race, and on an abandoned dial it would also attribute that dial's refusal to a request that
+// failed for an unrelated reason. An error value is delivered back through net/http's own channel
+// handoff, so it is ordered before Call returns and is discarded when the dial is abandoned.
+//
+// Unwrap exposes the guard error, so classifyBoundaryError's errors.Is chain — and every other
+// errors.Is/As in this package and the client's never-sent marking — behaves exactly as it does
+// for a refusal raised by the pre-call guard directly.
+type preSendGuardErr struct {
+	err     error
+	drifted bool
+}
+
+func (e *preSendGuardErr) Error() string { return e.err.Error() }
+func (e *preSendGuardErr) Unwrap() error { return e.err }
+
 // boundaryRefusal names which final guard refused, so the caller can map it to a
 // bounded reason without repeating the errors.Is chain.
 type boundaryRefusal struct {
@@ -887,15 +876,6 @@ type boundaryRefusal struct {
 	// same classification path as a boundary guard refusal but names its own reason.
 	gateRefused bool
 	gateReason  mcperr.Reason
-}
-
-// isBoundaryRefusal reports whether err is a preCallGuard refusal — the predicate the
-// post-Call classification needs so a transport or cancellation fault is never mistaken for
-// one. It is deliberately the same errors.Is chain classifyBoundaryError uses, so the two
-// cannot disagree about what counts.
-func isBoundaryRefusal(err error) bool {
-	cls := classifyBoundaryError(err)
-	return cls.stale || cls.killed || cls.withdrawn
 }
 
 // classifyBoundaryError decodes a preCallGuard refusal. The three causes are
