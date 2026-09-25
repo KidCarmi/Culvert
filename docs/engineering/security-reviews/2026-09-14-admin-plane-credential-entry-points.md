@@ -569,6 +569,22 @@ without CORS headers unless the *preflight* is already same-origin — but the
 asymmetry with `realClientIP` is real and should be closed by routing
 `X-Forwarded-Host` through the same trusted-proxy gate.
 
+**Re-assessed 2026-09-25, and the assessment got worse rather than staler.**
+Main landed SEC-BOOTSTRAP-HOST-1 in this window, which found the *same header*
+reaching a root-executed artifact and fixed it by conditioning on
+`proxy.trust_forwarded_headers` and validating the derived authority at the
+sink. So the gate this record asks for is not hypothetical — it exists as
+`trustForwardedHeaders` (`ui_extras_startup.go`), and a second security fix in
+the same review window explicitly used it. That reframes GAP-5: it is no longer
+"an asymmetry worth closing" but **one call site that does not consult a gate
+the codebase already applies to this exact header elsewhere.** Verified still
+open on the merge of `origin/main` — `ui_middleware.go:216` reads the header
+unconditionally. Severity stays LOW on exploitability grounds; the *priority*
+rises, because the fix is now a one-line reuse of an existing, reviewed gate
+rather than a design decision. Deliberately not changed here: it is a CSRF-path
+change and belongs with its own controls, not appended to a credential-lockout
+PR.
+
 ---
 
 ## 4. What was reviewed and found safe
