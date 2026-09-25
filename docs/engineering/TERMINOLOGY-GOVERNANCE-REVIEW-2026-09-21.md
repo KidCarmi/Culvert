@@ -291,14 +291,22 @@ Later review rounds found more errors, also fixed:
 
 ## Glossary term sweep
 
-Every term `docs/design/PRODUCT-TERMINOLOGY.md` forbids, reserves or replaces was checked against the
-lines this window ADDED. The counts below come from the tool, not from hand-tallying. For each term:
+The literal terms `docs/design/PRODUCT-TERMINOLOGY.md` forbids, reserves or replaces were checked against
+the lines this window ADDED. The counts below come from the tool, not from hand-tallying. For each term:
 `git diff 46410c3 6c46ebd -U0 | grep -v '^+++' | grep -ciE '^\+.*<pattern>'` gives "Added lines" (a case-insensitive
 substring match, so identifiers such as `permitVerdictInvariant` count). The file:line lists come from
 the same diff, with line numbers at `6c46ebd`. "Visible" means `static/index.html`, non-test
 `frontend/src`, `api/openapi/openapi.yaml`, `docs/` outside `docs/engineering`, `docs/design` and
 `docs/adr`, `CHANGELOG.md` and `README.md`. Generated copies (`openapi.json`, `types.gen.ts`) follow the
 YAML and are not counted.
+
+The sweep covers only the literal patterns in the table below: the glossary's forbidden or replaced
+words, matched as substrings. It does **not** cover the glossary's context-sensitive rules, which a pattern
+count cannot decide and which this pass did not check: "policy" used loosely for a single rule, bare
+"profile" on the steering-profile screen, "status" used for a health roll-up, "user" where it could mean
+a console account, "kill switch" without its qualifier (the table counts the literal only),
+"exception"/"bypass"/"allowlist" used for the wrong kind of skip, and sentence case. A term missing from
+the table, or a zero count, is not evidence that those rules hold.
 
 | Term (pattern) | Added lines | Visible | Visible lines (file:line) | Outcome |
 |---|---|---|---|---|
