@@ -7541,3 +7541,63 @@ because that is the author's call.
 > A wall should pin the property that was broken, not the shape the author
 > happened to write while fixing it. Ask what a future change could get *wrong*,
 > and stop there.
+
+### The fourth review round: `ok && bound(...)` exempts the `!ok` case
+
+One finding on `1a23a00` (Codex P2), and it is the completeness rule biting for
+the third time in this sweep — first across REPRESENTATIONS, then across PATHS,
+now across **BRANCHES on a path already covered**.
+
+The hoisted canonical gate was spelled:
+
+    destNormHost, destNormOK := canonicalDestHost(r.Host)
+    if destNormOK && rejectOversizeCanonicalHost(w, "HTTP", clientIP, destNormHost) {
+
+which reads as "bound the canonical host" and behaves as "bound the canonical
+host **when there is one**". An authority with no canonical form skipped the tier
+entirely. The band is narrow and entirely reachable:
+
+- more than `maxDestHostLen` (253) bare bytes, so the DNS bound should fire;
+- at most `maxRawDestAuthorityBytes` (1024) raw, so the raw pre-cap does not;
+- carrying a malformed ACE label, so `idna.ToASCII` refuses it.
+
+Measured against the pre-fix tree with a 995-byte dot-dense host ending
+`xn--0`: `rawAuthorityOversize` false, `canonicalDestHost` ok=false, and the
+request answered **407** — it paid the quadratic matcher walk inside Stage-1
+authentication and the oversize counter never moved. Both admin handlers carried
+the identical shape, so a **viewer** could drive it as well.
+
+**Why the HTTP path was exposed and SOCKS5 was not is the transferable part.**
+SOCKS5 refuses `INVALID_HOST` at the normalization point, ahead of its canonical
+tier and every matcher. The HTTP path's `INVALID_HOST` refusal deliberately sits
+*after* `resolveRequestAuth` so it can record the authenticated identity — a good
+reason, and exactly what left the gap. The two protocols disagreed about where
+"this host is not a host" is decided, and only one of them had a cost bound in
+front of the matchers.
+
+**The fix bounds the RAW BARE host when normalization fails, and the reason that
+is safe must be written down, because round 1 is the trap it looks like.** Round
+1's regression refused *legitimate* internationalized names whose canonical form
+fitted inside 253. Here normalization FAILED, so there is no canonical form and
+no resolver can serve the host; refusing it on length cannot reject a destination
+that could have been served, and 400 is the status `INVALID_HOST` already
+answered. Only the oversize band changes — a **short** malformed host keeps its
+identity-bearing `INVALID_HOST` row, pinned by
+`ControlShortUnnormalizableHostKeepsItsInvalidHostRefusal`, because the cheapest
+way to pass the defect gate is to refuse every unnormalizable host at the entry
+point and delete that audit evidence.
+
+A third bounded class `tier=unnormalizable` is emitted rather than folded into
+`canonical`: the operator's question is which bound fired **and on what basis**,
+and the basis here is the raw bare host rather than a normalized one.
+
+> **A guard written `ok && bound(...)` silently exempts the `!ok` case — and
+> `!ok` is exactly where a hostile input wants to be.** Having enumerated every
+> representation and every path, enumerate every BRANCH: for each guard, ask what
+> happens on the arm that does not run it.
+
+Gates: `DefectUnnormalizableHostIsStillBounded` (HTTP, with the band's existence
+asserted first and the 407 precondition), `DefectAdminEntryPointsBoundUnnormalizableHosts`
+(both handlers), and the control above. Verified failing against the reverted
+HTTP shape, the reverted admin shape, and a fallback with its length check
+removed.

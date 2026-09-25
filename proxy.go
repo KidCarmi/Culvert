@@ -1453,7 +1453,16 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 	// hoisting is value-preserving, and the INVALID_HOST refusal deliberately
 	// stays where it was — this gate decides length only, never validity.
 	destNormHost, destNormOK := canonicalDestHost(r.Host)
-	if destNormOK && rejectOversizeCanonicalHost(w, "HTTP", clientIP, destNormHost) {
+	if destNormOK {
+		if rejectOversizeCanonicalHost(w, "HTTP", clientIP, destNormHost) {
+			return
+		}
+	} else if rejectOversizeUnnormalizableHost(w, "HTTP", clientIP, r.Host) {
+		// No canonical form ⇒ the canonical tier is unreachable, so bound the
+		// raw bare host instead. Without this, the band above maxDestHostLen and
+		// below the raw pre-cap reached Stage-1's matcher at full length and a
+		// terminal 407 returned before the INVALID_HOST refusal below ever ran
+		// (Codex P2, PR #1446).
 		return
 	}
 

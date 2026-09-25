@@ -1425,8 +1425,16 @@ func apiURLCatLookup(w http.ResponseWriter, r *http.Request) {
 	// tier of a two-tier contract is not enforcing the contract (Codex P2,
 	// PR #1446). Normalization failure is NOT refused here: validity is this
 	// endpoint's existing business, and this gate decides length only.
-	if normHost, ok := canonicalDestHost(host); ok && canonicalHostOversize(normHost) {
-		noteOversizeHostRejection("api/url-lookup", realClientIP(r), len(normHost), "canonical")
+	if normHost, ok := canonicalDestHost(host); ok {
+		if canonicalHostOversize(normHost) {
+			noteOversizeHostRejection("api/url-lookup", realClientIP(r), len(normHost), "canonical")
+			http.Error(w, fmt.Sprintf("host must be at most %d bytes", maxDestHostLen), http.StatusBadRequest)
+			return
+		}
+	} else if unnormalizableHostOversize(host) {
+		// No canonical form ⇒ bound the raw bare host, or this band reaches
+		// the category fusion at full length (Codex P2, PR #1446).
+		noteOversizeHostRejection("api/url-lookup", realClientIP(r), len(bareDestHost(host)), "unnormalizable")
 		http.Error(w, fmt.Sprintf("host must be at most %d bytes", maxDestHostLen), http.StatusBadRequest)
 		return
 	}
@@ -2811,8 +2819,16 @@ func apiPolicyTest(w http.ResponseWriter, r *http.Request) {
 	// tier of a two-tier contract is not enforcing the contract (Codex P2,
 	// PR #1446). Normalization failure is NOT refused here: validity is this
 	// endpoint's existing business, and this gate decides length only.
-	if normHost, ok := canonicalDestHost(body.Host); ok && canonicalHostOversize(normHost) {
-		noteOversizeHostRejection("api/policy-test", realClientIP(r), len(normHost), "canonical")
+	if normHost, ok := canonicalDestHost(body.Host); ok {
+		if canonicalHostOversize(normHost) {
+			noteOversizeHostRejection("api/policy-test", realClientIP(r), len(normHost), "canonical")
+			http.Error(w, fmt.Sprintf("host must be at most %d bytes", maxDestHostLen), http.StatusBadRequest)
+			return
+		}
+	} else if unnormalizableHostOversize(body.Host) {
+		// No canonical form ⇒ bound the raw bare host, or this band reaches
+		// the category fusion at full length (Codex P2, PR #1446).
+		noteOversizeHostRejection("api/policy-test", realClientIP(r), len(bareDestHost(body.Host)), "unnormalizable")
 		http.Error(w, fmt.Sprintf("host must be at most %d bytes", maxDestHostLen), http.StatusBadRequest)
 		return
 	}

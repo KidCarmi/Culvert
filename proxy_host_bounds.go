@@ -192,11 +192,39 @@ func canonicalHostOversize(normHost string) bool {
 // that needs the normalized host for its own purposes should use this and reuse
 // the result rather than normalizing again.
 func canonicalDestHost(authority string) (normHost string, ok bool) {
-	h := authority
-	if bare, _, err := net.SplitHostPort(h); err == nil {
-		h = bare
+	return normalizeHostStrict(bareDestHost(authority))
+}
+
+// bareDestHost strips an optional port from an authority WITHOUT validating it.
+// One place owns this so canonicalDestHost and the unnormalizable fallback below
+// can never disagree about what "the host part" is.
+func bareDestHost(authority string) string {
+	if bare, _, err := net.SplitHostPort(authority); err == nil {
+		return bare
 	}
-	return normalizeHostStrict(h)
+	return authority
+}
+
+// unnormalizableHostOversize bounds an authority that has NO canonical form.
+//
+// It exists because the canonical tier is only reachable when normalization
+// SUCCEEDS, which left a narrow band open: more than maxDestHostLen bare bytes
+// but no more than maxRawDestAuthorityBytes raw, with a malformed ACE label, so
+// neither tier fired and the host reached the quadratic matcher walk at full
+// length (Codex P2, PR #1446). SOCKS5 was never exposed — it refuses
+// INVALID_HOST at the normalization point, ahead of every matcher — and the HTTP
+// path's INVALID_HOST refusal deliberately sits AFTER Stage-1 auth so it can
+// carry the authenticated identity, which is exactly what left the gap.
+//
+// Applying the DNS bound to RAW bytes here does NOT reintroduce the round-1 IDN
+// regression. That regression refused LEGITIMATE internationalized names whose
+// canonical form fitted; here normalization failed, so there is no canonical
+// form and no resolver can serve this host. Refusing it on length therefore
+// cannot reject a destination that could have been served, and 400 is the status
+// INVALID_HOST already answers. Only the OVERSIZE band changes: a short
+// unnormalizable host keeps its identity-bearing INVALID_HOST refusal.
+func unnormalizableHostOversize(authority string) bool {
+	return len(bareDestHost(authority)) > maxDestHostLen
 }
 
 // noteOversizeHostLog reports whether this rejection may emit a log line,
@@ -227,8 +255,11 @@ func noteOversizeHostLog() bool {
 func noteOversizeHostRejection(proto, clientIP string, n int, tier string) {
 	proxyOversizeHostRejected.Add(1)
 	if noteOversizeHostLog() {
+		// Every tier except the raw pre-cap is bounded by the DNS limit — the
+		// canonical one on the normalized host, the unnormalizable fallback on
+		// the raw bare host.
 		limit := maxRawDestAuthorityBytes
-		if tier == "canonical" {
+		if tier != "raw" {
 			limit = maxDestHostLen
 		}
 		logger.Printf("OVERSIZE_HOST %s %s {tier=%s bytes=%d limit=%d total=%d action=block}",
@@ -296,6 +327,20 @@ func rejectOversizeDestHost(w http.ResponseWriter, r *http.Request, clientIP str
 // still admits a 1 000-byte dot-dense ASCII authority costing ~1.3 ms. Measuring
 // the canonical form instead refuses exactly that, because ASCII does not shrink
 // under IDNA — while the 899-byte IDN it protects normalizes to 255 and passes.
+// rejectOversizeUnnormalizableHost is the canonical tier's fallback for an
+// authority with no canonical form. See unnormalizableHostOversize.
+func rejectOversizeUnnormalizableHost(w http.ResponseWriter, proto, clientIP, authority string) bool {
+	bare := bareDestHost(authority)
+	if len(bare) <= maxDestHostLen {
+		return false
+	}
+	atomic.AddInt64(&statBlocked, 1)
+	noteOversizeHostRejection(proto, clientIP, len(bare), "unnormalizable")
+	http.Error(w, fmt.Sprintf("Bad Request: destination host must be at most %d bytes", maxDestHostLen),
+		http.StatusBadRequest)
+	return true
+}
+
 func rejectOversizeCanonicalHost(w http.ResponseWriter, proto, clientIP, normHost string) bool {
 	if !canonicalHostOversize(normHost) {
 		return false

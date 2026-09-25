@@ -117,10 +117,18 @@ path, and for a name past 253 bytes the length is the only fact that
 distinguishes a probe from a broken client.
 
 `proto` is one of `HTTP`, `SOCKS5`, `api/url-lookup`, `api/policy-test`. `tier` is
-`raw` (refused on the client's bytes, before normalization) or `canonical`
-(normalized and still longer than DNS allows). A run of `canonical` refusals from
-one source is the dot-dense-ASCII probe shape; `raw` means the authority was
-simply enormous.
+`raw` (refused on the client's bytes, before normalization), `canonical`
+(normalized and still longer than DNS allows) or `unnormalizable` (the host has
+no canonical form at all — a malformed ACE label, say — so the DNS bound is
+measured on the raw bare host instead). A run of `canonical` refusals from one
+source is the dot-dense-ASCII probe shape; `unnormalizable` is the same shape
+carrying a broken `xn--` label, which is a probe rather than a client mistake
+once it is this long; `raw` means the authority was simply enormous.
+
+`unnormalizable` refusals are bounded by the same 253 limit as `canonical`, and a
+**short** malformed host is unaffected — it keeps the `INVALID_HOST` refusal,
+which carries the authenticated identity. Only hosts past the DNS limit are
+refused on length.
 
 ---
 

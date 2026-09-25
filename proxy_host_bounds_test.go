@@ -903,3 +903,150 @@ func TestChaos69_RunbookLogExampleMatchesTheEmitter(t *testing.T) {
 		}
 	}
 }
+
+// chaos69Unnormalizable builds an authority inside the RAW pre-cap that
+// canonicalDestHost CANNOT normalize: dot-dense (so the suffix walk is
+// quadratic) with a malformed ACE label, which idna.ToASCII refuses.
+func chaos69Unnormalizable(n int) string {
+	h := ""
+	for len(h) < n-5 {
+		h += "a."
+	}
+	return h + "xn--0"
+}
+
+// TestChaos69_DefectUnnormalizableHostIsStillBounded closes the hole the
+// round-2 hoist left behind: the canonical tier was guarded by
+// `destNormOK && …`, so an authority with NO canonical form skipped it
+// entirely and reached Stage-1's matcher at full length.
+//
+// The band is real and narrow: > maxDestHostLen bare bytes but <=
+// maxRawDestAuthorityBytes raw, so neither tier fires. HTTP's INVALID_HOST
+// refusal sits AFTER resolveRequestAuth (deliberately — it carries the
+// authenticated identity), so a terminal 407 returned before the request was
+// ever refused and the counter never moved (Codex P2, PR #1446).
+//
+// SOCKS5 was never exposed: it refuses INVALID_HOST at the normalization point,
+// ahead of its canonical tier and every matcher — the shape HTTP lacked.
+//
+// Bounding an unnormalizable host on its RAW bytes does NOT reintroduce the
+// round-1 IDN regression, and the reason is specific: that regression refused
+// LEGITIMATE internationalized names whose canonical form fitted. Here
+// normalization FAILED, so there is no canonical form and the host cannot be
+// resolved by anybody — refusing it on length cannot reject a destination that
+// could have been served, and the status class (400) is what INVALID_HOST
+// already answered.
+func TestChaos69_DefectUnnormalizableHostIsStillBounded(t *testing.T) {
+	setupAuthGateTest(t)
+	resetOversizeHostStateForTest()
+	t.Cleanup(resetOversizeHostStateForTest)
+	chaos66CaptureLog(t)
+
+	host := chaos69Unnormalizable(1000)
+
+	// The band this gate lives in must actually exist, or it proves nothing.
+	if rawAuthorityOversize(host) {
+		t.Fatalf("a %d-byte authority is refused by the RAW tier — this gate cannot reach the unnormalizable band", len(host))
+	}
+	if _, ok := canonicalDestHost(host); ok {
+		t.Fatalf("host normalized, so the CANONICAL tier covers it — this gate must use a host with no canonical form")
+	}
+
+	// PRECONDITION: Stage-1 really would answer first on this build.
+	w := httptest.NewRecorder()
+	handleRequest(w, makeRequest("http://ordinary-precondition.example.test/", nil))
+	if w.Code != http.StatusProxyAuthRequired {
+		t.Fatalf("precondition failed: an uncredentialed request must terminate in Stage-1 with 407, got %d", w.Code)
+	}
+
+	before := proxyOversizeHostRejected.Load()
+	w = httptest.NewRecorder()
+	handleRequest(w, makeRequest("http://"+host+"/", nil))
+
+	if w.Code == http.StatusProxyAuthRequired {
+		t.Fatalf("a %d-byte unnormalizable dot-dense authority terminated in Stage-1 with a 407: the request paid the "+
+			"quadratic matcher walk and was never refused", len(host))
+	}
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want %d", w.Code, http.StatusBadRequest)
+	}
+	if got := proxyOversizeHostRejected.Load(); got != before+1 {
+		t.Errorf("proxyOversizeHostRejected = %d, want %d — the refusal is uncounted", got, before+1)
+	}
+}
+
+// ControlShortUnnormalizableHostKeepsItsInvalidHostRefusal is the CONTROL: the
+// cheapest way to pass the gate above is to refuse every unnormalizable host at
+// the entry point, which would delete the identity-bearing INVALID_HOST audit
+// row that ordinary malformed destinations produce. Only the OVERSIZE band may
+// change.
+func TestChaos69_ControlShortUnnormalizableHostKeepsItsInvalidHostRefusal(t *testing.T) {
+	setupAuthGateTest(t)
+	resetOversizeHostStateForTest()
+	t.Cleanup(resetOversizeHostStateForTest)
+	chaos66CaptureLog(t)
+
+	const short = "xn--0" // unnormalizable, far inside every bound
+	if _, ok := canonicalDestHost(short); ok {
+		t.Fatalf("%q normalized — this control needs an unnormalizable host", short)
+	}
+
+	before := proxyOversizeHostRejected.Load()
+	w := httptest.NewRecorder()
+	handleRequest(w, makeRequest("http://"+short+"/", nil))
+
+	if got := proxyOversizeHostRejected.Load(); got != before {
+		t.Errorf("a SHORT unnormalizable host was charged to the oversize counter (%d -> %d): the length bound is "+
+			"firing on hosts that are merely invalid, which destroys the INVALID_HOST signal", before, got)
+	}
+}
+
+// TestChaos69_DefectAdminEntryPointsBoundUnnormalizableHosts is the admin-plane
+// half of the unnormalizable band. The reviewer named both handlers explicitly:
+// they carried the same `ok && oversize` shape, so a VIEWER could drive a
+// ~1 KiB dot-dense host with a malformed ACE label into lookupHostCategory and
+// (via apiPolicyTest) into the fusion more than once per call.
+func TestChaos69_DefectAdminEntryPointsBoundUnnormalizableHosts(t *testing.T) {
+	host := chaos69Unnormalizable(1000)
+	if rawAuthorityOversize(host) {
+		t.Fatalf("a %d-byte host is refused by the RAW tier — this gate cannot reach the unnormalizable band", len(host))
+	}
+	if _, ok := canonicalDestHost(host); ok {
+		t.Fatalf("host normalized — this gate needs a host with no canonical form")
+	}
+
+	t.Run("url-category-lookup", func(t *testing.T) {
+		chaos66Isolate(t)
+		chaos66CaptureLog(t)
+		before := proxyOversizeHostRejected.Load()
+
+		r := withRole(httptest.NewRequest(http.MethodGet, "/api/url-categories/lookup?host="+host, http.NoBody), RoleViewer)
+		w := httptest.NewRecorder()
+		apiURLCatLookup(w, r)
+
+		if w.Code != http.StatusBadRequest {
+			t.Errorf("status = %d, want %d — a viewer reached lookupHostCategory with a %d-byte unnormalizable host",
+				w.Code, http.StatusBadRequest, len(host))
+		}
+		if got := proxyOversizeHostRejected.Load(); got != before+1 {
+			t.Errorf("proxyOversizeHostRejected = %d, want %d — the refusal is uncounted", got, before+1)
+		}
+	})
+
+	t.Run("policy-test", func(t *testing.T) {
+		chaos66Isolate(t)
+		chaos66CaptureLog(t)
+		before := proxyOversizeHostRejected.Load()
+
+		w := httptest.NewRecorder()
+		apiPolicyTest(w, testerRoleReq(t, RoleViewer, map[string]any{"host": host}))
+
+		if w.Code != http.StatusBadRequest {
+			t.Errorf("status = %d, want %d — a viewer reached the fusion with a %d-byte unnormalizable host",
+				w.Code, http.StatusBadRequest, len(host))
+		}
+		if got := proxyOversizeHostRejected.Load(); got != before+1 {
+			t.Errorf("proxyOversizeHostRejected = %d, want %d — the refusal is uncounted", got, before+1)
+		}
+	})
+}
