@@ -2,8 +2,8 @@
 
 ## 0. Current status (authoritative)
 
-As of 2026-09-24, main `6ec745d` (#1487) plus the toolchain-consistency
-change (§20); before it, main `75dbb8b` (#1486: targeted report dispatches skip the
+As of 2026-09-25, main `0cf1245` (#1488, toolchain consistency, §20) plus
+build-once image promotion (§21); before it, main `6ec745d` (#1487); before that, main `75dbb8b` (#1486: targeted report dispatches skip the
 trend) plus the first natural-run measurements (§18.3–§18.5) and the
 conformance-fixture change (§19). This table
 is the one place that says where the plan stands. The sections below it are
@@ -13,11 +13,12 @@ tense disagrees with this table, this table wins.
 | Stage | Implemented | Operationally verified | Awaiting natural samples | Remaining backlog |
 |---|---|---|---|---|
 | Lane architecture, retirement steps 2–7 (§1–§3) | Yes | Yes: Fast/Deep gates carry every PR; QA/Security are pass-through on PRs | — | Step 1 (branch protection names Fast/Deep only; admin) and step 8 (traffic-smoke promotion, then retire `proxy-pr-gate.yml`) |
-| Release publication gating (§5a) | Yes: one predicate over `.github/release-evidence.txt` via `require-release-evidence.sh`; `docker` pushes candidate tags only; `promote-image` moves `latest`/`main`/semver onto the tested digest; every asset is staged as a draft | Yes: on `3febe59` main QA failed, so `Auto-Tag Release` and `Promote moving channels (main)` both refused at their evidence step and nothing was promoted (CI run 35905503220) | — | Main-to-tag build-once promotion: a tag still rebuilds the image the main push already built and tested |
+| Release publication gating (§5a) | Yes: one predicate over `.github/release-evidence.txt` via `require-release-evidence.sh`; `docker` pushes candidate tags only; `promote-image` moves `latest`/`main`/semver onto the tested digest; every asset is staged as a draft | Yes: on `3febe59` main QA failed, so `Auto-Tag Release` and `Promote moving channels (main)` both refused at their evidence step and nothing was promoted (CI run 35905503220) | — | — (build-once promotion: §21) |
+| Build-once image promotion (§21) | Yes: the main push builds + qualifies one signed candidate; the tag run reuses it by digest (binding → published alias → main candidate → owner-authorized rebuild), re-qualifies it and signs it in the tag context; auto-tag consumes the candidate's version | Locally: 52 mocked state-transition cases + workflow walls, each defect gate mutation-proven; no live run yet | The first main push after merge and the first normal release are the live acceptance (§21.7) | Security/QA workflows still build their own scan images from source (§21.8) |
 | Stage 1: QA scheduling (§8) | Yes | Yes | — | — |
 | Stages 2A/2B: coverage from the race run, race ownership by event (§9–§10) | Yes | Yes | — | — |
 | Stage 3: native cross-compilation in the production image (§11) | Yes: `FROM --platform=$BUILDPLATFORM`, `-trimpath -buildvcs=false` | Yes (byte-identical binaries, measured) | — | — |
-| Toolchain consistency (§20) | Yes: the root `go.mod` `toolchain go1.26.8` line drives CI, release binaries and every builder image (`golang:1.26.8-alpine` pinned by digest); walled with negative controls | Locally (both arches reproducible, both binaries record `go1.26.8`); CI qualification on this change's PR | Performance samples before this change ran Go 1.26.6 (§20) | Moving to Go 1.27 needs a lint-tool upgrade first (§20); the installer's operator-side source-build fallback stays unpinned |
+| Toolchain consistency (§20) | Yes: the root `go.mod` `toolchain go1.26.8` line drives CI, release binaries and every builder image (`golang:1.26.8-alpine` pinned by digest); walled with negative controls | Yes: CI-qualified on #1488 (both arches reproducible, every builder and binary records `go1.26.8`); the Dockerfile binary checks now compare against the pin (§21.2) | Performance samples before this change ran Go 1.26.6 (§20) | Moving to Go 1.27 needs a lint-tool upgrade first (§20); the installer's operator-side source-build fallback stays unpinned |
 | Stage 4: E2E image dependency discipline and recipe parity (§12) | Yes | Yes | — | — |
 | Stages 5A–5C: sharded race + coverage in QA and in the Fast PR Gate (§13–§15) | Yes: 4 root shards + a non-root lane on one engine | Yes | — | The non-root lane is now the Fast gate's critical path (§18.5); root-state/package isolation (`internal/mcp/execution` is 72 % of the lane) |
 | Stage 6A: small restore fixtures by default (§16) | Yes | Yes | — | — |
@@ -38,8 +39,8 @@ Remaining backlog, in the order the measurements support (§18.5):
    on-disk state cannot be split or reordered safely; this bounds items 1–2.
 4. **Repeated static-contract work** — many walls re-read and re-parse the
    same workflow and source files independently.
-5. **Main-to-tag build-once promotion** — a tag still rebuilds the image the
-   main push already built and tested.
+5. ~~**Main-to-tag build-once promotion**~~ — implemented (§21); live
+   acceptance waits for the next normal release.
 6. ~~**Toolchain consistency**~~ — done (§20): one pinned compiler, Go
    1.26.8. Follow-up: adopting Go 1.27 needs the pinned golangci-lint
    upgraded first.
@@ -2903,3 +2904,171 @@ consistency change.
 - `api-contract.yml` and `pr-api-governance.yml` call `actions/setup-go@v7`
   by tag. They read the same go.mod line, so their compiler agrees, but the
   action itself is not SHA-pinned.
+
+## 21. Build-once image promotion: main candidate → tag release
+
+Baseline: main `0cf1245a4b75054612df0f51471ed16ce608f475` (#1488). Operator
+view: `docs/operator/release-publication-gating.md` §4a.
+
+### 21.1 Before
+
+| step | what it did |
+| --- | --- |
+| main `smoke` | built an amd64 image **from source** (compose), started it, discarded it |
+| main `docker` | built the multi-platform candidate, computed a *speculative* version (highest `v*` + 1) and baked it in |
+| main `auto-tag` | computed the version **again**, tagged it |
+| tag `smoke` | built another amd64 image from source |
+| tag `docker` | **rebuilt** the multi-platform image — non-reproducibly (floating `alpine:3.24`, `apk upgrade`, a monthly GeoIP URL) — and bound the version to *those* bytes |
+| Security gate `vuln-trivy-image` | scanned yet another image, built from source |
+
+So the digest a release published was never the digest that had been tested,
+`latest` (main build) and `X.Y.Z` (tag build) named different images, and two
+independent version computations could disagree.
+
+### 21.2 What changed
+
+**One candidate, one identity, one version.** The main push's `docker` job runs
+`candidate-plan-main.sh`: reuse the commit's verified candidate (a re-run never
+rebuilds), else build one. The version is decided there, once — the `v*` tag
+already naming the commit, else highest + 1 — and baked in. A new candidate is
+signed with a **candidate record** (in-toto, keyless, type
+`…/attestations/release-candidate/v1`) binding the full SHA, repository,
+`ci.yml`, `refs/heads/main`, `push`, producer run id + attempt, version,
+index digest, each required platform digest (read back from the registry) and
+the build inputs (toolchain pin, builder image digest, input hashes); then the
+discovery pointer `candidate-commit-<sha>` is written **last**, so a present
+pointer implies a signed record.
+
+**Qualification of the candidate itself** (`qualify-candidate`, new, main and
+tag): exactly `linux/amd64` + `linux/arm64`; source revision label; the compiler
+both binaries record == the go.mod pin, per platform; GOOS/GOARCH; `/app/VERSION`;
+the proxy's `/health` version and `culvert-maint -version` on **both** platforms
+(arm64 under QEMU); the compose smoke on amd64 (`--no-build`); trivy on both
+platforms with the Security gate's policy. On main a pass is signed as a
+**qualification record**. The source-built `smoke` job is removed.
+
+**The tag run reuses** (`candidate-plan-tag.sh`): version binding → published
+exact alias → main candidate (record **and** qualification verified against the
+producer identity at the tag's full SHA, version == tag, compiler == pin,
+platforms == live index) → owner-authorized rebuild
+(`RELEASE_REBUILD_AUTHORIZED_TAG` == this exact tag) → refuse with the recovery.
+The tag run then re-qualifies the digest with a fresh vulnerability DB, and
+`catalog-pipeline` signs it **in the tag context** before verifying the release
+identity. `release_identity.env` is unchanged: it still accepts only `ci.yml` on
+`v*` tags, and a wall fails if it ever accepts the main identity.
+
+**auto-tag consumes the version** (`decide-release-version.sh`, in a cross-run
+`release-version-decision` lock): re-reads the remote; no-op if the version
+already names the commit; refuses if the commit already carries another
+version, if the version names another commit, or if a higher version exists;
+the tag push is the atomic step and a concurrent same-commit winner is success.
+
+**Every public act needs qualification**: `auto-tag`, `promote-image`,
+`catalog-pipeline`, `release`, `promote-release-channels` and `publish-release`
+depend on `qualify-candidate` with no status-function escape. The graph stays a
+DAG (walled).
+
+**Compiler check against the pin** (the §20 gap): the Dockerfile's post-build
+binary checks (proxy, agent, E2E) now compare the recorded compiler with the
+go.mod `toolchain` line instead of `go env GOVERSION`, and the toolchain wall
+rejects any GOTOOLCHAIN assignment in a builder stage other than the one
+`ENV GOTOOLCHAIN=local` (ENV, ARG, or a `RUN GOTOOLCHAIN=…` prefix). The agent's
+offline source-build exception is unchanged (its go.mod still has no toolchain
+line; the image stage reads the root pin from a copy).
+
+Unchanged: standalone release binaries and `verify-reproducible`, the evidence
+predicate, write-once exact aliases (both on one digest), channel anti-rollback,
+draft/final barriers, published-release protection, resign-only tag dispatch,
+R2, and the Pages retirement.
+
+### 21.3 Why this shape
+
+* **Attestations, not names.** A registry tag can be moved by any job with
+  `packages: write`, and an artifact or run output is not durable across runs.
+  A keyless attestation's certificate is issued by Fulcio to the exact
+  workflow, ref, event and commit, so cosign's certificate flags do the trust
+  work; the pointer only finds the digest.
+* **Two records.** The build is recorded before qualification; qualification is
+  recorded only after it passes. A tag run needs both, so a failed or skipped
+  qualification can never be released, even by a hand-pushed tag.
+* **The main identity is not the release identity.** Accepting a main
+  signature as a release signature would turn every main build into a
+  potential release. The tag run signs the digest itself instead.
+* **Reuse order.** A bound or published version is final: no attestation, and
+  no authorization, may substitute other bytes under it.
+* **Embedded version by execution.** `-trimpath` makes Go omit `-ldflags` from
+  the build info (measured: a `-trimpath` binary lists GOOS/GOARCH but no
+  `-ldflags` line), so the `-X main.version` value is not readable statically.
+  Running the binaries is also the stronger claim.
+
+### 21.4 Eliminated build executions (per release: one main push + its tag run)
+
+Measured baseline (6 most recent successful tag runs v1.0.237–v1.0.242 and
+3 successful main pushes; all attempt 1):
+
+| build | before | after | baseline duration (median) |
+| --- | --- | --- | --- |
+| main compose smoke, amd64 from source | 1 | 0 (candidate pulled) | smoke job 81 s |
+| main multi-platform candidate | 1 | 1 (0 on a re-run: reused) | build step 238 s |
+| tag compose smoke, amd64 from source | 1 | 0 | smoke job 79 s |
+| tag multi-platform rebuild | 1 | 0 (only an owner-authorized rebuild) | docker job 199.5 s, build step 151.5 s |
+
+Image builds in `ci.yml` per release: **4 → 1**. Not touched: the Security
+gate's source-built scan image (main and tag pushes) and QA's infra-compose
+image (§21.8).
+
+**Latency is not claimed.** The tag run's serial chain loses the compose job
+and the image build (≈ 280 s of job time in the baseline) but gains
+`qualify-candidate` (pulls, arm64 execution under QEMU, two trivy scans) and
+candidate verification in `docker`. Neither has run on a runner yet; the net
+effect is measured on the first normal release (§21.7), with the §18 caveat
+that the Go 1.26.8 cohort still has few samples.
+
+### 21.5 Validation (local, disposable, nothing published)
+
+| check | result |
+| --- | --- |
+| `.github/scripts/test/candidate-promotion-cases.sh` (driven by `TestCandidatePromotion_Behaviour`) — mocked registry, Sigstore, git, go | **52/52** — handoff, retry reuse, partial publication (binding wins; published alias adopted), superseded and concurrent candidates, wrong identity / version / digest / subject, missing platform, unavailable evidence (registry and Sigstore), failed and absent qualification, manual and pre-rollout tags with and without authorization, the running candidate reporting a wrong version or an unhealthy status, auto-tag conflicts and races |
+| every refusal case asserts its **reason** | added after the first run exposed a seam bug (`DOCKER_BIN` unset) that made unrelated refusals pass |
+| mutation proof, scripts | 6 injected defects (binding checked after the candidate, qualification skipped, authorization not bound to the tag, subject digest unchecked, overtaken version not checked, unverifiable pointer rebuilds) — each fails ≥ 1 case |
+| workflow walls (`release_build_once_promotion_test.go`) | pass; 3 injected defects (qualification dropped from the public jobs' needs, an unconditional build step, signing after verification) each fail |
+| real BuildKit index (`ghcr.io/kidcarmi/culvert:latest`) through `index_platforms` | both platforms parsed, attestation manifests excluded, no violations |
+| Dockerfile compiler snippet | passes a go1.26.8 binary, refuses a go1.25.0 one |
+| toolchain wall | 20 negative controls pass, incl. the 4 new ones (active-compiler comparison, later `ENV`, `RUN` prefix, `ARG`) |
+| existing release-gating walls + cases, actionlint | pass; actionlint shellcheck findings 10 → 9 |
+| full suite, `go test -count=1 -shuffle=20260925 ./...`, go1.26.8 | **passed**: all 110 packages, 0 failures (root package 527 s) |
+| golangci-lint v2.5.0 `--new-from-rev origin/main` | 0 issues |
+| cosign flags | read from the pinned cosign v3.0.6 source: `verify-attestation` accepts the `--certificate-github-workflow-*` flags and prints the verified DSSE payloads; `attest` and `verify-attestation` both default to the new bundle format |
+
+### 21.6 Migration and recovery
+
+* **Nothing to do for normal releases.** The first main push after merge builds
+  a candidate with a record; its auto-tag and tag run use it.
+* **Tags created before this change** carry no candidate record. A re-run of
+  one reuses its existing `candidate-vX.Y.Z` binding or published alias; one
+  that never got that far refuses — set `RELEASE_REBUILD_AUTHORIZED_TAG=<tag>`,
+  re-run, clear it.
+* **Hand-pushed tags** whose commit's candidate carries another version refuse
+  the same way (the image embeds the other version).
+* **Rollback:** revert the PR. The tag run then rebuilds again; bindings written
+  meanwhile are still honoured by `resolve-release-candidate.sh`.
+
+### 21.7 Live acceptance — pending a normal authorized release
+
+Not exercised by this change, because it would need real tags, public channels
+or the live catalog: keyless `cosign attest` / `verify-attestation` against
+GHCR from a runner; the arm64 execution under QEMU on a runner; the tag run
+reusing a real main candidate and signing it in the tag context; the catalog
+verify on that signature; the first main re-run reusing a candidate; and the
+latency of the new chain. The first merge's main push and the next normal
+release are that acceptance; failures there are fail-closed (nothing public
+moves) and recoverable by the §21.6 paths.
+
+### 21.8 Not in this change
+
+* `security-release-gate.yml` still scans an image it builds from source (as
+  release evidence, on main and tag pushes), and QA's infra-compose job builds
+  its own. Pointing them at the candidate needs cross-workflow digest handoff.
+* The runtime base (`alpine:3.24`) and the GeoIP download stay unpinned, so a
+  rebuild is still not reproducible — which is exactly why the version binds a
+  digest rather than a build.

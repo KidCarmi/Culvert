@@ -53,7 +53,8 @@ RUN : "${BUILD_VARIANT}" \
     && CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -mod=readonly -trimpath -buildvcs=false \
        -ldflags="-s -w -X main.version=e2e-${BUILD_VARIANT}" -o culvert . \
     && depfiles-guard verify "go build"
-RUN go version culvert && [ "$(go version culvert | cut -d' ' -f2)" = "$(go env GOVERSION)" ]
+RUN want="$(sed -n 's/^toolchain //p' go.mod)" && go version culvert && \
+    [ -n "${want}" ] && [ "$(go version culvert | cut -d' ' -f2)" = "${want}" ]
 
 FROM alpine:3.24
 ARG BUILD_VARIANT=v1
