@@ -1300,9 +1300,11 @@ func (c *Config) SetUIUser(username, password string, role UIRole) error {
 		}
 		c.uiUsers[username] = next
 	} else if existing != nil {
-		if role != existing.role {
-			existing.persistedRole = "" // an explicit reassignment wins
-		}
+		// A password-empty call IS an explicit role assignment — even when it
+		// names the role the clamp already produced (an admin confirming
+		// "viewer" in the edit UI) — so it always replaces the preserved raw
+		// role rather than letting SaveUIUsersFile write it back.
+		existing.persistedRole = ""
 		existing.role = role
 	} else {
 		return fmt.Errorf("password is required to create a new user")
@@ -1497,8 +1499,25 @@ func loadedRosterRole(username string, role UIRole) UIRole {
 // binary cannot grant — the downgrade/corruption signal an operator acts on.
 var rosterRoleClamped atomic.Int64
 
-// RosterRoleClampCount reports the clamp counter for the admin/status surfaces.
+// RosterRoleClampCount reports the CUMULATIVE clamp counter (the Prometheus
+// _total series). Current-health surfaces use ActiveRosterRoleClamps instead,
+// so a repaired roster stops reporting degraded.
 func RosterRoleClampCount() int64 { return rosterRoleClamped.Load() }
+
+// ActiveRosterRoleClamps reports how many roster records are PRESENTLY held at
+// a clamped effective role (a preserved raw role this build does not enroll).
+// It drops back to zero once every such account has been reassigned.
+func (c *Config) ActiveRosterRoleClamps() int {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	n := 0
+	for _, u := range c.uiUsers {
+		if u != nil && u.persistedRole != "" {
+			n++
+		}
+	}
+	return n
+}
 
 // SaveUIUsersFile writes the current UI user roster to disk atomically.
 // No-op when no file path is configured.

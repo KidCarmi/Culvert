@@ -541,3 +541,50 @@ func TestRosterLoad_ExplicitReassignmentReplacesPersistedRole(t *testing.T) {
 		t.Fatalf("explicit reassignment persisted %q, want %q", got, RoleOperator)
 	}
 }
+
+// TestRosterLoad_SameRoleReassignmentReplacesPersistedRole pins that a
+// password-empty role update naming the SAME role the clamp produced (an admin
+// confirming "viewer" in the edit UI) still replaces the preserved raw role,
+// so the unknown role is not silently written back and restored on upgrade.
+func TestRosterLoad_SameRoleReassignmentReplacesPersistedRole(t *testing.T) {
+	path, _ := seedRoster(t, "auditor")
+	c := &Config{cache: authCacheStore{entries: map[string]*authCacheEntry{}}}
+	c.SetUIUsersFile(path)
+	if err := c.LoadUIUsersFile(); err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if err := c.SetUIUser("bob", "", RoleViewer); err != nil {
+		t.Fatalf("reassign: %v", err)
+	}
+	if err := c.SaveUIUsersFile(); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	if got := savedRole(t, path); got != string(RoleViewer) {
+		t.Fatalf("confirming the clamped role persisted %q, want %q — the explicit assignment was ignored", got, RoleViewer)
+	}
+}
+
+// TestRosterLoad_ActiveClampCountClearsAfterRepair pins that the current-health
+// value behind /healthz and /api/stats reflects records PRESENTLY clamped, not
+// the cumulative counter, so a repaired roster stops reporting degraded.
+func TestRosterLoad_ActiveClampCountClearsAfterRepair(t *testing.T) {
+	path, _ := seedRoster(t, "auditor")
+	c := &Config{cache: authCacheStore{entries: map[string]*authCacheEntry{}}}
+	c.SetUIUsersFile(path)
+	if err := c.LoadUIUsersFile(); err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if got := c.ActiveRosterRoleClamps(); got != 1 {
+		t.Fatalf("active clamps after load = %d, want 1", got)
+	}
+	cumulative := RosterRoleClampCount()
+	if err := c.SetUIUser("bob", "", RoleOperator); err != nil {
+		t.Fatalf("reassign: %v", err)
+	}
+	if got := c.ActiveRosterRoleClamps(); got != 0 {
+		t.Fatalf("active clamps after repair = %d, want 0 — health would stay degraded after the documented fix", got)
+	}
+	if RosterRoleClampCount() != cumulative {
+		t.Fatal("the cumulative _total counter must not move on repair")
+	}
+}

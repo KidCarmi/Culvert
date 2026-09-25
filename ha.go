@@ -1122,7 +1122,7 @@ func addRequestLogHealth(resp map[string]any) {
 	// like the two above: it is an authorization-surface fact (someone's
 	// effective role is NOT what the file says) and the remedy is to re-assign
 	// the role, not to fix storage.
-	if n := RosterRoleClampCount(); n > 0 {
+	if n := cfg.ActiveRosterRoleClamps(); n > 0 {
 		resp["uiRosterRoleClamped"] = n
 	}
 	// Saturation of the async JSONL queue: no entry is lost, but request

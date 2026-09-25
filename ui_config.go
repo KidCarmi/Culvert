@@ -149,7 +149,7 @@ func apiStats(w http.ResponseWriter, r *http.Request) {
 		// SEC-RBAC-ROLE-1. Non-zero means ui_users.json carries a role this
 		// build does not enroll; the account was clamped to viewer at load, so
 		// its effective authority is deliberately lower than the file states.
-		"uiRosterRoleClamped": RosterRoleClampCount(),
+		"uiRosterRoleClamped": cfg.ActiveRosterRoleClamps(),
 		// Non-zero means the async JSONL persistence queue saturated: no
 		// entry was lost, but request goroutines waited on the disk.
 		"logBackpressure": reqlog.Backpressure(),
