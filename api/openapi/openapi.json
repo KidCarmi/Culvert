@@ -4641,6 +4641,15 @@
             "nullable": true,
             "type": "array"
           },
+          "ui_tls_cert_days_remaining": {
+            "description": "Days until ui_tls_cert_not_after (negative once expired). Present under the same condition as ui_tls_cert_not_after.",
+            "type": "integer"
+          },
+          "ui_tls_cert_not_after": {
+            "description": "Expiry (NotAfter, RFC3339 UTC) of the admin UI's own serving certificate — a custom pair set via -tls-cert/-tls-key or uploaded here, never the auto self-signed fallback. Present only once a custom pair has bound successfully at least once in this process's lifetime. Distinct from the MITM inspection root CA expiry (GET /api/ca/status) and the outbound upstream mTLS client cert expiry (GET /api/ocsp).",
+            "format": "date-time",
+            "type": "string"
+          },
           "ui_tls_fallback": {
             "description": "True when self-signed TLS setup failed at startup and the admin UI fell back to plain HTTP.",
             "type": "boolean"

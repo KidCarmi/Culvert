@@ -284,6 +284,12 @@ func serveAdminUIWithRetry(srv *http.Server, port int, certFile, keyFile string,
 	}
 }
 
+// adminUIBeforeServeTLS is a test seam run immediately before a custom-cert
+// ServeTLS call; it lets a gate rotate the pair on disk inside the window that
+// used to separate the recorded certificate from the served one. No-op in
+// production.
+var adminUIBeforeServeTLS = func() {}
+
 // adminUIServeOnce performs one bind-and-serve attempt. It returns
 // http.ErrServerClosed once the server has been Shutdown/Closed, and any other
 // error for a fault the caller should retry.
@@ -328,12 +334,17 @@ func adminUIServeOnce(srv *http.Server, addr, certFile, keyFile string) error {
 	// did (pinned by TestFE6B1D_D03).
 	customTLS := certFile != "" && keyFile != ""
 	var servedLeaf *x509.Certificate
+	// customCert is the same loaded pair, kept for noteAdminUITLSCertExpiry
+	// (PR #1381): the expiry surface records the material that is SERVED, the
+	// same object the listener evidence records — one read, one identity.
+	var customCert tls.Certificate
 	if customTLS {
 		pair, err := tls.LoadX509KeyPair(certFile, keyFile)
 		if err != nil {
 			return fmt.Errorf("%w: %w", errAdminUITLSMaterial, err)
 		}
 		servedLeaf = adminListenerLeafOf(pair)
+		customCert = pair
 		var cfg *tls.Config
 		if srv.TLSConfig != nil {
 			cfg = srv.TLSConfig.Clone()
@@ -355,6 +366,12 @@ func adminUIServeOnce(srv *http.Server, addr, certFile, keyFile string) error {
 	ln, err := lc.Listen(context.Background(), "tcp", addr)
 	if err != nil {
 		return err
+	}
+	// Record the serving certificate's expiry only once the port is actually
+	// held: a pair that failed to bind is not being served, and recording it
+	// would also overwrite the expiry of the last pair that was.
+	if customTLS {
+		noteAdminUITLSCertExpiry(customCert)
 	}
 
 	// The bind is the EVIDENCE. Announce only now: the pre-change code logged
@@ -390,6 +407,12 @@ func adminUIServeOnce(srv *http.Server, addr, certFile, keyFile string) error {
 	// files here.
 	defer ln.Close() //nolint:errcheck // idempotent teardown; Serve has normally closed it already
 
+	if customTLS {
+		// PR #1381's seam, run at the same point as adminUIBeforeServeHook: a
+		// pair rotated on disk here is served only by the next bind, because the
+		// pair installed above is the one ServeTLS serves (empty file names).
+		adminUIBeforeServeTLS()
+	}
 	if srv.TLSConfig != nil {
 		// customTLS: the loaded pair is in srv.TLSConfig.Certificates;
 		// self-signed: startUI installed it there. Empty file names ⇒ ServeTLS

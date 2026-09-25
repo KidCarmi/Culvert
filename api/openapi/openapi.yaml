@@ -1408,6 +1408,8 @@ components:
         ui_custom_cert_active: { type: boolean, description: "DERIVED from ui_listener (FE-6B.1 correction round): true only while the running listener is observed serving a pair whose certificate fingerprint equals the persisted pair's — never a boot-time selection flag; a pair replaced or deleted without a restart is not active." }
         ui_listener: { $ref: '#/components/schemas/AdminListener' }
         ui_custom_cert_corrupt: { type: boolean, description: "True when the persisted custom UI certificate/key pair does not parse as a matching TLS pair (interrupted or corrupted upload). It is NOT active, and a restart will NOT fix this — the pair must be re-uploaded." }
+        ui_tls_cert_not_after: { type: string, format: date-time, description: "Expiry (NotAfter, RFC3339 UTC) of the admin UI's own serving certificate — a custom pair set via -tls-cert/-tls-key or uploaded here, never the auto self-signed fallback. Present only once a custom pair has bound successfully at least once in this process's lifetime. Distinct from the MITM inspection root CA expiry (GET /api/ca/status) and the outbound upstream mTLS client cert expiry (GET /api/ocsp)." }
+        ui_tls_cert_days_remaining: { type: integer, description: "Days until ui_tls_cert_not_after (negative once expired). Present under the same condition as ui_tls_cert_not_after." }
     RewriteList:
       type: object
       required: [rules, count]
