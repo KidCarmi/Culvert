@@ -139,6 +139,68 @@ func (p *tracingWireProbe) send(t *testing.T, header, value string) (reached boo
 	}
 }
 
+// assertAdoptedForDeliveredByte carries the per-byte half of the wall above: the
+// parser handed this value through unchanged, so Culvert's bound is the only
+// thing standing between the byte and ~20 log sites. Split out of the test to
+// keep each piece one job — the sweep classifies, this decides.
+func assertAdoptedForDeliveredByte(t *testing.T, b int, value, adopted string, seen []string) {
+	t.Helper()
+	if len(seen) != 1 || seen[0] != value {
+		t.Errorf("byte 0x%02x: parser delivered %q, want exactly [%q]", b, seen, value)
+	}
+	if b >= 0x21 && b <= 0x7e {
+		if adopted != value {
+			t.Errorf("byte 0x%02x: adopted %q, want the client's %q", b, adopted, value)
+		}
+		return
+	}
+	// Outside the charset: must be replaced by a minted id, never adopted.
+	if adopted == value {
+		t.Errorf("byte 0x%02x: adopted the client value %q verbatim over the wire", b, value)
+	}
+	if len(adopted) != requestIDHexLen {
+		t.Errorf("byte 0x%02x: adopted %q, want a freshly minted %d-char id", b, adopted, requestIDHexLen)
+	}
+}
+
+// expectedParserRefusedBytes is the MEASURED partition, pinned: C0 minus TAB is
+// 31 byte values, DEL is the 32nd.
+func expectedParserRefusedBytes() map[byte]bool {
+	want := map[byte]bool{0x7f: true}
+	for b := 0x00; b < 0x20; b++ {
+		if b != 0x09 {
+			want[byte(b)] = true
+		}
+	}
+	return want
+}
+
+// assertParserRefusedPartition compares the observed refusal set against the
+// measured one in BOTH directions, which is what makes the wall fail for a Go
+// release that widens the deliverable set AND for one that narrows it.
+func assertParserRefusedPartition(t *testing.T, refusedByParser []byte) {
+	t.Helper()
+	want := expectedParserRefusedBytes()
+	got := make(map[byte]bool, len(refusedByParser))
+	for _, b := range refusedByParser {
+		got[b] = true
+	}
+
+	if len(refusedByParser) != len(want) {
+		t.Errorf("net/http refused %d byte values, expected %d: %#v", len(refusedByParser), len(want), refusedByParser)
+	}
+	for _, b := range refusedByParser {
+		if !want[b] {
+			t.Errorf("net/http refused 0x%02x, which this wall did not expect — the deliverable set NARROWED; re-check which gates still prove anything", b)
+		}
+	}
+	for b := range want {
+		if !got[b] {
+			t.Errorf("net/http now DELIVERS 0x%02x into a header value; the deliverable set WIDENED and request_tracing_bounds.go's reachability note is stale", b)
+		}
+	}
+}
+
 // TestSecReqID2Wire_DeliverableByteSpaceIsPinned is the empirical wall. It
 // measures, byte by byte, what a real net/http server will carry into a header
 // value, and requires that every DELIVERED byte outside the accepted charset is
@@ -160,54 +222,10 @@ func TestSecReqID2Wire_DeliverableByteSpaceIsPinned(t *testing.T) {
 			continue
 		}
 		delivered = append(delivered, byte(b))
-
-		// The parser handed the value through unchanged, so the bound is the
-		// only thing standing between this byte and ~20 log sites.
-		if len(seen) != 1 || seen[0] != value {
-			t.Errorf("byte 0x%02x: parser delivered %q, want exactly [%q]", b, seen, value)
-		}
-		if b >= 0x21 && b <= 0x7e {
-			if adopted != value {
-				t.Errorf("byte 0x%02x: adopted %q, want the client's %q", b, adopted, value)
-			}
-			continue
-		}
-		// Outside the charset: must be replaced by a minted id, never adopted.
-		if adopted == value {
-			t.Errorf("byte 0x%02x: adopted the client value %q verbatim over the wire", b, value)
-		}
-		if len(adopted) != requestIDHexLen {
-			t.Errorf("byte 0x%02x: adopted %q, want a freshly minted %d-char id", b, adopted, requestIDHexLen)
-		}
+		assertAdoptedForDeliveredByte(t, b, value, adopted, seen)
 	}
 
-	// The measured partition, pinned. C0 minus TAB is 31 bytes; DEL is the 32nd.
-	wantRefused := map[byte]bool{0x7f: true}
-	for b := 0x00; b < 0x20; b++ {
-		if b != 0x09 {
-			wantRefused[byte(b)] = true
-		}
-	}
-	if len(refusedByParser) != len(wantRefused) {
-		t.Errorf("net/http refused %d byte values, expected %d: %#v", len(refusedByParser), len(wantRefused), refusedByParser)
-	}
-	for _, b := range refusedByParser {
-		if !wantRefused[b] {
-			t.Errorf("net/http refused 0x%02x, which this wall did not expect — the deliverable set NARROWED; re-check which gates still prove anything", b)
-		}
-	}
-	for b := range wantRefused {
-		found := false
-		for _, d := range refusedByParser {
-			if d == b {
-				found = true
-				break
-			}
-		}
-		if !found {
-			t.Errorf("net/http now DELIVERS 0x%02x into a header value; the deliverable set WIDENED and request_tracing_bounds.go's reachability note is stale", b)
-		}
-	}
+	assertParserRefusedPartition(t, refusedByParser)
 
 	// NOT VACUOUS: the wall is worthless if almost nothing is delivered.
 	if len(delivered) != 224 {
