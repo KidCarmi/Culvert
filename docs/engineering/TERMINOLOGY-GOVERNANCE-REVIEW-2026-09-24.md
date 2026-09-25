@@ -39,7 +39,8 @@
 parts of the same window did find drift this pass missed; see "Overlap with parallel reports" below.
 
 1. **The new admin-facing field, row and metric names below were checked for cross-surface
-   consistency and found consistent.** This check covered names and their mappings only. It did not
+   consistency. Apart from the OCSP rejection counters, which are the already-open T-54 (below), they
+   are consistent.** This check covered names and their mappings only. It did not
    read description prose against the glossary, and it did not compare the OpenAPI audit-event names
    with the handlers, which is how it missed the "appliance" prose and the tool-trust audit-event
    mismatch (see "Overlap with parallel reports").
@@ -49,8 +50,15 @@ parts of the same window did find drift this pass missed; see "Overlap with para
      - The six rejection counters (`notForCertificateTotal`, `unauthorizedResponderTotal`,
        `malformedResponseTotal`, `staleResponseTotal`, `unknownStatusTotal`, `responderBlockedTotal`)
        correspond one-to-one with `culvert_ocsp_response_rejected_total{reason=...}` labels in
-       `ocsp_metrics.go` (camelCase field ↔ snake_case label, e.g. `notForCertificateTotal` ↔
-       `not_for_certificate`). The GUI does not show them individually. It sums them into one "Responses
+       `ocsp_metrics.go` (e.g. `notForCertificateTotal` ↔ `not_for_certificate`), but the spellings do not
+       all match: `malformedResponseTotal` ↔ `malformed`, `staleResponseTotal` ↔ `stale`, and the Go
+       accessor `UnknownTotal()` ↔ `unknownStatusTotal`/`unknown_status` (`ui_security.go:1843-1845`,
+       `ocsp_metrics.go:59-61`). `responder_blocked` (`ocsp_metrics.go:62`) is also counted in a series
+       described as discarded responses, although no response exists in that case. Both points are
+       **T-54**, opened by the 2026-09-12 report (#1372, audited `d378dff..2833db3`; `2833db3` is an
+       ancestor of `6ec745d`) and still open at `6ec745d`. The first revisions of this report called
+       these counters consistent and left T-54 out of the backlog; both were wrong and are corrected
+       here. The GUI does not show them individually. It sums them into one "Responses
        rejected" counter (`static/index.html:4485`, filled at `:17517`).
      - `respondersTruncatedTotal` ↔ `culvert_ocsp_responders_truncated_total`. It is not shown in the GUI.
      - `coverage` and `uncheckedEnforcingPaths` ↔ the separate `culvert_ocsp_path_checked{path}` gauge
@@ -119,20 +127,23 @@ parts of the same window did find drift this pass missed; see "Overlap with para
    no `rate_limit_rpm` or `conn_limit_max_per_ip` YAML key; only `security.rate_limit` and
    `security.max_conns_per_ip` exist. All three confirmed exactly as the prior reports left them.
 
-**Terminology Health Score: 8.7 / 10** (unchanged from 2026-09-08/09/11). This pass's checks found no new
-drift in a 256-file, backend-and-CI-heavy window, and no spot-checked carry-over item moved, so the score neither rises
-nor falls. It does not account for the parallel reports' findings (see "Overlap with parallel reports");
+**Terminology Health Score: 8.6 / 10** (unchanged from 2026-09-12). The starting point is the 2026-09-12
+report's 8.6, which already charged T-54 (backlog 13 → 14); this report does not charge it again. This
+pass's checks found no new drift in a 256-file, backend-and-CI-heavy window, and no spot-checked carry-over
+item moved, so the score neither rises nor falls. The first revisions of this report said 8.7 because they
+started from the 2026-09-11 report and missed T-54. It does not account for the parallel reports' findings (see "Overlap with parallel reports");
 the series' later reports reconcile the score.
 
 ---
 
 ## Carried-Over Findings (unchanged)
 
-All fourteen previously-open finding IDs (thirteen backlog entries, since T-21 and T-32 are tracked as
-one paired item) remain open with their original evidence, spot-checked as described in item 2 above: T-9, T-11, T-12,
-T-13 (residual), T-17, T-18, T-21+T-32 (paired), T-25 (residual), T-29, T-30, T-33, T-34, T-39. Full
+All fifteen previously-open finding IDs (fourteen backlog entries, since T-21 and T-32 are tracked as
+one paired item) remain open with their original evidence, spot-checked as described in items 1–3 above: T-9, T-11, T-12,
+T-13 (residual), T-17, T-18, T-21+T-32 (paired), T-25 (residual), T-29, T-30, T-33, T-34, T-39, T-54. Full
 descriptions and the priority-ordered refactoring plan are unchanged from
-`TERMINOLOGY-GOVERNANCE-REVIEW-2026-09-09.md` and are not restated here, to avoid drift between two
+`TERMINOLOGY-GOVERNANCE-REVIEW-2026-09-09.md` (T-9..T-39) and `TERMINOLOGY-GOVERNANCE-REVIEW-2026-09-12.md`
+(T-54) and are not restated here, to avoid drift between two
 descriptions of the same open items — see that report (or its predecessors, cited therein) for the
 canonical text of each.
 
@@ -287,10 +298,10 @@ their ID notes.
 No production-worthy NEW terminology improvement was identified by this pass's checks (parallel reports
 found some in the same window; see above): the 34-merge window audited
 was CI/release-pipeline engineering plus MCP-canary and reliability (CHAOS-60/63/65) work, all internally
-consistent where these checks looked. The 2026-09-21 report found that the window did add "appliance"
+consistent where these checks looked, apart from the OCSP counters that are the already-open T-54. The 2026-09-21 report found that the window did add "appliance"
 to customer-facing docs and an OpenAPI description, which this pass missed.
-The fourteen-ID (thirteen-entry) carry-over backlog remains open with its original evidence. Four of its
-IDs (T-11, T-12, T-29, T-30) were spot-checked at their cited locations; the backlog was not exhaustively
+The fifteen-ID (fourteen-entry) carry-over backlog, including T-54, remains open with its original
+evidence. Five of its IDs (T-11, T-12, T-29, T-30, T-54) were spot-checked at their cited locations; the backlog was not exhaustively
 re-verified. No cosmetic or
 preference-driven renames are proposed. This report itself — the audit record and backlog
 reconciliation — is the deliverable of this pass; per the DEBT-014 process lesson, it was written only
