@@ -79,6 +79,12 @@ Two ways to turn CDR on, and either one is enough — you do not need both:
 > enabled, eligible SSL-inspected files are forwarded without ever calling
 > Sluice, with no counter or log line. Enable at least one body-scanning
 > engine (or the remote scan service) alongside CDR.
+>
+> The same function has a second, unconditional gate ahead of it: a host
+> entered in **Security Scan → Exclusions** (`globalScanExclusions`) skips
+> `scanInspectBody` entirely, so it bypasses CDR too — even with a body
+> scanner enabled and a matching CDR policy rule. A scan exclusion is not
+> scoped to AV/DPI only; treat it as an exclusion from CDR as well.
 
    **The sentinel can only force CDR *on*, never *off*, across a restart.**
    At boot, `loadCDR` starts from the static `cdr.enabled` value (config
@@ -184,6 +190,26 @@ open, the pool has no client to pick and the request passes through
 **unconditionally** — see the "no client to call" gate under **Failure
 behavior** above; this is *not* governed by `fail_mode`.
 
+> **Single-instance half-open recovery is currently broken.** The default
+> half-open probe budget is 1 (`HalfOpenProbes`), and `runCDRStage` spends it
+> before a real probe ever happens: it first calls `cdrActiveClient()` just
+> to check whether *any* client exists, and that call alone invokes
+> `Pool.Pick()` → `Breaker.Allow()`, consuming the sole half-open
+> reservation. `safeCDRSanitize`'s own `cdrPickPooled()` call — the one that
+> would actually run a probe RPC and call `OnSuccess`/`OnFailure` — then
+> finds the budget already exhausted and gets `nil` back, so CDR silently
+> skips (fail-open) instead of probing. With only one instance in the pool
+> there is no other candidate for `Pick()` to fall through to, so the
+> breaker never sees a real probe and **stays half-open indefinitely** —
+> not the elapsed-time-plus-one-success path described above. A process
+> restart resets it (the pool starts empty, so there is no carried breaker
+> to inherit); a live reconfigure through the API does **not** — a same-name
+> instance keeps its existing `*cdrCircuitBreaker` object across rebuilds
+> (`dialEnrolledInstance` matches by name against the current pool), so
+> toggling or re-saving the instance alone will not clear the stuck state.
+> A pool with two or more *closed* instances is unaffected, since `Pick()`'s
+> first `Allow()==true` match is usually one of those, not the half-open one.
+
 Two observability tiers exist. `culvert_cdr_instance_healthy` and
 `culvert_cdr_queue_depth` (from the 15-second background health poll) are
 **pool-wide aggregates**: `instance_healthy` is 1 when *at least one*
@@ -194,9 +220,19 @@ instances — neither carries an instance label, so neither alone tells you
 labeled by `instance`: `culvert_cdr_pool_instance_healthy{instance}`,
 `culvert_cdr_pool_breaker_state{instance}` (0=closed, 1=open, 2=half_open),
 and `culvert_cdr_pool_breaker_trips_total{instance}`. Build per-member
-alerting off the `_pool_*` series, not the two aggregates; for ad hoc
-inspection use `GET /api/cdr/instances`, which carries per-instance health
-and breaker state. `GET /api/cdr/health` does **not** — it returns only the
+alerting off the `_pool_*` series, not the two aggregates — but treat them
+as **live-pool-only**: `buildCDRPoolFromRegistry` silently skips an
+enrolled instance whose certificate load or dial fails at (re)init time
+(logged, never added to the pool), so that instance never gets a
+`_pool_*{instance}` series at all — no `breaker_state`, no `healthy`, no
+error — while the two aggregates can stay green because another member
+dialed successfully. A missing `instance` label is not evidence of health;
+cross-check the `_pool_*` series against your enrolled-instance inventory
+(`GET /api/cdr/instances`) or the `CDR: pool: skipping "<name>"` startup/
+reconfigure log line to catch a member that never made it into the pool.
+`GET /api/cdr/instances` is also the right surface for ad hoc inspection,
+since it carries per-instance health and breaker state.
+`GET /api/cdr/health` does **not** — it returns only the
 cached/live Sluice `Health` response plus pool-wide `consecutiveFailures`/
 `liveHealthy`, with no per-instance breakdown, so it cannot tell you which
 member is unhealthy.
