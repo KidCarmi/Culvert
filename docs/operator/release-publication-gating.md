@@ -659,7 +659,7 @@ and the weekly SEC-F5 freshness canary.
 no Go, installer or packaging code references `kidcarmi.github.io` — so **no
 shipped client defaults to Pages**. The one affected case is an operator who
 explicitly set `CULVERT_RELEASE_CATALOG_URL` to the Pages URL; they must repoint
-it at `https://catalog.culvertlabs.com/release-catalog`. Because the appliance
+it at `https://catalog.culvertlabs.com/release-catalog`. Because Culvert
 verifies the signature regardless of origin, that repoint is a configuration
 change, not a trust change.
 

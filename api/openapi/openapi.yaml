@@ -480,7 +480,7 @@ components:
         uncheckedEnforcingPaths:
           type: array
           description: >-
-            Paths where this appliance validates an origin certificate on a
+            Paths where this node validates an origin certificate on a
             client's behalf and yet does not consult the revocation checker.
             Excludes bypassed CONNECT tunnels, which never terminate TLS.
           items: { type: string }

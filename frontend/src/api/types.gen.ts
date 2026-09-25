@@ -6237,7 +6237,7 @@ export interface components {
              * @description OCSP responses discarded because the signer is not an RFC 6960 authorized responder for the issuer — most importantly a certificate signing a verdict about itself. An accusation.
              */
             unauthorizedResponderTotal?: number;
-            /** @description Paths where this appliance validates an origin certificate on a client's behalf and yet does not consult the revocation checker. Excludes bypassed CONNECT tunnels, which never terminate TLS. */
+            /** @description Paths where this node validates an origin certificate on a client's behalf and yet does not consult the revocation checker. Excludes bypassed CONNECT tunnels, which never terminate TLS. */
             uncheckedEnforcingPaths?: string[];
             /**
              * Format: int64

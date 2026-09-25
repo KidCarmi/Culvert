@@ -7,8 +7,11 @@
 > not a statement about the tree this file is published in; the current governance state is whatever the
 > most recent review in this series says. Later windows are audited by later reports, never
 > retroactively by this one.
-> **Method:** Audited `46410c3..6c46ebd` — the window since the 2026-09-11 report's merge point,
-> confirmed as the then-current `origin/main` HEAD by a fetch immediately before this report was written on 2026-09-21 (the
+> **Finding-ID note:** this report's panel-title finding was first published as "T-40", which the
+> 2026-08-07 report had already used (the `idp_unreachable` alert rename). It is renumbered **T-57** here.
+> On `main` at `6c46ebd` the highest ID was T-53, and the other open reports in the series claim T-54–T-56.
+> **Method:** Audited `46410c3..6c46ebd` — the window since the 2026-09-11 report's own branch head
+> (`46410c3`, PR #1363, merged to `main` in `0665453`). The end commit `6c46ebd` was confirmed as the then-current `origin/main` HEAD by a fetch immediately before this report was written on 2026-09-21 (the
 > DEBT-014 lesson carried forward again: sync against `main` right before opening a PR). The window covers
 > 21 first-parent merges / 154 files / ~29.4k insertions, dominated by two unrelated engineering streams:
 > the MCP Agent Security Gateway's "first controlled canary" execution architecture (ADR-0035 —
@@ -28,8 +31,10 @@
 
 ## Executive Summary
 
-**One new terminology defect found and fixed this pass (T-40)** — a live admin-UI panel title named a
-revocation mechanism (CRL) the appliance does not implement. No other new terminology drift was found.
+**One new terminology defect found and fixed this pass (T-57)** — a live admin-UI panel title named a
+revocation mechanism (CRL) Culvert does not implement. **One recurrence of a closed finding, also fixed:**
+the window reintroduced "appliance" in customer-facing text (T-51 recurrence, below), which
+`docs/design/PRODUCT-TERMINOLOGY.md` forbids ("Appliance: *Not used* … the UI says node or instance").
 
 Two bounded audits were run against the diff since the last review; the second one's original conclusion
 was wrong and is corrected here.
@@ -66,10 +71,13 @@ was wrong and is corrected here.
    `GET /api/ocsp`, and `docs/operator/ocsp-revocation-checking.md` were spot-checked for cross-surface
    naming and match byte-for-byte (metric names ↔ HELP text ↔ doc section headings) — that part of the
    original audit was correct. **Correction**: the original report went on to conclude "internal engine, no
-   independent GUI panel — not a finding," which is factually wrong — `static/index.html:4477` has carried
-   a live panel titled **"OCSP / CRL Revocation"** since this window (an "Enable OCSP checking" toggle plus
-   four counters and three status banners, all OCSP-only). Auditing that panel directly, as it should have
-   been the first time, surfaces a real finding: see **T-40** below.
+   independent GUI panel — not a finding," which is factually wrong — `static/index.html:4477` carries a live
+   panel titled **"OCSP / CRL Revocation"** (the title predates this window; the window added its coverage
+   counter and banners). The panel is an "Enable OCSP checking" toggle plus four counters and three status
+   banners, all OCSP-only. Auditing that panel directly, as it should have
+   been the first time, surfaces a real finding: see **T-57** below. The same stream also added
+   "appliance" to the OCSP operator runbook and to an OpenAPI field description on `GET /api/ocsp`; see
+   the T-51 recurrence below.
 
 Release-pipeline changes in the window (`resign-catalog.yml`, `docs/operator/catalog-resign-runbook.md`,
 `roadmap/R2-CATALOG-MIGRATION-PLAN.md`, the `.github/scripts/*` release-gating rewrite) are CI/operator-doc
@@ -91,10 +99,11 @@ rather than assuming the backlog is unchanged just because no fix commit was see
   `POST /v1/upgrades/check`/`apply` with no `/v1/updates/*` alias, while the GUI still says "Dispatch
   Release" — unchanged.
 
-**Terminology Health Score: 8.7 / 10** (unchanged). One new defect (T-40) was found and fixed within the
+**Terminology Health Score: 8.7 / 10** (unchanged). One new defect (T-57) was found and fixed within the
 same pass — a security-adjacent admin-UI label overclaiming a capability — so, following 2026-09-08's
 precedent that a single item's discovery and its resolution are symmetric ±0.1 moves, the two cancel out
-rather than compounding. The pre-existing thirteen-item backlog did not otherwise move. The score is not
+rather than compounding; the T-51 recurrence was likewise fixed within the pass. The pre-existing
+thirteen-entry backlog did not otherwise move. The score is not
 raised above 8.7 despite the same-day fix, since a defect that reached production before this review is
 not evidence of improving health, only of this review doing its job.
 
@@ -120,7 +129,7 @@ this report's first published revision before merge, both now fixed above:
    fallback. Verified directly (`Read static/index.html:4470-4499`; `grep -rn "CRL" internal/ocsp/*.go
    ocsp_coverage.go ocsp_metrics.go docs/operator/ocsp-revocation-checking.md` — the runbook's one hit is
    itself just quoting the panel title back, confirming no CRL logic exists anywhere in the subsystem) and
-   promoted to a new finding, **T-40**, below.
+   promoted to a new finding, **T-57**, below.
 
 Both errors trace to the same root cause: the original audit searched only the files the diff touched
 directly for GUI/API surfacing (`ui_mcp_tooltrust.go` for routes; the diff's own `.go` files for a GUI
@@ -129,14 +138,19 @@ file, the generated OpenAPI/TS client) that a real admin or support engineer wou
 process note for future passes: "no GUI/API surface found" is a claim that must be verified against the
 rendered surface directly, not inferred from which files a diff touched.
 
+A second review round found three more errors, also fixed: the report itself used "appliance" (which
+the glossary forbids) and declared the window clean of it, when the window had added it to customer-facing
+text (now the T-51 recurrence below); it reused the ID T-40 (now T-57); and roadmap text still described
+the current panel as "OCSP / CRL" (now annotated as historical or corrected, see T-57).
+
 ---
 
 ## New Findings This Pass
 
-### T-40 — Admin-UI panel titled "OCSP / CRL Revocation" names a capability that does not exist (High) — FIXED this pass
+### T-57 — Admin-UI panel titled "OCSP / CRL Revocation" names a capability that does not exist (High) — FIXED this pass
 
 - **Concept**: certificate-revocation checking for upstream/inspected TLS connections, and which
-  mechanisms the appliance actually uses to perform it.
+  mechanisms Culvert actually uses to perform it.
 - **Names found**: the live admin panel (`static/index.html:4477`, present in production, not
   experimental/behind a flag) is titled **"OCSP / CRL Revocation"**, with a toggle labeled "Enable OCSP
   checking" and four counters/banners underneath, every one of them OCSP-specific (`ocsp-cache-len`,
@@ -160,17 +174,47 @@ rendered surface directly, not inferred from which files a diff touched.
   of harm: an admin, a security engineer, or a support engineer trusts a label that does not describe what
   the product does.
 - **Canonical direction, applied in this same PR**: renamed the panel to **"OCSP Revocation"** (dropped
-  "/ CRL" until CRL fallback, OCSP-9/OCSP-10 in CLAUDE.md's own register, actually ships) and updated
-  `docs/operator/ocsp-revocation-checking.md`'s one reference to match
-  (`static/index.html:4477`, `docs/operator/ocsp-revocation-checking.md:4`). This was a pure label
+  "/ CRL" until CRL fallback, register row OCSP-10, actually ships; OCSP-9 is stapling, a separate gap) and
+  updated `docs/operator/ocsp-revocation-checking.md`'s one reference to match
+  (`static/index.html:4477`, `docs/operator/ocsp-revocation-checking.md:4`). Roadmap text that describes the
+  current UI was brought in line: `roadmap/UI-DESIGN.md`'s Certificates-panel feature list now says "OCSP
+  toggle", and the two places `roadmap/CHAOS-ENGINEERING-REVIEW.md` state the panel title (register row
+  OCSP-10 and the §35 residuals list) are annotated as the title at the time, since renamed. The
+  historical description itself is kept. This was a pure label
   correction — no API field, metric name, config key, or audit event uses "CRL" anywhere (confirmed by the
   same-subsystem grep above), so there was no wire-compatibility obligation and no migration plan needed.
   If CRL fallback is added in the future, "OCSP / CRL Revocation" becomes accurate again and can be
   restored at that time.
-- **Affected surfaces**: GUI (`static/index.html:4477`) and one doc reference
-  (`docs/operator/ocsp-revocation-checking.md:4`). No API/config/audit/metric surface uses "CRL."
-- **Migration complexity**: trivial (two-line change, no wire contract) — applied. **Compatibility risk**:
-  none. **Actual PR size**: XS (2 lines changed).
+- **Affected surfaces**: GUI (`static/index.html:4477`), one operator-doc reference
+  (`docs/operator/ocsp-revocation-checking.md:4`), and three roadmap lines. No API/config/audit/metric
+  surface uses "CRL."
+- **Migration complexity**: trivial (label and prose only, no wire contract) — applied. **Compatibility
+  risk**: none. **Actual PR size**: XS.
+
+### T-51 recurrence — "appliance" reintroduced in customer-facing text (Low) — FIXED this pass
+
+- **Rule**: `docs/design/PRODUCT-TERMINOLOGY.md` governs UI labels and docs: "Appliance: *Not used.*
+  Culvert deploys as binary/container; the UI says **node** or **instance**." T-51 (2026-08-29) removed
+  the last labeled uses and deliberately left internal names alone (code comments, the
+  `x-culvert-tenant-scope: appliance` vendor-extension value, component-module names).
+- **Names found in this window's diff** (customer-facing only):
+  - OpenAPI `GET /api/ocsp` field `uncheckedEnforcingPaths` description: "Paths where this appliance
+    validates…" (`api/openapi/openapi.yaml`, carried into `openapi.json` and
+    `frontend/src/api/types.gen.ts`).
+  - `docs/operator/ocsp-revocation-checking.md:22` ("The appliance states it in three places") and `:154`
+    ("go out directly from the appliance").
+  - `docs/operator/geoip-resolution-health.md:36` ("on an appliance with no GeoIP database").
+  - `docs/operator/release-publication-gating.md:662` ("Because the appliance verifies the signature").
+- **Fix applied**: each now says "node" ("Culvert" in the release-gating sentence, whose subject is the
+  product). `make api-bundle` regenerated `openapi.json` and `make api-bundle-check` passes; the matching
+  JSDoc line in `types.gen.ts` was hand-synced as T-51 did (the frontend generator's pinned toolchain was
+  not available), and the frontend drift gate re-checks it in CI.
+- **Not actioned** (T-51's disposition): the window's other new uses are code comments and tests
+  (`ocsp_coverage.go`, `ocsp_metrics.go`, `geoip_resolve_health.go`, `internal/ocsp/ocsp_chaos_test.go`,
+  `mcp_live_execution_e2e_test.go`), workflow comments/CI log text (`publish-catalog-r2.yml`,
+  `resign-catalog.yml`), `CLAUDE.md`, `roadmap/CHAOS-ENGINEERING-REVIEW.md`, and one `CHANGELOG.md` entry,
+  which is a record of what shipped and is not rewritten.
+- **Compatibility risk**: none — description text and prose only; no field, path or schema changed.
 
 ---
 
@@ -182,8 +226,8 @@ T-9, T-11, T-12, T-13 (residual), T-17, T-18, T-21+T-32 (paired), T-25 (residual
 T-39. Full descriptions and the priority-ordered refactoring plan are unchanged from
 `TERMINOLOGY-GOVERNANCE-REVIEW-2026-09-09.md` and are not restated here to avoid drift between two
 descriptions of the same open items — see that report (or its predecessors, cited therein) for the
-canonical text of each. **T-40 (above) was found and fixed within this same pass and does not join the
-open backlog** — the thirteen-entry backlog is unchanged; T-40 is recorded here only as a closed finding
+canonical text of each. **T-57 (above) was found and fixed within this same pass and does not join the
+open backlog** — the thirteen-entry backlog is unchanged; T-57 is recorded here only as a closed finding
 ID, for the same reason closed items stay in the numbering series rather than being silently dropped.
 
 The "Content & Scanning" (legacy GUI) vs. "Content Security" (new React frontend) soft finding — a
@@ -194,14 +238,16 @@ item — also remains unresolved, per 2026-09-09's reasoning, and was not revisi
 
 ## Stop-Condition Assessment
 
-**Does not apply cleanly this pass — a production-worthy terminology defect (T-40) was identified and
+**Does not apply cleanly this pass — a production-worthy terminology defect (T-57) was identified and
 fixed**: a security-adjacent GUI label naming a revocation mechanism (CRL) that does not exist in the
-implementation, corrected in this same PR (XS, no migration risk, no wire surface affected). The MCP
+implementation, corrected in this same PR (XS, no migration risk, no wire surface affected). A recurrence
+of the closed T-51 ("appliance" in customer-facing text) was also fixed. The MCP
 canary-execution stream introduced no new drift once correctly re-audited (see "Corrections made in
 review"). The fourteen-ID carry-over backlog is otherwise unchanged and was independently re-confirmed (not
 merely assumed unchanged) for its three highest-visibility pre-existing items (T-12, T-13, T-29/T-30). No
 cosmetic or preference-driven renames are proposed. This report's first revision contained two factual
-errors, both caught by automated PR review before merge and corrected above rather than silently fixed —
+errors, and a second review round found three more; all were caught by automated PR review before merge
+and corrected above rather than silently fixed —
 per the DEBT-014 process lesson, it was written only after a fresh sync against `origin/main` immediately
 before opening its PR, and this revision adds a second lesson: a "no GUI/API surface" claim must be checked
 against the rendered surface directly, not inferred from which files a diff touched.

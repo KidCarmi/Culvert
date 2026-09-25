@@ -19,7 +19,7 @@ through the proxy. It covers one path:
 | `connect_bypass` | n/a | A bypassed CONNECT tunnel is relayed raw. Culvert never sees the certificate, so there is nothing to check. |
 
 This is recorded as register row **OCSP-8** and is deliberate for now — see §6.
-The appliance states it in three places so it cannot be missed:
+The node states it in three places so it cannot be missed:
 
 * a `WARNING` log line at the moment you enable it, from either the config file
   or the admin API;
@@ -151,7 +151,7 @@ culvert_ocsp_path_checked{path="ssl_inspect_origin"} == 0
 Symptom: upstream HTTPS connections start failing, `culvert_ocsp_fail_closed_total`
 climbing, `culvert_ocsp_revoked_total` flat.
 
-1. **Is it egress?** Responder queries go out **directly** from the appliance —
+1. **Is it egress?** Responder queries go out **directly** from the node —
    they do not traverse a configured parent proxy and do not honour
    `HTTP(S)_PROXY` from the environment. An egress policy that blocks outbound
    port 80 to arbitrary hosts blocks OCSP. Allow the responder hosts named in
