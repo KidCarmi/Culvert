@@ -217,6 +217,11 @@ Later review rounds found more errors, also fixed:
   - `docs/operator/ocsp-revocation-checking.md:39`, `:49`, `:50`, `:91`, `:95`, `:144` → "status" or
     "response" as above ("cached verdicts" → "cached statuses").
   - `CHANGELOG.md:226`, `:232`, `:259` (the CHAOS-65 entry).
+  - Strings the OCSP code emits, which operators read in errors, logs and `/metrics`:
+    `internal/ocsp/ocsp.go:424` (error: "no responder returned a usable verdict"), `:573` (log line: "no
+    usable verdict from … responder(s)"), and the HELP texts at `ocsp_metrics.go:38` ("affirmative
+    verdict"), `:42` ("Verdicts currently cached") and `:55` ("without producing a verdict"). Same
+    rewording.
 - **Affected surfaces**: GUI (`static/index.html:4477`), one operator-doc reference
   (`docs/operator/ocsp-revocation-checking.md:4`), and three roadmap lines. No API/config/audit/metric
   surface uses "CRL."
@@ -300,6 +305,20 @@ YAML and are not counted.
 | exclusion (`exclusion`) | 33 | 6 | `docs/operator/mcp-first-controlled-canary-review.md`: 397,795,816,1104,1248,2807 | The MCP rollout-scope "exclusions" field, not an inspection bypass — no violation |
 | kill switch (`kill.?switch`) | 2 | 0 | — | Test identifiers only (`EngageKillSwitch`/`ClearKillSwitch`) |
 | unauth mode, threat engine, Cluster Nodes, blacklist/whitelist, Live Feed, Live Request Log, Recent Requests, Users & Roles, proxy pool | 0 each | 0 | — | — |
+
+**Strings emitted by Go code.** The file-based "visible" rule does not cover strings that non-test Go
+code prints to operators. A second pass, `git diff 46410c3 6c46ebd -U0 -- '*.go' ':!*_test.go' | grep
+-iE '^\+.*"[^"]*<pattern>[^"]*"'`, checked added string literals for each term:
+- "verdict": 7 lines. Five are the OCSP error, log and HELP strings above (under T-59). One is a code
+  comment that quotes a phrase (`internal/ocsp/ocsp.go:485`). One is the MCP reason-code value
+  `policy_verdict_not_invariant` (`internal/mcp/canary/permit.go`), a wire identifier, not prose.
+- "policy rule": 1 line, and it is a hit. The GeoIP diagnostics row's warning message says
+  "country-scoped policy rules are not matching…" (`geoip_resolve_health.go:322`). The glossary
+  says "rule" for a Stage-2 `PolicyRule`. **Recorded, not yet numbered**; the rewording is "country-scoped
+  rules".
+- "exclusion": 2 lines, both identifiers (the `first_canary_exclusions_forbidden` reason code and an
+  `"exclusions"` map key in the MCP scope code).
+- "appliance", "result", "incident", "scanner", "kill switch": 0 lines.
 
 **Recorded, not yet numbered — "verdict" outside OCSP (42 visible lines).** These use "verdict" for
 something other than a Diagnostics check, which breaks the same reservation:
