@@ -109,13 +109,14 @@ re-verified; they are carried over with their original evidence.
   `POST /v1/upgrades/check`/`apply` with no `/v1/updates/*` alias, while the GUI still says "Dispatch
   Release" — unchanged.
 
-**Terminology Health Score: 8.7 / 10** (unchanged). One new defect (T-59) was found and fixed within the
-same pass — a security-adjacent admin-UI label overclaiming a capability — so, following 2026-09-08's
+**Terminology Health Score: 8.6 / 10** (down from 8.7). One new defect (T-59) was found and fixed within
+the same pass — a security-adjacent admin-UI label overclaiming a capability — so, following 2026-09-08's
 precedent that a single item's discovery and its resolution are symmetric ±0.1 moves, the two cancel out
-rather than compounding; the T-51 recurrence was likewise fixed within the pass. The pre-existing
-thirteen-entry backlog did not otherwise move. The score is not
-raised above 8.7 despite the same-day fix, since a defect that reached production before this review is
-not evidence of improving health, only of this review doing its job.
+rather than compounding; the T-51 recurrence was likewise fixed within the pass. T-60 was also found in
+this pass and is left OPEN, growing the backlog from thirteen to fourteen entries; under the same ±0.1
+per-item precedent an unresolved new defect is a −0.1 move with nothing to cancel it, hence 8.6. The
+score is not raised above that despite the same-day T-59 fix, since a defect that reached production
+before this review is not evidence of improving health, only of this review doing its job.
 
 ---
 
@@ -302,7 +303,7 @@ YAML and are not counted.
 | Term (pattern) | Added lines | Visible | Visible lines (file:line) | Outcome |
 |---|---|---|---|---|
 | appliance (`appliance`) | 24 | 6 | `CHANGELOG.md`: 276; `api/openapi/openapi.yaml`: 483; `docs/operator/geoip-resolution-health.md`: 36; `docs/operator/ocsp-revocation-checking.md`: 22,122; `docs/operator/release-publication-gating.md`: 547 | Fixed; see the T-51-recurrence list (which also counts the generated `openapi.json`/`types.gen.ts` copies and the workflow `::error::` line, for 9) |
-| verdict (`verdict`) | 380 | 55 | `CHANGELOG.md`: 15,226,232,259,391; `api/openapi/openapi.yaml`: 488; `docs/operator/mcp-first-controlled-canary-review.md`: 51,392,970,1111,1124,1133,1251,1252,1253,2196,2203,2223,2228,2273,2489,2502,2533,2542,2543,2545,2558,2592,2646,2693,2702,2818,2902,2916,2992,3072,3080,3118,3293,3358,3559,3589,3635; `docs/operator/ocsp-revocation-checking.md`: 39,49,50,91,95,144; `docs/operator/release-publication-gating.md`: 22,60,455; `static/index.html`: 4484,4491,4494 | Recorded: 13 OCSP lines under T-59; 42 others below |
+| verdict (`verdict`) | 380 | 55 | `CHANGELOG.md`: 15,226,232,259,391; `api/openapi/openapi.yaml`: 488; `docs/operator/mcp-first-controlled-canary-review.md`: 51,392,970,1111,1124,1133,1251,1252,1253,2196,2203,2223,2228,2273,2489,2502,2533,2542,2543,2545,2558,2592,2646,2693,2702,2818,2902,2916,2992,3072,3080,3118,3293,3358,3559,3589,3635; `docs/operator/ocsp-revocation-checking.md`: 39,49,50,91,95,144; `docs/operator/release-publication-gating.md`: 22,60,455; `static/index.html`: 4484,4491,4494 | Recorded: 13 OCSP lines under T-59; 40 others below; 2 identifier-only lines (`:2558`, `:2592`) exempt |
 | result (`result`) | 75 | 7 | `CHANGELOG.md`: 417; `docs/operator/mcp-first-controlled-canary-review.md`: 2255,2402,2908,3116; `docs/operator/ocsp-revocation-checking.md`: 77; `docs/operator/release-publication-gating.md`: 362 | None means a request's decision (campaign, query and release results) — no violation |
 | incident (`incident`) | 5 | 1 | `docs/operator/mcp-first-controlled-canary-review.md`: 886 | Plain English ("during an incident"); no entity invented — no violation |
 | scanner (`scanner`) | 6 | 3 | `docs/operator/mcp-first-controlled-canary-review.md`: 2967,3212,3236 | A code scanner in a test wall, not a scanning engine — no violation |
@@ -325,15 +326,23 @@ grep -iE '^\+.*"[^"]*<pattern>[^"]*"'`, checked added string literals for each t
   `"exclusions"` map key in the MCP scope code).
 - "appliance", "result", "incident", "scanner", "kill switch": 0 lines.
 
-**Recorded, not yet numbered — "verdict" outside OCSP (42 visible lines).** These use "verdict" for
-something other than a Diagnostics check, which breaks the same reservation:
-- `docs/operator/mcp-first-controlled-canary-review.md`: all 37 lines listed above. The review uses
-  "verdict" for its own conclusions, for policy decisions, and in test and function names (for example
-  `:2558` `permitVerdictInvariant`, `:2592` `PermitVerdictNotInvariant`).
+**Recorded, not yet numbered — "verdict" outside OCSP (40 visible prose lines).** These use "verdict"
+for something other than a Diagnostics check, which breaks the same reservation:
+- `docs/operator/mcp-first-controlled-canary-review.md`: 35 of the 37 lines listed above. The review uses
+  "verdict" for its own conclusions and for policy decisions, including in the prose around test and
+  function names.
 - `docs/operator/release-publication-gating.md:22`, `:60`, `:455`: a CI gate's outcome.
 - `CHANGELOG.md:15` (a CI gate's outcome) and `:391` (rate-limit exemption verdicts).
 
-They are not fixed in this report PR. Rewording the MCP review would touch many lines of a document that
+**Identifier-only, exempt (2 lines).** `mcp-first-controlled-canary-review.md:2558` and `:2592` contain
+"verdict" only inside the backend identifiers `permitVerdictInvariant` and `PermitVerdictNotInvariant`.
+The glossary exempts backend identifiers from renaming (as with `policy_verdict_not_invariant` above), so
+they are not violations. They are the only two of the 37 MCP lines with no whole-word "verdict";
+reproduce with `git diff 46410c3 6c46ebd -U0 -- docs/operator/mcp-first-controlled-canary-review.md |
+grep -v '^+++' | grep -iE '^\+.*verdict' | grep -viE '(^|[^a-z])verdict'`. Of the 55 visible lines, 53 are
+therefore violations (13 under T-59, 40 recorded here) and 2 are exempt identifiers.
+
+The 40 are not fixed in this report PR. Rewording the MCP review would touch many lines of a document that
 other PRs edit, so it needs its own change. The 13 OCSP lines (`static/index.html` ×3,
 `openapi.yaml:488`, the runbook ×6, `CHANGELOG.md:226`, `:232`, `:259`) are under T-59.
 
