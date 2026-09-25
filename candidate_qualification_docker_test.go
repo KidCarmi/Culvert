@@ -20,6 +20,7 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
@@ -276,8 +277,13 @@ func TestCandidateQualification_RealDockerImageStore(t *testing.T) {
 		for _, p := range platforms {
 			refs = append(refs, image+"@"+p.digest)
 		}
+		// t.Context() is already cancelled when cleanups run, so removal
+		// gets its own bounded context; otherwise the images are left behind.
+		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+		defer cancel()
 		for _, r := range refs {
-			_, _ = dockerOut(t, "image", "rm", "-f", r)
+			// #nosec G204 -- docker with this test's own arguments.
+			_ = exec.CommandContext(ctx, "docker", "image", "rm", "-f", r).Run()
 		}
 	})
 

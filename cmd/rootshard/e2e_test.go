@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -259,6 +260,7 @@ func TestPilot_EndToEnd(t *testing.T) {
 	// Every way evidence can be incomplete must be refused by the standalone
 	// verdict — no unsharded reference exists at this point.
 	t.Run("incomplete evidence", func(t *testing.T) { incompleteEvidence(t, f) })
+	t.Run("lane package handed first", func(t *testing.T) { laneFirst(t, f, v) })
 
 	if err := writeJSON(f.path("no-exceptions.json"), CoverageExceptions{Schema: 1}); err != nil {
 		t.Fatal(err)
@@ -456,4 +458,71 @@ func unusableProfile(t *testing.T, f *fixture, commit string) {
 		t.Fatal(err)
 	}
 	wantRejected(t, f, "belongs to the root package")
+}
+
+// laneFirst: -first hands chosen lane packages to `go test` first (§18.5 arm
+// C). The lane stays the same lane: the verdict accepts it with the same
+// merged coverage, and a name that is not a lane package, or a -first on the
+// universe (which must stay the whole lane), is refused.
+func laneFirst(t *testing.T, f *fixture, whole Verdict) {
+	const sub = "example.com/pilot/sub"
+	log := f.mustRS("run-lane", "-out-dir", f.path("lane-first"), "-commit", f.commit, "-timeout", "2m", "-first", sub)
+	var meta LaneMeta
+	if err := readJSON(f.path("lane-first", "meta.json"), &meta); err != nil {
+		t.Fatal(err)
+	}
+	if len(meta.Packages) == 0 || meta.Packages[0] != sub {
+		t.Fatalf("-first did not put %s first: %v", sub, meta.Packages)
+	}
+	// Which tiny fixture binary prints first is a race; the line's presence is
+	// what matters here.
+	if !strings.Contains(log, "run-lane: first test output from ") {
+		t.Fatalf("the lane does not report which package ran first:\n%s", log)
+	}
+	code, out := f.rs("verdict", "-build-dir", f.path("build"), "-shards-dir", f.path("shards"),
+		"-lane-dir", f.path("lane-first"), "-universe-dir", f.path("universe"), "-commit", f.commit, "-out-dir", f.path("verdict-first"))
+	var v Verdict
+	_ = readJSON(f.path("verdict-first", "verdict.json"), &v)
+	if code != 0 || !v.OK || v.Merged != whole.Merged || v.Lane.Packages != whole.Lane.Packages || !reflect.DeepEqual(v.Completeness, whole.Completeness) {
+		t.Fatalf("reordered lane rejected or different (exit %d):\n%s", code, out)
+	}
+	for _, bad := range [][]string{
+		{"run-lane", "-first", "example.com/pilot/nope"},
+		{"run-lane", "-first", sub + "," + sub},
+		{"universe", "-first", sub},
+	} {
+		args := append(append([]string{}, bad[0], "-out-dir", f.path("bad-"+bad[0]), "-commit", f.commit), bad[1:]...)
+		if code, out := f.rs(args...); code == 0 {
+			t.Fatalf("%v accepted:\n%s", bad, out)
+		}
+	}
+}
+
+// TestOrderFirst pins -first: named lane packages lead in the order given, the
+// rest keep `go list` order, and a name that is not a lane package or is
+// repeated is refused rather than silently ignored.
+func TestOrderFirst(t *testing.T) {
+	pkgs := []string{"m/a", "m/b", "m/c", "m/d"}
+	for _, tc := range []struct {
+		list string
+		want []string
+	}{
+		{"", pkgs},
+		{"m/c", []string{"m/c", "m/a", "m/b", "m/d"}},
+		{" m/d , m/b ", []string{"m/d", "m/b", "m/a", "m/c"}},
+		{"m/a", pkgs},
+	} {
+		got, err := orderFirst(slices.Clone(pkgs), tc.list)
+		if err != nil || !slices.Equal(got, tc.want) {
+			t.Errorf("orderFirst(%q) = %v, %v; want %v", tc.list, got, err, tc.want)
+		}
+	}
+	for list, want := range map[string]string{
+		"m/x":     "m/x is not a lane package",
+		"m/b,m/b": "m/b named twice",
+	} {
+		if _, err := orderFirst(pkgs, list); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("orderFirst(%q) err = %v; want %q", list, err, want)
+		}
+	}
 }
