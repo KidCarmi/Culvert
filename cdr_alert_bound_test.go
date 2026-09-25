@@ -382,3 +382,89 @@ func TestCDRHandleCallError_PostureIsUnchanged(t *testing.T) {
 		t.Fatal("a transport fault must still be counted as a CDR error")
 	}
 }
+
+// TestCDRCallErrorReportedTotal_CountsTheTriggeringFailure pins that the
+// rate-limited diagnostic never reports a magnitude that excludes the failure
+// it is describing.
+//
+// cdrHandleCallError calls noteCDRCallError and only THEN cdrErrorOutcome,
+// which owns the atomic increment, so reading the counter without counting the
+// triggering event reported the pre-event value — "errors total 0" printed
+// beside an actual error on the first failure of a process. The rate gate emits
+// at the onset and then at most one line per interval, so that understating
+// line is exactly the one an operator reads when an outage starts (Codex
+// review, PR #1483).
+//
+// Verified FAILING against the pre-fix shape (a bare atomic.LoadInt64), which
+// returns 0 on the first failure.
+func TestCDRCallErrorReportedTotal_CountsTheTriggeringFailure(t *testing.T) {
+	old := atomic.LoadInt64(&statCDRErrors)
+	t.Cleanup(func() { atomic.StoreInt64(&statCDRErrors, old) })
+
+	for _, prior := range []int64{0, 1, 7, 1 << 20} {
+		atomic.StoreInt64(&statCDRErrors, prior)
+		if got, want := cdrCallErrorReportedTotal(), prior+1; got != want {
+			t.Errorf("with %d prior errors the line reports %d, want %d", prior, got, want)
+		}
+	}
+}
+
+// TestCDRHandleCallError_ReportedTotalMatchesTheCounter pins the coupling that
+// the magnitude depends on: for ONE failed call, the total the line reports
+// equals the counter after the caller's increment.
+//
+// This is the assertion that catches the opposite over-correction — moving the
+// increment into noteCDRCallError, which would make the first line read 1 and
+// DOUBLE-COUNT every failure, since cdrErrorOutcome is also reached from the
+// ErrorMessage and unknown-status paths that never pass through the producer.
+func TestCDRHandleCallError_ReportedTotalMatchesTheCounter(t *testing.T) {
+	withCDRAlertStore(t)
+	resetCDRLogGate(t)
+
+	old := atomic.LoadInt64(&statCDRErrors)
+	atomic.StoreInt64(&statCDRErrors, 0)
+	t.Cleanup(func() { atomic.StoreInt64(&statCDRErrors, old) })
+
+	// What the diagnostic would print, captured before the caller increments.
+	reported := cdrCallErrorReportedTotal()
+
+	cdrHandleCallError(status.Error(codes.Unavailable, "sluice down"),
+		"profile", "fail_closed", 5, CDRConfig{})
+
+	counted := atomic.LoadInt64(&statCDRErrors)
+	if counted != 1 {
+		t.Fatalf("one failed call must charge the counter exactly once; got %d", counted)
+	}
+	if reported != counted {
+		t.Errorf("the line reports %d while the counter holds %d; the magnitude an "+
+			"operator reads must agree with the series they page on", reported, counted)
+	}
+}
+
+// TestCDRCallErrorLogLine_CarriesClassCauseAndTotal is the CONTROL for the two
+// gates above: the cheapest way to make a magnitude assertion pass is to stop
+// printing the cause or the class, which would delete the only signal naming
+// WHY the gateway is degraded. It also re-pins the CWE-117 sanitisation on the
+// one value Sluice writes, at the site that formats it.
+//
+// It asserts on the returned string rather than on captured log output,
+// deliberately: swapping the process-global logger races the async
+// alert-dispatch goroutines that read it through internal/obs — the
+// straggler-goroutine class this PR already closed twice (17b9edf, ba596ac).
+// An earlier draft of this gate did swap it and the race detector caught it.
+func TestCDRCallErrorLogLine_CarriesClassCauseAndTotal(t *testing.T) {
+	line := cdrCallErrorLogLine(status.Error(codes.Unavailable, "sluice down"), 3)
+
+	for _, want := range []string{"Unavailable", "sluice down", "errors total 3"} {
+		if !strings.Contains(line, want) {
+			t.Errorf("line %q is missing %q", line, want)
+		}
+	}
+
+	// A Sluice-supplied description carrying a newline must not forge a record.
+	forged := cdrCallErrorLogLine(
+		status.Error(codes.Unavailable, "down\nCDR: call error (OK): all clear; errors total 0"), 1)
+	if strings.ContainsAny(forged, "\n\r") {
+		t.Errorf("a remote-supplied description forged a second log record: %q", forged)
+	}
+}

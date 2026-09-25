@@ -517,12 +517,13 @@ func cdrCallErrorClass(err error) string {
 // noteCDRCallError logs (rate-limited, with the cause) and alerts (gated, with
 // a bounded class) one failed Sluice Sanitize call. The count is
 // cdrErrorOutcome's, which the caller reaches for this same event.
+// The logged total comes from cdrCallErrorReportedTotal, which counts the
+// triggering failure; see that function for why.
 func noteCDRCallError(err error) {
 	now := time.Now().UnixNano()
 	if prev := cdrCallErrorLogAt.Load(); (prev == 0 || now-prev >= int64(cdrCallErrorLogInterval)) &&
 		cdrCallErrorLogAt.CompareAndSwap(prev, now) {
-		logger.Printf("CDR: call error (%s): %s; errors total %d",
-			cdrCallErrorClass(err), sanitizeLog(err.Error()), atomic.LoadInt64(&statCDRErrors))
+		logger.Print(cdrCallErrorLogLine(err, cdrCallErrorReportedTotal()))
 	}
 	// The HasSubscriber gate is the contract fireDNSFailureAlert documents,
 	// applied to the other producer whose rate is set by a fault rather than by
@@ -537,6 +538,41 @@ func noteCDRCallError(err error) {
 		Source: "cdr",
 		Detail: cdrCallErrorClass(err),
 	})
+}
+
+// cdrCallErrorReportedTotal is the error total the rate-limited diagnostic
+// prints. It counts the TRIGGERING failure: the caller runs noteCDRCallError
+// and only then cdrErrorOutcome, which owns the atomic increment, so a bare
+// Load() reports the count EXCLUDING the very failure the line describes —
+// "errors total 0" beside a reported error on the first failure of an outage.
+// The rate gate makes that the reachable case rather than a corner one: it
+// emits at the onset and then at most one line per interval, so the line an
+// operator actually reads is precisely the one a bare Load() understates. A
+// magnitude that contradicts the event beside it is worse than no magnitude,
+// and this producer's contract is that the cause goes to the log and the
+// magnitude to the counter (Codex review, PR #1483).
+//
+// The increment is deliberately NOT moved into the producer: cdrErrorOutcome is
+// also reached from the non-call-error paths (an ErrorMessage result, an
+// unknown status), which never pass through noteCDRCallError, so incrementing
+// in both places would double-count exactly the number being corrected. Under
+// concurrent failures the value stays approximate — other goroutines may
+// already have incremented — but it can never fall below the event reported.
+func cdrCallErrorReportedTotal() int64 {
+	return atomic.LoadInt64(&statCDRErrors) + 1
+}
+
+// cdrCallErrorLogLine formats the rate-limited diagnostic. It is split out so
+// its CONTENT can be gated without swapping the process-global logger: async
+// alert-dispatch goroutines read that logger through internal/obs, so a test
+// that swaps it races any dispatch still in flight — the straggler-goroutine
+// class this PR already closed twice (commits 17b9edf and ba596ac).
+//
+// The cause is sanitised because a gRPC status description is written by
+// Sluice, not by this process (CWE-117).
+func cdrCallErrorLogLine(err error, total int64) string {
+	return fmt.Sprintf("CDR: call error (%s): %s; errors total %d",
+		cdrCallErrorClass(err), sanitizeLog(err.Error()), total)
 }
 
 // cdrErrorOutcome applies the configured fail_mode to an error event.
