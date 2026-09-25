@@ -7,8 +7,9 @@
 > not a statement about the tree this file is published in; the current governance state is whatever the
 > most recent review in this series says. Later windows are audited by later reports, never
 > retroactively by this one.
-> **Method:** Audited `574d265..36628eb` — the window since the 2026-09-11 report's merge point,
-> confirmed as the then-current `origin/main` HEAD by a fetch immediately before this report was written on 2026-09-19 (the
+> **Method:** Audited `574d265..36628eb` — the window since the previous report's audited snapshot
+> (`574d265`, the `origin/main` endpoint the 2026-09-11 report names; that report itself merged later, in `0665453`).
+> The end commit `36628eb` was confirmed as the then-current `origin/main` HEAD by a fetch immediately before this report was written on 2026-09-19 (the
 > DEBT-014 lesson: sync against `main` right before opening a PR, not only at review-start). Targeted
 > re-checks of the seven previously-declared-clean categories (SSL/TLS naming, blocklist/blacklist
 > cleanup, allowlist/exempt/bypass vocabulary, upstream/parent-proxy naming, node/CP/DP naming, category
