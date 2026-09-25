@@ -7320,6 +7320,35 @@ The general point is the one this file keeps making about gates: *a check that
 cannot be run before the push is not a gate, it is a notification* — and a
 sweep that adds walls should be most suspicious of the walls it cannot test.
 
+**A sibling tooling finding, recorded because it cost this sweep five
+misreadings in a row: on this repository a red required gate is more often a
+CANCELLATION CASCADE than a verdict, and the two are indistinguishable at
+check-run level.** The race+coverage suite runs SHARDED
+(`.github/workflows/qa-race-shards.yml`), and its verdict job FAILS CLOSED when
+a shard input is missing — which is correct, and is the whole point of the
+completeness proof. But a push that supersedes a head cancels that run's
+shards, the verdict job then observes them missing and reports `failure`, and
+the Fast/Deep Gate aggregates inherit it. The resulting check run is
+`conclusion: failure` on a required gate with no failing test anywhere in it.
+Five runs on this PR were read that way before the rule was written down:
+36187288439 (12 cancelled), 36187288351 (5), 36196777545 (11 cancelled + the
+verdict failing closed), 36197161409 (13 cancelled / 1 failure / 1 success / 4
+skipped) and 36198050751 (9). In every case the single `failure` was the
+verdict job and every job under it was `cancelled`.
+
+The operational rule, which applies to anyone driving a PR here to green:
+**read the JOBS of the run, not the aggregate's conclusion, and check the head
+SHA the run belongs to before believing either.** A run whose jobs are
+overwhelmingly `cancelled` is reporting that it was superseded; the only
+signal it carries is about a head that no longer exists. Concretely: fetch
+`/actions/runs?head_sha=<sha>` to confirm the run belongs to the CURRENT head,
+then `/actions/runs/<id>/jobs` and count conclusions — a lone `failure` sitting
+on top of a wall of `cancelled` is the cascade, not a defect. The same
+mechanism also makes a docs-only push mid-run costly, since it cancels the run
+it is trying not to disturb; the honest trade is to take the extra CI cycle
+rather than hold a durable commit for it, because the container is ephemeral
+and the run is not.
+
 The new validator's one security-relevant job is classifying an IP LITERAL with
 no resolver, and the direction it must not get wrong is admitting a private one,
 so `StructuralValidatorClassifiesOnlyLiterals` pins the IPv4-mapped IPv6 forms
