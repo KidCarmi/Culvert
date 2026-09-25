@@ -53,7 +53,8 @@ type FileConfig struct {
 	Security struct {
 		IPFilterMode  string   `yaml:"ip_filter_mode"`   // "allow" | "block" | ""
 		IPList        []string `yaml:"ip_list"`          // IPs or CIDRs
-		RateLimit     int      `yaml:"rate_limit"`       // max requests per minute (0=off)
+		RateLimit     int      `yaml:"rate_limit"`       // max requests per minute (0=off). Deprecated: use rate_limit_rpm (RateLimitRPM below) — the name every other surface (admin API, CP->DP wire, config-version diff, /metrics) already uses (terminology governance T-29).
+		RateLimitRPM  int      `yaml:"rate_limit_rpm"`   // max requests per minute per IP (0=off); canonical key, matches rate_limit_rpm on every other surface. rate_limit is a deprecated alias, reconciled in reconcileDeprecatedRateLimitKey.
 		MaxConnsPerIP int      `yaml:"max_conns_per_ip"` // max concurrent connections per IP (0=off)
 	} `yaml:"security"`
 
@@ -506,7 +507,26 @@ func loadFileConfig(path string) (*FileConfig, error) {
 		return nil, fmt.Errorf("validate %s: %w", path, err)
 	}
 	fc.reconcileDeprecatedDPIKeys()
+	fc.reconcileDeprecatedRateLimitKey()
 	return &fc, nil
+}
+
+// reconcileDeprecatedRateLimitKey resolves the canonical rate_limit_rpm YAML
+// key against the deprecated rate_limit alias it replaces (terminology
+// governance T-29: the per-IP rate limit is named rate_limit_rpm on every
+// other live surface — admin-settings persistence, the JSON API, the CP->DP
+// wire, config-version diffs, and the culvert_rate_limit_rpm metric — and
+// rate_limit was the lone YAML/CLI outlier). The canonical key wins when
+// both are set to a nonzero value; the deprecated key still works but logs a
+// one-line startup notice so operators can migrate on their own schedule.
+// Downstream code keeps reading fc.Security.RateLimit unchanged — this is
+// the single reconciliation point, mirroring reconcileDeprecatedDPIKeys.
+func (fc *FileConfig) reconcileDeprecatedRateLimitKey() {
+	if fc.Security.RateLimitRPM != 0 {
+		fc.Security.RateLimit = fc.Security.RateLimitRPM
+	} else if fc.Security.RateLimit != 0 {
+		fmt.Printf("[Culvert] config: %q is deprecated, use %q instead\n", "rate_limit", "rate_limit_rpm")
+	}
 }
 
 // reconcileDeprecatedDPIKeys resolves the canonical dpi_file/dpi_patterns
@@ -623,9 +643,12 @@ func (fc *FileConfig) validateLimits() []string {
 		errs = append(errs, fmt.Sprintf("security.max_conns_per_ip: must be >= 0, got %d", n))
 	}
 
-	// rate_limit
+	// rate_limit (deprecated alias) / rate_limit_rpm (canonical)
 	if n := fc.Security.RateLimit; n < 0 {
 		errs = append(errs, fmt.Sprintf("security.rate_limit: must be >= 0, got %d", n))
+	}
+	if n := fc.Security.RateLimitRPM; n < 0 {
+		errs = append(errs, fmt.Sprintf("security.rate_limit_rpm: must be >= 0, got %d", n))
 	}
 
 	return errs

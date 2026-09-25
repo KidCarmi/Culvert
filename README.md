@@ -151,7 +151,7 @@ security:
   ip_filter_mode: allow    # allow | block | "" (off)
   ip_list:
     - 192.168.1.0/24
-  rate_limit: 60           # requests/min per IP
+  rate_limit_rpm: 60       # requests/min per IP (canonical key; rate_limit is a deprecated alias)
   max_conns_per_ip: 256
 
 upstream:
@@ -178,7 +178,7 @@ TLS         -ca-path <bundle>  -tls-cert  -tls-key  -ui-no-tls
 Auth        -ui-users-file <db>  -ui-allow-ip <cidrs>  -session-timeout 8
 Filtering   -blocklist  -policy  -geoip-db  -clamav-addr  -yara-rules-dir  -threat-feed-db
 Logging     -logfile  -log-max-mb 50  -request-log-max-mb 100  -audit-log  -syslog
-Metrics     -metrics-token  -rate-limit  -otlp-endpoint <url>
+Metrics     -metrics-token  -rate-limit-rpm  -otlp-endpoint <url>
 Control Pl. -cp-grpc-addr  -cp-grpc-cert  -cp-grpc-key  -cp-grpc-ca
 Data Plane  -dp-cp-addr  -dp-node-id  -dp-cert  -dp-key  -dp-ca
 ```

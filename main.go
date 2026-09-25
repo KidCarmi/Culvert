@@ -61,7 +61,8 @@ type startupState struct {
 	logMaxMB                *int
 	tlsCert                 *string
 	tlsKey                  *string
-	rateLimitRPM            *int
+	rateLimitRPM            *int // -rate-limit (deprecated alias; see rateLimitRPMCanonical)
+	rateLimitRPMCanonical   *int // -rate-limit-rpm (canonical; terminology governance T-29)
 	ipMode                  *string
 	socks5Port              *int
 	metricsTok              *string
@@ -286,7 +287,8 @@ func parseFlags(s *startupState) {
 	s.logMaxMB = flag.Int("log-max-mb", 0, "Log rotation size in MB (default 50; overrides config)")
 	s.tlsCert = flag.String("tls-cert", "", "TLS cert file for UI (optional)")
 	s.tlsKey = flag.String("tls-key", "", "TLS key file for UI (optional)")
-	s.rateLimitRPM = flag.Int("rate-limit", 0, "Max requests/min per IP (0=off)")
+	s.rateLimitRPM = flag.Int("rate-limit", 0, "Max requests/min per IP (0=off). Deprecated: use -rate-limit-rpm")
+	s.rateLimitRPMCanonical = flag.Int("rate-limit-rpm", 0, "Max requests/min per IP (0=off); canonical flag, matches rate_limit_rpm on every other surface")
 	s.ipMode = flag.String("ip-filter-mode", "", "IP filter mode: allow|block (empty=off)")
 	s.socks5Port = flag.Int("socks5-port", 0, "SOCKS5 proxy port (0=disabled)")
 	s.metricsTok = flag.String("metrics-token", "", "Bearer token for /metrics (empty=open)")
@@ -637,7 +639,7 @@ func loadFileConfigAndFlags(s *startupState) {
 	s.cert = firstStr(*s.tlsCert, s.fc.Proxy.TLSCert)
 	s.key = firstStr(*s.tlsKey, s.fc.Proxy.TLSKey)
 	s.cert, s.key = resolveUITLSCertKey(s.cert, s.key)
-	s.rlRPM = firstNonZero(*s.rateLimitRPM, s.fc.Security.RateLimit)
+	s.rlRPM = firstNonZero(*s.rateLimitRPMCanonical, *s.rateLimitRPM, s.fc.Security.RateLimit)
 	s.ipModeVal = firstStr(*s.ipMode, s.fc.Security.IPFilterMode)
 	// config.yaml's security.ip_filter_mode is validated at load time
 	// (FileConfig.validateEnums, via loadFileConfig -> fc.validate()) — an

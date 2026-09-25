@@ -72,19 +72,20 @@ func TestLoadFileConfigAndFlags_LogMaxMB_YAMLHonoredWhenFlagUnset(t *testing.T) 
 	zero := 0
 	empty := ""
 	s := &startupState{
-		configPath:   &cfgPath,
-		proxyPort:    &zero,
-		uiPortFlag:   &zero,
-		socks5Port:   &zero,
-		logFilePath:  &empty,
-		blockFile:    &empty,
-		logMaxMB:     &zero, // flag not passed on the CLI -> unset sentinel
-		user:         &empty,
-		pass:         &empty,
-		tlsCert:      &empty,
-		tlsKey:       &empty,
-		rateLimitRPM: &zero,
-		ipMode:       &empty,
+		configPath:            &cfgPath,
+		proxyPort:             &zero,
+		uiPortFlag:            &zero,
+		socks5Port:            &zero,
+		logFilePath:           &empty,
+		blockFile:             &empty,
+		logMaxMB:              &zero, // flag not passed on the CLI -> unset sentinel
+		user:                  &empty,
+		pass:                  &empty,
+		tlsCert:               &empty,
+		tlsKey:                &empty,
+		rateLimitRPM:          &zero,
+		rateLimitRPMCanonical: &zero,
+		ipMode:                &empty,
 	}
 
 	loadFileConfigAndFlags(s)
@@ -117,19 +118,20 @@ func TestLoadFileConfigAndFlags_AuthUser_WhitespaceOnlyCLIFallsBackToYAML(t *tes
 	empty := ""
 	whitespaceUser := "   "
 	s := &startupState{
-		configPath:   &cfgPath,
-		proxyPort:    &zero,
-		uiPortFlag:   &zero,
-		socks5Port:   &zero,
-		logFilePath:  &empty,
-		blockFile:    &empty,
-		logMaxMB:     &zero,
-		user:         &whitespaceUser, // whitespace-only -user, never explicitly cleared
-		pass:         &empty,
-		tlsCert:      &empty,
-		tlsKey:       &empty,
-		rateLimitRPM: &zero,
-		ipMode:       &empty,
+		configPath:            &cfgPath,
+		proxyPort:             &zero,
+		uiPortFlag:            &zero,
+		socks5Port:            &zero,
+		logFilePath:           &empty,
+		blockFile:             &empty,
+		logMaxMB:              &zero,
+		user:                  &whitespaceUser, // whitespace-only -user, never explicitly cleared
+		pass:                  &empty,
+		tlsCert:               &empty,
+		tlsKey:                &empty,
+		rateLimitRPM:          &zero,
+		rateLimitRPMCanonical: &zero,
+		ipMode:                &empty,
 	}
 
 	loadFileConfigAndFlags(s)
@@ -286,19 +288,20 @@ func TestLoadFileConfigAndFlags_PortCollision_ResolvedByCLIOverride(t *testing.T
 	empty := ""
 	overriddenUIPort := 9090
 	s := &startupState{
-		configPath:   &cfgPath,
-		proxyPort:    &zero,
-		uiPortFlag:   &overriddenUIPort, // -ui-port 9090 on the CLI
-		socks5Port:   &zero,
-		logFilePath:  &empty,
-		blockFile:    &empty,
-		logMaxMB:     &zero,
-		user:         &empty,
-		pass:         &empty,
-		tlsCert:      &empty,
-		tlsKey:       &empty,
-		rateLimitRPM: &zero,
-		ipMode:       &empty,
+		configPath:            &cfgPath,
+		proxyPort:             &zero,
+		uiPortFlag:            &overriddenUIPort, // -ui-port 9090 on the CLI
+		socks5Port:            &zero,
+		logFilePath:           &empty,
+		blockFile:             &empty,
+		logMaxMB:              &zero,
+		user:                  &empty,
+		pass:                  &empty,
+		tlsCert:               &empty,
+		tlsKey:                &empty,
+		rateLimitRPM:          &zero,
+		rateLimitRPMCanonical: &zero,
+		ipMode:                &empty,
 	}
 
 	// Must not call log.Fatalf (would os.Exit the test binary) — the
@@ -686,19 +689,20 @@ func TestLoadFileConfigAndFlags_IPFilterMode_ValidCLIOverrideResolves(t *testing
 	empty := ""
 	blockMode := "block"
 	s := &startupState{
-		configPath:   &cfgPath,
-		proxyPort:    &zero,
-		uiPortFlag:   &zero,
-		socks5Port:   &zero,
-		logFilePath:  &empty,
-		blockFile:    &empty,
-		logMaxMB:     &zero,
-		user:         &empty,
-		pass:         &empty,
-		tlsCert:      &empty,
-		tlsKey:       &empty,
-		rateLimitRPM: &zero,
-		ipMode:       &blockMode, // -ip-filter-mode block
+		configPath:            &cfgPath,
+		proxyPort:             &zero,
+		uiPortFlag:            &zero,
+		socks5Port:            &zero,
+		logFilePath:           &empty,
+		blockFile:             &empty,
+		logMaxMB:              &zero,
+		user:                  &empty,
+		pass:                  &empty,
+		tlsCert:               &empty,
+		tlsKey:                &empty,
+		rateLimitRPM:          &zero,
+		rateLimitRPMCanonical: &zero,
+		ipMode:                &blockMode, // -ip-filter-mode block
 	}
 
 	// Must not call log.Fatalf (would os.Exit the test binary) — "block" is valid.
