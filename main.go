@@ -958,10 +958,15 @@ func initCDR(s *startupState) {
 	// back as a client-side timeout — which, under the default fail-open
 	// FailMode, silently skips CDR sanitization on every request that hits
 	// it, with nothing at startup naming the cause.
-	if resolved.CDR.Enabled {
-		if msg := validCDRTimeoutSec(resolved.CDR.TimeoutSec); msg != "" {
-			log.Fatalf("Invalid cdr.timeout_sec/-cdr-timeout-sec %d: %s", resolved.CDR.TimeoutSec, msg)
-		}
+	//
+	// "Enabled" here must be the EFFECTIVE enablement loadCDR will act on,
+	// which also includes the runtime sentinel (/data/cdr_enabled, written by
+	// the GUI toggle or first-enrollment auto-enable). The resolver
+	// deliberately excludes the sentinel, so gating on resolved.CDR.Enabled
+	// alone let a sentinel-enabled node boot with an invalid dormant
+	// config.yaml timeout (Codex review, PR #1480).
+	if msg := cdrStartupTimeoutError(resolved, cdrRuntimeEnabled()); msg != "" {
+		log.Fatalf("Invalid cdr.timeout_sec/-cdr-timeout-sec %d: %s", resolved.CDR.TimeoutSec, msg)
 	}
 	loadCDR(
 		resolved,

@@ -551,3 +551,33 @@ func TestResolveCDRStartupConfig_DormantYAMLTimeoutSurvivesCLIEnable(t *testing.
 		t.Fatalf("validCDRTimeoutSec(%d) accepted a dormant-then-enabled value below Sluice's 30s cap", got.CDR.TimeoutSec)
 	}
 }
+
+// TestCDRStartupTimeoutError_RuntimeSentinelEnables pins the second gap a
+// review of this change found (Codex, PR #1480): with cdr.enabled false in
+// config.yaml and no -cdr-enabled flag, the runtime sentinel alone still turns
+// CDR on inside loadCDR. The startup timeout check must therefore gate on the
+// sentinel-adjusted enablement, or an invalid dormant timeout reaches the
+// client unvalidated.
+func TestCDRStartupTimeoutError_RuntimeSentinelEnables(t *testing.T) {
+	fc := &FileConfig{}
+	fc.CDR.Enabled = false
+	fc.CDR.Endpoint = "sluice:8443"
+	fc.CDR.TimeoutSec = 5
+	got := resolveCDRStartupConfig(fc, t.TempDir(), cdrCLIFlags{})
+	if got.CDR.Enabled {
+		t.Fatalf("resolved CDR.Enabled = true, want false (neither YAML nor CLI enables it)")
+	}
+
+	if msg := cdrStartupTimeoutError(got, false); msg != "" {
+		t.Fatalf("CDR effectively disabled: a dormant timeout must stay unvalidated, got %q", msg)
+	}
+	if msg := cdrStartupTimeoutError(got, true); msg == "" {
+		t.Fatalf("runtime sentinel enables CDR: timeout_sec=5 must be rejected")
+	}
+
+	// Control: a valid timeout passes whichever way CDR is enabled.
+	got.CDR.TimeoutSec = 30
+	if msg := cdrStartupTimeoutError(got, true); msg != "" {
+		t.Fatalf("valid timeout rejected under the sentinel: %q", msg)
+	}
+}
