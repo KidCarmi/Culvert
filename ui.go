@@ -282,6 +282,12 @@ func serveAdminUIWithRetry(srv *http.Server, port int, certFile, keyFile string,
 	}
 }
 
+// adminUIBeforeServeTLS is a test seam run immediately before a custom-cert
+// ServeTLS call; it lets a gate rotate the pair on disk inside the window that
+// used to separate the recorded certificate from the served one. No-op in
+// production.
+var adminUIBeforeServeTLS = func() {}
+
 // adminUIServeOnce performs one bind-and-serve attempt. It returns
 // http.ErrServerClosed once the server has been Shutdown/Closed, and any other
 // error for a fault the caller should retry.
@@ -300,18 +306,23 @@ func adminUIServeOnce(srv *http.Server, addr, certFile, keyFile string) error {
 	//  2. It is what lets the failure be classified as `tls_certificate` rather
 	//     than matching on crypto/tls error text.
 	//
-	// The loaded pair is then DISCARDED and ServeTLS re-reads the files below.
-	// That deliberate double read is what keeps HTTP/2 working: ServeTLS calls
-	// setupHTTP2_ServeTLS, which srv.Serve(tls.NewListener(...)) does not, so
-	// hand-rolling the TLS listener here would silently drop ALPN h2 from the
-	// admin UI that ListenAndServeTLS used to negotiate.
+	// The loaded pair is then the one SERVED: it is installed into the server's
+	// TLS config and ServeTLS is called with empty paths, so the files are read
+	// exactly once per attempt. Re-reading them inside ServeTLS (the previous
+	// shape) let a rotation landing between the two reads serve the new pair
+	// while the expiry surface reported the old one until restart. ServeTLS is
+	// still the entry point because it calls setupHTTP2_ServeTLS, which
+	// srv.Serve(tls.NewListener(...)) does not — hand-rolling the TLS listener
+	// here would silently drop ALPN h2 from the admin UI.
 	customTLS := certFile != "" && keyFile != ""
+	var customCert tls.Certificate
 	if customTLS {
 		cert, err := tls.LoadX509KeyPair(certFile, keyFile)
 		if err != nil {
 			return fmt.Errorf("%w: %w", errAdminUITLSMaterial, err)
 		}
 		noteAdminUITLSCertExpiry(cert)
+		customCert = cert
 	}
 
 	lc := &net.ListenConfig{}
@@ -344,7 +355,17 @@ func adminUIServeOnce(srv *http.Server, addr, certFile, keyFile string) error {
 	defer ln.Close() //nolint:errcheck // idempotent teardown; Serve has normally closed it already
 
 	if customTLS {
-		return srv.ServeTLS(ln, certFile, keyFile)
+		adminUIBeforeServeTLS()
+		// Serve the pair recorded above, never a second read of the files.
+		// A config left by an earlier attempt (net/http's HTTP/2 setup may
+		// initialise one) is cloned rather than discarded.
+		cfg := &tls.Config{MinVersion: tls.VersionTLS12}
+		if srv.TLSConfig != nil {
+			cfg = srv.TLSConfig.Clone()
+		}
+		cfg.Certificates = []tls.Certificate{customCert}
+		srv.TLSConfig = cfg
+		return srv.ServeTLS(ln, "", "")
 	}
 	if srv.TLSConfig != nil {
 		return srv.ServeTLS(ln, "", "")

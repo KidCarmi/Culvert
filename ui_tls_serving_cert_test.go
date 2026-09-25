@@ -249,3 +249,101 @@ func TestAdminUIServeOnce_RecordsServingCertExpiry(t *testing.T) {
 		t.Fatalf("recorded NotAfter %v is not ~24h out (got %v remaining)", notAfter, remaining)
 	}
 }
+
+// TestAdminUIServeOnce_ServesTheRecordedCertificate pins that the certificate
+// whose expiry is reported is the one actually served. The pair on disk is
+// rotated in the window between the pre-bind load and ServeTLS; a ServeTLS
+// that re-read the files would serve the rotated pair while the expiry surface
+// kept reporting the original one for the listener's lifetime.
+func TestAdminUIServeOnce_ServesTheRecordedCertificate(t *testing.T) {
+	resetAdminUITLSCertExpiryForTest(t)
+
+	origNotAfter := time.Now().Add(24 * time.Hour).UTC().Truncate(time.Second)
+	rotNotAfter := time.Now().Add(72 * time.Hour).UTC().Truncate(time.Second)
+	certPath, keyPath := writeCertKeyPairWithNotAfter(t, t.TempDir(), origNotAfter)
+	rotCert, rotKey := writeCertKeyPairWithNotAfter(t, t.TempDir(), rotNotAfter)
+
+	prevHook := adminUIBeforeServeTLS
+	t.Cleanup(func() { adminUIBeforeServeTLS = prevHook })
+	adminUIBeforeServeTLS = func() {
+		for _, p := range [][2]string{{rotCert, certPath}, {rotKey, keyPath}} {
+			b, err := os.ReadFile(p[0])
+			if err != nil {
+				t.Errorf("read rotated pair: %v", err)
+				return
+			}
+			if err := os.WriteFile(p[1], b, 0o600); err != nil {
+				t.Errorf("rotate pair: %v", err)
+				return
+			}
+		}
+	}
+
+	port, release := occupyPort(t)
+	release()
+	addr := fmt.Sprintf(":%d", port)
+
+	srv := newTestAdminServer()
+	done := make(chan error, 1)
+	go func() { done <- adminUIServeOnce(srv, addr, certPath, keyPath) }()
+	t.Cleanup(func() {
+		_ = srv.Close()
+		<-done
+	})
+
+	var served *x509.Certificate
+	waitForAdminUI(t, 5*time.Second, "the admin UI to serve TLS", func() bool {
+		d := &tls.Dialer{Config: &tls.Config{InsecureSkipVerify: true}} // #nosec G402 -- test inspects the served leaf, no trust decision
+		conn, err := d.DialContext(context.Background(), "tcp", fmt.Sprintf("127.0.0.1:%d", port))
+		if err != nil {
+			return false
+		}
+		defer conn.Close() //nolint:errcheck // test teardown
+		served = conn.(*tls.Conn).ConnectionState().PeerCertificates[0]
+		return true
+	})
+
+	recorded, known := adminUITLSCertExpiry()
+	if !known {
+		t.Fatal("expected admin UI serving cert expiry to be known")
+	}
+	if !served.NotAfter.Equal(recorded) {
+		t.Fatalf("served certificate NotAfter %v != recorded %v — the expiry surface describes a certificate that is not being served",
+			served.NotAfter, recorded)
+	}
+	if !recorded.Equal(origNotAfter) {
+		t.Fatalf("recorded NotAfter %v, want the pre-bind pair's %v", recorded, origNotAfter)
+	}
+}
+
+// TestAdminUIServeOnce_CustomCertStillNegotiatesHTTP2 pins that serving the
+// pre-loaded pair through ServeTLS(ln, "", "") keeps ALPN h2 on the admin UI.
+func TestAdminUIServeOnce_CustomCertStillNegotiatesHTTP2(t *testing.T) {
+	resetAdminUITLSCertExpiryForTest(t)
+	certPath, keyPath := writeTestKeyPair(t, t.TempDir())
+
+	port, release := occupyPort(t)
+	release()
+	srv := newTestAdminServer()
+	done := make(chan error, 1)
+	go func() { done <- adminUIServeOnce(srv, fmt.Sprintf(":%d", port), certPath, keyPath) }()
+	t.Cleanup(func() {
+		_ = srv.Close()
+		<-done
+	})
+
+	var proto string
+	waitForAdminUI(t, 5*time.Second, "the admin UI to serve TLS", func() bool {
+		d := &tls.Dialer{Config: &tls.Config{InsecureSkipVerify: true, NextProtos: []string{"h2", "http/1.1"}}} // #nosec G402 -- test inspects ALPN only
+		conn, err := d.DialContext(context.Background(), "tcp", fmt.Sprintf("127.0.0.1:%d", port))
+		if err != nil {
+			return false
+		}
+		defer conn.Close() //nolint:errcheck // test teardown
+		proto = conn.(*tls.Conn).ConnectionState().NegotiatedProtocol
+		return true
+	})
+	if proto != "h2" {
+		t.Fatalf("admin UI negotiated ALPN %q, want h2", proto)
+	}
+}
