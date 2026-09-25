@@ -3,7 +3,7 @@ package main
 // ocsp_coverage.go — CHAOS-65: which TLS handshakes actually consult the
 // revocation checker, and saying so out loud.
 //
-// `security.ocsp_check: true` (or POST /api/ocsp) enables the checker, logs
+// `proxy.ocsp_check: true` (or POST /api/ocsp) enables the checker, logs
 // "OCSP: upstream certificate revocation checking enabled", and lights up an
 // admin panel with counters. What it does NOT do is put the check on the
 // handshake a Secure Web Gateway actually performs.
