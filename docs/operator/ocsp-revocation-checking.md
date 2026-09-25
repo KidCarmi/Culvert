@@ -41,7 +41,7 @@ following is discarded, not treated as a pass:
 
 | Discarded because | Counter (`reason=` label) |
 |---|---|
-| the signed response is about a **different certificate** — a genuine CA-signed response, borrowed | `not_for_certificate` |
+| the signed response is about a **different certificate** (issuer-chained signature, different serial) — either a genuine response borrowed from another certificate or a faulty responder answering for the wrong serial; the signer's authorization is not re-checked on this path, so it needs investigation rather than proving an attack | `not_for_certificate` |
 | the response's **signer is not authorized** for this issuer — no `id-kp-OCSPSigning` on the embedded certificate, or a delegate outside its own validity window (RFC 6960 §4.2.2.2); this is what stops a certificate vouching for its own revocation status | `unauthorized_responder` |
 | the response is outside its `ThisUpdate`/`NextUpdate` window | `stale` |
 | the responder answered `unknown` — the issuer does not recognise the certificate | `unknown_status` |
@@ -122,8 +122,10 @@ that never turned it on is indistinguishable from a broken one.
 # or egress problem, not a wave of revocations — compare against revoked_total.
 rate(culvert_ocsp_fail_closed_total[10m]) > 0.1
 
-# Something is answering with responses borrowed from other certificates.
-# This is a demonstrated bypass attempt, not a broken responder — any
+# A signed response named a different certificate's serial. That is the
+# shape of a borrowed-response bypass, but a faulty responder (or an expired /
+# no-EKU delegate — signer authorization is not re-checked on this path) can
+# produce it too, so investigate before treating it as an attack. Any
 # sustained rate here deserves a human. (malformed is excluded on purpose:
 # it is the ordinary broken-responder bucket, not an accusation — see §2.)
 increase(culvert_ocsp_response_rejected_total{reason="not_for_certificate"}[1h]) > 0
