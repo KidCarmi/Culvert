@@ -34,6 +34,36 @@ git push origin v1.2.3
    ci.yml → release job (multi-platform build + GitHub Release)
 ```
 
+### שער הפרסום / The publication gate
+
+מאז `docs/operator/release-publication-gating.md`, שער השחרור אינו רק
+`security-release-gate`: **כל** נתיב פרסום ב-`ci.yml` עובר דרך predicate יחיד,
+`.github/scripts/require-release-evidence.sh`, מעל מניפסט יחיד,
+`.github/release-evidence.txt`.
+
+Since `docs/operator/release-publication-gating.md`, the release gate is no
+longer just `security-release-gate`: **every** publication path in `ci.yml`
+goes through one predicate, `.github/scripts/require-release-evidence.sh`, over
+one manifest, `.github/release-evidence.txt`.
+
+- The `docker` job pushes only non-channel CANDIDATE tags
+  (`candidate-<run_id>`, `sha-<short>`). It no longer publishes `latest` or any
+  semver tag.
+- `promote-image` moves `latest`/`main`/semver onto that exact tested digest,
+  and only after the predicate resolves every `mandatory` manifest row to a
+  successful main-push run for the same SHA.
+- Every release asset is staged `draft: true`. `publish-release` is the only
+  job that runs `gh release edit --draft=false`, after `release`,
+  `catalog-pipeline`, `promote-image`, `aggregate-subjects`,
+  `verify-reproducible` and `provenance` have all succeeded and
+  `assert-release-complete.sh` has proved every required asset is present and
+  non-empty.
+
+**Changing which checks block a release is a one-word edit** on that workflow's
+row in `.github/release-evidence.txt` (`mandatory` ⇄ `advisory`). Do not
+hand-write the evidence list into a job again — that is how the main-push image
+path ended up with no gate at all.
+
 ---
 
 ## 2. רשימת בדיקות אבטחה / Security Check Inventory
