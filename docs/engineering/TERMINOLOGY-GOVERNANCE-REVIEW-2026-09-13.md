@@ -1,9 +1,15 @@
 # Culvert Language & Terminology Governance Review — 2026-09-13
 
 > **Owner:** Language & Terminology Governance routine · **Status:** Point-in-time review (repeatable)
+> **Snapshot scope (read this first):** this is a HISTORICAL record of `origin/main` at `993b390` on
+> 2026-09-13. It was merged later, after `main` had moved on, so the tree it ships in contains commits it
+> never audited. Its findings, carried-over backlog and health score describe `993b390` only. They are
+> not a statement about the tree this file is published in; the current governance state is whatever the
+> most recent review in this series says. Later windows are audited by later reports, never
+> retroactively by this one.
 > **Method:** Audited `2833db3..993b390` — the window since the 2026-09-12 report's audited base,
-> confirmed as the current `origin/main` HEAD by a `git fetch` immediately before this report was
-> written (per the DEBT-014 lesson recorded in the 2026-09-09 report: sync against `main` right before
+> confirmed as the then-current `origin/main` HEAD by a `git fetch` immediately before this report was
+> written on 2026-09-13 (per the DEBT-014 lesson recorded in the 2026-09-09 report: sync against `main` right before
 > opening a PR). The window covers 2 first-parent merges / 9 files / ~281 insertions (PR #1371: a
 > CDR `-cdr-server-fingerprint` CLI/YAML validation-parity fix, with a same-window Codex-review
 > follow-up correcting the flag's own name in a log message and trimming whitespace before the
