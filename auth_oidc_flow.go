@@ -109,7 +109,10 @@ func fetchOIDCDiscovery(profileID, issuer string) (*oidcDiscoveryDoc, error) {
 	// back through validateExternalURL, so a cached document cannot name an
 	// endpoint the network path would have refused.
 	fetched, fetchErr := fetchOIDCDiscoveryOverNetwork(wellKnown)
-	raw, err := resolveIdPDocument(profileID, idpmeta.KindOIDCDiscovery, wellKnown, fetched, fetchErr)
+	raw, err := resolveIdPDocument(profileID, idpmeta.KindOIDCDiscovery, wellKnown, fetched, fetchErr, func(b []byte) error {
+		_, vErr := parseAndValidateOIDCDiscovery(b)
+		return vErr
+	})
 	if err != nil {
 		return nil, err
 	}

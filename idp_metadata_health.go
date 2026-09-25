@@ -141,29 +141,43 @@ type idpMetadataHealth struct {
 	staleServed    int64
 	unavailable    int64
 
-	// firstFailure is the start of the current run of consecutive failures;
-	// zero when a fetch last succeeded. Degradation is measured from here, so
-	// an IdP that fails, answers, and fails again never accumulates toward the
-	// threshold across healthy periods.
+	lastReason  idpMetadataOutcome
+	lastSuccess time.Time
+
+	// episodes holds the CURRENT failure episode of each profile that is
+	// failing, keyed by profile id. Episode state is PER PROFILE on purpose:
+	// with it process-global, a successful fetch for one healthy profile
+	// cleared the episode another, dead profile had opened — so on a node with
+	// two remote IdPs the dead one never reached the degradation threshold,
+	// never paged, and repeated compiles emitted false recovery lines (Codex
+	// review). Only a success for the SAME profile clears its episode.
+	// Bounded by the admin-configured profile count.
+	episodes map[string]*idpMetadataEpisode
+}
+
+// idpMetadataEpisode is one profile's uninterrupted run of fetch failures.
+type idpMetadataEpisode struct {
+	// firstFailure is the start of the run. Degradation is measured from
+	// here, so an IdP that fails, answers, and fails again never accumulates
+	// toward the threshold across healthy periods.
 	firstFailure time.Time
 	lastFailure  time.Time
-	lastReason   idpMetadataOutcome
-	lastSuccess  time.Time
 
-	// consecutive resets on an OBSERVED successful fetch; the totals never do.
-	// Recovery is established by EVIDENCE — a document actually retrieved from
-	// the IdP — never by elapsed time. A node whose fetch failures stop
-	// because nothing is compiling any more has not recovered, and reporting
-	// that as recovery is the mistake ca_health.go and storage_health.go both
-	// call out by name.
+	// consecutive is cleared (with the whole episode) on an OBSERVED
+	// successful fetch for this profile; the totals never are. Recovery is
+	// established by EVIDENCE — a document actually retrieved from the IdP —
+	// never by elapsed time. A node whose fetch failures stop because nothing
+	// is compiling any more has not recovered, and reporting that as recovery
+	// is the mistake ca_health.go and storage_health.go both call out by name.
 	consecutive int64
 
 	logAt      time.Time
 	suppressed int64
 
 	// alerted is a fire-once latch per DEGRADATION episode: one page when
-	// document acquisition starts failing persistently, not one per compile.
-	// Cleared by an observed successful fetch, so a second incident pages again.
+	// this profile's document acquisition starts failing persistently, not
+	// one per compile. Cleared with the episode, so a second incident pages
+	// again.
 	alerted bool
 }
 
@@ -226,15 +240,16 @@ func noteIdPMetadataOutcome(profileID string, outcome idpMetadataOutcome, cause 
 
 	switch outcome {
 	case idpMetaFresh:
-		// Recovery on OBSERVED evidence: a document actually came back.
-		wasFailing := idpMetadata.consecutive > 0
-		suppressed := idpMetadata.suppressed
-		idpMetadata.consecutive = 0
-		idpMetadata.firstFailure = time.Time{}
+		// Recovery on OBSERVED evidence: a document actually came back — for
+		// THIS profile. Another profile's success says nothing about it.
+		ep := idpMetadata.episodes[profileID]
+		wasFailing := ep != nil
+		var suppressed int64
+		if ep != nil {
+			suppressed = ep.suppressed
+			delete(idpMetadata.episodes, profileID)
+		}
 		idpMetadata.lastSuccess = now
-		idpMetadata.suppressed = 0
-		idpMetadata.logAt = time.Time{}
-		idpMetadata.alerted = false
 		idpMetadata.mu.Unlock()
 		if wasFailing {
 			logger.Printf("IDP_METADATA_RECOVERED idp=%q (document fetched successfully; %d failure log line(s) suppressed during the episode)",
@@ -247,27 +262,28 @@ func noteIdPMetadataOutcome(profileID string, outcome idpMetadataOutcome, cause 
 		idpMetadata.unavailable++
 	}
 	idpMetadata.fetchFailures++
-	idpMetadata.consecutive++
-	idpMetadata.lastFailure = now
-	if idpMetadata.firstFailure.IsZero() {
-		idpMetadata.firstFailure = now
+	ep := idpMetadataEpisodeLocked(profileID)
+	ep.consecutive++
+	ep.lastFailure = now
+	if ep.firstFailure.IsZero() {
+		ep.firstFailure = now
 	}
-	failingFor := now.Sub(idpMetadata.firstFailure)
+	failingFor := now.Sub(ep.firstFailure)
 	degraded := failingFor >= idpMetadataDegradedAfter
 
-	shouldLog := idpMetadata.logAt.IsZero() || now.Sub(idpMetadata.logAt) >= idpMetadataLogInterval
-	suppressed := idpMetadata.suppressed
+	shouldLog := ep.logAt.IsZero() || now.Sub(ep.logAt) >= idpMetadataLogInterval
+	suppressed := ep.suppressed
 	if shouldLog {
-		idpMetadata.logAt = now
-		idpMetadata.suppressed = 0
+		ep.logAt = now
+		ep.suppressed = 0
 	} else {
-		idpMetadata.suppressed++
+		ep.suppressed++
 	}
-	shouldAlert := degraded && !idpMetadata.alerted
+	shouldAlert := degraded && !ep.alerted
 	if shouldAlert {
-		idpMetadata.alerted = true
+		ep.alerted = true
 	}
-	consecutive := idpMetadata.consecutive
+	consecutive := ep.consecutive
 	idpMetadata.mu.Unlock()
 
 	if shouldLog {
@@ -283,6 +299,24 @@ func noteIdPMetadataOutcome(profileID string, outcome idpMetadataOutcome, cause 
 	}
 }
 
+// idpMetadataEpisodeLocked returns profileID's current failure episode,
+// opening one if the profile is not failing. Caller holds idpMetadata.mu.
+func idpMetadataEpisodeLocked(profileID string) *idpMetadataEpisode {
+	if idpMetadata.episodes == nil {
+		idpMetadata.episodes = make(map[string]*idpMetadataEpisode)
+	}
+	ep := idpMetadata.episodes[profileID]
+	if ep == nil {
+		ep = &idpMetadataEpisode{}
+		idpMetadata.episodes[profileID] = ep
+	}
+	return ep
+}
+
+// idpMetadataState aggregates the per-profile episodes: the plane is failing
+// while ANY profile is, FailingFor is the OLDEST open episode (degradation is
+// a statement about the worst provider, not the average), and Consecutive is
+// the longest run.
 func idpMetadataState() idpMetadataSnapshot {
 	if !idpMetadataEverUsed.Load() {
 		return idpMetadataSnapshot{}
@@ -294,14 +328,22 @@ func idpMetadataState() idpMetadataSnapshot {
 		FetchFailures:  idpMetadata.fetchFailures,
 		StaleServed:    idpMetadata.staleServed,
 		Unavailable:    idpMetadata.unavailable,
-		Consecutive:    idpMetadata.consecutive,
 		LastReason:     idpMetadata.lastReason,
 		LastSuccess:    idpMetadata.lastSuccess,
-		Failing:        idpMetadata.consecutive > 0,
+		Failing:        len(idpMetadata.episodes) > 0,
 		Used:           true,
 	}
-	if !idpMetadata.firstFailure.IsZero() {
-		snap.FailingFor = time.Since(idpMetadata.firstFailure)
+	var oldest time.Time
+	for _, ep := range idpMetadata.episodes {
+		if ep.consecutive > snap.Consecutive {
+			snap.Consecutive = ep.consecutive
+		}
+		if oldest.IsZero() || ep.firstFailure.Before(oldest) {
+			oldest = ep.firstFailure
+		}
+	}
+	if !oldest.IsZero() {
+		snap.FailingFor = time.Since(oldest)
 		snap.Degraded = snap.FailingFor >= idpMetadataDegradedAfter
 	}
 	return snap
@@ -320,14 +362,9 @@ func resetIdPMetadataHealthForTest() {
 	idpMetadata.fetchFailures = 0
 	idpMetadata.staleServed = 0
 	idpMetadata.unavailable = 0
-	idpMetadata.firstFailure = time.Time{}
-	idpMetadata.lastFailure = time.Time{}
 	idpMetadata.lastReason = ""
 	idpMetadata.lastSuccess = time.Time{}
-	idpMetadata.consecutive = 0
-	idpMetadata.logAt = time.Time{}
-	idpMetadata.suppressed = 0
-	idpMetadata.alerted = false
+	idpMetadata.episodes = nil
 	idpMetadataEverUsed.Store(false)
 }
 

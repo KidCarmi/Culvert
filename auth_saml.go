@@ -242,7 +242,7 @@ func fetchSAMLMetadata(profileID string, cfg *SAMLProfileConfig) (*saml.EntityDe
 			return nil, err
 		}
 		fetched, fetchErr := fetchSAMLMetadataOverNetwork(cfg.MetadataURL)
-		doc, err := resolveIdPDocument(profileID, idpmeta.KindSAMLMetadata, cfg.MetadataURL, fetched, fetchErr)
+		doc, err := resolveIdPDocument(profileID, idpmeta.KindSAMLMetadata, cfg.MetadataURL, fetched, fetchErr, validateSAMLMetadataDocument)
 		if err != nil {
 			return nil, err
 		}
@@ -253,6 +253,15 @@ func fetchSAMLMetadata(profileID string, cfg *SAMLProfileConfig) (*saml.EntityDe
 	}
 
 	return samlsp.ParseMetadata(xmlData)
+}
+
+// validateSAMLMetadataDocument is the document gate resolveIdPDocument applies
+// before persisting a fetched document as last-known-good: the SAME parser the
+// compile runs on the result, so only a document the compile would accept can
+// ever replace the cached copy.
+func validateSAMLMetadataDocument(doc []byte) error {
+	_, err := samlsp.ParseMetadata(doc)
+	return err
 }
 
 // validateSAMLMetadataURL reports whether a configured metadata URL is

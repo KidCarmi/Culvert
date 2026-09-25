@@ -609,7 +609,7 @@ func TestChaos71_AlertDetailIsBoundedAndCarriesNoURL(t *testing.T) {
 	// never reach an alert Detail, because Dispatch dedups on it.
 	privateURL := "https://idp.internal.example/private-metadata-path"
 	idpMetadata.mu.Lock()
-	idpMetadata.firstFailure = time.Now().Add(-2 * idpMetadataDegradedAfter)
+	idpMetadataEpisodeLocked("corp").firstFailure = time.Now().Add(-2 * idpMetadataDegradedAfter)
 	idpMetadata.mu.Unlock()
 	idpMetadataEverUsed.Store(true)
 	noteIdPMetadataOutcome("corp", idpMetaUnavailable, fmt.Errorf("fetch %s: connection refused", privateURL))
@@ -631,7 +631,7 @@ func TestChaos71_AlertDetailIsBoundedAndCarriesNoURL(t *testing.T) {
 	// re-arms the latch so a second incident pages again.
 	noteIdPMetadataOutcome("corp", idpMetaFresh, nil)
 	idpMetadata.mu.Lock()
-	idpMetadata.firstFailure = time.Now().Add(-2 * idpMetadataDegradedAfter)
+	idpMetadataEpisodeLocked("corp").firstFailure = time.Now().Add(-2 * idpMetadataDegradedAfter)
 	idpMetadata.mu.Unlock()
 	noteIdPMetadataOutcome("corp", idpMetaUnavailable, fmt.Errorf("second incident"))
 	if len(details) != 2 {
@@ -672,6 +672,62 @@ func TestChaos71_AdminDiscoveryProbeIsCacheFree(t *testing.T) {
 	}
 	if idpMetadataState().Used {
 		t.Fatal("the admin probe must not register on the compile-path health plane")
+	}
+}
+
+// Codex review (P1): a document the IdP served with HTTP 200 but that the
+// compile's own parser rejects must NOT replace the last-known-good copy.
+// Pre-fix the bytes were persisted BEFORE parsing, so one malformed answer
+// overwrote the valid cache and a later outage fell back to the broken bytes —
+// the provider could no longer recover from the cache at all.
+func TestChaos71_InvalidFetchedDocumentDoesNotReplaceLastKnownGood(t *testing.T) {
+	chaos71Env(t)
+	idp := newChaos71IdP(t)
+
+	if _, err := NewSAMLProvider(chaos71Profile("corp", idp.URL())); err != nil {
+		t.Fatalf("healthy compile: %v", err)
+	}
+	idp.doc.Store("<html>edge error page, not SAML metadata</html>")
+	if _, err := NewSAMLProvider(chaos71Profile("corp", idp.URL())); err != nil {
+		t.Fatalf("an invalid 200 answer must fall back to the last-known-good document: %v", err)
+	}
+	if snap := idpMetadataState(); snap.StaleServed != 1 || !snap.Failing {
+		t.Fatalf("an invalid document must be accounted as a failed acquisition served from cache: %+v", snap)
+	}
+
+	idp.down.Store(true)
+	if _, err := NewSAMLProvider(chaos71Profile("corp", idp.URL())); err != nil {
+		t.Fatalf("after an invalid answer the cache must still hold the VALID document: %v", err)
+	}
+}
+
+// Codex review (P2): failure episodes are PER PROFILE. With one
+// process-global episode, a healthy sibling's successful fetch cleared the
+// dead profile's episode, so it never reached the degradation threshold and
+// never paged.
+func TestChaos71_HealthySiblingDoesNotClearAnotherProfilesEpisode(t *testing.T) {
+	chaos71Env(t)
+	var details []string
+	prev := fireIdPMetadataAlert
+	fireIdPMetadataAlert = func(d string) { details = append(details, d) }
+	t.Cleanup(func() { fireIdPMetadataAlert = prev })
+
+	noteIdPMetadataOutcome("dead", idpMetaStale, fmt.Errorf("down"))
+	idpMetadata.mu.Lock()
+	idpMetadataEpisodeLocked("dead").firstFailure = time.Now().Add(-2 * idpMetadataDegradedAfter)
+	idpMetadata.mu.Unlock()
+
+	noteIdPMetadataOutcome("healthy", idpMetaFresh, nil)
+	if snap := idpMetadataState(); !snap.Failing || !snap.Degraded {
+		t.Fatalf("a sibling's success must not clear the dead profile's episode: %+v", snap)
+	}
+	noteIdPMetadataOutcome("dead", idpMetaStale, fmt.Errorf("still down"))
+	if len(details) != 1 {
+		t.Fatalf("the dead profile must page once it crosses the threshold, got %d pages", len(details))
+	}
+	noteIdPMetadataOutcome("dead", idpMetaFresh, nil)
+	if idpMetadataState().Failing {
+		t.Fatal("the profile's OWN success must clear its episode")
 	}
 }
 

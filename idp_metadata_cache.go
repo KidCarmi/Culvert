@@ -99,7 +99,14 @@ func idpmetaStaleMaxAgeString() string {
 //     choice, so an IdP-side key rotation is picked up at the first compile
 //     after it happens exactly as before.
 //
-//  2. On success the raw bytes are persisted as last-known-good. A persist
+//  2. A fetched document is persisted as last-known-good — and reported
+//     FRESH — only after `validate` (the caller's own parser/validator, the
+//     one it runs on the result either way) accepts it. An IdP answering 200
+//     with a malformed or invalid document is NOT an answer: persisting it
+//     first overwrote the valid last-known-good copy, so a later outage fell
+//     back to the broken bytes and the provider could never recover from the
+//     cache (Codex review). An invalid document is therefore treated like a
+//     failed fetch and falls through to (3). A persist
 //     failure is logged and IGNORED: the fetch succeeded, so the only cost is
 //     that a FUTURE outage has no fallback, and failing a working compile
 //     because a cache write failed would be strictly worse than no cache.
@@ -108,9 +115,14 @@ func idpmetaStaleMaxAgeString() string {
 //     within idpmeta.StaleMaxAge. Past the ceiling — or with nothing cached —
 //     the original fetch error is returned unchanged and the caller fails
 //     exactly as it did before this package existed.
-func resolveIdPDocument(profileID string, kind idpmeta.Kind, source string, doc []byte, fetchErr error) ([]byte, error) {
+func resolveIdPDocument(profileID string, kind idpmeta.Kind, source string, doc []byte, fetchErr error, validate func([]byte) error) ([]byte, error) {
 	store := idpMetadataStore()
 
+	if fetchErr == nil && len(doc) > 0 && validate != nil {
+		if vErr := validate(doc); vErr != nil {
+			fetchErr = fmt.Errorf("IdP returned an invalid document: %w", vErr)
+		}
+	}
 	if fetchErr == nil && len(doc) > 0 {
 		if putErr := store.Put(profileID, kind, source, doc); putErr != nil {
 			// Not fatal — see (2) above. Rate-limiting is unnecessary: this
