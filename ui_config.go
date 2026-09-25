@@ -192,6 +192,12 @@ func apiStats(w http.ResponseWriter, r *http.Request) {
 		// metrics scraper wired up. A climbing count means an unauthenticated
 		// source is probing /api/auth/login.
 		"loginOversizeRejected": loginOversizeRejected.Load(),
+		// SEC-REQID-1: client-supplied X-Request-Id / Traceparent headers
+		// replaced because they were over-long or carried bytes that must not
+		// reach the process log. The request itself is never refused, so
+		// without this count the probing is invisible to an operator who has
+		// no metrics scraper or shell access to the log.
+		"tracingHeaderRejected": requestIDRejected.Load() + traceparentRejected.Load(),
 	})
 }
 
@@ -2357,10 +2363,11 @@ func registerSettingsRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/export", apiExport)
 
 	// ── Backup / restore / config versioning ──────────────────────────────
-	mux.HandleFunc("/api/config/export", apiConfigExport)     // GET — download exported config JSON
-	mux.HandleFunc("/api/config/import", apiConfigImport)     // POST — restore from exported config JSON
-	mux.HandleFunc("/api/config/versions", apiConfigVersions) // GET list / POST rollback
-	mux.HandleFunc("/api/config/diff", apiConfigDiff)         // GET diff between versions
+	mux.HandleFunc("/api/config/export", apiConfigExport)                // GET — download exported config JSON
+	mux.HandleFunc("/api/config/import", apiConfigImport)                // POST — restore from exported config JSON
+	mux.HandleFunc("/api/config/versions", apiConfigVersions)            // GET list / POST rollback
+	mux.HandleFunc("/api/config/diff", apiConfigDiff)                    // GET diff between versions
+	mux.HandleFunc("/api/config/rollback-scope", apiConfigRollbackScope) // GET settings excluded from rollback
 
 	// ── Auth / network / session settings ─────────────────────────────────
 	mux.HandleFunc("/api/settings/default-auth-outcome", apiDefaultAuthOutcome) // PUT — toggle proxy auth requirement

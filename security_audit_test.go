@@ -181,9 +181,11 @@ func TestUIAuthMiddleware_BadBasicAuth(t *testing.T) {
 func TestUIAuthMiddleware_ClusterBootstrapIsTokenAuthed(t *testing.T) {
 	origCfg := cfg
 	origStore := globalClusterStore
+	origCA := globalClusterCA
 	defer func() {
 		cfg = origCfg
 		globalClusterStore = origStore
+		globalClusterCA = origCA
 	}()
 
 	// A configured CP — the state of virtually every real deployment once
@@ -196,6 +198,21 @@ func TestUIAuthMiddleware_ClusterBootstrapIsTokenAuthed(t *testing.T) {
 	token, err := globalClusterStore.GenerateToken("dp", "", "admin", time.Hour)
 	if err != nil {
 		t.Fatalf("GenerateToken: %v", err)
+	}
+
+	// A cluster CA, because a CP that can hand out enrollment tokens has one.
+	//
+	// This used to be left to whatever a previously-run test happened to leave
+	// in the global, which passed only by luck of ordering: SEC-BOOTSTRAP-HOST-1
+	// made the compose handler refuse (503) rather than serve a document whose
+	// enrollment URL carries an EMPTY `ca-fp=sha256:` — an unpinned URL would
+	// have a fresh DP node trust whatever answers. That turned the hidden
+	// dependency into a shuffle-order failure (seed 1790033347947695463), which
+	// is the determinism gate doing its job. The subject here is token-auth, not
+	// CA readiness, so the CA is now set up explicitly.
+	globalClusterCA = &clusterCA{}
+	if err := globalClusterCA.InitOrLoad(t.TempDir()); err != nil {
+		t.Fatalf("InitOrLoad cluster CA: %v", err)
 	}
 
 	// Chain matches the real production order: uiIPGuardMiddleware and

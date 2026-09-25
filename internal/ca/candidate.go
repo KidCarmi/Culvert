@@ -333,8 +333,10 @@ func (cm *Manager) installLocked(c *Candidate, oldCert *x509.Certificate, oldKey
 	cm.mu.Lock()
 	cm.caCert = c.cert
 	cm.caKey = c.key
-	cm.cache = map[string]*certCacheEntry{}
-	cm.cacheOrder = nil
+	// resetLeafCacheLocked also retires caGen (#1447): a leaf sign that was in
+	// flight against the outgoing CA must not be cached against this one, and
+	// every FE-6B.0 install path — rotation, import, recovery — goes through here.
+	cm.resetLeafCacheLocked()
 	if oldCert != nil {
 		cm.secondaryCACert = oldCert
 		cm.secondaryCAKey = oldKey

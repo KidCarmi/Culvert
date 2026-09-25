@@ -177,6 +177,13 @@ var d0KnownRoutes = func() []string {
 //   - 178 — reconcile parallel-merge drift: Supportability M5 added
 //     /api/diagnose/support (bundle-store health self-check) but its lock bump
 //     collided with the /api/decryption/redaction merge; the true count is 178.
+//   - 246 — added /api/config/rollback-scope (settings excluded from config
+//     version rollback by design — Finding 10.3 exclusions surfaced to the
+//     operator instead of only being discoverable in config_surfaces.go
+//     source).
+//   - +1 (→ 247) — Terminology governance T-17: added canonical
+//     /api/traffic/redaction alongside the retained legacy /api/decryption/redaction
+//     alias (same handler, apiDecryptionRedaction), mirroring the T-10 DPI pattern.
 //
 // POST-C1 FAILURE MATRIX (the table below is the FULL contract; the
 // reverse-direction gap that existed in pre-C1 D0 is now closed by
@@ -193,7 +200,7 @@ var d0KnownRoutes = func() []string {
 //   - Remove an entry from uiRoutes only             → fails C1 reverse
 //     (helper-registered route has no metadata) AND this D0 count test.
 func TestD0_RouteInventory_Locked141(t *testing.T) {
-	const want = 251 // 247 (246 (245 (241 (240 (the 2E-C trust-lifecycle-era branch baseline: 238 (the 2E-C-era baseline: 237 (the 2E-B-era baseline: 222 incl. the 3 ADR-0027 LDAP IdP routes + 6 /api/policy-learning/* + 1 /api/backups + 3 FrontendV2 preview routes + 1 /api/urlcat/state + 2 ADR-0034 tool-trust routes + 2 2D-C v2 state reads) + 1 Canary-activation-gate route (/api/mcp/canary/shadow-exit-review — Shadow Exit Review attestation)) + 2 2E-C trust-lifecycle routes (/api/cdr/instances/enroll/recover + /api/cdr/instances/enroll/receipts)) + 1 authoritative rollback rehearsal route merged from main (/api/mcp/rollout/rehearse-rollback-authoritative)) + 2 2F-C Upstream v2 routes (/api/upstream/entries + /api/upstream/entries/)  // +1: maintenance-agent health visibility route (/api/maintenance-agent)  // +1: Auth Exempt runtime kill-switch route) + 1 FE-6A.0 route (/api/idp/repair — fenced quarantine acknowledgement)) + 1 FE-6A.0 correction route (/api/idp/operations/ — durable operation-intent lookup, Blocker 9)) + 4 FE-6B.0 routes (/api/ca/rotate/challenge + /api/ca/operations/ + /api/certs/ui + /api/certificates — the Certificates/CA backend-truth gate)
+	const want = 253 // 251 (247 (246 (245 (241 (240 (the 2E-C trust-lifecycle-era branch baseline: 238 (the 2E-C-era baseline: 237 (the 2E-B-era baseline: 222 incl. the 3 ADR-0027 LDAP IdP routes + 6 /api/policy-learning/* + 1 /api/backups + 3 FrontendV2 preview routes + 1 /api/urlcat/state + 2 ADR-0034 tool-trust routes + 2 2D-C v2 state reads) + 1 Canary-activation-gate route (/api/mcp/canary/shadow-exit-review — Shadow Exit Review attestation)) + 2 2E-C trust-lifecycle routes (/api/cdr/instances/enroll/recover + /api/cdr/instances/enroll/receipts)) + 1 authoritative rollback rehearsal route merged from main (/api/mcp/rollout/rehearse-rollback-authoritative)) + 2 2F-C Upstream v2 routes (/api/upstream/entries + /api/upstream/entries/)  // +1: maintenance-agent health visibility route (/api/maintenance-agent)  // +1: Auth Exempt runtime kill-switch route) + 1 FE-6A.0 route (/api/idp/repair — fenced quarantine acknowledgement)) + 1 FE-6A.0 correction route (/api/idp/operations/ — durable operation-intent lookup, Blocker 9)) + 4 FE-6B.0 routes (/api/ca/rotate/challenge + /api/ca/operations/ + /api/certs/ui + /api/certificates — the Certificates/CA backend-truth gate); +2 (→ 253) at the FE-6AR refresh merge of origin/main e3559499: main's /api/config/rollback-scope (246→247 on main) and the canonical /api/traffic/redaction alias (T-17), see record 6ARR-C5
 	if got := len(d0KnownRoutes); got != want {
 		t.Fatalf("d0KnownRoutes has %d entries; want %d (route added or removed?)", got, want)
 	}
