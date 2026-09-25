@@ -144,9 +144,14 @@ later review rounds found real coverage gaps — see the corrections above):
    `uncheckedEnforcingPaths` match the `GET /api/ocsp` keys (`ui_security.go:1836-1837`,
    `api/openapi/openapi.yaml:480`) and the GUI reader (`static/index.html:17519`);
    `culvert_ocsp_path_checked{path}` matches the operator doc (`docs/operator/ocsp-revocation-checking.md:27,89`);
-   the `security.ocsp_check` key, `ParseResponseForCert`, `id-kp-OCSPSigning` and the `HTTP(S)_PROXY`
-   behaviour change are spelled identically in code (`config.go:47`, `internal/ocsp/ocsp.go:664,716,179`) and
-   the doc (`:3,124`). "Responder" is used consistently throughout. The entries name none of the
+   `ParseResponseForCert`, `id-kp-OCSPSigning` and the `HTTP(S)_PROXY` behaviour change are spelled
+   identically in code (`internal/ocsp/ocsp.go:664,716,179`) and the doc (`:124`). **One drift found and
+   fixed in this PR (found in review):** the changelog (`CHANGELOG.md:263`), the operator runbook
+   (`docs/operator/ocsp-revocation-checking.md:3`) and the `ocsp_coverage.go:6` comment all named the key
+   `security.ocsp_check`. The real path is `proxy.ocsp_check`: `OCSPCheck` is nested under `proxy`
+   (`config.go:47-48`), as `config.example.yaml:55` documents. Because config decoding rejects unknown
+   fields (`yaml.DisallowUnknownField()`, `config.go:490`), an operator who copied the documented path got
+   a startup parse error instead of OCSP checking. All three now say `proxy.ocsp_check`. "Responder" is used consistently throughout. The entries name none of the
    discarded-response reason labels, so they neither extend nor contradict T-54. One observation, recorded
    here rather than filed as a new finding: the changelog says "a banner on the OCSP panel", and the panel
    is actually titled **"OCSP / CRL Revocation"** (`static/index.html:4477`), a title that names a CRL
