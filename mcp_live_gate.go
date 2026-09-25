@@ -175,6 +175,11 @@ func (g *mcpLiveSideEffectGate) AdmitSideEffect(in execution.LiveGateInput) exec
 	// through an atomic pointer), so the §5 hazard is removed rather than relocated, and the
 	// admission transaction can evaluate the whole predicate under one lock exactly as it did
 	// before the split.
+	// staleAtAdmission records that the probe refused because the peer observation was ALREADY
+	// not fresh at the admission instant. It is set only inside the probe, which runs exactly once
+	// and synchronously within the transaction, so reading it after the transaction returns is not
+	// a race.
+	var staleAtAdmission bool
 	adm := g.admitUnderActivation(in.Now, in.Operation, in.ResolvedScopeHash, g.currentScopeHash, canary.ExecutionIdentity{
 		Principal: in.Principal,
 		Tool:      in.ToolName,
@@ -214,6 +219,36 @@ func (g *mcpLiveSideEffectGate) AdmitSideEffect(in execution.LiveGateInput) exec
 			FingerprintFormat: live.Target.FingerprintFormat,
 			ServerIdentity:    live.ServerIdentity,
 		}
+		// PEER FRESHNESS IS ALSO ASKED HERE, BEFORE THE RESERVATION — and for a reason the
+		// boundary re-check cannot supply (Codex P2, PR #1439).
+		//
+		// The boundary re-asks freshness at every pre-send point, and that is what makes it
+		// sufficient for the INVARIANT: nothing crosses on a lapsed observation. It is not
+		// sufficient for the BUDGET. The reservation below spends from a MONOTONIC total that
+		// Release never refunds (canary.BudgetEnforcer: a crash between Reserve and the side
+		// effect must not let the budget be replayed). So a request whose observation was
+		// already stale when it arrived used to be admitted, charged one of the First Canary's
+		// three executions, and only then refused at the boundary — having sent nothing. Three
+		// such requests exhausted the experiment, and no later re-observation could buy the
+		// spent generation back.
+		//
+		// This is not a redundant second site. The boundary exists because an observation can
+		// lapse DURING the request; this exists because an already-lapsed one must not be paid
+		// for. Each has a reason the other cannot provide, and the boundary re-check is kept
+		// unchanged for the expiries that race admission.
+		//
+		// Same verdict (boundaryPeerFreshness — one definition of fresh), same capture as the
+		// approval below, and the ADMISSION instant, which is the clock every other admission
+		// fact here is judged at. It reports untrusted rather than drift: a lapse is the clock
+		// advancing, not the reviewed target moving, so nothing is latched (step 6).
+		//
+		// ORDER mirrors the boundary: freshness before the approval, so the durable store is not
+		// consulted for a request that is refused anyway and a request that is both stale and
+		// unapproved is diagnosed the same way at both sites.
+		if boundaryPeerFreshness(live, in.Now) != mcperr.ReasonNone {
+			staleAtAdmission = true
+			return canaryTrustObservation{Found: true, Current: cur}
+		}
 		trusted, _ := g.approvalOK(live.Target, in.Operation, in.Now)
 		return canaryTrustObservation{Found: true, Current: cur, Trusted: trusted}
 	})
@@ -243,6 +278,12 @@ func (g *mcpLiveSideEffectGate) AdmitSideEffect(in execution.LiveGateInput) exec
 		return deny(mcperr.ReasonLiveTrustRevalidationFailed)
 	case canaryAdmitUntrusted:
 		releaseAdmit()
+		if staleAtAdmission {
+			// The SAME bounded reason the boundary reports for the same fact, so a lapsed
+			// observation is diagnosed identically whichever site caught it (the round-4 rule,
+			// PR #1370).
+			return deny(mcperr.ReasonPeerObservationNotFresh)
+		}
 		return deny(mcperr.ReasonLiveTrustRevalidationFailed)
 	case canaryAdmitNotReviewed:
 		// The activation was never reviewed for this target. Request-scoped (nothing latched, per

@@ -30,12 +30,18 @@ import (
 // asserts it, so a future change to the PreSend wiring makes these cases fail loudly rather than
 // silently stop testing the point they were written for.
 //
-// ANTI-VACUITY, MEASURED RATHER THAN CLAIMED. With the boundary freshness call deleted from
-// mcp_live_gate.go, SEVEN of the ten cases below fail. The three that still pass are the three
-// that should: RT01 is the positive control (a boundary that refused everything would satisfy
-// every negative here while making the First Canary impossible), and RT06 and RT10 prove a
-// DIFFERENT authority — the precheck's target binding — and are labelled as such rather than
-// counted as freshness gates they are not.
+// ANTI-VACUITY, MEASURED RATHER THAN CLAIMED. There are TWO freshness sites since round 13 (Codex
+// P2, PR #1439): the boundary re-check and an admission-time check that stops an already-stale
+// request from spending budget. Deleting each in turn:
+//
+//   - boundary call only  → RT02, RT03, RT04 fail (lapses DURING the request)
+//   - admission call only → RT11 fails (stale on arrival: refused at the boundary, but charged)
+//   - both                → those four plus RT05, RT07, RT08, RT09, which either site refuses
+//
+// RT01, RT06 and RT10 survive every deletion, and should: RT01 is the positive control (a boundary
+// that refused everything would satisfy every negative here while making the First Canary
+// impossible), and RT06 and RT10 prove a DIFFERENT authority — the precheck's target binding — and
+// are labelled as such rather than counted as freshness gates they are not.
 
 // peerFreshRig drives the REAL live-execution path against a REAL local HTTPS peer, with the
 // boundary clock and the peer observation under test control.
@@ -137,12 +143,14 @@ func TestPeerFreshRT01_FreshObservationCrossesTheWholePath(t *testing.T) {
 // TestPeerFreshRT02_StaleBeforeAdmissionNeverReachesThePeer covers every ordering in which the
 // observation lapses before the first boundary re-check.
 //
-// This one case covers §9's rows 2, 3 and 4 — stale before admission, expired after activation
-// but before the request, and expired after policy resolution but before live admission — and
-// that is a statement about the design rather than a shortcut. Admission does not consult peer
-// freshness at all; the first authority that does is the boundary re-check. So all three
-// orderings converge on the same observable: the request is refused at the first re-check, having
-// touched nothing.
+// It places the lapse on the BOUNDARY clock at its very first read, while the admission instant
+// still sees the observation as fresh — so admission reserves and the first re-check refuses,
+// having touched nothing. §9's rows 2, 3 and 4 converge on that observable.
+//
+// The case where the observation is ALREADY stale at the admission instant is RT11, and it
+// asserts something this case cannot: that the refusal happens before the budget is charged.
+// Admission did not consult freshness when this case was written, which is exactly the gap
+// Codex found (P2, PR #1439) — the invariant held, the budget did not.
 func TestPeerFreshRT02_StaleBeforeAdmissionNeverReachesThePeer(t *testing.T) {
 	p := startControlledPeer(t, respondOK)
 	r := newPeerFreshRTRig(t, p, 10)
@@ -295,7 +303,14 @@ func TestPeerFreshRT08_FailedRefreshDoesNotExtendAgeAndARealOneDoes(t *testing.T
 
 	// Time passes and the refresh FAILS: the evidence is untouched, so it simply ages out. A
 	// failed refresh is not a statement that the peer is unchanged.
-	r.nowNanos.Store(time.Unix(0, r.nowNanos.Load()).Add(staleJump).UnixNano())
+	//
+	// Age is modelled by moving the EVIDENCE back rather than the boundary clock forward. This
+	// harness pins the admission instant (the executor's clock) at a fixed value, and admission now
+	// judges freshness too (Codex P2, PR #1439); advancing only the boundary clock and then
+	// re-observing at it would stamp the observation in the FUTURE relative to admission — two
+	// clocks that are one clock in production, disagreeing about an instant that cannot occur.
+	// Freshness is a function of (evaluation instant − sighting), so this is the same fact.
+	r.obsNanos.Store(time.Unix(0, r.nowNanos.Load()).Add(-staleJump).UnixNano())
 	if crossed, reqs := r.run(t); crossed || reqs != 0 {
 		t.Fatalf("aged-out evidence must refuse after a failed refresh: crossed=%v reqs=%d", crossed, reqs)
 	}
@@ -361,5 +376,53 @@ func TestPeerFreshRT10_TargetDriftBetweenAdmissionAndTheBoundaryIsRefused(t *tes
 	}
 	if reqs != 0 {
 		t.Fatalf("no bytes may reach the peer, got %d request(s)", reqs)
+	}
+}
+
+// ── (13) an observation already stale at admission spends no budget (Codex P2, PR #1439) ─────
+
+// TestPeerFreshRT11_StaleAtAdmissionSpendsNoBudget is the defect proof for the admission-time
+// freshness check.
+//
+// The boundary re-check makes the INVARIANT hold — nothing crosses on a lapsed observation — but
+// it runs after the reservation, and the reservation spends from a MONOTONIC total that Release
+// never refunds. So before the fix, a request whose observation was already stale when it arrived
+// was admitted, charged a slot, and refused at the boundary having sent nothing. With the First
+// Canary's tiny total, a handful of such requests stopped the experiment, and re-observing the
+// peer afterwards could not buy the spent generation back.
+//
+// The budget here is ONE execution, which makes the defect binary: three stale requests arrive
+// first, then the peer is re-observed. If any stale request was charged, the fresh one is refused
+// for budget and never reaches the peer. It must reach it exactly once.
+//
+// The observation is aged, not the clock, so it is stale at BOTH the admission instant and the
+// boundary — the precondition the admission check exists for. RT02 covers the other ordering.
+func TestPeerFreshRT11_StaleAtAdmissionSpendsNoBudget(t *testing.T) {
+	p := startControlledPeer(t, respondOK)
+	r := newPeerFreshRTRig(t, p, 1)
+
+	r.obsNanos.Store(time.Unix(0, r.nowNanos.Load()).Add(-staleJump).UnixNano())
+	before := mcpLiveGateDenialSnapshot()["peer_observation_not_fresh"]
+	for i := range 3 {
+		if crossed, reqs := r.run(t); crossed || reqs != 0 {
+			t.Fatalf("stale request %d must not execute: crossed=%v reqs=%d", i, crossed, reqs)
+		}
+	}
+	if got := mcpLiveGateDenialSnapshot()["peer_observation_not_fresh"] - before; got != 3 {
+		t.Fatalf("each stale request must be refused as peer_observation_not_fresh (the boundary's own "+
+			"reason, so both sites diagnose one fact identically); got %d of 3", got)
+	}
+	if got := r.reads.Load(); got != 0 {
+		t.Fatalf("a request refused at admission must never reach the boundary re-check, which runs "+
+			"only after a reservation; the boundary clock was read %d time(s)", got)
+	}
+
+	// The peer is observed again. The single budget slot must still be there to spend.
+	r.obsNanos.Store(r.nowNanos.Load())
+	crossed, reqs := r.run(t)
+	if !crossed || reqs != 1 {
+		t.Fatalf("SECURITY/AVAILABILITY: after stale requests, a fresh one must still execute on the "+
+			"First Canary's only slot (crossed=%v reqs=%d). A stale request was charged budget it "+
+			"could never spend.", crossed, reqs)
 	}
 }

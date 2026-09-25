@@ -58,6 +58,15 @@ func (c callSite) String() string { return c.File + ":" + c.Func }
 // method from a string at runtime with no selector in the source. That is recorded as a limit,
 // not papered over; nothing in this tree does it, and a gate that cannot see a construct should
 // say so rather than imply coverage it does not have.
+//
+// Nor does it follow a method value that ESCAPES the allowed declaration (Codex round 13, P1,
+// PR #1439, reproduced through referencesInSource before it was recorded). If Discovery.Discover
+// assigned `escaped = d.Catalog.IngestObserved` to a package-level variable, the selector would be
+// attributed — correctly, lexically — to Discovery.Discover, and a later `escaped(...)` elsewhere
+// names no selector at all. "Closes the class" above is true for a caller that must NAME the
+// method; it is not true for one handed the value. Where a function value goes is a dataflow
+// question, the same one rounds 8-12 kept meeting, and it is recorded in the ledger (§25f, Round
+// 13) under the rule stated there rather than chased. Nothing in this tree does it.
 func findCallsites(t *testing.T, sel string) []callSite {
 	t.Helper()
 	var sites []callSite

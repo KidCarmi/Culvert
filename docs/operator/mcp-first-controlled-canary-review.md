@@ -3522,7 +3522,14 @@ exists to close.
 
 **Security ordering is unchanged.** The emergency kill re-read stays LAST; nothing moved earlier.
 
-### Why there is exactly ONE new check site (§8, the #1370 lesson)
+### Why there is exactly ONE boundary check site (§8, the #1370 lesson)
+
+> **Correction, round 13 (Codex P2, PR #1439).** This section argued for exactly one new check
+> site, and for the INVARIANT that argument holds. It did not hold for the BUDGET: admission
+> reserves from a monotonic total that `Release` never refunds, and it did not consult freshness,
+> so a request whose observation was ALREADY stale on arrival was charged a slot and then refused
+> at the boundary having sent nothing. There is now a second, admission-time site with its own
+> reason to exist — see *Round 13* below. The boundary argument that follows is unchanged.
 
 #1370's lesson is that an authority checked before an unbounded wait is stale by the time it is
 spent. The question is therefore not "how many places can we check?" but "where is the authority
@@ -3572,6 +3579,7 @@ makes the matrix fail loudly rather than silently stop testing the point it was 
 | RT08 | a failed refresh does not extend age; a real one does |
 | RT09 | reseed and restart both remove the authority |
 | RT10 | target drift between admission and the boundary is refused |
+| RT11 | stale ON ARRIVAL is refused at admission and **spends no budget** (round 13) |
 
 **§10, the sharp proof.** RT04 does not settle for "the handler was not called". The expiry is
 placed after connect, so TCP may legitimately exist; the peer counts **MCP request bytes written**,
@@ -3591,6 +3599,17 @@ should: RT01 is the positive control (a boundary that refused everything would s
 negative here while making the First Canary impossible), and RT06/RT10 prove a DIFFERENT authority
 — the precheck's target binding — and are labelled as such rather than counted as freshness gates
 they are not.
+
+*Re-measured after round 13*, with eleven cases and two freshness sites, each site deleted in turn:
+
+| deleted | cases that fail | why |
+|---|---|---|
+| the boundary call only | RT02, RT03, RT04 | the lapses that happen DURING the request — admission saw a fresh observation |
+| the admission call only | RT11 | stale on arrival: the boundary still refuses the send, but the slot is already spent |
+| both | RT02, RT03, RT04, RT05, RT07, RT08, RT09, RT11 | RT05/07/08/09 are stale on arrival, so EITHER site refuses them |
+
+Each site is therefore killed by cases the other cannot satisfy. RT01, RT06 and RT10 survive every
+deletion, as before and for the same reasons.
 
 ### Mutation campaign (14 classes)
 
@@ -4013,16 +4032,96 @@ So the position recorded here, and stated on the PR:
   inside the gate. That is a self-contained change with its own review, and it is recorded as a
   dependency — not folded into a ledger commit.
 
+### Round 13: one real defect fixed, one wall evasion recorded (Codex, PR #1439)
+
+A requested re-review on `48c4b0f` returned two findings. Both were reproduced before either was
+agreed with.
+
+**P2 — a stale observation spent budget it could never use. Real, and FIXED.** Admission
+(`admitUnderActivation`) reserves before the boundary ever runs, and the reservation spends from
+`BudgetEnforcer`'s monotonic `total`, which `Release` deliberately never refunds (a crash between
+Reserve and the side effect must not let the budget be replayed). Admission did not consult
+freshness. So a request whose observation had ALREADY lapsed was admitted, charged, and refused at
+the first boundary re-check having sent nothing. The invariant held — nothing crossed — and the
+experiment was exhausted anyway: with a First-Canary total of three, three such requests stopped it,
+and re-observing the peer afterwards could not buy the spent generation back.
+
+The fix asks the SAME verdict (`boundaryPeerFreshness`, one definition of fresh) inside the
+admission probe, on the same capture as the approval beside it and at the admission instant every
+other admission fact is judged at, BEFORE the approval and before the reservation. A lapse is
+reported as untrusted, never as drift: the clock advancing is not the reviewed target moving, so
+nothing is latched. The denial carries the boundary's own bounded reason,
+`peer_observation_not_fresh`, so one fact is diagnosed identically whichever site catches it.
+
+This is not the redundant site §8 warns against, and the distinction is the whole argument: the
+boundary exists because an observation can lapse DURING a request; this exists because an
+already-lapsed one must not be PAID for. Neither reason covers the other, and the measurement above
+shows each site killed by cases the other cannot satisfy.
+
+`TestPeerFreshRT11_StaleAtAdmissionSpendsNoBudget` is the defect proof: a budget of ONE, three stale
+requests, then a re-observation — the fresh request must still reach the peer exactly once. It fails
+with the admission call removed (verified, then restored byte-for-byte) and passes with it. RT08 was
+adjusted in the same change: it advanced only the BOUNDARY clock and then re-observed at that
+instant, which stamps the observation in the future relative to this harness's fixed admission
+clock — two clocks that are one clock in production. It now ages the evidence instead; same fact,
+and it passes with and without the fix.
+
+**The fixture consequence, and a vacuity probe run because of it.** Asking freshness at admission
+failed about twenty-five existing admission-level cases whose premise was "this request is
+admitted" but whose seeded target no peer had ever been seen advertising — a state production cannot
+reach, because activation readiness already requires a fresh observation. Those rigs now observe
+the peer through the PRODUCTION refresh engine (`observeSeededToolTrustPeerAt` /
+`observePeerAdvertisingAt`, opt-in, never a hand-built record, and asserting the fingerprint did not
+move), exactly as the boundary fixtures had to when the boundary check landed.
+
+Fixing the cases that FAILED is not enough, because a case that expects a DENIAL and does not
+assert its reason would keep passing while now being refused for staleness instead of the thing it
+exists to prove. So the stale-at-admission branch was temporarily instrumented to print a stack and
+the whole MCP/Canary suite was run: FOUR such cases were found (C02 expired approval, the
+approval-expiry premise of C04/C07 and the scope-independent path, read-first C05, and the
+merely-unauthorized autostop case) and each now observes the peer at its own evaluation instant, so
+the only authority missing is the one it names. After the fix the branch is reached only by the
+freshness matrix itself (RT05/07/08/09/11) and by four drift cases that assert the latched cause —
+drift is decided from the same capture BEFORE the freshness answer is consulted, so a stale
+observation can never mask it, and those cases prove exactly that.
+
+**P1 — a method value exported from the allowed producer. Real, and RECORDED, not chased.**
+`Discovery.Discover` could assign `escaped = d.Catalog.IngestObserved` to a package-level variable,
+and any other function could then call `escaped(...)` with fabricated bytes. The bare selector is
+attributed to its enclosing declaration — the allowlisted one — and the later invocation names no
+selector, so the provenance wall stays green. Reproduced through the wall's own `referencesInSource`
+seam: the reference is reported as `internal/mcp/execution/discovery.go:Discovery.Discover`.
+
+This is round 13 of exactly the sequence the previous section stopped: a hand-written syntactic
+predicate standing in for a dataflow question — here, *where does this function VALUE go?* — and
+the thirteenth shape the previous section said almost certainly existed. It is recorded under that
+section's rule rather than chased. Nothing in the production tree does it (the one real reference is
+a direct call with arguments the declaration controls), and the guarantees are still the behavioural
+ones listed above: provenance is derived from evidence, `Discovery.Discover` is the only gatherer,
+the timestamp is taken before the request, and freshness is re-asked at admission and at every
+pre-send authority check. The comment on `findCallsites`, which said matching the selector "closes
+the class", now names this limit beside the reflection limit it already named. The `types.Object`
+resolution recorded above remains the real fix.
+
+**Nothing else moves.** Blocker 11 stays CLOSED — the invariant held throughout; round 13 closes an
+availability defect beside it. Blockers 1, 2, 3, 8, 10, 12 and 15 are untouched, and the §26 verdict
+is unchanged.
+
 ### Status — blocker 11 is CLOSED, and nothing else moves
 
 The closure bar was stated before the work: the ledger may change `#11 OPEN -> CLOSED` only once
 activation readiness, runtime/live admission, AND every existing pre-send authority revalidation
 site enforce the same property. All three now hold, and the third is the one worth naming
-precisely: there is exactly **one** new check site, inside the existing live authority predicate,
-and every pre-send re-ask reaches it — `preCallGuard` runs the predicate after admission and
-`CallOptions.PreSend` re-runs it after the pool wait and after the TLS handshake. That is why no
-second, third or fourth guard was added; a site with no distinct reason to exist is how #1370's
+precisely: there is exactly **one** boundary check site, inside the existing live authority
+predicate, and every pre-send re-ask reaches it — `preCallGuard` runs the predicate after admission
+and `CallOptions.PreSend` re-runs it after the pool wait and after the TLS handshake. That is why no
+third or fourth boundary guard was added; a site with no distinct reason to exist is how #1370's
 stale-authority lesson gets relearned rather than applied.
+
+*Round 13 correction.* "Runtime/live admission" was satisfied only in the sense that the
+predicate ran AFTER admission; admission itself did not ask, so an already-stale request was charged
+budget before being refused. The admission probe now asks the same verdict before the reservation
+(see *Round 13*), which is what makes the second clause of the closure bar true as written.
 
 **What is NOT closed by this.** Blocker 1 is untouched: the refresh that supplies an observation is
 sessionless, and none of this work implements the MCP `initialize` / version-negotiation / session

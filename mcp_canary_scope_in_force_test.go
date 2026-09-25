@@ -66,6 +66,10 @@ func newScopeRig(t *testing.T) *scopeRig {
 	resetInventory(t)
 	resetExecDeps(t)
 	_, cat, sid, tool, fpHex := seedToolTrustInventory(t)
+	// Every case here needs the request ADMITTED before it can prove the scope refusal, and
+	// admission now refuses a target no peer has been seen advertising (round 13). Observed at
+	// the rig's admission instant, before the approval pins the catalog revision.
+	observeSeededToolTrustPeerAt(t, sid, canaryRuntimeTestNow)
 	_, clkFn := liveFakeClock()
 	composeToolTrust(t, clkFn)
 	requestAndApproveLiveClassified(t, sid, tool, fpHex, cat.Current().Revision(), tooltrust.ReviewedOpReadOnly)

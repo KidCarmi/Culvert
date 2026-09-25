@@ -64,7 +64,10 @@ func TestPeerFreshWall_VerdictHasExactlyOneProductionCaller(t *testing.T) {
 			"exists because freshness is the one authority that expires with no state change at " +
 			"all: an observation can satisfy the activation preflight and lapse while the " +
 			"request waits on credential materialization, the durable commit and an upstream " +
-			"pool slot.",
+			"pool slot. boundaryPeerFreshness is itself reached from TWO sites in this file, " +
+			"both on that same capture: the admission probe, which refuses an already-stale " +
+			"request BEFORE it spends non-refundable budget (Codex P2, PR #1439), and the " +
+			"boundary re-check, which catches a lapse that happens during the request.",
 	})
 }
 
