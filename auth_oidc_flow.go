@@ -33,6 +33,8 @@ import (
 
 	jwtv5 "github.com/golang-jwt/jwt/v5"
 
+	"github.com/KidCarmi/Culvert/internal/ssrf"
+
 	"github.com/KidCarmi/Culvert/internal/authstate"
 
 	"github.com/KidCarmi/Culvert/internal/idpmeta"
@@ -133,10 +135,21 @@ func fetchOIDCDiscovery(profileID, issuer string) (*oidcDiscoveryDoc, error) {
 // whether the bytes came off the network or out of the last-known-good cache.
 // That is the load-bearing half of the cache's safety argument: the discovery
 // document names the authorization and token endpoints this appliance sends
-// users and credentials to, so every one of them is put back through
-// validateExternalURL (https, non-private) here. A cached document therefore
-// cannot widen anything the network path would have refused — including one
-// edited on disk by something that got write access to dataDir.
+// users and credentials to, so every one of them is re-validated here and a
+// cached document cannot widen anything the network path would have refused —
+// including one edited on disk by something that got write access to dataDir.
+//
+// The endpoints are NOT all guarded the same way, and the difference is the
+// point (CHAOS-71 round 3). The token and JWKS endpoints are ones this
+// appliance DIALS, so ssrfSafeDialContext refuses a private resolved address
+// at connect time and is rebinding-proof — a structural check is enough for
+// them. The AUTHORIZATION endpoint is not dialled by us at all: it is handed
+// to the user's BROWSER as a redirect, so no dialer of ours is ever consulted
+// and isSafeCaptiveRedirect checks only the shape (absolute, http/https,
+// non-empty host). An earlier round of this sweep claimed that function
+// re-checked the address and it does not; dropping the resolving validator
+// here therefore opened a path for a discovery document — or an edited cache
+// file — to redirect a browser at an internal address. It gets its own guard.
 func parseAndValidateOIDCDiscovery(raw []byte) (*oidcDiscoveryDoc, error) {
 	var doc oidcDiscoveryDoc
 	if err := json.NewDecoder(io.LimitReader(bytes.NewReader(raw), 64<<10)).Decode(&doc); err != nil {
@@ -154,19 +167,55 @@ func parseAndValidateOIDCDiscovery(raw []byte) (*oidcDiscoveryDoc, error) {
 		if u == "" {
 			continue
 		}
-		// STRUCTURAL only, and deliberately: this parser runs on the cached
-		// document too, so a DNS-backed check here would make the fallback
-		// unusable during exactly the outage it exists for. Everything this
-		// appliance DIALS from the discovery document goes out through
-		// ssrfSafeDialContext (the provider's transport and the JWKS client),
-		// which refuses a private resolved address at connect time and is
-		// rebinding-proof; the authorization endpoint is a browser redirect and
-		// is re-checked by isSafeCaptiveRedirect at the moment it is issued.
+		// STRUCTURAL, and deliberately: this parser runs on the cached
+		// document too, so a DNS-backed REFUSAL-ON-FAILURE here would make the
+		// fallback unusable during exactly the outage it exists for.
 		if err := validateExternalURLStructure(u); err != nil {
 			return nil, fmt.Errorf("oidc discovery endpoint %q: %w", u, err)
 		}
 	}
+	// The browser-redirect target gets the address check the dialer would have
+	// given it if we dialled it. Refused ONLY on a DEFINITE private verdict:
+	// ssrf.PrivateHostContext has three outcomes and a resolution FAILURE is
+	// not "private", it is "unknown" — treating it as a refusal would hand a
+	// resolver outage the power to reject a cached document, which is this
+	// sweep's own headline defect in miniature (the CHAOS-65 (6e) rule: a
+	// guard that can fail for more than one reason must say which).
+	if err := refuseDefinitelyPrivateRedirect(doc.AuthorizationEndpoint); err != nil {
+		return nil, err
+	}
 	return &doc, nil
+}
+
+// oidcRedirectHostCheckBudget bounds the one address lookup the authorization
+// endpoint gets. This runs at COMPILE time (boot, admin write, config sync) —
+// never on the proxy request path — so it is bounded for the same reason the
+// fetch beside it is, not because a request is waiting on it.
+const oidcRedirectHostCheckBudget = 5 * time.Second
+
+// refuseDefinitelyPrivateRedirect refuses an authorization endpoint that
+// RESOLVES into a private range. A host that cannot be resolved right now is
+// ALLOWED: the document was validated against a resolving check when it was
+// first fetched and cached, so "unknown" during an outage is the fallback
+// working as designed, while "definitely private" is the case no outage
+// excuses.
+func refuseDefinitelyPrivateRedirect(raw string) error {
+	if raw == "" {
+		return nil
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return fmt.Errorf("oidc discovery authorization_endpoint %q: unusable", raw)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), oidcRedirectHostCheckBudget)
+	defer cancel()
+	if err := isPrivateHostContext(ctx, u.Host); err != nil {
+		if errors.Is(err, ssrf.ErrBlocked) {
+			return fmt.Errorf("oidc discovery authorization_endpoint %q resolves to a private address", raw)
+		}
+		// Could not determine (resolver outage, budget spent). Not a refusal.
+	}
+	return nil
 }
 
 // probeOIDCDiscovery is the ADMIN "test this issuer" path (POST

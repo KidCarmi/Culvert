@@ -279,8 +279,17 @@ func validateUpsertProfile(p *IdPProfile) error {
 		return fmt.Errorf("idp: type must be 'oidc', 'saml', or 'ldap'")
 	}
 	// Security: validate issuer/metadata URLs before compiling.
+	//
+	// STRUCTURAL, deliberately (CHAOS-71 round 3). The resolving form gated
+	// this admission path, so a resolver outage rejected the admin write and —
+	// via ReplaceAll — aborted the WHOLE CP->DP snapshot, which is this
+	// sweep's headline defect surviving on the one path it was about: the
+	// last-known-good cache sits behind compileIdPProfile and is never reached
+	// when admission has already refused. The DNS-backed check stays inline in
+	// fetchOIDCDiscoveryOverNetwork, where its failure is a failed FETCH and
+	// falls back to the cache. A configuration error still fails fast here.
 	if p.Type == IdPTypeOIDC && p.OIDC != nil {
-		if err := validateExternalURL(p.OIDC.Issuer); err != nil {
+		if err := validateExternalURLStructure(p.OIDC.Issuer); err != nil {
 			return fmt.Errorf("idp oidc issuer: %w", err)
 		}
 	}
@@ -321,13 +330,35 @@ func (r *IdPRegistry) Upsert(p *IdPProfile) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
+	// Whether this id is ALREADY registered decides who owns any failure
+	// episode recorded below. A refused candidate that is not in the registry
+	// never existed, so its episode must not outlive the refusal; a refused
+	// EDIT of a profile that IS registered leaves the existing provider (and
+	// its legitimate episode) in place, so forgetting there would delete a real
+	// outage signal. Read under the lock, before anything can change it.
+	alreadyRegistered := false
+	for _, existing := range r.profiles {
+		if existing.ID == p.ID {
+			alreadyRegistered = true
+			break
+		}
+	}
+
 	var compiled IdentityProvider
 	if p.Enabled {
 		prov, err := compileIdPProfile(p)
 		if err != nil {
+			if !alreadyRegistered {
+				forgetIdPMetadataEpisode(p.ID)
+			}
 			return fmt.Errorf("idp compile error: %w", err)
 		}
 		compiled = prov
+	}
+	// A profile that is being stored DISABLED has no remote fetch to recover,
+	// so any episode it carries can never be cleared by evidence again.
+	if !p.Enabled {
+		defer forgetIdPMetadataEpisode(p.ID)
 	}
 
 	// Build the CANDIDATE state on copies — the published slice/map must not
@@ -424,6 +455,9 @@ func (r *IdPRegistry) Delete(id string) error {
 			return err // the profile stays stored AND live
 		}
 		r.profiles, r.live = nextProfiles, nextLive
+		// The profile is gone, so nothing will ever fetch for it again and no
+		// evidence can clear an episode it left behind.
+		forgetIdPMetadataEpisode(id)
 		return nil
 	}
 	return fmt.Errorf("idp %q not found", id)
@@ -456,9 +490,23 @@ func (r *IdPRegistry) All() []*IdPProfile {
 func (r *IdPRegistry) ReplaceAll(profiles []*IdPProfile) error {
 	nextProfiles := cloneIdPProfiles(profiles)
 	nextLive := make(map[string]IdentityProvider)
+
+	// Ids currently in the registry. A candidate that fails below and is NOT
+	// among them never entered the registry, so an episode its compile left
+	// behind has no owner and nothing could ever clear it; one that IS among
+	// them keeps its episode, which belongs to the still-authoritative
+	// provider this rejected snapshot did not replace.
+	registered := r.registeredIDs()
+	forgetUnregistered := func(id string) {
+		if _, ok := registered[id]; !ok {
+			forgetIdPMetadataEpisode(id)
+		}
+	}
+
 	for _, p := range nextProfiles {
 		normalizeIdPProfileWriteInput(p)
 		if err := validateIdPProfile(p); err != nil {
+			forgetUnregistered(p.ID)
 			return err
 		}
 		if !p.Enabled {
@@ -466,6 +514,7 @@ func (r *IdPRegistry) ReplaceAll(profiles []*IdPProfile) error {
 		}
 		prov, err := compileIdPProfile(p)
 		if err != nil {
+			forgetUnregistered(p.ID)
 			return fmt.Errorf("idp %q compile error: %w", p.ID, err)
 		}
 		nextLive[p.ID] = prov
@@ -478,7 +527,32 @@ func (r *IdPRegistry) ReplaceAll(profiles []*IdPProfile) error {
 	}
 	r.profiles = nextProfiles
 	r.live = nextLive
+
+	// Whatever this snapshot dropped or disabled has no remote fetch left, so
+	// its episode can never be cleared by evidence again.
+	kept := make(map[string]struct{}, len(nextProfiles))
+	for _, p := range nextProfiles {
+		if p.Enabled {
+			kept[p.ID] = struct{}{}
+		}
+	}
+	for id := range registered {
+		if _, ok := kept[id]; !ok {
+			forgetIdPMetadataEpisode(id)
+		}
+	}
 	return nil
+}
+
+// registeredIDs snapshots the ids currently stored in the registry.
+func (r *IdPRegistry) registeredIDs() map[string]struct{} {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	ids := make(map[string]struct{}, len(r.profiles))
+	for _, p := range r.profiles {
+		ids[p.ID] = struct{}{}
+	}
+	return ids
 }
 
 // validateReservedIdPNaming rejects IdP profile IDs and names that collide with
@@ -522,7 +596,10 @@ func validateIdPProfile(p *IdPProfile) error {
 		if p.OIDC == nil {
 			return fmt.Errorf("idp: oidc config is required")
 		}
-		if err := validateExternalURL(p.OIDC.Issuer); err != nil {
+		// STRUCTURAL — see the note in validateUpsertProfile. This gate is
+		// reached by ReplaceAll (CP->DP config sync), so a resolving check
+		// here lets one unreachable IdP veto the operator's whole config push.
+		if err := validateExternalURLStructure(p.OIDC.Issuer); err != nil {
 			return fmt.Errorf("idp oidc issuer: %w", err)
 		}
 	}

@@ -7119,13 +7119,17 @@ Four further rules the design carries, each with its own gate:
   load-bearing: the discovery document names the authorization and token
   endpoints this appliance sends users and credentials to, so
   `parseAndValidateOIDCDiscovery` — now the single parser for both origins —
-  puts every discovered endpoint back through `validateExternalURLStructure`
-  (structural, deliberately — a DNS-backed re-check on the parser would make
-  the fallback unusable during exactly the outage it exists for; everything
-  this appliance DIALS from the document goes out through `ssrfSafeDialContext`,
-  which refuses a private RESOLVED address at connect time and is
-  rebinding-proof, and the authorization endpoint is a browser redirect
-  re-checked by `isSafeCaptiveRedirect` at the instant it is issued). A cache
+  puts every discovered endpoint back through `validateExternalURLStructure`,
+  and additionally puts the AUTHORIZATION endpoint through an address check
+  (`refuseDefinitelyPrivateRedirect`). The asymmetry is the point: the token
+  and JWKS endpoints are ones this appliance DIALS, so `ssrfSafeDialContext`
+  refuses a private resolved address at connect time and is rebinding-proof;
+  the authorization endpoint is handed to the user's BROWSER, so no dialer of
+  ours is consulted. Round 1 of this sweep claimed `isSafeCaptiveRedirect`
+  re-checked it — FALSE, it checks only shape — so dropping the resolving
+  validator opened a redirect-to-internal path. The restored check refuses only
+  a DEFINITE private verdict, because a resolution failure is *unknown*, not
+  *private*. A cache
   file edited by anything that got write access to `dataDir` cannot widen a
   trust decision.
 * **A NEGATIVE age is STALE, not fresh.** A document stamped in the future,
@@ -7195,8 +7199,8 @@ a cache keyed on one would be a seeding surface.
 
 ### Gates
 
-`internal/idpmeta/idpmeta_test.go` (12) and `idp_metadata_chaos_test.go` (28
-functions). Eight DEFECT gates were verified failing against the reintroduced
+`internal/idpmeta/idpmeta_test.go` (12) and `idp_metadata_chaos_test.go` (34
+functions). Eleven DEFECT gates were verified failing against the reintroduced
 pre-fix shape and the four security gates plus three controls pass against it —
 the correct signature, since the security properties are new rather than
 regressions. The CONTROL `FreshDocumentAlwaysBeatsTheCache` was separately
@@ -7329,6 +7333,64 @@ is. Verified in both directions rather than assumed: Go's pure resolver rejects
 all three outright, cgo's `getaddrinfo` accepts them and the pre-flight then
 refuses them by resolved address (`localhost` measured as *"resolves to private
 address 127.0.0.1"*). Both closed.
+
+### Codex review round 2 — the headline defect was still open on the path it was about
+
+Three findings, all confirmed by reading the code rather than taken on the
+reviewer's word, and the first is the sweep's own primary defect surviving a
+round that claimed to have closed it.
+
+**P1 — the fix was applied below the gate that refuses.** Round 1 moved
+`fetchOIDCDiscovery` off the resolving validator, and a gate
+(`OIDCDNSOutageIsAnsweredFromCache`) proved a cached document answers a DNS
+outage. Both were true and neither was sufficient: `validateUpsertProfile` and
+`validateIdPProfile` still called the RESOLVING `validateExternalURL` on the
+OIDC issuer, and **admission runs before compilation while the cache lives
+behind compilation** — so during a resolver outage the admin write was still
+refused and `ReplaceAll` still aborted the entire CP→DP snapshot, which is
+finding (4), the fleet-wide config veto, unchanged. The gate could not see it
+because it called `fetchOIDCDiscovery` DIRECTLY, i.e. below both real admission
+gates. **This is the third instance in this one sweep of a wall proving less
+than it looks** (the SOCKS5 log-injection note states it twice: *sanitising one
+argument of a call does not sanitise the call*, and *walling one call shape does
+not wall the path*), and the transferable form is sharper: **a gate that enters
+the system below the layer that refuses cannot observe a refusal.** Drive the
+outermost caller — here `ReplaceAll`, the fleet-wide path — or the gate is
+describing a code path no operator reaches.
+
+**P2 — a security REGRESSION this sweep introduced, documented as its own
+mitigation.** Round 1 replaced the discovery parser's `validateExternalURL`
+with the structural form and justified it in three places (PR, review, CLAUDE.md)
+with *"the authorization endpoint is a browser redirect re-checked by
+`isSafeCaptiveRedirect` at the instant it is issued"*. That function checks
+`raw != ""`, absolute, `http`/`https`, `u.Host != ""` — **shape only, no address
+check whatsoever**. So a discovery document, or a cache file edited by anything
+with `dataDir` write access, could name `authorization_endpoint:
+https://internal.corp/…` and the appliance would redirect a user's browser
+there. The distinction that makes the rest of the argument sound is exactly the
+one that was missed: the token and JWKS endpoints are DIALLED (so
+`ssrfSafeDialContext` genuinely covers them), the authorization endpoint is
+NOT — nothing of ours ever connects to it. `refuseDefinitelyPrivateRedirect`
+restores the check for that one endpoint, refusing only on `ssrf.ErrBlocked`
+(definite) and allowing *could-not-determine*, so a resolver outage cannot
+reject a cached document. **The lesson: a claim that one guard covers what
+another used to do is a claim about code, and it has to be READ, not inferred
+from the name.** "Re-checked by isSafeCaptiveRedirect" sounded right and was
+never opened.
+
+**P2 — an episode recorded for a profile that never existed.** Compilation
+records a failure episode before the transactional Upsert/ReplaceAll decides
+whether to publish, so a REJECTED candidate left an episode behind for a
+profile not in the registry; degradation is derived from elapsed time and only
+a fetch or an inline transition cleared one, so nothing ever would — an
+indefinite degraded gauge, contract row and eventual alert for a dependency
+nobody configured. `forgetIdPMetadataEpisode` generalises the inline rule
+(clearing on evidence the dependency is GONE is not clearing on elapsed time)
+and is wired to rejection, delete and disable. The rejection case carries the
+one subtlety worth keeping: it forgets only when the id is **not already
+registered**, because a refused EDIT of a live profile leaves that profile
+authoritative and still down, and deleting its episode would hide a real
+outage.
 
 ### Register rows
 

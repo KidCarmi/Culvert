@@ -999,3 +999,153 @@ func TestChaos71_SAMLMetadataURLShapeBarrier(t *testing.T) {
 		t.Fatal("the regexp barrier must run on raw BEFORE url.Parse, in the same function as the request")
 	}
 }
+
+// ── Codex review round 2 (2026-09-25) ───────────────────────────────────────
+
+// P1. The headline defect, on the path it was actually about. The previous
+// gate called fetchOIDCDiscovery DIRECTLY, so it proved the cache fallback
+// works BELOW the registry's admission gates and proved nothing about whether
+// those gates are reachable during a resolver outage — and they were not:
+// both called the RESOLVING validateExternalURL on the issuer before
+// compilation, so a DNS outage refused the admin write and aborted the whole
+// CP->DP snapshot exactly as before the sweep.
+//
+// This drives ReplaceAll, which is the fleet-wide path.
+func TestChaos71_ReplaceAllSurvivesAnUnresolvableIssuer(t *testing.T) {
+	store := chaos71Env(t)
+
+	const issuer = "https://idp-that-does-not-resolve.invalid"
+	wellKnown := issuer + "/.well-known/openid-configuration"
+	doc := []byte(`{"issuer":"` + issuer + `",` +
+		`"authorization_endpoint":"https://idp-that-does-not-resolve.invalid/authorize",` +
+		`"token_endpoint":"https://idp-that-does-not-resolve.invalid/token"}`)
+	if err := store.Put("dp-sync", idpmeta.KindOIDCDiscovery, wellKnown, doc); err != nil {
+		t.Fatalf("seed last-known-good: %v", err)
+	}
+
+	reg := &IdPRegistry{live: make(map[string]IdentityProvider)}
+	profile := &IdPProfile{
+		ID: "dp-sync", Name: "dp-sync", Type: IdPTypeOIDC, Enabled: true,
+		OIDC: &OIDCProfileConfig{
+			Issuer: issuer, ClientID: "cid", ClientSecret: "sec",
+		},
+	}
+	if err := reg.ReplaceAll([]*IdPProfile{profile}); err != nil {
+		t.Fatalf("an unresolvable issuer with a valid cached document must not "+
+			"abort the config snapshot: %v", err)
+	}
+	if _, ok := reg.live["dp-sync"]; !ok {
+		t.Fatal("the profile should have compiled from the cached document")
+	}
+}
+
+// P1, the configuration half: the gates must still fail FAST on a genuine
+// configuration error, which is the whole reason the two questions were split.
+func TestChaos71_AdmissionGatesStillRefuseBadConfiguration(t *testing.T) {
+	// Deliberately NOT chaos71Env: that helper calls ssrf.AllowLoopbackForTest,
+	// which makes 127.0.0.1 non-private and would let this gate pass against a
+	// validator that had stopped refusing private literals. This case is pure
+	// validation and needs no environment, so it runs under the real posture.
+	for _, bad := range []string{"", "not-a-url", "ftp://idp.example", "https://127.0.0.1", "https://10.0.0.1"} {
+		p := &IdPProfile{
+			ID: "x", Name: "x", Type: IdPTypeOIDC, Enabled: true,
+			OIDC: &OIDCProfileConfig{
+				Issuer: bad, ClientID: "cid", ClientSecret: "sec",
+			},
+		}
+		if err := validateIdPProfile(p); err == nil {
+			t.Errorf("a configuration error must still fail fast: issuer %q", bad)
+		}
+	}
+}
+
+// P2, security. The authorization endpoint is handed to the user's BROWSER, so
+// no dialer of ours is ever consulted and isSafeCaptiveRedirect checks only
+// the SHAPE. Dropping the resolving validator from the discovery parser
+// therefore opened a redirect-to-internal path; this pins that a discovery
+// document naming a private authorization endpoint is refused.
+func TestChaos71_PrivateAuthorizationEndpointIsRefused(t *testing.T) {
+	for _, host := range []string{"127.0.0.1", "localhost", "10.0.0.1", "[::1]"} {
+		doc := []byte(`{"issuer":"https://idp.example",` +
+			`"authorization_endpoint":"https://` + host + `/authorize",` +
+			`"token_endpoint":"https://idp.example/token"}`)
+		if _, err := parseAndValidateOIDCDiscovery(doc); err == nil {
+			t.Errorf("a private authorization_endpoint must be refused: %q", host)
+		}
+	}
+	// A public one still passes — the guard must not refuse everything.
+	ok := []byte(`{"issuer":"https://idp.example",` +
+		`"authorization_endpoint":"https://idp.example/authorize",` +
+		`"token_endpoint":"https://idp.example/token"}`)
+	if _, err := parseAndValidateOIDCDiscovery(ok); err != nil {
+		t.Fatalf("a public authorization_endpoint must pass: %v", err)
+	}
+}
+
+// P2, security — the CONTROL that keeps the guard from becoming the defect it
+// replaces. An UNRESOLVABLE host is "unknown", not "private": refusing it
+// would hand a resolver outage the power to reject a cached document, which is
+// this sweep's headline defect in miniature.
+func TestChaos71_UnresolvableAuthorizationEndpointIsNotRefused(t *testing.T) {
+	doc := []byte(`{"issuer":"https://idp.example",` +
+		`"authorization_endpoint":"https://idp-that-does-not-resolve.invalid/authorize",` +
+		`"token_endpoint":"https://idp-that-does-not-resolve.invalid/token"}`)
+	if _, err := parseAndValidateOIDCDiscovery(doc); err != nil {
+		t.Fatalf("an unresolvable host is unknown, not private, and must not be "+
+			"refused — that would break the cache fallback: %v", err)
+	}
+}
+
+// P2. An episode recorded while compiling a candidate whose mutation is then
+// REJECTED has no owner: the profile never entered the registry, degradation
+// is derived from elapsed time, and only a fetch or an inline transition
+// cleared one — so it would report an indefinite outage for a dependency
+// nobody configured.
+func TestChaos71_RejectedCandidateLeavesNoEpisode(t *testing.T) {
+	chaos71Env(t)
+	idpMetadataEverUsed.Store(true)
+
+	noteIdPMetadataOutcome("ghost", idpMetaUnavailable, fmt.Errorf("down"))
+	if !idpMetadataState().Failing {
+		t.Fatal("precondition: the candidate must have an open episode")
+	}
+
+	reg := &IdPRegistry{live: make(map[string]IdentityProvider)}
+	// An enabled profile whose issuer cannot be compiled: never registered.
+	bad := &IdPProfile{
+		ID: "ghost", Name: "ghost", Type: IdPTypeOIDC, Enabled: true,
+		OIDC: &OIDCProfileConfig{Issuer: "ftp://nope", ClientID: "c", ClientSecret: "s"},
+	}
+	if err := reg.ReplaceAll([]*IdPProfile{bad}); err == nil {
+		t.Fatal("precondition: this snapshot must be rejected")
+	}
+	if idpMetadataState().Failing {
+		t.Fatal("a rejected candidate must not leave an episode nothing can clear")
+	}
+}
+
+// P2, the other direction: a profile that IS registered keeps its episode when
+// an EDIT of it is refused — the existing provider is still authoritative and
+// still down, so deleting that signal would hide a real outage.
+func TestChaos71_RejectedEditKeepsTheLiveProfilesEpisode(t *testing.T) {
+	chaos71Env(t)
+	idpMetadataEverUsed.Store(true)
+
+	reg := &IdPRegistry{
+		live:     make(map[string]IdentityProvider),
+		profiles: []*IdPProfile{{ID: "live-one", Name: "live-one", Type: IdPTypeOIDC}},
+	}
+	noteIdPMetadataOutcome("live-one", idpMetaUnavailable, fmt.Errorf("down"))
+	if !idpMetadataState().Failing {
+		t.Fatal("precondition: the registered profile must have an open episode")
+	}
+
+	bad := &IdPProfile{
+		ID: "live-one", Name: "live-one", Type: IdPTypeOIDC, Enabled: true,
+		OIDC: &OIDCProfileConfig{Issuer: "ftp://nope", ClientID: "c", ClientSecret: "s"},
+	}
+	_ = reg.Upsert(bad)
+	if !idpMetadataState().Failing {
+		t.Fatal("a refused EDIT must not delete the live profile's episode")
+	}
+}

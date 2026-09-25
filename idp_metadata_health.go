@@ -253,6 +253,40 @@ func noteIdPMetadataInline(profileID string) {
 	}
 }
 
+// forgetIdPMetadataEpisode drops a profile's failure episode because the
+// profile is no longer an authoritative, enabled, remote-metadata provider —
+// it was deleted, disabled, switched away from a remote URL, or its candidate
+// mutation was REJECTED and never entered the registry at all.
+//
+// The last case is the one that motivated this (CHAOS-71 round 3). Compilation
+// records an episode before the transactional Upsert/ReplaceAll decides
+// whether to publish, so a refused candidate could leave an episode behind for
+// a profile that does not exist. Degradation is derived from ELAPSED TIME
+// against the episode's first failure (deliberately — CHAOS-61's "freshness is
+// evaluated, never latched"), and only a fresh fetch or an inline transition
+// cleared one, so nothing would ever clear this one: the degraded gauge, the
+// contract row and eventually an alert would report an indefinite outage for a
+// dependency nobody configured.
+//
+// This is the same rule noteIdPMetadataInline states, generalised: the
+// observed-evidence discipline forbids clearing on elapsed TIME, never on
+// evidence that the dependency is GONE — and "this profile is not in the
+// registry" is exactly that evidence. It clears one profile's episode and
+// counts nothing.
+func forgetIdPMetadataEpisode(profileID string) {
+	if profileID == "" {
+		return
+	}
+	idpMetadata.mu.Lock()
+	_, had := idpMetadata.episodes[profileID]
+	delete(idpMetadata.episodes, profileID)
+	idpMetadata.mu.Unlock()
+	if had {
+		logger.Printf("IDP_METADATA_RECOVERED idp=%q (profile is no longer an enabled remote-metadata provider; its failure episode no longer applies)",
+			sanitizeLog(profileID))
+	}
+}
+
 func noteIdPMetadataOutcome(profileID string, outcome idpMetadataOutcome, cause error) {
 	if outcome == idpMetaInline {
 		noteIdPMetadataInline(profileID)
