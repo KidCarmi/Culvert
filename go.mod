@@ -2,6 +2,15 @@ module github.com/KidCarmi/Culvert
 
 go 1.26.6
 
+// The compiler that builds, tests and ships Culvert and its maintenance agent:
+// CI (setup-go reads this line), the release binaries and every Docker builder
+// stage. It is the ONE source of the version: the Dockerfiles' pinned image
+// tags must agree with it and toolchain_consistency_test.go fails any
+// disagreement. The `go` line above is the module's minimum language version,
+// not the build compiler, and is not raised to match. Upgrade procedure:
+// roadmap/CI-REDESIGN.md §20.
+toolchain go1.26.8
+
 require (
 	github.com/KidCarmi/Sluice v0.2.1-0.20260902055746-d6d4394ab74f
 	github.com/andybalholm/brotli v1.2.3
