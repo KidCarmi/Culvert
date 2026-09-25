@@ -2,9 +2,11 @@ package main
 
 import (
 	"encoding/json"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 )
 
@@ -162,5 +164,138 @@ func TestPolicyStore_Load_AdoptFailureNeverFailsLoad(t *testing.T) {
 	}
 	if !ps.Persisted() {
 		t.Error("Persisted() = false after a later successful save")
+	}
+}
+
+// TestPolicyStore_Load_ConcurrentWithPersisted_NoRace guards a Codex finding
+// (PR #1445): Load assigned ps.path without holding ps.mu, while Persisted()
+// (called on every GET /api/policy) reads it under ps.mu.RLock() — a real
+// data race between the SIGHUP goroutine (applyHotReload -> Load) and any
+// concurrent HTTP handler. `go test -race` only catches a race it actually
+// observes, so this drives both sides concurrently rather than relying on
+// the ordinary sequential tests above to happen to trip it.
+func TestPolicyStore_Load_ConcurrentWithPersisted_NoRace(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "policy.json")
+	ps := &PolicyStore{}
+
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				ps.Persisted()
+			}
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				ps.SaveErr() //nolint:errcheck // exercising concurrent access, not asserting outcomes
+			}
+		}
+	}()
+
+	for i := 0; i < 200; i++ {
+		if err := ps.Load(path); err != nil {
+			close(stop)
+			wg.Wait()
+			t.Fatalf("Load: %v", err)
+		}
+	}
+	close(stop)
+	wg.Wait()
+}
+
+// TestPolicyStore_Load_MalformedFileDoesNotAdoptPath guards the other half
+// of the same Codex finding: a hot reload (applyHotReload) survives a Load
+// error and keeps running, so a SIGHUP pointed at a malformed policy file
+// must not make the store silently claim that path — Persisted() would then
+// report true for a location that does not actually hold the live rules,
+// and initPolicy's own reload of that same file at the next restart would
+// hard-fail to boot with no warning ever having been shown.
+func TestPolicyStore_Load_MalformedFileDoesNotAdoptPath(t *testing.T) {
+	dir := t.TempDir()
+	goodPath := filepath.Join(dir, "good.json")
+	if err := os.WriteFile(goodPath, []byte(`[]`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ps := &PolicyStore{}
+	if err := ps.Load(goodPath); err != nil {
+		t.Fatalf("Load good: %v", err)
+	}
+	if !ps.Persisted() {
+		t.Fatal("Persisted() = false after a successful Load")
+	}
+
+	badPath := filepath.Join(dir, "bad.json")
+	if err := os.WriteFile(badPath, []byte("not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := ps.Load(badPath); err == nil {
+		t.Fatal("Load of malformed JSON should return an error")
+	}
+
+	ps.mu.RLock()
+	got := ps.path
+	ps.mu.RUnlock()
+	if got != goodPath {
+		t.Errorf("path = %q after a failed Load, want unchanged %q", got, goodPath)
+	}
+	if !ps.Persisted() {
+		t.Error("Persisted() = false after a failed reload, but the OLD path is still valid and unchanged")
+	}
+}
+
+// TestAPIPolicy_GET_DraftPersistedReflectsCandidateNotRunning guards a
+// second Codex finding: GET /api/policy always reported the RUNNING store's
+// persisted flag, even while rendering the draft candidate (draft:true).
+// The candidate's own persistence path is wired up only at startup
+// (initPolicyDraft), so a SIGHUP that turns persistence on for the running
+// store never rewires the draft — a staged edit can still be lost on
+// restart while the response claimed persisted:true for the exact rulebase
+// the admin was looking at.
+func TestAPIPolicy_GET_DraftPersistedReflectsCandidateNotRunning(t *testing.T) {
+	draftTestSetup(t)
+
+	// Running store IS persisted (as if a hot reload had turned persistence
+	// on) — the candidate's own path (reset to "" by draftTestSetup) is not.
+	f, err := os.CreateTemp(t.TempDir(), "policy-*.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	savedPath := policyStore.path
+	policyStore.path = f.Name()
+	t.Cleanup(func() { policyStore.path = savedPath })
+
+	setRequireCommit(true)
+	if w := createRuleViaAPI(t, "candidate-only", ""); w.Code != http.StatusOK {
+		t.Fatalf("stage candidate = %d (%s)", w.Code, w.Body.String())
+	}
+	if !policyDraftEngaged() {
+		t.Fatal("draft not engaged after staging")
+	}
+
+	w := httptest.NewRecorder()
+	apiPolicy(w, jsonReq("GET", "/api/policy", nil))
+	var resp map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp["draft"] != true {
+		t.Fatalf("draft = %v, want true", resp["draft"])
+	}
+	if resp["persisted"] != false {
+		t.Errorf("persisted = %v, want false — the draft candidate has no persistence path even though the running store does", resp["persisted"])
 	}
 }

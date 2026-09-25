@@ -872,13 +872,22 @@ func effectivePolicyVersion() (version int64, updatedAt string) {
 // (c.mu → PolicyStore.mu, the stageTarget convention); the per-store pair is
 // itself one PolicyStore.SnapshotWithVersion read so rules/version cannot
 // tear inside the selected store either.
-func effectiveManagementSnapshot() (snap PolicyStoreSnapshot, draft bool) {
+// persisted reports durability of the SELECTED domain, not always the
+// running store: while a draft is active, GET /api/policy renders the
+// candidate, and the candidate's own persistence path (policyDraft.path) is
+// wired up only at startup (initPolicyDraft) — a hot reload that turns
+// persistence on for the running store does NOT rewire the draft, so a
+// staged edit can still be lost on restart even though the running store
+// now reports true. Reporting the running store's flag regardless of which
+// rulebase is shown would silence that warning for exactly the rulebase the
+// admin is looking at (Codex review, PR #1445).
+func effectiveManagementSnapshot() (snap PolicyStoreSnapshot, draft bool, persisted bool) {
 	policyDraft.mu.Lock()
 	defer policyDraft.mu.Unlock()
 	if requireCommitEnabled() && policyDraft.state.Active {
-		return policyDraft.cand.SnapshotWithVersion(), true
+		return policyDraft.cand.SnapshotWithVersion(), true, policyDraft.path != ""
 	}
-	return policyStore.SnapshotWithVersion(), false
+	return policyStore.SnapshotWithVersion(), false, policyStore.Persisted()
 }
 
 // afterPolicyWrite is RETIRED (2B.0b): ordinary policy mutations run their
