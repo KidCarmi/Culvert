@@ -230,5 +230,42 @@ func WriteFileExclusive(path string, data []byte, perm os.FileMode) error {
 		_ = os.Remove(path)
 		return fmt.Errorf("exclusive write %s: close: %w", path, err)
 	}
+	// The file's fsync makes its CONTENT durable, not its directory entry:
+	// after a power loss the freshly created name can vanish, and a
+	// rendezvous that vanished is exactly what the next boot's recovery
+	// cannot finish. So the parent directory is synced too, with the same
+	// unsupported-filesystem tolerance AtomicWrite applies.
+	if err := exclusiveSyncDir(filepath.Dir(path)); err != nil {
+		_ = os.Remove(path)
+		return fmt.Errorf("exclusive write %s: parent dir fsync: %w", path, err)
+	}
+	return nil
+}
+
+// exclusiveSyncDir is the parent-directory fsync WriteFileExclusive runs
+// before reporting success. A package var so a test can observe that it
+// runs and that its failure fails the write closed.
+var exclusiveSyncDir = syncDirTolerant
+
+// syncDirTolerant fsyncs dir. Opening a directory for sync is not portable,
+// so an open failure is best-effort (same as AtomicWrite), and a filesystem
+// that does not support directory fsync (EINVAL/ENOTSUP/EOPNOTSUPP) is
+// treated as success.
+func syncDirTolerant(dir string) error {
+	d, err := os.Open(dir)
+	if err != nil {
+		return nil
+	}
+	syncErr := d.Sync()
+	closeErr := d.Close()
+	if syncErr != nil &&
+		!errors.Is(syncErr, syscall.EINVAL) &&
+		!errors.Is(syncErr, syscall.ENOTSUP) &&
+		!errors.Is(syncErr, syscall.EOPNOTSUPP) {
+		return syncErr
+	}
+	if syncErr == nil && closeErr != nil {
+		return closeErr
+	}
 	return nil
 }

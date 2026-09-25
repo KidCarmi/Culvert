@@ -270,3 +270,32 @@ func TestWriteFileExclusive_ConcurrentWritersNeverProduceTornContent(t *testing.
 	}
 	t.Fatalf("file holds neither payload intact — torn write of %d bytes", len(got))
 }
+
+// Codex review (PR #1467): the file's fsync does not make its directory entry
+// durable, so the rendezvous name could vanish after a power loss. The write
+// must sync the PARENT directory before reporting success, and a failure of
+// that sync must fail the write closed with nothing left at the path.
+func TestWriteFileExclusive_SyncsTheParentDirectory(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "client.key.tmp")
+	orig := exclusiveSyncDir
+	t.Cleanup(func() { exclusiveSyncDir = orig })
+
+	var synced []string
+	exclusiveSyncDir = func(d string) error { synced = append(synced, d); return orig(d) }
+	if err := WriteFileExclusive(path, []byte("k"), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if len(synced) != 1 || synced[0] != dir {
+		t.Fatalf("parent dir fsync calls = %v, want exactly [%s]", synced, dir)
+	}
+
+	boom := errors.New("dir fsync failed")
+	exclusiveSyncDir = func(string) error { return boom }
+	if err := WriteFileExclusive(path, []byte("k2"), 0o600); !errors.Is(err, boom) {
+		t.Fatalf("err = %v, want wrapped dir-fsync failure", err)
+	}
+	if _, err := os.Lstat(path); !os.IsNotExist(err) {
+		t.Fatalf("a write whose directory entry is not durable must leave nothing at the path (lstat err=%v)", err)
+	}
+}
