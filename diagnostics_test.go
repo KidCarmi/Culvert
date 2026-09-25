@@ -1637,3 +1637,49 @@ func TestApiDiagnostics_OversizeLegacyUsernameSurfacedOnContract(t *testing.T) {
 		t.Error("admin_username_length message should not echo the username itself")
 	}
 }
+
+// TestApiDiagnostics_MirroredLegacyUsernameRemediationSequence pins the
+// documented legacy remediation against the real store: SetAuth(short)
+// mirrors the new name into the roster WITHOUT removing the old key, so the
+// row stays warn until the old name's roster entry is deleted too. The
+// operator_action must therefore name that delete step.
+func TestApiDiagnostics_MirroredLegacyUsernameRemediationSequence(t *testing.T) {
+	snapshotCfgUIUsers(t)
+	cfg.mu.Lock()
+	cfg.uiUsers = map[string]*uiAdminUser{}
+	cfg.user = ""
+	cfg.mu.Unlock()
+	longName := strings.Repeat("m", maxUsernameLen+1)
+	if err := cfg.SetAuth(longName, "Chaos63-mirror-1!"); err != nil {
+		t.Fatalf("SetAuth(long): %v", err)
+	}
+
+	get := func() *OperatorContractCheck {
+		r := viewerCtx(httptest.NewRequest(http.MethodGet, "/api/diagnostics", http.NoBody))
+		w := httptest.NewRecorder()
+		apiDiagnostics(w, r)
+		found := findDiagnosticCheck(decodeContract(t, w), "admin_username_length")
+		if found == nil {
+			t.Fatal("admin_username_length check missing from report")
+		}
+		return found
+	}
+
+	if found := get(); found.Status != diagWarn || !strings.Contains(found.OperatorAction, "delete the old name") {
+		t.Fatalf("mirrored legacy row = %q / %q, want warn naming the old-roster delete step", found.Status, found.OperatorAction)
+	}
+	// Step 1: Settings sets a shorter legacy login — the old mirror remains.
+	if err := cfg.SetAuth("short-admin", "Chaos63-mirror-2!"); err != nil {
+		t.Fatalf("SetAuth(short): %v", err)
+	}
+	if found := get(); found.Status != diagWarn {
+		t.Fatalf("after SetAuth(short) status = %q, want warn (old mirrored roster entry still logs in)", found.Status)
+	}
+	// Step 2: delete the old name's roster entry — now resolved.
+	if err := cfg.DeleteUIUser(longName); err != nil {
+		t.Fatalf("DeleteUIUser(old): %v", err)
+	}
+	if found := get(); found.Status != diagOK {
+		t.Fatalf("after deleting the old roster entry status = %q, want ok", found.Status)
+	}
+}

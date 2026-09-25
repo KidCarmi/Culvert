@@ -572,16 +572,23 @@ func checkOversizeConfiguredUsernames() OperatorContractCheck {
 	if n != 1 {
 		plural = "s"
 	}
-	action := "Rename the affected account(s) from Admin Users so every credential entry point agrees on the name."
+	// A username cannot be renamed in place (the edit dialog locks it and the
+	// API has no rename), so the remediation is create → switch → delete.
+	action := "Usernames cannot be renamed in place: create a replacement admin account with a name of at most 64 bytes " +
+		"from Admin Users, sign in with it, then delete the old account."
 	if legacyOversize {
 		// The legacy single-user login (cfg.user) is not an Admin Users row
 		// and deleting its roster entry leaves it in place, so Admin Users
 		// cannot clear it. It is replaced by Settings (POST /api/settings,
 		// cfg.SetAuth) — and -user / auth.user re-apply it on every boot, so
 		// the startup source must change too.
-		action += " The oversize name includes the legacy single-user login, which Admin Users cannot change: " +
-			"set a shorter login under Settings (POST /api/settings), and update -user / auth.user if it is set at startup " +
-			"(it is re-applied on every boot)."
+		// SetAuth mirrors the NEW name into the roster without removing the
+		// old key, so the old name keeps authenticating (and this row keeps
+		// counting it) until its roster entry is deleted as well.
+		action += " The oversize name includes the legacy single-user login, which Admin Users alone cannot change: " +
+			"set a shorter login under Settings (POST /api/settings), sign in with it, then delete the old name's " +
+			"remaining Admin Users entry (Settings adds the new name but does not remove the old one), and update " +
+			"-user / auth.user if it is set at startup (it is re-applied on every boot)."
 	}
 	return OperatorContractCheck{
 		Code:   "admin_username_length",
