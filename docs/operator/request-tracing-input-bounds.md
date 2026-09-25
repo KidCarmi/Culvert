@@ -24,9 +24,15 @@ Culvert's instead of the client's.
 
 A client-supplied value is adopted when it is:
 
+* present **exactly once** — a repeated header is refused, because ambiguous
+  correlation is not correlation;
 * non-empty;
 * at most **128 bytes** (`X-Request-Id`) or **255 bytes** (`Traceparent`); and
 * made entirely of **visible ASCII with no whitespace** — bytes `0x21`–`0x7E`.
+
+When a value is refused, the freshly minted one **replaces the whole field**, so
+exactly one value is forwarded upstream and mirrored on the response. A rejection
+reports the total bytes across every value the client sent, not just the first.
 
 That admits every correlation-id encoding in real use: UUIDs (36 bytes), nginx
 `$request_id` (32), ULIDs (26), base64url, and a W3C version-00 traceparent
@@ -133,14 +139,6 @@ appear in Culvert's logs or in the upstream's.
   applies to headers generally. Lowering it changes which ordinary requests a
   forward proxy accepts, which is a product decision rather than this concern.
   With both tracing headers bounded, no *retained* value is unbounded any more.
-* A client may send `X-Request-Id` twice. Culvert validates, adopts, logs and
-  mirrors the **first** value, so nothing changes for its own log or response —
-  but when that first value is acceptable, the second is still forwarded to the
-  upstream. Forwarding client headers is a forward proxy's defined behaviour,
-  the value is not a framing header (no smuggling or desync), and net/http's
-  transport refuses to write a header value containing a control character, so
-  the injection half fails the request rather than reaching the origin. Pinned by
-  `TestSecReqID1_Residual_DuplicateHeaderSecondValueIsForwarded`.
 * `internal/otlp.ParseTraceparent` still performs no format validation. It is
   now fed only bounded, visible-ASCII input, so the exposure is size- and
   charset-bounded; strict W3C validation would be a trace-context semantics

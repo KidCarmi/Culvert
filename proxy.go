@@ -1112,23 +1112,52 @@ func setupRequestTracing(w http.ResponseWriter, r *http.Request) string {
 	// scrubs every byte < 0x20 and 0x7F — so acceptClientRequestID below is the
 	// bound, not a second opinion. Keep this line: it is the barrier CodeQL's
 	// go/log-injection query recognises on this value.
-	reqID := strings.ReplaceAll(strings.ReplaceAll(r.Header.Get(headerRequestID), "\n", ""), "\r", "") // sanitize for CWE-117
-	if reqID != "" && !acceptClientRequestID(reqID) {
+	// The WHOLE field-value slice is read, not Header.Get's first value, because
+	// a client may send the header TWICE. Get validates value [0] and says
+	// nothing about the rest, so an acceptable first value paired with a hostile
+	// second one took the accept branch, which does not Set — leaving BOTH on
+	// r.Header for the upstream, uncounted by the rejection metrics (Codex P2).
+	// A duplicate is therefore treated as unusable on its face: ambiguous
+	// correlation is not correlation, and minting collapses the field to one
+	// value via Set.
+	//
+	// Indexing the map directly rather than calling Get is not a cost: the
+	// constants are canonical (pinned by
+	// TestRequestTracing_CanonicalKeysMatchGoCanonicalisation) and a server
+	// request's header keys are canonicalised by textproto.ReadMIMEHeader, so
+	// this is the same lookup WITHOUT CanonicalMIMEHeaderKey's scan — measured
+	// 7.3 ns against 27-42 ns for Get, 0 allocs either way. A de-canonicalised
+	// constant would miss the map and mint, which is the fail-safe direction.
+	idVals := r.Header[headerRequestID]
+	// strings.ReplaceAll stays inline at the read site so CodeQL sees the
+	// CWE-117 sanitiser on the client-supplied value (repo convention). It is
+	// NOT sufficient on its own — it scrubs only CR/LF, where sanitizeLog
+	// scrubs every byte < 0x20 and 0x7F — so acceptClientRequestID below is the
+	// bound, not a second opinion. Keep this line: it is the barrier CodeQL's
+	// go/log-injection query recognises on this value.
+	reqID := ""
+	if len(idVals) > 0 {
+		reqID = strings.ReplaceAll(strings.ReplaceAll(idVals[0], "\n", ""), "\r", "") // sanitize for CWE-117
+	}
+	if len(idVals) > 1 || (reqID != "" && !acceptClientRequestID(reqID)) {
 		// The REQUEST is handed over, never a resolved client IP: realClientIP
 		// walks every X-Forwarded-For hop and must not run per rejection ahead of
 		// the limiters. noteRejectedRequestID resolves it behind its rate gate.
-		noteRejectedRequestID(r, len(reqID))
+		// The length reported is the total across EVERY value, which is what the
+		// client actually tried to put here.
+		noteRejectedRequestID(r, tracingHeaderBytes(idVals))
 		reqID = "" // fall into the mint arm below, which also overwrites the header
 	}
 	// ── W3C Trace Context: propagate or generate traceparent ────────────
 	// An over-long or control-carrying traceparent is replaced for the same
 	// reason: internal/otlp.ParseTraceparent splits it and hands the pieces
 	// straight to the exported span, so an unbounded value here is an unbounded
-	// attacker-chosen attribute on the OTLP collector.
-	clientTP := r.Header.Get(headerTraceparent)
-	needTraceparent := !acceptClientTraceparent(clientTP)
-	if needTraceparent && clientTP != "" {
-		noteRejectedTraceparent(r, len(clientTP))
+	// attacker-chosen attribute on the OTLP collector. Duplicates are refused on
+	// the same grounds as the request id: exactly one value, or we mint.
+	tpVals := r.Header[headerTraceparent]
+	needTraceparent := len(tpVals) != 1 || !acceptClientTraceparent(tpVals[0])
+	if needTraceparent && len(tpVals) > 0 {
+		noteRejectedTraceparent(r, tracingHeaderBytes(tpVals))
 	}
 
 	switch {

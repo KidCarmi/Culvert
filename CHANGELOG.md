@@ -36,7 +36,11 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   whether traffic flows. Rejections are counted as
   `culvert_tracing_header_rejected_total{header=…}`, surfaced on `GET /api/stats`
   and in the admin UI, and logged once per minute without ever echoing the
-  refused value.
+  refused value. A repeated header is refused on the same grounds — `Header.Get`
+  validates only the first field value, so an acceptable first `X-Request-Id`
+  paired with a hostile second one previously reached the upstream uncounted —
+  and the minted value replaces the whole field, so exactly one value is
+  forwarded.
 
 - Public release promotion ran ahead of the evidence that was supposed to
   authorize it. On `ci.yml` run 35507615339 (SHA `3d8c9bb`) the `docker` job

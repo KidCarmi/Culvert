@@ -158,6 +158,18 @@ func acceptableTracingHeaderValue(v string, maxLen int) bool {
 	return true
 }
 
+// tracingHeaderBytes totals the bytes across every field value of a repeated
+// tracing header, so a rejection reports what the client actually tried to put
+// there rather than only the first value's length. Allocation-free; the slice is
+// the one net/http already built.
+func tracingHeaderBytes(vals []string) int {
+	n := 0
+	for i := range vals {
+		n += len(vals[i])
+	}
+	return n
+}
+
 // acceptClientRequestID reports whether a client-supplied X-Request-Id may be
 // adopted as this request's correlation id.
 func acceptClientRequestID(v string) bool {

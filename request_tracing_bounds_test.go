@@ -586,57 +586,92 @@ func TestSecReqID1_BareReqIDInDecisionLineIsSafeOnlyBecauseOfTheBound(t *testing
 	})
 }
 
-// ─── recorded residual ──────────────────────────────────────────────────────
+// ─── duplicate headers (the former residual, now closed) ────────────────────
 
-// TestSecReqID1_Residual_DuplicateHeaderSecondValueIsForwarded PINS a residual
-// rather than asserting a fix, so a future reader finds it stated rather than
-// discovering it.
+// TestSecReqID1_DuplicateHeaderIsCollapsed is the INVERSION its own predecessor
+// asked for.
 //
-// A client may send X-Request-Id twice. Header.Get returns the FIRST value, so
-// that is the one Culvert validates, adopts, logs and mirrors — and when it is
-// acceptable the mint arm does not run, so the SECOND value is still on the
-// request map and is forwarded to the upstream.
+// It previously pinned a recorded residual: a client may send X-Request-Id
+// TWICE, `Header.Get` validates only value [0], and an acceptable first value
+// paired with a hostile second one took the ACCEPT branch — which does not Set —
+// so both values stayed on r.Header and went to the upstream. That test's own
+// closing line said "if a future change collapses duplicates, this assertion is
+// the one to invert — deliberately, not by accident." This is that change.
 //
-// It is recorded and not fixed because it is bounded to exactly the place a
-// forward proxy is supposed to be transparent, and reaches nothing this change
-// is about:
+// It was recorded rather than fixed on the stated ground that collapsing would
+// mean "measurable work on the second statement of handleRequest". Codex (P2)
+// pushed back, and measuring rather than re-arguing settled it the other way:
+// indexing the header map directly is 7.3 ns against 27-42 ns for Header.Get —
+// roughly 4x CHEAPER, 0 allocations either way — because it skips
+// CanonicalMIMEHeaderKey's scan. The cost objection was not just weak, it was
+// backwards, and the residual also evaded the rejection counters, so an operator
+// watching culvert_tracing_header_rejected_total saw nothing while a source
+// probed with duplicate headers.
 //
-//   - Culvert's own process log, response header and correlation identity all
-//     use reqID — the validated first value — so the log-forgery and
-//     log-amplification exposures are fully closed.
-//   - A client that can reach Culvert can generally reach the origin, and
-//     forwarding client headers is a forward proxy's defined behaviour; the
-//     value is not a framing header, so it enables no smuggling or desync.
-//   - net/http's own transport refuses to write a header value containing a
-//     control character (httpguts.ValidHeaderFieldValue), so the injection half
-//     fails the request rather than reaching the upstream.
-//
-// Collapsing duplicates would mean replacing Header.Get with a direct map index
-// on this path to see the slice, which is measurable work on the second
-// statement of handleRequest for a residual with no Culvert-side consequence.
-// If that is ever revisited, this test is where to start.
-func TestSecReqID1_Residual_DuplicateHeaderSecondValueIsForwarded(t *testing.T) {
+// A duplicate is now unusable on its face, for both headers: ambiguous
+// correlation is not correlation. The mint arm runs and Set collapses the field
+// to exactly one value.
+func TestSecReqID1_DuplicateHeaderIsCollapsed(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		header string
+		first  string
+		second string
+		want   int // minted length
+	}{
+		{"request id", headerRequestID, "good-id-1", "hostile id\x1b", requestIDHexLen},
+		{"request id, both valid", headerRequestID, "good-id-1", "good-id-2", requestIDHexLen},
+		{"traceparent", headerTraceparent,
+			"00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01",
+			"00-" + strings.Repeat("a", 300) + "-b-01", traceparentLen},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resetTracingBoundsStateForTest()
+			r := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "http://example.com/", http.NoBody)
+			r.Header.Add(tc.header, tc.first)
+			r.Header.Add(tc.header, tc.second)
+			rec := httptest.NewRecorder()
+
+			setupRequestTracing(rec, r)
+
+			vals := r.Header.Values(tc.header)
+			if len(vals) != 1 {
+				t.Fatalf("forwarded %s carries %d values, want exactly 1 — duplicates must be collapsed", tc.header, len(vals))
+			}
+			if vals[0] == tc.first || vals[0] == tc.second {
+				t.Errorf("forwarded %s = %q, want a freshly minted value (neither client value)", tc.header, vals[0])
+			}
+			if len(vals[0]) != tc.want {
+				t.Errorf("forwarded %s = %q (len %d), want a minted %d-char value", tc.header, vals[0], len(vals[0]), tc.want)
+			}
+			// The probe must be VISIBLE: the whole point of counting is that an
+			// operator watching the metric sees a duplicate-header source.
+			if n := requestIDRejected.Load() + traceparentRejected.Load(); n != 1 {
+				t.Errorf("duplicate %s counted %d rejections, want 1", tc.header, n)
+			}
+		})
+	}
+}
+
+// TestSecReqID1_DuplicateRejectionCountsEveryValuesBytes pins that the reported
+// length is the total the client actually sent, not just value [0]'s. Reporting
+// only the first value would under-state a duplicate-header flood in the one
+// line per window an operator gets.
+func TestSecReqID1_DuplicateRejectionCountsEveryValuesBytes(t *testing.T) {
 	resetTracingBoundsStateForTest()
+	var buf bytes.Buffer
+	old := logger
+	logger = log.New(&buf, "", 0)
+	t.Cleanup(func() { logger = old })
+
 	r := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "http://example.com/", http.NoBody)
-	r.Header.Add(headerRequestID, "good-id-1")
-	r.Header.Add(headerRequestID, "hostile id\x1b")
-	rec := httptest.NewRecorder()
+	r.Header.Add(headerRequestID, "short")                   // 5
+	r.Header.Add(headerRequestID, strings.Repeat("A", 4096)) // 4096
+	r.RemoteAddr = "198.51.100.31:5555"
+	setupRequestTracing(httptest.NewRecorder(), r)
 
-	got := setupRequestTracing(rec, r)
-
-	// The half that matters: what Culvert adopts, logs and mirrors is the
-	// validated first value, never the hostile second one.
-	if got != "good-id-1" {
-		t.Errorf("adopted request id = %q, want the validated first value", got)
-	}
-	if h := rec.Header().Get(headerRequestID); h != "good-id-1" {
-		t.Errorf("response header = %q, want the validated first value", h)
-	}
-	// The recorded residual. If a future change collapses duplicates, this
-	// assertion is the one to invert — deliberately, not by accident.
-	if n := len(r.Header.Values(headerRequestID)); n != 2 {
-		t.Errorf("forwarded header carries %d values, want the recorded 2 —"+
-			" if duplicates are now collapsed, update this test and the residual note", n)
+	if !strings.Contains(buf.String(), "4101 bytes") {
+		t.Errorf("rejection line does not report the total across both values (want 4101 bytes):\n%s", buf.String())
 	}
 }
 
