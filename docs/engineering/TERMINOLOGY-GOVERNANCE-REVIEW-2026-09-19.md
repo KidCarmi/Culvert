@@ -20,7 +20,10 @@
 
 ## Executive Summary
 
-**One new, small, real finding — fixed this pass.** The new admin frontend's Rule Editor
+**One small, real finding, new to the backlog — fixed this pass.** It is PRE-EXISTING, not
+introduced in the audited window: `RuleEditor.tsx` is identical at `574d265` and `36628eb`, and the window
+changed no rule-editing copy. The targeted SSL/TLS re-check of the `36628eb` snapshot found it. The new
+admin frontend's Rule Editor
 (`frontend/src/features/policy/RuleEditor.tsx`) named its own "TLS / Decryption" fieldset legend
 correctly but used "SSL action" for the control inside that fieldset, and — in a separate "Logging"
 fieldset further down the same dialog — described the same mechanism as "SSL Inspect." (Corrected from
@@ -37,7 +40,8 @@ inline comment (`RuleEditor.tsx:5`, "TLS/decryption controls"), and its own sibl
 toggles below," line 455) all said "TLS," and only the two visible labels (one in that fieldset, one in
 the dialog's separate "Logging" fieldset) said "SSL." The decryption-specific surfaces enumerated
 below (`DecryptionPage.tsx`, `AutoExclusionsTab.tsx`, `DestinationPrivacyTab.tsx`, `api/decryption.ts`,
-`api/types.gen.ts`) also say "TLS inspection" — but not every page does: `DecryptionProfilesPage.tsx`,
+`api/types.gen.ts`) also use TLS-based terminology ("TLS inspection", or "TLS-decryption" on
+`DecryptionPage.tsx`) — but not every page does: `DecryptionProfilesPage.tsx`,
 the PAC bypass explainer and the component gallery still say "SSL" (listed in the next paragraph). The two
 outlier labels were changed to match — "TLS action" / "TLS Inspect" — bringing the component back into
 agreement with itself and with those enumerated TLS-using surfaces, without touching the wire field name
@@ -61,7 +65,7 @@ unchanged and the broader SSL-vs-TLS branding question (T-13 residual) remains o
 
 ## Findings
 
-### T-54 — New admin frontend's Rule Editor disagreed with itself, across two fieldsets of the same dialog, about what to call the TLS-inspection mechanism (new — fixed this pass)
+### T-54 — New admin frontend's Rule Editor disagreed with itself, across two fieldsets of the same dialog, about what to call the TLS-inspection mechanism (new to the backlog; pre-existing in code — fixed this pass)
 
 - **Business concept:** the TLS-MITM decrypt/inspect action a policy rule applies to matching tunnels
   (`docs/design/PRODUCT-TERMINOLOGY.md`'s "Inspection" row: TLS MITM / "SSL inspect"; wire field
@@ -80,8 +84,9 @@ unchanged and the broader SSL-vs-TLS branding question (T-13 residual) remains o
     fieldset) both already said "TLS."
   - Contrast with other surfaces of the *same frontend* (not all of them — see "Observed, not fixed"
     below for the ones that still say "SSL"): `DecryptionPage.tsx:40`, `AutoExclusionsTab.tsx:597`,
-    `DestinationPrivacyTab.tsx:790,820`, `api/decryption.ts:8`, and `api/types.gen.ts:4339` all say "TLS
-    inspection" in prose.
+    `DestinationPrivacyTab.tsx:790,820`, `api/decryption.ts:8`, and `api/types.gen.ts:4339` use TLS-based
+    terminology in prose ("TLS inspection" everywhere except `DecryptionPage.tsx:40`, which says
+    "TLS-decryption coverage").
 - **Recommended canonical name (for this fix's scope):** "TLS" — the "TLS / Decryption" fieldset's own
   legend, the file's own surrounding comments/help text, and the enumerated TLS-using surfaces above all
   already agreed on it; the two "SSL"-labeled controls were the outliers, not the legend.
@@ -95,7 +100,7 @@ unchanged and the broader SSL-vs-TLS branding question (T-13 residual) remains o
   zero-risk copy change; does not touch or attempt to resolve the larger, already-tracked, deliberately
   deferred T-13 residual (in-app "SSL" vs. doc-branding "TLS Inspection").
 - **Affected Code:** `frontend/src/features/policy/RuleEditor.tsx` (2 lines, in two different fieldsets).
-- **Affected API:** none — `sslAction` (the wire field name, `ui_policy.go`) is unchanged; this is
+- **Affected API:** none — `sslAction` (the wire field name, `PolicyRule.SSLAction` in `policy.go:110`) is unchanged; this is
   display-copy only.
 - **Affected GUI:** the Rule Editor dialog's "TLS / Decryption" fieldset (one label) and its separate
   "Logging" fieldset (one label); rebuilt `frontend/dist`
@@ -182,14 +187,15 @@ than left for a future review pass to catch.
 
 ## Stop-Condition Assessment
 
-Terminology is **not** fully consistent, but this pass found only one small, genuinely new,
-zero-compatibility-risk issue in an ~8-day (2026-09-11 → 2026-09-19, 15 first-parent merges),
-low-admin-facing-change window (the audited window was dominated by the MCP-first-canary work plus a few
-CHAOS-series reliability fixes, per `CLAUDE.md` and the PR titles in the window, neither of which touch admin-facing rule-editing copy except for
-this one instance). It was fixed in this pass: `RuleEditor.tsx`'s two outlier "SSL" labels — one inside
+Terminology is **not** fully consistent. The ~8-day audited window (2026-09-11 → 2026-09-19, 15
+first-parent merges) was dominated by the MCP-first-canary work plus a few CHAOS-series reliability fixes,
+per `CLAUDE.md` and the PR titles in the window, and introduced no new drift; it changed no admin-facing
+rule-editing copy at all. The one finding, small and zero-compatibility-risk, is PRE-EXISTING: the
+targeted SSL/TLS re-check of the `36628eb` snapshot found it, and `RuleEditor.tsx` is identical at both
+ends of the window. It was fixed in this pass: `RuleEditor.tsx`'s two outlier "SSL" labels — one inside
 its "TLS / Decryption" fieldset, one in its separate "Logging" fieldset — now read "TLS," matching that
 first fieldset's own legend, the file's own surrounding comments, and the enumerated TLS-using
 decryption surfaces of the new frontend (not every page — see "Observed, not fixed") — with zero effect on the wire API, the legacy GUI, or the
 separately-tracked, deliberately-deferred T-13 branding residual. No cosmetic or preference-driven
 renames were proposed. All thirteen other carry-over backlog entries (fourteen IDs, T-21+T-32 paired) are
-unchanged and were spot-checked, not merely assumed unchanged, against the post-sync tree.
+unchanged and were re-confirmed, not merely assumed unchanged, against the then-current tree (`36628eb`).
