@@ -227,3 +227,40 @@ func TestDecRedaction_APISurfacesScope(t *testing.T) {
 		t.Fatalf("key_id must be a non-empty identifier independent of the key bytes, got %q", id)
 	}
 }
+
+// TestApiDecryptionRedaction_CanonicalRouteAlias — terminology governance T-17:
+// /api/traffic/redaction is the canonical path (the posture governs EVERY
+// traffic-log sink, not just decrypted sessions) and /api/decryption/redaction
+// is the retained legacy alias, mirroring the T-10 /api/dpi <-> /api/content-scan
+// pattern exactly (same handler registered under both paths — see ui_policy.go).
+// Both paths must resolve through the REAL wired mux to the identical handler
+// and produce a byte-identical GET response.
+func TestApiDecryptionRedaction_CanonicalRouteAlias(t *testing.T) {
+	swapDecRedact(t, true)
+	swapTrafficKey(t, []byte("0123456789abcdef0123456789abcdef"))
+
+	mux := d0WireMux(t)
+	get := func(path string) (int, string) {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodGet, path, http.NoBody)
+		req = req.WithContext(context.WithValue(req.Context(), uiRoleKey{}, RoleViewer))
+		h, pattern := mux.Handler(req)
+		if pattern == "" {
+			t.Fatalf("%s: not registered by any register*Routes helper", path)
+		}
+		rw := httptest.NewRecorder()
+		h.ServeHTTP(rw, req)
+		return rw.Code, rw.Body.String()
+	}
+
+	canonCode, canonBody := get("/api/traffic/redaction")
+	legacyCode, legacyBody := get("/api/decryption/redaction")
+
+	if canonCode != http.StatusOK {
+		t.Fatalf("canonical GET /api/traffic/redaction: code=%d body=%s", canonCode, canonBody)
+	}
+	if legacyCode != canonCode || legacyBody != canonBody {
+		t.Fatalf("legacy alias /api/decryption/redaction diverged from canonical /api/traffic/redaction:\n"+
+			"canonical: %d %s\nlegacy:    %d %s", canonCode, canonBody, legacyCode, legacyBody)
+	}
+}
