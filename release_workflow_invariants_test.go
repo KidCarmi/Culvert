@@ -2,6 +2,7 @@ package main
 
 import (
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
@@ -29,23 +30,40 @@ import (
 const r2WorkflowPath = ".github/workflows/publish-catalog-r2.yml"
 
 type wfStep struct {
-	Name            string      `yaml:"name"`
-	Uses            string      `yaml:"uses"`
-	Run             string      `yaml:"run"`
-	If              string      `yaml:"if"`
-	ContinueOnError interface{} `yaml:"continue-on-error"`
-	With            wfStepWith  `yaml:"with"`
+	Name            string            `yaml:"name"`
+	ID              string            `yaml:"id"` // release-publication gating (draft-state hop)
+	Uses            string            `yaml:"uses"`
+	Run             string            `yaml:"run"`
+	If              string            `yaml:"if"`
+	Env             map[string]string `yaml:"env"` // release-publication gating (draft-state hop)
+	ContinueOnError interface{}       `yaml:"continue-on-error"`
+	With            wfStepWith        `yaml:"with"`
 }
 
 type wfStepWith struct {
-	AllowedEndpoints string `yaml:"allowed-endpoints"`
-	EgressPolicy     string `yaml:"egress-policy"`
+	AllowedEndpoints string      `yaml:"allowed-endpoints"`
+	EgressPolicy     string      `yaml:"egress-policy"`
+	Draft            interface{} `yaml:"draft"`       // release-publication gating (see release_publication_gating_test.go)
+	Tags             string      `yaml:"tags"`        // docker/metadata-action tag directives
+	FetchDepth       *int        `yaml:"fetch-depth"` // actions/checkout history depth
+}
+
+// wfJobConcurrency is a job-level `concurrency:` block. Release-channel
+// promotion uses one to serialize across refs (see
+// release_publication_gating_test.go).
+type wfJobConcurrency struct {
+	Group            string      `yaml:"group"`
+	CancelInProgress interface{} `yaml:"cancel-in-progress"`
 }
 
 type wfJob struct {
-	If          string      `yaml:"if"`
-	Permissions interface{} `yaml:"permissions"` // string ("read-all"/"write-all") OR map
-	Steps       []wfStep    `yaml:"steps"`
+	If          string            `yaml:"if"`
+	Name        string            `yaml:"name"`
+	Needs       interface{}       `yaml:"needs"` // string OR []string
+	Concurrency *wfJobConcurrency `yaml:"concurrency"`
+	Permissions interface{}       `yaml:"permissions"` // string ("read-all"/"write-all") OR map
+	Outputs     map[string]string `yaml:"outputs"`     // release-publication gating (draft-state hop)
+	Steps       []wfStep          `yaml:"steps"`
 }
 
 type wfDoc struct {
@@ -319,7 +337,7 @@ func assertPromoteNotBypassable(t *testing.T, promote wfStep) {
 
 // ─── M1-1: secret-name contract + credential-free dual-publish verify ─────────
 
-const dualVerifyWorkflowPath = ".github/workflows/verify-dual-publish.yml"
+const catalogVerifyWorkflowPath = ".github/workflows/verify-catalog-publish.yml"
 
 // wfExprRE extracts `${{ … }}` expression blocks (multi-line: folded `if: >-`
 // gates span lines); wfRefRE finds every secrets./vars. reference INSIDE them.
@@ -393,8 +411,8 @@ func TestPublisherSecretContract(t *testing.T) {
 // permission level, contents at most read, EXACT-name asset selection (OPS-F2:
 // a culvert-release-catalog-* glob pick is order-dependent once resign assets
 // exist), and both served-verify steps carry the enforcing pass-proof.
-func TestDualVerifyWorkflowInvariants(t *testing.T) {
-	secretSet, _ := wfRefSets(t, dualVerifyWorkflowPath)
+func TestCatalogVerifyWorkflowInvariants(t *testing.T) {
+	secretSet, _ := wfRefSets(t, catalogVerifyWorkflowPath)
 	if len(secretSet) != 0 {
 		t.Fatalf("verify workflow must reference NO secrets; found %v", secretSet)
 	}
@@ -402,26 +420,29 @@ func TestDualVerifyWorkflowInvariants(t *testing.T) {
 	// secrets['X'], secrets[format(...)], toJSON(secrets) — which the name-set
 	// scanner cannot enumerate (Codex review): for this workflow ANY mention of
 	// the secrets context inside an expression is a violation.
-	rawExpr, err := os.ReadFile(dualVerifyWorkflowPath)
+	rawExpr, err := os.ReadFile(catalogVerifyWorkflowPath)
 	if err != nil {
-		t.Fatalf("read %s: %v", dualVerifyWorkflowPath, err)
+		t.Fatalf("read %s: %v", catalogVerifyWorkflowPath, err)
 	}
 	for _, expr := range wfExprRE.FindAllString(string(rawExpr), -1) {
 		if regexp.MustCompile(`\bsecrets\b`).MatchString(expr) {
 			t.Fatalf("verify workflow expression mentions the secrets context (any access form is a violation): %q", expr)
 		}
 	}
-	raw, err := os.ReadFile(dualVerifyWorkflowPath)
+	raw, err := os.ReadFile(catalogVerifyWorkflowPath)
 	if err != nil {
-		t.Fatalf("read %s: %v", dualVerifyWorkflowPath, err)
+		t.Fatalf("read %s: %v", catalogVerifyWorkflowPath, err)
 	}
 	var doc wfDoc
 	if err := yaml.Unmarshal(raw, &doc); err != nil {
-		t.Fatalf("parse %s: %v", dualVerifyWorkflowPath, err)
+		t.Fatalf("parse %s: %v", catalogVerifyWorkflowPath, err)
 	}
 	assertVerifyWorkflowCredentialFree(t, doc)
 	assertExactAssetSelection(t, doc)
-	assertServedVerifyPassProofs(t, doc, 2)
+	// ONE origin now: GitHub Pages was retired as a catalog host. The served
+	// verify itself is unchanged — the same baked-root, pinned-identity,
+	// must-PASS-not-skip proof that used to run per origin.
+	assertServedVerifyPassProofs(t, doc, 1)
 }
 
 // assertVerifyWorkflowCredentialFree: contents:read only, no id-token anywhere.
@@ -515,7 +536,6 @@ func assertServedVerifyPassProofs(t *testing.T, doc wfDoc, n int) {
 const (
 	ciWorkflowPath      = ".github/workflows/ci.yml"
 	resignSchedulerPath = ".github/workflows/resign-catalog.yml"
-	pagesWorkflowPath   = ".github/workflows/publish-catalog-pages.yml"
 )
 
 func loadWorkflow(t *testing.T, path string) wfDoc {
@@ -724,38 +744,85 @@ func TestResignSchedulerInvariants(t *testing.T) {
 	seq := all.String()
 	ci := strings.Index(seq, "dispatch_and_wait ci.yml")
 	r2 := strings.Index(seq, "dispatch_and_wait publish-catalog-r2.yml")
-	pg := strings.Index(seq, "dispatch_and_wait publish-catalog-pages.yml")
-	vf := strings.Index(seq, "dispatch_and_wait verify-dual-publish.yml")
-	if ci == -1 || r2 == -1 || pg == -1 || vf == -1 {
-		t.Fatalf("scheduler must dispatch ci(%d), r2(%d), pages(%d), verify(%d) — one is missing", ci, r2, pg, vf)
+	vf := strings.Index(seq, "dispatch_and_wait verify-catalog-publish.yml")
+	if ci == -1 || r2 == -1 || vf == -1 {
+		t.Fatalf("scheduler must dispatch ci(%d), r2(%d), verify(%d) — one is missing", ci, r2, vf)
 	}
-	dispatchOrdered := ci < r2 && r2 < pg && pg < vf
-	if !dispatchOrdered {
-		t.Fatal("scheduler dispatch order must be ci → R2 → Pages → verify (OPS-F4)")
+	if ci >= r2 || r2 >= vf {
+		t.Fatal("scheduler dispatch order must be ci → R2 → verify (OPS-F4; the Pages hop is retired)")
 	}
 	if !runContainsAll(seq, "resign=true", "resign_asset=", `"$conclusion" = "success"`, "fail-closed") {
 		t.Fatal("scheduler must pass resign=true / resign_asset and poll each run to a fail-closed success conclusion")
 	}
 }
 
-// TestResignPagesAndCanaryInvariants: the Pages newest-resign pick and the
-// SEC-F5 weekly freshness canary on the dual verify.
-func TestResignPagesAndCanaryInvariants(t *testing.T) {
-	pages := loadWorkflow(t, pagesWorkflowPath)
-	pick := false
-	for _, job := range pages.Jobs {
-		for i := range job.Steps {
-			run := runScript(job.Steps[i].Run)
-			if runContainsAll(run, `-r*.tar.gz`, "sort | tail -n1", `BUNDLE="dl/culvert-release-catalog-${TAG}.tar.gz"`) {
-				pick = true
+// GitHub Pages is RETIRED as a catalog origin. R2 (catalog.culvertlabs.com) is
+// the sole publication target, and the baked default client URL
+// (release_wiring.go defaultReleaseCatalogURL) already points there.
+//
+// The trust contract is unchanged by this: integrity comes from the catalog's
+// keyless Sigstore signature verified in-binary against the baked root, never
+// from the host — which is exactly why a second host of the same bytes bought
+// nothing and cost a divergence surface.
+//
+// Structural because a Pages origin can only come back through workflow YAML,
+// and a reintroduced publisher or fallback URL would otherwise be invisible
+// until it diverged in production.
+func TestCatalogOriginIsR2Only(t *testing.T) {
+	wfDir := filepath.Join(pkgSourceDir(), ".github", "workflows")
+	entries, err := os.ReadDir(wfDir)
+	if err != nil {
+		t.Fatalf("read workflows dir: %v", err)
+	}
+	scanned := 0
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".yml") {
+			continue
+		}
+		path := filepath.Join(wfDir, e.Name())
+		b, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		scanned++
+		body := string(b)
+		for _, banned := range []string{
+			"kidcarmi.github.io",
+			"actions/deploy-pages",
+			"actions/upload-pages-artifact",
+			"actions/configure-pages",
+			"publish-catalog-pages.yml",
+		} {
+			if strings.Contains(body, banned) {
+				t.Errorf("%s references %q — GitHub Pages is retired as a catalog origin; R2 is the sole target", path, banned)
 			}
 		}
+		// `pages: write` is the permission that makes a Pages deploy possible at
+		// all, so it is banned independently of the action that would use it.
+		if regexp.MustCompile(`(?m)^\s*pages:\s*write`).MatchString(body) {
+			t.Errorf("%s grants `pages: write` — no workflow may deploy to GitHub Pages", path)
+		}
 	}
-	if !pick {
-		t.Fatal("Pages publisher must prefer the newest resign bundle with an exact-original fallback (the old `ls | head -n1` picked the OLDEST resign)")
+	if scanned == 0 {
+		t.Fatal("no workflows scanned — the selector is stale and this test proves nothing")
 	}
 
-	verify := loadWorkflow(t, dualVerifyWorkflowPath)
+	// …and the shipped default must be the R2 origin, not a Pages URL.
+	wiring, err := os.ReadFile(filepath.Join(pkgSourceDir(), "release_wiring.go"))
+	if err != nil {
+		t.Fatalf("read release_wiring.go: %v", err)
+	}
+	if !strings.Contains(string(wiring), `defaultReleaseCatalogURL = "https://catalog.culvertlabs.com/release-catalog"`) {
+		t.Error("the baked default catalog URL must be the R2 origin")
+	}
+}
+
+// TestResignCanaryInvariants: the SEC-F5 weekly freshness canary on the catalog
+// verify. (The Pages newest-resign pick it used to sit beside is gone with the
+// Pages origin; the R2 publisher and the verify both still select the newest
+// resign asset by exact name, pinned by assertExactAssetSelection.)
+func TestResignCanaryInvariants(t *testing.T) {
+	verify := loadWorkflow(t, catalogVerifyWorkflowPath)
 	canary := false
 	for _, job := range verify.Jobs {
 		for i := range job.Steps {

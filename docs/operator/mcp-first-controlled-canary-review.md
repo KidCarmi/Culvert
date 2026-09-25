@@ -3019,7 +3019,7 @@ The DIRECTORY axis was itself an unrecorded gap for one round. The first inverte
 `frontend`, `dist` and `testdata` and wrote none of them down, while this paragraph claimed every
 Go and Markdown file was covered — the same overclaim, on the axis introduced to close it, invisible
 to every staleness check because nothing represented it. Codex round 6 found it. Those three are now
-SCANNED (2,555 files), and the two that remain excluded are named with a reason each.
+SCANNED (at least 2,609 files), and the two that remain excluded are named with a reason each.
 
 That number was wrong by one for a round, in two different ways at once, and both are worth
 keeping. It was TRANSCRIBED as 2,555 when the walk returns one fewer — it removes the wall's own
@@ -3028,6 +3028,14 @@ MEASURED by adding a temporary probe test to the tree, which the walk then count
 was in the sample. `TestCredWall_LedgerStatesTheRealScanCount` now reads the number back out of
 this document and compares it to what the walker returns, so it cannot be right by hand and wrong
 in fact.
+
+The number is a FLOOR, not an exact count. The defect this section records is an OVERCLAIM —
+stating more coverage than the walk delivers — and a floor can never be one: the gate fails when the
+stated figure exceeds the walk, never when the walk grows past it. Pinning it exactly made every PR
+that added any Go or Markdown file anywhere in the repository edit this sentence, and two such PRs
+could not merge in either order without one going red; that churn bought no protection, because an
+undercount is not a coverage claim this document makes. Raise the floor when convenient; never
+lower it without saying which files left the walk and why.
 
 The allowlist got the same treatment for the same reason. `TestCredWall_AllowlistIsNotStale` used
 to ask whether an entry's needle still appeared in the file; it now asks whether the scan REACHES
