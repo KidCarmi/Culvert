@@ -54,7 +54,7 @@ type oidcDiscoveryDoc struct {
 }
 
 // fetchOIDCDiscoveryOverNetwork performs exactly the request the
-// pre-CHAOS-66 code performed: same 10 s budget, same SSRF-safe dialer, same
+// pre-CHAOS-71 code performed: same 10 s budget, same SSRF-safe dialer, same
 // 64 KiB read limit, same HTTP-status rule. Split out only so
 // acquireIdPDocument can own the cache/fallback decision around it.
 //
@@ -101,7 +101,7 @@ func fetchOIDCDiscovery(profileID, issuer string) (*oidcDiscoveryDoc, error) {
 		return nil, fmt.Errorf("oidc discovery: %w", err)
 	}
 
-	// CHAOS-66: a discovery endpoint that is momentarily unreachable must not
+	// CHAOS-71: a discovery endpoint that is momentarily unreachable must not
 	// destroy the provider. acquireIdPDocument prefers the network and falls
 	// back to the last successfully fetched document within
 	// idpmeta.StaleMaxAge. The bytes are decoded and RE-VALIDATED below by the
@@ -119,7 +119,7 @@ func fetchOIDCDiscovery(profileID, issuer string) (*oidcDiscoveryDoc, error) {
 
 // parseAndValidateOIDCDiscovery decodes and validates a discovery document.
 //
-// CHAOS-66 makes this the SINGLE parser for the document, reached identically
+// CHAOS-71 makes this the SINGLE parser for the document, reached identically
 // whether the bytes came off the network or out of the last-known-good cache.
 // That is the load-bearing half of the cache's safety argument: the discovery
 // document names the authorization and token endpoints this appliance sends

@@ -61,7 +61,7 @@ func loadUIAccessPolicy(cfg uiAccessPolicyStartupConfig) error {
 			return fmt.Errorf("IdP profiles load error: %w", err)
 		}
 		logger.Printf("IdP: loaded from %s (%d profiles)", cfg.IdPProfilesFile, len(idpRegistry.All()))
-		// CHAOS-66: Load reports a compile failure with one log line and
+		// CHAOS-71: Load reports a compile failure with one log line and
 		// leaves the profile enabled-but-not-live, which before this was
 		// PERMANENT for the process lifetime — an IdP that was briefly
 		// unreachable at boot (ordinary on a host reboot, where the container

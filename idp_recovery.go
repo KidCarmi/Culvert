@@ -1,6 +1,6 @@
 package main
 
-// idp_recovery.go — CHAOS-66: the way BACK for an IdP profile that could not
+// idp_recovery.go — CHAOS-71: the way BACK for an IdP profile that could not
 // be compiled.
 //
 // `IdPRegistry.Load` logs a compile error and moves on, leaving the profile
@@ -60,7 +60,7 @@ const (
 // exist and how many of them have a live compiled provider.
 //
 // The gap between the two is the state that had no surface at all before
-// CHAOS-66: a profile the operator enabled, that is persisted, that the admin
+// CHAOS-71: a profile the operator enabled, that is persisted, that the admin
 // UI lists, and that cannot authenticate anybody. It is deliberately computed
 // over INTERACTIVE types only — an enabled LDAP profile that failed to compile
 // is a credential-path concern already covered by the CHAOS-47 `authProbeGate`

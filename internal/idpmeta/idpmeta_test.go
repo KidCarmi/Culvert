@@ -98,7 +98,7 @@ func TestGet_FutureStampIsStaleNotFresh(t *testing.T) {
 	}
 }
 
-// An inert store (no directory) must degrade to exactly the pre-CHAOS-66
+// An inert store (no directory) must degrade to exactly the pre-CHAOS-71
 // behaviour: Get finds nothing and Put is a silent no-op. The cache is an
 // availability aid, never a correctness dependency, so a node with no writable
 // state root must not have its compiles FAIL because of it.

@@ -1,6 +1,6 @@
 package main
 
-// idp_metadata_cache.go — CHAOS-66 composition root for internal/idpmeta.
+// idp_metadata_cache.go — CHAOS-71 composition root for internal/idpmeta.
 //
 // This file owns the singleton last-known-good document store and the two
 // wrappers the IdP compile path uses in place of a bare fetch. Everything that
@@ -85,7 +85,7 @@ func idpmetaStaleMaxAgeString() string {
 //
 // It takes the fetch RESULT rather than a fetch CLOSURE on purpose. A closure
 // seam would put this file between the profile config and the outbound
-// request, which is how CHAOS-66's first two attempts moved the SAML metadata
+// request, which is how CHAOS-71's first two attempts moved the SAML metadata
 // URL through an extra parse -> String() -> parameter -> re-parse hop and
 // raised a critical go/request-forgery alert: the taint reached the request
 // through a function boundary instead of being parsed and guarded where it is

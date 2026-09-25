@@ -3,8 +3,8 @@ package main
 // Report schemas. Each document carries its schema string; a consumer that
 // sees a schema it does not know refuses it rather than guessing.
 const (
-	runReportSchema   = "culvert.ci-run-report/v1"
-	trendReportSchema = "culvert.ci-trend-report/v1"
+	runReportSchema   = "culvert.ci-run-report/v2"
+	trendReportSchema = "culvert.ci-trend-report/v2"
 	baselineSchema    = "culvert.ci-perf-baseline/v1"
 )
 
@@ -17,23 +17,34 @@ const runnerMinutesNote = "sum of this attempt's job durations (parallel jobs co
 // RunReport is one execution of one workflow, measured from GitHub's own run
 // and job metadata plus the race engine's published evidence, read as data.
 type RunReport struct {
-	Schema    string        `json:"schema"`
-	Collector Collector     `json:"collector"`
-	Run       RunIdentity   `json:"run"`
-	Class     string        `json:"class"`
-	Reasons   []string      `json:"classReasons"`
-	JobSet    JobSet        `json:"jobSet"`
-	Toolchain *Toolchain    `json:"toolchain"` // nil: not observable for this run
-	Config    RunConfig     `json:"config"`
-	Timing    Timing        `json:"timing"`
-	Race      *RaceStats    `json:"race"` // nil: the race path did not run or left no evidence
-	Evidence  EvidenceState `json:"evidence"`
+	Schema    string      `json:"schema"`
+	Collector Collector   `json:"collector"`
+	Run       RunIdentity `json:"run"`
+	Class     string      `json:"class"`
+	Reasons   []string    `json:"classReasons"`
+	JobSet    JobSet      `json:"jobSet"`
+	Toolchain *Toolchain  `json:"toolchain"` // nil: not observable for this run
+	// RunnerImage is what the runner reported, in each job's log, about the
+	// image every measured job of this attempt ran on.
+	RunnerImage RunnerImageObs `json:"runnerImage"`
+	Cohort      Cohort         `json:"cohort"`
+	Config      RunConfig      `json:"config"`
+	Timing      Timing         `json:"timing"`
+	Race        *RaceStats     `json:"race"` // nil: the race path did not run or left no evidence
+	Evidence    EvidenceState  `json:"evidence"`
 	// Unknowns lists what could not be observed. A missing value is never
 	// reported as zero or as healthy.
 	Unknowns []string `json:"unknowns"`
 	// Problems are contradictions in the evidence (identities that disagree).
 	// They make the evidence untrusted, never the run green or red.
 	Problems []string `json:"problems"`
+	// cohortMetaShards are the shard indices whose meta.json was decoded and
+	// names itself as that shard; the cohort is verified only when this set
+	// equals the set of shards GitHub scheduled.
+	cohortMetaShards []int
+	// cohortToolchains are the distinct toolchain lines (release line +
+	// GOOS/GOARCH) the shards reported; more than one is a mixed run.
+	cohortToolchains []string
 }
 
 // Collector identifies the reporting execution, so a report can be traced to
@@ -60,7 +71,11 @@ type RunIdentity struct {
 	Status       string `json:"status"`
 	Conclusion   string `json:"conclusion"`
 	CreatedAt    string `json:"createdAt"`
-	StartedAt    string `json:"startedAt"`
+	// AttemptCreatedAt is when THIS attempt was enqueued. The run's own
+	// createdAt belongs to attempt 1; GitHub exposes a re-run's enqueue time
+	// only on the attempt endpoint. Empty when not observed.
+	AttemptCreatedAt string `json:"attemptCreatedAt,omitempty"`
+	StartedAt        string `json:"startedAt"`
 }
 
 // JobSet records what actually executed, so executions that ran different jobs
@@ -99,6 +114,47 @@ type Toolchain struct {
 	GOARCH string `json:"goarch"`
 }
 
+// RunnerImageObs is the runner image of the attempt's measured jobs, read
+// from the "Runner Image" group each hosted job's log starts with. Image is
+// set only when every measured job was observed on the same image; Build
+// only when they also agree on the build. The counts say how complete the
+// observation was.
+type RunnerImageObs struct {
+	Image        string `json:"image,omitempty"`
+	Build        string `json:"build,omitempty"`
+	JobsMeasured int    `json:"jobsMeasured"`
+	JobsObserved int    `json:"jobsObserved"`
+}
+
+// Cohort is the observed configuration an execution ran under. Executions are
+// compared only within one cohort, so a different runner platform, shard count
+// or Go toolchain never enters another configuration's baseline. A component
+// that was not observed is "unknown" — its own cohort, never merged into a
+// verified one and never given a reviewed baseline.
+type Cohort struct {
+	// Platform is the runner labels and runner group of the executed jobs,
+	// from GitHub's job metadata. The hosted image version behind a moving
+	// label (ubuntu-latest) is not exposed by the API and is not part of it.
+	Platform string `json:"platform"`
+	// Image is the hosted runner image (e.g. ubuntu-24.04) that EVERY job
+	// contributing to this attempt's timings reported in its log: the label
+	// ubuntu-latest moves between images under one name, and a rollout can
+	// move one job and not another. "unknown" when any measured job was not
+	// observed; "mixed:…" when they ran on different images (never
+	// verified). The image build changes weekly and is not keyed.
+	Image string `json:"image"`
+	// Shards is the sharded race engine's root shard count, from the shard
+	// jobs GitHub scheduled; "none" when the engine did not run.
+	Shards string `json:"shards"`
+	// Toolchain is the Go release line (major.minor) and GOOS/GOARCH the
+	// shards reported building with, from their meta.json. Patch releases
+	// stay comparable; the exact version is in the report's toolchain field.
+	// "unknown" when no shard evidence was read (metadata-only).
+	Toolchain string `json:"toolchain"`
+	Verified  bool   `json:"verified"`
+	Key       string `json:"key"`
+}
+
 // RunConfig is the configuration that changes what an execution measures.
 type RunConfig struct {
 	Shards           int    `json:"shards,omitempty"`
@@ -119,11 +175,15 @@ type Timing struct {
 	Busy              float64 `json:"busySeconds"`
 	RunnerMinutes     float64 `json:"runnerMinutes"`
 	RunnerMinutesNote string  `json:"runnerMinutesNote"`
-	// RunQueue is the run's own wait: created to started.
-	RunQueue float64    `json:"runQueueSeconds"`
-	Queue    PhaseStats `json:"jobQueue"`
-	Setup    PhaseStats `json:"jobSetup"`
-	Work     PhaseStats `json:"jobWork"`
+	// AttemptQueue is this attempt's wait for its first runner: attempt
+	// enqueue to the first job of this attempt starting. nil when the
+	// attempt's enqueue time was not observed (a re-run seen through the
+	// runs list, whose createdAt is attempt 1's) — never zero, and never the
+	// interval between attempts.
+	AttemptQueue *float64   `json:"attemptQueueSeconds"`
+	Queue        PhaseStats `json:"jobQueue"`
+	Setup        PhaseStats `json:"jobSetup"`
+	Work         PhaseStats `json:"jobWork"`
 }
 
 // PhaseStats summarises one phase across the attempt's jobs.
@@ -198,6 +258,12 @@ type CoverageFraction struct {
 
 // EvidenceState is the completeness and audit outcome.
 type EvidenceState struct {
+	// Source is "artifacts" when at least one evidence document was
+	// downloaded and decoded, else "metadata-only": the report then rests
+	// on GitHub's run and job metadata alone.
+	Source string `json:"source"`
+	// Read lists the "artifact/member" documents decoded, sorted.
+	Read []string `json:"read"`
 	// Verdict: ok | failed | missing | not-run.
 	Verdict         string   `json:"verdict"`
 	VerdictProblems []string `json:"verdictProblems"`

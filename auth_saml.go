@@ -221,7 +221,7 @@ func newSAMLStateStore() *samlStateStore {
 
 // fetchSAMLMetadata resolves the IdP EntityDescriptor for a profile.
 //
-// CHAOS-66: the remote branch goes through acquireIdPDocument, so a metadata
+// CHAOS-71: the remote branch goes through acquireIdPDocument, so a metadata
 // endpoint that is momentarily unreachable degrades to the last successfully
 // fetched document (bounded by idpmeta.StaleMaxAge) instead of destroying the
 // provider. The bytes it returns are parsed by the SAME samlsp.ParseMetadata
@@ -271,7 +271,7 @@ func validateSAMLMetadataURL(raw string) error {
 	return nil
 }
 
-// fetchSAMLMetadataOverNetwork performs exactly the request the pre-CHAOS-66
+// fetchSAMLMetadataOverNetwork performs exactly the request the pre-CHAOS-71
 // code performed: same 15 s budget, same SSRF-safe dialer, same 1 MiB read
 // limit, same HTTP-status rule. It is split out only so acquireIdPDocument can
 // own the cache/fallback decision around it.
@@ -282,7 +282,7 @@ func validateSAMLMetadataURL(raw string) error {
 // CodeQL can verify it — relying on a check in a calling function is exactly
 // what the convention forbids. Splitting this helper out of
 // fetchSAMLMetadata without carrying the guard raised a critical
-// go/request-forgery alert on the first CI run of CHAOS-66.
+// go/request-forgery alert on the first CI run of CHAOS-71.
 func fetchSAMLMetadataOverNetwork(raw string) ([]byte, error) {
 	metaURL, err := url.Parse(raw)
 	if err != nil {

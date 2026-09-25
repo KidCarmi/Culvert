@@ -1,12 +1,12 @@
 package main
 
-// idp_metadata_health.go — CHAOS-66: the interactive IdP compile path.
+// idp_metadata_health.go — CHAOS-71: the interactive IdP compile path.
 //
 // Why this file exists.
 //
 // Compiling an enabled SAML or OIDC profile performs a synchronous outbound
 // fetch against the customer's identity provider — `fetchSAMLMetadata` for a
-// `metadata_url`, `fetchOIDCDiscovery` for an issuer. Before CHAOS-66 that
+// `metadata_url`, `fetchOIDCDiscovery` for an issuer. Before CHAOS-71 that
 // fetch had no cache, no fallback and no fallback posture, and its failure was
 // reported by exactly one `logger.Printf`. Five consequences, each reproduced
 // against the pre-fix tree (`idp_metadata_chaos_test.go`):
@@ -337,7 +337,7 @@ func resetIdPMetadataHealthForTest() {
 //   - never used → ok, with no claim. A node with no remote interactive IdP
 //     has nothing to report and a permanent row would be noise.
 //   - an enabled profile has no live provider → WARN, and this is the row that
-//     matters most: before CHAOS-66 this state had no surface at all. Browser
+//     matters most: before CHAOS-71 this state had no surface at all. Browser
 //     SSO is not working for those profiles.
 //   - degraded (sustained fetch failures, still serving cached documents) →
 //     warn, NOT fail. Authentication is still working from the last-known-good

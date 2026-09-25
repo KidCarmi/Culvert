@@ -15,7 +15,7 @@ eventually hits. This page is what to do when that happens.
 
 ---
 
-## A third cause fires the same alert: IdP metadata (CHAOS-66)
+## A third cause fires the same alert: IdP metadata (CHAOS-71)
 
 The `identity_backend_unreachable` event is also raised, with source
 `idp_metadata`, when a SAML profile's `metadataUrl` or an OIDC profile's

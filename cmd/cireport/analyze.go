@@ -355,9 +355,6 @@ func measureTiming(run apiRun, views []jobView, rep *RunReport) {
 	start, ok := parseTime(run.RunStartedAt)
 	t := &rep.Timing
 	t.RunnerMinutesNote = runnerMinutesNote
-	if created, ok2 := parseTime(run.CreatedAt); ok && ok2 && start.After(created) {
-		t.RunQueue = secs(start.Sub(created))
-	}
 	var iv [][2]time.Time
 	var runner float64
 	var queue, setup, work []float64
@@ -395,12 +392,60 @@ func measureTiming(run apiRun, views []jobView, rep *RunReport) {
 		t.WallSpan = secs(last.Sub(start))
 	}
 	t.Queue, t.Setup, t.Work = phaseStats(queue), phaseStats(setup), phaseStats(work)
+	t.AttemptQueue = attemptQueue(run, views, start, rep)
 	if !ok {
 		rep.Unknowns = append(rep.Unknowns, "run_started_at missing: elapsed time is not observable")
 	}
 	if t.ElapsedToAggregate == nil {
 		rep.Unknowns = append(rep.Unknowns, "the aggregate job did not complete in this attempt: elapsed-to-aggregate is unknown")
 	}
+}
+
+// attemptEnqueue is when this attempt was queued, when that is observable:
+// the attempt endpoint's created_at, or the run's created_at on attempt 1.
+// A re-run read through the runs endpoint or list carries attempt 1's
+// created_at, and using it would add the interval between attempts.
+func attemptEnqueue(run apiRun) (time.Time, bool) {
+	if run.attemptCreatedAt != "" {
+		return parseTime(run.attemptCreatedAt)
+	}
+	if run.RunAttempt <= 1 {
+		return parseTime(run.CreatedAt)
+	}
+	return time.Time{}, false
+}
+
+// attemptQueue is the attempt's wait for its first runner: enqueue to the
+// earliest start among this attempt's own jobs. Every job of the attempt
+// that has started counts, completed or not — a run reported while still in
+// progress has running jobs whose start is observed. Skipped jobs and jobs
+// carried over from an earlier attempt (started before this one) do not.
+// Unknown — nil, never zero — when the enqueue time was not observed.
+func attemptQueue(run apiRun, views []jobView, attemptStart time.Time, rep *RunReport) *float64 {
+	enq, ok := attemptEnqueue(run)
+	if !ok {
+		rep.Unknowns = append(rep.Unknowns, fmt.Sprintf("attempt %d's enqueue time was not observed (only the attempt endpoint carries it): attempt queue is unknown", run.RunAttempt))
+		return nil
+	}
+	var first time.Time
+	for vI := range views {
+		v := &views[vI]
+		switch {
+		case v.api.Conclusion == "skipped", v.start.IsZero():
+			continue
+		case !attemptStart.IsZero() && v.start.Before(attemptStart):
+			continue // carried over from an earlier attempt
+		}
+		if first.IsZero() || v.start.Before(first) {
+			first = v.start
+		}
+	}
+	if first.IsZero() || first.Before(enq) {
+		rep.Unknowns = append(rep.Unknowns, "no job of this attempt started after its enqueue time: attempt queue is unknown")
+		return nil
+	}
+	q := secs(first.Sub(enq))
+	return &q
 }
 
 // Analyze builds a RunReport from GitHub metadata and whatever evidence was
@@ -414,7 +459,8 @@ func Analyze(run apiRun, jobs []apiJob, ev runEvidence) RunReport {
 			Workflow: run.Name, WorkflowPath: run.Path, Event: run.Event, RunID: run.ID,
 			Attempt: run.RunAttempt, Rerun: run.RunAttempt > 1, HeadSHA: run.HeadSHA,
 			HeadBranch: run.HeadBranch, DisplayTitle: run.DisplayTitle, Status: run.Status,
-			Conclusion: run.Conclusion, CreatedAt: run.CreatedAt, StartedAt: run.RunStartedAt,
+			Conclusion: run.Conclusion, CreatedAt: run.CreatedAt, AttemptCreatedAt: run.attemptCreatedAt,
+			StartedAt: run.RunStartedAt,
 		},
 		Unknowns: []string{},
 		Problems: []string{},
@@ -446,8 +492,213 @@ func Analyze(run apiRun, jobs []apiJob, ev runEvidence) RunReport {
 	measureTiming(run, views, &rep)
 	raceEvidence(run, views, groups, ev, &rep)
 	auditEvidence(views, auditReq, ev, &rep)
+	rep.Cohort = cohortOf(views, ev, &rep)
+	rep.Evidence.Read = append([]string{}, ev.Read...)
+	sort.Strings(rep.Evidence.Read)
+	rep.Evidence.Source = "metadata-only"
+	if len(rep.Evidence.Read) > 0 {
+		rep.Evidence.Source = "artifacts"
+	}
 	rep.Unknowns = append(rep.Unknowns, ev.Notes...)
 	return rep
+}
+
+const cohortUnknown = "unknown"
+
+var goReleaseLineRE = regexp.MustCompile(`^(go\d+\.\d+)(?:\.\d+)?$`)
+
+// cohortOf derives the observed configuration the run executed under. Each
+// component is read from something observed — job metadata for the platform
+// and shard count, the shards' own meta.json for the toolchain — and is
+// "unknown" when it was not. Nothing is filled in from what the workflow
+// files say should have happened.
+func cohortOf(views []jobView, ev runEvidence, rep *RunReport) Cohort {
+	scheduled := scheduledShardIndices(views)
+	c := Cohort{Platform: observedPlatform(views), Image: observedImage(views, ev, rep), Shards: scheduledShards(scheduled, rep), Toolchain: cohortUnknown}
+	// Every scheduled shard's metadata must have been read, shard for shard:
+	// a shard that was not may have run another toolchain, and a count match
+	// over different shards is not coverage.
+	complete := true
+	if len(scheduled) > 0 && !sameInts(scheduled, rep.cohortMetaShards) {
+		complete = false
+		rep.Unknowns = append(rep.Unknowns, fmt.Sprintf("shard metadata read for shards %v, GitHub scheduled shards %v: an unread shard may have run another toolchain", rep.cohortMetaShards, scheduled))
+		// The exact toolchain the read shards agree on does not speak for
+		// the unread ones either.
+		rep.Toolchain = nil
+	}
+	switch {
+	case !complete:
+	case len(rep.cohortToolchains) > 1:
+		// Shards disagreed on the release line or platform: the run did not
+		// execute under one configuration, whichever shard is listed first.
+		c.Toolchain = "mixed:" + strings.Join(rep.cohortToolchains, "+")
+	case len(rep.cohortToolchains) == 1:
+		c.Toolchain = rep.cohortToolchains[0]
+	}
+	switch {
+	case c.Shards == "none":
+		// No race engine ran: there is no toolchain to observe and none to
+		// compare. "n/a", not "unknown" — unknown always means unobserved.
+		c.Toolchain = "n/a"
+	case c.Toolchain == cohortUnknown:
+		rep.Unknowns = append(rep.Unknowns, "toolchain not observed (no shard meta.json read): this run's cohort is unverified")
+	}
+	c.Verified = c.Platform != cohortUnknown && c.Toolchain != cohortUnknown && c.Image != cohortUnknown &&
+		!strings.HasPrefix(c.Image, "mixed:") && !strings.HasPrefix(c.Toolchain, "mixed:")
+	c.Key = "platform=" + c.Platform + ";image=" + c.Image + ";shards=" + c.Shards + ";toolchain=" + c.Toolchain
+	return c
+}
+
+// observedImage is the runner image every job measured in this attempt ran
+// on, from the image group each job's log starts with. Any measured job that
+// was not observed leaves the image unknown: the others do not speak for it.
+// Jobs on different images make it mixed. The build is stated only when all
+// observed jobs agree on it.
+func observedImage(views []jobView, ev runEvidence, rep *RunReport) string {
+	images, builds := map[string]bool{}, map[string]bool{}
+	obs := &rep.RunnerImage
+	for vI := range views {
+		v := &views[vI]
+		if !v.inAttempt() {
+			continue
+		}
+		obs.JobsMeasured++
+		ri, ok := ev.JobImages[v.api.ID]
+		if !ok || v.api.ID == 0 {
+			continue
+		}
+		obs.JobsObserved++
+		images[ri.Image], builds[ri.Version] = true, true
+	}
+	names := sortedKeys(images)
+	switch {
+	case obs.JobsMeasured == 0 || obs.JobsObserved < obs.JobsMeasured:
+		rep.Unknowns = append(rep.Unknowns, fmt.Sprintf("runner image read from %d of %d measured jobs' logs: this run's cohort is unverified", obs.JobsObserved, obs.JobsMeasured))
+		return cohortUnknown
+	case len(names) > 1:
+		return "mixed:" + strings.Join(names, "+")
+	}
+	obs.Image = names[0]
+	if bs := sortedKeys(builds); len(bs) == 1 && bs[0] != "" {
+		obs.Build = bs[0]
+	} else {
+		rep.Unknowns = append(rep.Unknowns, "jobs reported different or missing runner image builds: the run's image build is unknown")
+	}
+	return names[0]
+}
+
+// toolchainLine is the Go release line and GOOS/GOARCH, or unknown.
+func toolchainLine(tc *Toolchain) string {
+	if tc == nil || !imageValueRE.MatchString(tc.Go) || !imageValueRE.MatchString(tc.GOOS) || !imageValueRE.MatchString(tc.GOARCH) {
+		// Empty, or outside the safe set: the values come from artifacts, and
+		// a separator in them would split the cohort or group key.
+		return cohortUnknown
+	}
+	line := tc.Go
+	if m := goReleaseLineRE.FindStringSubmatch(tc.Go); m != nil {
+		line = m[1]
+	}
+	return line + " " + tc.GOOS + "/" + tc.GOARCH
+}
+
+// observedPlatform is the distinct runner label sets and runner groups of the
+// executed jobs, sorted. Any executed job without them makes it unknown.
+func observedPlatform(views []jobView) string {
+	seen := map[string]bool{}
+	for vI := range views {
+		v := &views[vI]
+		if !v.executed {
+			continue
+		}
+		if len(v.api.Labels) == 0 || v.api.RunnerGroupName == "" {
+			return cohortUnknown
+		}
+		labels := make([]string, len(v.api.Labels))
+		for i, l := range v.api.Labels {
+			labels[i] = escapePlatform(l)
+		}
+		sort.Strings(labels)
+		seen[strings.Join(labels, "+")+"@"+escapePlatform(v.api.RunnerGroupName)] = true
+	}
+	if len(seen) == 0 {
+		return cohortUnknown
+	}
+	out := make([]string, 0, len(seen))
+	for k := range seen {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return strings.Join(out, ",")
+}
+
+// escapePlatform percent-encodes the characters the platform and cohort key
+// use as separators — including the trend's top-level "|" — and the escape
+// character itself, so distinct label sets
+// and groups never serialise to the same string: labels "a+b","c" and
+// "a","b","c" would otherwise both read "a+b+c". Ordinary labels such as
+// ubuntu-latest and the group "GitHub Actions" are unchanged.
+func escapePlatform(s string) string {
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c < 0x20 || c == 0x7f || strings.IndexByte("%+@,;=|", c) >= 0 {
+			fmt.Fprintf(&b, "%%%02X", c)
+			continue
+		}
+		b.WriteByte(c)
+	}
+	return b.String()
+}
+
+// scheduledShardIndices are the indices of the root-shard jobs GitHub
+// scheduled (not skipped), sorted: the engine's shards even when one failed or
+// was cancelled.
+func scheduledShardIndices(views []jobView) []int {
+	var idx []int
+	for vI := range views {
+		v := &views[vI]
+		if m := shardJobRE.FindStringSubmatch(v.api.Name); m != nil && v.api.Conclusion != "skipped" {
+			if i, err := strconv.Atoi(m[1]); err == nil && !containsInt(idx, i) {
+				idx = append(idx, i)
+			}
+		}
+	}
+	sort.Ints(idx)
+	return idx
+}
+
+// scheduledShards is the scheduled shard count, or "none" when no shard job
+// was scheduled. The verdict's own count, when read, must agree.
+func scheduledShards(idx []int, rep *RunReport) string {
+	if len(idx) == 0 {
+		return "none"
+	}
+	if rep.Config.Shards > 0 && rep.Config.Shards != len(idx) {
+		rep.Problems = append(rep.Problems, fmt.Sprintf("the verdict reports %d shards, GitHub scheduled %d shard jobs", rep.Config.Shards, len(idx)))
+	}
+	return strconv.Itoa(len(idx))
+}
+
+func containsInt(s []int, v int) bool {
+	for _, x := range s {
+		if x == v {
+			return true
+		}
+	}
+	return false
+}
+
+// sameInts reports whether two sorted index lists are equal.
+func sameInts(a, b []int) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func jobByName(views []jobView, pred func(string) bool) *jobView {
@@ -571,8 +822,16 @@ func checkIdentity(run apiRun, ev runEvidence, rep *RunReport) {
 		idx = append(idx, i)
 	}
 	sort.Ints(idx)
+	var named []int
 	for _, i := range idx {
 		m := ev.ShardMetas[i]
+		// The document must name the shard whose artifact carried it; one
+		// that names another shard proves nothing about this one.
+		if m.Shard != i {
+			rep.Problems = append(rep.Problems, fmt.Sprintf("artifact qa-race-shard-%d carries meta.json for shard %d", i, m.Shard))
+		} else {
+			named = append(named, i)
+		}
 		if m.Commit != v.Commit {
 			rep.Problems = append(rep.Problems, fmt.Sprintf("shard %d ran commit %s, the verdict judged %s", i, short(m.Commit), short(v.Commit)))
 		}
@@ -583,10 +842,38 @@ func checkIdentity(run apiRun, ev runEvidence, rep *RunReport) {
 			rep.Problems = append(rep.Problems, fmt.Sprintf("shard %d reports toolchain %v, shard %d reports %v", i, cur, idx[0], *tc))
 		}
 	}
-	rep.Toolchain = tc
+	rep.cohortMetaShards = named
+	lines := map[string]bool{}
+	for _, i := range named {
+		m := ev.ShardMetas[i]
+		lines[toolchainLine(&Toolchain{Go: m.GoVersion, GOOS: m.GOOS, GOARCH: m.GOARCH})] = true
+	}
+	rep.cohortToolchains = sortedKeys(lines)
+	// The run has one exact toolchain only when every shard reported the same
+	// one; otherwise no shard's version speaks for the others. Patch releases
+	// can differ while the release line (the cohort) still agrees.
+	exact := map[string]bool{}
+	for _, i := range named {
+		m := ev.ShardMetas[i]
+		exact[m.GoVersion+" "+m.GOOS+"/"+m.GOARCH] = true
+	}
+	if len(exact) == 1 {
+		rep.Toolchain = tc
+	} else {
+		rep.Unknowns = append(rep.Unknowns, "shards reported different exact toolchains ("+strings.Join(sortedKeys(exact), ", ")+"): no one version is stated for the run")
+	}
 	if len(ev.ShardMetas) != len(v.Shards) {
 		rep.Unknowns = append(rep.Unknowns, fmt.Sprintf("toolchain read from %d of %d shards", len(ev.ShardMetas), len(v.Shards)))
 	}
+}
+
+func sortedKeys(m map[string]bool) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
 
 func short(sha string) string {
