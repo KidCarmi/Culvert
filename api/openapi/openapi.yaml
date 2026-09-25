@@ -1778,6 +1778,30 @@ components:
         from: { type: integer }
         to: { type: integer }
         changes: { type: object, additionalProperties: true, nullable: true }
+    ConfigRollbackScope:
+      type: object
+      required: [excluded]
+      additionalProperties: false
+      properties:
+        excluded:
+          type: array
+          description: >-
+            Operator-facing settings a config version rollback deliberately
+            never captures, applies or diffs, with why. Empty when every
+            setting participates in rollback.
+          items:
+            type: object
+            required: [id, reason]
+            additionalProperties: false
+            properties:
+              id: { type: string, description: "Stable snake_case setting identifier." }
+              reason:
+                type: string
+                description: >-
+                  Why rollback leaves this setting unchanged: the setting's
+                  recorded rollback-exclusion reason when one exists, otherwise
+                  an explicit generic explanation (not captured in snapshots;
+                  secret-bearing settings are never snapshotted).
 
     # ── Slice 3 tranche 8: write request schemas ──────────────────────────────────
     SetBlocklistMode:
@@ -8451,6 +8475,35 @@ paths:
           description: Referenced object/version not found. Body is plain text.
           content:
             text/plain: { schema: { type: string } }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+
+  /api/config/rollback-scope:
+    get:
+      operationId: getConfigRollbackScope
+      tags: [config]
+      summary: Settings excluded from rollback
+      description: >-
+        Lists operator-facing settings that a config version rollback
+        deliberately never captures, applies or diffs (e.g. alert-webhook
+        delivery config, block-page HTML, upstream proxy pools,
+        connection-limit settings), plus why. Lets the admin UI's rollback
+        confirmation accurately describe what will and will not change,
+        instead of overclaiming that rollback replaces every setting.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 2.0.0
+      responses:
+        '200':
+          description: Settings excluded from config version rollback.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ConfigRollbackScope' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
 
   /api/ca/cache-clear:
