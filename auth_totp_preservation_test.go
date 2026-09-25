@@ -921,8 +921,8 @@ func TestSetTOTPSecret_TrailingBitSpellingKeepsCounter(t *testing.T) {
 // authenticator" actually means.
 func testTOTPCode(key []byte, counter int64) string {
 	var buf [8]byte
-	binary.BigEndian.PutUint64(buf[:], uint64(counter))
-	mac := hmac.New(sha1.New, key) // #nosec G401 G505 -- RFC 6238 mandates HMAC-SHA1
+	binary.BigEndian.PutUint64(buf[:], uint64(counter)) // #nosec G115 -- fixed positive test time steps
+	mac := hmac.New(sha1.New, key)                      // #nosec G401 G505 -- RFC 6238 mandates HMAC-SHA1
 	mac.Write(buf[:])
 	sum := mac.Sum(nil)
 	off := sum[len(sum)-1] & 0x0f
