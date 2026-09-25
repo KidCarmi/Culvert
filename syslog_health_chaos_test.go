@@ -27,10 +27,43 @@ import (
 )
 
 // syslogTestCollector is a TCP collector the test can kill.
+//
+// stop() must DETERMINISTICALLY sever every accepted connection. The first
+// shape kept accepted conns in a buffered channel and drained whatever was in
+// it, which loses any connection the accept goroutine has taken from Accept()
+// but not yet handed over — and then the writer keeps delivering happily to a
+// live socket, no drops ever occur, and a waitForDrops gate burns its whole
+// budget. Observed once under the CPU contention of a concurrent -race build,
+// which is exactly when that interleaving gets likely. The conns are tracked
+// under a mutex with a `stopped` flag instead, so a connection accepted at any
+// instant relative to stop() is closed by whichever side sees it last.
 type syslogTestCollector struct {
-	ln    net.Listener
-	addr  string
-	conns chan net.Conn
+	ln   net.Listener
+	addr string
+
+	mu      sync.Mutex
+	stopped bool
+	conns   []net.Conn
+	// accepted is signalled on every accepted connection so a test can wait
+	// for the writer to actually connect rather than guessing.
+	accepted chan struct{}
+}
+
+// track registers an accepted connection, or closes it immediately when the
+// collector has already stopped.
+func (c *syslogTestCollector) track(conn net.Conn) {
+	c.mu.Lock()
+	if c.stopped {
+		c.mu.Unlock()
+		_ = conn.Close()
+		return
+	}
+	c.conns = append(c.conns, conn)
+	c.mu.Unlock()
+	select {
+	case c.accepted <- struct{}{}:
+	default:
+	}
 }
 
 func startSyslogCollector(t *testing.T) *syslogTestCollector {
@@ -40,34 +73,66 @@ func startSyslogCollector(t *testing.T) *syslogTestCollector {
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	c := &syslogTestCollector{ln: ln, addr: ln.Addr().String(), conns: make(chan net.Conn, 8)}
+	c := newSyslogTestCollector(ln)
+	t.Cleanup(c.stop)
+	return c
+}
+
+func newSyslogTestCollector(ln net.Listener) *syslogTestCollector {
+	c := &syslogTestCollector{ln: ln, addr: ln.Addr().String(), accepted: make(chan struct{}, 16)}
 	go func() {
 		for {
 			conn, err := ln.Accept()
 			if err != nil {
 				return
 			}
-			select {
-			case c.conns <- conn:
-			default:
-				_ = conn.Close()
-			}
+			c.track(conn)
 			go func(cn net.Conn) { _, _ = cn.Read(make([]byte, 4096)) }(conn)
 		}
 	}()
-	t.Cleanup(c.stop)
 	return c
 }
 
+// stop closes the listener and every connection this collector has accepted,
+// including one accepted concurrently with the stop itself.
 func (c *syslogTestCollector) stop() {
 	_ = c.ln.Close()
-	for {
-		select {
-		case conn := <-c.conns:
-			_ = conn.Close()
-		default:
-			return
-		}
+	c.mu.Lock()
+	c.stopped = true
+	conns := c.conns
+	c.conns = nil
+	c.mu.Unlock()
+	for _, conn := range conns {
+		_ = conn.Close()
+	}
+}
+
+// firstConn returns the collector's side of the first accepted connection, so
+// a test can observe whether the writer closed it.
+func (c *syslogTestCollector) firstConn(t *testing.T) net.Conn {
+	t.Helper()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(c.conns) == 0 {
+		t.Fatal("collector has no accepted connection")
+	}
+	return c.conns[0]
+}
+
+// waitForConnection blocks until the writer has connected, so a test that is
+// about to kill the collector knows there is something to kill.
+func (c *syslogTestCollector) waitForConnection(t *testing.T) {
+	t.Helper()
+	c.mu.Lock()
+	n := len(c.conns)
+	c.mu.Unlock()
+	if n > 0 {
+		return
+	}
+	select {
+	case <-c.accepted:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the writer never connected to the collector")
 	}
 }
 
@@ -217,12 +282,8 @@ func TestChaos66_InitSyslogClosesTheWriterItReplaces(t *testing.T) {
 	second := startSyslogCollector(t)
 	armSyslogFeed(t, "tcp://"+first.addr)
 
-	var farEnd net.Conn
-	select {
-	case farEnd = <-first.conns:
-	case <-time.After(3 * time.Second):
-		t.Fatal("first collector saw no connection")
-	}
+	first.waitForConnection(t)
+	farEnd := first.firstConn(t)
 
 	runtime.GC()
 	before := runtime.NumGoroutine()
@@ -318,22 +379,7 @@ func startSyslogCollectorOn(t *testing.T, addr string) *syslogTestCollector {
 	if err != nil {
 		t.Skipf("cannot rebind %s: %v", addr, err)
 	}
-	c := &syslogTestCollector{ln: ln, addr: addr, conns: make(chan net.Conn, 8)}
-	go func() {
-		for {
-			conn, err := ln.Accept()
-			if err != nil {
-				return
-			}
-			select {
-			case c.conns <- conn:
-			default:
-				_ = conn.Close()
-			}
-			go func(cn net.Conn) { _, _ = cn.Read(make([]byte, 4096)) }(conn)
-		}
-	}()
-	return c
+	return newSyslogTestCollector(ln)
 }
 
 // The alert Detail reaches the alert store's dedup key (event + ":" + Detail).
