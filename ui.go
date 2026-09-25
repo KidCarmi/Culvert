@@ -321,7 +321,6 @@ func adminUIServeOnce(srv *http.Server, addr, certFile, keyFile string) error {
 		if err != nil {
 			return fmt.Errorf("%w: %w", errAdminUITLSMaterial, err)
 		}
-		noteAdminUITLSCertExpiry(cert)
 		customCert = cert
 	}
 
@@ -329,6 +328,12 @@ func adminUIServeOnce(srv *http.Server, addr, certFile, keyFile string) error {
 	ln, err := lc.Listen(context.Background(), "tcp", addr)
 	if err != nil {
 		return err
+	}
+	// Record the serving certificate's expiry only once the port is actually
+	// held: a pair that failed to bind is not being served, and recording it
+	// would also overwrite the expiry of the last pair that was.
+	if customTLS {
+		noteAdminUITLSCertExpiry(customCert)
 	}
 
 	// The bind is the EVIDENCE. Announce only now: the pre-change code logged

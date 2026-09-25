@@ -347,3 +347,35 @@ func TestAdminUIServeOnce_CustomCertStillNegotiatesHTTP2(t *testing.T) {
 		t.Fatalf("admin UI negotiated ALPN %q, want h2", proto)
 	}
 }
+
+// TestAdminUIServeOnce_FailedBindDoesNotRecordExpiry pins that a custom pair
+// whose attempt could not bind the admin port is never reported as the
+// serving certificate, and never overwrites the last served pair's expiry.
+func TestAdminUIServeOnce_FailedBindDoesNotRecordExpiry(t *testing.T) {
+	resetAdminUITLSCertExpiryForTest(t)
+	certPath, keyPath := writeTestKeyPair(t, t.TempDir())
+
+	port, release := occupyPort(t)
+	t.Cleanup(release)
+
+	err := adminUIServeOnce(newTestAdminServer(), fmt.Sprintf(":%d", port), certPath, keyPath)
+	if err == nil {
+		t.Fatal("expected a bind failure against an occupied port")
+	}
+	if notAfter, known := adminUITLSCertExpiry(); known || !notAfter.IsZero() {
+		t.Fatalf("a pair that never bound was recorded as serving (notAfter=%v known=%v)", notAfter, known)
+	}
+
+	// A previously served pair's expiry survives a failed attempt with a
+	// different (rotated) pair.
+	served := time.Now().Add(10 * 24 * time.Hour).UTC().Truncate(time.Second)
+	adminUITLSCertMu.Lock()
+	adminUITLSCertNotAfter, adminUITLSCertKnown = served, true
+	adminUITLSCertMu.Unlock()
+	if err := adminUIServeOnce(newTestAdminServer(), fmt.Sprintf(":%d", port), certPath, keyPath); err == nil {
+		t.Fatal("expected a bind failure against an occupied port")
+	}
+	if notAfter, known := adminUITLSCertExpiry(); !known || !notAfter.Equal(served) {
+		t.Fatalf("a failed bind overwrote the served pair's expiry: got %v (known=%v), want %v", notAfter, known, served)
+	}
+}
