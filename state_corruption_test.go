@@ -490,3 +490,49 @@ func TestResidualQuarantine_PolicyLearningAndMCPResurfaceAcrossRestart(t *testin
 		}
 	}
 }
+
+// TestResidualQuarantine_GlobMetacharInDataDir pins the Codex P2 on PR
+// #1408: CULVERT_DATA_DIR may be any absolute path, so a `[` (or `*`, `?`,
+// `\`) in it must not turn the residual scan into ErrBadPattern or a search
+// of a different path — the leftover quarantine must still surface.
+func TestResidualQuarantine_GlobMetacharInDataDir(t *testing.T) {
+	captureStartupAlerts(t)
+	isolateStateCorruption(t)
+
+	for _, name := range []string{"data[1", "data[ab]", "da*ta", "d?ta", `back\slash`} {
+		dir := filepath.Join(t.TempDir(), name)
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		p := filepath.Join(dir, "cluster.json")
+		if err := os.WriteFile(p+".corrupt.1", []byte("stale"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		// Reset between iterations: the record is once-per-kind.
+		stateCorruptionMu.Lock()
+		delete(stateCorruptionByKind, "cluster")
+		delete(stateCorruptionRecordByKind, "cluster")
+		stateCorruptionMu.Unlock()
+
+		noteResidualQuarantine("cluster", p)
+		rec, ok := stateCorruptionRecordsSnapshot()["cluster"]
+		if !ok || !rec.Residual || rec.ResidualCount != 1 {
+			t.Fatalf("dir %q: want residual record with count 1, got %+v (ok=%v)", name, rec, ok)
+		}
+	}
+}
+
+func TestGlobEscapeLiteral_MatchesOnlyTheLiteral(t *testing.T) {
+	root := t.TempDir()
+	lit := filepath.Join(root, "x[ab]")
+	decoy := filepath.Join(root, "xa")
+	for _, d := range []string{lit, decoy} {
+		if err := os.WriteFile(d+".corrupt.1", nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	m, err := filepath.Glob(globEscapeLiteral(lit) + ".corrupt.*")
+	if err != nil || len(m) != 1 || m[0] != lit+".corrupt.1" {
+		t.Fatalf("got %v, %v; want only %q", m, err, lit+".corrupt.1")
+	}
+}

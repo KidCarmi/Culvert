@@ -37,7 +37,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -154,7 +156,7 @@ func noteResidualQuarantinePaths(kind string, paths ...string) {
 		if p == "" {
 			continue
 		}
-		m, err := filepath.Glob(p + ".corrupt.*")
+		m, err := filepath.Glob(globEscapeLiteral(p) + ".corrupt.*")
 		if err != nil || len(m) == 0 {
 			continue
 		}
@@ -184,6 +186,31 @@ func noteResidualQuarantinePaths(kind string, paths ...string) {
 	stateCorruptionMu.Unlock()
 
 	deferStartupAlert("state_file_corrupt", AlertPayload{Detail: detail, Source: "storage"})
+}
+
+// globEscapeLiteral escapes the filepath.Match metacharacters in a LITERAL
+// path so it can prefix a glob pattern: CULVERT_DATA_DIR may be any absolute
+// path, and an unescaped `[` (or `*`, `?`, `\`) in it would either fail the
+// glob with ErrBadPattern or silently search a different path, dropping the
+// residual-quarantine record after a restart.
+func globEscapeLiteral(p string) string {
+	var b strings.Builder
+	b.Grow(len(p) + 8)
+	for i := 0; i < len(p); i++ {
+		switch c := p[i]; {
+		case c == '*' || c == '?' || c == '[':
+			// A one-byte character class matches the byte literally on every
+			// platform (Windows disables backslash escaping in Match).
+			b.WriteByte('[')
+			b.WriteByte(c)
+			b.WriteByte(']')
+		case c == '\\' && runtime.GOOS != "windows":
+			b.WriteString(`\\`)
+		default:
+			b.WriteByte(c)
+		}
+	}
+	return b.String()
 }
 
 // checkStateFileIntegrity is the `state_file_<kind>` authenticated
