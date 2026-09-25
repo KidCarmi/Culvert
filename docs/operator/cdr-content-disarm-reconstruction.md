@@ -37,15 +37,20 @@ Two ways to turn CDR on, and either one is enough — you do not need both:
    | `-cdr-default-profile` | `cdr.default_profile` | Sanitization profile sent when no CDR policy rule matches; must name a profile Sluice's `Health` RPC advertises | `default` |
    | `-cdr-default-mode` | `cdr.default_mode` | Mode sent when no rule matches: `ENFORCE`, `REPORT_ONLY`, or `BYPASS_WITH_REPORT` | `ENFORCE` |
    | `-cdr-timeout-sec` | `cdr.timeout_sec` | Per-file deadline; must be ≥ 30 (Sluice's own cap is 30s — Culvert adds 5s so its own timeout fires last) | 35 |
-   | `-cdr-max-file-size-mb` | `cdr.max_file_size_mb` | Reject files above this size **before** any bytes are sent to Sluice | 50 |
+   | `-cdr-max-file-size-mb` | `cdr.max_file_size_mb` | Skip CDR (no RPC) for a buffered body larger than this | 50 |
    | `-cdr-server-fingerprint` | `cdr.server_fingerprint` | TOFU-pinned SHA-256 of Sluice's server certificate (hex; `sha256:` prefix optional) | — |
    | `-cdr-certs-dir` | `cdr.certs_dir` | Directory holding the Sluice mTLS client bundle (`ca.pem`, `client.pem`, `client.key`) | — |
    | `-cdr-fail-mode` | `cdr.fail_mode` | Behavior when Sluice is unreachable: `open` or `closed` (see **Failure behavior** below); an invalid value is a fatal boot error | `open` |
 
-   `-cdr-endpoint` alone (with no instance ever enrolled through the API)
-   dials a single anonymous bootstrap client with no certificate lifecycle
-   automation — see **Certificate lifecycle** below before relying on this
-   path long-term.
+   `-cdr-endpoint` by itself dials nothing. The config/CLI-only bootstrap
+   path (no instance ever enrolled through the API) requires **all three**
+   of `-cdr-enabled` (or the runtime sentinel), `-cdr-endpoint`, and
+   `-cdr-server-fingerprint` — `loadCDR` skips client init entirely while
+   `Enabled` is false, and `bootstrapPoolFromConfig` itself refuses to dial
+   when either `Endpoint` or `ServerFingerprint` is empty. Configuring only
+   the endpoint silently leaves CDR with no client. This bootstrap path also
+   has no certificate lifecycle automation — see **Certificate lifecycle**
+   below before relying on it long-term.
 
 2. **GUI enrollment**, no restart or config-file edit required: open
    **CDR → Enroll new Sluice instance**, paste the one-time enrollment token
@@ -115,6 +120,21 @@ Two distinct gates exist, and only the second one consults `cdr.fail_mode`:
    matter how `fail_mode` is set — those are content decisions, not
    availability ones.
 
+**`cdr.max_file_size_mb` is not a whole-file guarantee, because CDR never
+sees the whole file for a large download in the first place.** On the
+SSL-inspect path (the only path CDR runs on), the response body is first
+buffered up to the shared DPI/content-scan window
+(`security_scan.max_scan_mb`, a few MiB by default — see
+`scan-capacity-and-timeouts.md`) *before* CDR (or ClamAV/YARA/DPI) ever sees
+it; whatever comes after that window is relayed to the client as-is, with no
+scanning of any kind. So for an ordinary large download, `cdr.max_file_size_mb`
+being larger than the scan window buys nothing — CDR is comparing against a
+prefix that was already capped upstream, and the untouched remainder ships
+unsanitized regardless of what `cdr.max_file_size_mb` says. Raising
+`cdr.max_file_size_mb` does not make CDR see more of a large file; raising
+`security_scan.max_scan_mb` does, at the cost of buffering more of every
+inspected response in memory.
+
 Per-request outcomes are also gated by the CDR policy rule's own **Mode**
 (`ENFORCE` strips and delivers the sanitized file; `REPORT_ONLY` detects and
 logs but delivers the original bytes; `BYPASS_WITH_REPORT` is a VIP carve-out
@@ -122,10 +142,15 @@ logs but delivers the original bytes; `BYPASS_WITH_REPORT` is a VIP carve-out
 defaults to `ENFORCE` (the safer choice over the alternative of silently
 falling back to `REPORT_ONLY`, which would let active content through).
 
-Identical files are not re-sanitized: results are cached by SHA-256 of the
-file body for up to one hour or 10,000 entries (`culvert_cdr_cache_hits_total`
-/ `_cache_misses_total` / `_cache_size`), invalidated whenever the CDR policy
-rule set changes.
+**Only non-sanitized verdicts are cached** — `CLEAN`, `UNSUPPORTED`, and
+`BLOCKED` results are cached by SHA-256 of the file body for up to one hour
+or 10,000 entries (`culvert_cdr_cache_hits_total` / `_cache_misses_total` /
+`_cache_size`), invalidated whenever the CDR policy rule set changes. A
+`SANITIZED` result is **not** cached — the reconstructed bytes aren't
+retained, so an identical file that previously needed sanitizing is sent to
+Sluice again on every request. Size Sluice capacity for repeat traffic in
+active `ENFORCE` sanitization accordingly; the cache only saves RPCs for
+files that turn out clean, unsupported, or blocked.
 
 ## Multi-instance pool and circuit breaker
 
@@ -148,9 +173,12 @@ instances — neither carries an instance label, so neither alone tells you
 labeled by `instance`: `culvert_cdr_pool_instance_healthy{instance}`,
 `culvert_cdr_pool_breaker_state{instance}` (0=closed, 1=open, 2=half_open),
 and `culvert_cdr_pool_breaker_trips_total{instance}`. Build per-member
-alerting off the `_pool_*` series, not the two aggregates; `GET
-/api/cdr/instances` / `/api/cdr/health` give the same per-instance detail
-for ad hoc inspection.
+alerting off the `_pool_*` series, not the two aggregates; for ad hoc
+inspection use `GET /api/cdr/instances`, which carries per-instance health
+and breaker state. `GET /api/cdr/health` does **not** — it returns only the
+cached/live Sluice `Health` response plus pool-wide `consecutiveFailures`/
+`liveHealthy`, with no per-instance breakdown, so it cannot tell you which
+member is unhealthy.
 
 **A single-instance deployment cannot revoke its own credential through the
 API.** `POST /api/cdr/instances/revoke` issues the revoke RPC *from* another
@@ -233,9 +261,13 @@ trigger before writing a policy rule around it.
 
 ## Observability
 
-Audit/request-log events: `CDR_SANITIZED`, `CDR_BLOCKED`, `CDR_ERROR` (each
-carries the matched profile, mode, and threat summary). Filter them from
-**CDR → Recent CDR events** in the GUI.
+Audit/request-log events: `CDR_SANITIZED`, `CDR_BLOCKED`, `CDR_ERROR` — each
+carries the matched profile, but the second detail field differs by event:
+`CDR_SANITIZED` carries the threat summary, while `CDR_BLOCKED` and
+`CDR_ERROR` carry the block reason / transport error instead. None of the
+three request-log entries carries the mode — mode appears only in the
+plain-text `logger.Printf` line alongside them, not in the structured
+event. Filter the events from **CDR → Recent CDR events** in the GUI.
 
 Prometheus metrics (`culvert_cdr_*`, all counters unless noted):
 `files_processed_total`, `threats_detected_total`, `errors_total`,
@@ -282,6 +314,10 @@ GET is viewer, PUT is admin):
   failed. Monitor `/api/cdr/health` and the per-instance breaker metrics,
   not `fail_mode`, to know whether CDR is actually protecting traffic right
   now.
+- **A large download is only sanitized up to the shared scan window, not up
+  to `cdr.max_file_size_mb`** — see the callout under **Failure behavior**.
+  The untouched remainder past `security_scan.max_scan_mb` ships to the
+  client with no CDR (or AV/YARA/DPI) inspection at all.
 - **`default_profile` must exist on Sluice.** There is no client-side
   validation that the configured or rule-selected profile name is one Sluice
   actually advertises; a typo surfaces as a Sluice-side `ERROR` at request
