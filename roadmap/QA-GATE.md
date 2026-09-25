@@ -44,7 +44,8 @@ layer is visible at a glance in the PR checks list:
 
 | Job | What it proves | What a red X means |
 |-----|----------------|--------------------|
-| `qa-logic` | `go vet` + `go test -race` for every package, deterministic seed. | **Application code is wrong.** Independent of infra/OS. |
+| `qa-logic` | Whole-module `go build` + `go vet`. (Before CI-REDESIGN stage 5B it also ran the race suite; that moved to `qa-race`.) | **Application code is wrong.** Independent of infra/OS. |
+| `qa-race` | `go test -race` + coverage for every package, deterministic seed — run as 4 root shards + a non-root lane (`qa-race-shards.yml`), with a verdict that proves no test, block or profile was lost before publishing `qa-coverage`. | **Application code is wrong** — or, if the verdict names missing/incomplete evidence, a producer failed. See `roadmap/CI-REDESIGN.md` §14. |
 | `qa-determinism` | Re-runs with `-shuffle=on -count=2`. | A test is **non-deterministic** (order-dependent, wall-clock dependent, RNG leak). Fix the test — never mark it flaky. |
 | `qa-coverage` | Enforces a per-file coverage floor on the security-sensitive surface (`totp.go`, `security.go`, `session.go`, `lockout.go`, `policy.go`). | A hot file has **unwatched branches**. Regression risk. |
 | `qa-infra-compose` | Builds the Docker image, boots `proxy` alone (clamav/updater disabled) via a generated `compose.qa.yml`, waits for the healthcheck. | **Docker / orchestration problem.** Not application logic. |
@@ -79,7 +80,7 @@ recovery, which hides ClamAV outages from health signals.
 
 The following mechanisms make the gate reproducible:
 
-- **`TEST_SEED=20260421` environment variable** — exported in `qa-logic` and
+- **`TEST_SEED=20260421` environment variable** — exported in `qa-race` and
   `qa-determinism`. Tests that need randomness should read this seed rather
   than calling `time.Now()` or `rand.Int()` directly.
 - **`verifyTOTPAt(secret, code, nowUnix, lastCounter)`** — the TOTP verifier
@@ -103,7 +104,7 @@ The following mechanisms make the gate reproducible:
    go test -race -count=2 -shuffle=on -timeout=20m ./... # qa-determinism
    ```
 3. **When a job goes red**: look at the job name first. Don't retry.
-   - `qa-logic` red ⇒ read the diff and fix the code.
+   - `qa-logic` / `qa-race` red ⇒ read the diff and fix the code (a `qa-race` verdict naming lost evidence ⇒ the named producer job failed; read it first).
    - `qa-determinism` red ⇒ find the flaky test and pin its inputs.
    - `qa-infra-compose` red ⇒ check the Dockerfile / compose graph.
    - `qa-os` red ⇒ check `go.mod` / build tags / runner image.

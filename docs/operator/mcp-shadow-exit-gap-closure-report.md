@@ -71,6 +71,11 @@ warmed keep-alive session, so the ratio isolates the Shadow-evaluation + evidenc
 test records p50/p95/p99/max for both and enforces `shadow_p99 ≤ 5× observe_p99` (generous:
 catches a gross regression — an unbounded scan, a double commit, a per-request re-hash — while
 the measured overhead is ~1–2×; a baseline floor guards against a noise-dominated denominator).
+Because p99 over n=300 is the third-slowest request, one scheduler/GC/fsync stall on a shared
+runner can decide it (Deep-gate run 35831416849: Shadow p99 6.14× while Shadow p50 was below
+Observe's), so the Shadow sample is re-measured up to 3 times and the gate fails only when EVERY
+attempt exceeds 5×. The budget and statistic are unchanged: a genuine tail regression affecting
+≥1% of requests reproduces on every attempt; an isolated stall does not.
 The precise, deterministic mutation guard is a pure table test on the gate function, which
 cannot flake on any hardware. **No admission saturation** is established with a bounded
 CONCURRENT burst (16 in-scope Shadow requests on distinct sessions in flight at once), each of

@@ -20,6 +20,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/KidCarmi/Culvert/internal/apicontract"
 )
 
 // isolateMutableStores snapshots the process-global stores the mutating-response
@@ -41,10 +43,10 @@ func isolateMutableStores(t *testing.T) {
 
 // mutatingResponseCase drives a real write handler at `role`, asserts the
 // documented status, and validates the JSON body against the contract for that
-// status.
-func mutatingResponseCase(t *testing.T, method, path, body string, role UIRole, h http.HandlerFunc, wantStatus int) {
+// status. sp is the caller's per-invocation spec fixture (see
+// assertResponseConforms).
+func mutatingResponseCase(t *testing.T, sp *apicontract.Spec, method, path, body string, role UIRole, h http.HandlerFunc, wantStatus int) {
 	t.Helper()
-	sp := loadContract(t)
 	rec := httptest.NewRecorder()
 	req := withRole(httptest.NewRequestWithContext(context.Background(), method, path, strings.NewReader(body)), role)
 	h(rec, req)
@@ -66,6 +68,7 @@ func mutatingResponseCase(t *testing.T, method, path, body string, role UIRole, 
 // documented schema. All mutated state is snapshotted + restored.
 func TestConformance_MutatingResponses(t *testing.T) {
 	isolateMutableStores(t)
+	spec := loadContract(t)
 	cases := []struct {
 		name, method, path, body string
 		role                     UIRole
@@ -84,7 +87,7 @@ func TestConformance_MutatingResponses(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			mutatingResponseCase(t, c.method, c.path, c.body, c.role, c.h, c.status)
+			mutatingResponseCase(t, spec, c.method, c.path, c.body, c.role, c.h, c.status)
 		})
 	}
 }

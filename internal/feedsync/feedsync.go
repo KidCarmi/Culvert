@@ -36,6 +36,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -160,6 +161,10 @@ type Syncer struct {
 	// round ("download", "write", "" when clean) — never a raw error string,
 	// which would carry the feed URL into any surface that consumes it.
 	lastFailure atomic.Value // stores string
+
+	// loop tracks the goroutine Start launches, so Wait can join it after the
+	// caller cancels Start's context.
+	loop sync.WaitGroup
 }
 
 // Bounded reason classes for a failed round. The verbose cause goes to the log.
@@ -246,8 +251,18 @@ func New(db *catdb.CommunityDB, feedURL string, syncInterval time.Duration) *Syn
 //     synchronised fleet is answered by rate-limiting — which produces exactly
 //     the failure the missing backoff then holds for 24 hours.
 func (fs *Syncer) Start(ctx context.Context) {
-	go feedsched.New(fs.schedulerConfig()).Run(ctx)
+	fs.loop.Add(1)
+	go func() {
+		defer fs.loop.Done()
+		feedsched.New(fs.schedulerConfig()).Run(ctx)
+	}()
 }
+
+// Wait blocks until the loop Start launched has returned; it returns at once if
+// Start was never called. Cancel Start's context first: the loop exits after
+// the round in flight, and a round logs through the process logger, so a test
+// that swaps that logger must not race a round left over from an earlier test.
+func (fs *Syncer) Wait() { fs.loop.Wait() }
 
 // schedulerConfig builds the syncer's cadence configuration. Split out of Start
 // so the cadence contract is asserted directly rather than by driving a live
