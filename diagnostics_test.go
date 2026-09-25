@@ -1599,3 +1599,35 @@ func TestApiDiagnostics_UsernameLengthOKByDefault(t *testing.T) {
 		t.Errorf("admin_username_length status = %q, want ok when no username exceeds the login bound", found.Status)
 	}
 }
+
+// TestApiDiagnostics_OversizeLegacyUsernameSurfacedOnContract pins the
+// legacy single-user fallback: VerifyUIUser/LoginNameConfigured still admit
+// cfg.user when it has no roster entry (DeleteUIUser removes only the map
+// entry), so an oversize legacy name must keep the row at warn rather than
+// falsely reporting the remediation as done.
+func TestApiDiagnostics_OversizeLegacyUsernameSurfacedOnContract(t *testing.T) {
+	snapshotCfgUIUsers(t)
+	longName := strings.Repeat("l", maxUsernameLen+1)
+	cfg.mu.Lock()
+	cfg.uiUsers = map[string]*uiAdminUser{}
+	cfg.user = longName
+	cfg.mu.Unlock()
+	if !cfg.LoginNameConfigured(longName) {
+		t.Fatal("precondition: legacy name must still be a configured login name")
+	}
+
+	r := viewerCtx(httptest.NewRequest(http.MethodGet, "/api/diagnostics", http.NoBody))
+	w := httptest.NewRecorder()
+	apiDiagnostics(w, r)
+
+	found := findDiagnosticCheck(decodeContract(t, w), "admin_username_length")
+	if found == nil {
+		t.Fatal("admin_username_length check missing from report")
+	}
+	if found.Status != diagWarn {
+		t.Errorf("admin_username_length status = %q, want warn for an oversize legacy login name with no roster entry", found.Status)
+	}
+	if strings.Contains(found.Message, longName) {
+		t.Error("admin_username_length message should not echo the username itself")
+	}
+}

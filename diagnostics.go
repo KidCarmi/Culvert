@@ -537,12 +537,24 @@ func checkOversizeConfiguredUsernames() OperatorContractCheck {
 			Message: "no admin accounts configured",
 		}
 	}
-	n, maxLen := 0, 0
+	// The legacy single user (cfg.GetUser) is included and deduplicated:
+	// LoginNameConfigured/VerifyUIUser fall back to it, and DeleteUIUser
+	// removes only the roster entry, so an oversize legacy name can remain
+	// able to log in with no roster row — reporting ok then would falsely
+	// confirm a remediation that did not happen.
+	names := map[string]struct{}{}
 	for _, u := range cfg.ListUIUsers() {
-		if len(u.Username) > maxUsernameLen {
+		names[u.Username] = struct{}{}
+	}
+	if legacy := cfg.GetUser(); legacy != "" {
+		names[legacy] = struct{}{}
+	}
+	n, maxLen := 0, 0
+	for name := range names {
+		if len(name) > maxUsernameLen {
 			n++
-			if len(u.Username) > maxLen {
-				maxLen = len(u.Username)
+			if len(name) > maxLen {
+				maxLen = len(name)
 			}
 		}
 	}
