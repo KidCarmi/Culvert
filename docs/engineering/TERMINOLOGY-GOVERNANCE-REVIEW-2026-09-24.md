@@ -51,9 +51,9 @@ parts of the same window did find drift this pass missed; see "Overlap with para
      - `coverage` and `uncheckedEnforcingPaths` ↔ the separate `culvert_ocsp_path_checked{path}` gauge
        (`ocsp_metrics.go:77-84`). The GUI renders `uncheckedEnforcingPaths` as its coverage banner
        (`static/index.html:17519`).
-     - The wording "no responder returned a usable, affirmative verdict" is reused verbatim between the
-       GUI fail-closed banner (`static/index.html:4494`) and the `culvert_ocsp_fail_closed_total` HELP text
-       (`ocsp_metrics.go:38`).
+     - Similar wording is shared between the GUI fail-closed banner ("No OCSP responder returned a usable, affirmative verdict",
+       `static/index.html:4494`) and the `culvert_ocsp_fail_closed_total` HELP text ("no responder returned
+       a usable, affirmative verdict", `ocsp_metrics.go:38`).
    - **GeoIP (CHAOS-60):** the new `geo_resolution` diagnostics-contract row mirrors the pre-existing
      `dns_resolution` row's naming and severity convention exactly, and `docs/operator/
      geoip-resolution-health.md` uses the same vocabulary.
@@ -69,13 +69,18 @@ parts of the same window did find drift this pass missed; see "Overlap with para
    - The release-publication-gating and R2-only-catalog work (`promote-image`, `candidate-<run_id>`,
      `resolve-candidate`) is CI/release-engineering internals with no operator-GUI or config-surface
      exposure, out of this glossary's scope.
-2. **None of this window's 256 changed files touch any of the fourteen carry-over finding locations**
-   (`docs/enterprise/TLS-INSPECTION-DEPLOYMENT.md`, `internal/sealbox`, the Cluster panel's `cp_version`/
-   `snapshot_sha256` sites, `internal/support`'s recipient/TAC-trust-key stores, the `PolicyAction`/
-   `PolicyReason` overwrite sites in `policy.go`, `apiURLCatFeedStatus`, or the
-   `qualification_inventory_file`/`qualification_telemetry`/`qualification_policy_file` trio) — cross-
-   checked against `git diff --name-only 574d265..6ec745d`'s full file list. None was touched, so none was
-   incidentally resolved or worsened.
+2. **No change in this window touches a carry-over finding location.** Most of those locations sit in
+   files the window did not change (`docs/enterprise/TLS-INSPECTION-DEPLOYMENT.md`, `internal/sealbox`,
+   `internal/support`, `policy.go`, `apiURLCatFeedStatus`). Two files that hold carry-over sites did
+   change, and their hunks (`git diff 574d265 6ec745d`) were read:
+   - `config.go` (the T-11 `default_action`, T-29/T-30 rate/connection-limit and T-39 `qualification_*`
+     keys): two hunks, both CDR server-fingerprint validation (`validCDRServerFingerprint` and its use in
+     `validateCDR`). None of those keys is touched.
+   - `static/index.html` (the Cluster panel's `cp_version`/`snapshot_sha256` sites for T-21+T-32, and the
+     T-39 qualification strings): four hunks — the oversized-login hint, the OCSP panel counters and banners,
+     `fetchStats` and `loadCAMgmt`. None touches the Cluster panel or a qualification string.
+
+   So no carry-over item was incidentally resolved or worsened.
 3. **Spot-checked three carry-over items directly** (rather than trusting the prior report alone), the
    same discipline the 2026-09-08/09/11 reports used: **T-11** — `config.go`'s `default_action`
    validation still accepts only `"allow"`/`"deny"` strings while `policy.go`'s `PolicyAction` enum still
@@ -133,12 +138,15 @@ Three reports written before this one were still unmerged PRs when it was writte
 part of this window. They recorded findings this pass did not:
 
 - **2026-09-21 (#1456)**: the OCSP admin panel was titled "OCSP / CRL Revocation" although only OCSP
-  exists (its T-57), and the OCSP work added "appliance", which the glossary forbids, to an OpenAPI field
-  description and operator docs (a T-51 recurrence). This report's OCSP check compared field spellings
-  and did not read the panel title or prose against the glossary.
-- **2026-09-23 (#1482)**: T-54–T-56 (identity-backend metric prefix, Sync vs Refresh verbs, the
+  exists (its T-59), and the OCSP work added "appliance", which the glossary forbids, to an OpenAPI field
+  description and operator docs (a T-51 recurrence). It also found that the MCP tool-trust decision
+  route's OpenAPI entry names an audit event, `mcp.tooltrust.decision`, that the handler never emits
+  (its T-60). This report's OCSP check compared field spellings and did not read the panel title or
+  prose against the glossary, and its MCP check did not compare the spec's audit-event names with the
+  handler.
+- **2026-09-23 (#1482)**: T-61–T-63 (identity-backend metric prefix, Sync vs Refresh verbs, the
   decryption-exclusion audit search). All three are long-standing, not introduced in this window.
-- **2026-09-19 (#1434)**: a pre-existing SSL/TLS label mismatch in the new frontend's Rule Editor (its T-54).
+- **2026-09-19 (#1434)**: a pre-existing SSL/TLS label mismatch in the new frontend's Rule Editor (its T-58).
 
 This report's "no new drift" conclusion covers only the checks listed above. It is not evidence
 against those findings. The finding IDs above are the parallel reports' own; see each report for
