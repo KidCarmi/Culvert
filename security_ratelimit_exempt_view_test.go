@@ -5,6 +5,7 @@ import (
 	"math/rand"
 	"net"
 	"reflect"
+	"runtime"
 	"sort"
 	"sync"
 	"testing"
@@ -585,6 +586,10 @@ func TestBenchGate_RateLimitExemptBulkLoadIsLinear(t *testing.T) {
 	measure := func(n int) time.Duration {
 		list := entries(n)
 		r := newRateLimiter()
+		// Settle the collector before the clock starts, as testing.B does — the
+		// same fix, measurement and reasoning as the sibling gate
+		// TestBenchGate_IPFilterBulkLoadIsLinear (see the comment there).
+		runtime.GC()
 		start := time.Now()
 		r.AddExemptions(list)
 		return time.Since(start)

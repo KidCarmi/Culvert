@@ -1,6 +1,7 @@
 # Admin-UI Browser E2E (Playwright) — Implementation Plan
 
-Status: **slices 1–16 shipped**. Companion to
+Status: **slices 1–14 and 16 shipped; slice 15 removed** (see note below).
+Companion to
 `docs/ci/proxy-quality-architecture.md`. This describes how to add real-browser
 end-to-end coverage of the Culvert admin UI without breaking the single-binary,
 zero-runtime-dependency, Go-first contract.
@@ -87,9 +88,14 @@ zero-runtime-dependency, Go-first contract.
   through the admin session: `/api/ca-cert` returns the live root's metadata
   (issuer, fingerprint, validity) and `/api/ca/download` serves the PEM for
   browser import — proving the surface is wired to the live CertManager.
-- **Slice 15 — self-update panel** (`ui_updates_e2e_test.go`). The panel is
-  reachable and `/api/update/status` (version + update availability) responds
-  through the admin's browser session.
+- **Slice 15 — self-update panel: REMOVED.** `ui_updates_e2e_test.go` and the
+  `updates` panel + `/api/update/*` surface it exercised were deleted along
+  with the legacy `updater/` sidecar (DEBT-008, closed 2026-07-11 — see
+  `docs/engineering/TECHNICAL-DEBT-REGISTER.md`). Day-2 updates now flow
+  through Release Management dispatch to the maintenance agent
+  (`docs/operator/release-management-agent.md`), which has its own E2E
+  coverage (`release_dispatch_e2e_test.go`, `maint-agent-*-e2e.yml`) — this
+  slice is not being replaced with a browser-driven equivalent.
 - **Slice 16 — config-versioning rollback, cross-plane** (`ui_configversion_e2e_test.go`).
   The strongest governance assertion: a snapshot rolled back through the Settings
   panel reverts the LIVE proxy plane. Baseline default-deny is snapshotted; a
@@ -113,13 +119,18 @@ tier.
 
 Every test in the quality program so far drives the **traffic plane** over real
 sockets (policy, MITM/SSL-inspect, CONNECT relay, SOCKS5, auth×authz). None of
-it renders the **admin UI**, which is a single ~11.6k-line SPA
-(`static/index.html`) exposing **25 `data-view` panels**:
+it renders the **admin UI**, a single ~11.6k-line SPA (`static/index.html`).
+The panel list below is a **historical snapshot from when this plan was
+authored, not the current total** (`static/index.html` carries 38 unique
+`data-view` panels at the time of this correction): the `updates` panel it
+originally included has since been removed with the legacy update mechanism,
+and later programs (MCP, Policy Learning, Decryption Exclusions, Support)
+have added many more not reflected below:
 
 ```
 audit authpolicy blocklist ca-mgmt catgroups cdr certificates cluster
 dashboard diagnostics fileblock governance idproviders livefeed pac policy
-policy-tester releases rewrite security settings updates upstream urlcat users
+policy-tester releases rewrite security settings upstream urlcat users
 ```
 
 Browser E2E covers what socket tests cannot:
