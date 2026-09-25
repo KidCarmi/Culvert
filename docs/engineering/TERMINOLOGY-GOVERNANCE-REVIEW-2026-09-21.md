@@ -1,8 +1,14 @@
 # Culvert Language & Terminology Governance Review — 2026-09-21
 
 > **Owner:** Language & Terminology Governance routine · **Status:** Point-in-time review (repeatable)
+> **Snapshot scope (read this first):** this is a HISTORICAL record of `origin/main` at `6c46ebd` on
+> 2026-09-21. It was merged later, after `main` had moved on, so the tree it ships in contains commits it
+> never audited. Its findings, carried-over backlog and health score describe `6c46ebd` only. They are
+> not a statement about the tree this file is published in; the current governance state is whatever the
+> most recent review in this series says. Later windows are audited by later reports, never
+> retroactively by this one.
 > **Method:** Audited `46410c3..6c46ebd` — the window since the 2026-09-11 report's merge point,
-> confirmed as the current `origin/main` HEAD by a fetch immediately before this report was written (the
+> confirmed as the then-current `origin/main` HEAD by a fetch immediately before this report was written on 2026-09-21 (the
 > DEBT-014 lesson carried forward again: sync against `main` right before opening a PR). The window covers
 > 21 first-parent merges / 154 files / ~29.4k insertions, dominated by two unrelated engineering streams:
 > the MCP Agent Security Gateway's "first controlled canary" execution architecture (ADR-0035 —
@@ -72,7 +78,7 @@ notes; spot-checked the runbook title against the workflow name (`resign-catalog
 Runbook") and the R2 terminology against CLAUDE.md's existing "R2 (`https://catalog.culvertlabs.com`)"
 description — consistent, no drift.
 
-**Spot-checked three carry-over items directly** against the current tree, as prior reports have done,
+**Spot-checked three carry-over items directly** against the then-current tree (`6c46ebd`), as prior reports have done,
 rather than assuming the backlog is unchanged just because no fix commit was seen in the window:
 - **T-13**: `docs/enterprise/TLS-INSPECTION-DEPLOYMENT.md:1` is still titled "TLS Inspection Deployment"
   (in-app/API/GUI still say "SSL Inspection" throughout `static/index.html`, e.g. `healthcheck.go`'s
@@ -171,7 +177,7 @@ rendered surface directly, not inferred from which files a diff touched.
 ## Carried-Over Findings (unchanged)
 
 All fourteen previously-open finding IDs (thirteen backlog entries, since T-21 and T-32 are tracked as one
-paired item) remain open, unchanged, and re-confirmed against the current tree:
+paired item) remain open, unchanged, and re-confirmed against the then-current tree (`6c46ebd`):
 T-9, T-11, T-12, T-13 (residual), T-17, T-18, T-21+T-32 (paired), T-25 (residual), T-29, T-30, T-33, T-34,
 T-39. Full descriptions and the priority-ordered refactoring plan are unchanged from
 `TERMINOLOGY-GOVERNANCE-REVIEW-2026-09-09.md` and are not restated here to avoid drift between two
