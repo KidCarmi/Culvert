@@ -19442,9 +19442,9 @@ function resetBlockPage() {
 </div>
 
 <!-- ── Self-service "Change my password" modal (topbar, any role) ──────── -->
-<div id="change-password-modal" style="position:fixed;inset:0;background:rgba(0,0,0,.65);z-index:300;align-items:center;justify-content:center">
+<div id="change-password-modal" role="dialog" aria-modal="true" aria-labelledby="cp-title" style="position:fixed;inset:0;background:rgba(0,0,0,.65);z-index:300;align-items:center;justify-content:center">
   <div class="setup-card" style="width:360px;max-width:94vw">
-    <h2 style="font-size:1.15rem;margin-bottom:4px">Change Password</h2>
+    <h2 id="cp-title" style="font-size:1.15rem;margin-bottom:4px">Change Password</h2>
     <p style="font-size:.82rem;color:var(--muted);margin-bottom:18px">Update the password for your own account.</p>
     <div class="form-group">
       <label class="form-label" for="cp-current">Current password</label>
@@ -19458,7 +19458,7 @@ function resetBlockPage() {
       <label class="form-label" for="cp-confirm">Confirm new password</label>
       <input id="cp-confirm" type="password" class="input" style="width:100%" autocomplete="new-password">
     </div>
-    <div class="setup-err" id="cp-err" style="margin-bottom:10px;display:none"></div>
+    <div class="setup-err" id="cp-err" role="alert" aria-live="assertive" style="margin-bottom:10px;display:none"></div>
     <div style="display:flex;gap:10px;margin-top:6px">
       <button class="btn" id="cp-save-btn" data-click="submitChangePassword">Save</button>
       <button class="btn ghost" data-click="closeChangePasswordModal">Cancel</button>

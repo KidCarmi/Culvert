@@ -123,3 +123,24 @@ func TestUIContract_ChangePasswordInputsHaveAccessibleNames(t *testing.T) {
 		}
 	}
 }
+
+// TestUIContract_ChangePasswordModalIsAnAnnouncedDialog pins the dialog
+// semantics: the overlay is a modal dialog named by its heading, and the error
+// container is an alert live region so validation and server errors are
+// announced to screen-reader users rather than silently made visible.
+func TestUIContract_ChangePasswordModalIsAnAnnouncedDialog(t *testing.T) {
+	html, err := os.ReadFile(staticIndexHTMLPath())
+	if err != nil {
+		t.Fatalf("read index.html: %v", err)
+	}
+	s := string(html)
+	for _, want := range []string{
+		`<div id="change-password-modal" role="dialog" aria-modal="true" aria-labelledby="cp-title"`,
+		`<h2 id="cp-title"`,
+		`id="cp-err" role="alert" aria-live="assertive"`,
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("change-password modal is missing %q", want)
+		}
+	}
+}
