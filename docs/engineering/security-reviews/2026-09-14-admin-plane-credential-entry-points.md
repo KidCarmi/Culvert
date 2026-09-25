@@ -464,6 +464,34 @@ on a PR already carrying this much: each touches a shared engine
 (`internal/lockout`, `internal/authcost`) whose other callers need their own
 regression proof.
 
+### Did the withdrawal trade a bound away? Measured, and the answer differs per axis
+
+This is the first question the withdrawal has to answer, so it is measured against
+the tree **before** §1 rather than argued:
+
+| Axis | Before §1 | Now |
+| --- | --- | --- |
+| bcrypt comparisons reachable per `(IP, username)` | **unbounded** | **5**, then locked and refused with no bcrypt |
+| limiter entries created per unauthenticated request | **0** | **2** (key-clamped, swept after the window) |
+
+So the two residuals are **not** symmetric, and saying "no regression" would be
+false:
+
+- **AU-18 is strictly better than the tree §1 replaced.** An unauthenticated
+  caller could previously drive an unbounded number of ~80 ms comparisons from a
+  public GET; it now gets five per pair per 15 minutes, and the refusal after
+  that costs no bcrypt. The withdrawal does not touch this, because the bound is
+  the lockout, not the budget. What remains open is *concurrency within those
+  five*, plus the per-username axis.
+- **AU-17b is a genuinely new vector**, introduced by §1 and **not** closed by
+  the withdrawal. Before §1 this path recorded nothing at all.
+
+The trade is therefore: two bounded, swept, now-observable map entries per
+unauthenticated request, in exchange for closing an unauthenticated
+password-checking oracle and capping bcrypt from unbounded to five. That is the
+right way round — but it is a **trade**, and AU-17b stays open with a designed
+fix rather than being argued away.
+
 ### Tests
 
 `ui_basicauth_lockout_test.go`:

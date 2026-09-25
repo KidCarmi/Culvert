@@ -180,6 +180,26 @@ import (
 //     the budget made one plane over. Reusing it also avoids a third dialect for
 //     one question (the internal/audit + CHAOS-53 rule).
 //
+// MEASURED AGAINST THE PRE-SEC-BASICAUTH-1 TREE, because "did the withdrawal
+// trade a bound away?" is the first question this file has to answer, and the
+// two axes answer it DIFFERENTLY — recorded as a trade rather than a wash:
+//
+//	axis                                  before this file   now
+//	bcrypt reachable per (IP, username)    UNBOUNDED          5, then locked
+//	                                                          with no bcrypt
+//	limiter entries per unauth request     0                  2 (key-clamped,
+//	                                                          swept in 10 min)
+//
+// So AU-18 is strictly BETTER than the tree this file replaced — an attacker
+// could previously drive unbounded ~80 ms comparisons from an unauthenticated
+// GET, and now gets five per pair per 15 minutes — while AU-17b is a GENUINELY
+// NEW vector that SEC-BASICAUTH-1 introduced and this withdrawal does not
+// close. The trade is two bounded, swept, observable map entries per
+// unauthenticated request in exchange for closing a password-checking oracle
+// and capping bcrypt from unbounded to five. That is the right way round, but
+// it is a trade, and AU-17b stays open until eviction lands rather than being
+// argued away.
+//
 // Both are deliberately left for a change of their own rather than landed as a
 // fourth iteration here. DO NOT REINTRODUCE A REFUSAL KEYED ON THE CLIENT ON
 // THIS PATH: any bound on the admin Basic-auth path must be one that DELAYS or
