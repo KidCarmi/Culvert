@@ -21,14 +21,15 @@ import (
 
 // GET responses conform through the real handlers (read-only).
 func TestConformance_M6_Response(t *testing.T) {
+	spec := loadContract(t)
 	withTempDataDir(t)
 	// TAC trust set (viewer) — public key material only; with no env keys the
 	// handler returns configured=false + an empty list, which must still conform.
-	assertResponseConforms(t, http.MethodGet, "/api/support/tac-trust", apiSupportTACTrust)
+	assertResponseConforms(t, spec, http.MethodGet, "/api/support/tac-trust", apiSupportTACTrust)
 	// Upload posture (viewer) — default not_enabled.
-	assertResponseConforms(t, http.MethodGet, "/api/support/upload/config", apiSupportUploadConfig)
+	assertResponseConforms(t, spec, http.MethodGet, "/api/support/upload/config", apiSupportUploadConfig)
 	// Upload queue (viewer) — empty queue still conforms to UploadQueue.
-	assertResponseConforms(t, http.MethodGet, "/api/support/uploads", apiSupportUploads)
+	assertResponseConforms(t, spec, http.MethodGet, "/api/support/uploads", apiSupportUploads)
 }
 
 // The per-bundle upload consent body validates against the contract (the POST

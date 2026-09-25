@@ -9,6 +9,7 @@ import (
 )
 
 func TestConformance_Response_Slice3n(t *testing.T) {
+	spec := loadContract(t)
 	cases := []struct {
 		name, path string
 		h          http.HandlerFunc
@@ -19,7 +20,7 @@ func TestConformance_Response_Slice3n(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			assertResponseConforms(t, http.MethodGet, c.path, c.h)
+			assertResponseConforms(t, spec, http.MethodGet, c.path, c.h)
 		})
 	}
 }
