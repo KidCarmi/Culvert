@@ -400,6 +400,10 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   `/api/upstream/entries/{id}/credential`) and the CDR enrollment recovery
   endpoints (`/api/cdr/instances/enroll/recover`,
   `/api/cdr/instances/enroll/receipts`).
+- Admin API operations (contract 2.1.0): `GET/PUT /api/traffic/redaction` —
+  the canonical name for the traffic-log destination-privacy posture
+  (terminology governance T-17); `/api/decryption/redaction` remains a
+  fully supported, non-deprecated alias of the same operations.
 
 ### Changed — API contract 1.2.0 → 2.0.0 (BREAKING)
 
