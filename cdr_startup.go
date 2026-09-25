@@ -72,3 +72,14 @@ func loadCDR(cfg cdrStartupConfig, ctx context.Context) {
 	logger.Printf("CDR: enabled — endpoint=%q profile=%q mode=%q %s (Phase 2c: client + policy engine + proxy wiring + admin API live)",
 		sanitizeLog(cdrCfg.Endpoint), sanitizeLog(profile), sanitizeLog(mode), failSafe)
 }
+
+// cdrStartupTimeoutError validates the resolved CDR timeout against the
+// EFFECTIVE boot-time enablement — the resolved (CLI/YAML-merged) flag OR the
+// runtime sentinel, exactly as loadCDR computes it. A timeout that will never
+// take effect (CDR stays disabled) is left unvalidated, matching validateCDR.
+func cdrStartupTimeoutError(cfg cdrStartupConfig, runtimeEnabled bool) string {
+	if !cfg.CDR.Enabled && !runtimeEnabled {
+		return ""
+	}
+	return validCDRTimeoutSec(cfg.CDR.TimeoutSec)
+}
