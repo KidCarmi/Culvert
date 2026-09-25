@@ -34,6 +34,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -190,6 +191,10 @@ type YARAMatcher interface {
 type ThreatChecker interface {
 	Enabled() bool
 	CheckURL(rawURL string) (bool, string)
+	// CheckRequestURL is CheckURL for a URL the caller has already parsed —
+	// same verdict, without the serialise-and-reparse round trip. See the
+	// contract on threatfeed.Feed.CheckRequestURL.
+	CheckRequestURL(u *url.URL) (bool, string)
 	CheckDomain(domain string) (bool, string)
 }
 
@@ -443,6 +448,25 @@ func (ss *Scanner) CheckURL(rawURL string) *Result {
 	return nil
 }
 
+// CheckRequestURL is CheckURL for a URL the request path has already parsed.
+// The verdict is identical; it just does not serialise the URL so the feed can
+// parse it back. This is the form the proxy's per-request call site uses.
+func (ss *Scanner) CheckRequestURL(u *url.URL) *Result {
+	feed := ss.feed
+	if feed == nil || !feed.Enabled() {
+		return nil
+	}
+	if ok, source := feed.CheckRequestURL(u); ok {
+		atomic.AddInt64(&statThreatFeedBlocked, 1)
+		return &Result{
+			Blocked: true,
+			Reason:  "threat intelligence (" + source + ")",
+			Source:  "threatfeed",
+		}
+	}
+	return nil
+}
+
 // CheckDomain checks a bare hostname against the threat feed.
 // Returns nil when no threat is found.
 func (ss *Scanner) CheckDomain(domain string) *Result {
@@ -670,11 +694,66 @@ func scanBodyTimeout() time.Duration {
 // timeout — a saturated webhook queue must not turn the fail-open error
 // path into a scan-timeout block.
 func clamScanError(err error) {
-	atomic.AddInt64(&statClamScanError, 1)
+	total := atomic.AddInt64(&statClamScanError, 1)
+	if degradedLogAllowed(&lastClamErrorLog) {
+		// The cause embeds daemon-supplied response text, so it is sanitised
+		// (CWE-117) rather than only newline-stripped.
+		obs.Warnf("SecurityScan: ClamAV error (%s): %s — forwarding UNSCANNED (fail-open); total %d",
+			clamFailureClass(err), obs.Sanitize(err.Error()), total)
+	}
+	// Same HasSubscriber gate, and the same class/cause split, remoteScanFail
+	// applies to the sidecar leg: this fires once per proxied response for as
+	// long as the daemon is unwell, and in the default posture (no webhooks)
+	// every one of those paid a goroutine, a payload build and a round trip
+	// through the process-wide dedup mutex to deliver an alert to nobody.
+	if !alerts.HasSubscriber("scan_clam_error") {
+		return
+	}
 	go alerts.Fire("scan_clam_error", alerts.Payload{
 		Source: "clamav",
-		Detail: err.Error(),
+		Detail: clamFailureClass(err),
 	})
+}
+
+// clamFailureClasses maps the prefixes internal/clamav produces onto BOUNDED
+// reason classes. Matching this package's OWN constant prefixes is
+// deterministic (unlike matching a platform's syscall text), and an unknown
+// shape folds to one class rather than minting a new one.
+//
+// The bound is load-bearing, not cosmetic: the alert store dedups on
+// "event:detail" within a 30 s window, and every one of these errors wraps a
+// net.OpError whose text embeds the EPHEMERAL LOCAL PORT
+// ("read tcp 127.0.0.1:54012->127.0.0.1:3310: connection reset by peer") or a
+// daemon-supplied response string. Passing err.Error() through made a distinct
+// key per request, so dedup could not suppress a failing daemon by
+// construction and the fan-out landed in the 500-entry retry queue — where a
+// scanner fault evicts real threat_detected alerts (WK-12/RS-5). The full
+// cause is in the rate-limited log line above; the magnitude is the counter.
+var clamFailureClasses = []struct{ prefix, class string }{
+	{"clamav: connect failed: ", "connect_failed"},
+	{"clamav: connect: ", "connect_failed"},
+	{"clamav: scan aborted: ", "scan_aborted"},
+	{"clamav: command write: ", "write_failed"},
+	{"clamav: write chunk: ", "write_failed"},
+	{"clamav: terminate stream: ", "write_failed"},
+	{"clamav: read response: ", "read_failed"},
+	{"clamav: empty response", "empty_response"},
+	{"clamav: unexpected response: ", "protocol_error"},
+	{"clamav: scan error: ", "daemon_scan_error"},
+}
+
+// clamFailureClass returns the bounded class for a ClamAV leg failure.
+func clamFailureClass(err error) string {
+	if err == nil {
+		return "engine_error"
+	}
+	msg := err.Error()
+	for _, c := range clamFailureClasses {
+		if strings.HasPrefix(msg, c.prefix) {
+			return c.class
+		}
+	}
+	return "engine_error"
 }
 
 // clamContextScanner is the optional budget-aware scan capability.
@@ -738,6 +817,7 @@ var (
 	lastLateDiscardLog atomic.Int64
 	lastSaturatedLog   atomic.Int64
 	lastAbandonedLog   atomic.Int64
+	lastClamErrorLog   atomic.Int64
 )
 
 // degradedLogAllowed reports whether enough time has passed since the last log
@@ -829,8 +909,9 @@ func (ss *Scanner) recordClamFailure(ctx context.Context, err error) {
 	case errors.Is(err, clamav.ErrQueueFull):
 		ss.noteClamSaturated(err, "no slot available")
 	default:
+		// The (rate-limited) line carrying the cause is emitted by
+		// clamScanError, beside the counter that carries the magnitude.
 		clamScanError(err)
-		obs.Printf("ERROR SecurityScan: ClamAV error: %s", strings.ReplaceAll(err.Error(), "\n", " "))
 	}
 }
 
