@@ -6180,7 +6180,7 @@ The engine, in `internal/ocsp`:
    No new posture, no second dialect: CHAOS-53's rule for the scan sidecar.
 4. **`certKey` = RFC 6960's CertID fields** (SHA-256 over issuer subject,
    issuer SPKI, plus the serial).
-5. **SSRF**: scheme allow-list + `ssrf.PrivateHost` inline at the call site
+5. **SSRF**: scheme allow-list + `ssrf.PrivateHostContext` inline at the call site
    (so CodeQL sees the guard, per repo convention), a dedicated client whose
    `DialContext` is `ssrf.SafeDialContext` — closing the rebinding window the
    pre-flight lookup leaves open — and `CheckRedirect` refusing outright.
@@ -6203,7 +6203,7 @@ The visibility, in package main: `ocspCoverage()` with a structural gate
 comparing each claim against the `tls.Config` the named path actually builds; a
 `WARNING` from both enable paths; `culvert_ocsp_*` including the
 `culvert_ocsp_path_checked{path}` coverage gauge; `coverage`,
-`uncheckedEnforcingPaths` and the four rejection counters on `GET /api/ocsp`;
+`uncheckedEnforcingPaths` and the six rejection-reason counters on `GET /api/ocsp`;
 two banners on the OCSP panel.
 
 **Emitted only when enabled** — the standing rule (`socks5_health.go`,
