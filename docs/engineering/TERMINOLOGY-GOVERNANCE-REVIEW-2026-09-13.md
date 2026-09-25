@@ -83,7 +83,10 @@ genuine, previously-undocumented mismatches between the legacy GUI (canonical, p
   own frozen spec text verbatim (*"GUI: 'Accept to Draft' ... house confirm stating 'Creates a
   disabled rule in Policy Draft...'"*) — but **"Accept to Policy Draft"** in the new frontend
   (`frontend/src/features/learning/LearningRecommendations.tsx:6,447,475,485`), for the identical
-  admin-only action, the identical `policy_learning.accept` audit event, and the identical API call.
+  admin-only action, the identical `policy_learning.accept` audit event, and the identical API call —
+  wording the frontend's own design contract (`FRONTEND-FEATURE-PARITY.md` FE-V18,
+  `FRONTEND-MIGRATION-PLAN.md:713-718`) also specifies, so this is a naming decision between two
+  recorded contracts, not a mechanical fix.
 - **T-56** (new): PAC's named traffic-steering ruleset is the **"steering profile"** in
   `docs/design/PRODUCT-TERMINOLOGY.md`'s canonical table (*"the fourth distinct 'Profile' concept ...
   always say 'steering profile,' never bare 'profile,' on this screen"*), consistently applied in the
@@ -138,13 +141,13 @@ and one is now partially fixed.
 
 ## Findings
 
-### T-55 — Policy Learning's "Accept to Draft" action has a different label in the new admin frontend (new — not fixed this pass)
+### T-55 — Policy Learning's "Accept to Draft" action has a different label in the new admin frontend (new — a NAMING DECISION, not a mechanical fix; not fixed this pass)
 
 - **Business concept:** the admin-only action that translates an accepted Policy Learning
   recommendation into a disabled rule in the shared Policy Draft (`policy_learning_accept.go`'s
   `plTranslateRecommendation`; audit event `policy_learning.accept`).
 - **Current names:**
-  - Legacy GUI (canonical, matches CLAUDE.md's own frozen M5B spec text): **"Accept to Draft"** — the
+  - Legacy GUI (matches CLAUDE.md's M5B spec text): **"Accept to Draft"** — the
     button (`static/index.html:7030`), the confirm-dialog title and confirm-button label
     (`static/index.html:7044-7045`).
   - New frontend: **"Accept to Policy Draft"** — the button
@@ -152,27 +155,29 @@ and one is now partially fixed.
     (`:475`) and confirm-button label (`:485`), and the file's own top-of-file comment, which asserts
     this exact wording is a deliberate choice (`:6`, *"Accept — 'Accept to Policy Draft' (never
     Apply/Enforce/Allow/Deploy)"*).
-- **Why the current naming is problematic:** the comment's own parenthetical shows what it was
-  actually guarding against — the wrong *verb* (never implying the rule is applied, enforced,
-  allowed, or deployed) — not a deliberate choice of "Policy Draft" over "Draft" as the object noun.
-  Nothing in the new frontend's source, CLAUDE.md, or any prior governance report records a reason for
-  that second divergence. The result: the identical button, calling the identical API with the
+  - The new frontend's own design contract, at the audited snapshot, ALSO specifies **"Accept to Policy
+    Draft"**: `docs/design/FRONTEND-FEATURE-PARITY.md:40` (row FE-V18) and
+    `docs/design/FRONTEND-MIGRATION-PLAN.md:713-718` both name it and describe it as preserving the M5B
+    contract. (An earlier draft of this report said nothing recorded a reason for the frontend wording;
+    that was wrong — found in review.)
+- **Why the current naming is problematic:** two recorded contracts disagree about one action —
+  CLAUDE.md's M5B text and the legacy GUI say "Accept to Draft", while the frontend's design documents
+  and implementation say "Accept to Policy Draft". The result: the identical button, calling the identical API with the
   identical audit event, reads differently depending on which of Culvert's two coexisting admin UIs an
   administrator or a support engineer happens to be looking at — exactly the kind of mismatch that
   makes a screenshot in one doc look wrong against the other UI, or makes a support script written
   against one UI's wording confusing when read against the other.
-- **Why the new name is better:** "Accept to Draft" is shorter, is the string CLAUDE.md's own frozen
-  M5B specification already fixes as canonical, and loses no meaning — "Draft" on this screen already
-  and unambiguously means the Policy Draft (the confirm dialog's body text, unchanged either way,
-  already spells out "Creates a disabled rule in Policy Draft"). Converging on it needs no
-  reinterpretation of user-facing meaning, only three string literals changed in one file.
-- **Affected code:** `frontend/src/features/learning/LearningRecommendations.tsx` (3 UI strings + 1
-  comment).
+- **Recommended resolution:** decide ONE canonical label first, then change the losing side AND its
+  written contract in the same change — never the implementation alone. Both options are defensible:
+  "Accept to Draft" is shorter and is the CLAUDE.md/legacy wording; "Accept to Policy Draft" names the
+  object explicitly and is what the frontend contract specifies. This report does not pre-decide it.
+- **Affected code:** whichever UI loses — `frontend/src/features/learning/LearningRecommendations.tsx`
+  (3 UI strings + 1 comment) or `static/index.html:7030,7044-7045`.
 - **Affected API:** none — no field, route, or payload shape changes.
 - **Affected GUI:** the new frontend's Policy Learning recommendations screen (button label, confirm
   dialog title, confirm button label).
-- **Affected Documentation:** none required (CLAUDE.md and the operator doc already say "Accept to
-  Draft").
+- **Affected Documentation:** the losing side's contract — either `docs/design/FRONTEND-FEATURE-PARITY.md`
+  FE-V18 + `docs/design/FRONTEND-MIGRATION-PLAN.md:713-718`, or CLAUDE.md's M5B text and the operator doc.
 - **Affected Configuration:** none.
 - **Migration Complexity:** Trivial in code (3 string literals); Small once the required
   `frontend/dist` rebuild + its own verification (build, lint, the existing Playwright/Vitest
@@ -287,7 +292,7 @@ added for the new findings:
 | Medium | T-12 (carried over) | Alias Maintenance Agent wire routes `/v1/upgrades/*` → `/v1/updates/*` | Medium | Medium |
 | Low-Medium | T-54 (carried over, still unmerged) | Rename OCSP admin JSON fields `malformedResponseTotal`→`malformedTotal` and `staleResponseTotal`→`staleTotal`, and Go accessor `UnknownTotal`→`UnknownStatusTotal`; regenerate the OpenAPI bundle; update GUI references; resolve `responder_blocked`'s metric-family scope mismatch | Low | Small |
 | Low-Medium | **T-56 (new)** | Decide "steering profile" vs. "PAC profile" as the going-forward canonical term for the new frontend's PAC screens; converge the losing surface (new frontend, or legacy GUI + `PRODUCT-TERMINOLOGY.md`) onto the winner. Doc half already fixed. | Low | Small |
-| Low | **T-55 (new)** | Change `LearningRecommendations.tsx`'s "Accept to Policy Draft" (3 strings + 1 comment) to "Accept to Draft" to match the legacy GUI and CLAUDE.md's frozen spec; rebuild `frontend/dist` | None | Small |
+| Low | **T-55 (new)** | Naming decision: pick one of "Accept to Draft" (legacy GUI + CLAUDE.md M5B text) or "Accept to Policy Draft" (frontend implementation + FRONTEND-FEATURE-PARITY FE-V18 + FRONTEND-MIGRATION-PLAN), then change the losing UI and its written contract together (rebuild `frontend/dist` if the frontend loses) | None | Small (after the decision) |
 | Low | T-34 (carried over) | Standardize `apiURLCatFeedStatus`'s SaaS block field names on the F3b-4 status endpoint's vocabulary | Low | Small |
 | Low | T-13 residual (carried over) | Decide whether README/enterprise-doc "TLS Inspection" branding should unify with in-app "SSL" | Low | Small |
 
