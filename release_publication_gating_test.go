@@ -171,11 +171,27 @@ func TestPublicationGating_DockerPushesNoReleaseChannel(t *testing.T) {
 		t.Errorf("the candidate tag promote-image binds on must be run-scoped (candidate-${GITHUB_RUN_ID}); got:\n%s", chanStep.Run)
 	}
 
-	// Belt and braces: no step in the build job may repoint tags itself. The
-	// removed "Apply version tag" step did exactly this.
+	// Belt and braces: no step in the build job may repoint a PUBLIC tag. The
+	// removed "Apply version tag" step did exactly this. The one `imagetools
+	// create` allowed here re-creates this run's own candidate tag on a REUSED
+	// digest (build-once: a main re-run reuses the commit's candidate and needs
+	// its run-scoped promotion authority to name it) — every `--tag` target must
+	// be exactly that non-channel reference.
+	createTagRE := regexp.MustCompile(`--tag\s+("?[^\s"]+"?)`)
 	for i := range docker.Steps {
-		if strings.Contains(docker.Steps[i].Run, "imagetools create") {
-			t.Errorf("docker step %q runs `imagetools create` — tag promotion must live in promote-image, behind the predicate", docker.Steps[i].Name)
+		st := &docker.Steps[i]
+		if !strings.Contains(st.Run, "imagetools create") {
+			continue
+		}
+		targets := createTagRE.FindAllStringSubmatch(st.Run, -1)
+		if len(targets) == 0 || st.Env["CANDIDATE"] != "${{ steps.chan.outputs.candidate_tag }}" {
+			t.Errorf("docker step %q runs `imagetools create` without a provable non-channel target — tag promotion must live in promote-image, behind the predicate", st.Name)
+			continue
+		}
+		for _, m := range targets {
+			if m[1] != `"${IMAGE}:${CANDIDATE}"` {
+				t.Errorf("docker step %q writes tag %s — only this run's candidate tag may be written before the verdict", st.Name, m[1])
+			}
 		}
 	}
 }
