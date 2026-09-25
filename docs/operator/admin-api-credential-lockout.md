@@ -54,7 +54,7 @@ A request with **no** `Authorization` header never consults the lockout and
 never creates a key, so the login overlay's anonymous `GET /api/auth/status`
 poll is unaffected.
 
-## The per-client failure budget (SEC-BASICAUTH-2)
+## The per-client failure budget (SEC-BASICAUTH-2 / -3)
 
 Recording a failure creates limiter state, and the state is keyed by a username
 the *caller* chooses. On a public GET with no rate limit that is a memory
@@ -62,14 +62,30 @@ amplifier, so a client that has already burned its failure budget in the current
 window is **refused before its credentials are verified** — the same
 `lockout.Burst` / `lockout.RateWindow` budget the mutating admin API uses.
 
-Two properties matter operationally:
+The admission and the charge are **one atomic step** (`Reserve`). They have to
+be: the first form read a budget probe and charged after verification, which
+bounded nothing when several requests arrived at once — every one of them saw
+the same not-yet-incremented count and passed. Against the real admin username
+that meant an unbounded number of *simultaneous* bcrypt comparisons from a
+single IP, which is the CPU bound this page's "costs no bcrypt" guarantee is
+about.
 
-- **Only failures are charged.** A client with valid credentials is never
-  budgeted, however many calls it makes.
+Three properties matter operationally:
+
+- **Only failures are charged.** A client with valid credentials has its charge
+  released as soon as verification succeeds, so it is never budgeted for work it
+  is not doing, however many calls it makes.
 - **An over-budget client is refused identically for a right and a wrong
   password**, so the refusal reveals nothing about the credential — and, because
   the refusal happens *before* verification, an attacker cannot use it to keep
   guessing without the account ever locking.
+- **The charge is held for the duration of one verification**, so the effective
+  rule is *failures + in-flight attempts < 60 per client per minute*. A client
+  that issues more than 60 **simultaneous** Basic-Auth requests can therefore
+  see some refused with `429` even when its credentials are correct. That is
+  expected: the refusal is retryable, carries `Retry-After`, and is never
+  recorded as a failure, so it cannot lock the account. A client that needs more
+  parallelism should use a session cookie rather than Basic Auth on every call.
 
 Watch `culvert_login_limiter_entries` to confirm the bound is holding: it is the
 live count of tier-1 and tier-2 entries the lockout is carrying. Sustained

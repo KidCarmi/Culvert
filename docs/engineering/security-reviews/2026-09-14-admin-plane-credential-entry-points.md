@@ -235,6 +235,128 @@ caught the flaw above), `TestSecBasicAuth2_Control_ValidClientIsNeverBudgeted`.
 
 ---
 
+## 1b. SEC-BASICAUTH-3 — the §1a budget was a read-then-act pair, so it bounded concurrency, not rate
+
+| | |
+| --- | --- |
+| **Severity** | MEDIUM (reachable; CWE-770 / A04:2021) |
+| **Found by** | Codex review of `53adfff`, PR #1399 (round 2) |
+| **Status** | Fixed |
+
+### The defect
+
+`§1a`'s gate was `Over()` (a read-only budget probe) before verification and
+`Allow()` (the charge) after it. Each call is mutex-protected; the **sequence**
+between them is not. A synchronised cohort of requests from one IP therefore all
+observe the same not-yet-incremented count, all pass, and all proceed to
+`RecordFailure`. The number admitted per window is the caller's **concurrency**,
+not `Burst`.
+
+### The reviewer named the wrong impact, and measuring it found the real one
+
+The review's stated consequence was unbounded limiter-state growth ("two lockout
+entries per request despite the advertised 60-entry budget"). That is mostly
+**not reachable**, and the reason is worth recording:
+
+| Verification gap | Admitted from a 500-request cohort | Limiter entries |
+| --- | --- | --- |
+| ~100 ns — unknown username, no bcrypt | **63** | 126 |
+| 1 ms | 500 | 1000 |
+| ~67 ms — configured username, real bcrypt | **500** | 1000 |
+
+State growth requires **distinct** usernames; distinct usernames are **unknown**
+usernames; and an unknown username verifies in ~100 ns (the measurement from
+§1a). So the probe→charge window barely exists on exactly the path that grows
+state: 63 admitted, i.e. `Burst`+3, essentially the advertised bound.
+
+The reachable damage is the other axis, and it is worse than the one reported.
+Against the **real admin username** with wrong passwords, the gap is a full
+bcrypt, so all 500 concurrent attempts were admitted and **all 500 ran bcrypt
+concurrently from one IP** — measured 3.49 s for the racing shape against 1.11 s
+for the bounded one, on a plane with no `internal/authcost` governor. That
+defeats load-bearing rule (1) of §1 — *a locked attempt costs no bcrypt* — which
+is the CPU-exhaustion half of the original finding. Note the same TOCTOU applies
+to `loginLimiter.Check` itself; on `apiAuthLogin` the mutating-POST limiter caps
+the arrival rate, and on these public GETs this budget was the only cap.
+
+### The reviewer's prescribed fix would have reopened §1a
+
+The review asked to "make admission and reservation atomic before verification,
+then refund the reservation when verification succeeds." The first half is
+right. Taken literally, the whole is not: the **refusal** decision necessarily
+precedes knowing whether the credential is valid, so charging every request
+throttles a legitimate client on work it is not doing — precisely the defect
+§1a's rule (2) closed by charging failures only — and a refund cannot un-refuse
+a request that already got a 429.
+
+The shape that satisfies both constraints is a reservation **released on
+success**: admit-and-charge atomically, hold the charge only for the duration of
+the verification, release it if the credential turns out valid, keep it if it
+does not.
+
+### Fix
+
+`internal/lockout` gains `Reserve` / `Release` / `Keep`; `Over` is **deleted**
+rather than left available, because an unused read-then-act primitive on a
+security path is the footgun that produced this finding. Two details are
+load-bearing:
+
+- **A refused `Reserve` does not increment.** Charging on refusal would let a
+  flood push the window out for the attempts behind it and make the counter
+  unreadable.
+- **`Release` matches the reservation's `windowStart`.** A charge whose window
+  rolled belongs to a window that no longer exists; crediting the current one
+  would return an attempt nobody made and silently widen the budget.
+
+`Keep()` disarms a deferred `Release`, so the call site can `defer` it for panic
+safety (a verification that panicked produced no failure to count) and still
+commit the charge on the failure path.
+
+### Residual risk — recorded, and pinned as a fact
+
+The charge is held across verification, so the admission rule is *failures +
+in-flight < `Burst`*. A client issuing more than 60 **simultaneous** Basic-Auth
+requests can have some refused with `429` even with correct credentials
+(measured: 180 concurrent valid attempts → 60 × `200`, 120 × `429`).
+
+This is unavoidable given the requirement that refusal precede verification, and
+it is acceptable because the refusal is retryable, carries `Retry-After`, and is
+**never recorded as a failure** — so it cannot feed the account lock. That last
+property is asserted, not assumed: the residual test also checks that a
+valid-credential burst leaves the client unlocked, which is the lockout-as-DoS
+direction the two-tier design exists to prevent.
+
+### The transferable rule
+
+> A gate placed ahead of the work must take its charge in the same critical
+> section that admits, or it measures the caller's concurrency instead of the
+> caller's rate.
+
+And, separately: **a reported impact is a hypothesis.** Measuring this one moved
+the severity from "memory amplifier" (largely self-bounding) to "the CPU bound
+was not enforced" (the more serious half of the original finding). The fix would
+have been the same; the *understanding*, and therefore what the tests assert,
+would not.
+
+### Tests
+
+`internal/lockout/lockout_reserve_test.go` (9): atomicity under a 400-goroutine
+cohort, refusal-does-not-charge, balanced reserve/release, idempotent and
+zero-safe release, `Keep` surviving a deferred `Release`, the rolled-window
+release, rate-not-cap, per-client isolation, and a mixed-traffic run under
+`-race`.
+
+`ui_basicauth_lockout_test.go`: `TestSecBasicAuth3_ConcurrentCohortCannotOutrunTheBudget`
+(defect gate — **verified failing at 200/200 reached verification** against the
+reintroduced `Over`+`Allow` pair),
+`TestSecBasicAuth3_Control_SerialValidClientIsNeverRefused` (the control that
+rejects the reviewer's literal prescription),
+`TestSecBasicAuth3_Control_OrdinaryLockoutStillTrips` (the cheapest way to pass
+the defect gate is to refuse everything, which would delete the lockout), and
+`TestSecBasicAuth3_ResidualConcurrentValidClientCanBeRefused`.
+
+---
+
 ## 2. SEC-PUBLICPATH-1 — a public-allowlist prefix pre-authorised routes that do not exist
 
 | | |

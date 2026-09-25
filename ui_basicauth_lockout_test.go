@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -408,4 +409,161 @@ func TestSecBasicAuth2_Control_ValidClientIsNeverBudgeted(t *testing.T) {
 	if got := basicAuthFailShed.Load(); got != 0 {
 		t.Fatalf("a client that never failed was charged %d shed failures", got)
 	}
+}
+
+// ---------------------------------------------------------------------------
+// SEC-BASICAUTH-3 — the budget gate must be ATOMIC, or it bounds nothing
+// ---------------------------------------------------------------------------
+//
+// Codex review of 53adfff, PR #1399. The SEC-BASICAUTH-2 gate above read a
+// budget probe (Over) and charged after the work (Allow). Each half was
+// mutex-protected; the SEQUENCE was not, so a synchronised cohort all observed
+// the same not-yet-incremented count and all passed.
+//
+// The reviewer named the impact as unbounded limiter-state growth. Measured, it
+// is NOT mainly that, and the correction is the useful part: state growth needs
+// DISTINCT usernames, distinct usernames are unknown usernames, and an unknown
+// username verifies in ~100ns, which leaves almost no window — a 500-request
+// cohort admitted 63 (Burst+3). The reachable damage is on the other axis. With
+// the REAL admin username and wrong passwords the gap is a full bcrypt, so all
+// 500 were admitted and all 500 ran bcrypt concurrently from one IP — defeating
+// the CPU bound that is SEC-BASICAUTH-1's whole first load-bearing property ("a
+// locked attempt costs no bcrypt"), on a plane with no authcost governor.
+//
+// So these gates are written on the axis that discriminates: how many concurrent
+// attempts reach verification at all.
+
+// TestSecBasicAuth3_ConcurrentCohortCannotOutrunTheBudget is the DEFECT GATE.
+// Verified failing against the reintroduced probe-then-charge shape, where every
+// request in the cohort reaches verification.
+func TestSecBasicAuth3_ConcurrentCohortCannotOutrunTheBudget(t *testing.T) {
+	basicAuthTestCfg(t, "admin", "correct-horse-battery")
+
+	const ip = "198.51.100.40"
+	const cohort = 200
+
+	var (
+		wg      sync.WaitGroup
+		start   = make(chan struct{})
+		mu      sync.Mutex
+		refused int // 429: never reached verification
+		reached int // anything else: the credential WAS verified
+	)
+	for i := 0; i < cohort; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start // race the gate as one cohort
+			// The REAL username with a wrong password: this is the shape whose
+			// verification is a full bcrypt, i.e. the wide window.
+			code, _ := authStatusProbe(t, ip, "admin", "guess")
+			mu.Lock()
+			if code == http.StatusTooManyRequests {
+				refused++
+			} else {
+				reached++
+			}
+			mu.Unlock()
+		}()
+	}
+	close(start)
+	wg.Wait()
+
+	// Admission and charge are one atomic step, so at most one window's budget
+	// of attempts can reach verification however many arrive at once.
+	if reached > apiRateBurst {
+		t.Fatalf("%d of %d concurrent attempts reached credential verification, want <= %d — "+
+			"the budget is a read-then-act pair and bounds nothing under concurrency: one IP can drive "+
+			"unbounded concurrent bcrypt on the admin plane (CWE-770)", reached, cohort, apiRateBurst)
+	}
+	if refused == 0 {
+		t.Fatalf("no attempt was refused out of %d — the gate did not engage at all", cohort)
+	}
+}
+
+// TestSecBasicAuth3_Control_SerialValidClientIsNeverRefused is the CONTROL that
+// caught the reviewer's own prescription. "Charge before verification, refund on
+// success" makes the REFUSAL decision before the credential is known to be
+// valid, so a legitimate client is throttled on work it is not doing — the exact
+// defect SEC-BASICAUTH-2 closed by charging failures only. A refund cannot help
+// a request already refused. Releasing the reservation on success is what keeps
+// the gate ahead of the work without billing the wrong callers.
+func TestSecBasicAuth3_Control_SerialValidClientIsNeverRefused(t *testing.T) {
+	basicAuthTestCfg(t, "admin", "correct-horse-battery")
+
+	const ip = "198.51.100.41"
+	// Far more than one window's budget: every reservation must be released.
+	for i := 0; i < apiRateBurst*4; i++ {
+		code, loggedIn := authStatusProbe(t, ip, "admin", "correct-horse-battery")
+		if code == http.StatusTooManyRequests || !loggedIn {
+			t.Fatalf("valid call %d of %d was refused (code %d, loggedIn %v) — a client with correct "+
+				"credentials must never be charged the failure budget", i+1, apiRateBurst*4, code, loggedIn)
+		}
+	}
+	if got := basicAuthFailShed.Load(); got != 0 {
+		t.Fatalf("a client that never failed was shed %d times", got)
+	}
+}
+
+// TestSecBasicAuth3_Control_OrdinaryLockoutStillTrips is the CONTROL that the
+// atomic gate did not neuter SEC-BASICAUTH-1. The cheapest way to pass the
+// defect gate above is to refuse everything, which would delete the lockout.
+func TestSecBasicAuth3_Control_OrdinaryLockoutStillTrips(t *testing.T) {
+	basicAuthTestCfg(t, "admin", "correct-horse-battery")
+
+	const ip = "198.51.100.42"
+	for i := 0; i < lockoutMaxAttempts; i++ {
+		if code := basicAuthProbe(t, ip, "admin", "guess"); code != http.StatusUnauthorized {
+			t.Fatalf("attempt %d: code %d, want 401 — the budget must not pre-empt the lockout", i+1, code)
+		}
+	}
+	if code := basicAuthProbe(t, ip, "admin", "correct-horse-battery"); code != http.StatusTooManyRequests {
+		t.Fatalf("after %d failures the correct password returned %d, want 429 — the lockout is gone",
+			lockoutMaxAttempts, code)
+	}
+}
+
+// TestSecBasicAuth3_ResidualConcurrentValidClientCanBeRefused pins a FACT, not a
+// wish, the way TestNormalizeHostStrict_IsNotALogSanitiser does.
+//
+// A reservation is held for the duration of verification, so the admission rule
+// is "failures + in-flight < Burst" and a client issuing more than Burst
+// SIMULTANEOUS attempts can have some refused even with correct credentials.
+// That residual is unavoidable given the load-bearing requirement that the
+// refusal precede verification — you cannot know a credential is valid without
+// verifying it. It is acceptable because the refusal is a retryable 429 with
+// Retry-After and is NEVER recorded as a failure, so it cannot feed the account
+// lock. Do not "fix" this by moving the gate after verification: that reopens
+// SEC-BASICAUTH-2 and the weakened-lock flaw its first draft had.
+func TestSecBasicAuth3_ResidualConcurrentValidClientCanBeRefused(t *testing.T) {
+	basicAuthTestCfg(t, "admin", "correct-horse-battery")
+
+	const ip = "198.51.100.43"
+	var (
+		wg    sync.WaitGroup
+		start = make(chan struct{})
+		mu    sync.Mutex
+		codes = map[int]int{}
+	)
+	for i := 0; i < apiRateBurst*3; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			code, _ := authStatusProbe(t, ip, "admin", "correct-horse-battery")
+			mu.Lock()
+			codes[code]++
+			mu.Unlock()
+		}()
+	}
+	close(start)
+	wg.Wait()
+
+	// The point of the gate: a refused VALID attempt must leave no failure
+	// behind, so it can never contribute to locking the real operator out.
+	if code, secs := loginLimiter.Check(ip, "admin"); code {
+		t.Fatalf("a burst of VALID credentials locked the client out for %ds — a refused reservation "+
+			"must never be recorded as a failure (lockout-as-DoS)", secs)
+	}
+	t.Logf("residual (recorded, not a defect): %d concurrent valid attempts -> %v", apiRateBurst*3, codes)
 }

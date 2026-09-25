@@ -45,6 +45,22 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   an over-budget one is refused identically for a right and a wrong password.
   Surfaced as `culvert_admin_basic_auth_fail_shed_total` and
   `culvert_login_limiter_entries`.
+- That budget was itself a read-then-act pair, so it bounded concurrency rather
+  than rate (SEC-BASICAUTH-3, found in review). The probe and the charge were
+  each mutex-safe but the sequence between them was not, so every request in a
+  simultaneous cohort saw the same un-incremented count and passed. Measuring it
+  moved the impact: limiter-state growth is largely self-bounding (state growth
+  needs distinct usernames, which verify in ~100 ns, so a 500-request cohort
+  admitted 63), but against the *real* admin username the gap is a full bcrypt
+  and all 500 were admitted — an unbounded number of simultaneous bcrypt
+  comparisons from one IP, defeating the "a locked attempt costs no bcrypt"
+  guarantee that is the CPU-exhaustion half of the original finding. Admission
+  and charge are now one atomic step (`lockout.Reserve`), with the charge
+  released when verification succeeds so a valid client is still never billed;
+  the read-only probe is removed rather than left available. A client issuing
+  more than 60 *simultaneous* Basic-Auth requests can now see some refused with
+  `429`; the refusal is retryable and is never recorded as a failure, so it
+  cannot lock the account.
 - Removed a public-allowlist prefix that pre-authorised routes nobody had
   written (SEC-PUBLICPATH-1). `isPublicUIAuthPath` matched any path under
   `/api/auth/totp`, and no such route exists: TOTP is verified inside

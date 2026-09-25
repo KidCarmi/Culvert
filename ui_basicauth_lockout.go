@@ -249,11 +249,18 @@ func verifyUIBasicAuth(r *http.Request, user, pass string) basicAuthResult {
 		return basicAuthResult{Outcome: basicAuthLockedOut, RetryAfter: secs}
 	}
 
-	// SEC-BASICAUTH-2: a client that has already burned its failure budget in
+	// SEC-BASICAUTH-2/3: a client that has already burned its failure budget in
 	// this window is REFUSED HERE — before verification, exactly like the
 	// lockout above — and the reasons it must be here and not after are the
 	// whole finding. See the file header.
-	if basicAuthFailLimiter.Over(clientIP) {
+	//
+	// The admission and the charge are ONE atomic step (SEC-BASICAUTH-3). The
+	// first shape of this gate read a budget probe and charged after the work,
+	// which bounded nothing under concurrency: every request in a synchronised
+	// cohort saw the same not-yet-incremented count and passed, so the attempts
+	// admitted per window were the attacker's concurrency rather than Burst.
+	res, ok := basicAuthFailLimiter.Reserve(clientIP)
+	if !ok {
 		basicAuthFailShed.Add(1)
 		if noteBasicAuthShedLog() {
 			logWarnf("Auth: refused admin API basic-auth from %s — over the per-client credential-failure budget; %d refused since boot",
@@ -261,9 +268,22 @@ func verifyUIBasicAuth(r *http.Request, user, pass string) basicAuthResult {
 		}
 		return basicAuthResult{Outcome: basicAuthLockedOut, RetryAfter: int(lockout.RateWindow.Seconds())}
 	}
+	// A reservation outlives a panic inside verification; releasing it there is
+	// correct, because a verification that did not complete produced no failure
+	// for the budget to bound. Release is idempotent, so the success path below
+	// can release early and this cannot double-credit.
+	defer basicAuthFailLimiter.Release(&res)
 
 	role, valid := cfg.VerifyUIUser(user, pass)
 	if valid {
+		// RELEASE the charge: the budget bounds credential FAILURES, so a valid
+		// client must not be billed for work it is not doing. Holding the
+		// charge only for the duration of the verification is what lets the gate
+		// sit ahead of the work without throttling legitimate callers — the
+		// residual is that more than Burst SIMULTANEOUS in-flight attempts from
+		// one client can be refused, which is a retryable 429 and never a
+		// recorded failure, so it cannot feed the account lock.
+		basicAuthFailLimiter.Release(&res)
 		// Clears the tier-1 pair and marks this IP trusted for the user, so a
 		// legitimate client making many API calls is never throttled and stays
 		// exempt from the tier-2 account lock an attacker flood can trip.
@@ -271,9 +291,11 @@ func verifyUIBasicAuth(r *http.Request, user, pass string) basicAuthResult {
 		return basicAuthResult{Outcome: basicAuthValid, Role: role}
 	}
 
-	// Charge the budget on the FAILURE only, so a valid client is never
-	// throttled by a bound on work it is not doing.
-	basicAuthFailLimiter.Allow(clientIP)
+	// KEEP the charge on the failure path — the reservation taken above IS the
+	// charge, so there is deliberately no second increment here. The deferred
+	// Release is inert once this function returns without releasing, because a
+	// failure is exactly what the budget exists to count.
+	res.Keep()
 
 	if loginLimiter.RecordFailure(clientIP, user) {
 		// ONE entry per trip (RecordFailure reports only the transition), with
