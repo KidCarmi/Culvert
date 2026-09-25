@@ -6156,7 +6156,7 @@ The visibility, in package main: `ocspCoverage()` with a structural gate
 comparing each claim against the `tls.Config` the named path actually builds; a
 `WARNING` from both enable paths; `culvert_ocsp_*` including the
 `culvert_ocsp_path_checked{path}` coverage gauge; `coverage`,
-`uncheckedEnforcingPaths` and the four rejection counters on `GET /api/ocsp`;
+`uncheckedEnforcingPaths` and the six rejection-reason counters on `GET /api/ocsp`;
 two banners on the OCSP panel.
 
 **Emitted only when enabled** — the standing rule (`socks5_health.go`,

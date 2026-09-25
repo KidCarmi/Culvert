@@ -262,7 +262,10 @@ this report merged rather than after.
 - **Affected GUI:** `static/index.html:17515` (read the new JSON keys) AND the OCSP panel's aggregate
   (`:4485,17514-17517`), which today adds `responderBlockedTotal` into "Responses rejected" — once the
   split lands it must be shown separately (e.g. "Responders refused"), or the GUI keeps the same
-  mismatch the metric split removes.
+  mismatch the metric split removes. ALSO the red `ocsp-borrowed-banner` (`:4490-4491,17526-17527`),
+  which sums `notForCertificateTotal` and `unauthorizedResponderTotal` into one "nobody was authorized …
+  not a broken responder" warning (Part 2 item 5): show the two counters separately, or use neutral
+  wording that matches the operator runbook's description of each reason.
 - **Affected Documentation:** `docs/operator/ocsp-revocation-checking.md` §2 — the rejection-reasons table
   was missing rows for `malformed` and `unauthorized_responder`. **Resolved independently on `main`**, not
   by this report: an earlier draft of this PR added the two rows, but `main` landed them first (with more
@@ -325,7 +328,7 @@ added for the new finding:
 | Medium | T-9 (carried over) | Rename `exportedAt` → `capturedAt` with read-compat alias | Low-medium | Medium |
 | Medium | T-11 (carried over) | Reconcile `allow`/`deny` default-action vocabulary vs. the four-value `PolicyAction` enum | Low / Medium-large | Small / Medium-large |
 | Medium | T-12 (carried over) | Alias Maintenance Agent wire routes `/v1/upgrades/*` → `/v1/updates/*` | Medium | Medium |
-| Low-Medium | **T-54 (new)** | Add OCSP admin JSON fields `malformedTotal` and `staleTotal` alongside `malformedResponseTotal` / `staleResponseTotal` and deprecate the old names (removal only via the API-versioning MAJOR exception — a plain rename is breaking); rename Go accessor `UnknownTotal`→`UnknownStatusTotal`; regenerate the OpenAPI bundle; update the two GUI references; move `responder_blocked` out of the `response_rejected` family into its own series with a compatibility window (a HELP-text change alone does not fix it), and carry that split through the GUI aggregate and the operator runbook's table; follow `API-DEPRECATION-POLICY.md` in full and bump the MINOR contract version. (Missing doc-table rows already resolved on `main`; the runbook update for the `responder_blocked` split is part of this item.) | Medium (stable API field — additive only) | Small |
+| Low-Medium | **T-54 (new)** | Add OCSP admin JSON fields `malformedTotal` and `staleTotal` alongside `malformedResponseTotal` / `staleResponseTotal` and deprecate the old names (removal only via the API-versioning MAJOR exception — a plain rename is breaking); rename Go accessor `UnknownTotal`→`UnknownStatusTotal`; regenerate the OpenAPI bundle; update the two GUI references; move `responder_blocked` out of the `response_rejected` family into its own series with a compatibility window (a HELP-text change alone does not fix it), and carry that split through the GUI aggregate and the operator runbook's table; separate or neutralise the `ocsp-borrowed-banner` that conflates `not_for_certificate` with `unauthorized_responder`; follow `API-DEPRECATION-POLICY.md` in full and bump the MINOR contract version. (Missing doc-table rows already resolved on `main`; the runbook update for the `responder_blocked` split is part of this item.) | Medium (stable API field — additive only) | Small |
 | Low | T-34 (carried over) | Standardize `apiURLCatFeedStatus`'s SaaS block field names on the F3b-4 status endpoint's vocabulary | Low | Small |
 | Low | T-13 residual (carried over) | Decide whether README/enterprise-doc "TLS Inspection" branding should unify with in-app "SSL" | Low | Small |
 
@@ -349,12 +352,17 @@ Controlled Canary (ADR-0035) — was checked in depth across code, API, and all 
 (including `CANARY-READINESS-MATRIX.md`'s new row 4a, which reinforces rather than contradicts the
 conclusion) and found internally consistent throughout: the Canary/First-Canary/Review trio, the
 Tool-Trust/Tool-Approval/Reviewed-Operation trio, and the Live-Gate/Live-Execution/Read-First trio are each
-genuinely distinct concepts used consistently, not drift. The five other new/changed surfaces in the
+genuinely distinct concepts used consistently, not drift. The six other new/changed surfaces in the
 window (`loginOversizeRejected`, expanded `trust_forwarded_headers` documentation, `CHANGELOG.md`'s
-rate-limit-exemption entry, `docker-compose.yml`'s YARA-directory fix, and `CHANGELOG.md`'s CHAOS-65 OCSP
-entries) were all checked directly and are clean — the YARA one is a genuine, already-fixed, now
-test-pinned pre-existing defect, not new drift, and the OCSP entries carry one pre-existing GUI-label
-observation recorded in Part 2 item 5.
+rate-limit-exemption entry, `docker-compose.yml`'s YARA-directory fix, `CHANGELOG.md`'s CHAOS-65 OCSP
+entries, and the CHAOS-65 section added to `roadmap/CHAOS-ENGINEERING-REVIEW.md`) were all checked
+directly. The YARA one is a genuine, already-fixed, now test-pinned pre-existing defect, not new drift.
+The OCSP entries carry the drift recorded in Part 2 item 5 (the `proxy.ocsp_check` key and the
+conflated banner, both fixed or queued under T-54). The roadmap section (found in review) said
+`GET /api/ocsp` exposes "four rejection counters" (`roadmap/CHAOS-ENGINEERING-REVIEW.md:6159`) when
+`ui_security.go:1841-1846` exposes six rejection-reason counters; that line is corrected in this PR. Its
+description of the red banner as the signal that "something is answering with borrowed responses" is the
+same conflation T-54 now covers, so it is fixed with T-54's GUI work rather than here.
 The carry-over backlog grew from thirteen to fourteen entries (T-54 added, now covering three identifiers
 plus the metric-family correction); T-39 was re-confirmed unchanged. No cosmetic or preference-driven renames are proposed. **Process note, recorded rather than
 smoothed over, across every correction round:** this report's own first draft initially missed the
