@@ -726,5 +726,5 @@ var rollbackMarkersCoveredByRegistry = map[string]string{
 // no durable setting at all, so there is nothing a rollback could restore.
 var rollbackMarkersRuntimeOnly = map[string]string{
 	"ui_certificates.go:apiCACacheClear": "flushes the in-memory leaf-certificate cache",
-	"ha.go:apiClusterHAEnable":       "HA leader-election state is ephemeral",
+	"ha.go:apiClusterHAEnable":           "HA leader-election state is ephemeral",
 }
