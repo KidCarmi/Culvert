@@ -306,21 +306,30 @@ func fetchSAMLMetadataOverNetwork(raw string) ([]byte, error) {
 		return nil, fmt.Errorf("metadata URL must use http or https scheme")
 	}
 	// The PRE-FLIGHT half of the guard, inline per the repo's SSRF convention
-	// so CodeQL can see a barrier on the host and not just on the scheme.
+	// (url.Parse + scheme check + a private-host check in the same function as
+	// the request). Note what this comment does NOT claim: the check is spelled
+	// isPrivateHostContext rather than isPrivateHost, and whether CodeQL models
+	// that wrapper as a barrier is not established — the go/request-forgery
+	// alert on this file is open and is answered on the PR, not here. The
+	// bounded form is mandatory (below) and an unbounded one would be traded
+	// for a static-analysis result, which is the wrong direction.
 	//
-	// It is not new enforcement: ssrfSafeDialContext below already refuses a
-	// private destination at connect time, so the set of URLs this function
-	// will fetch is unchanged — a private metadata host failed before and
-	// fails now, just earlier and with an error that names the reason. The
+	// It is not new enforcement either: ssrfSafeDialContext below already
+	// refuses a private destination at connect time, so the set of URLs this
+	// function will fetch is unchanged — a private metadata host failed before
+	// and fails now, just earlier and with an error that names the reason. The
 	// two layers are complementary rather than redundant: this one refuses a
 	// host that resolves private NOW, the dialer catches one that resolves
-	// public here and private at connect time (DNS rebinding).
-	// BOUNDED by the same 15 s budget as the request below. isPrivateHost
-	// resolves under context.Background(), so on a wedged resolver this
-	// pre-flight blocked for the OS budget BEFORE the request context existed
-	// — an unbounded step introduced into a bounded operation by the guard
-	// itself, which is the CHAOS-60/64 shape this sweep cites and must not
-	// reintroduce.
+	// public here and private at connect time (DNS rebinding), which is the
+	// authoritative half.
+	//
+	// BOUNDED by the same 15 s budget as the request below, from ONE context.
+	// isPrivateHost resolves under context.Background(), so on a wedged
+	// resolver the first shape of this pre-flight blocked for the OS budget
+	// BEFORE the request context existed — an unbounded step introduced into a
+	// bounded operation by the guard itself, the CHAOS-60/64 shape this sweep
+	// cites, reintroduced inside a fix for something else. A bounded operation
+	// is only as bounded as its first step. Do not un-bound this for CodeQL.
 	ctx, cancel := context.WithTimeout(context.Background(), samlMetadataFetchBudget)
 	defer cancel()
 	if err := isPrivateHostContext(ctx, metaURL.Host); err != nil {
