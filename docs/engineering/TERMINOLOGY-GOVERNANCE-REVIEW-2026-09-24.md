@@ -1,14 +1,21 @@
 # Culvert Language & Terminology Governance Review — 2026-09-24
 
 > **Owner:** Language & Terminology Governance routine · **Status:** Point-in-time review (repeatable)
+> **Snapshot scope (read this first):** this is a HISTORICAL record of `origin/main` at `6ec745d` on
+> 2026-09-24. It was merged later, after `main` had moved on, so the tree it ships in contains commits it
+> never audited. Its findings, carried-over backlog and health score describe `6ec745d` only. They are
+> not a statement about the tree this file is published in; the current governance state is whatever the
+> most recent review in this series says. Later windows are audited by later reports, never
+> retroactively by this one.
 > **Method:** Audited `0665453..6ec745d` — the window since the 2026-09-11 report's merge point (PR
-> #1363), confirmed as the current `origin/main` HEAD by a fetch immediately before this report was
-> written (per the DEBT-014 lesson: sync against `main` right before opening a PR, not only at
+> #1363). The end commit `6ec745d` was confirmed as the then-current `origin/main` HEAD by a fetch
+> immediately before this report was written on 2026-09-24 (per the DEBT-014 lesson: sync against `main` right before opening a PR, not only at
 > review-start, so a fix landed by a parallel branch is credited rather than re-claimed — no such
 > landing occurred this pass; the branch was created directly from a synced `origin/main`, so no merge
-> was needed). Checked first, and confirmed absent: no `docs/engineering/TERMINOLOGY-GOVERNANCE-REVIEW-*.md`
-> dated later than 2026-09-11 exists on any branch, so this is not a duplicate of a parallel run
-> (the DEBT-014 race this program has previously hit).
+> was needed). **Correction:** the first revision said no review dated later than 2026-09-11 existed on
+> any branch. That was wrong. Three were open as unmerged PRs at the time and audited overlapping
+> windows: 2026-09-19 (#1434), 2026-09-21 (#1456) and 2026-09-23 (#1482). This report is therefore a
+> parallel run of the DEBT-014 kind; see "Overlap with parallel reports" below.
 >
 > The window covers 31 first-parent merges / 248 files / ~53.1k insertions, dominated by two
 > unrelated backend tracks: (a) CI-REDESIGN pipeline work (`cmd/cireport`, `cmd/rootshard`,
@@ -23,17 +30,20 @@
 
 ## Executive Summary
 
-**No new terminology drift found, and no new fixes made this pass.**
+**No new terminology drift found by this pass, and no new fixes made.** Parallel reports covering
+parts of the same window did find drift this pass missed; see "Overlap with parallel reports" below.
 
 1. **Every new admin-facing name this window introduced was checked for cross-surface consistency and
    found internally consistent:**
    - **OCSP (CHAOS-65):** the new `/api/ocsp` fields (`notForCertificateTotal`,
      `unauthorizedResponderTotal`, `malformedResponseTotal`, `staleResponseTotal`, `unknownStatusTotal`,
-     `responderBlockedTotal`, `coverage`, `uncheckedEnforcingPaths`) match byte-for-byte across
-     `ui_security.go`, `ocsp_metrics.go`'s `culvert_ocsp_response_rejected_total{reason=...}` HELP text,
-     the GUI banners in `static/index.html`, `api/openapi/openapi.{json,yaml}`, and the auto-generated
-     `frontend/src/api/types.gen.ts` — the same wording ("no responder returned a usable, affirmative
-     verdict") is reused verbatim between the GUI banner and the metric HELP text.
+     `responderBlockedTotal`, `coverage`, `uncheckedEnforcingPaths`) are spelled identically in
+     `ui_security.go`, `static/index.html`, `api/openapi/openapi.{json,yaml}` and the auto-generated
+     `frontend/src/api/types.gen.ts`. The six rejection counters correspond one-to-one with
+     `ocsp_metrics.go`'s `culvert_ocsp_response_rejected_total{reason=...}` labels (camelCase field ↔
+     snake_case label, e.g. `notForCertificateTotal` ↔ `not_for_certificate`). The wording "no responder
+     returned a usable, affirmative verdict" is reused verbatim between the GUI fail-closed banner
+     (`static/index.html:4494`) and the `culvert_ocsp_fail_closed_total` HELP text (`ocsp_metrics.go:38`).
    - **GeoIP (CHAOS-60):** the new `geo_resolution` diagnostics-contract row mirrors the pre-existing
      `dns_resolution` row's naming and severity convention exactly, and `docs/operator/
      geoip-resolution-health.md` uses the same vocabulary.
@@ -66,16 +76,17 @@
    no `rate_limit_rpm` or `conn_limit_max_per_ip` YAML key; only `security.rate_limit` and
    `security.max_conns_per_ip` exist. All three confirmed exactly as the prior reports left them.
 
-**Terminology Health Score: 8.7 / 10** (unchanged from 2026-09-08/09/11). No new drift was introduced by
-a 248-file, backend-and-CI-heavy window with zero admin-facing vocabulary changes, and no carry-over item
-moved — so the score neither rises nor falls.
+**Terminology Health Score: 8.7 / 10** (unchanged from 2026-09-08/09/11). This pass's checks found no new
+drift in a 248-file, backend-and-CI-heavy window, and no carry-over item moved, so the score neither rises
+nor falls. It does not account for the parallel reports' findings (see "Overlap with parallel reports");
+the series' later reports reconcile the score.
 
 ---
 
 ## Carried-Over Findings (unchanged)
 
 All fourteen previously-open finding IDs (thirteen backlog entries, since T-21 and T-32 are tracked as
-one paired item) remain open, unchanged, and re-confirmed against the current tree: T-9, T-11, T-12,
+one paired item) remain open, unchanged, and re-confirmed against the then-current tree (`6ec745d`): T-9, T-11, T-12,
 T-13 (residual), T-17, T-18, T-21+T-32 (paired), T-25 (residual), T-29, T-30, T-33, T-34, T-39. Full
 descriptions and the priority-ordered refactoring plan are unchanged from
 `TERMINOLOGY-GOVERNANCE-REVIEW-2026-09-09.md` and are not restated here, to avoid drift between two
@@ -90,15 +101,36 @@ not a mechanical rename) also remains unresolved and is not queued to the number
 
 ---
 
+## Overlap with parallel reports
+
+Three reports written before this one were still unmerged PRs when it was written, and each audited
+part of this window. They recorded findings this pass did not:
+
+- **2026-09-21 (#1456)**: the OCSP admin panel was titled "OCSP / CRL Revocation" although only OCSP
+  exists (its T-57), and the OCSP work added "appliance", which the glossary forbids, to an OpenAPI field
+  description and operator docs (a T-51 recurrence). This report's OCSP check compared field spellings
+  and did not read the panel title or prose against the glossary.
+- **2026-09-23 (#1482)**: T-54–T-56 (identity-backend metric prefix, Sync vs Refresh verbs, the
+  decryption-exclusion audit search). All three are long-standing, not introduced in this window.
+- **2026-09-19 (#1434)**: a pre-existing SSL/TLS label mismatch in the new frontend's Rule Editor (its T-54).
+
+This report's "no new drift" conclusion covers only the checks listed above. It is not evidence
+against those findings. The finding IDs above are the parallel reports' own; see each report for
+their ID notes.
+
+---
+
 ## Stop-Condition Assessment
 
-No production-worthy NEW terminology improvement was identified this pass: the 31-merge window audited
+No production-worthy NEW terminology improvement was identified by this pass's checks (parallel reports
+found some in the same window; see above): the 31-merge window audited
 was CI/release-pipeline engineering plus MCP-canary and reliability (CHAOS-60/63/65) work, all internally
-consistent where it touched any admin-facing name, and with zero new admin-facing vocabulary reaching a
-GUI/API/config/doc surface for the first time in a way that collides with anything already canonical.
+consistent where these checks looked. The 2026-09-21 report found that the window did add "appliance"
+to customer-facing docs and an OpenAPI description, which this pass missed.
 The fourteen-ID (thirteen-entry) carry-over backlog is unchanged and was independently re-confirmed (not
 merely assumed unchanged) for three of its items via direct file inspection. No cosmetic or
 preference-driven renames are proposed. This report itself — the audit record and backlog
 reconciliation — is the deliverable of this pass; per the DEBT-014 process lesson, it was written only
 after a fresh sync against `origin/main` immediately before opening its PR, and the branch was confirmed
-to be exactly `origin/main` at commit `6ec745d5` with no divergent history before this file was added.
+to be exactly `origin/main` at commit `6ec745d5` with no divergent history before this file was added. The
+sync did not catch the parallel reports, because they were on unmerged branches rather than on `main`.
