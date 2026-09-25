@@ -3013,7 +3013,8 @@ func registerPolicyRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/category-groups", apiCategoryGroups)                             // GET/POST/PUT/DELETE category groups
 	mux.HandleFunc("/api/decryption-profiles", apiDecryptionProfiles)                     // GET/POST/PUT/DELETE decryption profiles
 	mux.HandleFunc("/api/decryption/health", apiDecryptionHealth)                         // GET ADR-0011 coverage + failure aggregate (viewer, read-only)
-	mux.HandleFunc("/api/decryption/redaction", apiDecryptionRedaction)                   // GET viewer / PUT admin — ADR-0011 §4 traffic-log destination-privacy posture (host/URI/dec.*/top_hosts)
+	mux.HandleFunc("/api/decryption/redaction", apiDecryptionRedaction)                   // legacy alias; canonical path is /api/traffic/redaction (terminology governance T-17)
+	mux.HandleFunc("/api/traffic/redaction", apiDecryptionRedaction)                      // GET viewer / PUT admin — ADR-0011 §4 traffic-log destination-privacy posture (host/URI/dec.*/top_hosts)
 	mux.HandleFunc("/api/decryption-exclusions", apiDecryptionExclusions)                 // GET list learned exclusions / DELETE evict one (?host=) or clear all
 	mux.HandleFunc("/api/decryption-exclusions/tunables", apiDecryptionExclusionTunables) // GET defaults+bounds / PUT admin runtime tunables (F10)
 	mux.HandleFunc("/api/urlcat", apiURLCat)                                              // GET/POST/PUT/DELETE categories
