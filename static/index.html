@@ -2625,7 +2625,7 @@ Firefox (all platforms):
         <div class="panel-header"><span class="panel-title">Config Versions</span></div>
         <div class="panel-body">
           <p class="hint">
-            Every configuration change creates a numbered snapshot. You can compare versions and roll back to any previous state.
+            Changes to versioned settings create a numbered snapshot. You can compare versions and roll back the settings captured in a snapshot; settings listed below the version table are not restored by rollback.
           </p>
           <div id="config-versions-list" style="margin-bottom:12px">
             <em style="color:var(--muted);font-size:.82rem">Loading versions...</em>
@@ -8220,7 +8220,7 @@ async function rollbackConfigVersion(version) {
   } else {
     scopeNote = '';
   }
-  if (!await confirmAction('Rollback Configuration', `Roll back to config version v${version}? This will replace most current settings with the snapshot from v${version}.${scopeNote} A new version will be created to record this rollback.`, 'Rollback')) return;
+  if (!await confirmAction('Rollback Configuration', `Roll back to config version v${version}? Rollback replaces only the settings captured in the v${version} snapshot; settings listed below the version table are not restored.${scopeNote} A new version will be created to record this rollback.`, 'Rollback')) return;
   try {
     const data = await api('/api/config/versions', {
       method: 'POST',
