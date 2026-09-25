@@ -250,8 +250,9 @@ and one is now partially fixed.
   backlog item.
 - **Affected code:** if the "steering profile" direction is chosen — every PAC file in
   `frontend/src/features/network/pac/` carrying bare "profile" copy (`ProfilesTab.tsx`, `ProfileDetail.tsx`,
-  `ProfileDraftEditor.tsx`, `PACPage.tsx`, `ExceptionsTab.tsx`, `PoolsTab.tsx`, `pacShared.tsx`) AND the
-  legacy panel description at `static/index.html:2316-2317`; alternatively, if the "PAC profile" direction
+  `ProfileDraftEditor.tsx`, `PACPage.tsx`, `ExceptionsTab.tsx`, `PoolsTab.tsx`, `pacShared.tsx`, and
+  `pacLifecycle.ts:241`, whose bare-"profile" refusal sentence `ProfileDetail.tsx:519-520,932-934` shows
+  verbatim) AND the legacy panel description at `static/index.html:2316-2317`; alternatively, if the "PAC profile" direction
   is chosen, `static/index.html` (the five titled strings) + `docs/design/PRODUCT-TERMINOLOGY.md` (1 row).
   Either list is the product copy only, not an exhaustive change list: frontend tests select controls by
   their current labels (e.g. `frontend/src/test/pac-2fe-c-red-page.test.tsx:441-445` "All profiles", and
@@ -269,7 +270,7 @@ and one is now partially fixed.
   canonical term and the operator documentation would disagree. In either direction the implementing change
   must grep the losing term repo-wide (source, tests, GUI, docs) and converge every reference.
 - **Affected Configuration:** none.
-- **Migration Complexity:** Small in either direction (a batch of string/comment edits in up to 8 files);
+- **Migration Complexity:** Small in either direction (a batch of string/comment edits in roughly ten files plus their dependent tests);
   Small-Medium once the "steering profile" direction's required `frontend/dist` rebuild + verification
   is counted, or once the "PAC profile" direction's canonical-doc update + legacy-GUI re-edit is
   counted.
