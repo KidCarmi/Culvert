@@ -184,9 +184,10 @@ and one is now partially fixed.
 - **Affected Documentation:** the losing side's contract — either `docs/design/FRONTEND-FEATURE-PARITY.md`
   FE-V18 + `docs/design/FRONTEND-MIGRATION-PLAN.md:713-718`, or CLAUDE.md's M5B text and the operator doc.
 - **Affected Configuration:** none.
-- **Migration Complexity:** Trivial in code (3 string literals); Small once the required
-  `frontend/dist` rebuild + its own verification (build, lint, the existing Playwright/Vitest
-  Policy-Learning coverage) is counted.
+- **Migration Complexity:** Trivial in code either way (3 string literals). If the frontend's wording
+  loses, add the `frontend/dist` rebuild + its verification (build, lint, the existing Playwright/Vitest
+  Policy-Learning coverage); if the legacy wording loses, only `static/index.html` and CLAUDE.md's M5B
+  text change and no rebuild is involved.
 - **Compatibility Risk:** None — display-only text behind an experimental, disabled-by-default flag
   (`CULVERT_EXPERIMENTAL_UI`); no external consumer depends on the exact button string.
 - **Estimated PR Size:** Small.
@@ -271,7 +272,8 @@ them (it did not): T-9, T-11, T-12, T-13 (residual), T-17, T-18, T-21+T-32 (pair
 T-29, T-30, T-33, T-34, T-39, and T-54 (still queued on the still-unmerged 2026-09-12 report — see the
 Program Note). Full descriptions and the priority-ordered refactoring plan for all of these are
 unchanged from `TERMINOLOGY-GOVERNANCE-REVIEW-2026-09-09.md` (T-9 … T-39) and
-`TERMINOLOGY-GOVERNANCE-REVIEW-2026-09-12.md` (T-54) and are not restated here to avoid drift between
+`TERMINOLOGY-GOVERNANCE-REVIEW-2026-09-12.md` (T-54 — added by PR #1372, which merges before this report;
+until then its full text is readable on that PR) and are not restated here to avoid drift between
 two descriptions of the same open items. **T-55 and T-56 (above) are new this pass**, bringing the
 open count to seventeen IDs (sixteen backlog entries).
 
@@ -299,7 +301,7 @@ added for the new findings:
 | Medium | T-9 (carried over) | Rename `exportedAt` → `capturedAt` with read-compat alias | Low-medium | Medium |
 | Medium | T-11 (carried over) | Reconcile `allow`/`deny` default-action vocabulary vs. the four-value `PolicyAction` enum | Low / Medium-large | Small / Medium-large |
 | Medium | T-12 (carried over) | Alias Maintenance Agent wire routes `/v1/upgrades/*` → `/v1/updates/*` | Medium | Medium |
-| Low-Medium | T-54 (carried over, still unmerged) | Rename OCSP admin JSON fields `malformedResponseTotal`→`malformedTotal` and `staleResponseTotal`→`staleTotal`, and Go accessor `UnknownTotal`→`UnknownStatusTotal`; regenerate the OpenAPI bundle; update GUI references; resolve `responder_blocked`'s metric-family scope mismatch | Low | Small |
+| Low-Medium | T-54 (carried over; defined in the 2026-09-12 report, PR #1372) | Add OCSP admin JSON fields `malformedTotal`/`staleTotal` alongside the old names and deprecate those per `API-DEPRECATION-POLICY.md` (a plain rename is breaking); rename Go accessor `UnknownTotal`→`UnknownStatusTotal`; move `responder_blocked` into its own metric series and carry that through the GUI and runbook. The 2026-09-12 report is authoritative for the details | Medium | Small |
 | Low-Medium | **T-56 (new)** | Decide "steering profile" vs. "PAC profile" as the going-forward canonical term for the new frontend's PAC screens; converge the losing surface (new frontend, or legacy GUI + `PRODUCT-TERMINOLOGY.md`) onto the winner. Doc half already fixed. | Low | Small |
 | Low | **T-55 (new)** | Naming decision: pick one of "Accept to Draft" (legacy GUI + CLAUDE.md M5B text) or "Accept to Policy Draft" (frontend implementation + FRONTEND-FEATURE-PARITY FE-V18 + FRONTEND-MIGRATION-PLAN), then change the losing UI and its written contract together (rebuild `frontend/dist` if the frontend loses) | None | Small (after the decision) |
 | Low | T-34 (carried over) | Standardize `apiURLCatFeedStatus`'s SaaS block field names on the F3b-4 status endpoint's vocabulary | Low | Small |
@@ -322,9 +324,9 @@ previously-undocumented mismatches between Culvert's two coexisting admin UIs (T
 vs. "Accept to Policy Draft"; T-56: "Steering Profile" vs. bare "PAC profile", the same defect class
 T-50 already fixed once, elsewhere). The doc-only half of T-56 was fixed on the spot at zero risk,
 consistent with this program's established practice for trivial, zero-compatibility-risk gaps; both
-findings' code/frontend halves are queued to the backlog rather than rushed into this documentation PR,
-since both require a `frontend/dist` rebuild to take effect and T-56 additionally requires a naming
-direction decision this report does not make unilaterally. No cosmetic or preference-driven renames are
+findings' code/GUI halves are queued to the backlog rather than rushed into this documentation PR,
+since both are naming decisions this report does not make unilaterally (and a direction that changes the
+new frontend additionally needs a `frontend/dist` rebuild). No cosmetic or preference-driven renames are
 proposed — both new findings are real, cross-checked against the codebase's own established canonical
 terminology document, and are things a real administrator moving between Culvert's two admin UIs would
 actually notice. This report recommends future passes fold `frontend/src/**` into the routine audit
