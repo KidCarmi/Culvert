@@ -3,8 +3,16 @@
 > **Owner:** Language & Terminology Governance routine · **Status:** Point-in-time review (repeatable)
 > **Snapshot scope (read this first):** this is a HISTORICAL record of `origin/main` at `6c46ebd` on
 > 2026-09-21. It was merged later, after `main` had moved on, so the tree it ships in contains commits it
-> never audited. Its findings, carried-over backlog and health score describe `6c46ebd` only. They are
-> not a statement about the tree this file is published in; the current governance state is whatever the
+> never audited. It uses two states, and says which one each part describes:
+> - **At the audited snapshot (`6c46ebd`)**: the tree as audited. The findings (T-59, T-59b, T-59c, T-60,
+>   the T-51 recurrence) and every file:line citation describe this state. Here the panel still says
+>   "OCSP / CRL Revocation" and the "appliance" text is still present.
+> - **After this PR's corrections**: `6c46ebd` plus the copy fixes this PR makes (the T-59 panel title
+>   and its doc/roadmap references, and the nine T-51-recurrence lines). The open backlog and the health
+>   score describe this state, so T-59's title and the T-51 recurrence count as fixed and nothing else
+>   does. To reproduce it, apply the fixes listed under T-59 and the T-51 recurrence to `6c46ebd`.
+>
+> Neither state is the tree this file is published in; the current governance state is whatever the
 > most recent review in this series says. Later windows are audited by later reports, never
 > retroactively by this one.
 > **Finding-ID note:** series finding IDs are assigned in report-date order. This report's panel-title
@@ -35,8 +43,11 @@
 revocation mechanism (CRL) Culvert does not implement. **One recurrence of a closed finding, also fixed:**
 the window reintroduced "appliance" in customer-facing text (T-51 recurrence, below), which
 `docs/design/PRODUCT-TERMINOLOGY.md` forbids ("Appliance: *Not used* … the UI says node or instance").
-**One new open finding (T-60):** the tool-trust decision route's OpenAPI entry names an audit event the
-handler never emits.
+**Three new open findings:** T-60 (the tool-trust decision route's OpenAPI entry names an audit event the
+handler never emits), T-59b ("verdict" outside Diagnostics in 53 visible lines and 5 emitted OCSP
+strings) and T-59c ("policy rules" in the GeoIP diagnostics warning). T-59b and T-59c are lettered
+sub-items of T-59 because they came out of the same glossary check of this window's new copy; they are
+separate backlog entries.
 
 Two bounded audits were run against the diff since the last review; the second one's original conclusion
 was wrong and is corrected here.
@@ -95,9 +106,10 @@ Runbook") and the R2 terminology against CLAUDE.md's existing "R2 (`https://cata
 description — the names are consistent. The glossary sweep below records the release-gating runbook's
 "verdict" and "appliance" wording.
 
-**Spot-checked three carry-over items (four IDs: T-12, T-13, T-29, T-30) at their cited locations** in the
-then-current tree (`6c46ebd`), as prior reports have done. The other carry-over findings were not
-re-verified; they are carried over with their original evidence.
+**Spot-checked four carry-over items (five IDs: T-12, T-13, T-29, T-30, T-54) at their cited locations** in
+the then-current tree (`6c46ebd`), as prior reports have done. T-54's check, with the command that
+reproduces it, is under "Carried-Over Findings". The other carry-over findings were not re-verified; they
+are carried over with their original evidence.
 - **T-13**: `docs/enterprise/TLS-INSPECTION-DEPLOYMENT.md:1` is still titled "TLS Inspection Deployment"
   (in-app/API/GUI still say "SSL Inspection", e.g. in `static/index.html`, `healthcheck.go`'s
   `ssl_inspection` field, `policy.go`'s `SSLAction`) — unchanged.
@@ -109,16 +121,17 @@ re-verified; they are carried over with their original evidence.
   `POST /v1/upgrades/check`/`apply` with no `/v1/updates/*` alias, while the GUI still says "Dispatch
   Release" — unchanged.
 
-**Terminology Health Score: 8.5 / 10** (down from 8.6). The starting point is the 2026-09-12 report's
-8.6, which already charged its own new open finding T-54 (backlog 13 → 14); T-54 is not charged again here.
-One new defect (T-59) was found and fixed within the same pass — a security-adjacent admin-UI label
-overclaiming a capability — so, following 2026-09-08's precedent that a single item's discovery and its
-resolution are symmetric ±0.1 moves, the two cancel out rather than compounding; the T-51 recurrence was
-likewise fixed within the pass. T-60 was also found in this pass and is left OPEN, growing the backlog
-from fourteen to fifteen entries; under the same ±0.1 per-item precedent an unresolved new defect is a
-−0.1 move with nothing to cancel it, hence 8.5. The score is not raised despite the same-day T-59 fix,
-since a defect that reached production before this review is not evidence of improving health, only of
-this review doing its job.
+**Terminology Health Score: 8.3 / 10** (down from 8.6; describes the state after this PR's corrections).
+The rule is the 2026-09-08 precedent: each item found moves the score −0.1, each item fixed in the same
+pass moves it +0.1, so an item found and fixed nets zero.
+- Start: 8.6, the 2026-09-12 report's score, which already charged T-54 (backlog 13 → 14). T-54 is not
+  charged again.
+- T-59 (panel title): found and fixed, net 0. T-51 recurrence: found and fixed, net 0.
+- T-60, T-59b, T-59c: found and left open, −0.1 each, −0.3 in total.
+- Result: 8.6 − 0.3 = **8.3**. The open backlog grows from fourteen to seventeen entries.
+
+The same-day T-59 fix does not raise the score, since a defect that reached production before this
+review is not evidence of improving health, only of this review doing its job.
 
 ---
 
@@ -208,28 +221,48 @@ Later review rounds found more errors, also fixed:
   say "OCSP/CRL". Those comments are internal and were not changed.
   If CRL fallback is added in the future, "OCSP / CRL Revocation" becomes accurate again and can be
   restored at that time.
-- **Sub-item — "verdict" in the OCSP copy (recorded, not fixed in this report PR).** The glossary
-  reserves "verdict" for Diagnostics checks (`PRODUCT-TERMINOLOGY.md`, Decision row). The window's OCSP
-  copy uses it for a responder's answer. Required rewording: "response" where the text means what the
-  responder sent, "status" where it means `good`/`revoked`. Hits (line numbers at `6c46ebd`):
-  - `static/index.html:4484` "Fail-closed (no usable verdict)" → "(no usable response)"; `:4491`
-    "revocation verdicts from the affected upstream" → "revocation responses"; `:4494` "a usable,
-    affirmative verdict" → "a usable, affirmative status".
-  - `api/openapi/openapi.yaml:488` (`unauthorizedResponderTotal`) "a certificate signing a verdict about
-    itself" → "a response about itself" (carried into `openapi.json` and `types.gen.ts` on regeneration).
-  - `docs/operator/ocsp-revocation-checking.md:39`, `:49`, `:50`, `:91`, `:95`, `:144` → "status" or
-    "response" as above ("cached verdicts" → "cached statuses").
-  - `CHANGELOG.md:226`, `:232`, `:259` (the CHAOS-65 entry).
-  - Strings the OCSP code emits, which operators read in errors, logs and `/metrics`:
-    `internal/ocsp/ocsp.go:424` (error: "no responder returned a usable verdict"), `:573` (log line: "no
-    usable verdict from … responder(s)"), and the HELP texts at `ocsp_metrics.go:38` ("affirmative
-    verdict"), `:42` ("Verdicts currently cached") and `:55` ("without producing a verdict"). Same
-    rewording.
+- **Split out**: the OCSP copy's "verdict" wording, first recorded here as a sub-item, is now part of
+  **T-59b** below, which is open.
 - **Affected surfaces**: GUI (`static/index.html:4477`), one operator-doc reference
   (`docs/operator/ocsp-revocation-checking.md:4`), and three roadmap lines. No API/config/audit/metric
   surface uses "CRL."
 - **Migration complexity**: trivial (label and prose only, no wire contract) — applied. **Compatibility
   risk**: none. **Actual PR size**: XS.
+
+### T-59b — "verdict" used outside Diagnostics in this window's new copy (Low) — OPEN
+
+- **Rule**: the glossary reserves "verdict" for Diagnostics checks (`PRODUCT-TERMINOLOGY.md`, Decision
+  row). This window's new copy uses it for other things. Counts come from the "Glossary term sweep" below.
+- **Scope at `6c46ebd`**: 53 visible lines plus 5 strings the OCSP code emits.
+  - OCSP (13 visible lines + 5 emitted strings). Required rewording: "response" where the text means what
+    the responder sent, "status" where it means `good`/`revoked`. Line numbers at `6c46ebd`:
+    - `static/index.html:4484` "Fail-closed (no usable verdict)" → "(no usable response)"; `:4491`
+      "revocation verdicts from the affected upstream" → "revocation responses"; `:4494` "a usable,
+      affirmative verdict" → "a usable, affirmative status".
+    - `api/openapi/openapi.yaml:488` (`unauthorizedResponderTotal`) "a certificate signing a verdict about
+      itself" → "a response about itself" (carried into `openapi.json` and `types.gen.ts` on regeneration).
+    - `docs/operator/ocsp-revocation-checking.md:39`, `:49`, `:50`, `:91`, `:95`, `:144` → "status" or
+      "response" as above ("cached verdicts" → "cached statuses").
+    - `CHANGELOG.md:226`, `:232`, `:259` (the CHAOS-65 entry).
+    - Emitted strings: `internal/ocsp/ocsp.go:424` (error: "no responder returned a usable verdict"),
+      `:573` (log line: "no usable verdict from … responder(s)"), and the `/metrics` HELP texts at
+      `ocsp_metrics.go:38` ("affirmative verdict"), `:42` ("Verdicts currently cached") and `:55`
+      ("without producing a verdict").
+  - Outside OCSP (40 visible lines): 35 in `docs/operator/mcp-first-controlled-canary-review.md`, 3 in
+    `docs/operator/release-publication-gating.md` (`:22`, `:60`, `:455`) and 2 in `CHANGELOG.md` (`:15`,
+    `:391`). The file:line list and the 2 exempt identifier lines are in the sweep below.
+- **Not fixed in this PR**: rewording the MCP review touches many lines of a document other PRs edit, and
+  the OCSP HELP and error strings are code changes. It needs its own change.
+
+### T-59c — "policy rules" in the GeoIP diagnostics warning (Low) — OPEN
+
+- **Rule**: the glossary says "rule" for a Stage-2 `PolicyRule` ("policy rule" is listed as a term it
+  replaces).
+- **Found at `6c46ebd`**: the `geo_resolution` diagnostics row's warning says "country-scoped policy rules
+  are not matching…" (`geoip_resolve_health.go:322`). It is the only added Go string literal containing
+  "policy rule" (reproduce with the second-pass command in the sweep below).
+- **Recommended action**: reword to "country-scoped rules". Not done in this report PR, because it is a
+  code change.
 
 ### T-60 — The tool-trust decision route documents an audit event the handler never emits (Low) — OPEN
 
@@ -239,6 +272,14 @@ Later review rounds found more errors, also fixed:
   `.revoke`, `.approve` or `.approve-live`, depending on the action (`ui_mcp_tooltrust.go:353,361,388,402`).
   No `mcp.tooltrust.decision` event exists. (The request route's `mcp.tooltrust.request` matches
   `ui_mcp_tooltrust.go:304`.)
+- **Also in scope (same class: the tool-trust OpenAPI entries do not describe what the handlers
+  return)**: `GET /api/mcp/tool-approvals` serializes `reviewed_operation_class` with
+  `ReviewedOperationClass.String()`, which returns `read_only`, `mutating` or `unset`
+  (`internal/mcp/tooltrust/reviewed_operation.go`; the struct comment at `ui_mcp_tooltrust.go:91-94` says
+  "read_only | mutating | unset"). The spec documents only the request enum `read_only | mutating`
+  (`api/openapi/openapi.yaml:13078`) and types the response as an untyped `additionalProperties: true`
+  object, so an admin-visible `unset` is documented nowhere in the API. The 2026-09-24 report (#1492)
+  recorded this; it is folded into T-60 rather than given a new ID. Fix: document the response values.
 - **Why it matters**: an operator or SIEM author who takes the spec at its word and searches or alerts on
   `mcp.tooltrust.decision` finds nothing, so approvals and revocations of MCP tools look unaudited.
 - **Recommended action**: make the spec name the events the handler actually writes, e.g. the family
@@ -313,7 +354,7 @@ the table, or a zero count, is not evidence that those rules hold.
 | Term (pattern) | Added lines | Visible | Visible lines (file:line) | Outcome |
 |---|---|---|---|---|
 | appliance (`appliance`) | 24 | 6 | `CHANGELOG.md`: 276; `api/openapi/openapi.yaml`: 483; `docs/operator/geoip-resolution-health.md`: 36; `docs/operator/ocsp-revocation-checking.md`: 22,122; `docs/operator/release-publication-gating.md`: 547 | Fixed; see the T-51-recurrence list (which also counts the generated `openapi.json`/`types.gen.ts` copies and the workflow `::error::` line, for 9) |
-| verdict (`verdict`) | 380 | 55 | `CHANGELOG.md`: 15,226,232,259,391; `api/openapi/openapi.yaml`: 488; `docs/operator/mcp-first-controlled-canary-review.md`: 51,392,970,1111,1124,1133,1251,1252,1253,2196,2203,2223,2228,2273,2489,2502,2533,2542,2543,2545,2558,2592,2646,2693,2702,2818,2902,2916,2992,3072,3080,3118,3293,3358,3559,3589,3635; `docs/operator/ocsp-revocation-checking.md`: 39,49,50,91,95,144; `docs/operator/release-publication-gating.md`: 22,60,455; `static/index.html`: 4484,4491,4494 | Recorded: 13 OCSP lines under T-59; 40 others below; 2 identifier-only lines (`:2558`, `:2592`) exempt |
+| verdict (`verdict`) | 380 | 55 | `CHANGELOG.md`: 15,226,232,259,391; `api/openapi/openapi.yaml`: 488; `docs/operator/mcp-first-controlled-canary-review.md`: 51,392,970,1111,1124,1133,1251,1252,1253,2196,2203,2223,2228,2273,2489,2502,2533,2542,2543,2545,2558,2592,2646,2693,2702,2818,2902,2916,2992,3072,3080,3118,3293,3358,3559,3589,3635; `docs/operator/ocsp-revocation-checking.md`: 39,49,50,91,95,144; `docs/operator/release-publication-gating.md`: 22,60,455; `static/index.html`: 4484,4491,4494 | T-59b (open): 13 OCSP lines and 40 others below; 2 identifier-only lines (`:2558`, `:2592`) exempt |
 | result (`result`) | 75 | 7 | `CHANGELOG.md`: 417; `docs/operator/mcp-first-controlled-canary-review.md`: 2255,2402,2908,3116; `docs/operator/ocsp-revocation-checking.md`: 77; `docs/operator/release-publication-gating.md`: 362 | None means a request's decision (campaign, query and release results) — no violation |
 | incident (`incident`) | 5 | 1 | `docs/operator/mcp-first-controlled-canary-review.md`: 886 | Plain English ("during an incident"); no entity invented — no violation |
 | scanner (`scanner`) | 6 | 3 | `docs/operator/mcp-first-controlled-canary-review.md`: 2967,3212,3236 | A code scanner in a test wall, not a scanning engine — no violation |
@@ -325,18 +366,18 @@ the table, or a zero count, is not evidence that those rules hold.
 **Strings emitted by Go code.** The file-based "visible" rule does not cover strings that non-test Go
 code prints to operators. A second pass, `git diff 46410c3 6c46ebd -U0 -- '*.go' ':!*_test.go' | grep -v '^+++' |
 grep -iE '^\+.*"[^"]*<pattern>[^"]*"'`, checked added string literals for each term:
-- "verdict": 7 lines. Five are the OCSP error, log and HELP strings above (under T-59). One is a code
+- "verdict": 7 lines. Five are the OCSP error, log and HELP strings (under T-59b). One is a code
   comment that quotes a phrase (`internal/ocsp/ocsp.go:485`). One is the MCP reason-code value
   `policy_verdict_not_invariant` (`internal/mcp/canary/permit.go`), a wire identifier, not prose.
 - "policy rule": 1 line, and it is a hit. The GeoIP diagnostics row's warning message says
   "country-scoped policy rules are not matching…" (`geoip_resolve_health.go:322`). The glossary
-  says "rule" for a Stage-2 `PolicyRule`. **Recorded, not yet numbered**; the rewording is "country-scoped
+  says "rule" for a Stage-2 `PolicyRule`. Recorded as **T-59c** (open); the rewording is "country-scoped
   rules".
 - "exclusion": 2 lines, both identifiers (the `first_canary_exclusions_forbidden` reason code and an
   `"exclusions"` map key in the MCP scope code).
 - "appliance", "result", "incident", "scanner", "kill switch": 0 lines.
 
-**Recorded, not yet numbered — "verdict" outside OCSP (40 visible prose lines).** These use "verdict"
+**Recorded under T-59b — "verdict" outside OCSP (40 visible prose lines).** These use "verdict"
 for something other than a Diagnostics check, which breaks the same reservation:
 - `docs/operator/mcp-first-controlled-canary-review.md`: 35 of the 37 lines listed above. The review uses
   "verdict" for its own conclusions and for policy decisions, including in the prose around test and
@@ -350,11 +391,9 @@ The glossary exempts backend identifiers from renaming (as with `policy_verdict_
 they are not violations. They are the only two of the 37 MCP lines with no whole-word "verdict";
 reproduce with `git diff 46410c3 6c46ebd -U0 -- docs/operator/mcp-first-controlled-canary-review.md |
 grep -v '^+++' | grep -iE '^\+.*verdict' | grep -viE '(^|[^a-z])verdict'`. Of the 55 visible lines, 53 are
-therefore violations (13 under T-59, 40 recorded here) and 2 are exempt identifiers.
+therefore violations (all under T-59b: 13 OCSP and 40 recorded here) and 2 are exempt identifiers.
 
-The 40 are not fixed in this report PR. Rewording the MCP review would touch many lines of a document that
-other PRs edit, so it needs its own change. The 13 OCSP lines (`static/index.html` ×3,
-`openapi.yaml:488`, the runbook ×6, `CHANGELOG.md:226`, `:232`, `:259`) are under T-59.
+None of the 53 is fixed in this report PR; see T-59b.
 
 ## Carried-Over Findings (unchanged)
 
@@ -370,7 +409,8 @@ descriptions of the same open items — see that report (or its predecessors, ci
 canonical text of each. **T-59 (above) was found and fixed within this same pass and does not join the
 open backlog** — the fourteen-entry carry-over backlog is unchanged; T-59 is recorded here only as a closed finding
 ID, for the same reason closed items stay in the numbering series rather than being silently dropped.
-**T-60 (above) is new and open**, so the open backlog after this pass is fifteen entries (sixteen IDs).
+**T-60, T-59b and T-59c (above) are new and open**, so the open backlog after this PR's corrections is
+seventeen entries (eighteen IDs).
 
 **T-54 at `6c46ebd`.** The 2026-09-12 report (audited `d378dff..2833db3`; `2833db3` is an ancestor of
 `6c46ebd`) opened T-54, and nothing in this window closed it. Checked at `6c46ebd`: the admin JSON in
@@ -394,10 +434,11 @@ item — also remains unresolved, per 2026-09-09's reasoning, and was not revisi
 **Does not apply cleanly this pass — a production-worthy terminology defect (T-59) was identified and
 fixed**: a security-adjacent GUI label naming a revocation mechanism (CRL) that does not exist in the
 implementation, corrected in this same PR (XS, no migration risk, no wire surface affected). A recurrence
-of the closed T-51 ("appliance" in customer-facing text) was also fixed. One new low-priority finding,
-T-60 (a documented audit event the tool-trust decision handler never emits), is left open for an
-API-contract change. The MCP
-canary-execution stream produced one finding once re-audited, T-60 (see "Corrections made in review").
+of the closed T-51 ("appliance" in customer-facing text) was also fixed. Three new low-priority findings
+are left open: T-60 (a documented audit event the tool-trust decision handler never emits), for an
+API-contract change; T-59b ("verdict" outside Diagnostics) and T-59c ("policy rules" in the GeoIP
+warning), for copy and string changes in their own PRs. Once re-audited, the MCP
+canary-execution stream produced T-60 (see "Corrections made in review") and 35 of T-59b's lines.
 The fifteen-ID (fourteen-entry) carry-over backlog, including T-54, remains open with its original
 evidence. T-12, T-13, T-29, T-30 and T-54 were spot-checked at their cited locations; the others were not
 re-verified. No
