@@ -45,15 +45,19 @@
 > than hidden**: the fixes below are complete as far as this report currently knows, and the process
 > lesson (this routine's own single-pass audits are not reliably complete without adversarial review) is
 > more durable than any one of the three individual OCSP/CHANGELOG/compose findings.
-> **Fourth correction round, same PR, when the PR was brought up to date with `main` on 2026-09-25:**
-> further "@codex review" passes found five more gaps, all now fixed: (1) the CHAOS-65 OCSP entries in
+> **Later correction rounds, same PR, when the PR was brought up to date with `main` on 2026-09-25:**
+> further "@codex review" passes found more gaps, all now fixed. The substantive ones: (1) the CHAOS-65 OCSP entries in
 > `CHANGELOG.md` — the largest changelog addition in the window — were never audited (now Part 2 item 5;
 > clean, with one pre-existing GUI-label observation); (2) T-54 recommended a plain rename of two fields in
 > the stable `GET /api/ocsp` schema, which `docs/api/API-VERSIONING-POLICY.md` classifies as breaking (now
 > additive + deprecate); (3) Reviewed Operation Class was described as a read/write/control classification
 > when it is deliberately binary (`read_only`/`mutating`); (4) the report credited itself with the OCSP
 > operator-doc table fix after `main` had landed those rows independently; (5) the summary counted four
-> audits while enumerating five. Four review rounds on one terminology report strengthens, rather than
+> audits while enumerating five; (6) T-54's remediation was tightened — the HELP-text-only option was
+> dropped, the full `API-DEPRECATION-POLICY.md` steps were required, and the `responder_blocked` split was
+> carried through the GUI and runbook. **The complete, authoritative correction history is the review
+> thread of PR #1372 itself;** this preamble deliberately does not keep a running round count, because
+> every correction would otherwise make that count stale. The number of rounds strengthens, rather than
 > changes, the process lesson above.
 
 ---
@@ -337,16 +341,17 @@ observation recorded in Part 2 item 5.
 The carry-over backlog grew from thirteen to fourteen entries (T-54 added, now covering three identifiers
 plus the metric-family correction); T-39's evidence was refreshed without changing its finding or
 priority. No cosmetic or preference-driven renames are proposed. **Process note, recorded rather than
-smoothed over, across all four correction rounds:** this report's own first draft initially missed the
+smoothed over, across every correction round:** this report's own first draft initially missed the
 `loginOversizeRejected`/`trust_forwarded_headers` surfaces and mischaracterized the OCSP naming as
 casing-only; the immediate fix then still missed `staleResponseTotal`'s identical mismatch; the fix after
 that still missed the `responder_blocked` metric-family scope issue and the `CHANGELOG.md`/
-`docker-compose.yml` coverage gaps; and the fourth round found the unaudited OCSP changelog entries, a
-breaking-rename recommendation, a mis-described binary field, a self-credited fix that `main` had made, and
-an audit miscount. All four rounds were caught and corrected by automated review
+`docker-compose.yml` coverage gaps; and the later rounds found the unaudited OCSP changelog entries, a
+breaking-rename recommendation, a mis-described binary field, a self-credited fix that `main` had made, an
+audit miscount, and an incomplete T-54 remediation (full history: PR #1372's review thread). Every round was
+caught and corrected by automated review
 (`chatgpt-codex-connector`) on this report's own PR before it merged, not by a parallel run — a concrete
 instance of the scheduled-review-can-be-incomplete risk DEBT-014 already tracks, and evidence that this
 routine's own single-pass audits should not be trusted as complete without adversarial review, independent
-of how thorough any one pass feels while writing it. This report was written, and then corrected in four
-review rounds, only after a fresh sync against `origin/main` immediately before opening (and before addressing
+of how thorough any one pass feels while writing it. This report was written, and then corrected across
+several review rounds, only after a fresh sync against `origin/main` immediately before opening (and before addressing
 each round of review comments on) its PR.
