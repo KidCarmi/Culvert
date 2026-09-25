@@ -1131,6 +1131,33 @@ func TestChaos70_SettingsRefusesEmptyUser(t *testing.T) {
 	}
 }
 
+// TestChaos70_SettingsFormDoesNotAdvertiseEmptyUserDisable pins that the
+// legacy Settings panel no longer tells an operator to "leave empty to disable
+// auth" — the backend refuses an empty user (above), so the form must point at
+// the default-auth-outcome control instead and refuse the empty field itself
+// rather than advertise a workflow that now answers 400.
+func TestChaos70_SettingsFormDoesNotAdvertiseEmptyUserDisable(t *testing.T) {
+	raw, err := os.ReadFile("static/index.html")
+	if err != nil {
+		t.Fatalf("read static/index.html: %v", err)
+	}
+	html := string(raw)
+	if strings.Contains(html, "Leave empty to disable auth") {
+		t.Error(`static/index.html still advertises "Leave empty to disable auth", but POST /api/settings now refuses an empty user with 400`)
+	}
+	i := strings.Index(html, "async function saveSettings()")
+	if i < 0 {
+		t.Fatal("saveSettings() not found in static/index.html")
+	}
+	body := html[i:]
+	if j := strings.Index(body, "\n}\n"); j > 0 {
+		body = body[:j]
+	}
+	if !strings.Contains(body, "if (!user.trim())") || !strings.Contains(body, "Exempt") {
+		t.Error("saveSettings() must refuse an empty username client-side and direct the operator to the default-authentication (Exempt) control")
+	}
+}
+
 // TestChaos70_Control_SettingsPersistFailureIsRefused is a CONTROL for the
 // round-3 shape: on a volume that cannot be written the endpoint must refuse
 // rather than report the rotation it could not persist, and it must charge the
