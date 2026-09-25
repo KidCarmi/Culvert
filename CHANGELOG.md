@@ -282,7 +282,7 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   forward proxy means the handshake to an `https://` parent proxy — inspected
   HTTPS origin handshakes build their own TLS config and are **not**
   revocation-checked. Because every counter reads zero either way, "found
-  nothing wrong" and "never consulted" were the same reading. The appliance now
+  nothing wrong" and "never consulted" were the same reading. Culvert now
   says so in a warning at the moment the control is enabled, in a banner on the
   OCSP panel, in `coverage`/`uncheckedEnforcingPaths` on `GET /api/ocsp`, and
   in `culvert_ocsp_path_checked{path}` — alongside a new `culvert_ocsp_*`

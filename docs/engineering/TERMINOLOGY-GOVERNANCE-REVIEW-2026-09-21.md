@@ -235,15 +235,15 @@ Later review rounds found more errors, also fixed:
     ("go out directly from the appliance").
   - `docs/operator/geoip-resolution-health.md:36` ("on an appliance with no GeoIP database").
   - `docs/operator/release-publication-gating.md:662` ("Because the appliance verifies the signature").
-- **Fix applied**: each now says "node" ("Culvert" in the release-gating sentence, whose subject is the
-  product). `make api-bundle` regenerated `openapi.json` and `make api-bundle-check` passes; the matching
-  JSDoc line in `types.gen.ts` was hand-synced as T-51 did (the frontend generator's pinned toolchain was
-  not available), and the frontend drift gate re-checks it in CI.
+  - `CHANGELOG.md:285`, the CHAOS-65 release note ("The appliance now says so").
+- **Fix applied**: each now says "node", except the release-gating sentence and the CHANGELOG note, which
+  say "Culvert" because their subject is the product. `make api-bundle` regenerated `openapi.json` and
+  `make api-bundle-check` passes. `types.gen.ts` was regenerated to match, and it is byte-identical to
+  the output of the pinned generator (openapi-typescript v7.13.0).
 - **Not actioned** (T-51's disposition): the window's other new uses are code comments and tests
   (`ocsp_coverage.go`, `ocsp_metrics.go`, `geoip_resolve_health.go`, `internal/ocsp/ocsp_chaos_test.go`,
   `mcp_live_execution_e2e_test.go`), workflow comments/CI log text (`publish-catalog-r2.yml`,
-  `resign-catalog.yml`), `CLAUDE.md`, `roadmap/CHAOS-ENGINEERING-REVIEW.md`, and one `CHANGELOG.md` entry,
-  which is a record of what shipped and is not rewritten.
+  `resign-catalog.yml`), `CLAUDE.md` and `roadmap/CHAOS-ENGINEERING-REVIEW.md`.
 - **Compatibility risk**: none — description text and prose only; no field, path or schema changed.
 
 ---
