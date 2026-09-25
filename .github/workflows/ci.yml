@@ -599,8 +599,12 @@ jobs:
           DIGEST: ${{ steps.what.outputs.digest }}
         run: |
           set -euo pipefail
-          docker pull --platform linux/amd64 "${IMAGE}@${DIGEST}"
-          docker tag "${IMAGE}@${DIGEST}" culvert:ci-smoke
+          # The amd64 manifest by its own digest: the run checks above already
+          # pulled other platforms of this index, and Docker's classic store
+          # refuses a second image under one digest reference.
+          REF="$(.github/scripts/candidate-platform-ref.sh "$IMAGE" "$DIGEST" linux/amd64)"
+          docker pull --platform linux/amd64 "$REF"
+          docker tag "$REF" culvert:ci-smoke
           docker compose -f docker-compose.yml -f docker-compose.ci.yml up -d --no-deps --no-build --pull never proxy
 
       - name: Compose smoke — wait for healthy (fail fast on container exit)

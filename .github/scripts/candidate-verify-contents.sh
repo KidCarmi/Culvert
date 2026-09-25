@@ -6,7 +6,8 @@
 # the part of qualification that does not need to execute the image (the smoke
 # run and the vulnerability scan are workflow steps in `qualify-candidate`).
 #
-# For the index <image>@<digest>:
+# For the index <image>@<digest> (each platform is pulled by its own manifest
+# digest, read from that index — see platform_digest in lib/candidate.sh):
 #   • exactly the required platforms, each exactly once;
 #   • every platform's config names <sha> as its source revision;
 # and for each platform, from the files INSIDE that platform's image:
@@ -79,8 +80,11 @@ for P in $CANDIDATE_PLATFORMS; do
   [ "$REV" = "$SHA" ] || bad "${P}: image config names revision '${REV}', want ${SHA}"
 
   D="$WORK/$OS-$ARCH"; mkdir -p "$D"
-  "$DOCKER" pull --quiet --platform "$P" "$REF" >/dev/null
-  CID="$("$DOCKER" create --platform "$P" "$REF")"
+  # By this platform's own manifest digest (see platform_digest).
+  PD="$(platform_digest "$LINES" "$P")" || { bad "${P}: no single manifest digest in the index"; continue; }
+  PREF="${IMAGE}@${PD}"
+  "$DOCKER" pull --quiet --platform "$P" "$PREF" >/dev/null
+  CID="$("$DOCKER" create --platform "$P" "$PREF")"
   for f in /app/culvert /app/VERSION /app/deploy/bin/culvert-maint; do
     "$DOCKER" cp "${CID}:${f}" "$D/$(basename "$f")" >/dev/null || bad "${P}: ${f} is missing from the image"
   done
