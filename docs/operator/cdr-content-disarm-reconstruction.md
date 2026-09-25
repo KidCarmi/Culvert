@@ -42,6 +42,11 @@ Two ways to turn CDR on, and either one is enough — you do not need both:
    | `-cdr-certs-dir` | `cdr.certs_dir` | Directory holding the Sluice mTLS client bundle (`ca.pem`, `client.pem`, `client.key`) | — |
    | `-cdr-fail-mode` | `cdr.fail_mode` | Behavior when Sluice is unreachable: `open` or `closed` (see **Failure behavior** below); an invalid value is a fatal boot error | `open` |
 
+   `-cdr-endpoint` alone (with no instance ever enrolled through the API)
+   dials a single anonymous bootstrap client with no certificate lifecycle
+   automation — see **Certificate lifecycle** below before relying on this
+   path long-term.
+
 2. **GUI enrollment**, no restart or config-file edit required: open
    **CDR → Enroll new Sluice instance**, paste the one-time enrollment token
    Sluice printed on first boot plus its server-certificate fingerprint.
@@ -78,18 +83,37 @@ key class.)
 
 ## Failure behavior
 
-CDR failures are governed by `cdr.fail_mode` (`open` by default):
+**`fail_mode=closed` only protects a request that reaches a live Sluice RPC
+call — it does NOT protect a request when no client is available at all.**
+Two distinct gates exist, and only the second one consults `cdr.fail_mode`:
 
-| Outcome | `open` (default) | `closed` |
-|---|---|---|
-| Sluice unreachable / times out / returns `ERROR` | Original file passes through unchanged; `CDR_ERROR` audit event + log line; `culvert_cdr_fail_open_total` | Delivery refused (block page); `culvert_cdr_fail_closed_total` |
-| Sluice returns `BLOCKED` (file is unsalvageable) | Delivery refused (block page) — **always**, regardless of `fail_mode` | same |
-| A panic anywhere in the CDR call path | Delivery refused (block page) — **always fail-closed**, regardless of `fail_mode` (`culvert_cdr_panics_total`) | same |
-| File exceeds `cdr.max_file_size_mb` | Skipped client-side before any bytes reach Sluice (`culvert_cdr_oversize_skipped_total`) — original file continues down the pipeline unsanitized | same |
+1. **No client to call.** If CDR has never successfully dialed any instance
+   (`cdrActiveClient()` is nil — e.g. every configured/enrolled instance is
+   unreachable at boot) — or every enrolled instance's circuit breaker is
+   currently open — the request **passes through unsanitized
+   unconditionally**, regardless of `fail_mode`. This path does not increment
+   `culvert_cdr_fail_open_total`/`_fail_closed_total` and emits no per-request
+   log line or audit event — it is silent at the request level. The only way
+   to notice it is happening is the pool/health surfaces themselves:
+   `GET /api/cdr/health`, `culvert_cdr_instance_healthy`, and the per-instance
+   `culvert_cdr_pool_breaker_state` (see **Multi-instance pool** below). A
+   deployment relying on `closed` for a hard security guarantee must monitor
+   these and alert on "no healthy instance" as its own outage condition —
+   `fail_mode=closed` alone will **not** block traffic during a total Sluice
+   outage.
+2. **A live RPC call fails**, once a client was actually reached:
 
-`fail_mode` only governs *transport/availability* failures. A `BLOCKED`
-verdict or an internal panic is never passed through, no matter how
-`fail_mode` is set — those are content decisions, not availability ones.
+   | Outcome | `open` (default) | `closed` |
+   |---|---|---|
+   | Sluice unreachable mid-call / times out / returns `ERROR` | Original file passes through unchanged; `CDR_ERROR` audit event + log line; `culvert_cdr_fail_open_total` | Delivery refused (block page); `culvert_cdr_fail_closed_total` |
+   | Sluice returns `BLOCKED` (file is unsalvageable) | Delivery refused (block page) — **always**, regardless of `fail_mode` | same |
+   | A panic anywhere in the CDR call path | Delivery refused (block page) — **always fail-closed**, regardless of `fail_mode` (`culvert_cdr_panics_total`) | same |
+   | File exceeds `cdr.max_file_size_mb` | Skipped client-side before any bytes reach Sluice (`culvert_cdr_oversize_skipped_total`) — original file continues down the pipeline unsanitized | same |
+
+   `fail_mode` only governs *transport/availability* failures reached this
+   way. A `BLOCKED` verdict or an internal panic is never passed through, no
+   matter how `fail_mode` is set — those are content decisions, not
+   availability ones.
 
 Per-request outcomes are also gated by the CDR policy rule's own **Mode**
 (`ENFORCE` strips and delivers the sanitized file; `REPORT_ONLY` detects and
@@ -110,29 +134,57 @@ its own circuit breaker (closed → open after 5 consecutive failures → half-o
 after a 30s reset timeout → closed again after one successful probe). Live
 requests round-robin across instances whose breaker is closed; an instance
 with an open breaker is skipped. If every enrolled instance's breaker is
-open, the pool reports "no active client" and the request falls through to
-`fail_mode` as if CDR were unreachable. `culvert_cdr_instance_healthy` and
-`culvert_cdr_queue_depth` come from the 15-second background health poll
-(`GET /api/cdr/health`) — they are **pool-wide aggregates, not per-instance**:
-`instance_healthy` is 1 when *at least one* enrolled instance's most recent
-probe succeeded, and `queue_depth` is the *minimum* Sluice-reported queue
-depth across the currently-healthy instances. Neither carries an instance
-label, so a multi-instance deployment cannot alert on one specific member
-going unhealthy or saturated from these two series alone — `GET
-/api/cdr/instances` / `/api/cdr/health` are the only place per-instance
-detail is exposed today.
+open, the pool has no client to pick and the request passes through
+**unconditionally** — see the "no client to call" gate under **Failure
+behavior** above; this is *not* governed by `fail_mode`.
 
-**Revocation requires a second active instance**: `POST /api/cdr/instances/revoke`
-issues the revoke RPC *from* another enrolled, reachable Sluice — a
-single-instance deployment cannot revoke its own credential through the API
-(Sluice itself refuses self-revocation). Enroll a second instance first, or
-remove the credential material out of band, if you need to revoke in a
-single-instance deployment.
+Two observability tiers exist. `culvert_cdr_instance_healthy` and
+`culvert_cdr_queue_depth` (from the 15-second background health poll) are
+**pool-wide aggregates**: `instance_healthy` is 1 when *at least one*
+enrolled instance's most recent probe succeeded, and `queue_depth` is the
+*minimum* Sluice-reported queue depth across the currently-healthy
+instances — neither carries an instance label, so neither alone tells you
+*which* member is down. Per-instance detail **is** exported separately,
+labeled by `instance`: `culvert_cdr_pool_instance_healthy{instance}`,
+`culvert_cdr_pool_breaker_state{instance}` (0=closed, 1=open, 2=half_open),
+and `culvert_cdr_pool_breaker_trips_total{instance}`. Build per-member
+alerting off the `_pool_*` series, not the two aggregates; `GET
+/api/cdr/instances` / `/api/cdr/health` give the same per-instance detail
+for ad hoc inspection.
+
+**A single-instance deployment cannot revoke its own credential through the
+API.** `POST /api/cdr/instances/revoke` issues the revoke RPC *from* another
+enrolled, reachable Sluice (Sluice refuses self-revocation), so revocation
+needs a second instance enrolled. **`DELETE /api/cdr/instances` is not a
+substitute** — it only removes Culvert's local registry entry and cert
+files; the credential is untouched at Sluice and stays trusted there until
+its natural expiry (deleting the local cert files can also destroy the
+easiest record of the fingerprint you'd need to revoke it later). If you
+need to revoke a credential from a single-instance deployment — especially
+after a suspected compromise, where this matters most — either enroll a
+second instance first and revoke through it, or revoke the credential
+directly on the Sluice side (outside Culvert's control; consult Sluice's own
+operator documentation).
 
 ## Certificate lifecycle
 
-Both directions of the mTLS relationship renew themselves automatically —
-manual action is a fallback, not the normal path:
+**Automatic renewal applies only to registry-backed (enrolled) instances —
+not to the config/CLI-only bootstrap path.** If at least one instance has
+ever been enrolled (via the GUI or `POST /api/cdr/instances/enroll`), the
+pool is built from that registry and both automatic behaviors below apply.
+If you instead only ever set `cdr.endpoint` (+ optionally `cdr.certs_dir`)
+via config/CLI and never enrolled anything, Culvert dials a single anonymous
+client (internally named `default`) that has no registry entry — and both
+`maybeRenewExpiringClients` and the server-rotation reconciler skip any
+instance they can't find in the registry. On that path, neither the client
+certificate nor the server-fingerprint pin renews itself; you are
+responsible for replacing the files under `cdr.certs_dir` and updating
+`cdr.server_fingerprint` manually before they expire or rotate. Enrolling at
+least one instance through the API is the only way to get the automatic
+behavior described below.
+
+Both directions of the mTLS relationship renew themselves automatically for
+enrolled instances — manual action is a fallback, not the normal path:
 
 - **Client certificate (Culvert → Sluice):** issued at enrollment, valid for
   one year. The 15-second health poller checks every enrolled instance's
@@ -191,9 +243,11 @@ Prometheus metrics (`culvert_cdr_*`, all counters unless noted):
 `oversize_skipped_total`, `cache_hits_total`, `cache_misses_total`,
 `cache_size` (gauge), `bytes_in_total`, `bytes_out_total`,
 `instance_healthy` (gauge, pool-wide aggregate — see **Multi-instance pool**
-above), `queue_depth` (gauge, pool-wide aggregate). Labels are deliberately
-low-cardinality — no filename, destination host, or user identity — by
-contract with Sluice.
+above), `queue_depth` (gauge, pool-wide aggregate). Per-instance (labeled
+`{instance}`): `pool_instance_healthy` (gauge), `pool_breaker_state` (gauge,
+0=closed/1=open/2=half_open), `pool_breaker_trips_total`. Labels are
+otherwise deliberately low-cardinality — no filename, destination host, or
+user identity — by contract with Sluice.
 
 ## API reference
 
@@ -210,6 +264,7 @@ GET is viewer, PUT is admin):
 | `/api/cdr/instances/enroll` | POST | admin | Exchange a one-time token + fingerprint for mTLS credentials |
 | `/api/cdr/instances/enroll/recover` | POST | admin | Resolve an enrollment whose outcome was left unknown (e.g. a client-side timeout mid-exchange) |
 | `/api/cdr/instances/enroll/receipts` | GET | viewer | Bounded recovery receipts for past enrollment operations |
+| `/api/cdr/instances/enroll/receipts` | DELETE | admin | Remove terminal recovery receipts — the repair path for a degraded receipt store |
 | `/api/cdr/instances/revoke` | POST | admin | Actively invalidate a credential at Sluice (by instance name or an orphaned fingerprint) — the Sluice-side counterpart to the local-only `DELETE` above |
 | `/api/cdr/policies` | GET/POST/DELETE | viewer / admin / admin | CDR policy rule CRUD |
 | `/api/cdr/health` | GET | viewer | Cached (or live, on demand) Sluice `Health` response |
@@ -219,11 +274,14 @@ GET is viewer, PUT is admin):
 
 - **A runtime `PUT {"enabled": false}` doesn't stick if static config still
   enables CDR** — see the restart caveat under **Enabling it** above.
-- **Enabling CDR with no reachable Sluice instance** leaves every
-  SSL-inspected file download depending on `fail_mode`: `open` (default)
-  silently stops sanitizing everything; `closed` blocks every eligible
-  download. Confirm `/api/cdr/health` reports a healthy instance before
-  relying on `closed`.
+- **Enabling CDR with no reachable Sluice instance does not block traffic,
+  even with `fail_mode=closed`.** With no client available at all, every
+  eligible file passes through unsanitized and silently — see the "no
+  client to call" gate under **Failure behavior**. `fail_mode=closed` only
+  ever blocks once a client was actually reached and that specific call
+  failed. Monitor `/api/cdr/health` and the per-instance breaker metrics,
+  not `fail_mode`, to know whether CDR is actually protecting traffic right
+  now.
 - **`default_profile` must exist on Sluice.** There is no client-side
   validation that the configured or rule-selected profile name is one Sluice
   actually advertises; a typo surfaces as a Sluice-side `ERROR` at request
