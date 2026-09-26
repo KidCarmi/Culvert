@@ -374,7 +374,7 @@ func apiAuthUsers(w http.ResponseWriter, r *http.Request) {
 			// counted, not logged per attempt and never treated as a write
 			// failure — the remedy is the permission repair the load-degraded
 			// row names, not free space (AU-37).
-			if errors.Is(err, session.ErrRevocationsUnread) {
+			if session.IsWriteFenced(err) {
 				noteRevocationPersistRefused(1)
 			} else {
 				logger.Printf("Session: failed to persist user revocation for %q: %v", sanitizeLog(username), err)

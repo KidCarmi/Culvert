@@ -10,7 +10,6 @@ package main
 
 import (
 	"encoding/hex"
-	"errors"
 	"net/http"
 	"os"
 	"strings"
@@ -143,7 +142,7 @@ func revokeSessionCookie(cookieName string, r *http.Request) {
 		// revocation is in force in memory and the load-degraded contract row
 		// already names the repair; counting it as a write failure would send
 		// the operator to check free space instead.
-		if errors.Is(err, session.ErrRevocationsUnread) {
+		if session.IsWriteFenced(err) {
 			noteRevocationPersistRefused(1)
 		} else {
 			logger.Printf("Session: failed to persist revocations: %v", err)

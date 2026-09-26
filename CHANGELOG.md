@@ -115,6 +115,13 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   counted as a write failure — no write was attempted and the volume may be
   healthy.
 
+  A corrupt revocations file that could not be moved aside is no longer
+  overwritten either. The quarantine's own failure message warned that "the
+  next save WILL OVERWRITE it" and that warning was the only mitigation; the
+  boot path now checks whether the rename succeeded and refuses writes when it
+  did not, so the only copy of the damaged file survives until an operator can
+  take it.
+
   The two ways a load can fail now carry the recovery action that matches each.
   A file that was read and would not parse is quarantined and has a restorable
   `.corrupt.*` copy; a file that could not be read at all (permissions, I/O, a

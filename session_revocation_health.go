@@ -120,6 +120,12 @@ type sessionRevocationHealth struct {
 	// socks5BindRemedy: a bounded classifier is worth nothing if one remedy
 	// is printed for every class.
 	LoadCorrupt bool
+	// LoadQuarantineFailed is true when LoadCorrupt is true AND the file could
+	// not be renamed aside, so the corrupt bytes are still at the target path
+	// and saves are fenced. The remedy differs from an ordinary quarantine —
+	// there is no .corrupt.* copy to restore, and the operator must free the
+	// path by hand — so the row must not print the quarantine remedy (AU-38).
+	LoadQuarantineFailed bool
 	// LoadDetail is the operator-facing reason the load failed.
 	//
 	// It is err.Error(), which embeds the configured PATH, so it belongs in
@@ -149,6 +155,15 @@ func noteRevocationPersistenceConfigured(path string) {
 // the error itself is how they would drift apart.
 func revocationLoadIsCorrupt(err error) bool {
 	return errors.Is(err, session.ErrRevocationsCorrupt)
+}
+
+// noteRevocationQuarantineFailed records that a corrupt revocations file could
+// not be moved aside. Saves are fenced by internal/session; this drives the
+// contract row so the operator is not sent after a copy that does not exist.
+func noteRevocationQuarantineFailed() {
+	sessionRevocationHealthMu.Lock()
+	sessionRevocationHealthy.LoadQuarantineFailed = true
+	sessionRevocationHealthMu.Unlock()
 }
 
 // noteRevocationLoadDegraded records that the persisted list did not load, so
@@ -333,6 +348,14 @@ func checkSessionRevocation() OperatorContractCheck {
 		}
 	}
 	if h.LoadDegraded {
+		if h.LoadCorrupt && h.LoadQuarantineFailed {
+			return OperatorContractCheck{
+				Code:           "session_revocation",
+				Status:         diagFail,
+				Message:        "the persisted session-revocation list could not be PARSED and could not be moved aside — the damaged file is still in place and is the only copy",
+				OperatorAction: "Copy the revocations file somewhere safe, then free its path (its name may be too long to rename, or its directory read-only) and restart. Writes are REFUSED until then, so the file will not be overwritten, and every revocation applied on this node in the meantime is held in memory only. There is no .corrupt.* copy — it could not be created.",
+			}
+		}
 		if h.LoadCorrupt {
 			return OperatorContractCheck{
 				Code:           "session_revocation",
@@ -457,7 +480,7 @@ func mergeAndPersistRevocations(entries []RevocationEntry, who string) int {
 		// once at boot — this function's own rule, two paragraphs up. The
 		// magnitude goes to the counter, which is also the size of the
 		// operator's re-apply job.
-		if errors.Is(err, session.ErrRevocationsUnread) {
+		if session.IsWriteFenced(err) {
 			noteRevocationPersistRefused(added)
 			return added
 		}

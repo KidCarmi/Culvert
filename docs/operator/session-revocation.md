@@ -110,6 +110,7 @@ unconfigured and states this coupling.
 | `warn` | No revocations file configured — revocations are lost on restart | Set `--revocations-file` (§3) |
 | `fail` | A revocation could not be **written** | §5 |
 | `fail` | The persisted list could not be **parsed** (corrupt; quarantined) | §6 |
+| `fail` | Corrupt **and could not be quarantined** — the damaged file is still in place | §6b |
 | `fail` | The persisted list could not be **read** (permissions, I/O, mount) | §6 |
 | `fail` | The revocations file is **missing** | §6a |
 
@@ -125,7 +126,7 @@ token — it is reachable at viewer role.
 | `culvert_session_revocation_users` | gauge | Deleted-account revocations in force on this node |
 | `culvert_session_revocation_persist_failures_total` | counter | Revocations applied in memory that could not be written |
 | `culvert_session_revocation_persist_degraded` | gauge | `1` while the latest revocation save failed and none has landed since (the page signal) |
-| `culvert_session_revocation_persist_refused_total` | counter | Revocations not written because the file could not be read this boot, so overwriting it was refused (§6) |
+| `culvert_session_revocation_persist_refused_total` | counter | Revocations not written because overwriting the file was refused — it could not be read this boot (§6), or it is corrupt and could not be quarantined (§6b) |
 
 These are emitted **unconditionally**, which is the deliberate exception to
 Culvert's usual "omit the series when the feature is off" rule. Elsewhere a flat
@@ -294,8 +295,6 @@ deliberately **not** counted as persistence failures
 and the volume may be perfectly healthy, so the remedy is the permission repair
 above, not free space.
 
----
-
 ## 6a. Recovery: the revocations file is missing
 
 The row reads:
@@ -336,6 +335,25 @@ different and stronger claim that *the revocations already in force are on
 disk*, and that is the one a missing file falsifies. Page on
 `_persist_degraded` (§5) for writes that are failing; watch this row for
 revocations that are not written down.
+
+---
+
+## 6b. Recovery: corrupt, and the quarantine failed
+
+If the damaged file could not be renamed aside — its name is too long for the
+`.corrupt.<timestamp>` suffix, or its directory is read-only — there is **no
+`.corrupt.*` copy to restore**, and the damaged file is still at its own path
+as the only record of what this node was enforcing.
+
+**Writes are refused while this holds.** Saving would replace those bytes, so
+`SaveRevocations` returns a refusal instead and every revocation applied in the
+meantime is memory-only (counted by
+`culvert_session_revocation_persist_refused_total`).
+
+1. Copy the revocations file somewhere safe **first**.
+2. Free its path — shorten the configured filename, or fix the directory's
+   permissions.
+3. Restart. Until then nothing is written and nothing is lost.
 
 ---
 

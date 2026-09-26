@@ -56,8 +56,22 @@ func loadSession(cfg sessionStartupConfig) error {
 			// the action advertised drift apart — which is exactly what the
 			// row did before, sending an operator after a .corrupt.* file
 			// that an unreadable (never-quarantined) file does not have.
+			//
+			// AU-38: the corrupt branch does NOT fence writes because the
+			// quarantine moves the file aside, freeing the path — but that is
+			// only true when the rename SUCCEEDS. quarantineCorruptStateFile
+			// returns "" when it fails, and its own log line says "the next
+			// save WILL OVERWRITE it", so discarding that return left the only
+			// copy of the corrupt evidence exposed to the first logout after
+			// boot. Reproduced: a basename long enough that `.corrupt.<ns>`
+			// exceeds the 255-byte filename limit while AtomicWrite's shorter
+			// `.tmp.*` still fits, so the quarantine fails and the save
+			// succeeds — destroying the file.
 			if revocationLoadIsCorrupt(err) {
-				quarantineCorruptStateFile("session_revocations", cfg.RevocationsFile, err)
+				if quarantineCorruptStateFile("session_revocations", cfg.RevocationsFile, err) == "" {
+					sessionRevoked.FenceWritesUnquarantined()
+					noteRevocationQuarantineFailed()
+				}
 			}
 			noteRevocationLoadDegraded(err)
 			return fmt.Errorf("load revocations: %w", err)

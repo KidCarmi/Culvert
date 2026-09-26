@@ -1513,3 +1513,122 @@ func TestChaos68_AU37_MergePathCountsTheRefusalAndStaysQuiet(t *testing.T) {
 		t.Errorf("the merge path logged a refusal as a persistence failure, once per sync tick: %q", logged.String())
 	}
 }
+
+// ---------------------------------------------------------------------------
+// AU-38: a premise that can be false.
+//
+// AU-37 fenced saves for a file that could not be READ, and deliberately
+// exempted the CORRUPT branch because "the quarantine moves the file aside, so
+// the path is free". That is a conditional statement recorded as an
+// unconditional one: the quarantine can FAIL, leaving the only copy in place.
+//
+// Reported by Codex on PR #1437 as a P2, and reproduced before fixing.
+// ---------------------------------------------------------------------------
+
+// au38LongBase returns a basename in the band where AtomicWrite's `.tmp.<10>`
+// suffix still fits inside the 255-byte filename limit but the quarantine's
+// longer `.corrupt.<19-digit ns>` does not — the shape that makes a failed
+// rename coexist with a successful write.
+func au38LongBase() string { return strings.Repeat("r", 235) }
+
+// DEFECT GATE. A corrupt file that could not be quarantined must never be
+// overwritten: it is the only copy of whatever the node was enforcing.
+//
+// This drives the REAL boot path (loadSession), not the primitive. A first
+// draft called quarantineCorruptStateFile and FenceWritesUnquarantined
+// directly from the test, and BOTH the pre-fix shape and an over-broad
+// always-fence shape passed it — it proved the fence works and nothing about
+// the call site that has to arm it, which is the entire fix. The same vacuity
+// AU-37's merge-path mutation exposed, one finding later.
+func TestChaos68_AU38_FailedQuarantineFencesTheSave(t *testing.T) {
+	withChaos68Revocations(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, au38LongBase())
+	corrupt := []byte(`{this is not a revocations array`)
+	if err := os.WriteFile(path, corrupt, 0o600); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	// Probe the filesystem band before asserting anything about it.
+	if err := os.Rename(path, fmt.Sprintf("%s.corrupt.%d", path, time.Now().UnixNano())); err == nil {
+		t.Skip("this filesystem allows the longer .corrupt.<ns> name; the band is not reproducible here")
+	}
+
+	if err := loadSession(sessionStartupConfig{RevocationsFile: path}); err == nil {
+		t.Fatal("loadSession must report the corrupt revocations file")
+	}
+
+	sessionRevoked.Revoke("a-token-this-process-knows", time.Now().Add(time.Hour))
+	if err := sessionRevoked.SaveRevocations(); !errors.Is(err, session.ErrRevocationsUnquarantined) {
+		t.Fatalf("SaveRevocations err = %v, want ErrRevocationsUnquarantined", err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if !bytes.Equal(got, corrupt) {
+		t.Errorf("the only copy of the corrupt file was overwritten: %q", got)
+	}
+	if row := checkSessionRevocation(); row.Status != diagFail {
+		t.Errorf("contract row = %q, want %q", row.Status, diagFail)
+	}
+}
+
+// DEFECT GATE. The two refusals must be DISTINGUISHABLE, because their
+// remedies differ — an unread file needs a permission repair, an
+// unquarantined one needs its path freed by hand.
+func TestChaos68_AU38_TheTwoRefusalsAreDistinctButBothFenced(t *testing.T) {
+	if errors.Is(session.ErrRevocationsUnquarantined, session.ErrRevocationsUnread) ||
+		errors.Is(session.ErrRevocationsUnread, session.ErrRevocationsUnquarantined) {
+		t.Error("the two refusal sentinels are not distinguishable, so a caller cannot tell the remedies apart")
+	}
+	for _, err := range []error{session.ErrRevocationsUnread, session.ErrRevocationsUnquarantined} {
+		if !session.IsWriteFenced(err) {
+			t.Errorf("IsWriteFenced(%v) = false; a call site would count this refusal as a failing volume", err)
+		}
+	}
+	if session.IsWriteFenced(os.ErrPermission) {
+		t.Error("IsWriteFenced accepted an ordinary write error, which would hide a real persistence failure")
+	}
+}
+
+// DEFECT GATE. The row must not send the operator after a .corrupt.* copy that
+// the failed quarantine never created.
+func TestChaos68_AU38_FailedQuarantineRowDoesNotPromiseACopy(t *testing.T) {
+	withChaos68Revocations(t)
+	noteRevocationPersistenceConfigured(filepath.Join(t.TempDir(), "revocations.json"))
+	noteRevocationLoadDegraded(session.ErrRevocationsCorrupt)
+	noteRevocationQuarantineFailed()
+
+	row := checkSessionRevocation()
+	if row.Status != diagFail {
+		t.Fatalf("status = %q, want %q", row.Status, diagFail)
+	}
+	blob := strings.ToLower(row.Message + " " + row.OperatorAction)
+	if strings.Contains(blob, "restore the quarantined") {
+		t.Errorf("the row offers a quarantined copy that was never created: %q", blob)
+	}
+	if !strings.Contains(blob, "only copy") && !strings.Contains(blob, "still in place") {
+		t.Errorf("the row does not say the damaged file is still at its path: %q", blob)
+	}
+}
+
+// CONTROL. A SUCCESSFUL quarantine must still leave the path writable — the
+// cheapest way to pass the gates above is to fence every corrupt load, which
+// would leave a quarantined node unable to persist anything until a restart.
+func TestChaos68_AU38_SuccessfulQuarantineStillAllowsSaves(t *testing.T) {
+	withChaos68Revocations(t)
+	path := filepath.Join(t.TempDir(), "revocations.json")
+	if err := os.WriteFile(path, []byte("{not json"), 0o600); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if err := loadSession(sessionStartupConfig{RevocationsFile: path}); err == nil {
+		t.Fatal("loadSession must report the corrupt revocations file")
+	}
+	if _, err := os.Stat(path); err == nil {
+		t.Fatal("precondition: an ordinary path must have been quarantined away")
+	}
+	sessionRevoked.Revoke("post-quarantine", time.Now().Add(time.Hour))
+	if err := sessionRevoked.SaveRevocations(); err != nil {
+		t.Fatalf("a successfully quarantined path must stay writable: %v", err)
+	}
+}

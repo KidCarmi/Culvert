@@ -157,9 +157,27 @@ type RevocationList struct {
 	// recover, which a write destroys permanently.
 	//
 	// Only the READ failure sets it. A CORRUPT file is quarantined (moved
-	// aside), so the path is free and writing a fresh list there is correct.
-	unread atomic.Bool
+	// aside), so the path is free and writing a fresh list there is correct —
+	// but ONLY IF THE QUARANTINE ACTUALLY HAPPENED, which is what
+	// fenceUnquarantined below covers.
+	writeFence atomic.Int32
 }
+
+// Write-fence reasons. The fence is ONE mechanism with distinct reasons,
+// because the two faults need different operator remedies and a single
+// sentinel would tell one of them the wrong thing — the AU-36 lesson (a
+// bounded classifier is worth nothing if one remedy is printed for every
+// class) applied to the refusal itself.
+const (
+	fenceNone = iota
+	// fenceUnread: this boot could not READ the file (AU-37).
+	fenceUnread
+	// fenceUnquarantined: the file was read, would not parse, and could NOT
+	// be moved aside. The corrupt bytes are still at the target path and are
+	// the only copy, so a save would destroy the evidence the quarantine
+	// exists to preserve (AU-38).
+	fenceUnquarantined
+)
 
 // NewRevocationList returns an empty list (used by tests to swap the
 // package singleton, mirroring the bl pointer-swap idiom).
@@ -413,13 +431,13 @@ func (r *RevocationList) SwapForTest() (restore func()) {
 	// sweep already recorded for resetDiagVerdictGlobals and broke again here:
 	// a new process-global with a latching state must be registered with its
 	// isolation primitive IN THE SAME CHANGE.
-	prevUnread := r.unread.Swap(false)
+	prevFence := r.writeFence.Swap(fenceNone)
 	return func() {
 		r.mu.Lock()
 		r.tokens = prevTokens
 		r.users = prevUsers
 		r.mu.Unlock()
-		r.unread.Store(prevUnread)
+		r.writeFence.Store(prevFence)
 	}
 }
 
@@ -467,6 +485,37 @@ var ErrRevocationsCorrupt = errors.New("session: revocations file corrupt")
 // permission or the mount and restart) with "check free space" — the wrong
 // investigation, which is the defect class AU-36 closed one layer up.
 var ErrRevocationsUnread = errors.New("session: revocations file was not read this boot; refusing to overwrite it")
+
+// ErrRevocationsUnquarantined is returned by SaveRevocations when the
+// revocations file was read, failed to parse, and could NOT be renamed aside.
+//
+// quarantineCorruptStateFile's own failure message says "the next save WILL
+// OVERWRITE it" — that warning was the product's only mitigation, and it is a
+// warning to a human who may never read it. The corrupt bytes at the target
+// path are the only copy of whatever revocations the node was enforcing, so
+// this refuses the save instead.
+//
+// It is DISTINCT from ErrRevocationsUnread because the remedies differ: an
+// unread file needs a permission or mount repair, while this one needs the
+// operator to copy the file elsewhere (its name is too long to rename, the
+// directory is read-only, and so on) before the node can persist again.
+var ErrRevocationsUnquarantined = errors.New("session: the corrupt revocations file could not be quarantined; refusing to overwrite the only copy")
+
+// IsWriteFenced reports whether err is a refusal to write rather than a
+// failed write. Callers MUST ask this rather than testing one sentinel: a
+// refusal is not a persistence failure, and a call site that recognises only
+// one reason will count the other as a failing volume and send the operator
+// after free space (the AU-36 defect, one layer down).
+func IsWriteFenced(err error) bool {
+	return errors.Is(err, ErrRevocationsUnread) || errors.Is(err, ErrRevocationsUnquarantined)
+}
+
+// FenceWritesUnquarantined refuses every later save because a corrupt file
+// could not be moved aside. Called by the boot path when
+// quarantineCorruptStateFile reports that its rename failed.
+func (r *RevocationList) FenceWritesUnquarantined() {
+	r.writeFence.Store(fenceUnquarantined)
+}
 
 // persistFailureObserver is notified whenever a revocation could not be made
 // durable. Installed by package main beside the metrics/health plane.
@@ -567,8 +616,11 @@ func (r *RevocationList) SaveRevocations() error {
 	// Refuse BEFORE taking saveMu and before any I/O: there is nothing to
 	// serialise, and a caller must not be delayed by other savers to be told
 	// that nothing will be written.
-	if r.unread.Load() {
+	switch r.writeFence.Load() {
+	case fenceUnread:
 		return ErrRevocationsUnread
+	case fenceUnquarantined:
+		return ErrRevocationsUnquarantined
 	}
 	r.saveMu.Lock()
 	defer r.saveMu.Unlock()
@@ -655,7 +707,7 @@ func (r *RevocationList) LoadRevocations() error {
 		// SaveRevocations refuses rather than renaming over content this
 		// process never saw. Cleared only by a load that actually succeeds,
 		// which in practice means a restart after the fault is repaired.
-		r.unread.Store(true)
+		r.writeFence.Store(fenceUnread)
 		return fmt.Errorf("read revocations: %w", err)
 	}
 	var entries []RevocationEntry
