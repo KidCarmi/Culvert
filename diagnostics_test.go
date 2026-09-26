@@ -1589,6 +1589,12 @@ func TestApiDiagnostics_OversizeUsernameSurfacedOnContract(t *testing.T) {
 	if strings.Contains(found.Message, "up to") || !strings.Contains(found.Message, "exempt") {
 		t.Errorf("admin_username_length message = %q, want the configured-name exemption stated without a byte cap", found.Message)
 	}
+	// Startup -user/auth.user and --reset-password store names without a
+	// length check (they are how an oversize account arises), so the message
+	// must not claim every account-creation path caps names.
+	if strings.Contains(found.Message, "every account-creation path") || !strings.Contains(found.Message, "--reset-password") {
+		t.Errorf("admin_username_length message = %q, want only the capping paths named and the uncapped sources identified", found.Message)
+	}
 }
 
 // TestApiDiagnostics_UsernameLengthOKByDefault pins the quiet case: an

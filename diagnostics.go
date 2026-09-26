@@ -533,7 +533,7 @@ func checkSessionSecret() OperatorContractCheck {
 //
 // The threshold is the 64-byte ACCOUNT limit, not the login endpoint's
 // 256-byte bound: every admin-facing sign-in form (static/index.html
-// li-user, maxlength=64) and every account-creation path caps at 64, so a
+// li-user, maxlength=64) and the setup / Admin Users creation paths cap at 64, so a
 // 65–256-byte name created via -user / --reset-password passes the API
 // bound yet cannot be typed into the dashboard login field. Reporting ok for
 // it would falsely confirm an account the operator cannot sign in with.
@@ -580,7 +580,8 @@ func checkOversizeConfiguredUsernames() OperatorContractCheck {
 		Code:   "admin_username_length",
 		Status: diagWarn,
 		Message: fmt.Sprintf("%d admin account%s have a username above the %d-byte account limit (longest: %d bytes) — "+
-			"the dashboard sign-in form accepts at most %d characters and every account-creation path caps names there, "+
+			"the dashboard sign-in form accepts at most %d characters and setup and Admin Users cap new names there "+
+			"(the -user / auth.user startup credentials and --reset-password do not, which is how such a name is created), "+
 			"so the account may be unusable from the admin UI (configured names are exempt from the login API's length bound, "+
 			"so the account can still authenticate through the API)",
 			n, plural, adminUsernameAccountLimit, maxLen, adminUsernameAccountLimit),
