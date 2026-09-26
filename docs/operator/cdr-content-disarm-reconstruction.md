@@ -107,18 +107,24 @@ Two ways to turn CDR on, and either one is enough — you do not need both:
    > calls `setCDREnabledRuntime(true)` (which flips the `Enabled` field on
    > whatever `cdrActiveCfg` currently holds) before `initCDRClient` builds
    > the pool from it. `GET /api/cdr/config` will show `defaultProfile`,
-   > `defaultMode`, `timeoutSec`, and `maxFileSizeMB` as empty/zero on a
-   > first enable like this, but the code that actually CONSUMES those
-   > fields falls back to the same values as an unconfigured install:
-   > `cdrProfileOrDefault` uses `"default"`, `normalizeMode("")` uses
-   > `ENFORCE`, `cdrCallContext`/`NewCDRClient` use 35s, and
-   > `maxFileSizeBytes()` uses 50 MiB — so the raw API values look worse
-   > than the actual enforced behavior. **`fail_mode` is the one field with
-   > no safe fallback**: `CDRFailOpen()` treats an empty string as
-   > fail-**open**, so a deployment that specifically needs `fail_mode:
-   > closed` silently runs fail-open instead until a restart, with no other
-   > effective difference from a correctly-configured node. If you need
-   > `fail_mode: closed` (the only setting this actually breaks), either
+   > `defaultMode`, `timeoutSec`, `maxFileSizeMB`, and `chunkSizeKB` as
+   > empty/zero on a first enable like this, but the code that actually
+   > CONSUMES those fields falls back to the SAME engine defaults an
+   > unconfigured install would use — `cdrProfileOrDefault` uses
+   > `"default"`, `normalizeMode("")` uses `ENFORCE`, `cdrCallContext`/
+   > `NewCDRClient` use 35s, `maxFileSizeBytes()` uses 50 MiB, and a zero
+   > `ChunkSize` uses 64 KiB — so none of these read as empty, unlimited, or
+   > disabled; the raw API values just look worse than the actual enforced
+   > behavior. **That is not the same claim as "no setting is lost",
+   > though**: if you specifically configured any of these away from the
+   > engine default — say `default_mode: REPORT_ONLY` for a staged rollout,
+   > a smaller `max_file_size_mb` for resource limits, or a longer
+   > `timeout_sec` for a slow Sluice — that choice is silently discarded on
+   > a first enable and replaced with the default, not preserved. **`fail_mode`
+   > is simply the one field where the default it's replaced with is LESS
+   > safe than what you likely configured**; every other field's default is
+   > merely different from yours, not unsafe. If you rely on `fail_mode:
+   > closed` OR on any other non-default `cdr.*` setting, either
    > start the process with `-cdr-enabled`/`cdr.enabled: true` from the very
    > first boot, or
    > restart once after your first GUI enrollment so `loadCDR` re-resolves
@@ -529,7 +535,7 @@ GET is viewer, PUT is admin):
 | `/api/cdr/config` | GET | viewer | Effective runtime config + derived fields (`clientActive`, `failOpen`) |
 | `/api/cdr/config` | PUT | admin | Toggle `enabled`; persists and applies immediately |
 | `/api/cdr/instances` | GET | viewer | List enrolled Sluice instances |
-| `/api/cdr/instances` | DELETE | admin | Remove a registry entry (`?name=…`) and shred its local cert material — does **not** notify Sluice. **In a multi-instance pool this shuts down the ENTIRE pool, not just the deleted member**: the handler's check is "is any client currently pickable" (`cdrActiveClient() != nil`), not "was the deleted instance the last one", so deleting one healthy instance out of several calls `shutdownCDRClient()` and empties the pool — CDR bypasses all traffic until the pool is rebuilt. The remaining instances stay in the registry and need no re-enrollment: a disable-then-enable via `PUT /api/cdr/config` or a process restart rebuilds the pool from them. **The opposite edge case: if every pool member's breaker is open at delete time**, `cdrActiveClient()` returns nil (nothing is pickable), so the pool-shutdown branch is SKIPPED entirely — the deleted instance's already-loaded in-memory TLS client stays in the live pool even though its registry entry and cert files are gone, and it can be selected again once its breaker later closes/half-opens, using a credential Sluice was never told is revoked. Follow a DELETE with a disable/enable cycle or restart if any breaker was open at the time, to be sure the removed member is actually gone from the running pool |
+| `/api/cdr/instances` | DELETE | admin | Remove a registry entry (`?name=…`) and shred its local cert material — does **not** notify Sluice. **In a multi-instance pool this shuts down the ENTIRE pool, not just the deleted member**: the handler's check is "is any client currently pickable" (`cdrActiveClient() != nil`), not "was the deleted instance the last one", so deleting one healthy instance out of several calls `shutdownCDRClient()` and empties the pool — CDR bypasses all traffic until the pool is rebuilt. The remaining instances stay in the registry and need no re-enrollment: a process restart rebuilds the pool from them cleanly. **A disable-then-enable via `PUT /api/cdr/config` also rebuilds the pool, but resets `cdrActiveCfg` to zero first** (see the runtime-toggle callout under **Enabling it** above) — prefer a restart if you're running any non-default `cdr.*` setting, especially `fail_mode: closed`. **The opposite edge case: if every pool member's breaker is open at delete time**, `cdrActiveClient()` returns nil (nothing is pickable), so the pool-shutdown branch is SKIPPED entirely — the deleted instance's already-loaded in-memory TLS client stays in the live pool even though its registry entry and cert files are gone, and it can be selected again once its breaker later closes/half-opens, using a credential Sluice was never told is revoked. Follow a DELETE with a disable/enable cycle or restart if any breaker was open at the time, to be sure the removed member is actually gone from the running pool |
 | `/api/cdr/instances/enroll` | POST | admin | Exchange a one-time token + fingerprint for mTLS credentials |
 | `/api/cdr/instances/enroll/recover` | POST | admin | Resolve an enrollment whose outcome was left unknown (e.g. a client-side timeout mid-exchange) |
 | `/api/cdr/instances/enroll/receipts` | GET | viewer | Bounded recovery receipts for past enrollment operations |
@@ -543,14 +549,18 @@ GET is viewer, PUT is admin):
 
 - **A runtime `PUT {"enabled": false}` doesn't stick if static config still
   enables CDR** — see the restart caveat under **Enabling it** above.
-- **Enabling CDR with no reachable Sluice instance does not block traffic,
-  even with `fail_mode=closed`.** With no client available at all, every
-  eligible file passes through unsanitized and silently — see the "no
-  client to call" gate under **Failure behavior**. `fail_mode=closed` only
-  ever blocks once a client was actually reached and that specific call
-  failed. Monitor `/api/cdr/health` and the per-instance breaker metrics,
-  not `fail_mode`, to know whether CDR is actually protecting traffic right
-  now.
+- **An unreachable Sluice is NOT the same condition as "no client to call",
+  and only the latter bypasses `fail_mode=closed`.** `grpc.NewClient` dials
+  lazily, so an unreachable-at-boot (or unreachable-right-now) Sluice still
+  has a pooled client: the first several `Sanitize` calls actually attempt
+  the RPC, fail, and are correctly blocked by `fail_mode=closed` via
+  `cdrErrorOutcome` — traffic is NOT waved through from the first failure.
+  Unconditional silent pass-through begins only once the pool is genuinely
+  **empty** (never enrolled, cert load failed, explicitly shut down) or
+  **every breaker has opened** from repeated failures — see the "no client
+  to call" gate under **Failure behavior**. Monitor `/api/cdr/health` and
+  the per-instance breaker metrics, not `fail_mode`, to know whether CDR is
+  actually protecting traffic right now.
 - **A large download is only sanitized up to the shared scan window, not up
   to `cdr.max_file_size_mb`** — see the callout under **Failure behavior**.
   The untouched remainder past `security_scan.max_scan_mb` ships to the
