@@ -39,6 +39,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 
@@ -263,6 +264,37 @@ func revocationBackingFileIsGone() bool {
 	return err != nil && os.IsNotExist(err)
 }
 
+// revocationTargetParentMissing reports that the revocations file's PARENT
+// DIRECTORY does not exist, so the target cannot be created at all.
+//
+// AU-39. revocationBackingFileIsGone answers ENOENT identically for a deleted
+// FILE and for a deleted MOUNT, and AU-35 leaned on the difference without
+// checking it: its recorded reasoning is that a missing file does not falsify
+// "a revocation applied right now would survive", BECAUSE AtomicWrite creates
+// it. That premise holds only while the parent exists — AtomicWrite opens its
+// temp with os.CreateTemp(dir, …) and never calls MkdirAll, so a vanished
+// parent fails the write. Reproduced: remove the directory and the gauge,
+// /api/cluster/revocations and the metric all still read durable until some
+// later save fails, which on a standalone node (no sync loop) means until the
+// next logout — the unearned green AU-31 exists to prevent, one layer out.
+//
+// Only a definitively absent parent counts (os.IsNotExist). EACCES or EIO are
+// not evidence the directory is gone, which is the rule LoadRevocations
+// already applies to an unreadable file and AU-35 to a vanished one.
+func revocationTargetParentMissing() bool {
+	path := session.RevocationsPath()
+	if path == "" {
+		return false
+	}
+	if _, err := os.Stat(path); err == nil || !os.IsNotExist(err) {
+		// The target itself is present (or its absence is unproven), so the
+		// parent necessarily is too. Costs one stat in the common case.
+		return false
+	}
+	_, err := os.Stat(filepath.Dir(path))
+	return err != nil && os.IsNotExist(err)
+}
+
 // revocationsAreDurable reports whether a revocation applied right now would
 // survive this process.
 //
@@ -282,7 +314,12 @@ func revocationBackingFileIsGone() bool {
 // its published meaning to report a condition the row already names.
 func revocationsAreDurable() bool {
 	h := sessionRevocationState()
-	return h.Configured && !h.LoadDegraded && !sessionRevocationPersistDegraded.Load()
+	if !h.Configured || h.LoadDegraded || sessionRevocationPersistDegraded.Load() {
+		return false
+	}
+	// AU-39: the one ENOENT case that DOES falsify this predicate's claim.
+	// A missing file is recreated by the next save; a missing parent is not.
+	return !revocationTargetParentMissing()
 }
 
 // resetSessionRevocationHealthForTest clears the record. Test isolation only.
@@ -370,6 +407,15 @@ func checkSessionRevocation() OperatorContractCheck {
 			Message: fmt.Sprintf("the persisted session-revocation list could not be READ — revocations applied before this restart are NOT in force on this node, and %d applied since have been held in memory only",
 				sessionRevocationPersistRefused.Load()),
 			OperatorAction: "Check the permissions and the mount backing the revocations file, then restart. The file was left in place and is NOT being written to while it cannot be read, so its contents may still be intact and a restart after the repair recovers them. Every revocation applied on this node in the meantime is in force now and gone at the next restart, so re-apply any logout or account deletion that must hold.",
+		}
+	}
+	if h.Configured && revocationTargetParentMissing() {
+		return OperatorContractCheck{
+			Code:   "session_revocation",
+			Status: diagFail,
+			Message: fmt.Sprintf("the directory holding the revocations file is gone — the %d token and %d account revocation(s) in force on this node are held in memory only, and no save can recreate them",
+				tokens, users),
+			OperatorAction: "Restore the mount or directory backing the revocations file, then restart. Unlike a deleted file, this cannot be repaired by the next logout or config sync — the parent directory has to exist before anything can be written. Re-apply any logout or account deletion that must hold.",
 		}
 	}
 	if h.Configured && revocationBackingFileIsGone() {

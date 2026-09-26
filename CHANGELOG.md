@@ -120,7 +120,10 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   next save WILL OVERWRITE it" and that warning was the only mitigation; the
   boot path now checks whether the rename succeeded and refuses writes when it
   did not, so the only copy of the damaged file survives until an operator can
-  take it.
+  take it. And a revocations directory that disappears is no longer reported as
+  durable: a deleted file is recreated by the next save, but a deleted parent
+  directory cannot be, and the metric, the cluster API and the diagnostics row
+  said otherwise until some later write happened to fail.
 
   The two ways a load can fail now carry the recovery action that matches each.
   A file that was read and would not parse is quarantined and has a restorable

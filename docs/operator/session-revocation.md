@@ -111,6 +111,7 @@ unconfigured and states this coupling.
 | `fail` | A revocation could not be **written** | §5 |
 | `fail` | The persisted list could not be **parsed** (corrupt; quarantined) | §6 |
 | `fail` | Corrupt **and could not be quarantined** — the damaged file is still in place | §6b |
+| `fail` | The **directory** holding the revocations file is gone | §6c |
 | `fail` | The persisted list could not be **read** (permissions, I/O, mount) | §6 |
 | `fail` | The revocations file is **missing** | §6a |
 
@@ -354,6 +355,22 @@ meantime is memory-only (counted by
 2. Free its path — shorten the configured filename, or fix the directory's
    permissions.
 3. Restart. Until then nothing is written and nothing is lost.
+
+---
+
+## 6c. Recovery: the directory is gone
+
+Distinct from §6a: if the *file* is missing the next save recreates it, but if
+the **parent directory or mount** is missing nothing can. `AtomicWrite` creates
+its temporary file inside that directory and never creates the directory
+itself, so every save fails until the mount is back.
+
+The node reports `durable = 0` and the row fails immediately rather than
+waiting for a write to discover it.
+
+1. Restore the mount or directory.
+2. Restart.
+3. Re-apply any logout or account deletion that had to hold.
 
 ---
 

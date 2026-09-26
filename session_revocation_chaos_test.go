@@ -1515,14 +1515,16 @@ func TestChaos68_AU37_MergePathCountsTheRefusalAndStaysQuiet(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// AU-38: a premise that can be false.
+// AU-38 / AU-39: two premises that can be false.
 //
 // AU-37 fenced saves for a file that could not be READ, and deliberately
 // exempted the CORRUPT branch because "the quarantine moves the file aside, so
-// the path is free". That is a conditional statement recorded as an
-// unconditional one: the quarantine can FAIL, leaving the only copy in place.
+// the path is free". AU-35 left the durable gauge alone because "AtomicWrite
+// creates the file". Both are conditional statements that were treated as
+// unconditional: the quarantine can FAIL (leaving the only copy in place), and
+// AtomicWrite cannot create anything when the PARENT DIRECTORY is gone.
 //
-// Reported by Codex on PR #1437 as a P2, and reproduced before fixing.
+// Both reported by Codex on PR #1437 as P2s, and both reproduced before fixing.
 // ---------------------------------------------------------------------------
 
 // au38LongBase returns a basename in the band where AtomicWrite's `.tmp.<10>`
@@ -1630,5 +1632,79 @@ func TestChaos68_AU38_SuccessfulQuarantineStillAllowsSaves(t *testing.T) {
 	sessionRevoked.Revoke("post-quarantine", time.Now().Add(time.Hour))
 	if err := sessionRevoked.SaveRevocations(); err != nil {
 		t.Fatalf("a successfully quarantined path must stay writable: %v", err)
+	}
+}
+
+// DEFECT GATE. A vanished PARENT falsifies "a revocation applied right now
+// would survive"; a vanished FILE does not. The gauge must tell them apart.
+func TestChaos68_AU39_VanishedParentIsNotDurable(t *testing.T) {
+	withChaos68Revocations(t)
+	parent := filepath.Join(t.TempDir(), "mount")
+	if err := os.Mkdir(parent, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	path := filepath.Join(parent, "revocations.json")
+	session.SetRevocationsPath(path)
+	noteRevocationPersistenceConfigured(path)
+	if err := sessionRevoked.SaveRevocations(); err != nil {
+		t.Fatalf("baseline save: %v", err)
+	}
+	if !revocationsAreDurable() {
+		t.Fatalf("precondition: a healthy node must read durable")
+	}
+
+	if err := os.RemoveAll(parent); err != nil {
+		t.Fatalf("remove parent: %v", err)
+	}
+	if revocationsAreDurable() {
+		t.Error("durable is true with the parent directory gone, but no save can recreate the target")
+	}
+	row := checkSessionRevocation()
+	if row.Status != diagFail {
+		t.Errorf("status = %q, want %q with the parent gone", row.Status, diagFail)
+	}
+	blob := strings.ToLower(row.Message + " " + row.OperatorAction)
+	if !strings.Contains(blob, "director") && !strings.Contains(blob, "mount") {
+		t.Errorf("the row does not name the missing directory/mount: %q", blob)
+	}
+	// It must NOT repeat the vanished-FILE remedy, which is false here.
+	if strings.Contains(blob, "next logout or account deletion recreates it") {
+		t.Errorf("the row promises a recreate that cannot happen with no parent: %q", blob)
+	}
+}
+
+// CONTROL. A vanished FILE with an intact parent is still durable — the
+// cheapest way to pass the gate above is to report every ENOENT non-durable,
+// which would contradict AU-35's recorded (and correct) split and page every
+// node whose file is merely waiting to be rewritten.
+func TestChaos68_AU39_VanishedFileWithIntactParentStaysDurable(t *testing.T) {
+	withChaos68Revocations(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "revocations.json")
+	session.SetRevocationsPath(path)
+	noteRevocationPersistenceConfigured(path)
+	if err := sessionRevoked.SaveRevocations(); err != nil {
+		t.Fatalf("baseline save: %v", err)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatalf("remove file: %v", err)
+	}
+	if !revocationsAreDurable() {
+		t.Error("a deleted file with an intact parent is still recreatable by the next save; durable must stay true")
+	}
+	if revocationTargetParentMissing() {
+		t.Error("revocationTargetParentMissing reported a missing parent for an intact directory")
+	}
+}
+
+// CONTROL. An UNCONFIGURED node must pay nothing and claim nothing.
+func TestChaos68_AU39_UnconfiguredNodeNeedsNoParentCheck(t *testing.T) {
+	withChaos68Revocations(t)
+	session.SetRevocationsPath("")
+	if revocationTargetParentMissing() {
+		t.Error("an unconfigured node reported a missing parent")
+	}
+	if revocationsAreDurable() {
+		t.Error("an unconfigured node must not read durable")
 	}
 }
