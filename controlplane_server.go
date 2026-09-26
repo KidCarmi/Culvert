@@ -775,7 +775,7 @@ type HAStateBundle struct {
 //
 // The standby MERGES additively and persists, so an entry carried by any
 // earlier sync is retained even once it falls below the cut.
-func fitRevocationsToBudget(entries []RevocationEntry, budget int) ([]RevocationEntry, int) {
+func fitRevocationsToBudget(entries []RevocationEntry, budget int) (kept []RevocationEntry, dropped int) {
 	if len(entries) == 0 {
 		return entries, 0
 	}
@@ -794,23 +794,23 @@ func fitRevocationsToBudget(entries []RevocationEntry, budget int) ([]Revocation
 		}
 		return a.Token < b.Token
 	})
-	used, kept := len("[]"), 0
+	used, n := len("[]"), 0
 	for i := range sorted {
 		b, err := json.Marshal(sorted[i])
 		if err != nil {
 			break
 		}
 		cost := len(b)
-		if kept > 0 {
+		if n > 0 {
 			cost++ // the separating comma
 		}
 		if used+cost > budget {
 			break
 		}
 		used += cost
-		kept++
+		n++
 	}
-	return sorted[:kept], len(sorted) - kept
+	return sorted[:n], len(sorted) - n
 }
 
 // normalizeAdvertisedAddr turns a standby's advertised address into one the
