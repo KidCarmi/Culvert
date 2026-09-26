@@ -16149,8 +16149,13 @@ function backupNowPollStart(opId, filename) {
   // alike): a status endpoint that keeps failing must not keep an open
   // browser polling forever.
   const deadline = Date.now() + 600000;
+  // lastSeenRunning: only an observed non-terminal state justifies "still
+  // running"; if no status check ever succeeded the outcome is unknown.
+  let lastSeenRunning = false;
   const giveUp = () => {
-    el.innerHTML += '<p class="hint">Still running - Refresh resumes the status check.</p>';
+    el.innerHTML += lastSeenRunning
+      ? '<p class="hint">Still running - Refresh resumes the status check.</p>'
+      : '<p class="hint">Status unknown (the status check kept failing) - Refresh resumes the status check.</p>';
     backupNowPollTimer = null;
     backupNowPolling = false;
   };
@@ -16184,6 +16189,7 @@ function backupNowPollStart(opId, filename) {
       loadBackups();
       return;
     }
+    lastSeenRunning = true;
     el.innerHTML = '<p class="hint">Backing up ' + escHtml(filename || '') + '… (' + escHtml(op.state || 'running') + ')</p>';
     if (Date.now() >= deadline) { giveUp(); return; }
     backupNowPollTimer = setTimeout(poll, 3000);

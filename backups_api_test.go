@@ -301,7 +301,7 @@ func TestAPIBackupsCreate_EncryptSendsEnvPrefixedRef(t *testing.T) {
 	agent := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewDecoder(r.Body).Decode(&gotReq)
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"op_id":"01ARZ3NDEKTSV4RRFFQ69G5FAW","state":"pending"}`))
+		_, _ = w.Write([]byte(`{"op_id":"01ARZ3NDEKTSV4RRFFQ69G5FAW","kind":"backup.create","state":"pending"}`))
 	}))
 	defer agent.Close()
 	t.Setenv(envMaintAgentURL, agent.URL)
@@ -597,6 +597,8 @@ func TestAPIBackupsCreate_MalformedAgentSuccessIs502(t *testing.T) {
 		"json null":   `null`,
 		"json array":  `[]`,
 		"wrong shape": `{"op_id":["01ARZ3NDEKTSV4RRFFQ69G5FAV"]}`,
+		"no kind":     `{"op_id":"01ARZ3NDEKTSV4RRFFQ69G5FAV","state":"pending"}`,
+		"wrong kind":  `{"op_id":"01ARZ3NDEKTSV4RRFFQ69G5FAV","kind":"upgrade.apply","state":"pending"}`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			resetBackupsCache(t)

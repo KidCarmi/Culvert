@@ -321,12 +321,14 @@ func apiBackupsCreate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, reason, http.StatusBadGateway)
 		return
 	}
-	// A 2xx is a success only when it carries an operation record with a
-	// valid op_id: without one the GUI would announce "Backup started" and
-	// then never poll, a false success with no way to learn the outcome.
+	// A 2xx is a success only when it carries a backup.create operation
+	// record with a valid op_id: without one the GUI would announce "Backup
+	// started" and then never poll, and a record of any other kind would be
+	// refused 404 by the status route, so its outcome could never be learned.
 	opID, _ := opResp["op_id"].(string)
-	if !backupOpIDRE.MatchString(opID) {
-		http.Error(w, "maintenance agent returned a malformed operation record (no valid op_id); "+
+	opKind, _ := opResp["kind"].(string)
+	if !backupOpIDRE.MatchString(opID) || opKind != backupOpKind {
+		http.Error(w, "maintenance agent returned a malformed operation record (no valid op_id or kind); "+
 			"the backup may still have started — check the archive listing", http.StatusBadGateway)
 		return
 	}

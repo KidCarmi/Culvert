@@ -119,3 +119,32 @@ func TestUIContract_BackupNowPollIsResumableAfterDeadline(t *testing.T) {
 		t.Error("backupNowPollStart must drop the retained op id on both terminal branches")
 	}
 }
+
+// A give-up after status checks that never succeeded must not claim the
+// backup is "Still running": no state was observed, and it may already have
+// failed, completed, or vanished after an agent restart (Codex review).
+func TestUIContract_BackupNowGiveUpDoesNotClaimRunningWithoutEvidence(t *testing.T) {
+	html, err := os.ReadFile(staticIndexHTMLPath())
+	if err != nil {
+		t.Fatalf("read index.html: %v", err)
+	}
+	s := string(html)
+	i := strings.Index(s, "function backupNowPollStart(")
+	if i < 0 {
+		t.Fatal("backupNowPollStart not found")
+	}
+	body := s[i:]
+	if k := strings.Index(body, "\n}\n"); k >= 0 {
+		body = body[:k]
+	}
+	for _, want := range []string{
+		"let lastSeenRunning = false;",
+		"el.innerHTML += lastSeenRunning",
+		"Status unknown (the status check kept failing)",
+		"lastSeenRunning = true;",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("backupNowPollStart must only report \"still running\" on an observed non-terminal state: missing %q", want)
+		}
+	}
+}
