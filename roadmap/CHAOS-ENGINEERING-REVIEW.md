@@ -8817,6 +8817,31 @@ prevent it. The trim now lives inside the helper and both call sites lost theirs
 
 > **A single derivation that excludes the normalisation is two derivations.**
 
+**THE ROUND-7 FIX THEN FAILED THE COMPLEXITY GATE, AND THE REFACTOR FOUND A
+STRONGER PROPERTY THAN THE ORIGINAL SHAPE HAD.** `Gate · golangci-lint` went red
+on the first round-7 commit: `cyclop` put `ReplaceAll` at 16 against a max of 15,
+and `gocognit` put the new repoint gate at 34 against 30 — both because the fix
+wrote the episode-retirement rule out TWICE and the gate nested its assertions
+two closures deep. Local `golangci-lint` cannot run on this module (a Go 1.25
+binary against a Go 1.26 module), and the pre-push `gocyclo` check measured the
+functions the change ADDED rather than the existing ones the change pushed over
+the line — *measure the functions your diff touches, not the ones it introduces.*
+
+The remedy is the shape the finding argued for anyway: one
+`retireEpisodeAfterCommit` helper called once from each publication site, which
+is how the two paths are kept from drifting — the very defect round 7 fixed.
+`Upsert` drops 18 → 13 and `ReplaceAll` 16 → 11. Re-running the mutation proofs
+against the refactored shape produced a result the original did not: dropping the
+`prevSource != newSource` guard fails ALL FIVE subtests rather than the two
+controls, because the commonest state of all is a profile recompiling against the
+SAME still-broken source. Without that guard the write retires the episode the
+stale compile just opened, so an ongoing outage's degradation signal is erased by
+every recompile and `culvert_idp_metadata_degraded` can never reach its
+threshold — strictly worse than the leak the change exists to fix. *A refactor
+forced by a lint gate is worth re-running every mutation proof through: the
+guard's most important consequence was one the first shape's gates could not
+see.*
+
 **AND A GATE OF MINE WAS VACUOUS FOR A REASON WORTH RECORDING.** The behavioural
 half of the trailing-slash gate drove `Upsert` with an OIDC profile carrying no
 `ClientID` — and `NewOIDCFlowProvider` refuses on a missing client id BEFORE it
