@@ -12,16 +12,33 @@
 // (the endpoint already exists and is read-only); it only gives the CP admin
 // GUI/API a way to reach it, matching the read pattern release_dispatch_exec.go
 // / release_api.go already use to talk to the same maintenance agent.
+//
+// This file also gives the admin GUI a way to TRIGGER an on-demand backup
+// (POST /api/backups) and poll it to completion (GET
+// /api/backups/operations/{id}). D1.5 (roadmap/D1.5-docker-compose-operator-
+// contract.md) documents backup creation as "runtime-OK" — safe to run at
+// any time, no downtime required — yet the only way to run one today is the
+// same `docker compose --profile cli run --rm cli --backup ...` SSH
+// invocation used for listing. The maintenance agent already implements
+// POST /v1/backups end to end (handleBackupCreate, handlers_d16b.go: input
+// validation, idempotency, exclusive maintenance-lock serialization against
+// a concurrent backup/restore/upgrade) and already reports operation
+// progress via GET /v1/operations/{id}; both handlers below are thin,
+// pass-through wrappers over that existing surface — no new agent
+// capability, no change to what the agent is allowed to do.
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"os"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -85,6 +102,7 @@ func fetchAgentBackups(ctx context.Context, ep AgentEndpoint) ([]backupListEntry
 
 func registerBackupsRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/backups", apiBackups)
+	mux.HandleFunc("/api/backups/operations/", apiBackupOperationStatus)
 }
 
 // backupsCache single-flights and briefly caches the agent listing. Every
@@ -103,29 +121,59 @@ var backupsCache struct {
 
 const backupsCacheTTL = 15 * time.Second
 
-// apiBackups is a read-only, viewer-role GET surfacing the backup archive
-// directory (as scanned by the CP-local maintenance agent's GET /v1/backups)
-// so an admin can answer "is my backup job actually working" from the GUI
+// apiBackups serves GET (viewer — list, unchanged) and POST (admin —
+// trigger a new backup). The requireRole call for each verb stays directly
+// in this switch, not in a delegated helper, so the C1.5 metadata/handler
+// parity scanner can attribute MinRole per method with confidence instead
+// of falling back to the MethodAny/"unknown" shape apiIdPRouter uses.
+func apiBackups(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		if !requireRole(w, r, RoleViewer) {
+			return
+		}
+		apiBackupsList(w, r)
+	case http.MethodPost:
+		if !requireRole(w, r, RoleAdmin) {
+			return
+		}
+		apiBackupsCreate(w, r)
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// apiBackupsList answers "is my backup job actually working" from the GUI
 // instead of SSHing in to run the CLI by hand. Newest-first so the question
 // an admin actually has ("did the most recent backup happen") is the first
-// row, not buried in a filename-sorted list.
-func apiBackups(w http.ResponseWriter, r *http.Request) {
-	if !requireRole(w, r, RoleViewer) {
-		return
-	}
-	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
+// row, not buried in a filename-sorted list. Caller has already checked
+// RoleViewer.
+func apiBackupsList(w http.ResponseWriter, r *http.Request) {
+	// The lock is held across the agent fetch (single-flight) but released
+	// BEFORE encoding: a viewer that stops reading its response would
+	// otherwise pin the mutex indefinitely (the admin UI server has no
+	// WriteTimeout), stalling every listing and cache invalidation. The
+	// payload is replaced, never mutated, so encoding it unlocked is safe.
+	jsonOK(w, backupsListingPayload(r.Context()))
+}
+
+// backupsListingPayload returns the cached listing inside the TTL, else
+// performs one agent fetch under the cache lock and caches it.
+func backupsListingPayload(ctx context.Context) map[string]any {
 	backupsCache.mu.Lock()
 	defer backupsCache.mu.Unlock()
 	if backupsCache.payload != nil && time.Since(backupsCache.at) < backupsCacheTTL {
-		jsonOK(w, backupsCache.payload)
-		return
+		return backupsCache.payload
 	}
-	out := buildBackupsPayload(r.Context())
-	backupsCache.payload, backupsCache.at = out, time.Now()
-	jsonOK(w, out)
+	// Stamp the FETCH START, not its return: the agent scans the directory
+	// somewhere inside the fetch, so a listing that returns after an op's
+	// finished_at may still predate the archive. The terminal-poll
+	// invalidation compares this stamp against finished_at, so it must never
+	// claim a snapshot is newer than it can prove.
+	start := time.Now()
+	out := buildBackupsPayload(ctx)
+	backupsCache.payload, backupsCache.at = out, start
+	return out
 }
 
 // buildBackupsPayload performs one agent listing and shapes the response.
@@ -161,4 +209,284 @@ func buildBackupsPayload(ctx context.Context) map[string]any {
 		out["newest_at"] = entries[0].ModifiedAt.UTC().Format(time.RFC3339)
 	}
 	return out
+}
+
+// ─── POST /api/backups (backup.create trigger) ────────────────────────────
+
+// backupCreateAgentRequest is the wire shape the agent's POST /v1/backups
+// expects (handlers_d16b.go backupCreateRequest). PassphraseRef must be
+// "env:NAME" — the agent resolves NAME from its own restricted environment
+// (EnvAllow) at execution time; the secret value itself never crosses this
+// API.
+type backupCreateAgentRequest struct {
+	Filename      string `json:"filename"`
+	Encrypt       bool   `json:"encrypt"`
+	PassphraseRef string `json:"passphrase_ref,omitempty"`
+}
+
+// backupCreateUIRequest is what the admin GUI sends: a bare env var NAME
+// (matching the hint already shown on the Release Dispatch pre-backup
+// field), never a secret value. apiBackupsCreate builds the "env:" prefix
+// the agent requires so the GUI caller doesn't need to know that wire detail.
+//
+// Encrypt is a pointer so an OMITTED choice is distinguishable from an
+// explicit false: the archive holds credentials, private keys, session
+// material and TOTP secrets, so the server never infers a plaintext backup
+// from silence (D1.5: encryption is the production default).
+type backupCreateUIRequest struct {
+	Encrypt          *bool  `json:"encrypt"`
+	PassphraseEnvVar string `json:"passphraseEnvVar,omitempty"`
+}
+
+// backupTriggerReadBound bounds the agent's create-op response (op_id / kind
+// / state / deduped — a few hundred bytes of JSON).
+const backupTriggerReadBound = 1 << 16
+
+// backupCreateEnvVar validates that encrypt was chosen explicitly and agrees
+// with passphraseEnvVar, and returns the trimmed env var name, or a non-empty
+// 400 message.
+func backupCreateEnvVar(body backupCreateUIRequest) (envVar, errMsg string) {
+	envVar = strings.TrimSpace(body.PassphraseEnvVar)
+	switch {
+	case body.Encrypt == nil:
+		return "", "encrypt is required: true (with passphraseEnvVar) for an encrypted backup, or an explicit false for an unencrypted dev/lab backup"
+	case *body.Encrypt && envVar == "":
+		return "", "encrypt requires passphraseEnvVar (the name of an env var the maintenance agent is allowed to read)"
+	case !*body.Encrypt && envVar != "":
+		return "", "passphraseEnvVar must be omitted unless encrypt is true"
+	}
+	return envVar, ""
+}
+
+// backupArchiveName generates the on-demand archive filename. An encrypted
+// archive is an AES-GCM blob, not gzip, so it carries the repository's
+// *.tar.gz.enc convention (the agent's own pre-upgrade backups use it too) —
+// tooling that selects by suffix must not mistake it for gzip.
+func backupArchiveName(now time.Time, encrypt bool) string {
+	suffix := ".tar.gz"
+	if encrypt {
+		suffix = ".tar.gz.enc"
+	}
+	return fmt.Sprintf("culvert-backup-%s-%06d%s", now.Format("20060102-150405"), now.Nanosecond()/1000, suffix)
+}
+
+// apiBackupsCreate triggers a new backup via the maintenance agent's
+// existing POST /v1/backups and returns its op_id for polling. Caller has
+// already checked RoleAdmin. Failure to reach or use the agent is reported
+// as a non-2xx error (unlike apiBackupsList's 200-with-available:false
+// shape) — this is a deliberate user action from a button click, not an
+// auto-refreshing panel, so the GUI's normal fetch-error handling
+// (try/catch → toast) is the right response.
+func apiBackupsCreate(w http.ResponseWriter, r *http.Request) {
+	var body backupCreateUIRequest
+	if err := decodeJSON(r, &body); err != nil && !errors.Is(err, io.EOF) {
+		http.Error(w, "invalid JSON body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	envVar, verr := backupCreateEnvVar(body)
+	if verr != "" {
+		http.Error(w, verr, http.StatusBadRequest)
+		return
+	}
+	ep, ok := resolveLocalMaintAgentEndpoint()
+	if !ok {
+		http.Error(w, "maintenance agent not configured", http.StatusServiceUnavailable)
+		return
+	}
+	encrypt := *body.Encrypt // non-nil: backupCreateEnvVar refuses an omitted choice
+	filename := backupArchiveName(time.Now().UTC(), encrypt)
+	agentReq := backupCreateAgentRequest{Filename: filename, Encrypt: encrypt}
+	if envVar != "" {
+		agentReq.PassphraseRef = "env:" + envVar
+	}
+	payload, err := json.Marshal(agentReq)
+	if err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	fctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+	status, data, err := callMaintAgent(fctx, ep, http.MethodPost, "/v1/backups", payload, backupTriggerReadBound)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+	var opResp map[string]any
+	_ = json.Unmarshal(data, &opResp)
+	if status != http.StatusOK && status != http.StatusAccepted {
+		reason := fmt.Sprintf("maintenance agent returned HTTP %d", status)
+		if msg, ok := opResp["error"].(string); ok && msg != "" {
+			reason = msg
+		}
+		http.Error(w, reason, http.StatusBadGateway)
+		return
+	}
+	// A 2xx is a success only when it carries a backup.create operation
+	// record with a valid op_id: without one the GUI would announce "Backup
+	// started" and then never poll, and a record of any other kind would be
+	// refused 404 by the status route, so its outcome could never be learned.
+	opID, _ := opResp["op_id"].(string)
+	opKind, _ := opResp["kind"].(string)
+	if !backupOpIDRE.MatchString(opID) || opKind != backupOpKind {
+		http.Error(w, "maintenance agent returned a malformed operation record (no valid op_id or kind); "+
+			"the backup may still have started — check the archive listing", http.StatusBadGateway)
+		return
+	}
+	auditEvent(r, "backup.trigger", filename, fmt.Sprintf("encrypt=%v op_id=%s", encrypt, opID))
+	// The listing is cached for backupsCacheTTL — drop it so the next GET
+	// (e.g. right after this op reaches a terminal state) shows the new
+	// archive instead of a stale pre-trigger snapshot.
+	backupsCache.mu.Lock()
+	backupsCache.payload = nil
+	backupsCache.mu.Unlock()
+	jsonOK(w, map[string]any{
+		"triggered": true,
+		"filename":  filename,
+		"opId":      opID,
+		"state":     opResp["state"],
+		"deduped":   opResp["deduped"],
+	})
+}
+
+// ─── GET /api/backups/operations/{id} (poll a triggered backup) ──────────
+
+// backupOpIDRE accepts exactly the shape the agent's validOpID accepts — a
+// canonical 26-character Crockford-base32 ULID (ulid.ParseStrict: no I/L/O/U,
+// first character 0-7 so the 128-bit value cannot overflow). Matching the
+// agent's contract here, rather than a looser alphanumeric bound, means a
+// malformed id is answered 400 by the CP instead of reaching the agent,
+// being rejected there, and surfacing as a misleading 502 upstream failure.
+var backupOpIDRE = regexp.MustCompile(`^[0-7][0-9A-HJKMNP-TV-Za-hjkmnp-tv-z]{25}$`)
+
+// backupOpKind is the agent's op kind for a backup this API can trigger
+// (cmd/culvert-maint/internal/ops KindBackupCreate).
+const backupOpKind = "backup.create"
+
+// backupOpRecord is the subset of the agent's op record (ops.Op) this API
+// inspects before passing the record through.
+type backupOpRecord struct {
+	Kind     string     `json:"kind"`
+	State    string     `json:"state"`
+	Finished *time.Time `json:"finished_at,omitempty"`
+}
+
+// terminal reports whether the op has reached a terminal state. Kept in step
+// with cmd/culvert-maint/internal/ops State*.
+func (op backupOpRecord) terminal() bool {
+	switch op.State {
+	case "succeeded", "failed", "cancelled":
+		return true
+	}
+	return false
+}
+
+// apiBackupOperationStatus lets the GUI poll a triggered backup (or any
+// other op_id the agent knows about) to a terminal state via the agent's
+// existing GET /v1/operations/{id} — viewer role, matching apiBackupsList.
+func apiBackupOperationStatus(w http.ResponseWriter, r *http.Request) {
+	if !requireRole(w, r, RoleViewer) {
+		return
+	}
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	id := strings.TrimPrefix(r.URL.Path, "/api/backups/operations/")
+	if !backupOpIDRE.MatchString(id) {
+		http.Error(w, "invalid operation id", http.StatusBadRequest)
+		return
+	}
+	ep, ok := resolveLocalMaintAgentEndpoint()
+	if !ok {
+		http.Error(w, "maintenance agent not configured", http.StatusServiceUnavailable)
+		return
+	}
+	fctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+	status, data, err := callMaintAgent(fctx, ep, http.MethodGet, "/v1/operations/"+url.PathEscape(id), nil, backupsAgentReadBound)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+	if status == http.StatusNotFound {
+		http.Error(w, "operation not found", http.StatusNotFound)
+		return
+	}
+	if status != http.StatusOK {
+		http.Error(w, fmt.Sprintf("maintenance agent returned HTTP %d", status), http.StatusBadGateway)
+		return
+	}
+	// The agent's operation endpoint is GLOBAL — it also answers upgrade and
+	// restore ops, whose params/progress/result this viewer-role backup route
+	// must not disclose. Anything that is not a backup op (or cannot be
+	// decoded as one) is answered exactly like an unknown id.
+	var op backupOpRecord
+	if json.Unmarshal(data, &op) != nil || op.Kind != backupOpKind {
+		http.Error(w, "operation not found", http.StatusNotFound)
+		return
+	}
+	// A terminal op means the archive set may have changed since the listing
+	// was cached — possibly re-cached by a Refresh WHILE the backup was still
+	// running, which the trigger-time invalidation cannot cover. Drop it so
+	// the GUI's completion refresh shows the new archive.
+	//
+	// Only a listing captured BEFORE the op finished is stale. Invalidating on
+	// every terminal poll would let any viewer holding a completed op id
+	// alternate status/listing GETs and defeat the 15 s cache that bounds how
+	// often the agent spawns a listing container. The agent is node-local, so
+	// its finished_at and this process's cache stamp share one clock; a
+	// terminal record without finished_at invalidates nothing (the TTL still
+	// bounds staleness).
+	if op.terminal() && op.Finished != nil {
+		backupsCache.mu.Lock()
+		if backupsCache.payload != nil && backupsCache.at.Before(*op.Finished) {
+			backupsCache.payload = nil
+		}
+		backupsCache.mu.Unlock()
+	}
+	// Pass the agent's op record through verbatim (op_id/kind/state/actor/
+	// started_at/finished_at/failure_reason/params/progress, ops.Op) — params
+	// only ever carries filename/encrypt/passphrase_ref (an env var NAME,
+	// never a secret value), and the agent already shape-validated this JSON
+	// before answering it on its own GET /v1/operations/{id}.
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(data)
+}
+
+// callMaintAgent performs one request against the maintenance agent's local
+// endpoint and returns the raw status + body, bounded by readBound. Shared
+// by every backups_api.go handler that talks to the agent (fetchAgentBackups
+// predates this helper and is left as-is to keep this change scoped).
+func callMaintAgent(ctx context.Context, ep AgentEndpoint, method, path string, body []byte, readBound int64) (status int, data []byte, err error) {
+	u, err := url.Parse(ep.BaseURL)
+	if err != nil {
+		return 0, nil, fmt.Errorf("parse agent base URL: %w", err)
+	}
+	u.Path = strings.TrimRight(u.Path, "/") + path
+	var reqBody io.Reader
+	if body != nil {
+		reqBody = bytes.NewReader(body)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, u.String(), reqBody)
+	if err != nil {
+		return 0, nil, err
+	}
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	client := ep.Client
+	if client == nil {
+		client = &http.Client{Timeout: 10 * time.Second}
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return 0, nil, fmt.Errorf("maintenance agent unreachable: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	data, err = io.ReadAll(io.LimitReader(resp.Body, readBound))
+	if err != nil {
+		return 0, nil, err
+	}
+	return resp.StatusCode, data, nil
 }
