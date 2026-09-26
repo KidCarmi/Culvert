@@ -1107,7 +1107,7 @@ Severity key: **C**ritical / **H**igh / **M**edium / **L**ow / **✓** handled w
 | OCSP-6 | **Unbounded responder fan-out inside a TLS handshake.** `leaf.OCSPServer` walked in full under a PER-RESPONDER 5 s timeout, on the request goroutine, holding the client conn, an FD and a per-IP `connlimit` slot: 200 blackholed responders ⇒ ~17 minutes parked AND 200 outbound POSTs at hosts the attacker named. Fan-out and targets both peer-written. CHAOS-58's finding one subsystem over. | NEW → **CLOSED** (CHAOS-65: `maxResponders` 4 inside ONE `queryBudget` 5 s envelope — deliberately the old per-responder value, so the ordinary one-responder certificate is unchanged and only the worst case shrinks; `culvert_ocsp_responders_truncated_total`) | **H** | was: `internal/ocsp/ocsp.go` `checkResponders`; see §35 |
 | OCSP-7 | **No single-flight**: N concurrent handshakes to one host each launched their own query (measured 24 → 24), amplifying client request rate 1:1 onto a responder that is by hypothesis already the slow dependency. The herd `hostIPCache` and `jwksCache` already collapse. | NEW → **CLOSED** (CHAOS-65: leader/follower per CertID, no follower timer, leader publishes on every exit path INCLUDING a panic, flight defaults are the fail-closed verdict) | M | was: `internal/ocsp/ocsp.go` `VerifyPeerCertificate`; see §35 |
 | OCSP-9 | **No OCSP stapling.** Culvert never requests or consumes `tls.ConnectionState.OCSPResponse` — the deployment shape that makes revocation checking cheap, private and egress-free, and the natural companion to closing CA-6b. | NEW (recorded, not in scope) | M | `proxy_tunnel.go` `upstreamInspectTLSConfig`; see §35 |
-| OCSP-10 | **No CRL fallback, and a certificate with no AIA responder is accepted unchecked.** The admin panel is titled "OCSP / CRL Revocation"; only OCSP exists. Unchanged by CHAOS-65. | NEW (recorded) | L/M | `internal/ocsp/ocsp.go` `checkResponders` (`len(responders) == 0` ⇒ pass); see §35 |
+| OCSP-10 | **No CRL fallback, and a certificate with no AIA responder is accepted unchecked.** The admin panel was titled "OCSP / CRL Revocation" when this row was recorded (since renamed "OCSP revocation", terminology review 2026-09-21 T-59); only OCSP exists. Unchanged by CHAOS-65. | NEW (recorded) | L/M | `internal/ocsp/ocsp.go` `checkResponders` (`len(responders) == 0` ⇒ pass); see §35 |
 | CA-7 | KEK-at-rest: rejects too-permissive/wrong-size files (never chmod-fixes, never silently regenerates), uses `os.Link` EEXIST to avoid racing mints, fails closed on decrypt error. | ✓ | — | `kek.go:174-239`, `cluster_ca_keyatrest.go:95-181` |
 | CA-8 | Session HMAC key is **random per-restart by default** (no env/config secret) → all admin sessions invalidated on every single-node restart. | GAP | M | `session.go:38-49`, `internal/session/session.go:80-86` |
 | CA-9 | Session HMAC runtime rotation / cluster sync is race-safe (lock-guarded set/read, hex+len validation before install, redacted on export). | ✓ | — | `internal/session/session.go:51-55,422-429`, `controlplane.go:1848-1862` |
@@ -6325,8 +6325,8 @@ audited as `ocsp.toggle`, deliberately off the config-version rollback surface.
   (`tls.ConnectionState.OCSPResponse`), which is the deployment shape that makes
   revocation checking cheap, private and egress-free — and is the natural
   companion to closing OCSP-8. Not in scope here; recorded as **OCSP-9**.
-- **No CRL fallback.** The panel is titled "OCSP / CRL Revocation"; only OCSP
-  exists. A certificate with no AIA responder is accepted without a check —
+- **No CRL fallback.** The panel was titled "OCSP / CRL Revocation" at the time
+  (since renamed "OCSP revocation"); only OCSP exists. A certificate with no AIA responder is accepted without a check —
   unchanged by this sweep, recorded as **OCSP-10**.
 - **`maxResponders` = 4 is a constant**, like every other bound in this file
   whose only use would be widening an attack window.
