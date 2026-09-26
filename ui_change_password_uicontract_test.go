@@ -309,3 +309,47 @@ func TestUIContract_ChangePasswordStaleSubmitCannotTouchReopenedDialog(t *testin
 		}
 	}
 }
+
+// uiContractFuncBody returns the text of the JS function starting at sig up to
+// its closing "\n}\n" line.
+func uiContractFuncBody(t *testing.T, s, sig string) string {
+	t.Helper()
+	i := strings.Index(s, sig)
+	if i < 0 {
+		t.Fatalf("%s not found", sig)
+	}
+	b := s[i:]
+	if k := strings.Index(b, "\n}\n"); k >= 0 {
+		b = b[:k]
+	}
+	return b
+}
+
+// Cancel and a successful change both go through closeChangePasswordModal, so
+// it — not only the session-loss dismiss path — must clear the typed
+// passwords; otherwise they stay readable in the hidden DOM for the rest of
+// the page session (and survive logout, since dismiss skips a closed dialog).
+func TestUIContract_ChangePasswordClearedOnEveryClose(t *testing.T) {
+	html, err := os.ReadFile(staticIndexHTMLPath())
+	if err != nil {
+		t.Fatalf("read index.html: %v", err)
+	}
+	b := uiContractFuncBody(t, string(html), "function closeChangePasswordModal() {")
+	if !strings.Contains(b, "clearChangePasswordFields()") {
+		t.Error("closeChangePasswordModal must clear the password fields on every close path")
+	}
+}
+
+// Without ResizeObserver the --topbar-h fallback only re-measures on resize,
+// so revealing the session controls (which can add a wrapped row) must
+// re-measure explicitly.
+func TestUIContract_TopbarHeightResyncedOnSessionChange(t *testing.T) {
+	html, err := os.ReadFile(staticIndexHTMLPath())
+	if err != nil {
+		t.Fatalf("read index.html: %v", err)
+	}
+	b := uiContractFuncBody(t, string(html), "function applySession(user, role) {")
+	if !strings.Contains(b, "syncTopbarHeight()") {
+		t.Error("applySession must call syncTopbarHeight() after changing topbar visibility")
+	}
+}

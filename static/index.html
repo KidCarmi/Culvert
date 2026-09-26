@@ -6450,6 +6450,9 @@ function applySession(user, role) {
   // change-password-modal below hits /api/auth/change-password, viewer floor).
   document.getElementById('logout-btn').style.display = (user || role) ? '' : 'none';
   document.getElementById('change-pw-btn').style.display = (user || role) ? '' : 'none';
+  // Revealing/hiding the session controls can add or remove a wrapped topbar
+  // row; re-measure so sticky bars stay below it even without ResizeObserver.
+  syncTopbarHeight();
 }
 
 function showLoginOverlay() {
@@ -6524,6 +6527,9 @@ function dismissChangePasswordModal() {
 }
 function closeChangePasswordModal() {
   _cpReqGen++;
+  // Every close path (Cancel, Escape, success, session loss) clears the typed
+  // passwords so they never linger in the hidden DOM.
+  clearChangePasswordFields();
   const modal = document.getElementById('change-password-modal');
   modalDeactivate(modal);
   modal.classList.remove('open');
