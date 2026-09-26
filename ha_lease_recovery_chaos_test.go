@@ -10,6 +10,11 @@ package main
 import (
 	"context"
 	"errors"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -71,6 +76,22 @@ func resumingLeader(t *testing.T, p halease.Provider, id string) (*HAState, *haC
 	return h, cfg
 }
 
+// shortResumeBudget cuts h's unreachable-backend resume budget from 5 s (2 s
+// retries) to 50 ms (10 ms retries) for a test whose subject is what happens
+// AFTER the resume hands off — the recovery loop, its metrics, the fence
+// decisions, Stop. The resume still takes the same path (several failed
+// acquires, then the read-only leader role with recovery armed); it only stops
+// retrying sooner. The tests that pin the budget itself keep the production
+// values (TestChaos55_ResumeBudgetTestsKeepProductionTiming). At the
+// production budget each such resume cost ≈6 s, ≈180 s of the root package's
+// determinism double run (roadmap/CI-REDESIGN.md §19.1).
+func shortResumeBudget(h *HAState) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.testResumeUnreachableWait = 50 * time.Millisecond
+	h.testResumeRetryBackoff = 10 * time.Millisecond
+}
+
 // haWaitFor polls cond until it holds or the budget elapses.
 func haWaitFor(budget time.Duration, cond func() bool) bool {
 	deadline := time.Now().Add(budget)
@@ -99,6 +120,7 @@ func TestChaos55_ResumeDuringBackendOutage_RegainsWriteAuthority(t *testing.T) {
 	o.down.Store(true)
 
 	h, cfg := resumingLeader(t, o, "cp-a")
+	shortResumeBudget(h)
 	h.ResumeAsLeader(cfg)
 	defer h.Stop()
 
@@ -153,6 +175,7 @@ func TestChaos55_RecoveredLeaderKeepsRenewing(t *testing.T) {
 	o.down.Store(true)
 
 	h, cfg := resumingLeader(t, o, "cp-a")
+	shortResumeBudget(h)
 	h.ResumeAsLeader(cfg)
 	defer h.Stop()
 
@@ -181,6 +204,7 @@ func TestChaos55_ForeignHolderSeenDuringRecovery_EntersStandby(t *testing.T) {
 	o.down.Store(true)
 
 	h, cfg := resumingLeader(t, o, "cp-a")
+	shortResumeBudget(h)
 	cfg.StandbyAddr = "cp-b:50051"
 	h.SetResyncMaterial(context.Background(), "cp-a:50051", "", "", "")
 	h.ResumeAsLeader(cfg)
@@ -216,6 +240,7 @@ func TestChaos55_ForeignHolderWithoutTarget_LatchesAndStopsRetrying(t *testing.T
 	o.down.Store(true)
 
 	h, cfg := resumingLeader(t, o, "cp-a") // no StandbyAddr, no resync material
+	shortResumeBudget(h)
 	h.ResumeAsLeader(cfg)
 	defer h.Stop()
 
@@ -359,6 +384,7 @@ func TestChaos55_StopIsPromptDuringRecoveryBackoff(t *testing.T) {
 		o := &outageProvider{Provider: halease.NewFake(10 * time.Second)}
 		o.down.Store(true)
 		h, cfg := resumingLeader(t, o, "cp-a")
+		shortResumeBudget(h)
 		h.ResumeAsLeader(cfg)
 		if !h.leaseRecoveryActive() {
 			t.Fatal("recovery loop must be armed for an unfenced leader")
@@ -436,6 +462,7 @@ func TestChaos55_UnfencedLeaderIsVisibleOnMetrics(t *testing.T) {
 	o := &outageProvider{Provider: halease.NewFake(10 * time.Second)}
 	o.down.Store(true)
 	globalHA.SetLeaseProvider(o, "cp-a")
+	shortResumeBudget(globalHA)
 	globalHA.ResumeAsLeader(&haConfig{Enabled: true, Role: "leader", Term: 5, Token: "t"})
 	defer globalHA.Stop()
 
@@ -512,6 +539,7 @@ func TestChaos55_LeaseHealthReportsRecovering(t *testing.T) {
 	o := &outageProvider{Provider: halease.NewFake(10 * time.Second)}
 	o.down.Store(true)
 	h, cfg := resumingLeader(t, o, "cp-a")
+	shortResumeBudget(h)
 	h.ResumeAsLeader(cfg)
 	defer h.Stop()
 
@@ -591,6 +619,7 @@ func TestChaos55_UnknownFenceStateDoesNotDemoteToStandby(t *testing.T) {
 	o.down.Store(true)
 
 	h, cfg := resumingLeader(t, o, "cp-a")
+	shortResumeBudget(h)
 	cfg.StandbyAddr = "cp-b:50051" // S0 target recorded — demotion is fully available
 	h.SetResyncMaterial(context.Background(), "cp-a:50051", "", "", "")
 
@@ -677,6 +706,68 @@ func TestChaos55_ResumeDoesNotBlockBootOnALongOutage(t *testing.T) {
 	}
 	if haResumeUnreachableWait >= haResumeGhostWait {
 		t.Fatal("haResumeUnreachableWait must stay well below haResumeGhostWait — it sits on the boot path")
+	}
+}
+
+// shortResumeBudget exists for tests whose subject comes AFTER the resume. If
+// it reached the two tests that pin the budget itself, they would still pass
+// while proving nothing about the 5 s a real boot waits, and if production code
+// ever set the override a real boot would give up on etcd after 50 ms. So: an
+// HAState nobody shortened uses the production constants, neither budget test
+// touches the override, and no non-test file assigns it.
+func TestChaos55_ResumeBudgetTestsKeepProductionTiming(t *testing.T) {
+	if budget, retry := (&HAState{}).resumeUnreachableTiming(); budget != haResumeUnreachableWait || retry != haLeaseResumeRetryBackoff {
+		t.Fatalf("an HAState nobody shortened resumes with %s/%s, want the production %s/%s",
+			budget, retry, haResumeUnreachableWait, haLeaseResumeRetryBackoff)
+	}
+
+	f, err := parser.ParseFile(token.NewFileSet(), "ha_lease_recovery_chaos_test.go", nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pinned := map[string]bool{
+		"TestChaos55_ResumeAbsorbsAShortBackendOutage":    false,
+		"TestChaos55_ResumeDoesNotBlockBootOnALongOutage": false,
+	}
+	for _, d := range f.Decls {
+		fn, ok := d.(*ast.FuncDecl)
+		if !ok {
+			continue
+		}
+		if _, ok := pinned[fn.Name.Name]; !ok {
+			continue
+		}
+		pinned[fn.Name.Name] = true
+		ast.Inspect(fn.Body, func(n ast.Node) bool {
+			if id, ok := n.(*ast.Ident); ok && (id.Name == "shortResumeBudget" || strings.HasPrefix(id.Name, "testResume")) {
+				t.Errorf("%s uses %s — the budget tests must measure the production budget", fn.Name.Name, id.Name)
+			}
+			return true
+		})
+	}
+	for name, seen := range pinned {
+		if !seen {
+			t.Errorf("%s not found — this wall would check nothing", name)
+		}
+	}
+
+	files, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range files {
+		if strings.HasSuffix(p, "_test.go") {
+			continue
+		}
+		src, err := os.ReadFile(p) // #nosec G304 -- this package's own source files
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, field := range []string{"testResumeUnreachableWait", "testResumeRetryBackoff"} {
+			if strings.Contains(string(src), field+" =") || strings.Contains(string(src), field+"=") {
+				t.Errorf("%s assigns %s — only tests may shorten the resume budget", p, field)
+			}
+		}
 	}
 }
 

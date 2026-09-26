@@ -9,6 +9,67 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Security
 
+- Node-local key material was written with `os.WriteFile` on a predictable
+  path, which follows a planted symlink and inherits a planted file's mode
+  (SEC-SECRETWRITE-1). Four writers introduced in this window were affected:
+  the upstream credential KEK (`.upstream_cred_key`, which unseals every
+  parent-proxy password), the webhook KEK (`.alert_webhook_key`), the request
+  history PBKDF2 salt (`<history>.salt`), and the CDR mTLS client bundle staged
+  at `<bundle>.{crt,key}.tmp`.
+
+  Both halves were reproduced against the tree. `os.ReadFile` on a **dangling**
+  symlink reports `fs.ErrNotExist` — exactly the condition every mint treats as
+  "no key yet" — so planting a link at a key path steers control flow into the
+  mint branch and then redirects the write out of the state root entirely. And
+  `perm` applies only on *creation*, so a `0666` file planted at
+  `client.key.tmp` receives the CDR client private key and stays
+  world-readable, no symlink required. In the escape case the appliance
+  believes it persisted a key: remove the target and every sealed upstream
+  credential becomes `credentialState: unusable`, no parent is eligible, and
+  the pool fails **open to DIRECT egress** — the parent-proxy chain bypassed.
+
+  The three mints with no rendezvous requirement now use `fileutil.AtomicWrite`
+  — the repository's existing durable-write chokepoint, already used for the
+  policy-learning subject key — whose `rename(2)` *replaces* a planted link
+  rather than writing through it. `installRenewedPEMs` cannot: its `.tmp` names
+  are a deliberate rendezvous `finishStagedRenewal` looks up by path at the next
+  boot, so it uses the new `fileutil.WriteFileExclusive`, which clears any
+  pre-existing entry and creates with `O_EXCL` at the requested mode (and
+  fsyncs, which makes that function's existing "never a half-written file"
+  promise true). No path, content or mode on disk changes; only the branch that
+  *creates* a file is affected. Gates: 26 across five files, every defect gate
+  verified failing against the verbatim `os.WriteFile` shape, with controls
+  pinning that a stale rendezvous file is still superseded (refusing it would
+  wedge CDR renewals after the first crash), that SEC-WHSIGN-1's "a failed
+  decrypt never mints" and CHAOS-62's `ErrSaltUnusable` refusal are unchanged,
+  and that 120 racing writers never leave a torn file. Review:
+  `docs/engineering/security-reviews/2026-09-22-resilience-sweep-and-upstream-v2-window.md`.
+
+- A role string this build does not enroll became FULL ADMIN
+  (SEC-RBAC-ROLE-1). `POST /api/auth/users` validates the role it is given,
+  but `LoadUIUsersFile` — the door the same roster arrives through from disk —
+  validated nothing and stored `role` verbatim. `VerifyUIUser` then returned
+  that value on a successful login, `apiAuthLogin` minted a genuinely signed
+  session with it, and `uiAuthMiddleware`'s backwards-compatibility branch
+  promoted it: the branch was written for the pre-RBAC *empty* role but keyed
+  on `!role.HasRole(RoleViewer)`, and because `rolePriority` is a map whose
+  unenrolled keys read as 0, that predicate is true of *every* unrecognized
+  string — so `"read-only"`, `"Admin"` and `"superuser"` all resolved to
+  `RoleAdmin`, on every request, for the full session TTL, with
+  `/api/auth/status` reporting `role: admin` to match. Nothing is forged; the
+  appliance signs the cookie itself. The reachable sources are the ordinary
+  raw-persistence ones: restoring a backup taken by a newer build that enrolls
+  a role this one does not, a hand-edited or partially-corrupted
+  `ui_users.json`, or any future writer that bypasses the admin API. Fixed at
+  all three layers — `HasRole` now refuses an unenrolled *requirement* (which
+  also closes a latent hole where `MinRole: RolePublic` or a typo in
+  `ui_routes_meta.go` would have admitted a viewer to an elevated method),
+  `LoadUIUsersFile` clamps an unenrolled non-empty roster role to `viewer`
+  rather than dropping the account, and the session resolver splits the compat
+  branch so `""` still means admin for pre-RBAC deployments while every other
+  unenrolled value is refused with a 401 and a cleared cookie. The clamp is
+  surfaced as `culvert_ui_roster_role_clamped_total` and as
+  `uiRosterRoleClamped` on `/healthz` and `/api/stats` when non-zero.
 - An unauthenticated client could park a gateway core for minutes with one
   request by choosing a very long destination host (CHAOS-69, register rows
   PX-21/PX-23/PX-24/PX-25). The destination authority is written by the client,

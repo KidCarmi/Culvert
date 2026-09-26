@@ -52,6 +52,7 @@ import (
 	badger "github.com/dgraph-io/badger/v4"
 	"golang.org/x/crypto/pbkdf2"
 
+	"github.com/KidCarmi/Culvert/internal/fileutil"
 	"github.com/KidCarmi/Culvert/internal/obs"
 )
 
@@ -232,7 +233,13 @@ func EncKey(dir, passphrase string) ([]byte, error) {
 	if _, e := rand.Read(salt); e != nil {
 		return nil, fmt.Errorf("logstore salt: %w", e)
 	}
-	if e := os.WriteFile(saltPath, salt, 0o600); e != nil {
+	// SEC-SECRETWRITE-1: AtomicWrite, never os.WriteFile. This mint is
+	// reached when the sidecar could not be read, which a DANGLING SYMLINK at
+	// saltPath also produces — os.WriteFile would follow it and strand the
+	// salt outside the store's directory, after which no boot can derive the
+	// key again. A pre-existing wide-mode file would likewise have KEPT its
+	// mode (perm applies only on creation), publishing the KDF salt.
+	if e := fileutil.AtomicWrite(saltPath, salt, 0o600); e != nil {
 		return nil, fmt.Errorf("write logstore salt: %w", e)
 	}
 	return pbkdf2.Key([]byte(passphrase), salt, encIters, encKeyLen, sha256.New), nil

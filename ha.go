@@ -118,6 +118,15 @@ type HAState struct {
 	// latch, re-armed by the next successful sync.
 	syncPanics       int
 	syncPanicAlerted bool
+
+	// testResumeUnreachableWait / testResumeRetryBackoff shorten THIS
+	// instance's resume-acquire budget for an unreachable fencing backend
+	// (0 = the production haResumeUnreachableWait / haLeaseResumeRetryBackoff).
+	// Only tests set them, and only tests whose subject is what happens after
+	// the resume hands off to the recovery loop; the tests that pin the budget
+	// itself never do (roadmap/CI-REDESIGN.md §19.1).
+	testResumeUnreachableWait time.Duration
+	testResumeRetryBackoff    time.Duration
 }
 
 // promoteContext holds the parameters StartAsStandby threads into the sync loop,
@@ -1116,6 +1125,14 @@ func addRequestLogHealth(resp map[string]any) {
 	// this one is fixed by restoring the CP link, not by freeing disk.
 	if n := auditPendingDrops(); n > 0 {
 		resp["auditClusterPushDrops"] = n
+	}
+	// SEC-RBAC-ROLE-1: a roster record named a role this build does not
+	// enroll and was clamped to viewer at load. Reported only when non-zero,
+	// like the two above: it is an authorization-surface fact (someone's
+	// effective role is NOT what the file says) and the remedy is to re-assign
+	// the role, not to fix storage.
+	if n := cfg.ActiveRosterRoleClamps(); n > 0 {
+		resp["uiRosterRoleClamped"] = n
 	}
 	// Saturation of the async JSONL queue: no entry is lost, but request
 	// goroutines are waiting on the disk again, so latency is affected.

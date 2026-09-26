@@ -153,7 +153,8 @@ func sseAuthStillValid(r *http.Request) bool {
 	}
 	// No session cookie — the connection was authenticated via HTTP Basic Auth.
 	if user, pass, ok := r.BasicAuth(); ok {
-		_, valid := cfg.VerifyUIUser(user, pass)
+		// SEC-BASIC-1: same controls as every other admin-plane Basic site.
+		_, valid := verifyUIBasicAuth(r, user, pass)
 		return valid
 	}
 	return false
@@ -253,6 +254,8 @@ func liveFeedWritePrometheus(w *strings.Builder) {
 	fmt.Fprintf(w, "# TYPE culvert_audit_write_errors_total counter\nculvert_audit_write_errors_total %d\n", auditWriteErrors())
 	fmt.Fprintf(w, "\n# HELP culvert_audit_cluster_push_drops_total Audit entries discarded from the Data Plane→Control Plane push queue at its cap (Control Plane unreachable). Non-zero means the CENTRALIZED audit trail is incomplete; the local JSONL file on this node is unaffected\n")
 	fmt.Fprintf(w, "# TYPE culvert_audit_cluster_push_drops_total counter\nculvert_audit_cluster_push_drops_total %d\n", auditPendingDrops())
+	fmt.Fprintf(w, "\n# HELP culvert_ui_roster_role_clamped_total Admin-UI roster records whose persisted role this build does not enroll, clamped to viewer at load (SEC-RBAC-ROLE-1). Non-zero means ui_users.json names a role this binary cannot grant — a restore from a newer build, or a hand-edited/corrupt roster\n")
+	fmt.Fprintf(w, "# TYPE culvert_ui_roster_role_clamped_total counter\nculvert_ui_roster_role_clamped_total %d\n", RosterRoleClampCount())
 	fmt.Fprintf(w, "\n# HELP culvert_logstore_dropped_total History-store entries dropped because the async write queue was full\n")
 	fmt.Fprintf(w, "# TYPE culvert_logstore_dropped_total counter\nculvert_logstore_dropped_total %d\n", logstore.Dropped())
 	fmt.Fprintf(w, "\n# HELP culvert_logstore_pruned_total History-store entries deleted by the size-retention janitor\n")

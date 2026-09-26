@@ -564,6 +564,58 @@ func (a *APIRateLimiter) Allow(ip string) bool {
 	return e.count <= Burst
 }
 
+// Reservation identifies one unit claimed by Reserve. It is bound to the
+// limiter WINDOW it was claimed in, so a Refund landing after the window has
+// rolled over cannot decrement a later window's count. The zero value is a
+// no-op Refund.
+type Reservation struct {
+	ip    string
+	entry *apiRateEntry
+}
+
+// Reserve ATOMICALLY claims one unit of ip's Burst allowance in the current
+// window and reports whether it succeeded. Unlike Allow, a refusal records
+// nothing, so a caller that charges only some outcomes (e.g. failures) can
+// reserve BEFORE doing expensive or state-retaining work and Refund the unit
+// once the outcome turns out not to be chargeable. A check-then-charge pair
+// (probe, work, then Allow) is not a bound: a concurrent wave all passes the
+// probe before any of it is charged.
+func (a *APIRateLimiter) Reserve(ip string) (Reservation, bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	e := a.entries[ip]
+	now := time.Now()
+	if e == nil || now.Sub(e.windowStart) > RateWindow {
+		e = &apiRateEntry{count: 1, windowStart: now}
+		a.entries[ip] = e
+		return Reservation{ip: ip, entry: e}, true
+	}
+	if e.count >= Burst {
+		return Reservation{}, false
+	}
+	e.count++
+	return Reservation{ip: ip, entry: e}, true
+}
+
+// Refund returns one unit previously claimed by Reserve. The refund applies
+// only to the window the unit was claimed in: once that window has expired
+// or been replaced by a newer one (a new entry is allocated per window), the
+// unit already expired with it and the refund is a no-op — otherwise an
+// in-flight success crossing the boundary would mint extra capacity in the
+// NEW window. The count never goes negative.
+func (a *APIRateLimiter) Refund(r Reservation) {
+	if r.entry == nil {
+		return
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	e := a.entries[r.ip]
+	if e == nil || e != r.entry || time.Since(e.windowStart) > RateWindow || e.count <= 0 {
+		return
+	}
+	e.count--
+}
+
 // Cleanup removes expired entries.
 func (a *APIRateLimiter) Cleanup() {
 	a.mu.Lock()
