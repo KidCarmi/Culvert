@@ -9,6 +9,46 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Security
 
+- An unauthenticated client could park a gateway core for minutes with one
+  request by choosing a very long destination host (CHAOS-69, register rows
+  PX-21/PX-23/PX-24/PX-25). The destination authority is written by the client,
+  `net/http` admits its 1 MiB default of request line plus headers, and nothing
+  bounded it. It was copied verbatim into the process log and the durable
+  request-log entry — a 256 KiB host wrote 262,228 bytes to a rotating file that
+  keeps one archive — but the copy was the smaller half: the authority is also
+  walked label by label by every destination matcher, and two of those walks are
+  quadratic in its length. The URL-category store probes every suffix beginning
+  just past a `.` against its reverse index, and the Layer-2 community feed
+  (enabled by default in the shipped compose file) opens one BadgerDB read
+  transaction per label. Measured through the real request path with one
+  ordinary category-group rule present: 4 KB of host cost 19.6 ms, 16 KB cost
+  260 ms and 64 KB cost **3.94 s** of CPU — so roughly sixteen minutes at the
+  1 MiB header default, inside the request goroutine, holding the connection and
+  a per-IP connection slot, and spent *before* authentication. Roughly 256 KB/s
+  from one client saturated a four-core gateway, and the three front-door
+  limiters ship disabled. The same value was also retained as a top-hosts map
+  key, whose 10,000-entry cap bounds the entry count and never bounded the key
+  size (about 10 GiB of heap at the cap with megabyte keys), and reached the same
+  quadratic lookup from two viewer-role admin endpoints.
+
+  The destination is now bounded in two tiers, because the DNS limit governs the
+  *canonical* form of a hostname rather than the bytes on the wire: a **1024-byte
+  pre-cap on the raw authority** at the entry point, ahead of every sink and every
+  matcher (in particular ahead of the IP filter and rate limiter, which both write
+  the host into the request log), and a **253-byte bound on the normalized A-label
+  form** at the existing canonicalization gate. The raw tier has to be generous
+  because an internationalized domain name *shrinks* under IDNA — `é`×40 in four
+  labels is 323 raw bytes and 187 canonical, and the widest legitimate case is 883
+  raw to 251 canonical — so a raw bound at the DNS limit would have refused
+  ordinary international destinations with a 400; its value is derived from the
+  maximum Punycode expansion and re-measured against the shipped normalizer by
+  test. The canonical tier is what keeps that generosity from being a hole, since
+  dot-dense ASCII does not shrink and is therefore refused. A refused request
+  answers 400 without echoing the value, creates no state, and is counted by
+  `culvert_proxy_oversize_host_rejected_total` with a rate-limited log line naming
+  the length and the tier rather than the value. Operator runbook:
+  `docs/operator/destination-host-bounds.md`.
+
 - An ordinary password change silently destroyed the account's TOTP second
   factor (SEC-TOTP-1 / RISK-029). `apiAuthLogin` refuses to issue a session for
   an enrolled account until `verifyLoginTOTP` accepts a code, so the enrolment

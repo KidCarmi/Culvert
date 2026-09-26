@@ -292,6 +292,18 @@ func liveFeedWritePrometheus(w *strings.Builder) {
 	fmt.Fprintf(w, "# TYPE culvert_login_oversize_rejected_total counter\nculvert_login_oversize_rejected_total %d\n",
 		loginOversizeRejected.Load())
 
+	// CHAOS-69: proxied requests refused for an over-long destination
+	// authority. Unlike the login counter above this one is ALWAYS emitted —
+	// there is no configuration to gate it on (every build bounds the
+	// authority), so a flat zero means "nothing has been probed", never "the
+	// feature is off". The caller gets a 400 (or a SOCKS5 failure reply) and
+	// nothing else moves, so a climbing counter is the operator's only signal
+	// that a client is sending authorities no resolver could answer for — the
+	// shape of a CPU-exhaustion probe against the proxy port.
+	fmt.Fprintf(w, "\n# HELP culvert_proxy_oversize_host_rejected_total Requests refused because the client-supplied destination authority exceeded the byte limit. Sustained growth means a client is probing the proxy port with unresolvable oversize hosts\n")
+	fmt.Fprintf(w, "# TYPE culvert_proxy_oversize_host_rejected_total counter\nculvert_proxy_oversize_host_rejected_total %d\n",
+		proxyOversizeHostRejected.Load())
+
 	// CHAOS-70: admin-roster durability. These are deliberately distinct from
 	// the storage plane's generic storage_write_failed, which says only that
 	// SOME durable write failed; these say WHICH administrative decision was
