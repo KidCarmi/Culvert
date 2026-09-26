@@ -1235,11 +1235,11 @@ func TestChaos69_DefectPolicyTesterStage1MatchesTheRuntimeHost(t *testing.T) {
 
 	// The runtime gate's own answer for this authority, via the production
 	// strip — the value the simulator must agree with.
-	runtime := resolveAuthOutcomeFrom(effective, authRequestContext(
+	liveDecision := resolveAuthOutcomeFrom(effective, authRequestContext(
 		&http.Request{Method: http.MethodGet, Host: authority, Header: http.Header{}}, "10.1.2.3"))
-	if runtime.Outcome != OutcomeExempt || runtime.Rule == nil {
+	if liveDecision.Outcome != OutcomeExempt || liveDecision.Rule == nil {
 		t.Fatalf("runtime Stage-1 = %q (ruleNil=%v); this gate needs the live gate to exempt this authority",
-			runtime.Outcome, runtime.Rule == nil)
+			liveDecision.Outcome, liveDecision.Rule == nil)
 	}
 
 	w := httptest.NewRecorder()
