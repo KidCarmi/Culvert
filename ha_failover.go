@@ -185,8 +185,9 @@ func (h *HAState) acquireLeaseForResume() (granted bool, sawForeignHolder bool) 
 	if p == nil {
 		return true, false
 	}
+	unreachableWait, retryBackoff := h.resumeUnreachableTiming()
 	ghostDeadline := time.Now().Add(haResumeGhostWait)
-	unreachableDeadline := time.Now().Add(haResumeUnreachableWait)
+	unreachableDeadline := time.Now().Add(unreachableWait)
 	unreachable := 0
 	for {
 		outcome, st := h.resumeAcquireRound()
@@ -206,17 +207,29 @@ func (h *HAState) acquireLeaseForResume() (granted bool, sawForeignHolder bool) 
 			if time.Now().After(unreachableDeadline) {
 				logger.Printf("HA: fencing backend still unreachable after %s — taking the leader role "+
 					"READ-ONLY and continuing to retry in the background so the data plane is not "+
-					"held up by a control-plane fence (CHAOS-55)", haResumeUnreachableWait)
+					"held up by a control-plane fence (CHAOS-55)", unreachableWait)
 				return false, false
 			}
 			unreachable++
 			if unreachable == 1 {
 				logger.Printf("HA: fencing backend unreachable during leader resume — retrying for up to %s "+
-					"before falling back to a read-only leader role", haResumeUnreachableWait)
+					"before falling back to a read-only leader role", unreachableWait)
 			}
-			time.Sleep(haLeaseResumeRetryBackoff)
+			time.Sleep(retryBackoff)
 		}
 	}
+}
+
+// resumeUnreachableTiming is acquireLeaseForResume's unreachable-backend budget
+// and retry cadence: the production constants unless a test shortened them on
+// this instance (HAState.testResumeUnreachableWait).
+func (h *HAState) resumeUnreachableTiming() (budget, retry time.Duration) {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	if h.testResumeUnreachableWait > 0 {
+		return h.testResumeUnreachableWait, h.testResumeRetryBackoff
+	}
+	return haResumeUnreachableWait, haLeaseResumeRetryBackoff
 }
 
 // ghostRetryWait is how long to wait before re-testing our own ghost lease:
