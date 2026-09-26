@@ -2171,11 +2171,25 @@ func TestChaos71_IssuerTrailingSlashDerivesExactlyOneSource(t *testing.T) {
 // It pins the CONTRACT, not the layout: which tokens the doc chooses to mention
 // stays the author's call, and only their correctness is asserted.
 func TestChaos71_RunbookQuotesOnlyRealLogTokens(t *testing.T) {
-	runbook, err := os.ReadFile(filepath.Join("docs", "operator", "idp-metadata-availability.md"))
+	// Both reads are anchored to pkgSourceDir(): a CWD-relative read picks up the
+	// wrong file the moment any concurrent test calls os.Chdir, which is the class
+	// TestTestFileReadsAreCWDIndependent exists to keep out, and it caught the
+	// bare .go read here.
+	//
+	// The docs read had the IDENTICAL hazard and no pattern to catch it — that
+	// wall matches a bare `os.ReadFile("x.go")` and `static/index.html`, not a
+	// filepath.Join whose first element is a literal repo directory. Widening it
+	// was tried and reverted: eleven pre-existing sites across other sweeps match
+	// that shape, and some are reads relative to a temp dir the test deliberately
+	// chdir'd into, so closing the gap needs per-site review rather than one
+	// regexp. Recorded as a wall-coverage gap rather than papered over here;
+	// every docs-reading test in this package otherwise already anchors, which is
+	// the convention followed below.
+	runbook, err := os.ReadFile(filepath.Join(pkgSourceDir(), "docs", "operator", "idp-metadata-availability.md")) // #nosec G304 -- fixed in-repo path
 	if err != nil {
 		t.Fatalf("read runbook: %v", err)
 	}
-	health, err := os.ReadFile("idp_metadata_health.go")
+	health, err := os.ReadFile(filepath.Join(pkgSourceDir(), "idp_metadata_health.go")) // #nosec G304 -- fixed in-repo path
 	if err != nil {
 		t.Fatalf("read health plane: %v", err)
 	}
