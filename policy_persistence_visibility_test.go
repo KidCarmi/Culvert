@@ -329,3 +329,51 @@ func TestPolicyStore_StalePathSaveDoesNotClearAdoptionFailure(t *testing.T) {
 		t.Fatal("a successful save to a SUPERSEDED path cleared the adoption failure — the warning is hidden while the current path holds no policy file")
 	}
 }
+
+// TestAPIPolicy_GET_DraftPersistedFalseAfterPolicyDirMoves pins the Codex
+// finding (PR #1445): a SIGHUP moving proxy.policy_file to another directory
+// leaves policyDraft.path at the OLD sibling, which the next boot's
+// initPolicyDraft never reloads — the draft must report persisted:false
+// until its file is where the next boot will look.
+func TestAPIPolicy_GET_DraftPersistedFalseAfterPolicyDirMoves(t *testing.T) {
+	draftTestSetup(t)
+
+	oldDir, newDir := t.TempDir(), t.TempDir()
+	savedPath := policyStore.path
+	policyStore.path = filepath.Join(oldDir, "policy.json")
+	t.Cleanup(func() { policyStore.path = savedPath })
+	policyDraft.mu.Lock()
+	policyDraft.path = policyDraftPathFor(policyStore.path)
+	policyDraft.mu.Unlock()
+	t.Cleanup(func() {
+		policyDraft.mu.Lock()
+		policyDraft.path = ""
+		policyDraft.mu.Unlock()
+	})
+
+	setRequireCommit(true)
+	if w := createRuleViaAPI(t, "candidate-moved", ""); w.Code != http.StatusOK {
+		t.Fatalf("stage candidate = %d (%s)", w.Code, w.Body.String())
+	}
+	get := func() any {
+		w := httptest.NewRecorder()
+		apiPolicy(w, jsonReq("GET", "/api/policy", nil))
+		var resp map[string]any
+		if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("decode response: %v", err)
+		}
+		if resp["draft"] != true {
+			t.Fatalf("draft = %v, want true", resp["draft"])
+		}
+		return resp["persisted"]
+	}
+	if p := get(); p != true {
+		t.Fatalf("control: draft sibling of the live policy file must report persisted:true, got %v", p)
+	}
+	policyStore.mu.Lock()
+	policyStore.path = filepath.Join(newDir, "policy.json")
+	policyStore.mu.Unlock()
+	if p := get(); p != false {
+		t.Errorf("persisted = %v, want false — the draft file is not where the next boot will reload it", p)
+	}
+}

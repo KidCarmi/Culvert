@@ -284,6 +284,13 @@ func (ps *PolicyStore) policyVersion() (int64, string) {
 	return ps.version, ps.updatedAt
 }
 
+// Path returns the store's current persistence path ("" when in-memory).
+func (ps *PolicyStore) Path() string {
+	ps.mu.RLock()
+	defer ps.mu.RUnlock()
+	return ps.path
+}
+
 // Persisted reports whether rule changes are written to disk. False means the
 // store is in-memory only (no -policy / policy_file configured) and every
 // add/edit/delete/reorder is lost on restart — mirrors IdPRegistry.Persisted.

@@ -72,6 +72,12 @@ type policyDraftCoordinator struct {
 
 var policyDraft = &policyDraftCoordinator{cand: &PolicyStore{}}
 
+// policyDraftPathFor is the draft file initPolicyDraft derives from a policy
+// path — the location the NEXT boot will reload a pending draft from.
+func policyDraftPathFor(policyPath string) string {
+	return filepath.Join(filepath.Dir(policyPath), "policy_draft.json")
+}
+
 // initPolicyDraft wires the coordinator's persistence path (sibling of the
 // policy file) and reloads any draft left pending by a prior run. A "" policy
 // path (in-memory mode) leaves the draft in-memory too.
@@ -82,7 +88,7 @@ func initPolicyDraft(policyPath string) {
 		policyDraft.path = ""
 		return
 	}
-	policyDraft.path = filepath.Join(filepath.Dir(policyPath), "policy_draft.json")
+	policyDraft.path = policyDraftPathFor(policyPath)
 	data, err := os.ReadFile(policyDraft.path)
 	if err != nil {
 		return // no pending draft
@@ -885,7 +891,13 @@ func effectiveManagementSnapshot() (snap PolicyStoreSnapshot, draft bool, persis
 	policyDraft.mu.Lock()
 	defer policyDraft.mu.Unlock()
 	if requireCommitEnabled() && policyDraft.state.Active {
-		return policyDraft.cand.SnapshotWithVersion(), true, policyDraft.path != ""
+		// The draft is durable only if its file is where the next boot will
+		// look: a SIGHUP that moves proxy.policy_file to another directory
+		// leaves policyDraft.path at the OLD sibling, which initPolicyDraft
+		// will never reload after a restart (Codex review, PR #1445).
+		p := policyDraft.path
+		return policyDraft.cand.SnapshotWithVersion(), true,
+			p != "" && p == policyDraftPathFor(policyStore.Path())
 	}
 	return policyStore.SnapshotWithVersion(), false, policyStore.Persisted()
 }
