@@ -360,6 +360,28 @@ func (s *controlPlaneServer) SyncRevocations(ctx context.Context, raw json.RawMe
 		return nil, err
 	}
 	globalRevAggregator.Update(req.NodeID, req.Entries)
+
+	// CHAOS-68: the CP is a session-bearing node like any other, and it is the
+	// node the admin UI runs on — so it is where a logout and an account
+	// deletion actually happen. Before this, the aggregator had exactly ONE
+	// writer (the line above) and the CP's own list was neither contributed nor
+	// consumed: an admin revoking a session on the Control Plane revoked it on
+	// the Control Plane alone, while every Data Plane node kept honouring the
+	// cookie for the rest of its TTL (up to 7 days). The direction that
+	// propagated was DP→fleet; the direction an operator uses did not.
+	//
+	// Both halves are closed here, in the one handler that runs on every sync
+	// tick, so no new loop or cadence is introduced and a node with no enrolled
+	// DPs pays nothing (the handler is never reached).
+	//
+	//  1. CONTRIBUTE — refresh the CP's own slot from its live list. The slot is
+	//     a dedicated field, not a reserved map key, so no enrolled node can
+	//     overwrite it or cause it to be excluded from its own merge.
+	//  2. CONSUME — apply what this DP reported to the CP's own list, so a
+	//     logout performed on a DP is enforced on the CP too.
+	globalRevAggregator.UpdateLocal(sessionRevoked.ExportRevocations())
+	mergeAndPersistRevocations(req.Entries, "ControlPlane")
+
 	remote := globalRevAggregator.MergedExcluding(req.NodeID)
 	b, err := json.Marshal(map[string]any{"entries": remote})
 	if err != nil {
@@ -700,6 +722,22 @@ type HAStateBundle struct {
 	// The PULLER verifies it against its own lease backend before importing
 	// (Finding 7 — a zombie leader serving stale state cannot be imported).
 	Epoch int64 `json:"epoch,omitempty"`
+	// Revocations is the leader's live session-revocation set (CHAOS-68).
+	//
+	// Without it the standby was the one CP-class node with NO route into the
+	// revocation plane, and the consequence is specific rather than
+	// theoretical: `Config` above carries SessionHMAC, so the standby verifies
+	// the very same cookies the leader does, while `SyncRevocations` — the only
+	// other path that carries revocations — is fenced on a standby by
+	// haIssuanceAllowed. So a session revoked on the leader authenticated
+	// against the standby, and kept full authority across a promotion until
+	// some Data Plane happened to push the entry back, or forever if none
+	// reconnected (Codex P1, PR #1437).
+	//
+	// omitempty keeps the bundle byte-identical when there is nothing to
+	// replicate, and a standby predating this field simply ignores it — the
+	// pre-existing behaviour, never worse.
+	Revocations []RevocationEntry `json:"revocations,omitempty"`
 }
 
 // normalizeAdvertisedAddr turns a standby's advertised address into one the
@@ -851,9 +889,10 @@ func (s *controlPlaneServer) HASync(ctx context.Context, raw json.RawMessage) (j
 		CAKeyEncrypted:   caKeyEncrypted,
 		Config:           published,
 		Version:          published.Version,
-		PromoteRequested: globalHA.plannedPromotion.Load(), // ADR-0004 Slice 1e: coordinated handoff
-		LeaderTerm:       globalHA.Status().Term,           // ADR-0004 Slice 1c/P2: seed standby epoch
-		Epoch:            globalHA.CurrentEpoch(),          // ADR-0005 S3: puller-side fence input
+		PromoteRequested: globalHA.plannedPromotion.Load(),   // ADR-0004 Slice 1e: coordinated handoff
+		LeaderTerm:       globalHA.Status().Term,             // ADR-0004 Slice 1c/P2: seed standby epoch
+		Epoch:            globalHA.CurrentEpoch(),            // ADR-0005 S3: puller-side fence input
+		Revocations:      sessionRevoked.ExportRevocations(), // CHAOS-68: the standby verifies the same cookies
 	}
 
 	resp, _ := json.Marshal(bundle)

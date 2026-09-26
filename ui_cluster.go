@@ -424,7 +424,14 @@ func apiClusterRevocations(w http.ResponseWriter, r *http.Request) {
 	}
 	jsonOK(w, map[string]any{
 		"local_revoked": sessionRevoked.Count(),
-		"cluster_mode":  audit.DPMode() || clusterRole.role == "control-plane",
+		// CHAOS-68: account-level revocations were invisible on every surface.
+		// `local_revoked` counts TOKENS only, so a node holding a hundred
+		// deleted-account revocations and a node holding none serialised
+		// identically — and this endpoint was the only place any revocation
+		// count was reported at all.
+		"local_user_revoked":  sessionRevoked.UserCount(),
+		"revocations_durable": revocationsAreDurable(),
+		"cluster_mode":        audit.DPMode() || clusterRole.role == "control-plane",
 	})
 }
 

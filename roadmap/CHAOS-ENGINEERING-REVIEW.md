@@ -178,6 +178,50 @@ the evidence column named the property that makes all seven reachable, and the
 verdict looked past it. Re-scored **H** and split. See §35, rows CA-6/CA-6b and
 OCSP-1…OCSP-10, and `docs/operator/ocsp-revocation-checking.md`.
 
+**2026-09-19 — CHAOS-68 sweep (the session revocation plane). ID CLAIMED BEFORE ANY CODE
+WAS WRITTEN,** as the header above recommends after ten collisions and as the CHAOS-65 sweep
+first did. This row was commit one of the sweep — and the id still moved: it was claimed as
+CHAOS-66 on the branch, and the SOCKS5 BIND sweep shipped to main under CHAOS-66 (§36) first, so
+on merging main this sweep was renumbered, and — with six open sweeps all holding CHAOS-66 —
+ids were allocated in PR-number order, giving it CHAOS-68 (§38; test gates `TestChaos68_*`). A claim
+made on an unmerged branch reserves nothing — only a claim that lands on main does.
+Scope: the one mechanism in Culvert that can withdraw authority from a session that is already
+issued — `internal/session`'s `RevocationList`, its persistence, its CP↔DP gossip, and the two
+admin actions that reach it.
+
+The property everything turns on: a Culvert cookie is **self-contained** and is trusted on its
+HMAC alone. Nothing re-consults the roster on a request — `ui_middleware.go` reads the admin
+role *out of the cookie*, and `proxy.go`'s identity arm reads the subject and groups out of it,
+where they feed identity- and group-scoped policy on the **data plane**. So the revocation list
+is not one control among many; it is the only way to take authority away from something already
+issued, and the window it otherwise runs to is up to **seven days**. Four defects, all closed,
+and the shape they share is that the list was treated as a cache. **An account-level revocation
+was never persisted and never gossiped** — `RevokeUser` wrote to a `users` map that
+`ExportRevocations` did not walk, two functions ninety lines apart in one file — so deleting a
+compromised account revoked its live sessions in the memory of one process, on one node, until
+that process exited. **The Control Plane was isolated from the plane in both directions**, and
+that is the sharpest one: `globalRevAggregator` had exactly one writer in the whole tree, a Data
+Plane push, and `SyncRevocations` never merged what it received. The admin UI runs on the
+Control Plane — that is what a control plane is for — so the node where logouts and deletions
+actually happen was the one node whose revocations went nowhere, while the direction that did
+work is the one nobody uses. **A corrupt revocations file resurrected every revocation behind
+one log line**, and the next save atomically overwrote the evidence; `quarantineCorruptStateFile`
+has handled exactly this for `ui_users.json` and `cluster.json` since CHAOS-05/07 and this file
+was simply never wired in. And **none of it was reachable by a dashboard**: no metric, no health
+row, no alert, one role-gated JSON field that counts tokens only — the §1 theme, and the same
+blind spot CHAOS-59 found in the feed plane.
+
+One finding is **reported, not changed**: `-revocations-file` ships empty, and the danger is the
+COUPLING rather than the default. With a per-restart signing key every cookie breaks on restart
+anyway — but `docker-compose.yml` sets `CULVERT_SESSION_SECRET` and every clustered deployment
+must, so the stable key that makes sessions survive a restart is exactly what lets a cookie
+outlive the restart that discards its revocation. The dangerous configuration is the documented
+one. Defaulting the path starts writing a new file on every appliance, which is an owner
+decision, so what shipped is the warning that names the coupling. 26 gates; every defect gate
+verified failing against its reintroduced pre-fix shape, with two controls (revoking everything
+passes every gate while locking every operator out; a row that always fails trains operators to
+ignore it). See rows AU-18…AU-23, §38, and `docs/operator/session-revocation.md`.
+
 **2026-09-02 — CHAOS-58 sweep (the directory that accepts and then stops answering).**
 CHAOS-47 solved the *unreachable* directory: fail closed, arm a provider-wide cooldown, deny
 without dialing, recover on evidence. This sweep asked which faults can actually ARM that
@@ -1144,6 +1188,28 @@ Severity key: **C**ritical / **H**igh / **M**edium / **L**ow / **✓** handled w
 | AU-13 | Registry introspection also lacks **negative caching / circuit breaker** — a permanently-invalid token amplifies one IdP call per provider per request forever. | GAP | M | `auth_oidc_flow.go:623-636`; breaker exists unused `internal/upstream/upstream.go:89-96` |
 | AU-15 | **The public admin-login endpoint accepted an UNBOUNDED username and copied it verbatim into durable state.** `apiAuthLogin` is on `uiAuthMiddleware`'s public allowlist; nothing between the 1 MiB body cap and the handler limited `body.User`, and every failed attempt wrote it into the two lockout maps (retained ≥ `lockout.Window`), the 500-entry audit ring, and the **durable audit JSONL** — a 50 MB rotating file keeping exactly ONE archive. At the endpoint's own rate limit (60 mutating POSTs/min/IP) one unauthenticated client commits ~60 MiB/min of chosen bytes, rotating the entire 100 MB retained compliance record away in **under two minutes**, with no disk fault and every write SUCCEEDING (so `writeErrors`/`storage_write_failed` never fire). Measured by the gate: **4,195,672 bytes into the audit file from 8 requests.** | NEW → **CLOSED** (CHAOS-63: bounded at the handler; `lockout.MaxUsernameKeyLen` is the structural half; `culvert_login_oversize_rejected_total`) | **H** | was: `ui_auth.go` `apiAuthLogin`; `internal/audit/audit.go:213` (`NewRotatingFile(path, 50)`); see §32 |
 | AU-16 | **`internal/lockout` bounded its maps by ENTRY COUNT but not by KEY SIZE.** `Cleanup`'s own doc claims the maps are bounded "against an unbounded-memory DoS" — true on the count axis, and the janitor cannot sweep an entry before its `Window` elapses, so the SIZE axis was the whole exposure: one caller retained (rate × Window × username size) bytes in a leaf package whose stated contract is to be bounded. | NEW → **CLOSED** (CHAOS-63: `boundUsername` applied at every public entry point; consistency pinned so `Check` and `RecordFailure` cannot disagree on the key) | M/H | was: `internal/lockout/lockout.go`; see §32 |
+| AU-18 | **An account-level revocation was never persisted.** A Culvert cookie is self-contained and trusted on its HMAC alone — nothing re-consults the roster on a request — so the revocation list is the ONLY way to withdraw a live session's authority, and the TTL it otherwise runs to is up to 7 days. `RevokeUser` wrote to an in-memory `users` map that `SaveRevocations` did not export, so deleting a compromised or departing account revoked its live sessions in the memory of one process and no longer. An ordinary redeploy, an OOM or a SIGKILL resurrected them. | NEW → **CLOSED** (CHAOS-68: both maps reach disk; `DELETE /api/auth/users` persists like a logout does) | **H** | was: `internal/session/session.go` `ExportRevocations` (tokens only), `ui_auth.go` DELETE branch (no save); see §38 |
+| AU-19 | **An account-level revocation was never gossiped**, for the same reason: `ExportRevocations`/`MergeRevocations` handled only the token map. On a cluster, deleting an account revoked its sessions on the ONE node that served the DELETE; every other node kept honouring the cookie — including for identity- and group-scoped **proxy policy**, not just the admin UI. | NEW → **CLOSED** (CHAOS-68: user entries ride the existing CP↔DP sync; downgrade-parseable array preserved) | **H** | was: `internal/session/session.go`; see §38 |
+| AU-20 | **The Control Plane was isolated from the revocation plane in BOTH directions.** `globalRevAggregator` had exactly one writer — a Data Plane push — so the CP contributed nothing to the fleet-wide merge, and `SyncRevocations` never merged what it received, so it consumed nothing either. The admin UI runs on the CP, which makes it the node where logouts and account deletions actually happen: the direction that propagated (DP→fleet) is the one nobody uses, and the direction an operator uses did not exist. | NEW → **CLOSED** (CHAOS-68: the handler contributes the CP's live list and merges the DP's, on the sync tick that already runs; the CP slot is a dedicated field, not a reserved map key) | **H** | was: `controlplane.go` `revocationAggregator`, `controlplane_server.go` `SyncRevocations`; see §38 |
+| AU-21 | **A corrupt revocations file resurrected every revocation, silently.** `initSession` logged the parse error and booted with an EMPTY list, and the next `SaveRevocations` atomically OVERWROTE the evidence. `state_corruption.go` has handled exactly this for `ui_users.json` and `cluster.json` since CHAOS-05/07; the revocations file — the one whose loss is a security-control failure rather than a roster inconvenience — was simply never wired into it. | NEW → **CLOSED** (CHAOS-68: `ErrRevocationsCorrupt` + `quarantineCorruptStateFile("session_revocations", …)`; a READ failure is deliberately NOT quarantined) | **H** | was: `session_startup.go`, `main.go` `initSession`; see §38 |
+| AU-22 | **Revocation persistence is opt-in and ships OFF** (`-revocations-file` defaults to `""`), and the danger is the COUPLING rather than the default alone: with a per-restart signing key every cookie breaks on restart anyway, but the shipped `docker-compose.yml` sets `CULVERT_SESSION_SECRET` and every clustered deployment MUST — so the stable key that makes sessions survive a restart is exactly what lets a cookie outlive the restart that discards its revocation. Defaulting the path to `<dataDir>/revocations.json` is the obvious fix and starts writing a new file on every appliance, so it is an OWNER decision, not a side effect of this sweep. Made VISIBLE rather than changed: the `session_revocation` row warns and names the coupling. | NEW, **REPORTED not changed** (CHAOS-68) | M/H | `main.go:320`, `docker-compose.yml` `CULVERT_SESSION_SECRET`; see §38 |
+| AU-23 | **A role or password change revokes nothing.** `POST /api/auth/users` re-writes the roster, but the role lives IN the cookie (`ui_middleware.go` reads `sess.Role`, it does not re-resolve), so a demoted admin keeps admin authority until the session expires, and the classic "my password was stolen, I changed it" action does not invalidate the stolen session. Only DELETE revokes. Closing it means revoking on a role/password edit, which changes an admin workflow and deserves its own review. | NEW, **REPORTED not changed** (CHAOS-68) | M | `ui_auth.go` POST branch; `ui_middleware.go:276`; see §38 |
+| AU-24 | **The HA standby CP was the one node with no route into the revocation plane at all.** The HA state bundle replicates `SessionHMAC` (inside `Config`), so a standby verifies exactly the cookies the leader does — while `SyncRevocations`, the only other carrier of revocations, is fenced on a standby by `haIssuanceAllowed`. So a session revoked on the leader authenticated against the standby, and kept full authority across a promotion until some Data Plane happened to push the entry back, or forever if none reconnected. Same defect as AU-20, one node over, and it survived AU-20's fix. | NEW → **CLOSED** (CHAOS-68 round 2, Codex P1: `HAStateBundle.Revocations`, `omitempty`, merged + persisted by `applyHABundle` inside the bundle's existing trust boundary) | **H** | was: `controlplane_server.go` `HAStateBundle`/`HASync`, `ha.go` `applyHABundle`; see §38 |
+| AU-25 | **A health row keyed on a CUMULATIVE failure counter can never recover.** `revocationsAreDurable` read `persistFailures == 0`, so one transient write failure pinned `culvert_session_revocation_durable` at 0 and the `session_revocation` row at `fail` for the life of the process — after the volume was repaired and a later save had written the complete live list. The row's own comment claimed the opposite ("evaluated, never latched"). `ca_health.go` records having fixed this exact bug once already, in the file CHAOS-68 cites as its model. | NEW (introduced by CHAOS-68) → **CLOSED in the same PR** (Codex P2: cumulative counter kept for magnitude, separate current-state flag cleared by a `SetPersistSuccessObserver` recovery seam) | M | was: `session_revocation_health.go`; precedent `ca_health.go` `caRotationPersistDegraded`; see §38 |
+| AU-26 | **An atomic write is not an atomic update: concurrent saves could silently drop a revocation.** `SaveRevocations` snapshotted the maps, released `mu`, then marshalled and renamed, so two savers could interleave with the OLDER snapshot renaming LAST — losing a revocation both callers were told had been applied, while both returned nil, both counted as a successful write and the durability row stayed green. Visible only at the next boot, when the dropped account's sessions authenticate again. Reachable BECAUSE of this sweep: `SaveRevocations` went from one caller to five, three of them background paths racing an admin's DELETE. | NEW (introduced by CHAOS-68) → **CLOSED in the same PR** (Codex P1: a dedicated `saveMu` across snapshot-through-rename; deliberately not a wider hold of `mu`, which would let a slow volume delay the act of revoking) | **H** | was: `internal/session/session.go` `SaveRevocations`; see §38 (36.6c) |
+| AU-27 | **A rate window cannot answer a question about the present.** The durability page was documented as `culvert_session_revocation_durable == 0 and increase(culvert_session_revocation_persist_failures_total[15m]) > 0`. After a save fails, nothing necessarily triggers another write — no further logout, no sync — so the `increase()` decays to zero and **the page CLEARS while writes are still failing** and the degraded flag is still set. The conjunction was chosen to stop the bare gauge paging on every default appliance (persistence is opt-in), which it does correctly; it just answered the wrong question, because `durable` is two-valued over THREE causes (unconfigured, load-degraded, write-failing) and only the third is pageable. The current state was ALREADY tracked — it is AU-25's own fix, `sessionRevocationPersistDegraded` — and simply was never exported. | NEW (introduced by CHAOS-68) → **CLOSED in the same PR** (Codex P2: export `culvert_session_revocation_persist_degraded`, page on `== 1`; the counter stays for MAGNITUDE and is still never alerted on alone) | M | was: `metrics.go` + `docs/operator/session-revocation.md`; gate `TestChaos68_WriteDegradedPageLatchesUntilASaveLands`; see §38 |
+| AU-28 | **An account revocation is keyed on the username with no issuance-time cutoff, so it locks out a same-name replacement.** `RevokeUser` records the username until `now + TTL` and `IsUserRevoked` rejects every session carrying that subject without asking when it was issued — the signed cookie payload has no issued-at field, only `Exp`. Deleting an account and immediately recreating it under the same name therefore yields a replacement whose brand-new cookies are rejected fleet-wide for up to the session TTL (default 8 h, max 7 days), and there is no admin API to withdraw a revocation early. The runbook recommended exactly that as the remedy for role/password changes (AU-23). PRE-EXISTING, but **this sweep made the consequences durable and fleet-wide**: the two things that used to end the lockout by accident — a restart, or using another node — no longer do. | PRE-EXISTING, consequences widened by CHAOS-68 → **DOCUMENTED, not fixed** (Codex P2). Guidance: recreate under a different username, or wait out the TTL. The principled fix is an issuance-time cutoff, which needs a new field in the signed cookie payload plus a fail-closed reading for legacy cookies that carry none — a wire-format change to a security control, and its own review | M | `internal/session/session.go` `RevokeUser`/`IsUserRevoked`; `docs/operator/session-revocation.md` §2 + §7; see §38 |
+| AU-29 | **The proxy/portal logout never revoked anything.** `authLogout` (`/auth/logout`) called `clearSessionCookie` and nothing else, so the `ps_session` token was never added to the revocation list, never persisted and never gossiped. Clearing a cookie is a request to the BROWSER, not a withdrawal of authority: a retained or stolen copy replayed against this node or any other until natural expiry (up to 7 days). This is the PROXY session, which `proxy.go`'s identity arm reads for identity- and group-scoped policy, so the replay window was an enforcement gap on the DATA plane, not merely an admin-console one — and it made §2 of the runbook ("admin **or user** logs out → token revoked") false for exactly half its own table, in the sweep whose entire premise is that this list is the only way to withdraw a live session's authority. The admin path (`apiAuthLogout`) had always revoked. | PRE-EXISTING → **CLOSED in the same PR** (Codex P1: `revokeSessionCookie(sessionCookieName, r)` before the clear, which is safe only together with AU-30) | **H** | was: `ui_auth.go` `authLogout`; gate `TestChaos68_ProxyLogoutRevokesTheSessionToken`; see §38 |
+| AU-30 | **`revokeSessionCookie` revoked an UNVERIFIED cookie, and both its call sites are PUBLIC.** It split on the final dot and read the expiry with a bare base64+JSON decode, verifying no HMAC — its comment claimed "HMAC already verified by decodeSession", which was true of the value's ORIGIN on the admin path and never of this function, which re-reads the cookie off the request. `/api/auth/logout` and `/auth/logout` are both on `uiAuthMiddleware`'s public allowlist, the revocation map is UNCAPPED, each entry expires at a time taken FROM THE COOKIE, and every call marshals the whole list to disk and gossips it fleet-wide — so one unauthenticated caller could mint arbitrarily many effectively permanent entries in memory, on disk and on every node. CHAOS-63's write-amplification shape aimed at the control that withdraws session authority. **Found while fixing AU-29**: the literal fix (copy the admin path's call) would have extended the vector to a second public endpoint, so the two had to land together. | PRE-EXISTING (latent on the admin path) → **CLOSED in the same PR** (authenticate via `decodeSession` first; it splits on the same dot and keys on the same b64, so a genuine logout is byte-identical and a forgery writes nothing) | **H** | was: `session.go` `revokeSessionCookie`; gate `TestChaos68_ForgedLogoutCookieCreatesNoRevocation` + control `TestChaos68_AdminLogoutStillRevokes`; see §38 |
+| AU-31 | **Durability was reported from configuration, not from evidence.** `LoadRevocations` treats `os.IsNotExist` as a legitimate first run and returns, while `Configured` is already true — so `revocationsAreDurable()` claimed a revocation would survive a restart even when the parent directory was missing, read-only or unwritable and the first save was guaranteed to fail. The cluster API, the `session_revocation` row and the metric all read GREEN until some operator's logout, hours later, became the first write to discover the path was bad. "The file is not there yet" and "this path works" are different claims and the health plane reports the second. **Round 2 (Codex P2 again): the first fix probed only the branch that prompted it.** The probe sat inside `if os.IsNotExist(err)`, so a file that already EXISTS and parses cleanly took the success path and never attempted a write — a volume remounted read-only after an I/O error, a restore mounted read-only, a directory whose permissions changed — and reported durable on every surface until the first real logout failed. The probe now runs on BOTH branches that reach a durable-looking posture and on NEITHER that does: absent (nothing to lose) and loaded (the in-memory list is a superset of the file, so rewriting it is safe), never unreadable (the content may be intact and a write is the one action that could destroy it — `state_corruption.go`'s rule) and never corrupt (the caller quarantines; writing first overwrites the evidence). Ordering is load-bearing in the other direction too: the probe must run AFTER the merge, or the natural "probe first, then read" refactor writes the EMPTY in-memory list over the real file at every boot — a total silent failure of the only control that withdraws a live session's authority, pinned by `ProbeDoesNotDropLoadedRevocations`. **The transferable lesson: a probe that proves a property must run on every path that reaches the claim, not just the path that prompted it** — the same shape as §38's "a global content wall over a composed document only tests the branches composition happens to select." | NEW-adjacent (pre-existing, surfaced by CHAOS-68's health plane) → **CLOSED in the same PR** (Codex P2: the absent-file branch PROVES the path with the real write path — `SaveRevocations` creates the file and drives the same success/failure observers — so a bad path degrades at BOOT instead of at first logout) | M | was: `internal/session/session.go` `LoadRevocations`; gates `TestChaos68_UnwritablePathIsNotReportedDurable` (absent) + `TestChaos68_ExistingFileIsProbedForWritability` / `TestChaos68_ExistingFileOnAReadOnlyDirIsReportedNotDurable` / `TestChaos68_ExistingFileOnUnwritablePathIsNotReportedDurable` (existing), controls `TestChaos68_WritablePathIsStillDurable`, `TestChaos68_UnreadableFileIsNotProbed`, `TestChaos68_CorruptFileIsNotOverwrittenByTheProbe`, `TestChaos68_ProbeDoesNotDropLoadedRevocations`; see §38 |
+| AU-32 | **A user revocation is keyed on the bare subject, so it crosses IDENTITY PROVIDERS.** `RevokeUser(username)` stores the roster username and `Decode` tests `Revoked.IsUserRevoked(s.Sub)` without consulting `Session.Provider`, so deleting the LOCAL admin `alice` also rejects an OIDC, SAML or LDAP session whose subject happens to be `alice`. The collision is not exotic: a SAML NameID and an OIDC `sub` mapped to a username claim are both ordinary configurations, and an estate whose local break-glass account mirrors a directory account name is the normal case, not the unlucky one. **The direction is FAIL-CLOSED** — it over-revokes, denying a session it need not deny, and never admits one it should not — and only an admin can trigger it, so there is no unauthenticated amplification; the cost is availability for an unrelated federated user, for up to the session TTL. | PRE-EXISTING (`RevokeUser` and the `IsUserRevoked(s.Sub)` check both arrived in PR #1315, an ancestor of main — neither is introduced here), but **this sweep makes the consequence DURABLE and FLEET-WIDE**: a restart or a hop to another node used to end the collision by accident and no longer does. **REPORTED, NOT CHANGED — owner decision**, for the same reason as AU-28. Neither available fix is a one-liner in this PR's scope. *Narrowing the check to `Provider == "local"`* (the reviewer's suggestion) is a LOOSENING of a security control — it admits sessions that are denied today, and whether an operator deleting local `alice` means "cut off this account" or "cut off this human" is a posture question this PR has twice declined to answer on its own (AU-23, AU-28); AU-2 already records the federated half as its own gap. *Namespacing the key by provider* is the PRECISE fix — it neither over- nor under-revokes — but it changes the persisted and gossiped key, so a node predating it files `user:alice` while a newer node looks for a provider-scoped key and the revocation silently stops matching across versions: a cross-version enforcement gap in exactly the control this sweep exists to make reliable, and the class constraint 1 of §38 (the document stays downgrade-parseable) was written to prevent. Doing it properly needs a dual-key or migration scheme and its own review. | M | `internal/session/session.go` `RevokeUser`/`IsUserRevoked`/`Decode`; reported by Codex on PR #1437; documented in `docs/operator/session-revocation.md` §7 |
+| AU-33 | **A revocations file containing the JSON literal `null` was accepted as an EMPTY LIST, not as corruption.** `encoding/json` unmarshals `null` into a slice WITHOUT error and leaves the slice nil, so the corrupt branch — which keys on the unmarshal error — never fired. The document took the LOADED path: it merged nothing, reported durable on every surface, and then the boot writability probe rewrote it as `[]`. The enforcement outcome is the same as a quarantine (both boot with an empty list, so nothing is under-revoked that a quarantine would have caught), which is why this is a VISIBILITY defect rather than a data-loss one — but it is the same silent acceptance of corruption that §38's defect 4 exists to close, one shape over: no `state_file_corrupt` alert, no readiness row, no preserved file, nothing for an operator to find. **This sweep made it strictly worse**, the AU-28/AU-32 pattern again: before the probe the anomaly survived on disk until some later logout overwrote it and an operator inspecting the file could still see it; after the probe, boot erases it every time. | **CLOSED.** `LoadRevocations` rejects a top-level `null` as `ErrRevocationsCorrupt` BEFORE the merge and BEFORE the probe, so the caller quarantines and the file is preserved byte-for-byte. `entries == nil` after a SUCCESSFUL unmarshal is an exact discriminator, not a heuristic — only `null` leaves the slice nil, an empty array yields a non-nil zero-length slice, and every other top-level value already failed with a type or syntax error (verified empirically across the whole shape set). Quarantining is safe because Culvert cannot produce `null`: `ExportRevocations` has allocated with `make([]RevocationEntry, 0, …)` since it first landed (dc3921a), so an empty list marshals to `[]` — checked at the original commit, not assumed, because a binary that HAD written `null` would make this fix quarantine a file every appliance owns. **Entry-level validation was deliberately DECLINED**, and that is the load-bearing half: rejecting the whole document over one malformed entry quarantines it, and a quarantine boots with an EMPTY list, so it would drop every GOOD revocation in the file to punish a bad one — the fail-OPEN direction this file must never err in. The one entry shape with an argument for it, an empty `Token`, is inert: it lands as `tokens[""]`, matches no real cookie payload, and cannot collide with a user revocation in `MergedExcluding`'s Token-keyed dedup, because those always carry the `user:` prefix that `ExportRevocations` stamps. It expires on its own. | M | `internal/session/session.go` `LoadRevocations`; reported by Codex on PR #1437 as a P1; gates `TestChaos68_NullDocumentIsCorruptNotEmpty` (defect, verified failing against the pre-fix body) + `TestChaos68_EmptyArrayIsNotCorrupt` (CONTROL — `len(entries) == 0` in place of `entries == nil` is the obvious way to write this fix and would quarantine every default appliance's own `[]` on every boot, write `[]` again, and quarantine it again next boot: an unbounded quarantine loop caused by the fix for a shape Culvert cannot emit; verified failing against exactly that) + `TestChaos68_PopulatedArrayStillLoadsAfterNullRejection` (CONTROL) |
+| AU-34 | **A failed revocation save was NEVER retried, because all three cluster merge sites persisted only inside `if added > 0`.** `MergeRevocations` returns 0 once an entry is already in memory, so ONE transient persist failure was PERMANENT: every later sync carried the same entry, added nothing, and skipped the save. Repairing the volume did not make the revocation durable, and a restart then loaded a file that had never received it — the revoked cookie is accepted again, the fail-OPEN direction this plane exists to prevent. **It bites hardest on the HA STANDBY, which is where the reviewer found it**: a standby is fenced out of `SyncRevocations` by `haIssuanceAllowed` (that is what AU-24 exists for), so the bundle is its ONLY writer and nothing else on that node would ever retry; the AU-31 boot probe does not help either, because by the time it runs the in-memory list is gone and it writes the file WITHOUT the revocation. | **CLOSED.** One primitive, `mergeAndPersistRevocations`, now serves all three sites (HA bundle, CP `SyncRevocations`, DP sync loop) and retries whenever `added > 0` **OR** persistence is currently degraded. **No new state**: `sessionRevocationPersistDegraded` (AU-25) is already exactly the dirty bit — set by a failed save, cleared only by one that lands — so reusing it keeps ONE answer to *are writes failing right now* instead of a second, parallel flag; and `SaveRevocations` always writes the COMPLETE live list, so a retry is idempotent by construction and needs no record of WHICH entry was lost. **The log is keyed on the TRANSITION, not the attempt**: the standby syncs every 5 s and the DP loop every 3 s, so a per-attempt line is hundreds an hour while a volume is broken — a mitigation for a durability defect must not become a write-amplification one (CHAOS-63's rule, CHAOS-61's one-line-per-transition precedent); the magnitude stays in `culvert_session_revocation_persist_failures_total`. An unconfigured node pays nothing (`SaveRevocations` returns early, never sets the flag, so a sync with no new entries returns before attempting anything). **The reviewer named ONE site and all three had it** — this sweep's own §38 lesson (*enumerate every surface the mechanism reaches*) applied to itself, which is why the fix is a shared primitive rather than three copies of the retry logic. | M | `session_revocation_health.go` `mergeAndPersistRevocations`; call sites `ha.go`, `controlplane_server.go`, `controlplane_client.go`; reported by Codex on PR #1437 as a P1. Gates: `TestChaos68_FailedSaveIsRetriedOnALaterSyncThatAddsNothing` (defect, verified failing against the pre-fix `if added > 0` shape) + `HealthyNodeDoesNotRewriteOnEverySync` (CONTROL — saving on every call is the cheapest way to pass the defect gate and would rewrite the whole list every 3–5 s on every node forever; verified failing against exactly that) + `RetryLogsOncePerEpisodeNotPerAttempt` + `RetrySuccessAnnouncesRecoveryOnce` + `EveryRevocationMergeSiteRetriesThroughThePrimitive` (STRUCTURAL WALL — the CP handler is not behaviourally reachable, needing an mTLS peer, an enrolled node and an unfenced lease, so a fourth merge site is stopped structurally; verified failing against a reverted HA site). **The refactor also broke the two pre-existing *wires-both-directions* walls**, which scanned for a literal `MergeRevocations` call: they fired CORRECTLY, because as spelled the functions no longer did what they required. The repair taught them the new spelling (`chaos68CalleeName` folds the primitive onto the requirement) and both were re-proven non-vacuous by deleting each direction in turn — *a wall you edit while refactoring must be re-proven, or you have quietly swapped a guarantee for a green tick.* |
+| AU-35 | **A backing file that disappears AFTER the boot probe is never noticed, so the in-force revocations silently drift off disk.** AU-31 proves the path is writable at BOOT; nothing re-establishes it afterwards. Delete `revocations.json`, or replace the mount under it, and NO observer fires — no write was attempted, so `sessionRevocationPersistDegraded` stays clear — while the AU-34 primitive keys its retry on exactly that flag. Every subsequent cluster sync therefore carries only already-known entries, adds 0, takes the early return, and never puts the list back on disk. The next restart loads a file that never received those revocations and the cookies are live again: the fail-OPEN direction this plane exists to prevent. | **CLOSED, and the fix is a REPAIR rather than a re-statement.** `revocationBackingFileIsGone()` is one shared predicate; the merge primitive treats a gone file as "durability in doubt" alongside the degraded flag, so the next sync rewrites the complete live list. It is SELF-LIMITING — the forced save recreates the file, so the following tick finds it present and returns early again: exactly one extra write per disappearance, not one per tick. If the save fails too (the mount is gone, not just the file) the flag is set and AU-34's retry takes over unchanged. **It keys on `session.RevocationsPath()`, the path `SaveRevocations` actually writes to, NOT the recorded health path** — otherwise a caller could loop forever, statting one path and saving to another. **ONLY a definitively absent file counts** (`os.IsNotExist`): EACCES, EIO or a stale handle are not evidence the file is gone and the content may be intact behind a transient fault, which is the rule `LoadRevocations` already applies to an unreadable file — a second, stricter posture for the same question inside one file is the divergence class this sweep keeps closing. **The durable GAUGE is deliberately left alone, and the distinction is the finding's substance**: `revocationsAreDurable` and `culvert_session_revocation_durable` state *"a revocation applied right now would survive"*, which a deleted file does NOT falsify — `AtomicWrite` creates the file, so the next revocation re-materialises everything. What a deleted file falsifies is *"the revocations ALREADY in force are on disk"*, which is the contract row's OK message; the row gets the new FAIL branch and the gauge keeps matching its own published help text. Folding the check into the gauge would make it contradict its documented meaning to report a condition the row already names. | M | `session_revocation_health.go` `revocationBackingFileIsGone` + `mergeAndPersistRevocations` + `checkSessionRevocation`; reported by Codex on PR #1437 as a P2, against the primitive's early return. Gates: `TestChaos68_VanishedBackingFileIsRewrittenOnTheNextSync` (defect) + `VanishedBackingFileFailsTheContractRow` (defect) + `VanishedFileRepairIsOneWriteNotAPerTickRewrite` + `UnconfiguredNodePaysNothingForTheVanishedFileCheck` (CONTROL) + `UnreadablePathIsNotReportedAsAVanishedFile` (CONTROL) — four mutations each verified RED: the flag-only retry, the removed row branch, an any-stat-error predicate, and a dropped early return. **The fix broke one of this sweep's own controls, and why is the transferable part**: `HealthyNodeDoesNotRewriteOnEverySync` used `os.Remove` as its instrument for *did a write happen*, and a missing file is now itself a reason to write — so the control was CREATING the condition it meant to rule out and could no longer distinguish "a healthy node wrote" from "a node repaired a file this test deleted". It now scribbles a sentinel over the file instead, which leaves it PRESENT (the actual healthy state) and is destroyed only by a real write. *An instrument that perturbs the state under test stops measuring it the moment that state acquires a meaning.* The branch wall `ContractRowNeverEchoesSensitiveTokens` gained the new branch AND a per-branch status assertion, since a wall claiming to drive every branch is false the moment one is added without it — and a sub-case that silently lands in a different branch would pass the leak check while proving nothing. |
+| AU-36 | **A load failure that could not be READ is given the recovery action of one that could not be PARSED — the operator is sent after evidence that does not exist.** The load path already separates the two: a file that was read and would not parse is quarantined to `.corrupt.<unixnano>` and records a `state_file_session_revocations` readiness row, while a file that could not be read at all (EACCES after a permission change, EIO on a failing volume, a mount that went away) is deliberately NOT quarantined — the content may be intact behind a transient fault, and moving a healthy security-critical file aside is the worse error. It then **DISCARDED that classification when recording the health**: `noteRevocationLoadDegraded` stored a bare bool, so the contract row printed one remedy for both and told an operator to *"See the state_file_session_revocations row … Restore the quarantined .corrupt.* file"* for a file that has neither. Mid-incident, on the one control that can withdraw an already-issued session, pointing at artifacts that were never produced. | **CLOSED.** `revocationLoadIsCorrupt(err)` is ONE shared predicate: `session_startup.go` asks it to decide the quarantine and `noteRevocationLoadDegraded` asks it to set `LoadCorrupt`, so **the action taken and the action advertised cannot disagree** — a call site classifying the error itself is precisely how they drifted apart, and the wall forbids it. The row now branches: the parse failure keeps the quarantine remedy verbatim, the read failure names the permission/mount repair and the restart. It also states the fact that makes *"the contents may still be intact"* actionable: **the window closes at the first revocation after boot, not at the restart.** The AU-31 probe deliberately does not write on this branch, but all three production writers (`revokeSessionCookie`, the account-delete handler, `mergeAndPersistRevocations`) call `SaveRevocations` unconditionally, so the next logout replaces the unread file with the list this process could not read. `LoadDetail` stays off the row and is documented as log-only — it is `err.Error()` and embeds the path, which `TestApiDiagnostics_NoSensitiveValues` forbids on a viewer-reachable surface. | L | `session_revocation_health.go` `revocationLoadIsCorrupt` + `sessionRevocationHealth.LoadCorrupt` + `checkSessionRevocation`; `session_startup.go`. Reported by Codex on PR #1437 as a P2. **Same defect class as CHAOS-66's `socks5BindRemedy`** (§36): *a bounded classifier is worth nothing if one remedy is printed for every class* — here the classifier already existed and its answer was thrown away one statement later, which is the sharper version. Gates: `AU36_UnreadableLoadDoesNotAdvertiseAQuarantine` + `AU36_UnreadableRemedyWarnsTheFileIsStillOverwritable` (defect) + `AU36_CorruptLoadStillNamesTheQuarantine` (CONTROL — the cheapest way to pass the two defect gates is to delete the quarantine remedy, stripping the one branch that really does leave a restorable copy of its only recovery instruction) + `AU36_TheTwoLoadFailuresCarryDistinctRemedies` (CONTROL — a switch returning one string satisfies every "names its own remedy" assertion) + `AU36_QuarantineAndRemedyShareOnePredicate` (structural WALL, with its own not-vacuous check on the recorder). Four mutations verified RED against the gate each targets: the pre-fix single remedy, the deleted quarantine remedy, a recorder that never classifies, and a call site that classifies the error itself. `TestChaos68_LoadFailureActionMatchesTheFault` is a SECOND, independently written gate for the same finding, kept rather than folded in: it was authored in a parallel session that reached the same conclusion, it asserts the pair in one function where these split it, and an independent check of one property is worth more than the duplication costs. The branch wall gained the read-failure composition — *a wall that drives only one sibling of a branch would not see a leak in the other*, the same branch-coverage lesson this row's own wall exists for, one branch deeper. | **The remedy's WORDING is constrained and must not be "improved" back**: the unreadable branch may not contain the words `.corrupt`, `quarantin*` or `state_file_session_revocations` **at all**, including as a disclaimer ("nothing was quarantined"). A first draft said exactly that and the gate caught it; the fact is carried instead as *"the file was left in place and nothing was moved aside, so there is no copy to restore"*, which is the actionable half. A blunt substring gate that cannot be argued with is more durable than a subtle one that has to distinguish an instruction from a disclaimer. |
+| AU-37 | **A revocations file that could not be READ is overwritten by ordinary operation, destroying the only copy of the revocations nobody saw.** A read failure is deliberately NOT quarantined on the reasoning that the content may be intact behind a transient fault — but that reasoning only holds if nothing LATER writes to it, and something did. The process boots with an EMPTY list, and the first logout, account deletion or cluster sync that adds an entry calls `SaveRevocations`, which renames a complete temp file over the target. **`AtomicWrite` needs only the parent DIRECTORY to be writable**, so an unreadable file in a writable directory — a mode change, an ACL, an EIO on the file's own blocks — is replaced by the handful of revocations this process happens to know about; every revocation that was on disk and never read is gone for good, and the operator's own remedy (fix the permission, restart) then loads the TRUNCATED file. Fail-OPEN on the one control that can withdraw an already-issued session, reachable by ordinary operation rather than by a second fault. | **CLOSED by a fence at the PRIMITIVE, not at the call sites.** `RevocationList.unread` is set by a READ failure in `LoadRevocations` and makes `SaveRevocations` return `ErrRevocationsUnread` before taking `saveMu` and before any I/O. Placing it in `internal/session` rather than in the three callers is the CHAOS-70 governance lesson applied (*enumerate such a class from the PRIMITIVE, not from the file being edited*): there are three writers today, two of them on loops, and a fourth would inherit the fence for free. **Only the READ failure sets it** — a CORRUPT file is quarantined, so the path is free and writing a fresh list there is correct, and fencing it too would leave a quarantined node unable to persist anything until a restart (pinned as a CONTROL). **The refusal is NOT a persistence failure and must never be counted as one**: no write was attempted, the volume may be healthy, and the condition is already reported by the load-degraded row — routing it through the persist observers would replace that row's remedy (fix the permission or the mount) with "check free space", which is AU-36's defect one layer down. It gets its OWN counter, `culvert_session_revocation_persist_refused_total`, which is also the operator's only measure of how many revocations are memory-only and therefore the size of the re-apply job; the row reports the same number. **The merge path does not log per attempt** — the sync loops run every 3-5s and the condition was already logged once at boot, so a per-tick line would be the write-amplification this primitive's own contract forbids. | H | `internal/session/session.go` (`unread`, `ErrRevocationsUnread`) + `session_revocation_health.go` + `session.go` + `ui_auth.go`; reported by Codex on PR #1437 as a P1 against the AU-36 head. **AU-36 had DOCUMENTED this hazard rather than removing it** — the runbook told the operator the window closed at the first revocation after boot — while the AU-31 boot probe already refused to write on exactly this branch for exactly this reason. *Same file, same fault, opposite postures*: the "two answers to one question" class this sweep keeps closing, this time inside the sweep's own fix. The lesson is narrower than "check for inconsistency": **when a mechanism declines to act in order to protect state, that protection is a claim about EVERY writer, not about the one you were editing** — so enumerate the writers in the same change, or the refusal is decoration. Gates: `AU37_SaveRefusesAfterAnUnreadableLoad` + `AU37_RefusalIsNotCountedAsAWriteFailure` (defect, chmod-driven, root-skipped) + `AU37_UnreadLoadFencesEverySubsequentSave` (their UID-INDEPENDENT counterpart, driving EISDIR via a directory at the path, so the skip leaves nothing unguarded on the root lanes) + `AU37_MergePathCountsTheRefusalAndStaysQuiet` (defect — the loop writer, and the one whose wiring every other gate missed) + `AU37_RefusalsAreCountedAndSurfaced` + two CONTROLS (`ReadableFileStillPersists` — refusing every save is the cheapest way to pass and silently deletes the durability this sweep exists to provide; `CorruptFileDoesNotFenceTheSave` — the over-broad fix). Four mutations verified RED against the gate each targets: the removed fence, a fence extended to the corrupt case, an unconditional refusal, and a removed merge-path branch. **That last mutation initially passed every gate**, which is what exposed the missing loop-writer gate — the merge path is the only writer that runs on a timer, so it is the only one where an uncounted refusal also becomes a per-tick log line. | **The fence is a LATCH, and a latch on a singleton is process-global TEST state**: `SwapForTest` swaps the maps and restores the SAME object, so one test tripping the fence made every LATER test's `SaveRevocations` refuse — it broke the unrelated AU-35 one-write gate, order-dependently, visible only under `-shuffle`. `SwapForTest` now saves, clears and restores it, pinned by `TestSwapForTest_IsolatesTheUnreadFence` (both directions: cleared inside the swap, and put BACK afterwards) and verified red against a swap that reads without clearing. **This is the resetDiagVerdictGlobals rule broken again inside the same sweep that recorded it** — *a new process-global with a latching state must be registered with its isolation primitive IN THE SAME CHANGE* — which is now written on `SwapForTest` itself rather than only in a register row nobody reads while adding a field. `TestChaos68_AU36_UnreadableRemedyWarnsTheFileIsStillOverwritable` was **INVERTED** into `AU37_UnreadableRemedyPromisesTheFileIsPreserved`: it pinned the documented hazard, and once the hazard was removed the old assertion would pass only if the fence were gone. Inverting a gate that pinned a now-removed hazard is deliberate and is recorded, never silent. |
+| AU-38 | **A corrupt revocations file that could NOT be quarantined is overwritten by the first save, destroying the only copy.** AU-37 fences writes for a file that could not be READ and deliberately EXEMPTS the corrupt branch, on the recorded reasoning that the quarantine moves the file aside so the path is free. That is a CONDITIONAL statement treated as unconditional: `quarantineCorruptStateFile` returns `""` when its rename fails, and **its own failure log says "the next save WILL OVERWRITE it; copy it elsewhere now"** — a warning to a human who may never see it, which was the product's entire mitigation. The boot path discarded that return. Reproduced with a basename in the band where AtomicWrite's `.tmp.<10>` suffix fits inside the 255-byte filename limit and the longer `.corrupt.<19-digit ns>` does not: the quarantine fails, the save succeeds, and the corrupt bytes are gone. | **CLOSED.** The boot path checks the return and arms the fence. The fence is ONE mechanism with a REASON (`writeFence` + `fenceUnread`/`fenceUnquarantined`) rather than a second bool, because the two faults need different remedies and a single sentinel would tell one of them the wrong thing — AU-36's lesson applied to the refusal itself: an unread file needs a permission or mount repair, an unquarantined one needs its path freed by hand. `session.IsWriteFenced(err)` is the SHARED predicate every call site asks, so a site recognising only one reason cannot count the other as a failing volume. The contract row branches too: the failed-quarantine branch must not offer a `.corrupt.*` copy that was never created. | M | `internal/session/session.go` + `session_startup.go` + `session_revocation_health.go`; Codex P2 on PR #1437. Gates: `AU38_FailedQuarantineFencesTheSave` (defect) + `AU38_FailedQuarantineRowDoesNotPromiseACopy` (defect) + `AU38_TheTwoRefusalsAreDistinctButBothFenced` + `AU38_SuccessfulQuarantineStillAllowsSaves` (CONTROL — fencing every corrupt load leaves a quarantined node unable to persist until a restart). **The first draft of the defect gate was VACUOUS and both mutations passed it**: it called `quarantineCorruptStateFile` and `FenceWritesUnquarantined` directly, so it proved the primitive worked and nothing about the CALL SITE that has to arm it — which is the entire fix. Rewired to drive the real `loadSession`, after which the pre-fix shape fails the defect gate and the always-fence shape fails the control. *AU-37's merge-path mutation taught this exact lesson one finding earlier; a gate that does not enter through the production entry point is testing a different program. **AND THE ISOLATION RULE LANDED A THIRD TIME, CONFIRMED BY REPRODUCTION.** AU-38's gates are the first in `session_revocation_chaos_test.go` to reach the REAL `quarantineCorruptStateFile`, which writes the process-global `stateCorruption` record, and `withChaos68Revocations` did not isolate it (only `state_corruption_test.go` ever called `resetStateCorruption`). The record is STICKY in one direction BY DESIGN — the most severe outcome wins, so a FAILED quarantine is never overwritten by a later successful one — and the DIAGNOSTICS contract row branches on exactly that bit (`QuarantineFailed` ⇒ `diagFail`, otherwise `diagWarn`), while `resetDiagVerdictGlobals` does not reset it either. So one leaked record flipped the aggregate `/api/diagnostics` verdict for the rest of the binary: **the Deep gate's `determinism (shuffle, count=2)` job went red on the root package**, and the mechanism is order-dependent, which is why the preceding head passed on a luckier seed. Reproduced in one command — `go test -count=2 -run 'TestApiDiagnostics|TestChaos68_AU38'` fails three `TestApiDiagnostics_*` tests pre-fix and passes with the reset, because `diagnostics_test.go` sorts BEFORE `session_revocation_chaos_test.go` so only the SECOND `-count` pass runs the diagnostics tests after the leak. **`/readyz` could not have caught it** — that row's detail is fixed regardless of severity, so the leak is invisible there and visible only on the surface that reads the severity bit. The reset therefore goes in the shared helper, not in the two gates that need it today.* |
+| AU-39 | **A vanished parent DIRECTORY is reported as durable.** `revocationBackingFileIsGone` answers ENOENT identically for a deleted FILE and a deleted MOUNT, and AU-35 leaned on the difference without checking it: its recorded reasoning for leaving the durable gauge alone is that a missing file does not falsify *"a revocation applied right now would survive"* **because AtomicWrite creates it**. True for a missing file; false for a missing parent — `AtomicWrite` opens its temp with `os.CreateTemp(dir, …)` and never calls `MkdirAll`, so the write fails. Reproduced: remove the directory and `revocationsAreDurable()`, `/api/cluster/revocations` and `culvert_session_revocation_durable` all still read TRUE. On a CLUSTERED node the next sync attempts a save and the flag corrects it; on a STANDALONE node nothing writes until a logout, so the green is indefinite. | **CLOSED.** `revocationTargetParentMissing()` is consulted by the gauge — the ONE ENOENT case that really does falsify its claim — and the contract row gets its own branch, because the vanished-FILE remedy ("the next logout or config sync recreates it") is false when there is no directory to create it in. Only a definitively absent parent counts (`os.IsNotExist`): EACCES/EIO are not evidence the directory is gone, the rule `LoadRevocations` already applies to an unreadable file and AU-35 to a vanished one. It costs one extra stat only on the branch where the target is already known absent, and a WRITE probe was deliberately not used — this predicate is read by every `/metrics` scrape, and probing by writing would be the write-amplification AU-37's own counter exists to avoid. | M | `session_revocation_health.go`; Codex P2 on PR #1437. Gates: `AU39_VanishedParentIsNotDurable` (defect) + `AU39_VanishedFileWithIntactParentStaysDurable` (CONTROL — reporting every ENOENT non-durable would contradict AU-35's correct split and page every node whose file is merely waiting to be rewritten) + `AU39_UnconfiguredNodeNeedsNoParentCheck`. Two mutations verified RED. **The transferable lesson: AU-35's split was right and its JUSTIFICATION was over-general — "AtomicWrite creates the file" is a claim about a specific failure, and the predicate it rested on could not tell that failure from a neighbouring one. When a rationale names a mechanism, check that the mechanism actually covers every case the predicate admits.** |
 
 ### 2.6 Background Workers / Feeds / Scanning / Alerting
 
@@ -6934,6 +7000,424 @@ status, or read the unfiltered output, before claiming a gate is green.
   terminal state, but it is a cycle rather than a convergence.
 
 ---
+
+## 38. CHAOS-68 — The session revocation plane
+
+**Date:** 2026-09-19. **Scope:** `internal/session`'s `RevocationList`, its
+persistence, its CP↔DP gossip, and the two admin actions that reach it.
+**Id claimed before any code was written** (see the revision log).
+
+### 36.1 Why this plane is load-bearing
+
+A Culvert session cookie is **self-contained**. `internal/session.Decode`
+verifies an HMAC and returns the payload; nothing re-consults the user roster on
+a request. `ui_middleware.go:276` reads the admin role *out of the cookie*
+(`role := UIRole(sess.Role)`), and `proxy.go:355`'s identity arm reads the
+subject and groups out of it, where they feed identity- and group-scoped policy
+rules on the **data plane**.
+
+So deleting an account does not by itself stop that account's live session, on
+the admin plane or the proxy. The revocation list is the only thing that does,
+and the window it would otherwise run to is the session TTL — 8 hours by
+default, **7 days** at `maxTTL`.
+
+That is the property every finding below turns on: this is not one control among
+many whose degradation costs coverage. It is the single mechanism by which an
+operator can take authority away from something already issued, and its
+*durability* and *cluster reach* are part of its correctness.
+
+### 36.2 What was found
+
+Four defects, and the shape they share is that **the list was treated as a
+cache**. Every one of them was survivable-looking in isolation and none of them
+moved a number an operator could watch.
+
+**AU-18 — an account revocation was never written down.** `RevokeUser` wrote to
+`r.users`; `SaveRevocations` exported `r.tokens`. The two lines are ninety apart
+in one file. So `DELETE /api/auth/users` revoked the account's live sessions in
+the memory of one process, and a restart — a redeploy, an OOM, a SIGKILL, a
+`docker compose up -d` — brought them back for the remainder of their TTL. The
+admin was told the deletion succeeded, and it had: the *account* was durable
+(`SaveUIUsersFile`), the *revocation* was not. Reproduced:
+`TestChaos68_UserRevocationSurvivesARestart`, failing against the pre-fix tree.
+
+**AU-19 — and it was never gossiped**, for the identical reason. Culvert has a
+working cluster-wide revocation path (DP → CP aggregator → other DPs, every 3 s)
+and the user map was invisible to it. Deleting an account revoked it on the one
+node that served the request. Every other node in the fleet kept authenticating
+the cookie — and, because the proxy path reads identity out of the same cookie,
+kept applying that user's policy rules to live traffic.
+
+**AU-20 — the Control Plane was isolated from the plane in both directions, and
+this is the sharpest of the four.** `globalRevAggregator` had exactly one writer
+in the entire tree:
+
+```
+controlplane_server.go:362:  globalRevAggregator.Update(req.NodeID, req.Entries)
+```
+
+— a Data Plane push. The CP never contributed its own list, and
+`SyncRevocations` never merged what it received into its own. **The admin UI
+runs on the Control Plane.** That is what a control plane is for. So the node
+where logouts and account deletions actually happen was the one node whose
+revocations went nowhere, while the direction that worked — a DP's own logouts
+reaching the fleet — is the one nobody uses. Both halves failed silently and in
+opposite directions at once: an admin logging out on the CP stayed logged in
+everywhere else, and a session revoked on a DP stayed valid on the CP.
+
+**AU-21 — a corrupt file resurrected everything, quietly.** `initSession`
+(`main.go:664`) logged the load error and continued with an empty list; the next
+`SaveRevocations` then atomically **overwrote** the corrupt file. Every revoked
+cookie and every deleted account's session worked again, and the evidence was
+destroyed by the recovery. The repository has had exactly the right machinery
+for this since CHAOS-05/07 — `quarantineCorruptStateFile` moves the file aside,
+fires `state_file_corrupt`, and records a `/readyz` row, and `ui_users.json` and
+`cluster.json` both use it. The revocations file, whose loss is a
+security-control failure rather than a roster inconvenience, was never wired in.
+
+**AU-22 — and none of this was reachable by a dashboard.** The plane had *no*
+metric, *no* health row and *no* alert. Its only surface was `local_revoked` on
+a role-gated cluster endpoint, which counts tokens — so a node holding a hundred
+deleted-account revocations and a node holding none serialised identically. This
+is the §1 theme exactly, and the same blind spot CHAOS-59 found in the feed
+plane: *the sole surviving difference reached one role-gated admin JSON field
+nothing scrapes.*
+
+### 36.3 The coupling that makes the default dangerous (AU-22)
+
+`-revocations-file` defaults to `""`. Persistence is off.
+
+Read alone that looks defensible, because the session signing key is also random
+per restart by default — and with a random key every cookie breaks on restart
+anyway, so losing the revocation list costs nothing. **The two defaults are only
+safe together, and the shipped configuration breaks the pair.**
+`docker-compose.yml` sets `CULVERT_SESSION_SECRET`, and the operations guide
+requires it on every node of a cluster so admin sessions stay valid fleet-wide.
+A stable signing key is precisely what makes a cookie survive the restart that
+discards its revocation.
+
+So the dangerous configuration is not an unusual one. It is the documented one.
+
+This sweep **did not change the default** — defaulting the path to
+`<dataDir>/revocations.json` starts writing a new file on every appliance, which
+is an owner decision rather than a side effect of a resilience sweep. What
+shipped is visibility: the `session_revocation` row warns whenever persistence
+is unconfigured and states the coupling in its operator action.
+
+### 36.4 What shipped
+
+**The engine.** Both maps now reach disk and the fleet by the paths a logout
+already used. Three constraints shaped the wire format and each is load-bearing:
+
+1. **The document stays a JSON array.** Promoting it to an object would make a
+   binary predating this change fail the whole parse and lose the *token*
+   revocations it does understand — trading a gap for a regression. A user entry
+   is an array element with an added `omitempty` field.
+2. **A user entry carries a namespaced `Token`**
+   (`user:<name>`), because `MergedExcluding` de-duplicates the fleet-wide merge
+   on `e.Token` alone. An empty token would collapse **every** user revocation in
+   the cluster into one entry, and the fleet would learn about a single deleted
+   account. Pinned by `TestChaos68_UserEntriesHaveDistinctTokens`.
+3. **The prefix contains a byte outside base64url**, so it can never equal a
+   cookie's payload segment. That is a security property, not a convenience: a
+   downgraded node files the entry under `tokens[]` and must never match a live
+   session with it, and `MergeRevocations` classifies by the prefix and must
+   never swallow a genuine token revocation. Pinned in both directions by
+   `TestChaos68_UserRevocationTokenCannotCollideWithACookiePayload`, which
+   asserts the property against a real `Encode`d session rather than by
+   inspection.
+
+Recovering the username from the prefix also means a hop through an old node
+degrades nothing (`TestChaos68_UserRevocationSurvivesAHopThroughAnOldNode`).
+
+**The Control Plane.** `SyncRevocations` now contributes the CP's live list and
+consumes the reporting node's, on the sync tick that already runs — no new loop,
+no new cadence, and a node with no enrolled DPs pays nothing because the handler
+is never reached.
+
+**The CP's aggregator slot is a dedicated field, not a reserved map key.** The
+first draft used a reserved node id, which is only as safe as the guarantee that
+no enrolled node is ever named it — and node ids reach that map from an
+enrollment. A field cannot be addressed by `Update(nodeID, …)` at all, so a node
+can neither overwrite the CP's slot nor be excluded from its own merge,
+*regardless of what it is called*. Collision is structurally absent rather than
+merely unlikely, and `TestChaos68_CPSlotIsNotAddressableByANodeID` drives the
+hostile names to prove it.
+
+**Corruption.** A file that was READ and could not be PARSED is wrapped in
+`ErrRevocationsCorrupt` and quarantined through the existing helper. A file that
+could not be READ is deliberately **not** quarantined — the content may be
+intact behind a transient permission or I/O fault, and moving a healthy
+security-critical file aside is the worse error. Same rule, and the same
+reasoning, as `state_corruption.go`'s own; pinned as a control.
+
+**Observability**, all reusing vocabulary that already exists so no second
+dialect is introduced: a `session_revocation` operator-contract row,
+`culvert_session_revocation_{durable,tokens,users,persist_failures_total}`, and
+for the corrupt case the existing `state_file_corrupt` alert plus the existing
+`state_file_session_revocations` readiness row — which means an existing webhook
+subscription picks this up with no config change.
+
+Two decisions inside that worth keeping:
+
+* **The series are emitted unconditionally**, the deliberate exception to the
+  socks5/cluster_ca/geo rule. Those are omitted because a flat `0` from a node
+  that never enabled the feature is indistinguishable from a broken one. Here
+  the reasoning inverts: `durable 0` from an unconfigured node and `durable 0`
+  from a node with a full volume mean the *same thing* to the operator, and it
+  is the condition worth watching. Omitting on the unconfigured node would hide
+  the default posture, which is the one most deployments are in.
+* **The row FAILS, rather than warns, on a persist failure.** It is the one
+  state in the sweep where the operator's belief and the node's state actively
+  disagree — the admin action reported success. Everything else degrades
+  honestly.
+
+**Deliberately NOT on `/readyz` as a row of its own.** A node whose revocations
+are not durable is proxying and authenticating perfectly. Failing readiness
+would eject a healthy gateway from its load balancer over a management-plane
+degradation — the trade §19 refused for the category store and §25 for the admin
+UI listener.
+
+### 36.5 Gates
+
+36 in total: 17 in `internal/session/revocation_chaos_test.go`, 19 in
+`session_revocation_chaos_test.go` (the round-2 findings in §38.6 added 8, and
+the CI-found isolation defect in §38.6b one more).
+
+Every defect gate was verified **failing against its reintroduced pre-fix
+shape** — six in the engine (persistence, gossip, distinct tokens, old-node hop,
+expiry pruning, later-expiry merge) and three at root (CP contribution, CP slot
+addressability, handler wiring) — with the controls confirmed still passing in
+the same run, since they are not statements about that half.
+
+Two controls exist because the cheapest ways to pass everything above are both
+worse than the defect:
+
+* `TestChaos68_UnrevokedSessionsStillDecode` — revoking everything satisfies
+  every assertion about revocations being enforced, while locking every operator
+  out of their own gateway.
+* `TestChaos68_HealthyNodeReadsOK` — a row that always fails satisfies every
+  assertion about the degradation being visible, and trains an operator to
+  ignore it.
+
+`TestChaos68_SyncRevocationsWiresBothDirections` is a **structural wall**, not a
+behavioural gate: `SyncRevocations` cannot be reached without an mTLS peer
+context, an enrolled node and an unfenced HA lease, so the wiring is pinned by
+shape — the same instrument, and the same reason, as
+`TestSOCKS5_EveryDestinationSinkIsAudited`. It requires *both* directions,
+because a Control Plane that contributes but does not consume still fails to
+enforce a logout performed on a Data Plane.
+
+`TestChaos68_ContractRowDoesNotLeakRevokedIdentities` pins the viewer-role
+contract: the row carries counts and a remedy, never a revoked username or token.
+
+**One regression was introduced by this sweep and caught inside it, and how it
+was caught is the useful part.** `/api/diagnostics` is walled against echoing
+secret names, PEM material and raw filesystem paths
+(`TestApiDiagnostics_NoSensitiveValues`), and the first draft of the
+`session_revocation` row spelled its remedy the natural way — naming a `/data/`
+path and the session-secret environment variable — which trips it. **The
+unshuffled suite passed; `-shuffle=on` failed.** The wall can only fire when
+this row is in its *warn* branch, and whether it is depends on whether an
+earlier test left revocation persistence configured, so the wall's coverage of
+any one row is a function of test ORDER. The substance moved to the runbook,
+and `TestChaos68_ContractRowNeverEchoesSensitiveTokens` now drives all four
+branches deterministically against the same forbidden list — verified failing
+against the original wording. The general point: **a global content wall over a
+composed document only tests the branches that composition happens to select,
+so a row with several branches needs its own deterministic driver.** The
+repository's determinism gate (`QA · Determinism`, which re-runs shuffled) is
+what makes this class findable at all; without running shuffled locally it
+would have merged green.
+
+### 36.6 Review round 2 — two findings, and the second one is the sweep's own
+
+Codex's review of the first push found two real defects. Both are recorded
+because of what they have in common: **each is a rule this repository had
+already written down, applied in one place and not carried to the neighbouring
+one** — the same shape §38.7 names below, found twice more inside the fix for it.
+
+**AU-24 (P1) — the HA standby.** The sweep closed the Control Plane's isolation
+(AU-20) and left the standby CP isolated in exactly the same way. The bundle
+replicates `SessionHMAC`, so a standby verifies precisely the cookies the leader
+does; `SyncRevocations` is fenced on a standby, so the path AU-20 opened cannot
+reach it. A session revoked on the leader therefore authenticated against the
+standby and survived a promotion with full authority. This is pre-existing — the
+CP contributed nothing anywhere before this sweep — but it is squarely this
+sweep's domain, and closing AU-20 without it would have left the plane whole for
+Data Planes and broken for the node that takes over when the leader dies. Fixed
+with one `omitempty` field on `HAStateBundle`, filled by the leader and merged
+by `applyHABundle` inside the bundle's EXISTING trust boundary: one trust
+decision, not two. The merge is additive and can only ever add denials, so a
+persist failure there is logged and counted rather than aborting the resync —
+failing a sync over durability would discard working safety state to punish a
+full disk.
+
+**AU-25 (P2) — introduced by this sweep, and it is the more instructive one.**
+`revocationsAreDurable` was keyed on the CUMULATIVE persist-failure counter, so
+one transient write failure pinned the gauge at 0 and the contract row at `fail`
+for the life of the process — including after the operator repaired the volume
+and a later save had written the complete live list (which genuinely restores
+durability: `SaveRevocations` persists the whole list, not a delta). The
+function's own comment asserted the opposite, word for word: *"a volume that
+fills, and a volume that is repaired all show up on the next read without a
+clearing path to maintain."*
+
+`ca_health.go` states the rule and the reason: the persistence warning there is
+keyed on `caRotationPersistDegraded()`, **not** on the cumulative counter,
+because *"a counter-keyed row would latch until process restart even after the
+operator fixed the volume and re-rotated."* This file cites `ca_health.go` as its
+model twice and then made the exact mistake that file exists to record. Fixed by
+separating the two instruments — cumulative counter for magnitude on `/metrics`,
+a current-state flag for the row and the gauge, cleared by a
+`SetPersistSuccessObserver` seam that fires only on a write that actually landed
+(the `path == ""` early return is deliberately not a recovery: nothing was
+written). Gates in both directions, because a flag that latches either way is
+equally wrong: recovery after repair, and re-degradation after a second failure.
+
+The lesson to carry: **citing a precedent is not the same as applying it.** The
+comment naming `ca_health.go` was written from memory of what that file's rule
+says, not from re-reading what its code does — and the prose was confident
+enough that it read as evidence the rule had been followed.
+
+### 36.6b A third instance, found by CI: a latching diagFail row needs registering
+
+The Deep-determinism and `-race` gates went red on three consecutive CI runs and
+could not be reproduced locally in ten full-suite attempts. The cause is the
+same shape as §38.8 for the third time, and both halves are worth recording.
+
+**The defect.** `resetDiagVerdictGlobals` (`diagnostics_test.go`) enumerates the
+process-globals the aggregate `/api/diagnostics` verdict folds in, because, in
+its own words, *"earlier tests legitimately dirty and do not restore"* them.
+CHAOS-45, CHAOS-47 and CHAOS-57 each registered theirs when they added a
+`diagFail`-capable row. This sweep added `session_revocation` — the only row in
+it that FAILS rather than warns — and did not.
+
+Both states behind that fail LATCH by design: the persist-failure flag clears
+only on an observed successful write (that is AU-25's fix) and the
+load-degraded flag never clears, because it is a boot fact. Correct in
+production; cross-talk in a test binary. Any test whose `SaveRevocations` fails
+— an unwritable dataDir, a revocations path left pointing at a removed temp dir
+— latches the record for the rest of the run, after which every test asserting
+`Verdict != diagFail` fails. Order-dependent, so only `-shuffle`/`-count=2`
+sees it.
+
+**Why it cost so much to find, which is the more transferable half.** The
+failing test's name was never retrievable. The root package's output exceeds
+the ~698 KB the GitHub logs API returns (identical output at `tail_lines`
+30,000 and 200,000 — it is a hard cap), so no `--- FAIL:` line was in the
+window; the full-log artifact redirects to blob storage the environment cannot
+reach. Ten local reproductions were green, including **CI's exact shuffle seeds
+for both heads** — and that is the subtle part, because a seed fixes the order
+WITHIN a package, which is enough to reproduce an intra-package ordering bug
+and not enough when the question is which *earlier* test dirtied a global.
+`GOMAXPROCS` 2 and 4, `-race` at CI's 40m budget, and `main` as a baseline were
+all green too.
+
+So: **a determinism gate whose failure output is larger than the log API can
+return is a gate that cannot be acted on remotely.** Piping `go test` through a
+filter that preserves `--- FAIL:`/`FAIL\t` lines would have made this a
+two-minute diagnosis. That is a CI change outside this sweep's scope and is
+recorded here rather than made.
+
+**The standing rule this adds:** a new operator-contract row that can return
+`diagFail` from a process-global MUST be registered in
+`resetDiagVerdictGlobals` in the same change. The row's severity is a
+production decision; its globals are a test-isolation obligation, and the two
+are decided at the same moment.
+`TestChaos68_RevocationHealthIsIsolatedFromTheAggregateVerdict` pins it,
+verified failing against the unregistered shape with the production symptom
+(`aggregate verdict = "fail"`).
+
+### 36.6c Review round 3: the sweep's own defect, inside the function that fixes it
+
+`SaveRevocations` was **snapshot-then-write with the lock released in between**.
+`ExportRevocations` takes and releases `mu` on its own, so
+`export -> marshal -> AtomicWrite` were three individually-atomic steps that were
+**jointly not**. Two savers could interleave so the one holding the OLDER
+snapshot renamed LAST, and the file lost a revocation that both callers had been
+told was applied.
+
+Every surface stayed green while it happened: both calls return `nil`, both
+count as a successful write, `culvert_session_revocation_durable` reads 1 and
+the `session_revocation` row reads OK. The loss becomes visible only at the next
+boot, when the dropped account's sessions authenticate again — **which is the
+exact failure this entire sweep exists to close, occurring inside the function
+that closes it.**
+
+It is reachable **because of** this sweep rather than in spite of it.
+`SaveRevocations` had ONE caller before (the logout path) and now has FIVE, three
+of them in background paths — the CP `SyncRevocations` handler, the DP sync loop,
+the HA bundle apply — that run concurrently with an admin's `DELETE`. Widening
+who calls a persist routine is a concurrency change even when the routine is not
+touched.
+
+**The fix is a dedicated `saveMu` held across snapshot-THROUGH-rename, and it is
+deliberately a SECOND mutex rather than a wider hold of `mu`.** `mu` guards the
+maps every enforcement decision reads (`IsRevoked` is on the admin path) and
+every revocation writes, so holding it across a marshal and an fsync would let a
+slow or full volume delay *the act of revoking* — a durability mechanism costing
+availability of the security control it exists to protect. `saveMu` blocks only
+other SAVERS. Lock order is `saveMu -> mu`; `mu` is never held while taking
+`saveMu`.
+
+Serializing was taken over the generation-check alternative because once the
+snapshot and the rename are under one lock the persisted content is **monotonic
+by construction** (entries are only ever added, modulo expiry pruning), so a
+compare-and-retry would add a failure path with nothing left to detect.
+
+The gate is **many-trial**, not single-shot: whether the stale writer wins the
+rename is a scheduling race, and one trial passes a broken build most of the time
+(the `TestChaos54_StopIsPromptDuringAcceptBackoff` precedent). Verified failing
+against the reintroduced pre-fix shape with exactly the predicted symptom —
+*14 of 16 revocations surviving, two silently dropped.*
+`TestChaos68_SerializedSaveStillRoundTrips` is its control, because the cheapest
+way to pass the gate is to write less.
+
+**The standing rule this adds:** *an atomic write is not an atomic update.*
+`fileutil.AtomicWrite` makes the file never torn; it says nothing about which
+snapshot wins when two callers race, and a durability routine that reports
+success to both is indistinguishable from one that worked. Whenever a persist
+routine gains callers — especially background ones — the read-snapshot and the
+rename belong under one lock, and that lock must not be the one the hot path
+needs. Reported by Codex on PR #1437 as a P1.
+
+### 36.7 Deliberately left (owner decisions)
+
+* **AU-22** — persistence stays opt-in. Made visible, not changed.
+* **AU-23** — a role or password change still revokes nothing. The role lives in
+  the cookie and is not re-resolved, so a demoted admin keeps admin authority
+  until expiry, and a password change does not invalidate a stolen session.
+  Closing it changes an admin workflow.
+* **AU-2** (pre-existing) — in-flight SSO sessions still survive IdP deletion;
+  there is no `RevokeProvider`. Same family, untouched here: one concern per
+  change.
+* **CA-8 / AU-9** (pre-existing) — the per-restart signing key and the absence of
+  a rotation grace window are unchanged. This sweep only records that the
+  *stable*-key posture is what makes AU-22 bite.
+
+### 36.8 The transferable lesson
+
+Two of the four defects are one mistake made twice: **a map was added beside an
+existing one and the code that carried the first was never taught about the
+second.** `users` was added next to `tokens` for account deletion (Finding 5.2)
+and `ExportRevocations`, `MergeRevocations`, `SaveRevocations` and `Count` all
+kept meaning "tokens". Nothing was wrong when each was written; the second map
+simply inherited none of the first's guarantees, and no test asked whether it
+had.
+
+The other two are the same mistake one level up. The revocation *list* was given
+durability, gossip and corruption handling; the revocation *plane* — which
+includes the node the admin actually uses and the file the list lives in — was
+never treated as one thing that either holds or does not.
+
+So the rule to carry forward: **when you add a second kind of a thing that an
+existing mechanism carries, enumerate every surface the first kind reaches and
+either extend it or record why not.** For this list that was four surfaces —
+disk, gossip, the aggregator, and the counters — and it reached none of them.
+CHAOS-65 stated a neighbouring version of this (*a check that runs at parse time
+governs a value that outlives the parse*); this is its structural twin, and both
+are cheaper to answer at authoring time than to find later.
 
 ## 39. CHAOS-69 — The client-supplied destination authority on the proxy data path
 

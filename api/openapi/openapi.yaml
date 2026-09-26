@@ -1599,7 +1599,21 @@ components:
       required: [local_revoked, cluster_mode]
       additionalProperties: true
       properties:
-        local_revoked: { type: integer }
+        local_revoked:
+          type: integer
+          description: Session-TOKEN revocations (explicit logouts) currently in force on this node.
+        local_user_revoked:
+          type: integer
+          description: >-
+            Account-level revocations (deleted users) currently in force on this
+            node. Distinct from local_revoked, which counts tokens only.
+        revocations_durable:
+          type: boolean
+          description: >-
+            False when a revocation applied on this node would not survive a
+            restart — because no revocations file is configured, because the
+            persisted list failed to load, or because a write failed. See the
+            session_revocation diagnostics row for which.
         cluster_mode: { type: boolean }
     ClusterRotation:
       type: object

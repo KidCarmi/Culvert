@@ -1103,6 +1103,80 @@ culvert_catfeeddb_quarantined_copies %d
 		cfdb.ResidualCopies,
 	)
 
+	// CHAOS-68: the session revocation plane. Emitted UNCONDITIONALLY, which is
+	// the deliberate exception to the "omit when the feature is off" rule the
+	// socks5/cluster_ca/geo series follow.
+	//
+	// Those series are omitted because a flat 0 from a node that never enabled
+	// the feature is indistinguishable from a broken one. Here the reasoning
+	// inverts: `durable 0` on a node that never configured a revocations file
+	// and `durable 0` on a node whose volume is full mean the SAME thing to the
+	// operator — a revocation applied on this node does not survive a restart —
+	// and it is exactly the condition worth alerting on. Omitting the series on
+	// the unconfigured node would hide the DEFAULT posture, which is the one
+	// most deployments are in. The `session_revocation` contract row carries
+	// which of the two causes applies.
+	//
+	// Paging rule, and BOTH halves are load-bearing because this gauge is
+	// two-valued over three causes (unconfigured, load-degraded, write-failing):
+	//
+	//   warn: culvert_session_revocation_durable == 0
+	//   page: culvert_session_revocation_persist_degraded == 1
+	//
+	// The bare durable gauge must NOT page: persistence is opt-in, so every
+	// default appliance reports 0 and would page forever. The counter must not
+	// page on its own either — it is cumulative and never reset, so one
+	// transient failure would latch until the process restarted, which is
+	// exactly the bug AU-25 fixed in the contract row. An increase() window
+	// over the counter is ALSO wrong: after one failed save with no later write
+	// the window empties and the page clears while durability has not
+	// recovered (Codex P2, PR #1437). `_persist_degraded` is the CURRENT write
+	// state — set by a failed save, cleared only by one that landed — so it
+	// pages exactly as long as the fault is unresolved.
+	//
+	// docs/operator/session-revocation.md carries the same three rules; its
+	// first draft disagreed with this comment and called the bare gauge a page
+	// (Codex P2 on PR #1437). Keep the two in step.
+	srDurable := 0
+	if revocationsAreDurable() {
+		srDurable = 1
+	}
+	srPersistDegraded := 0
+	if sessionRevocationPersistDegraded.Load() {
+		srPersistDegraded = 1
+	}
+	_, _ = fmt.Fprintf(w, `# HELP culvert_session_revocation_durable 1 when a session revocation applied on this node survives a restart
+# TYPE culvert_session_revocation_durable gauge
+culvert_session_revocation_durable %d
+
+# HELP culvert_session_revocation_tokens Session-token revocations (explicit logouts) currently in force on this node
+# TYPE culvert_session_revocation_tokens gauge
+culvert_session_revocation_tokens %d
+
+# HELP culvert_session_revocation_users Account-level revocations (deleted users) currently in force on this node
+# TYPE culvert_session_revocation_users gauge
+culvert_session_revocation_users %d
+
+# HELP culvert_session_revocation_persist_failures_total Session revocations that were applied in memory but could not be written to disk
+# TYPE culvert_session_revocation_persist_failures_total counter
+culvert_session_revocation_persist_failures_total %d
+
+# HELP culvert_session_revocation_persist_degraded 1 while the most recent revocation save failed and no save has landed since
+# TYPE culvert_session_revocation_persist_degraded gauge
+culvert_session_revocation_persist_degraded %d
+
+# HELP culvert_session_revocation_persist_refused_total Revocations not written because this boot could not read the revocations file, so overwriting it was refused
+# TYPE culvert_session_revocation_persist_refused_total counter
+culvert_session_revocation_persist_refused_total %d
+`,
+		srDurable,
+		sessionRevoked.Count(),
+		sessionRevoked.UserCount(),
+		sessionRevocationPersistFailures.Load(),
+		srPersistDegraded,
+		sessionRevocationPersistRefused.Load(),
+	)
+
 	// CHAOS-60: GeoIP resolution health. Emitted ONLY when a GeoIP database is
 	// loaded — on the default appliance (no .mmdb configured) these series are
 	// absent entirely, because a flat 0 on a node that has no GeoIP is
