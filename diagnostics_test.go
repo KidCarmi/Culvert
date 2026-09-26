@@ -1738,3 +1738,37 @@ func TestApiDiagnostics_UsernameAboveAccountLimitButWithinLoginBound(t *testing.
 		t.Errorf("a %d-byte name must report ok, got %+v", adminUsernameAccountLimit, f)
 	}
 }
+
+// TestApiDiagnostics_OversizeUsernameRemediationWarnsAboutTOTP pins that the
+// create → sign in → delete remediation does not silently downgrade an MFA
+// account: TOTP enrollment is keyed by username and does not carry over to
+// the replacement, so when an affected account has TOTP the action must say
+// so and forbid deleting the old account first. A non-TOTP account must not
+// carry the caveat.
+func TestApiDiagnostics_OversizeUsernameRemediationWarnsAboutTOTP(t *testing.T) {
+	snapshotCfgUIUsers(t)
+	longName := strings.Repeat("m", adminUsernameAccountLimit+1)
+	if err := cfg.SetUIUser(longName, "Chaos63-oversize-1!", RoleOperator); err != nil {
+		t.Fatalf("SetUIUser: %v", err)
+	}
+	get := func() *OperatorContractCheck {
+		r := viewerCtx(httptest.NewRequest(http.MethodGet, "/api/diagnostics", http.NoBody))
+		w := httptest.NewRecorder()
+		apiDiagnostics(w, r)
+		found := findDiagnosticCheck(decodeContract(t, w), "admin_username_length")
+		if found == nil || found.Status != diagWarn {
+			t.Fatalf("admin_username_length = %+v, want warn", found)
+		}
+		return found
+	}
+	if a := get().OperatorAction; strings.Contains(a, "TOTP") {
+		t.Errorf("operator_action mentions TOTP for an account without it: %q", a)
+	}
+	if !cfg.SetTOTPSecret(longName, "JBSWY3DPEHPK3PXP", []string{"bcrypt-code-1"}) {
+		t.Fatal("seed SetTOTPSecret returned false")
+	}
+	a := get().OperatorAction
+	if !strings.Contains(a, "TOTP") || !strings.Contains(a, "before deleting the old account") {
+		t.Errorf("operator_action = %q, want a TOTP caveat that blocks deleting the old account first", a)
+	}
+}

@@ -565,9 +565,13 @@ func checkOversizeConfiguredUsernames() OperatorContractCheck {
 		legacyOversize = len(legacy) > adminUsernameAccountLimit
 	}
 	n, maxLen := 0, 0
+	totpOversize := false
 	for name := range names {
 		if len(name) > adminUsernameAccountLimit {
 			n++
+			if cfg.UserHasTOTP(name) {
+				totpOversize = true
+			}
 			if len(name) > maxLen {
 				maxLen = len(name)
 			}
@@ -606,6 +610,18 @@ func checkOversizeConfiguredUsernames() OperatorContractCheck {
 			"(Settings sets the password it is given — never leave the password blank), sign in with it, then delete the old name's " +
 			"remaining Admin Users entry (Settings adds the new name but does not remove the old one), and update " +
 			"-user / auth.user if it is set at startup (it is re-applied on every boot)."
+	}
+	if totpOversize {
+		// TOTP enrollment is keyed by username and never carried to a new
+		// name, so a replacement signs in with a password only — deleting
+		// the old account first would silently drop the second factor.
+		// There is no in-product TOTP enrollment path (the secret is only
+		// ever loaded from the persisted user store), so the action must not
+		// promise one — it tells the operator what is lost and forbids the
+		// silent downgrade instead.
+		action += " At least one affected account has two-factor (TOTP) enrolled: TOTP does not carry over to the replacement " +
+			"name and the admin UI has no TOTP enrollment path, so the replacement would sign in with a password only — " +
+			"provision and verify TOTP for the replacement before deleting the old account, or explicitly accept that downgrade first."
 	}
 	return OperatorContractCheck{
 		Code:   "admin_username_length",
