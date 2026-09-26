@@ -309,6 +309,20 @@ func rejectOversizeDestHost(w http.ResponseWriter, r *http.Request, clientIP str
 	return true
 }
 
+// rejectOversizeUnnormalizableHost is the canonical tier's fallback for an
+// authority with no canonical form. See unnormalizableHostOversize.
+func rejectOversizeUnnormalizableHost(w http.ResponseWriter, proto, clientIP, authority string) bool {
+	bare := bareDestHost(authority)
+	if len(bare) <= maxDestHostLen {
+		return false
+	}
+	atomic.AddInt64(&statBlocked, 1)
+	noteOversizeHostRejection(proto, clientIP, len(bare), "unnormalizable")
+	http.Error(w, fmt.Sprintf("Bad Request: destination host must be at most %d bytes", maxDestHostLen),
+		http.StatusBadRequest)
+	return true
+}
+
 // rejectOversizeCanonicalHost refuses a request whose host, ONCE NORMALIZED to
 // its A-label form, exceeds what DNS can carry. It reports true when it has
 // written the response.
@@ -327,20 +341,6 @@ func rejectOversizeDestHost(w http.ResponseWriter, r *http.Request, clientIP str
 // still admits a 1 000-byte dot-dense ASCII authority costing ~1.3 ms. Measuring
 // the canonical form instead refuses exactly that, because ASCII does not shrink
 // under IDNA — while the 899-byte IDN it protects normalizes to 255 and passes.
-// rejectOversizeUnnormalizableHost is the canonical tier's fallback for an
-// authority with no canonical form. See unnormalizableHostOversize.
-func rejectOversizeUnnormalizableHost(w http.ResponseWriter, proto, clientIP, authority string) bool {
-	bare := bareDestHost(authority)
-	if len(bare) <= maxDestHostLen {
-		return false
-	}
-	atomic.AddInt64(&statBlocked, 1)
-	noteOversizeHostRejection(proto, clientIP, len(bare), "unnormalizable")
-	http.Error(w, fmt.Sprintf("Bad Request: destination host must be at most %d bytes", maxDestHostLen),
-		http.StatusBadRequest)
-	return true
-}
-
 func rejectOversizeCanonicalHost(w http.ResponseWriter, proto, clientIP, normHost string) bool {
 	if !canonicalHostOversize(normHost) {
 		return false
