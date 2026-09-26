@@ -128,9 +128,38 @@ const (
 // traffic another line's delivery lands between the before-snapshot and the
 // read, so the probe reports success for someone else's line while its own is
 // still queued behind a collector that is about to drop it.
+//
+// format, hdr and at let a HANDOFF re-encode the line: a runtime re-point may
+// also change the wire format, and a line formatted for the displaced writer
+// (RFC 3164) must not reach a successor configured for RFC 5424 — or vice
+// versa — where the collector would reject or misparse it while the successor
+// counted it delivered (Codex review, PR #1494). The message body is recovered
+// as line[hdr:len(line)-1], a substring sharing the line's memory, so the
+// queue's footprint does not double; at preserves the EVENT time across the
+// re-encode.
 type queuedLine struct {
-	line string
-	ack  chan bool // buffered(1) when set; receives true iff THIS line was delivered
+	line   string
+	ack    chan bool // buffered(1) when set; receives true iff THIS line was delivered
+	format string    // the format line is encoded in
+	pri    int
+	hdr    int       // byte offset of the message body within line
+	at     time.Time // event time the line was stamped with
+}
+
+// forWriter returns the line re-encoded for w when w's wire format differs
+// from the one it was formatted in; otherwise the item unchanged.
+func (item queuedLine) forWriter(w *Writer) queuedLine {
+	wf := w.format
+	if wf != "rfc5424" {
+		wf = "rfc3164"
+	}
+	if item.format == "" || item.format == wf || item.hdr <= 0 || item.hdr >= len(item.line) {
+		return item
+	}
+	msg := item.line[item.hdr : len(item.line)-1]
+	re := w.formatLine(item.pri, msg, item.at)
+	re.ack = item.ack
+	return re
 }
 
 // queueCap bounds the async delivery queue. At a formatted line of ~0.5 KB the
@@ -242,7 +271,7 @@ func (s *Writer) send(pri int, msg string) {
 	}
 	w := s
 	for hop := 0; hop < maxHandoffHops; hop++ {
-		if w.tryEnqueue(w.formatMsg(pri, msg), nil) != enqClosed {
+		if w.tryEnqueue(w.formatLine(pri, msg, time.Now())) != enqClosed {
 			return
 		}
 		nx := w.successor.Load()
@@ -257,14 +286,14 @@ func (s *Writer) send(pri int, msg string) {
 // tryEnqueue hands one formatted line to the drain goroutine without
 // blocking. A full queue is counted here; a closed writer is NOT, so the
 // caller can hand the line off instead.
-func (s *Writer) tryEnqueue(line string, ack chan bool) enqueueResult {
+func (s *Writer) tryEnqueue(item queuedLine) enqueueResult {
 	s.sendMu.RLock()
 	defer s.sendMu.RUnlock()
 	if s.closed.Load() {
 		return enqClosed
 	}
 	select {
-	case s.queue <- queuedLine{line: line, ack: ack}:
+	case s.queue <- item:
 		return enqAccepted
 	default:
 		s.noteDrop(&reasonQueueFull)
@@ -274,8 +303,8 @@ func (s *Writer) tryEnqueue(line string, ack chan bool) enqueueResult {
 
 // enqueue hands one formatted line to the drain goroutine without blocking.
 // Reports whether it was accepted; a rejected line is already counted.
-func (s *Writer) enqueue(line string, ack chan bool) bool {
-	switch s.tryEnqueue(line, ack) {
+func (s *Writer) enqueue(item queuedLine) bool {
+	switch s.tryEnqueue(item) {
 	case enqAccepted:
 		return true
 	case enqClosed:
@@ -291,7 +320,7 @@ func (s *Writer) enqueue(line string, ack chan bool) bool {
 func (s *Writer) handOffQueued(item queuedLine) bool {
 	w := s.successor.Load()
 	for hop := 0; w != nil && w.queue != nil && hop < maxHandoffHops; hop++ {
-		switch w.tryEnqueue(item.line, item.ack) {
+		switch w.tryEnqueue(item.forWriter(w)) {
 		case enqAccepted:
 			return true
 		case enqDropped:
@@ -368,7 +397,9 @@ func (s *Writer) WriteProbe(msg string) (<-chan bool, bool) {
 		ack <- s.delivered.Load() > before
 		return ack, true
 	}
-	if !s.enqueue(s.formatMsg(14, msg), ack) {
+	item := s.formatLine(14, msg, time.Now())
+	item.ack = ack
+	if !s.enqueue(item) {
 		return nil, false
 	}
 	return ack, true
@@ -423,15 +454,24 @@ func (s *Writer) WriteRequest(e any) {
 
 // formatMsg builds a syslog line in the configured format.
 func (s *Writer) formatMsg(pri int, msg string) string {
-	switch s.format {
+	return s.formatLine(pri, msg, time.Now()).line
+}
+
+// formatLine builds a syslog line in the configured format, stamped with the
+// event time at, and records where the message body starts so a handoff can
+// re-encode it for a successor with a different format.
+func (s *Writer) formatLine(pri int, msg string, at time.Time) queuedLine {
+	var hdr string
+	format := s.format
+	switch format {
 	case "rfc5424":
 		// RFC 5424: <PRI>VERSION SP TIMESTAMP SP HOSTNAME SP APP-NAME SP PROCID SP MSGID SP STRUCTURED-DATA SP MSG
-		ts := time.Now().Format(time.RFC3339Nano)
-		return fmt.Sprintf("<%d>1 %s %s %s %s - - %s\n", pri, ts, s.host, s.tag, s.pid, msg)
+		hdr = fmt.Sprintf("<%d>1 %s %s %s %s - - ", pri, at.Format(time.RFC3339Nano), s.host, s.tag, s.pid)
 	default: // rfc3164
-		ts := time.Now().Format("Jan 02 15:04:05")
-		return fmt.Sprintf("<%d>%s %s %s: %s\n", pri, ts, s.host, s.tag, msg)
+		format = "rfc3164"
+		hdr = fmt.Sprintf("<%d>%s %s %s: ", pri, at.Format("Jan 02 15:04:05"), s.host, s.tag)
 	}
+	return queuedLine{line: hdr + msg + "\n", format: format, pri: pri, hdr: len(hdr), at: at}
 }
 
 // writeTimeout bounds each conn write: a TCP collector that accepts but stops

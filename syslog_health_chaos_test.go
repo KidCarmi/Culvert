@@ -1087,3 +1087,47 @@ func TestChaos72_RowNeverClaimsDeliveryItCannotShow(t *testing.T) {
 		t.Error("row carries no operator action")
 	}
 }
+
+// TestChaos72_OverlappingRePointsLeaveRecordDescribingTheActiveWriter pins
+// that publishing the active writer and installing the health record that
+// describes it are ONE transition. As two steps, overlapping admin re-points
+// could end with the active writer C while target/installedAt/the alert latch
+// described B (Codex review, PR #1494). The interleaving is a race, so this is
+// a correctness gate for the serialized shape, not a deterministic defect gate.
+func TestChaos72_OverlappingRePointsLeaveRecordDescribingTheActiveWriter(t *testing.T) {
+	first := startSyslogCollector(t)
+	armSyslogFeed(t, "tcp://"+first.addr)
+	const n = 8
+	cols := make([]*syslogTestCollector, n)
+	for i := range cols {
+		cols[i] = startSyslogCollector(t)
+	}
+	for round := 0; round < 5; round++ {
+		var wg sync.WaitGroup
+		for i := range cols {
+			wg.Add(1)
+			go func(addr string) {
+				defer wg.Done()
+				_ = InitSyslog("tcp://"+addr, "rfc3164")
+			}(cols[i].addr)
+		}
+		wg.Wait()
+		syslogHealth.mu.Lock()
+		rec := syslogHealth.writer
+		syslogHealth.mu.Unlock()
+		if live := activeSyslog(); rec != live {
+			t.Fatalf("round %d: health record describes a displaced writer, not the active one", round)
+		}
+	}
+	t.Cleanup(func() {
+		if sw := activeSyslog(); sw != nil {
+			_ = sw.Close()
+		}
+	})
+	disableActiveSyslog()
+	syslogHealth.mu.Lock()
+	defer syslogHealth.mu.Unlock()
+	if activeSyslog() != nil || syslogHealth.writer != nil || syslogHealth.configured {
+		t.Fatal("disable did not clear the writer and the record together")
+	}
+}

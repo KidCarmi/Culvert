@@ -1863,16 +1863,13 @@ func apiSyslogConfig(w http.ResponseWriter, r *http.Request) {
 		}
 		if body.Addr == "" {
 			// Disable syslog.
-			if sw := activeSyslog(); sw != nil {
-				sw.SetDeliveryObserver(nil)
-				_ = sw.Close() //nolint:errcheck // best-effort release; the handle is being cleared either way
-				setActiveSyslog(nil)
-			}
+			// CHAOS-72: clear the writer AND tell the plane the feature is gone
+			// as one serialized transition, or a switched-off feed keeps
+			// exporting culvert_syslog_up 1 (and a concurrent re-point could
+			// interleave with the two halves).
+			disableActiveSyslog()
 			syslogConfigured = ""
 			syslogConfiguredAddr = ""
-			// CHAOS-66: the plane must stop claiming the feature exists, or a
-			// switched-off feed keeps exporting culvert_syslog_up 1.
-			noteSyslogForwardingDisabled()
 			auditEvent(r, "settings.syslog", "disabled", "")
 			adminSettingsSave()
 			jsonOK(w, map[string]any{"ok": true, "addr": "", "format": "rfc3164"})

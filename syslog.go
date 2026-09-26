@@ -8,6 +8,7 @@ package main
 import (
 	"fmt"
 	"strings"
+	"sync"
 	"sync/atomic"
 
 	"github.com/KidCarmi/Culvert/internal/syslog"
@@ -64,6 +65,28 @@ func activeSyslog() *syslogWriter { return globalSyslog.Load() }
 // setActiveSyslog publishes a writer (or nil to disable forwarding).
 func setActiveSyslog(sw *syslogWriter) { globalSyslog.Store(sw) }
 
+// syslogPublishMu makes "publish the active writer" and "install the health
+// record that describes it" ONE transition. They used to be two steps, so two
+// overlapping admin re-points could interleave as publish(B), publish(C),
+// install(C), install(B): the active writer is C while target, installedAt and
+// the alert latch describe B — misclassifying TCP-vs-UDP delivery evidence and
+// the feed age until the next configuration change (Codex review, PR #1494).
+// Only the publication is serialized; the dial happens before the lock.
+var syslogPublishMu sync.Mutex
+
+// disableActiveSyslog clears the active writer and the health record as one
+// serialized transition, releasing the writer it displaced.
+func disableActiveSyslog() {
+	syslogPublishMu.Lock()
+	old := globalSyslog.Swap(nil)
+	noteSyslogForwardingDisabled()
+	syslogPublishMu.Unlock()
+	if old != nil {
+		old.SetDeliveryObserver(nil)
+		_ = old.Close() //nolint:errcheck // best-effort release; the handle is being cleared either way
+	}
+}
+
 // InitSyslog parses addr and initialises the global syslog writer.
 // Supported addr formats:
 //
@@ -93,8 +116,10 @@ func InitSyslog(addr, syslogFmt string) error {
 	// the other is about to leak) or clobber each other's publication. The
 	// swap makes "publish the new one and hand me exactly the one I displaced"
 	// a single step, so every displaced writer is released exactly once.
+	syslogPublishMu.Lock()
 	releaseReplacedSyslogWriter(globalSyslog.Swap(sw), sw)
 	noteSyslogWriterInstalled(sw, addr)
+	syslogPublishMu.Unlock()
 	logger.Printf("Syslog: forwarding to %s://%q (format=%s)", network, sanitizeLog(target), sanitizeLog(sw.Format()))
 	return nil
 }

@@ -157,6 +157,11 @@ type syslogHealthRecord struct {
 	// target is the operator-facing collector address, kept only to name the
 	// transport in the UDP caveat. Never reaches an alert Detail.
 	target string
+	// writer is the Writer this record describes. Publication of the active
+	// writer and installation of this record are one serialized transition
+	// (syslogPublishMu), so writer == activeSyslog() whenever neither is
+	// mid-update.
+	writer *syslogWriter
 
 	alerted    bool
 	logAt      time.Time
@@ -230,6 +235,7 @@ func noteSyslogWriterInstalled(sw *syslogWriter, target string) {
 	syslogHealth.configured = true
 	syslogHealth.installedAt = syslogHealthNow()
 	syslogHealth.target = target
+	syslogHealth.writer = sw
 	syslogHealth.alerted = false
 	syslogHealth.logAt = time.Time{}
 	syslogHealth.suppressed = 0
@@ -252,6 +258,7 @@ func noteSyslogForwardingDisabled() {
 	syslogHealth.configured = false
 	syslogHealth.installedAt = time.Time{}
 	syslogHealth.target = ""
+	syslogHealth.writer = nil
 	syslogHealth.alerted = false
 	syslogHealth.logAt = time.Time{}
 	syslogHealth.suppressed = 0
@@ -700,6 +707,7 @@ func resetSyslogHealthForTest() {
 	syslogHealth.configured = false
 	syslogHealth.installedAt = time.Time{}
 	syslogHealth.target = ""
+	syslogHealth.writer = nil
 	syslogHealth.alerted = false
 	syslogHealth.logAt = time.Time{}
 	syslogHealth.suppressed = 0
