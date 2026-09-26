@@ -159,7 +159,7 @@ func (r *IdPRegistry) publishRecompiled(id string, generation, compiled *IdPProf
 	return false // deleted while we were compiling
 }
 
-// stillFetchesSource reports whether source is STILL the remote document a
+// stillFetchesSourceLocked reports whether source is STILL the remote document a
 // PRESENT, ENABLED profile of this generation depends on.
 //
 // It is publishRecompiled's re-check, read-only and on the FAILURE path. The
@@ -167,9 +167,12 @@ func (r *IdPRegistry) publishRecompiled(id string, generation, compiled *IdPProf
 // an admin delete, disable or repoint can commit while it is in flight; the
 // success path already re-checks identity under the lock before publishing, and
 // without this the failure path did not.
-func (r *IdPRegistry) stillFetchesSource(id string, generation *IdPProfile, source string) bool {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
+//
+// THE CALLER MUST HOLD r.mu, and must still hold it when it acts on the answer:
+// this used to take and release the lock itself, which made every caller a
+// check-then-act across a lock release (round 17). The answer is true only for
+// as long as the lock is held — that is the whole point.
+func (r *IdPRegistry) stillFetchesSourceLocked(id string, generation *IdPProfile, source string) bool {
 	for _, p := range r.profiles {
 		if p == nil || p.ID != id {
 			continue
@@ -321,10 +324,34 @@ func discardSupersededRecoveryEpisode(dc darkCandidate) {
 	if src == "" {
 		return // fetches nothing; no episode of this kind exists
 	}
-	if idpRegistry.stillFetchesSource(dc.candidate.ID, dc.generation, src) {
+	idpRegistry.forgetEpisodeIfSuperseded(dc.candidate.ID, dc.generation, src)
+}
+
+// forgetEpisodeIfSuperseded asks whether this generation still fetches source
+// and, if it does not, forgets that episode — BOTH UNDER ONE HOLD OF r.mu
+// (Codex round 17).
+//
+// Splitting them was a check-then-act across a lock release, the same class
+// round 16 fixed in ReplaceAll: stillFetchesSource released r.mu before the
+// forget, so a concurrent Upsert or ReplaceAll could republish the SAME profile
+// and source from stale cache in the window — opening a LEGITIMATE episode
+// under the identical key — which this superseded attempt then deleted. The
+// published provider is then serving cached metadata with its degradation
+// signal erased, and nothing restores it until the next fetch, so the alert the
+// operator depends on simply never fires.
+//
+// A read lock is enough and a write lock would be wrong: every republisher
+// takes r.mu.Lock(), so RLock excludes exactly the writers that can invalidate
+// the answer, while leaving the proxy request path's own RLock unblocked. The
+// order taken is r.mu -> idpMetadata.mu, the one this package already takes at
+// retireEpisodeAfterCommit and at ReplaceAll's aborts.
+func (r *IdPRegistry) forgetEpisodeIfSuperseded(id string, generation *IdPProfile, source string) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if r.stillFetchesSourceLocked(id, generation, source) {
 		return // still in service: the episode is a live outage signal
 	}
-	forgetIdPMetadataEpisodeForSource(dc.candidate.ID, src)
+	forgetIdPMetadataEpisodeForSource(id, source)
 }
 
 // runIdPRecoveryLoop retries compilation of enabled-but-dark profiles until

@@ -3262,3 +3262,154 @@ func TestChaos71_AbortStillDiscardsATrulySpeculativeEpisode(t *testing.T) {
 		t.Fatalf("the rejected snapshot must leave A live, got %q", got)
 	}
 }
+
+// ── Codex review round 17 (2026-09-26) ──────────────────────────────────────
+
+// chaos71AtomicCleanupVerdict applies the round-17 predicate to a source text:
+// the check and the act must sit inside ONE hold of r.mu. It is a function so
+// the CONTROL below can run the identical predicate over a verbatim pre-fix
+// body and require it to be REJECTED — without that, a selector typo would
+// leave the wall passing forever (the sanitizeLog scan-count precedent).
+func chaos71AtomicCleanupVerdict(t *testing.T, src string) (ok bool, why string) {
+	t.Helper()
+	cleanup := chaos71FuncSource(t, src, "func (r *IdPRegistry) forgetEpisodeIfSuperseded(")
+	body := cleanup[strings.Index(cleanup, "{")+1:]
+	stmts := strings.Fields(body)
+	if len(stmts) == 0 || stmts[0] != "r.mu.RLock()" {
+		return false, "forgetEpisodeIfSuperseded must take r.mu.RLock() as its FIRST statement"
+	}
+	if !strings.Contains(cleanup, "defer r.mu.RUnlock()") {
+		return false, "forgetEpisodeIfSuperseded must hold the read lock for its whole body"
+	}
+	if !strings.Contains(cleanup, "stillFetchesSourceLocked(") {
+		return false, "the authority CHECK must happen inside that lock hold"
+	}
+	if !strings.Contains(cleanup, "forgetIdPMetadataEpisodeForSource(") {
+		return false, "the ACT must happen inside the SAME lock hold as the check"
+	}
+	// The check must not take the lock itself: a self-locking check is exactly
+	// what makes every caller a check-then-act across a lock release.
+	probe := chaos71FuncSource(t, src, "func (r *IdPRegistry) stillFetchesSourceLocked(")
+	if strings.Contains(probe, "r.mu.RLock()") {
+		return false, "stillFetchesSourceLocked must NOT acquire r.mu itself — the caller holds it across the act"
+	}
+	// And the caller must delegate rather than act on a released answer.
+	caller := chaos71FuncSource(t, src, "func discardSupersededRecoveryEpisode(")
+	if strings.Contains(caller, "forgetIdPMetadataEpisodeForSource(") {
+		return false, "discardSupersededRecoveryEpisode must not forget directly — it would be acting outside the lock that decided"
+	}
+	return true, ""
+}
+
+// R17-D1 (P2, defect). THE SUPERSEDED-EPISODE CLEANUP MUST CHECK AND ACT UNDER
+// ONE HOLD OF r.mu.
+//
+// Round 12 asked "does this generation still fetch this source?" and then, on
+// "no", forgot that episode — but the question RELEASED r.mu before the answer
+// was used. A concurrent Upsert or ReplaceAll can republish the SAME profile and
+// source from stale cache in that window, opening a LEGITIMATE episode under the
+// identical key, which this superseded attempt then deletes: the published
+// provider is left serving cached metadata with its degradation signal erased,
+// and nothing restores it until the next fetch, so the operator's alert never
+// fires. Exactly the class round 16 fixed in ReplaceAll, on the path round 12
+// added.
+//
+// THIS IS A STRUCTURAL WALL, AND THE REASON IS WORTH KEEPING. The window is
+// microseconds wide and cannot be scheduled from a test — and the obvious
+// behavioural gate (hold the write lock, require the cleanup not to complete)
+// was BUILT FIRST AND PASSED AGAINST THE DEFECT, because the pre-fix shape also
+// blocks behind a held writer: its check takes the read lock too. The
+// difference is only WHERE the lock is released, which no observer outside the
+// function can see. A gate that passes against the defect is worse than no
+// gate, so the mechanism is asserted directly and the behavioural half is
+// relabelled below as the control it actually is.
+func TestChaos71_WallSupersededCleanupChecksAndActsUnderOneLock(t *testing.T) {
+	src, err := os.ReadFile(filepath.Join(pkgSourceDir(), "idp_recovery.go")) // #nosec G304 -- fixed in-repo path
+	if err != nil {
+		t.Fatalf("read idp_recovery.go: %v", err)
+	}
+	if ok, why := chaos71AtomicCleanupVerdict(t, string(src)); !ok {
+		t.Fatalf("%s — a republish landing between the check and the act has its LEGITIMATE episode deleted, "+
+			"and the published provider then serves cached metadata with no degradation alert", why)
+	}
+}
+
+// R17-C1 (CONTROL for the wall). The predicate must REJECT the verbatim pre-fix
+// shape. Without this the wall could go vacuous on a selector typo and pass
+// forever while asserting nothing.
+func TestChaos71_WallRejectsTheSplitCheckAndAct(t *testing.T) {
+	const preFix = `package main
+
+func discardSupersededRecoveryEpisode(dc darkCandidate) {
+	src := idpRemoteDocumentSource(dc.candidate)
+	if src == "" {
+		return
+	}
+	if idpRegistry.stillFetchesSourceLocked(dc.candidate.ID, dc.generation, src) {
+		return
+	}
+	forgetIdPMetadataEpisodeForSource(dc.candidate.ID, src)
+}
+
+func (r *IdPRegistry) forgetEpisodeIfSuperseded(id string, generation *IdPProfile, source string) {
+	if r.stillFetchesSourceLocked(id, generation, source) {
+		return
+	}
+	forgetIdPMetadataEpisodeForSource(id, source)
+}
+
+func (r *IdPRegistry) stillFetchesSourceLocked(id string, generation *IdPProfile, source string) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return false
+}
+`
+	if ok, _ := chaos71AtomicCleanupVerdict(t, preFix); ok {
+		t.Fatal("the round-17 predicate accepted the verbatim pre-fix shape (self-locking check, act outside it) — " +
+			"the wall asserts nothing and would pass forever")
+	}
+}
+
+// R17-C2 (CONTROL). The cleanup must be EXCLUDED by a writer, and must not
+// block forever.
+//
+// This was written as the defect gate and demoted when it turned out to pass
+// against the defect (see the wall above). It still earns its place: it is the
+// only thing that would catch a "fix" that dropped the lock entirely, or one
+// that deadlocked — both of which the structural wall alone would accept.
+func TestChaos71_SupersededCleanupIsExcludedByAWriterAndCompletes(t *testing.T) {
+	chaos71Env(t)
+	const source = "https://superseded.invalid/metadata"
+	gen := chaos71Profile("corp", source)
+
+	idpRegistry.mu.Lock()
+	unlocked := false
+	unlock := func() {
+		if !unlocked {
+			unlocked = true
+			idpRegistry.mu.Unlock()
+		}
+	}
+	defer unlock()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		idpRegistry.forgetEpisodeIfSuperseded("corp", gen, source)
+	}()
+
+	select {
+	case <-done:
+		unlock()
+		t.Fatal("the cleanup completed while a writer held r.mu — it consults the registry without excluding the " +
+			"writers that can invalidate its answer")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	unlock()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the cleanup never completed after the writer released r.mu — blocking forever is not the fix")
+	}
+}
