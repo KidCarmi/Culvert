@@ -626,17 +626,24 @@ func (r *IdPRegistry) ReplaceAll(profiles []*IdPProfile) error {
 	nextProfiles := cloneIdPProfiles(profiles)
 	nextLive := make(map[string]IdentityProvider)
 
-	// Ids currently in the registry. A candidate that fails below and is NOT
-	// among them never entered the registry, so an episode its compile left
-	// behind has no owner and nothing could ever clear it; one that IS among
-	// them keeps its episode, which belongs to the still-authoritative
-	// provider this rejected snapshot did not replace.
-	registered := r.registeredProfiles()
-	// Same source-awareness as Upsert: an id being registered is not enough.
-	// A snapshot that reuses an id and repoints it at a different unreachable
-	// source leaves an episode belonging to the CANDIDATE, so the still-live
-	// profile must not inherit it (Codex review round 3).
-	discardCandidateEpisode := func(candidate *IdPProfile) {
+	// WHO OWNS AN EPISODE IS A QUESTION ABOUT THE AUTHORITATIVE REGISTRY, AND IT
+	// IS ASKED UNDER THE LOCK (Codex round 16). This used to snapshot the
+	// registered set HERE, before the compile loop — which reaches the network,
+	// so the snapshot was stale by however long a metadata fetch took, up to
+	// samlMetadataFetchBudget per profile. Upsert holds r.mu across its whole
+	// body and so cannot drift; ReplaceAll compiles OUTSIDE the lock (the
+	// deliberate asymmetry, because HasEnabledInteractiveProvider is on the
+	// proxy request path), which is exactly what opens the window: an admin
+	// Upsert can publish a different source for the same id while this snapshot
+	// is still compiling. Against a stale reading both directions were wrong —
+	// an abort DELETED the episode the newly-published live provider owns
+	// (suppressing a real degradation page), and a commit compared against a
+	// source that had already been superseded, LEAVING the intervening source's
+	// episode behind to age into a page for a configuration out of service.
+	//
+	// So there is no pre-lock snapshot to go stale any more. Both shapes below
+	// read r.profiles, and each says which lock state it needs.
+	discardCandidateEpisodeLocked := func(candidate *IdPProfile) {
 		// A nil entry in the snapshot is rejected by validateIdPProfile, which
 		// handles nil correctly — but it reaches here on that error path, and a
 		// nil candidate has no id and therefore owns no episode. Dereferencing
@@ -646,9 +653,18 @@ func (r *IdPRegistry) ReplaceAll(profiles []*IdPProfile) error {
 		if candidate == nil {
 			return
 		}
+		// Same source-awareness as Upsert: an id being registered is not enough.
+		// A snapshot that reuses an id and repoints it at a different unreachable
+		// source leaves an episode belonging to the CANDIDATE, so the still-live
+		// profile must not inherit it (Codex review round 3).
 		source := idpRemoteDocumentSource(candidate)
-		if source != idpRemoteDocumentSource(registered[candidate.ID]) {
+		if source != r.liveRemoteSourceLocked(candidate.ID) {
 			forgetIdPMetadataEpisodeForSource(candidate.ID, source)
+		}
+	}
+	discardAllCandidateEpisodesLocked := func() {
+		for _, cand := range nextProfiles {
+			discardCandidateEpisodeLocked(cand)
 		}
 	}
 
@@ -664,10 +680,16 @@ func (r *IdPRegistry) ReplaceAll(profiles []*IdPProfile) error {
 	// configuration that is not in service") and applied to one of three abort
 	// paths. The partial-progress case needs it precisely because the loop makes
 	// progress before it fails.
+	// Called from the two aborts that run BEFORE r.mu is taken, so it acquires
+	// the read lock itself. The persist-failure abort already holds the write
+	// lock and calls discardAllCandidateEpisodesLocked directly — sync.RWMutex
+	// is not reentrant, and re-acquiring there is the deadlock CHAOS-50 records
+	// for the cluster CA. The order taken is r.mu -> idpMetadata.mu, the one
+	// this file already takes at retireEpisodeAfterCommit below.
 	discardAllCandidateEpisodes := func() {
-		for _, cand := range nextProfiles {
-			discardCandidateEpisode(cand)
-		}
+		r.mu.RLock()
+		defer r.mu.RUnlock()
+		discardAllCandidateEpisodesLocked()
 	}
 
 	for _, p := range nextProfiles {
@@ -689,11 +711,22 @@ func (r *IdPRegistry) ReplaceAll(profiles []*IdPProfile) error {
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	// The AUTHORITATIVE previous sources, read under the lock immediately before
+	// anything is published — not from a snapshot taken before the compile loop
+	// (round 16). After the swap below the old set is gone, so this is the last
+	// point at which "what was in service" can still be answered correctly.
+	prevSources := make(map[string]string, len(r.profiles))
+	for _, prev := range r.profiles {
+		if prev == nil || prev.ID == "" {
+			continue
+		}
+		prevSources[prev.ID] = idpRemoteDocumentSource(prev)
+	}
 	if err := r.persist(nextProfiles); err != nil {
 		// The WHOLE snapshot is rejected, so every candidate's speculative
 		// episode describes a configuration that is not in service — the same
 		// rule the two abort paths above now share.
-		discardAllCandidateEpisodes()
+		discardAllCandidateEpisodesLocked()
 		return err // the previous profile set + live providers stay authoritative
 	}
 	r.profiles = nextProfiles
@@ -715,26 +748,30 @@ func (r *IdPRegistry) ReplaceAll(profiles []*IdPProfile) error {
 			kept[p.ID] = src
 		}
 	}
-	for id, prev := range registered {
-		retireEpisodeAfterCommit(id, idpRemoteDocumentSource(prev), kept[id])
+	for id, prev := range prevSources {
+		retireEpisodeAfterCommit(id, prev, kept[id])
 	}
 	return nil
 }
 
-// registeredProfiles snapshots the profiles currently stored in the registry,
-// keyed by id. The PROFILE is carried, not just the id, because episode
-// ownership depends on the remote source it fetches from: ReplaceAll needs the
-// source a profile was fetching BEFORE the snapshot, both to decide whether a
-// refused candidate's episode was its own and to retire a source a committed
-// snapshot repointed away from.
-func (r *IdPRegistry) registeredProfiles() map[string]*IdPProfile {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	out := make(map[string]*IdPProfile, len(r.profiles))
+// liveRemoteSourceLocked returns the remote document source of the profile
+// CURRENTLY registered under id, or "" when no such profile is registered or it
+// fetches nothing. It answers the episode-ownership question — "is this episode
+// the candidate's, or the still-live provider's?" — and it answers it against
+// the authoritative registry rather than a snapshot, which is what round 16
+// fixed: the caller must hold r.mu (read or write), and the comparison is only
+// sound while that lock is held across BOTH the read and the forget.
+//
+// It replaced registeredProfiles(), a pre-lock map snapshot whose only two
+// consumers both drifted; there is deliberately no snapshot helper here any
+// more, so the stale reading cannot be reintroduced by a new caller.
+func (r *IdPRegistry) liveRemoteSourceLocked(id string) string {
 	for _, p := range r.profiles {
-		out[p.ID] = p
+		if p != nil && p.ID == id {
+			return idpRemoteDocumentSource(p)
+		}
 	}
-	return out
+	return ""
 }
 
 // validateReservedIdPNaming rejects IdP profile IDs and names that collide with

@@ -26,6 +26,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -43,6 +44,42 @@ type chaos71IdP struct {
 	down atomic.Bool
 	hits atomic.Int64
 	doc  atomic.Value // string
+	// hold, when set, makes every request BLOCK until the channel is closed.
+	// It is what lets a gate schedule the ReplaceAll compile window: that
+	// compile runs OUTSIDE r.mu and reaches the network, so an admin Upsert can
+	// land in the middle of it (round 16). An atomic.Value because the handler
+	// goroutine reads it while the gate installs it.
+	hold atomic.Value // chan struct{}
+}
+
+// chaos71NoHold is the typed nil stored to clear a hold. atomic.Value panics on
+// a type change, so the cleared value must carry the same concrete type as the
+// channel it replaces — a plain nil literal would not.
+var chaos71NoHold chan struct{}
+
+// liveRemoteSource reads which source is CURRENTLY published for a profile,
+// the same way the production cleanup does rather than re-deriving it. It lives
+// in the test file because nothing in production needs it, and putting a
+// test-only accessor in auth_idp.go is how production code accretes surface
+// that only gates use.
+func (r *IdPRegistry) liveRemoteSource(id string) string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.liveRemoteSourceLocked(id)
+}
+
+// holdRequests makes this server block every response until the returned
+// release func is called. Safe to call before any request has been served.
+func (m *chaos71IdP) holdRequests() (release func()) {
+	ch := make(chan struct{})
+	m.hold.Store(ch)
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			m.hold.Store(chaos71NoHold)
+			close(ch)
+		})
+	}
 }
 
 func newChaos71IdP(t *testing.T) *chaos71IdP {
@@ -51,6 +88,9 @@ func newChaos71IdP(t *testing.T) *chaos71IdP {
 	m.doc.Store(chaos71MetadataXML(t, "cert-A"))
 	m.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		m.hits.Add(1)
+		if h, ok := m.hold.Load().(chan struct{}); ok && h != nil {
+			<-h
+		}
 		if m.down.Load() {
 			http.Error(w, "maintenance", http.StatusServiceUnavailable)
 			return
@@ -3042,4 +3082,183 @@ func chaos71FuncSource(t *testing.T, src, decl string) string {
 		return rest[:end+3]
 	}
 	return rest
+}
+
+// ── Codex review round 16 (2026-09-26) ──────────────────────────────────────
+
+// chaos71OverlapSetup builds the one state both round-16 gates need: profile
+// "corp" LIVE at source A, with cached documents for BOTH A and B under that
+// profile id, so a later stale compile against either can succeed.
+//
+// The order matters. B is seeded FIRST and A last, because what the gate is
+// about is ReplaceAll reading "corp is at A" and that reading going stale — so
+// A must be the registered source at the moment ReplaceAll is entered.
+func chaos71OverlapSetup(t *testing.T) (a, b *chaos71IdP) {
+	t.Helper()
+	chaos71Env(t)
+	a = newChaos71IdP(t)
+	b = newChaos71IdP(t)
+
+	// Cache B's document under "corp" while B is healthy, then move the profile
+	// to A. B's cache entry survives — it is keyed by (profile, source).
+	if err := idpRegistry.Upsert(chaos71Profile("corp", b.URL())); err != nil {
+		t.Fatalf("setup: seed B's cache: %v", err)
+	}
+	if err := idpRegistry.Upsert(chaos71Profile("corp", a.URL())); err != nil {
+		t.Fatalf("setup: move the profile to A: %v", err)
+	}
+	if idpRegistry.liveRemoteSource("corp") != a.URL() {
+		t.Fatalf("setup: the registered source must be A, got %q", idpRegistry.liveRemoteSource("corp"))
+	}
+	return a, b
+}
+
+// chaos71RunWithInterveningUpsert runs fn (a slow ReplaceAll) while an admin
+// Upsert of "corp" to `to` lands in the MIDDLE of its compile loop, and returns
+// the ReplaceAll's error.
+//
+// The window is opened by a HELD metadata response on a SEPARATE gating
+// profile, not by a sleep and not by holding the source the Upsert also needs.
+// The first draft of this helper held the very source the Upsert targeted, so
+// both calls parked on the same channel, both fell through on the same 15 s
+// fetch budget, and the ReplaceAll's abort ran BEFORE the Upsert had published
+// anything — the gates then passed against the defect, which is worse than no
+// gate. The gating profile must therefore be one the Upsert never touches, so
+// the Upsert completes FAST (its own source answers immediately) while the
+// snapshot is still genuinely parked.
+func chaos71RunWithInterveningUpsert(t *testing.T, gate *chaos71IdP, to string, fn func() error) error {
+	t.Helper()
+	release := gate.holdRequests()
+	errCh := make(chan error, 1)
+	go func() { errCh <- fn() }()
+
+	abandon := func(format string, args ...any) {
+		t.Helper()
+		release()
+		<-errCh
+		t.Fatalf(format, args...)
+	}
+
+	// Wait until the snapshot's compile is actually parked in the gate handler.
+	deadline := time.Now().Add(10 * time.Second)
+	for gate.hits.Load() == 0 {
+		if time.Now().After(deadline) {
+			abandon("the gating source was never fetched; the window this gate is about never opened")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	if err := idpRegistry.Upsert(chaos71Profile("corp", to)); err != nil {
+		abandon("the intervening admin Upsert must succeed (degrading to cache): %v", err)
+	}
+	if got := idpRegistry.liveRemoteSource("corp"); got != to {
+		abandon("the intervening Upsert must have published %q, got %q", to, got)
+	}
+	if !idpMetadataHasEpisode("corp", to) {
+		abandon("the intervening Upsert must open a REAL episode for %q, or there is no episode to lose", to)
+	}
+
+	release()
+	return <-errCh
+}
+
+// R16-D1 (P2, defect). AN ABORT MUST NOT DELETE THE EPISODE A CONCURRENTLY
+// PUBLISHED PROVIDER OWNS.
+//
+// ReplaceAll used to snapshot the registered set at entry — BEFORE the compile
+// loop, which reaches the network — and then decide episode ownership against
+// that snapshot. Upsert cannot drift this way because it holds r.mu across its
+// whole body; ReplaceAll deliberately does not, because the compile reaches the
+// network and HasEnabledInteractiveProvider is on the proxy request path. That
+// asymmetry is the window.
+//
+// Here the snapshot records source A, an admin Upsert then publishes source B
+// with a REAL stale-cache episode, and the snapshot aborts: the stale
+// comparison reads B != A, concludes the episode is the candidate's, and
+// deletes the episode that now belongs to the LIVE provider — suppressing a
+// genuine degradation page for as long as the outage lasts.
+func TestChaos71_AbortDoesNotDeleteAConcurrentlyPublishedEpisode(t *testing.T) {
+	a, b := chaos71OverlapSetup(t)
+	b.down.Store(true) // so the intervening Upsert degrades to cache and opens an episode
+	gate := newChaos71IdP(t)
+
+	// The snapshot names B too, behind a gating profile that parks the compile
+	// loop, and carries a final profile that cannot compile so the whole thing
+	// aborts AFTER corp has been compiled.
+	bad := &IdPProfile{ID: "bad", Name: "bad", Type: IdPTypeSAML, Enabled: true}
+	err := chaos71RunWithInterveningUpsert(t, gate, b.URL(), func() error {
+		return idpRegistry.ReplaceAll([]*IdPProfile{
+			chaos71Profile("gate", gate.URL()),
+			chaos71Profile("corp", b.URL()),
+			bad,
+		})
+	})
+	chaos71WantErr(t, err, "the snapshot must be rejected: its second profile cannot compile")
+
+	chaos71WantEpisode(t, "corp", b.URL(),
+		"the aborted snapshot deleted the episode owned by the provider an admin Upsert published while it was "+
+			"compiling: ownership was decided against a registry snapshot taken before the network fetch, so a real "+
+			"outage on the LIVE source is now invisible and will never page")
+	if got := idpRegistry.liveRemoteSource("corp"); got != b.URL() {
+		t.Fatalf("the rejected snapshot must leave the Upsert's provider live; live source is %q", got)
+	}
+	_ = a
+}
+
+// R16-D2 (P2, defect). A COMMIT MUST RETIRE THE SOURCE THAT WAS ACTUALLY
+// SUPERSEDED, NOT THE ONE A STALE SNAPSHOT RECORDED.
+//
+// The mirror of R16-D1, and it fails the other way: the snapshot recorded A,
+// an Upsert published B (opening a real episode for B), and the snapshot then
+// committed corp back to A. Round 7's retirement compares prev against new —
+// against the stale reading that is A == A, so NOTHING is retired, and B's
+// episode is left behind with nothing left to fetch it. It ages past
+// idpMetadataDegradedAfter and the (round-5, unconditional) watchdog pages
+// forever for a source no longer configured: the exact leak round 7 closed,
+// reopened by reading the wrong generation.
+func TestChaos71_CommitRetiresTheActuallySupersededSource(t *testing.T) {
+	a, b := chaos71OverlapSetup(t)
+	b.down.Store(true) // the intervening Upsert degrades to cache and opens B's episode
+	gate := newChaos71IdP(t)
+
+	// The snapshot puts corp back on A, which is healthy, so it COMMITS.
+	err := chaos71RunWithInterveningUpsert(t, gate, b.URL(), func() error {
+		return idpRegistry.ReplaceAll([]*IdPProfile{
+			chaos71Profile("gate", gate.URL()),
+			chaos71Profile("corp", a.URL()),
+		})
+	})
+	if err != nil {
+		t.Fatalf("the snapshot must commit: %v", err)
+	}
+
+	chaos71WantNoEpisode(t, "corp", b.URL(),
+		"the committed snapshot left behind the episode of the source it actually superseded: it compared against a "+
+			"registry snapshot taken before the network fetch, so it thought it was replacing A with A and retired "+
+			"nothing — nothing fetches B any more, so that episode can never be cleared by evidence and will page forever")
+	chaos71WantNotFailing(t, "no episode may survive a commit onto a healthy source")
+}
+
+// R16-C1 (CONTROL). A GENUINELY SPECULATIVE CANDIDATE EPISODE IS STILL
+// DISCARDED ON ABORT.
+//
+// The cheapest way to pass both defect gates above is to stop discarding
+// candidate episodes at all, which would reinstate the round-3/round-8 leak:
+// a refused snapshot that stale-compiled a repointed candidate would leave an
+// episode for a source that never entered service. No concurrency here — this
+// is the ordinary abort, which must keep working exactly as round 8 left it.
+func TestChaos71_AbortStillDiscardsATrulySpeculativeEpisode(t *testing.T) {
+	a, b := chaos71OverlapSetup(t) // corp live at A, B's document cached
+	b.down.Store(true)
+
+	bad := &IdPProfile{ID: "bad", Name: "bad", Type: IdPTypeSAML, Enabled: true}
+	err := idpRegistry.ReplaceAll([]*IdPProfile{chaos71Profile("corp", b.URL()), bad})
+	chaos71WantErr(t, err, "the snapshot must be rejected: its second profile cannot compile")
+
+	chaos71WantNoEpisode(t, "corp", b.URL(),
+		"a refused snapshot must leave behind no episode of its OWN: corp is still live on A, B never entered "+
+			"service, and an episode nothing will ever fetch for can never be cleared by evidence")
+	if got := idpRegistry.liveRemoteSource("corp"); got != a.URL() {
+		t.Fatalf("the rejected snapshot must leave A live, got %q", got)
+	}
 }
