@@ -199,8 +199,27 @@ func TestBenchGate_CheckRequestURLTakesNoRoundTrip(t *testing.T) {
 	if fallback < 0 {
 		t.Fatal("CheckRequestURL no longer has an `if !handled {` fallback — this wall must be updated with it")
 	}
-	if before := body[:fallback]; strings.Contains(before, "u.String()") {
-		t.Error("CheckRequestURL calls u.String() BEFORE the !handled fallback — the round trip is unconditional again")
+	// CONFINE the serialisation, do not merely order it against the fallback.
+	// The first version of this wall asserted only that no u.String() appeared
+	// BEFORE the fallback, which is a weaker claim than the sentence above it
+	// makes: a SECOND, unconditional u.String() added AFTER the fallback block
+	// restores the exact round trip and sailed straight through (Codex, round 9;
+	// reproduced — the wall reported ok while CheckRequestURL had gone back to
+	// 6 allocs/op). Counting and locating is what makes the assertion match the
+	// claim; a gap in a wall is how the class it guards returns by another route.
+	if n := strings.Count(body, "u.String()"); n != 1 {
+		t.Errorf("CheckRequestURL serialises the URL %d times, want exactly 1 (inside the `!handled` fallback) — "+
+			"a second u.String() makes the round trip unconditional again however it is guarded", n)
+		return
+	}
+	blockEnd := strings.Index(body[fallback:], "\n\t}")
+	if blockEnd < 0 {
+		t.Fatal("cannot delimit the `if !handled {` block — this wall must be updated with it")
+	}
+	blockEnd += fallback
+	if at := strings.Index(body, "u.String()"); at < fallback || at > blockEnd {
+		t.Error("CheckRequestURL's only u.String() is OUTSIDE the `!handled` fallback — " +
+			"the serialise-and-reparse round trip runs on every call again")
 	}
 }
 
