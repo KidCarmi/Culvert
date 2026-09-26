@@ -8746,6 +8746,105 @@ it is trying not to disturb; the honest trade is to take the extra CI cycle
 rather than hold a durable commit for it, because the container is ephemeral
 and the run is not.
 
+### Codex review round 17 — a self-locking check makes every caller a check-then-act
+
+**THE SUPERSEDED-EPISODE CLEANUP RELEASED THE LOCK BETWEEN DECIDING AND ACTING
+(P2).** Round 12 asked *"does this generation still fetch this source?"* and
+then, on "no", forgot that episode — but `stillFetchesSource` took and RELEASED
+`r.mu` before the answer was used. A concurrent `Upsert` or `ReplaceAll` can
+republish the SAME profile and source from stale cache in that window, opening a
+LEGITIMATE episode under the identical key, which the superseded attempt then
+deletes. The published provider is left serving cached metadata with its
+degradation signal erased, and nothing restores it until the next fetch, so the
+alert an operator depends on never fires. It is the class round 16 fixed in
+`ReplaceAll`, on the path round 12 added, so the answer is the same: the check
+and the act move into ONE hold of `r.mu` (`forgetEpisodeIfSuperseded`), and the
+probe becomes `stillFetchesSourceLocked`, which no longer takes the lock itself.
+**A self-locking check is precisely what makes every caller a check-then-act** —
+that is the transferable form. A READ lock is sufficient and a write lock would
+be wrong: every republisher takes `r.mu.Lock()`, so `RLock` excludes exactly the
+writers that can invalidate the answer while leaving the proxy request path's own
+`RLock` unblocked; lock order stays `r.mu` → `idpMetadata.mu`.
+
+**THE BEHAVIOURAL GATE WAS BUILT FIRST AND PASSED AGAINST THE DEFECT.** Holding
+the write lock and requiring the cleanup not to complete proves nothing here: the
+pre-fix shape blocks behind a held writer too, because its check takes the read
+lock as well. The difference is only WHERE the lock is released, which no
+observer outside the function can see, and the window is microseconds wide and
+cannot be scheduled — the CHAOS-66 adopt/Stop situation. So the mechanism is
+asserted structurally, with a CONTROL that runs the identical predicate over a
+VERBATIM pre-fix body and requires it to be rejected (the `sanitizeLog`
+scan-count precedent), and the behavioural half is RELABELLED as the control it
+actually is: it is still the only thing that would catch a "fix" that dropped the
+lock entirely, or one that deadlocked, neither of which the wall alone rejects.
+
+### Codex review round 16 — episode ownership is read under the lock, not from a pre-compile snapshot
+
+**A SNAPSHOT TAKEN BEFORE A NETWORK FETCH DECIDED WHO OWNED AN EPISODE (P2).**
+`ReplaceAll` snapshotted the registered set at ENTRY — before the compile loop,
+which reaches the network — and then decided episode ownership against that
+reading. `Upsert` cannot drift this way because it holds `r.mu` across its whole
+body; `ReplaceAll` deliberately does not, because the compile reaches the network
+and `HasEnabledInteractiveProvider` is on the proxy request path. **That
+asymmetry is the window, and it is as wide as a metadata fetch.** Both directions
+were wrong against a stale reading: an ABORT read `B != A`, concluded the episode
+was the candidate's and DELETED the episode the LIVE provider owned (suppressing
+a genuine degradation page); a COMMIT compared `A == A` and retired NOTHING,
+leaving the superseded source's episode to age into a page for a configuration
+out of service — round 7's own leak, reopened by reading the wrong generation.
+
+There is no pre-lock snapshot any more, which is the structural half:
+`registeredProfiles()` is replaced by `liveRemoteSourceLocked`, so the stale
+reading cannot be reintroduced by a new caller rather than merely being avoided
+by the current ones. The two aborts that run before the lock acquire
+`r.mu.RLock` themselves; the persist-failure abort already holds the write lock
+and calls the `…Locked` variant directly (`sync.RWMutex` is not reentrant, and
+re-acquiring there is the deadlock CHAOS-50 records for the cluster CA); and the
+commit reads the previous sources UNDER THE LOCK immediately before the swap,
+the last point at which *"what was in service"* can still be answered correctly.
+
+**THE FIRST DRAFT OF THESE GATES WAS VACUOUS AND PASSED AGAINST THE DEFECT.** It
+held the very source the intervening `Upsert` also needed, so both calls parked
+on one channel, both fell through on the same 15 s fetch budget, and the abort ran
+BEFORE the `Upsert` had published anything — the assertion was true for the wrong
+reason. The window is now opened by a HELD GATING PROFILE the `Upsert` never
+touches, so the `Upsert` completes fast while the snapshot is genuinely parked.
+The run time is the tell: 1.5 s instead of 16 s. **A gate whose scheduling depends
+on a timeout is not scheduling anything: if two operations in a race gate can
+block on the same resource, they will serialise and the gate will pass for the
+wrong reason.**
+
+### Codex review round 15 (self-found) — the ceiling was bound to its providers by nothing at all
+
+**AN UNEXPORTED INTERFACE SATISFIED IMPLICITLY IS A COUPLING WITH NO
+COMPILE-TIME LINK (P2).** Found while reviewing round 14, in round 14's own
+code. `idpServedDocumentAger` is unexported and satisfied implicitly, so nothing
+connected it to either provider, and the failure is silent and FAIL-OPEN: rename
+or delete `servedDocumentCachedAt`, `idpServedEntry`'s type assertion returns
+`!ok`, `idpNotePublishedGeneration` DELETES the profile's served-generation
+record, and every profile of that type is exempt from `idpmeta.StaleMaxAge`
+FOREVER — a possibly-withdrawn signing key trusted indefinitely, with no metric,
+log or counter separating *"built fresh, no ceiling needed"* from *"built from
+cache and we cannot tell"*.
+
+**Measured, not reasoned about:** renaming `OIDCFlowProvider.servedDocumentCachedAt`
+left `go build ./...` clean AND THE WHOLE ROOT SUITE GREEN (428 s, every test)
+while every OIDC profile stopped being retired. The SAML rename was caught only
+incidentally, by one gate's `setup:` assertion — so the two halves were not
+equally exposed, the FIFTH instance in this sweep of a rule held on one of two
+symmetric paths. Two layers, and the first makes today's case unreachable rather
+than merely observable: compile-time assertions for both concrete providers
+beside the interface they bind, so a rename is a BUILD failure; and a structural
+wall over the PAIR, derived from `IdPType.Interactive()` and from
+`compileIdPProfile`'s own dispatch rather than a hand-list of two names, because
+a hand-list is exactly how the four earlier one-of-two-paths findings survived.
+Deliberately NOT a runtime counter: the assertions make the
+`!ok`-with-a-remote-source case unreachable, and a gate that cannot fire is the
+dead-code mistake CHAOS-69 records. The LDAP control is not optional — the
+cheapest way to pass the wall is to assert the interface on EVERY provider, which
+would be wrong, since LDAP resolves no remote document and *having no source*,
+not *lacking a method*, is what makes it exempt.
+
 ### Codex review round 14 — a fetch is not a publication
 
 **A FAILED SAVE ERASED THE CEILING OF THE GENERATION STILL IN SERVICE (P1).**
@@ -8776,6 +8875,32 @@ claim stays linearizable with publication. The round-8 control
 cleared the evidence — and now requires a fresh PUBLICATION; its companion
 control `SuccessfulFreshPublishClearsTheCeiling` pins that a committed fresh
 generation is never retired.
+
+### Codex review round 13 — two bounds held in one place and not in their twin
+
+**A NEGATIVE CACHE AGE WAS READ AS COMFORTABLY FRESH (P2-A).**
+`idpStaleCeilingSweep` read `age < idpmeta.StaleMaxAge`, so a wall clock stepping
+backwards after a provider began serving cache put the age under the seven-day
+ceiling and the provider kept trusting possibly-withdrawn SAML signing material
+until the clock caught up. `idpmeta.Get` ALREADY refuses a negative age for
+exactly this reason (CHAOS-61: *a negative age is stale, never maximally fresh*),
+so the store's own rule was enforced on the COMPILE path and not on the path that
+decides whether a LIVE provider may keep serving — the half round 8 added
+precisely because a steady-state node never recompiles. Now
+`age >= 0 && age < StaleMaxAge`. The control matters: retiring on EVERY age
+passes the defect gate while taking SSO down each time the clock is nudged.
+
+**THE INDEX READ WAS UNBOUNDED (P2-B).** `loadLocked` used `os.ReadFile` +
+`json.Unmarshal` into a map, so `MaxEntries` bounded WRITES and bounded nothing
+on the boot/compile READ path — the twin of the document-read gap round 11
+closed, left open on the index beside it. `MaxIndexBytes` is DERIVED
+(`MaxEntries × 4 KiB`) rather than picked, and the read is
+`io.ReadAll(io.LimitReader(f, MaxIndexBytes+1))` so one byte past the cap
+distinguishes *at the limit* from *over it*; an over-cap index is treated exactly
+as a corrupt one — start empty, never fail a boot over a cache of a remote
+resource. A file can also carry more RECORDS than the cap, which the byte bound
+cannot see, so `evictLocked` runs after the load loop: the ONE existing retention
+policy is reused rather than a second rule written beside it.
 
 ### Codex review round 10 — one finding, and it retires the comparison round 9 added
 
