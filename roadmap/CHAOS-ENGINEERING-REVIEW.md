@@ -6866,6 +6866,52 @@ test that drives the write path synthetically acquires a hidden timing
 dependency — and it will surface on the busiest machine, which is CI, not the
 one you developed on.
 
+### Follow-up — the bind record ran ahead of the handle it described
+
+`TestChaos66_ListenerRebindsOnceThePortIsFree` failed once during a full
+`go test -race` run of the root package with `a bound listener reports no
+address`, and passed on every isolated rerun (`-count=8`, quiet machine). The
+mechanism is in the code, not the fixture: the loop called `noteSOCKS5Bound`
+(`Binds++`, `EverBound`) and logged the bind BEFORE it constructed the server
+and published it via `adopt`. The test waited for `Binds > 0` and then read
+`Addr()`; a preemption between the two statements — likelier under the
+contended `-race` suite, which is where it was seen — read `cur == nil`.
+
+This is round 1's window one statement later, and the round-1 lesson applied
+to it: *a state that is only briefly wrong is still wrong, and "briefly" is a
+claim about the scheduler.* In that window `/healthz` said `ready`,
+`culvert_socks5_listener_up` read 1 and the contract row said "accepting
+connections" while the supervisor's own handle answered "unbound". Two fixes
+were available: make the test wait for both `Binds > 0` AND `Addr() != nil`,
+or make the product never expose one without the other. The test change was
+rejected because it converts an ordering defect into a documented quirk that
+every future caller of the handle has to know about; the product fix removes
+the window.
+
+**The loop now adopts first**: bind → `newSOCKS5Server` → `adopt` →
+`noteSOCKS5Bound` → `markFirstAttempt` → log. Once `Binds > 0` is observable,
+`Addr()` is non-nil, by construction. This also makes the refused branch
+honest: a listener that `Stop` refuses (the adopt/Stop race the round-1 unit
+gate pins) is closed without ever serving and is no longer counted as a bind
+or allowed to clear a failure episode — `noteSOCKS5ListenerStopped`
+deliberately leaves the history in place, and a socket nothing ever accepted
+on was overwriting it with "bound".
+
+**The gate is deterministic, and that is the point of the seam.** The window
+cannot be scheduled from a test, and a many-trial end-to-end gate would be the
+flake this document keeps refusing. `socks5BindRecordedHook` (nil in
+production) is called on the supervisor goroutine at the exact instant the
+record lands — after `noteSOCKS5Bound`, before `startSOCKS5` is released or
+anything is logged — so `ListenerIsPublishedBeforeTheBindIsRecorded` asserts
+what the handle answers at that instant. Against the record-first order it
+observes `Addr() == nil` on every run, not once in a thousand.
+`ABindRefusedByStopIsNotRecordedAsABind` drives the refused branch
+synchronously (`stopped` set under the lock without closing `stopping`, so the
+loop passes its top check, binds, and is refused) and requires `Binds == 0`,
+`EverBound == false`, `Stopped == true`, a nil handle, a released first-attempt
+channel and a freed port. Both were verified failing against the record-first
+order (file → 37 gates; the previous count of 33 recorded here and in CLAUDE.md was already two behind the file).
+
 ### Governance note: a lint gate this sweep did not actually run
 
 The PR claimed `golangci-lint run` was clean on every changed file. It was not

@@ -28,6 +28,7 @@ import (
 	"net"
 	"os"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -549,6 +550,110 @@ func TestChaos66_StopIsPromptDuringBindBackoff(t *testing.T) {
 			t.Fatalf("trial %d: Stop took %s during a bind backoff of at least %s — the sleep is not interruptible",
 				trial, took, socks5BindBackoffInitial)
 		}
+	}
+}
+
+// TestChaos66_ListenerIsPublishedBeforeTheBindIsRecorded pins the ORDER of the
+// two steps that make a bind observable: the supervisor's handle (`adopt`) and
+// the health plane's record (`noteSOCKS5Bound`).
+//
+// The first shipped order was record → log → adopt. Between those statements
+// `Binds` was already 1 — `/healthz` `ready`, `culvert_socks5_listener_up` 1,
+// `EverBound` true — while `Addr()` still answered nil, and one scheduler
+// preemption in that window failed ListenerRebindsOnceThePortIsFree under the
+// contended full `-race` suite (`a bound listener reports no address`). The
+// window cannot be scheduled from a test, and a many-trial gate would be a
+// gate that flakes, so it is pinned DETERMINISTICALLY through the
+// socks5BindRecordedHook seam: the hook runs on the supervisor goroutine at the
+// exact instant the record lands, before startSOCKS5 is released, and asserts
+// what the handle answers at that instant. Against the record-first order the
+// hook observes Addr() == nil every time, not once in a thousand runs.
+func TestChaos66_ListenerIsPublishedBeforeTheBindIsRecorded(t *testing.T) {
+	socks5ChaosSetup(t)
+
+	var (
+		mu       sync.Mutex
+		observed int
+		unbound  int
+	)
+	// Registered BEFORE startSupervisedSOCKS5 so it runs AFTER its Stop:
+	// cleanups are LIFO, and the seam must not be cleared while the loop can
+	// still read it.
+	t.Cleanup(func() { socks5BindRecordedHook = nil })
+	socks5BindRecordedHook = func(s *socks5Supervisor) {
+		mu.Lock()
+		defer mu.Unlock()
+		observed++
+		if s.Addr() == nil || socks5ListenerState().Binds == 0 {
+			unbound++
+		}
+	}
+
+	port := freeSOCKS5Port(t)
+	srv := startSupervisedSOCKS5(t, port)
+
+	mu.Lock()
+	defer mu.Unlock()
+	if observed == 0 {
+		t.Fatal("the bind-recorded seam never fired: the gate is vacuous")
+	}
+	if unbound != 0 {
+		t.Errorf("%d of %d bind record(s) were observable before the listener was published — "+
+			"Binds > 0 with Addr() == nil is the window this gate exists to close", unbound, observed)
+	}
+	if srv.Addr() == nil {
+		t.Error("a bound listener reports no address after startSOCKS5 returned")
+	}
+}
+
+// TestChaos66_ABindRefusedByStopIsNotRecordedAsABind pins the other half of
+// adopting first: a socket that Stop refuses is closed without ever serving,
+// so it must not be counted as a bind, must not set EverBound, and must not
+// clear a failure episode — the state noteSOCKS5ListenerStopped leaves is the
+// truth for a node on its way out. The record-first order counted it (Binds
+// 1, EverBound true) for a listener nothing ever accepted on.
+//
+// Driven synchronously: `stopped` is set under the lock without closing
+// `stopping`, so the loop passes its top check, binds, and is refused by adopt
+// — the refused branch reached deterministically, without racing Stop.
+func TestChaos66_ABindRefusedByStopIsNotRecordedAsABind(t *testing.T) {
+	socks5ChaosSetup(t)
+
+	port := freeSOCKS5Port(t)
+	s := &socks5Supervisor{
+		port:         port,
+		stopping:     make(chan struct{}),
+		done:         make(chan struct{}),
+		firstAttempt: make(chan struct{}),
+	}
+	noteSOCKS5Configured(port)
+	s.mu.Lock()
+	s.stopped = true
+	s.mu.Unlock()
+
+	s.run()
+	<-s.done
+
+	snap := socks5ListenerState()
+	if snap.Binds != 0 || snap.EverBound {
+		t.Errorf("a listener Stop refused was recorded as a bind: Binds=%d EverBound=%v", snap.Binds, snap.EverBound)
+	}
+	if !snap.Stopped {
+		t.Error("a refused adoption was not recorded as stopped")
+	}
+	if s.Addr() != nil {
+		t.Error("a refused listener was published")
+	}
+	select {
+	case <-s.firstAttempt:
+	default:
+		t.Error("startSOCKS5 would never have been released after a refused adoption")
+	}
+	// And the socket really was closed, not leaked against the successor.
+	if ln, err := ctxListen(fmt.Sprintf(":%d", port)); err != nil {
+		t.Errorf("port %d is still held after the refused listener should have been closed: %v", port, err)
+	} else {
+		_ = ln.Close()
 	}
 }
 

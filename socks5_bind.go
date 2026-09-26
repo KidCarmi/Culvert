@@ -365,21 +365,26 @@ func (s *socks5Supervisor) run() {
 			continue
 		}
 
-		// The success line is emitted AFTER the bind, never before it. The
-		// pre-CHAOS-66 code announced `SOCKS5: socks5://localhost:%d` from a
-		// path that could only be reached by a successful bind, but the admin
-		// UI's equivalent announced a listener that did not exist yet (§33);
-		// keeping the announcement strictly downstream of the evidence is the
-		// rule, not the accident of where it happened to sit.
-		suppressed, recovered := noteSOCKS5Bound()
-		s.markFirstAttempt() // after the bind is recorded, for the reason above
-		if recovered {
-			logger.Printf("SOCKS5: listener on port %d bound and accepting again (%d suppressed bind-failure log line(s))",
-				s.port, suppressed)
-		} else {
-			logger.Printf("SOCKS5: socks5://localhost:%d", s.port)
-		}
-
+		// PUBLISH the listener BEFORE recording the bind, never after.
+		//
+		// The first shipped order was record → log → adopt, and it opened a
+		// window in which `Binds` was already incremented — so `/healthz`
+		// said `ready`, `culvert_socks5_listener_up` read 1 and
+		// `EverBound` was true — while `s.cur` was still nil and `Addr()`
+		// still answered "unbound". A scheduler preemption between the two
+		// statements is enough to observe it (it did, once, under the
+		// contended full `-race` suite: `a bound listener reports no
+		// address`). The health plane's claim must never run ahead of the
+		// handle it describes, so adoption comes first: once `Binds > 0`
+		// is observable, `Addr()` is non-nil. The same rule this file
+		// already applies to `markFirstAttempt` (a caller released into a
+		// state that has not been written yet), one step earlier.
+		//
+		// Adopting first also makes the refused branch honest: a listener
+		// that Stop refuses is closed without ever serving, and it is no
+		// longer counted as a bind — the failure history stays exactly as
+		// noteSOCKS5ListenerStopped leaves it (deliberately unclear), instead
+		// of being cleared by a socket nothing ever accepted on.
 		srv := newSOCKS5Server(ln)
 		if !s.adopt(srv) {
 			// Stop won the race: close the listener we just bound rather than
@@ -388,6 +393,25 @@ func (s *socks5Supervisor) run() {
 			noteSOCKS5ListenerStopped()
 			return
 		}
+
+		// The success line is emitted AFTER the bind, never before it. The
+		// pre-CHAOS-66 code announced `SOCKS5: socks5://localhost:%d` from a
+		// path that could only be reached by a successful bind, but the admin
+		// UI's equivalent announced a listener that did not exist yet (§33);
+		// keeping the announcement strictly downstream of the evidence is the
+		// rule, not the accident of where it happened to sit.
+		suppressed, recovered := noteSOCKS5Bound()
+		if hook := socks5BindRecordedHook; hook != nil {
+			hook(s)
+		}
+		s.markFirstAttempt() // after the bind is recorded, for the reason above
+		if recovered {
+			logger.Printf("SOCKS5: listener on port %d bound and accepting again (%d suppressed bind-failure log line(s))",
+				s.port, suppressed)
+		} else {
+			logger.Printf("SOCKS5: socks5://localhost:%d", s.port)
+		}
+
 		srv.Start()
 		<-srv.done
 		s.release(srv)
@@ -412,6 +436,17 @@ func (s *socks5Supervisor) run() {
 		backoff = nextSOCKS5BindBackoff(backoff)
 	}
 }
+
+// socks5BindRecordedHook is a TEST seam, nil in production. When set it is
+// called on the supervisor goroutine immediately after noteSOCKS5Bound has
+// recorded a bind and BEFORE startSOCKS5 is released or anything is logged —
+// the exact instant `Binds > 0` first becomes observable — so a gate can assert
+// what the supervisor's handle answers at that instant, deterministically,
+// rather than by racing the loop from another goroutine. It is the seam that
+// pins the adopt-before-record order above (the ordering window cannot be
+// scheduled from a test; it surfaced once in thousands of runs). Set it before
+// startSOCKS5 and clear it only after Stop has returned.
+var socks5BindRecordedHook func(s *socks5Supervisor)
 
 // stopRequested reports whether Stop has been called.
 func (s *socks5Supervisor) stopRequested() bool {
