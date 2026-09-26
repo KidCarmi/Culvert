@@ -90,16 +90,36 @@ func (r *IdPRegistry) enabledInteractiveCounts() (enabled, live int) {
 // would block every per-request accessor (HasEnabledInteractiveProvider runs on
 // the proxy path) for the length of an IdP timeout. That is the CHAOS-50
 // cluster-CA rule: never hold a lock across a call that reaches the network.
-func (r *IdPRegistry) darkEnabledProfiles() []*IdPProfile {
+// darkCandidate pairs the registry's own profile pointer — which is the
+// GENERATION TOKEN publishRecompiled compares by identity — with a deep COPY
+// that the compile is free to mutate.
+//
+// The split is required because compiling writes into the profile:
+// NewOIDCFlowProvider takes `cfg := p.OIDC` and assigns the five discovered
+// endpoints through it ("Persist discovered endpoints back into the profile
+// config so the UI can display them"), and the recovery compile deliberately
+// runs OUTSIDE r.mu — so handing out the live pointer raced those writes
+// against All()'s clone under the read lock, which could also serve a
+// half-updated profile to the admin API (Codex review round 4).
+type darkCandidate struct {
+	generation *IdPProfile // registry identity; never compiled, never written here
+	candidate  *IdPProfile // deep copy the compile may mutate freely
+}
+
+func (r *IdPRegistry) darkEnabledProfiles() []darkCandidate {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	var out []*IdPProfile
+	var out []darkCandidate
 	for _, p := range r.profiles {
 		if p == nil || !p.Enabled {
 			continue
 		}
 		if _, ok := r.live[p.ID]; !ok {
-			out = append(out, p)
+			clones := cloneIdPProfiles([]*IdPProfile{p})
+			if len(clones) != 1 || clones[0] == nil {
+				continue
+			}
+			out = append(out, darkCandidate{generation: p, candidate: clones[0]})
 		}
 	}
 	return out
@@ -111,7 +131,7 @@ func (r *IdPRegistry) darkEnabledProfiles() []*IdPProfile {
 // disabled, edited, or compiled by an admin write or a config snapshot in the
 // meantime, and publishing then would resurrect a deleted IdP or overwrite a
 // newer provider with one built from older config. Returns whether it published.
-func (r *IdPRegistry) publishRecompiled(id string, generation *IdPProfile, prov IdentityProvider) bool {
+func (r *IdPRegistry) publishRecompiled(id string, generation, compiled *IdPProfile, prov IdentityProvider) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if _, live := r.live[id]; live {
@@ -124,10 +144,32 @@ func (r *IdPRegistry) publishRecompiled(id string, generation *IdPProfile, prov 
 		if !p.Enabled || p != generation {
 			return false // disabled, or replaced by a newer generation
 		}
+		// The compile ran against a COPY (see darkCandidate), so the endpoints
+		// it discovered are on that copy. Carry them onto the authoritative
+		// profile HERE, under the write lock, or the admin UI would silently
+		// stop showing discovered endpoints for any provider this loop
+		// recovered — losing the behaviour the writes exist for while fixing
+		// the race they caused.
+		copyDiscoveredOIDCEndpoints(p, compiled)
 		r.live[id] = prov
 		return true
 	}
 	return false // deleted while we were compiling
+}
+
+// copyDiscoveredOIDCEndpoints moves the five fields NewOIDCFlowProvider fills in
+// from a compiled copy onto the authoritative profile. Callers must hold the
+// registry write lock. It copies ONLY those five: everything else on the
+// authoritative profile is operator-owned config the compile must never edit.
+func copyDiscoveredOIDCEndpoints(dst, src *IdPProfile) {
+	if dst == nil || src == nil || dst.OIDC == nil || src.OIDC == nil {
+		return
+	}
+	dst.OIDC.AuthorizationEndpoint = src.OIDC.AuthorizationEndpoint
+	dst.OIDC.TokenEndpoint = src.OIDC.TokenEndpoint
+	dst.OIDC.IntrospectionEndpoint = src.OIDC.IntrospectionEndpoint
+	dst.OIDC.UserinfoEndpoint = src.OIDC.UserinfoEndpoint
+	dst.OIDC.JWKsURI = src.OIDC.JWKsURI
 }
 
 // runIdPRecoveryLoop retries compilation of enabled-but-dark profiles until
@@ -150,15 +192,18 @@ func runIdPRecoveryLoop(ctx context.Context) {
 			return
 		}
 		recovered := 0
-		for _, p := range idpRegistry.darkEnabledProfiles() {
-			prov, err := compileIdPProfile(p)
+		for _, dc := range idpRegistry.darkEnabledProfiles() {
+			// Compile the COPY: compiling writes discovered endpoints into the
+			// profile, and this runs without r.mu held. The registry's own
+			// pointer is passed only as the generation token.
+			prov, err := compileIdPProfile(dc.candidate)
 			if err != nil {
 				continue // already counted + rate-limit-logged by the metadata plane
 			}
-			if idpRegistry.publishRecompiled(p.ID, p, prov) {
+			if idpRegistry.publishRecompiled(dc.candidate.ID, dc.generation, dc.candidate, prov) {
 				recovered++
 				logger.Printf("IDP_RECOVERED idp=%q — provider compiled and is now live; browser SSO is available again without a restart",
-					sanitizeLog(p.ID))
+					sanitizeLog(dc.candidate.ID))
 			}
 		}
 		if recovered > 0 {
@@ -174,4 +219,24 @@ func runIdPRecoveryLoop(ctx context.Context) {
 			}
 		}
 	}
+}
+
+// hasEnabledRemoteMetadataProfile reports whether any enabled profile depends on
+// a REMOTE document, which is the only posture in which a metadata-degradation
+// episode can exist. It gates the detection watchdog so a node with no remote
+// IdP starts no goroutine at all — the same emission discipline the metric
+// surfaces follow (a flat zero from an appliance that never configured SSO is
+// indistinguishable from one whose IdP is dead).
+func (r *IdPRegistry) hasEnabledRemoteMetadataProfile() bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	for _, p := range r.profiles {
+		if p == nil || !p.Enabled {
+			continue
+		}
+		if idpRemoteDocumentSource(p) != "" {
+			return true
+		}
+	}
+	return false
 }

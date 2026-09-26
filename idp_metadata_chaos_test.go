@@ -314,12 +314,12 @@ func TestChaos71_DarkProviderRecoversWithoutARestart(t *testing.T) {
 	// backoff: the gate is about the RECOVERY, not about the cadence (which
 	// has its own gate below).
 	idp.down.Store(false)
-	for _, p := range reg.darkEnabledProfiles() {
-		prov, err := compileIdPProfile(p)
+	for _, dc := range reg.darkEnabledProfiles() {
+		prov, err := compileIdPProfile(dc.candidate)
 		if err != nil {
 			t.Fatalf("recompile after the IdP recovered: %v", err)
 		}
-		if !reg.publishRecompiled(p.ID, p, prov) {
+		if !reg.publishRecompiled(dc.candidate.ID, dc.generation, dc.candidate, prov) {
 			t.Fatal("publishRecompiled refused a legitimately recovered provider")
 		}
 	}
@@ -382,7 +382,7 @@ func TestChaos71_RecompiledProviderIsNotPublishedOverANewerDecision(t *testing.T
 
 	t.Run("deleted while compiling", func(t *testing.T) {
 		reg := &IdPRegistry{live: map[string]IdentityProvider{}}
-		if reg.publishRecompiled("corp", p, prov) {
+		if reg.publishRecompiled("corp", p, p, prov) {
 			t.Fatal("a profile deleted while we compiled must not be resurrected")
 		}
 	})
@@ -390,20 +390,20 @@ func TestChaos71_RecompiledProviderIsNotPublishedOverANewerDecision(t *testing.T
 		disabled := chaos71Profile("corp", idp.URL())
 		disabled.Enabled = false
 		reg := &IdPRegistry{live: map[string]IdentityProvider{}, profiles: []*IdPProfile{disabled}}
-		if reg.publishRecompiled("corp", disabled, prov) {
+		if reg.publishRecompiled("corp", disabled, disabled, prov) {
 			t.Fatal("a profile disabled while we compiled must not go live")
 		}
 	})
 	t.Run("replaced by a newer generation", func(t *testing.T) {
 		newer := chaos71Profile("corp", idp.URL())
 		reg := &IdPRegistry{live: map[string]IdentityProvider{}, profiles: []*IdPProfile{newer}}
-		if reg.publishRecompiled("corp", p, prov) {
+		if reg.publishRecompiled("corp", p, p, prov) {
 			t.Fatal("a stale generation must not overwrite a newer profile")
 		}
 	})
 	t.Run("already live", func(t *testing.T) {
 		reg := &IdPRegistry{live: map[string]IdentityProvider{"corp": prov}, profiles: []*IdPProfile{p}}
-		if reg.publishRecompiled("corp", p, prov) {
+		if reg.publishRecompiled("corp", p, p, prov) {
 			t.Fatal("an admin write or snapshot that got there first must win")
 		}
 	})
@@ -1409,5 +1409,192 @@ func TestChaos71_PersistedDisableClearsTheEpisode(t *testing.T) {
 	}
 	if idpMetadataState().Failing {
 		t.Fatal("a PERSISTED disable leaves no remote fetch, so the episode must be cleared")
+	}
+}
+
+// chaos71StubProvider is a minimal IdentityProvider for the publication gates:
+// they assert on WHICH pointer is published, never on provider behaviour.
+type chaos71StubProvider struct{}
+
+func (chaos71StubProvider) Verify(string, string) bool                       { return false }
+func (chaos71StubProvider) ResolveIdentity(string, string) (*Identity, bool) { return nil, false }
+func (chaos71StubProvider) Name() string                                     { return "chaos71-stub" }
+func (chaos71StubProvider) DisplayName() string                              { return "chaos71-stub" }
+func (chaos71StubProvider) CaptiveLoginURL(string, *http.Request) string     { return "" }
+
+// ---------------------------------------------------------------------------
+// Codex review round 4. Three findings, each verified against its pre-fix shape.
+// ---------------------------------------------------------------------------
+
+// ROUND 4 P1. ReplaceAll is the CP->DP snapshot-apply path, so a `null` entry in
+// idp_profiles must be REFUSED, not fatal. validateIdPProfile handles nil
+// correctly; the cleanup helper added in round 3 then dereferenced it and
+// panicked the data plane.
+func TestChaos71_NilSnapshotProfileIsRefusedNotFatal(t *testing.T) {
+	chaos71Env(t)
+	reg := &IdPRegistry{live: make(map[string]IdentityProvider)}
+
+	// A nil entry alongside a legitimate one, in both orders: the panic must
+	// not depend on where in the snapshot the malformed entry sits.
+	good := func() *IdPProfile {
+		return &IdPProfile{
+			ID: "ok", Name: "ok", Type: IdPTypeSAML, Enabled: false,
+			SAML: &SAMLProfileConfig{MetadataXML: chaos71MetadataXML(t, "nilsnap")},
+		}
+	}
+	for _, snapshot := range [][]*IdPProfile{
+		{nil},
+		{nil, good()},
+		{good(), nil},
+	} {
+		err := reg.ReplaceAll(snapshot) // must RETURN, never panic
+		if err == nil {
+			t.Fatalf("a snapshot carrying a nil profile must be refused, got nil error (len=%d)", len(snapshot))
+		}
+	}
+	if len(reg.profiles) != 0 {
+		t.Fatalf("a refused snapshot must publish nothing, got %d profile(s)", len(reg.profiles))
+	}
+}
+
+// ROUND 4 P2. The degradation page must not depend on another fetch happening.
+// A provider that fell back to cache once and whose config never changed again
+// crosses the elapsed-time threshold with nothing left to evaluate it: no
+// compile, and no recovery loop either, because that loop covers DARK profiles
+// and a cache-serving provider is LIVE.
+func TestChaos71_DegradationAlertFiresWithoutAFurtherFetch(t *testing.T) {
+	chaos71Env(t)
+	idpMetadataEverUsed.Store(true)
+
+	// ONE failure, then nothing ever compiles this profile again.
+	noteIdPMetadataOutcome("cache-serving", idpMetaStale, fmt.Errorf("HTTP 503"))
+
+	// Before the threshold: no page.
+	if fired := idpMetadataDegradationSweep(time.Now()); len(fired) != 0 {
+		t.Fatalf("swept %d alert(s) before the threshold elapsed, want 0", len(fired))
+	}
+
+	// Past the threshold, with NO further fetch recorded.
+	fired := idpMetadataDegradationSweep(time.Now().Add(idpMetadataDegradedAfter + time.Minute))
+	if len(fired) != 1 {
+		t.Fatalf("the degradation page must fire without another fetch, got %d", len(fired))
+	}
+	if fired[0] != idpMetaStale {
+		t.Errorf("the alert must carry the episode's BOUNDED outcome class, got %q", fired[0])
+	}
+
+	// Fire-once: the latch must hold across sweeps, or a ticking watchdog
+	// would page every interval for one episode.
+	if again := idpMetadataDegradationSweep(time.Now().Add(2 * idpMetadataDegradedAfter)); len(again) != 0 {
+		t.Fatalf("the fire-once latch leaked: swept %d further alert(s)", len(again))
+	}
+}
+
+// The CONTROL: the sweep must not invent pages. An episode that RECOVERED on
+// observed evidence is gone, and the cheapest way to pass the gate above is to
+// fire for anything at all.
+func TestChaos71_DegradationSweepDoesNotPageARecoveredProfile(t *testing.T) {
+	chaos71Env(t)
+	idpMetadataEverUsed.Store(true)
+
+	noteIdPMetadataOutcome("recovers", idpMetaStale, fmt.Errorf("HTTP 503"))
+	noteIdPMetadataOutcome("recovers", idpMetaFresh, nil) // observed evidence
+
+	if fired := idpMetadataDegradationSweep(time.Now().Add(10 * idpMetadataDegradedAfter)); len(fired) != 0 {
+		t.Fatalf("a recovered profile must never be paged, got %d alert(s)", len(fired))
+	}
+	// And a sweep with no episodes at all is inert.
+	if fired := idpMetadataDegradationSweep(time.Now()); len(fired) != 0 {
+		t.Fatalf("an empty sweep must be inert, got %d", len(fired))
+	}
+}
+
+// The watchdog interval must stay BELOW the threshold it detects, or the page
+// lands late by design (CHAOS-55's recoveryPollCeiling rule).
+func TestChaos71_WatchdogIntervalIsCappedBelowTheThreshold(t *testing.T) {
+	if idpMetadataWatchdogInterval >= idpMetadataDegradedAfter {
+		t.Fatalf("watchdog interval %s must be < the degradation threshold %s, or the page straddles it",
+			idpMetadataWatchdogInterval, idpMetadataDegradedAfter)
+	}
+}
+
+// ROUND 4 P2, wiring. A detection-only watchdog must not fetch, compile, or
+// clear an episode — recovery stays on OBSERVED evidence.
+func TestChaos71_DegradationSweepNeverClearsAnEpisode(t *testing.T) {
+	chaos71Env(t)
+	idpMetadataEverUsed.Store(true)
+
+	noteIdPMetadataOutcome("still-down", idpMetaUnavailable, fmt.Errorf("down"))
+	_ = idpMetadataDegradationSweep(time.Now().Add(idpMetadataDegradedAfter + time.Minute))
+
+	if !idpMetadataState().Failing {
+		t.Fatal("the sweep must not clear the episode — only observed evidence may")
+	}
+}
+
+// ROUND 4 P3. Compiling writes the five discovered endpoints into the profile,
+// and the recovery compile runs OUTSIDE r.mu, so the loop must not be handed the
+// registry's own pointer. Run under -race, this fails on the pre-fix shape.
+func TestChaos71_RecoveryCompilesACopyNotTheRegistrysProfile(t *testing.T) {
+	chaos71Env(t)
+
+	live := &IdPProfile{
+		ID: "racy", Name: "racy", Type: IdPTypeOIDC, Enabled: true,
+		OIDC: &OIDCProfileConfig{Issuer: "https://idp.example", ClientID: "c", ClientSecret: "s"},
+	}
+	reg := &IdPRegistry{live: make(map[string]IdentityProvider), profiles: []*IdPProfile{live}}
+
+	dark := reg.darkEnabledProfiles()
+	if len(dark) != 1 {
+		t.Fatalf("want 1 dark candidate, got %d", len(dark))
+	}
+	dc := dark[0]
+	if dc.generation != live {
+		t.Error("the generation token must be the registry's own pointer, or publishRecompiled's identity check is meaningless")
+	}
+	if dc.candidate == live {
+		t.Fatal("the candidate handed to the compile must NOT be the registry's profile")
+	}
+	if dc.candidate.OIDC == live.OIDC {
+		t.Fatal("the OIDC config must be deep-copied — that is the struct the compile writes into")
+	}
+
+	// Simulate what NewOIDCFlowProvider does, then prove it did not touch the
+	// registry's profile until publication carries it across under the lock.
+	dc.candidate.OIDC.TokenEndpoint = "https://idp.example/token"
+	if live.OIDC.TokenEndpoint != "" {
+		t.Fatal("a compile-time write reached the registry's profile without the lock")
+	}
+	if !reg.publishRecompiled(dc.candidate.ID, dc.generation, dc.candidate, chaos71StubProvider{}) {
+		t.Fatal("publishRecompiled refused a legitimate recovery")
+	}
+	if live.OIDC.TokenEndpoint != "https://idp.example/token" {
+		t.Error("discovered endpoints must be carried onto the authoritative profile at publication, " +
+			"or the admin UI silently stops showing them for any recovered provider")
+	}
+}
+
+// The CONTROL for P3: cloning must not defeat the generation check. A profile
+// REPLACED while the compile ran must still be refused.
+func TestChaos71_PublishStillRefusesASupersededGeneration(t *testing.T) {
+	chaos71Env(t)
+
+	live := &IdPProfile{
+		ID: "racy", Name: "racy", Type: IdPTypeOIDC, Enabled: true,
+		OIDC: &OIDCProfileConfig{Issuer: "https://idp.example", ClientID: "c", ClientSecret: "s"},
+	}
+	reg := &IdPRegistry{live: make(map[string]IdentityProvider), profiles: []*IdPProfile{live}}
+	dc := reg.darkEnabledProfiles()[0]
+
+	// An admin write replaces the profile with a NEW generation.
+	reg.mu.Lock()
+	reg.profiles = []*IdPProfile{{
+		ID: "racy", Name: "racy", Type: IdPTypeOIDC, Enabled: true,
+		OIDC: &OIDCProfileConfig{Issuer: "https://other.example", ClientID: "c", ClientSecret: "s"},
+	}}
+	reg.mu.Unlock()
+
+	if reg.publishRecompiled(dc.candidate.ID, dc.generation, dc.candidate, chaos71StubProvider{}) {
+		t.Fatal("a provider built from a SUPERSEDED generation must never be published")
 	}
 }

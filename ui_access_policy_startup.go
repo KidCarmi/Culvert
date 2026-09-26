@@ -76,6 +76,18 @@ func loadUIAccessPolicy(cfg uiAccessPolicyStartupConfig) error {
 		if len(idpRegistry.darkEnabledProfiles()) > 0 {
 			go runIdPRecoveryLoop(resolveLifecycleCtx())
 		}
+		// Detection-only degradation watchdog. UNLIKE the recovery loop above
+		// it is not gated on anything being dark, because the case it exists
+		// for is a provider that IS live while serving a stale cached
+		// document: nothing further compiles it, so nothing would ever
+		// evaluate the elapsed-time degradation threshold and the documented
+		// page would never fire (Codex review round 4). It fetches nothing,
+		// compiles nothing and clears no episode; with no open episode its
+		// sweep is a no-op, so an appliance with no remote IdP pays one
+		// sleeping goroutine.
+		if idpRegistry.hasEnabledRemoteMetadataProfile() {
+			go runIdPMetadataDegradationWatchdog(resolveLifecycleCtx())
+		}
 	}
 	return nil
 }

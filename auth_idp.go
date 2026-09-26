@@ -555,6 +555,15 @@ func (r *IdPRegistry) ReplaceAll(profiles []*IdPProfile) error {
 	// source leaves an episode belonging to the CANDIDATE, so the still-live
 	// profile must not inherit it (Codex review round 3).
 	forgetUnowned := func(candidate *IdPProfile) {
+		// A nil entry in the snapshot is rejected by validateIdPProfile, which
+		// handles nil correctly — but it reaches here on that error path, and a
+		// nil candidate has no id and therefore owns no episode. Dereferencing
+		// it panicked the DATA PLANE on a malformed CP->DP snapshot (Codex
+		// review round 4): ReplaceAll is the snapshot-apply path, so one `null`
+		// in idp_profiles took the node down instead of refusing the snapshot.
+		if candidate == nil {
+			return
+		}
 		if !idpEpisodeBelongsToLive(registered[candidate.ID], candidate) {
 			forgetIdPMetadataEpisode(candidate.ID)
 		}

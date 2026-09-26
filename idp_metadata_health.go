@@ -78,6 +78,7 @@ package main
 // rows already follow.
 
 import (
+	"context"
 	"fmt"
 	"sync"
 	"sync/atomic"
@@ -179,6 +180,11 @@ type idpMetadataEpisode struct {
 	// one per compile. Cleared with the episode, so a second incident pages
 	// again.
 	alerted bool
+
+	// lastOutcome is the BOUNDED class of the most recent failure, kept so the
+	// degradation sweep below can name it in the alert Detail without holding a
+	// cause string (Dispatch dedups on event+Detail — see fireIdPMetadataAlert).
+	lastOutcome idpMetadataOutcome
 }
 
 var idpMetadata idpMetadataHealth
@@ -326,6 +332,7 @@ func noteIdPMetadataOutcome(profileID string, outcome idpMetadataOutcome, cause 
 	ep := idpMetadataEpisodeLocked(profileID)
 	ep.consecutive++
 	ep.lastFailure = now
+	ep.lastOutcome = outcome
 	if ep.firstFailure.IsZero() {
 		ep.firstFailure = now
 	}
@@ -486,5 +493,73 @@ func checkIdPMetadata() OperatorContractCheck {
 		Code:    "idp_metadata",
 		Status:  diagOK,
 		Message: fmt.Sprintf("IdP metadata/discovery healthy (%d document acquisitions since startup)", snap.RemoteAttempts),
+	}
+}
+
+// idpMetadataDegradationSweep promotes every OPEN episode that has crossed
+// idpMetadataDegradedAfter to alerted, and returns the bounded outcome classes
+// to page on. It takes `now` so it is a pure function of recorded state plus an
+// injected clock (the CHAOS-66 round-3 rule: a health decision must not mix two
+// clocks).
+//
+// WHY THIS EXISTS. `noteIdPMetadataOutcome` evaluates the fire-once latch only
+// while RECORDING A FAILURE, so the page required another failed fetch after
+// the threshold elapsed. Degradation is derived from elapsed time — deliberately,
+// per CHAOS-61's *freshness is EVALUATED, never latched* — so a provider that
+// fell back to cache once and whose configuration then never changed again
+// crossed the threshold with NOTHING left to evaluate it: no compile, and no
+// recovery loop either, because that loop covers DARK profiles and a
+// cache-serving provider is live. The documented webhook alert could therefore
+// stay silent through exactly the sustained outage it exists for (Codex review
+// round 4).
+//
+// This is the CHAOS-66 round-3 finding one subsystem over, and this sweep had
+// already written the rule down: the READ path was given the clock and the
+// ALERT was left keyed on an attempt. There the fix clamped the one sleep that
+// could straddle the threshold; here there is no loop to clamp, so detection
+// gets its own bounded watchdog — the CHAOS-23 `runCatalogStaleWatchdogLoop`
+// precedent, where a detection-only ticker keeps a staleness alert live when
+// the thing that would have produced it has stopped happening.
+func idpMetadataDegradationSweep(now time.Time) []idpMetadataOutcome {
+	idpMetadata.mu.Lock()
+	var fire []idpMetadataOutcome
+	for _, ep := range idpMetadata.episodes {
+		if ep == nil || ep.alerted || ep.firstFailure.IsZero() {
+			continue
+		}
+		if now.Sub(ep.firstFailure) < idpMetadataDegradedAfter {
+			continue
+		}
+		ep.alerted = true
+		fire = append(fire, ep.lastOutcome)
+	}
+	idpMetadata.mu.Unlock()
+	return fire
+}
+
+// idpMetadataWatchdogInterval is capped BELOW idpMetadataDegradedAfter, which is
+// a CORRECTNESS bound rather than tuning: an interval that can straddle a state
+// transition delays the page past its documented threshold (CHAOS-55's
+// recoveryPollCeiling rule, and CHAOS-66's clamped sleep).
+const idpMetadataWatchdogInterval = idpMetadataDegradedAfter / 4
+
+// runIdPMetadataDegradationWatchdog fires the degradation page for an episode
+// that crossed the threshold with no further fetch to notice it. It is
+// detection-only: it never fetches, never compiles, and never clears an episode
+// — recovery stays on OBSERVED evidence.
+func runIdPMetadataDegradationWatchdog(ctx context.Context) {
+	t := time.NewTicker(idpMetadataWatchdogInterval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			for _, outcome := range idpMetadataDegradationSweep(time.Now()) {
+				fireIdPMetadataAlert(fmt.Sprintf(
+					"IdP metadata/discovery document unreachable for over %s (outcome: %s)",
+					idpMetadataDegradedAfter, outcome))
+			}
+		}
 	}
 }

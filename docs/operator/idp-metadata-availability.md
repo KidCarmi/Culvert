@@ -64,6 +64,8 @@ its own resolving check at compile time. That check refuses only a DEFINITE
 private verdict: a name that cannot be resolved is treated as *unknown*, not
 *private*, so a resolver outage can never reject a cached document.
 
+**The degradation alert does not depend on another fetch.** A provider serving from cache is still *live*, so nothing recompiles it and the dark-provider recovery loop does not cover it. A separate detection-only watchdog therefore evaluates open episodes against the clock and fires the page once the threshold is crossed, even if no further fetch is ever attempted. It never fetches, never compiles and never clears an episode — recovery still requires observed evidence — and it does not run at all on a node with no enabled remote-metadata profile.
+
 **A dark provider recovers on its own.** If a profile still cannot be compiled
 — unreachable at boot with nothing cached — the appliance retries at a bounded
 rate (2 s, doubling to 5 minutes, jittered) until it succeeds. No restart is
