@@ -6512,11 +6512,16 @@ async function doLogout() {
 // fresh one to retry a refused submit: a 409/428 is shown as the refusal it
 // is and the operator must close and reopen the dialog (which re-binds) — a
 // deliberate act, never a silent re-fence. Three outcomes are kept apart:
-// a REFUSAL (typed non-2xx: nothing was written, the dialog stays open), a
-// CHANGE (a 2xx whose body is action-bound: ok, selfAffected, a generation
-// strictly later than the one sent) and an UNPROVEN outcome (the request
-// left the browser and no usable answer came back — the write may or may not
-// have landed; the typed secrets are dropped and no success is claimed).
+// a REFUSAL (a non-2xx that MATCHES the handler's refusal contract — status,
+// JSON media type, an enrolled code and its facts — so nothing was written
+// and the dialog stays open), a CHANGE (a 200 whose body is the handler's
+// COMPLETE success shape: ok, persisted, sessionsRevoked, selfAffected, a
+// positive revision and a generation strictly later than the one sent) and
+// an UNPROVEN outcome (everything else — a transport death, an intermediary's
+// 502/504 over an answer the appliance did send, any 5xx, malformed or
+// contradictory bodies: the write may or may not have landed; the typed
+// secrets are dropped and neither success nor non-commit is claimed; record
+// 6ARR-C12b).
 let _cpBound = null; // {subject, generation} bound at open; null = nothing may be sent
 function clearChangePasswordFields() {
   document.getElementById('cp-current').value = '';
@@ -6589,42 +6594,67 @@ function showChangePasswordErr(msg) {
   el.textContent = msg;
   el.style.display = 'block';
 }
-// ChangePasswordRefused: a typed non-2xx — the appliance decided before
-// writing, so nothing changed. userText is what the dialog shows.
+// classifyChangePasswordRefusal decides whether a non-2xx PROVES that nothing
+// was written. Only the handler's OWN contract counts: the status, the JSON
+// media type, a code that status may carry, and the facts that code requires
+// (the two fence refusals name the current generation). Everything else is
+// UNPROVEN and returns null — a gateway's 502/504 in place of the appliance's
+// answer, ANY 5xx (a 500 `persist_failed` is a claim about a write that was
+// ATTEMPTED and the operator must verify it, a 503 that is not the typed
+// no-roster refusal is an intermediary), malformed JSON, a code this build does
+// not enrol, or a code on the wrong status. The server's `error` text is never
+// read and never rendered: every user-facing sentence here is the console's.
+function classifyChangePasswordRefusal(status, contentType, text) {
+  const contract = {
+    400: { 'invalid_input': 'The appliance refused the new password (it does not meet the password rules). Nothing was changed.' },
+    403: { 'invalid_credentials': 'Current password is incorrect. Nothing was changed.',
+           'forbidden': 'Your role may not change this password. Nothing was changed.' },
+    404: { 'not_found': 'This account no longer exists on the appliance. Nothing was changed.' },
+    409: { 'stale': 'Your account changed since this dialog was opened (another session or an administrator). Nothing was changed. Close and reopen the dialog, then try again.' },
+    428: { 'precondition_required': 'The appliance did not receive the account state this dialog was opened with. Nothing was changed. Close and reopen the dialog.' },
+    503: { 'persistence_not_configured': 'This appliance has no durable administrator roster; password changes are refused. Nothing was changed.' }
+  };
+  const codes = Object.prototype.hasOwnProperty.call(contract, status) ? contract[status] : null;
+  if (!codes) return null;
+  if (!(contentType || '').toLowerCase().startsWith('application/json')) return null;
+  let j;
+  try { j = JSON.parse(text); } catch (_) { return null; }
+  if (!j || typeof j !== 'object' || Array.isArray(j) || typeof j.code !== 'string') return null;
+  if (!Object.prototype.hasOwnProperty.call(codes, j.code)) return null;
+  const cur = j.current && typeof j.current === 'object' ? j.current : null;
+  if (status === 428 && !(cur && Number.isInteger(cur.generation))) return null;
+  if (status === 409 && !(cur && (Number.isInteger(cur.generation) || Number.isInteger(cur.revision)))) return null;
+  return { code: j.code, userText: codes[j.code] };
+}
+// ChangePasswordRefused carries a PROVEN refusal (see the classifier above):
+// the appliance decided before writing, so nothing changed. userText is the
+// console's own bounded sentence for that code.
 class ChangePasswordRefused extends Error {
-  constructor(status, text) {
+  constructor(refusal) {
     super('refused');
-    this.status = status;
-    let code = '';
-    try { const j = JSON.parse(text); if (j && typeof j.code === 'string') code = j.code; } catch (_) {}
-    this.code = code;
-    if (status === 428) {
-      this.userText = 'The appliance did not receive the account state this dialog was opened with. Nothing was changed. Close and reopen the dialog.';
-    } else if (status === 409) {
-      this.userText = 'Your account changed since this dialog was opened (another session or an administrator). Nothing was changed. Close and reopen the dialog, then try again.';
-    } else if (status === 403) {
-      this.userText = 'Current password is incorrect.';
-    } else if (status === 503) {
-      this.userText = 'This appliance has no durable administrator roster; password changes are refused. Nothing was changed.';
-    } else if (status >= 500) {
-      this.userText = 'The appliance refused the change because it could not be persisted. Nothing was changed.';
-    } else {
-      this.userText = apiErrorText(text) || 'Password change failed.';
-    }
+    this.code = refusal.code;
+    this.userText = refusal.userText;
   }
 }
-// changePasswordProof accepts a 2xx ONLY when it is action-bound to this
-// dialog's request: JSON, ok, selfAffected and a security generation strictly
-// later than the one sent (the appliance advances it on every credential
-// change). Anything else is not a success this dialog may report.
+// changePasswordProof accepts a 2xx ONLY when it is the handler's COMPLETE
+// success shape bound to this dialog's request: status 200, JSON, ok,
+// persisted (the roster was durably written — the handler refuses earlier
+// without a persistence path, so false here contradicts the contract),
+// sessionsRevoked (every other session of this account was revoked),
+// selfAffected, a positive integer revision and a security generation strictly
+// later than the one sent. A missing or contradictory fact is not a success
+// this dialog may report — it is UNPROVEN.
 async function changePasswordProof(r, bound) {
+  if (r.status !== 200) return null;
   const ct = (r.headers.get('content-type') || '').toLowerCase();
   if (!ct.startsWith('application/json')) return null;
   let j;
   try { j = await r.json(); } catch (_) { return null; }
-  if (!j || j.ok !== true || j.selfAffected !== true) return null;
+  if (!j || typeof j !== 'object' || Array.isArray(j)) return null;
+  if (j.ok !== true || j.persisted !== true || j.sessionsRevoked !== true || j.selfAffected !== true) return null;
+  if (!Number.isInteger(j.revision) || j.revision < 1) return null;
   if (!Number.isInteger(j.securityGeneration) || j.securityGeneration <= bound.generation) return null;
-  return { generation: j.securityGeneration };
+  return { generation: j.securityGeneration, revision: j.revision };
 }
 async function submitChangePassword() {
   const current = document.getElementById('cp-current').value;
@@ -6652,13 +6682,22 @@ async function submitChangePassword() {
       body: JSON.stringify({ current_password: current, new_password: next, generation: bound.generation })
     });
     if (r.status === 401) throw new Error('Unauthorized');
-    if (!r.ok) throw new ChangePasswordRefused(r.status, await r.text().catch(() => ''));
-    const proof = await changePasswordProof(r, bound);
-    if (!proof) throw new Error('unproven');
-    // The change happened even if the dialog was dismissed meanwhile, so the
-    // user is always told; only the dialog it was sent from is closed.
-    toast('Password changed.');
-    if (gen === _cpReqGen) closeChangePasswordModal();
+    if (r.ok) {
+      const proof = await changePasswordProof(r, bound);
+      if (!proof) throw new Error('unproven');
+      // The change happened even if the dialog was dismissed meanwhile, so the
+      // user is always told; only the dialog it was sent from is closed.
+      toast('Password changed.');
+      if (gen === _cpReqGen) closeChangePasswordModal();
+    } else {
+      // A non-2xx proves NOTHING by itself: only the handler's contracted
+      // refusal (status + JSON + enrolled code + facts) is read as "nothing was
+      // changed". Anything else — an intermediary's answer over a commit that
+      // may have landed — is UNPROVEN.
+      const refusal = classifyChangePasswordRefusal(r.status, r.headers.get('content-type'), await r.text().catch(() => ''));
+      if (!refusal) throw new Error('unproven');
+      throw new ChangePasswordRefused(refusal);
+    }
   } catch (err) {
     if (gen !== _cpReqGen) return; // dialog was dismissed/reopened: not ours
     if (err && err.message === 'Unauthorized') {
@@ -6674,10 +6713,12 @@ async function submitChangePassword() {
       // or missing generation is NOT re-fetched and re-sent from here.
       showChangePasswordErr(err.userText);
     } else {
-      // UNPROVEN: the request left the browser and no action-bound answer
-      // came back (transport death, a non-JSON 2xx, a body that does not
-      // name this change). The write may or may not have landed. Drop the
-      // typed secrets with the dialog and say exactly that — never success.
+      // UNPROVEN: the request left the browser and no answer this console can
+      // read came back (transport death, an intermediary's status, a 5xx, a
+      // 2xx or refusal whose body does not match the handler's contract). The
+      // write may or may not have landed. Drop the typed secrets with the
+      // dialog and say exactly that — never success, never non-commit, and
+      // never a retry.
       closeChangePasswordModal();
       toast('The password change could not be confirmed. Sign out and sign in again to check which password is in effect.', 'error');
     }

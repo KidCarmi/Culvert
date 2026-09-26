@@ -132,11 +132,15 @@ func TestCPJoin_RefusalVersusUnprovenOutcome(t *testing.T) {
 	if !strings.Contains(submit, "if (!proof) throw new Error('unproven');") {
 		t.Error("a 2xx that is not action-bound must be treated as UNPROVEN")
 	}
-	// Refusal classes name the two fence refusals as refusals.
-	cls := uiContractFuncBody(t, block, "class ChangePasswordRefused extends Error {")
+	// The refusal CLASSIFIER names the two fence refusals as refusals (6ARR-C12b
+	// moved classification out of the ChangePasswordRefused class into
+	// classifyChangePasswordRefusal, which is code-bound per status; the
+	// assertions are the originals, re-pointed at the function that now
+	// carries them).
+	cls := uiContractFuncBody(t, block, "function classifyChangePasswordRefusal(")
 	for _, want := range []string{"status === 428", "status === 409", "Nothing was changed"} {
 		if !strings.Contains(cls, want) {
-			t.Errorf("ChangePasswordRefused must classify the fence refusals: missing %q", want)
+			t.Errorf("classifyChangePasswordRefusal must classify the fence refusals: missing %q", want)
 		}
 	}
 }
