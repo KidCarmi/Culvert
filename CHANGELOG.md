@@ -27,7 +27,11 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   fleet, the Control Plane participates in both directions, and a corrupt file
   is quarantined through the existing `state_file_corrupt` path — including a
   document whose top-level value is the JSON literal `null`, which parses
-  without error into an empty list and so used to be accepted silently. The
+  without error into an empty list and so used to be accepted silently. A
+  revocation save that fails transiently is retried on a later cluster sync
+  rather than skipped because the entry is already in memory — on an HA standby
+  the replicated bundle is the only writer, so without the retry the volume
+  could be repaired and the revocation still never reach disk. The
   persisted document remains a JSON array so an older binary still parses the
   token revocations it understands.
 

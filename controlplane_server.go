@@ -380,11 +380,7 @@ func (s *controlPlaneServer) SyncRevocations(ctx context.Context, raw json.RawMe
 	//  2. CONSUME — apply what this DP reported to the CP's own list, so a
 	//     logout performed on a DP is enforced on the CP too.
 	globalRevAggregator.UpdateLocal(sessionRevoked.ExportRevocations())
-	if added := sessionRevoked.MergeRevocations(req.Entries); added > 0 {
-		if err := sessionRevoked.SaveRevocations(); err != nil {
-			logger.Printf("ControlPlane: failed to persist merged revocations: %v", err)
-		}
-	}
+	mergeAndPersistRevocations(req.Entries, "ControlPlane")
 
 	remote := globalRevAggregator.MergedExcluding(req.NodeID)
 	b, err := json.Marshal(map[string]any{"entries": remote})

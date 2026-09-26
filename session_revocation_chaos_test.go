@@ -1,10 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -300,9 +302,9 @@ func TestChaos68_SyncRevocationsWiresBothDirections(t *testing.T) {
 		if !ok {
 			return true
 		}
-		if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
-			if _, tracked := want[sel.Sel.Name]; tracked {
-				want[sel.Sel.Name] = true
+		if name := chaos68CalleeName(call); name != "" {
+			if _, tracked := want[name]; tracked {
+				want[name] = true
 			}
 		}
 		return true
@@ -485,7 +487,7 @@ func TestChaos68_HAWiresRevocationsInBothDirections(t *testing.T) {
 		var found bool
 		ast.Inspect(target, func(n ast.Node) bool {
 			if call, ok := n.(*ast.CallExpr); ok {
-				if sel, ok := call.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == tc.call {
+				if chaos68CalleeName(call) == tc.call {
 					found = true
 				}
 			}
@@ -643,4 +645,221 @@ func TestChaos68_WriteDegradedPageLatchesUntilASaveLands(t *testing.T) {
 	if got := scrapeSessionRevocationPersistDegraded(t); got != 0 {
 		t.Fatalf("persist_degraded = %d after a save landed; want 0", got)
 	}
+}
+
+// chaos68UnwritablePath returns a path whose PARENT is a regular file, so every
+// write fails with ENOTDIR. Deliberately not a permission bit: root bypasses
+// DAC, so a mode-based fault would make this gate skip on the CI runner — which
+// is exactly where a durability regression must not go unnoticed.
+func chaos68UnwritablePath(t *testing.T) string {
+	t.Helper()
+	blocker := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(blocker, []byte("x"), 0o600); err != nil {
+		t.Fatalf("seed blocker: %v", err)
+	}
+	return filepath.Join(blocker, "revocations.json")
+}
+
+// DEFECT GATE (Codex P1, PR #1437 — AU-34). All three cluster merge sites used
+// to persist only inside `if added > 0`. MergeRevocations returns 0 once the
+// entry is already in memory, so ONE transient failure was permanent: every
+// later sync carried the same entry, added nothing, and never retried. The
+// revocation stayed in RAM, never reached disk, and a restart resurrected the
+// session it was meant to withdraw.
+//
+// Verified failing against the pre-fix shape (`if added > 0 { save }`): the
+// repaired path was never written and the entry was lost.
+func TestChaos68_FailedSaveIsRetriedOnALaterSyncThatAddsNothing(t *testing.T) {
+	withChaos68Revocations(t)
+
+	bad := chaos68UnwritablePath(t)
+	session.SetRevocationsPath(bad)
+	noteRevocationPersistenceConfigured(bad)
+
+	exp := time.Now().Add(time.Hour)
+	entries := []RevocationEntry{{Token: "tok-must-become-durable", Expiry: exp.Unix()}}
+
+	// First sync: the entry merges, the save fails.
+	if added := mergeAndPersistRevocations(entries, "test"); added != 1 {
+		t.Fatalf("first merge added %d, want 1", added)
+	}
+	if revocationsAreDurable() {
+		t.Fatal("reported durable while the write was failing")
+	}
+
+	// The operator repairs the volume.
+	good := filepath.Join(t.TempDir(), "revocations.json")
+	session.SetRevocationsPath(good)
+
+	// A LATER sync carries the SAME entry, so the merge adds nothing.
+	if added := mergeAndPersistRevocations(entries, "test"); added != 0 {
+		t.Fatalf("second merge added %d, want 0 — the entry is already in memory", added)
+	}
+
+	raw, err := os.ReadFile(good)
+	if err != nil {
+		t.Fatalf("the repaired path was never written, so the revocation is still not durable: %v", err)
+	}
+	if !strings.Contains(string(raw), "tok-must-become-durable") {
+		t.Errorf("persisted document does not carry the revocation: %s", raw)
+	}
+	if !revocationsAreDurable() {
+		t.Error("still reported non-durable after a save that landed")
+	}
+}
+
+// CONTROL. The cheapest way to pass the gate above is to save on EVERY merge
+// call. The standby syncs every 5s and the DP loop every 3s, so that would
+// rewrite the whole list continuously on every node in the fleet, forever —
+// trading a durability defect for a write-amplification one.
+func TestChaos68_HealthyNodeDoesNotRewriteOnEverySync(t *testing.T) {
+	withChaos68Revocations(t)
+	path := filepath.Join(t.TempDir(), "revocations.json")
+	session.SetRevocationsPath(path)
+	noteRevocationPersistenceConfigured(path)
+
+	exp := time.Now().Add(time.Hour)
+	entries := []RevocationEntry{{Token: "tok-a", Expiry: exp.Unix()}}
+	if added := mergeAndPersistRevocations(entries, "test"); added != 1 {
+		t.Fatalf("first merge added %d, want 1", added)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("first merge did not persist: %v", err)
+	}
+
+	// Remove the file so a later write is observable, then re-sync the SAME
+	// entries on a healthy node. Nothing new, nothing degraded, nothing to do.
+	if err := os.Remove(path); err != nil {
+		t.Fatalf("remove: %v", err)
+	}
+	for i := 0; i < 3; i++ {
+		if added := mergeAndPersistRevocations(entries, "test"); added != 0 {
+			t.Fatalf("re-merge added %d, want 0", added)
+		}
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Error("a healthy node rewrote the revocations file on a sync that changed nothing")
+	}
+}
+
+// CONTROL. While a volume is broken the retry runs on every sync, so the
+// failure line must be keyed on the TRANSITION rather than the attempt — at a
+// 3-5s cadence a per-attempt line is hundreds an hour, and a mitigation for a
+// durability defect must not become a write-amplification one. The magnitude
+// stays in the counter.
+func TestChaos68_RetryLogsOncePerEpisodeNotPerAttempt(t *testing.T) {
+	withChaos68Revocations(t)
+	bad := chaos68UnwritablePath(t)
+	session.SetRevocationsPath(bad)
+	noteRevocationPersistenceConfigured(bad)
+
+	var buf bytes.Buffer
+	old := logger
+	logger = log.New(&buf, "", 0)
+	t.Cleanup(func() { logger = old })
+
+	exp := time.Now().Add(time.Hour)
+	entries := []RevocationEntry{{Token: "tok-noisy", Expiry: exp.Unix()}}
+	for i := 0; i < 8; i++ {
+		mergeAndPersistRevocations(entries, "test")
+	}
+
+	if n := strings.Count(buf.String(), "failed to persist merged revocations"); n != 1 {
+		t.Errorf("emitted %d failure lines across 8 syncs, want exactly 1 (onset only): %s", n, buf.String())
+	}
+	if got := sessionRevocationPersistFailures.Load(); got < 8 {
+		t.Errorf("cumulative failures = %d, want >= 8 — the counter must carry the magnitude the log suppresses", got)
+	}
+}
+
+// CONTROL. Recovery is announced once, so an operator watching the log can see
+// the episode close without tailing metrics.
+func TestChaos68_RetrySuccessAnnouncesRecoveryOnce(t *testing.T) {
+	withChaos68Revocations(t)
+	bad := chaos68UnwritablePath(t)
+	session.SetRevocationsPath(bad)
+	noteRevocationPersistenceConfigured(bad)
+
+	exp := time.Now().Add(time.Hour)
+	entries := []RevocationEntry{{Token: "tok-recover", Expiry: exp.Unix()}}
+	mergeAndPersistRevocations(entries, "test")
+
+	var buf bytes.Buffer
+	old := logger
+	logger = log.New(&buf, "", 0)
+	t.Cleanup(func() { logger = old })
+
+	session.SetRevocationsPath(filepath.Join(t.TempDir(), "revocations.json"))
+	for i := 0; i < 3; i++ {
+		mergeAndPersistRevocations(entries, "test")
+	}
+
+	if n := strings.Count(buf.String(), "durable again"); n != 1 {
+		t.Errorf("emitted %d recovery lines, want exactly 1: %s", n, buf.String())
+	}
+}
+
+// STRUCTURAL WALL. The reviewer found this on the HA standby, but all three
+// cluster merge sites carried the identical shape — and the CP handler is not
+// behaviourally reachable from a test (it needs an mTLS peer, an enrolled node
+// and an unfenced HA lease, which is why SyncRevocationsWiresBothDirections is
+// a wall too). Requiring every site to route through the one primitive is what
+// stops a fourth merge site reintroducing the gap silently.
+func TestChaos68_EveryRevocationMergeSiteRetriesThroughThePrimitive(t *testing.T) {
+	// Anchored to pkgSourceDir(), never the CWD: a concurrent os.Chdir in
+	// another test would otherwise make this wall flake (static_read_wall_test.go).
+	dir := pkgSourceDir()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read package dir: %v", err)
+	}
+	found := 0
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		src, err := os.ReadFile(filepath.Join(dir, name))
+		if err != nil {
+			t.Fatalf("read %s: %v", name, err)
+		}
+		n := strings.Count(string(src), "sessionRevoked.MergeRevocations(")
+		if n == 0 {
+			continue
+		}
+		found += n
+		if name != "session_revocation_health.go" {
+			t.Errorf("%s calls sessionRevoked.MergeRevocations directly (%d time(s)) — route it through mergeAndPersistRevocations, or a failed save there is never retried (AU-34)", name, n)
+		}
+	}
+	if found != 1 {
+		t.Errorf("found %d direct MergeRevocations call(s) in package main, want exactly 1 (the primitive) — the selector is stale, so this wall is not guarding anything", found)
+	}
+}
+
+// chaos68CalleeName returns the called function's name whether it is spelled as
+// a method (sessionRevoked.MergeRevocations) or a plain function
+// (mergeAndPersistRevocations), and folds the retry primitive onto the
+// requirement it satisfies.
+//
+// The two "wires both directions" walls below scan for a literal
+// MergeRevocations call. AU-34 moved every cluster merge site behind
+// mergeAndPersistRevocations, so those walls fired — correctly: as spelled, the
+// function no longer did what they required. The property they guard is
+// unchanged (the CP and the HA standby each participate in BOTH directions), so
+// the right repair is to teach them the new spelling, never to relax them.
+func chaos68CalleeName(call *ast.CallExpr) string {
+	var name string
+	switch fn := call.Fun.(type) {
+	case *ast.SelectorExpr:
+		name = fn.Sel.Name
+	case *ast.Ident:
+		name = fn.Name
+	default:
+		return ""
+	}
+	if name == "mergeAndPersistRevocations" {
+		return "MergeRevocations"
+	}
+	return name
 }

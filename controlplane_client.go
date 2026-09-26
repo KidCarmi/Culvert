@@ -617,11 +617,8 @@ func (c *DataPlaneClient) revocationSyncLoop(ctx context.Context, interval time.
 				logger.Printf("DataPlane: SyncRevocations parse error: %v", err)
 				continue
 			}
-			if added := sessionRevoked.MergeRevocations(resp.Entries); added > 0 {
+			if added := mergeAndPersistRevocations(resp.Entries, "DataPlane"); added > 0 {
 				logger.Printf("DataPlane: merged %d remote session revocations", added)
-				if err := sessionRevoked.SaveRevocations(); err != nil {
-					logger.Printf("DataPlane: failed to persist revocations: %v", err)
-				}
 			}
 		}
 	}

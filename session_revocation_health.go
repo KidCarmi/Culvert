@@ -224,3 +224,61 @@ func checkSessionRevocation() OperatorContractCheck {
 			tokens, users),
 	}
 }
+
+// mergeAndPersistRevocations merges a peer's revocation entries into the live
+// list and persists the result, RETRYING a previously failed save even when the
+// merge adds nothing new.
+//
+// All three cluster merge sites — the HA standby bundle (ha.go), the CP's
+// SyncRevocations handler (controlplane_server.go) and the DP sync loop
+// (controlplane_client.go) — used to persist only inside `if added > 0`.
+// MergeRevocations returns 0 once an entry is already in memory, so ONE
+// transient persist failure was PERMANENT: every later sync carried the same
+// entry, added nothing, and never retried. Repairing the volume did not make
+// that revocation durable, and a restart then loaded a file that had never
+// received it — the revoked cookie is accepted again, which is the fail-OPEN
+// direction this whole plane exists to prevent.
+//
+// It bites hardest on the HA STANDBY, which is why the reviewer found it there:
+// a standby is fenced out of SyncRevocations by haIssuanceAllowed (that is what
+// AU-24 exists for), so the bundle is its ONLY writer — nothing else on that
+// node would ever retry. The boot probe does not help either, because by the
+// time it runs the in-memory list is gone and it writes the file WITHOUT the
+// revocation.
+//
+// sessionRevocationPersistDegraded (AU-25) is already exactly the dirty bit the
+// retry needs — set by a failed save, cleared only by one that lands — so this
+// reuses it rather than adding a second, parallel answer to "are writes failing
+// right now". SaveRevocations always writes the COMPLETE live list, so a retry
+// is idempotent by construction and needs no record of WHICH entry was lost.
+//
+// The log is keyed on the TRANSITION, not on the attempt. The standby syncs
+// every 5s and the DP loop every 3s, so logging each failure would emit
+// hundreds of lines an hour while a volume is broken — a mitigation for a
+// durability defect must not become a write-amplification one (CHAOS-63's rule,
+// and CHAOS-61's one-line-per-transition precedent). The magnitude stays in
+// culvert_session_revocation_persist_failures_total.
+//
+// A node with no persistence configured pays nothing: SaveRevocations returns
+// early without writing and never sets the flag, so an unconfigured standby
+// with no new entries returns before attempting anything.
+//
+// Reported by Codex on PR #1437 as a P1 (AU-34).
+func mergeAndPersistRevocations(entries []RevocationEntry, who string) int {
+	added := sessionRevoked.MergeRevocations(entries)
+	wasDegraded := sessionRevocationPersistDegraded.Load()
+	if added == 0 && !wasDegraded {
+		return 0
+	}
+	if err := sessionRevoked.SaveRevocations(); err != nil {
+		// Onset only. While degraded the counter carries the magnitude.
+		if !wasDegraded {
+			logger.Printf("%s: failed to persist merged revocations: %v", who, err)
+		}
+		return added
+	}
+	if wasDegraded {
+		logger.Printf("%s: merged session revocations are durable again", who)
+	}
+	return added
+}

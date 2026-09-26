@@ -838,11 +838,8 @@ func applyHABundle(bundle *HAStateBundle, token string) bool {
 	// aborting the resync — the revocations are already in memory and
 	// enforcing, and failing the sync over durability would discard working
 	// safety state to punish a full disk.
-	if added := sessionRevoked.MergeRevocations(bundle.Revocations); added > 0 {
+	if added := mergeAndPersistRevocations(bundle.Revocations, "HA"); added > 0 {
 		logger.Printf("HA: merged %d session revocation(s) from the leader", added)
-		if err := sessionRevoked.SaveRevocations(); err != nil {
-			logger.Printf("HA: failed to persist replicated revocations: %v", err)
-		}
 	}
 
 	return true
