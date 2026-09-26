@@ -158,6 +158,29 @@ func (r *IdPRegistry) publishRecompiled(id string, generation, compiled *IdPProf
 	return false // deleted while we were compiling
 }
 
+// stillFetchesSource reports whether source is STILL the remote document a
+// PRESENT, ENABLED profile of this generation depends on.
+//
+// It is publishRecompiled's re-check, read-only and on the FAILURE path. The
+// recovery compile deliberately runs without r.mu (it reaches the network), so
+// an admin delete, disable or repoint can commit while it is in flight; the
+// success path already re-checks identity under the lock before publishing, and
+// without this the failure path did not.
+func (r *IdPRegistry) stillFetchesSource(id string, generation *IdPProfile, source string) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	for _, p := range r.profiles {
+		if p == nil || p.ID != id {
+			continue
+		}
+		if !p.Enabled || p != generation {
+			return false // disabled, or replaced by a newer generation
+		}
+		return effectiveRemoteSource(p) == source
+	}
+	return false // deleted while we were compiling
+}
+
 // copyDiscoveredOIDCEndpoints moves the five fields NewOIDCFlowProvider fills in
 // from a compiled copy onto the authoritative profile. Callers must hold the
 // registry write lock. It copies ONLY those five: everything else on the
@@ -288,6 +311,21 @@ func armIdPRecoveryLoop(ctx context.Context) {
 	}()
 }
 
+// discardSupersededRecoveryEpisode drops the failure episode a recovery compile
+// just opened when the profile/source it was compiled for is no longer what the
+// registry publishes. See the call site for why the failure path needs it and
+// why the still-authoritative case must be left alone.
+func discardSupersededRecoveryEpisode(dc darkCandidate) {
+	src := idpRemoteDocumentSource(dc.candidate)
+	if src == "" {
+		return // fetches nothing; no episode of this kind exists
+	}
+	if idpRegistry.stillFetchesSource(dc.candidate.ID, dc.generation, src) {
+		return // still in service: the episode is a live outage signal
+	}
+	forgetIdPMetadataEpisodeForSource(dc.candidate.ID, src)
+}
+
 // runIdPRecoveryLoop retries compilation of enabled-but-dark profiles until
 // none are left or ctx is cancelled. Started from the IdP startup slice; a
 // no-op on a node where every enabled profile compiled.
@@ -314,7 +352,26 @@ func runIdPRecoveryLoop(ctx context.Context) {
 			// pointer is passed only as the generation token.
 			prov, err := compileIdPProfile(dc.candidate)
 			if err != nil {
-				continue // already counted + rate-limit-logged by the metadata plane
+				// Already counted + rate-limit-logged by the metadata plane —
+				// but that episode may now belong to a source NOTHING fetches.
+				//
+				// The compile runs without r.mu, so an admin delete, disable or
+				// repoint can commit while it is in flight. That mutation's own
+				// cleanup (retireEpisodeAfterCommit) ran BEFORE this episode
+				// existed, so the episode this failure just opened describes a
+				// configuration no longer published: nothing will ever clear it
+				// by evidence, it ages past idpMetadataDegradedAfter, and the
+				// (unconditional) watchdog then pages indefinitely for a URL the
+				// operator removed. Round 7's committed-repoint leak, reached
+				// from the recovery loop instead of the commit path (Codex round
+				// 12).
+				//
+				// The guard is what keeps this safe: an episode for the source
+				// STILL IN SERVICE is a genuine outage signal and must survive
+				// (rounds 6/7/9/10), so the discard happens ONLY once the source
+				// is no longer authoritative for this profile.
+				discardSupersededRecoveryEpisode(dc)
+				continue
 			}
 			if idpRegistry.publishRecompiled(dc.candidate.ID, dc.generation, dc.candidate, prov) {
 				recovered++

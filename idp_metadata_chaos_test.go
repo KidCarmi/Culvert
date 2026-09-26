@@ -2645,3 +2645,117 @@ func TestChaos71_WatchdogEnforcesTheCeilingAndReArmsRecovery(t *testing.T) {
 		}
 	}
 }
+
+// ── ROUND 12: a superseded recovery attempt must not leave an episode ────────
+
+// chaos71RecoveryCandidate returns the (generation, candidate) pair the recovery
+// loop would work with for id, taken from the live registry exactly as the loop
+// takes it.
+func chaos71RecoveryCandidate(reg *IdPRegistry, id string) darkCandidate {
+	for _, dc := range reg.darkEnabledProfiles() {
+		if dc.candidate != nil && dc.candidate.ID == id {
+			return dc
+		}
+	}
+	return darkCandidate{}
+}
+
+// chaos71SeedDarkProfile installs one enabled-but-dark remote profile on the
+// registry chaos71Env already swapped in, and returns the recovery candidate.
+func chaos71SeedDarkProfile(t *testing.T, id string) darkCandidate {
+	t.Helper()
+	idpRegistry.mu.Lock()
+	idpRegistry.profiles = []*IdPProfile{chaos71Profile(id, chaos71Source(id))}
+	idpRegistry.mu.Unlock()
+	dc := chaos71RecoveryCandidate(idpRegistry, id)
+	if dc.candidate == nil {
+		t.Fatal("precondition: the profile must be dark and enabled")
+	}
+	return dc
+}
+
+// ROUND 12 P2 (DEFECT GATE). The recovery compile runs without r.mu, so an admin
+// delete/disable/repoint can commit while it is in flight. The committed
+// mutation's own cleanup runs BEFORE the late failure records its episode, so
+// without a failure-path re-check that episode describes a source nothing
+// fetches: unclearable by evidence, it ages past idpMetadataDegradedAfter and
+// the unconditional watchdog pages indefinitely for a configuration the operator
+// removed.
+//
+// Verified FAILING against the pre-fix shape (a bare `continue`).
+func TestChaos71_SupersededRecoveryFailureLeavesNoEpisode(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		after func(id string)
+	}{
+		{"profile deleted mid-compile", func(string) {
+			idpRegistry.mu.Lock()
+			idpRegistry.profiles = nil
+			idpRegistry.mu.Unlock()
+		}},
+		{"profile disabled mid-compile", func(id string) {
+			disabled := chaos71Profile(id, chaos71Source(id))
+			disabled.Enabled = false
+			idpRegistry.mu.Lock()
+			idpRegistry.profiles = []*IdPProfile{disabled}
+			idpRegistry.mu.Unlock()
+		}},
+		{"profile repointed mid-compile", func(id string) {
+			idpRegistry.mu.Lock()
+			idpRegistry.profiles = []*IdPProfile{chaos71Profile(id, "https://elsewhere.invalid/document")}
+			idpRegistry.mu.Unlock()
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			chaos71Env(t)
+			const id = "corp"
+			src := chaos71Source(id)
+			dc := chaos71SeedDarkProfile(t, id)
+
+			// The compile is in flight; the admin mutation commits and runs its
+			// own cleanup, exactly as retireEpisodeAfterCommit would.
+			tc.after(id)
+			forgetIdPMetadataEpisodeForSource(id, src)
+
+			// Now the late failure lands, opening an episode for a source that is
+			// no longer authoritative.
+			noteIdPMetadataOutcome(id, src, idpMetaUnavailable, fmt.Errorf("late failure"))
+			if !idpMetadataState().Failing {
+				t.Fatal("precondition: the late failure must have opened an episode")
+			}
+
+			discardSupersededRecoveryEpisode(dc)
+
+			if idpMetadataState().Failing {
+				t.Fatalf("a superseded recovery failure left an episode for %q, which "+
+					"nothing fetches any more — it can never be cleared by evidence "+
+					"and the watchdog will page for it indefinitely", src)
+			}
+		})
+	}
+}
+
+// ROUND 12 CONTROL. The cheapest way to pass the gate above is to discard the
+// episode unconditionally, which would erase an ONGOING outage's signal on every
+// failed recovery attempt — rounds 6/7/9/10's rule, and strictly worse than the
+// leak being fixed, since culvert_idp_metadata_degraded could then never reach
+// its threshold for exactly the profile the loop is retrying.
+func TestChaos71_StillAuthoritativeRecoveryFailureKeepsItsEpisode(t *testing.T) {
+	chaos71Env(t)
+	const id = "corp"
+	src := chaos71Source(id)
+	dc := chaos71SeedDarkProfile(t, id)
+
+	// Nothing changed: the same source is still what this profile fetches.
+	noteIdPMetadataOutcome(id, src, idpMetaUnavailable, fmt.Errorf("still down"))
+	if !idpMetadataState().Failing {
+		t.Fatal("precondition: the failure must have opened an episode")
+	}
+
+	discardSupersededRecoveryEpisode(dc)
+
+	if !idpMetadataState().Failing {
+		t.Fatal("the source is STILL in service, so its episode is a live outage " +
+			"signal and must survive a failed recovery attempt")
+	}
+}
