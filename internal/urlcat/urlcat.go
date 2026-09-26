@@ -27,6 +27,7 @@ import (
 
 	"github.com/KidCarmi/Culvert/internal/fileutil"
 	"github.com/KidCarmi/Culvert/internal/hostutil"
+	"github.com/KidCarmi/Culvert/internal/hotlock"
 	"github.com/KidCarmi/Culvert/internal/obs"
 )
 
@@ -94,7 +95,7 @@ type Entry struct {
 // F3b-4 cutover consults it so the SaaS taxonomy (BuiltIn=true) is served by
 // the atomic effective view instead of double-served from here.
 type Store struct {
-	mu         sync.RWMutex
+	mu         hotlock.HotRW
 	entries    []*Entry
 	index      map[string]map[string]bool // lowercase cat → lowercase host set (ALL entries)
 	adminIndex map[string]map[string]bool // same, BuiltIn=false entries only
@@ -1117,14 +1118,14 @@ func (s *Store) MatchesHost(cat Category, host string) bool {
 	var keyBuf [maxInlineCategoryKey]byte
 	inlineKey, strKey, inlineOK := categoryKey(keyBuf[:], string(cat))
 
-	s.mu.RLock()
+	sh := s.mu.RLockHot()
 	var hostSet map[string]bool
 	if inlineOK {
 		hostSet = s.index[string(inlineKey)]
 	} else {
 		hostSet = s.index[strKey]
 	}
-	s.mu.RUnlock()
+	sh.RUnlock()
 
 	if hostSet == nil {
 		return false
@@ -1153,14 +1154,14 @@ func (s *Store) MatchesHostAdmin(cat Category, host string) bool {
 	var keyBuf [maxInlineCategoryKey]byte
 	inlineKey, strKey, inlineOK := categoryKey(keyBuf[:], string(cat))
 
-	s.mu.RLock()
+	sh := s.mu.RLockHot()
 	var hostSet map[string]bool
 	if inlineOK {
 		hostSet = s.adminIndex[string(inlineKey)]
 	} else {
 		hostSet = s.adminIndex[strKey]
 	}
-	s.mu.RUnlock()
+	sh.RUnlock()
 
 	if hostSet == nil {
 		return false
@@ -1180,8 +1181,8 @@ func (s *Store) MatchesHostAdmin(cat Category, host string) bool {
 // categories (the admin layer of the F3b-4 source-aware resolution). Same
 // exact-or-subdomain grammar as LookupHost.
 func (s *Store) LookupHostAdmin(host string) (category, matchedBy string, ok bool) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	sh := s.mu.RLockHot()
+	defer sh.RUnlock()
 	return s.lookupIn(s.adminHostIndex, host)
 }
 
@@ -1263,8 +1264,8 @@ func containsFold(cats []string, name string) bool {
 // (admin URL-lookup API contract) — hence the index resolves back through
 // s.entries rather than answering from a lowercase key.
 func (s *Store) LookupHost(host string) (category, matchedBy string, ok bool) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	sh := s.mu.RLockHot()
+	defer sh.RUnlock()
 	return s.lookupIn(s.hostIndex, host)
 }
 
