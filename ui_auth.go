@@ -47,20 +47,38 @@ func verifyLoginTOTP(w http.ResponseWriter, r *http.Request, clientIP, user, cod
 	if totpOK {
 		// Persist the matched counter to close the replay window for this
 		// step and all earlier steps within the skew tolerance.
-		cfg.SetTOTPLastCounter(user, matchedCounter)
-		cfg.SaveUIUsersFile() //nolint:errcheck // best-effort persist
+		// CHAOS-70: fail-open but never silent — see noteRosterPersistBestEffort
+		// for why the login is not refused when this write does not land. The
+		// mutate and the persist run as ONE transaction (mutateRosterBestEffort)
+		// so a concurrent admin mutation's rollback cannot discard this update.
+		noteRosterPersistBestEffort("TOTP replay counter", cfg.mutateRosterBestEffort(func() bool {
+			return cfg.SetTOTPLastCounter(user, matchedCounter)
+		}))
 		return true
 	}
-	if cfg.ConsumeBackupCode(user, code) {
-		// Backup code consumed — persist removal.
-		cfg.SaveUIUsersFile() //nolint:errcheck // best-effort persist
+	// Backup code consumed — persist the removal in the same transaction. A
+	// code whose removal does not reach disk is valid again after a restart
+	// (single-use violated); counted and logged rather than discarded, and
+	// never rolled back by a concurrent admin write (CHAOS-70).
+	consumedBackupCode := false
+	backupPersistErr := cfg.mutateRosterBestEffort(func() bool {
+		consumedBackupCode = cfg.ConsumeBackupCode(user, code)
+		return consumedBackupCode
+	})
+	if consumedBackupCode {
+		noteRosterPersistBestEffort("backup-code consumption", backupPersistErr)
 		return true
 	}
 	// TOTP failures MUST feed the lockout counter — otherwise an attacker
 	// who has (or guesses) a valid password can brute-force the 6-digit OTP
 	// (1M possibilities) with only the 300 ms delay as a barrier.
 	nowLocked := loginLimiter.RecordFailure(clientIP, user)
-	cfg.SaveUIUsersFile() //nolint:errcheck // best-effort persist
+	// No roster write here (CHAOS-70): loginLimiter is internal/lockout, an
+	// in-memory, deliberately non-persisted store (register row AU-4), so
+	// RecordFailure changes nothing ui_users.json carries. The removed
+	// SaveUIUsersFile() re-serialised every account and bcrypt hash and fsync'd
+	// a rename on EVERY failed OTP — persisting nothing, on the brute-force
+	// path this branch exists to rate-limit.
 	auditEvent(r, "auth.totp.fail", user,
 		fmt.Sprintf("invalid TOTP, locked=%v, attempts_left=%d", nowLocked, loginLimiter.AttemptsLeft(clientIP, user)))
 	time.Sleep(300 * time.Millisecond)
@@ -213,34 +231,24 @@ func apiAuthStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	sess, err := readUISessionCookie(r)
 	if err == nil && sess != nil {
-		role := UIRole(sess.Role)
-		if !role.HasRole(RoleViewer) {
-			role = RoleAdmin
-		}
-		jsonOKAuthStatus(w, map[string]any{"loggedIn": true, "user": sess.Sub, "role": role})
-		return
-	}
-	// Accept Basic Auth header for CLI/API callers.
-	//
-	// SEC-BASICAUTH-1: this endpoint is on isPublicUIAuthPath, so
-	// uiAuthMiddleware admits it with NO credentials, and it is a GET, so
-	// securityMiddleware's mutating-only rate limit never applies. Verifying
-	// caller-supplied credentials here and reporting the verdict in loggedIn
-	// therefore made it an unauthenticated, unthrottled, unaudited password
-	// oracle — one bcrypt per request, forever. It now shares the login
-	// endpoint's two-tier lockout via verifyUIBasicAuth. A caller that sends
-	// NO Authorization header never reaches the limiter at all, so the login
-	// overlay's anonymous poll is untouched (pinned by
-	// TestSecBasicAuth1_Control_UnauthenticatedStatusStillAnswers).
-	user, pass, ok := r.BasicAuth()
-	if ok {
-		res := verifyUIBasicAuth(r, user, pass)
-		if res.Locked() {
-			writeBasicAuthLockout(w, res)
+		// Same fail-closed resolution uiAuthMiddleware applies. Reporting a
+		// session whose role this build does not enroll as `role: admin` would
+		// have the console render the full admin surface for a principal every
+		// gated endpoint is about to refuse; treating it as not-logged-in is
+		// both honest and the safe direction.
+		if role, ok := sessionRoleOrReject(sess.Role); ok {
+			jsonOKAuthStatus(w, map[string]any{"loggedIn": true, "user": sess.Sub, "role": role})
 			return
 		}
-		if res.OK() {
-			jsonOKAuthStatus(w, map[string]any{"loggedIn": true, "user": user, "role": res.Role})
+	}
+	// Accept Basic Auth header for CLI/API callers.
+	user, pass, ok := r.BasicAuth()
+	if ok {
+		// SEC-BASIC-1: this endpoint is on the PUBLIC allowlist, so an
+		// unauthenticated caller reaches it — the bare verifier here was a
+		// lockout-free, unaudited password oracle.
+		if role, valid := verifyUIBasicAuth(r, user, pass); valid {
+			jsonOKAuthStatus(w, map[string]any{"loggedIn": true, "user": user, "role": role})
 			return
 		}
 	}
@@ -306,12 +314,17 @@ func apiAuthUsers(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "role must be admin, operator, or viewer", http.StatusBadRequest)
 			return
 		}
-		if err := cfg.SetUIUser(body.Username, body.Password, role); err != nil {
+		// CHAOS-70: durable-or-refused. A role change is a privilege
+		// decision; reporting it done while the roster on disk still grants
+		// the old role means a restart silently restores the privilege.
+		if err := cfg.mutateRosterDurably(func() error {
+			return cfg.SetUIUser(body.Username, body.Password, role)
+		}); !rosterChangeCommitted(err) {
+			if refuseRosterChange(w, r, "auth.users.set", body.Username, err) {
+				return
+			}
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
-		}
-		if err := cfg.SaveUIUsersFile(); err != nil {
-			logger.Printf("UIUsers: failed to persist: %v", err)
 		}
 		auditEvent(r, "auth.users.set", body.Username, fmt.Sprintf("role=%s", role))
 		jsonOK(w, map[string]any{"ok": true})
@@ -325,12 +338,19 @@ func apiAuthUsers(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "missing username param", http.StatusBadRequest)
 			return
 		}
-		if err := cfg.DeleteUIUser(username); err != nil {
+		// CHAOS-70: durable-or-refused. Deleting an account is how an
+		// operator revokes a compromised or departing administrator. A 204
+		// over a failed write means the account — password hash, role, TOTP
+		// enrolment intact — returns at the next restart, with the audit trail
+		// recording the revocation as successful.
+		if err := cfg.mutateRosterDurably(func() error {
+			return cfg.DeleteUIUser(username)
+		}); !rosterChangeCommitted(err) {
+			if refuseRosterChange(w, r, "auth.users.delete", username, err) {
+				return
+			}
 			http.Error(w, err.Error(), http.StatusConflict)
 			return
-		}
-		if err := cfg.SaveUIUsersFile(); err != nil {
-			logger.Printf("UIUsers: failed to persist: %v", err)
 		}
 		// Revoke all active sessions for the deleted user (Finding 5.2).
 		sessionRevoked.RevokeUser(username)
@@ -433,12 +453,21 @@ func apiAuthChangePassword(w http.ResponseWriter, r *http.Request) {
 	if role == "" {
 		role = RoleAdmin // legacy single-user fallback
 	}
-	if err := cfg.SetUIUser(username, body.NewPass, role); err != nil {
+	// CHAOS-70: durable-or-refused. A password change is the documented
+	// remediation for a leaked admin credential; a 200 over a failed write
+	// leaves the OLD password authenticating after the next restart while the
+	// operator believes the leak is closed.
+	//
+	// Self-service: keep the account's role (and any persisted raw role) —
+	// a password change is not a role assignment (SEC-RBAC-ROLE-1).
+	if err := cfg.mutateRosterDurably(func() error {
+		return cfg.ChangeUIUserPassword(username, body.NewPass, role)
+	}); !rosterChangeCommitted(err) {
+		if refuseRosterChange(w, r, "auth.password_change", username, err) {
+			return
+		}
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
-	}
-	if err := cfg.SaveUIUsersFile(); err != nil {
-		logger.Printf("UIUsers: failed to persist after password change: %v", err)
 	}
 	auditEvent(r, "auth.password_change", username, "self-service password change")
 	// Intentionally NOT calling saveConfigVersion: password hashes are
@@ -557,11 +586,17 @@ func apiSetupComplete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := cfg.SetAuth(body.User, body.Pass); err != nil {
-		http.Error(w, "internal error: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-	if err := cfg.SaveUIUsersFile(); err != nil {
+	// CHAOS-70 (Codex round 2): ONE transaction. SetAuth mirrors the new admin
+	// into the roster, so it must be serialised against every other roster
+	// mutation — uiAuthMiddleware grants RoleAdmin to all requests while
+	// !IsConfigured(), so POST /api/auth/users is reachable DURING setup and a
+	// failing admin mutation's rollback could otherwise delete this account.
+	// See SetAuthDurably for the full interleaving.
+	if err := cfg.SetAuthDurably(body.User, body.Pass); err != nil && !rosterChangeCommitted(err) {
+		if !errors.Is(err, ErrRosterNotPersisted) {
+			http.Error(w, "internal error: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
 		// SetAuth already mutated in-memory state, which would otherwise make
 		// IsConfigured() true for the rest of this process's lifetime even
 		// though the credential was never durably saved — a restart before a
@@ -572,8 +607,8 @@ func apiSetupComplete(w http.ResponseWriter, r *http.Request) {
 		// operator's retry goes through the normal (retryable) setup path
 		// rather than hitting "setup already complete" with no session and no
 		// persisted credential.
+		// (rolled back inside SetAuthDurably, under the transaction lock).
 		logger.Printf("UIUsers: failed to persist: %v", err)
-		cfg.RollbackFailedSetupAuth(body.User)
 		http.Error(w, "internal error: admin credentials could not be saved to disk; setup did not complete — check disk space/permissions and retry", http.StatusInternalServerError)
 		return
 	}

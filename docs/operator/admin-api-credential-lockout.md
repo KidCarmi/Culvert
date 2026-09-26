@@ -1,4 +1,4 @@
-# Admin API credential lockout (SEC-BASICAUTH-1)
+# Admin API credential lockout (SEC-BASIC-1 / SEC-BASICAUTH-4, -5)
 
 Culvert's admin plane accepts credentials in two shapes: the browser login form
 (`POST /api/auth/login`) and HTTP Basic Auth for programmatic / CLI access. This
@@ -24,8 +24,9 @@ Basic …` header an unauthenticated, unthrottled password-checking oracle, and 
 made every attempt cost one bcrypt of CPU on the appliance.
 
 All three now share the login form's lockout. There is **no new setting** —
-same tiers, same window, same trusted-IP bypass, same `auth.lockout` audit
-action, same `auth_lockout` alert.
+same tiers, same window, same trusted-IP bypass. The Basic paths write their
+own audit actions (`auth.basic.fail`, `auth.basic.refused`) so a Basic-mounted
+campaign is distinguishable from one against the login form.
 
 ### One exception: the SSE re-check is read-only
 
@@ -61,9 +62,14 @@ guessing bound.
 
 ## What a locked-out client sees
 
-`429 Too Many Requests` with the standard lockout message naming the seconds
-remaining — on any `/api/` route via the middleware fallback, and on
-`GET /api/auth/status` when Basic credentials were presented.
+`401 Unauthorized` — the same answer a wrong password gets. The Basic
+verifier never writes the response itself, so a locked client is not told that
+it is locked. That is deliberate: the endpoint is reachable unauthenticated, and
+distinguishing "locked" from "wrong" there would confirm to an anonymous caller
+that the account exists and is under an active lock.
+
+Use `GET /api/auth/lockouts` (admin-only) to see what is actually locked, and
+the `auth.basic.fail` audit action for the trips.
 
 A request with **no** `Authorization` header never consults the lockout and
 never creates a key, so the login overlay's anonymous `GET /api/auth/status`
@@ -85,8 +91,8 @@ What bounds it today:
   janitor.
 - **In visibility** — `culvert_login_limiter_entries` reports the live count of
   tier-1 and tier-2 entries. Sustained growth with no corresponding
-  `auth.lockout` audit activity means a source is cycling usernames rather than
-  guessing passwords.
+  `auth.basic.fail` audit activity means a source is cycling usernames rather
+  than guessing passwords.
 
 The growth is in entry **count** only, and it never affects whether a valid
 credential is accepted. The planned fix is fair-share eviction — evict the oldest
@@ -119,23 +125,24 @@ per window.
 
 ## Signals
 
-- **Metric** — `culvert_admin_basic_auth_lockout_refused_total` (lockout
-  refusals) and `culvert_login_limiter_entries` (the live lockout-state size).
+- **Metric** — `culvert_login_limiter_entries` (the live lockout-state size).
   Sustained growth means a source is grinding credentials against the admin
   **API** rather than the login form. Pair it with
   `culvert_login_oversize_rejected_total` (CHAOS-63) when triaging a probe.
-- **Audit** — one `auth.lockout` entry per trip, never one per attempt (a
-  per-attempt entry would rebuild the CHAOS-63 durable-log amplifier). Note
-  which field carries what, because searching the wrong one finds nothing:
-  the **object** is the submitted username, truncated, and the **actor** is the
-  client IP (the attempt failed, so there is no authenticated identity for
-  `auditActor` to prefix it with). Alert on `action = auth.lockout` and read the
-  username out of the object.
-- **Alert** — the existing `auth_lockout` event, `Source: auth`,
-  `Detail: "admin API credential lockout"` (a fixed string, so the dispatcher's
-  dedup window works).
-- **Log** — one `Auth: refused admin API basic-auth from <ip>` warning at onset,
-  then at most one per minute; the magnitude lives in the counter.
+- **Audit** — one `auth.basic.fail` entry per lockout **trip**, never one per
+  attempt (a per-attempt entry would rebuild the CHAOS-63 durable-log amplifier
+  on an endpoint an unauthenticated caller can reach). Note which field carries
+  what, because searching the wrong one finds nothing: the **object** is the
+  submitted username, truncated, and the **actor** is the client IP (the attempt
+  failed, so there is no authenticated identity for `auditActor` to prefix it
+  with). Alert on the action and read the username out of the object.
+- **Alert** — none specific to the Basic paths. The login form's `auth_lockout`
+  event still fires for locks tripped there; a lock tripped over Basic is
+  visible in the audit trail and on `GET /api/auth/lockouts`.
+- **Audit, TOTP** — `auth.basic.refused` when an account with a second factor
+  enrolled presents a correct password over Basic. That combination cannot
+  succeed, so a stream of these means either a script that needs migrating to
+  the session login flow, or a compromised first factor.
 
 ## Clearing a lock
 

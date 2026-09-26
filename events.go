@@ -166,7 +166,10 @@ func sseAuthStillValid(r *http.Request) bool {
 	// their own appliance, and (b) clear a co-located attacker's tier-1 counter
 	// once per interval on a shared egress. See revalidateUIBasicAuth.
 	if user, pass, ok := r.BasicAuth(); ok {
-		return revalidateUIBasicAuth(r, user, pass).OK()
+		// SEC-BASIC-1: same controls as every other admin-plane Basic site.
+		// SEC-BASICAUTH-5: the LIVENESS wrapper — see revalidateUIBasicAuth.
+		_, valid := revalidateUIBasicAuth(r, user, pass)
+		return valid
 	}
 	return false
 }
@@ -265,6 +268,8 @@ func liveFeedWritePrometheus(w *strings.Builder) {
 	fmt.Fprintf(w, "# TYPE culvert_audit_write_errors_total counter\nculvert_audit_write_errors_total %d\n", auditWriteErrors())
 	fmt.Fprintf(w, "\n# HELP culvert_audit_cluster_push_drops_total Audit entries discarded from the Data Plane→Control Plane push queue at its cap (Control Plane unreachable). Non-zero means the CENTRALIZED audit trail is incomplete; the local JSONL file on this node is unaffected\n")
 	fmt.Fprintf(w, "# TYPE culvert_audit_cluster_push_drops_total counter\nculvert_audit_cluster_push_drops_total %d\n", auditPendingDrops())
+	fmt.Fprintf(w, "\n# HELP culvert_ui_roster_role_clamped_total Admin-UI roster records whose persisted role this build does not enroll, clamped to viewer at load (SEC-RBAC-ROLE-1). Non-zero means ui_users.json names a role this binary cannot grant — a restore from a newer build, or a hand-edited/corrupt roster\n")
+	fmt.Fprintf(w, "# TYPE culvert_ui_roster_role_clamped_total counter\nculvert_ui_roster_role_clamped_total %d\n", RosterRoleClampCount())
 	fmt.Fprintf(w, "\n# HELP culvert_logstore_dropped_total History-store entries dropped because the async write queue was full\n")
 	fmt.Fprintf(w, "# TYPE culvert_logstore_dropped_total counter\nculvert_logstore_dropped_total %d\n", logstore.Dropped())
 	fmt.Fprintf(w, "\n# HELP culvert_logstore_pruned_total History-store entries deleted by the size-retention janitor\n")
@@ -304,15 +309,42 @@ func liveFeedWritePrometheus(w *strings.Builder) {
 	fmt.Fprintf(w, "# TYPE culvert_login_oversize_rejected_total counter\nculvert_login_oversize_rejected_total %d\n",
 		loginOversizeRejected.Load())
 
-	// SEC-BASICAUTH-1: admin-plane HTTP Basic Auth attempts refused by the
-	// credential lockout before any verification. The caller only ever sees a
-	// 429, and these paths (the uiAuthMiddleware fallback and the PUBLIC
-	// /api/auth/status) are not mutating requests, so nothing else reports
-	// them. Sustained growth means a source is grinding credentials against
-	// the admin API rather than the login form.
-	fmt.Fprintf(w, "\n# HELP culvert_admin_basic_auth_lockout_refused_total Admin-plane HTTP Basic Auth attempts refused by the credential lockout without reaching verification\n")
-	fmt.Fprintf(w, "# TYPE culvert_admin_basic_auth_lockout_refused_total counter\nculvert_admin_basic_auth_lockout_refused_total %d\n",
-		basicAuthLockoutRefused.Load())
+	// CHAOS-69: proxied requests refused for an over-long destination
+	// authority. Unlike the login counter above this one is ALWAYS emitted —
+	// there is no configuration to gate it on (every build bounds the
+	// authority), so a flat zero means "nothing has been probed", never "the
+	// feature is off". The caller gets a 400 (or a SOCKS5 failure reply) and
+	// nothing else moves, so a climbing counter is the operator's only signal
+	// that a client is sending authorities no resolver could answer for — the
+	// shape of a CPU-exhaustion probe against the proxy port.
+	fmt.Fprintf(w, "\n# HELP culvert_proxy_oversize_host_rejected_total Requests refused because the client-supplied destination authority exceeded the byte limit. Sustained growth means a client is probing the proxy port with unresolvable oversize hosts\n")
+	fmt.Fprintf(w, "# TYPE culvert_proxy_oversize_host_rejected_total counter\nculvert_proxy_oversize_host_rejected_total %d\n",
+		proxyOversizeHostRejected.Load())
+
+	// CHAOS-70: admin-roster durability. These are deliberately distinct from
+	// the storage plane's generic storage_write_failed, which says only that
+	// SOME durable write failed; these say WHICH administrative decision was
+	// affected and therefore what the operator must redo.
+	//
+	// Both are emitted unconditionally: unlike the gauges elsewhere in this
+	// file, a flat zero here is the healthy steady state for every appliance
+	// (no roster write has failed), not an ambiguous "feature not configured".
+	fmt.Fprintf(w, "\n# HELP culvert_admin_roster_persist_failures_total Admin-roster changes REFUSED and rolled back because ui_users.json could not be written. Non-zero means an operator's account/role/password change did not take effect and must be retried once the data volume is writable\n")
+	fmt.Fprintf(w, "# TYPE culvert_admin_roster_persist_failures_total counter\nculvert_admin_roster_persist_failures_total %d\n",
+		rosterPersistRefused.Load())
+	fmt.Fprintf(w, "\n# HELP culvert_admin_roster_persist_degraded_total Login-path admin-roster writes that failed while the login was allowed to proceed (TOTP replay counter, backup-code consumption). Non-zero means a single-use credential or replay counter may not survive a restart\n")
+	fmt.Fprintf(w, "# TYPE culvert_admin_roster_persist_degraded_total counter\nculvert_admin_roster_persist_degraded_total %d\n",
+		rosterPersistBestEffort.Load())
+
+	// SEC-REQID-1: client-supplied tracing headers replaced because they were
+	// over-long or carried bytes that must not reach a log line. The request
+	// still proceeds — only the correlation id is ours instead of theirs — so
+	// this counter is the operator's ONLY signal that a source is feeding the
+	// data plane hostile tracing headers. Two fixed series, never a label
+	// derived from the rejected value.
+	fmt.Fprintf(w, "\n# HELP culvert_tracing_header_rejected_total Client-supplied tracing headers replaced with a generated value because they exceeded the byte limit or carried non-visible-ASCII bytes. Sustained growth means a source is attempting log forgery or log-write amplification through the proxy data plane\n")
+	fmt.Fprintf(w, "# TYPE culvert_tracing_header_rejected_total counter\nculvert_tracing_header_rejected_total{header=\"x_request_id\"} %d\nculvert_tracing_header_rejected_total{header=\"traceparent\"} %d\n",
+		requestIDRejected.Load(), traceparentRejected.Load())
 
 	// AU-17b: the live size of the lockout state an unauthenticated caller can
 	// grow through the public GET on /api/auth/status. This is the admin plane's

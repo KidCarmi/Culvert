@@ -229,17 +229,21 @@ func isSameOrigin(r *http.Request, origin string) bool {
 // credentials, so this must stay reachable even after cfg.IsConfigured() is
 // true.
 // NOTE: /api/auth/users is intentionally NOT in this list — it requires admin role.
-//
 // SEC-PUBLICPATH-1: the list previously carried a `/api/auth/totp` PREFIX that
-// matched no registered route. TOTP has no admin API — enrollment is verified
-// inside apiAuthLogin's two-step flow (verifyLoginTOTP), and cfg.SetTOTPSecret/
-// ClearTOTP have no production callers at all — so the entry was dead today and
-// a landmine tomorrow: the first `/api/auth/totp/enroll` or `.../disable`
-// handler anyone adds would have been born UNAUTHENTICATED, letting any caller
-// enrol or strip the second factor of an admin account. A prefix pre-authorises
-// endpoints that do not exist yet, which is the one thing an allowlist must
-// never do. Removing it changes no behaviour today (nothing matches it) and
-// forces the next author to make the decision explicitly.
+// matched no registered route, so it was dead today and a landmine tomorrow —
+// the first `/api/auth/totp/enroll` or `.../disable` handler anyone adds would
+// have been born UNAUTHENTICATED, letting any caller enrol or strip the second
+// factor of an admin account. A prefix pre-authorises endpoints that do not
+// exist yet, which is the one thing an allowlist must never do.
+//
+// SEC-BASIC-1 (#1420) raised the stakes rather than lowering them: TOTP
+// enrolment now decides whether an account may authenticate over HTTP Basic at
+// all (cfg.UserHasTOTP, ui_basic_auth.go), so a public enrol/disable route
+// would let an unauthenticated caller bind their own second factor to an admin
+// account — or strip one — against a factor that now actually gates access.
+//
+// Removing it changes no behaviour today (nothing matches it) and forces the
+// next author to make the decision explicitly.
 // Pinned by TestPublicAllowlist_EveryEntryMatchesARegisteredRoute.
 func isPublicUIAuthPath(path string) bool {
 	return strings.HasPrefix(path, "/api/setup") ||
@@ -284,34 +288,32 @@ func uiAuthMiddleware(next http.Handler) http.Handler {
 				http.Error(w, "Unauthorized", http.StatusUnauthorized)
 				return
 			}
-			role := UIRole(sess.Role)
-			if !role.HasRole(RoleViewer) {
-				role = RoleAdmin // backwards compat: sessions without role = admin
+			role, ok := sessionRoleOrReject(sess.Role)
+			if !ok {
+				// A signed session naming a role this build does not enroll.
+				// It used to take the compat branch below and come out ADMIN,
+				// because that branch was keyed on `!HasRole(RoleViewer)` —
+				// true of every unenrolled string, not just the empty one it
+				// was written for. Fail closed and clear the cookie so the
+				// holder re-authenticates and is re-issued a role this build
+				// can actually evaluate.
+				clearUISessionCookie(w, r)
+				http.Error(w, "Unauthorized", http.StatusUnauthorized)
+				return
 			}
 			ctx := context.WithValue(r.Context(), uiRoleKey{}, role)
 			next.ServeHTTP(w, r.WithContext(ctx))
 			return
 		}
 		// Fallback: HTTP Basic Auth for programmatic / CLI access.
-		//
-		// SEC-BASICAUTH-1: routed through verifyUIBasicAuth, which applies the
-		// SAME two-tier lockout /api/auth/login uses. Before that this path
-		// called cfg.VerifyUIUser directly — one bcrypt per request, on every
-		// /api/ route, with no lockout, no failure record, no audit entry and
-		// no rate limit (securityMiddleware limits only mutating requests), so
-		// RISK-012's brute-force barrier was bypassed by choosing a different
-		// URL. See ui_basicauth_lockout.go.
 		user, pass, ok := r.BasicAuth()
 		if ok {
-			res := verifyUIBasicAuth(r, user, pass)
-			if res.Locked() {
-				writeBasicAuthLockout(w, res)
-				return
-			}
-			if res.OK() {
+			// SEC-BASIC-1: verifyUIBasicAuth applies the login path's lockout,
+			// TOTP and audit controls. Never call cfg.VerifyUIUser here.
+			if role, valid := verifyUIBasicAuth(r, user, pass); valid {
 				// Store the authenticated username too (no cookie exists on this path), so admin-action
 				// attribution resolves the real actor instead of "unknown" (Codex P2).
-				ctx := context.WithValue(r.Context(), uiRoleKey{}, res.Role)
+				ctx := context.WithValue(r.Context(), uiRoleKey{}, role)
 				ctx = context.WithValue(ctx, uiUserKey{}, user)
 				next.ServeHTTP(w, r.WithContext(ctx))
 				return

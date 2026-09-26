@@ -585,6 +585,13 @@ func (a *APIRateLimiter) Allow(ip string) bool {
 	return e.count <= Burst
 }
 
+// NOTE: Reserve/Refund/Reservation were removed with SEC-BASICAUTH-4. They
+// existed for ONE caller — a per-IP admin Basic-auth failure budget — which
+// was withdrawn because, keyed on the client, it denied valid credentials to
+// every administrator behind a shared egress. A ready-made atomic-refusal
+// primitive sitting next to a "do not refuse here" rule is a footgun, so it
+// goes with the feature. A future bound on that path must DELAY or EVICT.
+
 // Cleanup removes expired entries.
 func (a *APIRateLimiter) Cleanup() {
 	a.mu.Lock()

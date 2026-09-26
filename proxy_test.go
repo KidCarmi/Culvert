@@ -252,7 +252,11 @@ func TestHandleRequest_RateLimited(t *testing.T) {
 
 func TestHandleRequest_PluginBlocks(t *testing.T) {
 	setupProxyTest(t)
-	pluginReplace([]Middleware{&testPlugin{name: "block-all", decision: DecisionBlock}})
+	// Restore the chain on exit: the plugin chain is process-global and a
+	// leaked block-all plugin blocks every later preDispatchBlocked caller in
+	// the package (seen under -shuffle as TestPreDispatch_URLThreatCheckSkippedForCONNECT).
+	prev := pluginReplace([]Middleware{&testPlugin{name: "block-all", decision: DecisionBlock}})
+	t.Cleanup(func() { pluginReplace(prev) })
 
 	w := httptest.NewRecorder()
 	r := makeRequest("http://example.com/", nil)

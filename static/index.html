@@ -184,15 +184,26 @@ nav { flex: 1; padding: 12px 10px; overflow-y: auto; }
   #sidebar.open { transform: translateX(0); }
   #sidebar-toggle { display: inline-flex; }
   #main { margin-left: 0 !important; }
+  /* The topbar's action row (user badge, Change Password, Sign Out) must
+     WRAP rather than overflow: body hides overflow, so a clipped row can
+     make Sign Out unreachable on a narrow viewport. */
+  .topbar { flex-wrap: wrap; row-gap: 8px; padding: 12px 16px; }
+  .topbar-actions { flex-wrap: wrap; justify-content: flex-end; row-gap: 6px; }
 }
 /* ─── Main content ──────────────────────────────────────────────────────── */
 #main { margin-left: var(--sidebar-w); flex: 1; height: 100vh;
         overflow-y: auto; display: flex; flex-direction: column; }
+/* The topbar and its action row WRAP at every width, not only below the
+   860px sidebar breakpoint: just above it the fixed sidebar still leaves
+   #main narrower than the action row, and body hides overflow, so a
+   non-wrapping row would clip Sign Out off-screen. */
 .topbar {
   padding: 14px 28px; border-bottom: 1px solid var(--border);
   display: flex; align-items: center; justify-content: space-between;
+  flex-wrap: wrap; row-gap: 8px;
   background: var(--surface); position: sticky; top: 0; z-index: 50;
 }
+.topbar-actions { flex-wrap: wrap; justify-content: flex-end; row-gap: 6px; }
 .topbar-title { font-size: 1rem; font-weight: 600; }
 .topbar-meta  { font-size: .75rem; color: var(--muted); }
 .pill {
@@ -914,13 +925,14 @@ table.mcpx-cat-tbl td{padding:6px 10px;border-bottom:1px solid var(--border)}
         <div class="topbar-meta" id="topbar-meta">Security posture and real-time proxy overview</div>
       </div>
     </div>
-    <div style="display:flex;gap:10px;align-items:center">
+    <div class="topbar-actions" style="display:flex;gap:10px;align-items:center">
       <span class="topbar-meta" id="server-time"></span>
       <span class="pill live" id="live-pill">● LIVE</span>
       <span id="topbar-user-info" style="display:none;align-items:center;gap:6px;font-size:.8rem">
         <span id="topbar-username" style="color:var(--muted)"></span>
         <span id="topbar-role-badge" style="padding:2px 8px;border-radius:99px;font-size:.7rem;font-weight:700;text-transform:uppercase"></span>
       </span>
+      <button class="btn ghost sm" id="change-pw-btn" data-click="openChangePasswordModal" style="display:none" title="Change your own password">Change Password</button>
       <button class="btn ghost sm" id="logout-btn" data-click="doLogout" style="display:none">Sign Out</button>
     </div>
   </div>
@@ -1165,7 +1177,7 @@ table.mcpx-cat-tbl td{padding:6px 10px;border-bottom:1px solid var(--border)}
         </div>
         <div class="panel" style="margin-bottom:0">
           <div class="panel-header">
-            <span class="panel-title">Recent Requests</span>
+            <span class="panel-title">Recent requests</span>
             <span style="font-size:.75rem;color:var(--muted)">last 10</span>
           </div>
           <div class="tbl-wrap">
@@ -1299,7 +1311,7 @@ table.mcpx-cat-tbl td{padding:6px 10px;border-bottom:1px solid var(--border)}
 
       <div class="panel">
         <div class="panel-header">
-          <span class="panel-title">Live Request Log</span>
+          <span class="panel-title">Live traffic</span>
           <div style="display:flex;align-items:center;gap:8px">
             <span class="topbar-meta" id="log-count">0 entries</span>
             <button class="btn ghost sm" data-click="exportLogs" data-arg="csv"><svg class="ico" aria-hidden="true"><use href="#i-download"/></svg> CSV</button>
@@ -1424,7 +1436,7 @@ table.mcpx-cat-tbl td{padding:6px 10px;border-bottom:1px solid var(--border)}
             </div>
             <div style="display:flex;gap:6px">
               <button class="btn" data-click="saveBlocklistFeed">Add / Update Feed</button>
-              <button class="btn ghost" data-click="syncBlocklistFeed">Sync All Now</button>
+              <button class="btn ghost" data-click="syncBlocklistFeed">Refresh All Now</button>
             </div>
           </div>
           <div id="s-bl-feed-list" style="margin-bottom:8px"></div>
@@ -1607,7 +1619,7 @@ table.mcpx-cat-tbl td{padding:6px 10px;border-bottom:1px solid var(--border)}
           <div id="sec-yara-warnings" style="display:none;background:rgba(234,179,8,.1);border-left:3px solid var(--yellow);padding:8px 12px;border-radius:6px;margin-bottom:14px;font-size:.78rem;color:var(--yellow)"></div>
 
           <div style="display:flex;gap:10px;flex-wrap:wrap">
-            <button class="btn ghost sm" data-click="syncThreatFeeds"><svg class="ico" aria-hidden="true"><use href="#i-refresh"/></svg> Sync Feeds Now</button>
+            <button class="btn ghost sm" data-click="syncThreatFeeds"><svg class="ico" aria-hidden="true"><use href="#i-refresh"/></svg> Refresh Feeds Now</button>
             <button class="btn ghost sm" data-click="reloadYARA"><svg class="ico" aria-hidden="true"><use href="#i-refresh"/></svg> Reload YARA Rules</button>
           </div>
           <div id="sec-scan-action-status" style="display:none;margin-top:10px;font-size:.8rem"></div>
@@ -2544,6 +2556,10 @@ Firefox (all platforms):
               <span class="info-key">Process Log I/O Backpressure</span>
               <span class="info-val" id="s-process-log-backpressure">-</span>
             </div>
+            <div class="info-item" title="Client-supplied X-Request-Id / Traceparent headers that were replaced with a generated value because they were over-long or carried bytes that must not reach a log line (control characters, whitespace). The request itself is never refused - only the correlation id is Culvert's instead of the client's. Sustained growth means a source is attempting log forgery or trying to flood the process log through the proxy data plane.">
+              <span class="info-key">Tracing Headers Replaced</span>
+              <span class="info-val" id="s-tracing-header-rejected">-</span>
+            </div>
           </div>
         </div>
 
@@ -2552,7 +2568,7 @@ Firefox (all platforms):
           <div class="panel-body">
             <div class="form-group">
               <label class="form-label">Username</label>
-              <input type="text" class="input" style="width:100%" id="s-user" placeholder="Leave empty to disable auth">
+              <input type="text" class="input" style="width:100%" id="s-user" placeholder="Username (required)">
             </div>
             <div class="form-group">
               <label class="form-label">Password</label>
@@ -2560,6 +2576,9 @@ Firefox (all platforms):
             </div>
             <button class="btn" data-click="saveSettings">Save Credentials</button>
             <p style="font-size:.72rem;color:var(--muted);margin-top:10px;">
+              A username and a password meeting the complexity policy are both required.
+              To run unmatched traffic without credentials, set
+              <strong>Default authentication behavior</strong> to Exempt instead.
               Changes apply immediately without restart.
             </p>
           </div>
@@ -3265,6 +3284,10 @@ Firefox (all platforms):
           Default Action
         </span>
         First matching policy rule wins. Blocklist and threat feed blocks happen before policy evaluation.
+      </div>
+
+      <div id="pol-persist-warning" class="banner crit" style="display:none" role="alert">
+        <svg class="ico" aria-hidden="true"><use href="#i-alert-triangle"/></svg> <strong>Not persisted:</strong> access rules are stored in memory only and will be <strong>lost on restart or update</strong>. Start Culvert with <code>-policy /data/policy.json</code> (or set <code>proxy.policy_file</code> in config.yaml) to persist them.
       </div>
 
       <!-- Rule Table -->
@@ -4476,7 +4499,7 @@ Firefox (all platforms):
         </div>
       </div>
       <div class="panel" style="margin-top:16px">
-        <div class="panel-header"><span class="panel-title">OCSP / CRL Revocation</span></div>
+        <div class="panel-header"><span class="panel-title">OCSP revocation</span></div>
         <div style="padding:16px;display:flex;align-items:center;gap:16px;font-size:.85rem;flex-wrap:wrap">
           <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
             <input type="checkbox" id="ocsp-toggle" data-change="toggleOCSP"> Enable OCSP checking
@@ -5197,13 +5220,30 @@ Firefox (all platforms):
           </div>
 
           <div>
-            <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;flex-wrap:wrap">
               <span style="font-weight:600">Backups</span>
               <button class="btn ghost sm" data-click="loadBackups" title="Re-check the backup archive directory">
                 <svg class="ico" aria-hidden="true"><use href="#i-refresh"/></svg> Refresh
               </button>
+              <button class="btn sm" data-click="backupNowOpen" data-min-role="admin" title="Create a backup now, without SSH">
+                <svg class="ico" aria-hidden="true"><use href="#i-save"/></svg> Backup Now
+              </button>
             </div>
             <p class="hint">Archive directory scanned by the maintenance agent - the same listing <code>--list-backups</code> produces, without SSH.</p>
+            <div id="support-backup-trigger" style="display:none;margin:8px 0;padding:10px;border:1px solid var(--border);border-radius:8px;background:var(--surface)">
+              <label style="font-size:.82rem;display:flex;align-items:center;gap:8px">
+                <input type="checkbox" id="backup-now-encrypt" data-change="backupNowEncryptToggle"> Encrypt this backup
+              </label>
+              <label id="backup-now-passlabel" style="font-size:.78rem;color:var(--muted);display:none;margin-top:6px">
+                Passphrase env var (must already be set on the maintenance-agent host)
+                <input id="backup-now-passvar" placeholder="CULVERT_BACKUP_PASSPHRASE" style="width:100%;margin-top:4px;padding:6px 8px;font-size:.85rem;background:var(--surface);border:1px solid var(--border);border-radius:6px;color:var(--text)">
+              </label>
+              <div style="display:flex;gap:8px;margin-top:8px">
+                <button class="btn primary sm" id="backup-now-submit" data-click="backupNowSubmit">Start Backup</button>
+                <button class="btn ghost sm" data-click="backupNowCancel">Cancel</button>
+              </div>
+            </div>
+            <div id="support-backup-progress" style="display:none;margin:8px 0" role="status" aria-live="polite"></div>
             <div id="support-backups" role="status" aria-live="polite"><p class="hint">Loading…</p></div>
           </div>
 
@@ -5513,6 +5553,9 @@ document.addEventListener('click', e => {
     case 'toggleTheme':       toggleTheme(); break;
     case 'toggleSidebar':     document.getElementById('sidebar').classList.toggle('open'); break;
     case 'doLogout':          doLogout(); break;
+    case 'openChangePasswordModal':  openChangePasswordModal(); break;
+    case 'closeChangePasswordModal': closeChangePasswordModal(); break;
+    case 'submitChangePassword':     submitChangePassword(); break;
     case 'switchView':        e.preventDefault(); switchView(arg); break;
     case 'dismissParent':     el.parentElement.parentElement.style.display='none'; break;
 
@@ -5824,7 +5867,10 @@ document.addEventListener('click', e => {
     // ── Release management (P1.6d-1) ──
     case 'loadReleases':           loadReleases(); break;
     case 'loadSupport':            loadSupport(); break;
-    case 'loadBackups':            loadBackups(); break;
+    case 'loadBackups':            loadBackups(); backupNowResumePoll(); break;
+    case 'backupNowOpen':          backupNowOpen(); break;
+    case 'backupNowCancel':        backupNowCancel(); break;
+    case 'backupNowSubmit':        backupNowSubmit(); break;
     case 'loadMaintAgentStatus':    loadMaintAgentStatus(); break;
     case 'supportCreateBundle':    supportCreateBundle(); break;
     case 'supportSetDebugLevel':   supportSetDebugLevel(); break;
@@ -5901,6 +5947,7 @@ document.addEventListener('change', e => {
     case 'releaseDispSelectRelease': if (el.value) document.getElementById('rel-disp-channel').value = ''; break;
     case 'releaseDispSelectChannel': if (el.value) document.getElementById('rel-disp-release').value = ''; break;
     case 'releaseDispToggleBackup':  document.getElementById('rel-disp-passlabel').style.display = el.checked ? '' : 'none'; break;
+    case 'backupNowEncryptToggle':   document.getElementById('backup-now-passlabel').style.display = el.checked ? '' : 'none'; break;
     case 'apOutcomeChanged':  apOutcomeChanged(); break;
     case 'yaraSettingCheckWarn': yaraSettingCheckWarn(); break;
     case 'toggleDecRedaction': toggleDecRedaction(); break;
@@ -6426,16 +6473,45 @@ function applySession(user, role) {
     const required = roleLevel[el.getAttribute('data-min-role')] || 0;
     el.style.display = myLevel >= required ? '' : 'none';
   });
+  // The Backup Now form is an open/closed dialog, not a role-gated control:
+  // it deliberately carries no data-min-role (the loop above would un-hide it
+  // before backupNowOpen sets its encrypted defaults). A session change
+  // always closes it; backupNowOpen and the server enforce admin.
+  const backupTrigger = document.getElementById('support-backup-trigger');
+  if (backupTrigger) backupTrigger.style.display = 'none';
 
-  // Logout button
+  // Logout button + self-service password change (any authenticated role —
+  // change-password-modal below hits /api/auth/change-password, viewer floor).
   document.getElementById('logout-btn').style.display = (user || role) ? '' : 'none';
+  document.getElementById('change-pw-btn').style.display = (user || role) ? '' : 'none';
+  // Revealing/hiding the session controls can add or remove a wrapped topbar
+  // row; re-measure so sticky bars stay below it even without ResizeObserver.
+  syncTopbarHeight();
 }
 
 function showLoginOverlay() {
+  // Every session-loss path (a 401 from ANY api() call, e.g. the 3 s
+  // dashboard tick, or an explicit logout) lands here, so the password
+  // dialog is dismissed centrally: typed passwords must never survive
+  // behind the overlay for whoever signs in next.
+  dismissChangePasswordModal();
   applySession('', '');
   const el = document.getElementById('login-overlay');
   if (el) { el.style.display = 'flex'; }
 }
+// The narrow-viewport topbar wraps onto extra rows, so sticky bars below it
+// (.reorder-bar) must offset by its measured height, not a fixed 52px.
+function syncTopbarHeight() {
+  const tb = document.querySelector('.topbar');
+  if (!tb) return;
+  document.documentElement.style.setProperty('--topbar-h', tb.offsetHeight + 'px');
+}
+document.addEventListener('DOMContentLoaded', function() {
+  syncTopbarHeight();
+  const tb = document.querySelector('.topbar');
+  if (tb && typeof ResizeObserver === 'function') new ResizeObserver(syncTopbarHeight).observe(tb);
+  else window.addEventListener('resize', syncTopbarHeight);
+});
 function hideLoginOverlay() {
   const el = document.getElementById('login-overlay');
   if (el) { el.style.display = 'none'; }
@@ -6444,6 +6520,93 @@ async function doLogout() {
   await fetch('/api/auth/logout', { method: 'POST' }).catch(() => {});
   applySession('', '');
   showLoginOverlay();
+}
+
+// ── Self-service password change ─────────────────────────────────────────
+// Every authenticated role (viewer/operator/admin) can rotate their own
+// password from POST /api/auth/change-password (server verifies the current
+// password and audits the change as "auth.password_change"). This is
+// distinct from the admin-only User Management "Edit User" flow above, which
+// lets an admin reset ANY user's password without knowing the old one — the
+// only prior GUI path, and one operators/viewers can never reach.
+function clearChangePasswordFields() {
+  document.getElementById('cp-current').value = '';
+  document.getElementById('cp-new').value = '';
+  document.getElementById('cp-confirm').value = '';
+  document.getElementById('cp-err').style.display = 'none';
+  document.getElementById('cp-err').textContent = '';
+}
+// _cpReqGen names the dialog instance a pending submit belongs to. Every open
+// and close advances it, so a request that completes after the dialog was
+// cancelled (or closed and reopened) cannot close, re-enable or write an error
+// into a dialog it no longer owns.
+let _cpReqGen = 0;
+function resetChangePasswordSaveBtn() {
+  const btn = document.getElementById('cp-save-btn');
+  btn.disabled = false; btn.textContent = 'Save';
+}
+function openChangePasswordModal() {
+  _cpReqGen++;
+  clearChangePasswordFields();
+  resetChangePasswordSaveBtn();
+  const modal = document.getElementById('change-password-modal');
+  modal.classList.add('open');
+  modalActivate(modal, '#cp-current', closeChangePasswordModal);
+}
+function dismissChangePasswordModal() {
+  const modal = document.getElementById('change-password-modal');
+  if (!modal || !modal.classList.contains('open')) return;
+  clearChangePasswordFields();
+  closeChangePasswordModal();
+}
+function closeChangePasswordModal() {
+  _cpReqGen++;
+  // Every close path (Cancel, Escape, success, session loss) clears the typed
+  // passwords so they never linger in the hidden DOM.
+  clearChangePasswordFields();
+  const modal = document.getElementById('change-password-modal');
+  modalDeactivate(modal);
+  modal.classList.remove('open');
+}
+function showChangePasswordErr(msg) {
+  const el = document.getElementById('cp-err');
+  el.textContent = msg;
+  el.style.display = 'block';
+}
+async function submitChangePassword() {
+  const current = document.getElementById('cp-current').value;
+  const next    = document.getElementById('cp-new').value;
+  const confirm = document.getElementById('cp-confirm').value;
+  if (!current || !next) return showChangePasswordErr('Current and new password are required.');
+  if (next.length < 8) return showChangePasswordErr('New password must be at least 8 characters.');
+  if (!meetsPasswordComplexity(next)) return showChangePasswordErr('Password must contain at least one uppercase letter, one lowercase letter, and one digit.');
+  if (next !== confirm) return showChangePasswordErr('New password and confirmation do not match.');
+
+  const btn = document.getElementById('cp-save-btn');
+  btn.disabled = true; btn.textContent = 'Saving…';
+  const gen = _cpReqGen;
+  try {
+    await api('/api/auth/change-password', {
+      method: 'POST',
+      body: { current_password: current, new_password: next }
+    });
+    // The change happened even if the dialog was dismissed meanwhile, so the
+    // user is always told; only the dialog it was sent from is closed.
+    toast('Password changed.');
+    if (gen === _cpReqGen) closeChangePasswordModal();
+  } catch (err) {
+    if (gen !== _cpReqGen) return; // dialog was dismissed/reopened: not ours
+    if (err && err.message === 'Unauthorized') {
+      // The session expired: api() has already raised the login overlay.
+      // Clear and close this dialog so the typed passwords are never left
+      // behind the overlay for whoever signs in next.
+      clearChangePasswordFields();
+      closeChangePasswordModal();
+    } else {
+      showChangePasswordErr(err.message || 'Password change failed.');
+    }
+  }
+  if (gen === _cpReqGen) resetChangePasswordSaveBtn();
 }
 
 // ── Users & Roles ────────────────────────────────────────────────────────
@@ -8370,6 +8533,16 @@ async function fetchStats() {
       splbp.textContent = pbp > 0 ? fmt(pbp) + ' lines delayed' : 'None';
       splbp.style.color = pbp > 0 ? 'var(--warn,#b8860b)' : '';
     }
+    // Replaced client tracing headers (SEC-REQID-1): the request still succeeds,
+    // so nothing else an admin can see changes when a source feeds the data
+    // plane hostile X-Request-Id / Traceparent values. Shown beside the log I/O
+    // rows because what it protects is the integrity of the process log.
+    const sthr = document.getElementById('s-tracing-header-rejected');
+    if (sthr) {
+      const thr = s.tracingHeaderRejected || 0;
+      sthr.textContent = thr > 0 ? fmt(thr) + ' replaced' : 'None';
+      sthr.style.color = thr > 0 ? 'var(--warn,#b8860b)' : '';
+    }
     // Oversized-username login attempts (CHAOS-63): each one is refused with a
     // plain 400 and otherwise leaves no trace an admin would see without a
     // metrics scraper or shell access to the process log. Surfacing the count
@@ -9625,15 +9798,15 @@ async function syncThreatFeeds() {
   const statusEl = document.getElementById('sec-scan-action-status');
   statusEl.style.display = 'block';
   statusEl.style.color = 'var(--muted)';
-  statusEl.textContent = 'Syncing threat feeds…';
+  statusEl.textContent = 'Refreshing threat feeds…';
   try {
     await api('/api/security-scan/feeds/sync', { method: 'POST' });
     statusEl.style.color = 'var(--green)';
-    statusEl.textContent = 'Sync complete.';
+    statusEl.textContent = 'Refresh complete.';
     loadSecScanStatus();
   } catch(e) {
     statusEl.style.color = 'var(--red)';
-    statusEl.textContent = 'Sync failed: ' + e.message;
+    statusEl.textContent = 'Refresh failed: ' + e.message;
   }
 }
 
@@ -10058,6 +10231,8 @@ async function fetchPolicy() {
       const dt = new Date(d.updatedAt);
       uBadge.textContent = 'updated ' + dt.toLocaleString();
     }
+    const persistWarn = document.getElementById('pol-persist-warning');
+    if (persistWarn) persistWarn.style.display = (d && d.persisted === false) ? '' : 'none';
     renderPolicy();
   } catch(e) { console.error(e); }
   // policy-draft (G2): refresh the commit-mode toggle + pending-changes bar.
@@ -11293,7 +11468,7 @@ async function fetchBlocklistFeed() {
         <td>${f.imported_count || 0}</td>
         <td>${f.attributed_count || 0}</td>
         <td class="text-right" style="white-space:nowrap">
-          <button class="btn ghost sm" style="font-size:.72rem" data-click="syncBlocklistFeed" data-arg="${escHtml(f.url)}">Sync</button>
+          <button class="btn ghost sm" style="font-size:.72rem" data-click="syncBlocklistFeed" data-arg="${escHtml(f.url)}">Refresh</button>
           <button class="btn ghost sm" style="font-size:.72rem" data-click="editBlocklistFeed" data-arg="${escHtml(f.url)}" data-arg2="${escHtml(f.interval)}">Edit</button>
           <button class="btn ghost sm" style="font-size:.72rem;color:var(--red)" data-click="deleteBlocklistFeed" data-arg="${escHtml(f.url)}" data-arg2="${f.attributed_count || 0}">Delete</button>
         </td>
@@ -11376,15 +11551,27 @@ async function syncBlocklistFeed(url) {
   try {
     const qs = url ? '?url=' + encodeURIComponent(url) : '';
     const d = await api('/api/blocklist/feed/sync' + qs, {method: 'POST'});
-    toast(`Sync complete - ${d.domains_synced} new domains imported`, 'success');
+    toast(`Refresh complete - ${d.domains_synced} new domains imported`, 'success');
     fetchBlocklistFeed();
     fetchBlocklist();
-  } catch(e) { toast('Error: ' + e.message, 'error'); }
+  } catch(e) {
+    // The server's error body is "sync failed: <cause>" (API text, unchanged);
+    // show it under the button's own verb instead of echoing the old prefix.
+    toast('Refresh failed: ' + String(e.message || '').trim().replace(/^sync failed:\s*/i, ''), 'error');
+  }
 }
 
 async function saveSettings() {
   const user = document.getElementById('s-user').value;
   const pass = document.getElementById('s-pass').value;
+  if (!user.trim()) {
+    toast('Username is required. To run unmatched traffic without credentials, set Default authentication behavior to Exempt.', 'error');
+    return;
+  }
+  if (!pass) {
+    toast('Password is required.', 'error');
+    return;
+  }
   try {
     await api('/api/settings', {
       method: 'POST',
@@ -15879,6 +16066,137 @@ function renderBackups(data) {
     '</tr>').join('') + '</tbody></table></div>';
 }
 
+// On-demand backup trigger (Enterprise Product Experience finding): the
+// maintenance agent already implements POST /v1/backups end to end
+// (validation, idempotency, exclusive maintenance-lock serialization against
+// a concurrent backup/restore/upgrade); this is the GUI's trigger + poll over
+// the CP pass-through in backups_api.go. Previously an on-demand backup - a
+// routine, no-downtime operation per D1.5 - needed
+// `docker compose --profile cli run --rm cli --backup ...` over SSH.
+let backupNowPollTimer = null;
+// The op a give-up left unresolved: the agent's operation_timeout (default
+// 30m) can outlast the poll deadline, so Refresh resumes it rather than the
+// terminal outcome being lost.
+let backupNowPendingOp = null;
+// True from backupNowPollStart until the poll gives up or sees a terminal
+// state (the first poll runs before any timer exists, so the timer alone
+// cannot say whether a poll is live).
+let backupNowPolling = false;
+// Advanced by every backupNowPollStart so a superseded poll loop (a resume or
+// a new backup started while a request was in flight) stops at its next step
+// instead of reporting on, or clearing the state of, the op that replaced it.
+let backupNowPollGen = 0;
+function backupNowResumePoll() {
+  if (backupNowPendingOp && !backupNowPolling) {
+    backupNowPollStart(backupNowPendingOp.opId, backupNowPendingOp.filename);
+  }
+}
+
+function backupNowOpen() {
+  if (uiRole !== 'admin') { toast('Admin role required', 'error'); return; }
+  // Encrypted is the production default (D1.5 invariant 6): the archive is
+  // a byte-faithful export of credentials, private keys and TOTP secrets, so
+  // the dialog opens encrypted with the conventional passphrase variable the
+  // agent is allowed to read; opting out requires an explicit confirmation.
+  document.getElementById('backup-now-encrypt').checked = true;
+  document.getElementById('backup-now-passvar').value = 'CULVERT_BACKUP_PASSPHRASE';
+  document.getElementById('backup-now-passlabel').style.display = '';
+  document.getElementById('support-backup-trigger').style.display = '';
+}
+function backupNowCancel() {
+  document.getElementById('support-backup-trigger').style.display = 'none';
+}
+
+async function backupNowSubmit() {
+  const encrypt = document.getElementById('backup-now-encrypt').checked;
+  const passphraseEnvVar = document.getElementById('backup-now-passvar').value.trim();
+  if (encrypt && !passphraseEnvVar) {
+    toast('Encrypting requires a passphrase env var name (or uncheck Encrypt)', 'error');
+    return;
+  }
+  if (!encrypt && !await confirmAction('Unencrypted Backup',
+      'Unencrypted backups are for dev/lab only: the archive contains credentials, private keys, session material and TOTP secrets in plaintext and must not leave the host. Continue without encryption?', 'Back Up Unencrypted')) return;
+  const body = { encrypt };
+  if (encrypt) body.passphraseEnvVar = passphraseEnvVar;
+  const btn = document.getElementById('backup-now-submit');
+  btn.disabled = true;
+  try {
+    const r = await apiFetch('/api/backups', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    if (!r.ok) { toast('Backup failed to start: ' + (await r.text()), 'error'); return; }
+    const payload = await r.json();
+    backupNowCancel();
+    toast('Backup started (' + payload.filename + ')', 'success');
+    backupNowPollStart(payload.opId, payload.filename);
+  } catch (err) {
+    toast('Backup failed to start: ' + err.message, 'error');
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+// backupNowPollStart polls GET /api/backups/operations/{id} every 3s until
+// the op reaches a terminal state (or 10 minutes elapse), then refreshes the
+// archive listing so the new backup shows up without a manual Refresh click.
+// A give-up keeps the op id (backupNowPendingOp) and Refresh resumes it.
+function backupNowPollStart(opId, filename) {
+  const el = document.getElementById('support-backup-progress');
+  if (!opId || !el) return;
+  if (backupNowPollTimer) clearTimeout(backupNowPollTimer);
+  backupNowPendingOp = { opId, filename };
+  backupNowPolling = true;
+  const gen = ++backupNowPollGen;
+  // Wall-clock deadline, checked on EVERY reschedule (success and error
+  // alike): a status endpoint that keeps failing must not keep an open
+  // browser polling forever.
+  const deadline = Date.now() + 600000;
+  // lastSeenRunning: only an observed non-terminal state justifies "still
+  // running"; if no status check ever succeeded the outcome is unknown.
+  let lastSeenRunning = false;
+  const giveUp = () => {
+    el.innerHTML += lastSeenRunning
+      ? '<p class="hint">Still running - Refresh resumes the status check.</p>'
+      : '<p class="hint">Status unknown (the status check kept failing) - Refresh resumes the status check.</p>';
+    backupNowPollTimer = null;
+    backupNowPolling = false;
+  };
+  const poll = async () => {
+    el.style.display = '';
+    let op;
+    try {
+      op = await api('/api/backups/operations/' + encodeURIComponent(opId));
+    } catch (err) {
+      if (gen !== backupNowPollGen) return;
+      el.innerHTML = '<p class="hint">Backing up ' + escHtml(filename || '') + '… (status check failed: ' + escHtml(err.message) + ')</p>';
+      if (Date.now() >= deadline) { giveUp(); return; }
+      backupNowPollTimer = setTimeout(poll, 5000);
+      return;
+    }
+    if (gen !== backupNowPollGen) return;
+    if (op.state === 'succeeded') {
+      el.innerHTML = '<p class="hint" style="color:var(--green)">Backup ' + escHtml(filename || '') + ' completed.</p>';
+      backupNowPendingOp = null;
+      backupNowPollTimer = null;
+      backupNowPolling = false;
+      loadBackups();
+      return;
+    }
+    if (op.state === 'failed' || op.state === 'cancelled') {
+      el.innerHTML = '<p class="hint" style="color:var(--red)">Backup ' + escHtml(filename || '') + ' ' + escHtml(op.state) +
+        (op.failure_reason ? ': ' + escHtml(op.failure_reason) : '') + '.</p>';
+      backupNowPendingOp = null;
+      backupNowPollTimer = null;
+      backupNowPolling = false;
+      loadBackups();
+      return;
+    }
+    lastSeenRunning = true;
+    el.innerHTML = '<p class="hint">Backing up ' + escHtml(filename || '') + '… (' + escHtml(op.state || 'running') + ')</p>';
+    if (Date.now() >= deadline) { giveUp(); return; }
+    backupNowPollTimer = setTimeout(poll, 3000);
+  };
+  poll();
+}
+
 // Maintenance-agent health visibility: read-only pass-through of the
 // CP-local maintenance agent's GET /v1/status (see maint_agent_status_api.go).
 // Answers "is my host-root agent healthy, what version, is the compose stack
@@ -17177,7 +17495,19 @@ function renderReleaseTrustBadge(d) {
   if (schemesEl) {
     const schemeLabels = { ed25519: 'ed25519 keys', sigstore: 'Sigstore identity', 'ed25519+sigstore': 'ed25519 keys + Sigstore identity', none: 'none' };
     const raw = d && d.trust_schemes;
-    schemesEl.textContent = raw ? ('via ' + (schemeLabels[raw] || raw)) : '';
+    let text = raw ? ('via ' + (schemeLabels[raw] || raw)) : '';
+    // Positive confirmation of which Sigstore trust material is actually
+    // enforcing (baked default vs an operator's CULVERT_RELEASE_SIGSTORE_*
+    // override) - the counterpart to the sigstore_warn banner below, which
+    // only fires when an override is BROKEN. A correctly-configured override
+    // otherwise looks identical to the baked default on this badge.
+    if (raw && raw.indexOf('sigstore') !== -1) {
+      const custom = [];
+      if (d.sigstore_identity_source === 'override') custom.push('custom identity');
+      if (d.sigstore_root_source === 'override') custom.push('custom root');
+      if (custom.length) text += ' (' + custom.join(', ') + ')';
+    }
+    schemesEl.textContent = text;
   }
   if (!warn) return;
   const lines = [];
@@ -19435,6 +19765,31 @@ function resetBlockPage() {
   </div>
 </div>
 
+<!-- ── Self-service "Change my password" modal (topbar, any role) ──────── -->
+<div id="change-password-modal" role="dialog" aria-modal="true" aria-labelledby="cp-title" style="position:fixed;inset:0;background:rgba(0,0,0,.65);z-index:300;align-items:center;justify-content:center">
+  <div class="setup-card" style="width:360px;max-width:94vw;max-height:calc(100vh - 32px);overflow-y:auto">
+    <h2 id="cp-title" style="font-size:1.15rem;margin-bottom:4px">Change Password</h2>
+    <p style="font-size:.82rem;color:var(--muted);margin-bottom:18px">Update the password for your own account.</p>
+    <div class="form-group">
+      <label class="form-label" for="cp-current">Current password</label>
+      <input id="cp-current" type="password" class="input" style="width:100%" autocomplete="current-password">
+    </div>
+    <div class="form-group">
+      <label class="form-label" for="cp-new">New password <span style="color:var(--muted)">(min 8 chars, incl. uppercase, lowercase &amp; a digit)</span></label>
+      <input id="cp-new" type="password" class="input" style="width:100%" autocomplete="new-password">
+    </div>
+    <div class="form-group">
+      <label class="form-label" for="cp-confirm">Confirm new password</label>
+      <input id="cp-confirm" type="password" class="input" style="width:100%" autocomplete="new-password">
+    </div>
+    <div class="setup-err" id="cp-err" role="alert" aria-live="assertive" style="margin-bottom:10px;display:none"></div>
+    <div style="display:flex;gap:10px;margin-top:6px">
+      <button class="btn" id="cp-save-btn" data-click="submitChangePassword">Save</button>
+      <button class="btn ghost" data-click="closeChangePasswordModal">Cancel</button>
+    </div>
+  </div>
+</div>
+
 <!-- ── PAC DIRECT-exception governance modal (PEI P2) ───────────────────── -->
 <div id="pac-gov-modal" style="position:fixed;inset:0;background:rgba(0,0,0,.65);z-index:300;align-items:center;justify-content:center">
   <div class="setup-card" style="width:440px;max-width:94vw">
@@ -19494,6 +19849,8 @@ function resetBlockPage() {
 .role-badge-viewer   { background:rgba(156,163,175,.15);color:#9ca3af; }
 #user-modal { display:none }
 #user-modal.open { display:flex }
+#change-password-modal { display:none }
+#change-password-modal.open { display:flex }
 .sched-day-lbl {
   display:inline-flex;align-items:center;gap:4px;cursor:pointer;
   padding:3px 8px;border-radius:6px;font-size:.78rem;border:1px solid var(--border);
@@ -19520,8 +19877,10 @@ function resetBlockPage() {
    warn tokens stay single-sourced; this only adds the sticky/flex deltas.
    top offset ≈ the sticky .topbar's height (z-index 50, same #main scroller)
    - top:0 would slide the bar underneath it exactly when the rulebase is
-   long enough to scroll. */
-.reorder-bar { position:sticky;top:52px;z-index:40;display:flex;gap:10px;align-items:center;
+   long enough to scroll. --topbar-h tracks the topbar's ACTUAL height
+   (syncTopbarHeight) because the topbar wraps onto several rows on narrow
+   viewports; 52px is only the single-row fallback. */
+.reorder-bar { position:sticky;top:var(--topbar-h, 52px);z-index:40;display:flex;gap:10px;align-items:center;
   margin:8px 16px 0;font-size:.82rem; }
 .where-used { list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:6px; }
 .where-used-item { display:flex;align-items:center;gap:8px;padding:8px 10px;border:1px solid var(--border);
