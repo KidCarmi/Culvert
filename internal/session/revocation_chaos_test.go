@@ -992,3 +992,96 @@ func TestSwapForTest_IsolatesTheUnreadFence(t *testing.T) {
 		t.Errorf("restore() did not put the fence back: %v", err)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// AU-38: the write fence's exported primitives, pinned IN THEIR OWN PACKAGE.
+//
+// IsWriteFenced, FenceWritesUnquarantined and ErrRevocationsUnquarantined are
+// exported security primitives of internal/session, and every behavioural gate
+// for them lives in package main — so `go tool cover` credited them 0% here
+// and the coverage floor over "/session.go:" measured the mean of two files
+// that no test in EITHER package pins directly. The SEC-TOTP-1 precedent is
+// the rule being applied: an exported primitive is pinned where it lives,
+// because cross-package exercise does not count.
+//
+// What these assert is the property AU-38 rests on: ONE predicate answers for
+// BOTH refusal reasons, so a call site that learned only one of them cannot
+// charge the other to the failing-volume counter.
+// ---------------------------------------------------------------------------
+
+func TestIsWriteFenced_AnswersForBothReasonsAndNothingElse(t *testing.T) {
+	fenced := []struct {
+		name string
+		err  error
+	}{
+		{"unread", ErrRevocationsUnread},
+		{"unquarantined", ErrRevocationsUnquarantined},
+		// Call sites receive WRAPPED errors, so the predicate has to see
+		// through fmt.Errorf — a == comparison would pass the bare cases
+		// above and silently fail every real one.
+		{"wrapped unread", fmt.Errorf("save revocations: %w", ErrRevocationsUnread)},
+		{"wrapped unquarantined", fmt.Errorf("save revocations: %w", ErrRevocationsUnquarantined)},
+	}
+	for _, tc := range fenced {
+		if !IsWriteFenced(tc.err) {
+			t.Errorf("%s: IsWriteFenced = false, so this refusal reaches a call site as an ordinary persistence failure", tc.name)
+		}
+	}
+
+	notFenced := []struct {
+		name string
+		err  error
+	}{
+		{"nil", nil},
+		{"corrupt", ErrRevocationsCorrupt},
+		{"permission", os.ErrPermission},
+		{"unrelated", errors.New("disk full")},
+	}
+	for _, tc := range notFenced {
+		if IsWriteFenced(tc.err) {
+			t.Errorf("%s: IsWriteFenced = true, so a genuine write failure would be reported as a refusal and never counted", tc.name)
+		}
+	}
+
+	// The two reasons must stay DISTINCT objects: they select different
+	// operator remedies (a permission/mount repair vs freeing the path by
+	// hand), so collapsing them into one sentinel tells one of them the
+	// wrong thing — which is the AU-36 defect one layer down.
+	if errors.Is(ErrRevocationsUnread, ErrRevocationsUnquarantined) ||
+		errors.Is(ErrRevocationsUnquarantined, ErrRevocationsUnread) {
+		t.Error("the two refusal reasons are interchangeable, so the contract row cannot tell them apart")
+	}
+}
+
+func TestFenceWritesUnquarantined_RefusesWithItsOwnReason(t *testing.T) {
+	dir := t.TempDir()
+	rl := NewRevocationList()
+
+	prevPath := RevocationsPath()
+	t.Cleanup(func() { SetRevocationsPath(prevPath) })
+	SetRevocationsPath(filepath.Join(dir, "revocations.json"))
+
+	// CONTROL: an unfenced list persists. The cheapest way to pass the
+	// assertion below is to refuse every save, which would delete the
+	// durability this whole plane exists to provide.
+	rl.Revoke("before", time.Now().Add(time.Hour))
+	if err := rl.SaveRevocations(); err != nil {
+		t.Fatalf("control: an unfenced list must persist: %v", err)
+	}
+
+	rl.FenceWritesUnquarantined()
+
+	err := rl.SaveRevocations()
+	if !errors.Is(err, ErrRevocationsUnquarantined) {
+		t.Fatalf("SaveRevocations err = %v, want ErrRevocationsUnquarantined", err)
+	}
+	// It must NOT masquerade as the read-failure reason: that remedy tells
+	// the operator to repair a permission or mount, which does not free a
+	// path the quarantine could not rename.
+	if errors.Is(err, ErrRevocationsUnread) {
+		t.Error("the failed-quarantine refusal reports itself as an unread file, so the operator gets the wrong remedy")
+	}
+	if !IsWriteFenced(err) {
+		t.Error("the shared predicate does not recognise its own reason")
+	}
+}
