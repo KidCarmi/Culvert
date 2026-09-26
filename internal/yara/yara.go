@@ -591,6 +591,81 @@ var yaraMatchFn = func(re *regexp.Regexp, data []byte) bool { return re.Match(da
 // signal, not only a liveness one.
 func MatchPanics() int64 { return yaraMatchPanics.Load() }
 
+// The BOUNDED reason classes a yara_degraded alert may carry in its Detail. The alert store dedups on "event:detail" within a 30 s window
+// (internal/alerts, Q17/CHAOS-27), so a Detail that embeds the live in-flight
+// COUNT is a distinct key on essentially every call — not occasionally, but BY
+// CONSTRUCTION, since the number the message reports is the one that changes.
+// Dedup could therefore not suppress this producer at all, and because
+// matchRegex evaluates saturation once per STRING DEFINITION per scanned body,
+// one saturated scan fanned one dispatch out per regex. Each distinct key also
+// lands in the 500-entry retry queue when the delivery semaphore is full —
+// where a scanner's own degradation evicts real threat_detected alerts
+// (register rows WK-12/RS-5; the same defect internal/secscan's remoteScanFail
+// documents and fixed for the sidecar leg).
+//
+// The magnitude belongs to the counter and the cause to the rate-limited log;
+// the alert carries only the class.
+const (
+	yaraReasonSaturated   = "saturated"
+	yaraReasonApproaching = "approaching_saturation"
+)
+
+// yaraDegradedLogInterval bounds each degraded log line. matchRegex runs per
+// string definition per scanned body, so an unbounded line here is a
+// request-path amplifier in its own right: internal/logsink BLOCKS a producer
+// on a full queue, so logging every skipped match adds latency to every
+// proxied response precisely while the engine is already saturated (the
+// CHAOS-54 shape, one subsystem over).
+const yaraDegradedLogInterval = 30 * time.Second
+
+var (
+	// yaraSaturationSkips counts matches skipped at the in-flight cap. It
+	// carries the magnitude the rate-limited log no longer repeats, and is
+	// surfaced on the scan-status surface beside yara_match_panics.
+	yaraSaturationSkips atomic.Int64
+	// Saturation and approaching-saturation keep SEPARATE rate gates: they are
+	// different states pointing at different operator actions, and a shared
+	// gate would let the milder one swallow the more urgent (storage_health.go's
+	// "two failures must not share a rate gate" rule).
+	lastYARASaturatedLog   atomic.Int64
+	lastYARAApproachingLog atomic.Int64
+)
+
+// SaturationSkips reports how many regex matches were skipped because the
+// in-flight cap was reached.
+func SaturationSkips() int64 { return yaraSaturationSkips.Load() }
+
+// yaraDegradedLogAllowed reports whether this degraded line may be emitted,
+// at most one per yaraDegradedLogInterval per gate.
+func yaraDegradedLogAllowed(last *atomic.Int64) bool {
+	now := time.Now().UnixNano()
+	prev := last.Load()
+	if prev != 0 && now-prev < int64(yaraDegradedLogInterval) {
+		return false
+	}
+	return last.CompareAndSwap(prev, now)
+}
+
+// fireYARADegraded dispatches one bounded-class yara_degraded alert.
+//
+// The HasSubscriber gate is the contract package main's fireDNSFailureAlert
+// documents and internal/secscan's remoteScanFail already applies to the other
+// scanner producer whose rate is set by a fault rather than by the operator:
+// in the default posture (no webhooks configured) it removes a goroutine, a
+// payload build, an RFC3339 format and a round trip through the process-wide
+// dedup mutex from every regex match of a node that is already degraded. The
+// seam reports true when no probe is installed, so a missing wire-up can never
+// silence a real alert.
+func fireYARADegraded(reason string) {
+	if !GetAlertDegraded() || !alerts.HasSubscriber("yara_degraded") {
+		return
+	}
+	go alerts.Fire("yara_degraded", alerts.Payload{
+		Source: "yara",
+		Detail: reason,
+	})
+}
+
 // yaraSaturationCheck returns (saturated, result). When saturated is true, the
 // caller must return result immediately without attempting the regex match.
 // Posture is controlled by yaraOnSaturationVar: fail_closed returns true (block),
@@ -600,13 +675,11 @@ func yaraSaturationCheck(inflight int64) (saturated, result bool) {
 	if inflight < limit {
 		return false, false
 	}
-	obs.Warnf("YARA: regex skipped: too many in-flight goroutines (%d)", inflight)
-	if GetAlertDegraded() {
-		go alerts.Fire("yara_degraded", alerts.Payload{
-			Source: "yara",
-			Detail: fmt.Sprintf("regex skipped: inflight=%d max=%d — YARA engine saturated", inflight, limit),
-		})
+	skips := yaraSaturationSkips.Add(1)
+	if yaraDegradedLogAllowed(&lastYARASaturatedLog) {
+		obs.Warnf("YARA: regex skipped: too many in-flight goroutines (%d/%d); skipped total %d", inflight, limit, skips)
 	}
+	fireYARADegraded(yaraReasonSaturated)
 	return true, GetOnSaturation() != FailOpenWithAlert
 }
 
@@ -618,10 +691,10 @@ func yaraDegradedCheck(inflight int64) {
 	}
 	limit := GetMaxInflight()
 	if inflight >= (limit*80)/100 {
-		go alerts.Fire("yara_degraded", alerts.Payload{
-			Source: "yara",
-			Detail: fmt.Sprintf("inflight=%d/%d — approaching YARA saturation", inflight, limit),
-		})
+		if yaraDegradedLogAllowed(&lastYARAApproachingLog) {
+			obs.Warnf("YARA: approaching saturation: %d of %d in-flight regex goroutines", inflight, limit)
+		}
+		fireYARADegraded(yaraReasonApproaching)
 	}
 }
 
