@@ -5220,13 +5220,30 @@ Firefox (all platforms):
           </div>
 
           <div>
-            <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;flex-wrap:wrap">
               <span style="font-weight:600">Backups</span>
               <button class="btn ghost sm" data-click="loadBackups" title="Re-check the backup archive directory">
                 <svg class="ico" aria-hidden="true"><use href="#i-refresh"/></svg> Refresh
               </button>
+              <button class="btn sm" data-click="backupNowOpen" data-min-role="admin" title="Create a backup now, without SSH">
+                <svg class="ico" aria-hidden="true"><use href="#i-save"/></svg> Backup Now
+              </button>
             </div>
             <p class="hint">Archive directory scanned by the maintenance agent - the same listing <code>--list-backups</code> produces, without SSH.</p>
+            <div id="support-backup-trigger" style="display:none;margin:8px 0;padding:10px;border:1px solid var(--border);border-radius:8px;background:var(--surface)">
+              <label style="font-size:.82rem;display:flex;align-items:center;gap:8px">
+                <input type="checkbox" id="backup-now-encrypt" data-change="backupNowEncryptToggle"> Encrypt this backup
+              </label>
+              <label id="backup-now-passlabel" style="font-size:.78rem;color:var(--muted);display:none;margin-top:6px">
+                Passphrase env var (must already be set on the maintenance-agent host)
+                <input id="backup-now-passvar" placeholder="CULVERT_BACKUP_PASSPHRASE" style="width:100%;margin-top:4px;padding:6px 8px;font-size:.85rem;background:var(--surface);border:1px solid var(--border);border-radius:6px;color:var(--text)">
+              </label>
+              <div style="display:flex;gap:8px;margin-top:8px">
+                <button class="btn primary sm" id="backup-now-submit" data-click="backupNowSubmit">Start Backup</button>
+                <button class="btn ghost sm" data-click="backupNowCancel">Cancel</button>
+              </div>
+            </div>
+            <div id="support-backup-progress" style="display:none;margin:8px 0" role="status" aria-live="polite"></div>
             <div id="support-backups" role="status" aria-live="polite"><p class="hint">Loading…</p></div>
           </div>
 
@@ -5850,7 +5867,10 @@ document.addEventListener('click', e => {
     // ── Release management (P1.6d-1) ──
     case 'loadReleases':           loadReleases(); break;
     case 'loadSupport':            loadSupport(); break;
-    case 'loadBackups':            loadBackups(); break;
+    case 'loadBackups':            loadBackups(); backupNowResumePoll(); break;
+    case 'backupNowOpen':          backupNowOpen(); break;
+    case 'backupNowCancel':        backupNowCancel(); break;
+    case 'backupNowSubmit':        backupNowSubmit(); break;
     case 'loadMaintAgentStatus':    loadMaintAgentStatus(); break;
     case 'supportCreateBundle':    supportCreateBundle(); break;
     case 'supportSetDebugLevel':   supportSetDebugLevel(); break;
@@ -5927,6 +5947,7 @@ document.addEventListener('change', e => {
     case 'releaseDispSelectRelease': if (el.value) document.getElementById('rel-disp-channel').value = ''; break;
     case 'releaseDispSelectChannel': if (el.value) document.getElementById('rel-disp-release').value = ''; break;
     case 'releaseDispToggleBackup':  document.getElementById('rel-disp-passlabel').style.display = el.checked ? '' : 'none'; break;
+    case 'backupNowEncryptToggle':   document.getElementById('backup-now-passlabel').style.display = el.checked ? '' : 'none'; break;
     case 'apOutcomeChanged':  apOutcomeChanged(); break;
     case 'yaraSettingCheckWarn': yaraSettingCheckWarn(); break;
     case 'toggleDecRedaction': toggleDecRedaction(); break;
@@ -6452,6 +6473,12 @@ function applySession(user, role) {
     const required = roleLevel[el.getAttribute('data-min-role')] || 0;
     el.style.display = myLevel >= required ? '' : 'none';
   });
+  // The Backup Now form is an open/closed dialog, not a role-gated control:
+  // it deliberately carries no data-min-role (the loop above would un-hide it
+  // before backupNowOpen sets its encrypted defaults). A session change
+  // always closes it; backupNowOpen and the server enforce admin.
+  const backupTrigger = document.getElementById('support-backup-trigger');
+  if (backupTrigger) backupTrigger.style.display = 'none';
 
   // Logout button + self-service password change (any authenticated role —
   // change-password-modal below hits /api/auth/change-password, viewer floor).
@@ -16037,6 +16064,137 @@ function renderBackups(data) {
       '<td>' + (b.modified_at ? escHtml(timeAgo(new Date(b.modified_at))) : '-') + '</td>' +
       '<td>' + (b.encrypted ? 'yes' : 'no') + '</td>' +
     '</tr>').join('') + '</tbody></table></div>';
+}
+
+// On-demand backup trigger (Enterprise Product Experience finding): the
+// maintenance agent already implements POST /v1/backups end to end
+// (validation, idempotency, exclusive maintenance-lock serialization against
+// a concurrent backup/restore/upgrade); this is the GUI's trigger + poll over
+// the CP pass-through in backups_api.go. Previously an on-demand backup - a
+// routine, no-downtime operation per D1.5 - needed
+// `docker compose --profile cli run --rm cli --backup ...` over SSH.
+let backupNowPollTimer = null;
+// The op a give-up left unresolved: the agent's operation_timeout (default
+// 30m) can outlast the poll deadline, so Refresh resumes it rather than the
+// terminal outcome being lost.
+let backupNowPendingOp = null;
+// True from backupNowPollStart until the poll gives up or sees a terminal
+// state (the first poll runs before any timer exists, so the timer alone
+// cannot say whether a poll is live).
+let backupNowPolling = false;
+// Advanced by every backupNowPollStart so a superseded poll loop (a resume or
+// a new backup started while a request was in flight) stops at its next step
+// instead of reporting on, or clearing the state of, the op that replaced it.
+let backupNowPollGen = 0;
+function backupNowResumePoll() {
+  if (backupNowPendingOp && !backupNowPolling) {
+    backupNowPollStart(backupNowPendingOp.opId, backupNowPendingOp.filename);
+  }
+}
+
+function backupNowOpen() {
+  if (uiRole !== 'admin') { toast('Admin role required', 'error'); return; }
+  // Encrypted is the production default (D1.5 invariant 6): the archive is
+  // a byte-faithful export of credentials, private keys and TOTP secrets, so
+  // the dialog opens encrypted with the conventional passphrase variable the
+  // agent is allowed to read; opting out requires an explicit confirmation.
+  document.getElementById('backup-now-encrypt').checked = true;
+  document.getElementById('backup-now-passvar').value = 'CULVERT_BACKUP_PASSPHRASE';
+  document.getElementById('backup-now-passlabel').style.display = '';
+  document.getElementById('support-backup-trigger').style.display = '';
+}
+function backupNowCancel() {
+  document.getElementById('support-backup-trigger').style.display = 'none';
+}
+
+async function backupNowSubmit() {
+  const encrypt = document.getElementById('backup-now-encrypt').checked;
+  const passphraseEnvVar = document.getElementById('backup-now-passvar').value.trim();
+  if (encrypt && !passphraseEnvVar) {
+    toast('Encrypting requires a passphrase env var name (or uncheck Encrypt)', 'error');
+    return;
+  }
+  if (!encrypt && !await confirmAction('Unencrypted Backup',
+      'Unencrypted backups are for dev/lab only: the archive contains credentials, private keys, session material and TOTP secrets in plaintext and must not leave the host. Continue without encryption?', 'Back Up Unencrypted')) return;
+  const body = { encrypt };
+  if (encrypt) body.passphraseEnvVar = passphraseEnvVar;
+  const btn = document.getElementById('backup-now-submit');
+  btn.disabled = true;
+  try {
+    const r = await apiFetch('/api/backups', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    if (!r.ok) { toast('Backup failed to start: ' + (await r.text()), 'error'); return; }
+    const payload = await r.json();
+    backupNowCancel();
+    toast('Backup started (' + payload.filename + ')', 'success');
+    backupNowPollStart(payload.opId, payload.filename);
+  } catch (err) {
+    toast('Backup failed to start: ' + err.message, 'error');
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+// backupNowPollStart polls GET /api/backups/operations/{id} every 3s until
+// the op reaches a terminal state (or 10 minutes elapse), then refreshes the
+// archive listing so the new backup shows up without a manual Refresh click.
+// A give-up keeps the op id (backupNowPendingOp) and Refresh resumes it.
+function backupNowPollStart(opId, filename) {
+  const el = document.getElementById('support-backup-progress');
+  if (!opId || !el) return;
+  if (backupNowPollTimer) clearTimeout(backupNowPollTimer);
+  backupNowPendingOp = { opId, filename };
+  backupNowPolling = true;
+  const gen = ++backupNowPollGen;
+  // Wall-clock deadline, checked on EVERY reschedule (success and error
+  // alike): a status endpoint that keeps failing must not keep an open
+  // browser polling forever.
+  const deadline = Date.now() + 600000;
+  // lastSeenRunning: only an observed non-terminal state justifies "still
+  // running"; if no status check ever succeeded the outcome is unknown.
+  let lastSeenRunning = false;
+  const giveUp = () => {
+    el.innerHTML += lastSeenRunning
+      ? '<p class="hint">Still running - Refresh resumes the status check.</p>'
+      : '<p class="hint">Status unknown (the status check kept failing) - Refresh resumes the status check.</p>';
+    backupNowPollTimer = null;
+    backupNowPolling = false;
+  };
+  const poll = async () => {
+    el.style.display = '';
+    let op;
+    try {
+      op = await api('/api/backups/operations/' + encodeURIComponent(opId));
+    } catch (err) {
+      if (gen !== backupNowPollGen) return;
+      el.innerHTML = '<p class="hint">Backing up ' + escHtml(filename || '') + '… (status check failed: ' + escHtml(err.message) + ')</p>';
+      if (Date.now() >= deadline) { giveUp(); return; }
+      backupNowPollTimer = setTimeout(poll, 5000);
+      return;
+    }
+    if (gen !== backupNowPollGen) return;
+    if (op.state === 'succeeded') {
+      el.innerHTML = '<p class="hint" style="color:var(--green)">Backup ' + escHtml(filename || '') + ' completed.</p>';
+      backupNowPendingOp = null;
+      backupNowPollTimer = null;
+      backupNowPolling = false;
+      loadBackups();
+      return;
+    }
+    if (op.state === 'failed' || op.state === 'cancelled') {
+      el.innerHTML = '<p class="hint" style="color:var(--red)">Backup ' + escHtml(filename || '') + ' ' + escHtml(op.state) +
+        (op.failure_reason ? ': ' + escHtml(op.failure_reason) : '') + '.</p>';
+      backupNowPendingOp = null;
+      backupNowPollTimer = null;
+      backupNowPolling = false;
+      loadBackups();
+      return;
+    }
+    lastSeenRunning = true;
+    el.innerHTML = '<p class="hint">Backing up ' + escHtml(filename || '') + '… (' + escHtml(op.state || 'running') + ')</p>';
+    if (Date.now() >= deadline) { giveUp(); return; }
+    backupNowPollTimer = setTimeout(poll, 3000);
+  };
+  poll();
 }
 
 // Maintenance-agent health visibility: read-only pass-through of the
