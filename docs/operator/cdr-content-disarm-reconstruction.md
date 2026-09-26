@@ -107,7 +107,16 @@ persists. The actual client credential bundle — CA cert, client cert, and
 client key — lives under `<dataDir>/integrations/sluice/<name>/` and is
 loaded lazily when the pool dials, not by `loadCDR`'s unconditional stores;
 it is also deliberately excluded from `--backup` (see the Cluster note
-below and `key-at-rest.md`).
+below and `key-at-rest.md`). **`--backup` only ever retains
+`cdr_policies.json`** — `defaultBackupArtifacts` deliberately omits
+`cdr_instances.json` (a restored registry entry would be inert without its
+credential bundle and can't simply be re-enrolled under the same name,
+since enrollment refuses a name already present), `cdr_enroll_receipts.json`,
+the `<dataDir>/cdr_enabled` runtime sentinel, and the credential directory
+itself. A restore onto a fresh volume/host keeps your CDR policy rules but
+loses the enrollment registry, credential/revocation lineage, recovery
+receipts, and the runtime enable state — plan to re-enroll every instance
+and re-toggle CDR on after a restore.
 
 **Cluster note:** CDR is deliberately **not** part of the CP→DP
 `ConfigSnapshot`, the config-version rollback surface, or config
@@ -249,6 +258,22 @@ behavior** above; this is *not* governed by `fail_mode`.
 > name. A pool with two or more *closed* instances is unaffected, since
 > `Pick()`'s first `Allow()==true` match is usually one of those, not the
 > half-open one.
+>
+> **The runtime disable-then-enable recovery ALSO silently resets
+> `fail_mode`, the default profile/mode, the timeout, and the size/chunk
+> limits — not just the breaker.** `shutdownCDRClient()` replaces
+> `cdrActiveCfg` with a fully zeroed `CDRConfig{}`; the toggle's enable
+> path only ever flips `cdrActiveCfg.Enabled` back to `true` on that same
+> (now-zeroed) struct before calling `initCDRClient`, and `PUT
+> /api/cdr/config` accepts no field but `enabled` — there is no runtime way
+> to restore the other values. So if you're running `cdr.fail_mode:
+> closed` (or a non-default profile/timeout/size cap), the disable-then-
+> enable recovery above will leave CDR running **fail-open** with default
+> settings until the next restart, with nothing in the API response
+> calling that out. **If your deployment has fail_mode set to `closed` or
+> any non-default CDR setting, restart the process instead of using the
+> runtime toggle to recover a stuck half-open breaker** — a restart
+> re-resolves the full static config from disk and reapplies it correctly.
 
 Two observability tiers exist. `culvert_cdr_instance_healthy` and
 `culvert_cdr_queue_depth` (from the 15-second background health poll) are
