@@ -9646,3 +9646,107 @@ that was never the problem while leaving the real defect in place. An
 intermittent-looking failure is not evidence of a timing bug: here it was a
 deterministic source-scan violation that only LOOKED intermittent because
 different CI jobs sample different shards and some gate names are shells.
+
+### Round 14 — the observer's own cost, on the goroutine it said it never ran on
+
+**The finding (Codex P2).** A queue-full drop is charged by `tryEnqueue` on
+the CALLER's goroutine — the audit or request-log fan-out, i.e. a proxy
+request goroutine. `noteDrop` then invokes the delivery observer
+synchronously, and the observer ran the entire health plane inline:
+`syslogFeedState` takes the process-wide `syslogHealth.mu`, settles the
+retired writers under it (work **round 12 added**), and
+`commitSyslogDegradation` takes the same mutex a second time — all while the
+caller still holds `sendMu.RLock`. So during a sustained SIEM outage,
+concurrent proxy requests serialized in the health plane instead of recording
+an atomic drop and moving on.
+
+**Measured** (4-core Xeon @2.10GHz, medians of n=5, `noteSyslogDelivery(false)`
+against an armed feed):
+
+| | GOMAXPROCS=1 | GOMAXPROCS=4 |
+|---|---|---|
+| pre-fix | 149.0 ns/op | **267.6 ns/op** |
+| fixed | 169.2 ns/op | **73.6 ns/op** |
+
+Pre-fix, four cores delivered **0.56x** the throughput of one — adding cores
+SUBTRACTED throughput. That is the same signature `internal/connlimit`,
+`internal/threatfeed`, the IP filter and the latency histogram each record,
+arriving here on the request path at exactly the load the asynchronous writer
+exists to absorb. It was also self-reinforcing: the same per-line cost on the
+drain goroutine slows the drain, which fills the queue, which puts *more*
+request goroutines on this path.
+
+**Why this is this note's own argument failing at its edge.** The observer is
+deliberately asymmetric — called on every drop, never on an ordinary success
+— on the recorded reasoning that a success is a gateway's steady state and a
+callback there would tax the happy path to observe a fault that is not
+happening. That reasoning is correct about the steady state and silent about
+the OUTAGE, where drops become the steady state at the full request rate.
+
+**The fix is a CLAIM, not a lock.** `syslogEvalInFlight.CompareAndSwap`
+collapses concurrent evaluations to one; a caller that loses does **not**
+wait, it returns having done nothing, so there is no queue to serialize on.
+
+What makes a dropped evaluation safe is that `noteDrop` has already recorded
+everything durable about the loss — the counter, the timestamp and the reason,
+all atomics — *before* it notifies. The evaluation is a pure READER asking
+"should I page now?", and the answer is a function of that recorded state plus
+the clock. Skipping a read therefore loses nothing, and two independent
+drivers ask again regardless: every later drop, and the 30s watchdog. This is
+the plane's own *freshness is EVALUATED, never latched* property, used here to
+make the read **droppable**.
+
+Two properties keep it behaviour-preserving:
+
+- **A sequential caller is unaffected** — the previous call released the claim
+  — which is why all 54 existing gates hold with no change. Only CONCURRENT
+  drops collapse, and they ask a question whose answer cannot differ between
+  them: degradation needs a non-zero consecutive-failure count (the first drop
+  already established it) and an age threshold (a property of the clock).
+- **The release is DEFERRED, not trailing.** `notifyDelivery` contains a
+  panicking observer, so a trailing store would leave the claim held forever
+  and the feed could never page again.
+
+**Rejected: a rate floor on top of the claim.** The evaluation rate is already
+bounded by the DROP rate rather than by a spin loop, so at a realistic 10k
+losses/s the surviving work is ~0.16% of a core. A time floor would also have
+changed sequential semantics, which every existing gate rests on.
+
+**Recorded, not rounded away:** one core is at parity to ~13% for the added
+CAS pair (measured across runs, so partly box drift). A single-core gateway
+with one drop source is the shape a forward proxy is never in — the
+`internal/connlimit` `maphash` precedent.
+
+**The transferable lesson is the comment.** `noteSyslogDelivery`'s doc said
+*"It runs on the drain goroutine and must never call back into the Writer"*.
+The second clause is right; the first is **false for one of its two callers**,
+and is contradicted by this very section three hundred lines up, where the
+caller-goroutine charge is spelled out to explain a different defect. That
+false sentence is why the cost survived thirteen rounds of review of this same
+file: every reader who checked "is this expensive?" was told it ran on a
+goroutine where the answer did not matter.
+
+> **A comment asserting a goroutine context is a load-bearing claim. When a
+> second caller is added, the comment is part of the diff.**
+
+**Gates** (3, `syslog_health_chaos_test.go`):
+
+- `ConcurrentDropsCollapseToOneEvaluation` — the DEFECT gate, verified failing
+  against the reintroduced pre-fix shape (33 concurrent drops produced 33
+  evaluations, want 1). The injected clock is the instrument:
+  `syslogFeedState` reads it exactly once per evaluation on a feed that is not
+  degraded, so the call count IS the evaluation count. The first read blocks
+  (so the winner is still inside its evaluation while the losers run) and
+  every later read returns at once, so the pre-fix shape fails on the COUNT
+  rather than hanging.
+- `ASequentialDropStillEvaluates` — CONTROL. The cheapest way to pass the
+  defect gate is to stop evaluating on a drop at all, which would delete the
+  "immediate on a busy node" driver and leave the 30s watchdog as the only
+  one. It also fails against a claim that is never released, on the second
+  drop.
+- `ADegradedFeedStillPagesFromADropUnderConcurrency` — CONTROL, driven by a
+  real killed collector: coalescing must drop redundant evaluations, never the
+  one that crosses the threshold.
+
+Both controls PASS against the pre-fix tree, which is what makes them controls
+rather than second defect gates.

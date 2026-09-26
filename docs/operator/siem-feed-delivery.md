@@ -166,6 +166,17 @@ The transition is evaluated both when an event is lost and on an independent
 period still pages: the alert does not depend on there being more traffic to
 lose.
 
+**Concurrent losses are evaluated once, not once each.** During a real outage
+the losing events arrive at the full request rate, and each one is charged on
+the goroutine serving that request. The evaluation itself is a *reader* —
+everything durable about the loss (the counter, the timestamp, the reason) is
+already recorded before the evaluation starts — so concurrent evaluations
+collapse to one and the rest return immediately rather than queueing behind
+the health plane. Nothing is lost by that: the answer is a function of already
+recorded state plus the clock, and both drivers above ask again. This matters
+operationally because the alternative was the outage slowing the proxy itself;
+a SIEM going away must cost you delivery, never throughput.
+
 **Recovery is declared on observed evidence only** — one event that actually
 reaches the collector. Elapsed time never clears it, because a feed that
 stopped dropping because nothing is being logged looks identical to a feed that

@@ -24,6 +24,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -3108,4 +3109,160 @@ func jsFunctionBody(t *testing.T, src, decl string) string {
 	}
 	t.Fatalf("unbalanced braces reading %q", decl)
 	return ""
+}
+
+// TestChaos72_ConcurrentDropsCollapseToOneEvaluation is the DEFECT gate for
+// Codex round 14: a queue-full drop is charged on the CALLER's goroutine — a
+// proxy request goroutine — so during a sustained SIEM outage the delivery
+// observer is reached at the full request rate. Unguarded, each of those
+// calls ran the whole health-plane snapshot inline (syslogHealth.mu taken,
+// retired writers settled under it, and the commit half taking it again),
+// which turned "record an atomic drop and move on" into a process-wide
+// serialization point at precisely the load the asynchronous writer exists to
+// absorb (measured: 157 ns/op at GOMAXPROCS=1 rising to 290 at 4 — four cores
+// delivering 0.54x the throughput of one).
+//
+// The observable is that concurrent drops collapse to ONE evaluation. The
+// clock is the instrument because syslogFeedState reads it exactly once per
+// evaluation on a feed that is not degraded, so the call count IS the
+// evaluation count. The first read blocks so the winner is still inside its
+// evaluation while the losers run; every later read returns at once, so
+// against the pre-fix shape the losers all complete and the gate fails on the
+// count rather than hanging.
+func TestChaos72_ConcurrentDropsCollapseToOneEvaluation(t *testing.T) {
+	resetSyslogHealthForTest()
+	t.Cleanup(resetSyslogHealthForTest)
+
+	sw, err := newSyslogWriter("udp", "127.0.0.1:65533", "rfc3164")
+	if err != nil {
+		t.Fatalf("writer: %v", err)
+	}
+	t.Cleanup(func() { _ = sw.Close() })
+	noteSyslogWriterInstalled(sw, "udp://127.0.0.1:65533")
+
+	var clockCalls atomic.Int64
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	fixed := time.Now()
+	setSyslogHealthNowForTest(func() time.Time {
+		n := clockCalls.Add(1)
+		if n == 1 {
+			close(entered)
+			<-release
+		}
+		return fixed
+	})
+	// The claim is released by a deferred Store, so abandoning the winner
+	// would leave it held for every later gate in this package.
+	t.Cleanup(func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+	})
+
+	var winner sync.WaitGroup
+	winner.Add(1)
+	go func() {
+		defer winner.Done()
+		noteSyslogDelivery(false)
+	}()
+
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the first evaluation never reached the clock; the gate cannot prove anything")
+	}
+
+	const losers = 32
+	var lost sync.WaitGroup
+	lost.Add(losers)
+	for i := 0; i < losers; i++ {
+		go func() {
+			defer lost.Done()
+			noteSyslogDelivery(false)
+		}()
+	}
+	lost.Wait()
+
+	if got := clockCalls.Load(); got != 1 {
+		t.Fatalf("%d concurrent drops produced %d health-plane evaluations, want exactly 1: "+
+			"every extra one is a proxy request goroutine serializing on the process-wide "+
+			"health mutex during a SIEM outage", losers+1, got)
+	}
+
+	once.Do(func() { close(release) })
+	winner.Wait()
+}
+
+// TestChaos72_ASequentialDropStillEvaluates is the CONTROL. The cheapest way
+// to pass the gate above is to stop evaluating on a drop at all — which would
+// delete the "immediate on a busy node" half of the degradation plane and
+// leave the 30s watchdog as the only driver. A claim that is never released
+// (a trailing Store instead of a deferred one, which a panicking observer
+// would skip) fails here too, on the second drop.
+func TestChaos72_ASequentialDropStillEvaluates(t *testing.T) {
+	resetSyslogHealthForTest()
+	t.Cleanup(resetSyslogHealthForTest)
+
+	sw, err := newSyslogWriter("udp", "127.0.0.1:65533", "rfc3164")
+	if err != nil {
+		t.Fatalf("writer: %v", err)
+	}
+	t.Cleanup(func() { _ = sw.Close() })
+	noteSyslogWriterInstalled(sw, "udp://127.0.0.1:65533")
+
+	var clockCalls atomic.Int64
+	fixed := time.Now()
+	setSyslogHealthNowForTest(func() time.Time {
+		clockCalls.Add(1)
+		return fixed
+	})
+
+	const drops = 4
+	for i := 0; i < drops; i++ {
+		noteSyslogDelivery(false)
+	}
+	if got := clockCalls.Load(); got != drops {
+		t.Fatalf("%d sequential drops produced %d evaluations, want %d: a sequential caller "+
+			"always finds the claim free, so coalescing must not change its behaviour", drops, got, drops)
+	}
+}
+
+// TestChaos72_ADegradedFeedStillPagesFromADropUnderConcurrency is the second
+// CONTROL: coalescing must not swallow the page itself. A feed already past
+// the window is driven by concurrent drops, and the alert must still fire.
+func TestChaos72_ADegradedFeedStillPagesFromADropUnderConcurrency(t *testing.T) {
+	col := startSyslogCollector(t)
+	armSyslogFeed(t, "tcp://"+col.addr)
+	col.stop()
+	waitForDrops(t, 5)
+
+	// Past the window, so the next evaluation that actually runs must page.
+	base := time.Now()
+	setSyslogHealthNowForTest(func() time.Time { return base.Add(syslogDegradedAfter + time.Minute) })
+
+	syslogHealth.mu.Lock()
+	syslogHealth.alerted = false
+	syslogHealth.mu.Unlock()
+
+	var wg sync.WaitGroup
+	for i := 0; i < 16; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			noteSyslogDelivery(false)
+		}()
+	}
+	wg.Wait()
+
+	syslogHealth.mu.Lock()
+	alerted := syslogHealth.alerted
+	syslogHealth.mu.Unlock()
+	if !alerted {
+		t.Fatal("a degraded feed did not page under concurrent drops: coalescing must drop " +
+			"redundant evaluations, never the one that crosses the threshold")
+	}
 }

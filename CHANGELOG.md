@@ -573,6 +573,32 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Performance
 
+- A SIEM outage no longer serializes proxy requests in the syslog health
+  plane. A queue-full drop is charged on the CALLER's goroutine — the audit or
+  request-log fan-out, i.e. a proxy request goroutine — and the delivery
+  observer ran the whole health-plane evaluation inline from there: the
+  process-wide `syslogHealth.mu` taken, the retired writers settled under it,
+  and the commit half taking the same mutex again, all while the caller still
+  held `sendMu.RLock`. So precisely during the overload the asynchronous
+  writer exists to absorb ("a slow SIEM must cost drops, not proxy latency"),
+  every proxied request paid for it. Measured on a 4-core Xeon (medians of
+  n=5): **149 ns/op at GOMAXPROCS=1 rising to 268 at 4 — four cores delivering
+  0.56x the throughput of one**, the throughput-ceiling shape `internal/connlimit`,
+  `internal/threatfeed` and the IP filter each record. It was self-reinforcing
+  too: the same per-line cost on the drain goroutine slows the drain, which
+  fills the queue, which puts more request goroutines on the path.
+
+  Concurrent evaluations now collapse to one through a compare-and-swap claim.
+  A caller that loses does **not** wait — it returns having done nothing — which
+  is safe because `noteDrop` has already recorded everything durable about the
+  loss (counter, timestamp, reason, all atomics) before it notifies; the
+  evaluation is a pure reader whose answer is a function of that recorded state
+  plus the clock, and two independent drivers ask again regardless (every later
+  drop, and the 30s watchdog). A sequential caller is unaffected, so every
+  existing gate holds unchanged. Post-fix: **268 → 74 ns/op at four cores
+  (3.6x), with the curve direction flipped from degrading to improving**; one
+  core is at parity to ~13% for the added CAS pair.
+
 - The threat feed's full-URL check no longer re-parses a URL it was handed
   already parsed. `preDispatchBlocked` runs it on every forwarded plain-HTTP
   request, on the request goroutine, before the policy engine — and called it

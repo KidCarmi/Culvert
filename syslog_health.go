@@ -559,17 +559,69 @@ func noteSyslogForwardingDisabled() {
 	syslogIntentArmedWithoutWriter.Store(false)
 }
 
+// syslogEvalInFlight collapses concurrent degradation evaluations to ONE.
+//
+// It is a claim, not a lock: a caller that loses the race does NOT wait for
+// the winner, it returns having done nothing. That is safe because noteDrop
+// has ALREADY recorded everything durable about the loss (the counter, the
+// timestamp and the reason, all atomics) before it notifies. The evaluation
+// is a pure READER asking "should I page now?", and the answer is a function
+// of that recorded state plus the clock — so skipping a read loses nothing,
+// and two independent drivers ask again regardless: every later drop, and
+// the 30s watchdog. This is the same "freshness is EVALUATED, never latched"
+// property the rest of this plane rests on, used here to make the read
+// droppable.
+var syslogEvalInFlight atomic.Bool
+
 // noteSyslogDelivery is the delivery observer: called once per DROPPED line,
 // and once when a delivery ends a failure episode.
 //
-// It runs on the drain goroutine and must never call back into the Writer.
-// It reads Stats (a lock-free atomic snapshot) and nothing else on that
-// object, which is explicitly safe from the drain goroutine's own stack.
+// It must never call back into the Writer. It reads Stats (a lock-free atomic
+// snapshot) and nothing else on that object.
+//
+// It does NOT run only on the drain goroutine, and the comment here said for
+// several rounds that it did. A queue-full drop is charged by tryEnqueue on
+// the CALLER's goroutine — an audit or request-log fan-out, i.e. a PROXY
+// REQUEST goroutine — so during a sustained SIEM outage this observer is
+// reached at the full request rate. Unguarded it then ran the entire
+// health-plane snapshot inline: syslogFeedState takes the process-wide
+// syslogHealth.mu, settles retired writers under it, and commitSyslogDegradation
+// takes it a SECOND time, all while the caller still holds sendMu.RLock.
+// Measured on a 4-core Xeon (medians of n=5), that made one drop cost 149 ns/op
+// at GOMAXPROCS=1 and 268 ns/op at 4 — four cores delivering 0.56x the
+// throughput of one, the throughput-ceiling shape internal/connlimit,
+// internal/threatfeed and the IP filter each record. So precisely during the overload the whole asynchronous
+// design exists to absorb ("a slow SIEM must cost drops, not proxy latency"),
+// proxy requests serialized in the health plane instead of recording an atomic
+// drop and moving on — and it was self-reinforcing, because the same cost on
+// the drain goroutine slows the drain, which fills the queue, which puts more
+// request goroutines on this path (Codex P2, PR #1494).
+//
+// A sequential caller is unaffected: the previous call released the claim, so
+// it still evaluates exactly as before and every existing gate holds. Only
+// CONCURRENT drops collapse, and they are asking a question whose answer
+// cannot differ between them — degradation needs a non-zero consecutive-failure
+// count (which the first drop already established) and an age threshold (a
+// property of the clock, identical for both).
+//
+// The release is DEFERRED, not trailing: notifyDelivery contains a panicking
+// observer, so a trailing Store would leave the claim held forever and the
+// feed could never page again.
+//
+// The WATCHDOG's own call to evaluateSyslogDegradation is deliberately NOT
+// claimed. It is the driver that exists so a node which went quiet mid-outage
+// still pages, it runs once per 30s on one goroutine, and letting a burst of
+// drops starve it would defeat the one thing it is for. The claim is about
+// the request path, not about the evaluation.
 func noteSyslogDelivery(delivered bool) {
 	if delivered {
 		noteSyslogDeliveryRecovered()
 		return
 	}
+	if !syslogEvalInFlight.CompareAndSwap(false, true) {
+		return
+	}
+	defer syslogEvalInFlight.Store(false)
 	evaluateSyslogDegradation()
 }
 
@@ -1345,6 +1397,11 @@ func resetSyslogHealthForTest() {
 	syslogHealth.mu.Unlock()
 	syslogIntentArmedWithoutWriter.Store(false)
 	syslogSkippedNoWriter.Store(0)
+	// A claim left set would make every later gate's drop a no-op — the
+	// fence-pollution class this sweep has already been bitten by twice. It
+	// cannot leak through the production path (the release is deferred), but
+	// a gate that abandons a blocked evaluation can leave it held.
+	syslogEvalInFlight.Store(false)
 	// Process-lifetime by design, so a gate that produces one shifts the
 	// exported drop total for every gate after it — see ResetLateDropsForTest.
 	syslog.ResetLateDropsForTest()
