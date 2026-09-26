@@ -72,19 +72,20 @@ func TestLoadFileConfigAndFlags_LogMaxMB_YAMLHonoredWhenFlagUnset(t *testing.T) 
 	zero := 0
 	empty := ""
 	s := &startupState{
-		configPath:   &cfgPath,
-		proxyPort:    &zero,
-		uiPortFlag:   &zero,
-		socks5Port:   &zero,
-		logFilePath:  &empty,
-		blockFile:    &empty,
-		logMaxMB:     &zero, // flag not passed on the CLI -> unset sentinel
-		user:         &empty,
-		pass:         &empty,
-		tlsCert:      &empty,
-		tlsKey:       &empty,
-		rateLimitRPM: &zero,
-		ipMode:       &empty,
+		configPath:            &cfgPath,
+		proxyPort:             &zero,
+		uiPortFlag:            &zero,
+		socks5Port:            &zero,
+		logFilePath:           &empty,
+		blockFile:             &empty,
+		logMaxMB:              &zero, // flag not passed on the CLI -> unset sentinel
+		user:                  &empty,
+		pass:                  &empty,
+		tlsCert:               &empty,
+		tlsKey:                &empty,
+		rateLimitRPM:          &zero,
+		rateLimitRPMCanonical: &zero,
+		ipMode:                &empty,
 	}
 
 	loadFileConfigAndFlags(s)
@@ -117,19 +118,20 @@ func TestLoadFileConfigAndFlags_AuthUser_WhitespaceOnlyCLIFallsBackToYAML(t *tes
 	empty := ""
 	whitespaceUser := "   "
 	s := &startupState{
-		configPath:   &cfgPath,
-		proxyPort:    &zero,
-		uiPortFlag:   &zero,
-		socks5Port:   &zero,
-		logFilePath:  &empty,
-		blockFile:    &empty,
-		logMaxMB:     &zero,
-		user:         &whitespaceUser, // whitespace-only -user, never explicitly cleared
-		pass:         &empty,
-		tlsCert:      &empty,
-		tlsKey:       &empty,
-		rateLimitRPM: &zero,
-		ipMode:       &empty,
+		configPath:            &cfgPath,
+		proxyPort:             &zero,
+		uiPortFlag:            &zero,
+		socks5Port:            &zero,
+		logFilePath:           &empty,
+		blockFile:             &empty,
+		logMaxMB:              &zero,
+		user:                  &whitespaceUser, // whitespace-only -user, never explicitly cleared
+		pass:                  &empty,
+		tlsCert:               &empty,
+		tlsKey:                &empty,
+		rateLimitRPM:          &zero,
+		rateLimitRPMCanonical: &zero,
+		ipMode:                &empty,
 	}
 
 	loadFileConfigAndFlags(s)
@@ -286,19 +288,20 @@ func TestLoadFileConfigAndFlags_PortCollision_ResolvedByCLIOverride(t *testing.T
 	empty := ""
 	overriddenUIPort := 9090
 	s := &startupState{
-		configPath:   &cfgPath,
-		proxyPort:    &zero,
-		uiPortFlag:   &overriddenUIPort, // -ui-port 9090 on the CLI
-		socks5Port:   &zero,
-		logFilePath:  &empty,
-		blockFile:    &empty,
-		logMaxMB:     &zero,
-		user:         &empty,
-		pass:         &empty,
-		tlsCert:      &empty,
-		tlsKey:       &empty,
-		rateLimitRPM: &zero,
-		ipMode:       &empty,
+		configPath:            &cfgPath,
+		proxyPort:             &zero,
+		uiPortFlag:            &overriddenUIPort, // -ui-port 9090 on the CLI
+		socks5Port:            &zero,
+		logFilePath:           &empty,
+		blockFile:             &empty,
+		logMaxMB:              &zero,
+		user:                  &empty,
+		pass:                  &empty,
+		tlsCert:               &empty,
+		tlsKey:                &empty,
+		rateLimitRPM:          &zero,
+		rateLimitRPMCanonical: &zero,
+		ipMode:                &empty,
 	}
 
 	// Must not call log.Fatalf (would os.Exit the test binary) — the
@@ -686,19 +689,20 @@ func TestLoadFileConfigAndFlags_IPFilterMode_ValidCLIOverrideResolves(t *testing
 	empty := ""
 	blockMode := "block"
 	s := &startupState{
-		configPath:   &cfgPath,
-		proxyPort:    &zero,
-		uiPortFlag:   &zero,
-		socks5Port:   &zero,
-		logFilePath:  &empty,
-		blockFile:    &empty,
-		logMaxMB:     &zero,
-		user:         &empty,
-		pass:         &empty,
-		tlsCert:      &empty,
-		tlsKey:       &empty,
-		rateLimitRPM: &zero,
-		ipMode:       &blockMode, // -ip-filter-mode block
+		configPath:            &cfgPath,
+		proxyPort:             &zero,
+		uiPortFlag:            &zero,
+		socks5Port:            &zero,
+		logFilePath:           &empty,
+		blockFile:             &empty,
+		logMaxMB:              &zero,
+		user:                  &empty,
+		pass:                  &empty,
+		tlsCert:               &empty,
+		tlsKey:                &empty,
+		rateLimitRPM:          &zero,
+		rateLimitRPMCanonical: &zero,
+		ipMode:                &blockMode, // -ip-filter-mode block
 	}
 
 	// Must not call log.Fatalf (would os.Exit the test binary) — "block" is valid.
@@ -706,5 +710,66 @@ func TestLoadFileConfigAndFlags_IPFilterMode_ValidCLIOverrideResolves(t *testing
 
 	if s.ipModeVal != "block" {
 		t.Errorf("s.ipModeVal = %q, want %q", s.ipModeVal, "block")
+	}
+}
+
+// TestLoadFileConfigAndFlags_RateLimitRPM_ExplicitZeroCLIOverridesNonzeroYAML
+// is the PR #1504 review regression, driven end to end through the real
+// flag.Parse()/flag.Visit path (not a hand-built startupState): an operator
+// migrating from the deprecated -rate-limit flag must be able to pass the
+// canonical "-rate-limit-rpm 0" to explicitly disable rate limiting, even
+// while config.yaml still carries a nonzero security.rate_limit. A
+// firstNonZero-style merge cannot express this (an explicit 0 is
+// indistinguishable from "flag not passed"), so precedence is decided by
+// flag.Visit-tracked presence (rateLimitRPMFlagSet/rateLimitRPMCanonicalSet)
+// instead.
+func TestLoadFileConfigAndFlags_RateLimitRPM_ExplicitZeroCLIOverridesNonzeroYAML(t *testing.T) {
+	origArgs := os.Args
+	origCommandLine := flag.CommandLine
+	t.Cleanup(func() {
+		os.Args = origArgs
+		flag.CommandLine = origCommandLine
+	})
+
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(cfgPath, []byte("security:\n  rate_limit: 60\n"), 0o600); err != nil {
+		t.Fatalf("write config.yaml: %v", err)
+	}
+
+	flag.CommandLine = flag.NewFlagSet("culvert", flag.ContinueOnError)
+	os.Args = []string{"culvert", "-config", cfgPath, "-rate-limit-rpm", "0"}
+
+	s := &startupState{}
+	parseFlags(s)
+	loadFileConfigAndFlags(s)
+
+	if s.rlRPM != 0 {
+		t.Errorf("s.rlRPM = %d, want 0 (explicit -rate-limit-rpm 0 must override config.yaml's nonzero rate_limit)", s.rlRPM)
+	}
+}
+
+// TestLoadFileConfigAndFlags_RateLimitRPM_CanonicalWinsOverDeprecatedFlag
+// proves the ordinary (nonzero) precedence still holds end to end: passing
+// both flags, the canonical -rate-limit-rpm wins over the deprecated
+// -rate-limit, mirroring every other alias pair this program has added
+// (dpi_file over content_scan_file, etc.).
+func TestLoadFileConfigAndFlags_RateLimitRPM_CanonicalWinsOverDeprecatedFlag(t *testing.T) {
+	origArgs := os.Args
+	origCommandLine := flag.CommandLine
+	t.Cleanup(func() {
+		os.Args = origArgs
+		flag.CommandLine = origCommandLine
+	})
+
+	flag.CommandLine = flag.NewFlagSet("culvert", flag.ContinueOnError)
+	os.Args = []string{"culvert", "-rate-limit", "30", "-rate-limit-rpm", "120"}
+
+	s := &startupState{}
+	parseFlags(s)
+	loadFileConfigAndFlags(s)
+
+	if s.rlRPM != 120 {
+		t.Errorf("s.rlRPM = %d, want 120 (canonical -rate-limit-rpm must win over the deprecated -rate-limit)", s.rlRPM)
 	}
 }

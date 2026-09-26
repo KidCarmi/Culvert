@@ -348,6 +348,81 @@ func TestLoadFileConfig_EmptyCanonicalDPIPatternsWins(t *testing.T) {
 	}
 }
 
+// TestLoadFileConfig_RateLimitRPMCanonicalWins verifies the terminology-
+// governance T-29 fix: the canonical rate_limit_rpm YAML key takes
+// precedence over the deprecated rate_limit alias when both are set to a
+// nonzero value, and downstream code keeps reading fc.Security.RateLimit.
+func TestLoadFileConfig_RateLimitRPMCanonicalWins(t *testing.T) {
+	f, err := os.CreateTemp("", "config*.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(f.Name()) //nolint:errcheck // test cleanup
+	_, _ = f.WriteString("security:\n" +
+		"  rate_limit_rpm: 120\n" +
+		"  rate_limit: 30\n")
+	f.Close()
+
+	fc, err := loadFileConfig(f.Name())
+	if err != nil {
+		t.Fatalf("loadFileConfig: %v", err)
+	}
+	if fc.Security.RateLimit != 120 {
+		t.Errorf("RateLimit = %d, want canonical rate_limit_rpm value 120", fc.Security.RateLimit)
+	}
+}
+
+// TestLoadFileConfig_DeprecatedRateLimitKeyStillWorks verifies the legacy
+// rate_limit key still parses and populates FileConfig when the canonical
+// rate_limit_rpm key is absent (back-compat for existing deployed
+// config.yaml files).
+func TestLoadFileConfig_DeprecatedRateLimitKeyStillWorks(t *testing.T) {
+	f, err := os.CreateTemp("", "config*.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(f.Name()) //nolint:errcheck // test cleanup
+	_, _ = f.WriteString("security:\n  rate_limit: 45\n")
+	f.Close()
+
+	fc, err := loadFileConfig(f.Name())
+	if err != nil {
+		t.Fatalf("loadFileConfig: %v", err)
+	}
+	if fc.Security.RateLimit != 45 {
+		t.Errorf("RateLimit = %d, want deprecated rate_limit value 45", fc.Security.RateLimit)
+	}
+}
+
+// TestLoadFileConfig_ExplicitZeroRateLimitRPMDisables is the PR #1504 review
+// regression: an operator migrating from the deprecated rate_limit key must
+// be able to explicitly disable rate limiting via the canonical
+// rate_limit_rpm key alone, even while the deprecated key is still present
+// and nonzero. Precedence is decided by rate_limit_rpm's pointer PRESENCE
+// (nil vs. non-nil), not by whether it decodes to a nonzero value — a
+// value-based check would treat "rate_limit_rpm: 0" as absent and leave the
+// legacy nonzero rate_limit enforced, silently ignoring the operator's
+// explicit intent to turn the feature off.
+func TestLoadFileConfig_ExplicitZeroRateLimitRPMDisables(t *testing.T) {
+	f, err := os.CreateTemp("", "config*.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(f.Name()) //nolint:errcheck // test cleanup
+	_, _ = f.WriteString("security:\n" +
+		"  rate_limit: 60\n" +
+		"  rate_limit_rpm: 0\n")
+	f.Close()
+
+	fc, err := loadFileConfig(f.Name())
+	if err != nil {
+		t.Fatalf("loadFileConfig: %v", err)
+	}
+	if fc.Security.RateLimit != 0 {
+		t.Errorf("RateLimit = %d, want 0 (explicit canonical rate_limit_rpm: 0 must disable, overriding the legacy nonzero rate_limit)", fc.Security.RateLimit)
+	}
+}
+
 // ─── store.go — InitAuditLog, authCacheStore ──────────────────────────────────
 
 func TestInitAuditLog_ValidPath(t *testing.T) {

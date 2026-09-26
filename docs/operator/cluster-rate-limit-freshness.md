@@ -1,7 +1,8 @@
 # Cluster rate limiting under a Control Plane outage
 
 **Applies to:** Data Plane nodes in a cluster with rate limiting enabled
-(`-rate-limit` / `security.rate_limit` > 0). Standalone proxies are unaffected —
+(`-rate-limit-rpm` / `security.rate_limit_rpm` > 0; `-rate-limit` / `security.rate_limit`
+remain supported deprecated aliases). Standalone proxies are unaffected —
 they never consult cluster counts.
 
 **Sections:** [What changed](#what-changed) · [The symptom this
