@@ -9,6 +9,195 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Security
 
+- An unauthenticated client could park a gateway core for minutes with one
+  request by choosing a very long destination host (CHAOS-69, register rows
+  PX-21/PX-23/PX-24/PX-25). The destination authority is written by the client,
+  `net/http` admits its 1 MiB default of request line plus headers, and nothing
+  bounded it. It was copied verbatim into the process log and the durable
+  request-log entry — a 256 KiB host wrote 262,228 bytes to a rotating file that
+  keeps one archive — but the copy was the smaller half: the authority is also
+  walked label by label by every destination matcher, and two of those walks are
+  quadratic in its length. The URL-category store probes every suffix beginning
+  just past a `.` against its reverse index, and the Layer-2 community feed
+  (enabled by default in the shipped compose file) opens one BadgerDB read
+  transaction per label. Measured through the real request path with one
+  ordinary category-group rule present: 4 KB of host cost 19.6 ms, 16 KB cost
+  260 ms and 64 KB cost **3.94 s** of CPU — so roughly sixteen minutes at the
+  1 MiB header default, inside the request goroutine, holding the connection and
+  a per-IP connection slot, and spent *before* authentication. Roughly 256 KB/s
+  from one client saturated a four-core gateway, and the three front-door
+  limiters ship disabled. The same value was also retained as a top-hosts map
+  key, whose 10,000-entry cap bounds the entry count and never bounded the key
+  size (about 10 GiB of heap at the cap with megabyte keys), and reached the same
+  quadratic lookup from two viewer-role admin endpoints.
+
+  The destination is now bounded in two tiers, because the DNS limit governs the
+  *canonical* form of a hostname rather than the bytes on the wire: a **1024-byte
+  pre-cap on the raw authority** at the entry point, ahead of every sink and every
+  matcher (in particular ahead of the IP filter and rate limiter, which both write
+  the host into the request log), and a **253-byte bound on the normalized A-label
+  form** at the existing canonicalization gate. The raw tier has to be generous
+  because an internationalized domain name *shrinks* under IDNA — `é`×40 in four
+  labels is 323 raw bytes and 187 canonical, and the widest legitimate case is 883
+  raw to 251 canonical — so a raw bound at the DNS limit would have refused
+  ordinary international destinations with a 400; its value is derived from the
+  maximum Punycode expansion and re-measured against the shipped normalizer by
+  test. The canonical tier is what keeps that generosity from being a hole, since
+  dot-dense ASCII does not shrink and is therefore refused. A refused request
+  answers 400 without echoing the value, creates no state, and is counted by
+  `culvert_proxy_oversize_host_rejected_total` with a rate-limited log line naming
+  the length and the tier rather than the value. Operator runbook:
+  `docs/operator/destination-host-bounds.md`.
+
+- An ordinary password change silently destroyed the account's TOTP second
+  factor (SEC-TOTP-1 / RISK-029). `apiAuthLogin` refuses to issue a session for
+  an enrolled account until `verifyLoginTOTP` accepts a code, so the enrolment
+  is a real second factor whose purpose is to survive a password compromise —
+  but `Config.SetUIUser` and `Config.SetAuth` assigned a freshly-built
+  `uiAdminUser` record over the stored one, so every credential write dropped
+  `totpSecret`, `backupCodes` and `totpLastCounter`. The removal was durable
+  (the next roster save persisted it), carried no audit entry naming the
+  de-enrolment, gave the account holder no signal, and required no proof of
+  possession of the authenticator. Whoever held the current password could
+  therefore permanently remove the control that outranks it, turning a
+  temporary session or credential compromise into durable password-only access
+  to the admin plane. Reachable from `POST /api/auth/change-password` (any
+  principal from viewer up, for its own account), `POST /api/auth/users`
+  (admin, any account) and `POST /api/settings/auth`. Resetting
+  `totpLastCounter` to zero was a second defect on the same line: it reopens
+  the one-time-password replay window (RFC 6238 §5.2) that the restore path
+  refuses to reopen without `--allow-counter-rollback`. Every credential write
+  now goes through one constructor that carries the enrolment across;
+  de-enrolment stays the job of the explicit `ClearTOTP` primitive. The
+  `--reset-password` break-glass keeps its outcome — an operator who lost the
+  authenticator as well as the password depends on it — but now clears
+  deliberately and prints that the account became single-factor. The replay
+  counter is part of the enrolment, not a separate durable fact: `ClearTOTP`
+  now clears it too, and `SetTOTPSecret` resets it when the KEY changes
+  (but not when backup codes are re-issued for the same key, which would
+  reopen the replay window for a live secret). Without that, the counter
+  outlived de-enrolment and refused the re-enrolment the break-glass warning
+  instructs the operator to perform — it had been zeroed only as a side effect
+  of the record replacement this change removes. That comparison asks whether
+  the KEY changed, not whether the stored string did: the verifier folds case
+  and trims whitespace before base32-decoding, and Go's decoder ignores a
+  secret's non-canonical trailing bits, so spellings that differ as strings can
+  name one authenticator (`MZXW6` and `MZXW7` decode to the same key). A
+  string comparison read a backup-code re-issue in a different spelling as a
+  key change and zeroed the counter for a live key. The canonicalisation is now
+  one function that the verifier itself uses and that backs the exported
+  `totp.SameKey`/`totp.Usable`, so the comparison and the code generator cannot
+  disagree, and an unusable incoming secret never counts as evidence that the
+  key changed.
+
+- Client-supplied tracing headers reached the process log unbounded
+  (SEC-REQID-1). `setupRequestTracing` runs on 100% of proxied traffic — the
+  second statement in `handleRequest`, ahead of the connection limiter, the IP
+  filter and authentication — and reads two headers the *client* chooses,
+  `X-Request-Id` and `Traceparent`. It bounded neither. The accepted request id
+  then reached roughly twenty process-log sites (every `POLICY_*` decision line
+  plus `AUTH_FAIL` / `IP_BLOCKED` / `RATE_LIMITED` / `BLOCKED` / `INVALID_HOST`)
+  as a bare `%s` inside the `{req_id=… identity=… action=…}` block, the response
+  header, and the forwarded request. The only sanitisation was `strings.ReplaceAll`
+  for CR and LF — the CWE-117 barrier, which correctly stops whole-record forgery
+  but is not what `sanitizeLog` does, since `sanitizeLog` scrubs every byte below
+  `0x20` and `0x7F`. So `ESC`, `NUL`, `BEL`, `VT`, `FF` and `DEL` reached the
+  forensic log verbatim, and a space could inject extra `key=value` tokens into
+  the decision line's brace block. Nothing bounded the length at all: the proxy
+  listener sets no `MaxHeaderBytes`, so net/http's 1 MiB default was the only
+  ceiling, and eight requests carrying a 512 KiB request id wrote 4,194,968 bytes
+  into the process log — the same amplification CHAOS-63 measured against the
+  audit log, reached here through the unauthenticated data plane rather than the
+  admin API, and invisible to every storage-health surface because each of those
+  writes succeeds (CWE-778, OWASP A09:2021). Both headers are now bounded and
+  charset-checked where they are read: at most 128 bytes (request id) or 255
+  (traceparent), visible ASCII with no whitespace. A value that fails is treated
+  exactly as an absent one — a fresh id is minted and overwrites the hostile value
+  on the request, the response and the wire — so a tracing header can never decide
+  whether traffic flows. Rejections are counted as
+  `culvert_tracing_header_rejected_total{header=…}`, surfaced on `GET /api/stats`
+  and in the admin UI, and logged once per minute without ever echoing the
+  refused value. A repeated header is refused on the same grounds — `Header.Get`
+  validates only the first field value, so an acceptable first `X-Request-Id`
+  paired with a hostile second one previously reached the upstream uncounted —
+  and the minted value replaces the whole field, so exactly one value is
+  forwarded.
+
+- **A request header could name a root-executed artifact (SEC-BOOTSTRAP-HOST-1).**
+  The Control Plane's one-click DP bootstrap renders two artifacts a human is
+  told to run with root authority — the install script it documents as
+  `curl -fsSL … | sudo bash`, and the `docker-compose.yml` that script
+  downloads. Two of the values interpolated into them came straight off the
+  wire (`r.Host`, and `X-Forwarded-Host` when `proxy.trust_forwarded_headers`
+  is on), and the script carried them inside a **double-quoted** shell word:
+  `CP_BASE="{{.CPBase}}"`. A double-quoted shell word still performs command
+  substitution, so a request whose Host header was `cp.example.com$(…)`
+  produced a script that ran the attacker's command, as root, before it did
+  anything else. Go's header validation is not a mitigation — measured against
+  `net/http`, it rejects `"`, a backtick, `{` and space but accepts
+  `$ ( ) ' ;`, and `X-Forwarded-Host` is filtered not at all.
+
+  Both bootstrap endpoints and `POST /api/cluster/token` now **refuse** a
+  derived authority that is not a plain `host[:port]` (400, nothing rendered),
+  the renderers re-validate at the sink, and the templates single-quote what
+  they interpolate. A compose document is also refused (503) when the cluster
+  CA has no fingerprint to pin, rather than served with an unpinned enrollment
+  URL. Refusals are counted on `culvert_bootstrap_host_refused_total` and
+  logged once a minute; the caller is told only `invalid host`. Operators
+  behind a reverse proxy should confirm it sets `Host` / `X-Forwarded-Host`
+  explicitly rather than appending a client value — see
+  `docs/operator/dp-bootstrap-artifact-safety.md`.
+- Admin-roster changes reported success on a durable write that never landed
+  (CHAOS-70). `ui_users.json` is the only durable home of the admin roster,
+  password hashes, roles, TOTP secrets, consumed backup codes and the TOTP
+  replay counter, and every mutation changes memory first and persists second.
+  Three handlers logged the persist error and answered 2xx anyway — precisely
+  the three an operator reaches for during an incident. On a full or read-only
+  data volume, deleting a compromised administrator returned `204 No Content`
+  and was audited as done while the account returned at the next restart with
+  its original password hash, role and TOTP enrolment; a role downgrade returned
+  `{"ok":true}` and the privilege came back; a password rotation returned
+  `{"ok":true}` and the leaked password still authenticated. The response, the
+  UI and the audit log all reported success, and the divergence between memory
+  and disk stayed invisible until a restart materialised it. The same rule was
+  already written down, reasoned out and tested twenty lines away — for the
+  one-time setup wizard only. `POST/DELETE /api/auth/users` and
+  `POST /api/auth/change-password` are now durable-or-refused: the in-memory change is
+  rolled back wholesale (hash, role, TOTP secret, backup codes and replay
+  counter together), the request fails with an actionable `500`, and the
+  refusal is audited as `<action>.refused`. `fileutil.ErrReplacedNotSynced` is
+  deliberately treated as committed — the content already landed. New counters
+  `culvert_admin_roster_persist_failures_total` and
+  `culvert_admin_roster_persist_degraded_total` name which administrative
+  decision was affected, which the pre-existing `storage_write_failed` alert
+  cannot. The two login-path roster writes (TOTP replay counter, backup-code
+  consumption) stay fail-open by recorded decision — refusing them would lock an
+  operator out of the appliance during the incident they need it to diagnose —
+  but no longer discard their error. See
+  `docs/operator/admin-roster-durability.md`.
+- **Security (admin UI): the Settings panel's Save button changed the admin
+  credential without ever writing it to disk, accepted an empty password, and
+  could disable local authentication.** `POST /api/settings` called the
+  credential setter and nothing else, and the admin credential is not carried in
+  `admin_settings.json`, so a rotated admin password answered `200 {"ok":true}`,
+  was audited as a successful `settings.update`, authenticated immediately — and
+  **reverted at the next restart, where the previous (possibly leaked) password
+  authenticated again**. No disk fault was required, which makes it worse than
+  the three handlers above. Password complexity was validated only when the field
+  was non-empty, so saving the panel with a blank password box installed
+  `bcrypt("")` as an admin credential — and, for a changed username, a new admin
+  account that authenticated with no password; clearing both fields disabled local
+  admin authentication outright, behind a *"Settings saved"* toast. Empty user and
+  empty password are now refused with `400` (run unmatched traffic without
+  credentials via `defaultAuthOutcome=Exempt`, which says so), and the credential
+  change is durable-or-refused through the same transaction as the other three.
+  Fixing the persistence alone would have been a regression, because persisting is
+  what would have made the two input faults survive a restart. The roster snapshot
+  now also captures the legacy credential pair, so a refused rotation **restores
+  the previous credential** instead of deleting the account — a control caught
+  that the first version of this fix locked the administrator out.  See
+  `docs/operator/admin-roster-durability.md`.
+
 - Public release promotion ran ahead of the evidence that was supposed to
   authorize it. On `ci.yml` run 35507615339 (SHA `3d8c9bb`) the `docker` job
   published and cosign-signed the `latest`, `v0.0.N` and `0.0.N` image tags at
@@ -282,7 +471,7 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   forward proxy means the handshake to an `https://` parent proxy — inspected
   HTTPS origin handshakes build their own TLS config and are **not**
   revocation-checked. Because every counter reads zero either way, "found
-  nothing wrong" and "never consulted" were the same reading. The appliance now
+  nothing wrong" and "never consulted" were the same reading. Culvert now
   says so in a warning at the moment the control is enabled, in a banner on the
   OCSP panel, in `coverage`/`uncheckedEnforcingPaths` on `GET /api/ocsp`, and
   in `culvert_ocsp_path_checked{path}` — alongside a new `culvert_ocsp_*`
@@ -311,6 +500,15 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 - `google.golang.org/grpc` bumped `v1.83.1` → `v1.83.2` (CVE-2026-84445,
   HIGH: gRPC-Go xDS servers, denial of service via crash). Module graph
   only; no code change.
+- The Cluster panel's Distributed Rate Limiting card now shows **Stale
+  Episodes** — the number of times this node's cluster-wide rate-limit
+  broadcast has gone fresh→stale since startup (`GET /api/cluster/rate-limits`
+  already returned `remote_counts_stale_episodes`; the panel never rendered
+  it). The existing stale banner only appears while the broadcast is
+  *currently* stale, so an operator reviewing the panel after a Control Plane
+  blip had recovered saw a fully healthy panel with no way to tell "did this
+  happen once overnight, or six times" without SSHing in and grepping the
+  process log for the CHAOS-61 transition line. Read-only, no behavior change.
 
 ### Performance
 
@@ -333,6 +531,16 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Added
 
+- `GET /api/policy` now reports `persisted` (whether the access-rule
+  rulebase is written to disk vs. in-memory only), and the Access Rules
+  panel shows a red banner when it is false. Every rule mutation already
+  returned 200 OK regardless of persistence — `PolicyStore.SaveErr()` is a
+  no-op when no `-policy`/`policy_file` path is configured, which is also
+  `config.example.yaml`'s shipped default — so an admin editing rules
+  through the GUI had no way to discover that a restart would silently
+  discard the entire rulebase short of it actually happening. Mirrors the
+  existing `idpRegistry.Persisted()` warning already shown for identity
+  providers. No behavior change: read-only field + banner.
 - New React/TypeScript admin frontend, Batch 2 (`CULVERT_EXPERIMENTAL_UI`,
   `/app/`): Policies (Access Rules, Authentication Rules, Policy Tester,
   Header Rewrite, Policy Learning), Objects (URL Categories, Category Groups,
@@ -366,6 +574,10 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   `/api/upstream/entries/{id}/credential`) and the CDR enrollment recovery
   endpoints (`/api/cdr/instances/enroll/recover`,
   `/api/cdr/instances/enroll/receipts`).
+- Admin API operations (contract 2.1.0): `GET/PUT /api/traffic/redaction` —
+  the canonical name for the traffic-log destination-privacy posture
+  (terminology governance T-17); `/api/decryption/redaction` remains a
+  fully supported, non-deprecated alias of the same operations.
 
 ### Changed — API contract 1.2.0 → 2.0.0 (BREAKING)
 
@@ -411,6 +623,36 @@ endpoints for credentialed parents.
 
 ### Performance
 
+- Concurrent leaf-certificate cache misses for one host are collapsed onto a
+  single sign. `Manager.GetCert` is the `tls.Config.GetCertificate` callback
+  for every SSL-inspected CONNECT, so a miss there is the most expensive unit
+  of work the appliance performs per connection — `signLeaf` measures 144 µs,
+  19.6 KB and 327 allocations on the reference box, 85% of it the irreducible
+  P-256 sign inside `x509.CreateCertificate`. Nothing stood between the cache
+  probe and the sign, so every handshake that arrived for a host while the
+  first was still signing started its own, and the duplicates were pure waste:
+  same host, same CA, same shared leaf key, same 24-hour window, with the last
+  writer simply overwriting the others in the cache. The amplification grew
+  with core count, because what bounded the herd was how many signs could be
+  in flight at once — 64 workers over 256 cold hosts measured 1.00 signs per
+  host at `GOMAXPROCS=1`, 1.35 at 2 and 1.61 at 4, so the 16/32-core hardware
+  the appliance ships to sat further up that curve. It landed during exactly
+  the cold-cache burst the cache exists to absorb: a restart, a TTL boundary
+  (entries are created by traffic and expire on one uniform 1-hour TTL, so a
+  working set goes cold together), or a traffic spike. A leader/follower
+  single flight — the same shape already used for `hostIPCache`, `jwksCache`
+  and `internal/ocsp` — takes that cold burst from 28.13 ms to 14.37 ms
+  (−48.9%), 157,550 allocations to 92,329 (−41.4%) and 9.75 MB to 5.85 MB
+  (−40.0%), at exactly 1.00 signs per host. A follower receives the leader's
+  certificate, which is the one it would have signed itself, so the cache, its
+  TTL, the LRU, the CA-validity refusal and the fail-closed posture are
+  unchanged, and the steady-state hit path is at parity (190.1 ns against
+  189.6 ns, same 32 B and one allocation). New counter
+  `culvert_cert_sign_singleflight_joined_total` reports the duplicate signs
+  avoided; `culvert_cert_cache_misses_total` keeps its meaning — hits plus
+  misses is still the number of `GetCert` calls — but is no longer the same
+  thing as the sign count, for which
+  `culvert_cert_sign_duration_seconds_count` is exact.
 - The per-request policy decision line is built by appending rather than by
   `logger.Printf`, and the benchmark that measured it was measuring a disabled
   logger. `applyPolicyDecision` emits exactly one `POLICY_*` line per proxied
@@ -498,6 +740,25 @@ endpoints for credentialed parents.
   metric, or dashboard change.
 
 ### Fixed
+
+- A leaf-certificate sign already in flight could outlive the CA it was started
+  against. Replacing the root CA (`InitCA`, `ImportBundle`, `LoadCustomCA`, and
+  `ClearCache`) cleared the leaf cache, which is not sufficient on its own: a
+  sign that began before the replacement was still running against the outgoing
+  CA, and when it completed it repopulated the just-cleared cache with that
+  outgoing CA's leaf — served to every client for the full one-hour cache TTL,
+  and rejected by any client that trusts only the newly installed CA. A CA
+  replacement is exactly the moment an operator expects the old CA to stop
+  being used. The cache now carries a CA *generation* retired in the same
+  locked step that clears it, a sign records the generation it started under,
+  and a result whose generation has been retired is dropped rather than cached;
+  a new CA-install path that cleared the cache without retiring the generation
+  would silently reintroduce this, so that is pinned structurally rather than
+  behaviourally. Found by Codex review on the leaf-sign single flight above,
+  which briefly widened the same window: a caller arriving *after* the
+  replacement could join the pre-replacement sign and be handed its leaf, where
+  previously it would have signed against the new CA itself. Flights are now
+  scoped to the generation, so generations never join each other.
 
 - A SOCKS5 listener bind failure no longer terminates the whole appliance
   (CHAOS-66). `startSOCKS5` bound with a single `logFatalf` branch, and

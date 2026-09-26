@@ -1290,6 +1290,30 @@ culvert_cluster_ratelimit_stale_episodes_total %d
 		)
 	}
 
+	// SEC-BOOTSTRAP-HOST-1: DP-bootstrap artifact renders refused because the
+	// request's derived authority was not a plain host[:port].
+	//
+	// A COUNTER, so it is emitted unconditionally at 0 (counters only move up,
+	// so zero is unambiguous — unlike the conditional gauges above). Non-zero
+	// means either a reverse proxy in front of this Control Plane is forwarding
+	// a Host / X-Forwarded-Host this appliance cannot name itself by, or the
+	// bootstrap surface is being probed with a crafted authority. Both need the
+	// same first look, which is why they share one series.
+	//
+	// The token series beside it is SEPARATE on purpose: it means the token
+	// store is carrying something it did not write, which sends the operator
+	// somewhere else entirely. One series that could mean either is a series
+	// nobody can act on.
+	_, _ = fmt.Fprintf(w, `# HELP culvert_bootstrap_host_refused_total DP-bootstrap artifacts refused because the request's derived authority was not a plain host[:port]
+# TYPE culvert_bootstrap_host_refused_total counter
+culvert_bootstrap_host_refused_total %d
+
+# HELP culvert_bootstrap_token_unusable_total DP-bootstrap artifacts refused because the stored enrollment token is not in the format this appliance mints
+# TYPE culvert_bootstrap_token_unusable_total counter
+culvert_bootstrap_token_unusable_total %d
+
+`, bootstrapHostRefusedCount(), bootstrapTokenUnusableCount())
+
 	// CHAOS-57: admin UI listener health. Emitted only when an admin UI was
 	// configured, for the reason the socks5 block states: `up 0` on a node that
 	// never had the listener is indistinguishable from a dead one and the
@@ -1527,6 +1551,16 @@ culvert_storage_write_last_failure_age_seconds %d
 	// _unavailable is 1 while a backend is in its cooldown, and
 	// _gated_denials_total is the blast radius — requests denied without
 	// contacting the backend while it was gated.
+	//
+	// Terminology note: this is the SAME condition the "identity_backend_unreachable"
+	// alert (internal/alerts/store.go) and the "identity_backend" operator-contract
+	// row (diagnostics.go checkIdentityBackend) name. The metric prefix is still
+	// "auth_backend": dashboards and alert rules key off these exact series names,
+	// so it is not renamed in place. A rename is tracked as terminology finding
+	// T-61 and would need a dual-emission window, as the T-31 ClamAV rename did
+	// (culvert_clam_scan_errors_total, pinned by clamav_metrics_dualemit_test.go).
+	// Until then, read this comment as the cross-reference from the alert or the
+	// contract row to the PromQL series.
 	abSnap := authBackendHealthStatus()
 	abDegraded := 0
 	if abSnap.Degraded {

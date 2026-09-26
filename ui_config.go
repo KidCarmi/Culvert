@@ -192,6 +192,12 @@ func apiStats(w http.ResponseWriter, r *http.Request) {
 		// metrics scraper wired up. A climbing count means an unauthenticated
 		// source is probing /api/auth/login.
 		"loginOversizeRejected": loginOversizeRejected.Load(),
+		// SEC-REQID-1: client-supplied X-Request-Id / Traceparent headers
+		// replaced because they were over-long or carried bytes that must not
+		// reach the process log. The request itself is never refused, so
+		// without this count the probing is invisible to an operator who has
+		// no metrics scraper or shell access to the log.
+		"tracingHeaderRejected": requestIDRejected.Load() + traceparentRejected.Load(),
 	})
 }
 
@@ -1908,13 +1914,47 @@ func apiSettings(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "invalid JSON", http.StatusBadRequest)
 			return
 		}
-		if body.Pass != "" {
-			if err := validatePasswordComplexity(body.Pass); err != nil {
-				http.Error(w, err.Error(), http.StatusBadRequest)
+		// CHAOS-70 round 3. This branch used to call cfg.SetAuth and NOTHING
+		// ELSE, and it is reached from the GUI's Settings panel
+		// (saveSettings(), static/index.html). Three faults, all measured
+		// against the real handler:
+		//
+		//  1. It persisted NOTHING. SetAuth mirrors the credential into
+		//     c.uiUsers, but no roster write followed and AdminSettings does
+		//     not carry the admin credential, so a rotated admin password
+		//     answered 200 {"ok":true}, was audited as settings.update,
+		//     authenticated live — and reverted at the next restart, where the
+		//     OLD (leaked) password authenticated again. That is the same
+		//     "rotate a leaked password" hazard this sweep exists for, except
+		//     UNCONDITIONAL: no disk fault required.
+		//  2. It accepted an EMPTY password. Complexity was validated only
+		//     `if body.Pass != ""`, so {"user":"x","pass":""} installed
+		//     bcrypt("") as an ADMIN credential — and, for a new username, an
+		//     admin ACCOUNT that authenticates with no password. The GUI form
+		//     sends whatever the password box holds, so leaving it blank while
+		//     editing the username reached this by accident.
+		//  3. It accepted an EMPTY user, which is SetAuth's documented way to
+		//     DISABLE local authentication. Clearing both fields therefore
+		//     switched off local admin auth with a "Settings saved" toast.
+		//
+		// Fixing (1) alone would have been a REGRESSION: persisting is what
+		// makes (2) and (3) survive a restart, so the three are one change.
+		// Running without credentials stays supported — through the
+		// defaultAuthOutcome endpoint, which is explicit about it — not by
+		// blanking a text field.
+		if strings.TrimSpace(body.User) == "" {
+			http.Error(w, "user is required; to run unmatched traffic without credentials set "+
+				"defaultAuthOutcome=Exempt instead", http.StatusBadRequest)
+			return
+		}
+		if err := validatePasswordComplexity(body.Pass); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if err := cfg.SetAuthDurably(body.User, body.Pass); err != nil && !rosterChangeCommitted(err) {
+			if refuseRosterChange(w, r, "settings.update", "auth", err) {
 				return
 			}
-		}
-		if err := cfg.SetAuth(body.User, body.Pass); err != nil {
 			http.Error(w, "internal error", http.StatusInternalServerError)
 			return
 		}
@@ -2356,10 +2396,11 @@ func registerSettingsRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/export", apiExport)
 
 	// ── Backup / restore / config versioning ──────────────────────────────
-	mux.HandleFunc("/api/config/export", apiConfigExport)     // GET — download exported config JSON
-	mux.HandleFunc("/api/config/import", apiConfigImport)     // POST — restore from exported config JSON
-	mux.HandleFunc("/api/config/versions", apiConfigVersions) // GET list / POST rollback
-	mux.HandleFunc("/api/config/diff", apiConfigDiff)         // GET diff between versions
+	mux.HandleFunc("/api/config/export", apiConfigExport)                // GET — download exported config JSON
+	mux.HandleFunc("/api/config/import", apiConfigImport)                // POST — restore from exported config JSON
+	mux.HandleFunc("/api/config/versions", apiConfigVersions)            // GET list / POST rollback
+	mux.HandleFunc("/api/config/diff", apiConfigDiff)                    // GET diff between versions
+	mux.HandleFunc("/api/config/rollback-scope", apiConfigRollbackScope) // GET settings excluded from rollback
 
 	// ── Auth / network / session settings ─────────────────────────────────
 	mux.HandleFunc("/api/settings/default-auth-outcome", apiDefaultAuthOutcome) // PUT — toggle proxy auth requirement
