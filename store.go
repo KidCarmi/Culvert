@@ -414,9 +414,17 @@ const maxAuditLogs = audit.MaxRing
 
 func init() {
 	audit.SetSIEM(func(e audit.Entry) {
-		if globalSyslog != nil {
-			globalSyslog.WriteAudit(e)
+		// Sampled BEFORE the Writer lookup: an install landing between the
+		// two would otherwise erase this event's loss (see syslogSkipArmed).
+		armed := syslogSkipArmed()
+		if sw := activeSyslog(); sw != nil {
+			sw.WriteAudit(e)
+			return
 		}
+		// No Writer: an operator-configured collector that never came up
+		// loses every event here, and a Writer's counters cannot record a
+		// loss that happened because there is no Writer (CHAOS-72, Codex P2).
+		noteSyslogEventSkipped(armed)
 	})
 }
 
@@ -2395,9 +2403,15 @@ func persistLogEntry(ip, method, host, status, ruleMatched, actionTaken, identit
 	auth.applyTo(&entry)
 	logAdd(entry)
 	// Forward request log entry to syslog/SIEM if configured (Finding 17.2).
-	if globalSyslog != nil {
-		globalSyslog.WriteRequest(entry)
+	// The arming sample is taken first — see syslogSkipArmed.
+	armed := syslogSkipArmed()
+	if sw := activeSyslog(); sw != nil {
+		sw.WriteRequest(entry)
+		return
 	}
+	// See the audit fan-out above: a configured collector with no Writer is
+	// losing every one of these, and it must be counted (CHAOS-72, Codex P2).
+	noteSyslogEventSkipped(armed)
 }
 
 // ─── Top hosts ────────────────────────────────────────────────────────────────

@@ -30,6 +30,13 @@ func loadBackgroundServices(cfg backgroundServicesStartupConfig, ctx context.Con
 	// persistent-admin-state loader, immediately after LoadAdminSettings, to avoid a
 	// boot sweep running the default caps for up to one tick.
 
+	// CHAOS-72: the SIEM feed's degradation transition. The drop observer is
+	// driven by traffic, and traffic stops — a collector that dies and is then
+	// followed by a quiet period would cross the threshold with nothing left
+	// to fire the alert. Detection only; no-ops when no collector is
+	// configured.
+	go startSyslogHealthWatchdog(ctx)
+
 	// ADR-0011 §3: decryption inspection-coverage trend sampler (volatile time-series
 	// behind the Decryption Health panel's coverage-erosion chart).
 	go startDecCoverageSampler(ctx)

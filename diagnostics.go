@@ -884,7 +884,8 @@ func checkOIDCJWKSTrust() OperatorContractCheck {
 // checkAuditPersistence. Side-effect-free: reads process state only, never
 // dials the collector (use POST /api/syslog/test for an active probe).
 func checkSyslogFeed() OperatorContractCheck {
-	if syslogConfiguredAddr == "" {
+	connectedTarget, intendedTarget, serving := syslogConfiguredSnapshot()
+	if intendedTarget == "" {
 		return OperatorContractCheck{
 			Code:    "syslog_feed",
 			Status:  diagOK,
@@ -900,13 +901,35 @@ func checkSyslogFeed() OperatorContractCheck {
 	// globalSyslog stays non-nil pointing at the PREVIOUS collector while intent
 	// has moved on — the persisted SIEM target is silently down but a nil-check
 	// would still report OK.
-	if globalSyslog == nil || syslogConfigured != syslogConfiguredAddr {
+	if serving == nil || connectedTarget != intendedTarget {
+		// Name the MAGNITUDE, not just the state. "Events are not reaching
+		// the collector" is the diagnosis; "how much have I lost?" is the
+		// question an operator asks next, and until CHAOS-72's round 7 the
+		// answer was structurally zero on every surface — the loss happens
+		// because there is no Writer, so no Writer's counters could hold it.
+		lost := ""
+		if n := syslogFeedState().Drops; n > 0 {
+			lost = fmt.Sprintf(" (%d event(s) lost so far)", n)
+		}
 		return OperatorContractCheck{
 			Code:           "syslog_feed",
 			Status:         diagFail,
-			Message:        "configured but failed to connect — remote syslog/SIEM forwarding is silently down, events are not reaching the collector",
-			OperatorAction: "Verify the collector host/port and network path, then re-save the syslog target (POST /api/syslog) or restart the proxy; use POST /api/syslog/test to confirm connectivity.",
+			Message:        "configured but failed to connect — remote syslog/SIEM forwarding is silently down, events are not reaching the collector" + lost,
+			OperatorAction: "Verify the collector host/port and network path, then re-save the syslog target (POST /api/syslog) or restart the proxy; use POST /api/syslog/test to confirm connectivity. Events lost while the collector was unreachable are not replayed.",
 		}
+	}
+	// CHAOS-72: everything above decides on state fixed at INIT time, and was
+	// the whole row. It answers "did we connect once?" and then reports
+	// "forwarding is active" for the rest of the process lifetime — including
+	// for a collector that died an hour later and has been swallowing every
+	// audit event since. Measured against the pre-fix tree: 49 of 49 audit
+	// lines dropped, this row still ok, still "active".
+	//
+	// The init-time branches stay FIRST and are unchanged: they catch the case
+	// where no Writer exists at all, which the delivery view cannot see because
+	// there is nothing to read stats from.
+	if row, ok := checkSyslogFeedDelivery(); ok {
+		return row
 	}
 	return OperatorContractCheck{
 		Code:    "syslog_feed",

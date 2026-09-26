@@ -885,6 +885,199 @@ endpoints for credentialed parents.
   password is now a fatal startup error instead of silently reaching
   `cfg.SetAuth("", pass)`, which disabled local authentication entirely
   and discarded the configured password.
+- **The SIEM/syslog feed reported that it was forwarding when it had stopped
+  (CHAOS-72).** The `syslog_feed` operator-contract row decided on two strings
+  fixed at startup, so a collector that went away during ordinary uptime left
+  the node reporting `ok` — *"remote syslog/SIEM forwarding is active"* — while
+  every audit and request event was discarded. Measured against the pre-fix
+  tree: 49 of 49 audit events dropped, row still `ok`. Delivery loss reached no
+  Prometheus series (so no alerting rule could be written), no `/healthz`
+  field, no alert and no log line; the one counter that existed was cumulative
+  with no time axis, so it could not distinguish a feed that is dark now from
+  one that healed last week. `internal/syslog` now records delivery with a
+  timestamp and a bounded failure reason, and `syslog_health.go` exposes
+  `culvert_syslog_*` (emitted only when a collector is configured),
+  `syslogDrops` on `/healthz` when non-zero, a delivery verdict on the
+  diagnostics row and a fire-once `syslog_feed_down` alert. Degradation
+  requires an UNRESOLVED loss (losses since the last delivery, not the
+  cumulative count) plus five minutes without a delivery, so it cannot fire on
+  an idle node and a healed blip cannot mark a working feed as down; the
+  transition is evaluated both on loss and on an independent 30-second timer, so
+  a collector that dies and is then followed by a quiet period still pages.
+  Recovery is declared only on an event that actually reaches the collector. `GET /api/syslog` gains `delivered`, `degraded`,
+  `neverDelivered`, `lastSuccessUnix`, `secondsSinceEvent`,
+  `lastFailureReason`, `queueDepth`, `queueCap` and `deliveryProvable`
+  (contract `SyslogConfig`). Note that `udp://` — the default when the address
+  omits a scheme — cannot prove delivery at all; every surface now says so.
+
+- **`culvert_syslog_drops_total` could go BACKWARDS when the collector was
+  re-pointed (CHAOS-72).** The health snapshot copied the record's retired
+  totals and the writer they belong to under one lock, then re-read the
+  *currently active* writer after releasing it — so a re-point landing in that
+  gap paired a new writer's counters with retired totals that had already
+  absorbed the old one's finals, and a whole generation's losses vanished from
+  the scrape. Prometheus reads a decreasing counter as a reset and discards the
+  interval. The snapshot now reads the writer it captured.
+- **The SIEM alert said nothing had ever connected when something was still
+  delivering (CHAOS-72).** A node that connects one collector and then fails to
+  connect a newly configured one keeps delivering to the first. That is
+  correctly reported degraded, but the page read *"no connection was ever
+  established"* and *"NOTHING is serving it"* — both false, and both send an
+  operator to debug a dial that succeeded. The alert and log line now
+  distinguish a superseded target from a feed that never came up, and say that
+  events are still reaching the previous collector. Those events are
+  deliberately not counted as drops: they reached a collector, and
+  `culvert_syslog_drops_total` measures events that reached no SIEM at all.
+
+- **`POST /api/syslog/test` could still report a UDP datagram as accepted
+  (CHAOS-72).** The previous fix asked the writer the probe was handed, but a
+  collector re-pointed while the test event is queued hands that event — and
+  its acknowledgement — to a successor which may use a different transport, so
+  a probe queued on TCP and sent over UDP was still reported as accepted by
+  the collector. The acknowledgement now carries the transport of the writer
+  that actually sent it.
+- **Events lost at the end of a long re-point chain were counted nowhere, and
+  a healthy collector could be blamed for them (CHAOS-72).** A queued line
+  follows a bounded chain of replaced collectors; past that bound the loss was
+  charged to a collector whose totals had already been folded into the
+  exported counters, so it appeared in neither `culvert_syslog_drops_total`
+  nor `/healthz`. The same walk also checked its bound one step too early, so
+  it could charge the loss to a collector it had never offered the line to —
+  recording a failure reason against a collector that is working. Both fixed;
+  the loss is now counted for the process even when no live writer can hold it.
+- **Turning the SIEM collector off while another request was turning it on
+  could leave the two disagreeing (CHAOS-72).** The address the admin API
+  reports and `admin_settings.json` persists was written after the collector
+  was published rather than with it, so an interleaved disable could leave the
+  process forwarding nowhere while every config surface said forwarding was
+  on — and the next restart re-enabled a collector the operator had switched
+  off. The address is now published and cleared in the same step as the
+  collector itself, and every reader goes through an accessor that takes the
+  same lock.
+
+- **Disabling an unreachable SIEM collector could page about it and silence
+  the NEXT one (CHAOS-72).** The guard that refuses a stale degradation commit
+  compared the writer pointer the snapshot was taken from against the one the
+  record now holds. A collector whose dial failed leaves no writer, and
+  disabling forwarding also leaves no writer, so `nil != nil` was false and the
+  stale commit landed anyway: it fired `syslog_feed_down` for a feature the
+  operator had just switched off, and set that record's fire-once latch, so the
+  first real outage after forwarding was next enabled would have been silent.
+  The health record now carries a generation bumped by every install, disable
+  and reset, and the commit compares that instead — an identity rather than a
+  pointer that can collide with another absent writer's.
+- **`POST /api/syslog/test` could report a UDP datagram as accepted by the
+  collector (CHAOS-72).** The probe took the writer it sent through as an
+  argument but then read the configured target address separately to decide
+  whether the transport can prove delivery, so a collector re-pointed between
+  the two reads made it answer *"the collector accepted the test event"* for a
+  datagram nothing may have received. UDP cannot confirm receipt, which every
+  other surface says; the probe now asks the writer that served the line.
+
+- **A SIEM event lost while a write was in flight could report the feed DOWN
+  even though that write succeeded (CHAOS-72).** The failure count was read
+  when the delivery began rather than when its write completed, so a
+  queue-full drop landing in between was never resolved by the success; once
+  such a loss became datable it could outlast the degradation window on its
+  own, and a node that then went idle paged DOWN off a delivery that had
+  worked. A delivery now resolves every loss recorded before it completed; the
+  loss itself is still counted.
+- **Disabling a SIEM collector that never connected kept counting losses
+  (CHAOS-72).** Turning forwarding off cleared the health record but left
+  skipped-event accounting armed, so every later audit and request event was
+  charged as a SIEM loss for the life of the process and the bogus totals
+  reappeared when forwarding was switched back on.
+- **`/healthz` omitted the SIEM losses `/metrics` reported (CHAOS-72).** The
+  `syslogDrops` field was gated on a writer having been installed, so it was
+  withheld for precisely the outage — a configured collector whose dial never
+  succeeded — in which every event is being lost.
+- **Events lost to a SIEM collector that never connected were counted nowhere
+  (CHAOS-72).** A configured-but-unreachable collector was reported down
+  (`culvert_syslog_up 0`, a failing `syslog_feed` row), but both the audit and
+  request fan-outs skip when no writer exists, so every lost event was charged
+  to nothing: `culvert_syslog_drops_total` read `0` and `/healthz` carried no
+  `syslogDrops` throughout the worst outage the plane can report. The loss is
+  now folded into the process-lifetime total and named on the contract row.
+  Counting is armed only while an operator has asked for a collector and none
+  is installed, so a node that forwards nowhere still reports nothing.
+- **The Settings panel reported "no delivery drops" right after a SIEM
+  collector was re-pointed (CHAOS-72).** The drop counters are
+  process-lifetime and survive a re-point, but the save handler rendered them
+  from the save response, which does not carry them — an absent field reads as
+  zero in the browser, so the panel showed a clean feed for one that had just
+  lost events, until the page was reloaded. The panel now re-reads the
+  authoritative `GET /api/syslog`, which is the one source for those numbers;
+  a failed re-read leaves the existing count rather than showing a zero.
+- **A SIEM event lost while no collector was connected could be uncounted if a
+  collector connected immediately afterwards (CHAOS-72).** The check for
+  "is a configured collector currently unmet" was made when the loss was
+  charged rather than when the event failed to find a collector, so a
+  successful reconnection landing in between erased a loss that had already
+  happened.
+- **Re-pointing or disabling a SIEM collector discarded most of the loss
+  history it had just recorded (CHAOS-72).** A displaced collector's totals
+  were folded into the exported counters at the moment it was displaced,
+  while its queue was still being flushed, so every loss recorded during that
+  final flush was held by nothing. Measured against the real disable path with
+  a dead collector, of 2000 lost events between 32 and 1999 were missing from
+  `culvert_syslog_drops_total` and `/healthz` — in one run the exported total
+  read **zero** for a feed that had just lost everything. A displaced
+  collector is now tracked until its queue has drained and its final totals
+  are published, and only then folded; losses recorded after that point are
+  counted for the process instead, so each one is counted exactly once.
+- **A SIEM feed serving a superseded collector paged repeatedly (CHAOS-72).**
+  When a node connects one collector and then fails to connect a newly
+  configured one, it keeps delivering to the first and is correctly reported
+  down. But a successful delivery to that first collector cleared the
+  fire-once latch for the configured one and logged "SIEM feed delivering
+  again", so the watchdog re-fired the DOWN alert on its next tick — a page
+  every half minute, and a log line asserting a recovery that had not
+  happened. A delivery no longer resolves an episode while the configured
+  collector is still unreachable.
+- **An omnibus settings save could persist a SIEM address paired with the
+  wrong collector (CHAOS-72).** The configured address and the collector
+  serving it were read in two separate steps, so a disable in between
+  persisted an address the operator had just switched off — re-enabled at the
+  next restart — and a re-point persisted one collector's address with the
+  previous one's wire format. Address, intent and collector are now read
+  together, in the same step that publishes them.
+- **A queued event could be sent to a collector the operator had already
+  replaced (CHAOS-72).** The handoff walk reported "no successor" both when
+  there genuinely was none and when its hop bound was exhausted; the drain loop
+  read the second as the first and delivered through the displaced writer's own
+  connection. Exhausting the bound is now a counted loss, never a fall-back.
+- **A dropped event that raced a successful delivery left its outage undatable
+  (CHAOS-72).** The delivery was dated when its bookkeeping ran rather than when
+  the write was attempted, so a concurrent queue-full drop looked older than the
+  success it raced; the health plane refuses to date such an episode, so the
+  feed could never reach the degradation threshold and the diagnostics row read
+  "FAILING NOW … failing for 0s" for as long as the node stayed quiet.
+- **`POST /api/syslog/test` could not fail (CHAOS-72).** It answered
+  `{"ok": true}` unconditionally, which was correct while delivery was
+  synchronous and became a channel-send acknowledgement once it was not: it
+  returned `ok` for a collector that had been dead for a week, while the
+  diagnostics row pointed operators at it to "confirm connectivity". It now
+  waits, bounded, for a real outcome and reports `delivered`, `sent`
+  (UDP — unprovable), `dropped` with the reason, or `unknown`. The outcome is
+  that of the probe's own message, acknowledged by the delivery goroutine,
+  rather than an inference from node-wide counters that another request's
+  success could satisfy.
+
+- **Re-pointing the syslog collector leaked a goroutine and a descriptor
+  (CHAOS-72).** `InitSyslog` overwrote the active writer without closing it,
+  stranding the previous one's delivery goroutine on an unreachable queue while
+  holding its collector socket open — the abandoned collector saw an
+  `ESTABLISHED` connection that never closed. Reached on every boot of an
+  appliance configured from both YAML and persisted admin settings, not only on
+  an admin re-point.
+
+- **The syslog writer handle was read on the request path while the admin plane
+  mutated it (CHAOS-72).** `globalSyslog` was a bare package-level pointer
+  written by `POST /api/syslog` and read by `recordRequest`, the audit fan-out
+  and three health surfaces — a data race confirmed under `-race`. It is now an
+  atomic pointer published by a single swap, with every call site loading once
+  into a local.
+
 - The root-CA recovery record (CHAOS-50) could report a recovery with the
   wrong attempt count. A successful attempt set `recovered` from inside the
   attempt while the campaign loop counted it only after the attempt returned,
