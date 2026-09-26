@@ -6493,8 +6493,19 @@ function clearChangePasswordFields() {
   document.getElementById('cp-err').style.display = 'none';
   document.getElementById('cp-err').textContent = '';
 }
+// _cpReqGen names the dialog instance a pending submit belongs to. Every open
+// and close advances it, so a request that completes after the dialog was
+// cancelled (or closed and reopened) cannot close, re-enable or write an error
+// into a dialog it no longer owns.
+let _cpReqGen = 0;
+function resetChangePasswordSaveBtn() {
+  const btn = document.getElementById('cp-save-btn');
+  btn.disabled = false; btn.textContent = 'Save';
+}
 function openChangePasswordModal() {
+  _cpReqGen++;
   clearChangePasswordFields();
+  resetChangePasswordSaveBtn();
   const modal = document.getElementById('change-password-modal');
   modal.classList.add('open');
   modalActivate(modal, '#cp-current', closeChangePasswordModal);
@@ -6506,6 +6517,7 @@ function dismissChangePasswordModal() {
   closeChangePasswordModal();
 }
 function closeChangePasswordModal() {
+  _cpReqGen++;
   const modal = document.getElementById('change-password-modal');
   modalDeactivate(modal);
   modal.classList.remove('open');
@@ -6526,14 +6538,18 @@ async function submitChangePassword() {
 
   const btn = document.getElementById('cp-save-btn');
   btn.disabled = true; btn.textContent = 'Saving…';
+  const gen = _cpReqGen;
   try {
     await api('/api/auth/change-password', {
       method: 'POST',
       body: { current_password: current, new_password: next }
     });
-    closeChangePasswordModal();
+    // The change happened even if the dialog was dismissed meanwhile, so the
+    // user is always told; only the dialog it was sent from is closed.
     toast('Password changed.');
+    if (gen === _cpReqGen) closeChangePasswordModal();
   } catch (err) {
+    if (gen !== _cpReqGen) return; // dialog was dismissed/reopened: not ours
     if (err && err.message === 'Unauthorized') {
       // The session expired: api() has already raised the login overlay.
       // Clear and close this dialog so the typed passwords are never left
@@ -6544,7 +6560,7 @@ async function submitChangePassword() {
       showChangePasswordErr(err.message || 'Password change failed.');
     }
   }
-  btn.disabled = false; btn.textContent = 'Save';
+  if (gen === _cpReqGen) resetChangePasswordSaveBtn();
 }
 
 // ── Users & Roles ────────────────────────────────────────────────────────

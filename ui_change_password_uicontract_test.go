@@ -250,3 +250,44 @@ func TestUIContract_StickyBarsTrackTopbarHeight(t *testing.T) {
 		}
 	}
 }
+
+// A submit that completes after the dialog was cancelled (or cancelled and
+// reopened) must not close, re-enable or write an error into a dialog it no
+// longer owns: open/close advance a generation token the continuation checks.
+func TestUIContract_ChangePasswordStaleSubmitCannotTouchReopenedDialog(t *testing.T) {
+	html, err := os.ReadFile(staticIndexHTMLPath())
+	if err != nil {
+		t.Fatalf("read index.html: %v", err)
+	}
+	s := string(html)
+	body := func(sig string) string {
+		i := strings.Index(s, sig)
+		if i < 0 {
+			t.Fatalf("%s not found", sig)
+		}
+		b := s[i:]
+		if k := strings.Index(b, "\n}\n"); k >= 0 {
+			b = b[:k]
+		}
+		return b
+	}
+	for _, sig := range []string{"function openChangePasswordModal() {", "function closeChangePasswordModal() {"} {
+		if !strings.Contains(body(sig), "_cpReqGen++") {
+			t.Errorf("%s must advance _cpReqGen", sig)
+		}
+	}
+	if !strings.Contains(body("function openChangePasswordModal() {"), "resetChangePasswordSaveBtn()") {
+		t.Error("openChangePasswordModal must reset a Save button a stale request left disabled")
+	}
+	sub := body("async function submitChangePassword() {")
+	for _, want := range []string{
+		"const gen = _cpReqGen;",
+		"if (gen === _cpReqGen) closeChangePasswordModal();",
+		"if (gen !== _cpReqGen) return;",
+		"if (gen === _cpReqGen) resetChangePasswordSaveBtn();",
+	} {
+		if !strings.Contains(sub, want) {
+			t.Errorf("submitChangePassword must guard its continuation: missing %q", want)
+		}
+	}
+}
