@@ -12,6 +12,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -410,6 +411,14 @@ var destinationSinks = map[string]string{
 	"JoinHostPort":        "net; string construction only",
 	"DialContext":         "net.Dialer; the error it returns is sanitised at the log site",
 	"sanitizeLog":         "the sanitiser itself",
+	// CHAOS-69 destination-authority bound. All three receive the destination
+	// only to MEASURE it, which is the whole design decision behind the bound's
+	// log line: the LENGTH is what an operator needs to tell a probe from a
+	// broken client, and a copy of the value — even a prefix — would reopen the
+	// write amplification the bound exists to close.
+	"canonicalHostOversize":     "proxy_host_bounds.go; a pure len() comparison on the normalized host — returns a bool, logs nothing, stores nothing",
+	"noteOversizeHostRejection": "proxy_host_bounds.go; receives len(host), never the host: its log line carries the byte COUNT, the protocol and the peer IP only",
+	"len":                       "builtin; yields an int, so the bytes cannot survive the call",
 }
 
 // TestSOCKS5_EveryDestinationSinkIsAudited is the SECOND wall, and it closes
@@ -420,7 +429,15 @@ var destinationSinks = map[string]string{
 // states why those attacker-chosen bytes are safe in it.
 func TestSOCKS5_EveryDestinationSinkIsAudited(t *testing.T) {
 	fset, fn := parseHandleSOCKS5(t)
-	raw := map[string]bool{"host": true, "target": true}
+	// The normalized destination counts as raw. normalizeHostStrict is NOT a log
+	// sanitiser — TestNormalizeHostStrict_IsNotALogSanitiser pins that as a FACT —
+	// so normSOCKS5Host can still carry the control characters that forge a log
+	// record. CHAOS-69 introduced that variable and it escaped this wall until the
+	// stale registry entry for its deleted predecessor gave the omission away: the
+	// wall flags unregistered CALLEES, never an unwatched VALUE, so a new
+	// client-derived local is invisible to it by construction. Whoever adds the
+	// next one must add it here too.
+	raw := map[string]bool{"host": true, "target": true, "normSOCKS5Host": true}
 
 	seen := 0
 	ast.Inspect(fn.Body, func(n ast.Node) bool {
@@ -443,6 +460,92 @@ func TestSOCKS5_EveryDestinationSinkIsAudited(t *testing.T) {
 
 	if seen < 5 {
 		t.Fatalf("the sink wall matched only %d forwarding calls; it is no longer finding them", seen)
+	}
+}
+
+// TestSOCKS5_DestinationSinkRegistryHasNoStaleEntries keeps the registry honest in
+// the other direction. The wall above flags an unregistered CALLEE; it says nothing
+// about an entry naming a function that no longer exists, so a rename or a deletion
+// leaves a reason recorded for code that is gone while the replacement goes
+// unaudited. CHAOS-69 did exactly that: it replaced destHostOversize with
+// canonicalHostOversize, and the wall stayed green with the dead name registered and
+// the live one missing.
+//
+// Declared names are collected by AST rather than by grepping for "func name(",
+// because a sink can legitimately be a package-level VAR binding rather than a
+// function declaration — pluginDecision is `pluginDecision = plugin.Decide`, and a
+// textual check reports it as stale. Builtins and methods on other packages' types
+// are exempt: they are not declared here at all.
+func TestSOCKS5_DestinationSinkRegistryHasNoStaleEntries(t *testing.T) {
+	exempt := map[string]bool{
+		"len":          true, // builtin
+		"IsBlocked":    true, // method on *blocklist.Store
+		"JoinHostPort": true, // net
+		"DialContext":  true, // method on *net.Dialer
+	}
+
+	declared := packageLevelDeclarations(t)
+
+	for name := range destinationSinks {
+		if exempt[name] {
+			continue
+		}
+		if !declared[name] {
+			t.Errorf("destinationSinks registers %q, but nothing by that name is declared in package main — "+
+				"a rename or deletion left a recorded reason behind while its replacement goes unaudited", name)
+		}
+	}
+}
+
+// packageLevelDeclarations returns every package-level function and var/const
+// name declared in package main's non-test sources.
+//
+// Extracted from the gate above rather than inlined: the AST walk's nested
+// switch over declaration kinds pushed the test past the gocognit threshold (35
+// of 30), which the _test.go exclusions do NOT cover — they exempt funlen, dupl,
+// cyclop, errcheck and unparam only. Worth knowing before writing another
+// AST-walking gate in a test file.
+func packageLevelDeclarations(t *testing.T) map[string]bool {
+	t.Helper()
+	files, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatalf("glob: %v", err)
+	}
+	declared := map[string]bool{}
+	fset := token.NewFileSet()
+	for _, f := range files {
+		if strings.HasSuffix(f, "_test.go") {
+			continue
+		}
+		af, perr := parser.ParseFile(fset, f, nil, 0)
+		if perr != nil {
+			t.Fatalf("parse %s: %v", f, perr)
+		}
+		collectPackageDecls(af, declared)
+	}
+	if len(declared) < 100 {
+		t.Fatalf("only %d package-level names collected; the AST walk is not finding declarations", len(declared))
+	}
+	return declared
+}
+
+// collectPackageDecls records af's package-level function and value names.
+func collectPackageDecls(af *ast.File, into map[string]bool) {
+	for _, d := range af.Decls {
+		switch decl := d.(type) {
+		case *ast.FuncDecl:
+			if decl.Recv == nil { // package-level function, not a method
+				into[decl.Name.Name] = true
+			}
+		case *ast.GenDecl:
+			for _, spec := range decl.Specs {
+				if vs, ok := spec.(*ast.ValueSpec); ok {
+					for _, n := range vs.Names {
+						into[n.Name] = true
+					}
+				}
+			}
+		}
 	}
 }
 
