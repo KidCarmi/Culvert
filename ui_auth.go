@@ -53,20 +53,38 @@ func verifyLoginTOTP(w http.ResponseWriter, r *http.Request, clientIP, user, cod
 	if totpOK {
 		// Persist the matched counter to close the replay window for this
 		// step and all earlier steps within the skew tolerance.
-		cfg.SetTOTPLastCounter(user, matchedCounter)
-		cfg.SaveUIUsersFile() //nolint:errcheck // best-effort persist
+		// CHAOS-70: fail-open but never silent — see noteRosterPersistBestEffort
+		// for why the login is not refused when this write does not land. The
+		// mutate and the persist run as ONE transaction (mutateRosterBestEffort)
+		// so a concurrent admin mutation's rollback cannot discard this update.
+		noteRosterPersistBestEffort("TOTP replay counter", cfg.mutateRosterBestEffort(func() bool {
+			return cfg.SetTOTPLastCounter(user, matchedCounter)
+		}))
 		return true
 	}
-	if cfg.ConsumeBackupCode(user, code) {
-		// Backup code consumed — persist removal.
-		cfg.SaveUIUsersFile() //nolint:errcheck // best-effort persist
+	// Backup code consumed — persist the removal in the same transaction. A
+	// code whose removal does not reach disk is valid again after a restart
+	// (single-use violated); counted and logged rather than discarded, and
+	// never rolled back by a concurrent admin write (CHAOS-70).
+	consumedBackupCode := false
+	backupPersistErr := cfg.mutateRosterBestEffort(func() bool {
+		consumedBackupCode = cfg.ConsumeBackupCode(user, code)
+		return consumedBackupCode
+	})
+	if consumedBackupCode {
+		noteRosterPersistBestEffort("backup-code consumption", backupPersistErr)
 		return true
 	}
 	// TOTP failures MUST feed the lockout counter — otherwise an attacker
 	// who has (or guesses) a valid password can brute-force the 6-digit OTP
 	// (1M possibilities) with only the 300 ms delay as a barrier.
 	nowLocked := loginLimiter.RecordFailure(clientIP, user)
-	cfg.SaveUIUsersFile() //nolint:errcheck // best-effort persist
+	// No roster write here (CHAOS-70): loginLimiter is internal/lockout, an
+	// in-memory, deliberately non-persisted store (register row AU-4), so
+	// RecordFailure changes nothing ui_users.json carries. The removed
+	// SaveUIUsersFile() re-serialised every account and bcrypt hash and fsync'd
+	// a rename on EVERY failed OTP — persisting nothing, on the brute-force
+	// path this branch exists to rate-limit.
 	auditEvent(r, "auth.totp.fail", user,
 		fmt.Sprintf("invalid TOTP, locked=%v, attempts_left=%d", nowLocked, loginLimiter.AttemptsLeft(clientIP, user)))
 	time.Sleep(300 * time.Millisecond)
@@ -829,11 +847,17 @@ func apiSetupComplete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := cfg.SetAuth(body.User, body.Pass); err != nil {
-		http.Error(w, "internal error: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-	if err := cfg.SaveUIUsersFile(); err != nil {
+	// CHAOS-70 (Codex round 2): ONE transaction. SetAuth mirrors the new admin
+	// into the roster, so it must be serialised against every other roster
+	// mutation — uiAuthMiddleware grants RoleAdmin to all requests while
+	// !IsConfigured(), so POST /api/auth/users is reachable DURING setup and a
+	// failing admin mutation's rollback could otherwise delete this account.
+	// See SetAuthDurably for the full interleaving.
+	if err := cfg.SetAuthDurably(body.User, body.Pass); err != nil && !rosterChangeCommitted(err) {
+		if !errors.Is(err, ErrRosterNotPersisted) {
+			http.Error(w, "internal error: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
 		// SetAuth already mutated in-memory state, which would otherwise make
 		// IsConfigured() true for the rest of this process's lifetime even
 		// though the credential was never durably saved — a restart before a
@@ -844,8 +868,8 @@ func apiSetupComplete(w http.ResponseWriter, r *http.Request) {
 		// operator's retry goes through the normal (retryable) setup path
 		// rather than hitting "setup already complete" with no session and no
 		// persisted credential.
+		// (rolled back inside SetAuthDurably, under the transaction lock).
 		logger.Printf("UIUsers: failed to persist: %v", err)
-		cfg.RollbackFailedSetupAuth(body.User)
 		http.Error(w, "internal error: admin credentials could not be saved to disk; setup did not complete — check disk space/permissions and retry", http.StatusInternalServerError)
 		return
 	}

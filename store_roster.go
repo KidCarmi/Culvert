@@ -142,7 +142,23 @@ func (c *Config) commitRoster(expectedRev *int64, mutate func(tx *rosterTx) erro
 	nextRev := current + 1
 	if path != "" {
 		if err := writeRosterEnvelope(path, rosterEnvelope(next, string(outcome), nextRev, tx.counter)); err != nil {
-			return current, fmt.Errorf("%w: %v", errRosterPersistFailed, err)
+			// CHAOS-70 (main #1469) meets the FE-6A.0 transaction here. Two
+			// rules from that change apply to this write too:
+			//   - fileutil.ErrReplacedNotSynced means the rename ALREADY landed
+			//     the new envelope and only the parent-directory fsync failed
+			//     (FE-6B.0 round 3's atomic-dir seam); every future reader,
+			//     including a restart, sees the new roster, so refusing here
+			//     would leave the FILE carrying a change the process denies —
+			//     the memory/disk split this transaction exists to prevent.
+			//     rosterChangeCommitted logs it and the commit proceeds.
+			//   - every other write failure is a REFUSAL, nothing published,
+			//     and it is charged to the same counter main's legacy-shaped
+			//     handlers charge (culvert_admin_roster_persist_failures_total)
+			//     so the metric is truthful on these handlers too.
+			if !rosterChangeCommitted(err) {
+				noteRosterPersistRefused(string(outcome), err)
+				return current, fmt.Errorf("%w: %v", errRosterPersistFailed, err)
+			}
 		}
 	}
 	c.mu.Lock()

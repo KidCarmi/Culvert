@@ -2556,7 +2556,7 @@ Firefox (all platforms):
           <div class="panel-body">
             <div class="form-group">
               <label class="form-label">Username</label>
-              <input type="text" class="input" style="width:100%" id="s-user" placeholder="Leave empty to disable auth">
+              <input type="text" class="input" style="width:100%" id="s-user" placeholder="Username (required)">
             </div>
             <div class="form-group">
               <label class="form-label">Password</label>
@@ -2564,6 +2564,9 @@ Firefox (all platforms):
             </div>
             <button class="btn" data-click="saveSettings">Save Credentials</button>
             <p style="font-size:.72rem;color:var(--muted);margin-top:10px;">
+              A username and a password meeting the complexity policy are both required.
+              To run unmatched traffic without credentials, set
+              <strong>Default authentication behavior</strong> to Exempt instead.
               Changes apply immediately without restart.
             </p>
           </div>
@@ -3269,6 +3272,10 @@ Firefox (all platforms):
           Default Action
         </span>
         First matching policy rule wins. Blocklist and threat feed blocks happen before policy evaluation.
+      </div>
+
+      <div id="pol-persist-warning" class="banner crit" style="display:none" role="alert">
+        <svg class="ico" aria-hidden="true"><use href="#i-alert-triangle"/></svg> <strong>Not persisted:</strong> access rules are stored in memory only and will be <strong>lost on restart or update</strong>. Start Culvert with <code>-policy /data/policy.json</code> (or set <code>proxy.policy_file</code> in config.yaml) to persist them.
       </div>
 
       <!-- Rule Table -->
@@ -10099,6 +10106,8 @@ async function fetchPolicy() {
       const dt = new Date(d.updatedAt);
       uBadge.textContent = 'updated ' + dt.toLocaleString();
     }
+    const persistWarn = document.getElementById('pol-persist-warning');
+    if (persistWarn) persistWarn.style.display = (d && d.persisted === false) ? '' : 'none';
     renderPolicy();
   } catch(e) { console.error(e); }
   // policy-draft (G2): refresh the commit-mode toggle + pending-changes bar.
@@ -11426,6 +11435,14 @@ async function syncBlocklistFeed(url) {
 async function saveSettings() {
   const user = document.getElementById('s-user').value;
   const pass = document.getElementById('s-pass').value;
+  if (!user.trim()) {
+    toast('Username is required. To run unmatched traffic without credentials, set Default authentication behavior to Exempt.', 'error');
+    return;
+  }
+  if (!pass) {
+    toast('Password is required.', 'error');
+    return;
+  }
   try {
     await api('/api/settings', {
       method: 'POST',
