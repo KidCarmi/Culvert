@@ -269,6 +269,12 @@ type PolicyStore struct {
 	path      string
 	version   int64  // incremented on every mutation
 	updatedAt string // RFC3339 timestamp of last mutation
+	// adoptUnsaved is set when Load adopted a path whose file did not exist
+	// and the immediate write of the current in-memory rules FAILED: the path
+	// is configured but nothing is on disk, so Persisted() must keep reporting
+	// false (the GUI warning stays up) until a later write succeeds. Only a
+	// successful SaveErr, or a later Load, clears it.
+	adoptUnsaved atomic.Bool
 }
 
 // policyVersion returns the current version number and last-updated time.
@@ -276,6 +282,22 @@ func (ps *PolicyStore) policyVersion() (int64, string) {
 	ps.mu.RLock()
 	defer ps.mu.RUnlock()
 	return ps.version, ps.updatedAt
+}
+
+// Path returns the store's current persistence path ("" when in-memory).
+func (ps *PolicyStore) Path() string {
+	ps.mu.RLock()
+	defer ps.mu.RUnlock()
+	return ps.path
+}
+
+// Persisted reports whether rule changes are written to disk. False means the
+// store is in-memory only (no -policy / policy_file configured) and every
+// add/edit/delete/reorder is lost on restart — mirrors IdPRegistry.Persisted.
+func (ps *PolicyStore) Persisted() bool {
+	ps.mu.RLock()
+	defer ps.mu.RUnlock()
+	return ps.path != "" && !ps.adoptUnsaved.Load()
 }
 
 // bumpVersion must be called under ps.mu.Lock().
@@ -317,17 +339,57 @@ func (ps *PolicyStore) ensureVersionAbove(floor int64) {
 var policyStore = &PolicyStore{}
 
 // Load reads rules from a JSON file. Missing file is treated as empty ruleset.
+//
+// ps.path is adopted ONLY on a definite outcome — a successful adopt-write
+// below, or a successfully parsed existing file — never merely because Load
+// was CALLED with a path. A read/parse failure leaves path and adoptUnsaved
+// exactly as they were: applyHotReload survives a Load error and keeps
+// running (only initPolicy's boot-time call treats one as fatal), so a
+// malformed reload target must not make the store silently claim a path
+// that was never actually adopted while the OLD rules stay live in memory.
+// Every assignment to ps.path is under ps.mu — Persisted(), SaveErr(),
+// loadMeta() and saveMeta() all read it from a different goroutine
+// (concurrent HTTP handlers) than the one running a SIGHUP reload.
 func (ps *PolicyStore) Load(path string) error {
-	ps.path = path
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
+			// Adopting a path with no file yet — a fresh install, or a hot
+			// reload (applyHotReload) that just turned persistence on for a
+			// store that may already hold in-memory-only rules from before
+			// the switch. Persisted() reports durability from ps.path alone,
+			// so without this write it would start claiming true the instant
+			// the path is set, even though the current rules exist nowhere
+			// on disk — silencing the GUI warning while a crash before the
+			// next mutation would still discard them. Best-effort and never
+			// fatal: SaveErr's own atomic-write failure (e.g. the parent
+			// directory doesn't exist) must not turn a graceful load into a
+			// boot failure at initPolicy — that failure surfaces the normal
+			// way, on the next rule mutation's own persist attempt.
+			// adoptUnsaved is set BEFORE the path is exposed, and only
+			// SaveErr's own successful write (via saveTo) clears it — never
+			// here. Clearing it here first and only re-setting it on a
+			// failed save left a window, between the unlock below and
+			// SaveErr returning, where a concurrent GET /api/policy read
+			// path != "" && !adoptUnsaved and reported persisted:true for
+			// rules that had not yet reached disk (Codex review, PR #1445).
+			ps.mu.Lock()
+			ps.path = path
+			ps.adoptUnsaved.Store(true)
+			ps.mu.Unlock()
+			if saveErr := ps.SaveErr(); saveErr != nil {
+				logWarnf("Policy: adopted %s but could not persist current rules yet: %v", sanitizeLog(path), saveErr)
+			}
 			return nil
 		}
+		// A real read failure (permissions, I/O error): the OLD path/rules
+		// stand untouched, exactly as if this call had never happened.
 		return err
 	}
 	var rules []*PolicyRule
 	if err := json.Unmarshal(data, &rules); err != nil {
+		// Malformed file: same reasoning — do not adopt a path whose content
+		// was never actually loaded.
 		return err
 	}
 	// Auth-aware fail-closed load gate (Phase 1 Slice 3, shared with ReplaceAll via
@@ -353,6 +415,7 @@ func (ps *PolicyStore) Load(path string) error {
 	}
 	rules = kept
 	ps.mu.Lock()
+	ps.path = path
 	previousCounters := make(map[string]*policyRuleCounters, len(ps.rules))
 	for _, current := range ps.rules {
 		if validRuleID(current.ID) && current.counters != nil {
@@ -367,6 +430,8 @@ func (ps *PolicyStore) Load(path string) error {
 		}
 	}
 	ps.sortLocked()
+	// A successfully parsed, existing file is durable by definition.
+	ps.adoptUnsaved.Store(false)
 	ps.mu.Unlock()
 	// Restore persisted version from sidecar .meta file.
 	ps.loadMeta()
@@ -419,10 +484,13 @@ type policyMeta struct {
 }
 
 func (ps *PolicyStore) loadMeta() {
-	if ps.path == "" {
+	ps.mu.RLock()
+	path := ps.path
+	ps.mu.RUnlock()
+	if path == "" {
 		return
 	}
-	metaPath := ps.path + ".meta"
+	metaPath := path + ".meta"
 	data, err := os.ReadFile(metaPath)
 	if err != nil {
 		return
@@ -439,7 +507,10 @@ func (ps *PolicyStore) loadMeta() {
 }
 
 func (ps *PolicyStore) saveMeta() {
-	if ps.path == "" {
+	ps.mu.RLock()
+	path := ps.path
+	ps.mu.RUnlock()
+	if path == "" {
 		return
 	}
 	ps.saveMu.Lock()
@@ -447,12 +518,12 @@ func (ps *PolicyStore) saveMeta() {
 	ps.mu.RLock()
 	m := policyMeta{Version: ps.version, UpdatedAt: ps.updatedAt}
 	ps.mu.RUnlock()
-	ps.saveMetaSnapshot(m)
+	ps.saveMetaSnapshot(path, m)
 }
 
-func (ps *PolicyStore) saveMetaSnapshot(m policyMeta) {
+func (ps *PolicyStore) saveMetaSnapshot(path string, m policyMeta) {
 	data, _ := json.Marshal(m)
-	_ = atomicWriteFile(ps.path+".meta", data, 0o600)
+	_ = atomicWriteFile(path+".meta", data, 0o600)
 }
 
 // Per-rule hit counters + lastHit are persisted by the metrics-layer system
@@ -472,9 +543,21 @@ func (ps *PolicyStore) Save() { _ = ps.SaveErr() }
 // so a restart silently reverted the commit and stranded a learning
 // acceptance with no durable target).
 func (ps *PolicyStore) SaveErr() error {
-	if ps.path == "" {
+	ps.mu.RLock()
+	path := ps.path
+	ps.mu.RUnlock()
+	if path == "" {
 		return nil
 	}
+	return ps.saveTo(path)
+}
+
+// saveTo persists the current rules to path, a value SaveErr snapshotted
+// before waiting on saveMu. A concurrent Load may adopt a DIFFERENT path in
+// that window, so a successful write clears adoptUnsaved only when path is
+// still the store's current path — a save that landed on a superseded path
+// says nothing about whether the current one is durable.
+func (ps *PolicyStore) saveTo(path string) error {
 	// Mutations may proceed while persistence runs, but saves themselves must be
 	// ordered end-to-end. Otherwise an older snapshot can rename after a newer
 	// save and regress durable policy state.
@@ -498,10 +581,15 @@ func (ps *PolicyStore) SaveErr() error {
 	// Atomic + durable write — temp file, fsync, rename, parent-dir fsync.
 	// Skip saveMeta on failure so the .meta sidecar can't record a newer
 	// version/timestamp than the rules actually on disk.
-	if err := atomicWriteFile(ps.path, data, 0o600); err != nil {
+	if err := atomicWriteFile(path, data, 0o600); err != nil {
 		return fmt.Errorf("write policy rules: %w", err)
 	}
-	ps.saveMetaSnapshot(meta)
+	ps.mu.Lock()
+	if ps.path == path {
+		ps.adoptUnsaved.Store(false)
+	}
+	ps.mu.Unlock()
+	ps.saveMetaSnapshot(path, meta)
 	return nil
 }
 
