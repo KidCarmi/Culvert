@@ -2,7 +2,8 @@
 
 ## 0. Current status (authoritative)
 
-As of 2026-09-25, main `b59c054` (#1497: per-platform qualification pulls,
+As of 2026-09-25, main `fb0e92c` (#1498, the lane start order, §18.5.1)
+plus the second determinism slice (§19.1); before it, main `b59c054` (#1497: per-platform qualification pulls,
 §21.7.1; the first build-once release, `v1.0.244`, §21.7.2) plus the lane
 start-order change measured in §18.5.1; before it, main `0cf1245` (#1488,
 toolchain consistency, §20) plus build-once image promotion (§21); before it, main `6ec745d` (#1487); before that, main `75dbb8b` (#1486: targeted report dispatches skip the
@@ -35,7 +36,12 @@ Remaining backlog, in the order the measurements support (§18.5):
    trials. Start order adopted; the separate job rejected.
 2. **Determinism** — the longest job on both QA (≈860 s) and the Deep PR
    gate (median 897 s). First slice done: repeated OpenAPI fixture
-   preparation in the conformance tests (§19).
+   preparation in the conformance tests (§19). Second slice (§19.1): a
+   whole-package profile found the HA resume wait in `TestChaos55` was
+   234 s of the root double run's 936 s, almost all of it waiting; shortened
+   for the tests that only use the resume as setup, the root double run
+   falls from a median 910.9 s to 735.7 s locally. Next candidate: the MCP
+   event spool's per-spool PBKDF2 (≈221 s of CPU).
 3. **Root-state/package isolation** — packages whose tests share process or
    on-disk state cannot be split or reordered safely; this bounds items 1–2.
 4. **Repeated static-contract work** — many walls re-read and re-parse the
@@ -2872,6 +2878,149 @@ discarded and repeated after freeing space.
 files on disk, so every new test file changes the MCP ledger's
 `SCANNED (N files)` claim. That is its design. This change moves it to
 2,605.
+
+### 19.1 Whole-package profile, and the HA resume wait (second determinism slice)
+
+§19 ended by asking for a profile of the whole root package before the
+next determinism slice. This is that profile, and the change it justified.
+
+**How it was measured.**
+- The configuration is the determinism job's own: no `-race`, no coverage,
+  `-count=2`, shuffled, `TEST_SEED=20260421`.
+- One prebuilt root test binary (Go 1.26.8, 4-core box) ran the complete
+  root package, with test binaries, profiles and logs outside the checkout.
+- Three sources were combined:
+  * the `test2json` timeline, per top-level test instance, with time shared
+    evenly when tests overlap so nothing is counted twice (no subtest times
+    are summed);
+  * a `-test.cpuprofile`;
+  * a sampler reading the process's CPU, child-process CPU, machine-wide CPU
+    and I/O every 0.25 s.
+- Wall time with little CPU behind it is waiting.
+
+**Baseline profile** (main `fb0e92c`, shuffle seed 1001): 936 s wall and
+516 s process CPU; the process was idle for 461 s of wall time.
+
+| Family (both repetitions) | Wall | CPU | What it is doing |
+|---|---|---|---|
+| `TestChaos55` (HA fencing-lease recovery, 20 tests) | **234 s** | 2.3 s | waiting: ~6 s per resume against a simulated-down etcd |
+| `TestChaos58` (LDAP stalls) | 26 s | 1.1 s | waiting on bounds the tests assert |
+| `TestChaos56` (shutdown bounds) | 25 s | 2.3 s | waiting on bounds the tests assert |
+| `TestLiveProd`, `TestHTTPSE2E`, `TestCoordinatorRehearsal`, … | 10–22 s each | ≈ wall | CPU-bound; see the PBKDF2 finding below |
+
+The CPU side, separately: **PBKDF2 is 291 s of the 508 s of CPU samples
+(57 %)**. 221 s of that is `spool.New` → `openCryptor` → `secret.Seal` →
+`ca.EncryptBundle`: the MCP event spool seals a fresh data key with
+600,000-iteration PBKDF2 every time a test builds one (`liveTestEvents`
+117 s, `buildMCPTelemetry` 88 s). bcrypt is another 51 s.
+
+**Why the HA wait, not PBKDF2.**
+- The HA wait is one mechanism, entirely setup, removable inside tests
+  without touching what they assert.
+- `acquireLeaseForResume` retries an unreachable backend every 2 s until
+  `haResumeUnreachableWait` (5 s) passes, so each resume blocks 6.0 s.
+  `TestChaos55_StopIsPromptDuringRecoveryBackoff` resumes 8 times per
+  repetition, 48.4 s each. Seven other tests resume once per repetition, and
+  none of them asserts anything about the resume's duration or attempt
+  count. That is ≈180 s of setup.
+- PBKDF2 cost is per spool. Removing it means sharing spools across tests
+  (loses isolation) or changing how production seals the key (a security
+  change). It is the next candidate, not this change.
+
+**Change.**
+- `HAState` gains two unexported per-instance fields,
+  `testResumeUnreachableWait` and `testResumeRetryBackoff`.
+  `acquireLeaseForResume` reads its budget through
+  `resumeUnreachableTiming()`, which returns the production constants when
+  they are zero. Nothing global changes, and production never sets them.
+- `shortResumeBudget(h)` sets 50 ms / 10 ms for the eight tests whose
+  subject comes after the resume hands off: the recovery loop, its metrics,
+  the fence decisions and `Stop`. Their resume takes the same path —
+  failed acquires, then the read-only leader role with recovery armed —
+  and stops retrying sooner.
+- The two tests that pin the budget itself keep the production values:
+  `ResumeAbsorbsAShortBackendOutage` (a 3 s outage must be absorbed) and
+  `ResumeDoesNotBlockBootOnALongOutage` (the resume must return within
+  budget + one retry + slack).
+- The ghost-lease tests use a different budget and are untouched.
+
+**Correctness.**
+- **The inventory is unchanged** except for the new wall: 6,544 → 6,545
+  tests (`-test.list`); every other name is identical.
+- **The new wall**, `TestChaos55_ResumeBudgetTestsKeepProductionTiming`:
+  * an `HAState` nobody shortened resumes with 5 s / 2 s;
+  * neither budget test references the override (AST walk);
+  * no non-test file assigns it.
+- **Mutations, each run against the affected tests:**
+
+| Mutation | Baseline | Candidate |
+|---|---|---|
+| Resume never arms recovery | 7 tests fail | the same 7 fail |
+| Resume gives up on the first transport error (the pre-CHAOS-55 shape) | — | `ResumeAbsorbsAShortBackendOutage` fails (production timing, so unchanged) |
+| Production code sets the override | — | the wall fails |
+| A budget test uses `shortResumeBudget` | — | the wall fails |
+| Recovery backoff ignores `Stop` | **not caught** | **not caught** |
+
+  The last row is pre-existing and identical on both sides: the first
+  recovery backoff is ≈1 s, inside `StopIsPrompt…`'s 2 s bound. It is
+  recorded here, not fixed in this change.
+- `go test -count=2 -shuffle=20260925 -timeout=20m ./...` with
+  `TEST_SEED=20260421` on the candidate: **passed**, all 110 packages, 780 s wall, the root package 775.2 s (alongside the other packages, as in CI).
+- golangci-lint (`--new-from-rev`) reports 0 issues.
+
+**Local result.** Unprofiled root double runs, run as interleaved pairs
+(base/cand, cand/base, base/cand), with the same prebuilt binaries, box and
+environment. Each pair shares a shuffle seed; `TEST_SEED` is 20260421 in
+every run and is not Go's shuffle seed. All 6 runs passed.
+
+| Pair (shuffle seed) | Baseline | Candidate | Δ |
+|---|---|---|---|
+| 1 (1101) | 917.4 s | 735.7 s | −181.7 s |
+| 2 (1202) | 903.2 s | 737.5 s | −165.7 s |
+| 3 (1303) | 910.9 s | 722.2 s | −188.7 s |
+| **Median** | **910.9 s** | **735.7 s** | **−175 s (−19 %)** |
+
+| Level | Baseline | Candidate |
+|---|---|---|
+| Family: `TestChaos55`, both repetitions (per run) | 233.3–233.9 s | 55.2–56.1 s |
+| Everything else in the root package (per run) | 669–684 s | 666–682 s |
+
+- **The saving is the family's saving.** The family falls by ≈178 s, the
+  rest of the package does not move, and the package falls by the same
+  amount.
+- The spread within each side is ≈15 s. The difference is ≈12 times
+  larger, so it is not runner noise. This is the attribution §19 could not
+  make for its own change.
+
+**CI result (PR #1501, head `eeeba4c`, one sample).**
+
+| Measure | This PR | Reference |
+|---|---|---|
+| Deep determinism job ([36163090082](https://github.com/KidCarmi/Culvert/actions/runs/36163090082)) | 734 s | median ≈880 s; 794–1,008 s over 10 identical-source dispatches (§18.5.1) |
+| Shuffled double-run step | 691 s | 752–965 s over the same 10 |
+| Root package inside it | 611.6 s | 750.2 s and 744.6 s (§19) |
+| Deep runner-seconds | 888 | 1,156–1,372 in the §18.5.1 trials |
+| Time until both PR gates finish | not comparable | see below |
+
+- **Gate completion time is not comparable on this sample.** Runners
+  queued jobs for up to 683 s (Fast) and 352 s (Deep) that day, against a
+  median job queue of 3 s in §18.5.1.
+- **Fast needed one re-run for an unrelated failure.** The first attempt
+  failed in root shard 0 on `TestChaos64_StaleServesDoNotStackRefreshes`:
+  the DNS-resolver test race recorded in §19, in a test this change does
+  not touch. The re-run of the failed jobs was green.
+- The shuffled step landed below the whole identical-source range,
+  consistent with the local −175 s. One sample still cannot establish a
+  gate speedup, so none is claimed. Natural runs after merge are the
+  evidence.
+
+**Rollback.** Revert this change. The production resume path is
+byte-for-byte the same when the override is unset, so nothing but test
+time moves.
+
+**Next candidate: the event-spool key derivation** (≈221 s of CPU, above).
+It needs a decision about spool isolation or production sealing, not a
+test-side edit.
 
 ## 20. Toolchain consistency: one pinned Go compiler
 
