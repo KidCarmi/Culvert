@@ -76,10 +76,54 @@ var syslogPublishMu sync.Mutex
 
 // disableActiveSyslog clears the active writer and the health record as one
 // serialized transition, releasing the writer it displaced.
+// syslogLateDrops is the engine's process-lifetime count of losses charged to
+// a Writer whose totals had already been retired — see internal/syslog's
+// lateDrops. Wrapped here so the health plane has one local name for the
+// three terms of its drop total.
+func syslogLateDrops() uint64 { return syslog.LateDrops() }
+
+// syslogConfiguredTargets reads the config metadata under the same lock that
+// publishes it. Read through this, never off the variables directly.
+//
+// The pair was a plain read/write pair on package variables, written by the
+// admin plane and read from handler goroutines, which this file's own header
+// recorded as a follow-up to close. Moving the writes inside the publication
+// transaction (Codex P2, PR #1494) made that follow-up load-bearing rather
+// than latent: InitSyslog is reached concurrently, so the write is now on a
+// concurrent path and the unsynchronised read is a confirmed race under
+// -race. A new writer is a new concurrency context — the same lesson this
+// sweep recorded when its own observer joined the drain goroutine.
+//
+// connected is the target a Writer was actually installed for; intended is
+// what an operator asked for, which is recorded even when the dial fails.
+func syslogConfiguredTargets() (connected, intended string) {
+	syslogPublishMu.Lock()
+	defer syslogPublishMu.Unlock()
+	return syslogConfigured, syslogConfiguredAddr
+}
+
+// noteSyslogConfiguredIntent records the target an operator asked for, before
+// any dial is attempted, so a failed connect is still reported as a
+// configured-but-down feed rather than as no feed at all.
+func noteSyslogConfiguredIntent(addr string) {
+	syslogPublishMu.Lock()
+	syslogConfiguredAddr = addr
+	syslogPublishMu.Unlock()
+}
+
 func disableActiveSyslog() {
 	syslogPublishMu.Lock()
 	old := globalSyslog.Swap(nil)
 	noteSyslogForwardingDisabled()
+	// The config metadata is part of the SAME transition as the writer.
+	// It used to be cleared by the admin handler after this call returned,
+	// so an enable that had already published its writer could resume in the
+	// gap and re-set these strings: the process then had no active writer
+	// while GET /api/syslog and admin_settings.json both said forwarding was
+	// on, and the next restart re-enabled a target nobody had asked for
+	// (Codex P2, PR #1494).
+	syslogConfigured = ""
+	syslogConfiguredAddr = ""
 	syslogPublishMu.Unlock()
 	if old != nil {
 		old.SetDeliveryObserver(nil)
@@ -119,6 +163,13 @@ func InitSyslog(addr, syslogFmt string) error {
 	syslogPublishMu.Lock()
 	releaseReplacedSyslogWriter(globalSyslog.Swap(sw), sw)
 	noteSyslogWriterInstalled(sw, addr)
+	// Published with the writer, not by the caller afterwards — see
+	// disableActiveSyslog for the interleaving that made the two disagree.
+	// Callers must NOT assign these on success; they may still record the
+	// INTENT (syslogConfiguredAddr) before calling, which is what survives a
+	// dial that never produces a writer.
+	syslogConfigured = addr
+	syslogConfiguredAddr = addr
 	syslogPublishMu.Unlock()
 	logger.Printf("Syslog: forwarding to %s://%q (format=%s)", network, sanitizeLog(target), sanitizeLog(sw.Format()))
 	return nil

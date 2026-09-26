@@ -8964,8 +8964,8 @@ correction paragraph then stated **32**, which was also wrong: the file held
 `syslog_stats_test.go`, 3 → 4 in `syslog_handoff_format_test.go`) were right.
 
 Counts move every round, so the authoritative figure is the one in the round's
-own `Gates:` line and nowhere else. As of round 10: **41** root gates, **13**
-engine stats gates, **4** handoff gates, **18** declared controls. Recording
+own `Gates:` line and nowhere else. As of round 11: **44** root gates, **13**
+engine stats gates, **6** handoff gates, **23** declared controls. Recording
 the same total in a second place is what produced both errors; this paragraph
 survives as the record of that, not as a second source of truth.
 
@@ -9296,3 +9296,113 @@ finding, so it is not a substitute. The control now applies a NAMED predicate
 shared with the check it vouches for — better than the negation on its own
 terms, since a control that re-derives the rule can pass while the rule it
 vouches for has drifted.
+
+### Round 11 — two round-10 fixes landing one hop short, and a transition that left its metadata behind
+
+**P2-16 — the acknowledgement must carry the transport, because only the
+sender knows it.** Round 10 bound the probe's `delivered`-vs-`sent` wording to
+the Writer the CALLER held. That is correct against a re-point and still
+wrong, because `handOffQueued` moves a queued line — its ack channel included
+— to a successor that may speak a different transport. A probe queued on a TCP
+writer and handed to a UDP one was reported as *"the collector accepted the
+test event"* for a datagram nothing may have received.
+
+It is round 10's own defect surviving one hop along, in the endpoint whose
+whole job is to be believed, and it is the third time this plane has been
+caught inferring an answer instead of carrying it (round 7 on the outcome,
+round 10 on the transport, now on the transport again after a handoff).
+`WriteProbe` returns a `ProbeOutcome{Delivered, Provable}` stamped by the
+Writer that actually performed the send; `ackQueued` takes that Writer as an
+argument, and the flush-timeout branch — where nothing sent the line — passes
+nil.
+
+> When a value can be handed on, bind the claim to the thing that will finally
+> act on it, not to the thing you were given.
+
+**P2-17 — a loss at the end of a bounded walk must be countable, and the walk
+must not charge a writer it never asked.** The exported drop total is each
+displaced Writer's finals, folded at the moment it is displaced, plus the LIVE
+Writer's own counters. A drop charged to an intermediate after its fold
+therefore lands nowhere: real compliance loss, absent from
+`culvert_syslog_drops_total` and `/healthz`, on the one series this plane
+exists to keep honest.
+
+`send` also checked its hop bound at the TOP of its loop, so on exhaustion `w`
+held a writer that had been assigned and never asked. With the live writer
+sitting at the exhaustion point that charged a drop to a healthy collector
+which never saw the line, and stamped `closed` on its `LastFailureReason` —
+which is an input to the health plane. Neither shape delivers the line; the
+bound is spent either way. What changes is whether the evidence names the
+writer that actually refused.
+
+The bound is now spent before advancing, and the exhausted terminal charges a
+process-lifetime `lateDrops` IN ADDITION to the Writer's own counter — the
+`syslogSkippedNoWriter` precedent. It cannot double-count: both terminal sites
+are reached only through `enqClosed`, and a closed Writer's finals were folded
+strictly before it could be walked past. The end-of-chain branch is
+deliberately not charged, because that writer is the live one and its drop is
+already read.
+
+**P2-15 — the config metadata was not part of the transition it describes.**
+`syslogConfigured` / `syslogConfiguredAddr` decide what `GET /api/syslog`
+reports, what `checkSyslogFeed` compares and what `admin_settings.json`
+persists. The admin handler assigned them AFTER `InitSyslog` returned, outside
+`syslogPublishMu`, so a concurrent disable clearing the writer and the strings
+in between left the process with no active writer while every config surface
+said forwarding was on — and the next restart re-enabled a target the operator
+had switched off. They are now set inside the same critical section that
+publishes the writer, and cleared inside the disable's; callers record only the
+INTENT beforehand, which is what survives a dial that produces no writer.
+
+**That fix made a deferred follow-up load-bearing, and it had to be closed in
+the same change.** This section had recorded the pair as an unsynchronised
+read/write to be repointed at the health record later. That was tolerable
+while the writes sat on the admin handler. Moving them into `InitSyslog` puts
+the write on a CONCURRENT path, and the concurrent-repoint gate caught the
+read as a real race under `-race` within minutes — *a new writer is a new
+concurrency context*, this sweep's own lesson arriving for the third time.
+Every access now goes through `syslogConfiguredTargets()` /
+`noteSyslogConfiguredIntent()`, and a structural wall forbids naming either
+variable outside its owning files: a direct read is correct on a quiet node
+and racy only under a re-point, which is the case no ordinary test drives.
+
+> Deferring a known hazard is a judgement about REACHABILITY, not about the
+> hazard. When a change moves code onto a path that reaches it, the deferral
+> expires with that change — it does not carry over on the strength of having
+> been written down.
+
+**Gates.** `TestProbeAckCarriesTheSendingTransport` and
+`TestSendExhaustedWalkIsCountableAndTriesItsLastWriter` in the engine;
+`TestChaos72_ConfigMetadataIsPublishedWithTheWriter` and
+`TestChaos72_ConfigMetadataIsReadOnlyThroughItsAccessors` in the root. Each has
+its own control. Four mutations verified failing the gate that targets them:
+an ack that ignores its sender, the late-drop charge removed, the bound
+restored to the top of the loop, and the metadata assignment moved back
+outside the transaction.
+
+**One gate was VACUOUS on its first shape and mutation is what found it**, as
+in round 10. The off-by-one assertion was written against a chain longer than
+the bound, where the exhaustion point lands on an intermediate — so the
+pre-fix and fixed shapes both charge a closed writer and the gate could not
+tell them apart (verified: it passed against the reverted loop). It now places
+the LIVE writer exactly at the exhaustion point, which is the only arrangement
+where the two shapes differ observably.
+
+**Self-review, same round: the late-drop counter was counted into a void.**
+The first shape of P2-17 added `lateDrops`, charged it at both terminal sites,
+exported `LateDrops()` and gated it — and never folded it into `snap.Drops`.
+The loss therefore moved a counter that no surface reads, which is precisely
+the defect the counter was added to close, committed inside its own fix.
+
+The engine gate could not see it, and that is the whole lesson rather than an
+excuse: it asserts the COUNTER moves, and the counter did. Measured, not
+recalled — with the fold removed,
+`TestSendExhaustedWalkIsCountableAndTriesItsLastWriter` stays GREEN while
+`TestChaos72_LateDropsReachTheExportedTotal` fails on all three surfaces it
+reads (`syslogFeedState`, `/healthz`'s `syslogDropCount`, and the real
+`culvert_syslog_drops_total` exposition body).
+
+> When a fix adds a counter, the deliverable is the SURFACE, never the
+> counter. Gate the surface — *walling the function is not walling the path*,
+> which this section has now recorded four times and demonstrated once against
+> its own work.

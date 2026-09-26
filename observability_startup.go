@@ -13,11 +13,12 @@ package main
 //     an observability failure.
 //   - Log strings are unchanged so operators see the same startup
 //     banner and the same fallback warnings.
-//   - syslogConfigured is set to cfg.SyslogAddr only after a
-//     successful InitSyslog. Preserves the dual-write contract with
-//     admin_settings.go:140 — the admin API readback at
-//     admin_settings.go:242–243 sees the same initial value as
-//     before.
+//   - syslogConfigured is set to cfg.SyslogAddr only on a successful
+//     InitSyslog — but by InitSyslog itself, inside the same critical
+//     section that publishes the writer, so the two can never disagree
+//     (Codex P2, PR #1494). Callers record only the INTENT beforehand,
+//     which is what survives a dial that produces no writer. Read both
+//     through syslogConfiguredTargets(), never off the variables.
 //   - globalOTLP and globalOTLPTraces both receive Configure when
 //     OTLPEndpoint is non-empty. Their internal goroutine lifecycles
 //     are unchanged — out of scope for the slice.
@@ -35,17 +36,18 @@ func loadObservability(cfg observabilityStartupConfig) {
 		// Record intent regardless of Init's outcome (see syslogConfiguredAddr)
 		// so checkSyslogFeed can distinguish an intentional no-SIEM setup from a
 		// configured feed that silently failed to connect at startup.
-		syslogConfiguredAddr = cfg.SyslogAddr
+		noteSyslogConfiguredIntent(cfg.SyslogAddr)
 		// Same intent, recorded where the health plane can read it under a
 		// mutex (CHAOS-72 P1-F): without it a failed dial exports no
 		// culvert_syslog_* series at all, so the documented
 		// `culvert_syslog_up == 0` paging rule cannot fire for a feed that
 		// never came up.
 		noteSyslogIntent(cfg.SyslogAddr)
+		// On success InitSyslog publishes syslogConfigured with the writer, in
+		// one critical section; the intent recorded above is what survives a
+		// dial that never produces one.
 		if err := InitSyslog(cfg.SyslogAddr, cfg.SyslogFormat); err != nil {
 			logger.Printf("Syslog: connect failed (%v) — continuing without syslog", err)
-		} else {
-			syslogConfigured = cfg.SyslogAddr
 		}
 	}
 

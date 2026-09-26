@@ -913,8 +913,8 @@ func TestChaos72_ProbeTracksItsOwnMessageNotTheWriterTotals(t *testing.T) {
 		t.Fatal("probe could not be queued against a healthy collector")
 	}
 	select {
-	case ok := <-ack:
-		if !ok {
+	case out := <-ack:
+		if !out.Delivered {
 			t.Error("probe reported its own line as lost against a healthy collector")
 		}
 	case <-time.After(5 * time.Second):
@@ -946,8 +946,8 @@ func TestChaos72_ProbeTracksItsOwnMessageNotTheWriterTotals(t *testing.T) {
 	outcome := "not-queued"
 	if queued2 {
 		select {
-		case ok := <-ack2:
-			if ok {
+		case out := <-ack2:
+			if out.Delivered {
 				outcome = "delivered"
 			} else {
 				outcome = "dropped"
@@ -2235,4 +2235,255 @@ func TestChaos72_TransportClaimHasOneSource(t *testing.T) {
 	if snap := syslogFeedState(); !snap.UDP {
 		t.Error("control: a configured-but-unconnected udp:// collector must still carry the UDP caveat")
 	}
+}
+
+// Enabling and disabling the SIEM feed must publish the writer and the config
+// metadata as ONE transition (CHAOS-72, Codex P2 round 11).
+//
+// `syslogConfigured` / `syslogConfiguredAddr` decide what `GET /api/syslog`
+// reports, what `checkSyslogFeed` compares, and what `admin_settings.json`
+// persists. The admin handler used to assign them AFTER InitSyslog returned,
+// outside `syslogPublishMu`, so a concurrent disable could clear the writer
+// and the strings in between: the process was then left with NO active writer
+// while every config surface said forwarding was on — and the next restart
+// re-enabled a target the operator had switched off.
+//
+// The window is a few instructions wide and cannot be scheduled through the
+// HTTP handler, so the invariant is pinned on the transitions themselves:
+// after either one, the writer and the metadata must agree.
+func TestChaos72_ConfigMetadataIsPublishedWithTheWriter(t *testing.T) {
+	ensureObservabilityStartupTestLogger(t)
+	snapshotObservabilityGlobals(t)
+	resetSyslogHealthForTest()
+	t.Cleanup(resetSyslogHealthForTest)
+
+	agree := func(stage string) {
+		t.Helper()
+		live := activeSyslog() != nil
+		named := syslogConfigured != ""
+		if live != named {
+			t.Errorf("%s: a writer is %v but syslogConfigured is %q — every config surface and "+
+				"admin_settings.json now disagree with what the process is actually doing",
+				stage, live, syslogConfigured)
+		}
+		if syslogConfigured != syslogConfiguredAddr {
+			t.Errorf("%s: syslogConfigured=%q but syslogConfiguredAddr=%q; checkSyslogFeed compares "+
+				"these two and would report a healthy feed as misconfigured",
+				stage, syslogConfigured, syslogConfiguredAddr)
+		}
+	}
+
+	col := startSyslogCollector(t)
+	addr := "tcp://" + col.addr
+
+	if err := InitSyslog(addr, "rfc3164"); err != nil {
+		t.Fatalf("InitSyslog(%q): %v", addr, err)
+	}
+	agree("after enable")
+	if syslogConfigured != addr {
+		t.Errorf("enable did not publish the address: syslogConfigured=%q, want %q", syslogConfigured, addr)
+	}
+
+	disableActiveSyslog()
+	agree("after disable")
+
+	// A second enable/disable pair: the strings must not survive either way.
+	if err := InitSyslog(addr, "rfc3164"); err != nil {
+		t.Fatalf("re-enable: %v", err)
+	}
+	agree("after re-enable")
+	disableActiveSyslog()
+	agree("after second disable")
+
+	// CONTROL: the transition must actually SET the metadata, not merely keep
+	// it consistent. A pair of functions that never touched either string
+	// would satisfy every assertion above on a process that started empty.
+	if err := InitSyslog(addr, "rfc3164"); err != nil {
+		t.Fatalf("control enable: %v", err)
+	}
+	if syslogConfigured == "" || syslogConfiguredAddr == "" {
+		t.Fatal("control: enabling the feed published no config metadata at all")
+	}
+}
+
+// The config-metadata variables must be reached only through their guarded
+// accessors (CHAOS-72, Codex P2 round 11).
+//
+// `syslogConfigured` / `syslogConfiguredAddr` are published under
+// `syslogPublishMu` with the writer. They are read by the diagnostics row, the
+// admin API and the settings snapshot, all on handler goroutines, while
+// `InitSyslog` writes them from whatever goroutine re-points the collector —
+// a confirmed data race under `-race` once the writes moved into the
+// transaction, and previously a latent one this file's header had recorded as
+// a follow-up.
+//
+// Behavioural coverage cannot reach a future call site that reads them
+// directly: it would be correct on a quiet node and racy only under a
+// concurrent re-point, which is exactly the case no ordinary test drives. So
+// the access is pinned structurally — the declarations and the accessors live
+// in syslog.go/ui_config.go, and nothing else may name them outside a comment.
+func TestChaos72_ConfigMetadataIsReadOnlyThroughItsAccessors(t *testing.T) {
+	owners := map[string]bool{"syslog.go": true, "ui_config.go": true}
+	names := []string{"syslogConfigured", "syslogConfiguredAddr"}
+
+	files, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatalf("glob: %v", err)
+	}
+	checked := 0
+	for _, f := range files {
+		if owners[f] || strings.HasSuffix(f, "_test.go") {
+			continue
+		}
+		src, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatalf("read %s: %v", f, err)
+		}
+		for i, line := range strings.Split(string(src), "\n") {
+			code := line
+			if idx := strings.Index(code, "//"); idx >= 0 {
+				code = code[:idx]
+			}
+			for _, n := range names {
+				// Word boundary: syslogConfiguredAddr must not match
+				// syslogConfigured.
+				for _, m := range findIdent(code, n) {
+					_ = m
+					t.Errorf("%s:%d reads or writes %s directly: %s\n\t"+
+						"these are published under syslogPublishMu with the writer; a direct access "+
+						"races a concurrent re-point. Use syslogConfiguredTargets() or "+
+						"noteSyslogConfiguredIntent().", f, i+1, n, strings.TrimSpace(line))
+				}
+			}
+			checked++
+		}
+	}
+	if checked < 1000 {
+		t.Fatalf("the scan covered only %d lines; the file selector has stopped matching and this wall proves nothing", checked)
+	}
+
+	// CONTROL: the matcher must be able to SEE an access, or a broken
+	// identifier scan would pass forever.
+	if len(findIdent("\tif syslogConfigured != \"\" {", "syslogConfigured")) != 1 {
+		t.Fatal("control: the identifier matcher cannot find a direct read")
+	}
+	if len(findIdent("\tx := syslogConfiguredAddr", "syslogConfigured")) != 0 {
+		t.Fatal("control: the identifier matcher is not word-bounded and would flag syslogConfiguredAddr as syslogConfigured")
+	}
+}
+
+// findIdent reports the offsets at which name appears in code as a whole Go
+// identifier (not as a prefix or suffix of a longer one).
+func findIdent(code, name string) []int {
+	isIdent := func(b byte) bool {
+		return b == '_' || (b >= '0' && b <= '9') || (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z')
+	}
+	var at []int
+	for i := 0; ; {
+		j := strings.Index(code[i:], name)
+		if j < 0 {
+			return at
+		}
+		j += i
+		before := j == 0 || !isIdent(code[j-1])
+		end := j + len(name)
+		after := end >= len(code) || !isIdent(code[end])
+		if before && after {
+			at = append(at, j)
+		}
+		i = j + 1
+	}
+}
+
+// A loss that no live Writer can hold must reach the EXPORTED total, not just
+// the engine's counter (CHAOS-72, Codex P2 round 11).
+//
+// Round 11 added `lateDrops` in internal/syslog for losses charged to a
+// Writer whose finals had already been folded. The engine gate asserts that
+// counter moves — which is walling the FUNCTION. The path is
+// `culvert_syslog_drops_total` and `/healthz`, and the first shape of that fix
+// added the counter and never folded it into the snapshot: the loss was
+// counted into a void, which is precisely the defect the counter exists to
+// close, committed inside its own fix.
+//
+// So this gate reads the operator-facing surfaces.
+func TestChaos72_LateDropsReachTheExportedTotal(t *testing.T) {
+	col := startSyslogCollector(t)
+	armSyslogFeed(t, "tcp://"+col.addr)
+
+	before := syslogFeedState().Drops
+	beforeHealth := syslogDropCount()
+	var bm strings.Builder
+	syslogWritePrometheus(&bm)
+	beforeMetric := promSeriesValue(t, bm.String(), "culvert_syslog_drops_total")
+
+	// A closed writer whose successor chain is longer than the hop bound: the
+	// terminal charge lands on a writer nothing reads.
+	head := newClosedSyslogChainPastTheBound(t)
+	_, _ = head.Write([]byte("late line")) //nolint:errcheck // the point is the loss, not the return
+
+	if got := syslogFeedState().Drops; got != before+1 {
+		t.Errorf("snapshot Drops = %d, want %d — the loss is held only by a retired writer and never reaches the exported total", got, before+1)
+	}
+	if got := syslogDropCount(); got != beforeHealth+1 {
+		t.Errorf("/healthz syslogDrops = %d, want %d", got, beforeHealth+1)
+	}
+	var am strings.Builder
+	syslogWritePrometheus(&am)
+	if got := promSeriesValue(t, am.String(), "culvert_syslog_drops_total"); got != beforeMetric+1 {
+		t.Errorf("culvert_syslog_drops_total = %v, want %v", got, beforeMetric+1)
+	}
+
+	// CONTROL: an ordinary delivery must move none of them. The cheapest way
+	// to pass the assertions above is to add a constant.
+	mid := syslogFeedState().Drops
+	if sw := activeSyslog(); sw != nil {
+		_, _ = sw.Write([]byte("ordinary line")) //nolint:errcheck // control: an ordinary delivery
+	}
+	if got := syslogFeedState().Drops; got != mid {
+		t.Errorf("control: a delivered line moved the drop total from %d to %d", mid, got)
+	}
+}
+
+// newClosedSyslogChainPastTheBound builds a displaced writer whose successor
+// chain is longer than the engine's hop bound, so a line written to it is lost
+// at the end of the walk and charged to a writer whose totals were retired.
+func newClosedSyslogChainPastTheBound(t *testing.T) *syslogWriter {
+	t.Helper()
+	head, err := newSyslogWriter("udp", "127.0.0.1:65533", "rfc3164")
+	if err != nil {
+		t.Fatalf("building the chain head: %v", err)
+	}
+	prev := head
+	for i := 0; i < 12; i++ {
+		w, err := newSyslogWriter("udp", "127.0.0.1:65533", "rfc3164")
+		if err != nil {
+			t.Fatalf("building chain link %d: %v", i, err)
+		}
+		prev.HandOffTo(w)
+		if err := prev.Close(); err != nil {
+			t.Fatalf("closing chain link %d: %v", i, err)
+		}
+		prev = w
+	}
+	t.Cleanup(func() { _ = prev.Close() })
+	return head
+}
+
+// promSeriesValue extracts a single unlabelled gauge/counter value from a
+// Prometheus exposition body.
+func promSeriesValue(t *testing.T, body, name string) float64 {
+	t.Helper()
+	for _, line := range strings.Split(body, "\n") {
+		if !strings.HasPrefix(line, name+" ") {
+			continue
+		}
+		var v float64
+		if _, err := fmt.Sscanf(strings.TrimPrefix(line, name+" "), "%g", &v); err != nil {
+			t.Fatalf("parsing %s from %q: %v", name, line, err)
+		}
+		return v
+	}
+	t.Fatalf("series %s is absent from the exposition", name)
+	return 0
 }

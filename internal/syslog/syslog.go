@@ -137,10 +137,60 @@ const (
 // as line[hdr:len(line)-1], a substring sharing the line's memory, so the
 // queue's footprint does not double; at preserves the EVENT time across the
 // re-encode.
+// lateDrops counts losses charged to a Writer that no surface reads any more.
+//
+// The health plane's process-lifetime total is `retiredDrops` (each displaced
+// Writer's finals, folded at the moment it is displaced) plus the LIVE
+// Writer's own counters. A drop recorded against an intermediate Writer AFTER
+// its finals were folded therefore lands nowhere: it is real compliance loss
+// that `culvert_syslog_drops_total` and `/healthz` never report.
+//
+// Two sites can produce one, both of them the terminal branch of a bounded
+// successor walk — `send` and `handOffQueued` past `maxHandoffHops`. Each
+// needs a chain longer than the bound, i.e. more rapid re-points than that
+// while a caller still holds a stale Writer, so it is rare; it is counted
+// rather than argued away because "did not reach the SIEM" is the one series
+// this plane exists to keep honest, and a rare undercount there is still an
+// undercount (Codex P2, PR #1494).
+//
+// It is charged IN ADDITION to the Writer's own counter, never instead of it:
+// the Writer's Stats must stay internally consistent for anything still
+// holding it. Double counting is impossible at these two sites because both
+// are reached only through `enqClosed`, and a closed Writer's finals were
+// folded when it was displaced — strictly before it could be walked past.
+//
+// The end-of-chain branch in handOffQueued is deliberately NOT charged here:
+// that writer is the live one, and its drop is already read.
+var lateDrops atomic.Uint64
+
+func noteLateDrop() { lateDrops.Add(1) }
+
+// LateDrops returns the process-lifetime count of losses that were charged to
+// a displaced Writer whose totals had already been retired. The health plane
+// folds it into the exported drop total; see lateDrops.
+func LateDrops() uint64 { return lateDrops.Load() }
+
+// ProbeOutcome is the result of one probed line, reported by the drain
+// goroutine of the Writer that ACTUALLY SENT IT.
+//
+// Provable is that sending Writer's DeliveryProvable(), never the one the
+// caller handed to WriteProbe. The two differ: handOffQueued moves a queued
+// line — its ack channel included — to a successor that may speak a different
+// transport, so a probe queued on a TCP writer and handed off to a UDP one was
+// reported with the TCP sentence ("the collector accepted the test event") for
+// a datagram nothing may have received (Codex P2, PR #1494). Binding the
+// transport to the Writer the caller holds was the previous round's fix and
+// was correct exactly one hop short: the acknowledgement has to carry the
+// transport, because only the sender knows it.
+type ProbeOutcome struct {
+	Delivered bool
+	Provable  bool
+}
+
 type queuedLine struct {
 	line   string
-	ack    chan bool // buffered(1) when set; receives true iff THIS line was delivered
-	format string    // the format line is encoded in
+	ack    chan ProbeOutcome // buffered(1) when set; receives the outcome of THIS line
+	format string            // the format line is encoded in
 	pri    int
 	hdr    int       // byte offset of the message body within line
 	at     time.Time // event time the line was stamped with
@@ -250,7 +300,7 @@ func (s *Writer) drainLoop() {
 						s.deliverTracked(item)
 					} else {
 						s.noteDrop(&reasonFlushTimeout)
-						ackQueued(item, false)
+						ackQueued(item, nil, false)
 					}
 				default:
 					return
@@ -277,7 +327,8 @@ func (s *Writer) send(pri int, msg string) {
 		return
 	}
 	w := s
-	for hop := 0; hop < maxHandoffHops; hop++ {
+	exhausted := false
+	for hop := 0; ; hop++ {
 		if w.tryEnqueue(w.formatLine(pri, msg, time.Now())) != enqClosed {
 			return
 		}
@@ -285,9 +336,24 @@ func (s *Writer) send(pri int, msg string) {
 		if nx == nil || nx.queue == nil {
 			break
 		}
+		// Advance only when there is a hop left to SPEND on the successor.
+		// The bound used to be checked at the top, so on exhaustion `w` held
+		// a writer that was assigned and never tried — the line was charged
+		// to a writer that had not refused it, and if that writer was the
+		// live one the caller lost a line it would have accepted (Codex P2,
+		// PR #1494). `w` is now always the last writer that actually refused.
+		if hop+1 >= maxHandoffHops {
+			exhausted = true
+			break
+		}
 		w = nx
 	}
 	w.noteDrop(&reasonClosed)
+	if exhausted {
+		// w is a displaced writer whose totals were folded long ago, so its
+		// counter is read by nothing; see lateDrops.
+		noteLateDrop()
+	}
 }
 
 // tryEnqueue hands one formatted line to the drain goroutine without
@@ -347,13 +413,13 @@ func (s *Writer) handOffQueued(item queuedLine) bool {
 		case enqAccepted:
 			return true
 		case enqDropped:
-			ackQueued(item, false)
+			ackQueued(item, w, false)
 			return true // counted on the live writer by tryEnqueue
 		}
 		nx := w.successor.Load()
 		if nx == nil {
 			w.noteDrop(&reasonClosed)
-			ackQueued(item, false)
+			ackQueued(item, w, false)
 			return true
 		}
 		w = nx
@@ -366,7 +432,8 @@ func (s *Writer) handOffQueued(item queuedLine) bool {
 	// and the reason vocabulary is a closed set on a published API enum that
 	// should not grow to name an internal walk limit.
 	s.noteDrop(&reasonClosed)
-	ackQueued(item, false)
+	noteLateDrop()
+	ackQueued(item, s, false)
 	return true
 }
 
@@ -384,12 +451,17 @@ func (s *Writer) HandOffTo(next *Writer) {
 // ackQueued reports one line's outcome to a waiting prober. The channel is
 // buffered(1) and written exactly once, so this never blocks the drain
 // goroutine even if the prober has already given up and stopped listening.
-func ackQueued(item queuedLine, delivered bool) {
+// ackQueued reports one line's outcome. `by` is the Writer that performed (or
+// failed) the send — NOT necessarily the one WriteProbe was called on, since a
+// handoff moves the line and its ack together. It supplies the transport the
+// outcome is about; nil means no Writer ever sent it, which cannot be
+// provable.
+func ackQueued(item queuedLine, by *Writer, delivered bool) {
 	if item.ack == nil {
 		return
 	}
 	select {
-	case item.ack <- delivered:
+	case item.ack <- ProbeOutcome{Delivered: delivered, Provable: by != nil && by.DeliveryProvable()}:
 	default:
 	}
 }
@@ -408,7 +480,7 @@ func (s *Writer) deliverTracked(item queuedLine) {
 	}
 	before := s.delivered.Load()
 	s.deliverGuarded(item.line)
-	ackQueued(item, s.delivered.Load() > before)
+	ackQueued(item, s, s.delivered.Load() > before)
 }
 
 // WriteProbe enqueues one message and returns a channel that receives the
@@ -421,12 +493,12 @@ func (s *Writer) deliverTracked(item queuedLine) {
 //
 // The caller must bound its own wait: a wedged collector can hold the drain in
 // a write deadline, and nothing here promises when the answer arrives.
-func (s *Writer) WriteProbe(msg string) (<-chan bool, bool) {
-	ack := make(chan bool, 1)
+func (s *Writer) WriteProbe(msg string) (<-chan ProbeOutcome, bool) {
+	ack := make(chan ProbeOutcome, 1)
 	if s.queue == nil { // zero-value Writer: synchronous path
 		before := s.delivered.Load()
 		s.writeMsg(14, msg)
-		ack <- s.delivered.Load() > before
+		ack <- ProbeOutcome{Delivered: s.delivered.Load() > before, Provable: s.DeliveryProvable()}
 		return ack, true
 	}
 	item := s.formatLine(14, msg, time.Now())

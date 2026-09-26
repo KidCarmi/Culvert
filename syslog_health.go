@@ -714,6 +714,30 @@ type syslogFeedSnapshot struct {
 	gen uint64
 }
 
+// syslogFeedIsUDP reports whether this feed cannot prove delivery.
+//
+// When a Writer EXISTS the transport is asked of the WRITER; the address
+// string is only the fallback for a feed that has none. Both derivations agree
+// today — `InitSyslog` is the sole installer and hands the record the same
+// address it parsed the network from — and that is precisely why the string
+// form is a latent trap rather than a live defect: it is a SECOND ANSWER to a
+// question that already has one, and round 10's P2-14 is what happens when the
+// two drift (the probe derived the same fact from the record's target and so
+// could contradict every other surface). Two answers to one question is the
+// defect; `TestChaos72_TransportClaimHasOneSource` walls the agreement, so a
+// future installer that normalises or rewrites the address cannot silently
+// make the contract row's UDP caveat wrong.
+//
+// The fallback is not a second answer: a feed with no Writer has no transport
+// to ask, and the operator's intended address is the only thing that can
+// describe what they asked for.
+func syslogFeedIsUDP(described *syslogWriter, caveatTarget string) bool {
+	if described != nil {
+		return !described.DeliveryProvable()
+	}
+	return !strings.HasPrefix(strings.ToLower(caveatTarget), "tcp://")
+}
+
 // syslogFeedState derives the current posture from the Writer's own stats plus
 // this file's install-time anchor.
 //
@@ -740,21 +764,7 @@ func syslogFeedState() syslogFeedSnapshot {
 	if caveatTarget == "" {
 		caveatTarget = intendedTarget
 	}
-	// When a Writer EXISTS, the transport is asked of the Writer; the string
-	// is only the fallback for a feed that has none. Both derivations agree
-	// today — `InitSyslog` is the sole installer and hands this record the
-	// same address it parsed the network from — and that is precisely why the
-	// string form is a latent trap rather than a live defect: it is a second
-	// answer to a question that already has one, and round 10's P2-14 is what
-	// happens when the two drift (the probe derived the same fact from the
-	// record's target and could contradict every other surface). Two answers
-	// to one question is the defect; `TestChaos72_TransportClaimHasOneSource` walls
-	// the agreement so a future installer that normalises or rewrites the
-	// address cannot silently make the contract row's UDP caveat wrong.
-	udp := !strings.HasPrefix(strings.ToLower(caveatTarget), "tcp://")
-	if described != nil {
-		udp = !described.DeliveryProvable()
-	}
+	udp := syslogFeedIsUDP(described, caveatTarget)
 	now := syslogHealthNow()
 	snap := syslogFeedSnapshot{
 		writer:     described,
@@ -769,7 +779,14 @@ func syslogFeedState() syslogFeedSnapshot {
 	snap.Delivered = retiredDelivered
 	// Events that found no Writer at all belong to the process-lifetime total:
 	// they did not reach the SIEM, and no Writer's counters can hold them.
-	snap.Drops = retiredDrops + syslogSkippedNoWriter.Load()
+	// syslogLateDrops() is the third term and is NOT optional: a loss charged
+	// to a Writer whose finals were already folded is held by no counter this
+	// sum would otherwise reach. Adding the engine-side counter without
+	// folding it here would count the loss into a void — which is the very
+	// defect the counter exists to close, committed inside its own fix, and
+	// is why TestChaos72_LateDropsReachTheExportedTotal drives /metrics and
+	// /healthz rather than the counter (Codex P2, PR #1494).
+	snap.Drops = retiredDrops + syslogSkippedNoWriter.Load() + syslogLateDrops()
 	snap.Panics = retiredPanics
 	// The writer the RECORD describes, captured above under the same lock as
 	// the retired totals — never a fresh activeSyslog() load.
@@ -1114,19 +1131,21 @@ func syslogDeliveryProbe(sw *syslogWriter) (outcome string, detail string) {
 	// a test has frozen the clock to drive degradation — against a frozen seam
 	// the wait would never expire and the probe would hang.
 	select {
-	case delivered := <-ack:
-		if !delivered {
+	case outcome := <-ack:
+		if !outcome.Delivered {
 			return "dropped", "the test event was lost before reaching the collector (" + reasonOrUnknown(sw.Stats().LastFailureReason) + ")"
 		}
-		// Asked of the WRITER that served this line, never of a target
-		// string read separately from the health record: those are two reads
-		// of two different things, and an admin re-point between them made
-		// this endpoint describe a UDP datagram with the TCP sentence — "the
-		// collector accepted the test event" — for a send nothing may have
-		// received (Codex P2, PR #1494). The probe's whole job is to be
-		// believed; it may not infer its transport any more than it may infer
-		// its outcome.
-		if !sw.DeliveryProvable() {
+		// The transport comes from the ACKNOWLEDGEMENT, which the Writer that
+		// actually sent the line stamps — not from a target string read
+		// separately (two reads of two different things: an admin re-point
+		// between them made this endpoint describe a UDP datagram with the
+		// TCP sentence), and not from `sw` either. `sw` is only the writer
+		// the probe was HANDED: handOffQueued moves a queued line and its ack
+		// together to a successor that may speak a different transport, so
+		// asking `sw` was right one hop short of the sender (Codex P2,
+		// PR #1494, two rounds running). The probe's whole job is to be
+		// believed; it may not infer its transport any more than its outcome.
+		if !outcome.Provable {
 			return "sent", "datagram sent; UDP cannot confirm the collector received it — use tcp:// for delivery evidence"
 		}
 		return "delivered", "the collector accepted the test event"

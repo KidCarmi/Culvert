@@ -208,11 +208,14 @@ POST /api/syslog/test        (admin)
 > counters, which on a busy gateway would let another request's success be
 > reported as the probe's.
 >
-> `delivered` vs `sent` is likewise read off the **writer that sent the line**,
-> not off the currently configured address. The probe used to re-read the
-> target string after the send, so a collector re-pointed between the two made
-> it answer `delivered` — "the collector accepted the test event" — for a UDP
-> datagram nothing may have received.
+> `delivered` vs `sent` is likewise decided by the **writer that actually sent
+> the line**, and the acknowledgement carries it. The probe used to re-read the
+> configured target after the send, so a collector re-pointed between the two
+> made it answer `delivered` — "the collector accepted the test event" — for a
+> UDP datagram nothing may have received. Asking the writer the probe was
+> handed was not sufficient either: a re-point hands a queued event, and its
+> acknowledgement, to the replacement collector, which may use a different
+> transport.
 
 ---
 

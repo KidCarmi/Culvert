@@ -929,6 +929,32 @@ endpoints for credentialed parents.
   deliberately not counted as drops: they reached a collector, and
   `culvert_syslog_drops_total` measures events that reached no SIEM at all.
 
+- **`POST /api/syslog/test` could still report a UDP datagram as accepted
+  (CHAOS-72).** The previous fix asked the writer the probe was handed, but a
+  collector re-pointed while the test event is queued hands that event — and
+  its acknowledgement — to a successor which may use a different transport, so
+  a probe queued on TCP and sent over UDP was still reported as accepted by
+  the collector. The acknowledgement now carries the transport of the writer
+  that actually sent it.
+- **Events lost at the end of a long re-point chain were counted nowhere, and
+  a healthy collector could be blamed for them (CHAOS-72).** A queued line
+  follows a bounded chain of replaced collectors; past that bound the loss was
+  charged to a collector whose totals had already been folded into the
+  exported counters, so it appeared in neither `culvert_syslog_drops_total`
+  nor `/healthz`. The same walk also checked its bound one step too early, so
+  it could charge the loss to a collector it had never offered the line to —
+  recording a failure reason against a collector that is working. Both fixed;
+  the loss is now counted for the process even when no live writer can hold it.
+- **Turning the SIEM collector off while another request was turning it on
+  could leave the two disagreeing (CHAOS-72).** The address the admin API
+  reports and `admin_settings.json` persists was written after the collector
+  was published rather than with it, so an interleaved disable could leave the
+  process forwarding nowhere while every config surface said forwarding was
+  on — and the next restart re-enabled a collector the operator had switched
+  off. The address is now published and cleared in the same step as the
+  collector itself, and every reader goes through an accessor that takes the
+  same lock.
+
 - **Disabling an unreachable SIEM collector could page about it and silence
   the NEXT one (CHAOS-72).** The guard that refuses a stale degradation commit
   compared the writer pointer the snapshot was taken from against the one the

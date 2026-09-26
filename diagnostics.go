@@ -884,7 +884,8 @@ func checkOIDCJWKSTrust() OperatorContractCheck {
 // checkAuditPersistence. Side-effect-free: reads process state only, never
 // dials the collector (use POST /api/syslog/test for an active probe).
 func checkSyslogFeed() OperatorContractCheck {
-	if syslogConfiguredAddr == "" {
+	connectedTarget, intendedTarget := syslogConfiguredTargets()
+	if intendedTarget == "" {
 		return OperatorContractCheck{
 			Code:    "syslog_feed",
 			Status:  diagOK,
@@ -900,7 +901,7 @@ func checkSyslogFeed() OperatorContractCheck {
 	// globalSyslog stays non-nil pointing at the PREVIOUS collector while intent
 	// has moved on — the persisted SIEM target is silently down but a nil-check
 	// would still report OK.
-	if activeSyslog() == nil || syslogConfigured != syslogConfiguredAddr {
+	if activeSyslog() == nil || connectedTarget != intendedTarget {
 		// Name the MAGNITUDE, not just the state. "Events are not reaching
 		// the collector" is the diagnosis; "how much have I lost?" is the
 		// question an operator asks next, and until CHAOS-72's round 7 the

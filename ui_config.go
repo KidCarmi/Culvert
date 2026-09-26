@@ -1843,8 +1843,9 @@ func apiSyslogConfig(w http.ResponseWriter, r *http.Request) {
 		// `degraded:true` for a target whose boot dial failed, i.e. it denied
 		// the one fact that verdict rests on (Codex P2, PR #1494).
 		present := snap.Configured || snap.Intended
+		connectedTarget, _ := syslogConfiguredTargets()
 		jsonOK(w, map[string]any{
-			"addr": syslogConfigured, "format": format, "drops": snap.Drops, "panics": snap.Panics,
+			"addr": connectedTarget, "format": format, "drops": snap.Drops, "panics": snap.Panics,
 			"delivered":         snap.Delivered,
 			"degraded":          snap.Degraded,
 			"neverDelivered":    present && snap.NeverDelivered,
@@ -1880,8 +1881,6 @@ func apiSyslogConfig(w http.ResponseWriter, r *http.Request) {
 			// exporting culvert_syslog_up 1 (and a concurrent re-point could
 			// interleave with the two halves).
 			disableActiveSyslog()
-			syslogConfigured = ""
-			syslogConfiguredAddr = ""
 			auditEvent(r, "settings.syslog", "disabled", "")
 			adminSettingsSave()
 			jsonOK(w, map[string]any{"ok": true, "addr": "", "format": "rfc3164"})
@@ -1891,8 +1890,10 @@ func apiSyslogConfig(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "syslog connect error: "+err.Error(), http.StatusBadRequest)
 			return
 		}
-		syslogConfigured = body.Addr
-		syslogConfiguredAddr = body.Addr
+		// InitSyslog published syslogConfigured/syslogConfiguredAddr inside the
+		// same critical section as the writer; assigning them here would
+		// reopen the enable/disable interleave they were moved to close.
+		//
 		// The effective format is derived, not read back off the handle. It is
 		// the same normalisation NewWriter applies ("" => rfc3164) and the
 		// value was already validated above, so the two cannot disagree — and
