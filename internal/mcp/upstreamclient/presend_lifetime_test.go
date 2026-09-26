@@ -35,6 +35,14 @@ import (
 //
 // It is DETERMINISTIC rather than timing-based: the hook is parked on a channel at the exact
 // moment the test needs it parked, so "the hook has not finished" is observed, never sampled.
+//
+// WHAT IT ASSERTS IS THE HAZARD, NOT THE SCHEDULE. The property the carrier rests on is that
+// the hook MAY outlive Call, so nothing it writes may be read back through shared state. It is
+// deliberately NOT an assertion that the hook DOES outlive Call: a transport that narrows the
+// hook's lifetime by joining its dial goroutine leaves the carrier correct — conservative
+// rather than required — so this gate SKIPS with that finding instead of failing, and only a
+// Call that will not return even once the hook is released is a real failure. Asserting the
+// looser direction would make a safe narrowing look like a regression (Codex review, PR #1411).
 func TestPreSend_MayStillBeRunningAfterCallReturns(t *testing.T) {
 	c, tgt, _, _, stop := pinnedTestServerCounting(t, func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -87,9 +95,40 @@ func TestPreSend_MayStillBeRunningAfterCallReturns(t *testing.T) {
 
 	select {
 	case <-callReturned:
+		// Fall through to the proof below.
 	case <-time.After(30 * time.Second):
+		// Call has NOT returned while the hook is parked. There are two reasons for
+		// that and they call for opposite verdicts, so they must be distinguished
+		// rather than both reported as this gate failing.
+		//
+		// The benign one is that the transport now JOINS its in-flight dial
+		// goroutine — a NARROWING of the hook's lifetime, and a safe one. The
+		// carrier in internal/mcp/execution stays correct under it: carrying the
+		// verdict on the error is then merely CONSERVATIVE rather than required.
+		// So this gate must not fail for it; asserting that the hook DOES outlive
+		// Call would make a valid transport improvement look like a regression,
+		// and would do it as a 30-second deadlock (Codex review, PR #1411).
+		//
+		// What this gate exists to prevent is the opposite mistake: someone
+		// DELETING the carrier on the belief that the hook cannot outlive Call.
+		// A skip that names the property is what that reader needs; silence is not.
+		//
+		// Releasing the hook separates the two: if Call was only waiting for it,
+		// it returns at once.
 		close(release)
-		t.Fatal("Call did not return while the dialer-site PreSend was parked")
+		select {
+		case <-callReturned:
+			<-finished
+			t.Skip("premise no longer holds: Call now waits for the dialer-site PreSend, " +
+				"so the hook can no longer outlive Call. The execution-side error carrier " +
+				"stays CORRECT under this (conservative, not required) — but re-derive the " +
+				"note on CallOptions.PreSend before anything starts relying on the narrower " +
+				"lifetime, and do not delete the carrier on the strength of this skip alone.")
+		case <-time.After(30 * time.Second):
+			t.Fatal("Call did not return even after the dialer-site PreSend was released; " +
+				"neither the hook's lifetime nor the release explains this, so something " +
+				"unrelated is wedged")
+		}
 	}
 
 	select {

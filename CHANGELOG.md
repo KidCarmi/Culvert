@@ -487,7 +487,13 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   edge production lacks, so nothing else asserts it — and `CallOptions.PreSend`
   now states the contract for every future caller: it is a pure predicate whose
   lifetime is not `Call`'s, so everything a verdict needs in order to be
-  diagnosed belongs on the error.
+  diagnosed belongs on the error. What the gate asserts is the HAZARD, not the
+  schedule: a transport that NARROWS the hook's lifetime by joining its dial
+  goroutine leaves the carrier correct — conservative rather than required — so
+  the gate skips with that finding rather than failing, and only a `Call` that
+  will not return even once the hook is released is a real failure. Asserting
+  that the hook DOES outlive `Call` would have made a safe narrowing look like a
+  regression, and would have reported it as a 30-second deadlock.
 
 - OCSP revocation checking accepted responses it should have refused
   (CHAOS-65). Every input the checker acts on comes from the peer's own
