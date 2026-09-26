@@ -1545,7 +1545,7 @@ func TestChaos72_EventsLostToAnUnmetIntentAreCounted(t *testing.T) {
 	// absolute assertion here is an assertion about the whole suite.
 	baseDrops := syslogFeedState().Drops
 	for i := 0; i < lost; i++ {
-		noteSyslogEventSkipped()
+		noteSyslogEventSkipped(syslogSkipArmed())
 	}
 
 	snap := syslogFeedState()
@@ -1571,7 +1571,7 @@ func TestChaos72_EventsLostToAnUnmetIntentAreCounted(t *testing.T) {
 	resetSyslogHealthForTest()
 	unarmedBase := syslogFeedState().Drops
 	for i := 0; i < 100; i++ {
-		noteSyslogEventSkipped()
+		noteSyslogEventSkipped(syslogSkipArmed())
 	}
 	if got := syslogFeedState().Drops - unarmedBase; got != 0 {
 		t.Errorf("an unconfigured node counted %d lost event(s); it asked for no collector, so it is losing nothing", got)
@@ -1590,8 +1590,8 @@ func TestChaos72_InstallingAWriterStopsCountingSkips(t *testing.T) {
 		t.Fatalf("precondition: want a configured feed with a live writer, got Configured=%v", snap.Configured)
 	}
 	before := syslogFeedState().Drops
-	noteSyslogEventSkipped()
-	noteSyslogEventSkipped()
+	noteSyslogEventSkipped(syslogSkipArmed())
+	noteSyslogEventSkipped(syslogSkipArmed())
 	if got := syslogFeedState().Drops; got != before {
 		t.Errorf("Drops moved from %d to %d while a writer was installed — skips must stop being charged once events have a writer to go through, or every loss is counted twice", before, got)
 	}
@@ -1619,7 +1619,7 @@ func TestChaos72_DisablingAnUnmetFeedStopsCountingSkips(t *testing.T) {
 
 	noteSyslogIntent("tcp://siem.invalid:514")
 	base := syslogFeedState().Drops
-	noteSyslogEventSkipped()
+	noteSyslogEventSkipped(syslogSkipArmed())
 	if got := syslogFeedState().Drops - base; got != 1 {
 		t.Fatalf("precondition: Drops moved by %d, want 1 — skip accounting must be ARMED for this gate to prove anything", got)
 	}
@@ -1628,7 +1628,7 @@ func TestChaos72_DisablingAnUnmetFeedStopsCountingSkips(t *testing.T) {
 
 	before := syslogFeedState().Drops
 	for i := 0; i < 5; i++ {
-		noteSyslogEventSkipped()
+		noteSyslogEventSkipped(syslogSkipArmed())
 	}
 	if got := syslogFeedState().Drops; got != before {
 		t.Errorf("Drops moved from %d to %d after forwarding was disabled — a node that forwards nowhere is not losing anything, and these bogus drops reappear the moment a collector is configured again", before, got)
@@ -1651,7 +1651,7 @@ func TestChaos72_HealthzReportsTheLossMetricsReports(t *testing.T) {
 	noteSyslogIntent("tcp://siem.invalid:514")
 	const lost = 4
 	for i := 0; i < lost; i++ {
-		noteSyslogEventSkipped()
+		noteSyslogEventSkipped(syslogSkipArmed())
 	}
 
 	var b strings.Builder
@@ -1667,7 +1667,7 @@ func TestChaos72_HealthzReportsTheLossMetricsReports(t *testing.T) {
 	// nothing. The cheapest way to pass the above is to drop the gate.
 	resetSyslogHealthForTest()
 	for i := 0; i < 20; i++ {
-		noteSyslogEventSkipped()
+		noteSyslogEventSkipped(syslogSkipArmed())
 	}
 	if got := syslogDropCount(); got != 0 {
 		t.Errorf("syslogDropCount() = %d on a node with no collector configured; want 0", got)
@@ -1738,7 +1738,7 @@ func TestChaos72_FailedToConnectRowNamesTheLoss(t *testing.T) {
 	}
 
 	for i := 0; i < 3; i++ {
-		noteSyslogEventSkipped()
+		noteSyslogEventSkipped(syslogSkipArmed())
 	}
 	row = checkSyslogFeed()
 	if !strings.Contains(row.Message, "3 event(s) lost so far") {
@@ -2965,4 +2965,142 @@ func TestChaos72_ConfigMetadataReadersTakeTheWriterFromTheSnapshot(t *testing.T)
 	if len(activeSyslogCallSites(fset, probe)) == 0 {
 		t.Fatal("control: the walk cannot find a known activeSyslog() call, so the wall above proves nothing")
 	}
+}
+
+// TestChaos72_AnInstallDoesNotEraseALossTheFanOutAlreadyObserved is the
+// DEFECT gate for Codex P2-19.
+//
+// noteSyslogEventSkipped re-read the arming flag at charge time, so a fan-out
+// goroutine that found no Writer, was descheduled, and resumed after a
+// successful install had its loss erased: the event reached no collector, but
+// the fresh read said "not armed" and the loss never appeared in
+// culvert_syslog_drops_total or /healthz.
+//
+// The interleaving is a few instructions wide and cannot be scheduled through
+// the fan-outs, so the gate drives the boundary the fix introduced — the
+// charge takes the arming state its CALLER observed, not the current one.
+func TestChaos72_AnInstallDoesNotEraseALossTheFanOutAlreadyObserved(t *testing.T) {
+	resetSyslogHealthForTest()
+	t.Cleanup(resetSyslogHealthForTest)
+
+	// A configured collector whose dial never produced a Writer: the fan-outs
+	// find nothing and every event is a loss.
+	noteSyslogIntent("tcp://siem.invalid:514")
+	if !syslogSkipArmed() {
+		t.Fatal("precondition: an unmet configured collector must arm skip accounting")
+	}
+	base := syslogFeedState().Drops
+
+	// The fan-out observes the unmet state...
+	observed := syslogSkipArmed()
+
+	// ...and a successful install lands before it can charge.
+	c := startSyslogCollector(t)
+	t.Cleanup(c.stop)
+	sw, err := newSyslogWriter("tcp", c.addr, "rfc3164")
+	if err != nil {
+		t.Fatalf("building the writer: %v", err)
+	}
+	t.Cleanup(func() { _ = sw.Close() })
+	noteSyslogWriterInstalled(sw, "tcp://"+c.addr)
+	if syslogSkipArmed() {
+		t.Fatal("precondition: installing a writer must disarm skip accounting")
+	}
+
+	noteSyslogEventSkipped(observed)
+
+	if got := syslogFeedState().Drops - base; got != 1 {
+		t.Fatalf("an event the fan-out had already seen find no collector moved the loss total by %d, want 1 — "+
+			"a later install erased a loss that had already happened", got)
+	}
+}
+
+// TestChaos72_AnEventForwardedThroughAWriterIsNeverChargedAsSkipped is the
+// CONTROL. The cheapest way to pass the gate above is to charge every event
+// unconditionally, which would accrue a permanent meaningless loss on every
+// appliance that forwards nowhere — the emission rule this plane already
+// applies everywhere else.
+func TestChaos72_AnEventForwardedThroughAWriterIsNeverChargedAsSkipped(t *testing.T) {
+	resetSyslogHealthForTest()
+	t.Cleanup(resetSyslogHealthForTest)
+
+	c := startSyslogCollector(t)
+	t.Cleanup(c.stop)
+	sw, err := newSyslogWriter("tcp", c.addr, "rfc3164")
+	if err != nil {
+		t.Fatalf("building the writer: %v", err)
+	}
+	t.Cleanup(func() { _ = sw.Close() })
+	noteSyslogWriterInstalled(sw, "tcp://"+c.addr)
+
+	base := syslogFeedState().Drops
+	for i := 0; i < 50; i++ {
+		noteSyslogEventSkipped(syslogSkipArmed())
+	}
+	if got := syslogFeedState().Drops - base; got != 0 {
+		t.Fatalf("a feed with a live writer charged %d skipped event(s); those events went THROUGH the writer and are counted by its own machinery", got)
+	}
+}
+
+// TestChaos72_TheDropRowIsNeverRenderedFromASaveResponse is the UI CONTRACT
+// gate for Codex P2-18.
+//
+// The drop counters are process-lifetime: they carry every collector this
+// process has retired, so a re-point does not reset them. POST /api/syslog
+// does not return them, and the save handler rendered `res.drops` anyway —
+// an absent field reads as zero, so the panel showed "no delivery drops" and
+// erased the loss history at exactly the moment an operator re-points to
+// remediate it. Only GET /api/syslog answers these numbers.
+//
+// Walled structurally because the defect is in a browser handler: no Go test
+// can drive it, and the failure is silent (a wrong number, not an error).
+func TestChaos72_TheDropRowIsNeverRenderedFromASaveResponse(t *testing.T) {
+	src, err := os.ReadFile("static/index.html")
+	if err != nil {
+		t.Fatalf("reading the admin UI: %v", err)
+	}
+	body := jsFunctionBody(t, string(src), "async function saveSyslog()")
+
+	if strings.Contains(body, "renderSyslogDrops(res.") {
+		t.Error("saveSyslog renders the drop row from the SAVE response; POST /api/syslog does not carry the counters, " +
+			"so an absent field reads as zero and the panel reports a clean feed for one that has lost events")
+	}
+	if !strings.Contains(body, "api('/api/syslog')") {
+		t.Error("saveSyslog does not re-read GET /api/syslog; the counters have exactly one source and it is that read")
+	}
+
+	// CONTROL: the row must still be updated after a save, or the cheapest
+	// way to pass the assertions above is to stop rendering it at all and
+	// leave the previous collector's number on screen for good.
+	if !strings.Contains(body, "renderSyslogDrops(") {
+		t.Error("saveSyslog no longer updates the drop row at all; a prior collector's count would stay on screen")
+	}
+}
+
+// jsFunctionBody returns the source of the named JS function from the admin
+// UI, brace-matched from its opening `{`.
+func jsFunctionBody(t *testing.T, src, decl string) string {
+	t.Helper()
+	i := strings.Index(src, decl)
+	if i < 0 {
+		t.Fatalf("%q is gone from the admin UI; this wall names a function that no longer exists", decl)
+	}
+	open := strings.Index(src[i:], "{")
+	if open < 0 {
+		t.Fatalf("no body found for %q", decl)
+	}
+	depth, start := 0, i+open
+	for j := start; j < len(src); j++ {
+		switch src[j] {
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				return src[start : j+1]
+			}
+		}
+	}
+	t.Fatalf("unbalanced braces reading %q", decl)
+	return ""
 }

@@ -478,11 +478,25 @@ var syslogSkippedNoWriter atomic.Uint64
 // no-collector branch, which is the common case.
 var syslogIntentArmedWithoutWriter atomic.Bool
 
+// syslogSkipArmed samples whether a configured collector is currently unmet.
+//
+// The fan-outs must take this sample BEFORE they look for a Writer, and hand
+// it to noteSyslogEventSkipped. Re-reading the flag at charge time loses the
+// event: a goroutine can observe no Writer, be descheduled, and resume after a
+// successful install has cleared the flag — its event reached no collector,
+// but the fresh read says "not armed" and the loss is erased from
+// culvert_syslog_drops_total and /healthz (Codex P2, PR #1494). Sampling first
+// orders the two reads so that "there was a configured collector" is always
+// observed no later than "there was no Writer", which is the pair the charge
+// is a statement about.
+func syslogSkipArmed() bool { return syslogIntentArmedWithoutWriter.Load() }
+
 // noteSyslogEventSkipped charges one event that found no Writer to forward it.
-// Called from the audit and request fan-outs in store.go; a no-op unless an
-// operator-configured collector is currently unmet.
-func noteSyslogEventSkipped() {
-	if syslogIntentArmedWithoutWriter.Load() {
+// Called from the audit and request fan-outs in store.go with the arming state
+// THEY observed (see syslogSkipArmed); a no-op unless a configured collector
+// was unmet at that moment.
+func noteSyslogEventSkipped(armed bool) {
+	if armed {
 		syslogSkippedNoWriter.Add(1)
 	}
 }

@@ -9556,3 +9556,54 @@ closed the very window it existed for and passed against the double-counting
 shape it was written to reject. It now reads the baseline while the writer is
 still unsealed. *A control that reads the state it is about to test can close
 the window it exists for.*
+
+### Round 13 — round 12's own rule, not carried to two consumers
+
+Both findings are Codex P2s, and both are the same shape: round 12 changed
+what a value means, and a consumer of that value still assumed the old
+meaning.
+
+**(a) An install must not erase a loss that already happened.**
+`noteSyslogEventSkipped` re-read `syslogIntentArmedWithoutWriter` at CHARGE
+time. A fan-out goroutine can observe no Writer, be descheduled, and resume
+after a successful install has cleared the flag: its event reached no
+collector, but the fresh read says "not armed" and the loss never appears in
+`culvert_syslog_drops_total` or `/healthz`. The arming state is now sampled by
+the CALLER (`syslogSkipArmed`) immediately before it looks for a Writer, and
+handed to the charge — so "there was a configured collector" is observed no
+later than "there was no Writer", which is the pair the charge is a statement
+about. The interleaving is a few instructions wide and cannot be scheduled
+through the fan-outs, so the gate drives the boundary the fix introduced
+rather than pretending to schedule the race.
+
+**(b) The process-lifetime counters have exactly one source, and the UI was
+reading a second.** P2-4 made the totals survive a re-point. The admin panel
+still assumed the opposite in three places: `renderSyslogDrops`' own header
+said *"a new collector starts a fresh writer at Drops()==0; disabling clears
+it"*, and `saveSyslog` rendered `res.drops` from the POST response — which
+does not carry the counters at all. An absent field is `undefined`, `|| 0`
+makes it zero, and the panel reported **"no delivery drops" for a feed that
+had just lost events**, until the operator reloaded the page. That is the
+loss-history erasure P2-4 exists to prevent, surviving one layer up, in the
+surface an admin actually looks at while re-pointing a collector to remediate
+the outage that produced those drops.
+
+Codex offered two fixes: return the totals from the mutation, or have the UI
+re-read the GET. The second was taken. Returning them from POST would create a
+second answer to a question that already has one — the defect this sweep
+records under CHAOS-61's rule — and would change a published response shape,
+which in this repo means regenerating the OpenAPI bundle and the TypeScript
+client as well. A failed re-read deliberately leaves the existing row: a stale
+real number beats a fabricated zero.
+
+The UI half is walled structurally, because no Go test can drive a browser
+handler and the failure is a wrong NUMBER rather than an error. The wall
+carries a control rejecting the cheapest wrong fix — rendering nothing at all,
+which would leave the previous collector's count on screen indefinitely — and
+both mutations (the pre-fix `renderSyslogDrops(res.drops)` and the
+render-nothing shape) were verified failing against it.
+
+**The transferable rule: when a change makes a value survive something it used
+to be reset by, every surface that renders it inherited an assumption that is
+now false. Enumerate the CONSUMERS of the fact, not the producers.** Round 12
+enumerated the producers (both retire paths) and stopped there.

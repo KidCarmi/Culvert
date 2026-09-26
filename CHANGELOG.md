@@ -1000,6 +1000,20 @@ endpoints for credentialed parents.
   now folded into the process-lifetime total and named on the contract row.
   Counting is armed only while an operator has asked for a collector and none
   is installed, so a node that forwards nowhere still reports nothing.
+- **The Settings panel reported "no delivery drops" right after a SIEM
+  collector was re-pointed (CHAOS-72).** The drop counters are
+  process-lifetime and survive a re-point, but the save handler rendered them
+  from the save response, which does not carry them — an absent field reads as
+  zero in the browser, so the panel showed a clean feed for one that had just
+  lost events, until the page was reloaded. The panel now re-reads the
+  authoritative `GET /api/syslog`, which is the one source for those numbers;
+  a failed re-read leaves the existing count rather than showing a zero.
+- **A SIEM event lost while no collector was connected could be uncounted if a
+  collector connected immediately afterwards (CHAOS-72).** The check for
+  "is a configured collector currently unmet" was made when the loss was
+  charged rather than when the event failed to find a collector, so a
+  successful reconnection landing in between erased a loss that had already
+  happened.
 - **Re-pointing or disabling a SIEM collector discarded most of the loss
   history it had just recorded (CHAOS-72).** A displaced collector's totals
   were folded into the exported counters at the moment it was displaced,
