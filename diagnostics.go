@@ -530,6 +530,18 @@ func checkSessionSecret() OperatorContractCheck {
 // not included in the message (matching the boot-time warning's own
 // discipline of reporting only the length) — Admin Users already lists the
 // full roster for the operator to identify which account to rename.
+//
+// The threshold is the 64-byte ACCOUNT limit, not the login endpoint's
+// 256-byte bound: every admin-facing sign-in form (static/index.html
+// li-user, maxlength=64) and every account-creation path caps at 64, so a
+// 65–256-byte name created via -user / --reset-password passes the API
+// bound yet cannot be typed into the dashboard login field. Reporting ok for
+// it would falsely confirm an account the operator cannot sign in with.
+// adminUsernameAccountLimit is the supported admin-account username length:
+// the dashboard sign-in field (maxlength=64), setup, and the admin user APIs
+// (ui_auth.go) all cap names at 64 bytes.
+const adminUsernameAccountLimit = 64
+
 func checkOversizeConfiguredUsernames() OperatorContractCheck {
 	if cfg == nil {
 		return OperatorContractCheck{
@@ -550,11 +562,11 @@ func checkOversizeConfiguredUsernames() OperatorContractCheck {
 	legacyOversize := false
 	if legacy := cfg.GetUser(); legacy != "" {
 		names[legacy] = struct{}{}
-		legacyOversize = len(legacy) > maxUsernameLen
+		legacyOversize = len(legacy) > adminUsernameAccountLimit
 	}
 	n, maxLen := 0, 0
 	for name := range names {
-		if len(name) > maxUsernameLen {
+		if len(name) > adminUsernameAccountLimit {
 			n++
 			if len(name) > maxLen {
 				maxLen = len(name)
@@ -593,9 +605,10 @@ func checkOversizeConfiguredUsernames() OperatorContractCheck {
 	return OperatorContractCheck{
 		Code:   "admin_username_length",
 		Status: diagWarn,
-		Message: fmt.Sprintf("%d admin account%s have a username above the %d-byte login limit (longest: %d bytes) — "+
-			"they still authenticate normally, but every other credential entry point caps names at 64 bytes",
-			n, plural, maxUsernameLen, maxLen),
+		Message: fmt.Sprintf("%d admin account%s have a username above the %d-byte account limit (longest: %d bytes) — "+
+			"the dashboard sign-in form accepts at most %d characters and every account-creation path caps names there, "+
+			"so the account may be unusable from the admin UI (the login API still accepts configured names up to %d bytes)",
+			n, plural, adminUsernameAccountLimit, maxLen, adminUsernameAccountLimit, maxUsernameLen),
 		OperatorAction: action,
 	}
 }

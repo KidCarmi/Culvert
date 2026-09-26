@@ -1683,3 +1683,42 @@ func TestApiDiagnostics_MirroredLegacyUsernameRemediationSequence(t *testing.T) 
 		t.Fatalf("after deleting the old roster entry status = %q, want ok", found.Status)
 	}
 }
+
+// TestApiDiagnostics_UsernameAboveAccountLimitButWithinLoginBound pins the
+// threshold: a 65-byte name (created via -user / --reset-password) is within
+// the login API's 256-byte bound but cannot be typed into the dashboard
+// sign-in field (maxlength=64), so the row must warn rather than report ok.
+func TestApiDiagnostics_UsernameAboveAccountLimitButWithinLoginBound(t *testing.T) {
+	snapshotCfgUIUsers(t)
+	name := strings.Repeat("b", adminUsernameAccountLimit+1)
+	if len(name) > maxUsernameLen {
+		t.Fatal("precondition: name must be within the login endpoint bound")
+	}
+	if err := cfg.SetUIUser(name, "Chaos63-account-1!", RoleAdmin); err != nil {
+		t.Fatalf("SetUIUser: %v", err)
+	}
+	r := viewerCtx(httptest.NewRequest(http.MethodGet, "/api/diagnostics", http.NoBody))
+	w := httptest.NewRecorder()
+	apiDiagnostics(w, r)
+	found := findDiagnosticCheck(decodeContract(t, w), "admin_username_length")
+	if found == nil {
+		t.Fatal("admin_username_length check missing from report")
+	}
+	if found.Status != diagWarn {
+		t.Errorf("admin_username_length status = %q, want warn for a %d-byte name the dashboard login field cannot accept", found.Status, len(name))
+	}
+	// Exactly at the limit stays ok.
+	snapshotCfgUIUsers(t)
+	cfg.mu.Lock()
+	cfg.uiUsers = map[string]*uiAdminUser{}
+	cfg.user = ""
+	cfg.mu.Unlock()
+	if err := cfg.SetUIUser(strings.Repeat("c", adminUsernameAccountLimit), "Chaos63-account-2!", RoleAdmin); err != nil {
+		t.Fatalf("SetUIUser: %v", err)
+	}
+	w = httptest.NewRecorder()
+	apiDiagnostics(w, viewerCtx(httptest.NewRequest(http.MethodGet, "/api/diagnostics", http.NoBody)))
+	if f := findDiagnosticCheck(decodeContract(t, w), "admin_username_length"); f == nil || f.Status != diagOK {
+		t.Errorf("a %d-byte name must report ok, got %+v", adminUsernameAccountLimit, f)
+	}
+}
