@@ -329,8 +329,9 @@ const backupOpKind = "backup.create"
 // backupOpRecord is the subset of the agent's op record (ops.Op) this API
 // inspects before passing the record through.
 type backupOpRecord struct {
-	Kind  string `json:"kind"`
-	State string `json:"state"`
+	Kind     string     `json:"kind"`
+	State    string     `json:"state"`
+	Finished *time.Time `json:"finished_at,omitempty"`
 }
 
 // terminal reports whether the op has reached a terminal state. Kept in step
@@ -392,9 +393,19 @@ func apiBackupOperationStatus(w http.ResponseWriter, r *http.Request) {
 	// was cached — possibly re-cached by a Refresh WHILE the backup was still
 	// running, which the trigger-time invalidation cannot cover. Drop it so
 	// the GUI's completion refresh shows the new archive.
-	if op.terminal() {
+	//
+	// Only a listing captured BEFORE the op finished is stale. Invalidating on
+	// every terminal poll would let any viewer holding a completed op id
+	// alternate status/listing GETs and defeat the 15 s cache that bounds how
+	// often the agent spawns a listing container. The agent is node-local, so
+	// its finished_at and this process's cache stamp share one clock; a
+	// terminal record without finished_at invalidates nothing (the TTL still
+	// bounds staleness).
+	if op.terminal() && op.Finished != nil {
 		backupsCache.mu.Lock()
-		backupsCache.payload = nil
+		if backupsCache.payload != nil && backupsCache.at.Before(*op.Finished) {
+			backupsCache.payload = nil
+		}
 		backupsCache.mu.Unlock()
 	}
 	// Pass the agent's op record through verbatim (op_id/kind/state/actor/

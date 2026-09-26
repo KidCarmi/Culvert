@@ -15925,9 +15925,13 @@ let backupNowPollTimer = null;
 
 function backupNowOpen() {
   if (uiRole !== 'admin') { toast('Admin role required', 'error'); return; }
-  document.getElementById('backup-now-encrypt').checked = false;
-  document.getElementById('backup-now-passvar').value = '';
-  document.getElementById('backup-now-passlabel').style.display = 'none';
+  // Encrypted is the production default (D1.5 invariant 6): the archive is
+  // a byte-faithful export of credentials, private keys and TOTP secrets, so
+  // the dialog opens encrypted with the conventional passphrase variable the
+  // agent is allowed to read; opting out requires an explicit confirmation.
+  document.getElementById('backup-now-encrypt').checked = true;
+  document.getElementById('backup-now-passvar').value = 'CULVERT_BACKUP_PASSPHRASE';
+  document.getElementById('backup-now-passlabel').style.display = '';
   document.getElementById('support-backup-trigger').style.display = '';
 }
 function backupNowCancel() {
@@ -15941,6 +15945,8 @@ async function backupNowSubmit() {
     toast('Encrypting requires a passphrase env var name (or uncheck Encrypt)', 'error');
     return;
   }
+  if (!encrypt && !await confirmAction('Unencrypted Backup',
+      'Unencrypted backups are for dev/lab only: the archive contains credentials, private keys, session material and TOTP secrets in plaintext and must not leave the host. Continue without encryption?', 'Back Up Unencrypted')) return;
   const body = { encrypt };
   if (encrypt) body.passphraseEnvVar = passphraseEnvVar;
   const btn = document.getElementById('backup-now-submit');

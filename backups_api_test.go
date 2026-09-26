@@ -383,11 +383,12 @@ func TestAPIBackupOperationStatus_TerminalStateInvalidatesListingCache(t *testin
 		t.Run(tc.state, func(t *testing.T) {
 			resetBackupsCache(t)
 			backupsCache.mu.Lock()
-			backupsCache.payload, backupsCache.at = map[string]any{"available": true, "count": 0}, time.Now()
+			backupsCache.payload, backupsCache.at = map[string]any{"available": true, "count": 0}, time.Now().Add(-time.Second)
 			backupsCache.mu.Unlock()
+			finished := time.Now().UTC().Format(time.RFC3339Nano)
 			agent := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("Content-Type", "application/json")
-				_, _ = w.Write([]byte(`{"op_id":"01ARZ3NDEKTSV4RRFFQ69G5FAV","kind":"backup.create","state":"` + tc.state + `"}`))
+				_, _ = w.Write([]byte(`{"op_id":"01ARZ3NDEKTSV4RRFFQ69G5FAV","kind":"backup.create","state":"` + tc.state + `","finished_at":"` + finished + `"}`))
 			}))
 			defer agent.Close()
 			t.Setenv(envMaintAgentURL, agent.URL)
@@ -403,6 +404,40 @@ func TestAPIBackupOperationStatus_TerminalStateInvalidatesListingCache(t *testin
 				t.Fatalf("state %q: cache invalidated = %v, want %v", tc.state, invalidated, tc.invalidates)
 			}
 		})
+	}
+}
+
+// TestAPIBackupOperationStatus_TerminalPollDoesNotRepeatedlyInvalidate pins
+// that a listing cached AFTER the op finished survives further terminal
+// polls: otherwise a viewer alternating status/listing GETs with a completed
+// op id would bypass the listing cache and spawn an agent container per GET.
+func TestAPIBackupOperationStatus_TerminalPollDoesNotRepeatedlyInvalidate(t *testing.T) {
+	for _, body := range []string{
+		`{"op_id":"01ARZ3NDEKTSV4RRFFQ69G5FAV","kind":"backup.create","state":"succeeded","finished_at":"` +
+			time.Now().Add(-time.Minute).UTC().Format(time.RFC3339Nano) + `"}`,
+		`{"op_id":"01ARZ3NDEKTSV4RRFFQ69G5FAV","kind":"backup.create","state":"succeeded"}`,
+	} {
+		resetBackupsCache(t)
+		backupsCache.mu.Lock()
+		backupsCache.payload, backupsCache.at = map[string]any{"available": true, "count": 1}, time.Now()
+		backupsCache.mu.Unlock()
+		agent := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(body))
+		}))
+		t.Setenv(envMaintAgentURL, agent.URL)
+		for i := 0; i < 3; i++ {
+			if w := getAPIBackupOperationStatus(t, RoleViewer, "01ARZ3NDEKTSV4RRFFQ69G5FAV"); w.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200 (body=%s)", w.Code, w.Body.String())
+			}
+		}
+		agent.Close()
+		backupsCache.mu.Lock()
+		kept := backupsCache.payload != nil
+		backupsCache.mu.Unlock()
+		if !kept {
+			t.Fatalf("a listing cached after the op finished was invalidated by a terminal poll (%s)", body)
+		}
 	}
 }
 
