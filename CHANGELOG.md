@@ -145,7 +145,21 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   longest-lived entries, so the dropped tail is the part that ages out first. A
   bundle that is over budget with no revocations left to give back is logged
   instead, because the overflow is then the config's and no trim can repair
-  it.
+  it. The bundle's byte budget is derived from the 128 MiB transport frame
+  (127 MiB) rather than from the 120 MiB cap on the config it carries — set to
+  the latter, a config published at its own limit consumed the whole budget and
+  every revocation was dropped, which is the case the trim exists for.
+
+  A repeat logout can now repair a revocation whose save failed. Logout
+  authenticates the cookie before writing anything, and previously did so
+  through the decoder that rejects an already-revoked token — so retrying a
+  logout after a transient write failure was refused before it could reach the
+  save. On a single node that was terminal: every other path that rewrites the
+  file is driven by a cluster peer, so the node stayed degraded until some
+  unrelated revocation occurred and a restart brought the logged-out cookie
+  back. Clicking Log out again now repairs it. The retry writes only while
+  durability is actually in doubt, so it cannot be used to force writes on a
+  healthy node, and an unsigned cookie still writes nothing.
 
   A Control Plane leader also repairs its own revocations file. Every repair
   path is driven by a peer, so a leader with an HA standby and no data-plane

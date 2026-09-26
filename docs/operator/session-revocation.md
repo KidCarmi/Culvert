@@ -238,9 +238,25 @@ restart those sessions are live again.
 1. Check the volume backing the revocations file: free space, permissions,
    mount state. `AtomicWrite` needs to create a temp file in the same directory
    and `fsync` it.
-2. **Fix the volume.** Recovery is automatic and needs no restart: the next
-   successful save writes the *complete* live list, so every revocation still
-   in memory becomes durable again. At that point
+2. **Fix the volume.** Recovery needs no restart: the next successful save
+   writes the *complete* live list, so every revocation still in memory becomes
+   durable again. Something has to *trigger* that save, and which triggers exist
+   depends on the topology:
+
+   | Node | What retries the write |
+   | --- | --- |
+   | Control Plane with Data Planes | every `SyncRevocations` call (a DP syncs every 3 s) |
+   | Data Plane | its own revocation sync loop |
+   | HA leader with a standby | the standby's `HASync` poll (every 5 s) |
+   | **Standalone** (the default appliance) | **the next logout or account deletion** |
+
+   On a standalone node the retry is the next revocation, and — since AU-45 —
+   **retrying the same logout counts**: a repeat logout of a cookie this node
+   already revoked re-attempts the save while durability is in doubt, so a user
+   who clicks Log out again repairs it. That repeat does nothing once the save
+   has landed, so it is not a way to force writes on a healthy node.
+
+   At that point
    `culvert_session_revocation_durable` returns to `1`,
    `culvert_session_revocation_persist_degraded` returns to `0`, and the
    `session_revocation` row returns to `ok`.

@@ -558,6 +558,26 @@ func checkSessionRevocation() OperatorContractCheck {
 	}
 }
 
+// revocationDurabilityDoubt reports the two independent reasons a revocation
+// held in memory might not be on disk.
+//
+// They are returned SEPARATELY rather than folded into one boolean because they
+// produce different operator lines: a failing save has already announced itself
+// at onset, while a vanished file has announced nothing at all, so reporting
+// the second as a recovery from the first would send an operator hunting for a
+// failure line that does not exist. `vanished` is computed only when `failing`
+// is clear, so a node whose saves are failing does not also stat the file every
+// tick.
+//
+// It is ONE definition because two callers now ask this question — the cluster
+// merge path and, since AU-45, the repeat-logout repair — and two answers to
+// one question is the drift this sweep has corrected three times already.
+func revocationDurabilityDoubt() (failing, vanished bool) {
+	failing = sessionRevocationPersistDegraded.Load()
+	vanished = !failing && revocationBackingFileIsGone()
+	return failing, vanished
+}
+
 // mergeAndPersistRevocations merges a peer's revocation entries into the live
 // list and persists the result, RETRYING a previously failed save even when the
 // merge adds nothing new.
@@ -621,8 +641,7 @@ func mergeAndPersistRevocations(entries []RevocationEntry, who string) int {
 	// flag is clear, so a node whose save is already failing does not also
 	// announce a missing file every tick — the flag's own onset line already
 	// said what is wrong.
-	failing := sessionRevocationPersistDegraded.Load()
-	vanished := !failing && revocationBackingFileIsGone()
+	failing, vanished := revocationDurabilityDoubt()
 	if added == 0 && !failing && !vanished {
 		return 0
 	}

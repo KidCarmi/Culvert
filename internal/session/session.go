@@ -851,7 +851,46 @@ func Encode(s *Session) (string, error) {
 // Decode parses and verifies a session cookie value.
 // Returns an error when the signature is invalid, the session has expired,
 // or the token/user has been revoked.
-func Decode(raw string) (*Session, error) {
+//
+// This is THE authentication primitive for a session cookie. If you need a
+// decode that tolerates an existing revocation, you want DecodeForRevocation
+// and you should read why it exists first.
+func Decode(raw string) (*Session, error) { return decode(raw, true) }
+
+// DecodeForRevocation authenticates a cookie for the LOGOUT path only: it
+// performs every check Decode does EXCEPT the two revocation lookups.
+//
+// **This is not an authentication function and must never be used as one.** A
+// session it accepts may be one this node has already revoked, or one whose
+// account has been deleted. The only caller is revokeSessionCookie, and a
+// structural wall (TestChaos68_AU45_WallDecodeForRevocationHasOneCaller, in
+// package main) keeps it that way, because a second caller would be a silent
+// authentication bypass.
+//
+// It exists because AU-30 made logout authenticate the cookie before writing
+// anything — correct, and it closed a fleet-wide write-amplification hole —
+// but it routed that through Decode, which REJECTS an already-revoked token.
+// So a logout whose SaveRevocations failed transiently could never be repaired
+// by retrying the logout: the second attempt was refused at the door, before
+// reaching the save. On a standalone appliance nothing else retries — every
+// other repair path (SyncRevocations, the DP poll loop, the HA bundle merge) is
+// driven by a PEER — so the node stayed degraded until some unrelated
+// revocation happened, and a restart brought the cookie back to life. That is
+// AU-41's lesson one topology over: the single-node case is the one with no
+// peer to repair it (AU-45).
+//
+// The signature check is what makes this safe, and it is unchanged: a forged
+// cookie is refused here exactly as it is in Decode, so no caller can mint a
+// revocation entry. The expiry check is kept for the same reason — an expired
+// cookie authenticates nothing, so revoking it would only let a caller write
+// entries for arbitrary past expiries.
+func DecodeForRevocation(raw string) (*Session, error) { return decode(raw, false) }
+
+// decode is the ONE implementation behind both exported forms. The revocation
+// lookups are a parameter rather than a second copy of the body precisely
+// because the parts that must never diverge — the constant-time MAC compare and
+// the expiry check — are the parts a copy would silently let drift.
+func decode(raw string, consultRevocations bool) (*Session, error) {
 	dot := strings.LastIndex(raw, ".")
 	if dot < 0 {
 		return nil, fmt.Errorf("session: malformed cookie")
@@ -864,8 +903,9 @@ func Decode(raw string) (*Session, error) {
 		return nil, fmt.Errorf("session: invalid signature")
 	}
 
-	// Revocation check (explicit logout).
-	if Revoked.IsRevoked(b64) {
+	// Revocation check (explicit logout). Skipped only by DecodeForRevocation,
+	// whose whole purpose is to let a repeat logout re-persist this entry.
+	if consultRevocations && Revoked.IsRevoked(b64) {
 		return nil, fmt.Errorf("session: revoked")
 	}
 
@@ -880,8 +920,11 @@ func Decode(raw string) (*Session, error) {
 	if time.Now().Unix() > s.Exp {
 		return nil, fmt.Errorf("session: expired")
 	}
-	// User-level revocation (account deleted while session was active).
-	if s.Sub != "" && Revoked.IsUserRevoked(s.Sub) {
+	// User-level revocation (account deleted while session was active). Also
+	// skipped by DecodeForRevocation: a logout arriving after the account was
+	// deleted must still be able to persist its own token entry, or the repair
+	// path would have the same hole one branch over.
+	if consultRevocations && s.Sub != "" && Revoked.IsUserRevoked(s.Sub) {
 		return nil, fmt.Errorf("session: user revoked")
 	}
 	return &s, nil

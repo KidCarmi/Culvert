@@ -266,22 +266,47 @@ const maxClusterInboundMsgSize = 16 << 20 // 16 MiB
 // caught at commit with a named error, exactly like the count gate.
 const maxSnapshotWireBytes = 120 << 20 // 120 MiB
 
-// maxHABundleWireBytes is the same budget for the HA state bundle, and it is a
+// haBundleFrameReserve is the margin between the HA bundle's byte budget and
+// the gRPC frame, and it is MEASURED rather than inherited.
+//
+// The bundle rides rawCodec (controlplane_codec.go), which treats the
+// json.RawMessage as OPAQUE BYTES — no protobuf wrapper — so the marshalled
+// bundle IS the gRPC message payload. grpc-go bounds the payload and nothing
+// else: the send path compares `payloadLen > maxSendMessageSize` and the
+// receive path `length > maxReceiveMessageSize`, where `length` is the value
+// in the 5-byte message header (verified against v1.83.2). The header itself,
+// the HTTP/2 DATA frame headers (9 bytes per 16 KiB frame, so ~72 KiB across a
+// 128 MiB message) and HPACK are all OUTSIDE that comparison.
+//
+// So the true accounting overhead is under 100 KiB and this reserve is
+// defensive headroom — ~14x the computed worst case — not a framing tax.
+const haBundleFrameReserve = 1 << 20 // 1 MiB
+
+// maxHABundleWireBytes is the byte budget for the HA state bundle. It is a
 // SEPARATE bound rather than a reuse of maxSnapshotWireBytes because the bundle
 // CONTAINS a published config plus the cluster state, the CA material and —
 // since CHAOS-68 — the leader's live revocation set. The config's own gate
 // therefore says nothing about the bundle's size: a snapshot admitted at
-// exactly 120 MiB leaves the bundle's other members to overflow the 128 MiB
-// frame on their own.
+// exactly maxSnapshotWireBytes leaves the bundle's other members to overflow
+// the frame on their own.
 //
-// The gap to maxClusterGRPCMsgSize is the same 8 MiB of gRPC framing slack
-// maxSnapshotWireBytes reserves, for the same reason. What differs is the
-// REMEDY: an over-budget config is refused at publish, because a config the
-// fleet cannot fetch must never commit; an over-budget bundle is TRIMMED (see
-// fitRevocationsToBudget), because refusing it would take down HA replication
-// entirely — config, CA, cluster state and every revocation — to protect the
-// one member that grew.
-const maxHABundleWireBytes = 120 << 20 // 120 MiB
+// **It is DERIVED FROM THE FRAME, never from the config cap** (AU-44). The
+// first shipped value was a literal 120 MiB — numerically identical to
+// maxSnapshotWireBytes, which is the cap on a member this bundle CONTAINS — so
+// a config published at its own limit consumed the entire bundle budget and
+// `budget - (len(resp) - len(revJSON))` handed fitRevocationsToBudget zero or
+// less. Every revocation was dropped, on exactly the enterprise estate whose
+// config is large enough to matter, while ~8 MiB of frame sat unused and a
+// promotion admitted sessions the leader had revoked. The prose above computed
+// the right headroom and the constant gave it away: **a budget for a container
+// must be derived from what holds the container, not from what it holds.**
+//
+// What differs from the config's gate is the REMEDY: an over-budget config is
+// refused at publish, because a config the fleet cannot fetch must never
+// commit; an over-budget bundle is TRIMMED (see fitRevocationsToBudget),
+// because refusing it would take down HA replication entirely — config, CA,
+// cluster state and every revocation — to protect the one member that grew.
+const maxHABundleWireBytes = maxClusterGRPCMsgSize - haBundleFrameReserve // 127 MiB
 
 // maxSnapURLCategoryHosts bounds the AGGREGATE hosts across all url_categories
 // entries. The entry count is small (maxSnapURLCategories), but each entry

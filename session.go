@@ -127,7 +127,13 @@ func revokeSessionCookie(cookieName string, r *http.Request) {
 	if err != nil {
 		return
 	}
-	sess, err := decodeSession(c.Value)
+	// AU-30: the cookie is AUTHENTICATED before anything is written, so an
+	// unauthenticated caller can never mint revocation entries. AU-45: that
+	// authentication deliberately does NOT go through Decode, which refuses an
+	// already-revoked token — which would make a repeat logout unable to repair
+	// a save that failed the first time. See DecodeForRevocation, and do not
+	// "simplify" this back to decodeSession.
+	sess, err := session.DecodeForRevocation(c.Value)
 	if err != nil || sess == nil {
 		return
 	}
@@ -135,7 +141,32 @@ func revokeSessionCookie(cookieName string, r *http.Request) {
 	if dot < 0 {
 		return
 	}
-	sessionRevoked.Revoke(c.Value[:dot], time.Unix(sess.Exp, 0))
+	token := c.Value[:dot]
+
+	// A repeat logout of an already-revoked cookie is a REPAIR OPPORTUNITY, and
+	// on a standalone appliance it is the only one there is: every other path
+	// that rewrites this file (SyncRevocations, the DP poll loop, the HA bundle
+	// merge) needs a PEER, and the default deployment has none.
+	//
+	// It is gated on durability actually being in doubt, and that gate is the
+	// load-bearing half. Persisting on EVERY repeat would turn a once-per-cookie
+	// write into a per-request marshal, fsync, rename and fleet-wide gossip,
+	// driven by anyone replaying one valid cookie against a PUBLIC route — the
+	// write-amplification shape CHAOS-63 exists for, aimed at the control that
+	// withdraws session authority. Gated, the extra write happens only while a
+	// save is already failing or the file has vanished, and one save that lands
+	// clears the flag, so the repair terminates on its own.
+	//
+	// Re-revoking cannot grow the list: Revoke is a map assignment keyed by the
+	// token, and the expiry comes from the same cookie, so the entry is
+	// byte-identical to the one already there.
+	if sessionRevoked.IsRevoked(token) {
+		if failing, vanished := revocationDurabilityDoubt(); !failing && !vanished {
+			return
+		}
+	}
+
+	sessionRevoked.Revoke(token, time.Unix(sess.Exp, 0))
 	if err := sessionRevoked.SaveRevocations(); err != nil {
 		// A REFUSAL is not a failure: this boot could not read the revocations
 		// file, so we decline to rename over content we never saw (AU-37). The

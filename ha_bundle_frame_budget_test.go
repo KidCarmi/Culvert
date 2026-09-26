@@ -222,8 +222,47 @@ func TestChaos68_AU40_ControlBudgetIsBelowTheFrame(t *testing.T) {
 	if maxHABundleWireBytes >= maxClusterGRPCMsgSize {
 		t.Fatalf("maxHABundleWireBytes=%d must leave gRPC framing slack below maxClusterGRPCMsgSize=%d", maxHABundleWireBytes, maxClusterGRPCMsgSize)
 	}
-	if maxHABundleWireBytes < maxSnapshotWireBytes {
-		t.Fatalf("maxHABundleWireBytes=%d is below the config budget %d it must contain — every published config would trim", maxHABundleWireBytes, maxSnapshotWireBytes)
+}
+
+// DEFECT (AU-44): a bundle carrying a MAXIMUM-SIZE config still has room for
+// revocations.
+//
+// This control's predecessor asserted `maxHABundleWireBytes >=
+// maxSnapshotWireBytes` — the right idea with the wrong comparison, because
+// EQUALITY passes it and equality is precisely the defect. The shipped constant
+// was a literal 120 MiB, numerically identical to the cap on a member the
+// bundle CONTAINS, so a config published at its own limit consumed the whole
+// bundle budget: `budget - (len(resp) - len(revJSON))` handed
+// fitRevocationsToBudget zero or less and every revocation was dropped, while
+// ~8 MiB of the 128 MiB frame sat unused. The control's own error message said
+// "every published config would trim" — which is exactly what happened.
+//
+// So the property is stated in the unit an operator cares about: how many real
+// revocations survive alongside a maxed config. Asserting a byte number would
+// re-admit the same class of off-by-a-relation.
+//
+// Verified FAILING against the reintroduced `maxHABundleWireBytes = 120 << 20`.
+func TestChaos68_AU44_MaxedConfigStillLeavesRoomForRevocations(t *testing.T) {
+	allowance := maxHABundleWireBytes - maxSnapshotWireBytes
+	if allowance <= 0 {
+		t.Fatalf("a config at its own cap (%d) consumes the entire bundle budget (%d): every revocation is dropped on exactly the estate large enough to need them",
+			maxSnapshotWireBytes, maxHABundleWireBytes)
+	}
+
+	// Measure a realistic entry rather than hardcoding one: a revoked OIDC
+	// session carries a long base64 token, so the per-entry cost is what
+	// decides how many survive.
+	entry, err := json.Marshal(RevocationEntry{
+		Token:  strings.Repeat("A", 240),
+		Expiry: 9_000_000_000,
+	})
+	if err != nil {
+		t.Fatalf("marshal probe entry: %v", err)
+	}
+	const wantEntries = 10_000
+	if got := allowance / (len(entry) + 1); got < wantEntries {
+		t.Fatalf("a maxed config leaves room for only %d revocation(s) (allowance %d bytes, entry %d bytes); want at least %d, or a promotion admits sessions the leader revoked",
+			got, allowance, len(entry), wantEntries)
 	}
 }
 
