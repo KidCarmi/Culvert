@@ -31,11 +31,23 @@ func withChaos68Revocations(t *testing.T) {
 	t.Helper()
 	restore := sessionRevoked.SwapForTest()
 	resetSessionRevocationHealthForTest()
+	// AU-38 made these gates the first in this file to reach the REAL
+	// quarantine, which writes the process-global stateCorruption record and
+	// feeds /readyz a state_file_session_revocations fail row. That record is
+	// STICKY in one direction by design -- quarantineCorruptStateFile keeps
+	// the most severe outcome, so a FAILED quarantine is never overwritten by
+	// a later successful one -- so leaking it does not merely add a row, it
+	// pins the wrong row for the rest of the binary. Same class as the
+	// SwapForTest fence and the health record beside it: a process-global a
+	// gate writes is registered with the isolation primitive in the same
+	// change.
+	resetStateCorruption()
 	prevPath := session.RevocationsPath()
 	t.Cleanup(func() {
 		restore()
 		session.SetRevocationsPath(prevPath)
 		resetSessionRevocationHealthForTest()
+		resetStateCorruption()
 	})
 }
 
