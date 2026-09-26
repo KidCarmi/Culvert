@@ -157,8 +157,16 @@ func sseAuthStillValid(r *http.Request) bool {
 	// the surviving un-bounded credential path. Fail-closed on every non-OK
 	// verdict, lockout included: a stream whose client IP is under an active
 	// credential lockout for this username stops receiving live telemetry.
+	//
+	// SEC-BASICAUTH-5: the LIVENESS wrapper, which checks and verifies exactly
+	// as the submission path does but records nothing. These headers were
+	// captured when the stream was established and cannot change mid-stream, so
+	// treating each tick as a login attempt would (a) charge one failure per
+	// open stream after a password rotation, locking the administrator out of
+	// their own appliance, and (b) clear a co-located attacker's tier-1 counter
+	// once per interval on a shared egress. See revalidateUIBasicAuth.
 	if user, pass, ok := r.BasicAuth(); ok {
-		return verifyUIBasicAuth(r, user, pass).OK()
+		return revalidateUIBasicAuth(r, user, pass).OK()
 	}
 	return false
 }

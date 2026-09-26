@@ -35,8 +35,13 @@ import (
 // gets through (and still answers to their own tier-1 pair lock).
 //
 // A successful login resets the pair counter and marks the IP trusted for
-// that user. State is not persisted across restarts (intentional — an
-// operator restart is the documented break-glass for a stuck lock).
+// that user. State is not persisted across restarts, which is intentional but
+// is NOT the routine remedy for a stuck lock: ResetUser clears every lock for
+// a username, and package main exposes it as the admin-only
+// POST /api/auth/lockouts (with GET to list what is locked). A restart clears
+// the same state and remains the break-glass for the case where nobody can
+// authenticate to reach that endpoint — it also interrupts proxy traffic, so
+// reach for the endpoint first.
 // ---------------------------------------------------------------------------
 
 const (

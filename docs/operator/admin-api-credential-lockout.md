@@ -27,6 +27,21 @@ All three now share the login form's lockout. There is **no new setting** —
 same tiers, same window, same trusted-IP bypass, same `auth.lockout` audit
 action, same `auth_lockout` alert.
 
+### One exception: the SSE re-check is read-only
+
+The third path is not a credential *submission*. An SSE stream's Basic
+credentials are captured when the connection is established and cannot change
+while it is open, so each periodic re-check replays one credential that was
+already accepted — it can never be a new guess. That path therefore still
+applies the lockout check and still verifies the credential (so a rotated
+password or a deleted user terminates the stream, and a locked pair has its
+streams cut), but it **records neither a failure nor a success**.
+
+This matters operationally in one direction you would otherwise hit:
+**rotating a password does not lock you out.** Streams open at the moment of
+the rotation keep replaying the old password until they are cut, and none of
+those re-checks counts against the new password's lockout budget.
+
 ## The bound
 
 Unchanged from the login form (`internal/lockout`):
@@ -110,8 +125,12 @@ per window.
   **API** rather than the login form. Pair it with
   `culvert_login_oversize_rejected_total` (CHAOS-63) when triaging a probe.
 - **Audit** — one `auth.lockout` entry per trip, never one per attempt (a
-  per-attempt entry would rebuild the CHAOS-63 durable-log amplifier). The actor
-  is the submitted username, truncated.
+  per-attempt entry would rebuild the CHAOS-63 durable-log amplifier). Note
+  which field carries what, because searching the wrong one finds nothing:
+  the **object** is the submitted username, truncated, and the **actor** is the
+  client IP (the attempt failed, so there is no authenticated identity for
+  `auditActor` to prefix it with). Alert on `action = auth.lockout` and read the
+  username out of the object.
 - **Alert** — the existing `auth_lockout` event, `Source: auth`,
   `Detail: "admin API credential lockout"` (a fixed string, so the dispatcher's
   dedup window works).
@@ -120,9 +139,19 @@ per window.
 
 ## Clearing a lock
 
-A lock expires on its own after 15 minutes. There is no API to clear one; the
-documented break-glass is a process restart (lockout state is deliberately not
-persisted). `GET /api/auth/lockouts` lists what is currently locked.
+A lock expires on its own after 15 minutes. To clear one sooner:
+
+1. `GET /api/auth/lockouts` (admin-only) lists every lock currently in force —
+   both the tier-1 (IP, username) pairs and the tier-2 account locks.
+2. `POST /api/auth/lockouts` with `{"username":"alice"}` (admin-only) clears
+   **every** lock for that username, both tiers and every source IP. The clear
+   is audited as `auth.lockout.clear`.
+
+Both are also in the admin UI, as the **Active Login Lockouts** panel on the
+Users view (admin-only), with a per-row **Unlock** button. A process restart also clears
+everything (lockout state is deliberately not persisted), but it is the
+break-glass for when nobody can authenticate to reach the endpoint at all — not
+the routine remedy, since it interrupts proxy traffic.
 
 If an automation account keeps locking itself out, it is sending a wrong
 password — check for a rotated credential. A **successful** Basic Auth call

@@ -52,6 +52,25 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   (AU-18 — the fix is the existing credential-cost governor, which makes an
   over-cap client wait rather than refusing it). Builds that briefly exported
   `culvert_admin_basic_auth_fail_shed_total` no longer do.
+- The SSE mid-stream re-check no longer records against the lockout
+  (SEC-BASICAUTH-5). An SSE stream's Basic credentials are captured when the
+  connection is established and cannot change while it is open, so a periodic
+  re-check replays a credential that was already accepted — it is never a new
+  guess, and counting it as an attempt was wrong in both directions. Counting a
+  **failure** meant that rotating a password locked the administrator out: the
+  streams already open keep replaying the old secret, and enough of them trip
+  the lock on the very address the administrator is working from. Counting a
+  **success** was the more serious half — it cleared the tier-1 counter and
+  refreshed the tier-2 trusted-IP grant, so one legitimate stream held open from
+  a shared egress reset a co-located attacker's failure count once per interval,
+  and an attacker keeping each burst under the threshold never locked at all.
+  The re-check now still applies the lockout check and still verifies the
+  credential — a rotated password, a deleted account or a locked pair all
+  terminate the stream, which is *stricter* than before — but records neither
+  outcome. Operationally: **rotating an admin password can no longer lock you
+  out**, and the runbook's lock-clearing procedure now documents the existing
+  admin-only `POST /api/auth/lockouts` (and its Unlock button) instead of
+  telling operators to restart the process.
 - Removed a public-allowlist prefix that pre-authorised routes nobody had
   written (SEC-PUBLICPATH-1). `isPublicUIAuthPath` matched any path under
   `/api/auth/totp`, and no such route exists: TOTP is verified inside

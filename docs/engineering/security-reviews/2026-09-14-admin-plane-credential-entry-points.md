@@ -521,6 +521,123 @@ unchanged and green.
 
 ---
 
+## 1d. SEC-BASICAUTH-5 — §1 routed the SSE re-check to the right place and made it record the wrong thing
+
+| | |
+| --- | --- |
+| **Severity** | MEDIUM |
+| **CWE** | CWE-307 (improper restriction of excessive authentication attempts) for the success half; CWE-645 (overly restrictive account lockout) for the failure half |
+| **OWASP** | A07:2021 |
+| **Regression risk** | Introduced by §1 — both halves are unreachable on the pre-§1 tree |
+| **Found by** | Codex review round 4, on the merge commit. It named the failure half; the success half was found while confirming it |
+
+§1's premise was that four entry points answered the same question and only one
+was bounded. That was right about `uiAuthMiddleware` and `apiAuthStatus`, which
+are credential **submissions**, and wrong about `sseAuthStillValid`, which is
+not. An SSE stream's Basic credentials are captured when the connection is
+established and cannot change while it is open, so a periodic re-check replays
+one credential that the submission chokepoint already accepted. Routing it
+through the chokepoint was correct; having the chokepoint **record** it as an
+attempt broke the limiter in both directions.
+
+### The failure half — a password rotation locks the administrator out
+
+Rotating a password does not close the SSE streams already open. Each keeps
+replaying the old secret, so at the next re-check every one of them charges a
+failure against the same `(IP, username)` pair. `lockout.MaxAttempts` open
+streams trip tier 1 and the administrator is refused `429` from that address for
+`lockout.Duration` — triggered by performing the security action, with no
+attacker involved. Reproduced: six stale re-checks, then the correct new
+password answers `429`.
+
+### The success half — a live stream clears a co-located attacker's counter
+
+This one is a weakening of RISK-012, not an availability defect, and it is the
+more serious of the two. `RecordSuccess` deletes the tier-1 pair entry and
+refreshes the tier-2 trusted-IP grant. One legitimate Basic-auth stream held
+open from a shared egress — a NAT, a CGNAT range, or an L7 proxy with no
+`trusted_proxy_cidrs` configured — therefore resets the failure count for that
+`(IP, username)` pair once per re-check interval. An attacker sharing that
+address who keeps each burst under the threshold never accumulates a lock at
+all, and holds no credential of their own. Reproduced: eight failures spanning
+one re-check, against a threshold of five, still unlocked.
+
+### Fix — the re-check is read-only with respect to the limiter
+
+`checkUIBasicAuth` is now the single `cfg.VerifyUIUser` call site, behind two
+named wrappers: `verifyUIBasicAuth` (submission) and `revalidateUIBasicAuth`
+(liveness). Both run the lockout `Check` before any bcrypt and both verify the
+credential. Only the submission records the outcome.
+
+Nothing is admitted that was not admitted before, and one thing is now refused
+that the pre-§1 tree admitted: a live stream on a locked pair is cut, because
+the `Check` applies on both intents. The removed writes cost nothing, because
+this path cannot be a guessing oracle by construction — reaching it requires an
+established connection, establishing one requires passing `requireRole` through
+the submission chokepoint, and the credential is then fixed for the life of the
+connection. One connection is one already-valid credential, never a new guess.
+
+An enum was chosen over a boolean parameter, and two named wrappers over an enum
+at the call site, because the argument that decides whether a security counter
+is written should not be a positional `true`.
+
+### The transferable rule
+
+**Identifying the right chokepoint does not settle what the chokepoint should
+do with each caller.** §1 asked "is this credential check bounded?" and stopped;
+the question it did not ask is "is this caller an *attempt*?". A re-validation,
+a health probe and a cached re-check all present credentials without being
+guesses, and charging them as guesses is wrong in both directions at once — it
+adds denial where there is no attacker and removes denial where there is one.
+
+### Widening the wall safely
+
+`callsChokepoint` now accepts a set of two entry points rather than one name,
+which is a widening of a security wall and needed its own guard.
+`TestSecBasicAuthWall_EveryChokepointEntryPointReachesTheCore` requires every
+name in that set to be a real func in package main that delegates to
+`checkUIBasicAuth` — so a wrapper added to the set that verified credentials
+some other way fails the build. Verified: a wrapper that calls
+`cfg.VerifyUIUser` directly is caught by **both** walls independently.
+
+### Tests
+
+`ui_basicauth_lockout_test.go` — two defect gates, each verified failing against
+the reintroduced pre-fix shape (`sseAuthStillValid` calling the submission
+wrapper) AND, individually, against a mutation that removes only its own guard,
+so neither gate is resting on the other:
+
+| Gate | Pre-fix shape | Own-guard mutation |
+| --- | --- | --- |
+| `StaleStreamsCannotLockOutTheRotatedPassword` | FAIL (`429`, want 200) | FAIL |
+| `LiveStreamCannotClearAnAttackersFailureCount` | FAIL (8 failures, threshold 5, unlocked) | FAIL |
+
+Two CONTROLS, because the cheapest way to pass both gates is to stop
+revalidating: `Control_RevalidationStillCutsAnInvalidStream` (a rotated password
+and an absent account must both terminate the stream; a valid one must survive)
+and `Control_RevalidationStillHonoursAnActiveLockout` (a **correct** credential
+on a locked pair must still be cut, and must move
+`culvert_admin_basic_auth_lockout_refused_total` — which is the "costs no
+bcrypt" ordering asserted from the other side).
+
+### Documentation defects found in the same review
+
+Both in `docs/operator/admin-api-credential-lockout.md`, both would have sent an
+operator the wrong way, neither is a code defect:
+
+- **Clearing a lock** said there is no API and directed the operator to restart
+  the process. `POST /api/auth/lockouts` has existed since route 146, is
+  admin-only, calls `ResetUser`, is audited as `auth.lockout.clear`, and is
+  wired to an **Unlock** button in the Active Login Lockouts panel on the Users
+  view. Following the runbook as written would have cost an avoidable traffic
+  interruption. Corrected, with restart retained as the genuine break-glass for
+  when nobody can authenticate to reach the endpoint.
+- **Signals** said the audit *actor* is the truncated username. It is the
+  *object*; `auditActor` resolves a failed, unauthenticated attempt to the
+  client IP. An alert keyed on the documented field would have matched nothing.
+
+---
+
 ## 2. SEC-PUBLICPATH-1 — a public-allowlist prefix pre-authorised routes that do not exist
 
 | | |

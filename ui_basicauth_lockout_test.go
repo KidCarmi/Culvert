@@ -426,3 +426,158 @@ func TestSecBasicAuth4_ResidualUnauthenticatedStateGrowth(t *testing.T) {
 		"keys stay clamped at lockout.MaxUsernameKeyLen and expire with Cleanup's window",
 		flood, before, after)
 }
+
+// ─── SEC-BASICAUTH-5 — a liveness re-check is not a login attempt ───────────
+//
+// SEC-BASICAUTH-1 routed the SSE mid-stream revalidation through the same
+// chokepoint as the two credential SUBMISSION paths, which was right about
+// WHERE it should be bounded and wrong about WHAT it should record. The
+// credentials an SSE stream re-checks were captured when the stream was
+// ESTABLISHED and cannot change while it is open, so each tick is one
+// already-admitted credential, never a new guess — and recording it as an
+// attempt broke the limiter in both directions. The gates below pin each
+// direction, with two controls, because the cheapest way to pass them both is
+// to stop revalidating at all, which would delete the property revalidation
+// exists for.
+
+// sseRevalidateProbe drives ONE mid-stream revalidation for a Basic-auth SSE
+// stream from the given client IP and reports whether the stream survives.
+func sseRevalidateProbe(t *testing.T, ip, user, pass string) bool {
+	t.Helper()
+	r := httptest.NewRequest(http.MethodGet, "/api/events", http.NoBody)
+	r.RemoteAddr = ip + ":51234"
+	r.SetBasicAuth(user, pass)
+	return sseAuthStillValid(r)
+}
+
+// TestSecBasicAuth5_StaleStreamsCannotLockOutTheRotatedPassword is the first
+// DEFECT gate: charging a FAILURE per re-check turned a password rotation into
+// a self-inflicted admin lockout.
+//
+// An administrator rotating their password does not close the SSE streams that
+// are already open — they keep carrying the OLD password, because the headers
+// were captured at connect time. At the next revalidation tick each open stream
+// charges one failure against the SAME (IP, username) pair, so lockoutMaxAttempts
+// of them trip tier 1 and the administrator is refused 429 from that IP for
+// lockoutDuration, at the exact moment they performed the security action.
+func TestSecBasicAuth5_StaleStreamsCannotLockOutTheRotatedPassword(t *testing.T) {
+	basicAuthTestCfg(t, "admin", "rotated-new-password")
+
+	const ip = "198.51.100.60"
+
+	// Streams established before the rotation, still replaying the old secret.
+	// One more than the threshold, so a build that records them cannot squeak
+	// under it.
+	for i := 0; i <= lockoutMaxAttempts; i++ {
+		if sseRevalidateProbe(t, ip, "admin", "pre-rotation-password") {
+			t.Fatalf("stale stream %d survived revalidation with the OLD password — "+
+				"revalidation must still terminate a stream whose credential is no longer valid", i+1)
+		}
+	}
+
+	// The administrator, from the same address, with the NEW correct password.
+	if code := basicAuthProbe(t, ip, "admin", "rotated-new-password"); code != http.StatusOK {
+		t.Fatalf("after %d stale-stream revalidations the ROTATED password got %d, want 200 — "+
+			"charging a re-check as a login attempt locks an administrator out of their own "+
+			"appliance for rotating a password (CWE-645, availability, admin plane)",
+			lockoutMaxAttempts+1, code)
+	}
+	if code, loggedIn := authStatusProbe(t, ip, "admin", "rotated-new-password"); code != http.StatusOK || !loggedIn {
+		t.Fatalf("status endpoint after the stale-stream revalidations: code=%d loggedIn=%v, want 200/true", code, loggedIn)
+	}
+}
+
+// TestSecBasicAuth5_LiveStreamCannotClearAnAttackersFailureCount is the second
+// DEFECT gate, and the more serious half: recording a SUCCESS per re-check
+// WEAKENS RISK-012 rather than merely costing availability.
+//
+// loginLimiter.RecordSuccess deletes the tier-1 pair entry and refreshes the
+// tier-2 trusted-IP grant. One legitimate Basic-auth stream held open from a
+// shared egress — a NAT, a CGNAT range, or an L7 proxy with no
+// trusted_proxy_cidrs configured — therefore resets a co-located attacker's
+// failure count once per revalidation interval, so an attacker keeping each
+// burst under the threshold never accumulates a lock at all. The tier-2 grant
+// refresh is the same defect one tier up, and is covered by the same fix.
+func TestSecBasicAuth5_LiveStreamCannotClearAnAttackersFailureCount(t *testing.T) {
+	basicAuthTestCfg(t, "admin", "correct-horse-battery")
+
+	// ONE client key shared by the attacker and the real operator.
+	const shared = "198.51.100.61"
+
+	burst := lockoutMaxAttempts - 1 // deliberately under the threshold
+	for i := 0; i < burst; i++ {
+		if code := basicAuthProbe(t, shared, "admin", "guess"); code != http.StatusUnauthorized {
+			t.Fatalf("attacker attempt %d: got %d, want 401", i+1, code)
+		}
+	}
+
+	// The operator's live stream re-checks. Its credential is correct, so a
+	// build that records the outcome calls RecordSuccess and wipes the count.
+	if !sseRevalidateProbe(t, shared, "admin", "correct-horse-battery") {
+		t.Fatal("a live stream with a still-valid credential must survive revalidation")
+	}
+
+	// The attacker continues. Across the two bursts they are now well past
+	// lockoutMaxAttempts, so tier 1 must have tripped.
+	locked := false
+	for i := 0; i < burst; i++ {
+		if code := basicAuthProbe(t, shared, "admin", "guess"); code == http.StatusTooManyRequests {
+			locked = true
+			break
+		}
+	}
+	if !locked {
+		t.Fatalf("after %d failures spanning one mid-stream revalidation the pair is still unlocked "+
+			"(threshold %d) — a re-check that records a success resets a co-located attacker's tier-1 "+
+			"counter once per interval, collapsing the lock and re-arming the tier-2 bypass (CWE-307)",
+			2*burst, lockoutMaxAttempts)
+	}
+}
+
+// TestSecBasicAuth5_Control_RevalidationStillCutsAnInvalidStream is the first
+// CONTROL. Both gates above are satisfied by a revalidation that never returns
+// false — which would delete the reason revalidation exists: an SSE connection
+// outlives its connect-time check, so a rotated password, a deleted user or a
+// revoked session must stop receiving live telemetry.
+func TestSecBasicAuth5_Control_RevalidationStillCutsAnInvalidStream(t *testing.T) {
+	basicAuthTestCfg(t, "admin", "correct-horse-battery")
+
+	const ip = "198.51.100.62"
+	if sseRevalidateProbe(t, ip, "admin", "no-longer-the-password") {
+		t.Fatal("control: a stream carrying a credential that no longer verifies must be terminated")
+	}
+	if sseRevalidateProbe(t, ip, "ghost", "anything") {
+		t.Fatal("control: a stream naming an account that does not exist must be terminated")
+	}
+	if !sseRevalidateProbe(t, ip, "admin", "correct-horse-battery") {
+		t.Fatal("control: a stream whose credential still verifies must survive")
+	}
+}
+
+// TestSecBasicAuth5_Control_RevalidationStillHonoursAnActiveLockout is the
+// second CONTROL, and it is what keeps "records nothing" from drifting into
+// "checks nothing". The liveness path is exempt from WRITING to the limiter, not
+// from READING it: while a pair is locked its live streams must be cut, and the
+// refusal must be reached BEFORE verification so it costs no bcrypt.
+func TestSecBasicAuth5_Control_RevalidationStillHonoursAnActiveLockout(t *testing.T) {
+	basicAuthTestCfg(t, "admin", "correct-horse-battery")
+
+	const ip = "198.51.100.63"
+	for i := 0; i < lockoutMaxAttempts; i++ {
+		if code := basicAuthProbe(t, ip, "admin", "guess"); code != http.StatusUnauthorized {
+			t.Fatalf("attempt %d: got %d, want 401", i+1, code)
+		}
+	}
+
+	before := basicAuthLockoutRefused.Load()
+	// A CORRECT credential: if the lockout were consulted after verification
+	// this would survive, which is the "costs no bcrypt" bound inverted.
+	if sseRevalidateProbe(t, ip, "admin", "correct-horse-battery") {
+		t.Fatal("control: a live stream on a LOCKED pair must be cut — the liveness path is exempt " +
+			"from recording, never from the lockout Check")
+	}
+	if basicAuthLockoutRefused.Load() <= before {
+		t.Fatal("control: the refusal did not move culvert_admin_basic_auth_lockout_refused_total, " +
+			"so it was not the lockout that cut the stream")
+	}
+}

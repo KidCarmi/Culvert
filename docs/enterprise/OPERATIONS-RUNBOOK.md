@@ -27,7 +27,7 @@ Interfaces referenced:
 ## Restart
 
 - **Command:** `docker compose restart proxy` **[HOST]**.
-- **Note:** a restart **clears in-memory brute-force lockouts** — this is the documented break-glass for a stuck lock.
+- **Note:** a restart **clears in-memory brute-force lockouts**, but it is not the remedy for a stuck lock — use the admin-only `POST /api/auth/lockouts` (`{"username":"..."}`), or the **Unlock** button in the Active Login Lockouts panel on the Users view, which clears both tiers without interrupting traffic. A restart is the break-glass for when nobody can authenticate to reach that endpoint. See [admin-api-credential-lockout.md](../operator/admin-api-credential-lockout.md).
 
 ## Health validation
 

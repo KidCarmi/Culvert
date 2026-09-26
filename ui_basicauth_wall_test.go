@@ -27,9 +27,11 @@ import (
 // credentialVerifierAllowlist names every function permitted to call
 // cfg.VerifyUIUser directly, with the bound that makes it safe.
 var credentialVerifierAllowlist = map[string]string{
-	// THE chokepoint. Applies loginLimiter.Check before verification, records
-	// the failure, audits the trip. See ui_basicauth_lockout.go.
-	"verifyUIBasicAuth": "the SEC-BASICAUTH-1 chokepoint: two-tier lockout checked before verification",
+	// THE chokepoint core, behind both wrappers (verifyUIBasicAuth for a
+	// submission, revalidateUIBasicAuth for a liveness re-check). Applies
+	// loginLimiter.Check before verification on BOTH intents; only a submission
+	// records the outcome. See ui_basicauth_lockout.go.
+	"checkUIBasicAuth": "the SEC-BASICAUTH-1 chokepoint: two-tier lockout checked before verification, on every intent",
 	// The login form. Its own loginLimiter.Check/RecordFailure pair plus the
 	// CHAOS-63 username bound and a 300 ms failure delay.
 	"apiAuthLogin": "RISK-012 two-tier lockout + CHAOS-63 username bound, applied inline",
@@ -47,7 +49,19 @@ var credentialVerifierAllowlist = map[string]string{
 var basicAuthReaderAllowlist = map[string]string{
 	"uiAuthMiddleware":  "programmatic/CLI fallback for every /api/ route",
 	"apiAuthStatus":     "PUBLIC endpoint (isPublicUIAuthPath) that reports the verdict",
-	"sseAuthStillValid": "SSE mid-stream revalidation",
+	"sseAuthStillValid": "SSE mid-stream revalidation — the LIVENESS wrapper (SEC-BASICAUTH-5): same Check, same verification, records nothing",
+}
+
+// chokepointEntryPoints names the wrappers a Basic-auth reader may call. Both
+// route to checkUIBasicAuth, so both apply the lockout Check before any bcrypt;
+// they differ only in whether the outcome is RECORDED (SEC-BASICAUTH-5).
+//
+// This is an ENUMERATION, not a prefix match: a new wrapper must be added here
+// deliberately, and adding one that skipped the Check would still have to get
+// past the verifier wall above.
+var chokepointEntryPoints = map[string]bool{
+	"verifyUIBasicAuth":     true,
+	"revalidateUIBasicAuth": true,
 }
 
 // mainPackageFiles returns the non-test .go files of package main.
@@ -127,7 +141,7 @@ func TestSecBasicAuthWall_EveryCredentialVerifierIsBounded(t *testing.T) {
 			seen[fn] = true
 			if _, allowed := credentialVerifierAllowlist[fn]; !allowed {
 				t.Errorf("%s: %s calls cfg.VerifyUIUser directly.\n"+
-					"Route it through verifyUIBasicAuth (ui_basicauth_lockout.go) so the two-tier\n"+
+					"Route it through checkUIBasicAuth (ui_basicauth_lockout.go) so the two-tier\n"+
 					"lockout applies, or add it to credentialVerifierAllowlist with the bound that\n"+
 					"makes it safe. An unbounded credential check is a brute-force oracle and one\n"+
 					"bcrypt of CPU per unauthenticated request.",
@@ -184,7 +198,8 @@ func collectBasicAuthReaders(t *testing.T, fset *token.FileSet) map[string]bool 
 			readers[fn] = true
 			if _, allowed := basicAuthReaderAllowlist[fn]; !allowed {
 				t.Errorf("%s: %s reads r.BasicAuth() but is not in basicAuthReaderAllowlist.\n"+
-					"Every inbound admin credential read must go through verifyUIBasicAuth.",
+					"Every inbound admin credential read must go through verifyUIBasicAuth or\n"+
+					"revalidateUIBasicAuth (see chokepointEntryPoints).",
 					fset.Position(call.Pos()), fn)
 			}
 			return true
@@ -193,7 +208,17 @@ func collectBasicAuthReaders(t *testing.T, fset *token.FileSet) map[string]bool 
 	return readers
 }
 
-// callsChokepoint reports whether fd contains a call to verifyUIBasicAuth.
+// sortedChokepointNames renders a name set deterministically for a failure message.
+func sortedChokepointNames(m map[string]bool) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// callsChokepoint reports whether fd calls one of the chokepointEntryPoints.
 func callsChokepoint(fd *ast.FuncDecl) bool {
 	found := false
 	ast.Inspect(fd, func(n ast.Node) bool {
@@ -201,7 +226,7 @@ func callsChokepoint(fd *ast.FuncDecl) bool {
 		if !ok {
 			return true
 		}
-		if id, ok := call.Fun.(*ast.Ident); ok && id.Name == "verifyUIBasicAuth" {
+		if id, ok := call.Fun.(*ast.Ident); ok && chokepointEntryPoints[id.Name] {
 			found = true
 		}
 		return true
@@ -228,8 +253,8 @@ func assertReadersReachChokepoint(t *testing.T, fset *token.FileSet, readers map
 				continue
 			}
 			if !callsChokepoint(fd) {
-				t.Errorf("%s: %s reads r.BasicAuth() but never calls verifyUIBasicAuth — the credentials it reads are unbounded",
-					fset.Position(fd.Pos()), fd.Name.Name)
+				t.Errorf("%s: %s reads r.BasicAuth() but calls no chokepoint entry point (%v) — the credentials it reads are unbounded",
+					fset.Position(fd.Pos()), fd.Name.Name, sortedChokepointNames(chokepointEntryPoints))
 			}
 		}
 	}
@@ -268,5 +293,57 @@ func TestSecBasicAuthWall_ControlRejectsAnUnboundedVerifier(t *testing.T) {
 	// trivially satisfiable by deleting every entry.
 	if len(credentialVerifierAllowlist) == 0 || len(basicAuthReaderAllowlist) == 0 {
 		t.Fatal("control: an empty allowlist disarms the wall")
+	}
+	if len(chokepointEntryPoints) == 0 {
+		t.Fatal("control: an empty chokepointEntryPoints set makes callsChokepoint unsatisfiable-by-deletion")
+	}
+	if chokepointEntryPoints["someNewWrapperThatSkipsTheLockout"] {
+		t.Fatal("control: an un-enumerated wrapper must not count as a chokepoint")
+	}
+}
+
+// TestSecBasicAuthWall_EveryChokepointEntryPointReachesTheCore is what makes
+// widening callsChokepoint to a SET safe rather than a hole: each name in
+// chokepointEntryPoints must be a real func in package main that delegates to
+// checkUIBasicAuth, which is the function the verifier wall above binds the
+// lockout Check to. A wrapper added to the set that verified credentials some
+// other way would satisfy the reader wall while bypassing the bound.
+func TestSecBasicAuthWall_EveryChokepointEntryPointReachesTheCore(t *testing.T) {
+	fset := token.NewFileSet()
+	found := map[string]bool{}
+
+	for _, path := range mainPackageFiles(t) {
+		f, err := parser.ParseFile(fset, path, nil, parser.ParseComments)
+		if err != nil {
+			t.Fatalf("parse %s: %v", path, err)
+		}
+		for _, decl := range f.Decls {
+			fd, ok := decl.(*ast.FuncDecl)
+			if !ok || fd.Recv != nil || !chokepointEntryPoints[fd.Name.Name] {
+				continue
+			}
+			found[fd.Name.Name] = true
+			reaches := false
+			ast.Inspect(fd, func(n ast.Node) bool {
+				call, ok := n.(*ast.CallExpr)
+				if !ok {
+					return true
+				}
+				if id, ok := call.Fun.(*ast.Ident); ok && id.Name == "checkUIBasicAuth" {
+					reaches = true
+				}
+				return true
+			})
+			if !reaches {
+				t.Errorf("%s: chokepoint entry point %s does not call checkUIBasicAuth — it cannot be relied on to apply the two-tier lockout Check before verification",
+					fset.Position(fd.Pos()), fd.Name.Name)
+			}
+		}
+	}
+
+	for name := range chokepointEntryPoints {
+		if !found[name] {
+			t.Errorf("chokepoint entry point %q is not a func in package main — a stale or misspelled name silently widens callsChokepoint", name)
+		}
 	}
 }
