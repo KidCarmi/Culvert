@@ -366,12 +366,18 @@ func (ps *PolicyStore) Load(path string) error {
 			// directory doesn't exist) must not turn a graceful load into a
 			// boot failure at initPolicy — that failure surfaces the normal
 			// way, on the next rule mutation's own persist attempt.
+			// adoptUnsaved is set BEFORE the path is exposed, and only
+			// SaveErr's own successful write (via saveTo) clears it — never
+			// here. Clearing it here first and only re-setting it on a
+			// failed save left a window, between the unlock below and
+			// SaveErr returning, where a concurrent GET /api/policy read
+			// path != "" && !adoptUnsaved and reported persisted:true for
+			// rules that had not yet reached disk (Codex review, PR #1445).
 			ps.mu.Lock()
 			ps.path = path
-			ps.adoptUnsaved.Store(false)
+			ps.adoptUnsaved.Store(true)
 			ps.mu.Unlock()
 			if saveErr := ps.SaveErr(); saveErr != nil {
-				ps.adoptUnsaved.Store(true)
 				logWarnf("Policy: adopted %s but could not persist current rules yet: %v", sanitizeLog(path), saveErr)
 			}
 			return nil

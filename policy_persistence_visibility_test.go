@@ -2,11 +2,13 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"testing"
 )
 
@@ -375,5 +377,67 @@ func TestAPIPolicy_GET_DraftPersistedFalseAfterPolicyDirMoves(t *testing.T) {
 	policyStore.mu.Unlock()
 	if p := get(); p != false {
 		t.Errorf("persisted = %v, want false — the draft file is not where the next boot will reload it", p)
+	}
+}
+
+// TestPolicyStore_Load_AdoptionNeverClaimsPersistedBeforeWrite guards a
+// Codex finding (PR #1445): Load's adopt-missing-file branch used to clear
+// adoptUnsaved to false BEFORE calling SaveErr, opening a window — between
+// that unlock and the atomic write actually landing — in which a concurrent
+// Persisted() call read path != "" && !adoptUnsaved (i.e. persisted:true)
+// for a path that had no file on disk yet. adoptUnsaved is now set to true
+// in the SAME critical section that publishes ps.path, and only SaveErr's
+// own successful write (via saveTo) clears it, so Persisted() can never
+// read true ahead of the write it describes. Runs Load and Persisted
+// concurrently on a writable directory (so every adopt-write succeeds) and
+// asserts persisted-implies-file-exists holds throughout, not just at the
+// end.
+func TestPolicyStore_Load_AdoptionNeverClaimsPersistedBeforeWrite(t *testing.T) {
+	dir := t.TempDir()
+	ps := &PolicyStore{}
+
+	stop := make(chan struct{})
+	var violation atomic.Bool
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			// Read path and the persisted verdict in the SAME critical
+			// section Persisted() itself uses — a separate re-read of
+			// ps.path after calling Persisted() would race the writer
+			// loop's next Load() advancing ps.path to a newer, not-yet-
+			// written path, which is a bug in this test, not in Load().
+			ps.mu.RLock()
+			path := ps.path
+			persisted := path != "" && !ps.adoptUnsaved.Load()
+			ps.mu.RUnlock()
+			if !persisted {
+				continue
+			}
+			if _, err := os.Stat(path); err != nil {
+				violation.Store(true)
+			}
+		}
+	}()
+
+	for i := 0; i < 500; i++ {
+		path := filepath.Join(dir, fmt.Sprintf("policy-%d.json", i))
+		if err := ps.Load(path); err != nil {
+			close(stop)
+			wg.Wait()
+			t.Fatalf("Load: %v", err)
+		}
+	}
+	close(stop)
+	wg.Wait()
+
+	if violation.Load() {
+		t.Fatal("Persisted() reported true for a path whose file was not yet on disk")
 	}
 }
