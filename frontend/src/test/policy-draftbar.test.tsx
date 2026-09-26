@@ -27,6 +27,7 @@ const POLICY_BODY = {
   version: 3,
   updatedAt: "2026-08-28T12:00:00Z",
   draft: false,
+  persisted: true,
 };
 
 const ACTIVE_DRAFT = {
