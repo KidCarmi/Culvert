@@ -57,8 +57,18 @@ var (
 	// single-use credential or a replay counter may not have survived a restart.
 	rosterPersistBestEffort atomic.Int64
 
+	// rosterNotDurable counts admin-roster mutations that APPLIED in memory
+	// while no roster file was configured, so nothing was written and the
+	// change is lost on restart. Deliberately distinct from
+	// rosterPersistRefused (a write that FAILED) — the operator action differs:
+	// configure -ui-users-file rather than investigate a failing volume.
+	rosterNotDurable atomic.Int64
+
 	rosterPersistLogLast  atomic.Int64 // unix nanos of the last emitted line
 	rosterPersistSuppress atomic.Int64
+
+	rosterNotDurableLogLast  atomic.Int64 // unix nanos, own gate
+	rosterNotDurableSuppress atomic.Int64
 )
 
 // rosterPersistLogInterval rate-limits the best-effort line. A failing volume
@@ -166,9 +176,42 @@ func noteRosterPersistBestEffort(what string, err error) {
 }
 
 // resetRosterPersistCountersForTest isolates the process-global counters.
+// noteRosterNotDurable records a roster mutation that applied in memory only
+// because no roster file is configured.
+//
+// It has its OWN rate gate rather than sharing rosterPersistLogLast: a node with
+// no roster path emits this on every admin mutation, and sharing one gate would
+// let that steady stream suppress the write-FAILURE line, which points at a
+// different and more urgent problem (storage_health.go's rule that two failures
+// must not share a rate gate).
+func noteRosterNotDurable() {
+	n := rosterNotDurable.Add(1)
+	now := time.Now()
+	for {
+		last := rosterNotDurableLogLast.Load()
+		if last != 0 && now.Sub(time.Unix(0, last)) < rosterPersistLogInterval {
+			rosterNotDurableSuppress.Add(1)
+			return
+		}
+		// CompareAndSwap, not load-compare-store: concurrent admin mutations
+		// would otherwise all observe the same expired stamp and all emit.
+		if rosterNotDurableLogLast.CompareAndSwap(last, now.UnixNano()) {
+			break
+		}
+	}
+	suppressed := rosterNotDurableSuppress.Swap(0)
+	logger.Printf("UIUsers: WARNING — roster change is in-memory only and will be LOST on restart "+
+		"(%d since boot, %d suppressed); set -ui-users-file (e.g. /data/ui_users.json) to persist. "+
+		"A password rotation on this node reverts to the -user/auth.user credential after a restart.",
+		n, suppressed)
+}
+
 func resetRosterPersistCountersForTest() {
 	rosterPersistRefused.Store(0)
 	rosterPersistBestEffort.Store(0)
 	rosterPersistLogLast.Store(0)
 	rosterPersistSuppress.Store(0)
+	rosterNotDurable.Store(0)
+	rosterNotDurableLogLast.Store(0)
+	rosterNotDurableSuppress.Store(0)
 }

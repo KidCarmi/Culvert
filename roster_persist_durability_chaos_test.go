@@ -1202,3 +1202,97 @@ func TestChaos70_Control_SettingsPersistFailureIsRefused(t *testing.T) {
 			"then contradict the file the next restart reads")
 	}
 }
+
+// TestChaos70_NoRosterPathIsReportedNotSilent covers the Codex round-4 finding:
+// saveUIUsersLocked is a SUCCESSFUL NO-OP when no roster file is configured, so
+// mutateRosterDurably cannot honour "durable-or-refused" — there is no file to
+// be durable in — and every converted handler answers 2xx for a change that
+// reverts on restart.
+//
+// The exposure is sharper than "the change disappears": VerifyUIUser falls back
+// to the legacy c.user/c.passHash pair, which is re-read from -user/auth.user at
+// every boot, so a password ROTATION on such a node reverts to the previous
+// (possibly leaked) credential.
+//
+// It is REPORTED rather than refused, and the reason is structural rather than a
+// preference: mutateRosterDurably is also the primitive behind SetAuthDurably,
+// so refusing would make FIRST-TIME SETUP fail on a node with no
+// -ui-users-file — the documented minimal run could then never be configured
+// through the admin UI at all. auth_idp.go reaches the same verdict for the same
+// shape.
+func TestChaos70_NoRosterPathIsReportedNotSilent(t *testing.T) {
+	resetRosterPersistCountersForTest()
+	c := &Config{}
+	// No SetUIUsersFile: the memory-only posture.
+	if c.rosterPathConfigured() {
+		t.Fatal("fixture error: no roster path should be configured")
+	}
+	if err := c.SetAuth("admin", "Or1ginalPass!"); err != nil {
+		t.Fatalf("SetAuth: %v", err)
+	}
+
+	before := rosterNotDurable.Load()
+	if err := c.mutateRosterDurably(func() error {
+		return c.SetUIUser("admin", "R0tatedPass!", RoleAdmin)
+	}); err != nil {
+		t.Fatalf("a memory-only roster mutation must still apply: %v", err)
+	}
+	if got := rosterNotDurable.Load(); got != before+1 {
+		t.Errorf("rosterNotDurable = %d, want %d — a change that landed nowhere must be counted", got, before+1)
+	}
+
+	// The exposure the counter exists to surface: the rotation is live now...
+	if _, ok := c.VerifyUIUser("admin", "R0tatedPass!"); !ok {
+		t.Error("the rotated password must authenticate in this process")
+	}
+	// ...and a restart reconstructs the roster from the legacy pair, so the
+	// ORIGINAL credential authenticates again. This is asserted, not implied,
+	// because it is the reason the warning names a password rotation.
+	fresh := &Config{}
+	if err := fresh.SetAuth("admin", "Or1ginalPass!"); err != nil {
+		t.Fatalf("SetAuth: %v", err)
+	}
+	if _, ok := fresh.VerifyUIUser("admin", "Or1ginalPass!"); !ok {
+		t.Error("after a restart the -user/auth.user credential authenticates — the hazard the warning names")
+	}
+}
+
+// TestChaos70_Control_ConfiguredRosterCountsNoNotDurable is the CONTROL. The
+// cheapest way to pass the gate above is to count every mutation as
+// non-durable, which would fire the warning on the supported deployment (the
+// shipped docker-compose.yml sets -ui-users-file) and make it noise.
+func TestChaos70_Control_ConfiguredRosterCountsNoNotDurable(t *testing.T) {
+	resetRosterPersistCountersForTest()
+	c := &Config{}
+	c.SetUIUsersFile(filepath.Join(t.TempDir(), "ui_users.json"))
+	if !c.rosterPathConfigured() {
+		t.Fatal("fixture error: a roster path should be configured")
+	}
+	if err := c.SetAuth("admin", "Or1ginalPass!"); err != nil {
+		t.Fatalf("SetAuth: %v", err)
+	}
+
+	before := rosterNotDurable.Load()
+	if err := c.mutateRosterDurably(func() error {
+		return c.SetUIUser("admin", "R0tatedPass!", RoleAdmin)
+	}); err != nil {
+		t.Fatalf("a configured roster mutation must succeed: %v", err)
+	}
+	if got := rosterNotDurable.Load(); got != before {
+		t.Errorf("rosterNotDurable moved to %d on a CONFIGURED roster — the warning must not fire on the supported deployment", got)
+	}
+}
+
+// TestChaos70_NoRosterPathStillAllowsFirstTimeSetup pins the structural reason
+// this is a warning and not a refusal: SetAuthDurably shares the primitive, so a
+// refusal would brick first-time setup on a memory-only node.
+func TestChaos70_NoRosterPathStillAllowsFirstTimeSetup(t *testing.T) {
+	resetRosterPersistCountersForTest()
+	c := &Config{}
+	if err := c.SetAuthDurably("admin", "Initi4lPass!"); err != nil {
+		t.Fatalf("first-time setup must succeed with no roster file configured: %v", err)
+	}
+	if _, ok := c.VerifyUIUser("admin", "Initi4lPass!"); !ok {
+		t.Error("the initial admin must authenticate after setup on a memory-only node")
+	}
+}

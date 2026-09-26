@@ -1645,7 +1645,33 @@ func (c *Config) mutateRosterDurably(mutate func() error) error {
 		c.restoreRoster(snap)
 		return fmt.Errorf("%w: %w", ErrRosterNotPersisted, err)
 	}
+	// saveUIUsersLocked is a SUCCESSFUL NO-OP when no roster path is
+	// configured, so "durable-or-refused" cannot be honoured here: there is no
+	// file to be durable in. Report it rather than refuse, and the reason is
+	// NOT availability hand-waving — mutateRosterDurably is also the primitive
+	// behind SetAuthDurably, so refusing would make FIRST-TIME SETUP fail on a
+	// node with no -ui-users-file, i.e. the documented minimal run could never
+	// be configured through the admin UI at all. This mirrors auth_idp.go's
+	// existing verdict for the same shape (a profile change with no
+	// -idp-profiles-file warns and succeeds).
+	//
+	// The exposure is real and is why this is loud: VerifyUIUser falls back to
+	// the legacy c.user/c.passHash pair, which is re-read from -user/auth.user
+	// at every boot, so on such a node a password ROTATION reverts and the
+	// previous (possibly leaked) credential authenticates again after restart.
+	if !c.rosterPathConfigured() {
+		noteRosterNotDurable()
+	}
 	return nil
+}
+
+// rosterPathConfigured reports whether a durable roster path is set. When it is
+// not, every roster write is a successful no-op (saveUIUsersLocked returns nil
+// on an empty path) and the whole roster lives only in this process.
+func (c *Config) rosterPathConfigured() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.uiUsersFile != ""
 }
 
 // mutateRosterBestEffort is mutateRosterDurably's fail-OPEN sibling for the
