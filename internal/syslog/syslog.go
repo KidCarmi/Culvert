@@ -321,11 +321,27 @@ func (s *Writer) enqueue(item queuedLine) bool {
 }
 
 // handOffQueued re-routes one line still queued on a displaced Writer to its
-// successor chain. Reports whether some successor accepted it; a line no
-// successor accepts is counted (on the last writer tried) and its prober, if
-// any, told it was not delivered.
+// successor chain. Reports whether the line has been DEALT WITH — accepted by
+// some successor, or lost and counted on the way. A line no successor accepts
+// is counted (on the last writer tried) and its prober, if any, told it was
+// not delivered.
+//
+// It reports false for exactly one reason: this Writer names no successor at
+// all, so the line is still the caller's to deliver.
+//
+// It must never report false once a successor IS named. Both drainLoop
+// callers read false as "no handoff" and fall through to deliverTracked,
+// which writes through THIS writer's own connection — the collector the
+// operator has already replaced. The hop bound used to exit that way, so a
+// queue surviving more than maxHandoffHops rapid re-points sent security
+// events to the displaced collector while the bound's stated contract was to
+// drop and count them (Codex P2, PR #1494). Exhausting the bound is a LOSS,
+// and a loss is recorded, not quietly redirected backwards.
 func (s *Writer) handOffQueued(item queuedLine) bool {
 	w := s.successor.Load()
+	if w == nil {
+		return false
+	}
 	for hop := 0; w != nil && w.queue != nil && hop < maxHandoffHops; hop++ {
 		switch w.tryEnqueue(item.forWriter(w)) {
 		case enqAccepted:
@@ -342,7 +358,16 @@ func (s *Writer) handOffQueued(item queuedLine) bool {
 		}
 		w = nx
 	}
-	return false
+	// The chain was named but could not be walked to a writer that would take
+	// the line — the hop bound, or a successor with no queue. Charged to this
+	// writer under the existing `closed` class rather than a new one: the
+	// outcome and the operator's remedy are identical to the end-of-chain
+	// branch above (events were lost across a re-point and are not replayed),
+	// and the reason vocabulary is a closed set on a published API enum that
+	// should not grow to name an internal walk limit.
+	s.noteDrop(&reasonClosed)
+	ackQueued(item, false)
+	return true
 }
 
 // HandOffTo records next as the Writer that replaces s. Call it BEFORE Close:
@@ -581,6 +606,19 @@ func (s *Writer) deliverLine(line string) {
 		}
 		s.lastReconnErr = time.Time{} // reset on success
 	}
+	// The instant the write is ATTEMPTED, not the instant noteDelivered runs.
+	// A queue-full drop lands on the CALLER's goroutine, so one can be stamped
+	// between the write returning and the success being recorded; stamping the
+	// success at the later instant made it NEWER than that drop, and Stats
+	// refuses to date an episode whose start predates the last success — so
+	// the surviving failure became permanently undatable and the row printed
+	// "FAILING NOW ... failing for 0s" forever (Codex P1, PR #1494).
+	//
+	// Taken before the write, any concurrent drop's own timestamp necessarily
+	// exceeds it, which is what makes the re-date in noteDelivered race-free.
+	// Under-stating a success by the duration of one write is the fail-SAFE
+	// direction: it can only make the feed look staler than it is.
+	successAt := now().UnixNano()
 	if err := s.writeLine(line); err != nil {
 		s.conn.Close() //nolint:errcheck // best-effort release of a conn we are discarding
 		s.conn = nil
@@ -593,6 +631,7 @@ func (s *Writer) deliverLine(line string) {
 			s.noteDrop(&reasonConnectFail)
 			return
 		}
+		successAt = now().UnixNano()
 		if err3 := s.writeLine(line); err3 != nil {
 			// A collector that ACCEPTS connections but never drains would
 			// otherwise reset the backoff on every call (connect succeeds,
@@ -611,7 +650,7 @@ func (s *Writer) deliverLine(line string) {
 	// Reached only when a write returned without error: the first attempt, or
 	// the retry after a successful reconnect. Recorded LAST so no path can
 	// report a delivery it did not make.
-	s.noteDelivered(failuresBefore)
+	s.noteDelivered(failuresBefore, successAt)
 }
 
 // Bounded reason classes for a delivery failure.
@@ -710,19 +749,44 @@ func (s *Writer) noteDrop(reason *string) {
 //
 // A compare-and-swap clears only the exact count this delivery observed, so a
 // concurrent drop makes the CAS fail and the failure survives — the fail-SAFE
-// direction, and free of cost: degradation also requires no delivery for the
-// window, and we just delivered, so a retained failure cannot page on its own.
-// The recovery notification fires only when the CAS succeeded, which is what
-// makes it mean "this delivery ended that episode" rather than "a delivery
-// happened".
-func (s *Writer) noteDelivered(failuresBefore uint64) {
+// direction. The recovery notification fires only when the CAS succeeded,
+// which is what makes it mean "this delivery ended that episode" rather than
+// "a delivery happened".
+//
+// successAt is when the write was ATTEMPTED (see deliverLine). Recording a
+// surviving failure is only half the job: its episode START must also remain
+// datable, or the failure is retained as a number nobody can act on. Two
+// separate interleavings leave a start that predates this success —
+//
+//   - the racing drop took the 0->1 edge, so it stamped its own start while
+//     this delivery was in flight; and
+//   - the CAS FAILED against an older, ongoing episode, which this delivery
+//     has just ended — the survivor belongs to a new episode, not that one.
+//
+// Stats refuses to date either (a start older than the last success is, by
+// construction, not this episode's), and no later drop takes the 0->1 edge to
+// correct it, so without the re-date below a real outage beginning at that
+// instant would stay undatable and therefore un-degradable FOREVER: the
+// contract row prints "FAILING NOW ... failing for 0s" for as long as the
+// node stays quiet, and the watchdog can never escalate it (Codex P1,
+// PR #1494).
+//
+// Re-dating to successAt is the honest answer — the loss is known to have
+// happened after this write — and it is race-free BECAUSE successAt precedes
+// the write: a concurrent drop's own timestamp is necessarily later, so
+// whichever of the two stores lands last leaves a datable start.
+func (s *Writer) noteDelivered(failuresBefore uint64, successAt int64) {
 	s.delivered.Add(1)
-	s.lastSuccessNano.Store(now().UnixNano())
+	s.lastSuccessNano.Store(successAt)
 	// CAS, not Swap: see above. It also keeps the property the Swap was
 	// chosen for — two deliveries racing one episode cannot both observe it
 	// as non-zero, so a recovery signal can never fire twice.
 	if failuresBefore > 0 && s.consecutiveFail.CompareAndSwap(failuresBefore, 0) {
 		s.notifyDelivery(true)
+		return
+	}
+	if s.consecutiveFail.Load() > 0 && s.failSinceNano.Load() <= successAt {
+		s.failSinceNano.Store(successAt)
 	}
 }
 

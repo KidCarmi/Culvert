@@ -307,6 +307,8 @@ func noteSyslogWriterInstalled(sw *syslogWriter, target string) {
 	syslogHealth.logAt = time.Time{}
 	syslogHealth.suppressed = 0
 	syslogHealth.mu.Unlock()
+	// A Writer exists again: events are no longer skipped for want of one.
+	syslogIntentArmedWithoutWriter.Store(false)
 
 	sw.SetDeliveryObserver(noteSyslogDelivery)
 }
@@ -324,6 +326,43 @@ func retireSyslogWriterLocked(old *syslogWriter) {
 	syslogHealth.retiredDelivered += st.Delivered
 	syslogHealth.retiredDrops += st.Drops
 	syslogHealth.retiredPanics += st.Panics
+}
+
+// syslogSkippedNoWriter counts events that reached the audit/request fan-out
+// while an operator-configured collector had NO Writer at all — the boot dial
+// failed, or forwarding was armed and never came up.
+//
+// Without it the compliance-loss series this file exists to publish reads ZERO
+// throughout the worst outage it can report. P1-F made that state visible
+// (`culvert_syslog_up 0`, a degraded row), but every event lost to it was
+// skipped at `if sw := activeSyslog(); sw != nil` in store.go and charged to
+// nothing: `culvert_syslog_drops_total` stayed 0, `/healthz` carried no
+// `syslogDrops`, and an operator asking "how much did I lose?" was answered
+// "nothing" while the answer was "everything" (Codex P2, PR #1494).
+//
+// A Writer's own counters cannot cover this: the loss happens because there is
+// no Writer. It is therefore folded into the process-lifetime total, which is
+// the one series that means "events that did not reach the SIEM".
+var syslogSkippedNoWriter atomic.Uint64
+
+// syslogIntentArmedWithoutWriter gates that counting. It is armed ONLY while an
+// operator has asked for a collector and none is installed.
+//
+// The gate is not an optimisation, it is the same emission rule the metrics
+// plane applies: a node that was never asked to forward anywhere is not losing
+// anything by not forwarding, and counting there would accrue a large,
+// permanent, meaningless "loss" on every appliance that does not use the
+// feature. It also keeps the request path to one relaxed atomic load on the
+// no-collector branch, which is the common case.
+var syslogIntentArmedWithoutWriter atomic.Bool
+
+// noteSyslogEventSkipped charges one event that found no Writer to forward it.
+// Called from the audit and request fan-outs in store.go; a no-op unless an
+// operator-configured collector is currently unmet.
+func noteSyslogEventSkipped() {
+	if syslogIntentArmedWithoutWriter.Load() {
+		syslogSkippedNoWriter.Add(1)
+	}
 }
 
 // noteSyslogIntent records that an operator has asked for a collector, BEFORE
@@ -346,7 +385,9 @@ func noteSyslogIntent(target string) {
 		syslogHealth.intendedTarget = target
 		syslogHealth.intentAt = syslogHealthNow()
 	}
+	unmet := syslogHealth.writer == nil
 	syslogHealth.mu.Unlock()
+	syslogIntentArmedWithoutWriter.Store(unmet)
 }
 
 // noteSyslogForwardingDisabled records that the operator turned forwarding off,
@@ -616,7 +657,9 @@ func syslogFeedState() syslogFeedSnapshot {
 	// Retired totals are carried even when no Writer is live, so a disabled or
 	// failed-to-reconnect feed still reports the events it has already lost.
 	snap.Delivered = retiredDelivered
-	snap.Drops = retiredDrops
+	// Events that found no Writer at all belong to the process-lifetime total:
+	// they did not reach the SIEM, and no Writer's counters can hold them.
+	snap.Drops = retiredDrops + syslogSkippedNoWriter.Load()
 	snap.Panics = retiredPanics
 	sw := activeSyslog()
 	if !configured || sw == nil {
@@ -865,7 +908,7 @@ func syslogWritePrometheus(w *strings.Builder) {
 
 	// The compliance-critical series: every increment is one audit or request
 	// event that exists nowhere in the SIEM and is never replayed.
-	w.WriteString("\n# HELP culvert_syslog_drops_total Events lost before reaching the remote syslog/SIEM collector (collector down, queue overflow, or writer closed)\n")
+	w.WriteString("\n# HELP culvert_syslog_drops_total Events lost before reaching the remote syslog/SIEM collector (collector down, queue overflow, writer closed, or no connection ever established)\n")
 	w.WriteString("# TYPE culvert_syslog_drops_total counter\n")
 	fmt.Fprintf(w, "culvert_syslog_drops_total %d\n", snap.Drops)
 
@@ -975,6 +1018,8 @@ func resetSyslogHealthForTest() {
 	syslogHealth.logAt = time.Time{}
 	syslogHealth.suppressed = 0
 	syslogHealth.mu.Unlock()
+	syslogIntentArmedWithoutWriter.Store(false)
+	syslogSkippedNoWriter.Store(0)
 	setSyslogHealthNowForTest(nil)
 }
 

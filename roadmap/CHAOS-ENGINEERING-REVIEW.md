@@ -8859,3 +8859,102 @@ undatable-episode assertion rather than the count one — the two halves of the
 P1 are pinned separately), and the handler's live-Writer reads. Controls: an
 ordinary delivery must still clear a real episode and report recovery exactly
 once, and a node that forwards nowhere must still claim nothing.
+
+### Round 7 — the surviving failure had to stay DATABLE, a walk limit was redirecting events backwards, and the loss nobody could count
+
+**P1 — a retained failure whose episode start is unusable is a number nobody
+can act on.** Round 6 stopped a racing delivery from ERASING a queue-full
+drop. It did not keep that survivor *actionable*. `noteDelivered` stamped
+`lastSuccessNano` when the BOOKKEEPING ran rather than when the write was
+attempted, so a drop landing between the two carried a timestamp EARLIER than
+the success it raced — and `Stats` refuses a start older than the last
+success, which is P1-H's rule and is right. Only a drop taking the 0→1 edge
+re-stamps, so nothing corrected it. A node that went quiet at that instant
+therefore carried an unresolved failure that could **never** reach the
+degradation window, while the contract row printed `FAILING NOW … failing for
+0s` for as long as the silence lasted — a self-contradictory sentence on an
+operator surface, permanently, which is this section's own thesis.
+
+The same shape reaches a second interleaving with no 0→1 edge at all: an
+episode is running, a delivery succeeds (ending it), a concurrent drop makes
+the compare-and-swap fail, and the survivor inherits the *ended* episode's
+start.
+
+Two halves, both required:
+
+- `deliverLine` captures `successAt` immediately BEFORE each write attempt.
+  Under-stating a success by the duration of one write is the fail-SAFE
+  direction — it can only make the feed look staler than it is.
+- `noteDelivered` RE-DATES a surviving failure whose start does not follow
+  that success, to the success itself. The loss is known to have happened
+  after that write, so this is the honest value, not a guess.
+
+**The early stamp is what makes the re-date race-free, and is not
+belt-and-braces.** It guarantees a concurrent drop's own timestamp EXCEEDS the
+success, so whichever of the two stores lands last leaves a datable start.
+Without it, a drop whose `Add` is already visible but whose `Store` has not
+landed lets the re-date be overwritten by an older value, and the episode is
+undatable again. That interleaving cannot be scheduled from a test, so rather
+than claim coverage the property it rests on is pinned instead:
+`noteDelivered` records the instant its CALLER supplies and never invents one
+(verified failing against a restored late stamp).
+
+> **The transferable rule: a retained signal is worth nothing if the value that
+> makes it actionable is left unusable.** When a fix decides to KEEP state,
+> enumerate every field a consumer needs in order to act on it — not just the
+> one the finding named. Round 6 kept the count and left the clock behind.
+
+**P2 — an internal walk limit may not redirect events BACKWARDS.**
+`handOffQueued` reported `false` for two different things: *this writer names
+no successor* (the caller still owns the line) and *the hop bound was
+exhausted*. Both `drainLoop` callers read `false` as the first and fell
+through to `deliverTracked`, which writes through THIS writer's own
+connection — the collector the operator has already replaced. So a queue
+surviving more than `maxHandoffHops` rapid re-points sent security events to
+the displaced collector, while the bound's stated contract was to drop and
+count them: P1-E's defect re-entering through the bound added for it.
+
+Exhaustion is now a LOSS — counted on this writer, the prober acked
+not-delivered, and reported as handled so no caller can fall back. It is
+charged under the existing `closed` class rather than a new one: the outcome
+and the operator's remedy are identical to the end-of-chain branch above it,
+and the reason vocabulary is a CLOSED SET on a published API enum that should
+not grow to name an internal walk limit. The gate builds a chain of closed
+writers longer than the bound with a LIVE writer beyond it, and asserts the
+far end received nothing — otherwise the bound was never reached and the gate
+would prove nothing.
+
+**P2 — a loss that happens because there is no Writer is still a loss.** P1-F
+made a configured-but-never-connected collector VISIBLE
+(`culvert_syslog_up 0`, a degraded row) and left it UNCOUNTABLE. Both fan-outs
+skip at `if sw := activeSyslog(); sw != nil` in `store.go`, charging the
+skipped event to nothing — so `culvert_syslog_drops_total` read **0** and
+`/healthz` carried no `syslogDrops` throughout the worst outage this plane can
+report. An operator asking *how much did I lose?* was answered *nothing* while
+the answer was *everything*.
+
+A Writer's counters structurally cannot hold this: the loss happens *because
+there is no Writer*. `noteSyslogEventSkipped` folds it into the
+process-lifetime total — the one series meaning "events that did not reach the
+SIEM" — and the `configured but failed to connect` row now names the
+magnitude, which is the surface an operator actually reads.
+
+It is ARMED only while an operator has asked for a collector and none is
+installed. That gate is not an optimisation but the same emission rule the
+metrics plane already applies: a node that was never asked to forward anywhere
+is not losing anything by not forwarding, and counting there would accrue a
+large, permanent and meaningless "loss" on every appliance that does not use
+the feature. It also keeps the request path to one relaxed atomic load on the
+no-collector branch, which is the common case.
+
+Its gate drives the REAL `auditEvent` and `recordRequest` paths. The skip
+lives in `store.go`, so a gate on the counter alone would have proved the
+counter works and said nothing about either fan-out — *walling the function is
+not walling the path*, now recorded four times in this section. Each fan-out
+was unwired in turn and the gate fails for each.
+
+**A published number was wrong and is corrected here.** Earlier rounds of this
+write-up and its PR description gave the root gate count as
+`syslog_health_chaos_test.go (22)`. The file held **28** at that point; it
+holds 32 now. The engine counts (9 → 11 in `syslog_stats_test.go`, 3 → 4 in
+`syslog_handoff_format_test.go`) were right.

@@ -1500,3 +1500,160 @@ func readSyslogAdminAPI(t *testing.T) map[string]any {
 	}
 	return body
 }
+
+// TestChaos72_EventsLostToAnUnmetIntentAreCounted closes the last hole in the
+// compliance-loss series this sweep exists to publish.
+//
+// P1-F made a configured-but-never-connected collector VISIBLE
+// (`culvert_syslog_up 0`, a degraded row). It did not make the loss
+// COUNTABLE: with no Writer installed, both fan-outs in store.go skip at
+// `if sw := activeSyslog(); sw != nil` and charge the skipped event to
+// nothing, so `culvert_syslog_drops_total` read 0 and `/healthz` carried no
+// `syslogDrops` throughout the worst outage the plane can report. An operator
+// asking "how much did I lose?" was answered "nothing" while the answer was
+// "everything" (Codex P2, PR #1494).
+//
+// A Writer's counters structurally cannot hold this loss: it happens because
+// there is no Writer. It belongs to the process-lifetime total, which is the
+// one series meaning "events that did not reach the SIEM".
+func TestChaos72_EventsLostToAnUnmetIntentAreCounted(t *testing.T) {
+	resetSyslogHealthForTest()
+	t.Cleanup(resetSyslogHealthForTest)
+
+	// An operator asked for a collector and the boot dial failed: intent
+	// recorded, no Writer installed.
+	noteSyslogIntent("tcp://siem.invalid:514")
+
+	const lost = 7
+	for i := 0; i < lost; i++ {
+		noteSyslogEventSkipped()
+	}
+
+	snap := syslogFeedState()
+	if !snap.Intended || snap.Configured {
+		t.Fatalf("precondition: want an unmet intent (Intended=true, Configured=false), got Intended=%v Configured=%v", snap.Intended, snap.Configured)
+	}
+	if snap.Drops != lost {
+		t.Errorf("Drops = %d after %d events found no writer; want %d — the series that measures compliance loss read clean through a total outage", snap.Drops, lost, lost)
+	}
+
+	// It reaches the exported series, not just the snapshot.
+	var b strings.Builder
+	syslogWritePrometheus(&b)
+	if !strings.Contains(b.String(), fmt.Sprintf("culvert_syslog_drops_total %d", lost)) {
+		t.Errorf("culvert_syslog_drops_total did not report the %d lost events:\n%s", lost, b.String())
+	}
+
+	// CONTROL: a node nobody asked to forward anywhere counts NOTHING. The
+	// cheapest way to pass the assertions above is to count every skipped
+	// event unconditionally, which would accrue a large, permanent and
+	// meaningless "loss" on every appliance that does not use the feature —
+	// the same emission rule the metrics plane already applies.
+	resetSyslogHealthForTest()
+	for i := 0; i < 100; i++ {
+		noteSyslogEventSkipped()
+	}
+	if got := syslogFeedState().Drops; got != 0 {
+		t.Errorf("an unconfigured node counted %d lost event(s); it asked for no collector, so it is losing nothing", got)
+	}
+}
+
+// TestChaos72_InstallingAWriterStopsCountingSkips is the other half of the
+// arming rule: once a Writer exists the events go THROUGH it and are counted
+// (or not) by its own machinery. Continuing to charge skips here would
+// double-count every loss.
+func TestChaos72_InstallingAWriterStopsCountingSkips(t *testing.T) {
+	col := startSyslogCollector(t)
+	armSyslogFeed(t, "tcp://"+col.addr) // installs a Writer (and resets the plane)
+
+	if snap := syslogFeedState(); !snap.Configured {
+		t.Fatalf("precondition: want a configured feed with a live writer, got Configured=%v", snap.Configured)
+	}
+	before := syslogFeedState().Drops
+	noteSyslogEventSkipped()
+	noteSyslogEventSkipped()
+	if got := syslogFeedState().Drops; got != before {
+		t.Errorf("Drops moved from %d to %d while a writer was installed — skips must stop being charged once events have a writer to go through, or every loss is counted twice", before, got)
+	}
+
+	// Turning forwarding off disarms it too: a skipped event is then the
+	// absence of a feature, not a loss.
+	noteSyslogForwardingDisabled()
+	before = syslogFeedState().Drops
+	noteSyslogEventSkipped()
+	if got := syslogFeedState().Drops; got != before {
+		t.Errorf("Drops moved from %d to %d after forwarding was disabled", before, got)
+	}
+}
+
+// TestChaos72_TheRealFanOutChargesEventsLostToAnUnmetIntent drives the REAL
+// audit and request-log paths, not the counter behind them.
+//
+// This section has had to record "walling the function is not walling the
+// path" three times already. The skip happens at
+// `if sw := activeSyslog(); sw != nil` inside store.go's two fan-outs, so a
+// gate that calls noteSyslogEventSkipped directly proves the counter works
+// and says nothing about whether either fan-out reaches it — which is exactly
+// where the defect lived.
+func TestChaos72_TheRealFanOutChargesEventsLostToAnUnmetIntent(t *testing.T) {
+	ensureObservabilityStartupTestLogger(t)
+	snapshotObservabilityGlobals(t)
+	resetSyslogHealthForTest()
+	t.Cleanup(resetSyslogHealthForTest)
+
+	// An operator asked for a collector; the dial failed, so no Writer exists.
+	setActiveSyslog(nil)
+	noteSyslogIntent("tcp://siem.invalid:514")
+	if activeSyslog() != nil {
+		t.Fatal("precondition: want no active writer")
+	}
+
+	before := syslogFeedState().Drops
+
+	// The audit fan-out (audit.SetSIEM, wired in store.go's init).
+	req := httptest.NewRequest(http.MethodPost, "/api/policy", nil)
+	req.RemoteAddr = "198.51.100.77:5555"
+	auditEvent(req, "policy.update", "rule-1", "chaos72 unmet-intent path gate")
+
+	// The request-log fan-out.
+	recordRequest("198.51.100.77", http.MethodGet, "example.com", "200", "", "allow", "", "")
+
+	got := syslogFeedState().Drops
+	if got != before+2 {
+		t.Errorf("Drops = %d after one audit event and one request-log entry found no writer; want %d.\n"+
+			"Both fan-outs in store.go skip silently at `if sw := activeSyslog(); sw != nil`, so the "+
+			"compliance-loss series reads clean while every event is being lost.", got, before+2)
+	}
+}
+
+// The operator surface an admin actually reads must name the MAGNITUDE, not
+// just the state. "Events are not reaching the collector" is the diagnosis;
+// "how much have I lost?" is the next question, and the answer was
+// structurally zero until the loss was counted.
+func TestChaos72_FailedToConnectRowNamesTheLoss(t *testing.T) {
+	ensureObservabilityStartupTestLogger(t)
+	snapshotObservabilityGlobals(t)
+	resetSyslogHealthForTest()
+	t.Cleanup(resetSyslogHealthForTest)
+
+	setActiveSyslog(nil)
+	syslogConfigured = ""
+	syslogConfiguredAddr = "tcp://siem.invalid:514"
+	noteSyslogIntent(syslogConfiguredAddr)
+
+	row := checkSyslogFeed()
+	if row.Status != diagFail {
+		t.Fatalf("precondition: row = %v (%s); want fail", row.Status, row.Message)
+	}
+	if strings.Contains(row.Message, "lost so far") {
+		t.Errorf("the row claimed a loss before any event was skipped: %q", row.Message)
+	}
+
+	for i := 0; i < 3; i++ {
+		noteSyslogEventSkipped()
+	}
+	row = checkSyslogFeed()
+	if !strings.Contains(row.Message, "3 event(s) lost so far") {
+		t.Errorf("row message = %q; want it to name the 3 events lost to a collector that never came up", row.Message)
+	}
+}

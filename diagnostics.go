@@ -898,11 +898,20 @@ func checkSyslogFeed() OperatorContractCheck {
 	// has moved on — the persisted SIEM target is silently down but a nil-check
 	// would still report OK.
 	if activeSyslog() == nil || syslogConfigured != syslogConfiguredAddr {
+		// Name the MAGNITUDE, not just the state. "Events are not reaching
+		// the collector" is the diagnosis; "how much have I lost?" is the
+		// question an operator asks next, and until CHAOS-72's round 7 the
+		// answer was structurally zero on every surface — the loss happens
+		// because there is no Writer, so no Writer's counters could hold it.
+		lost := ""
+		if n := syslogFeedState().Drops; n > 0 {
+			lost = fmt.Sprintf(" (%d event(s) lost so far)", n)
+		}
 		return OperatorContractCheck{
 			Code:           "syslog_feed",
 			Status:         diagFail,
-			Message:        "configured but failed to connect — remote syslog/SIEM forwarding is silently down, events are not reaching the collector",
-			OperatorAction: "Verify the collector host/port and network path, then re-save the syslog target (POST /api/syslog) or restart the proxy; use POST /api/syslog/test to confirm connectivity.",
+			Message:        "configured but failed to connect — remote syslog/SIEM forwarding is silently down, events are not reaching the collector" + lost,
+			OperatorAction: "Verify the collector host/port and network path, then re-save the syslog target (POST /api/syslog) or restart the proxy; use POST /api/syslog/test to confirm connectivity. Events lost while the collector was unreachable are not replayed.",
 		}
 	}
 	// CHAOS-72: everything above decides on state fixed at INIT time, and was

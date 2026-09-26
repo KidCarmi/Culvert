@@ -339,11 +339,13 @@ func TestNoteDelivered_DoesNotClearAFailureThatRacedTheWrite(t *testing.T) {
 		}
 	})
 
-	// The delivery observed a clean writer...
+	// The delivery observed a clean writer and stamped its success at the
+	// instant the write was ATTEMPTED...
 	failuresBefore := w.consecutiveFail.Load()
-	// ...and a queue-full drop landed while the write was in flight.
+	successAt := now().UnixNano()
+	// ...and a queue-full drop landed while that write was in flight.
 	w.noteDrop(&reasonQueueFull)
-	w.noteDelivered(failuresBefore)
+	w.noteDelivered(failuresBefore, successAt)
 
 	if n := w.consecutiveFail.Load(); n != 1 {
 		t.Fatalf("ConsecutiveFailures = %d after a drop raced the write; want 1 — the delivery erased a loss that happened after it, so the feed can never degrade for that event", n)
@@ -352,14 +354,26 @@ func TestNoteDelivered_DoesNotClearAFailureThatRacedTheWrite(t *testing.T) {
 		t.Errorf("fired %d recovery notifications for an episode that never ended", recoveries)
 	}
 
-	// And the surviving episode is DATABLE. Without the re-stamp in noteDrop
-	// the start would be stuck before the last success, Stats would refuse to
-	// date it, and no later drop takes the 0->1 edge — so a real outage
-	// beginning at that instant could never be reported, which is strictly
-	// worse than the defect this fix closes.
+	// And the surviving episode is DATABLE **immediately**, with no further
+	// drop to correct it. This is the half round 6 left open (Codex P1, round
+	// 7): retaining the failure is worth nothing if its start cannot be
+	// dated, because Stats refuses a start older than the last success and no
+	// later drop takes the 0->1 edge. A node that goes quiet right here would
+	// otherwise carry an unresolved failure that can never reach the
+	// degradation window, while the contract row printed "FAILING NOW ...
+	// failing for 0s" for as long as the silence lasted.
+	st := w.Stats()
+	if st.FailingSince.IsZero() {
+		t.Fatalf("the surviving episode is undatable (FailingSince zero, ConsecutiveFailures %d) — it can never reach the degradation window, and no later drop will correct it", st.ConsecutiveFailures)
+	}
+	if st.FailingSince.Before(st.LastSuccess) {
+		t.Errorf("FailingSince %v predates LastSuccess %v — Stats will refuse to date this episode", st.FailingSince, st.LastSuccess)
+	}
+
+	// A later drop keeps it datable rather than un-dating it.
 	w.noteDrop(&reasonConnectFail)
 	if st := w.Stats(); st.FailingSince.IsZero() {
-		t.Errorf("the surviving episode is undatable (FailingSince zero, ConsecutiveFailures %d) — it can never reach the degradation window", st.ConsecutiveFailures)
+		t.Errorf("a later drop left the episode undatable (ConsecutiveFailures %d)", st.ConsecutiveFailures)
 	}
 
 	// CONTROL: an ordinary delivery that ends a real episode still clears it
@@ -367,11 +381,93 @@ func TestNoteDelivered_DoesNotClearAFailureThatRacedTheWrite(t *testing.T) {
 	// assertions above is to stop clearing at all, which would latch the feed
 	// as failing forever after one transient drop.
 	before := w.consecutiveFail.Load()
-	w.noteDelivered(before)
+	w.noteDelivered(before, now().UnixNano())
 	if n := w.consecutiveFail.Load(); n != 0 {
 		t.Fatalf("ConsecutiveFailures = %d after a clean delivery; want 0", n)
 	}
 	if recoveries != 1 {
 		t.Errorf("fired %d recovery notifications; want exactly 1 for the episode that genuinely ended", recoveries)
+	}
+}
+
+// TestNoteDelivered_ReDatesAnEpisodeThatOutlivedTheDeliveryItRacedWith is the
+// OTHER interleaving that leaves an undatable start, and it does not need the
+// 0->1 edge at all: an episode is already running with N failures, a delivery
+// succeeds (so that episode has ENDED), and a concurrent queue-full drop makes
+// the compare-and-swap fail. The survivor belongs to a NEW episode beginning at
+// the delivery, but it carries the OLD episode's start — which now predates the
+// last success, so Stats refuses to date it and the feed can never degrade.
+//
+// Driven through the primitives in the order the race produces, since the
+// interleaving cannot be scheduled.
+func TestNoteDelivered_ReDatesAnEpisodeThatOutlivedTheDeliveryItRacedWith(t *testing.T) {
+	base := time.Date(2026, 3, 4, 10, 0, 0, 0, time.UTC)
+	cur := base
+	defer SetNowForTest(func() time.Time { return cur })()
+
+	w := &Writer{}
+
+	// An episode is running: two failures, starting at base.
+	w.noteDrop(&reasonWriteFail)
+	cur = base.Add(time.Second)
+	w.noteDrop(&reasonWriteFail)
+	failuresBefore := w.consecutiveFail.Load()
+	if failuresBefore != 2 {
+		t.Fatalf("setup: ConsecutiveFailures = %d, want 2", failuresBefore)
+	}
+
+	// A delivery succeeds — its success is stamped at the write, ten seconds
+	// in — and a third drop lands while it is in flight, so the CAS fails.
+	cur = base.Add(10 * time.Second)
+	successAt := now().UnixNano()
+	cur = base.Add(11 * time.Second)
+	w.noteDrop(&reasonQueueFull)
+	w.noteDelivered(failuresBefore, successAt)
+
+	st := w.Stats()
+	if st.ConsecutiveFailures != 3 {
+		t.Fatalf("ConsecutiveFailures = %d; want 3 — the raced drop must survive the failed CAS", st.ConsecutiveFailures)
+	}
+	if st.FailingSince.IsZero() {
+		t.Fatalf("the surviving episode is undatable — Stats refuses a start older than the last success, and no later drop takes the 0->1 edge to correct it")
+	}
+	if st.FailingSince.Before(st.LastSuccess) {
+		t.Errorf("FailingSince %v still carries the ENDED episode's start and predates LastSuccess %v", st.FailingSince, st.LastSuccess)
+	}
+	// It is dated from the delivery, not from the episode the delivery ended.
+	if got := st.FailingSince.UTC(); got.Before(base.Add(10 * time.Second)) {
+		t.Errorf("FailingSince = %v; want no earlier than the success at %v — the old episode ended when the delivery succeeded", got, base.Add(10*time.Second))
+	}
+}
+
+// TestNoteDelivered_RecordsTheWriteInstantNotTheBookkeepingInstant pins the
+// half of the round-7 fix the re-date cannot cover.
+//
+// A delivery's success must be dated when the write was ATTEMPTED, not when
+// noteDelivered happens to run. The two differ by the duration of the write,
+// and in that gap a queue-full drop can be stamped on the CALLER's goroutine.
+// Dating the success at the later instant makes it NEWER than that drop, which
+// is the state Stats refuses to date.
+//
+// The re-date below it repairs the common orderings, but it cannot repair the
+// one where the drop's own Store lands AFTER the re-date: there, the only
+// thing that keeps the episode datable is that the drop's timestamp is
+// necessarily later than the success it raced — which is true if and only if
+// the success was stamped before the write. That interleaving cannot be
+// scheduled from a test, so this gate pins the property it rests on instead:
+// noteDelivered records the instant its CALLER supplies and never invents one.
+func TestNoteDelivered_RecordsTheWriteInstantNotTheBookkeepingInstant(t *testing.T) {
+	base := time.Date(2026, 3, 4, 10, 0, 0, 0, time.UTC)
+	cur := base
+	defer SetNowForTest(func() time.Time { return cur })()
+
+	w := &Writer{}
+	writeAt := now().UnixNano()
+	// The write takes a second; bookkeeping runs after it.
+	cur = base.Add(time.Second)
+	w.noteDelivered(w.consecutiveFail.Load(), writeAt)
+
+	if got, want := w.Stats().LastSuccess.UTC(), base; !got.Equal(want) {
+		t.Errorf("LastSuccess = %v, want %v — the success was dated from the bookkeeping, not from the write, so any drop stamped during the write looks OLDER than it and becomes undatable", got, want)
 	}
 }

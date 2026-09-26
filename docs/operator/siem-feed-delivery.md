@@ -234,6 +234,24 @@ protocol, not a limitation of the node.
    the only place those events still exist — collect it if the gap matters for
    an audit.
 
+### If the feed never connected at boot
+
+`syslog_feed` reads *configured but failed to connect*, `culvert_syslog_up` is
+`0`, and no event has ever reached the collector. **Every audit and request
+event produced since boot has been lost**, and the row names the count
+(`N event(s) lost so far`) — as does `culvert_syslog_drops_total` and
+`syslogDrops` on `/healthz`.
+
+Until CHAOS-72 round 7 that loss was counted nowhere: the fan-outs skip when
+no writer exists, so a Writer's counters could not hold a loss caused by there
+being no Writer, and the compliance-loss series read `0` throughout the outage.
+If you are reading a series from an older build, treat `0` here as *unknown*,
+not as *nothing was lost*.
+
+Nothing retries a failed boot dial, so this state does not clear on its own —
+fix the address or the path and re-save the target (`POST /api/syslog`), which
+reconnects immediately.
+
 ### If the drop count rises while the feed keeps delivering
 
 The row reports `warn` and the collector is reachable but slower than this

@@ -91,3 +91,79 @@ func TestDrainLoop_DequeuedLineAfterHandOffGoesToSuccessor(t *testing.T) {
 		t.Fatalf("displaced collector still received %q after the handoff", oldConn.buf.String())
 	}
 }
+
+// TestHandOffQueued_ExhaustedHopBoundDropsRatherThanFallingBack pins that the
+// walk bound never sends a queued event BACKWARDS to the displaced collector.
+//
+// handOffQueued reports false to mean "no successor — this line is still
+// yours"; both drainLoop callers then deliver it through the writer's own
+// connection. The hop bound used to exit that way as well, so a queue that
+// survived more than maxHandoffHops rapid re-points had its security events
+// written to the collector the operator had already replaced, while the
+// bound's stated contract was to drop and count them (Codex P2, PR #1494).
+//
+// Exhausting the bound is a LOSS. It is recorded on this writer, acknowledged
+// to any waiting prober as not-delivered, and reported as handled so no caller
+// can fall back.
+func TestHandOffQueued_ExhaustedHopBoundDropsRatherThanFallingBack(t *testing.T) {
+	// A chain longer than the bound. Every link is itself CLOSED — which is
+	// what a run of rapid re-points produces, since each displaced writer is
+	// closed as its successor is installed — so the walk keeps following
+	// successor links and reaches the bound with a live writer still ahead.
+	head := &Writer{format: "rfc3164", host: "h", tag: "culvert", pid: "1", queue: make(chan queuedLine, 4)}
+	prev := head
+	for i := 0; i < maxHandoffHops+2; i++ {
+		w := &Writer{format: "rfc3164", host: "h", tag: "culvert", pid: "1", queue: make(chan queuedLine, 4)}
+		w.closed.Store(true)
+		prev.HandOffTo(w)
+		prev = w
+	}
+	// ...and the far end is live, so the line was never unreachable in
+	// principle; only the bound stopped us getting to it.
+	live := &Writer{format: "rfc3164", host: "h", tag: "culvert", pid: "1", queue: make(chan queuedLine, 4)}
+	prev.HandOffTo(live)
+
+	ack := make(chan bool, 1)
+	item := head.formatLine(13, `{"evt":"auth.login"}`, time.Now())
+	item.ack = ack
+
+	beforeDrops := head.Stats().Drops
+	if !head.handOffQueued(item) {
+		t.Fatal("handOffQueued reported the line as unhandled after exhausting the hop bound — both drainLoop callers read that as \"no successor\" and deliver it through the DISPLACED collector")
+	}
+	if got := head.Stats().Drops; got != beforeDrops+1 {
+		t.Errorf("drops = %d, want %d — a line lost to the hop bound must be counted, not silently redirected", got, beforeDrops+1)
+	}
+	select {
+	case delivered := <-ack:
+		if delivered {
+			t.Error("the prober was told the line was delivered; it was not")
+		}
+	default:
+		t.Error("the prober was never acknowledged and would wait out its own deadline")
+	}
+	// Nothing reached the displaced writer's own queue either.
+	if len(head.queue) != 0 {
+		t.Errorf("the displaced writer queued %d line(s) for its own collector", len(head.queue))
+	}
+
+	if len(live.queue) != 0 {
+		t.Errorf("the far end received %d line(s); the bound was not actually reached, so this gate proves nothing", len(live.queue))
+	}
+
+	// CONTROL: a chain INSIDE the bound still hands off normally. The cheapest
+	// way to pass everything above is to drop every handoff, which would
+	// delete the P1-E fix that preserves events across a re-point.
+	short := &Writer{format: "rfc3164", host: "h", tag: "culvert", pid: "1", queue: make(chan queuedLine, 4)}
+	target := &Writer{format: "rfc3164", host: "h", tag: "culvert", pid: "1", queue: make(chan queuedLine, 4)}
+	short.HandOffTo(target)
+	if !short.handOffQueued(short.formatLine(13, "ok", time.Now())) {
+		t.Fatal("a one-hop handoff was not handled")
+	}
+	if len(target.queue) != 1 {
+		t.Errorf("the live successor received %d line(s), want 1", len(target.queue))
+	}
+	if short.Stats().Drops != 0 {
+		t.Errorf("a successful handoff counted %d drop(s)", short.Stats().Drops)
+	}
+}

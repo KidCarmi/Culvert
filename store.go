@@ -416,7 +416,12 @@ func init() {
 	audit.SetSIEM(func(e audit.Entry) {
 		if sw := activeSyslog(); sw != nil {
 			sw.WriteAudit(e)
+			return
 		}
+		// No Writer: an operator-configured collector that never came up
+		// loses every event here, and a Writer's counters cannot record a
+		// loss that happened because there is no Writer (CHAOS-72, Codex P2).
+		noteSyslogEventSkipped()
 	})
 }
 
@@ -2234,7 +2239,11 @@ func persistLogEntry(ip, method, host, status, ruleMatched, actionTaken, identit
 	// Forward request log entry to syslog/SIEM if configured (Finding 17.2).
 	if sw := activeSyslog(); sw != nil {
 		sw.WriteRequest(entry)
+		return
 	}
+	// See the audit fan-out above: a configured collector with no Writer is
+	// losing every one of these, and it must be counted (CHAOS-72, Codex P2).
+	noteSyslogEventSkipped()
 }
 
 // ─── Top hosts ────────────────────────────────────────────────────────────────

@@ -849,6 +849,26 @@ endpoints for credentialed parents.
   (contract `SyslogConfig`). Note that `udp://` — the default when the address
   omits a scheme — cannot prove delivery at all; every surface now says so.
 
+- **Events lost to a SIEM collector that never connected were counted nowhere
+  (CHAOS-72).** A configured-but-unreachable collector was reported down
+  (`culvert_syslog_up 0`, a failing `syslog_feed` row), but both the audit and
+  request fan-outs skip when no writer exists, so every lost event was charged
+  to nothing: `culvert_syslog_drops_total` read `0` and `/healthz` carried no
+  `syslogDrops` throughout the worst outage the plane can report. The loss is
+  now folded into the process-lifetime total and named on the contract row.
+  Counting is armed only while an operator has asked for a collector and none
+  is installed, so a node that forwards nowhere still reports nothing.
+- **A queued event could be sent to a collector the operator had already
+  replaced (CHAOS-72).** The handoff walk reported "no successor" both when
+  there genuinely was none and when its hop bound was exhausted; the drain loop
+  read the second as the first and delivered through the displaced writer's own
+  connection. Exhausting the bound is now a counted loss, never a fall-back.
+- **A dropped event that raced a successful delivery left its outage undatable
+  (CHAOS-72).** The delivery was dated when its bookkeeping ran rather than when
+  the write was attempted, so a concurrent queue-full drop looked older than the
+  success it raced; the health plane refuses to date such an episode, so the
+  feed could never reach the degradation threshold and the diagnostics row read
+  "FAILING NOW … failing for 0s" for as long as the node stayed quiet.
 - **`POST /api/syslog/test` could not fail (CHAOS-72).** It answered
   `{"ok": true}` unconditionally, which was correct while delivery was
   synchronous and became a channel-send acknowledgement once it was not: it
