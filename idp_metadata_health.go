@@ -212,18 +212,6 @@ type idpMetadataEpisode struct {
 	// is carried rather than recovered.
 	profileID string
 	source    string
-
-	// servedFetchedAt is when the CACHED document this provider is currently
-	// serving was fetched from the IdP — zero unless the last acquisition fell
-	// back to cache. It is what makes idpmeta.StaleMaxAge enforceable on a LIVE
-	// provider (Codex review round 8): the ceiling lives inside Store.Get, which
-	// is reached only from a compile, and on a steady-state node nothing
-	// recompiles — an unchanged CP snapshot skips ReplaceAll, and the recovery
-	// loop considers only DARK profiles. So a provider compiled from cache
-	// stayed live indefinitely on a document the documentation promises is
-	// refused after seven days, which for SAML means continuing to trust a
-	// signing certificate the IdP has withdrawn.
-	servedFetchedAt time.Time
 }
 
 var idpMetadata idpMetadataHealth
@@ -384,26 +372,97 @@ func forgetIdPMetadataEpisode(profileID string) {
 	}
 }
 
-// noteIdPStaleDocumentServed records WHEN the cached document a provider is now
-// serving was fetched. It is called only on the stale-fallback path, right after
-// noteIdPMetadataOutcome has opened (or extended) that profile's episode.
+// idpServedDoc is the SERVED-generation evidence for one profile: the remote
+// source its PUBLISHED provider was built from, and when that document was
+// fetched from the IdP because it came from the last-known-good cache.
+type idpServedDoc struct {
+	source    string
+	fetchedAt time.Time
+}
+
+// idpServed records, per profile, the cached document the provider CURRENTLY
+// PUBLISHED is serving. It is what makes idpmeta.StaleMaxAge enforceable on a
+// LIVE provider (Codex review round 8): the ceiling lives inside Store.Get,
+// which is reached only from a compile, and on a steady-state node nothing
+// recompiles — so a provider compiled from cache stayed live indefinitely on a
+// document the runbook promises is refused after seven days, which for SAML
+// means continuing to trust a signing certificate the IdP has withdrawn.
 //
-// It exists because idpmeta.StaleMaxAge lives inside Store.Get, which is reached
-// only from a compile — so on a steady-state node, where nothing recompiles, the
-// ceiling was never re-evaluated and a provider stayed live forever on a
-// document the runbook promises stops being usable after seven days (Codex
-// review round 8). Carrying the fetch time in memory lets the watchdog enforce
-// the ceiling with no disk read and no second copy of the rule: the store still
-// owns the value, this is only where the provider's CURRENT document sits in it.
-func noteIdPStaleDocumentServed(profileID, source string, fetchedAt time.Time) {
-	if profileID == "" || fetchedAt.IsZero() {
+// IT IS DELIBERATELY NOT PART OF THE FETCH-HEALTH EPISODE (Codex review round
+// 14). An episode describes FETCHES, and a successful fetch deletes it; the
+// ceiling describes the PUBLISHED generation. Carried on the episode, an admin
+// update that fetched fresh metadata and then failed to SAVE erased the
+// evidence for the old, cache-built generation that stayed in service, which
+// then never retired. So this is written ONLY by idpNotePublishedGeneration,
+// called at every site that publishes a provider generation (Load, Upsert,
+// ReplaceAll, the recovery loop's publishRecompiled) and by Delete; a fetch —
+// successful or not — and a failed save never touch it.
+//
+// LOCK ORDER: every writer holds the registry's r.mu, so the order is always
+// r.mu -> idpServedMu, and nothing holds idpServedMu across a registry call.
+var (
+	idpServedMu sync.Mutex
+	idpServed   map[string]idpServedDoc
+)
+
+// idpServedDocumentAger is implemented by providers built from a remote
+// document. servedDocumentCachedAt is zero unless that document came from the
+// last-known-good cache.
+type idpServedDocumentAger interface {
+	servedDocumentCachedAt() time.Time
+}
+
+// idpNotePublishedGeneration records the generation just PUBLISHED for a
+// profile: prov is the provider now live (nil when none is), source the remote
+// document it fetches. A provider built from a FRESH or inline document — or no
+// provider at all — carries no ceiling, so its entry is removed.
+func idpNotePublishedGeneration(profileID, source string, prov IdentityProvider) {
+	if profileID == "" {
 		return
 	}
-	idpMetadata.mu.Lock()
-	defer idpMetadata.mu.Unlock()
-	if ep := idpMetadata.episodes[idpEpisodeKey(profileID, source)]; ep != nil {
-		ep.servedFetchedAt = fetchedAt
+	sd, ok := idpServedEntry(source, prov)
+	idpServedMu.Lock()
+	defer idpServedMu.Unlock()
+	if !ok {
+		delete(idpServed, profileID)
+		return
 	}
+	if idpServed == nil {
+		idpServed = make(map[string]idpServedDoc)
+	}
+	idpServed[profileID] = sd
+}
+
+// idpReplacePublishedGenerations is idpNotePublishedGeneration for a WHOLE
+// registry swap (ReplaceAll): the record is rebuilt from the published set and
+// swapped in one step, so every profile absent from live has no entry.
+func idpReplacePublishedGenerations(profiles []*IdPProfile, live map[string]IdentityProvider) {
+	next := make(map[string]idpServedDoc)
+	for _, p := range profiles {
+		if p == nil || p.ID == "" {
+			continue
+		}
+		if sd, ok := idpServedEntry(effectiveRemoteSource(p), live[p.ID]); ok {
+			next[p.ID] = sd
+		}
+	}
+	idpServedMu.Lock()
+	idpServed = next
+	idpServedMu.Unlock()
+}
+
+// idpServedEntry derives the served-generation record for a published provider:
+// present only when it was built from a CACHED remote document.
+func idpServedEntry(source string, prov IdentityProvider) (idpServedDoc, bool) {
+	a, ok := prov.(idpServedDocumentAger)
+	if !ok || source == "" {
+		return idpServedDoc{}, false
+	}
+	fetchedAt := a.servedDocumentCachedAt()
+	if fetchedAt.IsZero() {
+		return idpServedDoc{}, false
+	}
+	return idpServedDoc{source: source, fetchedAt: fetchedAt}, true
 }
 
 func noteIdPMetadataOutcome(profileID, source string, outcome idpMetadataOutcome, cause error) {
@@ -562,6 +621,9 @@ func resetIdPMetadataHealthForTest() {
 	idpMetadata.lastSuccess = time.Time{}
 	idpMetadata.episodes = nil
 	idpMetadataEverUsed.Store(false)
+	idpServedMu.Lock()
+	idpServed = nil
+	idpServedMu.Unlock()
 }
 
 // checkIdPMetadata is the `idp_metadata` operator-contract row.
@@ -685,23 +747,21 @@ type idpStaleCeilingVictim struct {
 }
 
 // idpStaleCeilingSweep returns the providers whose currently-served cached
-// document is older than idpmeta.StaleMaxAge, and clears the recorded fetch time
-// so one document is reported once.
+// document is older than idpmeta.StaleMaxAge. One document is adjudicated once,
+// by idpClaimStaleServe at retirement time.
 //
-// It reads the fetch time recorded by noteIdPStaleDocumentServed rather than
-// calling Store.Get: the ceiling's VALUE stays the store's (idpmeta.StaleMaxAge
-// is imported, never re-stated), and this avoids a disk read per profile per tick
-// inside the health plane. The returned list is acted on with idpMetadata.mu
+// It reads the SERVED-generation fetch time recorded by
+// idpNotePublishedGeneration rather than calling Store.Get: the ceiling's VALUE
+// stays the store's (idpmeta.StaleMaxAge is imported, never re-stated), and this
+// avoids a disk read per profile per tick inside the health plane. The returned
+// list is acted on with idpServedMu
 // RELEASED — retiring takes the registry's write lock, and holding one
 // subsystem's lock across another's call is the CHAOS-50 cluster-CA rule.
 func idpStaleCeilingSweep(now time.Time) []idpStaleCeilingVictim {
 	var out []idpStaleCeilingVictim
-	idpMetadata.mu.Lock()
-	for _, ep := range idpMetadata.episodes {
-		if ep == nil || ep.servedFetchedAt.IsZero() {
-			continue
-		}
-		age := now.Sub(ep.servedFetchedAt)
+	idpServedMu.Lock()
+	for id, sd := range idpServed {
+		age := now.Sub(sd.fetchedAt)
 		// A NEGATIVE age is EXPIRED, not fresh (Codex round 13). idpmeta.Get
 		// already refuses a negative age for exactly this reason — the store's
 		// own rule, CHAOS-61's "a negative age is stale, never maximally fresh"
@@ -714,17 +774,14 @@ func idpStaleCeilingSweep(now time.Time) []idpStaleCeilingVictim {
 		if age >= 0 && age < idpmeta.StaleMaxAge {
 			continue
 		}
-		out = append(out, idpStaleCeilingVictim{profileID: ep.profileID, source: ep.source, age: age, servedAt: ep.servedFetchedAt})
+		out = append(out, idpStaleCeilingVictim{profileID: id, source: sd.source, age: age, servedAt: sd.fetchedAt})
 		// The evidence is NOT destroyed here. Selecting is not adjudicating:
-		// this sweep releases idpMetadata.mu before the retirement takes r.mu,
-		// and a compile landing in that window republishes the profile. Zeroing
-		// on selection made the stamp unavailable to the retirement, which could
-		// then only compare the SOURCE — and a SAME-source refresh has the same
-		// source and a different generation, so a freshly-compiled healthy
-		// provider was deleted (Codex round 10). The stamp is CLAIMED instead,
-		// atomically, by idpClaimStaleServe at retirement time.
+		// this sweep releases idpServedMu before the retirement takes r.mu,
+		// and a publish landing in that window replaces the generation. The
+		// stamp is CLAIMED instead, atomically, by idpClaimStaleServe at
+		// retirement time (Codex round 10).
 	}
-	idpMetadata.mu.Unlock()
+	idpServedMu.Unlock()
 	// Deterministic order so a multi-profile sweep logs and retires the same way
 	// every run — the test-determinism class the repo's shuffle gate catches.
 	sort.Slice(out, func(i, j int) bool { return out[i].profileID < out[j].profileID })
@@ -737,27 +794,30 @@ func idpStaleCeilingSweep(now time.Time) []idpStaleCeilingVictim {
 // idpClaimStaleServe atomically consumes the stale-serve evidence a sweep
 // selected on, reporting whether it was still the CURRENT evidence.
 //
-// It is the generation check the source comparison cannot make. A fresh compile
-// for this (profile, source) deletes the episode outright (noteIdPMetadataOutcome,
-// idpMetaFresh), so a republished profile no longer carries the stamp the sweep
-// saw and the claim fails — which is the whole point: the provider that would be
-// retired is not the one the expired document belonged to.
+// It is the generation check the source comparison cannot make. Every publish
+// rewrites the profile's served-generation record (idpNotePublishedGeneration),
+// so a republished profile no longer carries the stamp the sweep saw and the
+// claim fails — which is the whole point: the provider that would be retired is
+// not the one the expired document belonged to. A FETCH never rewrites it, so a
+// fetch whose generation was never published (a failed save) cannot rescue the
+// generation still in service from its ceiling (Codex round 14).
 //
-// LOCK ORDER: called by retireStaleProvider while it holds r.mu, so the only
-// order this tree ever takes is r.mu -> idpMetadata.mu. Nothing holds
-// idpMetadata.mu across a call into the registry (the sweep releases it first,
-// deliberately), so there is no inversion — but do not add one.
+// LOCK ORDER: called by retireStaleProvider while it holds r.mu, and every
+// publish site writes the record under r.mu too, so the only order this tree
+// ever takes is r.mu -> idpServedMu. Nothing holds idpServedMu across a call
+// into the registry (the sweep releases it first, deliberately), so there is no
+// inversion — but do not add one.
 func idpClaimStaleServe(profileID, source string, servedAt time.Time) bool {
 	if servedAt.IsZero() {
 		return false
 	}
-	idpMetadata.mu.Lock()
-	defer idpMetadata.mu.Unlock()
-	ep := idpMetadata.episodes[idpEpisodeKey(profileID, source)]
-	if ep == nil || !ep.servedFetchedAt.Equal(servedAt) {
+	idpServedMu.Lock()
+	defer idpServedMu.Unlock()
+	sd, ok := idpServed[profileID]
+	if !ok || sd.source != source || !sd.fetchedAt.Equal(servedAt) {
 		return false // republished, recovered, or already claimed
 	}
-	ep.servedFetchedAt = time.Time{} // one document, one adjudication
+	delete(idpServed, profileID) // one document, one adjudication
 	return true
 }
 

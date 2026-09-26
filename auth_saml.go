@@ -43,6 +43,17 @@ type SAMLProvider struct {
 	cfg        *SAMLProfileConfig
 	sp         *saml.ServiceProvider
 	middleware *samlsp.Middleware
+	// cachedAt is when the metadata this provider was built from was fetched,
+	// if it came from the last-known-good cache; zero when fetched live or
+	// inline. Read only by the publish sites (idpNotePublishedGeneration).
+	cachedAt time.Time
+}
+
+func (p *SAMLProvider) servedDocumentCachedAt() time.Time {
+	if p == nil {
+		return time.Time{}
+	}
+	return p.cachedAt
 }
 
 // NewSAMLProvider builds a SAMLProvider from an IdPProfile.
@@ -55,7 +66,7 @@ func NewSAMLProvider(p *IdPProfile) (*SAMLProvider, error) {
 		return nil, fmt.Errorf("saml[%s] name_id_format: %w", p.ID, err)
 	}
 
-	idpMeta, err := fetchSAMLMetadata(p.ID, cfg)
+	idpMeta, cachedAt, err := fetchSAMLMetadata(p.ID, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("saml[%s] metadata: %w", p.ID, err)
 	}
@@ -88,6 +99,7 @@ func NewSAMLProvider(p *IdPProfile) (*SAMLProvider, error) {
 		cfg:        cfg,
 		sp:         &middleware.ServiceProvider,
 		middleware: middleware,
+		cachedAt:   cachedAt,
 	}, nil
 }
 
@@ -228,8 +240,9 @@ func newSAMLStateStore() *samlStateStore {
 // provider. The bytes it returns are parsed by the SAME samlsp.ParseMetadata
 // call as network bytes — the cache is a source of bytes, never a source of
 // trust.
-func fetchSAMLMetadata(profileID string, cfg *SAMLProfileConfig) (*saml.EntityDescriptor, error) {
+func fetchSAMLMetadata(profileID string, cfg *SAMLProfileConfig) (*saml.EntityDescriptor, time.Time, error) {
 	var xmlData []byte
+	var cachedAt time.Time
 
 	if cfg.MetadataURL != "" {
 		// Reject a malformed or wrong-scheme URL HERE, before the fetch, so
@@ -240,14 +253,15 @@ func fetchSAMLMetadata(profileID string, cfg *SAMLProfileConfig) (*saml.EntityDe
 		// fetcher, which parses and guards it once in the same function that
 		// issues the request.
 		if err := validateSAMLMetadataURL(cfg.MetadataURL); err != nil {
-			return nil, err
+			return nil, time.Time{}, err
 		}
 		fetched, fetchErr := fetchSAMLMetadataOverNetwork(cfg.MetadataURL)
-		doc, err := resolveIdPDocument(profileID, idpmeta.KindSAMLMetadata, cfg.MetadataURL, fetched, fetchErr, validateSAMLMetadataDocument)
+		doc, docCachedAt, err := resolveIdPDocument(profileID, idpmeta.KindSAMLMetadata, cfg.MetadataURL, fetched, fetchErr, validateSAMLMetadataDocument)
 		if err != nil {
-			return nil, err
+			return nil, time.Time{}, err
 		}
 		xmlData = doc
+		cachedAt = docCachedAt
 	} else {
 		// Inline metadata needs no network, so a remote-fetch episode this
 		// profile may still carry no longer applies — but it is NOT cleared
@@ -263,7 +277,11 @@ func fetchSAMLMetadata(profileID string, cfg *SAMLProfileConfig) (*saml.EntityDe
 		xmlData = []byte(cfg.MetadataXML)
 	}
 
-	return samlsp.ParseMetadata(xmlData)
+	ed, err := samlsp.ParseMetadata(xmlData)
+	if err != nil {
+		return nil, time.Time{}, err
+	}
+	return ed, cachedAt, nil
 }
 
 // validateSAMLMetadataDocument is the document gate resolveIdPDocument applies

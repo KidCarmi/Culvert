@@ -115,7 +115,13 @@ func idpmetaStaleMaxAgeString() string {
 //     within idpmeta.StaleMaxAge. Past the ceiling — or with nothing cached —
 //     the original fetch error is returned unchanged and the caller fails
 //     exactly as it did before this package existed.
-func resolveIdPDocument(profileID string, kind idpmeta.Kind, source string, doc []byte, fetchErr error, validate func([]byte) error) ([]byte, error) {
+//
+// The second result is WHEN the returned document was fetched from the IdP if it
+// came from the cache, and zero if it was fetched now. It is handed back to the
+// caller rather than recorded here because a fetch is not a publication: only
+// the site that PUBLISHES the provider built from this document may record it as
+// the served generation (Codex review round 14 — see idpNotePublishedGeneration).
+func resolveIdPDocument(profileID string, kind idpmeta.Kind, source string, doc []byte, fetchErr error, validate func([]byte) error) ([]byte, time.Time, error) {
 	store := idpMetadataStore()
 
 	if fetchErr == nil && len(doc) > 0 && validate != nil {
@@ -133,7 +139,7 @@ func resolveIdPDocument(profileID string, kind idpmeta.Kind, source string, doc 
 				sanitizeLog(profileID), putErr)
 		}
 		noteIdPMetadataOutcome(profileID, source, idpMetaFresh, nil)
-		return doc, nil
+		return doc, time.Time{}, nil
 	}
 	if fetchErr == nil {
 		fetchErr = fmt.Errorf("IdP returned an empty document")
@@ -142,7 +148,7 @@ func resolveIdPDocument(profileID string, kind idpmeta.Kind, source string, doc 
 	cached, age, cacheErr := store.Get(profileID, kind, source)
 	if cacheErr != nil {
 		noteIdPMetadataOutcome(profileID, source, idpMetaUnavailable, fetchErr)
-		return nil, fetchErr
+		return nil, time.Time{}, fetchErr
 	}
 	// The CACHED bytes go through the caller's validator too, BEFORE this is
 	// reported as a stale-but-usable service (Codex review round 3). Validating
@@ -159,16 +165,15 @@ func resolveIdPDocument(profileID string, kind idpmeta.Kind, source string, doc 
 			noteIdPMetadataOutcome(profileID, source, idpMetaUnavailable, fetchErr)
 			logger.Printf("IdP[%s]: metadata fetch failed (%v) AND the cached document fetched %s ago is no longer usable (%v) — this profile cannot be compiled",
 				sanitizeLog(profileID), sanitizeLog(fmt.Sprint(fetchErr)), age.Round(time.Second), sanitizeLog(fmt.Sprint(vErr)))
-			return nil, fetchErr
+			return nil, time.Time{}, fetchErr
 		}
 	}
 	noteIdPMetadataOutcome(profileID, source, idpMetaStale, fetchErr)
-	// Record WHEN this document was fetched, so the ceiling stays enforceable
-	// after the compile returns. Store.Get owns idpmeta.StaleMaxAge, but it is
-	// reached only from a compile, and a steady-state node never recompiles —
-	// see noteIdPStaleDocumentServed (Codex review round 8).
-	noteIdPStaleDocumentServed(profileID, source, time.Now().Add(-age))
 	logger.Printf("IdP[%s]: metadata fetch failed (%v) — continuing from the cached document fetched %s ago (refused past %s)",
 		sanitizeLog(profileID), sanitizeLog(fmt.Sprint(fetchErr)), age.Round(time.Second), idpmetaStaleMaxAgeString())
-	return cached, nil
+	// WHEN this document was fetched travels with it, so the ceiling stays
+	// enforceable after the compile returns: Store.Get owns idpmeta.StaleMaxAge,
+	// but it is reached only from a compile and a steady-state node never
+	// recompiles (Codex review round 8).
+	return cached, time.Now().Add(-age), nil
 }

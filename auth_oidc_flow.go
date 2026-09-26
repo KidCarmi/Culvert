@@ -146,7 +146,7 @@ func fetchOIDCDiscoveryOverNetwork(wellKnown string) ([]byte, error) {
 // fetchOIDCDiscovery fetches and validates the provider's well-known metadata
 // for a configured profile. The caller is responsible for ensuring issuer is a
 // valid HTTPS URL.
-func fetchOIDCDiscovery(profileID, issuer string) (*oidcDiscoveryDoc, error) {
+func fetchOIDCDiscovery(profileID, issuer string) (*oidcDiscoveryDoc, time.Time, error) {
 	// The trailing-slash normalisation lives INSIDE oidcWellKnownURL — see the
 	// note there. Trimming again here is what made two layers disagree.
 	wellKnown := oidcWellKnownURL(issuer)
@@ -160,7 +160,7 @@ func fetchOIDCDiscovery(profileID, issuer string) (*oidcDiscoveryDoc, error) {
 	// runs, inline in fetchOIDCDiscoveryOverNetwork, where its failure is a
 	// failed FETCH and routes to the cache.
 	if err := validateExternalURLStructure(wellKnown); err != nil {
-		return nil, fmt.Errorf("oidc discovery: %w", err)
+		return nil, time.Time{}, fmt.Errorf("oidc discovery: %w", err)
 	}
 
 	// CHAOS-71: a discovery endpoint that is momentarily unreachable must not
@@ -196,23 +196,24 @@ func fetchOIDCDiscovery(profileID, issuer string) (*oidcDiscoveryDoc, error) {
 	// rejects is a cache-poisoning path, not an optimisation.
 	fetched, fetchErr := fetchOIDCDiscoveryOverNetwork(wellKnown)
 	var parsed *oidcDiscoveryDoc
-	if _, err := resolveIdPDocument(profileID, idpmeta.KindOIDCDiscovery, wellKnown, fetched, fetchErr, func(b []byte) error {
+	_, cachedAt, err := resolveIdPDocument(profileID, idpmeta.KindOIDCDiscovery, wellKnown, fetched, fetchErr, func(b []byte) error {
 		doc, vErr := parseAndValidateOIDCDiscovery(profileID, b)
 		if vErr != nil {
 			return vErr
 		}
 		parsed = doc
 		return nil
-	}); err != nil {
-		return nil, err
+	})
+	if err != nil {
+		return nil, time.Time{}, err
 	}
 	if parsed == nil {
 		// Unreachable while resolveIdPDocument returns a nil error only for
 		// bytes the validator it was handed accepted. Fail CLOSED rather than
 		// hand back a nil document if that contract ever changes.
-		return nil, fmt.Errorf("oidc discovery: document accepted without a parse result")
+		return nil, time.Time{}, fmt.Errorf("oidc discovery: document accepted without a parse result")
 	}
-	return parsed, nil
+	return parsed, cachedAt, nil
 }
 
 // parseAndValidateOIDCDiscovery decodes and validates a discovery document.
@@ -774,6 +775,10 @@ type OIDCFlowProvider struct {
 	disc    *oidcDiscoveryDoc
 	jwks    *jwksCache
 	client  *http.Client
+	// cachedAt is when the discovery document this provider was built from was
+	// fetched, if it came from the last-known-good cache; zero when fetched
+	// live. Read only by the publish sites (idpNotePublishedGeneration).
+	cachedAt time.Time
 
 	// ── Introspection result cache + availability gate (CHAOS-49) ────────────
 	//
@@ -858,7 +863,7 @@ func NewOIDCFlowProvider(p *IdPProfile) (*OIDCFlowProvider, error) {
 	}
 	client := &http.Client{Timeout: 10 * time.Second, Transport: transport}
 
-	disc, err := fetchOIDCDiscovery(p.ID, cfg.Issuer)
+	disc, cachedAt, err := fetchOIDCDiscovery(p.ID, cfg.Issuer)
 	if err != nil {
 		return nil, fmt.Errorf("oidc[%s] discovery: %w", p.ID, err)
 	}
@@ -877,6 +882,8 @@ func NewOIDCFlowProvider(p *IdPProfile) (*OIDCFlowProvider, error) {
 		client:  client,
 		cache:   map[string]*oidcCacheEntry{},
 		ttl:     oidcFlowCacheTTL,
+
+		cachedAt: cachedAt,
 	}
 	if disc.JWKsURI != "" {
 		prov.jwks = &jwksCache{jwksURI: disc.JWKsURI, client: client, keys: make(map[string]interface{})}
@@ -885,6 +892,13 @@ func NewOIDCFlowProvider(p *IdPProfile) (*OIDCFlowProvider, error) {
 }
 
 func (p *OIDCFlowProvider) Name() string { return "oidc:" + p.profile.ID }
+
+func (p *OIDCFlowProvider) servedDocumentCachedAt() time.Time {
+	if p == nil {
+		return time.Time{}
+	}
+	return p.cachedAt
+}
 
 // DisplayName returns the admin-configured label shown to end users (e.g. on
 // the IdP selection screen), falling back to the machine key if unset.

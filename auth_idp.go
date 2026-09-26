@@ -256,6 +256,7 @@ func (r *IdPRegistry) compile(p *IdPProfile) error {
 		return err
 	}
 	r.live[p.ID] = prov
+	idpNotePublishedGeneration(p.ID, effectiveRemoteSource(p), prov)
 	return nil
 }
 
@@ -403,6 +404,11 @@ func (r *IdPRegistry) Upsert(p *IdPProfile) error {
 		return err // old profiles + old live providers stay authoritative
 	}
 	r.profiles, r.live = nextProfiles, nextLive
+	// The generation is PUBLISHED only here, after the save landed — so only
+	// here may its served-document evidence change (Codex round 14): a refused
+	// compile or a failed persist returned above and left the old generation's
+	// evidence, and therefore its staleness ceiling, untouched.
+	idpNotePublishedGeneration(p.ID, effectiveRemoteSource(p), compiled)
 
 	// A profile with NO REMOTE SOURCE LEFT — stored disabled, or switched to
 	// inline SAML metadata — has no remote fetch left, so any episode it
@@ -583,6 +589,7 @@ func (r *IdPRegistry) Delete(id string) error {
 			return err // the profile stays stored AND live
 		}
 		r.profiles, r.live = nextProfiles, nextLive
+		idpNotePublishedGeneration(id, "", nil)
 		// The profile is gone, so nothing will ever fetch for it again and no
 		// evidence can clear an episode it left behind.
 		forgetIdPMetadataEpisode(id)
@@ -691,6 +698,8 @@ func (r *IdPRegistry) ReplaceAll(profiles []*IdPProfile) error {
 	}
 	r.profiles = nextProfiles
 	r.live = nextLive
+	// Published: only now may the served-generation evidence change (round 14).
+	idpReplacePublishedGenerations(nextProfiles, nextLive)
 
 	// Whatever this snapshot dropped, disabled, or switched to inline metadata
 	// has no remote fetch left, so its episode can never be cleared by

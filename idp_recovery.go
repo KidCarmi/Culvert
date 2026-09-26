@@ -153,6 +153,7 @@ func (r *IdPRegistry) publishRecompiled(id string, generation, compiled *IdPProf
 		// the race they caused.
 		copyDiscoveredOIDCEndpoints(p, compiled)
 		r.live[id] = prov
+		idpNotePublishedGeneration(id, effectiveRemoteSource(p), prov)
 		return true
 	}
 	return false // deleted while we were compiling
@@ -250,10 +251,10 @@ func (r *IdPRegistry) retireStaleProvider(profileID, source string, servedAt tim
 		// source is unchanged, so the comparison passed and deleted it, taking
 		// SSO dark until the recovery loop ran (Codex round 10, reproduced).
 		//
-		// The stale-serve stamp IS the generation token — a fresh compile for
-		// this (profile, source) deletes the episode that carries it — so the
-		// retirement claims that exact stamp atomically and refuses when it is
-		// no longer current. Three rounds of comparisons on this function is
+		// The stale-serve stamp IS the generation token — every PUBLISH of this
+		// profile rewrites it, and nothing else does (round 14: a fetch that
+		// was never published must not) — so the retirement claims that exact
+		// stamp atomically and refuses when it is no longer current. Three rounds of comparisons on this function is
 		// what says the state was keyed wrongly rather than compared wrongly.
 		if !idpClaimStaleServe(profileID, source, servedAt) {
 			return false // republished or recovered since the sweep selected it

@@ -8746,6 +8746,37 @@ it is trying not to disturb; the honest trade is to take the extra CI cycle
 rather than hold a durable commit for it, because the container is ephemeral
 and the run is not.
 
+### Codex review round 14 — a fetch is not a publication
+
+**A FAILED SAVE ERASED THE CEILING OF THE GENERATION STILL IN SERVICE (P1).**
+Rounds 8–10 carried the stale-serve evidence (`servedFetchedAt`) on the
+fetch-health EPISODE, and a successful fetch deletes the episode. So a SAML
+`Upsert` that fetched fresh metadata and then failed to persist deleted the
+evidence while the OLD, cache-built generation stayed live and published — it
+was never retired at `idpmeta.StaleMaxAge`, and its (possibly withdrawn) signing
+certificate stayed trusted indefinitely. Reproduced before the fix:
+`TestChaos71_FailedSaveKeepsTheServedGenerationsCeiling` — cache-built
+generation published, fresh fetch + failed save, sweep at `StaleMaxAge+1h`
+returned nothing.
+
+**The two records describe different things and are now kept apart.** An
+episode describes FETCHES; the ceiling describes the PUBLISHED generation.
+`resolveIdPDocument` now RETURNS the cached document's fetch time instead of
+recording it; it travels on the compiled provider (`servedDocumentCachedAt`), and
+`idpNotePublishedGeneration` writes the per-profile `idpServed` record ONLY where
+a generation is published — `Load`'s compile, `Upsert` after persist, `ReplaceAll`
+after persist (`idpReplacePublishedGenerations`, one swap), the recovery loop's
+`publishRecompiled` — and clears it on `Delete`. A fresh or inline generation
+carries no entry. A fetch, successful or not, and a failed save never touch it,
+so a failed update leaves the old generation aging toward the ceiling and
+retiring on schedule. `idpClaimStaleServe` now claims against this record; every
+writer holds `r.mu`, so the lock edge is `r.mu` → `idpServedMu` and round 10's
+claim stays linearizable with publication. The round-8 control
+(`AHealthyLiveProviderIsNeverRetired`) encoded the old coupling — a fresh FETCH
+cleared the evidence — and now requires a fresh PUBLICATION; its companion
+control `SuccessfulFreshPublishClearsTheCeiling` pins that a committed fresh
+generation is never retired.
+
 ### Codex review round 10 — one finding, and it retires the comparison round 9 added
 
 **A SAME-SOURCE REFRESH HAS THE SAME SOURCE AND A DIFFERENT GENERATION (P2).**

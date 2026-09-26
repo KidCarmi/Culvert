@@ -1123,7 +1123,7 @@ func TestChaos71_OIDCDNSOutageIsAnsweredFromCache(t *testing.T) {
 		t.Fatalf("seed last-known-good: %v", err)
 	}
 
-	got, err := fetchOIDCDiscovery("dns-out", issuer)
+	got, _, err := fetchOIDCDiscovery("dns-out", issuer)
 	if err != nil {
 		t.Fatalf("a resolvable-yesterday issuer must still compile from cache: %v", err)
 	}
@@ -1527,7 +1527,7 @@ func TestChaos71_UnusableCachedDocumentIsNotReportedAsServed(t *testing.T) {
 	fetchErr := fmt.Errorf("dial tcp: no such host")
 	reject := func([]byte) error { return fmt.Errorf("cannot parse") }
 
-	got, err := resolveIdPDocument("corrupt", idpmeta.KindOIDCDiscovery, src, nil, fetchErr, reject)
+	got, _, err := resolveIdPDocument("corrupt", idpmeta.KindOIDCDiscovery, src, nil, fetchErr, reject)
 	if err == nil {
 		t.Fatal("a cached document the caller cannot use is not a fallback — " +
 			"resolveIdPDocument must return the fetch error")
@@ -1557,7 +1557,7 @@ func TestChaos71_UsableCachedDocumentIsStillServedStale(t *testing.T) {
 		t.Fatalf("seed: %v", err)
 	}
 
-	got, err := resolveIdPDocument("good", idpmeta.KindOIDCDiscovery, src, nil,
+	got, _, err := resolveIdPDocument("good", idpmeta.KindOIDCDiscovery, src, nil,
 		fmt.Errorf("dial tcp: no such host"), func([]byte) error { return nil })
 	if err != nil {
 		t.Fatalf("a usable cached document must still be served: %v", err)
@@ -1898,7 +1898,7 @@ func TestChaos71_ARefusedDocumentNeverReplacesTheLastKnownGood(t *testing.T) {
 
 	// 1. A healthy acquisition caches the good document. (Also the CONTROL for
 	//    the cheapest wrong fix: never replacing the cache at all.)
-	got, err := fetchOIDCDiscovery("r7", issuer)
+	got, _, err := fetchOIDCDiscovery("r7", issuer)
 	if err != nil {
 		t.Fatalf("healthy discovery must compile: %v", err)
 	}
@@ -1920,7 +1920,7 @@ func TestChaos71_ARefusedDocumentNeverReplacesTheLastKnownGood(t *testing.T) {
 	// 2. The IdP now serves a document the COMPILE will refuse.
 	idp.serveBad.Store(true)
 
-	got2, err := fetchOIDCDiscovery("r7", issuer)
+	got2, _, err := fetchOIDCDiscovery("r7", issuer)
 	if err != nil {
 		t.Fatalf("a refused document must degrade to the last-known-good, not fail the compile: %v", err)
 	}
@@ -1964,7 +1964,7 @@ func TestChaos71_PrivateAuthzEndpointStillFailsClosedWithNoCache(t *testing.T) {
 	idp := newChaos71OIDCServer(t, "authz-private-r7b.invalid")
 	idp.serveBad.Store(true)
 
-	if _, err := fetchOIDCDiscovery("r7b", idp.srv.URL); err == nil {
+	if _, _, err := fetchOIDCDiscovery("r7b", idp.srv.URL); err == nil {
 		t.Fatal("a private authorization_endpoint with no cached fallback must refuse the compile")
 	}
 	if st := idpMetadataState(); !st.Failing {
@@ -2247,13 +2247,13 @@ func TestChaos71_StaleCeilingIsEnforcedOnALiveProvider(t *testing.T) {
 
 	// A provider live from a cached document fetched just inside the ceiling.
 	noteIdPMetadataOutcome(profile, source, idpMetaStale, fmt.Errorf("endpoint down"))
-	noteIdPStaleDocumentServed(profile, source, time.Now().Add(-idpmeta.StaleMaxAge+time.Hour))
+	chaos71PublishCacheBuilt(profile, source, time.Now().Add(-idpmeta.StaleMaxAge+time.Hour))
 	if got := idpStaleCeilingSweep(time.Now()); len(got) != 0 {
 		t.Fatalf("a document still inside the ceiling must not be swept, got %+v", got)
 	}
 
 	// Past it, the provider is named for retirement exactly once.
-	noteIdPStaleDocumentServed(profile, source, time.Now().Add(-idpmeta.StaleMaxAge-time.Minute))
+	chaos71PublishCacheBuilt(profile, source, time.Now().Add(-idpmeta.StaleMaxAge-time.Minute))
 	got := idpStaleCeilingSweep(time.Now())
 	if len(got) != 1 || got[0].profileID != profile {
 		t.Fatalf("a document past %s must be swept for retirement, got %+v", idpmeta.StaleMaxAge, got)
@@ -2278,19 +2278,34 @@ func TestChaos71_StaleCeilingIsEnforcedOnALiveProvider(t *testing.T) {
 	}
 }
 
+// chaos71CacheBuiltProvider is a provider built from a document the cache
+// served, fetched at cachedAt — what a stale compile hands the publish sites.
+type chaos71CacheBuiltProvider struct {
+	chaos71StubProvider
+	cachedAt time.Time
+}
+
+func (p chaos71CacheBuiltProvider) servedDocumentCachedAt() time.Time { return p.cachedAt }
+
+// chaos71PublishCacheBuilt records, through the production publish seam, that
+// the generation now PUBLISHED for profileID serves a cached document fetched at
+// cachedAt. Since round 14 only a publication writes this evidence.
+func chaos71PublishCacheBuilt(profileID, source string, cachedAt time.Time) {
+	idpNotePublishedGeneration(profileID, source, chaos71CacheBuiltProvider{cachedAt: cachedAt})
+}
+
 // chaos71SeedStaleServe records the stale-serve stamp a ceiling sweep would
 // select on, and returns it, so a gate can drive retireStaleProvider directly.
 // Since round 10 the retirement CLAIMS this stamp atomically, so a gate that
 // does not seed it is asserting against a retirement that can never fire.
 func chaos71SeedStaleServe(profileID, source string) time.Time {
 	served := time.Now().Add(-8 * 24 * time.Hour)
-	// Mirror production exactly: resolveIdPDocument records the STALE outcome
-	// (which opens the episode) and then stamps it. noteIdPStaleDocumentServed
-	// only stamps an episode that already exists, so seeding the stamp alone
-	// records nothing and the gate would assert against a retirement that can
-	// never claim anything.
+	// Mirror production: resolveIdPDocument records the STALE outcome (which
+	// opens the fetch-health episode) and the publish site records the served
+	// generation. Since round 14 these are separate records, and the ceiling
+	// reads only the second.
 	noteIdPMetadataOutcome(profileID, source, idpMetaStale, fmt.Errorf("seeded outage"))
-	noteIdPStaleDocumentServed(profileID, source, served)
+	chaos71PublishCacheBuilt(profileID, source, served)
 	return served
 }
 
@@ -2530,6 +2545,10 @@ func TestChaos71_ProductionArmingActuallyStartsTheLoop(t *testing.T) {
 // however old the cached copy beside it is. Retiring on cache age alone would
 // take SSO down every 7 days on a completely healthy fleet — a self-inflicted
 // outage far worse than the defect.
+//
+// Round 13 moved what clears the evidence: it is the PUBLICATION of a
+// freshly-built generation, no longer the fetch alone (a fetch whose generation
+// is never published must not rescue the one still in service — R14-D1).
 func TestChaos71_AHealthyLiveProviderIsNeverRetired(t *testing.T) {
 	chaos71Env(t)
 
@@ -2537,9 +2556,10 @@ func TestChaos71_AHealthyLiveProviderIsNeverRetired(t *testing.T) {
 	source := chaos71Source(profile)
 	// It once served a very old cached document...
 	noteIdPMetadataOutcome(profile, source, idpMetaStale, fmt.Errorf("was down"))
-	noteIdPStaleDocumentServed(profile, source, time.Now().Add(-10*idpmeta.StaleMaxAge))
-	// ...and has since fetched successfully, which closes the episode.
+	chaos71PublishCacheBuilt(profile, source, time.Now().Add(-10*idpmeta.StaleMaxAge))
+	// ...and has since fetched successfully AND published that generation.
 	noteIdPMetadataOutcome(profile, source, idpMetaFresh, nil)
+	idpNotePublishedGeneration(profile, source, chaos71CacheBuiltProvider{})
 
 	if got := idpStaleCeilingSweep(time.Now()); len(got) != 0 {
 		t.Fatalf("a provider serving a FRESH document must never be retired, got %+v", got)
@@ -2812,5 +2832,87 @@ func TestChaos71_FreshCacheAgeIsNotRetired(t *testing.T) {
 			t.Fatal("a document fetched a minute ago is inside the ceiling and must " +
 				"NOT be retired — retiring it would take SSO down on a healthy fleet")
 		}
+	}
+}
+
+// ── ROUND 14: the SERVED generation is not the FETCHED one ───────────────────
+
+// R14-D1 (P1, defect, Codex round 14). A FETCH IS NOT A PUBLICATION.
+//
+// The stale-serve evidence the ceiling watchdog enforces idpmeta.StaleMaxAge
+// with used to live on the fetch-health episode, and a successful fetch deletes
+// that episode. So an admin edit that fetched FRESH metadata and then failed to
+// SAVE destroyed the evidence for the provider that stayed in service — the old
+// generation, still built from the cached document — and it was never retired:
+// for SAML, a signing certificate the IdP may have withdrawn trusted forever.
+//
+// The served generation is now recorded only where a generation is PUBLISHED,
+// so a failed save leaves the old generation's evidence untouched and it ages
+// toward the ceiling and retires on schedule.
+func TestChaos71_FailedSaveKeepsTheServedGenerationsCeiling(t *testing.T) {
+	chaos71Env(t)
+	idp := newChaos71IdP(t)
+	src := idpRemoteDocumentSource(chaos71Profile("corp", idp.URL()))
+
+	// Cache a document, then publish a generation built FROM that cache.
+	if err := idpRegistry.Upsert(chaos71Profile("corp", idp.URL())); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	idp.down.Store(true)
+	if err := idpRegistry.Upsert(chaos71Profile("corp", idp.URL())); err != nil {
+		t.Fatalf("stale-serving generation: %v", err)
+	}
+	past := time.Now().Add(idpmeta.StaleMaxAge + time.Hour)
+	if got := idpStaleCeilingSweep(past); len(got) != 1 {
+		t.Fatalf("setup: the cache-built generation must be subject to the ceiling, got %+v", got)
+	}
+
+	// The IdP answers again, the edit fetches FRESH metadata — and the save fails,
+	// so the OLD, cache-built generation stays in service.
+	idp.down.Store(false)
+	idpRegistry.path = filepath.Join(t.TempDir(), "no-such-dir", "idp.json")
+	chaos71WantErr(t, idpRegistry.Upsert(chaos71Profile("corp", idp.URL())),
+		"an update that cannot be persisted must be refused")
+	if !idpRegistry.HasEnabledInteractiveProvider() {
+		t.Fatal("setup: the old generation must still be live after the failed save")
+	}
+
+	got := idpStaleCeilingSweep(past)
+	if len(got) != 1 || got[0].profileID != "corp" || got[0].source != src {
+		t.Fatalf("a fetch whose generation was never published must not erase the served "+
+			"generation's ceiling evidence — the cache-built provider would be trusted forever, got %+v", got)
+	}
+	if !idpRegistry.retireStaleProvider(got[0].profileID, got[0].source, got[0].servedAt) {
+		t.Fatal("the still-served cache-built generation must retire at the ceiling")
+	}
+	if idpRegistry.HasEnabledInteractiveProvider() {
+		t.Fatal("the expired generation must no longer be live")
+	}
+}
+
+// R14-C1 (CONTROL). The cheapest way to pass R14-D1 is to never clear the
+// evidence, which would retire a healthy fleet every seven days. A SUCCESSFUL
+// save of a freshly-fetched generation must clear it.
+func TestChaos71_SuccessfulFreshPublishClearsTheCeiling(t *testing.T) {
+	chaos71Env(t)
+	idp := newChaos71IdP(t)
+
+	if err := idpRegistry.Upsert(chaos71Profile("corp", idp.URL())); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	idp.down.Store(true)
+	if err := idpRegistry.Upsert(chaos71Profile("corp", idp.URL())); err != nil {
+		t.Fatalf("stale-serving generation: %v", err)
+	}
+	past := time.Now().Add(idpmeta.StaleMaxAge + time.Hour)
+	if got := idpStaleCeilingSweep(past); len(got) != 1 {
+		t.Fatalf("setup: the cache-built generation must be subject to the ceiling, got %+v", got)
+	}
+	idp.down.Store(false)
+	if err := idpRegistry.Upsert(chaos71Profile("corp", idp.URL())); err != nil {
+		t.Fatalf("fresh publish: %v", err)
+	}
+	if got := idpStaleCeilingSweep(past); len(got) != 0 {
+		t.Fatalf("a PUBLISHED fresh generation must not be retired, got %+v", got)
 	}
 }
