@@ -948,3 +948,47 @@ func TestChaos68_PopulatedArrayStillLoadsAfterNullRejection(t *testing.T) {
 		t.Error("user revocation was lost")
 	}
 }
+
+// AU-37. The unread fence is a LATCH, so it is process-global test state: a
+// test that trips it would make every later test's SaveRevocations refuse,
+// order-dependently. SwapForTest must isolate it like the maps it already
+// isolates, and must restore whatever was there.
+//
+// This is a REGRESSION gate, not a hypothesis — adding the fence without
+// extending SwapForTest broke an unrelated AU-35 gate under -shuffle, which is
+// the only way that failure is visible.
+func TestSwapForTest_IsolatesTheUnreadFence(t *testing.T) {
+	dir := t.TempDir()
+	rl := NewRevocationList()
+
+	// Trip the fence through the real load path (EISDIR is uid-independent).
+	unreadable := filepath.Join(dir, "as-a-directory.json")
+	if err := os.Mkdir(unreadable, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	prevPath := RevocationsPath()
+	t.Cleanup(func() { SetRevocationsPath(prevPath) })
+	SetRevocationsPath(unreadable)
+	if err := rl.LoadRevocations(); err == nil {
+		t.Fatal("reading a directory as the revocations file must fail")
+	}
+
+	target := filepath.Join(dir, "revocations.json")
+	SetRevocationsPath(target)
+	if err := rl.SaveRevocations(); !errors.Is(err, ErrRevocationsUnread) {
+		t.Fatalf("precondition: the fence must be up, got %v", err)
+	}
+
+	restore := rl.SwapForTest()
+	rl.Revoke("token", time.Now().Add(time.Hour))
+	if err := rl.SaveRevocations(); err != nil {
+		t.Fatalf("SwapForTest left the fence up, so every later test would silently stop persisting: %v", err)
+	}
+	restore()
+
+	// And it must come BACK — restoring to a cleared fence would hide the
+	// condition from whatever set it.
+	if err := rl.SaveRevocations(); !errors.Is(err, ErrRevocationsUnread) {
+		t.Errorf("restore() did not put the fence back: %v", err)
+	}
+}

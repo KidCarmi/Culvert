@@ -10,6 +10,7 @@ package main
 
 import (
 	"encoding/hex"
+	"errors"
 	"net/http"
 	"os"
 	"strings"
@@ -137,7 +138,16 @@ func revokeSessionCookie(cookieName string, r *http.Request) {
 	}
 	sessionRevoked.Revoke(c.Value[:dot], time.Unix(sess.Exp, 0))
 	if err := sessionRevoked.SaveRevocations(); err != nil {
-		logger.Printf("Session: failed to persist revocations: %v", err)
+		// A REFUSAL is not a failure: this boot could not read the revocations
+		// file, so we decline to rename over content we never saw (AU-37). The
+		// revocation is in force in memory and the load-degraded contract row
+		// already names the repair; counting it as a write failure would send
+		// the operator to check free space instead.
+		if errors.Is(err, session.ErrRevocationsUnread) {
+			noteRevocationPersistRefused(1)
+		} else {
+			logger.Printf("Session: failed to persist revocations: %v", err)
+		}
 	}
 }
 

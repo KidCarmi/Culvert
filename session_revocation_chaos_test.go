@@ -1165,22 +1165,27 @@ func TestChaos68_AU36_UnreadableLoadDoesNotAdvertiseAQuarantine(t *testing.T) {
 	}
 }
 
-// DEFECT GATE. The remedy must warn that the file is still overwritable.
-//
-// The boot probe deliberately does not write on this branch, but all three
-// production writers (revokeSessionCookie, the account-delete handler, and
-// mergeAndPersistRevocations) call SaveRevocations unconditionally — so the
-// first revocation after boot REPLACES the file this process could not read.
-// "The contents may be intact" is only actionable if the operator is told how
-// long that stays true.
-func TestChaos68_AU36_UnreadableRemedyWarnsTheFileIsStillOverwritable(t *testing.T) {
+// INVERTED by AU-37. This gate used to require the remedy to WARN that the
+// next revocation would overwrite the unread file — it pinned a documented
+// hazard. AU-37 removed the hazard instead: SaveRevocations now refuses while
+// the file is unread, so the remedy must promise the opposite, that the file
+// is preserved and a restart after the repair recovers it. Inverting it is
+// deliberate, not incidental: the old assertion would now pass only if the
+// fence were gone.
+func TestChaos68_AU37_UnreadableRemedyPromisesTheFileIsPreserved(t *testing.T) {
 	withChaos68Revocations(t)
 	noteRevocationPersistenceConfigured(filepath.Join(t.TempDir(), "revocations.json"))
 	noteRevocationLoadDegraded(fmt.Errorf("read revocations: %w", errors.New("input/output error")))
 
 	action := strings.ToLower(checkSessionRevocation().OperatorAction)
-	if !strings.Contains(action, "replaces it") && !strings.Contains(action, "overwrit") {
-		t.Errorf("the unreadable-load remedy does not warn that the next revocation replaces the file: %q", action)
+	if strings.Contains(action, "replaces it") {
+		t.Errorf("the remedy still warns the file will be overwritten, which AU-37 made false: %q", action)
+	}
+	if !strings.Contains(action, "not being written") {
+		t.Errorf("the remedy does not state that the unread file is protected from writes: %q", action)
+	}
+	if !strings.Contains(action, "restart") {
+		t.Errorf("the remedy does not name the restart that recovers the contents: %q", action)
 	}
 }
 
@@ -1253,5 +1258,258 @@ func TestChaos68_AU36_QuarantineAndRemedyShareOnePredicate(t *testing.T) {
 	}
 	if !strings.Contains(string(health), "corrupt := revocationLoadIsCorrupt(err)") {
 		t.Error("noteRevocationLoadDegraded no longer derives LoadCorrupt from the shared predicate")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// AU-37: a file that could not be READ is never overwritten.
+//
+// A read failure is deliberately not quarantined, on the reasoning that the
+// content may be intact behind a transient fault and moving a healthy
+// security-critical file aside is the worse error. That reasoning only holds
+// if nothing LATER overwrites it — and something did. The process boots with an
+// EMPTY list, and the first logout, account deletion or cluster sync that adds
+// an entry calls SaveRevocations, which renames a complete temp file over the
+// target. AtomicWrite needs only the parent DIRECTORY to be writable, so an
+// unreadable file in a writable directory is replaced by the handful of
+// revocations this process happens to know about; every revocation that was on
+// disk and never read is gone, and the operator's own remedy (fix the
+// permission, restart) then loads the truncated file.
+//
+// Fail-OPEN on the one control that can withdraw an already-issued session,
+// reachable by ordinary operation rather than by a second fault. Reported by
+// Codex on PR #1437 as a P1.
+//
+// The boot probe already refused to write on this branch for exactly this
+// reason; the runtime writers did not. Same file, same fault, opposite
+// postures — the "two answers to one question" class this sweep keeps closing.
+// ---------------------------------------------------------------------------
+
+// au37UnreadableFeed returns a list whose backing file exists, holds content,
+// and cannot be read — the real shape, driven through the real load path.
+func au37UnreadableFeed(t *testing.T) (*session.RevocationList, string) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "revocations.json")
+	// Content a healthy boot WOULD have loaded. Its survival is the property.
+	original := []byte(`[{"token":"user:victim","exp":4102444800}]`)
+	if err := os.WriteFile(path, original, 0o600); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if err := os.Chmod(path, 0o000); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	session.SetRevocationsPath(path)
+	rl := session.NewRevocationList()
+	if err := rl.LoadRevocations(); err == nil {
+		t.Skip("running as root: DAC is bypassed, so the file cannot be made unreadable here")
+	}
+	return rl, path
+}
+
+// DEFECT GATE. A save after an unreadable load must not touch the file.
+func TestChaos68_AU37_SaveRefusesAfterAnUnreadableLoad(t *testing.T) {
+	withChaos68Revocations(t)
+	rl, path := au37UnreadableFeed(t)
+
+	rl.Revoke("a-token-this-process-knows", time.Now().Add(time.Hour))
+	err := rl.SaveRevocations()
+	if !errors.Is(err, session.ErrRevocationsUnread) {
+		t.Fatalf("SaveRevocations err = %v, want ErrRevocationsUnread — an unread file must never be overwritten", err)
+	}
+
+	// The original bytes must still be there. Read as the owner can.
+	if err := os.Chmod(path, 0o600); err != nil {
+		t.Fatalf("chmod back: %v", err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if !strings.Contains(string(got), "user:victim") {
+		t.Errorf("the unread revocations file was overwritten and its contents are gone: %s", got)
+	}
+}
+
+// DEFECT GATE. The refusal is not a persistence FAILURE: no write was
+// attempted, so it must not set the degraded flag or move the failure counter,
+// which would replace the load-degraded row's remedy (fix the permission) with
+// "check free space" — the wrong investigation.
+func TestChaos68_AU37_RefusalIsNotCountedAsAWriteFailure(t *testing.T) {
+	withChaos68Revocations(t)
+	rl, _ := au37UnreadableFeed(t)
+
+	rl.Revoke("another-token", time.Now().Add(time.Hour))
+	_ = rl.SaveRevocations()
+
+	if sessionRevocationPersistDegraded.Load() {
+		t.Error("a refusal set the persist-degraded flag; it is not a write failure and the volume may be healthy")
+	}
+	if got := sessionRevocationPersistFailures.Load(); got != 0 {
+		t.Errorf("persist failures = %d, want 0 — a refused save attempted no write", got)
+	}
+}
+
+// DEFECT GATE. The refusal is COUNTED. It is the operator's only measure of
+// how many revocations are memory-only, which is also the size of the re-apply
+// job the contract row asks for.
+func TestChaos68_AU37_RefusalsAreCountedAndSurfaced(t *testing.T) {
+	withChaos68Revocations(t)
+	path := filepath.Join(t.TempDir(), "revocations.json")
+	session.SetRevocationsPath(path)
+	noteRevocationPersistenceConfigured(path)
+	noteRevocationLoadDegraded(fmt.Errorf("read revocations: %w", os.ErrPermission))
+
+	noteRevocationPersistRefused(3)
+	if got := sessionRevocationPersistRefused.Load(); got != 3 {
+		t.Fatalf("refused counter = %d, want 3", got)
+	}
+	if msg := checkSessionRevocation().Message; !strings.Contains(msg, "3") {
+		t.Errorf("the row does not report how many revocations are memory-only: %q", msg)
+	}
+}
+
+// CONTROL. A healthy node must still persist. The cheapest way to pass every
+// gate above is to refuse every save, which would silently delete the
+// durability this whole sweep exists to provide.
+func TestChaos68_AU37_ReadableFileStillPersists(t *testing.T) {
+	withChaos68Revocations(t)
+	path := filepath.Join(t.TempDir(), "revocations.json")
+	session.SetRevocationsPath(path)
+	rl := session.NewRevocationList()
+	if err := rl.LoadRevocations(); err != nil {
+		t.Fatalf("load on a clean path: %v", err)
+	}
+	rl.Revoke("token", time.Now().Add(time.Hour))
+	if err := rl.SaveRevocations(); err != nil {
+		t.Fatalf("a healthy node must still persist: %v", err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if !strings.Contains(string(got), "token") {
+		t.Errorf("a healthy save wrote nothing useful: %s", got)
+	}
+}
+
+// CONTROL. A CORRUPT file must STILL be writable after the caller quarantines
+// it. The fence is specific to an UNREAD file; extending it to the corrupt case
+// would leave a quarantined node unable to persist anything until a restart,
+// which is a durability outage the quarantine exists to avoid.
+func TestChaos68_AU37_CorruptFileDoesNotFenceTheSave(t *testing.T) {
+	withChaos68Revocations(t)
+	path := filepath.Join(t.TempDir(), "revocations.json")
+	if err := os.WriteFile(path, []byte("{not json"), 0o600); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	session.SetRevocationsPath(path)
+	rl := session.NewRevocationList()
+	err := rl.LoadRevocations()
+	if !errors.Is(err, session.ErrRevocationsCorrupt) {
+		t.Fatalf("load err = %v, want ErrRevocationsCorrupt", err)
+	}
+	// The caller quarantines, then the node carries on. A save must work.
+	rl.Revoke("post-quarantine", time.Now().Add(time.Hour))
+	if err := rl.SaveRevocations(); err != nil {
+		t.Fatalf("a corrupt (quarantined) file must not fence the save: %v", err)
+	}
+}
+
+// UID-INDEPENDENT COUNTERPART to the two chmod gates above, which skip as root
+// because DAC cannot deny root a read. A DIRECTORY at the configured path fails
+// os.ReadFile with EISDIR for every uid, so the same fence is driven on every
+// runner — without it, the two gates above are unguarded on exactly the lanes
+// this repository runs as root.
+//
+// The write target is then pointed at an ordinary file holding known content,
+// which is what makes this a proof of the fence rather than of the directory:
+// the refusal must happen before any path work, so a save must return the
+// sentinel and leave those bytes alone.
+func TestChaos68_AU37_UnreadLoadFencesEverySubsequentSave(t *testing.T) {
+	withChaos68Revocations(t)
+	dir := t.TempDir()
+
+	unreadable := filepath.Join(dir, "revocations-as-a-directory.json")
+	if err := os.Mkdir(unreadable, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	session.SetRevocationsPath(unreadable)
+	rl := session.NewRevocationList()
+	err := rl.LoadRevocations()
+	if err == nil {
+		t.Fatal("reading a directory as the revocations file must fail")
+	}
+	if errors.Is(err, session.ErrRevocationsCorrupt) {
+		t.Fatalf("EISDIR must classify as a READ failure, not corruption: %v", err)
+	}
+
+	target := filepath.Join(dir, "revocations.json")
+	original := []byte(`[{"token":"user:victim","exp":4102444800}]`)
+	if err := os.WriteFile(target, original, 0o600); err != nil {
+		t.Fatalf("seed target: %v", err)
+	}
+	session.SetRevocationsPath(target)
+
+	rl.Revoke("token-known-only-to-this-process", time.Now().Add(time.Hour))
+	if err := rl.SaveRevocations(); !errors.Is(err, session.ErrRevocationsUnread) {
+		t.Fatalf("SaveRevocations err = %v, want ErrRevocationsUnread", err)
+	}
+	got, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if !bytes.Equal(got, original) {
+		t.Errorf("a save after an unread load wrote to disk: %s", got)
+	}
+	if sessionRevocationPersistDegraded.Load() {
+		t.Error("the refusal set the persist-degraded flag; no write was attempted")
+	}
+}
+
+// DEFECT GATE for the MERGE path's wiring, which the other AU-37 gates do not
+// reach: mergeAndPersistRevocations is the one writer that runs on a LOOP
+// (the CP handler, the DP sync, the HA bundle apply, every 3-5s), so it is the
+// one place a refusal could become both an uncounted event and a per-tick log
+// line. Removing its refusal branch left every other gate green — which is why
+// this exists.
+func TestChaos68_AU37_MergePathCountsTheRefusalAndStaysQuiet(t *testing.T) {
+	withChaos68Revocations(t)
+	dir := t.TempDir()
+
+	unreadable := filepath.Join(dir, "as-a-directory.json")
+	if err := os.Mkdir(unreadable, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	session.SetRevocationsPath(unreadable)
+	if err := sessionRevoked.LoadRevocations(); err == nil {
+		t.Fatal("reading a directory as the revocations file must fail")
+	}
+	noteRevocationPersistenceConfigured(unreadable)
+	noteRevocationLoadDegraded(errors.New("read revocations: is a directory"))
+
+	var logged bytes.Buffer
+	prev := logger
+	logger = log.New(&logged, "", 0)
+	t.Cleanup(func() { logger = prev })
+
+	before := sessionRevocationPersistRefused.Load()
+	added := mergeAndPersistRevocations([]RevocationEntry{
+		{Token: "user:alice", User: "alice", Expiry: time.Now().Add(time.Hour).Unix()},
+		{Token: "user:bob", User: "bob", Expiry: time.Now().Add(time.Hour).Unix()},
+	}, "test")
+	if added != 2 {
+		t.Fatalf("added = %d, want 2 — the merge itself must still apply", added)
+	}
+	if got := sessionRevocationPersistRefused.Load() - before; got != 2 {
+		t.Errorf("refused counter moved by %d, want 2 — the merge path must charge what it could not persist", got)
+	}
+	if sessionRevocationPersistDegraded.Load() {
+		t.Error("the merge path treated a refusal as a write failure")
+	}
+	// The sync loops run every few seconds; a per-attempt line here is the
+	// write-amplification this function's own contract forbids. The condition
+	// was already logged once at boot and is on the contract row.
+	if strings.Contains(logged.String(), "failed to persist") {
+		t.Errorf("the merge path logged a refusal as a persistence failure, once per sync tick: %q", logged.String())
 	}
 }

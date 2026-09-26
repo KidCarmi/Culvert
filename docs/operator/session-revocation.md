@@ -125,6 +125,7 @@ token — it is reachable at viewer role.
 | `culvert_session_revocation_users` | gauge | Deleted-account revocations in force on this node |
 | `culvert_session_revocation_persist_failures_total` | counter | Revocations applied in memory that could not be written |
 | `culvert_session_revocation_persist_degraded` | gauge | `1` while the latest revocation save failed and none has landed since (the page signal) |
+| `culvert_session_revocation_persist_refused_total` | counter | Revocations not written because the file could not be read this boot, so overwriting it was refused (§6) |
 
 These are emitted **unconditionally**, which is the deliberate exception to
 Culvert's usual "omit the series when the feature is off" rule. Elsewhere a flat
@@ -275,13 +276,23 @@ error. There is therefore **no `.corrupt.*` copy and no
 row says so and gives its own remedy, which is to fix the permission or the
 mount and restart.
 
-**Restart before applying new revocations.** The boot probe deliberately does
-not write on this branch, so the file is still on disk exactly as it was — but
-that only holds until the next write. Every one of the three writers (a logout,
-an account deletion, and a cluster revocation sync that merges anything new)
-calls `SaveRevocations` unconditionally, and that **replaces** the file with the
-list this process could not read. So the window in which the original contents
-are recoverable ends at the first revocation after boot, not at the restart.
+**The file is protected while it cannot be read.** Every writer
+(`SaveRevocations`) refuses for as long as this boot failed to read the file, so
+nothing renames over content the process never saw — a restart after the repair
+loads the original list. This matters because `AtomicWrite` needs only the
+parent *directory* to be writable, so without the fence an unreadable file in a
+writable directory would be silently replaced by whatever handful of revocations
+the process happened to know about, and the repair would then load the truncated
+file.
+
+The cost is that revocations applied in the meantime are **memory-only**: they
+are enforced by this node now and gone at the next restart.
+`culvert_session_revocation_persist_refused_total` counts them, and the row
+reports the same number — it is the size of the re-apply job. Refusals are
+deliberately **not** counted as persistence failures
+(`..._persist_failures_total`, `..._persist_degraded`): no write was attempted
+and the volume may be perfectly healthy, so the remedy is the permission repair
+above, not free space.
 
 ---
 

@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/KidCarmi/Culvert/internal/session"
 	"github.com/KidCarmi/Culvert/internal/totp"
 	"github.com/crewjam/saml"
 )
@@ -369,7 +370,15 @@ func apiAuthUsers(w http.ResponseWriter, r *http.Request) {
 		// and surfaced rather than living in one log line.
 		sessionRevoked.RevokeUser(username)
 		if err := sessionRevoked.SaveRevocations(); err != nil {
-			logger.Printf("Session: failed to persist user revocation for %q: %v", sanitizeLog(username), err)
+			// See session.go: a refusal (the file was not read this boot) is
+			// counted, not logged per attempt and never treated as a write
+			// failure — the remedy is the permission repair the load-degraded
+			// row names, not free space (AU-37).
+			if errors.Is(err, session.ErrRevocationsUnread) {
+				noteRevocationPersistRefused(1)
+			} else {
+				logger.Printf("Session: failed to persist user revocation for %q: %v", sanitizeLog(username), err)
+			}
 		}
 		auditEvent(r, "auth.users.delete", username, "")
 		w.WriteHeader(http.StatusNoContent)

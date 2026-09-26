@@ -64,10 +64,34 @@ import (
 // A successful save is a genuine recovery rather than merely a fresh write:
 // SaveRevocations persists the COMPLETE live list, so once one succeeds every
 // revocation still in memory is durable again.
+//
+// sessionRevocationPersistRefused is a THIRD, distinct counter: a save that was
+// REFUSED rather than attempted, because this boot could not read the
+// revocations file (session.ErrRevocationsUnread). Reusing the failure counter
+// would conflate two conditions with different remedies — "the volume rejected
+// a write" sends an operator to check space and mounts, while "we declined to
+// overwrite a file we never read" is repaired by the permission fix the
+// load-degraded row already names. One counter answering two questions is the
+// AU-36 defect one layer down.
+//
+// It is also the operator's only measure of HOW MUCH the refusal is holding:
+// every revocation counted here is in force on this node right now and is gone
+// at the next restart, so it is the size of the re-apply job.
 var (
 	sessionRevocationPersistFailures atomic.Uint64
+	sessionRevocationPersistRefused  atomic.Uint64
 	sessionRevocationPersistDegraded atomic.Bool
 )
+
+// noteRevocationPersistRefused records a save this node declined to attempt.
+// It deliberately does NOT set sessionRevocationPersistDegraded: nothing was
+// written, the volume may be perfectly healthy, and the condition is already
+// reported by the load-degraded branch of the contract row.
+func noteRevocationPersistRefused(n int) {
+	if n > 0 {
+		sessionRevocationPersistRefused.Add(uint64(n))
+	}
+}
 
 type sessionRevocationHealth struct {
 	// Configured is true when --revocations-file / config supplies a path.
@@ -252,6 +276,7 @@ func resetSessionRevocationHealthForTest() {
 	sessionRevocationHealthy = sessionRevocationHealth{}
 	sessionRevocationHealthMu.Unlock()
 	sessionRevocationPersistFailures.Store(0)
+	sessionRevocationPersistRefused.Store(0)
 	sessionRevocationPersistDegraded.Store(false)
 }
 
@@ -317,10 +342,11 @@ func checkSessionRevocation() OperatorContractCheck {
 			}
 		}
 		return OperatorContractCheck{
-			Code:           "session_revocation",
-			Status:         diagFail,
-			Message:        "the persisted session-revocation list could not be READ — revocations applied before this restart are NOT in force on this node",
-			OperatorAction: "Check the permissions and the mount backing the revocations file, then restart. The file was left in place and nothing was moved aside, so there is no copy to restore and its contents may still be intact — but the next logout or account deletion on this node REPLACES it with the list this process could not read, so restart before applying new revocations. Until the node restarts with the list loaded, re-apply any logout or account deletion that must hold.",
+			Code:   "session_revocation",
+			Status: diagFail,
+			Message: fmt.Sprintf("the persisted session-revocation list could not be READ — revocations applied before this restart are NOT in force on this node, and %d applied since have been held in memory only",
+				sessionRevocationPersistRefused.Load()),
+			OperatorAction: "Check the permissions and the mount backing the revocations file, then restart. The file was left in place and is NOT being written to while it cannot be read, so its contents may still be intact and a restart after the repair recovers them. Every revocation applied on this node in the meantime is in force now and gone at the next restart, so re-apply any logout or account deletion that must hold.",
 		}
 	}
 	if h.Configured && revocationBackingFileIsGone() {
@@ -422,6 +448,19 @@ func mergeAndPersistRevocations(entries []RevocationEntry, who string) int {
 			who, sessionRevoked.Count(), sessionRevoked.UserCount())
 	}
 	if err := sessionRevoked.SaveRevocations(); err != nil {
+		// A REFUSAL is not a failure and must not be logged per attempt
+		// (AU-37). This boot could not read the revocations file, so the save
+		// is declined to avoid renaming over content nobody saw; the merged
+		// entries are in force in memory and the load-degraded contract row
+		// already names the repair. The sync loops run every 3-5s, so logging
+		// here would emit hundreds of lines an hour for a condition reported
+		// once at boot — this function's own rule, two paragraphs up. The
+		// magnitude goes to the counter, which is also the size of the
+		// operator's re-apply job.
+		if errors.Is(err, session.ErrRevocationsUnread) {
+			noteRevocationPersistRefused(added)
+			return added
+		}
 		// Onset only. While degraded the counter carries the magnitude.
 		if !failing {
 			logger.Printf("%s: failed to persist merged revocations: %v", who, err)

@@ -27,6 +27,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/KidCarmi/Culvert/internal/fileutil"
@@ -126,6 +127,38 @@ type RevocationList struct {
 	//
 	// Lock order is saveMu → mu, and mu is never held while taking saveMu.
 	saveMu sync.Mutex
+
+	// unread is set when THIS boot could not READ the revocations file, and it
+	// makes SaveRevocations refuse rather than overwrite.
+	//
+	// A file that could not be read is deliberately NOT quarantined — its
+	// content may be perfectly intact behind a transient permission or I/O
+	// fault, and moving a healthy security-critical file aside is the worse
+	// error. That reasoning is only sound if nothing LATER overwrites it, and
+	// it did: the process boots with an EMPTY list, and the first logout,
+	// account deletion or cluster sync that adds an entry calls
+	// SaveRevocations, which renames a complete temp file over the target.
+	// AtomicWrite needs only the parent DIRECTORY to be writable, so an
+	// unreadable file in a writable directory — a mode change, an ACL, an EIO
+	// on the file's own blocks — is replaced by the handful of revocations
+	// this process happens to know about. Every revocation that was on disk
+	// and never read is then gone for good, and the operator's own remedy
+	// (fix the permission, restart) loads the truncated file instead.
+	//
+	// That is fail-OPEN on the one control that can withdraw an already-issued
+	// session, and it was reachable by ordinary operation rather than by a
+	// second fault. Reported by Codex on PR #1437 as a P1.
+	//
+	// Refusing costs no ENFORCEMENT: the revocation is still applied in
+	// memory and honoured by this node. It costs DURABILITY, which is already
+	// false and already reported — LoadDegraded makes revocationsAreDurable()
+	// false and fails the session_revocation row — so the refusal adds no
+	// silent state. And it preserves the one thing a restart can still
+	// recover, which a write destroys permanently.
+	//
+	// Only the READ failure sets it. A CORRUPT file is quarantined (moved
+	// aside), so the path is free and writing a fresh list there is correct.
+	unread atomic.Bool
 }
 
 // NewRevocationList returns an empty list (used by tests to swap the
@@ -368,11 +401,25 @@ func (r *RevocationList) SwapForTest() (restore func()) {
 	r.tokens = map[string]time.Time{}
 	r.users = map[string]time.Time{}
 	r.mu.Unlock()
+	// The unread fence is a LATCH on this object, cleared in production only by
+	// a load that succeeds — which normally means a restart. It therefore
+	// outlives any test that trips it, and because the swap restores the SAME
+	// object rather than installing a fresh one, one test driving
+	// LoadRevocations against an unreadable path would make every LATER test's
+	// SaveRevocations refuse. Order-dependent, so only -shuffle sees it; it was
+	// found exactly that way.
+	//
+	// EVERY field added to this struct belongs here. That is the same rule this
+	// sweep already recorded for resetDiagVerdictGlobals and broke again here:
+	// a new process-global with a latching state must be registered with its
+	// isolation primitive IN THE SAME CHANGE.
+	prevUnread := r.unread.Swap(false)
 	return func() {
 		r.mu.Lock()
 		r.tokens = prevTokens
 		r.users = prevUsers
 		r.mu.Unlock()
+		r.unread.Store(prevUnread)
 	}
 }
 
@@ -409,6 +456,17 @@ func RevocationsPath() string {
 // state_corruption.go's, expressed as a sentinel so the caller need not
 // re-classify the error.
 var ErrRevocationsCorrupt = errors.New("session: revocations file corrupt")
+
+// ErrRevocationsUnread is returned by SaveRevocations while this boot could not
+// READ the revocations file. Nothing is written.
+//
+// It is NOT a persistence failure and must not be counted as one: no write was
+// attempted, the volume may be perfectly healthy, and the condition is already
+// reported by the load-degraded branch of the session_revocation row. Routing
+// it through the persist observers would replace that row's remedy (fix the
+// permission or the mount and restart) with "check free space" — the wrong
+// investigation, which is the defect class AU-36 closed one layer up.
+var ErrRevocationsUnread = errors.New("session: revocations file was not read this boot; refusing to overwrite it")
 
 // persistFailureObserver is notified whenever a revocation could not be made
 // durable. Installed by package main beside the metrics/health plane.
@@ -506,6 +564,12 @@ func (r *RevocationList) SaveRevocations() error {
 	// bundle apply) that run concurrently with an admin's delete.
 	//
 	// Reported by Codex on PR #1437 as a P1.
+	// Refuse BEFORE taking saveMu and before any I/O: there is nothing to
+	// serialise, and a caller must not be delayed by other savers to be told
+	// that nothing will be written.
+	if r.unread.Load() {
+		return ErrRevocationsUnread
+	}
 	r.saveMu.Lock()
 	defer r.saveMu.Unlock()
 
@@ -587,6 +651,11 @@ func (r *RevocationList) LoadRevocations() error {
 			r.probePersistPath()
 			return nil
 		}
+		// Could not READ it. The file stays where it is, and from here on
+		// SaveRevocations refuses rather than renaming over content this
+		// process never saw. Cleared only by a load that actually succeeds,
+		// which in practice means a restart after the fault is repaired.
+		r.unread.Store(true)
 		return fmt.Errorf("read revocations: %w", err)
 	}
 	var entries []RevocationEntry

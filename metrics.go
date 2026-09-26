@@ -1164,12 +1164,17 @@ culvert_session_revocation_persist_failures_total %d
 # HELP culvert_session_revocation_persist_degraded 1 while the most recent revocation save failed and no save has landed since
 # TYPE culvert_session_revocation_persist_degraded gauge
 culvert_session_revocation_persist_degraded %d
+
+# HELP culvert_session_revocation_persist_refused_total Revocations not written because this boot could not read the revocations file, so overwriting it was refused
+# TYPE culvert_session_revocation_persist_refused_total counter
+culvert_session_revocation_persist_refused_total %d
 `,
 		srDurable,
 		sessionRevoked.Count(),
 		sessionRevoked.UserCount(),
 		sessionRevocationPersistFailures.Load(),
 		srPersistDegraded,
+		sessionRevocationPersistRefused.Load(),
 	)
 
 	// CHAOS-60: GeoIP resolution health. Emitted ONLY when a GeoIP database is

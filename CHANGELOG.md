@@ -101,6 +101,20 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   persisted document remains a JSON array so an older binary still parses the
   token revocations it understands.
 
+  A revocations file that could not be READ is no longer overwritten. It is
+  deliberately not quarantined, because its contents may be intact behind a
+  transient permission or I/O fault — but the process boots with an empty list,
+  and the first logout, account deletion or cluster sync used to rename a
+  complete file over it. `AtomicWrite` needs only the parent directory to be
+  writable, so an unreadable file in a writable directory was silently replaced
+  by the few revocations that node happened to know about, and the operator's
+  own remedy then loaded the truncated file. Saves are now refused while the
+  file is unread; revocations applied in the meantime are enforced in memory,
+  counted by `culvert_session_revocation_persist_refused_total`, and reported on
+  the diagnostics row, which is the size of the re-apply job. A refusal is not
+  counted as a write failure — no write was attempted and the volume may be
+  healthy.
+
   The two ways a load can fail now carry the recovery action that matches each.
   A file that was read and would not parse is quarantined and has a restorable
   `.corrupt.*` copy; a file that could not be read at all (permissions, I/O, a
