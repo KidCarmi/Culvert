@@ -125,7 +125,7 @@ token — it is reachable at viewer role.
 | `culvert_session_revocation_durable` | gauge | `1` when a revocation applied here survives a restart |
 | `culvert_session_revocation_tokens` | gauge | Logout revocations in force on this node |
 | `culvert_session_revocation_users` | gauge | Deleted-account revocations in force on this node |
-| `culvert_session_revocation_persist_failures_total` | counter | Revocations applied in memory that could not be written |
+| `culvert_session_revocation_persist_failures_total` | counter | **Failed save attempts**, not affected revocations — the boot probe attempts a save on an empty list and the sync loop retries every 3–5 s, so one fault reaches hundreds. The scope is `..._tokens` + `..._users` |
 | `culvert_session_revocation_persist_degraded` | gauge | `1` while the latest revocation save failed and none has landed since (the page signal) |
 | `culvert_session_revocation_persist_refused_total` | counter | Revocations not written because overwriting the file was refused — it could not be read this boot (§6), or it is corrupt and could not be quarantined (§6b) |
 
@@ -245,6 +245,9 @@ restart those sessions are live again.
    `culvert_session_revocation_persist_failures_total` is cumulative and
    deliberately does **not** reset, so the incident stays visible on `/metrics`
    after the row has cleared — that is where you look to confirm one happened.
+   Read it as the **age of the fault, not the size of the re-apply job**: it
+   counts failed *attempts*, and the retry loop attempts one every few seconds.
+   What a restart would actually lose is `..._tokens` + `..._users`.
 3. **Re-apply anything revoked during a restart in the window.** A revocation
    applied while writes were failing is recovered by the next successful save
    *if the process survived*. If the process restarted before that save, those
@@ -311,11 +314,15 @@ that did not include it, or a replaced mount.
 This state is **self-healing on the next write**, and usually before you see
 it:
 
-* **On a clustered node** the next config sync rewrites the complete list
-  (every 3–5 s), whether or not that sync carries anything new. The window is
-  seconds.
-* **On a standalone node** the next logout or account deletion recreates the
-  file with the full list. Until one happens, nothing writes.
+* **On a node that RECEIVES revocations** the next sync rewrites the complete
+  list (every 3–5 s), whether or not that sync carries anything new. The window
+  is seconds. That means a Data Plane node, an HA standby applying the leader's
+  bundle, and — since AU-41 — a Control Plane leader being polled by either.
+* **On any other node** the next logout or account deletion recreates the file
+  with the full list. Until one happens, nothing writes. This is the case for a
+  standalone node, and also for a **Control Plane leader with no HA standby and
+  no Data Plane nodes calling in**: every repair path is driven by a peer, so a
+  leader nobody polls has none.
 
 So the action is:
 
@@ -373,6 +380,53 @@ waiting for a write to discover it.
 3. Re-apply any logout or account deletion that had to hold.
 
 ---
+
+## 6d. The HA standby is being replicated a SUBSET
+
+`culvert_ha_bundle_revocations_dropped_total > 0`
+
+The HA state bundle carries the leader's published config, its CA material, the
+cluster state and its live revocation set, all in **one** CP↔DP gRPC message.
+The config alone may be up to 120 MiB and the frame is capped at 128 MiB, so the
+headroom for everything else is about 8 MiB. The revocation set is the only
+member of that bundle with no cap of its own: `Revoke` is unbounded, the Control
+Plane aggregates the whole fleet's revocations, and each entry lives until its
+session expires (up to 7 days). For scale, a realistic OIDC session is a
+326-byte entry, so roughly 25,700 of them fill that headroom — about 3,700
+fleet-wide logouts a day across a 7-day window.
+
+When the bundle would exceed the frame, the leader **trims** the revocation set
+to fit rather than letting gRPC reject the whole message. That choice is
+deliberate and it is the fail-safer of the two available answers: a rejected
+message gives the standby *nothing* — no config, no CA material, no cluster
+state and none of the same revocations — and its HA sync keeps failing with an
+opaque `ResourceExhausted` until enough entries expire, so failover readiness is
+lost entirely. Trimming degrades one member; not trimming loses all of them.
+
+The trim keeps the highest-value entries: **account** revocations before token
+revocations (one account entry withdraws every session that identity holds),
+then longest-remaining-life first. The dropped tail is therefore self-clearing —
+short-lived entries age out and a fresh logout sorts high.
+
+**What a non-zero counter means:** the standby holds a subset of the leader's
+revocations, so a promotion would admit sessions the leader currently rejects.
+Every other surface stays green, because HA sync is still working — the counter
+and a matching `haBundleRevocationsDropped` field on `/healthz` (present only
+when non-zero) are the signal.
+
+**What to do:** reduce what shares the frame. Shrink the published config (the
+blocked-host list is usually the dominant term) or the revocation backlog.
+Restarting does not help and loses the memory-only revocations.
+
+If instead you see this line in the log:
+
+```
+HA: state bundle is N bytes, over the M byte frame budget, with K revocation(s) carried
+```
+
+the overflow is **not** the revocations — the trim already ran and could not
+give back enough. The config or the cluster state is over budget on its own, and
+the standby's sync is being rejected. Shrink the published config.
 
 ## 7. Known limits (deliberate, recorded)
 

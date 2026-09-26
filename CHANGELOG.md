@@ -125,6 +125,35 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   directory cannot be, and the metric, the cluster API and the diagnostics row
   said otherwise until some later write happened to fail.
 
+  The HA state bundle now stays inside the CP↔DP gRPC frame. That bundle is one
+  message carrying the published config, the CA material, the cluster state and
+  the leader's revocation set; the config alone may reach 120 MiB against a
+  128 MiB frame, and the revocation set is the only member with no cap of its
+  own. An over-size message is rejected wholesale, so the standby would lose the
+  config, the CA material, the cluster state and the same revocations, with
+  failover readiness gone until entries expired. The leader now trims the
+  revocation set to fit — account revocations first, then longest-remaining-life
+  — and counts what it dropped in
+  `culvert_ha_bundle_revocations_dropped_total`, reported alongside a
+  `haBundleRevocationsDropped` field on `/healthz` when non-zero — HA sync keeps
+  working through a trim, so every other surface stays green. A bundle that is over budget with no revocations
+  left to give back is logged instead, because the overflow is then the config's
+  and no trim can repair it.
+
+  A Control Plane leader also repairs its own revocations file. Every repair
+  path is driven by a peer, so a leader with an HA standby and no data-plane
+  nodes calling in received nothing and its file could stay missing until the
+  next logout. The diagnostics remedy has been corrected to match: a sync
+  rewrites the file only on a node that receives revocations.
+
+  The persist-failure counter is reported as failed save attempts rather than as
+  affected revocations. It increments once per failed save, and both the startup
+  probe and the cluster retry loop attempt saves on an unchanged list, so one
+  fault could appear as hundreds of affected sessions and overstate the
+  operator's re-application scope. The diagnostics row now names the attempts as
+  the age of the fault and the in-force token and account counts as what a
+  restart would actually lose.
+
   The two ways a load can fail now carry the recovery action that matches each.
   A file that was read and would not parse is quarantined and has a restorable
   `.corrupt.*` copy; a file that could not be read at all (permissions, I/O, a

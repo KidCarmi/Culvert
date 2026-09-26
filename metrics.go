@@ -1157,7 +1157,7 @@ culvert_session_revocation_tokens %d
 # TYPE culvert_session_revocation_users gauge
 culvert_session_revocation_users %d
 
-# HELP culvert_session_revocation_persist_failures_total Session revocations that were applied in memory but could not be written to disk
+# HELP culvert_session_revocation_persist_failures_total Failed attempts to write the revocations file (attempts, NOT affected revocations — one fault retried by the cluster sync loop increments this repeatedly for the same list; the scope is culvert_session_revocation_tokens + _users)
 # TYPE culvert_session_revocation_persist_failures_total counter
 culvert_session_revocation_persist_failures_total %d
 
@@ -1168,6 +1168,10 @@ culvert_session_revocation_persist_degraded %d
 # HELP culvert_session_revocation_persist_refused_total Revocations not written because this boot could not read the revocations file, so overwriting it was refused
 # TYPE culvert_session_revocation_persist_refused_total counter
 culvert_session_revocation_persist_refused_total %d
+
+# HELP culvert_ha_bundle_revocations_dropped_total Revocation entries left out of an HA state bundle to keep it inside the CP-DP frame; non-zero means the standby holds a SUBSET of the leader's revocations
+# TYPE culvert_ha_bundle_revocations_dropped_total counter
+culvert_ha_bundle_revocations_dropped_total %d
 `,
 		srDurable,
 		sessionRevoked.Count(),
@@ -1175,6 +1179,7 @@ culvert_session_revocation_persist_refused_total %d
 		sessionRevocationPersistFailures.Load(),
 		srPersistDegraded,
 		sessionRevocationPersistRefused.Load(),
+		haBundleRevocationsDropped.Load(),
 	)
 
 	// CHAOS-60: GeoIP resolution health. Emitted ONLY when a GeoIP database is

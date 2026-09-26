@@ -1140,6 +1140,16 @@ func addRequestLogHealth(resp map[string]any) {
 	if n := auditPendingDrops(); n > 0 {
 		resp["auditClusterPushDrops"] = n
 	}
+	// AU-40: the standby is being replicated a SUBSET of this leader's
+	// revocations, because the HA bundle would otherwise exceed the CP-DP
+	// frame. Reported here for the same reason as the two above — every other
+	// surface stays green, since HA sync is still working — and separately,
+	// because the remedy is to shrink what shares the frame (the published
+	// config, or the revocation backlog), not to fix storage or a link. It
+	// means a promotion would admit sessions this leader currently rejects.
+	if n := haBundleRevocationsDropped.Load(); n > 0 {
+		resp["haBundleRevocationsDropped"] = n
+	}
 	// SEC-RBAC-ROLE-1: a roster record named a role this build does not
 	// enroll and was clamped to viewer at load. Reported only when non-zero,
 	// like the two above: it is an authorization-surface fact (someone's

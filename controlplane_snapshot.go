@@ -266,6 +266,23 @@ const maxClusterInboundMsgSize = 16 << 20 // 16 MiB
 // caught at commit with a named error, exactly like the count gate.
 const maxSnapshotWireBytes = 120 << 20 // 120 MiB
 
+// maxHABundleWireBytes is the same budget for the HA state bundle, and it is a
+// SEPARATE bound rather than a reuse of maxSnapshotWireBytes because the bundle
+// CONTAINS a published config plus the cluster state, the CA material and —
+// since CHAOS-68 — the leader's live revocation set. The config's own gate
+// therefore says nothing about the bundle's size: a snapshot admitted at
+// exactly 120 MiB leaves the bundle's other members to overflow the 128 MiB
+// frame on their own.
+//
+// The gap to maxClusterGRPCMsgSize is the same 8 MiB of gRPC framing slack
+// maxSnapshotWireBytes reserves, for the same reason. What differs is the
+// REMEDY: an over-budget config is refused at publish, because a config the
+// fleet cannot fetch must never commit; an over-budget bundle is TRIMMED (see
+// fitRevocationsToBudget), because refusing it would take down HA replication
+// entirely — config, CA, cluster state and every revocation — to protect the
+// one member that grew.
+const maxHABundleWireBytes = 120 << 20 // 120 MiB
+
 // maxSnapURLCategoryHosts bounds the AGGREGATE hosts across all url_categories
 // entries. The entry count is small (maxSnapURLCategories), but each entry
 // carries a Hosts list; without this a handful of categories could smuggle

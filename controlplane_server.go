@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -740,6 +741,78 @@ type HAStateBundle struct {
 	Revocations []RevocationEntry `json:"revocations,omitempty"`
 }
 
+// fitRevocationsToBudget returns the highest-value prefix of entries whose
+// marshaled JSON array fits budget bytes, plus the number dropped.
+//
+// CHAOS-68 / AU-40. The HA bundle carries a published config (up to
+// maxSnapshotWireBytes) inside a frame capped at maxClusterGRPCMsgSize, so the
+// headroom for everything else is ~8 MiB — and this sweep put an UNBOUNDED list
+// in there. `Revoke` has no cap, the CP aggregates the whole fleet's
+// revocations, and entries live until their session expiry (up to maxTTL, 7
+// days), so a large estate accumulates tens of thousands. At the enterprise
+// scale where the config is near its own cap, that is exactly the estate whose
+// logout volume fills the remaining 8 MiB.
+//
+// The failure it prevents is not a lost revocation but a lost PLANE: gRPC
+// rejects the whole over-size message, so the standby's HASync fails with an
+// opaque ResourceExhausted and stops refreshing config, CA material, cluster
+// state AND revocations — failover readiness gone until enough entries expire,
+// with no signal naming the cause. Trimming degrades one member; not trimming
+// loses all of them, including the same revocations, so this is the fail-SAFER
+// of the two available answers and the "prefer graceful degradation" one.
+//
+// Priority, applied as a strict prefix rather than a best-fit pack so the kept
+// set is predictable and testable:
+//
+//  1. ACCOUNT revocations before token revocations. One account entry withdraws
+//     every session that identity holds; a token entry withdraws one.
+//  2. Then latest expiry first. A revocation expiring in a minute protects
+//     almost nothing; one expiring in days protects for days. This also makes
+//     the perpetually-dropped tail SELF-CLEARING — the shortest-lived entries
+//     age out and a fresh logout sorts high — so no revocation is excluded
+//     forever while it still matters.
+//  3. Then token, so the order never depends on Go's map iteration.
+//
+// The standby MERGES additively and persists, so an entry carried by any
+// earlier sync is retained even once it falls below the cut.
+func fitRevocationsToBudget(entries []RevocationEntry, budget int) ([]RevocationEntry, int) {
+	if len(entries) == 0 {
+		return entries, 0
+	}
+	if budget < len("[]") {
+		return nil, len(entries)
+	}
+	sorted := make([]RevocationEntry, len(entries))
+	copy(sorted, entries)
+	sort.Slice(sorted, func(i, j int) bool {
+		a, b := sorted[i], sorted[j]
+		if (a.User != "") != (b.User != "") {
+			return a.User != ""
+		}
+		if a.Expiry != b.Expiry {
+			return a.Expiry > b.Expiry
+		}
+		return a.Token < b.Token
+	})
+	used, kept := len("[]"), 0
+	for i := range sorted {
+		b, err := json.Marshal(sorted[i])
+		if err != nil {
+			break
+		}
+		cost := len(b)
+		if kept > 0 {
+			cost++ // the separating comma
+		}
+		if used+cost > budget {
+			break
+		}
+		used += cost
+		kept++
+	}
+	return sorted[:kept], len(sorted) - kept
+}
+
 // normalizeAdvertisedAddr turns a standby's advertised address into one the
 // leader can actually dial (ADR-0005 S0; PR #529 review). The standby commonly
 // advertises its BIND address — ":50051" or "0.0.0.0:50051" — because the HA
@@ -882,6 +955,21 @@ func (s *controlPlaneServer) HASync(ctx context.Context, raw json.RawMessage) (j
 	// (rejected at publish, so never distributed to DPs) yet get stamped with
 	// the old published Version — the standby would then hold config the fleet
 	// never had, mismatched to its version floor.
+	// AU-41: the leader's own repair tick. A missing or unwritable revocations
+	// file is repaired by mergeAndPersistRevocations, and all three of its call
+	// sites are RECEIVERS — the CP's SyncRevocations handler (a Data Plane must
+	// call in), the DP sync loop, and the standby applying this bundle. A CP
+	// leader with an HA standby and no connected Data Planes receives nothing,
+	// so it was the one clustered node no sync repaired: its file could vanish
+	// and its revocations would stay memory-only until the next logout, and a
+	// restart before that accepted the sessions again.
+	//
+	// Nothing to merge — the leader is the source here — so this is purely the
+	// "durability is in doubt" retry. It self-limits exactly as the other call
+	// sites do: the forced save recreates the file, so the next poll finds it
+	// present and returns before writing anything.
+	mergeAndPersistRevocations(nil, "HA leader")
+
 	published := globalConfigStore.Get()
 	bundle := HAStateBundle{
 		ClusterState:     stateJSON,
@@ -895,7 +983,63 @@ func (s *controlPlaneServer) HASync(ctx context.Context, raw json.RawMessage) (j
 		Revocations:      sessionRevoked.ExportRevocations(), // CHAOS-68: the standby verifies the same cookies
 	}
 
-	resp, _ := json.Marshal(bundle)
+	return marshalHABundleWithinFrame(bundle, maxHABundleWireBytes)
+}
+
+// marshalHABundleWithinFrame marshals the bundle and, when it exceeds budget,
+// brings it back inside by trimming its revocation set (AU-40).
+//
+// The trim runs ONLY on the over-budget path, so an ordinary bundle pays
+// exactly the one marshal it always did — measure first, repair second.
+//
+// The revocation set is the member that gets trimmed because it is the only
+// UNBOUNDED one: the config was gated at publish (maxSnapshotWireBytes), the
+// cluster state is bounded by the enrolled-node count, and the CA material is
+// a few KiB.
+//
+// When the bundle is over budget with NO revocations to give back, the overflow
+// is not this member's and no trim here can repair it. That case is logged and
+// the bundle is sent anyway: gRPC rejects it, which is the pre-existing
+// behaviour, and refusing here would replace one failed sync with another while
+// losing the line that says which member is actually too big.
+//
+// budget is a parameter rather than a direct read of maxHABundleWireBytes so
+// the over-budget path is reachable from a test without a 120 MiB fixture.
+func marshalHABundleWithinFrame(bundle HAStateBundle, budget int) ([]byte, error) {
+	resp, err := json.Marshal(bundle)
+	if err != nil {
+		// Previously discarded, which returned a nil body with a nil error: the
+		// standby applied an EMPTY bundle and recorded the sync as successful.
+		return nil, fmt.Errorf("marshal HA state bundle: %w", err)
+	}
+	if len(resp) <= budget {
+		return resp, nil
+	}
+	revJSON, err := json.Marshal(bundle.Revocations)
+	if err != nil {
+		return nil, fmt.Errorf("measure HA bundle revocations: %w", err)
+	}
+	// Everything except the array's own bytes — its key and comma included — so
+	// the remainder is exactly what the array may occupy.
+	kept, dropped := fitRevocationsToBudget(bundle.Revocations, budget-(len(resp)-len(revJSON)))
+	if dropped > 0 {
+		bundle.Revocations = kept
+		if resp, err = json.Marshal(bundle); err != nil {
+			return nil, fmt.Errorf("marshal trimmed HA state bundle: %w", err)
+		}
+		noteHABundleRevocationsDropped(dropped)
+	}
+	// STILL over budget means the overflow was never the revocations' to give
+	// back — either there were none, or the trim surrendered every one and the
+	// config and cluster state alone exceed the frame. Both cases are the same
+	// operator question ("which member is too big?") and the same answer, so
+	// they share one line, checked AFTER the trim rather than instead of it.
+	// Reporting only the no-revocations case would leave the worse of the two —
+	// every revocation dropped AND the sync still rejected — counted but never
+	// explained.
+	if len(resp) > budget {
+		logHABundleOverBudget(len(resp), len(bundle.Revocations), budget)
+	}
 	return resp, nil
 }
 

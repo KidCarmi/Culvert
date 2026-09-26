@@ -42,13 +42,21 @@ import (
 	"path/filepath"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/KidCarmi/Culvert/internal/session"
 )
 
-// sessionRevocationPersistFailures counts revocations that could not be made
-// durable, cumulatively for the life of the process. It is the MAGNITUDE of an
-// incident and is never reset.
+// sessionRevocationPersistFailures counts FAILED SAVE ATTEMPTS, cumulatively
+// for the life of the process. It is the MAGNITUDE of an incident and is never
+// reset.
+//
+// It is deliberately NOT a count of affected revocations and must never be
+// rendered as one: the boot probe attempts a save on an empty list, and the
+// cluster sync loop retries every few seconds, so one broken volume reaches
+// hundreds of attempts while the set of revocations at risk has not changed.
+// The affected set is the LIVE list (SaveRevocations writes it whole), which
+// the contract row reports from Count()/UserCount() instead.
 //
 // sessionRevocationPersistDegraded is the CURRENT state: are writes failing
 // right now? Set on a failed save, cleared by a successful one.
@@ -92,6 +100,62 @@ func noteRevocationPersistRefused(n int) {
 	if n > 0 {
 		sessionRevocationPersistRefused.Add(uint64(n))
 	}
+}
+
+// haBundleRevocationsDropped counts revocation entries left OUT of an HA state
+// bundle because the bundle would otherwise have exceeded the CP↔DP frame
+// (AU-40). It is cumulative and never reset.
+//
+// It is the operator's only signal that the standby is being replicated a
+// SUBSET: the trim keeps HA sync working, so every other surface stays green
+// while the standby's revocation view silently falls behind the leader's. A
+// non-zero value means a promotion would admit sessions the leader rejects,
+// and the remedy is to shrink the published config or the revocation backlog,
+// not to restart anything.
+//
+// haBundleOverBudgetLogged rate-limits the companion line for the case the
+// trim CANNOT fix — a bundle over budget with no revocations in it at all.
+// That is a per-poll condition (the standby syncs every few seconds), so a
+// line per occurrence would be the write amplification CHAOS-63 forbids; the
+// gate is a CompareAndSwap claim rather than a read-compare-store, because
+// concurrent pollers reading the same expired stamp would all emit.
+var (
+	haBundleRevocationsDropped atomic.Uint64
+	haBundleOverBudgetLogged   atomic.Int64
+)
+
+// haBundleOverBudgetLogInterval is the minimum gap between "the HA bundle is
+// too big and trimming cannot help" lines.
+const haBundleOverBudgetLogInterval = time.Minute
+
+// noteHABundleRevocationsDropped records a trimmed HA bundle. It does not log:
+// the trim is a successful degradation on a path that runs every few seconds,
+// so the magnitude belongs in the counter and the meaning in the contract row.
+func noteHABundleRevocationsDropped(n int) {
+	if n > 0 {
+		haBundleRevocationsDropped.Add(uint64(n))
+	}
+}
+
+// logHABundleOverBudget reports a bundle that exceeds the frame even with its
+// revocation set emptied — so the overflow belongs to the config or the
+// cluster state, and no trim available here can repair it.
+//
+// Naming that is the whole point: without it the operator sees only gRPC's
+// opaque ResourceExhausted on every standby poll, with nothing saying which
+// member grew or that the revocation trim was already tried and was not the
+// answer.
+func logHABundleOverBudget(size, revocations, budget int) {
+	now := time.Now().UnixNano()
+	prev := haBundleOverBudgetLogged.Load()
+	if prev != 0 && now-prev < int64(haBundleOverBudgetLogInterval) {
+		return
+	}
+	if !haBundleOverBudgetLogged.CompareAndSwap(prev, now) {
+		return
+	}
+	logger.Printf("HA: state bundle is %d bytes, over the %d byte frame budget, with %d revocation(s) carried — the overflow is in the config or cluster state, so trimming revocations cannot repair it and the standby's sync will be rejected",
+		size, budget, revocations)
 }
 
 type sessionRevocationHealth struct {
@@ -330,6 +394,15 @@ func resetSessionRevocationHealthForTest() {
 	sessionRevocationPersistFailures.Store(0)
 	sessionRevocationPersistRefused.Store(0)
 	sessionRevocationPersistDegraded.Store(false)
+	// AU-40's two globals are reset HERE rather than in the gates that write
+	// them, for the reason this sweep has now learned three times (the write
+	// fence, the health record, the stateCorruption record): a process-global a
+	// gate writes belongs to the isolation primitive, not to the gate. The log
+	// gate especially — it is a LATCH, so one gate tripping it silently
+	// suppresses the line every later gate is asserting on, and only under
+	// -shuffle would anyone find out.
+	haBundleRevocationsDropped.Store(0)
+	haBundleOverBudgetLogged.Store(0)
 }
 
 // checkSessionRevocation is the `session_revocation` operator-contract row.
@@ -375,13 +448,25 @@ func checkSessionRevocation() OperatorContractCheck {
 	tokens, users := sessionRevoked.Count(), sessionRevoked.UserCount()
 
 	if sessionRevocationPersistDegraded.Load() {
-		failures := sessionRevocationPersistFailures.Load()
+		// The counter is SAVE ATTEMPTS, not revocations, and the two differ by
+		// orders of magnitude: the boot probe attempts a save on an EMPTY list,
+		// and the cluster sync loop retries every 3-5s while a volume is
+		// broken, so one fault reaches hundreds of attempts without a single
+		// further revocation being affected. Rendering it as "N session
+		// revocation(s)" overstated the operator's re-apply job by exactly that
+		// factor (Codex P2, PR #1437).
+		//
+		// The true scope is the LIVE list, because SaveRevocations writes the
+		// complete set: everything in memory right now is what a restart loses.
+		// So the attempts stay as the incident's magnitude and the counts carry
+		// the scope — the CHAOS-65 rule that a number an operator acts on is
+		// reported from evidence supporting the specific claim it makes.
 		return OperatorContractCheck{
 			Code:   "session_revocation",
 			Status: diagFail,
-			Message: fmt.Sprintf("%d session revocation(s) could not be written to disk — a logout or account deletion reported as complete will be undone by the next restart",
-				failures),
-			OperatorAction: "Check free space, permissions and the mount backing the revocations file, then re-apply the affected logouts/deletions. Until then, treat any session revoked on this node as still live after a restart.",
+			Message: fmt.Sprintf("the revocations file could not be written (%d failed save attempt(s)) — the %d token and %d account revocation(s) in force on this node are held in memory only, so a logout or account deletion reported as complete will be undone by the next restart",
+				sessionRevocationPersistFailures.Load(), tokens, users),
+			OperatorAction: "Check free space, permissions and the mount backing the revocations file. Once a save lands, every revocation still in force is durable again — the attempt count is the age of the fault, not the size of the re-apply job. Until then, treat any session revoked on this node as still live after a restart, and re-apply any logout or account deletion applied since the failure began.",
 		}
 	}
 	if h.LoadDegraded {
@@ -424,7 +509,7 @@ func checkSessionRevocation() OperatorContractCheck {
 			Status: diagFail,
 			Message: fmt.Sprintf("the revocations file is missing — the %d token and %d account revocation(s) in force on this node are held in memory only and are lost on the next restart",
 				tokens, users),
-			OperatorAction: "Check the mount backing the revocations file and whether it was deleted or restored over. A clustered node rewrites it on the next config sync; on a standalone node the next logout or account deletion recreates it with the full list. Until one of those lands, treat every revocation shown here as lost on restart.",
+			OperatorAction: "Check the mount backing the revocations file and whether it was deleted or restored over. The next logout or account deletion on this node recreates it with the full list. A sync also rewrites it, but only on a node that RECEIVES revocations — a data-plane node, an HA standby applying the leader's bundle, or a Control Plane leader being polled by either — so a leader with no standby and no data-plane nodes calling in is not repaired by sync at all. Until one of those lands, treat every revocation shown here as lost on restart.",
 		}
 	}
 	if !h.Configured {
