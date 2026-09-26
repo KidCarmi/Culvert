@@ -28,7 +28,14 @@ inspect pipeline is byte-identical to a build with CDR compiled out.
 Two ways to turn CDR on, and either one is enough — you do not need both:
 
 1. **Config file / CLI flags**, then restart. Config-file values are
-   overridden by CLI flags when both are set:
+   overridden by CLI flags when both are set — **except `-cdr-enabled`,
+   which can only force CDR ON, never off.** `resolveCDRStartupConfig`
+   only assigns `cfg.Enabled = true` when the boolean flag is `true`; it
+   never assigns `false`, so `-cdr-enabled=false` (or simply omitting the
+   flag) cannot override `cdr.enabled: true` in `config.yaml` — the config
+   file value wins. To disable CDR via the static config, remove/set
+   `cdr.enabled: false` in `config.yaml` itself; don't rely on the CLI flag
+   to turn it off.
 
    | CLI flag | `config.yaml` key | Meaning | Default |
    |---|---|---|---|
@@ -255,9 +262,23 @@ behavior** above; this is *not* governed by `fail_mode`.
 > registry entry WITHOUT a full disable/enable cycle does **not** recover
 > it — that path only ever calls `initCDRClient`, which reads the CURRENT
 > (still half-open) pool as `oldPool` and carries the breaker forward by
-> name. A pool with two or more *closed* instances is unaffected, since
-> `Pick()`'s first `Allow()==true` match is usually one of those, not the
-> half-open one.
+> name.
+>
+> **A pool with two or more *closed* instances is NOT unaffected — the
+> stuck instance still never recovers, it just stops mattering for most
+> requests.** `Pool.Pick()` uses ONE shared round-robin cursor that
+> advances on every call, including both separate `Pick()` calls one
+> request makes (`cdrActiveClient()`'s nil-check, then
+> `safeCDRSanitize`'s `cdrPickPooled()`). On a request where the cursor
+> happens to land on the half-open member for the FIRST call, that call
+> alone consumes its sole half-open reservation via `Breaker.Allow()`; the
+> cursor has advanced by the SECOND call, so the actual RPC lands on a
+> different, closed member instead — the half-open member gets no real
+> probe AND no `OnSuccess`/`OnFailure`, so it never closes. The pool keeps
+> serving requests through its closed members (CDR isn't bypassed), but
+> the half-open member stays permanently capacity-degraded — one
+> pool-configured instance silently never rejoins rotation until a
+> process restart or a full disable/enable cycle.
 >
 > **The runtime disable-then-enable recovery ALSO silently resets
 > `fail_mode`, the default profile/mode, the timeout, and the size/chunk
@@ -451,7 +472,7 @@ GET is viewer, PUT is admin):
 | `/api/cdr/config` | GET | viewer | Effective runtime config + derived fields (`clientActive`, `failOpen`) |
 | `/api/cdr/config` | PUT | admin | Toggle `enabled`; persists and applies immediately |
 | `/api/cdr/instances` | GET | viewer | List enrolled Sluice instances |
-| `/api/cdr/instances` | DELETE | admin | Remove a registry entry (`?name=…`) and shred its local cert material — does **not** notify Sluice. **In a multi-instance pool this shuts down the ENTIRE pool, not just the deleted member**: the handler's check is "is any client currently pickable" (`cdrActiveClient() != nil`), not "was the deleted instance the last one", so deleting one healthy instance out of several calls `shutdownCDRClient()` and empties the pool — CDR bypasses all traffic until the pool is rebuilt. The remaining instances stay in the registry and need no re-enrollment: a disable-then-enable via `PUT /api/cdr/config` or a process restart rebuilds the pool from them |
+| `/api/cdr/instances` | DELETE | admin | Remove a registry entry (`?name=…`) and shred its local cert material — does **not** notify Sluice. **In a multi-instance pool this shuts down the ENTIRE pool, not just the deleted member**: the handler's check is "is any client currently pickable" (`cdrActiveClient() != nil`), not "was the deleted instance the last one", so deleting one healthy instance out of several calls `shutdownCDRClient()` and empties the pool — CDR bypasses all traffic until the pool is rebuilt. The remaining instances stay in the registry and need no re-enrollment: a disable-then-enable via `PUT /api/cdr/config` or a process restart rebuilds the pool from them. **The opposite edge case: if every pool member's breaker is open at delete time**, `cdrActiveClient()` returns nil (nothing is pickable), so the pool-shutdown branch is SKIPPED entirely — the deleted instance's already-loaded in-memory TLS client stays in the live pool even though its registry entry and cert files are gone, and it can be selected again once its breaker later closes/half-opens, using a credential Sluice was never told is revoked. Follow a DELETE with a disable/enable cycle or restart if any breaker was open at the time, to be sure the removed member is actually gone from the running pool |
 | `/api/cdr/instances/enroll` | POST | admin | Exchange a one-time token + fingerprint for mTLS credentials |
 | `/api/cdr/instances/enroll/recover` | POST | admin | Resolve an enrollment whose outcome was left unknown (e.g. a client-side timeout mid-exchange) |
 | `/api/cdr/instances/enroll/receipts` | GET | viewer | Bounded recovery receipts for past enrollment operations |
