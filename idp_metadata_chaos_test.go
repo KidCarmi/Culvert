@@ -1972,6 +1972,63 @@ func TestChaos71_PrivateAuthzEndpointStillFailsClosedWithNoCache(t *testing.T) {
 	}
 }
 
+// chaos71RepointSetup leaves profile "corp" LIVE on source A, serving A's cached
+// document, with an open failure episode for A — the state a repoint arrives
+// into. Package-level rather than a closure inside the gate: gocognit charges
+// each branch by its nesting depth, and these three live two closures deep.
+func chaos71RepointSetup(t *testing.T) (sourceA string, healthyB *chaos71IdP) {
+	t.Helper()
+	chaos71Env(t)
+	a := newChaos71IdP(t)
+	b := newChaos71IdP(t)
+
+	// A is healthy first, so the profile is REGISTERED and live with a cached
+	// document...
+	if err := idpRegistry.Upsert(chaos71Profile("corp", a.URL())); err != nil {
+		t.Fatalf("initial upsert against a healthy source: %v", err)
+	}
+	// ...then A stops answering, and a recompile degrades to its cache, which is
+	// what opens A's episode while the profile stays live.
+	a.down.Store(true)
+	if err := idpRegistry.Upsert(chaos71Profile("corp", a.URL())); err != nil {
+		t.Fatalf("stale recompile must succeed from cache: %v", err)
+	}
+	if !idpMetadataHasEpisode("corp", a.URL()) {
+		t.Fatal("setup: source A must carry an open episode")
+	}
+	return a.URL(), b
+}
+
+// chaos71WantEpisode / chaos71WantNoEpisode keep the assertion branches out of
+// the gate bodies for the same reason.
+func chaos71WantEpisode(t *testing.T, profileID, source, why string) {
+	t.Helper()
+	if !idpMetadataHasEpisode(profileID, source) {
+		t.Fatal(why)
+	}
+}
+
+func chaos71WantNoEpisode(t *testing.T, profileID, source, why string) {
+	t.Helper()
+	if idpMetadataHasEpisode(profileID, source) {
+		t.Fatal(why)
+	}
+}
+
+func chaos71WantNotFailing(t *testing.T, why string) {
+	t.Helper()
+	if st := idpMetadataState(); st.Failing {
+		t.Fatalf("%s: %+v", why, st)
+	}
+}
+
+func chaos71WantErr(t *testing.T, err error, why string) {
+	t.Helper()
+	if err == nil {
+		t.Fatal(why)
+	}
+}
+
 // R7-D2 (P2, defect). A COMMITTED REPOINT MUST RETIRE THE SUPERSEDED SOURCE'S
 // EPISODE.
 //
@@ -1983,102 +2040,65 @@ func TestChaos71_PrivateAuthzEndpointStillFailsClosedWithNoCache(t *testing.T) {
 // threshold and the (now unconditional) watchdog pages for a source that is no
 // longer configured.
 func TestChaos71_CommittedRepointRetiresThePreviousSourcesEpisode(t *testing.T) {
-	// setup leaves profile "corp" LIVE on source A, serving A's cached document,
-	// with an open failure episode for A — the state a repoint arrives into.
-	setup := func(t *testing.T) (sourceA string, healthyB *chaos71IdP) {
-		t.Helper()
-		chaos71Env(t)
-		a := newChaos71IdP(t)
-		b := newChaos71IdP(t)
-
-		// A is healthy first, so the profile is REGISTERED and live with a
-		// cached document...
-		if err := idpRegistry.Upsert(chaos71Profile("corp", a.URL())); err != nil {
-			t.Fatalf("initial upsert against a healthy source: %v", err)
-		}
-		// ...then A stops answering, and a recompile degrades to its cache,
-		// which is what opens A's episode while the profile stays live.
-		a.down.Store(true)
-		if err := idpRegistry.Upsert(chaos71Profile("corp", a.URL())); err != nil {
-			t.Fatalf("stale recompile must succeed from cache: %v", err)
-		}
-		if !idpMetadataHasEpisode("corp", a.URL()) {
-			t.Fatal("setup: source A must carry an open episode")
-		}
-		return a.URL(), b
-	}
 
 	t.Run("Upsert", func(t *testing.T) {
-		sourceA, healthyB := setup(t)
+		sourceA, healthyB := chaos71RepointSetup(t)
 		if err := idpRegistry.Upsert(chaos71Profile("corp", healthyB.URL())); err != nil {
 			t.Fatalf("repoint to a healthy source: %v", err)
 		}
-		if idpMetadataHasEpisode("corp", sourceA) {
-			t.Fatal("the superseded source's episode must be retired on commit — nothing fetches it any more, " +
+		chaos71WantNoEpisode(t, "corp", sourceA,
+			"the superseded source's episode must be retired on commit — nothing fetches it any more, "+
 				"so it can never be cleared by evidence and will page forever")
-		}
-		if idpMetadataHasEpisode("corp", healthyB.URL()) {
-			t.Fatal("the newly published healthy source must carry no episode")
-		}
-		if st := idpMetadataState(); st.Failing {
-			t.Fatalf("no episode must survive a fully healthy repoint, got %+v", st)
-		}
+		chaos71WantNoEpisode(t, "corp", healthyB.URL(),
+			"the newly published healthy source must carry no episode")
+		chaos71WantNotFailing(t, "no episode must survive a fully healthy repoint")
 	})
 
 	t.Run("ReplaceAll", func(t *testing.T) {
-		sourceA, healthyB := setup(t)
+		sourceA, healthyB := chaos71RepointSetup(t)
 		if err := idpRegistry.ReplaceAll([]*IdPProfile{chaos71Profile("corp", healthyB.URL())}); err != nil {
 			t.Fatalf("snapshot repoint to a healthy source: %v", err)
 		}
-		if idpMetadataHasEpisode("corp", sourceA) {
-			t.Fatal("ReplaceAll has the same retention gap as Upsert and must retire the superseded source too")
-		}
-		if st := idpMetadataState(); st.Failing {
-			t.Fatalf("no episode must survive a fully healthy snapshot repoint, got %+v", st)
-		}
+		chaos71WantNoEpisode(t, "corp", sourceA,
+			"ReplaceAll has the same retention gap as Upsert and must retire the superseded source too")
+		chaos71WantNotFailing(t, "no episode must survive a fully healthy snapshot repoint")
 	})
 
 	// CONTROL: retire on COMMIT, never on ATTEMPT. A repoint whose candidate
 	// cannot be compiled leaves the OLD configuration authoritative, so A is
 	// still the source in service and its genuine outage episode must survive.
 	t.Run("ControlRefusedRepointKeepsTheLiveSourcesEpisode", func(t *testing.T) {
-		sourceA, _ := setup(t)
+		sourceA, _ := chaos71RepointSetup(t)
 		deadB, _ := chaos71DeadTLSEndpoint(t)
-		if err := idpRegistry.Upsert(chaos71Profile("corp", deadB)); err == nil {
-			t.Fatal("a repoint to an uncompilable source must be refused")
-		}
-		if !idpMetadataHasEpisode("corp", sourceA) {
-			t.Fatal("a REFUSED repoint must not retire the live source's episode — " +
+		chaos71WantErr(t, idpRegistry.Upsert(chaos71Profile("corp", deadB)),
+			"a repoint to an uncompilable source must be refused")
+		chaos71WantEpisode(t, "corp", sourceA,
+			"a REFUSED repoint must not retire the live source's episode — "+
 				"source A is still what this profile fetches")
-		}
-		if idpMetadataHasEpisode("corp", deadB) {
-			t.Fatal("the refused candidate must leave no episode of its own")
-		}
+		chaos71WantNoEpisode(t, "corp", deadB,
+			"the refused candidate must leave no episode of its own")
 	})
 
 	// CONTROL: a persist failure is not a commit either.
 	t.Run("ControlUnpersistedRepointKeepsTheLiveSourcesEpisode", func(t *testing.T) {
-		sourceA, healthyB := setup(t)
+		sourceA, healthyB := chaos71RepointSetup(t)
 		idpRegistry.path = filepath.Join(t.TempDir(), "no-such-dir", "idp.json")
-		if err := idpRegistry.Upsert(chaos71Profile("corp", healthyB.URL())); err == nil {
-			t.Fatal("a repoint that cannot be persisted must be refused")
-		}
-		if !idpMetadataHasEpisode("corp", sourceA) {
-			t.Fatal("an UNPERSISTED repoint must not retire the live source's episode")
-		}
+		chaos71WantErr(t, idpRegistry.Upsert(chaos71Profile("corp", healthyB.URL())),
+			"a repoint that cannot be persisted must be refused")
+		chaos71WantEpisode(t, "corp", sourceA,
+			"an UNPERSISTED repoint must not retire the live source's episode")
 	})
 
 	// CONTROL: episodes are per (profile, source), so retiring one profile's
 	// view of source A must not touch another profile's.
 	t.Run("ControlAnotherProfilesEpisodeOnTheSameSourceSurvives", func(t *testing.T) {
-		sourceA, healthyB := setup(t)
+		sourceA, healthyB := chaos71RepointSetup(t)
 		noteIdPMetadataOutcome("other", sourceA, idpMetaUnavailable, fmt.Errorf("down"))
 		if err := idpRegistry.Upsert(chaos71Profile("corp", healthyB.URL())); err != nil {
 			t.Fatalf("repoint: %v", err)
 		}
-		if !idpMetadataHasEpisode("other", sourceA) {
-			t.Fatal("another profile's episode on the same source must survive")
-		}
+		chaos71WantEpisode(t, "other", sourceA,
+			"another profile's episode on the same source must survive")
 	})
 }
 

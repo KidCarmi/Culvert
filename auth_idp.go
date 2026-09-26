@@ -415,30 +415,70 @@ func (r *IdPRegistry) Upsert(p *IdPProfile) error {
 	// which is BEFORE the parse and before this persist, so a rejected inline
 	// edit cleared a live profile's real episode (Codex review round 5). One
 	// condition now covers both, because it is one rule.
-	if !p.Enabled || candidateSource == "" {
-		forgetIdPMetadataEpisode(p.ID)
-	} else if liveSource != "" && liveSource != candidateSource {
-		// A COMMITTED remote-to-remote REPOINT retires the source it replaced.
-		//
-		// Episodes are keyed by (profile, SOURCE) since round 6, which closed
-		// the refusal path and left this one leaking (Codex review round 7): a
-		// profile serving cached metadata from the old source carries an open
-		// episode for it, the fresh fetch clears only the NEW source's key, and
-		// nothing in the process fetches the old source any more — so its
-		// episode can never be cleared by evidence, ages past
-		// idpMetadataDegradedAfter and pages for a configuration that is no
-		// longer in service. Retiring it is not "clearing on elapsed time": the
-		// evidence is that the dependency is GONE, the same rule the two arms
-		// above already apply to a disabled or inline profile.
-		//
-		// Only on COMMIT. On a refused compile or a failed persist the OLD
-		// profile stays authoritative, so the old source is still what this
-		// profile fetches and its episode is a live outage signal — that path
-		// takes discardCandidateEpisode instead, which touches only the
-		// candidate's own key.
-		forgetIdPMetadataEpisodeForSource(p.ID, liveSource)
-	}
+	// Only on COMMIT: on a refused compile or a failed persist the OLD profile
+	// stays authoritative, so the old source is still what this profile fetches
+	// and its episode is a live outage signal — those paths take
+	// discardCandidateEpisode instead, which touches only the candidate's own
+	// key. See retireEpisodeAfterCommit for the rule itself.
+	retireEpisodeAfterCommit(p.ID, liveSource, effectiveRemoteSource(p))
 	return nil
+}
+
+// effectiveRemoteSource is the remote document source a profile fetches from
+// ONCE PUBLISHED: "" for a DISABLED profile, which fetches nothing, as well as
+// for one that names no remote URL at all.
+func effectiveRemoteSource(p *IdPProfile) string {
+	if p == nil || !p.Enabled {
+		return ""
+	}
+	return idpRemoteDocumentSource(p)
+}
+
+// retireEpisodeAfterCommit applies the ONE episode-retirement rule every
+// COMMITTED profile write shares, and is called only after persistence lands.
+//
+// An episode describes a failed fetch against a SOURCE, so it is retired when
+// that source stops being something this appliance fetches — which is evidence
+// the dependency is GONE, not a clear on elapsed time (the observed-evidence
+// rule forbids the latter, never the former).
+//
+//   - newSource == "": the profile was disabled, deleted, or switched to inline
+//     metadata, so NO remote fetch is left and every episode it holds is
+//     unclearable by evidence. Sweep them all.
+//   - a different newSource: a remote-to-remote REPOINT. Nothing fetches the
+//     old source any more, so its episode would age past
+//     idpMetadataDegradedAfter and page indefinitely for a configuration no
+//     longer in service (Codex review round 7). Retire exactly that one, and
+//     keep any episode belonging to the newly published source — the fresh
+//     fetch owns that.
+//
+// THE `prevSource != newSource` GUARD IS THE LOAD-BEARING HALF, and not only for
+// the repoint case it was written for: the commonest state of all is a profile
+// recompiling against the SAME still-broken source, where prevSource ==
+// newSource. Without the guard that write retires the very episode the stale
+// compile just opened, so the degradation signal for an ongoing outage is erased
+// by each recompile and `culvert_idp_metadata_degraded` can never reach its
+// threshold — strictly worse than the leak this function exists to fix.
+// Mutation-verified: removing it fails every subtest of
+// TestChaos71_CommittedRepointRetiresThePreviousSourcesEpisode, including at the
+// fixture that establishes an ongoing outage.
+//
+// prevSource is deliberately the profile's raw source rather than its
+// effectiveRemoteSource: a profile stored DISABLED with a URL may still carry a
+// stale episode for it, and a snapshot that enables it against a NEW URL must
+// retire that one — reading the previous state as source-less would leak it.
+//
+// Extracted from Upsert/ReplaceAll rather than inlined twice: both were over
+// the cyclop threshold with it inline, and one rule in one place is also how
+// the two paths are kept from drifting.
+func retireEpisodeAfterCommit(profileID, prevSource, newSource string) {
+	if newSource == "" {
+		forgetIdPMetadataEpisode(profileID)
+		return
+	}
+	if prevSource != "" && prevSource != newSource {
+		forgetIdPMetadataEpisodeForSource(profileID, prevSource)
+	}
 }
 
 // idpRemoteDocumentSource reports the REMOTE document source a profile depends
@@ -639,27 +679,18 @@ func (r *IdPRegistry) ReplaceAll(profiles []*IdPProfile) error {
 	// has no remote fetch left, so its episode can never be cleared by
 	// evidence again. The inline arm mirrors Upsert's: a profile keeps its
 	// episode only while it still names a remote source to fetch from.
+	// Reached only after persist, so a rejected snapshot never gets here. A
+	// profile absent from `kept` has no remote source left in the published
+	// set, which retireEpisodeAfterCommit reads as the sweep-everything case —
+	// an absent key yields "", so the two cases need no branch here.
 	kept := make(map[string]string, len(nextProfiles))
 	for _, p := range nextProfiles {
-		if src := idpRemoteDocumentSource(p); p.Enabled && src != "" {
+		if src := effectiveRemoteSource(p); src != "" {
 			kept[p.ID] = src
 		}
 	}
 	for id, prev := range registered {
-		newSource, stillFetching := kept[id]
-		if !stillFetching {
-			forgetIdPMetadataEpisode(id)
-			continue
-		}
-		// A snapshot that REPOINTS a profile at a different remote source
-		// retires the one it replaced, for the reason spelled out in Upsert:
-		// nothing fetches the old source any more, so its episode would page
-		// forever for a configuration this snapshot removed (Codex review
-		// round 7). Reached only after persist, so a rejected snapshot never
-		// gets here.
-		if prevSource := idpRemoteDocumentSource(prev); prevSource != "" && prevSource != newSource {
-			forgetIdPMetadataEpisodeForSource(id, prevSource)
-		}
+		retireEpisodeAfterCommit(id, idpRemoteDocumentSource(prev), kept[id])
 	}
 	return nil
 }
