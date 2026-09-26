@@ -58,6 +58,19 @@ func (r *Rule) Obligations() Obligations { return r.obligations }
 // destructive operation (with the destructive obligation contract).
 func (r *Rule) AllowsDestructive() bool { return r.allowDestructive }
 
+// HasExpiry reports whether the rule carries an expiry instant, i.e. whether matches() can
+// stop returning true for an input it matches today purely because the clock moved.
+//
+// It exposes the PRESENCE of the expiry, never the instant: a caller that needs to know the
+// verdict is time-dependent must not be handed a deadline it could try to reason about, and
+// the operator-facing surfaces this feeds are a closed vocabulary with no room for a timestamp.
+//
+// It exists for the Canary activation permit's invariance argument. That argument already
+// refuses a rule REJECTED on expiry (the trace reports the fixed label "expiry", which names
+// no bound field); the WINNER's own expiry is the same dependency on the other side of the
+// match, and without this accessor the permit could not see it at all.
+func (r *Rule) HasExpiry() bool { return r.expiryUnix != 0 }
+
 // matches reports whether every condition (AND semantics) matches the input, and
 // returns the id of the FIRST condition that did not match (for the explain trace),
 // or "" when all matched. An expired rule (relative to the input's EvalTime) never

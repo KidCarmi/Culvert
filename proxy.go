@@ -877,14 +877,27 @@ const policyLineCallDepth = 2
 //   - hostSep is either the literal "->" or r.Method, and net/http's request
 //     parser admits only RFC 9110 token bytes as a method, so no control
 //     character can reach it.
-//   - reqID is the ONE of the five that can be client-chosen: setupRequestTracing
-//     passes an inbound X-Request-Id through, scrubbed INLINE of CR and LF (the
-//     repo's CodeQL-visible convention) rather than through sanitizeLog. That
-//     strips exactly what could forge a second record, which is why it is safe
-//     here — but it is narrower than sanitizeLog, so a TAB or an ANSI escape
-//     still survives into the line. That is pre-existing and unchanged by this
-//     shape; widening it would alter the emitted bytes and so belongs in its own
-//     change, not one whose acceptance condition is byte-identity.
+//   - reqID is the ONE of the five that can be client-chosen, and what makes it
+//     safe bare is NOT the inline CR/LF scrub but the entry-point BOUND:
+//     setupRequestTracing admits an inbound X-Request-Id only when it is at most
+//     maxClientRequestIDLen bytes of VISIBLE ASCII WITH NO WHITESPACE
+//     (0x21..0x7E) and otherwise replaces it with a freshly minted id, so no
+//     control byte, no space and no unbounded length can reach this buffer
+//     (SEC-REQID-1, request_tracing_bounds.go). IF THAT BOUND IS EVER REMOVED OR
+//     WIDENED, THIS FIELD MUST STOP BEING BARE.
+//
+// The reqID entry previously read that stripping CR/LF "strips exactly what could
+// forge a second record, which is why it is safe here", with a TAB or an ANSI
+// escape surviving as an accepted pre-existing residual. Both halves were wrong in
+// the same direction. The residual was not only a TAB: a SPACE forged extra
+// key=value tokens inside this very `{req_id=… identity=… action=…}` block, which a
+// first-wins parser reads in preference to the real ones. And the value was
+// UNBOUNDED, so one request could write ~1 MiB here — measured at 4,194,968 bytes
+// into the process log from eight requests, against a 50 MB rotating file that
+// keeps one archive. Both are closed at the entry point now, and the dependency is
+// pinned from both sides by
+// TestSecReqID1_BareReqIDInDecisionLineIsSafeOnlyBecauseOfTheBound, whose defect
+// proof calls this emitter directly to show the bare append is NOT self-protecting.
 //
 // Do not add a field to this bare set without stating why its bytes cannot
 // forge a record — the SOCKS5 destination is the standing example of a value
@@ -1088,13 +1101,98 @@ func recordRequestTelemetry(r *http.Request, start time.Time, sslAction SSLActio
 // The three arms below are the same decision the sequential form made, just
 // with the "generate both" case named so it can share one draw. Nothing is
 // generated that the previous shape would not have generated.
+//
+// SEC-REQID-1: both header values are CLIENT-CHOSEN and are bounded here, at the
+// one place they are read, before they can reach a log line, the response or the
+// upstream. An unusable value is treated exactly as an ABSENT one — the existing
+// mint path runs and its result overwrites the hostile value on the request, the
+// response and the wire — so a tracing header can never decide whether traffic
+// flows. See request_tracing_bounds.go for what "unusable" means and why the
+// remedy is replacement rather than refusal.
 func setupRequestTracing(w http.ResponseWriter, r *http.Request) string {
 	// ── Request tracing: generate X-Request-ID if not present ────────────
 	// strings.ReplaceAll stays inline at the read site so CodeQL sees the
-	// CWE-117 sanitiser on the client-supplied value (repo convention).
-	reqID := strings.ReplaceAll(strings.ReplaceAll(r.Header.Get(headerRequestID), "\n", ""), "\r", "") // sanitize for CWE-117
+	// CWE-117 sanitiser on the client-supplied value (repo convention). It is
+	// NOT sufficient on its own — it scrubs only CR/LF, where sanitizeLog
+	// scrubs every byte < 0x20 and 0x7F — so acceptClientRequestID below is the
+	// bound, not a second opinion. Keep this line: it is the barrier CodeQL's
+	// go/log-injection query recognises on this value.
+	// The WHOLE field-value slice is read, not Header.Get's first value, because
+	// a client may send the header TWICE. Get validates value [0] and says
+	// nothing about the rest, so an acceptable first value paired with a hostile
+	// second one took the accept branch, which does not Set — leaving BOTH on
+	// r.Header for the upstream, uncounted by the rejection metrics (Codex P2).
+	// A duplicate is therefore treated as unusable on its face: ambiguous
+	// correlation is not correlation, and minting collapses the field to one
+	// value via Set.
+	//
+	// Indexing the map directly rather than calling Get is not a cost: the
+	// constants are canonical (pinned by
+	// TestRequestTracing_CanonicalKeysMatchGoCanonicalisation) and a server
+	// request's header keys are canonicalised by textproto.ReadMIMEHeader, so
+	// this is the same lookup WITHOUT CanonicalMIMEHeaderKey's scan — measured
+	// 7.3 ns against 27-42 ns for Get, 0 allocs either way. A de-canonicalised
+	// constant would miss the map and mint, which is the fail-safe direction.
+	idVals := r.Header[headerRequestID]
+	// strings.ReplaceAll stays inline at the read site so CodeQL sees the
+	// CWE-117 sanitiser on the client-supplied value (repo convention). It is
+	// NOT sufficient on its own — it scrubs only CR/LF, where sanitizeLog
+	// scrubs every byte < 0x20 and 0x7F — so acceptClientRequestID below is the
+	// bound, not a second opinion. Keep this line: it is the barrier CodeQL's
+	// go/log-injection query recognises on this value.
+	reqID := ""
+	if len(idVals) > 0 {
+		reqID = strings.ReplaceAll(strings.ReplaceAll(idVals[0], "\n", ""), "\r", "") // sanitize for CWE-117
+	}
+	if len(idVals) > 1 || (reqID != "" && !acceptClientRequestID(reqID)) {
+		// The REQUEST is handed over, never a resolved client IP: realClientIP
+		// walks every X-Forwarded-For hop and must not run per rejection ahead of
+		// the limiters. noteRejectedRequestID resolves it behind its rate gate.
+		// The length reported is the total across EVERY value, which is what the
+		// client actually tried to put here.
+		noteRejectedRequestID(r, tracingHeaderBytes(idVals))
+		reqID = "" // fall into the mint arm below, which also overwrites the header
+	}
 	// ── W3C Trace Context: propagate or generate traceparent ────────────
-	needTraceparent := r.Header.Get(headerTraceparent) == ""
+	// An over-long or control-carrying traceparent is replaced for the same
+	// reason: internal/otlp.ParseTraceparent splits it and hands the pieces
+	// straight to the exported span, so an unbounded value here is an unbounded
+	// attacker-chosen attribute on the OTLP collector. Duplicates are refused on
+	// the same grounds as the request id: exactly one value, or we mint.
+	tpVals := r.Header[headerTraceparent]
+	needTraceparent := len(tpVals) != 1 || !acceptClientTraceparent(tpVals[0])
+	if needTraceparent && len(tpVals) > 0 {
+		noteRejectedTraceparent(r, tracingHeaderBytes(tpVals))
+	}
+
+	// A minted traceparent ORPHANS any client tracestate, so the tracestate goes
+	// with it (Codex P2). W3C Trace Context makes tracestate meaningful only
+	// relative to its traceparent and requires a receiver that cannot use the
+	// traceparent to discard the tracestate with it; keeping it would forward a
+	// pair the client never sent — Culvert's freshly minted trace context
+	// carrying the client's arbitrary vendor state — which an upstream may then
+	// accept as belonging to that new trace.
+	//
+	// This mismatch is one THIS bound introduced. Before it, an unusable
+	// traceparent was forwarded verbatim alongside its own tracestate, which is
+	// at least self-consistent; replacing the traceparent is what breaks the
+	// pairing, so repairing it belongs to the same change.
+	//
+	// The delete covers the no-traceparent mint arm too, deliberately: a
+	// tracestate arriving WITHOUT a traceparent is malformed by the same rule,
+	// and on the overwhelmingly common shape (client sent neither) deleting an
+	// absent key is a no-op that allocates nothing. Indexing the map directly
+	// rather than Header.Del skips CanonicalMIMEHeaderKey's scan, for the reason
+	// recorded on the reads above; headerTracestate is already canonical
+	// (pinned by TestRequestTracing_CanonicalKeysMatchGoCanonicalisation).
+	//
+	// Scope is exactly the mint: a client that supplied a USABLE traceparent
+	// keeps its tracestate untouched, which is ordinary W3C propagation through
+	// a forward proxy and must not be broken —
+	// TestSecReqID1_ValidTraceparentKeepsTracestate is the control.
+	if needTraceparent {
+		delete(r.Header, headerTracestate)
+	}
 
 	switch {
 	case reqID == "" && needTraceparent:
@@ -1312,6 +1410,62 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 	// byte-identical). See crashguard.go.
 	defer proxyCrashGuard(reqID)
 
+	// ── Destination-authority RAW pre-cap (CHAOS-69, fail-closed) ───────────
+	// FIRST consumer of r.Host, and deliberately ahead of the connection
+	// limiter, the IP filter, the rate limiter, authentication and policy. The
+	// client-supplied authority is copied into two rotating sinks and WALKED
+	// label by label by matchers that are quadratic in its length (one 64 KiB
+	// host measured 3.94 s of CPU through this function, ~16 min at net/http's
+	// 1 MiB header default). Every one of those costs is created by a sink or a
+	// matcher BEHIND this point — including IP_BLOCKED and RATE_LIMITED just
+	// below, which both write r.Host into the request log — so this tier has to
+	// be here and not at the IDNA gate further down.
+	//
+	// This is the RAW tier only, and it is deliberately generous (1 KiB): the
+	// bound DNS actually imposes cannot be applied to raw bytes without refusing
+	// legitimate internationalized names, which SHRINK under IDNA (measured: 883
+	// raw bytes → 251 A-label bytes). The tight bound is applied to the CANONICAL
+	// form at the gate below. See proxy_host_bounds.go.
+	if rejectOversizeDestHost(w, r, clientIP) {
+		return
+	}
+
+	// ── CHAOS-69 canonical tier (hoisted ahead of EVERY matcher) ───────────
+	// This used to sit ~60 lines down, at the RISK-013 canonicalization gate,
+	// on the reasoning that the raw pre-cap above had already bounded what the
+	// sinks in between could retain to 1 KiB. That reasoning is sound and it is
+	// only about RETENTION. The canonical tier's other job — the more important
+	// one — is bounding the QUADRATIC MATCHER WALK, and Stage-1 authentication
+	// runs a matcher: authRuleMatchesScratch calls matchDestNorm with
+	// authMatchScratch.hostCat(), the same category fusion, so a category-scoped
+	// auth rule paid the walk for a 1 000-byte dot-dense authority before this
+	// gate was reached — and a terminal auth outcome (407/403) returns without
+	// reaching it at all, so the refusal never happened and the counter never
+	// moved (Codex P2, PR #1446).
+	//
+	// The lesson is the one this sweep already recorded, arriving a third time: a
+	// bound is a property of the POSITION as well as the value. "Behind these two
+	// sinks is safe" was answered for the sinks and not for the matchers.
+	//
+	// Normalizing here costs nothing extra: the value is computed ONCE per
+	// request and reused at the RISK-013 gate below, which no longer normalizes.
+	// Nothing between here and there mutates r.Host (verified by inspection), so
+	// hoisting is value-preserving, and the INVALID_HOST refusal deliberately
+	// stays where it was — this gate decides length only, never validity.
+	destNormHost, destNormOK := canonicalDestHost(r.Host)
+	if destNormOK {
+		if rejectOversizeCanonicalHost(w, "HTTP", clientIP, destNormHost) {
+			return
+		}
+	} else if rejectOversizeUnnormalizableHost(w, "HTTP", clientIP, r.Host) {
+		// No canonical form ⇒ the canonical tier is unreachable, so bound the
+		// raw bare host instead. Without this, the band above maxDestHostLen and
+		// below the raw pre-cap reached Stage-1's matcher at full length and a
+		// terminal 407 returned before the INVALID_HOST refusal below ever ran
+		// (Codex P2, PR #1446).
+		return
+	}
+
 	// ── Connection limit per IP ─────────────────────────────────────────
 	if !connLimiter.Acquire(clientIP) {
 		http.Error(w, "Too Many Connections", http.StatusServiceUnavailable)
@@ -1372,7 +1526,12 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 	// raw spelling made aliases consume separate TopHosts budget entries and
 	// perturb evidence hashes). Matchers keep receiving the raw host: each
 	// normalizes internally, and changing their input is out of scope here.
-	normHost, ok := normalizeHostStrict(host)
+	// Normalized ONCE, at the CHAOS-69 canonical gate far above, and reused here.
+	// Do not re-derive it: two call sites normalizing independently is how the
+	// canonical tier came to be enforced on some entry points and not others.
+	// The length refusal already happened up there; what remains here is the
+	// RISK-013 VALIDITY refusal, unchanged and in its original position.
+	normHost, ok := destNormHost, destNormOK
 	if !ok {
 		atomic.AddInt64(&statBlocked, 1)
 		http.Error(w, "Bad Request: invalid host", http.StatusBadRequest)

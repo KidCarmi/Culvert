@@ -16,11 +16,14 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/KidCarmi/Culvert/internal/mcp/rollout"
 )
 
 // isolateStateCorruption resets the recorded-corruption map for one test
@@ -348,5 +351,251 @@ func TestHandleReady_SurfacesStateFileCorruption(t *testing.T) {
 	}
 	if gotCode != baseCode || got.Status != base.Status {
 		t.Fatalf("state-file row changed readiness (%s/%d → %s/%d) — must be report-only", base.Status, baseCode, got.Status, gotCode)
+	}
+}
+
+// TestCheckStateFileIntegrity_SurfacesOnAuthenticatedDiagnostics pins the
+// closed half of the gap TestHandleReady_SurfacesStateFileCorruption
+// documents: the authenticated /api/diagnostics operator contract must carry
+// the corruption's kind, cause, and recovery shape (fresh quarantine,
+// quarantine-attempt-itself-failed, or an unreconciled prior-boot leftover)
+// — without leaking the absolute file path — instead of forcing the admin to
+// read the process log for information the process already computed.
+func TestCheckStateFileIntegrity_SurfacesOnAuthenticatedDiagnostics(t *testing.T) {
+	isolateStateCorruption(t)
+
+	if got := checkStateFileIntegrity(); got != nil {
+		t.Fatalf("baseline: no corruption recorded, want nil, got %+v", got)
+	}
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "ui_users.json")
+	if err := os.WriteFile(path, []byte(`{not json`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var probe map[string]any
+	jsonErr := json.Unmarshal([]byte(`{`), &probe) // *json.SyntaxError "unexpected end of JSON input"
+	qpath := quarantineCorruptStateFile("ui_users", path, jsonErr)
+	if qpath == "" {
+		t.Fatal("setup: quarantine should have succeeded (path does not exist, rename target is free)")
+	}
+
+	rows := checkStateFileIntegrity()
+	if len(rows) != 1 {
+		t.Fatalf("want exactly one row, got %+v", rows)
+	}
+	row := rows[0]
+	if row.Code != "state_file_ui_users" {
+		t.Fatalf("Code = %q, want state_file_ui_users", row.Code)
+	}
+	if row.Status != diagWarn {
+		t.Fatalf("Status = %q, want %q (survivable — env fallback creds recover this)", row.Status, diagWarn)
+	}
+	if !strings.Contains(row.Message, "unexpected end of JSON input") {
+		t.Fatalf("Message must carry the parse cause, got %q", row.Message)
+	}
+	if strings.Contains(row.Message, path) || strings.Contains(row.Message, dir) || strings.Contains(row.Message, qpath) {
+		t.Fatalf("authenticated diagnostics row leaked the absolute path (viewer-role, no-paths contract): %q", row.Message)
+	}
+	if row.OperatorAction == "" {
+		t.Fatal("a warn/fail row must carry an OperatorAction")
+	}
+	// Codex P2 (PR #1408): a kind can span several files (per-capability MCP
+	// journals) and some quarantines happen lazily on an admin request, so the
+	// row must not claim a startup quarantine or a whole-store wipe.
+	if strings.Contains(row.Message, "at startup") || strings.Contains(row.Message, "empty") {
+		t.Fatalf("row overstates the posture (startup/empty-store claim): %q", row.Message)
+	}
+
+	// A rename-aside failure (path already gone) is the most urgent shape —
+	// the NEXT save would silently overwrite the corrupt file — and must be
+	// distinguishable from an ordinary quarantine.
+	isolateStateCorruption(t)
+	missing := filepath.Join(dir, "gone.json")
+	if got := quarantineCorruptStateFile("cluster", missing, errors.New("boom")); got != "" {
+		t.Fatalf("expected the rename to fail (source does not exist), got quarantine path %q", got)
+	}
+	rows = checkStateFileIntegrity()
+	if len(rows) != 1 || rows[0].Status != diagFail {
+		t.Fatalf("a failed quarantine attempt must report fail, got %+v", rows)
+	}
+
+	// A residual (prior-boot) leftover, detected without a fresh parse
+	// failure this boot, must also surface — this is the case /readyz can
+	// silently lose across a restart per noteResidualQuarantine's own doc.
+	isolateStateCorruption(t)
+	residualPath := filepath.Join(dir, "cluster.json")
+	if err := os.WriteFile(residualPath+".corrupt.1", []byte("stale"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	noteResidualQuarantine("cluster", residualPath)
+	rows = checkStateFileIntegrity()
+	if len(rows) != 1 || rows[0].Status != diagWarn || !strings.Contains(rows[0].Message, "unreconciled") {
+		t.Fatalf("residual quarantine must surface distinctly, got %+v", rows)
+	}
+	if strings.Contains(rows[0].Message, "empty") {
+		t.Fatalf("residual row overstates the posture (empty-store claim): %q", rows[0].Message)
+	}
+}
+
+// TestResidualQuarantine_PolicyLearningAndMCPResurfaceAcrossRestart pins
+// the Codex P2 on PR #1408: policy_learning and the MCP canary journals
+// quarantine through quarantineCorruptStateFile but, unlike ui_users /
+// cluster / admin_settings, never re-scanned their .corrupt.* siblings, so
+// their row vanished from /api/diagnostics (and /readyz, and the alert
+// stream) on the next boot while the evidence stayed on disk. Both
+// per-capability files of one MCP kind must count into one record.
+func TestResidualQuarantine_PolicyLearningAndMCPResurfaceAcrossRestart(t *testing.T) {
+	captureStartupAlerts(t)
+	isolateStateCorruption(t)
+
+	dir := t.TempDir()
+	prevDir := dataDir
+	dataDir = dir
+	t.Cleanup(func() { dataDir = prevDir })
+
+	prevPaths := policyLearnPaths
+	t.Cleanup(func() {
+		policyLearnAdminMu.Lock()
+		policyLearnPaths = prevPaths
+		policyLearnAdminMu.Unlock()
+	})
+
+	plStore := filepath.Join(dir, "policy_learning.json")
+	leftovers := []string{
+		plStore + ".corrupt.1",
+		canaryRuntimeStatePath(rollout.CapabilityGateway) + ".corrupt.1",
+		canaryRuntimeStatePath(rollout.CapabilityManagement) + ".corrupt.2",
+		shadowExitAttestationPath() + ".corrupt.3",
+	}
+	for _, f := range leftovers {
+		if err := os.WriteFile(f, []byte("stale"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Simulated restart: the feature is disabled (default), yet the
+	// leftover quarantine must still surface.
+	loadPolicyLearning(policyLearningStartupConfig{StorePath: plStore})
+	noteResidualMCPStateQuarantines()
+
+	recs := stateCorruptionRecordsSnapshot()
+	want := map[string]int{"policy_learning": 1, "mcp_canary_runtime": 2, "mcp_shadow_exit_review": 1}
+	for kind, n := range want {
+		rec, ok := recs[kind]
+		if !ok || !rec.Residual || rec.ResidualCount != n {
+			t.Fatalf("%s: want residual record with count %d, got %+v (ok=%v)", kind, n, rec, ok)
+		}
+	}
+	for _, kind := range []string{"mcp_rollback_rehearsal", "mcp_coordinator_rollback_rehearsal"} {
+		if _, ok := recs[kind]; ok {
+			t.Fatalf("%s: no leftover on disk, must not be recorded", kind)
+		}
+	}
+	codes := map[string]bool{}
+	for _, row := range checkStateFileIntegrity() {
+		codes[row.Code] = true
+	}
+	for kind := range want {
+		if !codes["state_file_"+kind] {
+			t.Fatalf("diagnostics must carry state_file_%s, got %v", kind, codes)
+		}
+	}
+}
+
+// TestResidualQuarantine_GlobMetacharInDataDir pins the Codex P2 on PR
+// #1408: CULVERT_DATA_DIR may be any absolute path, so a `[` (or `*`, `?`,
+// `\`) in it must not turn the residual scan into ErrBadPattern or a search
+// of a different path — the leftover quarantine must still surface.
+func TestResidualQuarantine_GlobMetacharInDataDir(t *testing.T) {
+	captureStartupAlerts(t)
+	isolateStateCorruption(t)
+
+	for _, name := range []string{"data[1", "data[ab]", "da*ta", "d?ta", `back\slash`} {
+		dir := filepath.Join(t.TempDir(), name)
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		p := filepath.Join(dir, "cluster.json")
+		if err := os.WriteFile(p+".corrupt.1", []byte("stale"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		// Reset between iterations: the record is once-per-kind.
+		stateCorruptionMu.Lock()
+		delete(stateCorruptionByKind, "cluster")
+		delete(stateCorruptionRecordByKind, "cluster")
+		stateCorruptionMu.Unlock()
+
+		noteResidualQuarantine("cluster", p)
+		rec, ok := stateCorruptionRecordsSnapshot()["cluster"]
+		if !ok || !rec.Residual || rec.ResidualCount != 1 {
+			t.Fatalf("dir %q: want residual record with count 1, got %+v (ok=%v)", name, rec, ok)
+		}
+	}
+}
+
+func TestGlobEscapeLiteral_MatchesOnlyTheLiteral(t *testing.T) {
+	root := t.TempDir()
+	lit := filepath.Join(root, "x[ab]")
+	decoy := filepath.Join(root, "xa")
+	for _, d := range []string{lit, decoy} {
+		if err := os.WriteFile(d+".corrupt.1", nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	m, err := filepath.Glob(globEscapeLiteral(lit) + ".corrupt.*")
+	if err != nil || len(m) != 1 || m[0] != lit+".corrupt.1" {
+		t.Fatalf("got %v, %v; want only %q", m, err, lit+".corrupt.1")
+	}
+}
+
+// TestCheckStateFileIntegrity_DoesNotDiscloseValueBearingErrors pins the
+// Codex P2 on PR #1408: a validation error can embed stored data (the
+// policy_learning cell key carries an observed IdP group name), and the
+// viewer-role diagnostics row must carry only a bounded cause class.
+func TestCheckStateFileIntegrity_DoesNotDiscloseValueBearingErrors(t *testing.T) {
+	isolateStateCorruption(t)
+	path := filepath.Join(t.TempDir(), "policy_learning.json")
+	cellKey := "g:Finance-Payroll-Admins\x1fSocial Media"
+	quarantineCorruptStateFile("policy_learning", path, fmt.Errorf("session s1: cell %q is null", cellKey))
+	rows := checkStateFileIntegrity()
+	if len(rows) != 1 {
+		t.Fatalf("want one row, got %+v", rows)
+	}
+	if strings.Contains(rows[0].Message, "Finance-Payroll-Admins") {
+		t.Fatalf("diagnostics row disclosed a stored value: %q", rows[0].Message)
+	}
+	if !strings.Contains(rows[0].Message, "failed validation") {
+		t.Fatalf("row must still carry a bounded cause class, got %q", rows[0].Message)
+	}
+}
+
+// TestQuarantineCorruptStateFile_LaterSuccessDoesNotEraseFailure pins the
+// shared-kind merge: when two files share a kind (the per-capability MCP
+// journals) and the first quarantine rename FAILS while the second
+// succeeds, the record must keep the failure — that file is still in the
+// save path's line of fire and would otherwise be reported as quarantined.
+func TestQuarantineCorruptStateFile_LaterSuccessDoesNotEraseFailure(t *testing.T) {
+	captureStartupAlerts(t)
+	isolateStateCorruption(t)
+
+	dir := t.TempDir()
+	gone := filepath.Join(dir, "gateway.json") // absent: rename fails
+	if q := quarantineCorruptStateFile("mcp_canary_runtime", gone, errors.New("boom")); q != "" {
+		t.Fatalf("rename cannot have succeeded, got %q", q)
+	}
+	present := filepath.Join(dir, "management.json")
+	if err := os.WriteFile(present, []byte("{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if q := quarantineCorruptStateFile("mcp_canary_runtime", present, errors.New("boom")); q == "" {
+		t.Fatal("second quarantine rename should have succeeded")
+	}
+	rec := stateCorruptionRecordsSnapshot()["mcp_canary_runtime"]
+	if !rec.QuarantineFailed {
+		t.Fatal("a later successful quarantine erased an earlier FAILED quarantine for the same kind")
+	}
+	if d := stateCorruptionSnapshot()["mcp_canary_runtime"]; !strings.Contains(d, "could not be quarantined") {
+		t.Fatalf("detail must still warn the failed file was not moved aside: %q", d)
 	}
 }

@@ -273,9 +273,18 @@ func uiAuthMiddleware(next http.Handler) http.Handler {
 				http.Error(w, "Unauthorized", http.StatusUnauthorized)
 				return
 			}
-			role := UIRole(sess.Role)
-			if !role.HasRole(RoleViewer) {
-				role = RoleAdmin // backwards compat: sessions without role = admin
+			role, ok := sessionRoleOrReject(sess.Role)
+			if !ok {
+				// A signed session naming a role this build does not enroll.
+				// It used to take the compat branch below and come out ADMIN,
+				// because that branch was keyed on `!HasRole(RoleViewer)` —
+				// true of every unenrolled string, not just the empty one it
+				// was written for. Fail closed and clear the cookie so the
+				// holder re-authenticates and is re-issued a role this build
+				// can actually evaluate.
+				clearUISessionCookie(w, r)
+				http.Error(w, "Unauthorized", http.StatusUnauthorized)
+				return
 			}
 			ctx := context.WithValue(r.Context(), uiRoleKey{}, role)
 			next.ServeHTTP(w, r.WithContext(ctx))

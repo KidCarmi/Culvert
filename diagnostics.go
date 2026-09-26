@@ -180,10 +180,14 @@ func buildOperatorContract() OperatorContract {
 		checkOIDCJWKSTrust(),
 		checkSyslogFeed(),
 		checkMemoryBackstop(),
+		checkRewriteIdentity(),
 	}
 	// Cluster (enrollment) CA — CHAOS-50. Contributes nothing on a node with no
 	// cluster CA, so it never adds a row to a single-node appliance's report.
 	checks = append(checks, checkClusterCA()...)
+	// CHAOS-05/07 state-file quarantine, authenticated + path-free. Contributes
+	// nothing when every state file on this node loaded cleanly.
+	checks = append(checks, checkStateFileIntegrity()...)
 	// Auth Exempt risk diagnostics (Slice 8): WARN-only rows for risky Stage-1
 	// exemption postures. Contributes nothing when no exempt rules exist.
 	checks = append(checks, authExemptDiagnostics(policyStore.List(), policyActionFromDefault())...)
@@ -788,6 +792,56 @@ func checkUpstreamCredentials() OperatorContractCheck {
 			requiring),
 		OperatorAction: "For each affected entry in Network → Upstream Proxies, set the credential again (Replace credential, Tier-2) or clear it deliberately (Clear credential, Tier-3). Until then the effective mode is no_eligible_parent when no other parent is eligible — plain-HTTP egress is NOT chained. Backups never carry parent-proxy credentials and the node-local .upstream_cred_key is never restored.",
 	}
+}
+
+// checkRewriteIdentity reports whether the v2 rewrite-rule MANAGEMENT
+// identity is durable on this node (rewrite_identity.go). A corrupt
+// settings-owned rewrite slice, or a failed identity-migration/ledger write
+// at boot, latches rewriteIdentityDegradedState for the rest of the process
+// lifetime: traffic rewrite enforcement keeps running unchanged, but
+// /api/rewrite/state and every StableID-addressed mutation fail closed with
+// a structured 503 until the node is restarted with the underlying
+// persistence issue fixed.
+//
+// Before this check, the ONLY place that degradation surfaced was a WARN log
+// line at boot and the 503 an admin would hit by opening the Rewrite Rules
+// panel — every general-purpose status surface (dashboard, /healthz,
+// /readyz) reported green regardless. Memory-only read of the existing
+// atomic latch; issues no probe and triggers no retry.
+func checkRewriteIdentity() OperatorContractCheck {
+	d := rewriteIdentityDegraded()
+	if d == nil {
+		return OperatorContractCheck{
+			Code:    "rewrite_identity",
+			Status:  diagOK,
+			Message: "rewrite management identity is durable",
+		}
+	}
+	return OperatorContractCheck{
+		Code:   "rewrite_identity",
+		Status: diagWarn,
+		Message: fmt.Sprintf("rewrite-rule management identity is not durable on this node — %s (traffic rewrite enforcement is unaffected; Rewrite Rules management is refused until this is fixed; the full cause is in the process log)",
+			rewriteIdentityReasonClass(d.reason)),
+		OperatorAction: "Fix the underlying settings-file/volume persistence issue and restart this node to re-establish durable rewrite-rule identity. There is no in-process retry: the Rewrite Rules panel (and its API) stays read-only-refused until then.",
+	}
+}
+
+// rewriteIdentityReasonClass reduces a latched rewrite-identity reason to its
+// code-controlled prefix. Every setRewriteIdentityDegraded caller formats the
+// reason as "<fixed description>: <wrapped error>", and the wrapped error can
+// carry raw filesystem paths (fileutil.AtomicWrite embeds the settings path
+// and its temp-file path). /api/diagnostics is viewer-reachable and walled
+// against raw paths (TestApiDiagnostics_NoSensitiveValues), so only the
+// fixed description is surfaced here; the full cause stays in the WARN log
+// line setRewriteIdentityDegraded already emits.
+func rewriteIdentityReasonClass(reason string) string {
+	if i := strings.Index(reason, ": "); i > 0 {
+		reason = reason[:i]
+	}
+	if reason == "" || strings.ContainsAny(reason, "/\\") {
+		return "identity could not be established"
+	}
+	return reason
 }
 
 // checkOIDCJWKSTrust reports whether any live OIDC provider's JWKS key set is
