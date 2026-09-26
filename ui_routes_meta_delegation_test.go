@@ -302,7 +302,10 @@ func c16Resolve(idx map[string]*c16Func, name, method string, depth int, seen ma
 		pathFloor = c16Weakest(paths)
 	}
 	if len(bc.dominating) > 0 {
-		role := c16Weakest(bc.dominating)
+		// Dominating guards are unconditional and terminating, so they all
+		// run in sequence: the floor is the STRICTEST of them, not the
+		// weakest (Codex review, PR #1420).
+		role := c16Strongest(bc.dominating)
 		if pathFloor != "" && rolePriorityOf(pathFloor) > rolePriorityOf(role) {
 			role = pathFloor
 		} else {
@@ -448,6 +451,17 @@ func c16Weakest(roles []UIRole) UIRole {
 		}
 	}
 	return weakest
+}
+
+// c16Strongest returns the strictest role in roles (non-empty).
+func c16Strongest(roles []UIRole) UIRole {
+	strongest := roles[0]
+	for _, r := range roles[1:] {
+		if rolePriorityOf(r) > rolePriorityOf(strongest) {
+			strongest = r
+		}
+	}
+	return strongest
 }
 
 // c16RoleMismatch compares a resolved handler role with the route's declared
@@ -939,4 +953,43 @@ func c16ParseFixtureDecls(t *testing.T, src string) []*ast.FuncDecl {
 		}
 	}
 	return out
+}
+
+// TestC16_SerialDominatingGuardsFoldToStrictest pins that two unconditional
+// terminating guards ahead of a delegate — a shared viewer preamble and an
+// admin guard in the method branch — resolve to the STRICTER role: both run
+// in sequence, so the effective floor is admin, and a weakest-wins fold would
+// report viewer and hide a viewer-metadata-over-admin-handler divergence
+// (Codex review, PR #1420).
+func TestC16_SerialDominatingGuardsFoldToStrictest(t *testing.T) {
+	const src = `package main
+
+import "net/http"
+
+func fixtureSerial(w http.ResponseWriter, r *http.Request) {
+	if !requireRole(w, r, RoleViewer) {
+		return
+	}
+	switch r.Method {
+	case http.MethodPost:
+		if !requireRole(w, r, RoleAdmin) {
+			return
+		}
+		fixtureSerialLeaf(w, r)
+	}
+}
+
+func fixtureSerialLeaf(w http.ResponseWriter, r *http.Request) {
+	_ = r
+	_ = w
+}
+`
+	idx := c16ParseFixture(t, src)
+	res := c16Resolve(idx, "fixtureSerial", "POST", 0, map[string]bool{})
+	if !res.resolved || res.role != RoleAdmin {
+		t.Fatalf("serial viewer+admin guards resolved to (%v, %q), want (true, %q)", res.resolved, res.role, RoleAdmin)
+	}
+	if c16RoleMismatch(res.role, RoleViewer) <= 0 {
+		t.Fatalf("viewer metadata over serial admin guard not flagged as a mismatch")
+	}
 }
