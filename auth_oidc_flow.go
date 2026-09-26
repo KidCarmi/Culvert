@@ -66,15 +66,40 @@ type oidcDiscoveryDoc struct {
 // calling function is what raised a critical go/request-forgery alert when
 // this helper was first split out.
 func fetchOIDCDiscoveryOverNetwork(wellKnown string) ([]byte, error) {
-	if err := validateExternalURL(wellKnown); err != nil {
-		return nil, fmt.Errorf("oidc discovery: %w", err)
+	// Inline url.Parse + scheme check + private-host check, in the SAME
+	// function as the request, per the repo's SSRF convention.
+	//
+	// This replaces a validateExternalURL call, and the replacement is NOT a
+	// widening: that helper is isSafeRedirectURL, i.e. exactly an absolute
+	// http/https check plus isPrivateHost, and isPrivateHost's failure mode is
+	// fail-CLOSED (an unresolvable host is refused). All three properties are
+	// preserved below, so the set of URLs this function will fetch is
+	// unchanged, and a refusal still reaches resolveIdPDocument as a failed
+	// FETCH and therefore falls back to the last-known-good cache.
+	//
+	// What changes is the BOUND. isPrivateHost resolves under
+	// context.Background(), so the guard ran to the OS resolver's full budget
+	// BEFORE the request context existed — an unbounded step introduced into a
+	// bounded operation by the guard itself, on boot and on every CP->DP
+	// snapshot apply, and one that also delays reaching the cached document
+	// this sweep exists to serve. That is the CHAOS-60/64 shape, and it is the
+	// SAME defect this sweep already fixed on the SAML half
+	// (fetchSAMLMetadataOverNetwork) and did not carry across — the third time
+	// the SAML/OIDC asymmetry has produced a finding here. A bounded operation
+	// is only as bounded as its first step. Do not un-bound this for CodeQL.
+	u, err := url.Parse(wellKnown)
+	if err != nil || !u.IsAbs() || (u.Scheme != "http" && u.Scheme != "https") {
+		return nil, fmt.Errorf("oidc discovery: URL must be an absolute http:// or https:// URL")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), oidcDiscoveryFetchBudget)
+	defer cancel()
+	if err := isPrivateHostContext(ctx, u.Host); err != nil {
+		return nil, fmt.Errorf("oidc discovery: host refused: %w", err)
 	}
 	client := &http.Client{
-		Timeout:   10 * time.Second,
+		Timeout:   oidcDiscoveryFetchBudget,
 		Transport: &http.Transport{DialContext: ssrfSafeDialContext},
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, wellKnown, http.NoBody)
 	if err != nil {
 		return nil, fmt.Errorf("oidc discovery request: %w", err)
@@ -119,14 +144,14 @@ func fetchOIDCDiscovery(profileID, issuer string) (*oidcDiscoveryDoc, error) {
 	// endpoint the network path would have accepted on structure.
 	fetched, fetchErr := fetchOIDCDiscoveryOverNetwork(wellKnown)
 	raw, err := resolveIdPDocument(profileID, idpmeta.KindOIDCDiscovery, wellKnown, fetched, fetchErr, func(b []byte) error {
-		_, vErr := parseAndValidateOIDCDiscovery(b)
+		_, vErr := parseAndValidateOIDCDiscovery(profileID, b)
 		return vErr
 	})
 	if err != nil {
 		return nil, err
 	}
 
-	return parseAndValidateOIDCDiscovery(raw)
+	return parseAndValidateOIDCDiscovery(profileID, raw)
 }
 
 // parseAndValidateOIDCDiscovery decodes and validates a discovery document.
@@ -150,7 +175,7 @@ func fetchOIDCDiscovery(profileID, issuer string) (*oidcDiscoveryDoc, error) {
 // re-checked the address and it does not; dropping the resolving validator
 // here therefore opened a path for a discovery document — or an edited cache
 // file — to redirect a browser at an internal address. It gets its own guard.
-func parseAndValidateOIDCDiscovery(raw []byte) (*oidcDiscoveryDoc, error) {
+func parseAndValidateOIDCDiscovery(profileID string, raw []byte) (*oidcDiscoveryDoc, error) {
 	var doc oidcDiscoveryDoc
 	if err := json.NewDecoder(io.LimitReader(bytes.NewReader(raw), 64<<10)).Decode(&doc); err != nil {
 		return nil, fmt.Errorf("oidc discovery parse: %w", err)
@@ -181,7 +206,7 @@ func parseAndValidateOIDCDiscovery(raw []byte) (*oidcDiscoveryDoc, error) {
 	// resolver outage the power to reject a cached document, which is this
 	// sweep's own headline defect in miniature (the CHAOS-65 (6e) rule: a
 	// guard that can fail for more than one reason must say which).
-	if err := refuseDefinitelyPrivateRedirect(doc.AuthorizationEndpoint); err != nil {
+	if err := refuseDefinitelyPrivateRedirect(profileID, doc.AuthorizationEndpoint); err != nil {
 		return nil, err
 	}
 	return &doc, nil
@@ -193,13 +218,19 @@ func parseAndValidateOIDCDiscovery(raw []byte) (*oidcDiscoveryDoc, error) {
 // fetch beside it is, not because a request is waiting on it.
 const oidcRedirectHostCheckBudget = 5 * time.Second
 
+// oidcDiscoveryFetchBudget bounds ONE discovery acquisition end to end — the
+// pre-flight host check AND the HTTP request share it, from one context, so
+// the guard can never outlive the operation it guards. It is the value the
+// request already used; only the guard was outside it.
+const oidcDiscoveryFetchBudget = 10 * time.Second
+
 // refuseDefinitelyPrivateRedirect refuses an authorization endpoint that
 // RESOLVES into a private range. A host that cannot be resolved right now is
 // ALLOWED: the document was validated against a resolving check when it was
 // first fetched and cached, so "unknown" during an outage is the fallback
 // working as designed, while "definitely private" is the case no outage
 // excuses.
-func refuseDefinitelyPrivateRedirect(raw string) error {
+func refuseDefinitelyPrivateRedirect(profileID, raw string) error {
 	if raw == "" {
 		return nil
 	}
@@ -213,7 +244,25 @@ func refuseDefinitelyPrivateRedirect(raw string) error {
 		if errors.Is(err, ssrf.ErrBlocked) {
 			return fmt.Errorf("oidc discovery authorization_endpoint %q resolves to a private address", raw)
 		}
-		// Could not determine (resolver outage, budget spent). Not a refusal.
+		// COULD NOT DETERMINE (resolver outage, or this budget spent). Not a
+		// refusal — treating it as one would hand a resolver outage the power
+		// to reject a cached document, which is this sweep's headline defect.
+		//
+		// It is therefore ADMITTED UNVERIFIED, and that is a real residual
+		// (register row IDP-9), not a closed case: this endpoint is handed to
+		// the user's BROWSER, so no dialer of ours is ever consulted, and
+		// isSafeCaptiveRedirect checks only shape. A host unresolvable now that
+		// later resolves private would be a browser redirect into the internal
+		// network, and nothing re-checks a LIVE provider.
+		//
+		// Closing it is a POSTURE decision with an availability price — failing
+		// closed here takes SSO down whenever OUR resolver cannot resolve the
+		// authorization host, even though the user's browser could — so it is
+		// left to an owner rather than changed inside this sweep. What is NOT
+		// acceptable is that it was SILENT: the admission is now counted, so an
+		// operator can see that a provider is serving redirects to an endpoint
+		// this appliance never verified.
+		noteIdPAuthzEndpointUnverified(profileID)
 	}
 	return nil
 }
@@ -239,7 +288,10 @@ func probeOIDCDiscovery(issuer string) (*oidcDiscoveryDoc, error) {
 	if err != nil {
 		return nil, err
 	}
-	return parseAndValidateOIDCDiscovery(raw)
+	// "" profile id: this is the admin diagnostic, which produces no live
+	// provider, so an unverified authorization endpoint here is not counted
+	// against a profile that does not exist.
+	return parseAndValidateOIDCDiscovery("", raw)
 }
 
 // ---------------------------------------------------------------------------

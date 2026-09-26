@@ -220,23 +220,3 @@ func runIdPRecoveryLoop(ctx context.Context) {
 		}
 	}
 }
-
-// hasEnabledRemoteMetadataProfile reports whether any enabled profile depends on
-// a REMOTE document, which is the only posture in which a metadata-degradation
-// episode can exist. It gates the detection watchdog so a node with no remote
-// IdP starts no goroutine at all — the same emission discipline the metric
-// surfaces follow (a flat zero from an appliance that never configured SSO is
-// indistinguishable from one whose IdP is dead).
-func (r *IdPRegistry) hasEnabledRemoteMetadataProfile() bool {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	for _, p := range r.profiles {
-		if p == nil || !p.Enabled {
-			continue
-		}
-		if idpRemoteDocumentSource(p) != "" {
-			return true
-		}
-	}
-	return false
-}

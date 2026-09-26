@@ -812,70 +812,190 @@ func TestChaos71_StructuralValidatorDecidesWithoutAResolver(t *testing.T) {
 // P2. The pre-flight host check must not outlive the operation it guards.
 // isPrivateHost resolves under context.Background(), so on a wedged resolver
 // it blocked for the OS budget BEFORE the request context existed.
-func TestChaos71_SAMLPreflightIsBoundedByTheRequestBudget(t *testing.T) {
-	if samlMetadataFetchBudget <= 0 {
-		t.Fatal("the shared budget must be positive")
+//
+// ROUND 5: this wall is a TABLE over BOTH fetchers. It covered only the SAML
+// half, and the OIDC half carried the identical unbounded guard — the third
+// finding this sweep has produced from the same SAML/OIDC asymmetry (the
+// admission gates and the endpoint validator were the other two). A wall
+// scoped to one of two symmetric paths is how that asymmetry keeps surviving,
+// so the fix is to wall the PAIR rather than the instance.
+func TestChaos71_MetadataPreflightsAreBoundedByTheRequestBudget(t *testing.T) {
+	if samlMetadataFetchBudget <= 0 || oidcDiscoveryFetchBudget <= 0 {
+		t.Fatal("both shared budgets must be positive")
 	}
-	// The guard and the request must share ONE budget: a guard with its own
-	// (or no) deadline is how an unbounded step re-enters a bounded operation.
-	src, err := os.ReadFile(filepath.Join(pkgSourceDir(), "auth_saml.go"))
-	if err != nil {
-		t.Fatalf("read source: %v", err)
-	}
-	// Slice the function out by hand rather than with a bare strings.Index:
-	// Index returns -1 when the anchor is absent, which slices from the END of
-	// the file and silently makes every assertion below vacuous — a wall that
-	// passes because it stopped looking is worse than no wall (gocritic
-	// offBy1 flags exactly this).
-	body := string(src)
-	start := strings.Index(body, "func fetchSAMLMetadataOverNetwork")
-	if start < 0 {
-		t.Fatal("fetchSAMLMetadataOverNetwork not found — this wall is pinning nothing")
-	}
-	fn := body[start:]
-	end := strings.Index(fn, "\n}\n")
-	if end < 0 {
-		t.Fatal("could not find the end of fetchSAMLMetadataOverNetwork")
-	}
-	fn = fn[:end]
-	if strings.Contains(fn, "isPrivateHost(") && !strings.Contains(fn, "isPrivateHostContext(") {
-		t.Fatal("the SAML pre-flight must use the ctx-bounded form, not the Background() one")
-	}
-	if !strings.Contains(fn, "isPrivateHostContext(ctx,") {
-		t.Fatal("the pre-flight must be bounded by the SAME ctx the request uses")
-	}
-	if strings.Count(fn, "context.WithTimeout") != 1 {
-		t.Fatal("guard and request must share ONE deadline, not one each")
+	for _, tc := range []struct{ file, fn string }{
+		{"auth_saml.go", "fetchSAMLMetadataOverNetwork"},
+		{"auth_oidc_flow.go", "fetchOIDCDiscoveryOverNetwork"},
+	} {
+		t.Run(tc.fn, func(t *testing.T) {
+			src, err := os.ReadFile(filepath.Join(pkgSourceDir(), tc.file))
+			if err != nil {
+				t.Fatalf("read source: %v", err)
+			}
+			// Slice the function out by hand rather than with a bare
+			// strings.Index: Index returns -1 when the anchor is absent, which
+			// slices from the END of the file and silently makes every
+			// assertion below vacuous — a wall that passes because it stopped
+			// looking is worse than no wall (gocritic offBy1 flags exactly this).
+			body := string(src)
+			start := strings.Index(body, "func "+tc.fn)
+			if start < 0 {
+				t.Fatalf("%s not found — this wall is pinning nothing", tc.fn)
+			}
+			fn := body[start:]
+			end := strings.Index(fn, "\n}\n")
+			if end < 0 {
+				t.Fatalf("could not find the end of %s", tc.fn)
+			}
+			fn = fn[:end]
+
+			if strings.Contains(fn, "isPrivateHost(") && !strings.Contains(fn, "isPrivateHostContext(") {
+				t.Fatal("the pre-flight must use the ctx-bounded form, not the Background() one")
+			}
+			if !strings.Contains(fn, "isPrivateHostContext(ctx,") {
+				t.Fatal("the pre-flight must be bounded by the SAME ctx the request uses")
+			}
+			if strings.Count(fn, "context.WithTimeout") != 1 {
+				t.Fatal("guard and request must share ONE deadline, not one each")
+			}
+			// validateExternalURL RESOLVES under Background(). Reaching it here
+			// is the defect in its original form, whatever else the function
+			// also does.
+			if strings.Contains(fn, "validateExternalURL(") {
+				t.Fatal("the resolving validator must not be the pre-flight: it " +
+					"resolves under context.Background(), outside this function's budget")
+			}
+		})
 	}
 }
 
-// P2. An inline transition is the resolution of a remote-fetch episode: with
-// no remote fetch left, nothing else can ever clear it, so the episode would
-// hold the degraded gauge and the contract row at a permanent outage for a
-// dependency that no longer exists.
-func TestChaos71_InlineTransitionClearsAStaleEpisode(t *testing.T) {
-	chaos71Env(t)
-	idpMetadataEverUsed.Store(true)
+// ROUND 5 P2. The degradation watchdog is the ONLY thing that evaluates the
+// elapsed-time threshold for a provider that is live while serving a cached
+// document, and it is started once at boot. Gating that start on a remote
+// profile EXISTING at boot meant an appliance that later gained one — an admin
+// write, or a CP->DP snapshot — had no goroutine left to notice its outage, so
+// the documented alert could never fire for exactly the profile an operator
+// had just added.
+//
+// Structural, because the defect is a start that never happens: no behavioural
+// test can observe a goroutine that was not spawned, and the sweep is a no-op
+// with no episodes, so an absent watchdog looks identical to a healthy one.
+func TestChaos71_DegradationWatchdogStartIsUnconditional(t *testing.T) {
+	src, err := os.ReadFile(filepath.Join(pkgSourceDir(), "ui_access_policy_startup.go"))
+	if err != nil {
+		t.Fatalf("read source: %v", err)
+	}
+	body := string(src)
+	i := strings.Index(body, "go runIdPMetadataDegradationWatchdog(")
+	if i < 0 {
+		t.Fatal("the degradation watchdog is never started — the documented " +
+			"alert can never fire for a cache-serving provider")
+	}
+	// INDENTATION, not keywords. The first version of this wall looked for a
+	// condition mentioning "Profile" on the preceding lines, which pins one
+	// spelling of one gate: any other condition — including the enclosing
+	// `if cfg.IdPProfilesFile != ""` block this start also had to leave —
+	// would have passed it. The statement must sit at FUNCTION-BODY depth,
+	// which no conditional wrapper can satisfy.
+	lineStart := strings.LastIndex(body[:i], "\n") + 1
+	indent := body[lineStart:i]
+	if indent != "\t" {
+		t.Fatalf("the watchdog start is nested (indent %q, want one tab): it is "+
+			"conditional on boot-time state, so a remote profile added later — by "+
+			"an admin write or a CP->DP snapshot — would never be watched", indent)
+	}
+}
 
-	noteIdPMetadataOutcome("switching", idpMetaUnavailable, fmt.Errorf("down"))
-	if !idpMetadataState().Failing {
-		t.Fatal("precondition: the profile must have an open episode")
+// ROUND 5 P2. An inline transition IS the resolution of a remote-fetch episode
+// — with no remote fetch left nothing else can ever clear it — but COMPILING is
+// not COMMITTING. The first shape cleared the episode inside compileIdPProfile,
+// which runs before the inline document is parsed and before the registry
+// mutation is persisted, so a REJECTED inline edit erased a live profile's
+// genuine outage episode and suppressed its alert while that profile stayed
+// authoritative.
+//
+// Driven through Upsert — the outermost caller — because that is the lesson
+// this sweep has now learned three times: a gate entering below the layer that
+// refuses cannot observe a refusal.
+func TestChaos71_InlineSwitchClearsTheEpisodeOnlyOnCommit(t *testing.T) {
+	const metaURL = "https://saml-idp-that-does-not-resolve.invalid/metadata"
+
+	// A registered, live REMOTE profile carrying a real failure episode.
+	arrange := func(t *testing.T) *IdPRegistry {
+		t.Helper()
+		store := chaos71Env(t)
+		idpMetadataEverUsed.Store(true)
+		if err := store.Put("switching", idpmeta.KindSAMLMetadata, metaURL,
+			[]byte(chaos71MetadataXML(t, "round5-remote"))); err != nil {
+			t.Fatalf("seed last-known-good: %v", err)
+		}
+		reg := &IdPRegistry{live: make(map[string]IdentityProvider)}
+		remote := &IdPProfile{
+			ID: "switching", Name: "switching", Type: IdPTypeSAML, Enabled: true,
+			SAML: &SAMLProfileConfig{MetadataURL: metaURL},
+		}
+		if err := reg.ReplaceAll([]*IdPProfile{remote}); err != nil {
+			t.Fatalf("precondition: the remote profile must register: %v", err)
+		}
+		noteIdPMetadataOutcome("switching", idpMetaUnavailable, fmt.Errorf("down"))
+		if !idpMetadataState().Failing {
+			t.Fatal("precondition: the profile must have an open episode")
+		}
+		return reg
 	}
-	// The admin switches that profile to inline metadata_xml.
-	noteIdPMetadataOutcome("switching", idpMetaInline, nil)
-	if idpMetadataState().Failing {
-		t.Fatal("an inline transition must clear the profile's now-unresolvable episode")
-	}
-	// It must clear ONLY that episode, and must not fabricate an attempt.
-	before := idpMetadataState().RemoteAttempts
-	noteIdPMetadataOutcome("other", idpMetaUnavailable, fmt.Errorf("down"))
-	noteIdPMetadataOutcome("switching", idpMetaInline, nil)
-	if !idpMetadataState().Failing {
-		t.Fatal("one profile going inline must not clear another profile's episode")
-	}
-	if got := idpMetadataState().RemoteAttempts; got != before+1 {
-		t.Fatalf("RemoteAttempts = %d, want %d — inline must count no attempt", got, before+1)
-	}
+
+	// THE DEFECT GATE: a refused inline edit must leave the episode alone.
+	t.Run("a rejected inline edit preserves the episode", func(t *testing.T) {
+		reg := arrange(t)
+		err := reg.Upsert(&IdPProfile{
+			ID: "switching", Name: "switching", Type: IdPTypeSAML, Enabled: true,
+			SAML: &SAMLProfileConfig{MetadataXML: "<not-valid-saml-metadata"},
+		})
+		if err == nil {
+			t.Fatal("precondition: an unparseable inline document must be refused")
+		}
+		if !idpMetadataState().Failing {
+			t.Fatal("a REFUSED inline edit cleared the live remote profile's episode: " +
+				"the old profile is still authoritative and still failing, so its " +
+				"degradation is now invisible and its alert suppressed")
+		}
+	})
+
+	// THE CONTROL: the cheapest way to pass the gate above is to stop clearing
+	// at all, which would hold the degraded gauge and the contract row at a
+	// permanent outage for a dependency that no longer exists.
+	t.Run("a committed inline switch clears the episode", func(t *testing.T) {
+		reg := arrange(t)
+		before := idpMetadataState().RemoteAttempts
+		if err := reg.Upsert(&IdPProfile{
+			ID: "switching", Name: "switching", Type: IdPTypeSAML, Enabled: true,
+			SAML: &SAMLProfileConfig{MetadataXML: chaos71MetadataXML(t, "round5-inline")},
+		}); err != nil {
+			t.Fatalf("a valid inline switch must commit: %v", err)
+		}
+		if idpMetadataState().Failing {
+			t.Fatal("a committed inline switch must clear the profile's now-unresolvable episode")
+		}
+		if got := idpMetadataState().RemoteAttempts; got != before {
+			t.Fatalf("RemoteAttempts = %d, want %d — going inline fetches nothing "+
+				"and must count no attempt", got, before)
+		}
+	})
+
+	// It must clear ONLY that profile's episode.
+	t.Run("it does not clear another profile's episode", func(t *testing.T) {
+		reg := arrange(t)
+		noteIdPMetadataOutcome("other", idpMetaUnavailable, fmt.Errorf("down"))
+		if err := reg.Upsert(&IdPProfile{
+			ID: "switching", Name: "switching", Type: IdPTypeSAML, Enabled: true,
+			SAML: &SAMLProfileConfig{MetadataXML: chaos71MetadataXML(t, "round5-inline")},
+		}); err != nil {
+			t.Fatalf("inline switch: %v", err)
+		}
+		if !idpMetadataState().Failing {
+			t.Fatal("one profile going inline must not clear another profile's episode")
+		}
+	})
 }
 
 // P1, behavioural. The structural check above is worth nothing unless the OIDC
@@ -1070,7 +1190,7 @@ func TestChaos71_PrivateAuthorizationEndpointIsRefused(t *testing.T) {
 		doc := []byte(`{"issuer":"https://idp.example",` +
 			`"authorization_endpoint":"https://` + host + `/authorize",` +
 			`"token_endpoint":"https://idp.example/token"}`)
-		if _, err := parseAndValidateOIDCDiscovery(doc); err == nil {
+		if _, err := parseAndValidateOIDCDiscovery("t", doc); err == nil {
 			t.Errorf("a private authorization_endpoint must be refused: %q", host)
 		}
 	}
@@ -1078,7 +1198,7 @@ func TestChaos71_PrivateAuthorizationEndpointIsRefused(t *testing.T) {
 	ok := []byte(`{"issuer":"https://idp.example",` +
 		`"authorization_endpoint":"https://idp.example/authorize",` +
 		`"token_endpoint":"https://idp.example/token"}`)
-	if _, err := parseAndValidateOIDCDiscovery(ok); err != nil {
+	if _, err := parseAndValidateOIDCDiscovery("t", ok); err != nil {
 		t.Fatalf("a public authorization_endpoint must pass: %v", err)
 	}
 }
@@ -1091,7 +1211,7 @@ func TestChaos71_UnresolvableAuthorizationEndpointIsNotRefused(t *testing.T) {
 	doc := []byte(`{"issuer":"https://idp.example",` +
 		`"authorization_endpoint":"https://idp-that-does-not-resolve.invalid/authorize",` +
 		`"token_endpoint":"https://idp-that-does-not-resolve.invalid/token"}`)
-	if _, err := parseAndValidateOIDCDiscovery(doc); err != nil {
+	if _, err := parseAndValidateOIDCDiscovery("t", doc); err != nil {
 		t.Fatalf("an unresolvable host is unknown, not private, and must not be "+
 			"refused — that would break the cache fallback: %v", err)
 	}

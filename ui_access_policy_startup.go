@@ -81,13 +81,31 @@ func loadUIAccessPolicy(cfg uiAccessPolicyStartupConfig) error {
 		// for is a provider that IS live while serving a stale cached
 		// document: nothing further compiles it, so nothing would ever
 		// evaluate the elapsed-time degradation threshold and the documented
-		// page would never fire (Codex review round 4). It fetches nothing,
-		// compiles nothing and clears no episode; with no open episode its
-		// sweep is a no-op, so an appliance with no remote IdP pays one
-		// sleeping goroutine.
-		if idpRegistry.hasEnabledRemoteMetadataProfile() {
-			go runIdPMetadataDegradationWatchdog(resolveLifecycleCtx())
-		}
+		// page would never fire (Codex review round 4).
+		//
+		// It is not gated on a remote profile EXISTING either, and that is
+		// deliberate. The first shape guarded this with
+		// hasEnabledRemoteMetadataProfile, evaluated ONCE here — so an
+		// appliance that booted with no remote IdP and later gained one
+		// (an admin Upsert, or a CP->DP snapshot) had no goroutine left to
+		// notice its outage, and the documented alert could never fire on
+		// exactly the profile an operator had just added (Codex review round
+		// 5). Starting it per-profile would mean a lifecycle to own, so the
+		// watchdog is simply unconditional: the gate's own justification was
+		// that the cost is one sleeping goroutine, which is what a boot-time
+		// gate saves and a correctness gap is not worth.
+		//
+		// It fetches nothing, compiles nothing and clears no episode; with no
+		// open episode its sweep is a no-op.
 	}
+
+	// Started OUTSIDE the -idp-profiles-file block on purpose. A DP with no
+	// profiles file still receives IdP profiles through the CP->DP snapshot
+	// (ReplaceAll persists nothing there and says so, but the registry is
+	// live), so leaving the watchdog inside that block left exactly the fleet
+	// nodes that get their configuration pushed to them with nothing watching
+	// for a metadata outage. This is the same round-5 finding one level out:
+	// the start was conditional on boot-time state that a later write changes.
+	go runIdPMetadataDegradationWatchdog(resolveLifecycleCtx())
 	return nil
 }

@@ -392,12 +392,18 @@ func (r *IdPRegistry) Upsert(p *IdPProfile) error {
 	}
 	r.profiles, r.live = nextProfiles, nextLive
 
-	// A profile stored DISABLED has no remote fetch left, so any episode it
+	// A profile with NO REMOTE SOURCE LEFT — stored disabled, or switched to
+	// inline SAML metadata — has no remote fetch left, so any episode it
 	// carries can never be cleared by evidence again. This runs only AFTER
 	// persistence lands: on a failed write the OLD enabled profile and its live
 	// provider stay authoritative, so clearing here would erase a genuine
 	// outage signal and suppress its alert (Codex review round 3).
-	if !p.Enabled {
+	//
+	// The inline half used to be cleared inside compileIdPProfile instead,
+	// which is BEFORE the parse and before this persist, so a rejected inline
+	// edit cleared a live profile's real episode (Codex review round 5). One
+	// condition now covers both, because it is one rule.
+	if !p.Enabled || idpRemoteDocumentSource(p) == "" {
 		forgetIdPMetadataEpisode(p.ID)
 	}
 	return nil
@@ -435,7 +441,23 @@ func idpRemoteDocumentSource(p *IdPProfile) string {
 // It does only when that profile fetches from the SAME non-empty remote source.
 func idpEpisodeBelongsToLive(live, candidate *IdPProfile) bool {
 	liveSrc := idpRemoteDocumentSource(live)
-	return liveSrc != "" && liveSrc == idpRemoteDocumentSource(candidate)
+	if liveSrc == "" {
+		// Nothing live fetches from anywhere, so there is no episode of the
+		// live profile's to preserve.
+		return false
+	}
+	candSrc := idpRemoteDocumentSource(candidate)
+	if candSrc == "" {
+		// The candidate fetches NOTHING — an inline-metadata or credential-only
+		// edit — so it cannot have opened an episode, and the open one is the
+		// live profile's. Round 3 compared the two sources for equality, which
+		// answers this case FALSE and made a refused inline edit erase a live
+		// remote profile's genuine outage episode (Codex review round 5).
+		// Ownership is about which profile performed the FETCH, not about the
+		// two sources matching.
+		return true
+	}
+	return liveSrc == candSrc
 }
 
 func validateSAMLProfileConfig(cfg *SAMLProfileConfig) error {
@@ -594,11 +616,13 @@ func (r *IdPRegistry) ReplaceAll(profiles []*IdPProfile) error {
 	r.profiles = nextProfiles
 	r.live = nextLive
 
-	// Whatever this snapshot dropped or disabled has no remote fetch left, so
-	// its episode can never be cleared by evidence again.
+	// Whatever this snapshot dropped, disabled, or switched to inline metadata
+	// has no remote fetch left, so its episode can never be cleared by
+	// evidence again. The inline arm mirrors Upsert's: a profile keeps its
+	// episode only while it still names a remote source to fetch from.
 	kept := make(map[string]struct{}, len(nextProfiles))
 	for _, p := range nextProfiles {
-		if p.Enabled {
+		if p.Enabled && idpRemoteDocumentSource(p) != "" {
 			kept[p.ID] = struct{}{}
 		}
 	}

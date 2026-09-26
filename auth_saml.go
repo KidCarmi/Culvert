@@ -249,8 +249,18 @@ func fetchSAMLMetadata(profileID string, cfg *SAMLProfileConfig) (*saml.EntityDe
 		}
 		xmlData = doc
 	} else {
+		// Inline metadata needs no network, so a remote-fetch episode this
+		// profile may still carry no longer applies — but it is NOT cleared
+		// here. Compiling is not committing: an invalid inline document fails
+		// the parse below, and even a good one can still fail to persist, and
+		// in both cases Upsert/ReplaceAll keep the OLD remote profile
+		// authoritative. Clearing at compile time therefore erased a genuine
+		// outage episode on a REJECTED edit and suppressed its alert (Codex
+		// review round 5). The clear now runs at the publication sites, after
+		// persistence lands, under the same rule the disabled case already
+		// used: a profile with no remote source left can never have its
+		// episode cleared by evidence again.
 		xmlData = []byte(cfg.MetadataXML)
-		noteIdPMetadataOutcome(profileID, idpMetaInline, nil)
 	}
 
 	return samlsp.ParseMetadata(xmlData)

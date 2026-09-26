@@ -1472,6 +1472,10 @@ culvert_idp_metadata_last_success_timestamp_seconds %d
 # HELP culvert_idp_metadata_degraded 1 while IdP metadata/discovery fetches have been failing longer than the degradation threshold; providers are running from cached documents
 # TYPE culvert_idp_metadata_degraded gauge
 culvert_idp_metadata_degraded %d
+
+# HELP culvert_idp_authz_endpoint_unverified_total OIDC authorization endpoints admitted without a public-address verdict because the address could not be determined; they are handed to browsers unverified (register row IDP-9)
+# TYPE culvert_idp_authz_endpoint_unverified_total counter
+culvert_idp_authz_endpoint_unverified_total %d
 `,
 			idpEnabled-idpLive,
 			im.RemoteAttempts,
@@ -1481,6 +1485,7 @@ culvert_idp_metadata_degraded %d
 			idpMetadataStore().Len(),
 			lastSuccess,
 			idpDegraded,
+			idpAuthzEndpointUnverified.Load(),
 		)
 	}
 

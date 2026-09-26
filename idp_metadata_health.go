@@ -123,7 +123,6 @@ const (
 	idpMetaFresh       idpMetadataOutcome = "fresh"        // fetched from the IdP
 	idpMetaStale       idpMetadataOutcome = "stale_cached" // fetch failed, served last-known-good
 	idpMetaUnavailable idpMetadataOutcome = "unavailable"  // fetch failed, no usable cache
-	idpMetaInline      idpMetadataOutcome = "inline"       // admin-pasted metadata_xml, no network
 )
 
 // idpMetadataHealth is the process-wide record of IdP document acquisition.
@@ -229,36 +228,6 @@ var fireIdPMetadataAlert = func(detail string) {
 	})
 }
 
-// noteIdPMetadataOutcome records one document acquisition.
-//
-// profileID and cause reach the rate-limited LOG line only. `outcome` is the
-// bounded class that reaches metrics, the contract row and the alert.
-// noteIdPMetadataInline resolves the failure episode of a profile that now uses
-// inline metadata_xml.
-//
-// No network was involved, so this plane has nothing to COUNT — but an inline
-// profile may be one an admin just switched AWAY from a remote metadata_url,
-// and if that profile had an open failure episode there will never be another
-// remote fetch to clear it. The episode would then hold
-// `culvert_idp_metadata_degraded` and the contract row at a permanent outage
-// for a dependency that no longer exists.
-//
-// The transition to inline IS the resolution — which is the recovery-on-
-// observed-evidence rule read the right way round: it forbids clearing on
-// elapsed TIME, not on evidence that the dependency is GONE. It clears this
-// profile's episode and nothing else: no attempt, no outcome, no counter, and
-// no other profile's episode.
-func noteIdPMetadataInline(profileID string) {
-	idpMetadata.mu.Lock()
-	_, had := idpMetadata.episodes[profileID]
-	delete(idpMetadata.episodes, profileID)
-	idpMetadata.mu.Unlock()
-	if had {
-		logger.Printf("IDP_METADATA_RECOVERED idp=%q (profile now uses inline metadata; its remote-fetch failure episode no longer applies)",
-			sanitizeLog(profileID))
-	}
-}
-
 // forgetIdPMetadataEpisode drops a profile's failure episode because the
 // profile is no longer an authoritative, enabled, remote-metadata provider —
 // it was deleted, disabled, switched away from a remote URL, or its candidate
@@ -279,6 +248,51 @@ func noteIdPMetadataInline(profileID string) {
 // evidence that the dependency is GONE — and "this profile is not in the
 // registry" is exactly that evidence. It clears one profile's episode and
 // counts nothing.
+// idpAuthzEndpointUnverified counts OIDC authorization endpoints admitted
+// WITHOUT a public-address verdict, because the address could not be
+// determined (resolver outage, or the check's own budget spent).
+//
+// This is register row IDP-9. The endpoint is handed to the user's BROWSER, so
+// no dialer of ours re-checks it and isSafeCaptiveRedirect checks only shape;
+// a host unresolvable at compile time that later resolves private is a browser
+// redirect into the internal network. Refusing on an unknown verdict instead
+// would let a resolver outage reject a cached document — this sweep's headline
+// defect — so the posture is an owner decision. What this counter removes is
+// the SILENCE: non-zero means at least one live provider is issuing redirects
+// to an endpoint this appliance never verified.
+var idpAuthzEndpointUnverified atomic.Int64
+
+// idpAuthzUnverifiedLogLast rate-limits the line to one per
+// idpMetadataLogInterval. The compile path is reachable from every CP->DP
+// snapshot apply, so an unrate-limited line would be one per sync per profile
+// for the length of a resolver outage.
+var idpAuthzUnverifiedLogLast atomic.Int64
+
+func noteIdPAuthzEndpointUnverified(profileID string) {
+	if profileID == "" {
+		return // admin diagnostic; no live provider results from it
+	}
+	n := idpAuthzEndpointUnverified.Add(1)
+	now := time.Now()
+	for {
+		last := idpAuthzUnverifiedLogLast.Load()
+		// A NEGATIVE age re-arms rather than suppressing: a clock that went
+		// backwards must not silence this for however far back it went
+		// (the CHAOS-61 rule; see noteTracingBoundsLog).
+		if last != 0 {
+			if d := now.UnixNano() - last; d >= 0 && d < int64(idpMetadataLogInterval) {
+				return
+			}
+		}
+		if idpAuthzUnverifiedLogLast.CompareAndSwap(last, now.UnixNano()) {
+			break
+		}
+	}
+	logger.Printf("IDP_AUTHZ_ENDPOINT_UNVERIFIED idp=%q — the authorization endpoint's address could not be "+
+		"determined, so it was admitted WITHOUT a public-address verdict and is being handed to browsers "+
+		"unverified (%d since boot). Check this node's resolver.", sanitizeLog(profileID), n)
+}
+
 func forgetIdPMetadataEpisode(profileID string) {
 	if profileID == "" {
 		return
@@ -294,10 +308,6 @@ func forgetIdPMetadataEpisode(profileID string) {
 }
 
 func noteIdPMetadataOutcome(profileID string, outcome idpMetadataOutcome, cause error) {
-	if outcome == idpMetaInline {
-		noteIdPMetadataInline(profileID)
-		return
-	}
 	idpMetadataEverUsed.Store(true)
 
 	now := time.Now()

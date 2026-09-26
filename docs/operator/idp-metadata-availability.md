@@ -96,6 +96,7 @@ indistinguishable from one whose IdP is dead.
 | `culvert_idp_metadata_unavailable_total` | Rising — unreachable **and** no usable cache: this is the state that leaves providers dark. |
 | `culvert_idp_metadata_fetch_failures_total` | Trend only. |
 | `culvert_idp_metadata_cached_documents` | Fallback coverage. Zero here means a future outage has no fallback. |
+| `culvert_idp_authz_endpoint_unverified_total` | **Rising** — an OIDC authorization endpoint was admitted without a public-address verdict and is being handed to browsers unverified. Almost always this node's resolver; see the residual below. |
 | `culvert_idp_metadata_last_success_timestamp_seconds` | Age against the 7-day ceiling. |
 
 **Alerts** — the existing `identity_backend_unreachable` event, source
@@ -174,6 +175,27 @@ egress to the IdP works before cutting traffic over. Deleting the directory is
 safe at any time; it costs only the fallback.
 
 ## Known residual risks
+
+* **An unverifiable authorization endpoint is admitted, not refused** (register
+  row IDP-9). The OIDC `authorization_endpoint` is the one discovered endpoint
+  this appliance never dials — it is handed to the user's browser — so the
+  SSRF-guarded dialer does not cover it, and the redirect validator checks only
+  URL shape. It is address-checked when the discovery document is parsed, but
+  that check refuses only a **definite** private verdict: if the address cannot
+  be determined at all (this node's resolver is down, or the check's own budget
+  is spent) the endpoint is admitted unverified, and nothing re-checks a
+  provider that is already live. A host that is unresolvable at compile time
+  and later resolves to a private address would therefore be a browser redirect
+  into your internal network.
+
+  Refusing instead would take SSO down whenever *this node* cannot resolve the
+  authorization host — even though the user's browser can — and would let a
+  resolver outage reject a cached document, which is the whole failure this
+  page exists to prevent. So the trade is deliberate and it is visible:
+  `culvert_idp_authz_endpoint_unverified_total` rising, plus one
+  `IDP_AUTHZ_ENDPOINT_UNVERIFIED` log line per minute naming the profile.
+  **If you see it: fix this node's DNS.** A provider compiled while the
+  resolver was healthy carries a verified endpoint.
 
 * **A node that has never compiled a given profile has no fallback.** A
   first-ever enrollment, or a newly added IdP profile, still depends on
