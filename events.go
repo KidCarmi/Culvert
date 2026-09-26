@@ -292,6 +292,21 @@ func liveFeedWritePrometheus(w *strings.Builder) {
 	fmt.Fprintf(w, "# TYPE culvert_login_oversize_rejected_total counter\nculvert_login_oversize_rejected_total %d\n",
 		loginOversizeRejected.Load())
 
+	// CHAOS-70: admin-roster durability. These are deliberately distinct from
+	// the storage plane's generic storage_write_failed, which says only that
+	// SOME durable write failed; these say WHICH administrative decision was
+	// affected and therefore what the operator must redo.
+	//
+	// Both are emitted unconditionally: unlike the gauges elsewhere in this
+	// file, a flat zero here is the healthy steady state for every appliance
+	// (no roster write has failed), not an ambiguous "feature not configured".
+	fmt.Fprintf(w, "\n# HELP culvert_admin_roster_persist_failures_total Admin-roster changes REFUSED and rolled back because ui_users.json could not be written. Non-zero means an operator's account/role/password change did not take effect and must be retried once the data volume is writable\n")
+	fmt.Fprintf(w, "# TYPE culvert_admin_roster_persist_failures_total counter\nculvert_admin_roster_persist_failures_total %d\n",
+		rosterPersistRefused.Load())
+	fmt.Fprintf(w, "\n# HELP culvert_admin_roster_persist_degraded_total Login-path admin-roster writes that failed while the login was allowed to proceed (TOTP replay counter, backup-code consumption). Non-zero means a single-use credential or replay counter may not survive a restart\n")
+	fmt.Fprintf(w, "# TYPE culvert_admin_roster_persist_degraded_total counter\nculvert_admin_roster_persist_degraded_total %d\n",
+		rosterPersistBestEffort.Load())
+
 	// SEC-REQID-1: client-supplied tracing headers replaced because they were
 	// over-long or carried bytes that must not reach a log line. The request
 	// still proceeds — only the correlation id is ours instead of theirs — so

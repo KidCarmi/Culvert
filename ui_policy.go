@@ -1926,14 +1926,17 @@ func apiPolicy(w http.ResponseWriter, r *http.Request) {
 		// holding generation-P rules with a generation-P+1 token would pass the
 		// optimistic fence with a stale edit. The draft flag comes from the same
 		// selected state so the SPA banner never claims draft editing while the
-		// rules shown (and written) are the live ones.
-		snap, draft := effectiveManagementSnapshot()
+		// rules shown (and written) are the live ones. persisted is likewise
+		// the SELECTED domain's own durability, not always the running
+		// store's — the draft candidate has its own, separately-wired path.
+		snap, draft, persisted := effectiveManagementSnapshot()
 		jsonOK(w, map[string]any{
 			"rules":     snap.Rules,
 			"count":     len(snap.Rules),
 			"version":   snap.Version,
 			"updatedAt": snap.UpdatedAt,
 			"draft":     draft,
+			"persisted": persisted,
 		})
 	case http.MethodPost:
 		apiPolicyCreate(w, r)

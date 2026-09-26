@@ -384,7 +384,7 @@ components:
         timezone: { type: string }
     PolicyList:
       type: object
-      required: [rules, count, version, updatedAt, draft]
+      required: [rules, count, version, updatedAt, draft, persisted]
       additionalProperties: false
       properties:
         rules: { type: array, items: { $ref: '#/components/schemas/PolicyRule' } }
@@ -392,6 +392,7 @@ components:
         version: { type: integer, format: int64 }
         updatedAt: { type: string }
         draft: { type: boolean }
+        persisted: { type: boolean, description: "False means the rulebase is in-memory only (no -policy / policy_file configured) and every add/edit/delete/reorder is lost on restart." }
     AuthPolicyList:
       type: object
       required: [rules, count, defaultAction, note, version, updatedAt, killSwitch]
@@ -3522,7 +3523,7 @@ paths:
       operationId: getPolicy
       tags: [policy]
       summary: List policy rules
-      description: Returns the effective policy rule list plus version, last-update time, and draft-mode flag.
+      description: Returns the effective policy rule list plus version, last-update time, draft-mode flag, and whether the rulebase is persisted to disk.
       security:
         - sessionCookie: []
         - basicAuth: []
