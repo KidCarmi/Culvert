@@ -47,7 +47,7 @@ Two ways to turn CDR on, and either one is enough — you do not need both:
    | `-cdr-max-file-size-mb` | `cdr.max_file_size_mb` | Skip CDR (no RPC) for a buffered body larger than this | 50 |
    | `-cdr-server-fingerprint` | `cdr.server_fingerprint` | TOFU-pinned SHA-256 of Sluice's server certificate (hex; `sha256:` prefix optional) | — |
    | `-cdr-certs-dir` | `cdr.certs_dir` | Directory holding the Sluice mTLS client bundle (`ca.pem`, `client.pem`, `client.key`) | — |
-   | `-cdr-fail-mode` | `cdr.fail_mode` | Behavior when Sluice is unreachable: `open` or `closed` (see **Failure behavior** below); an invalid value is a fatal boot error | `open` |
+   | `-cdr-fail-mode` | `cdr.fail_mode` | Behavior when Sluice is unreachable: `open` or `closed` (see **Failure behavior** below); an invalid value is a fatal boot error **only while `cdr.enabled: true` at the time config.yaml is parsed** — see the callout below the table | `open` |
 
    `-cdr-endpoint` by itself dials nothing. The config/CLI-only bootstrap
    path (no instance ever enrolled through the API) requires **all three**
@@ -66,6 +66,26 @@ Two ways to turn CDR on, and either one is enough — you do not need both:
    has no certificate lifecycle automation — see **Certificate lifecycle**
    below before relying on it long-term.
 
+   > **`cdr.fail_mode` validation is skipped while `cdr.enabled: false`, and
+   > an invalid value staged that way survives into a later runtime
+   > enable.** `FileConfig.validateCDR` returns immediately when
+   > `!fc.CDR.Enabled` — the whole CDR block, `fail_mode` included, is
+   > unchecked at config-load time for a config.yaml shipped with `cdr.enabled:
+   > false`. The startup-time CLI check (`initCDR` in `main.go`) only
+   > validates the RAW `-cdr-fail-mode` flag value, not the value that ends
+   > up in effect after CLI/YAML are merged — so if you stage a typo'd
+   > `cdr.fail_mode` in config.yaml alongside `cdr.enabled: false` (e.g.
+   > preparing a config ahead of turning CDR on later) and pass no CLI
+   > override, config load succeeds silently. Turning CDR on afterwards via
+   > the runtime sentinel or `-cdr-enabled` carries that unvalidated string
+   > straight into `CDRFailOpen()`, which treats anything other than the
+   > exact string `"closed"` as fail-**open** — so a typo intended to
+   > enforce `closed` silently runs `open` instead, with no startup error
+   > pointing at the mistake. `GET /api/cdr/config`'s `failMode`/`failOpen`
+   > fields are the only way to catch this after the fact; check them
+   > immediately after enabling CDR if `cdr.fail_mode` was ever set while
+   > `cdr.enabled` was `false`.
+
 2. **GUI enrollment**, no restart or config-file edit required: open
    **CDR → Enroll new Sluice instance**, paste the one-time enrollment token
    Sluice printed on first boot plus its server-certificate fingerprint.
@@ -77,21 +97,30 @@ Two ways to turn CDR on, and either one is enough — you do not need both:
    enable sentinel at `<dataDir>/cdr_enabled` and `false` removes it, and
    either way the connection pool starts/stops immediately.
 
-   > **This is the common case, and it runs on a zero-valued config.** CDR
-   > ships disabled, so `loadCDR` never calls `initCDRClient` at boot and
-   > `cdrActiveCfg` is never populated with your resolved `cdr.*`
-   > config/CLI settings — it stays at its Go zero value. The FIRST runtime
-   > enable, whether via this auto-enable-on-enroll path or a bare
-   > `PUT {"enabled": true}`, only ever calls `setCDREnabledRuntime(true)`
-   > (which flips the `Enabled` field on whatever `cdrActiveCfg` currently
-   > holds) before `initCDRClient` builds the pool from it — so on a node
-   > that has never had CDR enabled at boot, the pool comes up with
-   > `fail_mode` unset (fail-**open**), no default profile/mode, and a zero
-   > timeout/size cap, regardless of what you'd set in `config.yaml`/CLI
-   > flags. `GET /api/cdr/config` after enrolling will show these as empty/
-   > zero if this is your first enable. If you need non-default `cdr.*`
-   > settings (especially `fail_mode: closed`), either start the process
-   > with `-cdr-enabled`/`cdr.enabled: true` from the very first boot, or
+   > **This is the common case, and it runs on a zero-valued config —
+   > though most of that config has a safe fallback, so the real exposure
+   > is narrower than "zero" sounds.** CDR ships disabled, so `loadCDR`
+   > never calls `initCDRClient` at boot and `cdrActiveCfg` is never
+   > populated with your resolved `cdr.*` config/CLI settings — it stays at
+   > its Go zero value. The FIRST runtime enable, whether via this
+   > auto-enable-on-enroll path or a bare `PUT {"enabled": true}`, only ever
+   > calls `setCDREnabledRuntime(true)` (which flips the `Enabled` field on
+   > whatever `cdrActiveCfg` currently holds) before `initCDRClient` builds
+   > the pool from it. `GET /api/cdr/config` will show `defaultProfile`,
+   > `defaultMode`, `timeoutSec`, and `maxFileSizeMB` as empty/zero on a
+   > first enable like this, but the code that actually CONSUMES those
+   > fields falls back to the same values as an unconfigured install:
+   > `cdrProfileOrDefault` uses `"default"`, `normalizeMode("")` uses
+   > `ENFORCE`, `cdrCallContext`/`NewCDRClient` use 35s, and
+   > `maxFileSizeBytes()` uses 50 MiB — so the raw API values look worse
+   > than the actual enforced behavior. **`fail_mode` is the one field with
+   > no safe fallback**: `CDRFailOpen()` treats an empty string as
+   > fail-**open**, so a deployment that specifically needs `fail_mode:
+   > closed` silently runs fail-open instead until a restart, with no other
+   > effective difference from a correctly-configured node. If you need
+   > `fail_mode: closed` (the only setting this actually breaks), either
+   > start the process with `-cdr-enabled`/`cdr.enabled: true` from the very
+   > first boot, or
    > restart once after your first GUI enrollment so `loadCDR` re-resolves
    > the full static config with CDR already enabled.
 
