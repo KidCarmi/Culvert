@@ -184,6 +184,11 @@ nav { flex: 1; padding: 12px 10px; overflow-y: auto; }
   #sidebar.open { transform: translateX(0); }
   #sidebar-toggle { display: inline-flex; }
   #main { margin-left: 0 !important; }
+  /* The topbar's action row (user badge, Change Password, Sign Out) must
+     WRAP rather than overflow: body hides overflow, so a clipped row can
+     make Sign Out unreachable on a narrow viewport. */
+  .topbar { flex-wrap: wrap; row-gap: 8px; padding: 12px 16px; }
+  .topbar-actions { flex-wrap: wrap; justify-content: flex-end; row-gap: 6px; }
 }
 /* ─── Main content ──────────────────────────────────────────────────────── */
 #main { margin-left: var(--sidebar-w); flex: 1; height: 100vh;
@@ -914,7 +919,7 @@ table.mcpx-cat-tbl td{padding:6px 10px;border-bottom:1px solid var(--border)}
         <div class="topbar-meta" id="topbar-meta">Security posture and real-time proxy overview</div>
       </div>
     </div>
-    <div style="display:flex;gap:10px;align-items:center">
+    <div class="topbar-actions" style="display:flex;gap:10px;align-items:center">
       <span class="topbar-meta" id="server-time"></span>
       <span class="pill live" id="live-pill">● LIVE</span>
       <span id="topbar-user-info" style="display:none;align-items:center;gap:6px;font-size:.8rem">
@@ -6463,12 +6468,15 @@ async function doLogout() {
 // distinct from the admin-only User Management "Edit User" flow above, which
 // lets an admin reset ANY user's password without knowing the old one — the
 // only prior GUI path, and one operators/viewers can never reach.
-function openChangePasswordModal() {
+function clearChangePasswordFields() {
   document.getElementById('cp-current').value = '';
   document.getElementById('cp-new').value = '';
   document.getElementById('cp-confirm').value = '';
   document.getElementById('cp-err').style.display = 'none';
   document.getElementById('cp-err').textContent = '';
+}
+function openChangePasswordModal() {
+  clearChangePasswordFields();
   const modal = document.getElementById('change-password-modal');
   modal.classList.add('open');
   modalActivate(modal, '#cp-current', closeChangePasswordModal);
@@ -6502,7 +6510,15 @@ async function submitChangePassword() {
     closeChangePasswordModal();
     toast('Password changed.');
   } catch (err) {
-    showChangePasswordErr(err.message || 'Password change failed.');
+    if (err && err.message === 'Unauthorized') {
+      // The session expired: api() has already raised the login overlay.
+      // Clear and close this dialog so the typed passwords are never left
+      // behind the overlay for whoever signs in next.
+      clearChangePasswordFields();
+      closeChangePasswordModal();
+    } else {
+      showChangePasswordErr(err.message || 'Password change failed.');
+    }
   }
   btn.disabled = false; btn.textContent = 'Save';
 }

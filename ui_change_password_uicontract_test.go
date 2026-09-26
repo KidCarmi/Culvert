@@ -144,3 +144,51 @@ func TestUIContract_ChangePasswordModalIsAnAnnouncedDialog(t *testing.T) {
 		}
 	}
 }
+
+// A 401 during submit means api() has already raised the login overlay; the
+// dialog must be cleared and closed rather than left (with the typed
+// passwords) behind the overlay for whoever signs in next.
+func TestUIContract_ChangePasswordClearedOnReauth(t *testing.T) {
+	html, err := os.ReadFile(staticIndexHTMLPath())
+	if err != nil {
+		t.Fatalf("read index.html: %v", err)
+	}
+	s := string(html)
+	i := strings.Index(s, "async function submitChangePassword")
+	if i < 0 {
+		t.Fatal("submitChangePassword not found")
+	}
+	body := s[i:]
+	if j := strings.Index(body, "\n}\n"); j > 0 {
+		body = body[:j]
+	}
+	for _, want := range []string{`err.message === 'Unauthorized'`, `clearChangePasswordFields()`, `closeChangePasswordModal()`} {
+		if !strings.Contains(body, want) {
+			t.Errorf("submitChangePassword must handle reauthentication: missing %q", want)
+		}
+	}
+}
+
+// The topbar action row gained a button; on narrow viewports it must wrap
+// rather than overflow (body hides overflow, so Sign Out could be clipped).
+func TestUIContract_TopbarActionsWrapOnNarrowViewports(t *testing.T) {
+	html, err := os.ReadFile(staticIndexHTMLPath())
+	if err != nil {
+		t.Fatalf("read index.html: %v", err)
+	}
+	s := string(html)
+	if !strings.Contains(s, `class="topbar-actions"`) {
+		t.Fatal("topbar action row must carry class topbar-actions")
+	}
+	i := strings.Index(s, "@media(max-width:860px) {\n  #sidebar {")
+	if i < 0 {
+		t.Fatal("narrow-viewport media block not found")
+	}
+	block := s[i:]
+	block = block[:strings.Index(block, "\n}\n")]
+	for _, want := range []string{".topbar { flex-wrap: wrap;", ".topbar-actions { flex-wrap: wrap;"} {
+		if !strings.Contains(block, want) {
+			t.Errorf("narrow-viewport block must contain %q", want)
+		}
+	}
+}
