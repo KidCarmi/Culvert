@@ -73,3 +73,31 @@ func clearUISessionCookie(w http.ResponseWriter, r *http.Request) {
 		SameSite: http.SameSiteStrictMode,
 	})
 }
+
+// sessionRoleOrReject resolves the role carried by a verified session cookie
+// into a role this build can evaluate, or refuses the session outright.
+//
+// THE EMPTY VALUE IS THE ONLY COMPATIBILITY CASE. Sessions minted before the
+// role field existed carry "" and must keep resolving to RoleAdmin — those are
+// pre-RBAC single-admin deployments and narrowing that would lock them out
+// mid-session. Every OTHER unenrolled value is refused.
+//
+// The two used to be one branch (`if !role.HasRole(RoleViewer) { role = RoleAdmin }`),
+// and the predicate does not distinguish them: rolePriority is a map, so an
+// unenrolled key reads as 0 and "" and "read-only" and "Admin" were all equally
+// below viewer — so all of them were promoted to ADMIN. The roster loader's
+// missing role validation (see loadedRosterRole) made that reachable from a
+// restored or hand-edited ui_users.json without forging anything: the value
+// rides a legitimately HMAC-signed cookie the appliance minted itself.
+//
+// Splitting the branch is what makes the compat case narrow enough to keep.
+func sessionRoleOrReject(sessionRole string) (UIRole, bool) {
+	if sessionRole == "" {
+		return RoleAdmin, true // pre-RBAC session, minted before the role field
+	}
+	role := UIRole(sessionRole)
+	if !roleEnrolled(role) {
+		return "", false
+	}
+	return role, true
+}

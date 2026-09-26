@@ -22,6 +22,10 @@ func loadPolicyLearning(cfg policyLearningStartupConfig) {
 	policyLearnAdminMu.Lock()
 	defer policyLearnAdminMu.Unlock()
 	policyLearnPaths = cfg
+	// Residual-quarantine scan runs whether or not the feature is enabled:
+	// a store quarantined while enabled stays unreconciled on disk after a
+	// disable + restart, and must stay visible (/readyz, alert, diagnostics).
+	noteResidualQuarantine("policy_learning", cfg.StorePath)
 	desired, _ := policyLearnSnapshotState()
 	if !desired.Enabled {
 		return

@@ -146,6 +146,10 @@ func apiStats(w http.ResponseWriter, r *http.Request) {
 		// in-memory ring keeps only the newest 500 entries and is wiped on
 		// restart, so this is the only way an operator can see the gap.
 		"auditLogWriteErrors": auditWriteErrors(),
+		// SEC-RBAC-ROLE-1. Non-zero means ui_users.json carries a role this
+		// build does not enroll; the account was clamped to viewer at load, so
+		// its effective authority is deliberately lower than the file states.
+		"uiRosterRoleClamped": cfg.ActiveRosterRoleClamps(),
 		// Non-zero means the async JSONL persistence queue saturated: no
 		// entry was lost, but request goroutines waited on the disk.
 		"logBackpressure": reqlog.Backpressure(),

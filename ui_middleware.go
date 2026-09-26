@@ -284,10 +284,19 @@ func uiAuthMiddleware(next http.Handler) http.Handler {
 				}
 				role = curRole
 			}
-			if !role.HasRole(RoleViewer) {
-				role = RoleAdmin // backwards compat: sessions without role = admin
+			// SEC-RBAC-ROLE-1: the only compatibility value is the EMPTY role
+			// (pre-RBAC sessions and pre-RBAC roster records); every other
+			// unenrolled role is refused and the cookie cleared so the holder
+			// re-authenticates and is re-issued a role this build can evaluate.
+			// For a local session the value resolved here is the durable
+			// record's (clamped at load by loadedRosterRole), never the cookie's.
+			resolved, ok := sessionRoleOrReject(string(role))
+			if !ok {
+				clearUISessionCookie(w, r)
+				http.Error(w, "Unauthorized", http.StatusUnauthorized)
+				return
 			}
-			ctx := context.WithValue(r.Context(), uiRoleKey{}, role)
+			ctx := context.WithValue(r.Context(), uiRoleKey{}, resolved)
 			next.ServeHTTP(w, r.WithContext(ctx))
 			return
 		}

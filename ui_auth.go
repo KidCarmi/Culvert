@@ -251,11 +251,16 @@ func apiAuthStatus(w http.ResponseWriter, r *http.Request) {
 			}
 			role, gen = curRole, curGen
 		}
-		if !role.HasRole(RoleViewer) {
-			role = RoleAdmin
+		// SEC-RBAC-ROLE-1: same fail-closed resolution uiAuthMiddleware applies.
+		// Reporting a session whose role this build does not enroll as
+		// `role: admin` would have the console render the full admin surface
+		// for a principal every gated endpoint is about to refuse; treating it
+		// as not-logged-in is both honest and the safe direction. Only the
+		// EMPTY role keeps its pre-RBAC meaning (admin).
+		if resolved, ok := sessionRoleOrReject(string(role)); ok {
+			jsonOKAuthStatus(w, map[string]any{"loggedIn": true, "user": sess.Sub, "role": resolved, "securityGeneration": gen})
+			return
 		}
-		jsonOKAuthStatus(w, map[string]any{"loggedIn": true, "user": sess.Sub, "role": role, "securityGeneration": gen})
-		return
 	}
 	// Accept Basic Auth header for CLI/API callers.
 	user, pass, ok := r.BasicAuth()
