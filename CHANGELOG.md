@@ -107,6 +107,56 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   behind a reverse proxy should confirm it sets `Host` / `X-Forwarded-Host`
   explicitly rather than appending a client value — see
   `docs/operator/dp-bootstrap-artifact-safety.md`.
+- Admin-roster changes reported success on a durable write that never landed
+  (CHAOS-70). `ui_users.json` is the only durable home of the admin roster,
+  password hashes, roles, TOTP secrets, consumed backup codes and the TOTP
+  replay counter, and every mutation changes memory first and persists second.
+  Three handlers logged the persist error and answered 2xx anyway — precisely
+  the three an operator reaches for during an incident. On a full or read-only
+  data volume, deleting a compromised administrator returned `204 No Content`
+  and was audited as done while the account returned at the next restart with
+  its original password hash, role and TOTP enrolment; a role downgrade returned
+  `{"ok":true}` and the privilege came back; a password rotation returned
+  `{"ok":true}` and the leaked password still authenticated. The response, the
+  UI and the audit log all reported success, and the divergence between memory
+  and disk stayed invisible until a restart materialised it. The same rule was
+  already written down, reasoned out and tested twenty lines away — for the
+  one-time setup wizard only. `POST/DELETE /api/auth/users` and
+  `POST /api/auth/change-password` are now durable-or-refused: the in-memory change is
+  rolled back wholesale (hash, role, TOTP secret, backup codes and replay
+  counter together), the request fails with an actionable `500`, and the
+  refusal is audited as `<action>.refused`. `fileutil.ErrReplacedNotSynced` is
+  deliberately treated as committed — the content already landed. New counters
+  `culvert_admin_roster_persist_failures_total` and
+  `culvert_admin_roster_persist_degraded_total` name which administrative
+  decision was affected, which the pre-existing `storage_write_failed` alert
+  cannot. The two login-path roster writes (TOTP replay counter, backup-code
+  consumption) stay fail-open by recorded decision — refusing them would lock an
+  operator out of the appliance during the incident they need it to diagnose —
+  but no longer discard their error. See
+  `docs/operator/admin-roster-durability.md`.
+- **Security (admin UI): the Settings panel's Save button changed the admin
+  credential without ever writing it to disk, accepted an empty password, and
+  could disable local authentication.** `POST /api/settings` called the
+  credential setter and nothing else, and the admin credential is not carried in
+  `admin_settings.json`, so a rotated admin password answered `200 {"ok":true}`,
+  was audited as a successful `settings.update`, authenticated immediately — and
+  **reverted at the next restart, where the previous (possibly leaked) password
+  authenticated again**. No disk fault was required, which makes it worse than
+  the three handlers above. Password complexity was validated only when the field
+  was non-empty, so saving the panel with a blank password box installed
+  `bcrypt("")` as an admin credential — and, for a changed username, a new admin
+  account that authenticated with no password; clearing both fields disabled local
+  admin authentication outright, behind a *"Settings saved"* toast. Empty user and
+  empty password are now refused with `400` (run unmatched traffic without
+  credentials via `defaultAuthOutcome=Exempt`, which says so), and the credential
+  change is durable-or-refused through the same transaction as the other three.
+  Fixing the persistence alone would have been a regression, because persisting is
+  what would have made the two input faults survive a restart. The roster snapshot
+  now also captures the legacy credential pair, so a refused rotation **restores
+  the previous credential** instead of deleting the account — a control caught
+  that the first version of this fix locked the administrator out.  See
+  `docs/operator/admin-roster-durability.md`.
 
 - Public release promotion ran ahead of the evidence that was supposed to
   authorize it. On `ci.yml` run 35507615339 (SHA `3d8c9bb`) the `docker` job
@@ -479,6 +529,16 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Added
 
+- `GET /api/policy` now reports `persisted` (whether the access-rule
+  rulebase is written to disk vs. in-memory only), and the Access Rules
+  panel shows a red banner when it is false. Every rule mutation already
+  returned 200 OK regardless of persistence — `PolicyStore.SaveErr()` is a
+  no-op when no `-policy`/`policy_file` path is configured, which is also
+  `config.example.yaml`'s shipped default — so an admin editing rules
+  through the GUI had no way to discover that a restart would silently
+  discard the entire rulebase short of it actually happening. Mirrors the
+  existing `idpRegistry.Persisted()` warning already shown for identity
+  providers. No behavior change: read-only field + banner.
 - New React/TypeScript admin frontend, Batch 2 (`CULVERT_EXPERIMENTAL_UI`,
   `/app/`): Policies (Access Rules, Authentication Rules, Policy Tester,
   Header Rewrite, Policy Learning), Objects (URL Categories, Category Groups,
