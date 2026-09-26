@@ -184,15 +184,26 @@ nav { flex: 1; padding: 12px 10px; overflow-y: auto; }
   #sidebar.open { transform: translateX(0); }
   #sidebar-toggle { display: inline-flex; }
   #main { margin-left: 0 !important; }
+  /* The topbar's action row (user badge, Change Password, Sign Out) must
+     WRAP rather than overflow: body hides overflow, so a clipped row can
+     make Sign Out unreachable on a narrow viewport. */
+  .topbar { flex-wrap: wrap; row-gap: 8px; padding: 12px 16px; }
+  .topbar-actions { flex-wrap: wrap; justify-content: flex-end; row-gap: 6px; }
 }
 /* ─── Main content ──────────────────────────────────────────────────────── */
 #main { margin-left: var(--sidebar-w); flex: 1; height: 100vh;
         overflow-y: auto; display: flex; flex-direction: column; }
+/* The topbar and its action row WRAP at every width, not only below the
+   860px sidebar breakpoint: just above it the fixed sidebar still leaves
+   #main narrower than the action row, and body hides overflow, so a
+   non-wrapping row would clip Sign Out off-screen. */
 .topbar {
   padding: 14px 28px; border-bottom: 1px solid var(--border);
   display: flex; align-items: center; justify-content: space-between;
+  flex-wrap: wrap; row-gap: 8px;
   background: var(--surface); position: sticky; top: 0; z-index: 50;
 }
+.topbar-actions { flex-wrap: wrap; justify-content: flex-end; row-gap: 6px; }
 .topbar-title { font-size: 1rem; font-weight: 600; }
 .topbar-meta  { font-size: .75rem; color: var(--muted); }
 .pill {
@@ -914,13 +925,14 @@ table.mcpx-cat-tbl td{padding:6px 10px;border-bottom:1px solid var(--border)}
         <div class="topbar-meta" id="topbar-meta">Security posture and real-time proxy overview</div>
       </div>
     </div>
-    <div style="display:flex;gap:10px;align-items:center">
+    <div class="topbar-actions" style="display:flex;gap:10px;align-items:center">
       <span class="topbar-meta" id="server-time"></span>
       <span class="pill live" id="live-pill">● LIVE</span>
       <span id="topbar-user-info" style="display:none;align-items:center;gap:6px;font-size:.8rem">
         <span id="topbar-username" style="color:var(--muted)"></span>
         <span id="topbar-role-badge" style="padding:2px 8px;border-radius:99px;font-size:.7rem;font-weight:700;text-transform:uppercase"></span>
       </span>
+      <button class="btn ghost sm" id="change-pw-btn" data-click="openChangePasswordModal" style="display:none" title="Change your own password">Change Password</button>
       <button class="btn ghost sm" id="logout-btn" data-click="doLogout" style="display:none">Sign Out</button>
     </div>
   </div>
@@ -5524,6 +5536,9 @@ document.addEventListener('click', e => {
     case 'toggleTheme':       toggleTheme(); break;
     case 'toggleSidebar':     document.getElementById('sidebar').classList.toggle('open'); break;
     case 'doLogout':          doLogout(); break;
+    case 'openChangePasswordModal':  openChangePasswordModal(); break;
+    case 'closeChangePasswordModal': closeChangePasswordModal(); break;
+    case 'submitChangePassword':     submitChangePassword(); break;
     case 'switchView':        e.preventDefault(); switchView(arg); break;
     case 'dismissParent':     el.parentElement.parentElement.style.display='none'; break;
 
@@ -6438,15 +6453,38 @@ function applySession(user, role) {
     el.style.display = myLevel >= required ? '' : 'none';
   });
 
-  // Logout button
+  // Logout button + self-service password change (any authenticated role —
+  // change-password-modal below hits /api/auth/change-password, viewer floor).
   document.getElementById('logout-btn').style.display = (user || role) ? '' : 'none';
+  document.getElementById('change-pw-btn').style.display = (user || role) ? '' : 'none';
+  // Revealing/hiding the session controls can add or remove a wrapped topbar
+  // row; re-measure so sticky bars stay below it even without ResizeObserver.
+  syncTopbarHeight();
 }
 
 function showLoginOverlay() {
+  // Every session-loss path (a 401 from ANY api() call, e.g. the 3 s
+  // dashboard tick, or an explicit logout) lands here, so the password
+  // dialog is dismissed centrally: typed passwords must never survive
+  // behind the overlay for whoever signs in next.
+  dismissChangePasswordModal();
   applySession('', '');
   const el = document.getElementById('login-overlay');
   if (el) { el.style.display = 'flex'; }
 }
+// The narrow-viewport topbar wraps onto extra rows, so sticky bars below it
+// (.reorder-bar) must offset by its measured height, not a fixed 52px.
+function syncTopbarHeight() {
+  const tb = document.querySelector('.topbar');
+  if (!tb) return;
+  document.documentElement.style.setProperty('--topbar-h', tb.offsetHeight + 'px');
+}
+document.addEventListener('DOMContentLoaded', function() {
+  syncTopbarHeight();
+  const tb = document.querySelector('.topbar');
+  if (tb && typeof ResizeObserver === 'function') new ResizeObserver(syncTopbarHeight).observe(tb);
+  else window.addEventListener('resize', syncTopbarHeight);
+});
 function hideLoginOverlay() {
   const el = document.getElementById('login-overlay');
   if (el) { el.style.display = 'none'; }
@@ -6455,6 +6493,196 @@ async function doLogout() {
   await fetch('/api/auth/logout', { method: 'POST' }).catch(() => {});
   applySession('', '');
   showLoginOverlay();
+}
+
+// ── Self-service password change ─────────────────────────────────────────
+// Every authenticated role (viewer/operator/admin) can rotate their own
+// password from POST /api/auth/change-password (server verifies the current
+// password and audits the change as "auth.password_change"). This is
+// distinct from the admin-only User Management "Edit User" flow above, which
+// lets an admin reset ANY user's password without knowing the old one — the
+// only prior GUI path, and one operators/viewers can never reach.
+//
+// FE-6AR merge 12: the handler is FENCED (FE-6A.2). The caller must name the
+// SECURITY GENERATION it observed for its OWN account — 428 without it, 409
+// `stale` when the account changed since — and the appliance decides that
+// BEFORE anything is written. So the dialog BINDS, at open, the
+// authenticated subject and its server-owned generation from
+// GET /api/auth/status, sends exactly that generation, and never obtains a
+// fresh one to retry a refused submit: a 409/428 is shown as the refusal it
+// is and the operator must close and reopen the dialog (which re-binds) — a
+// deliberate act, never a silent re-fence. Three outcomes are kept apart:
+// a REFUSAL (typed non-2xx: nothing was written, the dialog stays open), a
+// CHANGE (a 2xx whose body is action-bound: ok, selfAffected, a generation
+// strictly later than the one sent) and an UNPROVEN outcome (the request
+// left the browser and no usable answer came back — the write may or may not
+// have landed; the typed secrets are dropped and no success is claimed).
+let _cpBound = null; // {subject, generation} bound at open; null = nothing may be sent
+function clearChangePasswordFields() {
+  document.getElementById('cp-current').value = '';
+  document.getElementById('cp-new').value = '';
+  document.getElementById('cp-confirm').value = '';
+  document.getElementById('cp-err').style.display = 'none';
+  document.getElementById('cp-err').textContent = '';
+}
+// _cpReqGen names the dialog instance a pending submit belongs to. Every open
+// and close advances it, so a request that completes after the dialog was
+// cancelled (or closed and reopened) cannot close, re-enable or write an error
+// into a dialog it no longer owns.
+let _cpReqGen = 0;
+function resetChangePasswordSaveBtn() {
+  const btn = document.getElementById('cp-save-btn');
+  btn.disabled = false; btn.textContent = 'Save';
+}
+// bindChangePasswordAuthority captures the subject + security generation the
+// appliance reports for THIS session. Save stays disabled until it succeeds;
+// an answer that does not name the signed-in user with a positive generation
+// binds nothing and the dialog says so (no request can be sent).
+async function bindChangePasswordAuthority(gen) {
+  _cpBound = null;
+  const btn = document.getElementById('cp-save-btn');
+  btn.disabled = true; btn.textContent = 'Confirming…';
+  try {
+    const st = await api('/api/auth/status');
+    if (gen !== _cpReqGen) return; // dialog was dismissed/reopened meanwhile
+    const subject = st && typeof st.user === 'string' ? st.user : '';
+    const g = st && Number.isInteger(st.securityGeneration) ? st.securityGeneration : 0;
+    if (!st || st.loggedIn !== true || !subject || subject !== uiUsername || g <= 0) {
+      showChangePasswordErr('Your session\'s authority could not be confirmed. Sign out and sign in again before changing your password.');
+      return;
+    }
+    _cpBound = { subject: subject, generation: g };
+    resetChangePasswordSaveBtn();
+  } catch (err) {
+    if (gen !== _cpReqGen) return;
+    if (err && err.message === 'Unauthorized') { clearChangePasswordFields(); closeChangePasswordModal(); return; }
+    showChangePasswordErr('Could not confirm your account\'s current state (' + (err && err.message ? err.message : 'request failed') + '). Close and reopen this dialog to try again.');
+  }
+}
+function openChangePasswordModal() {
+  _cpReqGen++;
+  clearChangePasswordFields();
+  resetChangePasswordSaveBtn();
+  const modal = document.getElementById('change-password-modal');
+  modal.classList.add('open');
+  modalActivate(modal, '#cp-current', closeChangePasswordModal);
+  bindChangePasswordAuthority(_cpReqGen);
+}
+function dismissChangePasswordModal() {
+  const modal = document.getElementById('change-password-modal');
+  if (!modal || !modal.classList.contains('open')) return;
+  clearChangePasswordFields();
+  closeChangePasswordModal();
+}
+function closeChangePasswordModal() {
+  _cpReqGen++;
+  _cpBound = null;
+  // Every close path (Cancel, Escape, success, session loss) clears the typed
+  // passwords so they never linger in the hidden DOM.
+  clearChangePasswordFields();
+  const modal = document.getElementById('change-password-modal');
+  modalDeactivate(modal);
+  modal.classList.remove('open');
+}
+function showChangePasswordErr(msg) {
+  const el = document.getElementById('cp-err');
+  el.textContent = msg;
+  el.style.display = 'block';
+}
+// ChangePasswordRefused: a typed non-2xx — the appliance decided before
+// writing, so nothing changed. userText is what the dialog shows.
+class ChangePasswordRefused extends Error {
+  constructor(status, text) {
+    super('refused');
+    this.status = status;
+    let code = '';
+    try { const j = JSON.parse(text); if (j && typeof j.code === 'string') code = j.code; } catch (_) {}
+    this.code = code;
+    if (status === 428) {
+      this.userText = 'The appliance did not receive the account state this dialog was opened with. Nothing was changed. Close and reopen the dialog.';
+    } else if (status === 409) {
+      this.userText = 'Your account changed since this dialog was opened (another session or an administrator). Nothing was changed. Close and reopen the dialog, then try again.';
+    } else if (status === 403) {
+      this.userText = 'Current password is incorrect.';
+    } else if (status === 503) {
+      this.userText = 'This appliance has no durable administrator roster; password changes are refused. Nothing was changed.';
+    } else if (status >= 500) {
+      this.userText = 'The appliance refused the change because it could not be persisted. Nothing was changed.';
+    } else {
+      this.userText = apiErrorText(text) || 'Password change failed.';
+    }
+  }
+}
+// changePasswordProof accepts a 2xx ONLY when it is action-bound to this
+// dialog's request: JSON, ok, selfAffected and a security generation strictly
+// later than the one sent (the appliance advances it on every credential
+// change). Anything else is not a success this dialog may report.
+async function changePasswordProof(r, bound) {
+  const ct = (r.headers.get('content-type') || '').toLowerCase();
+  if (!ct.startsWith('application/json')) return null;
+  let j;
+  try { j = await r.json(); } catch (_) { return null; }
+  if (!j || j.ok !== true || j.selfAffected !== true) return null;
+  if (!Number.isInteger(j.securityGeneration) || j.securityGeneration <= bound.generation) return null;
+  return { generation: j.securityGeneration };
+}
+async function submitChangePassword() {
+  const current = document.getElementById('cp-current').value;
+  const next    = document.getElementById('cp-new').value;
+  const confirm = document.getElementById('cp-confirm').value;
+  if (!current || !next) return showChangePasswordErr('Current and new password are required.');
+  if (next.length < 8) return showChangePasswordErr('New password must be at least 8 characters.');
+  if (!meetsPasswordComplexity(next)) return showChangePasswordErr('Password must contain at least one uppercase letter, one lowercase letter, and one digit.');
+  if (next !== confirm) return showChangePasswordErr('New password and confirmation do not match.');
+  // The fence: only the subject + generation bound at open may be sent, and
+  // only while the signed-in user is still that subject. Nothing is fetched
+  // here to fill a missing or stale binding.
+  const bound = _cpBound;
+  if (!bound || bound.subject !== uiUsername || !(bound.generation > 0)) {
+    return showChangePasswordErr('Your account\'s current state is not confirmed for this dialog. Close and reopen it.');
+  }
+
+  const btn = document.getElementById('cp-save-btn');
+  btn.disabled = true; btn.textContent = 'Saving…';
+  const gen = _cpReqGen;
+  try {
+    const r = await apiFetch('/api/auth/change-password', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ current_password: current, new_password: next, generation: bound.generation })
+    });
+    if (r.status === 401) throw new Error('Unauthorized');
+    if (!r.ok) throw new ChangePasswordRefused(r.status, await r.text().catch(() => ''));
+    const proof = await changePasswordProof(r, bound);
+    if (!proof) throw new Error('unproven');
+    // The change happened even if the dialog was dismissed meanwhile, so the
+    // user is always told; only the dialog it was sent from is closed.
+    toast('Password changed.');
+    if (gen === _cpReqGen) closeChangePasswordModal();
+  } catch (err) {
+    if (gen !== _cpReqGen) return; // dialog was dismissed/reopened: not ours
+    if (err && err.message === 'Unauthorized') {
+      // The session expired or its authority moved (the account changed
+      // since this dialog was opened, so the session's generation no longer
+      // matches the record): apiFetch has already raised the login overlay.
+      // Clear and close this dialog so the typed passwords are never left
+      // behind the overlay for whoever signs in next.
+      clearChangePasswordFields();
+      closeChangePasswordModal();
+    } else if (err instanceof ChangePasswordRefused) {
+      // Nothing was written. The dialog stays open with the refusal; a stale
+      // or missing generation is NOT re-fetched and re-sent from here.
+      showChangePasswordErr(err.userText);
+    } else {
+      // UNPROVEN: the request left the browser and no action-bound answer
+      // came back (transport death, a non-JSON 2xx, a body that does not
+      // name this change). The write may or may not have landed. Drop the
+      // typed secrets with the dialog and say exactly that — never success.
+      closeChangePasswordModal();
+      toast('The password change could not be confirmed. Sign out and sign in again to check which password is in effect.', 'error');
+    }
+  }
+  if (gen === _cpReqGen) resetChangePasswordSaveBtn();
 }
 
 // ── Users & Roles ────────────────────────────────────────────────────────
@@ -19717,6 +19945,31 @@ function resetBlockPage() {
   </div>
 </div>
 
+<!-- ── Self-service "Change my password" modal (topbar, any role) ──────── -->
+<div id="change-password-modal" role="dialog" aria-modal="true" aria-labelledby="cp-title" style="position:fixed;inset:0;background:rgba(0,0,0,.65);z-index:300;align-items:center;justify-content:center">
+  <div class="setup-card" style="width:360px;max-width:94vw;max-height:calc(100vh - 32px);overflow-y:auto">
+    <h2 id="cp-title" style="font-size:1.15rem;margin-bottom:4px">Change Password</h2>
+    <p style="font-size:.82rem;color:var(--muted);margin-bottom:18px">Update the password for your own account.</p>
+    <div class="form-group">
+      <label class="form-label" for="cp-current">Current password</label>
+      <input id="cp-current" type="password" class="input" style="width:100%" autocomplete="current-password">
+    </div>
+    <div class="form-group">
+      <label class="form-label" for="cp-new">New password <span style="color:var(--muted)">(min 8 chars, incl. uppercase, lowercase &amp; a digit)</span></label>
+      <input id="cp-new" type="password" class="input" style="width:100%" autocomplete="new-password">
+    </div>
+    <div class="form-group">
+      <label class="form-label" for="cp-confirm">Confirm new password</label>
+      <input id="cp-confirm" type="password" class="input" style="width:100%" autocomplete="new-password">
+    </div>
+    <div class="setup-err" id="cp-err" role="alert" aria-live="assertive" style="margin-bottom:10px;display:none"></div>
+    <div style="display:flex;gap:10px;margin-top:6px">
+      <button class="btn" id="cp-save-btn" data-click="submitChangePassword">Save</button>
+      <button class="btn ghost" data-click="closeChangePasswordModal">Cancel</button>
+    </div>
+  </div>
+</div>
+
 <!-- ── PAC DIRECT-exception governance modal (PEI P2) ───────────────────── -->
 <div id="pac-gov-modal" style="position:fixed;inset:0;background:rgba(0,0,0,.65);z-index:300;align-items:center;justify-content:center">
   <div class="setup-card" style="width:440px;max-width:94vw">
@@ -19776,6 +20029,8 @@ function resetBlockPage() {
 .role-badge-viewer   { background:rgba(156,163,175,.15);color:#9ca3af; }
 #user-modal { display:none }
 #user-modal.open { display:flex }
+#change-password-modal { display:none }
+#change-password-modal.open { display:flex }
 .sched-day-lbl {
   display:inline-flex;align-items:center;gap:4px;cursor:pointer;
   padding:3px 8px;border-radius:6px;font-size:.78rem;border:1px solid var(--border);
@@ -19802,8 +20057,10 @@ function resetBlockPage() {
    warn tokens stay single-sourced; this only adds the sticky/flex deltas.
    top offset ≈ the sticky .topbar's height (z-index 50, same #main scroller)
    - top:0 would slide the bar underneath it exactly when the rulebase is
-   long enough to scroll. */
-.reorder-bar { position:sticky;top:52px;z-index:40;display:flex;gap:10px;align-items:center;
+   long enough to scroll. --topbar-h tracks the topbar's ACTUAL height
+   (syncTopbarHeight) because the topbar wraps onto several rows on narrow
+   viewports; 52px is only the single-row fallback. */
+.reorder-bar { position:sticky;top:var(--topbar-h, 52px);z-index:40;display:flex;gap:10px;align-items:center;
   margin:8px 16px 0;font-size:.82rem; }
 .where-used { list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:6px; }
 .where-used-item { display:flex;align-items:center;gap:8px;padding:8px 10px;border:1px solid var(--border);
