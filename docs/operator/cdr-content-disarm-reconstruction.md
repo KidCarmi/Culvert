@@ -156,9 +156,20 @@ Two ways to turn CDR on, and either one is enough — you do not need both:
    disable CDR durably, remove `-cdr-enabled` / `cdr.enabled: true` from the
    static config as well as toggling it off at runtime.
 
-The enrolled-instance registry (names, endpoints, paths, and the last-known
-`Version`/`LastHealth` reported by a poll — **not** credential material) is
-tracked at `<dataDir>/cdr_instances.json`. Circuit-breaker state (`cbState`,
+The enrolled-instance registry (names, endpoints, paths — **not** credential
+material) is tracked at `<dataDir>/cdr_instances.json`. **`Version` and
+`LastHealth` are in-memory GUI telemetry, not reliably persisted state.**
+The 15-second health poller updates them via
+`CDRInstanceRegistry.SetHealthMeta`, whose own doc comment says so
+explicitly: "Deliberately NOT persisted — purely for the admin GUI." A
+health poll alone never writes `cdr_instances.json` or bumps the registry
+version. `saveLocked` marshals the entire in-memory instance list, so a
+*later, unrelated* mutation that does persist (a rotation stage, a
+renewal, a delete) can incidentally carry whatever `Version`/`LastHealth`
+values happen to be in memory at that moment — but don't rely on this
+file for a reliable last-known-health record across a restart; treat
+`GET /api/cdr/instances` (which reads the live pool) as the source of
+truth instead. Circuit-breaker state (`cbState`,
 `cbConsecFails`, `cbTotalOpens`, `cbTotalTrips`) is **not** part of this
 file: `CDREnrolledInstance` carries no breaker fields, and `GET
 /api/cdr/instances` merges that state in live from the in-memory
@@ -189,9 +200,13 @@ and re-toggle CDR on after a restore.
 `ConfigSnapshot`, the config-version rollback surface, or config
 export/import. Enrollment, policy rules, and the enable toggle are per-node
 state — each node that terminates inspected TLS and needs CDR must be
-enrolled with Sluice separately. (Client-key material at rest is covered
-by the shared key-at-rest mechanism — see `key-at-rest.md`, `cdr-client`
-key class.)
+enrolled with Sluice separately. (Client-key material at rest is
+**opt-in, off by default**: `cdrClientKeyEncryptionEnabled()` returns
+false unless `CULVERT_CDR_CLIENT_KEY_ENCRYPT` is set truthy, and
+enrollment initially writes `client.key` as a plaintext PEM at mode
+`0600` — encryption only applies to new writes/migration once that env
+var is set. See `key-at-rest.md`, `cdr-client` key class, for how to
+enable it.)
 
 ## Failure behavior
 
