@@ -1620,6 +1620,16 @@ culvert_storage_write_last_failure_age_seconds %d
 	// _unavailable is 1 while a backend is in its cooldown, and
 	// _gated_denials_total is the blast radius — requests denied without
 	// contacting the backend while it was gated.
+	//
+	// Terminology note: this is the SAME condition the "identity_backend_unreachable"
+	// alert (internal/alerts/store.go) and the "identity_backend" operator-contract
+	// row (diagnostics.go checkIdentityBackend) name. The metric prefix is still
+	// "auth_backend": dashboards and alert rules key off these exact series names,
+	// so it is not renamed in place. A rename is tracked as terminology finding
+	// T-61 and would need a dual-emission window, as the T-31 ClamAV rename did
+	// (culvert_clam_scan_errors_total, pinned by clamav_metrics_dualemit_test.go).
+	// Until then, read this comment as the cross-reference from the alert or the
+	// contract row to the PromQL series.
 	abSnap := authBackendHealthStatus()
 	abDegraded := 0
 	if abSnap.Degraded {

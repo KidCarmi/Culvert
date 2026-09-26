@@ -231,12 +231,15 @@ func apiAuthStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	sess, err := readUISessionCookie(r)
 	if err == nil && sess != nil {
-		role := UIRole(sess.Role)
-		if !role.HasRole(RoleViewer) {
-			role = RoleAdmin
+		// Same fail-closed resolution uiAuthMiddleware applies. Reporting a
+		// session whose role this build does not enroll as `role: admin` would
+		// have the console render the full admin surface for a principal every
+		// gated endpoint is about to refuse; treating it as not-logged-in is
+		// both honest and the safe direction.
+		if role, ok := sessionRoleOrReject(sess.Role); ok {
+			jsonOKAuthStatus(w, map[string]any{"loggedIn": true, "user": sess.Sub, "role": role})
+			return
 		}
-		jsonOKAuthStatus(w, map[string]any{"loggedIn": true, "user": sess.Sub, "role": role})
-		return
 	}
 	// Accept Basic Auth header for CLI/API callers.
 	user, pass, ok := r.BasicAuth()
@@ -471,8 +474,11 @@ func apiAuthChangePassword(w http.ResponseWriter, r *http.Request) {
 	// remediation for a leaked admin credential; a 200 over a failed write
 	// leaves the OLD password authenticating after the next restart while the
 	// operator believes the leak is closed.
+	//
+	// Self-service: keep the account's role (and any persisted raw role) —
+	// a password change is not a role assignment (SEC-RBAC-ROLE-1).
 	if err := cfg.mutateRosterDurably(func() error {
-		return cfg.SetUIUser(username, body.NewPass, role)
+		return cfg.ChangeUIUserPassword(username, body.NewPass, role)
 	}); !rosterChangeCommitted(err) {
 		if refuseRosterChange(w, r, "auth.password_change", username, err) {
 			return
