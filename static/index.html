@@ -1424,7 +1424,7 @@ table.mcpx-cat-tbl td{padding:6px 10px;border-bottom:1px solid var(--border)}
             </div>
             <div style="display:flex;gap:6px">
               <button class="btn" data-click="saveBlocklistFeed">Add / Update Feed</button>
-              <button class="btn ghost" data-click="syncBlocklistFeed">Sync All Now</button>
+              <button class="btn ghost" data-click="syncBlocklistFeed">Refresh All Now</button>
             </div>
           </div>
           <div id="s-bl-feed-list" style="margin-bottom:8px"></div>
@@ -1607,7 +1607,7 @@ table.mcpx-cat-tbl td{padding:6px 10px;border-bottom:1px solid var(--border)}
           <div id="sec-yara-warnings" style="display:none;background:rgba(234,179,8,.1);border-left:3px solid var(--yellow);padding:8px 12px;border-radius:6px;margin-bottom:14px;font-size:.78rem;color:var(--yellow)"></div>
 
           <div style="display:flex;gap:10px;flex-wrap:wrap">
-            <button class="btn ghost sm" data-click="syncThreatFeeds"><svg class="ico" aria-hidden="true"><use href="#i-refresh"/></svg> Sync Feeds Now</button>
+            <button class="btn ghost sm" data-click="syncThreatFeeds"><svg class="ico" aria-hidden="true"><use href="#i-refresh"/></svg> Refresh Feeds Now</button>
             <button class="btn ghost sm" data-click="reloadYARA"><svg class="ico" aria-hidden="true"><use href="#i-refresh"/></svg> Reload YARA Rules</button>
           </div>
           <div id="sec-scan-action-status" style="display:none;margin-top:10px;font-size:.8rem"></div>
@@ -9646,15 +9646,15 @@ async function syncThreatFeeds() {
   const statusEl = document.getElementById('sec-scan-action-status');
   statusEl.style.display = 'block';
   statusEl.style.color = 'var(--muted)';
-  statusEl.textContent = 'Syncing threat feeds…';
+  statusEl.textContent = 'Refreshing threat feeds…';
   try {
     await api('/api/security-scan/feeds/sync', { method: 'POST' });
     statusEl.style.color = 'var(--green)';
-    statusEl.textContent = 'Sync complete.';
+    statusEl.textContent = 'Refresh complete.';
     loadSecScanStatus();
   } catch(e) {
     statusEl.style.color = 'var(--red)';
-    statusEl.textContent = 'Sync failed: ' + e.message;
+    statusEl.textContent = 'Refresh failed: ' + e.message;
   }
 }
 
@@ -11316,7 +11316,7 @@ async function fetchBlocklistFeed() {
         <td>${f.imported_count || 0}</td>
         <td>${f.attributed_count || 0}</td>
         <td class="text-right" style="white-space:nowrap">
-          <button class="btn ghost sm" style="font-size:.72rem" data-click="syncBlocklistFeed" data-arg="${escHtml(f.url)}">Sync</button>
+          <button class="btn ghost sm" style="font-size:.72rem" data-click="syncBlocklistFeed" data-arg="${escHtml(f.url)}">Refresh</button>
           <button class="btn ghost sm" style="font-size:.72rem" data-click="editBlocklistFeed" data-arg="${escHtml(f.url)}" data-arg2="${escHtml(f.interval)}">Edit</button>
           <button class="btn ghost sm" style="font-size:.72rem;color:var(--red)" data-click="deleteBlocklistFeed" data-arg="${escHtml(f.url)}" data-arg2="${f.attributed_count || 0}">Delete</button>
         </td>
@@ -11399,10 +11399,14 @@ async function syncBlocklistFeed(url) {
   try {
     const qs = url ? '?url=' + encodeURIComponent(url) : '';
     const d = await api('/api/blocklist/feed/sync' + qs, {method: 'POST'});
-    toast(`Sync complete - ${d.domains_synced} new domains imported`, 'success');
+    toast(`Refresh complete - ${d.domains_synced} new domains imported`, 'success');
     fetchBlocklistFeed();
     fetchBlocklist();
-  } catch(e) { toast('Error: ' + e.message, 'error'); }
+  } catch(e) {
+    // The server's error body is "sync failed: <cause>" (API text, unchanged);
+    // show it under the button's own verb instead of echoing the old prefix.
+    toast('Refresh failed: ' + String(e.message || '').trim().replace(/^sync failed:\s*/i, ''), 'error');
+  }
 }
 
 async function saveSettings() {
