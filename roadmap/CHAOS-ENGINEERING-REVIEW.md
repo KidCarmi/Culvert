@@ -9607,3 +9607,42 @@ render-nothing shape) were verified failing against it.
 to be reset by, every surface that renders it inherited an assumption that is
 now false. Enumerate the CONSUMERS of the fact, not the producers.** Round 12
 enumerated the producers (both retire paths) and stopped there.
+
+#### Round 13 postscript — the wall that already existed, and two self-inflicted detours
+
+The UI gate above read the admin SPA with a CWD-relative `os.ReadFile`. The
+repo already walls that class (`TestTestFileReadsAreCWDIndependent`), because
+a concurrent `os.Chdir` in another test makes a relative read pick up the
+wrong file; the wall's own doc comment records that the class "cost real
+debugging time to track down". It was walked back into the same day, and it
+is deterministic — it accounted for every red on that head: race shard 3, the
+race verdict, the Fast Gate, determinism and the Deep Gate. (The QA and
+Security gate NAMES passed, because on PRs they are pass-through shells — a
+green there proves nothing about the sharded engine.)
+
+Two process lessons cost more time than the fix:
+
+**Do not truncate a failing run's output.** The identity of the failing test
+was lost TWICE to `| tail -20`, once here and once in the unattributed
+failure this sweep recorded earlier. `go test` prints `--- FAIL:` where the
+failure happens, and the root package's buffered logger output can push it
+tens of thousands of lines from the end. Write the whole run to a file and
+grep it. Note also that GitHub's job-log API returns only the tail (capped
+around 630 KB) and the full artifact lives on blob storage, so on a package
+this verbose CI cannot tell you WHICH test failed — only that one did. The
+local capture is the instrument.
+
+**Do not mutate the working tree while a background probe is reading it.** A
+mutation experiment (reverting `static/index.html` to its pre-fix shape to
+confirm a gate was not vacuous) ran while a background reproduction loop was
+live against the same tree. The loop caught the mutation and reported a
+failure that looked like the bug being hunted. Mutation testing and
+background probes need the tree to themselves.
+
+**And the diagnostic one:** the leading hypothesis before the reproduction was
+the heaviest new fixture (12,000 events through dead sockets under
+`-count=2`). It was wrong, and acting on it would have right-sized a fixture
+that was never the problem while leaving the real defect in place. An
+intermittent-looking failure is not evidence of a timing bug: here it was a
+deterministic source-scan violation that only LOOKED intermittent because
+different CI jobs sample different shards and some gate names are shells.
