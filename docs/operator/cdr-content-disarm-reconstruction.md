@@ -115,11 +115,21 @@ key class.)
 call — it does NOT protect a request when no client is available at all.**
 Two distinct gates exist, and only the second one consults `cdr.fail_mode`:
 
-1. **No client to call.** If CDR has never successfully dialed any instance
-   (`cdrActiveClient()` is nil — e.g. every configured/enrolled instance is
-   unreachable at boot) — or every enrolled instance's circuit breaker is
-   currently open — the request **passes through unsanitized
-   unconditionally**, regardless of `fail_mode`. This path does not increment
+1. **No client to call.** `NewCDRClient` dials with `grpc.NewClient`, which is
+   **non-blocking** (lazy connect) — a client is added to the pool whether or
+   not Sluice is actually reachable, and the post-init `warmupCDRClient` probe
+   only logs on failure, it never removes the client. So an unreachable
+   Sluice at boot does **not** leave `cdrActiveClient()` nil: the first
+   eligible requests DO reach a live RPC attempt (gate 2 below, which honors
+   `fail_mode`) and fail there, and only after enough consecutive failures
+   open that instance's breaker does this gate start applying. This gate is
+   reached only when the pool is genuinely empty — no instance was ever
+   enrolled/configured, every enrolled instance's certificate bundle failed
+   to load (so `buildCDRPoolFromRegistry` never added it — see **Multi-instance
+   pool** below), or CDR was toggled off (`shutdownCDRClient` empties the
+   pool) — or once every instance's circuit breaker is open. In any of those
+   cases the request **passes through unsanitized unconditionally**,
+   regardless of `fail_mode`. This path does not increment
    `culvert_cdr_fail_open_total`/`_fail_closed_total` and emits no per-request
    log line or request-log event — it is silent at the request level. The only way
    to notice it is happening is the pool/health surfaces themselves:
@@ -201,21 +211,34 @@ behavior** above; this is *not* governed by `fail_mode`.
 > skips (fail-open) instead of probing. With only one instance in the pool
 > there is no other candidate for `Pick()` to fall through to, so the
 > breaker never sees a real probe and **stays half-open indefinitely** —
-> not the elapsed-time-plus-one-success path described above. A process
-> restart resets it (the pool starts empty, so there is no carried breaker
-> to inherit); a live reconfigure through the API does **not** — a same-name
-> instance keeps its existing `*cdrCircuitBreaker` object across rebuilds
-> (`dialEnrolledInstance` matches by name against the current pool), so
-> toggling or re-saving the instance alone will not clear the stuck state.
-> A pool with two or more *closed* instances is unaffected, since `Pick()`'s
-> first `Allow()==true` match is usually one of those, not the half-open one.
+> not the elapsed-time-plus-one-success path described above. Recovery
+> needs the pool to be rebuilt with **no prior breaker to carry forward**:
+> a process restart does this (the pool starts empty), and so does a full
+> runtime **disable-then-enable** via `PUT /api/cdr/config`
+> (`{"enabled":false}` calls `shutdownCDRClient()`, which empties the pool
+> entirely; the following `{"enabled":true}` rebuilds from the registry
+> with nothing in `oldPool` for `dialEnrolledInstance` to match by name, so
+> it mints a fresh breaker). Editing or re-saving the SAME instance's
+> registry entry WITHOUT a full disable/enable cycle does **not** recover
+> it — that path only ever calls `initCDRClient`, which reads the CURRENT
+> (still half-open) pool as `oldPool` and carries the breaker forward by
+> name. A pool with two or more *closed* instances is unaffected, since
+> `Pick()`'s first `Allow()==true` match is usually one of those, not the
+> half-open one.
 
 Two observability tiers exist. `culvert_cdr_instance_healthy` and
 `culvert_cdr_queue_depth` (from the 15-second background health poll) are
 **pool-wide aggregates**: `instance_healthy` is 1 when *at least one*
 enrolled instance's most recent probe succeeded, and `queue_depth` is the
 *minimum* Sluice-reported queue depth across the currently-healthy
-instances — neither carries an instance label, so neither alone tells you
+instances at the LAST round that had one — `applyAggregateHealth` only
+overwrites the gauge when that round found a healthy member, and the
+all-members-failed path never resets it, so once every instance goes
+unhealthy `queue_depth` freezes at its last observed value instead of
+going to zero or empty. Never read it alone as current spare capacity;
+pair it with `instance_healthy` (or the per-instance series below) to
+tell "genuinely low queue" from "stale reading from before the outage".
+Neither carries an instance label, so neither alone tells you
 *which* member is down. Per-instance detail **is** exported separately,
 labeled by `instance`: `culvert_cdr_pool_instance_healthy{instance}`,
 `culvert_cdr_pool_breaker_state{instance}` (0=closed, 1=open, 2=half_open),
@@ -352,7 +375,7 @@ GET is viewer, PUT is admin):
 | `/api/cdr/config` | GET | viewer | Effective runtime config + derived fields (`clientActive`, `failOpen`) |
 | `/api/cdr/config` | PUT | admin | Toggle `enabled`; persists and applies immediately |
 | `/api/cdr/instances` | GET | viewer | List enrolled Sluice instances |
-| `/api/cdr/instances` | DELETE | admin | Remove a registry entry (`?name=…`) and shred its local cert material — does **not** notify Sluice |
+| `/api/cdr/instances` | DELETE | admin | Remove a registry entry (`?name=…`) and shred its local cert material — does **not** notify Sluice. **In a multi-instance pool this shuts down the ENTIRE pool, not just the deleted member**: the handler's check is "is any client currently pickable" (`cdrActiveClient() != nil`), not "was the deleted instance the last one", so deleting one healthy instance out of several calls `shutdownCDRClient()` and empties the pool — CDR bypasses all traffic until the remaining instances are re-added (re-enrolled or a config/CLI restart) |
 | `/api/cdr/instances/enroll` | POST | admin | Exchange a one-time token + fingerprint for mTLS credentials |
 | `/api/cdr/instances/enroll/recover` | POST | admin | Resolve an enrollment whose outcome was left unknown (e.g. a client-side timeout mid-exchange) |
 | `/api/cdr/instances/enroll/receipts` | GET | viewer | Bounded recovery receipts for past enrollment operations |
