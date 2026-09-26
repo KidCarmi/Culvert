@@ -785,14 +785,29 @@ func (s *Writer) Stats() Stats {
 	if ls > 0 {
 		st.LastSuccess = time.Unix(0, ls)
 	}
-	// An episode's start is never earlier than the delivery that ended the
-	// previous one: noteDelivered stores lastSuccess before resetting the
-	// failure count, so clamping here keeps a concurrent reader from pairing
-	// a new episode with the previous episode's (older) start.
-	if st.ConsecutiveFailures > 0 && fs > 0 {
-		if ls > fs {
-			fs = ls
-		}
+	// An episode's start is never earlier than the delivery that ENDED the
+	// previous one, because noteDelivered resets the failure count. So
+	// observing `ConsecutiveFailures > 0` together with `failSince < lastSuccess`
+	// means the start belongs to an episode that is already over, and the
+	// CURRENT episode's start has not been published yet.
+	//
+	// noteDrop is called from the CALLER's goroutine on a queue-full drop, so
+	// several request goroutines reach it at once: the one whose increment
+	// returns 1 can be descheduled between `consecutiveFail.Add(1)` and
+	// `failSinceNano.Store(t)` while another increments to 2 and invokes the
+	// observer, which lands here.
+	//
+	// This used to CLAMP the stale start up to lastSuccess, which is where the
+	// harm was: on a node that had been quiet since its last delivery, a
+	// brand-new episode was then dated from that delivery and could be older
+	// than the degradation window on its very first drop — an immediate false
+	// DOWN page (Codex P1, PR #1494). Refusing to date the episode at all is
+	// the fail-SAFE reading of the same evidence: we genuinely do not know when
+	// it started, and the consumer's predicate requires a known start, so it
+	// declines to page. The real start lands microseconds later, and the
+	// watchdog re-evaluates every 30s regardless, so nothing is suppressed
+	// beyond that window.
+	if st.ConsecutiveFailures > 0 && fs > 0 && fs >= ls {
 		st.FailingSince = time.Unix(0, fs)
 	}
 	return st

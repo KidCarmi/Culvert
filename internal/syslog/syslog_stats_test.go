@@ -256,3 +256,64 @@ func TestChaos72_StatsIsReadableWhileTheWriteLockIsHeld(t *testing.T) {
 	}
 	w.mu.Unlock()
 }
+
+// An episode whose start has NOT been published yet is reported as undated,
+// never dated from the previous episode's end (Codex P1, PR #1494).
+//
+// noteDrop runs on the CALLER's goroutine for a queue-full drop, so several
+// request goroutines reach it at once. The one whose `consecutiveFail.Add(1)`
+// returns 1 can be descheduled before `failSinceNano.Store(t)` while another
+// increments to 2 and invokes the observer — which reads Stats and sees a
+// non-zero failure count beside a `failSince` left over from an episode that a
+// delivery already ended.
+//
+// Stats used to CLAMP that stale value up to lastSuccess, so on a node that
+// had been quiet since its last delivery the brand-new episode was dated from
+// that delivery. Past the degradation window that is an immediate false DOWN
+// page on the FIRST drop of a fresh episode.
+//
+// The window is a couple of instructions wide and cannot be scheduled from a
+// test, so the invariant is driven directly through the atomics: `Stats` is a
+// pure function of them, and this is the state the race produces.
+func TestStats_UnpublishedEpisodeStartIsNotDatedFromTheLastDelivery(t *testing.T) {
+	base := time.Date(2026, 9, 26, 12, 0, 0, 0, time.UTC)
+	w := &Writer{}
+
+	oldEpisode := base.Add(-30 * time.Minute) // an episode that has since healed
+	lastSuccess := base.Add(-10 * time.Minute)
+
+	w.failSinceNano.Store(oldEpisode.UnixNano())
+	w.lastSuccessNano.Store(lastSuccess.UnixNano())
+	w.delivered.Store(41)
+	// The racing shape: the count is already 2 while the 0->1 goroutine has not
+	// yet stored the new episode's start.
+	w.consecutiveFail.Store(2)
+	w.drops.Store(2)
+	w.lastFailureNano.Store(base.UnixNano())
+
+	st := w.Stats()
+	if !st.FailingSince.IsZero() {
+		t.Fatalf("FailingSince = %s; want the zero time — the episode start has not been published, and dating it from the last delivery (%s) makes a brand-new episode look %s old and pages immediately",
+			st.FailingSince, lastSuccess, base.Sub(lastSuccess))
+	}
+	if st.ConsecutiveFailures != 2 {
+		t.Errorf("ConsecutiveFailures = %d; want 2 — the failure itself must still be reported", st.ConsecutiveFailures)
+	}
+
+	// CONTROL: once the start IS published, the episode is dated normally.
+	// Refusing to date every episode would satisfy the assertion above while
+	// deleting the degradation predicate's only time axis.
+	realStart := base.Add(-1 * time.Second)
+	w.failSinceNano.Store(realStart.UnixNano())
+	if st := w.Stats(); !st.FailingSince.Equal(realStart) {
+		t.Fatalf("FailingSince = %s; want %s once the start is published", st.FailingSince, realStart)
+	}
+
+	// CONTROL: a genuinely long episode that began after the last delivery is
+	// still dated from its own start, not truncated.
+	longStart := lastSuccess.Add(time.Second)
+	w.failSinceNano.Store(longStart.UnixNano())
+	if st := w.Stats(); !st.FailingSince.Equal(longStart) {
+		t.Fatalf("FailingSince = %s; want %s — a long real episode must keep its own start", st.FailingSince, longStart)
+	}
+}

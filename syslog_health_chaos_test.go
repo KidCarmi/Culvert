@@ -12,6 +12,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -679,6 +680,12 @@ func TestChaos72_ReplacedWriterDoesNotCorruptTheSuccessorsState(t *testing.T) {
 	for i := 0; i < 50; i++ {
 		activeSyslog().WriteAudit(map[string]string{"evt": "policy.change"})
 	}
+	// Captured BEFORE the re-point. How many of those 50 lines have already
+	// been charged as drops depends on when the queue fills, so the assertion
+	// below is monotonicity, not a count — the deterministic preservation gate
+	// is TestChaos72_RePointDoesNotResetTheLossHistory, which waits for drops
+	// first.
+	beforeDrops := syslogFeedState().Drops
 	syslogConfiguredAddr = "tcp://" + second.addr
 	if err := InitSyslog("tcp://"+second.addr, "rfc3164"); err != nil {
 		t.Fatalf("re-point: %v", err)
@@ -686,15 +693,39 @@ func TestChaos72_ReplacedWriterDoesNotCorruptTheSuccessorsState(t *testing.T) {
 	syslogConfigured = "tcp://" + second.addr
 
 	// Give the displaced writer time to finish flushing and dropping.
+	//
+	// What must NOT be inherited is the displaced writer's EPISODE: its
+	// failures, its degraded verdict, its claim on the row. The cumulative
+	// DROP TOTAL is a different thing and is carried deliberately — a
+	// re-point must not reset the loss history, or `culvert_syslog_drops_total`
+	// goes backwards and the evidence disappears at the moment an operator
+	// remediates (Codex P2, PR #1494). This test asserted the total instead of
+	// the episode, so it was pinning the reset as if it were the contract.
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
-		if syslogFeedState().Drops > 0 {
-			t.Fatalf("the replacement inherited %d drops from the writer it displaced", syslogFeedState().Drops)
+		snap := syslogFeedState()
+		if snap.ConsecutiveFailures > 0 {
+			t.Fatalf("the replacement inherited %d consecutive failures from the writer it displaced", snap.ConsecutiveFailures)
+		}
+		if snap.Degraded {
+			t.Fatal("the replacement is reported DOWN on the strength of the displaced writer's outage")
+		}
+		if snap.WriterDrops > 0 {
+			t.Fatalf("the replacement's OWN drop count is %d; the displaced writer's losses must not be attributed to this target", snap.WriterDrops)
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	if row := checkSyslogFeed(); row.Status != diagOK {
-		t.Errorf("row on a healthy replacement = %v (%q); want ok", row.Status, row.Message)
+	// The history survives, and the row reports it AS history rather than
+	// blaming the collector that has just been installed.
+	if snap := syslogFeedState(); snap.Drops < beforeDrops {
+		t.Errorf("the process-lifetime drop total went backwards across the re-point: %d -> %d", beforeDrops, snap.Drops)
+	}
+	row := checkSyslogFeed()
+	if row.Status == diagFail {
+		t.Errorf("row on a healthy replacement = fail (%q)", row.Message)
+	}
+	if strings.Contains(row.Message, "NEVER delivered an event since this target was configured") {
+		t.Errorf("row blames the freshly installed target for the predecessor's losses: %q", row.Message)
 	}
 }
 
@@ -1294,5 +1325,72 @@ func TestChaos72_StaleDegradationSnapshotNeitherPagesNorLatches(t *testing.T) {
 	commitSyslogDegradation(live)
 	if len(fired) != 1 {
 		t.Fatalf("the live writer's own degradation fired %d alerts; want 1", len(fired))
+	}
+}
+
+// A runtime re-point must not make the exported counters go BACKWARDS
+// (CHAOS-72, Codex P2).
+//
+// InitSyslog installs a brand-new Writer whose counters start at zero. The
+// plane read them straight off that Writer, so `culvert_syslog_drops_total`
+// decreased without a process restart — the one thing a Prometheus counter may
+// not do, since `rate()` reads a decrease as a counter reset and discards the
+// interval. The same reset removed `syslogDrops` from /healthz and turned the
+// `syslog_feed` row's "N dropped since startup" back to clean, erasing the
+// loss history at exactly the moment an operator re-points the collector to
+// remediate the outage that produced it.
+func TestChaos72_RePointDoesNotResetTheLossHistory(t *testing.T) {
+	dead := startSyslogCollector(t)
+	armSyslogFeed(t, "tcp://"+dead.addr)
+	dead.waitForConnection(t)
+	dead.stop()
+	waitForDrops(t, 3)
+
+	before := syslogFeedState()
+	if before.Drops == 0 {
+		t.Fatal("fixture recorded no drops; the rest of this gate proves nothing")
+	}
+	var beforeExposition strings.Builder
+	syslogWritePrometheus(&beforeExposition)
+	if !strings.Contains(beforeExposition.String(), fmt.Sprintf("culvert_syslog_drops_total %d", before.Drops)) {
+		t.Fatalf("exposition does not carry the pre-re-point drop count %d:\n%s", before.Drops, beforeExposition.String())
+	}
+
+	// The remediation an operator actually performs: point at a collector that
+	// works.
+	healthy := startSyslogCollector(t)
+	if err := InitSyslog("tcp://"+healthy.addr, "rfc3164"); err != nil {
+		t.Fatalf("re-point: %v", err)
+	}
+	t.Cleanup(func() {
+		if sw := activeSyslog(); sw != nil {
+			_ = sw.Close()
+		}
+	})
+
+	after := syslogFeedState()
+	if after.Drops < before.Drops {
+		t.Errorf("drops went BACKWARDS across a re-point: %d -> %d — a Prometheus counter reset with no process restart, and the loss history is gone from every surface",
+			before.Drops, after.Drops)
+	}
+	if n := syslogDropCount(); n < before.Drops {
+		t.Errorf("/healthz syslogDrops went backwards across a re-point: %d -> %d", before.Drops, n)
+	}
+	var afterExposition strings.Builder
+	syslogWritePrometheus(&afterExposition)
+	if !strings.Contains(afterExposition.String(), fmt.Sprintf("culvert_syslog_drops_total %d", after.Drops)) {
+		t.Errorf("exposition does not carry the post-re-point total %d:\n%s", after.Drops, afterExposition.String())
+	}
+
+	// CONTROL: the per-episode state is NOT carried across. The new writer is
+	// serving a live collector, so the feed must not be reported as failing —
+	// the cheapest way to pass the assertions above is to carry the whole
+	// previous Writer's state forward, which would report the replacement as
+	// broken from its first byte.
+	if after.ConsecutiveFailures != 0 {
+		t.Errorf("ConsecutiveFailures = %d after re-pointing at a live collector; the episode belongs to the displaced writer", after.ConsecutiveFailures)
+	}
+	if after.Degraded {
+		t.Error("the replacement feed is reported DOWN on the strength of the displaced writer's outage")
 	}
 }

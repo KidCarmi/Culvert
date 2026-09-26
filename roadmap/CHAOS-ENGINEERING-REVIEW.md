@@ -7365,3 +7365,63 @@ satisfy every other assertion in that test while deleting the alert.
 Both defect gates were verified failing against their reintroduced pre-fix
 shapes (P1-F: the metrics gate restored to `!snap.Configured`, which exports
 nothing; P1-G: the writer-identity check removed, which pages *and* latches).
+
+### Codex round 5 — the counter that went backwards, and the episode with no birthday
+
+**P2 — a runtime re-point reset every exported counter.** `InitSyslog`
+installs a brand-new Writer and the plane read its counters directly, so
+`culvert_syslog_drops_total` DECREASED with no process restart. That is the one
+thing a Prometheus counter may not do: `rate()` reads a decrease as a counter
+reset and discards the interval. The same reset removed `syslogDrops` from
+`/healthz` and turned the `syslog_feed` row's "N dropped since startup" back to
+clean — at exactly the moment an operator re-points the collector to REMEDIATE
+the outage that produced the losses, i.e. the evidence disappears when it is
+most wanted.
+
+What makes this one worth recording beyond the fix: the P1-F change committed
+minutes earlier carries a comment arguing that a displaced Writer's counters
+must be left alone *because zeroing them would make the counter go backwards
+and break `rate()`* — and the re-point path was doing precisely that, one
+function away. Getting a rule right at the surface you are editing says nothing
+about the other surfaces that already violate it; the reviewer's value here was
+reading the rule and then looking for where it was already broken.
+
+Displaced Writers' finals are folded into `retired{Delivered,Drops,Panics}`.
+Labelling the series by target was the alternative and is rejected: the label
+value would be an operator-supplied address, which is the unbounded-label-set
+defect this register records as WK-12/RS-5. The residual is documented rather
+than hidden — a displaced Writer is closed ASYNCHRONOUSLY, so anything it
+records after the fold (its final flush) is not carried, which can only
+UNDER-count at a generation boundary and can never make a counter decrease.
+The per-episode fields stay strictly per-Writer, pinned by a CONTROL: carrying
+the whole predecessor's state forward is the cheapest way to make the counters
+monotonic, and it would report a healthy replacement as broken from its first
+byte.
+
+**P1 — an episode whose start had not been published yet was dated from the
+previous episode's end.** `noteDrop` runs on the CALLER's goroutine for a
+queue-full drop, so several request goroutines reach it at once. The one whose
+`consecutiveFail.Add(1)` returns 1 can be descheduled between that and
+`failSinceNano.Store(t)` while another increments to 2 and invokes the
+observer. `Stats` then saw a non-zero failure count beside a `failSince` left
+over from an episode a delivery had already ended — and CLAMPED it up to
+`lastSuccess`. On a node quiet since its last delivery that dates a brand-new
+episode from that delivery, so past the degradation window it is an immediate
+false DOWN page on the episode's FIRST drop.
+
+`ConsecutiveFailures > 0 && failSince < lastSuccess` is provably an unpublished
+start, because a delivery resets the count. So the fail-SAFE reading of the
+same evidence is to refuse to date the episode at all: the consumer's predicate
+requires a known start and therefore declines to page, the real start lands
+microseconds later, and the 30 s watchdog re-evaluates regardless. Nothing is
+suppressed beyond that window. The clamp was reaching for the same invariant
+and chose the direction that guesses rather than the one that abstains —
+*when two facts disagree, the safe answer is "unknown", not the more alarming
+of the two.*
+
+The window is a couple of instructions wide and cannot be scheduled from a
+test, so the gate drives `Stats`'s inputs directly (it is a pure function of
+them) and reproduces exactly the state the race produces. It carries two
+controls: a published start must still be dated, and a genuinely long episode
+that began after the last delivery must keep its own start rather than be
+truncated.

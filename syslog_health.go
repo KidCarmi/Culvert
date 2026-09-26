@@ -184,6 +184,34 @@ type syslogHealthRecord struct {
 	// intentAt anchors the age of an UNMET intent, which has no install and no
 	// delivery to measure from.
 	intentAt time.Time
+
+	// retiredDelivered/retiredDrops/retiredPanics carry the totals of every
+	// Writer this process has displaced, so the exported counters are
+	// PROCESS-lifetime rather than per-Writer (Codex P2, PR #1494).
+	//
+	// InitSyslog installs a brand-new Writer on a runtime re-point and its
+	// counters start at zero — so `culvert_syslog_drops_total` DECREASED
+	// without a process restart, which is the one thing a Prometheus counter
+	// may not do (`rate()` reads a decrease as a counter reset and discards
+	// the interval). It also erased the loss history from `/healthz` and
+	// turned the `syslog_feed` row's "N dropped since startup" back to clean —
+	// at exactly the moment an operator re-points the collector to REMEDIATE
+	// an outage, i.e. the evidence vanishes when it is most wanted. This
+	// change's own P1-F comment argued that counters must not go backwards,
+	// and the re-point path was doing precisely that one function away.
+	//
+	// Labelling the series by target was the alternative and is rejected: the
+	// label value would be an operator-supplied address, which is the
+	// unbounded-label-set defect this sweep records elsewhere (WK-12/RS-5).
+	//
+	// Residual, documented rather than hidden: a displaced Writer is closed
+	// ASYNCHRONOUSLY, so anything it records after this snapshot (its final
+	// flush) is not carried. That can only UNDER-count at a generation
+	// boundary; it can never make a counter decrease, which is the property
+	// that matters.
+	retiredDelivered uint64
+	retiredDrops     uint64
+	retiredPanics    uint64
 	// writer is the Writer this record describes. Publication of the active
 	// writer and installation of this record are one serialized transition
 	// (syslogPublishMu), so writer == activeSyslog() whenever neither is
@@ -259,6 +287,9 @@ func noteSyslogWriterInstalled(sw *syslogWriter, target string) {
 		return
 	}
 	syslogHealth.mu.Lock()
+	if syslogHealth.writer != sw {
+		retireSyslogWriterLocked(syslogHealth.writer)
+	}
 	syslogHealth.configured = true
 	syslogHealth.installedAt = syslogHealthNow()
 	syslogHealth.target = target
@@ -278,6 +309,21 @@ func noteSyslogWriterInstalled(sw *syslogWriter, target string) {
 	syslogHealth.mu.Unlock()
 
 	sw.SetDeliveryObserver(noteSyslogDelivery)
+}
+
+// retireSyslogWriterLocked folds a Writer's final counters into the
+// process-lifetime totals. Caller holds syslogHealth.mu.
+//
+// Stats() is a lock-free read of atomics, so calling it under this mutex adds
+// no lock-order hazard: it never touches the Writer's own locks.
+func retireSyslogWriterLocked(old *syslogWriter) {
+	if old == nil {
+		return
+	}
+	st := old.Stats()
+	syslogHealth.retiredDelivered += st.Delivered
+	syslogHealth.retiredDrops += st.Drops
+	syslogHealth.retiredPanics += st.Panics
 }
 
 // noteSyslogIntent records that an operator has asked for a collector, BEFORE
@@ -314,6 +360,7 @@ func noteSyslogIntent(target string) {
 // statement this whole file exists to remove, just in the other direction.
 func noteSyslogForwardingDisabled() {
 	syslogHealth.mu.Lock()
+	retireSyslogWriterLocked(syslogHealth.writer)
 	syslogHealth.configured = false
 	syslogHealth.installedAt = time.Time{}
 	syslogHealth.target = ""
@@ -494,9 +541,23 @@ type syslogFeedSnapshot struct {
 	// installed when nothing has ever been delivered.
 	Age         time.Duration
 	LastSuccess time.Time
-	Delivered   uint64
-	Drops       uint64
-	Panics      uint64
+	// Delivered/Drops/Panics are PROCESS-lifetime totals: the live Writer's
+	// counters plus every displaced Writer's final ones. They must be
+	// monotonic across a runtime re-point, which installs a fresh Writer whose
+	// own counters start at zero — see retiredDrops on the health record.
+	// Everything else in this snapshot describes the CURRENT Writer only
+	// (NeverDelivered, ConsecutiveFailures, LastSuccess, FailingFor), because
+	// those are statements about the episode in progress, not about history.
+	Delivered uint64
+	Drops     uint64
+	Panics    uint64
+	// WriterDrops is the CURRENT Writer's own drop count. Any sentence that
+	// makes a claim about THIS target uses it; Drops (process-lifetime) is for
+	// "in total since startup". Blaming a freshly re-pointed collector for the
+	// losses of the one it replaced is the same false statement this file
+	// exists to remove, arriving through the counter that fixed a different
+	// one.
+	WriterDrops uint64
 	// ConsecutiveFailures is the count of losses since the last delivered
 	// event — zero means the last thing this writer did was succeed.
 	ConsecutiveFailures uint64
@@ -533,6 +594,9 @@ func syslogFeedState() syslogFeedSnapshot {
 	described := syslogHealth.writer
 	intendedTarget := syslogHealth.intendedTarget
 	intentAt := syslogHealth.intentAt
+	retiredDelivered := syslogHealth.retiredDelivered
+	retiredDrops := syslogHealth.retiredDrops
+	retiredPanics := syslogHealth.retiredPanics
 	syslogHealth.mu.Unlock()
 
 	// The caveat describes the transport the operator ASKED for when nothing
@@ -549,14 +613,20 @@ func syslogFeedState() syslogFeedSnapshot {
 		UDP:        !strings.HasPrefix(strings.ToLower(caveatTarget), "tcp://"),
 	}
 	snap.IntentUnmet = snap.Intended && (described == nil || target != intendedTarget)
+	// Retired totals are carried even when no Writer is live, so a disabled or
+	// failed-to-reconnect feed still reports the events it has already lost.
+	snap.Delivered = retiredDelivered
+	snap.Drops = retiredDrops
+	snap.Panics = retiredPanics
 	sw := activeSyslog()
 	if !configured || sw == nil {
 		return finishUnmetSyslogIntent(snap, now, intentAt)
 	}
 	st := sw.Stats()
-	snap.Delivered = st.Delivered
-	snap.Drops = st.Drops
-	snap.Panics = st.Panics
+	snap.Delivered += st.Delivered
+	snap.Drops += st.Drops
+	snap.Panics += st.Panics
+	snap.WriterDrops = st.Drops
 	snap.ConsecutiveFailures = st.ConsecutiveFailures
 	snap.Reason = st.LastFailureReason
 	snap.QueueDepth = st.QueueDepth
@@ -670,11 +740,15 @@ func checkSyslogFeedDelivery() (OperatorContractCheck, bool) {
 		if snap.NeverDelivered {
 			what = fmt.Sprintf("no event has EVER reached the collector since this target was configured %s ago", snap.Age.Round(time.Second))
 		}
+		dropped := snap.WriterDrops
+		if dropped == 0 {
+			dropped = snap.Drops
+		}
 		return OperatorContractCheck{
 			Code:   "syslog_feed",
 			Status: diagFail,
 			Message: fmt.Sprintf("remote syslog/SIEM forwarding is DOWN: %s and %d event(s) have been dropped (last failure: %s). Audit and request events are not reaching the SIEM; the node keeps proxying normally and the local audit log is unaffected",
-				what, snap.Drops, reasonOrUnknown(snap.Reason)),
+				what, dropped, reasonOrUnknown(snap.Reason)),
 			OperatorAction: "Restore the collector (host/port, listener, network path, and for tcp:// the collector's connection limit), then confirm with POST /api/syslog/test — recovery is declared only on an event that actually reaches the collector, so a quiet node stays reported as down until one does. Events dropped while the feed was down are NOT replayed.",
 		}, true
 	}
@@ -691,7 +765,7 @@ func checkSyslogFeedDelivery() (OperatorContractCheck, bool) {
 	// one place has to be re-read everywhere downstream of it.
 	if snap.Drops > 0 {
 		switch {
-		case snap.NeverDelivered:
+		case snap.NeverDelivered && snap.WriterDrops > 0:
 			// No delivery has EVER happened, so there is no "last event" to
 			// date and no delivery to claim. Distinct from the degraded branch
 			// only by how long it has been failing.
@@ -699,8 +773,23 @@ func checkSyslogFeedDelivery() (OperatorContractCheck, bool) {
 				Code:   "syslog_feed",
 				Status: diagWarn,
 				Message: fmt.Sprintf("remote syslog/SIEM forwarding has NEVER delivered an event since this target was configured %s ago, and %d event(s) have already been dropped (last failure: %s)",
-					snap.Age.Round(time.Second), snap.Drops, reasonOrUnknown(snap.Reason)),
+					snap.Age.Round(time.Second), snap.WriterDrops, reasonOrUnknown(snap.Reason)),
 				OperatorAction: "Treat this as a misconfigured or unreachable target rather than a transient stall: check the host/port, that the collector is listening, the network path, and for tcp:// the collector's connection limit. Confirm with POST /api/syslog/test. Nothing has reached the SIEM yet, and the dropped events are not replayed.",
+			}, true
+
+		case snap.NeverDelivered:
+			// Nothing has gone wrong with THIS target yet — it simply has not
+			// carried an event. The drops on the books belong to a Writer it
+			// replaced, and the counters are process-lifetime by design (a
+			// re-point must not reset the loss history), so the row reports
+			// the history as history and does not blame the new collector for
+			// it.
+			return OperatorContractCheck{
+				Code:   "syslog_feed",
+				Status: diagWarn,
+				Message: fmt.Sprintf("remote syslog/SIEM forwarding is connected; no event has been forwarded to this target yet. %d event(s) were lost to an earlier target in this process and are not replayed",
+					snap.Drops),
+				OperatorAction: "No action is needed for the current target — the loss predates it. Confirm the new collector with POST /api/syslog/test; the earlier events are gone and are not re-sent.",
 			}, true
 
 		case snap.ConsecutiveFailures > 0:
@@ -872,6 +961,9 @@ func syslogDeliveryProbe(sw *syslogWriter) (outcome string, detail string) {
 // would swap the held mutex for an unlocked zero value.
 func resetSyslogHealthForTest() {
 	syslogHealth.mu.Lock()
+	syslogHealth.retiredDelivered = 0
+	syslogHealth.retiredDrops = 0
+	syslogHealth.retiredPanics = 0
 	syslogHealth.configured = false
 	syslogHealth.installedAt = time.Time{}
 	syslogHealth.target = ""
