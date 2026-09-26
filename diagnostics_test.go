@@ -1794,3 +1794,36 @@ func TestApiDiagnostics_OversizeUsernameRemediationWarnsAboutTOTP(t *testing.T) 
 		t.Errorf("operator_action = %q, want a TOTP caveat that blocks deleting the old account first", a)
 	}
 }
+
+// TestApiDiagnostics_MirroredLegacyNonAdminRoleIsPreserved pins that a
+// mirrored legacy login whose roster role was lowered keeps that role in the
+// remediation: VerifyUIUser grants the roster role first, while SetAuth (the
+// Settings replacement) always creates the new name as admin, so following
+// the action without restoring the role would silently elevate the account.
+func TestApiDiagnostics_MirroredLegacyNonAdminRoleIsPreserved(t *testing.T) {
+	snapshotCfgUIUsers(t)
+	cfg.mu.Lock()
+	cfg.uiUsers = map[string]*uiAdminUser{}
+	cfg.user = ""
+	cfg.mu.Unlock()
+	longName := strings.Repeat("v", adminUsernameAccountLimit+1)
+	if err := cfg.SetAuth(longName, "Chaos63-role-1!"); err != nil {
+		t.Fatalf("SetAuth(long): %v", err)
+	}
+	if err := cfg.SetUIUser(longName, "Chaos63-role-2!", RoleViewer); err != nil {
+		t.Fatalf("SetUIUser(viewer): %v", err)
+	}
+	if role, ok := cfg.VerifyUIUser(longName, "Chaos63-role-2!"); !ok || role != RoleViewer {
+		t.Fatalf("precondition: effective role = %q/%v, want viewer", role, ok)
+	}
+	r := viewerCtx(httptest.NewRequest(http.MethodGet, "/api/diagnostics", http.NoBody))
+	w := httptest.NewRecorder()
+	apiDiagnostics(w, r)
+	found := findDiagnosticCheck(decodeContract(t, w), "admin_username_length")
+	if found == nil || found.Status != diagWarn {
+		t.Fatalf("admin_username_length = %+v, want warn", found)
+	}
+	if !strings.Contains(found.OperatorAction, "role back to viewer") {
+		t.Errorf("operator_action = %q, want the Settings replacement's role restored to viewer (SetAuth creates admin)", found.OperatorAction)
+	}
+}

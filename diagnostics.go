@@ -595,6 +595,9 @@ type adminUsernameInventory struct {
 	names          map[string]struct{}
 	legacyOversize bool
 	legacyMirrored bool
+	// legacyRole is the mirrored roster row's role (the role VerifyUIUser
+	// actually grants the legacy name); empty when there is no mirror.
+	legacyRole     UIRole
 	rosterOversize bool
 }
 
@@ -605,13 +608,16 @@ func collectAdminUsernames() adminUsernameInventory {
 	// able to log in with no roster row — reporting ok then would falsely
 	// confirm a remediation that did not happen.
 	names := map[string]struct{}{}
+	roles := map[string]UIRole{}
 	for _, u := range cfg.ListUIUsers() {
 		names[u.Username] = struct{}{}
+		roles[u.Username] = u.Role
 	}
 	inv := adminUsernameInventory{names: names}
 	legacy := cfg.GetUser()
 	if legacy != "" {
 		_, inv.legacyMirrored = names[legacy]
+		inv.legacyRole = roles[legacy]
 		names[legacy] = struct{}{}
 		inv.legacyOversize = len(legacy) > adminUsernameAccountLimit
 	}
@@ -655,6 +661,13 @@ func oversizeUsernameAction(inv adminUsernameInventory, totpOversize bool) strin
 		if inv.legacyMirrored {
 			// Only a mirrored legacy name has a roster entry to remove; a
 			// legacy-only name is retired by overwriting cfg.user alone.
+			if inv.legacyRole != "" && inv.legacyRole != RoleAdmin {
+				// VerifyUIUser grants the roster role first, so this login is
+				// effectively a non-admin; SetAuth always creates the new name
+				// as RoleAdmin, which would silently elevate it.
+				action += fmt.Sprintf("then in Admin Users set the new login's role back to %s "+
+					"(Settings always creates it as admin, but the old login's effective role is %s), ", inv.legacyRole, inv.legacyRole)
+			}
 			action += "then delete the old name's remaining Admin Users entry (Settings adds the new name but does not remove the old one), "
 		} else {
 			// POST /api/settings never writes ui_users.json, and with no
