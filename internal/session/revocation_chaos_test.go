@@ -643,3 +643,215 @@ func TestChaos68_CountsReportEveryLiveRevocation(t *testing.T) {
 		t.Errorf("UserCount() = %d, want 5", got)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// The boot writability probe (AU-31) — and the branch its first version missed.
+// ---------------------------------------------------------------------------
+
+// probeObservations installs the persist observers for the duration of the test
+// and reports what the boot probe did: how many writes landed and how many
+// failed. Zero of both means no probe ran at all, which is the pre-fix shape.
+func probeObservations(t *testing.T) (ok, failed *int) {
+	t.Helper()
+	var okN, failN int
+	SetPersistSuccessObserver(func() { okN++ })
+	SetPersistFailureObserver(func(error) { failN++ })
+	t.Cleanup(func() {
+		SetPersistSuccessObserver(nil)
+		SetPersistFailureObserver(nil)
+	})
+	return &okN, &failN
+}
+
+// DEFECT (Codex P2, second round). AU-31 proved the configured path was
+// writable by writing to it — but only on the os.IsNotExist branch. A file that
+// EXISTS and parses cleanly took the success path and never attempted a write,
+// so a node whose volume had since been remounted read-only reported durable
+// across /api/diagnostics, /metrics and the cluster API until the first real
+// logout failed to persist.
+//
+// "The file is readable" and "the path is writable" are different claims, and
+// the health plane reports the second one — the same distinction AU-31 made for
+// the absent file, one branch over.
+//
+// Verified FAILING against the pre-fix body (probe only under os.IsNotExist):
+// no write is observed.
+func TestChaos68_ExistingFileIsProbedForWritability(t *testing.T) {
+	path := chaosRevocationsPath(t)
+	seed, err := json.Marshal([]RevocationEntry{
+		{Token: "tok-existing", Expiry: time.Now().Add(time.Hour).Unix()},
+	})
+	if err != nil {
+		t.Fatalf("marshal seed: %v", err)
+	}
+	if err := os.WriteFile(path, seed, 0o600); err != nil {
+		t.Fatalf("write seed: %v", err)
+	}
+
+	ok, failed := probeObservations(t)
+	if err := NewRevocationList().LoadRevocations(); err != nil {
+		t.Fatalf("LoadRevocations on a healthy existing file: %v", err)
+	}
+
+	if *ok+*failed == 0 {
+		t.Error("an existing revocations file was loaded without ever proving the path is writable: durability is reported from configuration, not evidence")
+	}
+	if *failed != 0 {
+		t.Errorf("the boot probe failed on a writable path: %d failures", *failed)
+	}
+}
+
+// DEFECT, end to end. The reported scenario: the file is there and parses, the
+// mount underneath it is read-only. The probe must turn that into an observed
+// persist FAILURE at boot, which is what drives the degraded flag every
+// durability surface reads.
+//
+// Root bypasses DAC, so this is the one gate in the pair that cannot run as
+// root; TestChaos68_ExistingFileIsProbedForWritability above covers the same
+// branch uid-independently, so the branch is never left unguarded.
+func TestChaos68_ExistingFileOnAReadOnlyDirIsReportedNotDurable(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: mode bits do not deny writes")
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "revocations.json")
+	withRevocationsPath(t, path)
+	if err := os.WriteFile(path, []byte("[]"), 0o600); err != nil {
+		t.Fatalf("write seed: %v", err)
+	}
+	// Read-execute only: the file is still readable, no temp can be created
+	// beside it, so AtomicWrite fails exactly as it would on a read-only mount.
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+
+	ok, failed := probeObservations(t)
+	if err := NewRevocationList().LoadRevocations(); err != nil {
+		t.Fatalf("a readable file must not be a load error: %v", err)
+	}
+
+	if *failed == 0 {
+		t.Error("a readable revocations file on an unwritable directory produced no persist failure: the node reports durable until the first logout discovers otherwise")
+	}
+	if *ok != 0 {
+		t.Errorf("a write was reported successful on an unwritable directory: %d", *ok)
+	}
+}
+
+// CONTROL. A file that could not be READ must NOT be probed. The content may be
+// intact behind a transient permission or I/O fault, and a write attempt is the
+// one action that could destroy it — state_corruption.go's rule that moving (or
+// here, rewriting) a healthy security-critical file is the worse error.
+//
+// The cheapest way to pass the two gates above is to probe unconditionally, or
+// from a defer, which would reach this branch too.
+func TestChaos68_UnreadableFileIsNotProbed(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: mode bits do not deny reads")
+	}
+	path := chaosRevocationsPath(t)
+	original := []byte(`[{"token":"tok-intact","expiry":9999999999}]`)
+	if err := os.WriteFile(path, original, 0o600); err != nil {
+		t.Fatalf("write seed: %v", err)
+	}
+	if err := os.Chmod(path, 0o000); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(path, 0o600) })
+
+	ok, failed := probeObservations(t)
+	if err := NewRevocationList().LoadRevocations(); err == nil {
+		t.Fatal("an unreadable revocations file loaded without error")
+	}
+	if *ok+*failed != 0 {
+		t.Errorf("an unreadable file was probed (%d ok, %d failed): a write attempt is the one action that could destroy content that may be intact", *ok, *failed)
+	}
+
+	if err := os.Chmod(path, 0o600); err != nil {
+		t.Fatalf("chmod back: %v", err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if string(got) != string(original) {
+		t.Errorf("the unreadable file was rewritten: got %q, want %q", got, original)
+	}
+}
+
+// CONTROL. A CORRUPT file must not be probed either: the caller quarantines it,
+// and a probe that ran first would overwrite the evidence the quarantine exists
+// to preserve — turning a diagnosable incident into a silent one.
+//
+// Deterministic and uid-independent, so it guards the ordering on every runner.
+func TestChaos68_CorruptFileIsNotOverwrittenByTheProbe(t *testing.T) {
+	path := chaosRevocationsPath(t)
+	corrupt := []byte(`{"this is": "not an array"`)
+	if err := os.WriteFile(path, corrupt, 0o600); err != nil {
+		t.Fatalf("write seed: %v", err)
+	}
+
+	ok, failed := probeObservations(t)
+	err := NewRevocationList().LoadRevocations()
+	if !errors.Is(err, ErrRevocationsCorrupt) {
+		t.Fatalf("err = %v, want ErrRevocationsCorrupt", err)
+	}
+	if *ok+*failed != 0 {
+		t.Errorf("a corrupt file was probed (%d ok, %d failed): the probe would overwrite the evidence before the caller can quarantine it", *ok, *failed)
+	}
+
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if string(got) != string(corrupt) {
+		t.Errorf("the corrupt file was rewritten before quarantine: got %q, want %q", got, corrupt)
+	}
+}
+
+// CONTROL, and the sharpest one. The probe writes the COMPLETE live list, so it
+// must run AFTER the merge. Moving it earlier — the natural "probe first, then
+// read" refactor — would write the EMPTY in-memory list over the real file at
+// every boot, silently destroying every revocation on disk while every
+// durability surface reported green. That is a total failure of the one control
+// that can withdraw a live session's authority.
+func TestChaos68_ProbeDoesNotDropLoadedRevocations(t *testing.T) {
+	path := chaosRevocationsPath(t)
+	exp := time.Now().Add(time.Hour)
+	seed, err := json.Marshal([]RevocationEntry{
+		{Token: "tok-must-survive", Expiry: exp.Unix()},
+		{Token: userRevocationTokenPrefix + "alice", Expiry: exp.Unix(), User: "alice"},
+	})
+	if err != nil {
+		t.Fatalf("marshal seed: %v", err)
+	}
+	if err := os.WriteFile(path, seed, 0o600); err != nil {
+		t.Fatalf("write seed: %v", err)
+	}
+
+	rl := NewRevocationList()
+	if err := rl.LoadRevocations(); err != nil {
+		t.Fatalf("LoadRevocations: %v", err)
+	}
+	if !rl.IsRevoked("tok-must-survive") {
+		t.Error("a loaded token revocation is not in force")
+	}
+	if !rl.IsUserRevoked("alice") {
+		t.Error("a loaded user revocation is not in force")
+	}
+
+	// And it must still be on disk: the probe rewrote the superset, not a
+	// blank list.
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	var after []RevocationEntry
+	if err := json.Unmarshal(data, &after); err != nil {
+		t.Fatalf("unmarshal after probe: %v", err)
+	}
+	if len(after) != 2 {
+		t.Fatalf("the boot probe rewrote the file with %d entries, want 2: revocations on disk were destroyed at startup", len(after))
+	}
+}

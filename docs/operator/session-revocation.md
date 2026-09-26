@@ -172,13 +172,26 @@ cause that is a fault (writes failing) and nothing else. The contract row on
 installation — and contradicted `metrics.go`, whose own comment called it a
 warn. Reported by Codex on PR #1437 as a P2.
 
-**Durability is proven at boot, not assumed.** When the configured file does
-not exist yet, the node writes it immediately rather than reporting a clean
-first run: an absent file and a working path are different claims, and the
-surfaces below report the second. So a missing parent directory, a read-only
-mount or a permissions fault degrades the moment the node starts, instead of
-staying green until some operator's logout hours later turns out to be the
-first write (**AU-31**).
+**Durability is proven at boot, not assumed.** The node writes the revocations
+file at startup rather than inferring that it could: a readable path and a
+writable one are different claims, and the surfaces below report the second. So
+a missing parent directory, a read-only mount or a permissions fault degrades
+the moment the node starts, instead of staying green until some operator's
+logout hours later turns out to be the first write (**AU-31**).
+
+That applies whether or not the file already exists. A file that is present and
+parses cleanly proves only that the path is *readable* — a volume remounted
+read-only after an I/O error, a restore mounted read-only, or a directory whose
+permissions changed all leave a perfectly good file on a path nothing can write
+to. The startup write covers that case as well.
+
+It deliberately does **not** run when the file could not be read, or when it was
+read and could not be parsed. In the first case the content may be intact behind
+a transient fault and a write attempt is the one action that could destroy it;
+in the second the file is about to be quarantined and writing first would
+overwrite the evidence. In both, the `session_revocation` row fails with the
+load-failure reason instead — a different remedy from a permissions fault, which
+is why the two states are kept apart.
 
 ### Cluster revocations — `GET /api/cluster/revocations`
 

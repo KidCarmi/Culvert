@@ -230,3 +230,54 @@ func TestChaos68_WritablePathIsStillDurable(t *testing.T) {
 		t.Errorf("the boot probe did not create the revocations file, so durability was assumed rather than proven: %v", err)
 	}
 }
+
+// TestChaos68_ExistingFileOnUnwritablePathIsNotReportedDurable is the Codex P2
+// gate from the second round, at the surface the finding named.
+//
+// TestChaos68_UnwritablePathIsNotReportedDurable above covers the ABSENT file.
+// A file that already EXISTS and parses cleanly took LoadRevocations' success
+// path and never attempted a write, so a node whose volume had since been
+// remounted read-only reported durable here, on /api/diagnostics, on /metrics
+// and on the cluster API — until some later logout became the first write and
+// discovered otherwise. Same unearned green, one branch over.
+//
+// Root bypasses DAC, so this cannot run as root;
+// internal/session's TestChaos68_ExistingFileIsProbedForWritability covers the
+// same branch uid-independently, so it is never left unguarded.
+//
+// Verified FAILING against the pre-fix body (probe only under os.IsNotExist).
+func TestChaos68_ExistingFileOnUnwritablePathIsNotReportedDurable(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: mode bits do not deny writes")
+	}
+	// A failed durable write also trips the STORAGE write-health plane, which
+	// folds into the aggregate /api/diagnostics verdict — see the comment on
+	// TestChaos68_UnwritablePathIsNotReportedDurable.
+	resetDiagVerdictGlobals(t)
+	withChaos68Revocations(t)
+
+	dir := t.TempDir()
+	path := dir + "/revocations.json"
+	if err := os.WriteFile(path, []byte("[]"), 0o600); err != nil {
+		t.Fatalf("write seed: %v", err)
+	}
+	// Read-execute only: the file stays readable, no temp can be created
+	// beside it, so the write fails exactly as on a read-only mount.
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+
+	prev := session.RevocationsPath()
+	session.SetRevocationsPath(path)
+	t.Cleanup(func() { session.SetRevocationsPath(prev) })
+
+	noteRevocationPersistenceConfigured(path)
+	if err := sessionRevoked.LoadRevocations(); err != nil {
+		t.Fatalf("a readable revocations file must not be a load error: %v", err)
+	}
+
+	if revocationsAreDurable() {
+		t.Error("an existing revocations file on an unwritable path was reported durable: the operator sees green until the first logout discovers the volume is read-only")
+	}
+}

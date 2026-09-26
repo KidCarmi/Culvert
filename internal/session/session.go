@@ -527,6 +527,44 @@ func (r *RevocationList) SaveRevocations() error {
 	return nil
 }
 
+// probePersistPath PROVES the configured path is writable, by writing to it,
+// and drives the persist observers so every durability surface reflects the
+// answer at BOOT rather than at some later operator action.
+//
+// SaveRevocations writes the COMPLETE live list (ExportRevocations), so this is
+// never a partial or synthetic write: on the absent-file branch it creates the
+// file with the current list, and on the loaded branch it rewrites the superset
+// that was just merged. AtomicWrite renames a fully-written temp file into
+// place, so a failure leaves whatever was already on disk untouched — proving
+// writability cannot cost the content being proved about.
+//
+// It is called from BOTH branches that reach a durable-looking posture, and
+// from NEITHER branch that does not, which is the whole point:
+//
+//   - file ABSENT      → probe. Nothing to lose, and "not there yet" is not
+//     the same claim as "the path works".
+//   - file LOADED      → probe. The in-memory list is now a superset of the
+//     file, so rewriting it is safe — and this is the case the first version
+//     of this fix missed (Codex P2, PR #1437): an existing, perfectly
+//     parseable file on a mount that has since gone read-only took the success
+//     path, never attempted a write, and reported durable across diagnostics,
+//     metrics and the cluster API until the first real logout failed.
+//   - file UNREADABLE  → do NOT probe. The content may be intact behind a
+//     transient fault, and a write attempt is the one action that could
+//     destroy it. state_corruption.go's own rule: moving (or here, rewriting)
+//     a healthy security-critical file is the worse error.
+//   - file CORRUPT     → do NOT probe. The caller quarantines it, and writing
+//     first would overwrite the evidence.
+//
+// The error is deliberately not returned. "Could not read" and "cannot write"
+// are separate states (LoadDegraded vs the persist-degraded flag) and
+// conflating them would report a corrupt-file remedy for a permissions fault.
+func (r *RevocationList) probePersistPath() {
+	if err := r.SaveRevocations(); err != nil {
+		obs.Printf("Session: revocations path is not writable: %v", err)
+	}
+}
+
 // LoadRevocations reads revocations from disk and merges them.
 func (r *RevocationList) LoadRevocations() error {
 	path := RevocationsPath()
@@ -546,19 +584,7 @@ func (r *RevocationList) LoadRevocations() error {
 			// logout hours later became the first thing to discover the path
 			// was bad. The unearned green is the defect, not the missing file
 			// (Codex P2, PR #1437).
-			//
-			// So PROVE it with the real write path rather than inferring it:
-			// SaveRevocations creates the file with the current (empty) list
-			// and drives notePersistSuccess/notePersistFailure, so a bad path
-			// sets the same degradation a failed logout-save would and every
-			// surface lights up at BOOT. Deliberately not returned as a load
-			// error: "could not read" and "cannot write" are tracked as
-			// separate states (LoadDegraded vs the persist-degraded flag), and
-			// conflating them would report a corrupt-file remedy for a
-			// permissions fault.
-			if probeErr := r.SaveRevocations(); probeErr != nil {
-				obs.Printf("Session: revocations path is not writable: %v", probeErr)
-			}
+			r.probePersistPath()
 			return nil
 		}
 		return fmt.Errorf("read revocations: %w", err)
@@ -569,12 +595,21 @@ func (r *RevocationList) LoadRevocations() error {
 		// caller quarantines instead of silently booting with an EMPTY list —
 		// which is the fail-OPEN direction for this particular file, since
 		// every revocation it held is resurrected for the rest of its TTL.
+		// Deliberately returns BEFORE the probe: writing here would overwrite
+		// the evidence the quarantine exists to preserve.
 		return fmt.Errorf("%w: %v", ErrRevocationsCorrupt, err)
 	}
 	added := r.MergeRevocations(entries)
 	if added > 0 {
 		obs.Printf("Session: loaded %d revocations from disk", added)
 	}
+	// A file that EXISTS and parses proves the path is readable and says
+	// nothing about whether it is writable — a mount remounted read-only after
+	// an I/O error, a volume restored read-only, a directory whose permissions
+	// changed. That posture reported durable everywhere until the first logout
+	// failed, which is the same unearned green as the absent-file branch, one
+	// branch over. Prove it here too (Codex P2, second round, PR #1437).
+	r.probePersistPath()
 	return nil
 }
 

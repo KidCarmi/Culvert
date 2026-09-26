@@ -63,7 +63,12 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   unwritable and the first save was certain to fail — the fault surfaced only
   when some operator's logout, hours later, happened to be the first write.
   The node now proves the path at startup by writing the file, so a bad path
-  degrades at boot.
+  degrades at boot. This covers an existing file as well as an absent one: a
+  file that is present and parses proves only that the path is readable, so a
+  volume remounted read-only still reported durable until the first logout
+  failed. The startup write is deliberately skipped when the file could not be
+  read or could not be parsed — the content may be intact behind a transient
+  fault, or be about to be quarantined, and writing would destroy it.
 - An ordinary password change silently destroyed the account's TOTP second
   factor (SEC-TOTP-1 / RISK-029). `apiAuthLogin` refuses to issue a session for
   an enrolled account until `verifyLoginTOTP` accepts a code, so the enrolment
