@@ -155,8 +155,14 @@ func apiBackupsList(w http.ResponseWriter, r *http.Request) {
 		jsonOK(w, backupsCache.payload)
 		return
 	}
+	// Stamp the FETCH START, not its return: the agent scans the directory
+	// somewhere inside the fetch, so a listing that returns after an op's
+	// finished_at may still predate the archive. The terminal-poll
+	// invalidation compares this stamp against finished_at, so it must never
+	// claim a snapshot is newer than it can prove.
+	start := time.Now()
 	out := buildBackupsPayload(r.Context())
-	backupsCache.payload, backupsCache.at = out, time.Now()
+	backupsCache.payload, backupsCache.at = out, start
 	jsonOK(w, out)
 }
 

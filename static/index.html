@@ -5211,7 +5211,7 @@ Firefox (all platforms):
               </button>
             </div>
             <p class="hint">Archive directory scanned by the maintenance agent - the same listing <code>--list-backups</code> produces, without SSH.</p>
-            <div id="support-backup-trigger" style="display:none;margin:8px 0;padding:10px;border:1px solid var(--border);border-radius:8px;background:var(--surface)" data-min-role="admin">
+            <div id="support-backup-trigger" style="display:none;margin:8px 0;padding:10px;border:1px solid var(--border);border-radius:8px;background:var(--surface)">
               <label style="font-size:.82rem;display:flex;align-items:center;gap:8px">
                 <input type="checkbox" id="backup-now-encrypt" data-change="backupNowEncryptToggle"> Encrypt this backup
               </label>
@@ -6451,6 +6451,12 @@ function applySession(user, role) {
     const required = roleLevel[el.getAttribute('data-min-role')] || 0;
     el.style.display = myLevel >= required ? '' : 'none';
   });
+  // The Backup Now form is an open/closed dialog, not a role-gated control:
+  // it deliberately carries no data-min-role (the loop above would un-hide it
+  // before backupNowOpen sets its encrypted defaults). A session change
+  // always closes it; backupNowOpen and the server enforce admin.
+  const backupTrigger = document.getElementById('support-backup-trigger');
+  if (backupTrigger) backupTrigger.style.display = 'none';
 
   // Logout button
   document.getElementById('logout-btn').style.display = (user || role) ? '' : 'none';

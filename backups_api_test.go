@@ -82,6 +82,32 @@ func TestAPIBackups_ListingIsSingleFlightedAndCached(t *testing.T) {
 // any non-2xx (blanking the panel exactly while the operator diagnoses the
 // agent), so agent-down must answer 200 {available:false} like the
 // not-configured branch always did — never 503.
+// TestAPIBackups_ListingCacheStampIsTheFetchStart pins that the cache stamp
+// is taken before the agent scans the directory: a listing that returns
+// after an op's finished_at can still predate the archive, and the
+// terminal-poll invalidation compares this stamp against finished_at.
+func TestAPIBackups_ListingCacheStampIsTheFetchStart(t *testing.T) {
+	resetBackupsCache(t)
+	var scanAt atomic.Int64
+	agent := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		scanAt.Store(time.Now().UnixNano())
+		time.Sleep(20 * time.Millisecond) // the fetch returns well after the scan
+		_, _ = w.Write([]byte(`[]`))
+	}))
+	defer agent.Close()
+	t.Setenv(envMaintAgentURL, agent.URL)
+
+	if code, _ := callAPIBackups(t); code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", code)
+	}
+	backupsCache.mu.Lock()
+	at := backupsCache.at
+	backupsCache.mu.Unlock()
+	if scan := time.Unix(0, scanAt.Load()); at.After(scan) {
+		t.Fatalf("cache stamped %v, after the agent's scan at %v: a stale listing would outrank a later finished_at", at, scan)
+	}
+}
+
 func TestAPIBackups_AgentDownIsHTTP200Unavailable(t *testing.T) {
 	resetBackupsCache(t)
 	agent := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))

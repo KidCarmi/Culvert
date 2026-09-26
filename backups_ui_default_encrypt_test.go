@@ -44,3 +44,36 @@ func TestUIContract_BackupNowDefaultsToEncryption(t *testing.T) {
 		t.Error("backupNowSubmit must require an explicit dev/lab-only confirmation before an unencrypted backup")
 	}
 }
+
+// The Backup Now form is a dialog whose open state initializes the encrypted
+// defaults. If it carried data-min-role, applySession's role loop would set
+// display=” on every admin login and reveal it uninitialized (Encrypt
+// unchecked, passphrase empty). It must not carry the attribute, and a
+// session change must close it.
+func TestUIContract_BackupNowFormIsNotRevealedByRoleFiltering(t *testing.T) {
+	html, err := os.ReadFile(staticIndexHTMLPath())
+	if err != nil {
+		t.Fatalf("read index.html: %v", err)
+	}
+	s := string(html)
+	i := strings.Index(s, `<div id="support-backup-trigger"`)
+	if i < 0 {
+		t.Fatal("support-backup-trigger not found")
+	}
+	tag := s[i:]
+	tag = tag[:strings.Index(tag, ">")]
+	if strings.Contains(tag, "data-min-role") {
+		t.Error("support-backup-trigger must not carry data-min-role: applySession would reveal it before backupNowOpen initializes it")
+	}
+	j := strings.Index(s, "function applySession(")
+	if j < 0 {
+		t.Fatal("applySession not found")
+	}
+	body := s[j:]
+	if k := strings.Index(body, "\n}\n"); k >= 0 {
+		body = body[:k]
+	}
+	if !strings.Contains(body, "getElementById('support-backup-trigger')") || !strings.Contains(body, "backupTrigger.style.display = 'none'") {
+		t.Error("applySession must close the Backup Now form on every session change")
+	}
+}
