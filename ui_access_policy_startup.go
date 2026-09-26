@@ -61,6 +61,51 @@ func loadUIAccessPolicy(cfg uiAccessPolicyStartupConfig) error {
 			return fmt.Errorf("IdP profiles load error: %w", err)
 		}
 		logger.Printf("IdP: loaded from %s (%d profiles)", cfg.IdPProfilesFile, len(idpRegistry.All()))
+		// CHAOS-71: Load reports a compile failure with one log line and
+		// leaves the profile enabled-but-not-live, which before this was
+		// PERMANENT for the process lifetime — an IdP that was briefly
+		// unreachable at boot (ordinary on a host reboot, where the container
+		// and the network come up concurrently) stayed dark until somebody
+		// restarted the appliance or re-saved the profile. The loop exits
+		// immediately when every enabled profile compiled, so a healthy boot
+		// costs one goroutine that returns at once.
+		// Keyed on the loop's OWN predicate (every enabled profile with no
+		// live provider, LDAP included), not on the interactive-only counts
+		// the contract row reports — a start condition narrower than what the
+		// loop recovers would leave a dark profile with no way back.
+		if len(idpRegistry.darkEnabledProfiles()) > 0 {
+			armIdPRecoveryLoop(resolveLifecycleCtx())
+		}
+		// Detection-only degradation watchdog. UNLIKE the recovery loop above
+		// it is not gated on anything being dark, because the case it exists
+		// for is a provider that IS live while serving a stale cached
+		// document: nothing further compiles it, so nothing would ever
+		// evaluate the elapsed-time degradation threshold and the documented
+		// page would never fire (Codex review round 4).
+		//
+		// It is not gated on a remote profile EXISTING either, and that is
+		// deliberate. The first shape guarded this with
+		// hasEnabledRemoteMetadataProfile, evaluated ONCE here — so an
+		// appliance that booted with no remote IdP and later gained one
+		// (an admin Upsert, or a CP->DP snapshot) had no goroutine left to
+		// notice its outage, and the documented alert could never fire on
+		// exactly the profile an operator had just added (Codex review round
+		// 5). Starting it per-profile would mean a lifecycle to own, so the
+		// watchdog is simply unconditional: the gate's own justification was
+		// that the cost is one sleeping goroutine, which is what a boot-time
+		// gate saves and a correctness gap is not worth.
+		//
+		// It fetches nothing, compiles nothing and clears no episode; with no
+		// open episode its sweep is a no-op.
 	}
+
+	// Started OUTSIDE the -idp-profiles-file block on purpose. A DP with no
+	// profiles file still receives IdP profiles through the CP->DP snapshot
+	// (ReplaceAll persists nothing there and says so, but the registry is
+	// live), so leaving the watchdog inside that block left exactly the fleet
+	// nodes that get their configuration pushed to them with nothing watching
+	// for a metadata outage. This is the same round-5 finding one level out:
+	// the start was conditional on boot-time state that a later write changes.
+	go runIdPMetadataDegradationWatchdog(resolveLifecycleCtx())
 	return nil
 }

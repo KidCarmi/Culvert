@@ -70,6 +70,27 @@ everything else is triaged below with a suggested PR and required tests for foll
 > claim its id in a committed placeholder row in this file as its FIRST commit,
 > before any code is written — that is the whole remedy, and it costs one line.
 >
+> **AMENDED 2026-09-25 — the placeholder is NECESSARY BUT NOT SUFFICIENT, and
+> the CHAOS-71 sweep (§41) is the proof.** It did exactly what the paragraph
+> above prescribes: claimed `CHAOS-66` in a committed placeholder row as commit
+> one, before any code. It collided anyway. The reason is the part the remedy
+> never stated: **a placeholder reserves an id only against sweeps that branch
+> AFTER it merges.** The SOCKS5-bind sweep had claimed `CHAOS-66` on 2026-09-12
+> in *its* placeholder, on *its* branch, and merged to main after §41's branch
+> point — so at claim time §41 grepped its own working tree, found the id free,
+> and was correct about the tree and wrong about the world. Two correct
+> placeholders, mutually invisible, because a branch is not a registry.
+>
+> So the rule gains a second half, and it is the half that does the work:
+> **check `origin/main`, not the working tree.** `git fetch origin main && git
+> show origin/main:roadmap/CHAOS-ENGINEERING-REVIEW.md | grep CHAOS-<n>` is the
+> claim-time test; a `grep -rn` over the checkout is not, and neither is a
+> placeholder that will sit unmerged for days. This does not make the
+> placeholder pointless — it is still what lets a colliding sweep prove it
+> claimed first, and it is still what the renumber convention below keys on —
+> it means the placeholder is the RECORD and the origin/main check is the
+> RESERVATION. Doing only the first is what happened here.
+>
 > Both sweeps independently arrived at the same rule, which is the one to
 > follow until the durable fix exists: **an id is rewritable for free right up
 > until its first merge, and needs owner sign-off the moment after — so the
@@ -94,6 +115,55 @@ everything else is triaged below with a suggested PR and required tests for foll
 > in silence. The durable fix is still the one recorded above (allocate the id
 > in a committed placeholder row at the START of a sweep), and at six
 > occurrences it is well past overdue.
+
+**2026-09-23 — CHAOS-71 sweep (the interactive IdP compile path).** Claimed
+`CHAOS-66` in a committed placeholder before writing code, but main's SOCKS5-bind
+sweep (the 2026-09-12 row below) had already merged under that id, so the
+placeholder never reached main and this sweep was renumbered CHAOS-71 / §41 at
+merge time by the review coordinator. The
+finding: three previous identity sweeps (CHAOS-47, 49, 58) each asked what
+happens when an IdP fails to answer a REQUEST, and none asked what an enabled
+SAML/OIDC profile needs to be reachable in order to EXIST. `compileIdPProfile`
+performs a synchronous outbound fetch at the customer's IdP with no cache, no
+fallback and no retry, on three paths: boot, admin write, and **every CP→DP
+config sync**. Five defects, three closed. The sharpest is that **a third party
+could veto the operator's config push** — a failed IdP metadata fetch aborted
+the whole ConfigSnapshot without advancing `lastVersion`, so an ordinary IdP
+maintenance window stopped policy, blocklist and threat-feed distribution to
+every data plane in the fleet, and because the version could not advance every
+DP retried the fetch every 30 s for the duration (measured 1:1), aiming the
+fleet's full poll rate at the IdP that was already down — the WK-13 herd
+pointed at the customer's identity provider. Alongside it: a boot-time compile
+failure was PERMANENT for the process lifetime (an IdP unreachable for seconds
+during a host reboot left browser SSO dark until a restart), and the
+enabled-but-not-live state it produces had NO surface at all — not a metric,
+not a contract row, not an alert — so *"no IdP configured"* and *"an IdP is
+configured, enabled and dead"* were indistinguishable from outside. The rule:
+**a third party's availability decides whether an IdP's metadata is FRESH,
+never whether the IdP EXISTS** — `internal/idpmeta` keeps the last
+successfully-fetched document, bounded by a 7-day staleness ceiling on the
+SEC-JWKS-1 reasoning (withdrawing a key from published metadata is the IdP's
+revocation lever). Two are REPORTED, NOT FIXED: a node that has never compiled
+a profile still has no fallback (IDP-5), and the SAML SP key pair is still
+ephemeral per process and per node (IDP-6). Governance note: construction-time
+dependencies are invisible to request-path chaos testing by definition — the
+component either exists or the test does not run. **A review round found three
+more, one of them this sweep's own headline defect left open on the OIDC half**:
+`fetchOIDCDiscovery` gated on `validateExternalURL`, which RESOLVES, so a DNS
+outage returned a *configuration* error before the cache could be consulted —
+the SAML half fixed, the OIDC half not, and the operator pointed at their config
+for a fault in their resolver. A guard that answers two different questions with
+one verdict will be placed correctly for one of them; the configuration question
+is now `validateExternalURLStructure` (resolver-free, fail-fast) and the
+resolution question stays inline on the fetch (fail-back). The second: the SAML
+pre-flight `isPrivateHost` added for the CodeQL convention resolved under
+`context.Background()` — an unbounded step immediately AHEAD of a bounded
+operation, the CHAOS-60/64 shape reintroduced inside a fix for something else.
+The third: an `idpMetaInline` early return left an episode nothing could ever
+clear, so a profile switched to inline `metadataXml` warned forever about a
+remote fetch that no longer existed — the observed-evidence rule forbids clearing
+on elapsed TIME, not on evidence the dependency is GONE. See §41, rows
+IDP-1…IDP-10, and `docs/operator/idp-metadata-availability.md`.
 
 **2026-09-22 — CHAOS-70 sweep (the admin roster as a durability surface).**
 Written up as `CHAOS-66` and renumbered to `CHAOS-70` (§40) when main was merged
@@ -6925,13 +6995,43 @@ status, or read the unfiltered output, before claiming a gate is green.
   owner decision on each, not a drive-by change inside this one.
 - **`startUI`'s sibling faults** are already closed by §33; the CP gRPC bind
   (`cluster_startup.go`) remains fatal and is the closest unexamined analogue —
-  recorded, not changed here (one concern per change).
+  recorded, not changed here (one concern per change). **It has since been
+  EXAMINED — see register row CP-1**, which establishes that it is worse than
+  this note assumed: it is fatal at `cluster_startup.go:96`, `initCluster` runs
+  at `main.go:228` (earlier than the SOCKS5 fault this section closed, and
+  earlier than the admin UI and the proxy), a CP node also proxies, the mTLS
+  material is read at call time so §33's rotation trigger applies unchanged,
+  and the same function returns its error properly to both of its other two
+  callers including the live admin API.
 - **SOCKS5 still never consults the policy engine** (no category/GeoIP/schedule
   rules, no default-deny) — §22's residual, unchanged.
 - A listener that binds successfully and whose socket dies instantly on every
   accept will cycle at the 30 s ceiling indefinitely. It is rate-bounded, loudly
   reported (`down`, alert, gauge at zero) and strictly better than the previous
   terminal state, but it is a cycle rather than a convergence.
+- **The bind is RECORDED before the listener is ADOPTED** (found by §41's full-suite
+  run, reported here, not changed — one concern per change). `socks5_bind.go`
+  calls `noteSOCKS5Bound()` and then `markFirstAttempt()` at lines 374–375,
+  before `newSOCKS5Server` / `adopt` / `srv.Start()` at 383–386, so there is a
+  window in which `Binds`, `everBound`, `/healthz socks5 = ready` and
+  `culvert_socks5_listener_up 1` all say bound and serving while `s.cur` is
+  still nil, `Addr()` returns nil, and the accept loop has not started.
+  `markFirstAttempt`'s own comment states the rule it breaks — it exists so
+  `startSOCKS5` "cannot return while every SOCKS5 surface still describes a
+  listener that does not exist yet". The customer-visible cost is small and this
+  is not the §33 defect: the SOCKET really is bound at that point, so a client
+  completes its handshake and waits in the kernel backlog for the microseconds
+  until `Start()` runs. What is briefly untrue is that the supervisor has
+  adopted it. It is nonetheless the same inversion this sweep names as its rule
+  — *keep the announcement strictly downstream of the evidence* — applied to the
+  log line and not to the health record, and it makes
+  `TestChaos66_ListenerRebindsOnceThePortIsFree` flaky under load: it waits on
+  `Binds > 0` and then asserts `srv.Addr() != nil`, which is precisely the
+  window (observed once in a full `go test ./...` run, passes in isolation).
+  Moving `noteSOCKS5Bound`/`markFirstAttempt` to after a successful `adopt`
+  closes both, but it also changes what a failed adopt reports, which is an
+  owner decision on this sweep's own state machine.
+
 
 ---
 
@@ -8281,3 +8381,1031 @@ the sweep happens to be editing.
   from the local-account delete path, which the roster backstop already covers;
   it becomes live the moment user-level revocation is wired to anything else.
   Recorded as **AU-19**, not fixed inside a sweep about durability.
+
+---
+
+## 41. CHAOS-71 — The interactive IdP compile path
+
+**Sweep date:** 2026-09-23. **Originally claimed as CHAOS-66 / §36 in a committed
+placeholder row before any code was written**; that id was taken on main by the
+SOCKS5-bind sweep before this branch merged, so it was renumbered CHAOS-71 / §41
+at merge time. A placeholder on an unmerged branch reserves nothing — only a
+claim that reaches main does.
+
+### The question
+
+Every previous identity sweep asked what happens when an IdP does not answer a
+*request*: CHAOS-47 (LDAP/OIDC outcome caching and the `authProbeGate`),
+CHAOS-49 (the IdP registry, JWKS integrity and stale-key ceiling), CHAOS-58 (a
+directory that accepts and then stalls). All three govern the moment a user
+authenticates. This sweep asked the question one layer up and one moment
+earlier: **what does an enabled SAML or OIDC profile need to be reachable
+before it can EXIST at all, and what else breaks when it is not?**
+
+### The finding
+
+`compileIdPProfile` performs a synchronous outbound fetch against the
+customer's identity provider — `fetchSAMLMetadata` for a `metadataUrl`,
+`fetchOIDCDiscovery` for an issuer — with **no cache, no fallback and no
+retry**. That fetch sits on three paths, and on each of them a third party's
+availability decided something it had no business deciding.
+
+**(1) There was no last-known-good.** A provider that compiled successfully
+seconds earlier could not be compiled at all once its endpoint stopped
+answering, although nothing about the IdP's published document had changed.
+
+**(2) A boot-time failure was PERMANENT.** `IdPRegistry.Load` logs a compile
+error and moves on, leaving the profile `Enabled` in `r.profiles` and absent
+from `r.live`. Every accessor — `EnabledProviders`, `HasEnabledProviders`,
+`EnabledInteractiveProviders`, `LiveProvider` — keys on `r.live`, so the
+profile becomes operationally invisible while remaining enabled, stored and
+listed in the admin UI. **Nothing in the process ever retried**, so an IdP that
+came back thirty seconds later stayed dark until a restart or an admin re-save.
+The trigger is ordinary rather than exotic: on a host reboot the container and
+the network come up concurrently, and a few seconds of unresolvable DNS is
+enough. Note the asymmetry that hid it — the admin write path (`Upsert`) and
+the CP→DP path (`ReplaceAll`) both run `validateExternalURL` first, so the
+config an operator types is checked; `Load` does not, so the config an
+appliance boots with is not.
+
+**(3) It was INVISIBLE.** No metric, no contract row, no alert and no
+`/health` or `/ready` field distinguished *"no IdP configured"* from *"an IdP
+is configured, enabled, and dead"*. One `logger.Printf` at boot, into a
+rotating file. That is the register's §1 silent-failure theme reached through
+the identity plane. Downstream, a scoped `SSORequired` rule correctly fails
+CLOSED (403, `proxy.go` arm 3c — the posture is right and is pinned as a
+control), so the symptom customers see is *every browser user denied*, with a
+green dashboard and a rule hit-counter that reads exactly like *"no traffic
+matched"*.
+
+**(4) A third party could veto the operator's config push — the sharpest one.**
+`ReplaceAll` compiles every enabled profile and is all-or-nothing, and
+`syncSnapshotIdPProfiles` returns its error into `fetchAndApply`
+(`controlplane_client.go:343`), which abandons the snapshot **without advancing
+`lastVersion` and without persisting last-good**. So an IdP maintenance window
+— Okta, Entra or ADFS patching, an ordinary scheduled event — **stopped policy,
+blocklist, threat-feed and session-HMAC distribution to every data plane in the
+fleet.** A failure in the identity plane taking out the config plane. Measured:
+an inline-`metadataXml` profile that needs no network at all was rejected
+because a *sibling* profile's remote endpoint was unreachable.
+
+**(5) It amplified into the IdP.** Because the version never advanced, the
+pending snapshot stayed pending, so every DP retried the whole apply — fetch
+included — on its next 30 s poll, indefinitely. Measured 1:1: ten applies, ten
+outbound connections. A 200-node fleet with two remote IdPs aims roughly 800
+requests/minute at the metadata endpoint for the duration of the outage,
+starting the moment an operator pushes a config change, and **it never stops on
+its own** because the thing that would stop it is the config version advancing.
+That is the WK-13 herd, pointed at the customer's identity provider at the
+moment it is least able to answer, and it is the same shape CHAOS-64 found
+pointed at the customer's DNS and CHAOS-49 found pointed at the customer's JWKS
+endpoint.
+
+### The rule
+
+> **A third party's availability decides whether an IdP's metadata is FRESH.
+> It never decides whether the IdP EXISTS.**
+
+`internal/idpmeta` keeps the raw bytes of the last document each profile
+successfully fetched, and the compile degrades to it. That closes (1), and with
+it the compile failure that drives (4) and (5) for any node that has ever
+compiled the profile — which is every node in steady state. `idp_recovery.go`
+closes (2). `idp_metadata_health.go` closes (3).
+
+### Why the cache is bounded, and why that is the security half
+
+Serving a cached document forever would keep trusting an IdP signing key the
+IdP may have withdrawn — **withdrawing a key from published metadata is the
+IdP's revocation lever**, exactly as it is for a JWKS document. SEC-JWKS-1
+reached the identical conclusion one layer down (`jwksStaleMaxAge`) and the
+answer is the same: stale is a BOUNDED degradation. Past `idpmeta.StaleMaxAge`
+(7 days) the entry is refused and the caller fails exactly as it did before this
+package existed. It is a CONSTANT with no config surface — the only thing a
+knob here could do is widen the window in which a withdrawn key stays trusted,
+which is the one direction this value must not move.
+
+Four further rules the design carries, each with its own gate:
+
+* **The network always WINS when it answers.** The cache is a fallback, never a
+  first choice, so an IdP-side key rotation is picked up at the first compile
+  after it happens. This is the CONTROL, not a nicety: *"always serve the
+  cache"* passes every single defect gate above while silently stopping the
+  appliance from ever noticing a key rotation — strictly worse than the outage
+  being fixed. Verified: the control is the only gate that fails against that
+  shape.
+* **The key binds the document to its SOURCE** (profile id + a digest of the
+  URL), so re-pointing a profile at a different IdP has no cache. Otherwise a
+  deliberate migration could be answered by the provider being migrated away
+  from, which is a trust decision, not a caching one.
+* **Cached bytes go through the IDENTICAL parser and validator as network
+  bytes.** The store returns raw bytes and never parses. For OIDC this is
+  load-bearing: the discovery document names the authorization and token
+  endpoints this appliance sends users and credentials to, so
+  `parseAndValidateOIDCDiscovery` — now the single parser for both origins —
+  puts every discovered endpoint back through `validateExternalURLStructure`,
+  and additionally puts the AUTHORIZATION endpoint through an address check
+  (`refuseDefinitelyPrivateRedirect`). The asymmetry is the point: the token
+  and JWKS endpoints are ones this appliance DIALS, so `ssrfSafeDialContext`
+  refuses a private resolved address at connect time and is rebinding-proof;
+  the authorization endpoint is handed to the user's BROWSER, so no dialer of
+  ours is consulted. Round 1 of this sweep claimed `isSafeCaptiveRedirect`
+  re-checked it — FALSE, it checks only shape — so dropping the resolving
+  validator opened a redirect-to-internal path. The restored check refuses only
+  a DEFINITE private verdict, because a resolution failure is *unknown*, not
+  *private*. A cache
+  file edited by anything that got write access to `dataDir` cannot widen a
+  trust decision.
+* **A NEGATIVE age is STALE, not fresh.** A document stamped in the future,
+  which a clock rollback produces, is refused rather than read as maximally
+  fresh — the rule CHAOS-61 established for cluster rate-limit broadcast
+  freshness, for the same reason: a future stamp otherwise extends the trust
+  window by however far the clock moved.
+
+The store is also INERT rather than fatal when it has no writable directory:
+the cache is an availability aid, never a correctness dependency, so its
+absence degrades to exactly the pre-CHAOS-71 behaviour instead of failing a
+compile that would otherwise have worked.
+
+### The way back (idp_recovery.go)
+
+Same shape as CHAOS-55 (the fencing lease) and CHAOS-57 (the admin UI
+listener), and for the same reasons. Retry is **RATE-bounded, never
+COUNT-bounded** — the terminal state of "give up" is an appliance whose SSO
+never returns without an operator, which is the outcome being fixed — and
+"avoid infinite retries" is satisfied the CHAOS-54/55/57 way, by the retry
+never being SILENT. Waits are **jittered**, because a fleet restarts together
+and a fleet's IdP outage ends for everyone at once, so a fixed cadence would
+aim a synchronised herd at a recovering IdP: this sweep's own finding (5),
+which must not be reintroduced inside its own fix. Waits are
+**interruptible**, so shutdown never sits one out. Recovery is declared on
+**OBSERVED evidence only** — a provider that actually compiled. And the loop
+exits the moment nothing is dark, so a healthy appliance pays one goroutine
+that returns immediately.
+
+`publishRecompiled` re-checks **everything** under the lock — still present,
+still enabled, still the same generation, still not live — because the compile
+ran without it. Publishing blind would resurrect a profile deleted while we
+were fetching, or overwrite a newer provider with one built from older config.
+The compile itself deliberately runs OUTSIDE `r.mu`: it reaches the network,
+and `HasEnabledInteractiveProvider` runs on the proxy request path, so holding
+the lock across an IdP timeout would stall every proxied request — the CHAOS-50
+cluster-CA rule (never hold a lock across a call that reaches the network).
+
+### Surfaces
+
+All reuse existing operator vocabulary. `/api/diagnostics` gains the
+`idp_metadata` row; `/metrics` gains `culvert_idp_enabled_not_live` and
+`culvert_idp_metadata_*`, **emitted only on a node that has an enabled
+interactive IdP profile or has acquired a remote document** (the
+socks5/cluster_ca/dns rule: a flat `0` from every appliance that never
+configured SSO is indistinguishable from one whose IdP is dead, and the paging
+rule is `> 0`). The alert is the **existing `identity_backend_unreachable`
+event** with source `idp_metadata` — a new name would be silently unsubscribed
+on every already-configured webhook (the cluster-CA `cert_expiry` precedent),
+and "the IdP cannot be reached" is one operator action whether the unreachable
+thing is an LDAP bind endpoint, an OIDC introspection endpoint or a metadata
+document. Its Detail is a **BOUNDED reason class**: `Dispatch` dedups on
+`event + ":" + Detail`, and the raw error embeds the configured IdP URL.
+
+**Deliberately NOT on `/readyz`.** An IdP outage is fleet-wide by construction,
+so failing readiness would eject the entire fleet from the load balancer
+simultaneously over a dependency none of them can fix by restarting — turning
+an SSO degradation into the total traffic outage the change exists to prevent.
+The `ca`, `cluster_ca` and `dns_resolution` rows already follow this rule.
+
+The admin "test this issuer" endpoint (`POST /api/idp/oidc/discover`) was split
+onto its own cache-free path (`probeOIDCDiscovery`) in both directions: it must
+never READ the cache, because a diagnostic answered from cache reports a dead
+IdP as healthy (the `ocspCoverage` *"found nothing wrong" vs "never consulted"*
+mistake), and it must never WRITE it, because the issuer is caller-supplied and
+a cache keyed on one would be a seeding surface.
+
+### Gates
+
+`internal/idpmeta/idpmeta_test.go` (12) and `idp_metadata_chaos_test.go` (34
+functions). Eleven DEFECT gates were verified failing against the reintroduced
+pre-fix shape and the four security gates plus three controls pass against it —
+the correct signature, since the security properties are new rather than
+regressions. The CONTROL `FreshDocumentAlwaysBeatsTheCache` was separately
+verified as **the only** gate that fails against the always-prefer-cache wrong
+fix, which is what makes the defect gates worth trusting.
+
+One defect was introduced by this change and caught by its own gates:
+`resetIdPMetadataHealthForTest` assigned a zero struct **while holding the
+struct's own mutex**, so the deferred `Unlock` released a fresh mutex and the
+runtime killed the process with `sync: unlock of unlocked mutex`. Fields are
+now cleared individually, with the reason recorded at the site.
+
+### Codex review round (2026-09-25) — three findings, one of them the sweep's own headline defect left half-closed
+
+**P1 — a RESOLUTION failure was still reported as a CONFIGURATION error on the
+OIDC half.** `fetchOIDCDiscovery` gated on `validateExternalURL`, which
+**resolves the host**, so a DNS outage returned early with "URL must be https://
+and must not point to a private address" *before* `resolveIdPDocument` could be
+reached. The SAML half had been fixed and the OIDC half had not, so the sweep
+shipped with its own primary defect open on one of the two interactive
+protocols — and the error text pointed the operator at their configuration for a
+fault in their resolver. The fix splits the two questions that
+`validateExternalURL` had conflated: `validateExternalURLStructure`
+(`auth_idp.go`) answers the *configuration* question with no resolver at all
+(absolute, http/https, host present, and — for an IP literal, where no
+resolution is needed — not private), and the DNS-backed check stays INLINE in
+`fetchOIDCDiscoveryOverNetwork`, where its failure is a failed FETCH and
+therefore routes to the cache. Round 1 argued that nothing was lost on the
+trust side because *"the authorization endpoint is re-checked by
+`isSafeCaptiveRedirect` at the instant the redirect is issued"*. **That claim
+is FALSE and was corrected in round 2 below** — `isSafeCaptiveRedirect` checks
+shape only, and the endpoint this appliance never dials is the one that needed
+the address check restoring (`refuseDefinitelyPrivateRedirect`). What round 1
+got right is the other half: everything this appliance DIALS from the document
+goes out through `ssrfSafeDialContext`, so a structural check is sufficient
+there. The lesson is the one this file keeps relearning in a new
+costume: **a guard that answers two different questions with one verdict will be
+placed correctly for one of them.** "Is this string a legal configuration?" and
+"does this name resolve to somewhere I may talk to?" have different answers,
+different remedies and different *failure postures* — the first must fail fast,
+the second must fall back.
+
+**P2 — the pre-flight outlived the operation it guarded.** The SAML fix added an
+inline `isPrivateHost(metaURL.Host)` to satisfy the repo's CodeQL convention,
+and `isPrivateHost` resolves under `context.Background()`: an unbounded resolver
+call placed immediately *ahead* of a 15 s request context, i.e. exactly the
+CHAOS-60/64 shape this same file documents, reintroduced by this sweep inside a
+fix for a different fault. Guard and request now share ONE deadline
+(`samlMetadataFetchBudget`, via `isPrivateHostContext`). **A bounded operation
+is only as bounded as its first step**, and a guard added for a static-analysis
+convention is still a step.
+
+**P2 — an episode nothing could ever clear.** `noteIdPMetadataOutcome` returned
+early for `idpMetaInline`, so a profile switched from a remote `metadataUrl` to
+inline `metadataXml` kept its open failure episode forever: `culvert_idp_metadata_degraded`
+pinned at 1 and the `idp_metadata` contract row warning about a remote fetch
+that no longer exists. An inline transition *is* the resolution of a
+remote-fetch episode — the only one available, since with no remote fetch left
+nothing else can produce the evidence — so it now clears that profile's episode
+(only that profile's) and logs `IDP_METADATA_RECOVERED`, while still counting no
+attempt. This is the recovery-on-observed-evidence rule read the right way
+round: **the rule forbids clearing on elapsed time, not clearing on evidence
+that the dependency is gone.**
+
+All three were confirmed by direct inspection, not taken on the reviewer's word,
+and each is pinned by a gate verified failing against its reintroduced pre-fix
+shape (`OIDCDNSOutageIsAnsweredFromCache`,
+`SAMLPreflightIsBoundedByTheRequestBudget`,
+`InlineTransitionClearsAStaleEpisode`), with
+`StructuralValidatorDecidesWithoutAResolver` as the wall that keeps the
+structural validator from being "fixed" back into a resolver.
+
+**A fourth round was pure tooling, and it is worth recording because it is why
+the first three shipped.** The review round's fixes introduced four lint
+regressions — `goimports` twice (an import appended to the wrong group in
+`security.go` and `auth_idp.go`), `funlen` (the inline branch pushed
+`noteIdPMetadataOutcome` to 52 statements against a limit of 50) and `gocritic`
+`offBy1` twice (the SAML pre-flight wall sliced its target function out with
+bare `strings.Index` calls, which return -1 when the anchor is absent and would
+have left every assertion in that gate **vacuously true** — a wall that passes
+because it stopped looking). None was visible locally and `gofmt` sees none of
+them, because **the repo's pinned `golangci-lint` cannot be run against this
+module at all**: v2.5.0's own `go.mod` pins `toolchain go1.24.7`, so every local
+build of it — including with `GOTOOLCHAIN=local`, a cleared `GOCACHE` and
+`GOFLAGS=-a` — gets a Go 1.24 type checker, which either refuses the config's
+`go: "1.25"` outright or panics inside `go/types` on Go 1.26 source. The local
+lint gate is therefore structurally unavailable, and the only signal is a CI
+round trip.
+
+**The CodeQL stand-down was reversed, correctly, by a later session.** This
+sweep argued at length that no amount of guarding at the SAML metadata call
+site would clear `go/request-forgery`, having tried three reshapings, and
+recommended the owner simply accept the alert. That reasoning had a hole: it
+concluded *"CodeQL's Go SSRF query treats neither a scheme comparison nor an
+error-returning host check as a sanitiser"* and stopped there, without asking
+what this repository's OTHER outbound-request sites do about the same query.
+Two of them — `internal/otlp` and `internal/alerts` — already carry a
+`regexp.MustCompile("^https?://[^/]")` + `MatchString` barrier with a comment
+naming it as exactly that, for exactly this query, on exactly this kind of
+operator-configured endpoint. The fix was one in-repo precedent away the whole
+time (`22197c9`, adding `samlMetadataURLShape` with `(?i)` so an uppercase
+scheme — which `url.Parse` lowercases and the scheme check accepts — is not
+refused, a correct refinement of the precedent rather than drift).
+
+The lesson is not "try harder before standing down"; three attempts was
+reasonable. It is that **the attempts were all reshapings of the same call
+site, and none was a search for how the codebase already answers this**. A
+stand-down argued from the tool's behaviour should not be written before
+grepping for the tool's name in the tree: the barrier the query wants may
+already be a documented convention two packages over. The regexp admits
+strictly less than the scheme check that follows it, so nothing is traded for
+the static-analysis result — which is the one condition under which this
+sweep's own objection ("a static-analysis result is not worth an unbounded
+resolver call") does not apply.
+
+The workable substitute is to run the individual linters, which build against
+the current toolchain without complaint: `goimports -l` over the changed files,
+and `gocritic check -enable=offBy1,rangeValCopy,httpNoBody` over the package
+(filtering to the diff, since the CI gate is `--new-from-rev` and the tree
+carries ~137 legacy findings). That covers every class that bit this sweep.
+The general point is the one this file keeps making about gates: *a check that
+cannot be run before the push is not a gate, it is a notification* — and a
+sweep that adds walls should be most suspicious of the walls it cannot test.
+
+**A sibling tooling finding, recorded because it cost this sweep five
+misreadings in a row: on this repository a red required gate is more often a
+CANCELLATION CASCADE than a verdict, and the two are indistinguishable at
+check-run level.** The cause is GENERIC, not specific to any one job: a push
+that supersedes a head cancels that run's jobs, and every required aggregate
+verifies its dependencies — `cancelled` is not `success`, so the aggregate's
+own `needs-verdict` step refuses and the check run reports
+`conclusion: failure` with no failing test anywhere in it. The sharded
+race+coverage suite (`.github/workflows/qa-race-shards.yml`) adds a second
+instance of the same shape one level down, since its verdict job FAILS CLOSED
+on a missing shard input — correct, and the whole point of the completeness
+proof — so a Fast Gate cascade usually shows TWO failures (the shard verdict
+and the aggregate) while a Deep Gate cascade shows ONE (the aggregate alone,
+with no shard verdict anywhere in it). **Do not go looking for the shard
+verdict when diagnosing this** — that was this note's own first formulation,
+and the Deep Gate falsified it: run 36198970055 on a superseded head measured
+5 cancelled / 4 skipped / 1 success / 1 failure, the failure being
+`Run ./.github/actions/needs-verdict` on the aggregate itself.
+Seven runs on this PR carried this shape: 36187288439 (12 cancelled),
+36187288351 (5), 36196777545 (11 cancelled + the verdict failing closed),
+36197161409 (13 cancelled / 1 failure / 1 success / 4 skipped), 36198050751
+(9), 36198306761 (13 cancelled / 2 failures — verdict AND aggregate) and
+36198306759 / 36198970055 (the Deep Gate pair, aggregate only). The first five
+were each MISREAD as a verdict before the rule was written down.
+
+The operational rule, which applies to anyone driving a PR here to green:
+**read the JOBS of the run, not the aggregate's conclusion, and check the head
+SHA the run belongs to before believing either.** A run whose jobs are
+overwhelmingly `cancelled` is reporting that it was superseded; the only
+signal it carries is about a head that no longer exists. Concretely: fetch
+`/actions/runs?head_sha=<sha>` to confirm the run belongs to the CURRENT head,
+then `/actions/runs/<id>/jobs` and count conclusions — a lone `failure` sitting
+on top of a wall of `cancelled` is the cascade, not a defect. The same
+mechanism also makes a docs-only push mid-run costly, since it cancels the run
+it is trying not to disturb; the honest trade is to take the extra CI cycle
+rather than hold a durable commit for it, because the container is ephemeral
+and the run is not.
+
+### Codex review round 14 — a fetch is not a publication
+
+**A FAILED SAVE ERASED THE CEILING OF THE GENERATION STILL IN SERVICE (P1).**
+Rounds 8–10 carried the stale-serve evidence (`servedFetchedAt`) on the
+fetch-health EPISODE, and a successful fetch deletes the episode. So a SAML
+`Upsert` that fetched fresh metadata and then failed to persist deleted the
+evidence while the OLD, cache-built generation stayed live and published — it
+was never retired at `idpmeta.StaleMaxAge`, and its (possibly withdrawn) signing
+certificate stayed trusted indefinitely. Reproduced before the fix:
+`TestChaos71_FailedSaveKeepsTheServedGenerationsCeiling` — cache-built
+generation published, fresh fetch + failed save, sweep at `StaleMaxAge+1h`
+returned nothing.
+
+**The two records describe different things and are now kept apart.** An
+episode describes FETCHES; the ceiling describes the PUBLISHED generation.
+`resolveIdPDocument` now RETURNS the cached document's fetch time instead of
+recording it; it travels on the compiled provider (`servedDocumentCachedAt`), and
+`idpNotePublishedGeneration` writes the per-profile `idpServed` record ONLY where
+a generation is published — `Load`'s compile, `Upsert` after persist, `ReplaceAll`
+after persist (`idpReplacePublishedGenerations`, one swap), the recovery loop's
+`publishRecompiled` — and clears it on `Delete`. A fresh or inline generation
+carries no entry. A fetch, successful or not, and a failed save never touch it,
+so a failed update leaves the old generation aging toward the ceiling and
+retiring on schedule. `idpClaimStaleServe` now claims against this record; every
+writer holds `r.mu`, so the lock edge is `r.mu` → `idpServedMu` and round 10's
+claim stays linearizable with publication. The round-8 control
+(`AHealthyLiveProviderIsNeverRetired`) encoded the old coupling — a fresh FETCH
+cleared the evidence — and now requires a fresh PUBLICATION; its companion
+control `SuccessfulFreshPublishClearsTheCeiling` pins that a committed fresh
+generation is never retired.
+
+### Codex review round 10 — one finding, and it retires the comparison round 9 added
+
+**A SAME-SOURCE REFRESH HAS THE SAME SOURCE AND A DIFFERENT GENERATION (P2).**
+Round 9 closed the repoint case by comparing the profile's current remote source
+against the victim's. That comparison cannot see the other shape of the same
+race: an `Upsert` or `ReplaceAll` that re-fetches **fresh** metadata from the
+**same** endpoint inside the sweep→lock window publishes a newly compiled,
+healthy provider whose source is unchanged. The comparison passes, and the
+retirement deletes a provider that had just been refreshed — SSO dark for that
+profile until the recovery loop runs.
+
+Reproduced against the round-9 tree before anything was changed: two successive
+`Upsert`s on one source, then `retireStaleProvider(id, source)` returns true and
+`HasEnabledInteractiveProvider` reports false.
+
+**The instrument was wrong, and three rounds on one function is what says so.**
+Round 9 compared the source; round 10 shows a comparison cannot distinguish a
+generation. This review's own rule applies — *three rounds of patching a
+heuristic is evidence the state was keyed wrongly* — so the fix is not a second
+comparison bolted beside the first.
+
+The stale-serve stamp already **is** the generation token: a fresh compile for a
+`(profile, source)` deletes the episode that carries it (`noteIdPMetadataOutcome`,
+`idpMetaFresh`). So the retirement stops comparing and starts **claiming**:
+
+- `idpStaleCeilingSweep` no longer zeroes `servedFetchedAt` on selection.
+  *Selection is not adjudication* — and zeroing there is precisely what left the
+  retirement with nothing but the source to reason about.
+- `retireStaleProvider` calls `idpClaimStaleServe(profile, source, servedAt)`,
+  which under `idpMetadata.mu` requires the episode to still carry that exact
+  stamp, consumes it, and reports whether it was current.
+
+> **One document, one adjudication — moved from SELECTION time to CLAIM time.**
+
+That also closes a residual round 8 left: a victim selected but never retired
+(the profile was deleted mid-sweep) had its evidence consumed by the selection
+and could never be swept again. Now only an adjudication consumes it.
+
+**The new lock edge is `r.mu` → `idpMetadata.mu`**, and it is sound because
+nothing in the tree holds `idpMetadata.mu` across a call into the registry — the
+sweep releases it first, deliberately, which is what round 8 did to avoid an
+inversion. Recorded at the call site so nobody adds the opposite edge.
+
+Two test-authoring notes worth keeping, both found by the gates failing:
+
+- `noteIdPStaleDocumentServed` only stamps an episode that **already exists**;
+  production calls it immediately after the stale outcome opens one. A helper
+  that seeds only the stamp records nothing, so the gate would have asserted
+  against a retirement that can never claim anything — green for the wrong
+  reason. `chaos71SeedStaleServe` mirrors the production pair.
+- The round-8 "reported ONCE" assertion was pinning selection-time consumption,
+  which is the behaviour this round deliberately changes. It now pins the real
+  contract: an unclaimed document stays selectable, a **claimed** one never is,
+  and a stamp cannot be claimed twice.
+
+Mutations: reverting to round 9's source-only check fails the new defect gate
+*and* the control's consume assertion; a never-retire body fails rounds 8, 9 and
+10's controls together.
+
+### Codex review round 9 — one finding, a TOCTOU in round 8's own retirement path
+
+**THE SOURCE IS PART OF THE RETIREMENT VERDICT, NOT DECORATION (P2).**
+`idpStaleCeilingSweep` selects its victims under `idpMetadata.mu` and RELEASES
+that lock before `retireStaleProvider` takes `r.mu`. That release is deliberate
+and correct — retiring reaches into the registry, and no subsystem may hold its
+own lock across a call into another's (the CHAOS-50 cluster-CA rule this sweep
+follows everywhere else) — but it opens a window, and round 8 shipped a
+retirement that could not see into it.
+
+An admin `Upsert` or `ReplaceAll` lands in that window: it repoints the profile
+and publishes a **healthy** provider compiled from a NEW source. The retirement
+then checked only the profile ID and the enabled bit, both of which the
+replacement satisfies, so it deleted a provider that was serving correctly.
+Browser SSO for that profile goes dark until the recovery loop recompiles it —
+an availability fault introduced by the change whose entire purpose is to make
+the *security* posture of the cache enforceable.
+
+The expired document belonged to a `(profile, SOURCE)` pair — the keying round 6
+established — so the retirement is valid only while the profile is still serving
+THAT source. `retireStaleProvider(profileID, source)` re-derives the profile's
+current source under `r.mu` through `effectiveRemoteSource` (round 7's
+one-derivation rule: re-deriving it inline here is exactly how two layers drift
+apart) and refuses on a mismatch.
+
+**Skipping on a mismatch under-enforces nothing, and that is what makes the fix
+a fix rather than a trade.** A repointed profile is no longer serving the expired
+document at all, so there is nothing left for the ceiling to retire; and if the
+new source also falls back to cache, it records its own `servedFetchedAt` and is
+swept on its own terms.
+
+> **This is `publishRecompiled`'s rule — re-check identity under the lock,
+> because the decision was made without it — and round 8 applied it to the
+> PUBLISH path and not to its twin.** The fourth instance in this sweep of a rule
+> held correctly on one of two symmetric paths, after the SAML/OIDC fetchers, the
+> admission gates and the endpoint validator. The remedy each time has been the
+> same: wall the PAIR, not the instance.
+
+The gate carries its own CONTROL, because the cheapest way to pass a
+"must not delete the replacement" assertion is to stop retiring at all, which
+would silently delete round 8's enforcement of the staleness ceiling entirely. A
+victim naming the source ACTUALLY IN SERVICE must still retire exactly as before.
+Both were verified by mutation: removing the source check fails the defect gate,
+and a never-retire body fails the control and round 8's own gate.
+
+### Codex review round 8 — two findings, and the first is this sweep's own security claim
+
+**THE STALENESS CEILING MUST BE ENFORCED ON A LIVE PROVIDER, NOT ONLY AT COMPILE
+TIME (P1).** `idpmeta.StaleMaxAge` is the answer this sweep gives to *"what if the
+IdP withdraws a signing key?"* — the reason a last-known-good cache is a BOUNDED
+degradation rather than an open-ended one. It lives inside `Store.Get`, which is
+reached only from a compile. And a steady-state node never recompiles: an
+unchanged CP snapshot skips `ReplaceAll`, the recovery loop considers only DARK
+profiles, and the watchdog round 5 made unconditional merely ALERTED. So a
+provider compiled from cache stayed live INDEFINITELY on a document the runbook
+states "stops being usable 7 days after it was fetched, after which browser SSO
+stops". For SAML that is continuing to trust a withdrawn certificate; the second
+half is that recovery was never noticed either, because nothing re-fetched after
+the endpoint returned.
+
+*The documentation was right and the code did not implement it* — which is this
+sweep's recurring shape (a documented property enforced on one path) turned on
+its own central claim.
+
+The watchdog now ENFORCES rather than reports: `idpStaleCeilingSweep` finds
+providers whose served document passed the ceiling and `retireStaleProvider`
+stops serving them — removed from `r.live`, left ENABLED and STORED, i.e. DARK,
+exactly the state a fresh boot past the ceiling produces. The profile is
+deliberately not disabled and not deleted: the operator's configuration is
+correct, it is the DOCUMENT that expired, and leaving it enabled-but-dark is both
+the fail-closed posture and what hands it to the recovery loop. The fetch time is
+carried in memory (`servedFetchedAt`) so the ceiling's VALUE stays the store's and
+the watchdog needs no disk read, and `idpMetadata.mu` is released before retiring
+because retiring takes the registry write lock — CHAOS-50's rule against holding
+one subsystem's lock across another's call.
+
+**A provider live from a FRESH fetch is never retired, however old the cached copy
+beside it is.** Retiring on cache age alone would take SSO down every seven days
+on a completely healthy fleet: a self-inflicted outage far worse than the defect,
+and the cheapest wrong fix here, so it is pinned as a control.
+
+**RETIRING IS ONLY SAFE BECAUSE RECOVERY IS RE-ARMED, and the two must ship
+together.** `runIdPRecoveryLoop` RETURNS once nothing is dark, and it was started
+exactly once from the startup slice — so a retirement would have left the profile
+dark with nothing retrying it, SSO down until a restart or a config change. That
+is strictly worse than the expired document the retirement exists to stop serving.
+`armIdPRecoveryLoop` single-flights the loop on an `atomic.Bool`, the startup
+slice routes through it, and the watchdog re-arms on every tick while anything is
+dark — so a CAS that loses to a loop about to exit costs at most one
+`idpMetadataWatchdogInterval` and the window closes by REPETITION rather than by
+holding a lock across a goroutine's lifetime.
+
+> **A fix that takes capacity away is only safe once the way back is wired in the
+> same change.** Detection, enforcement and recovery are one mechanism; shipping
+> two of the three is how a hardening change becomes an outage.
+
+**EVERY ABORT ROLLS BACK EVERY CANDIDATE'S EPISODE (P2).** `ReplaceAll` is
+all-or-nothing, but its two in-loop abort paths discarded only the profile that
+failed. A snapshot that stale-compiled an earlier CHANGED-SOURCE candidate —
+opening a speculative episode for a source about to be rejected with the rest of
+the snapshot — then left that episode to age into a degradation page for a
+configuration nobody ever ran. The rule was already written on the persist branch
+(*"the WHOLE snapshot is rejected, so every candidate's speculative episode
+describes a configuration that is not in service"*) and applied to one of three
+paths; the partial-progress case needs it precisely because the loop makes
+progress before it fails.
+
+**The reproduction is the subtle part and the first draft got it wrong.** An
+episode for the source ALREADY IN SERVICE is a genuine outage signal that must
+SURVIVE a refusal (rounds 6 and 7 established exactly that), so only a
+*repointed* candidate's episode is speculative. The first gate gave the earlier
+candidate the same source it was already live on and therefore failed against the
+fix rather than against the defect — *a gate that fails for the wrong reason is
+still telling you something, and here it was that the scenario, not the code, was
+wrong.*
+
+### Codex review round 7 — three findings, and two of them are round 6's own fixes
+
+**A GATE THAT ADMITS WHAT THE COMPILE REFUSES IS A CACHE-POISONING PATH (P1).**
+Round 6 wired the document gate `resolveIdPDocument` applies to
+`parseOIDCDiscoveryStructural` — the half without the address check — so the gate
+became WEAKER than the verdict that decides whether a provider goes live, and
+`resolveIdPDocument` caches whatever its gate accepts. A 200 discovery document
+that parses, whose endpoints are structurally legal, and whose
+`authorization_endpoint` resolves into a private range therefore passed the gate:
+`Store.Put` OVERWROTE the last-known-good copy, a FRESH acquisition was recorded
+— clearing the episode, advancing `LastSuccess` — and only then did the
+authoritative parse refuse the provider. The document that could be compiled was
+gone, so the next outage found only the refused one. Recovery defeated by the
+acquisition that reported success, and the surface said healthy while the
+provider was dark.
+
+This is round 1's P1 (*defer caching until validation succeeds*) re-opened for
+exactly the one check round 6 moved out of the gate, which is why the fix is not
+a revert: the gate is now the AUTHORITATIVE parse, and
+`fetchOIDCDiscovery` CARRIES OUT the result the gate produced instead of
+recomputing it. That keeps round 6's property — the address lookup and its
+counter still run exactly ONCE per document — while making the gate and the
+verdict the same question. Two lookups remain possible in one case, and it is not
+waste: when a FETCHED document is refused and a CACHED one is then vetted before
+being served, those are two different documents and each must be judged.
+
+> **Bound the cost by not doing the work twice, never by asking a cheaper
+> question.** Round 6 reached for the second when the first was available, and
+> paid for it with a weaker gate in front of a cache.
+
+The gate for it is deliberately BOTH halves, and saying which matters because
+they are usually separate tests:
+`TestChaos71_PrivateAuthzEndpointStillFailsClosedWithNoCache` is a DEFECT gate
+for the mis-reporting (pre-fix, with nothing cached, the refused document was
+recorded `fresh` with `LastSuccess` advanced and no episode, so the only
+operator signal said healthy while the provider was dark) AND a CONTROL that
+the refusal still happens at all, since the cheapest way to pass the primary
+gate is to stop refusing the document and reopen the redirect path round 3
+closed.
+
+**A COMMITTED REPOINT MUST RETIRE THE SUPERSEDED SOURCE'S EPISODE (P2).** Round
+6 keyed episodes by `(profile, source)`, which closed the REFUSAL path and left
+the COMMIT path leaking. A live profile serving cached metadata from source A
+carries an open episode for A; a successful edit to a healthy source B clears
+only B's key, and nothing in the process fetches A any more — so A's episode can
+never be cleared by evidence, ages past `idpMetadataDegradedAfter`, and the
+watchdog round 5 made unconditional pages indefinitely for a configuration that
+is no longer in service. `ReplaceAll` had the identical retention behaviour.
+Retiring it is not *clearing on elapsed time*: the evidence is that the
+dependency is GONE, which is the same rule the disabled and inline arms beside it
+already apply. The controls carry the other half — a refused compile and a failed
+persist both leave the OLD configuration authoritative, so A is still the source
+in service and its episode is a live outage signal; both were verified failing
+against a retire-unconditionally shape.
+
+> **Re-keying state fixes every reader that consults the key and no reader that
+> does not.** When a key changes, enumerate the WRITERS of that state as well —
+> the commit path never asked the question the refusal path was rewritten around.
+
+**ONE DERIVATION MEANS ONE STRING, NORMALISATION INCLUDED (P2).** Round 6 made
+`oidcWellKnownURL` the single derivation of the discovery URL — fetch target,
+cache key, episode source — and left the trailing-slash normalisation OUTSIDE it,
+in `fetchOIDCDiscovery`. Neither admission gate normalises an issuer, so one
+ending in `/` is ordinary stored configuration: the acquisition recorded its
+episode under the trimmed key while `idpRemoteDocumentSource` derived the
+untrimmed one, and a refused edit's cleanup again looked up a key that never
+existed. Round 6's own finding, one layer down, in the helper it created to
+prevent it. The trim now lives inside the helper and both call sites lost theirs.
+
+> **A single derivation that excludes the normalisation is two derivations.**
+
+**THE ROUND-7 FIX THEN FAILED THE COMPLEXITY GATE, AND THE REFACTOR FOUND A
+STRONGER PROPERTY THAN THE ORIGINAL SHAPE HAD.** `Gate · golangci-lint` went red
+on the first round-7 commit: `cyclop` put `ReplaceAll` at 16 against a max of 15,
+and `gocognit` put the new repoint gate at 34 against 30 — both because the fix
+wrote the episode-retirement rule out TWICE and the gate nested its assertions
+two closures deep. Local `golangci-lint` cannot run on this module (a Go 1.25
+binary against a Go 1.26 module), and the pre-push `gocyclo` check measured the
+functions the change ADDED rather than the existing ones the change pushed over
+the line — *measure the functions your diff touches, not the ones it introduces.*
+
+The remedy is the shape the finding argued for anyway: one
+`retireEpisodeAfterCommit` helper called once from each publication site, which
+is how the two paths are kept from drifting — the very defect round 7 fixed.
+`Upsert` drops 18 → 13 and `ReplaceAll` 16 → 11. Re-running the mutation proofs
+against the refactored shape produced a result the original did not: dropping the
+`prevSource != newSource` guard fails ALL FIVE subtests rather than the two
+controls, because the commonest state of all is a profile recompiling against the
+SAME still-broken source. Without that guard the write retires the episode the
+stale compile just opened, so an ongoing outage's degradation signal is erased by
+every recompile and `culvert_idp_metadata_degraded` can never reach its
+threshold — strictly worse than the leak the change exists to fix. *A refactor
+forced by a lint gate is worth re-running every mutation proof through: the
+guard's most important consequence was one the first shape's gates could not
+see.*
+
+**AND A GATE OF MINE WAS VACUOUS FOR A REASON WORTH RECORDING.** The behavioural
+half of the trailing-slash gate drove `Upsert` with an OIDC profile carrying no
+`ClientID` — and `NewOIDCFlowProvider` refuses on a missing client id BEFORE it
+calls `fetchOIDCDiscovery`, so no episode was ever recorded and the assertion
+passed against the exact divergence it exists to catch. It was caught only by
+running it against the true pre-fix shape (the trim in the caller, absent from the
+helper) rather than against a plausible mutation of the helper alone. *A mutation
+that removes a fix is not the same as the defect: reproduce the DIVERGENCE, not
+one side of it — and a gate must be shown to reach the code under test, because a
+precondition failing earlier looks exactly like the invariant holding.*
+
+### Codex review round 6 — two findings, and the first one retires a heuristic three rounds had been patching
+
+**AN EPISODE IS KEYED BY (PROFILE, SOURCE).** `Upsert`/`ReplaceAll` compile a
+candidate SPECULATIVELY, before deciding whether to publish it. With one episode
+entry per PROFILE, a candidate that reused an id shared that entry with the live
+profile, and the sharp case — the fresh evidence beyond the round-3 thread — is
+the live source ALREADY FAILING when a repoint arrives: the refusal path then
+DELETED a genuine, ongoing outage episode for the source still in service,
+losing its fire-once page and restarting its degradation clock. Symmetrically, a
+candidate that stale-compiled and then failed to PERSIST left its own episode
+attached to a profile whose configuration had not changed, reporting an outage
+against an edit that was rejected. What an episode describes is a failed fetch
+against a SOURCE, so that is now the key.
+
+**Rounds 3, 5 and 6 were all ONE distinction, and it belonged in the key rather
+than in a predicate.** Round 3 added `idpEpisodeBelongsToLive` to decide whether
+a refusal may forget; round 5 found it answered wrongly for a candidate with no
+source at all; round 6 found it could not express the case where both sources
+exist and one is already failing, and that it was never consulted on the PERSIST
+path at all. The predicate is DELETED. A refusal now discards the candidate's own
+`(profile, source)` episode unless that is the source already in service — one
+comparison, on both refusal paths. *Three rounds of patching a heuristic is
+evidence the state was keyed wrongly.*
+
+**The source string must have exactly ONE derivation, and it did not.** The
+episode was recorded under the OIDC WELL-KNOWN URL — what `resolveIdPDocument`
+receives, and also the cache key — while the cleanup computed its key from the
+raw ISSUER, so the lookup named a key that never existed. This was caught by a
+round-3 gate that began failing the instant the key changed, which is the
+argument for keeping behavioural gates around old findings. `oidcWellKnownURL` is
+now the single derivation and `idpRemoteDocumentSource` returns the DOCUMENT url.
+
+> **When one layer decides what a value MEANS, every other layer must ask that
+> layer rather than re-derive the rule** — the SEC-TOTP-1 lesson, one subsystem
+> over, where a key-identity comparison that canonicalised differently from its
+> verifier was a silent security failure.
+
+**A VALIDATOR `resolveIdPDocument` MAY RUN TWICE MUST BE DETERMINISTIC AND
+FREE.** It runs on fetched bytes to decide whether to cache them, and again on
+cached bytes to decide whether they are still usable. Routing the
+side-effecting, DNS-resolving parse through it made every acquisition whose
+authorization host could not be resolved pay the authorization-host budget
+TWICE and increment `culvert_idp_authz_endpoint_unverified_total` by two — on
+boot and on every CP→DP snapshot apply, i.e. in exactly the outage the counter
+exists to report. `parseOIDCDiscoveryStructural` is the validator's half;
+`parseAndValidateOIDCDiscovery` adds the address check. That split is
+principled rather than a concession: whether a document parses and whether its
+endpoints are structurally legal are properties OF THE BYTES — deterministic,
+free, identical on every call — while whether a hostname currently resolves into
+a private range is a property of the NETWORK at one instant, which two calls may
+legitimately disagree about. A validator that may be invoked more than once per
+input must not carry either a side effect or a network dependency.
+
+### Codex review round 5 — four findings, and three of them are one rule applied to only one of two places
+
+**COMPILING IS NOT COMMITTING.** Round 4 closed the inline-transition episode
+by clearing it inside `compileIdPProfile` — which runs BEFORE the inline
+document is parsed and before the registry mutation persists. So a REJECTED
+inline edit (unparseable XML, or a failed write) erased a still-live remote
+profile's genuine outage episode and suppressed its alert, while that profile
+stayed authoritative. The clear moved to the publication sites, after `persist`
+lands, under the rule the DISABLED case already used one line away: *a profile
+with no remote source left can never have its episode cleared by evidence
+again.* One condition now covers disabled and inline in both `Upsert` and
+`ReplaceAll`, and the `idpMetaInline` outcome plumbing is deleted rather than
+relocated — the fix removes a special case instead of adding one.
+
+**The gate found a different defect from the one it was written for, and that
+is the entry worth keeping.** Written to prove that a refused inline edit
+preserves the episode, it failed on the REFUSAL path rather than the clear
+path: round 3's `idpEpisodeBelongsToLive` compares the two profiles' remote
+sources for EQUALITY, and an inline candidate has NO source — so it answered
+*"the episode belongs to the candidate"* for a candidate that performs no fetch
+and therefore cannot have opened one. **Episode ownership is about which
+profile performed the FETCH, not about the two sources matching**; a
+source-free candidate leaves the episode with the live profile. Round 3's rule
+was right about the case it was written for (an id reused against a DIFFERENT
+unreachable source) and silently wrong about the case where the candidate
+fetches nothing at all.
+
+**A BOUNDED OPERATION IS ONLY AS BOUNDED AS ITS FIRST STEP — on the OIDC half,
+after round 2 fixed it on the SAML half.** `fetchOIDCDiscoveryOverNetwork`
+still gated on `validateExternalURL`, which resolves under
+`context.Background()`, so the guard ran to the OS resolver's full budget
+before the request context existed, on boot and on every CP→DP snapshot apply,
+and delayed reaching the cached document this sweep exists to serve. The fix is
+mechanical; the finding is not. **This is the THIRD finding this sweep produced
+from the same SAML/OIDC asymmetry** — the admission gates (round 2) and the
+endpoint validator (round 3) were the other two — and in each case one half was
+fixed and its twin was left. The wall that should have caught this one was
+scoped to `fetchSAMLMetadataOverNetwork` alone. It is now a TABLE over the
+pair, which also refuses `validateExternalURL` in either fetcher; the mutation
+proof is that reintroducing the old call fails the OIDC arm while the SAML arm
+still passes, which is precisely the shape that kept slipping through.
+
+> **A wall scoped to one of two symmetric paths is how an asymmetry survives.
+> Wall the PAIR, not the instance.**
+
+**A START THAT NEVER HAPPENS CANNOT BE OBSERVED BEHAVIOURALLY.** Round 4's
+degradation watchdog was gated on `hasEnabledRemoteMetadataProfile()` evaluated
+ONCE at boot, and additionally sat inside the `-idp-profiles-file` block — so an
+appliance that later gained a remote profile had no goroutine left to notice
+its outage, and a DP that receives its profiles ONLY through the CP→DP snapshot
+never had one at all. The documented alert could therefore never fire for
+exactly the profile an operator had just added, on exactly the fleet nodes
+whose configuration is pushed to them. The gate's own justification was that it
+saves one sleeping goroutine, which is not a correctness gap's price, so the
+start is unconditional and at function-body depth. **Its gate keys on
+INDENTATION rather than on the condition's spelling**: the first wall looked for
+a condition mentioning "Profile" and would have sailed past the enclosing
+`IdPProfilesFile` block the start also had to escape — a wall that pins one
+spelling of one gate pins nothing.
+
+**The fourth finding is REPORTED, NOT FIXED, and the reason is that every
+available fix trades something this sweep exists to protect (register row
+IDP-9).** An OIDC `authorization_endpoint` whose address cannot be DETERMINED —
+resolver outage, or the check's own budget spent — is admitted unverified, and
+it is the one discovered endpoint this appliance never dials, so the
+SSRF-guarded dialer does not cover it and `isSafeCaptiveRedirect` checks only
+shape. Refusing on an unknown verdict takes SSO down whenever THIS node's
+resolver cannot resolve the authorization host, even though the user's browser
+can, and hands a resolver outage the power to reject a cached document — this
+sweep's headline defect. Re-checking at redirect issuance puts a synchronous
+resolve on the PROXY REQUEST PATH (`CaptiveLoginURL` is reached from
+`proxy_portal.go`), which is the CHAOS-60/64 defect this file documents at
+length. Both closing designs are recorded with the row rather than half-built.
+What changed is that it is no longer SILENT:
+`culvert_idp_authz_endpoint_unverified_total` plus a rate-limited line naming
+the profile, and a runbook entry pointing at the actual cause.
+
+**Two SUITE-LEVEL findings fell out of driving this PR, and both are the
+sweep's own subject matter applied to the tests rather than to the appliance:
+a gate that depends on state it does not establish, and a gate that asserts a
+property its environment cannot measure.** Neither is CHAOS-71 code; both are
+recorded here rather than fixed, because fixing them means editing packages
+this change does not touch (register rows **SUITE-1** and **SUITE-2**).
+
+**SUITE-1 — `Deep · determinism (shuffle, count=2)`, an unestablished
+precondition.** `TestSecReqID1_BareReqIDInDecisionLineIsSafeOnlyBecauseOfTheBound/bound_makes_the_bare_append_safe`
+(`request_tracing_bounds_test.go`) asserts that the per-request decision line
+carries exactly one ` identity=` and one ` action=` token. But `handleRequest`
+AUTHENTICATES BEFORE IT EVALUATES POLICY, and the test establishes no auth
+posture — it calls only `resetTracingBoundsStateForTest()`, which resets the
+tracing counters. So when the shuffled order happens to place a test that
+configures a credential in the process-global `cfg` ahead of it, the request is
+refused with `AUTH_FAIL (no-credentials)` and **no decision line is emitted at
+all**; the token count is 0 and the gate fails. Reproduced deterministically
+against the exact tree CI ran (`9c7673a`) with CI's own seed, failing in both
+passes of `-count=2` while `-count=1` without shuffle passes.
+
+Two things about it generalise. **Its own vacuity guard cannot see this**:
+`if !strings.Contains(line, "req_id=")` exists precisely to catch *"no decision
+line was emitted; this gate is testing nothing"*, and `AUTH_FAIL … {req_id=…}`
+satisfies it — so the guard reports health while the gate tests nothing about a
+policy decision. That is the same shape as the vacuous walls this file records
+on the SOCKS5 log-injection path and in CHAOS-71 round 2, in a guard written to
+prevent exactly it. **And reproducing it required the EXACT tree**: `-shuffle`
+permutes the actual test list, so the same seed against a list with more tests
+in it yields a different order — a repro on the branch tip could neither
+confirm nor exonerate, and the first attempt here was invalid for that reason.
+**The order does not have to be hunted, and the fix already exists in-repo.**
+Re-verified against the merged tree, the repro is DETERMINISTIC rather than
+seed-dependent: add one test that leaves a credential on the global `cfg`
+exactly as its siblings do, let source order put it first, and the gate fails
+with `AUTH_FAIL (no-credentials) … {req_id=…}` every run. **And it is not a rare
+draw** — 44 tests in the root package mutate the process-global auth credentials
+with no snapshot or restore, across `proxy_test.go`, `ui_test.go`,
+`socks5_test.go`, `final_coverage_test.go` and fourteen more files; any one of
+them landing first poisons it. The fix is ONE line, `setupProxyTest(t)`
+(`proxy_test.go`), which replaces `cfg` wholesale and resets the blocklist, IP
+filter, rate limiter and policy — every global the request path reads, not just
+auth — and whose own comment already records this exact flake class (*"without
+resetting here, the flake only shows up under -count>1 / -shuffle=on"*). The
+`POLICY_` guard is still worth tightening in the same change, but it is
+belt-and-braces rather than the fix.
+
+**The fix is MUTATION-PROVEN not to be vacuous**, which matters because
+silencing a gate is worse than the flake it silences: with the bound it pins
+reintroduced as a defect (`acceptableTracingHeaderValue` returning `true`), the
+FIXED gate still catches it, and catches it more strongly than before — it now
+reliably reaches a real `POLICY_DEFAULT_DENY` line and reports the ESC byte and
+both doubled tokens, where previously it could only reach that line by luck of
+ordering. A test-isolation fix that makes a gate deterministic must be shown to
+leave its detection power intact; this one increases it.
+
+**SUITE-2 — `internal/threatfeed`'s `TestBenchGate_CheckRequestURLBeatsLegacy`,
+a zero-margin timing ratio under `-race`.** The assertion is a bare
+`if fast.NsPerOp() >= legacy.NsPerOp()`. This file documents that path at
+**376 ns/op against 887 ns/op**; in the race lane both arms measured ~6-14x
+slower AND inverted (**5881 against 5141**), so the gate failed with no
+regression present. This is the standing conclusion of this file — *a gate that
+can flake gets muted* — and the package has ALREADY applied it once:
+`TestBenchGate_LookupsTakeNoFeedLock` is deliberately structural because "the
+scaling-ratio gate was built first and rejected because its margin narrows to
+1.35x under `-race`, too thin for a per-PR runner." This is the sibling that
+kept the ratio. The principled fix is the same replacement, not a wider bound:
+loosening it enough to tolerate a 1.14x inversion also admits a real 1.4x
+regression, and the allocation gate beside it (bound 2, hardware-independent)
+already carries the substance of the optimisation.
+
+The transferable rule, which is this file's own discipline turned on its test
+suite: **a gate must establish every precondition its assertion depends on, and
+must not assert a property the environment it runs in cannot measure.** The
+first makes a gate order-dependent; the second makes it environment-dependent.
+Both present as flakes, and neither is one.
+
+The new validator's one security-relevant job is classifying an IP LITERAL with
+no resolver, and the direction it must not get wrong is admitting a private one,
+so `StructuralValidatorClassifiesOnlyLiterals` pins the IPv4-mapped IPv6 forms
+explicitly — the same fail-open reading that `security.go`'s shared `prefixSet`
+normaliser carries a differential test for, verified failing here against the
+naive "16 bytes means IPv6" shape. It also pins what the function deliberately
+does NOT decide: a decimal, octal or abbreviated host (`2130706433`,
+`0177.0.0.1`, `127.1`) is passed on, because the guards downstream refuse on the
+RESOLVED address and are therefore robust to spelling in a way no string check
+is. Verified in both directions rather than assumed: Go's pure resolver rejects
+all three outright, cgo's `getaddrinfo` accepts them and the pre-flight then
+refuses them by resolved address (`localhost` measured as *"resolves to private
+address 127.0.0.1"*). Both closed.
+
+### Codex review round 2 — the headline defect was still open on the path it was about
+
+Three findings, all confirmed by reading the code rather than taken on the
+reviewer's word, and the first is the sweep's own primary defect surviving a
+round that claimed to have closed it.
+
+**P1 — the fix was applied below the gate that refuses.** Round 1 moved
+`fetchOIDCDiscovery` off the resolving validator, and a gate
+(`OIDCDNSOutageIsAnsweredFromCache`) proved a cached document answers a DNS
+outage. Both were true and neither was sufficient: `validateUpsertProfile` and
+`validateIdPProfile` still called the RESOLVING `validateExternalURL` on the
+OIDC issuer, and **admission runs before compilation while the cache lives
+behind compilation** — so during a resolver outage the admin write was still
+refused and `ReplaceAll` still aborted the entire CP→DP snapshot, which is
+finding (4), the fleet-wide config veto, unchanged. The gate could not see it
+because it called `fetchOIDCDiscovery` DIRECTLY, i.e. below both real admission
+gates. **This is the third instance in this one sweep of a wall proving less
+than it looks** (the SOCKS5 log-injection note states it twice: *sanitising one
+argument of a call does not sanitise the call*, and *walling one call shape does
+not wall the path*), and the transferable form is sharper: **a gate that enters
+the system below the layer that refuses cannot observe a refusal.** Drive the
+outermost caller — here `ReplaceAll`, the fleet-wide path — or the gate is
+describing a code path no operator reaches.
+
+**P2 — a security REGRESSION this sweep introduced, documented as its own
+mitigation.** Round 1 replaced the discovery parser's `validateExternalURL`
+with the structural form and justified it in three places (PR, review, CLAUDE.md)
+with *"the authorization endpoint is a browser redirect re-checked by
+`isSafeCaptiveRedirect` at the instant it is issued"*. That function checks
+`raw != ""`, absolute, `http`/`https`, `u.Host != ""` — **shape only, no address
+check whatsoever**. So a discovery document, or a cache file edited by anything
+with `dataDir` write access, could name `authorization_endpoint:
+https://internal.corp/…` and the appliance would redirect a user's browser
+there. The distinction that makes the rest of the argument sound is exactly the
+one that was missed: the token and JWKS endpoints are DIALLED (so
+`ssrfSafeDialContext` genuinely covers them), the authorization endpoint is
+NOT — nothing of ours ever connects to it. `refuseDefinitelyPrivateRedirect`
+restores the check for that one endpoint, refusing only on `ssrf.ErrBlocked`
+(definite) and allowing *could-not-determine*, so a resolver outage cannot
+reject a cached document. **The lesson: a claim that one guard covers what
+another used to do is a claim about code, and it has to be READ, not inferred
+from the name.** "Re-checked by isSafeCaptiveRedirect" sounded right and was
+never opened.
+
+**P2 — an episode recorded for a profile that never existed.** Compilation
+records a failure episode before the transactional Upsert/ReplaceAll decides
+whether to publish, so a REJECTED candidate left an episode behind for a
+profile not in the registry; degradation is derived from elapsed time and only
+a fetch or an inline transition cleared one, so nothing ever would — an
+indefinite degraded gauge, contract row and eventual alert for a dependency
+nobody configured. `forgetIdPMetadataEpisode` generalises the inline rule
+(clearing on evidence the dependency is GONE is not clearing on elapsed time)
+and is wired to rejection, delete and disable. The rejection case carries the
+one subtlety worth keeping: it forgets only when the id is **not already
+registered**, because a refused EDIT of a live profile leaves that profile
+authoritative and still down, and deleting its episode would hide a real
+outage.
+
+### Found while verifying this sweep's own claim — recorded, NOT fixed (IDP-8)
+
+Round 2's fix rests on the assertion that the token and JWKS endpoints need
+only a structural check because this appliance DIALS them through
+`ssrfSafeDialContext`. Having just been wrong twice about exactly this kind of
+claim, that one was read rather than inferred, and it holds:
+`NewOIDCFlowProvider` sets `transport.DialContext = ssrfSafeDialContext` and the
+`jwksCache` is handed that same client.
+
+Reading the loop closely surfaced something else. It validates
+`AuthorizationEndpoint`, `TokenEndpoint` and `JWKsURI` — **three of the five
+endpoints the discovery document names.** `IntrospectionEndpoint` and
+`UserinfoEndpoint` are persisted into the profile config
+(`NewOIDCFlowProvider`), used for outbound requests, and validated **nowhere**:
+not by this loop, not for scheme, not before or after this sweep (the
+pre-CHAOS-71 loop covered the same three).
+
+What they carry is the finding. `enrichFromUserinfo` sends
+`Authorization: Bearer <accessToken>` to `p.disc.UserinfoEndpoint`, and
+`introspect` sends `req.SetBasicAuth(p.cfg.ClientID, p.cfg.ClientSecret)` —
+**this appliance's own client secret** — to `p.disc.IntrospectionEndpoint`, on
+every cache-missing authentication. `ssrfSafeDialContext` refuses a PRIVATE
+resolved address, so the SSRF direction is covered; a **public cleartext**
+endpoint is not, because nothing checks the scheme. So an IdP's published
+document (or a cache file edited by anything with `dataDir` write access) can
+direct this appliance's client secret and its users' bearer tokens onto a
+plaintext channel, and the appliance will comply.
+
+**Recorded rather than fixed, deliberately.** Adding the two endpoints to the
+existing structural loop would be nearly free but buys almost nothing — the
+dialer already covers SSRF and `validateExternalURLStructure` permits `http`
+either way, so it is close to cosmetic. The change that would matter is
+REFUSING a non-`https` credential endpoint from discovery, and that is a
+POSTURE decision an owner should make: it would break self-signed/dev
+deployments that today rely on `TLSSkipVerify`, and it belongs in its own
+change with its own gates rather than folded into a third review round of a
+resilience sweep. The honest summary is that this sweep made the discovery
+document's endpoints no less safe than it found them, and found that three of
+five were the only ones anybody had ever checked.
+
+### Register rows
+
+| Row | Finding | Status |
+|---|---|---|
+| **IDP-1** | Interactive IdP compile depends on a live third-party fetch; no last-known-good | **CLOSED** — `internal/idpmeta`, bounded by `StaleMaxAge` |
+| **IDP-2** | A boot-time compile failure is permanent for the process lifetime | **CLOSED** — `idp_recovery.go`, rate-bounded + jittered + evidence-gated |
+| **IDP-3** | Enabled-but-not-live is invisible: no metric, row, alert or health field | **CLOSED** — `idp_metadata_health.go`, `culvert_idp_enabled_not_live` |
+| **IDP-4** | Metadata is refreshed only on compile, so a long-lived process can hold a document indefinitely and miss an IdP key rotation | **OPEN** — needs a periodic refresh on `internal/feedsched`; recorded rather than bolted on, because a refresh must recompile into the live registry and that touches the P1-3 transactional mutation model |
+| **IDP-5** | `ReplaceAll` is all-or-nothing, so on a node with **no** cached document (first enrollment, newly added profile) an unreachable IdP still rejects the whole IdP set and aborts the snapshot | **OPEN** — steady-state nodes are covered by IDP-1; closing it properly means classifying reachability failures separately from validation failures inside the config-sync path, which deserves its own review |
+| **IDP-6** | The SAML SP key pair is EPHEMERAL (`ensureSPKeyPair`, regenerated per process) and therefore differs on every node and after every restart — SP metadata is node- and restart-dependent, and encrypted assertions cannot be decrypted by a node that did not issue the AuthnRequest | **OPEN, REPORTED NOT FIXED** — persisting it is a key-management decision with cluster-distribution consequences, not a resilience patch |
+| **IDP-7** | Neither fetch honours the metadata document's own `validUntil` / `cacheDuration` | **OPEN** — noted during this sweep; the 7-day ceiling bounds the exposure but does not implement the IdP's stated intent |
+| **IDP-9** | An OIDC `authorization_endpoint` whose address CANNOT BE DETERMINED (resolver outage, or the check's own budget spent) is admitted UNVERIFIED. That endpoint is handed to the user's BROWSER, so no dialer of ours ever re-checks it and `isSafeCaptiveRedirect` validates only shape; nothing re-compiles a LIVE provider, so a host unresolvable at compile time that later resolves private is a browser redirect into the internal network | **OPEN, REPORTED NOT FIXED — POSTURE.** Refusing on an unknown verdict is not free: it takes SSO down whenever THIS node's resolver cannot resolve the authorization host, even though the user's browser could, and it hands a resolver outage the power to reject a cached document — this sweep's own headline defect. So the trade is an owner's, not a sweep's. It is no longer SILENT: `culvert_idp_authz_endpoint_unverified_total` plus a rate-limited log line naming the profile. Two closing designs were considered and are recorded rather than half-built: (a) resolve the verdict when the document is ADMITTED to the cache — the network path, where DNS is by definition working — and carry it with the document, which needs a cache-schema change; (b) memoise the verdict on the provider and resolve it OFF the request path, failing closed until it answers. A synchronous re-check at redirect issuance was REJECTED: `CaptiveLoginURL` is on the proxy request path (`proxy_portal.go`), and a blocking resolve there is exactly the CHAOS-60/64 defect this review documents at length |
+| **IDP-10** | **`Upsert` holds `r.mu.Lock()` ACROSS `compileIdPProfile`, which reaches the network** — so an admin saving an IdP profile whose metadata endpoint is slow or blackholed stalls the PROXY DATA PLANE. `proxy.go:350` calls `idpRegistry.HasEnabledInteractiveProvider()` on the request path and that takes `r.mu.RLock()`, so every proxied request blocks for the whole fetch: up to `samlMetadataFetchBudget` (15 s) or `oidcDiscoveryFetchBudget` (10 s), from ONE click on Save. **Measured against the real registry**, not reasoned about: with the metadata response held, the request-path probe was still blocked after 3 s and returned only when the fetch completed. **The rule is already written down TWICE in this tree and applied to two of its three writers** — `idp_recovery.go`'s `publishRecompiled` compiles outside the lock with the reason in its comment, and `ReplaceAll` does the same (round 16 restates it) — so this is the SIXTH instance in this sweep of a rule held on one of two (here, two of three) symmetric paths, and the one it was not applied to is the one reachable from the LIVE admin API. It is CHAOS-57's theme (*the admin plane may never take down the data plane*) in the STALL form rather than the exit form. | **OPEN, REPORTED NOT FIXED — one concern per change.** Pre-existing: the network fetch inside the compile is defect (1) of this sweep and the lock scope predates it, so nothing here introduced it and CHAOS-71 does not widen it. Closing it means giving `Upsert` the `publishRecompiled` shape — compile outside `r.mu`, then re-check still-present / still-enabled / same-generation under the lock before publishing — which is a structural change to the one registry writer whose current correctness argument is *"it never releases the lock"*: rounds 6, 7, 9, 10 and 16 all lean on that, so it needs its own gates for each, not a round appended to this PR |
+| **IDP-8** | Two OIDC discovery endpoints — `userinfo_endpoint` and `introspection_endpoint` — are dialled with a bearer token and the client secret respectively without ever being validated, so a document that downgraded one to plain `http` would send credentials in cleartext (the SSRF-guarded dialer still bounds the destination, so this is a confidentiality issue, not an SSRF one) | **OPEN, REPORTED NOT FIXED** — found while verifying this sweep's own claim that the discovery endpoints were covered; refusing non-`https` for credential-bearing endpoints is a POSTURE change that breaks dev/self-signed deployments relying on `TLSSkipVerify` and belongs in its own change with its own gates, not folded into a resilience sweep's third review round |
+| **SUITE-1** | `TestSecReqID1_BareReqIDInDecisionLineIsSafeOnlyBecauseOfTheBound` asserts on a `POLICY_*` decision line but establishes no AUTH posture, and `handleRequest` authenticates before policy — so an order that configures a credential first refuses the request and emits no decision line. Its own vacuity guard (`Contains(line, "req_id=")`) is satisfied by the refusal line, so it reports health while testing nothing. 44 root tests mutate the global auth credentials with no restore, so the poisoning order is common, not a rare draw | **CLOSED on main by CHAOS-69 (#1446)**, with the same one-line fix this row proposed — `setupProxyTest(t)`, the repo's own helper for this flake class — reached independently. **It also corrects this row**: CHAOS-69 applied the fix to the SIBLING gate `TestSecReqID1_EndToEndLogAmplificationIsBounded` as well, which this row had assessed as unaffected on the reasoning that it asserts on byte VOLUME rather than on tokens. That reasoning was wrong — leaked credentials change which PATH the request takes, so the byte bound was being measured against a challenge rather than a proxied request. *A gate that drives the real `handleRequest` depends on every global that path reads, not only on the ones its assertion names.* |
+| **SUITE-2** | `internal/threatfeed`'s `TestBenchGate_CheckRequestURLBeatsLegacy` is a bare `fast >= legacy` timing ratio with no margin; under `-race` both arms ran ~6-14x slower and INVERTED (5881 vs 5141 ns/op against a documented 376 vs 887), failing with no regression present | **OPEN, REPORTED NOT FIXED** — the package already replaced its other ratio gate with a structural one for this exact reason; widening the bound enough to tolerate a 1.14x inversion would also admit a real 1.4x regression |
+| **RB-1** | CHAOS-70's two new log rate gates (`noteRosterPersistBestEffort`, `noteRosterNotDurable`, `roster_persist_durability.go`) compare `now.Sub(time.Unix(0, last)) < rosterPersistLogInterval` with no `>= 0` guard, so a clock that steps BACKWARDS takes the suppress branch for however far back it went. The reachable trigger is ordinary — an appliance booting with a bad RTC and stepping back when NTP first syncs, which is exactly when the first roster mutation after boot would warn. Diverges from this file's own CHAOS-61 rule (*a negative age is STALE, not fresh — fail toward reporting*), which the neighbouring gate `noteTracingBoundsLog` follows explicitly and documents | **OPEN, REPORTED NOT FIXED.** The two gates are NOT equally exposed, and that is the point: `noteRosterPersistBestEffort` has `culvert_admin_roster_persist_degraded_total` behind it, so a rollback DELAYS its warning rather than losing it — but `noteRosterNotDurable` has no metric at all (RB-2), so its rate-gated line is the ONLY signal and a rollback suppresses it outright. The fix is the `d >= 0 &&` the sibling gate already carries. `roster_persist_durability.go` is a file this change does not touch |
+| **RB-2** | `rosterNotDurable` — CHAOS-70's counter for a roster mutation that applied in memory with NO roster file configured, so it is lost on restart — is incremented and then never read. Both of its siblings are exported (`culvert_admin_roster_persist_failures_total`, `culvert_admin_roster_persist_degraded_total`, `events.go`); this one reaches no `/metrics` series, no `/healthz` field and no API surface, so the only operator-visible signal that admin password rotations are reverting on every restart is one rate-limited log line. The file's own comment argues the state is distinct from its siblings *because the operator action differs*, which is the argument for exporting it | **OPEN, REPORTED NOT FIXED.** Looks like an oversight rather than a posture: the emission-discipline objection does not apply, since `events.go` already records that these roster counters are emitted UNCONDITIONALLY because a flat zero is the healthy steady state here rather than an ambiguous "not configured". Compounds RB-1, which suppresses the one surface it does have. `roster_persist_durability.go` / `events.go` are files this change does not touch |
+| **CP-1** | **The CP gRPC bind is fatal and runs BEFORE the proxy, the admin UI and the health endpoints exist.** `startControlPlaneWithHAResume` `logFatalf`s on any `enableControlPlane` error (`cluster_startup.go:96`), and `initCluster` is `main.go:228` — EARLIER than `initSOCKS5` (:254), `startAdminUI` (:269) and `buildAndStartProxyServer` (:271), so this kills the appliance earlier than the SOCKS5 fault §36 just closed. A CP node ALSO proxies: nothing branches on cluster role before the proxy starts, so this is a DATA-plane outage, not a management-plane one. TWO fault classes, both routine — the bind (`lc.Listen`: port in use, `permission_denied`, address unavailable) and the mTLS material, which `buildServerTLS` reads at call time via `tls.LoadX509KeyPair`, i.e. §33's exact certbot/cert-manager rotation trigger. Under `restart: unless-stopped` each is an unattended crash loop recoverable only with shell access | **OPEN, REPORTED NOT FIXED — EXAMINED, upgrading §36's "closest unexamined analogue" note.** Three things the earlier record did not have. (1) The site is ABSENT from the F-23/R-F fatal inventory above, which lists `cluster_startup.go:44` (the HA lease) and never `:96`. (2) That table's stated reason for leaving port-binds out of R-F — *"a port-bind failure has a strong case for staying fatal"* — has since been OVERTURNED for both sibling listeners, by §33 (admin UI) and §36 (SOCKS5); the remaining one inherits an argument its siblings no longer carry. (3) The asymmetry is inside ONE function: `enableControlPlane` has three callers, and `ui_cluster.go:98` (the LIVE admin API) and `cluster_startup.go:75` (HA promotion) both return the error properly — only the boot path exits, which is the shape §31 found for `enableLogStore`. Not changed here: one concern per change, and this is a different subsystem from the one this PR touches |
+
+### Governance note
+
+Rows IDP-1…IDP-3 describe a subsystem no previous sweep looked at, despite
+three separate identity-plane sweeps (CHAOS-47, 49, 58) that each stopped at
+the *request* boundary. The pattern worth carrying forward: **every one of
+those sweeps asked "what happens when this dependency fails while serving a
+request?" and none asked "what does this component need in order to be
+constructed?"** Construction-time dependencies are invisible to request-path
+chaos testing by definition — the component either exists or the test does not
+run — and on this appliance construction happens on the boot path, the admin
+path and the config-sync path, which is a strictly larger blast radius than the
+request path it was compared against.

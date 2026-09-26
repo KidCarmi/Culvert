@@ -516,6 +516,59 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   egress-restricted deployment must allow the responder hosts named in its
   upstreams' certificates. See `docs/operator/ocsp-revocation-checking.md`.
 
+- An enabled SAML or OIDC identity provider no longer depends on being able to
+  reach the identity provider in order to EXIST. Compiling a profile performs a
+  synchronous outbound fetch — SAML metadata, OIDC discovery — and it had no
+  cache, no fallback and no retry, on three paths: appliance boot, the admin
+  save, and every Control Plane → Data Plane config sync. Three consequences.
+  An IdP that was briefly unreachable at boot left the profile enabled, stored
+  and listed in the admin UI but with **no live provider**, permanently for the
+  life of the process and with no metric, health row or alert to say so —
+  browser SSO simply stopped, and a scoped `SSORequired` rule returned 403 for
+  every user, against a green dashboard. An ordinary IdP maintenance window
+  **aborted the whole config snapshot**, stopping policy, blocklist and
+  threat-feed distribution to every data plane in the fleet. And because the
+  config version could not advance, every data plane retried the fetch every
+  30 seconds for the duration of the outage, aiming the fleet's full poll rate
+  at the identity provider that was already down.
+
+  The appliance now keeps the last document it successfully fetched and
+  degrades to it, bounded by a 7-day staleness ceiling — withdrawing a key from
+  published metadata is your IdP's revocation lever, so the fallback is a
+  bounded degradation rather than an open-ended one. The network always wins
+  when it answers, so an IdP-side key rotation is still picked up at the next
+  compile; cached bytes are parsed and validated by exactly the same code as
+  network bytes; and a cached document is bound to its source URL, so
+  re-pointing a profile gets no cache. A profile that still cannot be compiled
+  now retries on its own at a bounded, jittered rate and goes live on the first
+  successful fetch — no restart. New: the `idp_metadata` diagnostics row,
+  `culvert_idp_enabled_not_live` (page on `> 0`) and `culvert_idp_metadata_*`,
+  and the existing `identity_backend_unreachable` alert with source
+  `idp_metadata`. Nothing is added to `/readyz`: an IdP outage is fleet-wide,
+  and failing readiness would eject a fleet that is still proxying fine. An
+  unresolvable IdP hostname now falls back to the cached document instead of
+  being reported as a configuration error (an OIDC discovery URL is admitted on
+  structure; the DNS-backed check runs on the fetch, where its failure routes to
+  the cache), the SAML pre-flight host check shares the fetch's deadline instead
+  of resolving unbounded ahead of it, and switching a profile to inline
+  `metadataXml` clears its now-unresolvable remote-fetch failure episode. Two
+  further operator-visible consequences: a discovery document the appliance
+  cannot accept — one naming an `authorization_endpoint` that resolves into a
+  private range — is now treated as an availability failure and the previously
+  cached document keeps serving, instead of replacing it and leaving the profile
+  with nothing to fall back to; and re-pointing a profile from one remote source
+  to another retires the old source's failure episode on commit, so a repoint
+  away from a broken IdP stops alerting instead of paging indefinitely for a URL
+  that is no longer configured. And the 7-day staleness ceiling is now enforced
+  on a **running** appliance rather than only when a profile is next compiled: a
+  provider whose cached document has expired is retired (logged as
+  `IDP_METADATA_EXPIRED`), so browser SSO for it fails closed instead of
+  continuing to trust a signing certificate your IdP may have withdrawn, and the
+  retry loop brings it back automatically on the first successful fetch. The
+  profile stays enabled and stored throughout, and a provider serving a freshly
+  fetched document is never retired however old the cached copy beside it is. See
+  `docs/operator/idp-metadata-availability.md`.
+
 ### Changed
 
 - The production image now cross-compiles the proxy and the bundled

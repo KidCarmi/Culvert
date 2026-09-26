@@ -21,6 +21,7 @@ import (
 	"math/big"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -29,6 +30,7 @@ import (
 	"github.com/crewjam/saml/samlsp"
 
 	"github.com/KidCarmi/Culvert/internal/authstate"
+	"github.com/KidCarmi/Culvert/internal/idpmeta"
 )
 
 // ---------------------------------------------------------------------------
@@ -41,6 +43,17 @@ type SAMLProvider struct {
 	cfg        *SAMLProfileConfig
 	sp         *saml.ServiceProvider
 	middleware *samlsp.Middleware
+	// cachedAt is when the metadata this provider was built from was fetched,
+	// if it came from the last-known-good cache; zero when fetched live or
+	// inline. Read only by the publish sites (idpNotePublishedGeneration).
+	cachedAt time.Time
+}
+
+func (p *SAMLProvider) servedDocumentCachedAt() time.Time {
+	if p == nil {
+		return time.Time{}
+	}
+	return p.cachedAt
 }
 
 // NewSAMLProvider builds a SAMLProvider from an IdPProfile.
@@ -53,7 +66,7 @@ func NewSAMLProvider(p *IdPProfile) (*SAMLProvider, error) {
 		return nil, fmt.Errorf("saml[%s] name_id_format: %w", p.ID, err)
 	}
 
-	idpMeta, err := fetchSAMLMetadata(cfg)
+	idpMeta, cachedAt, err := fetchSAMLMetadata(p.ID, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("saml[%s] metadata: %w", p.ID, err)
 	}
@@ -86,6 +99,7 @@ func NewSAMLProvider(p *IdPProfile) (*SAMLProvider, error) {
 		cfg:        cfg,
 		sp:         &middleware.ServiceProvider,
 		middleware: middleware,
+		cachedAt:   cachedAt,
 	}, nil
 }
 
@@ -218,51 +232,177 @@ func newSAMLStateStore() *samlStateStore {
 // SAML metadata fetch + parse
 // ---------------------------------------------------------------------------
 
-func fetchSAMLMetadata(cfg *SAMLProfileConfig) (*saml.EntityDescriptor, error) {
+// fetchSAMLMetadata resolves the IdP EntityDescriptor for a profile.
+//
+// CHAOS-71: the remote branch goes through acquireIdPDocument, so a metadata
+// endpoint that is momentarily unreachable degrades to the last successfully
+// fetched document (bounded by idpmeta.StaleMaxAge) instead of destroying the
+// provider. The bytes it returns are parsed by the SAME samlsp.ParseMetadata
+// call as network bytes — the cache is a source of bytes, never a source of
+// trust.
+func fetchSAMLMetadata(profileID string, cfg *SAMLProfileConfig) (*saml.EntityDescriptor, time.Time, error) {
 	var xmlData []byte
+	var cachedAt time.Time
 
 	if cfg.MetadataURL != "" {
-		// Validate scheme before making any request.
-		metaURL, err := url.Parse(cfg.MetadataURL)
+		// Reject a malformed or wrong-scheme URL HERE, before the fetch, so
+		// that a CONFIGURATION error can never be mistaken for an
+		// AVAILABILITY error and answered from the last-known-good cache.
+		// Only the parse verdict is used; the parsed value is deliberately
+		// discarded and the raw configured string is what reaches the
+		// fetcher, which parses and guards it once in the same function that
+		// issues the request.
+		if err := validateSAMLMetadataURL(cfg.MetadataURL); err != nil {
+			return nil, time.Time{}, err
+		}
+		fetched, fetchErr := fetchSAMLMetadataOverNetwork(cfg.MetadataURL)
+		doc, docCachedAt, err := resolveIdPDocument(profileID, idpmeta.KindSAMLMetadata, cfg.MetadataURL, fetched, fetchErr, validateSAMLMetadataDocument)
 		if err != nil {
-			return nil, fmt.Errorf("metadata URL parse: %w", err)
+			return nil, time.Time{}, err
 		}
-		if metaURL.Scheme != "http" && metaURL.Scheme != "https" {
-			return nil, fmt.Errorf("metadata URL must use http or https scheme")
-		}
-
-		// Use an SSRF-safe transport that rejects private/internal IPs at
-		// the dial level — even if DNS changes between validation and
-		// connection, the transport blocks the request.
-		client := &http.Client{
-			Timeout: 15 * time.Second,
-			Transport: &http.Transport{
-				DialContext: ssrfSafeDialContext,
-			},
-		}
-		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-		defer cancel()
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, metaURL.String(), nil)
-		if err != nil {
-			return nil, fmt.Errorf("metadata request: %w", err)
-		}
-		resp, err := client.Do(req)
-		if err != nil {
-			return nil, fmt.Errorf("fetch: %w", err)
-		}
-		defer resp.Body.Close()
-		if resp.StatusCode != http.StatusOK {
-			return nil, fmt.Errorf("HTTP %d fetching metadata", resp.StatusCode)
-		}
-		xmlData, err = io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-		if err != nil {
-			return nil, fmt.Errorf("read: %w", err)
-		}
+		xmlData = doc
+		cachedAt = docCachedAt
 	} else {
+		// Inline metadata needs no network, so a remote-fetch episode this
+		// profile may still carry no longer applies — but it is NOT cleared
+		// here. Compiling is not committing: an invalid inline document fails
+		// the parse below, and even a good one can still fail to persist, and
+		// in both cases Upsert/ReplaceAll keep the OLD remote profile
+		// authoritative. Clearing at compile time therefore erased a genuine
+		// outage episode on a REJECTED edit and suppressed its alert (Codex
+		// review round 5). The clear now runs at the publication sites, after
+		// persistence lands, under the same rule the disabled case already
+		// used: a profile with no remote source left can never have its
+		// episode cleared by evidence again.
 		xmlData = []byte(cfg.MetadataXML)
 	}
 
-	return samlsp.ParseMetadata(xmlData)
+	ed, err := samlsp.ParseMetadata(xmlData)
+	if err != nil {
+		return nil, time.Time{}, err
+	}
+	return ed, cachedAt, nil
+}
+
+// validateSAMLMetadataDocument is the document gate resolveIdPDocument applies
+// before persisting a fetched document as last-known-good: the SAME parser the
+// compile runs on the result, so only a document the compile would accept can
+// ever replace the cached copy.
+func validateSAMLMetadataDocument(doc []byte) error {
+	_, err := samlsp.ParseMetadata(doc)
+	return err
+}
+
+// samlMetadataFetchBudget bounds ONE metadata acquisition end to end — the
+// pre-flight host check AND the HTTP request share it, so the guard can never
+// outlive the operation it guards.
+const samlMetadataFetchBudget = 15 * time.Second
+
+// validateSAMLMetadataURL reports whether a configured metadata URL is
+// well-formed and carries a scheme this appliance will fetch. It returns no
+// parsed value on purpose: nothing derived from it may reach an outbound
+// request, so the raw configured string stays the single thing the fetcher
+// parses (see fetchSAMLMetadataOverNetwork).
+func validateSAMLMetadataURL(raw string) error {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("metadata URL parse: %w", err)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return fmt.Errorf("metadata URL must use http or https scheme")
+	}
+	return nil
+}
+
+// fetchSAMLMetadataOverNetwork performs exactly the request the pre-CHAOS-71
+// code performed: same 15 s budget, same SSRF-safe dialer, same 1 MiB read
+// limit, same HTTP-status rule. It is split out only so acquireIdPDocument can
+// own the cache/fallback decision around it.
+//
+// THE SCHEME CHECK IS REPEATED HERE ON PURPOSE, and must not be "cleaned up"
+// as redundant with the caller's. The repo convention (CLAUDE.md, SSRF guards)
+// is that the guard is inlined in the same function as the outbound request so
+// CodeQL can verify it — relying on a check in a calling function is exactly
+// what the convention forbids. Splitting this helper out of
+// fetchSAMLMetadata without carrying the guard raised a critical
+// go/request-forgery alert on the first CI run of CHAOS-71.
+// samlMetadataURLShape is the go/request-forgery barrier for
+// fetchSAMLMetadataOverNetwork: CodeQL recognises Regexp.MatchString on the
+// tainted value as a sanitiser (the same barrier internal/otlp and
+// internal/alerts use for their operator-configured endpoints), whereas
+// whether it models the isPrivateHostContext wrapper is not established — the
+// PR's CodeQL run flagged this request with that wrapper in place. It admits
+// only what the scheme check below admits anyway (case-insensitive http/https,
+// followed by an authority), so it narrows nothing a valid metadata URL uses.
+var samlMetadataURLShape = regexp.MustCompile(`(?i)^https?://[^/]`)
+
+func fetchSAMLMetadataOverNetwork(raw string) ([]byte, error) {
+	if !samlMetadataURLShape.MatchString(raw) {
+		return nil, fmt.Errorf("metadata URL must be an absolute http or https URL")
+	}
+	metaURL, err := url.Parse(raw)
+	if err != nil {
+		return nil, fmt.Errorf("metadata URL parse: %w", err)
+	}
+	if metaURL.Scheme != "http" && metaURL.Scheme != "https" {
+		return nil, fmt.Errorf("metadata URL must use http or https scheme")
+	}
+	// The PRE-FLIGHT half of the guard, inline per the repo's SSRF convention
+	// (url.Parse + scheme check + a private-host check in the same function as
+	// the request). The check is spelled isPrivateHostContext rather than
+	// isPrivateHost; the static-analysis barrier is the samlMetadataURLShape
+	// regexp at the top of this function, NOT this call. The bounded form is
+	// mandatory (below) and an unbounded one would be traded for a
+	// static-analysis result, which is the wrong direction.
+	//
+	// It is not new enforcement either: ssrfSafeDialContext below already
+	// refuses a private destination at connect time, so the set of URLs this
+	// function will fetch is unchanged — a private metadata host failed before
+	// and fails now, just earlier and with an error that names the reason. The
+	// two layers are complementary rather than redundant: this one refuses a
+	// host that resolves private NOW, the dialer catches one that resolves
+	// public here and private at connect time (DNS rebinding), which is the
+	// authoritative half.
+	//
+	// BOUNDED by the same 15 s budget as the request below, from ONE context.
+	// isPrivateHost resolves under context.Background(), so on a wedged
+	// resolver the first shape of this pre-flight blocked for the OS budget
+	// BEFORE the request context existed — an unbounded step introduced into a
+	// bounded operation by the guard itself, the CHAOS-60/64 shape this sweep
+	// cites, reintroduced inside a fix for something else. A bounded operation
+	// is only as bounded as its first step. Do not un-bound this for CodeQL.
+	ctx, cancel := context.WithTimeout(context.Background(), samlMetadataFetchBudget)
+	defer cancel()
+	if err := isPrivateHostContext(ctx, metaURL.Host); err != nil {
+		return nil, fmt.Errorf("metadata URL host refused: %w", err)
+	}
+
+	// Use an SSRF-safe transport that rejects private/internal IPs at
+	// the dial level — even if DNS changes between validation and
+	// connection, the transport blocks the request.
+	client := &http.Client{
+		Timeout: samlMetadataFetchBudget,
+		Transport: &http.Transport{
+			DialContext: ssrfSafeDialContext,
+		},
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, metaURL.String(), http.NoBody)
+	if err != nil {
+		return nil, fmt.Errorf("metadata request: %w", err)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("fetch: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("HTTP %d fetching metadata", resp.StatusCode)
+	}
+	xmlData, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return nil, fmt.Errorf("read: %w", err)
+	}
+	return xmlData, nil
 }
 
 // ---------------------------------------------------------------------------

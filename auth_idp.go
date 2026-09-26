@@ -6,8 +6,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
+	"net/url"
 	"os"
 	"sync"
+
+	"github.com/KidCarmi/Culvert/internal/ssrf"
 )
 
 // ---------------------------------------------------------------------------
@@ -252,6 +256,7 @@ func (r *IdPRegistry) compile(p *IdPProfile) error {
 		return err
 	}
 	r.live[p.ID] = prov
+	idpNotePublishedGeneration(p.ID, effectiveRemoteSource(p), prov)
 	return nil
 }
 
@@ -275,8 +280,17 @@ func validateUpsertProfile(p *IdPProfile) error {
 		return fmt.Errorf("idp: type must be 'oidc', 'saml', or 'ldap'")
 	}
 	// Security: validate issuer/metadata URLs before compiling.
+	//
+	// STRUCTURAL, deliberately (CHAOS-71 round 3). The resolving form gated
+	// this admission path, so a resolver outage rejected the admin write and —
+	// via ReplaceAll — aborted the WHOLE CP->DP snapshot, which is this
+	// sweep's headline defect surviving on the one path it was about: the
+	// last-known-good cache sits behind compileIdPProfile and is never reached
+	// when admission has already refused. The DNS-backed check stays inline in
+	// fetchOIDCDiscoveryOverNetwork, where its failure is a failed FETCH and
+	// falls back to the cache. A configuration error still fails fast here.
 	if p.Type == IdPTypeOIDC && p.OIDC != nil {
-		if err := validateExternalURL(p.OIDC.Issuer); err != nil {
+		if err := validateExternalURLStructure(p.OIDC.Issuer); err != nil {
 			return fmt.Errorf("idp oidc issuer: %w", err)
 		}
 	}
@@ -317,10 +331,44 @@ func (r *IdPRegistry) Upsert(p *IdPProfile) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
+	// Whether this id is ALREADY registered decides who owns any failure
+	// episode recorded below. A refused candidate that is not in the registry
+	// never existed, so its episode must not outlive the refusal; a refused
+	// EDIT of a profile that IS registered leaves the existing provider (and
+	// its legitimate episode) in place, so forgetting there would delete a real
+	// outage signal. Read under the lock, before anything can change it.
+	// It is NOT enough for the id to be registered: the episode describes a
+	// fetch against a SOURCE, so an edit that reuses an id and repoints it at a
+	// different (unreachable) issuer leaves an episode that belongs to the
+	// CANDIDATE, not to the profile that stays live — hence the source
+	// comparison below rather than an id check.
+	var liveProfile *IdPProfile
+	for _, existing := range r.profiles {
+		if existing.ID == p.ID {
+			liveProfile = existing
+			break
+		}
+	}
+	// A refused edit must leave behind no episode of its OWN, and must never
+	// touch the live profile's. Since CHAOS-71 round 6 those are DISTINCT KEYS
+	// unless the candidate points at the source already in service, so this is
+	// one comparison rather than a predicate over two profiles — and the
+	// persist path needs it too, not just the compile path: a candidate that
+	// stale-compiles and then fails to persist would otherwise leave an outage
+	// reported against a configuration that was rejected.
+	liveSource := idpRemoteDocumentSource(liveProfile)
+	candidateSource := idpRemoteDocumentSource(p)
+	discardCandidateEpisode := func() {
+		if candidateSource != liveSource {
+			forgetIdPMetadataEpisodeForSource(p.ID, candidateSource)
+		}
+	}
+
 	var compiled IdentityProvider
 	if p.Enabled {
 		prov, err := compileIdPProfile(p)
 		if err != nil {
+			discardCandidateEpisode()
 			return fmt.Errorf("idp compile error: %w", err)
 		}
 		compiled = prov
@@ -352,10 +400,123 @@ func (r *IdPRegistry) Upsert(p *IdPProfile) error {
 	}
 
 	if err := r.persist(nextProfiles); err != nil {
+		discardCandidateEpisode()
 		return err // old profiles + old live providers stay authoritative
 	}
 	r.profiles, r.live = nextProfiles, nextLive
+	// The generation is PUBLISHED only here, after the save landed — so only
+	// here may its served-document evidence change (Codex round 14): a refused
+	// compile or a failed persist returned above and left the old generation's
+	// evidence, and therefore its staleness ceiling, untouched.
+	idpNotePublishedGeneration(p.ID, effectiveRemoteSource(p), compiled)
+
+	// A profile with NO REMOTE SOURCE LEFT — stored disabled, or switched to
+	// inline SAML metadata — has no remote fetch left, so any episode it
+	// carries can never be cleared by evidence again. This runs only AFTER
+	// persistence lands: on a failed write the OLD enabled profile and its live
+	// provider stay authoritative, so clearing here would erase a genuine
+	// outage signal and suppress its alert (Codex review round 3).
+	//
+	// The inline half used to be cleared inside compileIdPProfile instead,
+	// which is BEFORE the parse and before this persist, so a rejected inline
+	// edit cleared a live profile's real episode (Codex review round 5). One
+	// condition now covers both, because it is one rule.
+	// Only on COMMIT: on a refused compile or a failed persist the OLD profile
+	// stays authoritative, so the old source is still what this profile fetches
+	// and its episode is a live outage signal — those paths take
+	// discardCandidateEpisode instead, which touches only the candidate's own
+	// key. See retireEpisodeAfterCommit for the rule itself.
+	retireEpisodeAfterCommit(p.ID, liveSource, effectiveRemoteSource(p))
 	return nil
+}
+
+// effectiveRemoteSource is the remote document source a profile fetches from
+// ONCE PUBLISHED: "" for a DISABLED profile, which fetches nothing, as well as
+// for one that names no remote URL at all.
+func effectiveRemoteSource(p *IdPProfile) string {
+	if p == nil || !p.Enabled {
+		return ""
+	}
+	return idpRemoteDocumentSource(p)
+}
+
+// retireEpisodeAfterCommit applies the ONE episode-retirement rule every
+// COMMITTED profile write shares, and is called only after persistence lands.
+//
+// An episode describes a failed fetch against a SOURCE, so it is retired when
+// that source stops being something this appliance fetches — which is evidence
+// the dependency is GONE, not a clear on elapsed time (the observed-evidence
+// rule forbids the latter, never the former).
+//
+//   - newSource == "": the profile was disabled, deleted, or switched to inline
+//     metadata, so NO remote fetch is left and every episode it holds is
+//     unclearable by evidence. Sweep them all.
+//   - a different newSource: a remote-to-remote REPOINT. Nothing fetches the
+//     old source any more, so its episode would age past
+//     idpMetadataDegradedAfter and page indefinitely for a configuration no
+//     longer in service (Codex review round 7). Retire exactly that one, and
+//     keep any episode belonging to the newly published source — the fresh
+//     fetch owns that.
+//
+// THE `prevSource != newSource` GUARD IS THE LOAD-BEARING HALF, and not only for
+// the repoint case it was written for: the commonest state of all is a profile
+// recompiling against the SAME still-broken source, where prevSource ==
+// newSource. Without the guard that write retires the very episode the stale
+// compile just opened, so the degradation signal for an ongoing outage is erased
+// by each recompile and `culvert_idp_metadata_degraded` can never reach its
+// threshold — strictly worse than the leak this function exists to fix.
+// Mutation-verified: removing it fails every subtest of
+// TestChaos71_CommittedRepointRetiresThePreviousSourcesEpisode, including at the
+// fixture that establishes an ongoing outage.
+//
+// prevSource is deliberately the profile's raw source rather than its
+// effectiveRemoteSource: a profile stored DISABLED with a URL may still carry a
+// stale episode for it, and a snapshot that enables it against a NEW URL must
+// retire that one — reading the previous state as source-less would leak it.
+//
+// Extracted from Upsert/ReplaceAll rather than inlined twice: both were over
+// the cyclop threshold with it inline, and one rule in one place is also how
+// the two paths are kept from drifting.
+func retireEpisodeAfterCommit(profileID, prevSource, newSource string) {
+	if newSource == "" {
+		forgetIdPMetadataEpisode(profileID)
+		return
+	}
+	if prevSource != "" && prevSource != newSource {
+		forgetIdPMetadataEpisodeForSource(profileID, prevSource)
+	}
+}
+
+// idpRemoteDocumentSource reports the REMOTE document source a profile depends
+// on — the OIDC discovery URL or the SAML metadata URL — and "" for a profile that
+// fetches nothing (inline SAML metadata, LDAP, a disabled/unset config).
+//
+// It exists because what a metadata failure episode describes is a failed fetch
+// against a SOURCE, so that is what episodes are keyed by (profile, source)
+// since round 6. Deciding who owns an episode by ID alone is wrong whenever an
+// edit REUSES an id and changes the source: the episode was opened by compiling
+// the candidate, so it belongs to the candidate's source, not to the still-live
+// profile's (Codex review rounds 3 and 6).
+func idpRemoteDocumentSource(p *IdPProfile) string {
+	if p == nil {
+		return ""
+	}
+	switch p.Type {
+	case IdPTypeOIDC:
+		if p.OIDC != nil {
+			// The DOCUMENT URL, not the raw issuer: this string must be the
+			// exact one resolveIdPDocument is given, because it is both the
+			// cache key and the failure-episode key. Returning the issuer here
+			// made the episode-cleanup path compute a key the recorder never
+			// used (Codex review round 6).
+			return oidcWellKnownURL(p.OIDC.Issuer)
+		}
+	case IdPTypeSAML:
+		if p.SAML != nil {
+			return p.SAML.MetadataURL
+		}
+	}
+	return ""
 }
 
 func validateSAMLProfileConfig(cfg *SAMLProfileConfig) error {
@@ -369,7 +530,15 @@ func validateSAMLProfileConfig(cfg *SAMLProfileConfig) error {
 		return fmt.Errorf("name_id_format: %w", err)
 	}
 	if cfg.MetadataURL != "" {
-		if err := validateExternalURL(cfg.MetadataURL); err != nil {
+		// STRUCTURAL, deliberately, and for exactly the reason the OIDC issuer
+		// gate is (CHAOS-71 rounds 2/3). Admission runs BEFORE compilation and
+		// the last-known-good cache lives BEHIND it, so a resolving check here
+		// refuses the admin write — and aborts the whole CP->DP snapshot via
+		// ReplaceAll — during a resolver outage this node could have ridden out
+		// from cache. The DNS-backed check stays INLINE in
+		// fetchSAMLMetadataOverNetwork, where its failure is a failed FETCH and
+		// therefore routes to resolveIdPDocument.
+		if err := validateExternalURLStructure(cfg.MetadataURL); err != nil {
 			return fmt.Errorf("metadata_url: %w", err)
 		}
 	}
@@ -420,6 +589,10 @@ func (r *IdPRegistry) Delete(id string) error {
 			return err // the profile stays stored AND live
 		}
 		r.profiles, r.live = nextProfiles, nextLive
+		idpNotePublishedGeneration(id, "", nil)
+		// The profile is gone, so nothing will ever fetch for it again and no
+		// evidence can clear an episode it left behind.
+		forgetIdPMetadataEpisode(id)
 		return nil
 	}
 	return fmt.Errorf("idp %q not found", id)
@@ -452,9 +625,77 @@ func (r *IdPRegistry) All() []*IdPProfile {
 func (r *IdPRegistry) ReplaceAll(profiles []*IdPProfile) error {
 	nextProfiles := cloneIdPProfiles(profiles)
 	nextLive := make(map[string]IdentityProvider)
+
+	// WHO OWNS AN EPISODE IS A QUESTION ABOUT THE AUTHORITATIVE REGISTRY, AND IT
+	// IS ASKED UNDER THE LOCK (Codex round 16). This used to snapshot the
+	// registered set HERE, before the compile loop — which reaches the network,
+	// so the snapshot was stale by however long a metadata fetch took, up to
+	// samlMetadataFetchBudget per profile. Upsert holds r.mu across its whole
+	// body and so cannot drift; ReplaceAll compiles OUTSIDE the lock (the
+	// deliberate asymmetry, because HasEnabledInteractiveProvider is on the
+	// proxy request path), which is exactly what opens the window: an admin
+	// Upsert can publish a different source for the same id while this snapshot
+	// is still compiling. Against a stale reading both directions were wrong —
+	// an abort DELETED the episode the newly-published live provider owns
+	// (suppressing a real degradation page), and a commit compared against a
+	// source that had already been superseded, LEAVING the intervening source's
+	// episode behind to age into a page for a configuration out of service.
+	//
+	// So there is no pre-lock snapshot to go stale any more. Both shapes below
+	// read r.profiles, and each says which lock state it needs.
+	discardCandidateEpisodeLocked := func(candidate *IdPProfile) {
+		// A nil entry in the snapshot is rejected by validateIdPProfile, which
+		// handles nil correctly — but it reaches here on that error path, and a
+		// nil candidate has no id and therefore owns no episode. Dereferencing
+		// it panicked the DATA PLANE on a malformed CP->DP snapshot (Codex
+		// review round 4): ReplaceAll is the snapshot-apply path, so one `null`
+		// in idp_profiles took the node down instead of refusing the snapshot.
+		if candidate == nil {
+			return
+		}
+		// Same source-awareness as Upsert: an id being registered is not enough.
+		// A snapshot that reuses an id and repoints it at a different unreachable
+		// source leaves an episode belonging to the CANDIDATE, so the still-live
+		// profile must not inherit it (Codex review round 3).
+		source := idpRemoteDocumentSource(candidate)
+		if source != r.liveRemoteSourceLocked(candidate.ID) {
+			forgetIdPMetadataEpisodeForSource(candidate.ID, source)
+		}
+	}
+	discardAllCandidateEpisodesLocked := func() {
+		for _, cand := range nextProfiles {
+			discardCandidateEpisodeLocked(cand)
+		}
+	}
+
+	// EVERY abort discards EVERY candidate's speculative episode, not just the
+	// one that failed (Codex review round 8). ReplaceAll is all-or-nothing, so a
+	// snapshot that compiles profile A from stale cache — opening an episode for
+	// A's new source — and then fails on profile B publishes NOTHING: A's source
+	// never entered service, yet its episode would age past
+	// idpMetadataDegradedAfter and page for a configuration nobody ever ran.
+	//
+	// The rule was already written on the persist branch below ("the WHOLE
+	// snapshot is rejected, so every candidate's speculative episode describes a
+	// configuration that is not in service") and applied to one of three abort
+	// paths. The partial-progress case needs it precisely because the loop makes
+	// progress before it fails.
+	// Called from the two aborts that run BEFORE r.mu is taken, so it acquires
+	// the read lock itself. The persist-failure abort already holds the write
+	// lock and calls discardAllCandidateEpisodesLocked directly — sync.RWMutex
+	// is not reentrant, and re-acquiring there is the deadlock CHAOS-50 records
+	// for the cluster CA. The order taken is r.mu -> idpMetadata.mu, the one
+	// this file already takes at retireEpisodeAfterCommit below.
+	discardAllCandidateEpisodes := func() {
+		r.mu.RLock()
+		defer r.mu.RUnlock()
+		discardAllCandidateEpisodesLocked()
+	}
+
 	for _, p := range nextProfiles {
 		normalizeIdPProfileWriteInput(p)
 		if err := validateIdPProfile(p); err != nil {
+			discardAllCandidateEpisodes()
 			return err
 		}
 		if !p.Enabled {
@@ -462,6 +703,7 @@ func (r *IdPRegistry) ReplaceAll(profiles []*IdPProfile) error {
 		}
 		prov, err := compileIdPProfile(p)
 		if err != nil {
+			discardAllCandidateEpisodes()
 			return fmt.Errorf("idp %q compile error: %w", p.ID, err)
 		}
 		nextLive[p.ID] = prov
@@ -469,12 +711,67 @@ func (r *IdPRegistry) ReplaceAll(profiles []*IdPProfile) error {
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	// The AUTHORITATIVE previous sources, read under the lock immediately before
+	// anything is published — not from a snapshot taken before the compile loop
+	// (round 16). After the swap below the old set is gone, so this is the last
+	// point at which "what was in service" can still be answered correctly.
+	prevSources := make(map[string]string, len(r.profiles))
+	for _, prev := range r.profiles {
+		if prev == nil || prev.ID == "" {
+			continue
+		}
+		prevSources[prev.ID] = idpRemoteDocumentSource(prev)
+	}
 	if err := r.persist(nextProfiles); err != nil {
+		// The WHOLE snapshot is rejected, so every candidate's speculative
+		// episode describes a configuration that is not in service — the same
+		// rule the two abort paths above now share.
+		discardAllCandidateEpisodesLocked()
 		return err // the previous profile set + live providers stay authoritative
 	}
 	r.profiles = nextProfiles
 	r.live = nextLive
+	// Published: only now may the served-generation evidence change (round 14).
+	idpReplacePublishedGenerations(nextProfiles, nextLive)
+
+	// Whatever this snapshot dropped, disabled, or switched to inline metadata
+	// has no remote fetch left, so its episode can never be cleared by
+	// evidence again. The inline arm mirrors Upsert's: a profile keeps its
+	// episode only while it still names a remote source to fetch from.
+	// Reached only after persist, so a rejected snapshot never gets here. A
+	// profile absent from `kept` has no remote source left in the published
+	// set, which retireEpisodeAfterCommit reads as the sweep-everything case —
+	// an absent key yields "", so the two cases need no branch here.
+	kept := make(map[string]string, len(nextProfiles))
+	for _, p := range nextProfiles {
+		if src := effectiveRemoteSource(p); src != "" {
+			kept[p.ID] = src
+		}
+	}
+	for id, prev := range prevSources {
+		retireEpisodeAfterCommit(id, prev, kept[id])
+	}
 	return nil
+}
+
+// liveRemoteSourceLocked returns the remote document source of the profile
+// CURRENTLY registered under id, or "" when no such profile is registered or it
+// fetches nothing. It answers the episode-ownership question — "is this episode
+// the candidate's, or the still-live provider's?" — and it answers it against
+// the authoritative registry rather than a snapshot, which is what round 16
+// fixed: the caller must hold r.mu (read or write), and the comparison is only
+// sound while that lock is held across BOTH the read and the forget.
+//
+// It replaced registeredProfiles(), a pre-lock map snapshot whose only two
+// consumers both drifted; there is deliberately no snapshot helper here any
+// more, so the stale reading cannot be reintroduced by a new caller.
+func (r *IdPRegistry) liveRemoteSourceLocked(id string) string {
+	for _, p := range r.profiles {
+		if p != nil && p.ID == id {
+			return idpRemoteDocumentSource(p)
+		}
+	}
+	return ""
 }
 
 // validateReservedIdPNaming rejects IdP profile IDs and names that collide with
@@ -518,7 +815,10 @@ func validateIdPProfile(p *IdPProfile) error {
 		if p.OIDC == nil {
 			return fmt.Errorf("idp: oidc config is required")
 		}
-		if err := validateExternalURL(p.OIDC.Issuer); err != nil {
+		// STRUCTURAL — see the note in validateUpsertProfile. This gate is
+		// reached by ReplaceAll (CP->DP config sync), so a resolving check
+		// here lets one unreachable IdP veto the operator's whole config push.
+		if err := validateExternalURLStructure(p.OIDC.Issuer); err != nil {
 			return fmt.Errorf("idp oidc issuer: %w", err)
 		}
 	}
@@ -849,6 +1149,45 @@ func (r *IdPRegistry) HasEnabledOIDC() bool {
 
 // validateExternalURL rejects URLs that target private/internal addresses or
 // use non-HTTPS schemes.  This prevents SSRF via admin-configured IdP URLs.
+// validateExternalURLStructure is validateExternalURL WITHOUT the DNS-backed
+// private-address check: it decides everything that can be decided from the
+// string alone (absolute, http/https, and — when the host is an IP LITERAL —
+// not a private address).
+//
+// CHAOS-71: validateExternalURL resolves the host, and a resolver that cannot
+// answer makes it fail. Used as an admission gate it therefore turns "DNS is
+// down" into "this IdP does not exist", which is precisely the outage the
+// last-known-good cache exists to survive — the gate ran before the cache
+// could be consulted, so an OIDC profile still went dark on a reboot during a
+// DNS outage and a config snapshot could still be aborted by one.
+//
+// So the two halves are separated by WHAT THEY DECIDE, not by how strict they
+// are: a CONFIGURATION error (not a URL, wrong scheme, private literal) is
+// permanent and must fail fast from the string; a RESOLUTION failure is
+// transient and must be reported as a failed fetch so the cache can answer.
+// The authoritative anti-SSRF guard for anything this appliance then dials is
+// ssrf.SafeDialContext at connect time, which is rebinding-proof and which a
+// pre-flight lookup never was.
+func validateExternalURLStructure(raw string) error {
+	if raw == "" {
+		return fmt.Errorf("URL is required")
+	}
+	u, err := url.Parse(raw)
+	if err != nil || !u.IsAbs() || (u.Scheme != "http" && u.Scheme != "https") {
+		return fmt.Errorf("URL must be an absolute http:// or https:// URL")
+	}
+	host := u.Hostname()
+	if host == "" {
+		return fmt.Errorf("URL must name a host")
+	}
+	// Only an IP LITERAL can be classified without a resolver. A name is left
+	// to the dial-time guard.
+	if ip := net.ParseIP(host); ip != nil && ssrf.PrivateIP(ip) {
+		return fmt.Errorf("URL must not point to a private address")
+	}
+	return nil
+}
+
 func validateExternalURL(raw string) error {
 	if raw == "" {
 		return fmt.Errorf("URL is required")

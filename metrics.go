@@ -1415,6 +1415,80 @@ culvert_dns_resolve_degraded %d
 		)
 	}
 
+	// CHAOS-71: interactive IdP metadata/discovery document health. Emitted
+	// ONLY on a node that has an enabled interactive IdP profile OR has
+	// actually acquired a remote document — a block of zeros on an appliance
+	// that never configured SSO is indistinguishable from one whose IdP is
+	// dead, and the documented paging rules below are all `> 0` / `== 1` (the
+	// socks5/cluster_ca/dns emission rule, applied here). Every value is a
+	// plain total or a gauge: /metrics is unauthenticated on the proxy port,
+	// so no IdP URL, issuer, profile id or error text may appear, and nothing
+	// here is a label.
+	//
+	// The signal an operator pages on is `culvert_idp_enabled_not_live > 0`:
+	// an IdP profile that is enabled and stored but cannot authenticate
+	// anybody. Before CHAOS-71 that state had no surface at all.
+	// `culvert_idp_metadata_degraded == 1` is the earlier, softer warning —
+	// authentication still works from cached documents, but an IdP-side
+	// signing-key rotation is no longer being picked up.
+	idpEnabled, idpLive := idpEnabledInteractiveCounts()
+	if im := idpMetadataState(); im.Used || idpEnabled > 0 {
+		idpDegraded := 0
+		if im.Degraded {
+			idpDegraded = 1
+		}
+		lastSuccess := int64(0)
+		if !im.LastSuccess.IsZero() {
+			lastSuccess = im.LastSuccess.Unix()
+		}
+		_, _ = fmt.Fprintf(w, `# HELP culvert_idp_enabled_not_live Enabled interactive IdP profiles with no live compiled provider; browser SSO is unavailable for them
+# TYPE culvert_idp_enabled_not_live gauge
+culvert_idp_enabled_not_live %d
+
+# HELP culvert_idp_metadata_acquisitions_total Remote IdP metadata/discovery document acquisitions attempted since startup
+# TYPE culvert_idp_metadata_acquisitions_total counter
+culvert_idp_metadata_acquisitions_total %d
+
+# HELP culvert_idp_metadata_fetch_failures_total Remote IdP metadata/discovery fetches that did not reach the IdP
+# TYPE culvert_idp_metadata_fetch_failures_total counter
+culvert_idp_metadata_fetch_failures_total %d
+
+# HELP culvert_idp_metadata_stale_served_total Compilations that proceeded from a cached last-known-good document because the IdP was unreachable
+# TYPE culvert_idp_metadata_stale_served_total counter
+culvert_idp_metadata_stale_served_total %d
+
+# HELP culvert_idp_metadata_unavailable_total Compilations that failed because the IdP was unreachable and no usable cached document existed
+# TYPE culvert_idp_metadata_unavailable_total counter
+culvert_idp_metadata_unavailable_total %d
+
+# HELP culvert_idp_metadata_cached_documents Remote IdP documents held as last-known-good on this node
+# TYPE culvert_idp_metadata_cached_documents gauge
+culvert_idp_metadata_cached_documents %d
+
+# HELP culvert_idp_metadata_last_success_timestamp_seconds Unix time of the last successful remote IdP document fetch; 0 if none since startup
+# TYPE culvert_idp_metadata_last_success_timestamp_seconds gauge
+culvert_idp_metadata_last_success_timestamp_seconds %d
+
+# HELP culvert_idp_metadata_degraded 1 while IdP metadata/discovery fetches have been failing longer than the degradation threshold; providers are running from cached documents
+# TYPE culvert_idp_metadata_degraded gauge
+culvert_idp_metadata_degraded %d
+
+# HELP culvert_idp_authz_endpoint_unverified_total OIDC authorization endpoints admitted without a public-address verdict because the address could not be determined; they are handed to browsers unverified (register row IDP-9)
+# TYPE culvert_idp_authz_endpoint_unverified_total counter
+culvert_idp_authz_endpoint_unverified_total %d
+`,
+			idpEnabled-idpLive,
+			im.RemoteAttempts,
+			im.FetchFailures,
+			im.StaleServed,
+			im.Unavailable,
+			idpMetadataStore().Len(),
+			lastSuccess,
+			idpDegraded,
+			idpAuthzEndpointUnverified.Load(),
+		)
+	}
+
 	// RISK-027: MCP Agent Security Gateway capability health. Emitted ONLY on a
 	// node that requested MCP — `culvert_mcp_gateway_up 0` on a node that never had
 	// MCP is indistinguishable from a dead listener, and the paging rule is `== 0`
