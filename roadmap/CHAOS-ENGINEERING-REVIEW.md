@@ -8746,6 +8746,59 @@ it is trying not to disturb; the honest trade is to take the extra CI cycle
 rather than hold a durable commit for it, because the container is ephemeral
 and the run is not.
 
+### Codex review round 6 — two findings, and the first one retires a heuristic three rounds had been patching
+
+**AN EPISODE IS KEYED BY (PROFILE, SOURCE).** `Upsert`/`ReplaceAll` compile a
+candidate SPECULATIVELY, before deciding whether to publish it. With one episode
+entry per PROFILE, a candidate that reused an id shared that entry with the live
+profile, and the sharp case — the fresh evidence beyond the round-3 thread — is
+the live source ALREADY FAILING when a repoint arrives: the refusal path then
+DELETED a genuine, ongoing outage episode for the source still in service,
+losing its fire-once page and restarting its degradation clock. Symmetrically, a
+candidate that stale-compiled and then failed to PERSIST left its own episode
+attached to a profile whose configuration had not changed, reporting an outage
+against an edit that was rejected. What an episode describes is a failed fetch
+against a SOURCE, so that is now the key.
+
+**Rounds 3, 5 and 6 were all ONE distinction, and it belonged in the key rather
+than in a predicate.** Round 3 added `idpEpisodeBelongsToLive` to decide whether
+a refusal may forget; round 5 found it answered wrongly for a candidate with no
+source at all; round 6 found it could not express the case where both sources
+exist and one is already failing, and that it was never consulted on the PERSIST
+path at all. The predicate is DELETED. A refusal now discards the candidate's own
+`(profile, source)` episode unless that is the source already in service — one
+comparison, on both refusal paths. *Three rounds of patching a heuristic is
+evidence the state was keyed wrongly.*
+
+**The source string must have exactly ONE derivation, and it did not.** The
+episode was recorded under the OIDC WELL-KNOWN URL — what `resolveIdPDocument`
+receives, and also the cache key — while the cleanup computed its key from the
+raw ISSUER, so the lookup named a key that never existed. This was caught by a
+round-3 gate that began failing the instant the key changed, which is the
+argument for keeping behavioural gates around old findings. `oidcWellKnownURL` is
+now the single derivation and `idpRemoteDocumentSource` returns the DOCUMENT url.
+
+> **When one layer decides what a value MEANS, every other layer must ask that
+> layer rather than re-derive the rule** — the SEC-TOTP-1 lesson, one subsystem
+> over, where a key-identity comparison that canonicalised differently from its
+> verifier was a silent security failure.
+
+**A VALIDATOR `resolveIdPDocument` MAY RUN TWICE MUST BE DETERMINISTIC AND
+FREE.** It runs on fetched bytes to decide whether to cache them, and again on
+cached bytes to decide whether they are still usable. Routing the
+side-effecting, DNS-resolving parse through it made every acquisition whose
+authorization host could not be resolved pay the authorization-host budget
+TWICE and increment `culvert_idp_authz_endpoint_unverified_total` by two — on
+boot and on every CP→DP snapshot apply, i.e. in exactly the outage the counter
+exists to report. `parseOIDCDiscoveryStructural` is the validator's half;
+`parseAndValidateOIDCDiscovery` adds the address check. That split is
+principled rather than a concession: whether a document parses and whether its
+endpoints are structurally legal are properties OF THE BYTES — deterministic,
+free, identical on every call — while whether a hostname currently resolves into
+a private range is a property of the NETWORK at one instant, which two calls may
+legitimately disagree about. A validator that may be invoked more than once per
+input must not carry either a side effect or a network dependency.
+
 ### Codex review round 5 — four findings, and three of them are one rule applied to only one of two places
 
 **COMPILING IS NOT COMMITTING.** Round 4 closed the inline-transition episode

@@ -114,6 +114,11 @@ func chaos71MetadataXML(t *testing.T, cn string) string {
 // MITM/H2 failures in a package that had passed. That is the PR3d
 // fence-pollution class, and under -shuffle it is order-dependent, so it must
 // be isolated here rather than per test.
+// chaos71Source derives a stable remote source for a profile id. Episodes are
+// keyed by (profile, SOURCE) since round 6, so repeated calls for one profile
+// must name the SAME source or they are two episodes rather than one run.
+func chaos71Source(profileID string) string { return "https://" + profileID + ".invalid/document" }
+
 func chaos71Env(t *testing.T) *idpmeta.Store {
 	t.Helper()
 	prevRegistry := idpRegistry
@@ -610,10 +615,10 @@ func TestChaos71_AlertDetailIsBoundedAndCarriesNoURL(t *testing.T) {
 	// never reach an alert Detail, because Dispatch dedups on it.
 	privateURL := "https://idp.internal.example/private-metadata-path"
 	idpMetadata.mu.Lock()
-	idpMetadataEpisodeLocked("corp").firstFailure = time.Now().Add(-2 * idpMetadataDegradedAfter)
+	idpMetadataEpisodeLocked(idpEpisodeKey("corp", chaos71Source("corp"))).firstFailure = time.Now().Add(-2 * idpMetadataDegradedAfter)
 	idpMetadata.mu.Unlock()
 	idpMetadataEverUsed.Store(true)
-	noteIdPMetadataOutcome("corp", idpMetaUnavailable, fmt.Errorf("fetch %s: connection refused", privateURL))
+	noteIdPMetadataOutcome("corp", chaos71Source("corp"), idpMetaUnavailable, fmt.Errorf("fetch %s: connection refused", privateURL))
 
 	if len(details) != 1 {
 		t.Fatalf("want exactly one page per degradation episode, got %d", len(details))
@@ -623,18 +628,18 @@ func TestChaos71_AlertDetailIsBoundedAndCarriesNoURL(t *testing.T) {
 	}
 
 	// Fire-once per episode: a second failure must not page again.
-	noteIdPMetadataOutcome("corp", idpMetaUnavailable, fmt.Errorf("again"))
+	noteIdPMetadataOutcome("corp", chaos71Source("corp"), idpMetaUnavailable, fmt.Errorf("again"))
 	if len(details) != 1 {
 		t.Fatalf("the latch must fire once per episode, got %d pages", len(details))
 	}
 
 	// Recovery is on OBSERVED evidence — a document actually fetched — and it
 	// re-arms the latch so a second incident pages again.
-	noteIdPMetadataOutcome("corp", idpMetaFresh, nil)
+	noteIdPMetadataOutcome("corp", chaos71Source("corp"), idpMetaFresh, nil)
 	idpMetadata.mu.Lock()
-	idpMetadataEpisodeLocked("corp").firstFailure = time.Now().Add(-2 * idpMetadataDegradedAfter)
+	idpMetadataEpisodeLocked(idpEpisodeKey("corp", chaos71Source("corp"))).firstFailure = time.Now().Add(-2 * idpMetadataDegradedAfter)
 	idpMetadata.mu.Unlock()
-	noteIdPMetadataOutcome("corp", idpMetaUnavailable, fmt.Errorf("second incident"))
+	noteIdPMetadataOutcome("corp", chaos71Source("corp"), idpMetaUnavailable, fmt.Errorf("second incident"))
 	if len(details) != 2 {
 		t.Fatalf("a second incident must page again, got %d pages", len(details))
 	}
@@ -646,7 +651,7 @@ func TestChaos71_AlertDetailIsBoundedAndCarriesNoURL(t *testing.T) {
 func TestChaos71_RecoveryRequiresObservedEvidence(t *testing.T) {
 	chaos71Env(t)
 	idpMetadataEverUsed.Store(true)
-	noteIdPMetadataOutcome("corp", idpMetaUnavailable, fmt.Errorf("down"))
+	noteIdPMetadataOutcome("corp", chaos71Source("corp"), idpMetaUnavailable, fmt.Errorf("down"))
 	if !idpMetadataState().Failing {
 		t.Fatal("precondition: must be failing")
 	}
@@ -654,7 +659,7 @@ func TestChaos71_RecoveryRequiresObservedEvidence(t *testing.T) {
 	if !idpMetadataState().Failing {
 		t.Fatal("elapsed time alone must NEVER clear a failing state")
 	}
-	noteIdPMetadataOutcome("corp", idpMetaFresh, nil)
+	noteIdPMetadataOutcome("corp", chaos71Source("corp"), idpMetaFresh, nil)
 	if idpMetadataState().Failing {
 		t.Fatal("an observed successful fetch must clear it")
 	}
@@ -713,20 +718,20 @@ func TestChaos71_HealthySiblingDoesNotClearAnotherProfilesEpisode(t *testing.T) 
 	fireIdPMetadataAlert = func(d string) { details = append(details, d) }
 	t.Cleanup(func() { fireIdPMetadataAlert = prev })
 
-	noteIdPMetadataOutcome("dead", idpMetaStale, fmt.Errorf("down"))
+	noteIdPMetadataOutcome("dead", chaos71Source("dead"), idpMetaStale, fmt.Errorf("down"))
 	idpMetadata.mu.Lock()
-	idpMetadataEpisodeLocked("dead").firstFailure = time.Now().Add(-2 * idpMetadataDegradedAfter)
+	idpMetadataEpisodeLocked(idpEpisodeKey("dead", chaos71Source("dead"))).firstFailure = time.Now().Add(-2 * idpMetadataDegradedAfter)
 	idpMetadata.mu.Unlock()
 
-	noteIdPMetadataOutcome("healthy", idpMetaFresh, nil)
+	noteIdPMetadataOutcome("healthy", chaos71Source("healthy"), idpMetaFresh, nil)
 	if snap := idpMetadataState(); !snap.Failing || !snap.Degraded {
 		t.Fatalf("a sibling's success must not clear the dead profile's episode: %+v", snap)
 	}
-	noteIdPMetadataOutcome("dead", idpMetaStale, fmt.Errorf("still down"))
+	noteIdPMetadataOutcome("dead", chaos71Source("dead"), idpMetaStale, fmt.Errorf("still down"))
 	if len(details) != 1 {
 		t.Fatalf("the dead profile must page once it crosses the threshold, got %d pages", len(details))
 	}
-	noteIdPMetadataOutcome("dead", idpMetaFresh, nil)
+	noteIdPMetadataOutcome("dead", chaos71Source("dead"), idpMetaFresh, nil)
 	if idpMetadataState().Failing {
 		t.Fatal("the profile's OWN success must clear its episode")
 	}
@@ -906,6 +911,109 @@ func TestChaos71_DegradationWatchdogStartIsUnconditional(t *testing.T) {
 	}
 }
 
+// ROUND 6 P2. resolveIdPDocument may run its validator TWICE — once on fetched
+// bytes to decide whether to cache them, once on cached bytes to decide whether
+// they are still usable — so a validator that resolves DNS and records a
+// counter charges both twice. Each acquisition whose authorization host cannot
+// be resolved therefore paid the authorization-host budget twice and
+// double-counted culvert_idp_authz_endpoint_unverified_total, on boot and on
+// every CP->DP snapshot apply.
+func TestChaos71_UnverifiedAuthzEndpointIsCountedOncePerAcquisition(t *testing.T) {
+	store := chaos71Env(t)
+
+	const issuer = "https://idp-round6-unreachable.invalid"
+	wellKnown := oidcWellKnownURL(issuer)
+	// The authorization endpoint is on a host that cannot be resolved, so the
+	// address check returns "unknown" and admits it unverified — the state the
+	// counter exists to make visible.
+	doc := []byte(`{"issuer":"` + issuer + `",` +
+		`"authorization_endpoint":"https://authz-round6-unresolvable.invalid/authorize",` +
+		`"token_endpoint":"` + issuer + `/token"}`)
+	if err := store.Put("round6", idpmeta.KindOIDCDiscovery, wellKnown, doc); err != nil {
+		t.Fatalf("seed last-known-good: %v", err)
+	}
+
+	before := idpAuthzEndpointUnverified.Load()
+	// The fetch fails (unreachable issuer), so this takes the stale path, which
+	// is the one that runs the validator on the CACHED bytes as well.
+	if _, err := compileIdPProfile(&IdPProfile{
+		ID: "round6", Name: "round6", Type: IdPTypeOIDC, Enabled: true,
+		OIDC: &OIDCProfileConfig{Issuer: issuer, ClientID: "c", ClientSecret: "s"},
+	}); err != nil {
+		t.Fatalf("precondition: the cached document must compile: %v", err)
+	}
+	if got := idpAuthzEndpointUnverified.Load() - before; got != 1 {
+		t.Fatalf("culvert_idp_authz_endpoint_unverified_total moved by %d for ONE acquisition, want 1 — "+
+			"the side-effecting, DNS-resolving parser is being run more than once per document, "+
+			"so the counter over-reports and each acquisition pays the authorization-host "+
+			"budget repeatedly", got)
+	}
+}
+
+// ROUND 6 P2. An episode describes a failed fetch against a SOURCE, so it is
+// keyed by (profile, source). Keyed by profile alone, a speculative compile of
+// a candidate that REUSES an id shared one entry with the live profile, and the
+// fresh evidence beyond the round-3 thread is the case where the live source is
+// ALREADY FAILING when the repoint arrives: the refusal path then deleted a
+// genuine, ongoing outage episode for the source still in service, losing its
+// fire-once alert latch and restarting its degradation clock.
+func TestChaos71_RefusedRepointPreservesTheLiveSourcesEpisode(t *testing.T) {
+	store := chaos71Env(t)
+	idpMetadataEverUsed.Store(true)
+
+	const liveIssuer = "https://idp-live-already-failing.invalid"
+	live := &IdPProfile{
+		ID: "shared", Name: "shared", Type: IdPTypeOIDC, Enabled: true,
+		OIDC: &OIDCProfileConfig{Issuer: liveIssuer, ClientID: "c", ClientSecret: "s"},
+	}
+	liveSource := idpRemoteDocumentSource(live)
+	// Cached so the live profile compiles and stays authoritative.
+	if err := store.Put("shared", idpmeta.KindOIDCDiscovery, liveSource, []byte(
+		`{"issuer":"`+liveIssuer+`","authorization_endpoint":"`+liveIssuer+`/a",`+
+			`"token_endpoint":"`+liveIssuer+`/t"}`)); err != nil {
+		t.Fatalf("seed last-known-good: %v", err)
+	}
+	reg := &IdPRegistry{live: make(map[string]IdentityProvider)}
+	if err := reg.ReplaceAll([]*IdPProfile{live}); err != nil {
+		t.Fatalf("precondition: the live profile must register: %v", err)
+	}
+	// It is serving from cache, so it ALREADY has an open episode. Clear the
+	// alert latch state by re-recording, then age it to just under threshold.
+	noteIdPMetadataOutcome("shared", liveSource, idpMetaStale, fmt.Errorf("origin down"))
+	if !idpMetadataState().Failing {
+		t.Fatal("precondition: the live source must be failing")
+	}
+	firstFailure := idpMetadataState().FailingFor
+
+	// The admin repoints the SAME id at a DIFFERENT unreachable source, with
+	// nothing cached for it, so the candidate is refused.
+	if err := reg.Upsert(&IdPProfile{
+		ID: "shared", Name: "shared", Type: IdPTypeOIDC, Enabled: true,
+		OIDC: &OIDCProfileConfig{
+			Issuer: "https://idp-candidate-unreachable.invalid", ClientID: "c", ClientSecret: "s",
+		},
+	}); err == nil {
+		t.Fatal("precondition: an unreachable issuer with nothing cached must be refused")
+	}
+
+	if !idpMetadataState().Failing {
+		t.Fatal("the REFUSED repoint deleted the live source's genuine outage episode: " +
+			"its degradation clock is restarted and its fire-once page is lost, while the " +
+			"profile is still live on that same failing source")
+	}
+	if got := idpMetadataState().FailingFor; got < firstFailure {
+		t.Fatalf("the live episode's clock was restarted (FailingFor %s < %s)", got, firstFailure)
+	}
+	// And the candidate must not have left an episode of its own behind.
+	idpMetadata.mu.Lock()
+	n := len(idpMetadata.episodes)
+	idpMetadata.mu.Unlock()
+	if n != 1 {
+		t.Fatalf("want exactly the live source's episode, got %d — a refused candidate "+
+			"left an episode describing a configuration that is not in service", n)
+	}
+}
+
 // ROUND 5 P2. An inline transition IS the resolution of a remote-fetch episode
 // — with no remote fetch left nothing else can ever clear it — but COMPILING is
 // not COMMITTING. The first shape cleared the episode inside compileIdPProfile,
@@ -937,7 +1045,7 @@ func TestChaos71_InlineSwitchClearsTheEpisodeOnlyOnCommit(t *testing.T) {
 		if err := reg.ReplaceAll([]*IdPProfile{remote}); err != nil {
 			t.Fatalf("precondition: the remote profile must register: %v", err)
 		}
-		noteIdPMetadataOutcome("switching", idpMetaUnavailable, fmt.Errorf("down"))
+		noteIdPMetadataOutcome("switching", chaos71Source("switching"), idpMetaUnavailable, fmt.Errorf("down"))
 		if !idpMetadataState().Failing {
 			t.Fatal("precondition: the profile must have an open episode")
 		}
@@ -985,7 +1093,7 @@ func TestChaos71_InlineSwitchClearsTheEpisodeOnlyOnCommit(t *testing.T) {
 	// It must clear ONLY that profile's episode.
 	t.Run("it does not clear another profile's episode", func(t *testing.T) {
 		reg := arrange(t)
-		noteIdPMetadataOutcome("other", idpMetaUnavailable, fmt.Errorf("down"))
+		noteIdPMetadataOutcome("other", chaos71Source("other"), idpMetaUnavailable, fmt.Errorf("down"))
 		if err := reg.Upsert(&IdPProfile{
 			ID: "switching", Name: "switching", Type: IdPTypeSAML, Enabled: true,
 			SAML: &SAMLProfileConfig{MetadataXML: chaos71MetadataXML(t, "round5-inline")},
@@ -1226,16 +1334,20 @@ func TestChaos71_RejectedCandidateLeavesNoEpisode(t *testing.T) {
 	chaos71Env(t)
 	idpMetadataEverUsed.Store(true)
 
-	noteIdPMetadataOutcome("ghost", idpMetaUnavailable, fmt.Errorf("down"))
-	if !idpMetadataState().Failing {
-		t.Fatal("precondition: the candidate must have an open episode")
-	}
-
 	reg := &IdPRegistry{live: make(map[string]IdentityProvider)}
 	// An enabled profile whose issuer cannot be compiled: never registered.
 	bad := &IdPProfile{
 		ID: "ghost", Name: "ghost", Type: IdPTypeOIDC, Enabled: true,
 		OIDC: &OIDCProfileConfig{Issuer: "ftp://nope", ClientID: "c", ClientSecret: "s"},
+	}
+	// Seed the episode against the CANDIDATE'S OWN source, derived from the
+	// profile by the production function rather than spelled out here — an
+	// episode recorded against some other source is not the one a refusal of
+	// THIS candidate is responsible for, and hard-coding the string would let
+	// the test drift from how the compile path names it.
+	noteIdPMetadataOutcome("ghost", idpRemoteDocumentSource(bad), idpMetaUnavailable, fmt.Errorf("down"))
+	if !idpMetadataState().Failing {
+		t.Fatal("precondition: the candidate must have an open episode")
 	}
 	if err := reg.ReplaceAll([]*IdPProfile{bad}); err == nil {
 		t.Fatal("precondition: this snapshot must be rejected")
@@ -1268,7 +1380,7 @@ func TestChaos71_RejectedEditKeepsTheLiveProfilesEpisode(t *testing.T) {
 		live:     make(map[string]IdentityProvider),
 		profiles: []*IdPProfile{{ID: "live-one", Name: "live-one", Type: IdPTypeOIDC}},
 	}
-	noteIdPMetadataOutcome("live-one", idpMetaUnavailable, fmt.Errorf("down"))
+	noteIdPMetadataOutcome("live-one", chaos71Source("live-one"), idpMetaUnavailable, fmt.Errorf("down"))
 	if !idpMetadataState().Failing {
 		t.Fatal("precondition: the registered profile must have an open episode")
 	}
@@ -1480,7 +1592,7 @@ func TestChaos71_DisableClearsTheEpisodeOnlyAfterPersistSucceeds(t *testing.T) {
 			},
 		}},
 	}
-	noteIdPMetadataOutcome("going-dark", idpMetaUnavailable, fmt.Errorf("down"))
+	noteIdPMetadataOutcome("going-dark", chaos71Source("going-dark"), idpMetaUnavailable, fmt.Errorf("down"))
 	if !idpMetadataState().Failing {
 		t.Fatal("precondition: the live profile must have an open episode")
 	}
@@ -1516,7 +1628,7 @@ func TestChaos71_PersistedDisableClearsTheEpisode(t *testing.T) {
 			},
 		}},
 	}
-	noteIdPMetadataOutcome("going-dark", idpMetaUnavailable, fmt.Errorf("down"))
+	noteIdPMetadataOutcome("going-dark", chaos71Source("going-dark"), idpMetaUnavailable, fmt.Errorf("down"))
 
 	disabled := &IdPProfile{
 		ID: "going-dark", Name: "going-dark", Type: IdPTypeOIDC, Enabled: false,
@@ -1587,7 +1699,7 @@ func TestChaos71_DegradationAlertFiresWithoutAFurtherFetch(t *testing.T) {
 	idpMetadataEverUsed.Store(true)
 
 	// ONE failure, then nothing ever compiles this profile again.
-	noteIdPMetadataOutcome("cache-serving", idpMetaStale, fmt.Errorf("HTTP 503"))
+	noteIdPMetadataOutcome("cache-serving", chaos71Source("cache-serving"), idpMetaStale, fmt.Errorf("HTTP 503"))
 
 	// Before the threshold: no page.
 	if fired := idpMetadataDegradationSweep(time.Now()); len(fired) != 0 {
@@ -1617,8 +1729,8 @@ func TestChaos71_DegradationSweepDoesNotPageARecoveredProfile(t *testing.T) {
 	chaos71Env(t)
 	idpMetadataEverUsed.Store(true)
 
-	noteIdPMetadataOutcome("recovers", idpMetaStale, fmt.Errorf("HTTP 503"))
-	noteIdPMetadataOutcome("recovers", idpMetaFresh, nil) // observed evidence
+	noteIdPMetadataOutcome("recovers", chaos71Source("recovers"), idpMetaStale, fmt.Errorf("HTTP 503"))
+	noteIdPMetadataOutcome("recovers", chaos71Source("recovers"), idpMetaFresh, nil) // observed evidence
 
 	if fired := idpMetadataDegradationSweep(time.Now().Add(10 * idpMetadataDegradedAfter)); len(fired) != 0 {
 		t.Fatalf("a recovered profile must never be paged, got %d alert(s)", len(fired))
@@ -1644,7 +1756,7 @@ func TestChaos71_DegradationSweepNeverClearsAnEpisode(t *testing.T) {
 	chaos71Env(t)
 	idpMetadataEverUsed.Store(true)
 
-	noteIdPMetadataOutcome("still-down", idpMetaUnavailable, fmt.Errorf("down"))
+	noteIdPMetadataOutcome("still-down", chaos71Source("still-down"), idpMetaUnavailable, fmt.Errorf("down"))
 	_ = idpMetadataDegradationSweep(time.Now().Add(idpMetadataDegradedAfter + time.Minute))
 
 	if !idpMetadataState().Failing {

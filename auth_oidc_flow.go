@@ -55,6 +55,23 @@ type oidcDiscoveryDoc struct {
 	JWKsURI               string `json:"jwks_uri"`
 }
 
+// oidcWellKnownURL is the ONE derivation of an issuer's discovery-document URL.
+//
+// It is a function rather than two inline concatenations because that string is
+// not only fetched: it is the cache key the last-known-good store is written
+// under AND the source a metadata failure episode is keyed by. Deriving it in
+// more than one place is how those three stopped agreeing — the episode key was
+// computed from the raw ISSUER while the episode itself was recorded under the
+// well-known URL, so a refused edit's cleanup looked up a key that never
+// existed (Codex review round 6). When one layer decides what a value MEANS,
+// every other layer must ask that layer rather than re-derive the rule.
+func oidcWellKnownURL(issuer string) string {
+	if issuer == "" {
+		return ""
+	}
+	return issuer + "/.well-known/openid-configuration"
+}
+
 // fetchOIDCDiscoveryOverNetwork performs exactly the request the
 // pre-CHAOS-71 code performed: same 10 s budget, same SSRF-safe dialer, same
 // 64 KiB read limit, same HTTP-status rule. Split out only so
@@ -121,7 +138,7 @@ func fetchOIDCDiscoveryOverNetwork(wellKnown string) ([]byte, error) {
 func fetchOIDCDiscovery(profileID, issuer string) (*oidcDiscoveryDoc, error) {
 	// Normalise: strip trailing slash.
 	issuer = strings.TrimRight(issuer, "/")
-	wellKnown := issuer + "/.well-known/openid-configuration"
+	wellKnown := oidcWellKnownURL(issuer)
 
 	// CONFIGURATION errors fail fast and are never answered from cache; a
 	// RESOLUTION failure is not one. validateExternalURL resolves the host, so
@@ -144,7 +161,9 @@ func fetchOIDCDiscovery(profileID, issuer string) (*oidcDiscoveryDoc, error) {
 	// endpoint the network path would have accepted on structure.
 	fetched, fetchErr := fetchOIDCDiscoveryOverNetwork(wellKnown)
 	raw, err := resolveIdPDocument(profileID, idpmeta.KindOIDCDiscovery, wellKnown, fetched, fetchErr, func(b []byte) error {
-		_, vErr := parseAndValidateOIDCDiscovery(profileID, b)
+		// Structural only: see parseAndValidateOIDCDiscovery. The address
+		// check runs ONCE, on the authoritative parse below.
+		_, vErr := parseOIDCDiscoveryStructural(b)
 		return vErr
 	})
 	if err != nil {
@@ -175,7 +194,7 @@ func fetchOIDCDiscovery(profileID, issuer string) (*oidcDiscoveryDoc, error) {
 // re-checked the address and it does not; dropping the resolving validator
 // here therefore opened a path for a discovery document — or an edited cache
 // file — to redirect a browser at an internal address. It gets its own guard.
-func parseAndValidateOIDCDiscovery(profileID string, raw []byte) (*oidcDiscoveryDoc, error) {
+func parseOIDCDiscoveryStructural(raw []byte) (*oidcDiscoveryDoc, error) {
 	var doc oidcDiscoveryDoc
 	if err := json.NewDecoder(io.LimitReader(bytes.NewReader(raw), 64<<10)).Decode(&doc); err != nil {
 		return nil, fmt.Errorf("oidc discovery parse: %w", err)
@@ -199,6 +218,34 @@ func parseAndValidateOIDCDiscovery(profileID string, raw []byte) (*oidcDiscovery
 			return nil, fmt.Errorf("oidc discovery endpoint %q: %w", u, err)
 		}
 	}
+	return &doc, nil
+}
+
+// parseAndValidateOIDCDiscovery is parseOIDCDiscoveryStructural plus the ONE
+// check that is not a property of the document bytes at all: the
+// browser-redirect target's ADDRESS.
+//
+// The split exists because `resolveIdPDocument` takes a validator it may run
+// TWICE — once on freshly fetched bytes to decide whether to cache them, once
+// on the cached bytes to decide whether they are still usable — and this half
+// resolves DNS and records a counter. Running it from there made every
+// acquisition whose authorization host could not be resolved pay the
+// authorization-host budget twice and increment
+// culvert_idp_authz_endpoint_unverified_total by two, delaying boot and every
+// CP->DP snapshot apply by a lookup that decides nothing (Codex review round 6).
+//
+// It is also the principled split, not a concession: whether a document parses
+// and whether its endpoints are structurally legal are properties OF THE BYTES,
+// deterministic and free; whether a hostname currently resolves into a private
+// range is a property of the NETWORK at this instant, which two calls can
+// legitimately disagree about. The validator gets the deterministic half; the
+// authoritative parse — the one whose verdict decides whether a provider goes
+// live — gets both.
+func parseAndValidateOIDCDiscovery(profileID string, raw []byte) (*oidcDiscoveryDoc, error) {
+	doc, err := parseOIDCDiscoveryStructural(raw)
+	if err != nil {
+		return nil, err
+	}
 	// The browser-redirect target gets the address check the dialer would have
 	// given it if we dialled it. Refused ONLY on a DEFINITE private verdict:
 	// ssrf.PrivateHostContext has three outcomes and a resolution FAILURE is
@@ -209,7 +256,7 @@ func parseAndValidateOIDCDiscovery(profileID string, raw []byte) (*oidcDiscovery
 	if err := refuseDefinitelyPrivateRedirect(profileID, doc.AuthorizationEndpoint); err != nil {
 		return nil, err
 	}
-	return &doc, nil
+	return doc, nil
 }
 
 // oidcRedirectHostCheckBudget bounds the one address lookup the authorization
@@ -280,7 +327,7 @@ func refuseDefinitelyPrivateRedirect(profileID, raw string) error {
 //     endpoint pre-seed documents for profiles that do not exist yet.
 func probeOIDCDiscovery(issuer string) (*oidcDiscoveryDoc, error) {
 	issuer = strings.TrimRight(issuer, "/")
-	wellKnown := issuer + "/.well-known/openid-configuration"
+	wellKnown := oidcWellKnownURL(issuer)
 	if err := validateExternalURL(wellKnown); err != nil {
 		return nil, fmt.Errorf("oidc discovery: %w", err)
 	}

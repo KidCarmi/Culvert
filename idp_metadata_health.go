@@ -80,6 +80,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -144,14 +145,30 @@ type idpMetadataHealth struct {
 	lastReason  idpMetadataOutcome
 	lastSuccess time.Time
 
-	// episodes holds the CURRENT failure episode of each profile that is
-	// failing, keyed by profile id. Episode state is PER PROFILE on purpose:
+	// episodes holds the CURRENT failure episode of each (profile, SOURCE)
+	// that is failing — see idpEpisodeKey. Episode state is PER PROFILE on
+	// purpose:
 	// with it process-global, a successful fetch for one healthy profile
 	// cleared the episode another, dead profile had opened — so on a node with
 	// two remote IdPs the dead one never reached the degradation threshold,
 	// never paged, and repeated compiles emitted false recovery lines (Codex
 	// review). Only a success for the SAME profile clears its episode.
-	// Bounded by the admin-configured profile count.
+	//
+	// It is keyed by profile AND SOURCE, not by profile alone, and that is a
+	// CORRECTNESS requirement rather than precision for its own sake (Codex
+	// review round 6). An `Upsert` that reuses a profile id while repointing it
+	// at a different remote source compiles the CANDIDATE speculatively, and
+	// with one entry per profile that compile mutated the LIVE profile's
+	// episode: a candidate that then failed made the refusal path delete a
+	// genuine, ongoing outage episode for the source still in service — losing
+	// its fire-once latch and restarting its degradation clock — while a
+	// candidate that stale-compiled and then failed to PERSIST left its own
+	// episode attached to a profile whose configuration had not changed,
+	// reporting an outage for a rejected edit. What an episode describes is a
+	// failed fetch against a SOURCE, which is what the key now says.
+	//
+	// Bounded by (profiles x sources they have been pointed at while failing),
+	// i.e. by the admin-configured profile count in the steady state.
 	episodes map[string]*idpMetadataEpisode
 }
 
@@ -248,6 +265,33 @@ var fireIdPMetadataAlert = func(detail string) {
 // evidence that the dependency is GONE — and "this profile is not in the
 // registry" is exactly that evidence. It clears one profile's episode and
 // counts nothing.
+// forgetIdPMetadataEpisodeForSource drops the episode a REFUSED candidate's own
+// speculative compile opened, and nothing else.
+//
+// It exists because `Upsert`/`ReplaceAll` compile a candidate BEFORE deciding
+// whether to publish it, so a refused edit can leave behind an episode for a
+// source no live profile uses — an outage reported against a configuration that
+// was rejected. The caller must NOT call this when the candidate's source is
+// the one already in service: those are the same key by construction, and the
+// episode then belongs to the live profile's ongoing outage (Codex review
+// rounds 3, 5 and 6 are all this one distinction, which is why it is now
+// carried by the KEY rather than by a predicate over two profiles).
+func forgetIdPMetadataEpisodeForSource(profileID, source string) {
+	if profileID == "" || source == "" {
+		return
+	}
+	key := idpEpisodeKey(profileID, source)
+	idpMetadata.mu.Lock()
+	_, had := idpMetadata.episodes[key]
+	delete(idpMetadata.episodes, key)
+	idpMetadata.mu.Unlock()
+	if had {
+		logger.Printf("IDP_METADATA_EPISODE_DISCARDED idp=%q — the edit that opened this remote-fetch "+
+			"failure episode was refused, so it describes a configuration that is not in service",
+			sanitizeLog(profileID))
+	}
+}
+
 // idpAuthzEndpointUnverified counts OIDC authorization endpoints admitted
 // WITHOUT a public-address verdict, because the address could not be
 // determined (resolver outage, or the check's own budget spent).
@@ -293,13 +337,23 @@ func noteIdPAuthzEndpointUnverified(profileID string) {
 		"unverified (%d since boot). Check this node's resolver.", sanitizeLog(profileID), n)
 }
 
+// forgetIdPMetadataEpisode drops EVERY episode this profile holds, across all
+// sources. It is the "this profile no longer fetches anything" case — stored
+// disabled, switched to inline metadata, or removed from the registry — where
+// nothing is left that could ever clear an episode by evidence.
 func forgetIdPMetadataEpisode(profileID string) {
 	if profileID == "" {
 		return
 	}
+	prefix := idpEpisodeProfilePrefix(profileID)
 	idpMetadata.mu.Lock()
-	_, had := idpMetadata.episodes[profileID]
-	delete(idpMetadata.episodes, profileID)
+	had := false
+	for k := range idpMetadata.episodes {
+		if strings.HasPrefix(k, prefix) {
+			delete(idpMetadata.episodes, k)
+			had = true
+		}
+	}
 	idpMetadata.mu.Unlock()
 	if had {
 		logger.Printf("IDP_METADATA_RECOVERED idp=%q (profile is no longer an enabled remote-metadata provider; its failure episode no longer applies)",
@@ -307,7 +361,7 @@ func forgetIdPMetadataEpisode(profileID string) {
 	}
 }
 
-func noteIdPMetadataOutcome(profileID string, outcome idpMetadataOutcome, cause error) {
+func noteIdPMetadataOutcome(profileID, source string, outcome idpMetadataOutcome, cause error) {
 	idpMetadataEverUsed.Store(true)
 
 	now := time.Now()
@@ -318,13 +372,15 @@ func noteIdPMetadataOutcome(profileID string, outcome idpMetadataOutcome, cause 
 	switch outcome {
 	case idpMetaFresh:
 		// Recovery on OBSERVED evidence: a document actually came back — for
-		// THIS profile. Another profile's success says nothing about it.
-		ep := idpMetadata.episodes[profileID]
+		// THIS profile AND THIS SOURCE. Another profile's success says nothing
+		// about it, and neither does a success against a different source.
+		key := idpEpisodeKey(profileID, source)
+		ep := idpMetadata.episodes[key]
 		wasFailing := ep != nil
 		var suppressed int64
 		if ep != nil {
 			suppressed = ep.suppressed
-			delete(idpMetadata.episodes, profileID)
+			delete(idpMetadata.episodes, key)
 		}
 		idpMetadata.lastSuccess = now
 		idpMetadata.mu.Unlock()
@@ -339,7 +395,7 @@ func noteIdPMetadataOutcome(profileID string, outcome idpMetadataOutcome, cause 
 		idpMetadata.unavailable++
 	}
 	idpMetadata.fetchFailures++
-	ep := idpMetadataEpisodeLocked(profileID)
+	ep := idpMetadataEpisodeLocked(idpEpisodeKey(profileID, source))
 	ep.consecutive++
 	ep.lastFailure = now
 	ep.lastOutcome = outcome
@@ -379,14 +435,29 @@ func noteIdPMetadataOutcome(profileID string, outcome idpMetadataOutcome, cause 
 
 // idpMetadataEpisodeLocked returns profileID's current failure episode,
 // opening one if the profile is not failing. Caller holds idpMetadata.mu.
-func idpMetadataEpisodeLocked(profileID string) *idpMetadataEpisode {
+// idpEpisodeKey identifies one profile's failure episode against ONE remote
+// source. It is LENGTH-FRAMED so it is injective: unframed, a (profile, source)
+// pair could collide with a different pair that concatenates to the same bytes,
+// and a collision here merges two profiles' outage state — the failure mode
+// per-profile keying was introduced to fix. The framing also makes
+// idpEpisodeProfilePrefix a safe prefix.
+func idpEpisodeKey(profileID, source string) string {
+	return fmt.Sprintf("%d:%s:%s", len(profileID), profileID, source)
+}
+
+// idpEpisodeProfilePrefix is the prefix every key for this profile shares.
+func idpEpisodeProfilePrefix(profileID string) string {
+	return fmt.Sprintf("%d:%s:", len(profileID), profileID)
+}
+
+func idpMetadataEpisodeLocked(key string) *idpMetadataEpisode {
 	if idpMetadata.episodes == nil {
 		idpMetadata.episodes = make(map[string]*idpMetadataEpisode)
 	}
-	ep := idpMetadata.episodes[profileID]
+	ep := idpMetadata.episodes[key]
 	if ep == nil {
 		ep = &idpMetadataEpisode{}
-		idpMetadata.episodes[profileID] = ep
+		idpMetadata.episodes[key] = ep
 	}
 	return ep
 }

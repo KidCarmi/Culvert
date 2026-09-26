@@ -348,15 +348,26 @@ func (r *IdPRegistry) Upsert(p *IdPProfile) error {
 			break
 		}
 	}
-	episodeSurvivesRefusal := idpEpisodeBelongsToLive(liveProfile, p)
+	// A refused edit must leave behind no episode of its OWN, and must never
+	// touch the live profile's. Since CHAOS-71 round 6 those are DISTINCT KEYS
+	// unless the candidate points at the source already in service, so this is
+	// one comparison rather than a predicate over two profiles — and the
+	// persist path needs it too, not just the compile path: a candidate that
+	// stale-compiles and then fails to persist would otherwise leave an outage
+	// reported against a configuration that was rejected.
+	liveSource := idpRemoteDocumentSource(liveProfile)
+	candidateSource := idpRemoteDocumentSource(p)
+	discardCandidateEpisode := func() {
+		if candidateSource != liveSource {
+			forgetIdPMetadataEpisodeForSource(p.ID, candidateSource)
+		}
+	}
 
 	var compiled IdentityProvider
 	if p.Enabled {
 		prov, err := compileIdPProfile(p)
 		if err != nil {
-			if !episodeSurvivesRefusal {
-				forgetIdPMetadataEpisode(p.ID)
-			}
+			discardCandidateEpisode()
 			return fmt.Errorf("idp compile error: %w", err)
 		}
 		compiled = prov
@@ -388,6 +399,7 @@ func (r *IdPRegistry) Upsert(p *IdPProfile) error {
 	}
 
 	if err := r.persist(nextProfiles); err != nil {
+		discardCandidateEpisode()
 		return err // old profiles + old live providers stay authoritative
 	}
 	r.profiles, r.live = nextProfiles, nextLive
@@ -410,7 +422,7 @@ func (r *IdPRegistry) Upsert(p *IdPProfile) error {
 }
 
 // idpRemoteDocumentSource reports the REMOTE document source a profile depends
-// on — the OIDC issuer or the SAML metadata URL — and "" for a profile that
+// on — the OIDC discovery URL or the SAML metadata URL — and "" for a profile that
 // fetches nothing (inline SAML metadata, LDAP, a disabled/unset config).
 //
 // It exists because a metadata failure episode is keyed by profile ID alone,
@@ -426,7 +438,12 @@ func idpRemoteDocumentSource(p *IdPProfile) string {
 	switch p.Type {
 	case IdPTypeOIDC:
 		if p.OIDC != nil {
-			return p.OIDC.Issuer
+			// The DOCUMENT URL, not the raw issuer: this string must be the
+			// exact one resolveIdPDocument is given, because it is both the
+			// cache key and the failure-episode key. Returning the issuer here
+			// made the episode-cleanup path compute a key the recorder never
+			// used (Codex review round 6).
+			return oidcWellKnownURL(p.OIDC.Issuer)
 		}
 	case IdPTypeSAML:
 		if p.SAML != nil {
@@ -434,30 +451,6 @@ func idpRemoteDocumentSource(p *IdPProfile) string {
 		}
 	}
 	return ""
-}
-
-// idpEpisodeBelongsToLive reports whether a failure episode left behind by
-// compiling `candidate` describes the profile that REMAINS authoritative.
-// It does only when that profile fetches from the SAME non-empty remote source.
-func idpEpisodeBelongsToLive(live, candidate *IdPProfile) bool {
-	liveSrc := idpRemoteDocumentSource(live)
-	if liveSrc == "" {
-		// Nothing live fetches from anywhere, so there is no episode of the
-		// live profile's to preserve.
-		return false
-	}
-	candSrc := idpRemoteDocumentSource(candidate)
-	if candSrc == "" {
-		// The candidate fetches NOTHING — an inline-metadata or credential-only
-		// edit — so it cannot have opened an episode, and the open one is the
-		// live profile's. Round 3 compared the two sources for equality, which
-		// answers this case FALSE and made a refused inline edit erase a live
-		// remote profile's genuine outage episode (Codex review round 5).
-		// Ownership is about which profile performed the FETCH, not about the
-		// two sources matching.
-		return true
-	}
-	return liveSrc == candSrc
 }
 
 func validateSAMLProfileConfig(cfg *SAMLProfileConfig) error {
@@ -576,7 +569,7 @@ func (r *IdPRegistry) ReplaceAll(profiles []*IdPProfile) error {
 	// A snapshot that reuses an id and repoints it at a different unreachable
 	// source leaves an episode belonging to the CANDIDATE, so the still-live
 	// profile must not inherit it (Codex review round 3).
-	forgetUnowned := func(candidate *IdPProfile) {
+	discardCandidateEpisode := func(candidate *IdPProfile) {
 		// A nil entry in the snapshot is rejected by validateIdPProfile, which
 		// handles nil correctly — but it reaches here on that error path, and a
 		// nil candidate has no id and therefore owns no episode. Dereferencing
@@ -586,15 +579,16 @@ func (r *IdPRegistry) ReplaceAll(profiles []*IdPProfile) error {
 		if candidate == nil {
 			return
 		}
-		if !idpEpisodeBelongsToLive(registered[candidate.ID], candidate) {
-			forgetIdPMetadataEpisode(candidate.ID)
+		source := idpRemoteDocumentSource(candidate)
+		if source != idpRemoteDocumentSource(registered[candidate.ID]) {
+			forgetIdPMetadataEpisodeForSource(candidate.ID, source)
 		}
 	}
 
 	for _, p := range nextProfiles {
 		normalizeIdPProfileWriteInput(p)
 		if err := validateIdPProfile(p); err != nil {
-			forgetUnowned(p)
+			discardCandidateEpisode(p)
 			return err
 		}
 		if !p.Enabled {
@@ -602,7 +596,7 @@ func (r *IdPRegistry) ReplaceAll(profiles []*IdPProfile) error {
 		}
 		prov, err := compileIdPProfile(p)
 		if err != nil {
-			forgetUnowned(p)
+			discardCandidateEpisode(p)
 			return fmt.Errorf("idp %q compile error: %w", p.ID, err)
 		}
 		nextLive[p.ID] = prov
@@ -611,6 +605,11 @@ func (r *IdPRegistry) ReplaceAll(profiles []*IdPProfile) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if err := r.persist(nextProfiles); err != nil {
+		// The WHOLE snapshot is rejected, so every candidate's speculative
+		// episode describes a configuration that is not in service.
+		for _, cand := range nextProfiles {
+			discardCandidateEpisode(cand)
+		}
 		return err // the previous profile set + live providers stay authoritative
 	}
 	r.profiles = nextProfiles

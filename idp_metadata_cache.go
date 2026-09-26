@@ -132,7 +132,7 @@ func resolveIdPDocument(profileID string, kind idpmeta.Kind, source string, doc 
 			logger.Printf("IdP[%s]: metadata cached document could not be persisted (%v); a future IdP outage will have no fallback on this node",
 				sanitizeLog(profileID), putErr)
 		}
-		noteIdPMetadataOutcome(profileID, idpMetaFresh, nil)
+		noteIdPMetadataOutcome(profileID, source, idpMetaFresh, nil)
 		return doc, nil
 	}
 	if fetchErr == nil {
@@ -141,7 +141,7 @@ func resolveIdPDocument(profileID string, kind idpmeta.Kind, source string, doc 
 
 	cached, age, cacheErr := store.Get(profileID, kind, source)
 	if cacheErr != nil {
-		noteIdPMetadataOutcome(profileID, idpMetaUnavailable, fetchErr)
+		noteIdPMetadataOutcome(profileID, source, idpMetaUnavailable, fetchErr)
 		return nil, fetchErr
 	}
 	// The CACHED bytes go through the caller's validator too, BEFORE this is
@@ -156,13 +156,13 @@ func resolveIdPDocument(profileID string, kind idpmeta.Kind, source string, doc 
 	// verdict as having nothing cached at all.
 	if validate != nil {
 		if vErr := validate(cached); vErr != nil {
-			noteIdPMetadataOutcome(profileID, idpMetaUnavailable, fetchErr)
+			noteIdPMetadataOutcome(profileID, source, idpMetaUnavailable, fetchErr)
 			logger.Printf("IdP[%s]: metadata fetch failed (%v) AND the cached document fetched %s ago is no longer usable (%v) — this profile cannot be compiled",
 				sanitizeLog(profileID), sanitizeLog(fmt.Sprint(fetchErr)), age.Round(time.Second), sanitizeLog(fmt.Sprint(vErr)))
 			return nil, fetchErr
 		}
 	}
-	noteIdPMetadataOutcome(profileID, idpMetaStale, fetchErr)
+	noteIdPMetadataOutcome(profileID, source, idpMetaStale, fetchErr)
 	logger.Printf("IdP[%s]: metadata fetch failed (%v) — continuing from the cached document fetched %s ago (refused past %s)",
 		sanitizeLog(profileID), sanitizeLog(fmt.Sprint(fetchErr)), age.Round(time.Second), idpmetaStaleMaxAgeString())
 	return cached, nil
