@@ -355,41 +355,38 @@ type c16Calls struct {
 }
 
 // c16IsDominatingGuard reports whether a top-level branch statement is an
-// UNCONDITIONAL requireRole guard — `if !requireRole(...) { ... }`, a bare
-// call, or an assignment from one — and returns its role. A guard behind a
-// compound condition is conditional, and so is not dominating.
+// UNCONDITIONAL, TERMINATING requireRole guard and returns its role. Only the
+// shape `if !requireRole(...) [|| more] { ...; return }` qualifies:
+// requireRole writes a 403 and returns false but does NOT abort its caller, so
+// a bare `requireRole(...)` statement or `ok := requireRole(...)` lets the
+// following delegate run anyway, and treating either as dominating would let
+// an unguarded delegate pass the gate (Codex review, PR #1420). The leftmost
+// operand of a || chain is always evaluated and a false requireRole makes the
+// whole condition true, so the return is reached; an && chain is NOT a guard
+// (`!requireRole(...) && x` skips the return when x is false), nor is a guard
+// with an else branch or an Init statement, nor a body that does not end in a
+// return.
 func c16IsDominatingGuard(st ast.Stmt) UIRole {
-	var e ast.Expr
-	switch s := st.(type) {
-	case *ast.IfStmt:
-		if s.Init != nil {
-			return ""
-		}
-		e = s.Cond
-		// The LEFTMOST operand of a && / || chain is always evaluated, so
-		// `if !requireRole(...) || !other(w) { return }` is still an
-		// unconditional guard.
-		for {
-			b, ok := e.(*ast.BinaryExpr)
-			if !ok || (b.Op != token.LOR && b.Op != token.LAND) {
-				break
-			}
-			e = b.X
-		}
-		if u, ok := e.(*ast.UnaryExpr); ok && u.Op == token.NOT {
-			e = u.X
-		}
-	case *ast.ExprStmt:
-		e = s.X
-	case *ast.AssignStmt:
-		if len(s.Rhs) != 1 {
-			return ""
-		}
-		e = s.Rhs[0]
-	default:
+	s, ok := st.(*ast.IfStmt)
+	if !ok || s.Init != nil || s.Else != nil || s.Body == nil || len(s.Body.List) == 0 {
 		return ""
 	}
-	call, ok := e.(*ast.CallExpr)
+	if _, ok := s.Body.List[len(s.Body.List)-1].(*ast.ReturnStmt); !ok {
+		return ""
+	}
+	e := s.Cond
+	for {
+		b, ok := e.(*ast.BinaryExpr)
+		if !ok || b.Op != token.LOR {
+			break
+		}
+		e = b.X
+	}
+	u, ok := e.(*ast.UnaryExpr)
+	if !ok || u.Op != token.NOT {
+		return ""
+	}
+	call, ok := u.X.(*ast.CallExpr)
 	if !ok {
 		return ""
 	}
@@ -453,6 +450,22 @@ func c16Weakest(roles []UIRole) UIRole {
 	return weakest
 }
 
+// c16RoleMismatch compares a resolved handler role with the route's declared
+// MinRole: negative when the handler enforces LESS than declared (C2 metadata
+// would be the only gate at the declared floor), positive when it enforces
+// MORE (metadata is more permissive than the handler — invariant #2), zero on
+// parity. The gate rejects BOTH directions; checking only one let the
+// metadata-more-permissive case through (Codex review, PR #1420).
+func c16RoleMismatch(handler, declared UIRole) int {
+	switch h, d := rolePriorityOf(handler), rolePriorityOf(declared); {
+	case h < d:
+		return -1
+	case h > d:
+		return 1
+	}
+	return 0
+}
+
 // TestC16_DelegatedHandlersEnforceDeclaredRole is the enforcing half of the
 // C1.5 contract: every non-public route/method must be resolvable to a
 // handler-level requireRole at least as strict as its declared MinRole, or
@@ -462,6 +475,7 @@ func TestC16_DelegatedHandlersEnforceDeclaredRole(t *testing.T) {
 
 	var (
 		weaker      []string
+		stricter    []string
 		unprotected []string
 		undeclared  []string
 		checked     int
@@ -482,10 +496,19 @@ func TestC16_DelegatedHandlersEnforceDeclaredRole(t *testing.T) {
 				where += " (via " + strings.Join(res.chain, " → ") + ")"
 			}
 
+			mismatch := 0
+			if res.resolved {
+				mismatch = c16RoleMismatch(res.role, m.MinRole)
+			}
 			switch {
-			case res.resolved && rolePriorityOf(res.role) < rolePriorityOf(m.MinRole):
+			case mismatch < 0:
 				weaker = append(weaker, fmt.Sprintf(
-					"  %s: metadata MinRole=%s but handler enforces only %s — metadata is MORE PERMISSIVE than the handler (CLAUDE.md Admin-UI invariant #2)",
+					"  %s: metadata MinRole=%s but handler enforces only %s — the handler is WEAKER than its declared contract, so C2 metadata is the only gate at %s (CLAUDE.md Admin-UI invariant #6)",
+					where, m.MinRole, res.role, m.MinRole))
+
+			case mismatch > 0:
+				stricter = append(stricter, fmt.Sprintf(
+					"  %s: metadata MinRole=%s but handler enforces %s — metadata is MORE PERMISSIVE than the handler (CLAUDE.md Admin-UI invariant #2)",
 					where, m.MinRole, res.role))
 
 			case !res.resolved && rolePriorityOf(m.MinRole) > rolePriorityOf(RoleViewer):
@@ -509,8 +532,12 @@ func TestC16_DelegatedHandlersEnforceDeclaredRole(t *testing.T) {
 	}
 
 	if len(weaker) > 0 {
-		t.Errorf("C1.6: %d route/method(s) where metadata is more permissive than the handler:\n%s",
+		t.Errorf("C1.6: %d route/method(s) where the handler enforces less than the declared MinRole:\n%s",
 			len(weaker), sortedJoin(weaker))
+	}
+	if len(stricter) > 0 {
+		t.Errorf("C1.6: %d route/method(s) where metadata is more permissive than the handler:\n%s",
+			len(stricter), sortedJoin(stricter))
 	}
 	if len(unprotected) > 0 {
 		t.Errorf("C1.6: %d PRIVILEGED route/method(s) with no reachable handler-level requireRole:\n%s\n"+
@@ -798,4 +825,118 @@ func fixtureNoCheck(w http.ResponseWriter, r *http.Request) {
 	if !dom.resolved || dom.role != RoleAdmin {
 		t.Fatalf("an unconditional admin guard ahead of the delegate resolved to (%v, %q), want (true, %q)", dom.resolved, dom.role, RoleAdmin)
 	}
+}
+
+// TestC16_GateRejectsBothMismatchDirections pins that the gate's comparison
+// flags a handler STRICTER than its metadata (MinRole=viewer, requireRole
+// admin — metadata more permissive, invariant #2) as well as one WEAKER than
+// its metadata, and accepts parity.
+func TestC16_GateRejectsBothMismatchDirections(t *testing.T) {
+	if got := c16RoleMismatch(RoleAdmin, RoleViewer); got <= 0 {
+		t.Fatalf("admin handler behind viewer metadata classified %d, want > 0 (metadata more permissive)", got)
+	}
+	if got := c16RoleMismatch(RoleViewer, RoleAdmin); got >= 0 {
+		t.Fatalf("viewer handler behind admin metadata classified %d, want < 0 (handler weaker)", got)
+	}
+	if got := c16RoleMismatch(RoleOperator, RoleOperator); got != 0 {
+		t.Fatalf("parity classified %d, want 0", got)
+	}
+}
+
+// TestC16_OnlyTerminatingGuardsDominate pins that a requireRole which does not
+// provably exit before the delegate — a bare call, an assignment, an && guard,
+// or a guard whose body does not return — is NOT treated as governing the
+// branch, so an unguarded delegate behind it stays unresolved and fails the
+// privileged-route bucket (Codex review, PR #1420).
+func TestC16_OnlyTerminatingGuardsDominate(t *testing.T) {
+	const src = `package main
+
+import "net/http"
+
+func fixtureLeak(w http.ResponseWriter, r *http.Request) {}
+
+func fixtureBare(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodPost:
+		requireRole(w, r, RoleAdmin)
+		fixtureLeak(w, r)
+	}
+}
+
+func fixtureAssign(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodPost:
+		ok := requireRole(w, r, RoleAdmin)
+		_ = ok
+		fixtureLeak(w, r)
+	}
+}
+
+func fixtureAnd(w http.ResponseWriter, r *http.Request, x bool) {
+	switch r.Method {
+	case http.MethodPost:
+		if !requireRole(w, r, RoleAdmin) && x {
+			return
+		}
+		fixtureLeak(w, r)
+	}
+}
+
+func fixtureNoReturn(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodPost:
+		if !requireRole(w, r, RoleAdmin) {
+			w.WriteHeader(403)
+		}
+		fixtureLeak(w, r)
+	}
+}
+
+func fixtureGuarded(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodPost:
+		if !requireRole(w, r, RoleAdmin) {
+			return
+		}
+		fixtureLeak(w, r)
+	}
+}
+`
+	idx := c16ParseFixture(t, src)
+	for _, name := range []string{"fixtureBare", "fixtureAssign", "fixtureNoReturn"} {
+		if res := c16Resolve(idx, name, "POST", 0, map[string]bool{}); res.resolved && c16RoleMismatch(res.role, RoleAdmin) >= 0 {
+			t.Errorf("%s: a non-terminating requireRole was treated as guarding an unguarded delegate (resolved %q)", name, res.role)
+		}
+	}
+	// fixtureAnd has a third parameter, so it is not a handler; check the
+	// classifier on its guard statement directly.
+	for _, d := range c16ParseFixtureDecls(t, src) {
+		if d.Name.Name != "fixtureAnd" {
+			continue
+		}
+		cl := d.Body.List[0].(*ast.SwitchStmt).Body.List[0].(*ast.CaseClause)
+		if role := c16IsDominatingGuard(cl.Body[0]); role != "" {
+			t.Errorf("an && guard was classified as dominating (%q)", role)
+		}
+	}
+	// CONTROL: the canonical terminating guard still dominates.
+	res := c16Resolve(idx, "fixtureGuarded", "POST", 0, map[string]bool{})
+	if !res.resolved || res.role != RoleAdmin {
+		t.Fatalf("fixtureGuarded POST resolved=%v role=%q, want admin — the canonical guard no longer dominates", res.resolved, res.role)
+	}
+}
+
+func c16ParseFixtureDecls(t *testing.T, src string) []*ast.FuncDecl {
+	t.Helper()
+	f, err := parser.ParseFile(token.NewFileSet(), "fixture.go", src, parser.SkipObjectResolution)
+	if err != nil {
+		t.Fatalf("parse fixture: %v", err)
+	}
+	var out []*ast.FuncDecl
+	for _, d := range f.Decls {
+		if fn, ok := d.(*ast.FuncDecl); ok {
+			out = append(out, fn)
+		}
+	}
+	return out
 }
