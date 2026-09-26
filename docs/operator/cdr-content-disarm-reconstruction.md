@@ -44,10 +44,11 @@ Two ways to turn CDR on, and either one is enough — you do not need both:
    | `-cdr-default-profile` | `cdr.default_profile` | Sanitization profile sent when no CDR policy rule matches; must name a profile Sluice's `Health` RPC advertises | `default` |
    | `-cdr-default-mode` | `cdr.default_mode` | Mode sent when no rule matches: `ENFORCE`, `REPORT_ONLY`, or `BYPASS_WITH_REPORT` | `ENFORCE` |
    | `-cdr-timeout-sec` | `cdr.timeout_sec` | Per-file deadline; must be ≥ 30 (Sluice's own `workers.timeout` **defaults** to 30s but is operator-configurable on the Sluice side, down to 1s and with no documented upper bound — Culvert's 35s default only fires last against that default; if your Sluice deployment raises `workers.timeout` above 35s, raise `cdr.timeout_sec` to match or Culvert will cancel a legitimate long-running job before Sluice does) | 35 |
-   | `-cdr-max-file-size-mb` | `cdr.max_file_size_mb` | Skip CDR (no RPC) for a buffered body larger than this | 50 |
+   | `-cdr-max-file-size-mb` | `cdr.max_file_size_mb` | Skip CDR (no RPC) for a buffered body larger than this — **capped at 50 MiB regardless of what you configure here, see the callout below the table** | 50 |
    | `-cdr-server-fingerprint` | `cdr.server_fingerprint` | TOFU-pinned SHA-256 of Sluice's server certificate (hex; `sha256:` prefix optional) | — |
    | `-cdr-certs-dir` | `cdr.certs_dir` | Directory holding the Sluice mTLS client bundle (`ca.pem`, `client.pem`, `client.key`) | — |
    | `-cdr-fail-mode` | `cdr.fail_mode` | Behavior when Sluice is unreachable: `open` or `closed` (see **Failure behavior** below); an invalid value is a fatal boot error **only while `cdr.enabled: true` at the time config.yaml is parsed** — see the callout below the table | `open` |
+   | *(YAML only, no CLI flag)* | `cdr.chunk_size_kb` | Streaming payload size per gRPC message for the Sanitize call (`CDRClientConfig.ChunkSize`); validated to 16–3072 KiB at config load (`config.go`) | 64 |
 
    `-cdr-endpoint` by itself dials nothing. The config/CLI-only bootstrap
    path (no instance ever enrolled through the API) requires **all three**
@@ -65,6 +66,22 @@ Two ways to turn CDR on, and either one is enough — you do not need both:
    client bundle as well. This bootstrap path also
    has no certificate lifecycle automation — see **Certificate lifecycle**
    below before relying on it long-term.
+
+   > **`cdr.max_file_size_mb` above 50 does not raise the effective
+   > ceiling — 50 MiB is an immutable client-side cap.** `cdrMaxFileSize`
+   > (`cdr.go`) is a hardcoded `const`, unrelated to any config field, and
+   > `CDRClient.Sanitize` enforces it independently of `cfg.max_file_size_mb`
+   > — once before sending (on `header.ContentLength`) and again mid-stream
+   > in case the caller lied about the length. So configuring
+   > `cdr.max_file_size_mb: 200` (or raising `security_scan.max_scan_mb` to
+   > let more of a large body reach CDR) does **not** get a 100 MiB file
+   > sanitized: `Sanitize` returns a `file_too_large` error, which
+   > `cdrHandleCallError`/`IsFileTooLarge` treat as **not** a fail-mode event
+   > — the file is delivered unsanitized via the same oversize-skip path as
+   > an ordinary `cdr.max_file_size_mb` skip, regardless of `fail_mode`.
+   > Setting `cdr.max_file_size_mb` above 50 only matters if you're also
+   > running a fork/build with a different `cdrMaxFileSize` constant; on the
+   > stock binary, 50 MiB is the real ceiling no matter what you configure.
 
    > **`cdr.fail_mode` validation is skipped while `cdr.enabled: false`, and
    > an invalid value staged that way survives into a later runtime
