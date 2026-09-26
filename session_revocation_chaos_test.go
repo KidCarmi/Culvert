@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -341,9 +343,16 @@ func TestChaos68_ContractRowNeverEchoesSensitiveTokens(t *testing.T) {
 		{"healthy", diagOK, func(t *testing.T) {
 			noteRevocationPersistenceConfigured(filepath.Join(t.TempDir(), "revocations.json"))
 		}},
-		{"load-degraded", diagFail, func(t *testing.T) {
+		{"load-degraded-corrupt", diagFail, func(t *testing.T) {
 			noteRevocationPersistenceConfigured(filepath.Join(t.TempDir(), "revocations.json"))
 			noteRevocationLoadDegraded(session.ErrRevocationsCorrupt)
+		}},
+		// AU-36. The read-failure branch is a SECOND composition of this row,
+		// and a wall that drives only its sibling would not see a leak here —
+		// the branch-coverage lesson this wall exists for, one branch deeper.
+		{"load-degraded-unreadable", diagFail, func(t *testing.T) {
+			noteRevocationPersistenceConfigured(filepath.Join(t.TempDir(), "revocations.json"))
+			noteRevocationLoadDegraded(fmt.Errorf("open: %w", os.ErrPermission))
 		}},
 		{"persist-failed", diagFail, func(t *testing.T) {
 			noteRevocationPersistenceConfigured(filepath.Join(t.TempDir(), "revocations.json"))
@@ -1085,5 +1094,135 @@ func TestChaos68_VanishedFileRepairAnnouncesItselfOncePerDisappearance(t *testin
 	}
 	if strings.Contains(out, "durable again") {
 		t.Errorf("a repaired vanished file was reported as recovery from a degradation that was never reported: %s", out)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// AU-36: an unreadable revocations file gets the remedy that matches it.
+//
+// The load path already distinguished a PARSE failure (quarantined, leaves a
+// .corrupt.* copy and a state_file_session_revocations readiness row) from a
+// READ failure (deliberately NOT quarantined — the content may be intact
+// behind a transient permission or I/O fault). It then discarded the
+// distinction when recording the health, so the contract row printed the
+// quarantine remedy for both and sent an operator hunting artifacts that only
+// exist in the other case, mid-incident, on the one control that can withdraw
+// an already-issued session.
+//
+// Same defect class as CHAOS-66's socks5BindRemedy: a bounded classifier is
+// worth nothing if one remedy is printed for every class.
+// ---------------------------------------------------------------------------
+
+// DEFECT GATE. An unreadable file must not be described as quarantined, and
+// must not point at evidence that was never produced.
+func TestChaos68_AU36_UnreadableLoadDoesNotAdvertiseAQuarantine(t *testing.T) {
+	withChaos68Revocations(t)
+	noteRevocationPersistenceConfigured(filepath.Join(t.TempDir(), "revocations.json"))
+	noteRevocationLoadDegraded(fmt.Errorf("open revocations: %w", os.ErrPermission))
+
+	row := checkSessionRevocation()
+	if row.Status != diagFail {
+		t.Fatalf("status = %q, want %q after an unreadable load", row.Status, diagFail)
+	}
+	blob := row.Message + " " + row.OperatorAction
+	// Each of these exists ONLY after a parse failure. Naming any of them on
+	// the read-failure branch is the defect.
+	for _, absent := range []string{".corrupt", "quarantin", "state_file_session_revocations"} {
+		if strings.Contains(strings.ToLower(blob), strings.ToLower(absent)) {
+			t.Errorf("the unreadable-load row names %q, which only exists after a PARSE failure: %q", absent, blob)
+		}
+	}
+	// It must still say what to do.
+	low := strings.ToLower(blob)
+	if !strings.Contains(low, "permission") || !strings.Contains(low, "restart") {
+		t.Errorf("the unreadable-load row does not name the permission/mount repair or the restart: %q", blob)
+	}
+}
+
+// DEFECT GATE. The remedy must warn that the file is still overwritable.
+//
+// The boot probe deliberately does not write on this branch, but all three
+// production writers (revokeSessionCookie, the account-delete handler, and
+// mergeAndPersistRevocations) call SaveRevocations unconditionally — so the
+// first revocation after boot REPLACES the file this process could not read.
+// "The contents may be intact" is only actionable if the operator is told how
+// long that stays true.
+func TestChaos68_AU36_UnreadableRemedyWarnsTheFileIsStillOverwritable(t *testing.T) {
+	withChaos68Revocations(t)
+	noteRevocationPersistenceConfigured(filepath.Join(t.TempDir(), "revocations.json"))
+	noteRevocationLoadDegraded(fmt.Errorf("read revocations: %w", errors.New("input/output error")))
+
+	action := strings.ToLower(checkSessionRevocation().OperatorAction)
+	if !strings.Contains(action, "replaces it") && !strings.Contains(action, "overwrit") {
+		t.Errorf("the unreadable-load remedy does not warn that the next revocation replaces the file: %q", action)
+	}
+}
+
+// CONTROL. The corrupt branch must KEEP pointing at the quarantine. The
+// cheapest way to pass the two gates above is to delete the quarantine remedy
+// entirely, which would strip the one branch that really does leave a
+// restorable copy of its only recovery instruction.
+func TestChaos68_AU36_CorruptLoadStillNamesTheQuarantine(t *testing.T) {
+	withChaos68Revocations(t)
+	noteRevocationPersistenceConfigured(filepath.Join(t.TempDir(), "revocations.json"))
+	noteRevocationLoadDegraded(session.ErrRevocationsCorrupt)
+
+	row := checkSessionRevocation()
+	if row.Status != diagFail {
+		t.Fatalf("status = %q, want %q after a corrupt load", row.Status, diagFail)
+	}
+	blob := strings.ToLower(row.Message + " " + row.OperatorAction)
+	for _, needle := range []string{".corrupt", "state_file_session_revocations"} {
+		if !strings.Contains(blob, needle) {
+			t.Errorf("the corrupt-load row no longer names %q — the operator's only restore path: %q", needle, blob)
+		}
+	}
+}
+
+// CONTROL. The two branches must actually DIFFER. A switch that returns one
+// string satisfies every "names its own remedy" assertion above — the CHAOS-66
+// distinct-remedy control, applied here.
+func TestChaos68_AU36_TheTwoLoadFailuresCarryDistinctRemedies(t *testing.T) {
+	read := func(err error) OperatorContractCheck {
+		withChaos68Revocations(t)
+		noteRevocationPersistenceConfigured(filepath.Join(t.TempDir(), "revocations.json"))
+		noteRevocationLoadDegraded(err)
+		return checkSessionRevocation()
+	}
+	corrupt := read(session.ErrRevocationsCorrupt)
+	unreadable := read(fmt.Errorf("open: %w", os.ErrPermission))
+
+	if corrupt.OperatorAction == unreadable.OperatorAction {
+		t.Errorf("both load failures print one remedy, so the classifier buys nothing: %q", corrupt.OperatorAction)
+	}
+	if corrupt.Message == unreadable.Message {
+		t.Errorf("both load failures print one message: %q", corrupt.Message)
+	}
+}
+
+// WALL. The quarantine decision and the remedy selection must consult ONE
+// predicate. If a call site classifies the error itself, the action taken and
+// the action advertised can drift apart — which is the defect AU-36 closed.
+func TestChaos68_AU36_QuarantineAndRemedyShareOnePredicate(t *testing.T) {
+	src, err := os.ReadFile(filepath.Join(pkgSourceDir(), "session_startup.go"))
+	if err != nil {
+		t.Fatalf("read session_startup.go: %v", err)
+	}
+	body := string(src)
+	if !strings.Contains(body, "revocationLoadIsCorrupt(err)") {
+		t.Error("session_startup.go no longer decides the quarantine with revocationLoadIsCorrupt")
+	}
+	if strings.Contains(body, "ErrRevocationsCorrupt") {
+		t.Error("session_startup.go classifies the load error itself; it must ask revocationLoadIsCorrupt " +
+			"so the quarantine and the advertised remedy cannot disagree")
+	}
+	// Not vacuous: the recorder must be the one place the classification is
+	// stored, and it must derive it from the same predicate.
+	health, err := os.ReadFile(filepath.Join(pkgSourceDir(), "session_revocation_health.go"))
+	if err != nil {
+		t.Fatalf("read session_revocation_health.go: %v", err)
+	}
+	if !strings.Contains(string(health), "corrupt := revocationLoadIsCorrupt(err)") {
+		t.Error("noteRevocationLoadDegraded no longer derives LoadCorrupt from the shared predicate")
 	}
 }

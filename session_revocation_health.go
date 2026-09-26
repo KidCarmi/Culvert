@@ -36,6 +36,7 @@ package main
 // row, which is report-only by the same reasoning.
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"sync"
@@ -77,7 +78,30 @@ type sessionRevocationHealth struct {
 	Path string
 	// LoadDegraded is true when this boot could not load the persisted list.
 	LoadDegraded bool
+	// LoadCorrupt distinguishes the TWO ways a load fails, because they have
+	// DIFFERENT operator actions and only one of them leaves any evidence.
+	//
+	// A file that was READ and could not be PARSED is quarantined (moved
+	// aside as .corrupt.*) and records a state_file_session_revocations
+	// readiness row. A file that could not be READ at all — EACCES after a
+	// permission change, EIO on a failing volume, a mount that went away — is
+	// deliberately NOT quarantined (session_startup.go says why: the content
+	// may be intact behind a transient fault, and moving a healthy
+	// security-critical file aside is the worse error).
+	//
+	// The load path already made that distinction to decide the quarantine
+	// and then DISCARDED it, so the row printed the quarantine remedy for
+	// both and sent an operator hunting a .corrupt.* file and a readiness row
+	// that only exist in the other case. Same defect class as CHAOS-66's
+	// socks5BindRemedy: a bounded classifier is worth nothing if one remedy
+	// is printed for every class.
+	LoadCorrupt bool
 	// LoadDetail is the operator-facing reason the load failed.
+	//
+	// It is err.Error(), which embeds the configured PATH, so it belongs in
+	// the log and nowhere else: /api/diagnostics is viewer-reachable and
+	// walled against raw filesystem paths (TestApiDiagnostics_NoSensitiveValues).
+	// Do not surface it on the contract row.
 	LoadDetail string
 }
 
@@ -94,11 +118,22 @@ func noteRevocationPersistenceConfigured(path string) {
 	sessionRevocationHealthMu.Unlock()
 }
 
+// revocationLoadIsCorrupt is the ONE predicate that separates a parse failure
+// from a read failure. Both the QUARANTINE decision (session_startup.go) and
+// the REMEDY selection (checkSessionRevocation) consult it, so the action
+// taken and the action advertised cannot disagree — a call site classifying
+// the error itself is how they would drift apart.
+func revocationLoadIsCorrupt(err error) bool {
+	return errors.Is(err, session.ErrRevocationsCorrupt)
+}
+
 // noteRevocationLoadDegraded records that the persisted list did not load, so
 // this process is running with fewer revocations than the operator applied.
 func noteRevocationLoadDegraded(err error) {
+	corrupt := revocationLoadIsCorrupt(err)
 	sessionRevocationHealthMu.Lock()
 	sessionRevocationHealthy.LoadDegraded = true
+	sessionRevocationHealthy.LoadCorrupt = corrupt
 	sessionRevocationHealthy.LoadDetail = err.Error()
 	sessionRevocationHealthMu.Unlock()
 }
@@ -273,11 +308,19 @@ func checkSessionRevocation() OperatorContractCheck {
 		}
 	}
 	if h.LoadDegraded {
+		if h.LoadCorrupt {
+			return OperatorContractCheck{
+				Code:           "session_revocation",
+				Status:         diagFail,
+				Message:        "the persisted session-revocation list could not be PARSED — revocations applied before this restart are NOT in force on this node, and the damaged file has been quarantined",
+				OperatorAction: "See the state_file_session_revocations row and the server logs. Restore the quarantined .corrupt.* copy or a backup and restart; until then, re-apply any logout or account deletion that must hold.",
+			}
+		}
 		return OperatorContractCheck{
 			Code:           "session_revocation",
 			Status:         diagFail,
-			Message:        "the persisted session-revocation list did not load — revocations applied before this restart are NOT in force on this node",
-			OperatorAction: "See the state_file_session_revocations row and the server logs. Restore the quarantined .corrupt.* file or a backup and restart; until then, re-apply any logout or account deletion that must hold.",
+			Message:        "the persisted session-revocation list could not be READ — revocations applied before this restart are NOT in force on this node",
+			OperatorAction: "Check the permissions and the mount backing the revocations file, then restart. The file was left in place and has not been overwritten, so its contents may still be intact — but the next logout or account deletion on this node REPLACES it with the list this process could not read, so restart before applying new revocations. Until the node restarts with the list loaded, re-apply any logout or account deletion that must hold.",
 		}
 	}
 	if h.Configured && revocationBackingFileIsGone() {

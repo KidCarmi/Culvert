@@ -5,7 +5,6 @@ package main
 // revocations, and applies the session TTL.
 
 import (
-	"errors"
 	"fmt"
 	"time"
 
@@ -49,12 +48,18 @@ func loadSession(cfg sessionStartupConfig) error {
 			// be intact behind a transient permission or I/O fault, and moving
 			// a healthy security-critical file aside is the worse error. Same
 			// rule, and the same reasoning, as state_corruption.go's.
-			if errors.Is(err, session.ErrRevocationsCorrupt) {
+			//
+			// revocationLoadIsCorrupt is the SHARED predicate: the same call
+			// decides whether to quarantine here and which remedy the
+			// session_revocation contract row advertises. Classifying the
+			// error separately in either place is how the action taken and
+			// the action advertised drift apart — which is exactly what the
+			// row did before, sending an operator after a .corrupt.* file
+			// that an unreadable (never-quarantined) file does not have.
+			if revocationLoadIsCorrupt(err) {
 				quarantineCorruptStateFile("session_revocations", cfg.RevocationsFile, err)
-				noteRevocationLoadDegraded(err)
-			} else {
-				noteRevocationLoadDegraded(err)
 			}
+			noteRevocationLoadDegraded(err)
 			return fmt.Errorf("load revocations: %w", err)
 		}
 	}

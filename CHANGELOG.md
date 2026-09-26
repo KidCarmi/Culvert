@@ -101,6 +101,16 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   persisted document remains a JSON array so an older binary still parses the
   token revocations it understands.
 
+  The two ways a load can fail now carry the recovery action that matches each.
+  A file that was read and would not parse is quarantined and has a restorable
+  `.corrupt.*` copy; a file that could not be read at all (permissions, I/O, a
+  mount that went away) is deliberately left alone, so it has no such copy — and
+  the diagnostics row used to print the quarantine remedy for both, sending an
+  operator after evidence that was never produced. The read-failure row now
+  names the permission/mount repair, and says that the unread file's contents
+  stay recoverable only until the next logout or account deletion on that node
+  replaces it.
+
   Revocation persistence remains opt-in (`-revocations-file`) and is not
   changed here, but it is no longer silent: a new `session_revocation`
   diagnostics row and `culvert_session_revocation_*` metrics report whether a

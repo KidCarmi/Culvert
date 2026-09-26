@@ -109,7 +109,8 @@ unconfigured and states this coupling.
 | `ok` | Revocations are durable; counts of tokens and accounts in force | none |
 | `warn` | No revocations file configured — revocations are lost on restart | Set `--revocations-file` (§3) |
 | `fail` | A revocation could not be **written** | §5 |
-| `fail` | The persisted list did not **load** | §6 |
+| `fail` | The persisted list could not be **parsed** (corrupt; quarantined) | §6 |
+| `fail` | The persisted list could not be **read** (permissions, I/O, mount) | §6 |
 | `fail` | The revocations file is **missing** | §6a |
 
 The row carries counts and a remedy only. It never names a revoked username or
@@ -266,10 +267,21 @@ overwriting your evidence.
    parses cleanly, so without that reminder probes go green over a lost
    revocation list.
 
-If the file could **not be read** (permissions, I/O), it is *not* quarantined —
-the content may be perfectly intact behind a transient fault, and moving a
-healthy security-critical file aside is the worse error. Fix the permission or
-the mount and restart.
+If the file could **not be read** (permissions, I/O, a mount that went away),
+it is *not* quarantined — the content may be perfectly intact behind a
+transient fault, and moving a healthy security-critical file aside is the worse
+error. There is therefore **no `.corrupt.*` copy and no
+`state_file_session_revocations` row** for this case; the `session_revocation`
+row says so and gives its own remedy, which is to fix the permission or the
+mount and restart.
+
+**Restart before applying new revocations.** The boot probe deliberately does
+not write on this branch, so the file is still on disk exactly as it was — but
+that only holds until the next write. Every one of the three writers (a logout,
+an account deletion, and a cluster revocation sync that merges anything new)
+calls `SaveRevocations` unconditionally, and that **replaces** the file with the
+list this process could not read. So the window in which the original contents
+are recoverable ends at the first revocation after boot, not at the restart.
 
 ---
 
