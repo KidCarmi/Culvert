@@ -455,6 +455,119 @@
         ],
         "type": "object"
       },
+      "BackupCreateBody": {
+        "additionalProperties": false,
+        "description": "The encryption choice is required and never inferred: an omitted `encrypt` is refused 400, so an unencrypted archive is created only by an explicit `\"encrypt\": false` (dev/lab only).",
+        "properties": {
+          "encrypt": {
+            "description": "Encrypt the archive with AES-256-GCM. Requires passphraseEnvVar.",
+            "type": "boolean"
+          },
+          "passphraseEnvVar": {
+            "description": "Name of an env var the maintenance agent is allowed to read (its EnvAllow); never the secret value itself.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "encrypt"
+        ],
+        "type": "object"
+      },
+      "BackupCreateResult": {
+        "additionalProperties": false,
+        "properties": {
+          "deduped": {
+            "description": "True when an identical in-flight/recent op was reused instead of starting a new one.",
+            "type": "boolean"
+          },
+          "filename": {
+            "description": "Server-generated archive filename.",
+            "type": "string"
+          },
+          "opId": {
+            "description": "Poll via GET /api/backups/operations/{id}.",
+            "type": "string"
+          },
+          "state": {
+            "enum": [
+              "pending",
+              "running",
+              "succeeded",
+              "failed",
+              "cancelled"
+            ],
+            "type": "string"
+          },
+          "triggered": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "triggered"
+        ],
+        "type": "object"
+      },
+      "BackupOperationStatus": {
+        "additionalProperties": true,
+        "description": "The maintenance agent's operation record (cmd/culvert-maint/internal/ops.Op), passed through verbatim. `params` only ever carries the backup filename/encrypt/passphrase_ref (an env var name, never a secret).",
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "failure_reason": {
+            "type": "string"
+          },
+          "finished_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "idempotency_key": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "op_id": {
+            "type": "string"
+          },
+          "params": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "progress": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "result": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "started_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "state": {
+            "enum": [
+              "pending",
+              "running",
+              "succeeded",
+              "failed",
+              "cancelled"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "op_id",
+          "kind",
+          "state",
+          "progress"
+        ],
+        "type": "object"
+      },
       "BackupsStatus": {
         "additionalProperties": true,
         "description": "Backup archive listing read from the CP-local maintenance agent. `available:false` means the agent could not be reached or is not configured; `backups` is newest-first when available.",
@@ -2772,7 +2885,7 @@
             "type": "integer"
           },
           "uncheckedEnforcingPaths": {
-            "description": "Paths where this appliance validates an origin certificate on a client's behalf and yet does not consult the revocation checker. Excludes bypassed CONNECT tunnels, which never terminate TLS.",
+            "description": "Paths where this Culvert instance validates an origin certificate on a client's behalf and yet does not consult the revocation checker. Excludes bypassed CONNECT tunnels, which never terminate TLS.",
             "items": {
               "type": "string"
             },
@@ -3433,6 +3546,10 @@
           "draft": {
             "type": "boolean"
           },
+          "persisted": {
+            "description": "False means the rulebase is in-memory only (no -policy / policy_file configured) and every add/edit/delete/reorder is lost on restart.",
+            "type": "boolean"
+          },
           "rules": {
             "items": {
               "$ref": "#/components/schemas/PolicyRule"
@@ -3452,7 +3569,8 @@
           "count",
           "version",
           "updatedAt",
-          "draft"
+          "draft",
+          "persisted"
         ],
         "type": "object"
       },
@@ -3615,6 +3733,22 @@
             "type": "boolean"
           },
           "reason": {
+            "type": "string"
+          },
+          "sigstore_identity_source": {
+            "description": "Present only when the Sigstore scheme is active. Whether the enforcing identity policy is the baked default or an operator override.",
+            "enum": [
+              "default",
+              "override"
+            ],
+            "type": "string"
+          },
+          "sigstore_root_source": {
+            "description": "Present only when the Sigstore scheme is active. Whether the enforcing trusted root is the baked default or an operator override.",
+            "enum": [
+              "default",
+              "override"
+            ],
             "type": "string"
           },
           "sigstore_warn": {
@@ -6480,8 +6614,8 @@
       "url": "https://github.com/KidCarmi/Culvert"
     },
     "title": "Culvert Admin API",
-    "version": "2.0.0",
-    "x-culvert-api-contract-version": "2.0.0"
+    "version": "2.1.0",
+    "x-culvert-api-contract-version": "2.1.0"
   },
   "openapi": "3.0.4",
   "paths": {
@@ -7782,7 +7916,154 @@
         "x-culvert-stability": "stable",
         "x-culvert-tenant-scope": "appliance",
         "x-culvert-visibility": "admin-supported"
+      },
+      "post": {
+        "description": "Triggers a new backup via the CP-local maintenance agent's existing POST /v1/backups (input validation, idempotency, and exclusive maintenance-lock serialization against a concurrent backup/restore/ upgrade all happen agent-side; this is a thin pass-through — no new agent capability). Returns an op id; poll GET /api/backups/operations/{id} for completion. Previously the only way to create a backup was `docker compose --profile cli run --rm cli --backup ...` over SSH, even though backup creation needs no downtime.",
+        "operationId": "createBackup",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BackupCreateBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BackupCreateResult"
+                }
+              }
+            },
+            "description": "Backup triggered."
+          },
+          "400": {
+            "$ref": "#/components/responses/PlainBadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          },
+          "502": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Maintenance agent unreachable or rejected the request. Body is plain text."
+          },
+          "503": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Maintenance agent not configured. Body is plain text."
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Trigger an on-demand backup",
+        "tags": [
+          "support"
+        ],
+        "x-culvert-audit-event": "backup.trigger",
+        "x-culvert-danger-level": "medium",
+        "x-culvert-idempotency": "non-idempotent",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "admin",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
       }
+    },
+    "/api/backups/operations/{id}": {
+      "get": {
+        "description": "Polls a backup operation (as created by POST /api/backups) to a terminal state, sourced from the CP-local maintenance agent's existing GET /v1/operations/{id}. The op record's params only ever carry the backup filename, whether it is encrypted, and the passphrase env var NAME (never a secret value). An operation that is not a backup (the agent's operation endpoint is global) is answered 404 exactly like an unknown id.",
+        "operationId": "getBackupOperationStatus",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BackupOperationStatus"
+                }
+              }
+            },
+            "description": "Operation status."
+          },
+          "400": {
+            "$ref": "#/components/responses/PlainBadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/PlainNotFound"
+          },
+          "502": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Maintenance agent unreachable or returned an unexpected status. Body is plain text."
+          },
+          "503": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Maintenance agent not configured. Body is plain text."
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Poll a triggered backup operation",
+        "tags": [
+          "support"
+        ],
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      },
+      "parameters": [
+        {
+          "in": "path",
+          "name": "id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ]
     },
     "/api/blocklist": {
       "delete": {
@@ -12888,7 +13169,7 @@
     },
     "/api/decryption/redaction": {
       "get": {
-        "description": "Returns the node-local destination-privacy posture (traffic-log destination pseudonymization) as ONE coherent snapshot: posture, non-secret pseudonym generation (key_id), the durable rotation sequence + bounded non-secret rotation receipts (operation-identity truth for resolving a lost rotation response), and the revision that fingerprints exactly the returned state.",
+        "description": "Destination-privacy posture (legacy alias — same handler and response as GET /api/traffic/redaction, terminology governance T-17).",
         "operationId": "getDecryptionRedaction",
         "responses": {
           "200": {
@@ -12899,7 +13180,7 @@
                 }
               }
             },
-            "description": "Decryption redaction hosts."
+            "description": "Traffic-log destination-privacy posture."
           },
           "403": {
             "$ref": "#/components/responses/PlainForbidden"
@@ -12913,7 +13194,7 @@
             "basicAuth": []
           }
         ],
-        "summary": "Destination-privacy posture",
+        "summary": "Destination-privacy posture (legacy alias)",
         "tags": [
           "policy"
         ],
@@ -12925,7 +13206,7 @@
         "x-culvert-visibility": "admin-supported"
       },
       "put": {
-        "description": "EXACTLY ONE ACTION per request: sets the destination-privacy posture (redact_hosts present) OR rotates the node-local pseudonym key (rotate_key:true + operation_id + ifRevision) — never both (persist-before-apply: the durable write, including the rotation receipt, lands first; a persist failure leaves the running posture untouched). This governs destination information in logs/observability — NOT whether traffic is decrypted, and the pseudonym key is NOT the TLS inspection Root CA.",
+        "description": "Set destination privacy / rotate pseudonym key (legacy alias — same handler and semantics as PUT /api/traffic/redaction, terminology governance T-17).",
         "operationId": "setDecryptionRedaction",
         "requestBody": {
           "content": {
@@ -12947,7 +13228,7 @@
                 }
               }
             },
-            "description": "Updated ({redact_hosts, key_rotated, key_id, rotation_seq, revision} plus, for a rotation, {operation_id, already_applied} — the state THIS PUT installed; a rotation and its receipt are durable before this response. An idempotent replay of an already-landed operation_id returns already_applied:true with that operation's receipt facts and mutates nothing)."
+            "description": "Updated ({redact_hosts, key_rotated, key_id, rotation_seq, revision} plus, for a rotation, {operation_id, already_applied} — the state THIS PUT installed; same semantics as PUT /api/traffic/redaction)."
           },
           "400": {
             "$ref": "#/components/responses/PlainBadRequest"
@@ -12977,7 +13258,7 @@
             "basicAuth": []
           }
         ],
-        "summary": "Set destination privacy / rotate pseudonym key",
+        "summary": "Set destination privacy / rotate pseudonym key (legacy alias)",
         "tags": [
           "policy"
         ],
@@ -19289,7 +19570,7 @@
         "x-culvert-visibility": "admin-supported"
       },
       "get": {
-        "description": "Returns the effective policy rule list plus version, last-update time, and draft-mode flag.",
+        "description": "Returns the effective policy rule list plus version, last-update time, draft-mode flag, and whether the rulebase is persisted to disk.",
         "operationId": "getPolicy",
         "responses": {
           "200": {
@@ -24939,6 +25220,111 @@
         "x-culvert-idempotency": "safe",
         "x-culvert-introduced-version": "1.0.0",
         "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/traffic/redaction": {
+      "get": {
+        "description": "Returns the node-local destination-privacy posture (traffic-log destination pseudonymization) as ONE coherent snapshot: posture, non-secret pseudonym generation (key_id), the durable rotation sequence + bounded non-secret rotation receipts (operation-identity truth for resolving a lost rotation response), and the revision that fingerprints exactly the returned state. Canonical path (terminology governance T-17); /api/decryption/redaction is a legacy alias — the posture governs EVERY traffic-log sink (plain HTTP and TUNNEL_CLOSED entries included), not just decrypted sessions.",
+        "operationId": "getTrafficRedaction",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DecryptionRedaction"
+                }
+              }
+            },
+            "description": "Traffic-log destination-privacy posture."
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Destination-privacy posture",
+        "tags": [
+          "policy"
+        ],
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "2.1.0",
+        "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      },
+      "put": {
+        "description": "EXACTLY ONE ACTION per request: sets the destination-privacy posture (redact_hosts present) OR rotates the node-local pseudonym key (rotate_key:true + operation_id + ifRevision) — never both (persist-before-apply: the durable write, including the rotation receipt, lands first; a persist failure leaves the running posture untouched). This governs destination information in logs/observability — NOT whether traffic is decrypted, and the pseudonym key is NOT the TLS inspection Root CA. Canonical path (terminology governance T-17); /api/decryption/redaction is a legacy alias.",
+        "operationId": "setTrafficRedaction",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetRedaction"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Updated ({redact_hosts, key_rotated, key_id, rotation_seq, revision} plus, for a rotation, {operation_id, already_applied} — the state THIS PUT installed; a rotation and its receipt are durable before this response. An idempotent replay of an already-landed operation_id returns already_applied:true with that operation's receipt facts and mutates nothing)."
+          },
+          "400": {
+            "$ref": "#/components/responses/PlainBadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          },
+          "409": {
+            "description": "Stale-writer fence conflict ({error, currentRevision, yourRevision}) — the posture or pseudonym generation changed since the asserted revision; nothing mutated and no key was minted."
+          },
+          "500": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Key provisioning/rotation failed, or the durable write failed — the running posture and key are unchanged. Body is plain text."
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Set destination privacy / rotate pseudonym key",
+        "tags": [
+          "policy"
+        ],
+        "x-culvert-audit-event": "decryption.redaction.set",
+        "x-culvert-danger-level": "medium",
+        "x-culvert-idempotency": "idempotent",
+        "x-culvert-introduced-version": "2.1.0",
+        "x-culvert-permission": "admin",
         "x-culvert-stability": "stable",
         "x-culvert-tenant-scope": "appliance",
         "x-culvert-visibility": "admin-supported"
