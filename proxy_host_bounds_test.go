@@ -267,10 +267,25 @@ func TestChaos69_DefectCostIsFlatInAuthorityLength(t *testing.T) {
 
 	// One ordinary category-group rule plus the default taxonomy: the shape that
 	// reaches hostCatScratch.fusion() → urlcat's quadratic suffix walk.
+	//
+	// THE CLEANUP ORDER HERE IS LOAD-BEARING, and getting it wrong broke a
+	// required CI gate. setupProxyTest (via chaos66Isolate) clears policyStore at
+	// test START, which stops leaks flowing IN and can do nothing about leaks
+	// flowing OUT — so the rule below outlived this test while the deferred
+	// Delete removed the group it references, MANUFACTURING a dangling object
+	// reference. `TestUpstreamV2D_R34_DryRunReturnsPlanAndDigestAppliesNothing`
+	// then failed its config import with "dangling object reference: policy rule
+	// \"chaos66-block\" references category-group \"chaos66-group\"", visible only
+	// under -shuffle. Note the asymmetry: cleaning up the group while leaking the
+	// rule is WORSE than leaking both, because leaking both leaves the reference
+	// resolvable. t.Cleanup is LIFO, so the store restore is registered AFTER the
+	// group delete and therefore runs BEFORE it — the rule is gone before the
+	// group it points at.
 	if _, err := globalCategoryGroups.Add("chaos66-group", []string{"Gambling"}); err != nil {
 		t.Fatalf("category group: %v", err)
 	}
 	t.Cleanup(func() { _ = globalCategoryGroups.Delete("chaos66-group") })
+	snapshotPolicyStoreForTest(t)
 	policyStore.Add(PolicyRule{
 		Priority: 1, Name: "chaos66-block", Action: ActionBlockPage,
 		DestCategoryGroup: "chaos66-group",
@@ -500,6 +515,7 @@ func TestChaos69_ControlOrdinaryDestinationStillProxies(t *testing.T) {
 	t.Cleanup(backend.Close)
 	hostPort := strings.TrimPrefix(backend.URL, "http://")
 	hostOnly := hostPort[:strings.LastIndex(hostPort, ":")]
+	snapshotPolicyStoreForTest(t) // do not leak this rule into a later test (see the cost gate)
 	policyStore.Add(PolicyRule{Priority: 1, Name: "chaos66-allow", Action: ActionAllow, DestFQDN: hostOnly})
 
 	w := httptest.NewRecorder()
@@ -1447,4 +1463,116 @@ func chaos69CalleeName(fun ast.Expr) string {
 		return f.Sel.Name
 	}
 	return ""
+}
+
+// TestChaos69_WallEveryGateThatMutatesPolicyRestoresIt is the anti-regression
+// wall for the defect that took down a required CI gate.
+//
+// `setupProxyTest` (reached through `chaos66Isolate`) clears `policyStore` at
+// test START. That stops leaked rules flowing IN and can do NOTHING about this
+// test's own rules flowing OUT — an asymmetry its own comment does not make
+// obvious, since it reads as "resets all global state".
+//
+// `DefectCostIsFlatInAuthorityLength` installed a rule referencing a category
+// group and deleted only the GROUP on cleanup, so the surviving rule pointed at
+// nothing and the next test that validated object references — a config import
+// in `TestUpstreamV2D_R34_DryRunReturnsPlanAndDigestAppliesNothing` — refused
+// with `dangling object reference`. Reachable only under `-shuffle`, which is
+// exactly what the determinism gate is for. **Cleaning the group while leaking
+// the rule is worse than leaking both**, because leaking both leaves the
+// reference resolvable.
+//
+// The rule: any gate in this file that mutates the process-wide policy store
+// must also register its restore. Checked structurally, because the failure it
+// prevents is invisible to every behavioural assertion in this file — those all
+// pass whether or not the rule is cleaned up.
+func TestChaos69_WallEveryGateThatMutatesPolicyRestoresIt(t *testing.T) {
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "proxy_host_bounds_test.go", nil, 0)
+	if err != nil {
+		t.Fatalf("parse proxy_host_bounds_test.go: %v", err)
+	}
+
+	// Helpers that restore the store on the caller's behalf. The list is SMALL
+	// and SELF-CHECKING: chaos69AssertHelperRestores re-reads each one and fails
+	// if it stopped calling snapshotPolicyStoreForTest, so a change to the helper
+	// breaks the build instead of silently widening this wall.
+	restoringHelpers := map[string]string{
+		"snapshotPolicyStoreForTest": "", // the primitive itself
+		"draftTestSetup":             "policy_draft_test.go",
+	}
+	for name, src := range restoringHelpers {
+		if src == "" {
+			continue
+		}
+		chaos69AssertHelperRestores(t, src, name)
+	}
+
+	mutators := 0
+	for _, d := range file.Decls {
+		fn, ok := d.(*ast.FuncDecl)
+		if !ok || fn.Body == nil || !strings.HasPrefix(fn.Name.Name, "TestChaos69_") {
+			continue
+		}
+		var mutates, restores bool
+		ast.Inspect(fn.Body, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			sel, isSel := call.Fun.(*ast.SelectorExpr)
+			if isSel {
+				if recv, ok := sel.X.(*ast.Ident); ok && recv.Name == "policyStore" {
+					switch sel.Sel.Name {
+					case "Add", "ReplaceAll", "Update", "Delete":
+						mutates = true
+					}
+				}
+			}
+			if _, ok := restoringHelpers[chaos69CalleeName(call.Fun)]; ok {
+				restores = true
+			}
+			return true
+		})
+		if !mutates {
+			continue
+		}
+		mutators++
+		if !restores {
+			t.Errorf("%s mutates policyStore without snapshotPolicyStoreForTest (directly or via draftTestSetup) — its rules outlive it "+
+				"(setupProxyTest clears the store at test START, never at cleanup), and a rule that survives its "+
+				"own category group breaks the next test that validates object references",
+				fn.Name.Name)
+		}
+	}
+
+	// A selector that stopped matching would let this wall pass forever.
+	if mutators < 3 {
+		t.Fatalf("the wall found only %d policy-mutating gates in this file; it is no longer finding them and "+
+			"must be re-aimed, not deleted", mutators)
+	}
+}
+
+// chaos69AssertHelperRestores fails if the named helper in the named file has
+// stopped calling snapshotPolicyStoreForTest. The wall above ACCEPTS that helper
+// as a restore, so this is what stops the allowance from becoming a hole.
+func chaos69AssertHelperRestores(t *testing.T, filename, helper string) {
+	t.Helper()
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, filename, nil, 0)
+	if err != nil {
+		t.Fatalf("parse %s: %v", filename, err)
+	}
+	fn := chaos69FuncDecl(t, f, helper)
+	found := false
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		if call, ok := n.(*ast.CallExpr); ok && chaos69CalleeName(call.Fun) == "snapshotPolicyStoreForTest" {
+			found = true
+		}
+		return true
+	})
+	if !found {
+		t.Fatalf("%s in %s no longer calls snapshotPolicyStoreForTest, but the policy-restore wall accepts it as a "+
+			"restore — either restore the call or drop %s from restoringHelpers", helper, filename, helper)
+	}
 }
