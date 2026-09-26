@@ -740,13 +740,28 @@ func syslogFeedState() syslogFeedSnapshot {
 	if caveatTarget == "" {
 		caveatTarget = intendedTarget
 	}
+	// When a Writer EXISTS, the transport is asked of the Writer; the string
+	// is only the fallback for a feed that has none. Both derivations agree
+	// today — `InitSyslog` is the sole installer and hands this record the
+	// same address it parsed the network from — and that is precisely why the
+	// string form is a latent trap rather than a live defect: it is a second
+	// answer to a question that already has one, and round 10's P2-14 is what
+	// happens when the two drift (the probe derived the same fact from the
+	// record's target and could contradict every other surface). Two answers
+	// to one question is the defect; `TestChaos72_TransportClaimHasOneSource` walls
+	// the agreement so a future installer that normalises or rewrites the
+	// address cannot silently make the contract row's UDP caveat wrong.
+	udp := !strings.HasPrefix(strings.ToLower(caveatTarget), "tcp://")
+	if described != nil {
+		udp = !described.DeliveryProvable()
+	}
 	now := syslogHealthNow()
 	snap := syslogFeedSnapshot{
 		writer:     described,
 		gen:        gen,
 		Configured: configured,
 		Intended:   intendedTarget != "",
-		UDP:        !strings.HasPrefix(strings.ToLower(caveatTarget), "tcp://"),
+		UDP:        udp,
 	}
 	snap.IntentUnmet = snap.Intended && (described == nil || target != intendedTarget)
 	// Retired totals are carried even when no Writer is live, so a disabled or

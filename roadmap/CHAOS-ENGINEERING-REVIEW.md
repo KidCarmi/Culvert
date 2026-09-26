@@ -8964,8 +8964,8 @@ correction paragraph then stated **32**, which was also wrong: the file held
 `syslog_stats_test.go`, 3 → 4 in `syslog_handoff_format_test.go`) were right.
 
 Counts move every round, so the authoritative figure is the one in the round's
-own `Gates:` line and nowhere else. As of round 10: **40** root gates, **13**
-engine stats gates, **4** handoff gates, **17** declared controls. Recording
+own `Gates:` line and nowhere else. As of round 10: **41** root gates, **13**
+engine stats gates, **4** handoff gates, **18** declared controls. Recording
 the same total in a second place is what produced both errors; this paragraph
 survives as the record of that, not as a second source of truth.
 
@@ -9258,3 +9258,41 @@ helper's side effects, and a side effect that performs the very thing you are
 pinning makes the wall unfalsifiable. Step the transition itself, and mutate
 each site to prove the wall can see it — including the sites that look too
 obvious to check.*
+
+**Self-review, same round: the last place the fact was derived twice.** Fixing
+P2-14 left the snapshot's `UDP` caveat — the one the contract row, `/healthz`
+and `GET /api/syslog` read — still derived from
+`strings.HasPrefix(target, "tcp://")` while the probe now asked the Writer.
+
+The two agree today. `InitSyslog` is the only installer and hands the record
+the very address it parsed the network from, so the string and the writer's
+`network` cannot currently disagree. That is what makes it a latent trap and
+not a live defect — and it is also exactly the state P2-14 was in until a
+re-point pulled the two apart. A second answer to a question that already has
+one is the defect (§30's rule), whether or not it has diverged yet.
+
+The snapshot now asks `described.DeliveryProvable()` whenever a Writer exists.
+The string survives only as the fallback for a feed that has none, which is not
+a second answer: there is no transport to ask, and the operator's intended
+address is the only thing that can describe what they asked for.
+
+`TestChaos72_TransportClaimHasOneSource` walls the agreement — for an installed
+writer the snapshot's claim must equal the writer's, and a `tcp://` string
+written onto the record must not override a UDP writer. Verified failing
+against the reverted string-only derivation. Its control runs both ways, because
+hardwiring the caveat on passes every agreement assertion while telling an
+operator with an evidence-capable TCP collector that it cannot give evidence.
+
+**A note on the lint gate, recorded because it cost a red CI round.** The
+structural wall's control was first written as
+`if !(beforeW != afterW && afterG <= beforeG)`, which golangci-lint's
+staticcheck flags (QF1001). `golangci-lint` cannot be run locally against this
+repo: v2.5.0's own module declares `go 1.24` and the config targets 1.25, so it
+refuses to load; rebuilding it with the repo's toolchain does not help (the
+guard reads the tool's module language version, not its build compiler), and
+forcing past the guard crashes its go1.24-built analyzer on go1.26 source.
+Standalone `staticcheck` at 2025.1.1 with `-checks=all` does NOT reproduce the
+finding, so it is not a substitute. The control now applies a NAMED predicate
+shared with the check it vouches for — better than the negation on its own
+terms, since a control that re-derives the rule can pass while the rule it
+vouches for has drifted.

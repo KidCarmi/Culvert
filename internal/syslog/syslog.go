@@ -909,6 +909,14 @@ type Stats struct {
 // collector accepted the test event" — for a datagram nothing may have
 // received (Codex P2, PR #1494). The writer that served the line is the only
 // thing that knows how it was sent.
+//
+// The comparison is exact rather than a prefix test, so any network this
+// package does not construct today — "tcp4", "tcp6", a unix socket — reports
+// FALSE and carries the caveat. That is the fail-safe direction: claiming a
+// transport cannot prove delivery when it can costs an operator one
+// unnecessary sentence, while the reverse tells them their SIEM has events it
+// may never have received. A new provable transport must be added here
+// deliberately.
 func (s *Writer) DeliveryProvable() bool { return s.network == "tcp" }
 
 // Stats snapshots the delivery counters.

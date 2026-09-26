@@ -2090,12 +2090,19 @@ func TestChaos72_EveryRecordTransitionAdvancesTheGeneration(t *testing.T) {
 		defer syslogHealth.mu.Unlock()
 		return syslogHealth.writer, syslogHealth.gen
 	}
+	// The invariant, named once so the control below applies literally the
+	// same rule rather than a hand-negated restatement of it — a control that
+	// re-derives the predicate can pass while the predicate it is meant to
+	// vouch for has drifted.
+	violates := func(beforeW, afterW *syslogWriter, beforeG, afterG uint64) bool {
+		return beforeW != afterW && afterG <= beforeG
+	}
 	step := func(stage string, fn func()) {
 		t.Helper()
 		beforeW, beforeG := read()
 		fn()
 		afterW, afterG := read()
-		if beforeW != afterW && afterG <= beforeG {
+		if violates(beforeW, afterW, beforeG, afterG) {
 			t.Errorf("%s: the record's writer changed (%p -> %p) but the generation did not advance (%d -> %d) — "+
 				"a snapshot taken before this transition would still be accepted by commitSyslogDegradation, "+
 				"which is the stale-commit defect reopened", stage, beforeW, afterW, beforeG, afterG)
@@ -2149,10 +2156,83 @@ func TestChaos72_EveryRecordTransitionAdvancesTheGeneration(t *testing.T) {
 	syslogHealth.writer = sw // deliberately without bumping gen
 	syslogHealth.mu.Unlock()
 	afterW, afterG := read()
-	if !(beforeW != afterW && afterG <= beforeG) {
+	if !violates(beforeW, afterW, beforeG, afterG) {
 		t.Fatal("control: the invariant cannot observe a writer swap that skips the bump, so it proves nothing")
 	}
 	syslogHealth.mu.Lock()
 	syslogHealth.writer = nil
 	syslogHealth.mu.Unlock()
+}
+
+// The transport claim must have ONE source (CHAOS-72, round 10 self-review).
+//
+// Round 10's P2-14 was the probe deriving "can this transport prove delivery"
+// from the health record's target string while the Writer that served the line
+// was right there as a parameter. The contract row and `GET /api/syslog` read
+// the same fact off `snap.UDP`, which was derived the same way.
+//
+// Both derivations agree today: `InitSyslog` is the only installer and hands
+// the record the very address it parsed the network from. That is what makes
+// the string form a latent trap rather than a live defect — and this repo's
+// own rule is that two answers to one question IS the defect (CHAOS-61), so
+// the agreement is walled rather than left to the next person to notice.
+//
+// The fallback is deliberately kept and is not a second answer: a feed with no
+// Writer has no transport to ask, and the operator's intended address is the
+// only thing that can describe what they asked for.
+func TestChaos72_TransportClaimHasOneSource(t *testing.T) {
+	for _, tc := range []struct {
+		addr    string
+		wantUDP bool
+	}{
+		{"udp://127.0.0.1:65533", true},
+		{"tcp://%s", false},
+	} {
+		addr := tc.addr
+		if strings.Contains(addr, "%s") {
+			col := startSyslogCollector(t)
+			addr = fmt.Sprintf(addr, col.addr)
+		}
+		armSyslogFeed(t, addr)
+		sw := activeSyslog()
+		if sw == nil {
+			t.Fatalf("%s: no writer installed", addr)
+		}
+		snap := syslogFeedState()
+		if snap.UDP != tc.wantUDP {
+			t.Errorf("%s: snapshot UDP=%v, want %v", addr, snap.UDP, tc.wantUDP)
+		}
+		if snap.UDP == sw.DeliveryProvable() {
+			t.Errorf("%s: the snapshot's transport claim (UDP=%v) contradicts the writer that serves it "+
+				"(DeliveryProvable=%v) — the contract row, /api/syslog and POST /api/syslog/test would "+
+				"disagree about whether this feed can prove delivery", addr, snap.UDP, sw.DeliveryProvable())
+		}
+	}
+
+	// The record's address string must not be able to override the writer.
+	// This is the shape P2-14 had, checked on the surface that still holds a
+	// string: a rewritten or re-pointed target cannot silently flip the caveat.
+	armSyslogFeed(t, "udp://127.0.0.1:65533")
+	syslogHealth.mu.Lock()
+	syslogHealth.target = "tcp://siem-b.invalid:601"
+	syslogHealth.mu.Unlock()
+	if snap := syslogFeedState(); !snap.UDP {
+		t.Error("a tcp:// address on the record overrode a UDP writer's own transport — " +
+			"the contract row would drop the 'delivery cannot be confirmed' caveat for a feed that cannot confirm it")
+	}
+
+	// CONTROL: with NO writer, the operator's intended address still decides.
+	// The cheapest way to pass the assertions above is to hardwire UDP, which
+	// would put the caveat on a TCP feed that never came up and tell an
+	// operator their evidence-capable collector cannot give evidence.
+	resetSyslogHealthForTest()
+	noteSyslogIntent("tcp://siem.invalid:601")
+	if snap := syslogFeedState(); snap.UDP {
+		t.Error("control: a configured-but-unconnected tcp:// collector must not carry the UDP caveat")
+	}
+	resetSyslogHealthForTest()
+	noteSyslogIntent("udp://siem.invalid:514")
+	if snap := syslogFeedState(); !snap.UDP {
+		t.Error("control: a configured-but-unconnected udp:// collector must still carry the UDP caveat")
+	}
 }
