@@ -1131,3 +1131,168 @@ func TestChaos72_OverlappingRePointsLeaveRecordDescribingTheActiveWriter(t *test
 		t.Fatal("disable did not clear the writer and the record together")
 	}
 }
+
+// A collector an operator configured but that could NOT be connected exports
+// every series, reporting the feed down (CHAOS-72 P1-F).
+//
+// Pre-fix, every surface in the plane gated on `configured`, which is set only
+// once a Writer is installed — so the boot path's own tolerated failure
+// ("Syslog: connect failed … continuing without syslog") left the node
+// exporting NO culvert_syslog_* series at all. The documented paging rule is
+// `culvert_syslog_up == 0` and an absent series cannot satisfy it, so the one
+// node whose SIEM feed never came up was also the one node monitoring could
+// not see, while a node that connected and then died was fully visible. The
+// contract row did report it, which is why this survived: the plane disagreed
+// with itself and only the surface nobody scrapes was right.
+//
+// The condition is reported down IMMEDIATELY rather than after the degradation
+// window, matching what the row has always done: nothing retries a failed
+// InitSyslog, so there is no transient to wait out.
+func TestChaos72_ConfiguredButNeverConnectedIsExportedAsDown(t *testing.T) {
+	ensureObservabilityStartupTestLogger(t)
+	snapshotObservabilityGlobals(t)
+	resetSyslogHealthForTest()
+	t.Cleanup(resetSyslogHealthForTest)
+
+	// Exactly what loadObservability does when the dial fails: intent is
+	// recorded, no Writer is published.
+	noteSyslogIntent("tcp://collector.invalid:601")
+	if activeSyslog() != nil {
+		t.Fatal("fixture published a writer; this gate is about the case where none exists")
+	}
+
+	var b strings.Builder
+	syslogWritePrometheus(&b)
+	out := b.String()
+	if out == "" {
+		t.Fatal("a configured-but-unreachable collector exported NO culvert_syslog_* series at all — `culvert_syslog_up == 0` cannot fire for the one feed that never came up")
+	}
+	for _, want := range []string{"culvert_syslog_up 0", "culvert_syslog_degraded 1"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("exposition is missing %q:\n%s", want, out)
+		}
+	}
+	// Line-anchored: the HELP text for culvert_syslog_up contains the literal
+	// "culvert_syslog_up 1 when …", so a substring check matches the
+	// documentation rather than the sample.
+	for _, line := range strings.Split(out, "\n") {
+		if strings.TrimSpace(line) == "culvert_syslog_up 1" {
+			t.Errorf("reported the feed UP with nothing serving it:\n%s", out)
+		}
+	}
+
+	// And the alert plane agrees, with its own sentence: the general one dates
+	// the outage from a delivery that never happened and names a drop count
+	// that is structurally zero.
+	var fired []string
+	prev := fireSyslogFeedDownAlert
+	fireSyslogFeedDownAlert = func(d string) { fired = append(fired, d) }
+	t.Cleanup(func() { fireSyslogFeedDownAlert = prev })
+
+	evaluateSyslogDegradation()
+	if len(fired) != 1 {
+		t.Fatalf("fired %d alerts for a feed that was never connected; want exactly 1", len(fired))
+	}
+	if strings.Contains(fired[0], "events dropped") {
+		t.Errorf("alert blames dropped events for a feed that never had a connection: %q", fired[0])
+	}
+	if !strings.Contains(fired[0], "no connection was ever established") {
+		t.Errorf("alert does not name the actual fault: %q", fired[0])
+	}
+	// Fire-once per episode, as everywhere else in this plane.
+	evaluateSyslogDegradation()
+	if len(fired) != 1 {
+		t.Errorf("fired %d alerts; the latch must hold until an operator re-points", len(fired))
+	}
+}
+
+// CONTROL for the gate above. The cheapest way to make a configured-but-dead
+// feed visible is to drop the emission gate altogether — which exports
+// `culvert_syslog_up 0` from every deployment that does not use the feature
+// and pages all of them. The rule is "was this feature ASKED for", so intent
+// must be the only thing that opens the gate, and disabling forwarding must
+// close it again.
+func TestChaos72_UnmetIntentDoesNotWidenTheEmissionRule(t *testing.T) {
+	ensureObservabilityStartupTestLogger(t)
+	snapshotObservabilityGlobals(t)
+	resetSyslogHealthForTest()
+	t.Cleanup(resetSyslogHealthForTest)
+
+	var none strings.Builder
+	syslogWritePrometheus(&none)
+	if none.Len() != 0 {
+		t.Fatalf("emitted %q on a node that never configured a collector", none.String())
+	}
+
+	noteSyslogIntent("tcp://collector.invalid:601")
+	var armed strings.Builder
+	syslogWritePrometheus(&armed)
+	if armed.Len() == 0 {
+		t.Fatal("fixture did not arm the intent; the rest of this control proves nothing")
+	}
+
+	noteSyslogForwardingDisabled()
+	var off strings.Builder
+	syslogWritePrometheus(&off)
+	if off.Len() != 0 {
+		t.Errorf("still exporting after forwarding was disabled:\n%s", off.String())
+	}
+}
+
+// A degradation decision snapshotted against one Writer must not be committed
+// into the record of another (CHAOS-72 P1-G).
+//
+// evaluateSyslogDegradation reads the snapshot and then takes the lock to fire.
+// An admin re-point landing between the two installs a fresh record, and the
+// stale callback would then page describing the OLD target AND set the NEW
+// record's fire-once latch — which nothing clears, because ordinary deliveries
+// do not invoke the observer. The replacement's first real outage would be
+// silent. The window is microseconds wide and cannot be scheduled through the
+// public entry point, so the commit half is its own function and is driven
+// directly.
+func TestChaos72_StaleDegradationSnapshotNeitherPagesNorLatches(t *testing.T) {
+	ensureObservabilityStartupTestLogger(t)
+	snapshotObservabilityGlobals(t)
+	resetSyslogHealthForTest()
+	t.Cleanup(resetSyslogHealthForTest)
+
+	var fired []string
+	prev := fireSyslogFeedDownAlert
+	fireSyslogFeedDownAlert = func(d string) { fired = append(fired, d) }
+	t.Cleanup(func() { fireSyslogFeedDownAlert = prev })
+
+	displaced, err := newSyslogWriter("tcp", "collector.invalid:601", "rfc3164")
+	if err == nil {
+		t.Cleanup(func() { _ = displaced.Close() })
+	}
+	successor, err := newSyslogWriter("udp", "127.0.0.1:65533", "rfc3164")
+	if err != nil {
+		t.Fatalf("building the successor writer: %v", err)
+	}
+	t.Cleanup(func() { _ = successor.Close() })
+
+	// The record describes the SUCCESSOR; the in-flight snapshot describes the
+	// writer it displaced.
+	noteSyslogWriterInstalled(successor, "udp://127.0.0.1:65533")
+	stale := syslogFeedSnapshot{Configured: true, Degraded: true, writer: displaced, Age: 10 * time.Minute}
+
+	commitSyslogDegradation(stale)
+	if len(fired) != 0 {
+		t.Errorf("a snapshot of a displaced writer paged about it: %q", fired)
+	}
+	syslogHealth.mu.Lock()
+	latched := syslogHealth.alerted
+	syslogHealth.mu.Unlock()
+	if latched {
+		t.Fatal("the stale commit latched the SUCCESSOR's record — its first real outage would now be silent, and nothing but a re-point clears the latch")
+	}
+
+	// CONTROL: the live writer's own snapshot still pages. A commit half that
+	// refused everything would pass every assertion above while deleting the
+	// alert.
+	live := syslogFeedSnapshot{Configured: true, Degraded: true, writer: successor, Age: 10 * time.Minute}
+	commitSyslogDegradation(live)
+	if len(fired) != 1 {
+		t.Fatalf("the live writer's own degradation fired %d alerts; want 1", len(fired))
+	}
+}

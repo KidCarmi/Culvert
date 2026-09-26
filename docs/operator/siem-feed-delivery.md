@@ -43,6 +43,25 @@ forwards nowhere emits no syslog series at all — a `culvert_syslog_up 0` on
 such a node would be indistinguishable from a dark feed, and the paging rule
 below is `== 0`.
 
+"Configured" means **an operator asked for a collector**, not "a connection
+succeeded". If the collector cannot be reached at boot, Culvert logs
+`Syslog: connect failed … continuing without syslog` and keeps serving traffic
+— and the series are still exported, reporting `culvert_syslog_up 0` /
+`culvert_syslog_degraded 1` from the moment the intent is recorded. Nothing
+retries a failed connect, so this state is terminal until you re-save the
+target (`POST /api/syslog`) or restart; it is reported down immediately rather
+than after the five-minute degradation window, because there is no transient
+to wait out. The `syslog_feed` contract row has always reported this case as
+`fail` ("configured but failed to connect"); until CHAOS-72's P1-F round the
+metrics plane did not, so the documented `culvert_syslog_up == 0` rule could
+not fire for precisely the feed that never came up.
+
+The same applies to a **re-point that failed**: if a later target cannot be
+connected, the writer stays pointing at the previous collector, and the feed is
+reported down because the collector the operator currently wants is not being
+served. The delivery counters keep their values in that state (they count real
+events that never reached any SIEM, and resetting them would break `rate()`).
+
 ### Metrics (`/metrics`)
 
 | Series | Meaning |

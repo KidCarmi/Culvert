@@ -7298,3 +7298,70 @@ anything. It now captures a baseline and waits for an increase. The same
 property is why the engine's own `noteDelivered` is an honest name only on TCP
 and only for the *socket*, which is the same limitation the UDP caveat above
 states in its strong form.
+
+### Codex round 4 — the feed monitoring could not see, and the page that latched the wrong record
+
+Two more, both of the family this section already names.
+
+**P1-F — a configured-but-never-connected feed exported nothing.** Every
+surface in `syslog_health.go` gated on `configured`, which is set only once a
+Writer is installed. The boot path *tolerates* a failed dial by design —
+`loadObservability` logs `Syslog: connect failed … continuing without syslog`
+and carries on, which is the right posture for a gateway — so a node whose
+collector was unreachable at boot exported **no `culvert_syslog_*` series at
+all**. The documented paging rule is `culvert_syslog_up == 0`, and an absent
+series cannot satisfy it: the one node whose SIEM feed never came up was also
+the one node monitoring could not see, while a node that connected and then
+died was fully visible. This is the emission rule of this very file (never
+export a zero for a feature nobody asked for) applied to the *wrong question* —
+"is there a Writer" instead of "did an operator ask for one". It survived
+because the plane disagreed with itself: the `syslog_feed` contract row has
+always reported this case as `fail` ("configured but failed to connect"), so
+the surface an operator reads by hand was right and the surface a rule reads
+was silent.
+
+The health record now carries the operator INTENT (`intendedTarget`/`intentAt`)
+under its own mutex, set at the two startup paths that tolerate a failed
+connect. Three decisions worth keeping. **The intent is duplicated** —
+`syslogConfiguredAddr` already records it — and deliberately: that variable is
+a plain string, and `syslogFeedState` is reached from the DRAIN goroutine, so
+reading it there would reintroduce D6 in a new place. (It also means that
+variable's own unsynchronised read/write pair — `checkSyslogFeed` reads it from
+one handler goroutine while `apiSyslogConfig` writes it from another — is still
+open; repointing the row at the record would close both, and is recorded as a
+follow-up rather than folded into a fix for something else.) **An unmet intent
+is reported DOWN IMMEDIATELY**, not after the degradation window, which is the
+one place this sweep departs from "degradation is a DURATION": nothing retries
+a failed `InitSyslog`, so there is no transient to wait out, and the contract
+row has always answered this condition without a grace. **The displaced
+writer's counters are left untouched** in the re-point-failed shape — a Writer
+still serving a target the operator has moved away from has real drops on it,
+and zeroing them would make `culvert_syslog_drops_total` go BACKWARDS, breaking
+`rate()` on the one series that measures compliance loss. The alert gets its
+own bounded sentence: the general one dates the outage from a delivery that
+never happened and names a drop count that is structurally zero, which would
+send an operator hunting a collector that is discarding events when the remedy
+is that no connection was ever made.
+
+**P1-G — a stale degradation snapshot paged about the old target and latched
+the new one.** `evaluateSyslogDegradation` SNAPSHOTS and then takes the lock to
+COMMIT. An admin re-point landing between the two installs a fresh record
+(`noteSyslogWriterInstalled` resets the latch for the new writer), and the
+stale callback then fired a page describing the OLD collector **and set the NEW
+record's `alerted` flag** — which nothing clears, because ordinary deliveries
+do not invoke the observer and only a further re-point resets it. The
+replacement's first real outage would have been silent. The snapshot now
+carries the Writer it describes and the commit half refuses a record that has
+been replaced.
+
+The window is microseconds wide and cannot be scheduled through the public
+entry point, so the commit is its OWN function (`commitSyslogDegradation`) and
+the gate drives it directly — the same answer CHAOS-66 reached for `adopt`'s
+Stop race, and for the same reason: *a gate that cannot fail for the defect it
+names is worse than no gate*. It carries a CONTROL requiring the live writer's
+own snapshot to still page, because a commit half that refused everything would
+satisfy every other assertion in that test while deleting the alert.
+
+Both defect gates were verified failing against their reintroduced pre-fix
+shapes (P1-F: the metrics gate restored to `!snap.Configured`, which exports
+nothing; P1-G: the writer-identity check removed, which pages *and* latches).

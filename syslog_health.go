@@ -154,9 +154,36 @@ type syslogHealthRecord struct {
 	// installedAt anchors the never-delivered age measurement.
 	installedAt time.Time
 
-	// target is the operator-facing collector address, kept only to name the
-	// transport in the UDP caveat. Never reaches an alert Detail.
+	// target is the operator-facing collector address of the INSTALLED
+	// Writer, kept to name the transport in the UDP caveat and to compare
+	// against the operator's intent. Never reaches an alert Detail.
 	target string
+
+	// intendedTarget is the collector the operator has ASKED for, recorded
+	// whether or not a Writer could be installed for it (CHAOS-72 P1-F).
+	//
+	// Every surface in this file used to gate on `configured`, which is set
+	// only once a Writer exists — so a node whose collector was unreachable at
+	// boot exported NO culvert_syslog_* series at all. The documented paging
+	// rule is `culvert_syslog_up == 0`, and an absent series cannot satisfy
+	// it: the one node whose SIEM feed never came up was also the one node
+	// monitoring could not see, while a node that connected and then died was
+	// fully visible. That is the emission rule of this file (never export a
+	// zero for a feature nobody asked for) applied to the wrong question —
+	// "is there a Writer" instead of "did an operator ask for one".
+	//
+	// It duplicates the package-level syslogConfiguredAddr, deliberately: that
+	// variable is a plain string read by checkSyslogFeed from handler
+	// goroutines and written by the admin plane, whereas this record is read
+	// from the DRAIN goroutine (syslogFeedState via noteSyslogDelivery) and so
+	// must be mutex-guarded. Both are set at the same four sites. Repointing
+	// checkSyslogFeed's init-time branches at this record — which would remove
+	// the duplication AND that variable's own unsynchronised read/write pair —
+	// is recorded as a follow-up rather than folded in here.
+	intendedTarget string
+	// intentAt anchors the age of an UNMET intent, which has no install and no
+	// delivery to measure from.
+	intentAt time.Time
 	// writer is the Writer this record describes. Publication of the active
 	// writer and installation of this record are one serialized transition
 	// (syslogPublishMu), so writer == activeSyslog() whenever neither is
@@ -236,12 +263,44 @@ func noteSyslogWriterInstalled(sw *syslogWriter, target string) {
 	syslogHealth.installedAt = syslogHealthNow()
 	syslogHealth.target = target
 	syslogHealth.writer = sw
+	// An installed Writer IS a satisfied intent, whatever was recorded before.
+	// Without this the admin re-point path — which never calls
+	// noteSyslogIntent, because it refuses a failed dial with a 400 — would
+	// leave the PREVIOUS target recorded as the intent and report the new,
+	// working collector as unmet.
+	if syslogHealth.intendedTarget != target {
+		syslogHealth.intendedTarget = target
+		syslogHealth.intentAt = syslogHealth.installedAt
+	}
 	syslogHealth.alerted = false
 	syslogHealth.logAt = time.Time{}
 	syslogHealth.suppressed = 0
 	syslogHealth.mu.Unlock()
 
 	sw.SetDeliveryObserver(noteSyslogDelivery)
+}
+
+// noteSyslogIntent records that an operator has asked for a collector, BEFORE
+// the dial that may or may not produce a Writer for it (CHAOS-72 P1-F).
+//
+// Called from the two startup paths that tolerate a failed connect — the
+// YAML/flag slice and the persisted-admin-settings apply. The live admin
+// re-point does not need it: it refuses a failed dial with a 400 and leaves
+// the previous target in force, so intent there only ever moves on success.
+//
+// A repeat of the same target does not re-anchor intentAt: re-applying the
+// same unreachable collector on the next boot is the same unmet intent, and
+// restarting the clock would make an outage look newer than it is.
+func noteSyslogIntent(target string) {
+	if target == "" {
+		return
+	}
+	syslogHealth.mu.Lock()
+	if syslogHealth.intendedTarget != target {
+		syslogHealth.intendedTarget = target
+		syslogHealth.intentAt = syslogHealthNow()
+	}
+	syslogHealth.mu.Unlock()
 }
 
 // noteSyslogForwardingDisabled records that the operator turned forwarding off,
@@ -258,6 +317,9 @@ func noteSyslogForwardingDisabled() {
 	syslogHealth.configured = false
 	syslogHealth.installedAt = time.Time{}
 	syslogHealth.target = ""
+	syslogHealth.intendedTarget = ""
+	syslogHealth.intentAt = time.Time{}
+
 	syslogHealth.writer = nil
 	syslogHealth.alerted = false
 	syslogHealth.logAt = time.Time{}
@@ -283,12 +345,28 @@ func noteSyslogDelivery(delivered bool) {
 // once per episode. Called from the drop observer (immediate on a busy node)
 // and from the watchdog (so a node that went quiet mid-outage still pages).
 func evaluateSyslogDegradation() {
-	snap := syslogFeedState()
+	commitSyslogDegradation(syslogFeedState())
+}
+
+// commitSyslogDegradation is the commit half, split out so the stale-snapshot
+// interleaving can be driven deterministically instead of raced: the window it
+// closes is real but cannot be scheduled from a test through the public entry
+// point.
+func commitSyslogDegradation(snap syslogFeedSnapshot) {
 	if !snap.Degraded {
 		return
 	}
 
 	syslogHealth.mu.Lock()
+	// The record may have been REPLACED since this snapshot was taken (an
+	// admin re-point runs noteSyslogWriterInstalled, which resets the latch
+	// for the new writer). Committing here would page about the old target
+	// and, worse, leave the NEW record latched — silencing the replacement's
+	// first real outage. The replacement's own evaluation reports it.
+	if syslogHealth.writer != snap.writer {
+		syslogHealth.mu.Unlock()
+		return
+	}
 	now := syslogHealthNow()
 	shouldLog := syslogHealth.logAt.IsZero() || now.Sub(syslogHealth.logAt) >= syslogLogInterval
 	if shouldLog {
@@ -300,14 +378,32 @@ func evaluateSyslogDegradation() {
 	syslogHealth.alerted = true
 	syslogHealth.mu.Unlock()
 
+	// An UNMET intent gets its own sentence. The general one dates the outage
+	// from the last delivery and names a drop count; with no Writer there has
+	// never been a delivery and there are no drops to name, so it would read
+	// "delivered nothing for 5m (0 events dropped, reason: unknown)" and send
+	// an operator looking for a collector that is discarding events, when the
+	// remedy is that no connection was ever made. The Detail stays BOUNDED —
+	// two fixed sentences, an age and a count — so Dispatch's event+Detail
+	// dedup still collapses repeats.
+	logLine := fmt.Sprintf("WARN syslog: SIEM feed not delivering — no line has reached the collector for %s (%d lines dropped, last failure %q); audit and request events are NOT reaching the SIEM",
+		snap.Age.Round(time.Second), snap.Drops, sanitizeLog(snap.Reason))
+	detail := fmt.Sprintf(
+		"the remote syslog/SIEM feed has delivered nothing for %s (%d events dropped, reason: %s); audit and request events are not reaching the collector while the node keeps proxying normally",
+		snap.Age.Round(time.Second), snap.Drops, reasonOrUnknown(snap.Reason))
+	if snap.IntentUnmet {
+		logLine = fmt.Sprintf("WARN syslog: SIEM forwarding is configured but NOTHING is serving it — the collector could not be connected %s ago and nothing retries; audit and request events are NOT reaching the SIEM",
+			snap.Age.Round(time.Second))
+		detail = fmt.Sprintf(
+			"remote syslog/SIEM forwarding is configured but no connection was ever established (%s ago) and nothing retries it; audit and request events are not reaching the collector while the node keeps proxying normally",
+			snap.Age.Round(time.Second))
+	}
+
 	if shouldLog && logger != nil {
-		logger.Printf("WARN syslog: SIEM feed not delivering — no line has reached the collector for %s (%d lines dropped, last failure %q); audit and request events are NOT reaching the SIEM",
-			snap.Age.Round(time.Second), snap.Drops, sanitizeLog(snap.Reason))
+		logger.Print(logLine)
 	}
 	if alertNow {
-		fireSyslogFeedDownAlert(fmt.Sprintf(
-			"the remote syslog/SIEM feed has delivered nothing for %s (%d events dropped, reason: %s); audit and request events are not reaching the collector while the node keeps proxying normally",
-			snap.Age.Round(time.Second), snap.Drops, reasonOrUnknown(snap.Reason)))
+		fireSyslogFeedDownAlert(detail)
 	}
 }
 
@@ -371,10 +467,24 @@ func startSyslogHealthWatchdog(ctx context.Context) {
 
 // syslogFeedSnapshot is the derived view every surface reads.
 type syslogFeedSnapshot struct {
-	// Configured is true once a Writer has been installed. Distinct from the
-	// operator INTENT recorded in syslogConfiguredAddr, which is set even when
-	// the initial dial failed.
+	// Configured is true once a Writer has been installed. Distinct from
+	// Intended, which is true from the moment an operator asks for a
+	// collector — including when the dial that would have produced the Writer
+	// failed.
 	Configured bool
+	// Intended is true when an operator has configured a collector, whether or
+	// not a Writer exists to serve it. It is what every EXPORT gates on: the
+	// question monitoring asks is "was this feature asked for", not "did it
+	// come up".
+	Intended bool
+	// IntentUnmet is true when a collector is configured and nothing is
+	// serving it — either no Writer at all (the boot dial failed), or a Writer
+	// still pointing at a PREVIOUS target because a later re-point failed.
+	// Nothing retries either case, so it is terminal until an operator acts:
+	// it is reported as degraded immediately rather than after the window,
+	// which is also what the `syslog_feed` contract row has always done for
+	// the same condition.
+	IntentUnmet bool
 	// NeverDelivered is true when this Writer has never got a line out.
 	NeverDelivered bool
 	// Degraded is the paging predicate: lines are being lost AND nothing has
@@ -398,6 +508,15 @@ type syslogFeedSnapshot struct {
 	FailingFor time.Duration
 	// UDP records that this feed cannot prove delivery; see the header.
 	UDP bool
+
+	// writer is the Writer this snapshot describes. A caller that SNAPSHOTS
+	// and then COMMITS a decision under the lock must check it still holds:
+	// an admin re-point between the two installs a new record, and a stale
+	// callback committing into it fires a page describing the OLD target AND
+	// sets the new record's fire-once latch — which then suppresses the
+	// replacement's first real outage, because ordinary deliveries do not
+	// invoke the observer and nothing else clears it (Codex P1, PR #1494).
+	writer *syslogWriter
 }
 
 // syslogFeedState derives the current posture from the Writer's own stats plus
@@ -411,15 +530,28 @@ func syslogFeedState() syslogFeedSnapshot {
 	configured := syslogHealth.configured
 	installedAt := syslogHealth.installedAt
 	target := syslogHealth.target
+	described := syslogHealth.writer
+	intendedTarget := syslogHealth.intendedTarget
+	intentAt := syslogHealth.intentAt
 	syslogHealth.mu.Unlock()
 
-	snap := syslogFeedSnapshot{
-		Configured: configured,
-		UDP:        !strings.HasPrefix(strings.ToLower(target), "tcp://"),
+	// The caveat describes the transport the operator ASKED for when nothing
+	// is installed — there is no Writer whose scheme could be reported.
+	caveatTarget := target
+	if caveatTarget == "" {
+		caveatTarget = intendedTarget
 	}
+	now := syslogHealthNow()
+	snap := syslogFeedSnapshot{
+		writer:     described,
+		Configured: configured,
+		Intended:   intendedTarget != "",
+		UDP:        !strings.HasPrefix(strings.ToLower(caveatTarget), "tcp://"),
+	}
+	snap.IntentUnmet = snap.Intended && (described == nil || target != intendedTarget)
 	sw := activeSyslog()
 	if !configured || sw == nil {
-		return snap
+		return finishUnmetSyslogIntent(snap, now, intentAt)
 	}
 	st := sw.Stats()
 	snap.Delivered = st.Delivered
@@ -431,7 +563,6 @@ func syslogFeedState() syslogFeedSnapshot {
 	snap.QueueCap = st.QueueCap
 	snap.LastSuccess = st.LastSuccess
 
-	now := syslogHealthNow()
 	ref := st.LastSuccess
 	if ref.IsZero() {
 		snap.NeverDelivered = true
@@ -478,6 +609,37 @@ func syslogFeedState() syslogFeedSnapshot {
 	snap.Degraded = snap.ConsecutiveFailures > 0 &&
 		snap.Age >= syslogDegradedAfter &&
 		snap.FailingFor >= syslogDegradedAfter
+	return finishUnmetSyslogIntent(snap, now, intentAt)
+}
+
+// finishUnmetSyslogIntent overlays the unmet-intent verdict onto a snapshot.
+//
+// It runs on BOTH exits of syslogFeedState because the condition has two
+// shapes: no Writer at all (the boot dial failed) and a Writer serving a
+// target the operator has since moved away from (a later re-point failed).
+// The second one still has live counters, and they are left untouched — the
+// drops a displaced Writer recorded are real events that never reached any
+// SIEM, and zeroing them would make culvert_syslog_drops_total go BACKWARDS,
+// which breaks rate() on the one series that measures compliance loss.
+//
+// Only the verdict and the age are overlaid: the feed is DOWN, and it has been
+// down for as long as the intent has gone unserved (the longer of that and any
+// staleness the displaced Writer already reported, so an observed outage is
+// never shortened by a fresher intent stamp).
+func finishUnmetSyslogIntent(snap syslogFeedSnapshot, now time.Time, intentAt time.Time) syslogFeedSnapshot {
+	if !snap.IntentUnmet {
+		return snap
+	}
+	snap.Degraded = true
+	snap.NeverDelivered = snap.LastSuccess.IsZero()
+	if !intentAt.IsZero() {
+		if age := now.Sub(intentAt); age > snap.Age {
+			snap.Age = age
+		}
+	}
+	if snap.Age < 0 {
+		snap.Age = 0
+	}
 	return snap
 }
 
@@ -590,7 +752,13 @@ func checkSyslogFeedDelivery() (OperatorContractCheck, bool) {
 // gauges.
 func syslogWritePrometheus(w *strings.Builder) {
 	snap := syslogFeedState()
-	if !snap.Configured {
+	// EITHER half admits the series. Configured alone was the gate, and it is
+	// set only once a Writer exists — so the node whose collector was
+	// unreachable at boot exported nothing, and `culvert_syslog_up == 0` could
+	// not fire for precisely the feed that never came up (CHAOS-72 P1-F). The
+	// emission rule is about whether the feature was ASKED for; an operator
+	// who configured a collector has asked, and gets a truthful 0.
+	if !snap.Configured && !snap.Intended {
 		return
 	}
 
@@ -707,6 +875,9 @@ func resetSyslogHealthForTest() {
 	syslogHealth.configured = false
 	syslogHealth.installedAt = time.Time{}
 	syslogHealth.target = ""
+	syslogHealth.intendedTarget = ""
+	syslogHealth.intentAt = time.Time{}
+
 	syslogHealth.writer = nil
 	syslogHealth.alerted = false
 	syslogHealth.logAt = time.Time{}

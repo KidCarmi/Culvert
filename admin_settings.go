@@ -492,6 +492,10 @@ func applyAdminServices(s *AdminSettings) {
 		// Record intent even if the connect fails so checkSyslogFeed surfaces a
 		// silently-down SIEM feed (see syslogConfiguredAddr).
 		syslogConfiguredAddr = s.SyslogAddr
+		// See loadObservability: the health plane needs the intent under its
+		// own mutex so a persisted target that will not connect is still
+		// exported as down (CHAOS-72 P1-F).
+		noteSyslogIntent(s.SyslogAddr)
 		if err := InitSyslog(s.SyslogAddr, s.SyslogFormat); err == nil {
 			syslogConfigured = s.SyslogAddr
 		}
