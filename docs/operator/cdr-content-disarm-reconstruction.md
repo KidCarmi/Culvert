@@ -198,15 +198,20 @@ active `ENFORCE` sanitization accordingly; the cache only saves RPCs for
 files that turn out clean, unsupported, or blocked.
 
 **The cache key is the file hash alone — it does not include the matched
-policy profile.** `safeCDRSanitize` evaluates the request's policy profile
-first and stores it on the cache entry for display, but `cdrCacheLookup`
-looks entries up by SHA-256 hash + policy epoch only. So if two profiles
-exist with different strictness and both can see the same file bytes, a
-verdict cached under a lenient profile (e.g. `CLEAN`) is reused for a later
-request that matches a stricter profile, without calling Sluice again for
-that stricter profile's own evaluation. This is only a concern when you run
-more than one CDR policy profile with materially different behavior for
-the same content; a single-profile deployment is unaffected.
+policy profile or mode.** `safeCDRSanitize` evaluates the request's policy
+profile and mode first and stores both on the cache entry for display, but
+`cdrCacheLookup` looks entries up by SHA-256 hash + policy epoch only. So a
+verdict cached under one rule's profile+mode is reused verbatim for a later
+request that matches a *different* rule for the same bytes — whether that
+rule selects a different, less strict profile, or the **same** profile
+under a different mode (e.g. one rule runs it `ENFORCE`, another
+`REPORT_ONLY`/`BYPASS_WITH_REPORT` for a different source/destination
+match). In the latter case an `ENFORCE`-cached `BLOCKED` verdict can still
+block a later request that matched a bypass/report-only rule, or a
+report-only-cached verdict can silently skip enforcement it should have
+applied. This affects any deployment with more than one CDR policy rule
+that can see the same file bytes under different profiles or modes — not
+just multi-profile setups.
 
 ## Multi-instance pool and circuit breaker
 
@@ -398,6 +403,17 @@ above), `queue_depth` (gauge, pool-wide aggregate). Per-instance (labeled
 0=closed/1=open/2=half_open), `pool_breaker_trips_total`. Labels are
 otherwise deliberately low-cardinality — no filename, destination host, or
 user identity — by contract with Sluice.
+
+**`bytes_in_total` is currently inert — it reads zero on every node.** Its
+backing counter, `statCDRBytesIn`, is declared and exposed by
+`cdrWriteByteMetrics` but nothing in the codebase increments it. The actual
+bytes streamed to Sluice per Sanitize call are tracked by a separate
+counter, `statCDRBytesSent` (incremented per chunk in `sendSanitizeBody`),
+which has no Prometheus exposure at all today. `bytes_out_total`
+(`statCDRBytesOut`, the sanitized bytes read back from Sluice) is wired
+correctly and can be trusted. Don't build a throughput/capacity dashboard
+on `bytes_in_total` expecting it to move — it won't, on any version of
+Culvert as of this writing.
 
 ## API reference
 
