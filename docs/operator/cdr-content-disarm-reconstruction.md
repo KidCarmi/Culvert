@@ -43,7 +43,7 @@ Two ways to turn CDR on, and either one is enough — you do not need both:
    | `-cdr-endpoint` | `cdr.endpoint` | Sluice gRPC address, `host:port` (e.g. `sluice:8443`) | — |
    | `-cdr-default-profile` | `cdr.default_profile` | Sanitization profile sent when no CDR policy rule matches; must name a profile Sluice's `Health` RPC advertises | `default` |
    | `-cdr-default-mode` | `cdr.default_mode` | Mode sent when no rule matches: `ENFORCE`, `REPORT_ONLY`, or `BYPASS_WITH_REPORT` | `ENFORCE` |
-   | `-cdr-timeout-sec` | `cdr.timeout_sec` | Per-file deadline; must be ≥ 30 (Sluice's own cap is 30s — Culvert adds 5s so its own timeout fires last) | 35 |
+   | `-cdr-timeout-sec` | `cdr.timeout_sec` | Per-file deadline; must be ≥ 30 (Sluice's own `workers.timeout` **defaults** to 30s but is operator-configurable on the Sluice side, down to 1s and with no documented upper bound — Culvert's 35s default only fires last against that default; if your Sluice deployment raises `workers.timeout` above 35s, raise `cdr.timeout_sec` to match or Culvert will cancel a legitimate long-running job before Sluice does) | 35 |
    | `-cdr-max-file-size-mb` | `cdr.max_file_size_mb` | Skip CDR (no RPC) for a buffered body larger than this | 50 |
    | `-cdr-server-fingerprint` | `cdr.server_fingerprint` | TOFU-pinned SHA-256 of Sluice's server certificate (hex; `sha256:` prefix optional) | — |
    | `-cdr-certs-dir` | `cdr.certs_dir` | Directory holding the Sluice mTLS client bundle (`ca.pem`, `client.pem`, `client.key`) | — |
@@ -267,7 +267,16 @@ inspected response in memory.
 Per-request outcomes are also gated by the CDR policy rule's own **Mode**
 (`ENFORCE` strips and delivers the sanitized file; `REPORT_ONLY` detects and
 logs but delivers the original bytes; `BYPASS_WITH_REPORT` is a VIP carve-out
-— report threats, still deliver the original). An invalid mode is normally
+— report threats, still deliver the original) — **except when Sluice's
+verdict is `BLOCKED`.** `cdrClassifyResult` maps `pb.Status_BLOCKED` to
+`cdrBlockResult` (delivery refused, block page) unconditionally — it never
+inspects `mode` on that branch. So an unsalvageable file still produces a
+block page under `REPORT_ONLY` or `BYPASS_WITH_REPORT`, the same as under
+`ENFORCE`; those modes only change behavior for a `CLEAN`/`SANITIZED`/
+`UNSUPPORTED` verdict, never for `BLOCKED`. Don't advertise `REPORT_ONLY`/
+`BYPASS_WITH_REPORT` to operators as "always delivers the original file" —
+a staged rollout or VIP carve-out on either mode can still block a
+download. An invalid mode is normally
 **rejected, not defaulted**: with `cdr.enabled: true`, an invalid
 `cdr.default_mode` fails config validation and stops startup, and
 creating a CDR policy rule with an invalid mode is refused by the API. Only
@@ -477,10 +486,26 @@ enrolled instances — manual action is a fallback, not the normal path:
   message shape with no fingerprint fields at all, so it's not authoritative
   either way for the currently-pinned Sluice version. Don't treat "automatic"
   here as a guarantee: verify a real rotation against your deployed Sluice
-  version before relying on it, and keep `cdr.server_fingerprint` update
-  as your fallback if a rotation isn't picked up (check the log for
-  `CDR: server-cert rotation` lines, or `GET /api/cdr/health` for staleness,
-  to tell whether the dual-pin ever actually armed).
+  version before relying on it (check the log for `CDR: server-cert rotation`
+  lines, or `GET /api/cdr/health` for staleness, to tell whether the dual-pin
+  ever actually armed).
+
+  **Updating `cdr.server_fingerprint` / `-cdr-server-fingerprint` is *not*
+  a usable fallback for an already-enrolled (registry-backed) instance.**
+  `buildCDRPoolFromRegistry` dials every enrolled instance through
+  `dialEnrolledInstance`, which always pins to `inst.ServerFingerprint` —
+  the value stored in `cdr_instances.json` for that instance — and never
+  reads `CDRConfig.ServerFingerprint` at all. The config/CLI value is
+  consulted only by `bootstrapPoolFromConfig`, which is reached exclusively
+  when the registry is *empty* (the anonymous config/CLI-only bootstrap
+  path). So if a rotation isn't picked up automatically for an enrolled
+  instance, changing the config value does nothing — the pool keeps
+  dialing with the stale registry pin. There is also no admin API to
+  update an enrolled instance's pin in place (`/api/cdr/instances` only
+  supports `GET`/`DELETE`, and enrollment refuses re-adding a name that's
+  still present). The actual recovery is: `DELETE` the stale instance
+  (`?name=…`), then re-enroll it via `POST /api/cdr/instances/enroll`,
+  which persists the current server fingerprint as the new registry pin.
 
 ## Policy rules
 
@@ -537,11 +562,24 @@ backing counter, `statCDRBytesIn`, is declared and exposed by
 `cdrWriteByteMetrics` but nothing in the codebase increments it. The actual
 bytes streamed to Sluice per Sanitize call are tracked by a separate
 counter, `statCDRBytesSent` (incremented per chunk in `sendSanitizeBody`),
-which has no Prometheus exposure at all today. `bytes_out_total`
-(`statCDRBytesOut`, the sanitized bytes read back from Sluice) is wired
-correctly and can be trusted. Don't build a throughput/capacity dashboard
-on `bytes_in_total` expecting it to move — it won't, on any version of
-Culvert as of this writing.
+which has no Prometheus exposure at all today. Don't build a
+throughput/capacity dashboard on `bytes_in_total` expecting it to move —
+it won't, on any version of Culvert as of this writing.
+
+**`bytes_out_total` (`statCDRBytesOut`) is narrower than "bytes received
+from Sluice" — it only counts a request-path `SANITIZED` swap.** It's
+incremented in exactly one place: `runCDRStage`'s `cdrSwap` branch, i.e.
+only when a proxied request's Sanitize call returns `SANITIZED` and the
+reconstructed body is swapped into the response. The bytes actually
+streamed back from Sluice on *every* call (including `CLEAN`/`UNSUPPORTED`/
+`BLOCKED` outcomes) are tracked by the separate, unexported
+`statCDRBytesReceived` (incremented per chunk in the shared receive loop
+in `cdr.go`), which has no Prometheus exposure either. `POST /api/cdr/test`
+calls `client.Sanitize` directly and never goes through `runCDRStage`, so
+an admin test run can receive an entire sanitized/original response
+without moving `bytes_out_total` at all. Treat `bytes_out_total` as "bytes
+delivered to a client via a request-path sanitization swap," not as total
+Sluice response throughput.
 
 ## API reference
 
