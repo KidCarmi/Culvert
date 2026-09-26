@@ -91,6 +91,15 @@ const (
 	// oldest-first by fetch time.
 	MaxEntries = 64
 
+	// MaxIndexBytes bounds the index READ, derived rather than picked: at most
+	// MaxEntries records, and 4 KiB is far above what one record can serialise to
+	// (five short fields, the longest an operator-chosen profile id). It exists
+	// because os.ReadFile sizes its buffer from the FILE and json.Unmarshal will
+	// populate a map of any size, so MaxEntries bounded writes and bounded
+	// NOTHING on the boot/compile read path — the same gap round 11 closed for
+	// the document read, left open on its twin, the index (Codex round 13).
+	MaxIndexBytes = MaxEntries * 4096
+
 	indexFile = "index.json"
 	dirPerm   = 0o700
 	filePerm  = 0o600
@@ -192,9 +201,17 @@ func (s *Store) loadLocked() {
 		return
 	}
 	s.loaded = true
-	data, err := os.ReadFile(filepath.Join(s.dir, indexFile))
+	f, err := os.Open(filepath.Join(s.dir, indexFile)) // #nosec G304 -- fixed name inside the store dir
 	if err != nil {
 		return // first run, or an unreadable index: start empty, never fail
+	}
+	defer func() { _ = f.Close() }()
+	// Bounded read: one byte past the cap distinguishes "at the limit" from
+	// "over it", and an over-cap index is treated exactly as a corrupt one —
+	// start empty, never fail a boot over a cache of a remote resource.
+	data, err := io.ReadAll(io.LimitReader(f, MaxIndexBytes+1))
+	if err != nil || len(data) > MaxIndexBytes {
+		return
 	}
 	var idx map[string]*entry
 	if err := json.Unmarshal(data, &idx); err != nil {
@@ -208,6 +225,12 @@ func (s *Store) loadLocked() {
 			s.entries[k] = e
 		}
 	}
+	// A file can carry more records than the cap, so the cap is applied on the
+	// way IN as well as on the way out. evictLocked is reused rather than a
+	// second retention rule written here: one policy (oldest fetch first, ties
+	// by key, orphaned document removed) keeps the directory from outgrowing the
+	// index, which is the invariant it already exists to hold.
+	s.evictLocked()
 }
 
 // Get returns the cached document for (profileID, kind, source) together with

@@ -2,6 +2,8 @@ package idpmeta
 
 import (
 	"bytes"
+	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -351,5 +353,82 @@ func TestGet_HealthyDocumentStillRoundTripsAfterTheBound(t *testing.T) {
 	}
 	if !bytes.Equal(got, doc) {
 		t.Fatalf("doc = %q, want %q", got, doc)
+	}
+}
+
+// ── ROUND 13: the index read is bounded too ──────────────────────────────────
+
+// TestLoad_OversizeIndexIsRefused is the defect gate. os.ReadFile sized its
+// buffer from the FILE and json.Unmarshal will populate a map of any size, so
+// MaxEntries bounded writes and bounded nothing on the boot/compile read path —
+// round 11's document-read gap, left open on its twin, the index.
+//
+// An over-cap index is treated exactly as a corrupt one: start empty, never fail
+// a boot over a cache of a remote resource.
+func TestLoad_OversizeIndexIsRefused(t *testing.T) {
+	dir := t.TempDir()
+	// A syntactically VALID index, padded past the cap with whitespace so only
+	// the size bound can reject it — not the JSON decoder.
+	body := []byte(`{"k":{"profile_id":"corp","kind":"saml_metadata","source_sum":"aa","fetched_at":1,"bytes":1}}`)
+	pad := make([]byte, MaxIndexBytes+1-len(body))
+	for i := range pad {
+		pad[i] = ' '
+	}
+	if err := os.WriteFile(filepath.Join(dir, indexFile), append(body, pad...), 0o600); err != nil {
+		t.Fatalf("seed oversize index: %v", err)
+	}
+
+	s := New(dir)
+	s.mu.Lock()
+	s.loadLocked()
+	n := len(s.entries)
+	s.mu.Unlock()
+	if n != 0 {
+		t.Fatalf("an over-cap index loaded %d entries; MaxEntries does not bound the read path", n)
+	}
+}
+
+// TestLoad_IndexWithTooManyRecordsIsCapped pins the OTHER half: a file can carry
+// more records than the cap even while fitting inside MaxIndexBytes, so the cap
+// is applied on the way IN as well as on the way out.
+func TestLoad_IndexWithTooManyRecordsIsCapped(t *testing.T) {
+	dir := t.TempDir()
+	idx := make(map[string]*entry, MaxEntries*2)
+	for i := 0; i < MaxEntries*2; i++ {
+		k := fmt.Sprintf("k%03d", i)
+		idx[k] = &entry{ProfileID: "corp", Kind: KindSAMLMetadata, SourceSum: k, FetchedAt: int64(i + 1), Bytes: 1}
+	}
+	data, err := json.Marshal(idx)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if len(data) > MaxIndexBytes {
+		t.Fatalf("fixture is %d bytes, over MaxIndexBytes — it would be rejected by the size bound instead", len(data))
+	}
+	if err := os.WriteFile(filepath.Join(dir, indexFile), data, 0o600); err != nil {
+		t.Fatalf("seed index: %v", err)
+	}
+
+	s := New(dir)
+	s.mu.Lock()
+	s.loadLocked()
+	n := len(s.entries)
+	s.mu.Unlock()
+	if n > MaxEntries {
+		t.Fatalf("loaded %d entries, want at most the %d cap", n, MaxEntries)
+	}
+}
+
+// TestLoad_HealthyIndexStillLoads is the CONTROL. The cheapest way to pass both
+// gates above is a loadLocked that loads nothing, which would silently delete the
+// last-known-good fallback this package exists to provide.
+func TestLoad_HealthyIndexStillLoads(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.Put("corp", KindSAMLMetadata, "https://idp.example/md", []byte("<EntityDescriptor/>")); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	// A fresh Store over the same directory must see it through loadLocked.
+	if _, _, err := New(s.dir).Get("corp", KindSAMLMetadata, "https://idp.example/md"); err != nil {
+		t.Fatalf("a healthy index must still load: %v", err)
 	}
 }

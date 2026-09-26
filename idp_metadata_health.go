@@ -702,7 +702,16 @@ func idpStaleCeilingSweep(now time.Time) []idpStaleCeilingVictim {
 			continue
 		}
 		age := now.Sub(ep.servedFetchedAt)
-		if age < idpmeta.StaleMaxAge {
+		// A NEGATIVE age is EXPIRED, not fresh (Codex round 13). idpmeta.Get
+		// already refuses a negative age for exactly this reason — the store's
+		// own rule, CHAOS-61's "a negative age is stale, never maximally fresh"
+		// — and this sweep is the LIVE-PROVIDER half of the same ceiling. Read
+		// naively, a wall clock stepping backwards after a provider started
+		// serving cache puts the age comfortably under StaleMaxAge, so the
+		// provider keeps trusting possibly-withdrawn SAML signing material until
+		// the clock catches up: the rule enforced on the compile path and not on
+		// the path that decides whether a LIVE provider may keep serving.
+		if age >= 0 && age < idpmeta.StaleMaxAge {
 			continue
 		}
 		out = append(out, idpStaleCeilingVictim{profileID: ep.profileID, source: ep.source, age: age, servedAt: ep.servedFetchedAt})

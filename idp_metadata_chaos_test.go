@@ -2759,3 +2759,58 @@ func TestChaos71_StillAuthoritativeRecoveryFailureKeepsItsEpisode(t *testing.T) 
 			"signal and must survive a failed recovery attempt")
 	}
 }
+
+// ── ROUND 13: a negative cache age is EXPIRED on the live-provider path too ───
+
+// ROUND 13 P2 (DEFECT GATE). idpmeta.Get already refuses a negative age — the
+// store's own rule, CHAOS-61's "a negative age is stale, never maximally fresh".
+// idpStaleCeilingSweep is the LIVE-PROVIDER half of the same ceiling and read it
+// naively, so a wall clock stepping backwards after a provider began serving
+// cache put the age comfortably under StaleMaxAge and the provider kept trusting
+// possibly-withdrawn SAML signing material until the clock caught up.
+//
+// Verified FAILING against the pre-fix condition (`age < idpmeta.StaleMaxAge`).
+func TestChaos71_NegativeCacheAgeIsRetired(t *testing.T) {
+	chaos71Env(t)
+	const id = "corp"
+	src := chaos71Source(id)
+
+	served := chaos71SeedStaleServe(id, src)
+
+	// The clock steps BACKWARDS past the moment the document was fetched.
+	rolledBack := served.Add(-time.Hour)
+	victims := idpStaleCeilingSweep(rolledBack)
+
+	var found bool
+	for _, v := range victims {
+		if v.profileID == id && v.source == src {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("a NEGATIVE age (clock rolled back past the fetch time) was treated as "+
+			"comfortably under the %s ceiling, so the live provider keeps serving a "+
+			"document whose signing material may have been withdrawn", idpmeta.StaleMaxAge)
+	}
+}
+
+// ROUND 13 CONTROL. The cheapest way to pass the gate above is to retire on every
+// age, which would take SSO down on every sweep for every provider serving a
+// perfectly fresh cached document — round 8's control, and far worse than a clock
+// rollback.
+func TestChaos71_FreshCacheAgeIsNotRetired(t *testing.T) {
+	chaos71Env(t)
+	const id = "corp"
+	src := chaos71Source(id)
+
+	served := chaos71SeedStaleServe(id, src)
+
+	// Well inside the ceiling, clock moving forward as normal.
+	victims := idpStaleCeilingSweep(served.Add(time.Minute))
+	for _, v := range victims {
+		if v.profileID == id && v.source == src {
+			t.Fatal("a document fetched a minute ago is inside the ceiling and must " +
+				"NOT be retired — retiring it would take SSO down on a healthy fleet")
+		}
+	}
+}
