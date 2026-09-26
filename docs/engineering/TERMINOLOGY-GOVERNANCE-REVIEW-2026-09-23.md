@@ -96,11 +96,13 @@ audit action strings, generated OpenAPI operation IDs).
    "refresh" finds them only if the feed URL or the actor happens to contain it. The **new React admin
    frontend** (`frontend/src/features/security/ThreatIntelTab.tsx`) independently uses "Sync" — button
    label ("Sync feeds now"), component state (`syncing`/`syncError`/`syncNote`), and user-visible copy
-   ("Sync completed…", "The sync request failed.") — and the OpenAPI-generated operation IDs
-   (`syncBlocklistFeed`, `syncThreatFeeds` in `frontend/src/api/types.gen.ts`) carry the same verb.
-   Realigning the new frontend needs a full `npm run verify` + two-build determinism-gate cycle (the T-53
-   fix's precedent) and, if the operation IDs are touched, a bundle regeneration — out of scope for a
-   zero-risk-only fix.
+   ("Sync completed…", "The sync request failed."). Those literals live in the component itself; it
+   imports only the hand-written `syncThreatFeeds` wrapper from `frontend/src/api/contentsec.ts`, not
+   `types.gen.ts`. Realigning that copy needs a full `npm run verify` + two-build determinism-gate cycle
+   (the T-53 fix's precedent) — out of scope for a zero-risk-only fix. Separately and optionally, the
+   OpenAPI operation IDs `syncThreatFeeds` and `syncBlocklistFeed` (`api/openapi/openapi.yaml`, with
+   generated copies in `types.gen.ts` that no hand-written frontend code imports) carry the same verb;
+   renaming them is not needed to fix the React copy.
 
 3. **T-63 — "Decryption Exclusions" (GUI/API) vs `decryption.autoexclude.*` (audit action prefix):
    the one event the feature exists for is not findable by the feature's displayed name.** The nav label
@@ -246,17 +248,24 @@ corrected here rather than silently replaced.)
   - `frontend/src/features/security/ThreatIntelTab.tsx` (the new React admin frontend, disabled by default
     behind `CULVERT_EXPERIMENTAL_UI`) independently says "Sync" — button label, component state
     (`syncing`/`syncError`/`syncNote`), and user-visible strings ("Sync completed — N entries.", "The sync
-    request failed.") — sourced from the OpenAPI-generated `syncThreatFeeds`/`syncBlocklistFeed` operation
-    IDs in `frontend/src/api/types.gen.ts`, which are themselves generated from the backend's OpenAPI
-    bundle. Realigning this surface needs a full frontend text/state-variable pass plus the `npm run
-    verify` (unit tests, lint, format, strict typecheck) + two-build determinism-gate cycle the
-    2026-09-09 report's T-53 fix required, and, only if the operation IDs themselves are renamed, an
-    OpenAPI bundle regeneration — none of which is a same-pass, zero-risk change.
+    request failed."). These literals and state names are written directly in the component
+    (`ThreatIntelTab.tsx:37-77,153,163`); it imports only the hand-written `syncThreatFeeds` wrapper from
+    `frontend/src/api/contentsec.ts:142`, not `types.gen.ts`. Realigning this copy needs a full frontend
+    text/state-variable pass plus the `npm run verify` (unit tests, lint, format, strict typecheck) +
+    two-build determinism-gate cycle the 2026-09-09 report's T-53 fix required — not a same-pass,
+    zero-risk change. It needs no OpenAPI change.
+  - Optional and separate: the OpenAPI operation IDs `syncThreatFeeds` (`api/openapi/openapi.yaml:8479`)
+    and `syncBlocklistFeed` (`:10640`) carry the same verb. Their generated copies in
+    `frontend/src/api/types.gen.ts` are not imported by any hand-written frontend code. Renaming them
+    would need a bundle regeneration and changes a published API identifier; it is not required to fix
+    the React copy, and is recorded only as an option. (An earlier revision said the React copy was
+    "sourced from" these generated IDs and listed `syncBlocklistFeed` in the React residual; corrected
+    after review.)
 - **Affected code:** `static/index.html` (2 button labels + the coupled row button, toast and status
   strings), `internal/blocklistfeed/blocklistfeed.go`
-  (1 doc comment) — this pass. Residual: `frontend/src/features/security/ThreatIntelTab.tsx` and the
-  OpenAPI bundle, for a future pass.
-- **Affected API:** none this pass (residual: OpenAPI operation IDs, if ever renamed).
+  (1 doc comment) — this pass. Residual: `frontend/src/features/security/ThreatIntelTab.tsx` (and,
+  optionally, the `contentsec.ts` wrapper name), for a future pass.
+- **Affected API:** none this pass (optional: the two OpenAPI operation IDs, if ever renamed).
 - **Affected GUI:** blocklist feed and threat feed panels (legacy `static/index.html`) fixed this pass; new
   React frontend's Threat Intelligence tab is residual.
 - **Affected Documentation:** none.
@@ -404,7 +413,7 @@ entries from this report:
 
 | Priority | Finding | Action | Migration risk | Est. PR size |
 |---|---|---|---|---|
-| Medium | T-62 residual | Align `blocklist.feed.sync`/`threatfeed.sync` audit actions to the `.refresh` verb (needs a safe audit-action alias approach, not a blind rename); separately, realign the new React frontend's Threat Intelligence tab wording/state to "Refresh" and regenerate the OpenAPI bundle only if the operation IDs are touched for another reason | Medium (audit strings); Low (frontend, default-off) | Small-Medium (audit); Medium (frontend, gated by full verify pipeline) |
+| Medium | T-62 residual | Align `blocklist.feed.sync`/`threatfeed.sync` audit actions to the `.refresh` verb (needs a safe audit-action alias approach, not a blind rename); separately, realign the new React frontend's Threat Intelligence tab wording/state to "Refresh" (component literals only; no OpenAPI change needed). Optional: rename the `syncThreatFeeds`/`syncBlocklistFeed` operation IDs with a bundle regeneration | Medium (audit strings); Low (frontend, default-off) | Small-Medium (audit); Medium (frontend, gated by full verify pipeline) |
 | Low | T-63 | Mention the exclusion in the `decryption.autoexclude.learn` (and absent-entry evict) audit detail text so a search for "exclusion" finds them; or cross-reference "autoexclude" in `docs/operator/decryption-auto-exclusions.md` | Low | Small |
 | Low | T-61 | Rename `culvert_auth_backend_*` → `culvert_identity_backend_*` with a dual-emission deprecation window (the T-31 precedent), only if a dedicated metrics-naming pass is ever scoped; otherwise an owner may close it as accepted, relying on the `metrics.go` cross-reference | High | Medium-Large |
 
