@@ -84,6 +84,7 @@ func logoutRequestWithCookie(name, value string) *http.Request {
 // Verified FAILING against the pre-fix body (clear-only): the session still
 // decodes after logout.
 func TestChaos68_ProxyLogoutRevokesTheSessionToken(t *testing.T) {
+	withChaos68Revocations(t)
 	value, key := logoutTestSession(t, "chaos68-proxy-logout")
 
 	if _, err := decodeSession(value); err != nil {
@@ -114,6 +115,7 @@ func TestChaos68_ProxyLogoutRevokesTheSessionToken(t *testing.T) {
 //
 // Verified FAILING against the pre-fix body: the forged payload is revoked.
 func TestChaos68_ForgedLogoutCookieCreatesNoRevocation(t *testing.T) {
+	withChaos68Revocations(t)
 	if !session.HasSigningKey() {
 		initSessionSecret()
 	}
@@ -144,6 +146,7 @@ func TestChaos68_ForgedLogoutCookieCreatesNoRevocation(t *testing.T) {
 // which would silently delete the logout half of the whole plane. Both logout
 // paths must still revoke a GENUINE session.
 func TestChaos68_AdminLogoutStillRevokes(t *testing.T) {
+	withChaos68Revocations(t)
 	value, key := logoutTestSession(t, "chaos68-admin-logout")
 
 	req := logoutRequestWithCookie(uiSessionCookieName, value)
@@ -167,8 +170,21 @@ func TestChaos68_AdminLogoutStillRevokes(t *testing.T) {
 // Verified FAILING against the pre-fix body (bare `return nil`): durable reads
 // true on an unwritable path.
 func TestChaos68_UnwritablePathIsNotReportedDurable(t *testing.T) {
-	resetSessionRevocationHealthForTest()
-	t.Cleanup(resetSessionRevocationHealthForTest)
+	// resetDiagVerdictGlobals, NOT just the session-revocation record: this
+	// test deliberately makes a save FAIL, and a failed durable write also
+	// trips the STORAGE write-health plane (`Storage: DURABLE WRITE FAILED`),
+	// which folds into the aggregate /api/diagnostics verdict. Resetting only
+	// this sweep's own globals leaves that one degraded for the rest of the
+	// binary, so a later test asserting `Verdict != diagFail` fails depending
+	// on order — visible only under -shuffle/-count=2.
+	//
+	// CLAUDE.md records this exact trap from this exact sweep ("a diagFail-
+	// capable contract row whose state is a PROCESS-GLOBAL must be registered
+	// in resetDiagVerdictGlobals in the SAME change"), and these tests were
+	// written without applying it. withChaos68Revocations additionally swaps
+	// the global revocation list so entries do not leak between tests.
+	resetDiagVerdictGlobals(t)
+	withChaos68Revocations(t)
 
 	// A path whose PARENT does not exist: the file is absent (the first-run
 	// branch) and no write to it can ever succeed.
@@ -194,8 +210,8 @@ func TestChaos68_UnwritablePathIsNotReportedDurable(t *testing.T) {
 // path must still read durable — and the probe must have actually created the
 // file, which is what proves the claim was earned rather than assumed.
 func TestChaos68_WritablePathIsStillDurable(t *testing.T) {
-	resetSessionRevocationHealthForTest()
-	t.Cleanup(resetSessionRevocationHealthForTest)
+	resetDiagVerdictGlobals(t)
+	withChaos68Revocations(t)
 
 	good := t.TempDir() + "/revocations.json"
 	prev := session.RevocationsPath()
