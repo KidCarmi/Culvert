@@ -586,13 +586,6 @@ func (s *Writer) SetPanicObserver(fn func(recovered any)) {
 func (s *Writer) deliverLine(line string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	// Captured BEFORE any write: noteDelivered clears exactly this count and
-	// no more, so a queue-full drop landing while the write is in flight
-	// survives instead of being erased by the success. Deliberately taken at
-	// ENTRY rather than just before the write — a drop that happened during a
-	// reconnect is a real loss, and retaining it costs nothing (the delivery
-	// resets the age half of the degradation predicate either way).
-	failuresBefore := s.consecutiveFail.Load()
 	if s.conn == nil {
 		// Backoff: don't retry more often than every 5 seconds.
 		if time.Since(s.lastReconnErr) < 5*time.Second {
@@ -650,6 +643,28 @@ func (s *Writer) deliverLine(line string) {
 	// Reached only when a write returned without error: the first attempt, or
 	// the retry after a successful reconnect. Recorded LAST so no path can
 	// report a delivery it did not make.
+	//
+	// The failure count is read HERE, after the write COMPLETED, and not at
+	// function entry. noteDelivered clears exactly this count and no more, so
+	// the boundary decides which losses a delivery is allowed to resolve:
+	//
+	//   - a drop recorded BEFORE this write completed happened while the
+	//     collector was demonstrably still accepting bytes. It is a real
+	//     compliance loss and stays counted in Drops, but it is NOT evidence
+	//     the feed is down, and letting it survive made a node that then went
+	//     idle report DOWN five minutes later off the back of a delivery that
+	//     had SUCCEEDED (Codex P1, PR #1494).
+	//   - a drop recorded AFTER completion is not resolved by this delivery,
+	//     so the compare-and-swap inside noteDelivered fails and it survives —
+	//     the round-6 property, unchanged.
+	//
+	// Reading at entry instead was justified by "retaining it costs nothing,
+	// the delivery resets the age half of the predicate either way". That was
+	// true until round 7 made a surviving failure DATABLE: a datable failure
+	// can outlast the window on its own, so retaining one now costs a false
+	// page. A later change can invalidate an earlier change's stated
+	// rationale — when it does, the rationale has to be re-read, not inherited.
+	failuresBefore := s.consecutiveFail.Load()
 	s.noteDelivered(failuresBefore, successAt)
 }
 

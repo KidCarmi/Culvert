@@ -8958,3 +8958,80 @@ write-up and its PR description gave the root gate count as
 `syslog_health_chaos_test.go (22)`. The file held **28** at that point; it
 holds 32 now. The engine counts (9 → 11 in `syslog_stats_test.go`, 3 → 4 in
 `syslog_handoff_format_test.go`) were right.
+
+### Round 8 — a delivery resolves what preceded it, and two edits that were never really there
+
+**P1 — the clearest case in this sweep of a later change invalidating an
+earlier one's stated rationale.** `deliverLine` read the failure count at
+function ENTRY. Round 6 chose that deliberately and wrote down why:
+
+> a drop that happened during a reconnect is a real loss, and retaining it
+> costs nothing (the delivery resets the age half of the degradation
+> predicate either way).
+
+That was true when written. Round 7 made it false — it gave a surviving
+failure a usable episode start, and a *datable* failure can outlast the
+degradation window on its own. So a queue-full drop landing while `writeLine`
+was blocked, at a moment the collector was demonstrably still accepting bytes
+because the write then SUCCEEDED, was excluded from the clear and left behind;
+a node that went idle afterwards reported DOWN five minutes later off the back
+of a delivery that had worked.
+
+The count is now read AFTER the write completes, which states the rule at the
+boundary:
+
+- a drop recorded **before** completion is a real compliance loss, stays in
+  `Drops`, and is **resolved** — it is not evidence the feed is down;
+- a drop recorded **after** completion still fails the compare-and-swap and
+  still survives, which is round 6's property, untouched.
+
+That split also explains why this cannot weaken real-outage detection: a dark
+collector produces `write_failed`/`connect_failed` drops on the drain
+goroutine, serialized with `noteDelivered`, with no success to resolve them.
+
+> **When a change makes previously inert state load-bearing, every decision
+> that was justified by that state being inert has to be re-read, not
+> inherited.** Round 7 did not go back and re-read round 6's rationale, and
+> the rationale was sitting in a comment four lines above the code it no
+> longer justified.
+
+**The gate for it had to drive the real `deliverLine`.** The existing
+`noteDelivered`-level gate supplies the count itself, so it pins the CONTRACT
+("clear exactly this count") and is structurally blind to which count
+`deliverLine` chooses to pass — which is the entire defect. Verified: it stays
+green against the reintroduced entry capture. The new gate injects the drop
+through the clock seam, which the happy path calls exactly once to stamp
+`successAt` immediately before the write, placing the loss in precisely the
+window an entry capture excludes. *Walling the function is not walling the
+path* — fifth time in this section.
+
+**P2 — an edit that silently applied nowhere, behind a gate that could not
+fail.** `noteSyslogForwardingDisabled` cleared the health record but not
+`syslogIntentArmedWithoutWriter`, so an operator who disables a collector that
+never connected keeps accruing SIEM "losses" on every audit and request event
+for the life of the process — the disable's own audit entry first — and they
+surface the moment forwarding is enabled again.
+
+Two process failures produced it, and both are worth recording:
+
+1. The round-7 patch applied three replacements and asserted on two of them.
+   The third matched nothing and was a silent no-op. It is now placed and the
+   placement is **verified by function**, not assumed from the patch
+   succeeding.
+2. Its gate installed a Writer before disabling — which already disarms the
+   counter — so the disable assertion passed whether or not the code existed.
+   *A gate that exercises the transition through a state where the property
+   already holds is not a gate.* Replaced with the reachable shape: intent
+   recorded, no writer ever installed, then disable.
+
+**P2 — `/healthz` omitted the loss `/metrics` reported.** `syslogDropCount`
+gated on `Configured`, which is set only once a Writer exists, so it withheld
+`syslogDrops` for exactly the outage where every event is being lost, while
+`/metrics` reported the identical number. It now uses the metrics plane's own
+`Configured || Intended` predicate.
+
+This is the **third** time in this sweep that a correct rule was established
+and the other readers of the same fact were not enumerated — P2-5/P2-6 on the
+admin API, P2-8 on the fan-outs, and now the health accessor. The habit to
+adopt is mechanical: *when a predicate changes, grep for every consumer of the
+value it governs before calling the change done.*

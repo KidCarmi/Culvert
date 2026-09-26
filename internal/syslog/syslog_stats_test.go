@@ -2,6 +2,7 @@ package syslog
 
 import (
 	"errors"
+	"io"
 	"net"
 	"sync"
 	"testing"
@@ -469,5 +470,136 @@ func TestNoteDelivered_RecordsTheWriteInstantNotTheBookkeepingInstant(t *testing
 
 	if got, want := w.Stats().LastSuccess.UTC(), base; !got.Equal(want) {
 		t.Errorf("LastSuccess = %v, want %v — the success was dated from the bookkeeping, not from the write, so any drop stamped during the write looks OLDER than it and becomes undatable", got, want)
+	}
+}
+
+// TestNoteDelivered_ADropDuringASuccessfulWriteIsResolvedByIt pins which
+// losses a delivery is allowed to clear, and it is decided by the CAPTURE
+// POINT of the failure count.
+//
+// A queue-full drop runs on the CALLER's goroutine and can land while
+// writeLine is blocked. That drop happened while the collector was
+// demonstrably still accepting bytes — the write went on to succeed — so it is
+// a real compliance loss but NOT evidence the feed is down. Reading the count
+// at function ENTRY excluded it from the clear, and once round 7 made a
+// surviving failure DATABLE, a node that then went idle reported DOWN five
+// minutes later off the back of a delivery that had SUCCEEDED (Codex P1,
+// PR #1494).
+//
+// Reading it after the write COMPLETED resolves it. The round-6 property is
+// untouched: a drop recorded after completion still fails the compare-and-swap
+// and still survives — proved by the sibling gate above.
+func TestNoteDelivered_ADropDuringASuccessfulWriteIsResolvedByIt(t *testing.T) {
+	base := time.Date(2026, 3, 4, 10, 0, 0, 0, time.UTC)
+	cur := base
+	defer SetNowForTest(func() time.Time { return cur })()
+
+	w := &Writer{}
+	var recoveries int
+	w.SetDeliveryObserver(func(delivered bool) {
+		if delivered {
+			recoveries++
+		}
+	})
+
+	// The write is attempted...
+	successAt := now().UnixNano()
+	// ...a queue-full drop lands WHILE it is in flight...
+	cur = base.Add(10 * time.Millisecond)
+	w.noteDrop(&reasonQueueFull)
+	// ...and the write then completes successfully, so the count is read here.
+	cur = base.Add(20 * time.Millisecond)
+	w.noteDelivered(w.consecutiveFail.Load(), successAt)
+
+	st := w.Stats()
+	if st.ConsecutiveFailures != 0 {
+		t.Errorf("ConsecutiveFailures = %d after a drop that PRECEDED a completed write; want 0 — the collector accepted bytes after that loss, so it is not evidence the feed is down, and an idle node would page DOWN on it", st.ConsecutiveFailures)
+	}
+	if !st.FailingSince.IsZero() {
+		t.Errorf("FailingSince = %v; a resolved episode must carry no start", st.FailingSince)
+	}
+	if recoveries != 1 {
+		t.Errorf("fired %d recovery notifications; want exactly 1 — the delivery did end that episode", recoveries)
+	}
+
+	// CONTROL: the loss is still COUNTED. Resolving the episode must not make
+	// the compliance record forget the event — that would trade a false page
+	// for a silent loss, which is the defect this whole sweep exists to remove.
+	if st.Drops != 1 {
+		t.Errorf("Drops = %d, want 1 — the event was lost and must stay counted", st.Drops)
+	}
+}
+
+// TestDeliverLine_ResolvesADropRecordedBeforeTheWriteCompleted drives the REAL
+// deliverLine, because the capture POINT is what this fix changed and the
+// sibling gate above cannot see it.
+//
+// That gate calls noteDelivered with a count the test supplies, so it pins the
+// contract ("clear exactly this count") and says nothing about which count
+// deliverLine chooses to pass — which is the entire defect. Restoring the
+// entry capture leaves it green. This section has had to record "walling the
+// function is not walling the path" four times; this is the fifth.
+//
+// The drop is injected through the clock seam, which deliverLine calls exactly
+// once on the happy path — to stamp successAt, immediately before the write.
+// That places the loss after entry and before completion: the window an entry
+// capture excludes and a completion capture includes.
+func TestDeliverLine_ResolvesADropRecordedBeforeTheWriteCompleted(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer ln.Close() //nolint:errcheck // test listener
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func() { _, _ = io.Copy(io.Discard, c) }()
+		}
+	}()
+
+	conn, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close() //nolint:errcheck // test conn
+
+	w := &Writer{format: "rfc3164", host: "h", tag: "culvert", pid: "1", conn: conn}
+
+	base := time.Date(2026, 3, 4, 10, 0, 0, 0, time.UTC)
+	var injected bool
+	defer SetNowForTest(func() time.Time {
+		// The first call is deliverLine stamping successAt, just before the
+		// write. Record a queue-full drop there — exactly as a caller
+		// goroutine would while the write is in flight. The guard stops
+		// noteDrop's own clock read from recursing.
+		if !injected {
+			injected = true
+			w.noteDrop(&reasonQueueFull)
+		}
+		return base
+	})()
+
+	w.deliverLine("<13>Sep 26 01:02:03 h culvert: probe\n")
+
+	if !injected {
+		t.Fatal("the clock seam was never reached, so no drop was injected — this gate would prove nothing")
+	}
+	st := w.Stats()
+	if st.ConsecutiveFailures != 0 {
+		t.Errorf("ConsecutiveFailures = %d after a drop recorded before the write COMPLETED; want 0.\n"+
+			"deliverLine read the failure count at function ENTRY, so the delivery could not resolve it — "+
+			"and once a surviving failure became datable, an idle node paged DOWN off a delivery that succeeded.",
+			st.ConsecutiveFailures)
+	}
+	if st.Delivered != 1 {
+		t.Errorf("Delivered = %d, want 1", st.Delivered)
+	}
+	// CONTROL: the loss is still counted. Resolving the episode must never
+	// make the compliance record forget the event.
+	if st.Drops != 1 {
+		t.Errorf("Drops = %d, want 1 — the event was lost and must stay counted", st.Drops)
 	}
 }

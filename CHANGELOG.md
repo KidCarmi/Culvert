@@ -874,6 +874,23 @@ endpoints for credentialed parents.
   (contract `SyslogConfig`). Note that `udp://` — the default when the address
   omits a scheme — cannot prove delivery at all; every surface now says so.
 
+- **A SIEM event lost while a write was in flight could report the feed DOWN
+  even though that write succeeded (CHAOS-72).** The failure count was read
+  when the delivery began rather than when its write completed, so a
+  queue-full drop landing in between was never resolved by the success; once
+  such a loss became datable it could outlast the degradation window on its
+  own, and a node that then went idle paged DOWN off a delivery that had
+  worked. A delivery now resolves every loss recorded before it completed; the
+  loss itself is still counted.
+- **Disabling a SIEM collector that never connected kept counting losses
+  (CHAOS-72).** Turning forwarding off cleared the health record but left
+  skipped-event accounting armed, so every later audit and request event was
+  charged as a SIEM loss for the life of the process and the bogus totals
+  reappeared when forwarding was switched back on.
+- **`/healthz` omitted the SIEM losses `/metrics` reported (CHAOS-72).** The
+  `syslogDrops` field was gated on a writer having been installed, so it was
+  withheld for precisely the outage — a configured collector whose dial never
+  succeeded — in which every event is being lost.
 - **Events lost to a SIEM collector that never connected were counted nowhere
   (CHAOS-72).** A configured-but-unreachable collector was reported down
   (`culvert_syslog_up 0`, a failing `syslog_feed` row), but both the audit and

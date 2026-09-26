@@ -250,7 +250,10 @@ not as *nothing was lost*.
 
 Nothing retries a failed boot dial, so this state does not clear on its own —
 fix the address or the path and re-save the target (`POST /api/syslog`), which
-reconnects immediately.
+reconnects immediately. The same count appears as `syslogDrops` on `/healthz`
+and as `culvert_syslog_drops_total`; if you turn forwarding **off** instead,
+counting stops there and the node reports the feature as absent again rather
+than accruing losses it is not incurring.
 
 ### If the drop count rises while the feed keeps delivering
 

@@ -1575,14 +1575,81 @@ func TestChaos72_InstallingAWriterStopsCountingSkips(t *testing.T) {
 	if got := syslogFeedState().Drops; got != before {
 		t.Errorf("Drops moved from %d to %d while a writer was installed — skips must stop being charged once events have a writer to go through, or every loss is counted twice", before, got)
 	}
+}
 
-	// Turning forwarding off disarms it too: a skipped event is then the
-	// absence of a feature, not a loss.
-	noteSyslogForwardingDisabled()
-	before = syslogFeedState().Drops
+// TestChaos72_DisablingAnUnmetFeedStopsCountingSkips covers the transition the
+// gate above CANNOT reach, and the reason it could not is the point.
+//
+// That gate disables forwarding too, but it installs a Writer first — which
+// already disarms skip accounting — so its disable assertion passes whether or
+// not the disable path clears the gate. It was vacuous for this transition,
+// and the code it was meant to protect was in fact missing: the
+// `syslogIntentArmedWithoutWriter.Store(false)` intended for
+// noteSyslogForwardingDisabled silently applied nowhere (Codex P2, PR #1494).
+//
+// The reachable shape is the one with NO writer ever installed: intent
+// recorded, dial failed, accounting armed — then the operator gives up and
+// turns forwarding off. Every later audit and request event, starting with the
+// disable's own audit entry, would otherwise be charged as a SIEM loss for the
+// life of the process, and those bogus drops surface the moment forwarding is
+// enabled again.
+func TestChaos72_DisablingAnUnmetFeedStopsCountingSkips(t *testing.T) {
+	resetSyslogHealthForTest()
+	t.Cleanup(resetSyslogHealthForTest)
+
+	noteSyslogIntent("tcp://siem.invalid:514")
 	noteSyslogEventSkipped()
+	if got := syslogFeedState().Drops; got != 1 {
+		t.Fatalf("precondition: Drops = %d, want 1 — skip accounting must be ARMED for this gate to prove anything", got)
+	}
+
+	noteSyslogForwardingDisabled()
+
+	before := syslogFeedState().Drops
+	for i := 0; i < 5; i++ {
+		noteSyslogEventSkipped()
+	}
 	if got := syslogFeedState().Drops; got != before {
-		t.Errorf("Drops moved from %d to %d after forwarding was disabled", before, got)
+		t.Errorf("Drops moved from %d to %d after forwarding was disabled — a node that forwards nowhere is not losing anything, and these bogus drops reappear the moment a collector is configured again", before, got)
+	}
+}
+
+// TestChaos72_HealthzReportsTheLossMetricsReports pins that the two surfaces
+// answer the same question with the same predicate.
+//
+// /metrics exports the skipped-event total for a configured collector that
+// never connected; /healthz gated its `syslogDrops` field on `Configured`,
+// which is set only once a Writer exists — so it omitted exactly those losses,
+// for exactly the outage where every event is being lost (Codex P2, PR #1494).
+// Third instance in this sweep of establishing a rule and not enumerating the
+// other readers of the same fact.
+func TestChaos72_HealthzReportsTheLossMetricsReports(t *testing.T) {
+	resetSyslogHealthForTest()
+	t.Cleanup(resetSyslogHealthForTest)
+
+	noteSyslogIntent("tcp://siem.invalid:514")
+	const lost = 4
+	for i := 0; i < lost; i++ {
+		noteSyslogEventSkipped()
+	}
+
+	var b strings.Builder
+	syslogWritePrometheus(&b)
+	if !strings.Contains(b.String(), fmt.Sprintf("culvert_syslog_drops_total %d", lost)) {
+		t.Fatalf("precondition: /metrics did not report the %d lost events", lost)
+	}
+	if got := syslogDropCount(); got != lost {
+		t.Errorf("syslogDropCount() = %d, want %d — /healthz omits the loss that /metrics reports, for the one outage where everything is being lost", got, lost)
+	}
+
+	// CONTROL: a node that was never asked to forward anywhere still reports
+	// nothing. The cheapest way to pass the above is to drop the gate.
+	resetSyslogHealthForTest()
+	for i := 0; i < 20; i++ {
+		noteSyslogEventSkipped()
+	}
+	if got := syslogDropCount(); got != 0 {
+		t.Errorf("syslogDropCount() = %d on a node with no collector configured; want 0", got)
 	}
 }
 

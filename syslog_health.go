@@ -413,6 +413,13 @@ func noteSyslogForwardingDisabled() {
 	syslogHealth.logAt = time.Time{}
 	syslogHealth.suppressed = 0
 	syslogHealth.mu.Unlock()
+	// The intent is gone, so nothing is left to be UNMET: a skipped event is
+	// now the absence of a feature, not a loss. Without this an operator who
+	// disables a collector that never connected keeps accruing "SIEM losses"
+	// on every audit and request event for the life of the process — the
+	// disable's own audit event first — and they surface the moment
+	// forwarding is switched back on (Codex P2, PR #1494).
+	syslogIntentArmedWithoutWriter.Store(false)
 }
 
 // noteSyslogDelivery is the delivery observer: called once per DROPPED line,
@@ -935,7 +942,13 @@ func syslogWritePrometheus(w *strings.Builder) {
 // configured, so the field stays absent on a node that forwards nowhere.
 func syslogDropCount() uint64 {
 	snap := syslogFeedState()
-	if !snap.Configured {
+	// `Configured || Intended` — the metrics plane's own predicate, for the
+	// same reason: the question is whether an operator ASKED for a collector,
+	// not whether one was successfully installed. Gating on Configured alone
+	// omitted `syslogDrops` from /healthz for precisely the outage where every
+	// event is being lost — a configured target whose dial never succeeded —
+	// while /metrics reported the identical number (Codex P2, PR #1494).
+	if !snap.Configured && !snap.Intended {
 		return 0
 	}
 	return snap.Drops
