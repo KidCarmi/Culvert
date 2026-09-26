@@ -569,3 +569,33 @@ func TestCheckStateFileIntegrity_DoesNotDiscloseValueBearingErrors(t *testing.T)
 		t.Fatalf("row must still carry a bounded cause class, got %q", rows[0].Message)
 	}
 }
+
+// TestQuarantineCorruptStateFile_LaterSuccessDoesNotEraseFailure pins the
+// shared-kind merge: when two files share a kind (the per-capability MCP
+// journals) and the first quarantine rename FAILS while the second
+// succeeds, the record must keep the failure — that file is still in the
+// save path's line of fire and would otherwise be reported as quarantined.
+func TestQuarantineCorruptStateFile_LaterSuccessDoesNotEraseFailure(t *testing.T) {
+	captureStartupAlerts(t)
+	isolateStateCorruption(t)
+
+	dir := t.TempDir()
+	gone := filepath.Join(dir, "gateway.json") // absent: rename fails
+	if q := quarantineCorruptStateFile("mcp_canary_runtime", gone, errors.New("boom")); q != "" {
+		t.Fatalf("rename cannot have succeeded, got %q", q)
+	}
+	present := filepath.Join(dir, "management.json")
+	if err := os.WriteFile(present, []byte("{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if q := quarantineCorruptStateFile("mcp_canary_runtime", present, errors.New("boom")); q == "" {
+		t.Fatal("second quarantine rename should have succeeded")
+	}
+	rec := stateCorruptionRecordsSnapshot()["mcp_canary_runtime"]
+	if !rec.QuarantineFailed {
+		t.Fatal("a later successful quarantine erased an earlier FAILED quarantine for the same kind")
+	}
+	if d := stateCorruptionSnapshot()["mcp_canary_runtime"]; !strings.Contains(d, "could not be quarantined") {
+		t.Fatalf("detail must still warn the failed file was not moved aside: %q", d)
+	}
+}

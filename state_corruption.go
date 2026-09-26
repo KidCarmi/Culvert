@@ -119,10 +119,16 @@ func quarantineCorruptStateFile(kind, path string, parseErr error) string {
 	logger.Printf("StateCorruption: %q", sanitizeLog(detail))
 
 	stateCorruptionMu.Lock()
-	stateCorruptionByKind[kind] = detail
-	stateCorruptionRecordByKind[kind] = stateCorruptionRecord{
-		ParseErr:         stateCorruptionCauseClass(parseErr),
-		QuarantineFailed: qpath == "",
+	// Several files can share one kind (the per-capability MCP journals).
+	// A later SUCCESSFUL quarantine must never erase an earlier FAILED one:
+	// that file is still in the save path's line of fire, which is the more
+	// severe and more actionable state. The most severe record wins.
+	if prev, ok := stateCorruptionRecordByKind[kind]; !ok || !prev.QuarantineFailed || qpath == "" {
+		stateCorruptionByKind[kind] = detail
+		stateCorruptionRecordByKind[kind] = stateCorruptionRecord{
+			ParseErr:         stateCorruptionCauseClass(parseErr),
+			QuarantineFailed: qpath == "",
+		}
 	}
 	stateCorruptionMu.Unlock()
 
