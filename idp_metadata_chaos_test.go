@@ -2040,7 +2040,6 @@ func chaos71WantErr(t *testing.T, err error, why string) {
 // threshold and the (now unconditional) watchdog pages for a source that is no
 // longer configured.
 func TestChaos71_CommittedRepointRetiresThePreviousSourcesEpisode(t *testing.T) {
-
 	t.Run("Upsert", func(t *testing.T) {
 		sourceA, healthyB := chaos71RepointSetup(t)
 		if err := idpRegistry.Upsert(chaos71Profile("corp", healthyB.URL())); err != nil {

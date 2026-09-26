@@ -99,6 +99,19 @@ go build -o culvert .                       # build binary
 go test ./...                               # run all tests
 go test -race -count=1 -timeout=15m ./...   # race detector (CI mode)
 go test -coverprofile=coverage.out ./...    # coverage report
+
+# The CI lint gate, run locally. GOTOOLCHAIN is LOAD-BEARING here: the base `go`
+# on a dev box may be OLDER than the go.mod toolchain line (go1.26.8) with
+# 1.26.8 merely downloaded, so a plain `go install` builds golangci-lint with the
+# base compiler and the linter then refuses the module outright — "the Go
+# language version (go1.24) used to build golangci-lint is lower than the
+# targeted Go version". That error reads like "the linter cannot run on this
+# module" and actually means "the linter was built by the wrong compiler", which
+# is why two CHAOS-71 review rounds were spent on complexity and whitespace
+# findings CI had to catch. Compare `go version` with
+# `GOTOOLCHAIN=local go version`; if they differ, name the version explicitly.
+GOTOOLCHAIN=go1.26.8 go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.5.0
+golangci-lint run --timeout=14m --new-from-rev origin/main  # exactly what Lane A runs
 ```
 
 ## Run
