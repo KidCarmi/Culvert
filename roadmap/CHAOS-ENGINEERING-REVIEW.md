@@ -9419,8 +9419,17 @@ counts. `ResetLateDropsForTest` joins `resetSyslogHealthForTest`, beside the
 That is the `swapAutoExclude` fence-pollution rule, and this section has now
 hit it twice in its own work (`armSyslogFeed` leaking live writers was the
 first). *A global a test installs — or increments — is a global the test must
-take back.* It also shows why the shuffled run matters: the failure depended
-entirely on which gates ran after the new one.
+take back.*
+
+**And a shuffled run over a `-run` filter is NOT the determinism gate.** The
+local `-count=2 -shuffle=on -run 'TestChaos72_'` run passed, and the change
+was pushed on the strength of it. CI's `Deep · determinism (shuffle, count=2)`
+and `Race · root shard 1` both failed, because they shuffle the WHOLE package:
+the gates that assert absolute drop counts and the gate that produces one only
+interleave once the unfiltered set is in play. A filter narrows the
+permutation space to the tests you already suspected, which is the opposite of
+what shuffling is for. Reproduce a suspected isolation failure with a filter;
+never clear one with it.
 
 **A note on `funlen`, recorded because it cost two red rounds.**
 `syslogFeedState` crossed the 50-statement bound twice as this round added to
