@@ -490,7 +490,15 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   structure; the DNS-backed check runs on the fetch, where its failure routes to
   the cache), the SAML pre-flight host check shares the fetch's deadline instead
   of resolving unbounded ahead of it, and switching a profile to inline
-  `metadataXml` clears its now-unresolvable remote-fetch failure episode. See
+  `metadataXml` clears its now-unresolvable remote-fetch failure episode. Two
+  further operator-visible consequences: a discovery document the appliance
+  cannot accept — one naming an `authorization_endpoint` that resolves into a
+  private range — is now treated as an availability failure and the previously
+  cached document keeps serving, instead of replacing it and leaving the profile
+  with nothing to fall back to; and re-pointing a profile from one remote source
+  to another retires the old source's failure episode on commit, so a repoint
+  away from a broken IdP stops alerting instead of paging indefinitely for a URL
+  that is no longer configured. See
   `docs/operator/idp-metadata-availability.md`.
 
 ### Changed

@@ -154,17 +154,43 @@ Providers are running from cached documents. Nobody is locked out **yet**.
 3. Fix egress to the IdP. Recovery is automatic and is declared only on an
    actual successful fetch.
 
-There is one other way the gauge clears, and it is the only case where no fetch
-is involved: if you switch that profile from a remote `metadataUrl` to inline
-`metadataXml`, the profile no longer has a remote fetch to recover, so its
-episode is closed at the next compile and one `IDP_METADATA_RECOVERED` line is
-logged. Other profiles' episodes are untouched, and no attempt is counted.
+There are two other ways the gauge clears, and they are the only cases where no
+fetch is involved. Both apply the same rule — an episode describes a failed
+fetch against a **source**, so it is closed when that source stops being
+something this appliance fetches — and both take effect only once the change has
+been **saved**, never while an edit is merely being validated:
+
+* Switching that profile from a remote `metadataUrl` to inline `metadataXml`
+  (or disabling it, or deleting it) leaves no remote fetch to recover, so the
+  episode is closed and one `IDP_METADATA_RECOVERED` line is logged.
+* **Re-pointing a profile from one remote source to another** closes the OLD
+  source's episode. This is what you do when an IdP URL changes or you migrate
+  providers, and it is the case that used to alert forever: nothing fetches the
+  old URL any more, so nothing could ever produce the evidence to clear it.
+
+In both cases other profiles' episodes are untouched — including another
+profile pointing at the same URL — and no attempt is counted. If the edit is
+**rejected** (the new source cannot be compiled, or the change cannot be
+persisted) the old configuration stays in service and its episode stays open,
+because it is still describing a live outage.
 
 A DNS failure at the IdP's host reaches this gauge rather than refusing the
 config: an unresolvable IdP hostname is a *resolution* failure, so it fails the
 fetch and falls back to the cached document. A **configuration** error — a
 non-absolute URL, a scheme other than http/https, or a private IP literal — is
 rejected outright at compile time and is never answered from cache.
+
+So does a document the appliance **cannot accept**. If your IdP starts serving
+an OIDC discovery document that this appliance refuses — most realistically one
+whose `authorization_endpoint` resolves into a private range, which would
+redirect your users' browsers into the internal network — that is treated as an
+availability failure, not as a new document: the previously cached document
+keeps serving, the gauge goes to 1, and the refused document's cause appears in
+the `IDP_METADATA_FETCH_FAILED` line with `outcome="stale_cached"`. The refused
+document never replaces your last-known-good copy, so the fallback survives the
+episode. With **nothing** cached there is no fallback and the provider fails to
+compile, which is the correct fail-closed outcome — look for the same cause in
+the log and check what your IdP is publishing.
 
 ### After a restore onto a fresh volume
 

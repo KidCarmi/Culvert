@@ -24,6 +24,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -1828,5 +1829,364 @@ func TestChaos71_PublishStillRefusesASupersededGeneration(t *testing.T) {
 
 	if reg.publishRecompiled(dc.candidate.ID, dc.generation, dc.candidate, chaos71StubProvider{}) {
 		t.Fatal("a provider built from a SUPERSEDED generation must never be published")
+	}
+}
+
+// ── Codex review round 7 ────────────────────────────────────────────────────
+
+// chaos71OIDCServer is a discovery endpoint whose document can be switched
+// between a healthy one and one naming a private authorization endpoint.
+type chaos71OIDCServer struct {
+	srv      *httptest.Server
+	serveBad atomic.Bool
+}
+
+func newChaos71OIDCServer(t *testing.T, badAuthzHost string) *chaos71OIDCServer {
+	t.Helper()
+	s := &chaos71OIDCServer{}
+	s.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		authz := s.srv.URL + "/authorize"
+		if s.serveBad.Load() {
+			authz = "https://" + badAuthzHost + "/authorize"
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, `{"issuer":%q,"authorization_endpoint":%q,"token_endpoint":%q}`,
+			s.srv.URL, authz, s.srv.URL+"/token")
+	}))
+	t.Cleanup(s.srv.Close)
+	return s
+}
+
+func (s *chaos71OIDCServer) goodAuthz() string { return s.srv.URL + "/authorize" }
+
+// idpMetadataHasEpisode reports whether an episode exists for (profile, source)
+// WITHOUT creating one. idpMetadataEpisodeLocked is get-or-create, so it cannot
+// answer a presence question — calling it would manufacture the episode the
+// assertion is looking for.
+func idpMetadataHasEpisode(profileID, source string) bool {
+	idpMetadata.mu.Lock()
+	defer idpMetadata.mu.Unlock()
+	_, ok := idpMetadata.episodes[idpEpisodeKey(profileID, source)]
+	return ok
+}
+
+// R7-D1 (P1, defect). THE DOCUMENT GATE resolveIdPDocument APPLIES MUST BE THE
+// SAME VERDICT THE COMPILE USES.
+//
+// Round 6 split the OIDC parser and wired the validator to the STRUCTURAL half,
+// so a 200 document that parses and whose endpoints are structurally legal
+// passed the gate even when its authorization_endpoint resolved into a private
+// range: Store.Put OVERWROTE the last-known-good copy and a FRESH acquisition
+// was recorded, and only then did the authoritative parse refuse the provider.
+// The document that could be compiled was gone, so the next outage found only
+// the refused one — recovery defeated by the acquisition that reported success.
+//
+// The pre-fix tree fails every assertion here: the compile errors instead of
+// degrading, the cache holds the refused bytes, and nothing is counted stale.
+func TestChaos71_ARefusedDocumentNeverReplacesTheLastKnownGood(t *testing.T) {
+	store := chaos71Env(t)
+
+	// A host with a DEFINITE private verdict, seeded into the SSRF DNS cache so
+	// this gate needs no resolver and no /etc/hosts. chaos71Env allows loopback
+	// (the discovery server lives there), so loopback is NOT private here — the
+	// two hosts therefore get genuinely different verdicts.
+	ssrf.CacheStore("authz-private-r7.invalid", true)
+
+	idp := newChaos71OIDCServer(t, "authz-private-r7.invalid")
+	issuer := idp.srv.URL
+	wellKnown := oidcWellKnownURL(issuer)
+
+	// 1. A healthy acquisition caches the good document. (Also the CONTROL for
+	//    the cheapest wrong fix: never replacing the cache at all.)
+	got, err := fetchOIDCDiscovery("r7", issuer)
+	if err != nil {
+		t.Fatalf("healthy discovery must compile: %v", err)
+	}
+	if got.AuthorizationEndpoint != idp.goodAuthz() {
+		t.Fatalf("authorization_endpoint = %q, want %q", got.AuthorizationEndpoint, idp.goodAuthz())
+	}
+	cached, _, cErr := store.Get("r7", idpmeta.KindOIDCDiscovery, wellKnown)
+	if cErr != nil {
+		t.Fatalf("a healthy document must be cached as last-known-good: %v", cErr)
+	}
+	if !bytes.Contains(cached, []byte(idp.goodAuthz())) {
+		t.Fatalf("cached document does not name the good authorization endpoint: %s", cached)
+	}
+	if st := idpMetadataState(); st.Failing {
+		t.Fatalf("a healthy acquisition must open no episode, got %+v", st)
+	}
+	goodBytes := append([]byte(nil), cached...)
+
+	// 2. The IdP now serves a document the COMPILE will refuse.
+	idp.serveBad.Store(true)
+
+	got2, err := fetchOIDCDiscovery("r7", issuer)
+	if err != nil {
+		t.Fatalf("a refused document must degrade to the last-known-good, not fail the compile: %v", err)
+	}
+	if got2.AuthorizationEndpoint != idp.goodAuthz() {
+		t.Fatalf("authorization_endpoint = %q, want the CACHED %q — the refused document must never become authoritative",
+			got2.AuthorizationEndpoint, idp.goodAuthz())
+	}
+
+	// 3. The cache still holds the document that can be compiled.
+	after, _, aErr := store.Get("r7", idpmeta.KindOIDCDiscovery, wellKnown)
+	if aErr != nil {
+		t.Fatalf("the last-known-good document must survive a refused fetch: %v", aErr)
+	}
+	if !bytes.Equal(after, goodBytes) {
+		t.Fatalf("the cache was replaced by a document the compile refuses:\n got %s\nwant %s", after, goodBytes)
+	}
+
+	// 4. And it is reported as the degradation it is, not as a success.
+	if st := idpMetadataState(); !st.Failing || st.StaleServed == 0 {
+		t.Fatalf("serving the cache because the IdP's document was refused must be counted stale and failing, got %+v", st)
+	}
+}
+
+// R7-D1b. This gate is BOTH halves and it is worth being precise about which,
+// because they are usually different tests.
+//
+// As a DEFECT gate it pins the MIS-REPORTING half of R7-D1: with nothing cached,
+// the pre-fix tree recorded the refused document as a FRESH acquisition —
+// LastReason "fresh", LastSuccess advanced, no episode — while the provider did
+// not go live, so the operator's only signal said healthy. It was verified
+// failing against the verbatim pre-fix block for exactly that reason.
+//
+// As a CONTROL it pins that the refusal still happens at all. The cheapest way
+// to pass R7-D1 is to stop refusing the document, which would reopen the
+// browser-redirect-to-internal path round 3 closed; with no fallback available,
+// failing closed is the only correct outcome.
+func TestChaos71_PrivateAuthzEndpointStillFailsClosedWithNoCache(t *testing.T) {
+	chaos71Env(t)
+	ssrf.CacheStore("authz-private-r7b.invalid", true)
+
+	idp := newChaos71OIDCServer(t, "authz-private-r7b.invalid")
+	idp.serveBad.Store(true)
+
+	if _, err := fetchOIDCDiscovery("r7b", idp.srv.URL); err == nil {
+		t.Fatal("a private authorization_endpoint with no cached fallback must refuse the compile")
+	}
+	if st := idpMetadataState(); !st.Failing {
+		t.Fatalf("the refusal must open an episode so it is visible, got %+v", st)
+	}
+}
+
+// R7-D2 (P2, defect). A COMMITTED REPOINT MUST RETIRE THE SUPERSEDED SOURCE'S
+// EPISODE.
+//
+// Round 6 keyed episodes by (profile, SOURCE), which fixed the REFUSAL path and
+// left the COMMIT path leaking: a live profile serving cached metadata from
+// source A carries an open episode for A, and a successful edit to a healthy
+// source B clears only B's key. Nothing in the process fetches A any more, so
+// A's episode can never be cleared by evidence — it ages past the degradation
+// threshold and the (now unconditional) watchdog pages for a source that is no
+// longer configured.
+func TestChaos71_CommittedRepointRetiresThePreviousSourcesEpisode(t *testing.T) {
+	// setup leaves profile "corp" LIVE on source A, serving A's cached document,
+	// with an open failure episode for A — the state a repoint arrives into.
+	setup := func(t *testing.T) (sourceA string, healthyB *chaos71IdP) {
+		t.Helper()
+		chaos71Env(t)
+		a := newChaos71IdP(t)
+		b := newChaos71IdP(t)
+
+		// A is healthy first, so the profile is REGISTERED and live with a
+		// cached document...
+		if err := idpRegistry.Upsert(chaos71Profile("corp", a.URL())); err != nil {
+			t.Fatalf("initial upsert against a healthy source: %v", err)
+		}
+		// ...then A stops answering, and a recompile degrades to its cache,
+		// which is what opens A's episode while the profile stays live.
+		a.down.Store(true)
+		if err := idpRegistry.Upsert(chaos71Profile("corp", a.URL())); err != nil {
+			t.Fatalf("stale recompile must succeed from cache: %v", err)
+		}
+		if !idpMetadataHasEpisode("corp", a.URL()) {
+			t.Fatal("setup: source A must carry an open episode")
+		}
+		return a.URL(), b
+	}
+
+	t.Run("Upsert", func(t *testing.T) {
+		sourceA, healthyB := setup(t)
+		if err := idpRegistry.Upsert(chaos71Profile("corp", healthyB.URL())); err != nil {
+			t.Fatalf("repoint to a healthy source: %v", err)
+		}
+		if idpMetadataHasEpisode("corp", sourceA) {
+			t.Fatal("the superseded source's episode must be retired on commit — nothing fetches it any more, " +
+				"so it can never be cleared by evidence and will page forever")
+		}
+		if idpMetadataHasEpisode("corp", healthyB.URL()) {
+			t.Fatal("the newly published healthy source must carry no episode")
+		}
+		if st := idpMetadataState(); st.Failing {
+			t.Fatalf("no episode must survive a fully healthy repoint, got %+v", st)
+		}
+	})
+
+	t.Run("ReplaceAll", func(t *testing.T) {
+		sourceA, healthyB := setup(t)
+		if err := idpRegistry.ReplaceAll([]*IdPProfile{chaos71Profile("corp", healthyB.URL())}); err != nil {
+			t.Fatalf("snapshot repoint to a healthy source: %v", err)
+		}
+		if idpMetadataHasEpisode("corp", sourceA) {
+			t.Fatal("ReplaceAll has the same retention gap as Upsert and must retire the superseded source too")
+		}
+		if st := idpMetadataState(); st.Failing {
+			t.Fatalf("no episode must survive a fully healthy snapshot repoint, got %+v", st)
+		}
+	})
+
+	// CONTROL: retire on COMMIT, never on ATTEMPT. A repoint whose candidate
+	// cannot be compiled leaves the OLD configuration authoritative, so A is
+	// still the source in service and its genuine outage episode must survive.
+	t.Run("ControlRefusedRepointKeepsTheLiveSourcesEpisode", func(t *testing.T) {
+		sourceA, _ := setup(t)
+		deadB, _ := chaos71DeadTLSEndpoint(t)
+		if err := idpRegistry.Upsert(chaos71Profile("corp", deadB)); err == nil {
+			t.Fatal("a repoint to an uncompilable source must be refused")
+		}
+		if !idpMetadataHasEpisode("corp", sourceA) {
+			t.Fatal("a REFUSED repoint must not retire the live source's episode — " +
+				"source A is still what this profile fetches")
+		}
+		if idpMetadataHasEpisode("corp", deadB) {
+			t.Fatal("the refused candidate must leave no episode of its own")
+		}
+	})
+
+	// CONTROL: a persist failure is not a commit either.
+	t.Run("ControlUnpersistedRepointKeepsTheLiveSourcesEpisode", func(t *testing.T) {
+		sourceA, healthyB := setup(t)
+		idpRegistry.path = filepath.Join(t.TempDir(), "no-such-dir", "idp.json")
+		if err := idpRegistry.Upsert(chaos71Profile("corp", healthyB.URL())); err == nil {
+			t.Fatal("a repoint that cannot be persisted must be refused")
+		}
+		if !idpMetadataHasEpisode("corp", sourceA) {
+			t.Fatal("an UNPERSISTED repoint must not retire the live source's episode")
+		}
+	})
+
+	// CONTROL: episodes are per (profile, source), so retiring one profile's
+	// view of source A must not touch another profile's.
+	t.Run("ControlAnotherProfilesEpisodeOnTheSameSourceSurvives", func(t *testing.T) {
+		sourceA, healthyB := setup(t)
+		noteIdPMetadataOutcome("other", sourceA, idpMetaUnavailable, fmt.Errorf("down"))
+		if err := idpRegistry.Upsert(chaos71Profile("corp", healthyB.URL())); err != nil {
+			t.Fatalf("repoint: %v", err)
+		}
+		if !idpMetadataHasEpisode("other", sourceA) {
+			t.Fatal("another profile's episode on the same source must survive")
+		}
+	})
+}
+
+// R7-D3 (P2, defect). ONE DERIVATION MEANS ONE STRING, NORMALISATION INCLUDED.
+//
+// Round 6 made oidcWellKnownURL the single derivation of the discovery URL —
+// the fetch target, the cache key and the episode source — and left the
+// trailing-slash normalisation OUTSIDE it, in fetchOIDCDiscovery. So for an
+// issuer ending in "/" (which both admission gates accept, since neither
+// normalises) the acquisition recorded its episode under one key while
+// idpRemoteDocumentSource derived another, and a refused edit's cleanup looked
+// up a key that never existed — round 6's own defect, one layer down.
+func TestChaos71_IssuerTrailingSlashDerivesExactlyOneSource(t *testing.T) {
+	// The derivation itself.
+	for _, issuer := range []string{
+		"https://idp.example.com",
+		"https://idp.example.com/",
+		"https://idp.example.com///",
+	} {
+		if got, want := oidcWellKnownURL(issuer), "https://idp.example.com/.well-known/openid-configuration"; got != want {
+			t.Errorf("oidcWellKnownURL(%q) = %q, want %q", issuer, got, want)
+		}
+	}
+	if oidcWellKnownURL("") != "" {
+		t.Error("an empty issuer must derive an empty source")
+	}
+
+	// And the property it exists for: acquisition and cleanup must agree, so a
+	// refused edit carrying a trailing-slash issuer leaves NO episode behind.
+	chaos71Env(t)
+	bad := &IdPProfile{
+		ID: "slash", Name: "slash", Type: IdPTypeOIDC, Enabled: true,
+		// ClientID is REQUIRED or NewOIDCFlowProvider refuses before it ever
+		// calls fetchOIDCDiscovery — the first draft of this gate omitted it,
+		// so no episode was ever recorded and the assertion below passed
+		// against the defect it exists to catch. A gate that cannot reach the
+		// code under test proves nothing.
+		OIDC: &OIDCProfileConfig{
+			Issuer:   "https://idp-that-does-not-resolve.invalid/",
+			ClientID: "c",
+		},
+	}
+	if err := idpRegistry.Upsert(bad); err == nil {
+		t.Fatal("an unresolvable issuer with nothing cached must be refused")
+	}
+	// The episode the refused compile opened must be gone under EVERY spelling:
+	// the acquisition records one key and the cleanup derives another, so
+	// checking only one of them would miss the divergence in one direction.
+	for _, source := range []string{
+		"https://idp-that-does-not-resolve.invalid/.well-known/openid-configuration",
+		"https://idp-that-does-not-resolve.invalid//.well-known/openid-configuration",
+	} {
+		if idpMetadataHasEpisode("slash", source) {
+			t.Errorf("a refused edit left an episode under %q", source)
+		}
+	}
+	if st := idpMetadataState(); st.Failing {
+		t.Fatalf("a refused edit must leave no episode — the cleanup key must match the one the "+
+			"acquisition recorded, whatever the issuer's trailing slashes: %+v", st)
+	}
+}
+
+// R7 WALL. The runbook quotes an event name and an `outcome="…"` token, and an
+// operator builds log parsing and alert routing from exactly those strings — so
+// they are a contract, not prose. CHAOS-69 learned this the expensive way: its
+// runbook kept a pre-rework example naming a bound the emitter never printed,
+// and the doc contradicted its own field list. Prose cannot be unit-tested but a
+// QUOTED TOKEN can, so every one the runbook names must be one the code emits.
+//
+// It pins the CONTRACT, not the layout: which tokens the doc chooses to mention
+// stays the author's call, and only their correctness is asserted.
+func TestChaos71_RunbookQuotesOnlyRealLogTokens(t *testing.T) {
+	runbook, err := os.ReadFile(filepath.Join("docs", "operator", "idp-metadata-availability.md"))
+	if err != nil {
+		t.Fatalf("read runbook: %v", err)
+	}
+	health, err := os.ReadFile("idp_metadata_health.go")
+	if err != nil {
+		t.Fatalf("read health plane: %v", err)
+	}
+
+	events := regexp.MustCompile(`IDP_METADATA_[A-Z_]+`).FindAllString(string(runbook), -1)
+	if len(events) == 0 {
+		t.Fatal("not vacuous: the runbook must name at least one log event")
+	}
+	seenEvent := map[string]bool{}
+	for _, ev := range events {
+		if seenEvent[ev] {
+			continue
+		}
+		seenEvent[ev] = true
+		if !bytes.Contains(health, []byte(ev)) {
+			t.Errorf("the runbook names log event %q, which idp_metadata_health.go never emits", ev)
+		}
+	}
+
+	valid := map[string]bool{
+		string(idpMetaFresh):       true,
+		string(idpMetaStale):       true,
+		string(idpMetaUnavailable): true,
+	}
+	outcomes := regexp.MustCompile(`outcome="([a-z_]+)"`).FindAllStringSubmatch(string(runbook), -1)
+	if len(outcomes) == 0 {
+		t.Fatal("not vacuous: the runbook must quote at least one outcome token")
+	}
+	for _, m := range outcomes {
+		if !valid[m[1]] {
+			t.Errorf("the runbook quotes outcome=%q, which is not an idpMetadataOutcome value", m[1])
+		}
 	}
 }

@@ -339,8 +339,8 @@ func (r *IdPRegistry) Upsert(p *IdPProfile) error {
 	// It is NOT enough for the id to be registered: the episode describes a
 	// fetch against a SOURCE, so an edit that reuses an id and repoints it at a
 	// different (unreachable) issuer leaves an episode that belongs to the
-	// CANDIDATE, not to the profile that stays live — see
-	// idpEpisodeBelongsToLive.
+	// CANDIDATE, not to the profile that stays live — hence the source
+	// comparison below rather than an id check.
 	var liveProfile *IdPProfile
 	for _, existing := range r.profiles {
 		if existing.ID == p.ID {
@@ -415,8 +415,28 @@ func (r *IdPRegistry) Upsert(p *IdPProfile) error {
 	// which is BEFORE the parse and before this persist, so a rejected inline
 	// edit cleared a live profile's real episode (Codex review round 5). One
 	// condition now covers both, because it is one rule.
-	if !p.Enabled || idpRemoteDocumentSource(p) == "" {
+	if !p.Enabled || candidateSource == "" {
 		forgetIdPMetadataEpisode(p.ID)
+	} else if liveSource != "" && liveSource != candidateSource {
+		// A COMMITTED remote-to-remote REPOINT retires the source it replaced.
+		//
+		// Episodes are keyed by (profile, SOURCE) since round 6, which closed
+		// the refusal path and left this one leaking (Codex review round 7): a
+		// profile serving cached metadata from the old source carries an open
+		// episode for it, the fresh fetch clears only the NEW source's key, and
+		// nothing in the process fetches the old source any more — so its
+		// episode can never be cleared by evidence, ages past
+		// idpMetadataDegradedAfter and pages for a configuration that is no
+		// longer in service. Retiring it is not "clearing on elapsed time": the
+		// evidence is that the dependency is GONE, the same rule the two arms
+		// above already apply to a disabled or inline profile.
+		//
+		// Only on COMMIT. On a refused compile or a failed persist the OLD
+		// profile stays authoritative, so the old source is still what this
+		// profile fetches and its episode is a live outage signal — that path
+		// takes discardCandidateEpisode instead, which touches only the
+		// candidate's own key.
+		forgetIdPMetadataEpisodeForSource(p.ID, liveSource)
 	}
 	return nil
 }
@@ -425,12 +445,12 @@ func (r *IdPRegistry) Upsert(p *IdPProfile) error {
 // on — the OIDC discovery URL or the SAML metadata URL — and "" for a profile that
 // fetches nothing (inline SAML metadata, LDAP, a disabled/unset config).
 //
-// It exists because a metadata failure episode is keyed by profile ID alone,
-// while what the episode actually describes is a failed fetch against a
-// SOURCE. Deciding who owns an episode by ID only is wrong whenever an edit
-// REUSES an id and changes the source: the episode was opened by compiling the
-// candidate, so it belongs to the candidate's source, not to the still-live
-// profile's (Codex review round 3).
+// It exists because what a metadata failure episode describes is a failed fetch
+// against a SOURCE, so that is what episodes are keyed by (profile, source)
+// since round 6. Deciding who owns an episode by ID alone is wrong whenever an
+// edit REUSES an id and changes the source: the episode was opened by compiling
+// the candidate, so it belongs to the candidate's source, not to the still-live
+// profile's (Codex review rounds 3 and 6).
 func idpRemoteDocumentSource(p *IdPProfile) string {
 	if p == nil {
 		return ""
@@ -619,15 +639,26 @@ func (r *IdPRegistry) ReplaceAll(profiles []*IdPProfile) error {
 	// has no remote fetch left, so its episode can never be cleared by
 	// evidence again. The inline arm mirrors Upsert's: a profile keeps its
 	// episode only while it still names a remote source to fetch from.
-	kept := make(map[string]struct{}, len(nextProfiles))
+	kept := make(map[string]string, len(nextProfiles))
 	for _, p := range nextProfiles {
-		if p.Enabled && idpRemoteDocumentSource(p) != "" {
-			kept[p.ID] = struct{}{}
+		if src := idpRemoteDocumentSource(p); p.Enabled && src != "" {
+			kept[p.ID] = src
 		}
 	}
-	for id := range registered {
-		if _, ok := kept[id]; !ok {
+	for id, prev := range registered {
+		newSource, stillFetching := kept[id]
+		if !stillFetching {
 			forgetIdPMetadataEpisode(id)
+			continue
+		}
+		// A snapshot that REPOINTS a profile at a different remote source
+		// retires the one it replaced, for the reason spelled out in Upsert:
+		// nothing fetches the old source any more, so its episode would page
+		// forever for a configuration this snapshot removed (Codex review
+		// round 7). Reached only after persist, so a rejected snapshot never
+		// gets here.
+		if prevSource := idpRemoteDocumentSource(prev); prevSource != "" && prevSource != newSource {
+			forgetIdPMetadataEpisodeForSource(id, prevSource)
 		}
 	}
 	return nil
@@ -635,8 +666,10 @@ func (r *IdPRegistry) ReplaceAll(profiles []*IdPProfile) error {
 
 // registeredProfiles snapshots the profiles currently stored in the registry,
 // keyed by id. The PROFILE is carried, not just the id, because episode
-// ownership depends on the remote source it fetches from — see
-// idpEpisodeBelongsToLive.
+// ownership depends on the remote source it fetches from: ReplaceAll needs the
+// source a profile was fetching BEFORE the snapshot, both to decide whether a
+// refused candidate's episode was its own and to retire a source a committed
+// snapshot repointed away from.
 func (r *IdPRegistry) registeredProfiles() map[string]*IdPProfile {
 	r.mu.RLock()
 	defer r.mu.RUnlock()

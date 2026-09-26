@@ -8746,6 +8746,88 @@ it is trying not to disturb; the honest trade is to take the extra CI cycle
 rather than hold a durable commit for it, because the container is ephemeral
 and the run is not.
 
+### Codex review round 7 — three findings, and two of them are round 6's own fixes
+
+**A GATE THAT ADMITS WHAT THE COMPILE REFUSES IS A CACHE-POISONING PATH (P1).**
+Round 6 wired the document gate `resolveIdPDocument` applies to
+`parseOIDCDiscoveryStructural` — the half without the address check — so the gate
+became WEAKER than the verdict that decides whether a provider goes live, and
+`resolveIdPDocument` caches whatever its gate accepts. A 200 discovery document
+that parses, whose endpoints are structurally legal, and whose
+`authorization_endpoint` resolves into a private range therefore passed the gate:
+`Store.Put` OVERWROTE the last-known-good copy, a FRESH acquisition was recorded
+— clearing the episode, advancing `LastSuccess` — and only then did the
+authoritative parse refuse the provider. The document that could be compiled was
+gone, so the next outage found only the refused one. Recovery defeated by the
+acquisition that reported success, and the surface said healthy while the
+provider was dark.
+
+This is round 1's P1 (*defer caching until validation succeeds*) re-opened for
+exactly the one check round 6 moved out of the gate, which is why the fix is not
+a revert: the gate is now the AUTHORITATIVE parse, and
+`fetchOIDCDiscovery` CARRIES OUT the result the gate produced instead of
+recomputing it. That keeps round 6's property — the address lookup and its
+counter still run exactly ONCE per document — while making the gate and the
+verdict the same question. Two lookups remain possible in one case, and it is not
+waste: when a FETCHED document is refused and a CACHED one is then vetted before
+being served, those are two different documents and each must be judged.
+
+> **Bound the cost by not doing the work twice, never by asking a cheaper
+> question.** Round 6 reached for the second when the first was available, and
+> paid for it with a weaker gate in front of a cache.
+
+The gate for it is deliberately BOTH halves, and saying which matters because
+they are usually separate tests:
+`TestChaos71_PrivateAuthzEndpointStillFailsClosedWithNoCache` is a DEFECT gate
+for the mis-reporting (pre-fix, with nothing cached, the refused document was
+recorded `fresh` with `LastSuccess` advanced and no episode, so the only
+operator signal said healthy while the provider was dark) AND a CONTROL that
+the refusal still happens at all, since the cheapest way to pass the primary
+gate is to stop refusing the document and reopen the redirect path round 3
+closed.
+
+**A COMMITTED REPOINT MUST RETIRE THE SUPERSEDED SOURCE'S EPISODE (P2).** Round
+6 keyed episodes by `(profile, source)`, which closed the REFUSAL path and left
+the COMMIT path leaking. A live profile serving cached metadata from source A
+carries an open episode for A; a successful edit to a healthy source B clears
+only B's key, and nothing in the process fetches A any more — so A's episode can
+never be cleared by evidence, ages past `idpMetadataDegradedAfter`, and the
+watchdog round 5 made unconditional pages indefinitely for a configuration that
+is no longer in service. `ReplaceAll` had the identical retention behaviour.
+Retiring it is not *clearing on elapsed time*: the evidence is that the
+dependency is GONE, which is the same rule the disabled and inline arms beside it
+already apply. The controls carry the other half — a refused compile and a failed
+persist both leave the OLD configuration authoritative, so A is still the source
+in service and its episode is a live outage signal; both were verified failing
+against a retire-unconditionally shape.
+
+> **Re-keying state fixes every reader that consults the key and no reader that
+> does not.** When a key changes, enumerate the WRITERS of that state as well —
+> the commit path never asked the question the refusal path was rewritten around.
+
+**ONE DERIVATION MEANS ONE STRING, NORMALISATION INCLUDED (P2).** Round 6 made
+`oidcWellKnownURL` the single derivation of the discovery URL — fetch target,
+cache key, episode source — and left the trailing-slash normalisation OUTSIDE it,
+in `fetchOIDCDiscovery`. Neither admission gate normalises an issuer, so one
+ending in `/` is ordinary stored configuration: the acquisition recorded its
+episode under the trimmed key while `idpRemoteDocumentSource` derived the
+untrimmed one, and a refused edit's cleanup again looked up a key that never
+existed. Round 6's own finding, one layer down, in the helper it created to
+prevent it. The trim now lives inside the helper and both call sites lost theirs.
+
+> **A single derivation that excludes the normalisation is two derivations.**
+
+**AND A GATE OF MINE WAS VACUOUS FOR A REASON WORTH RECORDING.** The behavioural
+half of the trailing-slash gate drove `Upsert` with an OIDC profile carrying no
+`ClientID` — and `NewOIDCFlowProvider` refuses on a missing client id BEFORE it
+calls `fetchOIDCDiscovery`, so no episode was ever recorded and the assertion
+passed against the exact divergence it exists to catch. It was caught only by
+running it against the true pre-fix shape (the trim in the caller, absent from the
+helper) rather than against a plausible mutation of the helper alone. *A mutation
+that removes a fix is not the same as the defect: reproduce the DIVERGENCE, not
+one side of it — and a gate must be shown to reach the code under test, because a
+precondition failing earlier looks exactly like the invariant holding.*
+
 ### Codex review round 6 — two findings, and the first one retires a heuristic three rounds had been patching
 
 **AN EPISODE IS KEYED BY (PROFILE, SOURCE).** `Upsert`/`ReplaceAll` compile a

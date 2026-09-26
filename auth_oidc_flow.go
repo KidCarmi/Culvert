@@ -65,7 +65,18 @@ type oidcDiscoveryDoc struct {
 // well-known URL, so a refused edit's cleanup looked up a key that never
 // existed (Codex review round 6). When one layer decides what a value MEANS,
 // every other layer must ask that layer rather than re-derive the rule.
+//
+// THE TRAILING-SLASH NORMALISATION BELONGS HERE, and leaving it outside was
+// round 6's own defect one layer down (Codex review round 7). Neither admission
+// gate normalises the issuer, so an issuer ending in "/" is ordinary stored
+// configuration; the fetch path trimmed it locally before calling this helper
+// while idpRemoteDocumentSource passed the stored string through untouched, so
+// acquisition and cleanup derived DIFFERENT keys for one profile and a refused
+// edit left its speculative episode behind to degrade and alert for a
+// configuration that was never published. One derivation means one string,
+// normalisation included: do not re-add a trim at a call site.
 func oidcWellKnownURL(issuer string) string {
+	issuer = strings.TrimRight(issuer, "/")
 	if issuer == "" {
 		return ""
 	}
@@ -136,8 +147,8 @@ func fetchOIDCDiscoveryOverNetwork(wellKnown string) ([]byte, error) {
 // for a configured profile. The caller is responsible for ensuring issuer is a
 // valid HTTPS URL.
 func fetchOIDCDiscovery(profileID, issuer string) (*oidcDiscoveryDoc, error) {
-	// Normalise: strip trailing slash.
-	issuer = strings.TrimRight(issuer, "/")
+	// The trailing-slash normalisation lives INSIDE oidcWellKnownURL — see the
+	// note there. Trimming again here is what made two layers disagree.
 	wellKnown := oidcWellKnownURL(issuer)
 
 	// CONFIGURATION errors fail fast and are never answered from cache; a
@@ -159,18 +170,49 @@ func fetchOIDCDiscovery(profileID, issuer string) (*oidcDiscoveryDoc, error) {
 	// same code either way — every discovered endpoint is put back through
 	// validateExternalURLStructure, so a cached document cannot name an
 	// endpoint the network path would have accepted on structure.
+	//
+	// THE GATE IS THE AUTHORITATIVE VERDICT, AND ITS RESULT IS CARRIED OUT
+	// RATHER THAN RECOMPUTED (Codex review round 7). Round 6 wired this
+	// validator to the STRUCTURAL half of the parser so the one check that
+	// resolves DNS would not run twice — but that made the gate WEAKER than the
+	// verdict that decides whether the provider goes live, and
+	// resolveIdPDocument caches whatever the gate accepts. A 200 document that
+	// parses and whose endpoints are structurally legal but whose
+	// authorization_endpoint resolves into a private range therefore REPLACED
+	// the last-known-good copy and recorded a FRESH acquisition, and was only
+	// then refused: the document that could be compiled was gone, so the next
+	// outage had nothing to fall back to, and the surface said success.
+	//
+	// Carrying the parse result out of the closure fixes both halves at once.
+	// The gate is the full parse, so nothing the compile refuses can enter the
+	// cache; and because the caller reuses what the gate produced, the
+	// authoritative parse — address lookup and counter included — still runs
+	// exactly ONCE per document, which is the property round 6 was protecting.
+	// Two lookups remain possible in one case only, and it is not waste: when a
+	// FETCHED document is refused and a CACHED one is then vetted before being
+	// served, those are two different documents and each must be judged.
+	//
+	// Do not narrow this validator again. A gate that admits what the compile
+	// rejects is a cache-poisoning path, not an optimisation.
 	fetched, fetchErr := fetchOIDCDiscoveryOverNetwork(wellKnown)
-	raw, err := resolveIdPDocument(profileID, idpmeta.KindOIDCDiscovery, wellKnown, fetched, fetchErr, func(b []byte) error {
-		// Structural only: see parseAndValidateOIDCDiscovery. The address
-		// check runs ONCE, on the authoritative parse below.
-		_, vErr := parseOIDCDiscoveryStructural(b)
-		return vErr
-	})
-	if err != nil {
+	var parsed *oidcDiscoveryDoc
+	if _, err := resolveIdPDocument(profileID, idpmeta.KindOIDCDiscovery, wellKnown, fetched, fetchErr, func(b []byte) error {
+		doc, vErr := parseAndValidateOIDCDiscovery(profileID, b)
+		if vErr != nil {
+			return vErr
+		}
+		parsed = doc
+		return nil
+	}); err != nil {
 		return nil, err
 	}
-
-	return parseAndValidateOIDCDiscovery(profileID, raw)
+	if parsed == nil {
+		// Unreachable while resolveIdPDocument returns a nil error only for
+		// bytes the validator it was handed accepted. Fail CLOSED rather than
+		// hand back a nil document if that contract ever changes.
+		return nil, fmt.Errorf("oidc discovery: document accepted without a parse result")
+	}
+	return parsed, nil
 }
 
 // parseAndValidateOIDCDiscovery decodes and validates a discovery document.
@@ -225,22 +267,22 @@ func parseOIDCDiscoveryStructural(raw []byte) (*oidcDiscoveryDoc, error) {
 // check that is not a property of the document bytes at all: the
 // browser-redirect target's ADDRESS.
 //
-// The split exists because `resolveIdPDocument` takes a validator it may run
-// TWICE — once on freshly fetched bytes to decide whether to cache them, once
-// on the cached bytes to decide whether they are still usable — and this half
-// resolves DNS and records a counter. Running it from there made every
-// acquisition whose authorization host could not be resolved pay the
-// authorization-host budget twice and increment
-// culvert_idp_authz_endpoint_unverified_total by two, delaying boot and every
-// CP->DP snapshot apply by a lookup that decides nothing (Codex review round 6).
+// THIS is the verdict every consumer must use — the compile AND the gate
+// resolveIdPDocument applies before a document may replace the last-known-good
+// copy. Round 6 handed the gate the structural half alone, to keep the DNS
+// lookup and its counter from running twice, and that made the gate admit
+// documents the compile refuses; what actually keeps the work single is that
+// fetchOIDCDiscovery CARRIES OUT the result this function produced instead of
+// recomputing it (Codex review round 7). Cost is bounded by not doing the work
+// twice, never by asking a cheaper question.
 //
-// It is also the principled split, not a concession: whether a document parses
-// and whether its endpoints are structurally legal are properties OF THE BYTES,
-// deterministic and free; whether a hostname currently resolves into a private
-// range is a property of the NETWORK at this instant, which two calls can
-// legitimately disagree about. The validator gets the deterministic half; the
-// authoritative parse — the one whose verdict decides whether a provider goes
-// live — gets both.
+// The two-function split survives as a decomposition, and it is a principled
+// one: whether a document parses and whether its endpoints are structurally
+// legal are properties OF THE BYTES, deterministic and free, so they are
+// reusable by anything that only needs to know the shape; whether a hostname
+// currently resolves into a private range is a property of the NETWORK at this
+// instant, which two calls can legitimately disagree about. Nothing outside
+// this function may use the structural half as a substitute for the verdict.
 func parseAndValidateOIDCDiscovery(profileID string, raw []byte) (*oidcDiscoveryDoc, error) {
 	doc, err := parseOIDCDiscoveryStructural(raw)
 	if err != nil {
@@ -326,7 +368,6 @@ func refuseDefinitelyPrivateRedirect(profileID, raw string) error {
 //     A cache keyed on an arbitrary admin-supplied issuer would let the test
 //     endpoint pre-seed documents for profiles that do not exist yet.
 func probeOIDCDiscovery(issuer string) (*oidcDiscoveryDoc, error) {
-	issuer = strings.TrimRight(issuer, "/")
 	wellKnown := oidcWellKnownURL(issuer)
 	if err := validateExternalURL(wellKnown); err != nil {
 		return nil, fmt.Errorf("oidc discovery: %w", err)
