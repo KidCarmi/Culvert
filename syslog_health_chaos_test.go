@@ -1394,3 +1394,109 @@ func TestChaos72_RePointDoesNotResetTheLossHistory(t *testing.T) {
 		t.Error("the replacement feed is reported DOWN on the strength of the displaced writer's outage")
 	}
 }
+
+// GET /api/syslog answers from the delivery snapshot, never from the live
+// Writer (CHAOS-72, Codex P2 ×2 on `ecfb906`).
+//
+// Two defects, one cause — the handler had its own idea of where the numbers
+// come from:
+//
+//   - `drops`/`panics` were read straight off `activeSyslog()`, so a runtime
+//     re-point reset them here while `/metrics` and the adjacent `delivered`
+//     field kept the process-lifetime totals. Reloading the admin UI erased
+//     the loss history at exactly the moment an operator re-points to
+//     remediate, and contradicted the contract's own "cumulative and
+//     monotonic" wording.
+//   - `neverDelivered` and `deliveryProvable` were gated on `Configured`,
+//     which is set only once a Writer exists — so a target whose boot dial
+//     failed was reported `degraded:true, neverDelivered:false`, denying the
+//     one fact that verdict rests on.
+func TestChaos72_AdminAPIAnswersFromTheDeliverySnapshot(t *testing.T) {
+	t.Run("a re-point does not reset the counters", func(t *testing.T) {
+		dead := startSyslogCollector(t)
+		armSyslogFeed(t, "tcp://"+dead.addr)
+		dead.waitForConnection(t)
+		dead.stop()
+		waitForDrops(t, 3)
+
+		before := readSyslogAdminAPI(t)
+		if before["drops"].(float64) == 0 {
+			t.Fatal("fixture recorded no drops; the rest of this gate proves nothing")
+		}
+
+		healthy := startSyslogCollector(t)
+		if err := InitSyslog("tcp://"+healthy.addr, "rfc3164"); err != nil {
+			t.Fatalf("re-point: %v", err)
+		}
+		syslogConfigured = "tcp://" + healthy.addr
+		t.Cleanup(func() {
+			if sw := activeSyslog(); sw != nil {
+				_ = sw.Close()
+			}
+		})
+
+		after := readSyslogAdminAPI(t)
+		if after["drops"].(float64) < before["drops"].(float64) {
+			t.Errorf("GET /api/syslog drops went BACKWARDS across a re-point: %v -> %v — the admin UI erases the loss history while /metrics keeps it",
+				before["drops"], after["drops"])
+		}
+	})
+
+	t.Run("a configured but never connected feed reports never-delivered", func(t *testing.T) {
+		ensureObservabilityStartupTestLogger(t)
+		snapshotObservabilityGlobals(t)
+		resetSyslogHealthForTest()
+		t.Cleanup(resetSyslogHealthForTest)
+
+		// Exactly what loadObservability leaves behind when the dial fails.
+		noteSyslogIntent("tcp://collector.invalid:601")
+		syslogConfiguredAddr = "tcp://collector.invalid:601"
+
+		body := readSyslogAdminAPI(t)
+		if body["degraded"] != true {
+			t.Fatalf("fixture is not in the unmet-intent state (degraded=%v)", body["degraded"])
+		}
+		if body["neverDelivered"] != true {
+			t.Errorf("neverDelivered=%v beside degraded=true for a target that never connected — the response denies the fact the verdict rests on", body["neverDelivered"])
+		}
+		// CONTROL on the same field: the transport claim must follow the same
+		// predicate, so a tcp:// target the operator asked for is still
+		// reported as delivery-provable rather than silently downgraded.
+		if body["deliveryProvable"] != true {
+			t.Errorf("deliveryProvable=%v for a configured tcp:// target", body["deliveryProvable"])
+		}
+	})
+
+	t.Run("an unconfigured node claims nothing", func(t *testing.T) {
+		ensureObservabilityStartupTestLogger(t)
+		snapshotObservabilityGlobals(t)
+		resetSyslogHealthForTest()
+		t.Cleanup(resetSyslogHealthForTest)
+
+		body := readSyslogAdminAPI(t)
+		for _, k := range []string{"degraded", "neverDelivered", "deliveryProvable"} {
+			if body[k] != false {
+				t.Errorf("%s=%v on a node that forwards nowhere; want false", k, body[k])
+			}
+		}
+	})
+}
+
+// readSyslogAdminAPI drives the REAL handler and decodes its body. Calling
+// syslogFeedState directly would pin the snapshot and say nothing about the
+// handler, which is where both of these defects lived — walling the function
+// is not walling the path.
+func readSyslogAdminAPI(t *testing.T) map[string]any {
+	t.Helper()
+	r := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/syslog", http.NoBody)
+	w := httptest.NewRecorder()
+	apiSyslogConfig(w, adminCtx(r))
+	if w.Code != http.StatusOK {
+		t.Fatalf("GET /api/syslog = %d, body %q", w.Code, w.Body.String())
+	}
+	var body map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decoding the response: %v (%q)", err, w.Body.String())
+	}
+	return body
+}

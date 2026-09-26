@@ -561,6 +561,13 @@ func (s *Writer) SetPanicObserver(fn func(recovered any)) {
 func (s *Writer) deliverLine(line string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// Captured BEFORE any write: noteDelivered clears exactly this count and
+	// no more, so a queue-full drop landing while the write is in flight
+	// survives instead of being erased by the success. Deliberately taken at
+	// ENTRY rather than just before the write — a drop that happened during a
+	// reconnect is a real loss, and retaining it costs nothing (the delivery
+	// resets the age half of the degradation predicate either way).
+	failuresBefore := s.consecutiveFail.Load()
 	if s.conn == nil {
 		// Backoff: don't retry more often than every 5 seconds.
 		if time.Since(s.lastReconnErr) < 5*time.Second {
@@ -604,7 +611,7 @@ func (s *Writer) deliverLine(line string) {
 	// Reached only when a write returned without error: the first attempt, or
 	// the retry after a successful reconnect. Recorded LAST so no path can
 	// report a delivery it did not make.
-	s.noteDelivered()
+	s.noteDelivered(failuresBefore)
 }
 
 // Bounded reason classes for a delivery failure.
@@ -664,6 +671,18 @@ func (s *Writer) noteDrop(reason *string) {
 	t := now().UnixNano()
 	if s.consecutiveFail.Add(1) == 1 {
 		s.failSinceNano.Store(t)
+	} else if s.failSinceNano.Load() <= s.lastSuccessNano.Load() {
+		// The count was already non-zero, so this is not the 0->1 edge — but
+		// the recorded start predates the last delivery, which means it
+		// belongs to an episode a delivery already ENDED and is being carried
+		// by a failure that survived noteDelivered's compare-and-swap (a drop
+		// that raced a successful write). Without this branch that episode can
+		// never be dated: Stats refuses a start older than the last success,
+		// and no later drop takes the 0->1 edge, so a real outage beginning at
+		// that instant would stay undatable and therefore un-degradable
+		// FOREVER. Re-stamping to now is accurate to within the race window
+		// and is the only write-side place with enough information to do it.
+		s.failSinceNano.Store(t)
 	}
 	s.lastFailureNano.Store(t)
 	s.lastFailReason.Store(reason)
@@ -677,16 +696,32 @@ func (s *Writer) noteDrop(reason *string) {
 // surfaces an ICMP port-unreachable on a LATER write, and a collector that is
 // silently discarding datagrams surfaces nothing at all. Every surface built on
 // this counter therefore makes a strictly weaker claim on UDP, and says so.
-func (s *Writer) noteDelivered() {
+// failuresBefore is the consecutive-failure count observed BEFORE this
+// delivery was attempted, and it is what makes the clear safe.
+//
+// An unconditional Swap(0) erased any failure recorded while the write was in
+// flight: queue-full drops run `noteDrop` on the CALLER's goroutine (see
+// tryEnqueue, which holds only sendMu), so one can land between this
+// delivery's write and its clear. The swap then discarded a loss that happened
+// AFTER the successful write and emitted a recovery notification for an
+// episode that had not ended — and if traffic then stopped, the watchdog saw
+// zero consecutive failures forever, so the lost event could never degrade the
+// feed (Codex P1, PR #1494).
+//
+// A compare-and-swap clears only the exact count this delivery observed, so a
+// concurrent drop makes the CAS fail and the failure survives — the fail-SAFE
+// direction, and free of cost: degradation also requires no delivery for the
+// window, and we just delivered, so a retained failure cannot page on its own.
+// The recovery notification fires only when the CAS succeeded, which is what
+// makes it mean "this delivery ended that episode" rather than "a delivery
+// happened".
+func (s *Writer) noteDelivered(failuresBefore uint64) {
 	s.delivered.Add(1)
 	s.lastSuccessNano.Store(now().UnixNano())
-	// Swap, don't Store: the observer must be called exactly on the edge that
-	// ENDS a failure episode, and reading-then-storing would let two
-	// deliveries racing the same episode both see a non-zero count. There is
-	// only ever one drain goroutine today, so this is defence against a
-	// future second writer rather than a live race — but a recovery signal
-	// that can fire twice is a recovery signal an operator stops trusting.
-	if s.consecutiveFail.Swap(0) > 0 {
+	// CAS, not Swap: see above. It also keeps the property the Swap was
+	// chosen for — two deliveries racing one episode cannot both observe it
+	// as non-zero, so a recovery signal can never fire twice.
+	if failuresBefore > 0 && s.consecutiveFail.CompareAndSwap(failuresBefore, 0) {
 		s.notifyDelivery(true)
 	}
 }

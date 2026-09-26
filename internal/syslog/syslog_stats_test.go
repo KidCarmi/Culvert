@@ -317,3 +317,61 @@ func TestStats_UnpublishedEpisodeStartIsNotDatedFromTheLastDelivery(t *testing.T
 		t.Fatalf("FailingSince = %s; want %s — a long real episode must keep its own start", st.FailingSince, longStart)
 	}
 }
+
+// A failure recorded while a delivery is in flight SURVIVES that delivery
+// (Codex P1, PR #1494).
+//
+// Queue-full drops run noteDrop on the CALLER's goroutine (tryEnqueue holds
+// only sendMu), so one can land between a successful write and the clear that
+// follows it. An unconditional Swap(0) discarded that loss and emitted a
+// recovery notification for an episode that had not ended; if traffic then
+// stopped, the watchdog saw zero consecutive failures forever and the lost
+// event could never degrade the feed.
+//
+// The interleaving cannot be scheduled from a test, so the invariant is driven
+// through the two primitives directly in the order the race produces.
+func TestNoteDelivered_DoesNotClearAFailureThatRacedTheWrite(t *testing.T) {
+	w := &Writer{}
+	var recoveries int
+	w.SetDeliveryObserver(func(delivered bool) {
+		if delivered {
+			recoveries++
+		}
+	})
+
+	// The delivery observed a clean writer...
+	failuresBefore := w.consecutiveFail.Load()
+	// ...and a queue-full drop landed while the write was in flight.
+	w.noteDrop(&reasonQueueFull)
+	w.noteDelivered(failuresBefore)
+
+	if n := w.consecutiveFail.Load(); n != 1 {
+		t.Fatalf("ConsecutiveFailures = %d after a drop raced the write; want 1 — the delivery erased a loss that happened after it, so the feed can never degrade for that event", n)
+	}
+	if recoveries != 0 {
+		t.Errorf("fired %d recovery notifications for an episode that never ended", recoveries)
+	}
+
+	// And the surviving episode is DATABLE. Without the re-stamp in noteDrop
+	// the start would be stuck before the last success, Stats would refuse to
+	// date it, and no later drop takes the 0->1 edge — so a real outage
+	// beginning at that instant could never be reported, which is strictly
+	// worse than the defect this fix closes.
+	w.noteDrop(&reasonConnectFail)
+	if st := w.Stats(); st.FailingSince.IsZero() {
+		t.Errorf("the surviving episode is undatable (FailingSince zero, ConsecutiveFailures %d) — it can never reach the degradation window", st.ConsecutiveFailures)
+	}
+
+	// CONTROL: an ordinary delivery that ends a real episode still clears it
+	// and still reports recovery exactly once. The cheapest way to pass the
+	// assertions above is to stop clearing at all, which would latch the feed
+	// as failing forever after one transient drop.
+	before := w.consecutiveFail.Load()
+	w.noteDelivered(before)
+	if n := w.consecutiveFail.Load(); n != 0 {
+		t.Fatalf("ConsecutiveFailures = %d after a clean delivery; want 0", n)
+	}
+	if recoveries != 1 {
+		t.Errorf("fired %d recovery notifications; want exactly 1 for the episode that genuinely ended", recoveries)
+	}
+}

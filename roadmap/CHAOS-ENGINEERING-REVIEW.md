@@ -7887,3 +7887,62 @@ them) and reproduces exactly the state the race produces. It carries two
 controls: a published start must still be dated, and a genuinely long episode
 that began after the last delivery must keep its own start rather than be
 truncated.
+
+### Codex round 6 — the callers that still bypassed the snapshot
+
+Three more, and all three are the same shape: the previous round made the
+delivery SNAPSHOT the single source of truth, and three callers were still
+answering from somewhere else.
+
+**P1 — a failure recorded while a delivery was in flight was erased by it.**
+Queue-full drops run `noteDrop` on the CALLER's goroutine (`tryEnqueue` holds
+only `sendMu`), so one can land between a successful write and the clear that
+follows. `noteDelivered`'s unconditional `consecutiveFail.Swap(0)` discarded
+that loss and emitted a recovery notification for an episode that had not
+ended; if traffic then stopped, the watchdog saw zero consecutive failures
+forever and the lost event could never degrade the feed. `deliverLine` now
+captures the count BEFORE any write and `noteDelivered` clears exactly that
+count by COMPARE-AND-SWAP, so a concurrent drop makes the clear fail and the
+failure survives. That is the fail-safe direction and it costs nothing:
+degradation also requires no delivery for the window, and we just delivered,
+so a retained failure cannot page on its own.
+
+**The naive CAS on its own is strictly worse than the defect, and finding that
+before shipping is the transferable part.** A failure that survives a delivery
+has a recorded start that predates the last success — and `Stats` refuses to
+date such an episode (that is round 4's P1-H rule, which exists to stop a
+brand-new episode being dated from an old fact). No later drop takes the 0→1
+edge, so the start would never be corrected: a real outage beginning at that
+instant would be undatable, and therefore un-degradable, FOREVER. `noteDrop`
+therefore RE-STAMPS whenever the recorded start is not after the last success.
+The write side is the only place with enough information to tell "this start
+belongs to an episode a delivery already ended" from "this start is simply
+old", which is exactly why the read side abstains. *A read-side rule that
+declines to guess needs a write-side counterpart that can eventually supply the
+answer — otherwise abstention becomes silence.*
+
+**P2 ×2 — `GET /api/syslog` was still answering from the live Writer.** It read
+`drops`/`panics` straight off `activeSyslog()`, so a runtime re-point reset
+them on that endpoint while `/metrics` and the response's own adjacent
+`delivered` field kept the process-lifetime totals — reloading the admin UI
+erased the loss history at exactly the moment an operator re-points the
+collector to remediate, and contradicted the contract's own "cumulative and
+monotonic" wording. And it gated `neverDelivered`/`deliveryProvable` on
+`Configured`, which is set only once a Writer exists, so a target whose boot
+dial failed answered `degraded:true, neverDelivered:false` — the response
+denying the single fact its own verdict rests on. Both now read from the
+snapshot, gated on `Configured || Intended`: the same predicate the metrics
+plane uses, because the question is whether an operator ASKED for a collector.
+
+These two are round 5's P2-4 and round 4's P1-F arriving at a surface neither
+fix visited. The rule each of them established was correct; what neither did
+was enumerate the OTHER readers of the same facts. The gate therefore drives
+the REAL handler rather than `syslogFeedState` — walling the function is not
+walling the path, which this section has now recorded three times.
+
+Every defect gate was verified failing against the shape it targets: the
+restored `Swap(0)`, the removed re-stamp branch (which fails on the
+undatable-episode assertion rather than the count one — the two halves of the
+P1 are pinned separately), and the handler's live-Writer reads. Controls: an
+ordinary delivery must still clear a real episode and report recovery exactly
+once, and a node that forwards nowhere must still claim nothing.

@@ -1813,35 +1813,43 @@ func apiSyslogConfig(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		format := "rfc3164"
-		var drops, panics uint64
 		// Loaded ONCE: the admin plane can clear this handle between two
 		// reads, so a check-then-act here would nil-deref the second call.
 		if sw := activeSyslog(); sw != nil {
 			format = sw.Format()
-			// Read panics before drops: deliverGuarded's recover branch always
-			// increments panics first, then drops (independent atomics, no
-			// combined snapshot). Reading in the same order means a report can
-			// only ever lag panics behind drops, never the reverse — so the
-			// UI's `drops > 0` gate can never hide a real panic behind a
-			// stale-looking drops==0.
-			panics = sw.Panics()
-			drops = sw.Drops()
 		}
-		// CHAOS-66: drops alone is cumulative and unreadable — it cannot
+		// CHAOS-72: drops alone is cumulative and unreadable — it cannot
 		// distinguish a feed that is dark now from one that healed last week.
 		// The delivery snapshot carries the time axis the counter lacks.
+		//
+		// EVERY counter comes from the snapshot, never from the live Writer.
+		// Reading sw.Drops()/sw.Panics() directly meant this endpoint dropped
+		// back to the CURRENT writer's totals, so a runtime re-point reset
+		// them here while /metrics and the adjacent `delivered` field kept the
+		// process-lifetime ones — reloading the admin UI erased the loss
+		// history at exactly the moment an operator re-points to remediate,
+		// and contradicted the contract's own "cumulative and monotonic"
+		// wording (Codex P2, PR #1494). The snapshot also removes the ordering
+		// note the old pair needed: it reads panics and drops from one
+		// lock-free Stats() snapshot, so they cannot skew against each other.
 		snap := syslogFeedState()
+		// A feed is PRESENT when an operator asked for a collector, not when a
+		// Writer happens to exist — the same predicate the metrics plane uses.
+		// Gating on Configured alone reported `neverDelivered:false` beside
+		// `degraded:true` for a target whose boot dial failed, i.e. it denied
+		// the one fact that verdict rests on (Codex P2, PR #1494).
+		present := snap.Configured || snap.Intended
 		jsonOK(w, map[string]any{
-			"addr": syslogConfigured, "format": format, "drops": drops, "panics": panics,
+			"addr": syslogConfigured, "format": format, "drops": snap.Drops, "panics": snap.Panics,
 			"delivered":         snap.Delivered,
 			"degraded":          snap.Degraded,
-			"neverDelivered":    snap.Configured && snap.NeverDelivered,
+			"neverDelivered":    present && snap.NeverDelivered,
 			"lastSuccessUnix":   unixOrZero(snap.LastSuccess),
 			"secondsSinceEvent": int64(snap.Age.Seconds()),
 			"lastFailureReason": snap.Reason,
 			"queueDepth":        snap.QueueDepth,
 			"queueCap":          snap.QueueCap,
-			"deliveryProvable":  snap.Configured && !snap.UDP,
+			"deliveryProvable":  present && !snap.UDP,
 		})
 	case http.MethodPost:
 		if !requireRole(w, r, RoleAdmin) {
