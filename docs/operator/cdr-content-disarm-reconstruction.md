@@ -96,10 +96,18 @@ Two ways to turn CDR on, and either one is enough — you do not need both:
    disable CDR durably, remove `-cdr-enabled` / `cdr.enabled: true` from the
    static config as well as toggling it off at runtime.
 
-Enrolled instances, the client credential bundle, and CDR policy rules are
-tracked at `<dataDir>/cdr_instances.json` and `<dataDir>/cdr_policies.json`,
-loaded unconditionally (even while CDR is disabled) so a GUI enrollment done
-before enabling still persists.
+The enrolled-instance registry (names, endpoints, paths, health/breaker
+state — **not** credential material) is tracked at
+`<dataDir>/cdr_instances.json`; CDR policy rules are tracked at
+`<dataDir>/cdr_policies.json`; enrollment recovery state (identifiable
+unknown-outcome receipts) is tracked separately at
+`<dataDir>/cdr_enroll_receipts.json`. All three are loaded unconditionally
+(even while CDR is disabled) so a GUI enrollment done before enabling still
+persists. The actual client credential bundle — CA cert, client cert, and
+client key — lives under `<dataDir>/integrations/sluice/<name>/` and is
+loaded lazily when the pool dials, not by `loadCDR`'s unconditional stores;
+it is also deliberately excluded from `--backup` (see the Cluster note
+below and `key-at-rest.md`).
 
 **Cluster note:** CDR is deliberately **not** part of the CP→DP
 `ConfigSnapshot`, the config-version rollback surface, or config
@@ -188,6 +196,17 @@ retained, so an identical file that previously needed sanitizing is sent to
 Sluice again on every request. Size Sluice capacity for repeat traffic in
 active `ENFORCE` sanitization accordingly; the cache only saves RPCs for
 files that turn out clean, unsupported, or blocked.
+
+**The cache key is the file hash alone — it does not include the matched
+policy profile.** `safeCDRSanitize` evaluates the request's policy profile
+first and stores it on the cache entry for display, but `cdrCacheLookup`
+looks entries up by SHA-256 hash + policy epoch only. So if two profiles
+exist with different strictness and both can see the same file bytes, a
+verdict cached under a lenient profile (e.g. `CLEAN`) is reused for a later
+request that matches a stricter profile, without calling Sluice again for
+that stricter profile's own evaluation. This is only a concern when you run
+more than one CDR policy profile with materially different behavior for
+the same content; a single-profile deployment is unaffected.
 
 ## Multi-instance pool and circuit breaker
 
@@ -290,6 +309,22 @@ responsible for replacing the files under `cdr.certs_dir` and updating
 `cdr.server_fingerprint` manually before they expire or rotate. Enrolling at
 least one instance through the API is the only way to get the automatic
 behavior described below.
+
+**The automatic renewal below depends on the 15-second health poller, and
+the poller is only started once, at boot, and only if CDR is already
+enabled at that point.** `loadCDR` returns before calling
+`startCDRHealthPoller` whenever CDR boots disabled — the default — and
+there is no other call site for it: neither the runtime enable toggle
+(`PUT /api/cdr/config {"enabled": true}`) nor enrolling an instance through
+the API calls it, both only reach `initCDRClient` (which (re)builds the
+connection pool). So on a node that starts with CDR disabled and is enabled
+purely at runtime, the pool exists and requests flow through it, but no
+certificate-expiry check, `RenewCert` call, or server-fingerprint rotation
+check runs until the process is restarted with CDR enabled at boot (via
+`-cdr-enabled` / `cdr.enabled: true`, or the `cdr_enabled` sentinel already
+being present from a prior enable). If you enable CDR at runtime only,
+schedule a restart to arm the poller, or start the node with CDR enabled in
+the first place.
 
 Both directions of the mTLS relationship renew themselves automatically for
 enrolled instances — manual action is a fallback, not the normal path:
