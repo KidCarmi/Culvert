@@ -1410,6 +1410,62 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 	// byte-identical). See crashguard.go.
 	defer proxyCrashGuard(reqID)
 
+	// ── Destination-authority RAW pre-cap (CHAOS-69, fail-closed) ───────────
+	// FIRST consumer of r.Host, and deliberately ahead of the connection
+	// limiter, the IP filter, the rate limiter, authentication and policy. The
+	// client-supplied authority is copied into two rotating sinks and WALKED
+	// label by label by matchers that are quadratic in its length (one 64 KiB
+	// host measured 3.94 s of CPU through this function, ~16 min at net/http's
+	// 1 MiB header default). Every one of those costs is created by a sink or a
+	// matcher BEHIND this point — including IP_BLOCKED and RATE_LIMITED just
+	// below, which both write r.Host into the request log — so this tier has to
+	// be here and not at the IDNA gate further down.
+	//
+	// This is the RAW tier only, and it is deliberately generous (1 KiB): the
+	// bound DNS actually imposes cannot be applied to raw bytes without refusing
+	// legitimate internationalized names, which SHRINK under IDNA (measured: 883
+	// raw bytes → 251 A-label bytes). The tight bound is applied to the CANONICAL
+	// form at the gate below. See proxy_host_bounds.go.
+	if rejectOversizeDestHost(w, r, clientIP) {
+		return
+	}
+
+	// ── CHAOS-69 canonical tier (hoisted ahead of EVERY matcher) ───────────
+	// This used to sit ~60 lines down, at the RISK-013 canonicalization gate,
+	// on the reasoning that the raw pre-cap above had already bounded what the
+	// sinks in between could retain to 1 KiB. That reasoning is sound and it is
+	// only about RETENTION. The canonical tier's other job — the more important
+	// one — is bounding the QUADRATIC MATCHER WALK, and Stage-1 authentication
+	// runs a matcher: authRuleMatchesScratch calls matchDestNorm with
+	// authMatchScratch.hostCat(), the same category fusion, so a category-scoped
+	// auth rule paid the walk for a 1 000-byte dot-dense authority before this
+	// gate was reached — and a terminal auth outcome (407/403) returns without
+	// reaching it at all, so the refusal never happened and the counter never
+	// moved (Codex P2, PR #1446).
+	//
+	// The lesson is the one this sweep already recorded, arriving a third time: a
+	// bound is a property of the POSITION as well as the value. "Behind these two
+	// sinks is safe" was answered for the sinks and not for the matchers.
+	//
+	// Normalizing here costs nothing extra: the value is computed ONCE per
+	// request and reused at the RISK-013 gate below, which no longer normalizes.
+	// Nothing between here and there mutates r.Host (verified by inspection), so
+	// hoisting is value-preserving, and the INVALID_HOST refusal deliberately
+	// stays where it was — this gate decides length only, never validity.
+	destNormHost, destNormOK := canonicalDestHost(r.Host)
+	if destNormOK {
+		if rejectOversizeCanonicalHost(w, "HTTP", clientIP, destNormHost) {
+			return
+		}
+	} else if rejectOversizeUnnormalizableHost(w, "HTTP", clientIP, r.Host) {
+		// No canonical form ⇒ the canonical tier is unreachable, so bound the
+		// raw bare host instead. Without this, the band above maxDestHostLen and
+		// below the raw pre-cap reached Stage-1's matcher at full length and a
+		// terminal 407 returned before the INVALID_HOST refusal below ever ran
+		// (Codex P2, PR #1446).
+		return
+	}
+
 	// ── Connection limit per IP ─────────────────────────────────────────
 	if !connLimiter.Acquire(clientIP) {
 		http.Error(w, "Too Many Connections", http.StatusServiceUnavailable)
@@ -1470,7 +1526,12 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 	// raw spelling made aliases consume separate TopHosts budget entries and
 	// perturb evidence hashes). Matchers keep receiving the raw host: each
 	// normalizes internally, and changing their input is out of scope here.
-	normHost, ok := normalizeHostStrict(host)
+	// Normalized ONCE, at the CHAOS-69 canonical gate far above, and reused here.
+	// Do not re-derive it: two call sites normalizing independently is how the
+	// canonical tier came to be enforced on some entry points and not others.
+	// The length refusal already happened up there; what remains here is the
+	// RISK-013 VALIDITY refusal, unchanged and in its original position.
+	normHost, ok := destNormHost, destNormOK
 	if !ok {
 		atomic.AddInt64(&statBlocked, 1)
 		http.Error(w, "Bad Request: invalid host", http.StatusBadRequest)
