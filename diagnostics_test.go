@@ -1579,6 +1579,16 @@ func TestApiDiagnostics_OversizeUsernameSurfacedOnContract(t *testing.T) {
 	if strings.Contains(found.Message, longName) {
 		t.Error("admin_username_length message should not echo the username itself")
 	}
+	// The replacement must keep the affected account's role: an oversize
+	// operator/viewer must not be told to create an ADMIN replacement.
+	if strings.Contains(found.OperatorAction, "replacement admin account") || !strings.Contains(found.OperatorAction, "same role") {
+		t.Errorf("admin_username_length operator_action = %q, want a same-role replacement, not an admin one", found.OperatorAction)
+	}
+	// A configured name is exempt from the login API's length bound at any
+	// length, so the message must not imply a %d-byte API cap.
+	if strings.Contains(found.Message, "up to") || !strings.Contains(found.Message, "exempt") {
+		t.Errorf("admin_username_length message = %q, want the configured-name exemption stated without a byte cap", found.Message)
+	}
 }
 
 // TestApiDiagnostics_UsernameLengthOKByDefault pins the quiet case: an

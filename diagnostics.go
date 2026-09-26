@@ -586,8 +586,10 @@ func checkOversizeConfiguredUsernames() OperatorContractCheck {
 	}
 	// A username cannot be renamed in place (the edit dialog locks it and the
 	// API has no rename), so the remediation is create → switch → delete.
-	action := "Usernames cannot be renamed in place: create a replacement admin account with a name of at most 64 bytes " +
-		"from Admin Users, sign in with it, then delete the old account."
+	// The roster holds every role, so the replacement keeps the affected
+	// account's role (an oversize operator/viewer must not become an admin).
+	action := "Usernames cannot be renamed in place: from Admin Users, create a replacement account with the same role " +
+		"and a name of at most 64 bytes, confirm it can sign in, then delete the old account."
 	if legacyOversize {
 		// The legacy single-user login (cfg.user) is not an Admin Users row
 		// and deleting its roster entry leaves it in place, so Admin Users
@@ -610,8 +612,9 @@ func checkOversizeConfiguredUsernames() OperatorContractCheck {
 		Status: diagWarn,
 		Message: fmt.Sprintf("%d admin account%s have a username above the %d-byte account limit (longest: %d bytes) — "+
 			"the dashboard sign-in form accepts at most %d characters and every account-creation path caps names there, "+
-			"so the account may be unusable from the admin UI (the login API still accepts configured names up to %d bytes)",
-			n, plural, adminUsernameAccountLimit, maxLen, adminUsernameAccountLimit, maxUsernameLen),
+			"so the account may be unusable from the admin UI (configured names are exempt from the login API's length bound, "+
+			"so the account can still authenticate through the API)",
+			n, plural, adminUsernameAccountLimit, maxLen, adminUsernameAccountLimit),
 		OperatorAction: action,
 	}
 }
