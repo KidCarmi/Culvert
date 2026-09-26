@@ -3055,7 +3055,12 @@ func TestChaos72_AnEventForwardedThroughAWriterIsNeverChargedAsSkipped(t *testin
 // Walled structurally because the defect is in a browser handler: no Go test
 // can drive it, and the failure is silent (a wrong number, not an error).
 func TestChaos72_TheDropRowIsNeverRenderedFromASaveResponse(t *testing.T) {
-	src, err := os.ReadFile("static/index.html")
+	// Anchored to the package source dir, never CWD-relative: a concurrent
+	// os.Chdir in another test makes a relative read pick up the wrong file,
+	// which the determinism and -race gates surface as a flake.
+	// TestTestFileReadsAreCWDIndependent walls this class, and this gate
+	// walked straight into it.
+	src, err := os.ReadFile(staticIndexHTMLPath())
 	if err != nil {
 		t.Fatalf("reading the admin UI: %v", err)
 	}
