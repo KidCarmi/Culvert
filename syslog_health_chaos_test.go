@@ -607,8 +607,12 @@ func TestChaos72_HealthyFeedStillReportsActive(t *testing.T) {
 	if snap.Degraded {
 		t.Errorf("healthy feed reported degraded: %+v", snap)
 	}
-	if snap.Drops != 0 {
-		t.Errorf("healthy feed recorded %d drops", snap.Drops)
+	// This writer's OWN losses, not the exported total: the total is
+	// process-lifetime and carries every Writer this process has retired, so
+	// another gate's still-draining collector can move it after this one has
+	// reset the plane. The claim here is about THIS feed.
+	if snap.WriterDrops != 0 {
+		t.Errorf("healthy feed recorded %d drops", snap.WriterDrops)
 	}
 	row := checkSyslogFeed()
 	if row.Status != diagOK {
@@ -632,8 +636,10 @@ func TestChaos72_IdleNodeIsNeverDegraded(t *testing.T) {
 	setSyslogHealthNowForTest(func() time.Time { return base.Add(30 * 24 * time.Hour) })
 
 	snap := syslogFeedState()
-	if snap.Drops != 0 {
-		t.Fatalf("precondition: idle feed recorded %d drops", snap.Drops)
+	// WriterDrops, not the process-lifetime total — see the note in
+	// TestChaos72_HealthyFeedStillReportsActive.
+	if snap.WriterDrops != 0 {
+		t.Fatalf("precondition: idle feed recorded %d drops", snap.WriterDrops)
 	}
 	if snap.Degraded {
 		t.Error("an idle node with a healthy collector was reported degraded after 30 days of silence")
@@ -1534,6 +1540,10 @@ func TestChaos72_EventsLostToAnUnmetIntentAreCounted(t *testing.T) {
 	noteSyslogIntent("tcp://siem.invalid:514")
 
 	const lost = 7
+	// Measured as a DELTA. The exported total is process-lifetime and can be
+	// moved by a Writer another gate retired and is still draining, so an
+	// absolute assertion here is an assertion about the whole suite.
+	baseDrops := syslogFeedState().Drops
 	for i := 0; i < lost; i++ {
 		noteSyslogEventSkipped()
 	}
@@ -1542,14 +1552,14 @@ func TestChaos72_EventsLostToAnUnmetIntentAreCounted(t *testing.T) {
 	if !snap.Intended || snap.Configured {
 		t.Fatalf("precondition: want an unmet intent (Intended=true, Configured=false), got Intended=%v Configured=%v", snap.Intended, snap.Configured)
 	}
-	if snap.Drops != lost {
-		t.Errorf("Drops = %d after %d events found no writer; want %d — the series that measures compliance loss read clean through a total outage", snap.Drops, lost, lost)
+	if snap.Drops-baseDrops != lost {
+		t.Errorf("Drops moved by %d after %d events found no writer; want %d — the series that measures compliance loss read clean through a total outage", snap.Drops-baseDrops, lost, lost)
 	}
 
 	// It reaches the exported series, not just the snapshot.
 	var b strings.Builder
 	syslogWritePrometheus(&b)
-	if !strings.Contains(b.String(), fmt.Sprintf("culvert_syslog_drops_total %d", lost)) {
+	if !strings.Contains(b.String(), fmt.Sprintf("culvert_syslog_drops_total %d", baseDrops+lost)) {
 		t.Errorf("culvert_syslog_drops_total did not report the %d lost events:\n%s", lost, b.String())
 	}
 
@@ -1559,10 +1569,11 @@ func TestChaos72_EventsLostToAnUnmetIntentAreCounted(t *testing.T) {
 	// meaningless "loss" on every appliance that does not use the feature —
 	// the same emission rule the metrics plane already applies.
 	resetSyslogHealthForTest()
+	unarmedBase := syslogFeedState().Drops
 	for i := 0; i < 100; i++ {
 		noteSyslogEventSkipped()
 	}
-	if got := syslogFeedState().Drops; got != 0 {
+	if got := syslogFeedState().Drops - unarmedBase; got != 0 {
 		t.Errorf("an unconfigured node counted %d lost event(s); it asked for no collector, so it is losing nothing", got)
 	}
 }
@@ -1607,9 +1618,10 @@ func TestChaos72_DisablingAnUnmetFeedStopsCountingSkips(t *testing.T) {
 	t.Cleanup(resetSyslogHealthForTest)
 
 	noteSyslogIntent("tcp://siem.invalid:514")
+	base := syslogFeedState().Drops
 	noteSyslogEventSkipped()
-	if got := syslogFeedState().Drops; got != 1 {
-		t.Fatalf("precondition: Drops = %d, want 1 — skip accounting must be ARMED for this gate to prove anything", got)
+	if got := syslogFeedState().Drops - base; got != 1 {
+		t.Fatalf("precondition: Drops moved by %d, want 1 — skip accounting must be ARMED for this gate to prove anything", got)
 	}
 
 	noteSyslogForwardingDisabled()
@@ -2509,6 +2521,42 @@ func floodUntilDropping(t *testing.T, sw *syslogWriter, n int) {
 	}
 }
 
+// waitSyslogWriterSealed blocks until the drain goroutine has published the
+// Writer's final totals.
+//
+// Close() is bounded by closeWait, so on a loaded machine it returns while the
+// flush is still running. Reading the Writer's own counters there compares one
+// moving number against another — and if the drain has not reached its first
+// line yet it reads ZERO, which trips the gate's own "this proves nothing"
+// precondition. Sealing is the only point at which the counters are final.
+func waitSyslogWriterSealed(t *testing.T, sw *syslogWriter, within time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(within)
+	for !sw.Sealed() {
+		if time.Now().After(deadline) {
+			t.Fatalf("the writer did not finish draining within %s; its totals are still moving and nothing can be compared against them", within)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// waitSyslogWriterRecordsALoss blocks until sw has counted at least one loss.
+// Same reason as waitSyslogWriterSealed: the losses are produced by the drain,
+// so how long they take is a property of the machine, not of the code.
+func waitSyslogWriterRecordsALoss(t *testing.T, sw *syslogWriter, within time.Duration) uint64 {
+	t.Helper()
+	deadline := time.Now().Add(within)
+	for {
+		if d := sw.Stats().Drops; d > 0 {
+			return d
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the writer recorded no losses within %s; this gate would prove nothing", within)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
 // waitExportedAccountsFor polls the exported snapshot until it accounts for
 // `want` events, and returns what it last saw. A poll rather than a sleep
 // because the re-point path closes the displaced Writer asynchronously, so
@@ -2555,13 +2603,16 @@ func TestChaos72_DisablingAFeedExportsEveryLossItRecorded(t *testing.T) {
 		c.stop() // the collector dies; every subsequent line is a loss
 		floodUntilDropping(t, sw, events)
 		disableActiveSyslog()
+		// The comparison is only meaningful against FINAL totals — see
+		// waitSyslogWriterSealed.
+		waitSyslogWriterSealed(t, sw, 60*time.Second)
 
 		own := sw.Stats()
 		accounted := own.Drops + own.Delivered
 		if accounted == 0 {
 			t.Fatalf("trial %d: the writer recorded nothing, so this gate proves nothing", trial)
 		}
-		got := waitExportedAccountsFor(t, accounted, 2*time.Second)
+		got := waitExportedAccountsFor(t, accounted, 30*time.Second)
 		if got < accounted {
 			t.Fatalf("trial %d: the writer accounted for %d events and the exported total for %d — %d losses reach no surface",
 				trial, accounted, got, accounted-got)
@@ -2618,14 +2669,7 @@ func TestChaos72_ARetiredWritersLaterLossesStillReachTheTotal(t *testing.T) {
 	for i := 0; i < later; i++ {
 		first.WriteAudit("post-retire loss")
 	}
-	deadline := time.Now().Add(2 * time.Second)
-	for first.Stats().Drops == 0 && time.Now().Before(deadline) {
-		time.Sleep(2 * time.Millisecond)
-	}
-	own := first.Stats().Drops
-	if own == 0 {
-		t.Fatal("the retired writer recorded no losses; this gate would prove nothing")
-	}
+	own := waitSyslogWriterRecordsALoss(t, first, 30*time.Second)
 	if got := syslogFeedState().Drops; got < base+own {
 		t.Fatalf("a retired writer recorded %d further losses; the exported total moved from %d to %d, losing %d",
 			own, base, got, base+own-got)
