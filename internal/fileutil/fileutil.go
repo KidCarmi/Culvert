@@ -216,19 +216,23 @@ func WriteFileExclusive(path string, data []byte, perm os.FileMode) error {
 	if err != nil {
 		return fmt.Errorf("exclusive write %s: create: %w", path, err)
 	}
+	// perm is filtered through the process umask at creation, so a umask
+	// that masks owner bits would leave the rendezvous unreadable after a
+	// restart. Apply the requested mode explicitly, as AtomicWrite does.
+	if err := f.Chmod(perm); err != nil {
+		_ = f.Close()
+		return exclusiveFail(path, "chmod", err)
+	}
 	if _, err := f.Write(data); err != nil {
 		_ = f.Close()
-		_ = os.Remove(path)
-		return fmt.Errorf("exclusive write %s: write: %w", path, err)
+		return exclusiveFail(path, "write", err)
 	}
 	if err := f.Sync(); err != nil {
 		_ = f.Close()
-		_ = os.Remove(path)
-		return fmt.Errorf("exclusive write %s: fsync: %w", path, err)
+		return exclusiveFail(path, "fsync", err)
 	}
 	if err := f.Close(); err != nil {
-		_ = os.Remove(path)
-		return fmt.Errorf("exclusive write %s: close: %w", path, err)
+		return exclusiveFail(path, "close", err)
 	}
 	// The file's fsync makes its CONTENT durable, not its directory entry:
 	// after a power loss the freshly created name can vanish, and a
@@ -236,10 +240,26 @@ func WriteFileExclusive(path string, data []byte, perm os.FileMode) error {
 	// cannot finish. So the parent directory is synced too, with the same
 	// unsupported-filesystem tolerance AtomicWrite applies.
 	if err := exclusiveSyncDir(filepath.Dir(path)); err != nil {
-		_ = os.Remove(path)
-		return fmt.Errorf("exclusive write %s: parent dir fsync: %w", path, err)
+		return exclusiveFail(path, "parent dir fsync", err)
 	}
 	return nil
+}
+
+// exclusiveFail undoes a WriteFileExclusive that failed after creating the
+// file, and makes the undo DURABLE: the unlink is verified and the parent
+// directory synced again, so "failed closed" means the path is empty after a
+// crash too. A cleanup that could not be verified or synced is joined into
+// the returned error, so the caller is never told the path is clear when it
+// may still hold (or, after a crash, regain) the partially written file.
+func exclusiveFail(path, stage string, cause error) error {
+	err := fmt.Errorf("exclusive write %s: %s: %w", path, stage, cause)
+	if rerr := os.Remove(path); rerr != nil && !errors.Is(rerr, os.ErrNotExist) {
+		return errors.Join(err, fmt.Errorf("exclusive write %s: cleanup: remove: %w", path, rerr))
+	}
+	if serr := exclusiveSyncDir(filepath.Dir(path)); serr != nil {
+		return errors.Join(err, fmt.Errorf("exclusive write %s: cleanup: parent dir fsync: %w", path, serr))
+	}
+	return err
 }
 
 // exclusiveSyncDir is the parent-directory fsync WriteFileExclusive runs

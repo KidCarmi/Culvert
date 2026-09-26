@@ -299,3 +299,40 @@ func TestWriteFileExclusive_SyncsTheParentDirectory(t *testing.T) {
 		t.Fatalf("a write whose directory entry is not durable must leave nothing at the path (lstat err=%v)", err)
 	}
 }
+
+// A failed write must leave the path empty DURABLY: after removing the file
+// the parent directory is synced again, and a cleanup that cannot be made
+// durable is reported rather than hidden behind the original error.
+func TestWriteFileExclusive_FailedWriteCleanupIsDurable(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "client.key.tmp")
+	orig := exclusiveSyncDir
+	t.Cleanup(func() { exclusiveSyncDir = orig })
+
+	boom := errors.New("dir fsync failed")
+	calls := 0
+	exclusiveSyncDir = func(string) error {
+		calls++
+		if calls == 1 {
+			return boom
+		}
+		return nil
+	}
+	err := WriteFileExclusive(path, []byte("k"), 0o600)
+	if !errors.Is(err, boom) {
+		t.Fatalf("err = %v, want the dir-fsync failure", err)
+	}
+	if calls != 2 {
+		t.Fatalf("parent dir fsync calls = %d, want 2 (the write, then the cleanup's unlink)", calls)
+	}
+	if _, lerr := os.Lstat(path); !os.IsNotExist(lerr) {
+		t.Fatalf("cleanup left an entry at the path (lstat err=%v)", lerr)
+	}
+
+	cleanupBoom := errors.New("cleanup fsync failed")
+	exclusiveSyncDir = func(string) error { return cleanupBoom }
+	err = WriteFileExclusive(path, []byte("k"), 0o600)
+	if !errors.Is(err, cleanupBoom) || !strings.Contains(err.Error(), "cleanup") {
+		t.Fatalf("err = %v, want the non-durable cleanup reported", err)
+	}
+}
