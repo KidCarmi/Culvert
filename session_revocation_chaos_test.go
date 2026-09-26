@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -219,6 +220,32 @@ func TestChaos68_DegradedLoadIsReported(t *testing.T) {
 	}
 	if revocationsAreDurable() {
 		t.Error("revocationsAreDurable() is true after a degraded load")
+	}
+}
+
+// An UNREADABLE file is deliberately not quarantined, so its recovery action
+// must not point at a readiness row or a .corrupt.* copy that do not exist —
+// while a CORRUPT file's action still must.
+func TestChaos68_LoadFailureActionMatchesTheFault(t *testing.T) {
+	withChaos68Revocations(t)
+	noteRevocationPersistenceConfigured(filepath.Join(t.TempDir(), "revocations.json"))
+	noteRevocationLoadDegraded(fmt.Errorf("read revocations: %w", os.ErrPermission))
+	row := checkSessionRevocation()
+	if row.Status != diagFail {
+		t.Fatalf("status = %q, want %q after an unreadable load", row.Status, diagFail)
+	}
+	if strings.Contains(row.OperatorAction, ".corrupt.") || strings.Contains(row.OperatorAction, "state_file_session_revocations") {
+		t.Errorf("unreadable-file action points at quarantine artifacts that do not exist: %q", row.OperatorAction)
+	}
+	if !strings.Contains(row.OperatorAction, "permission") {
+		t.Errorf("unreadable-file action = %q, want it to name the permission/mount fix", row.OperatorAction)
+	}
+
+	withChaos68Revocations(t)
+	noteRevocationPersistenceConfigured(filepath.Join(t.TempDir(), "revocations.json"))
+	noteRevocationLoadDegraded(session.ErrRevocationsCorrupt)
+	if row := checkSessionRevocation(); !strings.Contains(row.OperatorAction, ".corrupt.") {
+		t.Errorf("corrupt-file action = %q, want it to name the quarantined copy", row.OperatorAction)
 	}
 }
 

@@ -36,6 +36,7 @@ package main
 // row, which is report-only by the same reasoning.
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"sync"
@@ -79,6 +80,12 @@ type sessionRevocationHealth struct {
 	LoadDegraded bool
 	// LoadDetail is the operator-facing reason the load failed.
 	LoadDetail string
+	// LoadCorrupt distinguishes a file that was READ and could not be PARSED
+	// (quarantined: a state_file_session_revocations row and a .corrupt.*
+	// copy exist) from one that could not be READ at all (not quarantined:
+	// nothing to restore — the fix is the permission or the mount). The two
+	// need different recovery actions.
+	LoadCorrupt bool
 }
 
 var (
@@ -100,6 +107,7 @@ func noteRevocationLoadDegraded(err error) {
 	sessionRevocationHealthMu.Lock()
 	sessionRevocationHealthy.LoadDegraded = true
 	sessionRevocationHealthy.LoadDetail = err.Error()
+	sessionRevocationHealthy.LoadCorrupt = errors.Is(err, session.ErrRevocationsCorrupt)
 	sessionRevocationHealthMu.Unlock()
 }
 
@@ -273,11 +281,19 @@ func checkSessionRevocation() OperatorContractCheck {
 		}
 	}
 	if h.LoadDegraded {
+		// Only a PARSE failure is quarantined; a READ failure (permissions,
+		// I/O) leaves the file in place and produces no readiness row or
+		// .corrupt.* copy, so pointing at those would send the operator
+		// looking for artifacts that do not exist.
+		action := "See the state_file_session_revocations row and the server logs. Restore the quarantined .corrupt.* file or a backup and restart; until then, re-apply any logout or account deletion that must hold."
+		if !h.LoadCorrupt {
+			action = "The revocations file could not be read (it was NOT quarantined — its content may be intact). Check the server logs, fix the permission or the mount backing it, and restart; until then, re-apply any logout or account deletion that must hold."
+		}
 		return OperatorContractCheck{
 			Code:           "session_revocation",
 			Status:         diagFail,
 			Message:        "the persisted session-revocation list did not load — revocations applied before this restart are NOT in force on this node",
-			OperatorAction: "See the state_file_session_revocations row and the server logs. Restore the quarantined .corrupt.* file or a backup and restart; until then, re-apply any logout or account deletion that must hold.",
+			OperatorAction: action,
 		}
 	}
 	if h.Configured && revocationBackingFileIsGone() {
