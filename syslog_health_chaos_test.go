@@ -1880,3 +1880,65 @@ func captureSyslogAlertDetail(t *testing.T, snap syslogFeedSnapshot) string {
 	}
 	return got[len(got)-1]
 }
+
+// TestChaos72_RecordWriterPairingIsAnInvariant pins that the health record's
+// `configured` flag and its `writer` pointer are set and cleared TOGETHER.
+//
+// Three consumers read `Configured` as "a writer exists": the metrics plane's
+// emission gate, `/healthz`'s drop field (via `Configured || Intended`), and
+// the admin API. A fourth used to be the unmet-intent alert's branch, which
+// round 9 moved onto `snap.writer` directly once this pairing was recognised
+// as an unstated assumption rather than a stated rule — CHAOS-66 records
+// `configured` for the SOCKS5 listener BEFORE its first bind, deliberately,
+// so the move is one this repo has already made once in a sibling plane.
+//
+// This wall states the rule so the remaining three consumers keep their
+// meaning. It is BEHAVIOURAL over every transition that touches either field,
+// because a source scan would pass against an install path that set them in
+// two separate critical sections — which is the shape that actually breaks it.
+func TestChaos72_RecordWriterPairingIsAnInvariant(t *testing.T) {
+	check := func(stage string) {
+		t.Helper()
+		syslogHealth.mu.Lock()
+		configured, writer := syslogHealth.configured, syslogHealth.writer
+		syslogHealth.mu.Unlock()
+		if configured != (writer != nil) {
+			t.Errorf("%s: configured=%v but writer!=nil is %v — the record's two "+
+				"halves disagree, so every consumer reading Configured as "+
+				"\"a writer exists\" is now wrong", stage, configured, writer != nil)
+		}
+	}
+
+	resetSyslogHealthForTest()
+	check("after reset")
+
+	noteSyslogIntent("tcp://siem.invalid:514")
+	check("intent recorded, no writer")
+
+	col := startSyslogCollector(t)
+	armSyslogFeed(t, "tcp://"+col.addr)
+	check("writer installed")
+
+	// A superseded target: intent moves, the writer stays.
+	noteSyslogIntent("tcp://siem-b.invalid:514")
+	check("intent superseded")
+
+	noteSyslogForwardingDisabled()
+	check("forwarding disabled")
+
+	// CONTROL: the wall must be able to see a violation, or it proves nothing.
+	syslogHealth.mu.Lock()
+	syslogHealth.configured = true // writer is nil here
+	syslogHealth.mu.Unlock()
+	violated := false
+	func() {
+		syslogHealth.mu.Lock()
+		configured, writer := syslogHealth.configured, syslogHealth.writer
+		syslogHealth.mu.Unlock()
+		violated = configured != (writer != nil)
+	}()
+	if !violated {
+		t.Fatal("control: the pairing check cannot observe a divergence, so it proves nothing")
+	}
+	resetSyslogHealthForTest()
+}

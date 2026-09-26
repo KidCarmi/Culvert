@@ -497,17 +497,34 @@ func commitSyslogDegradation(snap syslogFeedSnapshot) {
 		//     an operator surface, in the alert this sweep added, and it sends
 		//     them to debug a dial that succeeded (Codex P2, PR #1494).
 		//
-		// `Configured` is true only once a Writer is installed, so it
-		// distinguishes them with no new field. Neither sentence names an
-		// address: Detail is the alert dedup key and an operator-supplied
-		// target there is the WK-12/RS-5 unbounded-key defect.
+		// The branch asks the question the sentence makes a claim about —
+		// IS A WRITER SERVING — and reads it off `snap.writer`, the field
+		// this function already trusts for the P1-G staleness check above.
+		//
+		// `snap.Configured` is equivalent TODAY (the record sets `configured`
+		// and `writer` together, in one critical section, at every install
+		// and every clear) and was the first shape of this fix. It is a PROXY
+		// for the claim rather than the claim, and this repo has already made
+		// the move that would break it: CHAOS-66 records `configured` for
+		// SOCKS5 BEFORE the first bind attempt, deliberately, so a listener
+		// that has never come up is not reported as "not configured". Adopt
+		// that here and the superseded-target sentence — "events are still
+		// being delivered to the PREVIOUS target" — fires for a feed that
+		// never connected: the exact false statement this branch was added to
+		// remove, arriving from the other side. `syslogRecordWriterPairing`
+		// walls the invariant separately, because `Configured` also means
+		// "a writer exists" to the metrics plane and `/healthz`.
+		//
+		// Neither sentence names an address: Detail is the alert dedup key and
+		// an operator-supplied target there is the WK-12/RS-5 unbounded-key
+		// defect.
 		//
 		// The superseded-target case is deliberately NOT counted as drops.
 		// Those events reached a collector; `culvert_syslog_drops_total` means
 		// "did not reach the SIEM", and widening it to "did not reach the
 		// CURRENTLY INTENDED SIEM" would conflate delivery-elsewhere with
 		// destruction on the one series that measures compliance loss.
-		if snap.Configured {
+		if snap.writer != nil {
 			logLine = fmt.Sprintf("WARN syslog: SIEM forwarding is serving a SUPERSEDED target — the collector configured %s ago could not be connected and nothing retries, so audit and request events are still going to the PREVIOUS collector, not the configured one",
 				snap.Age.Round(time.Second))
 			detail = fmt.Sprintf(

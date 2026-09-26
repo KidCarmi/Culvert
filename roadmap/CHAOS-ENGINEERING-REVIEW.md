@@ -8964,8 +8964,8 @@ correction paragraph then stated **32**, which was also wrong: the file held
 `syslog_stats_test.go`, 3 → 4 in `syslog_handoff_format_test.go`) were right.
 
 Counts move every round, so the authoritative figure is the one in the round's
-own `Gates:` line and nowhere else. As of round 9: **36** root gates, **13**
-engine stats gates, **4** handoff gates, **13** declared controls. Recording
+own `Gates:` line and nowhere else. As of round 9: **37** root gates, **13**
+engine stats gates, **4** handoff gates, **14** declared controls. Recording
 the same total in a second place is what produced both errors; this paragraph
 survives as the record of that, not as a second source of truth.
 
@@ -9102,6 +9102,41 @@ with destruction on the one series that measures compliance loss. The state is
 already reported degraded (both `syslogFeedState` exits route through
 `finishUnmetSyslogIntent`, which sets `Degraded`), so the gap was never
 visibility — it was the sentence.
+
+**Self-review — the fix for that was one `configured` away from committing
+the same error in the other direction.** Its first shape branched on
+`snap.Configured`. That is equivalent today: the record sets `configured` and
+`writer` together, in one critical section, at every install and every clear.
+But it is a PROXY for what the sentence claims, and the move that breaks it is
+one this repo has already made — **CHAOS-66 records `configured` for the SOCKS5
+listener BEFORE its first bind attempt**, deliberately, so a listener that has
+never come up is not reported as "not configured".
+
+Adopting that shape here was measured rather than argued, by mutating
+`noteSyslogIntent` to set `configured` and running both branch forms against a
+feed with no writer at all:
+
+| branch | Detail produced |
+| --- | --- |
+| `snap.Configured` | *"events are still being delivered to the PREVIOUS target"* — **false**, nothing is serving |
+| `snap.writer != nil` | *"no connection was ever established"* — correct |
+
+So the branch now reads `snap.writer`, the field this function already trusts
+for its P1-G staleness check, and the pairing is a stated rule rather than an
+unstated assumption: `TestChaos72_RecordWriterPairingIsAnInvariant` walks every
+transition that touches either field and fails against the CHAOS-66 shape. The
+wall is behavioural, not a source scan, because the shape that actually breaks
+the invariant is an install path that sets the two fields in two separate
+critical sections, which reads perfectly well.
+
+The wall is separate from the branch on purpose: three other consumers read
+`Configured` as *a writer exists* — the metrics emission gate, `/healthz`'s
+drop field, and the admin API — so the rule has to hold for them whatever this
+one branch does.
+
+> When a sentence makes a claim, branch on the field that IS the claim. An
+> equivalent proxy is only equivalent until someone changes what it means, and
+> the change that does it will be defensible in its own file.
 
 **P1 — recorded as residual SL-4 rather than closed.** Round 8 moved the
 failure-count read to after the write completes. The few instructions between
