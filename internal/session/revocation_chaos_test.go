@@ -1,6 +1,7 @@
 package session
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -775,7 +776,7 @@ func TestChaos68_UnreadableFileIsNotProbed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read back: %v", err)
 	}
-	if string(got) != string(original) {
+	if !bytes.Equal(got, original) {
 		t.Errorf("the unreadable file was rewritten: got %q, want %q", got, original)
 	}
 }
@@ -805,7 +806,7 @@ func TestChaos68_CorruptFileIsNotOverwrittenByTheProbe(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read back: %v", err)
 	}
-	if string(got) != string(corrupt) {
+	if !bytes.Equal(got, corrupt) {
 		t.Errorf("the corrupt file was rewritten before quarantine: got %q, want %q", got, corrupt)
 	}
 }
