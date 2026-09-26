@@ -3543,6 +3543,10 @@
           "draft": {
             "type": "boolean"
           },
+          "persisted": {
+            "description": "False means the rulebase is in-memory only (no -policy / policy_file configured) and every add/edit/delete/reorder is lost on restart.",
+            "type": "boolean"
+          },
           "rules": {
             "items": {
               "$ref": "#/components/schemas/PolicyRule"
@@ -3562,7 +3566,8 @@
           "count",
           "version",
           "updatedAt",
-          "draft"
+          "draft",
+          "persisted"
         ],
         "type": "object"
       },
@@ -19562,7 +19567,7 @@
         "x-culvert-visibility": "admin-supported"
       },
       "get": {
-        "description": "Returns the effective policy rule list plus version, last-update time, and draft-mode flag.",
+        "description": "Returns the effective policy rule list plus version, last-update time, draft-mode flag, and whether the rulebase is persisted to disk.",
         "operationId": "getPolicy",
         "responses": {
           "200": {
