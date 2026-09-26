@@ -227,7 +227,13 @@ type CanaryActivationInput struct {
 	// can arise from it (blocker #9, first disjunct). Resolved from authoritative state by
 	// canaryExactRequestFacts alongside ExactPolicyPermit, never supplied by a request.
 	FirstCanaryCredentialFree bool
-	Now                       time.Time
+	// FirstCanaryPeerObservedFresh — blocker #11. The exact reviewed target is backed by a
+	// recent AUTHENTICATED observation of the peer that advertises it, under the identity the
+	// registry pins now. Not implied by ToolFingerprintCurrent: an operator-seeded record whose
+	// local digest never moved satisfies that row and has never been backed by the upstream at
+	// all.
+	FirstCanaryPeerObservedFresh bool
+	Now                          time.Time
 }
 
 // evaluateCanaryNodeReadiness returns the scope-independent Canary node readiness verdict.
@@ -255,6 +261,12 @@ type canaryActivationInputs struct {
 	// FirstCanaryCredentialFree — blocker #9. Every authoritative credential layer for the exact
 	// request is empty. Resolved from the same capture as ExactPolicyPermit.
 	FirstCanaryCredentialFree bool
+	// FirstCanaryPeerObservedFresh — blocker #11. The exact reviewed target is backed by a
+	// recent AUTHENTICATED observation of the peer that advertises it, under the identity the
+	// registry pins now. Not implied by ToolFingerprintCurrent: an operator-seeded record whose
+	// local digest never moved satisfies that row and has never been backed by the upstream at
+	// all.
+	FirstCanaryPeerObservedFresh bool
 }
 
 // canaryActivationInputsProbe derives the authoritative activation-level inputs for a Canary
@@ -297,6 +309,15 @@ func productionCanaryActivationInputs(_ rollout.Capability, scope rollout.ScopeS
 		// production credential Provider adapter exists, so "requires a credential" and "cannot
 		// execute safely" are the same statement for the First Canary.
 		FirstCanaryCredentialFree: exact.CredentialFree,
+		// Blocker #11: the exact reviewed target must be backed by a RECENT AUTHENTICATED
+		// observation of the peer that advertises it. Resolved from the SAME capture and the
+		// SAME clock sample as the two facts above.
+		//
+		// It is not implied by any of them. ToolFingerprintCurrent asks whether the reviewed
+		// digest still matches Culvert's own catalog record — which an operator-seeded record
+		// satisfies perfectly and forever, because nothing ever re-observed the peer. This row
+		// is the one that can tell those two states apart.
+		FirstCanaryPeerObservedFresh: exact.PeerObservedFresh,
 	}
 }
 
@@ -407,6 +428,7 @@ func evaluateActivationOnFacts(f canary.Facts, in CanaryActivationInput) canary.
 	f.ToolCatalogUsable = in.ToolCatalogUsable
 	f.ExactPolicyPermit = in.ExactPolicyPermit
 	f.FirstCanaryCredentialFree = in.FirstCanaryCredentialFree
+	f.FirstCanaryPeerObservedFresh = in.FirstCanaryPeerObservedFresh
 	f.BudgetConfigured = canary.ValidateBudget(in.Budget) == canary.BudgetOK
 	return canary.Evaluate(f)
 }

@@ -3274,6 +3274,875 @@ finding unbacked.
 > runs — this paragraph used to carry its own enumeration and stopped at M21 while the script
 > reached M28, giving §25d two incompatible accounts of the same history (Codex round 9).
 
+## §25e Blocker 11 — peer-observed First-Canary freshness (activation-time half)
+
+**This section changes NO ledger status BY ITSELF, and did not when it was written.** It records
+the ACTIVATION-time half only; the blocker was closed later, by §25f's runtime half together with
+this one. Blocker 8 remains OPEN (narrowed), blockers 1, 2, 3, 10, 12 and 15 are untouched, the
+baseline is still fifteen, and the §26 verdict is unchanged — `BLOCKED — NO SAFE FIRST CANARY
+TARGET`.
+
+It records what the peer-observation work established, and — more usefully — exactly what was left
+before the blocker could be closed. The reason for splitting it is stated plainly below: an
+activation-time check alone does not close blocker 11, because freshness is the one prerequisite
+that becomes false with no state change at all.
+
+### What blocker 11 actually said, re-derived from the code
+
+The ledger entry is that the reviewed fingerprint is operator-DECLARED, not peer-OBSERVED. Two
+facts made that true, and both were confirmed against the tree before anything was written:
+
+- `seedServer`/`seedTools`/`Ingest` (`mcp_inventory.go`) compute the fingerprint from operator
+  JSON, re-encoded into a tools/list shaped exactly like a real one. The bytes cannot tell you
+  where they came from.
+- `execution.Discovery.Discover` — the one function that talks to a peer and ingests what it says
+  — had NO non-test caller anywhere in the tree.
+
+So `ToolStillCurrent`, "exact reviewed fingerprint" and "rug-pull invalidates the approval" all
+validated an unchanged LOCAL record. They bound the seed. A seeded record's digest matches the
+reviewed target exactly, and — because nothing ever re-observed the peer — it would keep matching
+forever, including on a node whose upstream had advertised something else since the day it was
+provisioned.
+
+### What this work established
+
+**1. Provenance is DERIVED, not declared** (`internal/mcp/catalog/provenance.go`). A record's
+`Provenance()` reads its `Observed` evidence; there is no `Source` field to set, so no caller can
+claim peer provenance without carrying an observation. `OperatorSeeded` is the zero value.
+
+**2. Two semantic ingest entrypoints over one private implementation.** `Ingest` is the operator
+seed and attaches no observation; `IngestObserved` requires complete evidence whose identity
+matches the ingest identity. Which one a caller reaches is the only difference between a seed and
+an observation, and that is pinned structurally rather than by convention
+(`TestPeerWall_ObservedIngestHasExactlyOneProducer`,
+`TestPeerWall_SeedReachesOnlyTheSeededEntrypoint`).
+
+**3. The evidence is AUTHENTICATED, and the identity is the transport's, not the payload's.**
+`Discovery.Discover` refuses a server with no pinned identity, dials through the production
+upstream client — destination policy, pinned destination, TLS >= 1.2, SPKI verification — and
+stamps the identity the transport was told to verify. A real-HTTPS end-to-end proof
+(`mcp_peer_refresh_https_e2e_test.go`) drives the seeded-F1/real-peer-F2 case over a loopback TLS
+server, with an agreeing peer as the positive control and a wrong-SPKI peer as the negative one
+(which records zero requests — the refusal happens in the handshake).
+
+**4. There is a governed production caller** (`POST /api/mcp/servers/refresh`, admin-only). It
+takes a server id and NOTHING else: endpoint, pin, tenant, tool set, provenance and the
+observation timestamp all come from authoritative state or from the peer. There is no field an
+operator can fill in to make the catalog say something the peer did not. It holds no activation,
+rollout or durable-state lock across the dial, single-flights per server, and confers no authority
+— pinned by identifier-reach walls rather than by behaviour, because "cannot invoke" is a claim
+behavioural tests can only make about the paths someone thought to drive.
+
+**5. Freshness is a bounded, named security interval** (`FirstCanaryPeerObservationMaxAge`, 30
+min) and a new ACTIVATION-level readiness row, `peer_observation_not_fresh` (matrix row 21a). It
+is deliberately not expressed in terms of the approval TTL, the tool-trust TTL or the Canary
+window: those bound how long a HUMAN DECISION stays valid, this bounds how long a MEASUREMENT of
+a third party stays believable, and the two must move independently.
+
+**6. Freshness is bound to the EXACT target, never to a server.** A fresh observation of F2 says
+nothing about an activation reviewed against F1, and reports `peer_observation_target_moved`
+rather than `..._stale` — the two name different remedies, and refreshing cannot fix a mismatch.
+Tenant comes from the REGISTRY, never from the observation: the peer has no authority over who
+owns it, which is why `catalog.PeerObservation` carries no tenant field at all.
+
+**7. The timestamp attests when the question was ASKED.** It is taken before the request goes out,
+so a call that stalls past the whole bound and then succeeds lands already stale. That is the
+conservative direction — an observation can read as older than it truly is, never newer.
+
+**8. A reseed does not renew freshness, and a restart forgets it.** The observation is written
+from the ingest's own evidence and never inherited, so a byte-identical operator reseed of a
+previously-observed tool clears it while a peer re-observation of an unchanged tool refreshes it.
+The catalog is not durable, so a restart returns every record to seeded — accepted deliberately:
+persisting a measurement of a third party across a process that was not running to see it would
+let a restart move an observation forward.
+
+### Why the activation-time half alone did not close blocker 11
+
+**An activation-time check is not sufficient, and the reason is specific to this fact.** Every
+other activation prerequisite becomes false only when some state changes — an approval is revoked,
+a policy is edited, a fingerprint moves. Freshness becomes false with NO state change at all,
+purely by the clock advancing. So an observation that satisfies the preflight can expire while the
+Canary window is still open, and nothing in this slice re-checks it before a physical send.
+
+Closing blocker 11 therefore additionally required the runtime to re-check peer freshness in the
+existing live authority revalidation path, immediately before the upstream call — the same seam
+that already revalidates kill state and live trust. **§25f is that re-check.** `PeerObservationFresh` is exported and
+separate from the binding verdict precisely so both call sites share ONE definition of fresh; an
+activation-time bound and a send-time bound that could drift apart would be two answers to one
+question.
+
+Two further limits are recorded rather than papered over:
+
+- **The refresh is SESSIONLESS.** It issues a single `tools/list` with no `initialize` handshake
+  and no session lifecycle, which is blocker 1's territory. That is enough to obtain an
+  authenticated statement of what the peer advertises, and it is NOT a claim that Culvert
+  implements the MCP session lifecycle. **Blocker 1 is untouched by this work and is not
+  absorbed into it.** A peer that requires an initialized session before answering `tools/list`
+  will simply fail the refresh — bounded, counted and reported, leaving the previous record
+  aging on its own clock.
+- **A failed refresh is never read as "the peer is unchanged."** It stamps nothing, erases
+  nothing and stops no clock. The existing observation keeps aging, so an outage expires
+  freshness by the passage of time rather than by a fabricated verdict.
+
+### Mutation campaign (24 classes)
+
+Each class is a named defect, the exact source edit that reintroduces it, and the gate that must
+catch it. The driver refuses to report a verdict it did not earn: an anchor matching zero sites is
+`NOT PROVEN`, never skipped, and a mutated tree that does not compile is `NOT PROVEN` rather than
+a pass.
+
+**Result: 22 CAUGHT, 1 EQUIVALENT, 1 superseded.** Everything the campaign surfaced is below —
+including two results that were wrong the first time, because how a campaign fails is more useful
+than its score.
+
+| # | defect class | verdict | gate |
+|---|---|---|---|
+| M1 | provenance is declared, not derived — every record claims peer evidence | CAUGHT | `TestProvenance_` |
+| M2 | the observed entrypoint accepts incomplete evidence | CAUGHT | `TestProvenance_ObservedIngestRefusesIncompleteEvidence` |
+| M3 | the observed entrypoint accepts an identity other than the one being ingested | CAUGHT | `TestProvenance_ObservedIdentityMustMatchTheIngestIdentity` |
+| M4 | an unchanged record inherits the prior observation (a reseed renews freshness) | CAUGHT | `TestPeerFreshProd_ByteIdenticalReseedRemovesFreshness` |
+| M5 | the observation is stamped when the answer ARRIVES | superseded by M5b | — |
+| M5b | the late stamp, in compilable form | CAUGHT | `TestDiscoveryObservation_StampPrecedesTheCall` |
+| M6 | the freshness boundary becomes exclusive | CAUGHT | `TestPeerObservationFresh_Predicate` |
+| M7 | an observation stamped in the future is honoured | CAUGHT | `TestPeerObservationFresh_Predicate` |
+| M8 | the max age is expressed in terms of another interval | CAUGHT | `TestPeerFresh_MaxAgeIsItsOwnInterval` |
+| M9 | freshness is never checked — a real observation never expires | CAUGHT | `TestPeerFreshProd_FailedRefreshLeavesTheObservationAndLetsItAge` |
+| M10 | the fingerprint is dropped from the target binding | CAUGHT | `TestPeerFreshProd_FreshF2NeverMakesAnF1ActivationFresh` |
+| M11 | the fingerprint FORMAT is dropped from the target binding | CAUGHT | `TestPeerFresh_Matrix` |
+| M12 | tenant is read from the reviewed set instead of the registry | **EQUIVALENT** | — (proof below) |
+| M13 | a missing reviewed target is invented from the current state | CAUGHT | `TestExactReviewedTargetFor_MissReturnsTheZeroTarget` |
+| M14 | identity is checked against the catalog record only, not the registry pin | CAUGHT | `TestPeerFresh_Matrix` |
+| M15 | a disabled or identity-mismatched server is still observable authority | CAUGHT | `TestPeerFresh_Matrix` |
+| M16 | an unresolved capture reads as a satisfied fact | CAUGHT | `TestPeerFresh_Matrix` |
+| M17 | the clock is checked before the bindings (a moved target reports stale) | CAUGHT | `TestPeerFresh_StaleAndMovedAreNotInterchangeable` |
+| M18 | the readiness row is removed (the pre-#11 contract) | CAUGHT | `TestPeerFreshProd_FingerprintCurrentDoesNotImplyFresh` |
+| M19 | a forwarding hop hardcodes the answer | CAUGHT | `TestPeerFreshWall_ForwardingSitesCarryTheResolverAnswer` |
+| M20 | the evidence is assembled at the call site instead of read from the record | CAUGHT | `TestPeerFreshWall_EvidenceComesFromTheCapturedRecord` |
+| M21 | the verdict samples its own clock | CAUGHT | `TestPeerFreshWall_NeitherSideSamplesItsOwnClock` |
+| M22 | the verdict is never consulted | CAUGHT | `TestPeerFreshWall_VerdictHasExactlyOneProductionCaller` |
+| M23 | a failed refresh is read as "the peer is unchanged" and re-stamps freshness | CAUGHT | `TestPeerFreshProd_FailedRefreshLeavesTheObservationAndLetsItAge` |
+
+**M12 is an equivalent mutant, and the proof is recorded in `peerfresh.go` rather than left as an
+assertion here.** Comparing the activation's tenant against `Reviewed.Tenant` instead of
+`Current.Tenant` cannot change any verdict, because reaching OK ALSO requires
+`Reviewed.Tenant == Current.Tenant` on the very next line, and given that equality the two
+comparisons agree on every input. No test is written to pretend otherwise. The code still reads
+from `Current` deliberately: the equivalence holds only while that second check exists, so reading
+from the authoritative side means the correct answer does not depend on another check elsewhere
+continuing to exist.
+
+**M13 found a genuine gap, and the first attempt to close it was itself insufficient.** No existing
+row exercised a reviewed-set MISS at all — every one supplied a set already containing the right
+tool. A row driving the miss through the production resolver was added, and the mutant SURVIVED it:
+the verdict independently compares Reviewed against Current on server and tool, so a fallback
+target is rejected a second time. That redundancy is defence in depth and is kept, but it also
+means the helper could be made unsound without a single behavioural test moving, until some later
+change removed the second rejection. The contract is therefore pinned where it is made
+(`TestExactReviewedTargetFor_MissReturnsTheZeroTarget`, with a positive control so a helper that
+returned the zero target unconditionally — making every activation report TargetMoved — would
+fail).
+
+**The campaign's own first run was defective, and that is recorded because the failure mode
+matters.** M5b composes on M5 and both patch the same file; on a build failure the driver restored
+its saved states in forward order, so the last write was the MUTATED content. The tree stayed
+dirty and the twenty following mutations all reported `NOT PROVEN` against a tree that was not the
+one under test. The same bug could as easily have produced twenty `SURVIVED` or twenty `CAUGHT`: a
+campaign that keeps going against a tree it did not restore is not measuring the suite, it is
+producing confident output about nothing. The driver now verifies after every restore that each
+touched file reproduces its saved bytes EXACTLY and aborts naming the mutation that failed to —
+and it compares against those saved bytes rather than asking git, because the first version of
+that guard reached for `git checkout` and destroyed uncommitted work it had not created.
+
+### Status
+
+Blocker 11 stayed **OPEN** as of this section, and that was correct at the time: the
+activation-time half was in place and proven, the send-time re-check was the remaining work, and
+until it existed an observation that expired after preflight could still back a later request.
+**§25f below records that re-check, and the blocker is CLOSED there — not here.**
+
+## §25f Blocker 11 — the runtime half: freshness at the side-effect boundary
+
+**This section, together with §25e, CLOSES blocker 11 — and closes nothing else.** It records the
+send-time work §25e named as the remaining half. Blockers 1, 2, 3, 8, 10, 12 and 15 are untouched,
+the baseline is still fifteen, and the §26 verdict is unchanged: `BLOCKED — NO SAFE FIRST CANARY
+TARGET`. In particular blocker 1 is NOT absorbed here — the refresh that supplies an observation is
+sessionless, and is not a claim that Culvert implements the MCP session lifecycle.
+
+### The invariant
+
+> A request may cross the irreversible boundary only if the exact target still carries a fresh
+> authenticated peer observation at the instant execution authority is spent.
+
+§25e closed the activation half and said plainly why that was not enough: freshness is the one
+prerequisite that becomes false with **no state change at all**. An observation that satisfied the
+preflight expires purely by the clock advancing, while the Canary window is still open.
+
+### One definition of fresh, not two
+
+`canary.EvaluatePeerObservedFresh` — the activation verdict — now **delegates its entire tail** to
+`canary.EvaluateObservedIdentityFresh`, and that is the function the boundary calls. Missing,
+future-dated, identity-not-current and stale are decided in ONE place, against ONE bound
+(`FirstCanaryPeerObservationMaxAge`, 30 min, inclusive). There is no second freshness algorithm,
+no second constant and no bespoke comparison at the send boundary. Two bounds that could drift
+apart would be two answers to one question, and the one that mattered would be whichever ran last.
+
+The delegation is pinned structurally, not by convention: `assertDelegatesTo` fails if the outer
+verdict stops calling the inner one, so a future change cannot quietly fork the definition.
+
+### It EXTENDS the existing authority predicate — it is not a guard bolted on after it
+
+The re-check lives inside `revalidateTargetTrust` (`mcp_live_gate.go`), between the trust precheck
+and the durable approval, on **one capture and one clock sample**. The result is a single coherent
+"is this request still authorized NOW?" predicate covering generation, scope hash, target/trust,
+peer freshness and approval — not an unrelated check appended to it. Sampling `now` once is what
+makes the freshness boundary testable at all: two samples would put two answers at two instants.
+
+**What it asks, and what it deliberately does not.** Every dimension §3 requires is bound on this
+one capture, and the freshness call is responsible for only the two that are still open when it
+runs:
+
+| dimension | bound by | where |
+|---|---|---|
+| tenant | `mcpLiveTrustPrecheck` — registry owner vs the request's tenant | before |
+| server, tool | `mcpLiveTrustPrecheck` — the target is resolved FOR these ids | before |
+| fingerprint | `mcpLiveTrustPrecheck` — current record must still carry the DECISION's fingerprint | before |
+| server usable / registry pin not diverged | `mcpLiveTrustPrecheck` — `AnchorLost`, so `Eligible` is false | before |
+| **peer verified identity** | `EvaluateObservedIdentityFresh` — the observation's identity must be BOTH the catalog record's and the registry's current pin | **the freshness call** |
+| **observation age** | `EvaluateObservedIdentityFresh` — missing / future-dated / stale | **the freshness call** |
+| fingerprint FORMAT | `approvalOK` → `ToolApproval.MatchesTool`, on `live.Target`'s `FingerprintFormat` | after |
+
+Re-comparing the precheck's values inside the freshness call would compare its answer with itself
+— the vacuous shape a test harness exposes and production hides, because in production the two
+sides are equal by construction. That is not hypothetical: it is exactly the defect RM5 found in an
+earlier shape of this work.
+
+A fresh observation for F2 therefore cannot satisfy an F1 request — the precheck refuses first, and
+reports its own reason rather than a freshness one, because the two name different remedies.
+
+**The evidence is read from authoritative current state**, resolved into the precheck from
+pointer-published inventory. It is NOT copied into `Decision`, `ExecInput` or the activation's
+reviewed snapshot as a boolean decided earlier; a cached verdict is precisely the defect.
+
+**NO I/O.** Everything the boundary reads was already resolved. It dials nothing, and a comment at
+the call site records that it must never learn to: a discovery call at the send boundary would put
+an unbounded network wait inside the last authority check — the exact shape the PreSend re-ask
+exists to close.
+
+**Security ordering is unchanged.** The emergency kill re-read stays LAST; nothing moved earlier.
+
+### Why there is exactly ONE boundary check site (§8, the #1370 lesson)
+
+> **Correction, round 13 (Codex P2, PR #1439).** This section argued for exactly one new check
+> site, and for the INVARIANT that argument holds. It did not hold for the BUDGET: admission
+> reserves from a monotonic total that `Release` never refunds, and it did not consult freshness,
+> so a request whose observation was ALREADY stale on arrival was charged a slot and then refused
+> at the boundary having sent nothing. There is now a second, admission-time site with its own
+> reason to exist — see *Round 13* below. The boundary argument that follows is unchanged.
+
+#1370's lesson is that an authority checked before an unbounded wait is stale by the time it is
+spent. The question is therefore not "how many places can we check?" but "where is the authority
+predicate already re-asked after an unbounded wait?" — and the answer was established by reading
+the executor rather than assumed: `preCallGuard` takes the live revalidation as a closure, and is
+run BOTH after admission and again from `CallOptions.PreSend`, which the upstream client invokes
+after the connection-pool wait and DNS, and again after connect and the TLS handshake.
+
+So one check inside the closure is reached by every pre-send site there is. **No redundant third
+or fourth site was added to inflate defence in depth** — a site with no distinct reason to exist
+is a site nobody maintains. That the existing sites are genuinely covered is not asserted: mutation
+RM12 deletes the re-ask from a PreSend site and the byte-level case catches it.
+
+The guard on the new row is `trustPrecheck != nil` ALONE, where the surrounding code required
+`approvalOK` too. Peer freshness does not depend on the approval seam, so gating it on that seam
+being wired would mean forgetting to wire the approval silently disables freshness as well — the
+permissive direction. A partially composed gate now refuses more, never less.
+
+### The denial reason is request-scoped and bounded
+
+`mcperr.ReasonPeerObservationNotFresh` — ONE bounded class for the live gate, mapped from the
+verdict rather than passed through. The verdict's finer classes exist because an OPERATOR needs to
+know whether to refresh or to re-review; a caller does not, and every one of those classes would
+otherwise carry the shape of the peer's identity, fingerprint or endpoint out to the wire. No SPKI,
+fingerprint, endpoint or raw identity is exposed. The fine class stays where it is safe: the
+activation surface and the log.
+
+### The race/time matrix (10 cases, no sleeps)
+
+Driven against the REAL live-execution path and a REAL local HTTPS peer, with the boundary clock
+and the peer observation under test control. There is not a single `time.Sleep`: expiry is placed
+by *counting boundary clock reads*, so a lapse lands at an exact point on the path.
+
+The three-read structure (preCallGuard, PreSend after the pool wait, PreSend after the handshake)
+is not assumed — the rig records every read and RT01 asserts it, so a change to the PreSend wiring
+makes the matrix fail loudly rather than silently stop testing the point it was written for.
+
+| case | what it places where |
+|---|---|
+| RT01 | POSITIVE CONTROL — a fresh observation crosses the whole path, exactly one request |
+| RT02 | stale before admission — never reaches the peer |
+| RT03 | expiry after admission — refused before the upstream |
+| RT04 | expiry during the connection wait — **zero MCP request bytes** (§10, below) |
+| RT05 | future-dated stamp is refused |
+| RT06 | a fresh observation for ANOTHER target does not rescue this one |
+| RT07 | recent, well-formed evidence under a SUPERSEDED registry pin is refused |
+| RT08 | a failed refresh does not extend age; a real one does |
+| RT09 | reseed and restart both remove the authority |
+| RT10 | target drift between admission and the boundary is refused |
+| RT11 | stale ON ARRIVAL is refused at admission and **spends no budget** (round 13) |
+
+**§10, the sharp proof.** RT04 does not settle for "the handler was not called". The expiry is
+placed after connect, so TCP may legitimately exist; the peer counts **MCP request bytes written**,
+and the assertion is that the count is **0**. A refusal that happened after the bytes went out
+would pass a handler-count assertion and fail this one.
+
+**§11, restart.** Two gates, because the property has two halves. `TestPeerFreshProd_Restart`
+`ReturnsEveryRecordToUnobserved` re-seeds the REAL inventory exactly as boot does and proves every
+record comes back `OperatorSeeded` with no observation. RT09 then drives the LIVE path against
+that end state — reached by a reseed or a restart alike — and proves the request cannot pass.
+Provenance is derived from the evidence, so a seeded record cannot claim otherwise, and a previous
+process's green activation cannot make seed data read as observed.
+
+**ANTI-VACUITY, MEASURED RATHER THAN CLAIMED.** With the `boundaryPeerFreshness` call deleted from
+`mcp_live_gate.go`, **SEVEN of the ten cases fail**. The three that survive are the three that
+should: RT01 is the positive control (a boundary that refused everything would satisfy every
+negative here while making the First Canary impossible), and RT06/RT10 prove a DIFFERENT authority
+— the precheck's target binding — and are labelled as such rather than counted as freshness gates
+they are not.
+
+*Re-measured after round 13*, with eleven cases and two freshness sites, each site deleted in turn:
+
+| deleted | cases that fail | why |
+|---|---|---|
+| the boundary call only | RT02, RT03, RT04 | the lapses that happen DURING the request — admission saw a fresh observation |
+| the admission call only | RT11 | stale on arrival: the boundary still refuses the send, but the slot is already spent |
+| both | RT02, RT03, RT04, RT05, RT07, RT08, RT09, RT11 | RT05/07/08/09 are stale on arrival, so EITHER site refuses them |
+
+Each site is therefore killed by cases the other cannot satisfy. RT01, RT06 and RT10 survive every
+deletion, as before and for the same reasons.
+
+### Mutation campaign (14 classes)
+
+Same driver discipline as §25e: an anchor matching zero sites is `NOT PROVEN`, never skipped; a
+mutated tree that does not compile is `NOT PROVEN` rather than a pass; and every restore is
+verified to reproduce the saved bytes exactly, compared against those bytes rather than by asking
+git.
+
+**Result: 14 CAUGHT, 0 SURVIVED, 0 NOT PROVEN.**
+
+| # | defect class | verdict | gate |
+|---|---|---|---|
+| RM1 | the runtime freshness check is removed entirely | CAUGHT | `TestPeerFreshRT` |
+| RM2 | freshness is checked only at activation (the boundary always permits) | CAUGHT | `TestPeerFreshRT` |
+| RM3 | a stale observation is accepted at the boundary | CAUGHT | `TestPeerFreshRT08_FailedRefreshDoesNotExtendAgeAndARealOneDoes` |
+| RM4 | a future-dated observation is accepted | CAUGHT | `TestPeerFresh_Matrix` |
+| RM5 | the boundary ignores the precheck's target verdict | CAUGHT | `TestPeerFreshRT10_TargetDriftBetweenAdmissionAndTheBoundaryIsRefused` |
+| RM6 | the fingerprint FORMAT is dropped from the target binding | CAUGHT | `TestPeerFresh_Matrix` |
+| RM7 | the observed identity is not checked against the catalog record | CAUGHT | `TestPeerFreshRT07_ObservationUnderASupersededPinIsRefused` |
+| RM8 | the observed identity is not checked against the REGISTRY PIN | CAUGHT | `TestPeerFreshRT07_ObservationUnderASupersededPinIsRefused` |
+| RM9 | the boundary reuses the DECISION-TIME instant instead of re-reading the clock | CAUGHT | `TestPeerFreshRT` |
+| RM10 | a FAILED refresh stamps a fresh observation anyway | CAUGHT | `TestPeerFreshProd_FailedRefreshLeavesTheObservationAndLetsItAge` |
+| RM11 | seed provenance (no observation at all) is accepted as evidence | CAUGHT | `TestPeerFresh_Matrix` |
+| RM12 | a PRE-SEND revalidation site omits the authority re-ask (the #1370 lesson) | CAUGHT | `TestPeerFreshRT04_ExpiryDuringTheConnectionWaitSendsNoRequestBytes` |
+| RM13 | the catalog record's observation is not carried to the boundary | CAUGHT | `TestPeerFreshProd_TheProductionPrecheckCarriesTheEvidence` |
+| RM14 | seed and observation share one ingest entrypoint again | CAUGHT | `TestProvenance_` |
+
+**Two of these were real gaps, and how they were found matters more than the score.**
+
+**RM13 — the boundary had no evidence to judge.** The first shape of this work let the precheck
+report freshness without carrying the catalog record's observation to the boundary at all. The
+campaign caught it; no behavioural test had, because every one of them supplied a rig whose
+precheck already carried evidence. The contract is now pinned where it is made — a production-level
+gate asserting the REAL precheck carries the REAL record's observation.
+
+**RM5 — the boundary's target comparison was vacuous, and only a harness could show it.** An
+earlier shape built a "reviewed" target from the REQUEST's ids and compared it against the
+precheck's resolved target. In production those are equal by construction, so the comparison could
+never fail and never catch anything; the defect was visible only because the harness could make
+them differ. The fix was to delete the comparison, not to strengthen it: the precheck already
+establishes that binding, and RT10 now proves the precheck's `Eligible` verdict is what the
+boundary acts on.
+
+**Nothing was forced into a fake kill.** RM4 and RM11 survived on the first run and were closed by
+extending the real matrix to drive the future-dated and no-observation rows, not by inventing a
+gate around the mutation. The campaign was then **re-measured end to end against the fixed tree**
+rather than having the two rows edited in — the §25e lesson about a campaign reporting confident
+output about a tree it did not restore.
+
+### A vacuous gate found while verifying invariant (2), and closed
+
+The claim that nothing unbounded sits between the last freshness re-ask and the first request byte
+rests on there being exactly **one physical send**. `PreSend` is re-asked per leg and the TLS
+dialer site reaches every leg because each leg builds its own transport — but a **redirect** to the
+SAME approved host can reuse a pooled connection, so it would NOT re-enter the dialer, and the peer
+chooses when its `3xx` arrives. `upstreamclient`'s own limits.go already records the principle
+(*"REDIRECTS ARE A RETRY BY ANOTHER NAME"*: a 307/308 replays the POST body carrying the same
+`AttemptID`, so no witness could tell the two invocations apart) and `RetryFreeLimits` therefore
+FORCES `MaxRedirects = 0` rather than merely validating it.
+
+So the invariant holds — **but nothing pinned that the live tier uses that constructor.**
+`TestCanaryPath_ProductionUpstreamClientIsRetryFree` asserts that `RetryFreeLimits` returns
+retry-free limits and that `newProductionUpstreamClient` constructs without error; neither reaches
+the property its own doc comment names. **Measured: swapping `RetryFreeLimits` for `NewLimits`
+inside the production constructor reintroduces retries AND redirects, and that gate still passes —
+as does every other test in the canary and peer-freshness families.** The HTTPS E2E cannot catch it
+either: `realUpstreamFor` rebuilds the shape locally with its own `RetryFreeLimits` call, because
+`DefaultGatewayPolicy` refuses loopback, so the E2E proves properties of a REPLICA of the
+production client rather than of the production constructor.
+
+`TestCanaryPath_ProductionUpstreamClientIsBuiltFromRetryFreeLimits` closes it structurally —
+behaviour cannot reach this constructor, for the loopback reason above.
+
+**Both earlier versions of that wall were themselves bypassable, and self-attack rather than review
+is what found it each time — three iterations in total.** The first required the constructor's body
+to mention `RetryFreeLimits` and to mention no other limits constructor — a DENY-LIST OF SPELLINGS. It killed the obvious swap, and it was defeated by
+keeping the `RetryFreeLimits` call and then assigning over its result from a local helper the
+deny-list cannot name (measured: the bypass PASSED). That is the same defect class the gate exists
+to close, one level up — *a check that enumerates the ways to be wrong is beaten by a way nobody
+enumerated.* The rule to carry forward: **a wall should follow the VALUE that is used, not the
+names that appear near it.**
+
+**The SECOND version was bypassable too, and probing it — not review — is what found that.** It
+took the first `upstreamclient.Config` literal in the function and counted only `Ident` assignments,
+which left two holes, both measured as real bypasses: a **decoy literal** (`_ =
+upstreamclient.Config{Limits: lim}` earlier in the body) captured the check while the literal
+actually handed to `New` carried weak limits; and a **pointer alias** (`p := &lim; *p = weak()`)
+replaced the value through a statement that is not an `Ident` assignment, so the binding count
+stayed at one.
+
+The shipped wall therefore anchors on the value that is USED, twice over: it finds the single call
+to `upstreamclient.New`, takes the `Config` literal passed to it (a non-literal `Config`, several
+`New` calls, or a missing `Limits` field are each refused rather than guessed at), reads the
+identifier in its `Limits` field, and requires that identifier to be bound EXACTLY ONCE by a call to
+`RetryFreeLimits` on the upstreamclient package — resolved through the file's own import alias — and
+to have its **address never taken**, since once it escapes its value can be replaced through an
+alias this analysis cannot follow. Refusing an aliased variable is fail-closed and deliberate: the
+gate does not chase aliases, it declines to certify them.
+
+**A FOURTH iteration followed, and this one came from REVIEW rather than from probing.** Codex round
+4 returned two P1s against the third version. The first — a decoy `Config` literal — was the hole
+already closed above, found independently. The second was one probing had NOT found: the Limits
+identifier is matched by **SPELLING**, and an `*ast.Ident` carries no scope, so a **package-level
+`lim`** holding default limits could feed the returned `Config` while an otherwise-unused
+**closure-local `lim := RetryFreeLimits(...)`** supplied the single binding that satisfied the
+predicate. Verified as a real bypass before it was agreed with.
+
+The binding must therefore also be in the function's **own top-level scope** — not in a nested
+block, loop or closure. The rigorous answer is to resolve the identifier to a `types.Object`; the
+fail-closed one is to refuse anything whose binding is not the function's own. Production binds
+`lim` at the top level of the constructor, so refusing the rest costs nothing and cannot be fooled
+by shadowing. **A gate may decline to certify what it cannot resolve, and that is the direction to
+err in.**
+
+Its control (`..._RetryFreeWallIsNotVacuous`) runs the rejection cases through the SAME predicate
+the gate runs — every bypass found against every version of this wall, by probing and by review
+alike — plus acceptance cases (the production form and an aliased-import form), because a wall
+nothing can satisfy gets deleted by the next person who touches the file. **All twelve known
+bypasses are CAUGHT; the shipped wall accepts the real production file.**
+
+**A FIFTH iteration followed, from review again.** Codex round 5 found two more, both real: the single
+`New` call's **result may be discarded** (`_, _ = New(Config{Limits: lim}, ...); return
+tunedUpstreamClient()` — one New call, retry-free limits, and a client built from something else),
+and a **pre-declaration scope** case (a local's scope begins at its declaration, so a package-level
+`lim` can feed a `Config` in an EARLY return while a later top-level
+`lim, _ := RetryFreeLimits(...)` supplies the binding matched by spelling). The `New` call must
+therefore be the one whose result is RETURNED, and the binding must PRECEDE the use in source order
+— a coarse stand-in for dominance that errs the safe way.
+
+**The honest summary of this sub-thread: one gate, FIVE versions, and every version but the last was
+bypassable.** Two holes were found by probing it, four by review, and none by the test suite passing.
+It is recorded at this length because the lesson is not about upstream limits at all — *a structural
+wall is itself code, and a wall that has never been attacked should not be counted as evidence.* The
+count also says something about the instrument: each fix was sound and each left a shape nobody had
+thought of, which is the ordinary behaviour of a hand-written AST predicate standing in for a
+dataflow analysis. That it took five rounds is the argument for treating this gate as a **tripwire,
+not a proof** — the real guarantees are the ones below it (`RetryFreeLimits` forcing the values, and
+the client honouring them), which are pinned behaviourally.
+
+Each link of the chain is now pinned somewhere: the production constructor takes the limits it
+passes to `Config` from `RetryFreeLimits` (this wall); `RetryFreeLimits` forces `MaxRedirects = 0`
+and `RetryDisabled` (`internal/mcp/upstreamclient/limits.go` + the gate above it); and the client
+honours both (`retryfree_test.go` and the HTTPS E2E).
+
+**This is a blocker-#6 gate, repaired here because blocker #11's runtime half depends on it.** It
+was found by verifying this PR's own invariant against the code rather than by review — the same
+class as RM5 and RM13, one layer further out: a gate whose doc comment states the requirement and
+whose assertions do not reach it.
+
+### A partial tools/list page was reported as success (Codex round 5, P2)
+
+Discovery fetches exactly ONE `tools/list` page. A result MAY paginate (MCP `nextCursor`), and the
+completeness flag was consulted only to gate catalog WITHDRAWAL — never surfaced. So on a paginating
+server the refresh **succeeded**, the operator was told it worked, and every tool beyond the first
+page received **no peer observation at all**: an operator refreshing precisely to satisfy the
+First-Canary freshness fact would find it still false with nothing pointing at why. Verified by
+driving a paginated peer through `Discover` before the fix.
+
+It fails CLOSED — the freshness fact stays false, so nothing unsafe activates — which is why it is a
+P2 and not a P1. But it is exactly the class this work is about: **"could not observe" must not be
+reported as anything else.**
+
+`catalog.Report.Complete` and `mcpPeerRefreshOutcome.Complete` now carry the fact, and the refresh
+API and its audit line report it. **Following the cursor is deliberately NOT done here, and saying so
+is the point:** the same flag gates withdrawal (a tool absent from a partial page has not been proven
+withdrawn), so consuming pages correctly means reworking when withdrawal may fire — a
+security-relevant change that belongs in its own review. Recorded as a dependency rather than
+absorbed. Gates: `TestDiscoveryObservation_PartialPageIsReportedAsPartial` with
+`..._CompletePageIsReportedAsComplete` as its control, since reporting everything as partial would
+satisfy the first assertion while making the signal useless and suppressing withdrawal entirely.
+
+### Round 8: both walls were bypassable, and the same rule fixes both
+
+Marking the PR ready for review re-triggered Codex on the ledger commit. It returned two P1s, both
+against structural walls in this change and both REAL — each was reproduced against the shipped
+tree before it was agreed with.
+
+**The provenance wall matched CALLS, and a method value is not a call.** `findCallsites` anchored
+on a `*ast.SelectorExpr` in the `Fun` position of a `*ast.CallExpr`, so
+
+```go
+mint := c.IngestObserved
+mint(reg, in, obs)
+```
+
+was invisible twice over — the selector is not in call position, and the call is through a plain
+identifier. Measured: a production function of exactly that shape minted a `PeerObserved` record
+with `TestPeerWall_ObservedIngestHasExactlyOneProducer` **green**, while the legitimate direct call
+from `Discovery.Discover` kept the expected-caller set satisfied. That path needs no peer: current
+pin data, peer-shaped bytes and a timestamp are enough, which is precisely the forgery blocker 11
+exists to prevent. The scan now matches the selector **wherever it appears** — a caller cannot use a
+method without naming it — so calls, method values and any future syntactic form all pass through
+it. It is deliberately broader than calls: a bare mention with no invocation is reported too, and
+naming the observed-ingest capability is itself what has to be justified. It does NOT reach
+reflection (`MethodByName` resolves from a string with no selector in the source); that is recorded
+as a limit rather than implied away.
+
+**The retry-free wall counted assignments, and a range clause assigns without being one.**
+`bindingsOf` collected `*ast.AssignStmt` writes, so
+
+```go
+lim, _ := upstreamclient.RetryFreeLimits(...)   // the one binding the gate counted
+for _, lim = range []upstreamclient.Limits{upstreamclient.DefaultLimits()} {
+}
+return upstreamclient.New(upstreamclient.Config{Limits: lim}, ...)
+```
+
+left the binding count at exactly one, by `RetryFreeLimits`, at top level, preceding the use — every
+clause satisfied — while the value reaching `Config` was the default limits, restoring retries AND
+redirects. Verified accepted by `retryFreeLimitsViolation` before the fix.
+
+**The fix is the inverted rule, and that choice is the point.** Adding a `RangeStmt` case would have
+been the sixth named shape on a wall whose own history says enumeration loses. So any write that is
+NOT an assignment now disqualifies the function outright, whatever it is — `unfollowableWriteTo`
+refuses range clauses, type switches and inner `var` declarations without needing to be right about
+which exotic forms exist. **Probing the fix immediately found two more real bypasses of version
+five** (a range clause binding the KEY, and an inner `var` shadow), neither of them reported,
+both measured. One review found one shape; ten minutes of probing the fix found two more. There is
+no reason to believe that enumeration was finished either, which is the argument for a rule that
+does not depend on having finished it.
+
+**Both walls gained a falsifiability seam.** The retry-free wall already had one
+(`retryFreeLimitsViolation` over synthetic source) and that is the only reason its bypasses could be
+measured rather than argued about. The provenance wall had none — it could be run only against the
+real tree, so it could be shown to pass and never shown to catch anything. `referencesInSource` is
+now the per-file half, and `TestPeerWall_ReferenceScanIsNotVacuous` drives five shapes through it,
+four of which are not calls, plus an unrelated-name case so a scan that flagged everything cannot
+pass either.
+
+**The running count on this one PR: one wall at six versions, one at two, and no version but the
+last of either was sound.** Every hole was found by review or by probing; none by the suite passing.
+That is the standing evidence for the rule already recorded above — *a structural wall is itself
+code, and a wall that has never been attacked should not be counted as evidence* — and for treating
+these gates as tripwires over guarantees that are pinned behaviourally underneath them.
+
+### Round 9: the enumeration was abandoned, because it kept losing
+
+Two more P1s, both again on the walls, both reproduced before being agreed with.
+
+**The provenance wall attributed a package-scope alias to the function above it.** The scan carried
+a running "last function seen" variable that was never reset on leaving a `FuncDecl`, so
+
+```go
+func (d *Discovery) Discover() { … }
+
+var mint = (*catalog.Catalog).IngestObserved
+
+func evil() { mint(nil, nil, nil) }
+```
+
+reported the alias as `internal/mcp/execution/discovery.go:Discovery.Discover` — **the exact key on
+the reasoned list** — and any other function could then call `mint(…)` producing no selector at all.
+Measured. Attribution now walks `file.Decls` and follows the declaration a reference is INSIDE;
+package-scope references are attributed to a sentinel (`<package scope>`) containing characters no
+Go identifier can hold, so they can never be put on the list and are always reported. That is not a
+modelling gap: an alias to the observed-ingest capability held in package scope is reachable from
+every function in the package at once, which is exactly what a per-caller wall cannot certify.
+
+The control gained the case AND a stronger assertion. Finding a reference is not enough — one
+misattributed to a function that IS on the reasoned list gets reported and then waved through, which
+is indistinguishable from not finding it. The control now checks WHERE each shape is attributed, and
+was verified failing against the reintroduced running-variable form.
+
+**The retry-free wall met a parenthesised range target** — `for _, (lim) = range …`, where the
+target is an `*ast.ParenExpr` and the shape-matcher simply does not see it. Verified accepted before
+the fix.
+
+**That was the fourth spelling of one idea in two rounds** — assignment, range value, range key,
+inner `var`, and now parentheses — so the clause stopped enumerating write forms altogether. The
+rule is now: **the Limits identifier may appear exactly twice in the function body**, once where it
+is bound from `RetryFreeLimits` and once in the returned `Config`. Any third occurrence, of any
+kind, disqualifies — a second assignment, a range target parenthesised or not, a var shadow, a
+type-switch binding, an address-of, a closure capture, or a form that does not exist yet. There is
+nothing left to enumerate because the rule never asks what a construct IS. `unfollowableWriteTo` and
+its three per-node helpers were deleted; the sixteen rejection cases in the control all still fail,
+now for one reason instead of five.
+
+It is deliberately over-strict in the safe direction: a constructor that legitimately READ its limits
+(`if lim.RetriesDisabled() { … }`) would be refused, and the refusal says exactly what to do. That is
+the right trade for a gate whose failure mode is silently certifying a retrying client.
+
+**The lesson, now paid for four times over:** a structural check that classifies SYNTAX is a
+deny-list with extra steps, and a deny-list loses to the next spelling. A check that counts
+OCCURRENCES of the thing it cares about has no spelling to be beaten by. Where a wall can be
+expressed that way, express it that way.
+
+### Round 10: the occurrence rule was necessary and not sufficient
+
+One P1, and it is the shape I had explicitly asked for on the round-9 thread — *get past "exactly
+two occurrences" without a third one appearing*. It does, by moving the mutation out of the function
+entirely:
+
+```go
+var lim upstreamclient.Limits                       // PACKAGE scope
+func resetLimits() { lim = upstreamclient.DefaultLimits() }
+
+func newProductionUpstreamClient() (*upstreamclient.Client, error) {
+	lim, _ = upstreamclient.RetryFreeLimits(…)      // assignment, NOT a declaration
+	resetLimits()                                    // mutates it from outside
+	return upstreamclient.New(upstreamclient.Config{Limits: lim}, …)
+}
+```
+
+Two occurrences, top level, preceding the use, bound by `RetryFreeLimits` — every clause satisfied,
+and the returned client carries the default retrying limits. Verified accepted before agreeing.
+
+**The occurrence rule bounds what happens INSIDE the function and says nothing about whether the
+identifier is a local at all.** That is a real limit of it, and worth stating plainly rather than
+treating round 9's rule as finished: it was necessary, not sufficient.
+
+The fix requires the binding to be `:=` rather than `=`, which closes the gap without resolving
+types. A short variable declaration at a function's top level always declares a NEW variable — a
+package-level name lives in an outer scope and is shadowed, not assigned — and it cannot be reusing
+a same-scope local, because the occurrence rule has already established there is no earlier `lim` in
+the body. So **the two rules together say: the value is a function-local, declared once, used
+once.** A helper cannot reach a local without `&lim`, which would be a third occurrence.
+
+**The pattern across rounds 4, 5, 8, 9 and 10 is now explicit.** Every clause constrained the SHAPE
+of the binding — top level, precedes the use, not in a closure, not overwritten — while leaving its
+SCOPE to be inferred from those shapes. Each inference was sound and each left a way to have an
+identifier that was not what it looked like. Constrain the scope directly and the inferences become
+unnecessary. That is the generalisation of round 9's lesson one level out: **prefer a rule that
+states the property you need over a set of rules from which it can be derived.**
+
+### Round 11: a closure is not a scope boundary, and the line is where the DATA comes from
+
+One P1, on the provenance wall — the one I had asked to have attacked, since it is what actually
+guards blocker 11's truth claim. Verified before agreeing: a capability captured in a closure and
+registered elsewhere
+
+```go
+func (d *Discovery) Discover() {
+	mint := func(reg, in, obs interface{}) { d.Catalog.IngestObserved(reg, in, obs) }
+	registry = append(registry, mint)
+}
+```
+
+reported as `discovery.go:Discovery.Discover` — the allowed caller — while a later holder invokes
+the escaped closure with **fabricated** discovery bytes and a current timestamp, producing no
+selector of its own.
+
+**The obvious fix would have broken production, and finding that out is what produced the right
+rule.** Refusing every closure-nested reference fails immediately: production's own call lives
+inside one. `ingest := func() error { … }` is handed to `d.IngestGuard` deliberately, so the catalog
+publish serialises with in-flight approvals — the capability escapes **by design**.
+
+So the line is not whether the closure escapes. It is **where its inputs come from**:
+
+- production's closure takes **no parameters**. Everything it feeds the catalog is CAPTURED from the
+  authenticated dial — the verified pin, the response bytes, and an `observedAt` stamped before the
+  request went out. A holder can only re-run it, and a replay re-ingests those same bytes with that
+  same (by then older) timestamp, which the freshness bound refuses. It fails closed.
+- a closure that takes its inputs as **parameters** hands that choice to the caller. That is the
+  finding, exactly.
+
+References inside a parameterised closure are therefore attributed to `<parameterised closure>`,
+which cannot be spelled on a reasoned-caller list. The walk carries its own scope stack, because
+`ast.Inspect` has none.
+
+**This is round 10's lesson applied to a capability instead of a value.** There, a binding's scope
+was inferred from the shape of its statement; here, a reference's reachability was inferred from the
+declaration it was written in. Both inferences were sound and both were wrong about the thing that
+mattered. *A reference reachable with caller-supplied data is not bounded by the function it is
+written in, whatever that function is called.*
+
+### Round 12: the rule moved from the closure to the data — and the sequence stops here
+
+One P1, again on the provenance wall, again real. Round 11 refused a PARAMETERISED closure because
+its caller chooses the inputs; that was necessary and not sufficient. A **zero-argument** closure
+reads whatever it captures, so if it captures package-level variables a later holder sets those and
+then invokes it — same outcome, no parameters:
+
+```go
+var fabricatedRaw []byte
+escaped = func() { d.Catalog.IngestObserved(d.Registry, DiscoveryInput{Raw: fabricatedRaw}, …) }
+```
+
+Measured: still attributed to `Discovery.Discover`.
+
+So the rule stops asking about the closure and asks about the **data**. Every root identifier in the
+call's arguments must be something the declaration controls — receiver, parameter, named result, or
+a local it declared — or a name that is not a mutable value at all (an imported package qualifier,
+a builtin). A package-level variable is none of those, and lands on `<caller-mutable input>`.
+
+**The first version of this rule REJECTED PRODUCTION**, and that is worth recording rather than
+quietly fixing: it treated a selector's right-hand side as a root, so every field name in
+`DiscoveryInput{ServerID: rec.ID, …}` read as an unresolvable identifier. A gate that refuses the
+real tree is a gate that gets relaxed by the next person who hits it, which is the failure mode all
+of this exists to avoid. The walk now descends a selector chain to its leftmost identifier and takes
+only a composite-literal's value, never its key.
+
+### The sequence stops here, and this is the honest reason
+
+Rounds 8 through 12 produced **seven real findings against two structural walls**, and every one of
+them was the same thing: a hand-written AST predicate standing in for a dataflow analysis, evaded by
+a shape nobody had enumerated. Each fix was sound. Each fix drew another.
+
+That is not converging, and there is a structural reason it cannot: **deciding where a value came
+from is a types-and-SSA question, and these predicates are pattern matches over syntax.** Every
+round narrows the gap; none closes it, because the gap is the instrument. The measured history —
+seven versions of the retry-free wall, six of them bypassable; four of the provenance wall, three of
+them bypassable; two of the bypasses found by probing, the rest by review, none by the suite passing
+— is the evidence for that claim, not an apology for it.
+
+So the position recorded here, and stated on the PR:
+
+- **These gates are TRIPWIRES, not proofs.** They exist to make a future change to the composition
+  root visible in review. They are not the guarantee, and this document should not be read as
+  claiming they are.
+- **The guarantees are underneath them and are pinned behaviourally.** For blocker 11: provenance is
+  DERIVED from evidence (`Observed.Present()`), there is no `Source` field to set, the only evidence
+  gatherer is `Discovery.Discover` over the authenticated transport, the timestamp is taken before
+  the request, and the runtime re-asks freshness at every pre-send authority check. None of that
+  rests on an AST scan. For blocker 6: `RetryFreeLimits` FORCES the values and the client honours
+  them, pinned by `retryfree_test.go` and the HTTPS E2E.
+- **Further findings of this class will be RECORDED here rather than chased.** A thirteenth shape
+  almost certainly exists. Chasing it buys a slightly narrower pattern match and costs another round
+  of CI on a branch whose production code has not changed in seven commits.
+- **The real fix, if this wall is ever worth more than a tripwire, is `types.Object` resolution**
+  inside the gate. That is a self-contained change with its own review, and it is recorded as a
+  dependency — not folded into a ledger commit.
+
+### Round 13: one real defect fixed, one wall evasion recorded (Codex, PR #1439)
+
+A requested re-review on `48c4b0f` returned two findings. Both were reproduced before either was
+agreed with.
+
+**P2 — a stale observation spent budget it could never use. Real, and FIXED.** Admission
+(`admitUnderActivation`) reserves before the boundary ever runs, and the reservation spends from
+`BudgetEnforcer`'s monotonic `total`, which `Release` deliberately never refunds (a crash between
+Reserve and the side effect must not let the budget be replayed). Admission did not consult
+freshness. So a request whose observation had ALREADY lapsed was admitted, charged, and refused at
+the first boundary re-check having sent nothing. The invariant held — nothing crossed — and the
+experiment was exhausted anyway: with a First-Canary total of three, three such requests stopped it,
+and re-observing the peer afterwards could not buy the spent generation back.
+
+The fix asks the SAME verdict (`boundaryPeerFreshness`, one definition of fresh) inside the
+admission probe, on the same capture as the approval beside it and at the admission instant every
+other admission fact is judged at, BEFORE the approval and before the reservation. A lapse is
+reported as untrusted, never as drift: the clock advancing is not the reviewed target moving, so
+nothing is latched. The denial carries the boundary's own bounded reason,
+`peer_observation_not_fresh`, so one fact is diagnosed identically whichever site catches it.
+
+This is not the redundant site §8 warns against, and the distinction is the whole argument: the
+boundary exists because an observation can lapse DURING a request; this exists because an
+already-lapsed one must not be PAID for. Neither reason covers the other, and the measurement above
+shows each site killed by cases the other cannot satisfy.
+
+`TestPeerFreshRT11_StaleAtAdmissionSpendsNoBudget` is the defect proof: a budget of ONE, three stale
+requests, then a re-observation — the fresh request must still reach the peer exactly once. It fails
+with the admission call removed (verified, then restored byte-for-byte) and passes with it. RT08 was
+adjusted in the same change: it advanced only the BOUNDARY clock and then re-observed at that
+instant, which stamps the observation in the future relative to this harness's fixed admission
+clock — two clocks that are one clock in production. It now ages the evidence instead; same fact,
+and it passes with and without the fix.
+
+**The fixture consequence, and a vacuity probe run because of it.** Asking freshness at admission
+failed about twenty-five existing admission-level cases whose premise was "this request is
+admitted" but whose seeded target no peer had ever been seen advertising — a state production cannot
+reach, because activation readiness already requires a fresh observation. Those rigs now observe
+the peer through the PRODUCTION refresh engine (`observeSeededToolTrustPeerAt` /
+`observePeerAdvertisingAt`, opt-in, never a hand-built record, and asserting the fingerprint did not
+move), exactly as the boundary fixtures had to when the boundary check landed.
+
+Fixing the cases that FAILED is not enough, because a case that expects a DENIAL and does not
+assert its reason would keep passing while now being refused for staleness instead of the thing it
+exists to prove. So the stale-at-admission branch was temporarily instrumented to print a stack and
+the whole MCP/Canary suite was run: FOUR such cases were found (C02 expired approval, the
+approval-expiry premise of C04/C07 and the scope-independent path, read-first C05, and the
+merely-unauthorized autostop case) and each now observes the peer at its own evaluation instant, so
+the only authority missing is the one it names. After the fix the branch is reached only by the
+freshness matrix itself (RT05/07/08/09/11) and by four drift cases that assert the latched cause —
+drift is decided from the same capture BEFORE the freshness answer is consulted, so a stale
+observation can never mask it, and those cases prove exactly that.
+
+**P1 — a method value exported from the allowed producer. Real, and RECORDED, not chased.**
+`Discovery.Discover` could assign `escaped = d.Catalog.IngestObserved` to a package-level variable,
+and any other function could then call `escaped(...)` with fabricated bytes. The bare selector is
+attributed to its enclosing declaration — the allowlisted one — and the later invocation names no
+selector, so the provenance wall stays green. Reproduced through the wall's own `referencesInSource`
+seam: the reference is reported as `internal/mcp/execution/discovery.go:Discovery.Discover`.
+
+This is round 13 of exactly the sequence the previous section stopped: a hand-written syntactic
+predicate standing in for a dataflow question — here, *where does this function VALUE go?* — and
+the thirteenth shape the previous section said almost certainly existed. It is recorded under that
+section's rule rather than chased. Nothing in the production tree does it (the one real reference is
+a direct call with arguments the declaration controls), and the guarantees are still the behavioural
+ones listed above: provenance is derived from evidence, `Discovery.Discover` is the only gatherer,
+the timestamp is taken before the request, and freshness is re-asked at admission and at every
+pre-send authority check. The comment on `findCallsites`, which said matching the selector "closes
+the class", now names this limit beside the reflection limit it already named. The `types.Object`
+resolution recorded above remains the real fix.
+
+**Nothing else moves.** Blocker 11 stays CLOSED — the invariant held throughout; round 13 closes an
+availability defect beside it. Blockers 1, 2, 3, 8, 10, 12 and 15 are untouched, and the §26 verdict
+is unchanged.
+
+### Status — blocker 11 is CLOSED, and nothing else moves
+
+The closure bar was stated before the work: the ledger may change `#11 OPEN -> CLOSED` only once
+activation readiness, runtime/live admission, AND every existing pre-send authority revalidation
+site enforce the same property. All three now hold, and the third is the one worth naming
+precisely: there is exactly **one** boundary check site, inside the existing live authority
+predicate, and every pre-send re-ask reaches it — `preCallGuard` runs the predicate after admission
+and `CallOptions.PreSend` re-runs it after the pool wait and after the TLS handshake. That is why no
+third or fourth boundary guard was added; a site with no distinct reason to exist is how #1370's
+stale-authority lesson gets relearned rather than applied.
+
+*Round 13 correction.* "Runtime/live admission" was satisfied only in the sense that the
+predicate ran AFTER admission; admission itself did not ask, so an already-stale request was charged
+budget before being refused. The admission probe now asks the same verdict before the reservation
+(see *Round 13*), which is what makes the second clause of the closure bar true as written.
+
+**What is NOT closed by this.** Blocker 1 is untouched: the refresh that supplies an observation is
+sessionless, and none of this work implements the MCP `initialize` / version-negotiation / session
+lifecycle. Blockers 2, 3, 8, 10, 12 and 15 are untouched. The baseline remains **fifteen**, no entry
+is renumbered, and the §26 verdict is unchanged — closing blocker 11 removes one of fifteen reasons
+a GO is forbidden, not the prohibition.
+
+**What a reader should carry away.** Peer observation supplies TRUTH; it supplies no AUTHORITY by
+itself. Activation asks whether the exact reviewed target is backed by a recent authenticated
+observation; the boundary asks the same question again, from authoritative current state, on one
+clock sample, at the instant authority is spent. One definition of fresh, asked twice, because the
+fact it decides can become false with nothing having changed.
+
 ## §26 Final verdict
 
 ### `FIRST CONTROLLED CANARY REVIEW: BLOCKED — NO SAFE FIRST CANARY TARGET`
@@ -3294,12 +4163,15 @@ would let them inherit a neighbour's closure) and NOT filed as a sixteenth block
 fifteen are preserved exactly as adopted). A First Canary requires the fifteen closed AND every such
 §24 finding closed.
 
-**Post-adoption status (see §25a, §25b, §25c).** The baseline remains **fifteen**; the list below is
-preserved as adopted, and nothing is renumbered or deleted. Seven entries have changed status since:
-**blocker 4 is CLOSED**, **blocker 5 is CLOSED**, **blocker 6 is CLOSED**, **blocker 7 is CLOSED**,
-**blocker 13 is CLOSED**, **blocker 14 is CLOSED**, and **blocker 8 is narrowed but still OPEN**.
-Eight are untouched, and the verdict above is unchanged — closing blockers 4, 5, 6, 7, 13 and 14
-removes six of fifteen reasons a GO is forbidden, not the prohibition.
+**Post-adoption status (see §25a, §25b, §25c, §25e, §25f).** The baseline remains **fifteen**; the
+list below is preserved as adopted, and nothing is renumbered or deleted. Eight entries have changed
+status since: **blocker 4 is CLOSED**, **blocker 5 is CLOSED**, **blocker 6 is CLOSED**, **blocker 7
+is CLOSED**, **blocker 11 is CLOSED**, **blocker 13 is CLOSED**, **blocker 14 is CLOSED**, and
+**blocker 8 is narrowed but still OPEN**. Seven are untouched, and the verdict above is unchanged —
+closing blockers 4, 5, 6, 7, 11, 13 and 14 removes seven of fifteen reasons a GO is forbidden, not
+the prohibition. **Blockers 1, 2, 3, 8, 10, 12 and 15 remain OPEN**, and blocker 1 in particular is
+untouched by the peer-observation work: the refresh is sessionless and is NOT a claim that Culvert
+implements the MCP session lifecycle.
 
 1. **No controlled upstream reachable AND usable under the supported production trust model (§5).**
    The only documented controlled inventory fails closed on scheme (`mcp+https://`), host (private
@@ -3509,7 +4381,7 @@ removes six of fifteen reasons a GO is forbidden, not the prohibition.
    a Canary→Shadow/Observe target (the demotion runs only via the unwired signed-distribution path). A
    governed operator-reachable rollback control (wire quiesce, or wire the demotion/publication path)
    must be added.
-11. **The reviewed fingerprint is operator-declared, not peer-observed (§7).** The only shipped
+11. **[CLOSED — see §25e and §25f] The reviewed fingerprint is operator-declared, not peer-observed (§7).** The only shipped
    provisioning path (`seedServer`/`seedTools`/`Ingest`, `mcp_inventory.go`) computes the fingerprint
    from operator-supplied JSON and verifies the pinned identity against its own register stamp, and
    `execution.Discovery.Discover` has no non-test caller, so nothing re-observes the live peer.
@@ -3517,6 +4389,46 @@ removes six of fifteen reasons a GO is forbidden, not the prohibition.
    "rug-pull invalidation" bind the SEED, not the actual upstream. Closing this needs authenticated
    production discovery/freshness verification OR an externally-verified ingestion procedure proving
    seeded-fingerprint == the live peer's advertised tool.
+
+   **CLOSED by authenticated observation required at BOTH ends.** The finding stands exactly as
+   written — it was true, and the two facts behind it were confirmed against the code before
+   anything was built. It is closed by making a peer observation REQUIRED, not by re-reading the
+   seed more carefully.
+
+   *Truth.* `ToolRecord.Provenance()` is DERIVED from the evidence (`Observed.Present()`); there is
+   no `Source` field a caller could set, so nothing can claim peer provenance without carrying an
+   observation. Seeding and observing are two semantic entrypoints over one implementation, pinned
+   structurally. Evidence is gathered only by `execution.Discovery.Discover` over the production
+   upstream transport — which now has exactly one governed production caller, `POST
+   /api/mcp/servers/refresh` — and the identity stamped is the one the TRANSPORT verified, never a
+   value read from the MCP payload. The timestamp is taken BEFORE the request goes out, so a stalled
+   call that eventually succeeds lands already stale.
+
+   *Activation.* Readiness row 21a (`peer_observation_not_fresh`) requires the EXACT reviewed target
+   — tenant, server, tool, fingerprint, fingerprint format, under an identity that is still both the
+   catalog record's and the registry's pin — to carry an observation no older than
+   `FirstCanaryPeerObservationMaxAge` (30 min).
+
+   *Runtime.* An activation-time check alone was NOT sufficient, because freshness is the one
+   prerequisite that becomes false with no state change at all. `boundaryPeerFreshness` re-asks the
+   SAME verdict inside the existing live authority predicate, on one capture and one clock sample,
+   at every pre-send re-ask — `preCallGuard` runs it after admission and again from
+   `CallOptions.PreSend` after the pool wait and after the TLS handshake. A request cannot spend
+   execution authority on an observation that has expired.
+
+   *Proven.* A 10-case race/time matrix with no sleeps, driving the real live path against a real
+   local HTTPS peer, expiry placed by counting boundary clock reads; a byte-level proof that an
+   expiry after connect yields **zero MCP request bytes** (not merely an uncalled handler); measured
+   anti-vacuity (delete the check and 7 of 10 fail); and a 14-class runtime mutation campaign at
+   **14 CAUGHT, 0 SURVIVED**, re-measured end to end against the fixed tree.
+
+   *Recorded limitations, both fail-closed.* A target on the second or later page of a paginated
+   `tools/list` cannot receive an observation, so it cannot become a First Canary target — the
+   refresh now REPORTS that (`complete`) rather than implying a whole-server observation, and
+   following the cursor is recorded as a dependency because the same flag gates catalog withdrawal.
+   The catalog is not durable, so a restart returns every record to seeded and re-observation is
+   required — deliberate, since persisting a measurement of a third party across a process that was
+   not running to see it would let a restart move an observation forward.
 12. **No operator-reachable governed Canary ACTIVATION entry point (§13/§17).** Even with arming
    (blocker 3) and the activation inputs (blocker 2) closed, nothing lets an operator TRANSITION the
    node into Canary mode: the admin `apiMCPRolloutTransition` ends with `distribution_not_configured`
@@ -3701,7 +4613,14 @@ verdict FAILED.)
   `distribution_not_configured` for a Canary→Shadow/Observe target (the demotion runs only via the
   unwired signed-distribution path). Wire `quiesceLiveTier`, OR wire the demotion/publication path so
   an admin can drive Canary→Shadow/Observe.
-- bind the reviewed fingerprint to the OBSERVED live peer (blocker 11, §7) — the shipped provisioning
+- ~~bind the reviewed fingerprint to the OBSERVED live peer~~ **DONE (blocker 11 CLOSED, §25e + §25f)**
+  — the requirement is preserved below exactly as written, because the condition it names in its
+  last sentence is precisely what the closure had to satisfy. The route taken is the FIRST
+  alternative: a governed non-test `Discover` caller (`POST /api/mcp/servers/refresh`) supplies an
+  authenticated observation, activation requires the exact reviewed target to carry one no older
+  than 30 minutes, and the SAME verdict is re-asked inside the live authority predicate at every
+  pre-send re-ask — so the freshness guarantee is carried through the side-effect boundary rather
+  than established once at ingestion. (blocker 11, §7) — the shipped provisioning
   (`seedServer`/`seedTools`/`Ingest`) computes the fingerprint from operator-declared JSON and verifies
   the pinned identity against its own register stamp, and `execution.Discovery.Discover` has no non-test
   caller, so `ToolStillCurrent` re-checks only the seeded record. Add authenticated production

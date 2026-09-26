@@ -153,6 +153,7 @@ func registerMCPRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/mcp/overview", apiMCPOverview)
 	mux.HandleFunc("/api/mcp/health", apiMCPHealth)
 	mux.HandleFunc("/api/mcp/servers", apiMCPServers)
+	mux.HandleFunc("/api/mcp/servers/refresh", apiMCPServerRefresh)
 	mux.HandleFunc("/api/mcp/tools", apiMCPTools)
 	mux.HandleFunc("/api/mcp/decisions", apiMCPDecisions)
 	mux.HandleFunc("/api/mcp/decision-explain", apiMCPDecisionExplain)

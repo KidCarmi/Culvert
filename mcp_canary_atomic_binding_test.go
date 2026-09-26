@@ -782,10 +782,13 @@ func TestAtomicBinding_ApprovalIsEvaluatedInsideTheTransaction(t *testing.T) {
 	cr := r.rt.capRuntime(r.capb)
 	askedInsideLock := false
 	g := &mcpLiveSideEffectGate{
-		capb:          r.capb,
-		admit:         func() (func(), bool) { return func() {}, true },
-		readFirst:     func(policy.OperationClass) bool { return true },
-		trustPrecheck: stubTrustPrecheckEligible,
+		capb:      r.capb,
+		admit:     func() (func(), bool) { return func() {}, true },
+		readFirst: func(policy.OperationClass) bool { return true },
+		// Observed at the admission instant: admission asks peer freshness BEFORE the approval
+		// (round 13), so a stale stub would refuse first and this case would never reach the
+		// approval it exists to prove is read inside the lock.
+		trustPrecheck: stubTrustPrecheckObservedAt(canaryRuntimeTestNow),
 		approvalOK: func(canary.LiveTarget, policy.OperationClass, time.Time) (bool, string) {
 			// The store answers DIFFERENTLY either side of the lock, which is the whole point:
 			// a constant answer cannot tell a cached read from a live one. sync.Mutex is not
@@ -905,7 +908,7 @@ func TestAtomicBinding_MissingApprovalIsNotDrift(t *testing.T) {
 		capb:          r.capb,
 		admit:         func() (func(), bool) { return func() {}, true },
 		readFirst:     func(policy.OperationClass) bool { return true },
-		trustPrecheck: stubTrustPrecheckEligible,
+		trustPrecheck: stubTrustPrecheckObservedAt(canaryRuntimeTestNow), // fresh at admission: the refusal must be the MISSING APPROVAL, not staleness (round 13)
 		approvalOK:    func(canary.LiveTarget, policy.OperationClass, time.Time) (bool, string) { return false, "" },
 		admitUnderActivation: func(now time.Time, opClass policy.OperationClass, resolvedScope string, scopeNow canaryScopeProbe, ident canary.ExecutionIdentity, trust canaryTrustProbe) canaryAdmission {
 			return r.rt.admitLiveExecution(r.capb, now, opClass, resolvedScope, scopeNow, ident, trust)

@@ -4,6 +4,12 @@ package main
 // Controlled Canary physical-effect contract (review blockers #6/#8).
 
 import (
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"os"
+	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/KidCarmi/Culvert/internal/mcp/upstreamclient"
@@ -67,4 +73,635 @@ func TestCanaryGate_MintsReservationIdentity(t *testing.T) {
 		}
 		seen[id] = struct{}{}
 	}
+}
+
+// ── the production constructor must BE the shape, not merely resemble one ───────────────────
+
+// TestCanaryPath_ProductionUpstreamClientIsBuiltFromRetryFreeLimits closes a vacuity in the gate
+// above, found while verifying blocker #11's runtime invariant.
+//
+// THE GAP. TestCanaryPath_ProductionUpstreamClientIsRetryFree asserts two things: that
+// RetryFreeLimits returns retry-free limits, and that newProductionUpstreamClient constructs
+// without error. Neither reaches the property its own doc comment names — that the client the
+// live tier actually uses is built retry-free. Swapping RetryFreeLimits for NewLimits inside
+// newProductionUpstreamClient reintroduces transport retries AND redirects, and that gate still
+// passes; so does every other test in the canary and peer-freshness families (measured). The E2E
+// proofs cannot catch it either, because realUpstreamFor rebuilds the shape locally with its own
+// RetryFreeLimits call — they prove properties of a REPLICA of the production client, not of the
+// production constructor.
+//
+// WHY IT IS LOAD-BEARING, AND FOR TWO BLOCKERS. Blocker #6 is "one accepted reservation, at most
+// one physical invocation" — retries and redirects each defeat it, and upstreamclient's own
+// limits.go records that a redirect is "a retry by another name" (a 307/308 replays the POST body
+// carrying the SAME AttemptID, so no witness could tell the two invocations apart). Blocker #11's
+// runtime half then RESTS on that: the claim that nothing unbounded sits between the last
+// peer-freshness re-ask and the first request byte holds because there is exactly ONE physical
+// send. PreSend is re-asked per leg and the TLS dialer site reaches every leg — but a redirect to
+// the SAME approved host can reuse a pooled connection, so it would not re-enter the dialer, and
+// the peer chooses when its 3xx arrives. With redirects forced off that is unreachable.
+//
+// IT FOLLOWS THE VALUE, NOT THE NAMES, AND THE FIRST VERSION DID NOT. That version required the
+// body to mention RetryFreeLimits and to mention no other limits constructor. It killed the
+// obvious mutation and was still bypassable: keep the RetryFreeLimits call, then assign over its
+// result from a local helper the deny-set cannot name (measured — the bypass PASSED). A deny-list
+// of spellings can always be evaded by a new spelling, which is the same defect class this gate
+// exists to close, one level up. So the check now starts at the Limits field of the
+// upstreamclient.Config literal the constructor actually returns, takes the identifier bound
+// there, and requires that identifier to be bound EXACTLY ONCE in the function, by a call to
+// RetryFreeLimits on the upstreamclient package — resolved through the file's own import alias,
+// so renaming the import cannot silently retire the gate either.
+//
+// WHY STRUCTURAL: production code cannot be driven against the controlled peer
+// (DefaultGatewayPolicy refuses loopback, which is why the E2E relaxes exactly that knob), so
+// behaviour cannot reach this constructor. The chain, each link gated somewhere: this wall pins
+// that the constructor's limits come from RetryFreeLimits; RetryFreeLimits FORCES MaxRedirects=0
+// and RetryDisabled (the gate above, and internal/mcp/upstreamclient/limits.go); and the client
+// honours both (internal/mcp/upstreamclient/retryfree_test.go and the HTTPS E2E).
+func TestCanaryPath_ProductionUpstreamClientIsBuiltFromRetryFreeLimits(t *testing.T) {
+	const path = "mcp_live_production_deps.go"
+	src, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	if why := retryFreeLimitsViolation(string(src)); why != "" {
+		t.Fatalf("newProductionUpstreamClient must take the limits it passes to upstreamclient.Config "+
+			"from upstreamclient.RetryFreeLimits, and must not rebind them: %s.\n\nA client built from "+
+			"any other limits carries transport retries AND redirects, so one accepted reservation can "+
+			"cause several physical tool invocations (blocker #6) and a peer-chosen 3xx can put a second "+
+			"send after the last peer-freshness re-ask on a pooled connection (blocker #11).", why)
+	}
+}
+
+// TestCanaryPath_RetryFreeWallIsNotVacuous is the CONTROL for the wall above.
+//
+// A selector that matched nothing would pass forever, which is the failure mode the wall exists to
+// remove. Each case below is a way the constructor could stop being retry-free; every one must be
+// REJECTED. The last two are not hypothetical — they are the bypasses that defeated the first
+// version of this wall, kept here so the weaker predicate cannot come back.
+func TestCanaryPath_RetryFreeWallIsNotVacuous(t *testing.T) {
+	for _, bad := range []struct{ name, body string }{
+		{"NewLimits instead", `lim, _ := upstreamclient.NewLimits(upstreamclient.LimitConfig{})
+	return upstreamclient.New(upstreamclient.Config{Limits: lim}, limits.DefaultGateway())`},
+		{"DefaultLimits instead", `lim := upstreamclient.DefaultLimits()
+	return upstreamclient.New(upstreamclient.Config{Limits: lim}, limits.DefaultGateway())`},
+		{"retry-free called, result overwritten", `lim, _ := upstreamclient.RetryFreeLimits(upstreamclient.LimitConfig{})
+	lim = upstreamclient.DefaultLimits()
+	return upstreamclient.New(upstreamclient.Config{Limits: lim}, limits.DefaultGateway())`},
+		{"retry-free called, result replaced via an indirection", `lim, _ := upstreamclient.RetryFreeLimits(upstreamclient.LimitConfig{})
+	lim = tunedUpstreamLimits()
+	return upstreamclient.New(upstreamclient.Config{Limits: lim}, limits.DefaultGateway())`},
+		{"retry-free called but a different value is passed", `lim, _ := upstreamclient.RetryFreeLimits(upstreamclient.LimitConfig{})
+	_ = lim
+	other := tunedUpstreamLimits()
+	return upstreamclient.New(upstreamclient.Config{Limits: other}, limits.DefaultGateway())`},
+		{"limits inlined from a helper", `return upstreamclient.New(upstreamclient.Config{Limits: tunedUpstreamLimits()}, limits.DefaultGateway())`},
+		// The two below were found by probing this predicate, not by review. Both PASSED the
+		// version that took the first Config literal and counted only Ident assignments.
+		{"a decoy Config literal captures the check", `lim, _ := upstreamclient.RetryFreeLimits(upstreamclient.LimitConfig{})
+	_ = upstreamclient.Config{Limits: lim}
+	return upstreamclient.New(upstreamclient.Config{Limits: tunedUpstreamLimits()}, limits.DefaultGateway())`},
+		{"value replaced through a pointer alias", `lim, _ := upstreamclient.RetryFreeLimits(upstreamclient.LimitConfig{})
+	p := &lim
+	*p = tunedUpstreamLimits()
+	return upstreamclient.New(upstreamclient.Config{Limits: lim}, limits.DefaultGateway())`},
+		{"New returned from a nested closure", `lim, _ := upstreamclient.RetryFreeLimits(upstreamclient.LimitConfig{})
+	mk := func() (*upstreamclient.Client, error) {
+		return upstreamclient.New(upstreamclient.Config{Limits: lim}, limits.DefaultGateway())
+	}
+	_ = mk
+	return tunedUpstreamClient()`},
+		{"the New call's result is discarded", `lim, _ := upstreamclient.RetryFreeLimits(upstreamclient.LimitConfig{})
+	_, _ = upstreamclient.New(upstreamclient.Config{Limits: lim}, limits.DefaultGateway())
+	return tunedUpstreamClient()`},
+		{"Config assembled across statements", `lim, _ := upstreamclient.RetryFreeLimits(upstreamclient.LimitConfig{})
+	_ = lim
+	cfg := upstreamclient.Config{}
+	cfg.Limits = tunedUpstreamLimits()
+	return upstreamclient.New(cfg, limits.DefaultGateway())`},
+		{"limits carried on a struct field", `lim, _ := upstreamclient.RetryFreeLimits(upstreamclient.LimitConfig{})
+	_ = lim
+	h := holder{lim: tunedUpstreamLimits()}
+	return upstreamclient.New(upstreamclient.Config{Limits: h.lim}, limits.DefaultGateway())`},
+		// Codex round 8, P1 — found by review, verified as a real bypass of the fifth version
+		// before it was agreed with. A range clause ASSIGNS its value variable, and an assignment
+		// that is not an *ast.AssignStmt was invisible to the binding count.
+		{"value replaced by a range clause", `lim, _ := upstreamclient.RetryFreeLimits(upstreamclient.LimitConfig{})
+	for _, lim = range []upstreamclient.Limits{upstreamclient.DefaultLimits()} {
+	}
+	return upstreamclient.New(upstreamclient.Config{Limits: lim}, limits.DefaultGateway())`},
+		// The same class, two other statements that write without an AssignStmt. Neither was
+		// REPORTED — both were found by asking what else the inverted rule would have to cover —
+		// and both were then MEASURED as real bypasses of version five, exactly like the range
+		// form above. That is the argument for inverting the rule rather than adding a third
+		// named case: the review found one shape, probing the fix found two more in minutes, and
+		// there is no reason to believe that enumeration was finished either.
+		{"value replaced by a range clause binding the key", `lim, _ := upstreamclient.RetryFreeLimits(upstreamclient.LimitConfig{})
+	for lim = range map[upstreamclient.Limits]bool{upstreamclient.DefaultLimits(): true} {
+	}
+	return upstreamclient.New(upstreamclient.Config{Limits: lim}, limits.DefaultGateway())`},
+		// Codex round 9, P1 — the range target wrapped in parentheses, which the shape-matcher
+		// could not see at all. It is the fourth spelling of one idea and the reason the clause
+		// stopped enumerating write forms.
+		{"value replaced by a PARENTHESISED range target", `lim, _ := upstreamclient.RetryFreeLimits(upstreamclient.LimitConfig{})
+	for _, (lim) = range []upstreamclient.Limits{upstreamclient.DefaultLimits()} {
+	}
+	return upstreamclient.New(upstreamclient.Config{Limits: lim}, limits.DefaultGateway())`},
+		{"value rebound by an inner var declaration", `lim, _ := upstreamclient.RetryFreeLimits(upstreamclient.LimitConfig{})
+	_ = lim
+	{
+		var lim = upstreamclient.DefaultLimits()
+		return upstreamclient.New(upstreamclient.Config{Limits: lim}, limits.DefaultGateway())
+	}`},
+	} {
+		if why := retryFreeLimitsViolation(synthProductionDeps(bad.body)); why == "" {
+			t.Fatalf("the retry-free wall must reject %q; it accepted it", bad.name)
+		}
+	}
+	// It must ACCEPT the real shape, and the aliased-import form, or it is unfalsifiable the other
+	// way: a wall nothing can satisfy gets deleted by the next person who touches the file.
+	good := `lim, lerr := upstreamclient.RetryFreeLimits(upstreamclient.LimitConfig{})
+	if lerr != nil {
+		return nil, lerr
+	}
+	return upstreamclient.New(upstreamclient.Config{Limits: lim}, limits.DefaultGateway())`
+	if why := retryFreeLimitsViolation(synthProductionDeps(good)); why != "" {
+		t.Fatalf("the retry-free wall must accept the production form, rejected: %s", why)
+	}
+	// Codex round 10, P1 — the shape I had asked for: it gets past "exactly two occurrences"
+	// without a third appearing, because the mutation happens OUTSIDE the function entirely.
+	// Needs a whole file for the package-level declaration and the helper.
+	packageScoped := `package main
+
+import (
+	"github.com/KidCarmi/Culvert/internal/mcp/limits"
+	"github.com/KidCarmi/Culvert/internal/mcp/upstreamclient"
+)
+
+var lim upstreamclient.Limits
+
+func resetLimits() { lim = upstreamclient.DefaultLimits() }
+
+func newProductionUpstreamClient() (*upstreamclient.Client, error) {
+	lim, _ = upstreamclient.RetryFreeLimits(upstreamclient.LimitConfig{})
+	resetLimits()
+	return upstreamclient.New(upstreamclient.Config{Limits: lim}, limits.DefaultGateway())
+}
+`
+	if why := retryFreeLimitsViolation(packageScoped); why == "" {
+		t.Fatal("the retry-free wall must reject a package-scoped lim assigned with =: code outside " +
+			"the constructor can replace the value between the binding and the Config")
+	}
+	// Codex round 5, P1: a local's scope begins at its DECLARATION, so a Config in an early
+	// return resolves to a package-level name of the same spelling while a later top-level
+	// retry-free binding supplies the one this gate matched. Needs a whole file for the
+	// package-level declaration.
+	preDeclaration := `package main
+
+import (
+	"github.com/KidCarmi/Culvert/internal/mcp/limits"
+	"github.com/KidCarmi/Culvert/internal/mcp/upstreamclient"
+)
+
+var lim = upstreamclient.DefaultLimits()
+
+func newProductionUpstreamClient() (*upstreamclient.Client, error) {
+	if true {
+		return upstreamclient.New(upstreamclient.Config{Limits: lim}, limits.DefaultGateway())
+	}
+	lim, _ := upstreamclient.RetryFreeLimits(upstreamclient.LimitConfig{})
+	_ = lim
+	return nil, nil
+}
+`
+	if why := retryFreeLimitsViolation(preDeclaration); why == "" {
+		t.Fatal("the retry-free wall must reject a binding that comes after the Config using that name")
+	}
+
+	// Codex round 4, P1: the identifier is matched by spelling, so a nested binding must not be
+	// able to stand in for the one the returned Config actually uses. This case needs a whole file
+	// (it declares a package-level variable), so it is written out rather than wrapped.
+	scopeConfusion := `package main
+
+import (
+	"github.com/KidCarmi/Culvert/internal/mcp/limits"
+	"github.com/KidCarmi/Culvert/internal/mcp/upstreamclient"
+)
+
+var lim = upstreamclient.DefaultLimits()
+
+func newProductionUpstreamClient() (*upstreamclient.Client, error) {
+	_ = func() {
+		lim, _ := upstreamclient.RetryFreeLimits(upstreamclient.LimitConfig{})
+		_ = lim
+	}
+	return upstreamclient.New(upstreamclient.Config{Limits: lim}, limits.DefaultGateway())
+}
+`
+	if why := retryFreeLimitsViolation(scopeConfusion); why == "" {
+		t.Fatal("the retry-free wall must reject a nested binding standing in for an outer identifier")
+	}
+	aliased := strings.ReplaceAll(good, "upstreamclient.", "uc.")
+	src := strings.Replace(synthProductionDeps(aliased),
+		`"github.com/KidCarmi/Culvert/internal/mcp/upstreamclient"`,
+		`uc "github.com/KidCarmi/Culvert/internal/mcp/upstreamclient"`, 1)
+	if why := retryFreeLimitsViolation(src); why != "" {
+		t.Fatalf("the retry-free wall must follow the file's import alias, rejected: %s", why)
+	}
+}
+
+// synthProductionDeps wraps a function body in a minimal file shaped like the real one, so the
+// control exercises the SAME predicate the gate runs rather than a paraphrase of it.
+func synthProductionDeps(body string) string {
+	return "package main\n\nimport (\n\t\"github.com/KidCarmi/Culvert/internal/mcp/limits\"\n" +
+		"\t\"github.com/KidCarmi/Culvert/internal/mcp/upstreamclient\"\n)\n\n" +
+		"func newProductionUpstreamClient() (*upstreamclient.Client, error) {\n\t" + body + "\n}\n"
+}
+
+const (
+	upstreamClientPkgPath = "github.com/KidCarmi/Culvert/internal/mcp/upstreamclient"
+	retryFreeLimitsFunc   = "RetryFreeLimits"
+)
+
+// retryFreeLimitsViolation returns "" when newProductionUpstreamClient in src passes
+// upstreamclient.Config a Limits value that is bound exactly once, by a call to
+// upstreamclient.RetryFreeLimits. Otherwise it returns the reason it is not sound.
+//
+// It works backwards from the VALUE that is actually used, which is what makes it robust against a
+// bypass that merely adds a new name: whatever the body mentions, the Limits field must still
+// resolve to the retry-free binding.
+func retryFreeLimitsViolation(src string) string {
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, "src.go", src, 0)
+	if err != nil {
+		return "source does not parse: " + err.Error()
+	}
+	pkg := upstreamClientAlias(f)
+	if pkg == "" {
+		return "the file does not import " + upstreamClientPkgPath
+	}
+	fn := findFunc(f, "newProductionUpstreamClient")
+	if fn == nil {
+		return "newProductionUpstreamClient not found — if it was renamed or moved, point this wall " +
+			"at its new home rather than deleting it: it is the only gate connecting the live tier's " +
+			"client to the retry-free (and therefore redirect-free) shape"
+	}
+	limitsExpr, why := newCallLimitsExpr(fn, pkg)
+	if why != "" {
+		return why
+	}
+	ident, ok := limitsExpr.(*ast.Ident)
+	if !ok {
+		return "the Limits field is not a plain identifier, so its binding cannot be followed; pass a " +
+			"variable bound from " + retryFreeLimitsFunc
+	}
+	// THE IDENTIFIER MAY APPEAR EXACTLY TWICE: the binding, and the use.
+	//
+	// Every previous version of this clause enumerated the ways a value can be REPLACED —
+	// assignments, then range clauses, then type switches, then inner var declarations — and every
+	// version was beaten by a form nobody had listed. Codex round 8 reported the range clause;
+	// probing that fix found the range KEY and the inner `var` in minutes; round 9 then reported
+	// `for _, (lim) = range ...`, where the target is an *ast.ParenExpr and the shape-matcher
+	// simply does not see it. Four rounds, four spellings of one idea.
+	//
+	// So the enumeration is abandoned. Production binds `lim` once and uses it once — exactly two
+	// occurrences of the identifier in the whole function body — and ANY third occurrence, of any
+	// kind, disqualifies: a second assignment, a range target parenthesised or not, a var shadow, a
+	// type-switch binding, `&lim`, a closure capture, or a form that does not exist yet. There is
+	// nothing left to enumerate, because the rule never asks what a construct IS.
+	//
+	// It is deliberately over-strict in the safe direction: a constructor that legitimately READ
+	// its limits (`if lim.RetriesDisabled() { … }`) would be refused. That costs nothing today and
+	// the refusal says exactly what to do, which is the right trade for a gate whose failure mode
+	// is silently certifying a retrying client.
+	if uses := identOccurrences(fn, ident.Name); len(uses) != 2 {
+		return "the Limits identifier " + ident.Name + " appears " + strconv.Itoa(len(uses)) +
+			" times in this function; it must appear exactly twice — once where it is bound from " +
+			retryFreeLimitsFunc + " and once in the Config that is returned. Any other occurrence " +
+			"(a second assignment, a range target, a var shadow, a type switch, an address-of, a " +
+			"closure capture) can replace the retry-free value where this gate cannot follow it"
+	}
+	bindings := bindingsOf(fn, ident.Name)
+	if len(bindings) == 0 {
+		return "the Limits identifier " + ident.Name + " is never bound in this function; it resolves to " +
+			"something outside it (a package-level variable, a parameter, an import) whose value this " +
+			"gate cannot follow"
+	}
+	if len(bindings) > 1 {
+		return "the Limits identifier " + ident.Name + " is bound more than once, so the retry-free " +
+			"binding can be overwritten before it is used"
+	}
+	// THE BINDING MUST DECLARE A FUNCTION-LOCAL — `:=`, never `=`.
+	//
+	// The occurrence rule above bounds what happens INSIDE this function. It says nothing about
+	// whether the identifier is a local at all, and Codex round 10 found exactly that gap — the one
+	// shape I had asked for, since it gets past "exactly two occurrences" without a third appearing:
+	//
+	//	var lim upstreamclient.Limits                       // PACKAGE scope
+	//	func resetLimits() { lim = upstreamclient.DefaultLimits() }
+	//
+	//	func newProductionUpstreamClient() (*upstreamclient.Client, error) {
+	//		lim, _ = upstreamclient.RetryFreeLimits(…)      // assignment, not declaration
+	//		resetLimits()                                    // mutates it from OUTSIDE
+	//		return upstreamclient.New(upstreamclient.Config{Limits: lim}, …)
+	//	}
+	//
+	// Two occurrences, top level, preceding the use, bound by RetryFreeLimits — every clause
+	// satisfied, and the client is built from DefaultLimits. Verified accepted before the fix.
+	//
+	// Requiring `:=` closes it without resolving types. A short variable declaration at the
+	// function's top level always declares a NEW variable, because a package-level name lives in an
+	// outer scope and is shadowed rather than assigned; and it cannot be re-using a same-scope
+	// local, because the occurrence rule has already established there is no earlier `lim` in this
+	// body. So the two rules TOGETHER say: the value is a function-local, declared once, used once.
+	// A helper cannot reach a local without `&lim`, which would be a third occurrence.
+	//
+	// This is the same lesson as the last four rounds, one level out: every previous clause
+	// constrained the SHAPE of the binding (top level, precedes the use) while leaving its SCOPE to
+	// be inferred. Constrain the scope directly and the inference is unnecessary.
+	if as := bindingStmt(fn, bindings[0]); as == nil || as.Tok != token.DEFINE {
+		return "the Limits identifier " + ident.Name + " is assigned with = rather than declared " +
+			"with :=, so it may name a package-level variable that code outside this function can " +
+			"change between the binding and the Config; declare a function-local"
+	}
+	// THE BINDING MUST BE IN THE FUNCTION'S OWN TOP-LEVEL SCOPE, not in a nested block or closure.
+	//
+	// bindingsOf matches by identifier SPELLING, and an *ast.Ident carries no scope on its own.
+	// Without this, a package-level `lim` holding default limits can feed the returned Config while
+	// an otherwise-unused closure-local `lim := RetryFreeLimits(...)` supplies the one binding that
+	// makes this predicate pass (Codex round 4, P1; verified as a real bypass of the previous
+	// version before this was written).
+	//
+	// The rigorous answer is to resolve the identifier to a types.Object; the fail-closed one is to
+	// refuse anything whose binding is not the function's own. Production binds `lim` at the top
+	// level of the constructor, so refusing the rest costs nothing and cannot be fooled by shadowing
+	// — a gate may decline to certify what it cannot resolve, and that is the direction to err in.
+	if !isTopLevelBinding(fn, bindings[0]) {
+		return "the Limits identifier " + ident.Name + " is not bound in the function's own top-level " +
+			"scope, so an inner block or closure may be supplying the binding this gate checks while a " +
+			"different value of the same name reaches Config"
+	}
+	// THE BINDING MUST PRECEDE THE USE. A local's scope begins at its declaration, so a package-
+	// level `lim` can feed a Config in an EARLY return while a later top-level
+	// `lim, _ := RetryFreeLimits(...)` supplies the binding this gate matched by spelling
+	// (Codex round 5, P1). Source order is a coarse stand-in for dominance and errs the safe way:
+	// it refuses a shape it cannot prove, and production binds before it builds.
+	if bindings[0].Pos() >= limitsExpr.Pos() {
+		return "the binding of " + ident.Name + " comes AFTER the Config that uses it, so the value " +
+			"reaching Limits is whatever that name meant earlier — not this binding"
+	}
+	if !isCallTo(bindings[0], pkg, retryFreeLimitsFunc) {
+		return "the Limits identifier " + ident.Name + " is not bound by " + pkg + "." + retryFreeLimitsFunc
+	}
+	if addressIsTaken(fn, ident.Name) {
+		return "the address of the Limits identifier " + ident.Name + " is taken, so its value can be " +
+			"replaced through an alias without rebinding it"
+	}
+	return ""
+}
+
+// upstreamClientAlias reports the name upstreamclient is imported under in f, honouring an alias.
+func upstreamClientAlias(f *ast.File) string {
+	for _, imp := range f.Imports {
+		path, err := strconv.Unquote(imp.Path.Value)
+		if err != nil || path != upstreamClientPkgPath {
+			continue
+		}
+		if imp.Name != nil {
+			return imp.Name.Name
+		}
+		return "upstreamclient"
+	}
+	return ""
+}
+
+func findFunc(f *ast.File, name string) *ast.FuncDecl {
+	for _, decl := range f.Decls {
+		if fn, ok := decl.(*ast.FuncDecl); ok && fn.Name.Name == name && fn.Body != nil {
+			return fn
+		}
+	}
+	return nil
+}
+
+// newCallLimitsExpr returns the expression assigned to the Limits field of the <pkg>.Config
+// literal that is actually passed to <pkg>.New — NOT merely the first Config literal in the
+// function.
+//
+// Taking the first literal was a bypass, found by probing this predicate rather than by review: a
+// decoy `_ = upstreamclient.Config{Limits: lim}` earlier in the body satisfied the check while the
+// literal actually handed to New carried weak limits. The rule this enforces is the same one that
+// motivated the whole gate — follow the value that is USED.
+func newCallLimitsExpr(fn *ast.FuncDecl, pkg string) (limitsExpr ast.Expr, why string) {
+	var calls []*ast.CallExpr
+	inspectOwnBody(fn, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		if isCallExprTo(call, pkg, "New") {
+			calls = append(calls, call)
+		}
+		return true
+	})
+	if len(calls) == 0 {
+		return nil, "no call to " + pkg + ".New was found"
+	}
+	if len(calls) > 1 {
+		return nil, "more than one call to " + pkg + ".New; which one builds the live client is ambiguous"
+	}
+	// THE CALL MUST BE THE ONE WHOSE RESULT IS RETURNED, not merely the only one present.
+	// `_, _ = upstreamclient.New(Config{Limits: lim}, ...); return tunedUpstreamClient()` has
+	// exactly one New call carrying retry-free limits and returns a client built from something
+	// else entirely (Codex round 5, P1).
+	if !isReturnedCall(fn, calls[0]) {
+		return nil, "the " + pkg + ".New call's result is not returned, so the client this " +
+			"constructor actually hands back is built somewhere this gate cannot see"
+	}
+	if len(calls[0].Args) == 0 {
+		return nil, pkg + ".New is called with no arguments"
+	}
+	lit, ok := calls[0].Args[0].(*ast.CompositeLit)
+	if !ok {
+		return nil, "the Config passed to " + pkg + ".New is not a literal, so the Limits it carries " +
+			"cannot be followed; build it inline at the call"
+	}
+	sel, ok := lit.Type.(*ast.SelectorExpr)
+	if !ok || sel.Sel.Name != "Config" {
+		return nil, "the first argument to " + pkg + ".New is not a " + pkg + ".Config literal"
+	}
+	if x, ok := sel.X.(*ast.Ident); !ok || x.Name != pkg {
+		return nil, "the Config literal is not " + pkg + ".Config"
+	}
+	for _, elt := range lit.Elts {
+		kv, ok := elt.(*ast.KeyValueExpr)
+		if !ok {
+			continue
+		}
+		if k, ok := kv.Key.(*ast.Ident); ok && k.Name == "Limits" {
+			return kv.Value, ""
+		}
+	}
+	return nil, "the Config passed to " + pkg + ".New sets no Limits field"
+}
+
+// addressIsTaken reports whether &name appears anywhere in fn.
+//
+// Once a variable's address escapes, its value can be replaced through the alias (`*p = weak()`)
+// by a statement this analysis does not see as a rebinding — measured as a real bypass. Rather
+// than chase aliases, the gate refuses: an address-taken limits variable is not followable, and
+// fail-closed is the right direction for a wall.
+func addressIsTaken(fn *ast.FuncDecl, name string) bool {
+	found := false
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		u, ok := n.(*ast.UnaryExpr)
+		if !ok || u.Op != token.AND {
+			return true
+		}
+		if id, ok := u.X.(*ast.Ident); ok && id.Name == name {
+			found = true
+			return false
+		}
+		return true
+	})
+	return found
+}
+
+// bindingsOf returns every right-hand side that binds name in fn (:= and = alike), so a rebinding
+// after the retry-free call is visible rather than hidden behind the first one.
+func bindingsOf(fn *ast.FuncDecl, name string) []ast.Expr {
+	var out []ast.Expr
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		as, ok := n.(*ast.AssignStmt)
+		if !ok {
+			return true
+		}
+		for i, lhs := range as.Lhs {
+			id, ok := lhs.(*ast.Ident)
+			if !ok || id.Name != name {
+				continue
+			}
+			// A multi-value call (lim, err := f()) binds every LHS from the one RHS call.
+			if len(as.Rhs) == 1 {
+				out = append(out, as.Rhs[0])
+			} else if i < len(as.Rhs) {
+				out = append(out, as.Rhs[i])
+			}
+		}
+		return true
+	})
+	return out
+}
+
+// unfollowableWriteTo reports a reason when name is written by anything other than an assignment.
+//
+// It is the complement of bindingsOf: that function collects the writes this gate can INSPECT,
+// this one refuses the ones it cannot. Range clauses assign their key and value; a var
+// declaration binds; a type switch binds a fresh name per clause. None of them expose a single
+// RHS expression to follow, so none of them can be certified — and since the whole predicate
+// rests on "the identifier is bound exactly once, by RetryFreeLimits", a write it never counted
+// is precisely the hole.
+//
+// identOccurrences returns every *ast.Ident in fn's body spelled name.
+//
+// It counts occurrences rather than classifying statements, which is the whole point: it never has
+// to know what a construct is, so a write form nobody thought of cannot slip past it. It walks
+// closures too, because a deferred closure assigning the variable is a write that lands before the
+// caller uses the client.
+func identOccurrences(fn *ast.FuncDecl, name string) []*ast.Ident {
+	var out []*ast.Ident
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		if id, ok := n.(*ast.Ident); ok && id.Name == name {
+			out = append(out, id)
+		}
+		return true
+	})
+	return out
+}
+
+// bindingStmt returns the assignment statement whose RHS is rhs, or nil.
+func bindingStmt(fn *ast.FuncDecl, rhs ast.Expr) *ast.AssignStmt {
+	var found *ast.AssignStmt
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		as, ok := n.(*ast.AssignStmt)
+		if !ok {
+			return true
+		}
+		for _, r := range as.Rhs {
+			if r == rhs {
+				found = as
+				return false
+			}
+		}
+		return true
+	})
+	return found
+}
+
+// isTopLevelBinding reports whether rhs belongs to an assignment that is a DIRECT statement of
+// fn.Body — not one nested inside a block, loop, if, or function literal.
+func isTopLevelBinding(fn *ast.FuncDecl, rhs ast.Expr) bool {
+	for _, stmt := range fn.Body.List {
+		as, ok := stmt.(*ast.AssignStmt)
+		if !ok {
+			continue
+		}
+		for _, r := range as.Rhs {
+			if r == rhs {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// inspectOwnBody walks fn's OWN statements, never descending into a nested function literal.
+//
+// ast.Inspect descends into FuncLit bodies, which let a closure stand in for the constructor: the
+// sole New call could be returned from `func() { return New(Config{Limits: lim}) }` while the
+// constructor itself returned something else entirely (Codex round 6, P1 — verified as a real
+// bypass). What this gate reasons about is what `newProductionUpstreamClient` does, so it must
+// look only at that function's own body.
+func inspectOwnBody(fn *ast.FuncDecl, visit func(ast.Node) bool) {
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		if _, isLit := n.(*ast.FuncLit); isLit {
+			return false
+		}
+		return visit(n)
+	})
+}
+
+// isReturnedCall reports whether call appears directly in a return statement of fn ITSELF.
+func isReturnedCall(fn *ast.FuncDecl, call *ast.CallExpr) bool {
+	returned := false
+	inspectOwnBody(fn, func(n ast.Node) bool {
+		ret, ok := n.(*ast.ReturnStmt)
+		if !ok {
+			return true
+		}
+		for _, r := range ret.Results {
+			if r == call {
+				returned = true
+				return false
+			}
+		}
+		return true
+	})
+	return returned
+}
+
+func isCallTo(e ast.Expr, pkg, fn string) bool {
+	call, ok := e.(*ast.CallExpr)
+	if !ok {
+		return false
+	}
+	return isCallExprTo(call, pkg, fn)
+}
+
+func isCallExprTo(call *ast.CallExpr, pkg, fn string) bool {
+	sel, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok || sel.Sel.Name != fn {
+		return false
+	}
+	x, ok := sel.X.(*ast.Ident)
+	return ok && x.Name == pkg
 }

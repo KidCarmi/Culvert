@@ -2,6 +2,7 @@ package execution
 
 import (
 	"context"
+	"time"
 
 	"github.com/KidCarmi/Culvert/internal/mcp/catalog"
 	"github.com/KidCarmi/Culvert/internal/mcp/mcperr"
@@ -41,6 +42,20 @@ type Discovery struct {
 	// publish lands, never what a publish produces, so carrying it grants this package no
 	// trust authority.
 	IngestGuard func(ingest func() error) error
+	// Now supplies the observation clock. It is a field so a test can drive freshness
+	// deterministically; NewDiscovery defaults it to time.Now. A nil value falls back to
+	// time.Now rather than producing a zero timestamp, because a zero timestamp is exactly what
+	// PeerObservation treats as "no observation" and a silently un-stamped discovery would be a
+	// freshness hole rather than a visible failure.
+	Now func() time.Time
+}
+
+// now reads the observation clock, defaulting to the wall clock.
+func (d *Discovery) now() time.Time {
+	if d.Now != nil {
+		return d.Now()
+	}
+	return time.Now()
 }
 
 // discoveryReconcileHook is the default OnIngest callback installed on every Discovery built
@@ -85,6 +100,7 @@ func NewDiscovery(reg *registry.Registry, cat *catalog.Catalog, up UpstreamCalle
 		Upstream:    up,
 		OnIngest:    discoveryReconcileHook,
 		IngestGuard: discoveryIngestGuard,
+		Now:         time.Now,
 	}, nil
 }
 
@@ -107,11 +123,34 @@ func (d *Discovery) Discover(ctx context.Context, serverID string) (*catalog.Rep
 		// A disabled or identity-mismatched server is never discovered against.
 		return nil, mcperr.New(mcperr.ReasonUpstreamServerUnusable, "execution.discovery", "server not usable")
 	}
+	// A DISCOVERY WITHOUT A PINNED IDENTITY IS NOT FRESHNESS EVIDENCE, so it is refused here
+	// rather than performed and then filed as something weaker.
+	//
+	// With a pin configured the transport replaces standard chain verification with an EXACT
+	// check of the leaf's SPKI against it (upstreamclient.tlsConfig → VerifyConnection), so a
+	// call that SUCCEEDS proves the peer holds that identity. That proof is the whole reason
+	// this function may stamp a peer observation at all. With no pin the transport still does
+	// standard chain + hostname verification — genuine authentication — but it binds no
+	// identity this catalog can name, and an observation that cannot say WHO was observed
+	// cannot support a per-server freshness claim.
+	//
+	// Refusing early also keeps the failure legible: without it the empty identity would flow
+	// into IngestObserved and surface as an incomplete-observation error AFTER the peer had
+	// already been contacted.
+	if rec.PinnedIdentity == "" {
+		return nil, mcperr.New(mcperr.ReasonUpstreamServerUnusable, "execution.discovery", "server has no pinned identity to observe against")
+	}
 	target := upstreamclient.Target{
 		ServerID:       string(rec.ID),
 		Endpoint:       string(rec.Endpoint),
 		PinnedIdentity: string(rec.PinnedIdentity),
 	}
+	// Stamped BEFORE the call, deliberately. The peer advertised its tools at some instant
+	// between this send and the response, and taking the EARLIER end is the conservative
+	// choice: an observation can then only ever read as older than it truly is, so a slow or
+	// long-stalled call that eventually succeeds is never credited with freshness it did not
+	// earn. Stamping on receipt would do the opposite.
+	observedAt := d.now()
 	resp, err := d.Upstream.Call(ctx, target, "tools/list", nil, upstreamclient.CallOptions{Idempotent: true, WireID: "disc-" + string(rec.ID)})
 	if err != nil {
 		// Discovery failure — the previous known-good catalog is retained unchanged.
@@ -126,11 +165,15 @@ func (d *Discovery) Discover(ctx context.Context, serverID string) (*catalog.Rep
 	// snapshot is retained on any ingestion error.
 	var report *catalog.Report
 	ingest := func() error {
-		_, r, ierr := d.Catalog.Ingest(d.Registry, catalog.DiscoveryInput{
+		// IngestObserved, never Ingest: this result came off an authenticated transport, and
+		// the entrypoint is what records that. The identity stamped is the PIN THE TRANSPORT
+		// VERIFIED — never a value read out of the MCP payload, which the peer writes and
+		// could therefore choose.
+		_, r, ierr := d.Catalog.IngestObserved(d.Registry, catalog.DiscoveryInput{
 			ServerID: rec.ID,
 			Identity: rec.PinnedIdentity,
 			Raw:      []byte(resp.Result),
-		})
+		}, catalog.PeerObservation{At: observedAt, Identity: rec.PinnedIdentity})
 		report = r
 		return ierr
 	}

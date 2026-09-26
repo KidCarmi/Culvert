@@ -414,6 +414,22 @@ type toolTrustTargetInput struct {
 	// what was approved. Callers on the Canary path treat it as drift; callers that only need the
 	// tool's shape do not have to care.
 	registryPinDiverged bool
+	// observed is the PEER OBSERVATION carried on the catalog record (blocker #11): the instant an
+	// authenticated peer was last seen to advertise this exact tool, and the identity the
+	// TRANSPORT verified when it did. The zero value means the record is operator-seeded — the
+	// shipped default, and what a restart returns every record to.
+	//
+	// It is taken from the SAME `rec` the fingerprint and pinnedIdentity come from, so the
+	// evidence and the target it describes are atomic by construction. A caller that re-read the
+	// catalog to fetch it could observe a different snapshot and judge freshness for a record
+	// other than the one it is about to execute against.
+	observed catalog.PeerObservation
+	// registryPin is the registry's CURRENT pinned identity for the server, carried alongside
+	// pinnedIdentity (which is the CATALOG record's). registryPinDiverged already reports whether
+	// they differ; the value itself is carried because the peer-freshness verdict requires the
+	// observed identity to equal BOTH, and reading the registry again at the boundary would
+	// reintroduce exactly the two-snapshot problem this struct's comments exist to describe.
+	registryPin string
 }
 
 // loadTarget resolves the authoritative current facts for a (server, tool) from the
@@ -438,7 +454,10 @@ func (c *mcpToolTrustCoordinator) loadTarget(serverID, toolName string) toolTrus
 	// The identity comes from the CATALOG RECORD, so it is atomic with the fingerprint taken from
 	// that same record; the registry's current pin is compared against it rather than substituted
 	// for it. See the pinnedIdentity/registryPinDiverged field comments.
-	pinned, diverged := "", false
+	pinned, diverged, regPin := "", false, ""
+	if sok {
+		regPin = string(srv.PinnedIdentity)
+	}
 	if ok {
 		pinned = string(rec.Fingerprint.Identity)
 		diverged = sok && rec.Fingerprint.Identity != srv.PinnedIdentity
@@ -458,6 +477,9 @@ func (c *mcpToolTrustCoordinator) loadTarget(serverID, toolName string) toolTrus
 	return toolTrustTargetInput{
 		target: t, fingerprint: rec.Fingerprint, key: key, found: ok && sok,
 		pinnedIdentity: pinned, registryPinDiverged: diverged,
+		// From the SAME rec as the fingerprint above. A zero PeerObservation on an absent record
+		// is the correct answer and the fail-closed one: nothing was observed.
+		observed: rec.Observed, registryPin: regPin,
 	}
 }
 
