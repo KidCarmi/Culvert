@@ -67,6 +67,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"github.com/KidCarmi/Culvert/internal/lockout"
 )
 
 // snapshotLoginLimiter captures and restores the package-global
@@ -82,6 +84,11 @@ import (
 func snapshotLoginLimiter(t *testing.T) {
 	t.Helper()
 	t.Cleanup(loginLimiter.SnapshotAndClear())
+	// The admin-plane Basic failure budget is per-IP and every httptest
+	// request shares one RemoteAddr, so isolate it alongside the lockout.
+	prevBasic := basicAuthFailLimiter
+	basicAuthFailLimiter = lockout.NewAPIRateLimiter()
+	t.Cleanup(func() { basicAuthFailLimiter = prevBasic })
 }
 
 // TestAPIAuthLogin_InvalidCreds_DeterministicUnderPollution is a
