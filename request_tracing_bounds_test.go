@@ -222,6 +222,11 @@ func TestSecReqID1_EndToEndLogAmplificationIsBounded(t *testing.T) {
 	logger = log.New(&buf, "", 0)
 	t.Cleanup(func() { logger = old })
 
+	// Same reason as the sibling gate below: this drives the real handleRequest,
+	// so the shared proxy globals must be reset or the byte bound is measured
+	// against whatever path leaked state sends the request down.
+	setupProxyTest(t)
+
 	const requests = 8
 	payload := strings.Repeat("A", 512*1024)
 	for i := 0; i < requests; i++ {
@@ -533,26 +538,15 @@ func TestSecReqID1_BareReqIDInDecisionLineIsSafeOnlyBecauseOfTheBound(t *testing
 	const forge = "x action=allow identity=root\x1b[2K"
 
 	t.Run("bound makes the bare append safe", func(t *testing.T) {
-		// This gate asserts the shape of a POLICY decision line, so the request
-		// has to REACH the policy engine. Authentication is a process global,
-		// and a credential-less request against a node where auth is enabled
-		// and the default outcome is Default is blocked at AUTH_FAIL instead —
-		// a line that carries ` action=` but no ` identity=`, so the gate fails
-		// with "decision line carries 0 ` identity=` tokens".
-		//
-		// The test never established that precondition; it inherited whatever
-		// an earlier test left behind. That is order-dependent by construction
-		// and predates this branch (the gate is unchanged on main), but adding
-		// tests anywhere in the package changes the shuffle permutation and so
-		// changes which runs expose it — this one surfaced under CI's
-		// determinism lane at seed 1790380893748734552.
-		//
-		// Pin the posture the gate depends on rather than leaving it ambient.
-		// The subject here is the request-id bound, not authentication.
-		prevOutcome := cfg.DefaultAuthOutcome()
-		cfg.SetDefaultAuthOutcome(OutcomeExempt)
-		t.Cleanup(func() { cfg.SetDefaultAuthOutcome(prevOutcome) })
-
+		// Reset the shared proxy globals before driving the real handleRequest.
+		// Without it this assertion is order-dependent: any of the eleven test
+		// files that call setupAuthGateTest leaves `cfg` with credentials
+		// configured (its cleanup restores only the exempt flag), so an
+		// uncredentialed request is CHALLENGED and the line becomes AUTH_CR —
+		// `req_id=` plus one ` action=` and NO ` identity=`, which is exactly the
+		// shape asserted against below. setupProxyTest's own comment records this
+		// class: it only shows up under -count>1 / -shuffle=on.
+		setupProxyTest(t)
 		resetTracingBoundsStateForTest()
 		var buf bytes.Buffer
 		old := logger
