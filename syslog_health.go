@@ -810,6 +810,20 @@ func syslogFeedState() syslogFeedSnapshot {
 	if !configured || sw == nil {
 		return finishUnmetSyslogIntent(snap, now, intentAt)
 	}
+	return finishUnmetSyslogIntent(applyLiveWriterStats(snap, sw, now, installedAt), now, intentAt)
+}
+
+// applyLiveWriterStats folds the CURRENT Writer's own counters and episode
+// state into a snapshot that already carries the process-lifetime totals,
+// and decides the degradation verdict.
+//
+// Split out of syslogFeedState for length, which is not the only reason to
+// keep it separate: everything here describes the episode IN PROGRESS
+// (NeverDelivered, ConsecutiveFailures, LastSuccess, FailingFor), whereas
+// its caller assembles the history that outlives any one Writer. Carrying a
+// predecessor's episode state forward would report a healthy replacement as
+// broken from its first byte.
+func applyLiveWriterStats(snap syslogFeedSnapshot, sw *syslogWriter, now, installedAt time.Time) syslogFeedSnapshot {
 	st := sw.Stats()
 	snap.Delivered += st.Delivered
 	snap.Drops += st.Drops
@@ -867,7 +881,7 @@ func syslogFeedState() syslogFeedSnapshot {
 	snap.Degraded = snap.ConsecutiveFailures > 0 &&
 		snap.Age >= syslogDegradedAfter &&
 		snap.FailingFor >= syslogDegradedAfter
-	return finishUnmetSyslogIntent(snap, now, intentAt)
+	return snap
 }
 
 // finishUnmetSyslogIntent overlays the unmet-intent verdict onto a snapshot.
@@ -1178,6 +1192,9 @@ func resetSyslogHealthForTest() {
 	syslogHealth.mu.Unlock()
 	syslogIntentArmedWithoutWriter.Store(false)
 	syslogSkippedNoWriter.Store(0)
+	// Process-lifetime by design, so a gate that produces one shifts the
+	// exported drop total for every gate after it — see ResetLateDropsForTest.
+	syslog.ResetLateDropsForTest()
 	setSyslogHealthNowForTest(nil)
 }
 

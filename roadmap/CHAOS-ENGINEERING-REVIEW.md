@@ -9406,3 +9406,30 @@ reads (`syslogFeedState`, `/healthz`'s `syslogDropCount`, and the real
 > counter. Gate the surface — *walling the function is not walling the path*,
 > which this section has now recorded four times and demonstrated once against
 > its own work.
+
+**And the late-drop counter had to be handed back.** `lateDrops` is
+process-lifetime by design — its whole purpose is to outlive the Writer the
+loss was charged against — which makes it exactly the kind of global a test
+must RESTORE rather than merely stop looking at. The new gate produces one
+late drop, which shifted the exported drop total for every gate that ran
+after it; seven unrelated CHAOS-72 gates turned red, all asserting exact
+counts. `ResetLateDropsForTest` joins `resetSyslogHealthForTest`, beside the
+`syslogSkippedNoWriter` reset that is there for the same reason.
+
+That is the `swapAutoExclude` fence-pollution rule, and this section has now
+hit it twice in its own work (`armSyslogFeed` leaking live writers was the
+first). *A global a test installs — or increments — is a global the test must
+take back.* It also shows why the shuffled run matters: the failure depended
+entirely on which gates ran after the new one.
+
+**A note on `funlen`, recorded because it cost two red rounds.**
+`syslogFeedState` crossed the 50-statement bound twice as this round added to
+it. It is now split at the seam the code already had: the caller assembles the
+history that outlives any one Writer, and `applyLiveWriterStats` folds in the
+episode IN PROGRESS. The linter found a real structural point, but it found it
+in CI both times, because `golangci-lint` cannot run locally against this repo
+(v2.5.0's module declares `go 1.24` against a 1.25 target, rebuilding does not
+help since the guard reads the tool's module language version, and forcing
+past it crashes its go1.24-built analyzer on go1.26 source). Standalone
+`staticcheck` does not carry the same check set. Anyone extending this file
+should expect the length bound to be enforced only by CI.

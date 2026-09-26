@@ -26,3 +26,15 @@ func SetNowForTest(fn func() time.Time) (restore func()) {
 	}
 	return func() { nowFn.Store(prev) }
 }
+
+// ResetLateDropsForTest clears the process-lifetime late-drop counter.
+//
+// That counter is process-lifetime BY DESIGN — its whole purpose is to
+// outlive the Writer the loss was charged against — which makes it exactly
+// the kind of global a test must hand back rather than merely stop looking
+// at. A gate that produces one late drop otherwise shifts the exported drop
+// total for every gate that runs after it, and those assert exact counts.
+// Observed, not hypothetical: adding the late-drop gate turned seven
+// unrelated CHAOS-72 gates red. Same rule as swapAutoExclude and
+// armSyslogFeed closing the writer it installs.
+func ResetLateDropsForTest() { lateDrops.Store(0) }
