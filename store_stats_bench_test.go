@@ -90,6 +90,7 @@ package main
 
 import (
 	"fmt"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -344,13 +345,37 @@ func TestTopHosts_ConcurrentRecordDecayAndTop(t *testing.T) {
 			hc.Top(10)
 		}
 	}()
-	// A high-cardinality flood, which drives inserts and decay passes.
+	// A high-cardinality flood, which drives inserts and decay passes. It is
+	// PACED by the heavy hitters: every reinforcementChunk inserts it waits for
+	// them to be incremented again, so the flood stays INTERLEAVED with the hot
+	// workers instead of racing them — which is what the comment above already
+	// says this test means by "the flood is the clock".
+	//
+	// Without the pacing this test was FLAKY under CPU contention (chaos register
+	// row ST-9, found by the CHAOS-69 sweep's determinism gate). The flood
+	// goroutine could complete all 20 000 inserts — ~156 decay passes at this cap
+	// — while the scheduler starved the four hot workers, so hot-a/hot-b were
+	// halved to 1 and lost an arbitrary tie to a count-1 junk entry. Measured
+	// before this fix, with six spinning CPU hogs: 3 failures in 30 runs, and one
+	// observed Top(2) was {hot-b Count:4} plus a junk host — i.e. the heavy
+	// hitters were not actually heavy. That is the TEST's premise failing, not the
+	// engine's contract, which is why the fix restores the interleaving rather
+	// than loosening the assertion: a tie-tolerant assertion would have passed
+	// while the engine's heavy-hitter guarantee went unchecked.
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
 		defer close(flood)
 		for i := 0; i < 20000; i++ {
 			hc.Record(fmt.Sprintf("junk-%d.example", i))
+			if i%reinforcementChunk == reinforcementChunk-1 &&
+				!awaitReinforcement(t, hc, "hot-a.example", "hot-b.example") {
+				// The hot workers stopped. Abandon the flood immediately rather
+				// than spending the bounded wait on every remaining chunk: with
+				// 20 000 inserts that would be ~78 x 10 s before the test
+				// reported. The assertion below then fails on what it saw.
+				return
+			}
 		}
 	}()
 	wg.Wait()
@@ -366,6 +391,47 @@ func TestTopHosts_ConcurrentRecordDecayAndTop(t *testing.T) {
 	if !got["hot-a.example"] || !got["hot-b.example"] {
 		t.Fatalf("heavy hitters lost under concurrency; Top(2) = %+v", top)
 	}
+}
+
+// reinforcementChunk is how many junk inserts the flood may run before it waits
+// for the heavy hitters to be reinforced again. Small enough that the hot hosts
+// are re-incremented between decay passes (which fire about once per cap-many
+// new-host drops), large enough that the pacing costs a few dozen waits rather
+// than one per insert.
+const reinforcementChunk = 256
+
+// awaitReinforcement blocks until every named host's count has increased since
+// the call began, so the caller can guarantee interleaving instead of hoping the
+// scheduler provides it. It reports false when it gave up.
+//
+// The wait is BOUNDED: a hot worker that is genuinely not running must fail the
+// test rather than hang it, and it reports through t.Errorf (safe from a
+// non-test goroutine, unlike t.Fatalf) so the run still completes and the
+// enclosing assertion reports what it saw. Returning false lets the caller stop
+// paying the bound on every subsequent chunk — verified while building this fix:
+// a control that killed the hot workers took the test past 120 s before the
+// early return was added, because ~78 chunks each waited the full 10 s.
+func awaitReinforcement(t *testing.T, hc *hostCounter, hosts ...string) bool {
+	t.Helper()
+	before := make([]int64, len(hosts))
+	for i, h := range hosts {
+		before[i], _ = hc.count(h) // absent reads 0, which the > test below handles
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for i, h := range hosts {
+		for {
+			if now, ok := hc.count(h); ok && now > before[i] {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Errorf("hot host %q was not reinforced within 10s — the hot workers are not running, "+
+					"so this test can no longer establish the heavy-hitter contract", h)
+				return false
+			}
+			runtime.Gosched()
+		}
+	}
+	return true
 }
 
 // TestTopHosts_TrackedCountsAreNotLost pins the accounting guarantee the
