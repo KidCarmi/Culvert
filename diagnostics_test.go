@@ -1655,6 +1655,16 @@ func TestApiDiagnostics_OversizeLegacyUsernameSurfacedOnContract(t *testing.T) {
 	if strings.Contains(found.OperatorAction, "delete the old name") {
 		t.Errorf("admin_username_length operator_action = %q, must not prescribe deleting a roster entry that does not exist", found.OperatorAction)
 	}
+	// Nor may it open with the generic Admin Users create/delete workflow:
+	// a legacy-only login has no roster row to replace or delete.
+	if strings.Contains(found.OperatorAction, "from Admin Users, create a replacement") {
+		t.Errorf("admin_username_length operator_action = %q, must not prescribe the Admin Users replace/delete workflow for a legacy-only login", found.OperatorAction)
+	}
+	// loadAuth re-applies -user AND -pass on every boot, so the startup
+	// password must change with the name or it overwrites the new one.
+	if !strings.Contains(found.OperatorAction, "auth.pass") {
+		t.Errorf("admin_username_length operator_action = %q, want the startup password (-pass / auth.pass) updated alongside the name", found.OperatorAction)
+	}
 	if strings.Contains(found.Message, longName) {
 		t.Error("admin_username_length message should not echo the username itself")
 	}
