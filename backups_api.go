@@ -218,8 +218,13 @@ type backupCreateAgentRequest struct {
 // (matching the hint already shown on the Release Dispatch pre-backup
 // field), never a secret value. apiBackupsCreate builds the "env:" prefix
 // the agent requires so the GUI caller doesn't need to know that wire detail.
+//
+// Encrypt is a pointer so an OMITTED choice is distinguishable from an
+// explicit false: the archive holds credentials, private keys, session
+// material and TOTP secrets, so the server never infers a plaintext backup
+// from silence (D1.5: encryption is the production default).
 type backupCreateUIRequest struct {
-	Encrypt          bool   `json:"encrypt"`
+	Encrypt          *bool  `json:"encrypt"`
 	PassphraseEnvVar string `json:"passphraseEnvVar,omitempty"`
 }
 
@@ -227,14 +232,17 @@ type backupCreateUIRequest struct {
 // / state / deduped — a few hundred bytes of JSON).
 const backupTriggerReadBound = 1 << 16
 
-// backupCreateEnvVar validates that encrypt and passphraseEnvVar agree and
-// returns the trimmed env var name, or a non-empty 400 message.
+// backupCreateEnvVar validates that encrypt was chosen explicitly and agrees
+// with passphraseEnvVar, and returns the trimmed env var name, or a non-empty
+// 400 message.
 func backupCreateEnvVar(body backupCreateUIRequest) (envVar, errMsg string) {
 	envVar = strings.TrimSpace(body.PassphraseEnvVar)
 	switch {
-	case body.Encrypt && envVar == "":
+	case body.Encrypt == nil:
+		return "", "encrypt is required: true (with passphraseEnvVar) for an encrypted backup, or an explicit false for an unencrypted dev/lab backup"
+	case *body.Encrypt && envVar == "":
 		return "", "encrypt requires passphraseEnvVar (the name of an env var the maintenance agent is allowed to read)"
-	case !body.Encrypt && envVar != "":
+	case !*body.Encrypt && envVar != "":
 		return "", "passphraseEnvVar must be omitted unless encrypt is true"
 	}
 	return envVar, ""
@@ -275,8 +283,9 @@ func apiBackupsCreate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "maintenance agent not configured", http.StatusServiceUnavailable)
 		return
 	}
-	filename := backupArchiveName(time.Now().UTC(), body.Encrypt)
-	agentReq := backupCreateAgentRequest{Filename: filename, Encrypt: body.Encrypt}
+	encrypt := *body.Encrypt // non-nil: backupCreateEnvVar refuses an omitted choice
+	filename := backupArchiveName(time.Now().UTC(), encrypt)
+	agentReq := backupCreateAgentRequest{Filename: filename, Encrypt: encrypt}
 	if envVar != "" {
 		agentReq.PassphraseRef = "env:" + envVar
 	}
@@ -302,7 +311,7 @@ func apiBackupsCreate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, reason, http.StatusBadGateway)
 		return
 	}
-	auditEvent(r, "backup.trigger", filename, fmt.Sprintf("encrypt=%v op_id=%v", body.Encrypt, opResp["op_id"]))
+	auditEvent(r, "backup.trigger", filename, fmt.Sprintf("encrypt=%v op_id=%v", encrypt, opResp["op_id"]))
 	// The listing is cached for backupsCacheTTL — drop it so the next GET
 	// (e.g. right after this op reaches a terminal state) shows the new
 	// archive instead of a stale pre-trigger snapshot.

@@ -5852,7 +5852,7 @@ document.addEventListener('click', e => {
     // ── Release management (P1.6d-1) ──
     case 'loadReleases':           loadReleases(); break;
     case 'loadSupport':            loadSupport(); break;
-    case 'loadBackups':            loadBackups(); break;
+    case 'loadBackups':            loadBackups(); backupNowResumePoll(); break;
     case 'backupNowOpen':          backupNowOpen(); break;
     case 'backupNowCancel':        backupNowCancel(); break;
     case 'backupNowSubmit':        backupNowSubmit(); break;
@@ -15945,6 +15945,23 @@ function renderBackups(data) {
 // routine, no-downtime operation per D1.5 - needed
 // `docker compose --profile cli run --rm cli --backup ...` over SSH.
 let backupNowPollTimer = null;
+// The op a give-up left unresolved: the agent's operation_timeout (default
+// 30m) can outlast the poll deadline, so Refresh resumes it rather than the
+// terminal outcome being lost.
+let backupNowPendingOp = null;
+// True from backupNowPollStart until the poll gives up or sees a terminal
+// state (the first poll runs before any timer exists, so the timer alone
+// cannot say whether a poll is live).
+let backupNowPolling = false;
+// Advanced by every backupNowPollStart so a superseded poll loop (a resume or
+// a new backup started while a request was in flight) stops at its next step
+// instead of reporting on, or clearing the state of, the op that replaced it.
+let backupNowPollGen = 0;
+function backupNowResumePoll() {
+  if (backupNowPendingOp && !backupNowPolling) {
+    backupNowPollStart(backupNowPendingOp.opId, backupNowPendingOp.filename);
+  }
+}
 
 function backupNowOpen() {
   if (uiRole !== 'admin') { toast('Admin role required', 'error'); return; }
@@ -15991,17 +16008,22 @@ async function backupNowSubmit() {
 // backupNowPollStart polls GET /api/backups/operations/{id} every 3s until
 // the op reaches a terminal state (or 10 minutes elapse), then refreshes the
 // archive listing so the new backup shows up without a manual Refresh click.
+// A give-up keeps the op id (backupNowPendingOp) and Refresh resumes it.
 function backupNowPollStart(opId, filename) {
   const el = document.getElementById('support-backup-progress');
   if (!opId || !el) return;
   if (backupNowPollTimer) clearTimeout(backupNowPollTimer);
+  backupNowPendingOp = { opId, filename };
+  backupNowPolling = true;
+  const gen = ++backupNowPollGen;
   // Wall-clock deadline, checked on EVERY reschedule (success and error
   // alike): a status endpoint that keeps failing must not keep an open
   // browser polling forever.
   const deadline = Date.now() + 600000;
   const giveUp = () => {
-    el.innerHTML += '<p class="hint">Still running - check back with Refresh.</p>';
+    el.innerHTML += '<p class="hint">Still running - Refresh resumes the status check.</p>';
     backupNowPollTimer = null;
+    backupNowPolling = false;
   };
   const poll = async () => {
     el.style.display = '';
@@ -16009,19 +16031,27 @@ function backupNowPollStart(opId, filename) {
     try {
       op = await api('/api/backups/operations/' + encodeURIComponent(opId));
     } catch (err) {
+      if (gen !== backupNowPollGen) return;
       el.innerHTML = '<p class="hint">Backing up ' + escHtml(filename || '') + '… (status check failed: ' + escHtml(err.message) + ')</p>';
       if (Date.now() >= deadline) { giveUp(); return; }
       backupNowPollTimer = setTimeout(poll, 5000);
       return;
     }
+    if (gen !== backupNowPollGen) return;
     if (op.state === 'succeeded') {
       el.innerHTML = '<p class="hint" style="color:var(--green)">Backup ' + escHtml(filename || '') + ' completed.</p>';
+      backupNowPendingOp = null;
+      backupNowPollTimer = null;
+      backupNowPolling = false;
       loadBackups();
       return;
     }
     if (op.state === 'failed' || op.state === 'cancelled') {
       el.innerHTML = '<p class="hint" style="color:var(--red)">Backup ' + escHtml(filename || '') + ' ' + escHtml(op.state) +
         (op.failure_reason ? ': ' + escHtml(op.failure_reason) : '') + '.</p>';
+      backupNowPendingOp = null;
+      backupNowPollTimer = null;
+      backupNowPolling = false;
       loadBackups();
       return;
     }

@@ -213,7 +213,7 @@ func TestAPIBackupsCreate_NotConfigured(t *testing.T) {
 	// branch) the value must fail localAgentEndpoint's own shape check.
 	t.Setenv(envMaintAgentURL, "not-a-valid-endpoint")
 
-	w, _ := postAPIBackups(t, RoleAdmin, nil)
+	w, _ := postAPIBackups(t, RoleAdmin, map[string]any{"encrypt": false})
 	if w.Code != http.StatusServiceUnavailable {
 		t.Fatalf("status = %d, want 503 (body=%s)", w.Code, w.Body.String())
 	}
@@ -247,7 +247,7 @@ func TestAPIBackupsCreate_Success(t *testing.T) {
 	t.Setenv(envMaintAgentURL, agent.URL)
 
 	baselineTS := time.Now().UnixMilli()
-	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/api/backups", bytes.NewReader(nil))
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/api/backups", strings.NewReader(`{"encrypt":false}`))
 	req.RemoteAddr = "198.51.100.60:0"
 	req = req.WithContext(context.WithValue(req.Context(), uiRoleKey{}, RoleAdmin))
 	w := httptest.NewRecorder()
@@ -553,5 +553,31 @@ func TestAPIBackupOperationStatus_NonBackupOpIsNotFound(t *testing.T) {
 				t.Fatal("a refused non-backup op must not invalidate the listing cache")
 			}
 		})
+	}
+}
+
+// TestAPIBackupsCreate_OmittedEncryptChoiceIsRejected pins that the server
+// never infers a plaintext backup from silence: an absent body, `{}` or a
+// body naming only other fields is refused 400 before the agent is called,
+// so an unencrypted archive (credentials, keys, session material, TOTP
+// secrets) is produced only by an explicit `"encrypt": false`.
+func TestAPIBackupsCreate_OmittedEncryptChoiceIsRejected(t *testing.T) {
+	resetBackupsCache(t)
+	var hits atomic.Int64
+	agent := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { hits.Add(1) }))
+	defer agent.Close()
+	t.Setenv(envMaintAgentURL, agent.URL)
+
+	for name, body := range map[string]map[string]any{
+		"no body":    nil,
+		"empty body": {},
+	} {
+		w, _ := postAPIBackups(t, RoleAdmin, body)
+		if w.Code != http.StatusBadRequest {
+			t.Errorf("%s: status = %d, want 400 (body=%s)", name, w.Code, w.Body.String())
+		}
+	}
+	if got := hits.Load(); got != 0 {
+		t.Fatalf("agent called %d times for a request with no explicit encrypt choice, want 0", got)
 	}
 }

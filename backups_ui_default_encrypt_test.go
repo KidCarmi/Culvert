@@ -61,7 +61,11 @@ func TestUIContract_BackupNowFormIsNotRevealedByRoleFiltering(t *testing.T) {
 		t.Fatal("support-backup-trigger not found")
 	}
 	tag := s[i:]
-	tag = tag[:strings.Index(tag, ">")]
+	end := strings.Index(tag, ">")
+	if end < 0 {
+		t.Fatal("support-backup-trigger opening tag is not terminated")
+	}
+	tag = tag[:end]
 	if strings.Contains(tag, "data-min-role") {
 		t.Error("support-backup-trigger must not carry data-min-role: applySession would reveal it before backupNowOpen initializes it")
 	}
@@ -75,5 +79,43 @@ func TestUIContract_BackupNowFormIsNotRevealedByRoleFiltering(t *testing.T) {
 	}
 	if !strings.Contains(body, "getElementById('support-backup-trigger')") || !strings.Contains(body, "backupTrigger.style.display = 'none'") {
 		t.Error("applySession must close the Backup Now form on every session change")
+	}
+}
+
+// The agent's operation_timeout defaults to 30 minutes, so a legitimate
+// backup can outlive the GUI's 10-minute poll deadline. Giving up must keep
+// the operation id, and the Refresh button must resume the status poll, so a
+// later failure or cancellation is still reported instead of being lost.
+func TestUIContract_BackupNowPollIsResumableAfterDeadline(t *testing.T) {
+	html, err := os.ReadFile(staticIndexHTMLPath())
+	if err != nil {
+		t.Fatalf("read index.html: %v", err)
+	}
+	s := string(html)
+	for _, want := range []string{
+		"let backupNowPendingOp = null;",
+		"function backupNowResumePoll() {",
+		"case 'loadBackups':            loadBackups(); backupNowResumePoll(); break;",
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("index.html must keep an abandoned backup op resumable: missing %q", want)
+		}
+	}
+	i := strings.Index(s, "function backupNowPollStart(")
+	if i < 0 {
+		t.Fatal("backupNowPollStart not found")
+	}
+	body := s[i:]
+	if k := strings.Index(body, "\n}\n"); k >= 0 {
+		body = body[:k]
+	}
+	if !strings.Contains(body, "backupNowPendingOp = { opId, filename };") {
+		t.Error("backupNowPollStart must retain the op id so the poll can be resumed")
+	}
+	if strings.Count(body, "if (gen !== backupNowPollGen) return;") < 2 {
+		t.Error("a superseded poll loop must stop after both the error and the success paths of its request")
+	}
+	if strings.Count(body, "backupNowPendingOp = null;") < 2 {
+		t.Error("backupNowPollStart must drop the retained op id on both terminal branches")
 	}
 }

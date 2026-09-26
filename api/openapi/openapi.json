@@ -457,7 +457,7 @@
       },
       "BackupCreateBody": {
         "additionalProperties": false,
-        "description": "Optional; an empty body creates an unencrypted backup.",
+        "description": "The encryption choice is required and never inferred: an omitted `encrypt` is refused 400, so an unencrypted archive is created only by an explicit `\"encrypt\": false` (dev/lab only).",
         "properties": {
           "encrypt": {
             "description": "Encrypt the archive with AES-256-GCM. Requires passphraseEnvVar.",
@@ -468,6 +468,9 @@
             "type": "string"
           }
         },
+        "required": [
+          "encrypt"
+        ],
         "type": "object"
       },
       "BackupCreateResult": {
@@ -7925,7 +7928,7 @@
               }
             }
           },
-          "required": false
+          "required": true
         },
         "responses": {
           "200": {
