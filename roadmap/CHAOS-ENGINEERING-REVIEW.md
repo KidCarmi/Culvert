@@ -7363,6 +7363,62 @@ it is trying not to disturb; the honest trade is to take the extra CI cycle
 rather than hold a durable commit for it, because the container is ephemeral
 and the run is not.
 
+**Two SUITE-LEVEL findings fell out of driving this PR, and both are the
+sweep's own subject matter applied to the tests rather than to the appliance:
+a gate that depends on state it does not establish, and a gate that asserts a
+property its environment cannot measure.** Neither is CHAOS-71 code; both are
+recorded here rather than fixed, because fixing them means editing packages
+this change does not touch (register rows **SUITE-1** and **SUITE-2**).
+
+**SUITE-1 — `Deep · determinism (shuffle, count=2)`, an unestablished
+precondition.** `TestSecReqID1_BareReqIDInDecisionLineIsSafeOnlyBecauseOfTheBound/bound_makes_the_bare_append_safe`
+(`request_tracing_bounds_test.go`) asserts that the per-request decision line
+carries exactly one ` identity=` and one ` action=` token. But `handleRequest`
+AUTHENTICATES BEFORE IT EVALUATES POLICY, and the test establishes no auth
+posture — it calls only `resetTracingBoundsStateForTest()`, which resets the
+tracing counters. So when the shuffled order happens to place a test that
+configures a credential in the process-global `cfg` ahead of it, the request is
+refused with `AUTH_FAIL (no-credentials)` and **no decision line is emitted at
+all**; the token count is 0 and the gate fails. Reproduced deterministically
+against the exact tree CI ran (`9c7673a`) with CI's own seed, failing in both
+passes of `-count=2` while `-count=1` without shuffle passes.
+
+Two things about it generalise. **Its own vacuity guard cannot see this**:
+`if !strings.Contains(line, "req_id=")` exists precisely to catch *"no decision
+line was emitted; this gate is testing nothing"*, and `AUTH_FAIL … {req_id=…}`
+satisfies it — so the guard reports health while the gate tests nothing about a
+policy decision. That is the same shape as the vacuous walls this file records
+on the SOCKS5 log-injection path and in CHAOS-71 round 2, in a guard written to
+prevent exactly it. **And reproducing it required the EXACT tree**: `-shuffle`
+permutes the actual test list, so the same seed against a list with more tests
+in it yields a different order — a repro on the branch tip could neither
+confirm nor exonerate, and the first attempt here was invalid for that reason.
+The fix is to establish the posture with `snapshotAuthGlobals` (the helper
+`auth_startup_test.go` already provides, whose doc comment records why the
+production restore APIs are non-deterministic under `-shuffle=on -count=2`) and
+to tighten the guard to require `POLICY_`.
+
+**SUITE-2 — `internal/threatfeed`'s `TestBenchGate_CheckRequestURLBeatsLegacy`,
+a zero-margin timing ratio under `-race`.** The assertion is a bare
+`if fast.NsPerOp() >= legacy.NsPerOp()`. This file documents that path at
+**376 ns/op against 887 ns/op**; in the race lane both arms measured ~6-14x
+slower AND inverted (**5881 against 5141**), so the gate failed with no
+regression present. This is the standing conclusion of this file — *a gate that
+can flake gets muted* — and the package has ALREADY applied it once:
+`TestBenchGate_LookupsTakeNoFeedLock` is deliberately structural because "the
+scaling-ratio gate was built first and rejected because its margin narrows to
+1.35x under `-race`, too thin for a per-PR runner." This is the sibling that
+kept the ratio. The principled fix is the same replacement, not a wider bound:
+loosening it enough to tolerate a 1.14x inversion also admits a real 1.4x
+regression, and the allocation gate beside it (bound 2, hardware-independent)
+already carries the substance of the optimisation.
+
+The transferable rule, which is this file's own discipline turned on its test
+suite: **a gate must establish every precondition its assertion depends on, and
+must not assert a property the environment it runs in cannot measure.** The
+first makes a gate order-dependent; the second makes it environment-dependent.
+Both present as flakes, and neither is one.
+
 The new validator's one security-relevant job is classifying an IP LITERAL with
 no resolver, and the direction it must not get wrong is admitting a private one,
 so `StructuralValidatorClassifiesOnlyLiterals` pins the IPv4-mapped IPv6 forms
@@ -7487,6 +7543,8 @@ five were the only ones anybody had ever checked.
 | **IDP-6** | The SAML SP key pair is EPHEMERAL (`ensureSPKeyPair`, regenerated per process) and therefore differs on every node and after every restart — SP metadata is node- and restart-dependent, and encrypted assertions cannot be decrypted by a node that did not issue the AuthnRequest | **OPEN, REPORTED NOT FIXED** — persisting it is a key-management decision with cluster-distribution consequences, not a resilience patch |
 | **IDP-7** | Neither fetch honours the metadata document's own `validUntil` / `cacheDuration` | **OPEN** — noted during this sweep; the 7-day ceiling bounds the exposure but does not implement the IdP's stated intent |
 | **IDP-8** | Two OIDC discovery endpoints — `userinfo_endpoint` and `introspection_endpoint` — are dialled with a bearer token and the client secret respectively without ever being validated, so a document that downgraded one to plain `http` would send credentials in cleartext (the SSRF-guarded dialer still bounds the destination, so this is a confidentiality issue, not an SSRF one) | **OPEN, REPORTED NOT FIXED** — found while verifying this sweep's own claim that the discovery endpoints were covered; refusing non-`https` for credential-bearing endpoints is a POSTURE change that breaks dev/self-signed deployments relying on `TLSSkipVerify` and belongs in its own change with its own gates, not folded into a resilience sweep's third review round |
+| **SUITE-1** | `TestSecReqID1_BareReqIDInDecisionLineIsSafeOnlyBecauseOfTheBound` asserts on a `POLICY_*` decision line but establishes no AUTH posture, and `handleRequest` authenticates before policy — so a shuffled order that configures a credential first refuses the request with `AUTH_FAIL` and emits no decision line. Its own vacuity guard (`Contains(line, "req_id=")`) is satisfied by `AUTH_FAIL … {req_id=…}`, so it reports health while testing nothing | **OPEN, REPORTED NOT FIXED** — reproduced against the exact tree CI ran with CI's seed; fix is `snapshotAuthGlobals` + a `POLICY_` guard in `request_tracing_bounds_test.go`, a package this change does not touch |
+| **SUITE-2** | `internal/threatfeed`'s `TestBenchGate_CheckRequestURLBeatsLegacy` is a bare `fast >= legacy` timing ratio with no margin; under `-race` both arms ran ~6-14x slower and INVERTED (5881 vs 5141 ns/op against a documented 376 vs 887), failing with no regression present | **OPEN, REPORTED NOT FIXED** — the package already replaced its other ratio gate with a structural one for this exact reason; widening the bound enough to tolerate a 1.14x inversion would also admit a real 1.4x regression |
 
 ### Governance note
 
