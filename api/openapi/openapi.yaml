@@ -480,7 +480,7 @@ components:
         uncheckedEnforcingPaths:
           type: array
           description: >-
-            Paths where this appliance validates an origin certificate on a
+            Paths where this Culvert instance validates an origin certificate on a
             client's behalf and yet does not consult the revocation checker.
             Excludes bypassed CONNECT tunnels, which never terminate TLS.
           items: { type: string }
@@ -1060,6 +1060,8 @@ components:
         reason: { type: string }
         verify_mode: { type: string }
         sigstore_warn: { type: string, description: "Present only when a Sigstore trust override (identity/trusted-root) did not take effect." }
+        sigstore_identity_source: { type: string, enum: [default, override], description: "Present only when the Sigstore scheme is active. Whether the enforcing identity policy is the baked default or an operator override." }
+        sigstore_root_source: { type: string, enum: [default, override], description: "Present only when the Sigstore scheme is active. Whether the enforcing trusted root is the baked default or an operator override." }
     ObjectReferences:
       type: object
       description: Reverse references from named objects (categories, groups, profiles) to policy rules.
