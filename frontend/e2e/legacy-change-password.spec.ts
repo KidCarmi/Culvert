@@ -74,13 +74,18 @@ async function passwordWorks(user: string, pass: string): Promise<boolean> {
   }
 }
 
-async function legacyLogin(page: Page, user: string, pass: string): Promise<void> {
+async function legacyLogin(
+  page: Page,
+  user: string,
+  pass: string,
+): Promise<void> {
   await page.goto(`${AUTH_URL}/`);
   await expect(page.locator("#login-overlay")).toBeVisible();
   await page.locator("#li-user").fill(user);
   await page.locator("#li-pass").fill(pass);
   const loginP = page.waitForResponse(
-    (r) => r.url().endsWith("/api/auth/login") && r.request().method() === "POST",
+    (r) =>
+      r.url().endsWith("/api/auth/login") && r.request().method() === "POST",
   );
   await page.locator("#li-btn").click();
   const login = await loginP;
@@ -100,7 +105,8 @@ async function legacyLogin(page: Page, user: string, pass: string): Promise<void
 /** Opens the dialog and waits for the authority to be BOUND (Save enabled). */
 async function openBoundDialog(page: Page): Promise<number> {
   const statusP = page.waitForResponse(
-    (r) => r.url().endsWith("/api/auth/status") && r.request().method() === "GET",
+    (r) =>
+      r.url().endsWith("/api/auth/status") && r.request().method() === "GET",
   );
   await page.locator("#change-pw-btn").click();
   const status: unknown = await (await statusP).json();
@@ -112,7 +118,11 @@ async function openBoundDialog(page: Page): Promise<number> {
   return status["securityGeneration"];
 }
 
-async function fillDialog(page: Page, current: string, next: string): Promise<void> {
+async function fillDialog(
+  page: Page,
+  current: string,
+  next: string,
+): Promise<void> {
   await page.locator("#cp-current").fill(current);
   await page.locator("#cp-new").fill(next);
   await page.locator("#cp-confirm").fill(next);
@@ -130,8 +140,11 @@ test.beforeAll(async () => {
     // Idempotent: a previous interrupted run may have left the account.
     const list = await api.get("/api/auth/users");
     const v: unknown = await list.json();
-    if (isRecord(v) && Array.isArray(v["users"]) &&
-        v["users"].some((x) => isRecord(x) && x["username"] === CP_USER)) {
+    if (
+      isRecord(v) &&
+      Array.isArray(v["users"]) &&
+      v["users"].some((x) => isRecord(x) && x["username"] === CP_USER)
+    ) {
       const del = await api.delete(
         `/api/auth/users?username=${CP_USER}&revision=${String(await rosterRevision(api))}`,
       );
@@ -151,37 +164,54 @@ test.afterAll(async () => {
   const api = await newAdminClient();
   try {
     const rev = await rosterRevision(api);
-    const del = await api.delete(`/api/auth/users?username=${CP_USER}&revision=${String(rev)}`);
+    const del = await api.delete(
+      `/api/auth/users?username=${CP_USER}&revision=${String(rev)}`,
+    );
     expect(del.ok(), await del.text()).toBe(true);
   } finally {
     await api.dispose();
   }
 });
 
-test("1 — a viewer changes their own password: bound generation sent, action-bound 2xx, secrets cleared", async ({ page }) => {
+test("1 — a viewer changes their own password: bound generation sent, action-bound 2xx, secrets cleared", async ({
+  page,
+}) => {
   await legacyLogin(page, CP_USER, PASS_A);
   const bound = await openBoundDialog(page);
 
-  const sent: Array<{ generation: unknown; hasCurrent: boolean; hasNew: boolean }> = [];
+  const sent: Array<{
+    generation: unknown;
+    hasCurrent: boolean;
+    hasNew: boolean;
+  }> = [];
   page.on("request", (r) => {
-    if (r.url().endsWith("/api/auth/change-password") && r.method() === "POST") {
+    if (
+      r.url().endsWith("/api/auth/change-password") &&
+      r.method() === "POST"
+    ) {
       const body: unknown = r.postDataJSON();
       sent.push({
         generation: isRecord(body) ? body["generation"] : undefined,
-        hasCurrent: isRecord(body) && typeof body["current_password"] === "string",
+        hasCurrent:
+          isRecord(body) && typeof body["current_password"] === "string",
         hasNew: isRecord(body) && typeof body["new_password"] === "string",
       });
     }
   });
 
   await fillDialog(page, PASS_A, PASS_B);
-  const respP = page.waitForResponse((r) => r.url().endsWith("/api/auth/change-password"));
+  const respP = page.waitForResponse((r) =>
+    r.url().endsWith("/api/auth/change-password"),
+  );
   await page.locator("#cp-save-btn").click();
   const resp = await respP;
   expect(resp.status()).toBe(200);
   const body: unknown = await resp.json();
-  expect(isRecord(body) && body["ok"] === true && body["selfAffected"] === true).toBe(true);
-  if (!isRecord(body) || typeof body["securityGeneration"] !== "number") throw new Error("no generation");
+  expect(
+    isRecord(body) && body["ok"] === true && body["selfAffected"] === true,
+  ).toBe(true);
+  if (!isRecord(body) || typeof body["securityGeneration"] !== "number")
+    throw new Error("no generation");
   expect(body["securityGeneration"]).toBeGreaterThan(bound);
 
   await expect(page.locator("#toasts")).toContainText("Password changed.");
@@ -189,19 +219,29 @@ test("1 — a viewer changes their own password: bound generation sent, action-b
   await expectDialogFieldsEmpty(page);
 
   expect(sent).toHaveLength(1);
-  expect(sent[0]).toEqual({ generation: bound, hasCurrent: true, hasNew: true });
+  expect(sent[0]).toEqual({
+    generation: bound,
+    hasCurrent: true,
+    hasNew: true,
+  });
 
   // The session was re-issued at the new generation: the console keeps
   // working without a re-login.
   const st = await page.request.get(`${AUTH_URL}/api/auth/status`);
   const stBody: unknown = await st.json();
-  expect(isRecord(stBody) && stBody["loggedIn"] === true && stBody["user"] === CP_USER).toBe(true);
+  expect(
+    isRecord(stBody) &&
+      stBody["loggedIn"] === true &&
+      stBody["user"] === CP_USER,
+  ).toBe(true);
 
   expect(await passwordWorks(CP_USER, PASS_B)).toBe(true);
   expect(await passwordWorks(CP_USER, PASS_A)).toBe(false);
 });
 
-test("2 — a stale generation is refused with nothing written, no retry; Cancel drops the secrets", async ({ page }) => {
+test("2 — a stale generation is refused with nothing written, no retry; Cancel drops the secrets", async ({
+  page,
+}) => {
   await legacyLogin(page, CP_USER, PASS_B);
   const bound = await openBoundDialog(page);
 
@@ -213,11 +253,15 @@ test("2 — a stale generation is refused with nothing written, no retry; Cancel
     posts++;
     const body: unknown = route.request().postDataJSON();
     if (!isRecord(body)) return route.continue();
-    await route.continue({ postData: JSON.stringify({ ...body, generation: bound - 1 }) });
+    await route.continue({
+      postData: JSON.stringify({ ...body, generation: bound - 1 }),
+    });
   });
 
   await fillDialog(page, PASS_B, PASS_C);
-  const respP = page.waitForResponse((r) => r.url().endsWith("/api/auth/change-password"));
+  const respP = page.waitForResponse((r) =>
+    r.url().endsWith("/api/auth/change-password"),
+  );
   await page.locator("#cp-save-btn").click();
   const resp = await respP;
   expect(resp.status()).toBe(409);
@@ -225,7 +269,9 @@ test("2 — a stale generation is refused with nothing written, no retry; Cancel
   expect(isRecord(rb) && rb["code"] === "stale").toBe(true);
 
   await expect(page.locator("#cp-err")).toBeVisible();
-  await expect(page.locator("#cp-err")).toContainText("Your account changed since this dialog was opened");
+  await expect(page.locator("#cp-err")).toContainText(
+    "Your account changed since this dialog was opened",
+  );
   await expect(page.locator("#cp-err")).toContainText("Nothing was changed");
   await expect(page.locator("#change-password-modal")).toBeVisible();
   await expect(page.locator("#cp-save-btn")).toBeEnabled();
@@ -236,13 +282,18 @@ test("2 — a stale generation is refused with nothing written, no retry; Cancel
   expect(await passwordWorks(CP_USER, PASS_B)).toBe(true);
   expect(await passwordWorks(CP_USER, PASS_C)).toBe(false);
 
-  await page.getByRole("dialog").getByRole("button", { name: "Cancel" }).click();
+  await page
+    .getByRole("dialog")
+    .getByRole("button", { name: "Cancel" })
+    .click();
   await expect(page.locator("#change-password-modal")).toBeHidden();
   await expectDialogFieldsEmpty(page);
   await page.unroute("**/api/auth/change-password");
 });
 
-test("3 — the account changed after the dialog bound: refused at the session fence, dialog closed and empty, nothing written", async ({ page }) => {
+test("3 — the account changed after the dialog bound: refused at the session fence, dialog closed and empty, nothing written", async ({
+  page,
+}) => {
   await legacyLogin(page, CP_USER, PASS_B);
   await openBoundDialog(page);
   await fillDialog(page, PASS_B, PASS_C);
@@ -261,7 +312,9 @@ test("3 — the account changed after the dialog bound: refused at the session f
     await api.dispose();
   }
 
-  const respP = page.waitForResponse((r) => r.url().endsWith("/api/auth/change-password"));
+  const respP = page.waitForResponse((r) =>
+    r.url().endsWith("/api/auth/change-password"),
+  );
   await page.locator("#cp-save-btn").click();
   expect((await respP).status()).toBe(401);
 
@@ -273,7 +326,9 @@ test("3 — the account changed after the dialog bound: refused at the session f
   expect(await passwordWorks(CP_USER, PASS_C)).toBe(false);
 });
 
-test("4 — no stated authority: nothing is bound, Save stays disabled, no request leaves the browser", async ({ page }) => {
+test("4 — no stated authority: nothing is bound, Save stays disabled, no request leaves the browser", async ({
+  page,
+}) => {
   await legacyLogin(page, CP_USER, ADMIN_RESET);
   // From here the appliance's status answer is stripped of its generation
   // (a build that does not publish one, or a body that cannot be trusted).
@@ -283,7 +338,11 @@ test("4 — no stated authority: nothing is bound, Save stays disabled, no reque
     if (!isRecord(j)) return route.fulfill({ response: r });
     const { securityGeneration: _dropped, ...rest } = j;
     void _dropped;
-    await route.fulfill({ response: r, body: JSON.stringify(rest), headers: { ...r.headers(), "content-type": "application/json" } });
+    await route.fulfill({
+      response: r,
+      body: JSON.stringify(rest),
+      headers: { ...r.headers(), "content-type": "application/json" },
+    });
   });
   let posts = 0;
   page.on("request", (r) => {
@@ -292,7 +351,9 @@ test("4 — no stated authority: nothing is bound, Save stays disabled, no reque
 
   await page.locator("#change-pw-btn").click();
   await expect(page.locator("#change-password-modal")).toBeVisible();
-  await expect(page.locator("#cp-err")).toContainText("authority could not be confirmed");
+  await expect(page.locator("#cp-err")).toContainText(
+    "authority could not be confirmed",
+  );
   await expect(page.locator("#cp-save-btn")).toBeDisabled();
   // Even a forced submit (Enter in a field) cannot send: the handler refuses
   // locally with no bound authority.
@@ -302,7 +363,10 @@ test("4 — no stated authority: nothing is bound, Save stays disabled, no reque
   expect(posts).toBe(0);
   expect(await passwordWorks(CP_USER, ADMIN_RESET)).toBe(true);
 
-  await page.getByRole("dialog").getByRole("button", { name: "Cancel" }).click();
+  await page
+    .getByRole("dialog")
+    .getByRole("button", { name: "Cancel" })
+    .click();
   await expectDialogFieldsEmpty(page);
   await page.unroute("**/api/auth/status");
 });
