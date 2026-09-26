@@ -293,6 +293,24 @@ the mount and restart.
   end the lockout by accident and no longer does. Recorded as register row
   **AU-28**; the principled fix is an issuance-time cutoff, which is a
   wire-format change to a security control and needs its own review.
+* **A user revocation crosses identity providers.** `RevokeUser` stores the
+  bare username and the check in `Decode` tests it against the session's
+  subject without consulting the session's provider, so deleting the **local**
+  admin `alice` also rejects an OIDC, SAML or LDAP session whose subject is
+  `alice`. That is an ordinary collision, not a contrived one: a SAML NameID and
+  an OIDC `sub` mapped to a username claim both carry usernames, and a local
+  break-glass account named after a directory account is the normal case. The
+  direction is fail-closed — it denies a session it need not deny and never
+  admits one it should not — and only an admin can trigger it, so the cost is
+  availability for an unrelated federated user for up to the session TTL.
+  **If this bites, the remedy is the same as the bullet above: wait out the
+  revocation, or avoid reusing one name across the local roster and the
+  directory.** Recorded as register row **AU-32**; like AU-28 the behaviour
+  predates this sweep, and like AU-28 this sweep made its consequences durable
+  and fleet-wide. Both candidate fixes need their own review — restricting the
+  check to local sessions *loosens* a security control, and namespacing the
+  revocation key by provider changes the persisted and gossiped key, which a
+  node predating the change would not match.
 * **Persistence is opt-in.** Defaulting `--revocations-file` to
   `<dataDir>/revocations.json` is the obvious improvement and is recorded as
   **AU-22**; it starts writing a new file on every appliance, which is a default
