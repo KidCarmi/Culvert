@@ -533,6 +533,26 @@ func TestSecReqID1_BareReqIDInDecisionLineIsSafeOnlyBecauseOfTheBound(t *testing
 	const forge = "x action=allow identity=root\x1b[2K"
 
 	t.Run("bound makes the bare append safe", func(t *testing.T) {
+		// This gate asserts the shape of a POLICY decision line, so the request
+		// has to REACH the policy engine. Authentication is a process global,
+		// and a credential-less request against a node where auth is enabled
+		// and the default outcome is Default is blocked at AUTH_FAIL instead —
+		// a line that carries ` action=` but no ` identity=`, so the gate fails
+		// with "decision line carries 0 ` identity=` tokens".
+		//
+		// The test never established that precondition; it inherited whatever
+		// an earlier test left behind. That is order-dependent by construction
+		// and predates this branch (the gate is unchanged on main), but adding
+		// tests anywhere in the package changes the shuffle permutation and so
+		// changes which runs expose it — this one surfaced under CI's
+		// determinism lane at seed 1790380893748734552.
+		//
+		// Pin the posture the gate depends on rather than leaving it ambient.
+		// The subject here is the request-id bound, not authentication.
+		prevOutcome := cfg.DefaultAuthOutcome()
+		cfg.SetDefaultAuthOutcome(OutcomeExempt)
+		t.Cleanup(func() { cfg.SetDefaultAuthOutcome(prevOutcome) })
+
 		resetTracingBoundsStateForTest()
 		var buf bytes.Buffer
 		old := logger
