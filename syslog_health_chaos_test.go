@@ -1611,7 +1611,7 @@ func TestChaos72_TheRealFanOutChargesEventsLostToAnUnmetIntent(t *testing.T) {
 	before := syslogFeedState().Drops
 
 	// The audit fan-out (audit.SetSIEM, wired in store.go's init).
-	req := httptest.NewRequest(http.MethodPost, "/api/policy", nil)
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/api/policy", http.NoBody)
 	req.RemoteAddr = "198.51.100.77:5555"
 	auditEvent(req, "policy.update", "rule-1", "chaos72 unmet-intent path gate")
 
