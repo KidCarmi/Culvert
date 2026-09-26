@@ -2556,7 +2556,7 @@ Firefox (all platforms):
           <div class="panel-body">
             <div class="form-group">
               <label class="form-label">Username</label>
-              <input type="text" class="input" style="width:100%" id="s-user" placeholder="Leave empty to disable auth">
+              <input type="text" class="input" style="width:100%" id="s-user" placeholder="Username (required)">
             </div>
             <div class="form-group">
               <label class="form-label">Password</label>
@@ -2564,6 +2564,9 @@ Firefox (all platforms):
             </div>
             <button class="btn" data-click="saveSettings">Save Credentials</button>
             <p style="font-size:.72rem;color:var(--muted);margin-top:10px;">
+              A username and a password meeting the complexity policy are both required.
+              To run unmatched traffic without credentials, set
+              <strong>Default authentication behavior</strong> to Exempt instead.
               Changes apply immediately without restart.
             </p>
           </div>
@@ -11399,6 +11402,14 @@ async function syncBlocklistFeed(url) {
 async function saveSettings() {
   const user = document.getElementById('s-user').value;
   const pass = document.getElementById('s-pass').value;
+  if (!user.trim()) {
+    toast('Username is required. To run unmatched traffic without credentials, set Default authentication behavior to Exempt.', 'error');
+    return;
+  }
+  if (!pass) {
+    toast('Password is required.', 'error');
+    return;
+  }
   try {
     await api('/api/settings', {
       method: 'POST',

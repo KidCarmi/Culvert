@@ -51,6 +51,8 @@ func loadAuth(auth authStartupConfig) {
 		} else if cfg.AuthEnabled() {
 			logger.Printf("UIUsers: loaded from %s", auth.UIUsersFile)
 		}
+	} else {
+		warnRosterNotDurable()
 	}
 	warnOversizeConfiguredUsernames()
 }
@@ -72,4 +74,23 @@ func warnOversizeConfiguredUsernames() {
 				len(u.Username), maxUsernameLen)
 		}
 	}
+}
+
+// warnRosterNotDurable reports at BOOT that the admin roster has no durable
+// home, which is the moment that matters: every later roster mutation (account
+// delete, role change, password rotation) then applies in memory and answers
+// 2xx while reverting on restart. The flag defaults to empty (main.go), and the
+// shipped docker-compose.yml sets it, so this fires on a bare-metal or
+// hand-rolled run rather than on the supported deployment.
+//
+// It is a warning, not a fatal: the stores never required the path, so failing
+// the boot would brick an appliance whose config was legal when written — the
+// same reasoning warnOversizeConfiguredUsernames records for the username
+// bound. The per-mutation half is noteRosterNotDurable
+// (roster_persist_durability.go), which fires when a change actually lands
+// nowhere.
+func warnRosterNotDurable() {
+	logger.Printf("UIUsers: WARNING — no roster file configured, so the admin roster is IN-MEMORY ONLY: " +
+		"account deletes, role changes and password rotations will be LOST on restart. " +
+		"Set -ui-users-file (e.g. /data/ui_users.json) to persist them.")
 }
