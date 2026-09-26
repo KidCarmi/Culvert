@@ -657,7 +657,7 @@ func oversizeUsernameAction(inv adminUsernameInventory, totpOversize bool) strin
 		// Settings hashes the password field as given (a blank one included),
 		// so the step must require a new password, not just a new name.
 		action += "The oversize name includes the legacy single-user login, which Admin Users alone cannot change: " +
-			"set a shorter login under Settings (POST /api/settings) together with a new strong password in the same save " +
+			"set a login of at most 64 bytes under Settings (POST /api/settings) together with a new strong password in the same save " +
 			"(Settings sets the password it is given — never leave the password blank), "
 		if inv.legacyMirrored && inv.legacyRole != "" && inv.legacyRole != RoleAdmin {
 			// VerifyUIUser grants the roster role first, so this login is
