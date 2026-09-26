@@ -50,3 +50,44 @@ func TestHandOffQueued_SameFormatIsForwardedVerbatim(t *testing.T) {
 		t.Fatalf("same-format handoff changed the line: %q -> %q", item.line, got.line)
 	}
 }
+
+// Once HandOffTo has named a successor, a line the drain goroutine dequeues
+// through its ordinary (non-stop) branch must go to the successor, never to
+// the collector being replaced. Close closes `stop` while lines are still
+// queued, and Go picks uniformly between two ready select cases, so without
+// this the drain loop could keep delivering queued security events to the
+// displaced collector after the re-point (Codex review, PR #1494). The stop
+// channel is deliberately left open here so the ordinary branch is the ONLY
+// one that can fire — the test is deterministic, not a race.
+func TestDrainLoop_DequeuedLineAfterHandOffGoesToSuccessor(t *testing.T) {
+	oldConn := &deadlineRecordingConn{}
+	old := &Writer{network: "tcp", addr: "192.0.2.1:514", host: "h1", tag: "culvert",
+		format: "rfc3164", pid: "1", conn: oldConn,
+		queue: make(chan queuedLine, 4), stop: make(chan struct{}), done: make(chan struct{})}
+	next := &Writer{format: "rfc3164", host: "h2", tag: "culvert", pid: "2", queue: make(chan queuedLine, 4)}
+	old.HandOffTo(next)
+	old.queue <- old.formatLine(13, "after-handoff", time.Now())
+
+	go old.drainLoop()
+	defer func() {
+		close(old.stop)
+		<-old.done
+	}()
+
+	select {
+	case got := <-next.queue:
+		if !strings.Contains(got.line, "after-handoff") {
+			t.Fatalf("successor received %q", got.line)
+		}
+	case <-time.After(2 * time.Second):
+		oldConn.mu.Lock()
+		sent := oldConn.buf.String()
+		oldConn.mu.Unlock()
+		t.Fatalf("line was not handed to the successor; displaced collector received %q", sent)
+	}
+	oldConn.mu.Lock()
+	defer oldConn.mu.Unlock()
+	if oldConn.buf.Len() != 0 {
+		t.Fatalf("displaced collector still received %q after the handoff", oldConn.buf.String())
+	}
+}

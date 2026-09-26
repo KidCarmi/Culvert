@@ -230,6 +230,13 @@ func (s *Writer) drainLoop() {
 	for {
 		select {
 		case item := <-s.queue:
+			// Once a successor is named, a dequeued line belongs to it even on
+			// this branch: Close readies `stop` while lines are still queued and
+			// select picks uniformly, so without this check queued events could
+			// still reach the collector being replaced (Codex review, PR #1494).
+			if s.successor.Load() != nil && s.handOffQueued(item) {
+				continue
+			}
 			s.deliverTracked(item)
 		case <-s.stop:
 			deadline := time.Now().Add(flushTimeout)
