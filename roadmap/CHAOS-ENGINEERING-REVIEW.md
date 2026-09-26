@@ -9729,24 +9729,51 @@ goroutine where the answer did not matter.
 > **A comment asserting a goroutine context is a load-bearing claim. When a
 > second caller is added, the comment is part of the diff.**
 
-**Gates** (3, `syslog_health_chaos_test.go`):
+**Gates** (4, `syslog_health_chaos_test.go`):
 
-- `ConcurrentDropsCollapseToOneEvaluation` — the DEFECT gate, verified failing
-  against the reintroduced pre-fix shape (33 concurrent drops produced 33
-  evaluations, want 1). The injected clock is the instrument:
-  `syslogFeedState` reads it exactly once per evaluation on a feed that is not
-  degraded, so the call count IS the evaluation count. The first read blocks
-  (so the winner is still inside its evaluation while the losers run) and
-  every later read returns at once, so the pre-fix shape fails on the COUNT
-  rather than hanging.
+- `ADropEvaluatesOnlyWhenNoEvaluationIsInFlight` — the DEFECT gate, verified
+  failing against the reintroduced pre-fix shape. The rule is *evaluate if and
+  only if no evaluation is already in flight*, pinned as a UNIT against the
+  real entry point. The injected clock is the instrument: `syslogFeedState`
+  reads it exactly once per evaluation on a feed that is not degraded, so the
+  call count IS the evaluation count.
+- `ConcurrentDropsAreRaceFree` — drives 64 concurrent drops under `-race` and
+  deliberately asserts **no count**: which goroutine wins the claim is a
+  scheduling outcome. It proves the plane is race-free under the real shape
+  and that the claim is left FREE afterwards, which is what catches a leaked
+  claim.
 - `ASequentialDropStillEvaluates` — CONTROL. The cheapest way to pass the
   defect gate is to stop evaluating on a drop at all, which would delete the
   "immediate on a busy node" driver and leave the 30s watchdog as the only
-  one. It also fails against a claim that is never released, on the second
-  drop.
+  one.
 - `ADegradedFeedStillPagesFromADropUnderConcurrency` — CONTROL, driven by a
   real killed collector: coalescing must drop redundant evaluations, never the
   one that crosses the threshold.
 
-Both controls PASS against the pre-fix tree, which is what makes them controls
-rather than second defect gates.
+All three controls PASS against the pre-fix tree, which is what makes them
+controls rather than second defect gates. The three mutations (pre-fix shape,
+never-evaluate, never-release) are each caught by a **different subset** of the
+four, which is what proves none of them is redundant.
+
+#### Round 14 postscript — the gate that would have hung
+
+The first shape of the defect gate raced concurrent goroutines through a clock
+that **blocked the winner**, so the losers' non-arrival was the observable. It
+was withdrawn before it shipped, for two reasons this file has already
+recorded in other words:
+
+- **Spurious under `-shuffle`.** A stray goroutine from another test reaching
+  the clock first consumes the blocking call, and the winner's own read then
+  returns immediately — the count assertion fails for a reason that has
+  nothing to do with the property.
+- **The defect would present as a HANG.** Against the pre-fix shape the losers
+  reach the clock too, and block there. A gate that can flake gets muted; a
+  gate that hangs is worse than no gate, because a 10-minute package timeout
+  says nothing about which assertion failed.
+
+It surfaced as a 600.119s timeout on the local `-count=2 -shuffle=on` run —
+which is also how the harness learned that CI gives that job `-timeout=20m`
+while `go test` defaults to 10, so the local run had been reporting a budget
+overrun as a failure. The property is now pinned deterministically as a unit,
+and the concurrency exercise keeps `-race` coverage without asserting anything
+a scheduler decides.

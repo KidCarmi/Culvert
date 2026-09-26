@@ -597,7 +597,10 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   drop, and the 30s watchdog). A sequential caller is unaffected, so every
   existing gate holds unchanged. Post-fix: **268 → 74 ns/op at four cores
   (3.6x), with the curve direction flipped from degrading to improving**; one
-  core is at parity to ~13% for the added CAS pair.
+  core is at parity to ~13% for the added CAS pair. The watchdog's own
+  evaluation is deliberately not claimed — it is the driver that exists so a
+  node which went quiet mid-outage still pages, and a burst of drops must not
+  starve it.
 
 - The threat feed's full-URL check no longer re-parses a URL it was handed
   already parsed. `preDispatchBlocked` runs it on every forwarded plain-HTTP

@@ -3111,25 +3111,31 @@ func jsFunctionBody(t *testing.T, src, decl string) string {
 	return ""
 }
 
-// TestChaos72_ConcurrentDropsCollapseToOneEvaluation is the DEFECT gate for
-// Codex round 14: a queue-full drop is charged on the CALLER's goroutine — a
-// proxy request goroutine — so during a sustained SIEM outage the delivery
-// observer is reached at the full request rate. Unguarded, each of those
-// calls ran the whole health-plane snapshot inline (syslogHealth.mu taken,
-// retired writers settled under it, and the commit half taking it again),
-// which turned "record an atomic drop and move on" into a process-wide
-// serialization point at precisely the load the asynchronous writer exists to
-// absorb (measured: 157 ns/op at GOMAXPROCS=1 rising to 290 at 4 — four cores
-// delivering 0.54x the throughput of one).
+// TestChaos72_ADropEvaluatesOnlyWhenNoEvaluationIsInFlight is the DEFECT gate
+// for Codex round 14: a queue-full drop is charged on the CALLER's goroutine —
+// a proxy request goroutine — so during a sustained SIEM outage the delivery
+// observer is reached at the full request rate. Unguarded, each of those calls
+// ran the whole health-plane snapshot inline (syslogHealth.mu taken, retired
+// writers settled under it, and the commit half taking it again), which turned
+// "record an atomic drop and move on" into a process-wide serialization point
+// at precisely the load the asynchronous writer exists to absorb (measured:
+// 149 ns/op at GOMAXPROCS=1 rising to 268 at 4 — four cores delivering 0.56x
+// the throughput of one).
 //
-// The observable is that concurrent drops collapse to ONE evaluation. The
-// clock is the instrument because syslogFeedState reads it exactly once per
-// evaluation on a feed that is not degraded, so the call count IS the
-// evaluation count. The first read blocks so the winner is still inside its
-// evaluation while the losers run; every later read returns at once, so
-// against the pre-fix shape the losers all complete and the gate fails on the
-// count rather than hanging.
-func TestChaos72_ConcurrentDropsCollapseToOneEvaluation(t *testing.T) {
+// The rule is "evaluate if and only if no evaluation is already in flight",
+// and it is pinned as a UNIT against the real entry point rather than raced.
+// The first shape of this gate drove concurrent goroutines through a clock
+// that blocked the winner, and it was rejected for two reasons the repo has
+// already recorded: a stray goroutine reaching the clock first makes the
+// assertion spurious under -shuffle, and against the pre-fix shape the losers
+// block too, so the defect would present as a package HANG rather than a
+// clean failure. A gate that can flake gets muted, and a gate that hangs is
+// worse than none.
+//
+// The injected clock is the instrument because syslogFeedState reads it
+// exactly once per evaluation on a feed that is not degraded, so the call
+// count IS the evaluation count.
+func TestChaos72_ADropEvaluatesOnlyWhenNoEvaluationIsInFlight(t *testing.T) {
 	resetSyslogHealthForTest()
 	t.Cleanup(resetSyslogHealthForTest)
 
@@ -3141,60 +3147,67 @@ func TestChaos72_ConcurrentDropsCollapseToOneEvaluation(t *testing.T) {
 	noteSyslogWriterInstalled(sw, "udp://127.0.0.1:65533")
 
 	var clockCalls atomic.Int64
-	entered := make(chan struct{})
-	release := make(chan struct{})
-	var once sync.Once
 	fixed := time.Now()
 	setSyslogHealthNowForTest(func() time.Time {
-		n := clockCalls.Add(1)
-		if n == 1 {
-			close(entered)
-			<-release
-		}
+		clockCalls.Add(1)
 		return fixed
 	})
-	// The claim is released by a deferred Store, so abandoning the winner
-	// would leave it held for every later gate in this package.
-	t.Cleanup(func() {
-		select {
-		case <-release:
-		default:
-			close(release)
-		}
-	})
 
-	var winner sync.WaitGroup
-	winner.Add(1)
-	go func() {
-		defer winner.Done()
-		noteSyslogDelivery(false)
-	}()
-
-	select {
-	case <-entered:
-	case <-time.After(5 * time.Second):
-		t.Fatal("the first evaluation never reached the clock; the gate cannot prove anything")
+	// An evaluation is already running: this drop must record its loss (which
+	// noteDrop has already done by the time the observer is reached) and
+	// return, NOT queue up behind the process-wide health mutex.
+	syslogEvalInFlight.Store(true)
+	noteSyslogDelivery(false)
+	if got := clockCalls.Load(); got != 0 {
+		t.Fatalf("a drop ran %d health-plane evaluations while one was already in flight, want 0: "+
+			"every one of those is a proxy request goroutine serializing on syslogHealth.mu "+
+			"during a SIEM outage", got)
 	}
 
-	const losers = 32
-	var lost sync.WaitGroup
-	lost.Add(losers)
-	for i := 0; i < losers; i++ {
+	// Nothing in flight: the drop is the driver again.
+	syslogEvalInFlight.Store(false)
+	noteSyslogDelivery(false)
+	if got := clockCalls.Load(); got != 1 {
+		t.Fatalf("a drop with no evaluation in flight ran %d evaluations, want 1: the claim must "+
+			"drop redundant reads, never the ones that have work to do", got)
+	}
+}
+
+// TestChaos72_ConcurrentDropsAreRaceFree exercises the real shape — many
+// goroutines charging losses at once, as a SIEM outage does — under the race
+// detector. It deliberately asserts NO count: which goroutine wins the claim
+// is a scheduling outcome, so a count assertion here would be exactly the
+// flaky gate the unit above replaces. What it proves is that the claim, its
+// deferred release and the health plane are safe under real concurrency, and
+// that the claim is left FREE afterwards.
+func TestChaos72_ConcurrentDropsAreRaceFree(t *testing.T) {
+	resetSyslogHealthForTest()
+	t.Cleanup(resetSyslogHealthForTest)
+
+	sw, err := newSyslogWriter("udp", "127.0.0.1:65533", "rfc3164")
+	if err != nil {
+		t.Fatalf("writer: %v", err)
+	}
+	t.Cleanup(func() { _ = sw.Close() })
+	noteSyslogWriterInstalled(sw, "udp://127.0.0.1:65533")
+
+	fixed := time.Now()
+	setSyslogHealthNowForTest(func() time.Time { return fixed })
+
+	var wg sync.WaitGroup
+	for i := 0; i < 64; i++ {
+		wg.Add(1)
 		go func() {
-			defer lost.Done()
+			defer wg.Done()
 			noteSyslogDelivery(false)
 		}()
 	}
-	lost.Wait()
+	wg.Wait()
 
-	if got := clockCalls.Load(); got != 1 {
-		t.Fatalf("%d concurrent drops produced %d health-plane evaluations, want exactly 1: "+
-			"every extra one is a proxy request goroutine serializing on the process-wide "+
-			"health mutex during a SIEM outage", losers+1, got)
+	if syslogEvalInFlight.Load() {
+		t.Fatal("the evaluation claim is still held after every caller returned: a leaked claim " +
+			"silences the feed for the life of the process")
 	}
-
-	once.Do(func() { close(release) })
-	winner.Wait()
 }
 
 // TestChaos72_ASequentialDropStillEvaluates is the CONTROL. The cheapest way
