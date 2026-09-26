@@ -491,6 +491,16 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Added
 
+- `GET /api/policy` now reports `persisted` (whether the access-rule
+  rulebase is written to disk vs. in-memory only), and the Access Rules
+  panel shows a red banner when it is false. Every rule mutation already
+  returned 200 OK regardless of persistence — `PolicyStore.SaveErr()` is a
+  no-op when no `-policy`/`policy_file` path is configured, which is also
+  `config.example.yaml`'s shipped default — so an admin editing rules
+  through the GUI had no way to discover that a restart would silently
+  discard the entire rulebase short of it actually happening. Mirrors the
+  existing `idpRegistry.Persisted()` warning already shown for identity
+  providers. No behavior change: read-only field + banner.
 - New React/TypeScript admin frontend, Batch 2 (`CULVERT_EXPERIMENTAL_UI`,
   `/app/`): Policies (Access Rules, Authentication Rules, Policy Tester,
   Header Rewrite, Policy Learning), Objects (URL Categories, Category Groups,
