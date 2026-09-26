@@ -353,3 +353,33 @@ func TestUIContract_TopbarHeightResyncedOnSessionChange(t *testing.T) {
 		t.Error("applySession must call syncTopbarHeight() after changing topbar visibility")
 	}
 }
+
+// TestUIContract_ChangePasswordCardScrollsOnShortViewports pins that the
+// dialog card is bounded to the viewport and scrolls: the overlay is fixed and
+// vertically centred and the page hides overflow, so without this a short
+// viewport (phone in landscape) clips Save/Cancel out of reach.
+func TestUIContract_ChangePasswordCardScrollsOnShortViewports(t *testing.T) {
+	html, err := os.ReadFile(staticIndexHTMLPath())
+	if err != nil {
+		t.Fatalf("read index.html: %v", err)
+	}
+	s := string(html)
+	i := strings.Index(s, `<div id="change-password-modal"`)
+	if i < 0 {
+		t.Fatal("change-password modal not found")
+	}
+	rest := s[i:]
+	j := strings.Index(rest, `<div class="setup-card"`)
+	if j < 0 {
+		t.Fatal("change-password card not found")
+	}
+	card := rest[j:]
+	if k := strings.Index(card, ">"); k >= 0 {
+		card = card[:k]
+	}
+	for _, want := range []string{"max-height:", "overflow-y:auto"} {
+		if !strings.Contains(card, want) {
+			t.Errorf("change-password card %q lacks %q", card, want)
+		}
+	}
+}
