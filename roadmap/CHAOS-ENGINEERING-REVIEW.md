@@ -7804,3 +7804,18 @@ two minutes of narrowing, and it would have cost far more without the seed the
 workflow prints — that `grep -m1 -- "-test.shuffle "` in `pr-deep-gate.yml` is
 the whole reason this was reproducible at all, since the log artifact carrying
 the failing test name is unreachable from here. Keep it.
+
+**How far the class spreads, measured rather than assumed.** A survey of the root
+test package finds **164** test functions that mutate `policyStore` with no
+visible restore, so the leak shape is common — but leaking a rule is only
+*dangerous* when something else the rule REFERENCES is cleaned up, which is what
+turns a harmless leftover into a dangling reference. Exactly **three** tests in
+the whole package both delete a category group and mutate `policyStore`:
+`TestConfigVersion_CategoryGroups_RuleIntegrity`,
+`TestConfigVersion_URLCategories_HazardURLA` and CHAOS-69's cost gate. The first
+two already restore the store; the cost gate was the only leak, and it is fixed.
+The remaining 164 are recorded as latent rather than fixed — most leak a rule
+with no object references at all, and `setupProxyTest` clears the store for every
+test that reaches it, so a blanket sweep would be churn without a failure to
+point at. **The signal to look for is not "a test leaked a rule" but "a test
+leaked a rule and tidied up something the rule pointed at."**
