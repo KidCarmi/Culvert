@@ -7833,6 +7833,83 @@ it is trying not to disturb; the honest trade is to take the extra CI cycle
 rather than hold a durable commit for it, because the container is ephemeral
 and the run is not.
 
+### Codex review round 5 — four findings, and three of them are one rule applied to only one of two places
+
+**COMPILING IS NOT COMMITTING.** Round 4 closed the inline-transition episode
+by clearing it inside `compileIdPProfile` — which runs BEFORE the inline
+document is parsed and before the registry mutation persists. So a REJECTED
+inline edit (unparseable XML, or a failed write) erased a still-live remote
+profile's genuine outage episode and suppressed its alert, while that profile
+stayed authoritative. The clear moved to the publication sites, after `persist`
+lands, under the rule the DISABLED case already used one line away: *a profile
+with no remote source left can never have its episode cleared by evidence
+again.* One condition now covers disabled and inline in both `Upsert` and
+`ReplaceAll`, and the `idpMetaInline` outcome plumbing is deleted rather than
+relocated — the fix removes a special case instead of adding one.
+
+**The gate found a different defect from the one it was written for, and that
+is the entry worth keeping.** Written to prove that a refused inline edit
+preserves the episode, it failed on the REFUSAL path rather than the clear
+path: round 3's `idpEpisodeBelongsToLive` compares the two profiles' remote
+sources for EQUALITY, and an inline candidate has NO source — so it answered
+*"the episode belongs to the candidate"* for a candidate that performs no fetch
+and therefore cannot have opened one. **Episode ownership is about which
+profile performed the FETCH, not about the two sources matching**; a
+source-free candidate leaves the episode with the live profile. Round 3's rule
+was right about the case it was written for (an id reused against a DIFFERENT
+unreachable source) and silently wrong about the case where the candidate
+fetches nothing at all.
+
+**A BOUNDED OPERATION IS ONLY AS BOUNDED AS ITS FIRST STEP — on the OIDC half,
+after round 2 fixed it on the SAML half.** `fetchOIDCDiscoveryOverNetwork`
+still gated on `validateExternalURL`, which resolves under
+`context.Background()`, so the guard ran to the OS resolver's full budget
+before the request context existed, on boot and on every CP→DP snapshot apply,
+and delayed reaching the cached document this sweep exists to serve. The fix is
+mechanical; the finding is not. **This is the THIRD finding this sweep produced
+from the same SAML/OIDC asymmetry** — the admission gates (round 2) and the
+endpoint validator (round 3) were the other two — and in each case one half was
+fixed and its twin was left. The wall that should have caught this one was
+scoped to `fetchSAMLMetadataOverNetwork` alone. It is now a TABLE over the
+pair, which also refuses `validateExternalURL` in either fetcher; the mutation
+proof is that reintroducing the old call fails the OIDC arm while the SAML arm
+still passes, which is precisely the shape that kept slipping through.
+
+> **A wall scoped to one of two symmetric paths is how an asymmetry survives.
+> Wall the PAIR, not the instance.**
+
+**A START THAT NEVER HAPPENS CANNOT BE OBSERVED BEHAVIOURALLY.** Round 4's
+degradation watchdog was gated on `hasEnabledRemoteMetadataProfile()` evaluated
+ONCE at boot, and additionally sat inside the `-idp-profiles-file` block — so an
+appliance that later gained a remote profile had no goroutine left to notice
+its outage, and a DP that receives its profiles ONLY through the CP→DP snapshot
+never had one at all. The documented alert could therefore never fire for
+exactly the profile an operator had just added, on exactly the fleet nodes
+whose configuration is pushed to them. The gate's own justification was that it
+saves one sleeping goroutine, which is not a correctness gap's price, so the
+start is unconditional and at function-body depth. **Its gate keys on
+INDENTATION rather than on the condition's spelling**: the first wall looked for
+a condition mentioning "Profile" and would have sailed past the enclosing
+`IdPProfilesFile` block the start also had to escape — a wall that pins one
+spelling of one gate pins nothing.
+
+**The fourth finding is REPORTED, NOT FIXED, and the reason is that every
+available fix trades something this sweep exists to protect (register row
+IDP-9).** An OIDC `authorization_endpoint` whose address cannot be DETERMINED —
+resolver outage, or the check's own budget spent — is admitted unverified, and
+it is the one discovered endpoint this appliance never dials, so the
+SSRF-guarded dialer does not cover it and `isSafeCaptiveRedirect` checks only
+shape. Refusing on an unknown verdict takes SSO down whenever THIS node's
+resolver cannot resolve the authorization host, even though the user's browser
+can, and hands a resolver outage the power to reject a cached document — this
+sweep's headline defect. Re-checking at redirect issuance puts a synchronous
+resolve on the PROXY REQUEST PATH (`CaptiveLoginURL` is reached from
+`proxy_portal.go`), which is the CHAOS-60/64 defect this file documents at
+length. Both closing designs are recorded with the row rather than half-built.
+What changed is that it is no longer SILENT:
+`culvert_idp_authz_endpoint_unverified_total` plus a rate-limited line naming
+the profile, and a runbook entry pointing at the actual cause.
+
 **Two SUITE-LEVEL findings fell out of driving this PR, and both are the
 sweep's own subject matter applied to the tests rather than to the appliance:
 a gate that depends on state it does not establish, and a gate that asserts a
