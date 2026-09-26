@@ -545,7 +545,7 @@ func TestNoteDelivered_ADropDuringASuccessfulWriteIsResolvedByIt(t *testing.T) {
 // That places the loss after entry and before completion: the window an entry
 // capture excludes and a completion capture includes.
 func TestDeliverLine_ResolvesADropRecordedBeforeTheWriteCompleted(t *testing.T) {
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	ln, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
