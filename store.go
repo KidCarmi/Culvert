@@ -24,6 +24,7 @@ import (
 	"github.com/KidCarmi/Culvert/internal/audit"
 	"github.com/KidCarmi/Culvert/internal/fileutil"
 	"github.com/KidCarmi/Culvert/internal/reqlog"
+	"github.com/KidCarmi/Culvert/internal/totp"
 )
 
 // ─── Uptime ───────────────────────────────────────────────────────────────────
@@ -888,15 +889,23 @@ func (c *Config) SetAuth(user, pass string) error {
 	c.passHash = hash
 	c.authRevision++
 	// Mirror into the RBAC user roster so the RBAC path works immediately.
+	// SEC-TOTP-1: preserve an existing TOTP enrolment for this username, for
+	// the same reason SetUIUser does. This path is not boot-only — POST
+	// /api/settings/auth (ui_config.go) reaches it at runtime, and the wipe it
+	// used to perform was persisted by the next SaveUIUsersFile any other
+	// roster mutation triggered.
 	if c.uiUsers == nil {
 		c.uiUsers = map[string]*uiAdminUser{}
 	}
-	if existing := c.uiUsers[user]; existing != nil {
-		existing.passHash, existing.role = hash, RoleAdmin // TOTP enrollment preserved
-		existing.securityGen = c.nextSecurityGenLocked()   // credential change ⇒ new generation
-	} else {
-		c.uiUsers[user] = &uiAdminUser{passHash: hash, role: RoleAdmin, securityGen: c.nextSecurityGenLocked()}
-	}
+	// SEC-TOTP-1 (main #1429) meets the FE-6A.0 Blocker 2 generation here:
+	// the replacement record is built by newUIAdminUserPreservingTOTP — the
+	// TOTP secret, backup codes and replay counter carried over, and a NEW
+	// record rather than an in-place write, because VerifyUIUser reads the
+	// entry's passHash after releasing c.mu — and a credential write mints a
+	// fresh per-user security generation, exactly as applyRosterSet does.
+	u := newUIAdminUserPreservingTOTP(c.uiUsers[user], hash, RoleAdmin)
+	u.securityGen = c.nextSecurityGenLocked()
+	c.uiUsers[user] = u
 	c.cache.clear()
 	c.mu.Unlock()
 	return nil
@@ -1308,20 +1317,31 @@ func applyRosterSet(users map[string]*uiAdminUser, username string, hash []byte,
 	case existing == nil && hash == nil:
 		return fmt.Errorf("password is required to create a new user")
 	case existing == nil:
-		users[username] = &uiAdminUser{passHash: hash, role: role, securityGen: nextGen()}
+		u := newUIAdminUserPreservingTOTP(nil, hash, role)
+		u.securityGen = nextGen()
+		users[username] = u
 		return nil
 	}
 	if existing.role == RoleAdmin && role != RoleAdmin && rosterAdminCount(users) <= 1 {
 		return errRosterLastAdmin
 	}
 	changed := hash != nil || existing.role != role
-	if hash != nil {
-		existing.passHash = hash // TOTP enrollment untouched (R9)
+	if hash == nil {
+		hash = existing.passHash // role-only update keeps the password
 	}
-	existing.role = role
+	// SEC-TOTP-1 (main #1429) + FE-6A.0 Blocker 2: the replacement is a NEW
+	// record built by newUIAdminUserPreservingTOTP — second factor carried
+	// over verbatim (R9), never an in-place write: when called from SetUIUser
+	// `users` is the LIVE map, and VerifyUIUser reads an entry's passHash after
+	// releasing c.mu, so mutating the stored record raced the authentication
+	// hot path (commitRoster hands this function its private candidate copy,
+	// where the same construction is simply the uniform shape). The security
+	// generation is carried when nothing changed and advanced otherwise.
+	u := newUIAdminUserPreservingTOTP(existing, hash, role)
 	if changed {
-		existing.securityGen = nextGen()
+		u.securityGen = nextGen()
 	}
+	users[username] = u
 	return nil
 }
 
@@ -1334,6 +1354,29 @@ func rosterAdminCount(users map[string]*uiAdminUser) int {
 		}
 	}
 	return n
+}
+
+// newUIAdminUserPreservingTOTP builds the replacement roster record for a
+// credential write: the new password hash and role, plus every TOTP enrolment
+// field — and the FE-6A.0 security generation — carried over verbatim from
+// prior (nil for a brand-new account, which therefore starts un-enrolled). Callers must hold c.mu for writing.
+//
+// Keep this the ONLY way a credential write reaches the roster. Adding a field
+// to uiAdminUser and forgetting it here silently drops that field on every
+// password change — which is exactly how the second factor was being lost.
+func newUIAdminUserPreservingTOTP(prior *uiAdminUser, hash []byte, role UIRole) *uiAdminUser {
+	u := &uiAdminUser{passHash: hash, role: role}
+	if prior != nil {
+		u.totpSecret = prior.totpSecret
+		u.backupCodes = append([]string(nil), prior.backupCodes...)
+		u.totpLastCounter = prior.totpLastCounter
+		// FE-6A.0 Blocker 2: the per-user security generation is carried too,
+		// so a write that changes nothing security-relevant keeps every live
+		// session valid; the caller advances it when the credential or role
+		// changed (applyRosterSet / SetAuth mint the next generation).
+		u.securityGen = prior.securityGen
+	}
+	return u
 }
 
 // DeleteUIUser removes a UI admin user.
@@ -1669,6 +1712,37 @@ func (c *Config) GetTOTPSecret(username string) string {
 }
 
 // SetTOTPSecret stores a TOTP secret and backup codes for a user.
+//
+// SEC-TOTP-1: the replay counter belongs to the SECRET, so installing a
+// DIFFERENT secret resets it. Codes for a new secret start at the current time
+// step, and a counter left over from the previous authenticator sits at or
+// above it — VerifyTOTPReturnCounter skips every candidate with
+// `candidate <= lastCounter`, so the freshly-enrolled device would be refused
+// until wall-clock time passed the stale value, and indefinitely after a clock
+// rollback.
+//
+// The reset is deliberately conditional on the KEY actually changing. A caller
+// that re-issues BACKUP CODES for the same secret must keep the counter:
+// zeroing it there would reopen the replay window for the live secret, which is
+// the opposite of what this field is for.
+//
+// "The same key" is NOT "the same string" (Codex review round 2, PR #1429).
+// The verifier canonicalises case and surrounding whitespace before decoding,
+// so "jbswy3dpehpk3pxp" and "JBSWY3DPEHPK3PXP" are ONE authenticator producing
+// identical codes. The first version of this guard compared the stored strings
+// raw, so re-issuing backup codes with a differently-spelled identical secret
+// zeroed the counter for a LIVE key — the replay window reopened by the change
+// that closed it, reached through spelling instead of an identical string, and
+// invisible to the control test because that test re-passes the same literal.
+// totp.SameKey compares the DECODED keys through the verifier's own
+// canonicalisation, so the two cannot disagree.
+//
+// The three-way decision is ordered by which way each case must FAIL. Keeping a
+// counter that should have been reset costs at most a step or two of delay on a
+// genuine re-enrolment (counters are time-derived, so a counter from a past
+// enrolment is already in the past); zeroing one that should have been kept
+// reopens a replay window on a live key. So the counter is reset ONLY on
+// positive evidence that the key changed.
 func (c *Config) SetTOTPSecret(username, secret string, backupCodes []string) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -1676,12 +1750,38 @@ func (c *Config) SetTOTPSecret(username, secret string, backupCodes []string) bo
 	if !ok {
 		return false
 	}
+	switch {
+	case !totp.Usable(secret):
+		// The incoming secret cannot validate any code, so there is no new key
+		// to protect and nothing the counter could wrongly refuse. Keep it:
+		// resetting here would zero the counter guarding the key a caller may
+		// restore next, on evidence that proves nothing.
+	case totp.SameKey(u.totpSecret, secret):
+		// Same authenticator, however it is spelled — a backup-code re-issue.
+		// Keeping the counter is the whole point of the guard.
+	default:
+		// Either a different usable key, or the account had no usable key at
+		// all. Both are a genuinely new binding, and a counter carried into one
+		// refuses the new device until wall-clock time passes it — indefinitely
+		// after a clock rollback.
+		u.totpLastCounter = 0
+	}
 	u.totpSecret = secret
 	u.backupCodes = backupCodes
 	return true
 }
 
-// ClearTOTP removes TOTP enrollment for a user.
+// ClearTOTP removes TOTP enrollment for a user — secret, backup codes AND the
+// replay counter.
+//
+// SEC-TOTP-1: the counter is part of the enrolment, not a separate durable
+// fact. It used to be left behind, which was harmless only because SetUIUser
+// replaced the whole record on the very next credential write and zeroed it as
+// a side effect. Now that a credential write PRESERVES the enrolment, a
+// counter left here survives de-enrolment and locks out the re-enrolment the
+// `--reset-password` break-glass explicitly tells the operator to perform
+// (Codex review, PR #1429). With no secret installed the value protects
+// nothing, so keeping it can only cost availability.
 func (c *Config) ClearTOTP(username string) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -1691,6 +1791,7 @@ func (c *Config) ClearTOTP(username string) bool {
 	}
 	u.totpSecret = ""
 	u.backupCodes = nil
+	u.totpLastCounter = 0
 	return true
 }
 

@@ -843,6 +843,20 @@ jobs:
     # dispatch); on an audit, skipped-as-pass would let an audit that never
     # ran approve, so require-success names them — and the jobs they consume
     # — as exactly `success`.
+    #
+    # A MAIN PUSH IS RELEASE EVIDENCE, so it carries its own require-success
+    # naming all nine substantive jobs. Without it the skipped-as-pass rule
+    # applied here too: every job skipping on a main push (a path filter, a
+    # mistyped `if:`, a cancellation before any job started) left THIS job —
+    # `if: always()` — the only one that ran, so it reported APPROVED and the
+    # workflow concluded `success`. require-gate.sh refuses a workflow-level
+    # `skipped`, but this shape never produces one, so `qa-gate.yml mandatory`
+    # in .github/release-evidence.txt was satisfiable with no test having run.
+    # The arms are disjoint: `push` is never an audit event, and the workflow's
+    # push trigger is `branches: [main]`, which is exactly the run release
+    # gating reads. Pull requests and ordinary dispatches still require
+    # nothing — a PR must keep reporting success (pass-through) and a dispatch
+    # is never release evidence.
     if: always()
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -850,7 +864,7 @@ jobs:
         with:
           needs-json: ${{ toJSON(needs) }}
           title: "✅ QA Gate — APPROVED"
-          require-success: ${{ (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.unsharded_audit)) && 'qa-race,qa-coverage,qa-unsharded-audit,qa-unsharded-audit-compare' || '' }}
+          require-success: ${{ (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.unsharded_audit)) && 'qa-race,qa-coverage,qa-unsharded-audit,qa-unsharded-audit-compare' || github.event_name == 'push' && 'qa-logic,qa-race,qa-determinism,qa-coverage,qa-infra-compose,qa-os,qa-contract,qa-agent,qa-bench' || '' }}
           extra-summary: ${{ github.event_name == 'pull_request' && 'PASS-THROUGH on PRs — QA is enforced by the Fast/Deep PR Gates (roadmap/CI-REDESIGN.md, step 5); this gate runs fully on main pushes.' || '' }}
 
       - name: Summarise
