@@ -19,6 +19,11 @@ import (
 // constructor) stay unchanged.
 type syslogWriter = syslog.Writer
 
+// syslogStats is the package-main alias for the engine's delivery snapshot,
+// so the health record can hold one without importing the package by name at
+// every use site.
+type syslogStats = syslog.Stats
+
 // newSyslogWriter constructs a syslog Writer. Thin wrapper over syslog.NewWriter
 // kept for InitSyslog and the integration test that builds a writer directly.
 // Wires the panic observer here (the internal/syslog package is a stdlib-only
@@ -82,7 +87,7 @@ var syslogPublishMu sync.Mutex
 // three terms of its drop total.
 func syslogLateDrops() uint64 { return syslog.LateDrops() }
 
-// syslogConfiguredTargets reads the config metadata under the same lock that
+// syslogConfiguredSnapshot reads the config metadata under the same lock that
 // publishes it. Read through this, never off the variables directly.
 //
 // The pair was a plain read/write pair on package variables, written by the
@@ -95,11 +100,23 @@ func syslogLateDrops() uint64 { return syslog.LateDrops() }
 // sweep recorded when its own observer joined the drain goroutine.
 //
 // connected is the target a Writer was actually installed for; intended is
-// what an operator asked for, which is recorded even when the dial fails.
-func syslogConfiguredTargets() (connected, intended string) {
+// what an operator asked for, which is recorded even when the dial fails; sw
+// is the Writer serving them. All three are read in ONE critical section.
+//
+// A caller that needs more than one of these must take them from here. Pairing
+// a target from a config-metadata read with a separately-loaded
+// activeSyslog() is a read that does not participate in the publication
+// transition: a disable landing between the two yields the old address beside
+// no writer (so an omnibus settings save persists a target the operator has
+// just switched off, and the next restart re-enables it), and a re-point
+// yields target A beside writer B (so the same save persists A with B's wire
+// format, and the restart then restarts A speaking the wrong one) — Codex P2,
+// PR #1494. This is the SAME defect the health snapshot closed one reader
+// earlier: a snapshot must read the generation it describes.
+func syslogConfiguredSnapshot() (connected, intended string, sw *syslogWriter) {
 	syslogPublishMu.Lock()
 	defer syslogPublishMu.Unlock()
-	return syslogConfigured, syslogConfiguredAddr
+	return syslogConfigured, syslogConfiguredAddr, globalSyslog.Load()
 }
 
 // noteSyslogConfiguredIntent records the target an operator asked for, before
@@ -212,6 +229,10 @@ func releaseReplacedSyslogWriter(old, successor *syslogWriter) {
 	if old == nil {
 		return
 	}
+	// Retired before anything can close it: the health plane folds this
+	// Writer's totals moments from now, and a loss landing after its drain
+	// seals but before it is marked would be counted in neither place.
+	old.MarkRetired()
 	old.HandOffTo(successor)
 	// Detach the delivery observer FIRST. This is HYGIENE, not a fix for an
 	// observed defect: the plane reads its counters from whichever writer is

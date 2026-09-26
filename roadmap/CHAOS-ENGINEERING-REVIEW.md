@@ -9442,3 +9442,117 @@ help since the guard reads the tool's module language version, and forcing
 past it crashes its go1.24-built analyzer on go1.26 source). Standalone
 `staticcheck` does not carry the same check set. Anyone extending this file
 should expect the length bound to be enforced only by CI.
+
+### Round 12 — the fold was taken before the writer was final, and two readers still spanned a transition
+
+Three findings. The first was found by MEASURING a residual this note had
+already written down and dismissed; the other two are Codex P2s, and both are
+earlier rules in this sweep arriving at a reader that had not been updated.
+
+**(a) The fold must be taken when the writer is FINAL, not when it is
+displaced.** P2-4 made the exported counters process-lifetime by folding each
+displaced Writer's totals into `retired*` — and took that fold at the moment
+of displacement, while the Writer's drain was still flushing. Every loss the
+final flush recorded after that landed on counters nothing reads. The note
+recorded the gap honestly but estimated it wrongly:
+
+> Residual, documented rather than hidden: a displaced Writer is closed
+> ASYNCHRONOUSLY, so anything it records after this snapshot (its final flush)
+> is not carried. That can only UNDER-count at a generation boundary; it can
+> never make a counter decrease, which is the property that matters.
+
+Measured against the real `disableActiveSyslog` path with a collector that
+dies mid-flight, 2000 events at a time:
+
+```
+trial 0: writer own drops=1999 delivered=1 (2000) | EXPORTED 1949 + 1  -> 50 lost
+trial 1: writer own drops=1999 delivered=1 (2000) | EXPORTED 1967 + 1  -> 32 lost
+trial 2: writer own drops=1999 delivered=1 (2000) | EXPORTED    0 + 0  -> 2000 lost
+trial 3: writer own drops=1999 delivered=1 (2000) | EXPORTED 1837 + 1  -> 162 lost
+trial 4: writer own drops=1999 delivered=1 (2000) | EXPORTED 1946 + 1  -> 53 lost
+```
+
+Every unaccounted event was attributable to the fold ordering — the Writer
+itself counted all 2000 in every trial, and none were lost to the
+documented "abrupt death loses the in-flight batch" class. Trial 2 is the one
+that matters: `culvert_syslog_drops_total` read **zero** for a feed that had
+just destroyed everything, because the drain had barely started when the fold
+ran. That is the loss-history erasure P2-4 exists to prevent, arriving from
+the WRITE side after P2-4 closed the READ side.
+
+The boundary is now SEALING. The drain publishes its cumulative finals
+(`finalStats`) under `sendMu` held exclusively, as the last thing it does
+before closing `done`. A displaced-but-unsealed Writer is TRACKED
+(`syslogHealth.retiring`) and its delta folded on every read of the retired
+totals — there is exactly one such read, `syslogFeedState`, and it settles
+first. The settle that observes the seal takes a genuinely final value and
+untracks the Writer.
+
+**A loss is charged to `lateDrops` only when the Writer is RETIRED *and*
+SEALED, and needing both is the whole of the correctness argument.** Keyed on
+the seal alone it double-counts every loss recorded against a Writer that is
+still installed — those counters are read live and folded nowhere else — and
+moves the loss into the "lost to an earlier target" bucket while that target
+is still the current one. Keyed on retirement alone it double-counts
+everything still inside the fold to come. `MarkRetired` therefore has to run
+BEFORE anything closes the Writer, since a loss landing after the seal but
+before the mark is in neither accounting; both owners mark first and release
+second.
+
+**The Writer's own counters deliberately keep moving after sealing.**
+Freezing them was the first shape, and it was wrong in a way worth recording:
+a Writer that is sealed but still INSTALLED stops reporting that it is failing
+at all, so the degradation predicate — which reads `ConsecutiveFailures` and
+`FailingSince` off the live Writer — goes blind on exactly the feed that has
+just lost its drain. Two existing gates caught this immediately, which is the
+argument for keeping fixtures that reach a state production is not supposed to
+reach. Cumulative totals need one home because they are folded elsewhere;
+episode state has one reader and must stay live.
+
+**(b) A superseded writer's delivery is not evidence the intended collector is
+back** (Codex P2). Round 9b fixed the alert WORDING for the shape where target
+A is serving while a persisted target B never connected, and left the RECOVERY
+side of the same shape untouched. A keeps its delivery observer, so one of A's
+own transient episodes ending reached `noteSyslogDeliveryRecovered`, cleared
+B's fire-once latch and logged "SIEM feed delivering again" — both false for B
+— after which the 30 s watchdog re-fired the DOWN page, and again, for as long
+as the mixed state lasted. Recovery now refuses to clear while the intent is
+unmet, through `syslogIntentUnmet`: ONE predicate, shared with the snapshot,
+because writing it twice is how the two came to disagree. The latch is not
+stranded — every transition that RESOLVES the intent already clears it.
+
+**(c) A reader that pairs a target with a separately-loaded writer is reading
+two generations** (Codex P2). Round 11c published the config metadata inside
+the publication transaction; `syslogConfiguredTargets()` then released
+`syslogPublishMu` before its callers loaded `activeSyslog()`. A disable landing
+in between yields the old address beside no writer; a re-point yields target A
+beside writer B. `snapshotAdminEndpoints` PERSISTS that pair, so the mismatch
+outlives the process: a restart can re-enable a target the operator has just
+switched off, or restart one speaking the previous collector's wire format.
+This is round 9a's rule — *a snapshot must read the generation it describes* —
+arriving at a third reader, so the two-value accessor was REPLACED rather than
+supplemented. `syslogConfiguredSnapshot()` returns target, intent and writer
+in one critical section and is the only way to obtain any pair of them; a
+structural wall pins the three readers against a second load.
+
+**Two residuals, recorded rather than hidden.** The tracking list is capped
+at 64; every retire settles the list first, so an evicted entry has already
+had its delta folded and loses only what it records afterwards — i.e. overflow
+degrades to exactly the pre-fix behaviour for that one Writer, and only under
+a burst of re-points faster than any read. And the mark-before-close ordering
+is a CONTRACT, not an enforced invariant: an owner that closed a Writer before
+marking it retired would lose whatever the drain recorded between the seal and
+the mark, because the fold then reads the sealed snapshot. Both owners mark
+first, and it is stated on `MarkRetired`, but it cannot be made exact by
+locking — the retire runs under `syslogHealth.mu` and `chargeTerminalDrop`
+holds `sendMu` while its `noteDrop` reaches the observer, so taking `sendMu`
+under the health mutex would invert the lock order and deadlock.
+
+**A note on the control that nearly proved nothing.** The exactly-once control
+for (a) has to observe a Writer that is sealed AND still tracked for folding.
+Its first version sealed the writer and then read the baseline — but the read
+is what settles, and settling a sealed writer untracks it, so the control
+closed the very window it existed for and passed against the double-counting
+shape it was written to reject. It now reads the baseline while the writer is
+still unsealed. *A control that reads the state it is about to test can close
+the window it exists for.*

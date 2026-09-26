@@ -204,14 +204,32 @@ type syslogHealthRecord struct {
 	// label value would be an operator-supplied address, which is the
 	// unbounded-label-set defect this sweep records elsewhere (WK-12/RS-5).
 	//
-	// Residual, documented rather than hidden: a displaced Writer is closed
-	// ASYNCHRONOUSLY, so anything it records after this snapshot (its final
-	// flush) is not carried. That can only UNDER-count at a generation
-	// boundary; it can never make a counter decrease, which is the property
-	// that matters.
+	// The fold is taken in TWO parts, and the second part is not optional.
+	// This note used to record the gap as a bounded residual — "a displaced
+	// Writer is closed ASYNCHRONOUSLY, so anything it records after this
+	// snapshot is not carried … it can only UNDER-count at a generation
+	// boundary". Measuring it instead of reasoning about it showed the
+	// estimate was wrong by up to the whole history: against the real disable
+	// path with a dead collector, of 2000 events the Writer counted all 2000
+	// and the exported total was short by between 32 and 1999 — one trial
+	// reported ZERO drops for a feed that had just lost everything, because
+	// the drain had barely started flushing when the fold ran. That is the
+	// loss-history erasure this very field was added to prevent, re-entering
+	// from the WRITE side.
+	//
+	// So a Writer that is not yet SEALED when it is displaced is tracked in
+	// `retiring`, and its delta is folded on every read until its drain has
+	// exited. Sealing publishes the Writer's cumulative snapshot, and the
+	// settle that observes it folds THAT and untracks the Writer; anything
+	// the Writer records afterwards is charged to LateDrops by the engine
+	// instead, so each loss lands in exactly one of the two.
 	retiredDelivered uint64
 	retiredDrops     uint64
 	retiredPanics    uint64
+	// retiring holds displaced Writers whose drains had not finished when
+	// their totals were first folded. See retiredDrops and
+	// settleRetiredSyslogWritersLocked.
+	retiring []retiringSyslogWriter
 	// writer is the Writer this record describes. Publication of the active
 	// writer and installation of this record are one serialized transition
 	// (syslogPublishMu), so writer == activeSyslog() whenever neither is
@@ -341,19 +359,89 @@ func noteSyslogWriterInstalled(sw *syslogWriter, target string) {
 	sw.SetDeliveryObserver(noteSyslogDelivery)
 }
 
-// retireSyslogWriterLocked folds a Writer's final counters into the
-// process-lifetime totals. Caller holds syslogHealth.mu.
+// retiringSyslogWriter is a displaced Writer whose totals have been folded
+// into the process-lifetime accumulators but whose drain had not finished, so
+// its counters can still move. `folded` is how much of it has been taken.
+type retiringSyslogWriter struct {
+	w      *syslogWriter
+	folded syslogStats
+}
+
+// maxRetiringSyslogWriters bounds the tracking list. Retires are admin-rate
+// and every read settles the list, so in practice it holds at most one entry;
+// the cap exists so a pathological burst of re-points against a wedged
+// collector cannot grow it without limit. Every retire settles the list
+// first, so an evicted entry has just had its delta folded and loses only
+// what it records after that — i.e. overflow degrades to exactly the pre-fix
+// behaviour for that one Writer, never to a wrong number.
+const maxRetiringSyslogWriters = 64
+
+// retireSyslogWriterLocked folds a Writer's counters into the process-lifetime
+// totals, and keeps tracking it until its drain has exited. Caller holds
+// syslogHealth.mu.
 //
-// Stats() is a lock-free read of atomics, so calling it under this mutex adds
-// no lock-order hazard: it never touches the Writer's own locks.
+// Stats() and Sealed() are lock-free reads of atomics, so calling them under
+// this mutex adds no lock-order hazard: neither touches the Writer's own
+// locks, and nothing reachable from here takes sendMu.
 func retireSyslogWriterLocked(old *syslogWriter) {
 	if old == nil {
 		return
 	}
-	st := old.Stats()
+	settleRetiredSyslogWritersLocked()
+	// Mark BEFORE anything closes it: a loss landing after the seal but
+	// before the mark is in neither the fold nor the late counter.
+	old.MarkRetired()
+	st, sealed := old.FinalStats()
+	if !sealed {
+		st = old.Stats()
+	}
 	syslogHealth.retiredDelivered += st.Delivered
 	syslogHealth.retiredDrops += st.Drops
 	syslogHealth.retiredPanics += st.Panics
+	if sealed {
+		return
+	}
+	if len(syslogHealth.retiring) >= maxRetiringSyslogWriters {
+		syslogHealth.retiring = syslogHealth.retiring[1:]
+	}
+	syslogHealth.retiring = append(syslogHealth.retiring, retiringSyslogWriter{w: old, folded: st})
+}
+
+// settleRetiredSyslogWritersLocked folds what each tracked Writer has recorded
+// since its last fold, and stops tracking the ones whose drains have exited.
+// Caller holds syslogHealth.mu.
+//
+// It must run before any read of the retired totals, which is why there is
+// exactly one such read (syslogFeedState) and it calls this first. The deltas
+// are non-negative because a Writer's counters are monotonic, so this can only
+// ever move the exported totals UP — a settle can never make
+// `culvert_syslog_drops_total` decrease.
+func settleRetiredSyslogWritersLocked() {
+	if len(syslogHealth.retiring) == 0 {
+		return
+	}
+	kept := syslogHealth.retiring[:0]
+	for _, r := range syslogHealth.retiring {
+		// The sealed snapshot, not the live counters: a stale handle can keep
+		// recording losses on a sealed Writer, and every one of those is
+		// already charged to LateDrops. Folding the live value here would
+		// take them a second time and make the compliance-loss series
+		// OVERSTATE, which is a false alarm on the one number an operator
+		// pages from.
+		cur, sealed := r.w.FinalStats()
+		if !sealed {
+			cur = r.w.Stats()
+		}
+		syslogHealth.retiredDelivered += cur.Delivered - r.folded.Delivered
+		syslogHealth.retiredDrops += cur.Drops - r.folded.Drops
+		syslogHealth.retiredPanics += cur.Panics - r.folded.Panics
+		if sealed {
+			continue
+		}
+		r.folded = cur
+		kept = append(kept, r)
+	}
+	syslogHealth.retiring = kept
 }
 
 // syslogSkippedNoWriter counts events that reached the audit/request fan-out
@@ -582,6 +670,24 @@ func commitSyslogDegradation(snap syslogFeedSnapshot) {
 	}
 }
 
+// syslogIntentUnmet reports whether an operator-configured collector is not
+// the one being served: either nothing is serving at all, or what is serving
+// is a target the operator has since moved on from.
+//
+// It is the ONE definition, shared by the snapshot and by the recovery path.
+// Writing it twice is how the two came to disagree about whether a superseded
+// writer's delivery ends an unmet intent's outage — two answers to one
+// question, which this sweep records as the defect elsewhere.
+func syslogIntentUnmet(described *syslogWriter, target, intended string) bool {
+	return intended != "" && (described == nil || target != intended)
+}
+
+// syslogIntentUnmetLocked is syslogIntentUnmet over the live record. Caller
+// holds syslogHealth.mu.
+func syslogIntentUnmetLocked() bool {
+	return syslogIntentUnmet(syslogHealth.writer, syslogHealth.target, syslogHealth.intendedTarget)
+}
+
 // noteSyslogDeliveryRecovered clears the episode on OBSERVED evidence — one
 // line that actually reached the collector.
 //
@@ -589,6 +695,22 @@ func commitSyslogDegradation(snap syslogFeedSnapshot) {
 // and by ca_health.go before it.
 func noteSyslogDeliveryRecovered() {
 	syslogHealth.mu.Lock()
+	// A delivery by the writer we are SERVING is not evidence that the
+	// collector the operator ASKED for is reachable. When a boot connects
+	// target A and then fails to connect the persisted target B, A keeps its
+	// delivery observer, so one of A's own transient episodes ending reached
+	// here and cleared B's fire-once latch and logged that the feed was
+	// delivering again — both false for B, and the watchdog then re-fired the
+	// DOWN alert on its next tick, so the operator got a page every half
+	// minute for as long as the mixed state lasted (Codex P2, PR #1494).
+	//
+	// The latch is not stranded by this: every transition that RESOLVES the
+	// intent — an install that meets it, or a disable that withdraws it —
+	// clears `alerted` itself.
+	if syslogIntentUnmetLocked() {
+		syslogHealth.mu.Unlock()
+		return
+	}
 	wasAlerted := syslogHealth.alerted
 	suppressed := syslogHealth.suppressed
 	syslogHealth.alerted = false
@@ -746,6 +868,10 @@ func syslogFeedIsUDP(described *syslogWriter, caveatTarget string) bool {
 // truth without anything having to run.
 func syslogFeedState() syslogFeedSnapshot {
 	syslogHealth.mu.Lock()
+	// The ONLY read of the retired totals, so the ONLY settle point: a
+	// displaced Writer's final flush lands after its first fold, and without
+	// this the exported drop total silently loses it (see retiredDrops).
+	settleRetiredSyslogWritersLocked()
 	configured := syslogHealth.configured
 	installedAt := syslogHealth.installedAt
 	target := syslogHealth.target
@@ -773,7 +899,7 @@ func syslogFeedState() syslogFeedSnapshot {
 		Intended:   intendedTarget != "",
 		UDP:        udp,
 	}
-	snap.IntentUnmet = snap.Intended && (described == nil || target != intendedTarget)
+	snap.IntentUnmet = syslogIntentUnmet(described, target, intendedTarget)
 	// Retired totals are carried even when no Writer is live, so a disabled or
 	// failed-to-reconnect feed still reports the events it has already lost.
 	snap.Delivered = retiredDelivered
@@ -824,6 +950,12 @@ func syslogFeedState() syslogFeedSnapshot {
 // predecessor's episode state forward would report a healthy replacement as
 // broken from its first byte.
 func applyLiveWriterStats(snap syslogFeedSnapshot, sw *syslogWriter, now, installedAt time.Time) syslogFeedSnapshot {
+	// The INSTALLED Writer's cumulative counters are read live and are not
+	// folded anywhere else, so nothing here may switch to its sealed
+	// snapshot: that would move its losses into the "lost to an earlier
+	// target" bucket while it is still the current one. The engine only
+	// charges a loss to LateDrops once the owner has RETIRED the Writer, so
+	// the two can never overlap.
 	st := sw.Stats()
 	snap.Delivered += st.Delivered
 	snap.Drops += st.Drops
@@ -1178,6 +1310,7 @@ func resetSyslogHealthForTest() {
 	syslogHealth.retiredDelivered = 0
 	syslogHealth.retiredDrops = 0
 	syslogHealth.retiredPanics = 0
+	syslogHealth.retiring = nil
 	syslogHealth.configured = false
 	syslogHealth.installedAt = time.Time{}
 	syslogHealth.target = ""

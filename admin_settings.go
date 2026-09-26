@@ -786,9 +786,13 @@ func snapshotAdminEndpoints(s *AdminSettings) {
 	if len(uiExtraSANs) > 0 {
 		s.UISANs = uiExtraSANs
 	}
-	if connected, _ := syslogConfiguredTargets(); connected != "" {
+	// Target, intent and writer in ONE read: this snapshot is PERSISTED, so a
+	// mixed pair is durable — an address the operator just disabled, or a
+	// target paired with the previous collector's wire format (Codex P2,
+	// PR #1494).
+	if connected, _, sw := syslogConfiguredSnapshot(); connected != "" {
 		s.SyslogAddr = connected
-		if sw := activeSyslog(); sw != nil {
+		if sw != nil {
 			s.SyslogFormat = sw.Format()
 		}
 	}

@@ -1000,6 +1000,33 @@ endpoints for credentialed parents.
   now folded into the process-lifetime total and named on the contract row.
   Counting is armed only while an operator has asked for a collector and none
   is installed, so a node that forwards nowhere still reports nothing.
+- **Re-pointing or disabling a SIEM collector discarded most of the loss
+  history it had just recorded (CHAOS-72).** A displaced collector's totals
+  were folded into the exported counters at the moment it was displaced,
+  while its queue was still being flushed, so every loss recorded during that
+  final flush was held by nothing. Measured against the real disable path with
+  a dead collector, of 2000 lost events between 32 and 1999 were missing from
+  `culvert_syslog_drops_total` and `/healthz` — in one run the exported total
+  read **zero** for a feed that had just lost everything. A displaced
+  collector is now tracked until its queue has drained and its final totals
+  are published, and only then folded; losses recorded after that point are
+  counted for the process instead, so each one is counted exactly once.
+- **A SIEM feed serving a superseded collector paged repeatedly (CHAOS-72).**
+  When a node connects one collector and then fails to connect a newly
+  configured one, it keeps delivering to the first and is correctly reported
+  down. But a successful delivery to that first collector cleared the
+  fire-once latch for the configured one and logged "SIEM feed delivering
+  again", so the watchdog re-fired the DOWN alert on its next tick — a page
+  every half minute, and a log line asserting a recovery that had not
+  happened. A delivery no longer resolves an episode while the configured
+  collector is still unreachable.
+- **An omnibus settings save could persist a SIEM address paired with the
+  wrong collector (CHAOS-72).** The configured address and the collector
+  serving it were read in two separate steps, so a disable in between
+  persisted an address the operator had just switched off — re-enabled at the
+  next restart — and a re-point persisted one collector's address with the
+  previous one's wire format. Address, intent and collector are now read
+  together, in the same step that publishes them.
 - **A queued event could be sent to a collector the operator had already
   replaced (CHAOS-72).** The handoff walk reported "no successor" both when
   there genuinely was none and when its hop bound was exhausted; the drain loop

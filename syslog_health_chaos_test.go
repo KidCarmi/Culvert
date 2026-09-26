@@ -13,6 +13,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -2351,7 +2354,7 @@ func TestChaos72_ConfigMetadataIsReadOnlyThroughItsAccessors(t *testing.T) {
 					_ = m
 					t.Errorf("%s:%d reads or writes %s directly: %s\n\t"+
 						"these are published under syslogPublishMu with the writer; a direct access "+
-						"races a concurrent re-point. Use syslogConfiguredTargets() or "+
+						"races a concurrent re-point. Use syslogConfiguredSnapshot() or "+
 						"noteSyslogConfiguredIntent().", f, i+1, n, strings.TrimSpace(line))
 				}
 			}
@@ -2460,6 +2463,12 @@ func newClosedSyslogChainPastTheBound(t *testing.T) *syslogWriter {
 		if err != nil {
 			t.Fatalf("building chain link %d: %v", i, err)
 		}
+		// Retired before closed, exactly as releaseReplacedSyslogWriter does
+		// it: a displaced Writer whose owner has stopped reading its
+		// counters is the state a late drop is defined against, and a chain
+		// built without the mark would model a shape production never
+		// produces.
+		prev.MarkRetired()
 		prev.HandOffTo(w)
 		if err := prev.Close(); err != nil {
 			t.Fatalf("closing chain link %d: %v", i, err)
@@ -2486,4 +2495,433 @@ func promSeriesValue(t *testing.T, body, name string) float64 {
 	}
 	t.Fatalf("series %s is absent from the exposition", name)
 	return 0
+}
+
+// floodUntilDropping writes n audit lines through sw and returns what the
+// Writer itself counted for them. The collector is expected to be dead, so
+// essentially every line is a loss; the point is to give the drain a real
+// backlog to flush AFTER the disable, which is where the accounting used to
+// go missing.
+func floodUntilDropping(t *testing.T, sw *syslogWriter, n int) {
+	t.Helper()
+	for i := 0; i < n; i++ {
+		sw.WriteAudit("chaos72 flood")
+	}
+}
+
+// waitExportedAccountsFor polls the exported snapshot until it accounts for
+// `want` events, and returns what it last saw. A poll rather than a sleep
+// because the re-point path closes the displaced Writer asynchronously, so
+// the settle that folds its final flush lands when the next read happens.
+func waitExportedAccountsFor(t *testing.T, want uint64, within time.Duration) uint64 {
+	t.Helper()
+	deadline := time.Now().Add(within)
+	var got uint64
+	for {
+		snap := syslogFeedState()
+		got = snap.Drops + snap.Delivered
+		if got >= want || time.Now().After(deadline) {
+			return got
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// TestChaos72_DisablingAFeedExportsEveryLossItRecorded is the DEFECT gate for
+// the fold-ordering loss.
+//
+// noteSyslogForwardingDisabled folded the Writer's totals BEFORE
+// disableActiveSyslog closed it, so every loss the drain recorded during its
+// final flush landed on a counter no surface reads. Measured against the
+// pre-fix tree with a dead collector: of 2000 events the Writer counted all
+// 2000 and `culvert_syslog_drops_total` was short by between 32 and 1999 —
+// one trial exported ZERO for a feed that had just lost everything.
+//
+// The assertion is deliberately "the exported total accounts for every event
+// the Writer did", not a fixed number: what makes the defect a defect is the
+// DISAGREEMENT between the two, and the split between drops and deliveries is
+// timing-dependent.
+func TestChaos72_DisablingAFeedExportsEveryLossItRecorded(t *testing.T) {
+	t.Cleanup(resetSyslogHealthForTest)
+	const events = 2000
+	for trial := 0; trial < 3; trial++ {
+		resetSyslogHealthForTest()
+		c := startSyslogCollector(t)
+		armSyslogFeed(t, "tcp://"+c.addr)
+		sw := activeSyslog()
+		if sw == nil {
+			t.Fatal("no writer was installed")
+		}
+		c.stop() // the collector dies; every subsequent line is a loss
+		floodUntilDropping(t, sw, events)
+		disableActiveSyslog()
+
+		own := sw.Stats()
+		accounted := own.Drops + own.Delivered
+		if accounted == 0 {
+			t.Fatalf("trial %d: the writer recorded nothing, so this gate proves nothing", trial)
+		}
+		got := waitExportedAccountsFor(t, accounted, 2*time.Second)
+		if got < accounted {
+			t.Fatalf("trial %d: the writer accounted for %d events and the exported total for %d — %d losses reach no surface",
+				trial, accounted, got, accounted-got)
+		}
+		// CONTROL half: the losses must actually be reported as losses, not
+		// quietly reclassified as deliveries to make the sum work out.
+		if snap := syslogFeedState(); snap.Drops == 0 {
+			t.Fatalf("trial %d: exported drops are zero after a dead collector lost %d events", trial, accounted)
+		}
+	}
+}
+
+// TestChaos72_ARetiredWritersLaterLossesStillReachTheTotal pins the settle
+// itself, deterministically.
+//
+// The end-to-end disable gate above exercises the same mechanism but its
+// margin is timing-dependent: with a dead collector most losses are recorded
+// synchronously by the caller (queue-full) and are therefore already inside
+// the first fold, so on a fast machine the post-fold remainder can be small
+// enough that a broken settle still passes. This drives the real recorders
+// and then moves a retired-but-unsealed Writer's counters by hand, so the
+// delta the settle has to carry is exact and cannot shrink to nothing.
+func TestChaos72_ARetiredWritersLaterLossesStillReachTheTotal(t *testing.T) {
+	resetSyslogHealthForTest()
+	t.Cleanup(resetSyslogHealthForTest)
+	c := startSyslogCollector(t)
+	t.Cleanup(c.stop)
+
+	first, err := newSyslogWriter("tcp", c.addr, "rfc3164")
+	if err != nil {
+		t.Fatalf("first writer: %v", err)
+	}
+	t.Cleanup(func() { _ = first.Close() })
+	noteSyslogWriterInstalled(first, "tcp://"+c.addr)
+
+	second, err := newSyslogWriter("tcp", c.addr, "rfc3164")
+	if err != nil {
+		t.Fatalf("second writer: %v", err)
+	}
+	t.Cleanup(func() { _ = second.Close() })
+	// Retires `first`. Its drain is still running, so its counters are NOT
+	// final and the fold taken here is a baseline, not a total.
+	noteSyslogWriterInstalled(second, "tcp://"+c.addr)
+
+	if first.Sealed() {
+		t.Fatal("the displaced writer sealed before it could be observed unsealed; this gate would prove nothing")
+	}
+	base := syslogFeedState().Drops
+
+	// The collector dies and the retired writer — which has no successor, so
+	// nothing hands its lines on — records real losses after its fold.
+	c.stop()
+	const later = 500
+	for i := 0; i < later; i++ {
+		first.WriteAudit("post-retire loss")
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for first.Stats().Drops == 0 && time.Now().Before(deadline) {
+		time.Sleep(2 * time.Millisecond)
+	}
+	own := first.Stats().Drops
+	if own == 0 {
+		t.Fatal("the retired writer recorded no losses; this gate would prove nothing")
+	}
+	if got := syslogFeedState().Drops; got < base+own {
+		t.Fatalf("a retired writer recorded %d further losses; the exported total moved from %d to %d, losing %d",
+			own, base, got, base+own-got)
+	}
+}
+
+// TestChaos72_ALossAtTheSealBoundaryIsCountedExactlyOnce is the CONTROL for
+// the settle, in the direction the settle can get wrong.
+//
+// The settle folds a tracked Writer's delta on every read, and lateDrops
+// charges losses the Writer can no longer hold. If both took the same loss
+// the compliance-loss series would OVERSTATE — a false alarm on the one
+// number an operator pages from — so chargeTerminalDrop deliberately leaves a
+// sealed Writer's counters alone. This drives the real send path against a
+// Writer that is retired, still tracked, and sealed, and requires the
+// exported total to move by exactly one.
+func TestChaos72_ALossAtTheSealBoundaryIsCountedExactlyOnce(t *testing.T) {
+	resetSyslogHealthForTest()
+	t.Cleanup(resetSyslogHealthForTest)
+	c := startSyslogCollector(t)
+	t.Cleanup(c.stop)
+
+	first, err := newSyslogWriter("tcp", c.addr, "rfc3164")
+	if err != nil {
+		t.Fatalf("first writer: %v", err)
+	}
+	second, err := newSyslogWriter("tcp", c.addr, "rfc3164")
+	if err != nil {
+		t.Fatalf("second writer: %v", err)
+	}
+	t.Cleanup(func() { _ = second.Close() })
+
+	noteSyslogWriterInstalled(first, "tcp://"+c.addr)
+	// Retires `first` while its drain is still running, so it is TRACKED.
+	noteSyslogWriterInstalled(second, "tcp://"+c.addr)
+
+	// Read the baseline while it is still UNSEALED, so this read settles it
+	// without untracking it. Sealing first and reading afterwards would take
+	// the final fold and drop it from the list, closing the very window this
+	// control exists for — which is exactly how the first version of this
+	// test passed against the double-counting shape it was written to reject.
+	before := syslogFeedState().Drops
+	if first.Sealed() {
+		t.Fatal("the writer sealed before its baseline read; this control would prove nothing")
+	}
+
+	if err := first.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	if !first.Sealed() {
+		t.Fatal("the writer did not seal; this control would prove nothing")
+	}
+
+	// No successor was ever named, so this terminates on `first` itself — a
+	// Writer that is sealed AND still tracked for folding.
+	first.WriteAudit("one loss at the seal boundary")
+	after := syslogFeedState().Drops
+
+	if got := after - before; got != 1 {
+		t.Fatalf("one loss at the seal boundary moved the exported drop total by %d, want exactly 1", got)
+	}
+}
+
+// TestChaos72_ASupersededWritersDeliveryDoesNotClearAnUnmetIntent is the
+// DEFECT gate for Codex P2-16.
+//
+// A boot that connects target A and then fails to connect the persisted
+// target B leaves A live and B unmet — correctly reported DOWN. A keeps its
+// delivery observer, so when one of A's own transient episodes ended the
+// recovery path cleared B's fire-once alert latch and logged "SIEM feed
+// delivering again". Both statements are false for B, and because the
+// watchdog re-evaluates every 30s the page then fired again, and again, for
+// as long as the mixed state lasted.
+func TestChaos72_ASupersededWritersDeliveryDoesNotClearAnUnmetIntent(t *testing.T) {
+	ensureObservabilityStartupTestLogger(t)
+	snapshotObservabilityGlobals(t)
+	resetSyslogHealthForTest()
+	t.Cleanup(resetSyslogHealthForTest)
+
+	var fired []string
+	prev := fireSyslogFeedDownAlert
+	fireSyslogFeedDownAlert = func(d string) { fired = append(fired, d) }
+	t.Cleanup(func() { fireSyslogFeedDownAlert = prev })
+
+	serving, err := newSyslogWriter("udp", "127.0.0.1:65533", "rfc3164")
+	if err != nil {
+		t.Fatalf("building the serving writer: %v", err)
+	}
+	t.Cleanup(func() { _ = serving.Close() })
+
+	// A is serving; the operator's current intent is B, which never connected.
+	noteSyslogWriterInstalled(serving, "udp://127.0.0.1:65533")
+	noteSyslogIntent("tcp://persisted-collector.invalid:601")
+
+	if snap := syslogFeedState(); !snap.IntentUnmet {
+		t.Fatal("precondition: a serving target that is not the intended one must read as an unmet intent")
+	}
+	// The unmet intent pages, and latches.
+	evaluateSyslogDegradation()
+	if len(fired) != 1 {
+		t.Fatalf("an unmet intent fired %d alerts; want 1", len(fired))
+	}
+	syslogHealth.mu.Lock()
+	latched := syslogHealth.alerted
+	syslogHealth.mu.Unlock()
+	if !latched {
+		t.Fatal("precondition: the unmet-intent page must latch")
+	}
+
+	// A delivers. This says nothing about B.
+	noteSyslogDelivery(true)
+
+	syslogHealth.mu.Lock()
+	stillLatched := syslogHealth.alerted
+	syslogHealth.mu.Unlock()
+	if !stillLatched {
+		t.Fatal("a delivery by the SUPERSEDED target cleared the unmet intent's fire-once latch; the watchdog will now re-page every tick for as long as the intended collector stays unreachable")
+	}
+	// And the watchdog's next tick must not produce a second page.
+	evaluateSyslogDegradation()
+	if len(fired) != 1 {
+		t.Fatalf("the unmet intent paged %d times across one episode; want 1", len(fired))
+	}
+}
+
+// TestChaos72_AMetIntentStillRecovers is the CONTROL for the gate above.
+//
+// The cheapest way to stop a superseded delivery clearing the latch is to
+// stop clearing it at all, which would leave every real recovery latched and
+// silence the feed's next genuine outage for the life of the process.
+func TestChaos72_AMetIntentStillRecovers(t *testing.T) {
+	ensureObservabilityStartupTestLogger(t)
+	snapshotObservabilityGlobals(t)
+	resetSyslogHealthForTest()
+	t.Cleanup(resetSyslogHealthForTest)
+
+	prev := fireSyslogFeedDownAlert
+	fireSyslogFeedDownAlert = func(string) {}
+	t.Cleanup(func() { fireSyslogFeedDownAlert = prev })
+
+	sw, err := newSyslogWriter("udp", "127.0.0.1:65533", "rfc3164")
+	if err != nil {
+		t.Fatalf("building the writer: %v", err)
+	}
+	t.Cleanup(func() { _ = sw.Close() })
+	noteSyslogWriterInstalled(sw, "udp://127.0.0.1:65533")
+
+	syslogHealth.mu.Lock()
+	syslogHealth.alerted = true
+	unmet := syslogIntentUnmetLocked()
+	syslogHealth.mu.Unlock()
+	if unmet {
+		t.Fatal("precondition: an installed writer serving its own intended target is a MET intent")
+	}
+
+	noteSyslogDelivery(true)
+
+	syslogHealth.mu.Lock()
+	latched := syslogHealth.alerted
+	syslogHealth.mu.Unlock()
+	if latched {
+		t.Fatal("a delivery on a feed serving its intended collector did not clear the episode; the next real outage would never page")
+	}
+}
+
+// TestChaos72_ALossOnAnInstalledWriterIsNeverCountedAsLate is the mirror
+// CONTROL: it pins the OTHER half of the late-drop predicate.
+//
+// A loss is late only when the owner has RETIRED the Writer as well as the
+// drain having sealed it. Keying on the seal alone double-counts every loss
+// recorded against a Writer that is still installed — its cumulative
+// counters are read live and are folded nowhere else — and moves it into the
+// "lost to an earlier target" bucket while it is still the current one.
+func TestChaos72_ALossOnAnInstalledWriterIsNeverCountedAsLate(t *testing.T) {
+	resetSyslogHealthForTest()
+	t.Cleanup(resetSyslogHealthForTest)
+	c := startSyslogCollector(t)
+	t.Cleanup(c.stop)
+
+	sw, err := newSyslogWriter("tcp", c.addr, "rfc3164")
+	if err != nil {
+		t.Fatalf("building the writer: %v", err)
+	}
+	noteSyslogWriterInstalled(sw, "tcp://"+c.addr)
+	t.Cleanup(func() { _ = sw.Close() })
+
+	// Sealed but never retired: the record still describes it, so its
+	// counters are still the ones every surface reads.
+	if err := sw.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	if !sw.Sealed() {
+		t.Fatal("the writer did not seal; this control would prove nothing")
+	}
+
+	before := syslogFeedState()
+	sw.WriteAudit("one loss on the installed writer")
+	after := syslogFeedState()
+
+	if got := after.Drops - before.Drops; got != 1 {
+		t.Fatalf("one loss on the installed writer moved the exported drop total by %d, want exactly 1", got)
+	}
+	if after.WriterDrops <= before.WriterDrops {
+		t.Fatalf("the loss was attributed away from the installed target (WriterDrops %d -> %d); the contract row would report it as lost to an EARLIER target while this one is still current",
+			before.WriterDrops, after.WriterDrops)
+	}
+}
+
+// configMetadataReaders names the functions that report or PERSIST the syslog
+// target, together with the file each lives in. Each must obtain the Writer
+// from syslogConfiguredSnapshot, not from a second, unsynchronised load.
+var configMetadataReaders = map[string]string{
+	"snapshotAdminEndpoints": "admin_settings.go",
+	"checkSyslogFeed":        "diagnostics.go",
+	"apiSyslogConfig":        "ui_config.go",
+}
+
+// TestChaos72_ConfigMetadataReadersTakeTheWriterFromTheSnapshot is the
+// STRUCTURAL wall for Codex P2-17.
+//
+// syslogConfiguredTargets() released syslogPublishMu before the caller loaded
+// activeSyslog(), so a reader that needed both got a pair from two different
+// generations: a disable in between yielded the old address beside no writer,
+// and a re-point yielded target A beside writer B. snapshotAdminEndpoints
+// PERSISTS that pair, so the mismatch outlived the process — a restart could
+// re-enable a target the operator had switched off, or restart one speaking
+// the previous collector's wire format.
+//
+// This is walled structurally rather than behaviourally because the window is
+// a few instructions wide and cannot be scheduled through the public entry
+// points; the round-9 wall on syslogFeedState exists for the same reason and
+// for the same defect one reader earlier.
+func TestChaos72_ConfigMetadataReadersTakeTheWriterFromTheSnapshot(t *testing.T) {
+	checked := 0
+	for fn, file := range configMetadataReaders {
+		fset := token.NewFileSet()
+		f, err := parser.ParseFile(fset, file, nil, parser.ParseComments)
+		if err != nil {
+			t.Fatalf("parse %s: %v", file, err)
+		}
+		var body *ast.FuncDecl
+		for _, d := range f.Decls {
+			if fd, ok := d.(*ast.FuncDecl); ok && fd.Name.Name == fn {
+				body = fd
+				break
+			}
+		}
+		if body == nil {
+			t.Fatalf("%s: %s is gone; this wall names a function that no longer exists", file, fn)
+		}
+		checked++
+		ast.Inspect(body, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			id, ok := call.Fun.(*ast.Ident)
+			if !ok || id.Name != "activeSyslog" {
+				return true
+			}
+			t.Errorf("%s: %s calls activeSyslog() at %s\n\t"+
+				"the writer must come from syslogConfiguredSnapshot(), in the same critical section as "+
+				"the target it is reported or persisted beside; a separate load belongs to a different "+
+				"generation (Codex P2, PR #1494)", file, fn, fset.Position(call.Pos()))
+			return true
+		})
+	}
+	if checked != len(configMetadataReaders) {
+		t.Fatalf("the wall resolved %d of %d readers; it proves nothing about the rest", checked, len(configMetadataReaders))
+	}
+
+	// CONTROL: the matcher must be able to SEE the call it forbids, or a
+	// broken AST walk would pass forever. apiSyslogTest reads only the writer
+	// — it pairs it with nothing — so it is deliberately NOT on the list, and
+	// it is the honest positive sample.
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, "ui_config.go", nil, parser.ParseComments)
+	if err != nil {
+		t.Fatalf("parse ui_config.go: %v", err)
+	}
+	found := false
+	for _, d := range f.Decls {
+		fd, ok := d.(*ast.FuncDecl)
+		if !ok || fd.Name.Name != "apiSyslogTest" {
+			continue
+		}
+		ast.Inspect(fd, func(n ast.Node) bool {
+			if call, ok := n.(*ast.CallExpr); ok {
+				if id, ok := call.Fun.(*ast.Ident); ok && id.Name == "activeSyslog" {
+					found = true
+				}
+			}
+			return true
+		})
+	}
+	if !found {
+		t.Fatal("control: the walk cannot find a known activeSyslog() call, so the wall above proves nothing")
+	}
 }

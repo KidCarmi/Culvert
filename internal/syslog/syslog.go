@@ -87,6 +87,26 @@ type Writer struct {
 	done      chan struct{}   // closed by drainLoop on exit (conn released)
 	closed    atomic.Bool     // post-Close sends drop (or hand off) instead of enqueueing
 	closeOnce sync.Once
+	// finalStats is published by the drain goroutine, under sendMu held
+	// EXCLUSIVELY, as the last thing it does before closing done. It is the
+	// cumulative snapshot as of the instant this Writer stopped being the
+	// only thing moving its counters, which is what lets a consumer folding
+	// those totals into a process-lifetime accumulator take a FINAL value.
+	//
+	// The counters THEMSELVES keep moving after it — a caller holding a stale
+	// handle still records its loss on the Writer, so anything reading the
+	// Writer's own episode state (is it failing NOW, since when, why) keeps
+	// seeing the truth. Only the CUMULATIVE totals have a second home, and
+	// only those are frozen here, because only those are folded elsewhere and
+	// could therefore be counted twice.
+	finalStats atomic.Pointer[Stats]
+
+	// retired is set by the owner when it stops reading this Writer's
+	// cumulative counters and folds them into its own accumulator. Together
+	// with finalStats it is what decides where a late loss is counted: see
+	// chargeTerminalDrop. It must be set BEFORE Close, or a loss landing
+	// between the seal and the mark is counted nowhere.
+	retired atomic.Bool
 
 	// sendMu makes "check closed, then enqueue" atomic with respect to Close.
 	// Senders hold it SHARED for that check-and-enqueue only (never across a
@@ -153,17 +173,88 @@ const (
 // this plane exists to keep honest, and a rare undercount there is still an
 // undercount (Codex P2, PR #1494).
 //
-// It is charged IN ADDITION to the Writer's own counter, never instead of it:
-// the Writer's Stats must stay internally consistent for anything still
-// holding it. Double counting is impossible at these two sites because both
-// are reached only through `enqClosed`, and a closed Writer's finals were
-// folded when it was displaced — strictly before it could be walked past.
+// The boundary is SEALING, not displacement, and that distinction is the whole
+// of it. The first version keyed on "this Writer was displaced, so its finals
+// were folded" — but the fold is taken when the Writer is displaced, while its
+// drain is still flushing, so every loss the final flush records lands after
+// the fold and is held by no counter any surface reads. Measured against the
+// real disable path with a dead collector: of 2000 events the Writer itself
+// counted all 2000 (1999 drops + 1 delivered) and the exported total reported
+// between 32 and 1999 fewer — in one trial `culvert_syslog_drops_total` read
+// ZERO for a feed that had just lost everything, which is the loss-history
+// erasure P2-4 exists to prevent, arriving through the WRITE side after P2-4
+// closed the read side.
 //
-// The end-of-chain branch in handOffQueued is deliberately NOT charged here:
-// that writer is the live one, and its drop is already read.
+// So the two accountings are made disjoint by construction rather than by
+// argument. The owner FOLDS a Writer's cumulative totals from the snapshot
+// the drain publishes as it exits (Sealed/FinalStats), never from the live
+// counters, and a loss is charged here only once the owner has RETIRED the
+// Writer and that snapshot exists. chargeTerminalDrop decides both halves
+// under one lock, so a loss can never be counted twice and never nowhere.
 var lateDrops atomic.Uint64
 
 func noteLateDrop() { lateDrops.Add(1) }
+
+// Sealed reports whether the drain goroutine has exited and published this
+// Writer's cumulative snapshot. It does NOT mean the counters stop moving: a
+// caller holding a stale handle still records its losses here, which is what
+// keeps the episode state (is it failing NOW, since when, why) honest. What
+// it means is that FinalStats is available, and that a consumer folding these
+// totals elsewhere must switch to it.
+//
+// A zero-value (synchronous) Writer has no drain goroutine and is never
+// sealed; nothing folds its totals either.
+func (s *Writer) Sealed() bool { return s.finalStats.Load() != nil }
+
+// FinalStats returns the cumulative snapshot taken when this Writer sealed,
+// and whether it has sealed at all. A consumer that folds this Writer's
+// totals into a process-lifetime accumulator must use THIS once it is
+// available: the live counters keep moving afterwards, and every one of those
+// later losses is already charged to LateDrops, so folding the live value
+// instead would count them twice.
+func (s *Writer) FinalStats() (Stats, bool) {
+	if p := s.finalStats.Load(); p != nil {
+		return *p, true
+	}
+	return Stats{}, false
+}
+
+// chargeTerminalDrop records a loss against a Writer that refused a line and
+// could not hand it on, and reports whether that loss must ALSO be charged to
+// the process-lifetime late-drop counter.
+//
+// Both halves are decided under the SHARED side of sendMu, which the drain
+// goroutine takes exclusively to publish its final snapshot. That is what
+// makes the split exact: a charge either wins the race and is inside the
+// snapshot, or loses it and is routed to lateDrops instead — never both.
+//
+// The Writer's own counters move either way. Freezing them was the first
+// shape and it was wrong in a way worth recording: a Writer that is sealed
+// but still INSTALLED (a drain that exits under a still-published handle)
+// would then stop reporting that it is failing at all, so the degradation
+// predicate — which reads ConsecutiveFailures and FailingSince off the live
+// Writer — went blind on exactly the feed that had just lost its drain.
+//
+// A loss is late only when BOTH are true: the owner has RETIRED this Writer
+// (so it no longer reads these counters) and the Writer has SEALED (so the
+// owner's final fold is already taken and cannot include this loss). Either
+// alone gets it wrong in one direction — an unretired sealed Writer's losses
+// are still read live, so charging them late would count them twice, while a
+// retired unsealed Writer's losses are still inside the fold to come.
+func (s *Writer) chargeTerminalDrop(reason *string) (late bool) {
+	s.sendMu.RLock()
+	defer s.sendMu.RUnlock()
+	s.noteDrop(reason)
+	return s.retired.Load() && s.finalStats.Load() != nil
+}
+
+// MarkRetired records that the owner has folded this Writer's cumulative
+// counters into its own accumulator and will stop reading them.
+//
+// Call it BEFORE Close. Sealing is what ends the fold, so a loss landing
+// after the seal but before this mark is in neither the fold nor the late
+// counter — the one ordering that loses a loss outright.
+func (s *Writer) MarkRetired() { s.retired.Store(true) }
 
 // LateDrops returns the process-lifetime count of losses that were charged to
 // a displaced Writer whose totals had already been retired. The health plane
@@ -275,6 +366,17 @@ func (s *Writer) drainLoop() {
 			s.conn = nil
 		}
 		s.mu.Unlock()
+		// Seal BEFORE done is closed, and under sendMu held exclusively, so a
+		// caller's terminal charge cannot interleave: chargeTerminalDrop reads
+		// the seal and increments the counters under the SHARED side of the
+		// same lock, so every loss is either inside this snapshot or routed to
+		// lateDrops — never both, and never neither. Ordering it before
+		// close(s.done) means a caller that observes done closed also observes
+		// Sealed().
+		s.sendMu.Lock()
+		final := s.Stats()
+		s.finalStats.Store(&final)
+		s.sendMu.Unlock()
 		close(s.done)
 	}()
 	for {
@@ -327,7 +429,6 @@ func (s *Writer) send(pri int, msg string) {
 		return
 	}
 	w := s
-	exhausted := false
 	for hop := 0; ; hop++ {
 		if w.tryEnqueue(w.formatLine(pri, msg, time.Now())) != enqClosed {
 			return
@@ -343,15 +444,17 @@ func (s *Writer) send(pri int, msg string) {
 		// live one the caller lost a line it would have accepted (Codex P2,
 		// PR #1494). `w` is now always the last writer that actually refused.
 		if hop+1 >= maxHandoffHops {
-			exhausted = true
 			break
 		}
 		w = nx
 	}
-	w.noteDrop(&reasonClosed)
-	if exhausted {
-		// w is a displaced writer whose totals were folded long ago, so its
-		// counter is read by nothing; see lateDrops.
+	// Both terminals — the hop bound and the end of the chain — go through one
+	// charge, because whether the loss is countable on `w` is a property of
+	// `w`, not of which branch reached it. The end-of-chain writer is usually
+	// the LIVE one, whose counters are read; after a disable it is a sealed
+	// one, whose counters are not. Branching on the reason for stopping got
+	// that second case wrong. See lateDrops.
+	if w.chargeTerminalDrop(&reasonClosed) {
 		noteLateDrop()
 	}
 }
@@ -418,7 +521,9 @@ func (s *Writer) handOffQueued(item queuedLine) bool {
 		}
 		nx := w.successor.Load()
 		if nx == nil {
-			w.noteDrop(&reasonClosed)
+			if w.chargeTerminalDrop(&reasonClosed) {
+				noteLateDrop()
+			}
 			ackQueued(item, w, false)
 			return true
 		}
@@ -431,8 +536,14 @@ func (s *Writer) handOffQueued(item queuedLine) bool {
 	// branch above (events were lost across a re-point and are not replayed),
 	// and the reason vocabulary is a closed set on a published API enum that
 	// should not grow to name an internal walk limit.
-	s.noteDrop(&reasonClosed)
-	noteLateDrop()
+	// s is this drain's OWN Writer, so it is displaced but cannot yet be
+	// sealed (sealing is the last thing this goroutine does), and the charge
+	// therefore lands on counters the health plane still folds. The branch is
+	// kept rather than asserted away so the accounting reads the same at every
+	// terminal; it simply never takes the late path from here.
+	if s.chargeTerminalDrop(&reasonClosed) {
+		noteLateDrop()
+	}
 	ackQueued(item, s, false)
 	return true
 }

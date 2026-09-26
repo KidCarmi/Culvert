@@ -279,6 +279,27 @@ and as `culvert_syslog_drops_total`; if you turn forwarding **off** instead,
 counting stops there and the node reports the feature as absent again rather
 than accruing losses it is not incurring.
 
+### If you are comparing drop counts across a re-point or a disable
+
+`culvert_syslog_drops_total`, `syslogDrops` on `/healthz` and the count named
+on the `syslog_feed` row are **process-lifetime** totals: they carry every
+collector this process has served, so re-pointing or disabling a collector
+never resets them, and they never decrease.
+
+Reading them on a build before CHAOS-72 round 12 needs a caveat. A displaced
+collector's totals were folded into the exported counters at the moment it was
+displaced, while its queue was still draining, so losses recorded during that
+final flush were held by nothing. Measured on the disable path against a dead
+collector, of 2000 lost events between 32 and 1999 were missing — and in one
+run the exported total read `0` for a feed that had just lost everything. If
+you are reading a total taken across a re-point or a disable on an older
+build, treat it as a lower bound.
+
+On current builds the two accountings are exhaustive and disjoint: a
+collector's losses are carried by that collector until its queue has drained
+and its final totals are published, and anything recorded after that point is
+counted for the process instead. Each loss appears exactly once.
+
 ### If the feed is degraded but the drop count is not rising
 
 `syslog_feed` reads degraded and the alert says *events are still being
@@ -292,6 +313,14 @@ Re-save the intended target (`POST /api/syslog`) once its address or
 reachability is fixed; that installs a writer for it and clears the state.
 Anything produced between the re-point and the fix is on the previous
 collector.
+
+Deliveries to that previous collector do **not** clear the state. They are
+evidence that the old target is reachable and say nothing about the one you
+configured, so the alert stays latched and the row stays degraded until a
+writer is installed for the intended target or forwarding is switched off.
+Before CHAOS-72 round 12 such a delivery cleared the latch and logged "SIEM
+feed delivering again", after which the 30-second watchdog re-fired the DOWN
+alert — so on an older build this state can produce a page every half minute.
 
 ### If the drop count rises while the feed keeps delivering
 

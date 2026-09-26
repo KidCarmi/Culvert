@@ -233,14 +233,29 @@ func TestProbeAckCarriesTheSendingTransport(t *testing.T) {
 // intermediate writer after its finals were folded therefore lands nowhere.
 // `send` also used to check its bound at the top of the loop, so on exhaustion
 // it charged a writer that had been assigned and never asked.
+// retiredAndSealed puts a hand-built Writer into the state a late drop is
+// DEFINED against: its owner has folded its cumulative counters and stopped
+// reading them (MarkRetired), and its drain has published its finals
+// (sealing). A closed Writer that is neither is still read live by the health
+// plane, so charging its losses late would count them twice — which is why
+// the predicate needs both and why a chain built without this models a shape
+// production never produces.
+func retiredAndSealed(w *Writer) {
+	w.MarkRetired()
+	st := w.Stats()
+	w.finalStats.Store(&st)
+}
+
 func TestSendExhaustedWalkIsCountableAndTriesItsLastWriter(t *testing.T) {
 	head := &Writer{network: "udp", format: "rfc3164", host: "h", tag: "culvert", pid: "1", queue: make(chan queuedLine, 4)}
 	head.closed.Store(true)
+	retiredAndSealed(head)
 	prev := head
 	chain := []*Writer{head}
 	for i := 0; i < maxHandoffHops+2; i++ {
 		w := &Writer{network: "udp", format: "rfc3164", host: "h", tag: "culvert", pid: "1", queue: make(chan queuedLine, 4)}
 		w.closed.Store(true)
+		retiredAndSealed(w)
 		prev.HandOffTo(w)
 		prev = w
 		chain = append(chain, w)
@@ -281,10 +296,12 @@ func TestSendExhaustedWalkIsCountableAndTriesItsLastWriter(t *testing.T) {
 	// refused.
 	oh := &Writer{network: "udp", format: "rfc3164", host: "h", tag: "culvert", pid: "1", queue: make(chan queuedLine, 4)}
 	oh.closed.Store(true)
+	retiredAndSealed(oh)
 	p := oh
 	for i := 0; i < maxHandoffHops-1; i++ {
 		w := &Writer{network: "udp", format: "rfc3164", host: "h", tag: "culvert", pid: "1", queue: make(chan queuedLine, 4)}
 		w.closed.Store(true)
+		retiredAndSealed(w)
 		p.HandOffTo(w)
 		p = w
 	}

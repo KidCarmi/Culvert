@@ -1816,10 +1816,14 @@ func apiSyslogConfig(w http.ResponseWriter, r *http.Request) {
 		if !requireRole(w, r, RoleAdmin) {
 			return
 		}
+		// Target and writer in ONE read, so the reported address and the
+		// format beside it always belong to the same generation: a re-point
+		// between two reads described target A with writer B's format
+		// (Codex P2, PR #1494). Loading the handle once also avoids the
+		// check-then-act nil-deref a concurrent disable used to allow.
+		connectedTarget, _, sw := syslogConfiguredSnapshot()
 		format := "rfc3164"
-		// Loaded ONCE: the admin plane can clear this handle between two
-		// reads, so a check-then-act here would nil-deref the second call.
-		if sw := activeSyslog(); sw != nil {
+		if sw != nil {
 			format = sw.Format()
 		}
 		// CHAOS-72: drops alone is cumulative and unreadable — it cannot
@@ -1843,7 +1847,6 @@ func apiSyslogConfig(w http.ResponseWriter, r *http.Request) {
 		// `degraded:true` for a target whose boot dial failed, i.e. it denied
 		// the one fact that verdict rests on (Codex P2, PR #1494).
 		present := snap.Configured || snap.Intended
-		connectedTarget, _ := syslogConfiguredTargets()
 		jsonOK(w, map[string]any{
 			"addr": connectedTarget, "format": format, "drops": snap.Drops, "panics": snap.Panics,
 			"delivered":         snap.Delivered,

@@ -18,7 +18,7 @@ package main
 //     section that publishes the writer, so the two can never disagree
 //     (Codex P2, PR #1494). Callers record only the INTENT beforehand,
 //     which is what survives a dial that produces no writer. Read both
-//     through syslogConfiguredTargets(), never off the variables.
+//     through syslogConfiguredSnapshot(), never off the variables.
 //   - globalOTLP and globalOTLPTraces both receive Configure when
 //     OTLPEndpoint is non-empty. Their internal goroutine lifecycles
 //     are unchanged — out of scope for the slice.
