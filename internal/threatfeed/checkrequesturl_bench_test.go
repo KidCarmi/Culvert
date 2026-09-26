@@ -143,11 +143,48 @@ func TestBenchGate_CheckRequestURLAllocs(t *testing.T) {
 	}
 }
 
+// gateTimingRounds / gateTimingMargin govern the timing gate below.
+//
+// Each arm is measured SEVERAL times and the FASTEST result is kept: noise only
+// ever makes a measurement slower — a descheduled goroutine, a noisy neighbour,
+// a GC pause — so the minimum is the closest available estimate of the intrinsic
+// cost, and it is the standard robust estimator when the box is not idle. The
+// arms are interleaved round by round so a load spike lands on both rather than
+// on whichever happened to run during it.
+const (
+	gateTimingRounds = 5
+	gateTimingMargin = 1.2
+)
+
+// bestNsPerOp returns the fastest of gateTimingRounds measurements of one arm.
+func bestNsPerOp(rounds []testing.BenchmarkResult) int64 {
+	best := rounds[0].NsPerOp()
+	for _, r := range rounds[1:] {
+		if n := r.NsPerOp(); n < best {
+			best = n
+		}
+	}
+	return best
+}
+
 // TestBenchGate_CheckRequestURLBeatsLegacy is the timing half, expressed as a
-// RATIO measured in ONE run so it is machine-independent and needs no
-// re-baselining. The bound is deliberately loose (the measured saving is far
-// larger) because its job is to catch the round trip coming back, not to police
-// a few nanoseconds.
+// RATIO so it is machine-independent and needs no re-baselining. Its job is to
+// catch the serialise-and-reparse round trip coming back, not to police a few
+// nanoseconds.
+//
+// IT USED TO BE A SINGLE MEASUREMENT PER ARM COMPARED WITH `>=`, i.e. with no
+// margin at all — while its own comment claimed the bound was "deliberately
+// loose". A comparison of two timings with zero tolerance is a coin flip
+// whenever noise exceeds the true gap, and on a loaded CI runner it duly failed
+// with BOTH arms inflated about twentyfold over their documented ~376 ns and
+// ~887 ns (8387 vs 7551 ns/op), where the ordering is pure scheduling noise. A
+// gate that can flake gets muted, which is this repo's standing rule and the
+// reason the allocation gate beside this one is deliberately structural.
+//
+// The substantive claim is now measured as best-of-N per arm against an explicit
+// margin, so the comment and the code say the same thing. The real saving is
+// ~2.3x, so a 1.2x bound still catches a regression that reintroduces the round
+// trip while tolerating a saturated machine.
 func TestBenchGate_CheckRequestURLBeatsLegacy(t *testing.T) {
 	if testing.Short() {
 		t.Skip("timing gate")
@@ -158,18 +195,27 @@ func TestBenchGate_CheckRequestURLBeatsLegacy(t *testing.T) {
 	// Both arms assign into the same package-level sink so neither can be
 	// optimised away differently from the other; the verdict itself is not
 	// under test here (the differential covers it).
-	fast := testing.Benchmark(func(b *testing.B) {
-		for i := 0; i < b.N; i++ {
-			gateSink, _ = tf.CheckRequestURL(u)
-		}
-	})
-	legacy := testing.Benchmark(func(b *testing.B) {
-		for i := 0; i < b.N; i++ {
-			gateSink, _ = tf.CheckURL(u.String())
-		}
-	})
-	if fast.NsPerOp() >= legacy.NsPerOp() {
-		t.Errorf("CheckRequestURL %d ns/op is not faster than CheckURL(u.String()) %d ns/op",
-			fast.NsPerOp(), legacy.NsPerOp())
+	fastRounds := make([]testing.BenchmarkResult, 0, gateTimingRounds)
+	legacyRounds := make([]testing.BenchmarkResult, 0, gateTimingRounds)
+	for i := 0; i < gateTimingRounds; i++ {
+		fastRounds = append(fastRounds, testing.Benchmark(func(b *testing.B) {
+			for j := 0; j < b.N; j++ {
+				gateSink, _ = tf.CheckRequestURL(u)
+			}
+		}))
+		legacyRounds = append(legacyRounds, testing.Benchmark(func(b *testing.B) {
+			for j := 0; j < b.N; j++ {
+				gateSink, _ = tf.CheckURL(u.String())
+			}
+		}))
+	}
+	fast, legacy := bestNsPerOp(fastRounds), bestNsPerOp(legacyRounds)
+	if fast <= 0 || legacy <= 0 {
+		t.Skipf("unusable measurement (fast=%d legacy=%d ns/op)", fast, legacy)
+	}
+	if ratio := float64(legacy) / float64(fast); ratio < gateTimingMargin {
+		t.Errorf("CheckRequestURL %d ns/op vs CheckURL(u.String()) %d ns/op = %.2fx, want >= %.2fx — "+
+			"the parsed-URL path is no longer meaningfully cheaper than the serialise-and-reparse round trip it replaced",
+			fast, legacy, ratio, gateTimingMargin)
 	}
 }
