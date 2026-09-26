@@ -336,29 +336,30 @@ func (r *IdPRegistry) Upsert(p *IdPProfile) error {
 	// EDIT of a profile that IS registered leaves the existing provider (and
 	// its legitimate episode) in place, so forgetting there would delete a real
 	// outage signal. Read under the lock, before anything can change it.
-	alreadyRegistered := false
+	// It is NOT enough for the id to be registered: the episode describes a
+	// fetch against a SOURCE, so an edit that reuses an id and repoints it at a
+	// different (unreachable) issuer leaves an episode that belongs to the
+	// CANDIDATE, not to the profile that stays live — see
+	// idpEpisodeBelongsToLive.
+	var liveProfile *IdPProfile
 	for _, existing := range r.profiles {
 		if existing.ID == p.ID {
-			alreadyRegistered = true
+			liveProfile = existing
 			break
 		}
 	}
+	episodeSurvivesRefusal := idpEpisodeBelongsToLive(liveProfile, p)
 
 	var compiled IdentityProvider
 	if p.Enabled {
 		prov, err := compileIdPProfile(p)
 		if err != nil {
-			if !alreadyRegistered {
+			if !episodeSurvivesRefusal {
 				forgetIdPMetadataEpisode(p.ID)
 			}
 			return fmt.Errorf("idp compile error: %w", err)
 		}
 		compiled = prov
-	}
-	// A profile that is being stored DISABLED has no remote fetch to recover,
-	// so any episode it carries can never be cleared by evidence again.
-	if !p.Enabled {
-		defer forgetIdPMetadataEpisode(p.ID)
 	}
 
 	// Build the CANDIDATE state on copies — the published slice/map must not
@@ -390,7 +391,51 @@ func (r *IdPRegistry) Upsert(p *IdPProfile) error {
 		return err // old profiles + old live providers stay authoritative
 	}
 	r.profiles, r.live = nextProfiles, nextLive
+
+	// A profile stored DISABLED has no remote fetch left, so any episode it
+	// carries can never be cleared by evidence again. This runs only AFTER
+	// persistence lands: on a failed write the OLD enabled profile and its live
+	// provider stay authoritative, so clearing here would erase a genuine
+	// outage signal and suppress its alert (Codex review round 3).
+	if !p.Enabled {
+		forgetIdPMetadataEpisode(p.ID)
+	}
 	return nil
+}
+
+// idpRemoteDocumentSource reports the REMOTE document source a profile depends
+// on — the OIDC issuer or the SAML metadata URL — and "" for a profile that
+// fetches nothing (inline SAML metadata, LDAP, a disabled/unset config).
+//
+// It exists because a metadata failure episode is keyed by profile ID alone,
+// while what the episode actually describes is a failed fetch against a
+// SOURCE. Deciding who owns an episode by ID only is wrong whenever an edit
+// REUSES an id and changes the source: the episode was opened by compiling the
+// candidate, so it belongs to the candidate's source, not to the still-live
+// profile's (Codex review round 3).
+func idpRemoteDocumentSource(p *IdPProfile) string {
+	if p == nil {
+		return ""
+	}
+	switch p.Type {
+	case IdPTypeOIDC:
+		if p.OIDC != nil {
+			return p.OIDC.Issuer
+		}
+	case IdPTypeSAML:
+		if p.SAML != nil {
+			return p.SAML.MetadataURL
+		}
+	}
+	return ""
+}
+
+// idpEpisodeBelongsToLive reports whether a failure episode left behind by
+// compiling `candidate` describes the profile that REMAINS authoritative.
+// It does only when that profile fetches from the SAME non-empty remote source.
+func idpEpisodeBelongsToLive(live, candidate *IdPProfile) bool {
+	liveSrc := idpRemoteDocumentSource(live)
+	return liveSrc != "" && liveSrc == idpRemoteDocumentSource(candidate)
 }
 
 func validateSAMLProfileConfig(cfg *SAMLProfileConfig) error {
@@ -404,7 +449,15 @@ func validateSAMLProfileConfig(cfg *SAMLProfileConfig) error {
 		return fmt.Errorf("name_id_format: %w", err)
 	}
 	if cfg.MetadataURL != "" {
-		if err := validateExternalURL(cfg.MetadataURL); err != nil {
+		// STRUCTURAL, deliberately, and for exactly the reason the OIDC issuer
+		// gate is (CHAOS-71 rounds 2/3). Admission runs BEFORE compilation and
+		// the last-known-good cache lives BEHIND it, so a resolving check here
+		// refuses the admin write — and aborts the whole CP->DP snapshot via
+		// ReplaceAll — during a resolver outage this node could have ridden out
+		// from cache. The DNS-backed check stays INLINE in
+		// fetchSAMLMetadataOverNetwork, where its failure is a failed FETCH and
+		// therefore routes to resolveIdPDocument.
+		if err := validateExternalURLStructure(cfg.MetadataURL); err != nil {
 			return fmt.Errorf("metadata_url: %w", err)
 		}
 	}
@@ -496,17 +549,21 @@ func (r *IdPRegistry) ReplaceAll(profiles []*IdPProfile) error {
 	// behind has no owner and nothing could ever clear it; one that IS among
 	// them keeps its episode, which belongs to the still-authoritative
 	// provider this rejected snapshot did not replace.
-	registered := r.registeredIDs()
-	forgetUnregistered := func(id string) {
-		if _, ok := registered[id]; !ok {
-			forgetIdPMetadataEpisode(id)
+	registered := r.registeredProfiles()
+	// Same source-awareness as Upsert: an id being registered is not enough.
+	// A snapshot that reuses an id and repoints it at a different unreachable
+	// source leaves an episode belonging to the CANDIDATE, so the still-live
+	// profile must not inherit it (Codex review round 3).
+	forgetUnowned := func(candidate *IdPProfile) {
+		if !idpEpisodeBelongsToLive(registered[candidate.ID], candidate) {
+			forgetIdPMetadataEpisode(candidate.ID)
 		}
 	}
 
 	for _, p := range nextProfiles {
 		normalizeIdPProfileWriteInput(p)
 		if err := validateIdPProfile(p); err != nil {
-			forgetUnregistered(p.ID)
+			forgetUnowned(p)
 			return err
 		}
 		if !p.Enabled {
@@ -514,7 +571,7 @@ func (r *IdPRegistry) ReplaceAll(profiles []*IdPProfile) error {
 		}
 		prov, err := compileIdPProfile(p)
 		if err != nil {
-			forgetUnregistered(p.ID)
+			forgetUnowned(p)
 			return fmt.Errorf("idp %q compile error: %w", p.ID, err)
 		}
 		nextLive[p.ID] = prov
@@ -544,15 +601,18 @@ func (r *IdPRegistry) ReplaceAll(profiles []*IdPProfile) error {
 	return nil
 }
 
-// registeredIDs snapshots the ids currently stored in the registry.
-func (r *IdPRegistry) registeredIDs() map[string]struct{} {
+// registeredProfiles snapshots the profiles currently stored in the registry,
+// keyed by id. The PROFILE is carried, not just the id, because episode
+// ownership depends on the remote source it fetches from — see
+// idpEpisodeBelongsToLive.
+func (r *IdPRegistry) registeredProfiles() map[string]*IdPProfile {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	ids := make(map[string]struct{}, len(r.profiles))
+	out := make(map[string]*IdPProfile, len(r.profiles))
 	for _, p := range r.profiles {
-		ids[p.ID] = struct{}{}
+		out[p.ID] = p
 	}
-	return ids
+	return out
 }
 
 // validateReservedIdPNaming rejects IdP profile IDs and names that collide with

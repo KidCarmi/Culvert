@@ -1127,6 +1127,18 @@ func TestChaos71_RejectedCandidateLeavesNoEpisode(t *testing.T) {
 // P2, the other direction: a profile that IS registered keeps its episode when
 // an EDIT of it is refused — the existing provider is still authoritative and
 // still down, so deleting that signal would hide a real outage.
+//
+// NOTE ON WHAT THIS ACTUALLY COVERS (corrected in round 3). The candidate here
+// carries `ftp://nope`, so `validateUpsertProfile` refuses it BEFORE the lock
+// and before any episode logic runs — this gate therefore pins the
+// VALIDATION-refusal path, on which no forget is reachable at all. That is a
+// real path worth pinning, but it is NOT the compile-refusal path the comment
+// above describes, and reading it as such is how a gate comes to pass for a
+// reason other than the one it claims. The compile-refusal path — where the
+// forget decision actually lives — is covered by
+// TestChaos71_RejectedEditOnTheSameSourceKeepsTheEpisode and
+// TestChaos71_RejectedReusedIDWithADifferentSourceLeavesNoEpisode, which use a
+// structurally valid but unresolvable issuer so admission passes.
 func TestChaos71_RejectedEditKeepsTheLiveProfilesEpisode(t *testing.T) {
 	chaos71Env(t)
 	idpMetadataEverUsed.Store(true)
@@ -1147,5 +1159,254 @@ func TestChaos71_RejectedEditKeepsTheLiveProfilesEpisode(t *testing.T) {
 	_ = reg.Upsert(bad)
 	if !idpMetadataState().Failing {
 		t.Fatal("a refused EDIT must not delete the live profile's episode")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Codex review round 3. Four findings, each verified against its pre-fix shape.
+// ---------------------------------------------------------------------------
+
+// ROUND 3 P1. The headline defect a THIRD time, on the SAML half: round 2
+// converted the OIDC issuer gates to the structural validator and left
+// validateSAMLProfileConfig resolving, so one unresolvable metadata host still
+// refused an admin write and aborted the whole CP->DP snapshot. Driven through
+// ReplaceAll — the outermost caller — because that is the lesson of round 2: a
+// gate entering below the layer that refuses cannot observe a refusal.
+func TestChaos71_SAMLAdmissionSurvivesAnUnresolvableMetadataHost(t *testing.T) {
+	store := chaos71Env(t)
+
+	const metaURL = "https://saml-idp-that-does-not-resolve.invalid/metadata"
+	xml := chaos71MetadataXML(t, "round3-saml")
+	if err := store.Put("dp-saml", idpmeta.KindSAMLMetadata, metaURL, []byte(xml)); err != nil {
+		t.Fatalf("seed last-known-good: %v", err)
+	}
+
+	reg := &IdPRegistry{live: make(map[string]IdentityProvider)}
+	profile := &IdPProfile{
+		ID: "dp-saml", Name: "dp-saml", Type: IdPTypeSAML, Enabled: true,
+		SAML: &SAMLProfileConfig{MetadataURL: metaURL},
+	}
+	if err := reg.ReplaceAll([]*IdPProfile{profile}); err != nil {
+		t.Fatalf("an unresolvable SAML metadata host with a valid cached document "+
+			"must not abort the config snapshot: %v", err)
+	}
+	if _, ok := reg.live["dp-saml"]; !ok {
+		t.Fatal("the SAML profile should have compiled from the cached document")
+	}
+}
+
+// The configuration half of the same split: a genuine SAML misconfiguration
+// must still fail FAST. Deliberately NOT chaos71Env — that helper allows
+// loopback, which would let a private literal through.
+func TestChaos71_SAMLAdmissionStillRefusesBadConfiguration(t *testing.T) {
+	for _, bad := range []string{"not-a-url", "ftp://idp.example", "https://127.0.0.1", "https://10.0.0.1"} {
+		cfg := &SAMLProfileConfig{MetadataURL: bad}
+		if err := validateSAMLProfileConfig(cfg); err == nil {
+			t.Errorf("a SAML configuration error must still fail fast: metadata_url %q", bad)
+		}
+	}
+}
+
+// ROUND 3 P2. Episode ownership is decided by SOURCE, not by id alone. An edit
+// that REUSES a registered id and repoints it at a different unreachable source
+// leaves an episode opened by the CANDIDATE's fetch; the profile that stays
+// authoritative never had that dependency, so inheriting it reports an
+// indefinite outage against the published configuration.
+//
+// Both halves use a structurally VALID but unresolvable issuer, so admission
+// passes and the failure happens in COMPILE — which is where the episode is
+// opened and where the forget decision lives.
+func TestChaos71_RejectedReusedIDWithADifferentSourceLeavesNoEpisode(t *testing.T) {
+	chaos71Env(t)
+	idpMetadataEverUsed.Store(true)
+
+	reg := &IdPRegistry{
+		live: make(map[string]IdentityProvider),
+		profiles: []*IdPProfile{{
+			ID: "shared-id", Name: "shared-id", Type: IdPTypeOIDC, Enabled: true,
+			OIDC: &OIDCProfileConfig{
+				Issuer: "https://idp-a-live.invalid", ClientID: "c", ClientSecret: "s",
+			},
+		}},
+	}
+
+	// The candidate repoints the SAME id at a DIFFERENT unreachable issuer.
+	candidate := &IdPProfile{
+		ID: "shared-id", Name: "shared-id", Type: IdPTypeOIDC, Enabled: true,
+		OIDC: &OIDCProfileConfig{
+			Issuer: "https://idp-b-candidate.invalid", ClientID: "c", ClientSecret: "s",
+		},
+	}
+	if err := reg.Upsert(candidate); err == nil {
+		t.Fatal("precondition: an unreachable issuer with nothing cached must be refused")
+	}
+	if idpMetadataState().Failing {
+		t.Fatal("an episode opened against the CANDIDATE's source must not be " +
+			"inherited by the profile that stays live on a different source")
+	}
+}
+
+// The CONTROL, and the one that makes the rule non-vacuous: when the candidate
+// keeps the SAME source as the live profile, the episode describes a dependency
+// the live provider really does have, so it must SURVIVE the refusal. The
+// cheapest way to pass the gate above is to forget unconditionally, which would
+// delete a real outage signal.
+func TestChaos71_RejectedEditOnTheSameSourceKeepsTheEpisode(t *testing.T) {
+	chaos71Env(t)
+	idpMetadataEverUsed.Store(true)
+
+	const issuer = "https://idp-shared-source.invalid"
+	reg := &IdPRegistry{
+		live: make(map[string]IdentityProvider),
+		profiles: []*IdPProfile{{
+			ID: "shared-id", Name: "shared-id", Type: IdPTypeOIDC, Enabled: true,
+			OIDC: &OIDCProfileConfig{Issuer: issuer, ClientID: "c", ClientSecret: "s"},
+		}},
+	}
+
+	candidate := &IdPProfile{
+		ID: "shared-id", Name: "shared-id", Type: IdPTypeOIDC, Enabled: true,
+		OIDC: &OIDCProfileConfig{Issuer: issuer, ClientID: "c", ClientSecret: "other"},
+	}
+	if err := reg.Upsert(candidate); err == nil {
+		t.Fatal("precondition: an unreachable issuer with nothing cached must be refused")
+	}
+	if !idpMetadataState().Failing {
+		t.Fatal("a refused edit on the SAME source must keep the live profile's " +
+			"episode — that outage is real and deleting it hides it")
+	}
+}
+
+// ROUND 3 P2. The cached bytes go through the caller's validator BEFORE the
+// stale outcome is recorded. Validating only the FETCHED bytes let the stale
+// path claim a compile that never happened: the counter moved, the log said
+// compilation was continuing, and the caller then rejected the document.
+func TestChaos71_UnusableCachedDocumentIsNotReportedAsServed(t *testing.T) {
+	store := chaos71Env(t)
+	idpMetadataEverUsed.Store(true)
+
+	const src = "https://idp.example/.well-known/openid-configuration"
+	if err := store.Put("corrupt", idpmeta.KindOIDCDiscovery, src, []byte("{not-usable}")); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	fetchErr := fmt.Errorf("dial tcp: no such host")
+	reject := func([]byte) error { return fmt.Errorf("cannot parse") }
+
+	got, err := resolveIdPDocument("corrupt", idpmeta.KindOIDCDiscovery, src, nil, fetchErr, reject)
+	if err == nil {
+		t.Fatal("a cached document the caller cannot use is not a fallback — " +
+			"resolveIdPDocument must return the fetch error")
+	}
+	if got != nil {
+		t.Fatalf("no document should be handed back, got %d bytes", len(got))
+	}
+	st := idpMetadataState()
+	if st.StaleServed != 0 {
+		t.Errorf("an unusable cached document must not be counted as stale-SERVED, got %d", st.StaleServed)
+	}
+	if !st.Failing {
+		t.Error("the profile is dark, so the episode must stay open")
+	}
+}
+
+// The CONTROL: a cached document the caller CAN use is still served stale. The
+// cheapest way to pass the gate above is to stop trusting the cache at all,
+// which would delete the entire last-known-good mechanism this sweep exists for.
+func TestChaos71_UsableCachedDocumentIsStillServedStale(t *testing.T) {
+	store := chaos71Env(t)
+	idpMetadataEverUsed.Store(true)
+
+	const src = "https://idp.example/.well-known/openid-configuration"
+	doc := []byte(`{"issuer":"https://idp.example"}`)
+	if err := store.Put("good", idpmeta.KindOIDCDiscovery, src, doc); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	got, err := resolveIdPDocument("good", idpmeta.KindOIDCDiscovery, src, nil,
+		fmt.Errorf("dial tcp: no such host"), func([]byte) error { return nil })
+	if err != nil {
+		t.Fatalf("a usable cached document must still be served: %v", err)
+	}
+	if string(got) != string(doc) {
+		t.Fatalf("the cached document should come back verbatim, got %q", got)
+	}
+	if idpMetadataState().StaleServed == 0 {
+		t.Error("serving from cache must be counted as stale-served")
+	}
+}
+
+// ROUND 3 P2. Clearing a disabled profile's episode is a DURABLE transition, so
+// it happens only after the write lands. On a persist failure the OLD enabled
+// profile and its live provider stay authoritative, so clearing there erases a
+// genuine outage signal and suppresses its alert.
+func TestChaos71_DisableClearsTheEpisodeOnlyAfterPersistSucceeds(t *testing.T) {
+	chaos71Env(t)
+	idpMetadataEverUsed.Store(true)
+
+	// A path that cannot be written: the parent is a FILE, not a directory.
+	blocker := filepath.Join(t.TempDir(), "not-a-dir")
+	if err := os.WriteFile(blocker, []byte("x"), 0o600); err != nil {
+		t.Fatalf("seed blocker: %v", err)
+	}
+	reg := &IdPRegistry{
+		live: make(map[string]IdentityProvider),
+		path: filepath.Join(blocker, "profiles.json"),
+		profiles: []*IdPProfile{{
+			ID: "going-dark", Name: "going-dark", Type: IdPTypeOIDC, Enabled: true,
+			OIDC: &OIDCProfileConfig{
+				Issuer: "https://idp-live.invalid", ClientID: "c", ClientSecret: "s",
+			},
+		}},
+	}
+	noteIdPMetadataOutcome("going-dark", idpMetaUnavailable, fmt.Errorf("down"))
+	if !idpMetadataState().Failing {
+		t.Fatal("precondition: the live profile must have an open episode")
+	}
+
+	disabled := &IdPProfile{
+		ID: "going-dark", Name: "going-dark", Type: IdPTypeOIDC, Enabled: false,
+		OIDC: &OIDCProfileConfig{
+			Issuer: "https://idp-live.invalid", ClientID: "c", ClientSecret: "s",
+		},
+	}
+	if err := reg.Upsert(disabled); err == nil {
+		t.Fatal("precondition: the persist must fail for this gate to mean anything")
+	}
+	if !idpMetadataState().Failing {
+		t.Fatal("a FAILED disable leaves the enabled profile authoritative and " +
+			"still down — its episode must not be erased")
+	}
+}
+
+// The CONTROL: a disable that PERSISTS does clear the episode, because the
+// profile then really has no remote fetch left to produce evidence.
+func TestChaos71_PersistedDisableClearsTheEpisode(t *testing.T) {
+	chaos71Env(t)
+	idpMetadataEverUsed.Store(true)
+
+	reg := &IdPRegistry{
+		live: make(map[string]IdentityProvider),
+		path: filepath.Join(t.TempDir(), "profiles.json"),
+		profiles: []*IdPProfile{{
+			ID: "going-dark", Name: "going-dark", Type: IdPTypeOIDC, Enabled: true,
+			OIDC: &OIDCProfileConfig{
+				Issuer: "https://idp-live.invalid", ClientID: "c", ClientSecret: "s",
+			},
+		}},
+	}
+	noteIdPMetadataOutcome("going-dark", idpMetaUnavailable, fmt.Errorf("down"))
+
+	disabled := &IdPProfile{
+		ID: "going-dark", Name: "going-dark", Type: IdPTypeOIDC, Enabled: false,
+		OIDC: &OIDCProfileConfig{
+			Issuer: "https://idp-live.invalid", ClientID: "c", ClientSecret: "s",
+		},
+	}
+	if err := reg.Upsert(disabled); err != nil {
+		t.Fatalf("a disable with a writable path must succeed: %v", err)
+	}
+	if idpMetadataState().Failing {
+		t.Fatal("a PERSISTED disable leaves no remote fetch, so the episode must be cleared")
 	}
 }

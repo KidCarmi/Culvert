@@ -144,6 +144,24 @@ func resolveIdPDocument(profileID string, kind idpmeta.Kind, source string, doc 
 		noteIdPMetadataOutcome(profileID, idpMetaUnavailable, fetchErr)
 		return nil, fetchErr
 	}
+	// The CACHED bytes go through the caller's validator too, BEFORE this is
+	// reported as a stale-but-usable service (Codex review round 3). Validating
+	// only the fetched bytes made the stale path claim a compile that did not
+	// happen: same-length disk corruption, or a validator tightened across an
+	// upgrade, yields bytes the caller then rejects, while
+	// culvert_idp_metadata_stale_served_total had already counted a success and
+	// the log line had already said compilation was continuing. A cached
+	// document the caller cannot use is not a fallback, so it is reported as
+	// UNAVAILABLE and the original fetch error is returned unchanged — the same
+	// verdict as having nothing cached at all.
+	if validate != nil {
+		if vErr := validate(cached); vErr != nil {
+			noteIdPMetadataOutcome(profileID, idpMetaUnavailable, fetchErr)
+			logger.Printf("IdP[%s]: metadata fetch failed (%v) AND the cached document fetched %s ago is no longer usable (%v) — this profile cannot be compiled",
+				sanitizeLog(profileID), sanitizeLog(fmt.Sprint(fetchErr)), age.Round(time.Second), sanitizeLog(fmt.Sprint(vErr)))
+			return nil, fetchErr
+		}
+	}
 	noteIdPMetadataOutcome(profileID, idpMetaStale, fetchErr)
 	logger.Printf("IdP[%s]: metadata fetch failed (%v) — continuing from the cached document fetched %s ago (refused past %s)",
 		sanitizeLog(profileID), sanitizeLog(fmt.Sprint(fetchErr)), age.Round(time.Second), idpmetaStaleMaxAgeString())
