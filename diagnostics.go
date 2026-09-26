@@ -559,8 +559,9 @@ func checkOversizeConfiguredUsernames() OperatorContractCheck {
 	for _, u := range cfg.ListUIUsers() {
 		names[u.Username] = struct{}{}
 	}
-	legacyOversize := false
+	legacyOversize, legacyMirrored := false, false
 	if legacy := cfg.GetUser(); legacy != "" {
+		_, legacyMirrored = names[legacy]
 		names[legacy] = struct{}{}
 		legacyOversize = len(legacy) > adminUsernameAccountLimit
 	}
@@ -607,9 +608,13 @@ func checkOversizeConfiguredUsernames() OperatorContractCheck {
 		// so the step must require a new password, not just a new name.
 		action += " The oversize name includes the legacy single-user login, which Admin Users alone cannot change: " +
 			"set a shorter login under Settings (POST /api/settings) together with a new strong password in the same save " +
-			"(Settings sets the password it is given — never leave the password blank), sign in with it, then delete the old name's " +
-			"remaining Admin Users entry (Settings adds the new name but does not remove the old one), and update " +
-			"-user / auth.user if it is set at startup (it is re-applied on every boot)."
+			"(Settings sets the password it is given — never leave the password blank), sign in with it, "
+		if legacyMirrored {
+			// Only a mirrored legacy name has a roster entry to remove; a
+			// legacy-only name is retired by overwriting cfg.user alone.
+			action += "then delete the old name's remaining Admin Users entry (Settings adds the new name but does not remove the old one), "
+		}
+		action += "and update -user / auth.user if it is set at startup (it is re-applied on every boot)."
 	}
 	if totpOversize {
 		// TOTP enrollment is keyed by username and never carried to a new

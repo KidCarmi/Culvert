@@ -1649,6 +1649,12 @@ func TestApiDiagnostics_OversizeLegacyUsernameSurfacedOnContract(t *testing.T) {
 	if !strings.Contains(found.OperatorAction, "never leave the password blank") {
 		t.Errorf("admin_username_length operator_action = %q, want an explicit new-password requirement for the Settings step", found.OperatorAction)
 	}
+	// The legacy name has no Admin Users row here, so the mirror-cleanup
+	// step would be impossible to perform: overwriting cfg.user alone
+	// resolves it, and the action must not prescribe a roster delete.
+	if strings.Contains(found.OperatorAction, "delete the old name") {
+		t.Errorf("admin_username_length operator_action = %q, must not prescribe deleting a roster entry that does not exist", found.OperatorAction)
+	}
 	if strings.Contains(found.Message, longName) {
 		t.Error("admin_username_length message should not echo the username itself")
 	}
