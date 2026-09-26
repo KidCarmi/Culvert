@@ -1179,7 +1179,23 @@ func TestChaos69_DefectAdminMatchersReceiveTheBoundedHost(t *testing.T) {
 // shown a NARROWER scope than production enforces.
 func TestChaos69_DefectPolicyTesterStage1MatchesTheRuntimeHost(t *testing.T) {
 	chaos66Isolate(t)
-	snapshotPolicyStoreForTest(t)
+	// draftTestSetup snapshots the policy store, resets the draft candidate and
+	// pins requireCommit=false with restore. All three matter here and none is
+	// optional: apiPolicyTest evaluates effectivePolicySnapshot(), so a leaked
+	// armed Draft Mode would have it read an empty candidate instead of the rule
+	// below — an order-dependent failure visible only under -shuffle.
+	draftTestSetup(t)
+	// The Exempt kill switch is a process-global atomic any test can set, and a
+	// leaked one suppresses a matching Exempt rule (resolveAuthOutcomeFrom
+	// continues past it), so this gate would fail for a reason that has nothing
+	// to do with what it measures. Pin it explicitly rather than inheriting it.
+	prevKill := authExemptDisabledRuntime.Load()
+	setAuthExemptDisabled(false)
+	t.Cleanup(func() { setAuthExemptDisabled(prevKill) })
+	if authExemptKillSwitchEngaged() {
+		t.Skip("the Exempt kill switch is engaged by the environment (CULVERT_AUTH_BYPASS_DISABLE); " +
+			"this gate measures a scoped Exempt rule and cannot run under it")
+	}
 	authority, bare := chaos69PortShaped()
 	swapCatStore(t, []*urlcat.Entry{{Name: "Social Media", Hosts: []string{bare}}})
 
@@ -1191,13 +1207,18 @@ func TestChaos69_DefectPolicyTesterStage1MatchesTheRuntimeHost(t *testing.T) {
 			All: []SubjectPredicate{{Type: subjectPredicateCIDR, Values: []string{"10.0.0.0/8"}}}},
 		Auth: &AuthRuleSpec{Outcome: OutcomeExempt, Owner: "ops", Reason: "chaos69"},
 	}})
-	if len(policyStore.List()) != 1 {
-		t.Fatalf("the auth rule was dropped on replace; this gate needs it to survive validation")
+	// Assert on what the HANDLER will evaluate, not on the running store: if the
+	// two ever disagree the gate must fail here with a clear reason rather than
+	// later with a confusing one.
+	effective, rulebase := effectivePolicySnapshot()
+	if len(effective) != 1 {
+		t.Fatalf("effectivePolicySnapshot() has %d rules (rulebase=%q), want 1 — the auth rule was dropped on "+
+			"replace or a leaked Draft Mode is shadowing the running store", len(effective), rulebase)
 	}
 
 	// The runtime gate's own answer for this authority, via the production
 	// strip — the value the simulator must agree with.
-	runtime := resolveAuthOutcomeFrom(policyStore.List(), authRequestContext(
+	runtime := resolveAuthOutcomeFrom(effective, authRequestContext(
 		&http.Request{Method: http.MethodGet, Host: authority, Header: http.Header{}}, "10.1.2.3"))
 	if runtime.Outcome != OutcomeExempt || runtime.Rule == nil {
 		t.Fatalf("runtime Stage-1 = %q (ruleNil=%v); this gate needs the live gate to exempt this authority",
