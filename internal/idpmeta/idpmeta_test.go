@@ -240,3 +240,120 @@ func TestStore_SurvivesProcessRestart(t *testing.T) {
 		t.Fatalf("doc = %q", doc)
 	}
 }
+
+// ── Bounded cache reads (Codex review round 11) ──────────────────────────────
+
+// docPathFor returns the on-disk document path for an entry, so a test can
+// corrupt the cache the way corruption, a malformed restore or a local
+// modification would — which is the only way to reach the branches below.
+func docPathFor(s *Store, profileID string, kind Kind, source string) string {
+	return filepath.Join(s.dir, docFileName(key(profileID, kind, source)))
+}
+
+// TestGet_OversizeDocumentIsAMiss is the defect gate, and the divergence it
+// reproduces is stronger than "allocates before rejecting": the pre-fix Get
+// SERVED the over-cap document. os.ReadFile sized its buffer from the FILE, so
+// when the file and the recorded length AGREE the only surviving check
+// (len(b) != e.Bytes) passes and the document is returned — MaxDocumentBytes
+// bounded Put and bounded nothing on the read path, which is the boot path and
+// every profile compile.
+//
+// The file is therefore grown to match the over-cap recorded length. An earlier
+// version of this gate set only the recorded length and left the file small, so
+// the pre-fix shape rejected it on the length comparison and the gate PASSED
+// against the defect — vacuous, which this repo holds to be worse than no gate.
+// Mutation-verified against the reintroduced os.ReadFile shape.
+func TestGet_OversizeDocumentIsAMiss(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.Put("corp", KindSAMLMetadata, "https://idp.example/md", []byte("<EntityDescriptor/>")); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	oversize := MaxDocumentBytes + 1
+	p := docPathFor(s, "corp", KindSAMLMetadata, "https://idp.example/md")
+	if err := os.WriteFile(p, make([]byte, oversize), 0o600); err != nil {
+		t.Fatalf("grow the cached document: %v", err)
+	}
+	// Make the index agree with the file, as a corrupt or hand-edited index can,
+	// so that ONLY the range check can reject it.
+	s.mu.Lock()
+	s.entries[key("corp", KindSAMLMetadata, "https://idp.example/md")].Bytes = oversize
+	s.mu.Unlock()
+
+	doc, _, err := s.Get("corp", KindSAMLMetadata, "https://idp.example/md")
+	if err != ErrNoEntry {
+		t.Fatalf("Get on an over-cap document = %v, want ErrNoEntry", err)
+	}
+	if doc != nil {
+		t.Fatalf("Get returned %d bytes for an over-cap document; the cap is not a backstop on the read path", len(doc))
+	}
+}
+
+// TestGet_ZeroOrNegativeRecordedLengthIsAMiss covers the other end of the range
+// check. A zero length would otherwise allocate nothing and hand a parser an
+// empty document, which Put refuses to create in the first place.
+func TestGet_ZeroOrNegativeRecordedLengthIsAMiss(t *testing.T) {
+	for _, n := range []int{0, -1} {
+		s := newTestStore(t)
+		if err := s.Put("corp", KindSAMLMetadata, "https://idp.example/md", []byte("<EntityDescriptor/>")); err != nil {
+			t.Fatalf("Put: %v", err)
+		}
+		s.mu.Lock()
+		k := key("corp", KindSAMLMetadata, "https://idp.example/md")
+		e := s.entries[k]
+		e.Bytes = n
+		s.entries[k] = e
+		s.mu.Unlock()
+		if _, _, err := s.Get("corp", KindSAMLMetadata, "https://idp.example/md"); err != ErrNoEntry {
+			t.Fatalf("Get with recorded length %d = %v, want ErrNoEntry", n, err)
+		}
+	}
+}
+
+// TestGet_LengthMismatchIsAMissInBothDirections pins the equivalence the
+// replaced `len(b) != e.Bytes` check provided. io.ReadFull cannot see trailing
+// bytes, so the longer case needs its own probe; without it a file with extra
+// bytes would be accepted and a PREFIX of it handed to a parser as though it
+// were the whole document.
+func TestGet_LengthMismatchIsAMissInBothDirections(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		doc  string
+	}{
+		{"shorter than recorded", "<EntityDesc"},
+		{"longer than recorded", "<EntityDescriptor/>trailing"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newTestStore(t)
+			if err := s.Put("corp", KindSAMLMetadata, "https://idp.example/md", []byte("<EntityDescriptor/>")); err != nil {
+				t.Fatalf("Put: %v", err)
+			}
+			p := docPathFor(s, "corp", KindSAMLMetadata, "https://idp.example/md")
+			if err := os.WriteFile(p, []byte(tc.doc), 0o600); err != nil {
+				t.Fatalf("corrupt the document: %v", err)
+			}
+			if _, _, err := s.Get("corp", KindSAMLMetadata, "https://idp.example/md"); err != ErrNoEntry {
+				t.Fatalf("Get = %v, want ErrNoEntry", err)
+			}
+		})
+	}
+}
+
+// TestGet_HealthyDocumentStillRoundTripsAfterTheBound is the CONTROL. The
+// cheapest way to pass every gate above is a Get that refuses everything, which
+// would silently delete the entire last-known-good fallback this package exists
+// to provide.
+func TestGet_HealthyDocumentStillRoundTripsAfterTheBound(t *testing.T) {
+	s := newTestStore(t)
+	doc := []byte("<EntityDescriptor id=\"exactly-this\"/>")
+	if err := s.Put("corp", KindSAMLMetadata, "https://idp.example/md", doc); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	got, _, err := s.Get("corp", KindSAMLMetadata, "https://idp.example/md")
+	if err != nil {
+		t.Fatalf("Get on a healthy entry: %v", err)
+	}
+	if string(got) != string(doc) {
+		t.Fatalf("doc = %q, want %q", got, doc)
+	}
+}

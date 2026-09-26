@@ -56,6 +56,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -237,8 +238,38 @@ func (s *Store) Get(profileID string, kind Kind, source string) (doc []byte, age
 	if age < 0 || age >= StaleMaxAge {
 		return nil, age, ErrNoEntry
 	}
-	b, readErr := os.ReadFile(filepath.Join(s.dir, docFileName(k))) // #nosec G304 -- derived from a hash of the key, never from file content
-	if readErr != nil || len(b) != e.Bytes {
+	// BOUND THE READ BEFORE ALLOCATING (Codex review round 11). The recorded
+	// length is INDEX data, and an index is a file: corruption, a malformed
+	// restore or a local modification can put any value there, so it is
+	// range-checked before it is trusted to size an allocation.
+	//
+	// This replaced os.ReadFile, which sizes its buffer from the FILE. An
+	// oversized .doc was therefore fully resident before `len(b) != e.Bytes`
+	// rejected it, so MaxDocumentBytes was a backstop on Put only — i.e. not a
+	// backstop at all on the path that reads bytes this process did not just
+	// produce, and that path is the BOOT path and every profile compile. The
+	// failure mode it left open is memory exhaustion at startup, which for an
+	// in-line gateway is a traffic outage, reached from a cache entry whose whole
+	// contract is that it may be discarded at any time.
+	if e.Bytes <= 0 || e.Bytes > MaxDocumentBytes {
+		return nil, age, ErrNoEntry
+	}
+	f, openErr := os.Open(filepath.Join(s.dir, docFileName(k))) // #nosec G304 -- derived from a hash of the key, never from file content
+	if openErr != nil {
+		return nil, age, ErrNoEntry
+	}
+	defer func() { _ = f.Close() }()
+	b := make([]byte, e.Bytes)
+	if _, readErr := io.ReadFull(f, b); readErr != nil {
+		return nil, age, ErrNoEntry
+	}
+	// A file LONGER than the recorded length is a mismatch exactly as a shorter
+	// one is, and that equivalence is what the replaced `len(b) != e.Bytes`
+	// check provided. io.ReadFull cannot see trailing bytes, so probe one past
+	// the recorded length: any byte there means the file and the index disagree
+	// and the entry is a MISS, never a truncated document handed to a parser.
+	var probe [1]byte
+	if n, _ := f.Read(probe[:]); n != 0 {
 		return nil, age, ErrNoEntry
 	}
 	return b, age, nil
