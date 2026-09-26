@@ -405,7 +405,26 @@ func runIdPRecoveryLoop(ctx context.Context) {
 				recovered++
 				logger.Printf("IDP_RECOVERED idp=%q — provider compiled and is now live; browser SSO is available again without a restart",
 					sanitizeLog(dc.candidate.ID))
+				continue
 			}
+			// The compile SUCCEEDED and its document is now the cached
+			// last-known-good, but publication lost the race: the profile went
+			// live, was disabled, or moved to a newer generation while this
+			// fetch was reaching the network (Codex round 18).
+			//
+			// Refusing to publish is correct and must stay — the provider was
+			// compiled against a generation the admin has since replaced, so its
+			// discovered endpoints and metadata belong to a configuration that is
+			// no longer the one in service, and publishRecompiled's live-guard is
+			// what rounds 9, 10, 16 and 17 all rest on. What was wrong was doing
+			// it SILENTLY: a freshly fetched document then sits in the cache
+			// unread while the live provider serves an older one, which for SAML
+			// is newly published signing metadata going unadopted. Adopting it
+			// means recompiling the AUTHORITATIVE generation, i.e. a periodic
+			// refresh into the live registry — register row IDP-4, whose whole
+			// content is that this needs the transactional mutation model rather
+			// than a second publication path bolted onto this loop.
+			noteIdPRecoverySuperseded(dc.candidate.ID)
 		}
 		if recovered > 0 {
 			// Recovery on OBSERVED evidence: back off from the floor again so

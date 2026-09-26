@@ -3413,3 +3413,123 @@ func TestChaos71_SupersededCleanupIsExcludedByAWriterAndCompletes(t *testing.T) 
 		t.Fatal("the cleanup never completed after the writer released r.mu — blocking forever is not the fix")
 	}
 }
+
+// R18-D2 (P2, defect). A SUCCESSFUL RECOVERY WHOSE PUBLICATION LOSES THE RACE
+// MUST NOT BE DISCARDED SILENTLY.
+//
+// The recovery compile runs without r.mu because it reaches the network, so an
+// admin Upsert can publish the same profile — from the STALE cache — while the
+// fetch is in flight. publishRecompiled then correctly refuses to overwrite that
+// generation (its live-guard is what rounds 9, 10, 16 and 17 all rest on), and
+// the freshly fetched document is left in the cache unread while the live
+// provider keeps serving the older one. For SAML that is newly published signing
+// metadata going unadopted until the next compile.
+//
+// Publishing the discarded provider is NOT the fix: it was compiled against a
+// generation the admin has since replaced. Adopting the fresh document means
+// recompiling the AUTHORITATIVE generation — register row IDP-4. What this gate
+// pins is that the discard is VISIBLE, which is the half that can be fixed here.
+func TestChaos71_SupersededSuccessfulRecoveryIsCounted(t *testing.T) {
+	chaos71Env(t)
+	gate := newChaos71IdP(t)
+	corp := newChaos71IdP(t)
+
+	// Cache a document for corp while its server is healthy, then take it down
+	// so the intervening Upsert compiles from that cache rather than the wire.
+	if err := idpRegistry.Upsert(chaos71Profile("corp", corp.URL())); err != nil {
+		t.Fatalf("setup: seed corp's cache: %v", err)
+	}
+	corp.down.Store(true)
+
+	// Both profiles DARK, gate first so the loop parks on it before it reaches
+	// corp — the round-16 lesson: if the two operations in a race gate can block
+	// on the same resource they serialise and the gate passes for the wrong
+	// reason, so the thing that opens the window is never the thing under test.
+	idpRegistry.mu.Lock()
+	idpRegistry.profiles = []*IdPProfile{
+		chaos71Profile("gate", gate.URL()),
+		chaos71Profile("corp", corp.URL()),
+	}
+	idpRegistry.live = map[string]IdentityProvider{}
+	idpRegistry.mu.Unlock()
+
+	before := idpRecoverySuperseded.Load()
+	release := gate.holdRequests()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() { defer close(done); runIdPRecoveryLoop(ctx) }()
+
+	deadline := time.Now().Add(10 * time.Second)
+	for gate.hits.Load() == 0 {
+		if time.Now().After(deadline) {
+			release()
+			cancel()
+			<-done
+			t.Fatal("the recovery loop never reached the gating profile; the window was never opened")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	// The admin publishes corp from the stale cache while the loop is parked.
+	if err := idpRegistry.Upsert(chaos71Profile("corp", corp.URL())); err != nil {
+		release()
+		cancel()
+		<-done
+		t.Fatalf("the intervening Upsert must succeed from cache: %v", err)
+	}
+	// corp answers again, so the loop's own compile will fetch FRESH and succeed
+	// — which is the whole point: the work is good and gets thrown away.
+	corp.down.Store(false)
+	release()
+
+	deadline = time.Now().Add(15 * time.Second)
+	for idpRecoverySuperseded.Load() == before {
+		if time.Now().After(deadline) {
+			cancel()
+			<-done
+			t.Fatal("a successful recovery compile was discarded without being counted: a freshly fetched " +
+				"document is sitting in the cache unread while the live provider serves an older one, and " +
+				"nothing on any surface says so")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	cancel()
+	<-done
+}
+
+// R18-C2 (CONTROL). An ordinary recovery — no race — must publish and must NOT
+// be counted as superseded. The cheapest way to pass the gate above is to count
+// every recovery attempt, which would make the counter meaningless and turn a
+// healthy self-heal into a standing operator signal.
+func TestChaos71_OrdinaryRecoveryIsNotCountedAsSuperseded(t *testing.T) {
+	chaos71Env(t)
+	idp := newChaos71IdP(t)
+
+	idpRegistry.mu.Lock()
+	idpRegistry.profiles = []*IdPProfile{chaos71Profile("corp", idp.URL())}
+	idpRegistry.live = map[string]IdentityProvider{}
+	idpRegistry.mu.Unlock()
+
+	before := idpRecoverySuperseded.Load()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() { defer close(done); runIdPRecoveryLoop(ctx) }()
+
+	select {
+	case <-done:
+	case <-time.After(15 * time.Second):
+		cancel()
+		<-done
+		t.Fatal("a healthy recovery must publish and let the loop exit")
+	}
+
+	if got := idpRegistry.liveRemoteSource("corp"); got != idp.URL() {
+		t.Fatalf("the recovered provider must be live, live source is %q", got)
+	}
+	if n := idpRecoverySuperseded.Load(); n != before {
+		t.Fatalf("an ordinary recovery moved the superseded counter (%d -> %d): the counter no longer "+
+			"distinguishes a discarded fetch from a successful self-heal", before, n)
+	}
+}

@@ -1476,6 +1476,10 @@ culvert_idp_metadata_degraded %d
 # HELP culvert_idp_authz_endpoint_unverified_total OIDC authorization endpoints admitted without a public-address verdict because the address could not be determined; they are handed to browsers unverified (register row IDP-9)
 # TYPE culvert_idp_authz_endpoint_unverified_total counter
 culvert_idp_authz_endpoint_unverified_total %d
+
+# HELP culvert_idp_recovery_superseded_total Successful recovery fetches whose compiled provider was discarded because the profile changed generation mid-fetch (the cached document is newer than what the live provider serves)
+# TYPE culvert_idp_recovery_superseded_total counter
+culvert_idp_recovery_superseded_total %d
 `,
 			idpEnabled-idpLive,
 			im.RemoteAttempts,
@@ -1486,6 +1490,7 @@ culvert_idp_authz_endpoint_unverified_total %d
 			lastSuccess,
 			idpDegraded,
 			idpAuthzEndpointUnverified.Load(),
+			idpRecoverySuperseded.Load(),
 		)
 	}
 

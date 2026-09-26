@@ -432,3 +432,133 @@ func TestLoad_HealthyIndexStillLoads(t *testing.T) {
 		t.Fatalf("a healthy index must still load: %v", err)
 	}
 }
+
+// ── Codex review round 18 ───────────────────────────────────────────────────
+
+// TestLen_CountsOnlyServableEntries is the defect gate. Len used to measure the
+// INDEX MAP, so culvert_idp_metadata_cached_documents reported a healthy number
+// of last-known-good documents on a node whose every entry was unusable — the
+// help text says "documents held as last-known-good", which an operator reads
+// as fallback coverage, and the gauge said yes while a compile had nothing to
+// fall back on.
+func TestLen_CountsOnlyServableEntries(t *testing.T) {
+	dir := t.TempDir()
+	s := New(dir)
+	now := time.Unix(1_700_000_000, 0)
+	s.now = func() time.Time { return now }
+
+	put := func(id, src string) {
+		t.Helper()
+		if err := s.Put(id, KindSAMLMetadata, src, []byte("<doc/>")); err != nil {
+			t.Fatalf("put %s: %v", id, err)
+		}
+	}
+	put("fresh", "https://a.invalid/m")
+	put("expired", "https://b.invalid/m")
+	put("gone", "https://c.invalid/m")
+	put("shortfile", "https://d.invalid/m")
+
+	if got := s.Len(); got != 4 {
+		t.Fatalf("setup: four servable entries, got %d", got)
+	}
+
+	// 1. Past the staleness ceiling: Get refuses it, so it is not a fallback.
+	s.mu.Lock()
+	s.entries[key("expired", KindSAMLMetadata, "https://b.invalid/m")].FetchedAt = now.Add(-StaleMaxAge - time.Hour).Unix()
+	s.mu.Unlock()
+
+	// 2. Document file removed out from under the index.
+	if err := os.Remove(docPathFor(s, "gone", KindSAMLMetadata, "https://c.invalid/m")); err != nil {
+		t.Fatalf("remove doc: %v", err)
+	}
+
+	// 3. File length disagrees with the index.
+	if err := os.WriteFile(docPathFor(s, "shortfile", KindSAMLMetadata, "https://d.invalid/m"), []byte("x"), 0o600); err != nil {
+		t.Fatalf("truncate doc: %v", err)
+	}
+
+	// Every one of the three is a miss for Get...
+	for _, tc := range []struct{ id, src string }{
+		{"expired", "https://b.invalid/m"},
+		{"gone", "https://c.invalid/m"},
+		{"shortfile", "https://d.invalid/m"},
+	} {
+		if _, _, err := s.Get(tc.id, KindSAMLMetadata, tc.src); err == nil {
+			t.Fatalf("setup: %s must be unservable", tc.id)
+		}
+	}
+
+	// ...so exactly one document is a fallback, and that is what the gauge
+	// behind culvert_idp_metadata_cached_documents must report.
+	if got := s.Len(); got != 1 {
+		t.Fatalf("Len must count only entries a compile could fall back on, got %d want 1 — "+
+			"the gauge is reporting index entries, so a node with no usable fallback scrapes as if it had one", got)
+	}
+}
+
+// TestServable_AgreesWithGet is the WALL against the two answers drifting apart
+// again. It asserts the AGREEMENT rather than either spelling of the rule, so a
+// future change to Get's rejection set is only safe if Len follows it.
+func TestServable_AgreesWithGet(t *testing.T) {
+	dir := t.TempDir()
+	s := New(dir)
+	now := time.Unix(1_700_000_000, 0)
+	s.now = func() time.Time { return now }
+
+	const src = "https://idp.invalid/m"
+	shapes := []struct {
+		name    string
+		mutate  func(t *testing.T, k string, e *entry)
+		wantGet bool
+	}{
+		{"healthy", func(*testing.T, string, *entry) {}, true},
+		{"at the ceiling", func(_ *testing.T, _ string, e *entry) {
+			e.FetchedAt = now.Add(-StaleMaxAge).Unix()
+		}, false},
+		{"just inside the ceiling", func(_ *testing.T, _ string, e *entry) {
+			e.FetchedAt = now.Add(-StaleMaxAge + time.Second).Unix()
+		}, true},
+		{"negative age", func(_ *testing.T, _ string, e *entry) {
+			e.FetchedAt = now.Add(time.Hour).Unix()
+		}, false},
+		{"zero recorded length", func(_ *testing.T, _ string, e *entry) { e.Bytes = 0 }, false},
+		{"oversize recorded length", func(_ *testing.T, _ string, e *entry) { e.Bytes = MaxDocumentBytes + 1 }, false},
+		{"file removed", func(t *testing.T, k string, _ *entry) {
+			t.Helper()
+			if err := os.Remove(filepath.Join(dir, docFileName(k))); err != nil {
+				t.Fatalf("remove: %v", err)
+			}
+		}, false},
+		{"file longer than recorded", func(t *testing.T, k string, _ *entry) {
+			t.Helper()
+			if err := os.WriteFile(filepath.Join(dir, docFileName(k)), []byte("<doc/>extra"), 0o600); err != nil {
+				t.Fatalf("grow: %v", err)
+			}
+		}, false},
+	}
+
+	for _, sh := range shapes {
+		t.Run(sh.name, func(t *testing.T) {
+			id := "p-" + sh.name
+			if err := s.Put(id, KindSAMLMetadata, src, []byte("<doc/>")); err != nil {
+				t.Fatalf("put: %v", err)
+			}
+			k := key(id, KindSAMLMetadata, src)
+			s.mu.Lock()
+			sh.mutate(t, k, s.entries[k])
+			_, servable := s.checkServableLocked(k, s.entries[k])
+			s.mu.Unlock()
+
+			_, _, err := s.Get(id, KindSAMLMetadata, src)
+			gotGet := err == nil
+
+			if gotGet != sh.wantGet {
+				t.Fatalf("Get servable = %v, want %v — the shape table no longer describes Get", gotGet, sh.wantGet)
+			}
+			if servable != gotGet {
+				t.Fatalf("checkServableLocked says %v but Get says %v: Len and Get have drifted, so the "+
+					"cached-documents gauge no longer means what a compile can fall back on", servable, gotGet)
+			}
+		})
+	}
+}

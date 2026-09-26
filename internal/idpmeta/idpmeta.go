@@ -233,6 +233,40 @@ func (s *Store) loadLocked() {
 	s.evictLocked()
 }
 
+// checkServableLocked answers the ONE question "can this entry still be
+// served?" and returns the entry's age alongside the verdict. The caller must
+// hold s.mu.
+//
+// It exists because Len used to answer that question differently from Get
+// (Codex round 18): Len measured the INDEX MAP, while Get rejects an entry for
+// five reasons the index cannot see — a negative age, an age past StaleMaxAge,
+// a recorded length outside MaxDocumentBytes, a document file that cannot be
+// opened, and a file whose length disagrees with the index. So
+// culvert_idp_metadata_cached_documents could report a healthy number of
+// last-known-good documents on a node with NO usable fallback at all, which is
+// the exact reading its help text invites and the exact failure this sweep
+// exists to make visible: "found nothing wrong" and "never consulted" must not
+// scrape identically.
+//
+// Both callers go through here so the two answers cannot drift, and the
+// agreement is pinned by TestServable_AgreesWithGet rather than by two copies
+// of the rule — when one layer decides what a value MEANS, every other layer
+// asks that layer.
+func (s *Store) checkServableLocked(k string, e *entry) (time.Duration, bool) {
+	age := s.now().Sub(time.Unix(e.FetchedAt, 0))
+	if age < 0 || age >= StaleMaxAge {
+		return age, false
+	}
+	if e.Bytes <= 0 || e.Bytes > MaxDocumentBytes {
+		return age, false
+	}
+	fi, err := os.Stat(filepath.Join(s.dir, docFileName(k))) // #nosec G304 -- derived from a hash of the key, never from file content
+	if err != nil || fi.Size() != int64(e.Bytes) {
+		return age, false
+	}
+	return age, true
+}
+
 // Get returns the cached document for (profileID, kind, source) together with
 // its age, or ErrNoEntry when nothing usable is cached.
 //
@@ -257,8 +291,9 @@ func (s *Store) Get(profileID string, kind Kind, source string) (doc []byte, age
 	if !ok {
 		return nil, 0, ErrNoEntry
 	}
-	age = s.now().Sub(time.Unix(e.FetchedAt, 0))
-	if age < 0 || age >= StaleMaxAge {
+	var servable bool
+	age, servable = s.checkServableLocked(k, e)
+	if !servable {
 		return nil, age, ErrNoEntry
 	}
 	// BOUND THE READ BEFORE ALLOCATING (Codex review round 11). The recorded
@@ -274,9 +309,6 @@ func (s *Store) Get(profileID string, kind Kind, source string) (doc []byte, age
 	// failure mode it left open is memory exhaustion at startup, which for an
 	// in-line gateway is a traffic outage, reached from a cache entry whose whole
 	// contract is that it may be discarded at any time.
-	if e.Bytes <= 0 || e.Bytes > MaxDocumentBytes {
-		return nil, age, ErrNoEntry
-	}
 	f, openErr := os.Open(filepath.Join(s.dir, docFileName(k))) // #nosec G304 -- derived from a hash of the key, never from file content
 	if openErr != nil {
 		return nil, age, ErrNoEntry
@@ -384,7 +416,12 @@ func (s *Store) Dir() string {
 	return s.dir
 }
 
-// Len reports how many documents are cached. Observability only.
+// Len reports how many documents are cached AND STILL SERVABLE — the number a
+// compile could actually fall back on right now. Observability only.
+//
+// It deliberately does not report len(s.entries): an index entry is not a
+// fallback. See checkServableLocked for what the index cannot see and why the
+// two must give one answer.
 func (s *Store) Len() int {
 	if s == nil {
 		return 0
@@ -395,5 +432,11 @@ func (s *Store) Len() int {
 		return 0
 	}
 	s.loadLocked()
-	return len(s.entries)
+	n := 0
+	for k, e := range s.entries {
+		if _, ok := s.checkServableLocked(k, e); ok {
+			n++
+		}
+	}
+	return n
 }

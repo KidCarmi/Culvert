@@ -348,6 +348,62 @@ func noteIdPAuthzEndpointUnverified(profileID string) {
 		"unverified (%d since boot). Check this node's resolver.", sanitizeLog(profileID), n)
 }
 
+// idpRecoverySuperseded counts recovery compiles that SUCCEEDED — a fresh
+// document fetched and written to the last-known-good cache — and were then
+// discarded because the profile had gone live, been disabled or moved to a
+// newer generation while the compile was reaching the network (Codex round 18).
+//
+// The one that matters is the same-source race: the recovery loop fetches fresh
+// metadata for a dark profile while an admin Upsert publishes that same profile
+// from the STALE cache. publishRecompiled correctly refuses to overwrite the
+// admin's generation — its live-guard is what rounds 9, 10, 16 and 17 all lean
+// on — so the fresh document is left in the cache, unread, while the live
+// provider keeps serving the older one. For SAML that is newly published
+// signing metadata not adopted until the next compile.
+//
+// It is NOT fixed by publishing the discarded provider: that provider was
+// compiled against a DIFFERENT generation of the profile, so its discovered
+// endpoints and its metadata belong to a configuration the admin has since
+// replaced. Adopting the fresh document means recompiling the AUTHORITATIVE
+// generation, which is a periodic refresh into the live registry — register row
+// IDP-4, recorded and not built here. This counter removes the SILENCE in the
+// meantime: non-zero means a fetched document is sitting in the cache that no
+// live provider is using, and the exposure is bounded by StaleMaxAge, measured
+// from the OLDER document's fetch — which is correct, since that is genuinely
+// what the live provider is serving.
+var idpRecoverySuperseded atomic.Int64
+
+// idpRecoverySupersededLogLast rate-limits the line to one per
+// idpMetadataLogInterval, on the same reasoning as the counter above it: the
+// recovery loop retries on its own schedule and a losing race can repeat.
+var idpRecoverySupersededLogLast atomic.Int64
+
+// noteIdPRecoverySuperseded records a successful recovery compile whose
+// publication lost the race. Counted always; logged at most once per interval.
+func noteIdPRecoverySuperseded(profileID string) {
+	if profileID == "" {
+		return
+	}
+	n := idpRecoverySuperseded.Add(1)
+	now := time.Now()
+	for {
+		last := idpRecoverySupersededLogLast.Load()
+		// A NEGATIVE age re-arms rather than suppressing (the CHAOS-61 rule).
+		if last != 0 {
+			if d := now.UnixNano() - last; d >= 0 && d < int64(idpMetadataLogInterval) {
+				return
+			}
+		}
+		if idpRecoverySupersededLogLast.CompareAndSwap(last, now.UnixNano()) {
+			break
+		}
+	}
+	logger.Printf("IDP_RECOVERY_SUPERSEDED idp=%q — a recovery fetch succeeded and its document is cached, but "+
+		"the profile went live or changed generation while the fetch was in flight, so the compiled provider was "+
+		"discarded and the live one keeps serving the older document (%d since boot)",
+		sanitizeLog(profileID), n)
+}
+
 // forgetIdPMetadataEpisode drops EVERY episode this profile holds, across all
 // sources. It is the "this profile no longer fetches anything" case — stored
 // disabled, switched to inline metadata, or removed from the registry — where
