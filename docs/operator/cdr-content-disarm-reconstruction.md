@@ -264,6 +264,27 @@ Two distinct gates exist, and only the second one consults `cdr.fail_mode`:
    | A panic recovered inside `safeCDRSanitize` (the RPC call + result classification) | Delivery refused (block page) — **always fail-closed**, regardless of `fail_mode` (`culvert_cdr_panics_total`) | same |
    | File exceeds `cdr.max_file_size_mb` | Skipped client-side before any bytes reach Sluice (`culvert_cdr_oversize_skipped_total`) — original file continues down the pipeline unsanitized | same |
 
+   **The effective oversize gate can be TIGHTER than `cdr.max_file_size_mb`
+   alone, and which profile sets that tighter cap is not the one your
+   request actually matches.** `cdrGateOversize` (called from
+   `safeCDRSanitize`, before the policy rule's profile/mode is even used to
+   build the RPC header) computes the effective cap as
+   `min(cfg.maxFileSizeBytes(), pooled.ProfileCap())`. `ProfileCap()` is
+   populated by `setHealth` from **`Health.Profiles[0]`** — whichever
+   profile Sluice happens to list FIRST in its `Health` response — not from
+   the profile this request's CDR policy rule resolves to. So if Sluice
+   advertises a smaller `max_file_size_bytes` on its first-listed profile
+   than on the profile a rule actually selects, every request is gated by
+   that SMALLER cap regardless of profile, and a file below the documented
+   `cdr.max_file_size_mb` ceiling is silently delivered unsanitized —
+   including under `fail_mode=closed` (this is the client-side oversize
+   skip, gate 1 above, which `fail_mode` never governs). Check
+   `GET /api/cdr/config`'s effective cap fields, or the `culvert_cdr_pool_*`
+   surfaces, against what your Sluice deployment advertises per profile if
+   file sizes near the documented limit behave unexpectedly. See
+   `cdr_proxy_test.go`'s `TestSafeCDRSanitize_ProfileCapTightensGate` /
+   `_ProfileCapLooserThanConfigDoesNotRelax` for the exact behavior.
+
    `fail_mode` only governs *transport/availability* failures reached this
    way. A `BLOCKED` verdict or a panic recovered inside `safeCDRSanitize` is
    never passed through, no matter how `fail_mode` is set — those are
@@ -563,6 +584,17 @@ request falls through to `cdr.default_profile` / `cdr.default_mode`. Use
 the active Sluice instance in `REPORT_ONLY` mode without touching live
 traffic — use it to confirm connectivity and see what a given file would
 trigger before writing a policy rule around it.
+
+**The effective upload limit here is 1 MiB, not `cdr.max_file_size_mb`.**
+`securityMiddleware` (`ui_middleware.go`) wraps the body of every mutating
+request — including this `POST` — with `http.MaxBytesReader(w, r.Body,
+1<<20)` before the handler runs. `readCDRTestUpload`'s own 64 MiB
+`http.MaxBytesReader` wrapper re-wraps the ALREADY-1-MiB-capped body, so it
+cannot raise the effective limit — reading past 1 MiB still fails inside
+the inner reader regardless of the larger outer cap. A test file over
+1 MiB fails with a body-too-large error rather than being submitted to
+Sluice, even though ordinary CDR-inspected traffic and `cdr.max_file_size_mb`
+allow up to 50 MiB (see **Failure behavior** above).
 
 ## Observability
 
