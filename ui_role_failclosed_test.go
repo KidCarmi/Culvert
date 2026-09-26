@@ -150,7 +150,7 @@ func TestRoleMetadata_MinRoleIsAlwaysEnrolled(t *testing.T) {
 
 // seedRoster writes a ui_users.json whose single record carries role, and
 // returns its path plus the plaintext password.
-func seedRoster(t *testing.T, role string) (path, pass string) {
+func seedRosterWithRole(t *testing.T, role string) (path, pass string) {
 	t.Helper()
 	dir := t.TempDir()
 	pass = "Sup3rSecret!x"
@@ -199,7 +199,7 @@ func seedRoster(t *testing.T, role string) (path, pass string) {
 func TestRosterLoad_UnenrolledRoleIsClampedNotHonoured(t *testing.T) {
 	for _, bogus := range []string{"superuser", "Admin", "ADMIN", "root", "public", "auditor", " viewer"} {
 		t.Run(bogus, func(t *testing.T) {
-			path, pass := seedRoster(t, bogus)
+			path, pass := seedRosterWithRole(t, bogus)
 			c := &Config{cache: authCacheStore{entries: map[string]*authCacheEntry{}}}
 			c.SetUIUsersFile(path)
 			before := RosterRoleClampCount()
@@ -233,7 +233,7 @@ func TestRosterLoad_EnrolledAndLegacyRolesUnchanged(t *testing.T) {
 			name = "legacy_empty"
 		}
 		t.Run(name, func(t *testing.T) {
-			path, pass := seedRoster(t, role)
+			path, pass := seedRosterWithRole(t, role)
 			c := &Config{cache: authCacheStore{entries: map[string]*authCacheEntry{}}}
 			c.SetUIUsersFile(path)
 			before := RosterRoleClampCount()
@@ -419,7 +419,7 @@ func TestAuthStatus_UnenrolledSessionIsNotReportedAsAdmin(t *testing.T) {
 // "superuser" -> signed session "superuser" -> middleware -> RoleAdmin.
 func TestRosterToSession_UnenrolledDiskRoleNeverReachesAdmin(t *testing.T) {
 	withSessionKey(t)
-	path, pass := seedRoster(t, "superuser")
+	path, pass := seedRosterWithRole(t, "superuser")
 
 	prev := cfg
 	t.Cleanup(func() { cfg = prev })
@@ -492,7 +492,7 @@ func savedRole(t *testing.T, path string) string {
 // newer build's role back verbatim, or a temporary downgrade permanently
 // destroys the assignment and upgrading again cannot restore it.
 func TestRosterLoad_ClampIsNeverPersisted(t *testing.T) {
-	path, pass := seedRoster(t, "auditor")
+	path, pass := seedRosterWithRole(t, "auditor")
 	c := &Config{cache: authCacheStore{entries: map[string]*authCacheEntry{}}}
 	c.SetUIUsersFile(path)
 	if err := c.LoadUIUsersFile(); err != nil {
@@ -526,7 +526,7 @@ func TestRosterLoad_ClampIsNeverPersisted(t *testing.T) {
 // CONTROL. An explicit reassignment by an admin must win over the preserved
 // raw role, or the admin could never repair the account on this build.
 func TestRosterLoad_ExplicitReassignmentReplacesPersistedRole(t *testing.T) {
-	path, _ := seedRoster(t, "auditor")
+	path, _ := seedRosterWithRole(t, "auditor")
 	c := &Config{cache: authCacheStore{entries: map[string]*authCacheEntry{}}}
 	c.SetUIUsersFile(path)
 	if err := c.LoadUIUsersFile(); err != nil {
@@ -548,7 +548,7 @@ func TestRosterLoad_ExplicitReassignmentReplacesPersistedRole(t *testing.T) {
 // confirming "viewer" in the edit UI) still replaces the preserved raw role,
 // so the unknown role is not silently written back and restored on upgrade.
 func TestRosterLoad_SameRoleReassignmentReplacesPersistedRole(t *testing.T) {
-	path, _ := seedRoster(t, "auditor")
+	path, _ := seedRosterWithRole(t, "auditor")
 	c := &Config{cache: authCacheStore{entries: map[string]*authCacheEntry{}}}
 	c.SetUIUsersFile(path)
 	if err := c.LoadUIUsersFile(); err != nil {
@@ -569,7 +569,7 @@ func TestRosterLoad_SameRoleReassignmentReplacesPersistedRole(t *testing.T) {
 // value behind /healthz and /api/stats reflects records PRESENTLY clamped, not
 // the cumulative counter, so a repaired roster stops reporting degraded.
 func TestRosterLoad_ActiveClampCountClearsAfterRepair(t *testing.T) {
-	path, _ := seedRoster(t, "auditor")
+	path, _ := seedRosterWithRole(t, "auditor")
 	c := &Config{cache: authCacheStore{entries: map[string]*authCacheEntry{}}}
 	c.SetUIUsersFile(path)
 	if err := c.LoadUIUsersFile(); err != nil {
@@ -595,7 +595,7 @@ func TestRosterLoad_ActiveClampCountClearsAfterRepair(t *testing.T) {
 // password change on a clamped account keeps BOTH the raw role a newer build
 // assigned and the account's TOTP enrolment (secret + replay counter).
 func TestRosterLoad_PasswordChangeKeepsPersistedRoleAndTOTP(t *testing.T) {
-	path, _ := seedRoster(t, "auditor")
+	path, _ := seedRosterWithRole(t, "auditor")
 	c := &Config{cache: authCacheStore{entries: map[string]*authCacheEntry{}}}
 	c.SetUIUsersFile(path)
 	if err := c.LoadUIUsersFile(); err != nil {
@@ -631,7 +631,7 @@ func TestRosterLoad_PasswordChangeKeepsPersistedRoleAndTOTP(t *testing.T) {
 // preserved raw role, or the unknown role is written back and restored on
 // upgrade although the UI reported the repair as done.
 func TestRosterLoad_SameRoleReassignmentWithPasswordReplacesPersistedRole(t *testing.T) {
-	path, _ := seedRoster(t, "auditor")
+	path, _ := seedRosterWithRole(t, "auditor")
 	c := &Config{cache: authCacheStore{entries: map[string]*authCacheEntry{}}}
 	c.SetUIUsersFile(path)
 	if err := c.LoadUIUsersFile(); err != nil {

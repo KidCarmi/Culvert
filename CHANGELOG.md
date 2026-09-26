@@ -34,6 +34,45 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   unenrolled value is refused with a 401 and a cleared cookie. The clamp is
   surfaced as `culvert_ui_roster_role_clamped_total` and as
   `uiRosterRoleClamped` on `/healthz` and `/api/stats` when non-zero.
+- An unauthenticated client could park a gateway core for minutes with one
+  request by choosing a very long destination host (CHAOS-69, register rows
+  PX-21/PX-23/PX-24/PX-25). The destination authority is written by the client,
+  `net/http` admits its 1 MiB default of request line plus headers, and nothing
+  bounded it. It was copied verbatim into the process log and the durable
+  request-log entry — a 256 KiB host wrote 262,228 bytes to a rotating file that
+  keeps one archive — but the copy was the smaller half: the authority is also
+  walked label by label by every destination matcher, and two of those walks are
+  quadratic in its length. The URL-category store probes every suffix beginning
+  just past a `.` against its reverse index, and the Layer-2 community feed
+  (enabled by default in the shipped compose file) opens one BadgerDB read
+  transaction per label. Measured through the real request path with one
+  ordinary category-group rule present: 4 KB of host cost 19.6 ms, 16 KB cost
+  260 ms and 64 KB cost **3.94 s** of CPU — so roughly sixteen minutes at the
+  1 MiB header default, inside the request goroutine, holding the connection and
+  a per-IP connection slot, and spent *before* authentication. Roughly 256 KB/s
+  from one client saturated a four-core gateway, and the three front-door
+  limiters ship disabled. The same value was also retained as a top-hosts map
+  key, whose 10,000-entry cap bounds the entry count and never bounded the key
+  size (about 10 GiB of heap at the cap with megabyte keys), and reached the same
+  quadratic lookup from two viewer-role admin endpoints.
+
+  The destination is now bounded in two tiers, because the DNS limit governs the
+  *canonical* form of a hostname rather than the bytes on the wire: a **1024-byte
+  pre-cap on the raw authority** at the entry point, ahead of every sink and every
+  matcher (in particular ahead of the IP filter and rate limiter, which both write
+  the host into the request log), and a **253-byte bound on the normalized A-label
+  form** at the existing canonicalization gate. The raw tier has to be generous
+  because an internationalized domain name *shrinks* under IDNA — `é`×40 in four
+  labels is 323 raw bytes and 187 canonical, and the widest legitimate case is 883
+  raw to 251 canonical — so a raw bound at the DNS limit would have refused
+  ordinary international destinations with a 400; its value is derived from the
+  maximum Punycode expansion and re-measured against the shipped normalizer by
+  test. The canonical tier is what keeps that generosity from being a hole, since
+  dot-dense ASCII does not shrink and is therefore refused. A refused request
+  answers 400 without echoing the value, creates no state, and is counted by
+  `culvert_proxy_oversize_host_rejected_total` with a rate-limited log line naming
+  the length and the tier rather than the value. Operator runbook:
+  `docs/operator/destination-host-bounds.md`.
 
 - An ordinary password change silently destroyed the account's TOTP second
   factor (SEC-TOTP-1 / RISK-029). `apiAuthLogin` refuses to issue a session for
@@ -133,6 +172,56 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   behind a reverse proxy should confirm it sets `Host` / `X-Forwarded-Host`
   explicitly rather than appending a client value — see
   `docs/operator/dp-bootstrap-artifact-safety.md`.
+- Admin-roster changes reported success on a durable write that never landed
+  (CHAOS-70). `ui_users.json` is the only durable home of the admin roster,
+  password hashes, roles, TOTP secrets, consumed backup codes and the TOTP
+  replay counter, and every mutation changes memory first and persists second.
+  Three handlers logged the persist error and answered 2xx anyway — precisely
+  the three an operator reaches for during an incident. On a full or read-only
+  data volume, deleting a compromised administrator returned `204 No Content`
+  and was audited as done while the account returned at the next restart with
+  its original password hash, role and TOTP enrolment; a role downgrade returned
+  `{"ok":true}` and the privilege came back; a password rotation returned
+  `{"ok":true}` and the leaked password still authenticated. The response, the
+  UI and the audit log all reported success, and the divergence between memory
+  and disk stayed invisible until a restart materialised it. The same rule was
+  already written down, reasoned out and tested twenty lines away — for the
+  one-time setup wizard only. `POST/DELETE /api/auth/users` and
+  `POST /api/auth/change-password` are now durable-or-refused: the in-memory change is
+  rolled back wholesale (hash, role, TOTP secret, backup codes and replay
+  counter together), the request fails with an actionable `500`, and the
+  refusal is audited as `<action>.refused`. `fileutil.ErrReplacedNotSynced` is
+  deliberately treated as committed — the content already landed. New counters
+  `culvert_admin_roster_persist_failures_total` and
+  `culvert_admin_roster_persist_degraded_total` name which administrative
+  decision was affected, which the pre-existing `storage_write_failed` alert
+  cannot. The two login-path roster writes (TOTP replay counter, backup-code
+  consumption) stay fail-open by recorded decision — refusing them would lock an
+  operator out of the appliance during the incident they need it to diagnose —
+  but no longer discard their error. See
+  `docs/operator/admin-roster-durability.md`.
+- **Security (admin UI): the Settings panel's Save button changed the admin
+  credential without ever writing it to disk, accepted an empty password, and
+  could disable local authentication.** `POST /api/settings` called the
+  credential setter and nothing else, and the admin credential is not carried in
+  `admin_settings.json`, so a rotated admin password answered `200 {"ok":true}`,
+  was audited as a successful `settings.update`, authenticated immediately — and
+  **reverted at the next restart, where the previous (possibly leaked) password
+  authenticated again**. No disk fault was required, which makes it worse than
+  the three handlers above. Password complexity was validated only when the field
+  was non-empty, so saving the panel with a blank password box installed
+  `bcrypt("")` as an admin credential — and, for a changed username, a new admin
+  account that authenticated with no password; clearing both fields disabled local
+  admin authentication outright, behind a *"Settings saved"* toast. Empty user and
+  empty password are now refused with `400` (run unmatched traffic without
+  credentials via `defaultAuthOutcome=Exempt`, which says so), and the credential
+  change is durable-or-refused through the same transaction as the other three.
+  Fixing the persistence alone would have been a regression, because persisting is
+  what would have made the two input faults survive a restart. The roster snapshot
+  now also captures the legacy credential pair, so a refused rotation **restores
+  the previous credential** instead of deleting the account — a control caught
+  that the first version of this fix locked the administrator out.  See
+  `docs/operator/admin-roster-durability.md`.
 
 - Public release promotion ran ahead of the evidence that was supposed to
   authorize it. On `ci.yml` run 35507615339 (SHA `3d8c9bb`) the `docker` job
@@ -467,6 +556,16 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Added
 
+- `GET /api/policy` now reports `persisted` (whether the access-rule
+  rulebase is written to disk vs. in-memory only), and the Access Rules
+  panel shows a red banner when it is false. Every rule mutation already
+  returned 200 OK regardless of persistence — `PolicyStore.SaveErr()` is a
+  no-op when no `-policy`/`policy_file` path is configured, which is also
+  `config.example.yaml`'s shipped default — so an admin editing rules
+  through the GUI had no way to discover that a restart would silently
+  discard the entire rulebase short of it actually happening. Mirrors the
+  existing `idpRegistry.Persisted()` warning already shown for identity
+  providers. No behavior change: read-only field + banner.
 - New React/TypeScript admin frontend, Batch 2 (`CULVERT_EXPERIMENTAL_UI`,
   `/app/`): Policies (Access Rules, Authentication Rules, Policy Tester,
   Header Rewrite, Policy Learning), Objects (URL Categories, Category Groups,
