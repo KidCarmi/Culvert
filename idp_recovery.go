@@ -183,7 +183,25 @@ func copyDiscoveredOIDCEndpoints(dst, src *IdPProfile) {
 // Leaving it enabled-but-dark is what hands it to runIdPRecoveryLoop, which is
 // both the fail-closed posture (browser SSO stops rather than trusting a
 // withdrawn signing key) and the way back the moment the IdP answers again.
-func (r *IdPRegistry) retireStaleProvider(profileID string) bool {
+//
+// THE SOURCE IS PART OF THE VERDICT, NOT DECORATION (Codex round 9). The sweep
+// that selects a victim runs under idpMetadata.mu and RELEASES it before this
+// lock is taken — deliberately, since retiring takes r.mu and no subsystem may
+// hold another's lock across a call into it. So an admin Upsert/ReplaceAll can
+// repoint the profile and publish a healthy provider for the NEW source inside
+// that window, and an id-and-enabled check alone cannot tell the two apart: it
+// would delete a provider that is serving correctly, taking browser SSO down
+// for that profile until the recovery loop recompiles it. The expired document
+// belonged to a (profile, SOURCE) pair, so the retirement is only valid while
+// the profile is still serving THAT source.
+//
+// This is publishRecompiled's rule — re-check identity under the lock, because
+// the decision was made without it — and round 8 applied it to the publish path
+// and not to its twin. Skipping on a mismatch under-enforces nothing: a
+// repointed profile is no longer serving the expired document at all, and if
+// its new source also falls back to cache it records its own fetch time and is
+// swept on its own.
+func (r *IdPRegistry) retireStaleProvider(profileID, source string) bool {
 	if profileID == "" {
 		return false
 	}
@@ -197,6 +215,12 @@ func (r *IdPRegistry) retireStaleProvider(profileID string) bool {
 	// reason about, and deleting it here would race the mutation that removed it.
 	for _, p := range r.profiles {
 		if p != nil && p.ID == profileID && p.Enabled {
+			// effectiveRemoteSource is the ONE derivation of a profile's remote
+			// source (round 7's rule); comparing anything re-derived here is how
+			// the two layers drift apart.
+			if effectiveRemoteSource(p) != source {
+				return false // repointed since the sweep selected it
+			}
 			delete(r.live, profileID)
 			return true
 		}

@@ -8746,6 +8746,51 @@ it is trying not to disturb; the honest trade is to take the extra CI cycle
 rather than hold a durable commit for it, because the container is ephemeral
 and the run is not.
 
+### Codex review round 9 — one finding, a TOCTOU in round 8's own retirement path
+
+**THE SOURCE IS PART OF THE RETIREMENT VERDICT, NOT DECORATION (P2).**
+`idpStaleCeilingSweep` selects its victims under `idpMetadata.mu` and RELEASES
+that lock before `retireStaleProvider` takes `r.mu`. That release is deliberate
+and correct — retiring reaches into the registry, and no subsystem may hold its
+own lock across a call into another's (the CHAOS-50 cluster-CA rule this sweep
+follows everywhere else) — but it opens a window, and round 8 shipped a
+retirement that could not see into it.
+
+An admin `Upsert` or `ReplaceAll` lands in that window: it repoints the profile
+and publishes a **healthy** provider compiled from a NEW source. The retirement
+then checked only the profile ID and the enabled bit, both of which the
+replacement satisfies, so it deleted a provider that was serving correctly.
+Browser SSO for that profile goes dark until the recovery loop recompiles it —
+an availability fault introduced by the change whose entire purpose is to make
+the *security* posture of the cache enforceable.
+
+The expired document belonged to a `(profile, SOURCE)` pair — the keying round 6
+established — so the retirement is valid only while the profile is still serving
+THAT source. `retireStaleProvider(profileID, source)` re-derives the profile's
+current source under `r.mu` through `effectiveRemoteSource` (round 7's
+one-derivation rule: re-deriving it inline here is exactly how two layers drift
+apart) and refuses on a mismatch.
+
+**Skipping on a mismatch under-enforces nothing, and that is what makes the fix
+a fix rather than a trade.** A repointed profile is no longer serving the expired
+document at all, so there is nothing left for the ceiling to retire; and if the
+new source also falls back to cache, it records its own `servedFetchedAt` and is
+swept on its own terms.
+
+> **This is `publishRecompiled`'s rule — re-check identity under the lock,
+> because the decision was made without it — and round 8 applied it to the
+> PUBLISH path and not to its twin.** The fourth instance in this sweep of a rule
+> held correctly on one of two symmetric paths, after the SAML/OIDC fetchers, the
+> admission gates and the endpoint validator. The remedy each time has been the
+> same: wall the PAIR, not the instance.
+
+The gate carries its own CONTROL, because the cheapest way to pass a
+"must not delete the replacement" assertion is to stop retiring at all, which
+would silently delete round 8's enforcement of the staleness ceiling entirely. A
+victim naming the source ACTUALLY IN SERVICE must still retire exactly as before.
+Both were verified by mutation: removing the source check fails the defect gate,
+and a never-retire body fails the control and round 8's own gate.
+
 ### Codex review round 8 — two findings, and the first is this sweep's own security claim
 
 **THE STALENESS CEILING MUST BE ENFORCED ON A LIVE PROVIDER, NOT ONLY AT COMPILE

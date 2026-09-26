@@ -719,8 +719,8 @@ func idpStaleCeilingSweep(now time.Time) []idpStaleCeilingVictim {
 // idpRetireStaleProvider is the seam the watchdog uses to stop serving a
 // provider whose cached document has expired. Package-level so tests observe the
 // decision without a live registry, matching fireIdPMetadataAlert.
-var idpRetireStaleProvider = func(profileID string) bool {
-	return idpRegistry.retireStaleProvider(profileID)
+var idpRetireStaleProvider = func(profileID, source string) bool {
+	return idpRegistry.retireStaleProvider(profileID, source)
 }
 
 // idpArmRecovery is the seam for re-arming the recovery loop after a retirement.
@@ -751,7 +751,7 @@ func runIdPMetadataDegradationWatchdog(ctx context.Context) {
 			// Retiring makes it DARK, which is exactly the state a fresh boot
 			// past the ceiling would produce, and hands it to the recovery loop.
 			for _, v := range idpStaleCeilingSweep(now) {
-				if !idpRetireStaleProvider(v.profileID) {
+				if !idpRetireStaleProvider(v.profileID, v.source) {
 					continue
 				}
 				logger.Printf("IDP_METADATA_EXPIRED idp=%q — the cached document it was serving is %s old, past the %s ceiling; the provider is no longer live and browser SSO is unavailable for it until a document is fetched successfully",

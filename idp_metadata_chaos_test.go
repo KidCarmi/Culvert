@@ -2278,7 +2278,7 @@ func TestChaos71_RetiringAnExpiredProviderLeavesItDarkNotDeleted(t *testing.T) {
 		t.Fatal("setup: the provider must be live")
 	}
 
-	if !idpRegistry.retireStaleProvider("corp") {
+	if !idpRegistry.retireStaleProvider("corp", idpRemoteDocumentSource(chaos71Profile("corp", idp.URL()))) {
 		t.Fatal("a live enabled profile must be retirable")
 	}
 	if idpRegistry.HasEnabledInteractiveProvider() {
@@ -2302,8 +2302,65 @@ func TestChaos71_RetiringAnExpiredProviderLeavesItDarkNotDeleted(t *testing.T) {
 		t.Fatal("retiring must not delete the profile")
 	}
 	// Idempotent: a second retirement changes nothing.
-	if idpRegistry.retireStaleProvider("corp") {
+	if idpRegistry.retireStaleProvider("corp", idpRemoteDocumentSource(chaos71Profile("corp", idp.URL()))) {
 		t.Fatal("retiring an already-dark provider must report no change")
+	}
+}
+
+// R9-D1 (P2, defect, Codex round 9). THE SOURCE IS PART OF THE RETIREMENT
+// VERDICT. idpStaleCeilingSweep picks a victim under idpMetadata.mu and RELEASES
+// it before retireStaleProvider takes r.mu — deliberately, since no subsystem
+// may hold its own lock across a call into another's. An admin repoint lands in
+// that window: Upsert publishes a HEALTHY provider for a NEW source, and an
+// id-and-enabled check cannot tell it from the expired one it replaced, so the
+// sweep deletes a provider that is serving correctly and browser SSO goes down
+// for that profile until the recovery loop recompiles it.
+//
+// Verified failing against the reintroduced pre-fix shape (retireStaleProvider
+// taking profileID alone): the replacement provider is deleted and
+// HasEnabledInteractiveProvider reports false.
+func TestChaos71_RetirementIsRefusedAfterARepoint(t *testing.T) {
+	chaos71Env(t)
+	oldIdP := newChaos71IdP(t)
+	newIdP := newChaos71IdP(t)
+
+	// Live on the OLD source, and that is the source the sweep would select.
+	if err := idpRegistry.Upsert(chaos71Profile("corp", oldIdP.URL())); err != nil {
+		t.Fatalf("initial upsert: %v", err)
+	}
+	expired := idpRemoteDocumentSource(chaos71Profile("corp", oldIdP.URL()))
+	if expired == "" {
+		t.Fatal("setup: the victim source must be derivable")
+	}
+
+	// The repoint the sweep cannot see, because it already let go of its lock.
+	if err := idpRegistry.Upsert(chaos71Profile("corp", newIdP.URL())); err != nil {
+		t.Fatalf("repoint upsert: %v", err)
+	}
+	if !idpRegistry.HasEnabledInteractiveProvider() {
+		t.Fatal("setup: the replacement provider must be live before the stale sweep runs")
+	}
+
+	if idpRegistry.retireStaleProvider("corp", expired) {
+		t.Fatal("a retirement selected for the PREVIOUS source must not delete the provider " +
+			"published for the new one — the expired document is not what this profile serves")
+	}
+	if !idpRegistry.HasEnabledInteractiveProvider() {
+		t.Fatal("the healthy replacement provider must still be live")
+	}
+	if idpRegistry.hasDarkEnabledProfile() {
+		t.Fatal("the profile must not be dark — nothing was wrong with it")
+	}
+
+	// CONTROL: the cheapest way to pass the above is to stop retiring at all,
+	// which would delete round 8's whole enforcement of the staleness ceiling.
+	// A victim naming the source STILL IN SERVICE must retire exactly as before.
+	inService := idpRemoteDocumentSource(chaos71Profile("corp", newIdP.URL()))
+	if !idpRegistry.retireStaleProvider("corp", inService) {
+		t.Fatal("a victim naming the source actually in service must still retire the provider")
+	}
+	if idpRegistry.HasEnabledInteractiveProvider() {
+		t.Fatal("the ceiling must still be enforced for the source in service")
 	}
 }
 
