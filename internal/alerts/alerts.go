@@ -25,13 +25,25 @@ var sink atomic.Pointer[Sink]
 
 // SetSink installs the dispatch implementation. Intended to be called once at
 // startup (publish-once); a later call atomically replaces the sink.
-func SetSink(fn Sink) { sink.Store(&fn) }
+//
+// A nil fn UNINSTALLS the sink rather than installing a nil function value.
+// Storing &fn unconditionally made probe/sink non-nil while the function
+// behind it was nil, so the guarded call below dereferenced a nil func and
+// PANICKED — on the request goroutine, inside the scan path, in a seam whose
+// whole contract is that producers "never need a nil check".
+func SetSink(fn Sink) {
+	if fn == nil {
+		sink.Store(nil)
+		return
+	}
+	sink.Store(&fn)
+}
 
 // Fire dispatches an alert through the installed sink. It is a no-op when no
 // sink is installed (e.g. unit tests that never wire alerting), so producers
 // never need a nil check or a dependency on the delivery layer.
 func Fire(event string, p Payload) {
-	if s := sink.Load(); s != nil {
+	if s := sink.Load(); s != nil && *s != nil {
 		(*s)(event, p)
 	}
 }
@@ -43,8 +55,16 @@ type SubscriberProbe func(event string) bool
 var probe atomic.Pointer[SubscriberProbe]
 
 // SetSubscriberProbe installs the subscription query (publish-once, same
-// lifecycle as SetSink).
-func SetSubscriberProbe(fn SubscriberProbe) { probe.Store(&fn) }
+// lifecycle as SetSink). A nil fn UNINSTALLS the probe, which HasSubscriber
+// reads as "not wired yet" and therefore answers true — see SetSink for why a
+// stored nil function value is not the same thing.
+func SetSubscriberProbe(fn SubscriberProbe) {
+	if fn == nil {
+		probe.Store(nil)
+		return
+	}
+	probe.Store(&fn)
+}
 
 // HasSubscriber reports whether firing event would reach anyone, so a producer
 // on the request path can skip the goroutine, the payload build and the round
@@ -59,7 +79,7 @@ func SetSubscriberProbe(fn SubscriberProbe) { probe.Store(&fn) }
 // sink but no store, and any call ordering where the store is not yet up) the
 // answer is true, so a missing probe can never silence a real alert.
 func HasSubscriber(event string) bool {
-	if p := probe.Load(); p != nil {
+	if p := probe.Load(); p != nil && *p != nil {
 		return (*p)(event)
 	}
 	return true

@@ -9,6 +9,47 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Security
 
+- An ordinary password change silently destroyed the account's TOTP second
+  factor (SEC-TOTP-1 / RISK-029). `apiAuthLogin` refuses to issue a session for
+  an enrolled account until `verifyLoginTOTP` accepts a code, so the enrolment
+  is a real second factor whose purpose is to survive a password compromise —
+  but `Config.SetUIUser` and `Config.SetAuth` assigned a freshly-built
+  `uiAdminUser` record over the stored one, so every credential write dropped
+  `totpSecret`, `backupCodes` and `totpLastCounter`. The removal was durable
+  (the next roster save persisted it), carried no audit entry naming the
+  de-enrolment, gave the account holder no signal, and required no proof of
+  possession of the authenticator. Whoever held the current password could
+  therefore permanently remove the control that outranks it, turning a
+  temporary session or credential compromise into durable password-only access
+  to the admin plane. Reachable from `POST /api/auth/change-password` (any
+  principal from viewer up, for its own account), `POST /api/auth/users`
+  (admin, any account) and `POST /api/settings/auth`. Resetting
+  `totpLastCounter` to zero was a second defect on the same line: it reopens
+  the one-time-password replay window (RFC 6238 §5.2) that the restore path
+  refuses to reopen without `--allow-counter-rollback`. Every credential write
+  now goes through one constructor that carries the enrolment across;
+  de-enrolment stays the job of the explicit `ClearTOTP` primitive. The
+  `--reset-password` break-glass keeps its outcome — an operator who lost the
+  authenticator as well as the password depends on it — but now clears
+  deliberately and prints that the account became single-factor. The replay
+  counter is part of the enrolment, not a separate durable fact: `ClearTOTP`
+  now clears it too, and `SetTOTPSecret` resets it when the KEY changes
+  (but not when backup codes are re-issued for the same key, which would
+  reopen the replay window for a live secret). Without that, the counter
+  outlived de-enrolment and refused the re-enrolment the break-glass warning
+  instructs the operator to perform — it had been zeroed only as a side effect
+  of the record replacement this change removes. That comparison asks whether
+  the KEY changed, not whether the stored string did: the verifier folds case
+  and trims whitespace before base32-decoding, and Go's decoder ignores a
+  secret's non-canonical trailing bits, so spellings that differ as strings can
+  name one authenticator (`MZXW6` and `MZXW7` decode to the same key). A
+  string comparison read a backup-code re-issue in a different spelling as a
+  key change and zeroed the counter for a live key. The canonicalisation is now
+  one function that the verifier itself uses and that backs the exported
+  `totp.SameKey`/`totp.Usable`, so the comparison and the code generator cannot
+  disagree, and an unusable incoming secret never counts as evidence that the
+  key changed.
+
 - Client-supplied tracing headers reached the process log unbounded
   (SEC-REQID-1). `setupRequestTracing` runs on 100% of proxied traffic — the
   second statement in `handleRequest`, ahead of the connection limiter, the IP
@@ -340,7 +381,7 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   forward proxy means the handshake to an `https://` parent proxy — inspected
   HTTPS origin handshakes build their own TLS config and are **not**
   revocation-checked. Because every counter reads zero either way, "found
-  nothing wrong" and "never consulted" were the same reading. The appliance now
+  nothing wrong" and "never consulted" were the same reading. Culvert now
   says so in a warning at the moment the control is enabled, in a banner on the
   OCSP panel, in `coverage`/`uncheckedEnforcingPaths` on `GET /api/ocsp`, and
   in `culvert_ocsp_path_checked{path}` — alongside a new `culvert_ocsp_*`
