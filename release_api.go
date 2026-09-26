@@ -63,6 +63,17 @@ type releaseManager struct {
 	// believes they pinned a custom identity can see it silently didn't
 	// without SSH/log access. Empty ⇒ omitted.
 	sigstoreWarn string
+	// sigstoreIdentitySource / sigstoreRootSource are "default" or "override",
+	// set only when the Sigstore scheme is active (rm.trustSchemes contains
+	// "sigstore") — surfaced read-only on GET /api/releases so an operator who
+	// configured CULVERT_RELEASE_SIGSTORE_IDENTITY/_TRUSTED_ROOT can positively
+	// confirm THEIR override is the one enforcing, not the baked default,
+	// without SSH/log access. This is the positive counterpart to
+	// sigstoreWarn's negative signal for a BROKEN override: sigstoreWarn fires
+	// only when the scheme is inactive, these are populated only when it is
+	// active, so the two never appear together.
+	sigstoreIdentitySource string
+	sigstoreRootSource     string
 	// refresh re-fetches the catalog from the configured origin (P1.7 auto-seed,
 	// when CULVERT_RELEASE_CATALOG_URL is set + enforce) and reloads the on-disk
 	// catalog, so a release published AFTER startup appears without restarting the
@@ -311,6 +322,33 @@ func writeJSONStatus(w http.ResponseWriter, status int, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
+// addReleaseTrustFields folds the release-trust surface (trust_schemes,
+// sigstore_warn, and the sigstore_identity_source / sigstore_root_source
+// positive-confirmation fields) into a /api/releases response, each gated on
+// being actually set. All three response shapes (disabled, no-catalog,
+// available) carry this same surface, so it is one call rather than the same
+// guarded assignments repeated at every call site (that repetition is what
+// pushed apiReleases over the cyclop complexity budget). The source fields
+// are the positive confirmation half of the trust-override surface: an
+// operator who set CULVERT_RELEASE_SIGSTORE_IDENTITY/_TRUSTED_ROOT and sees
+// no sigstore_warn still has no way to tell "my override is active" from
+// "the baked default silently took over" without them — same product gap
+// the M1-2 catalog_url_source field closed for the catalog origin.
+func addReleaseTrustFields(m map[string]any, rm *releaseManager) {
+	if rm.trustSchemes != "" {
+		m["trust_schemes"] = rm.trustSchemes
+	}
+	if rm.sigstoreWarn != "" {
+		m["sigstore_warn"] = rm.sigstoreWarn
+	}
+	if rm.sigstoreIdentitySource != "" {
+		m["sigstore_identity_source"] = rm.sigstoreIdentitySource
+	}
+	if rm.sigstoreRootSource != "" {
+		m["sigstore_root_source"] = rm.sigstoreRootSource
+	}
+}
+
 // ─── GET /api/releases ───────────────────────────────────────────────────────
 
 func apiReleases(w http.ResponseWriter, r *http.Request) {
@@ -337,12 +375,7 @@ func apiReleases(w http.ResponseWriter, r *http.Request) {
 			"reason":      "release management disabled",
 			"verify_mode": rm.verifyMode.String(),
 		}
-		if rm.trustSchemes != "" {
-			unavail["trust_schemes"] = rm.trustSchemes
-		}
-		if rm.sigstoreWarn != "" {
-			unavail["sigstore_warn"] = rm.sigstoreWarn
-		}
+		addReleaseTrustFields(unavail, rm)
 		addBootstrapProvenance(unavail)
 		jsonOK(w, unavail)
 		return
@@ -367,12 +400,7 @@ func apiReleases(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}
-		if rm.trustSchemes != "" {
-			unavail["trust_schemes"] = rm.trustSchemes
-		}
-		if rm.sigstoreWarn != "" {
-			unavail["sigstore_warn"] = rm.sigstoreWarn
-		}
+		addReleaseTrustFields(unavail, rm)
 		rm.addRefreshFields(unavail)
 		// Provenance is independent of the current catalog — surface it even when no
 		// catalog is published (an appliance whose catalog lapsed still knows how it
@@ -388,12 +416,7 @@ func apiReleases(w http.ResponseWriter, r *http.Request) {
 		"releases":     cat.List(),
 		"channels":     channelPointers(cat),
 	}
-	if rm.trustSchemes != "" {
-		out["trust_schemes"] = rm.trustSchemes
-	}
-	if rm.sigstoreWarn != "" {
-		out["sigstore_warn"] = rm.sigstoreWarn
-	}
+	addReleaseTrustFields(out, rm)
 	if v := cat.Version(); v > 0 {
 		out["catalog_version"] = v
 	}

@@ -2556,7 +2556,7 @@ Firefox (all platforms):
           <div class="panel-body">
             <div class="form-group">
               <label class="form-label">Username</label>
-              <input type="text" class="input" style="width:100%" id="s-user" placeholder="Leave empty to disable auth">
+              <input type="text" class="input" style="width:100%" id="s-user" placeholder="Username (required)">
             </div>
             <div class="form-group">
               <label class="form-label">Password</label>
@@ -2564,6 +2564,9 @@ Firefox (all platforms):
             </div>
             <button class="btn" data-click="saveSettings">Save Credentials</button>
             <p style="font-size:.72rem;color:var(--muted);margin-top:10px;">
+              A username and a password meeting the complexity policy are both required.
+              To run unmatched traffic without credentials, set
+              <strong>Default authentication behavior</strong> to Exempt instead.
               Changes apply immediately without restart.
             </p>
           </div>
@@ -3269,6 +3272,10 @@ Firefox (all platforms):
           Default Action
         </span>
         First matching policy rule wins. Blocklist and threat feed blocks happen before policy evaluation.
+      </div>
+
+      <div id="pol-persist-warning" class="banner crit" style="display:none" role="alert">
+        <svg class="ico" aria-hidden="true"><use href="#i-alert-triangle"/></svg> <strong>Not persisted:</strong> access rules are stored in memory only and will be <strong>lost on restart or update</strong>. Start Culvert with <code>-policy /data/policy.json</code> (or set <code>proxy.policy_file</code> in config.yaml) to persist them.
       </div>
 
       <!-- Rule Table -->
@@ -10072,6 +10079,8 @@ async function fetchPolicy() {
       const dt = new Date(d.updatedAt);
       uBadge.textContent = 'updated ' + dt.toLocaleString();
     }
+    const persistWarn = document.getElementById('pol-persist-warning');
+    if (persistWarn) persistWarn.style.display = (d && d.persisted === false) ? '' : 'none';
     renderPolicy();
   } catch(e) { console.error(e); }
   // policy-draft (G2): refresh the commit-mode toggle + pending-changes bar.
@@ -11399,6 +11408,14 @@ async function syncBlocklistFeed(url) {
 async function saveSettings() {
   const user = document.getElementById('s-user').value;
   const pass = document.getElementById('s-pass').value;
+  if (!user.trim()) {
+    toast('Username is required. To run unmatched traffic without credentials, set Default authentication behavior to Exempt.', 'error');
+    return;
+  }
+  if (!pass) {
+    toast('Password is required.', 'error');
+    return;
+  }
   try {
     await api('/api/settings', {
       method: 'POST',
@@ -17191,7 +17208,19 @@ function renderReleaseTrustBadge(d) {
   if (schemesEl) {
     const schemeLabels = { ed25519: 'ed25519 keys', sigstore: 'Sigstore identity', 'ed25519+sigstore': 'ed25519 keys + Sigstore identity', none: 'none' };
     const raw = d && d.trust_schemes;
-    schemesEl.textContent = raw ? ('via ' + (schemeLabels[raw] || raw)) : '';
+    let text = raw ? ('via ' + (schemeLabels[raw] || raw)) : '';
+    // Positive confirmation of which Sigstore trust material is actually
+    // enforcing (baked default vs an operator's CULVERT_RELEASE_SIGSTORE_*
+    // override) - the counterpart to the sigstore_warn banner below, which
+    // only fires when an override is BROKEN. A correctly-configured override
+    // otherwise looks identical to the baked default on this badge.
+    if (raw && raw.indexOf('sigstore') !== -1) {
+      const custom = [];
+      if (d.sigstore_identity_source === 'override') custom.push('custom identity');
+      if (d.sigstore_root_source === 'override') custom.push('custom root');
+      if (custom.length) text += ' (' + custom.join(', ') + ')';
+    }
+    schemesEl.textContent = text;
   }
   if (!warn) return;
   const lines = [];
