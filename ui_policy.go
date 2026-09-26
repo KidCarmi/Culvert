@@ -1438,9 +1438,19 @@ func apiURLCatLookup(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("host must be at most %d bytes", maxDestHostLen), http.StatusBadRequest)
 		return
 	}
-	category, tier, matchedBy := lookupHostCategory(host)
+	// Hand the matchers the SAME value the tiers above measured. net.SplitHostPort
+	// does NOT require a numeric port, so `a:` + a 1 000-byte dot-dense string is
+	// a 1 002-byte authority whose bare host is one byte: every tier passed on "a"
+	// while the fusion below received the full value, restoring the suffix walk
+	// this tier exists to prevent (Codex P2, PR #1446). Bounding the ORIGINAL at
+	// 253 is not the fix — that is round 1's IDN regression, since a legitimate
+	// internationalized host can be 883 raw bytes and 251 canonical. Measure and
+	// match the same string. This also makes the tool agree with the proxy, which
+	// strips the port identically before its own matchers.
+	lookupHost := bareDestHost(host)
+	category, tier, matchedBy := lookupHostCategory(lookupHost)
 	// Also check the blocklist so the lookup tool gives a complete picture.
-	blocked := bl.IsBlocked(host)
+	blocked := bl.IsBlocked(lookupHost)
 	blockSource := ""
 	if blocked {
 		blockSource = "blocklist"
@@ -2841,18 +2851,42 @@ func apiPolicyTest(w http.ResponseWriter, r *http.Request) {
 	// commit/revert and evaluate an empty candidate or mislabel the set.
 	rules, rulebase := effectivePolicySnapshot()
 
+	// ONE bounded host for every matcher on this endpoint, derived once.
+	//
+	// net.SplitHostPort does NOT require a numeric port, so `a:` + a 1 000-byte
+	// dot-dense string is a 1 002-byte authority whose bare host is one byte:
+	// every tier above passed on "a" while the matchers below received the full
+	// value, restoring the quadratic suffix walk those tiers exist to prevent
+	// (Codex P2, PR #1446). Bounding the ORIGINAL at 253 is not the fix — that is
+	// round 1's IDN regression, since a legitimate internationalized host can be
+	// 883 raw bytes and 251 canonical. Measure and match the SAME string.
+	//
+	// It is also a FIDELITY fix, which is why it is derived here rather than at
+	// each call: this endpoint dry-runs the live decision, and BOTH runtime
+	// stages strip the port with this exact operation before matching —
+	// authRequestContext (Stage-1, authpolicy.go) and handleRequest's own strip
+	// (Stage-2, proxy.go). Passing the raw authority made the simulator disagree
+	// with production on any host:port input.
+	testHost := bareDestHost(body.Host)
+
 	// Stage-1 simulation (Slice 8): resolve the auth outcome for this request
 	// and mirror Slice 7's runtime wiring — a no-credentials Exempt match makes
 	// Stage-2 see authSource="exempt". Dry-run: no counters, no hit counts.
+	//
+	// Stage-1 RUNS A MATCHER (resolveAuthOutcomeFrom → authRuleMatchesScratch →
+	// matchDestNorm → the category fusion), so it needs the bounded host for the
+	// same two reasons Stage-2 does. Enumerating the Stage-2 matchers and missing
+	// this one is the round-2 mistake of this same finding, repeated inside the
+	// function that fixed it.
 	stage2AuthSource, authBlock := simulateAuthOutcome(rules,
-		body.SourceIP, body.Host, body.Protocol, body.Method, body.Identity, body.AuthSource)
+		body.SourceIP, testHost, body.Protocol, body.Method, body.Identity, body.AuthSource)
 	body.AuthSource = stage2AuthSource
 
 	// Walk rules manually without incrementing hit counts.
-	trace, matched := walkPolicyTestRules(rules, body.SourceIP, body.Identity, body.AuthSource, body.Host, body.Groups)
+	trace, matched := walkPolicyTestRules(rules, body.SourceIP, body.Identity, body.AuthSource, testHost, body.Groups)
 
 	// Enrich with category lookup so the admin can see how the host was categorised.
-	catName, catTier, catMatchedBy := lookupHostCategory(body.Host)
+	catName, catTier, catMatchedBy := lookupHostCategory(testHost)
 	hostCategory := map[string]string{
 		"category":  catName,
 		"tier":      catTier,

@@ -7601,3 +7601,143 @@ asserted first and the 407 precondition), `DefectAdminEntryPointsBoundUnnormaliz
 (both handlers), and the control above. Verified failing against the reverted
 HTTP shape, the reverted admin shape, and a fallback with its length check
 removed.
+
+### The fifth review round: the tiers measured a string the matchers never received
+
+One finding on `fccc058` (Codex P2), and it is the sharpest form this sweep
+produced, because **every bound was correct, every gate was green, and the
+defect was fully reachable anyway.** The previous four rounds asked whether the
+bound was the right VALUE (round 1), in the right POSITION (round 2), paired
+with the right ACTION (round 3), and on every BRANCH (round 4). None of them
+asked the prior question: *is the string the tiers measure the string the
+matchers are handed?*
+
+`net.SplitHostPort` does not require a numeric port — it splits on the last
+colon and validates nothing beyond that. So:
+
+    authority := "a:" + strings.Repeat("bb.", 333) + "bb"   // 1 003 bytes
+
+- `rawAuthorityOversize(authority)` → **false** (1 003 < 1 024).
+- `canonicalDestHost(authority)` → `("a", true)`; the port is everything after
+  the colon.
+- `canonicalHostOversize("a")` → **false** (1 < 253).
+
+Both tiers pass, on a one-byte host. The two admin handlers then wrote:
+
+    category, tier, matchedBy := lookupHostCategory(host)      // the ORIGINAL
+    blocked := bl.IsBlocked(host)
+    ...
+    trace, matched := walkPolicyTestRules(rules, …, body.Host, …)
+    stage2AuthSource, authBlock := simulateAuthOutcome(rules, …, body.Host, …)
+
+so the quadratic suffix walk ran on 1 003 bytes — the exact cost §39 exists to
+bound, reached through a surface §39 had already "closed", from a viewer-role
+request.
+
+**Bounding the ORIGINAL at 253 is not the fix.** That is round 1's IDN
+regression restated: a legitimate internationalized host measures 883 raw bytes
+and 251 canonical, so a 253-byte cap on the raw authority refuses resolvable
+destinations. The fix is to derive the bounded form ONCE with the same operation
+the tiers used — `bareDestHost`, a `net.SplitHostPort` strip with no validation —
+and hand THAT to every matcher.
+
+#### The fidelity half, which is worse than the cost half
+
+Both runtime stages already strip the port with this exact operation before
+matching:
+
+- Stage-1: `authRequestContext` (`authpolicy.go`) — `net.SplitHostPort` on
+  `r.Host`, feeding `RequestContext.Host`.
+- Stage-2: `handleRequest` (`proxy.go`) — the same strip, feeding
+  `preDispatchBlocked` and `policyStore.Evaluate`.
+
+The policy tester's entire purpose is to predict those decisions. Measured on
+the pre-fix tree with a category-scoped auth-exempt rule:
+
+| host handed to the Stage-1 resolver | outcome | rule matched |
+|---|---|---|
+| `a` (production's value) | **Exempt** | yes |
+| `a:bb.bb.…` (the tester's value) | `Default` | no |
+
+So an admin auditing the blast radius of an auth exemption was shown
+*"this exemption does not apply"* for traffic the live gate exempts — a
+**narrower** scope than production enforces, which is the dangerous direction
+for an exemption review. Stage-2 under-reported its matches identically.
+
+#### Why exactly these two paths, and no others
+
+The HTTP proxy path was already correct, and for an ordinary reason: it does its
+own `net.SplitHostPort` at `proxy.go:1513` and passes the result to
+`preDispatchBlocked` and `Evaluate`. SOCKS5 was never exposed because RFC 1928
+§4 carries the port in its own two-byte field, so its DOMAINNAME never contains
+one. **The exposure was precisely the two paths whose host value does not come
+from a wire format that separates host from port** — a query parameter and a
+JSON field, where the admin types one string and the handler must split it
+itself.
+
+#### Stage-1 was missed by the first draft of this very fix
+
+The first draft bounded `lookupHostCategory`, `bl.IsBlocked` and
+`walkPolicyTestRules`, and left `simulateAuthOutcome` alone — the THIRD matcher
+call site in the same function. That is round 2's lesson (*Stage-1 runs a
+matcher*) landing again, inside the function that had just been repaired, in the
+same sweep that recorded the lesson. Enumerating "the matchers" is not the same
+as enumerating the matchers.
+
+> **A bound is a claim about a STRING, not about a request.** Measure the value
+> you will actually hand onward. If you derive a bounded form, make every
+> consumer on that path take the derived value — never the original sitting in
+> scope beside it.
+
+#### Two vacuous gates before a real one, and why
+
+This is the most instructive part of the round.
+
+1. **A cost-RATIO gate could not see the defect.** The quadratic walk needs a
+   populated taxonomy; with the shipped test fixtures the 1 003-byte and
+   253-byte cases cost the same, so the ratio gate passed against the pre-fix
+   shape. The instrument was right for the data path (where a real taxonomy is
+   in play) and wrong here.
+2. **A structural wall keyed on the identifier's NAME also passed.** It checked
+   that the matcher's argument was one of a blessed set of spellings, so the
+   pre-fix shape re-spelled `lookupHost := host` satisfied it. A wall that
+   cannot fail for its own defect is worse than no wall, because it is recorded
+   as coverage.
+
+What shipped is **behavioural**, and the observable is deliberately a match
+rather than a cost: urlcat's `lookupIn` probes the host and then each remainder
+after a `.`, so a payload of `bb.` labels can never reach the pattern `a`. A
+one-entry taxonomy therefore resolves the category for the bounded host and
+resolves nothing for the raw authority — a sharp differential needing no feed,
+no timing and no large fixture. The labels are `bb` on purpose: an authority
+ending `.a` would match through the suffix walk and hide the defect.
+
+Gates (`proxy_host_bounds_test.go`, round 5):
+
+- `DefectAdminMatchersReceiveTheBoundedHost` — both handlers, category fusion.
+  Asserts the tiers really do pass for this shape first, so it can never be
+  asserting against a request refused for an unrelated reason.
+- `DefectPolicyTesterStage1MatchesTheRuntimeHost` — computes the runtime gate's
+  own answer via `authRequestContext` and requires the simulator to agree.
+- `ControlPortShapedAuthorityIsStillAnswered` — an ordinary `host:port` must be
+  ANSWERED, uncharged, and still resolve its category, because the cheapest way
+  to pass the three defect gates is to refuse any authority carrying a port.
+  It also pins that the ECHOED host stays what the admin typed: the strip
+  governs what the matchers receive, never what the answer reports back.
+- `DefectEveryAdminMatcherTakesTheBoundedHost` — the completeness half. Walks
+  both handlers' ASTs and requires every host argument to a matcher to be an
+  identifier **assigned from** `bareDestHost` in that handler, across all five
+  call sites, with its own not-vacuous count.
+
+Mutation results (each run against the full `TestChaos69_` set):
+
+| mutation | fails |
+|---|---|
+| `lookupHost := host` (name kept, bound lost) | url-lookup gate, control, **the wall** |
+| `testHost := body.Host` | policy-test gate, Stage-1 gate, control, **the wall** |
+| only the Stage-1 argument reverted | **Stage-1 gate + the wall, and nothing else** |
+| `bareDestHost` returns `""` on any port (a colon ban) | **the control, both handlers** |
+
+The third row is the one worth keeping: the partial revert is invisible to every
+other gate, which is what proves the Stage-1 gate and the wall are each carrying
+weight rather than restating the behavioural gates.

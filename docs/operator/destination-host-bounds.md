@@ -172,6 +172,26 @@ refused on length.
   case by a constant while breaking clients that carry large cookie or token
   headers — the wrong instrument for a bound on one value.
 
+### One behaviour change on the admin surfaces
+
+**URL-category lookup** (`GET /api/url-categories/lookup`) and the **policy
+tester** accept a host you type by hand, so they have to split host from port
+themselves. Both now strip the port before matching — the same strip the proxy
+performs on every request — which means:
+
+- Looking up `shop.example.com:8443` reports the category of
+  `shop.example.com`. Previously it reported no category at all, because the
+  matcher was handed the whole string including the port.
+- The policy tester's **Stage-1 auth outcome** and **Stage-2 decision** now
+  agree with production for a `host:port` input. Previously a destination typed
+  with an explicit port could be reported as NOT matching a scoped auth
+  exemption that the live gate does apply — a narrower exemption scope than the
+  appliance actually enforces. If you have audited exemption blast radius with
+  the tester using `host:port` inputs, re-run those checks.
+
+The `host` field echoed back in the response is still exactly what you typed.
+The strip governs what the matchers see, not what the answer reports.
+
 ---
 
 ## 6. Why there is no configuration knob

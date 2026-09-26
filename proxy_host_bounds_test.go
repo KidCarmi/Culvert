@@ -4,6 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"encoding/json"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"io"
 	"log"
 	"net"
@@ -20,6 +24,7 @@ import (
 	"golang.org/x/net/idna"
 
 	"github.com/KidCarmi/Culvert/internal/reqlog"
+	"github.com/KidCarmi/Culvert/internal/urlcat"
 )
 
 // ─── CHAOS-69 — the client-supplied destination authority on the proxy path ───
@@ -1049,4 +1054,376 @@ func TestChaos69_DefectAdminEntryPointsBoundUnnormalizableHosts(t *testing.T) {
 			t.Errorf("proxyOversizeHostRejected = %d, want %d — the refusal is uncounted", got, before+1)
 		}
 	})
+}
+
+// ─── ROUND 5 — measure-vs-use: the bound must govern the string the matchers get ──
+//
+// net.SplitHostPort does NOT require a numeric port. So `a:` followed by a
+// 1 000-byte dot-dense string is a 1 003-byte authority whose bare host is ONE
+// byte: the raw tier passes (1 003 < 1 024), canonicalDestHost strips the port
+// and normalizes "a", and the canonical tier passes on a length of 1 — while
+// the matchers below received the full 1 003 bytes and paid the quadratic
+// suffix walk both tiers exist to prevent.
+//
+// Bounding the ORIGINAL at 253 is NOT the fix: that is round 1's IDN regression
+// (a legitimate internationalized host measures 883 raw / 251 canonical). The
+// fix is to MEASURE AND USE THE SAME STRING, which is what these gates pin.
+//
+// They are behavioural, not structural, and deliberately so: the observable is
+// whether a one-entry taxonomy MATCHES. urlcat's suffix walk probes the host
+// and then each remainder after a `.`, so a payload of "bb." labels can never
+// reach the pattern "a" — the bounded value resolves the category and the raw
+// value resolves nothing. That differential needs no populated feed and no
+// timing, which is what made the first attempt at this gate vacuous: the cost
+// ratio it measured is invisible without a large taxonomy this test cannot
+// build, so it passed against the pre-fix shape.
+
+// chaos69PortShaped returns the round-5 attack authority together with the bare
+// host every tier measured. Labels are "bb" so no suffix of the payload can
+// equal the taxonomy pattern by accident — an authority ending in ".a" would
+// match through the suffix walk and hide the defect.
+func chaos69PortShaped() (authority, bare string) {
+	authority = "a:" + strings.Repeat("bb.", 333) + "bb"
+	return authority, "a"
+}
+
+// TestChaos69_DefectAdminMatchersReceiveTheBoundedHost drives both viewer-role
+// admin entry points with the port-shaped authority and requires the category
+// fusion to answer for the BARE host. Pre-fix the raw authority reached the
+// fusion, which resolves nothing for it, so every assertion below fails.
+func TestChaos69_DefectAdminMatchersReceiveTheBoundedHost(t *testing.T) {
+	authority, bare := chaos69PortShaped()
+
+	// Prove the shape really does slip every tier — otherwise this gate would be
+	// asserting against a request that was refused for an unrelated reason.
+	if rawAuthorityOversize(authority) {
+		t.Fatalf("raw tier refused a %d-byte authority; this gate needs one that passes", len(authority))
+	}
+	norm, ok := canonicalDestHost(authority)
+	if !ok || canonicalHostOversize(norm) {
+		t.Fatalf("canonical tier refused %q (ok=%v); this gate needs an authority that passes both tiers", norm, ok)
+	}
+	if norm != bare {
+		t.Fatalf("canonicalDestHost(%d bytes) = %q, want %q", len(authority), norm, bare)
+	}
+
+	t.Run("url-category-lookup", func(t *testing.T) {
+		chaos66Isolate(t)
+		swapCatStore(t, []*urlcat.Entry{{Name: "Social Media", Hosts: []string{bare}}})
+
+		r := withRole(httptest.NewRequest(http.MethodGet,
+			"/api/url-categories/lookup?host="+authority, http.NoBody), RoleViewer)
+		w := httptest.NewRecorder()
+		apiURLCatLookup(w, r)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d: body=%s", w.Code, http.StatusOK, w.Body.String())
+		}
+		var got struct {
+			Category  string `json:"category"`
+			Tier      string `json:"tier"`
+			MatchedBy string `json:"matchedBy"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if got.Category != "Social Media" || got.Tier != "admin" || got.MatchedBy != bare {
+			t.Errorf("category = (%q, %q, %q), want (\"Social Media\", \"admin\", %q): the fusion received the "+
+				"%d-byte authority, not the %d-byte host every tier measured — the quadratic suffix walk the "+
+				"tiers exist to prevent still runs",
+				got.Category, got.Tier, got.MatchedBy, bare, len(authority), len(bare))
+		}
+	})
+
+	t.Run("policy-test", func(t *testing.T) {
+		chaos66Isolate(t)
+		swapCatStore(t, []*urlcat.Entry{{Name: "Social Media", Hosts: []string{bare}}})
+
+		w := httptest.NewRecorder()
+		apiPolicyTest(w, testerRoleReq(t, RoleViewer, map[string]any{"host": authority}))
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d: body=%s", w.Code, http.StatusOK, w.Body.String())
+		}
+		var got struct {
+			HostCategory struct {
+				Category  string `json:"category"`
+				Tier      string `json:"tier"`
+				MatchedBy string `json:"matchedBy"`
+			} `json:"hostCategory"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		hc := got.HostCategory
+		if hc.Category != "Social Media" || hc.Tier != "admin" || hc.MatchedBy != bare {
+			t.Errorf("hostCategory = (%q, %q, %q), want (\"Social Media\", \"admin\", %q): the fusion received the "+
+				"%d-byte authority, not the %d-byte host every tier measured",
+				hc.Category, hc.Tier, hc.MatchedBy, bare, len(authority), len(bare))
+		}
+	})
+}
+
+// TestChaos69_DefectPolicyTesterStage1MatchesTheRuntimeHost is the third call
+// site inside the SAME handler, and it is the round-2 lesson landing again:
+// STAGE-1 AUTH RUNS A MATCHER. simulateAuthOutcome →
+// resolveAuthOutcomeFrom → authRuleMatchesScratch → matchDestNorm → the
+// category fusion, so enumerating the Stage-2 matchers and missing this one
+// left the walk reachable through the function that had just been fixed.
+//
+// It is also a FIDELITY defect, which is the more serious half. The runtime
+// Stage-1 gate strips the port with exactly this operation
+// (authRequestContext, authpolicy.go), so pre-fix the tester reported
+// outcome=Default — "this exemption does not apply" — for traffic the live
+// gate exempts. An admin auditing the blast radius of an auth exemption was
+// shown a NARROWER scope than production enforces.
+func TestChaos69_DefectPolicyTesterStage1MatchesTheRuntimeHost(t *testing.T) {
+	chaos66Isolate(t)
+	snapshotPolicyStoreForTest(t)
+	authority, bare := chaos69PortShaped()
+	swapCatStore(t, []*urlcat.Entry{{Name: "Social Media", Hosts: []string{bare}}})
+
+	enabled := true
+	policyStore.ReplaceAll([]PolicyRule{{
+		Name: "chaos69-auth-exempt", RuleType: ruleTypeAuth, Enabled: &enabled, Priority: 1,
+		DestCategory: URLCategory("Social Media"),
+		SubjectMatch: &SubjectMatch{SchemaVersion: 1,
+			All: []SubjectPredicate{{Type: subjectPredicateCIDR, Values: []string{"10.0.0.0/8"}}}},
+		Auth: &AuthRuleSpec{Outcome: OutcomeExempt, Owner: "ops", Reason: "chaos69"},
+	}})
+	if len(policyStore.List()) != 1 {
+		t.Fatalf("the auth rule was dropped on replace; this gate needs it to survive validation")
+	}
+
+	// The runtime gate's own answer for this authority, via the production
+	// strip — the value the simulator must agree with.
+	runtime := resolveAuthOutcomeFrom(policyStore.List(), authRequestContext(
+		&http.Request{Method: http.MethodGet, Host: authority, Header: http.Header{}}, "10.1.2.3"))
+	if runtime.Outcome != OutcomeExempt || runtime.Rule == nil {
+		t.Fatalf("runtime Stage-1 = %q (ruleNil=%v); this gate needs the live gate to exempt this authority",
+			runtime.Outcome, runtime.Rule == nil)
+	}
+
+	w := httptest.NewRecorder()
+	apiPolicyTest(w, testerRoleReq(t, RoleViewer, map[string]any{
+		"host": authority, "sourceIP": "10.1.2.3", "protocol": "http", "method": http.MethodGet,
+	}))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d: body=%s", w.Code, http.StatusOK, w.Body.String())
+	}
+	var got struct {
+		Auth struct {
+			Outcome          string `json:"outcome"`
+			Stage2AuthSource string `json:"stage2AuthSource"`
+			FromDefault      bool   `json:"fromDefault"`
+		} `json:"auth"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.Auth.Outcome != string(OutcomeExempt) {
+		t.Errorf("simulator Stage-1 outcome = %q, want %q: the simulator handed the %d-byte authority to the "+
+			"Stage-1 matcher while the runtime gate strips the port, so the tester reports a NARROWER exemption "+
+			"scope than production enforces",
+			got.Auth.Outcome, OutcomeExempt, len(authority))
+	}
+	if got.Auth.Stage2AuthSource != authSourceExempt {
+		t.Errorf("stage2AuthSource = %q, want %q", got.Auth.Stage2AuthSource, authSourceExempt)
+	}
+	if got.Auth.FromDefault {
+		t.Error("fromDefault = true: the simulator fell through to the global default instead of matching the scoped rule")
+	}
+}
+
+// TestChaos69_ControlPortShapedAuthorityIsStillAnswered is the control for the
+// three gates above. The cheapest way to pass them is to refuse any authority
+// carrying a port, which would break every ordinary explicit-port destination
+// on both admin surfaces. An ordinary host:port must be ANSWERED, must not be
+// charged to the oversize counter, and must resolve the category for its bare
+// host — proving the strip is the production strip and not a colon ban.
+func TestChaos69_ControlPortShapedAuthorityIsStillAnswered(t *testing.T) {
+	const authority = "shop.example.com:8443"
+	const bare = "shop.example.com"
+
+	t.Run("url-category-lookup", func(t *testing.T) {
+		chaos66Isolate(t)
+		swapCatStore(t, []*urlcat.Entry{{Name: "Shopping", Hosts: []string{bare}}})
+		before := proxyOversizeHostRejected.Load()
+
+		r := withRole(httptest.NewRequest(http.MethodGet,
+			"/api/url-categories/lookup?host="+authority, http.NoBody), RoleViewer)
+		w := httptest.NewRecorder()
+		apiURLCatLookup(w, r)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("an ordinary %q was refused %d: %s", authority, w.Code, w.Body.String())
+		}
+		var got struct {
+			Category string `json:"category"`
+			Host     string `json:"host"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if got.Category != "Shopping" {
+			t.Errorf("category = %q, want \"Shopping\": an ordinary explicit-port destination no longer resolves", got.Category)
+		}
+		// The ECHOED host stays exactly what the admin typed — the strip governs
+		// what the matchers receive, never what the answer reports back.
+		if got.Host != authority {
+			t.Errorf("host echo = %q, want %q", got.Host, authority)
+		}
+		if after := proxyOversizeHostRejected.Load(); after != before {
+			t.Errorf("proxyOversizeHostRejected moved %d -> %d on an ordinary host:port", before, after)
+		}
+	})
+
+	t.Run("policy-test", func(t *testing.T) {
+		chaos66Isolate(t)
+		swapCatStore(t, []*urlcat.Entry{{Name: "Shopping", Hosts: []string{bare}}})
+		before := proxyOversizeHostRejected.Load()
+
+		w := httptest.NewRecorder()
+		apiPolicyTest(w, testerRoleReq(t, RoleViewer, map[string]any{"host": authority}))
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("an ordinary %q was refused %d: %s", authority, w.Code, w.Body.String())
+		}
+		var got struct {
+			HostCategory struct {
+				Category string `json:"category"`
+			} `json:"hostCategory"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if got.HostCategory.Category != "Shopping" {
+			t.Errorf("hostCategory.category = %q, want \"Shopping\"", got.HostCategory.Category)
+		}
+		if after := proxyOversizeHostRejected.Load(); after != before {
+			t.Errorf("proxyOversizeHostRejected moved %d -> %d on an ordinary host:port", before, after)
+		}
+	})
+}
+
+// TestChaos69_DefectEveryAdminMatcherTakesTheBoundedHost is the COMPLETENESS
+// half. The behavioural gates above observe three of the matcher arguments;
+// this one walks the AST of both handlers and requires EVERY host argument
+// handed to a matcher to be an identifier assigned from bareDestHost — so a
+// fourth matcher added later, or one of these quietly reverted to the raw
+// authority in a way no current assertion observes, fails the build.
+//
+// It checks the ASSIGNMENT, not the identifier's name. The first version of
+// this wall compared the name against a set of blessed spellings and therefore
+// PASSED against the pre-fix shape written as `lookupHost := host` — a wall
+// that cannot fail for its own defect.
+func TestChaos69_DefectEveryAdminMatcherTakesTheBoundedHost(t *testing.T) {
+	// matcher name → index of its host parameter.
+	hostArg := map[string]int{
+		"lookupHostCategory":  0,
+		"IsBlocked":           0,
+		"walkPolicyTestRules": 4,
+		"simulateAuthOutcome": 2,
+	}
+
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "ui_policy.go", nil, 0)
+	if err != nil {
+		t.Fatalf("parse ui_policy.go: %v", err)
+	}
+
+	checked := 0
+	for _, handler := range []string{"apiURLCatLookup", "apiPolicyTest"} {
+		fn := chaos69FuncDecl(t, file, handler)
+		derived := chaos69BareDerivedIdents(fn)
+
+		ast.Inspect(fn.Body, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			name := chaos69CalleeName(call.Fun)
+			idx, watched := hostArg[name]
+			if !watched || idx >= len(call.Args) {
+				return true
+			}
+			checked++
+			pos := fset.Position(call.Pos())
+			arg, isIdent := call.Args[idx].(*ast.Ident)
+			if !isIdent {
+				t.Errorf("%s:%d: %s receives a non-identifier host argument — it must be a value derived from "+
+					"bareDestHost, or the tiers measure one string and the matchers walk another",
+					handler, pos.Line, name)
+				return true
+			}
+			if !derived[arg.Name] {
+				t.Errorf("%s:%d: %s receives %q, which is not assigned from bareDestHost in this handler — "+
+					"the two tiers above measure the bare host while this matcher walks the full authority "+
+					"(net.SplitHostPort accepts a non-numeric port, so `a:`+1 000 dot-dense bytes passes both "+
+					"tiers on a 1-byte host)",
+					handler, pos.Line, name, arg.Name)
+			}
+			return true
+		})
+	}
+
+	// A selector that stopped matching would let this wall pass forever.
+	if checked != 5 {
+		t.Fatalf("the wall inspected %d bounded matcher arguments, want 5 — it is no longer finding the call "+
+			"sites and must be re-aimed, not deleted", checked)
+	}
+}
+
+// chaos69FuncDecl returns the named top-level function, failing loudly if a
+// rename has left the wall aimed at nothing.
+func chaos69FuncDecl(t *testing.T, file *ast.File, name string) *ast.FuncDecl {
+	t.Helper()
+	for _, d := range file.Decls {
+		if fn, ok := d.(*ast.FuncDecl); ok && fn.Name.Name == name && fn.Body != nil {
+			return fn
+		}
+	}
+	t.Fatalf("%s not found in ui_policy.go — this wall must be re-aimed, not deleted", name)
+	return nil
+}
+
+// chaos69BareDerivedIdents collects the local names assigned from a
+// bareDestHost call anywhere in fn. Assignment, not spelling, is the invariant:
+// the pre-fix shape re-spelled as `lookupHost := host` keeps the name and loses
+// the bound.
+func chaos69BareDerivedIdents(fn *ast.FuncDecl) map[string]bool {
+	derived := map[string]bool{}
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		assign, ok := n.(*ast.AssignStmt)
+		if !ok {
+			return true
+		}
+		for i, lhs := range assign.Lhs {
+			id, ok := lhs.(*ast.Ident)
+			if !ok || i >= len(assign.Rhs) {
+				continue
+			}
+			call, ok := assign.Rhs[i].(*ast.CallExpr)
+			if !ok {
+				continue
+			}
+			if chaos69CalleeName(call.Fun) == "bareDestHost" {
+				derived[id.Name] = true
+			}
+		}
+		return true
+	})
+	return derived
+}
+
+// chaos69CalleeName is the bare function name of a call target, for both
+// `f(...)` and `recv.f(...)`.
+func chaos69CalleeName(fun ast.Expr) string {
+	switch f := fun.(type) {
+	case *ast.Ident:
+		return f.Name
+	case *ast.SelectorExpr:
+		return f.Sel.Name
+	}
+	return ""
 }
