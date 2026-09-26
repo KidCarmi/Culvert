@@ -1665,6 +1665,12 @@ func TestApiDiagnostics_OversizeLegacyUsernameSurfacedOnContract(t *testing.T) {
 	if !strings.Contains(found.OperatorAction, "auth.pass") {
 		t.Errorf("admin_username_length operator_action = %q, want the startup password (-pass / auth.pass) updated alongside the name", found.OperatorAction)
 	}
+	// POST /api/settings never calls SaveUIUsersFile, and with no mirrored
+	// roster row there is no later delete to persist the roster either, so
+	// the action must name a step that writes the new login durably.
+	if !strings.Contains(found.OperatorAction, "change-password") {
+		t.Errorf("admin_username_length operator_action = %q, want a durable-persistence step for the Settings-only replacement", found.OperatorAction)
+	}
 	if strings.Contains(found.Message, longName) {
 		t.Error("admin_username_length message should not echo the username itself")
 	}

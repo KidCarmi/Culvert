@@ -550,35 +550,10 @@ func checkOversizeConfiguredUsernames() OperatorContractCheck {
 			Message: "no admin accounts configured",
 		}
 	}
-	// The legacy single user (cfg.GetUser) is included and deduplicated:
-	// LoginNameConfigured/VerifyUIUser fall back to it, and DeleteUIUser
-	// removes only the roster entry, so an oversize legacy name can remain
-	// able to log in with no roster row — reporting ok then would falsely
-	// confirm a remediation that did not happen.
-	names := map[string]struct{}{}
-	for _, u := range cfg.ListUIUsers() {
-		names[u.Username] = struct{}{}
-	}
-	legacyOversize, legacyMirrored := false, false
-	legacy := cfg.GetUser()
-	if legacy != "" {
-		_, legacyMirrored = names[legacy]
-		names[legacy] = struct{}{}
-		legacyOversize = len(legacy) > adminUsernameAccountLimit
-	}
-	// rosterOversize counts oversize Admin Users rows OTHER than the legacy
-	// login: those are the only accounts the Admin Users create/delete
-	// workflow applies to (a mirrored legacy name is retired via Settings).
-	rosterOversize := false
-	for name := range names {
-		if name != legacy && len(name) > adminUsernameAccountLimit {
-			rosterOversize = true
-			break
-		}
-	}
+	inv := collectAdminUsernames()
 	n, maxLen := 0, 0
 	totpOversize := false
-	for name := range names {
+	for name := range inv.names {
 		if len(name) > adminUsernameAccountLimit {
 			n++
 			if cfg.UserHasTOTP(name) {
@@ -600,16 +575,70 @@ func checkOversizeConfiguredUsernames() OperatorContractCheck {
 	if n != 1 {
 		plural = "s"
 	}
+	action := oversizeUsernameAction(inv, totpOversize)
+	return OperatorContractCheck{
+		Code:   "admin_username_length",
+		Status: diagWarn,
+		Message: fmt.Sprintf("%d admin account%s have a username above the %d-byte account limit (longest: %d bytes) — "+
+			"the dashboard sign-in form accepts at most %d characters and every account-creation path caps names there, "+
+			"so the account may be unusable from the admin UI (configured names are exempt from the login API's length bound, "+
+			"so the account can still authenticate through the API)",
+			n, plural, adminUsernameAccountLimit, maxLen, adminUsernameAccountLimit),
+		OperatorAction: action,
+	}
+}
+
+// adminUsernameInventory is the de-duplicated set of configured login names
+// (roster + legacy single user) plus the legacy-login facts the remediation
+// text depends on.
+type adminUsernameInventory struct {
+	names          map[string]struct{}
+	legacyOversize bool
+	legacyMirrored bool
+	rosterOversize bool
+}
+
+func collectAdminUsernames() adminUsernameInventory {
+	// The legacy single user (cfg.GetUser) is included and deduplicated:
+	// LoginNameConfigured/VerifyUIUser fall back to it, and DeleteUIUser
+	// removes only the roster entry, so an oversize legacy name can remain
+	// able to log in with no roster row — reporting ok then would falsely
+	// confirm a remediation that did not happen.
+	names := map[string]struct{}{}
+	for _, u := range cfg.ListUIUsers() {
+		names[u.Username] = struct{}{}
+	}
+	inv := adminUsernameInventory{names: names}
+	legacy := cfg.GetUser()
+	if legacy != "" {
+		_, inv.legacyMirrored = names[legacy]
+		names[legacy] = struct{}{}
+		inv.legacyOversize = len(legacy) > adminUsernameAccountLimit
+	}
+	// rosterOversize counts oversize Admin Users rows OTHER than the legacy
+	// login: those are the only accounts the Admin Users create/delete
+	// workflow applies to (a mirrored legacy name is retired via Settings).
+	for name := range names {
+		if name != legacy && len(name) > adminUsernameAccountLimit {
+			inv.rosterOversize = true
+			break
+		}
+	}
+	return inv
+}
+
+// oversizeUsernameAction builds the operator_action for a warn row.
+func oversizeUsernameAction(inv adminUsernameInventory, totpOversize bool) string {
 	// A username cannot be renamed in place (the edit dialog locks it and the
 	// API has no rename), so the remediation is create → switch → delete.
 	// The roster holds every role, so the replacement keeps the affected
 	// account's role (an oversize operator/viewer must not become an admin).
 	action := ""
-	if rosterOversize {
+	if inv.rosterOversize {
 		action = "Usernames cannot be renamed in place: from Admin Users, create a replacement account with the same role " +
 			"and a name of at most 64 bytes, confirm it can sign in, then delete the old account. "
 	}
-	if legacyOversize {
+	if inv.legacyOversize {
 		// The legacy single-user login (cfg.user) is not an Admin Users row
 		// and deleting its roster entry leaves it in place, so Admin Users
 		// cannot clear it. It is replaced by Settings (POST /api/settings,
@@ -623,10 +652,16 @@ func checkOversizeConfiguredUsernames() OperatorContractCheck {
 		action += "The oversize name includes the legacy single-user login, which Admin Users alone cannot change: " +
 			"set a shorter login under Settings (POST /api/settings) together with a new strong password in the same save " +
 			"(Settings sets the password it is given — never leave the password blank), sign in with it, "
-		if legacyMirrored {
+		if inv.legacyMirrored {
 			// Only a mirrored legacy name has a roster entry to remove; a
 			// legacy-only name is retired by overwriting cfg.user alone.
 			action += "then delete the old name's remaining Admin Users entry (Settings adds the new name but does not remove the old one), "
+		} else {
+			// POST /api/settings never writes ui_users.json, and with no
+			// mirrored row there is no roster delete to persist it either;
+			// a self-service password change (SaveUIUsersFile) does.
+			action += "then, signed in as the new login, change its password once (POST /api/auth/change-password) — " +
+				"Settings does not write the account store, so without that saved change the new login is lost on restart, "
 		}
 		// loadAuth re-applies BOTH startup values via SetAuth on every boot,
 		// so changing only the name would let the old startup password
@@ -647,16 +682,7 @@ func checkOversizeConfiguredUsernames() OperatorContractCheck {
 			"name and the admin UI has no TOTP enrollment path, so the replacement would sign in with a password only — " +
 			"provision and verify TOTP for the replacement before deleting the old account, or explicitly accept that downgrade first."
 	}
-	return OperatorContractCheck{
-		Code:   "admin_username_length",
-		Status: diagWarn,
-		Message: fmt.Sprintf("%d admin account%s have a username above the %d-byte account limit (longest: %d bytes) — "+
-			"the dashboard sign-in form accepts at most %d characters and every account-creation path caps names there, "+
-			"so the account may be unusable from the admin UI (configured names are exempt from the login API's length bound, "+
-			"so the account can still authenticate through the API)",
-			n, plural, adminUsernameAccountLimit, maxLen, adminUsernameAccountLimit),
-		OperatorAction: action,
-	}
+	return action
 }
 
 // checkAuditPersistence reports whether the operator-configured audit log file
