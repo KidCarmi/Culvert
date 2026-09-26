@@ -581,3 +581,40 @@ func TestAPIBackupsCreate_OmittedEncryptChoiceIsRejected(t *testing.T) {
 		t.Fatalf("agent called %d times for a request with no explicit encrypt choice, want 0", got)
 	}
 }
+
+// TestAPIBackupsCreate_MalformedAgentSuccessIs502 pins that a 2xx from the
+// agent whose body is not an operation record with a valid op_id is NOT
+// reported as a triggered backup: the GUI would say "Backup started" and then
+// silently never poll, since it has no id to track.
+func TestAPIBackupsCreate_MalformedAgentSuccessIs502(t *testing.T) {
+	for name, body := range map[string]string{
+		"truncated":   `{"op_id":"01ARZ3NDEKTSV4R`,
+		"not json":    `<html>ok</html>`,
+		"no op_id":    `{"state":"pending"}`,
+		"bad op_id":   `{"op_id":"not-a-ulid","state":"pending"}`,
+		"numeric id":  `{"op_id":42}`,
+		"empty body":  ``,
+		"json null":   `null`,
+		"json array":  `[]`,
+		"wrong shape": `{"op_id":["01ARZ3NDEKTSV4RRFFQ69G5FAV"]}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			resetBackupsCache(t)
+			agent := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusAccepted)
+				_, _ = w.Write([]byte(body))
+			}))
+			defer agent.Close()
+			t.Setenv(envMaintAgentURL, agent.URL)
+
+			w, _ := postAPIBackups(t, RoleAdmin, map[string]any{"encrypt": false})
+			if w.Code != http.StatusBadGateway {
+				t.Fatalf("status = %d, want 502 for a malformed agent success (body=%s)", w.Code, w.Body.String())
+			}
+			if strings.Contains(w.Body.String(), `"triggered":true`) {
+				t.Fatalf("body = %q, must not report a triggered backup", w.Body.String())
+			}
+		})
+	}
+}

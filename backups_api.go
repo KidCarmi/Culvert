@@ -311,7 +311,16 @@ func apiBackupsCreate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, reason, http.StatusBadGateway)
 		return
 	}
-	auditEvent(r, "backup.trigger", filename, fmt.Sprintf("encrypt=%v op_id=%v", encrypt, opResp["op_id"]))
+	// A 2xx is a success only when it carries an operation record with a
+	// valid op_id: without one the GUI would announce "Backup started" and
+	// then never poll, a false success with no way to learn the outcome.
+	opID, _ := opResp["op_id"].(string)
+	if !backupOpIDRE.MatchString(opID) {
+		http.Error(w, "maintenance agent returned a malformed operation record (no valid op_id); "+
+			"the backup may still have started — check the archive listing", http.StatusBadGateway)
+		return
+	}
+	auditEvent(r, "backup.trigger", filename, fmt.Sprintf("encrypt=%v op_id=%s", encrypt, opID))
 	// The listing is cached for backupsCacheTTL — drop it so the next GET
 	// (e.g. right after this op reaches a terminal state) shows the new
 	// archive instead of a stale pre-trigger snapshot.
@@ -321,7 +330,7 @@ func apiBackupsCreate(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, map[string]any{
 		"triggered": true,
 		"filename":  filename,
-		"opId":      opResp["op_id"],
+		"opId":      opID,
 		"state":     opResp["state"],
 		"deduped":   opResp["deduped"],
 	})
