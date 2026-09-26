@@ -560,7 +560,7 @@ func TestDeliverLine_ResolvesADropRecordedBeforeTheWriteCompleted(t *testing.T) 
 		}
 	}()
 
-	conn, err := net.Dial("tcp", ln.Addr().String())
+	conn, err := (&net.Dialer{}).DialContext(t.Context(), "tcp", ln.Addr().String())
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
