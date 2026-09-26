@@ -176,6 +176,14 @@ Interfaces referenced:
   docker exec culvert ./culvert --reset-password admin:NewStr0ngPass --ui-users-file /data/ui_users.json
   ```
 - **Expected:** `Password reset for "admin" (role=admin).` Log in with the new password.
+- **Second factor:** this break-glass **removes** the account's TOTP enrolment — an operator who has lost the
+  authenticator as well as the password must be able to get back in. When the account was enrolled the command
+  additionally prints `WARNING: TOTP two-factor enrolment for "admin" was removed … now single-factor`.
+  The enrolment is cleared completely (secret, backup codes and the replay counter), so the account can be
+  re-enrolled immediately. Re-enrol before returning the appliance to service.
+  **No other path removes a second factor:** an ordinary
+  password change (self-service or admin-initiated) preserves TOTP, the backup codes and the replay counter
+  (SEC-TOTP-1 / RISK-029).
 - **Prevention:** always keep ≥2 admins; retain host-exec break-glass; keep a current `/data` backup. There is no in-band recovery (GAP-IAM-01).
 
 ## Escalation criteria

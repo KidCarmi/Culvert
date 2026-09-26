@@ -2882,7 +2882,7 @@
             "type": "integer"
           },
           "uncheckedEnforcingPaths": {
-            "description": "Paths where this appliance validates an origin certificate on a client's behalf and yet does not consult the revocation checker. Excludes bypassed CONNECT tunnels, which never terminate TLS.",
+            "description": "Paths where this Culvert instance validates an origin certificate on a client's behalf and yet does not consult the revocation checker. Excludes bypassed CONNECT tunnels, which never terminate TLS.",
             "items": {
               "type": "string"
             },
@@ -3725,6 +3725,22 @@
             "type": "boolean"
           },
           "reason": {
+            "type": "string"
+          },
+          "sigstore_identity_source": {
+            "description": "Present only when the Sigstore scheme is active. Whether the enforcing identity policy is the baked default or an operator override.",
+            "enum": [
+              "default",
+              "override"
+            ],
+            "type": "string"
+          },
+          "sigstore_root_source": {
+            "description": "Present only when the Sigstore scheme is active. Whether the enforcing trusted root is the baked default or an operator override.",
+            "enum": [
+              "default",
+              "override"
+            ],
             "type": "string"
           },
           "sigstore_warn": {
