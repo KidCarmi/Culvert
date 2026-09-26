@@ -1287,9 +1287,9 @@ func TestChaos68_AU36_QuarantineAndRemedyShareOnePredicate(t *testing.T) {
 
 // au37UnreadableFeed returns a list whose backing file exists, holds content,
 // and cannot be read — the real shape, driven through the real load path.
-func au37UnreadableFeed(t *testing.T) (*session.RevocationList, string) {
+func au37UnreadableFeed(t *testing.T) (rl *session.RevocationList, path string) {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "revocations.json")
+	path = filepath.Join(t.TempDir(), "revocations.json")
 	// Content a healthy boot WOULD have loaded. Its survival is the property.
 	original := []byte(`[{"token":"user:victim","exp":4102444800}]`)
 	if err := os.WriteFile(path, original, 0o600); err != nil {
@@ -1299,7 +1299,7 @@ func au37UnreadableFeed(t *testing.T) (*session.RevocationList, string) {
 		t.Fatalf("chmod: %v", err)
 	}
 	session.SetRevocationsPath(path)
-	rl := session.NewRevocationList()
+	rl = session.NewRevocationList()
 	if err := rl.LoadRevocations(); err == nil {
 		t.Skip("running as root: DAC is bypassed, so the file cannot be made unreadable here")
 	}
