@@ -10,6 +10,7 @@ package main
 // IdP-side signing-key rotation — strictly worse than the defect being fixed.
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
@@ -1328,7 +1329,7 @@ func TestChaos71_UsableCachedDocumentIsStillServedStale(t *testing.T) {
 	if err != nil {
 		t.Fatalf("a usable cached document must still be served: %v", err)
 	}
-	if string(got) != string(doc) {
+	if !bytes.Equal(got, doc) {
 		t.Fatalf("the cached document should come back verbatim, got %q", got)
 	}
 	if idpMetadataState().StaleServed == 0 {
