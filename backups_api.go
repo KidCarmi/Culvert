@@ -149,11 +149,21 @@ func apiBackups(w http.ResponseWriter, r *http.Request) {
 // row, not buried in a filename-sorted list. Caller has already checked
 // RoleViewer.
 func apiBackupsList(w http.ResponseWriter, r *http.Request) {
+	// The lock is held across the agent fetch (single-flight) but released
+	// BEFORE encoding: a viewer that stops reading its response would
+	// otherwise pin the mutex indefinitely (the admin UI server has no
+	// WriteTimeout), stalling every listing and cache invalidation. The
+	// payload is replaced, never mutated, so encoding it unlocked is safe.
+	jsonOK(w, backupsListingPayload(r.Context()))
+}
+
+// backupsListingPayload returns the cached listing inside the TTL, else
+// performs one agent fetch under the cache lock and caches it.
+func backupsListingPayload(ctx context.Context) map[string]any {
 	backupsCache.mu.Lock()
 	defer backupsCache.mu.Unlock()
 	if backupsCache.payload != nil && time.Since(backupsCache.at) < backupsCacheTTL {
-		jsonOK(w, backupsCache.payload)
-		return
+		return backupsCache.payload
 	}
 	// Stamp the FETCH START, not its return: the agent scans the directory
 	// somewhere inside the fetch, so a listing that returns after an op's
@@ -161,9 +171,9 @@ func apiBackupsList(w http.ResponseWriter, r *http.Request) {
 	// invalidation compares this stamp against finished_at, so it must never
 	// claim a snapshot is newer than it can prove.
 	start := time.Now()
-	out := buildBackupsPayload(r.Context())
+	out := buildBackupsPayload(ctx)
 	backupsCache.payload, backupsCache.at = out, start
-	jsonOK(w, out)
+	return out
 }
 
 // buildBackupsPayload performs one agent listing and shapes the response.

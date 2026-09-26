@@ -618,3 +618,53 @@ func TestAPIBackupsCreate_MalformedAgentSuccessIs502(t *testing.T) {
 		})
 	}
 }
+
+// blockingBackupsWriter parks every Write until release is closed, standing in
+// for a viewer that stopped reading its response (the admin UI server has no
+// WriteTimeout).
+type blockingBackupsWriter struct {
+	hdr     http.Header
+	entered chan struct{}
+	release chan struct{}
+	once    atomic.Bool
+}
+
+func (b *blockingBackupsWriter) Header() http.Header { return b.hdr }
+func (b *blockingBackupsWriter) WriteHeader(int)     {}
+func (b *blockingBackupsWriter) Write(p []byte) (int, error) {
+	if b.once.CompareAndSwap(false, true) {
+		close(b.entered)
+	}
+	<-b.release
+	return len(p), nil
+}
+
+// TestAPIBackups_ListingLockNotHeldAcrossResponseWrite pins that a slow
+// reader cannot hold the listing cache mutex: the response is encoded after
+// the lock is released, so other listings, terminal-poll invalidations and a
+// POST's invalidation are never queued behind one stalled client.
+func TestAPIBackups_ListingLockNotHeldAcrossResponseWrite(t *testing.T) {
+	resetBackupsCache(t)
+	backupsCache.mu.Lock()
+	backupsCache.payload = map[string]any{"available": true, "backups": []any{}}
+	backupsCache.at = time.Now()
+	backupsCache.mu.Unlock()
+
+	bw := &blockingBackupsWriter{hdr: http.Header{}, entered: make(chan struct{}), release: make(chan struct{})}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		apiBackupsList(bw, httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/api/backups", http.NoBody))
+	}()
+	defer func() { close(bw.release); <-done }()
+
+	select {
+	case <-bw.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("listing never reached the response write")
+	}
+	if !backupsCache.mu.TryLock() {
+		t.Fatal("backupsCache.mu is held while the response is written to a stalled client")
+	}
+	backupsCache.mu.Unlock()
+}
