@@ -115,6 +115,21 @@ events"). The Detail carries a bounded reason class (`connect_failed`,
 `write_failed`, `backoff`, `queue_full`, `closed`, `panic`, `flush_timeout`),
 never the collector address or a transport error.
 
+An **unmet intent** — a collector you configured that this node could not
+connect — pages immediately rather than after the five-minute window, because
+nothing retries a failed `InitSyslog` and there is no transient to wait out.
+Two sentences are possible and they mean different things:
+
+| Detail says | What is true | Where your events are |
+| --- | --- | --- |
+| *no connection was ever established … and nothing retries it* | no collector has ever been reached on this node | nowhere — every event since boot is lost, and the count is in `culvert_syslog_drops_total` |
+| *events are still being delivered to the PREVIOUS target* | an earlier collector connected and is still serving; the newly configured one could not be dialled | reaching the **previous** collector, not the one now configured |
+
+The second case is **not** counted in `culvert_syslog_drops_total`: those
+events reached a collector, and that series means *reached no SIEM at all*. Fix
+the new address and re-save the target; until you do, search the old collector
+for anything produced after the re-point.
+
 ### Admin API
 
 `GET /api/syslog` now returns `delivered`, `degraded`, `neverDelivered`,
@@ -254,6 +269,20 @@ reconnects immediately. The same count appears as `syslogDrops` on `/healthz`
 and as `culvert_syslog_drops_total`; if you turn forwarding **off** instead,
 counting stops there and the node reports the feature as absent again rather
 than accruing losses it is not incurring.
+
+### If the feed is degraded but the drop count is not rising
+
+`syslog_feed` reads degraded and the alert says *events are still being
+delivered to the PREVIOUS target*. A collector connected earlier in this
+process's life and is still serving; a target you configured afterwards could
+not be dialled, so the node kept the working one rather than going dark. The
+events are not lost — they are at the old collector — which is why
+`culvert_syslog_drops_total` is flat.
+
+Re-save the intended target (`POST /api/syslog`) once its address or
+reachability is fixed; that installs a writer for it and clears the state.
+Anything produced between the re-point and the fix is on the previous
+collector.
 
 ### If the drop count rises while the feed keeps delivering
 

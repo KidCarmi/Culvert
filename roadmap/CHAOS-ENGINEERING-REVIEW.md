@@ -124,8 +124,11 @@ free number is what produced this collision in the first place, so this sweep
 took the next id above every claim visible on an open PR.
 
 Ten defects, all closed — seven from the sweep, three from the Codex review
-round; three residual rows recorded (SL-1 UDP cannot prove delivery and is the
-default, SL-2 the flat reconnect backoff, SL-3 no durable spool). The finding:
+round; four residual rows recorded (SL-1 UDP cannot prove delivery and is the
+default, SL-2 the flat reconnect backoff, SL-3 no durable spool, SL-4 the
+unsynchronised window between a write completing and the failure-count read —
+round 9, reachable only by a queue-full drop, whose *resolved* verdict is the
+correct one; see the round-9 section). The finding:
 the only health surface covering the SIEM feed decides on state fixed at INIT
 time, so a collector that goes away during ordinary uptime left the node
 reporting *"remote syslog/SIEM forwarding is active"* while every audit and
@@ -8953,11 +8956,18 @@ counter works and said nothing about either fan-out — *walling the function is
 not walling the path*, now recorded four times in this section. Each fan-out
 was unwired in turn and the gate fails for each.
 
-**A published number was wrong and is corrected here.** Earlier rounds of this
-write-up and its PR description gave the root gate count as
-`syslog_health_chaos_test.go (22)`. The file held **28** at that point; it
-holds 32 now. The engine counts (9 → 11 in `syslog_stats_test.go`, 3 → 4 in
-`syslog_handoff_format_test.go`) were right.
+**A published number was wrong and is corrected here — twice.** Earlier rounds
+of this write-up and its PR description gave the root gate count as
+`syslog_health_chaos_test.go (22)`. The file held **28** at that point. The
+correction paragraph then stated **32**, which was also wrong: the file held
+**34** when it was written. The engine counts (9 → 11 in
+`syslog_stats_test.go`, 3 → 4 in `syslog_handoff_format_test.go`) were right.
+
+Counts move every round, so the authoritative figure is the one in the round's
+own `Gates:` line and nowhere else. As of round 9: **36** root gates, **13**
+engine stats gates, **4** handoff gates, **13** declared controls. Recording
+the same total in a second place is what produced both errors; this paragraph
+survives as the record of that, not as a second source of truth.
 
 ### Round 8 — a delivery resolves what preceded it, and two edits that were never really there
 
@@ -9035,3 +9045,85 @@ and the other readers of the same fact were not enumerated — P2-5/P2-6 on the
 admin API, P2-8 on the fan-outs, and now the health accessor. The habit to
 adopt is mechanical: *when a predicate changes, grep for every consumer of the
 value it governs before calling the change done.*
+
+### Round 9 — a snapshot that read a later generation, an alert that asserted the wrong half of a two-shape state, and one window that stays open
+
+**P2 — a reader outside the publication transition made the counter go
+backwards.** `syslogFeedState` copies the health record's retired totals and
+the Writer they belong to together under `syslogHealth.mu`, then released that
+lock and re-loaded `activeSyslog()`. A re-point landing in the gap retires the
+displaced Writer's finals into a `retiredDrops` this snapshot has already
+copied, so the snapshot pairs a NEW generation's live counters with retired
+totals that already absorbed the OLD one — the displaced generation vanishes
+from the sum and `culvert_syslog_drops_total` **decreases** for that scrape.
+
+Prometheus reads a decrease as a counter reset and discards the interval, and
+that is precisely the defect **P2-4** was opened for. P2-4 fixed the WRITE side
+(a fresh Writer's zeroed counters no longer erase the history) and left a
+READER that does not participate in the publication transition free to
+reproduce the same symptom. The snapshot now reads the writer it captured, so
+it is internally consistent by construction rather than by timing.
+
+> A serialized transition only buys consistency for the readers that take part
+> in it. After fixing a publication race, enumerate the readers — not just the
+> writers.
+
+The window is a few instructions wide and cannot be scheduled through the
+public entry point, so the mechanism is pinned by source scan, which is this
+file's existing convention for wiring. Two things keep that gate honest: it
+strips `//` lines before scanning (the rationale comment names the very
+accessor being banned, so scanning prose would make the gate assert the
+absence of an explanation — caught as a false positive while writing it), and
+a control requires `activeSyslog()` to survive elsewhere in the file, because
+the rule is about THIS reader and not a ban on the accessor.
+
+**P2 — the unmet-intent alert asserted a false statement for half the states
+that reach it.** A boot that connects target A and then fails to connect the
+persisted target B leaves a live Writer serving A while the record's intent is
+B. That is an unmet intent and is correctly reported degraded — but the page
+said *"no connection was ever established"* and *"NOTHING is serving it"*. Both
+are false there: a connection was established, something is serving, and events
+are reaching a collector, just not the configured one. A false statement on an
+operator surface, inside the alert this sweep added because the contract row
+was asserting a false statement.
+
+The two shapes are distinguished by `Configured`, which is true only once a
+Writer is installed, so no new field was needed. The superseded-target sentence
+says events are still reaching the PREVIOUS collector — the fact that decides
+whether the operator is hunting a dial failure or a stale configuration.
+Neither sentence names an address: `Detail` is the alert dedup key, and an
+operator-supplied target there is the WK-12/RS-5 unbounded-key defect.
+
+The review that produced this finding asked for those events to be **counted as
+drops**, and that half is declined with reasoning. They reached a collector.
+`culvert_syslog_drops_total` means *did not reach the SIEM*; widening it to
+*did not reach the currently intended SIEM* would conflate delivery-elsewhere
+with destruction on the one series that measures compliance loss. The state is
+already reported degraded (both `syslogFeedState` exits route through
+`finishUnmetSyslogIntent`, which sets `Degraded`), so the gap was never
+visibility — it was the sentence.
+
+**P1 — recorded as residual SL-4 rather than closed.** Round 8 moved the
+failure-count read to after the write completes. The few instructions between
+`writeLine` returning and that read are unsynchronised, so a drop landing there
+is counted in `failuresBefore` and resolved, although by round 8's own rule it
+arrived after completion and should survive. Three facts make that acceptable
+and none of them is timing luck:
+
+- **Only one drop class can reach it.** `deliverLine` holds `s.mu` for its
+  whole body, so every drain-goroutine drop (`connect_failed`, `write_failed`,
+  `backoff`) is serialised with the read. Only a queue-full drop from a caller
+  goroutine can race it, because `tryEnqueue` holds `sendMu` alone.
+- **"Resolved" is the correct verdict for that drop.** A queue-full drop
+  microseconds after a successful write is local backpressure, not a dark
+  collector — the same verdict this boundary deliberately assigns to a drop
+  landing *during* the write.
+- **Closing it would cost more than it buys.** The queue-full path would have
+  to take `s.mu`, which parks request goroutines behind the drain goroutine's
+  blocking write. That is the latency coupling the whole async design exists to
+  prevent: a slow SIEM must cost drops, not proxy latency.
+
+A genuine outage is unaffected — its drops come from FAILED writes on the drain
+goroutine, there is no success to resolve them, and degradation proceeds
+normally. The residual is written into the code at the boundary it governs, not
+only here.

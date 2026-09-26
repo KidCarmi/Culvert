@@ -874,6 +874,25 @@ endpoints for credentialed parents.
   (contract `SyslogConfig`). Note that `udp://` — the default when the address
   omits a scheme — cannot prove delivery at all; every surface now says so.
 
+- **`culvert_syslog_drops_total` could go BACKWARDS when the collector was
+  re-pointed (CHAOS-72).** The health snapshot copied the record's retired
+  totals and the writer they belong to under one lock, then re-read the
+  *currently active* writer after releasing it — so a re-point landing in that
+  gap paired a new writer's counters with retired totals that had already
+  absorbed the old one's finals, and a whole generation's losses vanished from
+  the scrape. Prometheus reads a decreasing counter as a reset and discards the
+  interval. The snapshot now reads the writer it captured.
+- **The SIEM alert said nothing had ever connected when something was still
+  delivering (CHAOS-72).** A node that connects one collector and then fails to
+  connect a newly configured one keeps delivering to the first. That is
+  correctly reported degraded, but the page read *"no connection was ever
+  established"* and *"NOTHING is serving it"* — both false, and both send an
+  operator to debug a dial that succeeded. The alert and log line now
+  distinguish a superseded target from a feed that never came up, and say that
+  events are still reaching the previous collector. Those events are
+  deliberately not counted as drops: they reached a collector, and
+  `culvert_syslog_drops_total` measures events that reached no SIEM at all.
+
 - **A SIEM event lost while a write was in flight could report the feed DOWN
   even though that write succeeded (CHAOS-72).** The failure count was read
   when the delivery began rather than when its write completed, so a

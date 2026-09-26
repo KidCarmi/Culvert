@@ -664,6 +664,30 @@ func (s *Writer) deliverLine(line string) {
 	// can outlast the window on its own, so retaining one now costs a false
 	// page. A later change can invalidate an earlier change's stated
 	// rationale — when it does, the rationale has to be re-read, not inherited.
+	//
+	// RESIDUAL, recorded rather than closed (SL-4, Codex P2 round 9). The few
+	// instructions between writeLine RETURNING and this Load are an
+	// unsynchronised window: a drop landing there is counted in failuresBefore
+	// and therefore resolved, although by the rule above it arrived after
+	// completion and should survive. Three facts make that acceptable:
+	//
+	//   - only ONE drop class can land there. deliverLine holds s.mu for its
+	//     whole body, so every drain-goroutine drop (connect_failed,
+	//     write_failed, backoff) is serialised with this read. Only a
+	//     queue-full drop from a caller goroutine (tryEnqueue holds sendMu
+	//     alone) can race it.
+	//   - a queue-full drop microseconds after a successful write is LOCAL
+	//     backpressure, not a dark collector — so "resolved" is the correct
+	//     verdict for it, the same one this boundary deliberately assigns to a
+	//     drop during the write.
+	//   - closing it needs the queue-full path to take s.mu, which would park
+	//     request goroutines behind this goroutine's blocking write. That is
+	//     the latency coupling the whole async design exists to prevent: a
+	//     slow SIEM must cost drops, not proxy latency.
+	//
+	// A genuine outage is unaffected: its drops come from FAILED writes on the
+	// drain goroutine, there is no success to resolve them, and degradation
+	// proceeds normally.
 	failuresBefore := s.consecutiveFail.Load()
 	s.noteDelivered(failuresBefore, successAt)
 }

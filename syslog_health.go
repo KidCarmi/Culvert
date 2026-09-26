@@ -487,11 +487,39 @@ func commitSyslogDegradation(snap syslogFeedSnapshot) {
 		"the remote syslog/SIEM feed has delivered nothing for %s (%d events dropped, reason: %s); audit and request events are not reaching the collector while the node keeps proxying normally",
 		snap.Age.Round(time.Second), snap.Drops, reasonOrUnknown(snap.Reason))
 	if snap.IntentUnmet {
-		logLine = fmt.Sprintf("WARN syslog: SIEM forwarding is configured but NOTHING is serving it — the collector could not be connected %s ago and nothing retries; audit and request events are NOT reaching the SIEM",
-			snap.Age.Round(time.Second))
-		detail = fmt.Sprintf(
-			"remote syslog/SIEM forwarding is configured but no connection was ever established (%s ago) and nothing retries it; audit and request events are not reaching the collector while the node keeps proxying normally",
-			snap.Age.Round(time.Second))
+		// TWO shapes reach here and they need different sentences, because the
+		// second one makes the first's wording FALSE.
+		//
+		//   - no Writer at all: nothing was ever connected, nothing is serving.
+		//   - a Writer serving a SUPERSEDED target: a connection WAS
+		//     established and something IS serving — the previous collector —
+		//     so "no connection was ever established" is a false statement on
+		//     an operator surface, in the alert this sweep added, and it sends
+		//     them to debug a dial that succeeded (Codex P2, PR #1494).
+		//
+		// `Configured` is true only once a Writer is installed, so it
+		// distinguishes them with no new field. Neither sentence names an
+		// address: Detail is the alert dedup key and an operator-supplied
+		// target there is the WK-12/RS-5 unbounded-key defect.
+		//
+		// The superseded-target case is deliberately NOT counted as drops.
+		// Those events reached a collector; `culvert_syslog_drops_total` means
+		// "did not reach the SIEM", and widening it to "did not reach the
+		// CURRENTLY INTENDED SIEM" would conflate delivery-elsewhere with
+		// destruction on the one series that measures compliance loss.
+		if snap.Configured {
+			logLine = fmt.Sprintf("WARN syslog: SIEM forwarding is serving a SUPERSEDED target — the collector configured %s ago could not be connected and nothing retries, so audit and request events are still going to the PREVIOUS collector, not the configured one",
+				snap.Age.Round(time.Second))
+			detail = fmt.Sprintf(
+				"remote syslog/SIEM forwarding could not connect to the configured collector (%s ago) and nothing retries it; events are still being delivered to the PREVIOUS target, so they are reaching a collector but not the one now configured",
+				snap.Age.Round(time.Second))
+		} else {
+			logLine = fmt.Sprintf("WARN syslog: SIEM forwarding is configured but NOTHING is serving it — the collector could not be connected %s ago and nothing retries; audit and request events are NOT reaching the SIEM",
+				snap.Age.Round(time.Second))
+			detail = fmt.Sprintf(
+				"remote syslog/SIEM forwarding is configured but no connection was ever established (%s ago) and nothing retries it; audit and request events are not reaching the collector while the node keeps proxying normally",
+				snap.Age.Round(time.Second))
+		}
 	}
 
 	if shouldLog && logger != nil {
@@ -668,7 +696,25 @@ func syslogFeedState() syslogFeedSnapshot {
 	// they did not reach the SIEM, and no Writer's counters can hold them.
 	snap.Drops = retiredDrops + syslogSkippedNoWriter.Load()
 	snap.Panics = retiredPanics
-	sw := activeSyslog()
+	// The writer the RECORD describes, captured above under the same lock as
+	// the retired totals — never a fresh activeSyslog() load.
+	//
+	// Re-loading here reads a writer that may belong to a LATER generation
+	// than the totals beside it: a re-point landing between the capture and
+	// the load retires the displaced writer's finals into a `retiredDrops` we
+	// have already copied, so its whole generation vanishes from the sum and
+	// `culvert_syslog_drops_total` DECREASES for that scrape — which
+	// Prometheus reads as a counter reset and which is precisely the defect
+	// P2-4 exists to prevent, re-entering through a reader that does not
+	// participate in syslogPublishMu (Codex P2, PR #1494).
+	//
+	// `described` and `activeSyslog()` are the same writer in steady state,
+	// because publication and health installation are one serialized
+	// transition (P2-2); using the captured one makes the snapshot
+	// internally consistent by construction rather than by timing, and it
+	// matches `snap.writer`, which the degradation commit half compares
+	// against the live record.
+	sw := described
 	if !configured || sw == nil {
 		return finishUnmetSyslogIntent(snap, now, intentAt)
 	}

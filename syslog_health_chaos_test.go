@@ -1724,3 +1724,159 @@ func TestChaos72_FailedToConnectRowNamesTheLoss(t *testing.T) {
 		t.Errorf("row message = %q; want it to name the 3 events lost to a collector that never came up", row.Message)
 	}
 }
+
+// TestChaos72_SnapshotReadsTheWriterItCaptured pins that syslogFeedState reads
+// its Writer stats from the generation it captured under the lock, never from
+// a fresh activeSyslog() load.
+//
+// The record's retired totals and the writer it describes are copied together
+// under syslogHealth.mu. Re-loading the active writer AFTER releasing that lock
+// reads a possibly LATER generation: a re-point landing in between retires the
+// displaced writer's finals into a `retiredDrops` this snapshot has already
+// copied, so that whole generation vanishes from the sum and
+// `culvert_syslog_drops_total` DECREASES for one scrape — a counter reset to
+// Prometheus, and exactly the defect P2-4 exists to prevent, re-entering
+// through a reader that does not participate in syslogPublishMu (Codex P2).
+//
+// The interleaving is a few instructions wide and cannot be scheduled through
+// the public entry point, so the MECHANISM is pinned by source scan — the
+// convention this file already uses for wiring — rather than by a race gate
+// that would pass against the defect most of the time.
+func TestChaos72_SnapshotReadsTheWriterItCaptured(t *testing.T) {
+	src, err := os.ReadFile(filepath.Join(pkgSourceDir(), "syslog_health.go"))
+	if err != nil {
+		t.Fatalf("read syslog_health.go: %v", err)
+	}
+	body := syslogFuncBody(t, string(src), "func syslogFeedState() syslogFeedSnapshot {")
+	if strings.Contains(body, "activeSyslog()") {
+		t.Error("syslogFeedState loads activeSyslog() after releasing syslogHealth.mu — " +
+			"a re-point in that window pairs a NEW writer's counters with retired totals that " +
+			"already absorbed the OLD one, so the process-lifetime totals lose a whole generation " +
+			"and culvert_syslog_drops_total goes backwards")
+	}
+	if !strings.Contains(body, "sw := described") {
+		t.Error("syslogFeedState no longer reads the captured writer; the snapshot is only " +
+			"internally consistent if the stats and the retired totals come from one capture")
+	}
+
+	// Not vacuous: the extractor must really be returning this function's body,
+	// and that body must contain something only it contains.
+	if !strings.Contains(body, "retiredDrops") {
+		t.Fatal("control: the extracted body is not syslogFeedState's, so the scan proves nothing")
+	}
+	// Control: activeSyslog() is still used elsewhere in the file — the rule is
+	// about THIS reader, not a ban on the accessor.
+	if !strings.Contains(string(src), "activeSyslog()") {
+		t.Error("control: activeSyslog() vanished from the file entirely, which is not the fix")
+	}
+}
+
+// syslogFuncBody returns the source between a function's opening line and its
+// closing brace at column 0.
+func syslogFuncBody(t *testing.T, src, decl string) string {
+	t.Helper()
+	i := strings.Index(src, decl)
+	if i < 0 {
+		t.Fatalf("declaration not found: %s", decl)
+	}
+	rest := src[i+len(decl):]
+	if j := strings.Index(rest, "\n}\n"); j >= 0 {
+		rest = rest[:j]
+	}
+	// Strip line comments: the scan is about what the function CALLS, and the
+	// rationale comments in this file name the very accessor being banned.
+	// Scanning prose would make the gate assert the absence of an explanation.
+	var code strings.Builder
+	for _, line := range strings.Split(rest, "\n") {
+		if trimmed := strings.TrimSpace(line); strings.HasPrefix(trimmed, "//") {
+			continue
+		}
+		code.WriteString(line)
+		code.WriteByte('\n')
+	}
+	return code.String()
+}
+
+// TestChaos72_SupersededTargetIsNotReportedAsNeverConnected pins that the
+// unmet-intent alert tells the truth in BOTH shapes it can reach.
+//
+// A boot that connects target A and then fails to connect the persisted
+// target B leaves the writer for A live while the record's intent is B. That
+// is an unmet intent — correctly reported degraded — but the alert said "no
+// connection was ever established" and "NOTHING is serving it". Both are
+// FALSE there: a connection was established, something is serving, and events
+// are reaching a collector, just not the configured one. A false statement on
+// an operator surface, inside the alert this sweep added to remove exactly
+// that (Codex P2, PR #1494).
+//
+// The two shapes are distinguished by `Configured`, which is true only once a
+// Writer is installed. Neither sentence names a target: Detail is the alert
+// dedup key and an operator-supplied address there is WK-12/RS-5.
+func TestChaos72_SupersededTargetIsNotReportedAsNeverConnected(t *testing.T) {
+	col := startSyslogCollector(t)
+	armSyslogFeed(t, "tcp://"+col.addr) // target A connects
+
+	// The operator's persisted target B never connects: intent moves, the
+	// writer for A stays live.
+	noteSyslogIntent("tcp://siem-b.invalid:514")
+
+	snap := syslogFeedState()
+	if !snap.IntentUnmet || !snap.Configured {
+		t.Fatalf("precondition: want an unmet intent WITH a live writer, got IntentUnmet=%v Configured=%v", snap.IntentUnmet, snap.Configured)
+	}
+	if !snap.Degraded {
+		t.Error("a superseded target must still report degraded")
+	}
+
+	detail := captureSyslogAlertDetail(t, snap)
+	if strings.Contains(detail, "no connection was ever established") ||
+		strings.Contains(detail, "NOTHING is serving") {
+		t.Errorf("the alert claims nothing ever connected, but target A is connected and serving:\n%s", detail)
+	}
+	if !strings.Contains(detail, "PREVIOUS target") {
+		t.Errorf("the alert does not tell the operator events are going to the previous collector:\n%s", detail)
+	}
+	// Bounded: never the operator-supplied address, which is the dedup key.
+	if strings.Contains(detail, col.addr) || strings.Contains(detail, "siem-b.invalid") {
+		t.Errorf("the alert Detail names a collector address, which is the dedup key (WK-12/RS-5):\n%s", detail)
+	}
+
+	// CONTROL: with NO writer ever installed, the original sentence is the
+	// correct one and must be kept. The cheapest way to pass the assertions
+	// above is to use the superseded wording unconditionally, which would be
+	// just as false in the other direction.
+	resetSyslogHealthForTest()
+	noteSyslogIntent("tcp://siem-b.invalid:514")
+	snap2 := syslogFeedState()
+	if snap2.Configured {
+		t.Fatalf("control precondition: want no writer, got Configured=true")
+	}
+	detail2 := captureSyslogAlertDetail(t, snap2)
+	if !strings.Contains(detail2, "no connection was ever established") {
+		t.Errorf("control: a feed that never connected must still say so:\n%s", detail2)
+	}
+}
+
+// captureSyslogAlertDetail drives the real commit half and returns the Detail
+// it would page with, so a gate reads the operator-facing sentence rather than
+// a model of it.
+func captureSyslogAlertDetail(t *testing.T, snap syslogFeedSnapshot) string {
+	t.Helper()
+	var got []string
+	old := fireSyslogFeedDownAlert
+	fireSyslogFeedDownAlert = func(d string) { got = append(got, d) }
+	defer func() { fireSyslogFeedDownAlert = old }()
+
+	// Force the alert edge: the commit half fires once per episode.
+	syslogHealth.mu.Lock()
+	syslogHealth.alerted = false
+	syslogHealth.logAt = time.Time{}
+	syslogHealth.mu.Unlock()
+
+	snap.Degraded = true
+	commitSyslogDegradation(snap)
+	if len(got) == 0 {
+		t.Fatal("no alert Detail was produced, so this gate reads nothing")
+	}
+	return got[len(got)-1]
+}
