@@ -1,6 +1,7 @@
 package idpmeta
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"testing"
@@ -310,32 +311,27 @@ func TestGet_ZeroOrNegativeRecordedLengthIsAMiss(t *testing.T) {
 	}
 }
 
-// TestGet_LengthMismatchIsAMissInBothDirections pins the equivalence the
-// replaced `len(b) != e.Bytes` check provided. io.ReadFull cannot see trailing
-// bytes, so the longer case needs its own probe; without it a file with extra
-// bytes would be accepted and a PREFIX of it handed to a parser as though it
-// were the whole document.
-func TestGet_LengthMismatchIsAMissInBothDirections(t *testing.T) {
-	for _, tc := range []struct {
-		name string
-		doc  string
-	}{
-		{"shorter than recorded", "<EntityDesc"},
-		{"longer than recorded", "<EntityDescriptor/>trailing"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			s := newTestStore(t)
-			if err := s.Put("corp", KindSAMLMetadata, "https://idp.example/md", []byte("<EntityDescriptor/>")); err != nil {
-				t.Fatalf("Put: %v", err)
-			}
-			p := docPathFor(s, "corp", KindSAMLMetadata, "https://idp.example/md")
-			if err := os.WriteFile(p, []byte(tc.doc), 0o600); err != nil {
-				t.Fatalf("corrupt the document: %v", err)
-			}
-			if _, _, err := s.Get("corp", KindSAMLMetadata, "https://idp.example/md"); err != ErrNoEntry {
-				t.Fatalf("Get = %v, want ErrNoEntry", err)
-			}
-		})
+// TestGet_LongerThanRecordedIsRefused pins the half of the replaced
+// `len(b) != e.Bytes` check that the new bounded read does NOT get for free.
+//
+// io.ReadFull stops at the recorded length and cannot see trailing bytes, so
+// without the one-byte probe a file LONGER than the index says would be accepted
+// and a PREFIX of it handed to a parser as though it were the whole document.
+// Mutation-verified: removing the probe fails this test.
+//
+// The SHORTER direction is already covered by TestGet_TruncatedDocumentIsRefused
+// above, so it is deliberately not repeated here.
+func TestGet_LongerThanRecordedIsRefused(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.Put("corp", KindSAMLMetadata, "https://idp.example/md", []byte("<EntityDescriptor/>")); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	p := docPathFor(s, "corp", KindSAMLMetadata, "https://idp.example/md")
+	if err := os.WriteFile(p, []byte("<EntityDescriptor/>trailing"), 0o600); err != nil {
+		t.Fatalf("append to the cached document: %v", err)
+	}
+	if _, _, err := s.Get("corp", KindSAMLMetadata, "https://idp.example/md"); err != ErrNoEntry {
+		t.Fatalf("a document longer than its recorded length = %v, want ErrNoEntry", err)
 	}
 }
 
@@ -353,7 +349,7 @@ func TestGet_HealthyDocumentStillRoundTripsAfterTheBound(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Get on a healthy entry: %v", err)
 	}
-	if string(got) != string(doc) {
+	if !bytes.Equal(got, doc) {
 		t.Fatalf("doc = %q, want %q", got, doc)
 	}
 }
