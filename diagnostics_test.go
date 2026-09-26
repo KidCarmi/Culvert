@@ -136,6 +136,7 @@ func TestApiDiagnostics_DefaultOK(t *testing.T) {
 		"policy_loaded":              false,
 		"root_ca":                    false,
 		"session_secret":             false,
+		"admin_username_length":      false,
 		"cdr":                        false,
 		"cluster_posture":            false,
 		"saml_state_posture":         false,
@@ -1539,5 +1540,309 @@ func TestApiDiagnostics_OIDCJWKSTrustReportsCeilingBreach(t *testing.T) {
 	}
 	if found.OperatorAction == "" {
 		t.Error("oidc_jwks_trust fail row has no operator_action")
+	}
+}
+
+// TestApiDiagnostics_OversizeUsernameSurfacedOnContract is the fix under
+// test: before it, an admin account whose username exceeds the login
+// endpoint's 256-byte bound (CHAOS-63) was reported only by a one-time log
+// line at boot (warnOversizeConfiguredUsernames) — an operator who missed
+// that line, or whose container's boot log had already rolled off, had no
+// way to discover or confirm-fix the condition without reading the process
+// log. This check makes the same evidence a standing GET /api/diagnostics
+// row instead.
+func TestApiDiagnostics_OversizeUsernameSurfacedOnContract(t *testing.T) {
+	snapshotCfgUIUsers(t)
+	longName := strings.Repeat("a", maxUsernameLen+1)
+	if err := cfg.SetUIUser(longName, "Chaos63-oversize-1!", RoleAdmin); err != nil {
+		t.Fatalf("SetUIUser: %v", err)
+	}
+
+	r := viewerCtx(httptest.NewRequest(http.MethodGet, "/api/diagnostics", http.NoBody))
+	w := httptest.NewRecorder()
+	apiDiagnostics(w, r)
+
+	c := decodeContract(t, w)
+	found := findDiagnosticCheck(c, "admin_username_length")
+	if found == nil {
+		t.Fatal("admin_username_length check missing from report")
+	}
+	if found.Status != diagWarn {
+		t.Errorf("admin_username_length status = %q, want warn when a configured username exceeds the login bound", found.Status)
+	}
+	if found.OperatorAction == "" {
+		t.Error("admin_username_length warn row has no operator_action")
+	}
+	if strings.Contains(found.OperatorAction, "legacy single-user login") {
+		t.Error("admin_username_length operator_action names the legacy login when only a roster account is oversize")
+	}
+	if strings.Contains(found.Message, longName) {
+		t.Error("admin_username_length message should not echo the username itself")
+	}
+	// The replacement must keep the affected account's role: an oversize
+	// operator/viewer must not be told to create an ADMIN replacement.
+	if strings.Contains(found.OperatorAction, "replacement admin account") || !strings.Contains(found.OperatorAction, "same role") {
+		t.Errorf("admin_username_length operator_action = %q, want a same-role replacement, not an admin one", found.OperatorAction)
+	}
+	// A configured name is exempt from the login API's length bound at any
+	// length, so the message must not imply a %d-byte API cap.
+	if strings.Contains(found.Message, "up to") || !strings.Contains(found.Message, "exempt") {
+		t.Errorf("admin_username_length message = %q, want the configured-name exemption stated without a byte cap", found.Message)
+	}
+	// Startup -user/auth.user and --reset-password store names without a
+	// length check (they are how an oversize account arises), so the message
+	// must not claim every account-creation path caps names.
+	if strings.Contains(found.Message, "every account-creation path") || !strings.Contains(found.Message, "--reset-password") {
+		t.Errorf("admin_username_length message = %q, want only the capping paths named and the uncapped sources identified", found.Message)
+	}
+}
+
+// TestApiDiagnostics_UsernameLengthOKByDefault pins the quiet case: an
+// ordinary roster with no oversize usernames reports ok, not warn.
+func TestApiDiagnostics_UsernameLengthOKByDefault(t *testing.T) {
+	snapshotCfgUIUsers(t)
+	if err := cfg.SetUIUser("ordinary-admin", "Chaos63-ordinary-1!", RoleAdmin); err != nil {
+		t.Fatalf("SetUIUser: %v", err)
+	}
+
+	r := viewerCtx(httptest.NewRequest(http.MethodGet, "/api/diagnostics", http.NoBody))
+	w := httptest.NewRecorder()
+	apiDiagnostics(w, r)
+
+	c := decodeContract(t, w)
+	found := findDiagnosticCheck(c, "admin_username_length")
+	if found == nil {
+		t.Fatal("admin_username_length check missing from report")
+	}
+	if found.Status != diagOK {
+		t.Errorf("admin_username_length status = %q, want ok when no username exceeds the login bound", found.Status)
+	}
+}
+
+// TestApiDiagnostics_OversizeLegacyUsernameSurfacedOnContract pins the
+// legacy single-user fallback: VerifyUIUser/LoginNameConfigured still admit
+// cfg.user when it has no roster entry (DeleteUIUser removes only the map
+// entry), so an oversize legacy name must keep the row at warn rather than
+// falsely reporting the remediation as done.
+func TestApiDiagnostics_OversizeLegacyUsernameSurfacedOnContract(t *testing.T) {
+	snapshotCfgUIUsers(t)
+	longName := strings.Repeat("l", maxUsernameLen+1)
+	cfg.mu.Lock()
+	cfg.uiUsers = map[string]*uiAdminUser{}
+	cfg.user = longName
+	cfg.mu.Unlock()
+	if !cfg.LoginNameConfigured(longName) {
+		t.Fatal("precondition: legacy name must still be a configured login name")
+	}
+
+	r := viewerCtx(httptest.NewRequest(http.MethodGet, "/api/diagnostics", http.NoBody))
+	w := httptest.NewRecorder()
+	apiDiagnostics(w, r)
+
+	found := findDiagnosticCheck(decodeContract(t, w), "admin_username_length")
+	if found == nil {
+		t.Fatal("admin_username_length check missing from report")
+	}
+	if found.Status != diagWarn {
+		t.Errorf("admin_username_length status = %q, want warn for an oversize legacy login name with no roster entry", found.Status)
+	}
+	if !strings.Contains(found.OperatorAction, "/api/settings") || !strings.Contains(found.OperatorAction, "auth.user") {
+		t.Errorf("admin_username_length operator_action = %q, want the legacy-login remediation (Settings + -user/auth.user) — Admin Users cannot change cfg.user", found.OperatorAction)
+	}
+	// POST /api/settings hashes whatever password it is given — a blank one
+	// included — so the remediation must require a new strong password
+	// rather than let an operator change only the prefilled username.
+	if !strings.Contains(found.OperatorAction, "never leave the password blank") {
+		t.Errorf("admin_username_length operator_action = %q, want an explicit new-password requirement for the Settings step", found.OperatorAction)
+	}
+	// The legacy name has no Admin Users row here, so the mirror-cleanup
+	// step would be impossible to perform: overwriting cfg.user alone
+	// resolves it, and the action must not prescribe a roster delete.
+	if strings.Contains(found.OperatorAction, "delete the old name") {
+		t.Errorf("admin_username_length operator_action = %q, must not prescribe deleting a roster entry that does not exist", found.OperatorAction)
+	}
+	// Nor may it open with the generic Admin Users create/delete workflow:
+	// a legacy-only login has no roster row to replace or delete.
+	if strings.Contains(found.OperatorAction, "from Admin Users, create a replacement") {
+		t.Errorf("admin_username_length operator_action = %q, must not prescribe the Admin Users replace/delete workflow for a legacy-only login", found.OperatorAction)
+	}
+	// loadAuth re-applies -user AND -pass on every boot, so the startup
+	// password must change with the name or it overwrites the new one.
+	if !strings.Contains(found.OperatorAction, "auth.pass") {
+		t.Errorf("admin_username_length operator_action = %q, want the startup password (-pass / auth.pass) updated alongside the name", found.OperatorAction)
+	}
+	// POST /api/settings never calls SaveUIUsersFile, and with no mirrored
+	// roster row there is no later delete to persist the roster either, so
+	// the action must name a step that writes the new login durably.
+	if !strings.Contains(found.OperatorAction, "change-password") {
+		t.Errorf("admin_username_length operator_action = %q, want a durable-persistence step for the Settings-only replacement", found.OperatorAction)
+	}
+	// A legacy-only login gets no generic Admin Users clause, so the Settings
+	// step itself must state the 64-byte target: Settings enforces no length
+	// bound, and a merely "shorter" (e.g. 100-byte) name leaves the row warn.
+	if !strings.Contains(found.OperatorAction, "set a login of at most 64 bytes under Settings") {
+		t.Errorf("admin_username_length operator_action = %q, want the 64-byte limit stated for the legacy Settings replacement", found.OperatorAction)
+	}
+	if strings.Contains(found.Message, longName) {
+		t.Error("admin_username_length message should not echo the username itself")
+	}
+}
+
+// TestApiDiagnostics_MirroredLegacyUsernameRemediationSequence pins the
+// documented legacy remediation against the real store: SetAuth(short)
+// mirrors the new name into the roster WITHOUT removing the old key, so the
+// row stays warn until the old name's roster entry is deleted too. The
+// operator_action must therefore name that delete step.
+func TestApiDiagnostics_MirroredLegacyUsernameRemediationSequence(t *testing.T) {
+	snapshotCfgUIUsers(t)
+	cfg.mu.Lock()
+	cfg.uiUsers = map[string]*uiAdminUser{}
+	cfg.user = ""
+	cfg.mu.Unlock()
+	longName := strings.Repeat("m", maxUsernameLen+1)
+	if err := cfg.SetAuth(longName, "Chaos63-mirror-1!"); err != nil {
+		t.Fatalf("SetAuth(long): %v", err)
+	}
+
+	get := func() *OperatorContractCheck {
+		r := viewerCtx(httptest.NewRequest(http.MethodGet, "/api/diagnostics", http.NoBody))
+		w := httptest.NewRecorder()
+		apiDiagnostics(w, r)
+		found := findDiagnosticCheck(decodeContract(t, w), "admin_username_length")
+		if found == nil {
+			t.Fatal("admin_username_length check missing from report")
+		}
+		return found
+	}
+
+	if found := get(); found.Status != diagWarn || !strings.Contains(found.OperatorAction, "delete the old name") {
+		t.Fatalf("mirrored legacy row = %q / %q, want warn naming the old-roster delete step", found.Status, found.OperatorAction)
+	}
+	// Step 1: Settings sets a shorter legacy login — the old mirror remains.
+	if err := cfg.SetAuth("short-admin", "Chaos63-mirror-2!"); err != nil {
+		t.Fatalf("SetAuth(short): %v", err)
+	}
+	if found := get(); found.Status != diagWarn {
+		t.Fatalf("after SetAuth(short) status = %q, want warn (old mirrored roster entry still logs in)", found.Status)
+	}
+	// Step 2: delete the old name's roster entry — now resolved.
+	if err := cfg.DeleteUIUser(longName); err != nil {
+		t.Fatalf("DeleteUIUser(old): %v", err)
+	}
+	if found := get(); found.Status != diagOK {
+		t.Fatalf("after deleting the old roster entry status = %q, want ok", found.Status)
+	}
+}
+
+// TestApiDiagnostics_UsernameAboveAccountLimitButWithinLoginBound pins the
+// threshold: a 65-byte name (created via -user / --reset-password) is within
+// the login API's 256-byte bound but cannot be typed into the dashboard
+// sign-in field (maxlength=64), so the row must warn rather than report ok.
+func TestApiDiagnostics_UsernameAboveAccountLimitButWithinLoginBound(t *testing.T) {
+	snapshotCfgUIUsers(t)
+	name := strings.Repeat("b", adminUsernameAccountLimit+1)
+	if len(name) > maxUsernameLen {
+		t.Fatal("precondition: name must be within the login endpoint bound")
+	}
+	if err := cfg.SetUIUser(name, "Chaos63-account-1!", RoleAdmin); err != nil {
+		t.Fatalf("SetUIUser: %v", err)
+	}
+	r := viewerCtx(httptest.NewRequest(http.MethodGet, "/api/diagnostics", http.NoBody))
+	w := httptest.NewRecorder()
+	apiDiagnostics(w, r)
+	found := findDiagnosticCheck(decodeContract(t, w), "admin_username_length")
+	if found == nil {
+		t.Fatal("admin_username_length check missing from report")
+	}
+	if found.Status != diagWarn {
+		t.Errorf("admin_username_length status = %q, want warn for a %d-byte name the dashboard login field cannot accept", found.Status, len(name))
+	}
+	// Exactly at the limit stays ok.
+	snapshotCfgUIUsers(t)
+	cfg.mu.Lock()
+	cfg.uiUsers = map[string]*uiAdminUser{}
+	cfg.user = ""
+	cfg.mu.Unlock()
+	if err := cfg.SetUIUser(strings.Repeat("c", adminUsernameAccountLimit), "Chaos63-account-2!", RoleAdmin); err != nil {
+		t.Fatalf("SetUIUser: %v", err)
+	}
+	w = httptest.NewRecorder()
+	apiDiagnostics(w, viewerCtx(httptest.NewRequest(http.MethodGet, "/api/diagnostics", http.NoBody)))
+	if f := findDiagnosticCheck(decodeContract(t, w), "admin_username_length"); f == nil || f.Status != diagOK {
+		t.Errorf("a %d-byte name must report ok, got %+v", adminUsernameAccountLimit, f)
+	}
+}
+
+// TestApiDiagnostics_OversizeUsernameRemediationWarnsAboutTOTP pins that the
+// create → sign in → delete remediation does not silently downgrade an MFA
+// account: TOTP enrollment is keyed by username and does not carry over to
+// the replacement, so when an affected account has TOTP the action must say
+// so and forbid deleting the old account first. A non-TOTP account must not
+// carry the caveat.
+func TestApiDiagnostics_OversizeUsernameRemediationWarnsAboutTOTP(t *testing.T) {
+	snapshotCfgUIUsers(t)
+	longName := strings.Repeat("m", adminUsernameAccountLimit+1)
+	if err := cfg.SetUIUser(longName, "Chaos63-oversize-1!", RoleOperator); err != nil {
+		t.Fatalf("SetUIUser: %v", err)
+	}
+	get := func() *OperatorContractCheck {
+		r := viewerCtx(httptest.NewRequest(http.MethodGet, "/api/diagnostics", http.NoBody))
+		w := httptest.NewRecorder()
+		apiDiagnostics(w, r)
+		found := findDiagnosticCheck(decodeContract(t, w), "admin_username_length")
+		if found == nil || found.Status != diagWarn {
+			t.Fatalf("admin_username_length = %+v, want warn", found)
+		}
+		return found
+	}
+	if a := get().OperatorAction; strings.Contains(a, "TOTP") {
+		t.Errorf("operator_action mentions TOTP for an account without it: %q", a)
+	}
+	if !cfg.SetTOTPSecret(longName, "JBSWY3DPEHPK3PXP", []string{"bcrypt-code-1"}) {
+		t.Fatal("seed SetTOTPSecret returned false")
+	}
+	a := get().OperatorAction
+	if !strings.Contains(a, "TOTP") || !strings.Contains(a, "before deleting the old account") {
+		t.Errorf("operator_action = %q, want a TOTP caveat that blocks deleting the old account first", a)
+	}
+}
+
+// TestApiDiagnostics_MirroredLegacyNonAdminRoleIsPreserved pins that a
+// mirrored legacy login whose roster role was lowered keeps that role in the
+// remediation: VerifyUIUser grants the roster role first, while SetAuth (the
+// Settings replacement) always creates the new name as admin, so following
+// the action without restoring the role would silently elevate the account.
+func TestApiDiagnostics_MirroredLegacyNonAdminRoleIsPreserved(t *testing.T) {
+	snapshotCfgUIUsers(t)
+	cfg.mu.Lock()
+	cfg.uiUsers = map[string]*uiAdminUser{}
+	cfg.user = ""
+	cfg.mu.Unlock()
+	longName := strings.Repeat("v", adminUsernameAccountLimit+1)
+	if err := cfg.SetAuth(longName, "Chaos63-role-1!"); err != nil {
+		t.Fatalf("SetAuth(long): %v", err)
+	}
+	if err := cfg.SetUIUser(longName, "Chaos63-role-2!", RoleViewer); err != nil {
+		t.Fatalf("SetUIUser(viewer): %v", err)
+	}
+	if role, ok := cfg.VerifyUIUser(longName, "Chaos63-role-2!"); !ok || role != RoleViewer {
+		t.Fatalf("precondition: effective role = %q/%v, want viewer", role, ok)
+	}
+	r := viewerCtx(httptest.NewRequest(http.MethodGet, "/api/diagnostics", http.NoBody))
+	w := httptest.NewRecorder()
+	apiDiagnostics(w, r)
+	found := findDiagnosticCheck(decodeContract(t, w), "admin_username_length")
+	if found == nil || found.Status != diagWarn {
+		t.Fatalf("admin_username_length = %+v, want warn", found)
+	}
+	if !strings.Contains(found.OperatorAction, "role back to viewer") {
+		t.Errorf("operator_action = %q, want the Settings replacement's role restored to viewer (SetAuth creates admin)", found.OperatorAction)
+	}
+	// The role must be restored BEFORE the first sign-in: a role change does
+	// not revoke sessions, so signing in first leaves an admin session alive.
+	roleAt := strings.Index(found.OperatorAction, "role back to viewer")
+	signInAt := strings.Index(found.OperatorAction, "sign in with it")
+	if roleAt < 0 || signInAt < 0 || roleAt > signInAt {
+		t.Errorf("operator_action = %q, want the role restored before the first sign-in", found.OperatorAction)
 	}
 }
