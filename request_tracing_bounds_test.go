@@ -222,6 +222,11 @@ func TestSecReqID1_EndToEndLogAmplificationIsBounded(t *testing.T) {
 	logger = log.New(&buf, "", 0)
 	t.Cleanup(func() { logger = old })
 
+	// Same reason as the sibling gate below: this drives the real handleRequest,
+	// so the shared proxy globals must be reset or the byte bound is measured
+	// against whatever path leaked state sends the request down.
+	setupProxyTest(t)
+
 	const requests = 8
 	payload := strings.Repeat("A", 512*1024)
 	for i := 0; i < requests; i++ {
@@ -533,8 +538,16 @@ func TestSecReqID1_BareReqIDInDecisionLineIsSafeOnlyBecauseOfTheBound(t *testing
 	const forge = "x action=allow identity=root\x1b[2K"
 
 	t.Run("bound makes the bare append safe", func(t *testing.T) {
+		// Reset the shared proxy globals before driving the real handleRequest.
+		// Without it this assertion is order-dependent: any of the eleven test
+		// files that call setupAuthGateTest leaves `cfg` with credentials
+		// configured (its cleanup restores only the exempt flag), so an
+		// uncredentialed request is CHALLENGED and the line becomes AUTH_CR —
+		// `req_id=` plus one ` action=` and NO ` identity=`, which is exactly the
+		// shape asserted against below. setupProxyTest's own comment records this
+		// class: it only shows up under -count>1 / -shuffle=on.
+		setupProxyTest(t)
 		resetTracingBoundsStateForTest()
-		withNoProxyCredentialBackend(t)
 		var buf bytes.Buffer
 		old := logger
 		logger = log.New(&buf, "", 0)
@@ -835,49 +848,4 @@ func TestSecReqID1_ValidTraceparentKeepsTracestate(t *testing.T) {
 	if n := traceparentRejected.Load(); n != 0 {
 		t.Errorf("valid traceparent counted %d rejections, want 0", n)
 	}
-}
-
-// withNoProxyCredentialBackend pins the one precondition the request-path gates
-// above depend on: that handleRequest reaches a POLICY decision rather than
-// stopping at AUTH_FAIL.
-//
-// They assert on the `{req_id=… identity=… action=…}` brace block, which only
-// `emitPolicyDecision` writes. If any earlier test in the package leaves a
-// credential configured on the process-global cfg — `AuthEnabled()` is
-// `c.user != "" || c.provider != nil`, and dozens of tests call
-// `cfg.SetAuth(...)` — the request is refused before policy evaluation and the
-// line emitted is `AUTH_FAIL (no-credentials) … {req_id=… action=block}`, which
-// carries ZERO ` identity=` tokens and reads to the gate exactly like a forged
-// brace block. So the gate reported a log-injection failure whose real cause
-// was a leaked global three test files away.
-//
-// It is ORDER-DEPENDENT, not flaky: it passes in isolation and under most
-// shuffle seeds, and fails under the ones that schedule such a test first
-// (reproduced against CI's own seed, then reproduced deterministically by
-// inserting a one-line `cfg.SetAuth` leaker ahead of it — byte-identical
-// failure text). A test must establish the state it depends on rather than
-// inherit it; leaving that to whatever ran before is what makes
-// `-count=2 -shuffle=on` a lottery.
-//
-// The whole credential surface is saved and restored under cfg.mu — the same
-// shape `ui_e2e_smoke_test.go`'s fixture uses — because restoring through
-// `cfg.SetAuth("", "")` re-derives state rather than putting back what was
-// there. The auth result cache is cleared in both directions: entries keyed on
-// a credential this test is about to remove (or re-add) must not answer for it.
-func withNoProxyCredentialBackend(t *testing.T) {
-	t.Helper()
-	cfg.mu.Lock()
-	prevUser, prevHash, prevOutcome := cfg.user, cfg.passHash, cfg.defaultAuthOutcome
-	prevProvider := cfg.provider
-	cfg.user, cfg.passHash, cfg.provider = "", nil, nil
-	cfg.defaultAuthOutcome = OutcomeExempt
-	cfg.mu.Unlock()
-	cfg.cache.clear()
-	t.Cleanup(func() {
-		cfg.mu.Lock()
-		cfg.user, cfg.passHash, cfg.provider = prevUser, prevHash, prevProvider
-		cfg.defaultAuthOutcome = prevOutcome
-		cfg.mu.Unlock()
-		cfg.cache.clear()
-	})
 }
