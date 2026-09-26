@@ -149,6 +149,19 @@ Providers are running from cached documents. Nobody is locked out **yet**.
    IdP-side signing-key rotation will not be picked up, and each cached
    document stops being usable 7 days after it was fetched, after which browser
    SSO stops.
+
+   That 7-day ceiling is **enforced on a running appliance**, not only when a
+   profile is next compiled. A background check retires a provider whose served
+   document has expired: it logs `IDP_METADATA_EXPIRED`, stops serving that
+   provider (so browser SSO for it fails closed rather than trusting a signing
+   certificate your IdP may have withdrawn), and hands it to the retry loop,
+   which brings it back automatically the moment a document is fetched
+   successfully. Your profile is left **enabled and stored** throughout — the
+   configuration is still correct, it is the cached document that expired, so
+   there is nothing to re-enter and nothing to re-create.
+
+   A provider that is serving a **freshly fetched** document is never retired,
+   however old the cached copy beside it is.
 2. Check `culvert_idp_metadata_last_success_timestamp_seconds` to see how much
    of that 7 days is left.
 3. Fix egress to the IdP. Recovery is automatic and is declared only on an

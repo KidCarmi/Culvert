@@ -2223,3 +2223,264 @@ func TestChaos71_RunbookQuotesOnlyRealLogTokens(t *testing.T) {
 		}
 	}
 }
+
+// ── Codex review round 8 ────────────────────────────────────────────────────
+
+// R8-D1 (P1, defect). THE STALENESS CEILING MUST BE ENFORCED ON A LIVE PROVIDER,
+// NOT ONLY AT COMPILE TIME.
+//
+// idpmeta.StaleMaxAge lives inside Store.Get, which is reached only from a
+// compile — and on a steady-state node nothing recompiles: an unchanged CP
+// snapshot skips ReplaceAll, the recovery loop considers only DARK profiles, and
+// the degradation watchdog only alerted. So a provider compiled from cache stayed
+// live INDEFINITELY on a document the runbook promises "stops being usable 7 days
+// after it was fetched", which for SAML means continuing to trust a signing
+// certificate the IdP has withdrawn.
+//
+// The watchdog now retires such a provider, making it dark — the same state a
+// fresh boot past the ceiling produces — and hands it to the recovery loop.
+func TestChaos71_StaleCeilingIsEnforcedOnALiveProvider(t *testing.T) {
+	chaos71Env(t)
+
+	const profile = "expired"
+	source := chaos71Source(profile)
+
+	// A provider live from a cached document fetched just inside the ceiling.
+	noteIdPMetadataOutcome(profile, source, idpMetaStale, fmt.Errorf("endpoint down"))
+	noteIdPStaleDocumentServed(profile, source, time.Now().Add(-idpmeta.StaleMaxAge+time.Hour))
+	if got := idpStaleCeilingSweep(time.Now()); len(got) != 0 {
+		t.Fatalf("a document still inside the ceiling must not be swept, got %+v", got)
+	}
+
+	// Past it, the provider is named for retirement exactly once.
+	noteIdPStaleDocumentServed(profile, source, time.Now().Add(-idpmeta.StaleMaxAge-time.Minute))
+	got := idpStaleCeilingSweep(time.Now())
+	if len(got) != 1 || got[0].profileID != profile {
+		t.Fatalf("a document past %s must be swept for retirement, got %+v", idpmeta.StaleMaxAge, got)
+	}
+	if again := idpStaleCeilingSweep(time.Now()); len(again) != 0 {
+		t.Fatalf("one document must be reported ONCE, got %+v on the second sweep", again)
+	}
+}
+
+// R8-D1b (P1, defect, end to end). The registry must actually stop serving it,
+// and must leave the profile ENABLED so the recovery loop owns it — retiring by
+// disabling or deleting would discard the operator's configuration over an
+// expired document.
+func TestChaos71_RetiringAnExpiredProviderLeavesItDarkNotDeleted(t *testing.T) {
+	chaos71Env(t)
+	idp := newChaos71IdP(t)
+
+	if err := idpRegistry.Upsert(chaos71Profile("corp", idp.URL())); err != nil {
+		t.Fatalf("initial upsert: %v", err)
+	}
+	if !idpRegistry.HasEnabledInteractiveProvider() {
+		t.Fatal("setup: the provider must be live")
+	}
+
+	if !idpRegistry.retireStaleProvider("corp") {
+		t.Fatal("a live enabled profile must be retirable")
+	}
+	if idpRegistry.HasEnabledInteractiveProvider() {
+		t.Fatal("an expired provider must no longer be live — this is the fail-closed half: " +
+			"serving it means trusting a signing key the IdP may have withdrawn")
+	}
+	if !idpRegistry.hasDarkEnabledProfile() {
+		t.Fatal("the profile must be DARK (enabled, stored, no live provider) so the recovery loop owns it")
+	}
+	// The operator's configuration is untouched.
+	found := false
+	for _, p := range idpRegistry.All() {
+		if p.ID == "corp" {
+			found = true
+			if !p.Enabled {
+				t.Fatal("retiring must not disable the profile — the config is correct, the DOCUMENT expired")
+			}
+		}
+	}
+	if !found {
+		t.Fatal("retiring must not delete the profile")
+	}
+	// Idempotent: a second retirement changes nothing.
+	if idpRegistry.retireStaleProvider("corp") {
+		t.Fatal("retiring an already-dark provider must report no change")
+	}
+}
+
+// R8-D1c (P1, defect). RETIRING IS ONLY SAFE BECAUSE RECOVERY IS RE-ARMED.
+// runIdPRecoveryLoop RETURNS once nothing is dark and was started once at boot,
+// so a retirement would otherwise leave SSO down with nothing retrying it —
+// strictly worse than the expired document. The watchdog therefore re-arms while
+// anything is dark, and the arming is single-flighted.
+func TestChaos71_RecoveryIsReArmedAndSingleFlighted(t *testing.T) {
+	chaos71Env(t)
+
+	idpRecoveryRunning.Store(false)
+	t.Cleanup(func() { idpRecoveryRunning.Store(false) })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	started := &atomic.Int64{}
+	release := make(chan struct{})
+	prevArm := idpArmRecovery
+	idpArmRecovery = func(context.Context) {
+		if !idpRecoveryRunning.CompareAndSwap(false, true) {
+			return
+		}
+		started.Add(1)
+		go func() { <-release; idpRecoveryRunning.Store(false) }()
+	}
+	t.Cleanup(func() { idpArmRecovery = prevArm })
+
+	for i := 0; i < 5; i++ {
+		idpArmRecovery(ctx)
+	}
+	if got := started.Load(); got != 1 {
+		t.Fatalf("arming must be single-flighted: %d loops started, want 1", got)
+	}
+	close(release)
+}
+
+// R8-D1c CONTROL. The production arming must really start the loop, or every
+// assertion above passes against a no-op. Verified by observing the guard flip.
+func TestChaos71_ProductionArmingActuallyStartsTheLoop(t *testing.T) {
+	chaos71Env(t)
+	idpRecoveryRunning.Store(false)
+	t.Cleanup(func() { idpRecoveryRunning.Store(false) })
+
+	// Nothing is dark in this registry, so the loop returns immediately; what is
+	// asserted is that arming RAN it — the guard must return to false on its own.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	armIdPRecoveryLoop(ctx)
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if !idpRecoveryRunning.Load() {
+			return // the loop ran and released the guard
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("armIdPRecoveryLoop did not run the loop (the guard never cleared)")
+}
+
+// R8-D1 CONTROL. A provider live from a FRESH fetch must NEVER be retired,
+// however old the cached copy beside it is. Retiring on cache age alone would
+// take SSO down every 7 days on a completely healthy fleet — a self-inflicted
+// outage far worse than the defect.
+func TestChaos71_AHealthyLiveProviderIsNeverRetired(t *testing.T) {
+	chaos71Env(t)
+
+	const profile = "healthy"
+	source := chaos71Source(profile)
+	// It once served a very old cached document...
+	noteIdPMetadataOutcome(profile, source, idpMetaStale, fmt.Errorf("was down"))
+	noteIdPStaleDocumentServed(profile, source, time.Now().Add(-10*idpmeta.StaleMaxAge))
+	// ...and has since fetched successfully, which closes the episode.
+	noteIdPMetadataOutcome(profile, source, idpMetaFresh, nil)
+
+	if got := idpStaleCeilingSweep(time.Now()); len(got) != 0 {
+		t.Fatalf("a provider serving a FRESH document must never be retired, got %+v", got)
+	}
+}
+
+// R8-D2 (P2, defect). EVERY ABORT ROLLS BACK EVERY CANDIDATE'S EPISODE.
+//
+// ReplaceAll is all-or-nothing, but its two in-loop abort paths discarded only
+// the profile that failed. A snapshot that compiled an earlier changed-source
+// candidate from stale cache — opening an episode for a source that is about to
+// be rejected with the rest of the snapshot — then left that episode behind to
+// age into a degradation alert for a configuration nobody ever ran. The rule was
+// already written on the persist branch and applied to one of three paths.
+func TestChaos71_AbortedSnapshotRollsBackEveryCandidatesEpisode(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		bad  *IdPProfile
+	}{
+		{"validation", &IdPProfile{ID: "bad", Name: "bad", Type: IdPTypeSAML, Enabled: true,
+			SAML: &SAMLProfileConfig{}}}, // neither metadata_url nor metadata_xml
+		{"compile", nil}, // filled in below with an unreachable source
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			chaos71Env(t)
+
+			// The candidate whose episode leaks must have a CHANGED source: an
+			// episode for the source ALREADY IN SERVICE is a genuine outage
+			// signal and must survive a refusal (rounds 6/7), so only a
+			// repointed candidate's episode is speculative.
+			//
+			// oldSrc is cached and then taken down; the profile is left live on
+			// newSrc, which stays healthy — so after the refusal there is no
+			// legitimate episode anywhere and any survivor is the leak.
+			oldIdP := newChaos71IdP(t)
+			if err := idpRegistry.Upsert(chaos71Profile("first", oldIdP.URL())); err != nil {
+				t.Fatalf("seed against the old source: %v", err)
+			}
+			newIdP := newChaos71IdP(t)
+			if err := idpRegistry.Upsert(chaos71Profile("first", newIdP.URL())); err != nil {
+				t.Fatalf("move to the new source: %v", err)
+			}
+			oldIdP.down.Store(true) // cached, unreachable, and NOT in service
+
+			bad := tc.bad
+			if bad == nil {
+				deadURL, _ := chaos71DeadTLSEndpoint(t)
+				bad = chaos71Profile("bad", deadURL)
+			}
+			// The snapshot repoints "first" BACK to the dead-but-cached source —
+			// which stale-compiles and opens a speculative episode — and then
+			// fails on "bad", rejecting the whole snapshot.
+			err := idpRegistry.ReplaceAll([]*IdPProfile{chaos71Profile("first", oldIdP.URL()), bad})
+			if err == nil {
+				t.Fatal("the snapshot must be rejected")
+			}
+			if idpMetadataHasEpisode("first", oldIdP.URL()) {
+				t.Fatal("the earlier candidate's speculative episode survived an aborted snapshot — " +
+					"its source was never published, so it pages for a configuration nobody ran")
+			}
+			if st := idpMetadataState(); st.Failing {
+				t.Fatalf("a REJECTED snapshot must leave no candidate's episode behind — "+
+					"nothing it compiled entered service, so any surviving episode pages for a "+
+					"configuration that was never published: %+v", st)
+			}
+		})
+	}
+}
+
+// R8-D1 WALL. The sweep, the retirement and the re-arming are worthless unless
+// the watchdog actually invokes them, and that is the one thing no behavioural
+// gate here can observe: the interval is a constant and a loop that was never
+// wired looks exactly like a healthy one with nothing to do (round 5's
+// "a start that never happens cannot be seen behaviourally", one mechanism over).
+//
+// It pins the CALLS, not their arrangement, so the body stays free to change.
+func TestChaos71_WatchdogEnforcesTheCeilingAndReArmsRecovery(t *testing.T) {
+	src, err := os.ReadFile(filepath.Join(pkgSourceDir(), "idp_metadata_health.go")) // #nosec G304 -- fixed in-repo path
+	if err != nil {
+		t.Fatalf("read health plane: %v", err)
+	}
+	body := string(src)
+	start := strings.Index(body, "func runIdPMetadataDegradationWatchdog(")
+	if start < 0 {
+		t.Fatal("watchdog not found — rename it and this wall must be updated with it")
+	}
+	end := strings.Index(body[start:], "\n}\n")
+	if end < 0 {
+		t.Fatal("could not delimit the watchdog body")
+	}
+	fn := body[start : start+end]
+
+	for _, must := range []string{
+		"idpMetadataDegradationSweep(", // still alerts
+		"idpStaleCeilingSweep(",        // enforces idpmeta.StaleMaxAge on live providers
+		"idpRetireStaleProvider(",      // acts on the verdict
+		"idpAnyProfileDark(",           // supervises
+		"idpArmRecovery(",              // gives a retired provider a way back
+	} {
+		if !strings.Contains(fn, must) {
+			t.Errorf("the watchdog no longer calls %s — detection without enforcement is what round 8 found, "+
+				"and a retirement without re-arming leaves SSO down with nothing retrying it", must)
+		}
+	}
+}

@@ -498,7 +498,14 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   with nothing to fall back to; and re-pointing a profile from one remote source
   to another retires the old source's failure episode on commit, so a repoint
   away from a broken IdP stops alerting instead of paging indefinitely for a URL
-  that is no longer configured. See
+  that is no longer configured. And the 7-day staleness ceiling is now enforced
+  on a **running** appliance rather than only when a profile is next compiled: a
+  provider whose cached document has expired is retired (logged as
+  `IDP_METADATA_EXPIRED`), so browser SSO for it fails closed instead of
+  continuing to trust a signing certificate your IdP may have withdrawn, and the
+  retry loop brings it back automatically on the first successful fetch. The
+  profile stays enabled and stored throughout, and a provider serving a freshly
+  fetched document is never retired however old the cached copy beside it is. See
   `docs/operator/idp-metadata-availability.md`.
 
 ### Changed

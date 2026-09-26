@@ -80,10 +80,13 @@ package main
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/KidCarmi/Culvert/internal/idpmeta"
 )
 
 const (
@@ -201,6 +204,26 @@ type idpMetadataEpisode struct {
 	// degradation sweep below can name it in the alert Detail without holding a
 	// cause string (Dispatch dedups on event+Detail — see fireIdPMetadataAlert).
 	lastOutcome idpMetadataOutcome
+
+	// profileID / source identify who this episode belongs to, so a sweep can
+	// act on the provider rather than only report a count. The key is
+	// length-framed and therefore parseable, but re-deriving an identity from a
+	// key is how two layers disagree about what a value means (round 6), so it
+	// is carried rather than recovered.
+	profileID string
+	source    string
+
+	// servedFetchedAt is when the CACHED document this provider is currently
+	// serving was fetched from the IdP — zero unless the last acquisition fell
+	// back to cache. It is what makes idpmeta.StaleMaxAge enforceable on a LIVE
+	// provider (Codex review round 8): the ceiling lives inside Store.Get, which
+	// is reached only from a compile, and on a steady-state node nothing
+	// recompiles — an unchanged CP snapshot skips ReplaceAll, and the recovery
+	// loop considers only DARK profiles. So a provider compiled from cache
+	// stayed live indefinitely on a document the documentation promises is
+	// refused after seven days, which for SAML means continuing to trust a
+	// signing certificate the IdP has withdrawn.
+	servedFetchedAt time.Time
 }
 
 var idpMetadata idpMetadataHealth
@@ -361,6 +384,28 @@ func forgetIdPMetadataEpisode(profileID string) {
 	}
 }
 
+// noteIdPStaleDocumentServed records WHEN the cached document a provider is now
+// serving was fetched. It is called only on the stale-fallback path, right after
+// noteIdPMetadataOutcome has opened (or extended) that profile's episode.
+//
+// It exists because idpmeta.StaleMaxAge lives inside Store.Get, which is reached
+// only from a compile — so on a steady-state node, where nothing recompiles, the
+// ceiling was never re-evaluated and a provider stayed live forever on a
+// document the runbook promises stops being usable after seven days (Codex
+// review round 8). Carrying the fetch time in memory lets the watchdog enforce
+// the ceiling with no disk read and no second copy of the rule: the store still
+// owns the value, this is only where the provider's CURRENT document sits in it.
+func noteIdPStaleDocumentServed(profileID, source string, fetchedAt time.Time) {
+	if profileID == "" || fetchedAt.IsZero() {
+		return
+	}
+	idpMetadata.mu.Lock()
+	defer idpMetadata.mu.Unlock()
+	if ep := idpMetadata.episodes[idpEpisodeKey(profileID, source)]; ep != nil {
+		ep.servedFetchedAt = fetchedAt
+	}
+}
+
 func noteIdPMetadataOutcome(profileID, source string, outcome idpMetadataOutcome, cause error) {
 	idpMetadataEverUsed.Store(true)
 
@@ -399,6 +444,8 @@ func noteIdPMetadataOutcome(profileID, source string, outcome idpMetadataOutcome
 	ep.consecutive++
 	ep.lastFailure = now
 	ep.lastOutcome = outcome
+	ep.profileID = profileID
+	ep.source = source
 	if ep.firstFailure.IsZero() {
 		ep.firstFailure = now
 	}
@@ -628,6 +675,60 @@ const idpMetadataWatchdogInterval = idpMetadataDegradedAfter / 4
 // that crossed the threshold with no further fetch to notice it. It is
 // detection-only: it never fetches, never compiles, and never clears an episode
 // — recovery stays on OBSERVED evidence.
+// idpStaleCeilingVictim names a LIVE provider whose cached document has passed
+// idpmeta.StaleMaxAge and must therefore stop being served.
+type idpStaleCeilingVictim struct {
+	profileID string
+	source    string
+	age       time.Duration
+}
+
+// idpStaleCeilingSweep returns the providers whose currently-served cached
+// document is older than idpmeta.StaleMaxAge, and clears the recorded fetch time
+// so one document is reported once.
+//
+// It reads the fetch time recorded by noteIdPStaleDocumentServed rather than
+// calling Store.Get: the ceiling's VALUE stays the store's (idpmeta.StaleMaxAge
+// is imported, never re-stated), and this avoids a disk read per profile per tick
+// inside the health plane. The returned list is acted on with idpMetadata.mu
+// RELEASED — retiring takes the registry's write lock, and holding one
+// subsystem's lock across another's call is the CHAOS-50 cluster-CA rule.
+func idpStaleCeilingSweep(now time.Time) []idpStaleCeilingVictim {
+	var out []idpStaleCeilingVictim
+	idpMetadata.mu.Lock()
+	for _, ep := range idpMetadata.episodes {
+		if ep == nil || ep.servedFetchedAt.IsZero() {
+			continue
+		}
+		age := now.Sub(ep.servedFetchedAt)
+		if age < idpmeta.StaleMaxAge {
+			continue
+		}
+		out = append(out, idpStaleCeilingVictim{profileID: ep.profileID, source: ep.source, age: age})
+		// One document, one retirement. A provider that is re-compiled and falls
+		// back to cache again records a fresh fetch time and can be swept again.
+		ep.servedFetchedAt = time.Time{}
+	}
+	idpMetadata.mu.Unlock()
+	// Deterministic order so a multi-profile sweep logs and retires the same way
+	// every run — the test-determinism class the repo's shuffle gate catches.
+	sort.Slice(out, func(i, j int) bool { return out[i].profileID < out[j].profileID })
+	return out
+}
+
+// idpRetireStaleProvider is the seam the watchdog uses to stop serving a
+// provider whose cached document has expired. Package-level so tests observe the
+// decision without a live registry, matching fireIdPMetadataAlert.
+var idpRetireStaleProvider = func(profileID string) bool {
+	return idpRegistry.retireStaleProvider(profileID)
+}
+
+// idpArmRecovery is the seam for re-arming the recovery loop after a retirement.
+var idpArmRecovery = func(ctx context.Context) { armIdPRecoveryLoop(ctx) }
+
+// idpAnyProfileDark is the seam for "is there anything to recover".
+var idpAnyProfileDark = func() bool { return idpRegistry.hasDarkEnabledProfile() }
+
 func runIdPMetadataDegradationWatchdog(ctx context.Context) {
 	t := time.NewTicker(idpMetadataWatchdogInterval)
 	defer t.Stop()
@@ -636,10 +737,37 @@ func runIdPMetadataDegradationWatchdog(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			for _, outcome := range idpMetadataDegradationSweep(time.Now()) {
+			now := time.Now()
+			for _, outcome := range idpMetadataDegradationSweep(now) {
 				fireIdPMetadataAlert(fmt.Sprintf(
 					"IdP metadata/discovery document unreachable for over %s (outcome: %s)",
 					idpMetadataDegradedAfter, outcome))
+			}
+			// ENFORCE THE CEILING, do not merely report it. Store.Get refuses a
+			// document past idpmeta.StaleMaxAge, but it is reached only from a
+			// compile, and a steady-state node never recompiles — so without
+			// this a provider stayed live forever on an expired document while
+			// the runbook promised it would stop being usable (Codex round 8).
+			// Retiring makes it DARK, which is exactly the state a fresh boot
+			// past the ceiling would produce, and hands it to the recovery loop.
+			for _, v := range idpStaleCeilingSweep(now) {
+				if !idpRetireStaleProvider(v.profileID) {
+					continue
+				}
+				logger.Printf("IDP_METADATA_EXPIRED idp=%q — the cached document it was serving is %s old, past the %s ceiling; the provider is no longer live and browser SSO is unavailable for it until a document is fetched successfully",
+					sanitizeLog(v.profileID), v.age.Round(time.Minute), idpmeta.StaleMaxAge)
+				fireIdPMetadataAlert(fmt.Sprintf(
+					"IdP metadata/discovery document expired past the %s staleness ceiling; the provider is no longer live",
+					idpmeta.StaleMaxAge))
+			}
+			// The recovery loop RETURNS once nothing is dark and is started
+			// once at boot, so a retirement (or any later transition into dark)
+			// would otherwise have nothing retrying it — SSO down with no way
+			// back short of a restart, strictly worse than the defect above.
+			// Re-arming every tick makes the watchdog the supervisor and closes
+			// the arm/exit race by repetition rather than by a lock.
+			if idpAnyProfileDark() {
+				idpArmRecovery(ctx)
 			}
 		}
 	}

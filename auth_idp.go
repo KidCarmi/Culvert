@@ -645,10 +645,28 @@ func (r *IdPRegistry) ReplaceAll(profiles []*IdPProfile) error {
 		}
 	}
 
+	// EVERY abort discards EVERY candidate's speculative episode, not just the
+	// one that failed (Codex review round 8). ReplaceAll is all-or-nothing, so a
+	// snapshot that compiles profile A from stale cache — opening an episode for
+	// A's new source — and then fails on profile B publishes NOTHING: A's source
+	// never entered service, yet its episode would age past
+	// idpMetadataDegradedAfter and page for a configuration nobody ever ran.
+	//
+	// The rule was already written on the persist branch below ("the WHOLE
+	// snapshot is rejected, so every candidate's speculative episode describes a
+	// configuration that is not in service") and applied to one of three abort
+	// paths. The partial-progress case needs it precisely because the loop makes
+	// progress before it fails.
+	discardAllCandidateEpisodes := func() {
+		for _, cand := range nextProfiles {
+			discardCandidateEpisode(cand)
+		}
+	}
+
 	for _, p := range nextProfiles {
 		normalizeIdPProfileWriteInput(p)
 		if err := validateIdPProfile(p); err != nil {
-			discardCandidateEpisode(p)
+			discardAllCandidateEpisodes()
 			return err
 		}
 		if !p.Enabled {
@@ -656,7 +674,7 @@ func (r *IdPRegistry) ReplaceAll(profiles []*IdPProfile) error {
 		}
 		prov, err := compileIdPProfile(p)
 		if err != nil {
-			discardCandidateEpisode(p)
+			discardAllCandidateEpisodes()
 			return fmt.Errorf("idp %q compile error: %w", p.ID, err)
 		}
 		nextLive[p.ID] = prov
@@ -666,10 +684,9 @@ func (r *IdPRegistry) ReplaceAll(profiles []*IdPProfile) error {
 	defer r.mu.Unlock()
 	if err := r.persist(nextProfiles); err != nil {
 		// The WHOLE snapshot is rejected, so every candidate's speculative
-		// episode describes a configuration that is not in service.
-		for _, cand := range nextProfiles {
-			discardCandidateEpisode(cand)
-		}
+		// episode describes a configuration that is not in service — the same
+		// rule the two abort paths above now share.
+		discardAllCandidateEpisodes()
 		return err // the previous profile set + live providers stay authoritative
 	}
 	r.profiles = nextProfiles

@@ -8746,6 +8746,77 @@ it is trying not to disturb; the honest trade is to take the extra CI cycle
 rather than hold a durable commit for it, because the container is ephemeral
 and the run is not.
 
+### Codex review round 8 — two findings, and the first is this sweep's own security claim
+
+**THE STALENESS CEILING MUST BE ENFORCED ON A LIVE PROVIDER, NOT ONLY AT COMPILE
+TIME (P1).** `idpmeta.StaleMaxAge` is the answer this sweep gives to *"what if the
+IdP withdraws a signing key?"* — the reason a last-known-good cache is a BOUNDED
+degradation rather than an open-ended one. It lives inside `Store.Get`, which is
+reached only from a compile. And a steady-state node never recompiles: an
+unchanged CP snapshot skips `ReplaceAll`, the recovery loop considers only DARK
+profiles, and the watchdog round 5 made unconditional merely ALERTED. So a
+provider compiled from cache stayed live INDEFINITELY on a document the runbook
+states "stops being usable 7 days after it was fetched, after which browser SSO
+stops". For SAML that is continuing to trust a withdrawn certificate; the second
+half is that recovery was never noticed either, because nothing re-fetched after
+the endpoint returned.
+
+*The documentation was right and the code did not implement it* — which is this
+sweep's recurring shape (a documented property enforced on one path) turned on
+its own central claim.
+
+The watchdog now ENFORCES rather than reports: `idpStaleCeilingSweep` finds
+providers whose served document passed the ceiling and `retireStaleProvider`
+stops serving them — removed from `r.live`, left ENABLED and STORED, i.e. DARK,
+exactly the state a fresh boot past the ceiling produces. The profile is
+deliberately not disabled and not deleted: the operator's configuration is
+correct, it is the DOCUMENT that expired, and leaving it enabled-but-dark is both
+the fail-closed posture and what hands it to the recovery loop. The fetch time is
+carried in memory (`servedFetchedAt`) so the ceiling's VALUE stays the store's and
+the watchdog needs no disk read, and `idpMetadata.mu` is released before retiring
+because retiring takes the registry write lock — CHAOS-50's rule against holding
+one subsystem's lock across another's call.
+
+**A provider live from a FRESH fetch is never retired, however old the cached copy
+beside it is.** Retiring on cache age alone would take SSO down every seven days
+on a completely healthy fleet: a self-inflicted outage far worse than the defect,
+and the cheapest wrong fix here, so it is pinned as a control.
+
+**RETIRING IS ONLY SAFE BECAUSE RECOVERY IS RE-ARMED, and the two must ship
+together.** `runIdPRecoveryLoop` RETURNS once nothing is dark, and it was started
+exactly once from the startup slice — so a retirement would have left the profile
+dark with nothing retrying it, SSO down until a restart or a config change. That
+is strictly worse than the expired document the retirement exists to stop serving.
+`armIdPRecoveryLoop` single-flights the loop on an `atomic.Bool`, the startup
+slice routes through it, and the watchdog re-arms on every tick while anything is
+dark — so a CAS that loses to a loop about to exit costs at most one
+`idpMetadataWatchdogInterval` and the window closes by REPETITION rather than by
+holding a lock across a goroutine's lifetime.
+
+> **A fix that takes capacity away is only safe once the way back is wired in the
+> same change.** Detection, enforcement and recovery are one mechanism; shipping
+> two of the three is how a hardening change becomes an outage.
+
+**EVERY ABORT ROLLS BACK EVERY CANDIDATE'S EPISODE (P2).** `ReplaceAll` is
+all-or-nothing, but its two in-loop abort paths discarded only the profile that
+failed. A snapshot that stale-compiled an earlier CHANGED-SOURCE candidate —
+opening a speculative episode for a source about to be rejected with the rest of
+the snapshot — then left that episode to age into a degradation page for a
+configuration nobody ever ran. The rule was already written on the persist branch
+(*"the WHOLE snapshot is rejected, so every candidate's speculative episode
+describes a configuration that is not in service"*) and applied to one of three
+paths; the partial-progress case needs it precisely because the loop makes
+progress before it fails.
+
+**The reproduction is the subtle part and the first draft got it wrong.** An
+episode for the source ALREADY IN SERVICE is a genuine outage signal that must
+SURVIVE a refusal (rounds 6 and 7 established exactly that), so only a
+*repointed* candidate's episode is speculative. The first gate gave the earlier
+candidate the same source it was already live on and therefore failed against the
+fix rather than against the defect — *a gate that fails for the wrong reason is
+still telling you something, and here it was that the scenario, not the code, was
+wrong.*
+
 ### Codex review round 7 — three findings, and two of them are round 6's own fixes
 
 **A GATE THAT ADMITS WHAT THE COMPILE REFUSES IS A CACHE-POISONING PATH (P1).**

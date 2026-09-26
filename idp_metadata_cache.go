@@ -163,6 +163,11 @@ func resolveIdPDocument(profileID string, kind idpmeta.Kind, source string, doc 
 		}
 	}
 	noteIdPMetadataOutcome(profileID, source, idpMetaStale, fetchErr)
+	// Record WHEN this document was fetched, so the ceiling stays enforceable
+	// after the compile returns. Store.Get owns idpmeta.StaleMaxAge, but it is
+	// reached only from a compile, and a steady-state node never recompiles —
+	// see noteIdPStaleDocumentServed (Codex review round 8).
+	noteIdPStaleDocumentServed(profileID, source, time.Now().Add(-age))
 	logger.Printf("IdP[%s]: metadata fetch failed (%v) — continuing from the cached document fetched %s ago (refused past %s)",
 		sanitizeLog(profileID), sanitizeLog(fmt.Sprint(fetchErr)), age.Round(time.Second), idpmetaStaleMaxAgeString())
 	return cached, nil

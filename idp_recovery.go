@@ -39,6 +39,7 @@ package main
 
 import (
 	"context"
+	"sync/atomic"
 	"time"
 )
 
@@ -170,6 +171,81 @@ func copyDiscoveredOIDCEndpoints(dst, src *IdPProfile) {
 	dst.OIDC.IntrospectionEndpoint = src.OIDC.IntrospectionEndpoint
 	dst.OIDC.UserinfoEndpoint = src.OIDC.UserinfoEndpoint
 	dst.OIDC.JWKsURI = src.OIDC.JWKsURI
+}
+
+// retireStaleProvider stops serving a provider whose cached document has passed
+// idpmeta.StaleMaxAge, leaving the profile ENABLED and STORED but with no live
+// provider — i.e. DARK, exactly the state a fresh boot past the ceiling produces.
+// Reports whether it changed anything, so the caller logs once per retirement.
+//
+// The profile is deliberately NOT disabled and NOT deleted: the operator's
+// configuration is unchanged and still correct, it is the DOCUMENT that expired.
+// Leaving it enabled-but-dark is what hands it to runIdPRecoveryLoop, which is
+// both the fail-closed posture (browser SSO stops rather than trusting a
+// withdrawn signing key) and the way back the moment the IdP answers again.
+func (r *IdPRegistry) retireStaleProvider(profileID string) bool {
+	if profileID == "" {
+		return false
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, live := r.live[profileID]; !live {
+		return false // already dark; the recovery loop owns it
+	}
+	// Only a profile this registry still holds as enabled may be retired: a
+	// stale live entry for a profile that has since been deleted is not ours to
+	// reason about, and deleting it here would race the mutation that removed it.
+	for _, p := range r.profiles {
+		if p != nil && p.ID == profileID && p.Enabled {
+			delete(r.live, profileID)
+			return true
+		}
+	}
+	return false
+}
+
+// hasDarkEnabledProfile reports whether any enabled profile lacks a live
+// provider. Cheaper than darkEnabledProfiles for the watchdog's supervision
+// check, which runs every tick and clones nothing.
+func (r *IdPRegistry) hasDarkEnabledProfile() bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	for _, p := range r.profiles {
+		if p == nil || !p.Enabled {
+			continue
+		}
+		if _, ok := r.live[p.ID]; !ok {
+			return true
+		}
+	}
+	return false
+}
+
+// idpRecoveryRunning guards armIdPRecoveryLoop so at most one recovery loop runs.
+var idpRecoveryRunning atomic.Bool
+
+// armIdPRecoveryLoop starts the recovery loop unless one is already running.
+//
+// runIdPRecoveryLoop RETURNS once nothing is dark, and it was started exactly
+// once from the startup slice — so before CHAOS-71 round 8 any LATER transition
+// into dark (notably a staleness-ceiling retirement) had nothing retrying it, and
+// SSO stayed down until a restart or a config change. That is strictly worse than
+// the expired document the retirement exists to stop serving, which is why the
+// retirement and this arming ship together.
+//
+// The CAS can lose a race against a loop that is about to exit and clear the
+// flag, leaving nothing running for one interval. That is deliberate: the
+// watchdog re-arms on EVERY tick while anything is dark, so the window closes by
+// repetition within one idpMetadataWatchdogInterval instead of by holding a lock
+// across a goroutine's lifetime.
+func armIdPRecoveryLoop(ctx context.Context) {
+	if !idpRecoveryRunning.CompareAndSwap(false, true) {
+		return
+	}
+	go func() {
+		defer idpRecoveryRunning.Store(false)
+		runIdPRecoveryLoop(ctx)
+	}()
 }
 
 // runIdPRecoveryLoop retries compilation of enabled-but-dark profiles until

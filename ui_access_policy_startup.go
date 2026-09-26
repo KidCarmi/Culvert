@@ -74,7 +74,7 @@ func loadUIAccessPolicy(cfg uiAccessPolicyStartupConfig) error {
 		// the contract row reports — a start condition narrower than what the
 		// loop recovers would leave a dark profile with no way back.
 		if len(idpRegistry.darkEnabledProfiles()) > 0 {
-			go runIdPRecoveryLoop(resolveLifecycleCtx())
+			armIdPRecoveryLoop(resolveLifecycleCtx())
 		}
 		// Detection-only degradation watchdog. UNLIKE the recovery loop above
 		// it is not gated on anything being dark, because the case it exists
