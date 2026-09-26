@@ -11,6 +11,7 @@ import (
 	"os"
 	"sync"
 
+	"github.com/KidCarmi/Culvert/internal/idpmeta"
 	"github.com/KidCarmi/Culvert/internal/ssrf"
 )
 
@@ -356,11 +357,11 @@ func (r *IdPRegistry) Upsert(p *IdPProfile) error {
 	// persist path needs it too, not just the compile path: a candidate that
 	// stale-compiles and then fails to persist would otherwise leave an outage
 	// reported against a configuration that was rejected.
-	liveSource := idpRemoteDocumentSource(liveProfile)
-	candidateSource := idpRemoteDocumentSource(p)
+	liveRef := idpRemoteDocumentRef(liveProfile)
+	candidateRef := idpRemoteDocumentRef(p)
 	discardCandidateEpisode := func() {
-		if candidateSource != liveSource {
-			forgetIdPMetadataEpisodeForSource(p.ID, candidateSource)
+		if candidateRef != liveRef {
+			forgetIdPMetadataEpisodeForSource(p.ID, candidateRef)
 		}
 	}
 
@@ -426,7 +427,7 @@ func (r *IdPRegistry) Upsert(p *IdPProfile) error {
 	// and its episode is a live outage signal — those paths take
 	// discardCandidateEpisode instead, which touches only the candidate's own
 	// key. See retireEpisodeAfterCommit for the rule itself.
-	retireEpisodeAfterCommit(p.ID, liveSource, effectiveRemoteSource(p))
+	retireEpisodeAfterCommit(p.ID, liveRef, effectiveRemoteDocRef(p))
 	return nil
 }
 
@@ -434,10 +435,15 @@ func (r *IdPRegistry) Upsert(p *IdPProfile) error {
 // ONCE PUBLISHED: "" for a DISABLED profile, which fetches nothing, as well as
 // for one that names no remote URL at all.
 func effectiveRemoteSource(p *IdPProfile) string {
+	return effectiveRemoteDocRef(p).Source
+}
+
+// effectiveRemoteDocRef is effectiveRemoteSource's identity-complete form.
+func effectiveRemoteDocRef(p *IdPProfile) idpDocRef {
 	if p == nil || !p.Enabled {
-		return ""
+		return idpDocRef{}
 	}
-	return idpRemoteDocumentSource(p)
+	return idpRemoteDocumentRef(p)
 }
 
 // retireEpisodeAfterCommit applies the ONE episode-retirement rule every
@@ -477,13 +483,16 @@ func effectiveRemoteSource(p *IdPProfile) string {
 // Extracted from Upsert/ReplaceAll rather than inlined twice: both were over
 // the cyclop threshold with it inline, and one rule in one place is also how
 // the two paths are kept from drifting.
-func retireEpisodeAfterCommit(profileID, prevSource, newSource string) {
-	if newSource == "" {
+func retireEpisodeAfterCommit(profileID string, prev, next idpDocRef) {
+	if next.Source == "" {
 		forgetIdPMetadataEpisode(profileID)
 		return
 	}
-	if prevSource != "" && prevSource != newSource {
-		forgetIdPMetadataEpisodeForSource(profileID, prevSource)
+	// The whole REF is compared, not the source alone: a type flip that keeps
+	// the same URL is a different document and must retire the old episode
+	// rather than inherit it (Codex review round 19).
+	if prev.Source != "" && prev != next {
+		forgetIdPMetadataEpisodeForSource(profileID, prev)
 	}
 }
 
@@ -498,8 +507,46 @@ func retireEpisodeAfterCommit(profileID, prevSource, newSource string) {
 // the candidate, so it belongs to the candidate's source, not to the still-live
 // profile's (Codex review rounds 3 and 6).
 func idpRemoteDocumentSource(p *IdPProfile) string {
+	return idpRemoteDocumentRef(p).Source
+}
+
+// idpDocRef identifies the ONE remote document a profile depends on: its KIND
+// and its SOURCE together.
+//
+// The pair travels as a value because the two halves are one identity and must
+// never be passed separately. `internal/idpmeta` has said so since it was
+// written — its cache key is kind|profileID|source, and Kind's own comment
+// records why ("so one profile that somehow carries both cannot have them
+// collide") — but the failure-episode key re-derived a NARROWER identity of
+// (profile, source) alone, so the two layers disagreed about what a document
+// IS. A profile whose id is reused across a SAML/OIDC type flip, where the SAML
+// metadata_url happens to equal the OIDC well-known URL, then shared one
+// episode between two genuinely different documents: the candidate's
+// successful fetch cleared the live profile's real outage episode, and a
+// failed persist left that profile authoritative and stale with its
+// degradation clock and fire-once alert latch erased (Codex review round 19).
+//
+// The trigger is contrived — /.well-known/openid-configuration is an
+// OIDC-specific path that no real SAML metadata URL ends in — so this is a
+// defect of IDENTITY CONSISTENCY rather than a reachable outage, and it is
+// fixed for the reason this sweep keeps re-learning: when one layer decides
+// what a value MEANS, every other layer asks that layer instead of re-deriving
+// a rule of its own (SEC-TOTP-1; rounds 6 and 7 here).
+//
+// Note the ARITY change is the point. Rounds 6 and 7 changed this key's VALUE
+// and a writer that did not consult it drifted silently; carrying a new field
+// in the signature makes the COMPILER enumerate every call site instead.
+type idpDocRef struct {
+	Kind   idpmeta.Kind
+	Source string
+}
+
+// idpRemoteDocumentRef is THE derivation of a profile's remote document
+// identity. idpRemoteDocumentSource is a thin accessor over it and never
+// re-derives the rule, so the kind and the source cannot disagree.
+func idpRemoteDocumentRef(p *IdPProfile) idpDocRef {
 	if p == nil {
-		return ""
+		return idpDocRef{}
 	}
 	switch p.Type {
 	case IdPTypeOIDC:
@@ -509,14 +556,14 @@ func idpRemoteDocumentSource(p *IdPProfile) string {
 			// cache key and the failure-episode key. Returning the issuer here
 			// made the episode-cleanup path compute a key the recorder never
 			// used (Codex review round 6).
-			return oidcWellKnownURL(p.OIDC.Issuer)
+			return idpDocRef{Kind: idpmeta.KindOIDCDiscovery, Source: oidcWellKnownURL(p.OIDC.Issuer)}
 		}
 	case IdPTypeSAML:
 		if p.SAML != nil {
-			return p.SAML.MetadataURL
+			return idpDocRef{Kind: idpmeta.KindSAMLMetadata, Source: p.SAML.MetadataURL}
 		}
 	}
-	return ""
+	return idpDocRef{}
 }
 
 func validateSAMLProfileConfig(cfg *SAMLProfileConfig) error {
@@ -657,9 +704,9 @@ func (r *IdPRegistry) ReplaceAll(profiles []*IdPProfile) error {
 		// A snapshot that reuses an id and repoints it at a different unreachable
 		// source leaves an episode belonging to the CANDIDATE, so the still-live
 		// profile must not inherit it (Codex review round 3).
-		source := idpRemoteDocumentSource(candidate)
-		if source != r.liveRemoteSourceLocked(candidate.ID) {
-			forgetIdPMetadataEpisodeForSource(candidate.ID, source)
+		ref := idpRemoteDocumentRef(candidate)
+		if ref != r.liveRemoteDocRefLocked(candidate.ID) {
+			forgetIdPMetadataEpisodeForSource(candidate.ID, ref)
 		}
 	}
 	discardAllCandidateEpisodesLocked := func() {
@@ -715,12 +762,12 @@ func (r *IdPRegistry) ReplaceAll(profiles []*IdPProfile) error {
 	// anything is published — not from a snapshot taken before the compile loop
 	// (round 16). After the swap below the old set is gone, so this is the last
 	// point at which "what was in service" can still be answered correctly.
-	prevSources := make(map[string]string, len(r.profiles))
+	prevSources := make(map[string]idpDocRef, len(r.profiles))
 	for _, prev := range r.profiles {
 		if prev == nil || prev.ID == "" {
 			continue
 		}
-		prevSources[prev.ID] = idpRemoteDocumentSource(prev)
+		prevSources[prev.ID] = idpRemoteDocumentRef(prev)
 	}
 	if err := r.persist(nextProfiles); err != nil {
 		// The WHOLE snapshot is rejected, so every candidate's speculative
@@ -741,11 +788,12 @@ func (r *IdPRegistry) ReplaceAll(profiles []*IdPProfile) error {
 	// Reached only after persist, so a rejected snapshot never gets here. A
 	// profile absent from `kept` has no remote source left in the published
 	// set, which retireEpisodeAfterCommit reads as the sweep-everything case —
-	// an absent key yields "", so the two cases need no branch here.
-	kept := make(map[string]string, len(nextProfiles))
+	// an absent key yields the zero idpDocRef, whose Source is "", so the two
+	// cases need no branch here.
+	kept := make(map[string]idpDocRef, len(nextProfiles))
 	for _, p := range nextProfiles {
-		if src := effectiveRemoteSource(p); src != "" {
-			kept[p.ID] = src
+		if ref := effectiveRemoteDocRef(p); ref.Source != "" {
+			kept[p.ID] = ref
 		}
 	}
 	for id, prev := range prevSources {
@@ -766,12 +814,17 @@ func (r *IdPRegistry) ReplaceAll(profiles []*IdPProfile) error {
 // consumers both drifted; there is deliberately no snapshot helper here any
 // more, so the stale reading cannot be reintroduced by a new caller.
 func (r *IdPRegistry) liveRemoteSourceLocked(id string) string {
+	return r.liveRemoteDocRefLocked(id).Source
+}
+
+// liveRemoteDocRefLocked is liveRemoteSourceLocked's identity-complete form.
+func (r *IdPRegistry) liveRemoteDocRefLocked(id string) idpDocRef {
 	for _, p := range r.profiles {
 		if p != nil && p.ID == id {
-			return idpRemoteDocumentSource(p)
+			return idpRemoteDocumentRef(p)
 		}
 	}
-	return ""
+	return idpDocRef{}
 }
 
 // validateReservedIdPNaming rejects IdP profile IDs and names that collide with

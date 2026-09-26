@@ -287,11 +287,11 @@ var fireIdPMetadataAlert = func(detail string) {
 // episode then belongs to the live profile's ongoing outage (Codex review
 // rounds 3, 5 and 6 are all this one distinction, which is why it is now
 // carried by the KEY rather than by a predicate over two profiles).
-func forgetIdPMetadataEpisodeForSource(profileID, source string) {
-	if profileID == "" || source == "" {
+func forgetIdPMetadataEpisodeForSource(profileID string, ref idpDocRef) {
+	if profileID == "" || ref.Source == "" {
 		return
 	}
-	key := idpEpisodeKey(profileID, source)
+	key := idpEpisodeKey(profileID, ref)
 	idpMetadata.mu.Lock()
 	_, had := idpMetadata.episodes[key]
 	delete(idpMetadata.episodes, key)
@@ -555,7 +555,7 @@ func idpServedEntry(source string, prov IdentityProvider) (idpServedDoc, bool) {
 	return idpServedDoc{source: source, fetchedAt: fetchedAt}, true
 }
 
-func noteIdPMetadataOutcome(profileID, source string, outcome idpMetadataOutcome, cause error) {
+func noteIdPMetadataOutcome(profileID string, ref idpDocRef, outcome idpMetadataOutcome, cause error) {
 	idpMetadataEverUsed.Store(true)
 
 	now := time.Now()
@@ -568,7 +568,7 @@ func noteIdPMetadataOutcome(profileID, source string, outcome idpMetadataOutcome
 		// Recovery on OBSERVED evidence: a document actually came back — for
 		// THIS profile AND THIS SOURCE. Another profile's success says nothing
 		// about it, and neither does a success against a different source.
-		key := idpEpisodeKey(profileID, source)
+		key := idpEpisodeKey(profileID, ref)
 		ep := idpMetadata.episodes[key]
 		wasFailing := ep != nil
 		var suppressed int64
@@ -589,12 +589,12 @@ func noteIdPMetadataOutcome(profileID, source string, outcome idpMetadataOutcome
 		idpMetadata.unavailable++
 	}
 	idpMetadata.fetchFailures++
-	ep := idpMetadataEpisodeLocked(idpEpisodeKey(profileID, source))
+	ep := idpMetadataEpisodeLocked(idpEpisodeKey(profileID, ref))
 	ep.consecutive++
 	ep.lastFailure = now
 	ep.lastOutcome = outcome
 	ep.profileID = profileID
-	ep.source = source
+	ep.source = ref.Source
 	if ep.firstFailure.IsZero() {
 		ep.firstFailure = now
 	}
@@ -637,8 +637,14 @@ func noteIdPMetadataOutcome(profileID, source string, outcome idpMetadataOutcome
 // and a collision here merges two profiles' outage state — the failure mode
 // per-profile keying was introduced to fix. The framing also makes
 // idpEpisodeProfilePrefix a safe prefix.
-func idpEpisodeKey(profileID, source string) string {
-	return fmt.Sprintf("%d:%s:%s", len(profileID), profileID, source)
+func idpEpisodeKey(profileID string, ref idpDocRef) string {
+	// KIND is part of the identity, length-framed like the profile id so the
+	// key stays injective: the cache has always distinguished the two document
+	// kinds and this key did not, so one profile carrying both could share an
+	// episode between two different documents (Codex review round 19). The
+	// profile-id framing stays FIRST so idpEpisodeProfilePrefix remains a
+	// genuine prefix of every key this profile owns.
+	return fmt.Sprintf("%d:%s:%d:%s:%s", len(profileID), profileID, len(ref.Kind), ref.Kind, ref.Source)
 }
 
 // idpEpisodeProfilePrefix is the prefix every key for this profile shares.

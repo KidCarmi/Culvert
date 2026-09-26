@@ -160,6 +160,27 @@ func chaos71MetadataXML(t *testing.T, cn string) string {
 // must name the SAME source or they are two episodes rather than one run.
 func chaos71Source(profileID string) string { return "https://" + profileID + ".invalid/document" }
 
+// chaos71Ref lifts a bare source into the (KIND, source) identity episodes have
+// been keyed by since Codex round 19.
+//
+// The kind is INFERRED from the source, which is sound for these fixtures and
+// not a guess: an OIDC source is only ever produced by oidcWellKnownURL, so it
+// always carries that suffix, while a SAML metadata_url in this suite never
+// does. Hard-coding SAML here instead was wrong and the suite caught it — three
+// episode-ownership gates build OIDC profiles, so a SAML-stamped key seeded an
+// episode production never touched and they failed with two episodes where they
+// expect one.
+//
+// A gate that needs a specific kind — notably the collision gate, whose whole
+// point is a SAML source that DOES carry the OIDC suffix — constructs its
+// idpDocRef literally and does not come through here.
+func chaos71Ref(source string) idpDocRef {
+	if strings.HasSuffix(source, "/.well-known/openid-configuration") {
+		return idpDocRef{Kind: idpmeta.KindOIDCDiscovery, Source: source}
+	}
+	return idpDocRef{Kind: idpmeta.KindSAMLMetadata, Source: source}
+}
+
 func chaos71Env(t *testing.T) *idpmeta.Store {
 	t.Helper()
 	prevRegistry := idpRegistry
@@ -656,10 +677,10 @@ func TestChaos71_AlertDetailIsBoundedAndCarriesNoURL(t *testing.T) {
 	// never reach an alert Detail, because Dispatch dedups on it.
 	privateURL := "https://idp.internal.example/private-metadata-path"
 	idpMetadata.mu.Lock()
-	idpMetadataEpisodeLocked(idpEpisodeKey("corp", chaos71Source("corp"))).firstFailure = time.Now().Add(-2 * idpMetadataDegradedAfter)
+	idpMetadataEpisodeLocked(idpEpisodeKey("corp", chaos71Ref(chaos71Source("corp")))).firstFailure = time.Now().Add(-2 * idpMetadataDegradedAfter)
 	idpMetadata.mu.Unlock()
 	idpMetadataEverUsed.Store(true)
-	noteIdPMetadataOutcome("corp", chaos71Source("corp"), idpMetaUnavailable, fmt.Errorf("fetch %s: connection refused", privateURL))
+	noteIdPMetadataOutcome("corp", chaos71Ref(chaos71Source("corp")), idpMetaUnavailable, fmt.Errorf("fetch %s: connection refused", privateURL))
 
 	if len(details) != 1 {
 		t.Fatalf("want exactly one page per degradation episode, got %d", len(details))
@@ -669,18 +690,18 @@ func TestChaos71_AlertDetailIsBoundedAndCarriesNoURL(t *testing.T) {
 	}
 
 	// Fire-once per episode: a second failure must not page again.
-	noteIdPMetadataOutcome("corp", chaos71Source("corp"), idpMetaUnavailable, fmt.Errorf("again"))
+	noteIdPMetadataOutcome("corp", chaos71Ref(chaos71Source("corp")), idpMetaUnavailable, fmt.Errorf("again"))
 	if len(details) != 1 {
 		t.Fatalf("the latch must fire once per episode, got %d pages", len(details))
 	}
 
 	// Recovery is on OBSERVED evidence — a document actually fetched — and it
 	// re-arms the latch so a second incident pages again.
-	noteIdPMetadataOutcome("corp", chaos71Source("corp"), idpMetaFresh, nil)
+	noteIdPMetadataOutcome("corp", chaos71Ref(chaos71Source("corp")), idpMetaFresh, nil)
 	idpMetadata.mu.Lock()
-	idpMetadataEpisodeLocked(idpEpisodeKey("corp", chaos71Source("corp"))).firstFailure = time.Now().Add(-2 * idpMetadataDegradedAfter)
+	idpMetadataEpisodeLocked(idpEpisodeKey("corp", chaos71Ref(chaos71Source("corp")))).firstFailure = time.Now().Add(-2 * idpMetadataDegradedAfter)
 	idpMetadata.mu.Unlock()
-	noteIdPMetadataOutcome("corp", chaos71Source("corp"), idpMetaUnavailable, fmt.Errorf("second incident"))
+	noteIdPMetadataOutcome("corp", chaos71Ref(chaos71Source("corp")), idpMetaUnavailable, fmt.Errorf("second incident"))
 	if len(details) != 2 {
 		t.Fatalf("a second incident must page again, got %d pages", len(details))
 	}
@@ -692,7 +713,7 @@ func TestChaos71_AlertDetailIsBoundedAndCarriesNoURL(t *testing.T) {
 func TestChaos71_RecoveryRequiresObservedEvidence(t *testing.T) {
 	chaos71Env(t)
 	idpMetadataEverUsed.Store(true)
-	noteIdPMetadataOutcome("corp", chaos71Source("corp"), idpMetaUnavailable, fmt.Errorf("down"))
+	noteIdPMetadataOutcome("corp", chaos71Ref(chaos71Source("corp")), idpMetaUnavailable, fmt.Errorf("down"))
 	if !idpMetadataState().Failing {
 		t.Fatal("precondition: must be failing")
 	}
@@ -700,7 +721,7 @@ func TestChaos71_RecoveryRequiresObservedEvidence(t *testing.T) {
 	if !idpMetadataState().Failing {
 		t.Fatal("elapsed time alone must NEVER clear a failing state")
 	}
-	noteIdPMetadataOutcome("corp", chaos71Source("corp"), idpMetaFresh, nil)
+	noteIdPMetadataOutcome("corp", chaos71Ref(chaos71Source("corp")), idpMetaFresh, nil)
 	if idpMetadataState().Failing {
 		t.Fatal("an observed successful fetch must clear it")
 	}
@@ -759,20 +780,20 @@ func TestChaos71_HealthySiblingDoesNotClearAnotherProfilesEpisode(t *testing.T) 
 	fireIdPMetadataAlert = func(d string) { details = append(details, d) }
 	t.Cleanup(func() { fireIdPMetadataAlert = prev })
 
-	noteIdPMetadataOutcome("dead", chaos71Source("dead"), idpMetaStale, fmt.Errorf("down"))
+	noteIdPMetadataOutcome("dead", chaos71Ref(chaos71Source("dead")), idpMetaStale, fmt.Errorf("down"))
 	idpMetadata.mu.Lock()
-	idpMetadataEpisodeLocked(idpEpisodeKey("dead", chaos71Source("dead"))).firstFailure = time.Now().Add(-2 * idpMetadataDegradedAfter)
+	idpMetadataEpisodeLocked(idpEpisodeKey("dead", chaos71Ref(chaos71Source("dead")))).firstFailure = time.Now().Add(-2 * idpMetadataDegradedAfter)
 	idpMetadata.mu.Unlock()
 
-	noteIdPMetadataOutcome("healthy", chaos71Source("healthy"), idpMetaFresh, nil)
+	noteIdPMetadataOutcome("healthy", chaos71Ref(chaos71Source("healthy")), idpMetaFresh, nil)
 	if snap := idpMetadataState(); !snap.Failing || !snap.Degraded {
 		t.Fatalf("a sibling's success must not clear the dead profile's episode: %+v", snap)
 	}
-	noteIdPMetadataOutcome("dead", chaos71Source("dead"), idpMetaStale, fmt.Errorf("still down"))
+	noteIdPMetadataOutcome("dead", chaos71Ref(chaos71Source("dead")), idpMetaStale, fmt.Errorf("still down"))
 	if len(details) != 1 {
 		t.Fatalf("the dead profile must page once it crosses the threshold, got %d pages", len(details))
 	}
-	noteIdPMetadataOutcome("dead", chaos71Source("dead"), idpMetaFresh, nil)
+	noteIdPMetadataOutcome("dead", chaos71Ref(chaos71Source("dead")), idpMetaFresh, nil)
 	if idpMetadataState().Failing {
 		t.Fatal("the profile's OWN success must clear its episode")
 	}
@@ -1020,7 +1041,7 @@ func TestChaos71_RefusedRepointPreservesTheLiveSourcesEpisode(t *testing.T) {
 	}
 	// It is serving from cache, so it ALREADY has an open episode. Clear the
 	// alert latch state by re-recording, then age it to just under threshold.
-	noteIdPMetadataOutcome("shared", liveSource, idpMetaStale, fmt.Errorf("origin down"))
+	noteIdPMetadataOutcome("shared", chaos71Ref(liveSource), idpMetaStale, fmt.Errorf("origin down"))
 	if !idpMetadataState().Failing {
 		t.Fatal("precondition: the live source must be failing")
 	}
@@ -1086,7 +1107,7 @@ func TestChaos71_InlineSwitchClearsTheEpisodeOnlyOnCommit(t *testing.T) {
 		if err := reg.ReplaceAll([]*IdPProfile{remote}); err != nil {
 			t.Fatalf("precondition: the remote profile must register: %v", err)
 		}
-		noteIdPMetadataOutcome("switching", chaos71Source("switching"), idpMetaUnavailable, fmt.Errorf("down"))
+		noteIdPMetadataOutcome("switching", chaos71Ref(chaos71Source("switching")), idpMetaUnavailable, fmt.Errorf("down"))
 		if !idpMetadataState().Failing {
 			t.Fatal("precondition: the profile must have an open episode")
 		}
@@ -1134,7 +1155,7 @@ func TestChaos71_InlineSwitchClearsTheEpisodeOnlyOnCommit(t *testing.T) {
 	// It must clear ONLY that profile's episode.
 	t.Run("it does not clear another profile's episode", func(t *testing.T) {
 		reg := arrange(t)
-		noteIdPMetadataOutcome("other", chaos71Source("other"), idpMetaUnavailable, fmt.Errorf("down"))
+		noteIdPMetadataOutcome("other", chaos71Ref(chaos71Source("other")), idpMetaUnavailable, fmt.Errorf("down"))
 		if err := reg.Upsert(&IdPProfile{
 			ID: "switching", Name: "switching", Type: IdPTypeSAML, Enabled: true,
 			SAML: &SAMLProfileConfig{MetadataXML: chaos71MetadataXML(t, "round5-inline")},
@@ -1386,7 +1407,7 @@ func TestChaos71_RejectedCandidateLeavesNoEpisode(t *testing.T) {
 	// episode recorded against some other source is not the one a refusal of
 	// THIS candidate is responsible for, and hard-coding the string would let
 	// the test drift from how the compile path names it.
-	noteIdPMetadataOutcome("ghost", idpRemoteDocumentSource(bad), idpMetaUnavailable, fmt.Errorf("down"))
+	noteIdPMetadataOutcome("ghost", idpRemoteDocumentRef(bad), idpMetaUnavailable, fmt.Errorf("down"))
 	if !idpMetadataState().Failing {
 		t.Fatal("precondition: the candidate must have an open episode")
 	}
@@ -1421,7 +1442,7 @@ func TestChaos71_RejectedEditKeepsTheLiveProfilesEpisode(t *testing.T) {
 		live:     make(map[string]IdentityProvider),
 		profiles: []*IdPProfile{{ID: "live-one", Name: "live-one", Type: IdPTypeOIDC}},
 	}
-	noteIdPMetadataOutcome("live-one", chaos71Source("live-one"), idpMetaUnavailable, fmt.Errorf("down"))
+	noteIdPMetadataOutcome("live-one", chaos71Ref(chaos71Source("live-one")), idpMetaUnavailable, fmt.Errorf("down"))
 	if !idpMetadataState().Failing {
 		t.Fatal("precondition: the registered profile must have an open episode")
 	}
@@ -1633,7 +1654,7 @@ func TestChaos71_DisableClearsTheEpisodeOnlyAfterPersistSucceeds(t *testing.T) {
 			},
 		}},
 	}
-	noteIdPMetadataOutcome("going-dark", chaos71Source("going-dark"), idpMetaUnavailable, fmt.Errorf("down"))
+	noteIdPMetadataOutcome("going-dark", chaos71Ref(chaos71Source("going-dark")), idpMetaUnavailable, fmt.Errorf("down"))
 	if !idpMetadataState().Failing {
 		t.Fatal("precondition: the live profile must have an open episode")
 	}
@@ -1669,7 +1690,7 @@ func TestChaos71_PersistedDisableClearsTheEpisode(t *testing.T) {
 			},
 		}},
 	}
-	noteIdPMetadataOutcome("going-dark", chaos71Source("going-dark"), idpMetaUnavailable, fmt.Errorf("down"))
+	noteIdPMetadataOutcome("going-dark", chaos71Ref(chaos71Source("going-dark")), idpMetaUnavailable, fmt.Errorf("down"))
 
 	disabled := &IdPProfile{
 		ID: "going-dark", Name: "going-dark", Type: IdPTypeOIDC, Enabled: false,
@@ -1740,7 +1761,7 @@ func TestChaos71_DegradationAlertFiresWithoutAFurtherFetch(t *testing.T) {
 	idpMetadataEverUsed.Store(true)
 
 	// ONE failure, then nothing ever compiles this profile again.
-	noteIdPMetadataOutcome("cache-serving", chaos71Source("cache-serving"), idpMetaStale, fmt.Errorf("HTTP 503"))
+	noteIdPMetadataOutcome("cache-serving", chaos71Ref(chaos71Source("cache-serving")), idpMetaStale, fmt.Errorf("HTTP 503"))
 
 	// Before the threshold: no page.
 	if fired := idpMetadataDegradationSweep(time.Now()); len(fired) != 0 {
@@ -1770,8 +1791,8 @@ func TestChaos71_DegradationSweepDoesNotPageARecoveredProfile(t *testing.T) {
 	chaos71Env(t)
 	idpMetadataEverUsed.Store(true)
 
-	noteIdPMetadataOutcome("recovers", chaos71Source("recovers"), idpMetaStale, fmt.Errorf("HTTP 503"))
-	noteIdPMetadataOutcome("recovers", chaos71Source("recovers"), idpMetaFresh, nil) // observed evidence
+	noteIdPMetadataOutcome("recovers", chaos71Ref(chaos71Source("recovers")), idpMetaStale, fmt.Errorf("HTTP 503"))
+	noteIdPMetadataOutcome("recovers", chaos71Ref(chaos71Source("recovers")), idpMetaFresh, nil) // observed evidence
 
 	if fired := idpMetadataDegradationSweep(time.Now().Add(10 * idpMetadataDegradedAfter)); len(fired) != 0 {
 		t.Fatalf("a recovered profile must never be paged, got %d alert(s)", len(fired))
@@ -1797,7 +1818,7 @@ func TestChaos71_DegradationSweepNeverClearsAnEpisode(t *testing.T) {
 	chaos71Env(t)
 	idpMetadataEverUsed.Store(true)
 
-	noteIdPMetadataOutcome("still-down", chaos71Source("still-down"), idpMetaUnavailable, fmt.Errorf("down"))
+	noteIdPMetadataOutcome("still-down", chaos71Ref(chaos71Source("still-down")), idpMetaUnavailable, fmt.Errorf("down"))
 	_ = idpMetadataDegradationSweep(time.Now().Add(idpMetadataDegradedAfter + time.Minute))
 
 	if !idpMetadataState().Failing {
@@ -1903,10 +1924,10 @@ func (s *chaos71OIDCServer) goodAuthz() string { return s.srv.URL + "/authorize"
 // WITHOUT creating one. idpMetadataEpisodeLocked is get-or-create, so it cannot
 // answer a presence question — calling it would manufacture the episode the
 // assertion is looking for.
-func idpMetadataHasEpisode(profileID, source string) bool {
+func idpMetadataHasEpisode(profileID string, ref idpDocRef) bool {
 	idpMetadata.mu.Lock()
 	defer idpMetadata.mu.Unlock()
-	_, ok := idpMetadata.episodes[idpEpisodeKey(profileID, source)]
+	_, ok := idpMetadata.episodes[idpEpisodeKey(profileID, ref)]
 	return ok
 }
 
@@ -2033,7 +2054,7 @@ func chaos71RepointSetup(t *testing.T) (sourceA string, healthyB *chaos71IdP) {
 	if err := idpRegistry.Upsert(chaos71Profile("corp", a.URL())); err != nil {
 		t.Fatalf("stale recompile must succeed from cache: %v", err)
 	}
-	if !idpMetadataHasEpisode("corp", a.URL()) {
+	if !idpMetadataHasEpisode("corp", chaos71Ref(a.URL())) {
 		t.Fatal("setup: source A must carry an open episode")
 	}
 	return a.URL(), b
@@ -2043,14 +2064,14 @@ func chaos71RepointSetup(t *testing.T) (sourceA string, healthyB *chaos71IdP) {
 // the gate bodies for the same reason.
 func chaos71WantEpisode(t *testing.T, profileID, source, why string) {
 	t.Helper()
-	if !idpMetadataHasEpisode(profileID, source) {
+	if !idpMetadataHasEpisode(profileID, chaos71Ref(source)) {
 		t.Fatal(why)
 	}
 }
 
 func chaos71WantNoEpisode(t *testing.T, profileID, source, why string) {
 	t.Helper()
-	if idpMetadataHasEpisode(profileID, source) {
+	if idpMetadataHasEpisode(profileID, chaos71Ref(source)) {
 		t.Fatal(why)
 	}
 }
@@ -2132,7 +2153,7 @@ func TestChaos71_CommittedRepointRetiresThePreviousSourcesEpisode(t *testing.T) 
 	// view of source A must not touch another profile's.
 	t.Run("ControlAnotherProfilesEpisodeOnTheSameSourceSurvives", func(t *testing.T) {
 		sourceA, healthyB := chaos71RepointSetup(t)
-		noteIdPMetadataOutcome("other", sourceA, idpMetaUnavailable, fmt.Errorf("down"))
+		noteIdPMetadataOutcome("other", chaos71Ref(sourceA), idpMetaUnavailable, fmt.Errorf("down"))
 		if err := idpRegistry.Upsert(chaos71Profile("corp", healthyB.URL())); err != nil {
 			t.Fatalf("repoint: %v", err)
 		}
@@ -2190,7 +2211,7 @@ func TestChaos71_IssuerTrailingSlashDerivesExactlyOneSource(t *testing.T) {
 		"https://idp-that-does-not-resolve.invalid/.well-known/openid-configuration",
 		"https://idp-that-does-not-resolve.invalid//.well-known/openid-configuration",
 	} {
-		if idpMetadataHasEpisode("slash", source) {
+		if idpMetadataHasEpisode("slash", chaos71Ref(source)) {
 			t.Errorf("a refused edit left an episode under %q", source)
 		}
 	}
@@ -2286,7 +2307,7 @@ func TestChaos71_StaleCeilingIsEnforcedOnALiveProvider(t *testing.T) {
 	source := chaos71Source(profile)
 
 	// A provider live from a cached document fetched just inside the ceiling.
-	noteIdPMetadataOutcome(profile, source, idpMetaStale, fmt.Errorf("endpoint down"))
+	noteIdPMetadataOutcome(profile, chaos71Ref(source), idpMetaStale, fmt.Errorf("endpoint down"))
 	chaos71PublishCacheBuilt(profile, source, time.Now().Add(-idpmeta.StaleMaxAge+time.Hour))
 	if got := idpStaleCeilingSweep(time.Now()); len(got) != 0 {
 		t.Fatalf("a document still inside the ceiling must not be swept, got %+v", got)
@@ -2344,7 +2365,7 @@ func chaos71SeedStaleServe(profileID, source string) time.Time {
 	// opens the fetch-health episode) and the publish site records the served
 	// generation. Since round 14 these are separate records, and the ceiling
 	// reads only the second.
-	noteIdPMetadataOutcome(profileID, source, idpMetaStale, fmt.Errorf("seeded outage"))
+	noteIdPMetadataOutcome(profileID, chaos71Ref(source), idpMetaStale, fmt.Errorf("seeded outage"))
 	chaos71PublishCacheBuilt(profileID, source, served)
 	return served
 }
@@ -2595,10 +2616,10 @@ func TestChaos71_AHealthyLiveProviderIsNeverRetired(t *testing.T) {
 	const profile = "healthy"
 	source := chaos71Source(profile)
 	// It once served a very old cached document...
-	noteIdPMetadataOutcome(profile, source, idpMetaStale, fmt.Errorf("was down"))
+	noteIdPMetadataOutcome(profile, chaos71Ref(source), idpMetaStale, fmt.Errorf("was down"))
 	chaos71PublishCacheBuilt(profile, source, time.Now().Add(-10*idpmeta.StaleMaxAge))
 	// ...and has since fetched successfully AND published that generation.
-	noteIdPMetadataOutcome(profile, source, idpMetaFresh, nil)
+	noteIdPMetadataOutcome(profile, chaos71Ref(source), idpMetaFresh, nil)
 	idpNotePublishedGeneration(profile, source, chaos71CacheBuiltProvider{})
 
 	if got := idpStaleCeilingSweep(time.Now()); len(got) != 0 {
@@ -2656,7 +2677,7 @@ func TestChaos71_AbortedSnapshotRollsBackEveryCandidatesEpisode(t *testing.T) {
 			if err == nil {
 				t.Fatal("the snapshot must be rejected")
 			}
-			if idpMetadataHasEpisode("first", oldIdP.URL()) {
+			if idpMetadataHasEpisode("first", chaos71Ref(oldIdP.URL())) {
 				t.Fatal("the earlier candidate's speculative episode survived an aborted snapshot — " +
 					"its source was never published, so it pages for a configuration nobody ran")
 			}
@@ -2775,11 +2796,11 @@ func TestChaos71_SupersededRecoveryFailureLeavesNoEpisode(t *testing.T) {
 			// The compile is in flight; the admin mutation commits and runs its
 			// own cleanup, exactly as retireEpisodeAfterCommit would.
 			tc.after(id)
-			forgetIdPMetadataEpisodeForSource(id, src)
+			forgetIdPMetadataEpisodeForSource(id, chaos71Ref(src))
 
 			// Now the late failure lands, opening an episode for a source that is
 			// no longer authoritative.
-			noteIdPMetadataOutcome(id, src, idpMetaUnavailable, fmt.Errorf("late failure"))
+			noteIdPMetadataOutcome(id, chaos71Ref(src), idpMetaUnavailable, fmt.Errorf("late failure"))
 			if !idpMetadataState().Failing {
 				t.Fatal("precondition: the late failure must have opened an episode")
 			}
@@ -2807,7 +2828,7 @@ func TestChaos71_StillAuthoritativeRecoveryFailureKeepsItsEpisode(t *testing.T) 
 	dc := chaos71SeedDarkProfile(t, id)
 
 	// Nothing changed: the same source is still what this profile fetches.
-	noteIdPMetadataOutcome(id, src, idpMetaUnavailable, fmt.Errorf("still down"))
+	noteIdPMetadataOutcome(id, chaos71Ref(src), idpMetaUnavailable, fmt.Errorf("still down"))
 	if !idpMetadataState().Failing {
 		t.Fatal("precondition: the failure must have opened an episode")
 	}
@@ -3095,17 +3116,31 @@ func chaos71FuncSource(t *testing.T, src, decl string) string {
 // A must be the registered source at the moment ReplaceAll is entered.
 func chaos71OverlapSetup(t *testing.T) (a, b *chaos71IdP) {
 	t.Helper()
-	chaos71Env(t)
+	store := chaos71Env(t)
 	a = newChaos71IdP(t)
 	b = newChaos71IdP(t)
 
-	// Cache B's document under "corp" while B is healthy, then move the profile
-	// to A. B's cache entry survives — it is keyed by (profile, source).
-	if err := idpRegistry.Upsert(chaos71Profile("corp", b.URL())); err != nil {
-		t.Fatalf("setup: seed B's cache: %v", err)
-	}
+	// corp is live on A and has a cached document for B, so an Upsert that
+	// repoints it onto a DOWN B degrades to cache instead of being refused —
+	// which is the state the round-16 ownership gates need.
+	//
+	// This used to be built by Upserting B and then A, on the recorded
+	// reasoning that "B's cache entry survives — it is keyed by
+	// (profile, source)". Since Codex round 19 it does not: a successful fetch
+	// retires that profile's superseded sources for the same kind, because a
+	// superseded entry is UNREACHABLE (Get is keyed by the CURRENT source) and
+	// leaving it behind is what let dead keys evict live profiles' fallbacks.
+	// A profile therefore holds at most ONE document per kind, so the old
+	// two-Upsert shape now leaves A's entry and no B — the compile is refused
+	// and the gates fail in their setup rather than on their claim.
+	//
+	// B's document is written DIRECTLY through the store instead. corp stays
+	// live on A, which is healthy here and so needs no cache of its own.
 	if err := idpRegistry.Upsert(chaos71Profile("corp", a.URL())); err != nil {
-		t.Fatalf("setup: move the profile to A: %v", err)
+		t.Fatalf("setup: register corp on A: %v", err)
+	}
+	if err := store.Put("corp", idpmeta.KindSAMLMetadata, b.URL(), []byte(b.doc.Load().(string))); err != nil {
+		t.Fatalf("setup: seed B's cache: %v", err)
 	}
 	if idpRegistry.liveRemoteSource("corp") != a.URL() {
 		t.Fatalf("setup: the registered source must be A, got %q", idpRegistry.liveRemoteSource("corp"))
@@ -3154,7 +3189,7 @@ func chaos71RunWithInterveningUpsert(t *testing.T, gate *chaos71IdP, to string, 
 	if got := idpRegistry.liveRemoteSource("corp"); got != to {
 		abandon("the intervening Upsert must have published %q, got %q", to, got)
 	}
-	if !idpMetadataHasEpisode("corp", to) {
+	if !idpMetadataHasEpisode("corp", chaos71Ref(to)) {
 		abandon("the intervening Upsert must open a REAL episode for %q, or there is no episode to lose", to)
 	}
 
@@ -3345,20 +3380,20 @@ func discardSupersededRecoveryEpisode(dc darkCandidate) {
 	if src == "" {
 		return
 	}
-	if idpRegistry.stillFetchesSourceLocked(dc.candidate.ID, dc.generation, src) {
+	if idpRegistry.stillFetchesSourceLocked(dc.candidate.ID, dc.generation, chaos71Ref(src)) {
 		return
 	}
-	forgetIdPMetadataEpisodeForSource(dc.candidate.ID, src)
+	forgetIdPMetadataEpisodeForSource(dc.candidate.ID, chaos71Ref(src))
 }
 
-func (r *IdPRegistry) forgetEpisodeIfSuperseded(id string, generation *IdPProfile, source string) {
-	if r.stillFetchesSourceLocked(id, generation, source) {
+func (r *IdPRegistry) forgetEpisodeIfSuperseded(id string, generation *IdPProfile, chaos71Ref(source string)) {
+	if r.stillFetchesSourceLocked(id, generation, chaos71Ref(source)) {
 		return
 	}
-	forgetIdPMetadataEpisodeForSource(id, source)
+	forgetIdPMetadataEpisodeForSource(id, chaos71Ref(source))
 }
 
-func (r *IdPRegistry) stillFetchesSourceLocked(id string, generation *IdPProfile, source string) bool {
+func (r *IdPRegistry) stillFetchesSourceLocked(id string, generation *IdPProfile, chaos71Ref(source string)) bool {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	return false
@@ -3395,7 +3430,7 @@ func TestChaos71_SupersededCleanupIsExcludedByAWriterAndCompletes(t *testing.T) 
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		idpRegistry.forgetEpisodeIfSuperseded("corp", gen, source)
+		idpRegistry.forgetEpisodeIfSuperseded("corp", gen, chaos71Ref(source))
 	}()
 
 	select {
@@ -3531,5 +3566,91 @@ func TestChaos71_OrdinaryRecoveryIsNotCountedAsSuperseded(t *testing.T) {
 	if n := idpRecoverySuperseded.Load(); n != before {
 		t.Fatalf("an ordinary recovery moved the superseded counter (%d -> %d): the counter no longer "+
 			"distinguishes a discarded fetch from a successful self-heal", before, n)
+	}
+}
+
+// --- Codex review round 19: an episode is keyed by (profile, KIND, source) ---
+
+// TestChaos71_EpisodeKeyDistinguishesDocumentKind pins that two documents which
+// differ only in KIND never share one failure episode.
+//
+// `internal/idpmeta` has always keyed its cache kind|profile|source, and Kind's
+// own comment says why ("so one profile that somehow carries both cannot have
+// them collide"). The episode key re-derived a NARROWER identity of
+// (profile, source), so the two layers disagreed about what a document IS: a
+// profile id reused across a SAML/OIDC type flip whose SAML metadata_url equals
+// the OIDC well-known URL shared one episode between two different documents.
+// The candidate's successful fetch then cleared the LIVE profile's real outage
+// episode, and a failed persist left that profile authoritative and stale with
+// its degradation clock and fire-once alert latch erased.
+//
+// The trigger is contrived on purpose — /.well-known/openid-configuration is an
+// OIDC-specific path — so this gate states the INVARIANT rather than staging the
+// unreachable scenario: identity is (profile, kind, source), full stop.
+func TestChaos71_EpisodeKeyDistinguishesDocumentKind(t *testing.T) {
+	chaos71Env(t)
+
+	const shared = "https://idp.invalid/.well-known/openid-configuration"
+	saml := idpDocRef{Kind: idpmeta.KindSAMLMetadata, Source: shared}
+	oidc := idpDocRef{Kind: idpmeta.KindOIDCDiscovery, Source: shared}
+
+	if idpEpisodeKey("dual", saml) == idpEpisodeKey("dual", oidc) {
+		t.Fatal("two documents differing only in kind share one episode key")
+	}
+
+	// The live SAML document is failing: a real, ongoing outage.
+	noteIdPMetadataOutcome("dual", saml, idpMetaStale, fmt.Errorf("origin down"))
+	if !idpMetadataHasEpisode("dual", saml) {
+		t.Fatal("precondition: the SAML episode should be open")
+	}
+
+	// A speculative OIDC compile against the same URL succeeds. That says
+	// nothing about the SAML document and must not clear its episode.
+	noteIdPMetadataOutcome("dual", oidc, idpMetaFresh, nil)
+
+	if !idpMetadataHasEpisode("dual", saml) {
+		t.Fatal("a success for the OIDC document erased the SAML document's live outage episode")
+	}
+}
+
+// TestChaos71_EpisodeKeyIsInjectiveAcrossKindAndSource is the injectivity half.
+// Length-framing the kind as well as the profile id is what stops a collision
+// being reintroduced by a kind whose name happens to prefix a source.
+func TestChaos71_EpisodeKeyIsInjectiveAcrossKindAndSource(t *testing.T) {
+	// The corpus MUST contain a pair that collides when the kind is not
+	// length-framed, or this gate proves nothing about the framing: ("a","b:c")
+	// and ("a:b","c") both concatenate to "a:b:c". A first version of this
+	// test omitted that pair and PASSED against an unframed key — a gate whose
+	// claim was broader than what it checked, the vacuity this sweep keeps
+	// finding in its own walls.
+	seen := map[string]string{}
+	for _, id := range []string{"a", "ab", "a:b", ""} {
+		for _, k := range []idpmeta.Kind{idpmeta.KindSAMLMetadata, idpmeta.KindOIDCDiscovery, "", "saml_metadata:x", "a", "a:b"} {
+			for _, src := range []string{"", "s", "saml_metadata:s", "https://x.invalid/d", "b:c", "c"} {
+				ref := idpDocRef{Kind: k, Source: src}
+				key := idpEpisodeKey(id, ref)
+				desc := fmt.Sprintf("id=%q kind=%q src=%q", id, k, src)
+				if prev, dup := seen[key]; dup {
+					t.Fatalf("episode key collision: %s and %s both yield %q", prev, desc, key)
+				}
+				seen[key] = desc
+			}
+		}
+	}
+}
+
+// TestChaos71_EpisodeProfilePrefixStillMatchesEveryKey is the CONTROL for the
+// key change: forgetIdPMetadataEpisode sweeps a profile by PREFIX, so adding a
+// field in the wrong position would silently stop that sweep from matching and
+// leave episodes nothing can ever clear.
+func TestChaos71_EpisodeProfilePrefixStillMatchesEveryKey(t *testing.T) {
+	for _, id := range []string{"a", "profile-with-dashes", "a:b"} {
+		prefix := idpEpisodeProfilePrefix(id)
+		for _, k := range []idpmeta.Kind{idpmeta.KindSAMLMetadata, idpmeta.KindOIDCDiscovery} {
+			key := idpEpisodeKey(id, idpDocRef{Kind: k, Source: "https://x.invalid/d"})
+			if !strings.HasPrefix(key, prefix) {
+				t.Fatalf("key %q does not carry this profile's sweep prefix %q", key, prefix)
+			}
+		}
 	}
 }

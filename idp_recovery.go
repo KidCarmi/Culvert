@@ -172,7 +172,7 @@ func (r *IdPRegistry) publishRecompiled(id string, generation, compiled *IdPProf
 // this used to take and release the lock itself, which made every caller a
 // check-then-act across a lock release (round 17). The answer is true only for
 // as long as the lock is held — that is the whole point.
-func (r *IdPRegistry) stillFetchesSourceLocked(id string, generation *IdPProfile, source string) bool {
+func (r *IdPRegistry) stillFetchesSourceLocked(id string, generation *IdPProfile, ref idpDocRef) bool {
 	for _, p := range r.profiles {
 		if p == nil || p.ID != id {
 			continue
@@ -180,7 +180,7 @@ func (r *IdPRegistry) stillFetchesSourceLocked(id string, generation *IdPProfile
 		if !p.Enabled || p != generation {
 			return false // disabled, or replaced by a newer generation
 		}
-		return effectiveRemoteSource(p) == source
+		return effectiveRemoteDocRef(p) == ref
 	}
 	return false // deleted while we were compiling
 }
@@ -320,11 +320,11 @@ func armIdPRecoveryLoop(ctx context.Context) {
 // registry publishes. See the call site for why the failure path needs it and
 // why the still-authoritative case must be left alone.
 func discardSupersededRecoveryEpisode(dc darkCandidate) {
-	src := idpRemoteDocumentSource(dc.candidate)
-	if src == "" {
+	ref := idpRemoteDocumentRef(dc.candidate)
+	if ref.Source == "" {
 		return // fetches nothing; no episode of this kind exists
 	}
-	idpRegistry.forgetEpisodeIfSuperseded(dc.candidate.ID, dc.generation, src)
+	idpRegistry.forgetEpisodeIfSuperseded(dc.candidate.ID, dc.generation, ref)
 }
 
 // forgetEpisodeIfSuperseded asks whether this generation still fetches source
@@ -345,13 +345,13 @@ func discardSupersededRecoveryEpisode(dc darkCandidate) {
 // the answer, while leaving the proxy request path's own RLock unblocked. The
 // order taken is r.mu -> idpMetadata.mu, the one this package already takes at
 // retireEpisodeAfterCommit and at ReplaceAll's aborts.
-func (r *IdPRegistry) forgetEpisodeIfSuperseded(id string, generation *IdPProfile, source string) {
+func (r *IdPRegistry) forgetEpisodeIfSuperseded(id string, generation *IdPProfile, ref idpDocRef) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	if r.stillFetchesSourceLocked(id, generation, source) {
+	if r.stillFetchesSourceLocked(id, generation, ref) {
 		return // still in service: the episode is a live outage signal
 	}
-	forgetIdPMetadataEpisodeForSource(id, source)
+	forgetIdPMetadataEpisodeForSource(id, ref)
 }
 
 // runIdPRecoveryLoop retries compilation of enabled-but-dark profiles until

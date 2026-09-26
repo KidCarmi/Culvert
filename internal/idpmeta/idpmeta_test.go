@@ -192,24 +192,36 @@ func TestGet_TruncatedDocumentIsRefused(t *testing.T) {
 
 // Eviction is bounded and DETERMINISTIC (oldest fetch first, ties by key) so
 // which entry is dropped never depends on Go map iteration order.
+//
+// The cap is driven across DISTINCT PROFILES, which since Codex round 19 is the
+// only way to reach it: one profile can no longer accumulate entries, because a
+// successful Put retires that profile's superseded sources for the same kind.
+// The earlier shape of this test repointed a single profile 69 times, which the
+// supersession now collapses to one entry — a setup no appliance can produce.
+// Every assertion it made (bounded at the cap, oldest gone, newest present, no
+// orphan files) is preserved.
 func TestPut_EvictsOldestFirstAndStaysBounded(t *testing.T) {
 	s := newTestStore(t)
 	base := time.Now()
 	for i := 0; i < MaxEntries+5; i++ {
 		at := base.Add(time.Duration(i) * time.Second)
 		s.SetClockForTest(func() time.Time { return at })
-		src := "https://idp.example/md/" + string(rune('a'+i%26)) + string(rune('a'+i/26))
-		if err := s.Put("corp", KindSAMLMetadata, src, []byte("<md/>")); err != nil {
+		profile := fmt.Sprintf("corp-%03d", i)
+		if err := s.Put(profile, KindSAMLMetadata, "https://idp.example/md", []byte("<md/>")); err != nil {
 			t.Fatalf("Put %d: %v", i, err)
 		}
 	}
 	if got := s.Len(); got != MaxEntries {
 		t.Fatalf("Len = %d, want the %d cap", got, MaxEntries)
 	}
-	// The oldest source must be gone and the newest present.
+	// The oldest profile must be gone and the newest present.
 	s.SetClockForTest(func() time.Time { return base.Add(time.Hour) })
-	if _, _, err := s.Get("corp", KindSAMLMetadata, "https://idp.example/md/aa"); err != ErrNoEntry {
+	if _, _, err := s.Get("corp-000", KindSAMLMetadata, "https://idp.example/md"); err != ErrNoEntry {
 		t.Fatalf("oldest entry should have been evicted, got %v", err)
+	}
+	newest := fmt.Sprintf("corp-%03d", MaxEntries+4)
+	if _, _, err := s.Get(newest, KindSAMLMetadata, "https://idp.example/md"); err != nil {
+		t.Fatalf("newest entry should have survived eviction, got %v", err)
 	}
 	// Evicted document files must be removed too, so the directory cannot
 	// outgrow the index.
@@ -560,5 +572,108 @@ func TestServable_AgreesWithGet(t *testing.T) {
 					"cached-documents gauge no longer means what a compile can fall back on", servable, gotGet)
 			}
 		})
+	}
+}
+
+// --- Codex review round 19: superseded entries are retired, not merely aged ---
+
+// TestPut_RetiresSupersededSourceForSameProfileKind pins that repointing a
+// profile does not leave its old document behind forever.
+//
+// The DEFECT this fails against: Put only ever added keys, and nothing in the
+// tree could remove one (the Store has no delete API at all), so every repoint
+// leaked a key that Get can never read again — Get is keyed by the profile's
+// CURRENT source. Those dead keys then drove the global oldest-first eviction.
+func TestPut_RetiresSupersededSourceForSameProfileKind(t *testing.T) {
+	dir := t.TempDir()
+	s := New(dir)
+
+	if err := s.Put("p", KindSAMLMetadata, "https://a.example/md", []byte("A")); err != nil {
+		t.Fatalf("put A: %v", err)
+	}
+	oldPath := docPathFor(s, "p", KindSAMLMetadata, "https://a.example/md")
+	if _, err := os.Stat(oldPath); err != nil {
+		t.Fatalf("first document should exist: %v", err)
+	}
+
+	if err := s.Put("p", KindSAMLMetadata, "https://b.example/md", []byte("B")); err != nil {
+		t.Fatalf("put B: %v", err)
+	}
+
+	if got := len(s.entries); got != 1 {
+		t.Fatalf("repointing a profile left %d entries, want 1 — the superseded key was not retired", got)
+	}
+	if _, err := os.Stat(oldPath); !os.IsNotExist(err) {
+		t.Fatalf("superseded document file still on disk (err=%v)", err)
+	}
+	// The CURRENT source must still be served: retiring must never leave the
+	// profile with no fallback, which is the cheapest wrong version of this fix.
+	if doc, _, err := s.Get("p", KindSAMLMetadata, "https://b.example/md"); err != nil || string(doc) != "B" {
+		t.Fatalf("current source must still be served, got %q err=%v", doc, err)
+	}
+}
+
+// TestPut_SupersessionIsScopedToProfileAndKind is the CONTROL. The cheapest way
+// to pass the gate above is to clear more than you should — another profile's
+// entry, or the same profile's OTHER document kind — which would destroy
+// exactly the fallbacks the cache exists to hold.
+func TestPut_SupersessionIsScopedToProfileAndKind(t *testing.T) {
+	dir := t.TempDir()
+	s := New(dir)
+
+	if err := s.Put("other", KindSAMLMetadata, "https://other.example/md", []byte("OTHER")); err != nil {
+		t.Fatalf("put other: %v", err)
+	}
+	if err := s.Put("p", KindOIDCDiscovery, "https://p.example/.well-known/openid-configuration", []byte("OIDC")); err != nil {
+		t.Fatalf("put oidc: %v", err)
+	}
+	if err := s.Put("p", KindSAMLMetadata, "https://a.example/md", []byte("A")); err != nil {
+		t.Fatalf("put A: %v", err)
+	}
+	if err := s.Put("p", KindSAMLMetadata, "https://b.example/md", []byte("B")); err != nil {
+		t.Fatalf("put B: %v", err)
+	}
+
+	if doc, _, err := s.Get("other", KindSAMLMetadata, "https://other.example/md"); err != nil || string(doc) != "OTHER" {
+		t.Fatalf("another profile's entry was retired: %q err=%v", doc, err)
+	}
+	if doc, _, err := s.Get("p", KindOIDCDiscovery, "https://p.example/.well-known/openid-configuration"); err != nil || string(doc) != "OIDC" {
+		t.Fatalf("the same profile's OTHER kind was retired: %q err=%v", doc, err)
+	}
+}
+
+// TestPut_SupersessionKeepsLiveProfilesOutOfEvictionRange is the finding's own
+// scenario: a live profile that is NOT recompiling must not lose its only
+// fallback because another profile was repointed many times.
+//
+// Pre-fix, each repoint added a key, so MaxEntries+1 repoints of "busy" evicted
+// the oldest entry in the store — "steady", whose document was still the live
+// fallback for a profile serving traffic.
+func TestPut_SupersessionKeepsLiveProfilesOutOfEvictionRange(t *testing.T) {
+	dir := t.TempDir()
+	s := New(dir)
+	now := time.Unix(1_700_000_000, 0)
+	s.now = func() time.Time { return now }
+
+	if err := s.Put("steady", KindSAMLMetadata, "https://steady.example/md", []byte("STEADY")); err != nil {
+		t.Fatalf("seed steady: %v", err)
+	}
+
+	// "busy" is repointed far past the cap; "steady" never fetches again, so it
+	// is permanently the oldest entry in the store.
+	for i := 0; i < MaxEntries+8; i++ {
+		now = now.Add(time.Minute)
+		src := fmt.Sprintf("https://busy.example/md/%d", i)
+		if err := s.Put("busy", KindSAMLMetadata, src, []byte("BUSY")); err != nil {
+			t.Fatalf("put busy %d: %v", i, err)
+		}
+	}
+
+	doc, _, err := s.Get("steady", KindSAMLMetadata, "https://steady.example/md")
+	if err != nil {
+		t.Fatalf("a live profile's only fallback was evicted by another profile's repoints: %v", err)
+	}
+	if string(doc) != "STEADY" {
+		t.Fatalf("wrong document served: %q", doc)
 	}
 }

@@ -365,8 +365,47 @@ func (s *Store) Put(profileID string, kind Kind, source string, doc []byte) erro
 		return fmt.Errorf("idpmeta: write document: %w", err)
 	}
 	s.entries[k] = e
+	s.supersedeLocked(profileID, kind, k)
 	s.evictLocked()
 	return s.saveIndexLocked()
+}
+
+// supersedeLocked retires every OTHER cached document for this (profile, kind).
+//
+// A superseded entry is not merely old, it is UNREACHABLE: Get is keyed by the
+// profile's CURRENT source, so once a profile is repointed from S1 to S2 the
+// entry for S1 can never be served again. Leaving it behind made the cache
+// accumulate one dead key per repoint for the life of the appliance, and
+// because evictLocked is global oldest-first and liveness-blind, that
+// accumulation evicted the ONLY fallback of a profile that was still live and
+// still serving — the cache failing at precisely the job it exists for
+// (Codex review round 19).
+//
+// It runs AFTER the new entry is stored and skips it by key, so a profile is
+// never left with no fallback at all: the document that replaces the retired
+// ones is already on disk and in the index when this runs.
+//
+// Deleting rather than moving aside is deliberate and matches evictLocked: the
+// CHAOS-50/62 "quarantine, never delete" rule governs a store whose content is
+// EVIDENCE of a fault, and this content is a cache of a remote document that
+// the next successful fetch reproduces.
+//
+// RESIDUAL, recorded rather than closed here: this bounds accumulation to one
+// entry per (profile, kind) that has ever fetched, so a DELETED profile's last
+// entry still lingers. Closing that needs a Forget(profileID) the registry
+// calls on delete, i.e. a new cross-layer mutation path into the episode/commit
+// code rounds 6-10 repeatedly got wrong — its own change, not this one.
+func (s *Store) supersedeLocked(profileID string, kind Kind, keep string) {
+	for k, e := range s.entries {
+		if k == keep || e == nil {
+			continue
+		}
+		if e.ProfileID != profileID || e.Kind != kind {
+			continue
+		}
+		_ = os.Remove(filepath.Join(s.dir, docFileName(k)))
+		delete(s.entries, k)
+	}
 }
 
 // evictLocked keeps the store within MaxEntries, oldest fetch first. The
@@ -422,6 +461,15 @@ func (s *Store) Dir() string {
 // It deliberately does not report len(s.entries): an index entry is not a
 // fallback. See checkServableLocked for what the index cannot see and why the
 // two must give one answer.
+//
+// COST, and the rule that follows from it: answering honestly means one os.Stat
+// per entry, so this is O(MaxEntries) syscalls on the data volume under s.mu,
+// where it used to be O(1) and volume-independent. That is bounded by a
+// compile-time constant and is dwarfed by Get, which already holds this same
+// lock across a read of up to MaxDocumentBytes — but it does mean the caller
+// inherits the data volume's availability. Its ONE caller is the /metrics
+// exposition, scraped at the collector's interval; do not call it from a
+// request path, and do not raise MaxEntries without re-reading this.
 func (s *Store) Len() int {
 	if s == nil {
 		return 0

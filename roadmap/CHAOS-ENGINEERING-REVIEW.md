@@ -163,7 +163,7 @@ The third: an `idpMetaInline` early return left an episode nothing could ever
 clear, so a profile switched to inline `metadataXml` warned forever about a
 remote fetch that no longer existed — the observed-evidence rule forbids clearing
 on elapsed TIME, not on evidence the dependency is GONE. See §41, rows
-IDP-1…IDP-10, and `docs/operator/idp-metadata-availability.md`.
+IDP-1…IDP-11, and `docs/operator/idp-metadata-availability.md`.
 
 **2026-09-22 — CHAOS-70 sweep (the admin roster as a durability surface).**
 Written up as `CHAOS-66` and renumbered to `CHAOS-70` (§40) when main was merged
@@ -8746,6 +8746,96 @@ it is trying not to disturb; the honest trade is to take the extra CI cycle
 rather than hold a durable commit for it, because the container is ephemeral
 and the run is not.
 
+### Codex review round 19 — identity is (profile, KIND, source), and a superseded entry is unreachable rather than merely old
+
+**AN EPISODE KEY THAT OMITS THE DOCUMENT KIND DISAGREES WITH THE CACHE ABOUT
+WHAT A DOCUMENT IS (P2).** `internal/idpmeta` has keyed its cache
+`kind|profileID|source` since it was written, and `Kind`'s own comment records
+why — *"so one profile that somehow carries both cannot have them collide"*. The
+failure-episode key re-derived a NARROWER identity of `(profile, source)` alone,
+so a profile id reused across a SAML/OIDC type flip whose SAML `metadata_url`
+equals the OIDC well-known URL shared ONE episode between two genuinely
+different documents: the candidate's successful fetch cleared the LIVE profile's
+real outage episode, and a failed persist then left that profile authoritative
+and stale with its degradation clock restarted and its fire-once alert latch
+erased.
+
+**The trigger is contrived and saying so is part of the finding** —
+`/.well-known/openid-configuration` is an OIDC-specific path that no real SAML
+metadata URL ends in — so this is a defect of IDENTITY CONSISTENCY rather than a
+reachable outage. It is fixed anyway for the reason this sweep keeps
+re-learning: *when one layer decides what a value MEANS, every other layer asks
+that layer instead of re-deriving a rule of its own* (SEC-TOTP-1; rounds 6 and 7
+here).
+
+**The ARITY change is the safety argument, not incidental.** Rounds 6 and 7 each
+changed this key's VALUE and a writer that did not consult it drifted silently —
+twice. Carrying the identity as a new `idpDocRef` field in the SIGNATURE makes
+the COMPILER enumerate every call site instead of leaving the enumeration to
+whoever remembers, which is the protection those rounds lacked. The kind and
+source travel as ONE value for the same reason: they cannot be passed
+separately, and `idpRemoteDocumentRef` is the single derivation with
+`idpRemoteDocumentSource` a thin accessor over it, so the pair cannot drift.
+
+**A SUPERSEDED CACHE ENTRY IS UNREACHABLE, AND LEAVING IT BEHIND EVICTED LIVE
+PROFILES' FALLBACKS (P2).** `Put` only ever ADDED keys and the Store had no
+delete API at all, so every repoint leaked a key that `Get` can never read again
+— `Get` is keyed by the profile's CURRENT source. Those dead keys then drove
+`evictLocked`, which is global oldest-first and liveness-blind, so a profile that
+was still live and still serving could lose its ONLY fallback because a
+DIFFERENT profile had been repointed past the cap. That is the cache failing at
+precisely the job it exists for. `supersedeLocked` retires the other entries for
+the same `(profile, kind)` after the replacement is already on disk, which needs
+no liveness knowledge and bounds occupancy to one entry per live
+`(profile, kind)`.
+
+**The review's OTHER suggested remedy — teach eviction which keys belong to
+published profiles — is unsafe here and that is worth recording.** `Upsert` holds
+`r.mu.Lock()` across `compileIdPProfile` (register row IDP-10), which reaches
+`store.Put`, so a liveness callback from inside eviction into the registry would
+take `r.mu.RLock()` while the write lock is held: `sync.RWMutex` is not
+reentrant, so it self-deadlocks — the CHAOS-50 cluster-CA defect exactly. Of the
+two remedies offered, only one is available while IDP-10 stands.
+
+**THE FIX MADE AN EXISTING FIXTURE'S PREMISE UNREPRESENTABLE, WHICH IS THE
+INTERESTING PART.** `chaos71OverlapSetup` built its state by Upserting B then A
+on the recorded reasoning that *"B's cache entry survives — it is keyed by
+(profile, source)"*. That sentence described the accumulation being removed, so
+after the fix a profile holds at most one document per kind and the two-Upsert
+shape leaves A's entry and no B — three round-16 ownership gates then failed in
+their SETUP rather than on their claim. The gates are about episode OWNERSHIP,
+not about caching, so the fixture now writes B's document DIRECTLY through the
+store and every claim is preserved. *When a fix makes a fixture's premise
+unreachable, re-express the premise; do not weaken the gate that rests on it,
+and do not conclude the fix is wrong because a test encoded the old behaviour.*
+
+**AND ONE OF THIS ROUND'S OWN GATES WAS VACUOUS, CAUGHT BY ITS OWN MUTATION
+RUN.** The injectivity gate claimed the length-framing was load-bearing and
+PASSED against a key that left the kind UNFRAMED, because the corpus contained no
+pair that collides under concatenation — `("a","b:c")` and `("a:b","c")` both
+render `a:b:c`. The corpus now carries that pair and the mutation fails. *A gate
+whose claim is broader than its corpus is the same defect as a wall scoped to one
+of two symmetric paths, and the only thing that finds it is running the mutation
+you think is impossible.*
+
+A test-side error is recorded for the same reason: the mechanical transform that
+threaded the new identity through 45 call sites stamped SAML on every bare
+source, and three gates build OIDC profiles, so they seeded episodes production
+never touched. `chaos71Ref` now INFERS the kind from the source — sound rather
+than a guess, because an OIDC source is only ever produced by
+`oidcWellKnownURL` and always carries that suffix — while any gate needing a
+specific kind constructs its ref literally.
+
+Gates: `internal/idpmeta/idpmeta_test.go` (24) + `idp_metadata_chaos_test.go`
+(86). Four mutations verified failing the gate they target: supersession removed
+(the pre-fix shape), supersession unscoped from `(profile, kind)` (the control),
+the episode key reverted to `(profile, source)`, and the kind moved ahead of the
+profile id (which breaks the profile-sweep prefix `forgetIdPMetadataEpisode`
+depends on). RESIDUAL, recorded not closed: a DELETED profile's last entry still
+lingers, since closing it needs a `Forget(profileID)` the registry calls on
+delete — a new cross-layer mutation path into the commit code rounds 6-10
+repeatedly got wrong, so it is its own change.
+
 ### Codex review round 18 — a count and a serve are one question, and a lost race is an outcome
 
 **THE FALLBACK COUNT DID NOT ANSWER THE QUESTION ITS OWN HELP TEXT ASKS (P2).**
@@ -9589,6 +9679,7 @@ five were the only ones anybody had ever checked.
 | **IDP-7** | Neither fetch honours the metadata document's own `validUntil` / `cacheDuration` | **OPEN** — noted during this sweep; the 7-day ceiling bounds the exposure but does not implement the IdP's stated intent |
 | **IDP-9** | An OIDC `authorization_endpoint` whose address CANNOT BE DETERMINED (resolver outage, or the check's own budget spent) is admitted UNVERIFIED. That endpoint is handed to the user's BROWSER, so no dialer of ours ever re-checks it and `isSafeCaptiveRedirect` validates only shape; nothing re-compiles a LIVE provider, so a host unresolvable at compile time that later resolves private is a browser redirect into the internal network | **OPEN, REPORTED NOT FIXED — POSTURE.** Refusing on an unknown verdict is not free: it takes SSO down whenever THIS node's resolver cannot resolve the authorization host, even though the user's browser could, and it hands a resolver outage the power to reject a cached document — this sweep's own headline defect. So the trade is an owner's, not a sweep's. It is no longer SILENT: `culvert_idp_authz_endpoint_unverified_total` plus a rate-limited log line naming the profile. Two closing designs were considered and are recorded rather than half-built: (a) resolve the verdict when the document is ADMITTED to the cache — the network path, where DNS is by definition working — and carry it with the document, which needs a cache-schema change; (b) memoise the verdict on the provider and resolve it OFF the request path, failing closed until it answers. A synchronous re-check at redirect issuance was REJECTED: `CaptiveLoginURL` is on the proxy request path (`proxy_portal.go`), and a blocking resolve there is exactly the CHAOS-60/64 defect this review documents at length |
 | **IDP-10** | **`Upsert` holds `r.mu.Lock()` ACROSS `compileIdPProfile`, which reaches the network** — so an admin saving an IdP profile whose metadata endpoint is slow or blackholed stalls the PROXY DATA PLANE. `proxy.go:350` calls `idpRegistry.HasEnabledInteractiveProvider()` on the request path and that takes `r.mu.RLock()`, so every proxied request blocks for the whole fetch: up to `samlMetadataFetchBudget` (15 s) or `oidcDiscoveryFetchBudget` (10 s), from ONE click on Save. **Measured against the real registry**, not reasoned about: with the metadata response held, the request-path probe was still blocked after 3 s and returned only when the fetch completed. **The rule is already written down TWICE in this tree and applied to two of its three writers** — `idp_recovery.go`'s `publishRecompiled` compiles outside the lock with the reason in its comment, and `ReplaceAll` does the same (round 16 restates it) — so this is the SIXTH instance in this sweep of a rule held on one of two (here, two of three) symmetric paths, and the one it was not applied to is the one reachable from the LIVE admin API. It is CHAOS-57's theme (*the admin plane may never take down the data plane*) in the STALL form rather than the exit form. | **OPEN, REPORTED NOT FIXED — one concern per change.** Pre-existing: the network fetch inside the compile is defect (1) of this sweep and the lock scope predates it, so nothing here introduced it and CHAOS-71 does not widen it. Closing it means giving `Upsert` the `publishRecompiled` shape — compile outside `r.mu`, then re-check still-present / still-enabled / same-generation under the lock before publishing — which is a structural change to the one registry writer whose current correctness argument is *"it never releases the lock"*: rounds 6, 7, 9, 10 and 16 all lean on that, so it needs its own gates for each, not a round appended to this PR |
+| **IDP-11** | **A DELETED profile's last cached document is never removed.** Round 19 bounded cache occupancy to one entry per live `(profile, kind)` by retiring superseded sources on a successful `Put`, which closes the repoint accumulation that let dead keys evict a live profile's only fallback. What remains is the DELETE case: the Store has no `Forget(profileID)`, so a profile removed from the registry leaves its final entry behind, and `evictLocked` is still liveness-blind — so with more than `MaxEntries` (64) profiles having ever existed, a live profile's fallback can still be the oldest entry and be evicted | **OPEN, REPORTED NOT FIXED.** Far narrower than what round 19 closed: the bound moved from "one key per REPOINT, forever" to "one key per profile that has ever existed", so reaching it now needs 64 distinct profiles rather than 64 edits to one. Closing it means a `Forget(profileID)` the registry calls on delete — a NEW cross-layer mutation path into the commit code rounds 6, 7, 9, 10 and 16 each got wrong in turn, so it needs its own gates rather than a round appended here. **The eviction-side alternative is UNSAFE and must not be tried**: `Upsert` holds `r.mu.Lock()` across `compileIdPProfile` (row IDP-10), which reaches `store.Put`, so asking the registry which keys are live from inside eviction takes `r.mu.RLock()` under the write lock and self-deadlocks — the CHAOS-50 cluster-CA defect. Any fix here must pass liveness IN rather than call back OUT, or land after IDP-10 |
 | **IDP-8** | Two OIDC discovery endpoints — `userinfo_endpoint` and `introspection_endpoint` — are dialled with a bearer token and the client secret respectively without ever being validated, so a document that downgraded one to plain `http` would send credentials in cleartext (the SSRF-guarded dialer still bounds the destination, so this is a confidentiality issue, not an SSRF one) | **OPEN, REPORTED NOT FIXED** — found while verifying this sweep's own claim that the discovery endpoints were covered; refusing non-`https` for credential-bearing endpoints is a POSTURE change that breaks dev/self-signed deployments relying on `TLSSkipVerify` and belongs in its own change with its own gates, not folded into a resilience sweep's third review round |
 | **SUITE-1** | `TestSecReqID1_BareReqIDInDecisionLineIsSafeOnlyBecauseOfTheBound` asserts on a `POLICY_*` decision line but establishes no AUTH posture, and `handleRequest` authenticates before policy — so an order that configures a credential first refuses the request and emits no decision line. Its own vacuity guard (`Contains(line, "req_id=")`) is satisfied by the refusal line, so it reports health while testing nothing. 44 root tests mutate the global auth credentials with no restore, so the poisoning order is common, not a rare draw | **CLOSED on main by CHAOS-69 (#1446)**, with the same one-line fix this row proposed — `setupProxyTest(t)`, the repo's own helper for this flake class — reached independently. **It also corrects this row**: CHAOS-69 applied the fix to the SIBLING gate `TestSecReqID1_EndToEndLogAmplificationIsBounded` as well, which this row had assessed as unaffected on the reasoning that it asserts on byte VOLUME rather than on tokens. That reasoning was wrong — leaked credentials change which PATH the request takes, so the byte bound was being measured against a challenge rather than a proxied request. *A gate that drives the real `handleRequest` depends on every global that path reads, not only on the ones its assertion names.* |
 | **SUITE-2** | `internal/threatfeed`'s `TestBenchGate_CheckRequestURLBeatsLegacy` is a bare `fast >= legacy` timing ratio with no margin; under `-race` both arms ran ~6-14x slower and INVERTED (5881 vs 5141 ns/op against a documented 376 vs 887), failing with no regression present | **OPEN, REPORTED NOT FIXED** — the package already replaced its other ratio gate with a structural one for this exact reason; widening the bound enough to tolerate a 1.14x inversion would also admit a real 1.4x regression |
