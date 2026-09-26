@@ -151,6 +151,28 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   disagree, and an unusable incoming secret never counts as evidence that the
   key changed.
 
+- **The tracing-header bound is now proven over a socket, and one of its stated
+  exposures was not reachable (SEC-REQID-2).** Every SEC-REQID-1 gate drove
+  `httptest.NewRequest` + `Header.Set`, which installs a header value the wire
+  may not be able to deliver — the trap `bootstrap_host_injection_test.go`
+  already exists for, and the reason the Host-header bound carries an empirical
+  wall while these headers carried none. Measured against a real `net/http`
+  server: of 256 byte values, **224 are delivered into a header value verbatim
+  and 32 draw a 400 before the handler runs** — exactly `0x00`–`0x1F` minus
+  `TAB`, plus `0x7F` — because `textproto.ReadMIMEHeader` refuses them, and
+  `setupRequestTracing` has exactly one caller whose request always comes from
+  that parser. So `ESC`, `NUL` and `BEL` never reached a log line by any path,
+  and the claim that they did (in the code comment, this changelog, the operator
+  runbook and `CLAUDE.md`) came from measuring the function rather than the
+  wire; all four are corrected. The bound is **not** redundant for it: it is
+  load-bearing on 130 delivered byte values — `TAB`, `SPACE` and every byte
+  `0x80`–`0xFF` — and the length half is reachable in full. Seven new gates
+  drive the real `setupRequestTracing` behind a real listener and pin the
+  delivered/refused partition in both directions, so a future Go release that
+  widens what a header value may carry fails the build instead of quietly
+  widening what reaches the forensic log. No behaviour change: bound, charset,
+  counters and emitted bytes are untouched.
+
 - Client-supplied tracing headers reached the process log unbounded
   (SEC-REQID-1). `setupRequestTracing` runs on 100% of proxied traffic — the
   second statement in `handleRequest`, ahead of the connection limiter, the IP
@@ -162,9 +184,11 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   header, and the forwarded request. The only sanitisation was `strings.ReplaceAll`
   for CR and LF — the CWE-117 barrier, which correctly stops whole-record forgery
   but is not what `sanitizeLog` does, since `sanitizeLog` scrubs every byte below
-  `0x20` and `0x7F`. So `ESC`, `NUL`, `BEL`, `VT`, `FF` and `DEL` reached the
-  forensic log verbatim, and a space could inject extra `key=value` tokens into
-  the decision line's brace block. Nothing bounded the length at all: the proxy
+  `0x20` and `0x7F`. A space or a `TAB` could therefore inject extra `key=value`
+  tokens into the decision line's brace block, and any byte `0x80`–`0xFF` reached
+  the log unchecked. (Control characters were *not* among the reachable cases —
+  see the SEC-REQID-2 entry below, which corrects an earlier version of this
+  paragraph.) Nothing bounded the length at all: the proxy
   listener sets no `MaxHeaderBytes`, so net/http's 1 MiB default was the only
   ceiling, and eight requests carrying a 512 KiB request id wrote 4,194,968 bytes
   into the process log — the same amplification CHAOS-63 measured against the
