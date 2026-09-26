@@ -99,7 +99,7 @@ import (
 // `idna.ToASCII`, which SHRINKS it: measured against the real x/net/idna,
 // `é`×40 in four labels is 323 raw bytes and 187 A-label bytes — a perfectly
 // ordinary IDN that the first version of this bound refused with a 400. The
-// worst legitimate case measured is **899 raw bytes → 255 A-label bytes**. A
+// worst legitimate case measured is **883 raw bytes → 251 A-label bytes**. A
 // forward proxy that cannot reach international destinations is a customer
 // outage, so a raw-byte bound at the DNS limit is not a conservative choice, it
 // is a wrong one.
@@ -123,7 +123,7 @@ const maxDestAuthorityLen = 261
 // encoded code point (RFC 3492 §3), so a label encodes at most 59 code points,
 // each at most 4 UTF-8 bytes — at most 236 raw bytes per label. Packing a
 // 253-byte A-label authority with maximal labels gives ~940 raw bytes, and the
-// empirical maximum found by driving the real `idna.ToASCII` is **899**
+// empirical maximum found by driving the real `idna.ToASCII` is **883**
 // (pinned by TestChaos69_ControlRawCapExceedsMaximumIDNExpansion). 1024 clears
 // both with margin.
 //
@@ -136,7 +136,7 @@ const maxDestAuthorityLen = 261
 // refuses the shape an attacker actually wants (dot-dense ASCII does not shrink
 // under IDNA, so a 1 000-byte ASCII authority normalizes to 1 000 bytes and is
 // refused), leaving the realistic worst case at the 253-byte figure while the
-// 899-byte IDN goes through. Two tiers, because one cannot do both jobs.
+// 883-byte IDN goes through. Two tiers, because one cannot do both jobs.
 const maxRawDestAuthorityBytes = 1024
 
 // proxyOversizeHostRejected counts requests refused for an over-long
@@ -175,7 +175,7 @@ func rawAuthorityOversize(authority string) bool {
 // This is the bound that refuses the shape an attacker wants, and it must be
 // given the CANONICAL form: dot-dense ASCII does not shrink under IDNA, so a
 // 1 000-byte ASCII authority still measures 1 000 bytes here and is refused,
-// while an 899-byte IDN measures 255 and goes through.
+// while an 883-byte IDN measures 251 and goes through.
 func canonicalHostOversize(normHost string) bool {
 	return len(normHost) > maxDestHostLen
 }
@@ -340,7 +340,7 @@ func rejectOversizeUnnormalizableHost(w http.ResponseWriter, proto, clientIP, au
 // pre-cap has to be generous enough for IDN expansion (1 KiB), which on its own
 // still admits a 1 000-byte dot-dense ASCII authority costing ~1.3 ms. Measuring
 // the canonical form instead refuses exactly that, because ASCII does not shrink
-// under IDNA — while the 899-byte IDN it protects normalizes to 255 and passes.
+// under IDNA — while the 883-byte IDN it protects normalizes to 251 and passes.
 func rejectOversizeCanonicalHost(w http.ResponseWriter, proto, clientIP, normHost string) bool {
 	if !canonicalHostOversize(normHost) {
 		return false

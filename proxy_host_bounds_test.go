@@ -534,7 +534,7 @@ func TestChaos69_ControlLegitimateAuthorityShapesAreAccepted(t *testing.T) {
 		{"IDN with port", chaos66IDN(40, 4) + ":443"},
 		{"IDN, single label", chaos66IDN(40, 1) + ".example.com"},
 		// The worst legitimate expansion found by driving the real idna.ToASCII:
-		// 899 raw bytes normalizing to 255 A-label bytes.
+		// 883 raw bytes normalizing to 251 A-label bytes.
 		{"IDN, maximal expansion", chaos66MaxIDN(t)},
 	} {
 		if rawAuthorityOversize(tc.authority) {
