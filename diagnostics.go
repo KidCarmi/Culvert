@@ -656,8 +656,13 @@ func oversizeUsernameAction(inv adminUsernameInventory, totpOversize bool) strin
 		// counting it) until its roster entry is deleted as well.
 		// Settings hashes the password field as given (a blank one included),
 		// so the step must require a new password, not just a new name.
+		// SetAuth also OVERWRITES any existing roster entry of the chosen
+		// name (new hash, RoleAdmin), so the name must be unused — reusing
+		// one would reset that account's password and could elevate it.
 		action += "The oversize name includes the legacy single-user login, which Admin Users alone cannot change: " +
-			"set a login of at most 64 bytes under Settings (POST /api/settings) together with a new strong password in the same save " +
+			"set a login of at most 64 bytes that no existing Admin Users account already uses " +
+			"(Settings overwrites an existing account of that name, resetting its password and making it an admin) " +
+			"under Settings (POST /api/settings) together with a new strong password in the same save " +
 			"(Settings sets the password it is given — never leave the password blank), "
 		if inv.legacyMirrored && inv.legacyRole != "" && inv.legacyRole != RoleAdmin {
 			// VerifyUIUser grants the roster role first, so this login is

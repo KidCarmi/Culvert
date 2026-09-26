@@ -1680,8 +1680,13 @@ func TestApiDiagnostics_OversizeLegacyUsernameSurfacedOnContract(t *testing.T) {
 	// A legacy-only login gets no generic Admin Users clause, so the Settings
 	// step itself must state the 64-byte target: Settings enforces no length
 	// bound, and a merely "shorter" (e.g. 100-byte) name leaves the row warn.
-	if !strings.Contains(found.OperatorAction, "set a login of at most 64 bytes under Settings") {
+	if !strings.Contains(found.OperatorAction, "set a login of at most 64 bytes that") {
 		t.Errorf("admin_username_length operator_action = %q, want the 64-byte limit stated for the legacy Settings replacement", found.OperatorAction)
+	}
+	// SetAuth overwrites an existing roster entry of the same name (new
+	// password hash, RoleAdmin), so the replacement must be an unused name.
+	if !strings.Contains(found.OperatorAction, "that no existing Admin Users account already uses") {
+		t.Errorf("admin_username_length operator_action = %q, want the legacy replacement to require an unused login", found.OperatorAction)
 	}
 	if strings.Contains(found.Message, longName) {
 		t.Error("admin_username_length message should not echo the username itself")
