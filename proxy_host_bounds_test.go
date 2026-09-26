@@ -15,6 +15,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -1595,4 +1596,177 @@ func chaos69MutatesPolicyStore(call *ast.CallExpr) bool {
 		return true
 	}
 	return false
+}
+
+// ─── ROUND 6 — the mitigation must not be the amplifier (Codex P2, PR #1446) ──
+//
+// Two findings, one rule this file had already written down twice and applied to
+// the log LINE but not to the work around it.
+//
+// (a) The rate gate was a process-wide MUTEX, reached on the proxy path ahead of
+//     internal/connlimit, the IP filter and the rate limiter — all three sharded
+//     precisely because an unsharded lock on the request path is a throughput
+//     ceiling. Every rejection in the process serialised there, including the
+//     suppressed ones that are every rejection during a flood.
+//
+// (b) The two admin handlers passed `realClientIP(r)` as an ARGUMENT, and Go
+//     evaluates arguments eagerly — so behind a configured trusted proxy every
+//     suppressed rejection still joined and split the whole X-Forwarded-For
+//     header, one string header per comma, on an unthrottled GET.
+//
+// request_tracing_bounds.go had already been corrected for BOTH on the same
+// reasoning; CHAOS-69 simply did not inherit it. These gates are deliberately the
+// same shapes as that file's, so there is one dialect rather than two.
+
+// TestChaos69_LogGateTakesNoLock pins (a) STRUCTURALLY rather than by timing: a
+// return to a mutex-guarded gate fails on any hardware, at any load, with or
+// without -race. A scaling-ratio gate was not written, for the reason this repo
+// records everywhere else — a gate that can flake gets muted.
+func TestChaos69_LogGateTakesNoLock(t *testing.T) {
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "proxy_host_bounds.go", nil, 0)
+	if err != nil {
+		t.Fatalf("parse proxy_host_bounds.go: %v", err)
+	}
+	fn := chaos69FuncDecl(t, file, "noteOversizeHostLog")
+
+	sawCAS := false
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		switch chaos69CalleeName(call.Fun) {
+		case "Lock", "RLock", "Unlock", "RUnlock":
+			t.Errorf("noteOversizeHostLog takes a lock — this gate is reached on the proxy path AHEAD of "+
+				"connlimit, the IP filter and the rate limiter, all of which are sharded precisely because a "+
+				"process-wide lock there is a throughput ceiling (%s)", fset.Position(call.Pos()))
+		case "CompareAndSwap":
+			sawCAS = true
+		}
+		return true
+	})
+	// Not-vacuous: a gate that stopped arming the window at all would pass the
+	// no-lock assertion while logging on every rejection.
+	if !sawCAS {
+		t.Error("noteOversizeHostLog no longer arms the window with a CompareAndSwap — it must claim the window " +
+			"atomically, not merely avoid locking")
+	}
+}
+
+// TestChaos69_LogGateReArmsOnClockRollback pins the CHAOS-61 rule on the new
+// gate: a NEGATIVE age must fail toward still reporting, never toward silence.
+// Suppressing on a rollback would mute the operator for however far back the
+// clock went.
+func TestChaos69_LogGateReArmsOnClockRollback(t *testing.T) {
+	chaos66Isolate(t)
+
+	if !noteOversizeHostLog() {
+		t.Fatal("the first rejection in a fresh window must be allowed to log")
+	}
+	if noteOversizeHostLog() {
+		t.Fatal("the second rejection inside the window must be suppressed")
+	}
+	// Move the stored stamp into the FUTURE, i.e. the clock went backwards.
+	oversizeHostLogLast.Store(time.Now().Add(time.Hour).UnixNano())
+	if !noteOversizeHostLog() {
+		t.Error("a rejection after a clock rollback was suppressed — a negative age must re-arm, or a rollback " +
+			"silences the oversize-host signal for as long as the skew lasts")
+	}
+}
+
+// TestChaos69_AdminRejectionDoesNotWalkXFF pins (b). It measures ALLOCATED BYTES,
+// deliberately not allocation COUNT and not a timing ratio — the same instrument
+// and the same reason as TestSecReqID1_RejectionDoesNotWalkXFF: strings.Split
+// allocates ONE []string however many commas it finds, so the count is flat in hop
+// count and a count-based gate passes against the defect. The cost is in the
+// bytes, which are deterministic for a fixed workload and so cannot flake.
+//
+// The property is INDEPENDENCE: a suppressed rejection must allocate about the
+// same whether the request carries a 1-hop XFF or a 50,000-hop one.
+func TestChaos69_AdminRejectionDoesNotWalkXFF(t *testing.T) {
+	// A trusted proxy must be configured, or realClientIP returns the peer
+	// without ever consulting XFF and this gate passes vacuously.
+	if err := SetTrustedProxyCIDRs([]string{"192.0.2.0/24"}); err != nil {
+		t.Fatalf("SetTrustedProxyCIDRs: %v", err)
+	}
+	t.Cleanup(func() { _ = SetTrustedProxyCIDRs(nil) })
+
+	old := logger
+	logger = log.New(&safeDiscard{}, "", 0)
+	t.Cleanup(func() { logger = old })
+
+	oversize := strings.Repeat("a", maxRawDestAuthorityBytes+1)
+
+	const iters = 20
+	measureBytes := func(hops int) uint64 {
+		resetOversizeHostStateForTest()
+		xff := strings.TrimSuffix(strings.Repeat("203.0.113.9,", hops), ",")
+		build := func() *http.Request {
+			r := withRole(httptest.NewRequest(http.MethodGet,
+				"/api/url-categories/lookup?host="+oversize, http.NoBody), RoleViewer)
+			r.RemoteAddr = "192.0.2.10:4444" // inside the trusted CIDR
+			r.Header.Set("X-Forwarded-For", xff)
+			return r
+		}
+		// Prime the rate gate so every MEASURED call is suppressed — that is the
+		// flood path, and the one that must not walk the header. The XFF string and
+		// the requests are built outside the measurement so per-iteration
+		// construction costs the same in both arms.
+		apiURLCatLookup(httptest.NewRecorder(), build())
+		reqs := make([]*http.Request, iters)
+		for i := range reqs {
+			reqs[i] = build()
+		}
+		w := httptest.NewRecorder()
+		runtime.GC()
+		var before, after runtime.MemStats
+		runtime.ReadMemStats(&before)
+		for i := 0; i < iters; i++ {
+			apiURLCatLookup(w, reqs[i])
+		}
+		runtime.ReadMemStats(&after)
+		return (after.TotalAlloc - before.TotalAlloc) / iters
+	}
+
+	small := measureBytes(1)
+	large := measureBytes(50000)
+	t.Logf("suppressed admin rejection bytes/op: 1-hop XFF = %d, 50000-hop XFF = %d", small, large)
+
+	// Pre-fix the large arm carries ~16 bytes per hop (~800 KiB), orders of
+	// magnitude above the small arm rather than a few KiB above it.
+	if large > small+4096 {
+		t.Errorf("a suppressed admin rejection allocates %d bytes/op with a 50000-hop XFF vs %d with 1 hop — "+
+			"the client IP is being resolved per rejection instead of behind the log gate", large, small)
+	}
+}
+
+// TestChaos69_ControlRejectionLogStillNamesTheRealClient is the CONTROL for the
+// gate above. Deferring the resolution must not silently downgrade the log to the
+// PROXY's address: an operator hunting the source needs the client behind it, and
+// the cheapest way to pass an allocation gate is to stop calling realClientIP at
+// all.
+func TestChaos69_ControlRejectionLogStillNamesTheRealClient(t *testing.T) {
+	chaos66Isolate(t)
+	if err := SetTrustedProxyCIDRs([]string{"192.0.2.0/24"}); err != nil {
+		t.Fatalf("SetTrustedProxyCIDRs: %v", err)
+	}
+	t.Cleanup(func() { _ = SetTrustedProxyCIDRs(nil) })
+
+	buf := chaos66CaptureLog(t)
+
+	r := withRole(httptest.NewRequest(http.MethodGet,
+		"/api/url-categories/lookup?host="+strings.Repeat("a", maxRawDestAuthorityBytes+1), http.NoBody), RoleViewer)
+	r.RemoteAddr = "192.0.2.10:4444"
+	r.Header.Set("X-Forwarded-For", "198.51.100.77")
+	apiURLCatLookup(httptest.NewRecorder(), r)
+
+	got := buf.String()
+	if !strings.Contains(got, "198.51.100.77") {
+		t.Errorf("the rejection line does not name the real client behind the trusted proxy: %q", got)
+	}
+	if strings.Contains(got, "192.0.2.10") {
+		t.Errorf("the rejection line names the PROXY instead of the client — deferring the resolution must not "+
+			"downgrade what the operator sees: %q", got)
+	}
 }

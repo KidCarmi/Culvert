@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"net"
 	"net/http"
-	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -154,10 +153,19 @@ var proxyOversizeHostRejected atomic.Int64
 // write-amplification defect must not be one itself (the CHAOS-63 rule). Onset
 // is logged immediately, then at most one line per window, each naming the
 // cumulative count so the magnitude is never lost.
-var (
-	oversizeHostLogMu   sync.Mutex
-	oversizeHostLogLast time.Time
-)
+//
+// The gate is an ATOMIC STAMP, not a mutex, and that is not a micro-optimisation
+// (Codex P2, PR #1446 round 6). This gate is reached on the proxy path AHEAD of
+// internal/connlimit, the IP filter and the rate limiter — all three of which are
+// SHARDED precisely because an unsharded process-wide lock on the request path is
+// a throughput ceiling. A mutex here serialises every rejection in the process,
+// including the suppressed ones that are every rejection during a flood, and so
+// reintroduces that ceiling in front of the very limiters meant to bound the
+// flood. The CHAOS-63 precedent correctly uses a mutex because its login endpoint
+// sits BEHIND the 60/min API limiter; this one does not, and
+// request_tracing_bounds.go's tracingBoundsLogLast had already reached the same
+// conclusion for the same reason — CHAOS-69 simply failed to inherit it.
+var oversizeHostLogLast atomic.Int64
 
 const oversizeHostLogWindow = time.Minute
 
@@ -229,15 +237,25 @@ func unnormalizableHostOversize(authority string) bool {
 
 // noteOversizeHostLog reports whether this rejection may emit a log line,
 // arming the window when it does.
+//
+// The suppressed path — every path during a flood — is one atomic load and a
+// compare, taking no lock; see oversizeHostLogLast for why a mutex is wrong HERE.
+// The CAS makes exactly one racing caller the winner of each window; the losers
+// suppress, which is the same answer they would have got from a mutex.
+//
+// A clock that went BACKWARDS re-arms rather than suppressing (a negative delta
+// falls through to the CAS). Suppressing would silence the operator for however
+// far back the clock went, and the CHAOS-61 rule is that a negative age fails
+// toward the safe answer — here, still reporting.
 func noteOversizeHostLog() bool {
-	now := time.Now()
-	oversizeHostLogMu.Lock()
-	defer oversizeHostLogMu.Unlock()
-	if !oversizeHostLogLast.IsZero() && now.Sub(oversizeHostLogLast) < oversizeHostLogWindow {
-		return false
+	now := time.Now().UnixNano()
+	last := oversizeHostLogLast.Load()
+	if last != 0 {
+		if d := now - last; d >= 0 && d < int64(oversizeHostLogWindow) {
+			return false
+		}
 	}
-	oversizeHostLogLast = now
-	return true
+	return oversizeHostLogLast.CompareAndSwap(last, now)
 }
 
 // noteOversizeHostRejection charges the counter and emits the rate-limited log
@@ -255,17 +273,47 @@ func noteOversizeHostLog() bool {
 func noteOversizeHostRejection(proto, clientIP string, n int, tier string) {
 	proxyOversizeHostRejected.Add(1)
 	if noteOversizeHostLog() {
-		// Every tier except the raw pre-cap is bounded by the DNS limit — the
-		// canonical one on the normalized host, the unnormalizable fallback on
-		// the raw bare host.
-		limit := maxRawDestAuthorityBytes
-		if tier != "raw" {
-			limit = maxDestHostLen
-		}
-		logger.Printf("OVERSIZE_HOST %s %s {tier=%s bytes=%d limit=%d total=%d action=block}",
-			sanitizeLog(proto), sanitizeLog(clientIP), sanitizeLog(tier), n, limit,
-			proxyOversizeHostRejected.Load())
+		logOversizeHostRejection(proto, clientIP, n, tier)
 	}
+}
+
+// noteOversizeHostRejectionReq is the entry point for callers that do NOT
+// already hold a resolved client address — the two admin handlers, which take
+// their host from a query string or a JSON body.
+//
+// It exists because function arguments are evaluated EAGERLY, so
+// `noteOversizeHostRejection(proto, realClientIP(r), …)` resolved the client on
+// EVERY rejection, including the suppressed ones (Codex P2, PR #1446 round 6).
+// Behind a configured trusted proxy — Culvert's ordinary deployment behind a load
+// balancer — realClientIP joins every X-Forwarded-For field line into one string
+// and splits it on every comma, so a near-1 MiB XFF costs one string header per
+// comma PER REJECTION on an unthrottled GET. That is the amplifier this bound
+// exists to prevent, moved one layer out; request_tracing_bounds.go's
+// noteRejectedRequestID had already been corrected the same way.
+//
+// The COUNTER is still charged before anything else, so the round-3 rule holds:
+// charge before you reply, on every path.
+func noteOversizeHostRejectionReq(proto string, r *http.Request, n int, tier string) {
+	proxyOversizeHostRejected.Add(1)
+	if noteOversizeHostLog() {
+		logOversizeHostRejection(proto, realClientIP(r), n, tier)
+	}
+}
+
+// logOversizeHostRejection emits the line both entry points share. It runs ONLY
+// behind the rate gate, so everything it needs may be computed by its caller at
+// that point and never before.
+func logOversizeHostRejection(proto, clientIP string, n int, tier string) {
+	// Every tier except the raw pre-cap is bounded by the DNS limit — the
+	// canonical one on the normalized host, the unnormalizable fallback on the
+	// raw bare host.
+	limit := maxRawDestAuthorityBytes
+	if tier != "raw" {
+		limit = maxDestHostLen
+	}
+	logger.Printf("OVERSIZE_HOST %s %s {tier=%s bytes=%d limit=%d total=%d action=block}",
+		sanitizeLog(proto), sanitizeLog(clientIP), sanitizeLog(tier), n, limit,
+		proxyOversizeHostRejected.Load())
 }
 
 // rejectOversizeDestHost refuses an HTTP/CONNECT/WebSocket request whose RAW
@@ -356,7 +404,5 @@ func rejectOversizeCanonicalHost(w http.ResponseWriter, proto, clientIP, normHos
 // globals, so a test that asserts on either must isolate them.
 func resetOversizeHostStateForTest() {
 	proxyOversizeHostRejected.Store(0)
-	oversizeHostLogMu.Lock()
-	oversizeHostLogLast = time.Time{}
-	oversizeHostLogMu.Unlock()
+	oversizeHostLogLast.Store(0)
 }

@@ -1414,7 +1414,7 @@ func apiURLCatLookup(w http.ResponseWriter, r *http.Request) {
 	// admin-plane goroutine for minutes with one GET. Bounded through the same
 	// predicate the data path uses. See proxy_host_bounds.go.
 	if rawAuthorityOversize(host) {
-		noteOversizeHostRejection("api/url-lookup", realClientIP(r), len(host), "raw")
+		noteOversizeHostRejectionReq("api/url-lookup", r, len(host), "raw")
 		http.Error(w, fmt.Sprintf("host must be at most %d bytes", maxRawDestAuthorityBytes), http.StatusBadRequest)
 		return
 	}
@@ -1427,14 +1427,14 @@ func apiURLCatLookup(w http.ResponseWriter, r *http.Request) {
 	// endpoint's existing business, and this gate decides length only.
 	if normHost, ok := canonicalDestHost(host); ok {
 		if canonicalHostOversize(normHost) {
-			noteOversizeHostRejection("api/url-lookup", realClientIP(r), len(normHost), "canonical")
+			noteOversizeHostRejectionReq("api/url-lookup", r, len(normHost), "canonical")
 			http.Error(w, fmt.Sprintf("host must be at most %d bytes", maxDestHostLen), http.StatusBadRequest)
 			return
 		}
 	} else if unnormalizableHostOversize(host) {
 		// No canonical form ⇒ bound the raw bare host, or this band reaches
 		// the category fusion at full length (Codex P2, PR #1446).
-		noteOversizeHostRejection("api/url-lookup", realClientIP(r), len(bareDestHost(host)), "unnormalizable")
+		noteOversizeHostRejectionReq("api/url-lookup", r, len(bareDestHost(host)), "unnormalizable")
 		http.Error(w, fmt.Sprintf("host must be at most %d bytes", maxDestHostLen), http.StatusBadRequest)
 		return
 	}
@@ -2818,7 +2818,7 @@ func apiPolicyTest(w http.ResponseWriter, r *http.Request) {
 	// with a caller-supplied host — the same quadratic fusion the proxy data
 	// path bounds. Same predicate, same reason (see proxy_host_bounds.go).
 	if rawAuthorityOversize(body.Host) {
-		noteOversizeHostRejection("api/policy-test", realClientIP(r), len(body.Host), "raw")
+		noteOversizeHostRejectionReq("api/policy-test", r, len(body.Host), "raw")
 		http.Error(w, fmt.Sprintf("host must be at most %d bytes", maxRawDestAuthorityBytes), http.StatusBadRequest)
 		return
 	}
@@ -2831,14 +2831,14 @@ func apiPolicyTest(w http.ResponseWriter, r *http.Request) {
 	// endpoint's existing business, and this gate decides length only.
 	if normHost, ok := canonicalDestHost(body.Host); ok {
 		if canonicalHostOversize(normHost) {
-			noteOversizeHostRejection("api/policy-test", realClientIP(r), len(normHost), "canonical")
+			noteOversizeHostRejectionReq("api/policy-test", r, len(normHost), "canonical")
 			http.Error(w, fmt.Sprintf("host must be at most %d bytes", maxDestHostLen), http.StatusBadRequest)
 			return
 		}
 	} else if unnormalizableHostOversize(body.Host) {
 		// No canonical form ⇒ bound the raw bare host, or this band reaches
 		// the category fusion at full length (Codex P2, PR #1446).
-		noteOversizeHostRejection("api/policy-test", realClientIP(r), len(bareDestHost(body.Host)), "unnormalizable")
+		noteOversizeHostRejectionReq("api/policy-test", r, len(bareDestHost(body.Host)), "unnormalizable")
 		http.Error(w, fmt.Sprintf("host must be at most %d bytes", maxDestHostLen), http.StatusBadRequest)
 		return
 	}
