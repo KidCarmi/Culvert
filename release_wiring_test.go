@@ -385,6 +385,88 @@ func TestLoadReleaseManagement_SigstoreWarnSurfacedOnAPI(t *testing.T) {
 	}
 }
 
+// TestLoadReleaseManagement_SigstoreSourceFieldsSurfacedOnAPI proves the
+// positive counterpart to the warning above: when the Sigstore scheme is
+// ACTIVE, GET /api/releases says whether the enforcing identity/root is the
+// baked default or an operator override, so a correctly-configured override
+// doesn't look identical to the baked default on the API/GUI.
+func TestLoadReleaseManagement_SigstoreSourceFieldsSurfacedOnAPI(t *testing.T) {
+	t.Cleanup(func() { setReleaseManager(nil) })
+	setReleaseManager(nil)
+
+	loadReleaseManagement(releaseStartupConfig{
+		proxyRepo: defaultReleaseProxyRepo, catalogDir: "/tmp/nonexistent-catalog", maintURL: "",
+		verifyMode:             VerifyPermissive,
+		sigstoreActive:         true,
+		sigstoreIdentitySource: sigstoreSourceOverride,
+		sigstoreRootSource:     sigstoreSourceDefault,
+	})
+	rm := currentReleaseManager()
+	if rm == nil {
+		t.Fatal("valid config must publish a release manager")
+	}
+	if rm.sigstoreIdentitySource != sigstoreSourceOverride || rm.sigstoreRootSource != sigstoreSourceDefault {
+		t.Fatalf("releaseManager sigstore source fields = (%q, %q), want (%q, %q)",
+			rm.sigstoreIdentitySource, rm.sigstoreRootSource, sigstoreSourceOverride, sigstoreSourceDefault)
+	}
+
+	rec := httptest.NewRecorder()
+	apiReleases(rec, releaseReq(http.MethodGet, "/api/releases", nil, RoleViewer))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /api/releases = %d %s; want 200", rec.Code, rec.Body.String())
+	}
+	body := decodeBody(t, rec)
+	if got := body["sigstore_identity_source"]; got != sigstoreSourceOverride {
+		t.Fatalf("GET /api/releases sigstore_identity_source = %v, want %q", got, sigstoreSourceOverride)
+	}
+	if got := body["sigstore_root_source"]; got != sigstoreSourceDefault {
+		t.Fatalf("GET /api/releases sigstore_root_source = %v, want %q", got, sigstoreSourceDefault)
+	}
+	if _, present := body["sigstore_warn"]; present {
+		t.Fatal("sigstore_warn must be absent when the scheme is active (no misconfiguration)")
+	}
+}
+
+// TestResolveReleaseStartupConfigFrom_SigstoreSourcesWithheldWhenVerifyDisabled
+// covers a Codex review finding (PR #1457): in VerifyDisabled, verifyIndexSignature
+// (release_catalog_verify.go) returns before ever consulting trust.sigstore, so
+// NOTHING is enforcing the resolved Sigstore trust material — reporting a
+// resolved source in that mode would claim enforcement that isn't happening,
+// contradicting the whole point of these fields (positive confirmation of what
+// is ACTUALLY enforcing). The baked root is active by default (P2b-2a), so this
+// is reachable with no other env set.
+func TestResolveReleaseStartupConfigFrom_SigstoreSourcesWithheldWhenVerifyDisabled(t *testing.T) {
+	env := map[string]string{envReleaseCatalogVerify: "disabled"}
+	cfg := resolveReleaseStartupConfigFrom(func(k string) string { return env[k] })
+	if cfg.verifyMode != VerifyDisabled {
+		t.Fatalf("verifyMode = %v, want VerifyDisabled", cfg.verifyMode)
+	}
+	if !cfg.sigstoreActive {
+		t.Fatal("sigstoreActive should still be true (the baked root resolved); only the source fields are withheld")
+	}
+	if cfg.sigstoreIdentitySource != "" || cfg.sigstoreRootSource != "" {
+		t.Fatalf("sigstore source fields must be withheld in VerifyDisabled; got identitySource=%q rootSource=%q",
+			cfg.sigstoreIdentitySource, cfg.sigstoreRootSource)
+	}
+}
+
+// TestResolveReleaseStartupConfigFrom_SigstoreSourcesReportedWhenVerifyPermissive
+// is the control: VerifyPermissive still consults trust.sigstore for a PRESENT
+// signature (only an unsigned catalog is exempted), so the source fields stay
+// reported there — the withholding in the test above is specific to
+// VerifyDisabled's unconditional short-circuit, not to break-glass modes generally.
+func TestResolveReleaseStartupConfigFrom_SigstoreSourcesReportedWhenVerifyPermissive(t *testing.T) {
+	env := map[string]string{envReleaseCatalogVerify: "permissive"}
+	cfg := resolveReleaseStartupConfigFrom(func(k string) string { return env[k] })
+	if cfg.verifyMode != VerifyPermissive {
+		t.Fatalf("verifyMode = %v, want VerifyPermissive", cfg.verifyMode)
+	}
+	if cfg.sigstoreIdentitySource != sigstoreSourceDefault || cfg.sigstoreRootSource != sigstoreSourceDefault {
+		t.Fatalf("sigstore source fields should still be reported in VerifyPermissive; got identitySource=%q rootSource=%q",
+			cfg.sigstoreIdentitySource, cfg.sigstoreRootSource)
+	}
+}
+
 // TestLoadReleaseManagement_SigstoreWarnSurfacedWhenTrustFails covers the case
 // the warning actually exists for: enforce mode with no ed25519 roots and an
 // inactive Sigstore scheme (a custom identity set without a trusted root). The
