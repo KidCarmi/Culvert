@@ -420,7 +420,9 @@ func apiAuthChangePassword(w http.ResponseWriter, r *http.Request) {
 	if role == "" {
 		role = RoleAdmin // legacy single-user fallback
 	}
-	if err := cfg.SetUIUser(username, body.NewPass, role); err != nil {
+	// Self-service: keep the account's role (and any persisted raw role) —
+	// a password change is not a role assignment (SEC-RBAC-ROLE-1).
+	if err := cfg.ChangeUIUserPassword(username, body.NewPass, role); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}

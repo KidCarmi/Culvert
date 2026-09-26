@@ -507,8 +507,9 @@ func TestRosterLoad_ClampIsNeverPersisted(t *testing.T) {
 	if got := savedRole(t, path); got != "auditor" {
 		t.Fatalf("plain save persisted role %q, want the original %q — the clamp overwrote a newer build's assignment", got, "auditor")
 	}
-	// Password change keeps the effective role, so the persisted role survives.
-	if err := c.SetUIUser("bob", "N3wSecret!pass", RoleViewer); err != nil {
+	// A self-service password change is not a role assignment, so the
+	// persisted role survives.
+	if err := c.ChangeUIUserPassword("bob", "N3wSecret!pass", RoleAdmin); err != nil {
 		t.Fatalf("password change: %v", err)
 	}
 	if err := c.SaveUIUsersFile(); err != nil {
@@ -600,14 +601,14 @@ func TestRosterLoad_PasswordChangeKeepsPersistedRoleAndTOTP(t *testing.T) {
 	if err := c.LoadUIUsersFile(); err != nil {
 		t.Fatalf("load: %v", err)
 	}
-	const secret = "JBSWY3DPEHPK3PXP"
+	const secret = "JBSWY3DPEHPK3PXP" // #nosec G101 -- RFC 6238 example TOTP seed, test fixture
 	if !c.SetTOTPSecret("bob", secret, []string{"code-one"}) {
 		t.Fatal("precondition: enrol TOTP")
 	}
 	if !c.SetTOTPLastCounter("bob", 42) {
 		t.Fatal("precondition: set counter")
 	}
-	if err := c.SetUIUser("bob", "N3wSecret!pass", RoleViewer); err != nil {
+	if err := c.ChangeUIUserPassword("bob", "N3wSecret!pass", RoleAdmin); err != nil {
 		t.Fatalf("password change: %v", err)
 	}
 	if got := c.GetTOTPSecret("bob"); got != secret {
@@ -621,5 +622,28 @@ func TestRosterLoad_PasswordChangeKeepsPersistedRoleAndTOTP(t *testing.T) {
 	}
 	if got := savedRole(t, path); got != "auditor" {
 		t.Fatalf("password change persisted role %q, want %q", got, "auditor")
+	}
+}
+
+// DEFECT GATE (Codex review). The admin user editor sends password AND role
+// in one POST /api/auth/users request; confirming the clamped "viewer" while
+// also setting a password is an explicit assignment and must replace the
+// preserved raw role, or the unknown role is written back and restored on
+// upgrade although the UI reported the repair as done.
+func TestRosterLoad_SameRoleReassignmentWithPasswordReplacesPersistedRole(t *testing.T) {
+	path, _ := seedRoster(t, "auditor")
+	c := &Config{cache: authCacheStore{entries: map[string]*authCacheEntry{}}}
+	c.SetUIUsersFile(path)
+	if err := c.LoadUIUsersFile(); err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if err := c.SetUIUser("bob", "N3wSecret!pass", RoleViewer); err != nil {
+		t.Fatalf("reassign with password: %v", err)
+	}
+	if err := c.SaveUIUsersFile(); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	if got := savedRole(t, path); got != string(RoleViewer) {
+		t.Fatalf("admin edit (password + same role) persisted %q, want %q", got, RoleViewer)
 	}
 }

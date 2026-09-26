@@ -1318,15 +1318,14 @@ func (c *Config) SetUIUser(username, password string, role UIRole) error {
 		// passHash after releasing it, so an in-place credential write would be
 		// a data race on the authentication hot path. De-enrolment stays the
 		// job of the explicit ClearTOTP primitive.
-		next := newUIAdminUserPreservingTOTP(existing, hash, role)
-		if existing != nil && role == existing.role {
-			// SEC-RBAC-ROLE-1: effective role unchanged (e.g. a password
-			// change): keep the persisted role a newer build assigned — see
-			// persistedRole. The TOTP constructor deliberately does not carry
-			// it, because SetAuth's explicit admin assignment must replace it.
-			next.persistedRole = existing.persistedRole
-		}
-		c.uiUsers[username] = next
+		//
+		// SEC-RBAC-ROLE-1: SetUIUser is an EXPLICIT role assignment (the admin
+		// user editor, --reset-password), so the persisted raw role a newer
+		// build assigned is always replaced — including when the requested
+		// role equals the clamped effective role and a password is supplied in
+		// the same request. The self-service password change, which must keep
+		// it, goes through ChangeUIUserPassword instead.
+		c.uiUsers[username] = newUIAdminUserPreservingTOTP(existing, hash, role)
 	} else if existing != nil {
 		// A password-empty call IS an explicit role assignment — even when it
 		// names the role the clamp already produced (an admin confirming
@@ -1337,6 +1336,42 @@ func (c *Config) SetUIUser(username, password string, role UIRole) error {
 	} else {
 		return fmt.Errorf("password is required to create a new user")
 	}
+	return nil
+}
+
+// ChangeUIUserPassword is the SELF-SERVICE credential write (POST
+// /api/auth/change-password): it replaces only the password hash, keeping the
+// account's effective role, its TOTP enrolment and — SEC-RBAC-ROLE-1 — the
+// persisted raw role a newer build assigned, so a password change on a
+// downgraded build never destroys that assignment. A password change is not a
+// role assignment. fallbackRole is used only when the account is absent from
+// the roster (the legacy single-user path), which creates it.
+func (c *Config) ChangeUIUserPassword(username, password string, fallbackRole UIRole) error {
+	if password == "" {
+		return fmt.Errorf("password is required")
+	}
+	if err := validatePasswordComplexity(password); err != nil {
+		return err
+	}
+	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	if err != nil {
+		return err
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.uiUsers == nil {
+		c.uiUsers = map[string]*uiAdminUser{}
+	}
+	existing := c.uiUsers[username]
+	role := fallbackRole
+	if existing != nil {
+		role = existing.role
+	}
+	next := newUIAdminUserPreservingTOTP(existing, hash, role)
+	if existing != nil {
+		next.persistedRole = existing.persistedRole
+	}
+	c.uiUsers[username] = next
 	return nil
 }
 
