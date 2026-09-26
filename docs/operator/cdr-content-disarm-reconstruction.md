@@ -156,9 +156,16 @@ Two ways to turn CDR on, and either one is enough — you do not need both:
    disable CDR durably, remove `-cdr-enabled` / `cdr.enabled: true` from the
    static config as well as toggling it off at runtime.
 
-The enrolled-instance registry (names, endpoints, paths, health/breaker
-state — **not** credential material) is tracked at
-`<dataDir>/cdr_instances.json`; CDR policy rules are tracked at
+The enrolled-instance registry (names, endpoints, paths, and the last-known
+`Version`/`LastHealth` reported by a poll — **not** credential material) is
+tracked at `<dataDir>/cdr_instances.json`. Circuit-breaker state (`cbState`,
+`cbConsecFails`, `cbTotalOpens`, `cbTotalTrips`) is **not** part of this
+file: `CDREnrolledInstance` carries no breaker fields, and `GET
+/api/cdr/instances` merges that state in live from the in-memory
+`cdrPool` at request time. A restart therefore always starts every
+instance with a fresh, closed breaker regardless of what state it was in
+before the restart — don't treat `cdr_instances.json` as a breaker-state
+incident-recovery record. CDR policy rules are tracked at
 `<dataDir>/cdr_policies.json`; enrollment recovery state (identifiable
 unknown-outcome receipts) is tracked separately at
 `<dataDir>/cdr_enroll_receipts.json`. All three are loaded unconditionally
@@ -222,13 +229,25 @@ Two distinct gates exist, and only the second one consults `cdr.fail_mode`:
    |---|---|---|
    | Sluice unreachable mid-call / times out / returns `ERROR` | Original file passes through unchanged; `CDR_ERROR` request-log event + log line; `culvert_cdr_fail_open_total` | Delivery refused (block page); `culvert_cdr_fail_closed_total` |
    | Sluice returns `BLOCKED` (file is unsalvageable) | Delivery refused (block page) — **always**, regardless of `fail_mode` | same |
-   | A panic anywhere in the CDR call path | Delivery refused (block page) — **always fail-closed**, regardless of `fail_mode` (`culvert_cdr_panics_total`) | same |
+   | A panic recovered inside `safeCDRSanitize` (the RPC call + result classification) | Delivery refused (block page) — **always fail-closed**, regardless of `fail_mode` (`culvert_cdr_panics_total`) | same |
    | File exceeds `cdr.max_file_size_mb` | Skipped client-side before any bytes reach Sluice (`culvert_cdr_oversize_skipped_total`) — original file continues down the pipeline unsanitized | same |
 
    `fail_mode` only governs *transport/availability* failures reached this
-   way. A `BLOCKED` verdict or an internal panic is never passed through, no
-   matter how `fail_mode` is set — those are content decisions, not
-   availability ones.
+   way. A `BLOCKED` verdict or a panic recovered inside `safeCDRSanitize` is
+   never passed through, no matter how `fail_mode` is set — those are
+   content decisions, not availability ones.
+
+   **The fail-closed panic guarantee is scoped to `safeCDRSanitize` only,
+   not to "the CDR call path" as a whole.** `safeCDRSanitize` is the one
+   function wrapped by the deferred `recover()` that produces `cdrBlock`.
+   Its caller, `runCDRStage`, calls `cdrActiveClient()` *before* entering
+   that wrapper, and after it returns still runs terminal metrics
+   (`recordCDRTerminal`, `recordThreatDetections`), request logging
+   (`recordRequest`, the `CDR_BLOCKED`/`CDR_SANITIZED`/`CDR_ERROR` log
+   lines), and response handling (`scanBlockConn` on the block branch). A
+   panic in any of that surrounding code is **not** covered by this
+   guarantee and escapes without producing a `cdrBlock` outcome or the
+   block page described here.
 
 **`cdr.max_file_size_mb` is not a whole-file guarantee, because CDR never
 sees the whole file for a large download in the first place.** On the
