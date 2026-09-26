@@ -599,6 +599,44 @@ func (r *RevocationList) LoadRevocations() error {
 		// the evidence the quarantine exists to preserve.
 		return fmt.Errorf("%w: %v", ErrRevocationsCorrupt, err)
 	}
+	if entries == nil {
+		// Parsed fine, and still not a revocation document: the top-level value
+		// was the JSON literal `null`. encoding/json accepts it into a slice
+		// WITHOUT error and leaves the slice nil, so it used to take the loaded
+		// branch below — merging nothing, reporting durable, and then letting
+		// probePersistPath rewrite the file as `[]`. That is the same silent
+		// acceptance this sweep exists to close (defect 4), one shape over, and
+		// the boot probe made it worse: before it, the anomaly survived on disk
+		// until some later logout overwrote it and an operator could still see
+		// it; now boot erases it every time.
+		//
+		// `entries == nil` is an EXACT discriminator here and not a heuristic:
+		// after a successful unmarshal into a slice, only `null` leaves it nil.
+		// An empty array yields a non-nil zero-length slice, and every other
+		// top-level value (object, string, number, empty file) already failed
+		// above with a type or syntax error.
+		//
+		// Quarantining is safe because this code cannot produce `null`:
+		// ExportRevocations has allocated with make([]RevocationEntry, 0, …)
+		// since it first landed (dc3921a), so an empty list is written as `[]`.
+		// A `null` file therefore never came from a Culvert binary, and no
+		// appliance's own file can be quarantined by this branch.
+		//
+		// Entry-level validation is deliberately NOT done here. Rejecting the
+		// whole document over one malformed entry quarantines it, and a
+		// quarantine boots with an EMPTY list — so it would drop every GOOD
+		// revocation in that file to punish a bad one, which is the fail-OPEN
+		// direction this file must never err in. The one entry shape that could
+		// be argued for, an empty Token, is inert: it lands as tokens[""], which
+		// matches no real cookie payload, and it cannot collide in
+		// MergedExcluding's Token-keyed dedup with a user revocation, because
+		// those always carry the `user:` prefix (the §38 constraint 2 hazard is
+		// an empty token STANDING IN FOR a user entry, which ExportRevocations
+		// cannot emit). It expires on its own.
+		//
+		// Reported by Codex on PR #1437 as a P1.
+		return fmt.Errorf("%w: top-level value is null, not an array", ErrRevocationsCorrupt)
+	}
 	added := r.MergeRevocations(entries)
 	if added > 0 {
 		obs.Printf("Session: loaded %d revocations from disk", added)

@@ -856,3 +856,95 @@ func TestChaos68_ProbeDoesNotDropLoadedRevocations(t *testing.T) {
 		t.Fatalf("the boot probe rewrote the file with %d entries, want 2: revocations on disk were destroyed at startup", len(after))
 	}
 }
+
+// DEFECT GATE (Codex P1, PR #1437). `null` is valid JSON and encoding/json
+// accepts it into a slice WITHOUT error, leaving the slice nil — so before this
+// fix a revocations file containing `null` took the LOADED branch: it merged
+// nothing, reported durable, and then let probePersistPath rewrite it as `[]`.
+// Silent acceptance of a corruption shape is defect 4 of this sweep one shape
+// over, and the boot probe made it worse than it was: the anomaly used to
+// survive on disk until some later logout overwrote it, and now boot erases it
+// every time.
+//
+// Verified failing against the pre-fix body (no `entries == nil` branch): the
+// load returned nil and the file came back as `[]`.
+func TestChaos68_NullDocumentIsCorruptNotEmpty(t *testing.T) {
+	for _, seed := range []string{"null", "  null\n"} {
+		t.Run(strings.TrimSpace(seed), func(t *testing.T) {
+			path := chaosRevocationsPath(t)
+			if err := os.WriteFile(path, []byte(seed), 0o600); err != nil {
+				t.Fatalf("write seed: %v", err)
+			}
+
+			ok, failed := probeObservations(t)
+			err := NewRevocationList().LoadRevocations()
+			if !errors.Is(err, ErrRevocationsCorrupt) {
+				t.Fatalf("err = %v, want ErrRevocationsCorrupt: a `null` document is not an empty revocation list", err)
+			}
+			if *ok+*failed != 0 {
+				t.Errorf("a null file was probed (%d ok, %d failed): the probe would erase the anomaly before the caller can quarantine it", *ok, *failed)
+			}
+			got, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("read back: %v", err)
+			}
+			if string(got) != seed {
+				t.Errorf("the null file was rewritten before quarantine: got %q, want %q", got, seed)
+			}
+		})
+	}
+}
+
+// CONTROL, and the one that makes the fix above safe to ship. An EMPTY list is
+// what this code writes on any appliance holding no revocations
+// (ExportRevocations allocates with make(…, 0, …), so it marshals to `[]`), and
+// the cheapest wrong way to reject `null` is to reject "no entries" — which
+// would quarantine that perfectly normal file, boot with an empty list, write
+// `[]` again, and quarantine it again on the NEXT boot: an unbounded quarantine
+// loop, on every default appliance, caused by the fix for a file shape Culvert
+// cannot even produce.
+//
+// Verified failing against `if len(entries) == 0` in place of `entries == nil`.
+func TestChaos68_EmptyArrayIsNotCorrupt(t *testing.T) {
+	path := chaosRevocationsPath(t)
+	if err := os.WriteFile(path, []byte(`[]`), 0o600); err != nil {
+		t.Fatalf("write seed: %v", err)
+	}
+
+	ok, failed := probeObservations(t)
+	if err := NewRevocationList().LoadRevocations(); err != nil {
+		t.Fatalf("an empty array is a healthy revocation document, got err = %v", err)
+	}
+	if *ok == 0 {
+		t.Errorf("an empty but healthy file was not probed (%d ok, %d failed): its durability is still unproven", *ok, *failed)
+	}
+}
+
+// CONTROL. The cheapest way to pass every corruption gate is to reject
+// everything, which would quarantine real revocations and resurrect exactly the
+// sessions this plane exists to withdraw.
+func TestChaos68_PopulatedArrayStillLoadsAfterNullRejection(t *testing.T) {
+	path := chaosRevocationsPath(t)
+	exp := time.Now().Add(time.Hour)
+	seed, err := json.Marshal([]RevocationEntry{
+		{Token: "tok-still-loads", Expiry: exp.Unix()},
+		{Token: userRevocationTokenPrefix + "alice", Expiry: exp.Unix(), User: "alice"},
+	})
+	if err != nil {
+		t.Fatalf("marshal seed: %v", err)
+	}
+	if err := os.WriteFile(path, seed, 0o600); err != nil {
+		t.Fatalf("write seed: %v", err)
+	}
+
+	rl := NewRevocationList()
+	if err := rl.LoadRevocations(); err != nil {
+		t.Fatalf("LoadRevocations: %v", err)
+	}
+	if !rl.IsRevoked("tok-still-loads") {
+		t.Error("token revocation was lost")
+	}
+	if !rl.IsUserRevoked("alice") {
+		t.Error("user revocation was lost")
+	}
+}

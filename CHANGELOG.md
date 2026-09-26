@@ -25,9 +25,11 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   booted the node with an empty list behind one log line, after which the next
   save overwrote the evidence. Both revocation kinds now reach disk and the
   fleet, the Control Plane participates in both directions, and a corrupt file
-  is quarantined through the existing `state_file_corrupt` path. The persisted
-  document remains a JSON array so an older binary still parses the token
-  revocations it understands.
+  is quarantined through the existing `state_file_corrupt` path — including a
+  document whose top-level value is the JSON literal `null`, which parses
+  without error into an empty list and so used to be accepted silently. The
+  persisted document remains a JSON array so an older binary still parses the
+  token revocations it understands.
 
   Revocation persistence remains opt-in (`-revocations-file`) and is not
   changed here, but it is no longer silent: a new `session_revocation`
