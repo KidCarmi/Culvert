@@ -1514,34 +1514,15 @@ func TestChaos69_WallEveryGateThatMutatesPolicyRestoresIt(t *testing.T) {
 		if !ok || fn.Body == nil || !strings.HasPrefix(fn.Name.Name, "TestChaos69_") {
 			continue
 		}
-		var mutates, restores bool
-		ast.Inspect(fn.Body, func(n ast.Node) bool {
-			call, ok := n.(*ast.CallExpr)
-			if !ok {
-				return true
-			}
-			sel, isSel := call.Fun.(*ast.SelectorExpr)
-			if isSel {
-				if recv, ok := sel.X.(*ast.Ident); ok && recv.Name == "policyStore" {
-					switch sel.Sel.Name {
-					case "Add", "ReplaceAll", "Update", "Delete":
-						mutates = true
-					}
-				}
-			}
-			if _, ok := restoringHelpers[chaos69CalleeName(call.Fun)]; ok {
-				restores = true
-			}
-			return true
-		})
+		mutates, restores := chaos69ClassifyPolicyUse(fn, restoringHelpers)
 		if !mutates {
 			continue
 		}
 		mutators++
 		if !restores {
-			t.Errorf("%s mutates policyStore without snapshotPolicyStoreForTest (directly or via draftTestSetup) — its rules outlive it "+
-				"(setupProxyTest clears the store at test START, never at cleanup), and a rule that survives its "+
-				"own category group breaks the next test that validates object references",
+			t.Errorf("%s mutates policyStore without snapshotPolicyStoreForTest (directly or via draftTestSetup) — "+
+				"its rules outlive it (setupProxyTest clears the store at test START, never at cleanup), and a rule "+
+				"that survives its own category group breaks the next test that validates object references",
 				fn.Name.Name)
 		}
 	}
@@ -1575,4 +1556,43 @@ func chaos69AssertHelperRestores(t *testing.T, filename, helper string) {
 		t.Fatalf("%s in %s no longer calls snapshotPolicyStoreForTest, but the policy-restore wall accepts it as a "+
 			"restore — either restore the call or drop %s from restoringHelpers", helper, filename, helper)
 	}
+}
+
+// chaos69ClassifyPolicyUse reports whether fn mutates the process-wide policy
+// store and whether it registers a restore (directly or through one of the
+// helpers the wall accepts). Split out of the wall so each stays readable — the
+// wall decides the verdict, this decides the facts.
+func chaos69ClassifyPolicyUse(fn *ast.FuncDecl, restoringHelpers map[string]string) (mutates, restores bool) {
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		if chaos69MutatesPolicyStore(call) {
+			mutates = true
+		}
+		if _, ok := restoringHelpers[chaos69CalleeName(call.Fun)]; ok {
+			restores = true
+		}
+		return true
+	})
+	return mutates, restores
+}
+
+// chaos69MutatesPolicyStore reports whether call is a write against the
+// process-wide policyStore singleton.
+func chaos69MutatesPolicyStore(call *ast.CallExpr) bool {
+	sel, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok {
+		return false
+	}
+	recv, ok := sel.X.(*ast.Ident)
+	if !ok || recv.Name != "policyStore" {
+		return false
+	}
+	switch sel.Sel.Name {
+	case "Add", "ReplaceAll", "Update", "Delete":
+		return true
+	}
+	return false
 }
