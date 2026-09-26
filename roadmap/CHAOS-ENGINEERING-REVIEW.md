@@ -7856,10 +7856,30 @@ prevent exactly it. **And reproducing it required the EXACT tree**: `-shuffle`
 permutes the actual test list, so the same seed against a list with more tests
 in it yields a different order — a repro on the branch tip could neither
 confirm nor exonerate, and the first attempt here was invalid for that reason.
-The fix is to establish the posture with `snapshotAuthGlobals` (the helper
-`auth_startup_test.go` already provides, whose doc comment records why the
-production restore APIs are non-deterministic under `-shuffle=on -count=2`) and
-to tighten the guard to require `POLICY_`.
+**The order does not have to be hunted, and the fix already exists in-repo.**
+Re-verified against the merged tree, the repro is DETERMINISTIC rather than
+seed-dependent: add one test that leaves a credential on the global `cfg`
+exactly as its siblings do, let source order put it first, and the gate fails
+with `AUTH_FAIL (no-credentials) … {req_id=…}` every run. **And it is not a rare
+draw** — 44 tests in the root package mutate the process-global auth credentials
+with no snapshot or restore, across `proxy_test.go`, `ui_test.go`,
+`socks5_test.go`, `final_coverage_test.go` and fourteen more files; any one of
+them landing first poisons it. The fix is ONE line, `setupProxyTest(t)`
+(`proxy_test.go`), which replaces `cfg` wholesale and resets the blocklist, IP
+filter, rate limiter and policy — every global the request path reads, not just
+auth — and whose own comment already records this exact flake class (*"without
+resetting here, the flake only shows up under -count>1 / -shuffle=on"*). The
+`POLICY_` guard is still worth tightening in the same change, but it is
+belt-and-braces rather than the fix.
+
+**The fix is MUTATION-PROVEN not to be vacuous**, which matters because
+silencing a gate is worse than the flake it silences: with the bound it pins
+reintroduced as a defect (`acceptableTracingHeaderValue` returning `true`), the
+FIXED gate still catches it, and catches it more strongly than before — it now
+reliably reaches a real `POLICY_DEFAULT_DENY` line and reports the ESC byte and
+both doubled tokens, where previously it could only reach that line by luck of
+ordering. A test-isolation fix that makes a gate deterministic must be shown to
+leave its detection power intact; this one increases it.
 
 **SUITE-2 — `internal/threatfeed`'s `TestBenchGate_CheckRequestURLBeatsLegacy`,
 a zero-margin timing ratio under `-race`.** The assertion is a bare
@@ -8006,7 +8026,7 @@ five were the only ones anybody had ever checked.
 | **IDP-6** | The SAML SP key pair is EPHEMERAL (`ensureSPKeyPair`, regenerated per process) and therefore differs on every node and after every restart — SP metadata is node- and restart-dependent, and encrypted assertions cannot be decrypted by a node that did not issue the AuthnRequest | **OPEN, REPORTED NOT FIXED** — persisting it is a key-management decision with cluster-distribution consequences, not a resilience patch |
 | **IDP-7** | Neither fetch honours the metadata document's own `validUntil` / `cacheDuration` | **OPEN** — noted during this sweep; the 7-day ceiling bounds the exposure but does not implement the IdP's stated intent |
 | **IDP-8** | Two OIDC discovery endpoints — `userinfo_endpoint` and `introspection_endpoint` — are dialled with a bearer token and the client secret respectively without ever being validated, so a document that downgraded one to plain `http` would send credentials in cleartext (the SSRF-guarded dialer still bounds the destination, so this is a confidentiality issue, not an SSRF one) | **OPEN, REPORTED NOT FIXED** — found while verifying this sweep's own claim that the discovery endpoints were covered; refusing non-`https` for credential-bearing endpoints is a POSTURE change that breaks dev/self-signed deployments relying on `TLSSkipVerify` and belongs in its own change with its own gates, not folded into a resilience sweep's third review round |
-| **SUITE-1** | `TestSecReqID1_BareReqIDInDecisionLineIsSafeOnlyBecauseOfTheBound` asserts on a `POLICY_*` decision line but establishes no AUTH posture, and `handleRequest` authenticates before policy — so a shuffled order that configures a credential first refuses the request with `AUTH_FAIL` and emits no decision line. Its own vacuity guard (`Contains(line, "req_id=")`) is satisfied by `AUTH_FAIL … {req_id=…}`, so it reports health while testing nothing | **OPEN, REPORTED NOT FIXED** — reproduced against the exact tree CI ran with CI's seed; fix is `snapshotAuthGlobals` + a `POLICY_` guard in `request_tracing_bounds_test.go`, a package this change does not touch |
+| **SUITE-1** | `TestSecReqID1_BareReqIDInDecisionLineIsSafeOnlyBecauseOfTheBound` asserts on a `POLICY_*` decision line but establishes no AUTH posture, and `handleRequest` authenticates before policy — so an order that configures a credential first refuses the request with `AUTH_FAIL` and emits no decision line. Its own vacuity guard (`Contains(line, "req_id=")`) is satisfied by `AUTH_FAIL … {req_id=…}`, so it reports health while testing nothing. 44 root tests mutate the global auth credentials with no restore, so the poisoning order is common, not a rare draw | **OPEN, REPORTED NOT FIXED** — reproduced deterministically (a probe test that leaves a credential, ordered first); fix is ONE line, `setupProxyTest(t)`, the repo's own helper for this flake class, MUTATION-PROVEN to leave the gate's detection power intact (it increases it). `request_tracing_bounds_test.go` is a file this change does not touch |
 | **SUITE-2** | `internal/threatfeed`'s `TestBenchGate_CheckRequestURLBeatsLegacy` is a bare `fast >= legacy` timing ratio with no margin; under `-race` both arms ran ~6-14x slower and INVERTED (5881 vs 5141 ns/op against a documented 376 vs 887), failing with no regression present | **OPEN, REPORTED NOT FIXED** — the package already replaced its other ratio gate with a structural one for this exact reason; widening the bound enough to tolerate a 1.14x inversion would also admit a real 1.4x regression |
 
 ### Governance note
