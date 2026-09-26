@@ -9777,3 +9777,88 @@ while `go test` defaults to 10, so the local run had been reporting a budget
 overrun as a failure. The property is now pinned deterministically as a unit,
 and the concurrency exercise keeps `-race` coverage without asserting anything
 a scheduler decides.
+
+### Round 15 — an all-or-nothing resolve, and a reason one hop short
+
+Two P2s, both of them an earlier round's rule implemented at the wrong
+granularity.
+
+#### (a) A delivery resolves exactly the failures it observed
+
+Round 8 established the boundary: `deliverLine` reads the failure count **after
+the write completes**, so a drop recorded before completion is resolved by the
+delivery and one recorded after survives. `noteDelivered` implemented that with
+`CompareAndSwap(failuresBefore, 0)` — which resolves the episode only when
+*nothing raced it*.
+
+When a queue-full drop landed between the read and the swap, the swap failed
+and kept **every** failure, including the prefix the delivery had just proved
+resolved. An episode of N losses, followed by a successful write and one racing
+drop, reported **N+1 losses "since that delivery"** instead of 1 — on the
+contract row and on `GET /api/syslog`. An operator asking *how much have I lost
+since the feed last worked?* was handed the whole backlog.
+
+The degradation predicate is a **boolean** over this count, so the page was
+never wrong. Only the number an operator acts on was — which is why this is a
+P2.
+
+Subtracting the observed prefix states round 6's property precisely instead of
+all-or-nothing: the racing drop still survives, and now it survives **alone**.
+
+**It is a CAS loop, not a bare `Add(-failuresBefore)`.** An underflow here is
+not a smaller error but a catastrophic one: a wrapped `uint64` is a permanently
+non-zero failure count, i.e. a feed reported as failing for the life of the
+process. It cannot happen today — only this function decreases the counter, and
+its sole production caller is `deliverLine` on the single drain goroutine under
+`s.mu` — but that is an argument about a **caller**, and the standing lesson of
+this section is that such arguments get invalidated by later changes without
+anyone noticing. The clamp makes the invariant local.
+
+**An existing gate had to be inverted**, and it is the clearest self-documented
+case in the sweep. `TestNoteDelivered_ReDatesAnEpisodeThatOutlivedTheDeliveryItRacedWith`
+asserted `ConsecutiveFailures == 3` with the message *"the raced drop must
+survive the failed CAS"* — while its own prose four lines above says *"the
+survivor belongs to a NEW episode beginning at the delivery"*, singular. The
+test documented the correct model and pinned the defect's arithmetic.
+
+#### (b) The acknowledgement carries the sender's reason
+
+Round 11 bound the probe's `delivered`-vs-`sent` wording to the Writer that
+performed the send, because `handOffQueued` moves a queued line **and its ack**
+to a successor. It left the failure class reading
+`sw.Stats().LastFailureReason` — the writer the probe was *handed*, which never
+attempted the send and reports `unknown` on a fresh chain or an unrelated stale
+class on a busy one. Round 10's defect surviving one hop along, one field later,
+in the endpoint whose whole job is to be believed.
+
+**Reading that field at ack time would also have repeated round 7's P1-C**: it
+is writer-*wide*, and a concurrent line's failure can overwrite it between the
+drop and the read. So the reason is not derived at all. `deliverLine` **returns**
+the bounded class it charged (nil on success), `deliverGuarded` returns
+`&reasonPanic` from its recover path, and each handoff/flush terminal passes its
+own literal — `ProbeOutcome.Reason` is per-**line** by construction rather than
+by timing.
+
+The `!queued` branch deliberately still reads `sw`, and is correct: `enqueue`
+fails only on `sw` itself, so `sw` *is* the writer that charged it.
+
+> **When a value can be handed on, bind every claim to the thing that will
+> finally act.** Round 11 bound one of two, and the other waited a round.
+
+#### Gates (5)
+
+- `TestNoteDelivered_ResolvesOnlyTheFailuresItObserved` — a four-case table,
+  verified failing against the reintroduced CAS on exactly the two cases where
+  something races. The two where nothing races **pass** against the defect,
+  which makes them controls inside the table.
+- `TestNoteDelivered_CannotUnderflowTheFailureCount` — pins the clamp.
+- `TestAckCarriesTheSendersFailureReason` — drives a probe handed to a successor
+  whose queue is **full** and requires `queue_full` from that successor, while
+  asserting as a **precondition** that the handed writer carries no reason at
+  all. Without that precondition the gate could not distinguish the two writers.
+- `TestAckReasonIsEmptyOnDelivery` — CONTROL against stamping a class
+  unconditionally, which would report a failure reason alongside a success.
+- `TestChaos72_TheProbeReportsTheSendersReasonNotItsOwnWriters` — the PATH half:
+  an AST wall on the handler's ack branch, because *walling the function is not
+  walling the path*, and `ProbeReportsTheRealOutcome` passed unchanged against a
+  reverted handler once already in this sweep.

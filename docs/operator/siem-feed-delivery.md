@@ -177,6 +177,13 @@ recorded state plus the clock, and both drivers above ask again. This matters
 operationally because the alternative was the outage slowing the proxy itself;
 a SIEM going away must cost you delivery, never throughput.
 
+**The episode count is what you lost since the feed last worked**, not the
+cumulative total and not the backlog that preceded the last success. A delivery
+resolves exactly the losses that happened before it completed; a loss recorded
+after it survives into the new episode on its own. (Before this was exact, a
+loss that raced a successful write left the whole preceding backlog attributed
+to the new episode — no page was wrong, but the number was.)
+
 **Recovery is declared on observed evidence only** — one event that actually
 reaches the collector. Elapsed time never clears it, because a feed that
 stopped dropping because nothing is being logged looks identical to a feed that
@@ -204,7 +211,7 @@ POST /api/syslog/test        (admin)
 | --- | --- |
 | `delivered` | the collector accepted **this** event (TCP only) |
 | `sent` | the datagram left this host; UDP cannot confirm receipt |
-| `dropped` | the event was lost before reaching the collector, with the reason |
+| `dropped` | the event was lost before reaching the collector, with the bounded reason **from the writer that actually handled it** — after a re-point a queued probe can be handed to the replacement, and the answer names that collector, not the one the probe was submitted to |
 | `unknown` | still queued after the 3-second probe window — retry |
 | `unconfigured` | no collector is configured |
 

@@ -196,7 +196,7 @@ func TestProbeAckCarriesTheSendingTransport(t *testing.T) {
 	// The successor accepted it; its drain goroutine is not running in this
 	// unit, so acknowledge it exactly as deliverTracked would.
 	queued := <-live.queue
-	ackQueued(queued, live, true)
+	ackQueued(queued, live, true, nil)
 
 	select {
 	case out := <-ack:
@@ -219,7 +219,7 @@ func TestProbeAckCarriesTheSendingTransport(t *testing.T) {
 	ack2 := make(chan ProbeOutcome, 1)
 	item2 := tcpLive.formatLine(13, "probe", time.Now())
 	item2.ack = ack2
-	ackQueued(item2, tcpLive, true)
+	ackQueued(item2, tcpLive, true, nil)
 	if out := <-ack2; !out.Provable {
 		t.Error("control: a TCP sender's acknowledgement must report provable delivery")
 	}
@@ -330,5 +330,78 @@ func TestSendExhaustedWalkIsCountableAndTriesItsLastWriter(t *testing.T) {
 	}
 	if len(ok.queue) != 1 {
 		t.Errorf("control: the live writer received %d lines; want 1", len(ok.queue))
+	}
+}
+
+// TestAckCarriesTheSendersFailureReason is the DEFECT gate for Codex round 15.
+//
+// A queued probe is handed to a successor along with its ack channel. When the
+// successor is the one that drops it, the failure class belongs to THAT
+// writer — but POST /api/syslog/test read `sw.Stats().LastFailureReason`, i.e.
+// the writer the probe was CALLED on, which never attempted the send. It
+// reports `unknown` on a fresh chain, or an unrelated stale class on a busy
+// one, in the endpoint whose entire job is to be believed. This is the same
+// one-hop-short error the transport had (fixed the round before), one field
+// later.
+//
+// Driven at the ack level because the interleaving is what matters, not the
+// HTTP plumbing: the handler's own use of outcome.Reason is pinned in the root
+// package where that handler lives.
+func TestAckCarriesTheSendersFailureReason(t *testing.T) {
+	head := &Writer{network: "tcp", format: "rfc3164", host: "h", tag: "culvert", pid: "1", queue: make(chan queuedLine, 1)}
+	head.closed.Store(true)
+
+	// A successor whose queue is already FULL, so it refuses the handoff and
+	// the loss is charged there — not on head.
+	full := &Writer{network: "tcp", format: "rfc3164", host: "h", tag: "culvert", pid: "1", queue: make(chan queuedLine, 1)}
+	full.queue <- full.formatLine(13, "occupies the slot", time.Now())
+	head.HandOffTo(full)
+
+	// head must look "clean": pre-fix the handler read ITS reason, and the
+	// whole point is that head knows nothing about this line's fate.
+	if r := head.Stats().LastFailureReason; r != "" {
+		t.Fatalf("precondition: head already carries reason %q; the gate cannot distinguish", r)
+	}
+
+	ack := make(chan ProbeOutcome, 1)
+	item := head.formatLine(13, "probe", time.Now())
+	item.ack = ack
+	if !head.handOffQueued(item) {
+		t.Fatal("handOffQueued did not take the line")
+	}
+
+	select {
+	case out := <-ack:
+		if out.Delivered {
+			t.Fatal("precondition: the probe was reported delivered by a full successor")
+		}
+		if out.Reason != ReasonQueueFull {
+			t.Fatalf("acknowledged reason = %q, want %q: the reason must come from the writer that "+
+				"actually refused the send. Pre-fix the endpoint read it off the writer the probe was "+
+				"handed, which never attempted it and reports %q",
+				out.Reason, ReasonQueueFull, head.Stats().LastFailureReason)
+		}
+	default:
+		t.Fatal("the prober was never acknowledged")
+	}
+}
+
+// TestAckReasonIsEmptyOnDelivery is the CONTROL. The cheapest way to pass the
+// gate above is to stamp a reason unconditionally, which would have the test
+// endpoint report a failure class alongside a successful delivery.
+func TestAckReasonIsEmptyOnDelivery(t *testing.T) {
+	w := &Writer{network: "tcp", format: "rfc3164", host: "h", tag: "culvert", pid: "1", queue: make(chan queuedLine, 1)}
+	ack := make(chan ProbeOutcome, 1)
+	item := w.formatLine(13, "probe", time.Now())
+	item.ack = ack
+
+	ackQueued(item, w, true, &reasonWriteFail)
+
+	out := <-ack
+	if !out.Delivered {
+		t.Fatal("precondition: not reported delivered")
+	}
+	if out.Reason != "" {
+		t.Fatalf("a delivered probe carries reason %q, want empty: a success has no failure class", out.Reason)
 	}
 }

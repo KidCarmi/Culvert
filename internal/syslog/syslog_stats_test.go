@@ -426,8 +426,16 @@ func TestNoteDelivered_ReDatesAnEpisodeThatOutlivedTheDeliveryItRacedWith(t *tes
 	w.noteDelivered(failuresBefore, successAt)
 
 	st := w.Stats()
-	if st.ConsecutiveFailures != 3 {
-		t.Fatalf("ConsecutiveFailures = %d; want 3 — the raced drop must survive the failed CAS", st.ConsecutiveFailures)
+	// ONE, not three. The raced drop must survive — that is round 6's
+	// property and the reason this interleaving matters — but the two
+	// failures the delivery OBSERVED preceded its completion and are
+	// resolved by it. This assertion read `want 3` until Codex round 15,
+	// which is the all-or-nothing CAS's arithmetic rather than the rule:
+	// note that the prose above this function already says "the survivor
+	// belongs to a NEW episode beginning at the delivery" — singular — so
+	// the test documented the correct model and pinned the wrong number.
+	if st.ConsecutiveFailures != 1 {
+		t.Fatalf("ConsecutiveFailures = %d; want 1 — the raced drop survives, the two the delivery resolved do not", st.ConsecutiveFailures)
 	}
 	if st.FailingSince.IsZero() {
 		t.Fatalf("the surviving episode is undatable — Stats refuses a start older than the last success, and no later drop takes the 0->1 edge to correct it")
@@ -601,5 +609,72 @@ func TestDeliverLine_ResolvesADropRecordedBeforeTheWriteCompleted(t *testing.T) 
 	// make the compliance record forget the event.
 	if st.Drops != 1 {
 		t.Errorf("Drops = %d, want 1 — the event was lost and must stay counted", st.Drops)
+	}
+}
+
+// TestNoteDelivered_ResolvesOnlyTheFailuresItObserved is the DEFECT gate for
+// Codex round 15: a delivery resolves every loss that preceded its completion
+// (round 8), and the all-or-nothing CompareAndSwap implemented that rule only
+// when nothing raced it. When a queue-full drop landed between the count being
+// read and the swap, the swap failed and kept EVERY failure — including the
+// prefix the delivery had just proved resolved — so every later snapshot
+// reported those as losses since the delivery and inflated the current
+// episode on the contract row and the admin surface.
+//
+// The degradation predicate is a boolean over this count, so the page was
+// never wrong; the number an operator acts on was.
+func TestNoteDelivered_ResolvesOnlyTheFailuresItObserved(t *testing.T) {
+	base := time.Date(2026, 3, 4, 10, 0, 0, 0, time.UTC)
+	cur := base
+	defer SetNowForTest(func() time.Time { return cur })()
+
+	for _, tc := range []struct {
+		name      string
+		before    int // failures already unresolved when the delivery reads the count
+		racing    int // queue-full drops landing between that read and the resolve
+		wantAfter uint64
+	}{
+		{"nothing races, the episode ends", 4, 0, 0},
+		{"one drop races a long episode", 7, 1, 1},
+		{"several race", 3, 2, 2},
+		{"a single failure, nothing races", 1, 0, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := &Writer{}
+			for i := 0; i < tc.before; i++ {
+				w.noteDrop(&reasonWriteFail)
+			}
+			failuresBefore := w.consecutiveFail.Load()
+
+			cur = base.Add(10 * time.Second)
+			successAt := now().UnixNano()
+			cur = base.Add(11 * time.Second)
+			for i := 0; i < tc.racing; i++ {
+				w.noteDrop(&reasonQueueFull)
+			}
+			w.noteDelivered(failuresBefore, successAt)
+
+			if got := w.Stats().ConsecutiveFailures; got != tc.wantAfter {
+				t.Fatalf("ConsecutiveFailures = %d, want %d: a delivery resolves exactly the "+
+					"failures that preceded it and leaves exactly those recorded after", got, tc.wantAfter)
+			}
+		})
+	}
+}
+
+// TestNoteDelivered_CannotUnderflowTheFailureCount is the CONTROL on the clamp.
+// A wrapped uint64 is not a smaller error than an inflated count: it is a
+// permanently non-zero failure count, i.e. a feed reported as failing for the
+// life of the process. Today only the single drain goroutine decreases the
+// counter so this cannot arise, but that is an argument about a CALLER, and
+// the standing lesson of this file is that such arguments get invalidated
+// silently.
+func TestNoteDelivered_CannotUnderflowTheFailureCount(t *testing.T) {
+	w := &Writer{}
+	w.noteDrop(&reasonWriteFail)
+	// Claim to have observed far more failures than were ever recorded.
+	w.noteDelivered(50, now().UnixNano())
+	if got := w.Stats().ConsecutiveFailures; got != 0 {
+		t.Fatalf("ConsecutiveFailures = %d, want 0: the resolve must clamp, never wrap", got)
 	}
 }

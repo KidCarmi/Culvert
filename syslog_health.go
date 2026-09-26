@@ -1351,7 +1351,17 @@ func syslogDeliveryProbe(sw *syslogWriter) (outcome string, detail string) {
 	select {
 	case outcome := <-ack:
 		if !outcome.Delivered {
-			return "dropped", "the test event was lost before reaching the collector (" + reasonOrUnknown(sw.Stats().LastFailureReason) + ")"
+			// The reason comes from the ACKNOWLEDGEMENT, stamped by the
+			// Writer that actually refused the send — not from sw.Stats().
+			// Same one-hop-short error as the transport above, one field
+			// later: handOffQueued moves a queued line and its ack together,
+			// so a successor can be the one that dropped it while sw never
+			// attempted the send and reports `unknown` or an unrelated stale
+			// class. Reading the writer-wide field would ALSO reintroduce the
+			// round-7 defect this per-line ack exists to close, since a
+			// concurrent line's failure can overwrite it between the drop and
+			// the read (Codex P2, PR #1494).
+			return "dropped", "the test event was lost before reaching the collector (" + reasonOrUnknown(outcome.Reason) + ")"
 		}
 		// The transport comes from the ACKNOWLEDGEMENT, which the Writer that
 		// actually sent the line stamps — not from a target string read

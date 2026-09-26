@@ -3279,3 +3279,76 @@ func TestChaos72_ADegradedFeedStillPagesFromADropUnderConcurrency(t *testing.T) 
 			"redundant evaluations, never the one that crosses the threshold")
 	}
 }
+
+// TestChaos72_TheProbeReportsTheSendersReasonNotItsOwnWriters is the PATH half
+// of Codex round 15's second finding. The engine gate
+// (internal/syslog.TestAckCarriesTheSendersFailureReason) proves the
+// acknowledgement carries the reason of the Writer that actually refused the
+// send; this proves the HANDLER consumes it.
+//
+// Both halves are needed, and this file already records why: walling the
+// function is not walling the path. `ProbeReportsTheRealOutcome` calls
+// syslogDeliveryProbe directly and passed unchanged against a reverted
+// handler, so the handler is pinned separately.
+//
+// It is STRUCTURAL because the failure is a wrong STRING, not an error, and
+// reproducing it behaviourally needs a probe queued on one writer, handed to a
+// successor, and dropped there — an interleaving driven at the engine level by
+// the gate above. What this asserts is the one thing that can regress by
+// habit: that the ack branch stops asking the writer it was handed.
+func TestChaos72_TheProbeReportsTheSendersReasonNotItsOwnWriters(t *testing.T) {
+	fset, fd := syslogFuncDecl(t, "syslog_health.go", "syslogDeliveryProbe")
+	if fd == nil {
+		t.Fatal("syslogDeliveryProbe not found in syslog_health.go")
+	}
+
+	// The ack branch is the `case outcome := <-ack:` clause of the select.
+	var ackBranch *ast.CommClause
+	ast.Inspect(fd, func(n ast.Node) bool {
+		cc, ok := n.(*ast.CommClause)
+		if !ok || cc.Comm == nil {
+			return true
+		}
+		if as, ok := cc.Comm.(*ast.AssignStmt); ok && len(as.Lhs) == 1 {
+			if id, ok := as.Lhs[0].(*ast.Ident); ok && id.Name == "outcome" {
+				ackBranch = cc
+			}
+		}
+		return true
+	})
+	if ackBranch == nil {
+		t.Fatal("the `case outcome := <-ack:` branch was not found; this wall no longer pins anything")
+	}
+
+	var offenders []string
+	ast.Inspect(ackBranch, func(n ast.Node) bool {
+		sel, ok := n.(*ast.SelectorExpr)
+		if !ok || sel.Sel.Name != "LastFailureReason" {
+			return true
+		}
+		offenders = append(offenders, fset.Position(sel.Pos()).String())
+		return true
+	})
+	if len(offenders) > 0 {
+		t.Fatalf("the probe's acknowledgement branch reads LastFailureReason at %v: that field is "+
+			"writer-wide and belongs to the writer the probe was HANDED, which a handoff means never "+
+			"attempted the send — use outcome.Reason, which the sender stamps", offenders)
+	}
+
+	// Not vacuous: the branch must actually report a reason.
+	var usesOutcomeReason bool
+	ast.Inspect(ackBranch, func(n ast.Node) bool {
+		sel, ok := n.(*ast.SelectorExpr)
+		if !ok || sel.Sel.Name != "Reason" {
+			return true
+		}
+		if id, ok := sel.X.(*ast.Ident); ok && id.Name == "outcome" {
+			usesOutcomeReason = true
+		}
+		return true
+	})
+	if !usesOutcomeReason {
+		t.Fatal("the acknowledgement branch names no reason at all: a probe that says only " +
+			"\"lost\" without the bounded class is the diagnostic this endpoint exists to give")
+	}
+}

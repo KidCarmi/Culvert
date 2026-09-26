@@ -573,6 +573,30 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Performance
 
+- The SIEM feed's current-episode loss count is no longer inflated when a drop
+  races a successful delivery. A delivery resolves every loss that preceded its
+  completion, but `noteDelivered` implemented that with an all-or-nothing
+  compare-and-swap: when a queue-full drop landed between the count being read
+  and the swap, the swap failed and kept **every** failure, including the
+  prefix the delivery had just proved resolved. An episode of N losses followed
+  by a successful write and one racing drop reported N+1 losses *since that
+  delivery* instead of 1, on the `syslog_feed` contract row and
+  `GET /api/syslog` — so an operator asking "how much have I lost since the
+  feed last worked?" was handed the whole backlog. The degradation predicate is
+  a boolean over this count, so no page was ever wrong; the number an operator
+  acts on was. The resolve now subtracts exactly the observed prefix, leaving
+  exactly the failures recorded after it, under a clamp so the count can never
+  wrap.
+
+- `POST /api/syslog/test` now reports the failure class of the collector that
+  actually processed the probe. A queued probe handed to a successor writer and
+  dropped there was described using the failure reason of the writer the probe
+  was *called* on, which never attempted the send — so the endpoint reported
+  `unknown` on a fresh chain, or an unrelated stale class on a busy one. The
+  bounded reason now travels on the per-line acknowledgement, stamped by the
+  writer that performed or refused the send, alongside the transport it already
+  carried.
+
 - A SIEM outage no longer serializes proxy requests in the syslog health
   plane. A queue-full drop is charged on the CALLER's goroutine — the audit or
   request-log fan-out, i.e. a proxy request goroutine — and the delivery

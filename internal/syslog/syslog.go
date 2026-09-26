@@ -276,6 +276,18 @@ func LateDrops() uint64 { return lateDrops.Load() }
 type ProbeOutcome struct {
 	Delivered bool
 	Provable  bool
+	// Reason is the bounded failure class for THIS line, stamped by the
+	// Writer that actually attempted (or refused) the send. Empty when
+	// Delivered.
+	//
+	// It travels on the acknowledgement for the same reason Provable does: a
+	// handoff moves a queued line and its ack together to a successor, so the
+	// Writer the prober called is one hop short of the sender and its
+	// writer-wide LastFailureReason can be `unknown` or an unrelated line's
+	// class. Reading that field at ack time would ALSO repeat the defect the
+	// per-line ack was introduced to fix, since a concurrent line's failure
+	// can overwrite it between the drop and the read (Codex P2, PR #1494).
+	Reason string
 }
 
 type queuedLine struct {
@@ -402,7 +414,7 @@ func (s *Writer) drainLoop() {
 						s.deliverTracked(item)
 					} else {
 						s.noteDrop(&reasonFlushTimeout)
-						ackQueued(item, nil, false)
+						ackQueued(item, nil, false, &reasonFlushTimeout)
 					}
 				default:
 					return
@@ -516,7 +528,7 @@ func (s *Writer) handOffQueued(item queuedLine) bool {
 		case enqAccepted:
 			return true
 		case enqDropped:
-			ackQueued(item, w, false)
+			ackQueued(item, w, false, &reasonQueueFull)
 			return true // counted on the live writer by tryEnqueue
 		}
 		nx := w.successor.Load()
@@ -524,7 +536,7 @@ func (s *Writer) handOffQueued(item queuedLine) bool {
 			if w.chargeTerminalDrop(&reasonClosed) {
 				noteLateDrop()
 			}
-			ackQueued(item, w, false)
+			ackQueued(item, w, false, &reasonClosed)
 			return true
 		}
 		w = nx
@@ -544,7 +556,7 @@ func (s *Writer) handOffQueued(item queuedLine) bool {
 	if s.chargeTerminalDrop(&reasonClosed) {
 		noteLateDrop()
 	}
-	ackQueued(item, s, false)
+	ackQueued(item, s, false, &reasonClosed)
 	return true
 }
 
@@ -567,12 +579,24 @@ func (s *Writer) HandOffTo(next *Writer) {
 // handoff moves the line and its ack together. It supplies the transport the
 // outcome is about; nil means no Writer ever sent it, which cannot be
 // provable.
-func ackQueued(item queuedLine, by *Writer, delivered bool) {
+// reasonOrEmpty dereferences a bounded reason pointer, yielding "" for none.
+func reasonOrEmpty(p *string) string {
+	if p == nil {
+		return ""
+	}
+	return *p
+}
+
+func ackQueued(item queuedLine, by *Writer, delivered bool, reason *string) {
 	if item.ack == nil {
 		return
 	}
+	out := ProbeOutcome{Delivered: delivered, Provable: by != nil && by.DeliveryProvable()}
+	if !delivered {
+		out.Reason = reasonOrEmpty(reason)
+	}
 	select {
-	case item.ack <- ProbeOutcome{Delivered: delivered, Provable: by != nil && by.DeliveryProvable()}:
+	case item.ack <- out:
 	default:
 	}
 }
@@ -586,12 +610,12 @@ func ackQueued(item queuedLine, by *Writer, delivered bool) {
 // goroutine is not exact, which is precisely the defect this replaces.
 func (s *Writer) deliverTracked(item queuedLine) {
 	if item.ack == nil {
-		s.deliverGuarded(item.line)
+		_ = s.deliverGuarded(item.line)
 		return
 	}
 	before := s.delivered.Load()
-	s.deliverGuarded(item.line)
-	ackQueued(item, s, s.delivered.Load() > before)
+	reason := s.deliverGuarded(item.line)
+	ackQueued(item, s, s.delivered.Load() > before, reason)
 }
 
 // WriteProbe enqueues one message and returns a channel that receives the
@@ -609,7 +633,12 @@ func (s *Writer) WriteProbe(msg string) (<-chan ProbeOutcome, bool) {
 	if s.queue == nil { // zero-value Writer: synchronous path
 		before := s.delivered.Load()
 		s.writeMsg(14, msg)
-		ack <- ProbeOutcome{Delivered: s.delivered.Load() > before, Provable: s.DeliveryProvable()}
+		delivered := s.delivered.Load() > before
+		out := ProbeOutcome{Delivered: delivered, Provable: s.DeliveryProvable()}
+		if !delivered {
+			out.Reason = reasonOrEmpty(s.lastFailReason.Load())
+		}
+		ack <- out
 		return ack, true
 	}
 	item := s.formatLine(14, msg, time.Now())
@@ -732,11 +761,12 @@ func (s *Writer) writeMsg(pri int, msg string) {
 // SetPanicObserver) rather than logged here, for the same no-obs-import
 // reason — without an observer wired, a recovered panic is visible only
 // through Panics().
-func (s *Writer) deliverGuarded(line string) {
+func (s *Writer) deliverGuarded(line string) (reason *string) {
 	defer func() {
 		if r := recover(); r != nil {
 			s.panics.Add(1)
 			s.noteDrop(&reasonPanic)
+			reason = &reasonPanic
 			if p := s.panicObserver.Load(); p != nil {
 				func() {
 					defer func() { _ = recover() }() // an observer must never crash the drain goroutine
@@ -745,7 +775,7 @@ func (s *Writer) deliverGuarded(line string) {
 			}
 		}
 	}()
-	s.deliverLine(line)
+	return s.deliverLine(line)
 }
 
 // SetPanicObserver publishes an optional observer notified synchronously, on
@@ -766,19 +796,23 @@ func (s *Writer) SetPanicObserver(fn func(recovered any)) {
 	s.panicObserver.Store(&fn)
 }
 
-func (s *Writer) deliverLine(line string) {
+// deliverLine returns the bounded reason it charged, or nil when the line was
+// delivered. Returning it rather than leaving the caller to read
+// LastFailureReason keeps a probe's answer about ITS OWN line: that field is
+// writer-wide and a concurrent line's failure can overwrite it.
+func (s *Writer) deliverLine(line string) *string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.conn == nil {
 		// Backoff: don't retry more often than every 5 seconds.
 		if time.Since(s.lastReconnErr) < 5*time.Second {
 			s.noteDrop(&reasonBackoff)
-			return
+			return &reasonBackoff
 		}
 		if err := s.connect(); err != nil {
 			s.lastReconnErr = time.Now()
 			s.noteDrop(&reasonConnectFail)
-			return // syslog down — swallow, never block the proxy
+			return &reasonConnectFail // syslog down — swallow, never block the proxy
 		}
 		s.lastReconnErr = time.Time{} // reset on success
 	}
@@ -800,12 +834,12 @@ func (s *Writer) deliverLine(line string) {
 		s.conn = nil
 		if time.Since(s.lastReconnErr) < 5*time.Second {
 			s.noteDrop(&reasonBackoff)
-			return
+			return &reasonBackoff
 		}
 		if err2 := s.connect(); err2 != nil {
 			s.lastReconnErr = time.Now()
 			s.noteDrop(&reasonConnectFail)
-			return
+			return &reasonConnectFail
 		}
 		successAt = now().UnixNano()
 		if err3 := s.writeLine(line); err3 != nil {
@@ -819,7 +853,7 @@ func (s *Writer) deliverLine(line string) {
 			s.conn = nil
 			s.lastReconnErr = time.Now()
 			s.noteDrop(&reasonWriteFail)
-			return
+			return &reasonWriteFail
 		}
 		s.lastReconnErr = time.Time{}
 	}
@@ -873,6 +907,7 @@ func (s *Writer) deliverLine(line string) {
 	// proceeds normally.
 	failuresBefore := s.consecutiveFail.Load()
 	s.noteDelivered(failuresBefore, successAt)
+	return nil
 }
 
 // Bounded reason classes for a delivery failure.
@@ -1000,12 +1035,52 @@ func (s *Writer) noteDrop(reason *string) {
 func (s *Writer) noteDelivered(failuresBefore uint64, successAt int64) {
 	s.delivered.Add(1)
 	s.lastSuccessNano.Store(successAt)
-	// CAS, not Swap: see above. It also keeps the property the Swap was
-	// chosen for — two deliveries racing one episode cannot both observe it
-	// as non-zero, so a recovery signal can never fire twice.
-	if failuresBefore > 0 && s.consecutiveFail.CompareAndSwap(failuresBefore, 0) {
-		s.notifyDelivery(true)
-		return
+	// SUBTRACT the observed prefix; do not clear all-or-nothing.
+	//
+	// The first shape was CompareAndSwap(failuresBefore, 0), which resolves
+	// the episode only when NOTHING raced it — and when something did, it
+	// kept every failure, including the failuresBefore that this delivery had
+	// just proved resolved. Those losses preceded the write's completion, so
+	// by the rule above they are resolved; retaining them made every later
+	// snapshot report them as losses SINCE this delivery, inflating the
+	// current episode's count on the contract row and the admin surface (an
+	// operator asking "how much have I lost since the feed last worked?" was
+	// told the whole backlog). The degradation predicate is a boolean over
+	// this count, so the page was never wrong — only the number an operator
+	// acts on (Codex P2, PR #1494).
+	//
+	// Subtracting resolves exactly the prefix this delivery observed and
+	// leaves exactly the failures recorded after it, which is round 6's
+	// property stated precisely instead of all-or-nothing: a drop that raced
+	// the write still survives, and now it survives ALONE.
+	//
+	// The loop is a CAS loop rather than a bare Add(-failuresBefore) because
+	// an underflow here is not a smaller error, it is a catastrophic one: a
+	// wrapped uint64 is a permanently non-zero failure count, i.e. a feed
+	// reported as failing for the life of the process. Today it cannot
+	// happen — only this function decreases the counter, and its sole
+	// production caller is deliverLine on the single drain goroutine, holding
+	// s.mu — but that is an argument about a CALLER, and the standing lesson
+	// of this file is that such arguments are invalidated by later changes
+	// without anyone noticing. The clamp makes the invariant local.
+	if failuresBefore > 0 {
+		for {
+			cur := s.consecutiveFail.Load()
+			next := uint64(0)
+			if cur > failuresBefore {
+				next = cur - failuresBefore
+			}
+			if !s.consecutiveFail.CompareAndSwap(cur, next) {
+				continue
+			}
+			if next == 0 {
+				// The episode ended. Recovery fires at most once per episode:
+				// the next one starts at noteDrop's 0->1 edge.
+				s.notifyDelivery(true)
+				return
+			}
+			break
+		}
 	}
 	if s.consecutiveFail.Load() > 0 && s.failSinceNano.Load() <= successAt {
 		s.failSinceNano.Store(successAt)
