@@ -466,6 +466,35 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   itself is a repository-settings action an owner must still take; this change
   touches repository content only.
 
+- The MCP live side-effect boundary's pre-send re-ask is documented and its
+  concurrency premise is now pinned. PR #1370 added a second authority re-ask
+  inside the upstream client's TLS dialer, after the handshake and before
+  anything is written — the right place for the check, but net/http runs a dial
+  on its own goroutine (`Transport.queueForDial` → `go dialConnFor`), and that
+  goroutine is not joined to the request. When the caller's context is cancelled
+  while a dial is in flight — an ordinary client disconnect or request timeout —
+  `Call` unwinds at once while the dial goroutine completes its handshake and
+  invokes the hook, so `CallOptions.PreSend` can still be running after `Call`
+  has returned. Reading a refusal back out of variables the hook captured is
+  therefore a data race, and synchronising them removes the race without
+  establishing a hand-off, since a late hook can still write after the only
+  reader has gone; the executor consequently carries the verdict in the returned
+  error instead. That correction shipped with the read-first identity-band change;
+  what is added here is the evidence and the contract it rests on.
+  `TestPreSend_MayStillBeRunningAfterCallReturns` pins the lifetime property
+  deterministically against the real transport — the executor's own gates use a
+  fixture that joins the hook's goroutine, which is exactly the happens-before
+  edge production lacks, so nothing else asserts it — and `CallOptions.PreSend`
+  now states the contract for every future caller: it is a pure predicate whose
+  lifetime is not `Call`'s, so everything a verdict needs in order to be
+  diagnosed belongs on the error. What the gate asserts is the HAZARD, not the
+  schedule: a transport that NARROWS the hook's lifetime by joining its dial
+  goroutine leaves the carrier correct — conservative rather than required — so
+  the gate skips with that finding rather than failing, and only a `Call` that
+  will not return even once the hook is released is a real failure. Asserting
+  that the hook DOES outlive `Call` would have made a safe narrowing look like a
+  regression, and would have reported it as a 30-second deadlock.
+
 - OCSP revocation checking accepted responses it should have refused
   (CHAOS-65). Every input the checker acts on comes from the peer's own
   certificate — the responder URLs live in its AIA extension — so the party

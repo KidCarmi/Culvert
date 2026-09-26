@@ -2129,6 +2129,65 @@ Demonstrated in all three directions rather than asserted: the defect shape (dri
 pattern + failing spool) scored CAUGHT before and is rejected now, and a genuine two-sided
 demonstration still scores CAUGHT.
 
+### Round 21: the pre-send hook's lifetime is not the call's
+
+Round 6 closed the connect/TLS window by giving `CallOptions.PreSend` a second re-ask site inside
+`pinnedDialTLS`, after the TLS handshake and before anything is written. That is the right place
+for the check. It also moved the check onto a goroutine this executor does not own, and the
+caller was not told.
+
+**net/http dials on its own goroutine** (`Transport.queueForDial` -> `go dialConnFor`), and that
+goroutine is not joined to the request. When the request goroutine stops waiting for the dial --
+an ordinary context cancellation, which is what a client disconnect or a request timeout produces
+-- `getConn` returns at once and `Call` unwinds, while the dial goroutine finishes its handshake
+and calls the hook. So the hook can still be RUNNING after `Call` has returned.
+
+It was never a fail-open: the dialer still closes the socket with nothing written, and the
+physical send is refused in every interleaving. What it corrupted is the BLOCK RECORD -- whether
+the attempt is classified as a boundary refusal at all, under which bounded reason, and whether a
+drift observed at that re-ask reaches `Safety.Breach`. Rounds 4 and 5 exist precisely to make a
+refusal read the same whether admission or the boundary caught it; a racy hand-off puts that
+question back in play one layer down. A security control's telemetry is part of the control.
+
+**A mutex is not enough, and that is the interesting part.** Guarding the two variables makes the
+read well-defined and stops the detector firing, and it still does not establish a HAND-OFF:
+nothing orders the hook's write before the reader, so a late hook records after the only reader
+has gone and the classification stays scheduling-dependent. The right question was not how to make
+a shared variable safe but whether a shared variable is a hand-off at all, and between a goroutine
+net/http may abandon and one that has already returned, it is not.
+
+**The refusal therefore travels in the error.** `preSendGuardErr` carries the guard's own error
+and the drift bit back out through the value `Call` returns, `Unwrap` keeps the `errors.Is` chain
+every classification keys on intact, and the executor reads it with `errors.As`. That is a real
+hand-off in the memory-model sense -- net/http delivers the dial's error through a channel, so it
+is ordered before `Call` returns -- and an abandoned dial's error is discarded rather than read.
+This correction shipped alongside the read-first identity-band change (#1375), together with a
+deterministic gate that fails against the captured-variable shape.
+
+**What this round adds is the premise, which nothing else asserts.** The carrier is correct only
+while the hook can genuinely outlive the call, and the executor's own gates cannot show that:
+their fixture JOINS the hook's goroutine, which is exactly the happens-before edge production
+lacks -- as that file's own header says, the captured shape passes them even under `-race`.
+`TestPreSend_MayStillBeRunningAfterCallReturns` pins the property itself, against the real
+transport: the hook is parked on a channel at the moment the test needs it parked, the context is
+cancelled, `Call` returns, and the test OBSERVES that the hook has not finished. It is
+deterministic rather than timing-based, and it refuses to pass vacuously -- if the hook completes
+before `Call` returns, the run is declared inconclusive and fails. Without it, a future net/http or
+client change could make the hook complete before `Call` returns, the carrier's whole
+justification would silently become false, and nothing would go red.
+
+`CallOptions.PreSend` now states the contract on the field itself, so the next caller does not
+have to rediscover it: the hook is a pure predicate whose lifetime is not `Call`'s, a caller must
+not write anything it intends to read back afterwards, and everything a verdict needs in order to
+be diagnosed belongs ON the error.
+
+The lesson generalises past this hook, and it is two lessons rather than one. **A predicate handed
+across a package boundary inherits that package's concurrency, not the caller's** -- round 6
+reasoned carefully about WHERE the check had to run and not at all about WHICH GOROUTINE would run
+it, and the answer was one net/http owns and can abandon. And **"race-free" is not "delivered"**:
+a mutex answers a question about memory, not about causality, and a callback that may be abandoned
+can never hand anything back through shared state.
+
 ### Campaign state
 
 `scripts/mcp-canary-mutation-campaign.sh` now carries **110 mutations** (M61–M78 are the blocker-7
