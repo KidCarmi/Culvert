@@ -420,8 +420,11 @@ func settleRetiredSyslogWritersLocked() {
 	if len(syslogHealth.retiring) == 0 {
 		return
 	}
-	kept := syslogHealth.retiring[:0]
-	for _, r := range syslogHealth.retiring {
+	// Indexed, not ranged by value: retiringSyslogWriter embeds a Stats and is
+	// 144 bytes (the rangeValCopy convention).
+	kept := 0
+	for i := range syslogHealth.retiring {
+		r := &syslogHealth.retiring[i]
 		// The sealed snapshot, not the live counters: a stale handle can keep
 		// recording losses on a sealed Writer, and every one of those is
 		// already charged to LateDrops. Folding the live value here would
@@ -439,9 +442,12 @@ func settleRetiredSyslogWritersLocked() {
 			continue
 		}
 		r.folded = cur
-		kept = append(kept, r)
+		if kept != i {
+			syslogHealth.retiring[kept] = *r
+		}
+		kept++
 	}
-	syslogHealth.retiring = kept
+	syslogHealth.retiring = syslogHealth.retiring[:kept]
 }
 
 // syslogSkippedNoWriter counts events that reached the audit/request fan-out

@@ -2858,40 +2858,53 @@ var configMetadataReaders = map[string]string{
 // a few instructions wide and cannot be scheduled through the public entry
 // points; the round-9 wall on syslogFeedState exists for the same reason and
 // for the same defect one reader earlier.
+// syslogFuncDecl parses file and returns the named top-level function.
+func syslogFuncDecl(t *testing.T, file, fn string) (*token.FileSet, *ast.FuncDecl) {
+	t.Helper()
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, file, nil, parser.ParseComments)
+	if err != nil {
+		t.Fatalf("parse %s: %v", file, err)
+	}
+	for _, d := range f.Decls {
+		if fd, ok := d.(*ast.FuncDecl); ok && fd.Name.Name == fn {
+			return fset, fd
+		}
+	}
+	return fset, nil
+}
+
+// activeSyslogCallSites returns the positions of every activeSyslog() call in
+// fd.
+func activeSyslogCallSites(fset *token.FileSet, fd *ast.FuncDecl) []string {
+	var at []string
+	ast.Inspect(fd, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		if id, ok := call.Fun.(*ast.Ident); ok && id.Name == "activeSyslog" {
+			at = append(at, fset.Position(call.Pos()).String())
+		}
+		return true
+	})
+	return at
+}
+
 func TestChaos72_ConfigMetadataReadersTakeTheWriterFromTheSnapshot(t *testing.T) {
 	checked := 0
 	for fn, file := range configMetadataReaders {
-		fset := token.NewFileSet()
-		f, err := parser.ParseFile(fset, file, nil, parser.ParseComments)
-		if err != nil {
-			t.Fatalf("parse %s: %v", file, err)
-		}
-		var body *ast.FuncDecl
-		for _, d := range f.Decls {
-			if fd, ok := d.(*ast.FuncDecl); ok && fd.Name.Name == fn {
-				body = fd
-				break
-			}
-		}
-		if body == nil {
+		fset, fd := syslogFuncDecl(t, file, fn)
+		if fd == nil {
 			t.Fatalf("%s: %s is gone; this wall names a function that no longer exists", file, fn)
 		}
 		checked++
-		ast.Inspect(body, func(n ast.Node) bool {
-			call, ok := n.(*ast.CallExpr)
-			if !ok {
-				return true
-			}
-			id, ok := call.Fun.(*ast.Ident)
-			if !ok || id.Name != "activeSyslog" {
-				return true
-			}
+		for _, at := range activeSyslogCallSites(fset, fd) {
 			t.Errorf("%s: %s calls activeSyslog() at %s\n\t"+
 				"the writer must come from syslogConfiguredSnapshot(), in the same critical section as "+
 				"the target it is reported or persisted beside; a separate load belongs to a different "+
-				"generation (Codex P2, PR #1494)", file, fn, fset.Position(call.Pos()))
-			return true
-		})
+				"generation (Codex P2, PR #1494)", file, fn, at)
+		}
 	}
 	if checked != len(configMetadataReaders) {
 		t.Fatalf("the wall resolved %d of %d readers; it proves nothing about the rest", checked, len(configMetadataReaders))
@@ -2901,27 +2914,11 @@ func TestChaos72_ConfigMetadataReadersTakeTheWriterFromTheSnapshot(t *testing.T)
 	// broken AST walk would pass forever. apiSyslogTest reads only the writer
 	// — it pairs it with nothing — so it is deliberately NOT on the list, and
 	// it is the honest positive sample.
-	fset := token.NewFileSet()
-	f, err := parser.ParseFile(fset, "ui_config.go", nil, parser.ParseComments)
-	if err != nil {
-		t.Fatalf("parse ui_config.go: %v", err)
+	fset, probe := syslogFuncDecl(t, "ui_config.go", "apiSyslogTest")
+	if probe == nil {
+		t.Fatal("control: apiSyslogTest is gone; the wall above proves nothing")
 	}
-	found := false
-	for _, d := range f.Decls {
-		fd, ok := d.(*ast.FuncDecl)
-		if !ok || fd.Name.Name != "apiSyslogTest" {
-			continue
-		}
-		ast.Inspect(fd, func(n ast.Node) bool {
-			if call, ok := n.(*ast.CallExpr); ok {
-				if id, ok := call.Fun.(*ast.Ident); ok && id.Name == "activeSyslog" {
-					found = true
-				}
-			}
-			return true
-		})
-	}
-	if !found {
+	if len(activeSyslogCallSites(fset, probe)) == 0 {
 		t.Fatal("control: the walk cannot find a known activeSyslog() call, so the wall above proves nothing")
 	}
 }
