@@ -21,6 +21,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"github.com/KidCarmi/Culvert/internal/fileutil"
 )
 
 // KeyFileName is the node-local credential key file, beside admin_settings.
@@ -65,7 +67,15 @@ func OpenKey(dir string, create bool) (*Keyring, error) {
 	if _, err := rand.Read(key); err != nil {
 		return nil, fmt.Errorf("upstream credential key: generate: %w", err)
 	}
-	if err := os.WriteFile(path, key, 0o600); err != nil { // #nosec G306 -- 0600 is intentional for a secret key
+	// SEC-SECRETWRITE-1: AtomicWrite, never os.WriteFile. The read branch
+	// above reaches this mint whenever os.ReadFile answered fs.ErrNotExist —
+	// which a DANGLING SYMLINK planted at path also produces — and
+	// os.WriteFile would then follow that link and deposit the KEK for every
+	// sealed parent-proxy password outside the data directory. AtomicWrite
+	// creates a random O_EXCL temp beside the target and renames over it, so
+	// the rename REPLACES a planted link instead of writing through it, and
+	// the mode can never be inherited from a file somebody else created.
+	if err := fileutil.AtomicWrite(path, key, 0o600); err != nil {
 		return nil, fmt.Errorf("upstream credential key: write failed: %w", err)
 	}
 	return newKeyring(key), nil
