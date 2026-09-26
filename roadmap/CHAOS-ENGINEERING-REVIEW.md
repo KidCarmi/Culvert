@@ -8964,8 +8964,8 @@ correction paragraph then stated **32**, which was also wrong: the file held
 `syslog_stats_test.go`, 3 → 4 in `syslog_handoff_format_test.go`) were right.
 
 Counts move every round, so the authoritative figure is the one in the round's
-own `Gates:` line and nowhere else. As of round 9: **37** root gates, **13**
-engine stats gates, **4** handoff gates, **14** declared controls. Recording
+own `Gates:` line and nowhere else. As of round 10: **40** root gates, **13**
+engine stats gates, **4** handoff gates, **17** declared controls. Recording
 the same total in a second place is what produced both errors; this paragraph
 survives as the record of that, not as a second source of truth.
 
@@ -9162,3 +9162,99 @@ A genuine outage is unaffected — its drops come from FAILED writes on the drai
 goroutine, there is no success to resolve them, and degradation proceeds
 normally. The residual is written into the code at the boundary it governs, not
 only here.
+
+### Round 10 — a stale-commit guard blind to the one transition it most needed to see, and a probe that re-derived its own transport
+
+**P2-13 — the round-9 fix failing in the shape its instrument cannot
+distinguish.** Round 9's P1-G guard refused a stale degradation commit with
+`syslogHealth.writer != snap.writer`. That answers "is this still the record I
+described" on every path where a Writer exists, and collapses where none does:
+a boot dial that FAILED leaves `writer == nil`, and
+`noteSyslogForwardingDisabled` ALSO sets `writer = nil`, so the comparison is
+`nil != nil` — false — and the stale callback commits.
+
+The reachable sequence is the ordinary remediation one. An operator configures
+a collector; the dial fails; the plane records the intent, installs no Writer
+and reports the feed degraded immediately (correctly — nothing retries a failed
+`InitSyslog`, so there is no transient to wait out). A snapshot of that verdict
+goes in flight. The operator gives up and disables forwarding. The commit then
+lands in the FRESH record and does two things, the second worse than the first:
+
+- it fires `syslog_feed_down` for a feature the operator has just switched off,
+  with a Detail that describes a collector nobody is asking for any more; and
+- it sets `alerted` on that record. Nothing clears that latch but an install —
+  ordinary deliveries do not invoke the observer — so the next time forwarding
+  is enabled, its **first real outage is silent**.
+
+The record now carries a monotonic `gen`, bumped by every transition that
+REPLACES what it describes (install, disable, test reset), captured into the
+snapshot and compared at commit. The pointer check is removed, not supplemented:
+a counter IS "the record changed", where the pointer was a proxy for it, and one
+predicate cannot drift against a second that is not there.
+
+`noteSyslogIntent` deliberately does not bump it. Recording an intent changes
+what the operator ASKED for, not what the record DESCRIBES, and a pending
+unmet-and-degraded verdict stays true across it; suppressing there would only
+delay a legitimate page to the next 30 s watchdog tick.
+
+**The transferable rule is round 9b's arriving from the opposite side.** There
+the lesson was to stop branching on an equivalent proxy for a claim. Here it is
+that a proxy which is equivalent on every path you tested can be silently
+non-equivalent on the one you did not: a pointer identity collapses whenever the
+pointer is nil. When a check means *this is still the same thing*, give the
+thing an identity that cannot collide with another thing's.
+
+**P2-14 — the probe inferred its transport.** `syslogDeliveryProbe` took the
+Writer as a parameter and then read `syslogHealth.target` in its own separate
+critical section, classifying a delivered ack by
+`strings.HasPrefix(target, "tcp://")`. Two reads of two different things, so a
+re-point landing between them made the endpoint describe a UDP datagram with
+the TCP sentence — "the collector accepted the test event" — for a send nothing
+may have received.
+
+UDP's inability to prove delivery is register row SL-1 and is stated on every
+other surface in this plane (`deliveryProvable:false`, the contract row's
+caveat, the "sent" rather than "delivered" wording). The one endpoint an
+operator is told to use to CONFIRM connectivity was the one that could
+contradict all of them. It is round 7's P1-C repeating on the transport instead
+of the outcome: *an endpoint whose whole job is to be believed may not infer its
+answer.*
+
+`Writer.DeliveryProvable()` reads the transport off the Writer it was
+constructed with, so the answer belongs to the generation that served the line
+by construction rather than by timing. The snapshot's own UDP caveat needed no
+change — round 9 already made `target` and `described` a single locked read,
+which is why the same defect did not reach the contract row.
+
+**Gates.** `TestChaos72_DisabledFeedDoesNotInheritAnInFlightDegradation` and
+`TestChaos72_ProbeClassifiesTransportFromTheWriterThatServedIt`, each with its
+own control, the round-9 P1-G gate updated to carry generations, and
+`TestChaos72_EveryRecordTransitionAdvancesTheGeneration` as a structural wall.
+
+Mutations, each verified failing the gate that targets it: the reverted pointer
+comparison (both halves — it pages AND latches), the reverted target-string
+classification, `DeliveryProvable` hardwired false (which fails BOTH the new
+control and the pre-existing `ProbeReportsTheRealOutcome`), a commit half that
+refuses every snapshot (which fails both stale-commit gates' controls), and
+each of the three generation bumps dropped in turn.
+
+**The wall needed the wall.** The stale-commit guard now rests on the
+generation, so a future transition that swaps `writer` without bumping `gen`
+reopens the defect — and no behavioural gate can reach that, because the three
+sites are correct today and a fourth would simply not be exercised by any
+existing test. Hence the structural wall. Its FIRST shape was vacuous, in the
+way this file keeps recording: it drove its install step through
+`armSyslogFeed`, which resets the record first, so the reset's own bump masked
+a missing bump at the install site and the wall passed against a tree that had
+dropped it. That was found by mutating the code, not by reading the wall. The
+same masking then appeared one step over — the reset was stepped AFTER the
+disable, where no writer change occurs at all, so its own bump was unwalled
+too. It now drives `noteSyslogWriterInstalled`, `noteSyslogForwardingDisabled`
+and `resetSyslogHealthForTest` directly, and steps the reset while a writer is
+installed.
+
+*A wall that runs its subject through a convenience helper inherits that
+helper's side effects, and a side effect that performs the very thing you are
+pinning makes the wall unfalsifiable. Step the transition itself, and mutate
+each site to prove the wall can see it — including the sites that look too
+obvious to check.*

@@ -893,6 +893,25 @@ endpoints for credentialed parents.
   deliberately not counted as drops: they reached a collector, and
   `culvert_syslog_drops_total` measures events that reached no SIEM at all.
 
+- **Disabling an unreachable SIEM collector could page about it and silence
+  the NEXT one (CHAOS-72).** The guard that refuses a stale degradation commit
+  compared the writer pointer the snapshot was taken from against the one the
+  record now holds. A collector whose dial failed leaves no writer, and
+  disabling forwarding also leaves no writer, so `nil != nil` was false and the
+  stale commit landed anyway: it fired `syslog_feed_down` for a feature the
+  operator had just switched off, and set that record's fire-once latch, so the
+  first real outage after forwarding was next enabled would have been silent.
+  The health record now carries a generation bumped by every install, disable
+  and reset, and the commit compares that instead — an identity rather than a
+  pointer that can collide with another absent writer's.
+- **`POST /api/syslog/test` could report a UDP datagram as accepted by the
+  collector (CHAOS-72).** The probe took the writer it sent through as an
+  argument but then read the configured target address separately to decide
+  whether the transport can prove delivery, so a collector re-pointed between
+  the two reads made it answer *"the collector accepted the test event"* for a
+  datagram nothing may have received. UDP cannot confirm receipt, which every
+  other surface says; the probe now asks the writer that served the line.
+
 - **A SIEM event lost while a write was in flight could report the feed DOWN
   even though that write succeeded (CHAOS-72).** The failure count was read
   when the delivery began rather than when its write completed, so a

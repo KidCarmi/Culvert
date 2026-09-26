@@ -207,6 +207,12 @@ POST /api/syslog/test        (admin)
 > the delivery goroutine — not an inference from the node's overall delivery
 > counters, which on a busy gateway would let another request's success be
 > reported as the probe's.
+>
+> `delivered` vs `sent` is likewise read off the **writer that sent the line**,
+> not off the currently configured address. The probe used to re-read the
+> target string after the send, so a collector re-pointed between the two made
+> it answer `delivered` — "the collector accepted the test event" — for a UDP
+> datagram nothing may have received.
 
 ---
 

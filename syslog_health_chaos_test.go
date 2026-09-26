@@ -1303,9 +1303,15 @@ func TestChaos72_StaleDegradationSnapshotNeitherPagesNorLatches(t *testing.T) {
 	t.Cleanup(func() { _ = successor.Close() })
 
 	// The record describes the SUCCESSOR; the in-flight snapshot describes the
-	// writer it displaced.
+	// writer it displaced, and was therefore taken from an EARLIER generation.
 	noteSyslogWriterInstalled(successor, "udp://127.0.0.1:65533")
-	stale := syslogFeedSnapshot{Configured: true, Degraded: true, writer: displaced, Age: 10 * time.Minute}
+	syslogHealth.mu.Lock()
+	liveGen := syslogHealth.gen
+	syslogHealth.mu.Unlock()
+	if liveGen == 0 {
+		t.Fatal("precondition: installing a writer must advance the record generation")
+	}
+	stale := syslogFeedSnapshot{Configured: true, Degraded: true, writer: displaced, gen: liveGen - 1, Age: 10 * time.Minute}
 
 	commitSyslogDegradation(stale)
 	if len(fired) != 0 {
@@ -1321,7 +1327,7 @@ func TestChaos72_StaleDegradationSnapshotNeitherPagesNorLatches(t *testing.T) {
 	// CONTROL: the live writer's own snapshot still pages. A commit half that
 	// refused everything would pass every assertion above while deleting the
 	// alert.
-	live := syslogFeedSnapshot{Configured: true, Degraded: true, writer: successor, Age: 10 * time.Minute}
+	live := syslogFeedSnapshot{Configured: true, Degraded: true, writer: successor, gen: liveGen, Age: 10 * time.Minute}
 	commitSyslogDegradation(live)
 	if len(fired) != 1 {
 		t.Fatalf("the live writer's own degradation fired %d alerts; want 1", len(fired))
@@ -1941,4 +1947,212 @@ func TestChaos72_RecordWriterPairingIsAnInvariant(t *testing.T) {
 		t.Fatal("control: the pairing check cannot observe a divergence, so it proves nothing")
 	}
 	resetSyslogHealthForTest()
+}
+
+// A degradation snapshotted against a configured-but-unreachable feed must not
+// be committed into the record of a feed the operator has since DISABLED
+// (CHAOS-72, Codex P2 round 10).
+//
+// Round 9 closed the stale-commit window with a pointer comparison against the
+// snapshot's Writer. That answered the question everywhere except the one case
+// that matters most here: a boot dial that FAILED leaves `writer == nil`, and
+// `noteSyslogForwardingDisabled` also sets `writer = nil`, so
+// `syslogHealth.writer != snap.writer` is `nil != nil` — false, and the stale
+// callback committed anyway. It paged `syslog_feed_down` for a feature the
+// operator had just switched off, and set `alerted` on the fresh record, so
+// the next time forwarding is enabled its first real outage is silent. That is
+// the P1-G defect surviving in the one shape a pointer cannot see, on exactly
+// the transition an operator makes to remediate an unreachable collector.
+//
+// The window is microseconds wide and cannot be scheduled through the public
+// entry point, so the commit half is driven directly — the same reason the
+// round-9 gate above does.
+func TestChaos72_DisabledFeedDoesNotInheritAnInFlightDegradation(t *testing.T) {
+	ensureObservabilityStartupTestLogger(t)
+	snapshotObservabilityGlobals(t)
+	resetSyslogHealthForTest()
+	t.Cleanup(resetSyslogHealthForTest)
+
+	var fired []string
+	prev := fireSyslogFeedDownAlert
+	fireSyslogFeedDownAlert = func(d string) { fired = append(fired, d) }
+	t.Cleanup(func() { fireSyslogFeedDownAlert = prev })
+
+	// An operator asks for a collector whose dial fails: intent recorded, no
+	// Writer installed. Nothing retries, so the plane reports it degraded
+	// immediately — this is the snapshot that goes in flight.
+	noteSyslogIntent("tcp://siem.invalid:601")
+	snap := syslogFeedState()
+	if !snap.IntentUnmet || snap.writer != nil {
+		t.Fatalf("precondition: want an unmet intent with NO writer, got IntentUnmet=%v writer=%v", snap.IntentUnmet, snap.writer)
+	}
+	if !snap.Degraded {
+		t.Fatal("precondition: an unmet intent must report degraded, or this gate commits nothing")
+	}
+
+	// The operator gives up and turns forwarding off.
+	noteSyslogForwardingDisabled()
+
+	commitSyslogDegradation(snap)
+	if len(fired) != 0 {
+		t.Errorf("a snapshot taken before the operator disabled forwarding paged about the disabled feed: %q", fired)
+	}
+	syslogHealth.mu.Lock()
+	latched := syslogHealth.alerted
+	syslogHealth.mu.Unlock()
+	if latched {
+		t.Fatal("the stale commit latched the record of a DISABLED feed — the next enabled collector's first real outage would be silent, and nothing but an install clears the latch")
+	}
+
+	// CONTROL: the same shape, committed against the generation it was taken
+	// from, must still page. The cheapest way to pass every assertion above is
+	// a commit half that refuses everything, which would delete the alert this
+	// whole plane exists to produce.
+	resetSyslogHealthForTest()
+	noteSyslogIntent("tcp://siem.invalid:601")
+	fresh := syslogFeedState()
+	if !fresh.Degraded {
+		t.Fatal("control precondition: the control snapshot is not degraded")
+	}
+	commitSyslogDegradation(fresh)
+	if len(fired) != 1 {
+		t.Fatalf("a live unmet intent fired %d alerts; want 1", len(fired))
+	}
+}
+
+// The probe must classify its transport from the WRITER that served the line,
+// never from an address string read separately (CHAOS-72, Codex P2 round 10).
+//
+// syslogDeliveryProbe took the Writer as a parameter and then read
+// `syslogHealth.target` in its own critical section afterwards. Those are two
+// reads of two different things, so an admin re-point landing between them
+// made the endpoint describe a UDP datagram with the TCP sentence — "the
+// collector accepted the test event" — for a send nothing may have received.
+// UDP's inability to prove delivery is register row SL-1 and is stated on
+// every other surface in this plane; the one endpoint an operator is told to
+// use to CONFIRM connectivity was the one that could contradict it.
+func TestChaos72_ProbeClassifiesTransportFromTheWriterThatServedIt(t *testing.T) {
+	armSyslogFeed(t, "udp://127.0.0.1:65533")
+	sw := activeSyslog()
+	if sw == nil {
+		t.Fatal("precondition: no writer was installed")
+	}
+
+	// Simulate the re-point window: the record now names a TCP collector while
+	// the Writer the probe was handed is still the UDP one.
+	syslogHealth.mu.Lock()
+	syslogHealth.target = "tcp://siem-b.invalid:601"
+	syslogHealth.mu.Unlock()
+
+	outcome, detail := syslogDeliveryProbe(sw)
+	if outcome == "delivered" {
+		t.Errorf("the probe reported %q for a UDP datagram because the record named a tcp:// target: %s", outcome, detail)
+	}
+	if outcome != "sent" {
+		t.Fatalf("probe outcome = %q (%s); want \"sent\" for a UDP writer", outcome, detail)
+	}
+
+	// CONTROL: a TCP writer must still report delivery, and must do so even
+	// when the record names a udp:// target. The cheapest way to pass the
+	// assertion above is to answer "sent" unconditionally, which would delete
+	// the only affirmative delivery evidence this endpoint can give.
+	col := startSyslogCollector(t)
+	armSyslogFeed(t, "tcp://"+col.addr)
+	tcpWriter := activeSyslog()
+	if tcpWriter == nil {
+		t.Fatal("control precondition: no TCP writer was installed")
+	}
+	syslogHealth.mu.Lock()
+	syslogHealth.target = "udp://siem-c.invalid:514"
+	syslogHealth.mu.Unlock()
+	if outcome, detail := syslogDeliveryProbe(tcpWriter); outcome != "delivered" {
+		t.Errorf("control: a TCP writer reported %q (%s); want \"delivered\" regardless of what the record names", outcome, detail)
+	}
+}
+
+// Every transition that CHANGES what the health record describes must advance
+// its generation (CHAOS-72, Codex P2 round 10).
+//
+// The stale-commit guard is now `syslogHealth.gen != snap.gen`, so a future
+// transition that swaps `writer` without bumping `gen` silently reopens the
+// defect: a snapshot from before it would commit into the record after it,
+// paging about the old feed and latching the new one. No behavioural gate can
+// reach that — the sites are correct today and a new one would simply not be
+// exercised by any existing test — so the invariant is pinned over the real
+// transitions rather than left to review.
+//
+// Stated as "writer changed ⇒ gen advanced", not as an exact bump count: the
+// point is that the identity cannot be reused, and extra bumps are harmless
+// (they only ever refuse a stale commit that would have been refused anyway).
+func TestChaos72_EveryRecordTransitionAdvancesTheGeneration(t *testing.T) {
+	read := func() (*syslogWriter, uint64) {
+		syslogHealth.mu.Lock()
+		defer syslogHealth.mu.Unlock()
+		return syslogHealth.writer, syslogHealth.gen
+	}
+	step := func(stage string, fn func()) {
+		t.Helper()
+		beforeW, beforeG := read()
+		fn()
+		afterW, afterG := read()
+		if beforeW != afterW && afterG <= beforeG {
+			t.Errorf("%s: the record's writer changed (%p -> %p) but the generation did not advance (%d -> %d) — "+
+				"a snapshot taken before this transition would still be accepted by commitSyslogDegradation, "+
+				"which is the stale-commit defect reopened", stage, beforeW, afterW, beforeG, afterG)
+		}
+	}
+
+	ensureObservabilityStartupTestLogger(t)
+	snapshotObservabilityGlobals(t)
+	resetSyslogHealthForTest()
+	t.Cleanup(resetSyslogHealthForTest)
+
+	// The transitions are driven DIRECTLY, not through armSyslogFeed: that
+	// helper resets the record first, and the reset's own bump would mask a
+	// missing one at the install site — the wall would then pass against a
+	// tree that had dropped it. (Verified: it did, before this was changed.)
+	sw1, err := newSyslogWriter("udp", "127.0.0.1:65533", "rfc3164")
+	if err != nil {
+		t.Fatalf("building the first writer: %v", err)
+	}
+	t.Cleanup(func() { _ = sw1.Close() })
+	sw2, err := newSyslogWriter("udp", "127.0.0.1:65532", "rfc3164")
+	if err != nil {
+		t.Fatalf("building the second writer: %v", err)
+	}
+	t.Cleanup(func() { _ = sw2.Close() })
+
+	step("install", func() { noteSyslogWriterInstalled(sw1, "udp://127.0.0.1:65533") })
+	step("re-point", func() { noteSyslogWriterInstalled(sw2, "udp://127.0.0.1:65532") })
+	// An intent that does not change the writer need not bump; the invariant
+	// is one-directional and this exercises that it does not over-claim.
+	step("intent superseded", func() { noteSyslogIntent("tcp://siem-b.invalid:514") })
+	// The reset is stepped while a writer is INSTALLED. Stepping it after the
+	// disable would observe no writer change at all, so a tree that had
+	// dropped its bump would pass — the same masking the install site had.
+	// It is not test-only plumbing: a snapshot from one gate committing into
+	// the next gate's record is exactly the cross-test pollution this record's
+	// isolation exists to prevent.
+	step("reset while installed", resetSyslogHealthForTest)
+	step("re-install", func() { noteSyslogWriterInstalled(sw1, "udp://127.0.0.1:65533") })
+	step("disable", func() { noteSyslogForwardingDisabled() })
+
+	// CONTROL: the wall must be able to SEE a violation, or a selector that
+	// matched nothing would pass forever.
+	sw, err := newSyslogWriter("udp", "127.0.0.1:65533", "rfc3164")
+	if err != nil {
+		t.Fatalf("building a writer for the control: %v", err)
+	}
+	t.Cleanup(func() { _ = sw.Close() })
+	beforeW, beforeG := read()
+	syslogHealth.mu.Lock()
+	syslogHealth.writer = sw // deliberately without bumping gen
+	syslogHealth.mu.Unlock()
+	afterW, afterG := read()
+	if !(beforeW != afterW && afterG <= beforeG) {
+		t.Fatal("control: the invariant cannot observe a writer swap that skips the bump, so it proves nothing")
+	}
+	syslogHealth.mu.Lock()
+	syslogHealth.writer = nil
+	syslogHealth.mu.Unlock()
 }

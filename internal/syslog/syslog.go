@@ -893,6 +893,24 @@ type Stats struct {
 	LastFailureReason string
 }
 
+// DeliveryProvable reports whether this Writer's transport can give evidence
+// that the collector received a line.
+//
+// TCP can: a write that returns without error means the peer's kernel accepted
+// the bytes. UDP cannot — a write to a connected UDP socket almost always
+// succeeds whether or not anything is listening — so a `Delivered` on a UDP
+// Writer means only "this host sent the datagram" (register row SL-1).
+//
+// It is a property of the WRITER, read off the transport it was constructed
+// with, deliberately not re-derived from an address string held elsewhere. The
+// probe used to classify its own acknowledged send by re-reading the health
+// record's `target` AFTER the Writer had been passed in, so an admin re-point
+// landing between the two made it describe a UDP send with TCP wording — "the
+// collector accepted the test event" — for a datagram nothing may have
+// received (Codex P2, PR #1494). The writer that served the line is the only
+// thing that knows how it was sent.
+func (s *Writer) DeliveryProvable() bool { return s.network == "tcp" }
+
 // Stats snapshots the delivery counters.
 //
 // Read order is deliberate and is the only consistency guarantee offered: the

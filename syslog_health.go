@@ -218,6 +218,33 @@ type syslogHealthRecord struct {
 	// mid-update.
 	writer *syslogWriter
 
+	// gen is a monotonic identity for the RECORD, bumped by every transition
+	// that replaces what the record describes: an install, a disable, a test
+	// reset. A snapshot captures it and the commit half compares it, which is
+	// the direct statement of "this record is still the one I described".
+	//
+	// It replaces a pointer comparison against `writer`, which answered the
+	// same question everywhere EXCEPT the one case that matters most: a boot
+	// dial that failed leaves `writer == nil`, and `noteSyslogForwardingDisabled`
+	// also sets `writer = nil`, so `syslogHealth.writer != snap.writer` is
+	// `nil != nil` — false. A snapshot taken while a collector was configured
+	// and unreachable therefore committed into the record of a feed the
+	// operator had just TURNED OFF: it fired `syslog_feed_down` for a disabled
+	// feature and, worse, set `alerted` on the fresh record, so the next time
+	// forwarding is enabled its first real outage is silent (Codex P2,
+	// PR #1494). That is exactly the P1-G defect the pointer check was added
+	// to close, surviving in the one shape a pointer cannot distinguish.
+	//
+	// A counter is not a proxy for the claim the way the pointer was — it IS
+	// "the record changed" — and it subsumes the pointer check rather than
+	// sitting beside it, so there is no second predicate to drift.
+	//
+	// noteSyslogIntent deliberately does NOT bump it: recording an intent
+	// changes what the operator ASKED for, not what the record DESCRIBES, and
+	// a pending unmet-degraded verdict stays true across it. Suppressing there
+	// would only delay a legitimate page to the next 30 s watchdog tick.
+	gen uint64
+
 	alerted    bool
 	logAt      time.Time
 	suppressed int64
@@ -294,6 +321,7 @@ func noteSyslogWriterInstalled(sw *syslogWriter, target string) {
 	syslogHealth.installedAt = syslogHealthNow()
 	syslogHealth.target = target
 	syslogHealth.writer = sw
+	syslogHealth.gen++
 	// An installed Writer IS a satisfied intent, whatever was recorded before.
 	// Without this the admin re-point path — which never calls
 	// noteSyslogIntent, because it refuses a failed dial with a 400 — would
@@ -409,6 +437,7 @@ func noteSyslogForwardingDisabled() {
 	syslogHealth.intentAt = time.Time{}
 
 	syslogHealth.writer = nil
+	syslogHealth.gen++
 	syslogHealth.alerted = false
 	syslogHealth.logAt = time.Time{}
 	syslogHealth.suppressed = 0
@@ -453,12 +482,18 @@ func commitSyslogDegradation(snap syslogFeedSnapshot) {
 	}
 
 	syslogHealth.mu.Lock()
-	// The record may have been REPLACED since this snapshot was taken (an
-	// admin re-point runs noteSyslogWriterInstalled, which resets the latch
-	// for the new writer). Committing here would page about the old target
-	// and, worse, leave the NEW record latched — silencing the replacement's
-	// first real outage. The replacement's own evaluation reports it.
-	if syslogHealth.writer != snap.writer {
+	// The record may have been REPLACED since this snapshot was taken — an
+	// admin re-point (noteSyslogWriterInstalled) or a disable
+	// (noteSyslogForwardingDisabled), both of which reset the latch.
+	// Committing here would page about the old feed and, worse, leave the NEW
+	// record latched — silencing its first real outage. The replacement's own
+	// evaluation reports it.
+	//
+	// Compared by GENERATION, not by writer pointer: a boot dial that failed
+	// and a disabled feed both leave `writer == nil`, so the pointer form was
+	// blind to precisely the transition an operator makes to REMEDIATE an
+	// unreachable collector (Codex P2, PR #1494) — see syslogHealthRecord.gen.
+	if syslogHealth.gen != snap.gen {
 		syslogHealth.mu.Unlock()
 		return
 	}
@@ -663,14 +698,20 @@ type syslogFeedSnapshot struct {
 	// UDP records that this feed cannot prove delivery; see the header.
 	UDP bool
 
-	// writer is the Writer this snapshot describes. A caller that SNAPSHOTS
-	// and then COMMITS a decision under the lock must check it still holds:
-	// an admin re-point between the two installs a new record, and a stale
-	// callback committing into it fires a page describing the OLD target AND
-	// sets the new record's fire-once latch — which then suppresses the
-	// replacement's first real outage, because ordinary deliveries do not
-	// invoke the observer and nothing else clears it (Codex P1, PR #1494).
+	// writer is the Writer this snapshot describes. Read by the wording branch
+	// in commitSyslogDegradation, which makes a claim about whether anything
+	// is SERVING the feed and so must branch on the field that IS that claim.
 	writer *syslogWriter
+	// gen is the record generation this snapshot was taken from. A caller that
+	// SNAPSHOTS and then COMMITS a decision under the lock must check it still
+	// holds: an admin re-point or a disable between the two replaces the
+	// record, and a stale callback committing into it fires a page describing
+	// the OLD feed AND sets the new record's fire-once latch — which then
+	// suppresses the replacement's first real outage, because ordinary
+	// deliveries do not invoke the observer and nothing else clears it
+	// (Codex P1 then P2, PR #1494). See syslogHealthRecord.gen for why a
+	// pointer comparison against `writer` was not sufficient.
+	gen uint64
 }
 
 // syslogFeedState derives the current posture from the Writer's own stats plus
@@ -685,6 +726,7 @@ func syslogFeedState() syslogFeedSnapshot {
 	installedAt := syslogHealth.installedAt
 	target := syslogHealth.target
 	described := syslogHealth.writer
+	gen := syslogHealth.gen
 	intendedTarget := syslogHealth.intendedTarget
 	intentAt := syslogHealth.intentAt
 	retiredDelivered := syslogHealth.retiredDelivered
@@ -701,6 +743,7 @@ func syslogFeedState() syslogFeedSnapshot {
 	now := syslogHealthNow()
 	snap := syslogFeedSnapshot{
 		writer:     described,
+		gen:        gen,
 		Configured: configured,
 		Intended:   intendedTarget != "",
 		UDP:        !strings.HasPrefix(strings.ToLower(caveatTarget), "tcp://"),
@@ -1037,10 +1080,6 @@ func syslogDeliveryProbe(sw *syslogWriter) (outcome string, detail string) {
 	if sw == nil {
 		return "unconfigured", "no collector is configured"
 	}
-	syslogHealth.mu.Lock()
-	target := syslogHealth.target
-	syslogHealth.mu.Unlock()
-
 	// WriteProbe reports the outcome of THIS message, from the drain
 	// goroutine. The first shape of this function compared writer-wide
 	// Delivered/Drops counters around the write, which is not the same
@@ -1064,7 +1103,15 @@ func syslogDeliveryProbe(sw *syslogWriter) (outcome string, detail string) {
 		if !delivered {
 			return "dropped", "the test event was lost before reaching the collector (" + reasonOrUnknown(sw.Stats().LastFailureReason) + ")"
 		}
-		if !strings.HasPrefix(strings.ToLower(target), "tcp://") {
+		// Asked of the WRITER that served this line, never of a target
+		// string read separately from the health record: those are two reads
+		// of two different things, and an admin re-point between them made
+		// this endpoint describe a UDP datagram with the TCP sentence — "the
+		// collector accepted the test event" — for a send nothing may have
+		// received (Codex P2, PR #1494). The probe's whole job is to be
+		// believed; it may not infer its transport any more than it may infer
+		// its outcome.
+		if !sw.DeliveryProvable() {
 			return "sent", "datagram sent; UDP cannot confirm the collector received it — use tcp:// for delivery evidence"
 		}
 		return "delivered", "the collector accepted the test event"
@@ -1090,6 +1137,7 @@ func resetSyslogHealthForTest() {
 	syslogHealth.intentAt = time.Time{}
 
 	syslogHealth.writer = nil
+	syslogHealth.gen++
 	syslogHealth.alerted = false
 	syslogHealth.logAt = time.Time{}
 	syslogHealth.suppressed = 0
