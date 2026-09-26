@@ -21,6 +21,7 @@ package threatfeed
 //	go test -run '^$' -bench 'BenchmarkFeedCheckRequestURL' -benchmem -count=6 ./internal/threatfeed/
 
 import (
+	"math"
 	"net/url"
 	"testing"
 )
@@ -145,9 +146,38 @@ func TestBenchGate_CheckRequestURLAllocs(t *testing.T) {
 
 // TestBenchGate_CheckRequestURLBeatsLegacy is the timing half, expressed as a
 // RATIO measured in ONE run so it is machine-independent and needs no
-// re-baselining. The bound is deliberately loose (the measured saving is far
-// larger) because its job is to catch the round trip coming back, not to police
+// re-baselining. Its job is to catch the round trip coming back, not to police
 // a few nanoseconds.
+//
+// The two arms are INTERLEAVED and each is scored by its MINIMUM sample, and
+// that is a correctness property of the gate rather than a refinement. The
+// first shape measured each arm exactly once, back to back, and compared them
+// strictly (`fast >= legacy` fails) — which reads as a tight gate and is in
+// fact a coin flip on a contended runner. Observed on CI: 7139 ns/op against
+// 7115 ns/op, a 0.3% inversion, where the honest margin is ~2.3x (this box:
+// 318-465 ns fast against 821-921 ns legacy).
+//
+// Read those numbers and the failure mode is plain. The fast arm came out ~19x
+// its true cost, so the benchmark was not measuring the function; and both arms
+// landed within 0.3% of each other rather than staying 2.3x apart, so the
+// interference was ADDITIVE per op, not a multiplicative slowdown — additive
+// noise compresses any ratio toward 1.0. The arms then run about a second
+// apart, so whichever one happened to straddle a load change lost, and the
+// SIGN of a 0.3% difference is decided by drift rather than by the code.
+//
+// Interleaving puts both arms under the same conditions round by round, and the
+// minimum is the least-contaminated sample of each — noise only ever adds. The
+// assertion itself is UNCHANGED and still strict: the fast path must come out
+// ahead. This makes the measurement trustworthy; it does not make the bound
+// forgiving, and it must not be "simplified" into a tolerance. A permissive
+// ratio would be the wrong repair in the other direction — the regression this
+// exists to catch (the parsed-URL fast path reverting to a String()/Parse()
+// round trip) lands the two arms at parity, which is precisely what a
+// tolerance would wave through.
+//
+// TestBenchGate_CheckRequestURLAllocs above is the hardware-independent half
+// and carries the same property deterministically; this arm is the corroborating
+// one, so it must not be the reason a PR is red at random.
 func TestBenchGate_CheckRequestURLBeatsLegacy(t *testing.T) {
 	if testing.Short() {
 		t.Skip("timing gate")
@@ -158,18 +188,24 @@ func TestBenchGate_CheckRequestURLBeatsLegacy(t *testing.T) {
 	// Both arms assign into the same package-level sink so neither can be
 	// optimised away differently from the other; the verdict itself is not
 	// under test here (the differential covers it).
-	fast := testing.Benchmark(func(b *testing.B) {
-		for i := 0; i < b.N; i++ {
-			gateSink, _ = tf.CheckRequestURL(u)
-		}
-	})
-	legacy := testing.Benchmark(func(b *testing.B) {
-		for i := 0; i < b.N; i++ {
-			gateSink, _ = tf.CheckURL(u.String())
-		}
-	})
-	if fast.NsPerOp() >= legacy.NsPerOp() {
-		t.Errorf("CheckRequestURL %d ns/op is not faster than CheckURL(u.String()) %d ns/op",
-			fast.NsPerOp(), legacy.NsPerOp())
+	measure := func(fn func()) int64 {
+		return testing.Benchmark(func(b *testing.B) {
+			for i := 0; i < b.N; i++ {
+				fn()
+			}
+		}).NsPerOp()
+	}
+
+	const rounds = 3
+	fast, legacy := int64(math.MaxInt64), int64(math.MaxInt64)
+	for i := 0; i < rounds; i++ {
+		// Alternate within the round so a load change between the two
+		// measurements cannot systematically favour either arm.
+		fast = min(fast, measure(func() { gateSink, _ = tf.CheckRequestURL(u) }))
+		legacy = min(legacy, measure(func() { gateSink, _ = tf.CheckURL(u.String()) }))
+	}
+	if fast >= legacy {
+		t.Errorf("CheckRequestURL %d ns/op is not faster than CheckURL(u.String()) %d ns/op "+
+			"(best of %d interleaved rounds each)", fast, legacy, rounds)
 	}
 }
