@@ -54,7 +54,7 @@ type FileConfig struct {
 		IPFilterMode  string   `yaml:"ip_filter_mode"`   // "allow" | "block" | ""
 		IPList        []string `yaml:"ip_list"`          // IPs or CIDRs
 		RateLimit     int      `yaml:"rate_limit"`       // max requests per minute (0=off). Deprecated: use rate_limit_rpm (RateLimitRPM below) — the name every other surface (admin API, CP->DP wire, config-version diff, /metrics) already uses (terminology governance T-29).
-		RateLimitRPM  int      `yaml:"rate_limit_rpm"`   // max requests per minute per IP (0=off); canonical key, matches rate_limit_rpm on every other surface. rate_limit is a deprecated alias, reconciled in reconcileDeprecatedRateLimitKey.
+		RateLimitRPM  *int     `yaml:"rate_limit_rpm"`   // max requests per minute per IP (0=off); canonical key, matches rate_limit_rpm on every other surface. Pointer so an explicit "rate_limit_rpm: 0" (disable via the canonical key during a migration window where the deprecated rate_limit is still nonzero) is distinguishable from the key being absent — mirrors reconcileDeprecatedDPIKeys' use of slice nil-vs-non-nil for the same reason. rate_limit is a deprecated alias, reconciled in reconcileDeprecatedRateLimitKey.
 		MaxConnsPerIP int      `yaml:"max_conns_per_ip"` // max concurrent connections per IP (0=off)
 	} `yaml:"security"`
 
@@ -516,14 +516,20 @@ func loadFileConfig(path string) (*FileConfig, error) {
 // governance T-29: the per-IP rate limit is named rate_limit_rpm on every
 // other live surface — admin-settings persistence, the JSON API, the CP->DP
 // wire, config-version diffs, and the culvert_rate_limit_rpm metric — and
-// rate_limit was the lone YAML/CLI outlier). The canonical key wins when
-// both are set to a nonzero value; the deprecated key still works but logs a
-// one-line startup notice so operators can migrate on their own schedule.
-// Downstream code keeps reading fc.Security.RateLimit unchanged — this is
-// the single reconciliation point, mirroring reconcileDeprecatedDPIKeys.
+// rate_limit was the lone YAML/CLI outlier). The canonical key wins whenever
+// it is PRESENT, including an explicit "rate_limit_rpm: 0" — an operator
+// migrating from the deprecated key while it is still nonzero must be able
+// to disable rate limiting via the canonical key alone (PR #1504 review).
+// Precedence is decided by pointer presence (nil vs. non-nil), not by
+// whether the decoded value is nonzero — the same reasoning
+// reconcileDeprecatedDPIKeys applies to dpi_patterns via slice presence. The
+// deprecated key still works, unchanged, when the canonical key is absent,
+// and logs a one-line startup notice so operators can migrate on their own
+// schedule. Downstream code keeps reading fc.Security.RateLimit unchanged —
+// this is the single reconciliation point.
 func (fc *FileConfig) reconcileDeprecatedRateLimitKey() {
-	if fc.Security.RateLimitRPM != 0 {
-		fc.Security.RateLimit = fc.Security.RateLimitRPM
+	if fc.Security.RateLimitRPM != nil {
+		fc.Security.RateLimit = *fc.Security.RateLimitRPM
 	} else if fc.Security.RateLimit != 0 {
 		fmt.Printf("[Culvert] config: %q is deprecated, use %q instead\n", "rate_limit", "rate_limit_rpm")
 	}
@@ -647,8 +653,8 @@ func (fc *FileConfig) validateLimits() []string {
 	if n := fc.Security.RateLimit; n < 0 {
 		errs = append(errs, fmt.Sprintf("security.rate_limit: must be >= 0, got %d", n))
 	}
-	if n := fc.Security.RateLimitRPM; n < 0 {
-		errs = append(errs, fmt.Sprintf("security.rate_limit_rpm: must be >= 0, got %d", n))
+	if n := fc.Security.RateLimitRPM; n != nil && *n < 0 {
+		errs = append(errs, fmt.Sprintf("security.rate_limit_rpm: must be >= 0, got %d", *n))
 	}
 
 	return errs
