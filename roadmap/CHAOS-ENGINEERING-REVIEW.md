@@ -8746,6 +8746,65 @@ it is trying not to disturb; the honest trade is to take the extra CI cycle
 rather than hold a durable commit for it, because the container is ephemeral
 and the run is not.
 
+### Codex review round 10 — one finding, and it retires the comparison round 9 added
+
+**A SAME-SOURCE REFRESH HAS THE SAME SOURCE AND A DIFFERENT GENERATION (P2).**
+Round 9 closed the repoint case by comparing the profile's current remote source
+against the victim's. That comparison cannot see the other shape of the same
+race: an `Upsert` or `ReplaceAll` that re-fetches **fresh** metadata from the
+**same** endpoint inside the sweep→lock window publishes a newly compiled,
+healthy provider whose source is unchanged. The comparison passes, and the
+retirement deletes a provider that had just been refreshed — SSO dark for that
+profile until the recovery loop runs.
+
+Reproduced against the round-9 tree before anything was changed: two successive
+`Upsert`s on one source, then `retireStaleProvider(id, source)` returns true and
+`HasEnabledInteractiveProvider` reports false.
+
+**The instrument was wrong, and three rounds on one function is what says so.**
+Round 9 compared the source; round 10 shows a comparison cannot distinguish a
+generation. This review's own rule applies — *three rounds of patching a
+heuristic is evidence the state was keyed wrongly* — so the fix is not a second
+comparison bolted beside the first.
+
+The stale-serve stamp already **is** the generation token: a fresh compile for a
+`(profile, source)` deletes the episode that carries it (`noteIdPMetadataOutcome`,
+`idpMetaFresh`). So the retirement stops comparing and starts **claiming**:
+
+- `idpStaleCeilingSweep` no longer zeroes `servedFetchedAt` on selection.
+  *Selection is not adjudication* — and zeroing there is precisely what left the
+  retirement with nothing but the source to reason about.
+- `retireStaleProvider` calls `idpClaimStaleServe(profile, source, servedAt)`,
+  which under `idpMetadata.mu` requires the episode to still carry that exact
+  stamp, consumes it, and reports whether it was current.
+
+> **One document, one adjudication — moved from SELECTION time to CLAIM time.**
+
+That also closes a residual round 8 left: a victim selected but never retired
+(the profile was deleted mid-sweep) had its evidence consumed by the selection
+and could never be swept again. Now only an adjudication consumes it.
+
+**The new lock edge is `r.mu` → `idpMetadata.mu`**, and it is sound because
+nothing in the tree holds `idpMetadata.mu` across a call into the registry — the
+sweep releases it first, deliberately, which is what round 8 did to avoid an
+inversion. Recorded at the call site so nobody adds the opposite edge.
+
+Two test-authoring notes worth keeping, both found by the gates failing:
+
+- `noteIdPStaleDocumentServed` only stamps an episode that **already exists**;
+  production calls it immediately after the stale outcome opens one. A helper
+  that seeds only the stamp records nothing, so the gate would have asserted
+  against a retirement that can never claim anything — green for the wrong
+  reason. `chaos71SeedStaleServe` mirrors the production pair.
+- The round-8 "reported ONCE" assertion was pinning selection-time consumption,
+  which is the behaviour this round deliberately changes. It now pins the real
+  contract: an unclaimed document stays selectable, a **claimed** one never is,
+  and a stamp cannot be claimed twice.
+
+Mutations: reverting to round 9's source-only check fails the new defect gate
+*and* the control's consume assertion; a never-retire body fails rounds 8, 9 and
+10's controls together.
+
 ### Codex review round 9 — one finding, a TOCTOU in round 8's own retirement path
 
 **THE SOURCE IS PART OF THE RETIREMENT VERDICT, NOT DECORATION (P2).**

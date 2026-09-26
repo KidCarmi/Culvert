@@ -201,29 +201,45 @@ func copyDiscoveredOIDCEndpoints(dst, src *IdPProfile) {
 // repointed profile is no longer serving the expired document at all, and if
 // its new source also falls back to cache it records its own fetch time and is
 // swept on its own.
-func (r *IdPRegistry) retireStaleProvider(profileID, source string) bool {
+func (r *IdPRegistry) retireStaleProvider(profileID, source string, servedAt time.Time) bool {
 	if profileID == "" {
 		return false
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if _, live := r.live[profileID]; !live {
-		return false // already dark; the recovery loop owns it
-	}
 	// Only a profile this registry still holds as enabled may be retired: a
 	// stale live entry for a profile that has since been deleted is not ours to
 	// reason about, and deleting it here would race the mutation that removed it.
 	for _, p := range r.profiles {
-		if p != nil && p.ID == profileID && p.Enabled {
-			// effectiveRemoteSource is the ONE derivation of a profile's remote
-			// source (round 7's rule); comparing anything re-derived here is how
-			// the two layers drift apart.
-			if effectiveRemoteSource(p) != source {
-				return false // repointed since the sweep selected it
-			}
-			delete(r.live, profileID)
-			return true
+		if p == nil || p.ID != profileID || !p.Enabled {
+			continue
 		}
+		// effectiveRemoteSource is the ONE derivation of a profile's remote
+		// source (round 7's rule); comparing anything re-derived here is how
+		// the two layers drift apart.
+		if effectiveRemoteSource(p) != source {
+			return false // repointed since the sweep selected it
+		}
+		// CLAIM THE EVIDENCE, do not merely compare the source. Round 9 closed
+		// the REPOINT case with the comparison above, and a comparison is the
+		// wrong instrument for the rest: a SAME-source refresh landing in the
+		// sweep->lock window publishes a freshly-compiled healthy provider whose
+		// source is unchanged, so the comparison passed and deleted it, taking
+		// SSO dark until the recovery loop ran (Codex round 10, reproduced).
+		//
+		// The stale-serve stamp IS the generation token — a fresh compile for
+		// this (profile, source) deletes the episode that carries it — so the
+		// retirement claims that exact stamp atomically and refuses when it is
+		// no longer current. Three rounds of comparisons on this function is
+		// what says the state was keyed wrongly rather than compared wrongly.
+		if !idpClaimStaleServe(profileID, source, servedAt) {
+			return false // republished or recovered since the sweep selected it
+		}
+		if _, live := r.live[profileID]; !live {
+			return false // already dark; the recovery loop owns it
+		}
+		delete(r.live, profileID)
+		return true
 	}
 	return false
 }

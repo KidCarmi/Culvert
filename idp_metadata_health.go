@@ -678,6 +678,7 @@ const idpMetadataWatchdogInterval = idpMetadataDegradedAfter / 4
 // idpStaleCeilingVictim names a LIVE provider whose cached document has passed
 // idpmeta.StaleMaxAge and must therefore stop being served.
 type idpStaleCeilingVictim struct {
+	servedAt  time.Time // the stale-serve stamp this victim was selected on
 	profileID string
 	source    string
 	age       time.Duration
@@ -704,10 +705,15 @@ func idpStaleCeilingSweep(now time.Time) []idpStaleCeilingVictim {
 		if age < idpmeta.StaleMaxAge {
 			continue
 		}
-		out = append(out, idpStaleCeilingVictim{profileID: ep.profileID, source: ep.source, age: age})
-		// One document, one retirement. A provider that is re-compiled and falls
-		// back to cache again records a fresh fetch time and can be swept again.
-		ep.servedFetchedAt = time.Time{}
+		out = append(out, idpStaleCeilingVictim{profileID: ep.profileID, source: ep.source, age: age, servedAt: ep.servedFetchedAt})
+		// The evidence is NOT destroyed here. Selecting is not adjudicating:
+		// this sweep releases idpMetadata.mu before the retirement takes r.mu,
+		// and a compile landing in that window republishes the profile. Zeroing
+		// on selection made the stamp unavailable to the retirement, which could
+		// then only compare the SOURCE — and a SAME-source refresh has the same
+		// source and a different generation, so a freshly-compiled healthy
+		// provider was deleted (Codex round 10). The stamp is CLAIMED instead,
+		// atomically, by idpClaimStaleServe at retirement time.
 	}
 	idpMetadata.mu.Unlock()
 	// Deterministic order so a multi-profile sweep logs and retires the same way
@@ -719,8 +725,35 @@ func idpStaleCeilingSweep(now time.Time) []idpStaleCeilingVictim {
 // idpRetireStaleProvider is the seam the watchdog uses to stop serving a
 // provider whose cached document has expired. Package-level so tests observe the
 // decision without a live registry, matching fireIdPMetadataAlert.
-var idpRetireStaleProvider = func(profileID, source string) bool {
-	return idpRegistry.retireStaleProvider(profileID, source)
+// idpClaimStaleServe atomically consumes the stale-serve evidence a sweep
+// selected on, reporting whether it was still the CURRENT evidence.
+//
+// It is the generation check the source comparison cannot make. A fresh compile
+// for this (profile, source) deletes the episode outright (noteIdPMetadataOutcome,
+// idpMetaFresh), so a republished profile no longer carries the stamp the sweep
+// saw and the claim fails — which is the whole point: the provider that would be
+// retired is not the one the expired document belonged to.
+//
+// LOCK ORDER: called by retireStaleProvider while it holds r.mu, so the only
+// order this tree ever takes is r.mu -> idpMetadata.mu. Nothing holds
+// idpMetadata.mu across a call into the registry (the sweep releases it first,
+// deliberately), so there is no inversion — but do not add one.
+func idpClaimStaleServe(profileID, source string, servedAt time.Time) bool {
+	if servedAt.IsZero() {
+		return false
+	}
+	idpMetadata.mu.Lock()
+	defer idpMetadata.mu.Unlock()
+	ep := idpMetadata.episodes[idpEpisodeKey(profileID, source)]
+	if ep == nil || !ep.servedFetchedAt.Equal(servedAt) {
+		return false // republished, recovered, or already claimed
+	}
+	ep.servedFetchedAt = time.Time{} // one document, one adjudication
+	return true
+}
+
+var idpRetireStaleProvider = func(profileID, source string, servedAt time.Time) bool {
+	return idpRegistry.retireStaleProvider(profileID, source, servedAt)
 }
 
 // idpArmRecovery is the seam for re-arming the recovery loop after a retirement.
@@ -751,7 +784,7 @@ func runIdPMetadataDegradationWatchdog(ctx context.Context) {
 			// Retiring makes it DARK, which is exactly the state a fresh boot
 			// past the ceiling would produce, and hands it to the recovery loop.
 			for _, v := range idpStaleCeilingSweep(now) {
-				if !idpRetireStaleProvider(v.profileID, v.source) {
+				if !idpRetireStaleProvider(v.profileID, v.source, v.servedAt) {
 					continue
 				}
 				logger.Printf("IDP_METADATA_EXPIRED idp=%q — the cached document it was serving is %s old, past the %s ceiling; the provider is no longer live and browser SSO is unavailable for it until a document is fetched successfully",

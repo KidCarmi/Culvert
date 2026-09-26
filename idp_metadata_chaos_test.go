@@ -2258,9 +2258,40 @@ func TestChaos71_StaleCeilingIsEnforcedOnALiveProvider(t *testing.T) {
 	if len(got) != 1 || got[0].profileID != profile {
 		t.Fatalf("a document past %s must be swept for retirement, got %+v", idpmeta.StaleMaxAge, got)
 	}
-	if again := idpStaleCeilingSweep(time.Now()); len(again) != 0 {
-		t.Fatalf("one document must be reported ONCE, got %+v on the second sweep", again)
+	// ONE DOCUMENT, ONE ADJUDICATION — and since round 10 that is enforced at
+	// CLAIM time, not at selection time. The sweep deliberately no longer
+	// destroys the evidence it selects on: the retirement needs that stamp to
+	// tell a still-stale provider from one a same-source refresh republished in
+	// the sweep->lock window, and a selection that is never claimed (the profile
+	// was deleted, say) must not silently consume it either.
+	if again := idpStaleCeilingSweep(time.Now()); len(again) != 1 {
+		t.Fatalf("selection is not adjudication: an unclaimed document stays selectable, got %+v", again)
 	}
+	if !idpClaimStaleServe(profile, source, got[0].servedAt) {
+		t.Fatal("the stamp the sweep selected on must be claimable")
+	}
+	if after := idpStaleCeilingSweep(time.Now()); len(after) != 0 {
+		t.Fatalf("a CLAIMED document must never be swept again, got %+v", after)
+	}
+	if idpClaimStaleServe(profile, source, got[0].servedAt) {
+		t.Fatal("a claimed stamp must not be claimable twice")
+	}
+}
+
+// chaos71SeedStaleServe records the stale-serve stamp a ceiling sweep would
+// select on, and returns it, so a gate can drive retireStaleProvider directly.
+// Since round 10 the retirement CLAIMS this stamp atomically, so a gate that
+// does not seed it is asserting against a retirement that can never fire.
+func chaos71SeedStaleServe(profileID, source string) time.Time {
+	served := time.Now().Add(-8 * 24 * time.Hour)
+	// Mirror production exactly: resolveIdPDocument records the STALE outcome
+	// (which opens the episode) and then stamps it. noteIdPStaleDocumentServed
+	// only stamps an episode that already exists, so seeding the stamp alone
+	// records nothing and the gate would assert against a retirement that can
+	// never claim anything.
+	noteIdPMetadataOutcome(profileID, source, idpMetaStale, fmt.Errorf("seeded outage"))
+	noteIdPStaleDocumentServed(profileID, source, served)
+	return served
 }
 
 // R8-D1b (P1, defect, end to end). The registry must actually stop serving it,
@@ -2278,7 +2309,9 @@ func TestChaos71_RetiringAnExpiredProviderLeavesItDarkNotDeleted(t *testing.T) {
 		t.Fatal("setup: the provider must be live")
 	}
 
-	if !idpRegistry.retireStaleProvider("corp", idpRemoteDocumentSource(chaos71Profile("corp", idp.URL()))) {
+	src := idpRemoteDocumentSource(chaos71Profile("corp", idp.URL()))
+	served := chaos71SeedStaleServe("corp", src)
+	if !idpRegistry.retireStaleProvider("corp", src, served) {
 		t.Fatal("a live enabled profile must be retirable")
 	}
 	if idpRegistry.HasEnabledInteractiveProvider() {
@@ -2302,7 +2335,7 @@ func TestChaos71_RetiringAnExpiredProviderLeavesItDarkNotDeleted(t *testing.T) {
 		t.Fatal("retiring must not delete the profile")
 	}
 	// Idempotent: a second retirement changes nothing.
-	if idpRegistry.retireStaleProvider("corp", idpRemoteDocumentSource(chaos71Profile("corp", idp.URL()))) {
+	if idpRegistry.retireStaleProvider("corp", src, served) {
 		t.Fatal("retiring an already-dark provider must report no change")
 	}
 }
@@ -2341,7 +2374,8 @@ func TestChaos71_RetirementIsRefusedAfterARepoint(t *testing.T) {
 		t.Fatal("setup: the replacement provider must be live before the stale sweep runs")
 	}
 
-	if idpRegistry.retireStaleProvider("corp", expired) {
+	expiredServed := chaos71SeedStaleServe("corp", expired)
+	if idpRegistry.retireStaleProvider("corp", expired, expiredServed) {
 		t.Fatal("a retirement selected for the PREVIOUS source must not delete the provider " +
 			"published for the new one — the expired document is not what this profile serves")
 	}
@@ -2356,11 +2390,81 @@ func TestChaos71_RetirementIsRefusedAfterARepoint(t *testing.T) {
 	// which would delete round 8's whole enforcement of the staleness ceiling.
 	// A victim naming the source STILL IN SERVICE must retire exactly as before.
 	inService := idpRemoteDocumentSource(chaos71Profile("corp", newIdP.URL()))
-	if !idpRegistry.retireStaleProvider("corp", inService) {
+	inServiceServed := chaos71SeedStaleServe("corp", inService)
+	if !idpRegistry.retireStaleProvider("corp", inService, inServiceServed) {
 		t.Fatal("a victim naming the source actually in service must still retire the provider")
 	}
 	if idpRegistry.HasEnabledInteractiveProvider() {
 		t.Fatal("the ceiling must still be enforced for the source in service")
+	}
+}
+
+// R10-D1 (P2, defect, Codex round 10). A SAME-SOURCE REFRESH HAS THE SAME
+// SOURCE AND A DIFFERENT GENERATION. Round 9 closed the REPOINT case by
+// comparing sources, which cannot see a profile that was re-fetched from the
+// SAME endpoint inside the sweep->lock window: the comparison passes and a
+// freshly-compiled, healthy provider is deleted, taking SSO dark until the
+// recovery loop runs.
+//
+// The stale-serve stamp is the generation token — a fresh compile for this
+// (profile, source) deletes the episode carrying it — so the retirement claims
+// that exact stamp atomically instead of comparing anything.
+//
+// Verified failing against round 9's source-only shape: the refreshed provider
+// was deleted and HasEnabledInteractiveProvider reported false.
+func TestChaos71_RetirementIsRefusedAfterASameSourceRefresh(t *testing.T) {
+	chaos71Env(t)
+	idp := newChaos71IdP(t)
+
+	if err := idpRegistry.Upsert(chaos71Profile("corp", idp.URL())); err != nil {
+		t.Fatalf("initial upsert: %v", err)
+	}
+	src := idpRemoteDocumentSource(chaos71Profile("corp", idp.URL()))
+	served := chaos71SeedStaleServe("corp", src)
+
+	// The window: a SAME-source Upsert re-fetches fresh metadata and publishes a
+	// new healthy provider. Round 9's source comparison cannot distinguish this.
+	if err := idpRegistry.Upsert(chaos71Profile("corp", idp.URL())); err != nil {
+		t.Fatalf("same-source refresh upsert: %v", err)
+	}
+	if !idpRegistry.HasEnabledInteractiveProvider() {
+		t.Fatal("setup: the refreshed provider must be live before the retirement runs")
+	}
+
+	if idpRegistry.retireStaleProvider("corp", src, served) {
+		t.Fatal("a retirement selected before a SAME-source refresh must not delete the " +
+			"provider that refresh published — the expired document is not what it serves")
+	}
+	if !idpRegistry.HasEnabledInteractiveProvider() {
+		t.Fatal("the freshly-refreshed provider must still be live")
+	}
+	if idpRegistry.hasDarkEnabledProfile() {
+		t.Fatal("the profile must not be dark — its document was just fetched successfully")
+	}
+}
+
+// R10-C1 (CONTROL). The cheapest way to pass R10-D1 is to stop retiring, which
+// would delete round 8's enforcement of the staleness ceiling outright. A stamp
+// that IS still the current evidence must retire exactly as before.
+func TestChaos71_CurrentStaleEvidenceStillRetires(t *testing.T) {
+	chaos71Env(t)
+	idp := newChaos71IdP(t)
+
+	if err := idpRegistry.Upsert(chaos71Profile("corp", idp.URL())); err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+	src := idpRemoteDocumentSource(chaos71Profile("corp", idp.URL()))
+	served := chaos71SeedStaleServe("corp", src)
+
+	if !idpRegistry.retireStaleProvider("corp", src, served) {
+		t.Fatal("a victim whose stale-serve stamp is still current must retire the provider")
+	}
+	if idpRegistry.HasEnabledInteractiveProvider() {
+		t.Fatal("the ceiling must still be enforced")
+	}
+	// And the evidence is CONSUMED: one document, one adjudication.
+	if idpClaimStaleServe("corp", src, served) {
+		t.Fatal("a claimed stale-serve stamp must not be claimable twice")
 	}
 }
 
