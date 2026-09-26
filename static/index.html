@@ -4480,7 +4480,7 @@ Firefox (all platforms):
         </div>
       </div>
       <div class="panel" style="margin-top:16px">
-        <div class="panel-header"><span class="panel-title">OCSP / CRL Revocation</span></div>
+        <div class="panel-header"><span class="panel-title">OCSP revocation</span></div>
         <div style="padding:16px;display:flex;align-items:center;gap:16px;font-size:.85rem;flex-wrap:wrap">
           <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
             <input type="checkbox" id="ocsp-toggle" data-change="toggleOCSP"> Enable OCSP checking
@@ -17191,7 +17191,19 @@ function renderReleaseTrustBadge(d) {
   if (schemesEl) {
     const schemeLabels = { ed25519: 'ed25519 keys', sigstore: 'Sigstore identity', 'ed25519+sigstore': 'ed25519 keys + Sigstore identity', none: 'none' };
     const raw = d && d.trust_schemes;
-    schemesEl.textContent = raw ? ('via ' + (schemeLabels[raw] || raw)) : '';
+    let text = raw ? ('via ' + (schemeLabels[raw] || raw)) : '';
+    // Positive confirmation of which Sigstore trust material is actually
+    // enforcing (baked default vs an operator's CULVERT_RELEASE_SIGSTORE_*
+    // override) - the counterpart to the sigstore_warn banner below, which
+    // only fires when an override is BROKEN. A correctly-configured override
+    // otherwise looks identical to the baked default on this badge.
+    if (raw && raw.indexOf('sigstore') !== -1) {
+      const custom = [];
+      if (d.sigstore_identity_source === 'override') custom.push('custom identity');
+      if (d.sigstore_root_source === 'override') custom.push('custom root');
+      if (custom.length) text += ' (' + custom.join(', ') + ')';
+    }
+    schemesEl.textContent = text;
   }
   if (!warn) return;
   const lines = [];

@@ -47,6 +47,22 @@ const (
 // two audit jobs, and the sharded evidence and floors they are judged against.
 var qaAuditRequired = []string{"qa-race", "qa-coverage", "qa-unsharded-audit", "qa-unsharded-audit-compare"}
 
+// qaPushPredicate is the "this QA run is release evidence" condition. The
+// workflow's push trigger is `branches: [main]`, and require-gate.sh reads
+// only event=push runs of main, so the two describe the same set of runs.
+const qaPushPredicate = "github.event_name == 'push'"
+
+// qaRequireSuccessExpr is the ONE expression the aggregate passes to
+// needs-verdict, in evaluation order: the audit arm, then the main-push arm,
+// then ” for a pull request or an ordinary dispatch. Pinned whole rather
+// than decomposed — a nested ternary is exactly where an arm can be added,
+// reordered or silently emptied.
+func qaRequireSuccessExpr() string {
+	return "${{ (" + qaAuditPredicate + ") && '" + strings.Join(qaAuditRequired, ",") + "'" +
+		" || " + qaPushPredicate + " && '" + strings.Join(qaSubstantiveJobs, ",") + "'" +
+		" || '' }}"
+}
+
 // auditIs evaluates qaAuditPredicate's workflow copy for one (event, input).
 func auditIs(t *testing.T, cond, event string, input bool) bool {
 	t.Helper()
@@ -87,24 +103,50 @@ func TestCIPerf_AuditPredicateIsSingleSourced(t *testing.T) {
 	}
 
 	req := qaAggregateRequireSuccess(t)
-	if guard := normaliseExpr(extractGuard(req)); guard != qaAuditPredicate {
-		t.Errorf("the aggregate's require-success guard drifted from the audit predicate.\n got: %s\nwant: %s", guard, qaAuditPredicate)
+	if want := qaRequireSuccessExpr(); req != want {
+		t.Errorf("the aggregate's require-success drifted.\n got: %s\nwant: %s", req, want)
 	}
+	// Restated from the expression itself, so a future rewrite that keeps the
+	// shape but empties an arm still fails here.
 	if got := requiredList(t, req); !slices.Equal(got, qaAuditRequired) {
 		t.Errorf("an audit run must require exactly %v to be `success`; require-success lists %v", qaAuditRequired, got)
 	}
 	if !strings.HasSuffix(req, "|| '' }}") {
-		t.Errorf("an ORDINARY run must require nothing extra (the pass-through PR shape depends on it); require-success = %s", req)
+		t.Errorf("a PULL REQUEST or an ordinary dispatch must require nothing (the pass-through shape depends on it); require-success = %s", req)
 	}
 }
 
 func requiredList(t *testing.T, req string) []string {
 	t.Helper()
-	m := regexp.MustCompile(`&& '([^']*)'`).FindStringSubmatch(req)
-	if m == nil {
-		t.Fatalf("cannot find the required-job list in require-success %q", req)
+	return requireArms(t, req)[0]
+}
+
+// requireArms returns every `&& '<list>'` arm of the require-success
+// expression, in evaluation order: [0] the audit arm, [1] the main-push arm.
+// Reading the arms OUT of the workflow (rather than restating them) is what
+// makes the behavioural gates below real: empty an arm in qa-gate.yml and the
+// gate for that arm fails, because it is driven with the workflow's own value.
+func requireArms(t *testing.T, req string) [][]string {
+	t.Helper()
+	ms := regexp.MustCompile(`&& '([^']*)'`).FindAllStringSubmatch(req, -1)
+	if len(ms) != 2 {
+		t.Fatalf("require-success must carry exactly two required-job arms (audit, push); got %d in %q", len(ms), req)
 	}
-	return strings.Split(m[1], ",")
+	out := make([][]string, 0, 2)
+	for _, m := range ms {
+		if m[1] == "" {
+			t.Fatalf("an arm of require-success is empty — that arm requires nothing: %q", req)
+		}
+		out = append(out, strings.Split(m[1], ","))
+	}
+	return out
+}
+
+// qaPushRequired is the job list the aggregate requires on a main push, read
+// from the workflow.
+func qaPushRequired(t *testing.T) []string {
+	t.Helper()
+	return requireArms(t, qaAggregateRequireSuccess(t))[1]
 }
 
 // The predicate itself: an audit on the schedule and on an opted-in dispatch,
@@ -178,6 +220,115 @@ func TestCIPerf_ScheduledAuditRefusesMissingOrFailedEvidence(t *testing.T) {
 	// audit runs and does not change the main-push verdict.
 	if out, ok := runNeedsVerdict(t, script, needsJSON(allQAResults("success"))); !ok {
 		t.Fatalf("an ordinary main push with the audit jobs skipped must still approve; output:\n%s", out)
+	}
+}
+
+// TestCIPerf_MainPushRefusesJobsThatNeverRan drives the REAL needs-verdict
+// shell with the require-success value the QA aggregate passes on a main
+// push — the runs .github/release-evidence.txt names `mandatory` and
+// require-gate.sh reads.
+//
+// The fail-open it closes: needs-verdict reads a `skipped` need as a pass, so
+// without require-success a main push in which every substantive job skipped
+// left the aggregate (`if: always()`) as the only job that ran. It reported
+// APPROVED, the WORKFLOW therefore concluded `success` rather than `skipped`,
+// and require-gate.sh — which refuses a workflow-level `skipped` — had nothing
+// to refuse. Release promotion could proceed on a commit no test had run
+// against. Each sub-case below fails against the pre-fix expression.
+func TestCIPerf_MainPushRefusesJobsThatNeverRan(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash unavailable")
+	}
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skip("jq unavailable — the shared action's verdict is jq-based")
+	}
+	script := needsVerdictScript(t)
+	// Read from qa-gate.yml, not restated: emptying the push arm there must
+	// fail this gate, which is the defect being closed.
+	pushRequired := qaPushRequired(t)
+	if !slices.Equal(pushRequired, qaSubstantiveJobs) {
+		t.Fatalf("a main push must require every substantive job to be `success`.\n got: %v\nwant: %v", pushRequired, qaSubstantiveJobs)
+	}
+	require := strings.Join(pushRequired, ",")
+
+	// The healthy shape: nine substantive jobs green, both audit jobs skipped
+	// because this is not an audit run. Must still approve — the requirement
+	// must not make an ordinary green push refuse.
+	if out, ok := runNeedsVerdictRequiring(t, script, needsJSON(allQAResults("success")), require); !ok {
+		t.Fatalf("a green main push must approve; output:\n%s", out)
+	}
+
+	// The defect itself: nothing ran.
+	if out, ok := runNeedsVerdictRequiring(t, script, needsJSON(allQAResults("skipped")), require); ok {
+		t.Fatalf("a main push in which EVERY job skipped approved — nothing ran is not approval; output:\n%s", out)
+	}
+
+	// One job at a time, both ways it can fail to produce evidence: skipped,
+	// and absent from the needs map entirely.
+	for _, name := range qaSubstantiveJobs {
+		t.Run("skipped/"+name, func(t *testing.T) {
+			results := allQAResults("success")
+			results[name] = "skipped"
+			out, ok := runNeedsVerdictRequiring(t, script, needsJSON(results), require)
+			if ok {
+				t.Fatalf("a main push approved with %q skipped; output:\n%s", name, out)
+			}
+			if !strings.Contains(out, name) {
+				t.Errorf("the refusal does not name %q; output:\n%s", name, out)
+			}
+		})
+		t.Run("absent/"+name, func(t *testing.T) {
+			results := allQAResults("success")
+			delete(results, name)
+			if out, ok := runNeedsVerdictRequiring(t, script, needsJSON(results), require); ok {
+				t.Fatalf("a main push approved with %q absent from needs; output:\n%s", name, out)
+			}
+		})
+	}
+
+	// CONTROL: the requirement is scoped to the push arm. A pull request
+	// passes require-success='' and every job skips on its own `if:`, so the
+	// required check must still report success or branch protection wedges
+	// every PR at "Expected". The cheapest wrong fix — tightening the shared
+	// action's default instead of one caller — fails here.
+	if out, ok := runNeedsVerdict(t, script, needsJSON(allQAResults("skipped"))); !ok {
+		t.Fatalf("the PR pass-through shape must still approve; output:\n%s", out)
+	}
+}
+
+// TestCIPerf_RequiredJobsAreAllNeeded pins the invariant that makes a
+// require-success list safe: needs-verdict reads its verdicts out of the
+// `needs` context, so a job named in require-success but absent from the
+// aggregate's `needs:` is not missing evidence — it is evidence that can never
+// arrive, and the gate refuses EVERY run. The Security gate's `sbom` job is
+// the live example of a job that runs on the same events but is deliberately
+// not a need; see TestSecurityRace_RequiredJobsAreAllNeeded.
+func TestCIPerf_RequiredJobsAreAllNeeded(t *testing.T) {
+	needed := jobNeeds(loadWorkflow(t, qaGateWorkflowPath).Jobs[qaGateAggregateJob])
+	if len(needed) == 0 {
+		t.Fatalf("aggregate %q lists no needs — the selector is stale", qaGateAggregateJob)
+	}
+	for i, arm := range requireArms(t, qaAggregateRequireSuccess(t)) {
+		for _, job := range arm {
+			if !needed[job] {
+				t.Errorf("require-success arm %d names %q, which is NOT in the aggregate's `needs:` — the gate would refuse every run", i, job)
+			}
+		}
+	}
+}
+
+// TestCIPerf_RequireSuccessArmsAreDisjoint pins that the audit arm and the
+// push arm can never both claim a run: an audit is a schedule or a dispatch,
+// never a push, so the first arm winning never hides the second.
+func TestCIPerf_RequireSuccessArmsAreDisjoint(t *testing.T) {
+	for _, ev := range []string{"push", "pull_request", "workflow_dispatch", "schedule"} {
+		for _, input := range []bool{false, true} {
+			isAudit := auditIs(t, qaAuditPredicate, ev, input)
+			isPush := ev == "push"
+			if isAudit && isPush {
+				t.Errorf("event=%s unsharded_audit=%v matches BOTH require-success arms", ev, input)
+			}
+		}
 	}
 }
 
