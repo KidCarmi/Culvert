@@ -7741,3 +7741,66 @@ Mutation results (each run against the full `TestChaos69_` set):
 The third row is the one worth keeping: the partial revert is invisible to every
 other gate, which is what proves the Stage-1 gate and the wall are each carrying
 weight rather than restating the behavioural gates.
+
+### The determinism failure round 5 caused, and the asymmetry behind it
+
+`Deep · determinism (shuffle, count=2)` went red on `fccc058`. The dumped job
+log did not contain the `--- FAIL:` line (GitHub truncates, and the artifact host
+is blocked by this environment's egress policy), so it was reproduced locally
+with the seed the workflow prints — `-count=2 -shuffle=1790384784183295962` —
+then narrowed to two tests that reproduce it in **0.25 s**:
+
+    --- FAIL: TestUpstreamV2D_R34_DryRunReturnsPlanAndDigestAppliesNothing
+        commit: 400 import refused, dangling object reference: policy rule
+        "chaos66-block" references category-group "chaos66-group", which the
+        candidate does not define and no current authority resolves
+
+Both names belong to this sweep's own cost gate.
+
+**The mechanism is an asymmetry in `setupProxyTest`.** Its comment says it
+"resets all global state for a clean test run", and it clears `policyStore` at
+test **START**. That stops a previous test's leaked rules flowing **IN** and does
+nothing at all about this test's rules flowing **OUT** — so every gate that
+reaches it is protected from its predecessors and none is prevented from
+poisoning its successors.
+
+`DefectCostIsFlatInAuthorityLength` needs one category-group rule to reach the
+quadratic fusion. It added the group with a `t.Cleanup` delete and added the rule
+with **no cleanup at all**. So after it ran, `policyStore` held a rule pointing
+at a group that no longer existed.
+
+> **A partial cleanup is worse than no cleanup.** Leaking both the rule and the
+> group would have left the reference resolvable and nothing would have broken.
+> Cleaning up only the group MANUFACTURED the dangling reference that the next
+> object-reference validation refused. When a test creates two objects where one
+> references the other, either restore both or restore neither — and because
+> `t.Cleanup` is LIFO, register the dependent's restore AFTER the dependency's so
+> it runs BEFORE it.
+
+Two further leaks were fixed in the same pass (the allow-path control's rule, and
+round 5's Stage-1 gate, which now restores via `draftTestSetup`), and round 5's
+Stage-1 gate additionally pins the two process-global atomics it reads —
+`requireCommitFlag`, since `apiPolicyTest` evaluates `effectivePolicySnapshot()`
+and a leaked armed Draft Mode would have it read an empty candidate, and
+`authExemptDisabledRuntime`, since a leaked kill switch suppresses a matching
+Exempt rule. Both would have failed the gate for a reason unrelated to what it
+measures, and only under `-shuffle`.
+
+`TestChaos69_WallEveryGateThatMutatesPolicyRestoresIt` walls the class for this
+file: every `TestChaos69_*` that mutates `policyStore` must register its restore.
+It is **structural** because the failure is invisible to every behavioural
+assertion in the file — they all pass whether or not the rule is cleaned up, which
+is precisely why 27 green gates coexisted with a red required check. Its allowance
+for `draftTestSetup` is **self-checking**: `chaos69AssertHelperRestores` re-reads
+that helper and fails if it stops calling `snapshotPolicyStoreForTest`, so the
+allowance cannot silently become a hole.
+
+Four mutations verified failing: each lost restore names its own gate, removing
+`snapshotPolicyStoreForTest` from `draftTestSetup` trips the self-check, and
+breaking the wall's selector trips the not-vacuous count.
+
+**Process note worth keeping.** The diagnosis cost one 15-minute local run and
+two minutes of narrowing, and it would have cost far more without the seed the
+workflow prints — that `grep -m1 -- "-test.shuffle "` in `pr-deep-gate.yml` is
+the whole reason this was reproducible at all, since the log artifact carrying
+the failing test name is unreachable from here. Keep it.
