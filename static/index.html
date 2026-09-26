@@ -193,11 +193,17 @@ nav { flex: 1; padding: 12px 10px; overflow-y: auto; }
 /* ─── Main content ──────────────────────────────────────────────────────── */
 #main { margin-left: var(--sidebar-w); flex: 1; height: 100vh;
         overflow-y: auto; display: flex; flex-direction: column; }
+/* The topbar and its action row WRAP at every width, not only below the
+   860px sidebar breakpoint: just above it the fixed sidebar still leaves
+   #main narrower than the action row, and body hides overflow, so a
+   non-wrapping row would clip Sign Out off-screen. */
 .topbar {
   padding: 14px 28px; border-bottom: 1px solid var(--border);
   display: flex; align-items: center; justify-content: space-between;
+  flex-wrap: wrap; row-gap: 8px;
   background: var(--surface); position: sticky; top: 0; z-index: 50;
 }
+.topbar-actions { flex-wrap: wrap; justify-content: flex-end; row-gap: 6px; }
 .topbar-title { font-size: 1rem; font-weight: 600; }
 .topbar-meta  { font-size: .75rem; color: var(--muted); }
 .pill {

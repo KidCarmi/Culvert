@@ -195,6 +195,24 @@ func TestUIContract_TopbarActionsWrapOnNarrowViewports(t *testing.T) {
 			t.Errorf("narrow-viewport block must contain %q", want)
 		}
 	}
+	// Above 860px the fixed sidebar still consumes ~232px, so #main can be
+	// narrower than the action row. Wrapping must therefore be the BASE
+	// rule (outside every media query), not a narrow-viewport special case.
+	base := s[:i] + s[i+end:]
+	j := strings.Index(base, "\n.topbar {\n")
+	if j < 0 {
+		t.Fatal("base .topbar rule not found")
+	}
+	rule := base[j:]
+	if k := strings.Index(rule, "}"); k >= 0 {
+		rule = rule[:k]
+	}
+	if !strings.Contains(rule, "flex-wrap: wrap") {
+		t.Error("base .topbar rule must wrap at every width (sidebar-visible widths overflow too)")
+	}
+	if !strings.Contains(base, "\n.topbar-actions { flex-wrap: wrap;") {
+		t.Error("base .topbar-actions rule must wrap at every width")
+	}
 }
 
 // Session loss can be observed by ANY api() call (the 3 s dashboard tick),
