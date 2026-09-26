@@ -412,6 +412,34 @@ type idpServedDocumentAger interface {
 	servedDocumentCachedAt() time.Time
 }
 
+// COMPILE-TIME LINK, and it is the only thing holding the ceiling up for a
+// provider that HAS a remote source (Codex round 15 — self-found in review of
+// round 14). This interface is UNEXPORTED and satisfied IMPLICITLY, so nothing
+// connects it to either provider: renaming or deleting servedDocumentCachedAt
+// compiles cleanly, idpServedEntry's type assertion then returns !ok, and
+// idpNotePublishedGeneration DELETES the profile's record — which exempts it
+// from idpmeta.StaleMaxAge FOREVER, silently, with no metric, log or counter
+// separating "built fresh, no ceiling needed" from "built from cache and we
+// cannot tell". Measured against this tree: renaming the OIDC method leaves
+// `go build ./...` clean and the WHOLE root suite green (428 s, every test)
+// while every OIDC profile stops being retired, i.e. keeps trusting a
+// possibly-withdrawn signing key past the ceiling. The SAML rename was caught
+// only incidentally, by one gate's setup assertion.
+//
+// This is the FIFTH instance in this sweep of a rule held on one of two
+// symmetric paths (the admission gates, the endpoint validator, the fetch
+// pre-flight, the wall scoped to one fetcher), so it is walled as a PAIR here
+// and derived from IdPType.Interactive() in
+// TestChaos71_EveryInteractiveProviderIsBoundToTheCeiling — a third
+// interactive type must fail the build or the wall, never lose its ceiling
+// quietly. Deliberately NOT a runtime counter: these assertions make the
+// !ok-with-a-remote-source case unreachable, and a gate that cannot fire is
+// the dead-code mistake CHAOS-69 records.
+var (
+	_ idpServedDocumentAger = (*SAMLProvider)(nil)
+	_ idpServedDocumentAger = (*OIDCFlowProvider)(nil)
+)
+
 // idpNotePublishedGeneration records the generation just PUBLISHED for a
 // profile: prov is the provider now live (nil when none is), source the remote
 // document it fetches. A provider built from a FRESH or inline document — or no
@@ -453,6 +481,12 @@ func idpReplacePublishedGenerations(profiles []*IdPProfile, live map[string]Iden
 
 // idpServedEntry derives the served-generation record for a published provider:
 // present only when it was built from a CACHED remote document.
+//
+// The !ok arm is safe ONLY because of the compile-time assertions above: an
+// LDAP provider legitimately reaches it and carries no remote source, while a
+// provider that DOES have one and fails the assertion would be silently
+// exempted from the staleness ceiling. Do not delete those assertions, and do
+// not "simplify" the interface into an exported one satisfied somewhere else.
 func idpServedEntry(source string, prov IdentityProvider) (idpServedDoc, bool) {
 	a, ok := prov.(idpServedDocumentAger)
 	if !ok || source == "" {

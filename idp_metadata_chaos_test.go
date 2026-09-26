@@ -2916,3 +2916,130 @@ func TestChaos71_SuccessfulFreshPublishClearsTheCeiling(t *testing.T) {
 		t.Fatalf("a PUBLISHED fresh generation must not be retired, got %+v", got)
 	}
 }
+
+// TestChaos71_EveryInteractiveProviderIsBoundToTheCeiling is a STRUCTURAL WALL
+// over the PAIR, not over either instance (Codex round 15, self-found while
+// reviewing round 14).
+//
+// idpServedDocumentAger is unexported and satisfied IMPLICITLY, so the
+// staleness ceiling's only link to a provider is a type assertion that fails
+// SILENTLY and FAIL-OPEN: idpServedEntry returns !ok, the publish site DELETES
+// the record, and the profile is exempt from idpmeta.StaleMaxAge forever.
+// Measured against this tree before the fix: renaming
+// OIDCFlowProvider.servedDocumentCachedAt left `go build ./...` clean and the
+// WHOLE root suite green (428 s, every test), while every OIDC profile stopped
+// being retired. The compile-time assertions in idp_metadata_health.go make
+// that a build failure for the two providers that exist today; this wall is
+// what makes it a failure for a THIRD interactive type nobody has written yet.
+//
+// It derives the type list from IdPType.Interactive() rather than hard-coding
+// two names, because a hand-list is exactly how this sweep's four earlier
+// one-of-two-paths findings survived. A new interactive IdPType either gets an
+// assertion or fails here.
+func TestChaos71_EveryInteractiveProviderIsBoundToTheCeiling(t *testing.T) {
+	src, err := os.ReadFile(filepath.Join(pkgSourceDir(), "auth_idp.go")) // #nosec G304 -- fixed in-repo path
+	if err != nil {
+		t.Fatalf("read auth_idp.go: %v", err)
+	}
+
+	// 1. Every declared IdPType, taken from source so a new constant is seen.
+	declRe := regexp.MustCompile(`(?m)^\s*(IdPType[A-Za-z]+)\s+IdPType\s*=\s*"([a-z]+)"`)
+	decls := declRe.FindAllStringSubmatch(string(src), -1)
+	if len(decls) < 3 {
+		t.Fatalf("IdPType constant scan found %d declarations, expected at least the shipped 3 — the wall has gone vacuous", len(decls))
+	}
+
+	// 2. compileIdPProfile is the ONE dispatch from a type to a provider, so
+	//    the constructor it names for each type is the authority on which
+	//    concrete type goes live. Reading it keeps this wall honest if the
+	//    dispatch changes.
+	compile := chaos71FuncSource(t, string(src), "func compileIdPProfile(")
+	ctorRe := regexp.MustCompile(`case (IdPType[A-Za-z]+):`)
+	if len(ctorRe.FindAllString(compile, -1)) < 3 {
+		t.Fatalf("compileIdPProfile no longer dispatches on IdPType constants — the wall cannot map a type to its provider")
+	}
+
+	health, err := os.ReadFile(filepath.Join(pkgSourceDir(), "idp_metadata_health.go")) // #nosec G304 -- fixed in-repo path
+	if err != nil {
+		t.Fatalf("read idp_metadata_health.go: %v", err)
+	}
+
+	checkedInteractive := 0
+	for _, d := range decls {
+		constName, literal := d[1], d[2]
+		if !IdPType(literal).Interactive() {
+			// LDAP is deliberately never interactive and fetches no remote
+			// document, so it is correctly exempt — pinned below so that
+			// "exempt" can never quietly grow to include a browser protocol.
+			continue
+		}
+		checkedInteractive++
+
+		// The constructor named for this type in compileIdPProfile.
+		armRe := regexp.MustCompile(`case ` + regexp.QuoteMeta(constName) + `:[\s\S]*?return (New[A-Za-z]+)\(p\)`)
+		m := armRe.FindStringSubmatch(compile)
+		if m == nil {
+			t.Fatalf("interactive type %s: compileIdPProfile has no `return New…(p)` arm; cannot identify the provider bound to the ceiling", constName)
+		}
+		ctor := m[1] // e.g. NewSAMLProvider
+		provType := strings.TrimPrefix(ctor, "New")
+
+		// A compile-time assertion for that concrete type must exist, so a
+		// rename or deletion of servedDocumentCachedAt is a BUILD failure
+		// rather than a silently unenforced ceiling.
+		want := `_ idpServedDocumentAger = (*` + provType + `)(nil)`
+		if !strings.Contains(string(health), want) {
+			t.Fatalf("interactive type %s compiles to *%s, but idp_metadata_health.go carries no compile-time assertion %q.\n"+
+				"Without it, renaming or deleting servedDocumentCachedAt on that provider compiles cleanly and idpServedEntry "+
+				"silently returns !ok, deleting the served-generation record and exempting every profile of this type from "+
+				"idpmeta.StaleMaxAge — a possibly-withdrawn signing key trusted indefinitely, with no metric, log or counter.",
+				constName, provType, want)
+		}
+	}
+
+	if checkedInteractive < 2 {
+		t.Fatalf("wall checked only %d interactive types; the shipped tree has 2 (oidc, saml) — the derivation has gone vacuous", checkedInteractive)
+	}
+}
+
+// TestChaos71_LDAPIsDeliberatelyExemptFromTheCeiling is the CONTROL for the
+// wall above. The cheapest way to pass it is to assert the ager interface on
+// EVERY provider, which would be wrong: LDAP resolves no remote document, so
+// effectiveRemoteSource is empty for it and a ceiling is meaningless. This
+// pins that the exemption is about having no remote source — not about which
+// providers happen to implement a method — so idpServedEntry's `source == ""`
+// arm stays the reason LDAP is exempt.
+func TestChaos71_LDAPIsDeliberatelyExemptFromTheCeiling(t *testing.T) {
+	if IdPType("ldap").Interactive() {
+		t.Fatal("LDAP became interactive; it now needs a served-generation binding and its own ceiling reasoning")
+	}
+	// A provider that DOES implement the ager but carries no remote source must
+	// still produce no record: the source, not the method, is what decides.
+	if _, ok := idpServedEntry("", chaos71CacheBuiltProvider{cachedAt: time.Now().Add(-time.Hour)}); ok {
+		t.Fatal("idpServedEntry recorded a ceiling for a provider with NO remote source; a profile that fetches nothing must never be retired for staleness")
+	}
+	// And the same provider WITH a source must produce one, or the wall above
+	// would be pinning a mechanism that does nothing.
+	if _, ok := idpServedEntry("https://idp.example/metadata", chaos71CacheBuiltProvider{cachedAt: time.Now().Add(-time.Hour)}); !ok {
+		t.Fatal("idpServedEntry produced no record for a cache-built provider with a remote source; the ceiling has no evidence to act on")
+	}
+}
+
+// chaos71FuncSource returns the source of the function whose declaration starts
+// with decl, up to the next top-level declaration. A wall that scans a WHOLE
+// file can be satisfied by a match in an unrelated function, so the scanning
+// walls above slice the one function they are talking about.
+func chaos71FuncSource(t *testing.T, src, decl string) string {
+	t.Helper()
+	start := strings.Index(src, decl)
+	if start < 0 {
+		t.Fatalf("declaration %q not found — the wall is scanning nothing", decl)
+	}
+	rest := src[start:]
+	// The next line that begins at column 0 with "func " or "}" followed by a
+	// blank line ends the body; "\n}\n" is the closing brace of a top-level func.
+	if end := strings.Index(rest, "\n}\n"); end >= 0 {
+		return rest[:end+3]
+	}
+	return rest
+}
