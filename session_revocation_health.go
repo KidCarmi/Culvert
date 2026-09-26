@@ -320,7 +320,7 @@ func checkSessionRevocation() OperatorContractCheck {
 			Code:           "session_revocation",
 			Status:         diagFail,
 			Message:        "the persisted session-revocation list could not be READ — revocations applied before this restart are NOT in force on this node",
-			OperatorAction: "Check the permissions and the mount backing the revocations file, then restart. The file was left in place and has not been overwritten, so its contents may still be intact — but the next logout or account deletion on this node REPLACES it with the list this process could not read, so restart before applying new revocations. Until the node restarts with the list loaded, re-apply any logout or account deletion that must hold.",
+			OperatorAction: "Check the permissions and the mount backing the revocations file, then restart. The file was left in place and nothing was moved aside, so there is no copy to restore and its contents may still be intact — but the next logout or account deletion on this node REPLACES it with the list this process could not read, so restart before applying new revocations. Until the node restarts with the list loaded, re-apply any logout or account deletion that must hold.",
 		}
 	}
 	if h.Configured && revocationBackingFileIsGone() {
