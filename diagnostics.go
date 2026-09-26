@@ -597,8 +597,11 @@ func checkOversizeConfiguredUsernames() OperatorContractCheck {
 		// SetAuth mirrors the NEW name into the roster without removing the
 		// old key, so the old name keeps authenticating (and this row keeps
 		// counting it) until its roster entry is deleted as well.
+		// Settings hashes the password field as given (a blank one included),
+		// so the step must require a new password, not just a new name.
 		action += " The oversize name includes the legacy single-user login, which Admin Users alone cannot change: " +
-			"set a shorter login under Settings (POST /api/settings), sign in with it, then delete the old name's " +
+			"set a shorter login under Settings (POST /api/settings) together with a new strong password in the same save " +
+			"(Settings sets the password it is given — never leave the password blank), sign in with it, then delete the old name's " +
 			"remaining Admin Users entry (Settings adds the new name but does not remove the old one), and update " +
 			"-user / auth.user if it is set at startup (it is re-applied on every boot)."
 	}

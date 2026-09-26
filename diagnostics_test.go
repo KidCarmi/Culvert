@@ -1633,6 +1633,12 @@ func TestApiDiagnostics_OversizeLegacyUsernameSurfacedOnContract(t *testing.T) {
 	if !strings.Contains(found.OperatorAction, "/api/settings") || !strings.Contains(found.OperatorAction, "auth.user") {
 		t.Errorf("admin_username_length operator_action = %q, want the legacy-login remediation (Settings + -user/auth.user) — Admin Users cannot change cfg.user", found.OperatorAction)
 	}
+	// POST /api/settings hashes whatever password it is given — a blank one
+	// included — so the remediation must require a new strong password
+	// rather than let an operator change only the prefilled username.
+	if !strings.Contains(found.OperatorAction, "never leave the password blank") {
+		t.Errorf("admin_username_length operator_action = %q, want an explicit new-password requirement for the Settings step", found.OperatorAction)
+	}
 	if strings.Contains(found.Message, longName) {
 		t.Error("admin_username_length message should not echo the username itself")
 	}
