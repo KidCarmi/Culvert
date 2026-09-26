@@ -8746,6 +8746,80 @@ it is trying not to disturb; the honest trade is to take the extra CI cycle
 rather than hold a durable commit for it, because the container is ephemeral
 and the run is not.
 
+### Codex review round 18 — a count and a serve are one question, and a lost race is an outcome
+
+**THE FALLBACK COUNT DID NOT ANSWER THE QUESTION ITS OWN HELP TEXT ASKS (P2).**
+`Store.Len` returned `len(s.entries)` while `Get` refuses an entry for five
+conditions the index alone cannot see: a NEGATIVE age (a clock rollback — the
+CHAOS-61 rule), an age past `StaleMaxAge`, `Bytes` outside
+`(0, MaxDocumentBytes]`, a document file that is missing, and a file whose length
+disagrees with the index. The last three are not hypothetical — rounds 11 and 13
+added them precisely because a truncated or over-long document is the reachable
+shape on a volume that filled or was restored from a partial copy. So
+`culvert_idp_metadata_cached_documents`, whose help reads *"Remote IdP documents
+held as last-known-good on this node"*, could report a healthy fallback count on a
+node with NO usable fallback at all — and that gauge is the one reading an
+operator uses to decide whether an IdP outage is survivable. **The failure mode is
+the one this sweep exists to remove: a green surface over a dependency that is
+gone**, the `ocspCoverage` *"found nothing wrong" vs "never consulted"* mistake
+reached by a different road.
+
+Counting and serving are now ONE predicate (`checkServableLocked`) that both
+callers share. A second copy is how five conditions rot apart, and the copy that
+rots is always the one nobody is looking at — the same reasoning that moved the
+badger recovery engine into `internal/storeguard` rather than letting `catdb` and
+`logstore` each keep a copy of an empirical error table. **The wall carries an
+INDEPENDENT expectation column** (`TestServable_AgreesWithGet`, 8 shapes with a
+hand-written `wantGet` for each) rather than comparing the predicate with itself:
+a gate that asks one implementation about itself passes whatever that
+implementation becomes, which is the vacuity this sweep has now hit three times
+(rounds 7, 16 and 17).
+
+**A LOST RECOVERY RACE IS A REAL OUTCOME, SO IT IS COUNTED (P2).** A recovery
+compile can succeed with FRESH metadata — writing it to the cache — while an admin
+`Upsert` publishes the same profile from the STALE cache. `publishRecompiled` then
+correctly refuses, because the generation moved, and the fresh document sits in
+the cache unread while the live provider keeps serving the older one, with nothing
+saying so and nothing scheduled to recompile.
+
+**Publishing the discarded provider is NOT the fix, and that is worth recording
+rather than leaving as an obvious-looking follow-up.** That provider belongs to a
+SUPERSEDED generation: it was compiled outside `r.mu` against a profile the
+registry has since replaced, so adopting it is exactly the write
+`publishRecompiled`'s live-guard exists to refuse — the guard rounds 9, 10, 16 and
+17 all rest on. Round 10 is the direct precedent, where three rounds of patching a
+comparison ended in the conclusion that the STATE had to be keyed differently, not
+that the guard should yield. What is actually missing is a periodic refresh that
+recompiles into the LIVE registry, which is already **IDP-4** and touches the P1-3
+transactional mutation model, so it is its own piece of work and not something to
+bolt onto a loop whose contract is *dark profiles only*. IDP-4's row now names
+this route explicitly.
+
+So round 18 closes the VISIBILITY half alone:
+`culvert_idp_recovery_superseded_total` plus a rate-limited `IDP_RECOVERY_SUPERSEDED`
+line, magnitude in the counter (the standing rule for a line an event can drive —
+a mitigation for an invisibility defect must not become a write-amplification
+one). **Splitting a finding into the half that can ship now and the half that
+needs its own change is the right shape here**, because the alternative is either
+a silent state left standing or an unreviewed write into the registry's
+publication path.
+
+Mutation proofs, each verified failing against the shape it targets: `Len` back to
+`len(s.entries)` ⇒ `TestLen_CountsOnlyServableEntries`; the negative-age check
+dropped from the shared predicate ⇒ `TestServable_AgreesWithGet/negative_age`; the
+silent-discard pre-fix shape ⇒ `TestChaos71_SupersededSuccessfulRecoveryIsCounted`;
+counting EVERY recovery ⇒ `TestChaos71_OrdinaryRecoveryIsNotCountedAsSuperseded`.
+The last is the CONTROL: the cheapest way to pass the defect gate is to count
+every recovery, which makes the counter unreadable rather than absent, and *a
+counter an operator is told to act on is charged only from evidence supporting the
+specific claim its runbook makes* (the CHAOS-65 rule, twice).
+
+The superseded gate uses a SEPARATE gating profile from the one the intervening
+`Upsert` touches, and that is not incidental. Round 16's first attempt held the
+very source the `Upsert` also needed, so both parked on one channel and fell
+through on the same 15 s fetch budget — it passed against the defect. Runtime here
+is ~1.5 s, which is itself the evidence that no timeout is doing the scheduling.
+
 ### Codex review round 17 — a self-locking check makes every caller a check-then-act
 
 **THE SUPERSEDED-EPISODE CLEANUP RELEASED THE LOCK BETWEEN DECIDING AND ACTING
