@@ -229,12 +229,27 @@ func isSameOrigin(r *http.Request, origin string) bool {
 // credentials, so this must stay reachable even after cfg.IsConfigured() is
 // true.
 // NOTE: /api/auth/users is intentionally NOT in this list — it requires admin role.
+// SEC-PUBLICPATH-1: the list previously carried a `/api/auth/totp` PREFIX that
+// matched no registered route, so it was dead today and a landmine tomorrow —
+// the first `/api/auth/totp/enroll` or `.../disable` handler anyone adds would
+// have been born UNAUTHENTICATED, letting any caller enrol or strip the second
+// factor of an admin account. A prefix pre-authorises endpoints that do not
+// exist yet, which is the one thing an allowlist must never do.
+//
+// SEC-BASIC-1 (#1420) raised the stakes rather than lowering them: TOTP
+// enrolment now decides whether an account may authenticate over HTTP Basic at
+// all (cfg.UserHasTOTP, ui_basic_auth.go), so a public enrol/disable route
+// would let an unauthenticated caller bind their own second factor to an admin
+// account — or strip one — against a factor that now actually gates access.
+//
+// Removing it changes no behaviour today (nothing matches it) and forces the
+// next author to make the decision explicitly.
+// Pinned by TestPublicAllowlist_EveryEntryMatchesARegisteredRoute.
 func isPublicUIAuthPath(path string) bool {
 	return strings.HasPrefix(path, "/api/setup") ||
 		path == "/api/auth/login" ||
 		path == "/api/auth/logout" ||
 		path == "/api/auth/status" ||
-		strings.HasPrefix(path, "/api/auth/totp") ||
 		strings.HasPrefix(path, "/auth/") ||
 		path == "/proxy.pac" ||
 		strings.HasPrefix(path, "/pac/") ||

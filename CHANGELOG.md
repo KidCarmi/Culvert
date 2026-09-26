@@ -184,6 +184,94 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   and the minted value replaces the whole field, so exactly one value is
   forwarded.
 
+- The admin plane had four credential entry points and a brute-force bound on
+  one of them (SEC-BASICAUTH-1). The two-tier account lockout guarded
+  `POST /api/auth/login`; `uiAuthMiddleware`'s HTTP Basic Auth fallback,
+  `GET /api/auth/status` and the SSE mid-stream revalidation each verified the
+  same credentials with no lockout check, no failure record, no audit entry and
+  no rate limit — `securityMiddleware`'s per-IP API limiter applies only to
+  mutating requests, and none of the three is one. `/api/auth/status` is on the
+  public allowlist, so an **unauthenticated** caller could present
+  `Authorization: Basic …` and read the verdict out of `loggedIn`: a password
+  oracle at line rate, costing one bcrypt of appliance CPU per probe, leaving
+  no audit trail. All three now share the login form's lockout through one
+  chokepoint (`verifyUIBasicAuth`) — same tiers, same window, same trusted-IP
+  bypass, same `auth.lockout` audit action and `auth_lockout` alert, no new
+  setting. The check runs *before* verification, so a locked attempt costs no
+  bcrypt; the state is shared with the login endpoint, so an attacker cannot
+  refresh a budget by alternating endpoints; and the audit entry is written
+  once per lockout trip rather than once per attempt. A successful call clears
+  its own counter, so a legitimate CLI or monitoring client is never throttled.
+  Refusals are surfaced as `culvert_admin_basic_auth_lockout_refused_total` and
+  answered with `429` + `Retry-After`. **Basic Auth still does not enforce
+  TOTP** — a valid password alone reaches the full admin API — tracked as
+  RISK-030; see `docs/operator/admin-api-credential-lockout.md`.
+- Two residuals on that path are recorded rather than closed, after a per-client
+  failure budget was tried in review and withdrawn (SEC-BASICAUTH-2, -3, and
+  SEC-BASICAUTH-4).
+  Recording a failure creates lockout state keyed by a caller-chosen username, on
+  a public GET no rate limit covers (800 entries from 400 requests, measured), so
+  a budget was added that refused a client which had exceeded it. Because the
+  budget was keyed on the **client**, an unauthenticated flood of unknown
+  usernames — which cost no bcrypt — from a shared egress (a NAT, or an L7 proxy
+  with no `trusted_proxy_cidrs` configured) denied every administrator behind
+  that address, including ones presenting correct credentials. That is the
+  lockout-as-denial-of-service the two-tier design exists to prevent, so the
+  budget is withdrawn rather than patched again; any bound on this path must
+  delay or evict, never deny a request whose credentials were never checked. The
+  brute-force and "a locked attempt costs no bcrypt" bounds are the lockout
+  itself and are unaffected. What is now recorded open: **limiter-state growth**
+  (AU-17b — bounded per key by the username clamp, in time by the janitor, and
+  newly visible as `culvert_login_limiter_entries`; the fix is fair-share
+  eviction, which evicts without refusing) and **concurrent verification cost**
+  (AU-18 — the fix is the existing credential-cost governor, which makes an
+  over-cap client wait rather than refusing it). Builds that briefly exported
+  `culvert_admin_basic_auth_fail_shed_total` no longer do.
+- The admin-plane HTTP Basic chokepoint (SEC-BASIC-1) no longer refuses a
+  request on a bound keyed on the caller's address (SEC-BASICAUTH-4). A per-IP
+  failure budget was reserved before verification and kept on failure, so an
+  unauthenticated caller could exhaust it with ~60 unknown-username probes —
+  a map lookup each, no bcrypt — and every administrator sharing that address
+  (a NAT, a CGNAT range, an L7 proxy with no `trusted_proxy_cidrs`) was then
+  refused while presenting a **correct** password, repeatable once a minute.
+  That is the lockout-as-denial-of-service the two-tier design exists to
+  prevent, and it was worse than the lockout beside it on every axis:
+  username-independent, no bcrypt required, no knowledge of any account, and no
+  trusted-IP bypass. Refunding the unit on success cannot help a request already
+  refused. The budget is removed rather than retuned; any bound on this path
+  must delay or evict, never deny a request whose credentials were never
+  checked. The budget's other job — keeping an unauthenticated caller from
+  writing a durable audit line per attempt — is now done properly, by auditing
+  once per lockout **trip** instead of once per attempt.
+- The SSE mid-stream re-check no longer records against the lockout
+  (SEC-BASICAUTH-5). An SSE stream's Basic credentials are captured when the
+  connection is established and cannot change while it is open, so a periodic
+  re-check replays a credential that was already accepted — it is never a new
+  guess, and counting it as an attempt was wrong in both directions. Counting a
+  **failure** meant that rotating a password locked the administrator out: the
+  streams already open keep replaying the old secret, and enough of them trip
+  the lock on the very address the administrator is working from. Counting a
+  **success** was the more serious half — it cleared the tier-1 counter and
+  refreshed the tier-2 trusted-IP grant, so one legitimate stream held open from
+  a shared egress reset a co-located attacker's failure count once per interval,
+  and an attacker keeping each burst under the threshold never locked at all.
+  The re-check now still applies the lockout check and still verifies the
+  credential — a rotated password, a deleted account or a locked pair all
+  terminate the stream, which is *stricter* than before — but records neither
+  outcome. Operationally: **rotating an admin password can no longer lock you
+  out**, and the runbook's lock-clearing procedure now documents the existing
+  admin-only `POST /api/auth/lockouts` (and its Unlock button) instead of
+  telling operators to restart the process.
+- Removed a public-allowlist prefix that pre-authorised routes nobody had
+  written (SEC-PUBLICPATH-1). `isPublicUIAuthPath` matched any path under
+  `/api/auth/totp`, and no such route exists: TOTP is verified inside
+  `/api/auth/login`'s two-step exchange and there is no enrolment API. A prefix
+  authorises every future path beneath it, so the first
+  `/api/auth/totp/enroll` or `.../disable` handler would have been reachable
+  with no authentication, letting a caller bind their own second factor to an
+  admin account or strip an existing one. No behavioural change today (nothing
+  matched it); the class is now walled by a test requiring every allowlist
+  entry to cover at least one registered route.
 - **A request header could name a root-executed artifact (SEC-BOOTSTRAP-HOST-1).**
   The Control Plane's one-click DP bootstrap renders two artifacts a human is
   told to run with root authority — the install script it documents as

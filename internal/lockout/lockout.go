@@ -35,8 +35,13 @@ import (
 // gets through (and still answers to their own tier-1 pair lock).
 //
 // A successful login resets the pair counter and marks the IP trusted for
-// that user. State is not persisted across restarts (intentional — an
-// operator restart is the documented break-glass for a stuck lock).
+// that user. State is not persisted across restarts, which is intentional but
+// is NOT the routine remedy for a stuck lock: ResetUser clears every lock for
+// a username, and package main exposes it as the admin-only
+// POST /api/auth/lockouts (with GET to list what is locked). A restart clears
+// the same state and remains the break-glass for the case where nobody can
+// authenticate to reach that endpoint — it also interrupts proxy traffic, so
+// reach for the endpoint first.
 // ---------------------------------------------------------------------------
 
 const (
@@ -443,6 +448,22 @@ type LockedEntry struct {
 	SecondsRemaining int    `json:"seconds_remaining"`
 }
 
+// EntryCount returns the number of tier-1 pair and tier-2 account entries the
+// limiter is holding.
+//
+// Both maps are keyed by data an UNAUTHENTICATED caller chooses, so their SIZE
+// is a security observable, not a curiosity: MaxUsernameKeyLen bounds each
+// key's bytes (CHAOS-63) and Cleanup bounds how long an entry survives, but
+// nothing here bounds how many a caller may create — that is the callers' job
+// (SEC-BASICAUTH-2 rate-bounds its own failure path; see
+// ui_basicauth_lockout.go). This accessor is what lets a caller prove its bound
+// holds, and what lets an operator see the count on /metrics.
+func (l *LoginLimiter) EntryCount() int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return len(l.pairs) + len(l.accounts)
+}
+
 // Snapshot returns every currently-active lockout across both tiers, sorted
 // by username then IP for stable display. It is the read side of the
 // explicit unlock primitive (ResetUser) — without it, an operator has no way
@@ -564,57 +585,12 @@ func (a *APIRateLimiter) Allow(ip string) bool {
 	return e.count <= Burst
 }
 
-// Reservation identifies one unit claimed by Reserve. It is bound to the
-// limiter WINDOW it was claimed in, so a Refund landing after the window has
-// rolled over cannot decrement a later window's count. The zero value is a
-// no-op Refund.
-type Reservation struct {
-	ip    string
-	entry *apiRateEntry
-}
-
-// Reserve ATOMICALLY claims one unit of ip's Burst allowance in the current
-// window and reports whether it succeeded. Unlike Allow, a refusal records
-// nothing, so a caller that charges only some outcomes (e.g. failures) can
-// reserve BEFORE doing expensive or state-retaining work and Refund the unit
-// once the outcome turns out not to be chargeable. A check-then-charge pair
-// (probe, work, then Allow) is not a bound: a concurrent wave all passes the
-// probe before any of it is charged.
-func (a *APIRateLimiter) Reserve(ip string) (Reservation, bool) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	e := a.entries[ip]
-	now := time.Now()
-	if e == nil || now.Sub(e.windowStart) > RateWindow {
-		e = &apiRateEntry{count: 1, windowStart: now}
-		a.entries[ip] = e
-		return Reservation{ip: ip, entry: e}, true
-	}
-	if e.count >= Burst {
-		return Reservation{}, false
-	}
-	e.count++
-	return Reservation{ip: ip, entry: e}, true
-}
-
-// Refund returns one unit previously claimed by Reserve. The refund applies
-// only to the window the unit was claimed in: once that window has expired
-// or been replaced by a newer one (a new entry is allocated per window), the
-// unit already expired with it and the refund is a no-op — otherwise an
-// in-flight success crossing the boundary would mint extra capacity in the
-// NEW window. The count never goes negative.
-func (a *APIRateLimiter) Refund(r Reservation) {
-	if r.entry == nil {
-		return
-	}
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	e := a.entries[r.ip]
-	if e == nil || e != r.entry || time.Since(e.windowStart) > RateWindow || e.count <= 0 {
-		return
-	}
-	e.count--
-}
+// NOTE: Reserve/Refund/Reservation were removed with SEC-BASICAUTH-4. They
+// existed for ONE caller — a per-IP admin Basic-auth failure budget — which
+// was withdrawn because, keyed on the client, it denied valid credentials to
+// every administrator behind a shared egress. A ready-made atomic-refusal
+// primitive sitting next to a "do not refuse here" rule is a footgun, so it
+// goes with the feature. A future bound on that path must DELAY or EVICT.
 
 // Cleanup removes expired entries.
 func (a *APIRateLimiter) Cleanup() {

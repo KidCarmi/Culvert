@@ -141,7 +141,7 @@ metadata-driven RBAC gate Phase C below introduced).
 | `/` (SPA shell) | Static asset |
 | `/api/setup/status`, `/api/setup/complete` | First-run bootstrap |
 | `/api/auth/login`, `/api/auth/logout`, `/api/auth/status` | Login flow |
-| `/api/auth/totp*` (allowlisted prefix) | TOTP enrollment |
+| ~~`/api/auth/totp*` (allowlisted prefix)~~ | TOTP enrollment — **entry removed 2026-09-14 (SEC-PUBLICPATH-1)**: no such route exists, and a prefix pre-authorises every future path beneath it |
 | `/auth/oidc/callback`, `/auth/saml/callback`, `/auth/select`, `/auth/logout` | IdP redirect targets |
 | `/proxy.pac` | Windows PAC clients cannot send credentials |
 | `/healthz` | LB probe |

@@ -152,9 +152,23 @@ func sseAuthStillValid(r *http.Request) bool {
 		return true
 	}
 	// No session cookie — the connection was authenticated via HTTP Basic Auth.
+	//
+	// SEC-BASICAUTH-1: routed through the one chokepoint so this cannot become
+	// the surviving un-bounded credential path. Fail-closed on every non-OK
+	// verdict, lockout included: a stream whose client IP is under an active
+	// credential lockout for this username stops receiving live telemetry.
+	//
+	// SEC-BASICAUTH-5: the LIVENESS wrapper, which checks and verifies exactly
+	// as the submission path does but records nothing. These headers were
+	// captured when the stream was established and cannot change mid-stream, so
+	// treating each tick as a login attempt would (a) charge one failure per
+	// open stream after a password rotation, locking the administrator out of
+	// their own appliance, and (b) clear a co-located attacker's tier-1 counter
+	// once per interval on a shared egress. See revalidateUIBasicAuth.
 	if user, pass, ok := r.BasicAuth(); ok {
 		// SEC-BASIC-1: same controls as every other admin-plane Basic site.
-		_, valid := verifyUIBasicAuth(r, user, pass)
+		// SEC-BASICAUTH-5: the LIVENESS wrapper — see revalidateUIBasicAuth.
+		_, valid := revalidateUIBasicAuth(r, user, pass)
 		return valid
 	}
 	return false
@@ -331,6 +345,16 @@ func liveFeedWritePrometheus(w *strings.Builder) {
 	fmt.Fprintf(w, "\n# HELP culvert_tracing_header_rejected_total Client-supplied tracing headers replaced with a generated value because they exceeded the byte limit or carried non-visible-ASCII bytes. Sustained growth means a source is attempting log forgery or log-write amplification through the proxy data plane\n")
 	fmt.Fprintf(w, "# TYPE culvert_tracing_header_rejected_total counter\nculvert_tracing_header_rejected_total{header=\"x_request_id\"} %d\nculvert_tracing_header_rejected_total{header=\"traceparent\"} %d\n",
 		requestIDRejected.Load(), traceparentRejected.Load())
+
+	// AU-17b: the live size of the lockout state an unauthenticated caller can
+	// grow through the public GET on /api/auth/status. This is the admin plane's
+	// only signal for lockout-map growth, and it is deliberately a GAUGE rather
+	// than a refusal — the per-client budget that used to refuse here was
+	// withdrawn as a shared-egress DoS lever (SEC-BASICAUTH-4), so visibility is
+	// what remains until fair-share eviction lands.
+	fmt.Fprintf(w, "\n# HELP culvert_login_limiter_entries Live tier-1 pair + tier-2 account entries held by the admin credential lockout\n")
+	fmt.Fprintf(w, "# TYPE culvert_login_limiter_entries gauge\nculvert_login_limiter_entries %d\n",
+		loginLimiter.EntryCount())
 }
 
 // apiCountryTraffic returns the top destination countries for the dashboard.
