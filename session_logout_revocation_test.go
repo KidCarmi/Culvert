@@ -426,8 +426,12 @@ func TestChaos68_AU45_DecodeForRevocationKeepsTheSafetyChecks(t *testing.T) {
 // admitting a session this node has already revoked, or one whose account was
 // deleted. Behavioural coverage cannot see that; only an inventory can.
 func TestChaos68_AU45_WallDecodeForRevocationHasOneCaller(t *testing.T) {
+	// Anchored to pkgSourceDir(), never the CWD: a concurrent os.Chdir in
+	// another test would otherwise flake this wall (static_read_wall_test.go
+	// enforces that rule, and caught this file breaking it).
+	dir := pkgSourceDir()
 	fset := token.NewFileSet()
-	entries, err := os.ReadDir(".")
+	entries, err := os.ReadDir(dir)
 	if err != nil {
 		t.Fatalf("read dir: %v", err)
 	}
@@ -438,7 +442,7 @@ func TestChaos68_AU45_WallDecodeForRevocationHasOneCaller(t *testing.T) {
 		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
 			continue
 		}
-		f, err := parser.ParseFile(fset, name, nil, 0)
+		f, err := parser.ParseFile(fset, filepath.Join(dir, name), nil, 0)
 		if err != nil {
 			t.Fatalf("parse %s: %v", name, err)
 		}
@@ -468,7 +472,7 @@ func TestChaos68_AU45_WallDecodeForRevocationHasOneCaller(t *testing.T) {
 	// The seam's own doc comment points a future reader at this wall by name.
 	// A stale reference there is the CHAOS-70 round-2 defect (a document naming
 	// something that does not exist), and it is cheap to pin rather than trust.
-	src, err := os.ReadFile("internal/session/session.go")
+	src, err := os.ReadFile(filepath.Join(dir, "internal", "session", "session.go"))
 	if err != nil {
 		t.Fatalf("read seam source: %v", err)
 	}
