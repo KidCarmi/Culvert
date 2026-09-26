@@ -1826,4 +1826,11 @@ func TestApiDiagnostics_MirroredLegacyNonAdminRoleIsPreserved(t *testing.T) {
 	if !strings.Contains(found.OperatorAction, "role back to viewer") {
 		t.Errorf("operator_action = %q, want the Settings replacement's role restored to viewer (SetAuth creates admin)", found.OperatorAction)
 	}
+	// The role must be restored BEFORE the first sign-in: a role change does
+	// not revoke sessions, so signing in first leaves an admin session alive.
+	roleAt := strings.Index(found.OperatorAction, "role back to viewer")
+	signInAt := strings.Index(found.OperatorAction, "sign in with it")
+	if roleAt < 0 || signInAt < 0 || roleAt > signInAt {
+		t.Errorf("operator_action = %q, want the role restored before the first sign-in", found.OperatorAction)
+	}
 }

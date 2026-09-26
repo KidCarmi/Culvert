@@ -657,17 +657,22 @@ func oversizeUsernameAction(inv adminUsernameInventory, totpOversize bool) strin
 		// so the step must require a new password, not just a new name.
 		action += "The oversize name includes the legacy single-user login, which Admin Users alone cannot change: " +
 			"set a shorter login under Settings (POST /api/settings) together with a new strong password in the same save " +
-			"(Settings sets the password it is given — never leave the password blank), sign in with it, "
+			"(Settings sets the password it is given — never leave the password blank), "
+		if inv.legacyMirrored && inv.legacyRole != "" && inv.legacyRole != RoleAdmin {
+			// VerifyUIUser grants the roster role first, so this login is
+			// effectively a non-admin; SetAuth always creates the new name
+			// as RoleAdmin, which would silently elevate it. The role must be
+			// restored BEFORE the first sign-in: a role change does not
+			// revoke sessions and the session cookie carries the role it was
+			// issued with, so signing in first leaves an admin session alive.
+			action += fmt.Sprintf("then, before anyone signs in with the new login, set its role back to %s in Admin Users "+
+				"(Settings always creates it as admin, but the old login's effective role is %s, and a role change does not "+
+				"revoke a session already issued), ", inv.legacyRole, inv.legacyRole)
+		}
+		action += "sign in with it, "
 		if inv.legacyMirrored {
 			// Only a mirrored legacy name has a roster entry to remove; a
 			// legacy-only name is retired by overwriting cfg.user alone.
-			if inv.legacyRole != "" && inv.legacyRole != RoleAdmin {
-				// VerifyUIUser grants the roster role first, so this login is
-				// effectively a non-admin; SetAuth always creates the new name
-				// as RoleAdmin, which would silently elevate it.
-				action += fmt.Sprintf("then in Admin Users set the new login's role back to %s "+
-					"(Settings always creates it as admin, but the old login's effective role is %s), ", inv.legacyRole, inv.legacyRole)
-			}
 			action += "then delete the old name's remaining Admin Users entry (Settings adds the new name but does not remove the old one), "
 		} else {
 			// POST /api/settings never writes ui_users.json, and with no
