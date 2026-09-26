@@ -6447,10 +6447,28 @@ function applySession(user, role) {
 }
 
 function showLoginOverlay() {
+  // Every session-loss path (a 401 from ANY api() call, e.g. the 3 s
+  // dashboard tick, or an explicit logout) lands here, so the password
+  // dialog is dismissed centrally: typed passwords must never survive
+  // behind the overlay for whoever signs in next.
+  dismissChangePasswordModal();
   applySession('', '');
   const el = document.getElementById('login-overlay');
   if (el) { el.style.display = 'flex'; }
 }
+// The narrow-viewport topbar wraps onto extra rows, so sticky bars below it
+// (.reorder-bar) must offset by its measured height, not a fixed 52px.
+function syncTopbarHeight() {
+  const tb = document.querySelector('.topbar');
+  if (!tb) return;
+  document.documentElement.style.setProperty('--topbar-h', tb.offsetHeight + 'px');
+}
+document.addEventListener('DOMContentLoaded', function() {
+  syncTopbarHeight();
+  const tb = document.querySelector('.topbar');
+  if (tb && typeof ResizeObserver === 'function') new ResizeObserver(syncTopbarHeight).observe(tb);
+  else window.addEventListener('resize', syncTopbarHeight);
+});
 function hideLoginOverlay() {
   const el = document.getElementById('login-overlay');
   if (el) { el.style.display = 'none'; }
@@ -6480,6 +6498,12 @@ function openChangePasswordModal() {
   const modal = document.getElementById('change-password-modal');
   modal.classList.add('open');
   modalActivate(modal, '#cp-current', closeChangePasswordModal);
+}
+function dismissChangePasswordModal() {
+  const modal = document.getElementById('change-password-modal');
+  if (!modal || !modal.classList.contains('open')) return;
+  clearChangePasswordFields();
+  closeChangePasswordModal();
 }
 function closeChangePasswordModal() {
   const modal = document.getElementById('change-password-modal');
@@ -19646,8 +19670,10 @@ function resetBlockPage() {
    warn tokens stay single-sourced; this only adds the sticky/flex deltas.
    top offset ≈ the sticky .topbar's height (z-index 50, same #main scroller)
    - top:0 would slide the bar underneath it exactly when the rulebase is
-   long enough to scroll. */
-.reorder-bar { position:sticky;top:52px;z-index:40;display:flex;gap:10px;align-items:center;
+   long enough to scroll. --topbar-h tracks the topbar's ACTUAL height
+   (syncTopbarHeight) because the topbar wraps onto several rows on narrow
+   viewports; 52px is only the single-row fallback. */
+.reorder-bar { position:sticky;top:var(--topbar-h, 52px);z-index:40;display:flex;gap:10px;align-items:center;
   margin:8px 16px 0;font-size:.82rem; }
 .where-used { list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:6px; }
 .where-used-item { display:flex;align-items:center;gap:8px;padding:8px 10px;border:1px solid var(--border);

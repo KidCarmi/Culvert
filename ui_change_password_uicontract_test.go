@@ -185,10 +185,68 @@ func TestUIContract_TopbarActionsWrapOnNarrowViewports(t *testing.T) {
 		t.Fatal("narrow-viewport media block not found")
 	}
 	block := s[i:]
-	block = block[:strings.Index(block, "\n}\n")]
+	end := strings.Index(block, "\n}\n")
+	if end < 0 {
+		t.Fatal("narrow-viewport media block is not terminated")
+	}
+	block = block[:end]
 	for _, want := range []string{".topbar { flex-wrap: wrap;", ".topbar-actions { flex-wrap: wrap;"} {
 		if !strings.Contains(block, want) {
 			t.Errorf("narrow-viewport block must contain %q", want)
+		}
+	}
+}
+
+// Session loss can be observed by ANY api() call (the 3 s dashboard tick),
+// not only the password submit, so the dialog must be dismissed in the one
+// place every session-loss path converges: showLoginOverlay.
+func TestUIContract_ChangePasswordDismissedOnAnySessionLoss(t *testing.T) {
+	html, err := os.ReadFile(staticIndexHTMLPath())
+	if err != nil {
+		t.Fatalf("read index.html: %v", err)
+	}
+	s := string(html)
+	i := strings.Index(s, "function showLoginOverlay() {")
+	if i < 0 {
+		t.Fatal("showLoginOverlay not found")
+	}
+	body := s[i:]
+	end := strings.Index(body, "\n}\n")
+	if end < 0 {
+		t.Fatal("showLoginOverlay body is not terminated")
+	}
+	if !strings.Contains(body[:end], "dismissChangePasswordModal()") {
+		t.Error("showLoginOverlay must dismiss (clear + close) the password dialog")
+	}
+	j := strings.Index(s, "function dismissChangePasswordModal() {")
+	if j < 0 {
+		t.Fatal("dismissChangePasswordModal not found")
+	}
+	d := s[j:]
+	if k := strings.Index(d, "\n}\n"); k >= 0 {
+		d = d[:k]
+	}
+	for _, want := range []string{"clearChangePasswordFields()", "closeChangePasswordModal()"} {
+		if !strings.Contains(d, want) {
+			t.Errorf("dismissChangePasswordModal must call %s", want)
+		}
+	}
+}
+
+// The topbar wraps on narrow viewports, so the sticky policy bars must offset
+// by its measured height rather than a fixed single-row 52px.
+func TestUIContract_StickyBarsTrackTopbarHeight(t *testing.T) {
+	html, err := os.ReadFile(staticIndexHTMLPath())
+	if err != nil {
+		t.Fatalf("read index.html: %v", err)
+	}
+	s := string(html)
+	if !strings.Contains(s, ".reorder-bar { position:sticky;top:var(--topbar-h, 52px);") {
+		t.Error(".reorder-bar must offset by var(--topbar-h), not a fixed 52px")
+	}
+	for _, want := range []string{"function syncTopbarHeight()", "setProperty('--topbar-h'", "new ResizeObserver(syncTopbarHeight)"} {
+		if !strings.Contains(s, want) {
+			t.Errorf("index.html must keep --topbar-h in sync with the topbar: missing %q", want)
 		}
 	}
 }
