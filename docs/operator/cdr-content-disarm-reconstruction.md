@@ -77,6 +77,24 @@ Two ways to turn CDR on, and either one is enough — you do not need both:
    enable sentinel at `<dataDir>/cdr_enabled` and `false` removes it, and
    either way the connection pool starts/stops immediately.
 
+   > **This is the common case, and it runs on a zero-valued config.** CDR
+   > ships disabled, so `loadCDR` never calls `initCDRClient` at boot and
+   > `cdrActiveCfg` is never populated with your resolved `cdr.*`
+   > config/CLI settings — it stays at its Go zero value. The FIRST runtime
+   > enable, whether via this auto-enable-on-enroll path or a bare
+   > `PUT {"enabled": true}`, only ever calls `setCDREnabledRuntime(true)`
+   > (which flips the `Enabled` field on whatever `cdrActiveCfg` currently
+   > holds) before `initCDRClient` builds the pool from it — so on a node
+   > that has never had CDR enabled at boot, the pool comes up with
+   > `fail_mode` unset (fail-**open**), no default profile/mode, and a zero
+   > timeout/size cap, regardless of what you'd set in `config.yaml`/CLI
+   > flags. `GET /api/cdr/config` after enrolling will show these as empty/
+   > zero if this is your first enable. If you need non-default `cdr.*`
+   > settings (especially `fail_mode: closed`), either start the process
+   > with `-cdr-enabled`/`cdr.enabled: true` from the very first boot, or
+   > restart once after your first GUI enrollment so `loadCDR` re-resolves
+   > the full static config with CDR already enabled.
+
 > **Scan-engine gate.** Enrollment turns CDR on, but CDR only runs on a
 > response body that the SSL-inspection path has decided to buffer.
 > `scanInspectBody` returns before `runCDRStage` whenever
@@ -392,13 +410,23 @@ enrolled instances — manual action is a fallback, not the normal path:
   needed if automatic renewal has been failing (check the log for `RenewCert
   failed`) or the instance was never successfully enrolled.
 - **Server certificate (Sluice's own cert, TOFU-pinned by
-  `cdr.server_fingerprint`):** Sluice can advertise a rotation in progress
-  via its `Health` response, which Culvert stages as a second accepted
-  fingerprint (dual-pin) so a mid-rotation connection isn't dropped; once the
-  advertised grace window passes, Culvert promotes the new fingerprint to
-  primary automatically. Manually updating `cdr.server_fingerprint` is only
-  needed for a server-cert change Sluice did **not** advertise this way (e.g.
-  an out-of-band replacement).
+  `cdr.server_fingerprint`):** **on the Culvert side**, if Sluice's `Health`
+  response advertises a rotation in progress (`rotated_fingerprint` +
+  a grace-window deadline), Culvert stages the advertised value as a second
+  accepted fingerprint (dual-pin) so a mid-rotation connection isn't dropped,
+  and promotes it to primary once the grace window passes and Health reports
+  it as the new primary — verified end-to-end against this repo's own
+  `cdr_health.go`/`cdr_pool.go` and their tests. **Whether Sluice's rotation
+  tooling actually populates those fields on a live `Health` RPC is outside
+  what this Culvert-side runbook can confirm** — `roadmap/SLUICE-CDR-HANDOFF.md`,
+  the only Sluice-side reference in this repo, documents an older `Health`
+  message shape with no fingerprint fields at all, so it's not authoritative
+  either way for the currently-pinned Sluice version. Don't treat "automatic"
+  here as a guarantee: verify a real rotation against your deployed Sluice
+  version before relying on it, and keep `cdr.server_fingerprint` update
+  as your fallback if a rotation isn't picked up (check the log for
+  `CDR: server-cert rotation` lines, or `GET /api/cdr/health` for staleness,
+  to tell whether the dual-pin ever actually armed).
 
 ## Policy rules
 
