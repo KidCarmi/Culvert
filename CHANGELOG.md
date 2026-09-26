@@ -57,7 +57,11 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   revocation save that fails transiently is retried on a later cluster sync
   rather than skipped because the entry is already in memory — on an HA standby
   the replicated bundle is the only writer, so without the retry the volume
-  could be repaired and the revocation still never reach disk. The
+  could be repaired and the revocation still never reach disk. A backing file
+  that disappears after startup — deleted, or carried off by a replaced mount —
+  is likewise rewritten on the next sync instead of leaving the in-force
+  revocations in memory only; nothing observes such a disappearance on its own,
+  because no write is attempted and so no failure is recorded. The
   persisted document remains a JSON array so an older binary still parses the
   token revocations it understands.
 

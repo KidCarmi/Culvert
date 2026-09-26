@@ -328,21 +328,33 @@ func TestChaos68_SyncRevocationsWiresBothDirections(t *testing.T) {
 func TestChaos68_ContractRowNeverEchoesSensitiveTokens(t *testing.T) {
 	forbidden := []string{"sessionSecret", "CULVERT_SESSION_SECRET", "-----BEGIN", "/data/"}
 
+	// Each branch declares the status it must reach. Without that a setup that
+	// silently lands in a DIFFERENT branch would still pass the leak check, and
+	// the wall's claim to drive every branch would be false while green — the
+	// vacuous-gate failure mode this sweep keeps pinning against.
 	branches := []struct {
 		name  string
+		want  string
 		setup func(t *testing.T)
 	}{
-		{"unconfigured", func(*testing.T) {}},
-		{"healthy", func(t *testing.T) {
+		{"unconfigured", diagWarn, func(*testing.T) {}},
+		{"healthy", diagOK, func(t *testing.T) {
 			noteRevocationPersistenceConfigured(filepath.Join(t.TempDir(), "revocations.json"))
 		}},
-		{"load-degraded", func(t *testing.T) {
+		{"load-degraded", diagFail, func(t *testing.T) {
 			noteRevocationPersistenceConfigured(filepath.Join(t.TempDir(), "revocations.json"))
 			noteRevocationLoadDegraded(session.ErrRevocationsCorrupt)
 		}},
-		{"persist-failed", func(t *testing.T) {
+		{"persist-failed", diagFail, func(t *testing.T) {
 			noteRevocationPersistenceConfigured(filepath.Join(t.TempDir(), "revocations.json"))
 			noteRevocationPersistFailure(os.ErrPermission)
+		}},
+		// AU-35. The row names a mount and a deletion, which is the branch most
+		// likely to reach for a raw path when someone rewords it.
+		{"vanished-file", diagFail, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "revocations.json")
+			session.SetRevocationsPath(path)
+			noteRevocationPersistenceConfigured(path)
 		}},
 	}
 
@@ -351,6 +363,9 @@ func TestChaos68_ContractRowNeverEchoesSensitiveTokens(t *testing.T) {
 			withChaos68Revocations(t)
 			b.setup(t)
 			row := checkSessionRevocation()
+			if row.Status != b.want {
+				t.Fatalf("setup reached status %q, want %q — this sub-case is no longer driving the %s branch", row.Status, b.want, b.name)
+			}
 			blob := row.Code + " " + row.Message + " " + row.OperatorAction
 			for _, needle := range forbidden {
 				if strings.Contains(blob, needle) {
@@ -727,18 +742,32 @@ func TestChaos68_HealthyNodeDoesNotRewriteOnEverySync(t *testing.T) {
 		t.Fatalf("first merge did not persist: %v", err)
 	}
 
-	// Remove the file so a later write is observable, then re-sync the SAME
-	// entries on a healthy node. Nothing new, nothing degraded, nothing to do.
-	if err := os.Remove(path); err != nil {
-		t.Fatalf("remove: %v", err)
+	// Scribble a sentinel over the file so a later write is observable, then
+	// re-sync the SAME entries on a healthy node. Nothing new, nothing
+	// degraded, nothing to do — the sentinel must survive.
+	//
+	// The instrument used to be os.Remove, and AU-35 turned that into a
+	// measurement error: a missing file is now itself a reason to rewrite, so
+	// the control was creating the very condition it meant to rule out and
+	// could no longer tell "a healthy node wrote" from "a node repaired a file
+	// this test deleted". A sentinel leaves the file PRESENT — the actual
+	// healthy state — and is replaced only by a real write, which is the one
+	// thing being asked about.
+	sentinel := []byte(`["do-not-rewrite-me"]`)
+	if err := os.WriteFile(path, sentinel, 0o600); err != nil {
+		t.Fatalf("seed sentinel: %v", err)
 	}
 	for i := 0; i < 3; i++ {
 		if added := mergeAndPersistRevocations(entries, "test"); added != 0 {
 			t.Fatalf("re-merge added %d, want 0", added)
 		}
 	}
-	if _, err := os.Stat(path); !os.IsNotExist(err) {
-		t.Error("a healthy node rewrote the revocations file on a sync that changed nothing")
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if !bytes.Equal(got, sentinel) {
+		t.Errorf("a healthy node rewrote the revocations file on a sync that changed nothing: %s", got)
 	}
 }
 
@@ -862,4 +891,199 @@ func chaos68CalleeName(call *ast.CallExpr) string {
 		return "MergeRevocations"
 	}
 	return name
+}
+
+// DEFECT (AU-35). A backing file that disappears AFTER the boot probe leaves
+// every observer clear — no write was attempted, so no failure fired, so the
+// persist-degraded flag stays false. Keying the retry on that flag alone meant
+// a cluster sync carrying only already-known entries took the early return
+// forever, and the revocations stayed in RAM only. The next restart loaded a
+// file that had never received them and the cookies were live again.
+//
+// Reported by Codex on PR #1437 as a P2, against the merge primitive's early
+// return.
+func TestChaos68_VanishedBackingFileIsRewrittenOnTheNextSync(t *testing.T) {
+	withChaos68Revocations(t)
+	path := filepath.Join(t.TempDir(), "revocations.json")
+	session.SetRevocationsPath(path)
+	noteRevocationPersistenceConfigured(path)
+
+	exp := time.Now().Add(time.Hour)
+	entries := []RevocationEntry{{Token: "tok-gone", Expiry: exp.Unix()}}
+	if added := mergeAndPersistRevocations(entries, "test"); added != 1 {
+		t.Fatalf("first merge added %d, want 1", added)
+	}
+
+	// The mount is replaced, or an operator deletes the file. Nothing observes
+	// it: no save was attempted, so the degraded flag is still clear.
+	if err := os.Remove(path); err != nil {
+		t.Fatalf("remove: %v", err)
+	}
+	if sessionRevocationPersistDegraded.Load() {
+		t.Fatal("precondition: the flag must still be clear — the whole point is that nothing observed the deletion")
+	}
+
+	// The next sync carries the SAME entry, so the merge adds nothing.
+	if added := mergeAndPersistRevocations(entries, "test"); added != 0 {
+		t.Fatalf("re-merge added %d, want 0 — the entry is already in memory", added)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("the vanished revocations file was not rewritten: %v", err)
+	}
+	if !strings.Contains(string(data), "tok-gone") {
+		t.Errorf("the rewritten file does not carry the in-force revocation: %s", data)
+	}
+}
+
+// The repair is SELF-LIMITING: once the file is back, the next sync finds it
+// present and takes the early return again. Exactly one extra write per
+// disappearance, not one per tick — otherwise the fix for a durability defect
+// becomes the write-amplification defect this file keeps refusing to ship.
+func TestChaos68_VanishedFileRepairIsOneWriteNotAPerTickRewrite(t *testing.T) {
+	withChaos68Revocations(t)
+	path := filepath.Join(t.TempDir(), "revocations.json")
+	session.SetRevocationsPath(path)
+	noteRevocationPersistenceConfigured(path)
+
+	exp := time.Now().Add(time.Hour)
+	entries := []RevocationEntry{{Token: "tok-once", Expiry: exp.Unix()}}
+	mergeAndPersistRevocations(entries, "test")
+	if err := os.Remove(path); err != nil {
+		t.Fatalf("remove: %v", err)
+	}
+
+	// First sync after the disappearance repairs it.
+	mergeAndPersistRevocations(entries, "test")
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("repair did not happen: %v", err)
+	}
+
+	// Every sync after that must leave the file alone, proven with the same
+	// non-perturbing sentinel the healthy-node control uses.
+	sentinel := []byte(`["do-not-rewrite-me"]`)
+	if err := os.WriteFile(path, sentinel, 0o600); err != nil {
+		t.Fatalf("seed sentinel: %v", err)
+	}
+	for i := 0; i < 3; i++ {
+		mergeAndPersistRevocations(entries, "test")
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if !bytes.Equal(got, sentinel) {
+		t.Errorf("the repair kept firing after the file was restored: %s", got)
+	}
+}
+
+// CONTROL. A node with no persistence configured must pay nothing — no stat
+// storm, no save attempt, no degradation — on a sync that adds nothing. The
+// cheapest way to pass the defect gate is to drop the early return entirely,
+// which would put every unconfigured appliance in the fleet through a save
+// attempt on every 3-5s tick.
+func TestChaos68_UnconfiguredNodePaysNothingForTheVanishedFileCheck(t *testing.T) {
+	withChaos68Revocations(t)
+	session.SetRevocationsPath("")
+
+	if revocationBackingFileIsGone() {
+		t.Error("an unconfigured node reports its backing file missing — there is no backing file")
+	}
+	exp := time.Now().Add(time.Hour)
+	entries := []RevocationEntry{{Token: "tok-unconf", Expiry: exp.Unix()}}
+	mergeAndPersistRevocations(entries, "test")
+	if added := mergeAndPersistRevocations(entries, "test"); added != 0 {
+		t.Fatalf("re-merge added %d, want 0", added)
+	}
+	if sessionRevocationPersistDegraded.Load() {
+		t.Error("an unconfigured node was marked persist-degraded")
+	}
+}
+
+// Only a DEFINITIVELY absent file counts as gone. An unreadable one is not
+// evidence the content is missing — it may be intact behind a transient fault
+// — and this file already applies that rule to LoadRevocations. A second,
+// stricter posture for the same question is the divergence class this sweep
+// keeps closing.
+func TestChaos68_UnreadablePathIsNotReportedAsAVanishedFile(t *testing.T) {
+	withChaos68Revocations(t)
+	// A path whose PARENT is a regular file: stat fails with ENOTDIR, which is
+	// an error but is not "the file is not there".
+	session.SetRevocationsPath(chaos68UnwritablePath(t))
+
+	if revocationBackingFileIsGone() {
+		t.Error("an unstattable path was reported as a definitively missing file; only ENOENT may count")
+	}
+}
+
+// The operator-contract row must SAY the in-force revocations are no longer on
+// disk. Its OK message claims they are durable, which is exactly the
+// proposition a vanished file falsifies — distinct from the durable gauge,
+// whose claim ("a revocation applied right now would survive") stays true
+// because SaveRevocations recreates the file.
+func TestChaos68_VanishedBackingFileFailsTheContractRow(t *testing.T) {
+	withChaos68Revocations(t)
+	path := filepath.Join(t.TempDir(), "revocations.json")
+	session.SetRevocationsPath(path)
+	noteRevocationPersistenceConfigured(path)
+
+	sessionRevoked.RevokeUser("departed")
+	if err := sessionRevoked.SaveRevocations(); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	if row := checkSessionRevocation(); row.Status != diagOK {
+		t.Fatalf("precondition: row = %q, want %q (%s)", row.Status, diagOK, row.Message)
+	}
+
+	if err := os.Remove(path); err != nil {
+		t.Fatalf("remove: %v", err)
+	}
+	row := checkSessionRevocation()
+	if row.Status != diagFail {
+		t.Errorf("status = %q, want %q once the backing file is gone (%s)", row.Status, diagFail, row.Message)
+	}
+	// Viewer-reachable surface: counts and a remedy, never the revoked identity
+	// and never a raw path.
+	if strings.Contains(row.Message, "departed") || strings.Contains(row.OperatorAction, "departed") {
+		t.Errorf("the row leaked a revoked identity: %+v", row)
+	}
+	if strings.Contains(row.Message, path) || strings.Contains(row.OperatorAction, path) {
+		t.Errorf("the row leaked the raw revocations path: %+v", row)
+	}
+}
+
+// The repair announces the MISSING FILE, not a recovery. Reporting it as
+// "durable again" would claim recovery from a degradation that was never
+// reported, sending an operator to hunt for a failure line that does not
+// exist — and the line must be one per disappearance, not one per 3-5s tick.
+func TestChaos68_VanishedFileRepairAnnouncesItselfOncePerDisappearance(t *testing.T) {
+	withChaos68Revocations(t)
+	path := filepath.Join(t.TempDir(), "revocations.json")
+	session.SetRevocationsPath(path)
+	noteRevocationPersistenceConfigured(path)
+
+	exp := time.Now().Add(time.Hour)
+	entries := []RevocationEntry{{Token: "tok-log", Expiry: exp.Unix()}}
+	mergeAndPersistRevocations(entries, "test")
+	if err := os.Remove(path); err != nil {
+		t.Fatalf("remove: %v", err)
+	}
+
+	var buf bytes.Buffer
+	old := logger
+	logger = log.New(&buf, "", 0)
+	t.Cleanup(func() { logger = old })
+
+	for i := 0; i < 6; i++ {
+		mergeAndPersistRevocations(entries, "test")
+	}
+
+	out := buf.String()
+	if n := strings.Count(out, "the revocations file is missing"); n != 1 {
+		t.Errorf("emitted %d missing-file lines across 6 syncs, want exactly 1: %s", n, out)
+	}
+	if strings.Contains(out, "durable again") {
+		t.Errorf("a repaired vanished file was reported as recovery from a degradation that was never reported: %s", out)
+	}
 }

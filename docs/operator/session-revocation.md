@@ -110,6 +110,7 @@ unconfigured and states this coupling.
 | `warn` | No revocations file configured — revocations are lost on restart | Set `--revocations-file` (§3) |
 | `fail` | A revocation could not be **written** | §5 |
 | `fail` | The persisted list did not **load** | §6 |
+| `fail` | The revocations file is **missing** | §6a |
 
 The row carries counts and a remedy only. It never names a revoked username or
 token — it is reachable at viewer role.
@@ -269,6 +270,49 @@ If the file could **not be read** (permissions, I/O), it is *not* quarantined �
 the content may be perfectly intact behind a transient fault, and moving a
 healthy security-critical file aside is the worse error. Fix the permission or
 the mount and restart.
+
+---
+
+## 6a. Recovery: the revocations file is missing
+
+The row reads:
+
+> the revocations file is missing — the N token and M account revocation(s) in
+> force on this node are held in memory only and are lost on the next restart
+
+Persistence is armed and the file it writes to is not there. Nothing in the
+node deleted it: startup proves the path by writing to it, so a file that is
+absent afterwards was removed from outside — an operator deleting it, a restore
+that did not include it, or a replaced mount.
+
+This state is **self-healing on the next write**, and usually before you see
+it:
+
+* **On a clustered node** the next config sync rewrites the complete list
+  (every 3–5 s), whether or not that sync carries anything new. The window is
+  seconds.
+* **On a standalone node** the next logout or account deletion recreates the
+  file with the full list. Until one happens, nothing writes.
+
+So the action is:
+
+1. Check what happened to the mount or directory — the file vanishing is the
+   symptom, not the cause, and if the mount is gone the repair write will fail
+   too and the row moves to §5.
+2. If the row does not clear within a few seconds on a clustered node, treat it
+   as §5: the rewrite is being attempted and failing.
+3. On a standalone node, confirm the file reappears after the next revocation.
+   Until it does, **treat every revocation the row counts as lost on restart** —
+   do not restart the node if you are relying on them.
+
+Note the deliberate split with the metric: `culvert_session_revocation_durable`
+stays `1` here, and that is correct rather than a bug. It states *a revocation
+applied right now would survive* — which is true, because the write that
+applies it recreates the file with everything in memory. The row states the
+different and stronger claim that *the revocations already in force are on
+disk*, and that is the one a missing file falsifies. Page on
+`_persist_degraded` (§5) for writes that are failing; watch this row for
+revocations that are not written down.
 
 ---
 

@@ -37,6 +37,7 @@ package main
 
 import (
 	"fmt"
+	"os"
 	"sync"
 	"sync/atomic"
 
@@ -134,6 +135,60 @@ func sessionRevocationState() sessionRevocationHealth {
 	return sessionRevocationHealthy
 }
 
+// revocationBackingFileIsGone reports that persistence is armed and the file
+// it writes to is DEFINITIVELY absent right now.
+//
+// It exists because durability here has two propositions, not one, and only a
+// boot-time proof ever covered the second:
+//
+//   - "a revocation applied right now would survive" — what
+//     revocationsAreDurable and culvert_session_revocation_durable state.
+//     Deleting the file does NOT falsify it: SaveRevocations writes the
+//     COMPLETE live list through AtomicWrite, which creates the file, so the
+//     next revocation re-materialises everything.
+//   - "the revocations ALREADY in force are on disk" — what the contract row's
+//     OK message states, and what a restart actually depends on. That one IS
+//     falsified the moment the file disappears, and nothing observed it: no
+//     write was attempted, so no failure observer fired, so the persist-degraded
+//     flag stayed clear and every surface kept reporting the boot-time answer.
+//
+// Reported by Codex on PR #1437 as a P2 (AU-35), against the merge primitive's
+// early return — which is where it bites, because a cluster sync carrying only
+// already-known entries adds nothing, returned before the save, and therefore
+// never put the in-memory list back on disk. A restart then loaded a file that
+// had never received those revocations and the cookies were live again: the
+// fail-OPEN direction this plane exists to prevent.
+//
+// It keys on session.RevocationsPath() — the path SaveRevocations actually
+// writes to — and NOT on the recorded health Path. The two are the same value
+// in production (one startup slice sets both), and using the writer's path is
+// what makes "the file is gone" and "a save would recreate it" the same
+// question. Keying on the recorded path instead would let a caller loop: stat a
+// path that is missing, call a save that writes somewhere else (or nowhere),
+// find it still missing on the next tick, forever.
+//
+// ONLY a definitively absent file counts. Any other stat error — EACCES on the
+// parent, EIO, a stale NFS handle — is NOT treated as missing, because it is
+// not evidence the file is gone, and the content may be perfectly intact behind
+// a transient fault. That is the same rule LoadRevocations already applies to
+// an unreadable file ("do NOT probe … a write attempt is the one action that
+// could destroy it"); a second, stricter posture for the same question in the
+// same file is the divergence class this sweep keeps closing.
+//
+// A contract row doing filesystem I/O is established practice here, not a new
+// departure: checkPlaintextKeyBackups stats its candidate paths on the same
+// surface and says so, and checkMemoryBackstop reads cgroup files. The stat is
+// read-only and on a path the appliance already touches, so it inherits that
+// surface's existing exposure to a wedged mount rather than adding one.
+func revocationBackingFileIsGone() bool {
+	path := session.RevocationsPath()
+	if path == "" {
+		return false
+	}
+	_, err := os.Stat(path)
+	return err != nil && os.IsNotExist(err)
+}
+
 // revocationsAreDurable reports whether a revocation applied right now would
 // survive this process.
 //
@@ -141,6 +196,16 @@ func sessionRevocationState() sessionRevocationHealth {
 // that fills and a volume that is then repaired both show up on the next read.
 // See the comment on sessionRevocationPersistDegraded for why that distinction
 // is load-bearing rather than cosmetic.
+//
+// It deliberately does NOT consult revocationBackingFileIsGone, and that is not
+// an oversight: this predicate and the contract row state DIFFERENT
+// propositions. A deleted file does not falsify "a revocation applied right now
+// would survive" — SaveRevocations writes the complete live list through
+// AtomicWrite, which creates the file — so the gauge stays honest and matches
+// its own /metrics help text. What a deleted file falsifies is "the revocations
+// ALREADY in force are on disk", which is the row's claim, and the row is where
+// AU-35 is reported. Folding the check in here would make the gauge contradict
+// its published meaning to report a condition the row already names.
 func revocationsAreDurable() bool {
 	h := sessionRevocationState()
 	return h.Configured && !h.LoadDegraded && !sessionRevocationPersistDegraded.Load()
@@ -167,6 +232,13 @@ func resetSessionRevocationHealthForTest() {
 //     elapsed time and not on a restart — see sessionRevocationPersistDegraded.
 //   - the persisted list did not load → FAIL. Revocations the operator already
 //     applied are not in force on this node, and nothing else will tell them.
+//   - the backing file is GONE → FAIL. Persistence is armed and the file it
+//     writes to is not there, so the revocations listed as "in force" exist in
+//     RAM only and a restart resurrects every one of them. Nothing observed the
+//     disappearance — no write was attempted, so no failure fired — which is
+//     why this needs its own branch rather than falling out of the flag above
+//     (AU-35). It is a FAIL and not a warn for the same reason the first branch
+//     is: the operator was told these revocations were applied.
 //   - no persistence configured → WARN. Not a fault — it is the DEFAULT, and
 //     that is exactly why it needs saying: a logout or an account deletion is
 //     undone by the next restart. It is a warn and not a fail because it is a
@@ -206,6 +278,15 @@ func checkSessionRevocation() OperatorContractCheck {
 			Status:         diagFail,
 			Message:        "the persisted session-revocation list did not load — revocations applied before this restart are NOT in force on this node",
 			OperatorAction: "See the state_file_session_revocations row and the server logs. Restore the quarantined .corrupt.* file or a backup and restart; until then, re-apply any logout or account deletion that must hold.",
+		}
+	}
+	if h.Configured && revocationBackingFileIsGone() {
+		return OperatorContractCheck{
+			Code:   "session_revocation",
+			Status: diagFail,
+			Message: fmt.Sprintf("the revocations file is missing — the %d token and %d account revocation(s) in force on this node are held in memory only and are lost on the next restart",
+				tokens, users),
+			OperatorAction: "Check the mount backing the revocations file and whether it was deleted or restored over. A clustered node rewrites it on the next config sync; on a standalone node the next logout or account deletion recreates it with the full list. Until one of those lands, treat every revocation shown here as lost on restart.",
 		}
 	}
 	if !h.Configured {
@@ -266,18 +347,45 @@ func checkSessionRevocation() OperatorContractCheck {
 // Reported by Codex on PR #1437 as a P1 (AU-34).
 func mergeAndPersistRevocations(entries []RevocationEntry, who string) int {
 	added := sessionRevoked.MergeRevocations(entries)
-	wasDegraded := sessionRevocationPersistDegraded.Load()
-	if added == 0 && !wasDegraded {
+	// "Durability is in doubt" is TWO conditions, not one. The flag covers a
+	// save that was attempted and failed; revocationBackingFileIsGone covers a
+	// file that was never written down again because nobody attempted anything
+	// — deleted by hand, or carried off by a replaced mount. The second leaves
+	// every observer clear, so keying the retry on the flag alone meant a node
+	// whose file had vanished kept taking this early return on every sync while
+	// holding revocations that existed only in RAM (AU-35).
+	//
+	// Checking it here costs one stat per sync tick (3-5s) and self-limits: the
+	// forced save recreates the file, so the next tick finds it present and
+	// returns early again. Exactly one extra write per disappearance. If the
+	// save fails instead — the mount is gone, not just the file — the flag is
+	// set and the pre-existing retry below takes over unchanged.
+	//
+	// The two causes are kept SEPARATE rather than folded into one boolean,
+	// because they produce different operator lines. Reporting a repaired
+	// vanished file as "durable again" would claim a recovery from a
+	// degradation that was never reported, leaving an operator hunting for a
+	// failure line that does not exist. `vanished` is computed only when the
+	// flag is clear, so a node whose save is already failing does not also
+	// announce a missing file every tick — the flag's own onset line already
+	// said what is wrong.
+	failing := sessionRevocationPersistDegraded.Load()
+	vanished := !failing && revocationBackingFileIsGone()
+	if added == 0 && !failing && !vanished {
 		return 0
+	}
+	if vanished {
+		logger.Printf("%s: the revocations file is missing — rewriting the %d token and %d account revocation(s) held in memory",
+			who, sessionRevoked.Count(), sessionRevoked.UserCount())
 	}
 	if err := sessionRevoked.SaveRevocations(); err != nil {
 		// Onset only. While degraded the counter carries the magnitude.
-		if !wasDegraded {
+		if !failing {
 			logger.Printf("%s: failed to persist merged revocations: %v", who, err)
 		}
 		return added
 	}
-	if wasDegraded {
+	if failing {
 		logger.Printf("%s: merged session revocations are durable again", who)
 	}
 	return added
