@@ -419,14 +419,170 @@ func TestChaos68_AU40_DropCountReachesHealthzOnlyWhenNonZero(t *testing.T) {
 		t.Fatal("a healthy leader reports a drop field — a flat zero on every appliance is how a real signal gets ignored")
 	}
 
-	noteHABundleRevocationsDropped(3)
+	noteHABundleRevocations(3)
 	resp = map[string]any{}
 	addRequestLogHealth(resp)
 	got, present := resp["haBundleRevocationsDropped"]
 	if !present {
 		t.Fatal("the standby is holding a subset of this leader's revocations and /healthz does not say so")
 	}
-	if n, _ := got.(uint64); n != 3 {
+	if n, _ := got.(int64); n != 3 {
 		t.Fatalf("reported %v, want 3", got)
+	}
+}
+
+// haHealthzHeldSubset reports the /healthz drop field, or -1 when the field is
+// absent. Absent is the healthy answer, and the distinction is the whole of
+// AU-43: a leader that has recovered must stop making the claim, not report a
+// stale number.
+func haHealthzHeldSubset(t *testing.T) int64 {
+	t.Helper()
+	resp := map[string]any{}
+	addRequestLogHealth(resp)
+	v, present := resp["haBundleRevocationsDropped"]
+	if !present {
+		return -1
+	}
+	n, ok := v.(int64)
+	if !ok {
+		t.Fatalf("/healthz drop field is %T, want int64", v)
+	}
+	return n
+}
+
+// DEFECT (AU-43): the present-tense surfaces clear when a later bundle carries
+// the complete set.
+//
+// Codex raised this as a P2 on PR #1437, and it is the THIRD instance of one
+// rule in this tree — `ca_health.go` fixed it for the CA rotation persist
+// warning, AU-25 fixed it for `revocationsAreDurable` in this same sweep, and
+// AU-40 then keyed /healthz and the documented alert rule on the cumulative
+// counter a hundred lines from the note recording the rule.
+//
+// The condition genuinely recovers: `ExportRevocations` returns only
+// non-expired entries so the backlog drains by itself, the trim's priority
+// order makes the dropped tail self-clearing, and the published config sharing
+// the frame can shrink. Pre-fix, one transient trim pinned "a promotion would
+// admit sessions this leader currently rejects" for the life of the process.
+func TestChaos68_AU43_SubsetSurfacesClearWhenAFullBundleGoesOut(t *testing.T) {
+	withChaos68Revocations(t)
+	defer swapGlobalHA(t)()
+
+	bundle := haTestBundle(haTokenEntries(40, 9_000_000_000))
+	full, err := json.Marshal(bundle)
+	if err != nil {
+		t.Fatalf("marshal fixture: %v", err)
+	}
+
+	// A frame too tight for the backlog: the standby is replicated a subset.
+	if _, err := marshalHABundleWithinFrame(bundle, len(full)/2); err != nil {
+		t.Fatalf("marshalHABundleWithinFrame (trimmed): %v", err)
+	}
+	dropped := haHealthzHeldSubset(t)
+	if dropped <= 0 {
+		t.Fatalf("/healthz reported %d after a trim — the fixture did not exercise the trim, so this gate proves nothing", dropped)
+	}
+
+	// Entries expire, or the config shrinks, and the very next bundle carries
+	// everything. THIS is the assertion the counter-driven shape fails.
+	if _, err := marshalHABundleWithinFrame(bundle, len(full)); err != nil {
+		t.Fatalf("marshalHABundleWithinFrame (complete): %v", err)
+	}
+	if got := haHealthzHeldSubset(t); got != -1 {
+		t.Fatalf("a bundle that carried every revocation left /healthz still reporting %d dropped: a present-tense claim keyed on a value that never decreases (AU-43)", got)
+	}
+	if n := haBundleRevocationsSubset.Load(); n != 0 {
+		t.Fatalf("the current-state gauge reads %d after a complete bundle, want 0", n)
+	}
+}
+
+// CONTROL: recovery must not erase the MAGNITUDE.
+//
+// The cheapest way to pass the gate above is to zero the cumulative counter
+// when a full bundle goes out — which would delete the only record that this
+// leader has been running against its frame at all, and with it any `increase`
+// or rate alert built on the _total series.
+func TestChaos68_AU43_ControlCumulativeTotalSurvivesRecovery(t *testing.T) {
+	withChaos68Revocations(t)
+	defer swapGlobalHA(t)()
+
+	bundle := haTestBundle(haTokenEntries(40, 9_000_000_000))
+	full, err := json.Marshal(bundle)
+	if err != nil {
+		t.Fatalf("marshal fixture: %v", err)
+	}
+	if _, err := marshalHABundleWithinFrame(bundle, len(full)/2); err != nil {
+		t.Fatalf("marshalHABundleWithinFrame (trimmed): %v", err)
+	}
+	afterTrim := haBundleRevocationsDropped.Load()
+	if afterTrim == 0 {
+		t.Fatal("the trim charged nothing to the cumulative counter")
+	}
+	if _, err := marshalHABundleWithinFrame(bundle, len(full)); err != nil {
+		t.Fatalf("marshalHABundleWithinFrame (complete): %v", err)
+	}
+	if got := haBundleRevocationsDropped.Load(); got != afterTrim {
+		t.Fatalf("the cumulative total moved from %d to %d when a full bundle went out — recovery clears the CURRENT state, never the magnitude", afterTrim, got)
+	}
+}
+
+// CONTROL: the claim must still be made while it is true.
+//
+// The cheapest way to pass the recovery gate is to stop reporting the subset
+// at all, which silently deletes AU-40's only signal — and it must survive
+// REPEATED trims, because the standby polls every few seconds and a field that
+// reported once and then went quiet is the same blind spot.
+func TestChaos68_AU43_ControlSubsetIsReportedForAsLongAsItHolds(t *testing.T) {
+	withChaos68Revocations(t)
+	defer swapGlobalHA(t)()
+
+	bundle := haTestBundle(haTokenEntries(40, 9_000_000_000))
+	full, err := json.Marshal(bundle)
+	if err != nil {
+		t.Fatalf("marshal fixture: %v", err)
+	}
+	for poll := 1; poll <= 3; poll++ {
+		if _, err := marshalHABundleWithinFrame(bundle, len(full)/2); err != nil {
+			t.Fatalf("poll %d: marshalHABundleWithinFrame: %v", poll, err)
+		}
+		if got := haHealthzHeldSubset(t); got <= 0 {
+			t.Fatalf("poll %d: /healthz reported %d while the bundle was still being trimmed", poll, got)
+		}
+	}
+}
+
+// DEFECT (AU-43): a bundle that never reached the standby reports nothing.
+//
+// The recovery signal is "a bundle carrying everything went out". A marshal
+// failure produces no bundle, so the standby's view is whatever the last
+// successful sync left it — recording 0 on that path would announce a recovery
+// that did not happen, which is the same class of wrong answer as the latch
+// this gate's sibling fixes, in the opposite direction.
+func TestChaos68_AU43_AFailedMarshalDoesNotReportRecovery(t *testing.T) {
+	withChaos68Revocations(t)
+	defer swapGlobalHA(t)()
+
+	bundle := haTestBundle(haTokenEntries(40, 9_000_000_000))
+	full, err := json.Marshal(bundle)
+	if err != nil {
+		t.Fatalf("marshal fixture: %v", err)
+	}
+	if _, err := marshalHABundleWithinFrame(bundle, len(full)/2); err != nil {
+		t.Fatalf("marshalHABundleWithinFrame (trimmed): %v", err)
+	}
+	held := haHealthzHeldSubset(t)
+	if held <= 0 {
+		t.Fatalf("/healthz reported %d after a trim — the fixture did not exercise the trim", held)
+	}
+
+	// json.RawMessage is validated at marshal time, so this is the real error
+	// path of the real entry point, not a stub.
+	broken := haTestBundle(haTokenEntries(40, 9_000_000_000))
+	broken.ClusterState = json.RawMessage(`{not json`)
+	if _, err := marshalHABundleWithinFrame(broken, len(full)); err == nil {
+		t.Fatal("a bundle carrying invalid JSON marshalled without error — the fixture no longer reaches the error path")
+	}
+	if got := haHealthzHeldSubset(t); got != held {
+		t.Fatalf("/healthz moved from %d to %d on a bundle that was never sent: a failed marshal is not evidence the standby caught up", held, got)
 	}
 }

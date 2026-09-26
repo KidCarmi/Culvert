@@ -1147,7 +1147,13 @@ func addRequestLogHealth(resp map[string]any) {
 	// because the remedy is to shrink what shares the frame (the published
 	// config, or the revocation backlog), not to fix storage or a link. It
 	// means a promotion would admit sessions this leader currently rejects.
-	if n := haBundleRevocationsDropped.Load(); n > 0 {
+	//
+	// AU-43: read from the CURRENT-state half, never the cumulative counter.
+	// The sentence above is present tense, and the condition recovers on its
+	// own as entries expire, so a counter-driven field would keep making that
+	// claim for the life of the process after one transient trim. The
+	// cumulative magnitude stays on culvert_ha_bundle_revocations_dropped_total.
+	if n := haBundleRevocationsSubset.Load(); n > 0 {
 		resp["haBundleRevocationsDropped"] = n
 	}
 	// SEC-RBAC-ROLE-1: a roster record named a role this build does not

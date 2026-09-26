@@ -1169,9 +1169,13 @@ culvert_session_revocation_persist_degraded %d
 # TYPE culvert_session_revocation_persist_refused_total counter
 culvert_session_revocation_persist_refused_total %d
 
-# HELP culvert_ha_bundle_revocations_dropped_total Revocation entries left out of an HA state bundle to keep it inside the CP-DP frame; non-zero means the standby holds a SUBSET of the leader's revocations
+# HELP culvert_ha_bundle_revocations_dropped_total Revocation entries left out of an HA state bundle to keep it inside the CP-DP frame, cumulative over this process (magnitude only — for whether the standby is holding a subset RIGHT NOW, use culvert_ha_bundle_revocations_subset)
 # TYPE culvert_ha_bundle_revocations_dropped_total counter
 culvert_ha_bundle_revocations_dropped_total %d
+
+# HELP culvert_ha_bundle_revocations_subset Revocation entries left out of the MOST RECENT HA state bundle; > 0 means the standby is holding a subset of this leader's revocations now, so a promotion would admit sessions this leader rejects
+# TYPE culvert_ha_bundle_revocations_subset gauge
+culvert_ha_bundle_revocations_subset %d
 `,
 		srDurable,
 		sessionRevoked.Count(),
@@ -1180,6 +1184,7 @@ culvert_ha_bundle_revocations_dropped_total %d
 		srPersistDegraded,
 		sessionRevocationPersistRefused.Load(),
 		haBundleRevocationsDropped.Load(),
+		haBundleRevocationsSubset.Load(),
 	)
 
 	// CHAOS-60: GeoIP resolution health. Emitted ONLY when a GeoIP database is

@@ -133,12 +133,19 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   config, the CA material, the cluster state and the same revocations, with
   failover readiness gone until entries expired. The leader now trims the
   revocation set to fit — account revocations first, then longest-remaining-life
-  — and counts what it dropped in
-  `culvert_ha_bundle_revocations_dropped_total`, reported alongside a
-  `haBundleRevocationsDropped` field on `/healthz` when non-zero — HA sync keeps
-  working through a trim, so every other surface stays green. A bundle that is over budget with no revocations
-  left to give back is logged instead, because the overflow is then the config's
-  and no trim can repair it.
+  — and reports it on two series that answer different questions:
+  `culvert_ha_bundle_revocations_subset` is a gauge saying whether the standby
+  is holding a subset **right now** (alert on this one; it also drives the
+  `haBundleRevocationsDropped` field on `/healthz`, present only when non-zero)
+  and `culvert_ha_bundle_revocations_dropped_total` is the cumulative
+  magnitude. HA sync keeps working through a trim, so every other surface stays
+  green. Both present-tense surfaces clear on their own once a later bundle
+  carries the complete set — the usual outcome, since revocations are
+  replicated only until their session expires and the trim keeps the
+  longest-lived entries, so the dropped tail is the part that ages out first. A
+  bundle that is over budget with no revocations left to give back is logged
+  instead, because the overflow is then the config's and no trim can repair
+  it.
 
   A Control Plane leader also repairs its own revocations file. Every repair
   path is driven by a peer, so a leader with an HA standby and no data-plane

@@ -1013,6 +1013,11 @@ func marshalHABundleWithinFrame(bundle HAStateBundle, budget int) ([]byte, error
 		return nil, fmt.Errorf("marshal HA state bundle: %w", err)
 	}
 	if len(resp) <= budget {
+		// The complete set went out. Recorded on the HEALTHY path too, and not
+		// only on the trim, because this is what clears the current-state
+		// surfaces: a field that only ever moves in one direction cannot say
+		// whether the standby is holding a subset NOW (AU-43).
+		noteHABundleRevocations(0)
 		return resp, nil
 	}
 	revJSON, err := json.Marshal(bundle.Revocations)
@@ -1027,7 +1032,6 @@ func marshalHABundleWithinFrame(bundle HAStateBundle, budget int) ([]byte, error
 		if resp, err = json.Marshal(bundle); err != nil {
 			return nil, fmt.Errorf("marshal trimmed HA state bundle: %w", err)
 		}
-		noteHABundleRevocationsDropped(dropped)
 	}
 	// STILL over budget means the overflow was never the revocations' to give
 	// back — either there were none, or the trim surrendered every one and the
@@ -1040,6 +1044,10 @@ func marshalHABundleWithinFrame(bundle HAStateBundle, budget int) ([]byte, error
 	if len(resp) > budget {
 		logHABundleOverBudget(len(resp), len(bundle.Revocations), budget)
 	}
+	// Charged before the bytes are handed back, on every path that produces a
+	// bundle and on none that does not — the CHAOS-69 rule that the accounting
+	// lands ahead of what the peer observes.
+	noteHABundleRevocations(dropped)
 	return resp, nil
 }
 

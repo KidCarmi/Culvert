@@ -128,6 +128,8 @@ token — it is reachable at viewer role.
 | `culvert_session_revocation_persist_failures_total` | counter | **Failed save attempts**, not affected revocations — the boot probe attempts a save on an empty list and the sync loop retries every 3–5 s, so one fault reaches hundreds. The scope is `..._tokens` + `..._users` |
 | `culvert_session_revocation_persist_degraded` | gauge | `1` while the latest revocation save failed and none has landed since (the page signal) |
 | `culvert_session_revocation_persist_refused_total` | counter | Revocations not written because overwriting the file was refused — it could not be read this boot (§6), or it is corrupt and could not be quarantined (§6b) |
+| `culvert_ha_bundle_revocations_subset` | gauge | Entries left out of the **most recent** HA state bundle — `> 0` means the standby is holding a subset right now (§6d, the page signal) |
+| `culvert_ha_bundle_revocations_dropped_total` | counter | Cumulative entries left out of HA state bundles — magnitude and rate only; it never decreases, so do not alert on `> 0` (§6d) |
 
 These are emitted **unconditionally**, which is the deliberate exception to
 Culvert's usual "omit the series when the feature is off" rule. Elsewhere a flat
@@ -383,7 +385,7 @@ waiting for a write to discover it.
 
 ## 6d. The HA standby is being replicated a SUBSET
 
-`culvert_ha_bundle_revocations_dropped_total > 0`
+`culvert_ha_bundle_revocations_subset > 0`
 
 The HA state bundle carries the leader's published config, its CA material, the
 cluster state and its live revocation set, all in **one** CP↔DP gRPC message.
@@ -408,11 +410,33 @@ revocations (one account entry withdraws every session that identity holds),
 then longest-remaining-life first. The dropped tail is therefore self-clearing —
 short-lived entries age out and a fresh logout sorts high.
 
-**What a non-zero counter means:** the standby holds a subset of the leader's
+**What the signal means.** Two series, and the difference between them is which
+question they answer:
+
+| Series | Kind | Answers |
+| --- | --- | --- |
+| `culvert_ha_bundle_revocations_subset` | gauge | Is the standby holding a subset **right now**? Alert on this one. |
+| `culvert_ha_bundle_revocations_dropped_total` | counter | How much has this leader had to give up in total? Magnitude and rate only. |
+
+A non-zero **gauge** means the standby holds a subset of the leader's
 revocations, so a promotion would admit sessions the leader currently rejects.
-Every other surface stays green, because HA sync is still working — the counter
+Every other surface stays green, because HA sync is still working — the gauge,
 and a matching `haBundleRevocationsDropped` field on `/healthz` (present only
-when non-zero) are the signal.
+when non-zero), are the signal.
+
+The gauge and the `/healthz` field **clear on their own** when a later bundle
+carries the complete set, which is the ordinary outcome: revocations are replicated only until their session
+expires, so the backlog drains by itself, and the trim keeps the
+longest-remaining-life entries so the dropped tail is the part that ages out
+first. The cumulative counter does not clear — it is not meant to, and alerting
+on `culvert_ha_bundle_revocations_dropped_total > 0` would fire forever after
+one transient trim. Use `increase(...[1h]) > 0` if you want the counter to page.
+
+Recovery is reported from evidence, never from elapsed time: the gauge clears
+when a bundle that actually carried everything went out. So a leader whose HA
+sync has stopped altogether keeps reporting the subset it last replicated —
+which is the honest answer, because nothing has since brought the standby up to
+date.
 
 **What to do:** reduce what shares the frame. Shrink the published config (the
 blocked-host list is usually the dominant term) or the revocation backlog.

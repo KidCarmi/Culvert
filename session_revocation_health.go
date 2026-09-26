@@ -104,14 +104,31 @@ func noteRevocationPersistRefused(n int) {
 
 // haBundleRevocationsDropped counts revocation entries left OUT of an HA state
 // bundle because the bundle would otherwise have exceeded the CP↔DP frame
-// (AU-40). It is cumulative and never reset.
+// (AU-40). It is cumulative and never reset: it is the MAGNITUDE — how much
+// this leader has had to give up over its lifetime — and it feeds the `_total`
+// series and nothing else.
 //
-// It is the operator's only signal that the standby is being replicated a
-// SUBSET: the trim keeps HA sync working, so every other surface stays green
-// while the standby's revocation view silently falls behind the leader's. A
-// non-zero value means a promotion would admit sessions the leader rejects,
-// and the remedy is to shrink the published config or the revocation backlog,
-// not to restart anything.
+// haBundleRevocationsSubset is the CURRENT state: how many entries the MOST
+// RECENT bundle left out. It is stored on every bundle that goes out, so the
+// first one carrying the whole set clears it, and it is what `/healthz` and
+// the `_subset` gauge report — because their claim is present tense (*the
+// standby is holding a subset right now, so a promotion would admit sessions
+// this leader currently rejects*) and a monotonic counter cannot support it
+// (AU-43). The condition genuinely recovers: `ExportRevocations` returns only
+// non-expired entries so the backlog shrinks on its own, the trim's priority
+// order makes the dropped tail self-clearing, and the published config that
+// shares the frame can shrink too.
+//
+// This is the THIRD time a health surface in this tree has been keyed on a
+// cumulative counter — `ca_health.go` fixed it for the CA rotation persist
+// warning (`caRotationPersistDegraded`, explicitly NOT the counter), AU-25
+// fixed it for `revocationsAreDurable` in this same file, and AU-40 then did
+// it again a hundred lines from the note recording the rule. **Do not re-key
+// either surface on the counter**, and do not add a latch: recovery is
+// declared on OBSERVED evidence only — a bundle that actually carried
+// everything — never on elapsed time, so a leader whose HA sync has STOPPED
+// goes on reporting the subset it last replicated, which is the honest
+// answer.
 //
 // haBundleOverBudgetLogged rate-limits the companion line for the case the
 // trim CANNOT fix — a bundle over budget with no revocations in it at all.
@@ -121,6 +138,7 @@ func noteRevocationPersistRefused(n int) {
 // concurrent pollers reading the same expired stamp would all emit.
 var (
 	haBundleRevocationsDropped atomic.Uint64
+	haBundleRevocationsSubset  atomic.Int64
 	haBundleOverBudgetLogged   atomic.Int64
 )
 
@@ -128,13 +146,23 @@ var (
 // too big and trimming cannot help" lines.
 const haBundleOverBudgetLogInterval = time.Minute
 
-// noteHABundleRevocationsDropped records a trimmed HA bundle. It does not log:
-// the trim is a successful degradation on a path that runs every few seconds,
-// so the magnitude belongs in the counter and the meaning in the contract row.
-func noteHABundleRevocationsDropped(n int) {
-	if n > 0 {
-		haBundleRevocationsDropped.Add(uint64(n))
+// noteHABundleRevocations records the outcome of ONE HA state bundle, and is
+// called for EVERY bundle that goes out — including the ones that carry the
+// complete set, which is precisely what clears the current-state half.
+//
+// It is deliberately NOT called on a marshal error: no bundle reached the
+// standby on that path, so the standby's view is whatever the last successful
+// sync left it, and storing 0 there would report a recovery that never
+// happened.
+//
+// It does not log: a trim is a successful degradation on a path that runs
+// every few seconds, so the magnitude belongs in the counter and the meaning
+// in the contract row.
+func noteHABundleRevocations(dropped int) {
+	if dropped > 0 {
+		haBundleRevocationsDropped.Add(uint64(dropped))
 	}
+	haBundleRevocationsSubset.Store(int64(dropped))
 }
 
 // logHABundleOverBudget reports a bundle that exceeds the frame even with its
@@ -394,7 +422,7 @@ func resetSessionRevocationHealthForTest() {
 	sessionRevocationPersistFailures.Store(0)
 	sessionRevocationPersistRefused.Store(0)
 	sessionRevocationPersistDegraded.Store(false)
-	// AU-40's two globals are reset HERE rather than in the gates that write
+	// AU-40/AU-43's three globals are reset HERE rather than in the gates that write
 	// them, for the reason this sweep has now learned three times (the write
 	// fence, the health record, the stateCorruption record): a process-global a
 	// gate writes belongs to the isolation primitive, not to the gate. The log
@@ -402,6 +430,7 @@ func resetSessionRevocationHealthForTest() {
 	// suppresses the line every later gate is asserting on, and only under
 	// -shuffle would anyone find out.
 	haBundleRevocationsDropped.Store(0)
+	haBundleRevocationsSubset.Store(0)
 	haBundleOverBudgetLogged.Store(0)
 }
 
