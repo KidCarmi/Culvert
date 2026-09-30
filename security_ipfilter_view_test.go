@@ -374,7 +374,7 @@ func TestIPFilterView_EveryMutatorRepublishes(t *testing.T) {
 //
 // Filing a case under a mutator must mean the mutator really ran and really
 // republished. That is proved at RUNTIME, not by matching the case's source:
-// publishView reports every publish through ipFilterPublishHook, the hook
+// publishView reports every publish through its publishHook, the hook
 // attributes it to the nearest exported *IPFilter method on the call stack,
 // and only publishes of the case's own filter are recorded. A case that calls
 // a different method, calls the right one on another receiver, or never
@@ -392,27 +392,17 @@ type ipFilterPublishRecorder struct {
 	events []ipFilterPublishEvent
 }
 
-var (
-	ipFilterRecorders       sync.Map // *IPFilter -> *ipFilterPublishRecorder
-	ipFilterPublishHookOnce sync.Once
-)
-
-func installIPFilterPublishHook() {
-	ipFilterPublishHookOnce.Do(func() {
-		h := func(f *IPFilter) {
-			r, ok := ipFilterRecorders.Load(f)
-			if !ok {
-				return
-			}
-			rec := r.(*ipFilterPublishRecorder)
-			rec.mu.Lock()
-			rec.events = append(rec.events, ipFilterPublishEvent{
-				method: publishingIPFilterMethod(), view: f.view.Load(),
-			})
-			rec.mu.Unlock()
-		}
-		ipFilterPublishHook.Store(&h)
-	})
+func recordIPFilterPublishes(f *IPFilter) *ipFilterPublishRecorder {
+	rec := &ipFilterPublishRecorder{}
+	h := func(published *IPFilter) {
+		rec.mu.Lock()
+		rec.events = append(rec.events, ipFilterPublishEvent{
+			method: publishingIPFilterMethod(), view: published.view.Load(),
+		})
+		rec.mu.Unlock()
+	}
+	f.publishHook.Store(&h)
+	return rec
 }
 
 // publishingIPFilterMethod walks the stack to the nearest EXPORTED *IPFilter
@@ -438,11 +428,8 @@ func publishingIPFilterMethod() string {
 // unless the named mutator published a NEW view of that filter during it.
 func proveRepublish(t *testing.T, mutator string, run func(*testing.T, *IPFilter)) error {
 	t.Helper()
-	installIPFilterPublishHook()
 	f := &IPFilter{single: map[string]bool{}}
-	rec := &ipFilterPublishRecorder{}
-	ipFilterRecorders.Store(f, rec)
-	defer ipFilterRecorders.Delete(f)
+	rec := recordIPFilterPublishes(f)
 
 	run(t, f)
 

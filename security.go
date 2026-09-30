@@ -81,6 +81,10 @@ type IPFilter struct {
 	// view is the derived, immutable read-side snapshot. Written only under
 	// mu (by publishView); read without any lock by Allowed.
 	view atomic.Pointer[ipFilterView]
+
+	// publishHook is an instance-local test observer, nil in production.
+	// Called under mu after publication; it must not re-enter locking methods.
+	publishHook atomic.Pointer[func(*IPFilter)]
 }
 
 // ipFilterView is an immutable snapshot of an IPFilter's decision state.
@@ -217,11 +221,6 @@ var emptyIPFilterView = ipFilterView{}
 
 var ipf = &IPFilter{single: map[string]bool{}}
 
-// ipFilterPublishHook is a TEST-ONLY observer of publishView (nil in
-// production: one atomic load per publish, which is admin-rate). It lets the
-// republish tests prove at RUNTIME which mutator published.
-var ipFilterPublishHook atomic.Pointer[func(*IPFilter)]
-
 // loadView returns the current read-side snapshot, never nil.
 func (f *IPFilter) loadView() *ipFilterView {
 	if v := f.view.Load(); v != nil {
@@ -252,7 +251,7 @@ func (f *IPFilter) publishView() {
 	v.nets = buildPrefixSet(f.nets)
 
 	f.view.Store(v)
-	if h := ipFilterPublishHook.Load(); h != nil {
+	if h := f.publishHook.Load(); h != nil {
 		(*h)(f)
 	}
 }
@@ -553,6 +552,12 @@ type RateLimiter struct {
 	// under exemptMu (by publishExemptViewLocked); read without any lock by
 	// IsExempt.
 	exemptView atomic.Pointer[rlExemptView]
+
+	// Distributed admission and its diagnostic history belong to this limiter.
+	// All three zero values are usable; constructors create no goroutines.
+	remoteCounts       clusterCountStore
+	clusterEnabled     atomic.Bool
+	clusterObservation clusterRateLimitObservation
 }
 
 // rlExemptView is an immutable snapshot of a RateLimiter's exempt list.
@@ -1023,7 +1028,7 @@ type RateLimitBroadcast struct {
 	RemoteCounts map[string]int `json:"remote_counts"`
 }
 
-// clusterCounts holds per-IP request totals received from the Control Plane
+// clusterCountStore holds per-IP request totals received from the Control Plane
 // (other nodes' aggregated counts). Protected by its own mutex to avoid
 // contention with the hot-path Allow() sharded locks.
 //
@@ -1062,8 +1067,6 @@ type clusterCountStore struct {
 	appliedAtNano atomic.Int64
 }
 
-var clusterCounts = &clusterCountStore{counts: map[string]int{}}
-
 // clusterRemoteCountFallbackMaxAge bounds a broadcast's usefulness when the
 // rate limiter reports no window (defensive — Configure always sets one). It
 // matches the only window the product ships, so the fallback can never be more
@@ -1088,7 +1091,7 @@ func clusterRemoteCountMaxAge(window time.Duration) time.Duration {
 // A NEGATIVE age (the clock moved back between the stamp and this read) is
 // stale, not fresh. `age >= maxAge` alone reads a future stamp as brand new and
 // would honour the broadcast for however far back the clock went — and it would
-// disagree with clusterRateLimitFreshness, which reports the same condition as
+// disagree with ClusterFreshness, which reports the same condition as
 // stale. Two answers to one question is the defect; both fail toward the local
 // decision, which is where every other failure on this path lands.
 func (c *clusterCountStore) FreshCount(ip string, now time.Time, maxAge time.Duration) int {
@@ -1134,23 +1137,6 @@ func (c *clusterCountStore) Count() int {
 	return len(c.counts)
 }
 
-// resetForTest clears the store and its freshness stamp.
-func (c *clusterCountStore) resetForTest() {
-	c.mu.Lock()
-	c.counts = map[string]int{}
-	c.mu.Unlock()
-	c.appliedAtNano.Store(0)
-}
-
-// applyAtForTest applies a broadcast as if it had landed at ts, so a test can
-// age a broadcast without sleeping.
-func (c *clusterCountStore) applyAtForTest(remote map[string]int, ts time.Time) {
-	c.mu.Lock()
-	c.counts = remote
-	c.mu.Unlock()
-	c.appliedAtNano.Store(ts.UnixNano())
-}
-
 // ExportHotDeltas returns per-IP request count deltas for IPs that have
 // reached at least hotThresholdPct of the configured limit since the last
 // call. Counts are reset after export (delta, not absolute).
@@ -1189,15 +1175,25 @@ func (r *RateLimiter) ExportHotDeltas() []RateLimitDelta {
 	return deltas
 }
 
-// clusterRateLimitEnabled is set to true when this node is a Data Plane
-// receiving cluster-wide rate limit gossip. Checked by AllowAuto().
-var clusterRateLimitEnabled atomic.Bool
+// SetClusterEnabled selects distributed admission without clearing local history,
+// the last broadcast or diagnostic history. The gossip loop owns this switch.
+func (r *RateLimiter) SetClusterEnabled(enabled bool) { r.clusterEnabled.Store(enabled) }
+
+// ClusterEnabled reports whether gossip has enabled distributed admission.
+func (r *RateLimiter) ClusterEnabled() bool { return r.clusterEnabled.Load() }
+
+// ApplyRemoteCounts publishes a decoded broadcast. Ownership of the map is
+// transferred to the limiter: the caller must not mutate it after this call.
+func (r *RateLimiter) ApplyRemoteCounts(remote map[string]int) { r.remoteCounts.Apply(remote) }
+
+// RemoteIPCount reports the last broadcast's size, even when it is stale.
+func (r *RateLimiter) RemoteIPCount() int { return r.remoteCounts.Count() }
 
 // AllowAuto dispatches to AllowClusterAware when cluster rate limiting is
 // active, or plain Allow when running standalone. This is the method that
 // proxy.go and socks5.go should call.
 func (r *RateLimiter) AllowAuto(ip string) bool {
-	if clusterRateLimitEnabled.Load() {
+	if r.ClusterEnabled() {
 		return r.AllowClusterAware(ip)
 	}
 	return r.Allow(ip)
@@ -1239,7 +1235,7 @@ func (r *RateLimiter) AllowClusterAware(ip string) bool {
 	// Control-Plane outage degrades this node to plain local rate limiting
 	// instead of enforcing a frozen snapshot of the past forever.
 	localCount := b.n
-	remoteCount := clusterCounts.FreshCount(ip, now, clusterRemoteCountMaxAge(window))
+	remoteCount := r.remoteCounts.FreshCount(ip, now, clusterRemoteCountMaxAge(window))
 	if localCount+remoteCount >= limit {
 		return false
 	}

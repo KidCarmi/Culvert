@@ -18,7 +18,7 @@ package main
 // "this node stopped counting other nodes' traffic" — is logged ONCE in each
 // direction, and the live state is a gauge.
 //
-// Freshness is EVALUATED, never latched: clusterRateLimitFreshness() derives it
+// Freshness is EVALUATED, never latched: ClusterFreshness() derives it
 // from the applied-at stamp and the live window on every read. That is the same
 // discipline as ca_health.go's Usable() — recovery is a fact about the world,
 // not a flag someone has to remember to clear — and it means a gossip loop that
@@ -47,7 +47,7 @@ type clusterRateLimitStatus struct {
 	// before FreshCount is ever reached).
 	//
 	// Both halves are load-bearing, and the second one was missed in the first
-	// version of this file. rateLimitGossipLoop sets clusterRateLimitEnabled
+	// version of this file. rateLimitGossipLoop enables distributed admission
 	// unconditionally when it starts, but skips every RPC while rl.Enabled() is
 	// false — which is the DEFAULT posture, since Configure only enables the
 	// limiter for a limit > 0. On such a node no broadcast can ever be applied,
@@ -81,15 +81,15 @@ type clusterRateLimitStatus struct {
 	Episodes int64
 }
 
-// clusterRateLimitFreshness computes the current freshness state. Safe to call
+// ClusterFreshness computes the current freshness state. Safe to call
 // from any goroutine and from a scrape handler.
-func clusterRateLimitFreshness() clusterRateLimitStatus {
+func (r *RateLimiter) ClusterFreshness() clusterRateLimitStatus {
 	st := clusterRateLimitStatus{
-		Armed:    clusterRateLimitEnabled.Load() && rl.Enabled(),
-		MaxAge:   clusterRemoteCountMaxAge(rl.Window()),
-		Episodes: clusterRLStaleEpisodes.Load(),
+		Armed:    r.ClusterEnabled() && r.Enabled(),
+		MaxAge:   clusterRemoteCountMaxAge(r.Window()),
+		Episodes: r.clusterObservation.episodes.Load(),
 	}
-	if appliedAt, ok := clusterCounts.AppliedAt(); ok {
+	if appliedAt, ok := r.remoteCounts.AppliedAt(); ok {
 		st.Applied = true
 		st.Age = time.Since(appliedAt)
 	}
@@ -115,42 +115,39 @@ func clusterRateLimitFreshness() clusterRateLimitStatus {
 	return st
 }
 
-// clusterRLStaleEpisodes counts fresh→stale transitions. Exported through the
-// status snapshot and /metrics.
-var clusterRLStaleEpisodes atomic.Int64
-
-// clusterRLFreshnessLog holds only the log-once state for the two transitions.
-// The freshness verdict itself is never stored here — storing it would create a
-// second source of truth that a wedged gossip loop could pin to a lie.
-var clusterRLFreshnessLog struct {
+// clusterRateLimitObservation holds only this limiter's diagnostic history.
+// The freshness verdict is derived, never latched here.
+type clusterRateLimitObservation struct {
 	mu       sync.Mutex
-	reported bool // true while the stale transition has been logged and not yet cleared
+	reported bool // stale transition logged and not yet cleared
+	episodes atomic.Int64
 }
 
 // noteClusterRateLimitFreshness records one observation of the freshness state,
 // logging each transition once. Called from the DP gossip loop on every tick —
 // success and failure alike — so recovery is reported from the same place as
 // onset and neither depends on the other branch running.
-func noteClusterRateLimitFreshness(st clusterRateLimitStatus) {
+func (r *RateLimiter) noteClusterRateLimitFreshness() {
+	st := r.ClusterFreshness()
 	if !st.Armed {
 		return
 	}
-	clusterRLFreshnessLog.mu.Lock()
-	defer clusterRLFreshnessLog.mu.Unlock()
+	r.clusterObservation.mu.Lock()
+	defer r.clusterObservation.mu.Unlock()
 	switch {
-	case st.Stale && !clusterRLFreshnessLog.reported:
-		clusterRLFreshnessLog.reported = true
-		clusterRLStaleEpisodes.Add(1)
+	case st.Stale && !r.clusterObservation.reported:
+		r.clusterObservation.reported = true
+		r.clusterObservation.episodes.Add(1)
 		// No IP, no count, no Control-Plane address: this line is about the
 		// enforcement change, and the cause is already logged in full by the
 		// gossip and poll loops on every occurrence.
 		logger.Printf("WARN cluster rate limiting: no Control Plane broadcast within the %s window — "+
 			"other nodes' request counts are no longer applied on this node (local rate limits still enforced)",
 			st.MaxAge)
-	case !st.Stale && clusterRLFreshnessLog.reported:
-		clusterRLFreshnessLog.reported = false
+	case !st.Stale && r.clusterObservation.reported:
+		r.clusterObservation.reported = false
 		logger.Printf("cluster rate limiting: Control Plane broadcast is current again — "+
-			"other nodes' request counts are being applied (stale episodes: %d)", clusterRLStaleEpisodes.Load())
+			"other nodes' request counts are being applied (stale episodes: %d)", r.clusterObservation.episodes.Load())
 	}
 }
 
@@ -163,14 +160,4 @@ func clusterRateLimitBroadcastAgeMetric(st clusterRateLimitStatus) float64 {
 		return -1
 	}
 	return st.Age.Seconds()
-}
-
-// resetClusterRateLimitFreshnessForTest clears the process-global freshness
-// record so a test starts from a known state.
-func resetClusterRateLimitFreshnessForTest() {
-	clusterRLStaleEpisodes.Store(0)
-	clusterRLFreshnessLog.mu.Lock()
-	clusterRLFreshnessLog.reported = false
-	clusterRLFreshnessLog.mu.Unlock()
-	clusterCounts.resetForTest()
 }
