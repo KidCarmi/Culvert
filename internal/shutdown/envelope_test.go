@@ -1,4 +1,4 @@
-package main
+package shutdown
 
 import (
 	"context"
@@ -10,7 +10,7 @@ import (
 // CHAOS-56 follow-up — the watchdog grace is SHARED BY A PHASE, not charged per
 // hook, and sharing it must not starve the hooks behind.
 //
-// shutdownHookGrace is the extra time a phase may overrun its deadline while a
+// DefaultGrace is the extra time a phase may overrun its deadline while a
 // hook that cannot observe ctx unwinds (an fsync in a durable close, a badger
 // compaction, a write(2) into a wedged mount). Two shapes were wrong before
 // this, in opposite directions, and each gate below has to separate them:
@@ -45,15 +45,6 @@ import (
 // exactly as RunAll does, with each hook consuming its whole slice (the worst
 // case), and never waits on a timer or a goroutine.
 
-// phaseGraceTestConstants scales the watchdog constants for a test and restores
-// them on cleanup.
-func phaseGraceTestConstants(t *testing.T, grace, minSlice time.Duration) {
-	t.Helper()
-	oldGrace, oldMin := shutdownHookGrace, shutdownHookMinSlice
-	shutdownHookGrace, shutdownHookMinSlice = grace, minSlice
-	t.Cleanup(func() { shutdownHookGrace, shutdownHookMinSlice = oldGrace, oldMin })
-}
-
 // TestChaos56_BudgetArithmeticHoldsBothInvariants is the REGRESSION gate for
 // both shapes, and it uses the SHIPPED constants and the real per-phase budgets.
 //
@@ -73,7 +64,7 @@ func phaseGraceTestConstants(t *testing.T, grace, minSlice time.Duration) {
 func TestChaos56_BudgetArithmeticHoldsBothInvariants(t *testing.T) {
 	// The shipped values, not scaled: this gate costs no wall-clock time, so it
 	// can afford to assert against exactly what production runs.
-	phaseGraceTestConstants(t, 3*time.Second, 1*time.Second)
+	reg := New(Options{})
 
 	// The real phases and a hook count for each at or above the shipped
 	// registry's (8 early / 12 drain / 10 flush covers growth headroom).
@@ -82,9 +73,9 @@ func TestChaos56_BudgetArithmeticHoldsBothInvariants(t *testing.T) {
 		budget time.Duration
 		hooks  int
 	}{
-		{"early", defaultShutdownBudget.Early, 8},
-		{"drain", defaultShutdownBudget.Total - defaultShutdownBudget.Early - defaultShutdownBudget.Flush, 12},
-		{"flush", defaultShutdownBudget.Flush, 10},
+		{"early", 12 * time.Second, 8},
+		{"drain", 23 * time.Second, 12},
+		{"flush", 10 * time.Second, 10},
 	}
 	const drift = 100 * time.Millisecond // clock drift only; defects are seconds
 
@@ -95,10 +86,10 @@ func TestChaos56_BudgetArithmeticHoldsBothInvariants(t *testing.T) {
 			}
 			// remaining is the distance from the simulated "now" to the phase
 			// HORIZON, which is what RunAll hands hookBudget.
-			remaining := p.budget + shutdownHookGrace
+			remaining := p.budget + DefaultGrace
 			for i := 0; i < n; i++ {
 				horizon := time.Now().Add(remaining)
-				_, cancel, abandonAt := hookBudget(context.Background(), horizon, true, n-i-1)
+				_, cancel, abandonAt := reg.hookBudget(context.Background(), horizon, true, n-i-1)
 				slice := time.Until(abandonAt)
 				cancel()
 
@@ -136,18 +127,18 @@ func TestChaos56_BudgetArithmeticHoldsBothInvariants(t *testing.T) {
 // and needs ~1ms of it, so the assertion does not depend on a loaded runner
 // meeting a tight deadline.
 func TestChaos56_SharedGraceStillRunsEveryHook(t *testing.T) {
-	phaseGraceTestConstants(t, 300*time.Millisecond, 50*time.Millisecond)
-
 	closers := []string{"syslog", "community-db", "request-log", "audit-log", "log-closer"}
 
+	release := make(chan struct{})
+	defer close(release)
 	var mu sync.Mutex
 	completed := map[string]bool{}
 
-	reg := &shutdownRegistry{}
+	reg := New(Options{Grace: 300 * time.Millisecond, MinSlice: 50 * time.Millisecond})
 	// THREE stalled hooks ahead of them, enough to spend the phase deadline and
 	// its whole grace, which is the state in which the defect appeared.
 	for i := 0; i < 3; i++ {
-		reg.Register("stalled", 10+i, func(context.Context) error { select {} })
+		reg.Register("stalled", 10+i, func(context.Context) error { <-release; return nil })
 	}
 	for _, name := range closers {
 		reg.Register(name, 20, func(context.Context) error {
@@ -177,10 +168,8 @@ func TestChaos56_SharedGraceStillRunsEveryHook(t *testing.T) {
 // stalled the sharing arithmetic is unreachable, every hook runs to completion,
 // and the phase returns no error.
 func TestChaos56_HealthyPhaseIsUnaffected(t *testing.T) {
-	phaseGraceTestConstants(t, 300*time.Millisecond, 50*time.Millisecond)
-
 	var ran int
-	reg := &shutdownRegistry{}
+	reg := New(Options{Grace: 300 * time.Millisecond, MinSlice: 50 * time.Millisecond})
 	for i := 0; i < 8; i++ {
 		reg.Register("fast", i, func(context.Context) error {
 			ran++
@@ -202,10 +191,8 @@ func TestChaos56_HealthyPhaseIsUnaffected(t *testing.T) {
 // still be waited for rather than abandoned at the zero value — which would be
 // a fail-open on durability dressed as a bound.
 func TestChaos56_UnboundedPhaseStillWaitsIndefinitely(t *testing.T) {
-	phaseGraceTestConstants(t, 10*time.Millisecond, time.Millisecond)
-
 	done := make(chan struct{})
-	reg := &shutdownRegistry{}
+	reg := New(Options{Grace: 10 * time.Millisecond, MinSlice: time.Millisecond})
 	reg.Register("slow-durable-close", 10, func(context.Context) error {
 		time.Sleep(80 * time.Millisecond) // far beyond the (tiny) grace
 		close(done)

@@ -361,3 +361,13 @@ Phase 3 is **state durability**, not more shutdown refactor. The shutdown regist
 - **Required green:** `go test -race -count=1`, C1 / C1.5 / C2 / C2c / C4, plus a goleak-style assertion or equivalent bounded wait/stop test on any PR that adds or removes a goroutine owner.
 - **Determinism gate:** any new test must pass under `-count=2 -shuffle=on`.
 - **Phase boundaries:** before opening the next phase's first PR, update this document's checklist (if added) so phase progress is visible to future Claude sessions.
+
+## Package-isolation follow-up (2026-09-30)
+
+The new [package-isolation program](PACKAGE-ISOLATION.md) revisits current root
+ownership with a fresh ADR-0036, beginning with the shutdown execution engine.
+The earlier extraction and runtime phases remain complete; this is not a restart.
+The pilot preserves phase/service ordering and the existing race, determinism,
+coverage and release gates. Its local-test benefit is measured separately from
+whole-gate/PR latency. The next focused PR owns distributed rate-limit state
+before moving that engine; see the ordered acceptance criteria in the new roadmap.
