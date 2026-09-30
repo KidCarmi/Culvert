@@ -96,7 +96,8 @@ blocked hooks are released, and new lifecycle tests bound their completion.
 
 All 17 moved entry names are unchanged. Source inventory: root **6,757 → 6,742**
 (17 moved, 2 new integration contracts); new package **24** entries (17 moved,
-7 new ownership/boundary tests). No entry lost from the whole-module inventory.
+7 new ownership/boundary tests). Whole-module runnable entries rise from 9,964 to 9,973; no name/multiplicity
+lost, and all 309 benchmarks remain (152 in root).
 The actual `cmd/rootshard inventory -check-list` agrees with the candidate root
 binary. CI's non-root lane uses `go list ./...` minus the exact root import path,
 so the package is included automatically; the independent coverage universe uses

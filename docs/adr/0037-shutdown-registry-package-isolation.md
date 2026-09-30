@@ -16,6 +16,9 @@ minimum hook slice and diagnostic sink immutable construction dependencies, so
 independent registries and tests never change process-global timing or logging.
 Use the existing 3-second grace and 1-second minimum as defaults. Partitioned
 registries inherit the same settings. Keep one implementation.
+The diagnostic sink is a borrowed callback: its caller owns its lifetime and
+synchronization when several registries share it. Main supplies its existing
+concurrency-safe logger and keeps the same close ordering.
 
 The production owner remains `main`: it constructs the early/late registries,
 supplies its logger, registers the real service callbacks and runs the existing
