@@ -4,7 +4,7 @@ Assessment and pilot design, 2026-09-30. Baseline: freshly fetched
 `origin/main` **1f7f42c6937847c26f29387dcaae6685e356a9b0**. This equals the
 previously inspected SHA; it was rechecked, not assumed. Work is on
 `codex/package-isolation-pilot` in a separate worktree. ADR-0002 is **complete**.
-This is a new program with [ADR-0036](../docs/adr/0036-shutdown-registry-package-isolation.md),
+This is a new program with [ADR-0037](../docs/adr/0037-shutdown-registry-package-isolation.md),
 not a reopened leaf-extraction checklist. The existing runtime-ownership and
 CI-redesign programs remain authoritative for lifecycle and CI semantics.
 
@@ -63,7 +63,7 @@ re-extracted.
 ## Open-PR coordination
 
 REST file inventories for all 30 open PRs were checked on 2026-09-30; none used
-ADR number 0036 or changed the registry engine/tests. #1494 changes only the
+ADR number 0037 or changed the registry engine/tests. #1494 changes only the
 syslog callback's handle lookup in `main_shutdown.go`; this PR preserves that
 callback and its registration order. #1504 overlaps `main.go` flag handling,
 not shutdown construction. Several PRs touch CLAUDE.md; keep the guidance hunk

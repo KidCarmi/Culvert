@@ -1,7 +1,9 @@
-# ADR-0036: Instance-owned shutdown execution in internal/shutdown
+# ADR-0037: Instance-owned shutdown execution in internal/shutdown
 
 - Status: Proposed for review with the implementation PR (2026-09-30).
 - Baseline: `1f7f42c6937847c26f29387dcaae6685e356a9b0`, freshly fetched origin/main.
+- Numbering: checked both `docs/adr/` and `docs/support/rfc/`, the shared
+  namespace contract test, and the open-PR file inventories.
 - Program: [Package isolation](../../roadmap/PACKAGE-ISOLATION.md), a new program;
   ADR-0002 remains complete. Related: ADR-0003 and RUNTIME-OWNERSHIP S5.
 

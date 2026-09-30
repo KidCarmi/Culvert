@@ -3,7 +3,7 @@
 Baseline: `1f7f42c6937847c26f29387dcaae6685e356a9b0`, Go 1.26.8,
 Linux amd64, 4-vCPU cgroup, 32 GiB RAM; GOMAXPROCS=4, Go build parallelism 4.
 Design and exact migration: [roadmap](../../roadmap/PACKAGE-ISOLATION.md),
-[ADR-0036](../adr/0036-shutdown-registry-package-isolation.md).
+[ADR-0037](../adr/0037-shutdown-registry-package-isolation.md).
 
 ## Initial checks
 

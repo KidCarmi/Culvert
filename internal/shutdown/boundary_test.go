@@ -11,7 +11,7 @@ import (
 )
 
 // These restrictions are specific to this execution engine, not a proposed
-// architecture framework. Changing one requires revisiting ADR-0036.
+// architecture framework. Changing one requires revisiting ADR-0037.
 func boundaryViolations(source []byte) []string {
 	f, err := parser.ParseFile(token.NewFileSet(), "registry.go", source, 0)
 	if err != nil {

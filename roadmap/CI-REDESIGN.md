@@ -3461,7 +3461,7 @@ does not make a latency claim; §18's rule applies.
 ## Package-isolation follow-up (2026-09-30)
 
 The new [package-isolation program](PACKAGE-ISOLATION.md) revisits current root
-ownership with a fresh ADR-0036, beginning with the shutdown execution engine.
+ownership with a fresh ADR-0037, beginning with the shutdown execution engine.
 The earlier extraction and runtime phases remain complete; this is not a restart.
 The pilot preserves phase/service ordering and the existing race, determinism,
 coverage and release gates. Its local-test benefit is measured separately from
