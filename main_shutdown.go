@@ -95,7 +95,7 @@ func runShutdownSequence(early, late *shutdownRegistry, budget shutdownBudget) {
 
 	// Phase 2/3 — the late registry, split so the durable closers get their
 	// own reserve.
-	drain, flush := late.partitionAt(shutdownFlushBoundary)
+	drain, flush := late.PartitionAt(shutdownFlushBoundary)
 
 	drainEnd := deadline
 	if !deadline.IsZero() && budget.Flush > 0 {

@@ -1,4 +1,4 @@
-package main
+package shutdown
 
 import (
 	"context"
@@ -10,15 +10,15 @@ import (
 	"testing"
 )
 
-// Tests for P2.1 — shutdownRegistry contract.
+// Tests for P2.1 — Registry contract.
 //
-// Each test exercises one row of the contract from runtime_shutdown.go. No
+// Each test exercises one row of the contract from registry.go. No
 // production code is wired into the registry by this PR; these tests
 // stand alone with synthetic hooks (closures recording into local state).
 
 // TestShutdownRegistry_HooksRunInOrder pins the ascending-order rule.
 func TestShutdownRegistry_HooksRunInOrder(t *testing.T) {
-	var r shutdownRegistry
+	var r Registry
 	var seq []string
 	r.Register("c", 30, func(context.Context) error { seq = append(seq, "c"); return nil })
 	r.Register("a", 10, func(context.Context) error { seq = append(seq, "a"); return nil })
@@ -37,7 +37,7 @@ func TestShutdownRegistry_HooksRunInOrder(t *testing.T) {
 // stable-sort tie-break: hooks with the same order run in the order they
 // were Register'd.
 func TestShutdownRegistry_SameOrderPreservesRegistration(t *testing.T) {
-	var r shutdownRegistry
+	var r Registry
 	var seq []string
 	r.Register("first", 5, func(context.Context) error { seq = append(seq, "first"); return nil })
 	r.Register("second", 5, func(context.Context) error { seq = append(seq, "second"); return nil })
@@ -57,7 +57,7 @@ func TestShutdownRegistry_SameOrderPreservesRegistration(t *testing.T) {
 // the batch, and the returned error names each failing hook (and only
 // failing hooks) and wraps the underlying errors.
 func TestShutdownRegistry_ErrorsDoNotStopLaterHooks(t *testing.T) {
-	var r shutdownRegistry
+	var r Registry
 	var ranCount int
 	bang1 := errors.New("hook1 boom")
 	bang3 := errors.New("hook3 boom")
@@ -91,7 +91,7 @@ func TestShutdownRegistry_ErrorsDoNotStopLaterHooks(t *testing.T) {
 // TestShutdownRegistry_RunAllIdempotent pins the second-call-is-a-no-op
 // contract.
 func TestShutdownRegistry_RunAllIdempotent(t *testing.T) {
-	var r shutdownRegistry
+	var r Registry
 	var ranCount int
 	r.Register("once", 0, func(context.Context) error { ranCount++; return nil })
 
@@ -109,7 +109,7 @@ func TestShutdownRegistry_RunAllIdempotent(t *testing.T) {
 // TestShutdownRegistry_CtxIsPassedToHooks asserts that the ctx supplied
 // to RunAll is forwarded to each hook unchanged.
 func TestShutdownRegistry_CtxIsPassedToHooks(t *testing.T) {
-	var r shutdownRegistry
+	var r Registry
 	var seenCtx context.Context
 	r.Register("capture", 0, func(ctx context.Context) error {
 		seenCtx = ctx
@@ -135,7 +135,7 @@ func TestShutdownRegistry_CtxIsPassedToHooks(t *testing.T) {
 // wiring mistakes (forgotten initialiser, dropped assignment) loud at
 // startup time instead of silently skipping shutdown logic.
 func TestShutdownRegistry_NilStopPanics(t *testing.T) {
-	var reg shutdownRegistry
+	var reg Registry
 	defer func() {
 		if rec := recover(); rec == nil {
 			t.Fatal("Register(nil stop) did not panic")
@@ -147,7 +147,7 @@ func TestShutdownRegistry_NilStopPanics(t *testing.T) {
 // TestShutdownRegistry_EmptyRunAllReturnsNil confirms that calling RunAll
 // on an empty registry is a no-op (no hooks → no errors).
 func TestShutdownRegistry_EmptyRunAllReturnsNil(t *testing.T) {
-	var r shutdownRegistry
+	var r Registry
 	if err := r.RunAll(context.Background()); err != nil {
 		t.Errorf("empty RunAll returned %v; want nil", err)
 	}
@@ -158,7 +158,7 @@ func TestShutdownRegistry_EmptyRunAllReturnsNil(t *testing.T) {
 // registering another hook is a programming error (the hook would never
 // run because the registry is already drained) and must fail fast.
 func TestShutdownRegistry_RegisterAfterRunAllPanics(t *testing.T) {
-	var r shutdownRegistry
+	var r Registry
 	r.Register("first", 0, func(context.Context) error { return nil })
 	if err := r.RunAll(context.Background()); err != nil {
 		t.Fatalf("RunAll: %v", err)
@@ -179,7 +179,7 @@ func TestShutdownRegistry_RegisterAfterRunAllPanics(t *testing.T) {
 // that wins the race takes a snapshot and runs the hook, the other
 // observes ran=true and returns immediately.
 func TestShutdownRegistry_ConcurrentRunAllRunsHooksOnce(t *testing.T) {
-	var r shutdownRegistry
+	var r Registry
 	var ranCount atomic.Int32
 	r.Register("once", 0, func(context.Context) error {
 		ranCount.Add(1)
