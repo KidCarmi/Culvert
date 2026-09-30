@@ -209,7 +209,7 @@ func (c *DataPlaneClient) failover() bool {
 func (c *DataPlaneClient) Run(ctx context.Context, pollInterval time.Duration) {
 	go c.pollLoop(ctx, pollInterval)
 	go c.metricsLoop(ctx, pollInterval*2)
-	go c.rateLimitGossipLoop(ctx, 5*time.Second)
+	go c.rateLimitGossipLoop(ctx, 5*time.Second, rl)
 	go c.revocationSyncLoop(ctx, 3*time.Second)
 	go c.auditPushLoop(ctx, 10*time.Second)
 }
@@ -533,18 +533,18 @@ func (c *DataPlaneClient) metricsLoop(ctx context.Context, interval time.Duratio
 // rateLimitGossipLoop periodically syncs hot-IP rate limit deltas with the
 // Control Plane. Only sends data when the rate limiter is enabled and there
 // are IPs exceeding the hot threshold (>50% of limit).
-func (c *DataPlaneClient) rateLimitGossipLoop(ctx context.Context, interval time.Duration) {
+func (c *DataPlaneClient) rateLimitGossipLoop(ctx context.Context, interval time.Duration, limiter *RateLimiter) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
 	// Enable cluster-aware rate limiting now that we're connected to CP.
-	clusterRateLimitEnabled.Store(true)
+	limiter.SetClusterEnabled(true)
 	logger.Printf("DataPlane: distributed rate limiting enabled (gossip every %s)", interval)
 
 	for {
 		select {
 		case <-ctx.Done():
-			clusterRateLimitEnabled.Store(false)
+			limiter.SetClusterEnabled(false)
 			return
 		case <-ticker.C:
 			// CHAOS-61: evaluate broadcast freshness on EVERY tick, including the
@@ -553,17 +553,17 @@ func (c *DataPlaneClient) rateLimitGossipLoop(ctx context.Context, interval time
 			// causes it.
 			//
 			// This deliberately does NOT report on a node whose rate limiter is
-			// off: clusterRateLimitFreshness is un-armed there and returns a
+			// off: ClusterFreshness is un-armed there and returns a
 			// not-stale status, because AllowClusterAware short-circuits before
 			// consulting a remote count, so there is no enforcement for an
 			// expired broadcast to degrade. The first version of this call
 			// claimed the opposite in its own comment and pinned every freshness
 			// surface at "degraded" on the default posture (limit 0).
-			noteClusterRateLimitFreshness(clusterRateLimitFreshness())
-			if !rl.Enabled() {
+			limiter.noteClusterRateLimitFreshness()
+			if !limiter.Enabled() {
 				continue
 			}
-			deltas := rl.ExportHotDeltas()
+			deltas := limiter.ExportHotDeltas()
 			gossip := RateLimitGossip{
 				NodeID: c.nodeID,
 				Deltas: deltas,
@@ -579,7 +579,7 @@ func (c *DataPlaneClient) rateLimitGossipLoop(ctx context.Context, interval time
 				logger.Printf("DataPlane: SyncRateLimits parse error: %v", err)
 				continue
 			}
-			clusterCounts.Apply(broadcast.RemoteCounts)
+			limiter.ApplyRemoteCounts(broadcast.RemoteCounts)
 		}
 	}
 }

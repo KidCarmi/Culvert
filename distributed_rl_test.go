@@ -166,10 +166,7 @@ func TestAllowClusterAware_CombinesRemote(t *testing.T) {
 	// APPLIED (not just poked into the struct) so it carries a freshness stamp —
 	// CHAOS-61 made an unstamped store mean "nothing has ever arrived", which is
 	// exactly what a node that never reached its Control Plane should report.
-	oldCounts := clusterCounts
-	clusterCounts = &clusterCountStore{counts: map[string]int{}}
-	clusterCounts.Apply(map[string]int{"test-ip": 7})
-	defer func() { clusterCounts = oldCounts }()
+	r.ApplyRemoteCounts(map[string]int{"test-ip": 7})
 
 	// Local: should allow 3 more (7 remote + 3 local = 10 = limit).
 	for i := 0; i < 3; i++ {
@@ -187,8 +184,7 @@ func TestAllowAuto_Standalone(t *testing.T) {
 	r := newRateLimiter()
 	r.Configure(5, time.Minute)
 
-	// Standalone mode: clusterRateLimitEnabled is false.
-	clusterRateLimitEnabled.Store(false)
+	// A newly constructed limiter starts in standalone mode.
 	for i := 0; i < 5; i++ {
 		if !r.AllowAuto("standalone-ip") {
 			t.Fatalf("request %d should be allowed", i+1)

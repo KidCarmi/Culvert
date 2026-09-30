@@ -381,13 +381,14 @@ func apiClusterRateLimits(w http.ResponseWriter, r *http.Request) {
 	// node stopped consulting because the Control Plane went away" — the second
 	// is the state in which a 429 on this node has nothing to do with the
 	// client's current request rate.
-	crl := clusterRateLimitFreshness()
+	limiter := rl
+	crl := limiter.ClusterFreshness()
 	body := map[string]any{
-		"enabled":                      clusterRateLimitEnabled.Load(),
+		"enabled":                      limiter.ClusterEnabled(),
 		"syncing_nodes":                nodes,
 		"hot_ips":                      hotIPs,
-		"remote_ips":                   clusterCounts.Count(),
-		"rate_limit_rpm":               rl.Limit(),
+		"remote_ips":                   limiter.RemoteIPCount(),
+		"rate_limit_rpm":               limiter.Limit(),
 		"threshold_pct":                hotThresholdPct,
 		"remote_counts_stale":          crl.Stale,
 		"remote_counts_max_age_secs":   crl.MaxAge.Seconds(),
