@@ -1,4 +1,4 @@
-package main
+package admission
 
 import (
 	"fmt"
@@ -41,7 +41,7 @@ func legacyIsExempt(exemptIPs map[string]bool, exemptNets []*net.IPNet, ip strin
 // authoritative write-side state the oracle needs.
 func newExemptFixture(t *testing.T, entries []string) *RateLimiter {
 	t.Helper()
-	r := newRateLimiter()
+	r := NewRateLimiter()
 	for _, e := range entries {
 		// Invalid entries are deliberately fed in too — the oracle and the
 		// implementation must agree about an entry neither of them stored.
@@ -65,7 +65,7 @@ var exemptDivergenceEntries = []string{
 	"0.0.0.0/0",
 	"255.255.255.255/32",
 	"192.0.2.128/25",
-	"::ffff:10.0.0.0/104", // v4 network stored over 16 bytes — see prefixFromIPNet
+	"::ffff:10.0.0.0/104", // v4 network stored over 16 bytes — see PrefixFromIPNet
 	"2001:db8::/32",
 	"2001:db8::1",
 	"::/0",
@@ -168,7 +168,7 @@ func TestRLExemptView_DifferentialAgainstLegacy_Randomized(t *testing.T) {
 // to netip.Addr would make an IPv4-mapped probe hit a plain-v4 exemption,
 // handing a client a rate-limit bypass it does not have today.
 func TestRLExemptView_MappedProbeStaysNonExempt(t *testing.T) {
-	r := newRateLimiter()
+	r := NewRateLimiter()
 	if err := r.AddExemption("198.51.100.7"); err != nil {
 		t.Fatalf("AddExemption: %v", err)
 	}
@@ -214,7 +214,7 @@ func TestRLExemptView_EveryMutatorRepublishes(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.mutator, func(t *testing.T) {
-			r := newRateLimiter()
+			r := NewRateLimiter()
 			tc.apply(r)
 			if got := r.IsExempt(tc.probe); got != tc.want {
 				t.Fatalf("%s: IsExempt(%q)=%v, want %v — mutator did not publish "+
@@ -277,7 +277,7 @@ func containsExemptToken(name string) bool {
 //
 //	go test -race -run TestRLExemptView_ConcurrentReadersAndMutators .
 func TestRLExemptView_ConcurrentReadersAndMutators(t *testing.T) {
-	r := newRateLimiter()
+	r := NewRateLimiter()
 	_ = r.AddExemptions([]string{"10.0.0.0/8", "198.51.100.0/24", "203.0.113.9"})
 
 	var wg sync.WaitGroup
@@ -340,7 +340,7 @@ func TestRLExemptView_BareLiteralLimiterIsSafe(t *testing.T) {
 func TestRLExemptView_AddExemptionsMatchesAddLoop(t *testing.T) {
 	entries := []string{"10.0.0.0/8", "bogus", "203.0.113.9", "", "2001:db8::/32", "10.0.0.0/33"}
 
-	loop := newRateLimiter()
+	loop := NewRateLimiter()
 	var loopInvalid []string
 	for _, e := range entries {
 		if err := loop.AddExemption(e); err != nil {
@@ -348,7 +348,7 @@ func TestRLExemptView_AddExemptionsMatchesAddLoop(t *testing.T) {
 		}
 	}
 
-	bulk := newRateLimiter()
+	bulk := NewRateLimiter()
 	var bulkInvalid []string
 	for _, bad := range bulk.AddExemptions(entries) {
 		bulkInvalid = append(bulkInvalid, bad.Entry)
@@ -381,7 +381,7 @@ func TestRLExemptView_AddExemptionsMatchesAddLoop(t *testing.T) {
 // 10.255.255.1 probe was outside every generated prefix (caught in review).
 // Prose alone could not catch that; the numbers simply came out wrong.
 func TestExemptBenchFixturesProbeWhatTheyClaim(t *testing.T) {
-	miss := newRateLimiter()
+	miss := NewRateLimiter()
 	_ = miss.AddExemptions(benchExemptCIDRs(256))
 	if !miss.IsExempt(benchExemptCIDRHitIP) {
 		t.Errorf("benchExemptCIDRHitIP (%s) is not inside benchExemptCIDRs(256): "+
@@ -395,7 +395,7 @@ func TestExemptBenchFixturesProbeWhatTheyClaim(t *testing.T) {
 
 	// The realistic fixture must also hit on its single-IP probe and miss on
 	// the shared miss probe, for the same reason.
-	realistic := newRateLimiter()
+	realistic := NewRateLimiter()
 	_ = realistic.AddExemptions(benchExemptRealistic)
 	if !realistic.IsExempt("198.51.100.7") {
 		t.Error("benchExemptRealistic does not exempt 198.51.100.7: BenchmarkIsExempt_Hit measures a miss")
@@ -407,7 +407,7 @@ func TestExemptBenchFixturesProbeWhatTheyClaim(t *testing.T) {
 	// And no client IP the end-to-end Allow benchmark uses may be exempt, or it
 	// would skip the limiter entirely and measure nothing.
 	for _, n := range []int{0, 16, 256} {
-		r := newRateLimiter()
+		r := NewRateLimiter()
 		_ = r.AddExemptions(benchExemptCIDRs(n))
 		for _, ip := range benchClientIPs(256) {
 			if r.IsExempt(ip) {
@@ -427,7 +427,7 @@ func TestExemptBenchFixturesProbeWhatTheyClaim(t *testing.T) {
 // -race. (A scaling-ratio gate was considered and rejected for the reason
 // recorded throughout this repo: a gate that can flake gets muted.)
 func TestBenchGate_IsExemptTakesNoLock(t *testing.T) {
-	r := newRateLimiter()
+	r := NewRateLimiter()
 	_ = r.AddExemptions([]string{"198.51.100.0/24", "203.0.113.9"})
 
 	r.exemptMu.Lock()
@@ -473,7 +473,7 @@ func TestBenchGate_IsExemptTakesNoLock(t *testing.T) {
 // simply stopped locking, which would be a data race rather than an
 // optimisation. A mutator must still block while the lock is held.
 func TestBenchGate_ExemptMutatorsStillTakeTheLock(t *testing.T) {
-	r := newRateLimiter()
+	r := NewRateLimiter()
 
 	r.exemptMu.Lock()
 	started := make(chan struct{})
@@ -520,7 +520,7 @@ func TestBenchGate_IsExemptIsFlatInCIDRCount(t *testing.T) {
 	)
 
 	measure := func(n int) time.Duration {
-		r := newRateLimiter()
+		r := NewRateLimiter()
 		_ = r.AddExemptions(benchExemptCIDRs(n))
 		const iters = 20000
 		// Warm up so neither size pays first-touch costs the other does not.
@@ -585,7 +585,7 @@ func TestBenchGate_RateLimitExemptBulkLoadIsLinear(t *testing.T) {
 
 	measure := func(n int) time.Duration {
 		list := entries(n)
-		r := newRateLimiter()
+		r := NewRateLimiter()
 		// Settle the collector before the clock starts, as testing.B does — the
 		// same fix, measurement and reasoning as the sibling gate
 		// TestBenchGate_IPFilterBulkLoadIsLinear (see the comment there).
@@ -637,7 +637,7 @@ func TestBenchGate_IsExemptAllocsFree(t *testing.T) {
 
 	for _, p := range postures {
 		t.Run(p.name, func(t *testing.T) {
-			r := newRateLimiter()
+			r := NewRateLimiter()
 			_ = r.AddExemptions(p.entries)
 			if got := testing.AllocsPerRun(200, func() { _ = r.IsExempt(p.probe) }); got != 0 {
 				t.Errorf("IsExempt allocates %.0f times per call in posture %q; want 0", got, p.name)
@@ -665,7 +665,7 @@ func TestBenchGate_IsExemptAllocsFree(t *testing.T) {
 // that makes a reachable posture allocate at all (the gate above) — still
 // fails.
 func TestBenchGate_IsExemptUnparseableProbeAllocBound(t *testing.T) {
-	r := newRateLimiter()
+	r := NewRateLimiter()
 	_ = r.AddExemptions(benchExemptRealistic)
 	if got := testing.AllocsPerRun(200, func() { _ = r.IsExempt("not-an-ip") }); got > 1 {
 		t.Errorf("IsExempt allocates %.0f times on a malformed probe; bound is 1 "+

@@ -863,7 +863,7 @@ func applySnapshotBlocklist(snap ConfigSnapshot) {
 // connection limits). Shared by the full-snapshot path and the delta path.
 func applySnapshotTrafficExceptBlocklist(snap ConfigSnapshot) {
 	// IP filter.
-	newIPF := &IPFilter{single: map[string]bool{}}
+	newIPF := newIPFilter()
 	newIPF.SetMode(snap.IPFilterMode)
 	// Bulk load: one pass, one view publish. An Add loop is quadratic in the
 	// entry count, and this list's snapshot cap is maxSnapIPList (2,000,000),

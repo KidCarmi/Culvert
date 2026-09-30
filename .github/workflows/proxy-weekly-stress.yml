@@ -133,7 +133,7 @@ jobs:
         id: gate
         run: |
           set -o pipefail
-          go test -tags benchgate -run 'TestBenchGate_' -v -timeout 10m . 2>&1 | tee benchgate.log
+          go test -count=1 -tags benchgate -run 'TestBenchGate_' -v -timeout 10m . ./internal/admission 2>&1 | tee benchgate.log
 
       # Informational: benchstat ns/op delta vs committed baseline (ns/op is
       # hardware-sensitive, so this is a diff artifact, not a gate).

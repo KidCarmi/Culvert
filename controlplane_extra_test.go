@@ -374,7 +374,7 @@ func TestApplyConfigSnapshot(t *testing.T) {
 
 	// Initialize required globals.
 	bl = blocklist.New()
-	ipf = &IPFilter{single: map[string]bool{}}
+	ipf = newIPFilter()
 	rl = &RateLimiter{}
 
 	snap := ConfigSnapshot{
@@ -414,7 +414,7 @@ func TestCurrentConfigSnapshot(t *testing.T) {
 
 	bl = blocklist.New()
 	bl.Add("test.com")
-	ipf = &IPFilter{single: map[string]bool{}}
+	ipf = newIPFilter()
 	ipf.SetMode("block") // valid mode; snapshot must round-trip it
 	rl = &RateLimiter{}
 	rl.Configure(200, time.Minute)

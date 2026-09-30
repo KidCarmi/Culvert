@@ -62,7 +62,14 @@ func TestDistributedAdmission_ProductionWiring(t *testing.T) {
 			}
 			return nil, errors.New("controlled CP outage")
 		}
-		return cp.SyncRateLimits(ctxWithPeerCert(cert), raw)
+		response, err := cp.SyncRateLimits(ctxWithPeerCert(cert), raw)
+		if err == nil {
+			var broadcast RateLimitBroadcast
+			if e := json.Unmarshal(response, &broadcast); e != nil || broadcast.RemoteCounts[ip] != 2 {
+				t.Errorf("CP must exclude this node's six requests: response=%s err=%v", response, e)
+			}
+		}
+		return response, err
 	}}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
@@ -76,9 +83,6 @@ func TestDistributedAdmission_ProductionWiring(t *testing.T) {
 		}
 	})
 	awaitAdmissionBroadcast(t, r)
-	if got := r.remoteCounts.FreshCount(ip, time.Now(), time.Minute); got != 2 {
-		t.Fatalf("CP must exclude this node's six requests: remote=%d", got)
-	}
 	if got := globalRLAggregator.ClusterTotalsExcluding("remote")[ip]; got != 6 {
 		t.Fatalf("gossip exported %d local requests, want 6", got)
 	}

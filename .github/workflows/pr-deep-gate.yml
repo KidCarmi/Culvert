@@ -93,7 +93,7 @@ jobs:
               # (ui_*.go: middleware/CSRF, C2 metadata enforcement, RBAC,
               # routes SSOT — CI review P1-1), and the self-update/backup/
               # restore + fail-closed GeoIP policy input.
-              auth*.go|ca.go|tls.go|session.go|ocsp.go|security*.go|scanner.go|\
+              auth*.go|ca.go|tls.go|session.go|ocsp.go|security*.go|admission.go|cluster_ratelimit*.go|scanner.go|\
               clam.go|yara_scan.go|fileblock.go|fileprofile.go|threatfeed.go|\
               lockout.go|totp.go|identity.go|enrollment.go|controlplane.go|\
               ui_*.go|update*.go|backup*.go|restore.go|geoip.go|events.go|\

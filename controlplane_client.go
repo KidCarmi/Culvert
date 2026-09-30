@@ -559,11 +559,11 @@ func (c *DataPlaneClient) rateLimitGossipLoop(ctx context.Context, interval time
 			// expired broadcast to degrade. The first version of this call
 			// claimed the opposite in its own comment and pinned every freshness
 			// surface at "degraded" on the default posture (limit 0).
-			limiter.noteClusterRateLimitFreshness()
+			noteClusterRateLimitFreshness(limiter)
 			if !limiter.Enabled() {
 				continue
 			}
-			deltas := limiter.ExportHotDeltas()
+			deltas := rateLimitWireDeltas(limiter)
 			gossip := RateLimitGossip{
 				NodeID: c.nodeID,
 				Deltas: deltas,

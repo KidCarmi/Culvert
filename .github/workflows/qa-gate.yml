@@ -658,7 +658,7 @@ jobs:
         run: go mod download
 
       - name: Allocation-regression gate (policy + scrub hot paths)
-        run: go test -tags benchgate -run 'TestBenchGate_' -count=1 -timeout=10m -v .
+        run: go test -tags benchgate -run 'TestBenchGate_' -count=1 -timeout=10m -v . ./internal/admission
 
   # ─── Audit: the unsharded race reference (CI-REDESIGN stage 5B) ────────────
   # QUALIFICATION mode: the weekly schedule, or a dispatch with
