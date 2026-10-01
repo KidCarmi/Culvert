@@ -36,6 +36,8 @@ on:
       - "session.go"
       - "ocsp.go"
       - "security*.go"
+      - "admission.go"
+      - "cluster_ratelimit*.go"
       - "scanner.go"
       - "clam.go"
       - "yara_scan.go"

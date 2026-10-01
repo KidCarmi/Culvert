@@ -1,4 +1,4 @@
-package main
+package admission
 
 import (
 	"fmt"
@@ -25,7 +25,7 @@ import (
 // newBenchRateLimiter builds an isolated limiter so these never touch the
 // package global `rl` that the rest of the suite mutates.
 func newBenchRateLimiter(entries []string) *RateLimiter {
-	r := newRateLimiter()
+	r := NewRateLimiter()
 	for _, e := range entries {
 		if err := r.AddExemption(e); err != nil {
 			panic("bench fixture: " + e + ": " + err.Error())

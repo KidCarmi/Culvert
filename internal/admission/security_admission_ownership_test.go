@@ -1,4 +1,4 @@
-package main
+package admission
 
 import (
 	"sync"
@@ -18,7 +18,7 @@ func TestDistributedAdmission_IndependentOwners(t *testing.T) {
 		wg.Add(1)
 		go func(n int) {
 			defer wg.Done()
-			r := newRateLimiter()
+			r := NewRateLimiter()
 			r.Configure(10000, time.Minute)
 			<-start
 			for i := 0; i < 100; i++ {
@@ -39,10 +39,10 @@ func TestDistributedAdmission_IndependentOwners(t *testing.T) {
 				}
 				r.SetClusterEnabled(true)
 				r.remoteCounts.applyAtForTest(nil, time.Now().Add(-2*time.Minute))
-				r.noteClusterRateLimitFreshness()
-				r.noteClusterRateLimitFreshness()
+				r.ObserveClusterFreshness()
+				r.ObserveClusterFreshness()
 				r.ApplyRemoteCounts(nil)
-				r.noteClusterRateLimitFreshness()
+				r.ObserveClusterFreshness()
 				if st := r.ClusterFreshness(); st.Stale || st.Episodes != int64(i+1) {
 					t.Errorf("owner %d inherited diagnostic history: %+v", n, st)
 					return
@@ -55,7 +55,7 @@ func TestDistributedAdmission_IndependentOwners(t *testing.T) {
 }
 
 func TestDistributedAdmission_ConstructionAndRetainedState(t *testing.T) {
-	for name, r := range map[string]*RateLimiter{"constructor": newRateLimiter(), "zero": new(RateLimiter), "literal": {}} {
+	for name, r := range map[string]*RateLimiter{"constructor": NewRateLimiter(), "zero": new(RateLimiter), "literal": {}} {
 		t.Run(name, func(t *testing.T) {
 			if r.ClusterEnabled() || r.RemoteIPCount() != 0 || r.ClusterFreshness().Applied || !r.AllowAuto("192.0.2.1") {
 				t.Fatal("new owner did not start disabled and empty")
@@ -143,7 +143,7 @@ func TestIPFilterView_IndependentPublicationObservers(t *testing.T) {
 func BenchmarkDistributedAdmission(b *testing.B) {
 	for _, mode := range []string{"standalone", "fresh", "stale", "future", "disabled", "exempt"} {
 		b.Run(mode, func(b *testing.B) {
-			r := newRateLimiter()
+			r := NewRateLimiter()
 			r.Configure(1, time.Hour)
 			const ip = "198.51.100.71"
 			_ = r.Allow(ip) // prime a stable at-cap bucket: no growth/expiry allocations

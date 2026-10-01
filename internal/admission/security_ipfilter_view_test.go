@@ -1,4 +1,4 @@
-package main
+package admission
 
 import (
 	"fmt"
@@ -713,18 +713,22 @@ func TestBenchGate_IPFilterBulkLoadIsLinear(t *testing.T) {
 		return time.Since(start)
 	}
 
-	// Best-of-three: a scheduler hiccup inflates a sample, never deflates it.
-	best := func(n int) time.Duration {
-		d := measure(n)
-		for i := 0; i < 2; i++ {
-			if e := measure(n); e < d {
-				d = e
-			}
+	// Pair the sizes and alternate their order so they sample the same load
+	// phases while this package runs alongside the root suite. Grouped samples
+	// produced 10.81x in CI for the unchanged linear implementation. As in the
+	// exemption bulk-load gate, take each size's best of nine; retain the sizes,
+	// GC settling, measured operation and 8x bound against per-entry publishing.
+	dSmall, dLarge := measure(small), measure(large)
+	for i := 1; i < 9; i++ {
+		var nextSmall, nextLarge time.Duration
+		if i%2 == 0 {
+			nextSmall, nextLarge = measure(small), measure(large)
+		} else {
+			nextLarge, nextSmall = measure(large), measure(small)
 		}
-		return d
+		dSmall, dLarge = min(dSmall, nextSmall), min(dLarge, nextLarge)
 	}
 
-	dSmall, dLarge := best(small), best(large)
 	ratio := float64(dLarge) / float64(dSmall)
 	t.Logf("entries=%d: %v, entries=%d: %v, ratio=%.2fx (linear ~4x, quadratic ~16x, bound %.1fx)",
 		small, dSmall, large, dLarge, ratio, bound)

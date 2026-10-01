@@ -441,7 +441,7 @@ func csrIsolateRollbackStores(t *testing.T) {
 	t.Cleanup(func() { bl = origBL })
 
 	origIPF := ipf
-	ipf = &IPFilter{single: map[string]bool{}}
+	ipf = newIPFilter()
 	t.Cleanup(func() { ipf = origIPF })
 
 	origRewrite := rewriter.List()
@@ -871,6 +871,7 @@ var snapshotApplyFuncs = map[string]bool{
 	"applySnapshotPolicyAndTraffic":       true,
 	"applySnapshotBlocklist":              true, // T3 P1: blocklist step, split out of applySnapshotPolicyAndTraffic
 	"applySnapshotTrafficExceptBlocklist": true, // T3 P1: the rest, shared by the full + delta apply paths
+	"applySnapshotAdmission":              true, // IP filter + rate-limit wiring, shared by full and delta snapshots
 	"applySnapshotClusterRuntime":         true,
 	"applySnapshotSessionSecret":          true,
 	"applySnapshotExtendedState":          true,

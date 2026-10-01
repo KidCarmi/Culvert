@@ -120,7 +120,7 @@ implicit initialization and shared runtime variables, with negative controls.
    assertions relocated; inventory equivalence; race/shuffled package + root
    integration; full gates and coverage reviewed. Keep signal handling, phase
    budgets and service closures in main. No release or workflow redesign.
-2. **Implemented — instance-owned distributed admission state (ADR-0038).**
+2. **Complete — instance-owned distributed admission state (#1523, ADR-0038).**
    Baseline `60f127389d7a1004a6af7dd4dd352b908b8ad313`, including merged #1522.
    Each limiter now owns remote counts/stamp, enablement and freshness history;
    each IP filter owns its publication observer. Gossip captures the application
@@ -131,23 +131,20 @@ implicit initialization and shared runtime variables, with negative controls.
    handle. Concurrent ownership, CP→DP/ingress/diagnostic wiring and unchanged
    freshness verdicts are the acceptance gates. See [ADR-0038](../docs/adr/0038-instance-owned-admission-state.md)
    and [evidence](../docs/engineering/admission-state-ownership.md).
-3. **Exact next PR — `internal/admission` engine extraction.** Depends on 2. Choose one cohesive package
-   for filter/limiter/shared CIDR representation, reusing existing hostutil/ssrf
-   without duplicating security decisions. Move engine tests and tagged
-   benchgates; leave config persistence, HTTP/SOCKS5 call sites and the parented
-   cleanup loop in main. Accept: old/new verdict differential tests and hot-path
-   allocation gates unchanged; `security.go` 70% coverage selector deliberately
-   follows the moved implementation (no floor reduction); root and non-root
-   inventory proof; baseline/candidate focused and gate measurements.
-   Move `IPFilter`, `RateLimiter`, prefix matching, remote store and derived
-   freshness status together with engine tests and benchmark contracts. Keep
-   `rl`/`ipf` composition handles, gossip DTO/transport, CP fleet aggregation,
-   metrics/API rendering and transition logging in main; expose a narrow
-   observation result for the latter without creating a second freshness
-   authority. Split mixed test files by behavioral ownership, preserving every
-   assertion/name. Keep real snapshot, rollback, HTTP/SOCKS5 and cancellation
-   integration tests root. No temporary second engine or `internal/app` hub.
-4. **Policy pure-core feasibility and ownership design.** Depends on coordination
+3. **Implemented — admission engine extraction (ADR-0039).** Depends on merged
+   #1523. `internal/admission` owns filters, local windows, shared prefix
+   matching, remote state and derived freshness/episode accounting. Main retains
+   composition, persistence/rollback, HTTP/SOCKS5, gossip DTO/transport, CP fleet
+   aggregation, cleanup lifecycle, metrics/API and transition logging. Aliases
+   contain no parallel engine. 97 entries relocated (74 default tests, 21
+   benchmarks, 2 tagged gates); real integrations stay root. Fast, QA and weekly
+   benchgate selectors include both packages; engine and freshness each have
+   70% floors, with the residual security shim's 70% retained. Global 55% and all
+   other contracts stay intact. Negative controls reject missing gate targets
+   and omitted/uncovered implementation profiles. See [design](../docs/adr/0039-admission-engine-package.md),
+   [inventory](../docs/engineering/admission-test-migration.tsv) and
+   [validation/measurements](../docs/engineering/admission-engine-extraction.md).
+4. **Exact next step — policy pure-core feasibility and ownership design.** Depends on coordination
    with #1470 and admission results, not a promise to extract. Map rule vocabulary,
    live match dependencies and hit-accounting ownership against ADR-0026. Accept:
    one evaluator across enforcement/tester/replay; no injected fail-open load
@@ -178,12 +175,12 @@ focused command reduces either gate or overall PR completion.
 
 ## Admission development guidance
 
-Until step 3 lands, admission engine changes belong beside `security.go` and
-use explicitly constructed owners in tests. Do not restore distributed-state
+Admission engine changes and white-box tests belong in `internal/admission`;
+use explicitly constructed owners in tests. See [ADR-0039](../docs/adr/0039-admission-engine-package.md)
+and the [migration evidence](../docs/engineering/admission-engine-extraction.md). Do not restore distributed-state
 singletons or global observer registries. `newRateLimiter` initializes active
 local admission; zero literals retain disabled/read/configuration support.
 Treat a published remote map as transferred and immutable. Configure/enable
-switches retain history; lifecycle cancellation belongs to the caller. After
-extraction, engine tests must run with `go test ./internal/admission` without
+switches retain history; lifecycle cancellation belongs to the caller. Engine tests must run with `go test ./internal/admission` without
 application globals; adapters continue to test real composition from main.
 The concurrent-owner tests and publication negative controls enforce this seam.
