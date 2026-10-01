@@ -714,6 +714,32 @@ endpoints for credentialed parents.
   misses is still the number of `GetCert` calls — but is no longer the same
   thing as the sign count, for which
   `culvert_cert_sign_duration_seconds_count` is exact.
+
+- The per-request policy publication check is O(1) instead of O(rulebase).
+  `PolicyStore.Evaluate` runs on every proxied request, and its first act —
+  `evaluationSnapshot` — scanned the entire rulebase for a rule with a nil
+  counters cell before returning. Production rules always carry one, so the
+  scan never short-circuited: it ran to completion on every request to prove a
+  negative, under the process-wide policy read lock. On a 4-core box the
+  snapshot measured 15.4 ns at 10 rules, 51.3 ns at 100, 524 ns at 1 000 and
+  29 761 ns at 10 000 — superlinear, because the scan is a pointer chase that
+  leaves cache as the rulebase grows. Because it ran *before* evaluation it
+  taxed even requests the engine decides in O(1): a request matching the
+  highest-priority rule cost 465 ns at 10 rules and 30 900 ns at 10 000, so at
+  10 000 rules roughly 98% of `Evaluate` was the pre-scan and 2% was the
+  policy decision. The question the scan was really asking — "has this slice
+  been published?" — is a property of the slice, so it is now answered once
+  per publication instead of once per request: the snapshot is flat at ~13 ns
+  from 10 to 10 000 rules (2 294x at 10 000) and the O(1)-match request is
+  flat at ~390-460 ns (81x at 10 000), with zero allocations throughout.
+  Verdicts are unchanged — pinned by a differential against a verbatim frozen
+  copy of the pre-change body over 400 randomized mutation sequences, by
+  per-mutator immediate-visibility tests, and by a race-detector reader/mutator
+  run; the memo fails safe by construction (any write to the rulebase installs
+  a different slice, so a stale memo costs one scan, never a wrong verdict).
+  Operators with large rulebases see the largest gain; nothing about policy
+  semantics, ordering or default-deny changes.
+
 - The per-request policy decision line is built by appending rather than by
   `logger.Printf`, and the benchmark that measured it was measuring a disabled
   logger. `applyPolicyDecision` emits exactly one `POLICY_*` line per proxied
