@@ -143,3 +143,29 @@ All remain allocation-free. The initial large parallel delta did not persist:
 600/4 spans 40.60–74.36 baseline and 41.48–48.52 candidate; 6000/4 spans
 41.37–53.36 and 41.48–81.07. Report this scheduler-sensitive variation rather
 than attributing a stable latency improvement or regression to relocation.
+
+## CI qualification correction
+
+The diagnostic Deep run on 2026-10-01 failed only
+`TestBenchGate_RateLimitExemptBulkLoadIsLinear`: 8.19x against its existing 8x
+limit (shuffle seed 1790835629306347785). The admission implementation was
+unchanged. In 60 local runs with six CPU competitors, the original grouped
+best-of-three sampling failed once (maximum 10.15x). Alternating small/large
+order and taking each size's best of nine passed 60/60 (maximum 6.00x).
+The 2,500/10,000 sizes, GC settling, timed operation and 8x limit stay unchanged.
+An isolated copy deliberately replacing the bulk operation with a loop of
+`AddExemption` failed the corrected gate at 20.39x; no mutant code is shipped.
+Five race/shuffled package repeats also passed. This corrects the relocated
+gate's sampling, not the admission algorithm or its performance contract.
+
+A fresh three-pair warm measurement after this correction, with the same 74
+test names and result caching disabled, measured 2.347 s in baseline root and
+0.592 s in admission. The earlier table records the original extraction sample;
+this later sample includes the additional gate sampling. Production hot paths
+are unchanged. CI failure annotations now expose bounded diagnostics while
+preserving the original commands, failures and retained log artifact.
+
+The unchanged frontend audit also fails on baseline dependencies. Its four
+transitive lockfile updates are reviewed separately in PR #1525; this admission
+PR is stacked on that repair so its own diff stays focused. Neither PR is merged
+as part of this work. Final-head CI results remain in the PR validation record.

@@ -595,17 +595,24 @@ func TestBenchGate_RateLimitExemptBulkLoadIsLinear(t *testing.T) {
 		return time.Since(start)
 	}
 
-	best := func(n int) time.Duration {
-		d := measure(n)
-		for i := 0; i < 2; i++ {
-			if e := measure(n); e < d {
-				d = e
-			}
+	// This package now runs alongside the root suite and other packages. Three
+	// small samples followed by three large samples can compare different load
+	// phases (CI observed 8.19x for the unchanged linear implementation). Pair
+	// the sizes, alternate their order, and take each size's best of nine to
+	// spread scheduler noise across both workloads. Keep the sizes, GC settling,
+	// measured operation and 8x limit unchanged; a per-entry publication loop
+	// must still fail this gate.
+	dSmall, dLarge := measure(small), measure(large)
+	for i := 1; i < 9; i++ {
+		var nextSmall, nextLarge time.Duration
+		if i%2 == 0 {
+			nextSmall, nextLarge = measure(small), measure(large)
+		} else {
+			nextLarge, nextSmall = measure(large), measure(small)
 		}
-		return d
+		dSmall, dLarge = min(dSmall, nextSmall), min(dLarge, nextLarge)
 	}
 
-	dSmall, dLarge := best(small), best(large)
 	ratio := float64(dLarge) / float64(dSmall)
 	t.Logf("entries=%d: %v, entries=%d: %v, ratio=%.2fx (linear ~4x, quadratic ~16x, bound %.1fx)",
 		small, dSmall, large, dLarge, ratio, bound)
