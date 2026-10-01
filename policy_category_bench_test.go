@@ -99,6 +99,47 @@ func BenchmarkPolicyEvaluate_CategoryGroupRulesSynthetic(b *testing.B) {
 	}
 }
 
+// BenchmarkPolicyEvaluate_CategoryRulesParallel is the end-to-end instrument for
+// the per-RULE category-membership probe, and it is the one to read for how that
+// cost MOVES with core count rather than what it is at one core.
+//
+// A DestCategory rule reaches hostCatScratch.matchesCategory, which calls
+// catStore.MatchesHost (or MatchesHostAdmin) once per rule and deliberately does
+// not memoize. Until internal/urlcat's read lock was sharded that was one
+// process-wide RWMutex read acquisition per rule per request, so this scan was
+// CAPPED: measured on a 4-core Xeon @ 2.10GHz at 50 rules, four cores delivered
+// 1.10x the throughput of one (5134 / 4635 / 4664 ns/op at 1/2/4) — adding cores
+// bought almost nothing, because each one only added traffic to the single cache
+// line all of them had to write. Sharded: 5954 / 3810 / 2153 ns/op, 2.77x from
+// one core to four and 2.17x faster in absolute terms at four, with the curve
+// still climbing on the wider hardware the appliance ships to.
+//
+// Those two rows come from different runs, so read the SHAPE and not the
+// constants; the machine-independent same-run readings live on
+// internal/urlcat/BenchmarkMatchesHostScaling{,_Baseline} and
+// internal/hotlock/BenchmarkRLock{Hot,Single}. See internal/urlcat/hotread.go
+// for the full finding, the rejected atomic.Pointer view, and the ~11%
+// one-core cost that buys it.
+//
+//	go test -run '^$' -bench 'BenchmarkPolicyEvaluate_CategoryRulesParallel' -benchmem -cpu 1,2,4 .
+func BenchmarkPolicyEvaluate_CategoryRulesParallel(b *testing.B) {
+	seedCategoryTaxonomy(b, 12, 40)
+	for _, n := range []int{10, 50} {
+		ps := buildCategoryPolicyStore(n)
+		b.Run(fmt.Sprintf("rules=%d", n), func(b *testing.B) {
+			b.ReportAllocs()
+			b.ResetTimer()
+			b.RunParallel(func(pb *testing.PB) {
+				for pb.Next() {
+					if m := ps.Evaluate("203.0.113.7", "", "unauth", "uncategorized.example.net", nil); m != nil {
+						b.Fatalf("expected no match, got %q", m.Rule.Name)
+					}
+				}
+			})
+		})
+	}
+}
+
 // BenchmarkPolicyEvaluate_CategoryGroupRulesParallel measures the same scan
 // under concurrency. The fusion takes catStore's RLock once per rule, so a
 // per-rule lookup also multiplies lock traffic by the rule count on every

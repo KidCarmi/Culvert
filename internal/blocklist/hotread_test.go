@@ -77,15 +77,15 @@ func TestHotRW_ColdReadLockUsesShardZero(t *testing.T) {
 	h.RLock()
 	defer h.RUnlock()
 
-	if h.shards[0].TryLock() {
-		h.shards[0].Unlock()
+	if h.ShardAt(0).TryLock() {
+		h.ShardAt(0).Unlock()
 		t.Fatal("RLock did not take shard 0")
 	}
 	for i := 1; i < readShardCount; i++ {
-		if !h.shards[i].TryLock() {
+		if !h.ShardAt(i).TryLock() {
 			t.Fatalf("RLock took shard %d as well as shard 0; cold readers must take exactly one", i)
 		}
-		h.shards[i].Unlock()
+		h.ShardAt(i).Unlock()
 	}
 }
 
@@ -184,7 +184,7 @@ func TestBenchGate_HotReadsSpreadAcrossShards(t *testing.T) {
 	var h hotRW
 	seen := make(map[*readShard]struct{}, readShardCount)
 	for i := 0; i < readShardCount*readShardCount; i++ {
-		sh := h.rlockHot()
+		sh := h.RLockHot()
 		seen[sh] = struct{}{}
 		sh.RUnlock()
 	}
@@ -209,7 +209,7 @@ func TestHotRW_ShardsAreCacheLineIsolated(t *testing.T) {
 		t.Fatalf("readShard is %d bytes, want exactly one %d-byte cache line", got, cacheLine)
 	}
 	if readShardCount&(readShardCount-1) != 0 {
-		t.Fatalf("readShardCount = %d must be a power of two: rlockHot indexes with a mask", readShardCount)
+		t.Fatalf("readShardCount = %d must be a power of two: RLockHot indexes with a mask", readShardCount)
 	}
 }
 

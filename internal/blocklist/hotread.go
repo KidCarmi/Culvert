@@ -1,9 +1,6 @@
 package blocklist
 
-import (
-	"math/rand/v2"
-	"sync"
-)
+import "github.com/KidCarmi/Culvert/internal/hotlock"
 
 // ── The blocklist read lock is SHARDED ────────────────────────────────────────
 //
@@ -103,87 +100,27 @@ import (
 // Nothing about the VERDICT changes. Same maps, same probe sequence, same
 // mode semantics, same exclusion against writers — this is a cost change only.
 
-// readShardCount is the number of cache-line-isolated reader locks. 64 matches
-// internal/connlimit; it must be a power of two so the index is a mask.
-const readShardCount = 64
-
-// cacheLine is the padding target. 64 bytes is the line size on every
-// architecture this ships to (amd64, arm64) — the same constant, chosen for the
-// same reason, as internal/connlimit's.
-const cacheLine = 64
-
-// rwMutexSize is the size of a sync.RWMutex in bytes. Pinned by
-// TestHotRW_ShardsAreCacheLineIsolated rather than computed with unsafe.Sizeof,
-// which would drag the unsafe import into a security-critical package for a
-// padding constant.
-const rwMutexSize = 24
-
-// readShard is one reader lock, padded so no two shards share a cache line.
+// ── The engine lives in internal/hotlock ──────────────────────────────────────
 //
-// Without the padding, a sync.RWMutex is 24 bytes and two shards would share a
-// line: taking one shard's lock would invalidate its neighbour and hand back
-// most of what splitting the lock just bought. Same false-sharing reasoning, and
-// the same measured conclusion, as internal/connlimit's shard.
-type readShard struct {
-	sync.RWMutex
-	_ [cacheLine - rwMutexSize]byte
-}
-
-// hotRW is an RWMutex whose READ side is spread across readShardCount
-// independent locks, for a store read on the request path and written by
-// operators.
+// The mechanism below was written here and has since been EXTRACTED verbatim to
+// internal/hotlock so internal/urlcat could adopt it for the same reason (its
+// per-rule category probe took one process-wide RLock per rule per request).
+// The narrative above — the finding, the measurements, and the recorded reason
+// for choosing a sharded lock over an atomic.Pointer view — stays with this
+// store, because it is this store's evidence.
 //
-// Readers take exactly ONE shard, so concurrent readers on different cores
-// almost never touch the same cache line. Writers take EVERY shard, so a writer
-// still excludes every reader — the mutual-exclusion guarantee is identical to
-// the sync.RWMutex it replaces.
-//
-// Writers acquire shards in ascending index order and no reader ever holds two
-// shards at once, so the ordering is total and deadlock is impossible. Like
-// sync.RWMutex, hotRW is NOT reentrant: a goroutine holding a read lock must not
-// take the write lock. That constraint is unchanged from the plain RWMutex this
-// replaces, so any call sequence that was correct before is correct now.
-type hotRW struct {
-	shards [readShardCount]readShard
-}
+// These aliases keep every call site and every gate in this package pointing at
+// the shared engine, so internal/blocklist's hot-read suite is what proves the
+// extraction: a second copy is how the reasoning above rots (the same rule that
+// moved the badger recovery engine to internal/storeguard and the CIDR
+// machinery to security.go's prefixSet).
+type (
+	hotRW     = hotlock.HotRW
+	readShard = hotlock.Shard
+)
 
-// rlockHot takes the read lock for the per-request hot path and returns the
-// shard the caller must RUnlock.
-//
-// The shard is chosen by rand.Uint64, which since Go 1.22 is backed by the
-// runtime's per-P generator: no lock, no allocation, ~2 ns. There is no key to
-// shard on here — the answer depends on the whole store, not on one map entry —
-// so the goal is simply to spread concurrent readers across cache lines, and a
-// per-P random index does that without needing access to the P id. Two readers
-// that collide on a shard contend exactly as they did before this change and no
-// worse; with 64 shards that is ~1 in 64.
-func (h *hotRW) rlockHot() *readShard {
-	sh := &h.shards[rand.Uint64()&(readShardCount-1)] // #nosec G404 -- cache-line spread, not crypto; the index cannot affect the verdict
-	sh.RLock()
-	return sh
-}
-
-// RLock takes the read lock for COLD readers — the admin/list/persist surfaces,
-// which are not on the request path and have no reason to pay for shard
-// selection. They all share shard 0, which is correct because a writer holds
-// every shard: what they get is a plain RWMutex, and they never contend with the
-// hot path except through a writer.
-func (h *hotRW) RLock() { h.shards[0].RLock() }
-
-// RUnlock releases the cold read lock taken by RLock.
-func (h *hotRW) RUnlock() { h.shards[0].RUnlock() }
-
-// Lock takes the write lock: every shard, in ascending order.
-func (h *hotRW) Lock() {
-	for i := range h.shards {
-		h.shards[i].Lock()
-	}
-}
-
-// Unlock releases the write lock. The order is irrelevant for correctness;
-// descending simply mirrors the acquisition.
-func (h *hotRW) Unlock() {
-	for i := len(h.shards) - 1; i >= 0; i-- {
-		h.shards[i].Unlock()
-	}
-}
+const (
+	readShardCount = hotlock.ShardCount
+	cacheLine      = hotlock.CacheLineBytes
+	rwMutexSize    = hotlock.RWMutexSize
+)

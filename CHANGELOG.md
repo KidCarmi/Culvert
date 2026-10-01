@@ -573,6 +573,44 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Performance
 
+- **The category-membership read lock is sharded: a category-scoped policy scan
+  was capped at ~1.10x across four cores and now scales.**
+  `urlcat.Store.MatchesHost` / `MatchesHostAdmin` are the per-RULE half of
+  destination-category resolution — `hostCatScratch.matchesCategory` calls one
+  of them once per category-scoped access rule per proxied request, and
+  deliberately does not memoize — while `LookupHost` / `LookupHostAdmin` are the
+  once-per-scan fusion half. All four took ONE process-wide `sync.RWMutex` read
+  lock, so a category-scoped rulebase multiplied read-lock traffic by the RULE
+  COUNT on every core serving traffic. `RLock` is an atomic read-modify-write on
+  a single shared word, so the pre-fix read lock did not merely fail to scale,
+  it INVERTED: isolated in one run on a 4-core Xeon @2.10GHz, a single `RWMutex`
+  read pair delivered 62.8M acquisitions/s on one core against 22.9M on four,
+  because every added core only contributed coherence traffic to the one word
+  all of them had to write. Sharded, the store-level probe goes
+  135.3 / 117.4 / 118.1 → 150.7 / 89.9 / 50.5 ns/op at 1/2/4 cores (scaling
+  1.15x → 2.98x, 2.34x faster at four cores, 0 allocs both ways, both arms timed
+  in one run against the verbatim pre-fix probe). End to end a 50-rule
+  `DestCategory` scan against an uncategorized destination — what an ALLOWED
+  request pays, since clean traffic cannot short-circuit — goes from 1.10x to
+  2.77x scaling and is 2.17x faster at four cores; deleting the lock outright as
+  a throwaway probe measured the ceiling at 4.01x, so the lock was destroying
+  ~3.6x of available parallelism and sharding recovers about two thirds of it.
+  This repo's `atomic.Pointer` read view was measured and REJECTED for the same
+  structural reason `internal/blocklist` recorded: `addHostToIndexes` mutates
+  the outer index map in place once per host on the SaaS feed merge path, so a
+  view would bill every `AddHost` a copy of it — 3.0 µs at the shipped 27
+  categories but 23 ms and 6.8 MB at the 200,000-category cap, making the merge
+  quadratic and putting a GC-pressure regression on the very path being
+  optimized. Sharding costs the writer ~2.0 µs flat and allocation-free whatever
+  the taxonomy size, with ZERO write amplification — every mutator body in the
+  package is byte-identical. The engine was EXTRACTED from `internal/blocklist`
+  into the new `internal/hotlock` rather than copied (the `internal/storeguard`
+  rule), so blocklist's 15 hot-read gates now prove the shared engine and ran
+  unchanged. A writer still holds EVERY shard, so exclusion is identical to the
+  `RWMutex` it replaces: **no verdict this store can return is different.** The
+  one-core cost is ~11% from the single `rand.Uint64`, with the crossover below
+  two cores.
+
 - The threat feed's full-URL check no longer re-parses a URL it was handed
   already parsed. `preDispatchBlocked` runs it on every forwarded plain-HTTP
   request, on the request goroutine, before the policy engine — and called it
