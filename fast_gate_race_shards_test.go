@@ -490,6 +490,8 @@ func TestFastGateRace_ClassifierBehaviour(t *testing.T) {
 			map[string]string{"code": "false", "agent": "false", "mcp_docs": "false", "frontend": "false"}},
 		{"PR code change runs code", "pull_request", "none", touch("proxy.go"),
 			map[string]string{"code": "true", "agent": "false", "mcp_docs": "false", "frontend": "false"}},
+		{"PR admission engine and tests run code", "pull_request", "none", touch("internal/admission/engine.go", "internal/admission/security_test.go"),
+			map[string]string{"code": "true", "agent": "false"}},
 		{"PR load-bearing doc runs code", "pull_request", "none", touch("docs/saml-idp-configuration-reference.md"),
 			map[string]string{"code": "true"}},
 		{"PR agent change", "pull_request", "none", touch("cmd/culvert-maint/main.go"),

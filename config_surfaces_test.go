@@ -441,7 +441,7 @@ func csrIsolateRollbackStores(t *testing.T) {
 	t.Cleanup(func() { bl = origBL })
 
 	origIPF := ipf
-	ipf = &IPFilter{single: map[string]bool{}}
+	ipf = newIPFilter()
 	t.Cleanup(func() { ipf = origIPF })
 
 	origRewrite := rewriter.List()

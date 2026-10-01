@@ -55,7 +55,7 @@ func benchProxySetup(size int) func() {
 	prevCfg, prevReg := cfg, idpRegistry
 	prevBl := bl
 	bl = blocklist.New()
-	ipf = &IPFilter{single: map[string]bool{}}
+	ipf = newIPFilter()
 	rl = newRateLimiter()
 	cfg = &Config{cache: authCacheStore{entries: map[string]*authCacheEntry{}}}
 	idpRegistry = &IdPRegistry{}

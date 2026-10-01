@@ -1,4 +1,4 @@
-package main
+package admission
 
 import (
 	"fmt"
@@ -121,7 +121,7 @@ func BenchmarkRateLimitWindow_Legacy(b *testing.B) {
 func BenchmarkRateLimitWindow_AllowAtCapParallel(b *testing.B) {
 	for _, limit := range []int{600, 6000} {
 		b.Run(fmt.Sprintf("limit=%d", limit), func(b *testing.B) {
-			r := newRateLimiter()
+			r := NewRateLimiter()
 			r.Configure(limit, time.Minute)
 			ips := make([]string, 256)
 			for i := range ips {

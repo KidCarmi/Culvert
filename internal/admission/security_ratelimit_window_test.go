@@ -1,4 +1,4 @@
-package main
+package admission
 
 import (
 	"fmt"
@@ -278,7 +278,7 @@ func TestRateLimitWindow_OutOfOrderArrivalStaysOrderedAndFailsClosed(t *testing.
 // TestRateLimitWindow_AllowEnforcesLimitEndToEnd exercises the real Allow path
 // (shard lock, exempt check, atomics) rather than the bucket in isolation.
 func TestRateLimitWindow_AllowEnforcesLimitEndToEnd(t *testing.T) {
-	r := newRateLimiter()
+	r := NewRateLimiter()
 	r.Configure(5, time.Minute)
 	const ip = "203.0.113.9"
 
@@ -308,7 +308,7 @@ func TestRateLimitWindow_AllowEnforcesLimitEndToEnd(t *testing.T) {
 // timing rather than on behaviour. Back-dating is deterministic, and it shifts
 // every stamp by the same amount so the ring's ordering invariant still holds.
 func TestRateLimitWindow_ExportHotDeltasCountsInWindowOnly(t *testing.T) {
-	r := newRateLimiter()
+	r := NewRateLimiter()
 	r.Configure(10, time.Minute)
 	const ip = "203.0.113.11"
 	for i := 0; i < 9; i++ {
@@ -337,7 +337,7 @@ func TestRateLimitWindow_ExportHotDeltasCountsInWindowOnly(t *testing.T) {
 // Cleanup and delta export run alongside — the three writers that touch a
 // bucket. Correctness here is "no race, no panic, and the per-IP cap holds".
 func TestRateLimitWindow_ConcurrentAllowIsRaceFree(t *testing.T) {
-	r := newRateLimiter()
+	r := NewRateLimiter()
 	const limit = 32
 	r.Configure(limit, time.Minute)
 

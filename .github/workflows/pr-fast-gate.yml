@@ -357,7 +357,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/setup-go-cache
       - name: Run benchgate
-        run: go test -tags benchgate -run 'TestBenchGate_' -count=1 -timeout=10m -v .
+        run: go test -tags benchgate -run 'TestBenchGate_' -count=1 -timeout=10m -v . ./internal/admission
 
   # ─── 5. Fast security: govulncheck + gosec (pinned) ────────────────────────
   security-fast:

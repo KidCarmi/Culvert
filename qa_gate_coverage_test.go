@@ -297,15 +297,17 @@ func TestQAGateCoverage_FloorTableUnchanged(t *testing.T) {
 		t.Error("the global coverage floor is no longer 55 — stage 2A must not move a threshold to make an instrumented result pass")
 	}
 	for file, floor := range map[string]string{
-		"totp.go":                "85",
-		"security.go":            "70",
-		"session.go":             "75",
-		"lockout.go":             "80",
-		"policy.go":              "60",
-		"autoexclude.go":         "85",
-		"autoexclude_resolve.go": "80",
-		"controlplane_delta.go":  "80",
-		"controlplane_client.go": "55",
+		"totp.go":                         "85",
+		"security.go":                     "70",
+		"internal/admission/engine.go":    "70",
+		"internal/admission/freshness.go": "70",
+		"session.go":                      "75",
+		"lockout.go":                      "80",
+		"policy.go":                       "60",
+		"autoexclude.go":                  "85",
+		"autoexclude_resolve.go":          "80",
+		"controlplane_delta.go":           "80",
+		"controlplane_client.go":          "55",
 	} {
 		if !regexpFloorRow(body, file, floor) {
 			t.Errorf("per-file floor for %s is no longer %s%% — stage 2A changes where the profile comes from, never what it must clear", file, floor)
