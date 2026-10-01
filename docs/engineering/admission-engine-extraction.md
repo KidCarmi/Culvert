@@ -165,7 +165,26 @@ this later sample includes the additional gate sampling. Production hot paths
 are unchanged. CI failure annotations now expose bounded diagnostics while
 preserving the original commands, failures and retained log artifact.
 
+After #1524 was merged into #1525's branch, Deep run 36836998079 on
+`4e06e7e` exposed the sibling `TestBenchGate_IPFilterBulkLoadIsLinear` at
+10.81x (shuffle seed 1790843669051521773). Apply the same alternating,
+best-of-nine sampling to that gate, retaining 2,000/8,000 entries, GC settling,
+`AddAll` as the timed operation, and the 8x bound. In comparable 60-run local
+samples with six CPU competitors, neither version reproduced the CI outlier:
+grouped sampling peaked at 6.43x, corrected sampling at 6.18x. This evidence
+does not establish that all scheduling flakes are eliminated. An isolated
+production mutant replacing `AddAll` with per-entry `Add` failed the corrected
+gate at 19.39x; no mutant code is shipped. Five package race repeats using the
+CI shuffle seed passed.
+
+Reviewdog also reported complexity 16 in `applySnapshotTrafficExceptBlocklist`.
+Extracting its unchanged initial IP-filter/rate-limit wiring into
+`applySnapshotAdmission` reduces the parent's complexity to 13 (helper: 4),
+with the existing maximum of 15 unchanged. The source-contract helper inventory
+is updated, and snapshot/rollback/production-wiring tests passed three shuffled
+race runs. Application composition and operation ordering remain in main.
+
 The unchanged frontend audit also fails on baseline dependencies. Its four
-transitive lockfile updates are reviewed separately in PR #1525; this admission
-PR is stacked on that repair so its own diff stays focused. Neither PR is merged
-as part of this work. Final-head CI results remain in the PR validation record.
+transitive lockfile updates originated in PR #1525. After the user merged
+#1524 into that branch, #1525 carries the combined changes to main and remains
+unmerged for review. Final-head CI results remain in the PR validation record.
