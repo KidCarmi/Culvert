@@ -323,6 +323,27 @@ jobs:
             || { grep -m1 -- "-test.shuffle " determinism.log || true; \
                  echo "::error::determinism failure — reproduce with the printed -test.shuffle seed (log artifact: deep-determinism-log)"; exit 1; }
 
+      - name: Annotate determinism failures
+        if: failure()
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path("determinism.log")
+          if path.exists():
+              lines = path.read_text(errors="replace").splitlines()
+              selected = set()
+              for i, line in enumerate(lines):
+                  if line.startswith("-test.shuffle ") or line.startswith("FAIL"):
+                      selected.add(i)
+                  if "--- FAIL:" in line or line.startswith("panic:"):
+                      selected.update(range(i, min(i + 8, len(lines))))
+              detail = "\n".join(lines[i] for i in sorted(selected))
+              if not detail:
+                  detail = "\n".join(lines[-40:])
+              detail = detail[:12000].replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+              print("::error title=Determinism failure details::" + detail)
+          PY
+
       - name: Build determinism (release binaries are byte-reproducible)
         # The release builds' reproducibility underpins verifiable SLSA provenance
         # (an independent rebuild must hash-match the signed subjects). Two builds
