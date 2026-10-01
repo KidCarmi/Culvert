@@ -131,8 +131,10 @@ implicit initialization and shared runtime variables, with negative controls.
    handle. Concurrent ownership, CP→DP/ingress/diagnostic wiring and unchanged
    freshness verdicts are the acceptance gates. See [ADR-0038](../docs/adr/0038-instance-owned-admission-state.md)
    and [evidence](../docs/engineering/admission-state-ownership.md).
-3. **Implemented — admission engine extraction (ADR-0039).** Depends on merged
-   #1523. `internal/admission` owns filters, local windows, shared prefix
+3. **Complete — admission engine extraction (ADR-0039), #1524/#1525.**
+   #1524 was merged into #1525; #1525 landed on main as
+   `3fcc07e7ab5d1e3bd4d19e6cadc8bb63b682f3af`, after #1523.
+   `internal/admission` owns filters, local windows, shared prefix
    matching, remote state and derived freshness/episode accounting. Main retains
    composition, persistence/rollback, HTTP/SOCKS5, gossip DTO/transport, CP fleet
    aggregation, cleanup lifecycle, metrics/API and transition logging. Aliases
@@ -144,18 +146,31 @@ implicit initialization and shared runtime variables, with negative controls.
    and omitted/uncovered implementation profiles. See [design](../docs/adr/0039-admission-engine-package.md),
    [inventory](../docs/engineering/admission-test-migration.tsv) and
    [validation/measurements](../docs/engineering/admission-engine-extraction.md).
-4. **Exact next step — policy pure-core feasibility and ownership design.** Depends on coordination
-   with #1470 and admission results, not a promise to extract. Map rule vocabulary,
-   live match dependencies and hit-accounting ownership against ADR-0026. Accept:
-   one evaluator across enforcement/tester/replay; no injected fail-open load
-   gate, no generic DTO/common hub; concrete immutable input and state-owner
-   design with mixed tests accounted for. Keep draft commit/learning-accept and
-   config/snapshot transactions in main until separately designed.
-5. **Choose the next implementation from fresh timings.** Reprofile current
-   root determinism and compilation after 3. Prefer a complete domain over
-   splitting source-contract tests into an unrelated package. MCP spool setup
-   remains a separate security-reviewed performance project; no weaker KDF,
-   shared mutable test spool or skipped assertions as an isolation shortcut.
+4. **Assessed — policy pure-core feasibility: PREREQUISITE FIRST.** Fresh main
+   `3fcc07e7` has one access scan but still has implicit live lookup owners and
+   a shared timezone cache. See [ADR-0040](../docs/adr/0040-policy-evaluation-ownership-prerequisite.md),
+   [evidence](../docs/engineering/policy-core-feasibility.md) and the
+   [exact test inventory](../docs/engineering/policy-core-test-inventory.tsv).
+   Tester is a real second consumer; access replay/shadow are not shipped yet.
+   Admission's extraction does not justify moving the full policy hub.
+5. **Exact next implementation — explicit evaluation lookup owners in main.**
+   Wait for #1470's disposition, rebase on fresh main, and preserve its accepted
+   publication algorithm without duplicating its memo. Construct a policy-specific
+   lookup environment and schedule resolver; wire the one access scan, tester
+   and shared Stage-1/CDR matchers to explicit owners. No code/test extraction,
+   wire changes, validation callbacks, publication rewrite or policy changes.
+   Accept: concurrent independent environments, unchanged live-lookup/clock/effect
+   order, real application/load/learning-fence integrations, existing allocations,
+   race/shuffle and coverage contracts. ADR-0040 gives the API and task checklist.
+6. **Conditional follow-up — matching engine extraction.** Only after step 5's
+   isolation and performance proof, assess `internal/accesspolicy` with immutable
+   matching definitions and ordinal results into the same captured rule revision.
+   Keep PolicyStore/DTOs, accounting, draft commit, learning-accept durability and
+   config/snapshot transactions in main. Retain real Evaluate benchmarks and
+   integration gates; migrate matcher tests, coverage and source/CI discovery
+   explicitly. No total-CI gain is measured or promised. MCP spool setup remains
+   a separate security-reviewed performance project; no weaker KDF or shared
+   mutable test spool as an isolation shortcut.
 
 ## Measurement and validation contract
 
@@ -184,3 +199,12 @@ Treat a published remote map as transferred and immutable. Configure/enable
 switches retain history; lifecycle cancellation belongs to the caller. Engine tests must run with `go test ./internal/admission` without
 application globals; adapters continue to test real composition from main.
 The concurrent-owner tests and publication negative controls enforce this seam.
+
+## Policy development guidance
+
+Until step 5 is accepted, put access-decision changes in the one `evalAccessRules`
+path and its canonical matchers; do not add a tester/replay evaluator. Domain
+matching tests should use explicitly owned lookup fixtures once that seam lands.
+Keep activation, durable mutations, accounting and live generation fences in
+main. The proposed package boundary does not make category/geo state one atomic
+snapshot, and must not weaken `policyRulePersistable` or export it as a callback.
