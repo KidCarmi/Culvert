@@ -1,0 +1,328 @@
+baseline	package	file	entry	build_tag	prerequisite_owner	possible_extraction_owner	reason	measured_selector
+3fcc07e7	github.com/KidCarmi/Culvert	admission_contract_test.go	TestAdmissionMigration_BenchgateSelectors	default	main	main	root governance/source contract; extend scan/selector universe if extraction follows	
+3fcc07e7	github.com/KidCarmi/Culvert	admission_contract_test.go	TestAdmissionMigration_CoverageRejectsOmittedEngine	default	main	main	root governance/source contract; extend scan/selector universe if extraction follows	
+3fcc07e7	github.com/KidCarmi/Culvert	admission_contract_test.go	TestAdmissionMigration_DeepClassifier	default	main	main	root governance/source contract; extend scan/selector universe if extraction follows	
+3fcc07e7	github.com/KidCarmi/Culvert	admission_contract_test.go	TestAdmissionMigration_TransitionLoggingUsesEngineObservation	default	main	main	root governance/source contract; extend scan/selector universe if extraction follows	
+3fcc07e7	github.com/KidCarmi/Culvert	apicontract_policyrule_test.go	TestConformance_AuthPolicyRule_Request	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	apicontract_policyrule_test.go	TestConformance_DecryptionProfile_Request	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	apicontract_policyrule_test.go	TestConformance_FinalStructs_Request	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	apicontract_policyrule_test.go	TestConformance_MoreStructs_Request	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	apicontract_policyrule_test.go	TestConformance_NicheStructs_Request	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	apicontract_policyrule_test.go	TestConformance_PolicyRule_Request	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	apicontract_policyrule_test.go	TestConformance_SmallStructs_Request	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	apicontract_policyrule_test.go	TestOpenAPI_Gate9_NoResponseTypeCollision	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	auth_ldap_provider_test.go	TestSplitIdPSource_LDAPScheme	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	authpolicy_precompute_test.go	TestAuthResolve_ConcurrentSnapshotReadsWhilePublishing	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	authpolicy_precompute_test.go	TestAuthResolve_ScheduledRuleFailsClosedOnBadTZ	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	authpolicy_precompute_test.go	TestAuthScheduleParseable_CachedResolution	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	authpolicy_precompute_test.go	TestPolicyStorePublishesSubjectNets	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	authpolicy_precompute_test.go	TestPrecomputeSubjectNets_FallsBackWithoutPrecompute	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	authpolicy_precompute_test.go	TestPrecomputeSubjectNets_MatchesUnprecomputed	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	authpolicy_precompute_test.go	TestPrecomputeSubjectNets_NoStaleNetAfterEdit	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	authpolicy_precompute_test.go	TestPrecomputeSubjectNets_OnlyStoresParseableCIDRs	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	authpolicy_precompute_test.go	TestPrecomputeSubjectNets_PublicationClearsCopyPrecompute	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	authpolicy_precompute_test.go	TestScheduleLocationResolved_ReportsFailureDistinctly	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	authpolicy_resolve_bench_test.go	BenchmarkAuthScheduleParseable	default	main	main	measures real Evaluate/publication/accounting or other application path; retain workload	
+3fcc07e7	github.com/KidCarmi/Culvert	authpolicy_resolve_bench_test.go	BenchmarkResolveAuthOutcome_AccessOnly	default	main	main	measures real Evaluate/publication/accounting or other application path; retain workload	
+3fcc07e7	github.com/KidCarmi/Culvert	authpolicy_resolve_bench_test.go	BenchmarkResolveAuthOutcome_AuthRuleMatch	default	main	main	measures real Evaluate/publication/accounting or other application path; retain workload	
+3fcc07e7	github.com/KidCarmi/Culvert	authpolicy_resolve_bench_test.go	BenchmarkResolveAuthOutcome_AuthRulesMiss	default	main	main	measures real Evaluate/publication/accounting or other application path; retain workload	
+3fcc07e7	github.com/KidCarmi/Culvert	authpolicy_resolve_bench_test.go	BenchmarkResolveAuthOutcome_Parallel	default	main	main	measures real Evaluate/publication/accounting or other application path; retain workload	
+3fcc07e7	github.com/KidCarmi/Culvert	authpolicy_resolve_bench_test.go	BenchmarkResolveAuthOutcome_PureListBaseline	default	main	main	measures real Evaluate/publication/accounting or other application path; retain workload	
+3fcc07e7	github.com/KidCarmi/Culvert	authpolicy_resolve_bench_test.go	BenchmarkResolveAuthOutcome_ScheduledAuthRules	default	main	main	measures real Evaluate/publication/accounting or other application path; retain workload	
+3fcc07e7	github.com/KidCarmi/Culvert	authpolicy_resolve_bench_test.go	BenchmarkResolveAuthOutcome_WideCIDRParallel	default	main	main	measures real Evaluate/publication/accounting or other application path; retain workload	
+3fcc07e7	github.com/KidCarmi/Culvert	authpolicy_resolve_bench_test.go	BenchmarkResolveAuthOutcome_WideCIDRPredicates	default	main	main	measures real Evaluate/publication/accounting or other application path; retain workload	
+3fcc07e7	github.com/KidCarmi/Culvert	authpolicy_resolve_snapshot_test.go	TestResolveAuthOutcomeSnapshot_PriorityOrder	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	authpolicy_resolve_snapshot_test.go	TestResolveAuthOutcomeSnapshot_ReturnsDetachedRule	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	authpolicy_resolve_snapshot_test.go	TestResolveAuthOutcome_SnapshotEquivalentToPure	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	authpolicy_slice3_test.go	TestApplyConfigBackup_RoundTripsValidAuthRule	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	authpolicy_slice3_test.go	TestApplyConfigSnapshot_RoundTripsValidAuthRule	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	authpolicy_slice3_test.go	TestConfigImport_MergeMode_PreservesValidAuthRule	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	authpolicy_slice3_test.go	TestConfigImport_ReplaceMode_PreservesValidAuthRule	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	authpolicy_slice3_test.go	TestPolicyStore_Load_DropsInvalidAuthRuleFailClosed	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	authpolicy_slice3_test.go	TestPolicyStore_Load_PreservesValidAuthRule	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	authpolicy_slice3_test.go	TestPolicyStore_ReplaceAll_DropsInvalidAuthAndSubjectMatchAccess	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	authpolicy_slice3_test.go	TestPolicyStore_ReplaceAll_PreservesValidAuthRule	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	authpolicy_slice3_test.go	TestPolicyTest_SkipsAcceptedAuthRule	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	bench_regression_test.go	TestBenchGate_AuthResolveAllocs	benchgate	main	main	retain real production wrapper cost/verdict; add separate engine gate only at extraction	
+3fcc07e7	github.com/KidCarmi/Culvert	bench_regression_test.go	TestBenchGate_AuthScheduleTZAllocs	benchgate	main	main	retain real production wrapper cost/verdict; add separate engine gate only at extraction	
+3fcc07e7	github.com/KidCarmi/Culvert	bench_regression_test.go	TestBenchGate_CategoryLookupConstantInTaxonomySize	benchgate	main	main	retain real production wrapper cost/verdict; add separate engine gate only at extraction	
+3fcc07e7	github.com/KidCarmi/Culvert	bench_regression_test.go	TestBenchGate_PolicyEvalAllocs	benchgate	main	main	retain real production wrapper cost/verdict; add separate engine gate only at extraction	
+3fcc07e7	github.com/KidCarmi/Culvert	bench_regression_test.go	TestBenchGate_PolicyEvalCIDRAllocs	benchgate	main	main	retain real production wrapper cost/verdict; add separate engine gate only at extraction	
+3fcc07e7	github.com/KidCarmi/Culvert	bench_regression_test.go	TestBenchGate_PolicyEvalScheduledAllocs	benchgate	main	main	retain real production wrapper cost/verdict; add separate engine gate only at extraction	
+3fcc07e7	github.com/KidCarmi/Culvert	cdrpolicy_test.go	TestCDRPolicy_AddPersistsAndSortsByPriority	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	cdrpolicy_test.go	TestCDRPolicy_AddRejectsInvalidMode	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	cdrpolicy_test.go	TestCDRPolicy_DefaultFallbackNormalisesBlankProfile	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	cdrpolicy_test.go	TestCDRPolicy_DestFQDNWildcard	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	cdrpolicy_test.go	TestCDRPolicy_DisabledRulesSkipped	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	cdrpolicy_test.go	TestCDRPolicy_FirstMatchByPriority	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	cdrpolicy_test.go	TestCDRPolicy_MatchedConditions	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	cdrpolicy_test.go	TestCDRPolicy_ModeNormalisation	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	cdrpolicy_test.go	TestCDRPolicy_NoRulesReturnsDefault	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	cdrpolicy_test.go	TestCDRPolicy_RemoveByName	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	cdrpolicy_test.go	TestCDRPolicy_SourceCIDRMatcher	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	cdrpolicy_test.go	TestCDRPolicy_SourceIdentityMatcher	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	cdrpolicy_test.go	TestCDRPolicy_ValidateMode	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	cdrpolicy_test.go	TestCDRPolicy_VersionIncrementsOnMutations	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	coverage_isolation_policy_test.go	TestCovIsoPolicy_EvalAccessRulesTracesSourceMismatch	default	main	internal/accesspolicy (conditional)	matching/scratch/trace assertion; convert to local environment without dropping assertions	
+3fcc07e7	github.com/KidCarmi/Culvert	final_coverage_test.go	TestMatchDest_CountryFilter_NoCacheHit	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	fuzz_test.go	FuzzMatchDest	default	main	internal/accesspolicy (conditional)	matching/scratch/trace assertion; convert to local environment without dropping assertions	
+3fcc07e7	github.com/KidCarmi/Culvert	geoip_resolve_chaos_test.go	TestChaos60_UnresolvedCountryEvaluationIsCounted	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_authz_bypass_test.go	TestAuthzBypass_AndConditionsCannotBePartiallySatisfied	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_authz_bypass_test.go	TestAuthzBypass_AuthSourceNotForgeable	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_authz_bypass_test.go	TestAuthzBypass_DefaultDenyOnNoMatch	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_authz_bypass_test.go	TestAuthzBypass_GroupMatchNotForgeable	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_authz_bypass_test.go	TestAuthzBypass_SourceCIDRNotForgeable	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_authz_bypass_test.go	TestAuthzBypass_SourceIdentityNotForgeable	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_authz_bypass_test.go	TestAuthzBypass_XFFCannotChangeSourceIPAuthz	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_bench_test.go	BenchmarkPolicyEvaluate_CIDRRules	default	main	main	measures real Evaluate/publication/accounting or other application path; retain workload	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_bench_test.go	BenchmarkPolicyEvaluate_CategoryGroupRules	default	main	main	measures real Evaluate/publication/accounting or other application path; retain workload	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_bench_test.go	BenchmarkPolicyEvaluate_MatchLast	default	main	main	measures real Evaluate/publication/accounting or other application path; retain workload	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_bench_test.go	BenchmarkPolicyEvaluate_NoMatch	default	main	main	measures real Evaluate/publication/accounting or other application path; retain workload	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_bench_test.go	BenchmarkPolicyEvaluate_ScheduledRules	default	main	main	measures real Evaluate/publication/accounting or other application path; retain workload	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_bench_test.go	BenchmarkScrubForwardedHeaders	default	main	main	measures real Evaluate/publication/accounting or other application path; retain workload	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_bypass_security_test.go	TestPolicySecurity_AllowRuleNotOverbroad	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_bypass_security_test.go	TestPolicySecurity_BlockRuleNotBypassable	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_bypass_security_test.go	TestPolicySecurity_BlockRuleNotOverbroad	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_bypass_security_test.go	TestPolicySecurity_OptimizedMatchesCanonical	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_bypass_security_test.go	TestPolicySecurity_WildcardScoping	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_category_bench_test.go	BenchmarkPolicyEvaluate_CategoryGroupRulesParallel	default	main	main	measures real Evaluate/publication/accounting or other application path; retain workload	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_category_bench_test.go	BenchmarkPolicyEvaluate_CategoryGroupRulesSynthetic	default	main	main	measures real Evaluate/publication/accounting or other application path; retain workload	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_category_bench_test.go	BenchmarkPolicyEvaluate_CategoryRules	default	main	main	measures real Evaluate/publication/accounting or other application path; retain workload	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_category_benchgate_test.go	TestBenchGate_PolicyCategoryGroupScanFlatInRuleCount	benchgate	main	main	retain real production wrapper cost/verdict; add separate engine gate only at extraction	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_counters_test.go	TestHitCounterPersistence_StartupOrderPreservesCounts	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_counters_test.go	TestHitCountersStableIDSurvivesRenameBeforeCounterResave	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_counters_test.go	TestHitCounters_LastHitPersistRoundTrip	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_counters_test.go	TestHitCounters_LegacyFormatStillLoads	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_counters_test.go	TestLastHitWritersAreMonotonic	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_counters_test.go	TestLegacyCounterSnapshotUpgradesToStableID	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_counters_test.go	TestPersistentAdminState_RestoreBeforePersistenceLoop	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_counters_test.go	TestPolicyCounters_LastHitStampedOnMatch	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_counters_test.go	TestPolicyCounters_ListNeverReportsStaleLastHit	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_counters_test.go	TestPolicyLoadPreservesLiveCountersByStableID	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_counters_test.go	TestRepeatedRestoreDoesNotDoubleCountLiveTelemetryAfterLegacyLoad	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_counters_test.go	TestRestoreHitCounts_AppliesHitsAndLastHit	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_counters_test.go	TestRestoreRecordsCapsStableIDIndex	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_counters_test.go	TestRestoreRecordsPreservesLiveTelemetryAcrossReloads	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_counters_test.go	TestSaveHitCountersTracksRenamedRule	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_counters_test.go	TestStartHitCounterPersistence_DoesNotLoad	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_draft_test.go	TestDetectShadowedRules	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_draft_test.go	TestDraft_BaseGenerationStale_BlocksCommit	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_draft_test.go	TestDraft_CandidateVersionConcurrency	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_draft_test.go	TestDraft_Commit	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_draft_test.go	TestDraft_CommitPersistsCommentNote	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_draft_test.go	TestDraft_Commit_RequiresComment	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_draft_test.go	TestDraft_Commit_StrandedDraftUsesCandidateVersion	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_draft_test.go	TestDraft_Commit_VersionPrecondition	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_draft_test.go	TestDraft_Diff	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_draft_test.go	TestDraft_DisarmWhileDirty_409	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_draft_test.go	TestDraft_FailedEditDoesNotStickDraft	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_draft_test.go	TestDraft_GetState	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_draft_test.go	TestDraft_NoOpEditAutoDiscards	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_draft_test.go	TestDraft_OffMode_LiveWrite	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_draft_test.go	TestDraft_RealEditSurvivesReconcile	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_draft_test.go	TestDraft_RestartDurability	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_draft_test.go	TestDraft_Revert	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_draft_test.go	TestDraft_StageIsolation	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_draft_test.go	TestDraft_StrandedDraftOffMode_LiveWriteStaysDurable	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_evaluate_race_test.go	TestCascadeRename_NoRaceWithEvaluate	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_evaluate_race_test.go	TestEvaluate_NoRaceWithListAndSave	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_fence_interleaving_test.go	TestFenceInterleave_AccessBulkDelete_VsAuthTakeover_RefusesEscalation	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_fence_interleaving_test.go	TestFenceInterleave_AccessCreate_VsSameNameCreate	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_fence_interleaving_test.go	TestFenceInterleave_AccessDeleteByID_VsSameDelete_LoserIs404	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_fence_interleaving_test.go	TestFenceInterleave_AccessMove_VsReorder_HonoursIntent	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_fence_interleaving_test.go	TestFenceInterleave_AccessReorder_VsCreate_LoserIs409	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_fence_interleaving_test.go	TestFenceInterleave_AccessUpdate_VsReorder_LoserIs409	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_fence_interleaving_test.go	TestFenceInterleave_AuthCreate_VsSameNameCreate	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_fence_interleaving_test.go	TestFenceInterleave_AuthDeleteByPriority_VsReorder_AuditIsTruthful	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_fence_interleaving_test.go	TestFenceInterleave_AuthUpdate_VsReorder_LoserIs409	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_fenced_read_test.go	TestFencedRead_AuthPolicyGETVersionDescribesReturnedRules	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_fenced_read_test.go	TestFencedRead_CommitWithReviewedTokenRefusesUnseenRule	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_fenced_read_test.go	TestFencedRead_DraftReviewVersionDescribesReviewedCandidate	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_fenced_read_test.go	TestFencedRead_PolicyGETVersionDescribesReturnedRules	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_flow_e2e_test.go	TestPolicyFlow_IPLiterals	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_flow_e2e_test.go	TestPolicyFlow_MalformedConnectRejected	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_flow_e2e_test.go	TestPolicyFlow_PriorityFirstMatchWins	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_flow_e2e_test.go	TestPolicyFlow_RuleUpdateWhileTrafficFlows	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_hostcat_test.go	TestEvaluate_CategoryGroupScanSharesOneResolution	default	main	main	retained application/store/integration behavior	focused-38
+3fcc07e7	github.com/KidCarmi/Culvert	policy_hostcat_test.go	TestHostCatScratch_BoundToItsHost	default	main	internal/accesspolicy (conditional)	matching/scratch/trace assertion; convert to local environment without dropping assertions	focused-38
+3fcc07e7	github.com/KidCarmi/Culvert	policy_hostcat_test.go	TestHostCatScratch_ResolvesFusionOnce	default	main	internal/accesspolicy (conditional)	matching/scratch/trace assertion; convert to local environment without dropping assertions	focused-38
+3fcc07e7	github.com/KidCarmi/Culvert	policy_learning_codexfix_test.go	TestCodexFix_AcceptRefusedWhenDraftModeDisarmedAtStagingMoment	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_learning_codexfix_test.go	TestCodexFix_AcceptRetryAfterCommitFinalizesAgainstRunning	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_learning_codexfix_test.go	TestCodexFix_AcceptRetryAfterRevertNeverLatchesWithoutTarget	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_learning_codexfix_test.go	TestCodexFix_AcceptRetryAfterTargetDeleteNeverLatchesWithoutTarget	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_learning_codexfix_test.go	TestCodexFix_AcceptRetryStaleFenceAborts	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_learning_codexfix_test.go	TestCodexFix_AcceptTransactionHoldsPolicyWriteGate	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_learning_codexfix_test.go	TestCodexFix_CommitAppendNeverVanishesRule	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_learning_codexfix_test.go	TestCodexFix_CommitFenceRecheckedInsideActivation	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_learning_codexfix_test.go	TestCodexFix_CommitRetainsDraftWhenRunningPersistFails	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_learning_codexfix_test.go	TestCodexFix_ContentDriftAtDurabilityPointRefused	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_learning_codexfix_test.go	TestCodexFix_DurableProofPersistsVerifiedSnapshot	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_learning_codexfix_test.go	TestCodexFix_EnsureDurableTargetProvesMembershipUnderLock	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_learning_codexfix_test.go	TestCodexFix_LateChargeAfterAppendCompensatesDraftRule	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_learning_codexfix_test.go	TestCodexFix_LateChargeInvalidatesAcceptingIntentBeforeMutation	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_learning_codexfix_test.go	TestCodexFix_OrdinaryDraftEditNeverVanishesUnderCommit	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_learning_codexfix_test.go	TestEffectivePolicySnapshot_CoherentUnderConcurrentCommit	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_learning_codexfix_test.go	TestPolicyContentIdentityCached_DefaultActionInvalidates	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_learning_codexfix_test.go	TestPolicyContentIdentity_CategoryGroupMembership	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_learning_codexfix_test.go	TestPolicyContentIdentity_IgnoresProvenanceStamps	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_learning_codexfix_test.go	TestPolicyContentMemoized_MidHashFlipNeverPoisonsMemo	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_learning_codexfix_test.go	TestSetDefaultPolicyAction_RoundTripMovesRevision	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_learning_epoch_test.go	TestLearnCategoryEpoch_EngineRestartDoesNotChurnOrStale	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_learning_epoch_test.go	TestLearnCategoryEpoch_V2SchemeDistinguishableFromCounterScheme	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_learning_epoch_test.go	TestLearnCategoryEpoch_V2StableAcrossRestartEquivalentRebuild	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_learning_m4_test.go	TestRecommendableSeed_BusinessCategoriesOnly	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_learning_m4_test.go	TestRecommendableSeed_WiredIntoLifecycle	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_learning_m5b1_test.go	TestM5B1_CommitBetweenDurableCreateAndRetry	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_learning_m5b1_test.go	TestM5B1_DraftPersistFailureBlocksFinalize	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_learning_m5b1_test.go	TestM5B1_DurableWriteThenCrashBeforeFinalize	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_learning_m5b1_test.go	TestM5B1_FinalizeLatchFailureConverges	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_learning_m5b1_test.go	TestM5B1_GroupTruncationCountedAndSurfaced	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_learning_m5b1_test.go	TestM5B1_PrimitiveFenceAndRollback	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_learning_m5b_test.go	TestM5B_AcceptIsDraftOnlyAndBornSafe	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_learning_m5b_test.go	TestM5B_AcceptVersusDraftEditAndSupersession	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_learning_m5b_test.go	TestM5B_AcceptVersusGuardrailChange	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_learning_m5b_test.go	TestM5B_ConcurrentDoubleAccept	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_learning_m5b_test.go	TestM5B_CrashAfterIntentBeforeMutation	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_learning_m5b_test.go	TestM5B_CrashAfterMutationBeforeLatch	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_learning_m5b_test.go	TestM5B_DecisionAudit	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_learning_m5b_test.go	TestM5B_DecisionRBAC	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_learning_m5b_test.go	TestM5B_GUIDecisionWording	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_learning_m5b_test.go	TestM5B_GenerationOnlyChangeIsNotStale	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_learning_m5b_test.go	TestM5B_IntegrityConflictNeverOverwrites	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_learning_m5b_test.go	TestM5B_StaleIntentAbortsSafely	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_learning_observe_test.go	TestLearnFencedStamp_PostReadFlipYieldsWitness	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_learning_observe_test.go	TestObservationE2E_AuthenticatedAllow	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_learning_observe_test.go	TestObservationE2E_CONNECTTunnel	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_learning_observe_test.go	TestObservationE2E_DefaultDenyBlocked	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_learning_observe_test.go	TestObservationE2E_DisabledNilEngine	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_learning_observe_test.go	TestObservationE2E_HostCanonicalized	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_learning_observe_test.go	TestObservationE2E_SpoofCannotEnter	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_learning_observe_test.go	TestObservation_ActionDerivedFromEnforcementStatus	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_learning_observe_test.go	TestObservation_DefaultDecisionCarriesDecisionTimeIdentity	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_learning_observe_test.go	TestObservation_PreDispatchBoundToCapturedWindow	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_misc_test.go	TestAPIAuthLogin_AuthDisabled	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_misc_test.go	TestAPIAuthLogin_InvalidCreds	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_misc_test.go	TestAPIStats_Get	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_misc_test.go	TestCertMgr_LoadOrInitCA_ExistingPath	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_misc_test.go	TestCertMgr_LoadOrInitCA_NewPath	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_misc_test.go	TestMatchDest_EmptyRule	default	main	internal/accesspolicy (conditional)	matching/scratch/trace assertion; convert to local environment without dropping assertions	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_misc_test.go	TestMatchDest_FQDNMatch	default	main	internal/accesspolicy (conditional)	matching/scratch/trace assertion; convert to local environment without dropping assertions	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_misc_test.go	TestMatchDest_FQDNNoMatch	default	main	internal/accesspolicy (conditional)	matching/scratch/trace assertion; convert to local environment without dropping assertions	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_misc_test.go	TestMatchSchedule_InvalidTimezone	default	main	internal/accesspolicy (conditional)	matching/scratch/trace assertion; convert to local environment without dropping assertions	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_misc_test.go	TestMatchSchedule_TimeRange_InRange	default	main	internal/accesspolicy (conditional)	matching/scratch/trace assertion; convert to local environment without dropping assertions	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_misc_test.go	TestMatchSchedule_TimeRange_OutOfRange	default	main	internal/accesspolicy (conditional)	matching/scratch/trace assertion; convert to local environment without dropping assertions	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_misc_test.go	TestMatchSchedule_Timezone	default	main	internal/accesspolicy (conditional)	matching/scratch/trace assertion; convert to local environment without dropping assertions	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_misc_test.go	TestMatchSchedule_WrongDay	default	main	internal/accesspolicy (conditional)	matching/scratch/trace assertion; convert to local environment without dropping assertions	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_misc_test.go	TestScheduleTimeMatch_FullDayWindowCoversEveryMinute	default	main	internal/accesspolicy (conditional)	matching/scratch/trace assertion; convert to local environment without dropping assertions	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_misc_test.go	TestServeBlockPage	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_mutation_durability_test.go	TestDurable_DraftEdit_PersistFailureRollsBackCandidate	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_mutation_durability_test.go	TestDurable_DraftFirstWrite_PersistFailureDiscardsFork	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_mutation_durability_test.go	TestDurable_DraftReorder_PersistFailureRollsBackOrder	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_mutation_durability_test.go	TestDurable_DraftSuccess_SurvivesRestart	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_mutation_durability_test.go	TestDurable_LiveCreate_PersistFailureRollsBack	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_mutation_durability_test.go	TestDurable_LiveDelete_PersistFailureRollsBack	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_mutation_durability_test.go	TestDurable_LiveEdit_PersistFailureRollsBack	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_mutation_durability_test.go	TestDurable_LivePersistFailure_SeamRollback	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_mutation_durability_test.go	TestDurable_LiveReplacedNotSynced_CountsAsLanded	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_mutation_durability_test.go	TestDurable_LiveSuccess_IsRestartVisible	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_mutation_durability_test.go	TestDurable_NoOpDraftEdit_StillReconciles	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_mutation_fence_test.go	TestFence_A_ConcurrentEditsSameVersion	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_mutation_fence_test.go	TestFence_B_ConcurrentCreatesSameVersion	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_mutation_fence_test.go	TestFence_C_ConcurrentReorderAndEditSameVersion	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_mutation_fence_test.go	TestFence_D2_ForkVersionCollisionRegression	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_mutation_fence_test.go	TestFence_D_FirstWriteOpensDraftRace	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_mutation_fence_test.go	TestFence_E_CommitVsDraftMutation	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_mutation_fence_test.go	TestFence_F_LegacyNoIfVersionUnchanged	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_mutation_fence_test.go	TestFence_RetiredCandidateTokenNeverRevives	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_perfqual_test.go	BenchmarkPerfQual_Evaluate	default	main	main	measures real Evaluate/publication/accounting or other application path; retain workload	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_precompute_test.go	TestPolicyPrecompute_CIDRMatch	default	main	main	retained application/store/integration behavior	focused-38
+3fcc07e7	github.com/KidCarmi/Culvert	policy_precompute_test.go	TestPolicyPrecompute_ExactIPStillMatches	default	main	main	retained application/store/integration behavior	focused-38
+3fcc07e7	github.com/KidCarmi/Culvert	policy_precompute_test.go	TestPolicyPrecompute_InvalidCIDRFailsClosed	default	main	main	retained application/store/integration behavior	focused-38
+3fcc07e7	github.com/KidCarmi/Culvert	policy_precompute_test.go	TestPolicyPrecompute_MatchSourceFallback	default	main	internal/accesspolicy (conditional)	matching/scratch/trace assertion; convert to local environment without dropping assertions	focused-38
+3fcc07e7	github.com/KidCarmi/Culvert	policy_precompute_test.go	TestPolicyPrecompute_MatchedConditions	default	main	main	retained application/store/integration behavior	focused-38
+3fcc07e7	github.com/KidCarmi/Culvert	policy_precompute_test.go	TestPolicyPrecompute_ScheduleTimezone	default	main	main	retained application/store/integration behavior	focused-38
+3fcc07e7	github.com/KidCarmi/Culvert	policy_precompute_test.go	TestScheduleLocation_CachesAndFallsBack	default	main	main	retained application/store/integration behavior	focused-38
+3fcc07e7	github.com/KidCarmi/Culvert	policy_publication_race_test.go	TestBackfillIDsConcurrentEvaluateNoRace	default	main	main	retained application/store/integration behavior	focused-38
+3fcc07e7	github.com/KidCarmi/Culvert	policy_publication_race_test.go	TestPolicyStoreListDoesNotExposeCounterCell	default	main	main	retained application/store/integration behavior	focused-38
+3fcc07e7	github.com/KidCarmi/Culvert	policy_publication_race_test.go	TestPolicyStore_EvaluateConcurrentAllPublicationMutatorsNoRace	default	main	main	retained application/store/integration behavior	focused-38
+3fcc07e7	github.com/KidCarmi/Culvert	policy_publication_race_test.go	TestPolicyStore_EvaluateConcurrentMutationNoRace	default	main	main	retained application/store/integration behavior	focused-38
+3fcc07e7	github.com/KidCarmi/Culvert	policy_publication_race_test.go	TestPolicyStore_ListCannotMutatePublishedDefinition	default	main	main	retained application/store/integration behavior	focused-38
+3fcc07e7	github.com/KidCarmi/Culvert	policy_publication_race_test.go	TestPolicyStore_ListClonesAuthNestedData	default	main	main	retained application/store/integration behavior	focused-38
+3fcc07e7	github.com/KidCarmi/Culvert	policy_publication_race_test.go	TestPolicyStore_PolicyMatchCannotMutatePublishedDefinition	default	main	main	retained application/store/integration behavior	focused-38
+3fcc07e7	github.com/KidCarmi/Culvert	policy_publication_race_test.go	TestPolicyStore_PolicyMatchMaterializesLiveAccounting	default	main	main	retained application/store/integration behavior	focused-38
+3fcc07e7	github.com/KidCarmi/Culvert	policy_publication_race_test.go	TestPolicyStore_PublicationPreservesFirstMatchReorder	default	main	main	retained application/store/integration behavior	focused-38
+3fcc07e7	github.com/KidCarmi/Culvert	policy_publication_race_test.go	TestPolicyStore_PublicationPreservesRuleIdentityAndHits	default	main	main	retained application/store/integration behavior	focused-38
+3fcc07e7	github.com/KidCarmi/Culvert	policy_publication_race_test.go	TestPolicyStore_ReplaceAllStillResetsHitAccounting	default	main	main	retained application/store/integration behavior	focused-38
+3fcc07e7	github.com/KidCarmi/Culvert	policy_publication_race_test.go	TestPolicyStore_UpdatePreservesStableID	default	main	main	retained application/store/integration behavior	focused-38
+3fcc07e7	github.com/KidCarmi/Culvert	policy_publication_race_test.go	TestRestoreHitCountsConcurrentEvaluateNoRace	default	main	main	retained application/store/integration behavior	focused-38
+3fcc07e7	github.com/KidCarmi/Culvert	policy_publication_race_test.go	TestRestoreHitCountsPreservesLiveHitAndNewerLastHit	default	main	main	retained application/store/integration behavior	focused-38
+3fcc07e7	github.com/KidCarmi/Culvert	policy_schedule_minutes_test.go	TestEvaluate_ScheduledRuleDeniedByWindow	default	main	main	retained application/store/integration behavior	focused-38
+3fcc07e7	github.com/KidCarmi/Culvert	policy_schedule_minutes_test.go	TestMatchScheduleAt_SharedInstant	default	main	internal/accesspolicy (conditional)	matching/scratch/trace assertion; convert to local environment without dropping assertions	focused-38
+3fcc07e7	github.com/KidCarmi/Culvert	policy_schedule_minutes_test.go	TestParseClockMinutes	default	main	internal/accesspolicy (conditional)	matching/scratch/trace assertion; convert to local environment without dropping assertions	focused-38
+3fcc07e7	github.com/KidCarmi/Culvert	policy_schedule_minutes_test.go	TestScheduleTimeMatch_MalformedBoundsKeepLegacyBehavior	default	main	internal/accesspolicy (conditional)	matching/scratch/trace assertion; convert to local environment without dropping assertions	focused-38
+3fcc07e7	github.com/KidCarmi/Culvert	policy_schedule_minutes_test.go	TestScheduleTimeMatch_OrderEquivalence	default	main	internal/accesspolicy (conditional)	matching/scratch/trace assertion; convert to local environment without dropping assertions	focused-38
+3fcc07e7	github.com/KidCarmi/Culvert	policy_srcprefix_benchgate_test.go	TestBenchGate_PolicySourceCIDRAllocFree	benchgate	main	main	retain real production wrapper cost/verdict; add separate engine gate only at extraction	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_srcprefix_benchgate_test.go	TestBenchGate_PolicySourceCIDRUsesPrefix	benchgate	main	main	retain real production wrapper cost/verdict; add separate engine gate only at extraction	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_srcprefix_test.go	TestSrcPrefix_ClearedOnPublicationCopy	default	main	main	retained application/store/integration behavior	focused-38
+3fcc07e7	github.com/KidCarmi/Culvert	policy_srcprefix_test.go	TestSrcPrefix_ConcurrentEvaluateAndReplace	default	main	main	retained application/store/integration behavior	focused-38
+3fcc07e7	github.com/KidCarmi/Culvert	policy_srcprefix_test.go	TestSrcPrefix_DifferentialAgainstLegacyMatcher	default	main	internal/accesspolicy (conditional)	matching/scratch/trace assertion; convert to local environment without dropping assertions	focused-38
+3fcc07e7	github.com/KidCarmi/Culvert	policy_srcprefix_test.go	TestSrcPrefix_DifferentialRandomized	default	main	internal/accesspolicy (conditional)	matching/scratch/trace assertion; convert to local environment without dropping assertions	focused-38
+3fcc07e7	github.com/KidCarmi/Culvert	policy_srcprefix_test.go	TestSrcPrefix_NotContentForDraftComparison	default	main	main	retained application/store/integration behavior	focused-38
+3fcc07e7	github.com/KidCarmi/Culvert	policy_srcprefix_test.go	TestSrcPrefix_PrecomputeAgreesWithIPNet	default	main	main	retained application/store/integration behavior	focused-38
+3fcc07e7	github.com/KidCarmi/Culvert	policy_test.go	TestEvaluate_CategoryAnyMatchesAll	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_test.go	TestEvaluate_CategoryAnyWithFQDN	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_test.go	TestEvaluate_MultiConditionAND	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_test.go	TestFileProfileBlocked	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_test.go	TestMatchCategory	default	main	internal/accesspolicy (conditional)	matching/scratch/trace assertion; convert to local environment without dropping assertions	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_test.go	TestMatchFQDN	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_test.go	TestMatchFQDN_EmptyHost	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_test.go	TestMatchIPOrCIDR	default	main	internal/accesspolicy (conditional)	matching/scratch/trace assertion; convert to local environment without dropping assertions	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_test.go	TestMatchSchedule_AllDays	default	main	internal/accesspolicy (conditional)	matching/scratch/trace assertion; convert to local environment without dropping assertions	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_test.go	TestMatchSchedule_BoundaryEndExclusive	default	main	internal/accesspolicy (conditional)	matching/scratch/trace assertion; convert to local environment without dropping assertions	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_test.go	TestMatchSchedule_BoundaryStartInclusive	default	main	internal/accesspolicy (conditional)	matching/scratch/trace assertion; convert to local environment without dropping assertions	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_test.go	TestMatchSchedule_EmptySchedule	default	main	internal/accesspolicy (conditional)	matching/scratch/trace assertion; convert to local environment without dropping assertions	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_test.go	TestMatchSchedule_Nil	default	main	internal/accesspolicy (conditional)	matching/scratch/trace assertion; convert to local environment without dropping assertions	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_test.go	TestMatchSchedule_OvernightInside	default	main	internal/accesspolicy (conditional)	matching/scratch/trace assertion; convert to local environment without dropping assertions	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_test.go	TestMatchSchedule_OvernightOutside	default	main	internal/accesspolicy (conditional)	matching/scratch/trace assertion; convert to local environment without dropping assertions	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_test.go	TestPermutePriorities_DuplicatePriorityInStore	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_test.go	TestPolicyStore_AddListDelete	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_test.go	TestPolicyStore_Evaluate_AuthSourceLegacyIdPAlias	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_test.go	TestPolicyStore_Evaluate_FQDNMatch	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_test.go	TestPolicyStore_Evaluate_FirstMatch	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_test.go	TestPolicyStore_Evaluate_Groups	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_test.go	TestPolicyStore_Evaluate_GroupsTrimSpace	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_test.go	TestPolicyStore_Evaluate_HitCount	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_test.go	TestPolicyStore_Evaluate_NoMatch	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_test.go	TestPolicyStore_Evaluate_SourceIP	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_test.go	TestPolicyStore_Evaluate_SourceIdentity	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_test.go	TestPolicyStore_LoadInvalidJSON	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_test.go	TestPolicyStore_LoadMissingFile	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_test.go	TestPolicyStore_LoadSave	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_test.go	TestPolicyStore_Reorder	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_test.go	TestPolicyStore_SaveMeta_NoTmpLeak	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_test.go	TestPolicyStore_SaveNoHitCount	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_test.go	TestPolicyStore_SaveWithoutPath	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_test.go	TestPolicyStore_Save_MainFileNoTmpLeak	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_test.go	TestPolicyStore_Save_MetaSkippedOnMainWriteFailure	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_test.go	TestPolicyStore_Update	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_test.go	TestReorder_DuplicatePriorities	default	main	main	retained application/store/integration behavior	
+3fcc07e7	github.com/KidCarmi/Culvert	policy_tester_draft_test.go	TestPolicyTester_DraftRulebase	default	main	main	retained application/store/integration behavior	focused-38
+3fcc07e7	github.com/KidCarmi/Culvert	policy_tester_draft_test.go	TestPolicyTester_RunningRulebase	default	main	main	retained application/store/integration behavior	focused-38
+3fcc07e7	github.com/KidCarmi/Culvert	policy_tester_draft_test.go	TestPolicyTester_SkipsDisabledRule	default	main	main	retained application/store/integration behavior	focused-38
+3fcc07e7	github.com/KidCarmi/Culvert	policylearn_wall_test.go	TestPolicyLearnWall_ImportSurface	default	main	main	root governance/source contract; extend scan/selector universe if extraction follows	
+3fcc07e7	github.com/KidCarmi/Culvert	policylearn_wall_test.go	TestPolicyLearnWall_NoPolicyMutationTokens	default	main	main	root governance/source contract; extend scan/selector universe if extraction follows	
+3fcc07e7	github.com/KidCarmi/Culvert	policylearn_wall_test.go	TestPolicyLearnWall_NoWallClock	default	main	main	root governance/source contract; extend scan/selector universe if extraction follows	
+3fcc07e7	github.com/KidCarmi/Culvert	policylearn_wall_test.go	TestPolicyLearnWall_RequestPathOneWayTransport	default	main	main	root governance/source contract; extend scan/selector universe if extraction follows	
+3fcc07e7	github.com/KidCarmi/Culvert	policylearn_wall_test.go	TestPolicyLearnWall_RootTranslatorOwnership	default	main	main	root governance/source contract; extend scan/selector universe if extraction follows	
+3fcc07e7	github.com/KidCarmi/Culvert	qa_gate_coverage_test.go	TestQAGateCoverage_ArtifactHasExactlyOneProducer	default	main	main	root governance/source contract; extend scan/selector universe if extraction follows	
+3fcc07e7	github.com/KidCarmi/Culvert	qa_gate_coverage_test.go	TestQAGateCoverage_FloorScriptRefusesUnusableAndBreachedProfiles	default	main	main	root governance/source contract; extend scan/selector universe if extraction follows	
+3fcc07e7	github.com/KidCarmi/Culvert	qa_gate_coverage_test.go	TestQAGateCoverage_FloorTableUnchanged	default	main	main	root governance/source contract; extend scan/selector universe if extraction follows	
+3fcc07e7	github.com/KidCarmi/Culvert	qa_gate_coverage_test.go	TestQAGateCoverage_GuardsRefuseUnusableEvidence	default	main	main	root governance/source contract; extend scan/selector universe if extraction follows	
+3fcc07e7	github.com/KidCarmi/Culvert	qa_gate_coverage_test.go	TestQAGateCoverage_ProfileIsProducedByTheRaceRun	default	main	main	root governance/source contract; extend scan/selector universe if extraction follows	
+3fcc07e7	github.com/KidCarmi/Culvert	qa_gate_coverage_test.go	TestQAGateCoverage_VerdictRefusesMissingCoverageEvidence	default	main	main	root governance/source contract; extend scan/selector universe if extraction follows	
+3fcc07e7	github.com/KidCarmi/Culvert	qa_gate_coverage_test.go	TestQAGateCoverage_VerifierConsumesOnlyThisRun	default	main	main	root governance/source contract; extend scan/selector universe if extraction follows	
+3fcc07e7	github.com/KidCarmi/Culvert	qa_gate_coverage_test.go	TestQAGateCoverage_VerifierRunsNoTests	default	main	main	root governance/source contract; extend scan/selector universe if extraction follows	
+3fcc07e7	github.com/KidCarmi/Culvert	rewrite_scanner_policy_test.go	TestMatchSource_AllEmpty	default	main	internal/accesspolicy (conditional)	matching/scratch/trace assertion; convert to local environment without dropping assertions	
+3fcc07e7	github.com/KidCarmi/Culvert	rewrite_scanner_policy_test.go	TestMatchSource_AuthSource	default	main	internal/accesspolicy (conditional)	matching/scratch/trace assertion; convert to local environment without dropping assertions	
+3fcc07e7	github.com/KidCarmi/Culvert	test_order_isolation_c30_red_test.go	TestScheduleTests_NoWallClockFullDayWindowEndsAt2359	default	main	main	root governance/source contract; extend scan/selector universe if extraction follows	
+3fcc07e7	github.com/KidCarmi/Culvert	ui_policytester_e2e_test.go	TestUIE2E_PolicyTesterSimulatesDecision	uie2e	main	main	retained application/store/integration behavior	
