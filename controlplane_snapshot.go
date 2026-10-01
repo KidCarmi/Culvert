@@ -857,11 +857,9 @@ func applySnapshotBlocklist(snap ConfigSnapshot) {
 	bl.Save()
 }
 
-// applySnapshotTrafficExceptBlocklist applies every traffic/policy slice EXCEPT
-// the blocklist (IP filter, rate limiter + exemptions, external auth, default
-// action, policy rules, SSL bypass, URL categories, file profiles, rewrite, DPI,
-// connection limits). Shared by the full-snapshot path and the delta path.
-func applySnapshotTrafficExceptBlocklist(snap ConfigSnapshot) {
+// applySnapshotAdmission applies the IP filter and rate-limit settings before
+// the remaining traffic configuration, shared by full and delta snapshots.
+func applySnapshotAdmission(snap ConfigSnapshot) {
 	// IP filter.
 	newIPF := newIPFilter()
 	newIPF.SetMode(snap.IPFilterMode)
@@ -887,6 +885,14 @@ func applySnapshotTrafficExceptBlocklist(snap ConfigSnapshot) {
 	if snap.RateLimitExempt != nil {
 		rl.ReplaceExemptions(snap.RateLimitExempt)
 	}
+}
+
+// applySnapshotTrafficExceptBlocklist applies every traffic/policy slice EXCEPT
+// the blocklist (IP filter, rate limiter + exemptions, external auth, default
+// action, policy rules, SSL bypass, URL categories, file profiles, rewrite, DPI,
+// connection limits). Shared by the full-snapshot path and the delta path.
+func applySnapshotTrafficExceptBlocklist(snap ConfigSnapshot) {
+	applySnapshotAdmission(snap)
 
 	applyExternalAuthSnapshotSettings(snap)
 
