@@ -112,6 +112,20 @@ Re-derived independently:
   TOTP refusal (which does cost one). A TOTP refusal is deliberately not charged
   to the per-account lockout — charging it would let a caller who does *not*
   know the password lock the account out by replaying any Basic request.
+- **The new budget primitive** (`lockout.APIRateLimiter.Reserve`/`Refund`) is
+  correct where it is easiest to get wrong. The claim is atomic under the lock,
+  so there is no check-then-charge window a concurrent wave could all pass; and
+  the refund is bound by **pointer identity** to the `apiRateEntry` it was
+  claimed in (`e != r.entry`), not merely by an age check — a new window
+  allocates a new entry, so a refund crossing the boundary cannot mint capacity
+  in the new window. The `count <= 0` floor and the no-op zero `Reservation`
+  close the remaining two.
+- **The new limiter's map is bounded.** `basicAuthFailLimiter` is keyed by
+  client IP and is reachable unauthenticated through the public
+  `/api/auth/status`, so a limiter whose `Cleanup` was never wired would have
+  been a slow memory exhaustion introduced *by* the security fix. It is wired —
+  `connlimit_startup.go:100`, inside the CHAOS-24-guarded cleanup round
+  alongside `rl`, `loginLimiter` and `apiLimiter`.
 - **The wall** (`TestSECBASIC1_VerifyUIUserHasNoOtherRequestPathCaller`) is
   AST-based, carries a not-vacuous guard, and its three allowances are each
   justified. Finding 2 below is the gap in one allowance's *stated reasoning*,
