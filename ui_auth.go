@@ -434,6 +434,36 @@ func apiAuthChangePassword(w http.ResponseWriter, r *http.Request) {
 	}
 	// Verify current password.
 	if _, ok := cfg.VerifyUIUser(username, body.CurrentPass); !ok {
+		// SEC-REAUTH-AUDIT-1: a FAILED re-authentication on the admin plane is
+		// audited, like every other credential rejection in this file
+		// (auth.login.fail, auth.basic.fail). Without this entry the only
+		// unlocked, unthrottled-by-lockout password oracle in the admin API was
+		// also the only one that left no trace: a caller holding a stolen or
+		// hijacked session could guess this account's password at the mutating
+		// apiLimiter's rate and the operator had no signal at all — the
+		// password is durable persistence that outlives the session being
+		// revoked (CWE-778 / OWASP A09:2021).
+		//
+		// The entry is NOT a change of the recorded lockout trade-off
+		// (TestSECBASIC1_VerifyUIUserHasNoOtherRequestPathCaller explains why
+		// charging loginLimiter here would let a session holder lock themselves
+		// out of the login flow): it adds the missing EVIDENCE without altering
+		// any authentication decision.
+		//
+		// Not a write amplifier (CHAOS-63): this path needs a VALID SESSION and
+		// is a POST, so securityMiddleware's mutating-method apiLimiter bounds
+		// its rate exactly as it bounds apiAuthLogin's own audited failures.
+		//
+		// The identity is bounded in BOTH fields: truncateForAudit here for the
+		// Object, and auditActor itself for the Actor it rebuilds from the
+		// session. The first version of this comment claimed the actor was
+		// "still truncated" on the strength of this call alone — false, because
+		// auditEvent derives the Actor independently, so an oversize CONFIGURED
+		// name (-user / --reset-password persist one, and it is deliberately
+		// never refused for its length) was retained full-length (Codex review,
+		// PR #1532). Bounding moved to the chokepoint; do not re-derive it here.
+		auditEvent(r, "auth.password_change.fail", truncateForAudit(username),
+			"self-service password change refused: current password incorrect")
 		http.Error(w, "current password is incorrect", http.StatusForbidden)
 		return
 	}

@@ -9,6 +9,70 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Security
 
+- The **audit `Actor` is now bounded at the chokepoint** (`auditActor`,
+  `ui_helpers.go`). `truncateForAudit` was being applied by call sites to the
+  audit **Object**, which made each one look bounded, while `auditEvent` derives
+  the **Actor** independently and rebuilt `name + "@" + ip` from the session with
+  no bound — so a CONFIGURED account name longer than the 64-byte cap (which
+  `-user`/`auth.user` and `--reset-password` can persist, and which is
+  deliberately never refused for its length) was retained full-length. Measured:
+  a 300-byte name produced a 314-byte Actor. It is not only the audit ring —
+  call sites persist `auditActor`'s result into the MCP tool-trust store,
+  policy-learning decision records, CDR receipts, PAC lifecycle operations and
+  support-recipient/approval state, so every one of them retained it. Low
+  severity (the name is configured, not attacker-chosen: a retention bound, not
+  an unauthenticated amplifier), but it is CHAOS-63's rule unapplied at the one
+  place that would have covered every surface at once. Found by Codex review of
+  the `auth.password_change.fail` entry added in this same window, whose first
+  version claimed in its comment that the actor was "still truncated" and whose
+  gate was named `AuditActorIsBounded` while asserting only on `Object`. Fixed
+  at the primitive rather than per call site — bounding per call site is exactly
+  what hid it. Gates assert BOTH fields plus `auditActor` directly, with a
+  control requiring an ordinary name to pass through verbatim. **The rule: a
+  comment asserting a value is bounded is a claim about every field that value
+  reaches, and a gate must assert the property it is named for.**
+
+- The **cluster CA private key** backup completed SEC-SECRETWRITE-1. That sweep
+  was scoped to the four key writers introduced in its own review window, so
+  `backupCAFiles` (`enrollment.go`) — which predates it — still wrote
+  `cluster-ca.key.bak` and `cluster-ca.crt.bak` with `os.WriteFile` on a fully
+  predictable path, with both halves of the same defect reachable: the open
+  follows a symlink planted at the path, and `perm` applies only on *creation*,
+  so a `0666` file pre-created at `cluster-ca.key.bak` receives the key and
+  stays world-readable. The asset is larger than any of the four already fixed —
+  the cluster CA signs every Data Plane node certificate, so disclosure lets an
+  attacker mint a node cert, impersonate a DP to the Control Plane and receive
+  the full `ConfigSnapshot`, which carries `SessionHMAC` and the IdP secrets.
+  Both writes now use `fileutil.AtomicWrite` (random `O_EXCL` temp beside the
+  target, chmod + fsync, rename over it). The POSTURE is unchanged: the
+  plaintext branch is still plaintext (the recorded CA-3 trade) and the
+  encrypted branch already routed through `secret.SealToFile` → `AtomicWrite`;
+  only the primitive changed. Gates: `enrollment_ca_backup_secretwrite_test.go`
+  — 3 defect gates verified failing against the reintroduced `os.WriteFile`
+  shape, plus 4 controls verified failing against a `backupCAFiles` that writes
+  nothing, because deleting the dual-CA overlap recovery copy is the cheapest
+  way to pass every defect gate.
+
+- A **failed re-authentication on the admin plane is now audited**
+  (SEC-REAUTH-AUDIT-1). `POST /api/auth/change-password` re-verifies the
+  caller's current password, and by SEC-BASIC-1's own analysis it is the only
+  credential check in the admin API that consults no lockout — a deliberate
+  trade, since charging `loginLimiter` there would let a session holder lock
+  themselves out of the login flow. But it audited only on SUCCESS, so the one
+  unlocked password oracle was also the only silent one: a caller holding a
+  stolen or hijacked session could guess the account's password at the mutating
+  `apiLimiter`'s rate, indefinitely, with no trace in the compliance record —
+  and the password is durable persistence that outlives the session being
+  revoked (CWE-778 / OWASP A09:2021). The rejection now emits
+  `auth.password_change.fail` with a `truncateForAudit`'d actor, deliberately
+  NOT reusing `auth.password_change.refused` (which `refuseRosterChange` already
+  uses for the persistence refusal — an operator must be able to tell "wrong
+  password" from "the disk failed"). The lockout trade-off is unchanged; this
+  adds the missing EVIDENCE and alters no authentication decision. Gates:
+  `auth_change_password_reauth_audit_test.go` — 4 defect gates verified failing
+  against the pre-fix branch, plus 3 controls, two of them verified failing
+  against the obvious wrong fix of auditing unconditionally on entry.
+
 - Node-local key material was written with `os.WriteFile` on a predictable
   path, which follows a planted symlink and inherits a planted file's mode
   (SEC-SECRETWRITE-1). Four writers introduced in this window were affected:
