@@ -2000,8 +2000,16 @@
       "DispatchReleaseBody": {
         "additionalProperties": false,
         "properties": {
+          "acknowledge_unknown_current": {
+            "description": "Admit a target that declares min_upgrade_from when the running release is not a catalog release (custom build), i.e. the transition floor cannot be evaluated. Without it the planner refuses with kind \"unknown_current\" (HTTP 409). A running release BELOW the floor is refused with kind \"unsupported_transition\" and no acknowledgement admits it.",
+            "type": "boolean"
+          },
           "agent": {
             "type": "string"
+          },
+          "allow_downgrade": {
+            "description": "Break-glass only. Admit a target OLDER than the running release. Without it the planner refuses with kind \"downgrade\" (HTTP 409). Restore-from-backup is the supported way back; see docs/appliance/upgrade-transition-matrix.md.",
+            "type": "boolean"
           },
           "channel": {
             "type": "string"

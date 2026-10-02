@@ -246,6 +246,10 @@ func resolveGateSpec(t *testing.T) (releaseCatalogSpec, bool) {
 			Mode:       specModeRelease,
 			CommitISO:  os.Getenv("CULVERT_RELEASE_SPEC_COMMIT_ISO"),
 			Now:        os.Getenv("CULVERT_RELEASE_SPEC_NOW"), // optional dead-on-arrival guard
+			// The supported-predecessor floor comes from the repo policy constant,
+			// never from CI shell, so the published manifest and the planner's
+			// expectations are one source (release_transition_policy.go).
+			MinUpgradeFrom: resolveSpecMinUpgradeFrom(),
 		})
 		if err != nil {
 			t.Fatalf("buildReleaseSpec from env: %v", err)
@@ -279,6 +283,8 @@ func TestResolveGateSpec_MatchesBuild(t *testing.T) {
 		Platforms:  []string{"linux/amd64", "linux/arm64"},
 		Mode:       specModeRelease,
 		CommitISO:  "2026-07-08T12:00:00+02:00",
+
+		MinUpgradeFrom: resolveSpecMinUpgradeFrom(),
 	})
 	if err != nil {
 		t.Fatalf("direct build: %v", err)

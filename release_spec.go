@@ -94,6 +94,12 @@ type SpecInputs struct {
 	Channels   []Channel // channel pointers at this release (default: recommended)
 	Severity   string    // "normal" | "critical" (default: normal)
 
+	// MinUpgradeFrom is the oldest predecessor this release is qualified to be
+	// upgraded FROM (semver, "" ⇒ unconstrained). CI populates it from
+	// releaseMinUpgradeFrom (release_transition_policy.go) so every published
+	// manifest carries the policy the dispatch planner enforces.
+	MinUpgradeFrom string
+
 	Mode       specMode
 	CommitISO  string // release mode: the tagged commit's committer date (RFC3339, any offset)
 	ExpiryDays int    // days added to generated_at for expires_at (0 ⇒ default 180)
@@ -124,6 +130,14 @@ func buildReleaseSpec(in SpecInputs) (releaseCatalogSpec, error) {
 	}
 	if in.ListDigest == "" {
 		return releaseCatalogSpec{}, fmt.Errorf("release spec: list_digest is required")
+	}
+	if in.MinUpgradeFrom != "" {
+		if !catalogVersionCoreRE.MatchString(in.MinUpgradeFrom) {
+			return releaseCatalogSpec{}, fmt.Errorf("release spec: min_upgrade_from %q is not a bare X.Y.Z", in.MinUpgradeFrom)
+		}
+		if catalogCompareSemver(in.MinUpgradeFrom, in.Version) > 0 {
+			return releaseCatalogSpec{}, fmt.Errorf("release spec: min_upgrade_from %s is newer than the release %s", in.MinUpgradeFrom, in.Version)
+		}
 	}
 
 	catVer, err := catalogVersionFromSemver(in.Version)
@@ -179,6 +193,8 @@ func buildReleaseSpec(in SpecInputs) (releaseCatalogSpec, error) {
 			Platforms:  in.Platforms,
 			CreatedAt:  createdAt,
 			Channels:   channels,
+
+			MinUpgradeFrom: in.MinUpgradeFrom,
 		}},
 	}, nil
 }

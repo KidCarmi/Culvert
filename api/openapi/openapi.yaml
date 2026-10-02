@@ -2906,6 +2906,22 @@ components:
         no_rollback: { type: boolean }
         passphrase_ref: { type: string }
         idempotency_key: { type: string }
+        allow_downgrade:
+          type: boolean
+          description: >-
+            Break-glass only. Admit a target OLDER than the running release.
+            Without it the planner refuses with kind "downgrade" (HTTP 409).
+            Restore-from-backup is the supported way back; see
+            docs/appliance/upgrade-transition-matrix.md.
+        acknowledge_unknown_current:
+          type: boolean
+          description: >-
+            Admit a target that declares min_upgrade_from when the running
+            release is not a catalog release (custom build), i.e. the
+            transition floor cannot be evaluated. Without it the planner
+            refuses with kind "unknown_current" (HTTP 409). A running release
+            BELOW the floor is refused with kind "unsupported_transition" and
+            no acknowledgement admits it.
 
 paths:
   /healthz:

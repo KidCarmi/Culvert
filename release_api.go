@@ -598,6 +598,9 @@ type dispatchRequest struct {
 	NoRollback     bool   `json:"no_rollback,omitempty"`
 	PassphraseRef  string `json:"passphrase_ref,omitempty"`
 	IdempotencyKey string `json:"idempotency_key,omitempty"`
+	// Transition-policy acknowledgements (checkTransition). Both default off.
+	AllowDowngrade            bool `json:"allow_downgrade,omitempty"`
+	AcknowledgeUnknownCurrent bool `json:"acknowledge_unknown_current,omitempty"`
 }
 
 func (b dispatchRequest) target() (DispatchTarget, error) {
@@ -653,6 +656,9 @@ func apiReleaseDispatch(w http.ResponseWriter, r *http.Request) {
 		NoRollback:     body.NoRollback,
 		PassphraseRef:  body.PassphraseRef,
 		IdempotencyKey: body.IdempotencyKey, // honored when set; else the service mints a stable key
+
+		AllowDowngrade:            body.AllowDowngrade,
+		AcknowledgeUnknownCurrent: body.AcknowledgeUnknownCurrent,
 	}
 	dispatchID := rm.newID()
 
@@ -774,6 +780,11 @@ func refusalHTTPStatus(k RefusedKind) int {
 		return http.StatusServiceUnavailable
 	case RefusedUnknownTarget:
 		return http.StatusNotFound
+	case RefusedUnsupportedTransition, RefusedUnknownCurrent, RefusedDowngrade:
+		// Transition policy: the request is well-formed; the TRANSITION is
+		// refused. 409 so the GUI can distinguish it from a malformed body
+		// (400) and surface the acknowledgement the operator may give.
+		return http.StatusConflict
 	default: // no_target, ambiguous, repo_mismatch, malformed_ref, invalid config/rewrite
 		return http.StatusBadRequest
 	}

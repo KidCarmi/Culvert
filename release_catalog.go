@@ -137,6 +137,9 @@ type ResolvedRelease struct {
 	VersionID string
 	Severity  Severity
 	PinnedRef string
+	// MinUpgradeFrom is the manifest's declared oldest supported predecessor
+	// (semver, empty ⇒ unconstrained). Enforced by the dispatch planner.
+	MinUpgradeFrom string
 }
 
 // CurrentView is the derived "what is running now" result. Known is true ONLY

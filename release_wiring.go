@@ -410,7 +410,7 @@ func loadReleaseManagement(cfg releaseStartupConfig) {
 			sanitizeLog(cfg.catalogDir), err)
 	}
 
-	svc, err := NewDispatchService(holder, DispatchConfig{ProxyRepo: cfg.proxyRepo})
+	svc, err := NewDispatchService(holder, DispatchConfig{ProxyRepo: cfg.proxyRepo, SelfVersion: version})
 	if err != nil {
 		logger.Printf("release management disabled: dispatch service (proxy_repo=%q): %v",
 			sanitizeLog(cfg.proxyRepo), err)

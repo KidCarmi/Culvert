@@ -93,7 +93,7 @@ func TestDispatch_InvalidRewriteMappingRefuses(t *testing.T) {
 
 func TestDispatch_ChannelResolveBuildsDigestApply(t *testing.T) {
 	cat := mustLoad(t, validSource())
-	d, _ := newDispatcher(t, cat, DispatchConfig{ProxyRepo: dispatchRepo})
+	d, _ := newDispatcher(t, cat, DispatchConfig{ProxyRepo: dispatchRepo, SelfVersion: "v1.9.0"})
 
 	plan := d.Plan(DispatchTarget{Channel: ChannelRecommended}, nil, DefaultDispatchOptions())
 	if plan.Outcome != OutcomePlan {
@@ -112,7 +112,7 @@ func TestDispatch_ChannelResolveBuildsDigestApply(t *testing.T) {
 // digest ref — never a tag, never reconstructed from one.
 func TestDispatch_NeverTagShaped(t *testing.T) {
 	cat := mustLoad(t, validSource())
-	d, _ := newDispatcher(t, cat, DispatchConfig{ProxyRepo: dispatchRepo})
+	d, _ := newDispatcher(t, cat, DispatchConfig{ProxyRepo: dispatchRepo, SelfVersion: "v1.9.0"})
 
 	// A tag-shaped running ref is not a repo@digest and never matches Current.
 	plan := d.Plan(DispatchTarget{ReleaseID: "rel_a"}, []string{dispatchRepo + ":1.10.0"}, DefaultDispatchOptions())
@@ -164,20 +164,45 @@ func TestDispatch_MatchesAnyRepoDigestEntry(t *testing.T) {
 	}
 }
 
-func TestDispatch_UnknownCurrentAllowed(t *testing.T) {
+// INVERTED (appliance readiness): the fixture's 1.10.0 declares
+// min_upgrade_from 1.2.0, so a running release the catalog cannot name AND
+// the binary cannot name ("dev") is refused until acknowledged — the policy
+// is enforced, not merely parsed. The binary's own version stamp is the
+// ordinary way the predecessor becomes known (single-entry catalogs never
+// list the release being upgraded FROM).
+func TestDispatch_UnknownCurrentRequiresAcknowledgementOrSelfVersion(t *testing.T) {
 	cat := mustLoad(t, validSource())
-	d, _ := newDispatcher(t, cat, DispatchConfig{ProxyRepo: dispatchRepo})
 	running := []string{dispatchRepo + "@sha256:" + strings.Repeat("f", 64)} // foreign/legacy digest
 
+	d, _ := newDispatcher(t, cat, DispatchConfig{ProxyRepo: dispatchRepo, SelfVersion: "dev"})
 	plan := d.Plan(DispatchTarget{Channel: ChannelRecommended}, running, DefaultDispatchOptions())
-	if plan.Outcome != OutcomePlan {
-		t.Fatalf("unknown current must still allow dispatch; outcome=%s reason=%v", plan.Outcome, plan.Reason)
+	if plan.Kind != RefusedUnknownCurrent {
+		t.Fatalf("unknown current with a floor must be refused until acknowledged; kind=%q outcome=%s", plan.Kind, plan.Outcome)
 	}
-	if plan.Current.Known {
-		t.Fatal("Current should be Unknown for a foreign digest")
+	if plan.Current.Known || plan.CurrentVersion != "" {
+		t.Fatalf("Current should be Unknown for a foreign digest and a dev build: %+v", plan)
 	}
-	if plan.AlreadyCurrent {
-		t.Fatal("unknown current is not already-current")
+	plan = d.Plan(DispatchTarget{Channel: ChannelRecommended}, running, DispatchOptions{AcknowledgeUnknownCurrent: true})
+	if plan.Outcome != OutcomePlan || plan.AlreadyCurrent {
+		t.Fatalf("acknowledged unknown current must plan; outcome=%s reason=%v", plan.Outcome, plan.Reason)
+	}
+
+	// The binary's own stamp names the predecessor when the catalog cannot.
+	d, _ = newDispatcher(t, cat, DispatchConfig{ProxyRepo: dispatchRepo, SelfVersion: "v1.3.7"})
+	plan = d.Plan(DispatchTarget{Channel: ChannelRecommended}, running, DefaultDispatchOptions())
+	if plan.Outcome != OutcomePlan || plan.CurrentVersion != "1.3.7" || plan.CurrentVersionSource != "binary" {
+		t.Fatalf("self version >= floor must plan via the binary stamp: %+v reason=%v", plan, plan.Reason)
+	}
+	d, _ = newDispatcher(t, cat, DispatchConfig{ProxyRepo: dispatchRepo, SelfVersion: "v1.1.9"})
+	plan = d.Plan(DispatchTarget{Channel: ChannelRecommended}, running, DefaultDispatchOptions())
+	if plan.Kind != RefusedUnsupportedTransition {
+		t.Fatalf("self version below the floor must be refused: kind=%q", plan.Kind)
+	}
+	// A catalog identity outranks the binary stamp.
+	d, _ = newDispatcher(t, cat, DispatchConfig{ProxyRepo: dispatchRepo, SelfVersion: "v1.1.9"})
+	plan = d.Plan(DispatchTarget{ReleaseID: "rel_a"}, []string{dispatchRepo + "@" + digB}, DefaultDispatchOptions())
+	if plan.CurrentVersionSource != "catalog" {
+		t.Fatalf("catalog identity must win over the binary stamp: %+v", plan)
 	}
 }
 
@@ -185,7 +210,7 @@ func TestDispatch_UnknownCurrentAllowed(t *testing.T) {
 
 func TestDispatch_AirgapForwardPreservesDigestTargetsProxyRepo(t *testing.T) {
 	cat := mustLoad(t, validSource())
-	cfg := DispatchConfig{ProxyRepo: mirrorRepo, RepoRewrite: &RepoRewrite{From: dispatchRepo, To: mirrorRepo}}
+	cfg := DispatchConfig{ProxyRepo: mirrorRepo, RepoRewrite: &RepoRewrite{From: dispatchRepo, To: mirrorRepo}, SelfVersion: "1.9.0"}
 	d, _ := newDispatcher(t, cat, cfg)
 
 	plan := d.Plan(DispatchTarget{ReleaseID: "rel_a"}, nil, DefaultDispatchOptions())
@@ -227,7 +252,7 @@ func TestDispatch_AirgapReverseMakesCurrentKnown(t *testing.T) {
 
 func TestDispatch_ApplyFlags(t *testing.T) {
 	cat := mustLoad(t, validSource())
-	d, _ := newDispatcher(t, cat, DispatchConfig{ProxyRepo: dispatchRepo})
+	d, _ := newDispatcher(t, cat, DispatchConfig{ProxyRepo: dispatchRepo, SelfVersion: "v1.9.0"})
 
 	// Default: rollback on, no passphrase ⇒ pre_backup=false + skip note.
 	plan := d.Plan(DispatchTarget{ReleaseID: "rel_a"}, nil, DefaultDispatchOptions())
@@ -411,5 +436,162 @@ func TestDispatch_CatalogPinnedPerOp(t *testing.T) {
 	d.Plan(DispatchTarget{ReleaseID: "rel_a"}, nil, DefaultDispatchOptions())
 	if p.calls != 1 {
 		t.Fatalf("GetCatalog called %d times in one Plan; want exactly 1 (pinned snapshot)", p.calls)
+	}
+}
+
+// ─── transition policy (appliance readiness) ─────────────────────────────────
+
+// transitionCatalog builds a two-release catalog (1.9.0 → 1.10.0 per
+// testdata/release/valid) and lets a test stamp min_upgrade_from on the
+// newer one without touching fixtures on disk.
+func transitionCatalog(t *testing.T, minFrom string) *Catalog {
+	t.Helper()
+	cat := mustLoad(t, validSource())
+	newestID := ""
+	for id, rel := range cat.byReleaseID {
+		if newestID == "" || catalogCompareSemver(rel.VersionID, cat.byReleaseID[newestID].VersionID) > 0 {
+			newestID = id
+		}
+	}
+	if newestID == "" {
+		t.Fatal("fixture catalog is empty")
+	}
+	rel := cat.byReleaseID[newestID]
+	rel.MinUpgradeFrom = minFrom
+	cat.byReleaseID[newestID] = rel
+	return cat
+}
+
+func releaseByVersion(t *testing.T, cat *Catalog, want string) Release {
+	t.Helper()
+	for _, rel := range cat.byReleaseID {
+		if rel.VersionID == want {
+			return rel
+		}
+	}
+	t.Fatalf("no release %s in fixture", want)
+	return Release{}
+}
+
+func TestDispatch_Transition_RefusesBelowMinUpgradeFrom(t *testing.T) {
+	cat := transitionCatalog(t, "1.9.5")
+	newest := releaseByVersion(t, cat, "1.10.0")
+	older := releaseByVersion(t, cat, "1.9.0")
+	d, _ := newDispatcher(t, cat, DispatchConfig{ProxyRepo: dispatchRepo})
+
+	plan := d.Plan(DispatchTarget{ReleaseID: newest.ReleaseID}, []string{older.PinnedRef}, DefaultDispatchOptions())
+	if plan.Kind != RefusedUnsupportedTransition || !errors.Is(plan.Reason, errDispatchUnsupportedTransition) {
+		t.Fatalf("kind=%q reason=%v; want unsupported_transition", plan.Kind, plan.Reason)
+	}
+	if plan.Apply.ImageRef != "" {
+		t.Fatal("a refused transition must never build an apply request")
+	}
+	if plan.MinUpgradeFrom != "1.9.5" || plan.Current.VersionID != "1.9.0" {
+		t.Fatalf("refusal must carry the floor and the running release: %+v", plan)
+	}
+	// No acknowledgement admits an unqualified jump.
+	plan = d.Plan(DispatchTarget{ReleaseID: newest.ReleaseID}, []string{older.PinnedRef},
+		DispatchOptions{AcknowledgeUnknownCurrent: true, AllowDowngrade: true})
+	if plan.Kind != RefusedUnsupportedTransition {
+		t.Fatalf("acknowledgements must not admit a below-floor transition, got kind=%q", plan.Kind)
+	}
+	if refusalHTTPStatus(plan.Kind) != 409 {
+		t.Fatalf("transition refusals map to 409, got %d", refusalHTTPStatus(plan.Kind))
+	}
+}
+
+func TestDispatch_Transition_AdmitsAtOrAboveFloor(t *testing.T) {
+	for _, floor := range []string{"1.9.0", "1.8.0", ""} {
+		cat := transitionCatalog(t, floor)
+		newest := releaseByVersion(t, cat, "1.10.0")
+		older := releaseByVersion(t, cat, "1.9.0")
+		d, _ := newDispatcher(t, cat, DispatchConfig{ProxyRepo: dispatchRepo})
+		plan := d.Plan(DispatchTarget{ReleaseID: newest.ReleaseID}, []string{older.PinnedRef}, DefaultDispatchOptions())
+		if plan.Outcome != OutcomePlan {
+			t.Fatalf("floor %q: running 1.9.0 → 1.10.0 must plan, got outcome=%s kind=%q reason=%v", floor, plan.Outcome, plan.Kind, plan.Reason)
+		}
+	}
+}
+
+func TestDispatch_Transition_UnknownCurrentNeedsAcknowledgement(t *testing.T) {
+	cat := transitionCatalog(t, "1.9.0")
+	newest := releaseByVersion(t, cat, "1.10.0")
+	d, _ := newDispatcher(t, cat, DispatchConfig{ProxyRepo: dispatchRepo})
+	custom := []string{dispatchRepo + "@sha256:" + strings.Repeat("c", 64)}
+
+	plan := d.Plan(DispatchTarget{ReleaseID: newest.ReleaseID}, custom, DefaultDispatchOptions())
+	if plan.Kind != RefusedUnknownCurrent || !errors.Is(plan.Reason, errDispatchUnknownCurrent) {
+		t.Fatalf("kind=%q reason=%v; want unknown_current", plan.Kind, plan.Reason)
+	}
+	plan = d.Plan(DispatchTarget{ReleaseID: newest.ReleaseID}, custom, DispatchOptions{AcknowledgeUnknownCurrent: true})
+	if plan.Outcome != OutcomePlan {
+		t.Fatalf("acknowledged unknown current must plan, got kind=%q reason=%v", plan.Kind, plan.Reason)
+	}
+	// A target WITHOUT a floor constrains nothing for an unknown current
+	// (pre-policy catalogs; existing installs keep their behaviour).
+	cat = transitionCatalog(t, "")
+	newest = releaseByVersion(t, cat, "1.10.0")
+	d, _ = newDispatcher(t, cat, DispatchConfig{ProxyRepo: dispatchRepo})
+	if plan := d.Plan(DispatchTarget{ReleaseID: newest.ReleaseID}, custom, DefaultDispatchOptions()); plan.Outcome != OutcomePlan {
+		t.Fatalf("no floor ⇒ unknown current must plan, got kind=%q", plan.Kind)
+	}
+}
+
+func TestDispatch_Transition_DowngradeNeedsBreakGlass(t *testing.T) {
+	cat := transitionCatalog(t, "")
+	newest := releaseByVersion(t, cat, "1.10.0")
+	older := releaseByVersion(t, cat, "1.9.0")
+	d, _ := newDispatcher(t, cat, DispatchConfig{ProxyRepo: dispatchRepo})
+
+	plan := d.Plan(DispatchTarget{ReleaseID: older.ReleaseID}, []string{newest.PinnedRef}, DefaultDispatchOptions())
+	if plan.Kind != RefusedDowngrade || !errors.Is(plan.Reason, errDispatchDowngrade) {
+		t.Fatalf("kind=%q reason=%v; want downgrade", plan.Kind, plan.Reason)
+	}
+	if plan.Apply.ImageRef != "" {
+		t.Fatal("a refused downgrade must never build an apply request")
+	}
+	plan = d.Plan(DispatchTarget{ReleaseID: older.ReleaseID}, []string{newest.PinnedRef}, DispatchOptions{AllowDowngrade: true})
+	if plan.Outcome != OutcomePlan || plan.Apply.ImageRef == "" {
+		t.Fatalf("allow_downgrade must plan, got kind=%q reason=%v", plan.Kind, plan.Reason)
+	}
+	// Channel targets go through the same check (Catalog.Resolve carries the floor).
+	cat = transitionCatalog(t, "1.9.5")
+	newest = releaseByVersion(t, cat, "1.10.0")
+	older = releaseByVersion(t, cat, "1.9.0")
+	for ch, id := range cat.channels {
+		if id == newest.ReleaseID {
+			d, _ = newDispatcher(t, cat, DispatchConfig{ProxyRepo: dispatchRepo})
+			if plan := d.Plan(DispatchTarget{Channel: ch}, []string{older.PinnedRef}, DefaultDispatchOptions()); plan.Kind != RefusedUnsupportedTransition {
+				t.Fatalf("channel %s: want unsupported_transition, got kind=%q", ch, plan.Kind)
+			}
+		}
+	}
+}
+
+func TestReleaseSpec_MinUpgradeFromStamped(t *testing.T) {
+	in := SpecInputs{Version: "1.4.3", Repo: dispatchRepo, ListDigest: "sha256:" + strings.Repeat("a", 64),
+		Platforms: []string{"linux/amd64"}, Mode: specModeRelease, CommitISO: "2026-01-02T03:04:05Z", MinUpgradeFrom: "1.4.0"}
+	spec, err := buildReleaseSpec(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if spec.Entries[0].MinUpgradeFrom != "1.4.0" {
+		t.Fatalf("min_upgrade_from not stamped: %+v", spec.Entries[0])
+	}
+	in.MinUpgradeFrom = "1.5.0"
+	if _, err := buildReleaseSpec(in); err == nil {
+		t.Fatal("a floor newer than the release must be refused")
+	}
+	in.MinUpgradeFrom = "v1.4.0"
+	if _, err := buildReleaseSpec(in); err == nil {
+		t.Fatal("a non-bare floor must be refused")
+	}
+	// The repo policy constant is well-formed and is what CI stamps by default.
+	if !catalogVersionCoreRE.MatchString(releaseMinUpgradeFrom) {
+		t.Fatalf("releaseMinUpgradeFrom %q is not X.Y.Z", releaseMinUpgradeFrom)
+	}
+	t.Setenv("CULVERT_RELEASE_SPEC_MIN_UPGRADE_FROM", "")
+	if got := resolveSpecMinUpgradeFrom(); got != "" {
+		t.Fatalf("explicit empty override must mean unconstrained, got %q", got)
 	}
 }
