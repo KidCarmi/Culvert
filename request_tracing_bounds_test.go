@@ -114,8 +114,17 @@ func TestAcceptableTracingHeaderValue_EveryByteIsClassified(t *testing.T) {
 // ─── the entry point: defect gates ──────────────────────────────────────────
 
 // TestSecReqID1_ControlCharactersNeverReachTheLog is the first defect gate: the
-// pre-fix shape returned the payload byte-identical, so an ESC sequence reached
-// every POLICY_* line the request produced.
+// pre-fix shape returned the payload byte-identical.
+//
+// It is DEFENCE IN DEPTH, not a reachable exposure, and the distinction is
+// recorded rather than left implicit: net/http refuses every C0 byte and DEL in
+// a header value with a 400 before this handler runs, so an ESC sequence never
+// reached a POLICY_* line over the wire. Measured and pinned in
+// request_tracing_wire_bounds_test.go (SEC-REQID-2), which also shows what IS
+// reachable and therefore what the charset gate really earns: TAB, SPACE and
+// every byte 0x80..0xFF. Keeping this gate is still right — the bound must hold
+// on any value that reaches it, however it got there — but it must not be cited
+// as evidence that control bytes were reaching the log.
 func TestSecReqID1_ControlCharactersNeverReachTheLog(t *testing.T) {
 	resetTracingBoundsStateForTest()
 	const payload = "abc\x1b[2Kdef\x00ghi\x07jkl\x7fmno"

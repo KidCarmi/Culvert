@@ -48,19 +48,33 @@ That admits every correlation-id encoding in real use: UUIDs (36 bytes), nginx
 `$request_id` (32), ULIDs (26), base64url, and a W3C version-00 traceparent
 (55). Culvert's own generated request id is 16 hex characters.
 
-It excludes two classes, for two different reasons:
+It excludes three classes. The first two are what the bound is really for; the
+third is defence in depth against something net/http already refuses:
 
-* **Control characters** (`0x00`–`0x1F`, `0x7F`). The value reaches roughly
+* **Whitespace, including the space character and `TAB`.** This is the
+  wire-reachable half, and the one that matters. The value reaches roughly
   twenty process-log sites — every `POLICY_*` decision line, `AUTH_FAIL`,
-  `IP_BLOCKED`, `RATE_LIMITED`, `BLOCKED`, `INVALID_HOST`. Only `CR`/`LF` were
-  stripped previously, so `ESC`, `NUL`, `BEL`, `VT`, `FF` and `DEL` reached the
-  forensic log verbatim. An `ESC` sequence rewrites what an operator tailing the
-  log sees; a `NUL` truncates the record for readers that treat it as a
-  terminator.
-* **Whitespace, including the space character.** The decision lines render the
-  id inside a space-separated `{req_id=… identity=… action=…}` block, so a value
-  containing a space injects extra `key=value` tokens that a first-wins log
-  parser reads in preference to the real ones.
+  `IP_BLOCKED`, `RATE_LIMITED`, `BLOCKED`, `INVALID_HOST` — where it is rendered
+  inside a space-separated `{req_id=… identity=… action=…}` block, so a value
+  containing a space or a `TAB` injects extra `key=value` tokens that a
+  first-wins log parser reads in preference to the real ones. net/http carries
+  both bytes through to the handler, so Culvert's own bound is what stops them.
+* **Every byte `0x80`–`0xFF`.** net/http does not restrict non-ASCII in a header
+  value at all, so without this bound a correlation id could carry arbitrary
+  bytes into the log, the response header and the upstream.
+* **Control characters** (`0x00`–`0x1F`, `0x7F`) are excluded too, as
+  defence in depth — but **they are not reachable over the wire**, and an
+  earlier version of this page said otherwise. Measured against a real
+  net/http server (`request_tracing_wire_bounds_test.go`): of 256 byte values,
+  224 are delivered into a header value verbatim and 32 draw a **400 Bad
+  Request before the handler runs** — exactly `0x00`–`0x1F` minus `TAB`, plus
+  `0x7F`. `net/http`'s own `textproto.ReadMIMEHeader` refuses them, and every
+  path that reaches the bound is parsed by it. So `ESC`, `NUL` and `BEL` never
+  reached the forensic log; the earlier claim came from a test that set the
+  header on a hand-built request rather than sending it over a socket. The
+  partition is now pinned by a wall, so a future Go release that began
+  carrying a control byte would fail the build rather than quietly widen what
+  reaches the log.
 
 ## Why the length bound matters
 

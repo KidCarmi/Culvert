@@ -26,17 +26,41 @@ import (
 // The only sanitisation was `strings.ReplaceAll` for "\n" and "\r". That is the
 // CWE-117 barrier CodeQL recognises and it correctly stops whole-record forgery,
 // but it is NOT what sanitizeLog does: sanitizeLog scrubs every byte < 0x20 and
-// 0x7F. So ESC, NUL, BEL, VT, FF and DEL all reached the forensic log verbatim,
-// and nothing bounded the value's LENGTH at all.
+// 0x7F. So nothing bounded the value's CHARSET beyond CR/LF, and nothing bounded
+// its LENGTH at all.
 //
-// Both halves were measured against the real handler before this fix:
+// WHAT IS ACTUALLY DELIVERABLE — MEASURED OVER A SOCKET, AND A CORRECTION
+// (SEC-REQID-2, request_tracing_wire_bounds_test.go). The first version of this
+// note said that "ESC, NUL, BEL, VT, FF and DEL all reached the forensic log
+// verbatim" and offered `abc\x1b[2Kdef\x00ghi\x07jkl\x7fmno` as a payload that
+// "came back out of setupRequestTracing byte-identical". That was measured by
+// calling this function with httptest.NewRequest + Header.Set, which installs a
+// header value THE WIRE CANNOT DELIVER — precisely the trap that
+// bootstrap_host_injection_test.go exists for one subsystem over, in its own
+// words: "httptest.NewRequest lets a test set an r.Host the wire could never
+// deliver, which would make the gate prove less than it claims". Driven through
+// a REAL net/http server instead: of 256 byte values, 224 are delivered into a
+// header value verbatim and 32 draw a 400 BEFORE the handler runs — exactly
+// C0 minus TAB, plus DEL (0x7F), refused by net/http's own
+// textproto.ReadMIMEHeader. And
+// setupRequestTracing has exactly ONE caller — handleRequest, whose request is
+// always produced by that parser (the inspected-H2 server dispatches to
+// h2InspectStream, and the SSL-inspect inner loop's http.ReadRequest runs the
+// same validation) — so no ESC or NUL ever reached a log line by any path.
 //
-//   - CONTROL CHARACTERS. `X-Request-Id: abc\x1b[2Kdef\x00ghi\x07jkl\x7fmno`
-//     came back out of setupRequestTracing byte-identical, where sanitizeLog
-//     would have rendered "abc_[2Kdef_ghi_jkl_mno". An ESC sequence in a log an
-//     operator tails rewrites what they see (the ANSI erase-line above deletes
-//     the rest of the rendered line); a NUL truncates the record for readers
-//     that treat it as a terminator.
+// The bound is NOT redundant for that. It is load-bearing on 130 byte values
+// net/http carries happily, and the reachable exposures are these:
+//
+//   - TAB (0x09) and SPACE (0x20). These are the dangerous deliverable bytes,
+//     and the reason recorded on acceptableTracingHeaderValue is the right one:
+//     the decision lines render the id inside a space-separated
+//     `{req_id=… identity=… action=…}` block, so a value carrying either
+//     injects additional key=value tokens that a first-wins log parser reads in
+//     preference to the real ones. Reachable over the wire, and closed here.
+//
+//   - EVERY BYTE 0x80..0xFF, which net/http does not restrict at all, so a
+//     correlation id could carry arbitrary non-ASCII into the log, the response
+//     and the upstream.
 //
 //   - LENGTH. The proxy listener (main.go) sets no MaxHeaderBytes, so net/http's
 //     1 MiB DefaultMaxHeaderBytes is the only ceiling. Eight requests carrying a
