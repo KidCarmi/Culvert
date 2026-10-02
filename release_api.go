@@ -116,6 +116,9 @@ type releaseManager struct {
 	// must not overwrite a newer failure — M1-2 impl review MED). statusMu alone
 	// still guards reads, so /api/releases never blocks behind an in-flight fetch.
 	refreshRunMu sync.Mutex
+	// resumeWait is a test seam: when set, resumeInterruptedDispatches hands it
+	// the WaitGroup of the resumes it started so a test can join them.
+	resumeWait func(*sync.WaitGroup)
 }
 
 // refreshStatus records the most recent catalog-refresh outcome (M1-2).
@@ -235,6 +238,10 @@ type dispatchStore struct {
 	mu      sync.Mutex
 	now     func() time.Time
 	byAgent map[string]*dispatchRecord
+
+	// path, when set, mirrors every update to disk (release_dispatch_persist.go).
+	path           string
+	persistErrOnce sync.Once
 }
 
 func newDispatchStore() *dispatchStore {
@@ -263,6 +270,7 @@ func (st *dispatchStore) update(agent, dispatchID string, mut func(*dispatchReco
 	}
 	mut(cur)
 	cur.UpdatedAt = st.now()
+	st.persistLocked()
 }
 
 func (st *dispatchStore) markDispatched(agent, dispatchID string, rc DispatchResumeContext) {

@@ -17660,13 +17660,24 @@ async function loadReleaseStatus(forceMore) {
     // Keep refreshing while a dispatch is in flight, OR for a few forced rounds
     // after an action (dispatch/resume) whose background store update may lag
     // the 202 response - otherwise the panel could freeze on a stale record.
+    releaseStatusErrors = 0;
     if ((rec && rec.phase === 'dispatched') || more > 0) {
       releaseStatusTimer = setTimeout(() => loadReleaseStatus(more > 0 ? more - 1 : 0), 2500);
     }
   } catch (err) {
-    box.innerHTML = '<span style="color:var(--danger)">' + escHtml(err.message) + '</span>';
+    // The control plane is the container the dispatch replaces: a fetch error
+    // mid-poll is the EXPECTED shape of a successful upgrade (the proxy is
+    // restarting), not a reason to stop watching. Keep polling with backoff for
+    // up to ~5 minutes; the restarted process resumes the dispatch record on
+    // its own (release_dispatch_persist.go) and the next successful poll shows it.
+    releaseStatusErrors++;
+    const retrying = releaseStatusErrors <= 60;
+    box.innerHTML = '<span style="color:var(--danger)">' + escHtml(err.message) + '</span>'
+      + (retrying ? '<div style="color:var(--muted);font-size:.8rem">Control plane unreachable (restarting during the update?) - retrying ' + releaseStatusErrors + '/60</div>' : '');
+    if (retrying) releaseStatusTimer = setTimeout(() => loadReleaseStatus(more), Math.min(5000, 1500 + releaseStatusErrors * 250));
   }
 }
+let releaseStatusErrors = 0;
 
 function renderReleaseStatus(rec) {
   const box = document.getElementById('rel-status');

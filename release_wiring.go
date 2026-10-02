@@ -419,6 +419,10 @@ func loadReleaseManagement(cfg releaseStartupConfig) {
 
 	resolve, note := releaseAgentResolver(cfg.maintURL)
 	rm := newReleaseManager(svc, resolve)
+	// Durable dispatch bookkeeping: the proxy is recreated by its own upgrade,
+	// so the in-flight dispatch record must outlive this process
+	// (release_dispatch_persist.go).
+	rm.store = newPersistentDispatchStore(releaseDispatchStatePath())
 	rm.verifyMode = cfg.verifyMode
 	rm.trustSchemes = trustSchemes(cfg)
 	rm.sigstoreWarn = cfg.sigstoreWarn
@@ -517,6 +521,11 @@ func loadReleaseManagement(cfg releaseStartupConfig) {
 		return nil
 	}
 	setReleaseManager(rm)
+	// Re-attach to any dispatch cut short by the previous process (ours is the
+	// container the agent recreates); never re-applies.
+	if n := rm.resumeInterruptedDispatches(); n > 0 {
+		logger.Printf("release dispatch: resuming %d interrupted dispatch watch(es) from %s", n, sanitizeLog(releaseDispatchStatePath()))
+	}
 	// M1-3 freshness watchdog: evaluate the installed catalog's expiry ONCE at
 	// boot so an already-stale appliance alerts immediately instead of one full
 	// refresh interval later (restart-refire caveat documented in
