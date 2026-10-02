@@ -35,6 +35,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"strings"
@@ -334,17 +335,33 @@ func (s *Server) classifyRecord(ctx context.Context, rec *journal.Record, attemp
 	// Docker readiness gate (design P1): a capture ERROR must never be read as
 	// "running = ∅". compose ps succeeding is the readiness evidence.
 	if _, err := s.opts.Runner.ComposeStatus(ctx); err != nil {
-		v.Verdict = verdictInputsUnavailable
-		v.Reason = "docker_unavailable"
-		v.RecommendedAction = recommendFor(v.Verdict, false, v.Reason)
-		return reconcileClassification{rec: rec, verdict: v}
+		return s.inputsUnavailable(rec, v, "docker_unavailable")
 	}
 	v.Inputs.DockerReachable = true
-	if ri, err := s.opts.Runner.CaptureRunningProxyImage(ctx); err == nil {
+	// A capture ERROR is absent evidence, never an empty set. The decision
+	// table reads an empty TagDigests as "the tag is not on target" and an
+	// empty running set as "nothing is live" — so a transient inspect failure
+	// (daemon busy, timeout, a sudoers gap) on a record whose tag HAD advanced
+	// collapsed the reup hazard into a noop and RETIRED the record, leaving
+	// the un-health-gated target to start at the next `compose up` with
+	// nothing left on /v1/status (adversarial review, PR #1528). Only two
+	// outcomes are facts: the stack is down (ErrNoRunningProxy) and the tag
+	// does not exist ("no such image"). Anything else is inputs_unavailable:
+	// the record stays, the operator sees it, and the next boot re-asks.
+	switch ri, err := s.opts.Runner.CaptureRunningProxyImage(ctx); {
+	case err == nil:
 		in.RunningImageID = ri.RunningImageID
 		in.RunningDigests = bareDigests(ri.RepoDigests)
+	case errors.Is(err, runner.ErrNoRunningProxy):
+		// running = ∅ is a fact here.
+	default:
+		return s.inputsUnavailable(rec, v, "running_capture_failed")
 	}
-	in.TagDigests, v.Inputs.TagImageID = s.pinnedTagIdentity(ctx)
+	var tagErr error
+	in.TagDigests, v.Inputs.TagImageID, tagErr = s.pinnedTagIdentity(ctx)
+	if tagErr != nil {
+		return s.inputsUnavailable(rec, v, "tag_inspect_failed")
+	}
 	v.Inputs.RunningImageID, v.Inputs.RunningDigests, v.Inputs.TagDigests = in.RunningImageID, in.RunningDigests, in.TagDigests
 	// The tag's config digest is appended to BOTH tag and target sets so a
 	// record whose TargetImageID is known matches the tag on the class-invariant
@@ -370,14 +387,34 @@ func (s *Server) finishClassification(rec *journal.Record, v reconcileVerdictRec
 	return reconcileClassification{rec: rec, verdict: v, action: d.Action, live: live}
 }
 
+// inputsUnavailable records a classification that could not be computed: no
+// decision, no auto-resolve, no retirement — the record is surfaced and the
+// next boot asks Docker again. Any verdict that RETIRES a record must be
+// computed from captures that all succeeded; this is the only other exit.
+func (s *Server) inputsUnavailable(rec *journal.Record, v reconcileVerdictRecord, reason string) reconcileClassification {
+	v.Verdict = verdictInputsUnavailable
+	v.Reason = reason
+	v.RecommendedAction = recommendFor(v.Verdict, false, v.Reason)
+	return reconcileClassification{rec: rec, verdict: v}
+}
+
 // pinnedTagIdentity asks what culvert/proxy:pinned resolves to locally:
-// (bare repo digests, config digest). Both empty when the tag is absent.
-func (s *Server) pinnedTagIdentity(ctx context.Context) (digests []string, imageID string) {
+// (bare repo digests, config digest). Both empty with a nil error when the
+// tag does not exist — the "no such image" shape is the ONLY failure read as
+// absence (the same rule handlers_upgrade.go applies to local_inspect); any
+// other failure is returned, because an unanswerable question is not "no".
+func (s *Server) pinnedTagIdentity(ctx context.Context) (digests []string, imageID string, err error) {
 	res, err := s.opts.Runner.ComposeImageInspect(ctx, runner.PinnedProxyTag)
-	if err != nil || res == nil {
-		return nil, ""
+	if err == nil && res != nil {
+		return bareDigests(repoDigestsFromInspect(res.Stdout)), imageIDFromInspect(res.Stdout), nil
 	}
-	return bareDigests(repoDigestsFromInspect(res.Stdout)), imageIDFromInspect(res.Stdout)
+	if (res != nil && imageNotFoundRE.Match(res.Stderr)) || (err != nil && imageNotFoundRE.MatchString(err.Error())) {
+		return nil, "", nil
+	}
+	if err == nil {
+		err = errors.New("image inspect returned no result")
+	}
+	return nil, "", fmt.Errorf("inspect %s: %w", runner.PinnedProxyTag, err)
 }
 
 // digestsOf wraps a (possibly empty) record digest as a set.

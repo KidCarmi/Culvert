@@ -129,6 +129,14 @@ func (e psEntry) name() string {
 	return e.Name
 }
 
+// ErrNoRunningProxy is the ONE capture outcome that means "running = ∅" as a
+// FACT (compose ps answered and listed no proxy container — the stack is
+// down). Every other capture error means the question could not be answered,
+// and a caller deciding on the running image must treat those as absent
+// evidence, never as an empty set (startup reconcile, Codex/adversarial review
+// of PR #1528).
+var ErrNoRunningProxy = errors.New("no proxy service found in compose ps output")
+
 // proxyContainerID parses `docker compose ps --format json` output
 // (NDJSON or the array form some Compose versions emit) and returns the
 // single running proxy container's id. Zero proxy entries, more than
@@ -146,7 +154,7 @@ func proxyContainerID(stdout []byte) (string, error) {
 	}
 	switch len(ids) {
 	case 0:
-		return "", errors.New("no proxy service found in compose ps output")
+		return "", ErrNoRunningProxy
 	case 1:
 		if ids[0] == "" {
 			return "", errors.New("proxy service has no container id in compose ps output")

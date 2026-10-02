@@ -18,6 +18,7 @@ import (
 
 	"culvert-maint/internal/journal"
 	"culvert-maint/internal/ops"
+	"culvert-maint/internal/runner"
 )
 
 const (
@@ -327,4 +328,87 @@ func TestReconcile_LiveOpRecordNotListed(t *testing.T) {
 	}
 	close(rig.blockUp)
 	rig.waitOp(t, opID)
+}
+
+// A capture ERROR is absent evidence, never an empty set (adversarial review,
+// PR #1528). The tag really moved to the target (reup hazard — the exact
+// RISK-022 hole the decision table's own comment names) and ONLY the pinned-tag
+// inspect fails: daemon hiccup, deadline, or a sudoers gap. Pre-fix the empty
+// tag set read as "tag not on target", the record was retired as
+// noop(already_on_prior), and the un-health-gated target started at the next
+// `compose up` with nothing left on /v1/status. Verified failing against the
+// pre-fix classifyRecord.
+func TestReconcile_TagInspectFailureIsInputsUnavailable_NotNoop(t *testing.T) {
+	rig := startApplyRig(t)
+	defer rig.stop()
+	rig.pinnedDigest = digNew
+	rig.failFn = func(argv, _ []string) bool { return argvHas(argv, runner.PinnedProxyTag) }
+	opID := rig.seedRecord(t, journal.PhaseRestarting)
+	if n := rig.boot(t); n != 1 {
+		t.Fatalf("attention = %d, want 1 (record must be surfaced, not retired)", n)
+	}
+	if !rig.recordExists(opID) {
+		t.Fatal("record retired while the tag could not be inspected")
+	}
+	v, _ := rig.srv.readVerdict(opID)
+	if v == nil || v.Verdict != verdictInputsUnavailable || v.Reason != "tag_inspect_failed" {
+		t.Fatalf("verdict = %+v, want inputs_unavailable/tag_inspect_failed", v)
+	}
+	if rig.sawCommand("up") || rig.sawCommand("pull") {
+		t.Fatal("nothing may be executed on unavailable inputs")
+	}
+	// The next boot with Docker answering sees the hazard the first one could
+	// not: the record is still there to be classified.
+	rig.failFn = nil
+	if n := rig.boot(t); n != 1 {
+		t.Fatalf("second boot attention = %d, want 1 (reup surfaced)", n)
+	}
+	v, _ = rig.srv.readVerdict(opID)
+	if v == nil || !v.TagHazard {
+		t.Fatalf("second boot verdict = %+v, want the tag hazard surfaced", v)
+	}
+}
+
+// Both captures fail at a safe boundary: pre-fix the record was retired as
+// safe_boundary_confirmed with ZERO evidence.
+func TestReconcile_RunningCaptureFailureIsInputsUnavailable(t *testing.T) {
+	rig := startApplyRig(t)
+	defer rig.stop()
+	rig.pinnedDigest = digNew
+	rig.failFn = func(argv, _ []string) bool {
+		for _, a := range argv {
+			if a == runner.PinnedProxyTag || strings.Contains(a, "{{json .Image}}") {
+				return true
+			}
+		}
+		return false
+	}
+	opID := rig.seedRecord(t, journal.PhasePulled)
+	if n := rig.boot(t); n != 1 || !rig.recordExists(opID) {
+		t.Fatalf("attention=%d exists=%v: record must be surfaced, never retired on an errored capture", n, rig.recordExists(opID))
+	}
+	v, _ := rig.srv.readVerdict(opID)
+	if v == nil || v.Verdict != verdictInputsUnavailable || v.Reason != "running_capture_failed" {
+		t.Fatalf("verdict = %+v, want inputs_unavailable/running_capture_failed", v)
+	}
+}
+
+// CONTROL: the two FACTS that legitimately read as "absent" still do — a
+// stack that is down (compose ps lists no proxy) and a pinned tag that does
+// not exist ("no such image"). The cheapest way to pass the two gates above is
+// to treat every capture as unavailable, which would leave every interrupted
+// record stuck in attention forever; this pins that a genuine safe boundary
+// with nothing running and no tag still auto-resolves.
+func TestReconcile_StackDownAndAbsentTagAreStillFacts(t *testing.T) {
+	rig := startApplyRig(t)
+	defer rig.stop()
+	rig.pinnedDigest = "" // tag absent ⇒ "no such image"
+	rig.stackDown.Store(true)
+	opID := rig.seedRecord(t, journal.PhasePulled)
+	if n := rig.boot(t); n != 0 {
+		t.Fatalf("attention = %d, want 0 (safe boundary, nothing running, no tag ⇒ noop)", n)
+	}
+	if rig.recordExists(opID) {
+		t.Fatal("a confirmed safe boundary must still be retired")
+	}
 }

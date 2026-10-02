@@ -36,5 +36,38 @@ func (m *Manager) OverrideInterrupted(opID string, finalState State, reason Fail
 	if result != nil {
 		op.Result = result
 	}
+	// The reconciled verdict must outlive THIS process. MarkAllInterrupted
+	// runs before the idempotency index is loaded, so the in-memory op carries
+	// no idempotency key and recordIdempTerminalLocked would skip it — the
+	// persisted record would keep its non-terminal admission state and the
+	// NEXT restart would materialize the same op as
+	// failed(agent_restart_interrupted) again, handing a retry with the
+	// original idempotency key the wrong answer. Resolve the record by op id
+	// instead (Codex review, PR #1528).
+	m.recordIdempTerminalByOpIDLocked(op)
 	return nil
+}
+
+// recordIdempTerminalByOpIDLocked persists a terminal outcome for an op whose
+// idempotency key is not known in memory (an op registered by
+// MarkAllInterrupted). It also backfills the key onto the op so the ordinary
+// terminal path can find it afterwards. Caller holds m.mu.
+func (m *Manager) recordIdempTerminalByOpIDLocked(op *Op) {
+	if m.idempPath == "" {
+		return
+	}
+	for _, rec := range m.persisted {
+		if rec.OpID != op.ID {
+			continue
+		}
+		if op.IdempotencyKey == "" {
+			op.IdempotencyKey = rec.IdempotencyKey
+		}
+		rec.State = op.State
+		rec.FailureReason = op.FailureReason
+		rec.FinishedAt = op.Finished
+		rec.Result = op.Result
+		m.persistIdempLocked()
+		return
+	}
 }

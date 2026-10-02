@@ -331,3 +331,49 @@ func TestReconcileResolve_AttemptBound(t *testing.T) {
 }
 
 func (r *applyRig) resolveInFlightForTest(opID string) bool { return r.srv.resolveInFlight(opID) != "" }
+
+// A resolve REFUSED at admission (another op holds the maintenance lock) ran
+// nothing and must not consume the attempt bound: pre-fix the attempt was
+// charged and persisted BEFORE startAsyncOp, so a CP retrying against a busy
+// agent drove the record to loud_stop(reconcile_exhausted) without one action
+// (adversarial review, PR #1528). Verified failing against the pre-fix
+// launchResolveOp.
+func TestReconcileResolve_RefusedLaunchDoesNotChargeAnAttempt(t *testing.T) {
+	rig := startApplyRig(t)
+	defer rig.stop()
+	rig.pinnedDigest = digNew
+	rig.localImages = map[string]bool{digNew: true}
+	rig.blockUp = make(chan struct{})
+	opA := rig.seedRecord(t, journal.PhaseRestarting)
+	opB := rig.seedRecord(t, journal.PhaseRestarting)
+	rig.boot(t)
+
+	code, body := rig.postReconcile(t, opA, map[string]interface{}{"action": "resolve"})
+	if code != http.StatusAccepted {
+		t.Fatalf("resolve A: %d %+v", code, body)
+	}
+	first := body["op_id"].(string)
+	// The first refusal is the lock conflict; A's pull/tag may already have
+	// moved the fake daemon's live view, so later ones may re-classify B
+	// (verdict_changed) — either way nothing ran, so nothing may be charged.
+	code, body = rig.postReconcile(t, opB, map[string]interface{}{"action": "resolve"})
+	if code != http.StatusConflict || body["error"] != "concurrency_conflict" {
+		t.Fatalf("resolve B while A holds the lock: %d %+v", code, body)
+	}
+	if v, _ := rig.srv.readVerdict(opB); v == nil || v.Attempts != 0 {
+		t.Fatalf("B attempts = %+v, want 0 (nothing ran)", v)
+	}
+	if rig.srv.resolveInFlight(opA) != first {
+		t.Fatal("B's refusal must not clear A's in-flight marker")
+	}
+	close(rig.blockUp)
+	rig.waitOp(t, first)
+	// B is still resolvable once the lock is free: the bound was not spent.
+	code, body = rig.postReconcile(t, opB, map[string]interface{}{"action": "resolve"})
+	if body["error"] == "manual_required" || body["reason"] == "reconcile_exhausted" {
+		t.Fatalf("refused launches consumed the attempt bound: %d %+v", code, body)
+	}
+	if code == http.StatusAccepted {
+		rig.waitOp(t, body["op_id"].(string))
+	}
+}

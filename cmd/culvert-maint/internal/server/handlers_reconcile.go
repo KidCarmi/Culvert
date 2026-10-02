@@ -33,6 +33,7 @@ package server
 import (
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"strings"
 
@@ -201,10 +202,12 @@ func (s *Server) launchResolveOp(w http.ResponseWriter, r *http.Request, peer au
 	}
 	srcID := rec.OpID
 	acc := &rollbackAccumulator{kind: ops.KindRollbackCreate, actor: peer.String(), mode: "image"}
+	marked := false // did THIS request set the in-flight marker?
 	op, deduped, herr := s.startAsyncOp(r, peer, ops.KindRollbackCreate, idemKey, params,
 		func() ([]ops.FlowStage, *opError) { return s.buildImageRollbackStages(targetRef, acc), nil },
 		withOpIDHook(func(id string) {
 			acc.opID = id
+			marked = true
 			s.markResolving(srcID, id)
 		}),
 		withResultFn(func(state ops.State, reason ops.FailureReason) map[string]interface{} {
@@ -217,7 +220,19 @@ func (s *Server) launchResolveOp(w http.ResponseWriter, r *http.Request, peer au
 		}),
 	)
 	if herr != nil {
-		s.markResolving(srcID, "")
+		// Nothing ran: an admission refusal (another op holds the maintenance
+		// lock, the agent is busy) must not consume the attempt bound — a CP
+		// retrying against a busy agent would otherwise drive every record to
+		// loud_stop(reconcile_exhausted) without a single action — and must
+		// not clear an in-flight marker this request never set (adversarial
+		// review, PR #1528).
+		if marked {
+			s.markResolving(srcID, "")
+		}
+		v.Attempts--
+		if werr := s.opts.Journal.WriteVerdict(rec.OpID, v); werr != nil {
+			log.Printf("culvert-maint: reconcile: op=%s attempt refund not persisted: %v", strings.ReplaceAll(strings.ReplaceAll(rec.OpID, "\n", ""), "\r", ""), werr)
+		}
 		writeJSON(w, herr.Status, herr.Body)
 		return
 	}

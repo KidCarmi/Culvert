@@ -201,8 +201,14 @@ go through the one shared core).
    `rollback_to_prior`, an unhealthy live target, `loud_stop` (invalid refs,
    attempt bound exhausted, no recovery target), `data_manual`
    (`/data` rollback window — never auto-reconciled), and
-   `inputs_unavailable` (Docker was not reachable when classified). Each is a
-   WARN line at startup and an entry on `/v1/status`.
+   `inputs_unavailable` (Docker could not answer when classified — reason
+   `docker_unavailable`, `running_capture_failed` or `tag_inspect_failed`).
+   Each is a WARN line at startup and an entry on `/v1/status`.
+
+   A capture ERROR is absent evidence, never an empty set: only "the stack is
+   down" and "the pinned tag does not exist" count as facts. A record whose
+   running image or pinned tag could not be inspected is never retired on
+   that boot; the next boot asks Docker again.
 
 The whole pass is bounded by `stage_timeout`; it never prevents the agent
 from serving.
@@ -277,10 +283,11 @@ The original record is retired only when that op **succeeds**; a failure keeps
 it listed with `last_resolve_op_id` / `last_resolve_outcome`. Refusals (409):
 `verdict_changed` (live state no longer matches the recorded verdict — read
 status again), `manual_required` (`loud_stop` / `data_manual`),
-`inputs_unavailable` (daemon down), `no_recovery_target`, `resolve_in_flight`
-(a resolve is already running — never a second mutation), `op_running`.
-Each op_id gets at most 3 resolve attempts, then it is `loud_stop
-(reconcile_exhausted)`.
+`inputs_unavailable` (daemon down or a capture failed), `no_recovery_target`,
+`resolve_in_flight` (a resolve is already running — never a second mutation),
+`op_running`. Each op_id gets at most 3 resolve attempts, then it is
+`loud_stop (reconcile_exhausted)`; a resolve refused at admission
+(`concurrency_conflict`, `agent_busy`) ran nothing and does not count.
 
 `dismiss` is free for a `noop` verdict; a tag-hazard verdict requires
 `"acknowledge_tag_hazard": true`; any other non-noop or unclassified verdict
