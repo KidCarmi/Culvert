@@ -95,6 +95,15 @@ everything else is triaged below with a suggested PR and required tests for foll
 > in a committed placeholder row at the START of a sweep), and at six
 > occurrences it is well past overdue.
 
+**2026-10-02 — `CHAOS-71` CLAIMED (placeholder, commit one). Domain: the
+Control Plane's gRPC BIND, and which plane is allowed to kill which — the
+analogue §36 (CHAOS-66) named as "the closest unexamined" one when it closed
+the SOCKS5 bind: `cluster_startup.go`'s `logFatalf("ControlPlane gRPC: %v")`.
+Claimed here, in a committed line, BEFORE any code was written — the remedy the
+header above reaches twice independently after ten collisions, and which §39
+and §35 applied first. Ids 67 and 68 remain allocated to other open sweeps and
+were not reused. Findings and gates are written up in §41 below.**
+
 **2026-09-22 — CHAOS-70 sweep (the admin roster as a durability surface).**
 Written up as `CHAOS-66` and renumbered to `CHAOS-70` (§40) when main was merged
 in, because the SOCKS5-bind sweep below had taken 66 first — another
