@@ -28,18 +28,34 @@ REG_PORT="${REG_PORT:-5055}"; REPO="127.0.0.1:$REG_PORT/culvert"; PINNED="culver
 mkdir -p "$EVID"; JSONL="$EVID/checks.jsonl"; MD="$EVID/REPORT.md"; : > "$JSONL"; FAILS=0; RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)"
 log(){ printf '%s %s\n' "$(date -u +%H:%M:%S)" "$*" >&2; }
 check(){ local sc="$1" n="$2" r="$3" d="${4:-}"; printf '{"run":"%s","scenario":"%s","check":"%s","result":"%s","detail":%s}\n' "$RUN_ID" "$sc" "$n" "$r" "$(printf '%s' "$d" | python3 -c 'import json,sys;print(json.dumps(sys.stdin.read()))')" >> "$JSONL"; [[ "$r" == fail ]] && { FAILS=$((FAILS+1)); log "FAIL [$sc] $n: $d"; } || log "$r [$sc] $n: $d"; }
-PDIR="$EVID/proj"; PROJ="aqa"; rm -rf "$PDIR"; mkdir -p "$PDIR/state"
+# The agent runs `docker compose -f … up -d` from compose_project_dir, so the
+# compose PROJECT NAME is the directory basename; the harness must start the
+# stack under the same name or the agent's `up` collides with our containers.
+PDIR="$EVID/proj"; PROJ="proj"; rm -rf "$PDIR"; mkdir -p "$PDIR/state"
 dc(){ docker compose -p "$PROJ" --project-directory "$PDIR" -f "$PDIR/docker-compose.yml" -f "$PDIR/docker-compose.override.yml" "$@"; }
-cleanup(){ pkill -f "culvert-maint --config $PDIR/config.toml" 2>/dev/null || true; dc down -v --remove-orphans >/dev/null 2>&1 || true; docker rm -f aqa-registry >/dev/null 2>&1 || true; }
+cleanup(){ pkill -f "culvert-maint --config $PDIR/config.toml" 2>/dev/null || true; dc down -v --remove-orphans >/dev/null 2>&1 || true; docker rm -f aqa-registry >/dev/null 2>&1 || true; rm -rf "/etc/docker/certs.d/127.0.0.1:$REG_PORT"; }
 trap cleanup EXIT
 
 # ── registry + images ────────────────────────────────────────────────────────
+# TLS registry trusted by the daemon (and by `docker manifest inspect`, which
+# the agent's resolve_target template runs WITHOUT --insecure — correctly, a
+# production registry is never plain HTTP). Same shape as the CI e2e workflows.
 docker rm -f aqa-registry >/dev/null 2>&1 || true
-docker run -d --name aqa-registry -p "127.0.0.1:$REG_PORT:5000" registry:2 >/dev/null
-sleep 2
-push(){ docker tag "$1" "$REPO:$2" && docker push -q "$REPO:$2" >/dev/null && docker inspect --format '{{index .RepoDigests}}' "$REPO:$2" | tr ' ' '\n' | grep "^.*$REPO@sha256" | head -1 | tr -d '[]'; }
-# RepoDigests may hold several; pick the one for our repo.
-push_digest(){ docker tag "$1" "$REPO:$2" >/dev/null; docker push -q "$REPO:$2" >/dev/null; docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$REPO:$2" | grep "^$REPO@" | head -1; }
+CERTD="$PDIR/registry-certs"; mkdir -p "$CERTD"
+openssl req -x509 -newkey rsa:2048 -nodes -days 2 -keyout "$CERTD/tls.key" -out "$CERTD/tls.crt" \
+  -subj "/CN=127.0.0.1" -addext "subjectAltName=IP:127.0.0.1" >/dev/null 2>&1
+mkdir -p "/etc/docker/certs.d/127.0.0.1:$REG_PORT"; cp "$CERTD/tls.crt" "/etc/docker/certs.d/127.0.0.1:$REG_PORT/ca.crt"
+docker run -d --name aqa-registry -p "127.0.0.1:$REG_PORT:5000" -v "$CERTD:/certs:ro" \
+  -e REGISTRY_HTTP_TLS_CERTIFICATE=/certs/tls.crt -e REGISTRY_HTTP_TLS_KEY=/certs/tls.key registry:2 >/dev/null
+for _ in $(seq 1 20); do curl -fsS --cacert "$CERTD/tls.crt" "https://127.0.0.1:$REG_PORT/v2/" >/dev/null 2>&1 && break; sleep 1; done
+# The digest the REGISTRY serves for the pushed tag (Docker-Content-Digest):
+# with the containerd image store a locally built image's .Id / RepoDigests
+# can name an index the registry never received (attestation manifests), so
+# the local view is not the truth the agent's `docker manifest inspect` sees.
+push_digest(){ docker tag "$1" "$REPO:$2" >/dev/null; docker push -q "$REPO:$2" >/dev/null
+  local d; d="$(curl -sI -H 'Accept: application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json' --cacert "$PDIR/registry-certs/tls.crt" "https://127.0.0.1:$REG_PORT/v2/culvert/manifests/$2" | tr -d '\r' | awk 'tolower($1)=="docker-content-digest:"{print $2}')"
+  [[ -n "$d" ]] || { echo "registry returned no digest for $REPO:$2" >&2; return 1; }
+  echo "$REPO@$d"; }
 PRED_REF="$(push_digest "$PRED_IMAGE" pred)"; CUR_REF="$(push_digest "$CUR_IMAGE" cur)"
 log "pred=$PRED_REF cur=$CUR_REF"
 
@@ -113,7 +129,9 @@ r="$(ag -X POST http://unix/v1/upgrades/apply -d "{\"image_ref\":\"$PRED_REF\",\
 OP2="$(echo "$r" | sed '$d' | python3 -c 'import json,sys;print(json.load(sys.stdin).get("op_id",""))')"
 killed=no
 for _ in $(seq 1 300); do
-  if ag "http://unix/v1/operations/$OP2/logs" 2>/dev/null | grep -qE "stage=restart|restart: |\"restart\"|rollback_restart|tagAndUp|docker tag"; then kill_agent; killed=yes; break; fi
+  # The op log is tab-separated "<ts>\t<stage>\t<event>"; wait for the apply's
+  # OWN restart stage to START (the tag advance + compose up window).
+  if ag "http://unix/v1/operations/$OP2/logs" 2>/dev/null | grep -qP "\trestart\tSTART"; then kill_agent; killed=yes; break; fi
   st="$(ag "http://unix/v1/operations/$OP2" 2>/dev/null | python3 -c 'import json,sys
 try: print(json.load(sys.stdin).get("state",""))
 except Exception: print("")')"; [[ "$st" == succeeded || "$st" == failed ]] && break
