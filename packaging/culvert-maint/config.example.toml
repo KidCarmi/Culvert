@@ -107,3 +107,15 @@ image_allowlist = '^ghcr\.io/kidcarmi/culvert(:[A-Za-z0-9._-]+|@sha256:[a-f0-9]{
 # same repository as image_allowlist (install.sh refuses a mismatch).
 # Default: ghcr.io/kidcarmi/culvert.
 proxy_repo = "ghcr.io/kidcarmi/culvert"
+
+# Classify interrupted operations (crash-recovery journal) against Docker truth
+# at startup and auto-resolve ONLY the non-mutating verdicts: a safe-boundary
+# no-op (the pinned tag never advanced) and the adoption of a target that is
+# already live AND passes the health probe. Everything else — a tag advanced
+# but the container not restarted (TAG HAZARD), an unhealthy target, a data
+# rollback, an unreadable record — is surfaced on GET /v1/status
+# (interrupted_operations, attention_required) for an explicit
+# POST /v1/reconcile/{op_id} {"action":"resolve"|"dismiss"}. false ⇒ mark-only
+# (ops are marked failed(agent_restart_interrupted) and nothing is inspected).
+# Default when absent: true.
+reconcile_on_startup = true

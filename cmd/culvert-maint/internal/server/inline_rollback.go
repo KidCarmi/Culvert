@@ -69,6 +69,13 @@ func (acc *upgradeApplyAccumulator) rollbackDecision(rollbackOnFailure bool) (at
 // only DO work on a post-restart failure with a valid target and
 // rollback_on_failure set (#375 §2/§8).
 func (s *Server) inlineRollbackStages(acc *upgradeApplyAccumulator, racc *rollbackAccumulator, rollbackOnFailure bool) []ops.FlowStage {
+	// Bind the shared core to the APPLY op's journal record (P0-F): the record
+	// keeps its apply identity (target = new image, prior = old) — the inline
+	// rollback only moves the tag back, it does not change which op this is.
+	// opID is read at run time (delivered by the admission hook after build).
+	racc.kind = ops.KindUpgradeApply
+	racc.actor = acc.actor
+	racc.fold = applyFold(acc)
 	core := s.imageRollbackStages(func() string { return acc.priorRef }, racc)
 	out := make([]ops.FlowStage, 0, len(core))
 	for i := range core {
@@ -104,6 +111,7 @@ func (s *Server) guardInlineRollback(acc *upgradeApplyAccumulator, racc *rollbac
 		}
 		if !acc.rollbackAttempted {
 			acc.rollbackAttempted = true
+			racc.opID = acc.opID
 			s.emitRollbackAudit(acc, audit.OutcomeStarted, "")
 		}
 		out, errout, err := inner(ctx)

@@ -163,3 +163,159 @@ This UDS path is for the **CP-local** agent. Reaching an agent on another host
 needs an authenticated network endpoint (`CULVERT_MAINT_AGENT_URL=https://…`),
 which requires the agent to grow a TLS listener with mTLS/token auth — tracked
 in `roadmap/release-management-https-agent-spec.md`.
+
+## Interrupted operations and rollback (startup reconcile)
+
+An `upgrades.apply` or image `rollbacks.create` can be cut off mid-flight — an
+agent crash, OOM, host reboot, `systemctl restart culvert-maint`. Every such op
+carries a durable journal record (`<state_dir>/reconcile/<op_id>.json`) that
+says how far it got (`admitted → captured → resolved → pulled →
+restarting → restarted → verified`). The `restarting` entry is a write-ahead
+barrier fsync'd *immediately before* the fixed `culvert/proxy:pinned` tag is
+advanced, so the danger window is always on disk. Since the reconcile slice,
+**rollbacks advance the journal too** (standalone `POST /v1/rollbacks`
+mode=image, apply's inline auto-rollback, and reconcile-issued rollbacks all
+go through the one shared core).
+
+### What happens on agent restart
+
+1. Every record is read. A record that cannot be parsed is **quarantined**
+   (renamed to `<op_id>.json.corrupt.<unixnano>` beside the others), logged at
+   WARN, and never acted on — the agent keeps serving instead of crash-looping.
+2. Each readable record's op is registered as `failed(agent_restart_interrupted)`
+   so `GET /v1/operations/{op_id}` answers.
+3. With `reconcile_on_startup = true` (the default; set `false` in
+   `config.toml` for mark-only), each record is **classified** against Docker
+   truth — the running proxy image (`docker compose ps` + `docker inspect`),
+   what `culvert/proxy:pinned` currently resolves to (`docker image inspect`),
+   and the record's refs re-validated as repo-bound exact digests — and a
+   durable verdict is written to `<state_dir>/reconcile/verdicts/<op_id>.json`.
+4. **Only two verdicts are auto-resolved, because they mutate nothing:**
+   - `noop` — the tag never advanced, or the stack is already back on the
+     prior image: the record is retired; the op stays
+     `failed(agent_restart_interrupted)`.
+   - `verify_adopt_else_rollback` **when the target image is live AND the
+     health probe passes** — the upgrade effectively succeeded: the op is
+     re-marked `succeeded` with `result.reconciled=true` and the record retired.
+5. **Everything else is surfaced, never executed at boot:** `reup`,
+   `rollback_to_prior`, an unhealthy live target, `loud_stop` (invalid refs,
+   attempt bound exhausted, no recovery target), `data_manual`
+   (`/data` rollback window — never auto-reconciled), and
+   `inputs_unavailable` (Docker was not reachable when classified). Each is a
+   WARN line at startup and an entry on `/v1/status`.
+
+The whole pass is bounded by `stage_timeout`; it never prevents the agent
+from serving.
+
+### The pinned-tag hazard (`reup`)
+
+`reup` means the crash landed between `docker tag … culvert/proxy:pinned`
+and `docker compose up`: the tag already points at the **new, un-health-gated**
+image while the container still runs the old one. Nothing is wrong *yet*, but
+the next `docker compose up` — by anyone, for any reason — starts that image
+silently. The agent calls this out explicitly (`tag_hazard: true`, a dedicated
+WARN line) and does **not** converge it on its own; `resolve` runs tag+up
+under the health gate, or you repair by hand and `dismiss` with the
+acknowledgement flag.
+
+### Status fields
+
+```bash
+curl --unix-socket /run/culvert-maint/culvert-maint.sock http://unix/v1/status
+```
+
+```json
+{
+  "attention_required": true,
+  "reconcile_on_startup": true,
+  "quarantined_journal_records": ["01HX….json.corrupt.1759400000000000000"],
+  "interrupted_operations": [
+    {
+      "op_id": "01HX…", "kind": "upgrades.apply", "phase": "restarting",
+      "verdict": "reup", "reason": "tag_advanced_container_stale",
+      "recommended_action": "TAG HAZARD: culvert/proxy:pinned already points at target_ref …",
+      "tag_hazard": true,
+      "target_ref": "ghcr.io/kidcarmi/culvert@sha256:…", "prior_ref": "ghcr.io/kidcarmi/culvert@sha256:…",
+      "running_matches_target": false, "tag_matches_target": true,
+      "attempts": 0, "computed_at": "2026-10-02T09:00:00Z",
+      "last_health": "", "resolve_op_id": "", "last_resolve_op_id": "", "last_resolve_outcome": ""
+    }
+  ]
+}
+```
+
+`attention_required` is true whenever any interrupted operation, quarantined
+record, or `journal_error` exists. A record whose op is currently running is
+not an interrupted one and is not listed. Verdicts: `noop`,
+`verify_adopt_else_rollback`, `reup`, `rollback_to_prior`, `loud_stop`,
+`data_manual`, `inputs_unavailable`, `unclassified` (mark-only mode, or no
+verdict could be written).
+
+### The explicit endpoint
+
+`POST /v1/reconcile/{op_id}` (authenticated like every `/v1` route):
+
+```bash
+# act on the recorded verdict (recomputed against live Docker truth first)
+curl --unix-socket /run/culvert-maint/culvert-maint.sock \
+  -X POST -H 'Content-Type: application/json' \
+  -d '{"action":"resolve"}' http://unix/v1/reconcile/01HX…
+
+# clear a record without touching Docker
+curl --unix-socket /run/culvert-maint/culvert-maint.sock \
+  -X POST -H 'Content-Type: application/json' \
+  -d '{"action":"dismiss","acknowledge_tag_hazard":true}' http://unix/v1/reconcile/01HX…
+```
+
+`resolve` executes **exactly** the verdict: `noop` ⇒ retire (200);
+`verify_adopt_else_rollback` ⇒ health-probe, adopt if healthy (200) else roll
+back to `prior_ref` (202); `reup` ⇒ tag+up `target_ref` under the health gate
+(202); `rollback_to_prior` ⇒ roll back to `prior_ref` (202). A 202 is an
+ordinary journaled, locked, audited `rollbacks.create` op (params carry
+`reconcile_of` / `reconcile_action`); poll it via `/v1/operations/{op_id}`.
+The original record is retired only when that op **succeeds**; a failure keeps
+it listed with `last_resolve_op_id` / `last_resolve_outcome`. Refusals (409):
+`verdict_changed` (live state no longer matches the recorded verdict — read
+status again), `manual_required` (`loud_stop` / `data_manual`),
+`inputs_unavailable` (daemon down), `no_recovery_target`, `resolve_in_flight`
+(a resolve is already running — never a second mutation), `op_running`.
+Each op_id gets at most 3 resolve attempts, then it is `loud_stop
+(reconcile_exhausted)`.
+
+`dismiss` is free for a `noop` verdict; a tag-hazard verdict requires
+`"acknowledge_tag_hazard": true`; any other non-noop or unclassified verdict
+requires `"acknowledge_unresolved": true`. Once a record is gone, any further
+call answers 404 `record_not_found`.
+
+Audit events: `reconcile.noop`, `reconcile.adopt` (actor `agent:reconcile` at
+boot, or the caller on resolve), `reconcile.resolve`, `reconcile.dismiss`.
+
+### Offline rollback floor (local-first)
+
+A rollback's `rollback_pull` — and the upgrade's `pull` — first asks
+`docker image inspect <repo@sha256:…>`. A pinned digest is content-addressed,
+so when the exact digest is already in the local image store the registry is
+**not** consulted (`rollback_pull: skipped (image present locally)` in the op
+log) and the rollback proceeds with tag+up. A registry or network outage —
+usually the very fault that broke the upgrade — therefore no longer turns a
+rollback into `failed(rollback_failed)` with the bad image still running. An
+absent image pulls exactly as before.
+
+### Idempotency across restarts
+
+`idempotency.json` in `state_dir` persists the `(actor, kind,
+idempotency_key) → op_id + terminal outcome` index for `upgrades.apply` and
+`rollbacks.create` (24 h TTL, bounded to 256 entries). A Control Plane retry
+with the same key after an agent restart answers 200 with the prior op's
+state instead of running a second upgrade.
+
+### What is NOT automatic
+
+- No rollback, re-up, pull, tag or `compose up` ever runs at boot.
+- An unhealthy live target is reported, not rolled back.
+- `/data` rollback windows (`data_manual`) are never touched.
+- A quarantined (unreadable) record is never acted on; inspect and remove it
+  by hand.
+- Config key: `reconcile_on_startup = true` (default). `false` keeps the
+  records, marks the ops interrupted, and lists them `unclassified` — the
+  explicit endpoint still works and recomputes on demand.

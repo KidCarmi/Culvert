@@ -69,6 +69,25 @@ type applyRig struct {
 	// RepoDigests list → no valid rollback target.
 	noPriorDigest bool
 
+	// localImages models the LOCAL image store for the local-first probe
+	// (`docker image inspect <repo@sha256:…>`): nil ⇒ legacy behaviour (the
+	// inspect answers from the running view, as the capture path expects);
+	// non-nil ⇒ present iff the bare digest is in the set, absent ⇒ non-zero
+	// exit. Keyed by bare digest.
+	localImages map[string]bool
+	// pinnedDigest is what `docker image inspect culvert/proxy:pinned`
+	// resolves to (bare digest); "" ⇒ the tag is absent (inspect fails).
+	pinnedDigest string
+	// dockerDown makes EVERY docker command fail (daemon not up).
+	dockerDown atomic.Bool
+	// stackDown makes `compose ps` report no containers at all.
+	stackDown atomic.Bool
+	// blockUp, when non-nil, makes `compose up` block until it is closed.
+	blockUp chan struct{}
+
+	srv *Server
+	mgr *ops.Manager
+
 	pulled     atomic.Bool
 	healthFail atomic.Bool
 	failFor    []string
@@ -135,18 +154,61 @@ func (r *applyRig) canned(argv []string) []byte {
 	}
 	switch {
 	case has("ps"):
+		if r.stackDown.Load() {
+			return []byte(`[]`)
+		}
 		return []byte(`{"Service":"proxy","State":"running","ID":"abcdef012345"}`)
 	case contains("{{json .Image}}"):
 		return []byte(`"sha256:` + cfg + `"`)
 	case has("manifest"):
 		return []byte(`{"Descriptor":{"digest":"sha256:` + r.targetDigest + `"}}`)
 	case has("image") && has("inspect"):
+		ref := argv[len(argv)-1]
+		if ref == runner.PinnedProxyTag {
+			if r.pinnedDigest == "" {
+				return nil
+			}
+			return []byte(`[{"Id":"sha256:` + r.cfgFor(r.pinnedDigest) + `","RepoDigests":["` + repo + `@sha256:` + r.pinnedDigest + `"]}]`)
+		}
+		if d := digestRE.FindString(ref); strings.Contains(ref, "@sha256:") && r.localImages != nil {
+			bare := strings.TrimPrefix(d, "sha256:")
+			if !r.localImages[bare] {
+				return nil
+			}
+			return []byte(`[{"Id":"sha256:` + r.cfgFor(bare) + `","RepoDigests":["` + ref + `"]}]`)
+		}
 		if r.noPriorDigest && !r.pulled.Load() {
 			return []byte(`[{"RepoDigests":[]}]`) // no rollback target available
 		}
-		return []byte(`[{"RepoDigests":["` + repo + `@sha256:` + running + `"]}]`)
+		return []byte(`[{"Id":"sha256:` + cfg + `","RepoDigests":["` + repo + `@sha256:` + running + `"]}]`)
 	}
 	return nil
+}
+
+// cfgFor maps a bare digest to the config digest the fake daemon reports for
+// it (the "before" image is cfgOld, anything else cfgNew).
+func (r *applyRig) cfgFor(digest string) string {
+	if digest == r.digBefore {
+		return cfgOld
+	}
+	return cfgNew
+}
+
+// inspectAbsent reports whether an image-inspect argv targets an image the
+// fake store does not hold (the pinned tag when unset; a digest ref outside
+// localImages when the local store is modelled).
+func (r *applyRig) inspectAbsent(argv []string) bool {
+	if len(argv) < 3 || !argvHas(argv, "image") || !argvHas(argv, "inspect") {
+		return false
+	}
+	ref := argv[len(argv)-1]
+	if ref == runner.PinnedProxyTag {
+		return r.pinnedDigest == ""
+	}
+	if strings.Contains(ref, "@sha256:") && r.localImages != nil {
+		return !r.localImages[strings.TrimPrefix(digestRE.FindString(ref), "sha256:")]
+	}
+	return false
 }
 
 // currentRunning returns the digest the fake stack is currently running.
@@ -189,10 +251,18 @@ func (r *applyRig) countCommand(token string) int {
 	return n
 }
 
-//nolint:funlen // test rig setup; splitting hides the wiring sequence
 func startApplyRig(t *testing.T) *applyRig {
 	t.Helper()
-	tmp := t.TempDir()
+	return startApplyRigAt(t, t.TempDir())
+}
+
+// startApplyRigAt boots the rig on an explicit state dir so a test can stop
+// an agent and start a fresh one over the SAME on-disk state (journal,
+// idempotency index), modelling an agent restart.
+//
+//nolint:funlen // test rig setup; splitting hides the wiring sequence
+func startApplyRigAt(t *testing.T, tmp string) *applyRig {
+	t.Helper()
 	sockPath := filepath.Join(tmp, "agent.sock")
 	auditPath := filepath.Join(tmp, "audit.jsonl")
 
@@ -214,6 +284,7 @@ func startApplyRig(t *testing.T) *applyRig {
 		StageTimeout:      5 * time.Second,
 		OperationTimeout:  30 * time.Second,
 		ImageAllowlist:    regexp.MustCompile(`^ghcr\.io/kidcarmi/culvert(:[A-Za-z0-9._-]+|@sha256:[a-f0-9]{64})$`),
+		ProxyRepo:         repo, // config.Load always sets it; the reconcile trust gate is repo-bound
 	}
 
 	rig := &applyRig{
@@ -237,43 +308,19 @@ func startApplyRig(t *testing.T) *applyRig {
 	if err != nil {
 		t.Fatalf("runner: %v", err)
 	}
-	rn.SetExecHooksForTest(
-		func(cmd *exec.Cmd) error {
-			rig.mu.Lock()
-			rig.captured = append(rig.captured, append([]string(nil), cmd.Args...))
-			rig.mu.Unlock()
-			if out := rig.canned(cmd.Args); out != nil {
-				_, _ = cmd.Stdout.Write(out)
-			}
-			// A `docker pull <repo@sha256:…>` re-pins the "running image"
-			// view from the pulled ref (P1.4: the digest is in the argv,
-			// not an env var), so a rollback that pulls the prior digest
-			// flips the running view back for later captures.
-			for _, a := range cmd.Args {
-				if a == "pull" {
-					rig.pulled.Store(true)
-					rig.setRunning(cmd.Args)
-				}
-			}
-			return nil
-		},
-		func(cmd *exec.Cmd) error {
-			if rig.failFn != nil && rig.failFn(cmd.Args, cmd.Env) {
-				return errors.New("simulated non-zero exit (failFn)")
-			}
-			if rig.shouldFail(cmd.Args) {
-				return errors.New("simulated non-zero exit")
-			}
-			return nil
-		},
-	)
+	rn.SetExecHooksForTest(rig.execStart, rig.execWait)
 
 	mgr := ops.NewManager(nil)
+	mgr.EnableIdempotencyPersistence(filepath.Join(tmp, "idempotency.json"))
+	if _, lerr := mgr.LoadIdempotencyIndex(); lerr != nil {
+		t.Fatalf("idempotency index: %v", lerr)
+	}
 	jnl, err := journal.New(tmp)
 	if err != nil {
 		t.Fatalf("journal: %v", err)
 	}
 	rig.journal = jnl
+	rig.mgr = mgr
 	srv, err := New(Options{
 		Cfg:       cfg,
 		Auth:      pol,
@@ -300,6 +347,7 @@ func startApplyRig(t *testing.T) *applyRig {
 	if err != nil {
 		t.Fatalf("server.New: %v", err)
 	}
+	rig.srv = srv
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() { _ = srv.Serve(ctx) }()
 	for i := 0; i < 50; i++ {
@@ -314,6 +362,54 @@ func startApplyRig(t *testing.T) *applyRig {
 		_ = al.Close()
 	}
 	return rig
+}
+
+// execStart is the fake exec START hook: records argv, emits the canned
+// stdout, and honours blockUp.
+func (r *applyRig) execStart(cmd *exec.Cmd) error {
+	r.mu.Lock()
+	r.captured = append(r.captured, append([]string(nil), cmd.Args...))
+	r.mu.Unlock()
+	if out := r.canned(cmd.Args); out != nil {
+		_, _ = cmd.Stdout.Write(out)
+	}
+	if r.blockUp != nil && argvHas(cmd.Args, "up") {
+		<-r.blockUp
+	}
+	return nil
+}
+
+// execWait is the fake exec WAIT hook: decides the exit status and, on
+// success, moves the fake "running image" view.
+func (r *applyRig) execWait(cmd *exec.Cmd) error {
+	if r.dockerDown.Load() {
+		return errors.New("simulated daemon down")
+	}
+	if r.inspectAbsent(cmd.Args) {
+		return errors.New("simulated: no such image")
+	}
+	if r.failFn != nil && r.failFn(cmd.Args, cmd.Env) {
+		return errors.New("simulated non-zero exit (failFn)")
+	}
+	if r.shouldFail(cmd.Args) {
+		return errors.New("simulated non-zero exit")
+	}
+	// A SUCCESSFUL `docker pull <repo@sha256:…>` (or the `docker tag`
+	// of a locally-present digest, which the local-first path reaches
+	// with NO pull) re-pins the "running image" view from the ref in
+	// argv (P1.4: the digest is in the argv, not an env var), so a
+	// rollback that re-pins the prior digest flips the running view
+	// back for later captures. A FAILED pull leaves it unchanged.
+	for _, a := range cmd.Args {
+		if a == "pull" {
+			r.pulled.Store(true)
+			r.setRunning(cmd.Args)
+		}
+		if a == "tag" {
+			r.setRunning(cmd.Args)
+		}
+	}
+	return nil
 }
 
 func applyHealthClient(rig *applyRig) *http.Client {

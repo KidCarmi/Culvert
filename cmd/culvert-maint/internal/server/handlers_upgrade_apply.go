@@ -299,6 +299,14 @@ func (s *Server) buildUpgradeApplyStages(acc *upgradeApplyAccumulator, racc *rol
 			Name:          "pull",
 			FailureReason: ops.ReasonCommandError,
 			Run: skipIfCurrent(acc, "pull", func(ctx context.Context) ([]byte, []byte, error) {
+				// Local-first: a pinned digest is content-addressed, so a digest
+				// already in the local store needs no registry round trip (the
+				// same no-offline floor the rollback core applies). Absent ⇒ pull,
+				// byte-identical to the pre-change behaviour.
+				if s.imagePresentLocally(ctx, acc.pinnedRef) {
+					s.advanceJournalPhaseBestEffort(acc, journal.PhasePulled)
+					return []byte("pull: skipped (image present locally)"), nil, nil
+				}
 				res, rerr := s.opts.Runner.ComposePullDigest(ctx, acc.pinnedRef)
 				if res == nil {
 					return nil, nil, rerr

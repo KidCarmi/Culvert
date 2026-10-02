@@ -96,6 +96,16 @@ type Config struct {
 	// MUST describe the same repository as ImageAllowlist.
 	ProxyRepo string
 
+	// ReconcileOnStartup enables the crash-recovery startup reconciler
+	// (RISK-022 PR-E): at boot every interrupted journal record is classified
+	// against Docker truth, a durable verdict is written, and ONLY verdicts
+	// that mutate nothing are auto-resolved (safe-boundary no-op; adopt of a
+	// target that is already live AND healthy). Everything else stays visible
+	// on /v1/status (attention_required) for the explicit
+	// POST /v1/reconcile/{op_id} endpoint. Default true. false ⇒ mark-only
+	// (records are listed but never classified or touched at boot).
+	ReconcileOnStartup bool
+
 	// AllowPeers is the closed list of UID-or-username tokens permitted
 	// to connect to the agent's UDS. The agent refuses to start with
 	// an empty list. The CLI flag --allow-peers is now removed; this
@@ -142,6 +152,7 @@ type rawConfig struct {
 	AllowedBackupDir    string   `toml:"allowed_backup_dir"`
 	ImageAllowlist      string   `toml:"image_allowlist"`
 	ProxyRepo           string   `toml:"proxy_repo"`
+	ReconcileOnStartup  *bool    `toml:"reconcile_on_startup"`
 	AllowPeers          []string `toml:"allow_peers"`
 }
 
@@ -405,6 +416,10 @@ func validate(raw *rawConfig) (*Config, error) {
 		return nil, fmt.Errorf("config: proxy_repo has an invalid repository shape: %q", pr)
 	}
 	cfg.ProxyRepo = pr
+
+	// reconcile_on_startup — default true (classify + auto-resolve only the
+	// non-mutating verdicts). Absent key ⇒ default; an explicit false ⇒ mark-only.
+	cfg.ReconcileOnStartup = raw.ReconcileOnStartup == nil || *raw.ReconcileOnStartup
 
 	// allow_peers — required, no default. Validated only as non-empty
 	// shape here; the resolution to a concrete UID set happens in

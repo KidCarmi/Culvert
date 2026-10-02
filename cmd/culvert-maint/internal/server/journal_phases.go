@@ -1,15 +1,22 @@
-// Crash-recovery journal phase advancement for the upgrade-apply flow
-// (RISK-022, Tier 1). The admission write (handlers_d16b.go) records
-// PhaseAdmitted; this file advances the record through the apply lifecycle so
-// the on-disk record reflects HOW FAR the op got — which the startup
-// reconciler (a later, sign-off-gated slice) needs to choose between a no-op,
-// a resume, and a fail-safe rollback.
+// Crash-recovery journal phase advancement (RISK-022, Tier 1 + PR-E P0-F).
+// The admission write (handlers_d16b.go) records PhaseAdmitted; this file
+// advances the record through an op's lifecycle so the on-disk record reflects
+// HOW FAR the op got — which the startup reconciler (reconcile_startup.go)
+// needs to choose between a no-op, an adopt, and a surfaced recovery.
+//
+// The generic core (advanceJournalPhaseFor / writeBarrierFor) is keyed on an
+// op_id + a journalFold that copies whatever identifiers the flow knows into
+// the record. It is shared by the upgrade-apply flow (fold = foldIdentifiers
+// over the apply accumulator) AND the shared image-rollback core (P0-F: a
+// standalone or inline rollback moves the pinned tag too, so it carries the
+// same write-ahead barrier — otherwise a crash during a rollback's tag advance
+// left the record at a "safe boundary" while the tag had actually moved).
 //
 // Two disciplines:
 //   - Progress phases (captured/resolved/pulled/restarted/verified) are
 //     BEST-EFFORT breadcrumbs: advanceJournalPhaseBestEffort swallows write
 //     errors AND a missing record so a flaky journal never fails an
-//     otherwise-good upgrade.
+//     otherwise-good op.
 //   - The PhaseRestarting write-ahead barrier (writeBarrier) is FAIL-CLOSED:
 //     it is fsync'd immediately BEFORE the fixed-tag advance, so a crash in the
 //     danger window always leaves a durable record. It fails closed on a read /
@@ -27,6 +34,11 @@ import (
 	"culvert-maint/internal/journal"
 	"culvert-maint/internal/ops"
 )
+
+// journalFold copies a flow's known identifiers (target/prior refs, digests,
+// image ids, mode) into rec. It must be idempotent and must never clear a
+// field it does not know (a later phase may know less than an earlier one).
+type journalFold func(rec *journal.Record)
 
 // foldIdentifiers copies the target / prior identifiers acc knows by this point
 // into rec. Record digests are bare hex — the acc digests carry the sha256:
@@ -54,19 +66,24 @@ func foldIdentifiers(rec *journal.Record, acc *upgradeApplyAccumulator) {
 	}
 }
 
-// advanceJournalPhase read-modify-writes the in-flight op's record to `phase`,
-// folding in whatever identifiers acc knows. It is a read-modify-write so the
+// applyFold adapts the apply accumulator to the generic fold.
+func applyFold(acc *upgradeApplyAccumulator) journalFold {
+	return func(rec *journal.Record) { foldIdentifiers(rec, acc) }
+}
+
+// advanceJournalPhaseFor read-modify-writes opID's record to `phase`, folding
+// in whatever identifiers the flow knows. It is a read-modify-write so the
 // immutable admission fields (kind, mode, actor, started_at) are preserved.
 //
 // Returns found=false (nil error) when the record is ABSENT — the caller decides
 // whether that is benign (progress) or must fail closed (the barrier). A nil
 // journal / empty opID is likewise (false, nil): a non-journaled build has no
 // record to advance.
-func (s *Server) advanceJournalPhase(acc *upgradeApplyAccumulator, phase journal.Phase) (found bool, err error) {
-	if s.opts.Journal == nil || acc.opID == "" {
+func (s *Server) advanceJournalPhaseFor(opID string, fold journalFold, phase journal.Phase) (found bool, err error) {
+	if s.opts.Journal == nil || opID == "" {
 		return false, nil
 	}
-	rec, found, err := s.opts.Journal.Read(acc.opID)
+	rec, found, err := s.opts.Journal.Read(opID)
 	if err != nil {
 		return false, fmt.Errorf("journal read: %w", err)
 	}
@@ -75,33 +92,27 @@ func (s *Server) advanceJournalPhase(acc *upgradeApplyAccumulator, phase journal
 	}
 	rec.Phase = phase
 	rec.UpdatedAt = time.Now().UTC()
-	foldIdentifiers(rec, acc)
+	if fold != nil {
+		fold(rec)
+	}
 	if werr := s.opts.Journal.Write(*rec); werr != nil {
 		return true, werr
 	}
 	return true, nil
 }
 
-// advanceJournalPhaseBestEffort advances the phase and swallows any error or
-// missing record — a failed progress breadcrumb must never fail an
-// otherwise-successful op. The write-ahead barrier is the only phase that must
-// fail closed.
-func (s *Server) advanceJournalPhaseBestEffort(acc *upgradeApplyAccumulator, phase journal.Phase) {
-	_, _ = s.advanceJournalPhase(acc, phase)
-}
-
-// writeBarrier writes the PhaseRestarting write-ahead barrier FAIL-CLOSED. It
-// updates the existing record when present (preserving admission fields) and
-// RE-CREATES it when absent: a missing record right before the danger window
-// must NOT silently proceed (a crash after the tag advance would then leave
-// nothing for the reconciler). Any read / write error — or a failed re-create —
-// is returned so the restart stage aborts BEFORE advancing the tag. A nil
-// journal / empty opID is a no-op by design (non-journaled build).
-func (s *Server) writeBarrier(acc *upgradeApplyAccumulator) error {
-	if s.opts.Journal == nil || acc.opID == "" {
+// writeBarrierFor writes the PhaseRestarting write-ahead barrier FAIL-CLOSED.
+// It updates the existing record when present (preserving admission fields)
+// and RE-CREATES it when absent: a missing record right before the danger
+// window must NOT silently proceed (a crash after the tag advance would then
+// leave nothing for the reconciler). Any read / write error — or a failed
+// re-create — is returned so the restart stage aborts BEFORE advancing the
+// tag. A nil journal / empty opID is a no-op by design (non-journaled build).
+func (s *Server) writeBarrierFor(opID, kind, actor string, fold journalFold) error {
+	if s.opts.Journal == nil || opID == "" {
 		return nil
 	}
-	found, err := s.advanceJournalPhase(acc, journal.PhaseRestarting)
+	found, err := s.advanceJournalPhaseFor(opID, fold, journal.PhaseRestarting)
 	if err != nil {
 		return err
 	}
@@ -114,11 +125,31 @@ func (s *Server) writeBarrier(acc *upgradeApplyAccumulator) error {
 	// digests, not on StartedAt.
 	now := time.Now().UTC()
 	rec := journal.Record{
-		OpID: acc.opID, Kind: ops.KindUpgradeApply, Phase: journal.PhaseRestarting,
-		Actor: acc.actor, StartedAt: now, UpdatedAt: now,
+		OpID: opID, Kind: kind, Phase: journal.PhaseRestarting,
+		Actor: actor, StartedAt: now, UpdatedAt: now,
 	}
-	foldIdentifiers(&rec, acc)
+	if fold != nil {
+		fold(&rec)
+	}
 	return s.opts.Journal.Write(rec)
+}
+
+// advanceJournalPhase is the apply-flow form of advanceJournalPhaseFor.
+func (s *Server) advanceJournalPhase(acc *upgradeApplyAccumulator, phase journal.Phase) (found bool, err error) {
+	return s.advanceJournalPhaseFor(acc.opID, applyFold(acc), phase)
+}
+
+// advanceJournalPhaseBestEffort advances the phase and swallows any error or
+// missing record — a failed progress breadcrumb must never fail an
+// otherwise-successful op. The write-ahead barrier is the only phase that must
+// fail closed.
+func (s *Server) advanceJournalPhaseBestEffort(acc *upgradeApplyAccumulator, phase journal.Phase) {
+	_, _ = s.advanceJournalPhase(acc, phase)
+}
+
+// writeBarrier is the apply-flow form of writeBarrierFor.
+func (s *Server) writeBarrier(acc *upgradeApplyAccumulator) error {
+	return s.writeBarrierFor(acc.opID, ops.KindUpgradeApply, acc.actor, applyFold(acc))
 }
 
 // restartWithBarrier is the apply `restart` stage body: it writes the

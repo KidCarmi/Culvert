@@ -22,6 +22,7 @@ import (
 	"regexp"
 
 	"culvert-maint/internal/auth"
+	"culvert-maint/internal/journal"
 	"culvert-maint/internal/ops"
 	"culvert-maint/internal/runner"
 )
@@ -105,9 +106,10 @@ func (s *Server) rollbackImage(w http.ResponseWriter, r *http.Request, peer auth
 	}
 	targetRef := req.ImageRef
 
+	acc := &rollbackAccumulator{kind: ops.KindRollbackCreate, actor: peer.String(), mode: "image"}
 	op, deduped, herr := s.startAsyncOp(r, peer, ops.KindRollbackCreate, req.IdempotencyKey, params, func() ([]ops.FlowStage, *opError) {
-		return s.buildImageRollbackStages(targetRef), nil
-	})
+		return s.buildImageRollbackStages(targetRef, acc), nil
+	}, withOpIDHook(func(id string) { acc.opID = id }))
 	if herr != nil {
 		writeJSON(w, herr.Status, herr.Body)
 		return
@@ -119,9 +121,11 @@ func (s *Server) rollbackImage(w http.ResponseWriter, r *http.Request, peer auth
 // flow, pinned to targetRef (a strict repo@sha256:<digest>): a
 // capture_before + the SHARED imageRollbackStages core (pull → restart →
 // health → verify) + a report. The core is shared verbatim with apply's
-// inline auto-rollback so the two cannot drift (#375 §8).
-func (s *Server) buildImageRollbackStages(targetRef string) []ops.FlowStage {
-	acc := &rollbackAccumulator{}
+// inline auto-rollback so the two cannot drift (#375 §8). acc carries the
+// journal binding (opID is delivered by the admission hook; kind/actor/mode
+// are set by the caller); the fold is the standalone rollback record shape.
+func (s *Server) buildImageRollbackStages(targetRef string, acc *rollbackAccumulator) []ops.FlowStage {
+	acc.fold = acc.standaloneFold(targetRef)
 
 	stages := []ops.FlowStage{
 		{
@@ -132,9 +136,15 @@ func (s *Server) buildImageRollbackStages(targetRef string) []ops.FlowStage {
 			Run: func(ctx context.Context) ([]byte, []byte, error) {
 				ri, err := s.opts.Runner.CaptureRunningProxyImage(ctx)
 				if err != nil {
+					s.rollbackAdvancePhase(acc, journal.PhaseCaptured)
 					return []byte("capture_before: no running proxy captured (" + errString(err) + ")"), nil, nil
 				}
 				acc.priorDigests = bareDigests(ri.RepoDigests)
+				acc.priorImageID = ri.RunningImageID
+				if pr := ri.PriorRef(); rollbackDigestRefRE.MatchString(pr) {
+					acc.priorRef = pr
+				}
+				s.rollbackAdvancePhase(acc, journal.PhaseCaptured)
 				return []byte("capture_before: prior_digests=" + joinDigests(acc.priorDigests)), nil, nil
 			},
 		},
