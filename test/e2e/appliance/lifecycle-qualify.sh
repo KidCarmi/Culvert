@@ -70,7 +70,10 @@ newproj() { # newproj <name> <image-for-pinned>
   printf 'CULVERT_CA_PASSPHRASE=%s\nCULVERT_LOG_PASSPHRASE=%s\nCULVERT_DEFAULT_ACTION=%s\n' "$CA_PASS" "$CA_PASS" "${QUAL_DEFAULT_ACTION:-}" > "$PDIR/.env"
   chmod 600 "$PDIR/.env"
   docker tag "$2" "$PINNED"
-  export PROJ PDIR
+  # Cookie jar lives with the project; set in the PARENT shell so helpers
+  # invoked inside $(...) command substitutions (subshells) still find it.
+  JAR="$PDIR/jar"; : > "$JAR"
+  export PROJ PDIR JAR
 }
 dc() { docker compose -p "$PROJ" --project-directory "$PDIR" -f "$PDIR/docker-compose.yml" -f "$PDIR/docker-compose.override.yml" "$@"; }
 dcli() { dc --profile cli run --rm -T -e CULVERT_BACKUP_PASSPHRASE="$BK_PASS" cli "$@"; }
@@ -101,17 +104,19 @@ api() { # api <method> <path> [json]
 }
 code_of() { tail -n1; }
 body_of() { sed '$d'; }
-setup_admin() { JAR="$PDIR/jar"; export JAR; : > "$JAR"; api POST /api/setup/complete "{\"user\":\"$ADMIN_USER\",\"pass\":\"$ADMIN_PASS\"}" | code_of; }
-login() { JAR="$PDIR/jar"; export JAR; : > "$JAR"; api POST /api/auth/login "{\"user\":\"$1\",\"pass\":\"$2\"}" | code_of; }
+setup_admin() { : > "$JAR"; api POST /api/setup/complete "{\"user\":\"$ADMIN_USER\",\"pass\":\"$ADMIN_PASS\"}" | code_of; }
+login() { : > "$JAR"; api POST /api/auth/login "{\"user\":\"$1\",\"pass\":\"$2\"}" | code_of; }
 # Pilot posture: proxy clients are NOT authenticated (policy by destination).
 # Once a credentialed admin exists the proxy demands credentials from every
 # client by default (defaultAuthOutcome=Default ⇒ 407), so the operator must
 # choose the Exempt default explicitly — recorded in first-boot.md step 8.
 proxy_auth_exempt() { api PUT /api/settings/default-auth-outcome '{"defaultAuthOutcome":"Exempt"}' | code_of; }
 seed_policy() {
-  proxy_auth_exempt
-  api POST /api/default-action '{"action":"deny"}' | code_of
-  api POST /api/policy '{"name":"qual-allow-origin","priority":10,"action":"Allow","destFQDN":"origin-allowed","sslAction":"Bypass","enabled":true}' | code_of
+  local c1 c2 c3
+  c1="$(proxy_auth_exempt)"
+  c2="$(api POST /api/default-action '{"action":"deny"}' | code_of)"
+  c3="$(api POST /api/policy '{"name":"qual-allow-origin","priority":10,"action":"Allow","destFQDN":"origin-allowed","sslAction":"Bypass","enabled":true}' | code_of)"
+  log "seed_policy: auth-exempt=$c1 default-action=$c2 rule=$c3"
 }
 through_proxy() { curl -sS -m 10 -x "$PROXY" -o /dev/null -w '%{http_code}' "http://$1/" 2>/dev/null || echo 000; }
 assert_enforcement() { # <scenario> <label>
@@ -124,7 +129,6 @@ assert_enforcement() { # <scenario> <label>
 # introduced, and that clamav is the ONLY failing row — the real-sidecar run
 # (CULVERT_QUALIFY_REAL_CLAMAV=1) asserts the full 200.
 strict_ready() {
-  local r; r="$(curl -ksS "$PROXY/ready?strict=1" | sed '$!N;$!D' )"
   curl -ksS "$PROXY/ready?strict=1" | python3 -c 'import json,sys,os
 d=json.load(sys.stdin); c=d["checks"]; bad=[k for k,v in c.items() if v.get("status")!="ok"]
 real=os.environ.get("CULVERT_QUALIFY_REAL_CLAMAV")=="1"
@@ -235,7 +239,7 @@ scD() {
   if echo "$out" | grep -q "locked by another Culvert process"; then check $sc commit-refused-while-running pass "lock held by the proxy"; else check $sc commit-refused-while-running fail "$out"; fi
   # Dry-run is fine while running.
   out="$(dcli --restore /backup/qual.tar.gz.enc --mode full 2>&1 || true)"
-  if echo "$out" | grep -qi "ca.bundle decrypt: PASS"; then check $sc dry-run pass "validation passed incl. encrypted ca.bundle"; else check $sc dry-run fail "$out"; fi
+  if echo "$out" | grep -qiE "ca.bundle decrypt: *PASS"; then check $sc dry-run pass "validation passed incl. encrypted ca.bundle"; else check $sc dry-run fail "$out"; fi
   # Offline commit.
   down
   out="$(dcli --restore /backup/qual.tar.gz.enc --confirm --mode full --accept-dp-reenrollment 2>&1 || true)"

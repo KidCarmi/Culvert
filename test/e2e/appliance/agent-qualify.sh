@@ -33,7 +33,7 @@ check(){ local sc="$1" n="$2" r="$3" d="${4:-}"; printf '{"run":"%s","scenario":
 # stack under the same name or the agent's `up` collides with our containers.
 PDIR="$EVID/proj"; PROJ="proj"; rm -rf "$PDIR"; mkdir -p "$PDIR/state"
 dc(){ docker compose -p "$PROJ" --project-directory "$PDIR" -f "$PDIR/docker-compose.yml" -f "$PDIR/docker-compose.override.yml" "$@"; }
-cleanup(){ pkill -f "culvert-maint --config $PDIR/config.toml" 2>/dev/null || true; dc down -v --remove-orphans >/dev/null 2>&1 || true; docker rm -f aqa-registry >/dev/null 2>&1 || true; rm -rf "/etc/docker/certs.d/127.0.0.1:$REG_PORT"; }
+cleanup(){ pkill -f "culvert-maint --config $PDIR/config.toml" 2>/dev/null || true; rm -rf "${SOCKDIR:-}"; dc down -v --remove-orphans >/dev/null 2>&1 || true; docker rm -f aqa-registry >/dev/null 2>&1 || true; rm -rf "/etc/docker/certs.d/127.0.0.1:$REG_PORT"; }
 trap cleanup EXIT
 
 # ── registry + images ────────────────────────────────────────────────────────
@@ -74,7 +74,9 @@ check F0 seeded-predecessor pass "running $(curl -fsS http://127.0.0.1:8080/heal
 
 # ── agent ────────────────────────────────────────────────────────────────────
 ( cd "$ROOT/cmd/culvert-maint" && go build -o "$PDIR/culvert-maint" . )
-SOCK="$PDIR/agent.sock"
+# A Unix socket path is limited to ~108 bytes; keep it short and outside the
+# (possibly deep) evidence directory.
+SOCKDIR="$(mktemp -d /tmp/aqsock.XXXXXX)"; SOCK="$SOCKDIR/agent.sock"
 cat > "$PDIR/config.toml" <<CFG
 privilege_mode = "docker_group_lab"
 compose_project_dir = "$PDIR"
