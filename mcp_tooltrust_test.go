@@ -50,6 +50,70 @@ func seedToolTrustInventory(t *testing.T) (reg *registry.Registry, cat *catalog.
 	return reg, cat, "controlled", "t", hex.EncodeToString(sum[:])
 }
 
+// observeSeededToolTrustPeerAt records a REAL authenticated peer observation of the seeded
+// controlled server, stamped at `at`, by running the PRODUCTION refresh engine against a scripted
+// peer that advertises exactly the seeded tool.
+//
+// It is OPT-IN, for the rigs whose premise is "this request should be admitted". Since round 13
+// (Codex P2, PR #1439) live admission refuses a target whose peer observation is already stale or
+// absent, BEFORE it reserves non-refundable budget — so a fixture meaning "admit" has to say the
+// peer was seen, exactly as the send-boundary fixtures had to when the boundary re-check landed
+// (see stubTrustPrecheckObservedAt). seedToolTrustInventory deliberately does NOT do this itself:
+// a seeded record carries no observation, and dozens of tests rely on that being the shipped
+// state.
+//
+// The observation goes through mcpRefreshPeerObservation, never through a hand-built record, so
+// the fixture cannot claim evidence the production path would not have produced. It must be taken
+// BEFORE any approval is granted, because an approval binds the catalog revision it saw.
+//
+// It asserts the fingerprint did not move. The fixture's whole point is "the SAME target, now
+// seen" — a refresh that changed the digest would silently turn every admission premise built on
+// it into a rug-pull case.
+func observeSeededToolTrustPeerAt(t *testing.T, serverID string, at time.Time) {
+	t.Helper()
+	observePeerAdvertisingAt(t, serverID, at, `{"tools":[{"name":"t","inputSchema":{"type":"object"}}]}`, "t")
+}
+
+// observePeerAdvertisingAt is observeSeededToolTrustPeerAt for an inventory the test republished:
+// the scripted peer advertises exactly `toolsResult`, and every tool named in `tools` must keep
+// its fingerprint and come out observed. The no-move assertion is also what proves toolsResult
+// matches the published record byte-for-byte — a fixture that advertised something else would
+// fail here rather than quietly re-fingerprint the target.
+func observePeerAdvertisingAt(t *testing.T, serverID string, at time.Time, toolsResult string, tools ...string) {
+	t.Helper()
+	_, cat := mcpInventory.sharedInventory()
+	if cat == nil {
+		t.Fatal("observe: the inventory must be published first")
+	}
+	before := make(map[string][32]byte, len(tools))
+	for _, name := range tools {
+		rec, ok := cat.Current().Get(catalog.ToolKey{Server: registry.ServerID(serverID), Name: name})
+		if !ok {
+			t.Fatalf("observe: tool %q must exist before the refresh", name)
+		}
+		before[name] = rec.Fingerprint.Sum()
+	}
+	useRefreshPeer(t, &refreshPeer{result: toolsResult})
+	prev := mcpPeerRefreshNow
+	mcpPeerRefreshNow = func() time.Time { return at }
+	defer func() { mcpPeerRefreshNow = prev }()
+	if _, reason, err := mcpRefreshPeerObservation(context.Background(), serverID); reason != "" || err != nil {
+		t.Fatalf("observe: the production refresh must succeed: reason=%q err=%v", reason, err)
+	}
+	for _, name := range tools {
+		after, ok := cat.Current().Get(catalog.ToolKey{Server: registry.ServerID(serverID), Name: name})
+		if !ok {
+			t.Fatalf("observe: tool %q must still exist after the refresh", name)
+		}
+		if after.Fingerprint.Sum() != before[name] {
+			t.Fatalf("observe: the refresh moved %q's fingerprint; the fixture must observe the SAME target", name)
+		}
+		if !after.Observed.Present() {
+			t.Fatalf("observe: the refresh must leave a peer observation on %q", name)
+		}
+	}
+}
+
 // twoToolInv is the seeded two-tool inventory a race test drives (a struct rather than a
 // six-value return to stay within the gocritic result-count bound).
 type twoToolInv struct {

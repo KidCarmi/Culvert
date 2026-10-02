@@ -73,6 +73,10 @@ func newReadFirstRig(t *testing.T, class tooltrust.ReviewedOperationClass) *read
 	resetInventory(t)
 	resetExecDeps(t)
 	_, cat, sid, tool, fpHex := seedToolTrustInventory(t)
+	// Several cases here admit the reviewed request through the real gate, which now refuses a
+	// target no peer has been seen advertising (round 13). Observed at the rig's admission
+	// instant, before the grant pins the catalog revision.
+	observeSeededToolTrustPeerAt(t, sid, canaryRuntimeTestNow)
 	_, clkFn := liveFakeClock()
 	composeToolTrust(t, clkFn)
 	grant := requestLiveClassified(t, sid, tool, fpHex, cat.Current().Revision(), liveRequester, time.Hour, class)
@@ -256,6 +260,9 @@ func TestReadFirstClass_C05_ExpiredApprovalLeavesClassificationBoundButUnauthori
 		t.Fatal("the reviewed classification must outlive the approval it was derived from")
 	}
 	// Authorization does not. The live-trust probe reports the expired grant, and the gate denies.
+	// The peer is seen at this instant so the refusal is the EXPIRED GRANT and nothing else — an
+	// unobserved target is refused before the approval is consulted (round 13).
+	observeSeededToolTrustPeerAt(t, sid, mcpToolTrust.now())
 	g := realAdmissionGate(t, capb)
 	d := g.AdmitSideEffect(driftGateInput(sid, tool, fpHex, mcpToolTrust.now()))
 	if d.Release != nil {
@@ -691,6 +698,8 @@ func TestReadFirstClass_StaleReadClassIsRefusedAfterAReviewSaysMutating(t *testi
 	resetInventory(t)
 	resetExecDeps(t)
 	_, cat, sid, tool, fpHex := seedToolTrustInventory(t)
+	// The premise admits under G1, so the peer must have been seen (round 13).
+	observeSeededToolTrustPeerAt(t, sid, canaryRuntimeTestNow)
 	_, clkFn := liveFakeClock()
 	composeToolTrust(t, clkFn)
 	requestAndApproveLiveClassified(t, sid, tool, fpHex, cat.Current().Revision(), tooltrust.ReviewedOpReadOnly)

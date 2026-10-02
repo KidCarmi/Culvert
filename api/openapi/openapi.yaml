@@ -13020,6 +13020,76 @@ paths:
         '400': { $ref: '#/components/responses/PlainBadRequest' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
         '404': { $ref: '#/components/responses/PlainNotFound' }
+  /api/mcp/servers/refresh:
+    post:
+      operationId: refreshMCPServerObservation
+      tags: [mcp]
+      summary: Authenticated peer observation refresh
+      description: >-
+        Dials ONE registered MCP server over the supported authenticated transport and re-ingests
+        its tools/list as a peer-observed catalog record. The body carries a server_id and nothing
+        else: endpoint, pinned identity, tenant, fingerprint, tools, provenance and the observation
+        timestamp all come from authoritative state or from the peer itself. Admin-only, because a
+        refresh can move a tool's catalog drift/eligibility projection. It grants no execution
+        authority - it never arms the live tier, begins a Canary generation, changes rollout mode,
+        issues an approval, promotes a tool or reserves budget - and is invokable while the node is
+        Observe, Shadow or composed-but-unarmed. One refresh per server may be in flight at a time.
+        Requires a server with a pinned identity; a server without one cannot be observed.
+      security: [ { sessionCookie: [] }, { basicAuth: [] } ]
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: admin
+      x-culvert-tenant-scope: node
+      x-culvert-stability: stable
+      x-culvert-idempotency: unsafe
+      x-culvert-introduced-version: 1.0.0
+      # medium, not high: a refresh re-ingests the catalog record for one server, so it can move
+      # that tool's drift classification and eligibility projection (an observed change demotes a
+      # promoted tool). It confers no execution authority and cannot arm, approve or activate
+      # anything - see the description above and the structural walls in
+      # mcp_peer_refresh_wall_test.go.
+      x-culvert-danger-level: medium
+      x-culvert-audit-event: mcp.server.refresh
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [server_id]
+              additionalProperties: false
+              properties:
+                server_id: { type: string, description: 'Exact registered MCP server id; no wildcard' }
+      responses:
+        '200':
+          # A 200 means the peer was reached and what it returned was ingested. It does NOT by
+          # itself mean the whole server was observed: tools/list MAY paginate and this refresh
+          # fetches ONE page, so `complete` is the qualification a caller must read. It was an
+          # untyped object, which left `complete` invisible to generated clients and let a 200 be
+          # read as a whole-server observation (Codex round 6, P2).
+          description: 'Observation recorded for the tools the peer returned on this page'
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [server_id, revision, observations, complete]
+                additionalProperties: false
+                properties:
+                  server_id: { type: string, description: 'The registered MCP server id that was refreshed' }
+                  revision: { type: integer, format: int64, minimum: 0, description: 'Catalog revision published by this ingest' }
+                  observations: { type: integer, minimum: 0, description: 'Number of tool observations in this ingest' }
+                  complete:
+                    type: boolean
+                    description: >-
+                      True when the peer returned its COMPLETE tool set. False when it paginated
+                      (MCP nextCursor) and only the first page was observed - tools beyond that
+                      page received no peer observation, so a First-Canary freshness fact for one
+                      of them will remain unsatisfied despite this success.
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+        '405': { $ref: '#/components/responses/PlainMethodNotAllowed' }
+        '409': { description: 'MCP inventory is not configured on this node', content: { text/plain: { schema: { type: string } } } }
+        '429': { description: 'A refresh for this server is already in flight, or the global refresh cap is reached', content: { text/plain: { schema: { type: string } } } }
+        '502': { description: 'The peer could not be observed', content: { text/plain: { schema: { type: string } } } }
   /api/mcp/tools:
     get:
       operationId: listMCPTools

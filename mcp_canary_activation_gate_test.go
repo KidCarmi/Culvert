@@ -131,13 +131,14 @@ func armCanaryActivationInputs(t *testing.T, in CanaryActivationInput) {
 	prev := canaryActivationInputsProbe
 	canaryActivationInputsProbe = func(_ rollout.Capability, _ rollout.ScopeSpec, _ uint64) canaryActivationInputs {
 		return canaryActivationInputs{
-			ToolApprovals:             in.ToolApprovals,
-			Budget:                    in.Budget,
-			ServerUsable:              in.ServerUsable,
-			FingerprintCurrent:        in.FingerprintCurrent,
-			ToolCatalogUsable:         in.ToolCatalogUsable,
-			ExactPolicyPermit:         in.ExactPolicyPermit,
-			FirstCanaryCredentialFree: in.FirstCanaryCredentialFree,
+			ToolApprovals:                in.ToolApprovals,
+			Budget:                       in.Budget,
+			ServerUsable:                 in.ServerUsable,
+			FingerprintCurrent:           in.FingerprintCurrent,
+			ToolCatalogUsable:            in.ToolCatalogUsable,
+			ExactPolicyPermit:            in.ExactPolicyPermit,
+			FirstCanaryCredentialFree:    in.FirstCanaryCredentialFree,
+			FirstCanaryPeerObservedFresh: in.FirstCanaryPeerObservedFresh,
 		}
 	}
 	t.Cleanup(func() { canaryActivationInputsProbe = prev })
