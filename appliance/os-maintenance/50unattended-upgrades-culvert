@@ -1,0 +1,21 @@
+// Culvert appliance: unattended-upgrades policy.
+// Installs ONLY the guest-OS SECURITY pocket (and Ubuntu Pro ESM security, when
+// attached). Never the Docker engine (held + third-party origin, upgraded
+// deliberately via `culvert-os-update --docker`), never a reboot: the operator
+// reboots inside a maintenance window with `culvert-os-update --reboot`.
+Unattended-Upgrade::Allowed-Origins {
+    "${distro_id}:${distro_codename}-security";
+    "${distro_id}ESMApps:${distro_codename}-apps-security";
+    "${distro_id}ESM:${distro_codename}-infra-security";
+};
+Unattended-Upgrade::Package-Blacklist {
+    "docker-ce";
+    "docker-ce-cli";
+    "containerd.io";
+    "docker-compose-plugin";
+};
+Unattended-Upgrade::Automatic-Reboot "false";
+Unattended-Upgrade::Remove-Unused-Kernel-Packages "true";
+Unattended-Upgrade::Remove-New-Unused-Dependencies "true";
+Unattended-Upgrade::MinimalSteps "true";
+Unattended-Upgrade::SyslogEnable "true";

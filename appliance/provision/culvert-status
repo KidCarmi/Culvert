@@ -1,0 +1,96 @@
+#!/usr/bin/env bash
+# culvert-status — console/SSH readiness summary for the Culvert appliance.
+#
+#   culvert-status            full report
+#   culvert-status --brief    one-paragraph summary (used for /etc/issue)
+#   culvert-status --json     machine-readable
+#
+# States (in order; the first that does not hold is reported):
+#   provisioning   first-boot steps not complete (or failed)
+#   services       proxy answers /health on 127.0.0.1:8080 → "services running"
+#   setup          admin account created (GET /api/setup/status → needsSetup=false)
+#   enforce        /ready is 200 AND policy_loaded=ok AND (no CA row or ca=ok)
+#                  → "ready to enforce"
+# The loopback probe of the admin UI uses -k: the admin certificate is self-signed
+# at first boot and this reads only a boolean from the local process.
+set -uo pipefail
+STATE=/var/lib/culvert-appliance/state
+BUILD=/var/lib/culvert-appliance/build-info.json
+MODE="${1:-full}"
+
+ver="$(python3 -c 'import json;d=json.load(open("'"$BUILD"'"));print(d["appliance"]["version"]+" (app "+d["application"]["tag"]+")")' 2>/dev/null || echo unknown)"
+addrs="$(ip -4 -o addr show scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | paste -sd' ' || true)"
+primary="$(printf '%s' "$addrs" | awk '{print $1}')"
+
+prov="incomplete"
+if [[ -f "$STATE/complete.done" ]]; then prov="complete"
+elif systemctl is-failed --quiet culvert-firstboot.service 2>/dev/null; then prov="FAILED (journalctl -u culvert-firstboot; restart with: sudo systemctl restart culvert-firstboot)"
+elif systemctl is-active --quiet culvert-firstboot.service 2>/dev/null; then prov="running"
+fi
+
+health_code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 http://127.0.0.1:8080/health 2>/dev/null || true)"; health_code="${health_code:-000}"
+ready_json="$(curl -s --max-time 3 http://127.0.0.1:8080/ready 2>/dev/null || true)"
+ready_code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 http://127.0.0.1:8080/ready 2>/dev/null || true)"; ready_code="${ready_code:-000}"
+setup_json="$(curl -sk --max-time 3 https://127.0.0.1:9090/api/setup/status 2>/dev/null || true)"
+
+services="no"; [[ "$health_code" == "200" ]] && services="yes"
+needs_setup="unknown"
+case "$setup_json" in
+  *'"needsSetup":true'*)  needs_setup="yes" ;;
+  *'"needsSetup":false'*) needs_setup="no" ;;
+esac
+policy_ok="unknown"; ca_ok="n/a"
+if [[ -n "$ready_json" ]]; then
+  read -r policy_ok ca_ok <<<"$(printf '%s' "$ready_json" | python3 -c '
+import json,sys
+try: d=json.load(sys.stdin)
+except Exception: print("unknown unknown"); sys.exit()
+c=d.get("checks",{}) or {}
+p=c.get("policy_loaded",{}).get("status","absent")
+ca=c.get("ca",{}).get("status","n/a") if "ca" in c else "n/a"
+print(p, ca)')"
+fi
+enforce="no"
+if [[ "$ready_code" == "200" && "$policy_ok" == "ok" && ( "$ca_ok" == "ok" || "$ca_ok" == "n/a" ) ]]; then enforce="yes"; fi
+
+if   [[ "$prov" != "complete" ]]; then state="provisioning ($prov)"
+elif [[ "$services" != "yes" ]]; then state="provisioned, services NOT answering (check: cd /srv/culvert && sudo docker compose ps)"
+elif [[ "$needs_setup" == "yes" ]]; then state="services running — setup pending (create the first admin at https://${primary:-<address>}:9090)"
+elif [[ "$enforce" == "yes" ]]; then state="ready to enforce"
+else state="setup complete — not yet ready to enforce (policy_loaded=$policy_ok, ca=$ca_ok, /ready=$ready_code)"
+fi
+
+case "$MODE" in
+  --json)
+    python3 - "$ver" "$addrs" "$prov" "$services" "$needs_setup" "$policy_ok" "$ca_ok" "$ready_code" "$state" <<'PY'
+import json,sys
+a=sys.argv[1:]
+print(json.dumps({"appliance_version":a[0],"addresses":a[1].split(),"provisioning":a[2],"services_running":a[3]=="yes",
+  "needs_setup":a[4],"policy_loaded":a[5],"ca":a[6],"ready_http":a[7],"state":a[8]}))
+PY
+    ;;
+  --brief)
+    printf 'Culvert appliance %s\n' "$ver"
+    printf '  State:       %s\n' "$state"
+    printf '  Management:  https://%s:9090   Proxy: http://%s:8080\n' "${primary:-<no address yet>}" "${primary:-<no address yet>}"
+    printf '  Console:     login as "culvert"; run  culvert-status  /  culvert-net  /  culvert-os-update\n'
+    ;;
+  *)
+    printf 'Culvert appliance %s\n' "$ver"
+    printf '  Addresses:          %s\n' "${addrs:-none}"
+    printf '  Provisioning:       %s\n' "$prov"
+    printf '  Services running:   %s (GET http://127.0.0.1:8080/health → %s)\n' "$services" "$health_code"
+    setup_done="unknown"; [[ "$needs_setup" == no ]] && setup_done="yes"; [[ "$needs_setup" == yes ]] && setup_done="no"
+    printf '  Setup complete:     %s\n' "$setup_done"
+    printf '  Ready (/ready):     HTTP %s  policy_loaded=%s  ca=%s\n' "$ready_code" "$policy_ok" "$ca_ok"
+    printf '  Ready to enforce:   %s\n' "$enforce"
+    printf '  STATE:              %s\n' "$state"
+    printf '  Management UI:      https://%s:9090\n' "${primary:-<address>}"
+    printf '  Proxy endpoint:     http://%s:8080  (PAC: http://%s:8080/proxy.pac)\n' "${primary:-<address>}" "${primary:-<address>}"
+    if [[ -n "$ready_json" ]]; then printf '  /ready rows:        '; printf '%s' "$ready_json" | python3 -c '
+import json,sys
+try: d=json.load(sys.stdin)
+except Exception: print("unparsable"); sys.exit()
+print(", ".join(f"{k}={v.get(\"status\")}" for k,v in sorted((d.get("checks") or {}).items())))'; fi
+    ;;
+esac

@@ -1,0 +1,140 @@
+# Culvert appliance — reproducible OVA build record
+
+**Status (2026-10-02):** build path implemented and executed on a KVM-less
+build host (libguestfs under TCG). What was actually produced and what was
+blocked is in [`astra-evidence.md`](astra-evidence.md); this page is the build
+contract.
+
+## What the OVA is
+
+A single-disk x86_64 virtual machine (`vmx-13`, 2 vCPU, 4 GB RAM, 40 GB thin
+disk, one E1000 NIC) whose guest OS is **Ubuntu 24.04 LTS** (standard security
+maintenance until **2029-04**, Ubuntu Pro ESM until 2034-04). Pre-baked into the
+disk, all pinned in [`appliance/build/manifest.env`](../../appliance/build/manifest.env):
+
+| Layer | Content | Pin |
+|-------|---------|-----|
+| Guest OS | Ubuntu `noble` cloud image, serial `20260926` | SHA256 + Ubuntu's GPG signature on `SHA256SUMS` |
+| Container engine | `docker-ce`, `docker-ce-cli`, `containerd.io`, `docker-compose-plugin` from `download.docker.com` (`apt-mark hold`) | exact `.deb` versions + repo key fingerprint |
+| Application | `ghcr.io/kidcarmi/culvert:v1.0.259` as a `docker save` tar, loaded at first boot | OCI **index digest** + asserted amd64 manifest digest; cosign keyless verification against the pinned release identity **at build time** |
+| AV sidecar | `clamav/clamav:1.4` (as `docker-compose.yml` names it) as a tar | index + amd64 digests |
+| Installer | `scripts/install.sh` from the building checkout (SHA256 recorded) | git commit in `build-info.json` |
+| Provisioning | `appliance/provision/*`, `appliance/os-maintenance/*` | git commit |
+
+Nothing per-instance ships in the image: no SSH host keys, empty
+`/etc/machine-id`, the `culvert` console account is **locked** (no password, no
+key), no proxy/apt residue from the build host. `build-ova.sh` re-checks each of
+these from outside the guest before packaging and refuses to package otherwise.
+
+The ClamAV **signature database** (~250 MB) is NOT pre-baked — it would be
+stale by import time; the sidecar downloads it on first start (see first-boot).
+
+## Build host requirements
+
+* Linux, `qemu-img`, libguestfs (`virt-customize`, `virt-cat`, `virt-ls`),
+  `docker` with daemon access, `curl`, `tar`, `gzip`, `sha256sum`, `python3`.
+  Optional: `gpgv` + `/usr/share/keyrings/ubuntu-cloudimage-keyring.gpg`
+  (present on Ubuntu hosts) for base-image signature verification.
+* **No KVM required.** libguestfs falls back to TCG (`accel=kvm:tcg`); the
+  in-guest package install then takes 10–30 minutes instead of ~2.
+* A host **kernel package** must be installed (`/boot/vmlinuz-*` +
+  `/lib/modules/*`) — supermin builds the libguestfs appliance from it. In a
+  container that lacks one: `apt-get install linux-image-virtual` (that is what
+  the 2026-10-02 build did).
+* Outbound HTTPS to `cloud-images.ubuntu.com`, `download.docker.com`,
+  `archive.ubuntu.com`/`security.ubuntu.com` (in-guest apt), `ghcr.io`,
+  `registry-1.docker.io`, and the Sigstore endpoints
+  (`fulcio.sigstore.dev`, `rekor.sigstore.dev`, `tuf-repo-cdn.sigstore.dev`)
+  for cosign. The build honours `HTTPS_PROXY`/`SSL_CERT_FILE` for its own
+  pulls/cosign only; nothing from them reaches the guest.
+* ~8 GB free in `--work` (base image, working qcow2, VMDK).
+
+## Running it
+
+```bash
+# from the repository root, on the commit being released
+appliance/build/build-ova.sh --out appliance/build/out --work /var/tmp/culvert-ova
+#   --skip-cosign        do not cosign-verify the proxy image (dev only; recorded in build-info)
+#   --stop-after disk    stop at the customized qcow2 (boot/test it; no VMDK/OVA)
+#   --stop-after vmdk    stop after the streamOptimized VMDK
+#   --keep-work          keep the working directory for inspection
+```
+
+Outputs in `--out`:
+
+* `culvert-appliance-<version>-ubuntu-24.04.ova` and `.ova.sha256`
+* `build-info.json` — guest OS + package sources, architecture, tool versions
+  (qemu-img, libguestfs, docker, cosign image), application image digests and
+  cosign result, host component versions (pinned Docker versions,
+  `culvert-maint --version` taken from the image's deploy bundle), git commit
+  + dirty flag, `SOURCE_DATE_EPOCH`, build timestamp, final OVA SHA256
+* `dpkg-list.txt` and `host-components.txt` — the guest package inventory,
+  captured inside the guest during the build (input for the SBOM evidence)
+
+The OVA is a ustar archive in OVF order (descriptor, disk, manifest) with fixed
+owner/mtime (`SOURCE_DATE_EPOCH`, default: the git commit time). The `.mf`
+carries `SHA256(...)` lines for the descriptor and the VMDK, which vSphere
+verifies on import.
+
+## Pipeline (what `build-ova.sh` does, in order)
+
+1. Source `manifest.env`; refuse to run if any pin is missing; check tools.
+2. Download the base image into the work cache (or reuse it); verify the SHA256
+   pin; when the keyring is present, `gpgv` the upstream `SHA256SUMS` and assert
+   the pin is the signed value.
+3. `docker pull <repo>@<index digest>` for both images; assert the resolved
+   platform is `linux/amd64` and that the index's amd64 entry equals the pinned
+   amd64 digest; tag `repo:tag` locally.
+4. `cosign verify` (pinned `ghcr.io/sigstore/cosign/cosign:v3.0.6`, issuer +
+   SAN regex identical to `scripts/install.sh` / `release_identity.env`) of the
+   proxy image. Failure aborts the build.
+5. Stage the overlay: `docker save | gzip -n` of both images, `scripts/install.sh`,
+   provisioning + maintenance files, `manifest.env`, `build-info.json`.
+6. Copy the base image to a working qcow2, `qemu-img resize` to 40 GB
+   (cloud-init `growpart` grows `/` at first boot).
+7. `virt-customize`: copy the overlay in, run
+   [`prepare-guest.sh`](../../appliance/build/prepare-guest.sh) inside the guest
+   (Docker repo key fingerprint check → pinned package install → hold →
+   `daemon.json` with the containerd image store + live-restore → units,
+   firewall, sshd/cloud-init drop-ins, locked `culvert` account → package
+   inventory → identity strip).
+8. Outside-the-guest assertions (pinned `docker-ce` present, empty machine-id,
+   no host keys, no proxy config, no authorized keys, console account locked).
+9. `qemu-img convert -O vmdk -o subformat=streamOptimized,adapter_type=lsilogic`,
+   render the OVF from `culvert-appliance.ovf.tmpl`, write the `.mf`, tar.
+
+## Reproducibility — what is and is not claimed
+
+* **Input-pinned reproducibility (claimed):** two builds of the same
+  `manifest.env` + commit install identical package versions, embed byte-identical
+  image tars (same digests, `gzip -n`) and identical provisioning files, and
+  their `build-info.json` differ only in `build_wallclock`, `build_tools`
+  versions and the OVA checksum. The pins are the verification surface.
+* **Bit-for-bit reproducibility (not claimed):** `apt-get install` inside the
+  guest writes timestamps (`/var/lib/dpkg/*`, apt caches), so the VMDK — and
+  therefore the OVA checksum — differs run to run. Verify an OVA against its
+  `.ova.sha256`/`build-info.json` from the release, not by rebuilding it.
+* The base image serial is pinned, so a newer Ubuntu cloud image is a manifest
+  change, never a silent drift.
+
+## Why Ubuntu 24.04 and not Debian 12 / Ubuntu 26.04
+
+Debian 12 "bookworm" moved to LTS-only maintenance in 2026-06 (release
+2023-06 + 3 years), so at pin time it no longer receives security-team updates.
+Ubuntu 24.04 LTS has free security maintenance to 2029-04 and is the
+release Docker's repository, `open-vm-tools` and cloud-init are all current on.
+Ubuntu 26.04 LTS (2026-04) would extend the horizon by two years; it was not
+chosen for the pilot because `scripts/install.sh`'s host-side testing and the
+project CI run on 24.04. Moving is a manifest change plus a re-qualification.
+
+## Updating the pins
+
+| Pin | How to find the new value |
+|-----|---------------------------|
+| Base image | `https://cloud-images.ubuntu.com/releases/noble/` → newest `release-YYYYMMDD` → `SHA256SUMS` line for `ubuntu-24.04-server-cloudimg-amd64.img` |
+| Docker packages | `https://download.docker.com/linux/ubuntu/dists/noble/stable/binary-amd64/Packages` (the build script's own `pull`/`apt` steps fail loudly on a typo) |
+| Proxy image | the signed release catalog's `recommended` digest for the channel (`docs/operator/catalog-bootstrap-install-runbook.md`); `docker manifest inspect ghcr.io/kidcarmi/culvert:vX.Y.Z` for the amd64 entry |
+| ClamAV | `docker manifest inspect clamav/clamav:1.4` |
+
+A pin change is a reviewed commit; `build-info.json` of the resulting OVA is
+the release record.

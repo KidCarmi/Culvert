@@ -1,0 +1,11 @@
+== culvert-v1.0.259
+  SBOM components: 934 {'library': 123, 'operating-system': 1, 'file': 810}; os: alpine 3.24.2
+  trivy targets: [('ghcr.io/kidcarmi/culvert@sha256:238ba99b61e1903485c4e86a2dbac33e12aa2bbc52a2861ee499f1825610347e (alpine 3.24.2)', 'alpine', 0), ('app/culvert', 'gobinary', 1), ('app/deploy/bin/culvert-maint', 'gobinary', 0)]
+  vulnerabilities by severity: {'UNKNOWN': 1}; fixed/unfixed: {'unfixed': 1}; secrets: 0
+  - GO-2026-5932 UNKNOWN golang.org/x/crypto v0.57.0 fixed=- status=affected | The golang.org/x/crypto/openpgp package is unmaintained, unsafe by design, and has known s
+== clamav-1.4
+  SBOM components: 789 {'library': 41, 'operating-system': 1, 'file': 747}; os: alpine 3.24.2
+  trivy targets: [('clamav/clamav@sha256:57deb108fc4c72778aa83eafbca7bb7153e28c3f57c005afd38d31f16da86f23 (alpine 3.24.2)', 'alpine', 2)]
+  vulnerabilities by severity: {'MEDIUM': 1, 'HIGH': 1}; fixed/unfixed: {'fixed': 2}; secrets: 0
+  - CVE-2026-58055 MEDIUM nghttp2-libs 1.69.0-r0 fixed=1.70.0-r0 status=fixed | nghttp2: nghttp2: HTTP Request/Response Smuggling and Response-Queue Poisoning via ambiguo
+  - CVE-2026-103111 HIGH pcre2 10.48-r0 fixed=10.49-r0 status=fixed | pcre2: pcre2: Out-of-bounds write via crafted regular expression

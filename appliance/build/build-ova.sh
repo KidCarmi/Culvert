@@ -1,0 +1,293 @@
+#!/usr/bin/env bash
+# build-ova.sh — reproducible (input-pinned) Culvert appliance OVA build.
+#
+#   appliance/build/build-ova.sh [--out DIR] [--work DIR] [--skip-cosign]
+#                                [--stop-after disk|vmdk] [--keep-work]
+#
+# Pipeline (every input is a pin in manifest.env; nothing is resolved "latest"):
+#   1. fetch + verify the base cloud image (SHA256 pin, GPG when the Ubuntu
+#      cloud-image keyring is present on the build host)
+#   2. pull the application images BY DIGEST, assert the amd64 platform digest,
+#      cosign-verify the proxy image against the pinned release identity
+#   3. stage the overlay: docker-saved image tars, scripts/install.sh from THIS
+#      checkout, provisioning + maintenance files, build-info.json
+#   4. virt-customize (libguestfs; works under TCG — no KVM needed) runs
+#      prepare-guest.sh inside the disk: pinned Docker packages, units, firewall,
+#      sshd/cloud-init config, identity strip
+#   5. verify from OUTSIDE the guest that no build-host residue survived
+#   6. qemu-img → streamOptimized VMDK → OVF (+ .mf SHA256) → tar → .ova
+#
+# Outputs (in --out): culvert-appliance-<ver>-<os>.ova, .ova.sha256,
+#   build-info.json, dpkg-list.txt (guest package inventory for SBOM evidence),
+#   host-components.txt.
+#
+# Requires: qemu-img, virt-customize, virt-cat, virt-ls, docker (daemon access),
+# curl, gzip, tar, sha256sum, python3; gpgv + ubuntu-cloudimage-keyring optional.
+set -euo pipefail
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO="$(cd "$HERE/../.." && pwd)"
+MANIFEST="$HERE/manifest.env"
+OUT="$REPO/appliance/build/out"
+WORK="${TMPDIR:-/tmp}/culvert-ova-build"
+SKIP_COSIGN=0
+STOP_AFTER=""
+KEEP_WORK=0
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --out) OUT="$2"; shift 2 ;;
+    --work) WORK="$2"; shift 2 ;;
+    --skip-cosign) SKIP_COSIGN=1; shift ;;
+    --stop-after) STOP_AFTER="$2"; shift 2 ;;
+    --keep-work) KEEP_WORK=1; shift ;;
+    -h|--help) sed -n '2,24p' "$0"; exit 0 ;;
+    *) echo "unknown argument: $1" >&2; exit 2 ;;
+  esac
+done
+
+log()  { printf '\033[0;36m[build]\033[0m %s\n' "$*"; }
+die()  { printf '\033[0;31m[build] ERROR:\033[0m %s\n' "$*" >&2; exit 1; }
+
+set -a
+# shellcheck source=appliance/build/manifest.env
+. "$MANIFEST"
+set +a
+for v in BASE_IMAGE_URL BASE_IMAGE_SHA256 APP_IMAGE_REPO APP_IMAGE_TAG APP_IMAGE_INDEX_DIGEST \
+         APP_IMAGE_AMD64_DIGEST CLAMAV_IMAGE_REPO CLAMAV_IMAGE_TAG CLAMAV_IMAGE_INDEX_DIGEST \
+         CLAMAV_IMAGE_AMD64_DIGEST DOCKER_CE_VERSION VM_DISK_GB VM_VCPUS VM_MEMORY_MB VM_HW_VERSION; do
+  [[ -n "${!v:-}" ]] || die "manifest.env: $v is not set"
+done
+
+for t in qemu-img virt-customize virt-cat virt-ls docker curl gzip tar sha256sum python3; do
+  command -v "$t" >/dev/null 2>&1 || die "required tool missing: $t"
+done
+docker info >/dev/null 2>&1 || die "docker daemon not reachable"
+[[ -f "$REPO/scripts/install.sh" ]] || die "scripts/install.sh not found at $REPO"
+
+# SOURCE_DATE_EPOCH: the git commit time of this checkout unless the caller
+# pins one. Used for every mtime the build controls (tar, gzip).
+if [[ -z "${SOURCE_DATE_EPOCH:-}" ]]; then
+  SOURCE_DATE_EPOCH="$(git -C "$REPO" log -1 --format=%ct 2>/dev/null || date +%s)"
+fi
+export SOURCE_DATE_EPOCH
+GIT_COMMIT="$(git -C "$REPO" rev-parse HEAD 2>/dev/null || echo unknown)"
+GIT_DIRTY="false"; [[ -n "$(git -C "$REPO" status --porcelain 2>/dev/null)" ]] && GIT_DIRTY="true"
+
+VERSION="${APPLIANCE_VERSION:-${APP_IMAGE_TAG#v}}"
+OVA_BASENAME="${APPLIANCE_NAME}-${VERSION}-${GUEST_OS_ID}"
+mkdir -p "$OUT" "$WORK/cache" "$WORK/overlay"
+cleanup() { if [[ "$KEEP_WORK" -eq 0 ]]; then rm -rf "$WORK/overlay" "$WORK/disk.qcow2" "$WORK/ova"; fi; }
+trap cleanup EXIT
+
+# ── 1. Base image ───────────────────────────────────────────────────────────
+BASE_FILE="$WORK/cache/$(basename "$BASE_IMAGE_URL")"
+if [[ ! -f "$BASE_FILE" ]]; then
+  log "downloading base image $(basename "$BASE_IMAGE_URL")"
+  curl -fsSL -o "$BASE_FILE.part" "$BASE_IMAGE_URL" && mv "$BASE_FILE.part" "$BASE_FILE"
+fi
+echo "${BASE_IMAGE_SHA256}  ${BASE_FILE}" | sha256sum -c --quiet - || die "base image SHA256 mismatch (manifest BASE_IMAGE_SHA256)"
+log "base image SHA256 OK"
+BASE_GPG="skipped (keyring or gpgv not available on build host)"
+if command -v gpgv >/dev/null 2>&1 && [[ -f "${BASE_IMAGE_KEYRING:-/nonexistent}" ]]; then
+  curl -fsSL -o "$WORK/cache/SHA256SUMS" "$BASE_IMAGE_SUMS_URL"
+  curl -fsSL -o "$WORK/cache/SHA256SUMS.gpg" "$BASE_IMAGE_SUMS_SIG_URL"
+  gpgv --keyring "$BASE_IMAGE_KEYRING" "$WORK/cache/SHA256SUMS.gpg" "$WORK/cache/SHA256SUMS" 2>"$WORK/cache/gpgv.log" \
+    || die "GPG verification of SHA256SUMS failed: $(cat "$WORK/cache/gpgv.log")"
+  grep -q "^${BASE_IMAGE_SHA256} \*$(basename "$BASE_IMAGE_URL")$" "$WORK/cache/SHA256SUMS" \
+    || die "pinned SHA256 is not the one Ubuntu signed for this image"
+  BASE_GPG="verified ($(grep -o 'using RSA key [0-9A-F]*' "$WORK/cache/gpgv.log" | head -1))"
+  log "base image GPG: $BASE_GPG"
+fi
+
+# ── 2. Application images by digest ─────────────────────────────────────────
+pull_by_digest() { # repo index_digest amd64_digest tag
+  local repo="$1" idx="$2" amd="$3" tag="$4"
+  log "pulling ${repo}@${idx}"
+  docker pull -q "${repo}@${idx}" >/dev/null
+  local arch
+  arch="$(docker image inspect "${repo}@${idx}" --format '{{.Architecture}}/{{.Os}}')"
+  [[ "$arch" == "amd64/linux" ]] || die "${repo}@${idx} resolved to $arch, want amd64/linux"
+  local got
+  got="$(docker manifest inspect "${repo}@${idx}" | python3 -c '
+import json,sys
+m=json.load(sys.stdin)
+for e in m.get("manifests",[]):
+    p=e.get("platform",{})
+    if p.get("architecture")=="amd64" and p.get("os")=="linux":
+        print(e["digest"]); break')"
+  [[ "$got" == "$amd" ]] || die "${repo}: amd64 platform digest is $got, manifest pins $amd"
+  docker tag "${repo}@${idx}" "${repo}:${tag}"
+}
+pull_by_digest "$APP_IMAGE_REPO" "$APP_IMAGE_INDEX_DIGEST" "$APP_IMAGE_AMD64_DIGEST" "$APP_IMAGE_TAG"
+pull_by_digest "$CLAMAV_IMAGE_REPO" "$CLAMAV_IMAGE_INDEX_DIGEST" "$CLAMAV_IMAGE_AMD64_DIGEST" "$CLAMAV_IMAGE_TAG"
+
+COSIGN_RESULT="skipped (--skip-cosign)"
+if [[ "$SKIP_COSIGN" -eq 0 ]]; then
+  log "cosign-verifying ${APP_IMAGE_REPO}@${APP_IMAGE_INDEX_DIGEST} (keyless, pinned identity)"
+  # Honour a build-host HTTPS proxy + CA bundle if present; nothing of it reaches the guest.
+  cosign_env=(--network host)
+  [[ -n "${HTTPS_PROXY:-}" ]] && cosign_env+=(-e "HTTPS_PROXY=$HTTPS_PROXY")
+  [[ -n "${SSL_CERT_FILE:-}" && -f "${SSL_CERT_FILE:-}" ]] && cosign_env+=(-e SSL_CERT_FILE=/build-ca.crt -v "$SSL_CERT_FILE:/build-ca.crt:ro")
+  docker run --rm "${cosign_env[@]}" "$COSIGN_IMAGE" verify --timeout=120s \
+    --certificate-oidc-issuer="$SIGSTORE_ISSUER" \
+    --certificate-identity-regexp="$SIGSTORE_SAN_REGEX" \
+    "${APP_IMAGE_REPO}@${APP_IMAGE_INDEX_DIGEST}" >"$WORK/cosign.log" 2>&1 \
+    || die "cosign verification FAILED: $(tail -3 "$WORK/cosign.log")"
+  COSIGN_RESULT="verified (issuer=$SIGSTORE_ISSUER san=$SIGSTORE_SAN_REGEX)"
+fi
+
+# Versions carried by the image (the deploy bundle's maintenance agent is the
+# host component install.sh installs at first boot).
+cid="$(docker create "${APP_IMAGE_REPO}@${APP_IMAGE_INDEX_DIGEST}")"
+docker cp "$cid:/app/VERSION" "$WORK/app-VERSION" >/dev/null
+docker cp "$cid:/app/deploy/bin/culvert-maint" "$WORK/culvert-maint" >/dev/null
+docker rm "$cid" >/dev/null
+APP_VERSION="$(tr -d '[:space:]' < "$WORK/app-VERSION")"
+MAINT_VERSION="$("$WORK/culvert-maint" --version 2>/dev/null || echo unknown)"
+rm -f "$WORK/culvert-maint" "$WORK/app-VERSION"
+
+# ── 3. Overlay ──────────────────────────────────────────────────────────────
+OV="$WORK/overlay"
+rm -rf "$OV"; mkdir -p "$OV/opt/culvert-appliance" "$OV/var/lib/culvert-appliance/images"
+cp -r "$REPO/appliance/provision" "$REPO/appliance/os-maintenance" "$OV/opt/culvert-appliance/"
+cp "$REPO/scripts/install.sh" "$OV/opt/culvert-appliance/install.sh"
+cp "$MANIFEST" "$OV/var/lib/culvert-appliance/manifest.env"
+mkdir -p "$OV/opt/culvert-appliance/bin"
+# prepare-guest.sh rides in the overlay: virt-customize --run executes a script
+# with /bin/sh (dash) regardless of its shebang, so it is invoked via bash.
+cp "$HERE/prepare-guest.sh" "$OV/opt/culvert-appliance/prepare-guest.sh"
+
+save_image() { # ref out.tar.gz
+  log "docker save $1"
+  docker save "$1" | gzip -n -6 > "$2"
+}
+save_image "${APP_IMAGE_REPO}:${APP_IMAGE_TAG}"       "$OV/var/lib/culvert-appliance/images/culvert.tar.gz"
+save_image "${CLAMAV_IMAGE_REPO}:${CLAMAV_IMAGE_TAG}"  "$OV/var/lib/culvert-appliance/images/clamav.tar.gz"
+APP_TAR_SHA="$(sha256sum "$OV/var/lib/culvert-appliance/images/culvert.tar.gz" | cut -d' ' -f1)"
+CLAM_TAR_SHA="$(sha256sum "$OV/var/lib/culvert-appliance/images/clamav.tar.gz" | cut -d' ' -f1)"
+INSTALL_SHA="$(sha256sum "$REPO/scripts/install.sh" | cut -d' ' -f1)"
+
+BUILD_TS="$(date -u -d "@$SOURCE_DATE_EPOCH" +%Y-%m-%dT%H:%M:%SZ)"
+BUILD_WALL="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+BI_INSTALL_SHA="$INSTALL_SHA" BI_APP_VERSION="$APP_VERSION" BI_MAINT_VERSION="$MAINT_VERSION" \
+BI_COSIGN="$COSIGN_RESULT" BI_BASE_GPG="$BASE_GPG" BI_APP_TAR_SHA="$APP_TAR_SHA" BI_CLAM_TAR_SHA="$CLAM_TAR_SHA" \
+BI_VERSION="$VERSION" BI_OVA="$OVA_BASENAME.ova" BI_GIT_COMMIT="$GIT_COMMIT" BI_GIT_DIRTY="$GIT_DIRTY" \
+BI_BUILD_TS="$BUILD_TS" BI_BUILD_WALL="$BUILD_WALL" \
+python3 - "$OV/var/lib/culvert-appliance/build-info.json" <<'PY'
+import json, os, subprocess, sys
+E = os.environ
+def v(cmd):
+    try: return subprocess.check_output(cmd, shell=True, text=True).strip()
+    except Exception: return "unknown"
+info = {
+  "schema": 1,
+  "appliance": {"name": E["APPLIANCE_NAME"], "version": E["BI_VERSION"], "arch": E["APPLIANCE_ARCH"],
+                "ova": E["BI_OVA"], "product": E["APPLIANCE_PRODUCT"]},
+  "source": {"git_commit": E["BI_GIT_COMMIT"], "git_dirty": E["BI_GIT_DIRTY"] == "true",
+             "source_date_epoch": int(E["SOURCE_DATE_EPOCH"]), "build_timestamp": E["BI_BUILD_TS"],
+             "build_wallclock": E["BI_BUILD_WALL"], "install_sh_sha256": E["BI_INSTALL_SHA"]},
+  "guest_os": {"id": E["GUEST_OS_ID"], "name": E["GUEST_OS_NAME"], "codename": E["GUEST_OS_CODENAME"],
+               "base_image_url": E["BASE_IMAGE_URL"], "base_image_sha256": E["BASE_IMAGE_SHA256"],
+               "base_image_serial": E["BASE_IMAGE_SERIAL"], "base_image_gpg": E["BI_BASE_GPG"],
+               "standard_support_until": E["GUEST_OS_STANDARD_SUPPORT_UNTIL"], "esm_support_until": E["GUEST_OS_ESM_SUPPORT_UNTIL"],
+               "package_sources": [E["BASE_IMAGE_URL"] + " (preinstalled)",
+                                   E["DOCKER_APT_URL"] + " " + E["GUEST_OS_CODENAME"] + " stable (key " + E["DOCKER_APT_KEY_FPR"] + ")"]},
+  "host_components_pinned": {"docker-ce": E["DOCKER_CE_VERSION"], "docker-ce-cli": E["DOCKER_CE_CLI_VERSION"],
+               "containerd.io": E["CONTAINERD_IO_VERSION"], "docker-compose-plugin": E["DOCKER_COMPOSE_PLUGIN_VERSION"],
+               "culvert-maint (from image deploy bundle)": E["BI_MAINT_VERSION"]},
+  "application": {"image": E["APP_IMAGE_REPO"], "tag": E["APP_IMAGE_TAG"], "index_digest": E["APP_IMAGE_INDEX_DIGEST"],
+                  "amd64_digest": E["APP_IMAGE_AMD64_DIGEST"], "app_version_file": E["BI_APP_VERSION"],
+                  "cosign": E["BI_COSIGN"], "baked_tar_sha256": E["BI_APP_TAR_SHA"],
+                  "clamav_image": E["CLAMAV_IMAGE_REPO"], "clamav_tag": E["CLAMAV_IMAGE_TAG"],
+                  "clamav_index_digest": E["CLAMAV_IMAGE_INDEX_DIGEST"], "clamav_amd64_digest": E["CLAMAV_IMAGE_AMD64_DIGEST"],
+                  "clamav_baked_tar_sha256": E["BI_CLAM_TAR_SHA"]},
+  "virtual_hardware": {"vcpus": int(E["VM_VCPUS"]), "memory_mb": int(E["VM_MEMORY_MB"]), "disk_gb": int(E["VM_DISK_GB"]),
+                       "hw_version": E["VM_HW_VERSION"], "nic": "E1000 x1", "disk_format": "vmdk streamOptimized (thin)"},
+  "build_tools": {"qemu-img": v("qemu-img --version | head -1"), "libguestfs": v("virt-customize --version"),
+                  "docker": v("docker version --format '{{.Server.Version}}'"), "cosign_image": E["COSIGN_IMAGE"],
+                  "build_host": v(". /etc/os-release && echo $PRETTY_NAME"), "kvm": v("test -e /dev/kvm && echo yes || echo 'no (TCG)'")}
+}
+json.dump(info, open(sys.argv[1], "w"), indent=2); open(sys.argv[1], "a").write("\n")
+PY
+cp "$OV/var/lib/culvert-appliance/build-info.json" "$OUT/build-info.json"
+log "build-info.json written"
+
+# ── 4. Disk ─────────────────────────────────────────────────────────────────
+DISK="$WORK/disk.qcow2"
+log "preparing ${VM_DISK_GB}G qcow2 working disk"
+cp --reflink=auto "$BASE_FILE" "$DISK"
+qemu-img resize -q "$DISK" "${VM_DISK_GB}G"   # cloud-init growpart grows / at first boot
+
+log "virt-customize (libguestfs; this runs the guest under TCG when no KVM is present — expect 10-30 min)"
+virt-customize -a "$DISK" --smp 2 --memsize 2048 \
+  --hostname culvert-appliance --timezone UTC \
+  --copy-in "$OV/opt/culvert-appliance:/opt" \
+  --copy-in "$OV/var/lib/culvert-appliance:/var/lib" \
+  --run-command "bash /opt/culvert-appliance/prepare-guest.sh" \
+  --no-logfile 2>&1 | tee "$WORK/virt-customize.log" | grep -v '^\[ *[0-9.]*\] Running: ' || true
+grep -q 'prepare-guest: done' "$WORK/virt-customize.log" || die "prepare-guest.sh did not finish (see $WORK/virt-customize.log)"
+
+# ── 5. Outside-the-guest checks ─────────────────────────────────────────────
+log "verifying guest contents"
+virt-cat -a "$DISK" /var/lib/culvert-appliance/dpkg-list.txt       > "$OUT/dpkg-list.txt"
+virt-cat -a "$DISK" /var/lib/culvert-appliance/host-components.txt > "$OUT/host-components.txt"
+grep -q "^docker-ce	${DOCKER_CE_VERSION}	amd64$" "$OUT/dpkg-list.txt" || die "docker-ce is not the pinned version in the guest"
+[[ "$(virt-cat -a "$DISK" /etc/machine-id | wc -c)" -eq 0 ]] || die "machine-id not empty"
+if virt-ls -a "$DISK" /etc/ssh/ | grep -q '^ssh_host_'; then die "ssh host keys present in image"; fi
+if virt-ls -a "$DISK" /etc/apt/apt.conf.d/ | grep -qi proxy; then die "apt proxy config leaked into image"; fi
+if virt-ls -a "$DISK" /home/culvert/ 2>/dev/null | grep -q '^\.ssh$'; then die "authorized keys leaked into image"; fi
+shadow_line="$(virt-cat -a "$DISK" /etc/shadow | grep '^culvert:' || true)"
+[[ "$shadow_line" == culvert:!* ]] || die "console account is not locked in the image"
+log "guest checks OK (pinned docker, empty machine-id, no host keys, no proxy residue, console account locked)"
+[[ "$STOP_AFTER" == "disk" ]] && { cp "$DISK" "$OUT/$OVA_BASENAME.qcow2"; log "stopped after disk: $OUT/$OVA_BASENAME.qcow2"; KEEP_WORK=1; exit 0; }
+
+# ── 6. VMDK + OVF + OVA ─────────────────────────────────────────────────────
+OVADIR="$WORK/ova"; rm -rf "$OVADIR"; mkdir -p "$OVADIR"
+VMDK="$OVADIR/$OVA_BASENAME-disk1.vmdk"
+log "converting to streamOptimized VMDK"
+qemu-img convert -p -f qcow2 -O vmdk -o subformat=streamOptimized,adapter_type=lsilogic "$DISK" "$VMDK" | tr '\r' '\n' | tail -1
+VMDK_SIZE="$(stat -c %s "$VMDK")"
+POPULATED="$(qemu-img info --output=json "$DISK" | python3 -c 'import json,sys; print(json.load(sys.stdin)["actual-size"])')"
+[[ "$STOP_AFTER" == "vmdk" ]] && { cp "$VMDK" "$OUT/"; log "stopped after vmdk: $OUT/$(basename "$VMDK")"; KEEP_WORK=1; exit 0; }
+
+OVF="$OVADIR/$OVA_BASENAME.ovf"
+python3 - "$HERE/culvert-appliance.ovf.tmpl" "$OVF" <<PY
+import sys, html
+t = open(sys.argv[1]).read()
+subs = {
+ "@@VMDK_NAME@@": "$(basename "$VMDK")", "@@VMDK_SIZE@@": "$VMDK_SIZE", "@@VMDK_POPULATED@@": "$POPULATED",
+ "@@DISK_GB@@": "$VM_DISK_GB", "@@VM_NAME@@": "$OVA_BASENAME", "@@HW_VERSION@@": "$VM_HW_VERSION",
+ "@@VCPUS@@": "$VM_VCPUS", "@@MEMORY_MB@@": "$VM_MEMORY_MB",
+ "@@PRODUCT@@": html.escape("$APPLIANCE_PRODUCT"), "@@VENDOR@@": "$APPLIANCE_VENDOR",
+ "@@VERSION@@": "$VERSION", "@@FULL_VERSION@@": html.escape("$VERSION ($GUEST_OS_NAME, app $APP_IMAGE_TAG, commit ${GIT_COMMIT:0:12})"),
+}
+for k, v in subs.items(): t = t.replace(k, v)
+assert "@@" not in t, "unsubstituted token in OVF"
+open(sys.argv[2], "w").write(t)
+PY
+python3 -c "import xml.dom.minidom,sys; xml.dom.minidom.parse(sys.argv[1])" "$OVF"
+
+MF="$OVADIR/$OVA_BASENAME.mf"
+( cd "$OVADIR" && {
+    printf 'SHA256(%s)= %s\n' "$(basename "$OVF")"  "$(sha256sum "$(basename "$OVF")"  | cut -d' ' -f1)"
+    printf 'SHA256(%s)= %s\n' "$(basename "$VMDK")" "$(sha256sum "$(basename "$VMDK")" | cut -d' ' -f1)"
+  } > "$MF" )
+
+OVA="$OUT/$OVA_BASENAME.ova"
+log "packing $OVA"
+# OVF spec: descriptor first, then disks, then the manifest. ustar, fixed
+# owner and mtime so the archive layout is deterministic for identical inputs.
+( cd "$OVADIR" && tar --format=ustar --owner=0 --group=0 --numeric-owner \
+    --mtime="@$SOURCE_DATE_EPOCH" -cf "$OVA" \
+    "$(basename "$OVF")" "$(basename "$VMDK")" "$(basename "$MF")" )
+( cd "$OUT" && sha256sum "$(basename "$OVA")" > "$(basename "$OVA").sha256" )
+python3 - "$OUT/build-info.json" "$OVA" <<PY
+import json, sys, hashlib, os
+p=sys.argv[1]; d=json.load(open(p))
+d["artifact"]={"ova": os.path.basename(sys.argv[2]), "size_bytes": os.path.getsize(sys.argv[2]),
+               "sha256": hashlib.sha256(open(sys.argv[2],"rb").read()).hexdigest()}
+json.dump(d, open(p,"w"), indent=2); open(p,"a").write("\n")
+PY
+log "done: $OVA ($(du -h "$OVA" | cut -f1))"
+log "build-info: $OUT/build-info.json"

@@ -1,0 +1,71 @@
+#!/usr/bin/env bash
+# culvert-net — console network helper (netplan). No DHCP server? Use this.
+#
+#   sudo culvert-net show
+#   sudo culvert-net dhcp
+#   sudo culvert-net static <addr/prefix> <gateway> [dns1,dns2] [search1,search2]
+#
+# Writes ONE file, /etc/netplan/60-culvert.yaml, for the first non-loopback
+# interface, then `netplan apply`. cloud-init's generated DHCP config stays in
+# place and is overridden by the higher-numbered file; `dhcp` removes ours.
+set -euo pipefail
+NP=/etc/netplan/60-culvert.yaml
+cmd="${1:-show}"
+# The interface carrying the default route, else the first physical-looking one.
+iface="$(ip -4 route show default 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}')"
+[[ -n "$iface" ]] || iface="$(ip -o link show | awk -F': ' '$2 ~ /^(en|eth)/ {print $2; exit}')"
+[[ -n "$iface" ]] || { echo "no network interface found" >&2; exit 1; }
+need_root() { [[ "$(id -u)" -eq 0 ]] || { echo "run with sudo" >&2; exit 1; }; }
+valid_cidr() { [[ "$1" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}/[0-9]{1,2}$ ]] || [[ "$1" =~ ^[0-9a-fA-F:]+/[0-9]{1,3}$ ]]; }
+valid_ip()   { [[ "$1" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] || [[ "$1" =~ ^[0-9a-fA-F:]+$ ]]; }
+
+case "$cmd" in
+  show)
+    echo "interface: $iface"
+    ip -br addr show "$iface"; ip route show default || true
+    [[ -f "$NP" ]] && { echo "--- $NP"; cat "$NP"; } || echo "(DHCP via cloud-init; no $NP)"
+    ;;
+  dhcp)
+    need_root
+    rm -f "$NP"
+    netplan apply
+    echo "DHCP restored on $iface"
+    ;;
+  static)
+    need_root
+    addr="${2:-}"; gw="${3:-}"; dns="${4:-}"; search="${5:-}"
+    [[ -n "$addr" && -n "$gw" ]] || { echo "usage: culvert-net static <addr/prefix> <gateway> [dns,dns] [search,search]" >&2; exit 2; }
+    valid_cidr "$addr" || { echo "bad address/prefix: $addr" >&2; exit 2; }
+    valid_ip "$gw"     || { echo "bad gateway: $gw" >&2; exit 2; }
+    dns_yaml=""; search_yaml=""
+    if [[ -n "$dns" ]]; then
+      IFS=',' read -ra d <<<"$dns"; for x in "${d[@]}"; do valid_ip "$x" || { echo "bad DNS server: $x" >&2; exit 2; }; done
+      dns_yaml="        addresses: [$(printf '%s' "$dns" | sed 's/,/, /g')]"
+    fi
+    [[ -n "$search" ]] && search_yaml="        search: [$(printf '%s' "$search" | sed 's/,/, /g')]"
+    tmp="$(mktemp)"
+    {
+      echo "# written by culvert-net; remove with: sudo culvert-net dhcp"
+      echo "network:"
+      echo "  version: 2"
+      echo "  ethernets:"
+      echo "    $iface:"
+      echo "      dhcp4: false"
+      echo "      dhcp6: false"
+      echo "      addresses: [$addr]"
+      echo "      routes:"
+      echo "        - to: default"
+      echo "          via: $gw"
+      if [[ -n "$dns_yaml" || -n "$search_yaml" ]]; then
+        echo "      nameservers:"
+        [[ -n "$dns_yaml" ]] && echo "$dns_yaml"
+        [[ -n "$search_yaml" ]] && echo "$search_yaml"
+      fi
+    } > "$tmp"
+    install -m 0600 "$tmp" "$NP"; rm -f "$tmp"
+    netplan generate
+    netplan apply
+    echo "static address $addr via $gw applied on $iface"
+    ;;
+  *) echo "usage: culvert-net show|dhcp|static <addr/prefix> <gateway> [dns,dns] [search,search]" >&2; exit 2 ;;
+esac

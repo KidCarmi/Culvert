@@ -1,0 +1,108 @@
+#!/usr/bin/env bash
+# culvert-os-update — operator-driven OS/engine maintenance for the appliance.
+#
+#   sudo culvert-os-update check            what is pending; reboot required?
+#   sudo culvert-os-update security         guest-OS security updates now
+#                                           (same policy unattended-upgrades applies daily)
+#   sudo culvert-os-update os               ALL guest-OS package updates (Docker stays held)
+#   sudo culvert-os-update docker           Docker engine + compose plugin: stops the
+#                                           stack gracefully first, upgrades, restarts it
+#   sudo culvert-os-update reboot           graceful stack stop (honours stop_grace_period)
+#                                           then reboot
+#   any mode may add --reboot-if-required   reboot at the end when the kernel/libc need it
+#
+# Scope: guest OS packages/kernel and the Docker engine ONLY. The Culvert
+# container image is updated through Release Management (signed catalog +
+# maintenance agent) — never by this script. Local, interactive, sudo-gated;
+# there is no remote invocation path.
+set -euo pipefail
+STACK=/srv/culvert
+LOG=/var/log/culvert-os-update.log
+mode="${1:-check}"; shift || true
+reboot_if_required=0
+for a in "$@"; do [[ "$a" == "--reboot-if-required" ]] && reboot_if_required=1; done
+[[ "$(id -u)" -eq 0 ]] || { echo "run with sudo" >&2; exit 1; }
+export DEBIAN_FRONTEND=noninteractive
+exec > >(tee -a "$LOG") 2>&1
+log() { printf '%s culvert-os-update[%s]: %s\n' "$(date -u +%FT%TZ)" "$mode" "$*"; }
+DOCKER_PKGS=(docker-ce docker-ce-cli containerd.io docker-compose-plugin)
+
+reboot_required() { [[ -f /var/run/reboot-required ]]; }
+report_reboot() {
+  if reboot_required; then
+    echo "REBOOT REQUIRED: $(tr '\n' ' ' < /var/run/reboot-required.pkgs 2>/dev/null || true)"
+    echo "  schedule:  sudo culvert-os-update reboot   (graceful stack stop, then reboot)"
+    return 0
+  fi
+  echo "No reboot required."
+}
+stack_stop() {
+  [[ -f "$STACK/docker-compose.yml" ]] || { log "no stack at $STACK; nothing to stop"; return 0; }
+  log "stopping the Culvert stack gracefully (compose stop_grace_period=60s for the proxy)"
+  ( cd "$STACK" && docker compose stop )   # no -t: each service's stop_grace_period applies
+}
+stack_start() {
+  [[ -f "$STACK/docker-compose.yml" ]] || return 0
+  log "starting the Culvert stack"
+  if [[ -f "$STACK/docker-compose.maint-agent.yml" ]] && grep -q '^CULVERT_MAINT_GID=' "$STACK/.env" 2>/dev/null; then
+    ( cd "$STACK" && docker compose -f docker-compose.yml -f docker-compose.maint-agent.yml up -d )
+  else
+    ( cd "$STACK" && docker compose up -d )
+  fi
+}
+do_reboot() {
+  stack_stop
+  log "rebooting"
+  systemctl reboot
+}
+finish() {
+  report_reboot
+  if [[ "$reboot_if_required" -eq 1 ]] && reboot_required; then do_reboot; fi
+}
+
+case "$mode" in
+  check)
+    apt-get update -qq
+    echo "--- pending security updates (unattended-upgrades dry run):"
+    unattended-upgrade --dry-run -d 2>/dev/null | grep -E '^(Packages that will be upgraded|No packages found)' || true
+    echo "--- all upgradable packages:"
+    apt list --upgradable 2>/dev/null | grep -v '^Listing' || true
+    echo "--- Docker (held at the appliance pin):"
+    apt-mark showhold | grep -E 'docker|containerd' || true
+    echo "--- last unattended-upgrades run:"
+    tail -n 3 /var/log/unattended-upgrades/unattended-upgrades.log 2>/dev/null || echo "(none yet)"
+    report_reboot
+    ;;
+  security)
+    apt-get update -qq
+    log "running unattended-upgrade (security pocket only, Docker blacklisted)"
+    unattended-upgrade -v
+    finish
+    ;;
+  os)
+    apt-get update -qq
+    log "apt-get upgrade (Docker packages stay held)"
+    apt-get -y -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold upgrade
+    apt-get -y autoremove --purge
+    finish
+    ;;
+  docker)
+    apt-get update -qq
+    echo "--- candidate Docker versions:"
+    apt-cache policy "${DOCKER_PKGS[@]}" | grep -E '^[a-z]|Installed|Candidate'
+    stack_stop
+    log "unholding + upgrading Docker engine packages"
+    apt-mark unhold "${DOCKER_PKGS[@]}" >/dev/null
+    apt-get -y -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold install --only-upgrade "${DOCKER_PKGS[@]}"
+    apt-mark hold "${DOCKER_PKGS[@]}" >/dev/null
+    systemctl restart docker
+    stack_start
+    docker version --format 'Docker engine {{.Server.Version}}'
+    finish
+    ;;
+  reboot)
+    do_reboot
+    ;;
+  *)
+    sed -n '2,19p' "$0"; exit 2 ;;
+esac
