@@ -74,12 +74,20 @@ newproj() { # newproj <name> <image-for-pinned>
   # invoked inside $(...) command substitutions (subshells) still find it.
   JAR="$PDIR/jar"; : > "$JAR"
   export PROJ PDIR JAR
+  # Hermetic start: a previous run killed mid-scenario (or one whose destroy
+  # ran without the cli profile) leaves this project's volumes behind, and a
+  # stale /backup/qual.tar.gz.enc makes scenario D refuse the backup and then
+  # restore an archive from a DIFFERENT install. Measured once: 7 false FAILs.
+  destroy
 }
 dc() { docker compose -p "$PROJ" --project-directory "$PDIR" -f "$PDIR/docker-compose.yml" -f "$PDIR/docker-compose.override.yml" "$@"; }
 dcli() { dc --profile cli run --rm -T -e CULVERT_BACKUP_PASSPHRASE="$BK_PASS" cli "$@"; }
 up() { dc up -d --remove-orphans >/dev/null 2>&1 || true; wait_health; }
 down() { dc down --remove-orphans >/dev/null 2>&1 || true; }
-destroy() { dc down -v --remove-orphans >/dev/null 2>&1 || true; }
+# --profile cli is load-bearing: culvert-backups is referenced only by the
+# profiled cli service, so without the profile compose drops it from the
+# model and `down -v` leaves it on the host across runs.
+destroy() { dc --profile cli down -v --remove-orphans >/dev/null 2>&1 || true; }
 wait_health() {
   for _ in $(seq 1 60); do
     if curl -fsS -m 3 "$PROXY/health" >/dev/null 2>&1; then return 0; fi; sleep 2
