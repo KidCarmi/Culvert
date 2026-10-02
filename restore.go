@@ -1086,7 +1086,7 @@ func runRestoreCommit(tarPath, dataDir, passphrase string, opts restoreOpts) err
 		if jerr != nil {
 			return fmt.Errorf("restore: %w — resolve it first (--recover-restore)", jerr)
 		}
-		return fmt.Errorf("restore: an interrupted restore is pending in %s; resolve it first with --recover-restore --confirm revert|complete", dataDir)
+		return fmt.Errorf("restore: an interrupted restore is pending in %s; resolve it first with --recover-restore --confirm=revert|complete", dataDir)
 	}
 	// An entry of dataDir that is itself a mount point (e.g. a `./yara:/data/yara:ro`
 	// bind) cannot be renamed, so refuse BEFORE anything destructive rather
@@ -1157,7 +1157,7 @@ func runRestoreCommit(tarPath, dataDir, passphrase string, opts restoreOpts) err
 		StartedAt:  restoreNow().UTC(),
 	}
 	if err := swapInPlace(dataDir, stagingDir, bakPath, j); err != nil {
-		return fmt.Errorf("restore: COMMIT INTERRUPTED — %w; previous data is at %s, staged data at %s; resolve with: --recover-restore (inspect), then --recover-restore --confirm revert | complete",
+		return fmt.Errorf("restore: COMMIT INTERRUPTED — %w; previous data is at %s, staged data at %s; resolve with: --recover-restore (inspect), then --recover-restore --confirm=revert | --confirm=complete",
 			err, bakPath, stagingDir)
 	}
 	_ = fsyncDirBestEffort(dataDir)
@@ -1199,8 +1199,8 @@ func checkInterruptedRestore(dataDir string) error {
 			return fmt.Errorf("interrupted restore detected: a restore commit in %s was interrupted in phase %q "+
 				"(previous data at %s, staged data at %s). Resolve it with the stack stopped, then start Culvert again:\n"+
 				"    INSPECT:   --recover-restore\n"+
-				"    REVERT:    --recover-restore --confirm revert\n"+
-				"    COMPLETE:  --recover-restore --confirm complete",
+				"    REVERT:    --recover-restore --confirm=revert\n"+
+				"    COMPLETE:  --recover-restore --confirm=complete",
 				dataDir, j.Phase, filepath.Join(dataDir, j.BakDir), filepath.Join(dataDir, j.StagingDir))
 		}
 		return nil // dataDir present — normal boot

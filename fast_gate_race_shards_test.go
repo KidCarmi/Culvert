@@ -44,7 +44,7 @@ const (
 	fastAggregateJob       = "fast-gate-approved"
 	fastAggregateName      = "✅ Fast PR Gate — APPROVED"
 	fastCoverageArtifact   = "fast-gate-coverage"
-	fastPrivilegedTest     = "TestRestoreCommit_DataDirIsMountPoint_FailsInsteadOfCommitting"
+	fastPrivilegedTest     = "TestRestoreCommit_DataDirIsMountPoint_Commits"
 	fastPrivilegedTestFile = "restore_mountpoint_test.go"
 	hardenRunnerAction     = "step-security/harden-runner@"
 )

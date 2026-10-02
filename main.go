@@ -360,7 +360,7 @@ func parseFlags(s *startupState) {
 	s.restoreAcceptDPReenroll = flag.Bool("accept-dp-reenrollment", false, "Acknowledge that restoring will require enrolled DPs to re-enroll (D1.3b.2a/b)")
 	s.restoreAcceptRootCAChange = flag.Bool("accept-root-ca-change", false, "Acknowledge that restoring replaces or removes the inspection root CA (ca.bundle); clients trusting the current root lose inspected HTTPS")
 	s.restoreAllowCounterRB = flag.Bool("allow-counter-rollback", false, "Acknowledge that restoring will roll back TOTP counters for some users (D1.3b.2a/b)")
-	s.recoverRestore = flag.Bool("recover-restore", false, "Inspect an interrupted restore commit (journal in the data dir) and exit; with --confirm revert|complete, resolve it in that direction (offline only)")
+	s.recoverRestore = flag.Bool("recover-restore", false, "Inspect an interrupted restore commit (journal in the data dir) and exit; with --confirm=revert|complete, resolve it in that direction (offline only)")
 	s.listLeftovers = flag.Bool("list-restore-leftovers", false, "List restore leftover .bak/.staging dirs (siblings of dataDir) and exit (D1.3c)")
 	s.cleanupLeftovers = flag.Bool("cleanup-restore-leftovers", false, "Plan/execute cleanup of restore leftover .bak/.staging dirs and exit; dry-run unless --confirm is set (D1.3c)")
 	s.cleanupOlderThan = flag.String("older-than", "", "Cleanup filter: only candidates older than this duration (strict time.ParseDuration syntax, e.g. 168h, 720h) (D1.3c)")
@@ -449,7 +449,7 @@ func handleOneShotCommands(s *startupState) {
 		if s.restoreConfirm.Bool() {
 			action = restoreRecoverAction(strings.ToLower(strings.TrimSpace(s.restoreConfirm.String())))
 			if action == "true" || action == "" {
-				fmt.Fprintln(os.Stderr, "Recover-restore error: --confirm needs a direction: --confirm revert or --confirm complete")
+				fmt.Fprintln(os.Stderr, "Recover-restore error: --confirm needs a direction, written with an equals sign: --confirm=revert or --confirm=complete")
 				os.Exit(1)
 			}
 		}

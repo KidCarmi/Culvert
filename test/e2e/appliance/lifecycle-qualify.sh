@@ -266,12 +266,19 @@ scE() {
   # every previous entry evacuated, staged restore partially promoted.
   local S="20260102T030405Z-4242"
   onvol 'set -e; cd /data; mkdir .restore-bak.'"$S"' .restore-staging.'"$S"'; for e in *; do case "$e" in .restore-*) ;; *) mv "$e" .restore-bak.'"$S"'/;; esac; done; cp -a .restore-bak.'"$S"'/. .restore-staging.'"$S"'/; echo restored > .restore-staging.'"$S"'/qual-restored.marker; mv .restore-staging.'"$S"'/ui_users.json ./ui_users.json; printf "%s" "{\"version\":1,\"suffix\":\"'"$S"'\",\"phase\":\"promoting\",\"staging_dir\":\".restore-staging.'"$S"'\",\"bak_dir\":\".restore-bak.'"$S"'\",\"mode\":\"full\",\"started_at\":\"2026-01-02T03:04:05Z\",\"updated_at\":\"2026-01-02T03:04:06Z\"}" > .restore-journal.json'
-  dc up -d >/dev/null 2>&1 || true; sleep 6
-  if proxy_exited && docker logs culvert 2>&1 | grep -q "interrupted restore detected"; then check $sc boot-refused pass "$(docker logs culvert 2>&1 | grep -o 'interrupted restore detected[^(]*' | head -1)"; else check $sc boot-refused fail "status=$(docker inspect --format '{{.State.Status}}' culvert 2>/dev/null) logs=$(docker logs culvert 2>&1 | tail -3)"; fi
+  dc up -d >/dev/null 2>&1 || true
+  # restart: unless-stopped turns the FATAL into a restart loop; the container
+  # is never "running" with a serving proxy. Observe over a few seconds.
+  refused=no
+  for _ in $(seq 1 15); do
+    sleep 2
+    if docker logs culvert 2>&1 | grep -q "interrupted restore detected" && ! curl -fsS -m 2 "$PROXY/health" >/dev/null 2>&1; then refused=yes; break; fi
+  done
+  if [[ "$refused" == yes ]]; then check $sc boot-refused pass "status=$(docker inspect --format '{{.State.Status}}' culvert 2>/dev/null): $(docker logs culvert 2>&1 | grep -o 'interrupted restore detected[^(]*' | head -1)"; else check $sc boot-refused fail "status=$(docker inspect --format '{{.State.Status}}' culvert 2>/dev/null) logs=$(docker logs culvert 2>&1 | tail -3)"; fi
   down
   local out; out="$(dcli --recover-restore 2>&1 || true)"
   if echo "$out" | grep -q "Phase:.*promoting"; then check $sc inspect pass "$(echo "$out" | grep Phase)"; else check $sc inspect fail "$out"; fi
-  out="$(dcli --recover-restore --confirm complete 2>&1 || true)"
+  out="$(dcli --recover-restore --confirm=complete 2>&1 || true)"
   if echo "$out" | grep -q "Restore COMPLETED"; then check $sc recover-complete pass "completed"; else check $sc recover-complete fail "$out"; fi
   up || { check $sc boot-after-recovery fail "$(docker logs culvert 2>&1 | tail -5)"; destroy; return; }
   check $sc boot-after-recovery pass "version=$(version_of)"
@@ -284,10 +291,15 @@ scE() {
 
 # ═══ run ═════════════════════════════════════════════════════════════════════
 trap 'destroy >/dev/null 2>&1 || true' EXIT
-scA
-for p in $PRED_IMAGES; do scB "$p"; done
-scD
-scE
+SCENARIOS="${SCENARIOS:-A B D E}"   # subset for re-runs, e.g. SCENARIOS="E"
+for sc in $SCENARIOS; do
+  case "$sc" in
+    A) scA ;;
+    B) for p in $PRED_IMAGES; do scB "$p"; done ;;
+    D) scD ;;
+    E) scE ;;
+  esac
+done
 check X "clamav-real-sidecar" blocked "ClamAV replaced by a stub (docker-compose.qualify.yml); the real sidecar's signature download cannot verify TLS behind this sandbox's intercepting proxy. Prerequisite: run on a host with direct egress and CULVERT_QUALIFY_REAL_CLAMAV=1 (remove the stub)."
 
 {

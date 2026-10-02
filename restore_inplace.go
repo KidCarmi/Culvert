@@ -361,15 +361,15 @@ func runRecoverRestore(dataDir string, action restoreRecoverAction, out io.Write
 	switch action {
 	case "":
 		fmt.Fprintf(out, "\nChoose ONE and re-run with the stack still stopped:\n")
-		fmt.Fprintf(out, "  REVERT   (undo the restore, previous data back):   --recover-restore --confirm revert\n")
-		fmt.Fprintf(out, "  COMPLETE (finish the restore, staged data lands):  --recover-restore --confirm complete\n")
+		fmt.Fprintf(out, "  REVERT   (undo the restore, previous data back):   --recover-restore --confirm=revert\n")
+		fmt.Fprintf(out, "  COMPLETE (finish the restore, staged data lands):  --recover-restore --confirm=complete\n")
 		return nil
 	case recoverActionRevert:
 		return recoverRevert(dataDir, stagingDir, bakDir, j, out)
 	case recoverActionComplete:
 		return recoverComplete(dataDir, stagingDir, bakDir, j, out)
 	default:
-		return fmt.Errorf("unknown recovery action %q (use --confirm revert or --confirm complete)", string(action))
+		return fmt.Errorf("unknown recovery action %q (use --confirm=revert or --confirm=complete)", string(action))
 	}
 }
 

@@ -253,10 +253,10 @@ resumed automatically: you choose the direction.
 docker compose --profile cli run --rm cli --recover-restore
 
 # EITHER undo the restore (previous data becomes live again) ...
-docker compose --profile cli run --rm cli --recover-restore --confirm revert
+docker compose --profile cli run --rm cli --recover-restore --confirm=revert
 
 # ... OR finish it (staged data lands, previous data stays in .restore-bak).
-docker compose --profile cli run --rm cli --recover-restore --confirm complete
+docker compose --profile cli run --rm cli --recover-restore --confirm=complete
 
 docker compose up -d
 ```
@@ -348,8 +348,8 @@ in phase "promoting" (previous data at "/data/.restore-bak.<ts>-<pid>", staged
 data at "/data/.restore-staging.<ts>-<pid>"). Resolve it with the stack stopped,
 then start Culvert again:
     INSPECT:   --recover-restore
-    REVERT:    --recover-restore --confirm revert
-    COMPLETE:  --recover-restore --confirm complete
+    REVERT:    --recover-restore --confirm=revert
+    COMPLETE:  --recover-restore --confirm=complete
 ```
 
 Choose deliberately, offline (`docker compose down` first; the recovery

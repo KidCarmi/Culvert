@@ -177,7 +177,7 @@ func TestRecoverRestore_InspectIsReadOnly(t *testing.T) {
 	if err := runRecoverRestore(dir, "", &out); err != nil {
 		t.Fatalf("inspect: %v", err)
 	}
-	if !strings.Contains(out.String(), "--confirm revert") || !strings.Contains(out.String(), "--confirm complete") {
+	if !strings.Contains(out.String(), "--confirm=revert") || !strings.Contains(out.String(), "--confirm=complete") {
 		t.Errorf("inspect must print both options:\n%s", out.String())
 	}
 	if after := userEntries(t, dir); strings.Join(after, ",") != strings.Join(before, ",") {

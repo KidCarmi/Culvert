@@ -61,7 +61,7 @@ prints the exact commands:
 
 ```bash
 docker compose --profile cli run --rm cli --recover-restore                      # inspect
-docker compose --profile cli run --rm cli --recover-restore --confirm revert     # or: --confirm complete
+docker compose --profile cli run --rm cli --recover-restore --confirm=revert     # or: --confirm=complete
 docker compose up -d
 ```
 

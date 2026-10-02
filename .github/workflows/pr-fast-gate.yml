@@ -296,7 +296,7 @@ jobs:
       # mounted at /data). The unprivileged shards only ever reach its t.Skip,
       # so the engine re-runs it as root against the same binary and requires
       # PASS — the pre-5C "Mount-point regression (privileged)" step.
-      privileged-test: TestRestoreCommit_DataDirIsMountPoint_FailsInsteadOfCommitting
+      privileged-test: TestRestoreCommit_DataDirIsMountPoint_Commits
       fault: ${{ inputs.fault || 'none' }}
 
   # ─── 3b. Coverage floors (global + per-file) on the merged profile ─────────
