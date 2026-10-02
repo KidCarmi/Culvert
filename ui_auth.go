@@ -452,9 +452,16 @@ func apiAuthChangePassword(w http.ResponseWriter, r *http.Request) {
 		//
 		// Not a write amplifier (CHAOS-63): this path needs a VALID SESSION and
 		// is a POST, so securityMiddleware's mutating-method apiLimiter bounds
-		// its rate exactly as it bounds apiAuthLogin's own audited failures. The
-		// actor is session-derived and still truncated, because -user and
-		// --reset-password can persist a name longer than the creation API's cap.
+		// its rate exactly as it bounds apiAuthLogin's own audited failures.
+		//
+		// The identity is bounded in BOTH fields: truncateForAudit here for the
+		// Object, and auditActor itself for the Actor it rebuilds from the
+		// session. The first version of this comment claimed the actor was
+		// "still truncated" on the strength of this call alone — false, because
+		// auditEvent derives the Actor independently, so an oversize CONFIGURED
+		// name (-user / --reset-password persist one, and it is deliberately
+		// never refused for its length) was retained full-length (Codex review,
+		// PR #1532). Bounding moved to the chokepoint; do not re-derive it here.
 		auditEvent(r, "auth.password_change.fail", truncateForAudit(username),
 			"self-service password change refused: current password incorrect")
 		http.Error(w, "current password is incorrect", http.StatusForbidden)

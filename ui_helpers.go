@@ -52,7 +52,24 @@ func auditActor(r *http.Request) string {
 		name = uiUser(r)
 	}
 	if name != "" {
-		actor = name + "@" + actor
+		// CHAOS-63: BOUND the identity, at the chokepoint. The roster's own
+		// creation API caps a name at 64 bytes, but -user/auth.user reach
+		// cfg.SetAuth and --reset-password reaches cfg.SetUIUser, and neither
+		// bounds the name — so a CONFIGURED account name can be arbitrarily
+		// long, and it is deliberately never refused for its length (see
+		// rejectOversizeLoginUser / verifyUIBasicAuth). This value is not just
+		// the audit ring's Actor: callers persist it into the MCP tool-trust
+		// store, policy-learning decision records, CDR receipts, PAC lifecycle
+		// operations and support-recipient/approval state, so an unbounded name
+		// here is retained by every one of them.
+		//
+		// Bounding belongs HERE rather than at each call site: truncateForAudit
+		// was already being applied to the audit Object at the call sites, which
+		// made every one of them look bounded while the Actor this function
+		// rebuilt from the session stayed full-length (found by Codex review on
+		// PR #1532). Fixing one surface does not fix the call — enumerate the
+		// class from the PRIMITIVE, not from the file being edited.
+		actor = truncateForAudit(name) + "@" + actor
 	}
 	return actor
 }

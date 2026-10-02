@@ -114,12 +114,27 @@ func TestSecReauthAudit1_RepeatedFailuresEachLeaveEvidence(t *testing.T) {
 	}
 }
 
-// TestSecReauthAudit1_AuditActorIsBounded is the boundary gate. The username is
-// session-derived, but -user/auth.user and --reset-password both persist a name
-// the creation API's 64-byte cap never saw, so a configured account name can be
-// arbitrarily long — and this entry is reachable once per mutating request.
-// CHAOS-63's rule applies: bound the name before it reaches the audit ring.
-func TestSecReauthAudit1_AuditActorIsBounded(t *testing.T) {
+// TestSecReauthAudit1_AuditEntryIsBoundedInBothFields is the boundary gate. The
+// username is session-derived, but -user/auth.user and --reset-password both
+// persist a name the creation API's 64-byte cap never saw, so a configured
+// account name can be arbitrarily long — and it is deliberately never refused
+// for its length. CHAOS-63's rule applies: bound the name before it reaches the
+// audit ring.
+//
+// BOTH fields are asserted, and that is the whole point of this gate. The first
+// version applied truncateForAudit to the Object and asserted only on the
+// Object — while auditEvent separately rebuilds the ACTOR from the session via
+// auditActor, which did not bound the name, so every attempt still retained the
+// full-length value and the gate's own name ("AuditActorIsBounded") described a
+// property it never checked (Codex review, PR #1532). Measured against the
+// pre-fix tree: a 300-byte account name produced a 314-byte Actor. The Actor is
+// the worse half, because callers persist auditActor's result into the MCP
+// tool-trust store, policy-learning records, CDR receipts, PAC lifecycle
+// operations and support-recipient state — not just the audit ring.
+//
+// A gate must assert the property it is named for; asserting the adjacent field
+// is how an unbounded value survives a test that reads as if it covered it.
+func TestSecReauthAudit1_AuditEntryIsBoundedInBothFields(t *testing.T) {
 	snapshotAuthGlobals(t)
 	_ = seedRoster(t)
 
@@ -137,25 +152,66 @@ func TestSecReauthAudit1_AuditActorIsBounded(t *testing.T) {
 	})
 	apiAuthChangePassword(httptest.NewRecorder(), r)
 
+	// truncateForAudit appends a self-describing "…[truncated, N bytes]"
+	// marker, so the bound is the cap plus that marker (plus "@" + the IP for
+	// the Actor). Anything near len(long) means the field was never bounded.
+	const markerSlack = 48
 	var found bool
 	for _, e := range auditGet() {
 		if e.Action != "auth.password_change.fail" || e.TS < baselineTS {
 			continue
 		}
-		if !strings.HasPrefix(e.Object, "v") {
+		if !strings.HasPrefix(e.Object, "v") || !strings.Contains(e.Actor, clientIP) {
 			continue
 		}
 		found = true
-		if len(e.Object) > loginAuditActorMax+len("…[truncated,  bytes]")+24 {
-			t.Errorf("audit Object is %d bytes for an oversize account name: the entry is reachable "+
-				"once per request and must be bounded before it retains caller-sized bytes", len(e.Object))
+		if len(e.Object) > loginAuditActorMax+markerSlack {
+			t.Errorf("audit Object is %d bytes for an oversize account name, want <= %d",
+				len(e.Object), loginAuditActorMax+markerSlack)
 		}
-		if len(e.Object) == len(long) {
-			t.Errorf("audit Object is the untruncated %d-byte account name", len(e.Object))
+		if len(e.Actor) > loginAuditActorMax+markerSlack+len(clientIP)+1 {
+			t.Errorf("audit ACTOR is %d bytes for an oversize account name: auditEvent rebuilds the "+
+				"Actor from the session via auditActor, so bounding the Object alone leaves the "+
+				"full-length identity retained — and auditActor's result is also persisted into the "+
+				"MCP tool-trust store, policy-learning records, CDR receipts and PAC lifecycle state",
+				len(e.Actor))
+		}
+		if strings.Contains(e.Actor, long) {
+			t.Errorf("audit Actor still carries the untruncated %d-byte account name", len(long))
 		}
 	}
 	if !found {
 		t.Error("no auth.password_change.fail entry for the oversize account: the gate proves nothing")
+	}
+}
+
+// TestSecReauthAudit1_AuditActorIsBoundedAtTheChokepoint pins the fix where it
+// belongs — in auditActor — so EVERY audited surface inherits it, not just this
+// handler. Bounding it per call site is what let the defect hide: the call sites
+// were already passing truncateForAudit(username) as the Object.
+func TestSecReauthAudit1_AuditActorIsBoundedAtTheChokepoint(t *testing.T) {
+	long := strings.Repeat("v", loginAuditActorMax*5)
+	r := httptest.NewRequest(http.MethodPost, "/api/auth/change-password", nil)
+	r.RemoteAddr = "198.51.100.76:9999"
+	r = r.WithContext(context.WithValue(r.Context(), uiUserKey{}, long))
+
+	got := auditActor(r)
+	if strings.Contains(got, long) {
+		t.Errorf("auditActor returned the untruncated %d-byte identity (%d bytes total)",
+			len(long), len(got))
+	}
+	if len(got) > loginAuditActorMax+48+len("198.51.100.76")+1 {
+		t.Errorf("auditActor returned %d bytes for an oversize identity: it is persisted by the MCP "+
+			"tool-trust, policy-learning, CDR-receipt, PAC-lifecycle and support-recipient paths",
+			len(got))
+	}
+	// CONTROL: an ordinary name must pass through verbatim, or the bound has
+	// silently changed every audit entry's actor in the product.
+	short := httptest.NewRequest(http.MethodPost, "/api/auth/change-password", nil)
+	short.RemoteAddr = "198.51.100.77:9999"
+	short = short.WithContext(context.WithValue(short.Context(), uiUserKey{}, "keeper"))
+	if want, got := "keeper@198.51.100.77", auditActor(short); got != want {
+		t.Errorf("auditActor for an ordinary name = %q, want %q", got, want)
 	}
 }
 

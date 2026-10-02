@@ -32,8 +32,8 @@ verbatim, as do the CHAOS-56 shutdown invariants (recursive reserve, grace
 carved out of the slice rather than added on top, the phase horizon) and the
 3s/1s watchdog timing.
 
-**Two findings, both outside the refactor, and neither is a regression the
-refactor introduced:**
+**Three findings, none of them a regression the refactor introduced** (the
+third was found by review of the second's fix):
 
 1. **MEDIUM — `backupCAFiles` writes the cluster CA private key through a
    predictable path with `os.WriteFile`.** This is the one production writer of
@@ -46,6 +46,11 @@ refactor introduced:**
    recorded trade-off; its missing *evidence* was not recorded anywhere, which
    made the single unlocked password oracle in the admin API also the single
    silent one. **Fixed in this PR.**
+3. **LOW — the audit *Actor* was unbounded product-wide** (`auditActor`), so the
+   fix for finding 2 bounded the `Object` and left the identity it rebuilds from
+   the session full-length — in the audit ring and in the five other stores that
+   persist `auditActor`'s result. Caught by Codex review of this PR.
+   **Fixed in this PR.**
 
 Nothing in the window weakened authentication, authorization, policy
 precedence, TLS, or fail-closed behaviour. Three of the window's own commits
@@ -252,6 +257,43 @@ consults no lockout" — accurate but incomplete, and the incompleteness is what
 let the audit gap persist unnoticed. The note now enumerates *which* controls are
 absent. **When recording a residual, name every control that is missing; a
 reader takes the named one as the whole gap.**
+
+### 3.3 LOW — the audit *Actor* was unbounded, product-wide (found in review of 3.2's fix)
+
+**File:** `ui_helpers.go`, `auditActor`
+**CWE:** CWE-778 / CWE-770 (allocation without limits)
+**Severity:** Low
+**Found by:** Codex review on PR #1532
+
+The first version of 3.2's fix passed `truncateForAudit(username)` as the audit
+**Object** and claimed in its comment that "the actor is session-derived and
+still truncated". That was **false**: `auditEvent` derives the **Actor**
+independently via `auditActor`, which rebuilt `name + "@" + ip` from the session
+with no bound. Measured against that tree, a 300-byte configured account name
+produced a **314-byte Actor**. And the gate that was supposed to catch it was
+named `AuditActorIsBounded` while asserting only on `Object` — a test that reads
+as if it covered the property it is named for.
+
+**It is broader than this handler.** `auditActor`'s result is not only the audit
+ring's Actor: call sites persist it into the MCP tool-trust store, policy-learning
+decision records, CDR receipts, PAC lifecycle operations, support-bundle approval
+state and support-recipient records. So every audited admin action by an oversize
+configured account retained the full name in each of those stores. Severity stays
+**Low** because the name is *configured*, not attacker-chosen — this is a
+retention bound, not an unauthenticated amplifier.
+
+**Fix:** bound it at the **chokepoint** (`auditActor`), not at the call site.
+Bounding per call site is precisely what hid the defect — the call sites were
+already applying `truncateForAudit` to the Object, so each one *looked* bounded.
+This is CLAUDE.md's own governance lesson arriving again: **enumerate the class
+from the PRIMITIVE, not from the file being edited.** The gate now asserts both
+fields plus the chokepoint directly, with a control requiring an ordinary name to
+pass through verbatim — the cheapest way to pass a bound is to truncate
+everything, which would rewrite every audit actor in the product.
+
+**The transferable rule:** *a comment asserting that a value is bounded is a
+claim about every field the value reaches, not about the argument in front of
+you — and a gate must assert the property it is named for.*
 
 ---
 
