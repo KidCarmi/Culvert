@@ -184,24 +184,42 @@ Guest kernel `6.8.0-142-generic`, cloud-init 26.1. ~4 min of guest uptime to rea
 
 ---
 
-## Track status
+## Track status (updated 2026-10-02, after the Track A–E pushes; the TCG bake is running)
 
-| Track | State | Notes |
-|---|---|---|
-| A. Guest OS decision + `ova-build.md` | not started | |
-| B. `appliance/` build + first-boot provisioning | not started | |
-| C. `os-maintenance-runbook.md` + OS update/reboot qualification | not started | qualification will be TCG-only |
-| D. `sbom-cve/` | not started | tooling verified |
-| E. `install-runbook.md` + `hypervisor-qualification.md` | not started | vSphere import UNTESTED by construction |
-| F. OVA build | not started | feasible (qemu-img + tar); ovftool unavailable |
+| Track | State | Where | Evidence class |
+|---|---|---|---|
+| A. Guest OS decision + `ova-build.md` | **done** | `docs/appliance/ova-build.md`, `appliance/manifest.env` | SRC + RAN (inputs fetched/verified) |
+| B. `appliance/` build + first-boot provisioning | **implemented; qualification in progress** | `appliance/build.sh`, `appliance/bake/`, `appliance/guest/`, `appliance/ovf/`, `appliance/qualify/qemu-qualify.sh`, `scripts/install.sh` (offline opt-in) | shellcheck clean (RAN); installer contract tests `go test -run 'Install|Deploy|ReleaseManagementInstall|CatalogBootstrap|ReleaseIdentity|PinnedSeed|DeployBundle' .` → `ok` (RAN, 2m14s); bake + first-boot: see Track F |
+| C. `os-maintenance-runbook.md` + OS update/reboot qualification | **doc done; qualification pending the bake** (TCG) | `docs/appliance/os-maintenance-runbook.md`; phase 2 of `qemu-qualify.sh` | — |
+| D. `sbom-cve/` | **done for the two images + inventories; guest-disk scan pending the bake** | `docs/appliance/sbom-cve/README.md` + artifacts | RAN (trivy 0.75.0, grype 0.119.0, syft 1.54.0, cosign 3.1.3; DB timestamps in the README) |
+| E. `install-runbook.md` + `hypervisor-qualification.md` | **drafts pushed; §1/§3/§4 of the qualification doc filled after the runs** | `docs/appliance/` | SRC; vSphere import UNTESTED by construction |
+| F. OVA build | **running** (`appliance/build.sh --accel tcg`, started 10:03Z from `bd4ceea`) | `<scratch>/out/` | RAN when it completes |
+| extra | manual-dispatch CI workflow `.github/workflows/appliance-build.yml` (new file, not a gate) | — | UNTESTED in CI (cannot dispatch from here) |
 
-## Open questions for Fable
+### Design summary (what Fable should know)
 
-_(none yet — milestone 1 is a report)_
+* **Build = boot the stock Ubuntu cloud image once under QEMU with a NoCloud seed and an OFFLINE payload ISO** (docker-ce .debs with a local apt index, the two OCI image archives, the appliance guest files, vendored `scripts/install.sh`), then flatten to streamOptimized VMDK + OVF + manifest + OVA (+ qcow2). No packer, no libguestfs, no network in the bake VM. `appliance/manifest.env` pins every input; `<name>.build-record.json` records every digest consumed and produced.
+* **Preload**: the application image is saved with a local tag (`ghcr.io/kidcarmi/culvert:v1.0.259`) so `docker load` restores the registry RepoDigest and `.Id == catalog list digest`; the guest daemon is pinned to the containerd image store. `clamav/clamav:1.4` is preloaded too (pinned digest; the image bundles the signature DB, so clamd is healthy with no egress — verified by reading the image: `main.cvd`/`daily.cvd`/`bytecode.cvd` present, `/init` only runs freshclam when `main.cvd` is missing).
+* **First boot** (`culvert-appliance-firstboot.service`, after cloud-final + docker): verify preloaded image Ids against `/etc/culvert-appliance/build-inputs.json` → mint a one-time console password for user `culvert` unless a datasource set one (SSH stays key-only) → run the vendored `scripts/install.sh` with `CULVERT_INSTALL_OFFLINE=1 CULVERT_PROXY_SEED_REF=<repo>@<digest> CULVERT_DIR=/srv/culvert CULVERT_MAINT_TRUST_UNVERIFIED_IMAGE=1`, cwd `/`, stdin null → marker. Idempotent per step; failure is shown on the console with the retry command.
+* **Console** (`/etc/issue`, 15 s timer): addresses, admin/proxy URLs, first-boot phase/error, `/ready` status + every `.checks` row verbatim, setup-needed line from `/api/setup/status`, one-time password while unchanged, mgmt allowlist, DHCP/static.
+* **Host CLI** `culvert-appliance`: `status`, `netconfig --static/--dhcp` (netplan, validated before apply), `mgmt-allow` (nftables: NEW connections to 22 and the DNAT'd 9090 only from listed CIDRs — the host-level mitigation for the app's TOFU setup), `auto-reboot on|off`, `reidentify --yes` (host keys + machine-id, never `/data`), `firstboot-retry`, `logs`.
+* **Identity**: the bake strips ssh host keys, machine-id, cloud-init state and the bake user; nothing under `/data` is ever written by provisioning.
 
-## Proposed changes outside my owned paths
+### `scripts/install.sh` change (host-side, my path) — please review
 
-_(none yet)_
+One addition, before the internet pre-flight: `offline_install_ok()` honours `CULVERT_INSTALL_OFFLINE=1` only when docker is installed, `docker compose version` works, `CULVERT_PROXY_SEED_REF` is set AND `docker image inspect` finds it locally; otherwise it warns and the normal fatal check runs. No other line of the installer changed. All contract tests that scan the file pass (`deploy_pinned_seed_test.go`, `deploy_bundle_contract_test.go`, `install_catalog_bootstrap_contract_test.go`, `release_management_install_contract_test.go`, `release_identity_test.go`, the `install_script_*` tests). Pre-existing: shellcheck 0.9.0 (apt on 24.04) cannot parse the `# shellcheck disable=SC2064 -- reason` directive at L~2490 — present on `main` too, not introduced here.
+
+### Trust posture of the offline first boot (please confirm you are comfortable with it)
+
+The maintenance-agent trust gate in `install_maint_agent` needs `cosign verify` against ghcr.io + Sigstore, impossible offline. The appliance therefore passes `CULVERT_MAINT_TRUST_UNVERIFIED_IMAGE=1` (the existing break-glass) **after** its own offline check that the preloaded image Id equals the digest recorded at build time — and the build refuses to produce an OVA unless `cosign verify` of that digest passed (the verification output ships as `<name>.cosign-verify.json`). The residual is that the guest trusts its own build record, whose integrity rests on the OVA's sha256/manifest the operator verifies at import. Alternative if you prefer: an online-when-possible mode (try cosign first, fall back) — easy to add in `firstboot.sh`; I did not add it because an appliance that behaves differently depending on egress at first boot is harder to support.
+
+## Open questions / proposals for Fable (not blocking)
+
+1. **ClamAV image has two fixable CVEs** (`pcre2` 10.48→10.49-r0 HIGH, `nghttp2-libs` 1.69→1.70 MEDIUM; Alpine secdb confirms the fixes). `docker-compose.yml` pins `clamav/clamav:1.4` by tag; the appliance pins the digest that tag resolved to today (`sha256:57deb108…`). When Docker Hub republishes `1.4`, bump `CLAMAV_IMAGE_DIGEST` in `appliance/manifest.env` (my side) — or consider a digest-pinned tag in compose (your side).
+2. **Setup TOFU**: the host-level `mgmt-allow` restricts 9090 by source CIDR, but the honest fix is app-side: a one-time setup token printed on the console (I can show anything the app writes to a well-known file in `/data`… which provisioning cannot read — the volume is 100:101; the console renderer runs as root so it *can* read `/var/lib/docker/volumes/culvert_proxy-data/_data/<file>` if you want to define one). Your call.
+3. **Agent self-update signal**: after `/v1/upgrades/apply`, the agent binary/sudoers/compose on the host stay at the OLD version until `install.sh` is re-run (documented in `os-maintenance-runbook.md` §6). Proposal (Go, your side): the agent compares `server.Version` with the running image's `org.opencontainers.image.version` and surfaces `agent_update_pending` in `/v1/status` + the Release panel. I deliberately do not propose in-place self-replacement.
+4. **`docs/operator/*`**: nothing needs editing for the appliance. I'd suggest one line in `docs/operator/catalog-bootstrap-install-runbook.md`'s env table for `CULVERT_INSTALL_OFFLINE` once you accept the installer change.
+5. **A `/ready` row for "setup complete"** would let the console drop its separate `/api/setup/status` call — optional; the renderer already prints every `.checks` row generically.
 
 ## Push log
 
