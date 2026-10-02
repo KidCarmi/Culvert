@@ -50,3 +50,17 @@ from the shared branch at the baseline SHA, pushing to its own branch
 of the shared branch: it fetches, reviews, requests corrections, and
 merges Astra's branch in focused commits. No force-push, no history
 rewrite.
+
+## Coordination status
+
+Verified cycle (2026-10-02): Fable assigned milestone 1 (environment
+capability verification) at session creation; Astra pushed
+`claude/onprem-appliance-astra@25d33be` with executed evidence in
+`docs/appliance/ASTRA-STATUS.md`; Fable fetched, reviewed, accepted, and
+returned five design constraints for the offline first-boot path via
+the session message channel. Messages from Astra to Fable arrive as
+cross-session notifications; Fable also reads the status file from the
+branch, so progress never depends on the message channel alone.
+Implementation workers on Fable's tracks run in isolated git worktrees;
+Fable reviews their commits and cherry-picks into the shared branch.
+
