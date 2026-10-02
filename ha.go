@@ -837,6 +837,20 @@ func applyHABundle(bundle *HAStateBundle, token string) bool {
 	// armVersionPersistence at promotion.
 	globalConfigStore.seedReplicatedSnapshot(bundle.Config)
 
+	// Apply the leader's session revocations (CHAOS-68). This runs AFTER the
+	// bundle has been accepted, so it inherits the same trust decision as the
+	// CA, the cluster state and the config — one boundary, not two.
+	//
+	// Merging is additive and fail-CLOSED by construction: it can only ever add
+	// denials, never grant access, so a partial set is safe while an absent one
+	// is not. A persist failure is therefore logged and counted rather than
+	// aborting the resync — the revocations are already in memory and
+	// enforcing, and failing the sync over durability would discard working
+	// safety state to punish a full disk.
+	if added := mergeAndPersistRevocations(bundle.Revocations, "HA"); added > 0 {
+		logger.Printf("HA: merged %d session revocation(s) from the leader", added)
+	}
+
 	return true
 }
 
@@ -1125,6 +1139,22 @@ func addRequestLogHealth(resp map[string]any) {
 	// this one is fixed by restoring the CP link, not by freeing disk.
 	if n := auditPendingDrops(); n > 0 {
 		resp["auditClusterPushDrops"] = n
+	}
+	// AU-40: the standby is being replicated a SUBSET of this leader's
+	// revocations, because the HA bundle would otherwise exceed the CP-DP
+	// frame. Reported here for the same reason as the two above — every other
+	// surface stays green, since HA sync is still working — and separately,
+	// because the remedy is to shrink what shares the frame (the published
+	// config, or the revocation backlog), not to fix storage or a link. It
+	// means a promotion would admit sessions this leader currently rejects.
+	//
+	// AU-43: read from the CURRENT-state half, never the cumulative counter.
+	// The sentence above is present tense, and the condition recovers on its
+	// own as entries expire, so a counter-driven field would keep making that
+	// claim for the life of the process after one transient trim. The
+	// cumulative magnitude stays on culvert_ha_bundle_revocations_dropped_total.
+	if n := haBundleRevocationsSubset.Load(); n > 0 {
+		resp["haBundleRevocationsDropped"] = n
 	}
 	// SEC-RBAC-ROLE-1: a roster record named a role this build does not
 	// enroll and was clamped to viewer at load. Reported only when non-zero,

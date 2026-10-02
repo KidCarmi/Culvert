@@ -9,9 +9,7 @@ package main
 // Identity hub type), and the Session→Identity conversion.
 
 import (
-	"encoding/base64"
 	"encoding/hex"
-	"encoding/json"
 	"net/http"
 	"os"
 	"strings"
@@ -101,24 +99,84 @@ func sessionIdentity(s *Session) *Identity {
 }
 
 // revokeSessionCookie adds the cookie from r to the revocation list.
+//
+// THE COOKIE IS AUTHENTICATED FIRST, and that is a security requirement rather
+// than tidiness. Both call sites are logout handlers on the PUBLIC allowlist
+// (`/api/auth/logout` and `/auth/logout` — see uiAuthMiddleware), so the cookie
+// value reaching this function is attacker-chosen. The revocation map is
+// uncapped, its entries expire only at an expiry taken FROM THE COOKIE, and
+// every call marshals the whole list to disk and gossips it fleet-wide — so
+// revoking on an UNVERIFIED value let one unauthenticated caller mint
+// arbitrarily many permanent entries, in memory, on disk and on every node.
+// That is CHAOS-63's write-amplification shape (a public endpoint reaching a
+// durable sink with unbounded caller-chosen bytes) pointed at the one control
+// that withdraws session authority.
+//
+// The earlier body read the expiry with a bare base64+JSON decode and its
+// comment claimed "HMAC already verified by decodeSession" — true of the
+// value's ORIGIN on the admin path, never of this function, which re-reads the
+// cookie off the request itself and verified nothing.
+//
+// decodeSession splits on the same final dot and keys its own revocation check
+// on the same b64 payload, so authenticating here changes no key and no
+// behaviour for a genuine logout. A cookie that fails to verify needs no
+// revocation by construction: every consumer already rejects it. Expired and
+// already-revoked land in the same branch for the same reason.
 func revokeSessionCookie(cookieName string, r *http.Request) {
 	c, err := r.Cookie(cookieName)
 	if err != nil {
+		return
+	}
+	// AU-30: the cookie is AUTHENTICATED before anything is written, so an
+	// unauthenticated caller can never mint revocation entries. AU-45: that
+	// authentication deliberately does NOT go through Decode, which refuses an
+	// already-revoked token — which would make a repeat logout unable to repair
+	// a save that failed the first time. See DecodeForRevocation, and do not
+	// "simplify" this back to decodeSession.
+	sess, err := session.DecodeForRevocation(c.Value)
+	if err != nil || sess == nil {
 		return
 	}
 	dot := strings.LastIndex(c.Value, ".")
 	if dot < 0 {
 		return
 	}
-	b64part := c.Value[:dot]
-	// Decode just to get the expiry (HMAC already verified by decodeSession).
-	if payload, decErr := base64.RawURLEncoding.DecodeString(b64part); decErr == nil {
-		var s Session
-		if json.Unmarshal(payload, &s) == nil {
-			sessionRevoked.Revoke(b64part, time.Unix(s.Exp, 0))
-			if err := sessionRevoked.SaveRevocations(); err != nil {
-				logger.Printf("Session: failed to persist revocations: %v", err)
-			}
+	token := c.Value[:dot]
+
+	// A repeat logout of an already-revoked cookie is a REPAIR OPPORTUNITY, and
+	// on a standalone appliance it is the only one there is: every other path
+	// that rewrites this file (SyncRevocations, the DP poll loop, the HA bundle
+	// merge) needs a PEER, and the default deployment has none.
+	//
+	// It is gated on durability actually being in doubt, and that gate is the
+	// load-bearing half. Persisting on EVERY repeat would turn a once-per-cookie
+	// write into a per-request marshal, fsync, rename and fleet-wide gossip,
+	// driven by anyone replaying one valid cookie against a PUBLIC route — the
+	// write-amplification shape CHAOS-63 exists for, aimed at the control that
+	// withdraws session authority. Gated, the extra write happens only while a
+	// save is already failing or the file has vanished, and one save that lands
+	// clears the flag, so the repair terminates on its own.
+	//
+	// Re-revoking cannot grow the list: Revoke is a map assignment keyed by the
+	// token, and the expiry comes from the same cookie, so the entry is
+	// byte-identical to the one already there.
+	if sessionRevoked.IsRevoked(token) {
+		if failing, vanished := revocationDurabilityDoubt(); !failing && !vanished {
+			return
+		}
+	}
+
+	sessionRevoked.Revoke(token, time.Unix(sess.Exp, 0))
+	if err := sessionRevoked.SaveRevocations(); err != nil {
+		// A REFUSAL is not a failure: this boot could not read the revocations
+		// file, so we decline to rename over content we never saw (AU-37). The
+		// revocation is in force in memory and the load-degraded contract row
+		// already names the repair; counting it as a write failure would send
+		// the operator to check free space instead.
+		if session.IsWriteFenced(err) {
+			noteRevocationPersistRefused(1)
+		} else {
+			logger.Printf("Session: failed to persist revocations: %v", err)
 		}
 	}
 }

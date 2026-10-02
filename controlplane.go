@@ -229,6 +229,16 @@ func (a *rateLimitAggregator) Stats() (nodes int, hotIPs int) {
 type revocationAggregator struct {
 	mu      sync.Mutex
 	perNode map[string][]RevocationEntry // nodeID → latest entries
+	// cpLocal holds the Control Plane's OWN revocations (CHAOS-68).
+	//
+	// It is a SEPARATE FIELD rather than a reserved key in perNode, and that is
+	// the whole point: a reserved key is only as safe as the guarantee that no
+	// enrolled node can ever be named it, and node ids reach this map from an
+	// enrollment. A field cannot be addressed by Update(nodeID, …) at all, so a
+	// node cannot overwrite the CP's slot and MergedExcluding cannot filter the
+	// CP's entries out of that node's merge — regardless of what the node is
+	// called. Collision is structurally absent instead of merely unlikely.
+	cpLocal []RevocationEntry
 }
 
 var globalRevAggregator = &revocationAggregator{
@@ -242,13 +252,36 @@ func (a *revocationAggregator) Update(nodeID string, entries []RevocationEntry) 
 	a.mu.Unlock()
 }
 
-// MergedExcluding returns all revocation entries from other nodes.
+// UpdateLocal stores the Control Plane's own revocation entries (CHAOS-68).
+//
+// Before this, the aggregator had exactly one writer — a Data Plane push — so
+// the CP contributed nothing to the fleet-wide merge. The admin UI runs on the
+// CP, which makes it the node where logouts and account deletions actually
+// happen, so the one node whose revocations mattered most was the one node
+// whose revocations went nowhere.
+func (a *revocationAggregator) UpdateLocal(entries []RevocationEntry) {
+	a.mu.Lock()
+	a.cpLocal = entries
+	a.mu.Unlock()
+}
+
+// MergedExcluding returns all revocation entries from other nodes, plus the
+// Control Plane's own (which are never excluded — the requester is never the CP).
 func (a *revocationAggregator) MergedExcluding(nodeID string) []RevocationEntry {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	now := time.Now()
 	var merged []RevocationEntry
 	seen := map[string]bool{}
+	for _, e := range a.cpLocal {
+		if time.Unix(e.Expiry, 0).Before(now) {
+			continue // expired
+		}
+		if !seen[e.Token] {
+			seen[e.Token] = true
+			merged = append(merged, e)
+		}
+	}
 	for nid, entries := range a.perNode {
 		if nid == nodeID {
 			continue
