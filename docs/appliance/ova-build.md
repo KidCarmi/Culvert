@@ -47,7 +47,7 @@ stale by import time; the sidecar downloads it on first start (see first-boot).
   (`fulcio.sigstore.dev`, `rekor.sigstore.dev`, `tuf-repo-cdn.sigstore.dev`)
   for cosign. The build honours `HTTPS_PROXY`/`SSL_CERT_FILE` for its own
   pulls/cosign only; nothing from them reaches the guest.
-* ~8 GB free in `--work` (base image, working qcow2, VMDK).
+* ~12 GB free in `--work` (base image, the virt-resized working qcow2, VMDK).
 
 ## Running it
 
@@ -90,8 +90,9 @@ verifies on import.
    proxy image. Failure aborts the build.
 5. Stage the overlay: `docker save | gzip -n` of both images, `scripts/install.sh`,
    provisioning + maintenance files, `manifest.env`, `build-info.json`.
-6. Copy the base image to a working qcow2, `qemu-img resize` to 40 GB
-   (cloud-init `growpart` grows `/` at first boot).
+6. `virt-resize --expand /dev/sda1` the base image into a fresh 40 GB qcow2
+   (the cloud image's root is 2.4 GB and cloud-init's `growpart` only runs at
+   first boot — the Docker install needs the space during the build).
 7. `virt-customize`: copy the overlay in, run
    [`prepare-guest.sh`](../../appliance/build/prepare-guest.sh) inside the guest
    (Docker repo key fingerprint check → pinned package install → hold →
