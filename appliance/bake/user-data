@@ -1,0 +1,9 @@
+#cloud-config
+# Bake-time seed (NoCloud). Runs ONCE inside the build VM, offline. Everything
+# it does is in appliance/bake/bake.sh on the payload disk; this file only
+# mounts the payload and hands over. bake.sh powers the VM off itself.
+hostname: culvert-bake
+package_update: false
+package_upgrade: false
+runcmd:
+  - [ bash, -c, "mkdir -p /mnt/payload && mount -o ro /dev/disk/by-label/CULVERT_PAYLOAD /mnt/payload && exec bash /mnt/payload/appliance/bake/bake.sh /mnt/payload" ]

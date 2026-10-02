@@ -1,0 +1,204 @@
+#!/usr/bin/env bash
+# culvert-appliance — host-level operator CLI for the Culvert appliance guest.
+#
+#   status                         appliance + readiness summary (same as tty1)
+#   netconfig --dhcp [--iface IF]  revert the management NIC to DHCP
+#   netconfig --static A.B.C.D/NN --gateway G [--dns a,b] [--search d] [--iface IF]
+#   mgmt-allow CIDR [CIDR...]      restrict SSH (22) + admin UI (9090) to these sources
+#   mgmt-allow --clear             remove the restriction
+#   mgmt-apply                     (re)load the allowlist into nftables (unit hook)
+#   auto-reboot on [--time HH:MM] | off   reboot policy for unattended security updates
+#   reidentify --yes               new SSH host keys + machine-id (after cloning a
+#                                  PROVISIONED VM). Does NOT touch /data.
+#   firstboot-retry                re-run the first-boot provisioning unit
+#   logs                           tail first-boot + unit logs
+#
+# Host OS scope only. Application identity, backup/restore, upgrades and
+# rollback are the application's (docs/operator/*).
+set -euo pipefail
+
+ETC=/etc/culvert-appliance
+NETPLAN=/etc/netplan/60-culvert-appliance.yaml
+NFT_FILE=$ETC/mgmt.nft
+ALLOW_FILE=$ETC/mgmt-allow.conf
+
+die() { echo "culvert-appliance: $*" >&2; exit 1; }
+need_root() { [[ $EUID -eq 0 ]] || die "run as root (sudo)"; }
+
+default_iface() {
+  local i
+  i="$(ip -4 route show default 2>/dev/null | awk '{for (x=1;x<=NF;x++) if ($x=="dev") print $(x+1)}' | head -n1)"
+  [[ -n "$i" ]] || i="$(ip -o link show 2>/dev/null | awk -F': ' '$2!="lo"{print $2; exit}')"
+  [[ -n "$i" ]] || die "no network interface found"
+  echo "$i"
+}
+
+cmd_netconfig() {
+  need_root
+  local mode="" addr="" gw="" dns="" search="" iface=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --dhcp) mode=dhcp ;;
+      --static) mode=static; addr="${2:?--static needs A.B.C.D/NN}"; shift ;;
+      --gateway) gw="${2:?}"; shift ;;
+      --dns) dns="${2:?}"; shift ;;
+      --search) search="${2:?}"; shift ;;
+      --iface) iface="${2:?}"; shift ;;
+      -h|--help) sed -n '2,20p' "$0"; return 0 ;;
+      *) die "unknown option: $1" ;;
+    esac
+    shift
+  done
+  [[ -n "$mode" ]] || die "netconfig needs --dhcp or --static (see --help)"
+  [[ -n "$iface" ]] || iface="$(default_iface)"
+  ip link show "$iface" >/dev/null 2>&1 || die "interface $iface does not exist"
+  # cloud-init renders network ONCE per instance; from here on the appliance
+  # owns it, so cloud-init must stop writing 50-cloud-init.yaml.
+  install -d /etc/cloud/cloud.cfg.d
+  printf 'network: {config: disabled}\n' > /etc/cloud/cloud.cfg.d/99-culvert-appliance-network.cfg
+  if [[ -f /etc/netplan/50-cloud-init.yaml ]]; then
+    mv /etc/netplan/50-cloud-init.yaml "$ETC/50-cloud-init.yaml.disabled"
+  fi
+  if [[ "$mode" == dhcp ]]; then
+    cat > "$NETPLAN" <<YAML
+network:
+  version: 2
+  ethernets:
+    ${iface}:
+      dhcp4: true
+      dhcp6: true
+YAML
+  else
+    [[ "$addr" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/[0-9]+$ ]] || die "address must be A.B.C.D/NN"
+    [[ -n "$gw" ]] || die "--static needs --gateway"
+    [[ "$gw" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "gateway must be A.B.C.D"
+    local dns_yaml="" search_yaml=""
+    if [[ -n "$dns" ]]; then dns_yaml="        addresses: [${dns}]"; fi
+    if [[ -n "$search" ]]; then search_yaml="        search: [${search}]"; fi
+    {
+      echo "network:"
+      echo "  version: 2"
+      echo "  ethernets:"
+      echo "    ${iface}:"
+      echo "      dhcp4: false"
+      echo "      dhcp6: false"
+      echo "      addresses: [${addr}]"
+      echo "      routes:"
+      echo "        - to: default"
+      echo "          via: ${gw}"
+      if [[ -n "$dns_yaml$search_yaml" ]]; then
+        echo "      nameservers:"
+        [[ -n "$dns_yaml" ]] && echo "$dns_yaml"
+        [[ -n "$search_yaml" ]] && echo "$search_yaml"
+      fi
+    } > "$NETPLAN"
+  fi
+  chmod 0600 "$NETPLAN"
+  netplan generate || { rm -f "$NETPLAN"; die "netplan rejected the configuration (nothing applied)"; }
+  netplan apply
+  echo "applied: $(tr -s ' \n' ' ' < "$NETPLAN")"
+  /usr/local/lib/culvert-appliance/console-status.sh render >/dev/null 2>&1 || true
+}
+
+render_nft() {
+  # Allowlist semantics: a NEW TCP connection to sshd (host input, dport 22) or
+  # to the published admin UI (DNAT'd to the container, dport 9090) is dropped
+  # unless its source is listed. Loopback and established flows are untouched.
+  # `ct status dnat` keeps the forward rule on INBOUND published ports only —
+  # a container's own outbound connection to some remote :9090 is not matched.
+  local v4=() v6=() c
+  while read -r c; do
+    [[ -z "$c" ]] && continue
+    if [[ "$c" == *:* ]]; then v6+=("$c"); else v4+=("$c"); fi
+  done < "$ALLOW_FILE"
+  {
+    echo "table inet culvert_mgmt"
+    echo "delete table inet culvert_mgmt"
+    echo "table inet culvert_mgmt {"
+    echo "  set mgmt_v4 { type ipv4_addr; flags interval; $( [[ ${#v4[@]} -gt 0 ]] && printf 'elements = { %s }' "$(IFS=,; echo "${v4[*]}")" ) }"
+    echo "  set mgmt_v6 { type ipv6_addr; flags interval; $( [[ ${#v6[@]} -gt 0 ]] && printf 'elements = { %s }' "$(IFS=,; echo "${v6[*]}")" ) }"
+    echo "  chain input {"
+    echo "    type filter hook input priority -10; policy accept;"
+    echo "    iif lo accept"
+    echo "    tcp dport 22 ct state new ip saddr != @mgmt_v4 counter drop"
+    echo "    tcp dport 22 ct state new ip6 saddr != @mgmt_v6 counter drop"
+    echo "  }"
+    echo "  chain forward {"
+    echo "    type filter hook forward priority -10; policy accept;"
+    echo "    ct status dnat tcp dport 9090 ct state new ip saddr != @mgmt_v4 counter drop"
+    echo "    ct status dnat tcp dport 9090 ct state new ip6 saddr != @mgmt_v6 counter drop"
+    echo "  }"
+    echo "}"
+  }
+}
+
+cmd_mgmt_apply() {
+  need_root
+  command -v nft >/dev/null 2>&1 || die "nft not installed"
+  if [[ ! -s "$ALLOW_FILE" ]]; then
+    nft delete table inet culvert_mgmt 2>/dev/null || true
+    rm -f "$NFT_FILE"
+    return 0
+  fi
+  render_nft > "$NFT_FILE"
+  nft -c -f "$NFT_FILE" || die "generated nftables ruleset is invalid (not applied): $NFT_FILE"
+  nft -f "$NFT_FILE"
+}
+
+cmd_mgmt_allow() {
+  need_root
+  [[ $# -gt 0 ]] || die "mgmt-allow needs CIDRs or --clear"
+  if [[ "$1" == "--clear" ]]; then
+    : > "$ALLOW_FILE"; cmd_mgmt_apply; echo "management allowlist cleared (ssh + admin UI reachable from anywhere)"; return 0
+  fi
+  local c; for c in "$@"; do
+    [[ "$c" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+(/[0-9]+)?$ || "$c" =~ ^[0-9a-fA-F:]+(/[0-9]+)?$ ]] || die "not a CIDR: $c"
+  done
+  local src; src="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for (i=1;i<=NF;i++) if ($i=="src") print $(i+1)}' | head -n1)"
+  printf '%s\n' "$@" > "$ALLOW_FILE"
+  cmd_mgmt_apply
+  echo "ssh (22) and admin UI (9090) now accept NEW connections only from: $*"
+  echo "(this host's own address ${src:-?} is not implicitly allowed; make sure your workstation is in the list)"
+  /usr/local/lib/culvert-appliance/console-status.sh render >/dev/null 2>&1 || true
+}
+
+cmd_auto_reboot() {
+  need_root
+  local f=/etc/apt/apt.conf.d/53culvert-appliance-reboot
+  case "${1:-}" in
+    on)
+      local t="02:30"; [[ "${2:-}" == "--time" ]] && t="${3:?--time HH:MM}"
+      [[ "$t" =~ ^[0-2][0-9]:[0-5][0-9]$ ]] || die "time must be HH:MM"
+      printf 'Unattended-Upgrade::Automatic-Reboot "true";\nUnattended-Upgrade::Automatic-Reboot-WithUsers "true";\nUnattended-Upgrade::Automatic-Reboot-Time "%s";\n' "$t" > "$f"
+      echo "unattended security updates may now reboot the appliance at ${t} (local time) when a reboot is required" ;;
+    off) rm -f "$f"; echo "automatic reboots disabled (default); reboot in a maintenance window" ;;
+    *) die "auto-reboot on [--time HH:MM] | off" ;;
+  esac
+}
+
+cmd_reidentify() {
+  need_root
+  [[ "${1:-}" == "--yes" ]] || die "reidentify regenerates SSH host keys and the machine-id; pass --yes to confirm"
+  rm -f /etc/ssh/ssh_host_*
+  ssh-keygen -A >/dev/null
+  rm -f /etc/machine-id /var/lib/dbus/machine-id
+  systemd-machine-id-setup >/dev/null
+  systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null || true
+  echo "new SSH host keys:"; for k in /etc/ssh/ssh_host_*_key.pub; do ssh-keygen -lf "$k"; done
+  echo "new machine-id: $(cat /etc/machine-id)"
+  echo "NOTE: the APPLICATION identity under /data (inspection CA, session secret, cluster node"
+  echo "      identity) was NOT changed — see docs/operator for the application's cloning procedure."
+}
+
+case "${1:-}" in
+  status) exec /usr/local/lib/culvert-appliance/console-status.sh print ;;
+  netconfig) shift; cmd_netconfig "$@" ;;
+  mgmt-allow) shift; cmd_mgmt_allow "$@" ;;
+  mgmt-apply) cmd_mgmt_apply ;;
+  auto-reboot) shift; cmd_auto_reboot "$@" ;;
+  reidentify) shift; cmd_reidentify "$@" ;;
+  firstboot-retry) need_root; rm -f /var/lib/culvert-appliance/error; systemctl restart culvert-appliance-firstboot.service; echo "re-running; follow with: journalctl -fu culvert-appliance-firstboot" ;;
+  logs) tail -n 80 /var/log/culvert-appliance/firstboot.log 2>/dev/null; systemctl --no-pager status culvert-appliance-firstboot.service docker.service culvert-maint.service 2>/dev/null | head -n 40 ;;
+  -h|--help|"") sed -n '2,20p' "$0" ;;
+  *) die "unknown command: $1 (see --help)" ;;
+esac

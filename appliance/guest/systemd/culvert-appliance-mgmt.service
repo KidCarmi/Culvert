@@ -1,0 +1,16 @@
+[Unit]
+Description=Culvert appliance management-access allowlist (nftables)
+Documentation=https://github.com/KidCarmi/Culvert/blob/main/docs/appliance/install-runbook.md
+DefaultDependencies=no
+After=local-fs.target
+Before=network-pre.target
+Wants=network-pre.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/culvert-appliance mgmt-apply
+ExecReload=/usr/local/sbin/culvert-appliance mgmt-apply
+
+[Install]
+WantedBy=multi-user.target

@@ -198,8 +198,24 @@ if ! sudo -n true 2>/dev/null; then
   warn "sudo access required. You may be prompted for your password."
 fi
 
-# Check internet
-if curl -fsSL --connect-timeout 5 https://download.docker.com > /dev/null 2>&1 || \
+# Check internet — unless an appliance / air-gapped install opted out with
+# CULVERT_INSTALL_OFFLINE=1. The opt-out is honoured ONLY when nothing this run
+# needs from the network is missing: Docker Engine + Compose are already
+# installed and CULVERT_PROXY_SEED_REF names an image already in the local
+# store (seed_pinned_tag then tags culvert/proxy:pinned without a pull, and the
+# deploy bundle + maintenance-agent binary come out of that image). Anything
+# else would fail later with a worse message, so the gate refuses up front.
+offline_install_ok() {
+  [[ "${CULVERT_INSTALL_OFFLINE:-}" == "1" ]] || return 1
+  command -v docker >/dev/null 2>&1 || { warn "CULVERT_INSTALL_OFFLINE=1 but docker is not installed — ignoring the opt-out"; return 1; }
+  sudo docker compose version >/dev/null 2>&1 || { warn "CULVERT_INSTALL_OFFLINE=1 but 'docker compose' is not available — ignoring the opt-out"; return 1; }
+  [[ -n "${CULVERT_PROXY_SEED_REF:-}" ]] || { warn "CULVERT_INSTALL_OFFLINE=1 needs CULVERT_PROXY_SEED_REF — ignoring the opt-out"; return 1; }
+  sudo docker image inspect "$CULVERT_PROXY_SEED_REF" >/dev/null 2>&1 || { warn "CULVERT_INSTALL_OFFLINE=1 but ${CULVERT_PROXY_SEED_REF} is not in the local image store — ignoring the opt-out"; return 1; }
+  return 0
+}
+if offline_install_ok; then
+  info "Offline install (CULVERT_INSTALL_OFFLINE=1): Docker present, seed image ${CULVERT_PROXY_SEED_REF} in the local store — skipping the internet check"
+elif curl -fsSL --connect-timeout 5 https://download.docker.com > /dev/null 2>&1 || \
    wget -q --timeout=5 -O /dev/null https://download.docker.com 2>/dev/null; then
   info "Internet connectivity OK"
 else

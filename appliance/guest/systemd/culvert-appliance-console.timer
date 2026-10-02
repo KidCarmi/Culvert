@@ -1,0 +1,10 @@
+[Unit]
+Description=Refresh the Culvert appliance console status every 15 s
+
+[Timer]
+OnBootSec=10s
+OnUnitActiveSec=15s
+AccuracySec=2s
+
+[Install]
+WantedBy=timers.target
