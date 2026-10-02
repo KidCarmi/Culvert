@@ -1816,20 +1816,49 @@ func apiSyslogConfig(w http.ResponseWriter, r *http.Request) {
 		if !requireRole(w, r, RoleAdmin) {
 			return
 		}
+		// Target and writer in ONE read, so the reported address and the
+		// format beside it always belong to the same generation: a re-point
+		// between two reads described target A with writer B's format
+		// (Codex P2, PR #1494). Loading the handle once also avoids the
+		// check-then-act nil-deref a concurrent disable used to allow.
+		connectedTarget, _, sw := syslogConfiguredSnapshot()
 		format := "rfc3164"
-		var drops, panics uint64
-		if globalSyslog != nil {
-			format = globalSyslog.Format()
-			// Read panics before drops: deliverGuarded's recover branch always
-			// increments panics first, then drops (independent atomics, no
-			// combined snapshot). Reading in the same order means a report can
-			// only ever lag panics behind drops, never the reverse — so the
-			// UI's `drops > 0` gate can never hide a real panic behind a
-			// stale-looking drops==0.
-			panics = globalSyslog.Panics()
-			drops = globalSyslog.Drops()
+		if sw != nil {
+			format = sw.Format()
 		}
-		jsonOK(w, map[string]any{"addr": syslogConfigured, "format": format, "drops": drops, "panics": panics})
+		// CHAOS-72: drops alone is cumulative and unreadable — it cannot
+		// distinguish a feed that is dark now from one that healed last week.
+		// The delivery snapshot carries the time axis the counter lacks.
+		//
+		// EVERY counter comes from the snapshot, never from the live Writer.
+		// Reading sw.Drops()/sw.Panics() directly meant this endpoint dropped
+		// back to the CURRENT writer's totals, so a runtime re-point reset
+		// them here while /metrics and the adjacent `delivered` field kept the
+		// process-lifetime ones — reloading the admin UI erased the loss
+		// history at exactly the moment an operator re-points to remediate,
+		// and contradicted the contract's own "cumulative and monotonic"
+		// wording (Codex P2, PR #1494). The snapshot also removes the ordering
+		// note the old pair needed: it reads panics and drops from one
+		// lock-free Stats() snapshot, so they cannot skew against each other.
+		snap := syslogFeedState()
+		// A feed is PRESENT when an operator asked for a collector, not when a
+		// Writer happens to exist — the same predicate the metrics plane uses.
+		// Gating on Configured alone reported `neverDelivered:false` beside
+		// `degraded:true` for a target whose boot dial failed, i.e. it denied
+		// the one fact that verdict rests on (Codex P2, PR #1494).
+		present := snap.Configured || snap.Intended
+		jsonOK(w, map[string]any{
+			"addr": connectedTarget, "format": format, "drops": snap.Drops, "panics": snap.Panics,
+			"delivered":         snap.Delivered,
+			"degraded":          snap.Degraded,
+			"neverDelivered":    present && snap.NeverDelivered,
+			"lastSuccessUnix":   unixOrZero(snap.LastSuccess),
+			"secondsSinceEvent": int64(snap.Age.Seconds()),
+			"lastFailureReason": snap.Reason,
+			"queueDepth":        snap.QueueDepth,
+			"queueCap":          snap.QueueCap,
+			"deliveryProvable":  present && !snap.UDP,
+		})
 	case http.MethodPost:
 		if !requireRole(w, r, RoleAdmin) {
 			return
@@ -1850,12 +1879,11 @@ func apiSyslogConfig(w http.ResponseWriter, r *http.Request) {
 		}
 		if body.Addr == "" {
 			// Disable syslog.
-			if globalSyslog != nil {
-				globalSyslog.Close()
-				globalSyslog = nil
-			}
-			syslogConfigured = ""
-			syslogConfiguredAddr = ""
+			// CHAOS-72: clear the writer AND tell the plane the feature is gone
+			// as one serialized transition, or a switched-off feed keeps
+			// exporting culvert_syslog_up 1 (and a concurrent re-point could
+			// interleave with the two halves).
+			disableActiveSyslog()
 			auditEvent(r, "settings.syslog", "disabled", "")
 			adminSettingsSave()
 			jsonOK(w, map[string]any{"ok": true, "addr": "", "format": "rfc3164"})
@@ -1865,11 +1893,23 @@ func apiSyslogConfig(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "syslog connect error: "+err.Error(), http.StatusBadRequest)
 			return
 		}
-		syslogConfigured = body.Addr
-		syslogConfiguredAddr = body.Addr
-		auditEvent(r, "settings.syslog", body.Addr, "syslog forwarding enabled (format="+globalSyslog.Format()+")")
+		// InitSyslog published syslogConfigured/syslogConfiguredAddr inside the
+		// same critical section as the writer; assigning them here would
+		// reopen the enable/disable interleave they were moved to close.
+		//
+		// The effective format is derived, not read back off the handle. It is
+		// the same normalisation NewWriter applies ("" => rfc3164) and the
+		// value was already validated above, so the two cannot disagree — and
+		// deriving it avoids dereferencing a handle a concurrent disable can
+		// clear between the publish and the read-back, which is exactly the
+		// nil-deref the pre-CHAOS-66 code carried here.
+		effectiveFormat := body.Format
+		if effectiveFormat == "" {
+			effectiveFormat = "rfc3164"
+		}
+		auditEvent(r, "settings.syslog", body.Addr, "syslog forwarding enabled (format="+effectiveFormat+")")
 		adminSettingsSave()
-		jsonOK(w, map[string]any{"ok": true, "addr": body.Addr, "format": globalSyslog.Format()})
+		jsonOK(w, map[string]any{"ok": true, "addr": body.Addr, "format": effectiveFormat})
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
@@ -1884,14 +1924,24 @@ func apiSyslogTest(w http.ResponseWriter, r *http.Request) {
 	if !requireRole(w, r, RoleAdmin) {
 		return
 	}
-	if globalSyslog == nil {
+	sw := activeSyslog()
+	if sw == nil {
 		http.Error(w, "syslog not configured", http.StatusServiceUnavailable)
 		return
 	}
-	// Write sends a single PRI=14 message — same path as the old writeMsg(14, …),
-	// now via the exported io.Writer surface (writeMsg is package-internal).
-	_, _ = globalSyslog.Write([]byte("Culvert syslog test message — connectivity verified"))
-	jsonOK(w, map[string]any{"ok": true, "message": "test message sent"})
+	// CHAOS-66: this used to Write and answer {"ok": true} unconditionally.
+	// Once delivery became asynchronous that confirmed only that a channel
+	// send succeeded — it returned ok for a collector that had been dead for a
+	// week, while checkSyslogFeed's own OperatorAction pointed operators here
+	// to "confirm connectivity". A probe that cannot fail is worse than no
+	// probe. syslogDeliveryProbe waits, bounded, for the drain goroutine to
+	// report an actual outcome for this line.
+	outcome, detail := syslogDeliveryProbe(sw)
+	jsonOK(w, map[string]any{
+		"ok":      outcome == "delivered" || outcome == "sent",
+		"outcome": outcome,
+		"message": detail,
+	})
 }
 
 // GET/POST /api/security — IP filter + rate limiter config

@@ -491,10 +491,14 @@ func applyAdminServices(s *AdminSettings) {
 	if s.SyslogAddr != "" {
 		// Record intent even if the connect fails so checkSyslogFeed surfaces a
 		// silently-down SIEM feed (see syslogConfiguredAddr).
-		syslogConfiguredAddr = s.SyslogAddr
-		if err := InitSyslog(s.SyslogAddr, s.SyslogFormat); err == nil {
-			syslogConfigured = s.SyslogAddr
-		}
+		noteSyslogConfiguredIntent(s.SyslogAddr)
+		// See loadObservability: the health plane needs the intent under its
+		// own mutex so a persisted target that will not connect is still
+		// exported as down (CHAOS-72 P1-F).
+		noteSyslogIntent(s.SyslogAddr)
+		// syslogConfigured is published by InitSyslog with the writer itself
+		// (one critical section); the intent above survives a failed dial.
+		_ = InitSyslog(s.SyslogAddr, s.SyslogFormat) //nolint:errcheck // a failed dial is reported by the health plane via the recorded intent
 	}
 	if s.OTLPEndpoint != "" {
 		globalOTLP.Configure(s.OTLPEndpoint, s.OTLPHeaders)
@@ -782,10 +786,14 @@ func snapshotAdminEndpoints(s *AdminSettings) {
 	if len(uiExtraSANs) > 0 {
 		s.UISANs = uiExtraSANs
 	}
-	if syslogConfigured != "" {
-		s.SyslogAddr = syslogConfigured
-		if globalSyslog != nil {
-			s.SyslogFormat = globalSyslog.Format()
+	// Target, intent and writer in ONE read: this snapshot is PERSISTED, so a
+	// mixed pair is durable — an address the operator just disabled, or a
+	// target paired with the previous collector's wire format (Codex P2,
+	// PR #1494).
+	if connected, _, sw := syslogConfiguredSnapshot(); connected != "" {
+		s.SyslogAddr = connected
+		if sw != nil {
+			s.SyslogFormat = sw.Format()
 		}
 	}
 	s.OTLPEndpoint = globalOTLP.Endpoint()

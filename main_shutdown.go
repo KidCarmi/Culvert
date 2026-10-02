@@ -446,8 +446,8 @@ func registerLateShutdownHooks(reg *shutdownRegistry, s *startupState, proxySrv 
 	// the original behaviour exactly.
 	reg.Register("tunnel-drain", shutdownOrderTunnelDrain, drainActiveTunnels)
 	reg.Register("syslog-close", shutdownOrderSyslogClose, func(context.Context) error {
-		if globalSyslog != nil {
-			_ = globalSyslog.Close() // best-effort flush
+		if sw := activeSyslog(); sw != nil {
+			_ = sw.Close() // best-effort flush
 		}
 		return nil
 	})

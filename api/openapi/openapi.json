@@ -5227,13 +5227,60 @@
           "addr": {
             "type": "string"
           },
+          "degraded": {
+            "description": "True when events are being lost AND nothing has been delivered for the degradation window. Both halves are required, so an idle node is never reported degraded.",
+            "type": "boolean"
+          },
+          "delivered": {
+            "description": "Events written to the collector socket.",
+            "type": "integer"
+          },
+          "deliveryProvable": {
+            "description": "False for a udp:// target, where a successful write means only that this host sent the datagram — the collector may have received nothing. Use tcp:// when delivery evidence is required.",
+            "type": "boolean"
+          },
           "drops": {
+            "description": "Events lost before reaching the collector. Cumulative and monotonic, so it carries no time axis on its own — pair it with secondsSinceEvent to tell a feed that is dark now from one that healed earlier.",
             "type": "integer"
           },
           "format": {
             "type": "string"
           },
+          "lastFailureReason": {
+            "description": "Bounded reason class for the most recent loss; empty before the first one.",
+            "enum": [
+              "",
+              "queue_full",
+              "closed",
+              "connect_failed",
+              "write_failed",
+              "backoff",
+              "panic",
+              "flush_timeout"
+            ],
+            "type": "string"
+          },
+          "lastSuccessUnix": {
+            "description": "Unix time of the last delivered event; 0 when none ever was.",
+            "type": "integer"
+          },
+          "neverDelivered": {
+            "description": "No event has ever reached the collector for this target.",
+            "type": "boolean"
+          },
           "panics": {
+            "type": "integer"
+          },
+          "queueCap": {
+            "description": "Capacity of the delivery queue.",
+            "type": "integer"
+          },
+          "queueDepth": {
+            "description": "Events currently queued for delivery.",
+            "type": "integer"
+          },
+          "secondsSinceEvent": {
+            "description": "Seconds since the last delivered event, or since this target was configured when none ever was.",
             "type": "integer"
           }
         },

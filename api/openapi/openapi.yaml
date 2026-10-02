@@ -2300,8 +2300,52 @@ components:
       properties:
         addr: { type: string }
         format: { type: string }
-        drops: { type: integer }
+        drops:
+          type: integer
+          description: >-
+            Events lost before reaching the collector. Cumulative and monotonic,
+            so it carries no time axis on its own — pair it with
+            secondsSinceEvent to tell a feed that is dark now from one that
+            healed earlier.
         panics: { type: integer }
+        delivered:
+          type: integer
+          description: Events written to the collector socket.
+        degraded:
+          type: boolean
+          description: >-
+            True when events are being lost AND nothing has been delivered for
+            the degradation window. Both halves are required, so an idle node
+            is never reported degraded.
+        neverDelivered:
+          type: boolean
+          description: No event has ever reached the collector for this target.
+        lastSuccessUnix:
+          type: integer
+          description: Unix time of the last delivered event; 0 when none ever was.
+        secondsSinceEvent:
+          type: integer
+          description: >-
+            Seconds since the last delivered event, or since this target was
+            configured when none ever was.
+        lastFailureReason:
+          type: string
+          description: >-
+            Bounded reason class for the most recent loss; empty before the
+            first one.
+          enum: ["", queue_full, closed, connect_failed, write_failed, backoff, panic, flush_timeout]
+        queueDepth:
+          type: integer
+          description: Events currently queued for delivery.
+        queueCap:
+          type: integer
+          description: Capacity of the delivery queue.
+        deliveryProvable:
+          type: boolean
+          description: >-
+            False for a udp:// target, where a successful write means only that
+            this host sent the datagram — the collector may have received
+            nothing. Use tcp:// when delivery evidence is required.
     SetSyslogBody:
       type: object
       additionalProperties: false
