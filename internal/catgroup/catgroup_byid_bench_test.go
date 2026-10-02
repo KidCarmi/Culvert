@@ -33,18 +33,17 @@ import (
 // run precisely so the comparison survives a box whose clock drifts between
 // rounds (the urlcat categoryKey lesson).
 
-func benchStore(n int) (*Store, string, string) {
-	s := New()
-	var lastID, lastName string
+func benchStore(n int) (store *Store, lastID, lastName string) {
+	store = New()
 	for i := 0; i < n; i++ {
 		lastName = fmt.Sprintf("group-%d", i)
-		g, err := s.Add(lastName, []string{fmt.Sprintf("Category %d", i), "Social Media"})
+		g, err := store.Add(lastName, []string{fmt.Sprintf("Category %d", i), "Social Media"})
 		if err != nil {
 			panic(err)
 		}
 		lastID = g.ID
 	}
-	return s, lastID, lastName
+	return store, lastID, lastName
 }
 
 var benchGroupCounts = []int{4, 16, 64, 256, 1000}

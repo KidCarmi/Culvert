@@ -80,18 +80,18 @@ func assertIndexInLockstep(t *testing.T, s *Store, after string) {
 	}
 }
 
-func seedGroups(t *testing.T, n int) (*Store, []string) {
+func seedGroups(t *testing.T, n int) (store *Store, ids []string) {
 	t.Helper()
-	s := New()
-	ids := make([]string, 0, n)
+	store = New()
+	ids = make([]string, 0, n)
 	for i := 0; i < n; i++ {
-		g, err := s.Add(fmt.Sprintf("group-%d", i), []string{fmt.Sprintf("Category %d", i), "Social Media"})
+		g, err := store.Add(fmt.Sprintf("group-%d", i), []string{fmt.Sprintf("Category %d", i), "Social Media"})
 		if err != nil {
 			t.Fatalf("Add: %v", err)
 		}
 		ids = append(ids, g.ID)
 	}
-	return s, ids
+	return store, ids
 }
 
 // ── Equivalence ──────────────────────────────────────────────────────────────
