@@ -1,0 +1,80 @@
+# Appliance OVA build — MANUAL dispatch only (not a gate, never release evidence).
+# Runs appliance/build.sh exactly as documented in docs/appliance/ova-build.md:
+# every input is pinned in appliance/manifest.env, the application image is
+# cosign-verified against release_identity.env, the bake VM has no network.
+# GitHub-hosted ubuntu runners expose /dev/kvm (the script falls back to TCG
+# when it is absent). Artifacts (OVA, qcow2, build record, bake serial log)
+# are uploaded for inspection; nothing is published.
+name: Appliance OVA build
+
+on:
+  workflow_dispatch:
+    inputs:
+      accel:
+        description: "QEMU accelerator (auto picks kvm when /dev/kvm is writable)"
+        type: choice
+        options: [auto, kvm, tcg]
+        default: auto
+
+permissions:
+  contents: read
+
+concurrency:
+  group: appliance-build-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    steps:
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: audit
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+      - name: Install QEMU + cloud-image-utils + genisoimage
+        run: |
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq qemu-utils qemu-system-x86 cloud-image-utils genisoimage
+          qemu-img --version | head -n1; qemu-system-x86_64 --version | head -n1
+          if [ -w /dev/kvm ]; then echo "kvm: available"; else echo "kvm: NOT available (TCG fallback)"; fi
+
+      - name: Build the appliance
+        run: |
+          appliance/build.sh --out "${RUNNER_TEMP}/appliance-out" --accel "${{ inputs.accel }}"
+
+      - name: Summarise
+        if: always()
+        run: |
+          {
+            echo '## Appliance build'
+            echo
+            echo '```'
+            cat "${RUNNER_TEMP}"/appliance-out/*.sha256 2>/dev/null || echo "no outputs"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload build record + logs (always)
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: appliance-build-record
+          if-no-files-found: ignore
+          path: |
+            ${{ runner.temp }}/appliance-out/*.build-record.json
+            ${{ runner.temp }}/appliance-out/*.sha256
+            ${{ runner.temp }}/appliance-out/*.bake-serial.log
+            ${{ runner.temp }}/appliance-out/*.cosign-verify.json
+
+      - name: Upload OVA + qcow2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: appliance-ova
+          retention-days: 14
+          path: |
+            ${{ runner.temp }}/appliance-out/*.ova
+            ${{ runner.temp }}/appliance-out/*/*.qcow2
