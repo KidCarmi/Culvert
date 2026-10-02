@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -121,6 +122,7 @@ type startupState struct {
 	restoreIn               *string
 	restoreMode             *string
 	restoreConfirm          *confirmFlag
+	recoverRestore          *bool
 	prepareDowngrade        *bool
 	downgradeTargetSchema   *int
 	restoreAcceptDPReenroll *bool
@@ -204,6 +206,11 @@ func main() {
 		fmt.Fprintf(os.Stderr, "FATAL: %v\n", err)
 		os.Exit(1)
 	}
+	// Hold the data-directory lock for the process lifetime so an offline
+	// restore commit / recovery against a still-running stack is REFUSED
+	// rather than raced (restore_inplace.go). Advisory: an unavailable lock
+	// is logged and never stops the proxy from serving.
+	holdDataDirLock(dataDir)
 	setInsecureFlag(s)
 	runEnrollmentMode(s)
 	loadFileConfigAndFlags(s)
@@ -351,6 +358,7 @@ func parseFlags(s *startupState) {
 	s.downgradeTargetSchema = flag.Int("target-schema", 0, "Target admin-settings schema for --prepare-downgrade (only the frozen predecessor's schema is supported) (2F-D)")
 	s.restoreAcceptDPReenroll = flag.Bool("accept-dp-reenrollment", false, "Acknowledge that restoring will require enrolled DPs to re-enroll (D1.3b.2a/b)")
 	s.restoreAllowCounterRB = flag.Bool("allow-counter-rollback", false, "Acknowledge that restoring will roll back TOTP counters for some users (D1.3b.2a/b)")
+	s.recoverRestore = flag.Bool("recover-restore", false, "Inspect an interrupted restore commit (journal in the data dir) and exit; with --confirm revert|complete, resolve it in that direction (offline only)")
 	s.listLeftovers = flag.Bool("list-restore-leftovers", false, "List restore leftover .bak/.staging dirs (siblings of dataDir) and exit (D1.3c)")
 	s.cleanupLeftovers = flag.Bool("cleanup-restore-leftovers", false, "Plan/execute cleanup of restore leftover .bak/.staging dirs and exit; dry-run unless --confirm is set (D1.3c)")
 	s.cleanupOlderThan = flag.String("older-than", "", "Cleanup filter: only candidates older than this duration (strict time.ParseDuration syntax, e.g. 168h, 720h) (D1.3c)")
@@ -429,6 +437,22 @@ func handleOneShotCommands(s *startupState) {
 				fmt.Fprintf(os.Stderr, "Restore validation error: %v\n", err)
 				os.Exit(1)
 			}
+		}
+		os.Exit(0)
+	}
+	// ── One-shot: recover an interrupted in-place restore (restore_inplace.go) ─
+	if *s.recoverRestore {
+		action := restoreRecoverAction("")
+		if s.restoreConfirm.Bool() {
+			action = restoreRecoverAction(strings.ToLower(strings.TrimSpace(s.restoreConfirm.String())))
+			if action == "true" || action == "" {
+				fmt.Fprintln(os.Stderr, "Recover-restore error: --confirm needs a direction: --confirm revert or --confirm complete")
+				os.Exit(1)
+			}
+		}
+		if err := runRecoverRestoreCommand(dataDir, action); err != nil {
+			fmt.Fprintf(os.Stderr, "Recover-restore error: %v\n", err)
+			os.Exit(1)
 		}
 		os.Exit(0)
 	}
@@ -561,6 +585,43 @@ func runBackupCommand(s *startupState) error {
 	}
 	fmt.Printf("Backup written to %s\n", *s.backupOut)
 	return nil
+}
+
+// runRecoverRestoreCommand drives --recover-restore. Like the commit it
+// resolves, it is offline-only: a held data-dir lock (a running proxy) is a
+// refusal, because moving entries under a live process is exactly the race
+// the lock exists to prevent.
+func runRecoverRestoreCommand(dataDir string, action restoreRecoverAction) error {
+	if action != "" {
+		release, err := acquireDataDirLock(dataDir)
+		if err != nil {
+			if errors.Is(err, errDataDirLocked) {
+				return err
+			}
+			fmt.Fprintf(os.Stderr, "WARN: data-dir lock unavailable (%v); continuing without the quiescing guard\n", err)
+		} else {
+			defer release()
+		}
+	}
+	return runRecoverRestore(dataDir, action, os.Stdout)
+}
+
+// dataDirLockRelease keeps the proxy's data-dir lock alive for the process
+// lifetime (released implicitly at exit).
+var dataDirLockRelease func()
+
+func holdDataDirLock(dataDir string) {
+	release, err := acquireDataDirLock(dataDir)
+	if err != nil {
+		if errors.Is(err, errDataDirLocked) {
+			fmt.Fprintf(os.Stderr, "WARN: %v — another Culvert process holds %s; continuing, but offline restore will refuse while both run\n", err, filepath.Join(dataDir, dataDirLockName))
+			return
+		}
+		// Missing dir (first boot before init creates it) or read-only FS:
+		// the lock is a safety net, never a reason to refuse to serve.
+		return
+	}
+	dataDirLockRelease = release
 }
 
 func runCleanupCommand(s *startupState) error {

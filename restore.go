@@ -20,6 +20,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -932,9 +933,9 @@ var restoreNow = time.Now
 
 // runRestoreCommit performs a destructive restore: validate, analyze,
 // enforce guards, stage, swap. Caller must stop the proxy first
-// (offline restore only). On success, current /data has been replaced
-// by the restored content and the prior /data is preserved at
-// /data.bak.<timestamp>.
+// (offline restore only). On success, the data dir's content has been
+// replaced by the restored content and the prior content is preserved at
+// <dataDir>/.restore-bak.<timestamp>-<pid>/.
 //
 // Step ordering (single failure boundary at the swap):
 //
@@ -942,15 +943,16 @@ var restoreNow = time.Now
 //  2. analyze   (D1.3b.2a; no /data writes)
 //  3. guards    (D1.3b.2a precomputed; reject if WouldBlock)
 //  4. summary   (mode-aware; informational)
-//  5. stage     (mkdir /data.staging.<ts>; write per mode predicate)
-//  6. rename A  (current /data → /data.bak.<ts>)
-//  7. rename B  (staging → /data) + parent-dir fsync
-//  8. final     (print success + .bak path)
+//  5. stage     (mkdir <dataDir>/.restore-staging.<ts>; write per mode predicate)
+//  6. evacuate  (journal; move every top-level entry → <dataDir>/.restore-bak.<ts>/)
+//  7. promote   (journal; move every staged entry → <dataDir>/) + dir fsync
+//  8. final     (remove journal; print success + bak path)
 //
-// If 1–5 fail: /data unchanged, staging cleaned up.
-// If 6 fails: /data unchanged, staging cleaned up.
-// If 7 fails (or process is killed between 6 and 7): /data does not
-// exist; error message names the exact `mv` recovery command.
+// If 1–5 fail: data dir unchanged, staging cleaned up.
+// If 6–7 fail (or the process is killed inside them): the journal stays,
+// the boot guard refuses to start, and --recover-restore resolves it in
+// either direction (restore_inplace.go). The swap is in-place because a
+// mounted /data cannot be renamed (restore_mountpoint_test.go).
 func runRestoreCommit(tarPath, dataDir, passphrase string, opts restoreOpts) error {
 	// Steps 1–2 (reuse).
 	summary, manifest, files, err := validateBackup(tarPath, dataDir, passphrase, opts.BackupPassphrase)
@@ -975,14 +977,45 @@ func runRestoreCommit(tarPath, dataDir, passphrase string, opts restoreOpts) err
 	// Step 4: print summary so the operator sees the plan one last time.
 	printRestoreSummary(os.Stdout, summary, analysis)
 
+	// Refuse to start a second commit over an unresolved one: the journal is
+	// the operator's recovery handle and must never be clobbered.
+	if _, present, jerr := readRestoreJournal(dataDir); present {
+		if jerr != nil {
+			return fmt.Errorf("restore: %w — resolve it first (--recover-restore)", jerr)
+		}
+		return fmt.Errorf("restore: an interrupted restore is pending in %s; resolve it first with --recover-restore --confirm revert|complete", dataDir)
+	}
+	// An entry of dataDir that is itself a mount point (e.g. a `./yara:/data/yara:ro`
+	// bind) cannot be renamed, so refuse BEFORE anything destructive rather
+	// than failing half-way through evacuation.
+	if nested := nestedMountPointsUnder(dataDir); len(nested) > 0 {
+		return fmt.Errorf("restore: refusing to commit — mount points inside the data directory cannot be moved aside: %s (unmount them for the restore, or remove the bind mounts from the cli service)", strings.Join(nested, ", "))
+	}
+	// Quiescing is ENFORCED: the proxy holds <dataDir>/.culvert.lock for its
+	// lifetime (see restore_lock_unix.go), so a commit against a live stack
+	// is refused instead of racing it.
+	release, lerr := acquireDataDirLock(dataDir)
+	if lerr != nil {
+		if errors.Is(lerr, errDataDirLocked) {
+			return fmt.Errorf("restore: %w", lerr)
+		}
+		fmt.Fprintf(os.Stderr, "WARN: data-dir lock unavailable (%v); continuing without the quiescing guard\n", lerr)
+	} else {
+		defer release()
+	}
+
 	// Anchor paths now so failure messages can name them. Suffix is
 	// timestamp + PID so:
 	//   - same-second retries from different processes don't collide
 	//   - the operator can copy-paste the printed paths verbatim
 	//   - staging and bak share a correlated suffix
+	// Both live INSIDE dataDir (restore_inplace.go): a mounted /data cannot be
+	// renamed, and a sibling would land outside the volume.
 	suffix := fmt.Sprintf("%s-%d", restoreNow().UTC().Format("20060102T150405Z"), os.Getpid())
-	stagingDir := dataDir + ".staging." + suffix
-	bakPath := dataDir + ".bak." + suffix
+	stagingName := restoreStagingPrefix + suffix
+	bakName := restoreBakPrefix + suffix
+	stagingDir := filepath.Join(dataDir, stagingName)
+	bakPath := filepath.Join(dataDir, bakName)
 
 	// Collision pre-check: refuse to proceed if either path already
 	// exists on disk. Catches stale state from a prior failed restore
@@ -1001,7 +1034,7 @@ func runRestoreCommit(tarPath, dataDir, passphrase string, opts restoreOpts) err
 
 	fmt.Fprintf(os.Stdout, "\nCommitting restore now.\n")
 	fmt.Fprintf(os.Stdout, "  Staging dir: %s\n", stagingDir)
-	fmt.Fprintf(os.Stdout, "  Backup of current /data will be at: %s\n\n", bakPath)
+	fmt.Fprintf(os.Stdout, "  Backup of current data will be at: %s\n\n", bakPath)
 
 	// Step 5: stage to disk.
 	if err := stageArtifacts(stagingDir, dataDir, files, manifest, opts.Mode); err != nil {
@@ -1009,41 +1042,27 @@ func runRestoreCommit(tarPath, dataDir, passphrase string, opts restoreOpts) err
 		return fmt.Errorf("restore: stage failed: %w", err)
 	}
 
-	// Step 6: rename current /data → .bak.
-	if err := os.Rename(dataDir, bakPath); err != nil {
-		_ = os.RemoveAll(stagingDir) // #nosec G104 -- best-effort cleanup
-		return fmt.Errorf("restore: rename current %s → %s: %w", dataDir, bakPath, err)
+	// Steps 6–7: journaled in-place swap (evacuate → promote). Any failure
+	// past this point leaves a journal; the error names the recovery command
+	// and NOTHING is cleaned up, because both the previous data and the
+	// staged data are needed for the operator's choice.
+	j := &restoreJournal{
+		Suffix:     suffix,
+		StagingDir: stagingName,
+		BakDir:     bakName,
+		Mode:       opts.Mode.String(),
+		StartedAt:  restoreNow().UTC(),
 	}
-
-	// Critical window: /data does not exist between renames. On failure
-	// here, clean up staging so the operator's only recovery path is the
-	// .bak (no ambiguity between option A "revert via .bak" and option B
-	// "promote staging"). The .bak is preserved either way.
-	if commitInjectBetweenRenames != nil {
-		if err := commitInjectBetweenRenames(); err != nil {
-			_ = os.RemoveAll(stagingDir) // #nosec G104 -- best-effort cleanup
-			return fmt.Errorf("restore: COMMIT INTERRUPTED — %s does not exist; manual recovery: mv %s %s ; injected: %w",
-				dataDir, bakPath, dataDir, err)
-		}
+	if err := swapInPlace(dataDir, stagingDir, bakPath, j); err != nil {
+		return fmt.Errorf("restore: COMMIT INTERRUPTED — %w; previous data is at %s, staged data at %s; resolve with: --recover-restore (inspect), then --recover-restore --confirm revert | complete",
+			err, bakPath, stagingDir)
 	}
-
-	// Step 7: rename staging → /data.
-	if err := os.Rename(stagingDir, dataDir); err != nil {
-		_ = os.RemoveAll(stagingDir) // #nosec G104 -- best-effort cleanup
-		return fmt.Errorf("restore: COMMIT INTERRUPTED — %s does not exist; manual recovery: mv %s %s ; rename staging→/data failed: %w",
-			dataDir, bakPath, dataDir, err)
-	}
-
-	// Parent-dir fsync (best-effort, mirrors atomicWriteFile pattern).
-	if d, derr := os.Open(filepath.Dir(dataDir)); derr == nil {
-		_ = d.Sync()
-		_ = d.Close()
-	}
+	_ = fsyncDirBestEffort(dataDir)
 
 	// Step 8.
 	fmt.Fprintf(os.Stdout, "\nRestore committed.\n")
-	fmt.Fprintf(os.Stdout, "  Previous /data preserved at: %s\n", bakPath)
-	fmt.Fprintf(os.Stdout, "  (.bak is NOT auto-deleted; remove manually when no longer needed.)\n")
+	fmt.Fprintf(os.Stdout, "  Previous data preserved at: %s\n", bakPath)
+	fmt.Fprintf(os.Stdout, "  (never auto-deleted; remove with --cleanup-restore-leftovers --confirm when no longer needed.)\n")
 	return nil
 }
 
@@ -1066,6 +1085,21 @@ func runRestoreCommit(tarPath, dataDir, passphrase string, opts restoreOpts) err
 // the guard returns nil and normal first-run initialization proceeds.
 func checkInterruptedRestore(dataDir string) error {
 	if _, err := os.Stat(dataDir); err == nil {
+		// In-place (mount-point-safe) commits leave a journal INSIDE dataDir
+		// while interrupted; the data directory then holds a mix of previous
+		// and restored entries and must not be served.
+		if j, present, jerr := readRestoreJournal(dataDir); present {
+			if jerr != nil {
+				return fmt.Errorf("interrupted restore detected: %v. Inspect %s and the .restore-* directories in %s by hand before starting Culvert again",
+					jerr, restoreJournalPath(dataDir), dataDir)
+			}
+			return fmt.Errorf("interrupted restore detected: a restore commit in %s was interrupted in phase %q "+
+				"(previous data at %s, staged data at %s). Resolve it with the stack stopped, then start Culvert again:\n"+
+				"    INSPECT:   --recover-restore\n"+
+				"    REVERT:    --recover-restore --confirm revert\n"+
+				"    COMPLETE:  --recover-restore --confirm complete",
+				dataDir, j.Phase, filepath.Join(dataDir, j.BakDir), filepath.Join(dataDir, j.StagingDir))
+		}
 		return nil // dataDir present — normal boot
 	} else if !os.IsNotExist(err) {
 		return nil // unexpected stat error — don't block boot on a transient FS issue
@@ -1184,6 +1218,15 @@ func stageArtifacts(stagingDir, dataDir string, files map[string][]byte, manifes
 	walkErr := filepath.Walk(dataDir, func(p string, info os.FileInfo, werr error) error {
 		if werr != nil {
 			return werr
+		}
+		// Never carry over (or descend into) the restore machinery's own
+		// top-level entries: the staging dir being written, previous
+		// .restore-bak.* leftovers, the journal and the lock file.
+		if filepath.Dir(p) == dataDir && isRestoreInternalEntry(info.Name()) {
+			if info.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
 		}
 		if info.IsDir() {
 			return nil
