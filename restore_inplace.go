@@ -324,7 +324,7 @@ func swapInPlace(dataDir, stagingDir, bakDir string, j *restoreJournal) error {
 		// Staging must be empty now; anything else is a bug worth surfacing,
 		// but the data has landed, so finish the journal rather than
 		// leaving the boot guard armed over an empty directory.
-		fmt.Fprintf(os.Stderr, "WARN: could not remove empty staging dir %s: %v\n", stagingDir, err)
+		_, _ = fmt.Fprintf(os.Stderr, "WARN: could not remove empty staging dir %s: %v\n", stagingDir, err)
 	}
 	if err := removeRestoreJournal(dataDir); err != nil {
 		return err
@@ -362,18 +362,18 @@ func runRecoverRestore(dataDir string, action restoreRecoverAction, out io.Write
 	staged, _ := listTopLevelUserEntries(stagingDir)
 	backed, _ := listTopLevelUserEntries(bakDir)
 
-	fmt.Fprintf(out, "Interrupted restore detected in %s\n", dataDir)
-	fmt.Fprintf(out, "  Started:        %s   (mode %s)\n", j.StartedAt.UTC().Format(time.RFC3339), j.Mode)
-	fmt.Fprintf(out, "  Phase:          %s\n", j.Phase)
-	fmt.Fprintf(out, "  Previous data:  %s   (%d top-level entries)\n", bakDir, len(backed))
-	fmt.Fprintf(out, "  Staged restore: %s   (%d top-level entries)\n", stagingDir, len(staged))
-	fmt.Fprintf(out, "  Live data dir:  %d top-level user entries\n", len(live))
+	_, _ = fmt.Fprintf(out, "Interrupted restore detected in %s\n", dataDir)
+	_, _ = fmt.Fprintf(out, "  Started:        %s   (mode %s)\n", j.StartedAt.UTC().Format(time.RFC3339), j.Mode)
+	_, _ = fmt.Fprintf(out, "  Phase:          %s\n", j.Phase)
+	_, _ = fmt.Fprintf(out, "  Previous data:  %s   (%d top-level entries)\n", bakDir, len(backed))
+	_, _ = fmt.Fprintf(out, "  Staged restore: %s   (%d top-level entries)\n", stagingDir, len(staged))
+	_, _ = fmt.Fprintf(out, "  Live data dir:  %d top-level user entries\n", len(live))
 
 	switch action {
 	case "":
-		fmt.Fprintf(out, "\nChoose ONE and re-run with the stack still stopped:\n")
-		fmt.Fprintf(out, "  REVERT   (undo the restore, previous data back):   --recover-restore --confirm=revert\n")
-		fmt.Fprintf(out, "  COMPLETE (finish the restore, staged data lands):  --recover-restore --confirm=complete\n")
+		_, _ = fmt.Fprintf(out, "\nChoose ONE and re-run with the stack still stopped:\n")
+		_, _ = fmt.Fprintf(out, "  REVERT   (undo the restore, previous data back):   --recover-restore --confirm=revert\n")
+		_, _ = fmt.Fprintf(out, "  COMPLETE (finish the restore, staged data lands):  --recover-restore --confirm=complete\n")
 		return nil
 	case recoverActionRevert:
 		return recoverRevert(dataDir, stagingDir, bakDir, j, out)
@@ -409,22 +409,22 @@ func recoverRevert(dataDir, stagingDir, bakDir string, j *restoreJournal, out io
 		if err != nil {
 			return fmt.Errorf("revert: un-promote: %w", err)
 		}
-		fmt.Fprintf(out, "  Moved %d promoted entr%s back to staging\n", n, entries(n))
+		_, _ = fmt.Fprintf(out, "  Moved %d promoted entr%s back to staging\n", n, entries(n))
 	}
 	n, err := moveTopLevelEntriesIfPresent(bakDir, dataDir)
 	if err != nil {
 		return fmt.Errorf("revert: restore previous data: %w", err)
 	}
-	fmt.Fprintf(out, "  Moved %d previous entr%s back into %s\n", n, entries(n), dataDir)
+	_, _ = fmt.Fprintf(out, "  Moved %d previous entr%s back into %s\n", n, entries(n), dataDir)
 	if err := os.Remove(bakDir); err != nil && !os.IsNotExist(err) {
-		fmt.Fprintf(out, "  WARN: previous-data dir %s not empty after revert: %v\n", bakDir, err)
+		_, _ = fmt.Fprintf(out, "  WARN: previous-data dir %s not empty after revert: %v\n", bakDir, err)
 	}
 	if err := removeRestoreJournal(dataDir); err != nil {
 		return err
 	}
-	fmt.Fprintf(out, "\nRestore REVERTED. Previous data is live again.\n")
-	fmt.Fprintf(out, "  The staged restore content is kept at %s for inspection;\n", stagingDir)
-	fmt.Fprintf(out, "  remove it with --cleanup-restore-leftovers --confirm when no longer needed.\n")
+	_, _ = fmt.Fprintf(out, "\nRestore REVERTED. Previous data is live again.\n")
+	_, _ = fmt.Fprintf(out, "  The staged restore content is kept at %s for inspection;\n", stagingDir)
+	_, _ = fmt.Fprintf(out, "  remove it with --cleanup-restore-leftovers --confirm when no longer needed.\n")
 	return nil
 }
 
@@ -437,7 +437,7 @@ func recoverComplete(dataDir, stagingDir, bakDir string, j *restoreJournal, out 
 		if err != nil {
 			return fmt.Errorf("complete: finish evacuating: %w", err)
 		}
-		fmt.Fprintf(out, "  Moved %d remaining previous entr%s aside\n", n, entries(n))
+		_, _ = fmt.Fprintf(out, "  Moved %d remaining previous entr%s aside\n", n, entries(n))
 		j.Phase = restorePhasePromoting
 		if err := writeRestoreJournal(dataDir, j); err != nil {
 			return err
@@ -449,23 +449,23 @@ func recoverComplete(dataDir, stagingDir, bakDir string, j *restoreJournal, out 
 	// is a supported interruption point: completing it means retiring the
 	// journal, never failing on the missing directory (Codex review, PR #1528).
 	if _, serr := os.Lstat(stagingDir); os.IsNotExist(serr) {
-		fmt.Fprintf(out, "  Staged data was already fully promoted (staging dir gone); nothing left to move\n")
+		_, _ = fmt.Fprintf(out, "  Staged data was already fully promoted (staging dir gone); nothing left to move\n")
 	} else {
 		n, err := moveTopLevelEntries(stagingDir, dataDir)
 		if err != nil {
 			return fmt.Errorf("complete: promote staged data: %w", err)
 		}
-		fmt.Fprintf(out, "  Promoted %d staged entr%s into %s\n", n, entries(n), dataDir)
+		_, _ = fmt.Fprintf(out, "  Promoted %d staged entr%s into %s\n", n, entries(n), dataDir)
 		if err := os.Remove(stagingDir); err != nil && !os.IsNotExist(err) {
-			fmt.Fprintf(out, "  WARN: staging dir %s not empty after promotion: %v\n", stagingDir, err)
+			_, _ = fmt.Fprintf(out, "  WARN: staging dir %s not empty after promotion: %v\n", stagingDir, err)
 		}
 	}
 	if err := removeRestoreJournal(dataDir); err != nil {
 		return err
 	}
-	fmt.Fprintf(out, "\nRestore COMPLETED. Restored data is live.\n")
-	fmt.Fprintf(out, "  Previous data preserved at %s (never auto-deleted);\n", bakDir)
-	fmt.Fprintf(out, "  remove it with --cleanup-restore-leftovers --confirm when no longer needed.\n")
+	_, _ = fmt.Fprintf(out, "\nRestore COMPLETED. Restored data is live.\n")
+	_, _ = fmt.Fprintf(out, "  Previous data preserved at %s (never auto-deleted);\n", bakDir)
+	_, _ = fmt.Fprintf(out, "  remove it with --cleanup-restore-leftovers --confirm when no longer needed.\n")
 	return nil
 }
 

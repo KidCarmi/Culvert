@@ -930,18 +930,18 @@ func printRestoreSummary(w io.Writer, s *restoreSummary, a *commitAnalysis) {
 		_, _ = fmt.Fprintf(w, "  Current:    sha256:%s\n", a.CurrentRootCADigest[:16])
 	}
 	if a.RestoredRootCADigest == "" {
-		fmt.Fprintf(w, "  Restored:   (none would be present — a NEW root is minted at the next boot)\n")
+		_, _ = fmt.Fprintf(w, "  Restored:   (none would be present — a NEW root is minted at the next boot)\n")
 	} else {
-		fmt.Fprintf(w, "  Restored:   sha256:%s\n", a.RestoredRootCADigest[:16])
+		_, _ = fmt.Fprintf(w, "  Restored:   sha256:%s\n", a.RestoredRootCADigest[:16])
 	}
 	switch {
 	case a.RootCAGuardWouldBlock:
-		fmt.Fprintf(w, "  ⚠ Root CA changes: clients trusting the current root lose inspected HTTPS.\n")
-		fmt.Fprintf(w, "    Pass --accept-root-ca-change to allow commit, or --mode state-only to keep it.\n")
+		_, _ = fmt.Fprintf(w, "  ⚠ Root CA changes: clients trusting the current root lose inspected HTTPS.\n")
+		_, _ = fmt.Fprintf(w, "    Pass --accept-root-ca-change to allow commit, or --mode state-only to keep it.\n")
 	case a.RootCAChanged:
-		fmt.Fprintf(w, "  ⓘ Root CA change accepted.\n")
+		_, _ = fmt.Fprintf(w, "  ⓘ Root CA change accepted.\n")
 	default:
-		fmt.Fprintf(w, "  Root CA unchanged.\n")
+		_, _ = fmt.Fprintf(w, "  Root CA unchanged.\n")
 	}
 
 	fmt.Fprintf(w, "\nAdmin accounts:\n")
@@ -954,7 +954,7 @@ func printRestoreSummary(w io.Writer, s *restoreSummary, a *commitAnalysis) {
 		fmt.Fprintf(w, "  Will be removed:  %s\n", strings.Join(a.UsersRemovedByRestore, ", "))
 	}
 	if a.CurrentAdmins > 0 && a.RestoredAdmins == 0 {
-		fmt.Fprintf(w, "  ⚠ No admin would remain: commit is REFUSED (would reopen unauthenticated setup).\n")
+		_, _ = fmt.Fprintf(w, "  ⚠ No admin would remain: commit is REFUSED (would reopen unauthenticated setup).\n")
 	}
 
 	fmt.Fprintf(w, "\nTOTP counter rollbacks:\n")
@@ -1072,7 +1072,7 @@ func runRestoreCommit(tarPath, dataDir, passphrase string, opts restoreOpts) err
 		if errors.Is(lerr, errDataDirLocked) {
 			return fmt.Errorf("restore: %w", lerr)
 		}
-		fmt.Fprintf(os.Stderr, "WARN: data-dir lock unavailable (%v); continuing without the quiescing guard\n", lerr)
+		_, _ = fmt.Fprintf(os.Stderr, "WARN: data-dir lock unavailable (%v); continuing without the quiescing guard\n", lerr)
 	} else {
 		defer release()
 	}
@@ -1159,7 +1159,7 @@ func commitRestoreStaged(dataDir string, manifest *backupManifest, files map[str
 
 	fmt.Fprintf(os.Stdout, "\nCommitting restore now.\n")
 	fmt.Fprintf(os.Stdout, "  Staging dir: %s\n", stagingDir)
-	fmt.Fprintf(os.Stdout, "  Backup of current data will be at: %s\n\n", bakPath)
+	_, _ = fmt.Fprintf(os.Stdout, "  Backup of current data will be at: %s\n\n", bakPath)
 
 	// Step 5: stage to disk.
 	if err := stageArtifacts(stagingDir, dataDir, files, manifest, opts.Mode); err != nil {
@@ -1186,8 +1186,8 @@ func commitRestoreStaged(dataDir string, manifest *backupManifest, files map[str
 
 	// Step 8.
 	fmt.Fprintf(os.Stdout, "\nRestore committed.\n")
-	fmt.Fprintf(os.Stdout, "  Previous data preserved at: %s\n", bakPath)
-	fmt.Fprintf(os.Stdout, "  (never auto-deleted; remove with --cleanup-restore-leftovers --confirm when no longer needed.)\n")
+	_, _ = fmt.Fprintf(os.Stdout, "  Previous data preserved at: %s\n", bakPath)
+	_, _ = fmt.Fprintf(os.Stdout, "  (never auto-deleted; remove with --cleanup-restore-leftovers --confirm when no longer needed.)\n")
 	return nil
 }
 

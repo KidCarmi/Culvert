@@ -213,11 +213,11 @@ func main() {
 	// (first boot before the dir exists, read-only fs) stays advisory
 	// (adversarial review, PR #1528).
 	if err := holdDataDirLock(dataDir); err != nil {
-		fmt.Fprintf(os.Stderr, "FATAL: %v\n", err)
+		_, _ = fmt.Fprintf(os.Stderr, "FATAL: %v\n", err)
 		os.Exit(1)
 	}
 	if err := checkInterruptedRestore(dataDir); err != nil {
-		fmt.Fprintf(os.Stderr, "FATAL: %v\n", err)
+		_, _ = fmt.Fprintf(os.Stderr, "FATAL: %v\n", err)
 		os.Exit(1)
 	}
 	setInsecureFlag(s)
@@ -457,12 +457,12 @@ func handleOneShotCommands(s *startupState) {
 		if s.restoreConfirm.Bool() {
 			action = restoreRecoverAction(strings.ToLower(strings.TrimSpace(s.restoreConfirm.String())))
 			if action == "true" || action == "" {
-				fmt.Fprintln(os.Stderr, "Recover-restore error: --confirm needs a direction, written with an equals sign: --confirm=revert or --confirm=complete")
+				_, _ = fmt.Fprintln(os.Stderr, "Recover-restore error: --confirm needs a direction, written with an equals sign: --confirm=revert or --confirm=complete")
 				os.Exit(1)
 			}
 		}
 		if err := runRecoverRestoreCommand(dataDir, action); err != nil {
-			fmt.Fprintf(os.Stderr, "Recover-restore error: %v\n", err)
+			_, _ = fmt.Fprintf(os.Stderr, "Recover-restore error: %v\n", err)
 			os.Exit(1)
 		}
 		os.Exit(0)
@@ -609,7 +609,7 @@ func runRecoverRestoreCommand(dataDir string, action restoreRecoverAction) error
 			if errors.Is(err, errDataDirLocked) {
 				return err
 			}
-			fmt.Fprintf(os.Stderr, "WARN: data-dir lock unavailable (%v); continuing without the quiescing guard\n", err)
+			_, _ = fmt.Fprintf(os.Stderr, "WARN: data-dir lock unavailable (%v); continuing without the quiescing guard\n", err)
 		} else {
 			defer release()
 		}
@@ -629,7 +629,7 @@ func holdDataDirLock(dataDir string) error {
 		if errors.Is(err, errDataDirLocked) {
 			return fmt.Errorf("%w — refusing to start the proxy over a data directory another Culvert process (a restore commit or --recover-restore) is mutating: %s; retry once it has finished", err, filepath.Join(dataDir, dataDirLockName))
 		}
-		fmt.Fprintf(os.Stderr, "WARN: data-dir lock unavailable (%v); continuing without the quiescing guard\n", err)
+		_, _ = fmt.Fprintf(os.Stderr, "WARN: data-dir lock unavailable (%v); continuing without the quiescing guard\n", err)
 		return nil
 	}
 	// The lock is held for the process lifetime and released implicitly at
