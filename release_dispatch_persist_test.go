@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"strings"
@@ -181,7 +182,7 @@ func TestDispatchStore_UnreadableStateIsSurfacedNotOverwritten(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(after) != string(before) {
+	if !bytes.Equal(after, before) {
 		t.Fatal("a persist while the file was unreadable overwrote the records it could not read")
 	}
 	// CONTROL: an ABSENT file is still the ordinary fresh store.
