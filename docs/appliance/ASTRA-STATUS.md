@@ -206,3 +206,5 @@ _(none yet)_
 ## Push log
 
 _(appended after each push)_
+
+- 2026-10-02 — `72ce0984c1add911142db489c69f949a7ade1574` — M1 environment capability report.
