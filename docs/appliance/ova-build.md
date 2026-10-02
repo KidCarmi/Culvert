@@ -70,6 +70,11 @@ Outputs in `--out`:
   + dirty flag, `SOURCE_DATE_EPOCH`, build timestamp, final OVA SHA256
 * `dpkg-list.txt` and `host-components.txt` — the guest package inventory,
   captured inside the guest during the build (input for the SBOM evidence)
+* `prepare-guest.log` — the in-guest customization transcript, read back out
+  of the disk with `virt-cat` (libguestfs shows a `--run-command`'s output on
+  the host only when the command fails, so this is the record of a build that
+  succeeded; the same file ships in the image at
+  `/var/lib/culvert-appliance/prepare-guest.log` beside `build-info.json`)
 
 The OVA is a ustar archive in OVF order (descriptor, disk, manifest) with fixed
 owner/mtime (`SOURCE_DATE_EPOCH`, default: the git commit time). The `.mf`
@@ -98,7 +103,10 @@ verifies on import.
    (Docker repo key fingerprint check → pinned package install → hold →
    `daemon.json` with the containerd image store + live-restore → units,
    firewall, sshd/cloud-init drop-ins, locked `culvert` account → package
-   inventory → identity strip).
+   inventory → identity strip). The script's LAST act is to write
+   `/var/lib/culvert-appliance/prepare-guest.done`; that marker, read back with
+   `virt-cat`, is the only success signal the driver trusts — never the
+   host-side virt-customize output.
 8. Outside-the-guest assertions (pinned `docker-ce` present, empty machine-id,
    no host keys, no proxy config, no authorized keys, console account locked).
 9. `qemu-img convert -O vmdk -o subformat=streamOptimized,adapter_type=lsilogic`,
