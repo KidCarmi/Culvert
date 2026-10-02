@@ -95,15 +95,16 @@ bundler config, or `.ts` file. The only `npm` invocation in CI installs the play
   Login pre-setup is refused (session pre-minting defense, `ui_auth.go:113–148`).
 - **TOTP**: two-step **in-band on `/api/auth/login`** (`{totp_required:true}` → re-POST with
   code); replay-protected via stored counter; backup codes bcrypt-hashed. **The SPA has zero
-  TOTP UI** and there is **no enrollment endpoint**; `/api/auth/totp*` sits in the public-path
-  allowlist with no registered handler (dead entry, `ui_middleware.go:232–242`).
+  TOTP UI** and there is **no enrollment endpoint**. The `/api/auth/totp*` public-path
+  allowlist entry (a dead prefix with no registered handler) was REMOVED by SEC-PUBLICPATH-1
+  (2026-09-14) — see GAP-2.
 
 ### Gaps discovered during this audit (backend, pre-existing — not caused by the frontend)
 
 | ID | Finding | Anchor |
 |---|---|---|
 | GAP-1 | The C2 metadata index files Go-1.22 `{param}` wildcard paths under their literal `{id}` string, so the **10 wildcard routes never match**; e.g. `/api/support/bundles/<id>/approve` falls to the public `/` catch-all and skips the C2 metadata-enforcement layer. Stated precisely: a **C2 metadata-enforcement (defense-in-depth) bypass, not a proven authentication bypass** — handler-level `requireRole` still gates every affected handler. Tracked as work item SEC-C2. | `ui_metadata_enforcement.go:179–200` |
-| GAP-2 | `/api/auth/totp*` public-allowlist entry has no handler; no TOTP enrollment API exists | `ui_middleware.go:232–242` |
+| GAP-2 | ✅ **CLOSED 2026-09-14 (SEC-PUBLICPATH-1)** — `/api/auth/totp*` public-allowlist entry had no handler and no TOTP enrollment API exists. It was not merely dead: a PREFIX pre-authorises every future path beneath it, so the first `/api/auth/totp/enroll` or `.../disable` handler anyone wrote would have been born UNAUTHENTICATED — letting a caller bind their own second factor to an admin account or strip an existing one. Entry removed (zero behavioural change today: nothing matched it), the D0 baseline updated with the rationale, and the class walled by `TestPublicAllowlist_EveryEntryMatchesARegisteredRoute` (every allowlist entry must cover at least one registered route). If a pre-session TOTP step is ever needed it belongs in the existing `/api/auth/login` two-step exchange, which is already lockout-fed. | `ui_middleware.go`, `ui_public_allowlist_test.go`, `d0_auth_safety_test.go` |
 | GAP-3 | No HSTS on the admin UI despite HTTPS-by-default; `Secure` cookie flag drops on self-sign failure or a proxy that omits `X-Forwarded-Proto`. **Partially narrowed on main (2026-08-22)**: the self-sign→plain-HTTP fallback is no longer *silent* — `ui_tls_fallback`/`ui_tls_fallback_reason` are exposed pre-auth on `/api/setup/status` + `/api/auth/status` and the legacy SPA renders warning banners on setup/login/in-app. The HSTS and header-trust halves remain open (SEC-HSTS / SEC-PROXY). | `ui.go`, `ui_session.go:16–18` |
 | GAP-4 | `PATCH` outside `isMutating` (CSRF/body-cap/rate-limit bypass if ever routed) | `ui_middleware.go:174` |
 | GAP-5 | `isSameOrigin` and `isSecureRequest` trust `X-Forwarded-Host`/`X-Forwarded-Proto` unconditionally (no trusted-proxy gate, unlike `realClientIP`) | `ui_middleware.go:216`, `ui_session.go:17` |

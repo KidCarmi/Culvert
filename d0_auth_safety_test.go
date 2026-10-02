@@ -15,10 +15,26 @@ import (
 // Categories:
 //   - setup bootstrap (prefix /api/setup)
 //   - login/logout/status auth endpoints
-//   - TOTP enrolment (prefix /api/auth/totp)
 //   - IdP browser callbacks (prefix /auth/)
 //   - PAC file (Windows clients cannot send credentials)
 //   - non-/api/ paths (e.g. /healthz) bypass the API gate entirely
+//
+// SEC-PUBLICPATH-1 (2026-09-14) REMOVED the sixth category, "TOTP enrolment
+// (prefix /api/auth/totp)", and the two paths that pinned it. It named a
+// surface that has never existed: no /api/auth/totp* route is registered
+// anywhere, and cfg.SetTOTPSecret/ClearTOTP have no production callers at all.
+// The shipped second factor is verified INSIDE apiAuthLogin's two-step flow
+// (verifyLoginTOTP), which is credential-gated and feeds the lockout, so no
+// pre-session TOTP endpoint is required by the design.
+//
+// What the prefix did instead was pre-authorise endpoints nobody had written
+// yet: the first /api/auth/totp/enroll or .../disable handler would have been
+// born UNAUTHENTICATED, letting any caller bind their own second factor to an
+// admin account or strip an existing one. Enrolment is the one TOTP operation
+// that can never legitimately be anonymous. If a pre-session TOTP step is ever
+// needed, it belongs in the existing /api/auth/login two-step exchange (already
+// lockout-fed); making it a new public route is the decision this removal
+// forces somebody to take explicitly rather than inherit.
 var d0PublicPaths = []string{
 	"/api/setup/status",
 	"/api/setup/complete",
@@ -26,8 +42,6 @@ var d0PublicPaths = []string{
 	"/api/auth/login",
 	"/api/auth/logout",
 	"/api/auth/status",
-	"/api/auth/totp/enroll", // prefix allowlist /api/auth/totp
-	"/api/auth/totp/verify", // prefix allowlist /api/auth/totp
 	"/auth/oidc/callback",
 	"/auth/saml/callback",
 	"/auth/select",
@@ -45,6 +59,10 @@ var d0PublicPaths = []string{
 // is NOT on the public allowlist (only /api/auth/login|logout|status are).
 var d0NonPublicAPISample = []string{
 	"/api/auth/users", // intentionally NOT public
+	// SEC-PUBLICPATH-1: the former /api/auth/totp prefix. No such route is
+	// registered, so this asserts the negative directly — if one is ever added
+	// it must be authenticated (or the author must argue otherwise here).
+	"/api/auth/totp/enroll",
 	"/api/auth/change-password",
 	"/api/policy",
 	"/api/blocklist",
