@@ -1,5 +1,7 @@
 package main
 
+import "strings"
+
 // rewrite_default_action_startup.go — startup-time loader for the
 // header-rewrite + default-policy-action slice (PR3 expansion, Batch 3).
 //
@@ -22,6 +24,16 @@ func loadRewriteAndDefaultAction(cfg rewriteDefaultActionStartupConfig, rulesLoa
 	}
 
 	action := cfg.DefaultAction
+	if action == "" {
+		switch env := strings.ToLower(strings.TrimSpace(cfg.EnvDefaultAction)); env {
+		case "allow", "deny":
+			action = env
+			logger.Printf("Policy: default action %q set by %s (boot posture; a saved admin setting still wins)", action, defaultActionEnv)
+		case "":
+		default:
+			logger.Printf("Policy: ignoring %s=%q (want allow or deny)", defaultActionEnv, sanitizeLog(env))
+		}
+	}
 	if action == "" {
 		if rulesLoaded == 0 {
 			action = "allow"

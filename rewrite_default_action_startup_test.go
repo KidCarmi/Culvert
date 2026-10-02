@@ -40,7 +40,7 @@ func TestResolveRewriteDefaultActionStartupConfig_CopiesFields(t *testing.T) {
 		Rewrite:       []RewriteRule{{Host: "example.com"}},
 		DefaultAction: "deny",
 	}
-	got := resolveRewriteDefaultActionStartupConfig(fc)
+	got := resolveRewriteDefaultActionStartupConfig(fc, "")
 	if len(got.Rules) != 1 {
 		t.Errorf("Rules: got %d", len(got.Rules))
 	}
@@ -113,4 +113,29 @@ func TestLoadRewriteAndDefaultAction_NoRulesSkipsRewriterSet(t *testing.T) {
 	if got := len(rewriter.List()); got != before {
 		t.Errorf("rewriter should be untouched; before=%d after=%d", before, got)
 	}
+}
+
+// CULVERT_DEFAULT_ACTION is the appliance's boot posture: it applies only when
+// YAML sets nothing, replaces the rule-count auto-detect, and ignores junk.
+func TestLoadRewriteAndDefaultAction_EnvBootPosture(t *testing.T) {
+	cases := []struct {
+		yaml, env string
+		rules     int
+		want      string
+	}{
+		{"", "deny", 0, "deny"},       // the appliance case: fresh install, enforce from boot
+		{"", "allow", 5, "allow"},     // explicit allow beats the rules>0 ⇒ deny auto-detect
+		{"", "DENY ", 0, "deny"},      // case/space tolerant
+		{"", "bogus", 0, "allow"},     // junk ignored ⇒ auto-detect (no rules ⇒ allow)
+		{"", "", 0, "allow"},          // unset ⇒ historical behaviour
+		{"", "", 3, "deny"},           // unset ⇒ historical behaviour
+		{"allow", "deny", 0, "allow"}, // YAML wins over env
+	}
+	for _, tc := range cases {
+		loadRewriteAndDefaultAction(rewriteDefaultActionStartupConfig{DefaultAction: tc.yaml, EnvDefaultAction: tc.env}, tc.rules)
+		if got := defaultPolicyAction(); got != tc.want {
+			t.Errorf("yaml=%q env=%q rules=%d: default action = %q, want %q", tc.yaml, tc.env, tc.rules, got, tc.want)
+		}
+	}
+	setDefaultPolicyAction("deny")
 }

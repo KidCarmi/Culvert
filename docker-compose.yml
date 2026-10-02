@@ -124,6 +124,12 @@ services:
       # valid cluster-wide (docs/OPERATIONS.md §3); leave unset for a single
       # node to let the proxy generate one automatically at startup.
       - CULVERT_SESSION_SECRET=${CULVERT_SESSION_SECRET:-}
+      # Boot-time policy posture when config.yaml sets no default_action:
+      # "deny" makes a fresh install refuse proxy traffic until a rule allows
+      # it (the appliance first-boot sets this); unset keeps the historical
+      # auto-detect (no rules ⇒ allow/passthrough). A saved admin choice in
+      # admin_settings.json still wins at load.
+      - CULVERT_DEFAULT_ACTION=${CULVERT_DEFAULT_ACTION:-}
       # Release Management catalog/dispatch config. The maint-agent URL is
       # intentionally supplied only by docker-compose.maint-agent.yml, because
       # it is valid only when the Maintenance Agent socket is mounted.

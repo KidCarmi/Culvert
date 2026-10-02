@@ -323,3 +323,76 @@ func TestStageArtifacts_SkipsRestoreInternals(t *testing.T) {
 		}
 	}
 }
+
+// ─── restore guards: inspection root CA and admin roster (appliance readiness D) ─
+
+func TestRestoreCommit_RootCAGuard_RefusesRemovalWithoutFlag(t *testing.T) {
+	src, currentDir, _, _ := makeCommitFixture(t, 0)
+	// Current node has an inspection root; the archive carries none, so a
+	// full-mode commit would REMOVE it and the next boot would mint a new one.
+	seedFile(t, currentDir, "ca.bundle", []byte("-----BEGIN CERTIFICATE-----\nroot-bytes\n-----END CERTIFICATE-----\n"), 0o600)
+
+	_, err := captureStdout(t, func() error {
+		return runRestoreCommit(src, currentDir, "", restoreOpts{Mode: modeFull, AcceptDPReenrollment: true})
+	})
+	if err == nil || !strings.Contains(err.Error(), "root CA") || !strings.Contains(err.Error(), "--accept-root-ca-change") {
+		t.Fatalf("removing the root CA must be refused without the flag, got: %v", err)
+	}
+	if _, serr := os.Stat(filepath.Join(currentDir, "ca.bundle")); serr != nil {
+		t.Fatal("a refused commit must leave the current root CA in place")
+	}
+	if _, ok := readBak(t, currentDir); ok {
+		t.Fatal("a refused commit must not create a bak dir")
+	}
+	// state-only keeps the current root: no guard, commit proceeds.
+	if _, err := captureStdout(t, func() error {
+		return runRestoreCommit(src, currentDir, "", restoreOpts{Mode: modeStateOnly, AcceptDPReenrollment: true})
+	}); err != nil {
+		t.Fatalf("state-only must keep the root CA and commit: %v", err)
+	}
+	if _, serr := os.Stat(filepath.Join(currentDir, "ca.bundle")); serr != nil {
+		t.Fatal("state-only must carry the current root CA over")
+	}
+}
+
+func TestRestoreCommit_RootCAGuard_AcceptedWithFlag(t *testing.T) {
+	src, currentDir, _, _ := makeCommitFixture(t, 0)
+	seedFile(t, currentDir, "ca.bundle", []byte("old-root"), 0o600)
+	out, err := captureStdout(t, func() error {
+		return runRestoreCommit(src, currentDir, "", restoreOpts{Mode: modeFull, AcceptDPReenrollment: true, AcceptRootCAChange: true})
+	})
+	if err != nil {
+		t.Fatalf("accepted root CA change must commit: %v", err)
+	}
+	if !strings.Contains(out, "Root CA change accepted") {
+		t.Errorf("summary must say the change was accepted:\n%s", out)
+	}
+	if _, serr := os.Stat(filepath.Join(currentDir, "ca.bundle")); !os.IsNotExist(serr) {
+		t.Fatal("full mode with an archive lacking ca.bundle removes it (the accepted outcome)")
+	}
+	bak, _ := readBak(t, currentDir)
+	if body, _ := os.ReadFile(filepath.Join(bak, "ca.bundle")); string(body) != "old-root" {
+		t.Error("the previous root must be preserved in the bak dir")
+	}
+}
+
+func TestRestoreCommit_RefusesLeavingNoAdmin(t *testing.T) {
+	// Archive roster has a viewer only; current node has an admin.
+	src, _ := makeBackupWithRealCA(t, []uiUserRecord{{Username: "eve", Role: RoleViewer}}, 0)
+	currentDir := seedCurrentDataDir(t, true, []uiUserRecord{{Username: "bob", Role: RoleAdmin}}, 0)
+	_, err := captureStdout(t, func() error {
+		return runRestoreCommit(src, currentDir, "", restoreOpts{Mode: modeFull, AcceptDPReenrollment: true})
+	})
+	if err == nil || !strings.Contains(err.Error(), "NO admin") {
+		t.Fatalf("a commit that leaves no admin must be refused, got: %v", err)
+	}
+	if body, _ := os.ReadFile(filepath.Join(currentDir, "ui_users.json")); !strings.Contains(string(body), "bob") {
+		t.Fatal("refusal must leave the current roster untouched")
+	}
+	// trust-root-only keeps the current roster and is allowed.
+	if _, err := captureStdout(t, func() error {
+		return runRestoreCommit(src, currentDir, "", restoreOpts{Mode: modeTrustRootOnly, AcceptDPReenrollment: true})
+	}); err != nil {
+		t.Fatalf("trust-root-only keeps the roster and must commit: %v", err)
+	}
+}

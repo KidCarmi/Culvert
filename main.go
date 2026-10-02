@@ -52,96 +52,97 @@ var dataDir = "/data"
 // PR2's main() extraction.
 type startupState struct {
 	// ── CLI flag pointers (all set in parseFlags) ─────────────────────────
-	configPath              *string
-	proxyPort               *int
-	uiPortFlag              *int
-	user                    *string
-	pass                    *string
-	blockFile               *string
-	logFilePath             *string
-	logMaxMB                *int
-	tlsCert                 *string
-	tlsKey                  *string
-	rateLimitRPM            *int
-	ipMode                  *string
-	socks5Port              *int
-	metricsTok              *string
-	cpGRPCAddr              *string
-	cpGRPCCert              *string
-	cpGRPCKey               *string
-	cpGRPCCA                *string
-	haJoin                  *string
-	haToken                 *string
-	haAutoFailover          *bool
-	haEtcdEndpoints         *string
-	haEtcdCert              *string
-	haEtcdKey               *string
-	haEtcdCA                *string
-	haLeaseTTL              *int
-	dpCPAddr                *string
-	dpNodeID                *string
-	dpCert                  *string
-	dpKey                   *string
-	dpCA                    *string
-	policyFile              *string
-	caPath                  *string
-	auditLog                *string
-	requestLogPath          *string
-	requestLogMaxMB         *int
-	syslogAddr              *string
-	syslogFormat            *string
-	otlpEndpoint            *string
-	uiAllowIP               *string
-	trustedProxyCIDRs       *string
-	sessionHrs              *int
-	geoIPDB                 *string
-	clamavAddr              *string
-	yaraRulesDir            *string
-	threatFeedDB            *string
-	uiUsersFile             *string
-	fileProfilesFile        *string
-	idpProfilesFile         *string
-	uiNoTLS                 *bool
-	catFeedDB               *string
-	catFeedURL              *string
-	catSyncIntvl            *string
-	enrollURL               *string
-	clusterDB               *string
-	clusterInsecureFlag     *bool
-	revocationsFile         *string
-	scanSvcListen           *string
-	scanSvcURL              *string
-	updaterURLFlag          *string // deprecated: legacy updater removed; parsed-but-ignored
-	updaterURLAllowFlag     *string // deprecated: legacy updater removed; parsed-but-ignored
-	uiSANsFlag              *string
-	trustFwdHeaders         *bool
-	resetPwUser             *string
-	supportBundleOut        *string
-	backupOut               *string
-	backupEncrypt           *bool
-	restoreIn               *string
-	restoreMode             *string
-	restoreConfirm          *confirmFlag
-	recoverRestore          *bool
-	prepareDowngrade        *bool
-	downgradeTargetSchema   *int
-	restoreAcceptDPReenroll *bool
-	restoreAllowCounterRB   *bool
-	listLeftovers           *bool
-	cleanupLeftovers        *bool
-	cleanupOlderThan        *string
-	cleanupKeepLast         *int
-	listBackups             *bool
-	listBackupsDir          *string
-	cdrEnabledFlag          *bool
-	cdrEndpointFlag         *string
-	cdrFailModeFlag         *string
-	cdrProfileFlag          *string
-	cdrModeFlag             *string
-	cdrTimeoutFlag          *int
-	cdrMaxSizeFlag          *int
-	cdrFingerprintFlag      *string
-	cdrCertsDirFlag         *string
+	configPath                *string
+	proxyPort                 *int
+	uiPortFlag                *int
+	user                      *string
+	pass                      *string
+	blockFile                 *string
+	logFilePath               *string
+	logMaxMB                  *int
+	tlsCert                   *string
+	tlsKey                    *string
+	rateLimitRPM              *int
+	ipMode                    *string
+	socks5Port                *int
+	metricsTok                *string
+	cpGRPCAddr                *string
+	cpGRPCCert                *string
+	cpGRPCKey                 *string
+	cpGRPCCA                  *string
+	haJoin                    *string
+	haToken                   *string
+	haAutoFailover            *bool
+	haEtcdEndpoints           *string
+	haEtcdCert                *string
+	haEtcdKey                 *string
+	haEtcdCA                  *string
+	haLeaseTTL                *int
+	dpCPAddr                  *string
+	dpNodeID                  *string
+	dpCert                    *string
+	dpKey                     *string
+	dpCA                      *string
+	policyFile                *string
+	caPath                    *string
+	auditLog                  *string
+	requestLogPath            *string
+	requestLogMaxMB           *int
+	syslogAddr                *string
+	syslogFormat              *string
+	otlpEndpoint              *string
+	uiAllowIP                 *string
+	trustedProxyCIDRs         *string
+	sessionHrs                *int
+	geoIPDB                   *string
+	clamavAddr                *string
+	yaraRulesDir              *string
+	threatFeedDB              *string
+	uiUsersFile               *string
+	fileProfilesFile          *string
+	idpProfilesFile           *string
+	uiNoTLS                   *bool
+	catFeedDB                 *string
+	catFeedURL                *string
+	catSyncIntvl              *string
+	enrollURL                 *string
+	clusterDB                 *string
+	clusterInsecureFlag       *bool
+	revocationsFile           *string
+	scanSvcListen             *string
+	scanSvcURL                *string
+	updaterURLFlag            *string // deprecated: legacy updater removed; parsed-but-ignored
+	updaterURLAllowFlag       *string // deprecated: legacy updater removed; parsed-but-ignored
+	uiSANsFlag                *string
+	trustFwdHeaders           *bool
+	resetPwUser               *string
+	supportBundleOut          *string
+	backupOut                 *string
+	backupEncrypt             *bool
+	restoreIn                 *string
+	restoreMode               *string
+	restoreConfirm            *confirmFlag
+	recoverRestore            *bool
+	restoreAcceptRootCAChange *bool
+	prepareDowngrade          *bool
+	downgradeTargetSchema     *int
+	restoreAcceptDPReenroll   *bool
+	restoreAllowCounterRB     *bool
+	listLeftovers             *bool
+	cleanupLeftovers          *bool
+	cleanupOlderThan          *string
+	cleanupKeepLast           *int
+	listBackups               *bool
+	listBackupsDir            *string
+	cdrEnabledFlag            *bool
+	cdrEndpointFlag           *string
+	cdrFailModeFlag           *string
+	cdrProfileFlag            *string
+	cdrModeFlag               *string
+	cdrTimeoutFlag            *int
+	cdrMaxSizeFlag            *int
+	cdrFingerprintFlag        *string
+	cdrCertsDirFlag           *string
 
 	// ── Derived locals shared across init functions ──────────────────────
 	fc             *FileConfig
@@ -357,6 +358,7 @@ func parseFlags(s *startupState) {
 	s.prepareDowngrade = flag.Bool("prepare-downgrade", false, "Rewrite admin_settings.json for the frozen predecessor binary (unseals parent-proxy credentials into the legacy list, removes upstream_proxies_v2) and exit; dry-run unless --confirm <word> (2F-D)")
 	s.downgradeTargetSchema = flag.Int("target-schema", 0, "Target admin-settings schema for --prepare-downgrade (only the frozen predecessor's schema is supported) (2F-D)")
 	s.restoreAcceptDPReenroll = flag.Bool("accept-dp-reenrollment", false, "Acknowledge that restoring will require enrolled DPs to re-enroll (D1.3b.2a/b)")
+	s.restoreAcceptRootCAChange = flag.Bool("accept-root-ca-change", false, "Acknowledge that restoring replaces or removes the inspection root CA (ca.bundle); clients trusting the current root lose inspected HTTPS")
 	s.restoreAllowCounterRB = flag.Bool("allow-counter-rollback", false, "Acknowledge that restoring will roll back TOTP counters for some users (D1.3b.2a/b)")
 	s.recoverRestore = flag.Bool("recover-restore", false, "Inspect an interrupted restore commit (journal in the data dir) and exit; with --confirm revert|complete, resolve it in that direction (offline only)")
 	s.listLeftovers = flag.Bool("list-restore-leftovers", false, "List restore leftover .bak/.staging dirs (siblings of dataDir) and exit (D1.3c)")
@@ -425,6 +427,7 @@ func handleOneShotCommands(s *startupState) {
 			Mode:                 mode,
 			AcceptDPReenrollment: *s.restoreAcceptDPReenroll,
 			AllowCounterRollback: *s.restoreAllowCounterRB,
+			AcceptRootCAChange:   *s.restoreAcceptRootCAChange,
 			BackupPassphrase:     os.Getenv(backupPassphraseEnv),
 		}
 		if s.restoreConfirm.Bool() {
@@ -992,7 +995,10 @@ func initSSLBypassAndDPI(s *startupState) {
 // the current policy-rule count so the loader can derive the zero-
 // trust-vs-passthrough default when fc.DefaultAction is unset.
 func initRewriteAndDefaultAction(s *startupState) {
-	cfg := resolveRewriteDefaultActionStartupConfig(s.fc)
+	// Env read in the shim (resolvers stay pure): CULVERT_DEFAULT_ACTION is the
+	// appliance's boot-time posture when YAML sets none (see
+	// rewrite_default_action_startup.go).
+	cfg := resolveRewriteDefaultActionStartupConfig(s.fc, os.Getenv(defaultActionEnv))
 	loadRewriteAndDefaultAction(cfg, len(policyStore.List()))
 }
 

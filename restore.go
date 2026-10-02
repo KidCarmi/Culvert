@@ -190,6 +190,11 @@ type restoreOpts struct {
 	// detects encryption from magic bytes and demands a non-empty
 	// passphrase only when the magic matches.
 	BackupPassphrase string
+	// AcceptRootCAChange acknowledges that the commit replaces or REMOVES the
+	// inspection root CA (ca.bundle) — every client that trusts the current
+	// root loses inspected HTTPS, and a removed bundle is silently re-minted
+	// as a NEW root on the next boot (LoadOrInitCA). Appliance readiness D.
+	AcceptRootCAChange bool
 }
 
 // commitAnalysis is the read-only delta between current /data and the
@@ -198,6 +203,20 @@ type restoreOpts struct {
 // current /data; nothing is written.
 type commitAnalysis struct {
 	Mode restoreMode
+
+	// Root (inspection) CA delta — SHA-256 of the ca.bundle bytes (the
+	// bundle may be an encrypted envelope, so bytes are the honest identity:
+	// a re-encrypted-but-identical root reads as "changed", never the reverse).
+	CurrentRootCADigest   string // empty if current has no ca.bundle
+	RestoredRootCADigest  string // empty if the commit would leave no ca.bundle
+	RootCAChanged         bool   // current present and would be replaced or removed
+	RootCAGuardWouldBlock bool   // RootCAChanged && !AcceptRootCAChange
+
+	// Admin roster after the merge: a commit that leaves NO admin while the
+	// node has one today reopens unauthenticated first-time setup. Hard
+	// refusal — there is no acknowledgement for it (restore_test.go).
+	CurrentAdmins  int
+	RestoredAdmins int
 
 	// Cluster CA delta.
 	CurrentCAFingerprint  string // empty if current has no parseable cluster-ca.crt
@@ -672,6 +691,12 @@ func analyzeCommit(files map[string][]byte, dataDir string, opts restoreOpts) (*
 	a.CAFingerprintChanged = a.CurrentCAFingerprint != "" &&
 		a.CurrentCAFingerprint != a.RestoredCAFingerprint
 
+	// Root CA delta (bytes identity; see commitAnalysis).
+	a.CurrentRootCADigest = fileDigestIfPresent(filepath.Join(dataDir, "ca.bundle"))
+	a.RestoredRootCADigest = restoredRootCADigest(files, dataDir, opts.Mode)
+	a.RootCAChanged = a.CurrentRootCADigest != "" && a.CurrentRootCADigest != a.RestoredRootCADigest
+	a.RootCAGuardWouldBlock = a.RootCAChanged && !opts.AcceptRootCAChange
+
 	// Enrolled DPs in current cluster.json (read-only).
 	a.CurrentEnrolledNodes = currentEnrolledNodeCount(dataDir)
 
@@ -685,6 +710,8 @@ func analyzeCommit(files map[string][]byte, dataDir string, opts restoreOpts) (*
 	restoredUsers := readUsersForAnalysis(restoredUIUsersBody(files, dataDir, opts.Mode))
 	a.CurrentUsers = sortedUsernames(currentUsers)
 	a.RestoredUsers = sortedUsernames(restoredUsers)
+	a.CurrentAdmins = rosterAdminCount(currentUIUsersBody(dataDir))
+	a.RestoredAdmins = rosterAdminCount(restoredUIUsersBody(files, dataDir, opts.Mode))
 	a.UsersAddedByRestore = setDifference(a.RestoredUsers, a.CurrentUsers)
 	a.UsersRemovedByRestore = setDifference(a.CurrentUsers, a.RestoredUsers)
 
@@ -702,6 +729,46 @@ func analyzeCommit(files map[string][]byte, dataDir string, opts restoreOpts) (*
 	a.TOTPGuardWouldBlock = totpWouldNeedFlag && !opts.AllowCounterRollback
 
 	return a, nil
+}
+
+// fileDigestIfPresent returns hex SHA-256 of a file's bytes, or "" when absent
+// or unreadable (callers treat "" as "would not be present").
+func fileDigestIfPresent(path string) string {
+	body, err := os.ReadFile(path) // #nosec G304 -- operator-controlled data dir
+	if err != nil {
+		return ""
+	}
+	sum := sha256.Sum256(body)
+	return hex.EncodeToString(sum[:])
+}
+
+// restoredRootCADigest answers "which ca.bundle would be live after the
+// commit?": the tarball's when the mode routes the bundle from the tarball
+// (full / trust-root-only — ABSENT there means REMOVED), else the current one.
+func restoredRootCADigest(files map[string][]byte, dataDir string, mode restoreMode) string {
+	const path = "data/ca.bundle"
+	if mode.fromTarball(path) {
+		body, ok := files[path]
+		if !ok {
+			return ""
+		}
+		sum := sha256.Sum256(body)
+		return hex.EncodeToString(sum[:])
+	}
+	return fileDigestIfPresent(filepath.Join(dataDir, "ca.bundle"))
+}
+
+// rosterAdminCount counts admin accounts in a ui_users.json body (0 for an
+// absent or unparseable roster — the fail-closed reading for the guard).
+func rosterAdminCount(body []byte) int {
+	if len(body) == 0 {
+		return 0
+	}
+	n, err := validateUIUsersJSON(body)
+	if err != nil {
+		return 0
+	}
+	return n
 }
 
 func currentCAFingerprint(dataDir string) string {
@@ -856,6 +923,29 @@ func printRestoreSummary(w io.Writer, s *restoreSummary, a *commitAnalysis) {
 		fmt.Fprintf(w, "  CA fingerprint unchanged.\n")
 	}
 
+	fmt.Fprintf(w, "\nInspection root CA (ca.bundle):\n")
+	switch {
+	case a.CurrentRootCADigest == "":
+		fmt.Fprintf(w, "  Current:    (none)\n")
+	default:
+		fmt.Fprintf(w, "  Current:    sha256:%s\n", a.CurrentRootCADigest[:16])
+	}
+	switch {
+	case a.RestoredRootCADigest == "":
+		fmt.Fprintf(w, "  Restored:   (none would be present — a NEW root is minted at the next boot)\n")
+	default:
+		fmt.Fprintf(w, "  Restored:   sha256:%s\n", a.RestoredRootCADigest[:16])
+	}
+	switch {
+	case a.RootCAGuardWouldBlock:
+		fmt.Fprintf(w, "  ⚠ Root CA changes: clients trusting the current root lose inspected HTTPS.\n")
+		fmt.Fprintf(w, "    Pass --accept-root-ca-change to allow commit, or --mode state-only to keep it.\n")
+	case a.RootCAChanged:
+		fmt.Fprintf(w, "  ⓘ Root CA change accepted.\n")
+	default:
+		fmt.Fprintf(w, "  Root CA unchanged.\n")
+	}
+
 	fmt.Fprintf(w, "\nAdmin accounts:\n")
 	fmt.Fprintf(w, "  Current:   %d (%s)\n", len(a.CurrentUsers), strings.Join(a.CurrentUsers, ", "))
 	fmt.Fprintf(w, "  Restored:  %d (%s)\n", len(a.RestoredUsers), strings.Join(a.RestoredUsers, ", "))
@@ -864,6 +954,9 @@ func printRestoreSummary(w io.Writer, s *restoreSummary, a *commitAnalysis) {
 	}
 	if len(a.UsersRemovedByRestore) > 0 {
 		fmt.Fprintf(w, "  Will be removed:  %s\n", strings.Join(a.UsersRemovedByRestore, ", "))
+	}
+	if a.CurrentAdmins > 0 && a.RestoredAdmins == 0 {
+		fmt.Fprintf(w, "  ⚠ No admin would remain: commit is REFUSED (would reopen unauthenticated setup).\n")
 	}
 
 	fmt.Fprintf(w, "\nTOTP counter rollbacks:\n")
@@ -968,6 +1061,16 @@ func runRestoreCommit(tarPath, dataDir, passphrase string, opts restoreOpts) err
 	if analysis.DPGuardWouldBlock {
 		return fmt.Errorf("restore: cluster CA fingerprint changes (current=%s → restored=%s); %d DP(s) currently enrolled will need to re-enroll. Pass --accept-dp-reenrollment to proceed",
 			analysis.CurrentCAFingerprint, analysis.RestoredCAFingerprint, analysis.CurrentEnrolledNodes)
+	}
+	if analysis.RootCAGuardWouldBlock {
+		what := "replaced"
+		if analysis.RestoredRootCADigest == "" {
+			what = "REMOVED (and silently re-minted as a NEW root on the next boot)"
+		}
+		return fmt.Errorf("restore: the inspection root CA (ca.bundle) would be %s; every client trusting the current root loses inspected HTTPS. Pass --accept-root-ca-change to proceed, or use --mode state-only to keep the current root", what)
+	}
+	if analysis.CurrentAdmins > 0 && analysis.RestoredAdmins == 0 {
+		return fmt.Errorf("restore: the commit would leave NO admin account (current roster has %d) and reopen unauthenticated first-time setup; use a backup that carries ui_users.json, or --mode trust-root-only to keep the current roster", analysis.CurrentAdmins)
 	}
 	if analysis.TOTPGuardWouldBlock {
 		return fmt.Errorf("restore: TOTP counter rollback for %d user(s) (%s); recently-used codes could be replayed. Pass --allow-counter-rollback to proceed",

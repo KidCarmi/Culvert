@@ -26,6 +26,11 @@ type healthReport struct {
 	// would make every node look like it has the capability.
 	MCP               string `json:"mcp,omitempty" redact:"internal"`
 	ThreatFeedEntries int64  `json:"threat_feed_entries" redact:"internal"`
+	// Appliance readiness (F): distinguishes "services running" from "setup
+	// complete" and "ready to enforce" on the liveness surface too.
+	SetupComplete       bool   `json:"setup_complete" redact:"internal"`
+	PolicyDefaultAction string `json:"policy_default_action" redact:"internal"`
+	PolicyRules         int    `json:"policy_rules" redact:"internal"`
 }
 
 // computeHealth builds the liveness/posture snapshot from side-effect-free reads.
@@ -36,6 +41,10 @@ func computeHealth() healthReport {
 
 	// Threat feed entry count
 	tfEntries, _, _ := globalThreatFeed.Stats()
+
+	// Appliance readiness (F): setup + enforcement posture on the liveness
+	// surface too (same values as the /ready rows).
+	postureAction, postureRules := policyPosture()
 
 	// ClamAV connectivity
 	clamStatus := "disabled"
@@ -100,6 +109,10 @@ func computeHealth() healthReport {
 		// not.
 		AdminUI:           adminUIListenerStatus(),
 		ThreatFeedEntries: tfEntries,
+
+		SetupComplete:       cfg.IsConfigured(),
+		PolicyDefaultAction: postureAction,
+		PolicyRules:         postureRules,
 	}
 }
 
@@ -415,14 +428,25 @@ func computeReadiness() (report readinessReport, code int) {
 		checks["yara"] = &readinessCheck{Status: "ok"}
 	}
 
-	// 5. Policy loaded (informational). Empty policy is a valid Zero-Trust posture
-	// — default-deny applies — so this row does NOT gate readiness. Surfaces "no
-	// rules yet" as a hint without flapping load balancers on a fresh install.
+	// 5. Policy loaded (informational). This row does NOT gate readiness so a
+	// fresh install does not flap load balancers. NOTE: an empty policy is NOT
+	// default-deny — with no rules and no default_action the proxy boots in
+	// ALLOW (passthrough); the `policy_posture` row below says which.
 	if ver, _ := policyStore.policyVersion(); ver > 0 {
 		checks["policy_loaded"] = &readinessCheck{Status: "ok"}
 	} else {
 		checks["policy_loaded"] = &readinessCheck{Status: "fail", Detail: "no rules"}
 	}
+
+	// 5b/5c. Appliance readiness: "services running" (this endpoint answering),
+	// "setup complete" (an administrator exists / auth posture chosen) and
+	// "ready to enforce" (the default action is deny, or rules exist and the
+	// default is not a bare passthrough) are THREE different states, and
+	// before these rows /ready reported 200 for all of them. Both are
+	// report-only: a node mid-setup is still a serving proxy and must not be
+	// ejected from a load balancer; strict callers (?strict=1) gate on them.
+	// Details are FIXED strings — this endpoint is unauthenticated.
+	appendSetupAndPostureReadinessChecks(checks)
 
 	// 6. Admin session HMAC initialised. Without this, signed cookies cannot be
 	// issued or verified — the admin UI is effectively unmanageable. Fail
@@ -546,3 +570,31 @@ func caExpiryDaysRemaining() int {
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
+
+// appendSetupAndPostureReadinessChecks adds the report-only `setup_complete`
+// and `policy_posture` rows (appliance readiness F). See computeReadiness.
+func appendSetupAndPostureReadinessChecks(checks map[string]*readinessCheck) {
+	if cfg.IsConfigured() {
+		checks["setup_complete"] = &readinessCheck{Status: "ok"}
+	} else {
+		checks["setup_complete"] = &readinessCheck{Status: "fail", Detail: "first-time setup not completed — admin UI is unclaimed"}
+	}
+	action, rules := policyPosture()
+	switch {
+	case action == "deny":
+		checks["policy_posture"] = &readinessCheck{Status: "ok", Detail: "default-deny"}
+	case rules > 0:
+		checks["policy_posture"] = &readinessCheck{Status: "ok", Detail: "rules with default-allow fall-through"}
+	default:
+		checks["policy_posture"] = &readinessCheck{Status: "fail", Detail: "passthrough: no rules and default action allow — not enforcing"}
+	}
+}
+
+// policyPosture returns the effective default action and the rule count.
+func policyPosture() (action string, rules int) {
+	action = defaultPolicyAction()
+	if policyStore != nil {
+		rules = len(policyStore.List())
+	}
+	return action, rules
+}
