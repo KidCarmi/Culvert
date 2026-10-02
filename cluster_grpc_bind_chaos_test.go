@@ -86,10 +86,26 @@ func cpChaosSetup(t *testing.T) *time.Time {
 	t.Cleanup(func() {
 		cpGRPCHealthNow = prevNow
 		fireCPGRPCUnavailableAlert = prevAlert
+
+		// Stop any gRPC server that appeared DURING this test before restoring
+		// the previous handle, or the socket and its heartbeat monitor outlive
+		// the test with nothing holding a pointer to stop them. Gates that call
+		// `enableControlPlane` / `StartControlPlaneGRPC` directly (rather than
+		// through cpStartSupervised) bind a real listener, so restoring the
+		// handle without stopping it leaks one listener per run — which bites
+		// under -count=2 and -shuffle, where it is also the harder failure to
+		// read. CLAUDE.md's rule for setupProxyTest, one file over: a PARTIAL
+		// cleanup is worse than none.
+		clusterRoleMu.Lock()
+		if clusterRole.grpcSrv != nil && clusterRole.grpcSrv != prevSrv {
+			clusterRole.grpcSrv.Stop()
+		}
 		clusterRole.role = prevRole
 		clusterRole.grpcAddr = prevAddr
 		clusterRole.grpcSrv = prevSrv
 		clusterRole.grpcSupervisor = prevSup
+		clusterRoleMu.Unlock()
+
 		resetCPGRPCHealthForTest()
 	})
 	return &frozen
@@ -119,13 +135,10 @@ func cpStartSupervised(t *testing.T, cfg clusterStartupConfig) *cpGRPCSupervisor
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		_ = s.Stop(ctx)
-		// A gate that bound a real listener must not leave it serving.
-		clusterRoleMu.Lock()
-		if clusterRole.grpcSrv != nil {
-			clusterRole.grpcSrv.Stop()
-			clusterRole.grpcSrv = nil
-		}
-		clusterRoleMu.Unlock()
+		// The listener itself is stopped by cpChaosSetup's cleanup, which runs
+		// after this one (t.Cleanup is LIFO) and owns restoring the handle. Two
+		// places stopping it would be a double-Stop; grpc tolerates that, but
+		// one owner is the point.
 	})
 	return s
 }
