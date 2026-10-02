@@ -265,7 +265,7 @@ scE() {
   # Craft the exact on-disk state of a commit killed in phase "promoting":
   # every previous entry evacuated, staged restore partially promoted.
   local S="20260102T030405Z-4242"
-  onvol 'set -e; cd /data; mkdir .restore-bak.'"$S"' .restore-staging.'"$S"'; for e in *; do case "$e" in .restore-*) ;; *) mv "$e" .restore-bak.'"$S"'/;; esac; done; cp -a .restore-bak.'"$S"'/. .restore-staging.'"$S"'/; echo restored > .restore-staging.'"$S"'/qual-restored.marker; mv .restore-staging.'"$S"'/ui_users.json ./ui_users.json; printf "%s" "{\"version\":1,\"suffix\":\"'"$S"'\",\"phase\":\"promoting\",\"staging_dir\":\".restore-staging.'"$S"'\",\"bak_dir\":\".restore-bak.'"$S"'\",\"mode\":\"full\",\"started_at\":\"2026-01-02T03:04:05Z\",\"updated_at\":\"2026-01-02T03:04:06Z\"}" > .restore-journal.json'
+  onvol 'set -e; cd /data; mkdir .restore-bak.'"$S"' .restore-staging.'"$S"'; for e in *; do case "$e" in .restore-*) ;; *) mv "$e" .restore-bak.'"$S"'/;; esac; done; cp -a .restore-bak.'"$S"'/. .restore-staging.'"$S"'/; echo restored > .restore-staging.'"$S"'/qual-restored.marker; mv .restore-staging.'"$S"'/ui_users.json ./ui_users.json; printf "%s" "{\"version\":1,\"suffix\":\"'"$S"'\",\"phase\":\"promoting\",\"staging_dir\":\".restore-staging.'"$S"'\",\"bak_dir\":\".restore-bak.'"$S"'\",\"mode\":\"full\",\"started_at\":\"2026-01-02T03:04:05Z\",\"updated_at\":\"2026-01-02T03:04:06Z\"}" > .restore-journal.json; chown -R "$(stat -c %u:%g /data)" /data/.restore-*'
   dc up -d >/dev/null 2>&1 || true
   # restart: unless-stopped turns the FATAL into a restart loop; the container
   # is never "running" with a serving proxy. Observe over a few seconds.
