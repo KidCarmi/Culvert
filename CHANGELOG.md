@@ -20,6 +20,10 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   lock on `/data/.culvert.lock`, so a commit against a running stack is
   refused — and a proxy started while a commit or recovery holds the lock
   refuses to boot (fatal) rather than serving a half-moved directory.
+  The proxy's hold is pinned for the process lifetime: a first shape
+  discarded the release closure, the runtime finalizer closed the
+  unreachable lock file, and a commit landed on a running stack after the
+  first GC cycle (found by the lifecycle harness, not by review).
   Recovery tolerates a staging or previous-data directory that is already
   gone, and the nested-mount pre-check resolves a symlinked data directory.
   New guards: `--accept-root-ca-change` (the inspection root CA

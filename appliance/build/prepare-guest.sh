@@ -25,6 +25,20 @@ APPL=/opt/culvert-appliance
 STATE=/var/lib/culvert-appliance
 log() { printf 'prepare-guest: %s\n' "$*"; }
 
+# virt-customize redirects a --run-command's output into the guest's
+# /tmp/builder.log and shows it on the HOST only when the command FAILS
+# (measured, build run 8: the script completed but build-ova.sh, grepping the
+# host-side log for the final line, reported "did not finish"). So this script
+# keeps its own transcript next to the other build provenance and writes a
+# completion marker as its very last act; build-ova.sh reads both from outside
+# the guest with virt-cat. The transcript survives the step-5 /var/log wipe
+# because it lives under $STATE, not /var/log.
+LOG="$STATE/prepare-guest.log"
+DONE="$STATE/prepare-guest.done"
+rm -f "$LOG" "$DONE"
+exec > >(tee -a "$LOG") 2>&1
+TEE_PID=$!
+
 [[ "$(dpkg --print-architecture)" == "amd64" ]] || { echo "unsupported guest arch" >&2; exit 1; }
 [[ "$(. /etc/os-release; echo "$VERSION_CODENAME")" == "$GUEST_OS_CODENAME" ]] \
   || { echo "base image codename does not match manifest GUEST_OS_CODENAME=$GUEST_OS_CODENAME" >&2; exit 1; }
@@ -44,7 +58,9 @@ if [[ -f "$STATE/build-env.sh" ]]; then
   gw="$(ip -4 route show default | awk '{for(i=1;i<=NF;i++) if($i=="via"){print $(i+1); exit}}')"
   [[ -n "$gw" ]] || { echo "BUILD-ONLY proxy requested but the guest has no default route (DHCP client missing on the build host?)" >&2; exit 1; }
   BUILD_HTTPS_PROXY="http://${gw}:${BUILD_HTTPS_PROXY_PORT}"
-  log "BUILD-ONLY: using build host proxy $BUILD_HTTPS_PROXY for HTTPS"
+  # The transcript is shipped in the image, so it names neither the gateway
+  # nor the port — only that the sandbox-only accommodation was active.
+  log "BUILD-ONLY: routing HTTPS through the build host's proxy via the guest's default gateway (removed in step 5)"
   export https_proxy="$BUILD_HTTPS_PROXY" HTTPS_PROXY="$BUILD_HTTPS_PROXY"
   printf 'Acquire::https::Proxy "%s";\n' "$BUILD_HTTPS_PROXY" > /etc/apt/apt.conf.d/99-culvert-build-proxy
   if [[ -f "$STATE/build-ca.crt" ]]; then
@@ -193,3 +209,6 @@ if [[ "$BUILD_PROXY_ACTIVE" -eq 1 ]]; then
 fi
 rm -rf /root/.ssh /home/culvert/.ssh
 log "done"
+date -u +%Y-%m-%dT%H:%M:%SZ > "$DONE"   # the ONLY success signal build-ova.sh trusts
+exec 1>&- 2>&-
+wait "$TEE_PID" 2>/dev/null || true

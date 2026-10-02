@@ -19,7 +19,7 @@
 #
 # Outputs (in --out): culvert-appliance-<ver>-<os>.ova, .ova.sha256,
 #   build-info.json, dpkg-list.txt (guest package inventory for SBOM evidence),
-#   host-components.txt.
+#   host-components.txt, prepare-guest.log (the in-guest customization transcript).
 #
 # Requires: qemu-img, virt-customize, virt-cat, virt-ls, docker (daemon access),
 # curl, gzip, tar, sha256sum, python3; gpgv + ubuntu-cloudimage-keyring optional.
@@ -252,14 +252,26 @@ virt-resize --quiet --expand /dev/sda1 "$BASE_FILE" "$DISK"
 log "virt-customize (libguestfs; this runs the guest under TCG when no KVM is present — expect 10-30 min)"
 # The host's proxy variables must NOT reach the guest (libguestfs forwards
 # them; 127.0.0.1 means the guest there) — the guest gets build-env.sh instead.
+set +e
 env -u HTTPS_PROXY -u https_proxy -u HTTP_PROXY -u http_proxy -u NO_PROXY -u no_proxy \
 virt-customize -a "$DISK" --smp 2 --memsize 2048 \
   --hostname culvert-appliance --timezone UTC \
   --copy-in "$OV/opt/culvert-appliance:/opt" \
   --copy-in "$OV/var/lib/culvert-appliance:/var/lib" \
   --run-command "bash /opt/culvert-appliance/prepare-guest.sh" \
-  --no-logfile 2>&1 | tee "$WORK/virt-customize.log" | grep -v '^\[ *[0-9.]*\] Running: ' || true
-grep -q 'prepare-guest: done' "$WORK/virt-customize.log" || die "prepare-guest.sh did not finish (see $WORK/virt-customize.log)"
+  --no-logfile 2>&1 | tee "$WORK/virt-customize.log" | grep -v '^\[ *[0-9.]*\] Running: '
+VC_RC="${PIPESTATUS[0]}"
+set -e
+# virt-customize shows a --run-command's output on the host ONLY when the
+# command fails (it is redirected into the guest's /tmp/builder.log), so the
+# host-side log cannot prove success. prepare-guest.sh writes its transcript
+# and a completion marker inside the guest; both are read back here.
+virt-cat -a "$DISK" /var/lib/culvert-appliance/prepare-guest.log > "$OUT/prepare-guest.log" 2>/dev/null || true
+[[ "$VC_RC" -eq 0 ]] || die "virt-customize exited $VC_RC (see $WORK/virt-customize.log and $OUT/prepare-guest.log)"
+PREP_DONE="$(virt-cat -a "$DISK" /var/lib/culvert-appliance/prepare-guest.done 2>/dev/null || true)"
+[[ -n "$PREP_DONE" ]] || die "prepare-guest.sh did not finish: no completion marker in the guest (see $OUT/prepare-guest.log)"
+grep -q '^prepare-guest: done$' "$OUT/prepare-guest.log" || die "prepare-guest.sh transcript is incomplete (see $OUT/prepare-guest.log)"
+log "prepare-guest.sh completed in the guest at $PREP_DONE"
 
 # ── 5. Outside-the-guest checks ─────────────────────────────────────────────
 log "verifying guest contents"

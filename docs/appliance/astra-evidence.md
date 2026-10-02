@@ -108,10 +108,19 @@ No file outside `appliance/**` and `docs/appliance/*` was modified.
 
 ## Build run status
 
-See the section appended at the end of this file for the outcome of the final
-build run (`appliance/build/out`-equivalent in the scratch dir;
-`build-info.json` from run 2 is identical in content to the final one except
-for wall-clock fields).
+Every run is `build-ova.sh --work … --out … --keep-work` on the sandbox build
+host (no KVM — the guest customization runs under TCG, ~8 min per attempt
+once the base image, pulls and cosign verification are cached). Steps 1–3
+(base SHA256 + GPG, image pulls by digest, amd64 assertion, cosign-verified
+proxy image, `docker save`, `build-info.json`) succeeded on every run from
+run 2 onward; the history below is the in-guest customization step.
+
+| Run | Outcome | Cause → fix |
+|-----|---------|-------------|
+| 3–6 | failed inside `prepare-guest.sh` (apt/curl could not reach HTTPS origins) | the sandbox forces an intercepting HTTPS proxy on the build host; the guest first tried the proxy at the QEMU-documented `10.0.2.2`, but libguestfs' slirp uses `169.254.x.x` with the host at the guest's default gateway → the guest now DERIVES the gateway from `ip -4 route show default`, and the build CA is passed through for the build only (both stripped in step 5 and re-checked from outside the guest) |
+| 7 | failed: `No space left on device` during the Docker install | `qemu-img resize` grows the virtual disk but the cloud image's 2.4 GB root partition is only grown by cloud-init at FIRST BOOT → `virt-resize --expand /dev/sda1` grows it at build time |
+| 8 | the customization COMPLETED (verified from outside the guest: Docker pinned packages present in `dpkg-list.txt`, both image tarballs saved, `/var/log` truncated, no proxy/CA residue, empty `machine-id`) but `build-ova.sh` reported "did not finish" | the driver grepped the HOST-side virt-customize log for the script's last line, and virt-customize shows a `--run-command`'s output on the host only when the command FAILS → the script now writes its own transcript (`prepare-guest.log`) and a completion marker (`prepare-guest.done`) under `/var/lib/culvert-appliance`, and the driver reads both back with `virt-cat` (the only success signal it trusts) |
+| 9 | see the line appended below | — |
 
 ## BLOCKED (exact command + prerequisite)
 

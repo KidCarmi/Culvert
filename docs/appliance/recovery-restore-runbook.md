@@ -100,6 +100,7 @@ Details: `docs/operator/release-management-agent.md` §"Interrupted operations".
 |---|---|---|
 | Power loss / kill during restore swap | boot refused with journal; explicit revert/complete; both idempotent | `restore_inplace_test.go`, harness scenario E |
 | Restore attempted while the proxy runs | refused (data-dir lock) | harness D `commit-refused-while-running` |
+| Restore commit attempted after the proxy has run long enough to GC | still refused: the proxy's lock hold is pinned for its lifetime (a GC-released hold once let a commit land on a live stack) | `TestHoldDataDirLock_SurvivesGarbageCollection`, harness D `commit-refused-while-running` |
 | Proxy started while a restore commit/recovery holds the lock | proxy boot refused (fatal) until the commit finishes; `restart: unless-stopped` brings it back | `TestHoldDataDirLock_RefusesWhileCommitHoldsIt` |
 | Kill after promotion removed the staging dir but before the journal | `--confirm=complete` retires the journal; nothing left to move | `TestRecoverRestore_Complete_StagingAlreadyRemoved` |
 | Journal names a previous-data dir that no longer exists | revert and complete both succeed (absent dir = nothing to move) | `TestRecoverRestore_MissingBakDirIsNotFatal` |
