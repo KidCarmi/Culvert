@@ -434,6 +434,29 @@ func apiAuthChangePassword(w http.ResponseWriter, r *http.Request) {
 	}
 	// Verify current password.
 	if _, ok := cfg.VerifyUIUser(username, body.CurrentPass); !ok {
+		// SEC-REAUTH-AUDIT-1: a FAILED re-authentication on the admin plane is
+		// audited, like every other credential rejection in this file
+		// (auth.login.fail, auth.basic.fail). Without this entry the only
+		// unlocked, unthrottled-by-lockout password oracle in the admin API was
+		// also the only one that left no trace: a caller holding a stolen or
+		// hijacked session could guess this account's password at the mutating
+		// apiLimiter's rate and the operator had no signal at all — the
+		// password is durable persistence that outlives the session being
+		// revoked (CWE-778 / OWASP A09:2021).
+		//
+		// The entry is NOT a change of the recorded lockout trade-off
+		// (TestSECBASIC1_VerifyUIUserHasNoOtherRequestPathCaller explains why
+		// charging loginLimiter here would let a session holder lock themselves
+		// out of the login flow): it adds the missing EVIDENCE without altering
+		// any authentication decision.
+		//
+		// Not a write amplifier (CHAOS-63): this path needs a VALID SESSION and
+		// is a POST, so securityMiddleware's mutating-method apiLimiter bounds
+		// its rate exactly as it bounds apiAuthLogin's own audited failures. The
+		// actor is session-derived and still truncated, because -user and
+		// --reset-password can persist a name longer than the creation API's cap.
+		auditEvent(r, "auth.password_change.fail", truncateForAudit(username),
+			"self-service password change refused: current password incorrect")
 		http.Error(w, "current password is incorrect", http.StatusForbidden)
 		return
 	}

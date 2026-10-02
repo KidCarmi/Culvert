@@ -330,6 +330,14 @@ func TestSECBASIC1_VerifyUIUserHasNoOtherRequestPathCaller(t *testing.T) {
 		// current password at the limiter's rate. Adding a lock would let a
 		// session holder lock themselves out of the login flow, so the trade is
 		// deliberate rather than an oversight.
+		//
+		// SEC-REAUTH-AUDIT-1: that residual used to come with a SECOND one this
+		// note did not mention — the rejection was also unaudited, so the one
+		// unlocked password oracle in the admin API was also the only silent
+		// one. The EVIDENCE half is now closed (auth.password_change.fail, see
+		// auth_change_password_reauth_audit_test.go); the lockout half above
+		// remains the deliberate trade. When recording a residual, state which
+		// controls are absent — "no lockout" was read as the whole gap.
 		"apiAuthChangePassword": "re-auth of an already-authenticated session for its OWN account; session-derived username, mutating-method rate limit",
 	}
 
