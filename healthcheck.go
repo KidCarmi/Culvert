@@ -590,11 +590,19 @@ func appendSetupAndPostureReadinessChecks(checks map[string]*readinessCheck) {
 	}
 }
 
-// policyPosture returns the effective default action and the rule count.
+// policyPosture returns the effective default action and the number of
+// ENABLED rules. A disabled rule is skipped by evaluation (ruleIsEnabled), so
+// a rulebase whose every rule is disabled is pure passthrough under
+// default-allow and must not read as "ready to enforce" (Codex P2, PR #1528).
 func policyPosture() (action string, rules int) {
 	action = defaultPolicyAction()
 	if policyStore != nil {
-		rules = len(policyStore.List())
+		all := policyStore.List()
+		for i := range all {
+			if ruleIsEnabled(&all[i]) {
+				rules++
+			}
+		}
 	}
 	return action, rules
 }

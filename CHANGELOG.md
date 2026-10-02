@@ -26,6 +26,12 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   first GC cycle (found by the lifecycle harness, not by review).
   Recovery tolerates a staging or previous-data directory that is already
   gone, and the nested-mount pre-check resolves a symlinked data directory.
+- **Readiness and recovery surfaces say what they can prove.** `policy_posture`
+  counts only enabled rules (an all-disabled rulebase under default-allow is
+  passthrough), `culvert-status` requires that row before reporting "ready to
+  enforce", a replayed reconcile resolve is deduplicated without consuming an
+  attempt, and a dispatch state file that exists but cannot be read at startup
+  is surfaced (`dispatch_state` on `/api/releases`) and never overwritten.
   New guards: `--accept-root-ca-change` (the inspection root CA
   would be replaced or removed) and an outright refusal of a restore that
   would leave no admin account.

@@ -93,7 +93,13 @@ case "$mode" in
     stack_stop
     log "unholding + upgrading Docker engine packages"
     apt-mark unhold "${DOCKER_PKGS[@]}" >/dev/null
+    # The holds are the invariant: a failed upgrade (mirror, dpkg) under set -e
+    # would otherwise exit with Docker UNHELD, and the next plain OS upgrade
+    # would move the engine (Codex P2, PR #1528). Re-hold on every failure
+    # path, then try to bring the stack back rather than leave it stopped.
+    trap 'apt-mark hold "${DOCKER_PKGS[@]}" >/dev/null 2>&1 || true; echo "culvert-os-update: Docker upgrade FAILED — package holds restored; attempting to restart the stack" >&2; stack_start || echo "culvert-os-update: stack did not start — check: cd $STACK && docker compose ps" >&2' ERR
     apt-get -y -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold install --only-upgrade "${DOCKER_PKGS[@]}"
+    trap - ERR
     apt-mark hold "${DOCKER_PKGS[@]}" >/dev/null
     systemctl restart docker
     stack_start

@@ -377,3 +377,46 @@ func TestReconcileResolve_RefusedLaunchDoesNotChargeAnAttempt(t *testing.T) {
 		rig.waitOp(t, body["op_id"].(string))
 	}
 }
+
+// A deduplicated replay (same idempotency_key as an earlier, failed resolve)
+// returns the prior op and runs nothing, so it must not consume the attempt
+// bound: three harmless retries used to exhaust the record (Codex P1,
+// PR #1528).
+func TestReconcileResolve_DedupedReplayDoesNotChargeAnAttempt(t *testing.T) {
+	rig := startApplyRig(t)
+	defer rig.stop()
+	rig.pinnedDigest = digNew
+	rig.localImages = map[string]bool{}
+	rig.failFor = []string{"pull"}
+	opID := rig.seedRecord(t, journal.PhaseRestarting)
+	rig.boot(t)
+
+	code, body := rig.postReconcile(t, opID, map[string]interface{}{"action": "resolve", "idempotency_key": "replay-me"})
+	if code != http.StatusAccepted {
+		t.Fatalf("first resolve: %d %+v", code, body)
+	}
+	first := body["op_id"].(string)
+	rig.waitOp(t, first)
+	deadline := time.Now().Add(2 * time.Second)
+	for rig.resolveInFlightForTest(opID) && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if v, _ := rig.srv.readVerdict(opID); v == nil || v.Attempts != 1 {
+		t.Fatalf("after one real attempt: %+v, want Attempts=1", v)
+	}
+	for i := 0; i < reconcileMaxAttempts+1; i++ {
+		code, body = rig.postReconcile(t, opID, map[string]interface{}{"action": "resolve", "idempotency_key": "replay-me"})
+		if code != http.StatusOK || body["deduped"] != true || body["op_id"] != first {
+			t.Fatalf("replay %d must dedupe to the first op: %d %+v", i, code, body)
+		}
+		if v, _ := rig.srv.readVerdict(opID); v == nil || v.Attempts != 1 {
+			t.Fatalf("replay %d charged an attempt: %+v", i, v)
+		}
+	}
+	// A genuinely new resolve still works: the bound was not spent by replays.
+	code, body = rig.postReconcile(t, opID, map[string]interface{}{"action": "resolve", "idempotency_key": "fresh"})
+	if code != http.StatusAccepted {
+		t.Fatalf("a fresh resolve after replays must be admitted: %d %+v", code, body)
+	}
+	rig.waitOp(t, body["op_id"].(string))
+}

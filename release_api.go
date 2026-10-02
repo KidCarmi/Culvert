@@ -242,6 +242,9 @@ type dispatchStore struct {
 	// path, when set, mirrors every update to disk (release_dispatch_persist.go).
 	path           string
 	persistErrOnce sync.Once
+	// loadErr records a state file that EXISTED but could not be read at
+	// startup; while set the store never writes over it (release_dispatch_persist.go).
+	loadErr error
 }
 
 func newDispatchStore() *dispatchStore {
@@ -461,6 +464,10 @@ func (rm *releaseManager) addRefreshFields(out map[string]any) {
 	}
 	if st := rm.refreshStatusSnapshot(); !st.LastAt.IsZero() {
 		out["last_refresh"] = st
+	}
+	if rm.store != nil && rm.store.loadErr != nil {
+		// Bounded: a reason class, never the raw error (it embeds the path).
+		out["dispatch_state"] = "unreadable_at_startup"
 	}
 }
 

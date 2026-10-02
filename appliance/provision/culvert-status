@@ -39,34 +39,39 @@ case "$setup_json" in
   *'"needsSetup":true'*)  needs_setup="yes" ;;
   *'"needsSetup":false'*) needs_setup="no" ;;
 esac
-policy_ok="unknown"; ca_ok="n/a"
+policy_ok="unknown"; posture_ok="unknown"; ca_ok="n/a"
 if [[ -n "$ready_json" ]]; then
-  read -r policy_ok ca_ok <<<"$(printf '%s' "$ready_json" | python3 -c '
+  read -r policy_ok posture_ok ca_ok <<<"$(printf '%s' "$ready_json" | python3 -c '
 import json,sys
 try: d=json.load(sys.stdin)
-except Exception: print("unknown unknown"); sys.exit()
+except Exception: print("unknown unknown unknown"); sys.exit()
 c=d.get("checks",{}) or {}
 p=c.get("policy_loaded",{}).get("status","absent")
+pp=c.get("policy_posture",{}).get("status","absent")
 ca=c.get("ca",{}).get("status","n/a") if "ca" in c else "n/a"
-print(p, ca)')"
+print(p, pp, ca)')"
 fi
+# "ready to enforce" needs BOTH rows: policy_loaded says a policy file parsed,
+# policy_posture says it enforces something (default-deny, or enabled rules).
+# A default-allow policy whose last rule was deleted keeps policy_loaded=ok
+# while unmatched traffic passes through (Codex P2, PR #1528).
 enforce="no"
-if [[ "$ready_code" == "200" && "$policy_ok" == "ok" && ( "$ca_ok" == "ok" || "$ca_ok" == "n/a" ) ]]; then enforce="yes"; fi
+if [[ "$ready_code" == "200" && "$policy_ok" == "ok" && "$posture_ok" == "ok" && ( "$ca_ok" == "ok" || "$ca_ok" == "n/a" ) ]]; then enforce="yes"; fi
 
 if   [[ "$prov" != "complete" ]]; then state="provisioning ($prov)"
 elif [[ "$services" != "yes" ]]; then state="provisioned, services NOT answering (check: cd /srv/culvert && sudo docker compose ps)"
 elif [[ "$needs_setup" == "yes" ]]; then state="services running — setup pending (create the first admin at https://${primary:-<address>}:9090)"
 elif [[ "$enforce" == "yes" ]]; then state="ready to enforce"
-else state="setup complete — not yet ready to enforce (policy_loaded=$policy_ok, ca=$ca_ok, /ready=$ready_code)"
+else state="setup complete — not yet ready to enforce (policy_loaded=$policy_ok, policy_posture=$posture_ok, ca=$ca_ok, /ready=$ready_code)"
 fi
 
 case "$MODE" in
   --json)
-    python3 - "$ver" "$addrs" "$prov" "$services" "$needs_setup" "$policy_ok" "$ca_ok" "$ready_code" "$state" <<'PY'
+    python3 - "$ver" "$addrs" "$prov" "$services" "$needs_setup" "$policy_ok" "$posture_ok" "$ca_ok" "$ready_code" "$state" <<'PY'
 import json,sys
 a=sys.argv[1:]
 print(json.dumps({"appliance_version":a[0],"addresses":a[1].split(),"provisioning":a[2],"services_running":a[3]=="yes",
-  "needs_setup":a[4],"policy_loaded":a[5],"ca":a[6],"ready_http":a[7],"state":a[8]}))
+  "needs_setup":a[4],"policy_loaded":a[5],"policy_posture":a[6],"ca":a[7],"ready_http":a[8],"state":a[9]}))
 PY
     ;;
   --brief)

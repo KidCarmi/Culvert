@@ -29,6 +29,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sync"
@@ -56,7 +57,17 @@ func newPersistentDispatchStore(path string) *dispatchStore {
 	st.path = path
 	body, err := os.ReadFile(path) // #nosec G304 -- operator-controlled data dir
 	if err != nil {
-		return st // absent ⇒ fresh (the common case before the first dispatch)
+		if errors.Is(err, fs.ErrNotExist) {
+			return st // absent ⇒ fresh (the common case before the first dispatch)
+		}
+		// Present but unreadable (permissions, I/O error during a restart):
+		// starting empty would silently abandon the in-flight dispatch this
+		// file exists to resume, and the next persist would OVERWRITE the
+		// unread records with an empty store. Start empty, say so, and refuse
+		// to write over the file until a restart reads it (Codex P2, PR #1528).
+		st.loadErr = err
+		logger.Printf("release dispatch state: %s exists but could not be read (%v); interrupted dispatches will NOT be resumed and the file is left untouched until the next restart reads it", sanitizeLog(path), err)
+		return st
 	}
 	var f dispatchStateFile
 	if jerr := json.Unmarshal(body, &f); jerr != nil || f.Version != releaseDispatchStateVersion {
@@ -81,6 +92,12 @@ func newPersistentDispatchStore(path string) *dispatchStore {
 // the failure is logged once per store so a read-only volume is visible.
 func (st *dispatchStore) persistLocked() {
 	if st.path == "" {
+		return
+	}
+	if st.loadErr != nil {
+		st.persistErrOnce.Do(func() {
+			logger.Printf("release dispatch state: not persisting to %s — the file could not be read at startup (%v) and writing would discard the records it holds", sanitizeLog(st.path), st.loadErr)
+		})
 		return
 	}
 	f := dispatchStateFile{Version: releaseDispatchStateVersion, Records: st.byAgent}

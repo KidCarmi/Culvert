@@ -135,3 +135,58 @@ func TestReleaseManager_ResumeUnknownOpIsNeedsAttention(t *testing.T) {
 		t.Fatalf("record = %+v; want terminal failed_needs_attn keeping the op_id (the GUI's Resume handle)", rec)
 	}
 }
+
+// A state file that EXISTS but cannot be read is not an absent one: the
+// store must say so and must never write over it (Codex P2, PR #1528 — the
+// first shape treated every ReadFile error as "fresh", so a transient EACCES
+// during a control-plane restart silently abandoned the in-flight dispatch
+// and the next persist overwrote the records with an empty store).
+func TestDispatchStore_UnreadableStateIsSurfacedNotOverwritten(t *testing.T) {
+	// Root-proof half: a path that exists but is a DIRECTORY reads as EISDIR,
+	// which is not fs.ErrNotExist, on every uid.
+	asDir := filepath.Join(t.TempDir(), releaseDispatchStateFile)
+	if err := os.Mkdir(asDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if st := newPersistentDispatchStore(asDir); st.loadErr == nil {
+		t.Fatal("an existing-but-unreadable state path must be recorded, not read as absent")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("root reads a mode-000 file; the overwrite half needs the permission fault")
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, releaseDispatchStateFile)
+	seed := newPersistentDispatchStore(path)
+	seed.markDispatched("local", "01HDISPATCH000000000000007", DispatchResumeContext{OpID: "op-7", TargetPinnedRef: "x@sha256:" + strings.Repeat("a", 64)})
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(path, 0o600) })
+
+	st := newPersistentDispatchStore(path)
+	if st.loadErr == nil {
+		t.Fatal("an unreadable state file must be recorded, not read as absent")
+	}
+	if _, ok := st.get("local"); ok {
+		t.Fatal("nothing can be loaded from an unreadable file")
+	}
+	// A write while degraded must leave the unread records intact.
+	st.markDispatched("local", "01HDISPATCH000000000000008", DispatchResumeContext{OpID: "op-8", TargetPinnedRef: "x@sha256:" + strings.Repeat("b", 64)})
+	_ = os.Chmod(path, 0o600)
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(before) {
+		t.Fatal("a persist while the file was unreadable overwrote the records it could not read")
+	}
+	// CONTROL: an ABSENT file is still the ordinary fresh store.
+	fresh := newPersistentDispatchStore(filepath.Join(dir, "absent.json"))
+	if fresh.loadErr != nil {
+		t.Fatalf("absent must stay fresh, got %v", fresh.loadErr)
+	}
+}

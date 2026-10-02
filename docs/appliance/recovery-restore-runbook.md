@@ -107,6 +107,8 @@ Details: `docs/operator/release-management-agent.md` §"Interrupted operations".
 | Data dir reached through a symlink with a bind mount inside | nested mount still refused before anything destructive | `TestNestedMountPointsUnder_ResolvesSymlinkedDataDir` |
 | Agent cannot inspect the running image or the pinned tag at boot | record kept as `inputs_unavailable`; never retired on absent evidence | `TestReconcile_TagInspectFailureIsInputsUnavailable_NotNoop`, `TestReconcile_RunningCaptureFailureIsInputsUnavailable` |
 | Resolve refused at admission (lock held / agent busy) | attempt bound not consumed | `TestReconcileResolve_RefusedLaunchDoesNotChargeAnAttempt` |
+| Resolve replayed with the same `idempotency_key` after a failed attempt | the prior op is returned (`deduped`), nothing runs, attempt bound not consumed | `TestReconcileResolve_DedupedReplayDoesNotChargeAnAttempt` |
+| Dispatch state file exists but is unreadable at control-plane start | logged, `dispatch_state: unreadable_at_startup` on `/api/releases`, the file is never overwritten; restart once it is readable to resume the watch | `TestDispatchStore_UnreadableStateIsSurfacedNotOverwritten` |
 | Agent restart after a reconciled adoption | adopted outcome persists in the idempotency index | `TestOverrideInterrupted_PersistsReconciledOutcomeAcrossRestart` |
 | Agent killed between pull and restart / after tag | journal classified at start; safe boundary retired; tag hazard surfaced, resolve-only | `cmd/culvert-maint/internal/server/reconcile_startup_test.go`, agent harness F3 |
 | Control plane (proxy) replaced mid-dispatch | dispatch record persisted; watch resumed on boot; GUI keeps polling | `release_dispatch_persist_test.go`, agent harness F1 |

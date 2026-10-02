@@ -56,3 +56,30 @@ func TestReadiness_SetupAndPostureRows(t *testing.T) {
 		t.Fatalf("/health must mirror the posture: %+v", h)
 	}
 }
+
+// Disabled rules are skipped by evaluation, so a rulebase whose every rule is
+// disabled under default-allow is passthrough and must not read as enforcing
+// (Codex P2, PR #1528).
+func TestReadiness_PostureCountsOnlyEnabledRules(t *testing.T) {
+	setupProxyTest(t)
+	snapshotPolicyStoreForTest(t)
+	t.Cleanup(func() { setDefaultPolicyAction("deny") })
+	setDefaultPolicyAction("allow")
+	off := false
+	policyStore.Add(PolicyRule{Name: "disabled-only", Action: "block", DestFQDN: "*", Enabled: &off})
+	if _, n := policyPosture(); n != 0 {
+		t.Fatalf("a disabled rule counted toward the posture: %d", n)
+	}
+	rep, _ := computeReadiness()
+	if c := rep.Checks["policy_posture"]; c == nil || c.Status != "fail" {
+		t.Fatalf("all-disabled rules under default-allow must be passthrough: %+v", c)
+	}
+	// CONTROL: one enabled rule is enough to leave passthrough.
+	policyStore.Add(PolicyRule{Name: "live", Action: "block", DestFQDN: "*"})
+	if _, n := policyPosture(); n != 1 {
+		t.Fatalf("enabled rule count = %d, want 1", n)
+	}
+	if c, _ := computeReadiness(); c.Checks["policy_posture"].Status != "ok" {
+		t.Fatalf("one enabled rule must read as enforcing: %+v", c.Checks["policy_posture"])
+	}
+}

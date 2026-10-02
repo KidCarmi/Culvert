@@ -219,13 +219,18 @@ func (s *Server) launchResolveOp(w http.ResponseWriter, r *http.Request, peer au
 			}
 		}),
 	)
-	if herr != nil {
-		// Nothing ran: an admission refusal (another op holds the maintenance
-		// lock, the agent is busy) must not consume the attempt bound — a CP
-		// retrying against a busy agent would otherwise drive every record to
-		// loud_stop(reconcile_exhausted) without a single action — and must
-		// not clear an in-flight marker this request never set (adversarial
-		// review, PR #1528).
+	if herr != nil || deduped {
+		// Nothing ran, so nothing may be charged. Two shapes reach here: an
+		// admission refusal (another op holds the maintenance lock, the agent
+		// is busy — a CP retrying against a busy agent would otherwise drive
+		// every record to loud_stop(reconcile_exhausted) without a single
+		// action; adversarial review, PR #1528), and a DEDUPLICATED replay —
+		// the same idempotency_key as an earlier resolve returns that op's
+		// snapshot with neither the op-ID hook nor the result callback, so
+		// the attempt charged above would otherwise stand with no recovery
+		// attempted (Codex P1, PR #1528: three harmless replays exhausted
+		// the record). Neither shape may clear an in-flight marker this
+		// request never set.
 		if marked {
 			s.markResolving(srcID, "")
 		}
@@ -233,8 +238,10 @@ func (s *Server) launchResolveOp(w http.ResponseWriter, r *http.Request, peer au
 		if werr := s.opts.Journal.WriteVerdict(rec.OpID, v); werr != nil {
 			log.Printf("culvert-maint: reconcile: op=%s attempt refund not persisted: %v", strings.ReplaceAll(strings.ReplaceAll(rec.OpID, "\n", ""), "\r", ""), werr)
 		}
-		writeJSON(w, herr.Status, herr.Body)
-		return
+		if herr != nil {
+			writeJSON(w, herr.Status, herr.Body)
+			return
+		}
 	}
 	writeOpResponse(w, op, deduped)
 }
