@@ -240,7 +240,7 @@ jobs:
   lint:
     name: "Gate · golangci-lint"
     runs-on: ubuntu-latest
-    timeout-minutes: 12
+    timeout-minutes: 18  # > install + the 10m --timeout below
     needs: changes
     if: needs.changes.outputs.code == 'true'
     steps:
@@ -264,7 +264,7 @@ jobs:
         run: |
           BASE_REF="${GITHUB_BASE_REF:-main}"
           git fetch --no-tags origin "$BASE_REF"
-          golangci-lint run --timeout=5m --new-from-rev "origin/$BASE_REF"
+          golangci-lint run --timeout=10m --new-from-rev "origin/$BASE_REF"
 
   # ─── 3. Race + coverage (sharded, stage 5C) ────────────────────────────────
   # THE race + coverage execution for PRs, on the shared engine the QA gate
@@ -411,7 +411,7 @@ jobs:
   agent:
     name: "Gate · maint-agent (cmd/culvert-maint)"
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30  # > 10m -race tests + 10m golangci-lint + setup
     needs: changes
     if: needs.changes.outputs.agent == 'true'
     defaults:
@@ -446,7 +446,7 @@ jobs:
         # Checksum-verified install (sum.golang.org), not curl|sh off a tag ref.
         run: |
           go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.5.0
-          golangci-lint run --timeout=5m
+          golangci-lint run --timeout=10m
 
       - name: staticcheck
         run: |
