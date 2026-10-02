@@ -45,6 +45,8 @@ Evidence files: `docs/appliance/evidence/lifecycle-REPORT.md`, `docs/appliance/e
 | `ghcr.io/kidcarmi/culvert:v1.0.250 / 258 / 259` | real published releases (amd64 by digest) | predecessor side of the transition matrix |
 | `culvert-maint` | built from this branch | privilege_mode=docker_group_lab (no systemd here); sudoers mode is exercised by `install-lifecycle-e2e.yml` in CI |
 
+Final run (image built from commit `1e9e051`, harness as committed): lifecycle **72 checks passed, 0 failed** (`lifecycle-REPORT.md`, run 20261002T193353Z); agent flow **17 checks passed, 0 failed** (`agent-REPORT.md`, run 20261002T193735Z; note `F3`: the agent was SIGKILLed inside its restart stage, startup reconcile classified the record as `reup` with `tag_hazard=true` and did NOT act, `POST /v1/reconcile/{op}` converged it, a duplicate resolve answered 404). Earlier iterations of the same runs found and fixed harness defects only (compose project naming, cookie-jar scoping, the plain-HTTP registry that the agent's `docker manifest inspect` template correctly refuses, a Unix-socket path over 108 bytes) and one product usability defect (`--confirm complete` had to become `--confirm=complete`).
+
 Scenario summary (pass/fail counts are in the evidence files): A fresh install → setup → posture → actual allow/block → restart; B/C three real predecessors; D backup → mutate → refused-while-running → offline restore → verified; E interrupted restore → refused boot → explicit complete → verified; F1–F5 agent apply, duplicate, kill+reconcile, offline rollback, restart idempotency.
 
 ## 4. Blocked (exact prerequisite)

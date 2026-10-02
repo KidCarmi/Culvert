@@ -1,0 +1,17 @@
+{"run":"20261002T193726Z","scenario":"F0","check":"seeded-predecessor","result":"pass","detail":"running v1.0.259"}
+{"run":"20261002T193726Z","scenario":"F0","check":"agent-start","result":"pass","detail":"{\"agent_version\":\"dev\",\"status\":\"ok\"}"}
+{"run":"20261002T193726Z","scenario":"F1","check":"apply-accepted","result":"pass","detail":"op=01M3Z1YHZVER9HRX3ECZ8G5Z0C http=202"}
+{"run":"20261002T193726Z","scenario":"F1","check":"apply-succeeded","result":"pass","detail":"state=succeeded"}
+{"run":"20261002T193726Z","scenario":"F1","check":"running-is-target","result":"pass","detail":"127.0.0.1:5055/culvert@sha256:e6a67d49974c3e0a1ee52e0c6edd4c2c6c7335a15a8acf5782a87f23e63cbbb4"}
+{"run":"20261002T193726Z","scenario":"F1","check":"state-preserved","result":"pass","detail":"admin login http 200 after upgrade"}
+{"run":"20261002T193726Z","scenario":"F2","check":"duplicate-deduped","result":"pass","detail":"http 200 01M3Z1YHZVER9HRX3ECZ8G5Z0C True"}
+{"run":"20261002T193726Z","scenario":"F5","check":"duplicate-after-agent-restart","result":"pass","detail":"http 200 01M3Z1YHZVER9HRX3ECZ8G5Z0C True"}
+{"run":"20261002T193726Z","scenario":"F3","check":"killed-mid-apply","result":"pass","detail":"SIGKILL at the restart stage of 01M3Z1YRFQPX4Z52G8BY8GTVAC"}
+{"run":"20261002T193726Z","scenario":"F3","check":"reconcile-classified","result":"pass","detail":"attention_required=True interrupted=1 verdicts=[('01M3Z1YRFQPX4Z52G8BY8GTVAC', 'reup', True)]"}
+{"run":"20261002T193726Z","scenario":"F3","check":"explicit-resolve-converged","result":"pass","detail":"http 202 resolve op=01M3Z1YYQZCJ1K2F41TK30XFPZ running=127.0.0.1:5055/culvert@sha256:f714e55b7b6708442af164accb082a3c3c89a79ecd37934931af3b166a4f448f"}
+{"run":"20261002T193726Z","scenario":"F3","check":"duplicate-resolve-refused","result":"pass","detail":"http 404"}
+{"run":"20261002T193726Z","scenario":"F4","check":"rollback-accepted","result":"pass","detail":"op=01M3Z1Z7C0MKM19GV85472DGY7 (registry stopped)"}
+{"run":"20261002T193726Z","scenario":"F4","check":"rollback-succeeded-offline","result":"pass","detail":"state=succeeded"}
+{"run":"20261002T193726Z","scenario":"F4","check":"pull-skipped-local","result":"pass","detail":"rollback_pull: skipped (image present locally)"}
+{"run":"20261002T193726Z","scenario":"F4","check":"running-is-prior","result":"pass","detail":"127.0.0.1:5055/culvert@sha256:f714e55b7b6708442af164accb082a3c3c89a79ecd37934931af3b166a4f448f"}
+{"run":"20261002T193726Z","scenario":"F4","check":"state-preserved-after-rollback","result":"pass","detail":"http 200"}

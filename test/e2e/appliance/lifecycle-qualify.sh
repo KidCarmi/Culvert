@@ -189,7 +189,7 @@ scA() {
 # ═══ B/C. real predecessor → CUR, then CUR state under PRED ══════════════════
 scB() {
   local pred="$1"; local tag="${1##*:}"; local sc="B:$tag"; log "=== $sc predecessor $pred → $CUR_IMAGE"
-  QUAL_DEFAULT_ACTION= newproj "b-$tag" "$pred"
+  QUAL_DEFAULT_ACTION="" newproj "b-$tag" "$pred"
   if up; then check "$sc" boot-predecessor pass "version=$(version_of)"; else check "$sc" boot-predecessor fail "predecessor did not answer /health"; destroy; return; fi
   local c; c="$(setup_admin)"; [[ "$c" == 200 ]] && check "$sc" setup pass "http $c" || check "$sc" setup fail "http $c"
   login "$ADMIN_USER" "$ADMIN_PASS" >/dev/null; seed_policy >/dev/null
