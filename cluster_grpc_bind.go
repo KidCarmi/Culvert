@@ -320,13 +320,7 @@ func (s *cpGRPCSupervisor) run() {
 	defer func() {
 		if v := recover(); v != nil {
 			recordCrash("control-plane-grpc-bind", "", v)
-			// A contained panic here IS terminal — nothing rebinds — so the
-			// state recorded must not promise an automatic recovery. This is
-			// CHAOS-66's round-2 lesson: a blanket "retrying" message sends an
-			// operator away from the one restart that IS needed.
-			noteCPGRPCBindFailure("supervisor_panicked", 0, cpGRPCHealthNow())
-			logErrorf("ControlPlane: gRPC listener supervisor panicked — the cluster control plane is " +
-				"unavailable until this node is restarted. This node's proxy data plane and admin UI are unaffected.")
+			noteCPGRPCSupervisorPanic()
 		}
 	}()
 

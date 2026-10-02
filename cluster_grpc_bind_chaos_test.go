@@ -1078,6 +1078,64 @@ func TestChaos71_ConcurrentObserversAreRaceFree(t *testing.T) {
 	}
 }
 
+// TestChaos71_SupervisorPanicClaimMatchesTheEvidence pins the panic guard.
+//
+// A contained panic is terminal for the loop either way, but it can land in two
+// places with opposite truths: BEFORE a bind (the listener really is down) or
+// AFTER one, in the leadership-resolution step that follows a successful
+// activation (the listener is bound and serving the fleet). An unconditional
+// `noteCPGRPCBindFailure` in the guard reports the second case as a dead
+// listener — sending an operator to hunt a bind fault that does not exist, and
+// dropping `culvert_cluster_grpc_up` to 0 on a node whose gRPC is answering.
+//
+// That is a surface saying the opposite of the truth, i.e. the whole class of
+// defect this sweep exists to remove, reintroduced inside the sweep's own
+// mitigation. Found in self-review; the CHAOS-57 "the evidence must match the
+// claim" family.
+func TestChaos71_SupervisorPanicClaimMatchesTheEvidence(t *testing.T) {
+	t.Run("panic with no listener is recorded as a failure", func(t *testing.T) {
+		cpChaosSetup(t)
+		noteCPGRPCConfigured("127.0.0.1:50051")
+		fireCPGRPCUnavailableAlert = func(string) {}
+
+		noteCPGRPCSupervisorPanic()
+
+		snap := cpGRPCListenerState()
+		if !snap.Failing {
+			t.Error("a panic before any bind is not recorded as a failure — every surface would stay green on a dead control plane")
+		}
+		if snap.LastReason != "supervisor_panicked" {
+			t.Errorf("reason = %q, want supervisor_panicked", snap.LastReason)
+		}
+		if got := cpGRPCListenerStatus(); got == "ready" {
+			t.Errorf("/health posture = %q after a pre-bind panic", got)
+		}
+	})
+
+	t.Run("panic after a bind does not report the listener down", func(t *testing.T) {
+		cpChaosSetup(t)
+		noteCPGRPCConfigured("127.0.0.1:50051")
+		fireCPGRPCUnavailableAlert = func(string) {}
+		// An OBSERVED bind, exactly as attempt() records before it resolves
+		// leadership — which is where a post-bind panic comes from.
+		noteCPGRPCBound()
+		noteCPGRPCRoleAsserted()
+
+		noteCPGRPCSupervisorPanic()
+
+		snap := cpGRPCListenerState()
+		if snap.Failing {
+			t.Error("a panic AFTER the listener bound reported the listener as failing — the gRPC port is answering and every surface now says it is not")
+		}
+		if !snap.Serving {
+			t.Error("a panic after the bind cleared `serving` on a listener that is still serving the fleet")
+		}
+		if got := cpGRPCListenerStatus(); got != "ready" {
+			t.Errorf("/health posture = %q after a post-bind panic, want ready — the listener is still serving", got)
+		}
+	})
+}
+
 // ── Structural walls ─────────────────────────────────────────────────────────
 
 // TestChaos71_TheControlPlaneActivationPathHasNoFatal is the wall against

@@ -8690,7 +8690,7 @@ driving the whole sequence.
 
 ### 41.10 Gates
 
-`cluster_grpc_bind_chaos_test.go` — 29 gates. **Twenty-three mutations were each
+`cluster_grpc_bind_chaos_test.go` — 30 gates. **Twenty-five mutations were each
 verified FAILING against the shape they target**, including the reintroduced
 pre-fix `logFatalf`, asserting role+leadership without a bind, returning before
 the first attempt resolves, re-preparing per attempt, both halves of the
@@ -8701,6 +8701,20 @@ sleep, rate-limiting the counter along with the log, swapping the shutdown
 order, and all three shapes of the §41.6 deadlock (prepare under the write lock
 on the admin path and on the supervisor path, plus a NEW offender introduced
 elsewhere in package main, which the AST wall catches).
+
+One of those gates covers a defect found in SELF-REVIEW, inside this sweep's own
+mitigation. The supervisor's panic guard called `noteCPGRPCBindFailure`
+unconditionally — but the loop can panic either BEFORE a bind (the listener
+really is down) or AFTER one, in the leadership-resolution step that follows a
+successful activation, where the listener is bound and serving the fleet.
+Reporting the second case as a dead listener would send an operator to hunt a
+bind fault that does not exist and drop `culvert_cluster_grpc_up` to 0 on a node
+whose gRPC is answering — **a surface saying the opposite of the truth, i.e. the
+whole class of defect this sweep exists to remove, reintroduced inside its own
+fix.** `noteCPGRPCSupervisorPanic` now branches on the recorded evidence: a panic
+with no listener is a failure, a panic with one is logged loudly and nothing
+else, and both are terminal for the supervisor while neither is silent. The
+CHAOS-57 *"the evidence must match the claim"* family.
 
 **Five CONTROLS**, each verified failing against the cheapest wrong fix, because
 the cheapest way to pass every defect gate above is to stop activating the

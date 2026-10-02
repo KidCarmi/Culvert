@@ -391,6 +391,40 @@ func noteCPGRPCRoleAsserted() {
 	cpGRPCListener.mu.Unlock()
 }
 
+// noteCPGRPCSupervisorPanic records a contained panic in the supervisor loop.
+//
+// A contained panic IS terminal for the loop — nothing rebinds — so the state
+// recorded must not promise an automatic recovery. That is CHAOS-66's round-2
+// lesson: a blanket "retrying" message sends an operator away from the one
+// restart that IS actually needed.
+//
+// But THE CLAIM MUST MATCH THE EVIDENCE, which is why this is a function rather
+// than an unconditional `noteCPGRPCBindFailure` at the call site. The loop can
+// panic either BEFORE a bind (the listener really is down) or AFTER one, in the
+// leadership-resolution step that follows a successful activation (the listener
+// is bound and serving the fleet). Reporting the second case as a dead listener
+// would send an operator to hunt a bind fault that does not exist, and would
+// drop `culvert_cluster_grpc_up` to 0 on a node whose gRPC is answering — a
+// surface saying the opposite of the truth, which is the whole class of defect
+// this sweep exists to remove.
+//
+// So: a panic with no listener is recorded as a failure; a panic with one is
+// recorded only in the log, loudly, naming what is and is not affected. Both
+// are terminal for the SUPERVISOR, and neither is silent.
+func noteCPGRPCSupervisorPanic() {
+	if cpGRPCListenerState().Serving {
+		logErrorf("ControlPlane: gRPC listener supervisor panicked AFTER the listener bound — the listener is " +
+			"still serving the fleet, but this node will not rebind if it ever stops, and leadership resolution " +
+			"may be incomplete. Verify the HA role via /healthz or the HA panel and restart this node at a " +
+			"convenient time. The proxy data plane and the admin UI are unaffected.")
+		return
+	}
+	noteCPGRPCBindFailure("supervisor_panicked", 0, cpGRPCHealthNow())
+	logErrorf("ControlPlane: gRPC listener supervisor panicked — the cluster control plane is " +
+		"unavailable until this node is restarted. This node's proxy data plane and admin UI are unaffected, " +
+		"and Data Planes keep enforcing their last-known config.")
+}
+
 // noteCPGRPCStopped records the supervisor exiting for shutdown.
 func noteCPGRPCStopped() {
 	cpGRPCListener.mu.Lock()
