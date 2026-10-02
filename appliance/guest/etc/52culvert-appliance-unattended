@@ -1,0 +1,19 @@
+// Culvert appliance: unattended SECURITY updates for the guest OS only.
+// Origins stay Ubuntu's defaults from 50unattended-upgrades (noble-security
+// + ESM). Docker's repository is not an allowed origin AND its packages are
+// blacklisted: the engine is updated in a maintenance window by the operator
+// (docs/appliance/os-maintenance-runbook.md), never behind the data plane's
+// back. Reboots are never automatic unless the operator enables them with
+// `culvert-appliance auto-reboot on` (writes 53culvert-appliance-reboot).
+Unattended-Upgrade::Automatic-Reboot "false";
+Unattended-Upgrade::Remove-Unused-Dependencies "true";
+Unattended-Upgrade::Remove-New-Unused-Dependencies "true";
+Unattended-Upgrade::MinimalSteps "true";
+Unattended-Upgrade::Package-Blacklist {
+  "docker-ce";
+  "docker-ce-cli";
+  "containerd.io";
+  "docker-compose-plugin";
+  "docker-buildx-plugin";
+  "docker-ce-rootless-extras";
+};

@@ -1,0 +1,6 @@
+[Unit]
+Description=Culvert appliance console status (renders /etc/issue)
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/lib/culvert-appliance/console-status.sh render

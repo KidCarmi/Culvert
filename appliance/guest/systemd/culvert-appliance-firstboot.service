@@ -1,0 +1,20 @@
+[Unit]
+Description=Culvert appliance first-boot provisioning
+Documentation=https://github.com/KidCarmi/Culvert/blob/main/docs/appliance/install-runbook.md
+# After cloud-init has applied hostname/keys/network and docker is up.
+After=network-online.target docker.service cloud-final.service
+Wants=network-online.target docker.service
+ConditionPathExists=!/var/lib/culvert-appliance/provisioned
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+TimeoutStartSec=45min
+WorkingDirectory=/
+StandardInput=null
+StandardOutput=append:/var/log/culvert-appliance/firstboot.log
+StandardError=append:/var/log/culvert-appliance/firstboot.log
+ExecStart=/usr/local/lib/culvert-appliance/firstboot.sh
+
+[Install]
+WantedBy=multi-user.target
