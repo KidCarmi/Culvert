@@ -110,7 +110,13 @@ step_console() {
     log "SSH key present for 'culvert'; console password stays locked (set one with: sudo passwd culvert)"
   else
     local pw
-    pw="$(tr -dc 'A-HJ-NP-Za-km-z2-9' < /dev/urandom | head -c 16)"
+    # Bounded producer: `tr … < /dev/urandom | head -c 16` runs under
+    # pipefail, and head closing the pipe kills tr with SIGPIPE (status 141),
+    # which aborted the whole first boot before the password was set (Codex
+    # review, PR #1528). 4 KiB of entropy yields ~900 alphabet characters, so
+    # tr always finishes before cut reads; the length is then asserted.
+    pw="$(head -c 4096 /dev/urandom | tr -dc 'A-HJ-NP-Za-km-z2-9' | cut -c1-16)"
+    [[ ${#pw} -eq 16 ]] || { log "ERROR: console password generation produced ${#pw} characters"; return 1; }
     printf 'culvert:%s\n' "$pw" | chpasswd
     passwd -u culvert >/dev/null 2>&1 || true
     chage -d 0 culvert
@@ -175,6 +181,11 @@ step_install() {
     export CULVERT_PROXY_SEED_REF="${APP_IMAGE_REPO}:${APP_IMAGE_TAG}"
     export CULVERT_INSTALL_ASSUME_DOCKER=1
     export CULVERT_INSTALL_CHANNEL="${CULVERT_INSTALL_CHANNEL:-stable}"
+    # The appliance contract is default-DENY at first boot (readiness row
+    # policy_posture, docs/appliance/first-boot.md); install.sh persists
+    # CULVERT_DEFAULT_ACTION only when told to, so say so here (Codex review,
+    # PR #1528).
+    export CULVERT_INSTALL_DEFAULT_ACTION=deny
     bash "$INSTALL_SH" < /dev/null
   )
   [[ -f "$STACK_DIR/docker-compose.yml" && -f "$STACK_DIR/.env" ]] || { log "ERROR: install.sh did not produce $STACK_DIR"; return 1; }

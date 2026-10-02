@@ -91,6 +91,6 @@ PY
 import json,sys
 try: d=json.load(sys.stdin)
 except Exception: print("unparsable"); sys.exit()
-print(", ".join(f"{k}={v.get(\"status\")}" for k,v in sorted((d.get("checks") or {}).items())))'; fi
+print(", ".join("%s=%s" % (k, (v or {}).get("status")) for k, v in sorted((d.get("checks") or {}).items())))'; fi
     ;;
 esac
