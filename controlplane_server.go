@@ -876,7 +876,13 @@ func cpServerOption(addr, certFile, keyFile, caFile string) (grpc.ServerOption, 
 	case certFile != "" && keyFile != "":
 		creds, err := buildServerTLS(certFile, keyFile, caFile)
 		if err != nil {
-			return nil, fmt.Errorf("gRPC TLS: %w", err)
+			// Wrapped with errCPGRPCTLSMaterial so classifyCPGRPCBindError can
+			// report `tls_certificate` without string-matching whatever message
+			// crypto/tls chose (CHAOS-71). The distinction matters because the
+			// remedy differs completely from a socket fault: a rotation caught
+			// mid-write needs no intervention at all, since the pair is re-read
+			// on every attempt.
+			return nil, fmt.Errorf("gRPC TLS: %w: %w", errCPGRPCTLSMaterial, err)
 		}
 		logger.Printf("ControlPlane: gRPC %s (mTLS)", strings.ReplaceAll(addr, "\n", ""))
 		return grpc.Creds(creds), nil
@@ -919,6 +925,14 @@ func StartControlPlaneGRPC(addr, certFile, keyFile, caFile string) error {
 	lc := net.ListenConfig{}
 	ln, err := lc.Listen(context.Background(), "tcp", addr)
 	if err != nil {
+		// Stop the server we just built. grpc.NewServer spawns no goroutines
+		// before Serve, so this is a pure memory leak rather than a goroutine
+		// one — but it leaked one registered grpc.Server per failed attempt,
+		// and it was already reachable from the admin API's enable endpoint (an
+		// operator retrying a bad address). CHAOS-71 adds an AUTOMATIC retry at
+		// up to one attempt per 30 s, which turns "a few clicks" into ~2880
+		// leaked servers a day, so the retry and this cleanup are one change.
+		srv.Stop()
 		return fmt.Errorf("gRPC listen: %w", err)
 	}
 	clusterRole.grpcSrv = srv

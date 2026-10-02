@@ -232,7 +232,17 @@ func registerEarlyShutdownHooks(reg *shutdownRegistry, s *startupState) {
 		return nil
 	})
 	// Gracefully stop gRPC server (drains in-flight RPCs).
-	reg.Register("control-plane-grpc-stop", shutdownOrderControlPlaneGRPCStop, func(context.Context) error {
+	//
+	// CHAOS-71: the bind supervisor is interrupted FIRST, and the order is the
+	// correctness argument — it retries up to once per 30 s, so stopping it
+	// after the drain would let it bind a FRESH listener and start serving RPCs
+	// on a node that is already tearing down. Its Stop is bounded by ctx (this
+	// hook runs under the shutdown watchdog) and is a no-op on a node that is
+	// not a Control Plane, so the drain's own CHAOS-56 budget is unchanged.
+	reg.Register("control-plane-grpc-stop", shutdownOrderControlPlaneGRPCStop, func(ctx context.Context) error {
+		if err := clusterRole.grpcSupervisor.Stop(ctx); err != nil {
+			logger.Printf("ControlPlane: gRPC bind supervisor did not stop within the shutdown budget: %v", err)
+		}
 		StopControlPlaneGRPC()
 		return nil
 	})
