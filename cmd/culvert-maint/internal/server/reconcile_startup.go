@@ -230,6 +230,9 @@ func (s *Server) adoptIfHealthy(ctx context.Context, rec *journal.Record, v *rec
 // in the interrupted state (e.g. mark-only mode did not register it) the
 // record is still retired: Docker truth says the target is live and healthy.
 func (s *Server) adopt(opID string, v *reconcileVerdictRecord, actor string) bool {
+	// Analyzer-visible CWE-117 barrier (see logSafeOpID); inline because
+	// the taint analysis clears taint only at the sanitizer CALL SITE.
+	opID = strings.ReplaceAll(strings.ReplaceAll(opID, "\n", ""), "\r", "")
 	result := map[string]interface{}{
 		"reconciled": true, "reconcile_reason": v.Reason, "target_ref": v.TargetRef, "health": v.LastHealth,
 	}
@@ -269,6 +272,7 @@ func (s *Server) warnAttention(rec *journal.Record, v reconcileVerdictRecord) {
 
 // retireRecord removes the journal record + verdict (both idempotent).
 func (s *Server) retireRecord(opID string) {
+	opID = strings.ReplaceAll(strings.ReplaceAll(opID, "\n", ""), "\r", "") // CWE-117 barrier, see logSafeOpID
 	if err := s.opts.Journal.Remove(opID); err != nil {
 		log.Printf("culvert-maint: reconcile: op=%s record remove failed: %v", opID, err)
 	}
@@ -429,3 +433,18 @@ func resolveTargetFor(action reconcileAction, v *reconcileVerdictRecord) (ref, l
 
 // isNoopVerdict reports a verdict that mutates nothing.
 func isNoopVerdict(verdict string) bool { return strings.EqualFold(verdict, actNoop.String()) }
+
+// logSafeOpID documents the analyzer-visible CWE-117 barrier for an op id that is
+// about to reach the process log. Every caller already holds a canonical ULID
+// (the HTTP handler refuses anything validOpID rejects before it reaches
+// adopt/retireRecord, and the journal names its files by the same id), so the
+// replacement is a no-op on every real value — but taint analysis cannot see
+// a validator, only a sanitizer, and gosec G706 recognises strings.ReplaceAll.
+// The two production sites (adopt, retireRecord) spell the same expression
+// INLINE: gosec's taint engine clears taint only where the sanitizer is
+// called, not through a wrapper, so a helper call there is not a barrier.
+// This function is the single definition the gate test pins the inline
+// expression against, so the two cannot drift apart.
+func logSafeOpID(opID string) string {
+	return strings.ReplaceAll(strings.ReplaceAll(opID, "\n", ""), "\r", "")
+}
