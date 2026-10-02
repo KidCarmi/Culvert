@@ -104,7 +104,43 @@ func compileLeftoverNameRE(base string) *regexp.Regexp {
 //
 //	.restore-bak.<YYYYMMDDTHHMMSSZ>-<pid>
 //	.restore-staging.<YYYYMMDDTHHMMSSZ>-<pid>
-var inDirLeftoverNameRE = regexp.MustCompile(`^\.restore-(bak|staging)\.([0-9]{8}T[0-9]{6}Z)-([0-9]+)$`)
+var inDirLeftoverNameRE = regexp.MustCompile(`^\.restore-(bak|staging)\.(\d{8}T\d{6}Z)-(\d+)$`)
+
+// discoverInDirLeftovers admits the in-place restore leftovers that live
+// INSIDE dataDir. A leftover referenced by an unresolved restore journal is
+// the operator's recovery material and is withheld, never offered for
+// cleanup; an unreadable journal withholds every in-dir leftover.
+func discoverInDirLeftovers(abs string) (valid []leftover, skipped []skipReason) {
+	inner, rerr := os.ReadDir(abs)
+	if rerr != nil {
+		if !os.IsNotExist(rerr) {
+			skipped = append(skipped, skipReason{Path: abs, Reason: fmt.Sprintf("read data dir: %v", rerr)})
+		}
+		return valid, skipped
+	}
+	var pending *restoreJournal
+	if j, present, jerr := readRestoreJournal(abs); present && jerr == nil {
+		pending = j
+	} else if present {
+		skipped = append(skipped, skipReason{Path: restoreJournalPath(abs), Reason: fmt.Sprintf("unreadable restore journal (%v); in-place leftovers withheld until it is resolved", jerr)})
+		pending = &restoreJournal{} // withhold everything: phase unknown
+	}
+	for _, entry := range inner {
+		lo, skip := admitEntry(entry, abs, abs, inDirLeftoverNameRE)
+		if skip != nil {
+			skipped = append(skipped, *skip)
+		}
+		if lo == nil {
+			continue
+		}
+		if pending != nil && (pending.StagingDir == "" || entry.Name() == pending.StagingDir || entry.Name() == pending.BakDir) {
+			skipped = append(skipped, skipReason{Path: lo.Path, Reason: "referenced by an unresolved interrupted restore (run --recover-restore first)"})
+			continue
+		}
+		valid = append(valid, *lo)
+	}
+	return valid, skipped
+}
 
 // resolveDataDirRoots normalizes dataDir into (parent, base, abs) and
 // refuses paths that have no usable parent (root, "."). All admission
@@ -213,33 +249,9 @@ func discoverLeftovers(dataDir string) ([]leftover, []skipReason, error) {
 
 	// In-place leftovers live INSIDE dataDir (restore_inplace.go). A missing
 	// dataDir (legacy interrupted sibling rename) simply has none.
-	if inner, rerr := os.ReadDir(abs); rerr == nil {
-		var pending *restoreJournal
-		if j, present, jerr := readRestoreJournal(abs); present && jerr == nil {
-			pending = j
-		} else if present {
-			skipped = append(skipped, skipReason{Path: restoreJournalPath(abs), Reason: fmt.Sprintf("unreadable restore journal (%v); in-place leftovers withheld until it is resolved", jerr)})
-			pending = &restoreJournal{} // withhold everything: phase unknown
-		}
-		for _, entry := range inner {
-			lo, skip := admitEntry(entry, abs, abs, inDirLeftoverNameRE)
-			if skip != nil {
-				skipped = append(skipped, *skip)
-			}
-			if lo == nil {
-				continue
-			}
-			// A leftover referenced by an unresolved journal is the operator's
-			// recovery material, never a cleanup candidate.
-			if pending != nil && (pending.StagingDir == "" || entry.Name() == pending.StagingDir || entry.Name() == pending.BakDir) {
-				skipped = append(skipped, skipReason{Path: lo.Path, Reason: "referenced by an unresolved interrupted restore (run --recover-restore first)"})
-				continue
-			}
-			valid = append(valid, *lo)
-		}
-	} else if !os.IsNotExist(rerr) {
-		skipped = append(skipped, skipReason{Path: abs, Reason: fmt.Sprintf("read data dir: %v", rerr)})
-	}
+	inValid, inSkipped := discoverInDirLeftovers(abs)
+	valid = append(valid, inValid...)
+	skipped = append(skipped, inSkipped...)
 
 	sort.Slice(valid, func(i, j int) bool {
 		if !valid[i].Timestamp.Equal(valid[j].Timestamp) {

@@ -18,7 +18,11 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   `--recover-restore --confirm=revert|complete` (never automatically; the
   boot guard refuses while the journal exists). The proxy holds an advisory
   lock on `/data/.culvert.lock`, so a commit against a running stack is
-  refused. New guards: `--accept-root-ca-change` (the inspection root CA
+  refused — and a proxy started while a commit or recovery holds the lock
+  refuses to boot (fatal) rather than serving a half-moved directory.
+  Recovery tolerates a staging or previous-data directory that is already
+  gone, and the nested-mount pre-check resolves a symlinked data directory.
+  New guards: `--accept-root-ca-change` (the inspection root CA
   would be replaced or removed) and an outright refusal of a restore that
   would leave no admin account.
 - **Supported upgrade transitions are enforced.** The dispatch planner
@@ -37,8 +41,12 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   `GET /v1/status` and resolved only through `POST /v1/reconcile/{op_id}`;
   rollbacks (standalone and inline) use the local image cache before the
   registry; rollbacks advance the journal; the idempotency index persists
-  across agent restarts; a corrupt journal record is quarantined instead of
-  crash-looping the agent.
+  across agent restarts (including an outcome the reconciler adopted); a
+  corrupt journal record is quarantined instead of crash-looping the agent.
+  A failed Docker capture is absent evidence (`inputs_unavailable`), never an
+  empty set, so a tag hazard can no longer be retired as a no-op on a
+  transient inspect failure; a resolve refused at admission does not consume
+  the attempt bound.
 - **Readiness tells the states apart:** `/ready` rows `setup_complete` and
   `policy_posture` (report-only; gating under `?strict=1`) and `/health`
   fields `setup_complete`, `policy_default_action`, `policy_rules`. The

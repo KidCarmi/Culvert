@@ -924,16 +924,14 @@ func printRestoreSummary(w io.Writer, s *restoreSummary, a *commitAnalysis) {
 	}
 
 	fmt.Fprintf(w, "\nInspection root CA (ca.bundle):\n")
-	switch {
-	case a.CurrentRootCADigest == "":
+	if a.CurrentRootCADigest == "" {
 		fmt.Fprintf(w, "  Current:    (none)\n")
-	default:
+	} else {
 		fmt.Fprintf(w, "  Current:    sha256:%s\n", a.CurrentRootCADigest[:16])
 	}
-	switch {
-	case a.RestoredRootCADigest == "":
+	if a.RestoredRootCADigest == "" {
 		fmt.Fprintf(w, "  Restored:   (none would be present — a NEW root is minted at the next boot)\n")
-	default:
+	} else {
 		fmt.Fprintf(w, "  Restored:   sha256:%s\n", a.RestoredRootCADigest[:16])
 	}
 	switch {
@@ -1058,6 +1056,36 @@ func runRestoreCommit(tarPath, dataDir, passphrase string, opts restoreOpts) err
 	}
 
 	// Step 3: enforce guards before any destructive operation.
+	if err := enforceCommitGuards(analysis); err != nil {
+		return err
+	}
+
+	// Step 4: print summary so the operator sees the plan one last time.
+	printRestoreSummary(os.Stdout, summary, analysis)
+
+	// Quiescing is ENFORCED: the proxy holds <dataDir>/.culvert.lock for its
+	// lifetime (see restore_lock_unix.go), so a commit against a live stack
+	// is refused instead of racing it. The lock is taken BEFORE the journal
+	// and mount-point checks so two concurrent commits cannot both pass them.
+	release, lerr := acquireDataDirLock(dataDir)
+	if lerr != nil {
+		if errors.Is(lerr, errDataDirLocked) {
+			return fmt.Errorf("restore: %w", lerr)
+		}
+		fmt.Fprintf(os.Stderr, "WARN: data-dir lock unavailable (%v); continuing without the quiescing guard\n", lerr)
+	} else {
+		defer release()
+	}
+	if err := refuseUnsafeCommitTopology(dataDir); err != nil {
+		return err
+	}
+	return commitRestoreStaged(dataDir, summary, manifest, files, opts)
+}
+
+// enforceCommitGuards is Step 3 of runRestoreCommit: every guard that must
+// refuse BEFORE anything destructive happens, each with the flag that admits
+// it named in the error.
+func enforceCommitGuards(analysis *commitAnalysis) error {
 	if analysis.DPGuardWouldBlock {
 		return fmt.Errorf("restore: cluster CA fingerprint changes (current=%s → restored=%s); %d DP(s) currently enrolled will need to re-enroll. Pass --accept-dp-reenrollment to proceed",
 			analysis.CurrentCAFingerprint, analysis.RestoredCAFingerprint, analysis.CurrentEnrolledNodes)
@@ -1076,37 +1104,31 @@ func runRestoreCommit(tarPath, dataDir, passphrase string, opts restoreOpts) err
 		return fmt.Errorf("restore: TOTP counter rollback for %d user(s) (%s); recently-used codes could be replayed. Pass --allow-counter-rollback to proceed",
 			len(analysis.TOTPCounterRollbacks), strings.Join(analysis.TOTPCounterRollbacks, ", "))
 	}
+	return nil
+}
 
-	// Step 4: print summary so the operator sees the plan one last time.
-	printRestoreSummary(os.Stdout, summary, analysis)
-
-	// Refuse to start a second commit over an unresolved one: the journal is
-	// the operator's recovery handle and must never be clobbered.
+// refuseUnsafeCommitTopology refuses a commit whose data directory cannot be
+// swapped in place: an unresolved journal (the operator's recovery handle,
+// never to be clobbered) or a mount point nested inside dataDir (an entry
+// that rename(2) refuses — better to refuse now than half-way through
+// evacuation).
+func refuseUnsafeCommitTopology(dataDir string) error {
 	if _, present, jerr := readRestoreJournal(dataDir); present {
 		if jerr != nil {
 			return fmt.Errorf("restore: %w — resolve it first (--recover-restore)", jerr)
 		}
 		return fmt.Errorf("restore: an interrupted restore is pending in %s; resolve it first with --recover-restore --confirm=revert|complete", dataDir)
 	}
-	// An entry of dataDir that is itself a mount point (e.g. a `./yara:/data/yara:ro`
-	// bind) cannot be renamed, so refuse BEFORE anything destructive rather
-	// than failing half-way through evacuation.
 	if nested := nestedMountPointsUnder(dataDir); len(nested) > 0 {
 		return fmt.Errorf("restore: refusing to commit — mount points inside the data directory cannot be moved aside: %s (unmount them for the restore, or remove the bind mounts from the cli service)", strings.Join(nested, ", "))
 	}
-	// Quiescing is ENFORCED: the proxy holds <dataDir>/.culvert.lock for its
-	// lifetime (see restore_lock_unix.go), so a commit against a live stack
-	// is refused instead of racing it.
-	release, lerr := acquireDataDirLock(dataDir)
-	if lerr != nil {
-		if errors.Is(lerr, errDataDirLocked) {
-			return fmt.Errorf("restore: %w", lerr)
-		}
-		fmt.Fprintf(os.Stderr, "WARN: data-dir lock unavailable (%v); continuing without the quiescing guard\n", lerr)
-	} else {
-		defer release()
-	}
+	return nil
+}
 
+// commitRestoreStaged is Steps 5–8 of runRestoreCommit: stage the artifacts
+// into dataDir, run the journaled in-place swap, and finish. The caller holds
+// the data-dir lock.
+func commitRestoreStaged(dataDir string, summary *restoreSummary, manifest *backupManifest, files map[string][]byte, opts restoreOpts) error {
 	// Anchor paths now so failure messages can name them. Suffix is
 	// timestamp + PID so:
 	//   - same-second retries from different processes don't collide

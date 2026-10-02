@@ -254,9 +254,20 @@ func nestedMountPointsUnder(dir string) []string {
 	if err != nil {
 		return nil
 	}
-	abs, err := filepath.Abs(dir)
+	// mountinfo reports REAL paths, so dir must be resolved the same way: a
+	// data dir reached through a symlink (CULVERT_DATA_DIR only requires an
+	// absolute, clean path) would otherwise hide every nested mount and the
+	// "refuse before anything destructive" promise would break mid-evacuation
+	// with EBUSY (adversarial review, PR #1528). A dir that cannot be resolved
+	// cannot be verified, so it is reported as its own obstacle: the caller
+	// refuses rather than guesses.
+	abs, err := filepath.EvalSymlinks(dir)
 	if err != nil {
-		return nil
+		return []string{dir + " (cannot resolve: " + err.Error() + ")"}
+	}
+	abs, err = filepath.Abs(abs)
+	if err != nil {
+		return []string{dir + " (cannot resolve: " + err.Error() + ")"}
 	}
 	abs = filepath.Clean(abs)
 	var out []string
@@ -373,6 +384,18 @@ func runRecoverRestore(dataDir string, action restoreRecoverAction, out io.Write
 	}
 }
 
+// moveTopLevelEntriesIfPresent is moveTopLevelEntries for the RECOVERY
+// paths, where an absent source directory is a valid current state (a bak
+// dir the operator removed, a staging dir promotion already emptied and
+// removed): nothing to move, not an error. The commit path keeps the strict
+// form — there, a missing dir is a bug.
+func moveTopLevelEntriesIfPresent(src, dst string) (int, error) {
+	if _, err := os.Lstat(src); os.IsNotExist(err) {
+		return 0, nil
+	}
+	return moveTopLevelEntries(src, dst)
+}
+
 func recoverRevert(dataDir, stagingDir, bakDir string, j *restoreJournal, out io.Writer) error {
 	if j.Phase == restorePhasePromoting {
 		// Everything live was promoted from staging; put it back there so
@@ -386,13 +409,13 @@ func recoverRevert(dataDir, stagingDir, bakDir string, j *restoreJournal, out io
 		if err != nil {
 			return fmt.Errorf("revert: un-promote: %w", err)
 		}
-		fmt.Fprintf(out, "  Moved %d promoted entr%s back to staging\n", n, plural(n, "y", "ies"))
+		fmt.Fprintf(out, "  Moved %d promoted entr%s back to staging\n", n, entries(n))
 	}
-	n, err := moveTopLevelEntries(bakDir, dataDir)
+	n, err := moveTopLevelEntriesIfPresent(bakDir, dataDir)
 	if err != nil {
 		return fmt.Errorf("revert: restore previous data: %w", err)
 	}
-	fmt.Fprintf(out, "  Moved %d previous entr%s back into %s\n", n, plural(n, "y", "ies"), dataDir)
+	fmt.Fprintf(out, "  Moved %d previous entr%s back into %s\n", n, entries(n), dataDir)
 	if err := os.Remove(bakDir); err != nil && !os.IsNotExist(err) {
 		fmt.Fprintf(out, "  WARN: previous-data dir %s not empty after revert: %v\n", bakDir, err)
 	}
@@ -407,23 +430,35 @@ func recoverRevert(dataDir, stagingDir, bakDir string, j *restoreJournal, out io
 
 func recoverComplete(dataDir, stagingDir, bakDir string, j *restoreJournal, out io.Writer) error {
 	if j.Phase == restorePhaseEvacuating {
+		if err := os.MkdirAll(bakDir, 0o700); err != nil {
+			return fmt.Errorf("complete: previous-data dir: %w", err)
+		}
 		n, err := moveTopLevelEntries(dataDir, bakDir)
 		if err != nil {
 			return fmt.Errorf("complete: finish evacuating: %w", err)
 		}
-		fmt.Fprintf(out, "  Moved %d remaining previous entr%s aside\n", n, plural(n, "y", "ies"))
+		fmt.Fprintf(out, "  Moved %d remaining previous entr%s aside\n", n, entries(n))
 		j.Phase = restorePhasePromoting
 		if err := writeRestoreJournal(dataDir, j); err != nil {
 			return err
 		}
 	}
-	n, err := moveTopLevelEntries(stagingDir, dataDir)
-	if err != nil {
-		return fmt.Errorf("complete: promote staged data: %w", err)
-	}
-	fmt.Fprintf(out, "  Promoted %d staged entr%s into %s\n", n, plural(n, "y", "ies"), dataDir)
-	if err := os.Remove(stagingDir); err != nil && !os.IsNotExist(err) {
-		fmt.Fprintf(out, "  WARN: staging dir %s not empty after promotion: %v\n", stagingDir, err)
+	// swapInPlace removes the (empty) staging dir BEFORE it retires the
+	// journal, so a kill between those two steps leaves a `promoting` journal
+	// with every restored entry already live and no staging dir at all. That
+	// is a supported interruption point: completing it means retiring the
+	// journal, never failing on the missing directory (Codex review, PR #1528).
+	if _, serr := os.Lstat(stagingDir); os.IsNotExist(serr) {
+		fmt.Fprintf(out, "  Staged data was already fully promoted (staging dir gone); nothing left to move\n")
+	} else {
+		n, err := moveTopLevelEntries(stagingDir, dataDir)
+		if err != nil {
+			return fmt.Errorf("complete: promote staged data: %w", err)
+		}
+		fmt.Fprintf(out, "  Promoted %d staged entr%s into %s\n", n, entries(n), dataDir)
+		if err := os.Remove(stagingDir); err != nil && !os.IsNotExist(err) {
+			fmt.Fprintf(out, "  WARN: staging dir %s not empty after promotion: %v\n", stagingDir, err)
+		}
 	}
 	if err := removeRestoreJournal(dataDir); err != nil {
 		return err
@@ -434,9 +469,10 @@ func recoverComplete(dataDir, stagingDir, bakDir string, j *restoreJournal, out 
 	return nil
 }
 
-func plural(n int, one, many string) string {
+// entries pluralises "entry" for the recovery transcript.
+func entries(n int) string {
 	if n == 1 {
-		return one
+		return "y"
 	}
-	return many
+	return "ies"
 }

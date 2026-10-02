@@ -448,8 +448,8 @@ func transitionCatalog(t *testing.T, minFrom string) *Catalog {
 	t.Helper()
 	cat := mustLoad(t, validSource())
 	newestID := ""
-	for id, rel := range cat.byReleaseID {
-		if newestID == "" || catalogCompareSemver(rel.VersionID, cat.byReleaseID[newestID].VersionID) > 0 {
+	for id := range cat.byReleaseID {
+		if newestID == "" || catalogCompareSemver(cat.byReleaseID[id].VersionID, cat.byReleaseID[newestID].VersionID) > 0 {
 			newestID = id
 		}
 	}
@@ -464,9 +464,9 @@ func transitionCatalog(t *testing.T, minFrom string) *Catalog {
 
 func releaseByVersion(t *testing.T, cat *Catalog, want string) Release {
 	t.Helper()
-	for _, rel := range cat.byReleaseID {
-		if rel.VersionID == want {
-			return rel
+	for id := range cat.byReleaseID {
+		if cat.byReleaseID[id].VersionID == want {
+			return cat.byReleaseID[id]
 		}
 	}
 	t.Fatalf("no release %s in fixture", want)

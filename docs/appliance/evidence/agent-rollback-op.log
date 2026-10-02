@@ -1,28 +1,28 @@
-2026-10-02T19:37:59.93873132Z	agent	NOTE	op_id=01M3Z1Z7C0MKM19GV85472DGY7 kind=rollbacks.create actor=uid=0,user=root — started
-2026-10-02T19:37:59.938740747Z	capture_before	START
-2026-10-02T19:38:00.154105499Z	capture_before	out	capture_before: prior_digests=sha256:e6a67d49974c3e0a1ee52e0c6edd4c2c6c7335a15a8acf5782a87f23e63cbbb4,sha256:e6a67d49974c3e0a1ee52e0c6edd4c2c6c7335a15a8acf5782a87f23e63cbbb4
-2026-10-02T19:38:00.154118024Z	capture_before	END succeeded
-2026-10-02T19:38:00.154122202Z	rollback_pull	START
-2026-10-02T19:38:00.204736627Z	rollback_pull	out	rollback_pull: skipped (image present locally)
-2026-10-02T19:38:00.204754152Z	rollback_pull	END succeeded
-2026-10-02T19:38:00.204760007Z	rollback_restart	START
-2026-10-02T19:38:01.650505375Z	rollback_restart	err	 Container proj-origin-blocked-1 Running 
-2026-10-02T19:38:01.650521831Z	rollback_restart	err	 Container culvert-clamav Running 
-2026-10-02T19:38:01.65052363Z	rollback_restart	err	 Container proj-origin-allowed-1 Running 
-2026-10-02T19:38:01.650525079Z	rollback_restart	err	 Container culvert Recreate 
-2026-10-02T19:38:01.650526495Z	rollback_restart	err	 Container culvert Recreated 
-2026-10-02T19:38:01.650528142Z	rollback_restart	err	 Container culvert-clamav Waiting 
-2026-10-02T19:38:01.650529603Z	rollback_restart	err	 Container culvert-clamav Healthy 
-2026-10-02T19:38:01.650531041Z	rollback_restart	err	 Container culvert Starting 
-2026-10-02T19:38:01.650532477Z	rollback_restart	err	 Container culvert Started 
-2026-10-02T19:38:01.650534801Z	rollback_restart	END succeeded
-2026-10-02T19:38:01.650540059Z	rollback_health	START
-2026-10-02T19:38:03.655182064Z	rollback_health	out	ready=true ready_detail="200 200 OK after 2 attempt(s) in 2.004s" health=true health_detail="200 200 OK" duration=2.004626255s
-2026-10-02T19:38:03.655255891Z	rollback_health	END succeeded
-2026-10-02T19:38:03.65526268Z	rollback_verify	START
-2026-10-02T19:38:03.842827472Z	rollback_verify	out	verify: running_digests=sha256:f714e55b7b6708442af164accb082a3c3c89a79ecd37934931af3b166a4f448f,sha256:f714e55b7b6708442af164accb082a3c3c89a79ecd37934931af3b166a4f448f
-2026-10-02T19:38:03.842843287Z	rollback_verify	END succeeded
-2026-10-02T19:38:03.842849538Z	report	START
-2026-10-02T19:38:03.842865653Z	report	out	rollback mode=image target_ref="127.0.0.1:5055/culvert@sha256:f714e55b7b6708442af164accb082a3c3c89a79ecd37934931af3b166a4f448f" prior_digests=sha256:e6a67d49974c3e0a1ee52e0c6edd4c2c6c7335a15a8acf5782a87f23e63cbbb4,sha256:e6a67d49974c3e0a1ee52e0c6edd4c2c6c7335a15a8acf5782a87f23e63cbbb4 running_after=sha256:f714e55b7b6708442af164accb082a3c3c89a79ecd37934931af3b166a4f448f,sha256:f714e55b7b6708442af164accb082a3c3c89a79ecd37934931af3b166a4f448f health=[ready=true ready_detail="200 200 OK after 2 attempt(s) in 2.004s" health=true health_detail="200 200 OK" duration=2.004626255s]
-2026-10-02T19:38:03.842868955Z	report	END succeeded
-2026-10-02T19:38:03.844951911Z	agent	NOTE	op finished succeeded
+2026-10-02T20:08:47.879135247Z	agent	NOTE	op_id=01M3Z3QM042XQ687A0Y1XZ7S35 kind=rollbacks.create actor=uid=0,user=root — started
+2026-10-02T20:08:47.879157037Z	capture_before	START
+2026-10-02T20:08:48.183237824Z	capture_before	out	capture_before: prior_digests=sha256:e6a67d49974c3e0a1ee52e0c6edd4c2c6c7335a15a8acf5782a87f23e63cbbb4,sha256:e6a67d49974c3e0a1ee52e0c6edd4c2c6c7335a15a8acf5782a87f23e63cbbb4
+2026-10-02T20:08:48.183257464Z	capture_before	END succeeded
+2026-10-02T20:08:48.183261949Z	rollback_pull	START
+2026-10-02T20:08:48.234367325Z	rollback_pull	out	rollback_pull: skipped (image present locally)
+2026-10-02T20:08:48.234382808Z	rollback_pull	END succeeded
+2026-10-02T20:08:48.234389968Z	rollback_restart	START
+2026-10-02T20:08:49.852620158Z	rollback_restart	err	 Container proj-origin-blocked-1 Running 
+2026-10-02T20:08:49.852638285Z	rollback_restart	err	 Container culvert-clamav Running 
+2026-10-02T20:08:49.852640192Z	rollback_restart	err	 Container proj-origin-allowed-1 Running 
+2026-10-02T20:08:49.852641612Z	rollback_restart	err	 Container culvert Recreate 
+2026-10-02T20:08:49.852643346Z	rollback_restart	err	 Container culvert Recreated 
+2026-10-02T20:08:49.852644802Z	rollback_restart	err	 Container culvert-clamav Waiting 
+2026-10-02T20:08:49.852646205Z	rollback_restart	err	 Container culvert-clamav Healthy 
+2026-10-02T20:08:49.852647541Z	rollback_restart	err	 Container culvert Starting 
+2026-10-02T20:08:49.852648792Z	rollback_restart	err	 Container culvert Started 
+2026-10-02T20:08:49.852651051Z	rollback_restart	END succeeded
+2026-10-02T20:08:49.852657527Z	rollback_health	START
+2026-10-02T20:08:51.856864307Z	rollback_health	out	ready=true ready_detail="200 200 OK after 2 attempt(s) in 2.003s" health=true health_detail="200 200 OK" duration=2.004193828s
+2026-10-02T20:08:51.856878783Z	rollback_health	END succeeded
+2026-10-02T20:08:51.856882905Z	rollback_verify	START
+2026-10-02T20:08:52.075754764Z	rollback_verify	out	verify: running_digests=sha256:f714e55b7b6708442af164accb082a3c3c89a79ecd37934931af3b166a4f448f,sha256:f714e55b7b6708442af164accb082a3c3c89a79ecd37934931af3b166a4f448f
+2026-10-02T20:08:52.07576627Z	rollback_verify	END succeeded
+2026-10-02T20:08:52.075771458Z	report	START
+2026-10-02T20:08:52.075781515Z	report	out	rollback mode=image target_ref="127.0.0.1:5055/culvert@sha256:f714e55b7b6708442af164accb082a3c3c89a79ecd37934931af3b166a4f448f" prior_digests=sha256:e6a67d49974c3e0a1ee52e0c6edd4c2c6c7335a15a8acf5782a87f23e63cbbb4,sha256:e6a67d49974c3e0a1ee52e0c6edd4c2c6c7335a15a8acf5782a87f23e63cbbb4 running_after=sha256:f714e55b7b6708442af164accb082a3c3c89a79ecd37934931af3b166a4f448f,sha256:f714e55b7b6708442af164accb082a3c3c89a79ecd37934931af3b166a4f448f health=[ready=true ready_detail="200 200 OK after 2 attempt(s) in 2.003s" health=true health_detail="200 200 OK" duration=2.004193828s]
+2026-10-02T20:08:52.075783707Z	report	END succeeded
+2026-10-02T20:08:52.077137181Z	agent	NOTE	op finished succeeded

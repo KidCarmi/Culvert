@@ -203,15 +203,23 @@ func main() {
 	// that was killed mid-rename (would otherwise start empty + silently lose
 	// data). Runs AFTER the one-shots so --list/--cleanup-restore-leftovers and
 	// --restore can still operate on the orphaned state.
+	// Hold the data-directory lock for the process lifetime, BEFORE the
+	// interrupted-restore guard: a restore commit or recovery holding it is
+	// mutating /data right now, and a proxy that booted anyway would serve a
+	// half-evacuated directory and write into it (the guard alone cannot see
+	// a commit that has not written its journal yet). A positively HELD lock
+	// is therefore fatal — under `restart: unless-stopped` the proxy simply
+	// comes back once the commit has finished. A lock that cannot be created
+	// (first boot before the dir exists, read-only fs) stays advisory
+	// (adversarial review, PR #1528).
+	if err := holdDataDirLock(dataDir); err != nil {
+		fmt.Fprintf(os.Stderr, "FATAL: %v\n", err)
+		os.Exit(1)
+	}
 	if err := checkInterruptedRestore(dataDir); err != nil {
 		fmt.Fprintf(os.Stderr, "FATAL: %v\n", err)
 		os.Exit(1)
 	}
-	// Hold the data-directory lock for the process lifetime so an offline
-	// restore commit / recovery against a still-running stack is REFUSED
-	// rather than raced (restore_inplace.go). Advisory: an unavailable lock
-	// is logged and never stops the proxy from serving.
-	holdDataDirLock(dataDir)
 	setInsecureFlag(s)
 	runEnrollmentMode(s)
 	loadFileConfigAndFlags(s)
@@ -609,22 +617,25 @@ func runRecoverRestoreCommand(dataDir string, action restoreRecoverAction) error
 	return runRecoverRestore(dataDir, action, os.Stdout)
 }
 
-// dataDirLockRelease keeps the proxy's data-dir lock alive for the process
-// lifetime (released implicitly at exit).
-var dataDirLockRelease func()
-
-func holdDataDirLock(dataDir string) {
+// holdDataDirLock takes the proxy's lifetime lock on dataDir. It returns an
+// error ONLY when the lock is positively held by another process (a restore
+// commit or recovery in progress — the proxy must not serve over it). A lock
+// that cannot be created at all (missing dir on first boot, read-only fs) is
+// logged and tolerated: the lock is a safety net, never a reason to refuse to
+// serve when nobody else is mutating the directory.
+func holdDataDirLock(dataDir string) error {
 	release, err := acquireDataDirLock(dataDir)
 	if err != nil {
 		if errors.Is(err, errDataDirLocked) {
-			fmt.Fprintf(os.Stderr, "WARN: %v — another Culvert process holds %s; continuing, but offline restore will refuse while both run\n", err, filepath.Join(dataDir, dataDirLockName))
-			return
+			return fmt.Errorf("%w — refusing to start the proxy over a data directory another Culvert process (a restore commit or --recover-restore) is mutating: %s; retry once it has finished", err, filepath.Join(dataDir, dataDirLockName))
 		}
-		// Missing dir (first boot before init creates it) or read-only FS:
-		// the lock is a safety net, never a reason to refuse to serve.
-		return
+		fmt.Fprintf(os.Stderr, "WARN: data-dir lock unavailable (%v); continuing without the quiescing guard\n", err)
+		return nil
 	}
-	dataDirLockRelease = release
+	// The lock is held for the process lifetime and released implicitly at
+	// exit; nothing in the proxy ever unlocks it deliberately.
+	_ = release
+	return nil
 }
 
 func runCleanupCommand(s *startupState) error {

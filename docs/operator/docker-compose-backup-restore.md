@@ -189,7 +189,13 @@ entries are moved aside into `/data/.restore-bak.<ts>-<pid>/`, and the staged
 entries are promoted. The proxy must be stopped first — and that is now
 enforced, not merely documented: the running proxy holds an advisory lock on
 `/data/.culvert.lock`, and a commit against a live stack is refused with
-`data directory is locked by another Culvert process`.
+`data directory is locked by another Culvert process`. The lock works in both
+directions: while a commit or `--recover-restore` holds it, a proxy that is
+started (an operator, or `restart: unless-stopped`) refuses to boot with
+`FATAL: … refusing to start the proxy over a data directory another Culvert
+process … is mutating` and comes back by itself once the commit has finished.
+A lock that cannot be created at all (first boot before the directory exists,
+read-only filesystem) is only a warning.
 
 > **Why in place?** `/data` is a Docker volume, i.e. a mount point inside the
 > container, and `rename(2)` refuses to move a mount point. Earlier builds

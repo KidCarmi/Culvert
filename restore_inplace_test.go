@@ -9,9 +9,11 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -394,5 +396,128 @@ func TestRestoreCommit_RefusesLeavingNoAdmin(t *testing.T) {
 		return runRestoreCommit(src, currentDir, "", restoreOpts{Mode: modeTrustRootOnly, AcceptDPReenrollment: true})
 	}); err != nil {
 		t.Fatalf("trust-root-only keeps the roster and must commit: %v", err)
+	}
+}
+
+// swapInPlace removes the (empty) staging dir BEFORE it retires the journal;
+// a kill between the two leaves `promoting` + no staging dir + every restored
+// entry live. Pre-fix `--confirm=complete` failed forever on the missing dir
+// (ENOENT from listTopLevelUserEntries) and the boot guard stayed armed; the
+// only outs were reverting a fully landed restore or hand-deleting the journal
+// the error text says never to touch (Codex + adversarial review, PR #1528).
+func TestRecoverRestore_Complete_StagingAlreadyRemoved(t *testing.T) {
+	dir := interruptCommit(t, "between")
+	// Finish the promotion by hand up to the last step, exactly as the real
+	// commit does: promote, remove staging, and then die before the journal.
+	j, present, err := readRestoreJournal(dir)
+	if !present || err != nil {
+		t.Fatalf("journal: present=%v err=%v", present, err)
+	}
+	staging := filepath.Join(dir, j.StagingDir)
+	if _, err := moveTopLevelEntries(staging, dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(staging); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if err := runRecoverRestore(dir, recoverActionComplete, &out); err != nil {
+		t.Fatalf("complete with staging already gone must succeed: %v\n%s", err, out.String())
+	}
+	if body, _ := os.ReadFile(filepath.Join(dir, "ui_users.json")); !strings.Contains(string(body), "alice") {
+		t.Errorf("restored roster must stay live; got %s", body)
+	}
+	if _, present, _ := readRestoreJournal(dir); present {
+		t.Error("journal must be retired")
+	}
+	if err := checkInterruptedRestore(dir); err != nil {
+		t.Errorf("boot guard must pass: %v", err)
+	}
+	if _, ok := readBak(t, dir); !ok {
+		t.Error("previous data must still be preserved")
+	}
+}
+
+// A journal whose bak dir no longer exists (the operator removed it, or the
+// evacuation never got as far as writing into it) is a valid current state for
+// BOTH recovery directions: revert has nothing to put back, complete creates
+// the dir it is about to evacuate into. Pre-fix both failed with a bare ENOENT.
+func TestRecoverRestore_MissingBakDirIsNotFatal(t *testing.T) {
+	for _, action := range []restoreRecoverAction{recoverActionRevert, recoverActionComplete} {
+		t.Run(string(action), func(t *testing.T) {
+			dir := interruptCommit(t, "evacuating")
+			j, _, _ := readRestoreJournal(dir)
+			if err := os.RemoveAll(filepath.Join(dir, j.BakDir)); err != nil {
+				t.Fatal(err)
+			}
+			var out bytes.Buffer
+			if err := runRecoverRestore(dir, action, &out); err != nil {
+				t.Fatalf("%s with no bak dir: %v\n%s", action, err, out.String())
+			}
+			if _, present, _ := readRestoreJournal(dir); present {
+				t.Error("journal must be retired")
+			}
+			if err := checkInterruptedRestore(dir); err != nil {
+				t.Errorf("boot guard must pass: %v", err)
+			}
+		})
+	}
+}
+
+// The data-dir lock is BIDIRECTIONAL: a proxy must not boot over a commit or
+// recovery that holds it. Pre-fix holdDataDirLock warned and continued, so a
+// `restart: unless-stopped` proxy started mid-evacuation, passed the
+// interrupted-restore guard (the journal is written after the lock), served a
+// half-moved /data and wrote into it, and the promotion then failed on
+// "refusing to overwrite" (adversarial review, PR #1528).
+func TestHoldDataDirLock_RefusesWhileCommitHoldsIt(t *testing.T) {
+	dir := t.TempDir()
+	release, err := acquireDataDirLock(dir) // the cli container's commit
+	if err != nil {
+		t.Skipf("flock unavailable: %v", err)
+	}
+	defer release()
+	if err := holdDataDirLock(dir); !errors.Is(err, errDataDirLocked) {
+		t.Fatalf("proxy boot must refuse while the lock is held, got %v", err)
+	}
+	release()
+	if err := holdDataDirLock(dir); err != nil {
+		t.Fatalf("boot after the commit released the lock: %v", err)
+	}
+	// CONTROL: an uncreatable lock (missing dir) is advisory, never fatal —
+	// the first boot before init creates the directory must still serve.
+	if err := holdDataDirLock(filepath.Join(dir, "does-not-exist")); err != nil {
+		t.Fatalf("an uncreatable lock must not refuse the boot: %v", err)
+	}
+}
+
+// nestedMountPointsUnder must see a nested mount through a SYMLINKED data dir
+// (mountinfo reports real paths). Needs a real bind mount, so root only.
+func TestNestedMountPointsUnder_ResolvesSymlinkedDataDir(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("needs root for a bind mount")
+	}
+	real := t.TempDir()
+	nested := filepath.Join(real, "yara")
+	if err := os.Mkdir(nested, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Mount(t.TempDir(), nested, "", syscall.MS_BIND, ""); err != nil {
+		t.Skipf("bind mount unavailable: %v", err)
+	}
+	t.Cleanup(func() { _ = syscall.Unmount(nested, 0) })
+	link := filepath.Join(t.TempDir(), "data")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+	if got := nestedMountPointsUnder(real); len(got) != 1 {
+		t.Fatalf("via real path: %v, want the nested mount", got)
+	}
+	if got := nestedMountPointsUnder(link); len(got) != 1 {
+		t.Fatalf("via symlink: %v, want the nested mount (pre-fix: hidden)", got)
+	}
+	// An unresolvable dir is reported as an obstacle, never as "no mounts".
+	if got := nestedMountPointsUnder(filepath.Join(real, "missing")); len(got) != 1 {
+		t.Fatalf("unresolvable dir: %v, want one obstacle entry", got)
 	}
 }

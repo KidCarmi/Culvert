@@ -100,6 +100,13 @@ Details: `docs/operator/release-management-agent.md` §"Interrupted operations".
 |---|---|---|
 | Power loss / kill during restore swap | boot refused with journal; explicit revert/complete; both idempotent | `restore_inplace_test.go`, harness scenario E |
 | Restore attempted while the proxy runs | refused (data-dir lock) | harness D `commit-refused-while-running` |
+| Proxy started while a restore commit/recovery holds the lock | proxy boot refused (fatal) until the commit finishes; `restart: unless-stopped` brings it back | `TestHoldDataDirLock_RefusesWhileCommitHoldsIt` |
+| Kill after promotion removed the staging dir but before the journal | `--confirm=complete` retires the journal; nothing left to move | `TestRecoverRestore_Complete_StagingAlreadyRemoved` |
+| Journal names a previous-data dir that no longer exists | revert and complete both succeed (absent dir = nothing to move) | `TestRecoverRestore_MissingBakDirIsNotFatal` |
+| Data dir reached through a symlink with a bind mount inside | nested mount still refused before anything destructive | `TestNestedMountPointsUnder_ResolvesSymlinkedDataDir` |
+| Agent cannot inspect the running image or the pinned tag at boot | record kept as `inputs_unavailable`; never retired on absent evidence | `TestReconcile_TagInspectFailureIsInputsUnavailable_NotNoop`, `TestReconcile_RunningCaptureFailureIsInputsUnavailable` |
+| Resolve refused at admission (lock held / agent busy) | attempt bound not consumed | `TestReconcileResolve_RefusedLaunchDoesNotChargeAnAttempt` |
+| Agent restart after a reconciled adoption | adopted outcome persists in the idempotency index | `TestOverrideInterrupted_PersistsReconciledOutcomeAcrossRestart` |
 | Agent killed between pull and restart / after tag | journal classified at start; safe boundary retired; tag hazard surfaced, resolve-only | `cmd/culvert-maint/internal/server/reconcile_startup_test.go`, agent harness F3 |
 | Control plane (proxy) replaced mid-dispatch | dispatch record persisted; watch resumed on boot; GUI keeps polling | `release_dispatch_persist_test.go`, agent harness F1 |
 | Duplicate apply request / after agent restart | same op returned (`deduped`) | agent harness F2/F5, `idempotency_persist_test.go` |
