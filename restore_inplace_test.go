@@ -497,8 +497,8 @@ func TestNestedMountPointsUnder_ResolvesSymlinkedDataDir(t *testing.T) {
 	if os.Geteuid() != 0 {
 		t.Skip("needs root for a bind mount")
 	}
-	real := t.TempDir()
-	nested := filepath.Join(real, "yara")
+	realDir := t.TempDir()
+	nested := filepath.Join(realDir, "yara")
 	if err := os.Mkdir(nested, 0o750); err != nil {
 		t.Fatal(err)
 	}
@@ -507,17 +507,17 @@ func TestNestedMountPointsUnder_ResolvesSymlinkedDataDir(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = syscall.Unmount(nested, 0) })
 	link := filepath.Join(t.TempDir(), "data")
-	if err := os.Symlink(real, link); err != nil {
+	if err := os.Symlink(realDir, link); err != nil {
 		t.Fatal(err)
 	}
-	if got := nestedMountPointsUnder(real); len(got) != 1 {
-		t.Fatalf("via real path: %v, want the nested mount", got)
+	if got := nestedMountPointsUnder(realDir); len(got) != 1 {
+		t.Fatalf("via realDir path: %v, want the nested mount", got)
 	}
 	if got := nestedMountPointsUnder(link); len(got) != 1 {
 		t.Fatalf("via symlink: %v, want the nested mount (pre-fix: hidden)", got)
 	}
 	// An unresolvable dir is reported as an obstacle, never as "no mounts".
-	if got := nestedMountPointsUnder(filepath.Join(real, "missing")); len(got) != 1 {
+	if got := nestedMountPointsUnder(filepath.Join(realDir, "missing")); len(got) != 1 {
 		t.Fatalf("unresolvable dir: %v, want one obstacle entry", got)
 	}
 }

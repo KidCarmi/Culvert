@@ -1079,7 +1079,7 @@ func runRestoreCommit(tarPath, dataDir, passphrase string, opts restoreOpts) err
 	if err := refuseUnsafeCommitTopology(dataDir); err != nil {
 		return err
 	}
-	return commitRestoreStaged(dataDir, summary, manifest, files, opts)
+	return commitRestoreStaged(dataDir, manifest, files, opts)
 }
 
 // enforceCommitGuards is Step 3 of runRestoreCommit: every guard that must
@@ -1128,7 +1128,7 @@ func refuseUnsafeCommitTopology(dataDir string) error {
 // commitRestoreStaged is Steps 5–8 of runRestoreCommit: stage the artifacts
 // into dataDir, run the journaled in-place swap, and finish. The caller holds
 // the data-dir lock.
-func commitRestoreStaged(dataDir string, summary *restoreSummary, manifest *backupManifest, files map[string][]byte, opts restoreOpts) error {
+func commitRestoreStaged(dataDir string, manifest *backupManifest, files map[string][]byte, opts restoreOpts) error {
 	// Anchor paths now so failure messages can name them. Suffix is
 	// timestamp + PID so:
 	//   - same-second retries from different processes don't collide
