@@ -923,11 +923,11 @@ func printRestoreSummary(w io.Writer, s *restoreSummary, a *commitAnalysis) {
 		fmt.Fprintf(w, "  CA fingerprint unchanged.\n")
 	}
 
-	fmt.Fprintf(w, "\nInspection root CA (ca.bundle):\n")
+	_, _ = fmt.Fprintf(w, "\nInspection root CA (ca.bundle):\n")
 	if a.CurrentRootCADigest == "" {
-		fmt.Fprintf(w, "  Current:    (none)\n")
+		_, _ = fmt.Fprintf(w, "  Current:    (none)\n")
 	} else {
-		fmt.Fprintf(w, "  Current:    sha256:%s\n", a.CurrentRootCADigest[:16])
+		_, _ = fmt.Fprintf(w, "  Current:    sha256:%s\n", a.CurrentRootCADigest[:16])
 	}
 	if a.RestoredRootCADigest == "" {
 		fmt.Fprintf(w, "  Restored:   (none would be present — a NEW root is minted at the next boot)\n")

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -34,7 +35,7 @@ func TestReadiness_SetupAndPostureRows(t *testing.T) {
 
 	// Strict callers gate on them.
 	rr := httptest.NewRecorder()
-	handleReady(rr, httptest.NewRequest("GET", "/ready?strict=1", nil))
+	handleReady(rr, httptest.NewRequest("GET", "/ready?strict=1", http.NoBody))
 	if rr.Code != 503 {
 		t.Fatalf("strict readiness must fail before setup/enforcement, got %d", rr.Code)
 	}
