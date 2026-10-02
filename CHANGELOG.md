@@ -516,6 +516,42 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   egress-restricted deployment must allow the responder hosts named in its
   upstreams' certificates. See `docs/operator/ocsp-revocation-checking.md`.
 
+### Performance
+
+- Category-group membership is now resolved by index instead of by walking
+  every group. `categoryGroupMatchesHostScratch` runs once per category-group
+  access rule per proxied request and prefers the rule's
+  `DestCategoryGroupID` — the authoritative, rename-safe link the admin API
+  stamps on every rule saved against an existing group — but
+  `MatchesCategoryByID` resolved that id by ranging the whole group map
+  comparing IDs, with the store's read lock held across the walk, because the
+  map is keyed by *name*. So the path production takes was O(number of groups)
+  while the denormalized-name fallback it supersedes was already an O(1)
+  probe, and the store is capped at 1000 groups.
+
+  Measured on a 4-core Xeon @2.10 GHz (medians of n=3, both arms in one
+  session), one resolve: **117.6 → 89.5 ns at 4 groups, 349.3 → 82.2 at 64,
+  1317 → 89.0 at 256, 5298 → 86.6 at 1000** — linear at ~5 ns/group before,
+  flat after. End to end through the policy scan with 20 category-group rules
+  and a categorized destination: **121 µs → 2.25 µs per request** at the
+  1000-group cap (53.8×). An *uncategorized* destination — clean traffic to a
+  host no tier classifies, and the common case — now short-circuits the whole
+  per-rule probe at the call site, because neither branch can match an empty
+  category: **125 µs → 395 ns** (317×). Verdicts are unchanged; the index is
+  derived state rebuilt wholesale at the one content-mutation chokepoint, and
+  a stale index degrades to "not resolved" rather than to a wrong group.
+
+  Also fixes a **data race** on the same path, reported by the race detector:
+  `MatchesCategory` resolved through `GetByName`, which releases the lock
+  before returning the live group, and then read that group's category set
+  with no lock held — while `Update`, `UpdateByID`, `Load`, `ReplaceAll` and
+  the rollback path all *reassign* that field under the write lock. Reachable
+  as proxy traffic evaluating an un-migrated category-group rule concurrent
+  with an admin edit of that group. The probe now happens inside the single
+  read-lock critical section, which also removes the old shape's second lock
+  round trip. Only deployments using category groups in policy rules are
+  affected; no configuration, API or metric surface changes.
+
 ### Changed
 
 - The production image now cross-compiles the proxy and the bundled
