@@ -7828,6 +7828,132 @@ test that reaches it, so a blanket sweep would be churn without a failure to
 point at. **The signal to look for is not "a test leaked a rule" but "a test
 leaked a rule and tidied up something the rule pointed at."**
 
+### The sixth review round: the mitigation was doing unbounded work of its own
+
+Two findings, neither about the bound itself. Both are about the code that
+REPORTS a refusal, and both had already been found, argued and fixed one file
+over — in `request_tracing_bounds.go`, the other entry-point bound on
+client-supplied input. CHAOS-69 did not inherit either.
+
+#### (a) The rate gate was a process-wide mutex
+
+The `OVERSIZE_HOST` line is rate-limited to one per minute, because a mitigation
+for a write-amplification defect must not be one itself (the CHAOS-63 rule). The
+gate that enforced it was a `sync.Mutex` around a read/compare/store.
+
+That is correct and it is also a throughput ceiling in exactly the wrong place.
+Every refusal in the process serialised on one lock — **including the suppressed
+ones, which during a flood is every refusal** — and this gate is reached on the
+proxy path **ahead of `internal/connlimit`, the IP filter and the per-IP rate
+limiter**. All three of those are sharded, and the reason is written down in this
+same file: an unsharded process-wide lock on the request path is a throughput
+ceiling. So the mitigation reintroduced that ceiling in front of the very
+limiters meant to bound the flood.
+
+`noteOversizeHostLog` is now an `atomic.Int64` stamp claimed with
+`CompareAndSwap`: exactly one racing caller wins each window and the losers
+suppress, which is the same answer a mutex would have given them. A **negative**
+delta re-arms rather than suppressing, so a clock that went backwards still
+reports — suppressing would mute the operator for however far back the clock
+went, and the CHAOS-61 rule is that a negative age fails toward the safe answer.
+
+> **The CHAOS-63 precedent's mutex is right THERE and wrong here, and the
+> difference is POSITION, not taste.** That gate sits behind the
+> 60-mutating-POST/min API limiter; this one sits ahead of every limiter there
+> is. A primitive is not inherited from a sibling sweep because the sweeps look
+> alike — it is chosen from where the code sits in the gate order.
+
+#### (b) `realClientIP` was resolved once per refusal
+
+Go evaluates arguments eagerly. Both admin handlers passed `realClientIP(r)`
+*into* the note function, so it ran on every refusal — suppressed or not, i.e. on
+every refusal during a flood.
+
+Behind a configured trusted proxy `realClientIP` joins every `X-Forwarded-For`
+field line and splits it on every comma; the resulting slice carries one 16-byte
+string header per hop. Measured through the real handler, on the suppressed path
+that a flood consists of:
+
+| shape | pre-fix bytes/op | post-fix bytes/op |
+| --- | --- | --- |
+| 1-hop XFF | 706 | 660 |
+| 50,000-hop XFF | **803,618** | **674** |
+
+~800 KB of allocation per refusal, from a viewer GET that reaches no limiter,
+in the code path whose entire purpose is to bound what a hostile input can make
+this process do.
+
+`noteOversizeHostRejectionReq` now takes the `*http.Request` and resolves the
+client **only after winning the window**. The operator still sees the client
+behind the proxy rather than the proxy itself — that is the CONTROL, and it
+matters more than it looks: the cheapest way to pass an allocation gate is to
+stop calling `realClientIP` at all and log `RemoteAddr`, which would silently
+degrade every rejection line on every reverse-proxied deployment.
+`ControlRejectionLogStillNamesTheRealClient` passes against the defect as well
+as against the fix, which is what makes it a control rather than a second defect
+gate.
+
+#### The instrument: allocated BYTES, never allocation COUNT
+
+The XFF gate was written count-first and **passed against the defect**.
+`strings.Split` allocates ONE `[]string` however many commas it finds, and
+`strings.Join` of a single field line copies nothing — so the allocation *count*
+is flat in hop count and a count-based assertion cannot see an 800 KB walk. The
+cost is in the bytes. Bytes are deterministic for a fixed workload, so unlike a
+timing ratio the gate cannot flake, and the property asserted is INDEPENDENCE: a
+suppressed refusal must allocate about the same with a 1-hop header as with a
+50,000-hop one.
+
+The same instrument, for the same reason, backs
+`TestSecReqID1_RejectionDoesNotWalkXFF`. One dialect, two call sites.
+
+#### Why the lock gate is structural
+
+`TestChaos69_LogGateTakesNoLock` AST-walks `noteOversizeHostLog`, errors on any
+`Lock`/`RLock`/`Unlock`/`RUnlock`, and requires a `CompareAndSwap`.
+
+It has to be structural. A mutex and an atomic stamp produce the **identical**
+observable — one line per window — so no behavioural assertion can distinguish
+them; what changed is contention, and a contention ratio on a shared CI runner
+is measurable only as a flake (the standing `sanitizeLog` / `connlimit` /
+latency-histogram rule: a gate that can flake gets muted). The
+`CompareAndSwap` requirement is its not-vacuous check — a gate that stopped
+arming the window at all would satisfy "takes no lock" while logging on every
+refusal.
+
+#### Gates
+
+| gate | kind | pins |
+| --- | --- | --- |
+| `LogGateTakesNoLock` | wall | the gate is an atomic claim, not a lock |
+| `LogGateReArmsOnClockRollback` | defect | a negative age reports, never silences |
+| `AdminRejectionDoesNotWalkXFF` | defect | suppressed-refusal bytes are independent of hop count |
+| `ControlRejectionLogStillNamesTheRealClient` | control | deferring must not downgrade the line to the proxy's address |
+
+Mutations verified: reinstating the mutex fails the wall; deleting the
+`CompareAndSwap` fails its not-vacuous check; suppressing on a negative delta
+fails the rollback gate; restoring eager resolution fails the XFF gate at
+803,618 vs 706 bytes/op while the control still passes; logging `RemoteAddr`
+instead fails the control while passing the XFF gate.
+
+#### The lesson, which is this sweep's own lesson turned on itself
+
+Rounds 2, 4 and 5 all ended in the same rule stated three ways — *enumerate every
+path, every branch, every representation*. Round 6 is the rule one level up:
+
+> **A rule recorded in one file is not a rule the next file follows.** Both
+> findings had already been made, argued and fixed in
+> `request_tracing_bounds.go` — the other bound on client-supplied input at the
+> same entry point, written by the same hand, carrying both corrections in its
+> comments. CHAOS-69 was built beside it and inherited neither. When a fix
+> establishes a discipline for one input bound, go and apply it to the bounds
+> that already exist, rather than leaving the next one to rediscover it under
+> review.
+
+That is also why the round-6 gates are deliberately the same *shapes* as that
+file's rather than better ones: the tree should carry one dialect for this class,
+so the next entry point has something to copy.
+
 ---
 
 ## 40. CHAOS-70 — The admin-roster mutations that report success on a write that never landed
