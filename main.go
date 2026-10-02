@@ -633,10 +633,18 @@ func holdDataDirLock(dataDir string) error {
 		return nil
 	}
 	// The lock is held for the process lifetime and released implicitly at
-	// exit; nothing in the proxy ever unlocks it deliberately.
-	_ = release
+	// exit; nothing in the proxy ever unlocks it deliberately. The release
+	// closure is PINNED in a package global on purpose: it is the only
+	// reference to the lock's *os.File, and an unreachable file is closed by
+	// the runtime finalizer, which releases the flock — a commit against a
+	// running stack was measured to succeed exactly that way.
+	dataDirLockHold = release
 	return nil
 }
+
+// dataDirLockHold keeps the proxy's data-dir lock reachable (see
+// holdDataDirLock).
+var dataDirLockHold func()
 
 func runCleanupCommand(s *startupState) error {
 	var older time.Duration
@@ -1664,5 +1672,14 @@ func applyHotReload(fc *FileConfig) {
 		}
 		applyUpstreamProxy()
 		logger.Printf("Reload: upstream %s", formatUpstreamSummary(ucfg.Proxies))
+	}
+}
+
+// releaseDataDirHoldForTest drops the proxy's lifetime hold so a test can
+// take the lock again in the same process.
+func releaseDataDirHoldForTest() {
+	if dataDirLockHold != nil {
+		dataDirLockHold()
+		dataDirLockHold = nil
 	}
 }

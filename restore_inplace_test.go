@@ -12,9 +12,11 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 )
 
 // interruptCommit runs a full-mode commit against a fresh fixture and
@@ -519,5 +521,29 @@ func TestNestedMountPointsUnder_ResolvesSymlinkedDataDir(t *testing.T) {
 	// An unresolvable dir is reported as an obstacle, never as "no mounts".
 	if got := nestedMountPointsUnder(filepath.Join(realDir, "missing")); len(got) != 1 {
 		t.Fatalf("unresolvable dir: %v, want one obstacle entry", got)
+	}
+}
+
+// The proxy's lifetime hold must survive garbage collection. Measured by the
+// lifecycle harness (run 20261002T201749Z): a commit against a RUNNING stack
+// printed "Restore committed." because holdDataDirLock dropped the release
+// closure, the lock's *os.File became unreachable, and the runtime finalizer
+// closed the descriptor — which releases a flock. A lock nobody references is
+// a lock the GC removes.
+func TestHoldDataDirLock_SurvivesGarbageCollection(t *testing.T) {
+	dir := t.TempDir()
+	t.Cleanup(releaseDataDirHoldForTest)
+	if err := holdDataDirLock(dir); err != nil {
+		t.Skipf("flock unavailable: %v", err)
+	}
+	// Finalizers run on their own goroutine after the GC cycle, so the
+	// check is repeated across many cycles: against the pre-fix shape the
+	// lock disappears within the first few, with the fix it never does.
+	for i := 0; i < 40; i++ {
+		runtime.GC()
+		time.Sleep(5 * time.Millisecond)
+		if _, err := acquireDataDirLock(dir); !errors.Is(err, errDataDirLocked) {
+			t.Fatalf("the proxy's hold must still block a commit after GC (cycle %d), got %v", i, err)
+		}
 	}
 }
