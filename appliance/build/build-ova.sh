@@ -158,6 +158,29 @@ mkdir -p "$OV/opt/culvert-appliance/bin"
 # with /bin/sh (dash) regardless of its shebang, so it is invoked via bash.
 cp "$HERE/prepare-guest.sh" "$OV/opt/culvert-appliance/prepare-guest.sh"
 
+# ── BUILD-HOST-ONLY accommodation: an intercepting HTTPS proxy ──────────────
+# A sandboxed build host may force outbound HTTPS through a local proxy
+# (HTTPS_PROXY=http://127.0.0.1:PORT with its own CA). Inside the libguestfs
+# appliance 127.0.0.1 is the GUEST, but qemu user-mode networking (slirp) maps
+# the build host's loopback to 10.0.2.2, so the proxy is handed to the guest as
+# http://10.0.2.2:PORT together with the CA bundle, FOR THE BUILD ONLY.
+# prepare-guest.sh consumes build-env.sh for curl/apt-over-https, then deletes
+# every trace (apt conf, CA file, trust-store entry, build-env.sh); the
+# outside-the-guest checks below refuse to package if any survived. An
+# ordinary build host with direct egress writes nothing here.
+BUILD_PROXY_CA_LINE=""
+if [[ -n "${HTTPS_PROXY:-}" ]]; then
+  pport="${HTTPS_PROXY##*:}"; pport="${pport%%/*}"
+  [[ "$pport" =~ ^[0-9]+$ ]] || die "cannot parse a port from HTTPS_PROXY=$HTTPS_PROXY"
+  log "build host uses an HTTPS proxy — passing it to the guest as http://10.0.2.2:$pport (build only, stripped afterwards)"
+  printf 'BUILD_HTTPS_PROXY=http://10.0.2.2:%s\n' "$pport" > "$OV/var/lib/culvert-appliance/build-env.sh"
+  if [[ -n "${SSL_CERT_FILE:-}" && -f "${SSL_CERT_FILE:-}" ]]; then
+    cp "$SSL_CERT_FILE" "$OV/var/lib/culvert-appliance/build-ca.crt"
+    # a distinctive line of the CA bundle, used to prove it left the guest trust store
+    BUILD_PROXY_CA_LINE="$(awk '!/-----/ { print; exit }' "$SSL_CERT_FILE")"
+  fi
+fi
+
 save_image() { # ref out.tar.gz
   log "docker save $1"
   docker save "$1" | gzip -n -6 > "$2"
@@ -220,6 +243,9 @@ cp --reflink=auto "$BASE_FILE" "$DISK"
 qemu-img resize -q "$DISK" "${VM_DISK_GB}G"   # cloud-init growpart grows / at first boot
 
 log "virt-customize (libguestfs; this runs the guest under TCG when no KVM is present — expect 10-30 min)"
+# The host's proxy variables must NOT reach the guest (libguestfs forwards
+# them; 127.0.0.1 means the guest there) — the guest gets build-env.sh instead.
+env -u HTTPS_PROXY -u https_proxy -u HTTP_PROXY -u http_proxy -u NO_PROXY -u no_proxy \
 virt-customize -a "$DISK" --smp 2 --memsize 2048 \
   --hostname culvert-appliance --timezone UTC \
   --copy-in "$OV/opt/culvert-appliance:/opt" \
@@ -236,10 +262,14 @@ grep -q "^docker-ce	${DOCKER_CE_VERSION}	amd64$" "$OUT/dpkg-list.txt" || die "do
 [[ "$(virt-cat -a "$DISK" /etc/machine-id | wc -c)" -eq 0 ]] || die "machine-id not empty"
 if virt-ls -a "$DISK" /etc/ssh/ | grep -q '^ssh_host_'; then die "ssh host keys present in image"; fi
 if virt-ls -a "$DISK" /etc/apt/apt.conf.d/ | grep -qi proxy; then die "apt proxy config leaked into image"; fi
+if virt-ls -a "$DISK" /var/lib/culvert-appliance/ | grep -qE '^build-(env\.sh|ca\.crt)$'; then die "build proxy/CA material leaked into image"; fi
+if virt-ls -a "$DISK" /usr/local/share/ca-certificates/ 2>/dev/null | grep -q .; then die "a build CA is still in /usr/local/share/ca-certificates"; fi
+if [[ -n "$BUILD_PROXY_CA_LINE" ]] && virt-cat -a "$DISK" /etc/ssl/certs/ca-certificates.crt | grep -qF -- "$BUILD_PROXY_CA_LINE"; then die "build proxy CA still in the guest trust store"; fi
+if virt-cat -a "$DISK" /etc/environment | grep -qi proxy; then die "proxy variables leaked into /etc/environment"; fi
 if virt-ls -a "$DISK" /home/culvert/ 2>/dev/null | grep -q '^\.ssh$'; then die "authorized keys leaked into image"; fi
 shadow_line="$(virt-cat -a "$DISK" /etc/shadow | grep '^culvert:' || true)"
 [[ "$shadow_line" == culvert:!* ]] || die "console account is not locked in the image"
-log "guest checks OK (pinned docker, empty machine-id, no host keys, no proxy residue, console account locked)"
+log "guest checks OK (pinned docker, empty machine-id, no host keys, no proxy/CA residue, console account locked)"
 [[ "$STOP_AFTER" == "disk" ]] && { cp "$DISK" "$OUT/$OVA_BASENAME.qcow2"; log "stopped after disk: $OUT/$OVA_BASENAME.qcow2"; KEEP_WORK=1; exit 0; }
 
 # ── 6. VMDK + OVF + OVA ─────────────────────────────────────────────────────

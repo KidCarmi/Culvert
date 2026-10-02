@@ -29,6 +29,26 @@ log() { printf 'prepare-guest: %s\n' "$*"; }
 [[ "$(. /etc/os-release; echo "$VERSION_CODENAME")" == "$GUEST_OS_CODENAME" ]] \
   || { echo "base image codename does not match manifest GUEST_OS_CODENAME=$GUEST_OS_CODENAME" >&2; exit 1; }
 
+# ── 0. BUILD-HOST-ONLY: intercepting HTTPS proxy handed in by build-ova.sh ──
+# Present only when the build host itself sits behind such a proxy (sandbox
+# CI). Everything installed here is removed again in step 5 and re-checked by
+# build-ova.sh from outside the guest. Plain-HTTP apt sources (archive/security
+# .ubuntu.com) go direct through qemu's user-mode NAT; only HTTPS uses the proxy.
+BUILD_PROXY_ACTIVE=0
+if [[ -f "$STATE/build-env.sh" ]]; then
+  # shellcheck source=/dev/null
+  . "$STATE/build-env.sh"
+  BUILD_PROXY_ACTIVE=1
+  log "BUILD-ONLY: using build host proxy $BUILD_HTTPS_PROXY for HTTPS"
+  export https_proxy="$BUILD_HTTPS_PROXY" HTTPS_PROXY="$BUILD_HTTPS_PROXY"
+  printf 'Acquire::https::Proxy "%s";\n' "$BUILD_HTTPS_PROXY" > /etc/apt/apt.conf.d/99-culvert-build-proxy
+  if [[ -f "$STATE/build-ca.crt" ]]; then
+    install -d -m 0755 /usr/local/share/ca-certificates
+    install -m 0644 "$STATE/build-ca.crt" /usr/local/share/ca-certificates/culvert-build-proxy-ca.crt
+    update-ca-certificates >/dev/null 2>&1
+  fi
+fi
+
 # ── 1. Docker Engine + Compose plugin, pinned, from Docker's official repo ──
 log "configuring Docker apt repository"
 install -m 0755 -d /etc/apt/keyrings
@@ -159,5 +179,12 @@ rm -rf /var/lib/cloud/instances /var/lib/cloud/instance /var/lib/cloud/data 2>/d
 # Nothing from the BUILD host may survive: no proxy config, no apt proxy, no
 # authorized keys. build-ova.sh re-checks these from outside the guest.
 rm -f /etc/apt/apt.conf.d/*proxy* /etc/environment.d/*proxy* /root/.docker/config.json
+if [[ "$BUILD_PROXY_ACTIVE" -eq 1 ]]; then
+  log "BUILD-ONLY: removing the build host proxy + CA from the guest"
+  unset https_proxy HTTPS_PROXY
+  rm -f /etc/apt/apt.conf.d/99-culvert-build-proxy /usr/local/share/ca-certificates/culvert-build-proxy-ca.crt
+  update-ca-certificates --fresh >/dev/null 2>&1
+  rm -f "$STATE/build-env.sh" "$STATE/build-ca.crt"
+fi
 rm -rf /root/.ssh /home/culvert/.ssh
 log "done"
