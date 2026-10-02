@@ -33,6 +33,7 @@ and `docs/engineering/`.
 - [`cluster-ca-expiry.md`](cluster-ca-expiry.md) — cluster (enrollment) CA expiry and the resulting control-plane trust outage.
 - [`cluster-config-capacity.md`](cluster-config-capacity.md) — CP→DP config-sync capacity limits and operations.
 - [`cluster-rate-limit-freshness.md`](cluster-rate-limit-freshness.md) — how cluster-wide rate limiting degrades during a Control Plane outage.
+- [`dp-bootstrap-artifact-safety.md`](dp-bootstrap-artifact-safety.md) — one-click DP enrollment refuses to render bootstrap scripts/compose files for an unsafe request authority (SEC-BOOTSTRAP-HOST-1).
 
 ## Authentication and identity
 
@@ -41,6 +42,8 @@ and `docs/engineering/`.
 - [`ldap-directory-stalls.md`](ldap-directory-stalls.md) — what happens when a directory accepts a connection and then stops answering.
 - [`credential-verification-cost.md`](credential-verification-cost.md) — the bounded credential-verification governor and the `auth_verify_saturated` alert.
 - [`admin-login-input-bounds.md`](admin-login-input-bounds.md) — why the admin login endpoint bounds the submitted username, and what it protects.
+- [`admin-basic-auth.md`](admin-basic-auth.md) — HTTP Basic fallback on the admin API: lockout, audit and username bound now apply, and TOTP-enrolled accounts are refused (SEC-BASIC-1, breaking for automation).
+- [`admin-roster-durability.md`](admin-roster-durability.md) — admin account/role/password changes are durable-or-refused; what a failed persist looks like and the recommended alerts (CHAOS-70).
 
 ## TLS inspection, certificates, and decryption
 
@@ -60,6 +63,8 @@ and `docs/engineering/`.
 - [`dns-resolution-health.md`](dns-resolution-health.md) — destination-host DNS resolution health, bounding, and recovery.
 - [`geoip-resolution-health.md`](geoip-resolution-health.md) — GeoIP policy resolution health and the warmer that backs it.
 - [`traffic-log-destination-privacy.md`](traffic-log-destination-privacy.md) — controlling how much destination detail lands in traffic logs.
+- [`destination-host-bounds.md`](destination-host-bounds.md) — the two-tier bound on client-supplied destination authorities, what is refused (400) and the `OVERSIZE_HOST` log line (CHAOS-69).
+- [`request-tracing-input-bounds.md`](request-tracing-input-bounds.md) — bounds on client `X-Request-Id` / `Traceparent` headers; unusable values are replaced, never refused (SEC-REQID-1).
 
 ## Security scanning and threat intelligence
 
