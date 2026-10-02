@@ -191,7 +191,7 @@ func TestSecReauthAudit1_AuditEntryIsBoundedInBothFields(t *testing.T) {
 // were already passing truncateForAudit(username) as the Object.
 func TestSecReauthAudit1_AuditActorIsBoundedAtTheChokepoint(t *testing.T) {
 	long := strings.Repeat("v", loginAuditActorMax*5)
-	r := httptest.NewRequest(http.MethodPost, "/api/auth/change-password", nil)
+	r := httptest.NewRequest(http.MethodPost, "/api/auth/change-password", http.NoBody)
 	r.RemoteAddr = "198.51.100.76:9999"
 	r = r.WithContext(context.WithValue(r.Context(), uiUserKey{}, long))
 
@@ -207,7 +207,7 @@ func TestSecReauthAudit1_AuditActorIsBoundedAtTheChokepoint(t *testing.T) {
 	}
 	// CONTROL: an ordinary name must pass through verbatim, or the bound has
 	// silently changed every audit entry's actor in the product.
-	short := httptest.NewRequest(http.MethodPost, "/api/auth/change-password", nil)
+	short := httptest.NewRequest(http.MethodPost, "/api/auth/change-password", http.NoBody)
 	short.RemoteAddr = "198.51.100.77:9999"
 	short = short.WithContext(context.WithValue(short.Context(), uiUserKey{}, "keeper"))
 	if want, got := "keeper@198.51.100.77", auditActor(short); got != want {

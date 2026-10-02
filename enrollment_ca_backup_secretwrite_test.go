@@ -31,6 +31,7 @@ package main
 // the operator's only recovery copy of the previous root.
 
 import (
+	"bytes"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -118,12 +119,19 @@ func TestSecSecretWrite1_CABackupKeyIsNotWorldReadableOnAPrePlantedFile(t *testi
 	dir, key, certPEM := caBackupFixture(t)
 
 	keyBak := filepath.Join(dir, "cluster-ca.key.bak")
-	if err := os.WriteFile(keyBak, nil, 0o666); err != nil {
-		t.Fatalf("pre-plant permissive file: %v", err)
+	// Created at 0600 and WIDENED by the Chmod below rather than created 0666:
+	// gosec G306 bounds os.WriteFile's mode argument (and is enforced in this
+	// repo), while G302 — chmod's mode — is excluded, so this needs no
+	// suppression. The permissive mode is the point of the fixture either way:
+	// os.WriteFile applies perm only on CREATION, so the defect is that the key
+	// lands in a file somebody else already made world-readable.
+	if err := os.WriteFile(keyBak, nil, 0o600); err != nil {
+		t.Fatalf("pre-plant file: %v", err)
 	}
-	// Defeat umask, which would otherwise mask the bits the defect needs.
+	// Widen it, and defeat umask, which would otherwise mask the bits the
+	// defect needs.
 	if err := os.Chmod(keyBak, 0o666); err != nil {
-		t.Fatalf("chmod pre-planted file: %v", err)
+		t.Fatalf("widen pre-planted file: %v", err)
 	}
 
 	backupCAFiles(dir, certPEM, key)
@@ -154,7 +162,7 @@ func TestSecSecretWrite1_CABackupStillWritesBothArtifacts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("cert backup missing: %v", err)
 	}
-	if string(gotCert) != string(certPEM) {
+	if !bytes.Equal(gotCert, certPEM) {
 		t.Errorf("cert backup content = %q, want the CA cert PEM verbatim", gotCert)
 	}
 
@@ -205,7 +213,7 @@ func TestSecSecretWrite1_CABackupIsOverwritableAcrossRotations(t *testing.T) {
 	if err != nil {
 		t.Fatalf("cert backup missing after second rotation: %v", err)
 	}
-	if string(got) != string(second) {
+	if !bytes.Equal(got, second) {
 		t.Errorf("second rotation did not replace the backup: got %q, want %q", got, second)
 	}
 }
