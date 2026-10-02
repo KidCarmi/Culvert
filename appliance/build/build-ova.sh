@@ -161,9 +161,11 @@ cp "$HERE/prepare-guest.sh" "$OV/opt/culvert-appliance/prepare-guest.sh"
 # ── BUILD-HOST-ONLY accommodation: an intercepting HTTPS proxy ──────────────
 # A sandboxed build host may force outbound HTTPS through a local proxy
 # (HTTPS_PROXY=http://127.0.0.1:PORT with its own CA). Inside the libguestfs
-# appliance 127.0.0.1 is the GUEST, but qemu user-mode networking (slirp) maps
-# the build host's loopback to 10.0.2.2, so the proxy is handed to the guest as
-# http://10.0.2.2:PORT together with the CA bundle, FOR THE BUILD ONLY.
+# appliance 127.0.0.1 is the GUEST; qemu user-mode networking (slirp) exposes
+# the build host's loopback at the guest's DEFAULT GATEWAY (libguestfs uses
+# 169.254.2.15/16, so that is 169.254.0.2 — NOT the generic 10.0.2.2). Only the
+# PORT is handed over; prepare-guest.sh derives the host from its own default
+# route. The CA bundle rides along, FOR THE BUILD ONLY.
 # prepare-guest.sh consumes build-env.sh for curl/apt-over-https, then deletes
 # every trace (apt conf, CA file, trust-store entry, build-env.sh); the
 # outside-the-guest checks below refuse to package if any survived. An
@@ -172,8 +174,8 @@ BUILD_PROXY_CA_LINE=""
 if [[ -n "${HTTPS_PROXY:-}" ]]; then
   pport="${HTTPS_PROXY##*:}"; pport="${pport%%/*}"
   [[ "$pport" =~ ^[0-9]+$ ]] || die "cannot parse a port from HTTPS_PROXY=$HTTPS_PROXY"
-  log "build host uses an HTTPS proxy — passing it to the guest as http://10.0.2.2:$pport (build only, stripped afterwards)"
-  printf 'BUILD_HTTPS_PROXY=http://10.0.2.2:%s\n' "$pport" > "$OV/var/lib/culvert-appliance/build-env.sh"
+  log "build host uses an HTTPS proxy — handing port $pport to the guest (reached via its default gateway; build only, stripped afterwards)"
+  printf 'BUILD_HTTPS_PROXY_PORT=%s\n' "$pport" > "$OV/var/lib/culvert-appliance/build-env.sh"
   if [[ -n "${SSL_CERT_FILE:-}" && -f "${SSL_CERT_FILE:-}" ]]; then
     cp "$SSL_CERT_FILE" "$OV/var/lib/culvert-appliance/build-ca.crt"
     # a distinctive line of the CA bundle, used to prove it left the guest trust store
@@ -238,9 +240,14 @@ log "build-info.json written"
 
 # ── 4. Disk ─────────────────────────────────────────────────────────────────
 DISK="$WORK/disk.qcow2"
-log "preparing ${VM_DISK_GB}G qcow2 working disk"
-cp --reflink=auto "$BASE_FILE" "$DISK"
-qemu-img resize -q "$DISK" "${VM_DISK_GB}G"   # cloud-init growpart grows / at first boot
+log "preparing ${VM_DISK_GB}G qcow2 working disk (virt-resize: root partition grown at BUILD time)"
+# The cloud image's root partition is ~2.4 GB and cloud-init's growpart only
+# runs at FIRST BOOT, so a plain `qemu-img resize` leaves the build with the
+# original filesystem — measured: the Docker install hit ENOSPC at 100 %.
+# virt-resize copies the image into a fresh disk and expands /dev/sda1 now.
+rm -f "$DISK"
+qemu-img create -q -f qcow2 "$DISK" "${VM_DISK_GB}G"
+virt-resize --quiet --expand /dev/sda1 "$BASE_FILE" "$DISK"
 
 log "virt-customize (libguestfs; this runs the guest under TCG when no KVM is present — expect 10-30 min)"
 # The host's proxy variables must NOT reach the guest (libguestfs forwards

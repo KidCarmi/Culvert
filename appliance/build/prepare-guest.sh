@@ -39,6 +39,11 @@ if [[ -f "$STATE/build-env.sh" ]]; then
   # shellcheck source=/dev/null
   . "$STATE/build-env.sh"
   BUILD_PROXY_ACTIVE=1
+  # The build host's loopback is reachable at the appliance's default gateway
+  # (slirp host alias). Derived, never hard-coded: libguestfs picks the subnet.
+  gw="$(ip -4 route show default | awk '{for(i=1;i<=NF;i++) if($i=="via"){print $(i+1); exit}}')"
+  [[ -n "$gw" ]] || { echo "BUILD-ONLY proxy requested but the guest has no default route (DHCP client missing on the build host?)" >&2; exit 1; }
+  BUILD_HTTPS_PROXY="http://${gw}:${BUILD_HTTPS_PROXY_PORT}"
   log "BUILD-ONLY: using build host proxy $BUILD_HTTPS_PROXY for HTTPS"
   export https_proxy="$BUILD_HTTPS_PROXY" HTTPS_PROXY="$BUILD_HTTPS_PROXY"
   printf 'Acquire::https::Proxy "%s";\n' "$BUILD_HTTPS_PROXY" > /etc/apt/apt.conf.d/99-culvert-build-proxy
