@@ -77,6 +77,11 @@ GIT_DIRTY="false"; [[ -n "$(git -C "$REPO" status --porcelain 2>/dev/null)" ]] &
 VERSION="${APPLIANCE_VERSION:-${APP_IMAGE_TAG#v}}"
 OVA_BASENAME="${APPLIANCE_NAME}-${VERSION}-${GUEST_OS_ID}"
 mkdir -p "$OUT" "$WORK/cache" "$WORK/overlay"
+# One build per work dir: a second run would recreate disk.qcow2 under the
+# first (measured: `virt-resize: guestfs_launch failed` when two builds were
+# launched into the same --work a minute apart).
+exec 9>"$WORK/.lock"
+flock -n 9 || die "another build is already using $WORK"
 cleanup() { if [[ "$KEEP_WORK" -eq 0 ]]; then rm -rf "$WORK/overlay" "$WORK/disk.qcow2" "$WORK/ova"; fi; }
 trap cleanup EXIT
 

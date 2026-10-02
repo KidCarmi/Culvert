@@ -47,6 +47,9 @@ stale by import time; the sidecar downloads it on first start (see first-boot).
   (`fulcio.sigstore.dev`, `rekor.sigstore.dev`, `tuf-repo-cdn.sigstore.dev`)
   for cosign. The build honours `HTTPS_PROXY`/`SSL_CERT_FILE` for its own
   pulls/cosign only; nothing from them reaches the guest.
+* `--work` is held by an `flock` for the whole run: a second build into the
+  same directory is refused (two runs would recreate the working disk under
+  each other); use a different `--work` to build in parallel.
 * ~12 GB free in `--work` (base image, the virt-resized working qcow2, VMDK).
 
 ## Running it
