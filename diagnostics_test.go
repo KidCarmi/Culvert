@@ -1647,7 +1647,7 @@ func TestApiDiagnostics_OversizeLegacyUsernameSurfacedOnContract(t *testing.T) {
 		t.Errorf("admin_username_length status = %q, want warn for an oversize legacy login name with no roster entry", found.Status)
 	}
 	if !strings.Contains(found.OperatorAction, "/api/settings") || !strings.Contains(found.OperatorAction, "auth.user") {
-		t.Errorf("admin_username_length operator_action = %q, want the legacy-login remediation (Settings + -user/auth.user) — Admin Users cannot change cfg.user", found.OperatorAction)
+		t.Errorf("admin_username_length operator_action = %q, want the legacy-login remediation (Settings + -user/auth.user) — Administrators cannot change cfg.user", found.OperatorAction)
 	}
 	// POST /api/settings hashes whatever password it is given — a blank one
 	// included — so the remediation must require a new strong password
@@ -1655,16 +1655,16 @@ func TestApiDiagnostics_OversizeLegacyUsernameSurfacedOnContract(t *testing.T) {
 	if !strings.Contains(found.OperatorAction, "never leave the password blank") {
 		t.Errorf("admin_username_length operator_action = %q, want an explicit new-password requirement for the Settings step", found.OperatorAction)
 	}
-	// The legacy name has no Admin Users row here, so the mirror-cleanup
+	// The legacy name has no Administrators row here, so the mirror-cleanup
 	// step would be impossible to perform: overwriting cfg.user alone
 	// resolves it, and the action must not prescribe a roster delete.
 	if strings.Contains(found.OperatorAction, "delete the old name") {
 		t.Errorf("admin_username_length operator_action = %q, must not prescribe deleting a roster entry that does not exist", found.OperatorAction)
 	}
-	// Nor may it open with the generic Admin Users create/delete workflow:
+	// Nor may it open with the generic Administrators create/delete workflow:
 	// a legacy-only login has no roster row to replace or delete.
-	if strings.Contains(found.OperatorAction, "from Admin Users, create a replacement") {
-		t.Errorf("admin_username_length operator_action = %q, must not prescribe the Admin Users replace/delete workflow for a legacy-only login", found.OperatorAction)
+	if strings.Contains(found.OperatorAction, "from the Administrators panel, create a replacement") {
+		t.Errorf("admin_username_length operator_action = %q, must not prescribe the Administrators replace/delete workflow for a legacy-only login", found.OperatorAction)
 	}
 	// loadAuth re-applies -user AND -pass on every boot, so the startup
 	// password must change with the name or it overwrites the new one.
@@ -1677,7 +1677,7 @@ func TestApiDiagnostics_OversizeLegacyUsernameSurfacedOnContract(t *testing.T) {
 	if !strings.Contains(found.OperatorAction, "change-password") {
 		t.Errorf("admin_username_length operator_action = %q, want a durable-persistence step for the Settings-only replacement", found.OperatorAction)
 	}
-	// A legacy-only login gets no generic Admin Users clause, so the Settings
+	// A legacy-only login gets no generic Administrators clause, so the Settings
 	// step itself must state the 64-byte target: Settings enforces no length
 	// bound, and a merely "shorter" (e.g. 100-byte) name leaves the row warn.
 	if !strings.Contains(found.OperatorAction, "set a login of at most 64 bytes that") {
@@ -1685,7 +1685,7 @@ func TestApiDiagnostics_OversizeLegacyUsernameSurfacedOnContract(t *testing.T) {
 	}
 	// SetAuth overwrites an existing roster entry of the same name (new
 	// password hash, RoleAdmin), so the replacement must be an unused name.
-	if !strings.Contains(found.OperatorAction, "that no existing Admin Users account already uses") {
+	if !strings.Contains(found.OperatorAction, "that no existing administrator account already uses") {
 		t.Errorf("admin_username_length operator_action = %q, want the legacy replacement to require an unused login", found.OperatorAction)
 	}
 	if strings.Contains(found.Message, longName) {

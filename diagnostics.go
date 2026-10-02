@@ -531,12 +531,12 @@ func checkSessionSecret() OperatorContractCheck {
 // GET /api/diagnose call and in the Diagnostics panel, for the life of the
 // process rather than scrolling out of a log file. Usernames themselves are
 // not included in the message (matching the boot-time warning's own
-// discipline of reporting only the length) — Admin Users already lists the
+// discipline of reporting only the length) — Administrators already lists the
 // full roster for the operator to identify which account to rename.
 //
 // The threshold is the 64-byte ACCOUNT limit, not the login endpoint's
 // 256-byte bound: every admin-facing sign-in form (static/index.html
-// li-user, maxlength=64) and the setup / Admin Users creation paths cap at 64, so a
+// li-user, maxlength=64) and the setup / Administrators creation paths cap at 64, so a
 // 65–256-byte name created via -user / --reset-password passes the API
 // bound yet cannot be typed into the dashboard login field. Reporting ok for
 // it would falsely confirm an account the operator cannot sign in with.
@@ -583,7 +583,7 @@ func checkOversizeConfiguredUsernames() OperatorContractCheck {
 		Code:   "admin_username_length",
 		Status: diagWarn,
 		Message: fmt.Sprintf("%d admin account%s have a username above the %d-byte account limit (longest: %d bytes) — "+
-			"the dashboard sign-in form accepts at most %d characters and setup and Admin Users cap new names there "+
+			"the dashboard sign-in form accepts at most %d characters and setup and the Administrators panel cap new names there "+
 			"(the -user / auth.user startup credentials and --reset-password do not, which is how such a name is created), "+
 			"so the account may be unusable from the admin UI (configured names are exempt from the login API's length bound, "+
 			"so the account can still authenticate through the API)",
@@ -625,8 +625,8 @@ func collectAdminUsernames() adminUsernameInventory {
 		names[legacy] = struct{}{}
 		inv.legacyOversize = len(legacy) > adminUsernameAccountLimit
 	}
-	// rosterOversize counts oversize Admin Users rows OTHER than the legacy
-	// login: those are the only accounts the Admin Users create/delete
+	// rosterOversize counts oversize Administrators rows OTHER than the legacy
+	// login: those are the only accounts the Administrators create/delete
 	// workflow applies to (a mirrored legacy name is retired via Settings).
 	for name := range names {
 		if name != legacy && len(name) > adminUsernameAccountLimit {
@@ -645,12 +645,12 @@ func oversizeUsernameAction(inv adminUsernameInventory, totpOversize bool) strin
 	// account's role (an oversize operator/viewer must not become an admin).
 	action := ""
 	if inv.rosterOversize {
-		action = "Usernames cannot be renamed in place: from Admin Users, create a replacement account with the same role " +
+		action = "Usernames cannot be renamed in place: from the Administrators panel, create a replacement account with the same role " +
 			"and a name of at most 64 bytes, confirm it can sign in, then delete the old account. "
 	}
 	if inv.legacyOversize {
-		// The legacy single-user login (cfg.user) is not an Admin Users row
-		// and deleting its roster entry leaves it in place, so Admin Users
+		// The legacy single-user login (cfg.user) is not an Administrators row
+		// and deleting its roster entry leaves it in place, so Administrators
 		// cannot clear it. It is replaced by Settings (POST /api/settings,
 		// cfg.SetAuth) — and -user / auth.user re-apply it on every boot, so
 		// the startup source must change too.
@@ -662,8 +662,8 @@ func oversizeUsernameAction(inv adminUsernameInventory, totpOversize bool) strin
 		// SetAuth also OVERWRITES any existing roster entry of the chosen
 		// name (new hash, RoleAdmin), so the name must be unused — reusing
 		// one would reset that account's password and could elevate it.
-		action += "The oversize name includes the legacy single-user login, which Admin Users alone cannot change: " +
-			"set a login of at most 64 bytes that no existing Admin Users account already uses " +
+		action += "The oversize name includes the legacy single-user login, which the Administrators panel alone cannot change: " +
+			"set a login of at most 64 bytes that no existing administrator account already uses " +
 			"(Settings overwrites an existing account of that name, resetting its password and making it an admin) " +
 			"under Settings (POST /api/settings) together with a new strong password in the same save " +
 			"(Settings sets the password it is given — never leave the password blank), "
@@ -674,7 +674,7 @@ func oversizeUsernameAction(inv adminUsernameInventory, totpOversize bool) strin
 			// restored BEFORE the first sign-in: a role change does not
 			// revoke sessions and the session cookie carries the role it was
 			// issued with, so signing in first leaves an admin session alive.
-			action += fmt.Sprintf("then, before anyone signs in with the new login, set its role back to %s in Admin Users "+
+			action += fmt.Sprintf("then, before anyone signs in with the new login, set its role back to %s in the Administrators panel "+
 				"(Settings always creates it as admin, but the old login's effective role is %s, and a role change does not "+
 				"revoke a session already issued), ", inv.legacyRole, inv.legacyRole)
 		}
@@ -682,7 +682,7 @@ func oversizeUsernameAction(inv adminUsernameInventory, totpOversize bool) strin
 		if inv.legacyMirrored {
 			// Only a mirrored legacy name has a roster entry to remove; a
 			// legacy-only name is retired by overwriting cfg.user alone.
-			action += "then delete the old name's remaining Admin Users entry (Settings adds the new name but does not remove the old one), "
+			action += "then delete the old name's remaining entry in the Administrators panel (Settings adds the new name but does not remove the old one), "
 		} else {
 			// POST /api/settings never writes ui_users.json, and with no
 			// mirrored row there is no roster delete to persist it either;
