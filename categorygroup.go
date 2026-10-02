@@ -45,6 +45,19 @@ var globalCategoryGroups = catgroup.New()
 // scan build a throwaway scratch with newHostCatScratch(host).
 func categoryGroupMatchesHostScratch(rule *PolicyRule, sc *hostCatScratch) bool {
 	hostCat, _, _ := sc.fusion()
+	if hostCat == "" {
+		// An UNCATEGORIZED host is in no category group, so neither branch
+		// below can match: MatchesCategory returns false on an empty category,
+		// and MatchesCategoryByID reports (false, resolved) which this function
+		// returns as false. Answering here skips a group resolve — and the
+		// store read lock it takes — once per category-group rule, and the
+		// uncategorized host is the COMMON case on a gateway (clean traffic to
+		// a destination no tier classifies), so on that shape the whole
+		// per-rule membership probe disappears rather than merely getting
+		// cheaper. Behaviour-preserving: an empty category is never a catSet
+		// member (buildCatSet refuses it by construction).
+		return false
+	}
 	if id := rule.DestCategoryGroupID; id != "" {
 		if matched, resolved := globalCategoryGroups.MatchesCategoryByID(id, hostCat); resolved {
 			return matched
