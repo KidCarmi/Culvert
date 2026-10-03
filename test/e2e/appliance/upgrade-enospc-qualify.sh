@@ -227,24 +227,37 @@ PY
 # closed. Needs egress to the category feed (the write is what is under
 # test); without it the run is INCONCLUSIVE (exit 2), never a pass.
 if [[ "$SCENARIO" == midwrite ]]; then
+  # Poll fast: the write lasts seconds, and a coarse poll lands the fill
+  # after it has finished — which then reads as "survived" when nothing was
+  # tested (the first runner run polled at 5 s and could not tell).
   wline=""
-  for _ in $(seq 1 120); do
+  for _ in $(seq 1 1200); do
     wline="$(IN docker logs culvert 2>&1 | grep -m1 -oE 'FeedSync: (parsed [0-9]+ domain entries, writing to BadgerDB|download/parse failed|write REFUSED[^"]*)' || true)"
-    [[ -n "$wline" ]] && break; sleep 5
+    [[ -n "$wline" ]] && break; sleep 0.5
   done
   if [[ "$wline" != *"writing to BadgerDB"* ]]; then
     check W write-started inconclusive "no bulk write observed (${wline:-nothing within 600 s}); this host cannot reproduce F-DISK-1"
     INCONCLUSIVE=1; write_report_and_exit; fi
+  # The write must still be IN FLIGHT when the fill lands, or the scenario
+  # tested nothing: checked immediately before the fill, and again after it.
+  wdone='FeedSync: (sync complete|bulk write failed)[^"]*'
+  if IN docker logs culvert 2>&1 | grep -qE "$wdone"; then
+    check W write-in-flight inconclusive "the write finished before the fill could land; nothing was tested"
+    INCONCLUSIVE=1; write_report_and_exit; fi
   why="$(fill_bounded)" || { check W filled-during-write fail "$why"; write_report_and_exit; }
-  check W filled-during-write pass "$wline; filled to $(df -k --output=avail "$MNT" | tail -1 | tr -d ' ')KiB free"
+  if IN docker logs culvert 2>&1 | grep -qE "$wdone"; then
+    check W write-in-flight inconclusive "the write finished while the fill was being placed; nothing was tested"
+    INCONCLUSIVE=1; write_report_and_exit; fi
+  check W filled-during-write pass "$wline; write still in flight; filled to $(df -k --output=avail "$MNT" | tail -1 | tr -d ' ')KiB free"
   sleep 30
+  after="$(IN docker logs culvert 2>&1 | grep -m1 -oE "$wdone" || echo 'no completion line')"
   st="$(IN docker inspect -f 'status={{.State.Status}} exit={{.State.ExitCode}} restarts={{.RestartCount}}' culvert 2>&1 || true)"
   if IN docker logs culvert 2>&1 | grep -q 'SIGBUS'; then
     check W known-failure-reproduced known-failure "F-DISK-1 reproduced: SIGBUS during the write; $st"
     diagnose W-crash
   else
     v="$(health_version 2>/dev/null || echo unreachable)"
-    check W known-failure-reproduced survived "no SIGBUS; $st; /health version=$v"
+    check W known-failure-reproduced survived "no SIGBUS; $st; /health version=$v; the write then reported: ${after}"
   fi
   # Recovery procedure (docs/appliance/readiness-report.md F-DISK-1): free
   # space on the data filesystem, then bring the stack back.
