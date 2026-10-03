@@ -67,6 +67,8 @@ func TestTerminalProcess(t *testing.T) {
 	}
 	var action string
 	switch os.Getenv("CONSOLE_TEST_MODE") {
+	case "action-return", "action-wait", "action-ignore":
+		action, err = terminalActionFixture(ctx, os.Getenv("CONSOLE_TEST_MODE"))
 	case "confirm":
 		action, err = confirm(ctx, "CONFIRM READY: ")
 	case "reject":

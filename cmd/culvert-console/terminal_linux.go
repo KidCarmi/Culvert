@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"os/user"
 	"strconv"
 	"strings"
@@ -276,20 +275,6 @@ func runMenu(ctx context.Context, collector applianceconsole.Collector, admin bo
 	}
 }
 
-func execute(ctx context.Context, args []string) error {
-	// #nosec G204 -- login and recovery policy supply fixed argv; no shell interpolation.
-	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
-	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
-	cmd.Env = append(probeEnvironment(), "TERM=linux")
-	if u, err := user.LookupId(strconv.Itoa(os.Geteuid())); err == nil {
-		cmd.Env = append(cmd.Env, "HOME="+u.HomeDir)
-	}
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("run console action: %w", err)
-	}
-	return nil
-}
-
 func confirm(ctx context.Context, prompt string) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, time.Minute)
 	defer cancel()
@@ -338,10 +323,15 @@ func runTerminal(ctx context.Context, collector applianceconsole.Collector, acti
 			return nil
 		}
 		if choice == "login" {
-			_ = execute(ctx, []string{"/bin/login", "culvert"})
+			if err := execute(ctx, []string{"/bin/login", "culvert"}); errors.Is(err, errTerminalState) {
+				return err
+			}
 			continue
 		}
 		if err := actions.Apply(ctx, choice); err != nil {
+			if errors.Is(err, errTerminalState) {
+				return err
+			}
 			if _, writeErr := fmt.Fprintln(os.Stderr, applianceconsole.Clean(err.Error(), 160)); writeErr != nil {
 				return fmt.Errorf("display action error: %w", writeErr)
 			}
@@ -355,6 +345,9 @@ func runTerminal(ctx context.Context, collector applianceconsole.Collector, acti
 // Unknown terminals receive printable output only. No-color keeps navigation.
 func terminalCapabilities() (ansi, color bool) {
 	term := os.Getenv("TERM")
+	if term != applianceconsole.Clean(term, 64) {
+		return false, false
+	}
 	ansi = term == "linux" || term == "vt100" || term == "ansi" || strings.HasPrefix(term, "xterm") || strings.HasPrefix(term, "screen") || strings.HasPrefix(term, "tmux")
 	_, noColor := os.LookupEnv("NO_COLOR")
 	return ansi, ansi && term != "vt100" && !noColor

@@ -50,6 +50,8 @@ jobs:
       - name: Syntax and degraded-host smoke
         run: |
           bash -n appliance/console/install.sh
+          bash -n appliance/console/install-lib.sh
           bash -n appliance/console/profile.sh
+          sudo bash appliance/console/install_test.sh
           appliance/console/culvert-console --json
           appliance/console/culvert-console --text

@@ -326,9 +326,56 @@ fuzzing. These tests establish specific behavior, not a production certification
 The earlier ESXi reports apply only to their recorded revisions.
 
 Remaining release work includes integrated OVA qualification, network changes
-with independent rollback, durable recovery-action auditing, session policy for
+with independent rollback, durable audit retention/forwarding, session policy for
 external PAM/sudo/recovery-shell children, and a completed security review. The
 menu idle timeout does not govern an interactive shell once it has been handed
 off. The firstboot archive-content blocker and ESXi screenshot capture limitation
 remain separate open issues. This PR stays draft until the integration and
 qualification evidence support promotion.
+
+## Recovery lifecycle, journal records and installation
+
+The Linux execution adapter accepts an exact allowlist of commands and argv.
+It snapshots/restores terminal modes around every child, including unsuccessful
+commands and cancellation; restoration failure ends the menu. Cancellation first
+sends SIGTERM so PAM/sudo can perform cleanup, then forces termination of the
+direct child after two seconds. TERM is preserved only for supported, printable
+terminal names, and the child environment excludes inherited credentials.
+The getty override explicitly uses `KillMode=control-group`, `SendSIGHUP=yes` and
+a five-second stop timeout. This covers processes still in that service cgroup;
+it is not containment of processes moved into separate PAM/logind session scopes
+or a replacement for logind's session policy. Recovery shells remain privileged
+operator tools with their existing permissions.
+
+Each allowlisted child has paired attempt/result records sent through the
+[native systemd journal protocol](https://systemd.io/JOURNAL_NATIVE_PROTOCOL/).
+Records contain a random correlation ID, fixed action name, phase, coarse outcome,
+effective UID and UTC timestamp. They contain no argv, keystrokes, credentials,
+child output or raw errors. `returned` means the command exited successfully;
+it does not assert successful login, completed provisioning or verified traffic.
+Inspect with `journalctl -t culvert-console -o json`; journald also attaches
+trusted process/UID metadata. PAM/sudo retain their own authentication logs.
+
+Each send is bounded to 300 ms, and result logging gets a separate budget after
+cancellation. If delivery fails the operator sees an explicit coverage warning;
+recovery remains available and commands are never repeated for logging. A Unix
+datagram send acknowledges transport only: journal storage, rate limiting,
+retention, forwarding and power-loss durability remain host policy. Missing result
+records can indicate an interrupted process, host shutdown or delivery loss.
+
+The installer validates the binary under a ten-second timeout and checks profile
+syntax before changing destinations. A local lock excludes concurrent installs.
+All three files are staged and backed up before publication; same-filesystem
+renames replace the binary and profile, then activate getty last. Ordinary errors
+and catchable signals roll back published files; symlink/nonregular targets are
+refused. Atomic binary replacement supports upgrading a running executable.
+If rollback itself fails, backup files are retained with an explicit error.
+This is atomic per file, not a power-loss-safe transaction across filesystems;
+SIGKILL/power loss may leave a mixed bundle or staging files. The installer never
+restarts getty, changes sudo policy or adds network configuration.
+
+Tests inject failure at every publication step, failed staging, failed first
+installation, symlink targets and lock contention; verify rollback, ownership,
+modes and repeated installation. Linux PTYs verify terminal restoration after
+child success, termination and forced termination. Unix socket tests exercise
+journal serialization, pairing, cancellation, missing transport and backpressure.

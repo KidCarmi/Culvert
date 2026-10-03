@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+# Fault injection only in a newly created disposable directory; no host install.
+set -euo pipefail
+HERE=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+source "$HERE/install-lib.sh"
+[[ $(id -u) == 0 ]] || { echo 'Test requires root for ownership checks.' >&2; exit 1; }
+TEST_ROOT=$(mktemp -d)
+trap 'rm -rf -- "$TEST_ROOT"' EXIT
+mkdir "$TEST_ROOT/source" "$TEST_ROOT/dest"
+src=$TEST_ROOT/source
+bin=$TEST_ROOT/dest/binary
+profile=$TEST_ROOT/dest/profile
+getty=$TEST_ROOT/dest/getty
+printf 'new binary\n' >"$src/culvert-console"
+printf 'new profile\n' >"$src/profile.sh"
+printf 'new getty\n' >"$src/getty-override.conf"
+reset_targets() {
+    printf 'old binary\n' >"$bin"
+    printf 'old profile\n' >"$profile"
+    printf 'old getty\n' >"$getty"
+}
+assert_old() {
+    [[ $(cat "$bin") == 'old binary' && $(cat "$profile") == 'old profile' && $(cat "$getty") == 'old getty' ]]
+}
+reset_targets
+# Inject a one-shot failure at each rename, including getty activation.
+for fail_at in 1 2 3; do
+    reset_targets
+    if (
+        count=0
+        mv() { count=$((count+1)); [[ $count != "$fail_at" ]] || return 99; command mv "$@"; }
+        install_console_bundle "$src" "$bin" "$profile" "$getty"
+    ); then echo 'Injected rename failure was ignored.' >&2; exit 1; fi
+    assert_old
+done
+# A failed first installation must leave no newly activated hooks or binary.
+rm "$bin" "$profile" "$getty"
+if (
+    count=0
+    mv() { count=$((count+1)); [[ $count != 3 ]] || return 99; command mv "$@"; }
+    install_console_bundle "$src" "$bin" "$profile" "$getty"
+); then exit 1; fi
+[[ ! -e $bin && ! -e $profile && ! -e $getty ]]
+reset_targets
+# Preparation failure must not publish even the first file.
+rm "$src/profile.sh"
+if install_console_bundle "$src" "$bin" "$profile" "$getty"; then exit 1; fi
+assert_old
+printf 'new profile\n' >"$src/profile.sh"
+# Reject symlink targets without changing their referent.
+rm "$profile"
+ln -s "$getty" "$profile"
+if install_console_bundle "$src" "$bin" "$profile" "$getty"; then exit 1; fi
+[[ $(cat "$getty") == 'old getty' ]]
+rm "$profile"
+reset_targets
+# Lock contention must leave existing files intact.
+(
+    exec 8>"$TEST_ROOT/dest/.culvert-console-install.lock"
+    flock -n 8
+    if install_console_bundle "$src" "$bin" "$profile" "$getty"; then exit 1; fi
+)
+assert_old
+install_console_bundle "$src" "$bin" "$profile" "$getty"
+install_console_bundle "$src" "$bin" "$profile" "$getty"
+cmp "$bin" "$src/culvert-console"
+cmp "$profile" "$src/profile.sh"
+cmp "$getty" "$src/getty-override.conf"
+[[ $(stat -c '%a:%u:%g' "$bin") == '755:0:0' ]]
+[[ $(stat -c '%a:%u:%g' "$getty") == '644:0:0' ]]
+[[ -z $(find "$TEST_ROOT/dest" -name '.culvert-stage.*' -o -name '.culvert-backup.*') ]]
+echo 'PASS: staged installation, rollback, symlink refusal, locking and idempotency'
