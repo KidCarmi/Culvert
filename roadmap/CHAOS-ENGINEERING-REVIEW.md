@@ -9020,6 +9020,44 @@ answer may be that the surface it was meant to feed is now lying.**
   admin API's enable refuses on the same role guard, which is a weaker position
   than "the API is still there" and is why this is registered rather than
   dismissed.
+- **TWO DATA RACES IN THE TEST SUITE, ONE SHAPE, NEITHER THIS SWEEP'S — recorded
+  as TS-1.** This sweep's own full-module `-race -shuffle=on` run went red with
+  three failures: the disposal gate's flake (§41.10, fixed) and two more that
+  are *not* assertion failures at all but
+  `testing.go:1712: race detected during execution of test`. **The race detector
+  attributes a race to whatever test is RUNNING, which is not the test that
+  caused it**, so both were blamed on innocent bystanders:
+
+  | Blamed test | Writer | Reader (the actual culprit) |
+  |---|---|---|
+  | `TestCDRHandleCallError_PostureIsUnchanged` | `withCDRAlertStore` swaps the global alert sink (`cdr_alert_bound_test.go:47`) | a DETACHED goroutine from `TestLegacyOnMaxFail_Unchanged` → `ha.go:718` `warnManualFailoverRequired` → `alerts.Fire` reading that sink (`alerts.go:47`) |
+  | `TestReportCatFeedDBUnavailable_DoesNotClaimRecovery` | `captureLogger` swaps the global logger (`coldstart_observability_test.go:32`) | a DETACHED goroutine from `TestChaos50_InspectMatchedBypassIsCounted` → `handleTunnel` → `handleTunnelBypass` reading `logger` (`proxy_tunnel.go:459`) |
+
+  **One shape twice: a test spawns a goroutine that OUTLIVES it and reads a
+  process-global; a later test swaps that global; the detector fires and names
+  the swapper.** Both are pre-existing — every frame in both stacks is code this
+  sweep does not touch (its diff is 15 files, none of them `ha.go`,
+  `alerts.go`, `cdr_alert_bound_test.go`, `ha_failover_test.go`,
+  `coldstart_observability_test.go`, `proxy_tunnel.go` or
+  `rootca_recovery_test.go`), and the CHAOS-71 gates were cleared as a cause by
+  running them in-process with both victims, shuffled, 8/8 clean.
+
+  **It needs FULL-SUITE SCALE to reproduce** — the leaked goroutine has to still
+  be in flight when the later test swaps the global, so the two-test pair passes
+  3/3 and CI stayed green across all four race shards. Observed once in one
+  ~31-minute full-module run. That is exactly why it is worth a row rather than a
+  shrug: a load-dependent race that MISATTRIBUTES itself is the hardest kind to
+  act on when it finally turns a required gate red, because the named test is
+  innocent and reproducing it from that name alone fails.
+
+  **Not fixed here, deliberately** — the fix belongs to the leaking tests (join
+  the goroutine, or give these globals a swap the goroutine cannot observe), and
+  widening a Control-Plane-bind sweep into the HA, CDR and tunnel test files is
+  the scope error this register repeatedly warns about. The transferable rule for
+  whoever takes it: **when a `-race` failure names a test that only SWAPS a
+  global, the culprit is whoever is still READING it — look for a detached
+  goroutine in the tests that ran before, not a defect in the one that was
+  blamed.**
 - **The pre-bind work's own failure modes are unchanged** — a rejected initial
   config publish is logged and alerted via `LastPublishError` and boot
   continues, as before.
