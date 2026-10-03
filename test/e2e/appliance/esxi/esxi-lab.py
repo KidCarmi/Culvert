@@ -437,7 +437,7 @@ class Lab:
         self.record('console-captured', 'info', 'private screenshot captured; not automatically exported')
         ip = self.guest_ip(timeout=30)
         probe = (HERE / 'guest-observe.py').read_text(encoding='utf-8')
-        result = subprocess.run(self.ssh_command(ip, strict=False) + ['sudo python3 -'],
+        result = subprocess.run(self.ssh_command(ip, strict=False) + ['python3 -'],
                                 input=probe, capture_output=True, text=True, timeout=60)
         require(result.returncode == 0, 'read-only guest observation unavailable')
         guest = json.loads(result.stdout)

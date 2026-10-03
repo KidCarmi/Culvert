@@ -35,7 +35,7 @@ def main():
                  firstboot_unit_sha256=hashlib.sha256(unit.read_bytes()).hexdigest() if unit.exists() else None,
                  source_sha=build.get('source', {}).get('git_commit'),
                  instance_id=instance_id,
-                 image_id=read_command(['docker', 'inspect', '-f', '{{.Image}}', 'culvert']),
+                 image_id=read_command(['sudo', '-n', 'docker', 'inspect', '-f', '{{.Image}}', 'culvert']),
                  machine_id_sha256=hashlib.sha256(Path('/etc/machine-id').read_bytes()).hexdigest(),
                  boot_id_sha256=hashlib.sha256(Path('/proc/sys/kernel/random/boot_id').read_bytes()).hexdigest())
     print(json.dumps(facts))
