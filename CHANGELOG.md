@@ -9,6 +9,40 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Security
 
+- The viewer-readable operator contract rendered **admin-only roster state**
+  (SEC-DIAG-ROSTER-1). `GET /api/diagnostics` is deliberately `RoleViewer` — a
+  management-plane health surface must not require admin — but the oversize
+  admin-username row added in this window became the first contract row derived
+  from the admin roster (`cfg.ListUIUsers`/`GetUser`/`UserHasTOTP`), which
+  `GET /api/auth/users` gates at `RoleAdmin` on every method. With no role
+  filtering in `apiDiagnostics`, a viewer or operator could read the affected
+  account count, the longest username's byte length, that a legacy single-user
+  login exists and is oversize, whether it is mirrored into the roster, that
+  login's effective role interpolated verbatim, and **whether at least one
+  affected account has TOTP enrolled**.
+
+  The second-factor fact is the one with real attacker value: it tells a
+  lower-privileged insider — or a stolen read-only monitoring session — whether
+  a high-value administrator is single-factor, which is precisely the input to
+  choosing a credential-stuffing or phishing target. Before the row existed the
+  only signal was a one-shot boot log line, not reachable through the API at
+  all, so this was a new cross-role flow (CWE-497/CWE-200/CWE-1220,
+  OWASP A01:2021). `TestApiDiagnostics_NoSensitiveValues` did not catch it and
+  is not vacuous — it is a secret-*material* wall (session-secret symbols, PEM,
+  `/data/` paths, long hex runs) and identity metadata was outside its scope.
+
+  `redactContractForRole` now withholds that detail below admin. The row stays
+  **visible** at every role (code, `warn` status and the rolled-up verdict are
+  unchanged, so monitoring and the SPA still see the condition) and only the
+  roster-derived detail is withheld — hiding the row would conceal a live
+  management-plane fault and is pinned by a control. The redacted message is a
+  constant carrying no roster-derived value, an `ok` row is never redacted, and
+  the decision is fail-closed by construction: the only input that un-redacts
+  is a proven admin. No allow/deny decision, proxy path, or admission behaviour
+  changes. **Operator-visible change:** viewers and operators now see this one
+  row without its remediation text; sign in as an admin for the full
+  remediation.
+
 - Node-local key material was written with `os.WriteFile` on a predictable
   path, which follows a planted symlink and inherits a planted file's mode
   (SEC-SECRETWRITE-1). Four writers introduced in this window were affected:
