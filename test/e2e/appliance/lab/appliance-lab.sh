@@ -428,7 +428,7 @@ lookups() { local h
 h=sys.argv[1]
 try: d=json.load(sys.stdin)
 except Exception: print(f"{h} error"); sys.exit()
-print(f"{h} category={d.get(\"category\") or \"\"} matchedBy={d.get(\"matchedBy\") or \"\"}")' "$h"
+print("%s category=%s matchedBy=%s" % (h, d.get("category") or "", d.get("matchedBy") or ""))' "$h"
   done; }
 
 # ── collect: guest diagnostics + identities → REPORT.md (redacted) ──────────
