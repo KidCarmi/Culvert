@@ -6,7 +6,7 @@ independent of Docker and the Culvert application. There is no new network
 listener. The displayed application URL remains `https://<address>:9090` and is
 explicitly labelled unavailable until the application starts.
 
-The public screen shows version/candidate status, assigned IPv4 addresses,
+The public screen shows version/candidate status, assigned IPv4/IPv6 addresses,
 recorded firstboot checkpoints and live service observations. `F2` or `L` starts
 normal Linux/PAM login as `culvert`; `F4` or `4` shows sanitized diagnostics.
 Number keys work when a browser console intercepts function keys.
@@ -210,7 +210,7 @@ full browser setup experience is not delivered by this console slice.
 The home view follows the supplied 80-column terminal composition: cyan brand
 and selection, appliance/network identity, a scoped status and next action,
 browser handoff, four visible choices, and an authentication footer. Both 80x25
-and 80x24 preserve the bottom margin. Smaller terminals show a compact paged
+and 80x24 preserve the bottom margin. Larger terminals center an 80x25 panel. Smaller terminals show a compact paged
 view; details wrap long values and support Up/Down or PageUp/PageDown. Terminals
 smaller than 20x7 request resizing. Numbers open views immediately; arrows/Tab
 select only the four visible entries, and Enter opens. B/Escape returns home.

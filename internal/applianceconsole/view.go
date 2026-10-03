@@ -232,7 +232,7 @@ func networkRows(s Snapshot) []Row {
 	for _, dns := range s.DNS[min(1, len(s.DNS)):] {
 		rows = append(rows, Row{"     " + dns, ""})
 	}
-	return append(rows, Row{"DHCP/static mode: not inferred from an assigned address.", ""}, Row{"Guided changes unavailable: rollback backend is not implemented.", "warning"}, Row{"[E] Authenticated recovery shell for existing network tools", ""})
+	return append(rows, Row{"DHCP/static mode: not inferred from an assigned address.", ""}, Row{"Guided changes unavailable. Use authenticated recovery.", "warning"}, Row{"[E] Authenticated recovery shell for existing network tools", ""})
 }
 
 func accessRows(s Snapshot) []Row {
@@ -264,7 +264,7 @@ func reportRows(s Snapshot) []Row {
 	if s.Candidate {
 		rows = append(rows, Row{"Candidate build; full appliance qualification not established.", "warning"})
 	}
-	return append(rows, Row{"Read-only observation; no security attestation or upload.", ""}, Row{"Same facts available over SSH: culvert-console --json", ""})
+	return append(rows, Row{"Read-only observation; no security attestation or upload.", ""}, Row{"SSH: /opt/culvert-appliance/bin/culvert-console --json", ""})
 }
 
 func clipped(text string, width int) string {
