@@ -80,7 +80,7 @@ func orderingCycleReport(t *testing.T, unit string) string {
 	t.Helper()
 	dir := t.TempDir()
 	write := func(name, body string) {
-		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -90,7 +90,7 @@ func orderingCycleReport(t *testing.T, unit string) string {
 	write("culvert-firstboot.service", regexp.MustCompile(`(?m)^ExecStart=.*$`).ReplaceAllString(unit, "ExecStart=/bin/true"))
 	link := func(target, u string) {
 		d := filepath.Join(dir, target+".wants")
-		if err := os.MkdirAll(d, 0o755); err != nil {
+		if err := os.MkdirAll(d, 0o750); err != nil {
 			t.Fatal(err)
 		}
 		if err := os.Symlink(filepath.Join("..", u), filepath.Join(d, u)); err != nil {
