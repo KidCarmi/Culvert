@@ -6,10 +6,9 @@ import (
 	"context"
 	"encoding/json"
 	"io"
-	"net/netip"
+	"net"
 	"os"
 	"path/filepath"
-	"regexp"
 	"slices"
 	"strings"
 	"sync"
@@ -21,7 +20,6 @@ const maxOutput = 65536
 var stepNames = []string{"ovf", "console", "images", "install", "agent", "complete"}
 var stepLabels = []string{"Network configuration", "Console access", "Application images", "Service installation", "Maintenance agent", "Provisioning complete"}
 var unitKeys = []string{"LoadState", "ActiveState", "SubState", "Result", "ExecMainStatus", "NRestarts"}
-var interfaceName = regexp.MustCompile(`^[A-Za-z0-9_.:-]{1,15}$`)
 
 // Clean strips terminal controls, non-ASCII and multiline text before display.
 func Clean(value string, limit int) string {
@@ -47,6 +45,13 @@ type Step struct {
 
 // Snapshot is the versioned contract shared by CLI and terminal display.
 type Snapshot struct {
+	Hostname              string            `json:"hostname"`
+	Interfaces            []Interface       `json:"interfaces"`
+	IPv6Gateway           string            `json:"ipv6_gateway"`
+	Gateway               string            `json:"gateway"`
+	DNS                   []string          `json:"dns"`
+	SetupStatus           string            `json:"setup_status"`
+	ManagementAvailable   bool              `json:"management_available"`
 	SchemaVersion         int               `json:"schema_version"`
 	ObservedAt            string            `json:"observed_at"`
 	Version               string            `json:"version"`
@@ -77,6 +82,7 @@ type readyStatus struct {
 // Probe must honor cancellation and bound output; it is called concurrently.
 type Sources struct {
 	StateDir, BuildFile, NetDir string
+	HostnameFile, ResolverFile  string
 	Probe                       func(context.Context, []string) string
 }
 
@@ -102,7 +108,9 @@ func httpBody(raw string) (body, code string) {
 func (c Collector) observations(ctx context.Context) map[string]string {
 	queries := map[string][]string{
 		"unit":    {"/usr/bin/systemctl", "show", "culvert-firstboot.service", "--property=" + strings.Join(unitKeys, ",")},
-		"network": {"/usr/sbin/ip", "-j", "-4", "address", "show", "scope", "global"},
+		"network": {"/usr/sbin/ip", "-j", "address", "show", "scope", "global"},
+		"route6":  {"/usr/sbin/ip", "-j", "-6", "route", "show", "default"},
+		"route":   {"/usr/sbin/ip", "-j", "route", "show", "default"},
 		"health":  {"/usr/bin/curl", "--noproxy", "*", "--silent", "--max-time", "2", "--output", "/dev/null", "--write-out", "%{http_code}", "http://127.0.0.1:8080/health"},
 		// Only this fixed loopback read permits the appliance's self-signed TLS.
 		"setup": {"/usr/bin/curl", "--noproxy", "*", "--silent", "--insecure", "--max-time", "2", "--max-filesize", "65536", "--write-out", "\n%{http_code}", "https://127.0.0.1:9090/api/setup/status"},
@@ -134,9 +142,13 @@ func (c Collector) Collect(ctx context.Context) Snapshot {
 		}
 	}
 	s.Steps = c.steps()
-	s.Addresses = c.addresses(raw["network"])
+	s.Interfaces, s.Addresses = c.network(raw["network"])
+	s.Hostname = readHostname(c.sources.HostnameFile)
+	s.Gateway = readGateway(raw["route"])
+	s.IPv6Gateway = readGateway(raw["route6"])
+	s.DNS = readDNS(c.sources.ResolverFile)
 	for _, ip := range s.Addresses {
-		s.ManagementURLs = append(s.ManagementURLs, "https://"+ip+":9090")
+		s.ManagementURLs = append(s.ManagementURLs, "https://"+net.JoinHostPort(ip, "9090"))
 	}
 	s.Network = "address_unavailable"
 	if len(s.Addresses) > 0 {
@@ -157,42 +169,6 @@ func (c Collector) steps() []Step {
 		steps = append(steps, Step{key, stepLabels[i], state})
 	}
 	return steps
-}
-
-func usableIPv4(raw string) (string, bool) {
-	ip, err := netip.ParseAddr(raw)
-	valid := err == nil && ip.Is4() && !ip.IsLoopback() && !ip.IsLinkLocalUnicast() && !ip.IsUnspecified() && !ip.IsMulticast()
-	return ip.String(), valid
-}
-
-func (c Collector) addresses(raw string) []string {
-	addresses := []string{}
-	var interfaces []struct {
-		Name      string `json:"ifname"`
-		Addresses []struct {
-			Family string `json:"family"`
-			Local  string `json:"local"`
-		} `json:"addr_info"`
-	}
-	if json.Unmarshal([]byte(raw), &interfaces) != nil {
-		return addresses
-	}
-	for _, nic := range interfaces {
-		if !interfaceName.MatchString(nic.Name) {
-			continue
-		}
-		if _, err := os.Stat(filepath.Join(c.sources.NetDir, nic.Name, "device")); err != nil {
-			continue
-		}
-		for _, address := range nic.Addresses {
-			if ip, valid := usableIPv4(address.Local); valid && address.Family == "inet" {
-				addresses = append(addresses, ip)
-			}
-		}
-	}
-	slices.Sort(addresses)
-	addresses = slices.Compact(addresses)
-	return addresses[:min(8, len(addresses))]
 }
 
 func (c Collector) readBuild(s *Snapshot) {
@@ -232,6 +208,8 @@ func (s *Snapshot) summarize(health, setupRaw, readyRaw string) {
 	var setup setupStatus
 	body, code := httpBody(setupRaw)
 	setupKnown := code == "200" && json.Unmarshal([]byte(body), &setup) == nil && setup.NeedsSetup != nil
+	s.ManagementAvailable = setupKnown
+	s.SetupStatus = enrollmentStatus(setupKnown, setup.NeedsSetup)
 	s.ApplicationResponding = health == "200"
 	s.AdministratorEnrolled = setupKnown && !*setup.NeedsSetup
 	s.TrafficVerified = false
@@ -248,6 +226,16 @@ func (s *Snapshot) summarize(health, setupRaw, readyRaw string) {
 	default:
 		s.Phase, s.Reason, s.Message = "unknown", "FIRSTBOOT_UNKNOWN", "Provisioning status is unavailable."
 	}
+}
+
+func enrollmentStatus(known bool, needsSetup *bool) string {
+	if !known {
+		return "unknown"
+	}
+	if *needsSetup {
+		return "pending"
+	}
+	return "completed"
 }
 
 func readinessPassed(raw string) bool {

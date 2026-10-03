@@ -85,6 +85,9 @@ func readKey(ctx context.Context) (string, error) {
 			continue
 		}
 		sequence.WriteByte(b[0])
+		if sequence.String() == "\x1b[200~" {
+			return "", discardPaste(ctx)
+		}
 		if sequence.Len() == 1 && b[0] != 27 {
 			return applianceconsole.DecodeKey(sequence.String()), nil
 		}
@@ -94,6 +97,9 @@ func readKey(ctx context.Context) (string, error) {
 		if sequence.Len() >= 16 {
 			return "", nil
 		}
+	}
+	if sequence.String() == "\x1b" {
+		return "ESC", nil
 	}
 	return "", nil
 }
@@ -110,25 +116,37 @@ func menu(ctx context.Context, collector applianceconsole.Collector, admin bool)
 	if err := unix.IoctlSetTermios(0, unix.TCSETS, &mode); err != nil {
 		return "", err
 	}
+	ansi, _ := terminalCapabilities()
 	defer func() {
 		// Best-effort restoration also runs when the terminal has disconnected.
 		_ = unix.IoctlSetTermios(0, unix.TCSETS, original)
-		_, _ = fmt.Fprint(os.Stdout, "\x1b[?25h\x1b[2J\x1b[H")
+		if ansi {
+			_, _ = fmt.Fprint(os.Stdout, "\x1b[0m\x1b[?25h\x1b[?2004l\x1b[2J\x1b[H")
+		}
+		_ = unix.IoctlSetInt(0, unix.TCFLSH, unix.TCIFLUSH)
 	}()
-	if _, err := fmt.Fprint(os.Stdout, "\x1b[?25l"); err != nil {
-		return "", fmt.Errorf("hide cursor: %w", err)
+	if ansi {
+		if _, err := fmt.Fprint(os.Stdout, "\x1b[2J\x1b[H\x1b[?25l\x1b[?2004h"); err != nil {
+			return "", fmt.Errorf("hide cursor: %w", err)
+		}
 	}
 	return runMenu(ctx, collector, admin)
 }
 
 type menuDisplay struct {
-	snapshot           applianceconsole.Snapshot
-	refresh            time.Time
-	diagnostics, dirty bool
-	height, width      int
+	snapshot      applianceconsole.Snapshot
+	refresh       time.Time
+	dirty         bool
+	view          applianceconsole.View
+	ansi, color   bool
+	lastFrame     string
+	height, width int
 }
 
-func (d *menuDisplay) redraw(ctx context.Context, collector applianceconsole.Collector, admin bool) error {
+func (d *menuDisplay) redraw(ctx context.Context, collector applianceconsole.Collector) error {
+	if !d.ansi && !d.dirty {
+		return nil
+	}
 	if time.Now().After(d.refresh) {
 		d.snapshot = collector.Collect(ctx)
 		d.refresh = time.Now().Add(5 * time.Second)
@@ -141,22 +159,70 @@ func (d *menuDisplay) redraw(ctx context.Context, collector applianceconsole.Col
 	if !d.dirty && height == d.height && width == d.width {
 		return nil
 	}
-	lines := applianceconsole.Display(d.snapshot, admin, d.diagnostics, height, width)
-	if _, err := fmt.Fprint(os.Stdout, "\x1b[2J\x1b[H"+strings.Join(lines, "\n")); err != nil {
+	rows := d.view.Frame(d.snapshot, height, width)
+	frame := applianceconsole.Render(rows, d.color)
+	if !d.ansi && frame == d.lastFrame {
+		d.dirty = false
+		return nil
+	}
+	d.lastFrame = frame
+	if d.ansi {
+		for i := range rows {
+			rows[i].Text += strings.Repeat(" ", max(0, width-1-len(rows[i].Text)))
+		}
+		frame = "\x1b[H" + applianceconsole.Render(rows, d.color)
+	} else {
+		frame = "\n" + frame + "\n"
+	}
+	if _, err := fmt.Fprint(os.Stdout, frame); err != nil {
 		return fmt.Errorf("draw menu: %w", err)
 	}
 	d.dirty, d.height, d.width = false, height, width
 	return nil
 }
 
+// discardPaste consumes bracketed paste as data, never as recovery commands.
+// A missing terminator flushes queued input after a bounded drain.
+func discardPaste(ctx context.Context) error {
+	deadline := time.Now().Add(2 * time.Second)
+	var tail string
+	for time.Now().Before(deadline) && ctx.Err() == nil {
+		poll := []unix.PollFd{{Fd: 0, Events: unix.POLLIN}}
+		n, err := unix.Poll(poll, 50)
+		if errors.Is(err, unix.EINTR) {
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("drain paste: %w", err)
+		}
+		if n == 0 {
+			continue
+		}
+		var b [1]byte
+		if _, err := unix.Read(0, b[:]); err != nil {
+			return fmt.Errorf("read paste: %w", err)
+		}
+		tail += string(b[:])
+		if len(tail) > 6 {
+			tail = tail[len(tail)-6:]
+		}
+		if tail == "\x1b[201~" {
+			return nil
+		}
+	}
+	_ = unix.IoctlSetInt(0, unix.TCFLSH, unix.TCIFLUSH)
+	return ctx.Err()
+}
+
 func runMenu(ctx context.Context, collector applianceconsole.Collector, admin bool) (string, error) {
 	lastInput := time.Now()
-	display := menuDisplay{dirty: true}
+	ansi, color := terminalCapabilities()
+	display := menuDisplay{dirty: true, view: applianceconsole.NewView(admin), ansi: ansi, color: color}
 	for {
 		if err := ctx.Err(); err != nil {
 			return "", err
 		}
-		if err := display.redraw(ctx, collector, admin); err != nil {
+		if err := display.redraw(ctx, collector); err != nil {
 			return "", err
 		}
 		key, err := readKey(ctx)
@@ -169,12 +235,12 @@ func runMenu(ctx context.Context, collector applianceconsole.Collector, admin bo
 		if admin && time.Since(lastInput) >= 5*time.Minute {
 			return "logout", nil
 		}
-		switch choice := applianceconsole.Choice(key, admin); choice {
+		if key != "" {
+			display.dirty = true
+		}
+		switch choice := display.view.Handle(key); choice {
 		case "refresh":
 			display.refresh = time.Time{}
-		case "diagnostics":
-			display.diagnostics = !display.diagnostics
-			display.dirty = true
 		case "":
 		default:
 			return choice, nil
@@ -251,4 +317,12 @@ func runTerminal(ctx context.Context, collector applianceconsole.Collector, acti
 			return nil
 		}
 	}
+}
+
+// Unknown terminals receive printable output only. No-color keeps navigation.
+func terminalCapabilities() (ansi, color bool) {
+	term := os.Getenv("TERM")
+	ansi = term == "linux" || term == "vt100" || term == "ansi" || strings.HasPrefix(term, "xterm") || strings.HasPrefix(term, "screen") || strings.HasPrefix(term, "tmux")
+	_, noColor := os.LookupEnv("NO_COLOR")
+	return ansi, ansi && term != "vt100" && !noColor
 }

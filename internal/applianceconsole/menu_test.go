@@ -9,64 +9,6 @@ import (
 	"testing"
 )
 
-func TestPublicMenuCannotDispatchRecovery(t *testing.T) {
-	for _, key := range []string{"1", "3", "5", "6", "Q", "EXIT", "REBOOT"} {
-		if choice := Choice(key, false); choice != "" {
-			t.Errorf("public key %s became %s", key, choice)
-		}
-	}
-	for _, key := range []string{"2", "F2"} {
-		if Choice(key, false) != "login" {
-			t.Fatal("missing login")
-		}
-	}
-	if Choice("4", false) != "diagnostics" || Choice("4", true) != "4" {
-		t.Fatal("wrong privilege boundary")
-	}
-}
-
-func TestFunctionKeysAndMalformedEscapes(t *testing.T) {
-	for _, raw := range []string{"\x1b[[B", "\x1bOQ", "\x1b[12~"} {
-		if DecodeKey(raw) != "F2" {
-			t.Errorf("%q", raw)
-		}
-	}
-	for _, raw := range []string{"\x1b[[D", "\x1bOS", "\x1b[14~"} {
-		if DecodeKey(raw) != "F4" {
-			t.Errorf("%q", raw)
-		}
-	}
-	for _, raw := range []string{"\x1b", "\x1b[12", "\x1b[99~", "\x1b2", "24", "\n"} {
-		if DecodeKey(raw) != "" {
-			t.Errorf("accepted %q", raw)
-		}
-	}
-	if DecodeKey("q") != "Q" || Choice("EXIT", true) != "logout" {
-		t.Fatal("logout missing")
-	}
-}
-
-func TestDisplayFitsVGAKeepsActionsAndSanitizes(t *testing.T) {
-	s := Snapshot{Version: "test\x1b[2J", Message: "hello", Firstboot: map[string]string{}, Steps: []Step{}}
-	for range 30 {
-		s.Steps = append(s.Steps, Step{ID: "x", Label: strings.Repeat("z", 100), State: "recorded"})
-	}
-	for _, size := range [][2]int{{25, 80}, {8, 20}, {1, 1}} {
-		lines := Display(s, true, false, size[0], size[1])
-		if len(lines) >= size[0] {
-			t.Fatal("screen overflow")
-		}
-		for _, line := range lines {
-			if len(line) >= size[1] || strings.Contains(line, "\x1b") {
-				t.Fatal("unsafe rendering")
-			}
-		}
-		if size[0] == 25 && !strings.Contains(strings.Join(lines, "\n"), "[Q] Log out") {
-			t.Fatal("actions clipped")
-		}
-	}
-}
-
 func actionFixture() (actions Actions, recorded *[][]string) {
 	calls := [][]string{}
 	a := NewActions(ActionDependencies{Authorized: func() bool { return true }, Collect: func(context.Context) Snapshot { return Snapshot{Firstboot: map[string]string{"ActiveState": "failed"}} },

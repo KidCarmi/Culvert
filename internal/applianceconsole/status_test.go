@@ -179,13 +179,13 @@ func TestOversizedBuildInfoRejected(t *testing.T) {
 
 func TestCollectorProbesConcurrent(t *testing.T) {
 	c, _ := fixture(t)
-	started := make(chan struct{}, 5)
+	started := make(chan struct{}, 7)
 	release := make(chan struct{})
 	c.sources.Probe = func(context.Context, []string) string { started <- struct{}{}; <-release; return "" }
 	done := make(chan struct{})
 	go func() { c.Collect(context.Background()); close(done) }()
 	defer func() { close(release); <-done }()
-	for range 5 {
+	for range 7 {
 		select {
 		case <-started:
 		case <-time.After(time.Second):

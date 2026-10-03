@@ -7,7 +7,7 @@ listener. The displayed application URL remains `https://<address>:9090` and is
 explicitly labelled unavailable until the application starts.
 
 The public screen shows version/candidate status, assigned IPv4 addresses,
-recorded firstboot checkpoints and live service observations. `F2` or `2` starts
+recorded firstboot checkpoints and live service observations. `F2` or `L` starts
 normal Linux/PAM login as `culvert`; `F4` or `4` shows sanitized diagnostics.
 Number keys work when a browser console intercepts function keys.
 
@@ -85,7 +85,7 @@ sudo systemctl restart getty@tty1.service
 ```
 
 These are read-only and never include a setup token, `.env`, raw journals or
-OVF data. Five fixed probes execute concurrently with four-second subprocess
+OVF data. Seven fixed probes execute concurrently with four-second subprocess
 timeouts (HTTP probes have two-second deadlines). Requests use loopback only,
 disable proxies, do not follow redirects, and limit response size. Only the
 self-signed loopback setup-status read uses a TLS verification exception.
@@ -130,7 +130,7 @@ application logging; raw probe stderr and credential-bearing output never enter
 the public status snapshot.
 
 Collection is read-only: existing firstboot code owns marker persistence and
-the application owns enrollment/readiness. A collection call starts five bounded
+the application owns enrollment/readiness. A collection call starts seven bounded
 probes and joins them before returning. There are no detached background workers.
 The command owns cancellation; child processes use that context. Menu input uses
 bounded polling, never a background stdin reader that could consume a later
@@ -203,3 +203,58 @@ editing with host-side rollback (the current menu provides information/recovery
 only), independent browser bootstrap service, and application wizard integration.
 No network Apply button is offered before rollback is implemented. The proposed
 full browser setup experience is not delivered by this console slice.
+
+
+## Visual console integration
+
+The home view follows the supplied 80-column terminal composition: cyan brand
+and selection, appliance/network identity, a scoped status and next action,
+browser handoff, four visible choices, and an authentication footer. Both 80x25
+and 80x24 preserve the bottom margin. Smaller terminals show a compact paged
+view; details wrap long values and support Up/Down or PageUp/PageDown. Terminals
+smaller than 20x7 request resizing. Numbers open views immediately; arrows/Tab
+select only the four visible entries, and Enter opens. B/Escape returns home.
+
+1. Network information: read-only observed addresses, links, gateways and DNS.
+2. Setup access: existing web onboarding; S invokes the existing privileged
+   setup-status helper only after PAM authentication.
+3. Diagnose readiness: observed failure, source/time and recorded checkpoints.
+4. Installation report: current build, setup and check observations, with the
+   JSON equivalent available through `culvert-console --json` over SSH.
+
+L/F2 signs in; Q logs out of the authenticated menu. 0 opens authenticated
+recovery (retry, confirmed power operations, shell). Public recovery requests
+only enter normal login; they do not queue an action to run after login. Network
+E opens authenticated recovery. No new network writer or rollback claim is
+introduced. Mode remains unknown instead of inferring DHCP/static from an IP.
+The report is a current observation, not a persisted receipt or attestation;
+configuration revision and external traffic verification are not collected.
+
+| Display fact | Authoritative observation |
+| --- | --- |
+| Host / build | Bounded `/etc/hostname` and existing build-info JSON |
+| Interfaces / addresses / link | Fixed `ip -j address show scope global`; sysfs physical/lower interfaces; IPv4 and IPv6 |
+| Gateways | Fixed IPv4/IPv6 `ip -j route show default` |
+| DNS | IP-only nameserver entries from `/run/systemd/resolve/resolv.conf`; absent means unknown |
+| Setup availability / enrollment | HTTP 200 plus typed `needsSetup` boolean from the existing loopback 9090 setup endpoint |
+| Status / checkpoints | Existing systemd fields and firstboot marker files |
+| Application checks | Existing health/readiness endpoints; no traffic verification inferred |
+
+The management URL uses observed addresses and the existing appliance's
+published 9090 port contract (`appliance/provision/culvert-status` and firstboot),
+not the reference demo's 8443 placeholder. The URL is offered only after the
+local management probe succeeds. This does not prove a browser can reach it,
+verify a certificate from that browser, or discover custom listener bindings.
+
+Rendering supports basic ANSI colors on known compatible terminals, monochrome
+on vt100 or with NO_COLOR, and printable line-oriented output for TERM=dumb or
+unknown terminals. Plain mode updates on operator input rather than repeatedly
+scrolling status. Bracketed paste is discarded; queued input is flushed before
+PAM/recovery handoff. ASCII sanitization precedes the addition of renderer-owned
+escape sequences. No external UI library or module dependency is introduced.
+
+Tests include deterministic readiness fixtures, layout/long-field/paging checks,
+privilege boundaries and real Linux pseudo-terminal navigation, resize, paste
+and termios restoration. Fixture addresses in tests are never production data.
+Historical smoke evidence above applies to its recorded implementation commit;
+new visual verification is recorded separately.

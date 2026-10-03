@@ -39,7 +39,7 @@ func run() int {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT, syscall.SIGHUP)
 	defer stop()
 	collector := applianceconsole.NewCollector(applianceconsole.Sources{
-		StateDir: "/var/lib/culvert-appliance/state", BuildFile: "/var/lib/culvert-appliance/build-info.json", NetDir: "/sys/class/net", Probe: runProbe,
+		StateDir: "/var/lib/culvert-appliance/state", BuildFile: "/var/lib/culvert-appliance/build-info.json", NetDir: "/sys/class/net", Probe: runProbe, HostnameFile: "/etc/hostname", ResolverFile: "/run/systemd/resolve/resolv.conf",
 	})
 	if *jsonOutput || *textOutput {
 		snapshot := collector.Collect(ctx)
