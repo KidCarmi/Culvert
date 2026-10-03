@@ -302,6 +302,11 @@ class Lab:
         except subprocess.TimeoutExpired:
             raise Refused(f'govc {args[0]} timed out; reconcile owned state before retry') from None
         # Raw stderr can contain endpoint credentials or OVF properties: never export.
+        # After up has created the restricted key directory, preserve failure
+        # diagnostics privately so an import can be reconciled without guessing.
+        if r.returncode and self.state and (self.sec / 'id_ed25519').is_file():
+            atomic_json(self.sec / 'govc-error.json', dict(command=args[0],
+                        returncode=r.returncode, stdout=r.stdout, stderr=r.stderr))
         require(r.returncode == 0, f'govc {args[0]} failed (exit {r.returncode}); no mutation retry')
         return json.loads(r.stdout) if json_output else r.stdout.strip()
 
