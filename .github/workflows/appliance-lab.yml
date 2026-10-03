@@ -73,9 +73,18 @@ jobs:
           # runner's is systemd-resolved's stub (127.0.0.53), unreachable from
           # inside that guest ("Could not resolve host", run 37138601142). Point
           # it at the real upstream resolvers. Host environment only.
-          if [ -s /run/systemd/resolve/resolv.conf ]; then sudo ln -sfn /run/systemd/resolve/resolv.conf /etc/resolv.conf; fi
-          grep -E '^nameserver' /etc/resolv.conf
-          ! grep -qE '^nameserver 127\.' /etc/resolv.conf
+          # Mirror the qualification host: a plain resolv.conf with public
+          # resolvers (the Azure platform resolver did not answer the build
+          # guest either, run 37138969586).
+          sudo rm -f /etc/resolv.conf
+          printf 'nameserver 8.8.8.8\nnameserver 1.1.1.1\noptions timeout:2 attempts:3\n' | sudo tee /etc/resolv.conf >/dev/null
+          getent hosts download.docker.com
+      - name: Probe libguestfs appliance networking (fails fast, before a long build)
+        run: |
+          set -euo pipefail
+          sudo env LIBGUESTFS_BACKEND=direct timeout 300 guestfish --network -a /dev/null run : \
+            debug sh "cat /etc/resolv.conf; ip -4 route; getent hosts download.docker.com || echo DNS-FAILED" | tee /tmp/lg-net.txt
+          ! grep -q DNS-FAILED /tmp/lg-net.txt
       - name: Match the recorded build host's Docker engine (29.6.2)
         # The original OVA's build-info.json records Docker 29.6.2 on the
         # containerd image store. The runner ships Docker 28, whose containerd
