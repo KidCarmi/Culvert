@@ -1,0 +1,147 @@
+{
+  "schema": 1,
+  "date": "2026-10-03",
+  "operator": "LOCAL-ESXI",
+  "qualification": "INCOMPLETE",
+  "scope": {
+    "esxi": "8.0.1 build-21813344",
+    "datastore": "DataStore2",
+    "network": "VM Network",
+    "max_vms": 1,
+    "vcpus": 2,
+    "memory_mib": 4096,
+    "disk_gib": 40
+  },
+  "superseded_original": {
+    "ova_sha256": "e24eb542f973fb70360bad5124ef81fdab8b6f8d67af601720613cbcca3700a4",
+    "result": "BLOCKED",
+    "reason": "Original bytes unavailable; no substitute qualifies that original"
+  },
+  "control": {
+    "artifact_id": 11282975335,
+    "run_id": 37144426441,
+    "archive_sha256": "08a489c070506caa8b32adeebf04f2d7eb089aa2a3f39d579f5f8dd88107d63f",
+    "provenance": {
+      "artifact": {
+        "ova_sha256": "60a734756bea788523ffb1d4e6c8ba08f74d16198850a52ed24c85e0deb0b10e",
+        "disk_bytes": 42949672960,
+        "cpus": 2,
+        "memory_mb": 4096,
+        "manifest": {
+          "culvert-appliance-dev-candidate.78e1bc566e80-ubuntu-24.04.ovf": "b3565f5ea3c18db39715a3793fc674e7d2c3e67183b8931d702949ec9d2c3879",
+          "culvert-appliance-dev-candidate.78e1bc566e80-ubuntu-24.04-disk1.vmdk": "7fbecd72002fccf5c9d8131b017cc8d549622d454e2ba0efb870ad6bd768733a"
+        },
+        "hardware": "vmx-13",
+        "networks": [
+          "VM Network"
+        ]
+      },
+      "expected_source": "78e1bc566e80055f893de41befbbad190ac4dfec",
+      "expected_image": "sha256:921c834451f26df7da1da4cc65455db9a2239c6d8e9370a226daea9007c900f3",
+      "original_candidate": false,
+      "harness_sha": "0cf48d78bf2570cb4d886a12cabd7ec611adf012",
+      "harness_dirty": false,
+      "harness_file_sha256": {
+        "test/e2e/appliance/esxi/esxi-lab.py": "29f7c30e3bf9716610a741b6e64dc0bacf04415b8060d69e67e7db02d8253afa",
+        "test/e2e/appliance/esxi/guest-checks.sh": "9eda0588ee369b57727885f3bb94cb24a5b4d48ce104fa82e2a2460992488d0c",
+        "test/e2e/appliance/esxi/guest-observe.py": "6ea7852a2d349e3ef1f5572f1fe99033c457ca29bc9f395f4cca301364c3bde7",
+        "test/e2e/appliance/esxi/govc-sha256-negotiation.patch": "25559bf74ab1e4e8d453213679c95a75fc769d5b2cb9aec96d28c8e75ef3bee7",
+        "test/e2e/appliance/lab/appliance-lab.sh": "bcc0da8352e7fabc1fc89afa3d347068bd7d1a67372adb0cc9b2d7c35304f195"
+      },
+      "govc_version": "govc 0.0.0",
+      "tls_verification": "owner-authorized-exception",
+      "hypervisor": {
+        "name": "VMware ESXi",
+        "fullName": "VMware ESXi 8.0.1 build-21813344",
+        "vendor": "VMware, Inc.",
+        "version": "8.0.1",
+        "patchLevel": "0.10",
+        "build": "21813344",
+        "localeVersion": "INTL",
+        "localeBuild": "000",
+        "osType": "vmnix-x86",
+        "productLineId": "embeddedEsx",
+        "apiType": "HostAgent",
+        "apiVersion": "8.0.1.0",
+        "licenseProductName": "VMware ESX Server",
+        "licenseProductVersion": "8.0"
+      },
+      "capacity": {
+        "datastore_reserve_bytes": 49392123904,
+        "datastore_free_bytes": 460626853888,
+        "host_free_mb": 9572,
+        "host_free_cpu_mhz": 9788
+      },
+      "property_delivery": "govc ImportVApp + InjectOvfEnv via VMware guestinfo",
+      "host_ref": {
+        "type": "HostSystem",
+        "value": "ha-host"
+      },
+      "ds_ref": {
+        "type": "Datastore",
+        "value": "65c64726-fdbff771-ecd4-e88088a40ee4"
+      },
+      "network_ref": {
+        "type": "Network",
+        "value": "HaNetwork-VM Network"
+      },
+      "govc_local_build": {
+        "base_tag": "v0.56.0",
+        "base_commit": "81608f9b9725d64e4ed447b9a338c9f03dbf8840",
+        "patch": "test/e2e/appliance/esxi/govc-sha256-negotiation.patch",
+        "binary_sha256": "a28278c8114497e18a02aa2a47c46797d6ec4b64b7c2bef7fb30eb8c2fa550ac"
+      }
+    },
+    "vm_observation": {
+      "firmware": "bios",
+      "virtual_hardware": "vmx-13",
+      "cpus": 2,
+      "memory_mb": 4096,
+      "power_state": "poweredOn",
+      "tools_status": "guestToolsRunning",
+      "ova_sha256": "60a734756bea788523ffb1d4e6c8ba08f74d16198850a52ed24c85e0deb0b10e"
+    },
+    "guest_observation": {
+      "kernel": "6.8.0-142-generic",
+      "complete": false,
+      "firstboot_cycle": true,
+      "firstboot_state": {
+        "Result": "success",
+        "ExecMainStartTimestamp": "",
+        "ExecMainStatus": "0",
+        "ActiveState": "inactive",
+        "SubState": "dead"
+      },
+      "firstboot_unit_sha256": "a57e87ebf6affc707214ff387743d3637d801003393f51e86a2123dd070cc2ad",
+      "source_sha": "78e1bc566e80055f893de41befbbad190ac4dfec",
+      "instance_id": "culvert-esxi-724013340d0a",
+      "image_id": "",
+      "machine_id_sha256": "2133b56d91a93391537681ae000e29fe5bc2611a8e1c710a9df2637172c35760",
+      "boot_id_sha256": "e76c29d88c7ab48c7da878d7eb500264cccdd8721227dcc3338ef554838da139"
+    },
+    "result": "FAIL: firstboot ordering cycle",
+    "journal_excerpt": [
+      "multi-user.target: Found ordering cycle on culvert-firstboot.service/start",
+      "multi-user.target: Job culvert-firstboot.service/start deleted to break ordering cycle starting with multi-user.target/start"
+    ],
+    "console_observed": "Login prompt; Culvert appliance - provisioning has not run yet",
+    "console_image_retained": false,
+    "console_image_note": "A later capture overwrote the useful frame before cleanup; incomplete frame excluded. Capture now uses unique filenames.",
+    "vm_deleted": true,
+    "evidence_bundle_sha256": "36f36283eb05f6802017ecaea52c4206eeb7af02dd77991a4c35d6cfea5c2177"
+  },
+  "firstboot_fix": {
+    "artifact_id": 11283274993,
+    "run_id": 37149375829,
+    "ova_sha256": "e85e364081fd13833eb53ea04a365cea4a771911f7edb3e41e6cb6dda401c300",
+    "provisioning_source": "25d0aa83884ec66fe82e82f83d0f9e83b5a85353",
+    "image_source": "78e1bc566e80055f893de41befbbad190ac4dfec",
+    "provisioning_drift": true,
+    "build_git_dirty": true,
+    "result": "IN PROGRESS"
+  },
+  "known_failures": [
+    "F-DISK-1 remains open; not reproduced on ESXi"
+  ],
+  "risk_acceptance": false
+}

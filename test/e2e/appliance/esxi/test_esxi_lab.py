@@ -394,7 +394,9 @@ class ObservationTests(unittest.TestCase):
                  patch.object(obj, 'guest_ip', return_value='192.0.2.10'), \
                  patch.object(subprocess, 'run', return_value=completed):
                 obj.inspect()
-            self.assertEqual(gov.call_args.args[1], '-capture=' + str(obj.sec / 'console.png'))
+            capture = Path(gov.call_args.args[1].removeprefix('-capture='))
+            self.assertEqual(capture.parent, obj.sec)
+            self.assertRegex(capture.name, r'^console-[0-9]+\.png$')
             rows = [json.loads(s) for s in (obj.ev / 'adapter.jsonl').read_text().splitlines()]
             self.assertFalse(any(r['result'] == 'fail' for r in rows))
             obj.collect()

@@ -432,7 +432,7 @@ class Lab:
         self.record('firmware-observed', 'info', facts['firmware'])
         require(runtime['powerState'] == 'poweredOn', 'console observation needs a powered-on owned VM')
         # Screens can show setup secrets: keep private until explicitly reviewed.
-        self.gov('vm.console', '-capture=' + str(self.sec / 'console.png'),
+        self.gov('vm.console', '-capture=' + str(self.sec / ('console-' + str(time.time_ns()) + '.png')),
                  self.state['path'], json_output=False)
         self.record('console-captured', 'info', 'private screenshot captured; not automatically exported')
         ip = self.guest_ip(timeout=30)

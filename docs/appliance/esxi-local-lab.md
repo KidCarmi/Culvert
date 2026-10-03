@@ -239,3 +239,42 @@ and [import option schema](https://github.com/vmware/govmomi/blob/v0.56.0/ovf/im
 Tool ZIP identities are in the evidence JSON. No runner was registered,
 no host was exposed to a cloud agent, and no release, image publication,
 merge or customer deployment is part of this lab.
+
+## Direct ESXi NFC checksum compatibility
+
+Real ESXi 8.0.1 testing exposed two differences from the simulator. Stock
+govc 0.56.0 requests no checksum algorithm; this host defaults to SHA1,
+which cannot satisfy the candidate's SHA256 manifest. After requesting
+SHA256 before transfer, the host hashes through the streamOptimized VMDK's
+end-of-stream sector. QEMU's file also contains 64,512 trailing zero bytes.
+For the control candidate, the observed server digest exactly matches the
+locally computed digest through that end marker.
+
+The local [govc patch](../../test/e2e/appliance/esxi/govc-sha256-negotiation.patch)
+requests the manifest algorithm with
+[HttpNfcLeaseSetManifestChecksumType](https://developer.broadcom.com/xapis/virtual-infrastructure-json-api/latest/sdk/vim25/release/HttpNfcLease/moId/HttpNfcLeaseSetManifestChecksumType/post/)
+before transfer. For the supported QEMU v3 streamOptimized layout it verifies
+the **entire local VMDK** against the original manifest, parses every grain
+through the zero EOS sector, and requires all remaining bytes to be zero
+and fewer than one grain. It then compares the server's SHA256 with the
+independently derived stream digest. The OVA, its manifest and the uploaded
+bytes remain unchanged. Missing digests, unsupported layouts, truncated
+grains, nonzero trailers, excessive padding and digest mismatches fail.
+The marker format is defined in [QEMU's VMDK implementation](https://github.com/qemu/qemu/blob/v8.2.2/block/vmdk.c).
+
+Build this explicit local tool variant from govmomi tag `v0.56.0`, commit
+`81608f9b9725d64e4ed447b9a338c9f03dbf8840`:
+
+```text
+git apply /absolute/path/to/govc-sha256-negotiation.patch
+go test ./ovf/importer -count=1
+cd govc
+go build -o /absolute/path/to/govc-sha256-stream.exe .
+```
+
+Set the local scope's `govc` path to that executable. Add `govc_build` with
+`base_tag`, `base_commit`, `patch` and the executable's measured
+`binary_sha256`; preflight verifies and records that identity. The local
+Windows executable used for the stream-aware attempt has SHA256
+`a28278c8114497e18a02aa2a47c46797d6ec4b64b7c2bef7fb30eb8c2fa550ac`.
+This is a patched local tool, not the unmodified upstream release.
