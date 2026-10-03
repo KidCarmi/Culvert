@@ -27,9 +27,20 @@ for _ in $(seq 1 60); do r docker info >/dev/null 2>&1 && break; sleep 2; done
 echo "replay store: $(r docker info --format '{{.ServerVersion}} {{.Driver}} {{.DriverStatus}}') containerd=$(r containerd --version 2>/dev/null | awk '{print $3}')"
 echo "images before replay: $(r docker image ls -aq | wc -l)"
 ref="${repo}@${idx}" tagged="${repo}:${tag}"
+# Optional: the builder's earlier steps, to bisect (REPLAY_PRELOAD_TAR = the
+# candidate image tar build-ova.sh loads first; REPLAY_CREATE=1 = its
+# docker create/cp/rm of that image, which runs before the saves).
+if [[ -n "${REPLAY_PRELOAD_TAR:-}" ]]; then
+  docker cp "$REPLAY_PRELOAD_TAR" "$name:/preload.tar" >/dev/null
+  loaded="$(r docker load -q -i /preload.tar | sed -n 's/^Loaded image: //p' | head -1)"
+  echo "preloaded: $loaded"
+fi
 r docker pull -q "$ref" >/dev/null || { echo "REPLAY INCONCLUSIVE: the disposable store could not pull $ref"; exit 0; }
 r docker image inspect "$ref" --format 'after pull: {{.Id}} {{.Os}}/{{.Architecture}}'
 r docker tag "$ref" "$tagged"
+if [[ "${REPLAY_CREATE:-0}" == 1 && -n "${loaded:-}" ]]; then
+  cid="$(r docker create "$loaded")" && r docker cp "$cid:/app/VERSION" /tmp/VERSION >/dev/null && r docker rm "$cid" >/dev/null && echo "create/cp/rm of $loaded done"
+fi
 r docker image ls --tree 2>&1 | sed 's/^/tree: /'
 save() { # label docker-save-args...
   local label="$1"; shift

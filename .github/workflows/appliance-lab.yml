@@ -170,8 +170,15 @@ jobs:
         run: |
           set -uo pipefail
           . appliance/build/manifest.env
-          test/e2e/appliance/lab/save-replay.sh "$CLAMAV_IMAGE_REPO" "$CLAMAV_IMAGE_TAG" "$CLAMAV_IMAGE_INDEX_DIGEST" \
-            "$CLAMAV_IMAGE_AMD64_DIGEST" "$COLDLOAD_DIND_IMAGE" "$LAB_ROOT/replay" | tee "$LAB_ROOT/save-replay.txt"
+          # Bisect: each variant in its OWN fresh disposable store.
+          for v in baseline preload preload+create; do
+            echo "=== replay variant: $v"
+            pre=""; cr=0
+            [[ "$v" == preload* ]] && pre="$LAB_ROOT/in/culvert-image.tar"
+            [[ "$v" == *create ]] && cr=1
+            REPLAY_PRELOAD_TAR="$pre" REPLAY_CREATE="$cr" test/e2e/appliance/lab/save-replay.sh "$CLAMAV_IMAGE_REPO" "$CLAMAV_IMAGE_TAG" \
+              "$CLAMAV_IMAGE_INDEX_DIGEST" "$CLAMAV_IMAGE_AMD64_DIGEST" "$COLDLOAD_DIND_IMAGE" "$LAB_ROOT/replay"
+          done 2>&1 | tee "$LAB_ROOT/save-replay.txt"
           echo "builder daemon has no ClamAV image before the build: $(docker image ls -q --filter reference='*clamav*' | wc -l) found"
       - name: Check out the appliance source the candidate is built from
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -217,6 +224,17 @@ jobs:
           cfg=sha256:5ca07785ce6993ebdac0dc329b1866e09ca28a6336223879f839b7c530d39bd9
           sudo ctr -n moby content ls -q | grep -qx "$cfg" && echo "amd64 config IN the builder's content store" || echo "amd64 config NOT in the builder's content store"
           ls -l "$LAB_ROOT/build/overlay/var/lib/culvert-appliance/images/" 2>/dev/null || true
+          echo "--- builder daemon: save BY DIGEST now"
+          . appliance/build/archive-identity.sh
+          docker save "${CLAMAV_IMAGE_REPO}@${CLAMAV_IMAGE_INDEX_DIGEST}" | gzip -n -1 > /tmp/b-digest.tgz
+          echo "by-digest: $(stat -c %s /tmp/b-digest.tgz) bytes"; archive_platform_closure /tmp/b-digest.tgz linux/amd64 "$CLAMAV_IMAGE_INDEX_DIGEST" "$CLAMAV_IMAGE_AMD64_DIGEST" || true
+          sudo docker save "${CLAMAV_IMAGE_REPO}:${CLAMAV_IMAGE_TAG}" | gzip -n -1 > /tmp/b-tag.tgz
+          echo "by-tag (root CLI): $(stat -c %s /tmp/b-tag.tgz) bytes"; archive_platform_closure /tmp/b-tag.tgz linux/amd64 "$CLAMAV_IMAGE_INDEX_DIGEST" "$CLAMAV_IMAGE_AMD64_DIGEST" || true
+          echo "--- builder daemon state"
+          docker info 2>&1 | sed -n '1,60p'
+          sudo ls -la /var/lib/docker /var/lib/docker/image 2>&1 | head -30
+          sudo du -sh /var/lib/docker/* /var/lib/containerd 2>/dev/null | head -20
+          sudo ctr namespaces ls
       - name: "Focused check: ClamAV READY from the baked archive alone (empty store, no registry)"
         # The build already proved create + execute offline; this adds a real
         # clamd reaching `clamdscan --ping` (signatures via freshclam; the
