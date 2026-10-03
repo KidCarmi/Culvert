@@ -52,7 +52,7 @@ func run() int {
 		}
 		return 0
 	}
-	actions := applianceconsole.NewActions(applianceconsole.ActionDependencies{Authorized: adminIdentity, Collect: collector.Collect, Run: func(args []string) error { return execute(ctx, args) }, Confirm: confirm, Out: os.Stdout})
+	actions := applianceconsole.NewActions(applianceconsole.ActionDependencies{Authorized: adminIdentity, Collect: collector.Collect, Run: func(args []string) error { return execute(ctx, args) }, Confirm: func(prompt string) (string, error) { return confirm(ctx, prompt) }, Out: os.Stdout})
 	if err := runTerminal(ctx, collector, actions, *admin); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return 1

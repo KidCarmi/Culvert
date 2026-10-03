@@ -65,8 +65,19 @@ func TestTerminalProcess(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	action, err := menu(ctx, collector, false)
-	if err != nil && ctx.Err() == nil {
+	var action string
+	switch os.Getenv("CONSOLE_TEST_MODE") {
+	case "confirm":
+		action, err = confirm(ctx, "CONFIRM READY: ")
+	case "reject":
+		action, err = menu(ctx, collector, false)
+		if err == nil || action != "" {
+			t.Fatalf("unsafe input accepted: action=%q err=%v", action, err)
+		}
+	default:
+		action, err = menu(ctx, collector, false)
+	}
+	if err != nil && ctx.Err() == nil && os.Getenv("CONSOLE_TEST_MODE") != "reject" {
 		t.Fatal(err)
 	}
 	after, err := unix.IoctlGetTermios(0, unix.TCGETS)
@@ -76,9 +87,12 @@ func TestTerminalProcess(t *testing.T) {
 	if *before != *after {
 		t.Fatal("terminal modes not restored")
 	}
-	if ctx.Err() != nil {
+	switch {
+	case ctx.Err() != nil:
 		fmt.Fprintln(os.Stdout, "RESTORED CANCELLED")
-	} else {
+	case os.Getenv("CONSOLE_TEST_MODE") == "reject":
+		fmt.Fprintln(os.Stdout, "RESTORED REJECTED")
+	default:
 		fmt.Fprintln(os.Stdout, "RESTORED ACTION:"+action)
 	}
 }
@@ -103,6 +117,11 @@ type terminalSession struct {
 }
 
 func startTerminal(t *testing.T, rows, columns uint16, term string) *terminalSession {
+	t.Helper()
+	return startTerminalMode(t, rows, columns, term, "")
+}
+
+func startTerminalMode(t *testing.T, rows, columns uint16, term, mode string) *terminalSession {
 	t.Helper()
 	fd, err := unix.Open("/dev/ptmx", unix.O_RDWR|unix.O_NOCTTY|unix.O_CLOEXEC, 0)
 	if err != nil {
@@ -133,7 +152,7 @@ func startTerminal(t *testing.T, rows, columns uint16, term string) *terminalSes
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	// #nosec G204 -- execute this test binary with a fixed helper-test selector.
 	cmd := exec.CommandContext(ctx, exe, "-test.run=^TestTerminalProcess$", "--", "console-pty")
-	cmd.Env = []string{"PATH=/usr/bin:/bin", "TERM=" + term}
+	cmd.Env = []string{"PATH=/usr/bin:/bin", "TERM=" + term, "CONSOLE_TEST_MODE=" + mode}
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = slave, slave, slave
 	if err := cmd.Start(); err != nil {
 		cancel()

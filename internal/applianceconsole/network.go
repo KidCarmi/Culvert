@@ -22,13 +22,26 @@ type Interface struct {
 }
 
 type kernelInterface struct {
-	Name      string `json:"ifname"`
-	State     string `json:"operstate"`
-	Addresses []struct {
-		Family string `json:"family"`
-		Local  string `json:"local"`
-		Prefix int    `json:"prefixlen"`
-	} `json:"addr_info"`
+	Name      string          `json:"ifname"`
+	State     string          `json:"operstate"`
+	Addresses []kernelAddress `json:"addr_info"`
+}
+
+type kernelAddress struct {
+	Family     string   `json:"family"`
+	Local      string   `json:"local"`
+	Prefix     *int     `json:"prefixlen"`
+	Tentative  bool     `json:"tentative"`
+	DADFailed  bool     `json:"dadfailed"`
+	Deprecated bool     `json:"deprecated"`
+	Flags      []string `json:"flags"`
+}
+
+func (a kernelAddress) usable(ip netip.Addr) bool {
+	if a.Prefix == nil || *a.Prefix < 0 || *a.Prefix > ip.BitLen() || a.Tentative || a.DADFailed || a.Deprecated {
+		return false
+	}
+	return !slices.Contains(a.Flags, "tentative") && !slices.Contains(a.Flags, "dadfailed") && !slices.Contains(a.Flags, "deprecated")
 }
 
 func (c Collector) physicalNIC(name string, depth int) bool {
@@ -52,16 +65,21 @@ func (c Collector) physicalNIC(name string, depth int) bool {
 func kernelAddresses(nic kernelInterface) (cidrs, addresses []string) {
 	for _, a := range nic.Addresses {
 		ip, err := netip.ParseAddr(a.Local)
-		if err != nil || !ip.IsGlobalUnicast() || ip.IsLinkLocalUnicast() {
+		if err != nil || !ip.IsGlobalUnicast() || ip.IsLinkLocalUnicast() || ip.Zone() != "" {
 			continue
 		}
-		if (a.Family != "inet" && a.Family != "inet6") || a.Prefix < 0 || a.Prefix > ip.BitLen() {
+		if !a.usable(ip) {
+			continue
+		}
+		if (a.Family != "inet" || !ip.Is4()) && (a.Family != "inet6" || !ip.Is6() || ip.Is4In6()) {
 			continue
 		}
 		addresses = append(addresses, ip.String())
-		cidrs = append(cidrs, ip.String()+"/"+strconv.Itoa(a.Prefix))
+		cidrs = append(cidrs, ip.String()+"/"+strconv.Itoa(*a.Prefix))
 	}
-	return cidrs, addresses
+	slices.Sort(cidrs)
+	slices.Sort(addresses)
+	return slices.Compact(cidrs), slices.Compact(addresses)
 }
 
 func (c Collector) network(raw string) (interfaces []Interface, addresses []string) {
@@ -84,11 +102,15 @@ func (c Collector) network(raw string) (interfaces []Interface, addresses []stri
 }
 
 func readPublicFile(path string) string {
-	f, err := os.Open(path)
+	f, err := openPublicFile(path)
 	if err != nil {
 		return ""
 	}
 	defer f.Close()
+	info, err := f.Stat()
+	if err != nil || !info.Mode().IsRegular() || info.Size() > maxOutput {
+		return ""
+	}
 	data, err := io.ReadAll(io.LimitReader(f, maxOutput+1))
 	if err != nil || len(data) > maxOutput {
 		return ""

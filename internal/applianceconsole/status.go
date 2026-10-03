@@ -5,7 +5,6 @@ package applianceconsole
 import (
 	"context"
 	"encoding/json"
-	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -162,8 +161,11 @@ func (c Collector) Collect(ctx context.Context) Snapshot {
 func (c Collector) steps() []Step {
 	steps := make([]Step, 0, len(stepNames))
 	for i, key := range stepNames {
-		state := "not_recorded"
-		if st, err := os.Stat(filepath.Join(c.sources.StateDir, key+".done")); err == nil && st.Mode().IsRegular() {
+		state := "unknown"
+		st, err := os.Lstat(filepath.Join(c.sources.StateDir, key+".done"))
+		if os.IsNotExist(err) {
+			state = "not_recorded"
+		} else if err == nil && st.Mode().IsRegular() {
 			state = "recorded"
 		}
 		steps = append(steps, Step{key, stepLabels[i], state})
@@ -172,11 +174,6 @@ func (c Collector) steps() []Step {
 }
 
 func (c Collector) readBuild(s *Snapshot) {
-	file, err := os.Open(c.sources.BuildFile)
-	if err != nil {
-		return
-	}
-	defer file.Close()
 	var build struct {
 		Appliance struct {
 			Version string `json:"version"`
@@ -185,8 +182,8 @@ func (c Collector) readBuild(s *Snapshot) {
 			Candidate bool `json:"candidate"`
 		} `json:"candidate"`
 	}
-	data, readErr := io.ReadAll(io.LimitReader(file, maxOutput+1))
-	if readErr == nil && len(data) <= maxOutput && json.Unmarshal(data, &build) == nil {
+	data := readPublicFile(c.sources.BuildFile)
+	if json.Unmarshal([]byte(data), &build) == nil {
 		if build.Appliance.Version != "" {
 			s.Version = Clean(build.Appliance.Version, 70)
 		}

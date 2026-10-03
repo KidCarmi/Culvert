@@ -10,7 +10,15 @@ import (
 
 func canRetry(s Snapshot) bool {
 	state := s.Firstboot["ActiveState"]
-	return (state == "failed" || state == "inactive") && !s.recorded("complete")
+	if s.Firstboot["LoadState"] != "loaded" || (state != "failed" && state != "inactive") {
+		return false
+	}
+	for _, step := range s.Steps {
+		if step.ID == "complete" {
+			return step.State == "not_recorded"
+		}
+	}
+	return false
 }
 
 // ActionDependencies are supplied by the authenticated terminal process.
@@ -36,31 +44,46 @@ func NewActions(deps ActionDependencies) Actions {
 
 // Apply checks the effective identity before dispatching any fixed command.
 func (a Actions) Apply(ctx context.Context, choice string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if !a.deps.Authorized() {
 		return errors.New("sign in as culvert before using recovery actions")
 	}
 	const bin = "/opt/culvert-appliance/bin/"
 	switch choice {
 	case "1":
-		if err := a.deps.Run([]string{bin + "culvert-net", "show"}); err != nil {
+		if err := a.run(ctx, []string{bin + "culvert-net", "show"}); err != nil {
 			return fmt.Errorf("show network: %w", err)
 		}
 		_, err := fmt.Fprintln(a.deps.Out, "\nUse the recovery shell to change network settings with culvert-net.")
 		return err
 	case "2":
-		return a.deps.Run([]string{"/usr/bin/sudo", "--", bin + "culvert-status"})
+		return a.run(ctx, []string{"/usr/bin/sudo", "--", bin + "culvert-status"})
 	case "4":
 		return a.retry(ctx)
 	case "5":
-		return a.power()
+		return a.power(ctx)
 	case "6":
 		if _, err := fmt.Fprintln(a.deps.Out, "Recovery shell. Type exit to return to the menu."); err != nil {
 			return fmt.Errorf("display shell instructions: %w", err)
 		}
-		return a.deps.Run([]string{"/bin/bash", "--noprofile", "--norc"})
+		return a.run(ctx, []string{"/bin/bash", "--noprofile", "--norc"})
 	default:
 		return errors.New("unknown recovery action")
 	}
+}
+
+// run fences every dispatch, including the second step of a retry. The process
+// adapter must also use this same context when starting and waiting for a child.
+func (a Actions) run(ctx context.Context, args []string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if !a.deps.Authorized() {
+		return errors.New("authenticated identity no longer available")
+	}
+	return a.deps.Run(args)
 }
 
 func (a Actions) retry(ctx context.Context) error {
@@ -77,16 +100,16 @@ func (a Actions) retry(ctx context.Context) error {
 	if !canRetry(a.deps.Collect(ctx)) {
 		return errors.New("state changed; no retry dispatched")
 	}
-	if err := a.deps.Run([]string{"/usr/bin/sudo", "--", "/usr/bin/systemctl", "reset-failed", "culvert-firstboot.service"}); err != nil {
+	if err := a.run(ctx, []string{"/usr/bin/sudo", "--", "/usr/bin/systemctl", "reset-failed", "culvert-firstboot.service"}); err != nil {
 		return fmt.Errorf("clear failed provisioning: %w", err)
 	}
-	if err := a.deps.Run([]string{"/usr/bin/sudo", "--", "/usr/bin/systemctl", "start", "--no-block", "culvert-firstboot.service"}); err != nil {
+	if err := a.run(ctx, []string{"/usr/bin/sudo", "--", "/usr/bin/systemctl", "start", "--no-block", "culvert-firstboot.service"}); err != nil {
 		return fmt.Errorf("start provisioning: %w", err)
 	}
 	return nil
 }
 
-func (a Actions) power() error {
+func (a Actions) power(ctx context.Context) error {
 	answer, err := a.deps.Confirm("Type REBOOT or POWEROFF (anything else cancels): ")
 	if err != nil {
 		return fmt.Errorf("confirm power action: %w", err)
@@ -94,7 +117,7 @@ func (a Actions) power() error {
 	if answer != "REBOOT" && answer != "POWEROFF" {
 		return nil
 	}
-	if err := a.deps.Run([]string{"/usr/bin/sudo", "--", "/usr/bin/systemctl", strings.ToLower(answer)}); err != nil {
+	if err := a.run(ctx, []string{"/usr/bin/sudo", "--", "/usr/bin/systemctl", strings.ToLower(answer)}); err != nil {
 		return fmt.Errorf("request power action: %w", err)
 	}
 	return nil

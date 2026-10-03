@@ -264,8 +264,8 @@ verify a certificate from that browser, or discover custom listener bindings.
 
 Rendering supports basic ANSI colors on known compatible terminals, monochrome
 on vt100 or with NO_COLOR, and printable line-oriented output for TERM=dumb or
-unknown terminals. Plain mode updates on operator input rather than repeatedly
-scrolling status. Bracketed paste is discarded; queued input is flushed before
+unknown terminals. Plain mode rechecks status every five seconds, prints changed
+frames with an observation timestamp, and suppresses identical frames. Bracketed paste is discarded; queued input is flushed before
 PAM/recovery handoff. ASCII sanitization precedes the addition of renderer-owned
 escape sequences. No external UI library or module dependency is introduced.
 
@@ -274,3 +274,53 @@ privilege boundaries and real Linux pseudo-terminal navigation, resize, paste
 and termios restoration. Fixture addresses in tests are never production data.
 Historical smoke evidence above applies to its recorded implementation commit;
 new visual verification is recorded separately.
+
+## Failure handling and hardening contract
+
+The terminal adapter has a single input owner. A bracketed paste must terminate
+within two seconds; incomplete/unsupported escape sequences end the menu instead
+of treating their remaining bytes as commands. This can require signing in again
+after an unsupported terminal key. Input disconnection, output failure, failed
+termios restoration or failed input flushing also end the session without an
+automatic PAM/recovery handoff. Input and output must refer to the same terminal.
+The getty service can start a fresh public console; normal tty2/SSH recovery
+remains available. The console never keeps a background password reader.
+
+Confirmation input has a one-minute absolute deadline, a 128-byte limit and
+cancellation-aware polling, including while waiting for an unfinished canonical
+line. Queued input is drained before prompting and after a complete answer.
+Each recovery command rechecks cancellation and effective identity. Retry needs
+a loaded unit in failed/inactive state and a positively absent completion marker,
+then rechecks that state after confirmation. A missing observation, inaccessible
+marker, symlink or nonregular marker does not authorize retry. These checks do
+not make observation and systemd dispatch atomic; firstboot still owns its
+idempotency and concurrency protection.
+
+Public metadata reads accept bounded regular files only. Linux opens them with
+O_NONBLOCK before checking the descriptor, so a FIFO with no writer cannot stall
+collection; resolver symlinks to regular files remain supported. This is a local
+filesystem guarantee, not a deadline for an unresponsive remote filesystem.
+
+Network addresses require an explicit valid prefix and matching address family.
+Tentative, DAD-failed and deprecated addresses are excluded from setup URL
+candidates. The boolean fields follow
+[iproute2's address JSON output](https://github.com/iproute2/iproute2/blob/main/ip/ipaddress.c).
+The home screen resolves its displayed NIC from the displayed address; default
+routes, which can belong to another NIC, are shown separately in network details.
+Rendering bounds dimensions before arithmetic and bounds pagination to prevent
+overflow or oversized allocations from invalid terminal sizes.
+
+Regression coverage includes malformed/unterminated input with termios
+restoration and no dispatch, cancellation during confirmation, disconnected
+input, cancellation between retry commands, uncertain completion markers,
+FIFO/device metadata, mismatched NIC/address observations and bounded layout
+fuzzing. These tests establish specific behavior, not a production certification.
+The earlier ESXi reports apply only to their recorded revisions.
+
+Remaining release work includes integrated OVA qualification, network changes
+with independent rollback, durable recovery-action auditing, session policy for
+external PAM/sudo/recovery-shell children, and a completed security review. The
+menu idle timeout does not govern an interactive shell once it has been handed
+off. The firstboot archive-content blocker and ESXi screenshot capture limitation
+remain separate open issues. This PR stays draft until the integration and
+qualification evidence support promotion.

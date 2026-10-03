@@ -100,7 +100,7 @@ func fixture(t *testing.T) (collector Collector, observations map[string]string)
 	}
 	raw := map[string]string{
 		"unit":    "ActiveState=failed\nResult=exit-code\nExecMainStatus=1\nSECRET=NEVER_DISPLAY",
-		"network": `[{"ifname":"eth0","addr_info":[{"family":"inet","local":"192.0.2.10"},{"family":"inet","local":"127.0.0.1"},{"family":"inet","local":"169.254.1.1"}]},{"ifname":"docker0","addr_info":[{"family":"inet","local":"172.17.0.1"}]}]`,
+		"network": `[{"ifname":"eth0","addr_info":[{"family":"inet","local":"192.0.2.10","prefixlen":24},{"family":"inet","local":"127.0.0.1","prefixlen":8},{"family":"inet","local":"169.254.1.1","prefixlen":16}]},{"ifname":"docker0","addr_info":[{"family":"inet","local":"172.17.0.1","prefixlen":16}]}]`,
 	}
 	c := NewCollector(Sources{StateDir: dir, BuildFile: filepath.Join(dir, "build.json"), NetDir: filepath.Join(dir, "net")})
 	c.sources.Probe = func(_ context.Context, args []string) string {

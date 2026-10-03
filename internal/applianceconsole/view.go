@@ -2,6 +2,7 @@ package applianceconsole
 
 import (
 	"fmt"
+	"net/netip"
 	"strings"
 )
 
@@ -69,10 +70,10 @@ func (v *View) Handle(key string) string {
 		v.open("diagnostics")
 		return ""
 	case "PAGEUP":
-		v.offset = max(0, v.offset-1)
+		v.offset = max(0, max(0, v.offset)-1)
 		return ""
 	case "PAGEDOWN":
-		v.offset++
+		v.offset = min(max(0, v.offset), maxOutput) + 1
 		return ""
 	}
 	return v.handleScreen(key)
@@ -83,11 +84,11 @@ func (v *View) handleScreen(key string) string {
 		return v.handleHome(key)
 	}
 	if key == "UP" {
-		v.offset = max(0, v.offset-1)
+		v.offset = max(0, max(0, v.offset)-1)
 		return ""
 	}
 	if key == "DOWN" {
-		v.offset++
+		v.offset = min(max(0, v.offset), maxOutput) + 1
 		return ""
 	}
 	switch v.screen + ":" + key {
@@ -185,11 +186,16 @@ func (v View) home(s Snapshot, width int) []Row {
 
 func identityRows(s Snapshot, width int) []Row {
 	nic, link := "unknown", "unknown"
-	if len(s.Interfaces) > 0 {
-		nic, link = s.Interfaces[0].Name, s.Interfaces[0].Link
+	address := first(s.Addresses, "not assigned")
+	for _, candidate := range s.Interfaces {
+		for _, cidr := range candidate.Addresses {
+			if prefix, err := netip.ParsePrefix(cidr); err == nil && prefix.Addr().String() == address {
+				nic, link = candidate.Name, candidate.Link
+			}
+		}
 	}
 	left := []string{"APPLIANCE", "Host     " + s.Hostname, "Build    " + s.Version, "Setup    " + setupLabel(s), "Traffic  NOT VERIFIED"}
-	right := []string{"MANAGEMENT NETWORK", "Interface  " + nic, "Address    " + first(s.Addresses, "not assigned"), "Link       " + link, "Gateway    " + s.Gateway}
+	right := []string{"OBSERVED NETWORK", "Interface  " + nic, "Address    " + address, "Link       " + link, "Defaults   see [1]"}
 	if width < 76 {
 		return []Row{{"Host: " + s.Hostname, ""}, {"Build: " + s.Version, ""}, {"Setup: " + setupLabel(s) + " | Traffic: NOT VERIFIED", ""}, {"Address: " + first(s.Addresses, "not assigned"), ""}}
 	}
@@ -281,7 +287,8 @@ func clipped(text string, width int) string {
 // Frame reserves a row to prevent terminal scrolling and paginates long content.
 // Home selection stays visible in small terminals; details support PgUp/PgDn.
 func (v *View) Frame(s Snapshot, height, width int) []Row {
-	capacity, columns := max(0, height-1), max(0, width-1)
+	// Keep presentation bounded even if a caller supplies corrupt dimensions.
+	capacity, columns := max(0, max(0, min(height, 25))-1), max(0, max(0, min(width, 80))-1)
 	if capacity == 0 || columns == 0 {
 		return nil
 	}
@@ -298,7 +305,7 @@ func (v *View) Frame(s Snapshot, height, width int) []Row {
 		body = wrapRows(body, columns)
 	}
 	room := capacity - len(header) - 2
-	v.offset = min(v.offset, max(0, len(body)-room))
+	v.offset = max(0, min(v.offset, max(0, len(body)-room)))
 	if v.screen == "home" && len(body) > room {
 		v.offset = max(0, len(body)-4+v.selected-1-room+1)
 	}

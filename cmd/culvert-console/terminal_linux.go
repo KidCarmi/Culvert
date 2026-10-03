@@ -43,6 +43,11 @@ func validateTerminal(admin bool) error {
 	if _, err := unix.IoctlGetTermios(1, unix.TCGETS); err != nil {
 		return errors.New("interactive output requires a terminal")
 	}
+	input, inputErr := os.Stdin.Stat()
+	output, outputErr := os.Stdout.Stat()
+	if inputErr != nil || outputErr != nil || !os.SameFile(input, output) {
+		return errors.New("interactive input and output must use the same terminal")
+	}
 	if admin {
 		if !adminIdentity() {
 			return errors.New("admin mode requires an authenticated culvert user")
@@ -56,55 +61,41 @@ func validateTerminal(admin bool) error {
 // readKey handles fragmented escape sequences without a goroutine left reading
 // passwords while /bin/login owns the terminal. Calls are bounded by poll.
 func readKey(ctx context.Context) (string, error) {
+	inputCtx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
+	defer cancel()
 	var sequence strings.Builder
-	deadline := time.Now().Add(500 * time.Millisecond)
-	for time.Now().Before(deadline) {
-		if err := ctx.Err(); err != nil {
-			return "", err
-		}
-		poll := []unix.PollFd{{Fd: 0, Events: unix.POLLIN}}
-		n, err := unix.Poll(poll, 50)
-		if errors.Is(err, unix.EINTR) {
-			continue
-		}
+	for sequence.Len() < 16 {
+		b, err := confirmationByte(inputCtx, 0)
 		if err != nil {
+			if ctx.Err() != nil {
+				return "", ctx.Err()
+			}
+			if errors.Is(err, context.DeadlineExceeded) {
+				break
+			}
 			return "", err
 		}
-		if n == 0 {
-			continue
-		}
-		if poll[0].Revents&(unix.POLLHUP|unix.POLLERR|unix.POLLNVAL) != 0 {
-			return "", errors.New("console input unavailable")
-		}
-		var b [1]byte
-		count, err := unix.Read(0, b[:])
-		if err != nil {
-			return "", err
-		}
-		if count != 1 {
-			continue
-		}
-		sequence.WriteByte(b[0])
+		sequence.WriteByte(b)
 		if sequence.String() == "\x1b[200~" {
 			return "", discardPaste(ctx)
 		}
-		if sequence.Len() == 1 && b[0] != 27 {
+		if sequence.Len() == 1 && b != 27 {
 			return applianceconsole.DecodeKey(sequence.String()), nil
 		}
 		if key := applianceconsole.DecodeKey(sequence.String()); key != "" {
 			return key, nil
 		}
-		if sequence.Len() >= 16 {
-			return "", nil
-		}
 	}
 	if sequence.String() == "\x1b" {
 		return "ESC", nil
 	}
+	if sequence.Len() != 0 {
+		return "", errors.New("incomplete or unsupported console escape sequence")
+	}
 	return "", nil
 }
 
-func menu(ctx context.Context, collector applianceconsole.Collector, admin bool) (string, error) {
+func menu(ctx context.Context, collector applianceconsole.Collector, admin bool) (choice string, result error) {
 	original, err := unix.IoctlGetTermios(0, unix.TCGETS)
 	if err != nil {
 		return "", err
@@ -118,12 +109,16 @@ func menu(ctx context.Context, collector applianceconsole.Collector, admin bool)
 	}
 	ansi, _ := terminalCapabilities()
 	defer func() {
-		// Best-effort restoration also runs when the terminal has disconnected.
-		_ = unix.IoctlSetTermios(0, unix.TCSETS, original)
+		// Never hand the terminal to PAM/sudo if restoration or draining failed.
+		restoreErr := unix.IoctlSetTermios(0, unix.TCSETS, original)
+		var displayErr error
 		if ansi {
-			_, _ = fmt.Fprint(os.Stdout, "\x1b[0m\x1b[?25h\x1b[?2004l\x1b[2J\x1b[H")
+			_, displayErr = fmt.Fprint(os.Stdout, "\x1b[0m\x1b[?25h\x1b[?2004l\x1b[2J\x1b[H")
 		}
-		_ = unix.IoctlSetInt(0, unix.TCFLSH, unix.TCIFLUSH)
+		result = errors.Join(result, restoreErr, displayErr, unix.IoctlSetInt(0, unix.TCFLSH, unix.TCIFLUSH))
+		if result != nil {
+			choice = ""
+		}
 	}()
 	if ansi {
 		if _, err := fmt.Fprint(os.Stdout, "\x1b[2J\x1b[H\x1b[?25l\x1b[?2004h"); err != nil {
@@ -144,9 +139,6 @@ type menuDisplay struct {
 }
 
 func (d *menuDisplay) redraw(ctx context.Context, collector applianceconsole.Collector) error {
-	if !d.ansi && !d.dirty {
-		return nil
-	}
 	if time.Now().After(d.refresh) {
 		d.snapshot = collector.Collect(ctx)
 		d.refresh = time.Now().Add(5 * time.Second)
@@ -170,7 +162,7 @@ func (d *menuDisplay) redraw(ctx context.Context, collector applianceconsole.Col
 			frame = "\x1b[2J" + frame
 		}
 	} else {
-		frame = "\n" + frame + "\n"
+		frame = "\nObserved (UTC): " + applianceconsole.Clean(d.snapshot.ObservedAt, 40) + "\n" + frame + "\n"
 	}
 	if _, err := fmt.Fprint(os.Stdout, frame); err != nil {
 		return fmt.Errorf("draw menu: %w", err)
@@ -198,7 +190,7 @@ func positionedFrame(rows []applianceconsole.Row, color bool, height, width, pan
 }
 
 // discardPaste consumes bracketed paste as data, never as recovery commands.
-// A missing terminator flushes queued input after a bounded drain.
+// A missing terminator ends the session; late paste bytes cannot become actions.
 func discardPaste(ctx context.Context) error {
 	deadline := time.Now().Add(2 * time.Second)
 	var tail string
@@ -214,8 +206,14 @@ func discardPaste(ctx context.Context) error {
 		if n == 0 {
 			continue
 		}
+		if poll[0].Revents&(unix.POLLHUP|unix.POLLERR|unix.POLLNVAL) != 0 {
+			return errors.New("console input unavailable during paste")
+		}
 		var b [1]byte
-		if _, err := unix.Read(0, b[:]); err != nil {
+		if count, err := unix.Read(0, b[:]); err != nil || count != 1 {
+			if err == nil {
+				err = errors.New("console input closed")
+			}
 			return fmt.Errorf("read paste: %w", err)
 		}
 		tail += string(b[:])
@@ -226,8 +224,10 @@ func discardPaste(ctx context.Context) error {
 			return nil
 		}
 	}
-	_ = unix.IoctlSetInt(0, unix.TCFLSH, unix.TCIFLUSH)
-	return ctx.Err()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return errors.New("unterminated console paste")
 }
 
 func runMenu(ctx context.Context, collector applianceconsole.Collector, admin bool) (string, error) {
@@ -278,22 +278,30 @@ func execute(ctx context.Context, args []string) error {
 	return nil
 }
 
-func confirm(prompt string) (string, error) {
+func confirm(ctx context.Context, prompt string) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, time.Minute)
+	defer cancel()
+	if err := unix.IoctlSetInt(0, unix.TCFLSH, unix.TCIFLUSH); err != nil {
+		return "", fmt.Errorf("clear confirmation input: %w", err)
+	}
 	if _, err := fmt.Fprint(os.Stdout, prompt); err != nil {
 		return "", fmt.Errorf("display confirmation: %w", err)
 	}
 	// No buffered reader may retain keystrokes needed by a later PAM/sudo prompt.
 	var answer strings.Builder
-	var b [1]byte
 	for {
-		if _, err := os.Stdin.Read(b[:]); err != nil {
+		b, err := confirmationByte(ctx, 0)
+		if err != nil {
 			return "", err
 		}
-		if b[0] == '\n' {
+		if b == '\n' {
+			if err := unix.IoctlSetInt(0, unix.TCFLSH, unix.TCIFLUSH); err != nil {
+				return "", fmt.Errorf("drain confirmation input: %w", err)
+			}
 			return strings.TrimSuffix(answer.String(), "\r"), nil
 		}
 		if answer.Len() < 128 {
-			answer.WriteByte(b[0])
+			answer.WriteByte(b)
 		} else {
 			return "", errors.New("confirmation too long")
 		}
@@ -312,10 +320,7 @@ func runTerminal(ctx context.Context, collector applianceconsole.Collector, acti
 			return nil
 		}
 		if err != nil {
-			if !admin {
-				return execute(ctx, []string{"/bin/login", "culvert"})
-			}
-			return errors.New("console unavailable; use SSH for recovery")
+			return fmt.Errorf("console unavailable; reconnect or use SSH for recovery: %w", err)
 		}
 		if choice == "logout" {
 			return nil
@@ -329,7 +334,7 @@ func runTerminal(ctx context.Context, collector applianceconsole.Collector, acti
 				return fmt.Errorf("display action error: %w", writeErr)
 			}
 		}
-		if _, err := confirm("\nPress Enter to return to the menu..."); err != nil {
+		if _, err := confirm(ctx, "\nPress Enter to return to the menu..."); err != nil {
 			return nil
 		}
 	}

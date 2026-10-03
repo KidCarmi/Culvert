@@ -11,9 +11,13 @@ import (
 
 func actionFixture() (actions Actions, recorded *[][]string) {
 	calls := [][]string{}
-	a := NewActions(ActionDependencies{Authorized: func() bool { return true }, Collect: func(context.Context) Snapshot { return Snapshot{Firstboot: map[string]string{"ActiveState": "failed"}} },
+	a := NewActions(ActionDependencies{Authorized: func() bool { return true }, Collect: func(context.Context) Snapshot { return retrySnapshot("failed") },
 		Run: func(args []string) error { calls = append(calls, args); return nil }, Confirm: func(string) (string, error) { return "RETRY", nil }, Out: io.Discard})
 	return a, &calls
+}
+
+func retrySnapshot(state string) Snapshot {
+	return Snapshot{Firstboot: map[string]string{"LoadState": "loaded", "ActiveState": state}, Steps: []Step{{ID: "complete", State: "not_recorded"}}}
 }
 
 func TestActionsRequireEffectiveIdentity(t *testing.T) {
@@ -55,7 +59,7 @@ func TestRetryRechecksAfterConfirmation(t *testing.T) {
 		if count > 1 {
 			state = "active"
 		}
-		return Snapshot{Firstboot: map[string]string{"ActiveState": state}}
+		return retrySnapshot(state)
 	}
 	if a.Apply(context.Background(), "4") == nil || len(*calls) != 0 {
 		t.Fatal("state change ignored")
