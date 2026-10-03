@@ -103,21 +103,26 @@ case "$mode" in
     apt-get update -qq
     echo "--- candidate Docker versions:"
     apt-cache policy "${DOCKER_PKGS[@]}" | grep -E '^[a-z]|Installed|Candidate'
-    stack_stop
-    log "unholding + upgrading Docker engine packages"
-    apt-mark unhold "${DOCKER_PKGS[@]}" >/dev/null
     # The holds are the invariant: a failed upgrade (mirror, dpkg) under set -e
     # would otherwise exit with Docker UNHELD, and the next plain OS upgrade
-    # would move the engine (Codex P2, PR #1528). The trap stays armed until
-    # the re-hold, the engine restart and the stack start have ALL succeeded —
+    # would move the engine (Codex P2, PR #1528). The trap is armed BEFORE the
+    # first mutation — a failed stack stop or a failed/partial unhold also
+    # leaves the host between states (owner review) — and stays armed until
+    # the re-hold, the engine restart and the stack start have ALL succeeded:
     # the re-hold is itself a dpkg write that can fail (Codex P2, second
-    # round) — and it reports what it actually achieved instead of assuming
-    # the hold took.
+    # round). It reports what it actually achieved instead of assuming.
+    # stack_stop/stack_start are FUNCTIONS: an ERR trap is not inherited by
+    # them (and errtrace would make their subshells run the recovery too), so
+    # a failure inside one would exit under set -e without recovering. They
+    # are checked explicitly instead.
     trap docker_upgrade_recover ERR
+    if ! stack_stop; then docker_upgrade_recover; exit 1; fi
+    log "unholding + upgrading Docker engine packages"
+    apt-mark unhold "${DOCKER_PKGS[@]}" >/dev/null
     apt-get -y -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold install --only-upgrade "${DOCKER_PKGS[@]}"
     apt-mark hold "${DOCKER_PKGS[@]}" >/dev/null
     systemctl restart docker
-    stack_start
+    if ! stack_start; then docker_upgrade_recover; exit 1; fi
     trap - ERR
     docker version --format 'Docker engine {{.Server.Version}}'
     finish

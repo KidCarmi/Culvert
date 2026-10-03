@@ -45,11 +45,11 @@ func runOSUpdateDocker(t *testing.T, env ...string) (out, calls string, code int
 	}
 	stubs := map[string]string{
 		"id":        `echo 0`,
-		"apt-mark":  `echo "apt-mark $*" >> "$CALLS"; [[ "$1" == hold && "${FAIL_HOLD:-0}" == 1 ]] && exit 100; exit 0`,
+		"apt-mark":  `echo "apt-mark $*" >> "$CALLS"; [[ "$1" == hold && "${FAIL_HOLD:-0}" == 1 ]] && exit 100; [[ "$1" == unhold && "${FAIL_UNHOLD:-0}" == 1 ]] && exit 100; exit 0`,
 		"apt-get":   `echo "apt-get $*" >> "$CALLS"; [[ "$*" == *only-upgrade* && "${FAIL_UPGRADE:-0}" == 1 ]] && exit 100; exit 0`,
 		"apt-cache": `echo "Candidate: 29.0"; exit 0`,
-		"systemctl": `echo "systemctl $*" >> "$CALLS"; exit 0`,
-		"docker":    `echo "docker $*" >> "$CALLS"; exit 0`,
+		"systemctl": `echo "systemctl $*" >> "$CALLS"; [[ "$1" == restart && "${FAIL_RESTART:-0}" == 1 ]] && exit 1; exit 0`,
+		"docker":    `echo "docker $*" >> "$CALLS"; [[ "$1 $2" == "compose stop" && "${FAIL_STOP:-0}" == 1 ]] && exit 1; [[ "$1 $2" == "compose up" && "${FAIL_START:-0}" == 1 ]] && exit 1; exit 0`,
 	}
 	for name, body := range stubs {
 		if err := os.WriteFile(filepath.Join(bin, name), []byte("#!/bin/bash\n"+body+"\n"), 0o700); err != nil { //nolint:gosec // PATH stub in a test temp dir: must be executable
@@ -102,5 +102,49 @@ func TestOSUpdateDocker_SuccessfulUpgradeTakesNoRecoveryPath(t *testing.T) {
 		if !strings.Contains(calls, want) {
 			t.Fatalf("happy path missing %q:\n%s", want, calls)
 		}
+	}
+}
+
+// Owner review (PR #1528, 2026-10-03): recovery must be armed BEFORE the
+// first mutation of the docker branch, not after `apt-mark unhold`. A failed
+// or partial unhold (dpkg lock, I/O) and a failed stack stop both happen after
+// the stack may already be down; a failed engine restart happens after the
+// packages moved. Each must end in the same recovery: holds re-applied,
+// stack start attempted, non-zero exit with an actionable message.
+func TestOSUpdateDocker_EveryMutationFailureIsRecovered(t *testing.T) {
+	for _, tc := range []struct{ name, env string }{
+		{"unhold-fails", "FAIL_UNHOLD=1"},
+		{"stack-stop-fails", "FAIL_STOP=1"},
+		{"engine-restart-fails", "FAIL_RESTART=1"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out, calls, code := runOSUpdateDocker(t, tc.env)
+			if code == 0 {
+				t.Fatalf("a failed step must exit non-zero:\n%s", out)
+			}
+			if !strings.Contains(out, "Docker upgrade FAILED") {
+				t.Fatalf("the failure must reach the recovery path and say so:\n%s", out)
+			}
+			// The LAST hold-state call must be a hold: whatever moved, the
+			// packages end held.
+			lastHold, lastUnhold := strings.LastIndex(calls, "apt-mark hold"), strings.LastIndex(calls, "apt-mark unhold")
+			if lastHold < 0 || lastHold < lastUnhold {
+				t.Fatalf("Docker packages must end HELD (last hold after last unhold):\n%s", calls)
+			}
+			if !strings.Contains(calls, "docker compose up -d") {
+				t.Fatalf("the stack must be restarted after a failed maintenance step:\n%s", calls)
+			}
+		})
+	}
+}
+
+// A stack that will not start again is reported, never claimed as done.
+func TestOSUpdateDocker_StackStartFailureIsReported(t *testing.T) {
+	out, calls, code := runOSUpdateDocker(t, "FAIL_START=1")
+	if code == 0 || !strings.Contains(out, "stack did not start") {
+		t.Fatalf("a stack that does not come back must fail loudly (code %d):\n%s", code, out)
+	}
+	if strings.LastIndex(calls, "apt-mark hold") < strings.LastIndex(calls, "apt-mark unhold") {
+		t.Fatalf("holds must be re-applied:\n%s", calls)
 	}
 }
