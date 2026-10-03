@@ -1,0 +1,103 @@
+diff --git a/ovf/importer/checksum_local_test.go b/ovf/importer/checksum_local_test.go
+new file mode 100644
+index 0000000..006b5dd
+--- /dev/null
++++ b/ovf/importer/checksum_local_test.go
+@@ -0,0 +1,31 @@
++package importer
++
++import (
++	"github.com/vmware/govmomi/nfc"
++	"github.com/vmware/govmomi/vapi/library"
++	"github.com/vmware/govmomi/vim25/types"
++	"testing"
++)
++
++func TestLocalImportChecksumTypes(t *testing.T) {
++	info := &nfc.LeaseInfo{HttpNfcLeaseInfo: types.HttpNfcLeaseInfo{DeviceUrl: []types.HttpNfcLeaseDeviceUrl{{Key: "disk-key", ImportKey: "disk-id"}}},
++		Items: []nfc.FileItem{{OvfFileItem: types.OvfFileItem{Path: "disk.vmdk", DeviceId: "disk-id"}}}}
++	manifest := map[string]*library.Checksum{"disk.vmdk": {Algorithm: "SHA256", Checksum: "unused"}}
++	pairs, err := importChecksumTypes(info, manifest)
++	if err != nil || len(pairs) != 1 || pairs[0].Key != "disk-key" || pairs[0].Value != "sha256" {
++		t.Fatalf("unexpected negotiation: %v %v", pairs, err)
++	}
++	delete(manifest, "disk.vmdk")
++	if _, err := importChecksumTypes(info, manifest); err == nil {
++		t.Fatal("missing digest accepted")
++	}
++	manifest["disk.vmdk"] = &library.Checksum{Algorithm: "SHA512"}
++	if _, err := importChecksumTypes(info, manifest); err == nil {
++		t.Fatal("unsupported algorithm accepted")
++	}
++	manifest["disk.vmdk"].Algorithm = "SHA256"
++	info.DeviceUrl[0].ImportKey = "different"
++	if _, err := importChecksumTypes(info, manifest); err == nil {
++		t.Fatal("mismatched device accepted")
++	}
++}
+diff --git a/ovf/importer/importer.go b/ovf/importer/importer.go
+index 8a20242..a4d9f56 100644
+--- a/ovf/importer/importer.go
++++ b/ovf/importer/importer.go
+@@ -20,6 +20,7 @@ import (
+ 	"github.com/vmware/govmomi/task"
+ 	"github.com/vmware/govmomi/vapi/library"
+ 	"github.com/vmware/govmomi/vim25"
++	"github.com/vmware/govmomi/vim25/methods"
+ 	"github.com/vmware/govmomi/vim25/progress"
+ 	"github.com/vmware/govmomi/vim25/soap"
+ 	"github.com/vmware/govmomi/vim25/types"
+@@ -162,6 +163,21 @@ func (imp *Importer) Import(ctx context.Context, fpath string, opts Options) (*t
+ 		return nil, err
+ 	}
+ 
++	// LOCAL-ESXI: request the manifest's algorithm before transferring any bytes.
++	// ESXi 8.0 defaults to SHA1 even for an OVA carrying a SHA256 manifest.
++	// Keep ValidateChecksum mandatory; never downgrade or rewrite the artifact.
++	if imp.VerifyManifest {
++		pairs, err := importChecksumTypes(info, imp.Manifest)
++		if err == nil {
++			_, err = methods.HttpNfcLeaseSetManifestChecksumType(ctx, imp.Client,
++				&types.HttpNfcLeaseSetManifestChecksumType{This: lease.Reference(), DeviceUrlsToChecksumTypes: pairs})
++		}
++		if err != nil {
++			_ = lease.Abort(ctx, nil)
++			return nil, fmt.Errorf("manifest checksum negotiation: %w", err)
++		}
++	}
++
+ 	u := lease.StartUpdater(ctx, info)
+ 	defer u.Done()
+ 
+@@ -179,6 +195,31 @@ func (imp *Importer) Import(ctx context.Context, fpath string, opts Options) (*t
+ 	return &info.Entity, lease.Complete(ctx)
+ }
+ 
++func importChecksumTypes(info *nfc.LeaseInfo, manifest map[string]*library.Checksum) ([]types.KeyValue, error) {
++	var pairs []types.KeyValue
++	for _, item := range info.Items {
++		sum := manifest[item.Path]
++		if sum == nil {
++			return nil, fmt.Errorf("missing checksum for %s", item.Path)
++		}
++		algorithm := strings.ToLower(sum.Algorithm)
++		if algorithm != "sha1" && algorithm != "sha256" {
++			return nil, fmt.Errorf("unsupported checksum algorithm %s", algorithm)
++		}
++		matches := 0
++		for _, device := range info.DeviceUrl {
++			if device.ImportKey == item.DeviceId {
++				pairs = append(pairs, types.KeyValue{Key: device.Key, Value: algorithm})
++				matches++
++			}
++		}
++		if matches != 1 {
++			return nil, fmt.Errorf("expected one lease device for %s", item.Path)
++		}
++	}
++	return pairs, nil
++}
++
+ func (imp *Importer) NetworkMap(ctx context.Context, e *ovf.Envelope, networks []Network) ([]types.OvfNetworkMapping, error) {
+ 	var nmap []types.OvfNetworkMapping
+ 	for _, m := range networks {

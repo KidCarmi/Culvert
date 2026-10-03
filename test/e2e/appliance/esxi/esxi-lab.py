@@ -333,7 +333,8 @@ class Lab:
         sha = subprocess.run(['git', '-C', str(ROOT), 'rev-parse', 'HEAD'], capture_output=True, text=True, check=True).stdout.strip()
         dirty = subprocess.run(['git', '-C', str(ROOT), 'status', '--porcelain'], capture_output=True, text=True, check=True).stdout.strip()
         sources = {}
-        for source in (Path(__file__), HERE / 'guest-checks.sh', HERE / 'guest-observe.py', HERE.parent / 'lab/appliance-lab.sh'):
+        for source in (Path(__file__), HERE / 'guest-checks.sh', HERE / 'guest-observe.py',
+                       HERE / 'govc-sha256-negotiation.patch', HERE.parent / 'lab/appliance-lab.sh'):
             with source.open('rb') as f:
                 sources[source.relative_to(ROOT).as_posix()] = digest(f)
         data = dict(artifact=artifact, expected_source=self.c['source_sha'], expected_image=self.c['image_id'],
@@ -344,6 +345,11 @@ class Lab:
                     hypervisor=hs[0]['summary']['config']['product'], capacity=capacity,
                     property_delivery='govc ImportVApp + InjectOvfEnv via VMware guestinfo',
                     host_ref=hs[0]['self'], ds_ref=dss[0]['self'], network_ref=net)
+        if self.c.get('govc_build'):
+            with Path(self.govc).open('rb') as f:
+                actual_binary = digest(f)
+            require(actual_binary == self.c['govc_build']['binary_sha256'], 'local govc binary identity changed')
+            data['govc_local_build'] = self.c['govc_build']
         atomic_json(self.ev / 'preflight.json', data)
         self.record('preflight', 'pass', 'checksum, complete manifest, scope and measured capacity verified')
         return data
