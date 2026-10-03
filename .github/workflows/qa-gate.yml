@@ -421,15 +421,7 @@ jobs:
         run: go build -ldflags="-s -w" -o culvert .
 
       - name: Verify binary is static
-        run: |
-          file culvert
-          if ldd culvert 2>&1 | grep -q "not a dynamic executable"; then
-            echo "binary is static — good"
-          else
-            echo "::error::binary has dynamic dependencies — broke CGO_ENABLED=0 guarantee"
-            ldd culvert || true
-            exit 1
-          fi
+        run: bash .github/scripts/assert-static-binary.sh culvert
 
       - name: Smoke run — start, hit /health, stop
         run: |
@@ -581,12 +573,12 @@ jobs:
         run: go install github.com/securego/gosec/v2/cmd/gosec@v2.27.1
 
       - name: gosec (agent module)
-        # G703 excluded for parity with security-release-gate.yml (taint-mode
-        # variant of the already-excluded G304; see the comment there).
+        # G703/G704 enforced: the sole G703 finding is scoped to the
+        # ULID-validated operation-log read; no G704 findings in this module.
         working-directory: cmd/culvert-maint
         run: |
           $(go env GOPATH)/bin/gosec \
-            -exclude=G104,G302,G304,G703,G704 \
+            -exclude=G104,G302,G304 \
             -fmt=text \
             ./...
 

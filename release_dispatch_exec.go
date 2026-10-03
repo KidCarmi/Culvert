@@ -632,6 +632,7 @@ func (c *httpAgentClient) doJSON(ctx context.Context, method, p string, body []b
 	if body != nil {
 		rdr = bytes.NewReader(body)
 	}
+	// #nosec G704 -- configured agent endpoint, intentionally permits local/private services; RISK-002 suppression audit records HTTP override as accepted-risk, not SSRF-protected.
 	req, err := http.NewRequestWithContext(ctx, method, u.String(), rdr)
 	if err != nil {
 		return err
@@ -639,7 +640,7 @@ func (c *httpAgentClient) doJSON(ctx context.Context, method, p string, body []b
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	resp, err := c.client.Do(req)
+	resp, err := c.client.Do(req) // #nosec G704 -- same configured agent endpoint; TestService_EndpointRebindingUsesNewClient; HTTP override residual in RISK-002.
 	if err != nil {
 		return err
 	}

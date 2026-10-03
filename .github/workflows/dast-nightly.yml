@@ -12,10 +12,8 @@
 #       provision + anon-401 + authenticated-200 gate is a deterministic guard;
 #       ZAP findings stay advisory (passive: missing headers / cookie flags /
 #       info leaks).
-#   J4  gosec report-only view with the remaining blocking-gate exclusions
-#       dropped (G703/G704 — SSRF / forward-proxy-by-design). G401 (weak crypto)
-#       + G402 (InsecureSkipVerify) are now ENFORCED by the blocking gate, so
-#       this lane just surfaces the residual excluded classes for human eyes.
+#   J4  unfiltered gosec advisory (all rules and inline suppressions visible).
+#       Findings need triage; scanner/build errors are failures, not evidence.
 #
 # The forged-leaf TLS posture of the INSPECTED path is asserted deterministically
 # and hermetically by TestMITM_ForgedLeafTLSPosture (Go), not here — the shipped
@@ -235,9 +233,9 @@ jobs:
           retention-days: 30
           if-no-files-found: warn
 
-  # ─── J4 — gosec G401/G402 discovery (report-only) ──────────────────────────
+  # ─── J4 — full gosec discovery (advisory findings) ────────────────────────
   weak-crypto-discovery:
-    name: "DAST · gosec G401/G402 surface (report-only)"
+    name: "DAST · unfiltered gosec advisory"
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -251,17 +249,22 @@ jobs:
       - name: Install gosec (pinned)
         run: go install github.com/securego/gosec/v2/cmd/gosec@v2.27.1
 
-      - name: gosec with the blocking-gate exclusions dropped (non-test, report-only)
-        # G401 (weak crypto) + G402 (InsecureSkipVerify) are now ENFORCED by the
-        # blocking gates (the few config-gated sites carry an at-site `// #nosec`).
-        # This lane keeps a broader report-only view by dropping the REMAINING
-        # exclusions too (G703/G704 — SSRF / forward-proxy-by-design), surfacing
-        # that hidden surface for periodic human eyes without blocking. Non-test
-        # (inline #nosec on annotated production sites suppresses the legit ones).
+      - name: All rules and inline sites (findings advisory, scan errors fatal)
         run: |
-          set -o pipefail
-          echo "── root module ──"
-          gosec -tests=false -exclude=G104,G302,G304 -fmt=text ./... || true
-          echo "── cmd/culvert-maint ──"
-          ( cd cmd/culvert-maint && gosec -tests=false -exclude=G104,G302,G304 -fmt=text ./... ) || true
-          echo "Report-only: G401/G402 are enforced in the blocking gate; this surfaces the remaining (G703/G704) delta."
+          mkdir -p suppression-evidence
+          for module in root maint; do
+            dir=.
+            [ "$module" != maint ] || dir=cmd/culvert-maint
+            (cd "$dir" && gosec -nosec -no-fail -fmt=json -out="$GITHUB_WORKSPACE/suppression-evidence/$module.json" ./...)
+            python3 .github/scripts/security-exceptions.py gosec "suppression-evidence/$module.json" > "suppression-evidence/$module.md"
+            cat "suppression-evidence/$module.md" >> "$GITHUB_STEP_SUMMARY"
+          done
+
+      - name: Upload unfiltered findings
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: gosec-suppression-evidence
+          path: suppression-evidence/
+          retention-days: 30
+          if-no-files-found: error

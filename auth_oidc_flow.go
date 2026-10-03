@@ -389,11 +389,11 @@ func (j *jwksCache) refreshOnce() error {
 func (j *jwksCache) refresh() error {
 	ctx, cancel := context.WithTimeout(context.Background(), jwksFetchTimeout)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, j.jwksURI, http.NoBody)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, j.jwksURI, http.NoBody) // #nosec G704 -- discovery-supplied endpoint; newOIDCTransport guards every resolved dial; TestOIDCTransport_SSRFBoundary (RISK-002).
 	if err != nil {
 		return fmt.Errorf("jwks request: %w", err)
 	}
-	resp, err := j.client.Do(req)
+	resp, err := j.client.Do(req) // #nosec G704 -- guarded transport shared with OIDC flow, including redirects; TestOIDCTransport_SSRFBoundary (RISK-002).
 	if err != nil {
 		return fmt.Errorf("jwks fetch: %w", err)
 	}
@@ -572,8 +572,7 @@ func NewOIDCFlowProvider(p *IdPProfile) (*OIDCFlowProvider, error) {
 		return nil, fmt.Errorf("oidc[%s]: client_id required", p.ID)
 	}
 
-	transport := http.DefaultTransport.(*http.Transport).Clone()
-	transport.DialContext = ssrfSafeDialContext // SSRF guard at dial level
+	transport := newOIDCTransport()
 	if cfg.TLSSkipVerify {
 		logWarnf("OIDC flow [%s]: TLS certificate verification DISABLED (tls_skip_verify) — credentials traverse an unverified channel vulnerable to MITM; intended for self-signed dev IdPs only", sanitizeLog(p.ID)) // RISK-009
 		transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}                                                                                                                                              // #nosec G402 -- InsecureSkipVerify is an explicit admin opt-in via cfg.TLSSkipVerify (warned above)
@@ -961,6 +960,7 @@ func (p *OIDCFlowProvider) introspect(token string) (identity *Identity, active 
 	}
 	intrCtx, intrCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer intrCancel()
+	// #nosec G704 -- newOIDCTransport guards the resolved destination on every dial; TestOIDCTransport_SSRFBoundary. TLS skip/HTTP residual: RISK-009.
 	req, reqErr := http.NewRequestWithContext(intrCtx,
 		http.MethodPost, p.disc.IntrospectionEndpoint, strings.NewReader(form.Encode()))
 	if reqErr != nil {
@@ -969,7 +969,7 @@ func (p *OIDCFlowProvider) introspect(token string) (identity *Identity, active 
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.SetBasicAuth(p.cfg.ClientID, p.cfg.ClientSecret)
 
-	resp, doErr := p.client.Do(req)
+	resp, doErr := p.client.Do(req) // #nosec G704 -- same guarded transport, including redirects; TestOIDCTransport_SSRFBoundary (RISK-002).
 	if doErr != nil {
 		return nil, false, nil, fmt.Errorf("introspection request: %w", doErr)
 	}

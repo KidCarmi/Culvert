@@ -194,8 +194,7 @@ func NewOIDCAuth(cfg OIDCConfig) (*OIDCAuth, error) {
 	if ttl <= 0 {
 		ttl = 2 * time.Minute
 	}
-	transport := http.DefaultTransport.(*http.Transport).Clone()
-	transport.DialContext = ssrfSafeDialContext // SSRF guard at dial level (RISK-002): the admin-configured IntrospectURL is reached per-request
+	transport := newOIDCTransport()
 	if cfg.TLSSkipVerify {
 		logWarnf("OIDC introspection: TLS certificate verification DISABLED (tls_skip_verify) — credentials traverse an unverified channel vulnerable to MITM; intended for self-signed dev IdPs only") // RISK-009
 		transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}                                                                                                                               // #nosec G402 -- InsecureSkipVerify is config-guarded by cfg.TLSSkipVerify
@@ -206,6 +205,16 @@ func NewOIDCAuth(cfg OIDCConfig) (*OIDCAuth, error) {
 		client: &http.Client{Timeout: 10 * time.Second, Transport: transport},
 		cache:  map[string]*oidcCacheEntry{},
 	}, nil
+}
+
+// newOIDCTransport keeps the dial-time guard on the actual IdP destination.
+// A forward proxy would make DialContext check the proxy's IP instead, leaving
+// the destination (including redirect targets) to the proxy's resolver.
+func newOIDCTransport() *http.Transport {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.Proxy = nil
+	transport.DialContext = ssrfSafeDialContext
+	return transport
 }
 
 func (a *OIDCAuth) Name() string { return "oidc" }
@@ -301,6 +310,7 @@ func (a *OIDCAuth) introspect(token string) (identity *Identity, active bool, to
 		"token":           {token},
 		"token_type_hint": {"access_token"},
 	}
+	// #nosec G704 -- newOIDCTransport guards the resolved destination on every dial; TestOIDCTransport_SSRFBoundary. TLS skip/HTTP residual: RISK-009.
 	req, reqErr := http.NewRequestWithContext(
 		context.Background(),
 		http.MethodPost,
@@ -314,7 +324,7 @@ func (a *OIDCAuth) introspect(token string) (identity *Identity, active bool, to
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.SetBasicAuth(a.cfg.ClientID, a.cfg.ClientSecret)
 
-	resp, doErr := a.client.Do(req)
+	resp, doErr := a.client.Do(req) // #nosec G704 -- same guarded transport, including redirects; TestOIDCTransport_SSRFBoundary (RISK-002).
 	if doErr != nil {
 		logger.Printf("OIDC introspect request error: %v", doErr)
 		return nil, false, nil, fmt.Errorf("introspection request: %w", doErr)

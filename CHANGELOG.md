@@ -9,6 +9,14 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Security
 
+- OIDC credential/JWKS transports now dial the guarded destination directly:
+  an inherited forward proxy could bypass the resolved-IP SSRF guard. A
+  behavioral regression checks private destinations, DNS rebinding and
+  redirects through a public proxy. OIDC no longer uses environment proxies.
+  G704 is enforced with scoped exceptions, the expired OpenSSL exception is
+  removed, and CI records unfiltered findings and the actual image's package
+  and static-binary evidence (RISK-002/RISK-006).
+
 - Node-local key material was written with `os.WriteFile` on a predictable
   path, which follows a planted symlink and inherits a planted file's mode
   (SEC-SECRETWRITE-1). Four writers introduced in this window were affected:

@@ -101,6 +101,7 @@ for P in $CANDIDATE_PLATFORMS; do
     [ "$CC" = "$TOOLCHAIN" ] || bad "${P}: ${BIN} was built by '${CC}', but go.mod pins ${TOOLCHAIN}"
     [ "$(setting "$INFO" GOOS)" = "$OS" ] || bad "${P}: ${BIN} was built for GOOS=$(setting "$INFO" GOOS)"
     [ "$(setting "$INFO" GOARCH)" = "$ARCH" ] || bad "${P}: ${BIN} was built for GOARCH=$(setting "$INFO" GOARCH)"
+    bash "$HERE/assert-static-binary.sh" "$D/$BIN" || bad "${P}: ${BIN} violated the static-binary assumption"
     echo "  ${P} ${BIN}: ${CC}, $(setting "$INFO" GOOS)/$(setting "$INFO" GOARCH)"
   done
 done

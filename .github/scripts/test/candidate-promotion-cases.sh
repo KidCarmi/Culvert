@@ -36,6 +36,14 @@ bad() { fail=$((fail+1)); printf '  FAIL  %s\n     -> %s\n' "$1" "$2"; }
 
 BIN="$WORK/bin"; mkdir -p "$BIN"
 
+# This suite mocks artifact contents to test promotion state transitions.
+# Actual ELF parsing is exercised separately by security-evidence-test.py.
+cat > "$BIN/readelf" <<'EOF'
+#!/usr/bin/env bash
+if [ "${ELF_DYNAMIC:-}" = 1 ]; then echo '  DYNAMIC 0x1000'; else echo '  LOAD 0x1000'; fi
+EOF
+chmod +x "$BIN/readelf"
+
 cat > "$BIN/docker" <<'EOF'
 #!/usr/bin/env bash
 # buildx imagetools inspect|create, pull, create, cp, rm, run, logs
@@ -178,6 +186,7 @@ cat > "$BIN/go" <<'EOF'
 # The fake binary holds "compiler goos goarch".
 read -r cc os arch < "$3"
 printf '%s: %s\n\tpath\tx\n\tbuild\tGOARCH=%s\n\tbuild\tGOOS=%s\n' "$3" "$cc" "$arch" "$os"
+printf '\tbuild\tCGO_ENABLED=%s\n' "${GO_CGO:-0}"
 EOF
 cat > "$BIN/curl" <<'EOF2'
 #!/usr/bin/env bash
@@ -436,6 +445,12 @@ contents() { # contents <amd64 compiler> <arm64 compiler> <arm64 goarch> <versio
 verify() { bash "$SCRIPTS/candidate-verify-contents.sh" "$IMG" "$D1" "$SHA" v1.0.5 go1.26.8 >"$WORK/log" 2>&1; }
 reset; index "$D1"; printf '%s|%s\n' "$D1" "$SHA" >> "$WORK/labels"; contents go1.26.8 go1.26.8 arm64 v1.0.5
 if verify; then ok "a correct candidate verifies on both platforms"; else bad "a correct candidate verifies on both platforms" "$(cat "$WORK/log")"; fi
+export GO_CGO=1
+refused "a CGO candidate fails the static assumption" "missing CGO_ENABLED=0" verify
+unset GO_CGO
+export ELF_DYNAMIC=1
+refused "a dynamic candidate fails even with CGO_ENABLED=0 metadata" "interpreter or dynamic segment" verify
+unset ELF_DYNAMIC
 contents go1.26.8 go1.27.1 arm64 v1.0.5
 if verify; then bad "an arm64 binary from another compiler fails qualification" "passed"
 elif log_has "go1.27.1"; then ok "an arm64 binary from another compiler fails qualification"
