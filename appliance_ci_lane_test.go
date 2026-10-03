@@ -63,6 +63,33 @@ func TestApplianceLane_ClassifierRunsTheHarnessesForApplianceChanges(t *testing.
 	})
 }
 
+// applianceJobShape reports the four properties every appliance job must
+// carry: it depends on the gate image build, downloads that image artifact,
+// loads it into docker, and runs an appliance harness against it.
+func applianceJobShape(j map[string]interface{}) (needsBuild, downloadsArtifact, loadsImage, runsHarness bool) {
+	needs, _ := j["needs"].([]interface{})
+	for _, n := range needs {
+		if toStr(n) == "build-image" {
+			needsBuild = true
+		}
+	}
+	steps, _ := j["steps"].([]interface{})
+	for _, st := range steps {
+		s := asMap(st)
+		uses, run := toStr(s["uses"]), toStr(s["run"])
+		if strings.HasPrefix(uses, "actions/download-artifact@") && toStr(asMap(s["with"])["name"]) == "deep-gate-image" {
+			downloadsArtifact = true
+		}
+		if strings.Contains(run, "docker load -i culvert-image.tar") {
+			loadsImage = true
+		}
+		if strings.Contains(run, "test/e2e/appliance/") && strings.Contains(run, "-qualify.sh") {
+			runsHarness = true
+		}
+	}
+	return needsBuild, downloadsArtifact, loadsImage, runsHarness
+}
+
 func TestApplianceLane_JobsConsumeTheGateImageAndAreAggregated(t *testing.T) {
 	path := filepath.Join(pkgSourceDir(), ".github", "workflows", "pr-deep-gate.yml")
 	raw, err := os.ReadFile(path)
@@ -76,27 +103,7 @@ func TestApplianceLane_JobsConsumeTheGateImageAndAreAggregated(t *testing.T) {
 		if j == nil {
 			t.Fatalf("job %s missing", job)
 		}
-		var needsBuild, downloadsArtifact, loadsImage, runsHarness bool
-		needs, _ := j["needs"].([]interface{})
-		for _, n := range needs {
-			if toStr(n) == "build-image" {
-				needsBuild = true
-			}
-		}
-		steps, _ := j["steps"].([]interface{})
-		for _, st := range steps {
-			s := asMap(st)
-			uses, run := toStr(s["uses"]), toStr(s["run"])
-			if strings.HasPrefix(uses, "actions/download-artifact@") && toStr(asMap(s["with"])["name"]) == "deep-gate-image" {
-				downloadsArtifact = true
-			}
-			if strings.Contains(run, "docker load -i culvert-image.tar") {
-				loadsImage = true
-			}
-			if strings.Contains(run, "test/e2e/appliance/") && strings.Contains(run, "-qualify.sh") {
-				runsHarness = true
-			}
-		}
+		needsBuild, downloadsArtifact, loadsImage, runsHarness := applianceJobShape(j)
 		if !needsBuild || !downloadsArtifact || !loadsImage || !runsHarness {
 			t.Errorf("%s: needsBuild=%v downloadsArtifact=%v loadsImage=%v runsHarness=%v", job, needsBuild, downloadsArtifact, loadsImage, runsHarness)
 		}

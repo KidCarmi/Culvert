@@ -18,6 +18,8 @@ package main
 // failure and still refuse to claim success after a persistent one.
 
 import (
+	"bytes"
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -57,12 +59,12 @@ func newFBHarness(t *testing.T) *fbHarness {
 		calls:   filepath.Join(root, "calls.log"),
 	}
 	for _, d := range []string{filepath.Join(h.state, "state"), h.stack, h.sudoers, filepath.Join(h.home, ".ssh"), h.bin, h.stubs} {
-		if err := os.MkdirAll(d, 0o755); err != nil {
+		if err := os.MkdirAll(d, 0o750); err != nil {
 			t.Fatal(err)
 		}
 	}
 	// main() sources the build manifest (image repo/tag) before any verb.
-	if err := os.WriteFile(filepath.Join(h.state, "manifest.env"), []byte("APP_IMAGE_REPO=ghcr.io/kidcarmi/culvert\nAPP_IMAGE_TAG=v0.0.0-test\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(h.state, "manifest.env"), []byte("APP_IMAGE_REPO=ghcr.io/kidcarmi/culvert\nAPP_IMAGE_TAG=v0.0.0-test\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	// culvert-issue-update is invoked best-effort by the finish/repair paths.
@@ -84,7 +86,10 @@ func newFBHarness(t *testing.T) *fbHarness {
 
 func (h *fbHarness) writeExec(path, body string) {
 	h.t.Helper()
-	if err := os.WriteFile(path, []byte(body), 0o755); err != nil {
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		h.t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0o700); err != nil {
 		h.t.Fatal(err)
 	}
 }
@@ -133,13 +138,14 @@ func (h *fbHarness) env() []string {
 
 // run sources the script in library mode and evaluates cmd. It returns the
 // combined output and the exit status (0 on success).
-func (h *fbHarness) run(cmd string) (string, int) {
+func (h *fbHarness) run(cmd string) (output string, code int) {
 	h.t.Helper()
 	abs, _ := filepath.Abs(fbScript)
-	c := exec.Command("bash", "-c", ". "+abs+"; "+cmd)
+	// #nosec G204 -- program is the literal "bash"; abs is the checked-in
+	// script's path and cmd a test-constant snippet, never external input.
+	c := exec.CommandContext(h.t.Context(), "bash", "-c", ". "+abs+"; "+cmd)
 	c.Env = h.env()
 	out, err := c.CombinedOutput()
-	code := 0
 	if err != nil {
 		var ee *exec.ExitError
 		if ok := errorsAs(err, &ee); ok {
@@ -427,12 +433,12 @@ func TestFirstBoot_StepAgent_ReasonsAreSpecific(t *testing.T) {
 	h := newFBHarness(t)
 	unit := filepath.Join(h.root, "culvert-maint.service")
 	// unit present, not enabled
-	_ = os.WriteFile(unit, []byte("[Unit]\n"), 0o644)
+	_ = os.WriteFile(unit, []byte("[Unit]\n"), 0o600)
 	if out, _ := h.run("agent_state"); strings.TrimSpace(out) != "missing:unit_not_enabled" {
 		t.Fatalf("got %q", out)
 	}
 	// enabled, binary absent
-	_ = os.WriteFile(filepath.Join(h.root, "agent.enabled"), nil, 0o644)
+	_ = os.WriteFile(filepath.Join(h.root, "agent.enabled"), nil, 0o600)
 	if out, _ := h.run("agent_state"); strings.TrimSpace(out) != "missing:binary_absent" {
 		t.Fatalf("got %q", out)
 	}
@@ -466,7 +472,7 @@ func TestFirstBoot_RepairAgent_TransientFailureThenRecovery(t *testing.T) {
 	}
 
 	// Trust service back: repair installs, verifies, clears.
-	_ = os.WriteFile(filepath.Join(h.root, "agent.available"), nil, 0o644)
+	_ = os.WriteFile(filepath.Join(h.root, "agent.available"), nil, 0o600)
 	out, code = h.run("main --repair-agent")
 	if code != 0 {
 		t.Fatalf("repair after recovery failed (%d):\n%s", code, out)
@@ -475,12 +481,12 @@ func TestFirstBoot_RepairAgent_TransientFailureThenRecovery(t *testing.T) {
 		t.Fatal("a verified repair must clear agent.pending and record agent.done")
 	}
 	envAfter, _ := os.ReadFile(filepath.Join(h.stack, ".env"))
-	if string(envAfter) != string(envBefore) {
+	if !bytes.Equal(envAfter, envBefore) {
 		t.Fatalf("repair must not rewrite the stack's .env (token/secrets):\n%s\n---\n%s", envBefore, envAfter)
 	}
 	calls, _ := os.ReadFile(h.calls)
 	tok := regexp.MustCompile(`CULVERT_SETUP_TOKEN=([a-f0-9]{32})`).FindStringSubmatch(string(envBefore))
-	if tok == nil || strings.Count(string(calls), "TOKEN="+tok[1]) != 3 {
+	if len(tok) < 2 || strings.Count(string(calls), "TOKEN="+tok[1]) != 3 {
 		t.Fatalf("every install.sh run (boot + 2 repairs) must carry the same persisted token:\n%s", calls)
 	}
 }
@@ -499,13 +505,14 @@ func TestFirstBoot_RepairAgent_RefusesBeforeInstallStep(t *testing.T) {
 
 // ── culvert-sudo-policy: never lock the operator out ────────────────────────
 
-func (h *fbHarness) runSudoPolicy(args ...string) (string, int) {
+func (h *fbHarness) runSudoPolicy(args ...string) (output string, code int) {
 	h.t.Helper()
 	abs, _ := filepath.Abs(sudoPolicyScript)
-	c := exec.Command("bash", append([]string{abs}, args...)...)
+	// #nosec G204 -- program is the literal "bash"; abs is the checked-in
+	// script's path and args are test constants.
+	c := exec.CommandContext(h.t.Context(), "bash", append([]string{abs}, args...)...)
 	c.Env = h.env()
 	out, err := c.CombinedOutput()
-	code := 0
 	if err != nil {
 		var ee *exec.ExitError
 		if errorsAs(err, &ee) {
@@ -521,7 +528,7 @@ func TestSudoPolicy_RequirePasswordRefusesWithoutAPassword(t *testing.T) {
 	h := newFBHarness(t)
 	h.setShadow("!")
 	h.setKey(true)
-	_ = os.WriteFile(filepath.Join(h.sudoers, "95-culvert-keyonly"), []byte("culvert ALL=(ALL:ALL) NOPASSWD: ALL\n"), 0o440)
+	_ = os.WriteFile(filepath.Join(h.sudoers, "95-culvert-keyonly"), []byte("culvert ALL=(ALL:ALL) NOPASSWD: ALL\n"), 0o400)
 	out, code := h.runSudoPolicy("require-password")
 	if code == 0 || !strings.Contains(out, "no usable password") {
 		t.Fatalf("must refuse (exit %d):\n%s", code, out)
@@ -559,11 +566,12 @@ func TestSudoPolicy_PasswordlessRefusesWithoutAKey(t *testing.T) {
 
 func TestApplianceStatus_ReportsAgentSudoAndToken(t *testing.T) {
 	h := newFBHarness(t)
-	_ = os.WriteFile(filepath.Join(h.state, "state", "agent.pending"), []byte("2026-10-03T00:00:00Z unit_absent\n"), 0o644)
-	_ = os.WriteFile(filepath.Join(h.sudoers, "95-culvert-keyonly"), []byte("culvert ALL=(ALL:ALL) NOPASSWD: ALL\n"), 0o440)
+	_ = os.WriteFile(filepath.Join(h.state, "state", "agent.pending"), []byte("2026-10-03T00:00:00Z unit_absent\n"), 0o600)
+	_ = os.WriteFile(filepath.Join(h.sudoers, "95-culvert-keyonly"), []byte("culvert ALL=(ALL:ALL) NOPASSWD: ALL\n"), 0o400)
 	_ = os.WriteFile(filepath.Join(h.stack, ".env"), []byte("CULVERT_SETUP_TOKEN=0123456789abcdef0123456789abcdef\n"), 0o600)
 	abs, _ := filepath.Abs(statusScript)
-	c := exec.Command("bash", abs)
+	// #nosec G204 -- program is the literal "bash"; abs is the checked-in script's path.
+	c := exec.CommandContext(t.Context(), "bash", abs)
 	c.Env = h.env()
 	out, _ := c.CombinedOutput() // the loopback probes fail here: no services
 	s := string(out)
@@ -577,7 +585,7 @@ func TestApplianceStatus_ReportsAgentSudoAndToken(t *testing.T) {
 	if strings.Contains(s, "0123456789abcdef") {
 		t.Errorf("token must not be printed while setup state is unknown:\n%s", s)
 	}
-	c = exec.Command("bash", abs, "--json")
+	c = exec.CommandContext(t.Context(), "bash", abs, "--json") // #nosec G204 -- same script, fixed flag
 	c.Env = h.env()
 	out, _ = c.CombinedOutput()
 	if !strings.Contains(string(out), `"maintenance_agent": "NOT installed (unit_absent)`) || !strings.Contains(string(out), `"sudo_policy": "passwordless`) {
@@ -606,25 +614,35 @@ func TestSudoPolicy_LiveLastMatchPrecedence(t *testing.T) {
 		}
 	}
 	user := "cvsudotest" + strconv.Itoa(os.Getpid()%10000)
-	if out, err := exec.Command("useradd", "-m", "-s", "/bin/bash", user).CombinedOutput(); err != nil {
+	// #nosec G204 -- fixed argv; user is the throwaway account name this test generates.
+	if out, err := exec.CommandContext(t.Context(), "useradd", "-m", "-s", "/bin/bash", user).CombinedOutput(); err != nil {
 		t.Fatalf("useradd: %v %s", err, out)
 	}
-	t.Cleanup(func() { _ = exec.Command("userdel", "-r", user).Run() })
+	// t.Context() is already cancelled when Cleanup runs; the account removal
+	// must not be cut short by it.
+	t.Cleanup(func() { _ = exec.CommandContext(context.Background(), "userdel", "-r", user).Run() }) // #nosec G204 -- fixed argv + the generated account name
 	cloudInit := "/etc/sudoers.d/90-cloud-init-users-" + user
 	keyOnly := "/etc/sudoers.d/95-culvert-keyonly-" + user
 	write := func(path, rule string) {
 		t.Helper()
-		if err := os.WriteFile(path, []byte(rule), 0o440); err != nil {
+		// Written private, then given the real sudoers.d mode (0440): the
+		// proof must run against the file shape an appliance ships.
+		if err := os.WriteFile(path, []byte(rule), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		if out, err := exec.Command("visudo", "-c", "-q", "-f", path).CombinedOutput(); err != nil {
+		if err := os.Chmod(path, 0o440); err != nil {
+			t.Fatal(err)
+		}
+		// #nosec G204 -- fixed argv; path is one of the two sudoers drop-ins this test writes.
+		if out, err := exec.CommandContext(t.Context(), "visudo", "-c", "-q", "-f", path).CombinedOutput(); err != nil {
 			t.Fatalf("visudo rejects %s: %v %s", path, err, out)
 		}
 	}
 	write(cloudInit, user+" ALL=(ALL:ALL) ALL\n")
 	t.Cleanup(func() { _ = os.Remove(cloudInit); _ = os.Remove(keyOnly) })
 	sudoN := func() (string, error) {
-		out, err := exec.Command("su", "-", user, "-c", "sudo -n true").CombinedOutput()
+		// #nosec G204 -- fixed argv + the generated account name.
+		out, err := exec.CommandContext(t.Context(), "su", "-", user, "-c", "sudo -n true").CombinedOutput()
 		return string(out), err
 	}
 	// Password rule alone: sudo -n must refuse (no password can be supplied).

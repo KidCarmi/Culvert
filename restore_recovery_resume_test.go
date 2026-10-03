@@ -54,7 +54,7 @@ func snapshotTree(t *testing.T, dir string) map[string]string {
 			out[rel] = "dir"
 			return nil
 		}
-		body, rerr := os.ReadFile(p) // #nosec G304 -- test fixture
+		body, rerr := os.ReadFile(p) // #nosec G304 G122 -- test fixture snapshot of a t.TempDir() tree; no symlinks are created there
 		if rerr != nil {
 			return rerr
 		}
@@ -375,8 +375,16 @@ func TestRestoreCommit_WritesPromotedMarkerBeforeRemovingStaging(t *testing.T) {
 		t.Fatal(err)
 	}
 	fn := string(body)
-	fn = fn[strings.Index(fn, "func swapInPlace("):]
-	fn = fn[:strings.Index(fn, "\n}\n")]
+	start := strings.Index(fn, "func swapInPlace(")
+	if start < 0 {
+		t.Fatal("swapInPlace not found in restore_inplace.go")
+	}
+	fn = fn[start:]
+	end := strings.Index(fn, "\n}\n")
+	if end < 0 {
+		t.Fatal("swapInPlace body end not found")
+	}
+	fn = fn[:end]
 	mark := strings.Index(fn, "restoreProgressPromoted")
 	rm := strings.Index(fn, "os.Remove(stagingDir)")
 	if mark < 0 || rm < 0 || mark > rm {

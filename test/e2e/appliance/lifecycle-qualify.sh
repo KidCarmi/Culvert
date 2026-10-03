@@ -49,12 +49,24 @@ SUDO=""; [[ "$(id -u)" -eq 0 ]] || SUDO=sudo
 LOOPDEVS=()
 
 log()  { printf '%s %s\n' "$(date -u +%H:%M:%S)" "$*" >&2; }
-digest_of() { docker image inspect --format '{{index .RepoDigests 0}}|{{.Id}}' "$1" 2>/dev/null || echo "unknown|unknown"; }
+# digest_of answers "<repo digest or none>|<image id>" on ONE line. An image
+# loaded from a tar (the CI gate image) carries no RepoDigests, and `index` on
+# that empty list makes docker emit a bare newline before it fails — the first
+# CI run of this lane wrote that newline INTO the JSONL record and the report
+# step refused every line. The template never indexes an absent list, and the
+# answer is stripped of control characters whatever docker prints.
+digest_of() {
+  local d
+  d="$(docker image inspect --format '{{if .RepoDigests}}{{index .RepoDigests 0}}{{else}}none{{end}}|{{.Id}}' "$1" 2>/dev/null | tr -d '\n\r\t')" || d=""
+  printf '%s' "${d:-unknown|unknown}"
+}
 check() { # check <scenario> <name> <pass|fail|blocked> <detail>
   local sc="$1" name="$2" res="$3" detail="${4:-}"
-  printf '{"run":"%s","scenario":"%s","check":"%s","result":"%s","detail":%s,"cur_image":"%s","cur_digest":"%s"}\n' \
-    "$RUN_ID" "$sc" "$name" "$res" "$(printf '%s' "$detail" | python3 -c 'import json,sys;print(json.dumps(sys.stdin.read()))')" \
-    "$CUR_IMAGE" "$(digest_of "$CUR_IMAGE")" >> "$JSONL"
+  # Every field goes through json.dumps: the record must stay machine-readable
+  # whatever a detail, image name or digest contains (the report step parses
+  # it line by line and a single bad byte voids the whole run's evidence).
+  python3 -c 'import json,sys; a=sys.argv[1:]; print(json.dumps({"run":a[0],"scenario":a[1],"check":a[2],"result":a[3],"detail":a[4],"cur_image":a[5],"cur_digest":a[6]},separators=(",",":")))' \
+    "$RUN_ID" "$sc" "$name" "$res" "$detail" "$CUR_IMAGE" "$(digest_of "$CUR_IMAGE")" >> "$JSONL"
   if [[ "$res" == fail ]]; then FAILS=$((FAILS+1)); log "FAIL [$sc] $name: $detail"; else log "$res [$sc] $name: $detail"; fi
 }
 expect() { # expect <scenario> <name> <condition-cmd...>

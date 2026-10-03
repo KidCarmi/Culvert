@@ -82,7 +82,7 @@ func TestSetupToken_UnsetKeepsOpenBootstrap(t *testing.T) {
 	if setupTokenRequired() {
 		t.Fatal("a blank token must not be required")
 	}
-	req := httptest.NewRequest(http.MethodGet, "/api/setup/status", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/setup/status", http.NoBody)
 	rec := httptest.NewRecorder()
 	apiSetupStatus(rec, req)
 	if !strings.Contains(rec.Body.String(), `"setupTokenRequired":false`) {
@@ -96,7 +96,7 @@ func TestSetupToken_UnsetKeepsOpenBootstrap(t *testing.T) {
 func TestSetupToken_StatusReportsRequirement(t *testing.T) {
 	setupTokenTestConfig(t)
 	loadSetupToken("per-instance-token-0123456789abcdef")
-	req := httptest.NewRequest(http.MethodGet, "/api/setup/status", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/setup/status", http.NoBody)
 	rec := httptest.NewRecorder()
 	apiSetupStatus(rec, req)
 	if !strings.Contains(rec.Body.String(), `"setupTokenRequired":true`) {

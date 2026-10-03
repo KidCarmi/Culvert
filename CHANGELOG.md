@@ -87,7 +87,10 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   the explicit retry. ext4's `lost+found` no longer blocks a restore on a
   dedicated data volume. The real-image lifecycle, real-ClamAV and agent
   harnesses are blocking Deep PR Gate jobs against the PR-head image, with a
-  full-volume (ENOSPC) restore scenario; the OVA build has a labelled
+  full-volume (ENOSPC) restore scenario (first execution: every scenario and
+  the real sidecar passed on the runner; the harness's JSONL writer, which
+  broke on a tar-loaded image's missing digest, is fixed and gated); the OVA
+  build has a labelled
   candidate mode from a CI image artifact; guest security updates are
   applied at build time from a pinned archive snapshot; every CVE on the
   shipped artefacts has a disposition.
