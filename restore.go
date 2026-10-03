@@ -1341,17 +1341,24 @@ func stageArtifacts(stagingDir, dataDir string, files map[string][]byte, manifes
 	// manifest are still preserved (e.g. files added by features
 	// introduced after the backup snapshot, in non-full modes).
 	walkErr := filepath.Walk(dataDir, func(p string, info os.FileInfo, werr error) error {
-		if werr != nil {
-			return werr
-		}
 		// Never carry over (or descend into) the restore machinery's own
-		// top-level entries: the staging dir being written, previous
-		// .restore-bak.* leftovers, the journal and the lock file.
-		if filepath.Dir(p) == dataDir && (isRestoreInternalEntry(info.Name()) || isFilesystemFixtureEntry(info.Name())) {
+		// top-level entries — the staging dir being written, previous
+		// .restore-bak.* leftovers, the journal and the lock file — nor the
+		// filesystem's own (`lost+found`). This check runs BEFORE the error
+		// check on purpose: filepath.Walk reads a directory before it calls
+		// the function for it, so an unreadable top-level directory arrives
+		// here WITH werr set (root-owned 0700 lost+found on a dedicated ext4
+		// volume: "open /data/lost+found: permission denied"), and an
+		// error-first shape fails the whole stage on an entry that must be
+		// skipped — measured against the real image in lifecycle scenario G.
+		if info != nil && filepath.Dir(p) == dataDir && (isRestoreInternalEntry(info.Name()) || isFilesystemFixtureEntry(info.Name())) {
 			if info.IsDir() {
 				return filepath.SkipDir
 			}
 			return nil
+		}
+		if werr != nil {
+			return werr
 		}
 		if info.IsDir() {
 			return nil

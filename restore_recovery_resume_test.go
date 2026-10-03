@@ -370,7 +370,7 @@ func TestRecoverRestore_Complete_MissingStagingWithoutMarker_Refuses(t *testing.
 // promotion rename (before the marker) must still complete, because staging
 // is then present and empty.
 func TestRestoreCommit_WritesPromotedMarkerBeforeRemovingStaging(t *testing.T) {
-	body, err := os.ReadFile("restore_inplace.go")
+	body, err := os.ReadFile(filepath.Join(pkgSourceDir(), "restore_inplace.go"))
 	if err != nil {
 		t.Fatal(err)
 	}

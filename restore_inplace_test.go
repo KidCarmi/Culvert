@@ -589,12 +589,18 @@ func TestRestoreCommit_LeavesLostAndFoundInPlace(t *testing.T) {
 	if err := os.Mkdir(lf, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	// An unreadable fixture for a non-root test process; root ignores the
-	// mode, so the in-place assertions below are what pin the behaviour.
+	// Unreadable for a non-root test process — which is what the CI runner
+	// is, and what makes this gate catch the error-first walk shape the first
+	// fix shipped with (filepath.Walk hands an unreadable directory to the
+	// callback WITH its readdir error). Root ignores the mode; there the
+	// in-place assertions below are what the gate pins.
 	if err := os.Chmod(lf, 0); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.Chmod(lf, 0o700) })
+	if os.Getuid() == 0 {
+		t.Log("running as root: the EACCES half of this gate is exercised only by an unprivileged runner")
+	}
 	if _, err := captureStdout(t, func() error {
 		return runRestoreCommit(src, currentDir, "", restoreOpts{Mode: modeFull, AcceptDPReenrollment: true})
 	}); err != nil {

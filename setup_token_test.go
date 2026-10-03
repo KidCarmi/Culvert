@@ -108,7 +108,7 @@ func TestSetupToken_StatusReportsRequirement(t *testing.T) {
 // length never influence timing; pinned structurally (a timing gate would
 // flake) by requiring subtle.ConstantTimeCompare on the hashes.
 func TestSetupToken_ComparisonIsConstantTime(t *testing.T) {
-	raw, err := os.ReadFile("setup_token.go")
+	raw, err := os.ReadFile(filepath.Join(pkgSourceDir(), "setup_token.go"))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -27,9 +27,14 @@ import (
 	"testing"
 )
 
-const fbScript = "appliance/provision/culvert-firstboot.sh"
-const sudoPolicyScript = "appliance/provision/culvert-sudo-policy"
-const statusScript = "appliance/provision/culvert-status"
+// Anchored to the package source dir (static_read_wall_test.go): a
+// concurrent os.Chdir in another test must not flake these reads.
+var (
+	fbScript         = filepath.Join(pkgSourceDir(), "appliance", "provision", "culvert-firstboot.sh")
+	sudoPolicyScript = filepath.Join(pkgSourceDir(), "appliance", "provision", "culvert-sudo-policy")
+	statusScript     = filepath.Join(pkgSourceDir(), "appliance", "provision", "culvert-status")
+	buildOVAScript   = filepath.Join(pkgSourceDir(), "appliance", "build", "build-ova.sh")
+)
 
 // fbHarness is one isolated first-boot world: state dir, stack dir, sudoers
 // dir, home dir, a stub bin dir on PATH and a record of every stubbed call.
@@ -683,7 +688,7 @@ func TestFirstBoot_CandidateBuildExportsScopedAgentTrustOnly(t *testing.T) {
 // (later keys win on source) rather than substituted, and the OVF/full
 // version names the candidate.
 func TestBuildOVA_CandidateModeIsLabelledAndScoped(t *testing.T) {
-	b, err := os.ReadFile("appliance/build/build-ova.sh")
+	b, err := os.ReadFile(buildOVAScript)
 	if err != nil {
 		t.Fatal(err)
 	}

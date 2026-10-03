@@ -64,7 +64,7 @@ func TestApplianceLane_ClassifierRunsTheHarnessesForApplianceChanges(t *testing.
 }
 
 func TestApplianceLane_JobsConsumeTheGateImageAndAreAggregated(t *testing.T) {
-	const path = ".github/workflows/pr-deep-gate.yml"
+	path := filepath.Join(pkgSourceDir(), ".github", "workflows", "pr-deep-gate.yml")
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
