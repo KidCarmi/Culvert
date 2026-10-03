@@ -44,7 +44,7 @@
 #   host-components.txt, build-upgrades.txt (packages the pinned-snapshot
 #   security upgrade moved), prepare-guest.log (the in-guest transcript).
 #
-# Requires: qemu-img, virt-customize, virt-cat, virt-ls, docker (daemon access),
+# Requires: qemu-img, guestfish, virt-customize, virt-cat, virt-ls, docker (daemon access),
 # curl, gzip, tar, sha256sum, python3; gpgv + ubuntu-cloudimage-keyring optional.
 set -euo pipefail
 
@@ -92,7 +92,7 @@ for v in BASE_IMAGE_URL BASE_IMAGE_SHA256 APP_IMAGE_REPO APP_IMAGE_TAG APP_IMAGE
   [[ -n "${!v:-}" ]] || die "manifest.env: $v is not set"
 done
 
-for t in qemu-img virt-customize virt-cat virt-ls docker curl gzip tar sha256sum python3; do
+for t in qemu-img guestfish virt-customize virt-cat virt-ls docker curl gzip tar sha256sum python3; do
   command -v "$t" >/dev/null 2>&1 || die "required tool missing: $t"
 done
 docker info >/dev/null 2>&1 || die "docker daemon not reachable"
@@ -353,14 +353,34 @@ log "build-info.json written"
 
 # ── 4. Disk ─────────────────────────────────────────────────────────────────
 DISK="$WORK/disk.qcow2"
-log "preparing ${VM_DISK_GB}G qcow2 working disk (virt-resize: root partition grown at BUILD time)"
+log "preparing ${VM_DISK_GB}G qcow2 working disk (root partition grown IN PLACE at build time)"
 # The cloud image's root partition is ~2.4 GB and cloud-init's growpart only
 # runs at FIRST BOOT, so a plain `qemu-img resize` leaves the build with the
 # original filesystem — measured: the Docker install hit ENOSPC at 100 %.
-# virt-resize copies the image into a fresh disk and expands /dev/sda1 now.
+# The root partition (sda1) is the LAST one on the disk, so it is grown in
+# place: GPT backup header moved to the new end, sda1's end extended, the
+# filesystem checked and resized. NOT virt-resize: it copies partitions into a
+# fresh table and RENUMBERS them (14,15,16,1 → 1,2,3,4), while the BIOS GRUB
+# core image embedded in the BIOS-boot partition still names its /boot as
+# partition 16 — every BIOS boot then stopped at "error: no such partition /
+# grub rescue>" (appliance lab, test/appliance-lab; UEFI was unaffected
+# because its grub.cfg finds /boot by UUID). The layout must stay the vendor's.
 rm -f "$DISK"
-qemu-img create -q -f qcow2 "$DISK" "${VM_DISK_GB}G"
-virt-resize --quiet --expand /dev/sda1 "$BASE_FILE" "$DISK"
+qemu-img convert -q -O qcow2 "$BASE_FILE" "$DISK"
+qemu-img resize -q "$DISK" "${VM_DISK_GB}G"
+part_layout() { LIBGUESTFS_BACKEND="${LIBGUESTFS_BACKEND:-direct}" guestfish --ro -a "$1" run : part-list /dev/sda | awk '/part_num:/{n=$2} /part_start:/{print n":"$2}' | tr '\n' ' '; }
+layout_before="$(part_layout "$DISK")"
+LIBGUESTFS_BACKEND="${LIBGUESTFS_BACKEND:-direct}" guestfish -a "$DISK" <<'GF' || die "growing the root partition in place failed"
+run
+part-expand-gpt /dev/sda
+part-resize /dev/sda 1 -34
+e2fsck-f /dev/sda1
+resize2fs /dev/sda1
+GF
+layout_after="$(part_layout "$DISK")"
+# Same partition numbers at the same starts: only sda1's END may move.
+[[ "$layout_before" == "$layout_after" ]] || die "partition layout changed while growing root (before: $layout_before; after: $layout_after) — BIOS GRUB would not find /boot"
+log "root grown in place; partition numbers/starts unchanged: $layout_after"
 
 log "virt-customize (libguestfs; this runs the guest under TCG when no KVM is present — expect 10-30 min)"
 # The host's proxy variables must NOT reach the guest (libguestfs forwards
