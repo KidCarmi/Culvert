@@ -7,6 +7,12 @@
 //	                 Also derives the inline-rollback target (priorRef).
 //	resolve_target → docker manifest inspect <image_ref> → target digest
 //	                 set; compute already_current (running ∩ target).
+//	preflight_dependencies → refuse (nothing changed) while a service the
+//	                 proxy depends on is unhealthy: `compose up` would
+//	                 remove the proxy and leave the new one stopped.
+//	preflight_space → refuse (nothing pulled) when the Docker data root
+//	                 has less free space than ~3x the target's compressed
+//	                 size + headroom.
 //	pre_backup     → if requested AND not already_current: encrypted
 //	                 backup; a failure ABORTS before any pull/restart.
 //	pull           → docker pull <pinned repo@sha256> (P1.4; sudo-boundary
@@ -47,6 +53,7 @@ import (
 	"time"
 
 	"culvert-maint/internal/auth"
+	"culvert-maint/internal/health"
 	"culvert-maint/internal/journal"
 	"culvert-maint/internal/ops"
 	"culvert-maint/internal/runner"
@@ -176,6 +183,13 @@ type upgradeApplyAccumulator struct {
 	runningAfterID      string
 	runningAfterDigests []string
 	healthSummary       string
+	// preserved is the health.Baseline taken before the restart: the
+	// /ready rows that were "ok" and must be "ok" again for health_gate
+	// to pass (owner review, PR #1528). Empty ⇒ 2xx alone gates.
+	targetCompressed int64 // registry size of the pinned target (0 = unknown)
+	preserved        []string
+	before           *health.Snapshot // the full pre-restart /ready answer (nil: stack did not answer)
+	baselineDetail   string
 
 	// Inline auto-rollback state (#375). Set/read across stages + the
 	// result computer; acc.opID/actor feed the rollback audit sub-action.
@@ -208,22 +222,7 @@ func (s *Server) buildUpgradeApplyStages(acc *upgradeApplyAccumulator, racc *rol
 			// derive the inline-rollback target (priorRef) here.
 			Name:          "capture_before",
 			FailureReason: ops.ReasonCommandError,
-			Run: func(ctx context.Context) ([]byte, []byte, error) {
-				ri, err := s.opts.Runner.CaptureRunningProxyImage(ctx)
-				if err != nil {
-					acc.priorCaptureReason = "no_prior_digest"
-					// Capture step done (no prior to record); advance the journal.
-					s.advanceJournalPhaseBestEffort(acc, journal.PhaseCaptured)
-					return []byte("capture_before: no running proxy captured (" + errString(err) + ")"), nil, nil
-				}
-				acc.priorImageID = ri.RunningImageID
-				acc.priorDigests = bareDigests(ri.RepoDigests)
-				s.deriveRollbackTarget(acc, ri.PriorRef())
-				// Prior (rollback target) now known — fold it into the journal record.
-				s.advanceJournalPhaseBestEffort(acc, journal.PhaseCaptured)
-				return []byte(fmt.Sprintf("capture_before: running_image_id=%s prior_digests=%s prior_ref=%q rollback_target=%s",
-					ri.RunningImageID, joinDigests(acc.priorDigests), acc.priorRef, rollbackTargetNote(acc))), nil, nil
-			},
+			Run:           s.captureBefore(acc),
 		},
 		{
 			// Remote registry lookup → target digest set, then PIN a
@@ -263,6 +262,7 @@ func (s *Server) buildUpgradeApplyStages(acc *upgradeApplyAccumulator, racc *rol
 					acc.pinnedDigest = pd
 					acc.pinnedRef = imageRepo(requestedRef) + "@" + acc.pinnedDigest
 				}
+				acc.targetCompressed = targetCompressedBytes(res.Stdout, acc.pinnedDigest)
 				if digestSetsIntersect(acc.priorDigests, acc.targetDigests) {
 					acc.alreadyCurrent = true
 				}
@@ -271,6 +271,23 @@ func (s *Server) buildUpgradeApplyStages(acc *upgradeApplyAccumulator, racc *rol
 				return []byte(fmt.Sprintf("resolve_target: requested_ref=%q pinned_ref=%q target_digests=%s already_current=%v",
 					requestedRef, acc.pinnedRef, joinDigests(acc.targetDigests), acc.alreadyCurrent)), res.Stderr, nil
 			},
+		},
+		{
+			// Refuse before anything is touched when a dependency of the
+			// proxy is unhealthy: `compose up` would leave the proxy
+			// stopped (see preflightDependencies). Not post-restart, so no
+			// rollback fires.
+			Name:          "preflight_dependencies",
+			FailureReason: ops.ReasonValidation,
+			Run:           skipIfCurrent(acc, "preflight_dependencies", s.preflightDependencies()),
+		},
+		{
+			// Refuse before the pull when the Docker data root cannot hold
+			// the target: a full root disk crashed the running proxy and
+			// left Docker unable to restart it (see preflight_space.go).
+			Name:          "preflight_space",
+			FailureReason: ops.ReasonValidation,
+			Run:           skipIfCurrent(acc, "preflight_space", s.preflightSpace(acc)),
 		},
 		{
 			// Encrypted pre-upgrade backup. Skipped when already current
@@ -299,6 +316,14 @@ func (s *Server) buildUpgradeApplyStages(acc *upgradeApplyAccumulator, racc *rol
 			Name:          "pull",
 			FailureReason: ops.ReasonCommandError,
 			Run: skipIfCurrent(acc, "pull", func(ctx context.Context) ([]byte, []byte, error) {
+				// Local-first: a pinned digest is content-addressed, so a digest
+				// already in the local store needs no registry round trip (the
+				// same no-offline floor the rollback core applies). Absent ⇒ pull,
+				// byte-identical to the pre-change behaviour.
+				if s.imagePresentLocally(ctx, acc.pinnedRef) {
+					s.advanceJournalPhaseBestEffort(acc, journal.PhasePulled)
+					return []byte("pull: skipped (image present locally)"), nil, nil
+				}
 				res, rerr := s.opts.Runner.ComposePullDigest(ctx, acc.pinnedRef)
 				if res == nil {
 					return nil, nil, rerr
@@ -330,13 +355,15 @@ func (s *Server) buildUpgradeApplyStages(acc *upgradeApplyAccumulator, racc *rol
 			Name:          "health_gate",
 			FailureReason: ops.ReasonHealthFailed,
 			Run: skipIfCurrent(acc, "health_gate", func(ctx context.Context) ([]byte, []byte, error) {
-				hr, herr := s.opts.HealthProbeFactory().Run(ctx)
+				probe := s.opts.HealthProbeFactory()
+				probe.Preserve, probe.Before = acc.preserved, acc.before
+				hr, herr := probe.Run(ctx)
 				if herr != nil {
 					acc.upgradeFailedPostRestart = true
 					return nil, nil, herr
 				}
-				acc.healthSummary = fmt.Sprintf("ready=%v ready_detail=%q health=%v health_detail=%q duration=%s",
-					hr.ReadyOK, hr.ReadyDetail, hr.HealthOK, hr.HealthDetail, hr.TotalDuration)
+				acc.healthSummary = fmt.Sprintf("ready=%v ready_detail=%q health=%v health_detail=%q preserved=[%s] duration=%s",
+					hr.ReadyOK, hr.ReadyDetail, hr.HealthOK, hr.HealthDetail, strings.Join(acc.preserved, ","), hr.TotalDuration)
 				if hr.Failed() {
 					// Post-restart failure: the new image is running but
 					// unhealthy → this is what triggers inline rollback.
@@ -380,6 +407,35 @@ func (s *Server) buildUpgradeApplyStages(acc *upgradeApplyAccumulator, racc *rol
 		},
 	})
 	return stages
+}
+
+// captureBefore records what is ACTUALLY running before anything is
+// touched, the inline-rollback target, and the /ready baseline the
+// health gate must preserve. A capture failure (stack down / fresh
+// deploy) is a valid state, not an op failure.
+func (s *Server) captureBefore(acc *upgradeApplyAccumulator) stageRun {
+	return func(ctx context.Context) ([]byte, []byte, error) {
+		ri, err := s.opts.Runner.CaptureRunningProxyImage(ctx)
+		if err != nil {
+			acc.priorCaptureReason = "no_prior_digest"
+			// Capture step done (no prior to record); advance the journal.
+			s.advanceJournalPhaseBestEffort(acc, journal.PhaseCaptured)
+			return []byte("capture_before: no running proxy captured (" + errString(err) + ")"), nil, nil
+		}
+		acc.priorImageID = ri.RunningImageID
+		acc.priorDigests = bareDigests(ri.RepoDigests)
+		s.deriveRollbackTarget(acc, ri.PriorRef())
+		// What the running stack reports as healthy now is what the
+		// upgrade must preserve. Best-effort: no answer ⇒ nothing to keep.
+		acc.before, acc.baselineDetail = s.opts.HealthProbeFactory().Baseline(ctx)
+		if acc.before != nil {
+			acc.preserved = acc.before.Preserved
+		}
+		// Prior (rollback target) now known — fold it into the journal record.
+		s.advanceJournalPhaseBestEffort(acc, journal.PhaseCaptured)
+		return []byte(fmt.Sprintf("capture_before: running_image_id=%s prior_digests=%s prior_ref=%q rollback_target=%s %s",
+			ri.RunningImageID, joinDigests(acc.priorDigests), acc.priorRef, rollbackTargetNote(acc), acc.baselineDetail)), nil, nil
+	}
 }
 
 // skipIfCurrent wraps a stage Run so it no-ops (success) when the running

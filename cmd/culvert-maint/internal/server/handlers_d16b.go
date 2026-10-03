@@ -62,6 +62,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -207,7 +208,7 @@ func admissionJournalRecord(opID, kind, actor string, params map[string]interfac
 	return rec
 }
 
-//nolint:cyclop // single-pass admission flow; splitting hides the dedup→build→spawn ordering
+//nolint:cyclop,funlen // single-pass admission flow; splitting hides the dedup→lock→build→spawn ordering
 func (s *Server) startAsyncOp(_ *http.Request, peer auth.PeerInfo, kind, idempotencyKey string, paramsForAudit map[string]interface{}, buildStages func() ([]ops.FlowStage, *opError), opts ...startOpt) (*ops.Op, bool, *opError) {
 	var cfg startCfg
 	for _, o := range opts {
@@ -256,6 +257,20 @@ func (s *Server) startAsyncOp(_ *http.Request, peer auth.PeerInfo, kind, idempot
 		// vars, files) are no longer present.
 		return op, true, nil
 	}
+	// Host maintenance lock (shared with culvert-os-update): a state-changing
+	// op holds it until the flow ends; while OS/engine maintenance holds it,
+	// the op is refused before anything runs. A lock that cannot be opened
+	// at all (state dir unreadable) does not block the agent — logged, the
+	// in-memory lock still serializes agent ops.
+	hostRelease, herr := s.takeHostLock(op.ID, kind, peer.String(), paramsForAudit, idempotencyKey)
+	if herr != nil {
+		return nil, false, herr
+	}
+	defer func() {
+		if hostRelease != nil {
+			hostRelease()
+		}
+	}()
 	// Newly admitted op — deliver the op_id to the caller (so late-bound
 	// stage closures can stamp it onto sub-action audit events) BEFORE
 	// building stages, then late-bound stage construction.
@@ -300,9 +315,14 @@ func (s *Server) startAsyncOp(_ *http.Request, peer auth.PeerInfo, kind, idempot
 	// op flow finishes.
 	slotRelease := releaseSlot
 	releaseSlot = nil
+	hostLock := hostRelease
+	hostRelease = nil // the goroutine owns it now: released when the flow ends
 	s.goOp(func() {
 		if slotRelease != nil {
 			defer slotRelease()
+		}
+		if hostLock != nil {
+			defer hostLock()
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), s.opts.Cfg.OperationTimeout)
 		defer cancel()
@@ -900,3 +920,34 @@ var (
 	_ = audit.OutcomeStarted
 	_ = health.Probe{}
 )
+
+// takeHostLock acquires the host maintenance lock for a state-changing op
+// (nil release for other kinds). While culvert-os-update holds it the op is
+// refused (409) and its admission recorded as failed. A lock that cannot be
+// opened at all does not block the agent — logged; the in-memory lock still
+// serializes agent ops.
+func (s *Server) takeHostLock(opID, kind, actor string, params map[string]interface{}, idemKey string) (func(), *opError) {
+	if !ops.IsStateChanging(kind) {
+		return nil, nil
+	}
+	rel, busy, err := acquireHostMaintenanceLock(s.opts.StateDir)
+	switch {
+	case busy:
+		s.recordAdmissionFailure(opID, kind, actor, params, idemKey, "host_maintenance_in_progress")
+		return nil, augmentErrorWithOp(&opError{Status: http.StatusConflict, Body: map[string]string{
+			"error":  "host_maintenance_in_progress",
+			"detail": "culvert-os-update is running on this host; retry when it has finished",
+		}}, opID)
+	case err != nil:
+		// Indeterminate is not "free": admitting here would let a retag or
+		// stack recreate run under an engine upgrade or reboot, the exact
+		// overlap the shared lock exists to prevent (Codex P1, PR #1528).
+		log.Printf("culvert-maint: ERROR host maintenance lock unavailable (%v); refusing the operation", err)
+		s.recordAdmissionFailure(opID, kind, actor, params, idemKey, "host_maintenance_lock_unavailable")
+		return nil, augmentErrorWithOp(&opError{Status: http.StatusServiceUnavailable, Body: map[string]string{
+			"error":  "host_maintenance_lock_unavailable",
+			"detail": "cannot open or lock " + hostMaintenanceLockName + " in the agent state directory; check its ownership and permissions (the agent must be able to open it read-only)",
+		}}, opID)
+	}
+	return rel, nil
+}

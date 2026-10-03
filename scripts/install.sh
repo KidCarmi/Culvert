@@ -198,12 +198,26 @@ if ! sudo -n true 2>/dev/null; then
   warn "sudo access required. You may be prompted for your password."
 fi
 
-# Check internet
-if curl -fsSL --connect-timeout 5 https://download.docker.com > /dev/null 2>&1 || \
+# Check internet — needed to install Docker from download.docker.com. An
+# appliance image (appliance/) pre-installs Docker + the compose plugin and
+# sets CULVERT_INSTALL_ASSUME_DOCKER=1, so a restricted-egress first boot must
+# not fail here on a host that will never contact the Docker repo. Without the
+# variable, a host that already has docker + compose is still allowed through
+# with a warning; only a host that NEEDS the install is refused.
+DOCKER_PRESENT=0
+if command -v docker &>/dev/null && docker compose version &>/dev/null 2>&1; then
+  DOCKER_PRESENT=1
+fi
+if [[ "${CULVERT_INSTALL_ASSUME_DOCKER:-0}" == "1" ]]; then
+  [[ "$DOCKER_PRESENT" == "1" ]] || error "CULVERT_INSTALL_ASSUME_DOCKER=1 but docker + docker compose are not installed"
+  info "Docker preinstalled (CULVERT_INSTALL_ASSUME_DOCKER=1); skipping the download.docker.com reachability check"
+elif curl -fsSL --connect-timeout 5 https://download.docker.com > /dev/null 2>&1 || \
    wget -q --timeout=5 -O /dev/null https://download.docker.com 2>/dev/null; then
   info "Internet connectivity OK"
+elif [[ "$DOCKER_PRESENT" == "1" ]]; then
+  warn "Cannot reach download.docker.com, but docker + docker compose are already installed; continuing (set CULVERT_INSTALL_ASSUME_DOCKER=1 to silence this)"
 else
-  error "No internet connection. Cannot reach download.docker.com"
+  error "No internet connection. Cannot reach download.docker.com (required to install Docker)"
 fi
 
 # Memory check — Culvert + ClamAV need ~1.5 GB to run comfortably.
@@ -1862,6 +1876,34 @@ if [[ -n "$CATALOG_URL" ]]; then
   env_put CULVERT_RELEASE_CATALOG_URL "$CATALOG_URL" "$INSTALL_DIR/.env"
 fi
 env_put CULVERT_INSTALL_CHANNEL "$INSTALL_CHANNEL" "$INSTALL_DIR/.env"
+# Boot-time policy posture (CULVERT_DEFAULT_ACTION, read by the proxy when
+# config.yaml sets no default_action). The appliance first boot passes
+# CULVERT_INSTALL_DEFAULT_ACTION=deny so a fresh gateway enforces from the
+# start; a quick-start host keeps the historical passthrough unless asked.
+case "${CULVERT_INSTALL_DEFAULT_ACTION:-}" in
+  allow|deny) env_put CULVERT_DEFAULT_ACTION "$CULVERT_INSTALL_DEFAULT_ACTION" "$INSTALL_DIR/.env" ;;
+  "") ;;
+  *) warn "Ignoring CULVERT_INSTALL_DEFAULT_ACTION='${CULVERT_INSTALL_DEFAULT_ACTION}' (want allow or deny)" ;;
+esac
+# Per-instance first-admin setup token (CULVERT_SETUP_TOKEN, read once by the
+# proxy): the appliance first boot mints one per instance so the one-time
+# setup window on the published admin port is not open to whoever reaches it
+# first. Persisted like the other .env secrets — never overwritten once set, so
+# a re-run after an interrupted first boot keeps the token the console showed.
+# Restricted to a safe .env alphabet (see setup_at_rest_encryption's rationale).
+if [[ -n "${CULVERT_INSTALL_SETUP_TOKEN:-}" ]]; then
+  if secret_already_set CULVERT_SETUP_TOKEN "$INSTALL_DIR/.env"; then
+    # env_put REPLACES; the never-overwrite property every .env secret has
+    # comes from this guard, exactly as for the passphrases above. The token
+    # the console already showed stays the token the wizard accepts.
+    info "Keeping the existing first-admin setup token in $INSTALL_DIR/.env"
+  elif [[ "$CULVERT_INSTALL_SETUP_TOKEN" =~ ^[A-Za-z0-9._-]{16,128}$ ]]; then
+    env_put CULVERT_SETUP_TOKEN "$CULVERT_INSTALL_SETUP_TOKEN" "$INSTALL_DIR/.env"
+    info "Persisted the first-admin setup token (CULVERT_SETUP_TOKEN) into $INSTALL_DIR/.env"
+  else
+    warn "Ignoring CULVERT_INSTALL_SETUP_TOKEN: must be 16-128 characters from [A-Za-z0-9._-]"
+  fi
+fi
 
 info "Pulling images and starting services (first run may take a few minutes — ClamAV downloads ~250 MB of virus signatures)..."
 

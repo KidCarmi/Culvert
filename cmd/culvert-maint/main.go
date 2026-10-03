@@ -133,6 +133,7 @@ func run(configPath string) error {
 	if err != nil {
 		return err
 	}
+	initIdempotencyIndex(cfg.StateDir, mgr)
 
 	r, err := newRunner(cfg)
 	if err != nil {
@@ -153,6 +154,8 @@ func run(configPath string) error {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
+	reconcileOnStartup(ctx, cfg, srv)
+
 	startOpLogRetention(ctx, cfg.StateDir, cfg.LogRetentionDays, mgr.IsRunning)
 
 	log.Printf("culvert-maint: listening on %s (privilege_mode=%s)", cfg.SocketPath, cfg.PrivilegeMode)
@@ -164,19 +167,25 @@ func run(configPath string) error {
 }
 
 // initJournal opens the crash-recovery journal (RISK-022) and marks any op that
-// was in flight at the last stop. It reads the journal FAIL-CLOSED: a corrupt
-// record means we cannot tell whether a destructive op was interrupted, so the
-// agent refuses to serve rather than silently ignore it. Orphaned records are
-// marked failed(agent_restart_interrupted) so GET /v1/operations/{id} answers;
-// Docker reconciliation of the danger window is a later slice.
+// was in flight at the last stop as failed(agent_restart_interrupted) so
+// GET /v1/operations/{id} answers. A record that cannot be read is
+// QUARANTINED (renamed aside, logged loudly, surfaced on /v1/status as
+// attention_required) rather than fatal: a single rotted file used to make
+// startup fail → systemd restart → fail again, a crash loop with no admin
+// surface left to fix it. The fail-closed property that matters is kept — a
+// quarantined record is never acted on. Docker reconciliation of the readable
+// records is server.ReconcileOnStartup.
 func initJournal(stateDir string, mgr *ops.Manager) (*journal.Journal, error) {
 	jnl, err := journal.New(stateDir)
 	if err != nil {
 		return nil, fmt.Errorf("journal: %w", err)
 	}
-	recs, err := jnl.List()
+	recs, quarantined, err := jnl.ListQuarantining(time.Now().UTC())
 	if err != nil {
 		return nil, fmt.Errorf("journal: refusing to serve — %w", err)
+	}
+	for _, q := range quarantined {
+		log.Printf("culvert-maint: WARN journal record %q is unreadable — quarantined as %s.corrupt.<unixnano> under %s; it will NOT be acted on (inspect and remove it manually)", q, q, jnl.Dir())
 	}
 	orphans := make([]ops.InterruptedOp, 0, len(recs))
 	for i := range recs {
@@ -186,6 +195,36 @@ func initJournal(stateDir string, mgr *ops.Manager) (*journal.Journal, error) {
 		log.Printf("culvert-maint: %d operation(s) interrupted by a prior stop — marked failed(agent_restart_interrupted)", n)
 	}
 	return jnl, nil
+}
+
+// initIdempotencyIndex arms the persisted idempotency index (journaled kinds
+// only): a CP retry with the same idempotency_key after an agent restart
+// dedupes to the prior op's terminal outcome instead of admitting a second
+// stack mutation. Loaded AFTER MarkAllInterrupted so an interrupted op keeps
+// its journal-derived verdict; the index only fills in ops the journal no
+// longer knows. Never fatal.
+func initIdempotencyIndex(stateDir string, mgr *ops.Manager) {
+	mgr.EnableIdempotencyPersistence(filepath.Join(stateDir, "idempotency.json"))
+	if n, err := mgr.LoadIdempotencyIndex(); err != nil {
+		log.Printf("WARN: %v", err)
+	} else if n > 0 {
+		log.Printf("culvert-maint: restored %d idempotency entr(y/ies) from disk", n)
+	}
+}
+
+// reconcileOnStartup runs the crash-recovery reconcile (RISK-022 PR-E E3):
+// classify every interrupted record against Docker truth and auto-resolve ONLY
+// the non-mutating verdicts; everything else is surfaced on /v1/status
+// (attention_required) for the explicit POST /v1/reconcile/{op_id}. Bounded by
+// the stage timeout; never fatal. reconcile_on_startup=false ⇒ mark-only.
+func reconcileOnStartup(ctx context.Context, cfg *config.Config, srv *server.Server) {
+	if !cfg.ReconcileOnStartup {
+		log.Printf("culvert-maint: reconcile_on_startup=false — interrupted operations are marked only (not classified)")
+		return
+	}
+	if n := srv.ReconcileOnStartup(ctx); n > 0 {
+		log.Printf("culvert-maint: WARN %d interrupted operation(s) need attention — see GET /v1/status interrupted_operations", n)
+	}
 }
 
 // newServer wires the agent HTTP server from its already-constructed

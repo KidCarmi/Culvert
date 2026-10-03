@@ -30,6 +30,7 @@ import (
 	"fmt"
 	"regexp"
 	"sort"
+	"strings"
 )
 
 // proxyServiceName is the compose service whose running image we
@@ -119,6 +120,7 @@ type psEntry struct {
 	Service string `json:"Service"`
 	State   string `json:"State"`
 	Status  string `json:"Status"`
+	Health  string `json:"Health"`
 	ID      string `json:"ID"`
 }
 
@@ -128,6 +130,14 @@ func (e psEntry) name() string {
 	}
 	return e.Name
 }
+
+// ErrNoRunningProxy is the ONE capture outcome that means "running = ∅" as a
+// FACT (compose ps answered and listed no proxy container — the stack is
+// down). Every other capture error means the question could not be answered,
+// and a caller deciding on the running image must treat those as absent
+// evidence, never as an empty set (startup reconcile, Codex/adversarial review
+// of PR #1528).
+var ErrNoRunningProxy = errors.New("no proxy service found in compose ps output")
 
 // proxyContainerID parses `docker compose ps --format json` output
 // (NDJSON or the array form some Compose versions emit) and returns the
@@ -146,7 +156,7 @@ func proxyContainerID(stdout []byte) (string, error) {
 	}
 	switch len(ids) {
 	case 0:
-		return "", errors.New("no proxy service found in compose ps output")
+		return "", ErrNoRunningProxy
 	case 1:
 		if ids[0] == "" {
 			return "", errors.New("proxy service has no container id in compose ps output")
@@ -252,4 +262,30 @@ func repoDigestsFromImageInspect(stdout []byte) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// UnhealthyDependencies parses `docker compose ps --format json` and returns
+// the services OTHER than the proxy whose healthcheck reports "unhealthy"
+// (sorted). The proxy is excluded: an unhealthy proxy is a reason to
+// upgrade, not to refuse.
+//
+// Why the agent asks before it mutates: `docker compose up -d` with a
+// `depends_on: condition: service_healthy` dependency that is unhealthy
+// REMOVES the running proxy container, creates the new one and leaves it
+// STOPPED ("dependency failed to start"), so the upgrade — and its inline
+// rollback, which runs the same `up` — turns a ClamAV outage into a proxy
+// outage (measured with Docker Compose v2, 2026-10-03).
+func UnhealthyDependencies(stdout []byte) ([]string, error) {
+	entries, err := parsePSEntries(stdout)
+	if err != nil {
+		return nil, err
+	}
+	var out []string
+	for i := range entries {
+		if entries[i].name() != proxyServiceName && strings.EqualFold(entries[i].Health, "unhealthy") {
+			out = append(out, entries[i].name())
+		}
+	}
+	sort.Strings(out)
+	return out, nil
 }

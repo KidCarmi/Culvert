@@ -1,0 +1,74 @@
+# Kernel ABI update vs culvert-os-update os — reproduction (2026-10-03)
+# ubuntu:24.04 container, Ubuntu snapshot archive (noble, noble-updates, noble-security).
+# Install linux-virtual at snapshot 20260926T000000Z (6.8.0-142), then point apt at
+# snapshot 20261002T120000Z, where linux-virtual 6.8.0-146 needs the NEW package
+# linux-image-6.8.0-146-generic. Each step installs from the archive for real; only the run.sh lines marked -s are simulations.
+# Container limits: no boot, so 'running kernel' after reboot is NOT observable here —
+# that is step 7 of docs/appliance/vsphere-qualification.md.
+
+## 1. simulated: plain upgrade (os branch before this change) vs upgrade --with-new-pkgs (verbatim, run.sh)
+== install linux-virtual from snapshot 20260926T000000Z
+linux-image-6.8.0-142-generic 6.8.0-142.142 ii 
+linux-image-virtual 6.8.0-142.142 ii 
+linux-virtual 6.8.0-142.142 ii 
+== switch to snapshot 20261002T120000Z
+linux-virtual:
+  Installed: 6.8.0-142.142
+  Candidate: 6.8.0-146.146
+  Version table:
+== apt-get upgrade -s (what culvert-os-update os runs today)
+The following packages have been kept back:
+  linux-headers-generic linux-headers-virtual linux-image-virtual
+  linux-virtual
+4 upgraded, 0 newly installed, 0 to remove and 4 not upgraded.
+== apt-get upgrade --with-new-pkgs -s
+8 upgraded, 95 newly installed, 0 to remove and 0 not upgraded.
+Inst linux-headers-6.8.0-146 (6.8.0-146.146 Ubuntu:24.04/noble-updates [all])
+Inst linux-headers-6.8.0-146-generic (6.8.0-146.146 Ubuntu:24.04/noble-updates [amd64])
+Inst linux-modules-6.8.0-146-generic (6.8.0-146.146 Ubuntu:24.04/noble-updates [amd64])
+Inst linux-image-6.8.0-146-generic (6.8.0-146.146 Ubuntu:24.04/noble-updates [amd64])
+Inst linux-virtual [6.8.0-142.142] (6.8.0-146.146 Ubuntu:24.04/noble-updates [amd64]) []
+Inst linux-image-virtual [6.8.0-142.142] (6.8.0-146.146 Ubuntu:24.04/noble-updates [amd64]) []
+Inst linux-headers-virtual [6.8.0-142.142] (6.8.0-146.146 Ubuntu:24.04/noble-updates [amd64]) []
+Inst linux-headers-generic [6.8.0-142.142] (6.8.0-146.146 Ubuntu:24.04/noble-updates [amd64])
+Inst linux-tools-common (6.8.0-146.146 Ubuntu:24.04/noble-updates [all])
+Inst linux-tools-6.8.0-146 (6.8.0-146.146 Ubuntu:24.04/noble-updates [amd64])
+Inst linux-tools-6.8.0-146-generic (6.8.0-146.146 Ubuntu:24.04/noble-updates [amd64])
+(the 95 "newly installed" are counted against a MINIMAL container installed with --no-install-recommends;
+ on the OVA the base system already carries most of them)
+
+## 2. REAL 'apt-get upgrade --with-new-pkgs' with a held package standing in for the Docker holds
+held stand-in: libaudit-common 1:3.1.2-2.1build1.1
+== REAL: apt-get upgrade --with-new-pkgs
+held after: libaudit-common 1:3.1.2-2.1build1.1 hold=1
+linux-image-6.8.0-142-generic 6.8.0-142.142 ii 
+linux-image-6.8.0-146-generic 6.8.0-146.146 ii 
+linux-virtual 6.8.0-146.146 ii 
+== autoremove --purge -s (the os branch runs it next); running kernel simulated = 6.8.0-142
+0 upgraded, 0 newly installed, 0 to remove and 2 not upgraded.
+
+## 3. REAL 'unattended-upgrade -v' with appliance/os-maintenance/50unattended-upgrades-culvert
+## (the daily automatic path: security pocket only)
+== installed before: linux-image-6.8.0-142-generic=6.8.0-142.142 linux-virtual=6.8.0-142.142 
+== candidate: 6.8.0-146.146 from:
+  Version table:
+     6.8.0-146.146 500
+        500 https://snapshot.ubuntu.com/ubuntu/20261002T120000Z noble-updates/main amd64 Packages
+ *** 6.8.0-142.142 500
+        500 https://snapshot.ubuntu.com/ubuntu/20261002T120000Z noble-security/main amd64 Packages
+        100 /var/lib/dpkg/status
+== REAL: unattended-upgrade -v (the daily security path, Culvert policy)
+Allowed origins are: o=Ubuntu,a=noble, o=Ubuntu,a=noble-security, o=UbuntuESMApps,a=noble-apps-security, o=UbuntuESM,a=noble-infra-security, o=Ubuntu,a=noble-security, o=UbuntuESMApps,a=noble-apps-security, o=UbuntuESM,a=noble-infra-security
+    logging.info(_("Allowed origins are: %s"),
+Message: 'Allowed origins are: %s'
+Packages that will be upgraded: libssl3t64 openssl
+    logging.info(_("Packages that will be upgraded: %s"), " ".join(pkgs))
+Message: 'Packages that will be upgraded: %s'
+== installed after: linux-image-6.8.0-142-generic=6.8.0-142.142:ii  linux-virtual=6.8.0-142.142:ii  
+
+## Reading
+- Before this change 'culvert-os-update os' could never move a kernel ABI bump: plain upgrade keeps it back.
+- 'upgrade --with-new-pkgs' installs the new linux-image ALONGSIDE the running one, keeps every hold,
+  and the following autoremove removes nothing (the running/previous kernel stays bootable).
+- The daily security path moves the kernel only when the ABI bump is published to noble-security;
+  at this snapshot 6.8.0-146 was in noble-updates only, so it correctly installed openssl/libssl3t64 and left the kernel.

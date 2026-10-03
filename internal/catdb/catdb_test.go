@@ -148,3 +148,22 @@ func TestCommunityDB_BulkWrite_Empty(t *testing.T) {
 		t.Errorf("BulkWrite empty map: %v", err)
 	}
 }
+
+// HasEntries is exact where Stats is an estimate: freshly written keys sit in
+// the memtable, which Stats (LSM table metadata) does not count yet.
+func TestCommunityDB_HasEntries(t *testing.T) {
+	db, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close() //nolint:errcheck // test cleanup
+	if db.HasEntries() {
+		t.Fatal("a new store reports entries")
+	}
+	if err := db.BulkWrite(map[string]string{"casino.example.com": "Gambling"}); err != nil {
+		t.Fatal(err)
+	}
+	if !db.HasEntries() {
+		t.Fatalf("a store holding a key reports none (Stats estimate = %d)", db.Stats())
+	}
+}

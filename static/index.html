@@ -5478,6 +5478,8 @@ Firefox (all platforms):
         <input id="rel-disp-passphrase" placeholder="env ref, e.g. CULVERT_BACKUP_PASSPHRASE" style="width:100%;margin-top:4px;padding:6px 8px;font-size:.85rem;background:var(--surface);border:1px solid var(--border);border-radius:6px;color:var(--text)">
       </label>
       <label style="font-size:.82rem;display:flex;align-items:center;gap:8px"><input type="checkbox" id="rel-disp-norollback"> Disable auto-rollback (no_rollback)</label>
+      <label style="font-size:.82rem;display:flex;align-items:center;gap:8px" title="Only needed when the running release is not a catalog release; confirms you verified the transition yourself"><input type="checkbox" id="rel-disp-ack-unknown"> Acknowledge unknown running release (acknowledge_unknown_current)</label>
+      <label style="font-size:.82rem;display:flex;align-items:center;gap:8px" title="Break-glass: dispatch a release OLDER than the running one. Restore-from-backup is the supported way back."><input type="checkbox" id="rel-disp-allow-downgrade"> Allow downgrade (allow_downgrade, break-glass)</label>
     </div>
     <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:20px">
       <button class="btn ghost" data-click="releaseDispatchCancel">Cancel</button>
@@ -17658,13 +17660,24 @@ async function loadReleaseStatus(forceMore) {
     // Keep refreshing while a dispatch is in flight, OR for a few forced rounds
     // after an action (dispatch/resume) whose background store update may lag
     // the 202 response - otherwise the panel could freeze on a stale record.
+    releaseStatusErrors = 0;
     if ((rec && rec.phase === 'dispatched') || more > 0) {
       releaseStatusTimer = setTimeout(() => loadReleaseStatus(more > 0 ? more - 1 : 0), 2500);
     }
   } catch (err) {
-    box.innerHTML = '<span style="color:var(--danger)">' + escHtml(err.message) + '</span>';
+    // The control plane is the container the dispatch replaces: a fetch error
+    // mid-poll is the EXPECTED shape of a successful upgrade (the proxy is
+    // restarting), not a reason to stop watching. Keep polling with backoff for
+    // up to ~5 minutes; the restarted process resumes the dispatch record on
+    // its own (release_dispatch_persist.go) and the next successful poll shows it.
+    releaseStatusErrors++;
+    const retrying = releaseStatusErrors <= 60;
+    box.innerHTML = '<span style="color:var(--danger)">' + escHtml(err.message) + '</span>'
+      + (retrying ? '<div style="color:var(--muted);font-size:.8rem">Control plane unreachable (restarting during the update?) - retrying ' + releaseStatusErrors + '/60</div>' : '');
+    if (retrying) releaseStatusTimer = setTimeout(() => loadReleaseStatus(more), Math.min(5000, 1500 + releaseStatusErrors * 250));
   }
 }
+let releaseStatusErrors = 0;
 
 function renderReleaseStatus(rec) {
   const box = document.getElementById('rel-status');
@@ -17727,6 +17740,8 @@ async function releaseDispatchSubmit() {
     pre_backup: preBackup,
     no_rollback: document.getElementById('rel-disp-norollback').checked,
   };
+  if (document.getElementById('rel-disp-ack-unknown').checked) body.acknowledge_unknown_current = true;
+  if (document.getElementById('rel-disp-allow-downgrade').checked) body.allow_downgrade = true;
   if (preBackup) body.passphrase_ref = passphraseRef;
   if (releaseId) body.release_id = releaseId; else body.channel = channel;
   const btn = document.getElementById('rel-disp-submit');
@@ -17748,6 +17763,13 @@ async function releaseDispatchSubmit() {
         : 'Dispatch accepted', 'success');
       releaseDispatchCancel();
       if (agent === releaseCurrentAgent()) { loadReleaseCurrent(); loadReleaseStatus(); }
+    } else if (r.status === 409 && payload.status === 'refused') {
+      // Transition policy refusals (checkTransition): the body was fine, the
+      // TRANSITION is not. Name the kind and the acknowledgement (if any).
+      const hint = payload.kind === 'downgrade' ? ' - tick "Allow downgrade" only as break-glass (restore-from-backup is the supported way back)'
+        : payload.kind === 'unknown_current' ? ' - tick "Acknowledge unknown running release" after verifying the transition'
+        : payload.kind === 'unsupported_transition' ? ' - upgrade through a release at or above min_upgrade_from first' : '';
+      toast('Refused (' + (payload.kind || 'policy') + '): ' + (payload.detail || '') + hint, 'error');
     } else if (r.status === 409) {
       toast(payload.status === 'stale_replan_required' ? 'Node drifted - re-plan required' : 'A dispatch is already in flight on this maintenance agent', 'error');
     } else if (r.status === 404) {
@@ -19623,6 +19645,10 @@ function resetBlockPage() {
       <input id="su-pass" type="password" autocomplete="new-password" minlength="8" required>
       <label for="su-pass2">Confirm password</label>
       <input id="su-pass2" type="password" autocomplete="new-password" minlength="8" required>
+      <div id="su-token-row" style="display:none">
+        <label for="su-token">Setup token <span style="color:var(--muted)">(this deployment requires it: appliance console or <code>sudo culvert-status</code>)</span></label>
+        <input id="su-token" type="password" autocomplete="off" maxlength="128">
+      </div>
       <div class="setup-err" id="su-err"></div>
       <button class="setup-submit" id="su-btn" type="submit">Set Password &amp; Continue</button>
     </form>
@@ -19990,6 +20016,11 @@ function renderTLSFallbackBanner(idPrefix, active) {
     if (d.needsSetup) {
       // First-time setup - show the setup wizard.
       document.getElementById('setup-overlay').classList.add('active');
+      // A deployment started with CULVERT_SETUP_TOKEN gates the one-time
+      // setup on a per-instance token; the server says so and refuses
+      // without it (setup_token.go), so ask for it up front.
+      const tokenRequired = !!d.setupTokenRequired;
+      if (tokenRequired) document.getElementById('su-token-row').style.display = '';
 
       document.getElementById('setup-form').addEventListener('submit', async (e) => {
         e.preventDefault();
@@ -20006,12 +20037,16 @@ function renderTLSFallbackBanner(idPrefix, active) {
         if (!meetsPasswordComplexity(pass))
           return showErr('Password must contain at least one uppercase letter, one lowercase letter, and one digit.');
         if (pass !== pass2)   return showErr('Passwords do not match.');
+        const token = tokenRequired ? document.getElementById('su-token').value.trim() : '';
+        if (tokenRequired && !token) return showErr('This deployment requires the setup token shown on the appliance console.');
 
         btn.disabled = true; btn.textContent = 'Saving\u2026';
         try {
+          const headers = {'Content-Type': 'application/json'};
+          if (token) headers['X-Culvert-Setup-Token'] = token;
           const r = await fetch('/api/setup/complete', {
             method: 'POST',
-            headers: {'Content-Type': 'application/json'},
+            headers,
             body: JSON.stringify({user, pass})
           });
           if (r.ok) {

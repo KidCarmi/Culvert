@@ -19,10 +19,11 @@ func (c *Catalog) Resolve(ch Channel) (ResolvedRelease, error) {
 	}
 	rel := c.byReleaseID[relID]
 	return ResolvedRelease{
-		ReleaseID: rel.ReleaseID,
-		VersionID: rel.VersionID,
-		Severity:  rel.Severity,
-		PinnedRef: rel.PinnedRef,
+		ReleaseID:      rel.ReleaseID,
+		VersionID:      rel.VersionID,
+		Severity:       rel.Severity,
+		PinnedRef:      rel.PinnedRef,
+		MinUpgradeFrom: rel.MinUpgradeFrom,
 	}, nil
 }
 

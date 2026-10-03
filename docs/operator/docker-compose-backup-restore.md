@@ -68,7 +68,14 @@ Two consequences worth knowing:
 1. **The proxy cannot read backups at runtime.** A compromise of the proxy
    process cannot exfiltrate prior archives. `/backup` only exists inside
    the ephemeral `cli` container.
-2. **`/backup` can be redirected to off-host storage** (NFS, SMB, a host
+2. **`/data` may be a dedicated filesystem.** A block device or loop-backed
+   ext4 image mounted as `proxy-data` works, including for restore: the
+   root-owned `lost+found` ext4 creates at the volume root is treated as a
+   filesystem fixture — never staged, evacuated or promoted by a restore
+   commit (the unprivileged proxy could neither read nor rename it, which
+   used to fail the commit at the stage step). Nothing else at the volume
+   root is exempt; a restore moves every other top-level entry.
+3. **`/backup` can be redirected to off-host storage** (NFS, SMB, a host
    bind mount, or an operator-managed sync target) without exposing
    `/data`. Override the volume in your `docker-compose.override.yml`:
    ```yaml
@@ -183,11 +190,26 @@ Modes: `full` (default), `trust-root-only` (only restore CA material),
 
 ## 6. Restore — commit (offline)
 
-Restore commit is **destructive and offline-only**. It performs an
-atomic swap of `/data` (current `/data` → `/data.bak.<ts>-<pid>`,
-staging dir → `/data`). The proxy must be stopped first or its open
-file descriptors will outlive the swap and admin actions during the
-swap will race.
+Restore commit is **destructive and offline-only**. It swaps the CONTENT of
+`/data` in place: the restored tree is staged inside the volume, the current
+entries are moved aside into `/data/.restore-bak.<ts>-<pid>/`, and the staged
+entries are promoted. The proxy must be stopped first — and that is now
+enforced, not merely documented: the running proxy holds an advisory lock on
+`/data/.culvert.lock`, and a commit against a live stack is refused with
+`data directory is locked by another Culvert process`. The lock works in both
+directions: while a commit or `--recover-restore` holds it, a proxy that is
+started (an operator, or `restart: unless-stopped`) refuses to boot with
+`FATAL: … refusing to start the proxy over a data directory another Culvert
+process … is mutating` and comes back by itself once the commit has finished.
+A lock that cannot be created at all (first boot before the directory exists,
+read-only filesystem) is only a warning.
+
+> **Why in place?** `/data` is a Docker volume, i.e. a mount point inside the
+> container, and `rename(2)` refuses to move a mount point. Earlier builds
+> renamed `/data` itself to `/data.bak.<ts>` and therefore could never commit
+> on a real deployment (and a sibling of the mount would have been outside
+> the volume, lost with the container). The in-place swap is also the
+> behaviour on a bare host.
 
 ```bash
 # 1. Stop the running stack.
@@ -208,30 +230,81 @@ docker compose up -d
 
 1. Re-runs the dry-run validation. Refuses on any failure.
 2. Honours `--mode` (full / trust-root-only / state-only).
-3. Refuses on guard violations unless explicitly acknowledged with
-   `--accept-dp-reenrollment` or `--allow-counter-rollback`.
-4. Stages the new content under `/data.staging.<ts>-<pid>`.
-5. Renames current `/data` → `/data.bak.<ts>-<pid>` (preserved for
-   rollback; see § 8 to clean up later).
-6. Renames the staging dir → `/data`.
-7. fsyncs the parent directory.
+3. Refuses on guard violations unless explicitly acknowledged:
+   `--accept-dp-reenrollment` (cluster CA changes with DPs enrolled),
+   `--allow-counter-rollback` (TOTP counters would roll back),
+   `--accept-root-ca-change` (the inspection root `ca.bundle` would be
+   replaced or REMOVED — every client trusting the current root loses
+   inspected HTTPS, and a removed bundle is silently re-minted as a NEW
+   root at the next boot). A commit that would leave **no admin account**
+   while the node has one is refused outright (it would reopen
+   unauthenticated first-time setup): use a backup that carries
+   `ui_users.json`, or `--mode trust-root-only`.
+4. Refuses if any entry of `/data` is itself a mount point (for example a
+   `./yara:/data/yara:ro` bind) — those cannot be moved aside; unmount them
+   for the restore.
+5. Stages the new content under `/data/.restore-staging.<ts>-<pid>/`.
+6. Writes `/data/.restore-journal.json`, moves every current top-level entry
+   into `/data/.restore-bak.<ts>-<pid>/` (phase `evacuating`), then moves
+   every staged entry into `/data` (phase `promoting`), removes the empty
+   staging directory and the journal, and fsyncs.
 
-The previous `/data` is preserved as `/data.bak.<ts>-<pid>` indefinitely.
-Once you've verified the restored state, clean it up with the cleanup
-command (§ 8). The `.bak` directory is never auto-deleted.
+The previous content is preserved as `/data/.restore-bak.<ts>-<pid>/`
+indefinitely — inside the volume, so it survives container recreation.
+Once you have verified the restored state, clean it up with the cleanup
+command (§ 8). It is never auto-deleted.
 
-### Recovery if step 2 fails after rename A
+### Recovery if the commit is interrupted
 
-If the process is killed between the two renames, the error message
-names the exact `mv` recovery command. Worst case: `mv /data.bak.<ts>-<pid>
-/data` brings the prior state back.
+A commit killed during step 6 leaves the journal in place. The proxy
+**refuses to start** while it exists (the data directory holds a mix of
+previous and restored entries) and prints the recovery command. Nothing is
+resumed automatically: you choose the direction.
+
+```bash
+# Inspect (read-only): phase, where the previous and staged data are.
+docker compose --profile cli run --rm cli --recover-restore
+
+# EITHER undo the restore (previous data becomes live again) ...
+docker compose --profile cli run --rm cli --recover-restore --confirm=revert
+
+# ... OR finish it (staged data lands, previous data stays in .restore-bak).
+docker compose --profile cli run --rm cli --recover-restore --confirm=complete
+
+docker compose up -d
+```
+
+Both directions are deterministic for every phase, and a recovery is itself
+restartable: the journal records the chosen direction and each sub-step as
+it completes (`recovery: revert|complete`, `progress: unpromoted | returned |
+promoted`), so if the recovery is interrupted, **run the same command
+again** and it resumes where it stopped. Two refusals follow from that:
+
+* **The direction cannot be switched once a recovery has started.** The
+  recorded direction is always finishable; the other one would act on a
+  layout the journal no longer describes. Finish the recorded direction,
+  then run a fresh restore if the other outcome is wanted.
+* **Missing recovery material is never read as finished work.** A revert
+  whose `.restore-bak.*` directory is absent, or a complete whose
+  `.restore-staging.*` directory is absent, refuses without moving anything
+  and keeps the journal — unless the journal's own `returned` / `promoted`
+  marker proves that directory had already been emptied. Put the directory
+  back and re-run; the journal is removed by hand only after inspecting the
+  `.restore-*` directories.
+
+A journal the binary cannot parse (including one carrying a direction or
+marker this build does not know) is never acted on; the proxy refuses to
+start and the operator inspects `/data/.restore-journal.json` and the
+`.restore-*` directories by hand.
 
 ---
 
 ## 7. List restore leftovers
 
-Inventory `.bak.<ts>-<pid>` and `.staging.<ts>-<pid>` siblings of `/data`
-left behind by past restore commits or killed restores.
+Inventory the `.restore-bak.<ts>-<pid>` / `.restore-staging.<ts>-<pid>`
+directories inside `/data` left behind by past restore commits or killed
+restores (and, for installs upgraded from older builds, any legacy
+`/data.bak.<ts>-<pid>` siblings).
 
 ```bash
 docker compose --profile cli run --rm cli --list-restore-leftovers
@@ -240,12 +313,15 @@ docker compose --profile cli run --rm cli --list-restore-leftovers
 Output:
 
 ```
-PATH                                            TYPE     AGE      SIZE
-/data.bak.20260428T101500Z-1234                 bak      4d 2h    412.3 MB
-/data.staging.20260501T030000Z-9876             staging  1d 11h   8.2 MB
+PATH                                                   TYPE     AGE      SIZE
+/data/.restore-bak.20260428T101500Z-1234               bak      4d 2h    412.3 MB
+/data/.restore-staging.20260501T030000Z-9876           staging  1d 11h   8.2 MB
 ```
 
-Read-only; safe any time.
+Read-only; safe any time. A staging/bak pair referenced by an unresolved
+restore journal is reported as protected (`WARN: ... referenced by an
+unresolved interrupted restore`) and is never a cleanup candidate until
+`--recover-restore` resolves it.
 
 ---
 
@@ -279,56 +355,50 @@ Filters:
   wreckage) are always candidates if they pass other filters.
 
 **Both dry-run and `--confirm` are runtime-OK** — cleanup operates only
-on siblings of `/data`, never on `/data` itself, with sibling-only
-discovery, anchored regex, Lstat at admission **and** immediately
-before deletion (TOCTOU re-check), and never follows symlinks. The
-proxy holds no descriptors under `/data.bak.*` or `/data.staging.*`,
-so live load is safe.
+on `/data/.restore-{bak,staging}.<ts>-<pid>` children (and legacy
+`/data.bak.*` / `/data.staging.*` siblings), never on `/data` itself or
+any other entry of it, with anchored-regex discovery, Lstat at admission
+**and** immediately before deletion (TOCTOU re-check), never follows
+symlinks, and never touches a directory an unresolved restore journal
+references. The proxy holds no descriptors under `.restore-*`, so live
+load is safe.
 
 ---
 
 ## 8b. Recovering from an interrupted restore (RISK-005)
 
-A restore commit replaces `/data` with two atomic renames: it moves the
-current `/data` aside to `/data.bak.<ts>-<pid>`, then promotes the staged
-copy `/data.staging.<ts>-<pid>` into place. If the process is **killed
-between those two renames**, `/data` does not exist yet — the previous
-data is safe in the `.bak`, and the new data is ready in the `.staging`.
-
-Culvert **refuses to start** in this state instead of booting on an empty
-`/data` (which would silently lose data). Startup prints:
+A restore commit swaps the content of `/data` in place under a journal
+(§ 6). If the process is killed inside the swap, `/data/.restore-journal.json`
+remains and the directory holds a mix of previous and restored entries.
+Culvert **refuses to start** in this state and prints:
 
 ```
-FATAL: interrupted restore detected: data directory "/data" is missing, but the
-previous data was preserved at "/data.bak.<ts>-<pid>" (a restore commit was
-killed before it finished). Recover by choosing ONE, then start Culvert again:
-    REVERT to the previous data:            mv "/data.bak.<ts>-<pid>" "/data"
-    COMPLETE the restore (promote staged):  mv "/data.staging.<ts>-<pid>" "/data"
-    (run --list-restore-leftovers to inspect all leftovers)
+FATAL: interrupted restore detected: a restore commit in "/data" was interrupted
+in phase "promoting" (previous data at "/data/.restore-bak.<ts>-<pid>", staged
+data at "/data/.restore-staging.<ts>-<pid>"). Resolve it with the stack stopped,
+then start Culvert again:
+    INSPECT:   --recover-restore
+    REVERT:    --recover-restore --confirm=revert
+    COMPLETE:  --recover-restore --confirm=complete
 ```
 
-Choose deliberately:
+Choose deliberately, offline (`docker compose down` first; the recovery
+also refuses while the proxy's data-dir lock is held):
 
-- **REVERT** (`mv /data.bak.<ts>-<pid> /data`) — discard the in-flight
-  restore and return to the data you had before. Safe default if you are
-  unsure.
-- **COMPLETE** (`mv /data.staging.<ts>-<pid> /data`) — finish the restore
-  you intended; the staged copy is the fully-materialised new `/data`.
+- **REVERT** — undo the in-flight restore; the previous data is live again
+  and the staged restore content is kept as a `.restore-staging` leftover
+  for inspection. Safe default if you are unsure.
+- **COMPLETE** — finish the restore you intended; the previous data stays
+  in `.restore-bak`.
 
-Do this **offline** (the same offline-restore contract as § 6: `docker
-compose down` → `mv …` in a transient `cli` container or on the host →
-`docker compose up -d`). Run `--list-restore-leftovers` (§ 7) first if more
-than one generation of leftovers is present. Only one of the two `mv`
-moves is needed; afterwards remove the remaining sibling with
-`--cleanup-restore-leftovers` (§ 8) once you have confirmed the proxy is
-healthy.
+Both are deterministic for every phase and idempotent (interrupted again ⇒
+run the same command again). Afterwards `docker compose up -d`, verify, and
+remove the leftover with `--cleanup-restore-leftovers` (§ 8).
 
-The guard only triggers when `/data` is **absent and a `.bak` sibling
-exists** — a genuine first-run install (no `/data`, no `.bak`) boots
-normally.
-
----
-
+Installs upgraded from a build that used the old sibling layout
+(`/data.bak.<ts>-<pid>` next to a missing `/data`) still get the legacy
+`mv`-based instructions at startup; nothing in that layout is touched by
+the new build.
 ## 9. Passphrase handling
 
 `CULVERT_BACKUP_PASSPHRASE` controls encrypted-backup creation and

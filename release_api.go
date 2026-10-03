@@ -116,6 +116,9 @@ type releaseManager struct {
 	// must not overwrite a newer failure — M1-2 impl review MED). statusMu alone
 	// still guards reads, so /api/releases never blocks behind an in-flight fetch.
 	refreshRunMu sync.Mutex
+	// resumeWait is a test seam: when set, resumeInterruptedDispatches hands it
+	// the WaitGroup of the resumes it started so a test can join them.
+	resumeWait func(*sync.WaitGroup)
 }
 
 // refreshStatus records the most recent catalog-refresh outcome (M1-2).
@@ -235,6 +238,13 @@ type dispatchStore struct {
 	mu      sync.Mutex
 	now     func() time.Time
 	byAgent map[string]*dispatchRecord
+
+	// path, when set, mirrors every update to disk (release_dispatch_persist.go).
+	path           string
+	persistErrOnce sync.Once
+	// loadErr records a state file that EXISTED but could not be read at
+	// startup; while set the store never writes over it (release_dispatch_persist.go).
+	loadErr error
 }
 
 func newDispatchStore() *dispatchStore {
@@ -263,6 +273,7 @@ func (st *dispatchStore) update(agent, dispatchID string, mut func(*dispatchReco
 	}
 	mut(cur)
 	cur.UpdatedAt = st.now()
+	st.persistLocked()
 }
 
 func (st *dispatchStore) markDispatched(agent, dispatchID string, rc DispatchResumeContext) {
@@ -454,6 +465,10 @@ func (rm *releaseManager) addRefreshFields(out map[string]any) {
 	if st := rm.refreshStatusSnapshot(); !st.LastAt.IsZero() {
 		out["last_refresh"] = st
 	}
+	if rm.store != nil && rm.store.loadErr != nil {
+		// Bounded: a reason class, never the raw error (it embeds the path).
+		out["dispatch_state"] = "unreadable_at_startup"
+	}
 }
 
 func channelPointers(cat *Catalog) map[string]any {
@@ -598,6 +613,9 @@ type dispatchRequest struct {
 	NoRollback     bool   `json:"no_rollback,omitempty"`
 	PassphraseRef  string `json:"passphrase_ref,omitempty"`
 	IdempotencyKey string `json:"idempotency_key,omitempty"`
+	// Transition-policy acknowledgements (checkTransition). Both default off.
+	AllowDowngrade            bool `json:"allow_downgrade,omitempty"`
+	AcknowledgeUnknownCurrent bool `json:"acknowledge_unknown_current,omitempty"`
 }
 
 func (b dispatchRequest) target() (DispatchTarget, error) {
@@ -653,6 +671,9 @@ func apiReleaseDispatch(w http.ResponseWriter, r *http.Request) {
 		NoRollback:     body.NoRollback,
 		PassphraseRef:  body.PassphraseRef,
 		IdempotencyKey: body.IdempotencyKey, // honored when set; else the service mints a stable key
+
+		AllowDowngrade:            body.AllowDowngrade,
+		AcknowledgeUnknownCurrent: body.AcknowledgeUnknownCurrent,
 	}
 	dispatchID := rm.newID()
 
@@ -774,6 +795,11 @@ func refusalHTTPStatus(k RefusedKind) int {
 		return http.StatusServiceUnavailable
 	case RefusedUnknownTarget:
 		return http.StatusNotFound
+	case RefusedUnsupportedTransition, RefusedUnknownCurrent, RefusedDowngrade:
+		// Transition policy: the request is well-formed; the TRANSITION is
+		// refused. 409 so the GUI can distinguish it from a malformed body
+		// (400) and surface the acknowledgement the operator may give.
+		return http.StatusConflict
 	default: // no_target, ambiguous, repo_mismatch, malformed_ref, invalid config/rewrite
 		return http.StatusBadRequest
 	}

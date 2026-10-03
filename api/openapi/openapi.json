@@ -2000,8 +2000,16 @@
       "DispatchReleaseBody": {
         "additionalProperties": false,
         "properties": {
+          "acknowledge_unknown_current": {
+            "description": "Admit a target that declares min_upgrade_from when the running release is not a catalog release (custom build), i.e. the transition floor cannot be evaluated. Without it the planner refuses with kind \"unknown_current\" (HTTP 409). A running release BELOW the floor is refused with kind \"unsupported_transition\" and no acknowledgement admits it.",
+            "type": "boolean"
+          },
           "agent": {
             "type": "string"
+          },
+          "allow_downgrade": {
+            "description": "Break-glass only. Admit a target OLDER than the running release. Without it the planner refuses with kind \"downgrade\" (HTTP 409). Restore-from-backup is the supported way back; see docs/appliance/upgrade-transition-matrix.md.",
+            "type": "boolean"
           },
           "channel": {
             "type": "string"
@@ -5009,6 +5017,10 @@
         "properties": {
           "needsSetup": {
             "description": "True until an initial admin credential (or explicit open mode) is configured.",
+            "type": "boolean"
+          },
+          "setupTokenRequired": {
+            "description": "True when the deployment was started with a per-instance setup token (CULVERT_SETUP_TOKEN; the appliance first boot mints one) and POST /api/setup/complete requires it in the X-Culvert-Setup-Token header. Absent/false on deployments without a token.",
             "type": "boolean"
           },
           "ui_tls_fallback": {
@@ -23136,8 +23148,19 @@
     },
     "/api/setup/complete": {
       "post": {
-        "description": "One-time bootstrap. Sets the first admin credential, or enables explicit\nopen mode with `{unauth:true}`. Returns 403 once auth is already\nconfigured. Rate-limited per source IP.\n",
+        "description": "One-time bootstrap. Sets the first admin credential, or enables explicit\nopen mode with `{unauth:true}`. Returns 403 once auth is already\nconfigured, and 403 when the deployment requires a setup token\n(`GET /api/setup/status` → `setupTokenRequired`) that the request does\nnot present in `X-Culvert-Setup-Token`. Rate-limited per source IP; a\nmissing or wrong token counts as a failed attempt.\n",
         "operationId": "completeSetup",
+        "parameters": [
+          {
+            "description": "The per-instance setup token (appliance console / `sudo culvert-status`). Required only when `setupTokenRequired` is true.",
+            "in": "header",
+            "name": "X-Culvert-Setup-Token",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {

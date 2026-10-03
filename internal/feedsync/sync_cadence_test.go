@@ -100,7 +100,7 @@ func TestSyncRound_FailureIsCountedAndClassified(t *testing.T) {
 // an error string, for the same alert-dedup and disclosure reasons the threat
 // feed's classification carries.
 func TestLastFailureIsBounded(t *testing.T) {
-	allowed := map[string]bool{"": true, failDownload: true, failWrite: true}
+	allowed := map[string]bool{"": true, failDownload: true, failDiskSpace: true, failDiskSpaceUnknown: true, failWrite: true}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusTeapot)
 	}))

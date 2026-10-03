@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# culvert-appliance-reset-identity — prepare a RUNNING appliance to be cloned
+# or turned into a template. Removes every per-instance OS identity so the
+# next boot regenerates it (machine-id, SSH host keys, cloud-init instance,
+# first-boot console credential step). APPLICATION STATE IS KEPT: /srv/culvert
+# (.env with the CA/log passphrases) and the proxy-data volume (Root CA, admin
+# roster, policy) are untouched — a clone of a configured appliance is a
+# configured appliance with the SAME secrets. Rotate them on the clone if the
+# clone must not share trust with the original (admin UI → Certificates →
+# rotate CA; change admin passwords).
+#
+#   sudo culvert-appliance-reset-identity && sudo poweroff
+set -euo pipefail
+[[ "$(id -u)" -eq 0 ]] || { echo "run with sudo" >&2; exit 1; }
+STATE=/var/lib/culvert-appliance/state
+echo "This resets OS identity (machine-id, SSH host keys, cloud-init instance) and"
+echo "re-arms the first-boot console/network steps. Application data is kept."
+read -rp "Continue? [y/N] " a; [[ "${a,,}" == y ]] || exit 1
+cloud-init clean --logs --machine-id 2>/dev/null || { truncate -s 0 /etc/machine-id; rm -rf /var/lib/cloud/instances /var/lib/cloud/instance; }
+rm -f /etc/ssh/ssh_host_*
+rm -f "$STATE/ovf.done" "$STATE/console.done" "$STATE/complete.done"
+rm -f /etc/netplan/60-culvert.yaml
+: > /root/.bash_history 2>/dev/null || true
+: > /home/culvert/.bash_history 2>/dev/null || true
+journalctl --rotate --vacuum-time=1s >/dev/null 2>&1 || true
+echo "Identity reset. Power off now and clone/export; the clone regenerates its identity at boot."

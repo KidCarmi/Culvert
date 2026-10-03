@@ -26,6 +26,11 @@ type healthReport struct {
 	// would make every node look like it has the capability.
 	MCP               string `json:"mcp,omitempty" redact:"internal"`
 	ThreatFeedEntries int64  `json:"threat_feed_entries" redact:"internal"`
+	// Appliance readiness (F): distinguishes "services running" from "setup
+	// complete" and "ready to enforce" on the liveness surface too.
+	SetupComplete       bool   `json:"setup_complete" redact:"internal"`
+	PolicyDefaultAction string `json:"policy_default_action" redact:"internal"`
+	PolicyRules         int    `json:"policy_rules" redact:"internal"`
 }
 
 // computeHealth builds the liveness/posture snapshot from side-effect-free reads.
@@ -36,6 +41,10 @@ func computeHealth() healthReport {
 
 	// Threat feed entry count
 	tfEntries, _, _ := globalThreatFeed.Stats()
+
+	// Appliance readiness (F): setup + enforcement posture on the liveness
+	// surface too (same values as the /ready rows).
+	postureAction, postureRules, _ := policyPosture()
 
 	// ClamAV connectivity
 	clamStatus := "disabled"
@@ -100,6 +109,10 @@ func computeHealth() healthReport {
 		// not.
 		AdminUI:           adminUIListenerStatus(),
 		ThreatFeedEntries: tfEntries,
+
+		SetupComplete:       cfg.IsConfigured(),
+		PolicyDefaultAction: postureAction,
+		PolicyRules:         postureRules,
 	}
 }
 
@@ -415,14 +428,25 @@ func computeReadiness() (report readinessReport, code int) {
 		checks["yara"] = &readinessCheck{Status: "ok"}
 	}
 
-	// 5. Policy loaded (informational). Empty policy is a valid Zero-Trust posture
-	// — default-deny applies — so this row does NOT gate readiness. Surfaces "no
-	// rules yet" as a hint without flapping load balancers on a fresh install.
+	// 5. Policy loaded (informational). This row does NOT gate readiness so a
+	// fresh install does not flap load balancers. NOTE: an empty policy is NOT
+	// default-deny — with no rules and no default_action the proxy boots in
+	// ALLOW (passthrough); the `policy_posture` row below says which.
 	if ver, _ := policyStore.policyVersion(); ver > 0 {
 		checks["policy_loaded"] = &readinessCheck{Status: "ok"}
 	} else {
 		checks["policy_loaded"] = &readinessCheck{Status: "fail", Detail: "no rules"}
 	}
+
+	// 5b/5c. Appliance readiness: "services running" (this endpoint answering),
+	// "setup complete" (an administrator exists / auth posture chosen) and
+	// "ready to enforce" (the default action is deny, or rules exist and the
+	// default is not a bare passthrough) are THREE different states, and
+	// before these rows /ready reported 200 for all of them. Both are
+	// report-only: a node mid-setup is still a serving proxy and must not be
+	// ejected from a load balancer; strict callers (?strict=1) gate on them.
+	// Details are FIXED strings — this endpoint is unauthenticated.
+	appendSetupAndPostureReadinessChecks(checks)
 
 	// 6. Admin session HMAC initialised. Without this, signed cookies cannot be
 	// issued or verified — the admin UI is effectively unmanageable. Fail
@@ -546,3 +570,64 @@ func caExpiryDaysRemaining() int {
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
+
+// appendSetupAndPostureReadinessChecks adds the report-only `setup_complete`
+// and `policy_posture` rows (appliance readiness F). See computeReadiness.
+func appendSetupAndPostureReadinessChecks(checks map[string]*readinessCheck) {
+	if cfg.IsConfigured() {
+		checks["setup_complete"] = &readinessCheck{Status: "ok"}
+	} else {
+		checks["setup_complete"] = &readinessCheck{Status: "fail", Detail: "first-time setup not completed — admin UI is unclaimed"}
+	}
+	action, _, constraining := policyPosture()
+	switch {
+	case action == "deny":
+		checks["policy_posture"] = &readinessCheck{Status: "ok", Detail: "default-deny"}
+	case constraining > 0:
+		checks["policy_posture"] = &readinessCheck{Status: "ok", Detail: "blocking/filtering rules with default-allow fall-through"}
+	default:
+		checks["policy_posture"] = &readinessCheck{Status: "fail", Detail: "passthrough: no blocking or filtering rule and default action allow — not enforcing"}
+	}
+}
+
+// policyPosture returns the effective default action, the number of ENABLED
+// rules, and how many of those can actually REFUSE or ALTER a request. A
+// disabled rule is skipped by evaluation (ruleIsEnabled), so a rulebase whose
+// every rule is disabled is pure passthrough under default-allow and must not
+// read as "ready to enforce" (Codex P2, PR #1528). The same holds for a
+// rulebase of plain Allow rules: under default-allow it allows everything
+// either way (Codex P2, second round), so the posture is decided by the
+// constraining count, while `policy_rules` on /health keeps reporting enabled
+// rules.
+func policyPosture() (action string, rules, constraining int) {
+	action = defaultPolicyAction()
+	if policyStore != nil {
+		all := policyStore.List()
+		for i := range all {
+			if !ruleIsEnabled(&all[i]) {
+				continue
+			}
+			rules++
+			if ruleConstrainsTraffic(&all[i]) {
+				constraining++
+			}
+		}
+	}
+	return action, rules, constraining
+}
+
+// ruleConstrainsTraffic mirrors applyPolicyDecision's switch (proxy.go): Drop,
+// Block_Page and Redirect stop or divert the request; Allow does so only
+// through a per-rule file profile, behind exactly the guard
+// FileProfileBlocked opens with. An action outside the four constants reaches
+// no branch there, so it constrains nothing here either.
+func ruleConstrainsTraffic(r *PolicyRule) bool {
+	switch r.Action {
+	case ActionDrop, ActionBlockPage, ActionRedirect:
+		return true
+	case ActionAllow:
+		return r.FileFiltering && r.FileProfile != FileProfileNone
+	default:
+		return false
+	}
+}

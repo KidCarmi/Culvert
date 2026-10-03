@@ -14,6 +14,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -26,9 +27,64 @@ import (
 
 // isolateLogRing swaps the in-memory request-log ring for an empty one and
 // restores it on cleanup so logAdd side-effects don't leak across tests.
-func isolateLogRing(t *testing.T) {
+//
+// It first waits (bounded) for every in-flight HIJACKED tunnel to finish. A
+// tunnel's close accounting writes a request-log entry from the relay
+// goroutine, and httptest.Server.Close does not wait for hijacked
+// connections, so a CONNECT/WebSocket/SOCKS5 test that returns as soon as it
+// has its 200 leaves that write in flight — on a loaded runner it landed in
+// the NEXT test's freshly swapped ring (Deep determinism, seed
+// 1791014615135233342: "seeded ring holds 61 entries, want 60", the
+// straggler a `tunnel-allow` CONNECT from TestObservationE2E_CONNECTTunnel).
+// Every such tunnel is registered in activeConns and its accounting lands
+// BEFORE the deferred release (handleTunnelBypass etc.), so activeConns
+// reaching zero proves no straggler can still write.
+//
+// If the tunnels do not drain within the bound the helper FAILS BEFORE
+// SWAPPING: an isolated ring that a leaked tunnel can still write into is not
+// isolated, and a test that proceeded would assert against it and fail later
+// for a reason it cannot name. The failure names the cause instead.
+func isolateLogRing(t testing.TB) {
 	t.Helper()
+	if err := waitTunnelsQuiescent(isolateLogRingTunnelWait); err != nil {
+		t.Fatalf("isolateLogRing: refusing to isolate the request-log ring: %v — a previous test leaked a hijacked tunnel whose close accounting could land in this test's ring; make that test wait for its tunnel (waitForActiveConnsZero)", err)
+	}
 	t.Cleanup(reqlog.SwapRingForTest())
+}
+
+// isolateLogRingTunnelWait bounds isolateLogRing's wait. A leaked tunnel whose
+// client and target are both closed drains in microseconds; the bound only
+// matters for one that never ends.
+const isolateLogRingTunnelWait = 5 * time.Second
+
+// Seams for waitTunnelsQuiescent, so its gates never depend on runner speed:
+// the clock and the sleep can be replaced, and ringQuiescenceProbe (nil in
+// production) is called on every poll that found a tunnel still in flight —
+// the explicit "the helper is now waiting" signal a gate synchronises on.
+var (
+	ringQuiescenceNow   = time.Now
+	ringQuiescenceSleep = time.Sleep
+	ringQuiescenceProbe func()
+)
+
+// waitTunnelsQuiescent polls until no hijacked tunnel is registered, or the
+// bound passes, in which case it reports how many are still open. With
+// nothing in flight it returns on the first check, without sleeping.
+func waitTunnelsQuiescent(within time.Duration) error {
+	deadline := ringQuiescenceNow().Add(within)
+	for {
+		n := getActiveConns()
+		if n <= 0 {
+			return nil
+		}
+		if probe := ringQuiescenceProbe; probe != nil {
+			probe()
+		}
+		if !ringQuiescenceNow().Before(deadline) {
+			return fmt.Errorf("%d hijacked tunnel(s) still open after %s", n, within)
+		}
+		ringQuiescenceSleep(2 * time.Millisecond)
+	}
 }
 
 // resetRequestLogState unwires the persistent request log engine state so

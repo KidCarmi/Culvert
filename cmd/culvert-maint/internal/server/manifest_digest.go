@@ -43,6 +43,65 @@ type manifestVerboseEntry struct {
 			Variant      string `json:"variant"`
 		} `json:"platform"`
 	} `json:"Descriptor"`
+	// The embedded per-platform manifest (one of the two, by media type);
+	// only the blob sizes are read, for the upgrade space preflight.
+	SchemaV2Manifest *manifestBlobSizes `json:"SchemaV2Manifest"`
+	OCIManifest      *manifestBlobSizes `json:"OCIManifest"`
+}
+
+type manifestBlobSizes struct {
+	Config struct {
+		Size int64 `json:"size"`
+	} `json:"config"`
+	Layers []struct {
+		Size int64 `json:"size"`
+	} `json:"layers"`
+}
+
+// targetCompressedBytes returns the registry (compressed) size of the image
+// the apply will pull — config + layers of the pinned manifest — or 0 when
+// the verbose output does not let it be determined (the caller then skips
+// the space check rather than guess). pinned is the selected manifest
+// descriptor digest; for a single-entry result that entry is used.
+func targetCompressedBytes(stdout []byte, pinned string) int64 {
+	entries, err := parseManifestVerbose(stdout)
+	if err != nil {
+		return 0
+	}
+	pick := -1
+	for i := range entries {
+		if entries[i].Descriptor.Digest == pinned {
+			pick = i
+			break
+		}
+	}
+	if pick < 0 && len(entries) == 1 {
+		pick = 0
+	}
+	if pick < 0 {
+		if d, derr := resolveTargetManifestDigest(stdout); derr == nil {
+			for i := range entries {
+				if entries[i].Descriptor.Digest == d {
+					pick = i
+				}
+			}
+		}
+	}
+	if pick < 0 {
+		return 0
+	}
+	m := entries[pick].OCIManifest
+	if m == nil {
+		m = entries[pick].SchemaV2Manifest
+	}
+	if m == nil {
+		return 0
+	}
+	total := m.Config.Size
+	for _, l := range m.Layers {
+		total += l.Size
+	}
+	return total
 }
 
 // resolveTargetManifestDigest parses `docker manifest inspect --verbose`

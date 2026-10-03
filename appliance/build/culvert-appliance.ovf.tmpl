@@ -1,0 +1,156 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Culvert appliance OVF descriptor template. build-ova.sh substitutes the
+  the double-at-sign tokens below and never edits anything else. One streamOptimized VMDK, one
+  E1000 NIC (works on ESXi, VirtualBox and KVM without guest drivers), an IDE
+  CD-ROM so the OVF environment can also be delivered as an ISO (VirtualBox),
+  and ovf:transport="com.vmware.guestInfo iso" so vSphere delivers it via
+  guestinfo.ovfEnv (read by cloud-init's OVF datasource and by
+  culvert-firstboot for the culvert.* keys).
+-->
+<Envelope xmlns="http://schemas.dmtf.org/ovf/envelope/1"
+          xmlns:ovf="http://schemas.dmtf.org/ovf/envelope/1"
+          xmlns:rasd="http://schemas.dmtf.org/wbem/wscim/1/cim-schema/2/CIM_ResourceAllocationSettingData"
+          xmlns:vssd="http://schemas.dmtf.org/wbem/wscim/1/cim-schema/2/CIM_VirtualSystemSettingData"
+          xmlns:vmw="http://www.vmware.com/schema/ovf"
+          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+          ovf:version="1.0">
+  <References>
+    <File ovf:href="@@VMDK_NAME@@" ovf:id="file1" ovf:size="@@VMDK_SIZE@@"/>
+  </References>
+  <DiskSection>
+    <Info>Virtual disk information</Info>
+    <Disk ovf:capacity="@@DISK_GB@@" ovf:capacityAllocationUnits="byte * 2^30" ovf:diskId="vmdisk1" ovf:fileRef="file1"
+          ovf:format="http://www.vmware.com/interfaces/specifications/vmdk.html#streamOptimized"
+          ovf:populatedSize="@@VMDK_POPULATED@@"/>
+  </DiskSection>
+  <NetworkSection>
+    <Info>Logical networks</Info>
+    <Network ovf:name="VM Network">
+      <Description>Management + proxy network (one NIC)</Description>
+    </Network>
+  </NetworkSection>
+  <VirtualSystem ovf:id="@@VM_NAME@@">
+    <Info>Culvert Secure Web Gateway appliance</Info>
+    <Name>@@VM_NAME@@</Name>
+    <OperatingSystemSection ovf:id="94" vmw:osType="ubuntu64Guest">
+      <Info>Guest operating system</Info>
+      <Description>Ubuntu Linux (64-bit)</Description>
+    </OperatingSystemSection>
+    <ProductSection ovf:required="false">
+      <Info>Appliance properties (read at first boot)</Info>
+      <Product>@@PRODUCT@@</Product>
+      <Vendor>@@VENDOR@@</Vendor>
+      <Version>@@VERSION@@</Version>
+      <FullVersion>@@FULL_VERSION@@</FullVersion>
+      <!-- Standard cloud-init OVF keys (cloudinit/sources/DataSourceOVF.py) -->
+      <Property ovf:key="instance-id" ovf:type="string" ovf:userConfigurable="true" ovf:value="iid-culvert-appliance">
+        <Label>Instance ID</Label>
+        <Description>cloud-init instance id. Change it to force a clone to re-run first-boot identity steps.</Description>
+      </Property>
+      <Property ovf:key="hostname" ovf:type="string" ovf:userConfigurable="true" ovf:value="culvert-appliance">
+        <Label>Hostname</Label>
+        <Description>Guest hostname.</Description>
+      </Property>
+      <Property ovf:key="public-keys" ovf:type="string" ovf:userConfigurable="true" ovf:value="">
+        <Label>SSH public key for the 'culvert' administrator</Label>
+        <Description>OpenSSH public key(s), one per line. SSH is key-only; leave empty to disable remote SSH login.</Description>
+      </Property>
+      <Property ovf:key="password" ovf:type="string" ovf:password="true" ovf:userConfigurable="true" ovf:value="">
+        <Label>Console password for 'culvert' (optional)</Label>
+        <Description>Initial console password; a change is forced at first login. Leave empty to have a one-time password printed on the VM console at first boot (only when no SSH key is given).</Description>
+      </Property>
+      <!-- Culvert keys (read by culvert-firstboot; a static address needs all of mode/address/gateway) -->
+      <Property ovf:key="culvert.net.mode" ovf:type="string" ovf:userConfigurable="true" ovf:value="dhcp">
+        <Label>Network mode</Label>
+        <Description>dhcp (default) or static.</Description>
+      </Property>
+      <Property ovf:key="culvert.net.address" ovf:type="string" ovf:userConfigurable="true" ovf:value="">
+        <Label>Static address (CIDR)</Label>
+        <Description>e.g. 10.0.10.5/24. Used only when mode=static.</Description>
+      </Property>
+      <Property ovf:key="culvert.net.gateway" ovf:type="string" ovf:userConfigurable="true" ovf:value="">
+        <Label>Default gateway</Label>
+        <Description>e.g. 10.0.10.1. Used only when mode=static.</Description>
+      </Property>
+      <Property ovf:key="culvert.net.dns" ovf:type="string" ovf:userConfigurable="true" ovf:value="">
+        <Label>DNS servers</Label>
+        <Description>Comma-separated, e.g. 10.0.10.2,10.0.10.3. Used only when mode=static.</Description>
+      </Property>
+      <Property ovf:key="culvert.net.search" ovf:type="string" ovf:userConfigurable="true" ovf:value="">
+        <Label>DNS search domains</Label>
+        <Description>Comma-separated. Optional, mode=static only.</Description>
+      </Property>
+    </ProductSection>
+    <VirtualHardwareSection ovf:transport="com.vmware.guestInfo iso">
+      <Info>Virtual hardware requirements</Info>
+      <System>
+        <vssd:ElementName>Virtual Hardware Family</vssd:ElementName>
+        <vssd:InstanceID>0</vssd:InstanceID>
+        <vssd:VirtualSystemIdentifier>@@VM_NAME@@</vssd:VirtualSystemIdentifier>
+        <vssd:VirtualSystemType>@@HW_VERSION@@</vssd:VirtualSystemType>
+      </System>
+      <Item>
+        <rasd:AllocationUnits>hertz * 10^6</rasd:AllocationUnits>
+        <rasd:Description>Number of Virtual CPUs</rasd:Description>
+        <rasd:ElementName>@@VCPUS@@ virtual CPU(s)</rasd:ElementName>
+        <rasd:InstanceID>1</rasd:InstanceID>
+        <rasd:ResourceType>3</rasd:ResourceType>
+        <rasd:VirtualQuantity>@@VCPUS@@</rasd:VirtualQuantity>
+      </Item>
+      <Item>
+        <rasd:AllocationUnits>byte * 2^20</rasd:AllocationUnits>
+        <rasd:Description>Memory Size</rasd:Description>
+        <rasd:ElementName>@@MEMORY_MB@@MB of memory</rasd:ElementName>
+        <rasd:InstanceID>2</rasd:InstanceID>
+        <rasd:ResourceType>4</rasd:ResourceType>
+        <rasd:VirtualQuantity>@@MEMORY_MB@@</rasd:VirtualQuantity>
+      </Item>
+      <Item>
+        <rasd:Address>0</rasd:Address>
+        <rasd:Description>SCSI Controller</rasd:Description>
+        <rasd:ElementName>SCSI Controller 0</rasd:ElementName>
+        <rasd:InstanceID>3</rasd:InstanceID>
+        <rasd:ResourceSubType>lsilogic</rasd:ResourceSubType>
+        <rasd:ResourceType>6</rasd:ResourceType>
+      </Item>
+      <Item>
+        <rasd:AddressOnParent>0</rasd:AddressOnParent>
+        <rasd:ElementName>Hard Disk 1</rasd:ElementName>
+        <rasd:HostResource>ovf:/disk/vmdisk1</rasd:HostResource>
+        <rasd:InstanceID>4</rasd:InstanceID>
+        <rasd:Parent>3</rasd:Parent>
+        <rasd:ResourceType>17</rasd:ResourceType>
+      </Item>
+      <Item>
+        <rasd:Address>1</rasd:Address>
+        <rasd:Description>IDE Controller</rasd:Description>
+        <rasd:ElementName>IDE Controller 1</rasd:ElementName>
+        <rasd:InstanceID>5</rasd:InstanceID>
+        <rasd:ResourceType>5</rasd:ResourceType>
+      </Item>
+      <Item ovf:required="false">
+        <rasd:AddressOnParent>0</rasd:AddressOnParent>
+        <rasd:AutomaticAllocation>false</rasd:AutomaticAllocation>
+        <rasd:ElementName>CD/DVD Drive 1</rasd:ElementName>
+        <rasd:InstanceID>6</rasd:InstanceID>
+        <rasd:Parent>5</rasd:Parent>
+        <rasd:ResourceType>15</rasd:ResourceType>
+      </Item>
+      <Item>
+        <rasd:AddressOnParent>7</rasd:AddressOnParent>
+        <rasd:AutomaticAllocation>true</rasd:AutomaticAllocation>
+        <rasd:Connection>VM Network</rasd:Connection>
+        <rasd:Description>E1000 ethernet adapter on "VM Network"</rasd:Description>
+        <rasd:ElementName>Network adapter 1</rasd:ElementName>
+        <rasd:InstanceID>7</rasd:InstanceID>
+        <rasd:ResourceSubType>E1000</rasd:ResourceSubType>
+        <rasd:ResourceType>10</rasd:ResourceType>
+      </Item>
+    </VirtualHardwareSection>
+    <AnnotationSection ovf:required="false">
+      <Info>Annotation</Info>
+      <Annotation>Culvert appliance @@FULL_VERSION@@. First boot provisions /srv/culvert from the pre-baked, signed proxy image; management UI https://&lt;address&gt;:9090, proxy http://&lt;address&gt;:8080. See docs/appliance/first-boot.md.</Annotation>
+    </AnnotationSection>
+  </VirtualSystem>
+</Envelope>

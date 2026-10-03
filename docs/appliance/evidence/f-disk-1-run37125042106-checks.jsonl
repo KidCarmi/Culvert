@@ -1,0 +1,10 @@
+{"run":"20261003T131145Z","scenario":"E0","check":"bounded-fs","result":"pass","detail":"size=1992552KiB avail=1976120KiB image=/home/runner/work/_temp/appliance-fdisk1/appliance-root.img (sparse, cap 2048MiB)"}
+{"run":"20261003T131145Z","scenario":"E0","check":"image-store-bounded","result":"pass","detail":"server=29.8.2 driver=overlayfs root=/var/lib/docker containerd-store=[[driver-type io.containerd.snapshotter.v1]]; content store /var/lib/docker/containerd/daemon/io.containerd.content.v1.content; every state dir on one device (1792 )"}
+{"run":"20261003T131145Z","scenario":"E0","check":"dind-image","result":"pass","detail":"docker:29-dind@sha256:7dcdfc4a20246236f558175182ccace1eb15a41bd3eb119dd2284f393498b7c1 = docker@sha256:7dcdfc4a20246236f558175182ccace1eb15a41bd3eb119dd2284f393498b7c1"}
+{"run":"20261003T131145Z","scenario":"E0","check":"seeded-predecessor","result":"pass","detail":"running dev image=sha256:41f8408108aef2aae104e7a54053a1298bdf3e820ab7b4303669665d9c1818b0 state=8b50c04313d1c3d6"}
+{"run":"20261003T131145Z","scenario":"E0","check":"ca-identity","result":"pass","detail":"root CA sha256 3E:E5:9D:EA:EA:62:BC:A2:24:94:5D:F1:6B:42:91:A1:FC:4E:93:5A:FC:F6:5E:E8:E0:8E:3C:4E:95:05:78:E8"}
+{"run":"20261003T131145Z","scenario":"E0","check":"enforcement","result":"pass","detail":"allowed=200 blocked=403 (default-deny + allow rule, real traffic through the proxy)"}
+{"run":"20261003T131145Z","scenario":"E0","check":"agent-start","result":"pass","detail":"{\"agent_version\":\"dev\",\"status\":\"ok\"}"}
+{"run":"20261003T131145Z","scenario":"W","check":"filled-during-write","result":"pass","detail":"FeedSync: parsed 2570579 domain entries, writing to BadgerDB; write still in flight; filled to 5500KiB free"}
+{"run":"20261003T131145Z","scenario":"W","check":"known-failure-reproduced","result":"known-failure","detail":"F-DISK-1 reproduced: SIGBUS during the write; status=exited exit=2 restarts=1"}
+{"run":"20261003T131145Z","scenario":"W","check":"recovered-serving","result":"fail","detail":"version=unreachable"}
