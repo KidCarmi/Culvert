@@ -102,19 +102,38 @@ func orderingCycleReport(t *testing.T, unit string) string {
 	for _, u := range []string{"cloud-init-local.service", "cloud-init.service", "cloud-config.service", "cloud-final.service"} {
 		link("cloud-init.target", u)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), verifyTimeout)
 	defer cancel()
+	// The trailing ':' appends systemd's default search path: the real
+	// multi-user.target is needed (a hermetic stub target loses the cycle, which
+	// the broken-ordering control in the caller would catch).
 	cmd := exec.CommandContext(ctx, "systemd-analyze", "verify", "--man=no", "multi-user.target")
 	cmd.Env = append(os.Environ(), "SYSTEMD_UNIT_PATH="+dir+":")
-	out, _ := cmd.CombinedOutput() // verify also warns about unrelated host units; only cycles matter
+	out, err := cmd.CombinedOutput()
+	// A verification that did not complete proves nothing: no cycle lines from
+	// a killed or failed run must never read as "no cycle". Exit status alone
+	// is not the verdict either — systemd-analyze exits 0 with a cycle present,
+	// so the caller still checks the output (and the control proves it would).
+	if ctx.Err() != nil {
+		t.Fatalf("systemd-analyze verify did not complete within %v (%v); output:\n%s", verifyTimeout, ctx.Err(), out)
+	}
+	if err != nil {
+		t.Fatalf("systemd-analyze verify failed: %v; output:\n%s", err, out)
+	}
 	var cycles []string
 	for _, l := range strings.Split(string(out), "\n") {
 		if strings.Contains(strings.ToLower(l), "ordering cycle") || strings.Contains(l, "to break ordering cycle") {
 			cycles = append(cycles, l)
 		}
 	}
+	if len(cycles) > 0 {
+		t.Logf("systemd-analyze verify output:\n%s", out)
+	}
 	return strings.Join(cycles, "\n")
 }
+
+// verifyTimeout bounds one systemd-analyze run (it loads the host's units too).
+var verifyTimeout = time.Minute
 
 func TestFirstbootUnit_NoOrderingCycleWithCloudInit(t *testing.T) {
 	if _, err := exec.LookPath("systemd-analyze"); err != nil {
