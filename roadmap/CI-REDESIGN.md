@@ -3161,12 +3161,10 @@ attempt is a full suite on the same tree.
   that neither change touches, but neither fact establishes independence:
   a change that reorders or shortens the root package's work can still
   move a same-run timing ratio.
-- **Suspected, not confirmed: a leaked syslog forwarder.** The suspicion is
-  that a forwarder an earlier test left running added CPU load while the
-  ratio was being measured. The step logs and the uploaded
-  `deep-determinism-log` artifacts are non-verbose: no per-test timeline
-  and no goroutine state. So the logs can neither confirm nor rule this
-  out, and it stays labelled as suspected.
+- **Their cause is undetermined.** The step logs and the uploaded
+  `deep-determinism-log` artifacts are non-verbose: they have no per-test
+  timeline and no goroutine state. Nothing in them identifies what inflated
+  the measured ratio.
 - **The third failure is attributed, with evidence.** The branch's next
   push (`7faae52`) anchors that read to the package directory. Its run,
   [36273951828](https://github.com/KidCarmi/Culvert/actions/runs/36273951828), passed.
@@ -3175,11 +3173,9 @@ attempt is a full suite on the same tree.
   `6a83a2b` ("pair IP filter scaling gate samples under load", #1525).
   `TestBenchGate_RateLimitExemptBulkLoadIsLinear` still failed after both,
   in `internal/admission` ([36924714497](https://github.com/KidCarmi/Culvert/actions/runs/36924714497/attempts/1),
-  [37124197333](https://github.com/KidCarmi/Culvert/actions/runs/37124197333/attempts/1)), and no issue tracks it.
-  **Follow-up, recorded here and outside this change:** make the bulk-load
-  ratio gates robust to a busy runner, and capture enough state (`-v`
-  timeline or a goroutine dump on failure) to confirm or drop the syslog
-  suspicion.
+  [37124197333](https://github.com/KidCarmi/Culvert/actions/runs/37124197333/attempts/1)).
+  **Tracked in #1539**, which lists every observed failure of that gate.
+  Reproduction and remediation belong there, outside this change.
 
 **What this does not establish.**
 - Time until a PR gate or the QA gate finishes, total CI time or runner
