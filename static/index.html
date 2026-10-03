@@ -20181,6 +20181,14 @@ async function renderMCPCommandCenter(){
   var items=[];
   if(rolloutErr) items.push(['warn','Rollout posture unavailable: /api/mcp/rollout did not respond - kill switch, hard-fail and production-lock state are unknown','mcp-rollout']);
   if(distErr) items.push(['warn','Distribution posture unavailable: /api/mcp/distribution did not respond - fleet-effective state is unknown','mcp-health']);
+  // The DP applier fails CLOSED when its trust config is bad (previously visible only in the
+  // startup log and the raw API): the node silently ignores signed CP rollouts. Read-only
+  // surfacing of the bounded dp_compose_reason; "not_configured"/"ready" are healthy states.
+  var dpReason=distErr?'':(d.dp_compose_reason||'');
+  if(dpReason && dpReason!=='not_configured' && dpReason!=='ready'){
+    var dpWhy={invalid_trust_json:'CULVERT_MCP_DISTRIBUTION_TRUST_KEYS is present but is not valid JSON',invalid_trust_alg:'CULVERT_MCP_DISTRIBUTION_TRUST_KEYS names an unsupported algorithm',invalid_trust_key:'CULVERT_MCP_DISTRIBUTION_TRUST_KEYS holds a malformed public key',invalid_trust_store:'CULVERT_MCP_DISTRIBUTION_TRUST_KEYS could not form a trust store',state_dir_unavailable:'the durable state directory could not be created',recover_failed:'durable state could not be recovered',invalid_applier:'the applier could not be built'};
+    items.push(['warn','This node ignores signed MCP distribution (fail-closed): '+(dpWhy[dpReason]||('reason '+dpReason))+'. Fix it and restart; see the startup log for detail.','mcp-health']);
+  }
   if(gwKilled) items.push(['crit','Emergency kill switch active on gateway: all admission stopped (node-local)','mcp-rollout']);
   if(mgmtKilled) items.push(['crit','Emergency kill switch active on management: all admission stopped (node-local)','mcp-rollout']);
   if(gwSev!=='none') items.push([(gwSev==='high'||gwSev==='critical')?'crit':'warn','Gateway durability '+gwSev+': see durability meters','mcp-health']);
