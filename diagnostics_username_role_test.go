@@ -389,3 +389,193 @@ func TestWall_RosterDerivedDiagnosticsAreEnumerated(t *testing.T) {
 			"the accessor names changed and this wall is now scanning for nothing")
 	}
 }
+
+// TestWall_EveryOperatorContractRendererIsClassified enumerates from the OTHER
+// primitive, and it exists because the first version of this fix got exactly
+// this wrong. SEC-DIAG-ROSTER-1 has two halves — WHICH rows carry roster state
+// (walled above, from the roster accessors) and WHO RENDERS the contract — and
+// only the first was enumerated. `redactContractForRole` was wired into
+// `apiDiagnostics` alone, while `apiHealthExplain` (`ui_support.go`) renders the
+// SAME `OperatorContract` at the SAME `RoleViewer` floor and returned it raw, so
+// a viewer could read the affected count, the longest length, the legacy
+// login's role and the TOTP posture through the alternate endpoint — a complete
+// bypass of the fix (Codex P1, PR #1545).
+//
+// That is CHAOS-70's recorded governance lesson landing on the change that
+// quoted it: *enumerate the class from the PRIMITIVE, not from the file being
+// edited*. A wall anchored on `diagnostics.go` cannot see a second renderer in
+// another file, so this one scans every production file for callers of
+// `buildOperatorContract` and requires each to be classified here.
+func TestWall_EveryOperatorContractRendererIsClassified(t *testing.T) {
+	// Every function that obtains an OperatorContract, and why it is safe.
+	classified := map[string]string{
+		// Redacted renderers: must call redactContractForRole (asserted below).
+		"apiDiagnostics":   "redacted",
+		"apiHealthExplain": "redacted",
+
+		// Stated exception. The support-bundle collector is a different trust
+		// boundary, not the live viewer-facing API: it writes through
+		// in.Redactor.Classify under the struct's redact:"internal" tags and a
+		// declared MaxClass of ClassInternal, and a bundle is admin-created,
+		// admin-approved and capture-level gated before anyone can download it.
+		// If that lifecycle ever widens to a lower role, this row is wrong.
+		"Collect": "support-bundle redactor + admin-approved lifecycle",
+	}
+
+	root := pkgSourceDir()
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		t.Fatalf("read package dir: %v", err)
+	}
+
+	checked, redactedSeen := 0, 0
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		src, err := os.ReadFile(filepath.Join(root, name))
+		if err != nil {
+			t.Fatalf("read %s: %v", name, err)
+		}
+		body := string(src)
+		for idx := 0; ; {
+			k := strings.Index(body[idx:], "buildOperatorContract()")
+			if k < 0 {
+				break
+			}
+			at := idx + k
+			idx = at + len("buildOperatorContract()")
+
+			start := strings.LastIndex(body[:at], "\nfunc ")
+			if start < 0 {
+				t.Fatalf("%s: buildOperatorContract() call outside any function", name)
+			}
+			decl := body[start+1:]
+			if nl := strings.IndexByte(decl, '\n'); nl >= 0 {
+				decl = decl[:nl]
+			}
+			// The definition itself is not a renderer.
+			if strings.Contains(decl, "func buildOperatorContract(") {
+				continue
+			}
+			checked++
+
+			fn := ""
+			for candidate := range classified {
+				if strings.Contains(decl, candidate+"(") {
+					fn = candidate
+					break
+				}
+			}
+			if fn == "" {
+				t.Errorf("%s: %q renders the OperatorContract but is not classified in this wall. "+
+					"The contract carries an admin-only roster-derived row, so either wrap it in "+
+					"redactContractForRole (and add it here as \"redacted\") or record here why this "+
+					"caller is a different trust boundary", name, decl)
+				continue
+			}
+			if classified[fn] != "redacted" {
+				continue
+			}
+			redactedSeen++
+			// A renderer classified as redacted must actually redact: find the
+			// enclosing function body and require the call inside it.
+			end := strings.Index(body[start+1:], "\nfunc ")
+			fnBody := body[start+1:]
+			if end >= 0 {
+				fnBody = fnBody[:end]
+			}
+			if !strings.Contains(fnBody, "redactContractForRole(") {
+				t.Errorf("%s: %q is classified \"redacted\" but does not call redactContractForRole — "+
+					"it hands a viewer the admin-only roster detail, bypassing SEC-DIAG-ROSTER-1", name, decl)
+			}
+			if !strings.Contains(fnBody, "HasRole(RoleAdmin)") {
+				t.Errorf("%s: %q must gate redaction on HasRole(RoleAdmin); any lower threshold "+
+					"un-redacts for a role that cannot read the roster", name, decl)
+			}
+		}
+	}
+
+	if checked == 0 {
+		t.Fatal("not-vacuous check: no buildOperatorContract() caller found outside its own definition — " +
+			"the primitive was renamed and this wall is now scanning for nothing")
+	}
+	// Both known viewer-facing renderers must have been seen and verified; if a
+	// future change deletes one, the count drops and this fails rather than
+	// passing against a shrinking surface.
+	if redactedSeen < 2 {
+		t.Errorf("verified %d redacted renderer(s), want at least 2 (apiDiagnostics + apiHealthExplain); "+
+			"a renderer was removed or renamed without updating this wall", redactedSeen)
+	}
+}
+
+// TestApiHealthExplain_UsernameRowDetailIsAdminOnly is the behavioural half of
+// the bypass fix, driving the REAL alternate handler. Verified failing against
+// the pre-fix body (a bare jsonOK(w, buildOperatorContract())).
+func TestApiHealthExplain_UsernameRowDetailIsAdminOnly(t *testing.T) {
+	seedOversizeRosterWithTOTP(t)
+
+	fetch := func(role UIRole) *OperatorContractCheck {
+		t.Helper()
+		r := roleCtx(httptest.NewRequest(http.MethodGet, "/api/health/explain", http.NoBody), role)
+		w := httptest.NewRecorder()
+		apiHealthExplain(w, r)
+		if w.Code != http.StatusOK {
+			t.Fatalf("role %q: status = %d, want 200", role, w.Code)
+		}
+		return findDiagnosticCheck(decodeContract(t, w), adminUsernameLengthCode)
+	}
+
+	// Positive: an admin still gets the full remediation through this endpoint.
+	adminRow := fetch(RoleAdmin)
+	if adminRow == nil || adminRow.Status != diagWarn {
+		t.Fatalf("admin: admin_username_length = %+v, want warn", adminRow)
+	}
+	adminDetail := usernameRowDetail(adminRow)
+	for _, tok := range rosterDisclosureTokens {
+		if !strings.Contains(adminDetail, tok) {
+			t.Fatalf("admin rendering of /api/health/explain lacks %q — the fixture no longer "+
+				"produces the disclosure, so the negative half would be vacuous", tok)
+		}
+	}
+
+	// Negative: neither viewer nor operator may read it here either.
+	for _, role := range []UIRole{RoleViewer, RoleOperator} {
+		row := fetch(role)
+		if row == nil {
+			t.Fatalf("role %q: admin_username_length row missing from /api/health/explain", role)
+		}
+		if row.OperatorAction != "" {
+			t.Errorf("role %q: /api/health/explain leaked operator_action = %q", role, row.OperatorAction)
+		}
+		if row.Message != diagnosticsRedactedUsernameMessage {
+			t.Errorf("role %q: /api/health/explain message = %q, want the redacted constant", role, row.Message)
+		}
+		detail := usernameRowDetail(row)
+		for _, tok := range rosterDisclosureTokens {
+			if strings.Contains(detail, tok) {
+				t.Errorf("role %q: /api/health/explain leaked roster-derived fact %q", role, tok)
+			}
+		}
+	}
+}
+
+// TestApiHealthExplain_UsernameRowStaysVisible is the CONTROL: the alternate
+// renderer must keep reporting the condition, same as /api/diagnostics.
+func TestApiHealthExplain_UsernameRowStaysVisible(t *testing.T) {
+	seedOversizeRosterWithTOTP(t)
+
+	r := roleCtx(httptest.NewRequest(http.MethodGet, "/api/health/explain", http.NoBody), RoleViewer)
+	w := httptest.NewRecorder()
+	apiHealthExplain(w, r)
+	c := decodeContract(t, w)
+
+	row := findDiagnosticCheck(c, adminUsernameLengthCode)
+	if row == nil || row.Status != diagWarn {
+		t.Fatalf("viewer: admin_username_length = %+v, want a visible warn row", row)
+	}
+	if c.Verdict == "ok" {
+		t.Error("viewer: verdict rolled up to ok despite a warn row")
+	}
+}

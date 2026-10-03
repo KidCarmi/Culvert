@@ -43,6 +43,15 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   row without its remediation text; sign in as an admin for the full
   remediation.
 
+  **Review round (P1):** the first version wired the redaction into
+  `/api/diagnostics` only, while `GET /api/health/explain` renders the same
+  contract at the same viewer floor and returned it raw — a complete bypass
+  through the alternate endpoint. Both renderers are now redacted, and a wall
+  enumerates every caller of `buildOperatorContract` repo-wide so a third
+  renderer fails the build until it is redacted or granted a stated exception
+  (the support-bundle collector is the one recorded exception: a separate,
+  admin-approved trust boundary that writes through the bundle redactor).
+
 - Node-local key material was written with `os.WriteFile` on a predictable
   path, which follows a planted symlink and inherits a planted file's mode
   (SEC-SECRETWRITE-1). Four writers introduced in this window were affected:

@@ -134,6 +134,49 @@ the caller's contract and leak back into a later admin render through a shared b
 
 ---
 
+## 3b. Review round — F-1 was bypassable (P1, fixed)
+
+Codex found the fix **incomplete, and the miss is the same class the fix was
+written to close.** `redactContractForRole` was wired into `apiDiagnostics`
+alone, but `apiHealthExplain` (`ui_support.go`, `GET /api/health/explain`)
+renders the **same** `OperatorContract` at the **same** `RoleViewer` floor and
+returned `buildOperatorContract()` raw — so every fact in F-1 remained readable
+by a viewer through the alternate endpoint. The fix was defeated in full by an
+endpoint one file over.
+
+**Why it was missed, stated plainly.** SEC-DIAG-ROSTER-1 has **two** primitives:
+which rows carry roster state (`ListUIUsers` / `UserHasTOTP` / `GetUser`) and
+**who renders the contract** (`buildOperatorContract`). §6 enumerated the first
+and built a wall anchored on `diagnostics.go`, which structurally cannot see a
+second renderer in another file. The governance lesson this review quoted from
+CHAOS-70 — *enumerate the class from the primitive, not from the file being
+edited* — was applied to one primitive and not the other. The transferable form:
+**enumerating one primitive of a two-primitive class is not enumerating the
+class** (cf. CHAOS-69's "enforcing one tier of a two-tier contract is not
+enforcing the contract").
+
+**Fixed:** both renderers redact. `TestWall_EveryOperatorContractRendererIsClassified`
+now scans every production file for callers of `buildOperatorContract` and
+requires each to be classified — a `redacted` renderer must actually call
+`redactContractForRole` **and** gate on `HasRole(RoleAdmin)` (so a widened
+threshold fails the wall, not only the behavioural gate), and anything else
+needs a recorded reason. The support-bundle collector (`support_collectors.go`)
+is the one stated exception: a different trust boundary, writing through
+`in.Redactor.Classify` under the struct's `redact:"internal"` tags with a
+declared `MaxClass: ClassInternal`, behind an admin-created, admin-approved,
+capture-level-gated lifecycle. The wall carries a not-vacuous check and a floor
+of two verified redacted renderers, so deleting or renaming one fails rather
+than passing against a shrinking surface.
+
+Gates added: `TestApiHealthExplain_UsernameRowDetailIsAdminOnly` (behavioural,
+positive + negative, with its own not-vacuous check) and
+`TestApiHealthExplain_UsernameRowStaysVisible` (control — the alternate renderer
+must keep reporting the condition). Four mutations each verified failing: the
+pre-fix bare render, the threshold widened to `RoleOperator`, a new unclassified
+renderer added in an unrelated file, and the primitive renamed.
+
+---
+
 ## 4. Regression analysis of the extraction (no findings)
 
 Each claim below was verified mechanically, not by reading intent.
