@@ -54,7 +54,8 @@ guard_maintenance() {
       log "WARNING: --force: proceeding although the maintenance agent journal holds: $inflight"
     else
       echo "culvert-os-update: the maintenance agent has operation(s) in flight or awaiting reconcile: $inflight" >&2
-      echo "  wait for them to finish, or check: curl --unix-socket /run/culvert-maint/culvert-maint.sock http://unix/v1/status" >&2
+      echo "  wait for them to finish; an interrupted one is listed under interrupted_operations in" >&2
+      echo "  Admin UI → Release Management (GET /api/maintenance-agent) and is settled with POST /v1/reconcile" >&2
       echo "  (override with --force only when you know the agent is idle)" >&2
       exit 3
     fi
