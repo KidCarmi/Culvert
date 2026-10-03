@@ -196,9 +196,14 @@ func noteCPGRPCConfigured(addr string) {
 }
 
 // noteCPGRPCBindFailure records one failed bind attempt and reports whether the
-// caller should log, plus how long the episode has been running (for the sleep
-// clamp).
-func noteCPGRPCBindFailure(reason string, backoff time.Duration, now time.Time) (shouldLog bool, failingFor time.Duration) {
+// caller should emit a log line for it.
+//
+// It deliberately does NOT return the episode duration, even though
+// socks5_health.go's twin does: the supervisor reads it with cpGRPCFailingFor
+// at the top of each iteration, immediately before the sleep it clamps, which
+// is FRESHER than a value computed when the previous failure was recorded.
+// Returning both left the second result dead at every call site (unparam).
+func noteCPGRPCBindFailure(reason string, backoff time.Duration, now time.Time) (shouldLog bool) {
 	cpGRPCEverFailed.Store(true)
 
 	cpGRPC.mu.Lock()
@@ -221,14 +226,13 @@ func noteCPGRPCBindFailure(reason string, backoff time.Duration, now time.Time) 
 		cpGRPC.suppressed++
 	}
 
-	failingFor = cpGRPCElapsedSince(cpGRPC.firstFailure, cpGRPC.lastFailure, now)
+	failingFor := cpGRPCElapsedSince(cpGRPC.firstFailure, cpGRPC.lastFailure, now)
 	unavailable := failingFor >= cpGRPCBindUnavailableAfter
 	alertNow := unavailable && !cpGRPC.alerted
 	if alertNow {
 		cpGRPC.alerted = true
 	}
 	failures := cpGRPC.consecutive
-	addr := cpGRPC.addr
 	everServed := cpGRPC.everServed
 	cpGRPC.mu.Unlock()
 
@@ -249,9 +253,8 @@ func noteCPGRPCBindFailure(reason string, backoff time.Duration, now time.Time) 
 				"enrolled Data Planes cannot fetch config and continue on their last-good policy, and node "+
 				"enrollment is unavailable. This node's HTTP/HTTPS proxy and admin UI are unaffected",
 			history, cpGRPCBindUnavailableAfter, failures, reason))
-		_ = addr
 	}
-	return shouldLog, failingFor
+	return shouldLog
 }
 
 // noteCPGRPCBound records an OBSERVED successful bind and returns the number of

@@ -251,14 +251,13 @@ func startControlPlaneWithBindRetry(cfg clusterStartupConfig, _ context.Context)
 		return nil
 	} else {
 		reason := classifyCPGRPCBindError(err)
-		_, failingFor := noteCPGRPCBindFailure(reason, cpGRPCBindBackoffInitial, time.Now())
+		noteCPGRPCBindFailure(reason, cpGRPCBindBackoffInitial, time.Now())
 		// The FULL error goes here and nowhere else: the contract row, the
 		// alert and the readiness detail carry the bounded class only.
 		// logErrorf applies sanitizeLog (CWE-117) to the whole line.
 		logErrorf("ControlPlane gRPC listener could not bind (%s): %v — retrying in the background; "+
 			"this node keeps proxying and its admin UI stays reachable, and enrolled Data Planes "+
 			"continue on their last-good config until it binds", reason, err)
-		_ = failingFor
 	}
 
 	s := &cpGRPCSupervisor{
@@ -395,7 +394,7 @@ func (s *cpGRPCSupervisor) run() {
 		}
 
 		reason := classifyCPGRPCBindError(err)
-		shouldLog, _ := noteCPGRPCBindFailure(reason, backoff, time.Now())
+		shouldLog := noteCPGRPCBindFailure(reason, backoff, time.Now())
 		if shouldLog {
 			logErrorf("ControlPlane gRPC listener still cannot bind (%s): %v — this node keeps proxying "+
 				"and its admin UI stays reachable; enrolled Data Planes continue on their last-good config",

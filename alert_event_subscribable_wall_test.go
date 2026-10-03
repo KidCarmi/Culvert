@@ -90,6 +90,14 @@ func collectFiredAlertEvents(t *testing.T) map[string][]string {
 	t.Helper()
 	found := map[string][]string{}
 	root := pkgSourceDir()
+
+	// The walk only ENUMERATES; every file is read afterwards, outside the
+	// callback. gosec G122 flags a filesystem operation performed inside a
+	// Walk callback, because the path the callback is handed was resolved by
+	// an earlier lstat and a symlink swapped in between the two is a TOCTOU
+	// traversal. Collecting first and reading after keeps discovery and
+	// reading separate, which is the clearer shape here anyway.
+	var sources []string
 	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
@@ -103,12 +111,26 @@ func collectFiredAlertEvents(t *testing.T) map[string][]string {
 			}
 			return nil
 		}
+		// Regular files only: a symlink or device node is never a source file
+		// this wall needs to read, and skipping them here means the read loop
+		// below is handed nothing but ordinary files.
+		if !info.Mode().IsRegular() {
+			return nil
+		}
 		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
 			return nil
 		}
-		b, rerr := os.ReadFile(path) // #nosec G304 -- walking our own module
+		sources = append(sources, path)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walking the module: %v", err)
+	}
+
+	for _, path := range sources {
+		b, rerr := os.ReadFile(path) // #nosec G304 -- enumerated from our own module source tree
 		if rerr != nil {
-			return rerr
+			t.Fatalf("reading %s: %v", path, rerr)
 		}
 		for _, m := range alertEmitterRe.FindAllStringSubmatch(string(b), -1) {
 			ev := m[1]
@@ -124,10 +146,6 @@ func collectFiredAlertEvents(t *testing.T) map[string][]string {
 			}
 			found[ev] = append(found[ev], rel)
 		}
-		return nil
-	})
-	if err != nil {
-		t.Fatalf("walking the module: %v", err)
 	}
 	return found
 }

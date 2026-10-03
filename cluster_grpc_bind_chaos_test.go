@@ -519,7 +519,9 @@ func TestChaos71_DefectClockRollbackCannotShrinkAnObservedOutage(t *testing.T) {
 
 // ─── CONTROLS ───────────────────────────────────────────────────────────────
 
-// TestChaos71_ControlHealthyControlPlaneStillBindsAndServes.
+// TestChaos71_ControlHealthyControlPlaneStillBindsAndServes requires an
+// ordinary Control Plane to come up, arm no supervisor, and report itself
+// serving on every surface.
 //
 // The cheapest way to pass every defect gate above is to stop bringing the
 // Control Plane up at all, which would silently delete cluster config
@@ -560,7 +562,8 @@ func TestChaos71_ControlHealthyControlPlaneStillBindsAndServes(t *testing.T) {
 	StopControlPlaneGRPC()
 }
 
-// TestChaos71_ControlReadinessRowIsReportOnly.
+// TestChaos71_ControlReadinessRowIsReportOnly requires a failing listener to
+// leave a plain /ready verdict passing while ?strict=1 fails on it.
 //
 // A node whose Control Plane listener cannot bind is proxying perfectly, so
 // gating the default readiness verdict would eject a healthy gateway from the

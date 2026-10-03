@@ -239,9 +239,7 @@ func registerEarlyShutdownHooks(reg *shutdownRegistry, s *startupState) {
 	})
 	// CHAOS-71: stop the CP gRPC rebind supervisor before the server itself,
 	// so no new listener can be published behind the stop's back.
-	reg.Register("cp-grpc-bind-supervisor-stop", shutdownOrderCPGRPCBindSupervisor, func(ctx context.Context) error {
-		return stopCPGRPCBindSupervisor(ctx)
-	})
+	reg.Register("cp-grpc-bind-supervisor-stop", shutdownOrderCPGRPCBindSupervisor, stopCPGRPCBindSupervisor)
 	// Gracefully stop gRPC server (drains in-flight RPCs).
 	reg.Register("control-plane-grpc-stop", shutdownOrderControlPlaneGRPCStop, func(context.Context) error {
 		StopControlPlaneGRPC()
