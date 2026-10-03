@@ -37,9 +37,19 @@ env:
 
 jobs:
   guest-boot:
-    name: "Lab · build OVA + QEMU guest boot + qualify"
+    name: "Lab · ${{ matrix.variant }} OVA: build + QEMU guest boot + qualify"
     runs-on: ubuntu-24.04
     timeout-minutes: 240
+    strategy:
+      fail-fast: false
+      matrix:
+        # original: the candidate's exact inputs (source 4c4b772) — the
+        #           qualification of record for that build.
+        # fix:      the same image tar, built with THIS branch's build-ova.sh
+        #           (in-place root growth; recorded as provisioning drift) —
+        #           a proposed product fix, separately identified, never
+        #           presented as the original.
+        variant: [original, fix]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Host preflight (KVM, RAM, disk) and lab directory
@@ -121,7 +131,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: echo "from=$(test/e2e/appliance/lab/obtain-image.sh "$LAB_ROOT/in")" >> "$GITHUB_OUTPUT"
       - name: Preserve the source image beyond the original artifact's expiry
-        if: steps.image.outputs.from == 'source-run'
+        if: steps.image.outputs.from == 'source-run' && matrix.variant == 'original'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: lab-source-image-${{ env.SOURCE_IMAGE_RUN_ID }}
@@ -129,6 +139,7 @@ jobs:
           retention-days: 30
           compression-level: 0
       - name: Check out the appliance source the candidate was built from
+        if: matrix.variant == 'original'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ env.APPLIANCE_SOURCE_SHA }}
@@ -139,11 +150,13 @@ jobs:
           set -euo pipefail
           # The build runs as root over a runner-owned checkout; without this,
           # git refuses the repo and the candidate-source == HEAD check fails.
-          sudo git config --global --add safe.directory "$GITHUB_WORKSPACE/appliance-src"
+          if [ "${{ matrix.variant }}" = original ]; then src="$GITHUB_WORKSPACE/appliance-src"; drift=()
+          else src="$GITHUB_WORKSPACE"; drift=(--candidate-allow-provisioning-drift); fi
+          sudo git config --global --add safe.directory "$src"
           sudo -E env LIBGUESTFS_BACKEND=direct BASE_IMAGE_KEYRING=/usr/share/keyrings/ubuntu-cloudimage-keyring.gpg \
-            appliance-src/appliance/build/build-ova.sh \
+            "$src/appliance/build/build-ova.sh" \
               --candidate-image-tar "$LAB_ROOT/in/culvert-image.tar" \
-              --candidate-source "$APPLIANCE_SOURCE_SHA" --candidate-run-id "$SOURCE_IMAGE_RUN_ID" \
+              --candidate-source "$APPLIANCE_SOURCE_SHA" --candidate-run-id "$SOURCE_IMAGE_RUN_ID" "${drift[@]}" \
               --out "$LAB_ROOT/ova" --work "$LAB_ROOT/build" 2>&1 | tee "$LAB_ROOT/build-ova.log"
           sudo chown -R "$(id -u):$(id -g)" "$LAB_ROOT/ova"
           cat "$LAB_ROOT/ova/"*.ova.sha256
@@ -172,12 +185,13 @@ jobs:
           mkdir -p "$LAB_ROOT/lab/evidence/build"
           cp "$LAB_ROOT/ova/"{build-info.json,build-upgrades.txt,dpkg-list.txt,host-components.txt,prepare-guest.log} "$LAB_ROOT/ova/"*.ova.sha256 "$LAB_ROOT/lab/evidence/build/" 2>/dev/null || true
           cp "$LAB_ROOT/rebuilt.fingerprint.tsv" "$LAB_ROOT/build-ova.log" "$LAB_ROOT/lab/evidence/build/" 2>/dev/null || true
-          printf 'lab_commit=%s\nappliance_source=%s\noriginal_ova_sha256=%s (NOT the artifact booted here)\nsource_image_run=%s from=%s\n' \
-            "$GITHUB_SHA" "$APPLIANCE_SOURCE_SHA" "$ORIGINAL_OVA_SHA256" "$SOURCE_IMAGE_RUN_ID" "${{ steps.image.outputs.from }}" > "$LAB_ROOT/lab/evidence/identities.txt"
+          printf 'variant=%s\nlab_commit=%s\nimage_source=%s\nbuild_scripts=%s\noriginal_ova_sha256=%s (NOT the artifact booted here)\nsource_image_run=%s from=%s\n' \
+            "${{ matrix.variant }}" "$GITHUB_SHA" "$APPLIANCE_SOURCE_SHA" "$([ "${{ matrix.variant }}" = original ] && echo "$APPLIANCE_SOURCE_SHA" || echo "$GITHUB_SHA (proposed fix)")" \
+            "$ORIGINAL_OVA_SHA256" "$SOURCE_IMAGE_RUN_ID" "${{ steps.image.outputs.from }}" > "$LAB_ROOT/lab/evidence/identities.txt"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
-          name: appliance-lab-evidence
+          name: appliance-lab-evidence-${{ matrix.variant }}
           path: ${{ env.LAB_ROOT }}/lab/evidence
           retention-days: 30
           if-no-files-found: warn

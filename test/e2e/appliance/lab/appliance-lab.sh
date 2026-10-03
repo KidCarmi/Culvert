@@ -6,6 +6,13 @@
 #   test/e2e/appliance/lab/appliance-lab.sh fingerprint OVA OUT.tsv
 #   test/e2e/appliance/lab/appliance-lab.sh compare REFERENCE.tsv CANDIDATE.tsv
 #
+# EXTERNAL target (the same guest checks against an appliance some other tool
+# deployed — e.g. an ESXi import; that tool owns the VM and its credentials):
+#   LAB_EXTERNAL=1 LAB_HOST=<vm address> LAB_SSH_KEY=<key the VM was given>
+#   [LAB_SSH_PORT=22 LAB_PROXY_PORT=8080 LAB_UI_PORT=9090] appliance-lab.sh qualify ; ... collect
+#   `up`/`down` are QEMU-only; with LAB_EXTERNAL=1 `down` removes only the
+#   lab's own disposable admin password and cookies, never the VM or its key.
+#
 # What it boots: the VMDK inside the OVA, after verifying the OVA's SHA-256
 # (LAB_OVA_SHA256) and every digest in its .mf. The VMDK is converted ONCE to
 # a read-only qcow2 base; the guest writes only to a disposable qcow2 overlay
@@ -44,8 +51,10 @@ WORK="$LAB_DIR/work"; EV="$LAB_DIR/evidence"; SEC="$LAB_DIR/secrets"; STATEF="$L
 JSONL="$EV/checks.jsonl"
 LAB_MEM_MB="${LAB_MEM_MB:-4096}"; LAB_CPUS="${LAB_CPUS:-2}"; LAB_ACCEL="${LAB_ACCEL:-auto}"
 LAB_MIN_FREE_GB="${LAB_MIN_FREE_GB:-20}"; LAB_MIN_MEM_MB="${LAB_MIN_MEM_MB:-6144}"
-LAB_SSH_PORT="${LAB_SSH_PORT:-2222}"; LAB_PROXY_PORT="${LAB_PROXY_PORT:-18080}"; LAB_UI_PORT="${LAB_UI_PORT:-19090}"
-LAB_FIRSTBOOT_TIMEOUT="${LAB_FIRSTBOOT_TIMEOUT:-2400}"; LAB_FEED_TIMEOUT="${LAB_FEED_TIMEOUT:-1500}"
+LAB_EXTERNAL="${LAB_EXTERNAL:-0}"; LAB_HOST="${LAB_HOST:-127.0.0.1}"
+if [[ "$LAB_EXTERNAL" == 1 ]]; then dssh=22 dproxy=8080 dui=9090; else dssh=2222 dproxy=18080 dui=19090; fi
+LAB_SSH_PORT="${LAB_SSH_PORT:-$dssh}"; LAB_PROXY_PORT="${LAB_PROXY_PORT:-$dproxy}"; LAB_UI_PORT="${LAB_UI_PORT:-$dui}"
+LAB_FIRSTBOOT_TIMEOUT="${LAB_FIRSTBOOT_TIMEOUT:-2400}"; LAB_KERNEL_TIMEOUT="${LAB_KERNEL_TIMEOUT:-}"; LAB_FEED_TIMEOUT="${LAB_FEED_TIMEOUT:-1500}"
 LAB_EXPECT_IMAGE_ID="${LAB_EXPECT_IMAGE_ID:-}"
 ADMIN_USER=labadmin
 
@@ -75,14 +84,31 @@ redact_tree() { local f v
   done; }
 
 # ── access helpers (vsphere-qualification.md step 4 shapes) ──────────────────
-SSH_OPTS=(-i "$SEC/id_ed25519" -p "$LAB_SSH_PORT" -o StrictHostKeyChecking=no -o "UserKnownHostsFile=$SEC/known_hosts"
+LAB_SSH_KEY="${LAB_SSH_KEY:-$SEC/id_ed25519}"
+SSH_OPTS=(-i "$LAB_SSH_KEY" -p "$LAB_SSH_PORT" -o StrictHostKeyChecking=no -o "UserKnownHostsFile=$SEC/known_hosts"
           -o ConnectTimeout=10 -o BatchMode=yes -o LogLevel=ERROR -o ServerAliveInterval=15)
-gssh() { ssh "${SSH_OPTS[@]}" culvert@127.0.0.1 "$@"; }
-UI="https://127.0.0.1:$LAB_UI_PORT"; P="http://127.0.0.1:$LAB_PROXY_PORT"; JAR="$SEC/cookies"
+gssh() { ssh "${SSH_OPTS[@]}" "culvert@$LAB_HOST" "$@"; }
+UI="https://$LAB_HOST:$LAB_UI_PORT"; P="http://$LAB_HOST:$LAB_PROXY_PORT"; JAR="$SEC/cookies"
+ensure_admin_pass() { [[ -s "$SEC/admin-pass" ]] || { head -c 4096 /dev/urandom | tr -dc 'A-Za-z0-9' | cut -c1-24 > "$SEC/admin-pass"; chmod 0600 "$SEC/admin-pass"; }; }
 api() { curl -ksS -m 30 -X "$1" "$UI$2" -H "Origin: $UI" -H 'Content-Type: application/json' -b "$JAR" -c "$JAR" ${3:+-d "$3"} -w '\n%{http_code}\n'; }
 body() { sed '$d'; }; code() { tail -n1; }
 through_proxy() { curl -sS -m 20 -x "$P" -o /dev/null -w '%{http_code}' "$1" 2>/dev/null || echo 000; }
+# Monitor socket: a short fixed path (AF_UNIX paths are limited to 108 bytes).
+MON_SOCK="/tmp/culvert-lab-$(printf '%s' "$WORK" | sha256sum | cut -c1-12).sock"
 qemu_alive() { [[ -f "$WORK/qemu.pid" ]] && kill -0 "$(cat "$WORK/qemu.pid")" 2>/dev/null; }
+# screendump NAME — the VGA screen as PNG in the evidence (firmware and GRUB
+# write there, not to the serial console). Stdlib only: monitor socket + PPM→PNG.
+screendump() { qemu_alive && [[ -S "$MON_SOCK" ]] || return 0
+  python3 - "$MON_SOCK" "$WORK/screen.ppm" "$EV/$1.png" <<'PY' || true
+import socket,struct,sys,time,zlib
+s=socket.socket(socket.AF_UNIX); s.connect(sys.argv[1]); time.sleep(0.3); s.recv(65536)
+s.send(f"screendump {sys.argv[2]}\n".encode()); time.sleep(1.5); s.close()
+d=open(sys.argv[2],"rb").read(); p=d.split(b"\n",3); w,h=map(int,p[1].split()); px=p[3]
+raw=b"".join(b"\x00"+px[y*w*3:(y+1)*w*3] for y in range(h))
+c=lambda t,b: struct.pack(">I",len(b))+t+b+struct.pack(">I",zlib.crc32(t+b)&0xffffffff)
+open(sys.argv[3],"wb").write(b"\x89PNG\r\n\x1a\n"+c(b"IHDR",struct.pack(">IIBBBBB",w,h,8,2,0,0,0))+c(b"IDAT",zlib.compress(raw))+c(b"IEND",b""))
+PY
+}
 
 # ── preflight: KVM, RAM, free disk, tools — measured, recorded, enforced ─────
 cmd_preflight() {
@@ -176,7 +202,7 @@ cmd_up() {
   check 1 disk-chain pass "base.qcow2 (0444, from the OVA's own VMDK) ← overlay.qcow2 (disposable)"
   # Disposable credentials.
   rm -f "$SEC/id_ed25519"*; ssh-keygen -q -t ed25519 -N '' -C "culvert-lab-$RUN_ID" -f "$SEC/id_ed25519"
-  head -c 4096 /dev/urandom | tr -dc 'A-Za-z0-9' | cut -c1-24 > "$SEC/admin-pass"; chmod 0600 "$SEC/admin-pass"
+  rm -f "$SEC/admin-pass"; ensure_admin_pass
   # OVF environment (ISO transport): the same properties ovftool's --prop sets.
   mkdir -p "$WORK/ovfenv"
   python3 - "$WORK/ovfenv/ovf-env.xml" "lab-$RUN_ID" "$(cat "$SEC/id_ed25519.pub")" <<'PY'
@@ -204,16 +230,26 @@ PY
     -drive "file=$WORK/ovfenv.iso,if=none,id=cd0,media=cdrom,readonly=on" -device ide-cd,drive=cd0 \
     -netdev "user,id=n0,hostfwd=tcp:127.0.0.1:$LAB_SSH_PORT-:22,hostfwd=tcp:127.0.0.1:$LAB_PROXY_PORT-:8080,hostfwd=tcp:127.0.0.1:$LAB_UI_PORT-:9090" \
     -device e1000,netdev=n0 -display none -serial "file:$WORK/console.log" \
-    -pidfile "$WORK/qemu.pid" -daemonize
+    -monitor "unix:$MON_SOCK,server,nowait" -pidfile "$WORK/qemu.pid" -daemonize
   printf 'qemu-system-x86_64 %s -smp %s -m %s virtio-scsi(overlay.qcow2) ide-cd(ovfenv.iso) e1000 user-net hostfwd 127.0.0.1:{%s,%s,%s} SeaBIOS\n' \
     "${acc[*]}" "$LAB_CPUS" "$LAB_MEM_MB" "$LAB_SSH_PORT" "$LAB_PROXY_PORT" "$LAB_UI_PORT" > "$EV/02-qemu-command.txt"
   save_state BOOT_STARTED "$(date +%s)"
   check 2 boot-started pass "qemu pid $(cat "$WORK/qemu.pid") accel=$ACCEL"
   # Bounded: SSH, then first boot to completion (the guest's own marker).
   local deadline=$(( $(date +%s) + LAB_FIRSTBOOT_TIMEOUT )) t0; t0=$(date +%s)
+  # The guest kernel logs to ttyS0 (cloud image cmdline): no "Linux version"
+  # within the bound means firmware/bootloader never handed over — fail fast
+  # with the VGA screen as evidence instead of waiting out the SSH bound.
+  local kt="${LAB_KERNEL_TIMEOUT:-$([[ "$ACCEL" == kvm ]] && echo 300 || echo 1800)}"
+  until grep -qa 'Linux version' "$WORK/console.log" 2>/dev/null; do
+    qemu_alive || { check 2 kernel-started fail "qemu exited before the kernel started"; return 1; }
+    if (( $(date +%s) - t0 > kt )); then screendump 02-screen-no-kernel
+      check 2 kernel-started fail "no kernel output on ttyS0 within ${kt}s — bootloader/firmware stopped; see 02-screen-no-kernel.png"; return 1; fi
+    sleep 5; done
+  check 2 kernel-started pass "$(grep -am1 'Linux version' "$WORK/console.log" | cut -c1-90) after $(( $(date +%s) - t0 ))s"
   until gssh true 2>/dev/null; do
     qemu_alive || { check 2 ssh-up fail "qemu exited during boot (see console.log)"; return 1; }
-    (( $(date +%s) < deadline )) || { check 2 ssh-up fail "no SSH within ${LAB_FIRSTBOOT_TIMEOUT}s"; return 1; }
+    (( $(date +%s) < deadline )) || { screendump 02-screen-no-ssh; check 2 ssh-up fail "no SSH within ${LAB_FIRSTBOOT_TIMEOUT}s"; return 1; }
     sleep 10; done
   check 2 ssh-up pass "SSH with the OVF-delivered key after $(( $(date +%s) - t0 ))s"
   until gssh 'sudo test -f /var/lib/culvert-appliance/state/complete.done' 2>/dev/null; do
@@ -226,7 +262,13 @@ PY
 STOP=0
 gate() { [[ $STOP == 0 ]] || { check "$1" "$2" not-run "an earlier step failed"; return 1; }; }
 cmd_qualify() {
-  [[ -n "${BOOT_STARTED:-}" ]] || die "run up first"
+  if [[ "$LAB_EXTERNAL" == 1 ]]; then
+    [[ -r "$LAB_SSH_KEY" ]] || die "LAB_EXTERNAL=1 needs LAB_SSH_KEY (the key the VM was given)"
+    gssh true || die "cannot reach culvert@$LAB_HOST:$LAB_SSH_PORT"
+    [[ -n "${ACCEL:-}" ]] || { save_state RUN_ID "$RUN_ID"; save_state ACCEL "external ($LAB_HOST)"; }
+    check 2 target info "external appliance at $LAB_HOST (deployed and owned by another tool; up/down not used)"
+  else [[ -n "${BOOT_STARTED:-}" ]] || die "run up first"; fi
+  ensure_admin_pass
   : > "$JAR"
   # Step 3 — first-boot evidence, kernel BEFORE, image identity, token.
   gssh 'uname -r; uname -v' > "$EV/03-kernel-before.txt" 2>&1 || true
@@ -324,7 +366,7 @@ PY
   # Step 7 — OS update + reboot, kernel BEFORE → AFTER.
   if gate 7 os-update; then
     gssh 'sudo culvert-os-update check' > "$EV/07-check-before.txt" 2>&1 || true
-    local rc=0; timeout 2400 ssh "${SSH_OPTS[@]}" culvert@127.0.0.1 'sudo culvert-os-update os' > "$EV/07-os-update.txt" 2>&1 || rc=$?
+    local rc=0; timeout 2400 ssh "${SSH_OPTS[@]}" "culvert@$LAB_HOST" 'sudo culvert-os-update os' > "$EV/07-os-update.txt" 2>&1 || rc=$?
     [[ $rc == 0 ]] && check 7 os-update pass "culvert-os-update os exit 0 ($(grep -cE '^(Setting up|Unpacking) ' "$EV/07-os-update.txt" || true) package actions)" || check 7 os-update fail "exit $rc: $(tail -3 "$EV/07-os-update.txt" | tr '\n' ' ')"
     gssh 'sudo culvert-os-update check; ls -l /var/run/reboot-required 2>/dev/null; dpkg -l "linux-image-*" | awk "/^ii/{print \$2, \$3}"; apt-mark showhold; sudo docker version --format "{{.Server.Version}}"' > "$EV/07-check-after-update.txt" 2>&1 || true
     gssh 'sudo culvert-os-update reboot' > "$EV/07-reboot.txt" 2>&1 || true
@@ -426,12 +468,17 @@ PY
 
 # ── down: stop the guest, remove the disposable disks (evidence stays) ──────
 cmd_down() {
+  if [[ "$LAB_EXTERNAL" == 1 ]]; then
+    rm -f "$SEC/admin-pass" "$SEC/setup-token" "$SEC/cookies"
+    log "down (external): removed the lab's own disposable secrets; the VM and its key belong to the deploying tool"; return 0
+  fi
   if qemu_alive; then
     gssh 'sudo systemctl poweroff' >/dev/null 2>&1 || true
     for _ in $(seq 1 60); do qemu_alive || break; sleep 2; done
     qemu_alive && kill "$(cat "$WORK/qemu.pid")" 2>/dev/null; sleep 3
     qemu_alive && kill -9 "$(cat "$WORK/qemu.pid")" 2>/dev/null || true
   fi
+  rm -f "$MON_SOCK"
   [[ "${LAB_KEEP_DISKS:-0}" == 1 ]] || rm -rf "$WORK/overlay.qcow2" "$WORK/base.qcow2" "$WORK/ova" "$WORK/ovfenv" "$WORK/ovfenv.iso"
   rm -rf "$SEC"; log "down: guest stopped, disposable disks and credentials removed (evidence kept in $EV)"
 }
