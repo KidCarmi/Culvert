@@ -8812,18 +8812,64 @@ after its own end-to-end gate proved vacuous the same way. **That is the second
 vacuous gate this sweep caught by mutation, both times because the gate never
 reached the code it claimed to test.**
 
-**Two lint findings rode along, and both are repo conventions rather than taste.**
-`noctx` flagged `net.DialTimeout` in a gate — CLAUDE.md states the rule
-explicitly (*"use `DialContext()` not `DialTimeout()`"*). And `gocognit` put the
-AST wall at cognitive complexity **52** against a bound of 30; it was split into
-three named helpers (`cpScanRoleLockReentrancy`, `cpRoleLockAcquire`,
-`cpCalleeName`), which brought it to **25** — measured with the real analyzer,
-not estimated, since the locally installed `golangci-lint 2.5.0` is built with
-go1.25.1 and **cannot parse this module's go1.26 language version** (it panics in
-its package loader). The same toolchain-skew trap made the first staticcheck
-reproduction inconclusive; in both cases the fix was to run the underlying
-analyzer under `GOTOOLCHAIN=go1.26.8` rather than trust a crash or a
-compile-error spray as a pass.
+**Six lint findings rode along, every one a repo convention rather than taste —
+and the COUNT is the lesson, because the report that named them was a SAMPLE,
+not an inventory.** `Gate · golangci-lint` printed `gocognit: 1, gocritic: 1,
+noctx: 4`. Two were closed first: `gocognit` put the AST wall at cognitive
+complexity **52** against a bound of 30, split into three named helpers
+(`cpScanRoleLockReentrancy`, `cpRoleLockAcquire`, `cpCalleeName`) to reach
+**25**; and `noctx` flagged a `net.DialTimeout`, which CLAUDE.md bans by name
+(*"use `DialContext()` not `DialTimeout()`"*).
+
+**The remaining `noctx` findings are where a plausible reading goes wrong.** The
+report named `net.Listen` at exactly THREE lines, so "fix those three" looks
+like the whole job. It is not: `.golangci.yml` sets `max-same-issues: 3`, which
+caps a REPEATED message, and the file held **nine** `net.Listen` call sites.
+Fixing the three named lines would have surfaced the next three on the following
+push, and the three after that on the push after — a fix converging on green one
+CI cycle at a time while each run looks like a fresh finding. All nine are now
+`(&net.ListenConfig{}).Listen(t.Context(), ...)`, the form every other
+recently-written test in the tree uses, with `t.Context()` justified in a
+comment at `cpOccupyPort`: `ListenConfig.Listen`'s ctx governs address
+resolution ONLY and never the returned listener's lifetime, so it cannot close
+a socket out from under a gate whose whole job is to hold a port occupied. The
+sixth finding, `gocritic unnamedResult` on `cpOccupyPort(t) (int, func())`,
+names the results — and naming them turned the local `port :=` into a shadow,
+so it became an assignment to the named result.
+
+**The standing rule: a linter report is a SAMPLE of a class, not an inventory of
+it.** Read the per-linter COUNT against the number of call sites the change
+actually introduced, and when they disagree, the config — not the report — says
+how many there are. This is §39's *sampling one path is the same error as
+sampling one representation* arriving from the tooling side: the instrument
+itself was sampling, and the fix has to be enumerated from the SOURCE
+(`grep` for the primitive across the new file), never from the lines the tool
+chose to print. The pre-existing raw `net.Listen` sites elsewhere in the tree
+are deliberately untouched — they survive only because the gate runs
+`--new-from-rev`, the same grandfathering the latency-histogram note records for
+its `#nosec G115` suppressions, and widening this change to them would be a
+different concern inside a sweep about something else.
+
+Every one of the six was measured with the real analyzer rather than estimated,
+because the locally installed `golangci-lint 2.5.0` is built with go1.25.1 and
+**cannot parse this module's go1.26 language version** (it panics in its package
+loader). The same toolchain-skew trap made the first staticcheck reproduction
+inconclusive; in both cases the fix was to run the underlying analyzer under
+`GOTOOLCHAIN=go1.26.8` rather than trust a crash or a compile-error spray as a
+pass.
+
+**A seventh CI failure in the same batch was NOT a finding, and saying so
+precisely matters.** `Race · verdict + coverage evidence` reported `failure` on
+the same head, which on a sweep that adds 35 gates reads like a lost test or a
+coverage-completeness refusal — the two things that job exists to fail closed
+on. It was neither: the job's log contains only harden-runner post-job output,
+so its verdict step never ran, and the aggregate names the real cause —
+`required job 'test-race' result=cancelled — cannot trust the gate`. A newer
+push superseded that head in the concurrency group and cancelled the race path
+mid-flight; the aggregate's refusal to treat `cancelled` as `success` is the
+documented contract working, not a defect. **A red check on a SUPERSEDED head is
+evidence about the push that replaced it, not about the code** — read the
+aggregate's reason before diagnosing the job it names.
 
 ### 41.12 A CI lint found a real blind spot, and deleting the code would have certified it
 
