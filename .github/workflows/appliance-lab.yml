@@ -161,6 +161,21 @@ jobs:
           sudo chown -R "$(id -u):$(id -g)" "$LAB_ROOT/ova"
           cat "$LAB_ROOT/ova/"*.ova.sha256
           rm -f "$LAB_ROOT/in/culvert-image.tar"
+      - name: Retain the built OVA (unpublished test artifact, before any boot)
+        # For the ESXi qualification (test/esxi-qualification), which imports
+        # the bytes on a LAN host: kept BEFORE the QEMU boot so a boot failure
+        # cannot discard the only importable file. Unpublished: a workflow
+        # artifact with short retention, not a release, tag or registry push.
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: appliance-lab-ova-${{ matrix.variant }}
+          path: |
+            ${{ env.LAB_ROOT }}/ova/*.ova
+            ${{ env.LAB_ROOT }}/ova/*.ova.sha256
+            ${{ env.LAB_ROOT }}/ova/build-info.json
+          retention-days: 7
+          compression-level: 0
+          if-no-files-found: error
       - name: Compare the rebuilt guest content with the original OVA's fingerprint
         run: |
           set -euo pipefail

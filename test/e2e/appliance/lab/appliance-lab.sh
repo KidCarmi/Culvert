@@ -484,6 +484,8 @@ cmd_down() {
 }
 
 failures() { grep -c '"result":"fail"' "$JSONL" 2>/dev/null || true; }
+# Transport adapters may reuse the guest checks without dispatching QEMU.
+[[ "${LAB_LIBRARY_ONLY:-0}" == 1 ]] && return 0
 case "${1:-}" in
   preflight) cmd_preflight ;;
   fingerprint) cmd_fingerprint "${2:?OVA}" "${3:?OUT.tsv}" ;;
