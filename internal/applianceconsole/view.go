@@ -285,7 +285,7 @@ func (v *View) Frame(s Snapshot, height, width int) []Row {
 	if capacity == 0 || columns == 0 {
 		return nil
 	}
-	if capacity < 6 {
+	if capacity < 6 || columns < 19 {
 		return []Row{{clipped("Resize terminal (minimum 20x7).", columns), "warning"}, {clipped("L Sign in | Q Log out", columns), ""}}[:min(2, capacity)]
 	}
 	header := []Row{{"C U L V E R T                 APPLIANCE / FIRST-TIME SETUP", "cyan"}, {strings.Repeat("-", min(columns, 78)), "cyan"}}

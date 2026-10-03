@@ -152,14 +152,12 @@ func (d *menuDisplay) redraw(ctx context.Context, collector applianceconsole.Col
 		d.refresh = time.Now().Add(5 * time.Second)
 		d.dirty = true
 	}
-	height, width := 25, 80
-	if size, err := unix.IoctlGetWinsize(1, unix.TIOCGWINSZ); err == nil && size.Row > 0 && size.Col > 0 {
-		height, width = int(size.Row), int(size.Col)
-	}
+	height, width := terminalSize()
 	if !d.dirty && height == d.height && width == d.width {
 		return nil
 	}
-	rows := d.view.Frame(d.snapshot, height, width)
+	panelHeight, panelWidth := min(height, 25), min(width, 80)
+	rows := d.view.Frame(d.snapshot, panelHeight, panelWidth)
 	frame := applianceconsole.Render(rows, d.color)
 	if !d.ansi && frame == d.lastFrame {
 		d.dirty = false
@@ -167,10 +165,10 @@ func (d *menuDisplay) redraw(ctx context.Context, collector applianceconsole.Col
 	}
 	d.lastFrame = frame
 	if d.ansi {
-		for i := range rows {
-			rows[i].Text += strings.Repeat(" ", max(0, width-1-len(rows[i].Text)))
+		frame = positionedFrame(rows, d.color, height, width, panelHeight, panelWidth)
+		if height != d.height || width != d.width {
+			frame = "\x1b[2J" + frame
 		}
-		frame = "\x1b[H" + applianceconsole.Render(rows, d.color)
 	} else {
 		frame = "\n" + frame + "\n"
 	}
@@ -179,6 +177,24 @@ func (d *menuDisplay) redraw(ctx context.Context, collector applianceconsole.Col
 	}
 	d.dirty, d.height, d.width = false, height, width
 	return nil
+}
+
+func terminalSize() (height, width int) {
+	if size, err := unix.IoctlGetWinsize(1, unix.TIOCGWINSZ); err == nil && size.Row > 0 && size.Col > 0 {
+		return int(size.Row), int(size.Col)
+	}
+	return 25, 80
+}
+
+func positionedFrame(rows []applianceconsole.Row, color bool, height, width, panelHeight, panelWidth int) string {
+	var output strings.Builder
+	top, left := (height-panelHeight)/2+1, (width-panelWidth)/2+1
+	for i := range rows {
+		rows[i].Text += strings.Repeat(" ", max(0, panelWidth-1-len(rows[i].Text)))
+		output.WriteString(fmt.Sprintf("\x1b[%d;%dH", top+i, left))
+		output.WriteString(applianceconsole.Render(rows[i:i+1], color))
+	}
+	return output.String()
 }
 
 // discardPaste consumes bracketed paste as data, never as recovery commands.
