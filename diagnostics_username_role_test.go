@@ -250,6 +250,108 @@ func TestRedactContractForRole_DoesNotMutateInput(t *testing.T) {
 	}
 }
 
+// callerSite is one production call site of a scanned token, attributed to its
+// enclosing function. Shared by the two governance walls below so neither has
+// to re-implement the attribution (and so neither trips gocognit on the nesting
+// that doing it inline requires — test files are exempt from funlen/cyclop but
+// NOT from gocognit, which is what caught the first draft of this file).
+type callerSite struct {
+	File string // base name of the production file
+	Decl string // the enclosing `func …` declaration line
+	Body string // that function's source, up to the next top-level func
+}
+
+// scanProductionCallers returns every call site of token across the package's
+// production files, excluding the token's own definition. onlyFile, when
+// non-empty, narrows the scan to that one file.
+func scanProductionCallers(t *testing.T, token, onlyFile string) []callerSite {
+	t.Helper()
+	root := pkgSourceDir()
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		t.Fatalf("read package dir: %v", err)
+	}
+	var sites []callerSite
+	for _, e := range entries {
+		name := e.Name()
+		if !productionGoFile(e.IsDir(), name) {
+			continue
+		}
+		if onlyFile != "" && name != onlyFile {
+			continue
+		}
+		src, err := os.ReadFile(filepath.Join(root, name))
+		if err != nil {
+			t.Fatalf("read %s: %v", name, err)
+		}
+		sites = append(sites, callersIn(name, string(src), token)...)
+	}
+	return sites
+}
+
+func productionGoFile(isDir bool, name string) bool {
+	return !isDir && strings.HasSuffix(name, ".go") && !strings.HasSuffix(name, "_test.go")
+}
+
+// callersIn attributes each occurrence of token in body to its enclosing func.
+func callersIn(file, body, token string) []callerSite {
+	var sites []callerSite
+	for idx := 0; ; {
+		k := strings.Index(body[idx:], token)
+		if k < 0 {
+			return sites
+		}
+		at := idx + k
+		idx = at + len(token)
+
+		start := strings.LastIndex(body[:at], "\nfunc ")
+		if start < 0 {
+			continue
+		}
+		fnSrc := body[start+1:]
+		decl := fnSrc
+		if nl := strings.IndexByte(decl, '\n'); nl >= 0 {
+			decl = decl[:nl]
+		}
+		// The token's own definition is not a call site.
+		if strings.HasPrefix(decl, "func "+strings.TrimSuffix(token, "()")+"(") {
+			continue
+		}
+		if e := strings.Index(fnSrc, "\nfunc "); e >= 0 {
+			fnSrc = fnSrc[:e]
+		}
+		sites = append(sites, callerSite{File: file, Decl: decl, Body: fnSrc})
+	}
+}
+
+// leakedRosterTokens reports which roster-derived facts a rendered row exposes.
+func leakedRosterTokens(detail string) []string {
+	var found []string
+	for _, tok := range rosterDisclosureTokens {
+		if strings.Contains(detail, tok) {
+			found = append(found, tok)
+		}
+	}
+	return found
+}
+
+// readUsernameRowAtRole drives one real read and returns the roster-derived
+// facts the row leaked. A role that may legitimately read them leaks nothing by
+// definition, so it returns nil for an admin.
+func readUsernameRowAtRole(role UIRole) []string {
+	r := roleCtx(httptest.NewRequest(http.MethodGet, "/api/diagnostics", http.NoBody), role)
+	w := httptest.NewRecorder()
+	apiDiagnostics(w, r)
+	if role.HasRole(RoleAdmin) {
+		return nil
+	}
+	var c OperatorContract
+	if err := json.Unmarshal(w.Body.Bytes(), &c); err != nil {
+		return nil
+	}
+	return leakedRosterTokens(usernameRowDetail(findDiagnosticCheck(c, adminUsernameLengthCode)))
+}
+
 // TestApiDiagnostics_ConcurrentMixedRoleReadsDoNotLeak drives admin and viewer
 // readers in parallel under -race. Redaction copies the row slice, so an admin
 // render running concurrently with a viewer render must never put the detail
@@ -260,42 +362,30 @@ func TestApiDiagnostics_ConcurrentMixedRoleReadsDoNotLeak(t *testing.T) {
 	seedOversizeRosterWithTOTP(t)
 
 	var wg sync.WaitGroup
-	leaks := make(chan string, 64)
+	leaks := make(chan string, 256)
 	for i := 0; i < 8; i++ {
+		role := RoleViewer
+		if i%2 == 0 {
+			role = RoleAdmin
+		}
 		wg.Add(1)
-		go func(i int) {
+		go func(role UIRole) {
 			defer wg.Done()
-			role := RoleViewer
-			if i%2 == 0 {
-				role = RoleAdmin
-			}
 			for n := 0; n < 25; n++ {
-				r := roleCtx(httptest.NewRequest(http.MethodGet, "/api/diagnostics", http.NoBody), role)
-				w := httptest.NewRecorder()
-				apiDiagnostics(w, r)
-				if role != RoleViewer {
-					continue
-				}
-				var c OperatorContract
-				if err := json.Unmarshal(w.Body.Bytes(), &c); err != nil {
-					continue
-				}
-				detail := usernameRowDetail(findDiagnosticCheck(c, adminUsernameLengthCode))
-				for _, tok := range rosterDisclosureTokens {
-					if strings.Contains(detail, tok) {
-						select {
-						case leaks <- tok:
-						default:
-						}
+				for _, tok := range readUsernameRowAtRole(role) {
+					select {
+					case leaks <- tok:
+					default:
 					}
 				}
 			}
-		}(i)
+		}(role)
 	}
 	wg.Wait()
 	close(leaks)
+
 	for tok := range leaks {
-		t.Errorf("a concurrent viewer read leaked roster-derived token %q", tok)
+		t.Errorf("a concurrent viewer read leaked roster-derived fact %q", tok)
 	}
 }
 
@@ -330,71 +420,62 @@ func TestApiDiagnostics_MalformedRoleValueIsRedacted(t *testing.T) {
 	}
 }
 
-// TestWall_RosterDerivedDiagnosticsAreEnumerated is the governance wall, and it
-// enumerates from the PRIMITIVE rather than from the row that happened to be
-// edited. Any check that reads the admin roster produces a row whose detail is
-// admin-only, so a NEW such check must either be redacted or be a deliberate,
-// stated exception. Behavioural coverage cannot catch that: a future row would
-// simply ship, green, on a viewer-readable surface.
+// TestWall_RosterDerivedDiagnosticsAreEnumerated is one of this file's two
+// governance walls, and it enumerates from the PRIMITIVE rather than from the
+// row that happened to be edited. Any check that reads the admin roster
+// produces a row whose detail is admin-only, so a NEW such check must either be
+// redacted or be a deliberate, stated exception. Behavioural coverage cannot
+// catch that: a future row would simply ship, green, on a viewer-readable
+// surface.
 func TestWall_RosterDerivedDiagnosticsAreEnumerated(t *testing.T) {
-	src, err := os.ReadFile(filepath.Join(pkgSourceDir(), "diagnostics.go"))
-	if err != nil {
-		t.Fatalf("read diagnostics.go: %v", err)
+	// Stated exceptions:
+	//   checkOversizeConfiguredUsernames / collectAdminUsernames — the redacted
+	//     row itself.
+	//   hasCredentialCapableProvider — reads cfg.GetUser() only as a BOOLEAN
+	//     existence probe ("is any credential validator configured"). It never
+	//     renders a name, a role, a count or a second-factor posture, and the
+	//     row it feeds describes policy posture rather than roster content.
+	allowed := []string{
+		"checkOversizeConfiguredUsernames",
+		"collectAdminUsernames",
+		"hasCredentialCapableProvider",
 	}
-	body := string(src)
 
-	// The roster accessors. A check reaching any of these is describing
-	// admin-only state.
-	primitives := []string{"ListUIUsers(", "UserHasTOTP(", "GetUser("}
-	matched := 0
-	for _, prim := range primitives {
-		for idx := 0; ; {
-			k := strings.Index(body[idx:], prim)
-			if k < 0 {
-				break
+	checked := 0
+	for _, prim := range []string{"ListUIUsers(", "UserHasTOTP(", "GetUser("} {
+		for _, site := range scanProductionCallers(t, prim, "diagnostics.go") {
+			checked++
+			if declNames(site.Decl, allowed) {
+				continue
 			}
-			at := idx + k
-			idx = at + len(prim)
-			// Attribute the call to the enclosing func declaration.
-			start := strings.LastIndex(body[:at], "\nfunc ")
-			if start < 0 {
-				t.Fatalf("%s at offset %d is outside any function", prim, at)
-			}
-			decl := body[start+1:]
-			if nl := strings.IndexByte(decl, '\n'); nl >= 0 {
-				decl = decl[:nl]
-			}
-			matched++
-			// Stated exceptions:
-			//   checkOversizeConfiguredUsernames / collectAdminUsernames — the
-			//     redacted row itself.
-			//   hasCredentialCapableProvider — reads cfg.GetUser() only as a
-			//     BOOLEAN existence probe ("is any credential validator
-			//     configured"). It never renders a name, a role, a count or a
-			//     second-factor posture, and the row it feeds describes policy
-			//     posture rather than roster content.
-			if !strings.Contains(decl, "checkOversizeConfiguredUsernames") &&
-				!strings.Contains(decl, "collectAdminUsernames") &&
-				!strings.Contains(decl, "hasCredentialCapableProvider") {
-				t.Errorf("new roster-derived diagnostics code %q calls %s: its row rides the "+
-					"viewer-readable /api/diagnostics, so either redact it in "+
-					"redactContractForRole (and add a gate beside "+
-					"TestApiDiagnostics_UsernameRowDetailIsAdminOnly) or record here why "+
-					"its detail is safe for a viewer and an operator to read", decl, prim)
-			}
+			t.Errorf("new roster-derived diagnostics code %q calls %s: its row rides the "+
+				"viewer-readable /api/diagnostics, so either redact it in "+
+				"redactContractForRole (and add a gate beside "+
+				"TestApiDiagnostics_UsernameRowDetailIsAdminOnly) or record here why "+
+				"its detail is safe for a viewer and an operator to read", site.Decl, prim)
 		}
 	}
-	if matched == 0 {
+	if checked == 0 {
 		t.Fatal("not-vacuous check: no roster accessor call found in diagnostics.go — " +
 			"the accessor names changed and this wall is now scanning for nothing")
 	}
 }
 
+// declNames reports whether decl declares one of the named functions.
+func declNames(decl string, names []string) bool {
+	for _, n := range names {
+		if strings.Contains(decl, n+"(") {
+			return true
+		}
+	}
+	return false
+}
+
 // TestWall_EveryOperatorContractRendererIsClassified enumerates from the OTHER
 // primitive, and it exists because the first version of this fix got exactly
 // this wrong. SEC-DIAG-ROSTER-1 has two halves — WHICH rows carry roster state
-// (walled above, from the roster accessors) and WHO RENDERS the contract — and
-// only the first was enumerated. `redactContractForRole` was wired into
+// (the wall above, from the roster accessors) and WHO RENDERS the contract —
+// and only the first was enumerated. `redactContractForRole` was wired into
 // `apiDiagnostics` alone, while `apiHealthExplain` (`ui_support.go`) renders the
 // SAME `OperatorContract` at the SAME `RoleViewer` floor and returned it raw, so
 // a viewer could read the affected count, the longest length, the legacy
@@ -404,110 +485,71 @@ func TestWall_RosterDerivedDiagnosticsAreEnumerated(t *testing.T) {
 // That is CHAOS-70's recorded governance lesson landing on the change that
 // quoted it: *enumerate the class from the PRIMITIVE, not from the file being
 // edited*. A wall anchored on `diagnostics.go` cannot see a second renderer in
-// another file, so this one scans every production file for callers of
-// `buildOperatorContract` and requires each to be classified here.
+// another file, so this one scans every production file.
 func TestWall_EveryOperatorContractRendererIsClassified(t *testing.T) {
 	// Every function that obtains an OperatorContract, and why it is safe.
+	// "redacted" is verified structurally below; anything else is a stated
+	// exception whose reason is the map value.
 	classified := map[string]string{
-		// Redacted renderers: must call redactContractForRole (asserted below).
 		"apiDiagnostics":   "redacted",
 		"apiHealthExplain": "redacted",
 
-		// Stated exception. The support-bundle collector is a different trust
-		// boundary, not the live viewer-facing API: it writes through
-		// in.Redactor.Classify under the struct's redact:"internal" tags and a
-		// declared MaxClass of ClassInternal, and a bundle is admin-created,
-		// admin-approved and capture-level gated before anyone can download it.
-		// If that lifecycle ever widens to a lower role, this row is wrong.
+		// The support-bundle collector is a different trust boundary, not the
+		// live viewer-facing API: it writes through in.Redactor.Classify under
+		// the struct's redact:"internal" tags and a declared MaxClass of
+		// ClassInternal, and a bundle is admin-created, admin-approved and
+		// capture-level gated before anyone can download it. If that lifecycle
+		// ever widens to a lower role, this row is wrong.
 		"Collect": "support-bundle redactor + admin-approved lifecycle",
 	}
 
-	root := pkgSourceDir()
-	entries, err := os.ReadDir(root)
-	if err != nil {
-		t.Fatalf("read package dir: %v", err)
-	}
-
-	checked, redactedSeen := 0, 0
-	for _, e := range entries {
-		name := e.Name()
-		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+	sites := scanProductionCallers(t, "buildOperatorContract()", "")
+	redactedSeen := 0
+	for _, site := range sites {
+		fn := classifiedName(site.Decl, classified)
+		if fn == "" {
+			t.Errorf("%s: %q renders the OperatorContract but is not classified in this wall. "+
+				"The contract carries an admin-only roster-derived row, so either wrap it in "+
+				"redactContractForRole (and add it here as \"redacted\") or record here why this "+
+				"caller is a different trust boundary", site.File, site.Decl)
 			continue
 		}
-		src, err := os.ReadFile(filepath.Join(root, name))
-		if err != nil {
-			t.Fatalf("read %s: %v", name, err)
+		if classified[fn] != "redacted" {
+			continue
 		}
-		body := string(src)
-		for idx := 0; ; {
-			k := strings.Index(body[idx:], "buildOperatorContract()")
-			if k < 0 {
-				break
-			}
-			at := idx + k
-			idx = at + len("buildOperatorContract()")
-
-			start := strings.LastIndex(body[:at], "\nfunc ")
-			if start < 0 {
-				t.Fatalf("%s: buildOperatorContract() call outside any function", name)
-			}
-			decl := body[start+1:]
-			if nl := strings.IndexByte(decl, '\n'); nl >= 0 {
-				decl = decl[:nl]
-			}
-			// The definition itself is not a renderer.
-			if strings.Contains(decl, "func buildOperatorContract(") {
-				continue
-			}
-			checked++
-
-			fn := ""
-			for candidate := range classified {
-				if strings.Contains(decl, candidate+"(") {
-					fn = candidate
-					break
-				}
-			}
-			if fn == "" {
-				t.Errorf("%s: %q renders the OperatorContract but is not classified in this wall. "+
-					"The contract carries an admin-only roster-derived row, so either wrap it in "+
-					"redactContractForRole (and add it here as \"redacted\") or record here why this "+
-					"caller is a different trust boundary", name, decl)
-				continue
-			}
-			if classified[fn] != "redacted" {
-				continue
-			}
-			redactedSeen++
-			// A renderer classified as redacted must actually redact: find the
-			// enclosing function body and require the call inside it.
-			end := strings.Index(body[start+1:], "\nfunc ")
-			fnBody := body[start+1:]
-			if end >= 0 {
-				fnBody = fnBody[:end]
-			}
-			if !strings.Contains(fnBody, "redactContractForRole(") {
-				t.Errorf("%s: %q is classified \"redacted\" but does not call redactContractForRole — "+
-					"it hands a viewer the admin-only roster detail, bypassing SEC-DIAG-ROSTER-1", name, decl)
-			}
-			if !strings.Contains(fnBody, "HasRole(RoleAdmin)") {
-				t.Errorf("%s: %q must gate redaction on HasRole(RoleAdmin); any lower threshold "+
-					"un-redacts for a role that cannot read the roster", name, decl)
-			}
+		redactedSeen++
+		if !strings.Contains(site.Body, "redactContractForRole(") {
+			t.Errorf("%s: %q is classified \"redacted\" but does not call redactContractForRole — "+
+				"it hands a viewer the admin-only roster detail, bypassing SEC-DIAG-ROSTER-1",
+				site.File, site.Decl)
+		}
+		if !strings.Contains(site.Body, "HasRole(RoleAdmin)") {
+			t.Errorf("%s: %q must gate redaction on HasRole(RoleAdmin); any lower threshold "+
+				"un-redacts for a role that cannot read the roster", site.File, site.Decl)
 		}
 	}
 
-	if checked == 0 {
-		t.Fatal("not-vacuous check: no buildOperatorContract() caller found outside its own definition — " +
-			"the primitive was renamed and this wall is now scanning for nothing")
+	if len(sites) == 0 {
+		t.Fatal("not-vacuous check: no buildOperatorContract() caller found outside its own " +
+			"definition — the primitive was renamed and this wall is now scanning for nothing")
 	}
-	// Both known viewer-facing renderers must have been seen and verified; if a
-	// future change deletes one, the count drops and this fails rather than
-	// passing against a shrinking surface.
+	// Both known viewer-facing renderers must have been seen AND verified; if a
+	// future change deletes or renames one, the count drops and this fails
+	// rather than passing against a shrinking surface.
 	if redactedSeen < 2 {
 		t.Errorf("verified %d redacted renderer(s), want at least 2 (apiDiagnostics + apiHealthExplain); "+
 			"a renderer was removed or renamed without updating this wall", redactedSeen)
 	}
+}
+
+// classifiedName returns the classified function decl names matches, or "".
+func classifiedName(decl string, classified map[string]string) string {
+	for candidate := range classified {
+		if strings.Contains(decl, candidate+"(") {
+			return candidate
+		}
+	}
+	return ""
 }
 
 // TestApiHealthExplain_UsernameRowDetailIsAdminOnly is the behavioural half of
