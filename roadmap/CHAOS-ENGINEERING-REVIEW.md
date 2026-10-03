@@ -8690,7 +8690,7 @@ driving the whole sequence.
 
 ### 41.10 Gates
 
-`cluster_grpc_bind_chaos_test.go` — 32 gates. **Thirty mutations were each
+`cluster_grpc_bind_chaos_test.go` — 35 gates. **Thirty-four mutations were each
 verified FAILING against the shape they target**, including the reintroduced
 pre-fix `logFatalf`, asserting role+leadership without a bind, returning before
 the first attempt resolves, re-preparing per attempt, both halves of the
@@ -8764,7 +8764,68 @@ call it: every defect gate stops at a failed bind. The supervisor's panic guard
 contained it and reported the correct TERMINAL state, which is incidental
 evidence that the guard works.
 
-### 41.11 A CI lint found a real blind spot, and deleting the code would have certified it
+### 41.11 Codex round — a REGRESSION this sweep introduced, and a shutdown race
+
+Three findings on the first push. One was the §41.12 blind spot found
+independently; the other two are below.
+
+**P1 — another activation winning must still complete the HA transition.** This
+is a regression this sweep introduced and did not catch. `attempt()`'s
+`role == "control-plane"` branch — reached when an operator enables the Control
+Plane through `POST /api/cluster/mode` during the retry window, which is exactly
+what this change makes possible — recorded the bind and `return nil`ed **without
+calling `completeCPLeadership`**.
+
+The pre-CHAOS-71 boot path ALWAYS resumed leadership after a successful
+activation, and `enableControlPlane` has never done it itself (the admin API's
+enable never resumed HA — pre-existing, and harmless while boot always followed
+up). So on a persisted HA leader whose boot bind failed, an operator enabling
+the Control Plane left `globalHA` **DISABLED**: no lease, no keepalive, no
+resync material, and the fencing gate treating this node as standalone and
+write-authoritative **while its peer may already be leading.**
+
+Rule 3 says leadership is asserted only on an OBSERVED bind — and *somebody
+else's bind is an observed bind*. The lesson is narrow and worth keeping: **a
+branch that treats another actor's success as "nothing left to do" must still do
+the part that actor never does.**
+
+**P2 — shutdown must cancel an in-flight activation before it binds.** Phase 2
+does FILESYSTEM work (the version floor, the config publish, the cluster-CA
+load), so an attempt can sit in it for longer than the early shutdown phase's
+deadline: `Stop` returns on its ctx, the hook moves on to
+`StopControlPlaneGRPC` — which observes no server — and the I/O eventually
+unblocks and binds a listener on a node already tearing down, then resumes HA
+leadership **after `globalHA.Stop()` has run**, resurrecting the lease keepalive.
+`attempt()` now re-checks `stopRequested()` inside the write lock before the
+bind, once more before leadership, and `discardActivation` tears down a listener
+that wins the narrower post-bind race (`Stop` does not take `clusterRoleMu`, so
+no check there can be atomic with it).
+
+**A gate for the disposal half came out VACUOUS first, for a structural reason
+worth recording.** An integration gate that closes `stopping` during the prepare
+seam is caught by the PRE-bind check and never reaches disposal at all — so it
+passed against a reintroduced `return` with no `discardActivation`. The window
+is microseconds wide and cannot be scheduled from a test, so the invariant is
+pinned as a UNIT on `discardActivation` (server stopped, handle dropped, role
+reset, teardown recorded, socket really free), exactly as §36 pinned `adopt`'s
+after its own end-to-end gate proved vacuous the same way. **That is the second
+vacuous gate this sweep caught by mutation, both times because the gate never
+reached the code it claimed to test.**
+
+**Two lint findings rode along, and both are repo conventions rather than taste.**
+`noctx` flagged `net.DialTimeout` in a gate — CLAUDE.md states the rule
+explicitly (*"use `DialContext()` not `DialTimeout()`"*). And `gocognit` put the
+AST wall at cognitive complexity **52** against a bound of 30; it was split into
+three named helpers (`cpScanRoleLockReentrancy`, `cpRoleLockAcquire`,
+`cpCalleeName`), which brought it to **25** — measured with the real analyzer,
+not estimated, since the locally installed `golangci-lint 2.5.0` is built with
+go1.25.1 and **cannot parse this module's go1.26 language version** (it panics in
+its package loader). The same toolchain-skew trap made the first staticcheck
+reproduction inconclusive; in both cases the fix was to run the underlying
+analyzer under `GOTOOLCHAIN=go1.26.8` rather than trust a crash or a
+compile-error spray as a pass.
+
+### 41.12 A CI lint found a real blind spot, and deleting the code would have certified it
 
 `Deep · staticcheck` failed on the first push with
 
@@ -8828,7 +8889,7 @@ re-bind, and `Stop` not recording the teardown).
 not an instruction. Ask what the observer was for before deleting it — the
 answer may be that the surface it was meant to feed is now lying.**
 
-### 41.11 Residual risk, deliberately left
+### 41.13 Residual risk, deliberately left
 
 - **R-F is unchanged.** The three boot-path DATA-FILE loads (`catStore`,
   blocklist, policy) stay fatal, defensibly so since they are policy-load-bearing.
@@ -8846,10 +8907,19 @@ answer may be that the surface it was meant to feed is now lying.**
   ports to each other, and none of this finding's triggers is a self-collision,
   so adding it would buy nothing for this fault while touching a startup
   validation path inside a sweep about something else. Recorded as **CL-21**.
-- **An established listener that dies is NOT rebound** (§41.11): the state is
+- **An established listener that dies is NOT rebound** (§41.12): the state is
   reported as terminal and the remedy is a restart. A full serve/rebind loop is
   the shape that would close it, with its own shutdown interaction; recorded as
-  **CL-22** rather than folded into this sweep.
+  **CL-22** rather than folded into this sweep. Two specific blockers, so
+  whoever picks it up does not rediscover them: `activateControlPlaneLocked`
+  refuses while the role is already `control-plane` (so a rebind must reset the
+  role the way `discardActivation` does), and it calls
+  `globalClusterStore.StartHeartbeatMonitor`, which spawns a goroutine on EVERY
+  call with no idempotency guard — so a naive rebind starts a second heartbeat
+  monitor. **The operator's only recovery today is a process restart**: the
+  admin API's enable refuses on the same role guard, which is a weaker position
+  than "the API is still there" and is why this is registered rather than
+  dismissed.
 - **The pre-bind work's own failure modes are unchanged** — a rejected initial
   config publish is logged and alerted via `LastPublishError` and boot
   continues, as before.

@@ -870,7 +870,12 @@ func TestChaos71_ControlHealthyBootStillServesAndLeads(t *testing.T) {
 		t.Errorf("the contract row is not ok on a healthy boot: %+v", got)
 	}
 	// And the listener is really there.
-	c, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), 2*time.Second)
+	// DialContext, not DialTimeout — CLAUDE.md's standing convention, enforced
+	// by the `noctx` linter.
+	dialCtx, dialCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer dialCancel()
+	var d net.Dialer
+	c, err := d.DialContext(dialCtx, "tcp", fmt.Sprintf("127.0.0.1:%d", port))
 	if err != nil {
 		t.Fatalf("the Control Plane reports serving but nothing is listening: %v", err)
 	}
@@ -1289,6 +1294,198 @@ func TestChaos71_StopRecordsTheTeardownOnTheHappyPath(t *testing.T) {
 	}
 }
 
+// ── Codex review round (PR #1534) ────────────────────────────────────────────
+
+// TestChaos71_AnotherActivationStillCompletesTheHATransition is the Codex P1
+// gate, and it pins a REGRESSION this sweep introduced.
+//
+// The `role == "control-plane"` branch of attempt() — reached when an operator
+// enables the Control Plane through `POST /api/cluster/mode` during the retry
+// window, which is precisely what this change makes possible — used to
+// `return nil` without calling completeCPLeadership. The pre-CHAOS-71 boot path
+// ALWAYS resumed leadership after a successful activation, and
+// `enableControlPlane` has never done it itself, so on a persisted HA leader
+// whose boot bind failed this left `globalHA` DISABLED: no lease, no keepalive,
+// no resync material, and the fencing gate treating the node as standalone and
+// write-authoritative while its peer may already be leading.
+//
+// Rule 3 says leadership is asserted only on an OBSERVED bind — and somebody
+// else's bind is an observed bind.
+func TestChaos71_AnotherActivationStillCompletesTheHATransition(t *testing.T) {
+	cpChaosSetup(t)
+
+	var completions int
+	prev := cpCompleteLeadershipFn
+	cpCompleteLeadershipFn = func(clusterStartupConfig, context.Context, bool) { completions++ }
+	t.Cleanup(func() { cpCompleteLeadershipFn = prev })
+
+	// Someone else already activated the Control Plane.
+	clusterRoleMu.Lock()
+	clusterRole.role = "control-plane"
+	clusterRoleMu.Unlock()
+
+	s := &cpGRPCSupervisor{
+		cfg:          cpInsecureCfg(t, "127.0.0.1:50051"),
+		ctx:          context.Background(),
+		stopping:     make(chan struct{}),
+		done:         make(chan struct{}),
+		firstAttempt: make(chan struct{}),
+	}
+	if err := s.attempt(); err != nil {
+		t.Fatalf("attempt() on an already-activated Control Plane: %v", err)
+	}
+
+	if completions != 1 {
+		t.Errorf("the HA transition ran %d times when another activation won, want 1 — a persisted HA leader would be left with globalHA disabled, unfenced and write-authoritative", completions)
+	}
+	if snap := cpGRPCListenerState(); !snap.RoleAsserted || !snap.Serving {
+		t.Errorf("another activation winning was not recorded as serving: %+v", snap)
+	}
+}
+
+// TestChaos71_ShutdownCancelsAnInFlightActivation is the Codex P2 gate.
+//
+// Phase 2 of attempt() does FILESYSTEM work (the version floor, the config
+// publish, the cluster-CA load), so an attempt can sit in it for longer than
+// the early shutdown phase's deadline: `Stop` returns on its ctx, the hook
+// moves on to `StopControlPlaneGRPC` — which observes no server — and the I/O
+// eventually unblocks and binds a listener on a node that is already tearing
+// down, then resumes HA leadership AFTER `globalHA.Stop()` has run.
+//
+// Driven through the prepare seam, which is the only place a test can hold an
+// attempt open at exactly that point.
+func TestChaos71_ShutdownCancelsAnInFlightActivation(t *testing.T) {
+	cpChaosSetup(t)
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("pick a port: %v", err)
+	}
+	port := ln.Addr().(*net.TCPAddr).Port
+	_ = ln.Close()
+
+	var completions int
+	prevComplete := cpCompleteLeadershipFn
+	cpCompleteLeadershipFn = func(clusterStartupConfig, context.Context, bool) { completions++ }
+	t.Cleanup(func() { cpCompleteLeadershipFn = prevComplete })
+
+	s := &cpGRPCSupervisor{
+		cfg:          cpInsecureCfg(t, fmt.Sprintf("127.0.0.1:%d", port)),
+		ctx:          context.Background(),
+		stopping:     make(chan struct{}),
+		done:         make(chan struct{}),
+		firstAttempt: make(chan struct{}),
+	}
+
+	// Shutdown lands while the attempt is inside the prepare phase.
+	prevPrepare := cpPrepareFn
+	cpPrepareFn = func(string) { close(s.stopping) }
+	t.Cleanup(func() { cpPrepareFn = prevPrepare })
+
+	err = s.attempt()
+	if !errors.Is(err, errCPGRPCStopping) {
+		t.Errorf("attempt() interrupted by shutdown = %v, want errCPGRPCStopping", err)
+	}
+	if completions != 0 {
+		t.Error("HA leadership was resumed during teardown — globalHA.Stop() runs BEFORE the gRPC stop hook, so this resurrects the lease keepalive after it was stopped")
+	}
+
+	clusterRoleMu.RLock()
+	role, srv := clusterRole.role, clusterRole.grpcSrv
+	clusterRoleMu.RUnlock()
+	if role == "control-plane" {
+		t.Error("a node that is shutting down was left reporting the control-plane role")
+	}
+	if srv != nil {
+		t.Error("a gRPC server handle survived an activation cancelled by shutdown")
+	}
+	// Nothing is left listening. NOTE: this gate exercises the PRE-bind check
+	// (shutdown lands inside prepare), so no listener is ever created on this
+	// path; the disposal of one that wins the narrower post-bind race is pinned
+	// as a unit by TestChaos71_DiscardActivationTearsDownAListenerThatWonTheRace.
+	probe, perr := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+	if perr != nil {
+		t.Errorf("a listener bound during teardown was left serving: %v", perr)
+	} else {
+		_ = probe.Close()
+	}
+	if snap := cpGRPCListenerState(); snap.Failing {
+		t.Error("a shutdown-interrupted attempt was recorded as a bind FAILURE — it is a teardown, not a fault")
+	}
+}
+
+// TestChaos71_DiscardActivationTearsDownAListenerThatWonTheRace pins the
+// disposal half of the Codex P2 fix as a UNIT, and the reason is worth
+// recording.
+//
+// `Stop` does not take clusterRoleMu, so the pre-bind check inside phase 3
+// cannot be atomic with it: an activation can complete between that check and
+// the post-bind one. That window is MICROSECONDS wide and cannot be scheduled
+// from a test — an integration gate that closes `stopping` during the prepare
+// seam is caught by the PRE-bind check and never reaches disposal at all, which
+// is exactly how the first version of this gate came out VACUOUS (it passed
+// against a reintroduced `return` with no `discardActivation`).
+//
+// So the invariant is pinned directly, the way CHAOS-66 pinned `adopt`'s after
+// its own end-to-end gate proved vacuous for the same structural reason.
+func TestChaos71_DiscardActivationTearsDownAListenerThatWonTheRace(t *testing.T) {
+	cpChaosSetup(t)
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("pick a port: %v", err)
+	}
+	port := ln.Addr().(*net.TCPAddr).Port
+	_ = ln.Close()
+
+	addr := fmt.Sprintf("127.0.0.1:%d", port)
+	cfg := cpInsecureCfg(t, addr)
+	noteCPGRPCConfigured(addr)
+
+	// A real, serving activation — the state the race leaves behind.
+	clusterRoleMu.Lock()
+	err = activateControlPlaneLocked(cfg.CPAddr, "", "", "", "startup")
+	clusterRoleMu.Unlock()
+	if err != nil {
+		t.Fatalf("activate: %v", err)
+	}
+	clusterRoleMu.RLock()
+	bound := clusterRole.grpcSrv
+	clusterRoleMu.RUnlock()
+	if bound == nil {
+		t.Fatal("the gate did not reach a bound listener — it proves nothing")
+	}
+
+	s := &cpGRPCSupervisor{
+		cfg:          cfg,
+		ctx:          context.Background(),
+		stopping:     make(chan struct{}),
+		done:         make(chan struct{}),
+		firstAttempt: make(chan struct{}),
+	}
+	s.discardActivation()
+
+	clusterRoleMu.RLock()
+	role, srv := clusterRole.role, clusterRole.grpcSrv
+	clusterRoleMu.RUnlock()
+	if srv != nil {
+		t.Error("the gRPC server handle survived disposal — nothing else holds a pointer to stop it")
+	}
+	if role == "control-plane" {
+		t.Error("the node still reports the control-plane role after disposal")
+	}
+	if snap := cpGRPCListenerState(); !snap.Stopped {
+		t.Error("disposal did not record the teardown, so surfaces keep describing a Control Plane that is exiting")
+	}
+	// The socket is really gone: the same bind must now succeed.
+	probe, perr := net.Listen("tcp", addr)
+	if perr != nil {
+		t.Errorf("the listener is still bound after disposal: %v", perr)
+	} else {
+		_ = probe.Close()
+	}
+}
+
 // ── Structural walls ─────────────────────────────────────────────────────────
 
 // TestChaos71_TheControlPlaneActivationPathHasNoFatal is the wall against
@@ -1450,8 +1647,6 @@ func TestChaos71_Wall_NoCurrentConfigSnapshotUnderTheRoleLock(t *testing.T) {
 		t.Fatalf("read package dir: %v", err)
 	}
 
-	reentrant := map[string]bool{"CurrentConfigSnapshot": true, "prepareControlPlane": true}
-
 	fset := token.NewFileSet()
 	scannedFuncs, lockedFuncs := 0, 0
 	for _, e := range entries {
@@ -1469,31 +1664,7 @@ func TestChaos71_Wall_NoCurrentConfigSnapshotUnderTheRoleLock(t *testing.T) {
 				continue
 			}
 			scannedFuncs++
-
-			// Find the earliest position at which this function takes
-			// clusterRoleMu, and the positions of any re-entrant calls.
-			lockAt := token.NoPos
-			var offenders []*ast.CallExpr
-			ast.Inspect(fn.Body, func(n ast.Node) bool {
-				call, ok := n.(*ast.CallExpr)
-				if !ok {
-					return true
-				}
-				sel, ok := call.Fun.(*ast.SelectorExpr)
-				if ok {
-					if id, ok := sel.X.(*ast.Ident); ok && id.Name == "clusterRoleMu" &&
-						(sel.Sel.Name == "Lock" || sel.Sel.Name == "RLock") {
-						if lockAt == token.NoPos || call.Pos() < lockAt {
-							lockAt = call.Pos()
-						}
-					}
-					return true
-				}
-				if id, ok := call.Fun.(*ast.Ident); ok && reentrant[id.Name] {
-					offenders = append(offenders, call)
-				}
-				return true
-			})
+			lockAt, offenders := cpScanRoleLockReentrancy(fn.Body)
 			if lockAt == token.NoPos {
 				continue
 			}
@@ -1502,11 +1673,10 @@ func TestChaos71_Wall_NoCurrentConfigSnapshotUnderTheRoleLock(t *testing.T) {
 				if call.Pos() <= lockAt {
 					continue
 				}
-				id := call.Fun.(*ast.Ident)
 				t.Errorf("%s: %s calls %s() after taking clusterRoleMu — CurrentConfigSnapshot re-reads the role "+
 					"through buildCPAddressList's RLock and sync.RWMutex is not reentrant, so this deadlocks the "+
 					"goroutine while it holds the lock (certain on any node with HA enabled)",
-					fset.Position(call.Pos()), fn.Name.Name, id.Name)
+					fset.Position(call.Pos()), fn.Name.Name, cpCalleeName(call))
 			}
 		}
 	}
@@ -1519,6 +1689,65 @@ func TestChaos71_Wall_NoCurrentConfigSnapshotUnderTheRoleLock(t *testing.T) {
 	if lockedFuncs == 0 {
 		t.Fatal("the wall found no function taking clusterRoleMu — its selector has gone stale")
 	}
+}
+
+// cpRoleLockReentrantCalls are the functions that read the cluster role BACK,
+// and so must never be called by a function holding clusterRoleMu in either
+// mode. CurrentConfigSnapshot reaches it through buildCPAddressList;
+// prepareControlPlane calls CurrentConfigSnapshot.
+var cpRoleLockReentrantCalls = map[string]bool{
+	"CurrentConfigSnapshot": true,
+	"prepareControlPlane":   true,
+}
+
+// cpScanRoleLockReentrancy reports the earliest position at which body takes
+// clusterRoleMu (token.NoPos if it never does) and every re-entrant call it
+// makes. Split out of the wall so each half stays legible — and so the wall
+// itself stays under the cognitive-complexity bound golangci-lint enforces.
+func cpScanRoleLockReentrancy(body *ast.BlockStmt) (lockAt token.Pos, offenders []*ast.CallExpr) {
+	lockAt = token.NoPos
+	ast.Inspect(body, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		if pos, isLock := cpRoleLockAcquire(call); isLock {
+			if lockAt == token.NoPos || pos < lockAt {
+				lockAt = pos
+			}
+			return true
+		}
+		if cpRoleLockReentrantCalls[cpCalleeName(call)] {
+			offenders = append(offenders, call)
+		}
+		return true
+	})
+	return lockAt, offenders
+}
+
+// cpRoleLockAcquire reports whether call takes clusterRoleMu in either mode.
+func cpRoleLockAcquire(call *ast.CallExpr) (token.Pos, bool) {
+	sel, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok {
+		return token.NoPos, false
+	}
+	id, ok := sel.X.(*ast.Ident)
+	if !ok || id.Name != "clusterRoleMu" {
+		return token.NoPos, false
+	}
+	if sel.Sel.Name != "Lock" && sel.Sel.Name != "RLock" {
+		return token.NoPos, false
+	}
+	return call.Pos(), true
+}
+
+// cpCalleeName returns a plain-identifier callee's name, or "" for anything
+// else (a method call, a closure, a package-qualified call).
+func cpCalleeName(call *ast.CallExpr) string {
+	if id, ok := call.Fun.(*ast.Ident); ok {
+		return id.Name
+	}
+	return ""
 }
 
 // TestChaos71_ShutdownStopsTheSupervisorBeforeDrainingTheServer pins the

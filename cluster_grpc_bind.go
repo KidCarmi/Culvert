@@ -185,6 +185,15 @@ var errCPGRPCRoleTaken = errors.New("cluster role already taken by another plane
 // have refused, and reporting it on every surface beats exiting.
 var errCPGRPCNoAddress = errors.New("control-plane gRPC listen address is empty")
 
+// errCPGRPCStopping reports that Stop was requested while an attempt was in
+// flight. It is not a fault: the loop exits cleanly on it.
+var errCPGRPCStopping = errors.New("control-plane activation interrupted by shutdown")
+
+// cpCompleteLeadershipFn is the leadership-completion seam. Package-level so a
+// gate can observe WHETHER the HA transition ran — the property Codex's P1 and
+// P2 findings are both about — without driving the real globalHA state machine.
+var cpCompleteLeadershipFn = completeCPLeadership
+
 // cpPrepareFn is the prepare seam. Package-level so a gate can COUNT the
 // one-time pre-bind work across retries instead of reading the supervisor's
 // private flag — which is written only by the supervisor goroutine and would be
@@ -346,6 +355,13 @@ func (s *cpGRPCSupervisor) run() {
 		}
 
 		err := s.attempt()
+		if errors.Is(err, errCPGRPCStopping) {
+			// Not a fault: shutdown interrupted the attempt. Recorded as a
+			// teardown so no surface reports a bind failure on the way out.
+			noteCPGRPCStopped()
+			s.markFirstAttempt()
+			return
+		}
 		if err == nil {
 			// Bound, role asserted, leadership resolved. The listener's own
 			// serve loop is owned by grpc-go from here; there is no serve-ended
@@ -423,9 +439,29 @@ func (s *cpGRPCSupervisor) attempt() error {
 	// Someone else got there first — the admin API's enable endpoint is
 	// reachable during the retry window, which is precisely the point of this
 	// change. Treat it as success and stop retrying.
+	//
+	// ████ IT MUST STILL COMPLETE THE HA TRANSITION. ████
+	//
+	// This branch used to `return nil` here, which was a REGRESSION against the
+	// pre-CHAOS-71 boot path: that path always resumed leadership after a
+	// successful activation, and `enableControlPlane` has never done it itself
+	// (the admin API's enable never resumed HA — pre-existing, and harmless
+	// while boot always followed up). So on a persisted HA leader whose boot
+	// bind failed, an operator enabling the Control Plane through
+	// `POST /api/cluster/mode` left `globalHA` DISABLED: no lease, no
+	// keepalive, no resync material, and the fencing gate treating this node as
+	// standalone and write-authoritative while its peer may already be leading.
+	//
+	// Rule 3 says leadership is asserted only on an OBSERVED bind — and
+	// somebody else's bind is an observed bind. Reported by Codex review on
+	// PR #1534.
 	if role == "control-plane" {
-		noteCPGRPCBound()
+		_, recovered := noteCPGRPCBound()
 		noteCPGRPCRoleAsserted()
+		if s.stopRequested() {
+			return errCPGRPCStopping
+		}
+		cpCompleteLeadershipFn(s.cfg, s.ctx, recovered)
 		return nil
 	}
 	// The role moved to something that is not ours to overwrite (a DP
@@ -449,15 +485,36 @@ func (s *cpGRPCSupervisor) attempt() error {
 	}
 
 	// Phase 3 — bind and commit the role, re-checking under the write lock.
+	//
+	// The stop re-check inside the lock is not belt-and-braces. Phase 2 does
+	// FILESYSTEM work (the version floor, the config publish, the cluster-CA
+	// load), so an attempt can sit in it for longer than the early shutdown
+	// phase's deadline: `Stop` then returns on its ctx, the hook moves on to
+	// `StopControlPlaneGRPC` — which observes no server — and the I/O
+	// eventually unblocks and binds a listener on a node that is already
+	// tearing down. Reported by Codex review on PR #1534.
 	if err := func() error {
 		clusterRoleMu.Lock()
 		defer clusterRoleMu.Unlock()
+		if s.stopRequested() {
+			return errCPGRPCStopping
+		}
 		if clusterRole.role != "standalone" && clusterRole.role != "control-plane" {
 			return errCPGRPCRoleTaken
 		}
 		return activateControlPlaneLocked(s.cfg.CPAddr, s.cfg.CPCert, s.cfg.CPKey, s.cfg.CPCA, "startup")
 	}(); err != nil {
 		return err
+	}
+
+	// And if Stop won the race ANYWAY — it does not take clusterRoleMu, so the
+	// check above cannot be atomic with it — dispose of the listener we just
+	// created rather than leaving it serving with the drain already past. The
+	// role is reset too, so nothing downstream reports a Control Plane on a
+	// node that is exiting.
+	if s.stopRequested() {
+		s.discardActivation()
+		return errCPGRPCStopping
 	}
 
 	suppressed, recovered := noteCPGRPCBound()
@@ -470,6 +527,32 @@ func (s *cpGRPCSupervisor) attempt() error {
 	// Rule 3 + rule 5: leadership is resolved only now, against the CURRENT
 	// persisted HA state rather than a boot snapshot, and with the role lock
 	// released (see the header).
-	completeCPLeadership(s.cfg, s.ctx, recovered)
+	//
+	// Checked once more first: `globalHA.Stop()` runs BEFORE
+	// `control-plane-grpc-stop` in the shutdown sequence, so resuming
+	// leadership here would resurrect the lease keepalive after it was stopped.
+	if s.stopRequested() {
+		return errCPGRPCStopping
+	}
+	cpCompleteLeadershipFn(s.cfg, s.ctx, recovered)
 	return nil
+}
+
+// discardActivation tears down an activation that completed concurrently with
+// shutdown: stop the server, drop the handle, and return the role to
+// standalone so no surface reports a Control Plane on a node that is exiting.
+func (s *cpGRPCSupervisor) discardActivation() {
+	clusterRoleMu.Lock()
+	srv := clusterRole.grpcSrv
+	clusterRole.grpcSrv = nil
+	if clusterRole.role == "control-plane" {
+		clusterRole.role = "standalone"
+	}
+	clusterRoleMu.Unlock()
+
+	if srv != nil {
+		srv.Stop()
+	}
+	noteCPGRPCStopped()
+	logger.Printf("ControlPlane: discarded a gRPC listener that bound while this node was shutting down")
 }
