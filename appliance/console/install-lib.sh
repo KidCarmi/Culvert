@@ -18,6 +18,7 @@ install_console_bundle() (
             for ((index=${#published[@]}-1; index>=0; index--)); do
                 if [[ -n ${backups[index]} ]]; then
                     if ! mv -fT -- "${backups[index]}" "${targets[index]}"; then
+                        echo "Could not restore ${targets[index]} from ${backups[index]}" >&2
                         rollback_failed=true
                     fi
                 elif ! rm -f -- "${targets[index]}"; then
@@ -57,7 +58,7 @@ install_console_bundle() (
         install -o root -g root -m "${modes[index]}" -- "${sources[index]}" "$stage" || exit 1
         backup=''
         if [[ -e $target ]]; then
-            backup=$(mktemp "${target%/*}/.culvert-backup.XXXXXX") || exit 1
+            backup=$(mktemp "${target%/*}/.culvert-backup.${target##*/}.XXXXXX") || exit 1
             backups+=("$backup")
             cp -p -- "$target" "$backup" || exit 1
         else

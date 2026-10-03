@@ -85,6 +85,11 @@ cmp "$getty" "$src/getty-override.conf"
 cp /bin/sleep "$bin"
 "$bin" 30 &
 child=$!
+for ((attempt=0; attempt<200; attempt++)); do
+    [[ /proc/$child/exe -ef $bin ]] && break
+    sleep 0.01
+done
+[[ /proc/$child/exe -ef $bin ]]
 old_inode=$(stat -c '%i' "$bin")
 install_console_bundle "$src" "$bin" "$profile" "$getty"
 [[ $(stat -c '%i' "$bin") != "$old_inode" ]]
@@ -92,4 +97,14 @@ kill -0 "$child"
 kill "$child"
 wait "$child" || true
 child=''
+# If both publication and rollback fail, keep named backups for manual recovery.
+reset_targets
+if (
+    count=0
+    mv() { count=$((count+1)); [[ $count == 1 ]] || return 99; command mv "$@"; }
+    install_console_bundle "$src" "$bin" "$profile" "$getty"
+); then exit 1; fi
+[[ $(find "$TEST_ROOT/dest" -name '.culvert-backup.binary.*' | wc -l) == 1 ]]
+[[ $(find "$TEST_ROOT/dest" -name '.culvert-backup.profile.*' | wc -l) == 1 ]]
+[[ $(find "$TEST_ROOT/dest" -name '.culvert-backup.getty.*' | wc -l) == 1 ]]
 echo 'PASS: staged installation, rollback, symlink refusal, locking and idempotency'
