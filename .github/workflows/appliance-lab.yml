@@ -25,7 +25,8 @@ permissions:
   actions: read
 
 concurrency:
-  group: appliance-lab-${{ github.ref }}
+  # Per commit: a fix-proof variant runs beside a candidate already in progress.
+  group: appliance-lab-${{ github.ref }}-${{ github.sha }}
   cancel-in-progress: false
 
 env:
@@ -48,14 +49,16 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # FINAL candidate for the ESXi handoff: #1528 head c5551a18 (first-boot
-        # ordering fix + ClamAV save-order fix + archive closure/cold-load
-        # guards). Image = that head's own Deep PR Gate tar (run 37156550461,
-        # Fast + Deep APPROVED); provisioning + build script = a clean checkout
-        # of the SAME commit. No provisioning drift.
+        # PROPOSED FIX for F-OSU-REBOOT-1 (run 37156062516: after
+        # `culvert-os-update reboot` the stack stayed Exited — compose stop
+        # marks containers manually stopped, so unless-stopped never restarts
+        # them). Image = #1528 head c5551a18's own Deep PR Gate tar; provisioning
+        # = THIS lab commit, whose appliance/ tree is c5551a18's plus the
+        # resume fix only. Provisioning drift, separately identified; NOT the
+        # handoff candidate (candidate-c5551a18da30 is run 37158853618).
         include:
-          - variant: candidate-c5551a18da30
-            provisioning: source
+          - variant: stack-resume-fix-on-c5551a18da30
+            provisioning: lab
             source_sha: "c5551a18da30e1178861cd9b488fc2d9aa6de781"
             image_run: "37156550461"
             image_tar_sha256: "622560c8a4dd711399f0b8aef0abbcfcec0bda539213a38036cf3633701516a8"
@@ -192,8 +195,8 @@ jobs:
             (cd "$GITHUB_WORKSPACE" && diff -ruN appliance-src/appliance appliance) > "$LAB_ROOT/provisioning-drift.diff" || true
             changed="$(cd "$GITHUB_WORKSPACE" && diff -rqN appliance-src/appliance appliance | sed -E 's#^(Files|Only in) appliance-src/##; s# and .*##' | sort || true)"
             echo "appliance/ drift vs $APPLIANCE_SOURCE_SHA:"; echo "$changed"
-            want="$(printf '%s\n' appliance/build/archive-identity.sh appliance/build/build-ova.sh appliance/build/cold-load-check.sh \
-              appliance/build/manifest.env appliance/provision/culvert-firstboot.service | sort)"
+            want="$(printf '%s\n' appliance/build/prepare-guest.sh appliance/os-maintenance/culvert-os-update \
+              appliance/os-maintenance/culvert-stack-resume.service | sort)"
             [ "$changed" = "$want" ] || { echo "::error::provisioning drift differs from the approved set: $changed"; exit 1; }
             src="$GITHUB_WORKSPACE"; drift=(--candidate-allow-provisioning-drift)
           fi
@@ -286,7 +289,7 @@ jobs:
           cp "$LAB_ROOT/rebuilt.fingerprint.tsv" "$LAB_ROOT/build-ova.log" "$LAB_ROOT/fpcmp/evidence/fingerprint-diff.txt" "$LAB_ROOT/lab/evidence/build/" 2>/dev/null || true
           cp "$LAB_ROOT/provisioning-drift.diff" "$LAB_ROOT/save-replay.txt" "$LAB_ROOT/coldload-clamav-ready.txt" "$LAB_ROOT/lab/evidence/build/" 2>/dev/null || true
           printf 'variant=%s\nlab_commit=%s\nimage_source=%s\nprovisioning_source=%s\nsource_image_run=%s tar_sha256=%s from=%s\nexpected_image_id=%s\nsuperseded_ova_sha256=%s (NOT the artifact booted here)\n' \
-            "${{ matrix.variant }}" "$GITHUB_SHA" "$APPLIANCE_SOURCE_SHA" "$([ "${{ matrix.provisioning }}" = lab ] && echo "$GITHUB_SHA (lab: $APPLIANCE_SOURCE_SHA + firstboot unit fix; provisioning drift)" || echo "$APPLIANCE_SOURCE_SHA")" \
+            "${{ matrix.variant }}" "$GITHUB_SHA" "$APPLIANCE_SOURCE_SHA" "$([ "${{ matrix.provisioning }}" = lab ] && echo "$GITHUB_SHA (lab: $APPLIANCE_SOURCE_SHA + approved provisioning drift, see provisioning-drift.diff)" || echo "$APPLIANCE_SOURCE_SHA")" \
             "$SOURCE_IMAGE_RUN_ID" "$SOURCE_IMAGE_TAR_SHA256" "${{ steps.image.outputs.from }}" \
             "${{ matrix.expect_image_id }}" "$ORIGINAL_OVA_SHA256" > "$LAB_ROOT/lab/evidence/identities.txt"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

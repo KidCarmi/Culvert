@@ -74,9 +74,10 @@ var cloudInit261Units = map[string]string{
 	"docker.service":           "[Unit]\nDescription=stub\n[Service]\nExecStart=/bin/true\n",
 }
 
-// orderingCycleReport loads unit + cloud-init into systemd-analyze and returns
-// any ordering-cycle lines for a multi-user.target start transaction.
-func orderingCycleReport(t *testing.T, unit string) string {
+// orderingCycleReport loads unit (+ any extra units WantedBy=multi-user.target)
+// and cloud-init into systemd-analyze and returns any ordering-cycle lines for
+// a multi-user.target start transaction.
+func orderingCycleReport(t *testing.T, unit string, extra map[string]string) string {
 	t.Helper()
 	dir := t.TempDir()
 	write := func(name, body string) {
@@ -87,7 +88,11 @@ func orderingCycleReport(t *testing.T, unit string) string {
 	for name, body := range cloudInit261Units {
 		write(name, body)
 	}
-	write("culvert-firstboot.service", regexp.MustCompile(`(?m)^ExecStart=.*$`).ReplaceAllString(unit, "ExecStart=/bin/true"))
+	execStart := regexp.MustCompile(`(?m)^ExecStart=.*$`)
+	write("culvert-firstboot.service", execStart.ReplaceAllString(unit, "ExecStart=/bin/true"))
+	for name, body := range extra {
+		write(name, execStart.ReplaceAllString(body, "ExecStart=/bin/true"))
+	}
 	link := func(target, u string) {
 		d := filepath.Join(dir, target+".wants")
 		if err := os.MkdirAll(d, 0o750); err != nil {
@@ -98,6 +103,9 @@ func orderingCycleReport(t *testing.T, unit string) string {
 		}
 	}
 	link("multi-user.target", "culvert-firstboot.service")
+	for name := range extra {
+		link("multi-user.target", name)
+	}
 	link("multi-user.target", "cloud-init.target") // the cloud-init generator's link
 	for _, u := range []string{"cloud-init-local.service", "cloud-init.service", "cloud-config.service", "cloud-final.service"} {
 		link("cloud-init.target", u)
@@ -135,10 +143,15 @@ func orderingCycleReport(t *testing.T, unit string) string {
 // verifyTimeout bounds one systemd-analyze run (it loads the host's units too).
 var verifyTimeout = time.Minute
 
-func TestFirstbootUnit_NoOrderingCycleWithCloudInit(t *testing.T) {
+func requireSystemdAnalyze(t *testing.T) {
+	t.Helper()
 	if _, err := exec.LookPath("systemd-analyze"); err != nil {
 		t.Skip("systemd-analyze not available")
 	}
+}
+
+func TestFirstbootUnit_NoOrderingCycleWithCloudInit(t *testing.T) {
+	requireSystemdAnalyze(t)
 	raw, err := os.ReadFile(firstbootUnitPath)
 	if err != nil {
 		t.Fatal(err)
@@ -146,10 +159,10 @@ func TestFirstbootUnit_NoOrderingCycleWithCloudInit(t *testing.T) {
 	// Control: the shipped-broken ordering must be seen as a cycle, or this
 	// harness proves nothing.
 	broken := regexp.MustCompile(`(?m)^After=.*$`).ReplaceAllString(string(raw), "After=cloud-final.service docker.service network-online.target")
-	if rep := orderingCycleReport(t, broken); !strings.Contains(rep, "culvert-firstboot.service") {
+	if rep := orderingCycleReport(t, broken, nil); !strings.Contains(rep, "culvert-firstboot.service") {
 		t.Fatalf("control: systemd-analyze did not report the known cycle; output:\n%s", rep)
 	}
-	if rep := orderingCycleReport(t, string(raw)); rep != "" {
+	if rep := orderingCycleReport(t, string(raw), nil); rep != "" {
 		t.Errorf("culvert-firstboot.service forms an ordering cycle with cloud-init:\n%s", rep)
 	}
 }

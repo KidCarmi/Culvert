@@ -395,6 +395,12 @@ PY
   # Step 8 — persistence and readiness after the reboot.
   if gate 8 persistence; then
     gssh 'sudo culvert-status; ls /var/lib/culvert-appliance/state/' > "$EV/08-status-after-reboot.txt" 2>&1 || true
+    # F-OSU-REBOOT-1: the stack stopped by `culvert-os-update reboot` is started
+    # by culvert-stack-resume.service, which clears its marker only on success.
+    gssh 'systemctl show culvert-stack-resume.service -p LoadState -p ActiveState -p Result -p ExecMainStatus; sudo journalctl -b -u culvert-stack-resume --no-pager | tail -8; test -e /var/lib/culvert-appliance/state/stack-resume-on-boot && echo MARKER-PRESENT || echo MARKER-CLEARED' > "$EV/08-stack-resume.txt" 2>&1 || true
+    grep -qx 'Result=success' "$EV/08-stack-resume.txt" && grep -qx 'MARKER-CLEARED' "$EV/08-stack-resume.txt" && grep -q 'stack started after the maintenance reboot' "$EV/08-stack-resume.txt" \
+      && check 8 stack-resumed pass "culvert-stack-resume.service started the stack and cleared its marker" \
+      || check 8 stack-resumed fail "$(tr '\n' ' ' < "$EV/08-stack-resume.txt" | head -c 300)"
     : > "$JAR"; c="$(api POST /api/auth/login "{\"user\":\"$ADMIN_USER\",\"pass\":\"$pass\"}" | tee "$EV/08-login.txt" | code)"
     [[ $c == 200 ]] && check 8 admin-login pass "200 after reboot" || check 8 admin-login fail "http $c"
     api GET /api/policy | body > "$EV/08-policy.json" || true
