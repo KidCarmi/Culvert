@@ -162,6 +162,7 @@ func (s *Server) imageRollbackStages(targetRefFn func() string, acc *rollbackAcc
 			Run: func(ctx context.Context) ([]byte, []byte, error) {
 				probe := s.opts.HealthProbeFactory()
 				probe.Preserve, probe.PreserveReportOnly, probe.Before = acc.preserved, true, acc.before
+				probe.MissingIsUnknown = true // the target may predate rows the running release added
 				hr, herr := probe.Run(ctx)
 				if herr != nil {
 					return nil, nil, herr

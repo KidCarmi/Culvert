@@ -184,3 +184,28 @@ func TestRun_ToleratesA503ThatPredatesTheRestart(t *testing.T) {
 		t.Fatalf("no baseline ⇒ non-2xx must fail: %+v", res)
 	}
 }
+
+// A rollback may target an older release that predates rows the newer one
+// added: with MissingIsUnknown an ABSENT row does not count as broken, an
+// explicit failure still does.
+func TestRun_RollbackTreatsAbsentRowsAsUnknown(t *testing.T) {
+	body := readyBody(map[string]string{"clamav": "fail", "session_secret": "ok"})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte(body))
+	}))
+	defer srv.Close()
+	p := fastProbe(t, srv.URL)
+	p.Before = &Snapshot{Ready: false, OK: []string{"session_secret", "setup_complete", "policy_posture"}}
+	if res, _ := p.Run(context.Background()); !res.Failed() {
+		t.Fatalf("an upgrade must treat a vanished row as broken: %+v", res)
+	}
+	p.MissingIsUnknown = true
+	if res, err := p.Run(context.Background()); err != nil || res.Failed() {
+		t.Fatalf("a rollback to a release without those rows must be tolerated: %+v %v", res, err)
+	}
+	body = readyBody(map[string]string{"clamav": "fail", "session_secret": "fail"})
+	if res, _ := p.Run(context.Background()); !res.Failed() {
+		t.Fatalf("an explicit failure must still fail a rollback: %+v", res)
+	}
+}

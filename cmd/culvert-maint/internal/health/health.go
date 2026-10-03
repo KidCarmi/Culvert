@@ -123,6 +123,11 @@ type Probe struct {
 	// is failing (or missing) — nothing that worked broke. nil ⇒ a
 	// non-2xx always fails, the historical contract.
 	Before *Snapshot
+	// MissingIsUnknown makes a row ABSENT from the answer not count as
+	// broken (only an explicit non-"ok" does). Set for rollbacks: the
+	// target may be an older release that predates rows the newer one
+	// added. An upgrade leaves it false — a vanished row is a regression.
+	MissingIsUnknown bool
 
 	// Budget is the total wall-clock budget for the probe (default 30s).
 	Budget time.Duration
@@ -233,7 +238,7 @@ func (p Probe) Run(ctx context.Context) (*Result, error) {
 // ready (unless report-only).
 func (p Probe) judgeReady(res *Result, ok bool, detail string, body []byte) (ready bool, why string) {
 	if !ok && p.Before != nil && !p.Before.Ready {
-		if failing, parsed := failingRows(body); parsed && len(failing) > 0 && len(regressedRows(body, p.Before.OK)) == 0 {
+		if failing, parsed := failingRows(body); parsed && len(failing) > 0 && len(p.broken(body, p.Before.OK)) == 0 {
 			ok = true
 			detail += " tolerated: failing [" + strings.Join(failing, ",") + "]; /ready was already non-2xx and no row that was ok broke"
 		}
@@ -281,6 +286,22 @@ func (p Probe) Baseline(ctx context.Context) (snapshot *Snapshot, detail string)
 	snap.Detail = fmt.Sprintf("baseline: %s preserved=[%s] failing=[%s]",
 		d, strings.Join(snap.Preserved, ","), strings.Join(failing, ","))
 	return snap, snap.Detail
+}
+
+// broken returns the want rows that are not "ok" in body, treating an
+// absent row as unknown (not broken) when MissingIsUnknown is set.
+func (p Probe) broken(body []byte, want []string) []string {
+	if !p.MissingIsUnknown {
+		return regressedRows(body, want)
+	}
+	rows, _ := readyRows(body)
+	var out []string
+	for _, name := range want {
+		if st, present := rows[name]; present && st != "ok" {
+			out = append(out, name)
+		}
+	}
+	return out
 }
 
 // failingRows returns the rows whose status is not "ok" (sorted), and
