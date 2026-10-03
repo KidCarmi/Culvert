@@ -69,6 +69,13 @@ jobs:
           # user-mode network there — match it.
           if dpkg -s passt >/dev/null 2>&1; then sudo apt-get remove -y -q passt; fi
           ! command -v passt
+          # The libguestfs build guest inherits the host's resolv.conf; the
+          # runner's is systemd-resolved's stub (127.0.0.53), unreachable from
+          # inside that guest ("Could not resolve host", run 37138601142). Point
+          # it at the real upstream resolvers. Host environment only.
+          if [ -s /run/systemd/resolve/resolv.conf ]; then sudo ln -sfn /run/systemd/resolve/resolv.conf /etc/resolv.conf; fi
+          grep -E '^nameserver' /etc/resolv.conf
+          ! grep -qE '^nameserver 127\.' /etc/resolv.conf
       - name: Match the recorded build host's Docker engine (29.6.2)
         # The original OVA's build-info.json records Docker 29.6.2 on the
         # containerd image store. The runner ships Docker 28, whose containerd
