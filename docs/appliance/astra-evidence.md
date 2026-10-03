@@ -140,6 +140,27 @@ exercised the new pinned-snapshot security upgrade (`GUEST_APT_SNAPSHOT=20261002
 | c2 | the snapshot upgrade **succeeded** inside the guest — 36 packages unpacked/set up from `snapshot.ubuntu.com` at `20261002T120000Z`, including `openssl`/`libssl3t64` 3.0.13-0ubuntu3.15 → **3.0.13-0ubuntu3.16** (the two HIGH findings), `dracut-install`, `libevent-core`, `libheif*`, `libxpm4`, `python3-jwt`, `python3-requests`, and `linux-libc-dev`/`linux-tools-common` 6.8.0-142 → 6.8.0-146 (header/tooling packages; **no new kernel image**, as designed) — then `prepare-guest.sh` exited non-zero in the evidence step: `diff` exits 1 when the lists differ, which `set -o pipefail` turned into an abort | `comm` instead of `diff` (exit 0 on differences), moved-count grep guarded (`184edfe`) |
 | c3 | **SUCCEEDED** — `culvert-appliance-dev-candidate.6b26b3402253-ubuntu-24.04.ova`, 1,180,559,360 bytes, SHA256 `a51f231686bf837a78e332fe8866cbc5bcd12e06e7a44e7fad9f17c26154f076` (`cand-build3.log`, ~26 min under TCG). Provenance in `build-info.json` (`appliance/sbom/evidence/candidate-6b26b34.build-info.json`): `candidate: true`, image source `6b26b34…`, provisioning `184edfe…` (`provisioning_drift: true`, allowed explicitly), image tar sha256 `ddb59654…`, CI run 37065478520, `application.cosign: "not applicable — CANDIDATE build from an unsigned CI artifact…"`. Read back from the disk with `virt-cat`/`virt-ls`: the guest manifest carries `CANDIDATE_BUILD=1` and the candidate image pins AFTER the release pins (later keys win), `/opt/culvert-appliance/bin` + `/usr/local/sbin` carry `culvert-sudo-policy` and `culvert-firstboot`, the shipped `install.sh` handles `CULVERT_INSTALL_SETUP_TOKEN`. The pinned-snapshot upgrade moved 13 packages (`guest-os-candidate-6b26b34.build-upgrades.txt`): `openssl`/`libssl3t64` → 3.0.13-0ubuntu3.16 (the two HIGHs), `dracut-install`, `libevent-core`, `libheif*`, `libxpm4`, `python3-jwt`, `python3-requests`, `sosreport`, `linux-libc-dev`/`linux-tools-common` → 6.8.0-146 (no new kernel image). **Still NOT done: booting it** (no KVM) — the artefact exists to be booted on the pilot hypervisor, not to be shipped | — |
 
+## Final candidate build (closeout, 2026-10-03) — image and provisioning from ONE commit
+
+The round-3 candidate (`6b26b34`) predates the restore, agent and feed-sync
+fixes, so it was superseded. `build-ova.sh --candidate-image-tar` was run
+against the Deep PR Gate artifact `deep-gate-image` of run **37124197333**
+(head `4c4b772`; `culvert-image.tar` sha256
+`bb8a2c75369ca3397aaf84566eeee6222f30ca5c3b791de7d60bfecac9a8c3a4`, artifact
+zip digest `4900e510…`), from a clean worktree checked out at the SAME commit,
+so `provisioning_drift: false` — no drift flag was needed.
+
+| Run | Outcome |
+|-----|---------|
+| c4 | **SUCCEEDED** — `culvert-appliance-dev-candidate.4c4b7728c0e6-ubuntu-24.04.ova`, 1,223,895,040 bytes, SHA256 `e24eb542f973fb70360bad5124ef81fdab8b6f8d67af601720613cbcca3700a4` (equal in `.ova.sha256` and `build-info.json` → `artifact.sha256`), ~26 min under TCG. Provenance (`appliance/sbom/evidence/candidate-4c4b772.build-info.json`): `candidate: true`, image source AND provisioning `4c4b7728c0e6a1746e968d935b635fc652647e6f`, `git_dirty: false`, image tar sha256 `bb8a2c75…`, CI run 37124197333, application image id inside the guest `sha256:384f4c4b1bad91be93dc8b78adb974b6c57dd9b4c8f534bfdbafc2c1e4f1ab04` (containerd store: the OCI manifest digest), ClamAV pinned `clamav/clamav:1.4@sha256:57deb108…` (unchanged), Docker 5:29.8.2 / containerd 2.3.6 / compose 5.5.1 (pins unchanged). Snapshot `20261002T120000Z` moved the same 13 packages as c3 (`guest-os-candidate-4c4b772.build-upgrades.txt`); the kernel image stays `6.8.0-142` (`/boot` read back with `virt-ls`). Guest re-scan of THIS artefact: `sbom-cve-evidence.md` §Final candidate. **Still NOT done: booting it** — `vsphere-qualification.md` is the procedure. |
+
+Commits after `4c4b772` change only the qualification harness, evidence and
+documentation (verified with `git diff --stat 4c4b772 HEAD` at the closeout
+commit: no Go source, Dockerfile, compose file, `appliance/build/`,
+`appliance/provision/`, `appliance/os-maintenance/`, `packaging/` or
+`scripts/` path), so the artefact's source identity remains `4c4b772` and it
+was not rebuilt.
+
 ## BLOCKED (exact command + prerequisite)
 
 | Item | Command that would do it | Prerequisite missing here |
