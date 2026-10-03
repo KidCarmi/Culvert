@@ -65,8 +65,11 @@ docker compose --profile cli run --rm cli --recover-restore --confirm=revert    
 docker compose up -d
 ```
 
-Both directions are deterministic and idempotent
-(`docs/operator/docker-compose-backup-restore.md` §8b).
+Both directions are deterministic, and an interrupted recovery is resumed by
+re-running the SAME command (the journal records the direction and each
+completed sub-step; switching direction is refused; a missing
+`.restore-bak.*`/`.restore-staging.*` directory refuses rather than being
+read as finished work) — `docs/operator/docker-compose-backup-restore.md` §6.
 
 ## 4. Interrupted upgrade / agent restart
 
@@ -102,8 +105,11 @@ Details: `docs/operator/release-management-agent.md` §"Interrupted operations".
 | Restore attempted while the proxy runs | refused (data-dir lock) | harness D `commit-refused-while-running` |
 | Restore commit attempted after the proxy has run long enough to GC | still refused: the proxy's lock hold is pinned for its lifetime (a GC-released hold once let a commit land on a live stack) | `TestHoldDataDirLock_SurvivesGarbageCollection`, harness D `commit-refused-while-running` |
 | Proxy started while a restore commit/recovery holds the lock | proxy boot refused (fatal) until the commit finishes; `restart: unless-stopped` brings it back | `TestHoldDataDirLock_RefusesWhileCommitHoldsIt` |
-| Kill after promotion removed the staging dir but before the journal | `--confirm=complete` retires the journal; nothing left to move | `TestRecoverRestore_Complete_StagingAlreadyRemoved` |
-| Journal names a previous-data dir that no longer exists | revert and complete both succeed (absent dir = nothing to move) | `TestRecoverRestore_MissingBakDirIsNotFatal` |
+| Kill after promotion removed the staging dir but before the journal | the commit records `progress: promoted` BEFORE removing the staging dir, so `--confirm=complete` retires the journal; without that marker a missing staging dir is REFUSED (nothing moved, journal kept) | `TestRecoverRestore_Complete_StagingAlreadyRemoved`, `TestRecoverRestore_Complete_MissingStagingWithoutMarker_Refuses`, `TestRestoreCommit_WritesPromotedMarkerBeforeRemovingStaging` |
+| Kill DURING a revert — while parking the promoted entries, or while returning the previous entries | re-running `--confirm=revert` resumes: the journal recorded the direction and `progress: unpromoted` before the first previous entry came back, so the returned previous data is never mistaken for promoted data; the live tree equals the previous set byte for byte, staging holds the restored set | `TestRecoverRestore_Revert_InterruptedDuringReturn_Resumes`, `…InterruptedDuringUnpromote_Resumes`, `…InterruptedBeforeJournalRemoval_Retires` |
+| Kill during a complete's promotion | re-running `--confirm=complete` resumes; live equals the restored set, bak equals the previous set | `TestRecoverRestore_Complete_InterruptedDuringPromote_Resumes` |
+| Operator switches direction after a recovery started | refused with the recorded direction named; nothing moved | `TestRecoverRestore_DirectionSwitchIsRefused` |
+| Journal names a previous-data dir that no longer exists | `--confirm=complete` recreates it and says the previous data was not preserved; `--confirm=revert` REFUSES (nothing moved, journal kept) unless `progress: returned` proves the previous data is already live — an absent bak dir with live restored data used to be reverted into an EMPTY data dir with the boot guard disarmed | `TestRecoverRestore_MissingBakDir`, `TestRecoverRestore_Revert_MissingBakInPromoting_RefusesAndMovesNothing` |
 | Data dir reached through a symlink with a bind mount inside | nested mount still refused before anything destructive | `TestNestedMountPointsUnder_ResolvesSymlinkedDataDir` |
 | Agent cannot inspect the running image or the pinned tag at boot | record kept as `inputs_unavailable`; never retired on absent evidence | `TestReconcile_TagInspectFailureIsInputsUnavailable_NotNoop`, `TestReconcile_RunningCaptureFailureIsInputsUnavailable` |
 | Resolve refused at admission (lock held / agent busy) | attempt bound not consumed | `TestReconcileResolve_RefusedLaunchDoesNotChargeAnAttempt` |

@@ -401,22 +401,30 @@ func TestRestoreCommit_RefusesLeavingNoAdmin(t *testing.T) {
 	}
 }
 
-// swapInPlace removes the (empty) staging dir BEFORE it retires the journal;
-// a kill between the two leaves `promoting` + no staging dir + every restored
-// entry live. Pre-fix `--confirm=complete` failed forever on the missing dir
-// (ENOENT from listTopLevelUserEntries) and the boot guard stayed armed; the
-// only outs were reverting a fully landed restore or hand-deleting the journal
-// the error text says never to touch (Codex + adversarial review, PR #1528).
+// swapInPlace promotes, records the `promoted` marker, removes the (empty)
+// staging dir and only then retires the journal; a kill between the rmdir and
+// the journal removal leaves `promoting` + marker + no staging dir + every
+// restored entry live. Pre-fix `--confirm=complete` failed forever on the
+// missing dir (ENOENT) and the boot guard stayed armed (Codex + adversarial
+// review, PR #1528). The owner review then found the opposite hole — a
+// missing dir alone is NOT proof the content landed — so the marker is what
+// completes it (TestRecoverRestore_Complete_MissingStagingWithoutMarker_Refuses
+// is the control).
 func TestRecoverRestore_Complete_StagingAlreadyRemoved(t *testing.T) {
 	dir := interruptCommit(t, "between")
 	// Finish the promotion by hand up to the last step, exactly as the real
-	// commit does: promote, remove staging, and then die before the journal.
+	// commit does: promote, record the marker, remove staging, die before
+	// the journal removal.
 	j, present, err := readRestoreJournal(dir)
 	if !present || err != nil {
 		t.Fatalf("journal: present=%v err=%v", present, err)
 	}
 	staging := filepath.Join(dir, j.StagingDir)
 	if _, err := moveTopLevelEntries(staging, dir); err != nil {
+		t.Fatal(err)
+	}
+	j.Progress = restoreProgressPromoted
+	if err := writeRestoreJournal(dir, j); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Remove(staging); err != nil {
@@ -440,30 +448,52 @@ func TestRecoverRestore_Complete_StagingAlreadyRemoved(t *testing.T) {
 	}
 }
 
-// A journal whose bak dir no longer exists (the operator removed it, or the
-// evacuation never got as far as writing into it) is a valid current state for
-// BOTH recovery directions: revert has nothing to put back, complete creates
-// the dir it is about to evacuate into. Pre-fix both failed with a bare ENOENT.
-func TestRecoverRestore_MissingBakDirIsNotFatal(t *testing.T) {
-	for _, action := range []restoreRecoverAction{recoverActionRevert, recoverActionComplete} {
-		t.Run(string(action), func(t *testing.T) {
-			dir := interruptCommit(t, "evacuating")
-			j, _, _ := readRestoreJournal(dir)
-			if err := os.RemoveAll(filepath.Join(dir, j.BakDir)); err != nil {
-				t.Fatal(err)
-			}
-			var out bytes.Buffer
-			if err := runRecoverRestore(dir, action, &out); err != nil {
-				t.Fatalf("%s with no bak dir: %v\n%s", action, err, out.String())
-			}
-			if _, present, _ := readRestoreJournal(dir); present {
-				t.Error("journal must be retired")
-			}
-			if err := checkInterruptedRestore(dir); err != nil {
-				t.Errorf("boot guard must pass: %v", err)
-			}
-		})
-	}
+// A journal whose bak dir no longer exists: COMPLETE does not need the
+// previous data (it creates the dir it is about to evacuate into and says
+// so), but REVERT refuses — the bak dir is created before the journal, so
+// its absence means it was removed, possibly with content, and the live dir
+// must not be touched on that evidence (owner review, PR #1528; the
+// promoting-phase twin is TestRecoverRestore_Revert_MissingBakInPromoting_RefusesAndMovesNothing).
+func TestRecoverRestore_MissingBakDir(t *testing.T) {
+	t.Run("complete_recreates", func(t *testing.T) {
+		dir := interruptCommit(t, "evacuating")
+		j, _, _ := readRestoreJournal(dir)
+		if err := os.RemoveAll(filepath.Join(dir, j.BakDir)); err != nil {
+			t.Fatal(err)
+		}
+		var out bytes.Buffer
+		if err := runRecoverRestore(dir, recoverActionComplete, &out); err != nil {
+			t.Fatalf("complete with no bak dir: %v\n%s", err, out.String())
+		}
+		if _, present, _ := readRestoreJournal(dir); present {
+			t.Error("journal must be retired")
+		}
+		if err := checkInterruptedRestore(dir); err != nil {
+			t.Errorf("boot guard must pass: %v", err)
+		}
+		if body, _ := os.ReadFile(filepath.Join(dir, "ui_users.json")); !strings.Contains(string(body), "alice") {
+			t.Errorf("restored roster must be live; got %s", body)
+		}
+	})
+	t.Run("revert_refuses", func(t *testing.T) {
+		dir := interruptCommit(t, "evacuating")
+		j, _, _ := readRestoreJournal(dir)
+		if err := os.RemoveAll(filepath.Join(dir, j.BakDir)); err != nil {
+			t.Fatal(err)
+		}
+		live, _ := listTopLevelUserEntries(dir)
+		var out bytes.Buffer
+		if err := runRecoverRestore(dir, recoverActionRevert, &out); !errors.Is(err, errRecoveryMaterialMissing) {
+			t.Fatalf("revert with no bak dir must refuse as missing material, got %v\n%s", err, out.String())
+		}
+		after, _ := listTopLevelUserEntries(dir)
+		if strings.Join(live, ",") != strings.Join(after, ",") {
+			t.Errorf("a refused revert must move nothing: before %v after %v", live, after)
+		}
+		if _, present, _ := readRestoreJournal(dir); !present {
+			t.Error("journal must be kept")
+		}
+	})
 }
 
 // The data-dir lock is BIDIRECTIONAL: a proxy must not boot over a commit or

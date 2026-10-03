@@ -267,11 +267,28 @@ docker compose --profile cli run --rm cli --recover-restore --confirm=complete
 docker compose up -d
 ```
 
-Both directions are deterministic for every phase and idempotent: if the
-recovery itself is interrupted, run the same command again. A journal the
-binary cannot parse is never acted on; the proxy refuses to start and the
-operator inspects `/data/.restore-journal.json` and the `.restore-*`
-directories by hand.
+Both directions are deterministic for every phase, and a recovery is itself
+restartable: the journal records the chosen direction and each sub-step as
+it completes (`recovery: revert|complete`, `progress: unpromoted | returned |
+promoted`), so if the recovery is interrupted, **run the same command
+again** and it resumes where it stopped. Two refusals follow from that:
+
+* **The direction cannot be switched once a recovery has started.** The
+  recorded direction is always finishable; the other one would act on a
+  layout the journal no longer describes. Finish the recorded direction,
+  then run a fresh restore if the other outcome is wanted.
+* **Missing recovery material is never read as finished work.** A revert
+  whose `.restore-bak.*` directory is absent, or a complete whose
+  `.restore-staging.*` directory is absent, refuses without moving anything
+  and keeps the journal — unless the journal's own `returned` / `promoted`
+  marker proves that directory had already been emptied. Put the directory
+  back and re-run; the journal is removed by hand only after inspecting the
+  `.restore-*` directories.
+
+A journal the binary cannot parse (including one carrying a direction or
+marker this build does not know) is never acted on; the proxy refuses to
+start and the operator inspects `/data/.restore-journal.json` and the
+`.restore-*` directories by hand.
 
 ---
 

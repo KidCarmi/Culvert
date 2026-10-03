@@ -47,9 +47,43 @@ package main
 //	            then move bak/* back into <dataDir>.
 //	            complete = promote the remaining staging/*.
 //
-// Both operations are idempotent (they act on the CURRENT directory state,
-// never on a recorded list), so a second interruption during recovery is
-// recovered by running the same command again.
+// Both operations act on the CURRENT directory state, never on a recorded
+// list — but acting on the current state is only sound while the phase label
+// still describes it, and a RECOVERY changes which directory owns what. A
+// revert from `promoting` first parks the promoted entries back in staging
+// and then returns the previous entries from the bak dir: once the first
+// previous entry is back, the live dir holds PREVIOUS data under a journal
+// that still says "everything live was promoted", so a retry would try to
+// park that previous entry in staging — on top of the restored entry of the
+// same name — and refuse; switching to complete collided the same way (owner
+// review, PR #1528). The journal therefore also records, durably and BEFORE
+// the ownership change it describes:
+//
+//	recovery: revert | complete   the direction, once chosen (a later run
+//	                              with the other direction is REFUSED — the
+//	                              recorded one is always finishable, so
+//	                              refusing costs nothing but a re-run)
+//	progress: unpromoted          revert: every promoted entry is back in
+//	                              staging; the live dir holds PREVIOUS data
+//	          returned            revert: every previous entry is back live;
+//	                              only the bak rmdir + journal removal remain
+//	          promoted            commit/complete: every staged entry is
+//	                              live; only the staging rmdir + journal
+//	                              removal remain
+//
+// With those markers a second interruption at ANY point of a recovery is
+// resumed by running the same command again, and the resumed run skips the
+// sub-steps already marked done instead of re-deriving them from a layout
+// the phase label no longer describes.
+//
+// Missing recovery material is never read as finished work: a revert whose
+// bak dir is absent REFUSES (moving nothing, keeping the journal) unless the
+// `returned` marker proves the previous data is already live, and a complete
+// whose staging dir is absent refuses unless `promoted` proves the restored
+// data is already live. Before these markers a revert with a missing bak dir
+// parked the live (restored) data in staging, treated the absent bak as
+// "nothing to move", retired the journal and reported success over an EMPTY
+// live data dir with the boot guard disarmed (owner review, PR #1528).
 //
 // Recovery is EXPLICIT, never automatic: a journal present at boot refuses
 // the boot (checkInterruptedRestore) and names the exact command. Resuming
@@ -94,6 +128,16 @@ const (
 	restorePhaseEvacuating = "evacuating"
 	restorePhasePromoting  = "promoting"
 
+	// Recovery direction, recorded durably before the first move a recovery
+	// makes (see the file header).
+	restoreRecoveryRevert   = "revert"
+	restoreRecoveryComplete = "complete"
+
+	// Durable sub-step markers (see the file header).
+	restoreProgressUnpromoted = "unpromoted" // revert: promoted entries are back in staging
+	restoreProgressReturned   = "returned"   // revert: previous entries are back live
+	restoreProgressPromoted   = "promoted"   // commit/complete: staged entries are live
+
 	// dataDirLockName is the advisory lock the running proxy holds on its
 	// data directory; see restore_lock_unix.go.
 	dataDirLockName = ".culvert.lock"
@@ -111,6 +155,13 @@ type restoreJournal struct {
 	Mode       string    `json:"mode"`
 	StartedAt  time.Time `json:"started_at"`
 	UpdatedAt  time.Time `json:"updated_at"`
+	// Recovery is the direction a --recover-restore run committed to ("" until
+	// one has); Progress is the last durable sub-step marker. Both are
+	// additive (omitempty) so a journal written before they existed still
+	// reads, and a journal with an unknown value is refused like any other
+	// malformed one.
+	Recovery string `json:"recovery,omitempty"`
+	Progress string `json:"progress,omitempty"`
 }
 
 // isRestoreInternalEntry reports whether a TOP-LEVEL dataDir entry name is
@@ -163,6 +214,16 @@ func readRestoreJournal(dataDir string) (*restoreJournal, bool, error) {
 	}
 	if j.Phase != restorePhaseEvacuating && j.Phase != restorePhasePromoting {
 		return nil, true, fmt.Errorf("restore journal: unknown phase %q", j.Phase)
+	}
+	switch j.Recovery {
+	case "", restoreRecoveryRevert, restoreRecoveryComplete:
+	default:
+		return nil, true, fmt.Errorf("restore journal: unknown recovery direction %q", j.Recovery)
+	}
+	switch j.Progress {
+	case "", restoreProgressUnpromoted, restoreProgressReturned, restoreProgressPromoted:
+	default:
+		return nil, true, fmt.Errorf("restore journal: unknown progress marker %q", j.Progress)
 	}
 	if !strings.HasPrefix(j.StagingDir, restoreStagingPrefix) || !strings.HasPrefix(j.BakDir, restoreBakPrefix) ||
 		filepath.Base(j.StagingDir) != j.StagingDir || filepath.Base(j.BakDir) != j.BakDir {
@@ -235,9 +296,22 @@ func moveTopLevelEntries(src, dst string) (int, error) {
 			return moved, fmt.Errorf("rename %s → %s: %w", from, to, err)
 		}
 		moved++
+		// Test seam: a kill AFTER this rename landed and BEFORE the next one
+		// (the recovery gates interrupt un-promotion and the return of the
+		// previous entries at exact points; the layout left behind is what a
+		// real kill leaves).
+		if restoreMoveHook != nil {
+			if err := restoreMoveHook(from, to); err != nil {
+				return moved, err
+			}
+		}
 	}
 	return moved, nil
 }
+
+// restoreMoveHook is called after every successful rename moveTopLevelEntries
+// performs; a non-nil error aborts the move loop at that point. Tests only.
+var restoreMoveHook func(from, to string) error
 
 // nestedMountPointsUnder returns mount points strictly below dir (Linux
 // /proc/self/mountinfo; empty elsewhere). An entry of dataDir that is itself
@@ -320,6 +394,14 @@ func swapInPlace(dataDir, stagingDir, bakDir string, j *restoreJournal) error {
 	if _, err := moveTopLevelEntries(stagingDir, dataDir); err != nil {
 		return fmt.Errorf("promote staged data: %w (interrupted restore — run --recover-restore)", err)
 	}
+	// Durable "every staged entry is live" marker BEFORE the staging dir is
+	// removed: a kill between that rmdir and the journal removal must be
+	// completable, and a missing staging dir on its own must not be read as
+	// proof of that (the operator may have deleted it with content).
+	j.Progress = restoreProgressPromoted
+	if err := writeRestoreJournal(dataDir, j); err != nil {
+		return fmt.Errorf("%w (interrupted restore — run --recover-restore)", err)
+	}
 	if err := os.Remove(stagingDir); err != nil {
 		// Staging must be empty now; anything else is a bug worth surfacing,
 		// but the data has landed, so finish the journal rather than
@@ -365,6 +447,11 @@ func runRecoverRestore(dataDir string, action restoreRecoverAction, out io.Write
 	_, _ = fmt.Fprintf(out, "Interrupted restore detected in %s\n", dataDir)
 	_, _ = fmt.Fprintf(out, "  Started:        %s   (mode %s)\n", j.StartedAt.UTC().Format(time.RFC3339), j.Mode)
 	_, _ = fmt.Fprintf(out, "  Phase:          %s\n", j.Phase)
+	if j.Recovery != "" {
+		_, _ = fmt.Fprintf(out, "  Recovery:       %s in progress (progress: %s) — only --confirm=%s is accepted\n", j.Recovery, orNone(j.Progress), j.Recovery)
+	} else if j.Progress != "" {
+		_, _ = fmt.Fprintf(out, "  Progress:       %s\n", j.Progress)
+	}
 	_, _ = fmt.Fprintf(out, "  Previous data:  %s   (%d top-level entries)\n", bakDir, len(backed))
 	_, _ = fmt.Fprintf(out, "  Staged restore: %s   (%d top-level entries)\n", stagingDir, len(staged))
 	_, _ = fmt.Fprintf(out, "  Live data dir:  %d top-level user entries\n", len(live))
@@ -384,38 +471,87 @@ func runRecoverRestore(dataDir string, action restoreRecoverAction, out io.Write
 	}
 }
 
-// moveTopLevelEntriesIfPresent is moveTopLevelEntries for the RECOVERY
-// paths, where an absent source directory is a valid current state (a bak
-// dir the operator removed, a staging dir promotion already emptied and
-// removed): nothing to move, not an error. The commit path keeps the strict
-// form — there, a missing dir is a bug.
-func moveTopLevelEntriesIfPresent(src, dst string) (int, error) {
-	if _, err := os.Lstat(src); os.IsNotExist(err) {
-		return 0, nil
+// commitRecoveryDirection records the operator's direction DURABLY before the
+// first move a recovery makes, and refuses a different direction once one is
+// recorded: the recorded direction is always finishable (every remaining move
+// is collision-free by construction), so refusing the switch costs the
+// operator a re-run of the recorded command and nothing else, whereas honouring
+// it would act on a layout the phase label no longer describes.
+func commitRecoveryDirection(dataDir string, j *restoreJournal, want string) error {
+	if j.Recovery == want {
+		return nil
 	}
-	return moveTopLevelEntries(src, dst)
+	if j.Recovery != "" {
+		return fmt.Errorf("a %s recovery is already in progress (progress: %s); it cannot be switched to %s — finish it with --recover-restore --confirm=%s, then run a fresh restore if the other outcome is wanted",
+			j.Recovery, orNone(j.Progress), want, j.Recovery)
+	}
+	j.Recovery = want
+	return writeRestoreJournal(dataDir, j)
 }
 
+func orNone(s string) string {
+	if s == "" {
+		return "none"
+	}
+	return s
+}
+
+// errRecoveryMaterialMissing is returned when a recovery direction needs a
+// directory that is absent and no durable marker proves its content has
+// already been moved: refuse, move nothing, keep the journal.
+var errRecoveryMaterialMissing = errors.New("recovery material is missing")
+
 func recoverRevert(dataDir, stagingDir, bakDir string, j *restoreJournal, out io.Writer) error {
-	if j.Phase == restorePhasePromoting {
-		// Everything live was promoted from staging; put it back there so
-		// the bak entries can return without collisions.
-		if _, err := os.Lstat(stagingDir); os.IsNotExist(err) {
-			if err := os.Mkdir(stagingDir, 0o700); err != nil {
-				return fmt.Errorf("recreate staging dir: %w", err)
+	if err := commitRecoveryDirection(dataDir, j, restoreRecoveryRevert); err != nil {
+		return fmt.Errorf("revert: %w", err)
+	}
+	if j.Progress != restoreProgressReturned {
+		// The previous data must be there to return. A missing bak dir is
+		// NOT "nothing to move" — the commit created it before the journal,
+		// so its absence means someone removed it, content and all — and
+		// nothing is moved before this check so the live dir is untouched.
+		if _, err := os.Lstat(bakDir); err != nil {
+			if os.IsNotExist(err) {
+				return fmt.Errorf("revert: %w: previous-data dir %s does not exist and no record says its content was returned; nothing was moved and the journal is kept. Put the directory back (from wherever it was moved) and re-run, or choose --confirm=complete if the RESTORED data should land instead; the journal is removed by hand only after inspecting the .restore-* directories",
+					errRecoveryMaterialMissing, bakDir)
+			}
+			return fmt.Errorf("revert: lstat %s: %w", bakDir, err)
+		}
+		if j.Phase == restorePhasePromoting && j.Progress != restoreProgressUnpromoted {
+			// Everything live was promoted from staging; put it back there
+			// so the previous entries can return without collisions. The
+			// staging dir may legitimately be gone (removed after the
+			// `promoted` marker); recreating it is safe because the entries
+			// parked into it are the restored ones the revert discards.
+			if _, err := os.Lstat(stagingDir); os.IsNotExist(err) {
+				if err := os.Mkdir(stagingDir, 0o700); err != nil {
+					return fmt.Errorf("recreate staging dir: %w", err)
+				}
+			}
+			n, err := moveTopLevelEntries(dataDir, stagingDir)
+			if err != nil {
+				return fmt.Errorf("revert: un-promote: %w (re-run the same command to resume)", err)
+			}
+			_, _ = fmt.Fprintf(out, "  Moved %d promoted entr%s back to staging\n", n, entries(n))
+			// From here the live dir holds PREVIOUS data only; a retry must
+			// never park it in staging again.
+			j.Progress = restoreProgressUnpromoted
+			if err := writeRestoreJournal(dataDir, j); err != nil {
+				return err
 			}
 		}
-		n, err := moveTopLevelEntries(dataDir, stagingDir)
+		n, err := moveTopLevelEntries(bakDir, dataDir)
 		if err != nil {
-			return fmt.Errorf("revert: un-promote: %w", err)
+			return fmt.Errorf("revert: restore previous data: %w (re-run the same command to resume)", err)
 		}
-		_, _ = fmt.Fprintf(out, "  Moved %d promoted entr%s back to staging\n", n, entries(n))
+		_, _ = fmt.Fprintf(out, "  Moved %d previous entr%s back into %s\n", n, entries(n), dataDir)
+		j.Progress = restoreProgressReturned
+		if err := writeRestoreJournal(dataDir, j); err != nil {
+			return err
+		}
+	} else {
+		_, _ = fmt.Fprintf(out, "  Previous data was already returned (recorded); nothing left to move\n")
 	}
-	n, err := moveTopLevelEntriesIfPresent(bakDir, dataDir)
-	if err != nil {
-		return fmt.Errorf("revert: restore previous data: %w", err)
-	}
-	_, _ = fmt.Fprintf(out, "  Moved %d previous entr%s back into %s\n", n, entries(n), dataDir)
 	if err := os.Remove(bakDir); err != nil && !os.IsNotExist(err) {
 		_, _ = fmt.Fprintf(out, "  WARN: previous-data dir %s not empty after revert: %v\n", bakDir, err)
 	}
@@ -429,13 +565,16 @@ func recoverRevert(dataDir, stagingDir, bakDir string, j *restoreJournal, out io
 }
 
 func recoverComplete(dataDir, stagingDir, bakDir string, j *restoreJournal, out io.Writer) error {
+	if err := commitRecoveryDirection(dataDir, j, restoreRecoveryComplete); err != nil {
+		return fmt.Errorf("complete: %w", err)
+	}
 	if j.Phase == restorePhaseEvacuating {
 		if err := os.MkdirAll(bakDir, 0o700); err != nil {
 			return fmt.Errorf("complete: previous-data dir: %w", err)
 		}
 		n, err := moveTopLevelEntries(dataDir, bakDir)
 		if err != nil {
-			return fmt.Errorf("complete: finish evacuating: %w", err)
+			return fmt.Errorf("complete: finish evacuating: %w (re-run the same command to resume)", err)
 		}
 		_, _ = fmt.Fprintf(out, "  Moved %d remaining previous entr%s aside\n", n, entries(n))
 		j.Phase = restorePhasePromoting
@@ -443,29 +582,42 @@ func recoverComplete(dataDir, stagingDir, bakDir string, j *restoreJournal, out 
 			return err
 		}
 	}
-	// swapInPlace removes the (empty) staging dir BEFORE it retires the
-	// journal, so a kill between those two steps leaves a `promoting` journal
-	// with every restored entry already live and no staging dir at all. That
-	// is a supported interruption point: completing it means retiring the
-	// journal, never failing on the missing directory (Codex review, PR #1528).
-	if _, serr := os.Lstat(stagingDir); os.IsNotExist(serr) {
-		_, _ = fmt.Fprintf(out, "  Staged data was already fully promoted (staging dir gone); nothing left to move\n")
+	if j.Progress == restoreProgressPromoted {
+		// swapInPlace (or an earlier complete) recorded that every staged
+		// entry is live before removing the staging dir; a kill between that
+		// rmdir and the journal removal is finished by retiring the journal.
+		_, _ = fmt.Fprintf(out, "  Staged data was already fully promoted (recorded); nothing left to move\n")
 	} else {
+		if _, err := os.Lstat(stagingDir); err != nil {
+			if os.IsNotExist(err) {
+				return fmt.Errorf("complete: %w: staging dir %s does not exist and no record says its content was promoted; nothing was moved and the journal is kept. Put the directory back and re-run, or choose --confirm=revert to bring the previous data back; the journal is removed by hand only after inspecting the .restore-* directories",
+					errRecoveryMaterialMissing, stagingDir)
+			}
+			return fmt.Errorf("complete: lstat %s: %w", stagingDir, err)
+		}
 		n, err := moveTopLevelEntries(stagingDir, dataDir)
 		if err != nil {
-			return fmt.Errorf("complete: promote staged data: %w", err)
+			return fmt.Errorf("complete: promote staged data: %w (re-run the same command to resume)", err)
 		}
 		_, _ = fmt.Fprintf(out, "  Promoted %d staged entr%s into %s\n", n, entries(n), dataDir)
-		if err := os.Remove(stagingDir); err != nil && !os.IsNotExist(err) {
-			_, _ = fmt.Fprintf(out, "  WARN: staging dir %s not empty after promotion: %v\n", stagingDir, err)
+		j.Progress = restoreProgressPromoted
+		if err := writeRestoreJournal(dataDir, j); err != nil {
+			return err
 		}
+	}
+	if err := os.Remove(stagingDir); err != nil && !os.IsNotExist(err) {
+		_, _ = fmt.Fprintf(out, "  WARN: staging dir %s not empty after promotion: %v\n", stagingDir, err)
 	}
 	if err := removeRestoreJournal(dataDir); err != nil {
 		return err
 	}
 	_, _ = fmt.Fprintf(out, "\nRestore COMPLETED. Restored data is live.\n")
-	_, _ = fmt.Fprintf(out, "  Previous data preserved at %s (never auto-deleted);\n", bakDir)
-	_, _ = fmt.Fprintf(out, "  remove it with --cleanup-restore-leftovers --confirm when no longer needed.\n")
+	if _, err := os.Lstat(bakDir); err == nil {
+		_, _ = fmt.Fprintf(out, "  Previous data preserved at %s (never auto-deleted);\n", bakDir)
+		_, _ = fmt.Fprintf(out, "  remove it with --cleanup-restore-leftovers --confirm when no longer needed.\n")
+	} else {
+		_, _ = fmt.Fprintf(out, "  NOTE: the previous-data dir %s is absent — the previous data was not preserved by this recovery.\n", bakDir)
+	}
 	return nil
 }
 
