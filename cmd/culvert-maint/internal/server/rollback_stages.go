@@ -33,6 +33,7 @@ import (
 	"fmt"
 	"strings"
 
+	"culvert-maint/internal/health"
 	"culvert-maint/internal/journal"
 	"culvert-maint/internal/ops"
 )
@@ -62,6 +63,7 @@ type rollbackAccumulator struct {
 	// baseline. Checked REPORT-ONLY: a rollback restores service and must
 	// not be failed by a row the operator still needs to look at.
 	preserved []string
+	before    *health.Snapshot
 
 	opID  string
 	kind  string
@@ -159,7 +161,7 @@ func (s *Server) imageRollbackStages(targetRefFn func() string, acc *rollbackAcc
 			FailureReason: ops.ReasonHealthFailed,
 			Run: func(ctx context.Context) ([]byte, []byte, error) {
 				probe := s.opts.HealthProbeFactory()
-				probe.Preserve, probe.PreserveReportOnly = acc.preserved, true
+				probe.Preserve, probe.PreserveReportOnly, probe.Before = acc.preserved, true, acc.before
 				hr, herr := probe.Run(ctx)
 				if herr != nil {
 					return nil, nil, herr

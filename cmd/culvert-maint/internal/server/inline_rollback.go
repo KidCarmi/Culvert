@@ -112,7 +112,7 @@ func (s *Server) guardInlineRollback(acc *upgradeApplyAccumulator, racc *rollbac
 		if !acc.rollbackAttempted {
 			acc.rollbackAttempted = true
 			racc.opID = acc.opID
-			racc.preserved = acc.preserved // set by capture_before, after build
+			racc.preserved, racc.before = acc.preserved, acc.before // set by capture_before, after build
 			s.emitRollbackAudit(acc, audit.OutcomeStarted, "")
 		}
 		out, errout, err := inner(ctx)

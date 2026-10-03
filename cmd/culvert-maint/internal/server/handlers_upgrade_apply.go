@@ -47,6 +47,7 @@ import (
 	"time"
 
 	"culvert-maint/internal/auth"
+	"culvert-maint/internal/health"
 	"culvert-maint/internal/journal"
 	"culvert-maint/internal/ops"
 	"culvert-maint/internal/runner"
@@ -180,6 +181,7 @@ type upgradeApplyAccumulator struct {
 	// /ready rows that were "ok" and must be "ok" again for health_gate
 	// to pass (owner review, PR #1528). Empty ⇒ 2xx alone gates.
 	preserved      []string
+	before         *health.Snapshot // the full pre-restart /ready answer (nil: stack did not answer)
 	baselineDetail string
 
 	// Inline auto-rollback state (#375). Set/read across stages + the
@@ -213,25 +215,7 @@ func (s *Server) buildUpgradeApplyStages(acc *upgradeApplyAccumulator, racc *rol
 			// derive the inline-rollback target (priorRef) here.
 			Name:          "capture_before",
 			FailureReason: ops.ReasonCommandError,
-			Run: func(ctx context.Context) ([]byte, []byte, error) {
-				ri, err := s.opts.Runner.CaptureRunningProxyImage(ctx)
-				if err != nil {
-					acc.priorCaptureReason = "no_prior_digest"
-					// Capture step done (no prior to record); advance the journal.
-					s.advanceJournalPhaseBestEffort(acc, journal.PhaseCaptured)
-					return []byte("capture_before: no running proxy captured (" + errString(err) + ")"), nil, nil
-				}
-				acc.priorImageID = ri.RunningImageID
-				acc.priorDigests = bareDigests(ri.RepoDigests)
-				s.deriveRollbackTarget(acc, ri.PriorRef())
-				// What the running stack reports as healthy now is what the
-				// upgrade must preserve. Best-effort: no answer ⇒ nothing to keep.
-				acc.preserved, acc.baselineDetail = s.opts.HealthProbeFactory().Baseline(ctx)
-				// Prior (rollback target) now known — fold it into the journal record.
-				s.advanceJournalPhaseBestEffort(acc, journal.PhaseCaptured)
-				return []byte(fmt.Sprintf("capture_before: running_image_id=%s prior_digests=%s prior_ref=%q rollback_target=%s %s",
-					ri.RunningImageID, joinDigests(acc.priorDigests), acc.priorRef, rollbackTargetNote(acc), acc.baselineDetail)), nil, nil
-			},
+			Run:           s.captureBefore(acc),
 		},
 		{
 			// Remote registry lookup → target digest set, then PIN a
@@ -347,7 +331,7 @@ func (s *Server) buildUpgradeApplyStages(acc *upgradeApplyAccumulator, racc *rol
 			FailureReason: ops.ReasonHealthFailed,
 			Run: skipIfCurrent(acc, "health_gate", func(ctx context.Context) ([]byte, []byte, error) {
 				probe := s.opts.HealthProbeFactory()
-				probe.Preserve = acc.preserved
+				probe.Preserve, probe.Before = acc.preserved, acc.before
 				hr, herr := probe.Run(ctx)
 				if herr != nil {
 					acc.upgradeFailedPostRestart = true
@@ -398,6 +382,35 @@ func (s *Server) buildUpgradeApplyStages(acc *upgradeApplyAccumulator, racc *rol
 		},
 	})
 	return stages
+}
+
+// captureBefore records what is ACTUALLY running before anything is
+// touched, the inline-rollback target, and the /ready baseline the
+// health gate must preserve. A capture failure (stack down / fresh
+// deploy) is a valid state, not an op failure.
+func (s *Server) captureBefore(acc *upgradeApplyAccumulator) stageRun {
+	return func(ctx context.Context) ([]byte, []byte, error) {
+		ri, err := s.opts.Runner.CaptureRunningProxyImage(ctx)
+		if err != nil {
+			acc.priorCaptureReason = "no_prior_digest"
+			// Capture step done (no prior to record); advance the journal.
+			s.advanceJournalPhaseBestEffort(acc, journal.PhaseCaptured)
+			return []byte("capture_before: no running proxy captured (" + errString(err) + ")"), nil, nil
+		}
+		acc.priorImageID = ri.RunningImageID
+		acc.priorDigests = bareDigests(ri.RepoDigests)
+		s.deriveRollbackTarget(acc, ri.PriorRef())
+		// What the running stack reports as healthy now is what the
+		// upgrade must preserve. Best-effort: no answer ⇒ nothing to keep.
+		acc.before, acc.baselineDetail = s.opts.HealthProbeFactory().Baseline(ctx)
+		if acc.before != nil {
+			acc.preserved = acc.before.Preserved
+		}
+		// Prior (rollback target) now known — fold it into the journal record.
+		s.advanceJournalPhaseBestEffort(acc, journal.PhaseCaptured)
+		return []byte(fmt.Sprintf("capture_before: running_image_id=%s prior_digests=%s prior_ref=%q rollback_target=%s %s",
+			ri.RunningImageID, joinDigests(acc.priorDigests), acc.priorRef, rollbackTargetNote(acc), acc.baselineDetail)), nil, nil
+	}
 }
 
 // skipIfCurrent wraps a stage Run so it no-ops (success) when the running

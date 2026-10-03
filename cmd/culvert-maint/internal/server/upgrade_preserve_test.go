@@ -67,3 +67,57 @@ func TestUpgradeApply_RowsNotOKBeforeAreNotRequired(t *testing.T) {
 		t.Fatalf("a row that was already failing must not be required: %+v", op)
 	}
 }
+
+// A ClamAV sidecar that was already down gates /ready (503) before AND
+// after the restart. The upgrade did not cause it and a rollback would not
+// fix it, so it must succeed — not fail health_gate and then fail the
+// rollback's health check the same way.
+func TestUpgradeApply_PreexistingGatingFailureDoesNotRollBack(t *testing.T) {
+	rig := startApplyRig(t)
+	defer rig.stop()
+	rig.readyBodies = map[string]string{digOld: readyExternalDegrad, digNew: readyExternalDegrad}
+	rig.readyStatuses = map[string]int{digOld: 503, digNew: 503}
+
+	op, opID := rig.acceptAndWait(t, map[string]interface{}{"image_ref": repo + "@sha256:" + digNew})
+	if op["state"] != "succeeded" {
+		t.Fatalf("a failure that predates the upgrade must be tolerated: %+v\n%s", op, rig.opLog(t, opID))
+	}
+	if log := rig.opLog(t, opID); !strings.Contains(log, "tolerated: failing [clamav]") {
+		t.Errorf("op-log must say what was tolerated:\n%s", log)
+	}
+}
+
+// The defect direction: the same 503 that appears only AFTER the restart
+// is something the upgrade broke.
+func TestUpgradeApply_NewGatingFailureRollsBack(t *testing.T) {
+	rig := startApplyRig(t)
+	defer rig.stop()
+	rig.readyBodies = map[string]string{digOld: readyAllOK, digNew: readyExternalDegrad}
+	rig.readyStatuses = map[string]int{digNew: 503}
+
+	op, _ := rig.acceptAndWait(t, map[string]interface{}{"image_ref": repo + "@sha256:" + digNew})
+	if op["state"] != "failed" || op["failure_reason"] != "health_failed" {
+		t.Fatalf("a gating row that newly fails must fail the upgrade: %+v", op)
+	}
+}
+
+// The standalone image rollback takes the same baseline, so a host whose
+// /ready was already 503 (ClamAV down) can still be rolled back.
+func TestImageRollback_PreexistingGatingFailureIsTolerated(t *testing.T) {
+	rig := startApplyRig(t)
+	defer rig.stop()
+	rig.readyBodies = map[string]string{digOld: readyExternalDegrad, digNew: readyExternalDegrad}
+	rig.readyStatuses = map[string]int{digOld: 503, digNew: 503}
+
+	op, opID := rig.rollbackAndWait(t, map[string]interface{}{"mode": "image", "image_ref": repo + "@sha256:" + digNew})
+	if op["state"] != "succeeded" {
+		t.Fatalf("a rollback on a host already at 503 must be tolerated: %+v\n%s", op, rig.opLog(t, opID))
+	}
+	// CONTROL: from a 2xx host, a rollback target that answers 503 fails.
+	rig2 := startApplyRig(t)
+	defer rig2.stop()
+	rig2.readyStatuses = map[string]int{digNew: 503}
+	if op2, _ := rig2.rollbackAndWait(t, map[string]interface{}{"mode": "image", "image_ref": repo + "@sha256:" + digNew}); op2["state"] != "failed" {
+		t.Fatalf("a rollback that turns a 2xx host into 503 must fail: %+v", op2)
+	}
+}

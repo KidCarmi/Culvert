@@ -32,7 +32,12 @@
 //     half-configured appliance upgrades exactly as before. The list is
 //     deliberately LOCAL state only — never a row that depends on an
 //     external service (clamav, cp_poll, threat feeds, DNS), because a
-//     dependency outage during an upgrade must not roll it back.
+//     dependency outage during an upgrade must not roll it back. For the
+//     same reason a non-2xx /ready is TOLERATED when /ready was already
+//     non-2xx in the baseline AND no row that was "ok" then is failing
+//     now: a ClamAV sidecar that was down before the upgrade gates /ready,
+//     but it is not something the upgrade broke or a rollback would fix.
+//     A /ready that was 2xx before must be 2xx after.
 //
 // The probe is intentionally simple — no exponential backoff, no
 // connection pooling, no caching. Each HTTP request is a fresh
@@ -58,6 +63,14 @@ import (
 // The proxy pins that it emits these names
 // (TestReadiness_AgentPreservedRowsExist in the root module).
 var PreservedReadyChecks = []string{"setup_complete", "session_secret", "ca", "policy_loaded", "policy_posture"}
+
+// Snapshot is one parsed /ready answer taken before a restart.
+type Snapshot struct {
+	Ready     bool     // /ready answered 2xx
+	OK        []string // every row reading "ok" (sorted)
+	Preserved []string // the PreservedReadyChecks among OK
+	Detail    string   // op-log summary
+}
 
 // maxReadyBody bounds how much of a /ready body is read for row parsing.
 const maxReadyBody = 64 << 10
@@ -105,6 +118,11 @@ type Probe struct {
 	// PreserveReportOnly records regressions in Result.Regressed without
 	// gating on them (rollback: restoring service must not fail on it).
 	PreserveReportOnly bool
+	// Before is the pre-restart Baseline. When it saw a non-2xx /ready,
+	// a non-2xx answer now counts as ready provided no row in Before.OK
+	// is failing (or missing) — nothing that worked broke. nil ⇒ a
+	// non-2xx always fails, the historical contract.
+	Before *Snapshot
 
 	// Budget is the total wall-clock budget for the probe (default 30s).
 	Budget time.Duration
@@ -178,13 +196,7 @@ func (p Probe) Run(ctx context.Context) (*Result, error) {
 	for {
 		attempts++
 		ok, detail, body := probeOnce(ctx, client, readyURL, p.RequestTimeout)
-		if ok && len(p.Preserve) > 0 {
-			res.Regressed = regressedRows(body, p.Preserve)
-			if len(res.Regressed) > 0 && !p.PreserveReportOnly {
-				ok = false
-				detail = "preserved_check_regressed: " + strings.Join(res.Regressed, ",")
-			}
-		}
+		ok, detail = p.judgeReady(res, ok, detail, body)
 		if ok {
 			res.ReadyOK = true
 			res.ReadyDetail = fmt.Sprintf("%s after %d attempt(s) in %s", detail, attempts, time.Since(start).Truncate(time.Millisecond))
@@ -215,12 +227,31 @@ func (p Probe) Run(ctx context.Context) (*Result, error) {
 	return res, nil
 }
 
-// Baseline reads /ready ONCE and returns which PreservedReadyChecks are
-// "ok" right now (sorted), whatever the HTTP status: a 503 body still
-// carries the rows. A stack that does not answer, or answers without the
-// row map, yields nil — nothing is required afterwards — and a detail
-// saying why, for the op log.
-func (p Probe) Baseline(ctx context.Context) (preserved []string, detail string) {
+// judgeReady applies the baseline to one /ready answer: a non-2xx is
+// tolerated when /ready was already non-2xx before and nothing that was
+// ok then is failing now, and a 2xx whose preserved rows regressed is not
+// ready (unless report-only).
+func (p Probe) judgeReady(res *Result, ok bool, detail string, body []byte) (ready bool, why string) {
+	if !ok && p.Before != nil && !p.Before.Ready {
+		if failing, parsed := failingRows(body); parsed && len(failing) > 0 && len(regressedRows(body, p.Before.OK)) == 0 {
+			ok = true
+			detail += " tolerated: failing [" + strings.Join(failing, ",") + "]; /ready was already non-2xx and no row that was ok broke"
+		}
+	}
+	if ok && len(p.Preserve) > 0 {
+		res.Regressed = regressedRows(body, p.Preserve)
+		if len(res.Regressed) > 0 && !p.PreserveReportOnly {
+			return false, "preserved_check_regressed: " + strings.Join(res.Regressed, ",")
+		}
+	}
+	return ok, detail
+}
+
+// Baseline reads /ready ONCE, whatever the HTTP status (a 503 body still
+// carries the rows). A stack that does not answer, or answers without the
+// row map, yields nil — nothing is preserved or tolerated afterwards —
+// with the reason in the returned detail for the op log.
+func (p Probe) Baseline(ctx context.Context) (snapshot *Snapshot, detail string) {
 	if err := p.Validate(); err != nil {
 		return nil, "baseline: " + err.Error()
 	}
@@ -229,17 +260,44 @@ func (p Probe) Baseline(ctx context.Context) (preserved []string, detail string)
 	if client == nil {
 		client = &http.Client{Timeout: p.RequestTimeout}
 	}
-	_, d, body := probeOnce(ctx, client, joinURL(p.BaseURL, p.ReadyPath), p.RequestTimeout)
-	rows, ok := readyRows(body)
-	if !ok {
+	ok, d, body := probeOnce(ctx, client, joinURL(p.BaseURL, p.ReadyPath), p.RequestTimeout)
+	rows, parsed := readyRows(body)
+	if !parsed {
 		return nil, "baseline: no readiness rows (" + d + ")"
 	}
-	for _, name := range PreservedReadyChecks {
-		if rows[name] == "ok" {
-			preserved = append(preserved, name)
+	snap := &Snapshot{Ready: ok}
+	for k, v := range rows {
+		if v == "ok" {
+			snap.OK = append(snap.OK, k)
 		}
 	}
-	return preserved, fmt.Sprintf("baseline: %s preserved=[%s]", d, strings.Join(preserved, ","))
+	sort.Strings(snap.OK)
+	for _, name := range PreservedReadyChecks {
+		if rows[name] == "ok" {
+			snap.Preserved = append(snap.Preserved, name)
+		}
+	}
+	failing, _ := failingRows(body)
+	snap.Detail = fmt.Sprintf("baseline: %s preserved=[%s] failing=[%s]",
+		d, strings.Join(snap.Preserved, ","), strings.Join(failing, ","))
+	return snap, snap.Detail
+}
+
+// failingRows returns the rows whose status is not "ok" (sorted), and
+// whether the body carried a row map at all.
+func failingRows(body []byte) ([]string, bool) {
+	rows, ok := readyRows(body)
+	if !ok {
+		return nil, false
+	}
+	var out []string
+	for k, v := range rows {
+		if v != "ok" {
+			out = append(out, k)
+		}
+	}
+	sort.Strings(out)
+	return out, true
 }
 
 // readyRows parses the proxy's /ready body ({"checks":{name:{"status"}}}).

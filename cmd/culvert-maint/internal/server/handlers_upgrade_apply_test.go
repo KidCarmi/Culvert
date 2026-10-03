@@ -68,6 +68,9 @@ type applyRig struct {
 	// readyBodies: the /ready body served while the keyed bare digest is
 	// running. nil/absent ⇒ the plain "ok" body (no rows).
 	readyBodies map[string]string
+	// readyStatuses: the /ready status code while the keyed digest runs
+	// (absent ⇒ 200 unless healthFail/unhealthyDigests).
+	readyStatuses map[string]int
 	// noPriorDigest makes capture_before (before any pull) report an empty
 	// RepoDigests list → no valid rollback target.
 	noPriorDigest bool
@@ -419,6 +422,9 @@ func applyHealthClient(rig *applyRig) *http.Client {
 	return &http.Client{
 		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 			status := 200
+			if c, ok := rig.readyStatuses[rig.currentRunning()]; ok {
+				status = c
+			}
 			if rig.healthFail.Load() || rig.unhealthyDigests[rig.currentRunning()] {
 				status = 503
 			}

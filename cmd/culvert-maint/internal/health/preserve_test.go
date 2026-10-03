@@ -70,9 +70,12 @@ func TestBaseline_RecordsOnlyPreservedRowsThatAreOK(t *testing.T) {
 		})))
 	}))
 	defer srv.Close()
-	got, detail := fastProbe(t, srv.URL).Baseline(context.Background())
-	if strings.Join(got, ",") != "setup_complete,session_secret,policy_posture" {
-		t.Fatalf("baseline = %v (%s); want only preserved rows that are ok, never external rows like clamav", got, detail)
+	snap, detail := fastProbe(t, srv.URL).Baseline(context.Background())
+	if snap == nil || strings.Join(snap.Preserved, ",") != "setup_complete,session_secret,policy_posture" {
+		t.Fatalf("baseline = %+v (%s); want only preserved rows that are ok, never external rows like clamav", snap, detail)
+	}
+	if snap.Ready || strings.Join(snap.OK, ",") != "clamav,policy_posture,session_secret,setup_complete" || !strings.Contains(detail, "failing=[ca]") {
+		t.Fatalf("snapshot = %+v (%s)", snap, detail)
 	}
 }
 
@@ -80,9 +83,9 @@ func TestBaseline_StackDownRequiresNothing(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 	u := srv.URL
 	srv.Close()
-	got, detail := fastProbe(t, u).Baseline(context.Background())
-	if got != nil || !strings.Contains(detail, "no readiness rows") {
-		t.Fatalf("a stack that does not answer must yield an empty baseline: %v %q", got, detail)
+	snap, detail := fastProbe(t, u).Baseline(context.Background())
+	if snap != nil || !strings.Contains(detail, "no readiness rows") {
+		t.Fatalf("a stack that does not answer must yield an empty baseline: %v %q", snap, detail)
 	}
 }
 
@@ -144,5 +147,40 @@ func TestRun_ReportOnlyRecordsWithoutGating(t *testing.T) {
 	res, err := p.Run(context.Background())
 	if err != nil || res.Failed() || strings.Join(res.Regressed, ",") != "ca" {
 		t.Fatalf("report-only must pass and record the regression: %+v %v", res, err)
+	}
+}
+
+// A gating row that was already failing before the restart (a ClamAV
+// sidecar that was down) answers 503 after it too; that is not something
+// the upgrade broke, so it must not fail the gate and roll back.
+func TestRun_ToleratesA503ThatPredatesTheRestart(t *testing.T) {
+	body := readyBody(map[string]string{"clamav": "fail", "setup_complete": "ok", "policy_posture": "fail"})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte(body))
+	}))
+	defer srv.Close()
+	p := fastProbe(t, srv.URL)
+	// A NEW row (policy_posture, absent before) may fail: it did not break.
+	p.Preserve, p.Before = []string{"setup_complete"}, &Snapshot{Ready: false, OK: []string{"setup_complete"}}
+	if res, err := p.Run(context.Background()); err != nil || res.Failed() || !strings.Contains(res.ReadyDetail, "tolerated: failing [clamav,policy_posture]") {
+		t.Fatalf("a 503 that predates the restart must be tolerated: %+v %v", res, err)
+	}
+	// The defect direction: a row that WAS ok and now fails is never tolerated.
+	p.Before = &Snapshot{Ready: false, OK: []string{"setup_complete", "session_secret"}}
+	body = readyBody(map[string]string{"clamav": "fail", "session_secret": "fail", "setup_complete": "ok"})
+	if res, _ := p.Run(context.Background()); !res.Failed() {
+		t.Fatalf("a row that was ok and now fails must fail the gate: %+v", res)
+	}
+	// /ready was 2xx before ⇒ it must be 2xx after, whatever the rows say.
+	p.Before = &Snapshot{Ready: true, OK: []string{"setup_complete"}}
+	body = readyBody(map[string]string{"clamav": "fail", "setup_complete": "ok"})
+	if res, _ := p.Run(context.Background()); !res.Failed() {
+		t.Fatalf("a /ready that was 2xx before must be 2xx after: %+v", res)
+	}
+	// CONTROL: without a baseline a 503 fails exactly as before.
+	p.Before = nil
+	if res, _ := p.Run(context.Background()); !res.Failed() {
+		t.Fatalf("no baseline ⇒ non-2xx must fail: %+v", res)
 	}
 }

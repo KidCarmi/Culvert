@@ -23,7 +23,7 @@ op `health_failed` and rolls the prior image back:
 | Condition | How it is checked |
 |-----------|-------------------|
 | the intended release is what runs | `verify`: the running container's RepoDigests include the pinned `repo@sha256` (hard check) |
-| the process serves and its config loaded | `health_gate`: `/ready` answers 2xx within 30 s (a config that does not load is fatal at boot) |
+| the process serves and its config loaded | `health_gate`: `/ready` answers within 30 s with 2xx — or, only when `/ready` was ALREADY non-2xx before the restart, with 503 provided no row that was `ok` then is failing now (e.g. a ClamAV sidecar that was down: nothing the upgrade broke, nothing a rollback would fix). A `/ready` that was 2xx before must be 2xx after. A config that does not load is fatal at boot, so the process never answers |
 | nothing that worked before broke | `health_gate`: every `/ready` row among `setup_complete`, `session_secret`, `ca`, `policy_loaded`, `policy_posture` that was `ok` BEFORE the restart (read by `capture_before`) is `ok` again; a missing row counts as regressed |
 
 The preserved set is local state only — admin setup and session signing,

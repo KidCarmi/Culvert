@@ -144,8 +144,15 @@ func (s *Server) buildImageRollbackStages(targetRef string, acc *rollbackAccumul
 				if pr := ri.PriorRef(); rollbackDigestRefRE.MatchString(pr) {
 					acc.priorRef = pr
 				}
+				// Same baseline as apply: a /ready that was already non-2xx
+				// is tolerated if nothing that was ok breaks; preserved rows
+				// are reported (rollback_health is report-only on them).
+				var detail string
+				if acc.before, detail = s.opts.HealthProbeFactory().Baseline(ctx); acc.before != nil {
+					acc.preserved = acc.before.Preserved
+				}
 				s.rollbackAdvancePhase(acc, journal.PhaseCaptured)
-				return []byte("capture_before: prior_digests=" + joinDigests(acc.priorDigests)), nil, nil
+				return []byte("capture_before: prior_digests=" + joinDigests(acc.priorDigests) + " " + detail), nil, nil
 			},
 		},
 	}
