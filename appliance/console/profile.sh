@@ -4,7 +4,7 @@
 case $- in
   *i*)
     if [ "$(id -un)" = culvert ] && [ "$(tty 2>/dev/null)" = /dev/tty1 ]; then
-      /usr/bin/python3 -I /opt/culvert-appliance/console/launch.py --admin
+      /opt/culvert-appliance/bin/culvert-console --admin
       exit
     fi
     ;;

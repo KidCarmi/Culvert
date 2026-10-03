@@ -4,11 +4,19 @@ on:
   pull_request:
     paths:
       - 'appliance/console/**'
+      - 'cmd/culvert-console/**'
+      - 'internal/applianceconsole/**'
+      - 'go.mod'
+      - 'go.sum'
       - '.github/workflows/appliance-console.yml'
   push:
     branches: [feat/appliance-console]
     paths:
       - 'appliance/console/**'
+      - 'cmd/culvert-console/**'
+      - 'internal/applianceconsole/**'
+      - 'go.mod'
+      - 'go.sum'
       - '.github/workflows/appliance-console.yml'
   workflow_dispatch:
 
@@ -18,15 +26,28 @@ permissions:
 jobs:
   console:
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Console state, display and authentication boundary tests
-        run: python3 -m unittest discover -s appliance/console -p 'test_*.py' -v
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Console state, display, process and authentication boundary tests
+        run: |
+          go test -race -shuffle=on -count=2 ./internal/applianceconsole ./cmd/culvert-console
+          go vet ./internal/applianceconsole ./cmd/culvert-console
+      - name: Build static host binary with the repository compiler
+        run: |
+          CGO_ENABLED=0 go build -trimpath -o appliance/console/culvert-console ./cmd/culvert-console
+          expected=$(awk '$1 == "toolchain" { print $2 }' go.mod)
+          actual=$(go version -m appliance/console/culvert-console | head -1 | awk '{print $2}')
+          test "$actual" = "$expected"
       - name: Syntax and degraded-host smoke
         run: |
           bash -n appliance/console/install.sh
           bash -n appliance/console/profile.sh
-          python3 -I appliance/console/launch.py --json | python3 -m json.tool
+          appliance/console/culvert-console --json
+          appliance/console/culvert-console --text

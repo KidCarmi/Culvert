@@ -1,7 +1,7 @@
 # Culvert boot console — first implementation slice
 
 This additive component provides an ESXi-style local console after power-on.
-It is a host Python application (standard library and Ubuntu's curses support),
+It is a static Go host binary built with the root `go.mod` toolchain,
 independent of Docker and the Culvert application. There is no new network
 listener. The displayed application URL remains `https://<address>:9090` and is
 explicitly labelled unavailable until the application starts.
@@ -22,15 +22,26 @@ session with `sudo passwd culvert`.
 
 ## Integration boundary with Opus
 
-Files are contained here to avoid conflicts with the ongoing firstboot/image
-fix. This slice does **not** modify `build-ova.sh`, `prepare-guest.sh`, firstboot,
+The Go command lives in `cmd/culvert-console`, with domain logic and white-box
+tests in `internal/applianceconsole`. Packaging files stay here to avoid
+conflicts with the ongoing firstboot/image fix. This slice does **not** modify
+`build-ova.sh`, `prepare-guest.sh`, firstboot,
 the network helper, the existing status CLI, or the application UI. It does not
 change the existing application readiness contract.
 
 Two build hooks are needed when this component is accepted:
 
 1. In `build-ova.sh`, beside the provision/os-maintenance overlay copy, copy
-   `appliance/console` to `$OV/opt/culvert-appliance/console`.
+   `appliance/console` to `$OV/opt/culvert-appliance/console`, then build from the
+   repository root using its pinned Go compiler:
+
+   ```bash
+   CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath \
+     -o "$OV/opt/culvert-appliance/console/culvert-console" ./cmd/culvert-console
+   ```
+
+   The executable must be copied with mode 0755. It is a build artifact and is
+   ignored by Git; no compiler or Python runtime is needed in the guest.
 2. In `prepare-guest.sh`, after the `culvert` account and existing helpers have
    been installed, run:
 
@@ -38,7 +49,7 @@ Two build hooks are needed when this component is accepted:
    bash /opt/culvert-appliance/console/install.sh
    ```
 
-The installer checks Python curses, PAM login, sudo and the account before
+The installer checks that the binary executes, PAM login, sudo and the account before
 installing the tty1 getty override and root-owned login profile hook. It does
 not restart a live console, add sudo rules, change the firewall or configure
 autologin. Normal tty2/serial/SSH login remains available. Do not add an ordering
@@ -69,8 +80,8 @@ sudo systemctl restart getty@tty1.service
 ## Shared status contract (schema version 1)
 
 ```bash
-python3 -I /opt/culvert-appliance/console/launch.py --json
-python3 -I /opt/culvert-appliance/console/launch.py --text
+/opt/culvert-appliance/bin/culvert-console --json
+/opt/culvert-appliance/bin/culvert-console --text
 ```
 
 These are read-only and never include a setup token, `.env`, raw journals or
@@ -86,7 +97,7 @@ No Docker API or command is required to render the display.
   deliberately evidence of a marker, not a fabricated current step or percentage.
 - `firstboot`: allowlisted systemd fields. A previous failure remains visible
   during automatic retry. An inactive incomplete unit is explicitly not running.
-- `administrator_enrolled`: true only on an explicit `needsSetup: false`.
+- `administrator_enrolled`: true only on HTTP 200 and an explicit `needsSetup: false`.
 - `ready`: requires application health HTTP 200, explicit enrollment, readiness
   HTTP 200 and `ok` for policy_loaded, policy_posture, ca and setup_complete.
   Missing rows are not success. This is a conservative console summary.
@@ -94,19 +105,54 @@ No Docker API or command is required to render the display.
   successfully passes through the proxy.
 
 Terminal text is restricted to printable ASCII so untrusted metadata cannot
-inject terminal controls. Imported code is restricted to the root-owned install
-directory with Python isolated mode. Public key presses can only refresh,
+inject terminal controls. The installed binary and hooks are root-owned.
+Public key presses can only refresh,
 view this sanitized status, or invoke `/bin/login culvert` without `-f`.
 Recovery actions additionally check the effective Unix identity, use fixed argv
-and existing sudo authorization. No password is captured by the Python program.
+and existing sudo authorization. No password is captured by the console program.
 Setup-token output stays on the authenticated terminal and is not a diagnostic
 export. The public root-owned process is a narrow getty/login wrapper, not an
 HTTP server and not an unauthenticated shell.
 
+## Package boundary design
+
+This records the new boundary required by `CLAUDE.md` and the package-isolation
+roadmap. `internal/applianceconsole` owns status interpretation, display layout,
+key-to-action policy and recovery guards. `NewCollector` and `NewActions` copy
+explicit dependencies into private fields. The package does not depend on the
+application's main package, singletons, Docker or a generic common service.
+
+`cmd/culvert-console` owns process startup, fixed production paths, signal
+cancellation, bounded subprocess probes, effective-identity checks, Linux
+terminal I/O and concrete command wiring. It uses the existing `x/sys/unix`
+dependency. No module dependencies are added. Terminal text is CLI output, not
+application logging; raw probe stderr and credential-bearing output never enter
+the public status snapshot.
+
+Collection is read-only: existing firstboot code owns marker persistence and
+the application owns enrollment/readiness. A collection call starts five bounded
+probes and joins them before returning. There are no detached background workers.
+The command owns cancellation; child processes use that context. Menu input uses
+bounded polling, never a background stdin reader that could consume a later
+PAM password. Terminal modes/cursor are restored before login, confirmation or
+recovery actions; those actions synchronously own input until they exit. systemd
+owns the getty process and its shutdown process group. The console adds no
+persistent mutable state or service listener.
+
+GUI parity scope: `--login` and `--admin` select getty/PAM process roles, while
+`--json` and `--text` serialize the same read-only host status. They introduce no
+application configuration knobs. This first slice is explicitly local recovery;
+host recovery API/UI and browser wizard parity remain follow-on work. Existing
+application setup continues at the displayed management URL. This is not a claim
+that the complete provisioning experience or its GUI parity has shipped.
+
 ## Tests and remaining work
 
 ```bash
-python3 -m unittest discover -s appliance/console -p 'test_*.py' -v
+go test -race -shuffle=on -count=2 ./internal/applianceconsole ./cmd/culvert-console
+go vet ./internal/applianceconsole ./cmd/culvert-console
+golangci-lint run ./internal/applianceconsole/... ./cmd/culvert-console/...
+CGO_ENABLED=0 go build -trimpath -o appliance/console/culvert-console ./cmd/culvert-console
 bash -n appliance/console/install.sh
 bash -n appliance/console/profile.sh
 ```
@@ -119,15 +165,16 @@ Real ESXi smoke results are recorded separately; unit tests do not establish
 PAM/getty/keyboard behavior. The incomplete ClamAV image remains a product
 failure even if the console handles it correctly.
 
-The [real ESXi smoke report](evidence/esxi-smoke.json) records the exact base OVA
+The [historical Python ESXi smoke report](evidence/esxi-smoke.json) records the exact base OVA
 and installed overlay hashes. All 26 tests passed in the Ubuntu guest; real
 VMware keyboard/PAM login, invalid-password refusal, logout, stopped-Docker
 operation and automatic console startup after reboot passed. The owned VM was
 deleted afterward. This is development-overlay evidence, not a rebuilt OVA.
-The console service reported about 14.1 MiB at one observation; this is not a
+These results and the image below apply only to the superseded Python prototype,
+not the Go implementation. The prototype service reported about 14.1 MiB at one observation; this is not a
 peak or whole-appliance resource qualification.
 
-![ESXi boot console after reboot](evidence/esxi-boot-menu.png)
+![Historical Python console after reboot](evidence/esxi-boot-menu.png)
 
 Some ESXi screenshot captures were partial even though the guest's virtual
 terminal buffer held the complete menu. The retained reboot capture follows a
