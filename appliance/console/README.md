@@ -119,6 +119,21 @@ Real ESXi smoke results are recorded separately; unit tests do not establish
 PAM/getty/keyboard behavior. The incomplete ClamAV image remains a product
 failure even if the console handles it correctly.
 
+The [real ESXi smoke report](evidence/esxi-smoke.json) records the exact base OVA
+and installed overlay hashes. All 26 tests passed in the Ubuntu guest; real
+VMware keyboard/PAM login, invalid-password refusal, logout, stopped-Docker
+operation and automatic console startup after reboot passed. The owned VM was
+deleted afterward. This is development-overlay evidence, not a rebuilt OVA.
+The console service reported about 14.1 MiB at one observation; this is not a
+peak or whole-appliance resource qualification.
+
+![ESXi boot console after reboot](evidence/esxi-boot-menu.png)
+
+Some ESXi screenshot captures were partial even though the guest's virtual
+terminal buffer held the complete menu. The retained reboot capture follows a
+tty2/tty1 switch to force a redraw; no image editing was used. This capture
+limitation remains recorded rather than counting a partial image as visual proof.
+
 Follow-on work: persistent explicit firstboot step/error events, guided network
 editing with host-side rollback (the current menu provides information/recovery
 only), independent browser bootstrap service, and application wizard integration.
