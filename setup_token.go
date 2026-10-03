@@ -37,7 +37,7 @@ import (
 )
 
 // headerSetupToken is the request header carrying the setup token.
-const headerSetupToken = "X-Culvert-Setup-Token"
+const headerSetupToken = "X-Culvert-Setup-Token" // #nosec G101 -- header NAME, not a credential; the token value is per-instance and never in source
 
 var setupTokenState struct {
 	mu   sync.RWMutex
