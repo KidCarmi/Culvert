@@ -44,7 +44,7 @@ func computeHealth() healthReport {
 
 	// Appliance readiness (F): setup + enforcement posture on the liveness
 	// surface too (same values as the /ready rows).
-	postureAction, postureRules := policyPosture()
+	postureAction, postureRules, _ := policyPosture()
 
 	// ClamAV connectivity
 	clamStatus := "disabled"
@@ -579,30 +579,55 @@ func appendSetupAndPostureReadinessChecks(checks map[string]*readinessCheck) {
 	} else {
 		checks["setup_complete"] = &readinessCheck{Status: "fail", Detail: "first-time setup not completed — admin UI is unclaimed"}
 	}
-	action, rules := policyPosture()
+	action, _, constraining := policyPosture()
 	switch {
 	case action == "deny":
 		checks["policy_posture"] = &readinessCheck{Status: "ok", Detail: "default-deny"}
-	case rules > 0:
-		checks["policy_posture"] = &readinessCheck{Status: "ok", Detail: "rules with default-allow fall-through"}
+	case constraining > 0:
+		checks["policy_posture"] = &readinessCheck{Status: "ok", Detail: "blocking/filtering rules with default-allow fall-through"}
 	default:
-		checks["policy_posture"] = &readinessCheck{Status: "fail", Detail: "passthrough: no rules and default action allow — not enforcing"}
+		checks["policy_posture"] = &readinessCheck{Status: "fail", Detail: "passthrough: no blocking or filtering rule and default action allow — not enforcing"}
 	}
 }
 
-// policyPosture returns the effective default action and the number of
-// ENABLED rules. A disabled rule is skipped by evaluation (ruleIsEnabled), so
-// a rulebase whose every rule is disabled is pure passthrough under
-// default-allow and must not read as "ready to enforce" (Codex P2, PR #1528).
-func policyPosture() (action string, rules int) {
+// policyPosture returns the effective default action, the number of ENABLED
+// rules, and how many of those can actually REFUSE or ALTER a request. A
+// disabled rule is skipped by evaluation (ruleIsEnabled), so a rulebase whose
+// every rule is disabled is pure passthrough under default-allow and must not
+// read as "ready to enforce" (Codex P2, PR #1528). The same holds for a
+// rulebase of plain Allow rules: under default-allow it allows everything
+// either way (Codex P2, second round), so the posture is decided by the
+// constraining count, while `policy_rules` on /health keeps reporting enabled
+// rules.
+func policyPosture() (action string, rules, constraining int) {
 	action = defaultPolicyAction()
 	if policyStore != nil {
 		all := policyStore.List()
 		for i := range all {
-			if ruleIsEnabled(&all[i]) {
-				rules++
+			if !ruleIsEnabled(&all[i]) {
+				continue
+			}
+			rules++
+			if ruleConstrainsTraffic(&all[i]) {
+				constraining++
 			}
 		}
 	}
-	return action, rules
+	return action, rules, constraining
+}
+
+// ruleConstrainsTraffic mirrors applyPolicyDecision's switch (proxy.go): Drop,
+// Block_Page and Redirect stop or divert the request; Allow does so only
+// through a per-rule file profile, behind exactly the guard
+// FileProfileBlocked opens with. An action outside the four constants reaches
+// no branch there, so it constrains nothing here either.
+func ruleConstrainsTraffic(r *PolicyRule) bool {
+	switch r.Action {
+	case ActionDrop, ActionBlockPage, ActionRedirect:
+		return true
+	case ActionAllow:
+		return r.FileFiltering && r.FileProfile != FileProfileNone
+	default:
+		return false
+	}
 }
