@@ -1892,7 +1892,12 @@ esac
 # a re-run after an interrupted first boot keeps the token the console showed.
 # Restricted to a safe .env alphabet (see setup_at_rest_encryption's rationale).
 if [[ -n "${CULVERT_INSTALL_SETUP_TOKEN:-}" ]]; then
-  if [[ "$CULVERT_INSTALL_SETUP_TOKEN" =~ ^[A-Za-z0-9._-]{16,128}$ ]]; then
+  if secret_already_set CULVERT_SETUP_TOKEN "$INSTALL_DIR/.env"; then
+    # env_put REPLACES; the never-overwrite property every .env secret has
+    # comes from this guard, exactly as for the passphrases above. The token
+    # the console already showed stays the token the wizard accepts.
+    info "Keeping the existing first-admin setup token in $INSTALL_DIR/.env"
+  elif [[ "$CULVERT_INSTALL_SETUP_TOKEN" =~ ^[A-Za-z0-9._-]{16,128}$ ]]; then
     env_put CULVERT_SETUP_TOKEN "$CULVERT_INSTALL_SETUP_TOKEN" "$INSTALL_DIR/.env"
     info "Persisted the first-admin setup token (CULVERT_SETUP_TOKEN) into $INSTALL_DIR/.env"
   else
