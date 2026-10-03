@@ -289,6 +289,14 @@ save_image "${CLAMAV_IMAGE_REPO}:${CLAMAV_IMAGE_TAG}"  "$OV/var/lib/culvert-appl
 # archive carries that identity before baking it (archive-identity.sh).
 archive_names_digest "$OV/var/lib/culvert-appliance/images/culvert.tar.gz" "$APP_IMAGE_INDEX_DIGEST" \
   || die "the saved application archive does not carry $APP_IMAGE_INDEX_DIGEST — the first boot would refuse it. Build on a Docker daemon with the containerd image store (daemon.json: {\"features\":{\"containerd-snapshotter\":true}})"
+# Both archives must CARRY a complete linux/amd64 image (manifest, config and
+# every layer, size and digest checked), not merely name one: a 69 KB ClamAV
+# archive with no layers loaded "successfully" and broke first boot
+# (archive-identity.sh, F-OVA-CLAMAV-1).
+for a in culvert clamav; do
+  archive_platform_closure "$OV/var/lib/culvert-appliance/images/$a.tar.gz" linux/amd64 \
+    || die "the saved $a archive does not carry a complete linux/amd64 image — refusing to bake it"
+done
 APP_TAR_SHA="$(sha256sum "$OV/var/lib/culvert-appliance/images/culvert.tar.gz" | cut -d' ' -f1)"
 CLAM_TAR_SHA="$(sha256sum "$OV/var/lib/culvert-appliance/images/clamav.tar.gz" | cut -d' ' -f1)"
 INSTALL_SHA="$(sha256sum "$REPO/scripts/install.sh" | cut -d' ' -f1)"

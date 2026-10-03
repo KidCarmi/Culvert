@@ -150,6 +150,31 @@ jobs:
           path: ${{ env.LAB_ROOT }}/in/culvert-image.tar
           retention-days: 30
           compression-level: 0
+      - name: "Diagnostic: does this Docker save a COMPLETE ClamAV image? (F-OVA-CLAMAV-1)"
+        # Runner builds baked a 69,562-byte ClamAV archive (no config, no
+        # layers) where the qualification host baked 152,380,114 bytes. This
+        # step only observes; build-ova.sh's closure check decides.
+        continue-on-error: true
+        run: |
+          set -uo pipefail
+          . appliance/build/manifest.env
+          . appliance/build/archive-identity.sh
+          ref="${CLAMAV_IMAGE_REPO}@${CLAMAV_IMAGE_INDEX_DIGEST}"
+          docker pull -q "$ref"
+          docker image ls --tree "$ref" 2>&1 | head -20 || true
+          docker image inspect "$ref" --format 'inspect: {{.Id}} {{.Os}}/{{.Architecture}} size={{.Size}}'
+          cfg="$(docker manifest inspect "${CLAMAV_IMAGE_REPO}@${CLAMAV_IMAGE_AMD64_DIGEST}" 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin)["config"]["digest"])' || true)"
+          echo "amd64 config digest: $cfg"
+          sudo ctr -n moby content ls -q 2>/dev/null | grep -c . | sed 's/^/moby content blobs: /'
+          [ -n "$cfg" ] && { sudo ctr -n moby content ls -q | grep -qx "$cfg" && echo "config IN content store" || echo "config NOT in content store"; }
+          grep -n -i 'discard\|snapshotter\|root\b' /etc/containerd/config.toml 2>/dev/null | head -20 || echo "no /etc/containerd/config.toml"
+          cat /etc/docker/daemon.json
+          docker save "$ref" | gzip -n -1 > /tmp/clam-plain.tgz
+          docker save --platform linux/amd64 "$ref" | gzip -n -1 > /tmp/clam-amd64.tgz
+          for f in /tmp/clam-plain.tgz /tmp/clam-amd64.tgz; do
+            echo "$f: $(stat -c %s "$f") bytes"; archive_platform_closure "$f" linux/amd64 || echo "$f: CLOSURE FAILED"
+          done
+          rm -f /tmp/clam-plain.tgz /tmp/clam-amd64.tgz
       - name: Check out the appliance source the candidate is built from
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

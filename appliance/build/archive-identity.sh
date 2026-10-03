@@ -27,3 +27,73 @@ if want not in got:
   tar -tzf "$tar" "blobs/sha256/${want#sha256:}" >/dev/null 2>&1 \
     || { echo "archive lacks blob ${want}" >&2; return 1; }
 }
+
+# archive_platform_closure <image.tar.gz> [os/arch]
+#   succeeds only when the `docker save` archive carries EVERY blob the
+#   selected platform (default linux/amd64) needs: its image manifest, the
+#   config and each layer, each present with the size and sha256 its
+#   descriptor declares. An archive can name an image (index.json, a tag, a
+#   manifest) without carrying it: the runner-built OVAs baked a 69,562-byte
+#   ClamAV archive whose amd64 manifest referenced a config and seven layers
+#   that were not in it; `docker load` reported success and first boot then
+#   failed to create the container (LOCAL-ESXI F-OVA-CLAMAV-1, PR #1528). A
+#   tag or a successful load proves nothing about the payload; this does.
+archive_platform_closure() {
+  local tar="$1" want="${2:-linux/amd64}"
+  [[ -f "$tar" ]] || { echo "archive_platform_closure: no archive $tar" >&2; return 2; }
+  python3 - "$tar" "$want" <<'PY'
+import hashlib, json, sys, tarfile
+path, want = sys.argv[1], sys.argv[2]
+want_os, want_arch = want.split("/", 1)
+INDEX = {"application/vnd.oci.image.index.v1+json",
+         "application/vnd.docker.distribution.manifest.list.v2+json"}
+MANIFEST = {"application/vnd.oci.image.manifest.v1+json",
+            "application/vnd.docker.distribution.manifest.v2+json"}
+with tarfile.open(path, "r:gz") as tf:
+    members = {m.name: m for m in tf.getmembers() if m.isfile()}
+    def blob(desc, what):
+        d = desc.get("digest", "")
+        if not d.startswith("sha256:") or len(d) != 71:
+            sys.exit("%s has an unusable digest %r" % (what, d))
+        name = "blobs/sha256/" + d[7:]
+        m = members.get(name)
+        if m is None:
+            sys.exit("archive lacks %s %s" % (what, d))
+        if "size" in desc and m.size != desc["size"]:
+            sys.exit("%s %s is %d bytes, descriptor says %d" % (what, d, m.size, desc["size"]))
+        data = tf.extractfile(m).read()
+        if hashlib.sha256(data).hexdigest() != d[7:]:
+            sys.exit("%s %s does not hash to its digest" % (what, d))
+        return data
+    try:
+        top = json.loads(tf.extractfile(members["index.json"]).read())
+    except Exception:
+        sys.exit("archive has no readable OCI index.json")
+    found = []
+    def walk(descs, depth):
+        if depth > 3:
+            sys.exit("index nesting too deep")
+        for desc in descs:
+            mt = desc.get("mediaType", "")
+            p = desc.get("platform") or {}
+            if p and (p.get("os"), p.get("architecture")) != (want_os, want_arch):
+                continue  # another platform (or an attestation): not needed
+            data = blob(desc, "manifest")
+            doc = json.loads(data)
+            if mt in INDEX or "manifests" in doc:
+                walk(doc.get("manifests", []), depth + 1)
+                continue
+            if mt and mt not in MANIFEST:
+                continue
+            cfg = json.loads(blob(doc.get("config", {}), "config"))
+            if (cfg.get("os"), cfg.get("architecture")) != (want_os, want_arch):
+                continue
+            for i, layer in enumerate(doc.get("layers", [])):
+                blob(layer, "layer %d" % i)
+            found.append(desc.get("digest"))
+    walk(top.get("manifests", []), 0)
+    if not found:
+        sys.exit("archive carries no complete %s image" % want)
+    print("closure ok: %s %s" % (want, " ".join(sorted(set(found)))))
+PY
+}
