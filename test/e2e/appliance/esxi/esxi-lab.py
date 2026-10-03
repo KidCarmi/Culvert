@@ -13,7 +13,6 @@ import os
 from pathlib import Path
 import re
 import secrets
-import shutil
 import socket
 import subprocess
 import sys
@@ -53,6 +52,83 @@ def atomic_json(path, value):
     tmp = path.with_suffix('.tmp')
     tmp.write_text(json.dumps(value, indent=2) + '\n', encoding='utf-8')
     tmp.replace(path)
+
+
+def credential_environment(c, inherited):
+    """Decrypt only an explicitly configured Windows credential into child env."""
+    env = dict(inherited)
+    credential_file = c.get('credential_file')
+    if credential_file:
+        require(os.name == 'nt', 'credential_file requires Windows DPAPI')
+        require(Path(credential_file).is_file(), 'run Set-LabCredential.ps1 in your Windows account first')
+        loader_env = dict(os.environ, CULVERT_ESXI_CREDENTIAL_FILE=credential_file)
+        script = ("$ErrorActionPreference='Stop'; "
+                  "$c=Import-Clixml -LiteralPath $env:CULVERT_ESXI_CREDENTIAL_FILE; "
+                  "if ($c -isnot [System.Management.Automation.PSCredential]) { throw 'Wrong credential type' }; "
+                  "@{username=$c.UserName;password=$c.GetNetworkCredential().Password} | ConvertTo-Json -Compress")
+        result = subprocess.run(['powershell.exe', '-NoProfile', '-NonInteractive', '-Command', script],
+                                env=loader_env, capture_output=True, text=True, timeout=30)
+        require(result.returncode == 0, 'Windows credential decryption failed for this account')
+        data = json.loads(result.stdout)
+        require(data.get('username') and data.get('password'), 'empty Windows credential')
+        env.update(GOVC_USERNAME=data['username'], GOVC_PASSWORD=data['password'])
+    return env
+
+
+def stop_process(proc):
+    if proc is None:
+        return
+    if proc.poll() is None:
+        proc.terminate()
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait(timeout=5)
+
+
+class TunnelSupervisor:
+    """Controller-owned reconnects; transport health never proves a guest reboot."""
+    def __init__(self, resolve, start, ready, event, timeout=2400,
+                 clock=time.monotonic, sleep=time.sleep):
+        self.resolve, self.start, self.ready, self.event = resolve, start, ready, event
+        self.timeout, self.clock, self.sleep = timeout, clock, sleep
+        self.proc = None
+        self.connections = 0
+
+    def close(self):
+        stop_process(self.proc)
+        self.proc = None
+
+    def ensure(self, budget=None):
+        if self.proc is not None and self.proc.poll() is None:
+            return
+        self.close()
+        deadline = self.clock() + min(self.timeout, self.timeout if budget is None else budget)
+        while self.clock() < deadline:
+            candidate = None
+            try:
+                # Re-resolve through the owned VM on EVERY reconnect, including
+                # DHCP changes, then enforce CIDR and the stable SSH key alias.
+                ip = self.resolve(min(30, max(1, int(deadline - self.clock()))))
+                candidate = self.start(ip)
+                attempt_deadline = min(deadline, self.clock() + 20)
+                while candidate.poll() is None and self.clock() < attempt_deadline:
+                    if self.ready(min(5, max(.1, attempt_deadline - self.clock()))):
+                        self.proc = candidate
+                        candidate = None
+                        self.connections += 1
+                        self.event('transport-connected' if self.connections == 1 else 'transport-reconnected',
+                                   'pass', 'SSH forwarding ready; host key retained; guest reboot verdict remains separate')
+                        return
+                    self.sleep(min(.25, max(0, attempt_deadline - self.clock())))
+            except (Refused, OSError, subprocess.TimeoutExpired):
+                pass  # Retry only transport reads/connections; never VM mutations.
+            finally:
+                stop_process(candidate)
+            self.sleep(min(2, max(0, deadline - self.clock())))
+        self.event('transport-recovery', 'fail', 'SSH forwarding did not recover within its bounded deadline')
+        raise Refused('SSH forwarding recovery deadline exceeded; guest availability is unproven')
 
 
 def verify_ova(path, expected):
@@ -118,6 +194,9 @@ def validate_scope(c):
     require(u.scheme == 'https' and u.hostname and not u.username and not u.password,
             'endpoint must be HTTPS without credentials')
     require(not u.query and not u.fragment and u.path in ('', '/', '/sdk'), 'invalid endpoint')
+    require(type(c.get('tls_insecure', False)) is bool, 'tls_insecure must be boolean')
+    if c.get('tls_insecure'):
+        require(c.get('tls_exception_endpoint') == c['endpoint'], 'TLS exception must name this exact endpoint')
     for k in ('host', 'datastore', 'network', 'folder', 'pool'):
         require(c[k].startswith('/') and not any(x in c[k] for x in '*?[]\n\r'), 'exact inventory path required: ' + k)
     for k in ('max_vms', 'max_vcpus', 'max_memory_mb', 'max_disk_gib',
@@ -179,6 +258,7 @@ class Lab:
             p.mkdir(parents=True, exist_ok=True)
         self.govc = self.c.get('govc', 'govc')
         self.state = json.loads(self.state_file.read_text()) if self.state_file.exists() else {}
+        self._credential_env = None
 
     def record(self, check, result, detail):
         row = dict(step='ESXi', check=check, result=result, detail=detail,
@@ -197,7 +277,13 @@ class Lab:
                   'GOVC_CERTIFICATE', 'GOVC_PRIVATE_KEY'):
             if k in os.environ:
                 env[k] = os.environ[k]
-        env.update(GOVC_URL=self.c['endpoint'], GOVC_PERSIST_SESSION='false', GOVC_INSECURE='false')
+        if self.c.get('tls_insecure'):
+            require(self.c.get('tls_exception_endpoint') == self.c['endpoint'], 'TLS exception endpoint mismatch')
+        if self._credential_env is None:
+            self._credential_env = credential_environment(self.c, env)
+        env = dict(self._credential_env)
+        env.update(GOVC_URL=self.c['endpoint'], GOVC_PERSIST_SESSION='false',
+                   GOVC_INSECURE='true' if self.c.get('tls_insecure') else 'false')
         cmd = [self.govc, args[0]] + (['-json'] if json_output else []) + list(args[1:])
         try:
             r = subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=timeout,
@@ -208,10 +294,10 @@ class Lab:
         require(r.returncode == 0, f'govc {args[0]} failed (exit {r.returncode}); no mutation retry')
         return json.loads(r.stdout) if json_output else r.stdout.strip()
 
-    def vm(self):
+    def vm(self, timeout=120):
         require(self.state and not self.state.get('deleted'), 'no active owned VM')
         require(self.state['endpoint'] == self.c['endpoint'], 'endpoint changed')
-        vms = self.gov('vm.info', self.state['path'])['virtualMachines'] or []
+        vms = self.gov('vm.info', self.state['path'], timeout=timeout)['virtualMachines'] or []
         require(len(vms) == 1, 'expected exactly one owned VM')
         return assert_owned(vms[0], self.state, self.c)
 
@@ -240,6 +326,7 @@ class Lab:
                     original_candidate=artifact['ova_sha256'] == ORIGINAL_SHA,
                     harness_sha=sha, harness_dirty=bool(dirty), harness_file_sha256=sources,
                     govc_version=self.gov('version', json_output=False),
+                    tls_verification='owner-authorized-exception' if self.c.get('tls_insecure') else 'verified',
                     hypervisor=hs[0]['summary']['config']['product'], capacity=capacity,
                     property_delivery='govc ImportVApp + InjectOvfEnv via VMware guestinfo',
                     host_ref=hs[0]['self'], ds_ref=dss[0]['self'], network_ref=dict(type=kind, value=value))
@@ -294,12 +381,21 @@ class Lab:
         self.save()
         self.record('power-on', 'pass', 'owned VM powered on; guest qualification is separate')
 
-    def guest_ip(self):
-        self.vm()
-        ip = self.gov('vm.ip', '-wait=120s', '-a', '-v4', self.state['path'], timeout=150, json_output=False)
+    def guest_ip(self, timeout=150):
+        started = time.monotonic()
+        self.vm(timeout=max(1, timeout // 2))
+        remaining = max(1, int(timeout - (time.monotonic() - started)))
+        ip = self.gov('vm.ip', f'-wait={max(1, remaining-2)}s', '-a', '-v4', self.state['path'],
+                      timeout=remaining, json_output=False)
         require(ip and ',' not in ip and '\n' not in ip, 'guest IP missing or ambiguous')
         require(ipaddress.ip_address(ip) in ipaddress.ip_network(self.c['guest_cidr']), 'guest IP outside approved CIDR')
         return ip
+
+    def ssh_command(self, ip, strict=True):
+        return ['ssh', '-F', 'none', '-i', str(self.sec / 'id_ed25519'), '-o', 'IdentitiesOnly=yes',
+                '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=' + ('yes' if strict else 'accept-new'),
+                '-o', 'HostKeyAlias=' + self.state['name'], '-o', 'UserKnownHostsFile=' + str(self.sec / 'known_hosts'),
+                '-o', 'ConnectTimeout=5', '-o', 'ServerAliveInterval=5', '-o', 'ServerAliveCountMax=2', 'culvert@' + ip]
 
     def qualify(self):
         require(self.state.get('phase') == 'powered-on', 'qualify is single-use on a fresh import')
@@ -308,10 +404,7 @@ class Lab:
         probe = subprocess.run([bash, '-c', 'for t in ssh curl openssl timeout; do command -v "$t" || exit 3; done'], capture_output=True, timeout=30)
         require(probe.returncode == 0, 'Bash host needs ssh, curl, openssl and timeout')
         ip = self.guest_ip()
-        ssh = ['ssh', '-F', 'none', '-i', str(self.sec / 'id_ed25519'), '-o', 'IdentitiesOnly=yes',
-               '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=accept-new',
-               '-o', 'UserKnownHostsFile=' + str(self.sec / 'known_hosts'), '-o', 'ConnectTimeout=10',
-               '-o', 'ServerAliveInterval=15', '-o', 'ServerAliveCountMax=2', 'culvert@' + ip]
+        ssh = self.ssh_command(ip, strict=False)
         deadline = time.monotonic() + 2400
         while True:
             r = subprocess.run(ssh + ['sudo test -f /var/lib/culvert-appliance/state/complete.done'], capture_output=True, timeout=60)
@@ -337,13 +430,24 @@ class Lab:
         for port in ports:
             with socket.socket() as sock:
                 sock.bind(('127.0.0.1', port))
-        tunnel = ssh[:-1] + ['-o', 'ExitOnForwardFailure=yes', '-N']
-        for local, remote in zip(ports, (22, 8080, 9090)):
-            tunnel += ['-L', f'127.0.0.1:{local}:127.0.0.1:{remote}']
-        tunnel += [ssh[-1]]
+        def start_tunnel(address):
+            command = self.ssh_command(address)
+            tunnel = command[:-1] + ['-o', 'ExitOnForwardFailure=yes', '-N']
+            for local, remote in zip(ports, (22, 8080, 9090)):
+                tunnel += ['-L', f'127.0.0.1:{local}:127.0.0.1:{remote}']
+            tunnel += [command[-1]]
+            return subprocess.Popen(tunnel, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+        def forwarding_ready(timeout):
+            command = self.ssh_command('127.0.0.1')
+            probe = subprocess.run(command[:-1] + ['-p', str(ports[0]), command[-1], 'true'],
+                                   capture_output=True, timeout=timeout)
+            return probe.returncode == 0
+
+        transport = TunnelSupervisor(self.guest_ip, start_tunnel, forwarding_ready, self.record)
         env = {k: v for k, v in os.environ.items() if not k.startswith(('LAB_', 'GOVC_'))}
         env.update(LAB_DIR=self.run.as_posix(), LAB_SSH_PORT=str(ports[0]), LAB_PROXY_PORT=str(ports[1]),
-                   LAB_UI_PORT=str(ports[2]), LAB_EXPECT_IMAGE_ID=self.c['image_id'], ESXI_GUEST_IP=ip,
+                   LAB_UI_PORT=str(ports[2]), LAB_EXPECT_IMAGE_ID=self.c['image_id'], ESXI_HOST_KEY_ALIAS=self.state['name'],
                    ESXI_ADAPTER=Path(__file__).resolve().as_posix(), ESXI_SCOPE=self.scope_path.as_posix(), ESXI_PYTHON=Path(sys.executable).as_posix())
         # Credentials required only for the alive read; no govc debug/session persistence.
         for k in ('GOVC_USERNAME', 'GOVC_PASSWORD', 'GOVC_TLS_CA_CERTS', 'GOVC_TLS_KNOWN_HOSTS',
@@ -352,35 +456,34 @@ class Lab:
                 env[k] = os.environ[k]
         self.state['phase'] = 'qualification-started'
         self.save()
-        with subprocess.Popen(tunnel, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) as proc:
-            try:
-                time.sleep(2)
-                require(proc.poll() is None, 'SSH tunnel failed')
-                with (self.sec / 'qualification.log').open('w', encoding='utf-8') as log:
-                    with subprocess.Popen([bash, (HERE / 'guest-checks.sh').as_posix(), 'qualify'], env=env,
-                                          stdout=log, stderr=subprocess.STDOUT,
-                                          start_new_session=os.name != 'nt') as guest_checks:
-                        try:
-                            rc = guest_checks.wait(timeout=10800)
-                        except subprocess.TimeoutExpired:
-                            # Kill only this spawned check process and its descendants.
-                            if os.name == 'nt':
-                                subprocess.run(['taskkill', '/PID', str(guest_checks.pid), '/T', '/F'],
-                                               capture_output=True, timeout=30)
-                            else:
-                                import signal
-                                os.killpg(guest_checks.pid, signal.SIGKILL)
-                            guest_checks.wait(timeout=30)
-                            raise Refused('guest suite exceeded 10800 seconds; collect and down') from None
-                self.record('baseline-guest-checks', 'pass' if rc == 0 else 'fail',
-                            'shared guest assertions completed; inspect each checks.jsonl verdict')
-                require(rc == 0, 'baseline guest checks failed')
-            finally:
-                proc.terminate()
-                try:
-                    proc.wait(timeout=15)
-                except subprocess.TimeoutExpired:
-                    proc.kill()
+        try:
+            transport.ensure()
+            with (self.sec / 'qualification.log').open('w', encoding='utf-8') as log:
+                with subprocess.Popen([bash, (HERE / 'guest-checks.sh').as_posix(), 'qualify'], env=env,
+                                      stdout=log, stderr=subprocess.STDOUT,
+                                      start_new_session=os.name != 'nt') as guest_checks:
+                    try:
+                        deadline = time.monotonic() + 10800
+                        while guest_checks.poll() is None:
+                            require(time.monotonic() < deadline, 'guest suite exceeded 10800 seconds')
+                            transport.ensure(budget=deadline - time.monotonic())
+                            time.sleep(.25)
+                        rc = guest_checks.returncode
+                    except BaseException:
+                        # Kill only this spawned check process and its descendants.
+                        if os.name == 'nt':
+                            subprocess.run(['taskkill', '/PID', str(guest_checks.pid), '/T', '/F'],
+                                           capture_output=True, timeout=30)
+                        else:
+                            import signal
+                            os.killpg(guest_checks.pid, signal.SIGKILL)
+                        guest_checks.wait(timeout=30)
+                        raise
+            self.record('baseline-guest-checks', 'pass' if rc == 0 else 'fail',
+                        'shared guest assertions completed; inspect each checks.jsonl verdict')
+            require(rc == 0, 'baseline guest checks failed')
+        finally:
+            transport.close()
         self.state['phase'] = 'baseline-completed'
         self.save()
 

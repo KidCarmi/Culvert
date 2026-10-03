@@ -7,6 +7,8 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import socket
+import sys
 import tarfile
 import tempfile
 import unittest
@@ -223,6 +225,147 @@ class EvidenceTests(unittest.TestCase):
                 with self.assertRaises(lab.Refused):
                     with lab.locked(p):
                         self.fail('concurrent mutation allowed')
+
+
+class FakeTunnel:
+    def __init__(self, exited=False):
+        self.exited = exited
+        self.reaped = False
+
+    def poll(self):
+        return 255 if self.exited else None
+
+    def terminate(self):
+        self.exited = True
+
+    def wait(self, timeout):
+        self.reaped = True
+        return 255
+
+
+class TransportTests(unittest.TestCase):
+    def setUp(self):
+        self.now = 0
+        self.procs = []
+        self.addresses = []
+        self.events = []
+
+    def sleep(self, seconds):
+        self.now += seconds
+
+    def start(self, ip):
+        self.addresses.append(ip)
+        proc = FakeTunnel()
+        self.procs.append(proc)
+        return proc
+
+    def supervisor(self, resolve=None, ready=None, timeout=10):
+        return lab.TunnelSupervisor(resolve or (lambda timeout: '192.0.2.10'), self.start,
+                                    ready or (lambda timeout: True), lambda *event: self.events.append(event),
+                                    timeout=timeout, clock=lambda: self.now, sleep=self.sleep)
+
+    def test_reconnects_after_reboot_and_dhcp_change(self):
+        addresses = iter(('192.0.2.10', '192.0.2.11'))
+        supervisor = self.supervisor(resolve=lambda timeout: next(addresses))
+        supervisor.ensure()
+        self.procs[0].exited = True  # real reboot drops the forwarding connection
+        supervisor.ensure()
+        self.assertEqual(self.addresses, ['192.0.2.10', '192.0.2.11'])
+        self.assertTrue(self.procs[0].reaped)
+        self.assertEqual(supervisor.connections, 2)
+        self.assertEqual(self.events[-1][0], 'transport-reconnected')
+        supervisor.close()
+        self.assertTrue(all(p.reaped and p.exited for p in self.procs))
+
+    def test_never_returning_guest_fails_with_deadline_and_cleanup(self):
+        supervisor = self.supervisor(ready=lambda timeout: False)
+        with self.assertRaisesRegex(lab.Refused, 'deadline exceeded'):
+            supervisor.ensure()
+        self.assertLessEqual(self.now, 10)
+        self.assertTrue(all(p.reaped and p.exited for p in self.procs))
+        self.assertEqual(self.events[-1][1], 'fail')
+        self.assertEqual(supervisor.connections, 0)
+
+    def test_living_unready_tunnel_is_not_counted_connected(self):
+        supervisor = self.supervisor(ready=lambda timeout: False, timeout=1)
+        with self.assertRaises(lab.Refused):
+            supervisor.ensure()
+        self.assertNotIn('pass', [r[1] for r in self.events])
+
+    def test_out_of_scope_dhcp_address_never_starts_tunnel(self):
+        def refused(timeout):
+            raise lab.Refused('guest IP outside approved CIDR')
+        supervisor = self.supervisor(resolve=refused)
+        with self.assertRaises(lab.Refused):
+            supervisor.ensure()
+        self.assertEqual(self.procs, [])
+        self.assertLessEqual(self.now, 10)
+
+    def test_suite_budget_caps_reconnect_time(self):
+        supervisor = self.supervisor(ready=lambda timeout: False, timeout=2400)
+        with self.assertRaises(lab.Refused):
+            supervisor.ensure(budget=3)
+        self.assertLessEqual(self.now, 3)
+
+    def test_stable_host_key_alias_and_strict_reconnect(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp)
+            cfg = p / 'scope.json'
+            cfg.write_text(json.dumps(scope(p)))
+            obj = lab.Lab(cfg)
+            obj.state = {'name': 'culvert-esxi-owned'}
+            for address in ('192.0.2.10', '192.0.2.11'):
+                cmd = obj.ssh_command(address)
+                self.assertIn('StrictHostKeyChecking=yes', cmd)
+                self.assertIn('HostKeyAlias=culvert-esxi-owned', cmd)
+                self.assertEqual(cmd[-1], 'culvert@' + address)
+            self.assertIn('StrictHostKeyChecking=accept-new', obj.ssh_command('192.0.2.10', strict=False))
+
+    def test_real_forwarding_process_loss_and_recovery(self):
+        # Real child processes and loopback sockets, not SSH or a guest claim.
+        with socket.socket() as sock:
+            sock.bind(('127.0.0.1', 0))
+            port = sock.getsockname()[1]
+        children = []
+        def start(ip):
+            code = ('import socket\n'
+                    's=socket.socket();s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1)\n'
+                    f's.bind(("127.0.0.1",{port}));s.listen()\n'
+                    'while True:\n c,a=s.accept();c.sendall(b"ready");c.close()\n')
+            proc = subprocess.Popen([sys.executable, '-c', code], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            children.append(proc)
+            return proc
+        def ready(timeout):
+            try:
+                with socket.create_connection(('127.0.0.1', port), timeout=timeout) as conn:
+                    return conn.recv(5) == b'ready'
+            except OSError:
+                return False
+        supervisor = lab.TunnelSupervisor(lambda timeout: '127.0.0.1', start, ready, lambda *args: None, timeout=5)
+        try:
+            supervisor.ensure()
+            children[0].terminate()
+            children[0].wait(timeout=3)
+            supervisor.ensure()
+            self.assertEqual(supervisor.connections, 2)
+            self.assertTrue(ready(1))
+        finally:
+            supervisor.close()
+        self.assertTrue(all(p.poll() is not None for p in children))
+
+
+class CredentialTests(unittest.TestCase):
+    def test_environment_auth_stays_runtime_only(self):
+        source = {'GOVC_USERNAME': 'synthetic', 'GOVC_PASSWORD': 'synthetic-test-only'}
+        self.assertEqual(lab.credential_environment({}, source), source)
+
+    def test_tls_exception_must_match_exact_endpoint(self):
+        c = scope(Path(tempfile.gettempdir()).resolve())
+        c.update(tls_insecure=True, tls_exception_endpoint='https://other.invalid')
+        with self.assertRaisesRegex(lab.Refused, 'exact endpoint'):
+            lab.validate_scope(c)
+        c['tls_exception_endpoint'] = c['endpoint']
+        lab.validate_scope(c)
 
 
 if __name__ == '__main__':

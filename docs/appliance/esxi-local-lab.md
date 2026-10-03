@@ -13,17 +13,21 @@ opt-in library return immediately before the QEMU command dispatcher.
 
 ## Current access and blockers
 
-The owner designated `https://192.168.1.78`. Local TCP 443 connectivity
-passed on 2026-10-03. Python's normal TLS verification failed with
-`unable to get local issuer certificate`. No authenticated API request or
-real VM mutation was attempted. An approved CA chain or independently
-verified TLS pin is required; the adapter does not turn TLS verification off.
+The owner designated `https://192.168.1.78`, subsequently authorized its TLS
+certificate-verification exception, and supplied a Windows-encrypted
+credential. Authenticated read-only inventory now succeeds: **ESXi 8.0.1
+build-21813344**. Normal trust still fails (`unable to get local issuer
+certificate`); this is an explicit exception, not verified CA trust. No real
+VM mutation has occurred.
 
-Still required from the owner: secure credential mechanism, allowed
-datastore and port group/network (including guest CIDR), VM/CPU/RAM/disk
-limits and host/datastore headroom, and the original OVA path. Exact host,
-folder and resource-pool paths can be resolved read-only after authenticated
-access is available. Do not infer scope from inventory availability.
+The owner authorized the default network and 2 vCPU / 4096 MiB / 40 GiB.
+Inventory identifies `VM Network` on vSwitch0, VLAN 0, matching the management
+network's `192.168.1.0/24`; the local guest-address fence uses that subnet.
+The two datastores are `datastore1` (~69 GiB free) and `DataStore2` (~498 GiB
+free). Datastore selection and the original OVA location remain pending.
+Conservative local admission thresholds retain 64 GiB datastore space,
+4096 MiB host RAM and 2000 MHz host CPU after provisioning. Availability
+does not authorize choosing an unrelated datastore.
 
 ## Artifact and resources
 
@@ -75,6 +79,27 @@ or `GOVC_TLS_KNOWN_HOSTS` for approved trust. govc session persistence and
 debug/trace inheritance are disabled. The run's `secrets` directory is
 restricted to the current user (and SYSTEM on Windows).
 
+Environment variables created in another already-running PowerShell window
+are not inherited by this controller. On Windows, run:
+
+```powershell
+& .\test\e2e\appliance\esxi\Set-LabCredential.ps1
+```
+
+It prompts for a `PSCredential` and uses Windows DPAPI through `Export-Clixml`
+to encrypt the password for the same user on the same computer. The file
+is under `%LOCALAPPDATA%\CulvertEsxiLab\192.168.1.78.credential.xml`, with a
+restricted ACL, outside the checkout. Set the local scope's `credential_file`
+to that path. The controller captures decryption privately and supplies the
+credential only in its govc child's runtime environment; it is never printed
+or included in evidence. Remove that credential file when lab access ends.
+[Microsoft documents the Windows-specific encryption behavior](https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.utility/export-clixml#example-3-encrypt-an-exported-credential-object-on-windows).
+
+TLS verification remains the default. An explicitly authorized exception
+requires both `tls_insecure: true` and `tls_exception_endpoint` equal to the
+exact scope endpoint; inherited `GOVC_INSECURE` cannot enable it. Preflight
+evidence labels this as `owner-authorized-exception`.
+
 From the repository root, in PowerShell or a local shell:
 
 ```text
@@ -105,6 +130,16 @@ checks then cover setup token, first admin, traffic, real-sidecar readiness,
 backup validation, OS update and reboot persistence. An extra before/after
 boot-ID check prevents an unchanged running guest from counting as a reboot.
 
+The controller supervises the forwarding process throughout the suite.
+After transport loss it re-resolves the address from the owned VM, rechecks
+the guest CIDR, and establishes fresh localhost forwards. A stable per-VM
+`HostKeyAlias` preserves the initial SSH key across DHCP changes; reconnects
+use `StrictHostKeyChecking=yes`. Readiness is tested with a real SSH command
+through the forward before declaring the transport recovered. Each recovery
+is bounded by 2400 s and the remaining suite budget; failed recovery kills
+the check process tree and reaps tunnel processes. Forwarding recovery,
+guest availability and changed boot-ID evidence remain separate verdicts.
+
 `up` verifies the outer SHA256 and every manifest payload without extracting
 the tar. It refuses duplicate paths, links, traversal, malformed or partial
 manifests. It imports powered off with the original virtual hardware and
@@ -131,7 +166,7 @@ no aggregate green result implies all requested scenarios passed.
 | Scenario | Current result / required evidence |
 |---|---|
 | Original OVA hash and manifest | BLOCKED: file location unavailable |
-| ESXi import/property delivery/boot | BLOCKED: scope, credentials and artifact missing |
+| ESXi import/property delivery/boot | BLOCKED: datastore selection and artifact missing; authenticated inventory works |
 | Baseline guest checks and reboot | NOT RUN; per-check verdicts required |
 | Real ClamAV failure posture | NOT RUN; readiness alone is insufficient. Exercise EICAR and unavailable clamd with actual traffic; report fail-open if observed. No CVE/risk acceptance. |
 | Category enforcement | NOT RUN; lookup equality alone does not prove category-based allow/deny decisions |
@@ -163,7 +198,10 @@ bash -n test/e2e/appliance/esxi/guest-checks.sh
 bash -n test/e2e/appliance/lab/appliance-lab.sh
 ```
 
-23 safety/evidence tests passed locally. The simulator smoke uses only a
+32 safety/evidence tests passed locally, including reboot transport loss,
+DHCP re-resolution, retained host-key checking, never-returning guest,
+remaining-budget enforcement and real loopback child-process recovery.
+These controller tests do not qualify a guest reboot. The simulator smoke uses only a
 loopback simulator it launches, synthetic credentials and synthetic disk
 bytes. It proves govc JSON integration, owned power-off/delete, wrong-UUID
 refusal before power-off, and cleanup after a partial import. **vcsim does

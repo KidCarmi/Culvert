@@ -24,23 +24,86 @@
     "credential_values_recorded": false
   },
   "results": [
-    {"id": "LOCAL-ACCESS-1", "result": "PASS", "scope": "TCP 443 on owner-designated endpoint is reachable from this terminal"},
-    {"id": "LOCAL-TLS-1", "result": "BLOCKED", "scope": "Default certificate validation", "observed": "unable to get local issuer certificate"},
-    {"id": "ADAPTER-UNIT", "result": "PASS", "scope": "23 controller safety/evidence tests; no hypervisor or appliance claims"},
-    {"id": "ADAPTER-SHELL", "result": "PASS", "scope": "Both shell scripts parse; library hook sources guest functions without QEMU dispatch"},
-    {"id": "ADAPTER-SIM", "result": "PASS", "scope": "Loopback vcsim: govc JSON, powered-on read, wrong-UUID refusal before power-off, owned deletion, idempotent down, partial-import ownership and cleanup"},
-    {"id": "SIM-UPLOAD-DIGEST", "result": "BLOCKED", "scope": "Synthetic OVA only", "observed": "vcsim has no NFC upload checksum; govc -m refuses before power-on. Gate retained."},
-    {"id": "SCOPE-PREFLIGHT", "result": "BLOCKED", "scope": "Real adapter command", "observed": "Missing authorized placement/resource scope and OVA path; refused before API access"},
-    {"id": "OVA-VERIFY", "result": "BLOCKED", "scope": "Original file location unavailable"},
-    {"id": "ESXI-IMPORT-BOOT", "result": "NOT RUN"},
-    {"id": "VMWARE-PROPERTY-DELIVERY", "result": "NOT RUN"},
-    {"id": "BASELINE-GUEST", "result": "NOT RUN"},
-    {"id": "OS-UPDATE-REBOOT-PERSISTENCE", "result": "NOT RUN"},
-    {"id": "CLAMAV-FAILURE-POSTURE", "result": "NOT RUN"},
-    {"id": "ACTUAL-RESTORE", "result": "NOT RUN"},
-    {"id": "TWO-IMPORT-IDENTITY", "result": "NOT RUN"},
-    {"id": "FIRSTBOOT-NETWORK-POWER-FAULTS", "result": "NOT RUN"},
-    {"id": "F-DISK-1", "result": "KNOWN FAILURE", "scope": "Prior CI finding in #1535, not reproduced locally; remains open"}
+    {
+      "id": "LOCAL-ACCESS-1",
+      "result": "PASS",
+      "scope": "TCP 443 on owner-designated endpoint is reachable from this terminal"
+    },
+    {
+      "id": "LOCAL-TLS-1",
+      "result": "BLOCKED",
+      "scope": "Default certificate validation",
+      "observed": "unable to get local issuer certificate"
+    },
+    {
+      "id": "ADAPTER-UNIT",
+      "result": "PASS",
+      "scope": "23 controller safety/evidence tests; no hypervisor or appliance claims"
+    },
+    {
+      "id": "ADAPTER-SHELL",
+      "result": "PASS",
+      "scope": "Both shell scripts parse; library hook sources guest functions without QEMU dispatch"
+    },
+    {
+      "id": "ADAPTER-SIM",
+      "result": "PASS",
+      "scope": "Loopback vcsim: govc JSON, powered-on read, wrong-UUID refusal before power-off, owned deletion, idempotent down, partial-import ownership and cleanup"
+    },
+    {
+      "id": "SIM-UPLOAD-DIGEST",
+      "result": "BLOCKED",
+      "scope": "Synthetic OVA only",
+      "observed": "vcsim has no NFC upload checksum; govc -m refuses before power-on. Gate retained."
+    },
+    {
+      "id": "SCOPE-PREFLIGHT",
+      "result": "BLOCKED",
+      "scope": "Real adapter command",
+      "observed": "Missing authorized placement/resource scope and OVA path; refused before API access"
+    },
+    {
+      "id": "OVA-VERIFY",
+      "result": "BLOCKED",
+      "scope": "Original file location unavailable"
+    },
+    {
+      "id": "ESXI-IMPORT-BOOT",
+      "result": "NOT RUN"
+    },
+    {
+      "id": "VMWARE-PROPERTY-DELIVERY",
+      "result": "NOT RUN"
+    },
+    {
+      "id": "BASELINE-GUEST",
+      "result": "NOT RUN"
+    },
+    {
+      "id": "OS-UPDATE-REBOOT-PERSISTENCE",
+      "result": "NOT RUN"
+    },
+    {
+      "id": "CLAMAV-FAILURE-POSTURE",
+      "result": "NOT RUN"
+    },
+    {
+      "id": "ACTUAL-RESTORE",
+      "result": "NOT RUN"
+    },
+    {
+      "id": "TWO-IMPORT-IDENTITY",
+      "result": "NOT RUN"
+    },
+    {
+      "id": "FIRSTBOOT-NETWORK-POWER-FAULTS",
+      "result": "NOT RUN"
+    },
+    {
+      "id": "F-DISK-1",
+      "result": "KNOWN FAILURE",
+      "scope": "Prior CI finding in #1535, not reproduced locally; remains open"
+    }
   ],
   "real_vms_created": 0,
   "real_host_configuration_changes": 0,
@@ -51,5 +114,35 @@
     "allowed datastore/network and guest CIDR",
     "VM/vCPU/RAM/guest-disk limits plus host/datastore headroom",
     "original candidate OVA location"
-  ]
+  ],
+  "followup": {
+    "date": "2026-10-03",
+    "authenticated_inventory": "PASS",
+    "esxi_version": "VMware ESXi 8.0.1 build-21813344",
+    "tls": "owner-authorized endpoint-specific verification exception; original CA trust failure remains",
+    "credentials": "Windows DPAPI PSCredential file; decrypted locally into child environment; no values recorded",
+    "authorized_vm_budget": {
+      "vcpus": 2,
+      "memory_mib": 4096,
+      "disk_gib": 40,
+      "network": "default VM Network"
+    },
+    "real_vms_created": 0,
+    "controller_tests": {
+      "result": "PASS",
+      "count": 32,
+      "includes": [
+        "SSH tunnel loss and bounded reconnect",
+        "DHCP change with stable strict host-key alias",
+        "never-returning guest deadline",
+        "remaining suite budget",
+        "real loopback forwarding process loss/recovery"
+      ]
+    },
+    "simulator_regression": "PASS for ownership/cleanup; NFC upload checksum still BLOCKED on simulator",
+    "remaining_inputs": [
+      "authorized datastore selection",
+      "original OVA path or URL"
+    ]
+  }
 }
