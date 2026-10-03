@@ -179,7 +179,7 @@ func buildFakeCulvert(t *testing.T, dir, goarch, version string) []byte {
 	}
 	out := filepath.Join(dir, "culvert-"+goarch)
 	// #nosec G204 -- fixed go build of this test's own temp source.
-	cmd := exec.CommandContext(t.Context(), "go", "build", "-trimpath", "-ldflags", "-X main.version="+version, "-o", out, ".")
+	cmd := exec.CommandContext(t.Context(), "go", "build", "-buildvcs=false", "-trimpath", "-ldflags", "-X main.version="+version, "-o", out, ".")
 	cmd.Dir = src
 	cmd.Env = append(os.Environ(), "CGO_ENABLED=0", "GOOS=linux", "GOARCH="+goarch, "GOFLAGS=", "GOTOOLCHAIN=local")
 	if b, err := cmd.CombinedOutput(); err != nil {

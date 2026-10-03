@@ -13,9 +13,9 @@
 | ID | Sev | Status | Title | Evidence |
 |---|---|---|---|---|
 | RISK-001 | HIGH | ✅ CLOSED | Multi-CP HA split-brain (no quorum/fencing) | ADR-0004 safe defaults + ADR-0005 S0–S5 SHIPPED (2026-07-03): etcd fencing lease — Acquire-gated promotion, self-fence, epoch-fenced write sinks, safe auto-failover, GUI/compose/runbook. Legacy (no etcd) keeps the safe-manual posture. **HV** |
-| RISK-002 | HIGH | ✅ CLOSED | OIDC introspection path missing SSRF dial guard | fixed `auth_oidc.go:95` (2026-06-28) |
+| RISK-002 | HIGH | MITIGATING | OIDC destination guard: inherited proxy bypass fixed; other transports need review | `newOIDCTransport`, boundary regression (2026-10-03) |
 | RISK-003 | HIGH | ✅ CLOSED | Webhook HMAC secret persisted cleartext on disk | `alerts.go`, `alerts_secret.go` |
-| RISK-006 | MEDIUM | ✅ CLOSED | Gate config blind spots: `--ignore-unfixed` + `HIGH,CRITICAL` only (masks unfixed/medium) | advisory unmasked report + trivy-native `exp:` dates (2026-07-04) |
+| RISK-006 | MEDIUM | MITIGATING | Scanner exclusions and gate filters leave unproven assumptions | dated inventory + unfiltered source/image reports (2026-10-03) |
 | RISK-014 | MEDIUM | ✅ CLOSED | Reachability gate (govulncheck) scans root module only; nested modules unanalyzed | per-module govulncheck in both lanes (2026-07-04) |
 | RISK-015 | LOW | OPEN | Single-scanner gate; detection-source divergence (Dependabot 5 vs Trivy DB 3) | trivy run vs Dependabot count, 2026-06-28 |
 | RISK-016 | LOW ↓ | MITIGATING | ~~Scanners `@latest`~~ all pinned (tree-verified 2026-07-04); residual: CodeQL non-blocking | gosec v2.27.1 / govulncheck v1.5.0 / go-licenses v1.6.0 / trivy v0.69.3 / Obituary SHA-pinned |
@@ -133,7 +133,46 @@
   cannot form in lease mode; legacy-mode CL-4 facts stay pinned for legacy deployments.
 - **Owner:** shipped · **Closed:** 2026-07-03 (ADR-0005 S5).
 
-## RISK-002 — OIDC introspection missing SSRF guard · HIGH · ✅ CLOSED 2026-06-28
+## RISK-002 — OIDC destination guard · HIGH · MITIGATING
+- **Audit 2026-10-03:** the historical dial-guard fix was incomplete. Both legacy
+  introspection and flow/JWKS clients cloned `http.DefaultTransport`, inheriting
+  `ProxyFromEnvironment`. A public forward proxy passed the IP guard while
+  receiving a request for a private destination. Caller-supplied tokens drive
+  requests to configured/discovered endpoints; redirects cross another boundary.
+  "Admin-controlled" does not protect against compromised discovery, redirects or
+  an operator's incorrect URL.
+- **Fix:** `newOIDCTransport` disables the inherited proxy and installs the
+  resolved-IP dial guard. OIDC requires direct reachability to public endpoints;
+  environment proxies are no longer used. Private IdPs remain blocked by the
+  existing policy. Discovery already uses a transport without a proxy.
+- **Evidence:** `TestOIDCTransport_SSRFBoundary` uses real HTTP transport/redirect
+  handling and the real `ssrf.Control`, replacing only network connections with
+  `net.Pipe`. It exercises legacy introspection, flow introspection and JWKS refresh directly,
+  refusing loopback, RFC1918, metadata, IPv6, mapped IPv6 and a rebind to private IP,
+  including redirects through a public-proxy hook; each public endpoint succeeds.
+  Removing `Proxy=nil` made all 18 private cases and three redirect cases fail;
+  restored control passed twice under race/shuffle. Flow constructor/discovery
+  wiring is reviewed separately; this fixture does not claim TLS-discovery coverage.
+- **G704 dispositions:** six OIDC sites are protected by this control, subject to
+  RISK-009 (TLS verification opt-out and legacy HTTP remain residual risks; warning
+  logs are observability, not prevention). Two signed-feed download sites reuse
+  per-hop origin/path validation and resolved-IP dialing: `TestF3b2_SSRFPrivateAddressRejected`,
+  `TestF3b2_RedirectEscapeRejected`, `TestF3b2_DialsResolvedIPWithOfficialHostAndSNI`.
+  Two release-agent sites are **accepted risk**, not SSRF-protected: UDS is preferred,
+  but configured private/local HTTP(S) endpoints intentionally remain reachable;
+  environment proxy/redirect semantics of that override need review. Existing
+  `TestService_EndpointRebindingUsesNewClient` tests endpoint selection, not safety
+  of arbitrary endpoint destinations. G704 now blocks new unannotated sites in
+  standalone gosec and golangci; root race runs the behavioral tests.
+- **Remaining gap:** other cloned transports with a guarded dialer and inherited
+  proxy must be reviewed individually. This fix establishes no universal SSRF
+  claim for SAML, LDAP, alerts, feeds, release catalogs or the forward proxy.
+  No new exception hides this unresolved review.
+- **Owner:** @KidCarmi (repository default CODEOWNER; confirm security DRI).
+  **Review:** 2026-11-03. Detailed inventory and exact CI paths:
+  [2026-10-03 audit](security-reviews/2026-10-03-suppression-evidence.md).
+
+### Historical RISK-002 closure (2026-06-28; superseded assumptions)
 - **Was (HV):** `NewOIDCAuth` (`auth_oidc.go`) cloned the introspection transport with **no**
   `DialContext = ssrfSafeDialContext`, unlike the sibling `auth_oidc_flow.go:300`. The
   admin-configured introspection URL is reached on every token-validating request → per-request SSRF
@@ -169,7 +208,41 @@
     cleartext migrated on save. Webhook HMAC delivery tests still green (signing unaffected).
     Build/vet/lint/`-race`/determinism all green. **Complexity S — closed as recommended.**
 
-## RISK-006 — Trivy gate config blind spots · MEDIUM · ✅ CLOSED 2026-07-04
+<a id="security-suppression-evidence"></a>
+
+## RISK-006 — Trivy gate config blind spots · MEDIUM · MITIGATING (2026-10-03 audit)
+- **Audit 2026-10-03:** removed the expired `CVE-2026-14456` entry rather than
+  renewing it. The exact baseline linux/amd64 candidate image contains Alpine
+  `libcrypto3`/`libssl3` **3.5.9-r0**, beyond OpenSSL's **3.5.8** fix boundary.
+  This is remediation evidence for that image, independent of static-linking
+  and server reachability claims. No exception remains active.
+- **Executable evidence:** final PR image inspection records commit, image ID,
+  installed apk database, executable inventory and actual Go build metadata;
+  `assert-static-binary.sh` refuses missing CGO=0 metadata or ELF interpreter/
+  dynamic segments for BOTH proxy and bundled maintenance agent. Main/tag
+  candidate qualification applies it to the exact digest for linux/amd64 and
+  linux/arm64. Real ELF tests and promotion tests enforce rejection. It proves
+  linkage of those bytes only; packaged dynamic executables, host OS, systemd
+  services and external QUIC servers are separate scopes.
+- **Policy visibility:** preserve blocking HIGH/CRITICAL + ignore-unfixed scans.
+  Full-severity/unfixed/suppressed reports now cover the same PR image and both
+  candidate platforms. PR gosec JSON includes global exclusions AND inline sites
+  (`-nosec -no-fail`), with scan completeness checked separately (including equality of the reported
+  finding count and the retained findings array). Metadata/expiry
+  validation requires an owner, classification, exact scope and evidence anchor
+  in this register. Metadata checks do not establish security.
+- **Remaining exclusions:** root G104/G302/G304/G703 and maintenance G104/G302/G304
+  remain under investigation. G304/G703 findings include HTTP upload/restore and
+  support paths; the historical "operator-config paths" rationale is not adequate.
+  Maintenance G703 now runs: its sole finding already has a scoped ULID annotation
+  and `TestOperationsEndpoint_RejectsInvalidOpID`; that does not prove StateDir
+  cannot contain hostile symlinks. G704 globals retired after triage of all ten
+  root findings (RISK-002), not simply because the scanner now passes.
+- **Owner:** @KidCarmi (default CODEOWNER; confirm security DRI). **Review:** 2026-11-03.
+  [Inventory, vendor sources, artifact digests and unresolved claims](security-reviews/2026-10-03-suppression-evidence.md)
+  are supporting evidence; this register remains the decision authority.
+
+### Historical RISK-006 closure (superseded; retain as provenance)
 - **Fix (as recommended):** (1) the blocking gate keeps `--ignore-unfixed` (un-actionable noise is a
   real cost), and a new **non-blocking full-severity pass** (no `--ignore-unfixed`, no severity
   filter, `--show-suppressed` so `.trivyignore`'d findings appear WITH suppression status — trivy
@@ -183,7 +256,7 @@
 - **Update 2026-07-11:** the updater module was removed (DEBT-008/RISK-ACC-1 CLOSED), so those two
   `docker/docker` masks were retired and `.trivyignore` is now empty. The `exp:`-date mechanism and
   the full-severity non-blocking pass remain the pattern for any future suppression.
-- **Update 2026-08-30 — one suppression is ACTIVE again; recorded here so the register, not just the
+- **Historical update 2026-08-30 — one suppression was active again; recorded here so the register, not just the
   file, carries it.** `.trivyignore` holds `CVE-2026-14456 exp:2026-09-15` (HIGH; OpenSSL QUIC-server
   unbounded-memory DoS in Alpine's `libcrypto3`/`libssl3`). The base image `alpine:3.24` ships
   `3.5.7-r0` and the fix is `3.5.8-r0`; 3.24 is the newest Alpine release, and the runtime stage
@@ -240,6 +313,18 @@
   step. **Complexity XS.**
 
 ## RISK-015 — Single-scanner gate; detection-source divergence · LOW · OPEN
+- **Audit update 2026-10-03:** the unchanged frontend app/generator dependency
+  trees fail their existing HIGH npm audit gate on `GHSA-ch52-4w7c-c8xp`
+  (`http-cache-semantics`, through license-checker-rseidelsohn → arborist/pacote/
+  sigstore; 11 downstream HIGH reports), plus moderate `ip-address` advisories.
+  [PR #1537's canonical verification](https://github.com/KidCarmi/Culvert/actions/runs/37144895951/job/111266729218)
+  is the concrete report. These are advisory leads requiring separate upstream
+  and reachability triage, not a confirmed application runtime exploit. Tooling
+  dependencies still form a build trust boundary. All four app/generator
+  manifests/lockfiles are byte-identical to baseline `3fcc07e7`.
+  No suppression, threshold reduction or forced downgrade was added. Keep the
+  gate blocking; owner @KidCarmi (default CODEOWNER, confirm security DRI), review
+  2026-11-03. Dependency/toolchain remediation is separate from suppression evidence.
 - **Current state:** Dependabot (GitHub Advisory DB) reports **5** docker/docker alerts; Trivy (its
   own DB) reports **3** of them; the Go vuln DB (govulncheck) is a third source. The blocking gate
   relies on Trivy's DB for dependency-graph coverage. The three sources demonstrably disagree on
