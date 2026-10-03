@@ -88,7 +88,7 @@ set -a
 set +a
 for v in BASE_IMAGE_URL BASE_IMAGE_SHA256 APP_IMAGE_REPO APP_IMAGE_TAG APP_IMAGE_INDEX_DIGEST \
          APP_IMAGE_AMD64_DIGEST CLAMAV_IMAGE_REPO CLAMAV_IMAGE_TAG CLAMAV_IMAGE_INDEX_DIGEST \
-         CLAMAV_IMAGE_AMD64_DIGEST COLDLOAD_DIND_IMAGE BUILD_HOST_CONTAINERD_VERSION DOCKER_CE_VERSION VM_DISK_GB VM_VCPUS VM_MEMORY_MB VM_HW_VERSION; do
+         CLAMAV_IMAGE_AMD64_DIGEST COLDLOAD_DIND_IMAGE DOCKER_CE_VERSION VM_DISK_GB VM_VCPUS VM_MEMORY_MB VM_HW_VERSION; do
   [[ -n "${!v:-}" ]] || die "manifest.env: $v is not set"
 done
 
@@ -136,16 +136,8 @@ if command -v gpgv >/dev/null 2>&1 && [[ -f "${BASE_IMAGE_KEYRING:-/nonexistent}
   log "base image GPG: $BASE_GPG"
 fi
 
-# The image archives are written by the daemon's containerd. With Docker
-# 29.6.2 on containerd 2.3.6 `docker save` exported a 69 KB ClamAV archive with
-# no config or layers while the same content store held them; on 2.2.6 (the
-# recorded build host, and a disposable docker:dind) the same sequence saves
-# the complete image (F-OVA-CLAMAV-1, lab runs 37153099273/37153481510). The
-# build therefore runs only on the pinned containerd; the closure and
-# cold-load checks below still verify every archive it writes.
+# Recorded in build-info.json (provenance; not a gate).
 HOST_CONTAINERD="$(docker version --format '{{range .Server.Components}}{{if eq .Name "containerd"}}{{.Version}}{{end}}{{end}}')"
-[[ "${HOST_CONTAINERD#v}" == "$BUILD_HOST_CONTAINERD_VERSION" ]] \
-  || die "the Docker daemon uses containerd ${HOST_CONTAINERD:-unknown}; this build requires ${BUILD_HOST_CONTAINERD_VERSION} (manifest.env BUILD_HOST_CONTAINERD_VERSION) — install containerd.io ${BUILD_HOST_CONTAINERD_VERSION} on the build host"
 log "build host containerd: $HOST_CONTAINERD"
 
 # ── 2. Application images by digest ─────────────────────────────────────────
@@ -167,6 +159,16 @@ for e in m.get("manifests",[]):
   [[ "$got" == "$amd" ]] || die "${repo}: amd64 platform digest is $got, manifest pins $amd"
   docker tag "${repo}@${idx}" "${repo}:${tag}"
 }
+# ClamAV is pulled AND saved before the candidate image archive is loaded.
+# Loading that archive into the store first made every later ClamAV save
+# hollow — index and manifests only, no config or layers (69,562 bytes), by
+# tag, by digest or both — while a store that never loaded it saves the full
+# image (F-OVA-CLAMAV-1; bisected in fresh disposable stores, lab run
+# 37154350794). The closure and cold-load checks below verify the result.
+pull_by_digest "$CLAMAV_IMAGE_REPO" "$CLAMAV_IMAGE_INDEX_DIGEST" "$CLAMAV_IMAGE_AMD64_DIGEST" "$CLAMAV_IMAGE_TAG"
+mkdir -p "$WORK"
+log "docker save ${CLAMAV_IMAGE_REPO}:${CLAMAV_IMAGE_TAG} (before any archive is loaded)"
+docker save "${CLAMAV_IMAGE_REPO}:${CLAMAV_IMAGE_TAG}" | gzip -n -6 > "$WORK/clamav.tar.gz"
 CANDIDATE=0
 CANDIDATE_TAR_SHA=""
 if [[ -n "$CANDIDATE_TAR" ]]; then
@@ -203,7 +205,6 @@ else
   APP_REF="${APP_IMAGE_REPO}@${APP_IMAGE_INDEX_DIGEST}"
   COSIGN_RESULT="skipped (--skip-cosign)"
 fi
-pull_by_digest "$CLAMAV_IMAGE_REPO" "$CLAMAV_IMAGE_INDEX_DIGEST" "$CLAMAV_IMAGE_AMD64_DIGEST" "$CLAMAV_IMAGE_TAG"
 
 if [[ "$CANDIDATE" -eq 0 && "$SKIP_COSIGN" -eq 0 ]]; then
   log "cosign-verifying ${APP_IMAGE_REPO}@${APP_IMAGE_INDEX_DIGEST} (keyless, pinned identity)"
@@ -296,7 +297,7 @@ save_image() { # ref out.tar.gz
   docker save "$1" | gzip -n -6 > "$2"
 }
 save_image "${APP_IMAGE_REPO}:${APP_IMAGE_TAG}"       "$OV/var/lib/culvert-appliance/images/culvert.tar.gz"
-save_image "${CLAMAV_IMAGE_REPO}:${CLAMAV_IMAGE_TAG}"  "$OV/var/lib/culvert-appliance/images/clamav.tar.gz"
+mv "$WORK/clamav.tar.gz" "$OV/var/lib/culvert-appliance/images/clamav.tar.gz"  # saved before the candidate load (above)
 # First boot checks the loaded image against APP_IMAGE_INDEX_DIGEST; prove the
 # archive carries that identity before baking it (archive-identity.sh).
 archive_names_digest "$OV/var/lib/culvert-appliance/images/culvert.tar.gz" "$APP_IMAGE_INDEX_DIGEST" \

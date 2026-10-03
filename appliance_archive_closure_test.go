@@ -298,31 +298,29 @@ func TestBuildOVA_ColdLoadsBothArchivesBeforeBaking(t *testing.T) {
 	}
 }
 
-// F-OVA-CLAMAV-1's cause: with Docker 29.6.2, `docker save` on containerd
-// 2.3.6 wrote a hollow ClamAV archive while the content store held the image;
-// on 2.2.6 (the recorded build host, and a disposable docker:dind) the same
-// sequence is complete. The build refuses any containerd but the pinned one,
-// before any image is pulled or saved.
-func TestBuildOVA_RunsOnlyOnThePinnedContainerd(t *testing.T) {
+// F-OVA-CLAMAV-1's cause, bisected in fresh disposable stores (lab run
+// 37154350794): once the candidate image archive had been loaded into the
+// store, every later save of the pulled ClamAV image was hollow (index and
+// manifests only) — by tag, by digest or both — while a store that never
+// loaded it saved the full image. The build pulls and saves ClamAV before any
+// archive is loaded, and bakes that early save.
+func TestBuildOVA_SavesClamAVBeforeLoadingTheCandidate(t *testing.T) {
 	b, err := os.ReadFile(buildOVAScript)
 	if err != nil {
 		t.Fatal(err)
 	}
 	src := string(b)
-	check := strings.Index(src, `[[ "${HOST_CONTAINERD#v}" == "$BUILD_HOST_CONTAINERD_VERSION" ]]`)
-	pull := strings.Index(src, `pull_by_digest "$CLAMAV_IMAGE_REPO"`)
-	save := strings.Index(src, `save_image "${CLAMAV_IMAGE_REPO}:${CLAMAV_IMAGE_TAG}"`)
-	if check < 0 || pull < 0 || save < 0 || check > pull || check > save {
-		t.Fatal("build-ova.sh must refuse an unpinned containerd before pulling or saving any image")
+	pull := strings.Index(src, `pull_by_digest "$CLAMAV_IMAGE_REPO" "$CLAMAV_IMAGE_INDEX_DIGEST" "$CLAMAV_IMAGE_AMD64_DIGEST" "$CLAMAV_IMAGE_TAG"`)
+	save := strings.Index(src, `docker save "${CLAMAV_IMAGE_REPO}:${CLAMAV_IMAGE_TAG}" | gzip -n -6 > "$WORK/clamav.tar.gz"`)
+	load := strings.Index(src, `docker load -q -i "$CANDIDATE_TAR"`)
+	bake := strings.Index(src, `mv "$WORK/clamav.tar.gz" "$OV/var/lib/culvert-appliance/images/clamav.tar.gz"`)
+	if pull < 0 || save < 0 || load < 0 || bake < 0 || pull > save || save > load || bake < load {
+		t.Fatalf("build-ova.sh must pull and save ClamAV before loading the candidate archive, and bake that save (pull=%d save=%d load=%d bake=%d)", pull, save, load, bake)
+	}
+	if strings.Count(src, `pull_by_digest "$CLAMAV_IMAGE_REPO"`) != 1 || strings.Count(src, `docker save "${CLAMAV_IMAGE_REPO}:${CLAMAV_IMAGE_TAG}"`) != 1 {
+		t.Error("ClamAV must be pulled and saved exactly once, before the load")
 	}
 	if !strings.Contains(src, `"containerd": E["BI_CONTAINERD"]`) {
 		t.Error("build-info.json must record the build host's containerd")
-	}
-	m, err := os.ReadFile(filepath.Join(pkgSourceDir(), "appliance", "build", "manifest.env"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !regexp.MustCompile(`(?m)^BUILD_HOST_CONTAINERD_VERSION=2\.2\.6$`).Match(m) {
-		t.Error("manifest.env must pin BUILD_HOST_CONTAINERD_VERSION to the verified 2.2.6")
 	}
 }

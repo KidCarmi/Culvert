@@ -126,14 +126,7 @@ jobs:
           sudo apt-get update -q
           v="$(apt-cache madison docker-ce | awk '$3 ~ /^5:29\.6\.2-/{print $3; exit}')"
           [ -n "$v" ] || { echo "::error::docker-ce 29.6.2 not available"; exit 1; }
-          # containerd too: on the runner's newest containerd.io (2.3.6) docker
-          # save wrote a hollow ClamAV archive (F-OVA-CLAMAV-1); the recorded
-          # build host runs 2.2.6, and build-ova.sh now refuses anything else.
-          c="$(apt-cache madison containerd.io | awk '$3 ~ /^2\.2\.6-/{print $3; exit}')"
-          [ -n "$c" ] || { echo "::error::containerd.io 2.2.6 not available"; exit 1; }
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q --allow-downgrades "docker-ce=$v" "docker-ce-cli=$v" "containerd.io=$c"
-          sudo systemctl restart containerd docker
-          containerd --version | tee /dev/stderr | grep -q ' v2\.2\.6 '
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q --allow-downgrades "docker-ce=$v" "docker-ce-cli=$v" containerd.io
           docker version --format 'client={{.Client.Version}} server={{.Server.Version}}'
       - name: Use the containerd image store (the build's archive-identity guard requires it)
         # Under Docker's classic store a loaded image's ID is its CONFIG digest,
@@ -171,12 +164,12 @@ jobs:
           set -uo pipefail
           . appliance/build/manifest.env
           # Bisect: each variant in its OWN fresh disposable store.
-          for v in baseline preload preload+create; do
+          for v in baseline load-first save-first; do
             echo "=== replay variant: $v"
-            pre=""; cr=0
-            [[ "$v" == preload* ]] && pre="$LAB_ROOT/in/culvert-image.tar"
-            [[ "$v" == *create ]] && cr=1
-            REPLAY_PRELOAD_TAR="$pre" REPLAY_CREATE="$cr" test/e2e/appliance/lab/save-replay.sh "$CLAMAV_IMAGE_REPO" "$CLAMAV_IMAGE_TAG" \
+            pre=""; order=""
+            [[ "$v" != baseline ]] && pre="$LAB_ROOT/in/culvert-image.tar"
+            [[ "$v" == save-first ]] && order=save-first
+            REPLAY_PRELOAD_TAR="$pre" REPLAY_ORDER="$order" test/e2e/appliance/lab/save-replay.sh "$CLAMAV_IMAGE_REPO" "$CLAMAV_IMAGE_TAG" \
               "$CLAMAV_IMAGE_INDEX_DIGEST" "$CLAMAV_IMAGE_AMD64_DIGEST" "$COLDLOAD_DIND_IMAGE" "$LAB_ROOT/replay"
           done 2>&1 | tee "$LAB_ROOT/save-replay.txt"
           echo "builder daemon has no ClamAV image before the build: $(docker image ls -q --filter reference='*clamav*' | wc -l) found"
