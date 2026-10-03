@@ -1465,20 +1465,74 @@ func initClusterCA(clusterDBPath string) {
 	}
 }
 
-// enableControlPlane activates Control Plane mode: starts the gRPC server,
-// initialises the cluster CA, and starts the heartbeat monitor.
+// enableControlPlane activates Control Plane mode: the one-time pre-bind work,
+// the gRPC listener, the cluster role and the heartbeat monitor.
 // Safe to call at runtime from the admin API (idempotent — returns error if already CP).
+//
+// Reached from exactly three places, and all three are non-fatal: the admin API
+// (`POST /api/cluster/mode`), the HA promote callback (panic-contained, guard
+// reset so a later attempt retries), and — since CHAOS-71 — the boot path's
+// `cpGRPCSupervisor`, which retries. The boot path used to call this and
+// `logFatalf` on any error; see cluster_grpc_bind.go for that finding.
 func enableControlPlane(grpcAddr, certFile, keyFile, caFile, clusterDBPath string) error {
+	if err := checkControlPlaneActivatable(grpcAddr); err != nil {
+		return err
+	}
+	prepareControlPlane(clusterDBPath)
+
 	clusterRoleMu.Lock()
 	defer clusterRoleMu.Unlock()
+	return activateControlPlaneLocked(grpcAddr, certFile, keyFile, caFile, "admin API")
+}
 
-	if clusterRole.role == "control-plane" {
-		return fmt.Errorf("already running as control-plane")
-	}
+// checkControlPlaneActivatable is the cheap precondition check, taken under a
+// READ lock so it can run before the expensive prepare step without a
+// redundant enable publishing a config snapshot on its way to being refused.
+//
+// It is NOT the authority: activateControlPlaneLocked re-checks the same
+// conditions under the write lock, which is what closes the check-then-act gap
+// this split opens.
+func checkControlPlaneActivatable(grpcAddr string) error {
 	if grpcAddr == "" {
 		return fmt.Errorf("gRPC listen address is required")
 	}
+	clusterRoleMu.RLock()
+	defer clusterRoleMu.RUnlock()
+	if clusterRole.role == "control-plane" {
+		return fmt.Errorf("already running as control-plane")
+	}
+	return nil
+}
 
+// prepareControlPlane runs the ONE-TIME pre-bind work: arm the durable
+// config-version floor, publish the initial snapshot, initialise the cluster CA.
+//
+// ████ IT MUST RUN WITH clusterRoleMu NOT HELD. ████
+//
+// `CurrentConfigSnapshot()` reads the cluster role BACK — via
+// `buildCPAddressList` (controlplane_snapshot.go), which takes
+// `clusterRoleMu.RLock()` to read `clusterRole.grpcAddr` — and `sync.RWMutex`
+// is NOT reentrant. Running this inside the write lock therefore DEADLOCKS the
+// calling goroutine WHILE IT HOLDS THE WRITE LOCK, which then blocks every
+// reader of the cluster role for the life of the process.
+//
+// That is not hypothetical and it was not introduced here: `enableControlPlane`
+// used to hold `clusterRoleMu.Lock()` across exactly this call, and
+// `buildCPAddressList` returns early (no lock) only when HA is DISABLED — so
+// the deadlock was latent on a standalone CP and certain on any node with HA
+// enabled, which is definitionally the case on the HA PROMOTE path. A standby
+// promoting itself after a leader failure hung here, holding the role lock,
+// with no leader in the cluster and no panic for the CHAOS-25 guard to catch.
+// Reproduced on the pre-CHAOS-71 tree; see §41.6 of the chaos review.
+//
+// This is the CHAOS-50 §17 rule on a second lock: *hold the mutex for the
+// shortest possible window and NEVER across a call that reads the same state
+// back.* Commit-then-notify, not notify-under-commit.
+//
+// It is idempotent (arming the floor re-reads it; `InitOrLoad` loads an existing
+// CA) and touches no `clusterRole` field, which is why it needs no lock of its
+// own.
+func prepareControlPlane(clusterDBPath string) {
 	// CHAOS-01: seed + arm the durable config-version floor BEFORE the first
 	// publish so a restarted (or HA-promoted) CP never re-issues version
 	// numbers at or below what running DPs have already seen.
@@ -1488,6 +1542,26 @@ func enableControlPlane(grpcAddr, certFile, keyFile, caFile, clusterDBPath strin
 	// the CP still serves locally, so boot continues.
 	_ = globalConfigStore.Update(CurrentConfigSnapshot())
 	initClusterCA(clusterDBPath)
+}
+
+// activateControlPlaneLocked binds the listener and commits the role transition.
+// REQUIRES clusterRoleMu (write).
+//
+// `via` names what triggered the activation and reaches only the success log
+// line. It exists because that line read "enabled via GUI" UNCONDITIONALLY, so
+// an ordinary Control Plane BOOT logged a GUI action nobody performed — a
+// misattribution on a cluster-role transition, and one that becomes actively
+// misleading now that a retrying supervisor is a third possible trigger.
+//
+// Nothing in here may read the cluster role back through another package-level
+// helper; see prepareControlPlane for why.
+func activateControlPlaneLocked(grpcAddr, certFile, keyFile, caFile, via string) error {
+	if clusterRole.role == "control-plane" {
+		return fmt.Errorf("already running as control-plane")
+	}
+	if grpcAddr == "" {
+		return fmt.Errorf("gRPC listen address is required")
+	}
 	if err := StartControlPlaneGRPC(grpcAddr, certFile, keyFile, caFile); err != nil {
 		return err
 	}
@@ -1499,7 +1573,8 @@ func enableControlPlane(grpcAddr, certFile, keyFile, caFile, clusterDBPath strin
 	clusterRole.keyFile = keyFile
 	clusterRole.caFile = caFile
 	globalClusterStore.StartHeartbeatMonitor(appLifecycleCtx.Done())
-	logger.Printf("ControlPlane: enabled via GUI (gRPC %s)", strings.ReplaceAll(grpcAddr, "\n", ""))
+	logger.Printf("ControlPlane: enabled via %s (gRPC %s)",
+		strings.ReplaceAll(via, "\n", ""), strings.ReplaceAll(grpcAddr, "\n", ""))
 	return nil
 }
 

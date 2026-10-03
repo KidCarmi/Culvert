@@ -95,6 +95,15 @@ everything else is triaged below with a suggested PR and required tests for foll
 > in a committed placeholder row at the START of a sweep), and at six
 > occurrences it is well past overdue.
 
+**2026-10-02 — `CHAOS-71` CLAIMED (placeholder, commit one). Domain: the
+Control Plane's gRPC BIND, and which plane is allowed to kill which — the
+analogue §36 (CHAOS-66) named as "the closest unexamined" one when it closed
+the SOCKS5 bind: `cluster_startup.go`'s `logFatalf("ControlPlane gRPC: %v")`.
+Claimed here, in a committed line, BEFORE any code was written — the remedy the
+header above reaches twice independently after ten collisions, and which §39
+and §35 applied first. Ids 67 and 68 remain allocated to other open sweeps and
+were not reused. Findings and gates are written up in §41 below.**
+
 **2026-09-22 — CHAOS-70 sweep (the admin roster as a durability surface).**
 Written up as `CHAOS-66` and renumbered to `CHAOS-70` (§40) when main was merged
 in, because the SOCKS5-bind sweep below had taken 66 first — another
@@ -8281,3 +8290,774 @@ the sweep happens to be editing.
   from the local-account delete path, which the roster backstop already covers;
   it becomes live the moment user-level revocation is wired to anything else.
   Recorded as **AU-19**, not fixed inside a sweep about durability.
+
+---
+
+## 41. CHAOS-71 — The Control Plane's gRPC BIND, and which plane may kill which
+
+**Status:** Shipped. Closes the analogue §36 (CHAOS-66) named as "the closest
+unexamined" one when it closed the SOCKS5 listener's bind. Third and final
+instance of the family opened by §33 (CHAOS-57).
+
+> **Read §41.6 first.** The sweep set out to remove a `logFatalf` and, while
+> gating it, found that `enableControlPlane` **DEADLOCKS** — holding the
+> cluster-role write lock forever — on any node with HA enabled, which is
+> definitionally every HA **promote**. A standby promoting itself after a leader
+> failure stopped there, with no leader in the cluster and no panic for
+> CHAOS-25's guard to catch. That defect predates this sweep; this sweep is what
+> made it reachable from an unattended retry loop, and what found it.
+
+### 41.1 Executive summary
+
+`startControlPlaneWithHAResume` (`cluster_startup.go`) activated the cluster
+control plane with exactly one error branch:
+
+```go
+if err := enableControlPlane(cfg.CPAddr, cfg.CPCert, cfg.CPKey, cfg.CPCA, cfg.ClusterDBPath); err != nil {
+        logFatalf("ControlPlane gRPC: %v", err)   // ← os.Exit(1)
+}
+```
+
+So **every** way the cluster gRPC listener could fail to come up terminated the
+whole appliance — and it did so from `initCluster`, which `main.go` runs at line
+228 of the init block, **before** `initRootCA`, `initPolicy`,
+`initURLCategories`, `initScanning`, `initSOCKS5`, `startAdminUI` and
+`buildAndStartProxyServer`. The HTTP/HTTPS proxy, the admin UI, the SOCKS5
+listener and every health endpoint therefore never start at all.
+
+**The sharpest part of this finding has nothing to do with blast radius.** The
+rule already existed on two of the three call sites of the same function, and
+the one that lacked it is the one that runs unattended:
+
+| Caller | On an activation failure |
+|---|---|
+| `ui_cluster.go` — `POST /api/cluster/mode` (admin API) | returns the error to the operator (409) |
+| `ha.go` `promote` — the HA promote callback | panic-contained (CHAOS-25); guard reset *"so a later attempt can retry"* |
+| `cluster_startup.go` — **the boot path** | **`os.Exit(1)`** |
+
+That asymmetry, not any individual handler, is the finding. It is the shape §30
+(CHAOS-61) recorded for the cluster rate limiter, where the CP pruned stale peer
+counts and the DP did not: the rule was written on one side of the link and not
+the other, and the side that lacked it is the one that decides live behaviour.
+
+### 41.2 Reproduction (real binary, not reasoned about)
+
+**(1) An occupied gRPC port** — the ordinary redeploy / host-service case:
+
+```
+$ ./culvert -port 18080 -ui-port 19090 -cp-grpc-addr 127.0.0.1:50051 -cluster-insecure
+ControlPlane: config v1790979205 published
+ClusterCA: generated new cluster CA (expires 2036-09-29)
+WARN ControlPlane: gRPC 127.0.0.1:50051 (insecure — all cluster data unencrypted!)
+ControlPlane gRPC: gRPC listen: listen tcp 127.0.0.1:50051: bind: address already in use
+EXIT=1
+proxy http_code=000          ← the HTTP proxy port never listened
+ui http_code=000             ← the admin UI port never listened
+admin UI log lines: 0        ← startAdminUI never ran
+```
+
+**(2) An mTLS pair caught mid-rotation** — needs no port collision anywhere:
+
+```
+$ : > cp.crt; : > cp.key     # what certbot/cert-manager looks like mid-write
+$ ./culvert -port 18081 -ui-port 19091 -cp-grpc-addr 127.0.0.1:50052 \
+      -cp-grpc-cert cp.crt -cp-grpc-key cp.key
+ControlPlane gRPC: gRPC TLS: tls: failed to find any PEM data in certificate input
+EXIT=1
+ui http_code=000
+```
+
+### 41.3 Triggers, and why none is visible to the one check that looks relevant
+
+`validatePortCollisions` (`main.go`) compares Culvert's own proxy / UI / SOCKS5
+ports to **each other** only — **the cluster gRPC port is not even in its
+list**, so it cannot see a host service, a predecessor container still draining,
+a second Culvert, or even a collision with Culvert's own proxy port.
+
+- **EADDRINUSE** — a predecessor container draining, a host-network service, an
+  operator collision, a second instance.
+- **EACCES/EPERM** — a privileged gRPC port on a deployment that dropped
+  `CAP_NET_BIND_SERVICE` or stopped running as root.
+- **EADDRNOTAVAIL** — binding before the interface the address lives on is up.
+  **More likely here than for the other three listeners**, because a CP is
+  usually bound to a specific address rather than the wildcard.
+- **the mTLS pair unreadable or momentarily truncated** — certbot /
+  cert-manager / a Docker secret mid-rotation. `cpServerOption` loads the pair
+  at bind time, so a rotation window is a boot that ends in exit 1.
+
+Under `restart: unless-stopped` each is an unattended **crash loop**: no proxy,
+no admin UI, no `/health`, no `/ready`, recoverable only with shell access.
+
+### 41.4 Why "it exits, so it fails closed" is wrong, twice
+
+The §33 argument applies unchanged and must not be re-argued: **process death
+picks no posture, it delegates the choice to the topology.** An explicit-proxy
+fleet loses all egress; a PAC/WPAD fleet with a `DIRECT` fallback, or a
+transparent deployment that bypasses a dead next hop, goes **unfiltered**.
+
+There is a second argument specific to this plane, and it is stronger. A Control
+Plane whose gRPC is not serving is, from the fleet's point of view, **exactly** a
+Control Plane that is unreachable — and that is a state the Data Plane side is
+already built to survive: `pollConfig` fails and backs off, the `cp_poll`
+readiness row reports it, the CP-link alert fires, and **every DP keeps
+enforcing its last-known config** (HA-1's documented config-staleness posture).
+Killing the process converts a degradation the fleet already tolerates into a
+total egress outage for this node's own clients, plus the loss of the only
+surface on which an operator could see or fix it.
+
+### 41.5 The fix, and the rule that keeps it from being worse than the defect
+
+`cluster_grpc_bind.go` adds a `cpGRPCSupervisor` that owns the activation
+lifecycle. Six of its seven rules are borrowed wholesale from
+CHAOS-54/55/57/66 rather than invented as a fourth dialect. **Rule 3 is this
+sweep's own, and it is the one a naive fix gets wrong.**
+
+1. **No bind path is fatal.** `startControlPlaneSupervised` always returns.
+
+2. **Retry is RATE-bounded, never COUNT-bounded** (1 s doubling to 30 s, ±20%
+   jitter, interruptible). The terminal state of "give up" is a fleet that never
+   receives config again until someone restarts the appliance — the outcome this
+   change exists to remove. "Avoid infinite retries" is satisfied the
+   CHAOS-54/55 way: the retry is never SILENT (onset logged immediately, then
+   ≤1 line per 60 s, then a recovery line naming the suppressed count;
+   magnitude in a counter).
+
+3. **ROLE AND LEADERSHIP ARE ASSERTED ONLY ON AN OBSERVED BIND.**
+
+   If a node that cannot bind were allowed to continue to
+   `clusterRole.role = "control-plane"` and `globalHA.ResumeAsLeader`, it would
+   hold the leader role, report `role: leader` on `/healthz` and in the HA
+   panel, and serve no gRPC at all — a **black hole for config distribution**.
+   Its standby cannot reach it, so in legacy ADR-0004 mode (no etcd fence)
+   auto-failover promotes the standby too and **both** nodes claim leadership.
+   **A SPLIT BRAIN introduced by the change that removes an outage.** Today the
+   fatal happens to prevent that, so the exit is load-bearing for a reason that
+   has nothing to do with why it was written.
+
+   Staying `standalone` until a listener actually binds gives the CLUSTER
+   byte-identical semantics to the old fatal — the standby promotes exactly as
+   it does when the leader is dead — while this node keeps proxying and keeps
+   its admin UI. The cost is that leadership is taken late rather than never; in
+   lease mode the etcd fence arbitrates, and in legacy mode it is the ordinary
+   restarted-leader path the code already prints an ADR-0004/RISK-001 warning
+   for on every boot.
+
+4. **The FIRST attempt resolves SYNCHRONOUSLY** before `loadCluster` continues.
+   Without it `configured` is true while the supervisor goroutine has not run
+   yet, and in that window every surface describes a Control Plane that does not
+   exist (`/health` `ready`, the readiness row `ok`, the contract row "serving",
+   `culvert_cluster_grpc_up 1`) with no socket bound. That is the same class of
+   lie this change exists to remove, so reporting the window accurately (a
+   "pending" state) would be the weaker fix: better not to have the window.
+   Bounded by one `bind(2)`, which does not block — and it is the pre-CHAOS-71
+   behaviour, minus the fatal. This is §36's `startSOCKS5` handshake rule.
+
+5. **The deferred completion RE-READS the HA decision** instead of using the
+   boot snapshot. Non-obvious, and load-bearing **because of** this fix: making
+   the admin UI reachable during the retry window is the whole point, so an
+   operator can now change this node's HA posture while it is still retrying.
+   Completing against a stale boot snapshot would assert a leadership the
+   operator has since revoked — the fix handing back a different version of the
+   hazard rule 3 closes. If the decision has moved to `standby`, leadership is
+   skipped and said out loud: nothing here is worse than claiming authority
+   against evidence that says otherwise.
+
+6. **Reason classes are BOUNDED**, matched via `errors.As` on `syscall.Errno`,
+   never by string (`port_in_use`, `permission_denied`, `address_unavailable`,
+   `descriptors_exhausted`, `tls_certificate`, `network_error`,
+   `listen_failed`). The raw error reaches the rate-limited log and nowhere
+   else: an unbounded reason gives the alert dedup key one value per failure
+   (the WK-12/RS-5 defect) and would put the listener address on a viewer-role
+   surface. `network_error` requires an actual `Timeout()` — the narrowing
+   `classifyAdminUIListenError` and `classifySOCKS5BindError` both had to be
+   retrofitted, so this one starts narrow.
+
+7. **The one-time PRE-BIND work runs ONCE, not per attempt.**
+   `enableControlPlane` arms the durable config-version floor, publishes an
+   initial snapshot and initialises the cluster CA before it binds, and each
+   emits a log line — so re-running it per retry would be exactly the log flood
+   rule 2's rate limiting exists to prevent, and would rewrite the version floor
+   once per attempt for no benefit. `enableControlPlaneLocked(..., prepare bool)`
+   is the split; the admin API and HA promote paths pass `true` and are
+   semantically unchanged.
+
+**Deliberately NOT changed:** `runProxyUntilShutdown`'s
+`logFatalf("Proxy error")` stays correct for §33's reason — the proxy IS the
+product, and a gateway that cannot serve must exit loudly rather than linger as
+a black hole. The asymmetry between an auxiliary plane and the primary one is
+the whole point of this family. And `armHALease`'s `logFatalf` stays fatal on
+purpose: silently running legacy ADR-0004 when the operator asked for fencing
+would be an invisible safety downgrade (ADR-0005 S5). The structural wall names
+that one allowance explicitly rather than excusing it by pattern, and
+**self-checks it** — the wall fails if the allowed fatal is ever deleted, so the
+allowance cannot quietly become a hole.
+
+### 41.6 THE BIGGER FINDING: `enableControlPlane` DEADLOCKED, and the HA promote path hit it every time
+
+**This sweep's own gate found a defect more severe than the one it set out to
+fix, in code it did not write.**
+
+```
+enableControlPlane()
+  clusterRoleMu.Lock()                      ← write lock taken
+    CurrentConfigSnapshot()
+      buildCPAddressList()
+        clusterRoleMu.RLock()               ← SAME mutex, same goroutine
+```
+
+`sync.RWMutex` is **not reentrant**, so the goroutine blocks **forever while
+holding the write lock**, and every reader of the cluster role blocks behind it
+for the life of the process.
+
+**`buildCPAddressList` returns early, taking no lock, only when HA is
+DISABLED** (`if !haStatus.Enabled { return nil }`). So:
+
+- on a **standalone** Control Plane the fault is **latent** — which is why the
+  §41.2 reproductions published config and reached the bind normally, and why
+  nothing had noticed;
+- on **any node with HA enabled** it is **certain**;
+- and the HA **promote** callback is, by definition, such a node. A standby
+  promoting itself after a leader failure (`promote()` → `onPromote` →
+  `enableControlPlane`) **hangs here, holding the cluster-role write lock, with
+  no leader in the cluster.** `promote()` is panic-contained under CHAOS-25, but
+  **a deadlock is not a panic** — `runGuarded` waits for the function to return,
+  so the guard has nothing to catch and the idempotency guard is never reset,
+  meaning no later attempt retries either.
+- The admin API path (`POST /api/cluster/mode`) hangs the same way on an
+  HA-enabled node: the operator's request never returns **and** the role lock is
+  held forever.
+
+Reproduced on the **pre-CHAOS-71 tree** (`git stash`, clean base), by arming
+`globalHA.role` so `Status().Enabled` is true and calling the real
+`enableControlPlane` on a goroutine:
+
+```
+--- FAIL: TestProbeCPDeadlock (5.01s)
+    DEADLOCK: enableControlPlane did not return within 5s with HA enabled
+```
+
+**Exactly how reachable, stated precisely rather than dramatically.** The CP
+**boot** path is latent both before and after this sweep: `globalHA.role` is `""`
+until `ResumeAsLeader`, which runs *after* the bind, and `armHALease` sets only
+the lease provider and TTL — not the role — so `Status().Enabled` is false while
+the pre-bind work runs. (Verified, not assumed: the real-binary run in §41.2
+published config and reached the bind normally, and the recovery run in §41.5's
+verification resumed leadership afterwards without hanging.) **The certain paths
+are the HA promote callback and the admin API on a node where HA is already
+enabled** — and those are the ones that matter, because the first is an
+unattended failover.
+
+**How it was found is the part worth keeping, and it is not a code-reading
+story.** `TestChaos71_StopIsPromptDuringBackoff` hung for the full 10-minute test
+timeout in a `-shuffle=on` full-package run, having passed in 0.64 s in
+isolation. The cause was **test pollution**: an earlier test in the package
+leaves `globalHA` armed, which under one shuffle order put the supervisor's
+pre-bind work on the locking branch of `buildCPAddressList`. The goroutine dump
+named the cycle in four frames.
+
+The transferable lesson is about the reaction, not the mechanism. **A hang that
+only appears under `-shuffle` looks exactly like test pollution, and the
+reflex — isolate the global, move on — would have buried a production P0 on a
+path no test drives directly.** The question that found it is *why does this
+global make the code deadlock at all?* rather than *which test left it set?*
+The same reflex is what §36's round-3 entry warns about from the other
+direction, where a determinism failure that looked like ordering turned out to
+be the environment. Both say: a shuffle-only failure is evidence about the
+CODE until proven otherwise.
+
+**The fix is the rule CHAOS-50 §17 already recorded for `clusterCA.mu`, applied
+to the second lock:** *hold the mutex for the shortest possible window and NEVER
+across a call that reads the same state back.* `enableControlPlane` is split
+into three phases, and only the middle one holds the write lock:
+
+1. `checkControlPlaneActivatable` — cheap preconditions under a short **read**
+   lock, so a redundant enable does not publish a config snapshot on its way to
+   being refused;
+2. `prepareControlPlane` — the one-time pre-bind work, **with no lock held**;
+3. `activateControlPlaneLocked` — bind and commit the role under the write lock,
+   **re-checking** the preconditions, which is what closes the check-then-act
+   gap phase 1 opens.
+
+Leadership is resolved **after** the lock is released, and that is required
+rather than tidy: `ResumeAsLeader` can perform an etcd lease acquisition with
+network round trips (ADR-0005), so holding the cluster-role write lock across it
+would block every reader of the role for the resume budget. It is also exactly
+what the pre-CHAOS-71 boot path did (`enableControlPlane` returned, releasing
+the lock, and leadership followed), so the ordering is preserved rather than
+invented.
+
+**Gates — three behavioural plus one general wall, all verified failing against
+the reintroduced shape:**
+
+- `PrepareRunsWithTheRoleLockReleased` asserts the **mechanism** (`TryLock`
+  succeeds inside the prepare seam) rather than timing out on the symptom,
+  because a hang gate is a ten-minute failure with no name attached — which is
+  how this was found once, and a poor way to find it twice.
+- `EnableControlPlaneDoesNotDeadlockWithHAEnabled` drives the real
+  `enableControlPlane` with HA armed and additionally requires the lock to be
+  free afterwards.
+- `PrepareRunsOncePerSupervisor` counts through the `cpPrepareFn` seam rather
+  than reading the supervisor's private flag, which only the supervisor
+  goroutine writes and would be a data race to observe.
+- `Wall_NoCurrentConfigSnapshotUnderTheRoleLock` is an **AST wall over every
+  non-test file in package main**: any function that takes `clusterRoleMu` in
+  either mode and then calls `CurrentConfigSnapshot` or `prepareControlPlane` is
+  a build failure. It is deliberately wider than the two call sites this sweep
+  touched, because this is a **whole-package invariant about a primitive**, not
+  a property of one function — and because a new offender would be latent on a
+  standalone node and certain on an HA one, i.e. invisible until a failover.
+  That is §40 (CHAOS-70) round 3's governance lesson applied preventively:
+  **enumerate such a class from the PRIMITIVE (`clusterRoleMu`), not from the
+  file being edited.** It carries two not-vacuous checks (a function-count floor
+  and a requirement that something still takes the lock).
+
+### 41.7 Two riders found while reading the code being changed
+
+**`StartControlPlaneGRPC` LEAKED the `grpc.Server` it had just built** when
+`lc.Listen` failed: the server is constructed and the ConfigService registered
+*before* the bind, and the failure path returned without `srv.Stop()`.
+`grpc.NewServer` spawns no goroutines before `Serve`, so it is a pure memory
+leak rather than a goroutine one — but it was **already reachable from the admin
+API's enable endpoint** (an operator retrying a bad address), and CHAOS-71 adds
+an AUTOMATIC retry at up to one attempt per 30 s, which turns "a few clicks"
+into ~2880 leaked registered servers a day. The retry and the cleanup are
+therefore one change.
+
+**`enableControlPlane`'s success line said "enabled via GUI" unconditionally**,
+so an ordinary Control Plane *boot* logged a GUI action nobody performed — a
+misattribution on a cluster-role transition line, and one that becomes actively
+misleading now that a retrying supervisor is a third possible trigger. The line
+now names its actual trigger (`enabled via startup` / `via admin API`).
+
+### 41.8 Surfaces (existing vocabulary, one new event with its reason stated)
+
+Every one is emitted **only when CP mode is configured** — the
+socks5 / cluster_ca / dns emission rule: a `culvert_cluster_grpc_up 0` on the
+ordinary standalone appliance is indistinguishable from a Control Plane whose
+listener is dead, and the documented paging rule is `== 0`.
+
+- `cluster_grpc` **operator-contract row** (role-gated `/api/diagnostics`), with
+  a remedy chosen **per reason class** — §36's round-3 finding: a bounded
+  classifier is worth nothing if one remedy is printed for every class, and a
+  node out of descriptors or with an interface not yet up was being sent to hunt
+  the owner of a port nobody holds. Two clauses are invariant in every branch
+  (the listener rebinds by itself; the proxy and admin UI are unaffected).
+- **report-only `cluster_grpc` row on `/ready`**, and the report-only part is
+  load-bearing (pinned as a CONTROL, asserted as a differential against the
+  verdict with no cluster configured): a node whose cluster gRPC cannot bind is
+  proxying perfectly, so gating readiness would eject a fully working gateway
+  over a plane that has nothing to do with serving traffic — converting a
+  control-plane fault into the traffic outage this change exists to prevent.
+  Strict callers opt in via `?strict=1`. Detail is a FIXED string per branch:
+  `/ready` is unauthenticated on the proxy port.
+- **fixed five-value `cluster_grpc` posture on `/health`** (`disabled` / `ready`
+  / `degraded` / `unavailable` / `stopped`). Posture public, resolution not.
+- `culvert_cluster_grpc_{up,unavailable,role_asserted,bind_failures_total,binds_total,bind_backoff_seconds}`.
+  The `role_asserted` gauge is the half an operator cannot get anywhere else:
+  `up 0` + `role_asserted 0` says *configured as a CP, never served*, which is
+  what distinguishes "came up and fell over" from "never came up at all".
+- All of these ride the **PROXY** port, which is what makes them reachable while
+  the cluster plane is down — the cluster gRPC endpoint cannot report that the
+  cluster gRPC endpoint is unreachable (§33's reasoning for the admin UI).
+- A fire-once-per-episode **`cluster_grpc_unavailable`** alert, cleared only by
+  an observed bind. **A new event name, and this sweep owes the reason:** §27's
+  rule is that a new name is silently unsubscribed on every already-configured
+  webhook, so reusing one is the default. There is no existing event meaning
+  *"this node's cluster control-plane listener is not serving"* — the CP-link
+  alerting that exists fires on the DATA PLANE, about reaching a CP, and cannot
+  be produced by the CP about itself. `admin_ui_unavailable` (§33) is the direct
+  precedent for adding one. The contract row, the readiness row and the metrics
+  are the signal for operators whose subscriptions predate this build, and the
+  runbook says so.
+- **Unavailability is a DURATION (30 s), not a count**, so an ordinary redeploy
+  in which a predecessor is still draining never pages. Freshness is EVALUATED
+  against an injected clock and never latched (§36 round 3), and
+  `clampCPGRPCBindSleep` shortens the one sleep that would straddle the
+  threshold (§23's `recoveryPollCeiling` rule — a CORRECTNESS bound, since the
+  alert is attempt-driven and nothing else wakes the loop).
+
+### 41.9 Shutdown
+
+The supervisor's `Stop` is registered in the EXISTING `control-plane-grpc-stop`
+hook and runs **before** `StopControlPlaneGRPC()`. The order is the correctness
+argument: the supervisor retries up to once per 30 s, so stopping it after the
+drain would let it bind a FRESH listener and begin serving RPCs on a node that
+is already tearing down. Its `Stop` is bounded by the hook's ctx (CHAOS-56's
+watchdog) and is a no-op on a node that is not a Control Plane, so the drain's
+own `cpGRPCGracefulStopBudget` is unchanged. Pinned structurally, because a
+hook-ordering property is one line and gating it behaviourally would mean
+driving the whole sequence.
+
+### 41.10 Gates
+
+`cluster_grpc_bind_chaos_test.go` — 35 gates. **Thirty-four mutations were each
+verified FAILING against the shape they target**, including the reintroduced
+pre-fix `logFatalf`, asserting role+leadership without a bind, returning before
+the first attempt resolves, re-preparing per attempt, both halves of the
+`grpc.Server` leak, dropping the TLS-material sentinel, the unqualified
+`errors.As(net.Error)`, recording `configured` after the bind, latching the
+duration to stored stamps, one remedy for every class, a non-interruptible
+sleep, rate-limiting the counter along with the log, swapping the shutdown
+order, and all three shapes of the §41.6 deadlock (prepare under the write lock
+on the admin path and on the supervisor path, plus a NEW offender introduced
+elsewhere in package main, which the AST wall catches).
+
+One of those gates covers a defect found in SELF-REVIEW, inside this sweep's own
+mitigation. The supervisor's panic guard called `noteCPGRPCBindFailure`
+unconditionally — but the loop can panic either BEFORE a bind (the listener
+really is down) or AFTER one, in the leadership-resolution step that follows a
+successful activation, where the listener is bound and serving the fleet.
+Reporting the second case as a dead listener would send an operator to hunt a
+bind fault that does not exist and drop `culvert_cluster_grpc_up` to 0 on a node
+whose gRPC is answering — **a surface saying the opposite of the truth, i.e. the
+whole class of defect this sweep exists to remove, reintroduced inside its own
+fix.** `noteCPGRPCSupervisorPanic` now branches on the recorded evidence: a panic
+with no listener is a failure, a panic with one is logged loudly and nothing
+else, and both are terminal for the supervisor while neither is silent. The
+CHAOS-57 *"the evidence must match the claim"* family.
+
+**Five CONTROLS**, each verified failing against the cheapest wrong fix, because
+the cheapest way to pass every defect gate above is to stop activating the
+Control Plane at all — which would silently delete clustering: a healthy boot
+must still bind, assert the role and accept a connection; the surfaces must be
+ABSENT on a node with no cluster; the readiness row must not move the default
+verdict; each reason class must carry a DISTINCT remedy; and another plane's
+role must not be overwritten.
+
+**Two runbook walls**, and the second one exists because of a near-miss worth
+recording: the first draft of the runbook sent operators to
+`POST /api/cluster/control-plane`, **which is registered nowhere** — the handler
+lives at `/api/cluster/mode` — so anyone following the manual-recovery step
+mid-incident would have got a 404. That is the exact defect §40 (CHAOS-70)
+round 2 found in its own runbook and fixed, reproduced here within three weeks
+by a sweep that had read that writeup. Prose cannot be unit-tested but a PATH
+can, so `Wall_RunbookNamesRegisteredEndpoints` compares every `/api/` path in
+the runbook against `uiRoutes`, and `Wall_RunbookMetricNamesMatchTheEmitter`
+pins the documented metric names against `metrics.go` **in both directions** (a
+documented series the emitter does not produce is an alert rule that never
+fires; an emitted series the runbook omits is a signal the operator does not
+know exists).
+
+**One gate was found VACUOUS by mutation and that is the transferable lesson.**
+`ListenFailureDoesNotLeakTheGRPCServer` asserted that a failed bind publishes no
+`grpc.Server` handle — and it PASSED against a reintroduced
+`clusterRole.grpcSrv = srv` on the listen-failure path. The cause: the gate did
+not set `clusterInsecure`, so `cpServerOption` refused for want of certificates
+and returned **before `grpc.NewServer` was ever called**. The gate's `err != nil`
+precondition held for the wrong reason and the leak assertion became an absence
+that could not fail. This is §39 (CHAOS-69)'s standing rule arriving from a new
+direction: **a gate must assert the REFUSAL IT CLAIMS, never merely the absence
+of what the refusal would have prevented — absence is what an unreached code
+path and a working guard have in common.** The gate now asserts the reason class
+is `port_in_use` (proving the bind was attempted) and additionally pins
+`srv.Stop()` structurally, since the published handle is the leak's fingerprint
+rather than the leak itself.
+
+One further harness note, found by the healthy-boot CONTROL and by nothing else:
+`enableControlPlane` starts the cluster heartbeat monitor on
+`appLifecycleCtx.Done()`, and a test binary never ran `initLifecycleContext`, so
+a healthy activation **nil-panics** under test. It is a harness artifact, not a
+production hazard — `main.go` runs `initLifecycleContext` at line 216 and
+`initCluster` at 228, so the context is live on every path that reaches
+activation — and it is recorded here because only the control gets far enough to
+call it: every defect gate stops at a failed bind. The supervisor's panic guard
+contained it and reported the correct TERMINAL state, which is incidental
+evidence that the guard works.
+
+### 41.11 Codex round — a REGRESSION this sweep introduced, and a shutdown race
+
+Three findings on the first push. One was the §41.12 blind spot found
+independently; the other two are below.
+
+**P1 — another activation winning must still complete the HA transition.** This
+is a regression this sweep introduced and did not catch. `attempt()`'s
+`role == "control-plane"` branch — reached when an operator enables the Control
+Plane through `POST /api/cluster/mode` during the retry window, which is exactly
+what this change makes possible — recorded the bind and `return nil`ed **without
+calling `completeCPLeadership`**.
+
+The pre-CHAOS-71 boot path ALWAYS resumed leadership after a successful
+activation, and `enableControlPlane` has never done it itself (the admin API's
+enable never resumed HA — pre-existing, and harmless while boot always followed
+up). So on a persisted HA leader whose boot bind failed, an operator enabling
+the Control Plane left `globalHA` **DISABLED**: no lease, no keepalive, no
+resync material, and the fencing gate treating this node as standalone and
+write-authoritative **while its peer may already be leading.**
+
+Rule 3 says leadership is asserted only on an OBSERVED bind — and *somebody
+else's bind is an observed bind*. The lesson is narrow and worth keeping: **a
+branch that treats another actor's success as "nothing left to do" must still do
+the part that actor never does.**
+
+**P2 — shutdown must cancel an in-flight activation before it binds.** Phase 2
+does FILESYSTEM work (the version floor, the config publish, the cluster-CA
+load), so an attempt can sit in it for longer than the early shutdown phase's
+deadline: `Stop` returns on its ctx, the hook moves on to
+`StopControlPlaneGRPC` — which observes no server — and the I/O eventually
+unblocks and binds a listener on a node already tearing down, then resumes HA
+leadership **after `globalHA.Stop()` has run**, resurrecting the lease keepalive.
+`attempt()` now re-checks `stopRequested()` inside the write lock before the
+bind, once more before leadership, and `discardActivation` tears down a listener
+that wins the narrower post-bind race (`Stop` does not take `clusterRoleMu`, so
+no check there can be atomic with it).
+
+**A gate for the disposal half came out VACUOUS first, for a structural reason
+worth recording.** An integration gate that closes `stopping` during the prepare
+seam is caught by the PRE-bind check and never reaches disposal at all — so it
+passed against a reintroduced `return` with no `discardActivation`. The window
+is microseconds wide and cannot be scheduled from a test, so the invariant is
+pinned as a UNIT on `discardActivation` (server stopped, handle dropped, role
+reset, teardown recorded, socket really free), exactly as §36 pinned `adopt`'s
+after its own end-to-end gate proved vacuous the same way. **That is the second
+vacuous gate this sweep caught by mutation, both times because the gate never
+reached the code it claimed to test.**
+
+**AND THEN THAT UNIT GATE FLAKED, BECAUSE ITS LAST ASSERTION CLAIMED A
+SYNCHRONOUS GUARANTEE THE CODE NEVER MADE.** `socket really free` was a SINGLE
+bind probe immediately after `discardActivation` returned, and it failed about
+one run in twelve under `-count=2 -shuffle=on`:
+
+```
+--- FAIL: TestChaos71_DiscardActivationTearsDownAListenerThatWonTheRace
+    the listener is still bound after disposal: bind: address already in use
+```
+
+`discardActivation` calls `srv.Stop()` SYNCHRONOUSLY, so the probe looks sound.
+But `Stop()` is not what closes this listener. `StartControlPlaneGRPC` spawns
+`go srv.Serve(ln)`, and when `Stop()` wins the race against a serve goroutine
+the runtime has not scheduled yet, it finds NO listener registered and returns
+having closed nothing; `Serve` then runs, takes the `s.lis == nil` branch —
+*"Serve called after Stop or GracefulStop"* — and closes the listener ITSELF, on
+the serve goroutine, after `discardActivation` has already returned
+(grpc@v1.83.2 `server.go`: `s.mu.Unlock()` precedes `lis.Close()`). **The
+release is guaranteed; the INSTANT is not.** The gate's own log recorded both
+halves of that ordering and the first draft read past it:
+
+```
+ControlPlane: discarded a gRPC listener that bound while this node was shutting down
+ControlPlane gRPC error: grpc: the server has been stopped   ← Serve closing lis, late
+```
+
+**Production is unaffected and that is worth stating rather than assuming**:
+`Serve` is always called (the goroutine is spawned unconditionally), so the
+socket is always released, and nothing in production probes the port
+immediately after a disposal that only happens while the process is tearing
+down. This is a defect in the GATE, not in the disposal.
+
+The fix is `cpRequirePortFree`, which WAITS for the release under a 5 s budget
+instead of probing once, and **it does not weaken the claim** — disposal that
+never happens leaves the listener serving forever, since `discardActivation`
+has already nil'd the only handle anyone could stop it with, so the port never
+frees and the wait exhausts. Verified by mutation: removing `srv.Stop()` still
+fails the gate, and fails it with the diagnostic that separates the two
+outcomes (`address already in use` means a listener really was left serving;
+anything else means the gate could not probe at all).
+
+**The transferable rule, and it is the THIRD shape of one error in this sweep:
+a gate must assert the guarantee the code actually makes, at the strength it
+makes it.** §41.10's first vacuous gate asserted an absence that an unreached
+code path satisfied; its second asserted a refusal for the wrong reason; this
+one asserted correct CONTENT with incorrect TIMING. All three passed or failed
+for reasons unrelated to the invariant, and in this case the symptom was a
+flake rather than a false pass — which is strictly worse than it sounds,
+because this repo's standing rule is that *a gate that can flake gets muted*,
+so a 1-in-12 failure in the one gate pinning a P2 shutdown race is a gate on
+its way to being deleted. When an assertion follows a `Stop`, a `Close` or a
+`Cancel`, ask which goroutine performs the release before asserting that it has
+already happened.
+
+**Six lint findings rode along, every one a repo convention rather than taste —
+and the COUNT is the lesson, because the report that named them was a SAMPLE,
+not an inventory.** `Gate · golangci-lint` printed `gocognit: 1, gocritic: 1,
+noctx: 4`. Two were closed first: `gocognit` put the AST wall at cognitive
+complexity **52** against a bound of 30, split into three named helpers
+(`cpScanRoleLockReentrancy`, `cpRoleLockAcquire`, `cpCalleeName`) to reach
+**25**; and `noctx` flagged a `net.DialTimeout`, which CLAUDE.md bans by name
+(*"use `DialContext()` not `DialTimeout()`"*).
+
+**The remaining `noctx` findings are where a plausible reading goes wrong.** The
+report named `net.Listen` at exactly THREE lines, so "fix those three" looks
+like the whole job. It is not: `.golangci.yml` sets `max-same-issues: 3`, which
+caps a REPEATED message, and the file held **nine** `net.Listen` call sites.
+Fixing the three named lines would have surfaced the next three on the following
+push, and the three after that on the push after — a fix converging on green one
+CI cycle at a time while each run looks like a fresh finding. All nine are now
+`(&net.ListenConfig{}).Listen(t.Context(), ...)`, the form every other
+recently-written test in the tree uses, with `t.Context()` justified in a
+comment at `cpOccupyPort`: `ListenConfig.Listen`'s ctx governs address
+resolution ONLY and never the returned listener's lifetime, so it cannot close
+a socket out from under a gate whose whole job is to hold a port occupied. The
+sixth finding, `gocritic unnamedResult` on `cpOccupyPort(t) (int, func())`,
+names the results — and naming them turned the local `port :=` into a shadow,
+so it became an assignment to the named result.
+
+**The standing rule: a linter report is a SAMPLE of a class, not an inventory of
+it.** Read the per-linter COUNT against the number of call sites the change
+actually introduced, and when they disagree, the config — not the report — says
+how many there are. This is §39's *sampling one path is the same error as
+sampling one representation* arriving from the tooling side: the instrument
+itself was sampling, and the fix has to be enumerated from the SOURCE
+(`grep` for the primitive across the new file), never from the lines the tool
+chose to print. The pre-existing raw `net.Listen` sites elsewhere in the tree
+are deliberately untouched — they survive only because the gate runs
+`--new-from-rev`, the same grandfathering the latency-histogram note records for
+its `#nosec G115` suppressions, and widening this change to them would be a
+different concern inside a sweep about something else.
+
+Every one of the six was measured with the real analyzer rather than estimated,
+because the locally installed `golangci-lint 2.5.0` is built with go1.25.1 and
+**cannot parse this module's go1.26 language version** (it panics in its package
+loader). The same toolchain-skew trap made the first staticcheck reproduction
+inconclusive; in both cases the fix was to run the underlying analyzer under
+`GOTOOLCHAIN=go1.26.8` rather than trust a crash or a compile-error spray as a
+pass.
+
+**A seventh CI failure in the same batch was NOT a finding, and saying so
+precisely matters.** `Race · verdict + coverage evidence` reported `failure` on
+the same head, which on a sweep that adds 35 gates reads like a lost test or a
+coverage-completeness refusal — the two things that job exists to fail closed
+on. It was neither: the job's log contains only harden-runner post-job output,
+so its verdict step never ran, and the aggregate names the real cause —
+`required job 'test-race' result=cancelled — cannot trust the gate`. A newer
+push superseded that head in the concurrency group and cancelled the race path
+mid-flight; the aggregate's refusal to treat `cancelled` as `success` is the
+documented contract working, not a defect. **A red check on a SUPERSEDED head is
+evidence about the push that replaced it, not about the code** — read the
+aggregate's reason before diagnosing the job it names.
+
+### 41.12 A CI lint found a real blind spot, and deleting the code would have certified it
+
+`Deep · staticcheck` failed on the first push with
+
+```
+cluster_grpc_health.go:438:6: func noteCPGRPCServeEnded is unused (U1000)
+```
+
+The lint was RIGHT: that observer was written for a serve/rebind loop, the
+shipped supervisor returns once activation succeeds, and nothing called it. Dead
+code, which this repo's own PR checklist bans.
+
+**Deleting it to satisfy the linter would have been the wrong instinct**, and
+checking the serve path is what showed why. Two gaps:
+
+1. `StartControlPlaneGRPC`'s serve goroutine has always only LOGGED when
+   `srv.Serve` returns. Harmless while nothing claimed the listener was up — and
+   a LIE the moment a gauge does. **This sweep adds
+   `culvert_cluster_grpc_up`**, so without an observer that gauge reads `1`
+   forever on a listener whose socket has died. The underlying fault is old; the
+   misleading SURFACE is this sweep's. That is the exact defect class §41 exists
+   to remove, reintroduced inside its own fix — §36's *"returning silently would
+   leave every probe green on a dead listener, PX-18 in miniature, reintroduced
+   inside the change that closed it"*.
+
+2. `noteCPGRPCStopped` was reached only from the supervisor loop's FAILURE exit
+   paths. On the happy path the loop returns early (activation succeeded,
+   nothing left to retry), so a clean shutdown of a HEALTHY Control Plane never
+   recorded the teardown: `/health cluster_grpc` reported `ready` on its way
+   out, and the fixed enum's `stopped` value was unreachable for a healthy node.
+
+So the observer was WIRED, not deleted. `Stop` records the teardown;
+`noteCPGRPCServeEnded` records a terminal serve-ended state and no-ops during a
+deliberate shutdown (GracefulStop makes `Serve` return NIL, so the `stopped`
+flag is what tells the two apart) and when no bind was ever observed (the
+bind-failure path owns that state); an observed bind clears it, since a fresh
+socket IS the recovery (§36's rule, where leaving `down` latched reported a fail
+row and a page after the outage was over).
+
+**One judgement call, recorded rather than silently taken.** The supervisor does
+NOT rebind a listener that was already serving — that is a full serve/rebind
+loop with its own shutdown interaction, and folding it in would widen the PR. So
+the state is reported honestly as TERMINAL, and the contract row's remedy says
+*"Restart this node"* and deliberately does NOT say *"rebinds automatically"*,
+which every other remedy in this file does. Promising a recovery that will not
+happen sends an operator away from the one restart that IS needed — §36's
+round-2 finding, and a CONTROL gate pins the absence of that phrase.
+
+**Reproduced and re-verified the way a CI fix must be.** The 2025.1 staticcheck
+`go run` first emitted compile errors rather than reaching U1000, because that
+binary is built with go1.24 and cannot parse this module's go1.26 stdlib — an
+inconclusive reproduction, not a pass. Re-run under `GOTOOLCHAIN=go1.26.8` it
+reports nothing at all, and the identifier now has a production call site
+(`controlplane_server.go:949`), which is what U1000 keys on.
+
+Gates: 6 sub-cases over all four branches plus the happy-path teardown; five
+mutations verified failing (the state not recorded, firing during a clean
+teardown, a remedy promising a rebind, the state staying latched after a
+re-bind, and `Stop` not recording the teardown).
+
+**The transferable lesson: a dead-code lint on a health observer is a question,
+not an instruction. Ask what the observer was for before deleting it — the
+answer may be that the surface it was meant to feed is now lying.**
+
+### 41.13 Residual risk, deliberately left
+
+- **R-F is unchanged.** The three boot-path DATA-FILE loads (`catStore`,
+  blocklist, policy) stay fatal, defensibly so since they are policy-load-bearing.
+- **A supervisor panic is terminal** — nothing rebinds — and that is reported as
+  such rather than papered over with a "retrying" message that would send an
+  operator away from the one restart that IS needed (§36's round-2 lesson). The
+  proxy and admin UI survive it, so the restart can be scheduled.
+- **Leadership taken late is still leadership taken.** In legacy ADR-0004 mode a
+  deferred resume inherits the pre-existing restarted-leader hazard the code
+  already warns about on every boot; the fence closes it in lease mode. Not
+  introduced here, and not closed here either.
+- **`validatePortCollisions` still cannot see the cluster gRPC port** (nor
+  anything else on the host). Widening it to Culvert's fourth port is a
+  one-liner and was deliberately NOT folded in: the check compares Culvert's own
+  ports to each other, and none of this finding's triggers is a self-collision,
+  so adding it would buy nothing for this fault while touching a startup
+  validation path inside a sweep about something else. Recorded as **CL-21**.
+- **An established listener that dies is NOT rebound** (§41.12): the state is
+  reported as terminal and the remedy is a restart. A full serve/rebind loop is
+  the shape that would close it, with its own shutdown interaction; recorded as
+  **CL-22** rather than folded into this sweep. Two specific blockers, so
+  whoever picks it up does not rediscover them: `activateControlPlaneLocked`
+  refuses while the role is already `control-plane` (so a rebind must reset the
+  role the way `discardActivation` does), and it calls
+  `globalClusterStore.StartHeartbeatMonitor`, which spawns a goroutine on EVERY
+  call with no idempotency guard — so a naive rebind starts a second heartbeat
+  monitor. **The operator's only recovery today is a process restart**: the
+  admin API's enable refuses on the same role guard, which is a weaker position
+  than "the API is still there" and is why this is registered rather than
+  dismissed.
+- **TWO DATA RACES IN THE TEST SUITE, ONE SHAPE, NEITHER THIS SWEEP'S — recorded
+  as TS-1.** This sweep's own full-module `-race -shuffle=on` run went red with
+  three failures: the disposal gate's flake (§41.10, fixed) and two more that
+  are *not* assertion failures at all but
+  `testing.go:1712: race detected during execution of test`. **The race detector
+  attributes a race to whatever test is RUNNING, which is not the test that
+  caused it**, so both were blamed on innocent bystanders:
+
+  | Blamed test | Writer | Reader (the actual culprit) |
+  |---|---|---|
+  | `TestCDRHandleCallError_PostureIsUnchanged` | `withCDRAlertStore` swaps the global alert sink (`cdr_alert_bound_test.go:47`) | a DETACHED goroutine from `TestLegacyOnMaxFail_Unchanged` → `ha.go:718` `warnManualFailoverRequired` → `alerts.Fire` reading that sink (`alerts.go:47`) |
+  | `TestReportCatFeedDBUnavailable_DoesNotClaimRecovery` | `captureLogger` swaps the global logger (`coldstart_observability_test.go:32`) | a DETACHED goroutine from `TestChaos50_InspectMatchedBypassIsCounted` → `handleTunnel` → `handleTunnelBypass` reading `logger` (`proxy_tunnel.go:459`) |
+
+  **One shape twice: a test spawns a goroutine that OUTLIVES it and reads a
+  process-global; a later test swaps that global; the detector fires and names
+  the swapper.** Both are pre-existing — every frame in both stacks is code this
+  sweep does not touch (its diff is 15 files, none of them `ha.go`,
+  `alerts.go`, `cdr_alert_bound_test.go`, `ha_failover_test.go`,
+  `coldstart_observability_test.go`, `proxy_tunnel.go` or
+  `rootca_recovery_test.go`), and the CHAOS-71 gates were cleared as a cause by
+  running them in-process with both victims, shuffled, 8/8 clean.
+
+  **It needs FULL-SUITE SCALE to reproduce** — the leaked goroutine has to still
+  be in flight when the later test swaps the global, so the two-test pair passes
+  3/3 and CI stayed green across all four race shards. Observed once in one
+  ~31-minute full-module run. That is exactly why it is worth a row rather than a
+  shrug: a load-dependent race that MISATTRIBUTES itself is the hardest kind to
+  act on when it finally turns a required gate red, because the named test is
+  innocent and reproducing it from that name alone fails.
+
+  **Not fixed here, deliberately** — the fix belongs to the leaking tests (join
+  the goroutine, or give these globals a swap the goroutine cannot observe), and
+  widening a Control-Plane-bind sweep into the HA, CDR and tunnel test files is
+  the scope error this register repeatedly warns about. The transferable rule for
+  whoever takes it: **when a `-race` failure names a test that only SWAPS a
+  global, the culprit is whoever is still READING it — look for a detached
+  goroutine in the tests that ran before, not a defect in the one that was
+  blamed.**
+- **The pre-bind work's own failure modes are unchanged** — a rejected initial
+  config publish is logged and alerted via `LastPublishError` and boot
+  continues, as before.

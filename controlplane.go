@@ -331,9 +331,15 @@ var (
 		grpcAddr string // gRPC listen address (CP) or connect-to address (DP)
 		nodeID   string // this node's identifier
 		grpcSrv  *grpc.Server
-		certFile string // TLS cert path (for HA deploy command)
-		keyFile  string // TLS key path (for HA deploy command)
-		caFile   string // CA cert path (for HA deploy command)
+		// grpcSupervisor owns the boot path's bind/retry lifecycle (CHAOS-71).
+		// Nil on a node that is not a Control Plane, and on the admin-API and
+		// HA-promote activation paths, which are one-shot and report their own
+		// errors. Stopped by the control-plane-grpc-stop shutdown hook so no
+		// NEW listener is bound while the node is tearing down.
+		grpcSupervisor *cpGRPCSupervisor
+		certFile       string // TLS cert path (for HA deploy command)
+		keyFile        string // TLS key path (for HA deploy command)
+		caFile         string // CA cert path (for HA deploy command)
 	}
 )
 

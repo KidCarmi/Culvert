@@ -516,6 +516,69 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   egress-restricted deployment must allow the responder hosts named in its
   upstreams' certificates. See `docs/operator/ocsp-revocation-checking.md`.
 
+### Fixed
+
+- **A Control Plane node whose cluster gRPC listener could not bind killed the
+  whole appliance, and an HA promote deadlocked (CHAOS-71).** Two findings, one
+  change.
+
+  The boot path activated the Control Plane with exactly one error branch —
+  `logFatalf`, which `os.Exit(1)`s the process — so an occupied gRPC port, a
+  privileged port without `CAP_NET_BIND_SERVICE`, an address on an interface not
+  yet up, or an mTLS pair caught mid-rotation each terminated the appliance. It
+  did so from `initCluster`, which runs **before** the proxy listener, the admin
+  UI, the SOCKS5 listener and every health endpoint, so under
+  `restart: unless-stopped` each was an unattended crash loop recoverable only
+  with shell access. Reproduced against the real binary: `EXIT=1`,
+  `proxy http_code=000`, `ui http_code=000`, zero admin-UI log lines. None of
+  the triggers was visible to `validatePortCollisions`, which compares Culvert's
+  own proxy/UI/SOCKS5 ports to each other only — the cluster gRPC port is not in
+  its list.
+
+  A Control Plane whose gRPC is not serving is, to the fleet, exactly a Control
+  Plane that is unreachable — a state Data Planes already survive, since they
+  back off, report `/ready cp_poll`, and keep enforcing their last-known config.
+  The listener is now supervised: bind failures are non-fatal and retried at a
+  bounded rate (1 s doubling to 30 s, ±20% jitter, interruptible), the mTLS pair
+  is re-read on every attempt so a completing rotation self-heals, and **the
+  control-plane role and HA leadership are taken only on an observed bind** — a
+  node that cannot serve must not claim to lead, or a standby's automatic
+  failover would produce two leaders. Cluster semantics are unchanged: a node
+  that has not bound behaves, to its standby, exactly as the old process exit
+  did.
+
+  Separately, `enableControlPlane` held `clusterRoleMu` for writing and then
+  called `CurrentConfigSnapshot()`, which reads the cluster role back through
+  `buildCPAddressList`'s read lock. `sync.RWMutex` is not reentrant, so the
+  goroutine blocked **forever while holding the write lock**, blocking every
+  reader of the cluster role for the life of the process. The locking branch is
+  reached only when HA is enabled, so this was latent on a standalone Control
+  Plane and **certain on every HA promote**: a standby promoting itself after a
+  leader failure hung there, with no leader in the cluster, and because a
+  deadlock is not a panic the promote guard had nothing to catch. The same hang
+  reached `POST /api/cluster/mode` on any HA-enabled node. Activation is now
+  three phases with only the middle one holding the write lock.
+
+  Two smaller fixes rode along: `StartControlPlaneGRPC` leaked the
+  `grpc.Server` it had built when the listen failed (reachable from the admin
+  API, and amplified by the new automatic retry), and the activation success log
+  line said "enabled via GUI" unconditionally, so an ordinary boot logged a GUI
+  action nobody performed.
+
+  New surfaces, all emitted only on a node configured as a Control Plane and all
+  on the **proxy** port, which is what makes them reachable while the cluster
+  plane is down: a `cluster_grpc` operator-contract row with a remedy per reason
+  class, a **report-only** `/ready cluster_grpc` row (a cluster-plane fault must
+  not eject a healthy proxy from a load balancer; `?strict=1` opts in), a
+  `cluster_grpc` posture on `/health`, and
+  `culvert_cluster_grpc_{up,unavailable,role_asserted,bind_failures_total,binds_total,bind_backoff_seconds}`.
+  **Page on `culvert_cluster_grpc_unavailable == 1`, not on `up == 0`** — `up` is
+  0 during the few seconds of rebinding after any ordinary CP redeploy. A new
+  `cluster_grpc_unavailable` alert event is fired once per episode; **existing
+  webhook subscriptions will not receive it until the event name is added**,
+  since subscriptions match exactly. Runbook:
+  `docs/operator/control-plane-grpc-bind.md`.
+
 ### Changed
 
 - The production image now cross-compiles the proxy and the bundled

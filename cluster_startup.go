@@ -92,22 +92,74 @@ func startControlPlaneWithHAResume(cfg clusterStartupConfig, ctx context.Context
 		return
 	}
 
-	if err := enableControlPlane(cfg.CPAddr, cfg.CPCert, cfg.CPKey, cfg.CPCA, cfg.ClusterDBPath); err != nil {
-		logFatalf("ControlPlane gRPC: %v", err)
-	}
+	// CHAOS-71: the gRPC bind is SUPERVISED, not fatal. This used to be
+	//
+	//	if err := enableControlPlane(...); err != nil { logFatalf(...) }
+	//
+	// which exited the process — from initCluster, before the proxy, the admin
+	// UI, SOCKS5 and every health endpoint exist — for an occupied port or an
+	// mTLS pair caught mid-rotation. See cluster_grpc_bind.go for the finding,
+	// the reproduction and the seven rules; the two that shape THIS function
+	// are that the first attempt resolves synchronously (so nothing downstream
+	// observes a half-announced Control Plane) and that leadership is asserted
+	// only on an observed bind, inside completeCPLeadership.
+	clusterRole.grpcSupervisor = startControlPlaneSupervised(cfg, ctx)
+}
+
+// completeCPLeadership runs the post-bind half of Control Plane boot: resync
+// material and, for a persisted leader, the leadership resume.
+//
+// Called ONLY after an observed successful bind — CHAOS-71 rule 3. A node that
+// cannot serve gRPC must not hold the leader role: it would be a black hole for
+// config distribution while reporting itself as the leader, and in legacy
+// ADR-0004 mode (no etcd fence) the standby's auto-failover would promote too.
+// Leaving this node `standalone` until it binds gives the cluster exactly the
+// semantics the old fatal gave it — the standby promotes as it does for a dead
+// leader — without the egress outage.
+//
+// It RE-READS the persisted HA state rather than taking a boot snapshot
+// (CHAOS-71 rule 5). That is load-bearing precisely because of this change:
+// making the admin UI reachable during the retry window is the point, so an
+// operator can now alter this node's HA posture while it retries, and
+// completing against a stale snapshot would assert a leadership they have since
+// revoked. If the decision has moved to "standby", leadership is skipped — the
+// conservative direction, since nothing is worse here than claiming authority
+// against evidence that says otherwise.
+//
+// `deferred` reports whether this ran after one or more failed attempts, so the
+// log line can say so: an operator reading "resumed as leader" needs to know it
+// happened minutes into the boot rather than at it.
+func completeCPLeadership(cfg clusterStartupConfig, ctx context.Context, deferred bool) {
 	// ADR-0005 S4: record resync material BEFORE any leadership assertion —
 	// an unfenced resume (or a later self-fence) re-enters standby with it.
 	globalHA.SetResyncMaterial(ctx, cfg.CPAddr, cfg.CPCert, cfg.CPKey, cfg.CPCA)
+
+	haCfg, haErr := loadHAConfig()
+	if haRestartAction(haCfg, haErr) == "standby" {
+		// Only reachable on the deferred path: the boot path checked this
+		// before activating at all, so reaching it here means the persisted
+		// state changed while we were retrying.
+		logger.Printf("HA: not resuming leadership — the persisted role in %s now reads standby "+
+			"(it changed while the Control Plane gRPC listener was retrying). This node serves gRPC but does "+
+			"not claim leadership; restart it to enter standby against its peer.", haConfigFile)
+		return
+	}
+	if haErr != nil || !haCfg.Enabled {
+		return
+	}
+
 	// Persisted leader (or legacy config with no role) resumes leadership.
-	if haErr == nil && haCfg.Enabled {
-		globalHA.ResumeAsLeader(haCfg) // restores role+token+term+auto_failover (no term bump)
-		if haCfg.AutoFailover {
-			logger.Printf("HA: resumed as leader from %s after restart. WARNING: automatic failover is "+
-				"enabled — if the standby promoted while this node was down, BOTH may now lead. Verify via "+
-				"/healthz or the HA panel and reconcile (ADR-0004/RISK-001).", haConfigFile)
-		} else {
-			logger.Printf("HA: resumed as leader from %s after restart (peer=%s)", haConfigFile, haCfg.PeerAddr)
-		}
+	globalHA.ResumeAsLeader(haCfg) // restores role+token+term+auto_failover (no term bump)
+	when := "after restart"
+	if deferred {
+		when = "after restart, once the gRPC listener recovered"
+	}
+	if haCfg.AutoFailover {
+		logger.Printf("HA: resumed as leader from %s %s. WARNING: automatic failover is "+
+			"enabled — if the standby promoted while this node was down, BOTH may now lead. Verify via "+
+			"/healthz or the HA panel and reconcile (ADR-0004/RISK-001).", haConfigFile, when)
+	} else {
+		logger.Printf("HA: resumed as leader from %s %s (peer=%s)", haConfigFile, when, haCfg.PeerAddr)
 	}
 }
 

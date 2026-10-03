@@ -21,6 +21,11 @@ type healthReport struct {
 	ClusterCA     string `json:"cluster_ca" redact:"internal"`
 	SOCKS5        string `json:"socks5" redact:"internal"`
 	AdminUI       string `json:"admin_ui" redact:"internal"`
+	// ClusterGRPC is the Control Plane gRPC listener posture (CHAOS-71). Fixed
+	// five-value enum: disabled | ready | degraded | unavailable | stopped.
+	// "disabled" on every node that is not a Control Plane, so the field never
+	// reads as a fault on an appliance that has no cluster at all.
+	ClusterGRPC string `json:"cluster_grpc" redact:"internal"`
 	// MCP is the MCP Agent Security Gateway capability state (RISK-027). It is
 	// omitted entirely on a node that never requested MCP: an always-present field
 	// would make every node look like it has the capability.
@@ -98,7 +103,13 @@ func computeHealth() healthReport {
 		// nothing at all. Same fixed-enum discipline as the socks5 field: the
 		// posture is public, the resolution (attempt count, reason class) is
 		// not.
-		AdminUI:           adminUIListenerStatus(),
+		AdminUI: adminUIListenerStatus(),
+		// CHAOS-71. Like the AdminUI field this lives on the PROXY port: a
+		// Control Plane whose gRPC listener cannot bind is still proxying, and
+		// the one probe that could not report this is the cluster gRPC endpoint
+		// itself. Same fixed-enum discipline — the posture is public, the
+		// resolution (attempt count, reason class) is not.
+		ClusterGRPC:       cpGRPCListenerStatus(),
 		ThreatFeedEntries: tfEntries,
 	}
 }
@@ -459,6 +470,7 @@ func computeReadiness() (report readinessReport, code int) {
 	// management plane, turning a management outage into the traffic outage
 	// this row exists to make visible. Strict callers opt in via ?strict=1.
 	appendAdminUIReadinessCheck(checks)
+	appendCPGRPCReadinessCheck(checks)
 
 	// 9c. MCP gateway (RISK-027) — REPORT-ONLY, absent entirely when MCP was never
 	// requested. It must NEVER gate the default verdict: MCP is an optional,
