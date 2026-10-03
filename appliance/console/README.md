@@ -335,6 +335,14 @@ qualification evidence support promotion.
 
 ## Recovery lifecycle, journal records and installation
 
+The [lifecycle ESXi report](evidence/esxi-lifecycle-smoke.json) records exact bundle
+`0e0e5d7b`, native tests and installer fault injection, real PAM/shell handoffs,
+verified journal UID/correlation with output excluded, live views and reboot.
+[Final-bundle Linux CI passed](https://github.com/KidCarmi/Culvert/actions/runs/37158252080).
+Both disposable validation VMs were deleted; independent inventory found zero
+matching lab VMs and private run files were removed. Test-fixture corrections and
+the fresh-run validation are recorded in the report, not hidden as product passes.
+
 The Linux execution adapter accepts an exact allowlist of commands and argv.
 It snapshots/restores terminal modes around every child, including unsuccessful
 commands and cancellation; restoration failure ends the menu. Cancellation first
@@ -350,7 +358,7 @@ operator tools with their existing permissions.
 Each allowlisted child has paired attempt/result records sent through the
 [native systemd journal protocol](https://systemd.io/JOURNAL_NATIVE_PROTOCOL/).
 Records contain a random correlation ID, fixed action name, phase, coarse outcome,
-effective UID and UTC timestamp. They contain no argv, keystrokes, credentials,
+effective UID and UTC timestamp. Application fields contain no argv, keystrokes, credentials,
 child output or raw errors. `returned` means the command exited successfully;
 it does not assert successful login, completed provisioning or verified traffic.
 Inspect with `journalctl -t culvert-console -o json`; journald also attaches
