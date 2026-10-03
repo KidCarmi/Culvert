@@ -244,6 +244,7 @@ if [[ "$SCENARIO" == midwrite ]]; then
   if IN docker logs culvert 2>&1 | grep -qE "$wdone"; then
     check W write-in-flight inconclusive "the write finished before the fill could land; nothing was tested"
     INCONCLUSIVE=1; write_report_and_exit; fi
+  r0="$(IN docker inspect -f '{{.RestartCount}}' culvert 2>/dev/null || echo 0)"
   why="$(fill_bounded)" || { check W filled-during-write fail "$why"; write_report_and_exit; }
   if IN docker logs culvert 2>&1 | grep -qE "$wdone"; then
     check W write-in-flight inconclusive "the write finished while the fill was being placed; nothing was tested"
@@ -252,12 +253,23 @@ if [[ "$SCENARIO" == midwrite ]]; then
   sleep 30
   after="$(IN docker logs culvert 2>&1 | grep -m1 -oE "$wdone" || echo 'no completion line')"
   st="$(IN docker inspect -f 'status={{.State.Status}} exit={{.State.ExitCode}} restarts={{.RestartCount}}' culvert 2>&1 || true)"
-  if IN docker logs culvert 2>&1 | grep -q 'SIGBUS'; then
-    check W known-failure-reproduced known-failure "F-DISK-1 reproduced: SIGBUS during the write; $st"
+  # The verdict comes from the CONTAINER, not from its log: on a full disk
+  # dockerd cannot write the crash trace ("Error writing log message"), so a
+  # run that grepped only for SIGBUS read a crash as "survived" (Deep
+  # 37126218486: exit=2 restarts=1, no trace). A crash is any exit, a non-zero
+  # exit code, or a restart since the fill; the trace is reported if kept.
+  read -r cst cex crs <<<"$(IN docker inspect -f '{{.State.Status}} {{.State.ExitCode}} {{.RestartCount}}' culvert 2>/dev/null || echo 'unknown 0 0')"
+  trace=lost; IN docker logs culvert 2>&1 | grep -q 'SIGBUS' && trace=SIGBUS
+  if [[ "$cst" != running || "$cex" != 0 || "$crs" != "$r0" ]]; then
+    check W known-failure-reproduced known-failure "F-DISK-1 reproduced: the proxy died during the write ($st; restarts before fill=$r0); crash trace: $trace"
     diagnose W-crash
   else
     v="$(health_version 2>/dev/null || echo unreachable)"
-    check W known-failure-reproduced survived "no SIGBUS; $st; /health version=$v; the write then reported: ${after}"
+    if [[ "$v" == unreachable ]]; then
+      check W known-failure-reproduced fail "container running but /health unreachable; $st"
+    else
+      check W known-failure-reproduced survived "no crash: still running, no restart since the fill; $st; /health version=$v; the write then reported: ${after}"
+    fi
   fi
   # Recovery procedure (docs/appliance/readiness-report.md F-DISK-1): free
   # space on the data filesystem, then bring the stack back. The FIRST runner
