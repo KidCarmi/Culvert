@@ -35,6 +35,13 @@ stale by import time; the sidecar downloads it on first start (see first-boot).
   `docker` with daemon access, `curl`, `tar`, `gzip`, `sha256sum`, `python3`.
   Optional: `gpgv` + `/usr/share/keyrings/ubuntu-cloudimage-keyring.gpg`
   (present on Ubuntu hosts) for base-image signature verification.
+* The Docker daemon must use the **containerd image store**
+  (`{"features":{"containerd-snapshotter":true}}`, the default on a fresh
+  Docker 29 install). A classic store saves a re-created manifest without the
+  registry digest, and the guest's first boot — which verifies the loaded
+  image against the pinned digest — would refuse it. The build checks the
+  archive it is about to bake (`archive-identity.sh`) and stops with that
+  message instead of producing an OVA that cannot boot.
 * **No KVM required.** libguestfs falls back to TCG (`accel=kvm:tcg`); the
   in-guest package install then takes 10–30 minutes instead of ~2.
 * A host **kernel package** must be installed (`/boot/vmlinuz-*` +

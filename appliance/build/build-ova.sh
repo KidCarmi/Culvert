@@ -51,6 +51,8 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$HERE/../.." && pwd)"
 MANIFEST="$HERE/manifest.env"
+# shellcheck source=appliance/build/archive-identity.sh
+. "$HERE/archive-identity.sh"
 OUT="$REPO/appliance/build/out"
 WORK="${TMPDIR:-/tmp}/culvert-ova-build"
 SKIP_COSIGN=0
@@ -280,6 +282,10 @@ save_image() { # ref out.tar.gz
 }
 save_image "${APP_IMAGE_REPO}:${APP_IMAGE_TAG}"       "$OV/var/lib/culvert-appliance/images/culvert.tar.gz"
 save_image "${CLAMAV_IMAGE_REPO}:${CLAMAV_IMAGE_TAG}"  "$OV/var/lib/culvert-appliance/images/clamav.tar.gz"
+# First boot checks the loaded image against APP_IMAGE_INDEX_DIGEST; prove the
+# archive carries that identity before baking it (archive-identity.sh).
+archive_names_digest "$OV/var/lib/culvert-appliance/images/culvert.tar.gz" "$APP_IMAGE_INDEX_DIGEST" \
+  || die "the saved application archive does not carry $APP_IMAGE_INDEX_DIGEST — the first boot would refuse it. Build on a Docker daemon with the containerd image store (daemon.json: {\"features\":{\"containerd-snapshotter\":true}})"
 APP_TAR_SHA="$(sha256sum "$OV/var/lib/culvert-appliance/images/culvert.tar.gz" | cut -d' ' -f1)"
 CLAM_TAR_SHA="$(sha256sum "$OV/var/lib/culvert-appliance/images/clamav.tar.gz" | cut -d' ' -f1)"
 INSTALL_SHA="$(sha256sum "$REPO/scripts/install.sh" | cut -d' ' -f1)"
