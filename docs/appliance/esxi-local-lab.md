@@ -117,6 +117,7 @@ From the repository root, in PowerShell or a local shell:
 ```text
 python test/e2e/appliance/esxi/esxi-lab.py --scope .tools/esxi-scope.json preflight
 python test/e2e/appliance/esxi/esxi-lab.py --scope .tools/esxi-scope.json up
+python test/e2e/appliance/esxi/esxi-lab.py --scope .tools/esxi-scope.json inspect
 python test/e2e/appliance/esxi/esxi-lab.py --scope .tools/esxi-scope.json qualify
 python test/e2e/appliance/esxi/esxi-lab.py --scope .tools/esxi-scope.json collect
 python test/e2e/appliance/esxi/esxi-lab.py --scope .tools/esxi-scope.json down
@@ -133,6 +134,16 @@ checks pass; otherwise preserve the ledger for manual reconciliation.
 A stale `operation.lock` requires checking that its process is no longer
 running before removing that one local file. Cleanup never deletes a VM
 by a name prefix alone. Local evidence and the deletion ledger remain.
+
+`inspect` records actual firmware, hardware and power state for the owned VM,
+captures its console under the private `secrets` directory, and attempts a
+bounded read-only guest observation. It reads the kernel, completion marker,
+firstboot service state, current-boot ordering-cycle evidence and VMware
+guestinfo instance ID. It never starts or restarts a service. An absent
+completion marker is only an observation; a matching systemd ordering cycle
+is reported separately as a failure. Review console images before sharing:
+the screen can contain a setup token. Console and guest-observation files
+are not automatically included in the public evidence bundle.
 
 Wait bounds: govc reads 120 s, import 1800 s, first boot 2400 s, guest IP
 150 s, guest commands 120 s, OS update 2400 s, complete guest suite 10800 s,
@@ -210,7 +221,8 @@ bash -n test/e2e/appliance/esxi/guest-checks.sh
 bash -n test/e2e/appliance/lab/appliance-lab.sh
 ```
 
-32 safety/evidence tests passed locally, including reboot transport loss,
+34 safety/evidence tests passed locally, including owned-VM observation,
+private console capture, pending-firstboot handling, reboot transport loss,
 DHCP re-resolution, retained host-key checking, never-returning guest,
 remaining-budget enforcement and real loopback child-process recovery.
 These controller tests do not qualify a guest reboot. The simulator smoke uses only a

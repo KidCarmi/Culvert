@@ -319,7 +319,7 @@ class Lab:
         sha = subprocess.run(['git', '-C', str(ROOT), 'rev-parse', 'HEAD'], capture_output=True, text=True, check=True).stdout.strip()
         dirty = subprocess.run(['git', '-C', str(ROOT), 'status', '--porcelain'], capture_output=True, text=True, check=True).stdout.strip()
         sources = {}
-        for source in (Path(__file__), HERE / 'guest-checks.sh', HERE.parent / 'lab/appliance-lab.sh'):
+        for source in (Path(__file__), HERE / 'guest-checks.sh', HERE / 'guest-observe.py', HERE.parent / 'lab/appliance-lab.sh'):
             with source.open('rb') as f:
                 sources[source.relative_to(ROOT).as_posix()] = digest(f)
         data = dict(artifact=artifact, expected_source=self.c['source_sha'], expected_image=self.c['image_id'],
@@ -396,6 +396,39 @@ class Lab:
                 '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=' + ('yes' if strict else 'accept-new'),
                 '-o', 'HostKeyAlias=' + self.state['name'], '-o', 'UserKnownHostsFile=' + str(self.sec / 'known_hosts'),
                 '-o', 'ConnectTimeout=5', '-o', 'ServerAliveInterval=5', '-o', 'ServerAliveCountMax=2', 'culvert@' + ip]
+
+    def inspect(self):
+        """Observe the owned VM without starting/restarting guest services."""
+        vm = self.vm()
+        cfg, runtime = vm['config'], vm['runtime']
+        facts = dict(firmware=cfg.get('firmware', 'unknown'),
+                     virtual_hardware=cfg.get('version'),
+                     cpus=cfg.get('hardware', {}).get('numCPU'),
+                     memory_mb=cfg.get('hardware', {}).get('memoryMB'),
+                     power_state=runtime['powerState'],
+                     tools_status=vm.get('guest', {}).get('toolsRunningStatus'),
+                     ova_sha256=self.c['ova_sha256'])
+        atomic_json(self.ev / 'boot-observation.json', facts)
+        self.record('firmware-observed', 'info', facts['firmware'])
+        require(runtime['powerState'] == 'poweredOn', 'console observation needs a powered-on owned VM')
+        # Screens can show setup secrets: keep private until explicitly reviewed.
+        self.gov('vm.console', '-capture=' + str(self.sec / 'console.png'),
+                 self.state['path'], json_output=False)
+        self.record('console-captured', 'info', 'private screenshot captured; not automatically exported')
+        ip = self.guest_ip(timeout=30)
+        probe = (HERE / 'guest-observe.py').read_text(encoding='utf-8')
+        result = subprocess.run(self.ssh_command(ip, strict=False) + ['sudo python3 -'],
+                                input=probe, capture_output=True, text=True, timeout=60)
+        require(result.returncode == 0, 'read-only guest observation unavailable')
+        guest = json.loads(result.stdout)
+        atomic_json(self.ev / 'guest-observation.json', guest)
+        self.record('kernel-observed', 'pass', 'SSH reached the owned guest and read its kernel version')
+        self.record('firstboot-observed', 'pass' if guest['complete'] else 'info',
+                    'completion marker present' if guest['complete'] else 'completion marker absent at observation')
+        self.record('firstboot-ordering-cycle', 'fail' if guest['firstboot_cycle'] else 'info',
+                    'current boot journal reports firstboot ordering cycle' if guest['firstboot_cycle'] else 'no matching cycle in current boot journal')
+        self.record('vmware-property-observed', 'pass' if guest['instance_id'] == self.state['name'] else 'fail',
+                    'guestinfo instance identity matched' if guest['instance_id'] == self.state['name'] else 'guestinfo identity missing or mismatched')
 
     def qualify(self):
         require(self.state.get('phase') == 'powered-on', 'qualify is single-use on a fresh import')
@@ -554,7 +587,7 @@ def locked(run):
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--scope', required=True, type=Path)
-    p.add_argument('command', choices=('preflight', 'up', 'qualify', 'collect', 'down', 'alive'))
+    p.add_argument('command', choices=('preflight', 'up', 'inspect', 'qualify', 'collect', 'down', 'alive'))
     args = p.parse_args()
     lab = Lab(args.scope)
     try:

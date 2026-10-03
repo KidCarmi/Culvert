@@ -354,6 +354,43 @@ class TransportTests(unittest.TestCase):
         self.assertTrue(all(p.poll() is not None for p in children))
 
 
+class ObservationTests(unittest.TestCase):
+    def test_ownership_refusal_prevents_console_or_guest_access(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp)
+            cfg = p / 'scope.json'
+            cfg.write_text(json.dumps(scope(p)))
+            obj = lab.Lab(cfg)
+            with patch.object(obj, 'vm', side_effect=lab.Refused('ownership mismatch')), \
+                 patch.object(obj, 'gov') as gov, patch.object(obj, 'guest_ip') as ip:
+                with self.assertRaises(lab.Refused):
+                    obj.inspect()
+                gov.assert_not_called()
+                ip.assert_not_called()
+
+    def test_console_is_private_and_pending_firstboot_is_not_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp)
+            cfg = p / 'scope.json'
+            cfg.write_text(json.dumps(scope(p)))
+            obj = lab.Lab(cfg)
+            obj.state = dict(name='owned-vm', path='/dc/vm/owned-vm')
+            vm = dict(config=dict(firmware='bios', version='vmx-13', hardware={}),
+                      runtime=dict(powerState='poweredOn'))
+            guest = dict(complete=False, firstboot_cycle=False, instance_id='owned-vm')
+            completed = subprocess.CompletedProcess([], 0, json.dumps(guest), '')
+            with patch.object(obj, 'vm', return_value=vm), patch.object(obj, 'gov') as gov, \
+                 patch.object(obj, 'guest_ip', return_value='192.0.2.10'), \
+                 patch.object(subprocess, 'run', return_value=completed):
+                obj.inspect()
+            self.assertEqual(gov.call_args.args[1], '-capture=' + str(obj.sec / 'console.png'))
+            rows = [json.loads(s) for s in (obj.ev / 'adapter.jsonl').read_text().splitlines()]
+            self.assertFalse(any(r['result'] == 'fail' for r in rows))
+            obj.collect()
+            with tarfile.open(obj.run / 'esxi-evidence.tgz') as tf:
+                self.assertEqual(tf.getnames(), ['results.json'])
+
+
 class CredentialTests(unittest.TestCase):
     def test_environment_auth_stays_runtime_only(self):
         source = {'GOVC_USERNAME': 'synthetic', 'GOVC_PASSWORD': 'synthetic-test-only'}
