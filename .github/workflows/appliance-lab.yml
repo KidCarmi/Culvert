@@ -32,7 +32,7 @@ env:
   # focused: build (closure + offline cold-load inside it), the disposable-store
   # replay and the ClamAV readiness check — no QEMU qualification. full: also
   # boot and qualify the OVA.
-  LAB_STAGE: focused
+  LAB_STAGE: full
   # Superseded candidate (historical; does not boot under BIOS, #1528 §3f).
   # Its guest-content fingerprint stays the comparison reference.
   ORIGINAL_OVA_SHA256: e24eb542f973fb70360bad5124ef81fdab8b6f8d67af601720613cbcca3700a4
