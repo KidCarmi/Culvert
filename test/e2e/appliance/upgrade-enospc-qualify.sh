@@ -230,9 +230,22 @@ if [[ "$SCENARIO" == midwrite ]]; then
   # Poll fast: the write lasts seconds, and a coarse poll lands the fill
   # after it has finished — which then reads as "survived" when nothing was
   # tested (the first runner run polled at 5 s and could not tell).
+  # Make the write happen UNDER OBSERVATION. On a fast host the predecessor's
+  # boot-time feed write finishes during E0's setup checks, leaving nothing in
+  # flight to fill against (appliance lab, runs 37138167013/37138298441:
+  # inconclusive). Stop the proxy, remove ONLY the derived category cache
+  # (re-downloadable by design, CHAOS-50), start it again: the boot-time sync
+  # then runs while the poll below is already armed. Admin state, CA and
+  # policy are untouched (state-intact compares them after recovery).
+  IN sh -c 'cd /srv/culvert && docker compose stop proxy' >/dev/null 2>&1
+  IN docker run --rm -v culvert_proxy-data:/data busybox:stable rm -rf /data/catfeeddb
+  LOGS_SINCE="$(IN date -u +%Y-%m-%dT%H:%M:%SZ)"
+  IN sh -c 'cd /srv/culvert && docker compose start proxy' >/dev/null 2>&1
+  # Same container: read only what it logged since this start.
+  wlogs() { IN docker logs --since "$LOGS_SINCE" culvert 2>&1; }
   wline=""
   for _ in $(seq 1 1200); do
-    wline="$(IN docker logs culvert 2>&1 | grep -m1 -oE 'FeedSync: (parsed [0-9]+ domain entries, writing to BadgerDB|download/parse failed|write REFUSED[^"]*)' || true)"
+    wline="$(wlogs | grep -m1 -oE 'FeedSync: (parsed [0-9]+ domain entries, writing to BadgerDB|download/parse failed|write REFUSED[^"]*)' || true)"
     [[ -n "$wline" ]] && break; sleep 0.5
   done
   if [[ "$wline" != *"writing to BadgerDB"* ]]; then
@@ -241,17 +254,17 @@ if [[ "$SCENARIO" == midwrite ]]; then
   # The write must still be IN FLIGHT when the fill lands, or the scenario
   # tested nothing: checked immediately before the fill, and again after it.
   wdone='FeedSync: (sync complete|bulk write failed)[^"]*'
-  if IN docker logs culvert 2>&1 | grep -qE "$wdone"; then
+  if wlogs | grep -qE "$wdone"; then
     check W write-in-flight inconclusive "the write finished before the fill could land; nothing was tested"
     INCONCLUSIVE=1; write_report_and_exit; fi
   r0="$(IN docker inspect -f '{{.RestartCount}}' culvert 2>/dev/null || echo 0)"
   why="$(fill_bounded)" || { check W filled-during-write fail "$why"; write_report_and_exit; }
-  if IN docker logs culvert 2>&1 | grep -qE "$wdone"; then
+  if wlogs | grep -qE "$wdone"; then
     check W write-in-flight inconclusive "the write finished while the fill was being placed; nothing was tested"
     INCONCLUSIVE=1; write_report_and_exit; fi
   check W filled-during-write pass "$wline; write still in flight; filled to $(df -k --output=avail "$MNT" | tail -1 | tr -d ' ')KiB free"
   sleep 30
-  after="$(IN docker logs culvert 2>&1 | grep -m1 -oE "$wdone" || echo 'no completion line')"
+  after="$(wlogs | grep -m1 -oE "$wdone" || echo 'no completion line')"
   st="$(IN docker inspect -f 'status={{.State.Status}} exit={{.State.ExitCode}} restarts={{.RestartCount}}' culvert 2>&1 || true)"
   # The verdict comes from the CONTAINER, not from its log: on a full disk
   # dockerd cannot write the crash trace ("Error writing log message"), so a
@@ -259,7 +272,7 @@ if [[ "$SCENARIO" == midwrite ]]; then
   # 37126218486: exit=2 restarts=1, no trace). A crash is any exit, a non-zero
   # exit code, or a restart since the fill; the trace is reported if kept.
   read -r cst cex crs <<<"$(IN docker inspect -f '{{.State.Status}} {{.State.ExitCode}} {{.RestartCount}}' culvert 2>/dev/null || echo 'unknown 0 0')"
-  trace=lost; IN docker logs culvert 2>&1 | grep -q 'SIGBUS' && trace=SIGBUS
+  trace=lost; wlogs | grep -q 'SIGBUS' && trace=SIGBUS
   if [[ "$cst" != running || "$cex" != 0 || "$crs" != "$r0" ]]; then
     check W known-failure-reproduced known-failure "F-DISK-1 reproduced: the proxy died during the write ($st; restarts before fill=$r0); crash trace: $trace"
     diagnose W-crash
@@ -315,7 +328,7 @@ if [[ "$SCENARIO" == midwrite ]]; then
   # A store torn mid-write reopens with only PART of the feed, and a non-empty
   # store does not trigger the boot-time sync — coverage stays partial until
   # the next scheduled round. Record what the reopened store reports.
-  fl="$(IN docker logs culvert 2>&1 | grep -oE 'FeedSync: [^"]{0,160}' | tail -3 | tr '\n' ' ' || true)"
+  fl="$(wlogs | grep -oE 'FeedSync: [^"]{0,160}' | tail -3 | tr '\n' ' ' || true)"
   check W category-coverage-after-recovery info "post-recovery feed log: ${fl:-none}"
   write_report_and_exit
 fi

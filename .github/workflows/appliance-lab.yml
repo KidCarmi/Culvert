@@ -189,6 +189,7 @@ jobs:
         # harness then exits 2 (inconclusive, nothing tested). Up to 3 attempts,
         # each kept in its own directory; the last one is the result.
         run: |
+          set +e   # GitHub runs steps under bash -e; the retry needs each exit code
           set -uo pipefail
           rc=2
           for attempt in 1 2 3; do
