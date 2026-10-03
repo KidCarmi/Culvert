@@ -63,6 +63,19 @@ jobs:
           done
           # supermin (libguestfs) reads the host kernel; Ubuntu ships it 0600.
           sudo chmod 0644 /boot/vmlinuz-*
+      - name: Use the containerd image store (the build's archive-identity guard requires it)
+        # Under Docker's classic store a loaded image's ID is its CONFIG digest,
+        # so the saved archive cannot carry the manifest digest first boot pins
+        # (build-ova.sh refuses it — PR #1528 K16). Same requirement as the
+        # qualification host; the guard is not relaxed.
+        run: |
+          set -euo pipefail
+          sudo mkdir -p /etc/docker
+          [ -s /etc/docker/daemon.json ] || echo '{}' | sudo tee /etc/docker/daemon.json >/dev/null
+          sudo python3 -c 'import json; p="/etc/docker/daemon.json"; d=json.load(open(p)); d.setdefault("features",{})["containerd-snapshotter"]=True; json.dump(d,open(p,"w"))'
+          sudo systemctl restart docker
+          for i in $(seq 1 30); do docker info >/dev/null 2>&1 && break; sleep 2; done
+          docker info --format 'driver={{.Driver}} {{.DriverStatus}}' | tee /dev/stderr | grep -q 'io.containerd.snapshotter.v1'
       - name: Obtain the source image tar (verified sha256)
         id: image
         env:
@@ -156,10 +169,23 @@ jobs:
         # the runner's filesystem never fills. Reproducing the crash is a KNOWN
         # FAILURE, never a survival pass; exit 1 = a recovery/integrity check failed,
         # exit 2 = inconclusive (no write observed).
+        # The write can finish before the fill lands on a fast runner; the
+        # harness then exits 2 (inconclusive, nothing tested). Up to 3 attempts,
+        # each kept in its own directory; the last one is the result.
         run: |
-          sudo -E env "PATH=$PATH" "HOME=$HOME" "GOCACHE=$(go env GOCACHE)" "GOMODCACHE=$(go env GOMODCACHE)" "GOFLAGS=-mod=mod" \
-            QUAL_ENOSPC_SCENARIO=midwrite CUR_IMAGE=culvert:ci-smoke PRED_IMAGE=culvert:ci-smoke \
-            EVID="$RUNNER_TEMP/fdisk1" ./test/e2e/appliance/upgrade-enospc-qualify.sh
+          set -uo pipefail
+          rc=2
+          for attempt in 1 2 3; do
+            sudo -E env "PATH=$PATH" "HOME=$HOME" "GOCACHE=$(go env GOCACHE)" "GOMODCACHE=$(go env GOMODCACHE)" "GOFLAGS=-mod=mod" \
+              QUAL_ENOSPC_SCENARIO=midwrite CUR_IMAGE=culvert:ci-smoke PRED_IMAGE=culvert:ci-smoke \
+              EVID="$RUNNER_TEMP/fdisk1/attempt-$attempt" ./test/e2e/appliance/upgrade-enospc-qualify.sh
+            rc=$?
+            echo "attempt $attempt: exit $rc"
+            [ "$rc" = 2 ] || break
+          done
+          sudo cp "$RUNNER_TEMP/fdisk1/attempt-$attempt/"{REPORT.md,checks.jsonl,diagnose.log} "$RUNNER_TEMP/fdisk1/" 2>/dev/null || true
+          sudo chown -R "$(id -u):$(id -g)" "$RUNNER_TEMP/fdisk1"
+          exit "$rc"
       - name: Report
         if: always()
         run: cat "$RUNNER_TEMP/fdisk1/REPORT.md" >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || echo "no REPORT.md" >> "$GITHUB_STEP_SUMMARY"
@@ -169,8 +195,8 @@ jobs:
           name: appliance-lab-fdisk1-evidence
           # Named files only: the evidence dir also holds the 2 GiB loop image.
           path: |
-            ${{ runner.temp }}/fdisk1/REPORT.md
-            ${{ runner.temp }}/fdisk1/checks.jsonl
-            ${{ runner.temp }}/fdisk1/diagnose.log
+            ${{ runner.temp }}/fdisk1/**/REPORT.md
+            ${{ runner.temp }}/fdisk1/**/checks.jsonl
+            ${{ runner.temp }}/fdisk1/**/diagnose.log
           retention-days: 30
           if-no-files-found: warn
