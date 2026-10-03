@@ -573,6 +573,54 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Performance
 
+- The forward category index's per-rule read lock is sharded, so category-scoped
+  policy evaluation scales with core count instead of against it.
+  `urlcat.MatchesHost`/`MatchesHostAdmin` answer "is this host in category C?"
+  and are called once per category-scoped access rule per proxied request
+  (deliberately unmemoized — the answer depends on the rule's category as well
+  as the host). Both reached their host set under one process-wide
+  `sync.RWMutex` read lock, whose `RLock` is an atomic read-modify-write on a
+  single shared word, so every request on every core wrote the same cache line
+  purely to read an index that in steady state never changes. That is a
+  throughput ceiling rather than a constant cost, and it is the finding already
+  closed for `internal/threatfeed`, `internal/connlimit`, `internal/blocklist`,
+  `internal/rewrite`, the IP filter and the rate-limit exempt view.
+
+  A pure-CPU control confirms the test machine scales 3.85x from one core to
+  four, so the shape is contention and not saturation. On the read primitive,
+  both arms timed in one run: before, 20.0 ns at one core rising to 48.6 ns at
+  four — per-op cost *rose* 2.4x as cores were added, so four cores delivered
+  0.41x the throughput of one; after, 22.2 ns falling to 5.3 ns (4.2x). End to
+  end on `DestCategory` rules at four cores, 10 rules go 957.7 → 533.0 ns
+  (1.80x) and 50 rules 4568 → 2016 ns (2.27x), with one-core-to-four-core
+  scaling going 1.13x → 2.64x.
+
+  A sharded lock rather than this repository's other established fix, the
+  `atomic.Pointer` read view — measured before the approach was chosen. The
+  view is ~2.2x better on the primitive and is the wrong shape here, because it
+  requires every writer to install a replacement map and this index is mutated
+  incrementally by `addHostToIndexes`, which the SaaS feed merge calls once per
+  host. Publishing would mean shallow-copying the outer category→set map on
+  every single-host add: 1.29 µs at the 27-category shipped default, but 30.7 ms
+  at the 200,000 categories `maxSnapURLCategories` already permits, so a merge
+  adding 10k hosts would spend ~307 seconds under the write lock — breaking
+  urlcat's standing rule that nothing O(taxonomy) may be added to `AddHost`.
+  Sharding removes the contention with no write amplification at all: both
+  index writers are byte-identical, every mutator keeps true exclusive access,
+  and the documented lock order is untouched because the sharded lock replaces
+  the mutex in place. It therefore cannot carry a view's failure class — there
+  is no view to publish, so no mutator can forget to publish one, which for
+  this store would be a silent security failure (a category a Deny rule keys on
+  that stops matching).
+
+  Nothing about the verdict changes: same index, same key derivation, same
+  exact-then-suffix probe sequence, same exclusion against writers. The trade
+  is that a writer takes all 64 shards instead of one lock (admin and feed
+  rate, already doing far more work per call), and at one core the hot path is
+  ~2.8 ns dearer per rule from the single `rand.Uint64` — 5182 → 5321 ns on the
+  50-rule scan. `internal/catgroup.GetByName` has the identical shape on the
+  `DestCategoryGroup` path and is recorded as the next finding, not fixed here.
+
 - The threat feed's full-URL check no longer re-parses a URL it was handed
   already parsed. `preDispatchBlocked` runs it on every forwarded plain-HTTP
   request, on the request goroutine, before the policy engine — and called it
