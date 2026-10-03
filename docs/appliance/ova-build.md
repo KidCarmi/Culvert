@@ -57,7 +57,7 @@ stale by import time; the sidecar downloads it on first start (see first-boot).
 * `--work` is held by an `flock` for the whole run: a second build into the
   same directory is refused (two runs would recreate the working disk under
   each other); use a different `--work` to build in parallel.
-* ~12 GB free in `--work` (base image, the virt-resized working qcow2, VMDK).
+* ~12 GB free in `--work` (base image, the working qcow2, VMDK).
 
 ## Running it
 
@@ -107,9 +107,15 @@ verifies on import.
    proxy image. Failure aborts the build.
 5. Stage the overlay: `docker save | gzip -n` of both images, `scripts/install.sh`,
    provisioning + maintenance files, `manifest.env`, `build-info.json`.
-6. `virt-resize --expand /dev/sda1` the base image into a fresh 40 GB qcow2
-   (the cloud image's root is 2.4 GB and cloud-init's `growpart` only runs at
-   first boot — the Docker install needs the space during the build).
+6. Convert the base image to a 40 GB qcow2 and grow the root partition IN
+   PLACE (`part-expand-gpt`, `part-resize /dev/sda 1`, `e2fsck`, `resize2fs`):
+   the cloud image's root is 2.4 GB and cloud-init's `growpart` only runs at
+   first boot, while the Docker install needs the space during the build. The
+   build refuses to continue if any partition number or start changed. NOT
+   `virt-resize`: it renumbers the partitions (14, 15, 16, 1 → 1, 2, 3, 4)
+   while the BIOS GRUB core image still names `/boot` as partition 16, so the
+   OVA stopped at `grub rescue>` under BIOS (found by the QEMU appliance lab;
+   `readiness-report.md` §3f). Pinned by `TestBuildOVA_RootGrownInPlace`.
 7. `virt-customize`: copy the overlay in, run
    [`prepare-guest.sh`](../../appliance/build/prepare-guest.sh) inside the guest
    (Docker repo key fingerprint check → pinned package install → hold →

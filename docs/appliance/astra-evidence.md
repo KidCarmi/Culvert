@@ -154,6 +154,16 @@ so `provisioning_drift: false` — no drift flag was needed.
 |-----|---------|
 | c4 | **SUCCEEDED** — `culvert-appliance-dev-candidate.4c4b7728c0e6-ubuntu-24.04.ova`, 1,223,895,040 bytes, SHA256 `e24eb542f973fb70360bad5124ef81fdab8b6f8d67af601720613cbcca3700a4` (equal in `.ova.sha256` and `build-info.json` → `artifact.sha256`), ~26 min under TCG. Provenance (`appliance/sbom/evidence/candidate-4c4b772.build-info.json`): `candidate: true`, image source AND provisioning `4c4b7728c0e6a1746e968d935b635fc652647e6f`, `git_dirty: false`, image tar sha256 `bb8a2c75…`, CI run 37124197333, application image id inside the guest `sha256:384f4c4b1bad91be93dc8b78adb974b6c57dd9b4c8f534bfdbafc2c1e4f1ab04` (containerd store: the OCI manifest digest), ClamAV pinned `clamav/clamav:1.4@sha256:57deb108…` (unchanged), Docker 5:29.8.2 / containerd 2.3.6 / compose 5.5.1 (pins unchanged). Snapshot `20261002T120000Z` moved the same 13 packages as c3 (`guest-os-candidate-4c4b772.build-upgrades.txt`); the kernel image stays `6.8.0-142` (`/boot` read back with `virt-ls`). Guest re-scan of THIS artefact: `sbom-cve-evidence.md` §Final candidate. **Still NOT done: booting it** — `vsphere-qualification.md` is the procedure. |
 
+**Superseded: c4 does not boot under BIOS (historical record, kept).** The
+QEMU appliance lab (`test/appliance-lab`) booted c4's own disk under SeaBIOS
+and it stopped at `error: no such partition. Entering rescue mode... grub
+rescue>`; under UEFI the same disk reaches the kernel. Cause: the build's
+`virt-resize` renumbered the partitions under the BIOS GRUB core image. Its
+ESXi result is BLOCKED and stays so: the file exists only on the host that
+built it, with no permitted transfer route. The replacement candidate is
+built from the corrected source with its own identity (`readiness-report.md`
+§3f).
+
 Commits after `4c4b772` change only the qualification harness, evidence and
 documentation (verified with `git diff --stat 4c4b772 HEAD` at the closeout
 commit: no Go source, Dockerfile, compose file, `appliance/build/`,
