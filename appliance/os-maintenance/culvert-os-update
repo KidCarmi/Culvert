@@ -10,23 +10,56 @@
 #   sudo culvert-os-update reboot           graceful stack stop (honours stop_grace_period)
 #                                           then reboot
 #   any mode may add --reboot-if-required   reboot at the end when the kernel/libc need it
+#   any mutating mode may add --force       proceed although the maintenance agent has an
+#                                           operation in flight (see below)
 #
 # Scope: guest OS packages/kernel and the Docker engine ONLY. The Culvert
 # container image is updated through Release Management (signed catalog +
 # maintenance agent) — never by this script. Local, interactive, sudo-gated;
 # there is no remote invocation path.
+#
+# Sequencing with the maintenance agent: an application upgrade/rollback/
+# restore runs `docker compose` against the same stack this script stops,
+# upgrades the engine under, or reboots. A mutating mode therefore REFUSES
+# while the agent's crash-recovery journal holds a record (an operation in
+# flight, or an interrupted one awaiting POST /v1/reconcile), and two runs
+# of this script never overlap (flock). --force overrides the journal check
+# only. The other direction is covered by the agent's own startup
+# reconcile: an op interrupted by a reboot is classified on /v1/status.
 set -euo pipefail
 STACK=/srv/culvert
 LOG=/var/log/culvert-os-update.log
+MAINT_JOURNAL=/var/lib/culvert-maint/reconcile
+LOCK=/run/culvert-os-update.lock
 mode="${1:-check}"; shift || true
-reboot_if_required=0
-for a in "$@"; do [[ "$a" == "--reboot-if-required" ]] && reboot_if_required=1; done
+reboot_if_required=0; force=0
+for a in "$@"; do
+  [[ "$a" == "--reboot-if-required" ]] && reboot_if_required=1
+  [[ "$a" == "--force" ]] && force=1
+done
 [[ "$(id -u)" -eq 0 ]] || { echo "run with sudo" >&2; exit 1; }
 export DEBIAN_FRONTEND=noninteractive
 exec > >(tee -a "$LOG") 2>&1
 log() { printf '%s culvert-os-update[%s]: %s\n' "$(date -u +%FT%TZ)" "$mode" "$*"; }
 DOCKER_PKGS=(docker-ce docker-ce-cli containerd.io docker-compose-plugin)
 
+# guard_maintenance: called by every mutating mode before it changes anything.
+guard_maintenance() {
+  exec 9>"$LOCK"
+  flock -n 9 || { echo "culvert-os-update: another culvert-os-update run holds $LOCK — wait for it to finish" >&2; exit 3; }
+  local inflight
+  inflight="$(find "$MAINT_JOURNAL" -maxdepth 1 -name '*.json' -type f 2>/dev/null | sed 's#.*/##; s#\.json$##' | tr '\n' ' ')"
+  if [[ -n "$inflight" ]]; then
+    if [[ "$force" -eq 1 ]]; then
+      log "WARNING: --force: proceeding although the maintenance agent journal holds: $inflight"
+    else
+      echo "culvert-os-update: the maintenance agent has operation(s) in flight or awaiting reconcile: $inflight" >&2
+      echo "  wait for them to finish, or check: curl --unix-socket /run/culvert-maint/culvert-maint.sock http://unix/v1/status" >&2
+      echo "  (override with --force only when you know the agent is idle)" >&2
+      exit 3
+    fi
+  fi
+}
 reboot_required() { [[ -f /var/run/reboot-required ]]; }
 report_reboot() {
   if reboot_required; then
@@ -87,12 +120,14 @@ case "$mode" in
     report_reboot
     ;;
   security)
+    guard_maintenance
     apt-get update -qq
     log "running unattended-upgrade (security pocket only, Docker blacklisted)"
     unattended-upgrade -v
     finish
     ;;
   os)
+    guard_maintenance
     apt-get update -qq
     # --with-new-pkgs: a kernel ABI bump (linux-virtual -> a NEW
     # linux-image-<abi> package) is "kept back" by a plain `upgrade`, so the
@@ -107,6 +142,7 @@ case "$mode" in
     finish
     ;;
   docker)
+    guard_maintenance
     apt-get update -qq
     echo "--- candidate Docker versions:"
     apt-cache policy "${DOCKER_PKGS[@]}" | grep -E '^[a-z]|Installed|Candidate'
@@ -135,6 +171,7 @@ case "$mode" in
     finish
     ;;
   reboot)
+    guard_maintenance
     do_reboot
     ;;
   *)

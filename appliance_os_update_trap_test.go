@@ -22,6 +22,13 @@ func runOSUpdateDocker(t *testing.T, env ...string) (out, calls string, code int
 
 func runOSUpdate(t *testing.T, mode string, env ...string) (out, calls string, code int) {
 	t.Helper()
+	return runOSUpdateWith(t, []string{mode}, nil, env...)
+}
+
+// runOSUpdateWith runs the script with args, after writing one agent
+// journal record per name in journal (an operation in flight).
+func runOSUpdateWith(t *testing.T, args, journal []string, env ...string) (out, calls string, code int) {
+	t.Helper()
 	if _, err := exec.LookPath("bash"); err != nil {
 		t.Skip("bash not available")
 	}
@@ -41,8 +48,19 @@ func runOSUpdate(t *testing.T, mode string, env ...string) (out, calls string, c
 	}
 	script := strings.Replace(string(src), "STACK=/srv/culvert", "STACK="+stack, 1)
 	script = strings.Replace(script, "LOG=/var/log/culvert-os-update.log", "LOG="+filepath.Join(dir, "log"), 1)
-	if script == string(src) {
-		t.Fatal("could not relocate STACK/LOG in culvert-os-update")
+	jdir := filepath.Join(dir, "reconcile")
+	script = strings.Replace(script, "MAINT_JOURNAL=/var/lib/culvert-maint/reconcile", "MAINT_JOURNAL="+jdir, 1)
+	script = strings.Replace(script, "LOCK=/run/culvert-os-update.lock", "LOCK="+filepath.Join(dir, "lock"), 1)
+	if !strings.Contains(script, "MAINT_JOURNAL="+jdir) || !strings.Contains(script, "LOCK="+filepath.Join(dir, "lock")) || !strings.Contains(script, "STACK="+stack) {
+		t.Fatal("could not relocate STACK/LOG/MAINT_JOURNAL/LOCK in culvert-os-update")
+	}
+	if err := os.MkdirAll(jdir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range journal {
+		if err := os.WriteFile(filepath.Join(jdir, id+".json"), []byte("{}"), 0o600); err != nil {
+			t.Fatal(err)
+		}
 	}
 	scriptPath := filepath.Join(dir, "culvert-os-update")
 	if err := os.WriteFile(scriptPath, []byte(script), 0o600); err != nil { // run as `bash <file>`: no execute bit needed
@@ -62,7 +80,7 @@ func runOSUpdate(t *testing.T, mode string, env ...string) (out, calls string, c
 		}
 	}
 	callsPath := filepath.Join(dir, "calls")
-	cmd := exec.CommandContext(t.Context(), "bash", scriptPath, mode) //nolint:gosec // test-owned copy of the script in t.TempDir(); mode is a test constant
+	cmd := exec.CommandContext(t.Context(), "bash", append([]string{scriptPath}, args...)...) //nolint:gosec // test-owned copy of the script in t.TempDir(); args are test constants
 	cmd.Env = append([]string{"PATH=" + bin + ":" + os.Getenv("PATH"), "CALLS=" + callsPath}, env...)
 	b, _ := cmd.CombinedOutput()
 	code = cmd.ProcessState.ExitCode()
@@ -175,5 +193,41 @@ func TestOSUpdateOS_InstallsNewKernelPackagesAndKeepsHolds(t *testing.T) {
 		if strings.Contains(calls, forbidden) {
 			t.Fatalf("os mode must leave the Docker holds alone; saw %q in:\n%s", forbidden, calls)
 		}
+	}
+}
+
+// Sequencing with the maintenance agent (owner review, PR #1528): while the
+// agent's journal holds a record — an upgrade/rollback/restore in flight, or
+// one interrupted and awaiting reconcile — no mutating mode may stop the
+// stack, move the engine or reboot under it.
+func TestOSUpdate_RefusesWhileTheAgentHasAnOperationInFlight(t *testing.T) {
+	for _, mode := range []string{"os", "security", "docker", "reboot"} {
+		t.Run(mode, func(t *testing.T) {
+			out, calls, code := runOSUpdateWith(t, []string{mode}, []string{"01M40NA2MFQW9CCZN85KRQB6MC"})
+			if code != 3 || !strings.Contains(out, "01M40NA2MFQW9CCZN85KRQB6MC") {
+				t.Fatalf("%s must refuse (exit 3) naming the in-flight op; code=%d\n%s", mode, code, out)
+			}
+			if strings.TrimSpace(calls) != "" {
+				t.Fatalf("%s mutated something while refusing:\n%s", mode, calls)
+			}
+		})
+	}
+}
+
+func TestOSUpdate_ForceOverridesTheJournalGuard(t *testing.T) {
+	out, calls, code := runOSUpdateWith(t, []string{"os", "--force"}, []string{"01M40NA2MFQW9CCZN85KRQB6MC"})
+	if code != 0 || !strings.Contains(out, "--force: proceeding") || !strings.Contains(calls, "upgrade --with-new-pkgs") {
+		t.Fatalf("--force must proceed and say so; code=%d\n%s\n%s", code, out, calls)
+	}
+}
+
+// CONTROLS: `check` is read-only and never refused, and an empty journal
+// refuses nothing.
+func TestOSUpdate_GuardIgnoresReadOnlyModeAndEmptyJournal(t *testing.T) {
+	if _, _, code := runOSUpdateWith(t, []string{"check"}, []string{"01M40NA2MFQW9CCZN85KRQB6MC"}); code != 0 {
+		t.Fatalf("check must not be gated, code=%d", code)
+	}
+	if _, _, code := runOSUpdate(t, "os"); code != 0 {
+		t.Fatalf("an empty journal must not refuse, code=%d", code)
 	}
 }
