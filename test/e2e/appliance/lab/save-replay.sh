@@ -8,7 +8,7 @@
 # pinned docker:dind container with its own data root, never in the
 # builder's daemon, so it can neither pre-populate nor repair the store the
 # build uses. For comparison it also saves by digest and by tag with
-# --platform, and with both references (the corrected build). Every archive is checked with archive_platform_closure against
+# --platform, and with both references. Every archive is checked with archive_platform_closure against
 # the pins. Observes only; never fails the job.
 #
 # Usage: save-replay.sh <repo> <tag> <index-digest> <amd64-digest> <dind-image@sha256:…> <out-dir>
@@ -47,6 +47,6 @@ save() { # label docker-save-args...
 save by-tag "$tagged"                         # the save that produced F-OVA-CLAMAV-1
 save by-digest "$ref"
 save by-tag-platform --platform linux/amd64 "$tagged"
-save digest-and-tag "$ref" "$tagged"          # build-ova.sh's corrected save
+save digest-and-tag "$ref" "$tagged"          # tried as a fix; did not help on containerd 2.3.6
 rm -f "$out"/*.tgz
 exit 0

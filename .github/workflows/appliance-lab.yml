@@ -126,7 +126,14 @@ jobs:
           sudo apt-get update -q
           v="$(apt-cache madison docker-ce | awk '$3 ~ /^5:29\.6\.2-/{print $3; exit}')"
           [ -n "$v" ] || { echo "::error::docker-ce 29.6.2 not available"; exit 1; }
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q --allow-downgrades "docker-ce=$v" "docker-ce-cli=$v" containerd.io
+          # containerd too: on the runner's newest containerd.io (2.3.6) docker
+          # save wrote a hollow ClamAV archive (F-OVA-CLAMAV-1); the recorded
+          # build host runs 2.2.6, and build-ova.sh now refuses anything else.
+          c="$(apt-cache madison containerd.io | awk '$3 ~ /^2\.2\.6-/{print $3; exit}')"
+          [ -n "$c" ] || { echo "::error::containerd.io 2.2.6 not available"; exit 1; }
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q --allow-downgrades "docker-ce=$v" "docker-ce-cli=$v" "containerd.io=$c"
+          sudo systemctl restart containerd docker
+          containerd --version | tee /dev/stderr | grep -q ' v2\.2\.6 '
           docker version --format 'client={{.Client.Version}} server={{.Server.Version}}'
       - name: Use the containerd image store (the build's archive-identity guard requires it)
         # Under Docker's classic store a loaded image's ID is its CONFIG digest,

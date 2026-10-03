@@ -88,7 +88,7 @@ set -a
 set +a
 for v in BASE_IMAGE_URL BASE_IMAGE_SHA256 APP_IMAGE_REPO APP_IMAGE_TAG APP_IMAGE_INDEX_DIGEST \
          APP_IMAGE_AMD64_DIGEST CLAMAV_IMAGE_REPO CLAMAV_IMAGE_TAG CLAMAV_IMAGE_INDEX_DIGEST \
-         CLAMAV_IMAGE_AMD64_DIGEST COLDLOAD_DIND_IMAGE DOCKER_CE_VERSION VM_DISK_GB VM_VCPUS VM_MEMORY_MB VM_HW_VERSION; do
+         CLAMAV_IMAGE_AMD64_DIGEST COLDLOAD_DIND_IMAGE BUILD_HOST_CONTAINERD_VERSION DOCKER_CE_VERSION VM_DISK_GB VM_VCPUS VM_MEMORY_MB VM_HW_VERSION; do
   [[ -n "${!v:-}" ]] || die "manifest.env: $v is not set"
 done
 
@@ -135,6 +135,18 @@ if command -v gpgv >/dev/null 2>&1 && [[ -f "${BASE_IMAGE_KEYRING:-/nonexistent}
   BASE_GPG="verified ($(grep -o 'using RSA key [0-9A-F]*' "$WORK/cache/gpgv.log" | head -1))"
   log "base image GPG: $BASE_GPG"
 fi
+
+# The image archives are written by the daemon's containerd. With Docker
+# 29.6.2 on containerd 2.3.6 `docker save` exported a 69 KB ClamAV archive with
+# no config or layers while the same content store held them; on 2.2.6 (the
+# recorded build host, and a disposable docker:dind) the same sequence saves
+# the complete image (F-OVA-CLAMAV-1, lab runs 37153099273/37153481510). The
+# build therefore runs only on the pinned containerd; the closure and
+# cold-load checks below still verify every archive it writes.
+HOST_CONTAINERD="$(docker version --format '{{range .Server.Components}}{{if eq .Name "containerd"}}{{.Version}}{{end}}{{end}}')"
+[[ "${HOST_CONTAINERD#v}" == "$BUILD_HOST_CONTAINERD_VERSION" ]] \
+  || die "the Docker daemon uses containerd ${HOST_CONTAINERD:-unknown}; this build requires ${BUILD_HOST_CONTAINERD_VERSION} (manifest.env BUILD_HOST_CONTAINERD_VERSION) — install containerd.io ${BUILD_HOST_CONTAINERD_VERSION} on the build host"
+log "build host containerd: $HOST_CONTAINERD"
 
 # ── 2. Application images by digest ─────────────────────────────────────────
 pull_by_digest() { # repo index_digest amd64_digest tag
@@ -279,25 +291,12 @@ if [[ -n "${HTTPS_PROXY:-}" ]]; then
   fi
 fi
 
-save_image() { # out.tar.gz ref...
-  local out="$1"; shift
-  log "docker save $*"
-  docker save "$@" | gzip -n -6 > "$out"
+save_image() { # ref out.tar.gz
+  log "docker save $1"
+  docker save "$1" | gzip -n -6 > "$2"
 }
-# An image pulled BY DIGEST and then `docker tag`ged is saved under BOTH
-# references. On the containerd image store the tag created from a digest
-# reference carries no platform content (`docker image ls --tree` lists no
-# platform under it), so saving the tag alone exported only the index and
-# manifests: a 69,562-byte ClamAV archive that "loaded" and could not run
-# (F-OVA-CLAMAV-1, reproduced in a fresh disposable store). The digest
-# reference carries the content; the tag is what first boot and compose name.
-# The closure and cold-load checks below prove the result either way.
-if [[ "$CANDIDATE" -eq 1 ]]; then
-  save_image "$OV/var/lib/culvert-appliance/images/culvert.tar.gz" "${APP_IMAGE_REPO}:${APP_IMAGE_TAG}"
-else
-  save_image "$OV/var/lib/culvert-appliance/images/culvert.tar.gz" "${APP_IMAGE_REPO}@${APP_IMAGE_INDEX_DIGEST}" "${APP_IMAGE_REPO}:${APP_IMAGE_TAG}"
-fi
-save_image "$OV/var/lib/culvert-appliance/images/clamav.tar.gz" "${CLAMAV_IMAGE_REPO}@${CLAMAV_IMAGE_INDEX_DIGEST}" "${CLAMAV_IMAGE_REPO}:${CLAMAV_IMAGE_TAG}"
+save_image "${APP_IMAGE_REPO}:${APP_IMAGE_TAG}"       "$OV/var/lib/culvert-appliance/images/culvert.tar.gz"
+save_image "${CLAMAV_IMAGE_REPO}:${CLAMAV_IMAGE_TAG}"  "$OV/var/lib/culvert-appliance/images/clamav.tar.gz"
 # First boot checks the loaded image against APP_IMAGE_INDEX_DIGEST; prove the
 # archive carries that identity before baking it (archive-identity.sh).
 archive_names_digest "$OV/var/lib/culvert-appliance/images/culvert.tar.gz" "$APP_IMAGE_INDEX_DIGEST" \
@@ -327,7 +326,7 @@ INSTALL_SHA="$(sha256sum "$REPO/scripts/install.sh" | cut -d' ' -f1)"
 BUILD_TS="$(date -u -d "@$SOURCE_DATE_EPOCH" +%Y-%m-%dT%H:%M:%SZ)"
 BUILD_WALL="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 BI_INSTALL_SHA="$INSTALL_SHA" BI_APP_VERSION="$APP_VERSION" BI_MAINT_VERSION="$MAINT_VERSION" \
-BI_COSIGN="$COSIGN_RESULT" BI_BASE_GPG="$BASE_GPG" BI_APP_TAR_SHA="$APP_TAR_SHA" BI_CLAM_TAR_SHA="$CLAM_TAR_SHA" \
+BI_CONTAINERD="$HOST_CONTAINERD" BI_COSIGN="$COSIGN_RESULT" BI_BASE_GPG="$BASE_GPG" BI_APP_TAR_SHA="$APP_TAR_SHA" BI_CLAM_TAR_SHA="$CLAM_TAR_SHA" \
 BI_VERSION="$VERSION" BI_OVA="$OVA_BASENAME.ova" BI_GIT_COMMIT="$GIT_COMMIT" BI_GIT_DIRTY="$GIT_DIRTY" \
 BI_BUILD_TS="$BUILD_TS" BI_BUILD_WALL="$BUILD_WALL" \
 BI_CANDIDATE="$CANDIDATE" BI_CANDIDATE_SOURCE="$CANDIDATE_SOURCE" BI_CANDIDATE_TAR_SHA="$CANDIDATE_TAR_SHA" BI_CANDIDATE_RUN_ID="$CANDIDATE_RUN_ID" \
@@ -362,7 +361,8 @@ info = {
   "virtual_hardware": {"vcpus": int(E["VM_VCPUS"]), "memory_mb": int(E["VM_MEMORY_MB"]), "disk_gb": int(E["VM_DISK_GB"]),
                        "hw_version": E["VM_HW_VERSION"], "nic": "E1000 x1", "disk_format": "vmdk streamOptimized (thin)"},
   "build_tools": {"qemu-img": v("qemu-img --version | head -1"), "libguestfs": v("virt-customize --version"),
-                  "docker": v("docker version --format '{{.Server.Version}}'"), "cosign_image": E["COSIGN_IMAGE"],
+                  "docker": v("docker version --format '{{.Server.Version}}'"),
+                  "containerd": E["BI_CONTAINERD"], "cosign_image": E["COSIGN_IMAGE"],
                   "build_host": v(". /etc/os-release && echo $PRETTY_NAME"), "kvm": v("test -e /dev/kvm && echo yes || echo 'no (TCG)'")}
 }
 if E["BI_CANDIDATE"] == "1":

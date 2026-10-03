@@ -298,24 +298,31 @@ func TestBuildOVA_ColdLoadsBothArchivesBeforeBaking(t *testing.T) {
 	}
 }
 
-// F-OVA-CLAMAV-1's cause: on the containerd store, a tag created from a
-// digest reference carries no platform content, so saving the tag alone
-// exported a hollow archive. Pulled images are saved under both references.
-func TestBuildOVA_SavesPulledImagesUnderDigestAndTag(t *testing.T) {
+// F-OVA-CLAMAV-1's cause: with Docker 29.6.2, `docker save` on containerd
+// 2.3.6 wrote a hollow ClamAV archive while the content store held the image;
+// on 2.2.6 (the recorded build host, and a disposable docker:dind) the same
+// sequence is complete. The build refuses any containerd but the pinned one,
+// before any image is pulled or saved.
+func TestBuildOVA_RunsOnlyOnThePinnedContainerd(t *testing.T) {
 	b, err := os.ReadFile(buildOVAScript)
 	if err != nil {
 		t.Fatal(err)
 	}
 	src := string(b)
-	for _, want := range []string{
-		`save_image "$OV/var/lib/culvert-appliance/images/clamav.tar.gz" "${CLAMAV_IMAGE_REPO}@${CLAMAV_IMAGE_INDEX_DIGEST}" "${CLAMAV_IMAGE_REPO}:${CLAMAV_IMAGE_TAG}"`,
-		`save_image "$OV/var/lib/culvert-appliance/images/culvert.tar.gz" "${APP_IMAGE_REPO}@${APP_IMAGE_INDEX_DIGEST}" "${APP_IMAGE_REPO}:${APP_IMAGE_TAG}"`,
-	} {
-		if !strings.Contains(src, want) {
-			t.Errorf("build-ova.sh must save a pulled image under its digest AND its tag: missing %s", want)
-		}
+	check := strings.Index(src, `[[ "${HOST_CONTAINERD#v}" == "$BUILD_HOST_CONTAINERD_VERSION" ]]`)
+	pull := strings.Index(src, `pull_by_digest "$CLAMAV_IMAGE_REPO"`)
+	save := strings.Index(src, `save_image "${CLAMAV_IMAGE_REPO}:${CLAMAV_IMAGE_TAG}"`)
+	if check < 0 || pull < 0 || save < 0 || check > pull || check > save {
+		t.Fatal("build-ova.sh must refuse an unpinned containerd before pulling or saving any image")
 	}
-	if regexp.MustCompile(`(?m)^save_image "[^"]*clamav\.tar\.gz" "\$\{CLAMAV_IMAGE_REPO\}:\$\{CLAMAV_IMAGE_TAG\}"$`).MatchString(src) {
-		t.Error("build-ova.sh saves ClamAV by tag alone (the F-OVA-CLAMAV-1 shape)")
+	if !strings.Contains(src, `"containerd": E["BI_CONTAINERD"]`) {
+		t.Error("build-info.json must record the build host's containerd")
+	}
+	m, err := os.ReadFile(filepath.Join(pkgSourceDir(), "appliance", "build", "manifest.env"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !regexp.MustCompile(`(?m)^BUILD_HOST_CONTAINERD_VERSION=2\.2\.6$`).Match(m) {
+		t.Error("manifest.env must pin BUILD_HOST_CONTAINERD_VERSION to the verified 2.2.6")
 	}
 }
