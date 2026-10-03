@@ -53,6 +53,7 @@ jobs:
       release: ${{ steps.classify.outputs.release }}
       maint: ${{ steps.classify.outputs.maint }}
       terraform: ${{ steps.classify.outputs.terraform }}
+      appliance: ${{ steps.classify.outputs.appliance }}
       image_needed: ${{ steps.classify.outputs.image_needed }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -64,7 +65,7 @@ jobs:
         run: |
           set -euo pipefail
           if [ "${{ github.event_name }}" != "pull_request" ]; then
-            for k in proxy_core security docker deps tests packaging release maint terraform image_needed; do
+            for k in proxy_core security docker deps tests packaging release maint terraform appliance image_needed; do
               echo "$k=true" >> "$GITHUB_OUTPUT"
             done
             echo "Manual run — all deep jobs enabled."
@@ -75,7 +76,7 @@ jobs:
 
           proxy_core=false; security=false; docker=false; deps=false
           tests=false; packaging=false; release=false; maint=false
-          terraform=false
+          terraform=false; appliance=false
           self=false
           while IFS= read -r f; do
             case "$f" in
@@ -125,7 +126,19 @@ jobs:
                 maint=true ;;
             esac
             case "$f" in
-              packaging/*|scripts/*) packaging=true ;;
+              # The appliance's provisioning/maintenance scripts are packaging
+              # too: shellchecked by the same job as the agent installer.
+              packaging/*|scripts/*|appliance/provision/*|appliance/os-maintenance/*|appliance/build/*.sh) packaging=true ;;
+            esac
+            case "$f" in
+              # On-prem appliance qualification (owner review, PR #1528): the
+              # real-image lifecycle + agent harnesses run against the
+              # deep-gate-image artifact whenever the appliance, the
+              # backup/restore/cleanup path, the deploy bundle or the
+              # harnesses themselves change. `*` matches `/`, so
+              # appliance/* covers build/, provision/, os-maintenance/, sbom/.
+              appliance/*|test/e2e/appliance/*|restore*.go|backup*.go|cleanup*.go|scripts/install.sh|docker-compose.yml|packaging/*)
+                appliance=true ;;
             esac
             case "$f" in
               # Declarations-only IaC skeleton (M0-PR5). Gates the terraform
@@ -155,17 +168,17 @@ jobs:
             echo "Gate self-change detected — enabling all deep jobs."
             proxy_core=true; security=true; docker=true; deps=true
             tests=true; packaging=true; release=true; maint=true
-            terraform=true
+            terraform=true; appliance=true
           fi
 
           image_needed=false
-          if $proxy_core || $security || $docker || $deps || $release; then
+          if $proxy_core || $security || $docker || $deps || $release || $appliance; then
             image_needed=true
           fi
-          for k in proxy_core security docker deps tests packaging release maint terraform image_needed; do
+          for k in proxy_core security docker deps tests packaging release maint terraform appliance image_needed; do
             eval "echo \"$k=\$$k\"" >> "$GITHUB_OUTPUT"
           done
-          echo "proxy_core=$proxy_core security=$security docker=$docker deps=$deps tests=$tests packaging=$packaging release=$release maint=$maint terraform=$terraform image_needed=$image_needed"
+          echo "proxy_core=$proxy_core security=$security docker=$docker deps=$deps tests=$tests packaging=$packaging release=$release maint=$maint terraform=$terraform appliance=$appliance image_needed=$image_needed"
 
   # ─── 1. Build the proxy image ONCE (amd64) — consumed by the jobs below ───
   build-image:
@@ -433,6 +446,25 @@ jobs:
           sudo apt-get update -q && sudo apt-get install -y -q shellcheck
           shellcheck packaging/culvert-maint/install.sh
 
+      - name: shellcheck appliance scripts (first boot, status, sudo policy, OS maintenance, OVA build, harnesses)
+        run: |
+          shellcheck -S warning \
+            appliance/provision/culvert-firstboot.sh appliance/provision/culvert-status \
+            appliance/provision/culvert-sudo-policy appliance/provision/culvert-net \
+            appliance/provision/culvert-issue-update appliance/provision/culvert-appliance-reset-identity \
+            appliance/os-maintenance/culvert-os-update \
+            appliance/build/build-ova.sh appliance/build/prepare-guest.sh \
+            test/e2e/appliance/lifecycle-qualify.sh test/e2e/appliance/agent-qualify.sh
+
+      - name: Validate appliance sudoers + first-boot unit shapes
+        run: |
+          # The key-only drop-in first boot writes (95-culvert-keyonly) and the
+          # console rule prepare-guest.sh installs must be valid sudoers.
+          printf 'culvert ALL=(ALL:ALL) NOPASSWD: ALL\n' > /tmp/95-culvert-keyonly
+          printf 'culvert ALL=(ALL:ALL) ALL\n' > /tmp/50-culvert-console
+          sudo visudo -c -f /tmp/95-culvert-keyonly && sudo visudo -c -f /tmp/50-culvert-console
+          bash -n appliance/provision/culvert-firstboot.sh
+
       - name: Validate sudoers drop-in
         # The P1.4 pin-binding security boundary — a syntax error here would
         # brick the maintenance agent's privilege model on install.
@@ -451,6 +483,137 @@ jobs:
           (cd cmd/culvert-maint && go build -o /tmp/culvert-maint .)
           sudo install -m 0755 /tmp/culvert-maint /usr/local/bin/culvert-maint
           systemd-analyze verify packaging/systemd/culvert-maint.service
+
+  # ─── 9. On-prem appliance qualification (owner review, PR #1528) ───────────
+  #
+  # The real-image lifecycle and agent harnesses (test/e2e/appliance/) run
+  # against the SAME deep-gate-image artifact the other jobs consume, so the
+  # evidence names the exact PR-head image. Three blocking jobs, each on its
+  # own runner because both harnesses bind host ports 8080/9090:
+  #   appliance-lifecycle  A/B/D/E/G: fresh install → setup → posture → actual
+  #                        allow/block → restart; two real predecessors
+  #                        (v1.0.258, v1.0.259) upgraded with seeded state;
+  #                        backup → mutate → refused-while-running → offline
+  #                        restore → verified; interrupted restore → refused
+  #                        boot → explicit recovery; restore onto a FULL
+  #                        loop-backed ext4 volume → refused before any move.
+  #   appliance-clamav     scenario A with the deploy bundle's REAL ClamAV
+  #                        sidecar (signature download, scanner rows on
+  #                        /ready strict) — needs the runner's direct egress.
+  #   appliance-agent      F1–F5: maintenance-agent apply/duplicate/kill +
+  #                        reconcile/offline rollback/restart idempotency
+  #                        against a throwaway TLS registry.
+  # Runner limits (why this is what it is): ubuntu-latest is 4 vCPU/16 GB
+  # with Docker + compose v2, sudo root and loop devices; it runs the
+  # CONTAINER topology, not the OVA (no OVA boot here — that is the
+  # appliance-boot gap the readiness report records), and the predecessor
+  # images come from the public ghcr.io registry (no secrets needed).
+  appliance-lifecycle:
+    name: "Deep · appliance lifecycle (real images)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    needs: [changes, build-image]
+    if: needs.changes.outputs.appliance == 'true'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: deep-gate-image
+      - name: Load the PR-head image
+        run: docker load -i culvert-image.tar && docker image inspect culvert:ci-smoke --format 'id={{.Id}}'
+      - name: Pre-pull predecessors + fixtures (retry)
+        run: |
+          set -euo pipefail
+          pull_retry() { for i in 1 2 3 4; do docker pull -q "$1" && return 0; echo "pull $1 failed (attempt $i)"; sleep $((i*3)); done; return 1; }
+          for img in ghcr.io/kidcarmi/culvert:v1.0.258 ghcr.io/kidcarmi/culvert:v1.0.259 busybox:stable alpine:3.20; do pull_retry "$img"; done
+      - name: Lifecycle qualification
+        env:
+          CUR_IMAGE: culvert:ci-smoke
+          PRED_IMAGES: "ghcr.io/kidcarmi/culvert:v1.0.258 ghcr.io/kidcarmi/culvert:v1.0.259"
+          SCENARIOS: "A B D E G"
+        run: EVID="$RUNNER_TEMP/appliance-lifecycle" ./test/e2e/appliance/lifecycle-qualify.sh
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: appliance-lifecycle-evidence
+          path: |
+            ${{ runner.temp }}/appliance-lifecycle/REPORT.md
+            ${{ runner.temp }}/appliance-lifecycle/checks.jsonl
+          retention-days: 14
+
+  appliance-clamav:
+    name: "Deep · appliance scenario A with real ClamAV"
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    needs: [changes, build-image]
+    if: needs.changes.outputs.appliance == 'true'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: deep-gate-image
+      - name: Load the PR-head image
+        run: docker load -i culvert-image.tar
+      - name: Pre-pull the real sidecar + fixtures (retry)
+        run: |
+          set -euo pipefail
+          pull_retry() { for i in 1 2 3 4; do docker pull -q "$1" && return 0; echo "pull $1 failed (attempt $i)"; sleep $((i*3)); done; return 1; }
+          for img in clamav/clamav:1.4 busybox:stable alpine:3.20; do pull_retry "$img"; done
+      - name: Scenario A against the real ClamAV sidecar
+        env:
+          CUR_IMAGE: culvert:ci-smoke
+          SCENARIOS: "A"
+          CULVERT_QUALIFY_REAL_CLAMAV: "1"
+          QUAL_HEALTH_WAIT_S: "900"
+        run: EVID="$RUNNER_TEMP/appliance-clamav" ./test/e2e/appliance/lifecycle-qualify.sh
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: appliance-clamav-evidence
+          path: |
+            ${{ runner.temp }}/appliance-clamav/REPORT.md
+            ${{ runner.temp }}/appliance-clamav/checks.jsonl
+          retention-days: 14
+
+  appliance-agent:
+    name: "Deep · appliance maintenance-agent flow"
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    needs: [changes, build-image]
+    if: needs.changes.outputs.appliance == 'true' || needs.changes.outputs.maint == 'true'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/setup-go-cache
+        with:
+          cache-dependency-path: cmd/culvert-maint/go.sum
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: deep-gate-image
+      - name: Load the PR-head image
+        run: docker load -i culvert-image.tar
+      - name: Pre-pull predecessor + registry (retry)
+        run: |
+          set -euo pipefail
+          pull_retry() { for i in 1 2 3 4; do docker pull -q "$1" && return 0; echo "pull $1 failed (attempt $i)"; sleep $((i*3)); done; return 1; }
+          for img in ghcr.io/kidcarmi/culvert:v1.0.259 registry:2 busybox:stable; do pull_retry "$img"; done
+      - name: "Build the agent from this PR head (warms the module cache; the harness rebuilds as root)"
+        run: (cd cmd/culvert-maint && go build -o /dev/null .)
+      - name: "Agent update-flow qualification (root — writes /etc/docker/certs.d for the TLS registry)"
+        # The harness runs the agent in docker_group_lab mode as root — the
+        # same lab shape the install-lifecycle e2e uses; the sudoers-bound
+        # production mode is covered by install-lifecycle-e2e.yml.
+        run: |
+          sudo -E env "PATH=$PATH" "HOME=$HOME" "GOCACHE=$(go env GOCACHE)" "GOMODCACHE=$(go env GOMODCACHE)" "GOFLAGS=-mod=mod" \
+            CUR_IMAGE=culvert:ci-smoke PRED_IMAGE=ghcr.io/kidcarmi/culvert:v1.0.259 \
+            EVID="$RUNNER_TEMP/appliance-agent" ./test/e2e/appliance/agent-qualify.sh
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: appliance-agent-evidence
+          path: |
+            ${{ runner.temp }}/appliance-agent/REPORT.md
+            ${{ runner.temp }}/appliance-agent/checks.jsonl
+          retention-days: 14
 
   # ─── Terraform guardrails skeleton — fmt + validate (declarations-only) ──────
   terraform:
@@ -502,6 +665,9 @@ jobs:
       - licenses
       - packaging
       - terraform
+      - appliance-lifecycle
+      - appliance-clamav
+      - appliance-agent
     if: always()
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
