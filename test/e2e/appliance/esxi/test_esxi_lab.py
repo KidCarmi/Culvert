@@ -404,6 +404,43 @@ class ObservationTests(unittest.TestCase):
                 self.assertEqual(tf.getnames(), ['results.json'])
 
 
+class ImageArchiveTests(unittest.TestCase):
+    def exercise(self, omit=False, corrupt=False):
+        spec = importlib.util.spec_from_file_location('image_check', Path(__file__).with_name('image-archive-check.py'))
+        checker = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(checker)
+        payloads = [b'{"architecture":"amd64","os":"linux"}', b'synthetic layer']
+        descriptors = [dict(digest='sha256:' + hashlib.sha256(b).hexdigest(), size=len(b)) for b in payloads]
+        manifest = json.dumps(dict(schemaVersion=2, config=descriptors[0], layers=descriptors[1:])).encode()
+        manifest_sha = hashlib.sha256(manifest).hexdigest()
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'image.tar.gz'
+            with tarfile.open(path, 'w:gz') as tf:
+                contents = [(manifest_sha, manifest)]
+                if not omit:
+                    contents += [(d['digest'].split(':')[1], b) for d, b in zip(descriptors, payloads)]
+                if corrupt:
+                    contents[-1] = (contents[-1][0], b'corrupted layer')
+                for name, body in contents:
+                    info = tarfile.TarInfo('blobs/sha256/' + name)
+                    info.size = len(body)
+                    tf.addfile(info, io.BytesIO(body))
+            return checker.check(path, manifest_sha)
+
+    def test_complete_selected_platform_closure(self):
+        self.assertEqual(self.exercise()['result'], 'PASS')
+
+    def test_manifest_only_export_cannot_pass(self):
+        result = self.exercise(omit=True)
+        self.assertEqual(result['result'], 'FAIL')
+        self.assertEqual([d['role'] for d in result['missing']], ['config', 'layer'])
+
+    def test_present_corrupt_blob_cannot_pass(self):
+        result = self.exercise(corrupt=True)
+        self.assertEqual(result['result'], 'FAIL')
+        self.assertEqual(result['invalid'][0]['role'], 'layer')
+
+
 class CredentialTests(unittest.TestCase):
     def test_environment_auth_stays_runtime_only(self):
         source = {'GOVC_USERNAME': 'synthetic', 'GOVC_PASSWORD': 'synthetic-test-only'}

@@ -138,10 +138,233 @@
     "image_source": "78e1bc566e80055f893de41befbbad190ac4dfec",
     "provisioning_drift": true,
     "build_git_dirty": true,
-    "result": "IN PROGRESS"
+    "result": "FAIL: firstboot application startup; ordering-cycle regression PASS",
+    "provenance": {
+      "artifact": {
+        "ova_sha256": "e85e364081fd13833eb53ea04a365cea4a771911f7edb3e41e6cb6dda401c300",
+        "disk_bytes": 42949672960,
+        "cpus": 2,
+        "memory_mb": 4096,
+        "manifest": {
+          "culvert-appliance-dev-candidate.78e1bc566e80-ubuntu-24.04.ovf": "58253d74aa15ba0c2fd9d95571b9fe1a24df7664cfb634bf8c269d18c1ceb15a",
+          "culvert-appliance-dev-candidate.78e1bc566e80-ubuntu-24.04-disk1.vmdk": "875d25f404ff2cc1f428d3e56a94a049be14bc5847ab117dcc30844a9b6156c5"
+        },
+        "hardware": "vmx-13",
+        "networks": [
+          "VM Network"
+        ]
+      },
+      "expected_source": "25d0aa83884ec66fe82e82f83d0f9e83b5a85353",
+      "expected_image": "sha256:921c834451f26df7da1da4cc65455db9a2239c6d8e9370a226daea9007c900f3",
+      "original_candidate": false,
+      "harness_sha": "f55538bfcf584d1e2ddcaae262b57d66dc2dd926",
+      "harness_dirty": true,
+      "harness_file_sha256": {
+        "test/e2e/appliance/esxi/esxi-lab.py": "07d6d4dbdb7a0b29a4b9ac3fdbc39740c860127d24a55292299e25f4fba074e8",
+        "test/e2e/appliance/esxi/guest-checks.sh": "9eda0588ee369b57727885f3bb94cb24a5b4d48ce104fa82e2a2460992488d0c",
+        "test/e2e/appliance/esxi/guest-observe.py": "3e836e8a7a47e1612de39b9433e1c49937dbacefc284fa5c1581426a54f6f184",
+        "test/e2e/appliance/esxi/govc-sha256-negotiation.patch": "25559bf74ab1e4e8d453213679c95a75fc769d5b2cb9aec96d28c8e75ef3bee7",
+        "test/e2e/appliance/lab/appliance-lab.sh": "bcc0da8352e7fabc1fc89afa3d347068bd7d1a67372adb0cc9b2d7c35304f195"
+      },
+      "govc_version": "govc 0.0.0",
+      "tls_verification": "owner-authorized-exception",
+      "hypervisor": {
+        "name": "VMware ESXi",
+        "fullName": "VMware ESXi 8.0.1 build-21813344",
+        "vendor": "VMware, Inc.",
+        "version": "8.0.1",
+        "patchLevel": "0.10",
+        "build": "21813344",
+        "localeVersion": "INTL",
+        "localeBuild": "000",
+        "osType": "vmnix-x86",
+        "productLineId": "embeddedEsx",
+        "apiType": "HostAgent",
+        "apiVersion": "8.0.1.0",
+        "licenseProductName": "VMware ESX Server",
+        "licenseProductVersion": "8.0"
+      },
+      "capacity": {
+        "datastore_reserve_bytes": 49392123904,
+        "datastore_free_bytes": 460624756736,
+        "host_free_mb": 8574,
+        "host_free_cpu_mhz": 10058
+      },
+      "property_delivery": "govc ImportVApp + InjectOvfEnv via VMware guestinfo",
+      "host_ref": {
+        "type": "HostSystem",
+        "value": "ha-host"
+      },
+      "ds_ref": {
+        "type": "Datastore",
+        "value": "65c64726-fdbff771-ecd4-e88088a40ee4"
+      },
+      "network_ref": {
+        "type": "Network",
+        "value": "HaNetwork-VM Network"
+      },
+      "govc_local_build": {
+        "base_tag": "v0.56.0",
+        "base_commit": "81608f9b9725d64e4ed447b9a338c9f03dbf8840",
+        "patch": "test/e2e/appliance/esxi/govc-sha256-negotiation.patch",
+        "binary_sha256": "a28278c8114497e18a02aa2a47c46797d6ec4b64b7c2bef7fb30eb8c2fa550ac"
+      }
+    },
+    "vm_observation": {
+      "firmware": "bios",
+      "virtual_hardware": "vmx-13",
+      "cpus": 2,
+      "memory_mb": 4096,
+      "power_state": "poweredOn",
+      "tools_status": "guestToolsRunning",
+      "ova_sha256": "e85e364081fd13833eb53ea04a365cea4a771911f7edb3e41e6cb6dda401c300"
+    },
+    "guest_observation": {
+      "kernel": "6.8.0-142-generic",
+      "complete": false,
+      "firstboot_cycle": false,
+      "firstboot_state": {
+        "Result": "exit-code",
+        "ExecMainStartTimestamp": "Sat 2026-10-03 20:29:15 UTC",
+        "ExecMainStatus": "1",
+        "ActiveState": "activating",
+        "SubState": "auto-restart"
+      },
+      "firstboot_unit_sha256": "897101c209d7ba10e4b4991dfe1ef22b2a2c514a7159074eb7f05981896498d0",
+      "source_sha": "25d0aa83884ec66fe82e82f83d0f9e83b5a85353",
+      "instance_id": "culvert-esxi-3e20ab7a9038",
+      "image_id": "",
+      "machine_id_sha256": "810045368f5316a9938c9f4a6b189dc14429c7039be2f5b36a7196b115356899",
+      "boot_id_sha256": "61fd5d1f68e3206378c87fb6a85ef0ae23dc57deac0e86bd177f8de2b5a06231"
+    },
+    "image_diagnostics": [
+      {
+        "command": "systemctl show culvert-firstboot.service -p NRestarts -p ActiveState -p SubState -p ExecMainStatus -p ExecMainStartTimestamp",
+        "exit": 0,
+        "stdout": "NRestarts=0\nExecMainStartTimestamp=Sat 2026-10-03 20:29:15 UTC\nExecMainStatus=1\nActiveState=activating\nSubState=auto-restart\n",
+        "stderr": ""
+      },
+      {
+        "command": "sudo -n docker info --format \"{{.ServerVersion}} {{.Driver}} {{json .DriverStatus}}\"",
+        "exit": 0,
+        "stdout": "29.8.2 overlayfs [[\"driver-type\",\"io.containerd.snapshotter.v1\"]]\n",
+        "stderr": ""
+      },
+      {
+        "command": "sudo -n docker image ls --format \"{{.Repository}}:{{.Tag}} {{.ID}}\"",
+        "exit": 0,
+        "stdout": "culvert/proxy:pinned 921c834451f2\nculvert/candidate:sha-78e1bc566e80 921c834451f2\nclamav/clamav:1.4 57deb108fc4c\n",
+        "stderr": ""
+      },
+      {
+        "command": "sudo -n docker ps -a --format \"{{.Names}} {{.Status}}\"",
+        "exit": 0,
+        "stdout": "",
+        "stderr": ""
+      },
+      {
+        "command": "df -h / /var/lib/docker; free -m",
+        "exit": 0,
+        "stdout": "Filesystem      Size  Used Avail Use% Mounted on\n/dev/sda1        38G  2.0G   36G   6% /\n/dev/sda1        38G  2.0G   36G   6% /\n               total        used        free      shared  buff/cache   available\nMem:            3915         492        3015           1         632        3423\nSwap:              0           0           0\n",
+        "stderr": ""
+      }
+    ],
+    "image_inspection": [
+      {
+        "command": "sudo -n docker image inspect --platform linux/amd64 clamav/clamav:1.4 --format \"{{.Id}} {{.Architecture}} {{.Os}}\"",
+        "exit": 0,
+        "stdout": "sha256:da8463f630e2c9467c74f3da1dee6f096e61a71650e4e9f1ff9b5f687ba91aa0  \n",
+        "stderr": ""
+      },
+      {
+        "command": "sudo -n docker image inspect --platform linux/amd64 culvert/proxy:pinned --format \"{{.Id}} {{.Architecture}} {{.Os}}\"",
+        "exit": 0,
+        "stdout": "sha256:921c834451f26df7da1da4cc65455db9a2239c6d8e9370a226daea9007c900f3 amd64 linux\n",
+        "stderr": ""
+      },
+      {
+        "command": "systemctl show culvert-firstboot.service -p NRestarts -p ActiveState -p SubState -p ExecMainStatus",
+        "exit": 0,
+        "stdout": "NRestarts=0\nExecMainStatus=1\nActiveState=activating\nSubState=auto-restart\n",
+        "stderr": ""
+      },
+      {
+        "command": "sudo -n ctr -n moby content ls -q",
+        "exit": 0,
+        "missing_config_present": false,
+        "content_count": 19
+      }
+    ],
+    "clamav_archive": {
+      "archive_sha256": "28b73b727cb49fe964c5c17be1a754556eeec363ad0238393fb84882631e6c8f",
+      "expected_archive_sha256": "28b73b727cb49fe964c5c17be1a754556eeec363ad0238393fb84882631e6c8f",
+      "member_count": 11,
+      "missing_config_present_in_tar": false,
+      "manifests": [
+        {
+          "manifest_file": "blobs/sha256/51ac66f1b9891dae465c4355c15ce8baa62044e19bad29e90f86c78acf221849",
+          "config_digest": "sha256:931559ce71567796db0ed29232f451ec201ea022dd4b7c22e1676e3f4f67c7aa",
+          "config_present_in_tar": true,
+          "layer_count": 2
+        },
+        {
+          "manifest_file": "blobs/sha256/da8463f630e2c9467c74f3da1dee6f096e61a71650e4e9f1ff9b5f687ba91aa0",
+          "config_digest": "sha256:5ca07785ce6993ebdac0dc329b1866e09ca28a6336223879f839b7c530d39bd9",
+          "config_present_in_tar": false,
+          "layer_count": 7
+        }
+      ]
+    },
+    "missing_layers": {
+      "archive_bytes": 69562,
+      "missing_layer_digests": [
+        "sha256:e2de96513ba9eb53b431787ec8a65cdde380ac4772a3e4c4b714dcfde2a102b5",
+        "sha256:f521e3871fc1cb59e4bb2884e80bdb0b4f3a6bef53d0e5ca5d3f3525243d615b",
+        "sha256:57ca85041bd5c3608be33ec530ba38c32ff5bb1dd4c658b7f4f6591558e9f229",
+        "sha256:4eb587af903b26f91ef6be5bc819807fe08aba90c0ecfc172957f7ce027c8a98",
+        "sha256:6175c2b81f58ea01e7ef07a5d7e4970fe16b9e9b29c30a5f76607d0d01db29c5",
+        "sha256:f8f651a6b68f6bb2f34fcb2b4970d373a4c57a634eb19c513c9d9e10ac1e21c9",
+        "sha256:01d1c784b59e05a411a9c7ae8416808c48d1b05871b324dd0a0771238d886eed"
+      ],
+      "service": "NRestarts=1\nExecMainStatus=1\nSubState=auto-restart\n"
+    },
+    "vm_deleted": true,
+    "evidence_bundle_sha256": "6259bcfd39ba062ae1374a97ca920b87b175f38ea3b8ebfcef8c08d55654f69b",
+    "console_image": "esxi-firstboot-fix-login.png"
   },
   "known_failures": [
     "F-DISK-1 remains open; not reproduced on ESXi"
   ],
-  "risk_acceptance": false
+  "risk_acceptance": false,
+  "finding": {
+    "id": "F-OVA-CLAMAV-1",
+    "result": "FAIL",
+    "error": "failed to read config content: NotFound: content digest sha256:5ca07785ce6993ebdac0dc329b1866e09ca28a6336223879f839b7c530d39bd9: not found",
+    "expected": "baked selected-platform image includes its config and all layers and can create ClamAV in an empty content store",
+    "observed": "archive digest matches build record, but amd64 config and all seven layers are absent; firstboot retries without completing",
+    "handoff": "https://github.com/KidCarmi/Culvert/pull/1528#issuecomment-5973232426",
+    "product_repair_attempted": false
+  },
+  "remaining": {
+    "baseline_application": "BLOCKED by incomplete baked ClamAV archive",
+    "setup_token_admin_enrollment_traffic": "NOT RUN",
+    "backup_restore": "NOT RUN",
+    "os_update_reboot_persistence": "NOT RUN",
+    "clamav_failure_posture": "NOT RUN",
+    "fault_injection_identity_category_enforcement": "NOT RUN"
+  },
+  "controller_tests": {
+    "result": "PASS",
+    "count": 38,
+    "govmomi_importer_tests": "PASS (local negotiation and stream validation plus upstream importer tests)"
+  },
+  "cleanup": {
+    "result": "PASS",
+    "remaining_lab_vms": 0,
+    "remaining_lab_datastore_directories": 0,
+    "import_attempts": 5,
+    "vms_booted": 2,
+    "failed_import_rollbacks_verified": 3,
+    "host_configuration_changes": 0
+  }
 }

@@ -1,9 +1,13 @@
 # LOCAL-ESXI qualification lab
 
-This is an **unqualified local execution adapter**, not a pilot acceptance.
-Its `up / qualify / collect / down` path has not run against a real ESXi guest.
-Status and sanitized local evidence are in
-[`evidence/local-esxi-access-20261003.json`](evidence/local-esxi-access-20261003.json).
+Real ESXi import, BIOS boot, imported SSH access, VMware guestinfo readback
+and owned-VM cleanup have now run on two identified candidates. Full guest
+qualification is **incomplete**: the control skips first boot, and the unit-fix
+variant reaches application startup but its baked ClamAV archive lacks the
+amd64 config and all seven layers. This is not pilot acceptance.
+Current sanitized evidence is in
+[`evidence/local-esxi-boot-20261003.json`](evidence/local-esxi-boot-20261003.json);
+the earlier access-only record is historical.
 
 The harness baseline is `test/appliance-lab` at
 `b9fc086f61df4122d0aa2090acd4d41a8f5f7502`. LOCAL-ESXI owns
@@ -17,8 +21,9 @@ The owner designated `https://192.168.1.78`, subsequently authorized its TLS
 certificate-verification exception, and supplied a Windows-encrypted
 credential. Authenticated read-only inventory now succeeds: **ESXi 8.0.1
 build-21813344**. Normal trust still fails (`unable to get local issuer
-certificate`); this is an explicit exception, not verified CA trust. No real
-VM mutation has occurred.
+certificate`); this is an explicit exception, not verified CA trust. The two
+booted disposable VMs and three failed import attempts have been cleaned up;
+no lab VMs or lab datastore directories remain. No host configuration changed.
 
 The owner authorized the default network and 2 vCPU / 4096 MiB / 40 GiB.
 Inventory identifies `VM Network` on vSwitch0, VLAN 0, matching the management
@@ -26,8 +31,9 @@ network's `192.168.1.0/24`; the local guest-address fence uses that subnet.
 The owner accepted `DataStore2` (~498 GiB free). Read-only admission checks
 pass for one VM at the requested size: 46 GiB provisioned-space allowance,
 9576 MiB host RAM available and 9847 MHz host CPU available at observation.
-The OVA file is the remaining blocker; the actual `preflight` command refuses
-with `missing scope: ova` before any import.
+Retained candidate artifacts have now passed checksum/manifest verification
+and real import. The current blocker is defective baked image content
+(`F-OVA-CLAMAV-1`), requiring a corrected, separately identified OVA from Opus.
 Conservative local admission thresholds retain 64 GiB datastore space,
 4096 MiB host RAM and 2000 MHz host CPU after provisioning. Capacity must be
 checked again when the artifact arrives.
@@ -37,9 +43,9 @@ contains a rebuilt candidate checksum
 `07ffa55482415016a0654fc24c0debc74abe7d31aeb7de43ff47a832bed826ab`, but no
 OVA bytes. That run records successful build/manifest checks followed by
 `no SSH within 2400s` under QEMU/KVM and an empty serial console log.
-These are remote CI observations, not local ESXi results. Opus must provide
-the original transfer route or retain a separately identified rebuilt OVA;
-the CI evidence archive alone cannot unblock import.
+These are remote CI observations, not local ESXi results. Later retained
+artifacts 11282975335 and 11283274993 supplied the bytes used in the current
+ESXi run. The superseded original remains unavailable and unqualified.
 
 ## Artifact and resources
 
@@ -189,8 +195,9 @@ no aggregate green result implies all requested scenarios passed.
 | Scenario | Current result / required evidence |
 |---|---|
 | Original OVA hash and manifest | BLOCKED: file location unavailable |
-| ESXi import/property delivery/boot | BLOCKED: OVA file missing; authorized placement, authenticated inventory and requested-profile capacity checks pass |
-| Baseline guest checks and reboot | NOT RUN; per-check verdicts required |
+| ESXi import/property delivery/boot | PASS on retained control `60a73475…` and fix variant `e85e3640…`; both default to BIOS and boot Linux |
+| First boot | FAIL: control skipped by ordering cycle; fix starts but cannot create ClamAV from its incomplete archive |
+| Baseline guest checks and reboot | BLOCKED by firstboot failure; application assertions NOT RUN |
 | Real ClamAV failure posture | NOT RUN; readiness alone is insufficient. Exercise EICAR and unavailable clamd with actual traffic; report fail-open if observed. No CVE/risk acceptance. |
 | Category enforcement | NOT RUN; lookup equality alone does not prove category-based allow/deny decisions |
 | Backup → actual restore | NOT RUN; existing baseline is a dry-run validation. Restore into an owned disposable target, then compare contents/admin/CA/policy and real traffic. |
@@ -221,7 +228,7 @@ bash -n test/e2e/appliance/esxi/guest-checks.sh
 bash -n test/e2e/appliance/lab/appliance-lab.sh
 ```
 
-34 safety/evidence tests passed locally, including owned-VM observation,
+38 safety/evidence tests passed locally, including OCI archive closure, owned-VM observation,
 private console capture, pending-firstboot handling, reboot transport loss,
 DHCP re-resolution, retained host-key checking, never-returning guest,
 remaining-budget enforcement and real loopback child-process recovery.
@@ -231,7 +238,9 @@ bytes. It proves govc JSON integration, owned power-off/delete, wrong-UUID
 refusal before power-off, and cleanup after a partial import. **vcsim does
 not return the NFC upload digest**, so the production `-m` gate stops that
 synthetic import before power-on/property injection. That gate is retained;
-upload verification and guestinfo readback remain untested on ESXi.
+the original simulator result does not establish upload verification or
+guestinfo delivery. Those now pass on the real host with the explicit NFC
+compatibility patch below.
 
 govc semantics were checked against the pinned
 [v0.56.0 import implementation](https://github.com/vmware/govmomi/blob/v0.56.0/cli/importx/options.go)
@@ -278,3 +287,38 @@ Set the local scope's `govc` path to that executable. Add `govc_build` with
 Windows executable used for the stream-aware attempt has SHA256
 `a28278c8114497e18a02aa2a47c46797d6ec4b64b7c2bef7fb30eb8c2fa550ac`.
 This is a patched local tool, not the unmodified upstream release.
+
+## Current artifact findings
+
+| Candidate | Identity and observed result |
+|---|---|
+| Control, artifact 11282975335 | OVA `60a734756bea788523ffb1d4e6c8ba08f74d16198850a52ed24c85e0deb0b10e`; source/provisioning `78e1bc566e80055f893de41befbbad190ac4dfec`. BIOS boots `6.8.0-142-generic`; firstboot start job is deleted to break the cloud-final ordering cycle. |
+| Firstboot fix, artifact 11283274993 | OVA `e85e364081fd13833eb53ea04a365cea4a771911f7edb3e41e6cb6dda401c300`; provisioning `25d0aa83884ec66fe82e82f83d0f9e83b5a85353`, image source `78e1bc56…`, provisioning drift and dirty build state explicitly recorded. Cycle regression passes; application startup fails. |
+
+`F-OVA-CLAMAV-1`: the fix variant's baked `clamav.tar.gz` is 69,562 bytes,
+SHA256 `28b73b727cb49fe964c5c17be1a754556eeec363ad0238393fb84882631e6c8f`,
+matching its build record. It contains the selected amd64 manifest but lacks
+its configuration blob and all seven referenced layers. Docker load and tag
+listing succeed, but Compose reports the missing config digest and no
+containers are created. An automatic firstboot retry was observed; no image
+was pulled or repaired to obtain a pass. The unit fix therefore passes its
+ordering regression but does not qualify the appliance.
+
+The read-only reproducer below checks config/layer existence, size and digest
+for the explicitly selected manifest. Run it against the baked archive on
+the disposable guest, or a retained copy of that archive. It never extracts
+files or contacts a registry:
+
+```text
+python image-archive-check.py clamav.tar.gz --manifest-sha256 da8463f630e2c9467c74f3da1dee6f096e61a71650e4e9f1ff9b5f687ba91aa0
+```
+
+The script is under `test/e2e/appliance/esxi/`. The affected artifact should
+report FAIL with one missing config and seven missing layers. Its focused
+tests also reject present-but-corrupt blobs and accept complete content.
+The actual guest archive was checked with the same descriptor inspection
+before cleanup; this reusable CLI was added afterwards and tested with
+synthetic archives. [Product handoff and exact reproduction evidence](https://github.com/KidCarmi/Culvert/pull/1528#issuecomment-5973232426).
+The reviewed [console capture](evidence/esxi-firstboot-fix-login.png) records
+the fix variant's Linux login screen; structured journal/service evidence
+establishes the firstboot failure.
