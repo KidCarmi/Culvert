@@ -26,9 +26,47 @@ import (
 
 // isolateLogRing swaps the in-memory request-log ring for an empty one and
 // restores it on cleanup so logAdd side-effects don't leak across tests.
+//
+// It first waits (bounded) for every in-flight HIJACKED tunnel to finish. A
+// tunnel's close accounting writes a request-log entry from the relay
+// goroutine, and httptest.Server.Close does not wait for hijacked
+// connections, so a CONNECT/WebSocket/SOCKS5 test that returns as soon as it
+// has its 200 leaves that write in flight — on a loaded runner it landed in
+// the NEXT test's freshly swapped ring (Deep determinism, seed
+// 1791014615135233342: "seeded ring holds 61 entries, want 60", the
+// straggler a `tunnel-allow` CONNECT from TestObservationE2E_CONNECTTunnel).
+// Every such tunnel is registered in activeConns and its accounting lands
+// BEFORE the deferred release (handleTunnelBypass etc.), so activeConns
+// reaching zero proves no straggler can still write. The wait is bounded and
+// does not fail the caller: a gauge held by a genuinely stuck tunnel is the
+// leaking test's defect, reported here, not this test's.
 func isolateLogRing(t *testing.T) {
 	t.Helper()
+	if !waitTunnelsQuiescent(isolateLogRingTunnelWait) {
+		t.Logf("isolateLogRing: %d hijacked tunnel(s) still open after %s — a previous test leaked one; its accounting may still land in this ring", getActiveConns(), isolateLogRingTunnelWait)
+	}
 	t.Cleanup(reqlog.SwapRingForTest())
+}
+
+// isolateLogRingTunnelWait bounds isolateLogRing's wait. A leaked tunnel whose
+// client and target are both closed drains in microseconds; the bound only
+// matters for one that never ends.
+const isolateLogRingTunnelWait = 5 * time.Second
+
+// waitTunnelsQuiescent polls until no hijacked tunnel is registered, or the
+// bound passes. Unlike waitForActiveConnsZero it needs no *testing.T, so the
+// helper above can call it before deciding how to report.
+func waitTunnelsQuiescent(within time.Duration) bool {
+	deadline := time.Now().Add(within)
+	for {
+		if getActiveConns() <= 0 {
+			return true
+		}
+		if !time.Now().Before(deadline) {
+			return false
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
 }
 
 // resetRequestLogState unwires the persistent request log engine state so
