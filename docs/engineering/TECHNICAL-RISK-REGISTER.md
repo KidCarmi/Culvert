@@ -147,10 +147,12 @@
   existing policy. Discovery already uses a transport without a proxy.
 - **Evidence:** `TestOIDCTransport_SSRFBoundary` uses real HTTP transport/redirect
   handling and the real `ssrf.Control`, replacing only network connections with
-  `net.Pipe`. It refuses loopback, RFC1918, metadata, IPv6, mapped IPv6 and a
-  rebind to private IP, including a redirect through a public-proxy hook; a public
-  endpoint succeeds. Removing `Proxy=nil` made all six private cases and the
-  redirect case fail; restored control passed twice under race/shuffle.
+  `net.Pipe`. It exercises legacy introspection, flow introspection and JWKS refresh directly,
+  refusing loopback, RFC1918, metadata, IPv6, mapped IPv6 and a rebind to private IP,
+  including redirects through a public-proxy hook; each public endpoint succeeds.
+  Removing `Proxy=nil` made all 18 private cases and three redirect cases fail;
+  restored control passed twice under race/shuffle. Flow constructor/discovery
+  wiring is reviewed separately; this fixture does not claim TLS-discovery coverage.
 - **G704 dispositions:** six OIDC sites are protected by this control, subject to
   RISK-009 (TLS verification opt-out and legacy HTTP remain residual risks; warning
   logs are observability, not prevention). Two signed-feed download sites reuse
@@ -225,7 +227,8 @@
 - **Policy visibility:** preserve blocking HIGH/CRITICAL + ignore-unfixed scans.
   Full-severity/unfixed/suppressed reports now cover the same PR image and both
   candidate platforms. PR gosec JSON includes global exclusions AND inline sites
-  (`-nosec -no-fail`), with scan completeness checked separately. Metadata/expiry
+  (`-nosec -no-fail`), with scan completeness checked separately (including equality of the reported
+  finding count and the retained findings array). Metadata/expiry
   validation requires an owner, classification, exact scope and evidence anchor
   in this register. Metadata checks do not establish security.
 - **Remaining exclusions:** root G104/G302/G304/G703 and maintenance G104/G302/G304
@@ -310,6 +313,18 @@
   step. **Complexity XS.**
 
 ## RISK-015 — Single-scanner gate; detection-source divergence · LOW · OPEN
+- **Audit update 2026-10-03:** the unchanged frontend app/generator dependency
+  trees fail their existing HIGH npm audit gate on `GHSA-ch52-4w7c-c8xp`
+  (`http-cache-semantics`, through license-checker-rseidelsohn → arborist/pacote/
+  sigstore; 11 downstream HIGH reports), plus moderate `ip-address` advisories.
+  [PR #1537's canonical verification](https://github.com/KidCarmi/Culvert/actions/runs/37144895951/job/111266729218)
+  is the concrete report. These are advisory leads requiring separate upstream
+  and reachability triage, not a confirmed application runtime exploit. Tooling
+  dependencies still form a build trust boundary. All four app/generator
+  manifests/lockfiles are byte-identical to baseline `3fcc07e7`.
+  No suppression, threshold reduction or forced downgrade was added. Keep the
+  gate blocking; owner @KidCarmi (default CODEOWNER, confirm security DRI), review
+  2026-11-03. Dependency/toolchain remediation is separate from suppression evidence.
 - **Current state:** Dependabot (GitHub Advisory DB) reports **5** docker/docker alerts; Trivy (its
   own DB) reports **3** of them; the Go vuln DB (govulncheck) is a third source. The blocking gate
   relies on Trivy's DB for dependency-graph coverage. The three sources demonstrably disagree on

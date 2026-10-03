@@ -68,6 +68,8 @@ def report_gosec(path, root):
     issues = report.get("Issues")
     if not isinstance(issues, list):
         raise ValueError(f"{path}: missing findings array")
+    if report.get("Stats", {}).get("found") != len(issues):
+        raise ValueError(f"{path}: scan incomplete (finding count does not match retained findings)")
     print(f"### {path.stem}: unfiltered gosec advisory ({len(issues)} findings)")
     print("Includes globally excluded rules and inline #nosec sites. Findings require triage.")
     print("| Rule | Scope | Scanner description |")

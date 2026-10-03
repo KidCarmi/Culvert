@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Behavioral checks for metadata/report handling and real ELF evidence."""
+import contextlib
 import datetime
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -60,15 +62,30 @@ class MetadataEvidenceTests(unittest.TestCase):
 class ReportEvidenceTests(unittest.TestCase):
     def test_no_fail_scan_errors_and_empty_scan_are_not_evidence(self):
         for data in (
-            {"Golang errors": {"pkg": ["build failed"]}, "Stats": {"files": 1}, "Issues": []},
-            {"Golang errors": {}, "Stats": {"files": 0}, "Issues": []},
-            {"Golang errors": {}, "Stats": {"files": 1}},
+            {"Golang errors": {"pkg": ["build failed"]}, "Stats": {"files": 1, "found": 0}, "Issues": []},
+            {"Golang errors": {}, "Stats": {"files": 0, "found": 0}, "Issues": []},
+            {"Golang errors": {}, "Stats": {"files": 1, "found": 0}},
+            {"Golang errors": {}, "Stats": {"files": 1, "found": 1}, "Issues": []},
         ):
             with tempfile.TemporaryDirectory() as directory:
                 path = Path(directory) / "report.json"
                 path.write_text(json.dumps(data))
                 with self.assertRaises(ValueError):
                     EXCEPTIONS.report_gosec(path, ROOT)
+
+    def test_complete_reports_keep_findings_visible(self):
+        issue = {"rule_id": "G704", "file": str(ROOT / "auth_oidc.go"), "line": "304", "details": "SSRF finding"}
+        for issues in ([], [issue]):
+            with tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "report.json"
+                path.write_text(json.dumps({"Golang errors": {}, "Stats": {"files": 1, "found": len(issues)}, "Issues": issues}))
+                output = io.StringIO()
+                with contextlib.redirect_stdout(output):
+                    EXCEPTIONS.report_gosec(path, ROOT)
+                self.assertIn(f"({len(issues)} findings)", output.getvalue())
+                if issues:
+                    self.assertIn("auth_oidc.go:304", output.getvalue())
+                    self.assertIn("G704", output.getvalue())
 
 
 class ArtifactEvidenceTests(unittest.TestCase):

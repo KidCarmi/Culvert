@@ -1,7 +1,7 @@
 # Suppression evidence audit — 2026-10-03
 
 Decision authority: [TECHNICAL-RISK-REGISTER](../TECHNICAL-RISK-REGISTER.md),
-RISK-002, RISK-006, RISK-009 and RISK-023. This is a dated evidence snapshot,
+RISK-002, RISK-006, RISK-009, RISK-015 and RISK-023. This is a dated evidence snapshot,
 not a second risk register. Owner: default CODEOWNER @KidCarmi; an explicitly
 assigned security DRI is still missing. Follow-up review: 2026-11-03 (this does
 not extend any exception). Scanner findings are leads, not confirmed vulnerabilities.
@@ -74,7 +74,7 @@ then checked that proxy, not the private request destination. Fixed via
 
 | Suppression → claim | Evidence | CI execution | Disposition |
 |---|---|---|---|
-| OIDC six G704 sites → resolved destination guarded, redirects included | `TestOIDCTransport_SSRFBoundary`, real HTTP transport + real IP Control, public positive control | Fast/QA root race; Fast + Security gosec; golangci | Global retired; narrow protected-by-control annotations; RISK-009 residual |
+| OIDC six G704 sites → resolved destination guarded, redirects included | `TestOIDCTransport_SSRFBoundary`, legacy/flow/JWKS request paths, real HTTP transport + real IP Control, public positive controls | Fast/QA root race; Fast + Security gosec; golangci | Global retired; narrow protected-by-control annotations; RISK-009 residual |
 | Signed feed two G704 sites → pinned origin/path, per-hop checks, dial actual IP | `TestF3b2_SSRFPrivateAddressRejected`, `TestF3b2_RedirectEscapeRejected`, `TestF3b2_DialsResolvedIPWithOfficialHostAndSNI` | Fast/QA root race | Reuse existing tests; narrow protected-by-control annotations |
 | Release-agent two G704 sites → intentional configured UDS/private HTTP(S) endpoint | `TestLocalAgentEndpoint`, `TestService_EndpointRebindingUsesNewClient` prove wiring/selection only | Fast/QA root race | Narrow **accepted risk**, proxy/redirect override destination safety unproven |
 | Maintenance G703 → canonical ULID lexical confinement | `TestOperationsEndpoint_RejectsInvalidOpID`, existing scoped annotation | Fast security-fast; Deep maint; QA qa-agent | Global retired; StateDir/symlink assumption remains |
@@ -85,7 +85,7 @@ then checked that proxy, not the private request destination. Fixed via
 After policy changes, blocking standalone gosec has **0 findings and no Go errors**
 in both modules. Full unfiltered root scan has **371 findings**, including ten
 G704 sites; not an exploitability verdict. PR and nightly JSON/Markdown preserve
-all rules and inline sites; errors/empty scans are refused even with `-no-fail`.
+all rules and inline sites; errors/empty scans and mismatched finding counts are refused even with `-no-fail`.
 Root G304/G703 remain globally excluded because 127/44 diagnostic findings span
 uploads, restore/support paths and local state operations. Retiring them requires
 boundary-specific product work; the old operator-path rationale is withdrawn.
@@ -135,8 +135,9 @@ platforms on the **same candidate digest**, with no extra build.
 
 All mutations were isolated and restored, none committed:
 
-- Removed `transport.Proxy=nil`: six private-target tests accepted the request
-  (`err=nil`), redirect test reached two requests. Restored: race/shuffle count=2 passed.
+- Removed `transport.Proxy=nil`: all 18 private-target cases across legacy
+  introspection, flow introspection and JWKS refresh accepted the request
+  (`err=nil`); all three redirect cases reached two requests. Restored: race/shuffle count=2 passed.
 - Disabled ELF-segment refusal in a temporary checker: genuine Go ELF with a
   PT_NOTE replaced by PT_DYNAMIC/PT_INTERP was accepted; corresponding test failed
   (`0 == 0`). Disabled CGO-metadata refusal: cgo fixture reached the wrong refusal
@@ -144,7 +145,9 @@ All mutations were isolated and restored, none committed:
   amd64/arm64 and cgo/header cases all passed; mutated bytes were never executed.
 - Disabled exception expiry: expired/today cases failed (`ValueError not raised`).
   Disabled advisory scan-error validation: scan-error case failed likewise.
-  Restored: all 9 Python tests passed.
+  Disabled finding-count validation: a truncated retained array was accepted and
+  its refusal test failed. Restored: all 10 Python tests passed, including complete
+  empty/nonempty reports that preserve the actual findings in the advisory output.
 
 Behavioral attempts establish these representative controls, not universal
 non-exploitability. OCSP G123 wiring tests set VerifyConnection, but do not perform
