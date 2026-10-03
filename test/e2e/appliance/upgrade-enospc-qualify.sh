@@ -28,10 +28,15 @@
 #       PRED running with seeded state through the agent's own compose project
 #   E1  disk filled to QUAL_ENOSPC_LEAVE_KB free, apply PRED → CUR through
 #       POST /v1/upgrades/apply ⇒ the op FAILS at the pull with ENOSPC, the
-#       running container, the pinned tag, /health and admin state are those
-#       of PRED, unchanged
-#   E2  fill removed, a NEW apply ⇒ succeeds, running digest = CUR, admin
-#       state preserved
+#       running container, the pinned tag, /health, admin state, the CA
+#       identity and TRAFFIC ENFORCEMENT are those of PRED, unchanged
+#   E2  fill removed, a NEW apply ⇒ succeeds through the agent's real
+#       /ready gate (baseline + preservation), running digest = CUR, admin
+#       state, CA identity and enforcement preserved
+#
+# Enforcement is proven with traffic, not a status row: default-deny plus
+# one allow rule, and two busybox origins from docker-compose.qualify.yml —
+# origin-allowed must answer 200 through the proxy, origin-blocked must not.
 #
 # Requires root (losetup/mount, privileged container, /etc/docker/certs.d).
 # Usage: CUR_IMAGE=<ref> PRED_IMAGE=<ref> EVID=<dir> upgrade-enospc-qualify.sh
@@ -116,11 +121,22 @@ for _ in $(seq 1 60); do curl -fsS -m 3 http://127.0.0.1:18080/health >/dev/null
 UI=https://127.0.0.1:19090; JAR="$EVID/jar"; : > "$JAR"
 api(){ curl -ksS -m 20 -X "$1" "$UI$2" -H "Origin: $UI" -H 'Content-Type: application/json' -b "$JAR" -c "$JAR" ${3:+-d "$3"} -w '\n%{http_code}'; }
 api POST /api/setup/complete '{"user":"enospcadmin","pass":"Enospc-Qual-2026!x"}' | tail -n1 >/dev/null
+# Pilot posture (first-boot.md step 8): clients unauthenticated, policy by
+# destination, default-deny + one allow rule.
+api PUT /api/settings/default-auth-outcome '{"defaultAuthOutcome":"Exempt"}' | tail -n1 >/dev/null
+api POST /api/default-action '{"action":"deny"}' | tail -n1 >/dev/null
+api POST /api/policy '{"name":"qual-allow-origin","priority":10,"action":"Allow","destFQDN":"origin-allowed","sslAction":"Bypass","enabled":true}' | tail -n1 >/dev/null
+through_proxy(){ curl -sS -m 10 -x http://127.0.0.1:18080 -o /dev/null -w '%{http_code}' "http://$1/" 2>/dev/null || echo 000; }
+assert_enforcement(){ local a b; a="$(through_proxy origin-allowed)"; b="$(through_proxy origin-blocked)"
+  if [[ "$a" == 200 && "$b" != 200 && "$b" != 000 ]]; then check "$1" enforcement pass "allowed=$a blocked=$b (default-deny + allow rule, real traffic through the proxy)"; else check "$1" enforcement fail "allowed=$a blocked=$b"; fi; }
+ca_fp(){ api GET /api/ca-cert | sed '$d' | openssl x509 -noout -fingerprint -sha256 2>/dev/null | cut -d= -f2; }
 health_version(){ curl -fsS -m 5 http://127.0.0.1:18080/health | python3 -c 'import json,sys;print(json.load(sys.stdin)["version"])'; }
 PRED_VER="$(health_version)"
 state_sum(){ IN docker exec culvert sh -c 'cd /data && sha256sum ui_users.json ca.bundle 2>/dev/null' | sha256sum | cut -c1-16; }
 STATE0="$(state_sum)"
 check E0 seeded-predecessor pass "running $PRED_VER image=$PRED_ID state=$STATE0"
+FP0="$(ca_fp)"; [[ -n "$FP0" ]] && check E0 ca-identity pass "root CA sha256 $FP0" || check E0 ca-identity fail "no CA certificate from /api/ca-cert"
+assert_enforcement E0
 
 ( cd "$ROOT/cmd/culvert-maint" && CGO_ENABLED=0 go build -o "$EVID/culvert-maint" . )
 docker cp "$EVID/culvert-maint" "$DIND:/usr/local/bin/culvert-maint" >/dev/null
@@ -137,7 +153,7 @@ image_allowlist = "^${esc_reg}/culvert(:[A-Za-z0-9._-]+|@sha256:[a-f0-9]{64})\$"
 allow_peers = ["0"]
 health_base_url = "http://127.0.0.1:8080"
 health_path = "/health"
-ready_path = "/health"
+ready_path = "/ready"
 operation_timeout = "20m"
 stage_timeout = "8m"
 reconcile_on_startup = true
@@ -172,6 +188,8 @@ fi
 v="$(health_version 2>/dev/null || echo unreachable)"; [[ "$v" == "$PRED_VER" ]] && check E1 health-unchanged pass "/health 200 version=$v" || check E1 health-unchanged fail "version=$v want=$PRED_VER"
 c="$(api POST /api/auth/login '{"user":"enospcadmin","pass":"Enospc-Qual-2026!x"}' | tail -n1)"; s="$(state_sum)"
 [[ "$c" == 200 && "$s" == "$STATE0" ]] && check E1 state-preserved pass "admin login http $c; ui_users.json+ca.bundle digest $s unchanged" || check E1 state-preserved fail "login http $c state=$s want=$STATE0"
+fp="$(ca_fp)"; [[ "$fp" == "$FP0" ]] && check E1 ca-identity-unchanged pass "root CA sha256 $fp" || check E1 ca-identity-unchanged fail "fp=$fp want=$FP0"
+assert_enforcement E1
 ag http://unix/v1/status > "$EVID/status-after-enospc.json" 2>&1 || true
 check E1 agent-status pass "$(python3 -c 'import json,sys;d=json.load(open(sys.argv[1]));print("attention_required=%s interrupted=%d"%(d.get("attention_required"),len(d.get("interrupted_operations") or [])))' "$EVID/status-after-enospc.json" 2>/dev/null || echo unreadable)"
 
@@ -187,6 +205,10 @@ CUR_ID="$(IN docker image inspect -f '{{.Id}}' "$CUR_REF" 2>/dev/null || echo no
 for _ in $(seq 1 30); do curl -fsS -m 3 http://127.0.0.1:18080/health >/dev/null 2>&1 && break; sleep 2; done
 c="$(api POST /api/auth/login '{"user":"enospcadmin","pass":"Enospc-Qual-2026!x"}' | tail -n1)"
 [[ "$c" == 200 ]] && check E2 state-preserved pass "admin login http $c on $(health_version 2>/dev/null)" || check E2 state-preserved fail "http $c"
+fp="$(ca_fp)"; [[ "$fp" == "$FP0" ]] && check E2 ca-identity-preserved pass "root CA sha256 $fp" || check E2 ca-identity-preserved fail "fp=$fp want=$FP0"
+assert_enforcement E2
+gate="$(grep -E -m2 'baseline:|health_gate' "$EVID/op-retry.log" | tr '\t\n' '  ' | cut -c1-400)"
+grep -q 'baseline: ' "$EVID/op-retry.log" && check E2 agent-ready-gate pass "$gate" || check E2 agent-ready-gate fail "no /ready baseline in the op log: $gate"
 
 IN cat /var/lib/culvert-maint/agent.log > "$EVID/agent.log" 2>/dev/null || true
 { echo "# Upgrade-under-ENOSPC qualification — run $RUN_ID"; echo

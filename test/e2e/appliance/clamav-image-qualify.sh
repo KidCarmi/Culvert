@@ -41,6 +41,26 @@ check image-identity pass "clamav=$(docker image inspect -f '{{.Id}}' "$CLAMAV_I
 pcre="$(docker run --rm --entrypoint sh "$CLAMAV_IMAGE" -c "apk info -v 2>/dev/null | grep '^pcre2-[0-9]' || dpkg-query -W -f='\${Package}-\${Version}' libpcre2-8-0")"
 check pcre2-version pass "$pcre"
 
+# JIT guard (review trigger for the CVE-2026-103111 "not reachable" call):
+# the advisory's flaw is in PCRE2's JIT path, and libclamav imports no
+# pcre2_jit_* symbol and names none for dlsym. If a future image starts
+# using JIT, this check FAILS and the disposition must be re-reviewed. It
+# is non-vacuous: libclamav must import SOME pcre2 symbol, or the probe
+# looked at the wrong library.
+command -v nm >/dev/null || { check pcre2-jit-unused fail "nm (binutils) not installed on the runner — guard cannot run"; exit 1; }
+lib="$(docker run --rm --entrypoint sh "$CLAMAV_IMAGE" -c 'for f in /usr/lib/libclamav.so.* /usr/lib/*/libclamav.so.*; do [ -e "$f" ] && readlink -f "$f"; done | sort -u | head -1')"
+jdir="$(mktemp -d)"; cid="$(docker create "$CLAMAV_IMAGE")"
+docker cp "$cid:$lib" "$jdir/libclamav.so" >/dev/null 2>&1 || true; docker rm -f "$cid" >/dev/null
+imports="$(nm -D --undefined-only "$jdir/libclamav.so" 2>/dev/null | grep -c ' pcre2_' || true)"
+jit="$(nm -D --undefined-only "$jdir/libclamav.so" 2>/dev/null | grep -c ' pcre2_jit' || true)"
+named="$(grep -c 'pcre2_jit' "$jdir/libclamav.so" 2>/dev/null || true)"
+rm -rf "${jdir:?}"
+if [[ "${imports:-0}" -gt 0 && "${jit:-0}" -eq 0 && "${named:-0}" -eq 0 ]]; then
+  check pcre2-jit-unused pass "$lib imports $imports pcre2 symbols, 0 pcre2_jit, no pcre2_jit name for dlsym"
+else
+  check pcre2-jit-unused fail "$lib: pcre2 imports=${imports:-?} pcre2_jit imports=${jit:-?} pcre2_jit names=${named:-?} — re-review CVE-2026-103111 reachability"
+fi
+
 # Origin: one busybox httpd serving the four bodies.
 eicar='X5O!P%@AP[4\PZX54(P^)7CC)7}$'"EICAR-STANDARD-ANTIVIRUS-TEST-FILE!"'$H+H*'
 docker run -d --name "$N-origin" --network "$NET" --network-alias origin busybox:stable \
