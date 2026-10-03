@@ -1,0 +1,17 @@
+{"run":"20261003T092433Z","scenario":"E0","check":"bounded-fs","result":"pass","detail":"size=1992552KiB avail=1976120KiB image=<EVID>/appliance-root.img (sparse, cap 2048MiB)"}
+{"run":"20261003T092433Z","scenario":"E0","check":"image-store-bounded","result":"pass","detail":"server=29.8.2 driver=overlayfs root=/var/lib/docker containerd-store=[[driver-type io.containerd.snapshotter.v1]]; content store /var/lib/docker/containerd/daemon/io.containerd.content.v1.content; every state dir on one device (1792 )"}
+{"run":"20261003T092433Z","scenario":"E0","check":"dind-image","result":"pass","detail":"docker:29-dind = docker@sha256:7dcdfc4a20246236f558175182ccace1eb15a41bd3eb119dd2284f393498b7c1"}
+{"run":"20261003T092433Z","scenario":"E0","check":"cur-absent","result":"pass","detail":"CUR not present inside the bounded host \u2014 the apply must pull it"}
+{"run":"20261003T092433Z","scenario":"E0","check":"seeded-predecessor","result":"pass","detail":"running v1.0.259 image=sha256:f714e55b7b6708442af164accb082a3c3c89a79ecd37934931af3b166a4f448f state=ca90bb25ac431f45"}
+{"run":"20261003T092433Z","scenario":"E0","check":"agent-start","result":"pass","detail":"{\"agent_version\":\"dev\",\"status\":\"ok\"}"}
+{"run":"20261003T092433Z","scenario":"E1","check":"disk-filled","result":"pass","detail":"free 6140KiB on the bounded fs; CUR needs ~31749KiB unpacked; outer host untouched (fill is a file inside <EVID>/appliance-root.img)"}
+{"run":"20261003T092433Z","scenario":"E1","check":"pull-failed-enospc","result":"pass","detail":"op=01M40HA1G6DKSY86VAS241J299 state=failed; 2026-10-03T09:25:18.086411707Z pull err failed to copy: failed to send write: write /var/lib/docker/containerd/daemon/io.containerd.content.v1.content/ingest/ac30f9867fa950a9fe9b74ab8d595aaa0bb311d8f01e22a4100287f713d7ea"}
+{"run":"20261003T092433Z","scenario":"E1","check":"running-unchanged","result":"pass","detail":"running image sha256:f714e55b7b6708442af164accb082a3c3c89a79ecd37934931af3b166a4f448f"}
+{"run":"20261003T092433Z","scenario":"E1","check":"pinned-tag-unchanged","result":"pass","detail":"culvert/proxy:pinned \u2192 sha256:f714e55b7b6708442af164accb082a3c3c89a79ecd37934931af3b166a4f448f"}
+{"run":"20261003T092433Z","scenario":"E1","check":"health-unchanged","result":"pass","detail":"/health 200 version=v1.0.259"}
+{"run":"20261003T092433Z","scenario":"E1","check":"state-preserved","result":"pass","detail":"admin login http 200; ui_users.json+ca.bundle digest ca90bb25ac431f45 unchanged"}
+{"run":"20261003T092433Z","scenario":"E1","check":"agent-status","result":"pass","detail":"attention_required=False interrupted=0"}
+{"run":"20261003T092433Z","scenario":"E2","check":"space-freed","result":"pass","detail":"free 1861656KiB"}
+{"run":"20261003T092433Z","scenario":"E2","check":"retry-succeeded","result":"pass","detail":"op=01M40HA4JSAE188A9V4V6VYEQW state=succeeded"}
+{"run":"20261003T092433Z","scenario":"E2","check":"running-is-target","result":"pass","detail":"running sha256:ad2d417e65575e4056c66f14427e6d2ad98f3287f69840c35e3b290b3cc805c1 (172.17.0.1:5056/culvert@sha256:ad2d417e65575e4056c66f14427e6d2ad98f3287f69840c35e3b290b3cc805c1)"}
+{"run":"20261003T092433Z","scenario":"E2","check":"state-preserved","result":"pass","detail":"admin login http 200 on dev"}

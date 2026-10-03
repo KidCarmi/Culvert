@@ -254,3 +254,36 @@ func TestClamAVCandidate_CIQualifiesBothImagesAndNothingShipsTheCandidate(t *tes
 		}
 	}
 }
+
+// Upgrade-under-ENOSPC (PR #1528 closeout): the agent lane must execute the
+// bounded-host harness, and the harness may only ever fill a file INSIDE its
+// own loop mount — filling anything else would fill the runner's (or an
+// operator's) real disk.
+func TestApplianceLane_AgentJobRunsTheBoundedENOSPCHarness(t *testing.T) {
+	dir := pkgSourceDir()
+	jobs := asMap(genericWorkflow(t, filepath.Join(dir, ".github", "workflows", "pr-deep-gate.yml"))["jobs"])
+	steps, _ := asMap(jobs["appliance-agent"])["steps"].([]interface{})
+	ran := false
+	for _, st := range steps {
+		if strings.Contains(toStr(asMap(st)["run"]), "./test/e2e/appliance/upgrade-enospc-qualify.sh") {
+			ran = true
+		}
+	}
+	if !ran {
+		t.Fatal("appliance-agent must run test/e2e/appliance/upgrade-enospc-qualify.sh")
+	}
+	raw, err := os.ReadFile(filepath.Join(dir, "test", "e2e", "appliance", "upgrade-enospc-qualify.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := string(raw)
+	fills := regexp.MustCompile(`(?m)^\s*fallocate\b.*$`).FindAllString(src, -1)
+	if len(fills) != 1 || !strings.Contains(fills[0], `"$MNT/.qual-fill"`) {
+		t.Fatalf("the only fill must target \"$MNT/.qual-fill\" inside the loop mount; got %q", fills)
+	}
+	for _, want := range []string{`mount -o loop "$IMG" "$MNT"`, `-v "$MNT/docker:/var/lib/docker"`, `-v "$MNT/containerd:/var/lib/containerd"`, "mkfs.ext4 -q -F -m 0"} {
+		if !strings.Contains(src, want) {
+			t.Errorf("bounded-host contract missing %q", want)
+		}
+	}
+}
