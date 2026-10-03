@@ -58,6 +58,10 @@ type rollbackAccumulator struct {
 	runningAfterDigests []string
 	healthSummary       string
 	pullSkippedLocal    bool // rollback_pull found the target locally and skipped the registry
+	// preserved (inline rollback only) is the upgrade's pre-restart
+	// baseline. Checked REPORT-ONLY: a rollback restores service and must
+	// not be failed by a row the operator still needs to look at.
+	preserved []string
 
 	opID  string
 	kind  string
@@ -154,12 +158,14 @@ func (s *Server) imageRollbackStages(targetRefFn func() string, acc *rollbackAcc
 			Name:          "rollback_health",
 			FailureReason: ops.ReasonHealthFailed,
 			Run: func(ctx context.Context) ([]byte, []byte, error) {
-				hr, herr := s.opts.HealthProbeFactory().Run(ctx)
+				probe := s.opts.HealthProbeFactory()
+				probe.Preserve, probe.PreserveReportOnly = acc.preserved, true
+				hr, herr := probe.Run(ctx)
 				if herr != nil {
 					return nil, nil, herr
 				}
-				acc.healthSummary = fmt.Sprintf("ready=%v ready_detail=%q health=%v health_detail=%q duration=%s",
-					hr.ReadyOK, hr.ReadyDetail, hr.HealthOK, hr.HealthDetail, hr.TotalDuration)
+				acc.healthSummary = fmt.Sprintf("ready=%v ready_detail=%q health=%v health_detail=%q not_restored=[%s] duration=%s",
+					hr.ReadyOK, hr.ReadyDetail, hr.HealthOK, hr.HealthDetail, strings.Join(hr.Regressed, ","), hr.TotalDuration)
 				if hr.Failed() {
 					return []byte(acc.healthSummary), nil, errors.New(hr.ReadyDetail)
 				}

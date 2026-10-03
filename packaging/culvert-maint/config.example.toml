@@ -69,6 +69,10 @@ privilege_mode = "sudoers"
 # proxy port has been remapped or fronted by a TLS terminator.
 health_base_url = "http://127.0.0.1:8080"
 health_path = "/health"
+# A query is honoured (e.g. "/ready?strict=1"), but strict makes every
+# report-only row a rollback trigger, external-dependency rows included.
+# The default gate is /ready 2xx + the rows that were ok before the
+# upgrade (docs/appliance/upgrade-runbook.md).
 ready_path = "/ready"
 
 # Hard ceiling on a single operation. Exceeding triggers cancel +

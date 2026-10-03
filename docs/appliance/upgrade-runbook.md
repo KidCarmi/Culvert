@@ -16,6 +16,30 @@ host **maintenance agent** (`culvert-maint`, systemd, sudoers-bounded) to
 apply it: pull by digest → retag `culvert/proxy:pinned` → `docker compose
 up -d` → health gate → verify running digest → auto-rollback on failure.
 
+**What "the upgrade succeeded" means.** The agent marks an upgrade
+succeeded only when ALL of these hold after the restart; any miss fails the
+op `health_failed` and rolls the prior image back:
+
+| Condition | How it is checked |
+|-----------|-------------------|
+| the intended release is what runs | `verify`: the running container's RepoDigests include the pinned `repo@sha256` (hard check) |
+| the process serves and its config loaded | `health_gate`: `/ready` answers 2xx within 30 s (a config that does not load is fatal at boot) |
+| nothing that worked before broke | `health_gate`: every `/ready` row among `setup_complete`, `session_secret`, `ca`, `policy_loaded`, `policy_posture` that was `ok` BEFORE the restart (read by `capture_before`) is `ok` again; a missing row counts as regressed |
+
+The preserved set is local state only — admin setup and session signing,
+the inspection CA, policy loaded and enforcing. Rows that depend on an
+external service (`clamav`, `cp_poll`, threat feeds, DNS) are deliberately
+outside it: a dependency outage during the window must not roll an upgrade
+back, and a rollback would not fix it. A row that was already failing before
+(an unclaimed appliance) is not required after. The inline rollback checks
+the same rows report-only and lists any that did not come back as
+`not_restored=[…]` in the op log. CA *identity* (the same root, not just a
+usable one) is outside the agent gate — the bundle lives in `/data`, which an
+upgrade never writes; the upgrade qualification compares the CA certificate
+fingerprint before and after (`test/e2e/appliance/upgrade-enospc-qualify.sh`). Do not point `ready_path` at `/ready?strict=1`
+(now honoured): strict gating makes every report-only row — external ones
+included — a rollback trigger.
+
 Persistent state (`/data` volume) is untouched by an upgrade; the new
 binary reads the previous build's state. Supported predecessors are
 enforced: see `upgrade-transition-matrix.md`.

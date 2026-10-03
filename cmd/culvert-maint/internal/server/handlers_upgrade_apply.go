@@ -176,6 +176,11 @@ type upgradeApplyAccumulator struct {
 	runningAfterID      string
 	runningAfterDigests []string
 	healthSummary       string
+	// preserved is the health.Baseline taken before the restart: the
+	// /ready rows that were "ok" and must be "ok" again for health_gate
+	// to pass (owner review, PR #1528). Empty ⇒ 2xx alone gates.
+	preserved      []string
+	baselineDetail string
 
 	// Inline auto-rollback state (#375). Set/read across stages + the
 	// result computer; acc.opID/actor feed the rollback audit sub-action.
@@ -219,10 +224,13 @@ func (s *Server) buildUpgradeApplyStages(acc *upgradeApplyAccumulator, racc *rol
 				acc.priorImageID = ri.RunningImageID
 				acc.priorDigests = bareDigests(ri.RepoDigests)
 				s.deriveRollbackTarget(acc, ri.PriorRef())
+				// What the running stack reports as healthy now is what the
+				// upgrade must preserve. Best-effort: no answer ⇒ nothing to keep.
+				acc.preserved, acc.baselineDetail = s.opts.HealthProbeFactory().Baseline(ctx)
 				// Prior (rollback target) now known — fold it into the journal record.
 				s.advanceJournalPhaseBestEffort(acc, journal.PhaseCaptured)
-				return []byte(fmt.Sprintf("capture_before: running_image_id=%s prior_digests=%s prior_ref=%q rollback_target=%s",
-					ri.RunningImageID, joinDigests(acc.priorDigests), acc.priorRef, rollbackTargetNote(acc))), nil, nil
+				return []byte(fmt.Sprintf("capture_before: running_image_id=%s prior_digests=%s prior_ref=%q rollback_target=%s %s",
+					ri.RunningImageID, joinDigests(acc.priorDigests), acc.priorRef, rollbackTargetNote(acc), acc.baselineDetail)), nil, nil
 			},
 		},
 		{
@@ -338,13 +346,15 @@ func (s *Server) buildUpgradeApplyStages(acc *upgradeApplyAccumulator, racc *rol
 			Name:          "health_gate",
 			FailureReason: ops.ReasonHealthFailed,
 			Run: skipIfCurrent(acc, "health_gate", func(ctx context.Context) ([]byte, []byte, error) {
-				hr, herr := s.opts.HealthProbeFactory().Run(ctx)
+				probe := s.opts.HealthProbeFactory()
+				probe.Preserve = acc.preserved
+				hr, herr := probe.Run(ctx)
 				if herr != nil {
 					acc.upgradeFailedPostRestart = true
 					return nil, nil, herr
 				}
-				acc.healthSummary = fmt.Sprintf("ready=%v ready_detail=%q health=%v health_detail=%q duration=%s",
-					hr.ReadyOK, hr.ReadyDetail, hr.HealthOK, hr.HealthDetail, hr.TotalDuration)
+				acc.healthSummary = fmt.Sprintf("ready=%v ready_detail=%q health=%v health_detail=%q preserved=[%s] duration=%s",
+					hr.ReadyOK, hr.ReadyDetail, hr.HealthOK, hr.HealthDetail, strings.Join(acc.preserved, ","), hr.TotalDuration)
 				if hr.Failed() {
 					// Post-restart failure: the new image is running but
 					// unhealthy → this is what triggers inline rollback.

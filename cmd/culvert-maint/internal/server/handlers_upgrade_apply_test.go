@@ -65,6 +65,9 @@ type applyRig struct {
 	// makes the fake health probe fail. Models "the new image is broken,
 	// the prior one is fine." nil/empty → all healthy (unless healthFail).
 	unhealthyDigests map[string]bool
+	// readyBodies: the /ready body served while the keyed bare digest is
+	// running. nil/absent ⇒ the plain "ok" body (no rows).
+	readyBodies map[string]string
 	// noPriorDigest makes capture_before (before any pull) report an empty
 	// RepoDigests list → no valid rollback target.
 	noPriorDigest bool
@@ -422,12 +425,19 @@ func applyHealthClient(rig *applyRig) *http.Client {
 			return &http.Response{
 				StatusCode: status,
 				Status:     strconv.Itoa(status) + " test",
-				Body:       io.NopCloser(strings.NewReader("ok")),
+				Body:       io.NopCloser(strings.NewReader(rig.readyBody())),
 				Request:    req,
 			}, nil
 		}),
 		Timeout: time.Second,
 	}
+}
+
+func (r *applyRig) readyBody() string {
+	if b, ok := r.readyBodies[r.currentRunning()]; ok {
+		return b
+	}
+	return "ok"
 }
 
 func (r *applyRig) post(t *testing.T, body interface{}) (status int, respBody []byte) {

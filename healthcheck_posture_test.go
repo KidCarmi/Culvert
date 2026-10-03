@@ -3,6 +3,9 @@ package main
 import (
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -134,4 +137,51 @@ func TestReadiness_PostureCountsOnlyRulesThatConstrainTraffic(t *testing.T) {
 	if h := computeHealth(); h.PolicyRules != 4 {
 		t.Fatalf("/health policy_rules = %d, want 4 enabled rules (allow-a, allow-b, bogus-action, allow-filter-no-profile)", h.PolicyRules)
 	}
+}
+
+// The maintenance agent's upgrade gate requires the /ready rows that were
+// "ok" before an upgrade to be "ok" after (cmd/culvert-maint
+// internal/health.PreservedReadyChecks). A renamed or dropped row would read
+// as "regressed" on every upgrade and roll it back, so the names are pinned
+// against what this proxy actually emits.
+func TestReadiness_AgentPreservedRowsExist(t *testing.T) {
+	setupProxyTest(t)
+	src, err := os.ReadFile(filepath.Join(pkgSourceDir(), "cmd", "culvert-maint", "internal", "health", "health.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := regexp.MustCompile(`var PreservedReadyChecks = \[\]string\{([^}]*)\}`).FindSubmatch(src)
+	if m == nil {
+		t.Fatal("PreservedReadyChecks not found in the agent's health package")
+	}
+	rep, _ := computeReadiness()
+	var names []string
+	for _, q := range regexp.MustCompile(`"([a-z_]+)"`).FindAllSubmatch(m[1], -1) {
+		names = append(names, string(q[1]))
+	}
+	if len(names) < 4 {
+		t.Fatalf("parsed only %v — the wall is vacuous", names)
+	}
+	for _, name := range names {
+		if name == "ca" {
+			// Emitted only once a CA is configured (absent ⇒ never in a
+			// baseline, so never required); pinned by its writer instead.
+			if !strings.Contains(string(mustReadSource(t, "healthcheck.go")), `checks["ca"] = &readinessCheck{Status: "ok"}`) {
+				t.Fatal("the proxy no longer emits an ok `ca` row")
+			}
+			continue
+		}
+		if rep.Checks[name] == nil {
+			t.Errorf("agent preserves /ready row %q but the proxy does not emit it", name)
+		}
+	}
+}
+
+func mustReadSource(t *testing.T, name string) []byte {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join(pkgSourceDir(), name))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
 }
