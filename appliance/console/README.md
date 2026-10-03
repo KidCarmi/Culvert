@@ -8,7 +8,7 @@ explicitly labelled unavailable until the application starts.
 
 The public screen shows version/candidate status, assigned IPv4/IPv6 addresses,
 recorded firstboot checkpoints and live service observations. `F2` or `L` starts
-normal Linux/PAM login as `culvert`; `F4` or `4` shows sanitized diagnostics.
+normal Linux/PAM login as `culvert`; `F4` or `3` shows sanitized diagnostics.
 Number keys work when a browser console intercepts function keys.
 
 After authenticating, the operator gets network information, setup-token access
@@ -276,6 +276,14 @@ Historical smoke evidence above applies to its recorded implementation commit;
 new visual verification is recorded separately.
 
 ## Failure handling and hardening contract
+
+The [hardening ESXi report](evidence/esxi-hardening-smoke.json) records runtime
+`f64e9ec1`, guest binary/hook hashes, native shuffled tests, PAM rejection/login/
+logout, live terminal views, mismatched-terminal rejection and reboot checks.
+[Linux race and fuzz CI passed](https://github.com/KidCarmi/Culvert/actions/runs/37156507792).
+The owned VM was deleted, an independent inventory found zero matching lab VMs,
+and private run files were removed. This remains a development overlay on the
+recorded candidate OVA; no new full-appliance qualification is claimed.
 
 The terminal adapter has a single input owner. A bracketed paste must terminate
 within two seconds; incomplete/unsupported escape sequences end the menu instead
