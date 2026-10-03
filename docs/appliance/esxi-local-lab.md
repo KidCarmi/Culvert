@@ -23,11 +23,23 @@ VM mutation has occurred.
 The owner authorized the default network and 2 vCPU / 4096 MiB / 40 GiB.
 Inventory identifies `VM Network` on vSwitch0, VLAN 0, matching the management
 network's `192.168.1.0/24`; the local guest-address fence uses that subnet.
-The two datastores are `datastore1` (~69 GiB free) and `DataStore2` (~498 GiB
-free). Datastore selection and the original OVA location remain pending.
+The owner accepted `DataStore2` (~498 GiB free). Read-only admission checks
+pass for one VM at the requested size: 46 GiB provisioned-space allowance,
+9576 MiB host RAM available and 9847 MHz host CPU available at observation.
+The OVA file is the remaining blocker; the actual `preflight` command refuses
+with `missing scope: ova` before any import.
 Conservative local admission thresholds retain 64 GiB datastore space,
-4096 MiB host RAM and 2000 MHz host CPU after provisioning. Availability
-does not authorize choosing an unrelated datastore.
+4096 MiB host RAM and 2000 MHz host CPU after provisioning. Capacity must be
+checked again when the artifact arrives.
+
+The retained evidence from [Appliance Lab run 37139370715](https://github.com/KidCarmi/Culvert/actions/runs/37139370715)
+contains a rebuilt candidate checksum
+`07ffa55482415016a0654fc24c0debc74abe7d31aeb7de43ff47a832bed826ab`, but no
+OVA bytes. That run records successful build/manifest checks followed by
+`no SSH within 2400s` under QEMU/KVM and an empty serial console log.
+These are remote CI observations, not local ESXi results. Opus must provide
+the original transfer route or retain a separately identified rebuilt OVA;
+the CI evidence archive alone cannot unblock import.
 
 ## Artifact and resources
 
@@ -166,7 +178,7 @@ no aggregate green result implies all requested scenarios passed.
 | Scenario | Current result / required evidence |
 |---|---|
 | Original OVA hash and manifest | BLOCKED: file location unavailable |
-| ESXi import/property delivery/boot | BLOCKED: datastore selection and artifact missing; authenticated inventory works |
+| ESXi import/property delivery/boot | BLOCKED: OVA file missing; authorized placement, authenticated inventory and requested-profile capacity checks pass |
 | Baseline guest checks and reboot | NOT RUN; per-check verdicts required |
 | Real ClamAV failure posture | NOT RUN; readiness alone is insufficient. Exercise EICAR and unavailable clamd with actual traffic; report fail-open if observed. No CVE/risk acceptance. |
 | Category enforcement | NOT RUN; lookup equality alone does not prove category-based allow/deny decisions |

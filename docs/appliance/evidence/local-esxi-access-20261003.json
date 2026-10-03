@@ -38,7 +38,7 @@
     {
       "id": "ADAPTER-UNIT",
       "result": "PASS",
-      "scope": "23 controller safety/evidence tests; no hypervisor or appliance claims"
+      "scope": "32 controller safety/evidence tests; no hypervisor or appliance claims"
     },
     {
       "id": "ADAPTER-SHELL",
@@ -60,7 +60,7 @@
       "id": "SCOPE-PREFLIGHT",
       "result": "BLOCKED",
       "scope": "Real adapter command",
-      "observed": "Missing authorized placement/resource scope and OVA path; refused before API access"
+      "observed": "missing scope: ova; placement and requested-profile capacity independently checked read-only; refused before import"
     },
     {
       "id": "OVA-VERIFY",
@@ -103,6 +103,11 @@
       "id": "F-DISK-1",
       "result": "KNOWN FAILURE",
       "scope": "Prior CI finding in #1535, not reproduced locally; remains open"
+    },
+    {
+      "id": "AUTHORIZED-CAPACITY",
+      "result": "PASS",
+      "scope": "Read-only admission for requested 2 vCPU / 4096 MiB / 40 GiB on DataStore2; not OVA verification"
     }
   ],
   "real_vms_created": 0,
@@ -110,10 +115,7 @@
   "risk_acceptance": false,
   "qualification": "BLOCKED / INCOMPLETE",
   "next_inputs": [
-    "secure credential mechanism and approved TLS CA/pin",
-    "allowed datastore/network and guest CIDR",
-    "VM/vCPU/RAM/guest-disk limits plus host/datastore headroom",
-    "original candidate OVA location"
+    "original OVA transfer route or separately identified rebuilt OVA file"
   ],
   "followup": {
     "date": "2026-10-03",
@@ -125,7 +127,9 @@
       "vcpus": 2,
       "memory_mib": 4096,
       "disk_gib": 40,
-      "network": "default VM Network"
+      "network": "default VM Network",
+      "datastore": "DataStore2",
+      "max_vms": 1
     },
     "real_vms_created": 0,
     "controller_tests": {
@@ -141,8 +145,36 @@
     },
     "simulator_regression": "PASS for ownership/cleanup; NFC upload checksum still BLOCKED on simulator",
     "remaining_inputs": [
-      "authorized datastore selection",
-      "original OVA path or URL"
-    ]
+      "original OVA transfer route or separately identified rebuilt OVA file"
+    ],
+    "read_only_capacity": {
+      "checked_at": "2026-10-03T18:06:45.990594+00:00",
+      "capacity": {
+        "datastore_reserve_bytes": 49392123904,
+        "datastore_free_bytes": 534493790208,
+        "host_free_mb": 9576,
+        "host_free_cpu_mhz": 9847
+      },
+      "existing_lab_vm_count": 0,
+      "result": "PASS",
+      "scope": "Read-only admission for requested profile; OVA bytes not verified"
+    },
+    "admission_headroom": {
+      "datastore_gib": 64,
+      "host_ram_mib": 4096,
+      "host_cpu_mhz": 2000,
+      "basis": "conservative local thresholds"
+    },
+    "artifact_search": {
+      "ci_run_url": "https://github.com/KidCarmi/Culvert/actions/runs/37139370715",
+      "artifact_id": 11280813229,
+      "archive_sha256": "3063db4a03e6ffc26946fd1eafe6ef0c0558a286d1ed3b5872e287722079412f",
+      "archive_contains_ova": false,
+      "rebuilt_ova_sha256_from_ci_evidence": "07ffa55482415016a0654fc24c0debc74abe7d31aeb7de43ff47a832bed826ab",
+      "rebuilt_ova_locally_verified": false,
+      "remote_ci_guest_boot": "FAIL: no SSH within 2400s; serial console file empty",
+      "local_build_capability": "WSL not installed; docker and qemu-system-x86_64 not on PATH",
+      "interpretation": "Build evidence is not the artifact and does not qualify original OVA or ESXi"
+    }
   }
 }
