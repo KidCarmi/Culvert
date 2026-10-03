@@ -8812,6 +8812,60 @@ after its own end-to-end gate proved vacuous the same way. **That is the second
 vacuous gate this sweep caught by mutation, both times because the gate never
 reached the code it claimed to test.**
 
+**AND THEN THAT UNIT GATE FLAKED, BECAUSE ITS LAST ASSERTION CLAIMED A
+SYNCHRONOUS GUARANTEE THE CODE NEVER MADE.** `socket really free` was a SINGLE
+bind probe immediately after `discardActivation` returned, and it failed about
+one run in twelve under `-count=2 -shuffle=on`:
+
+```
+--- FAIL: TestChaos71_DiscardActivationTearsDownAListenerThatWonTheRace
+    the listener is still bound after disposal: bind: address already in use
+```
+
+`discardActivation` calls `srv.Stop()` SYNCHRONOUSLY, so the probe looks sound.
+But `Stop()` is not what closes this listener. `StartControlPlaneGRPC` spawns
+`go srv.Serve(ln)`, and when `Stop()` wins the race against a serve goroutine
+the runtime has not scheduled yet, it finds NO listener registered and returns
+having closed nothing; `Serve` then runs, takes the `s.lis == nil` branch —
+*"Serve called after Stop or GracefulStop"* — and closes the listener ITSELF, on
+the serve goroutine, after `discardActivation` has already returned
+(grpc@v1.83.2 `server.go`: `s.mu.Unlock()` precedes `lis.Close()`). **The
+release is guaranteed; the INSTANT is not.** The gate's own log recorded both
+halves of that ordering and the first draft read past it:
+
+```
+ControlPlane: discarded a gRPC listener that bound while this node was shutting down
+ControlPlane gRPC error: grpc: the server has been stopped   ← Serve closing lis, late
+```
+
+**Production is unaffected and that is worth stating rather than assuming**:
+`Serve` is always called (the goroutine is spawned unconditionally), so the
+socket is always released, and nothing in production probes the port
+immediately after a disposal that only happens while the process is tearing
+down. This is a defect in the GATE, not in the disposal.
+
+The fix is `cpRequirePortFree`, which WAITS for the release under a 5 s budget
+instead of probing once, and **it does not weaken the claim** — disposal that
+never happens leaves the listener serving forever, since `discardActivation`
+has already nil'd the only handle anyone could stop it with, so the port never
+frees and the wait exhausts. Verified by mutation: removing `srv.Stop()` still
+fails the gate, and fails it with the diagnostic that separates the two
+outcomes (`address already in use` means a listener really was left serving;
+anything else means the gate could not probe at all).
+
+**The transferable rule, and it is the THIRD shape of one error in this sweep:
+a gate must assert the guarantee the code actually makes, at the strength it
+makes it.** §41.10's first vacuous gate asserted an absence that an unreached
+code path satisfied; its second asserted a refusal for the wrong reason; this
+one asserted correct CONTENT with incorrect TIMING. All three passed or failed
+for reasons unrelated to the invariant, and in this case the symptom was a
+flake rather than a false pass — which is strictly worse than it sounds,
+because this repo's standing rule is that *a gate that can flake gets muted*,
+so a 1-in-12 failure in the one gate pinning a P2 shutdown race is a gate on
+its way to being deleted. When an assertion follows a `Stop`, a `Close` or a
+`Cancel`, ask which goroutine performs the release before asserting that it has
+already happened.
+
 **Six lint findings rode along, every one a repo convention rather than taste —
 and the COUNT is the lesson, because the report that named them was a SAMPLE,
 not an inventory.** `Gate · golangci-lint` printed `gocognit: 1, gocritic: 1,

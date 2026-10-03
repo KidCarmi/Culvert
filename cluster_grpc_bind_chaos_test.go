@@ -159,6 +159,47 @@ func cpWaitFor(t *testing.T, d time.Duration, what string, cond func() bool) {
 	t.Fatalf("timed out after %s waiting for %s", d, what)
 }
 
+// cpRequirePortFree asserts that nothing is listening on addr, WAITING for the
+// socket to be released rather than probing once.
+//
+// The wait is load-bearing, not slack. `discardActivation` calls `srv.Stop()`
+// synchronously, but grpc-go's `Serve` is what closes the listener when it finds
+// the server already stopped — and it does so on the SERVE GOROUTINE, after
+// `Stop()` has returned (grpc@v1.83.2 server.go: `s.mu.Unlock()` then
+// `lis.Close()` on the `s.lis == nil` branch). So when `Stop()` wins the race
+// against a serve goroutine the runtime has not scheduled yet, the socket is
+// released microseconds LATER. The release is guaranteed; the instant is not.
+//
+// A single probe therefore asserted a SYNCHRONOUS guarantee the code never
+// made, and failed roughly one run in twelve under `-count=2 -shuffle=on` — a
+// flake in the one gate that pins the Codex P2 disposal invariant, and this
+// repo's standing rule is that a gate which can flake gets muted.
+//
+// It does NOT weaken the claim: disposal that never happens leaves the listener
+// serving forever (nothing else holds a pointer to stop it, since
+// `discardActivation` has already nil'd the handle), so the port never frees
+// and the wait exhausts. Verified by mutation — removing `srv.Stop()` from
+// `discardActivation` still fails this gate.
+func cpRequirePortFree(t *testing.T, addr, what string) {
+	t.Helper()
+	const budget = 5 * time.Second
+	var last error
+	deadline := time.Now().Add(budget)
+	for time.Now().Before(deadline) {
+		probe, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", addr)
+		if err == nil {
+			_ = probe.Close()
+			return
+		}
+		last = err
+		time.Sleep(10 * time.Millisecond)
+	}
+	// The last bind error is the diagnostic that separates the two ways this can
+	// fail: "address already in use" means a listener really was left serving,
+	// anything else means the gate could not probe at all.
+	t.Errorf("timed out after %s waiting for %s: %v", budget, what, last)
+}
+
 // cpBindErr builds a bind error in the exact shape the net package produces:
 // *net.OpError wrapping *os.SyscallError wrapping a syscall.Errno. Matching the
 // real wrapping matters — classifyCPGRPCBindError uses errors.As, and a gate
@@ -1406,12 +1447,8 @@ func TestChaos71_ShutdownCancelsAnInFlightActivation(t *testing.T) {
 	// (shutdown lands inside prepare), so no listener is ever created on this
 	// path; the disposal of one that wins the narrower post-bind race is pinned
 	// as a unit by TestChaos71_DiscardActivationTearsDownAListenerThatWonTheRace.
-	probe, perr := (&net.ListenConfig{}).Listen(t.Context(), "tcp", fmt.Sprintf("127.0.0.1:%d", port))
-	if perr != nil {
-		t.Errorf("a listener bound during teardown was left serving: %v", perr)
-	} else {
-		_ = probe.Close()
-	}
+	cpRequirePortFree(t, fmt.Sprintf("127.0.0.1:%d", port),
+		"no listener to be left serving after teardown")
 	if snap := cpGRPCListenerState(); snap.Failing {
 		t.Error("a shutdown-interrupted attempt was recorded as a bind FAILURE — it is a teardown, not a fault")
 	}
@@ -1480,13 +1517,8 @@ func TestChaos71_DiscardActivationTearsDownAListenerThatWonTheRace(t *testing.T)
 	if snap := cpGRPCListenerState(); !snap.Stopped {
 		t.Error("disposal did not record the teardown, so surfaces keep describing a Control Plane that is exiting")
 	}
-	// The socket is really gone: the same bind must now succeed.
-	probe, perr := (&net.ListenConfig{}).Listen(t.Context(), "tcp", addr)
-	if perr != nil {
-		t.Errorf("the listener is still bound after disposal: %v", perr)
-	} else {
-		_ = probe.Close()
-	}
+	// The socket is really gone: the same bind must become possible again.
+	cpRequirePortFree(t, addr, "the disposed listener's socket to be released")
 }
 
 // ── Structural walls ─────────────────────────────────────────────────────────
