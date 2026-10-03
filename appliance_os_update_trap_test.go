@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -25,8 +26,13 @@ func runOSUpdate(t *testing.T, mode string, env ...string) (out, calls string, c
 	return runOSUpdateWith(t, []string{mode}, nil, env...)
 }
 
-// runOSUpdateWith runs the script with args, after writing one agent
-// journal record per name in journal (an operation in flight).
+// osUpdateHook, when set, runs with the relocated agent state dir before
+// the script starts (to take the agent's host maintenance lock).
+var osUpdateHook func(agentStateDir string)
+
+// runOSUpdateWith runs the script with args. journal == nil leaves the
+// agent's state dir absent (agent not installed); otherwise one journal
+// record per name is written (an operation awaiting reconcile).
 func runOSUpdateWith(t *testing.T, args, journal []string, env ...string) (out, calls string, code int) {
 	t.Helper()
 	if _, err := exec.LookPath("bash"); err != nil {
@@ -48,14 +54,20 @@ func runOSUpdateWith(t *testing.T, args, journal []string, env ...string) (out, 
 	}
 	script := strings.Replace(string(src), "STACK=/srv/culvert", "STACK="+stack, 1)
 	script = strings.Replace(script, "LOG=/var/log/culvert-os-update.log", "LOG="+filepath.Join(dir, "log"), 1)
-	jdir := filepath.Join(dir, "reconcile")
-	script = strings.Replace(script, "MAINT_JOURNAL=/var/lib/culvert-maint/reconcile", "MAINT_JOURNAL="+jdir, 1)
+	mstate := filepath.Join(dir, "culvert-maint")
+	jdir := filepath.Join(mstate, "reconcile")
+	script = strings.Replace(script, "MAINT_STATE=/var/lib/culvert-maint", "MAINT_STATE="+mstate, 1)
 	script = strings.Replace(script, "LOCK=/run/culvert-os-update.lock", "LOCK="+filepath.Join(dir, "lock"), 1)
-	if !strings.Contains(script, "MAINT_JOURNAL="+jdir) || !strings.Contains(script, "LOCK="+filepath.Join(dir, "lock")) || !strings.Contains(script, "STACK="+stack) {
-		t.Fatal("could not relocate STACK/LOG/MAINT_JOURNAL/LOCK in culvert-os-update")
+	if !strings.Contains(script, "MAINT_STATE="+mstate) || !strings.Contains(script, "LOCK="+filepath.Join(dir, "lock")) || !strings.Contains(script, "STACK="+stack) {
+		t.Fatal("could not relocate STACK/LOG/MAINT_STATE/LOCK in culvert-os-update")
 	}
-	if err := os.MkdirAll(jdir, 0o750); err != nil {
-		t.Fatal(err)
+	if journal != nil {
+		if err := os.MkdirAll(jdir, 0o750); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if osUpdateHook != nil {
+		osUpdateHook(mstate)
 	}
 	for _, id := range journal {
 		if err := os.WriteFile(filepath.Join(jdir, id+".json"), []byte("{}"), 0o600); err != nil {
@@ -229,5 +241,49 @@ func TestOSUpdate_GuardIgnoresReadOnlyModeAndEmptyJournal(t *testing.T) {
 	}
 	if _, _, code := runOSUpdate(t, "os"); code != 0 {
 		t.Fatalf("an empty journal must not refuse, code=%d", code)
+	}
+}
+
+// The journal snapshot could not see an agent op admitted after it was
+// taken (Codex P1, PR #1528). The agent now holds a flock on
+// <state>/host-maintenance.lock for every state-changing op; the script
+// takes the same lock and refuses while the agent holds it — --force does
+// not override a live operation.
+func TestOSUpdate_RefusesWhileTheAgentHoldsTheHostLock(t *testing.T) {
+	var held *os.File
+	osUpdateHook = func(state string) {
+		if err := os.MkdirAll(state, 0o750); err != nil {
+			t.Fatal(err)
+		}
+		f, err := os.OpenFile(filepath.Join(state, "host-maintenance.lock"), os.O_RDONLY|os.O_CREATE, 0o640) //nolint:gosec // test temp dir
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil { //nolint:gosec // fd fits in int
+			t.Fatal(err)
+		}
+		held = f
+	}
+	defer func() { osUpdateHook = nil; _ = held.Close() }()
+	for _, args := range [][]string{{"os"}, {"docker"}, {"reboot"}, {"os", "--force"}} {
+		out, calls, code := runOSUpdateWith(t, args, []string{})
+		if code != 3 || !strings.Contains(out, "maintenance agent is running an operation") || strings.TrimSpace(calls) != "" {
+			t.Fatalf("%v while the agent holds the lock: code=%d calls=%q\n%s", args, code, calls, out)
+		}
+		_ = held.Close()
+	}
+}
+
+// Codex P2: where first boot recorded a missing agent, the state dir (and
+// the journal dir) need not exist; that is "nothing to sequence", not an
+// error that kills every mutating mode under set -e.
+func TestOSUpdate_MissingAgentStateIsIdle(t *testing.T) {
+	if out, _, code := runOSUpdateWith(t, []string{"os"}, nil); code != 0 {
+		t.Fatalf("no agent state dir must not block os mode: code=%d\n%s", code, out)
+	}
+	osUpdateHook = func(state string) { _ = os.MkdirAll(state, 0o750) } // state dir, no reconcile/
+	defer func() { osUpdateHook = nil }()
+	if out, _, code := runOSUpdateWith(t, []string{"os"}, nil); code != 0 {
+		t.Fatalf("an agent state dir without a journal must not block os mode: code=%d\n%s", code, out)
 	}
 }

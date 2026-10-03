@@ -653,3 +653,54 @@ func TestRestoreCommit_RootCAGuard_UnreadableCurrentRootRefuses(t *testing.T) {
 		t.Fatal("a refused commit must not create a bak dir")
 	}
 }
+
+// An existing roster the restore cannot read, or cannot parse, must not count
+// as "no admins": that disarmed the no-admin guard and let a full restore of
+// a pre-setup backup reopen unauthenticated setup (Codex P1, PR #1528).
+func TestRestoreCommit_NoAdminGuard_UnreadableOrCorruptCurrentRoster(t *testing.T) {
+	viewerOnly := []uiUserRecord{{Username: "eve", Role: RoleViewer}}
+	t.Run("unreadable", func(t *testing.T) {
+		src, _ := makeBackupWithRealCA(t, viewerOnly, 0)
+		currentDir := seedCurrentDataDir(t, true, []uiUserRecord{{Username: "bob", Role: RoleAdmin}}, 0)
+		p := filepath.Join(currentDir, "ui_users.json")
+		if err := os.Remove(p); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(p, 0o750); err != nil { // unreadable even as root
+			t.Fatal(err)
+		}
+		_, err := captureStdout(t, func() error {
+			return runRestoreCommit(src, currentDir, "", restoreOpts{Mode: modeFull, AcceptDPReenrollment: true})
+		})
+		if err == nil || !strings.Contains(err.Error(), "cannot read the current ui_users.json") {
+			t.Fatalf("an unreadable current roster must refuse, got: %v", err)
+		}
+	})
+	t.Run("corrupt", func(t *testing.T) {
+		src, _ := makeBackupWithRealCA(t, viewerOnly, 0)
+		currentDir := seedCurrentDataDir(t, true, []uiUserRecord{{Username: "bob", Role: RoleAdmin}}, 0)
+		if err := os.WriteFile(filepath.Join(currentDir, "ui_users.json"), []byte("{not json"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		_, err := captureStdout(t, func() error {
+			return runRestoreCommit(src, currentDir, "", restoreOpts{Mode: modeFull, AcceptDPReenrollment: true})
+		})
+		if err == nil || !strings.Contains(err.Error(), "cannot be parsed") {
+			t.Fatalf("a corrupt roster replaced by one with no admin must refuse, got: %v", err)
+		}
+	})
+	// CONTROL: restoring a backup that brings an admin back still recovers a
+	// corrupt roster — the remedy must stay available.
+	t.Run("corrupt-recovered-by-a-backup-with-an-admin", func(t *testing.T) {
+		src, _ := makeBackupWithRealCA(t, []uiUserRecord{{Username: "alice", Role: RoleAdmin}}, 0)
+		currentDir := seedCurrentDataDir(t, true, []uiUserRecord{{Username: "bob", Role: RoleAdmin}}, 0)
+		if err := os.WriteFile(filepath.Join(currentDir, "ui_users.json"), []byte("{not json"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := captureStdout(t, func() error {
+			return runRestoreCommit(src, currentDir, "", restoreOpts{Mode: modeFull, AcceptDPReenrollment: true, AcceptRootCAChange: true})
+		}); err != nil {
+			t.Fatalf("a backup with an admin must recover a corrupt roster: %v", err)
+		}
+	})
+}

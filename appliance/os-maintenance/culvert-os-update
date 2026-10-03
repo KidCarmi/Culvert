@@ -20,16 +20,19 @@
 #
 # Sequencing with the maintenance agent: an application upgrade/rollback/
 # restore runs `docker compose` against the same stack this script stops,
-# upgrades the engine under, or reboots. A mutating mode therefore REFUSES
-# while the agent's crash-recovery journal holds a record (an operation in
-# flight, or an interrupted one awaiting POST /v1/reconcile), and two runs
-# of this script never overlap (flock). --force overrides the journal check
-# only. The other direction is covered by the agent's own startup
-# reconcile: an op interrupted by a reboot is classified on /v1/status.
+# upgrades the engine under, or reboots. Both sides flock ONE file,
+# <agent state dir>/host-maintenance.lock: the agent for every
+# state-changing operation, this script for its whole run — so neither can
+# start while the other is active, in either order. A mutating mode also
+# refuses while the agent's crash-recovery journal holds a record (an
+# operation interrupted and awaiting POST /v1/reconcile, which holds no
+# lock). --force overrides the journal check only, never the lock. Two
+# runs of this script never overlap.
 set -euo pipefail
 STACK=/srv/culvert
 LOG=/var/log/culvert-os-update.log
-MAINT_JOURNAL=/var/lib/culvert-maint/reconcile
+MAINT_STATE=/var/lib/culvert-maint
+MAINT_JOURNAL="$MAINT_STATE/reconcile"
 LOCK=/run/culvert-os-update.lock
 mode="${1:-check}"; shift || true
 reboot_if_required=0; force=0
@@ -47,15 +50,27 @@ DOCKER_PKGS=(docker-ce docker-ce-cli containerd.io docker-compose-plugin)
 guard_maintenance() {
   exec 9>"$LOCK"
   flock -n 9 || { echo "culvert-os-update: another culvert-os-update run holds $LOCK — wait for it to finish" >&2; exit 3; }
-  local inflight
-  inflight="$(find "$MAINT_JOURNAL" -maxdepth 1 -name '*.json' -type f 2>/dev/null | sed 's#.*/##; s#\.json$##' | tr '\n' ' ')"
-  if [[ -n "$inflight" ]]; then
+  # The agent's state dir exists only where the agent is installed; without
+  # it there is nothing to sequence against.
+  if [[ -d "$MAINT_STATE" ]]; then
+    exec 8>>"$MAINT_STATE/host-maintenance.lock"
+    flock -n 8 || {
+      echo "culvert-os-update: the maintenance agent is running an operation (it holds $MAINT_STATE/host-maintenance.lock) — wait for it to finish" >&2
+      exit 3
+    }
+  fi
+  local inflight=""
+  if [[ -d "$MAINT_JOURNAL" ]]; then
+    inflight="$(find "$MAINT_JOURNAL" -maxdepth 1 -name '*.json' -type f -printf '%f ' | sed 's/\.json / /g')" || {
+      echo "culvert-os-update: cannot read the maintenance agent journal $MAINT_JOURNAL — refusing" >&2; exit 3; }
+  fi
+  if [[ -n "${inflight// /}" ]]; then
     if [[ "$force" -eq 1 ]]; then
       log "WARNING: --force: proceeding although the maintenance agent journal holds: $inflight"
     else
-      echo "culvert-os-update: the maintenance agent has operation(s) in flight or awaiting reconcile: $inflight" >&2
-      echo "  wait for them to finish; an interrupted one is listed under interrupted_operations in" >&2
-      echo "  Admin UI → Release Management (GET /api/maintenance-agent) and is settled with POST /v1/reconcile" >&2
+      echo "culvert-os-update: the maintenance agent has operation(s) interrupted and awaiting reconcile: $inflight" >&2
+      echo "  they are listed under interrupted_operations in Admin UI → Release Management" >&2
+      echo "  (GET /api/maintenance-agent) and settled with POST /v1/reconcile" >&2
       echo "  (override with --force only when you know the agent is idle)" >&2
       exit 3
     fi

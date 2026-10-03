@@ -55,6 +55,19 @@ actually running after the reboot is not observable in a container.** It is
 recorded on real hardware by step 7 of
 [`vsphere-qualification.md`](vsphere-qualification.md) (`uname -r` before and after).
 
+**Sequencing with application operations.** `culvert-os-update` and the
+maintenance agent both `flock` `/var/lib/culvert-maint/host-maintenance.lock`:
+the agent for every state-changing operation (upgrade, rollback, restore,
+backup), `culvert-os-update` for its whole run (`security`, `os`, `docker`,
+`reboot`). Whichever comes second is refused — the OS tool exits 3 naming the
+agent; the agent answers `409 host_maintenance_in_progress` — so an engine
+upgrade, a stack stop or a reboot never lands under an upgrade, and the other
+way round. An operation that was interrupted and is awaiting
+`POST /v1/reconcile` holds no lock, so the OS tool also refuses while the
+agent journal lists one (`--force` overrides only that, never a live lock).
+`check` is read-only and never gated. The daily `unattended-upgrades` run
+installs security packages only and does not stop the stack or reboot.
+
 **Maintenance-window procedure (host reboot):**
 1. Announce; proxy clients lose the gateway for the reboot duration (~1–2 min).
 2. `sudo culvert-os-update check` → if REBOOT REQUIRED: `sudo culvert-os-update reboot`.

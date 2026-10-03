@@ -713,12 +713,23 @@ func analyzeCommit(files map[string][]byte, dataDir string, opts restoreOpts) (*
 	a.DPGuardWouldBlock = dpWouldNeedFlag && !opts.AcceptDPReenrollment
 
 	// ui_users analysis (post-merge).
-	currentUsers := readUsersForAnalysis(currentUIUsersBody(dataDir))
-	restoredUsers := readUsersForAnalysis(restoredUIUsersBody(files, dataDir, opts.Mode))
+	curRoster, err := currentUIUsersBody(dataDir)
+	if err != nil {
+		return nil, err
+	}
+	resRoster, err := restoredUIUsersBody(files, dataDir, opts.Mode)
+	if err != nil {
+		return nil, err
+	}
+	currentUsers := readUsersForAnalysis(curRoster)
+	restoredUsers := readUsersForAnalysis(resRoster)
 	a.CurrentUsers = sortedUsernames(currentUsers)
 	a.RestoredUsers = sortedUsernames(restoredUsers)
-	a.CurrentAdmins = rosterAdminCount(currentUIUsersBody(dataDir))
-	a.RestoredAdmins = rosterAdminCount(restoredUIUsersBody(files, dataDir, opts.Mode))
+	a.CurrentAdmins = rosterAdminCount(curRoster)
+	a.RestoredAdmins = rosterAdminCount(resRoster)
+	if a.RestoredAdmins < 0 {
+		a.RestoredAdmins = 0 // an unparseable restored roster yields no usable admin
+	}
 	a.UsersAddedByRestore = setDifference(a.RestoredUsers, a.CurrentUsers)
 	a.UsersRemovedByRestore = setDifference(a.CurrentUsers, a.RestoredUsers)
 
@@ -775,13 +786,19 @@ func restoredRootCADigest(files map[string][]byte, dataDir string, mode restoreM
 
 // rosterAdminCount counts admin accounts in a ui_users.json body (0 for an
 // absent or unparseable roster — the fail-closed reading for the guard).
+// rosterAdminCount returns the admins in a ui_users.json body: 0 when the
+// body is empty (no roster), and -1 when a roster EXISTS but cannot be
+// parsed — "unknown", which the no-admin guard treats like "has admins"
+// (Codex P1, PR #1528: reading it as zero let a full restore of a pre-setup
+// backup move it aside and reopen unauthenticated setup). A restore that
+// brings an admin back still recovers a corrupt roster.
 func rosterAdminCount(body []byte) int {
 	if len(body) == 0 {
 		return 0
 	}
 	n, err := validateUIUsersJSON(body)
 	if err != nil {
-		return 0
+		return -1
 	}
 	return n
 }
@@ -829,17 +846,24 @@ func currentEnrolledNodeCount(dataDir string) int {
 	return len(st.Nodes)
 }
 
-func currentUIUsersBody(dataDir string) []byte {
+// currentUIUsersBody reads the current admin roster: nil when it does not
+// exist, an error for any other read failure — an existing roster the
+// restore cannot read must not be counted as "no admins" (Codex P1,
+// PR #1528).
+func currentUIUsersBody(dataDir string) ([]byte, error) {
 	body, err := os.ReadFile(filepath.Join(dataDir, "ui_users.json")) // #nosec G304 -- operator-controlled
-	if err != nil {
-		return nil
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
 	}
-	return body
+	if err != nil {
+		return nil, fmt.Errorf("restore: cannot read the current ui_users.json to count admins (fix its ownership/permissions and retry): %w", err)
+	}
+	return body, nil
 }
 
-func restoredUIUsersBody(files map[string][]byte, dataDir string, mode restoreMode) []byte {
+func restoredUIUsersBody(files map[string][]byte, dataDir string, mode restoreMode) ([]byte, error) {
 	if mode.fromTarball("data/ui_users.json") {
-		return files["data/ui_users.json"]
+		return files["data/ui_users.json"], nil
 	}
 	return currentUIUsersBody(dataDir)
 }
@@ -968,7 +992,7 @@ func printRestoreSummary(w io.Writer, s *restoreSummary, a *commitAnalysis) {
 	if len(a.UsersRemovedByRestore) > 0 {
 		fmt.Fprintf(w, "  Will be removed:  %s\n", strings.Join(a.UsersRemovedByRestore, ", "))
 	}
-	if a.CurrentAdmins > 0 && a.RestoredAdmins == 0 {
+	if a.CurrentAdmins != 0 && a.RestoredAdmins == 0 {
 		_, _ = fmt.Fprintf(w, "  ⚠ No admin would remain: commit is REFUSED (would reopen unauthenticated setup).\n")
 	}
 
@@ -1112,8 +1136,12 @@ func enforceCommitGuards(analysis *commitAnalysis) error {
 		}
 		return fmt.Errorf("restore: the inspection root CA (ca.bundle) would be %s; every client trusting the current root loses inspected HTTPS. Pass --accept-root-ca-change to proceed, or use --mode state-only to keep the current root", what)
 	}
-	if analysis.CurrentAdmins > 0 && analysis.RestoredAdmins == 0 {
-		return fmt.Errorf("restore: the commit would leave NO admin account (current roster has %d) and reopen unauthenticated first-time setup; use a backup that carries ui_users.json, or --mode trust-root-only to keep the current roster", analysis.CurrentAdmins)
+	if analysis.CurrentAdmins != 0 && analysis.RestoredAdmins == 0 {
+		have := fmt.Sprintf("current roster has %d", analysis.CurrentAdmins)
+		if analysis.CurrentAdmins < 0 {
+			have = "current roster exists but cannot be parsed"
+		}
+		return fmt.Errorf("restore: the commit would leave NO admin account (%s) and reopen unauthenticated first-time setup; use a backup that carries ui_users.json, or --mode trust-root-only to keep the current roster", have)
 	}
 	if analysis.TOTPGuardWouldBlock {
 		return fmt.Errorf("restore: TOTP counter rollback for %d user(s) (%s); recently-used codes could be replayed. Pass --allow-counter-rollback to proceed",
