@@ -2,8 +2,13 @@
 Description=Culvert appliance first-boot provisioning (idempotent; resumes after interruption)
 Documentation=file:///opt/culvert-appliance/provision/culvert-firstboot.sh
 # cloud-init must have applied the OVF/NoCloud identity (hostname, keys,
-# password) first; Docker must be up for the image load.
-After=cloud-final.service docker.service network-online.target
+# password) first; Docker must be up for the image load. users_groups, ssh
+# and set_passwords run in cloud-init.service (the init stage), so order after
+# that and cloud-config.service — NEVER cloud-final.service: Ubuntu orders it
+# After=multi-user.target, and this unit is WantedBy=multi-user.target (so
+# Before it), which is a cycle systemd breaks by DELETING this unit's start
+# job — first boot then never runs (lab run 37144426441).
+After=cloud-init.service cloud-config.service docker.service network-online.target
 Wants=network-online.target docker.service
 ConditionPathExists=!/var/lib/culvert-appliance/state/complete.done
 # A persistent failure is retried in bounded bursts, never silently: the console
