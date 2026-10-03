@@ -30,12 +30,30 @@ arbitrary commands):
 |---------|--------|
 | `check` | `apt update`; lists pending security updates (dry run), all upgradable packages, held Docker packages, last unattended run; says whether a **reboot is required** (`/var/run/reboot-required`) |
 | `security` | run the same security-only policy now |
-| `os` | all guest-OS package updates (Docker stays held) |
+| `os` | all guest-OS package updates incl. a new kernel ABI (`apt-get upgrade --with-new-pkgs`; Docker stays held) |
 | `reboot` | `docker compose stop` in `/srv/culvert` (each service's `stop_grace_period` applies — the proxy's is 60 s so its shutdown sequence completes and durable state is flushed; `docs/operator/graceful-shutdown.md`) then `systemctl reboot` |
 | any + `--reboot-if-required` | reboot at the end only when the kernel/libc update needs it |
 
 A kernel or glibc update is live only after a reboot; `culvert-status` is not
 affected, so `check` is the signal. Run `check` weekly, reboot in the window.
+
+**Kernel updates.** An Ubuntu kernel ABI bump ships as a NEW package
+(`linux-image-<abi>-generic`) pulled in by `linux-virtual`. A plain
+`apt-get upgrade` keeps that back, so the kernel would never move. Reproduced
+against the Ubuntu snapshot archive, 6.8.0-142 → 6.8.0-146
+([evidence](evidence/kernel-update-reproduction.txt)). `os` therefore runs
+`upgrade --with-new-pkgs`, which:
+* installs the new kernel **beside** the running one (both `ii`),
+* still honours every `apt-mark hold` (Docker stays pinned; never `dist-upgrade`),
+* removes nothing, and the following `autoremove` keeps the running kernel, so
+  the previous kernel stays in the GRUB menu as the fallback boot entry.
+
+`security` (and the daily `unattended-upgrades` run) move the kernel only when
+the bump is published to `-security`. At the reproduction snapshot 6.8.0-146 was
+in `-updates` only, and the security path correctly left it alone. **The kernel
+actually running after the reboot is not observable in a container.** It is
+recorded on real hardware by step 7 of
+[`vsphere-qualification.md`](vsphere-qualification.md) (`uname -r` before and after).
 
 **Maintenance-window procedure (host reboot):**
 1. Announce; proxy clients lose the gateway for the reboot duration (~1–2 min).

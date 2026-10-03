@@ -94,8 +94,15 @@ case "$mode" in
     ;;
   os)
     apt-get update -qq
-    log "apt-get upgrade (Docker packages stay held)"
-    apt-get -y -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold upgrade
+    # --with-new-pkgs: a kernel ABI bump (linux-virtual -> a NEW
+    # linux-image-<abi> package) is "kept back" by a plain `upgrade`, so the
+    # kernel would never move (owner review, PR #1528; reproduced against the
+    # Ubuntu snapshot archive — docs/appliance/evidence/kernel-update-*.txt).
+    # Holds are still honoured (Docker stays pinned) and nothing is removed;
+    # the following autoremove keeps the RUNNING kernel, so the previous one
+    # stays bootable until the next maintenance cycle.
+    log "apt-get upgrade --with-new-pkgs (Docker packages stay held)"
+    apt-get -y -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold upgrade --with-new-pkgs
     apt-get -y autoremove --purge
     finish
     ;;

@@ -17,6 +17,11 @@ import (
 
 func runOSUpdateDocker(t *testing.T, env ...string) (out, calls string, code int) {
 	t.Helper()
+	return runOSUpdate(t, "docker", env...)
+}
+
+func runOSUpdate(t *testing.T, mode string, env ...string) (out, calls string, code int) {
+	t.Helper()
 	if _, err := exec.LookPath("bash"); err != nil {
 		t.Skip("bash not available")
 	}
@@ -57,7 +62,7 @@ func runOSUpdateDocker(t *testing.T, env ...string) (out, calls string, code int
 		}
 	}
 	callsPath := filepath.Join(dir, "calls")
-	cmd := exec.CommandContext(t.Context(), "bash", scriptPath, "docker") //nolint:gosec // test-owned copy of the script in t.TempDir()
+	cmd := exec.CommandContext(t.Context(), "bash", scriptPath, mode) //nolint:gosec // test-owned copy of the script in t.TempDir(); mode is a test constant
 	cmd.Env = append([]string{"PATH=" + bin + ":" + os.Getenv("PATH"), "CALLS=" + callsPath}, env...)
 	b, _ := cmd.CombinedOutput()
 	code = cmd.ProcessState.ExitCode()
@@ -146,5 +151,29 @@ func TestOSUpdateDocker_StackStartFailureIsReported(t *testing.T) {
 	}
 	if strings.LastIndex(calls, "apt-mark hold") < strings.LastIndex(calls, "apt-mark unhold") {
 		t.Fatalf("holds must be re-applied:\n%s", calls)
+	}
+}
+
+// `os` must move a kernel ABI bump (a new linux-image-<abi> package), which a
+// plain `apt-get upgrade` keeps back, while leaving every hold in place and
+// never touching the Docker packages (owner review, PR #1528).
+func TestOSUpdateOS_InstallsNewKernelPackagesAndKeepsHolds(t *testing.T) {
+	out, calls, code := runOSUpdate(t, "os")
+	if code != 0 {
+		t.Fatalf("os mode failed (%d):\n%s", code, out)
+	}
+	var upgrade string
+	for _, l := range strings.Split(calls, "\n") {
+		if strings.HasPrefix(l, "apt-get ") && strings.Contains(l, " upgrade") {
+			upgrade = l
+		}
+	}
+	if !strings.Contains(upgrade, "upgrade --with-new-pkgs") {
+		t.Fatalf("os mode must run `upgrade --with-new-pkgs` (plain upgrade keeps a kernel ABI bump back); got %q", upgrade)
+	}
+	for _, forbidden := range []string{"apt-mark unhold", "dist-upgrade", "full-upgrade", "docker-ce"} {
+		if strings.Contains(calls, forbidden) {
+			t.Fatalf("os mode must leave the Docker holds alone; saw %q in:\n%s", forbidden, calls)
+		}
 	}
 }
