@@ -63,6 +63,22 @@ jobs:
           done
           # supermin (libguestfs) reads the host kernel; Ubuntu ships it 0600.
           sudo chmod 0644 /boot/vmlinuz-*
+      - name: Match the recorded build host's Docker engine (29.6.2)
+        # The original OVA's build-info.json records Docker 29.6.2 on the
+        # containerd image store. The runner ships Docker 28, whose containerd
+        # store reports an empty platform for an index-digest reference, so
+        # build-ova.sh's amd64 assertion refuses the pinned ClamAV image (run
+        # 37138298441). Match the build host instead of changing the build.
+        run: |
+          set -euo pipefail
+          sudo install -m 0755 -d /etc/apt/keyrings
+          curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor --yes -o /etc/apt/keyrings/docker.gpg
+          echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu noble stable" | sudo tee /etc/apt/sources.list.d/docker-lab.list >/dev/null
+          sudo apt-get update -q
+          v="$(apt-cache madison docker-ce | awk '$3 ~ /^5:29\.6\.2-/{print $3; exit}')"
+          [ -n "$v" ] || { echo "::error::docker-ce 29.6.2 not available"; exit 1; }
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q --allow-downgrades "docker-ce=$v" "docker-ce-cli=$v" containerd.io
+          docker version --format 'client={{.Client.Version}} server={{.Server.Version}}'
       - name: Use the containerd image store (the build's archive-identity guard requires it)
         # Under Docker's classic store a loaded image's ID is its CONFIG digest,
         # so the saved archive cannot carry the manifest digest first boot pins
@@ -75,7 +91,7 @@ jobs:
           sudo python3 -c 'import json; p="/etc/docker/daemon.json"; d=json.load(open(p)); d.setdefault("features",{})["containerd-snapshotter"]=True; json.dump(d,open(p,"w"))'
           sudo systemctl restart docker
           for i in $(seq 1 30); do docker info >/dev/null 2>&1 && break; sleep 2; done
-          docker info --format 'driver={{.Driver}} {{.DriverStatus}}' | tee /dev/stderr | grep -q 'io.containerd.snapshotter.v1'
+          docker info --format 'server={{.ServerVersion}} driver={{.Driver}} {{.DriverStatus}}' | tee /dev/stderr | grep -q 'server=29.6.2 .*io.containerd.snapshotter.v1'
       - name: Obtain the source image tar (verified sha256)
         id: image
         env:
