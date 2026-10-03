@@ -5,7 +5,8 @@ HERE=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 source "$HERE/install-lib.sh"
 [[ $(id -u) == 0 ]] || { echo 'Test requires root for ownership checks.' >&2; exit 1; }
 TEST_ROOT=$(mktemp -d)
-trap 'rm -rf -- "$TEST_ROOT"' EXIT
+child=''
+trap 'if [[ -n $child ]]; then kill "$child" 2>/dev/null || true; wait "$child" 2>/dev/null || true; fi; rm -rf -- "$TEST_ROOT"' EXIT
 mkdir "$TEST_ROOT/source" "$TEST_ROOT/dest"
 src=$TEST_ROOT/source
 bin=$TEST_ROOT/dest/binary
@@ -33,6 +34,17 @@ for fail_at in 1 2 3; do
     ); then echo 'Injected rename failure was ignored.' >&2; exit 1; fi
     assert_old
 done
+# A termination immediately after the first rename must also restore the bundle.
+if (
+    count=0
+    mv() {
+        command mv "$@" || return
+        count=$((count+1))
+        if [[ $count == 1 ]]; then kill -TERM "$BASHPID"; fi
+    }
+    install_console_bundle "$src" "$bin" "$profile" "$getty"
+); then exit 1; fi
+assert_old
 # A failed first installation must leave no newly activated hooks or binary.
 rm "$bin" "$profile" "$getty"
 if (
@@ -69,4 +81,15 @@ cmp "$getty" "$src/getty-override.conf"
 [[ $(stat -c '%a:%u:%g' "$bin") == '755:0:0' ]]
 [[ $(stat -c '%a:%u:%g' "$getty") == '644:0:0' ]]
 [[ -z $(find "$TEST_ROOT/dest" -name '.culvert-stage.*' -o -name '.culvert-backup.*') ]]
+# Replacing an executing binary must use a new inode, never truncate its image.
+cp /bin/sleep "$bin"
+"$bin" 30 &
+child=$!
+old_inode=$(stat -c '%i' "$bin")
+install_console_bundle "$src" "$bin" "$profile" "$getty"
+[[ $(stat -c '%i' "$bin") != "$old_inode" ]]
+kill -0 "$child"
+kill "$child"
+wait "$child" || true
+child=''
 echo 'PASS: staged installation, rollback, symlink refusal, locking and idempotency'
