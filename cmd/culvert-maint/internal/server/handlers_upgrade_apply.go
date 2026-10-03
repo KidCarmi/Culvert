@@ -7,6 +7,9 @@
 //	                 Also derives the inline-rollback target (priorRef).
 //	resolve_target → docker manifest inspect <image_ref> → target digest
 //	                 set; compute already_current (running ∩ target).
+//	preflight_dependencies → refuse (nothing changed) while a service the
+//	                 proxy depends on is unhealthy: `compose up` would
+//	                 remove the proxy and leave the new one stopped.
 //	pre_backup     → if requested AND not already_current: encrypted
 //	                 backup; a failure ABORTS before any pull/restart.
 //	pull           → docker pull <pinned repo@sha256> (P1.4; sudo-boundary
@@ -263,6 +266,15 @@ func (s *Server) buildUpgradeApplyStages(acc *upgradeApplyAccumulator, racc *rol
 				return []byte(fmt.Sprintf("resolve_target: requested_ref=%q pinned_ref=%q target_digests=%s already_current=%v",
 					requestedRef, acc.pinnedRef, joinDigests(acc.targetDigests), acc.alreadyCurrent)), res.Stderr, nil
 			},
+		},
+		{
+			// Refuse before anything is touched when a dependency of the
+			// proxy is unhealthy: `compose up` would leave the proxy
+			// stopped (see preflightDependencies). Not post-restart, so no
+			// rollback fires.
+			Name:          "preflight_dependencies",
+			FailureReason: ops.ReasonValidation,
+			Run:           skipIfCurrent(acc, "preflight_dependencies", s.preflightDependencies()),
 		},
 		{
 			// Encrypted pre-upgrade backup. Skipped when already current

@@ -121,3 +121,38 @@ func TestImageRollback_PreexistingGatingFailureIsTolerated(t *testing.T) {
 		t.Fatalf("a rollback that turns a 2xx host into 503 must fail: %+v", op2)
 	}
 }
+
+// `compose up` against an unhealthy service_healthy dependency removes the
+// running proxy and leaves the new one stopped, and an inline rollback runs
+// the same `up`. With the ClamAV sidecar unhealthy the agent must refuse
+// BEFORE pulling or restarting anything.
+func TestUpgradeApply_RefusesWhileADependencyIsUnhealthy(t *testing.T) {
+	rig := startApplyRig(t)
+	defer rig.stop()
+	rig.clamUnhealthy = true
+
+	op, opID := rig.acceptAndWait(t, map[string]interface{}{"image_ref": repo + "@sha256:" + digNew})
+	if op["state"] != "failed" || op["failure_reason"] != "validation" {
+		t.Fatalf("an unhealthy dependency must refuse the upgrade: state=%v reason=%v", op["state"], op["failure_reason"])
+	}
+	if rig.sawCommand("pull") || rig.sawCommand("up") || rig.sawCommand("tag") {
+		t.Fatalf("nothing may be pulled, tagged or restarted while refusing:\n%s", rig.opLog(t, opID))
+	}
+	if log := rig.opLog(t, opID); !strings.Contains(log, "REFUSED — unhealthy: clamav") {
+		t.Errorf("op-log must name the unhealthy dependency:\n%s", log)
+	}
+	res, _ := op["result"].(map[string]interface{})
+	if res != nil && res["rollback_attempted"] == true {
+		t.Fatalf("a pre-mutation refusal must not roll back: %v", res)
+	}
+}
+
+func TestImageRollback_RefusesWhileADependencyIsUnhealthy(t *testing.T) {
+	rig := startApplyRig(t)
+	defer rig.stop()
+	rig.clamUnhealthy = true
+	op, _ := rig.rollbackAndWait(t, map[string]interface{}{"mode": "image", "image_ref": repo + "@sha256:" + digNew})
+	if op["state"] != "failed" || rig.sawCommand("up") {
+		t.Fatalf("a rollback must refuse before `up` while a dependency is unhealthy: %+v", op)
+	}
+}

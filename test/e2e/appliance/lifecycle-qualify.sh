@@ -16,6 +16,9 @@
 #   D  backup (cli, encrypted) → mutate → offline restore --confirm on the
 #      mounted volume → boot → state verified; plus: a commit against the
 #      RUNNING stack is refused (data-dir lock)
+#   R  disaster recovery: backup + .env escrowed off-box, BOTH original
+#      volumes destroyed, a new install restores into a FRESH /data → same
+#      root CA (fingerprint), admin, policy and real enforcement
 #   E  interrupted restore (journal present) → proxy refuses to boot →
 #      --recover-restore --confirm complete → boot → state verified
 #   G  restore onto a FULL volume (/data on a size-bounded loop-backed ext4
@@ -324,6 +327,69 @@ scD() {
   destroy
 }
 
+# ═══ R. disaster recovery: fresh volume, original appliance gone ═══════════
+# Distinct from D (same volume, previous data beside it). Here the original
+# data AND backup volumes are destroyed; recovery has exactly what an
+# operator holds off-box: the encrypted archive (+ its passphrase) and the
+# separately kept .env (CA/log passphrases). A new install restores into a
+# FRESH /data and must come back as the SAME appliance: same root CA
+# (fingerprint), same admin, same policy, same enforcement.
+ca_fp() { api GET /api/ca-cert | body_of | openssl x509 -noout -fingerprint -sha256 2>/dev/null | cut -d= -f2; }
+scR() {
+  local sc=R; log "=== $sc disaster recovery into a fresh volume"
+  QUAL_DEFAULT_ACTION=deny newproj r1 "$CUR_IMAGE"
+  up || { check $sc boot fail "no /health"; destroy; return; }
+  setup_admin >/dev/null; login "$ADMIN_USER" "$ADMIN_PASS" >/dev/null; seed_policy >/dev/null
+  local fp0 out esc="$EVID/dr-escrow" uid gid orig="$PROJ"
+  fp0="$(ca_fp)"; [[ -n "$fp0" ]] && check $sc original-ca pass "root CA sha256 $fp0" || check $sc original-ca fail "no CA from /api/ca-cert"
+  out="$(dcli --encrypt --backup /backup/dr.tar.gz.enc 2>&1 || true)"
+  if echo "$out" | grep -q "Backup written"; then check $sc backup pass "$(echo "$out" | tail -1)"; else check $sc backup fail "$out"; fi
+  # Off-box escrow: the archive and the .env leave the host separately.
+  rm -rf "$esc"; mkdir -p "$esc"
+  docker run --rm -v "${PROJ}_culvert-backups:/backup:ro" -v "$esc:/out" alpine:3.20 cp /backup/dr.tar.gz.enc /out/ \
+    && cp "$PDIR/.env" "$esc/env" && check $sc escrowed pass "archive $(stat -c %s "$esc/dr.tar.gz.enc" 2>/dev/null) bytes + .env held off-box" \
+    || check $sc escrowed fail "could not copy the archive out"
+  destroy
+  if docker volume inspect "${orig}_proxy-data" >/dev/null 2>&1 || docker volume inspect "${orig}_culvert-backups" >/dev/null 2>&1; then
+    check $sc original-gone fail "a volume of $orig survived destroy"
+  else
+    check $sc original-gone pass "data and backup volumes of $orig removed"
+  fi
+  # A NEW install, exactly as recovery-restore-runbook.md §5 says: first
+  # boot brings the stack up on fresh volumes (it mints its OWN root CA),
+  # the setup wizard is NOT completed, the escrowed .env goes back, the
+  # archive is restored with --accept-root-ca-change so the archived root
+  # replaces the fresh one.
+  newproj r2 "$CUR_IMAGE"; cp "$esc/env" "$PDIR/.env"; chmod 600 "$PDIR/.env"
+  up || { check $sc new-install-boot fail "no /health on the new install"; destroy; rm -rf "$esc"; return; }
+  local fpn; fpn="$(onvol 'test -e /data/ui_users.json && echo roster' 2>/dev/null || true)"
+  [[ -z "$fpn" ]] && check $sc new-install-unclaimed pass "fresh install up, no admin roster (wizard not completed)" || check $sc new-install-unclaimed fail "fresh volume already holds ui_users.json"
+  down
+  uid="$(docker run --rm --entrypoint id "$CUR_IMAGE" -u)"; gid="$(docker run --rm --entrypoint id "$CUR_IMAGE" -g)"
+  dcli --list-restore-leftovers >/dev/null 2>&1 || true   # creates the backups volume
+  docker run --rm -v "${PROJ}_culvert-backups:/backup" -v "$esc:/in:ro" alpine:3.20 \
+    sh -c "cp /in/dr.tar.gz.enc /backup/ && chown $uid:$gid /backup/dr.tar.gz.enc && chmod 600 /backup/dr.tar.gz.enc"
+  out="$(dcli --restore /backup/dr.tar.gz.enc --confirm --mode full --accept-dp-reenrollment 2>&1 || true)"
+  if echo "$out" | grep -q "Restore committed"; then
+    check $sc root-ca-guard fail "restore over a freshly minted CA committed WITHOUT --accept-root-ca-change"
+  else
+    check $sc root-ca-guard pass "refused without --accept-root-ca-change: $(echo "$out" | grep -m1 -iE 'root ca|ca.bundle|refus' | cut -c1-160)"
+  fi
+  out="$(dcli --restore /backup/dr.tar.gz.enc --confirm --mode full --accept-dp-reenrollment --accept-root-ca-change 2>&1 || true)"
+  if echo "$out" | grep -q "Restore committed"; then check $sc restore-commit pass "$(echo "$out" | grep -m1 -E 'Restore committed')"; else check $sc restore-commit fail "$out"; fi
+  up || { check $sc boot-after-dr fail "no /health: $(docker logs culvert 2>&1 | tail -5)"; destroy; rm -rf "$esc"; return; }
+  check $sc boot-after-dr pass "version=$(version_of)"
+  expect $sc admin-recovered bash -c '[[ "$(login "'"$ADMIN_USER"'" "'"$ADMIN_PASS"'")" == 200 ]] && echo "original admin logs in on the new appliance"'
+  login "$ADMIN_USER" "$ADMIN_PASS" >/dev/null
+  local fp1; fp1="$(ca_fp)"
+  [[ -n "$fp0" && "$fp1" == "$fp0" ]] && check $sc ca-identity-recovered pass "root CA sha256 $fp1 (same root: clients keep trusting it)" || check $sc ca-identity-recovered fail "fp=$fp1 want=$fp0"
+  expect $sc ssl-inspection-ready bash -c 'curl -fsS '"$PROXY"'/health | python3 -c "import json,sys; d=json.load(sys.stdin); assert d[\"ssl_inspection\"]==\"ready\", d; print(\"ssl_inspection=ready (ca.bundle decrypts under the escrowed passphrase)\")"'
+  expect $sc rules-recovered bash -c '[[ "$(rule_present)" == yes ]] && echo present'
+  expect $sc default-deny-recovered bash -c '[[ "$(default_action)" == deny ]] && echo deny'
+  assert_enforcement $sc after-dr
+  destroy; rm -rf "$esc"
+}
+
 # ═══ E. interrupted restore → refuse boot → explicit recovery ═══════════════
 scE() {
   local sc=E; log "=== $sc interrupted restore recovery"
@@ -401,14 +467,18 @@ scG() {
 
 # ═══ run ═════════════════════════════════════════════════════════════════════
 trap 'destroy >/dev/null 2>&1 || true' EXIT
-SCENARIOS="${SCENARIOS:-A B D E G}"   # subset for re-runs, e.g. SCENARIOS="E"
+SCENARIOS="${SCENARIOS:-A B D R E G}"   # subset for re-runs, e.g. SCENARIOS="E"
 for sc in $SCENARIOS; do
   case "$sc" in
     A) scA ;;
     B) for p in $PRED_IMAGES; do scB "$p"; done ;;
     D) scD ;;
+    R) scR ;;
     E) scE ;;
     G) scG ;;
+    # An unknown letter used to be skipped silently, so a scenario missing
+    # from this table "passed" with zero checks.
+    *) check "$sc" unknown-scenario fail "no scenario '$sc' in this harness" ;;
   esac
 done
 if [[ "${CULVERT_QUALIFY_REAL_CLAMAV:-0}" == 1 ]]; then

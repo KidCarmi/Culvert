@@ -155,6 +155,13 @@ func (s *Server) buildImageRollbackStages(targetRef string, acc *rollbackAccumul
 				return []byte("capture_before: prior_digests=" + joinDigests(acc.priorDigests) + " " + detail), nil, nil
 			},
 		},
+		{
+			// Same refusal as apply: a rollback's `compose up` against an
+			// unhealthy dependency would leave the proxy stopped.
+			Name:          "preflight_dependencies",
+			FailureReason: ops.ReasonValidation,
+			Run:           s.preflightDependencies(),
+		},
 	}
 	stages = append(stages, s.imageRollbackStages(func() string { return targetRef }, acc)...)
 	stages = append(stages, ops.FlowStage{

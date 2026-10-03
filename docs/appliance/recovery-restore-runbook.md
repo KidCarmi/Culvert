@@ -27,6 +27,23 @@ in the agent audit log. Rolling the image back does NOT roll back state the
 newer build wrote; if the older binary refuses or ignores that state,
 continue with §2.
 
+**Image rollback vs. data: the compatibility window.** An image rollback
+swaps the binary and keeps `/data` as the newer build left it. That is
+sound only while the older binary can read that state:
+
+| Situation | Image rollback alone | Use instead |
+|---|---|---|
+| Rolled back to the release that ran immediately before, in the same window, 1.0.x line (no state-schema migration between v1.0.250 and this build — `upgrade-transition-matrix.md`) | **Measured**: v1.0.250/258/259 boot on this build's state with login, rules and default-deny intact; newer files they do not know are ignored (lifecycle harness C) | — |
+| Rolling back across a release that migrated a versioned schema (upstream schema v2, policy-learning schemas: an older build REFUSES a newer version, fail closed) | not sufficient | §2 restore of the pre-upgrade backup onto the older release; the upstream schema-v2 predecessor has its own `--prepare-downgrade` path |
+| Rolled back after operators changed configuration on the newer build | the changes stay in `/data`; features the older build lacks are silently ignored | §2 if the old release must also have the old configuration |
+| Any rollback older than the supported predecessor floor (`min_upgrade_from`) | unsupported; the dispatch refuses it without break-glass | §2 or §5 |
+
+The agent's own rollback health check reports any `/ready` row that was
+`ok` before the upgrade and is not after as `not_restored=[…]` in the op
+log (report-only); treat a non-empty list as "check the data", not as a
+failed rollback. Rows the older release does not emit at all are not
+counted (it predates them).
+
 ## 2. Restore persistent state (offline, in place)
 
 Prerequisites in separate custody: the backup archive, `CULVERT_BACKUP_PASSPHRASE`,
@@ -97,6 +114,22 @@ Details: `docs/operator/release-management-agent.md` §"Interrupted operations".
 3. Bring the stack up, verify, re-enter excluded credentials (§2).
 4. Re-point clients/PAC at the new address if it changed.
 
+Without `--accept-root-ca-change` the restore is REFUSED, because the new
+install's freshly minted root would be replaced. **Executed** exactly as
+written above (lifecycle harness scenario R,
+`evidence/dr-fresh-volume-REPORT.md`): original install set up with
+default-deny + one allow rule, encrypted backup and `.env` copied off the
+host, BOTH original volumes destroyed, a new install brought up unclaimed
+on fresh volumes, the restore refused without the flag and committed with
+it; the new appliance came back with the SAME root CA (SHA-256 fingerprint
+equal — clients keep trusting it), the original admin login, the rules,
+default-deny, `ssl_inspection: ready`, and real allow/block traffic through
+the proxy. Distinct from §2 (same volume, previous data kept beside it). Not
+exercised: a different IP/hostname for the new appliance (PAC re-point is
+an operator step), and a lost `.env` — without the CA passphrase the
+archived `ca.bundle` cannot be decrypted and inspection does not come back
+(`state-and-key-custody-matrix.md` §4).
+
 ## 6. Failure matrix (what was exercised, where)
 
 | Failure | Expected outcome | Evidence |
@@ -122,6 +155,8 @@ Details: `docs/operator/release-management-agent.md` §"Interrupted operations".
 | Registry unreachable during rollback | rollback from local cache | agent harness F4, `TestRealDocker_LocalFirstRollbackSurvivesRegistryOutage` |
 | Corrupt / unsupported archive or journal | refused before any write; journal never acted on | `restore_test.go`, `TestRecoverRestore_MalformedJournalRefuses` |
 | Archive without `ca.bundle` / without admins | refused unless `--accept-root-ca-change` / refused outright | `TestRestoreCommit_RootCAGuard_*`, `TestRestoreCommit_RefusesLeavingNoAdmin` |
-| Insufficient disk space | restore stage fails before the swap (staging is written first); upgrade pull fails before tag | by construction (stage-before-swap); not injected in this run — BLOCKED row in the readiness report |
+| Insufficient disk space | restore stage fails before the swap (staging is written first); upgrade pull fails before tag, running version + data + CA identity + enforcement unchanged, retry succeeds once space is freed | restore: lifecycle harness G (size-bounded ext4 volume); upgrade: `test/e2e/appliance/upgrade-enospc-qualify.sh` (`evidence/enospc-*`) |
+| Original appliance lost (DR) | new install + archive + escrowed `.env` comes back as the same appliance | lifecycle harness R (`evidence/dr-fresh-volume-*`) |
+| OS/engine maintenance started during an agent operation | `culvert-os-update` refuses (exit 3) while the agent journal holds a record; `--force` overrides | `appliance_os_update_trap_test.go` (`TestOSUpdate_RefusesWhileTheAgentHasAnOperationInFlight`) |
 | Unsupported predecessor / downgrade | dispatch refused 409 | `release_dispatch_test.go` transition gates |
 | Failed health after update | auto-rollback to prior from cache | `appliance-catalog-update-e2e.yml` P5, agent harness F4 |

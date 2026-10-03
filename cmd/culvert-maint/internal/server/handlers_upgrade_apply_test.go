@@ -71,6 +71,9 @@ type applyRig struct {
 	// readyStatuses: the /ready status code while the keyed digest runs
 	// (absent ⇒ 200 unless healthFail/unhealthyDigests).
 	readyStatuses map[string]int
+	// clamUnhealthy makes compose ps list a clamav sidecar whose
+	// healthcheck reports "unhealthy".
+	clamUnhealthy bool
 	// noPriorDigest makes capture_before (before any pull) report an empty
 	// RepoDigests list → no valid rollback target.
 	noPriorDigest bool
@@ -136,6 +139,17 @@ func (r *applyRig) shouldFail(argv []string) bool {
 }
 
 // canned routes stdout by the docker command shape.
+// composePS is the canned `docker compose ps --format json` answer.
+func (r *applyRig) composePS() []byte {
+	if r.stackDown.Load() {
+		return []byte(`[]`)
+	}
+	if r.clamUnhealthy {
+		return []byte(`{"Service":"proxy","State":"running","ID":"abcdef012345"}` + "\n" + `{"Service":"clamav","State":"running","Health":"unhealthy","ID":"c1"}`)
+	}
+	return []byte(`{"Service":"proxy","State":"running","ID":"abcdef012345"}`)
+}
+
 func (r *applyRig) canned(argv []string) []byte {
 	has := func(tok string) bool {
 		for _, a := range argv {
@@ -160,10 +174,7 @@ func (r *applyRig) canned(argv []string) []byte {
 	}
 	switch {
 	case has("ps"):
-		if r.stackDown.Load() {
-			return []byte(`[]`)
-		}
-		return []byte(`{"Service":"proxy","State":"running","ID":"abcdef012345"}`)
+		return r.composePS()
 	case contains("{{json .Image}}"):
 		return []byte(`"sha256:` + cfg + `"`)
 	case has("manifest"):
