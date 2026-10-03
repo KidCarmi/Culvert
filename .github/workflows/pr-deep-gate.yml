@@ -652,6 +652,8 @@ jobs:
             ${{ runner.temp }}/appliance-enospc/REPORT.md
             ${{ runner.temp }}/appliance-enospc/checks.jsonl
             ${{ runner.temp }}/appliance-enospc/op-full-disk.log
+            ${{ runner.temp }}/appliance-enospc/op-retry.log
+            ${{ runner.temp }}/appliance-enospc/diagnose.log
           retention-days: 14
 
   # ─── Terraform guardrails skeleton — fmt + validate (declarations-only) ──────

@@ -185,10 +185,26 @@ else
 fi
 [[ "$(running_id)" == "$PRED_ID" ]] && check E1 running-unchanged pass "running image $PRED_ID" || check E1 running-unchanged fail "running=$(running_id) want=$PRED_ID"
 [[ "$(IN docker image inspect -f '{{.Id}}' "$PINNED")" == "$PRED_ID" ]] && check E1 pinned-tag-unchanged pass "$PINNED → $PRED_ID" || check E1 pinned-tag-unchanged fail "$PINNED moved"
-v="$(health_version 2>/dev/null || echo unreachable)"; [[ "$v" == "$PRED_VER" ]] && check E1 health-unchanged pass "/health 200 version=$v" || check E1 health-unchanged fail "version=$v want=$PRED_VER"
-c="$(api POST /api/auth/login '{"user":"enospcadmin","pass":"Enospc-Qual-2026!x"}' | tail -n1)"; s="$(state_sum)"
+# diagnose: what the stack looks like when a probe fails (container state,
+# restarts, OOM, recent logs of the proxy and of the bounded host's dockerd,
+# free space). Evidence only — never changes the verdict.
+diagnose(){ local tag="$1"; {
+    echo "== $tag $(date -u +%FT%TZ)"; df -k "$MNT" | tail -1
+    IN docker ps -a --format '{{.Names}} {{.Status}}' 2>&1
+    IN docker inspect -f 'status={{.State.Status}} restarting={{.State.Restarting}} restarts={{.RestartCount}} oom={{.State.OOMKilled}} exit={{.State.ExitCode}} err={{.State.Error}} started={{.State.StartedAt}}' culvert 2>&1
+    echo "-- proxy log"; IN docker logs --tail 40 culvert 2>&1 | cut -c1-300
+    echo "-- bounded dockerd log"; docker logs --tail 40 "$DIND" 2>&1 | cut -c1-300
+  } >> "$EVID/diagnose.log" 2>&1 || true; }
+v="$(health_version 2>/dev/null || echo unreachable)"
+if [[ "$v" == "$PRED_VER" ]]; then check E1 health-unchanged pass "/health 200 version=$v"
+else
+  check E1 health-unchanged fail "version=$v want=$PRED_VER (see diagnose.log)"; diagnose E1-health-failed
+  back=none; for i in $(seq 1 45); do curl -fsS -m 3 http://127.0.0.1:18080/health >/dev/null 2>&1 && { back="${i}x2s"; break; }; sleep 2; done
+  check E1 health-recovers-by-itself "$([[ $back == none ]] && echo fail || echo pass)" "proxy answered again after $back (still on the full disk)"; diagnose E1-after-wait
+fi
+c="$(api POST /api/auth/login '{"user":"enospcadmin","pass":"Enospc-Qual-2026!x"}' | tail -n1 || true)"; s="$(state_sum || true)"
 [[ "$c" == 200 && "$s" == "$STATE0" ]] && check E1 state-preserved pass "admin login http $c; ui_users.json+ca.bundle digest $s unchanged" || check E1 state-preserved fail "login http $c state=$s want=$STATE0"
-fp="$(ca_fp)"; [[ "$fp" == "$FP0" ]] && check E1 ca-identity-unchanged pass "root CA sha256 $fp" || check E1 ca-identity-unchanged fail "fp=$fp want=$FP0"
+fp="$(ca_fp || true)"; [[ "$fp" == "$FP0" ]] && check E1 ca-identity-unchanged pass "root CA sha256 $fp" || check E1 ca-identity-unchanged fail "fp=$fp want=$FP0"
 assert_enforcement E1
 ag http://unix/v1/status > "$EVID/status-after-enospc.json" 2>&1 || true
 check E1 agent-status pass "$(python3 -c 'import json,sys;d=json.load(open(sys.argv[1]));print("attention_required=%s interrupted=%d"%(d.get("attention_required"),len(d.get("interrupted_operations") or [])))' "$EVID/status-after-enospc.json" 2>/dev/null || echo unreadable)"
@@ -203,9 +219,9 @@ ag "http://unix/v1/operations/$OP2/logs" > "$EVID/op-retry.log" 2>&1 || true
 CUR_ID="$(IN docker image inspect -f '{{.Id}}' "$CUR_REF" 2>/dev/null || echo none)"
 [[ "$(running_id)" == "$CUR_ID" && "$CUR_ID" != none ]] && check E2 running-is-target pass "running $CUR_ID ($CUR_REF)" || check E2 running-is-target fail "running=$(running_id) want=$CUR_ID"
 for _ in $(seq 1 30); do curl -fsS -m 3 http://127.0.0.1:18080/health >/dev/null 2>&1 && break; sleep 2; done
-c="$(api POST /api/auth/login '{"user":"enospcadmin","pass":"Enospc-Qual-2026!x"}' | tail -n1)"
+c="$(api POST /api/auth/login '{"user":"enospcadmin","pass":"Enospc-Qual-2026!x"}' | tail -n1 || true)"
 [[ "$c" == 200 ]] && check E2 state-preserved pass "admin login http $c on $(health_version 2>/dev/null)" || check E2 state-preserved fail "http $c"
-fp="$(ca_fp)"; [[ "$fp" == "$FP0" ]] && check E2 ca-identity-preserved pass "root CA sha256 $fp" || check E2 ca-identity-preserved fail "fp=$fp want=$FP0"
+fp="$(ca_fp || true)"; [[ "$fp" == "$FP0" ]] && check E2 ca-identity-preserved pass "root CA sha256 $fp" || check E2 ca-identity-preserved fail "fp=$fp want=$FP0"
 assert_enforcement E2
 gate="$(grep -E -m2 'baseline:|health_gate' "$EVID/op-retry.log" | tr '\t\n' '  ' | cut -c1-400)"
 grep -q 'baseline: ' "$EVID/op-retry.log" && check E2 agent-ready-gate pass "$gate" || check E2 agent-ready-gate fail "no /ready baseline in the op log: $gate"
@@ -223,4 +239,5 @@ for line in open(sys.argv[1]):
     d=json.loads(line); print(f"| {d['scenario']} | {d['check']} | **{d['result'].upper()}** | {d['detail'].replace('|','/').replace(chr(10),' ')[:260]} |")
 PY
   echo; echo "Failures: $FAILS"; } > "$MD"
+[[ -s "$EVID/diagnose.log" ]] && { log "diagnostics:"; cat "$EVID/diagnose.log" >&2; }
 log "evidence: $MD ($FAILS failure(s))"; exit $(( FAILS > 0 ))
