@@ -260,19 +260,51 @@ if [[ "$SCENARIO" == midwrite ]]; then
     check W known-failure-reproduced survived "no SIGBUS; $st; /health version=$v; the write then reported: ${after}"
   fi
   # Recovery procedure (docs/appliance/readiness-report.md F-DISK-1): free
-  # space on the data filesystem, then bring the stack back.
+  # space on the data filesystem, then bring the stack back. The FIRST runner
+  # run of this scenario (Deep 37125042106) found that `compose up -d` alone
+  # left the proxy down: dockerd's restart attempt during the full disk failed
+  # to save the container's state ("restartmanger wait error"). So the
+  # procedure is ESCALATED in order and the run records which step brought the
+  # proxy back — that, not an assumption, is what the runbook may document.
+  # Every command's output is kept; nothing here may abort the run before the
+  # report is written.
   rm -f "$MNT/.qual-fill"
-  IN sh -c 'cd /srv/culvert && docker compose up -d' >/dev/null 2>&1 || true
-  for _ in $(seq 1 60); do curl -fsS -m 3 http://127.0.0.1:18080/health >/dev/null 2>&1 && break; sleep 2; done
+  up_within(){ local i; for i in $(seq 1 "$1"); do curl -fsS -m 3 http://127.0.0.1:18080/health >/dev/null 2>&1 && return 0; sleep 2; done; return 1; }
+  rstep(){ local label="$1"; shift
+    { echo "== recovery step: $label $(date -u +%FT%TZ)"; "$@" 2>&1 | tail -20; } >> "$EVID/diagnose.log" 2>&1 || true; }
+  recovered=""
+  rstep "compose up -d" IN sh -c 'cd /srv/culvert && docker compose up -d'
+  if up_within 60; then recovered="1: docker compose up -d"; else
+    diagnose W-after-compose-up
+    rstep "compose up -d --force-recreate proxy" IN sh -c 'cd /srv/culvert && docker compose up -d --force-recreate proxy'
+    if up_within 60; then recovered="2: docker compose up -d --force-recreate proxy"; else
+      diagnose W-after-recreate
+      rstep "restart dockerd" docker restart "$DIND"
+      for _ in $(seq 1 60); do IN docker info >/dev/null 2>&1 && break; sleep 1; done
+      rstep "compose up -d after dockerd restart" IN sh -c 'cd /srv/culvert && docker compose up -d'
+      if up_within 60; then recovered="3: restart dockerd, then docker compose up -d"; else diagnose W-after-dockerd-restart; fi
+    fi
+  fi
+  if [[ -z "$recovered" ]]; then
+    check W recovered-serving fail "proxy not serving after every escalation step (compose up; force-recreate; dockerd restart) — see diagnose.log"
+    write_report_and_exit
+  fi
   v="$(health_version 2>/dev/null || echo unreachable)"
-  [[ "$v" == "$PRED_VER" ]] && check W recovered-serving pass "/health 200 version=$v after freeing space + compose up" || check W recovered-serving fail "version=$v"
+  [[ "$v" == "$PRED_VER" ]] && check W recovered-serving pass "/health 200 version=$v; recovered at step $recovered" || check W recovered-serving fail "version=$v after step $recovered"
+  [[ "$recovered" == 1:* ]] && check W recovery-step-1-sufficient pass "free space + docker compose up -d" \
+    || check W recovery-step-1-sufficient known-failure "free space + compose up -d did NOT restore the proxy; needed step $recovered (runbook must say so)"
   c="$(api POST /api/auth/login '{"user":"enospcadmin","pass":"Enospc-Qual-2026!x"}' | tail -n1 || true)"
-  s1="$(state_sum)"
+  s1="$(state_sum || true)"
   [[ "$c" == 200 && "$s1" == "$STATE0" ]] && check W state-intact pass "admin login http $c; ui_users.json+ca.bundle digest $s1 unchanged" || check W state-intact fail "login=$c digest=$s1 want=$STATE0"
   fp="$(ca_fp || true)"; [[ "$fp" == "$FP0" ]] && check W ca-identity-intact pass "root CA sha256 $fp" || check W ca-identity-intact fail "fp=$fp want=$FP0"
-  assert_enforcement W
-  m="$(curl -fsS -m 5 http://127.0.0.1:18080/metrics 2>/dev/null | grep -E '^culvert_catfeeddb_(available|recovered|quarantined_copies) ' | tr '\n' ' ')"
+  assert_enforcement W || true
+  m="$(curl -fsS -m 5 http://127.0.0.1:18080/metrics 2>/dev/null | grep -E '^culvert_catfeeddb_(available|recovered|quarantined_copies) ' | tr '\n' ' ' || true)"
   [[ "$m" == *"culvert_catfeeddb_available 1"* ]] && check W category-store-opens pass "$m" || check W category-store-opens fail "category store not available after recovery: ${m:-no metric}"
+  # A store torn mid-write reopens with only PART of the feed, and a non-empty
+  # store does not trigger the boot-time sync — coverage stays partial until
+  # the next scheduled round. Record what the reopened store reports.
+  fl="$(IN docker logs culvert 2>&1 | grep -oE 'FeedSync: [^"]{0,160}' | tail -3 | tr '\n' ' ' || true)"
+  check W category-coverage-after-recovery info "post-recovery feed log: ${fl:-none}"
   write_report_and_exit
 fi
 
