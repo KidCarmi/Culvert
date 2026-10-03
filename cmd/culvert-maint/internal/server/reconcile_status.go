@@ -101,3 +101,31 @@ func (s *Server) markResolving(opID, resolveOpID string) {
 	}
 	s.resolving[opID] = resolveOpID
 }
+
+// claimReconcile reserves opID for one /v1/reconcile request. It fails when
+// another request holds the claim or a resolve op it launched is still
+// running, returning which (and that op's id). The caller releases the claim
+// when it returns; a resolve it launched has by then installed its own
+// in-flight marker (markResolving runs in the admission hook, inside the
+// request), so the record is never unclaimed while an action is pending.
+func (s *Server) claimReconcile(opID string) (ok bool, busy, resolveOpID string) {
+	s.reconcileMu.Lock()
+	defer s.reconcileMu.Unlock()
+	if rid := s.resolving[opID]; rid != "" {
+		return false, "resolve_in_flight", rid
+	}
+	if s.claimed[opID] {
+		return false, "reconcile_in_progress", ""
+	}
+	if s.claimed == nil {
+		s.claimed = map[string]bool{}
+	}
+	s.claimed[opID] = true
+	return true, "", ""
+}
+
+func (s *Server) releaseReconcile(opID string) {
+	s.reconcileMu.Lock()
+	defer s.reconcileMu.Unlock()
+	delete(s.claimed, opID)
+}

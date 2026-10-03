@@ -23,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -692,8 +693,14 @@ func analyzeCommit(files map[string][]byte, dataDir string, opts restoreOpts) (*
 		a.CurrentCAFingerprint != a.RestoredCAFingerprint
 
 	// Root CA delta (bytes identity; see commitAnalysis).
-	a.CurrentRootCADigest = fileDigestIfPresent(filepath.Join(dataDir, "ca.bundle"))
-	a.RestoredRootCADigest = restoredRootCADigest(files, dataDir, opts.Mode)
+	cur, err := fileDigestIfPresent(filepath.Join(dataDir, "ca.bundle"))
+	if err != nil {
+		return nil, err
+	}
+	a.CurrentRootCADigest = cur
+	if a.RestoredRootCADigest, err = restoredRootCADigest(files, dataDir, opts.Mode); err != nil {
+		return nil, err
+	}
 	a.RootCAChanged = a.CurrentRootCADigest != "" && a.CurrentRootCADigest != a.RestoredRootCADigest
 	a.RootCAGuardWouldBlock = a.RootCAChanged && !opts.AcceptRootCAChange
 
@@ -731,29 +738,37 @@ func analyzeCommit(files map[string][]byte, dataDir string, opts restoreOpts) (*
 	return a, nil
 }
 
-// fileDigestIfPresent returns hex SHA-256 of a file's bytes, or "" when absent
-// or unreadable (callers treat "" as "would not be present").
-func fileDigestIfPresent(path string) string {
+// fileDigestIfPresent returns hex SHA-256 of a file's bytes, or "" when the
+// file does not exist. Any OTHER read failure is returned: an existing
+// ca.bundle the restore cannot read (ownership drift after a manual
+// recovery, a directory in its place) is still a trust root the commit would
+// rename aside, so reading it as "absent" would disarm the root-CA guard and
+// let a full restore replace it without --accept-root-ca-change (Codex P1,
+// PR #1528). The restore refuses before any mutation instead.
+func fileDigestIfPresent(path string) (string, error) {
 	body, err := os.ReadFile(path) // #nosec G304 -- operator-controlled data dir
+	if errors.Is(err, fs.ErrNotExist) {
+		return "", nil
+	}
 	if err != nil {
-		return ""
+		return "", fmt.Errorf("restore: cannot read the current %s to compare root CAs (fix its ownership/permissions and retry): %w", filepath.Base(path), err)
 	}
 	sum := sha256.Sum256(body)
-	return hex.EncodeToString(sum[:])
+	return hex.EncodeToString(sum[:]), nil
 }
 
 // restoredRootCADigest answers "which ca.bundle would be live after the
 // commit?": the tarball's when the mode routes the bundle from the tarball
 // (full / trust-root-only — ABSENT there means REMOVED), else the current one.
-func restoredRootCADigest(files map[string][]byte, dataDir string, mode restoreMode) string {
+func restoredRootCADigest(files map[string][]byte, dataDir string, mode restoreMode) (string, error) {
 	const path = "data/ca.bundle"
 	if mode.fromTarball(path) {
 		body, ok := files[path]
 		if !ok {
-			return ""
+			return "", nil
 		}
 		sum := sha256.Sum256(body)
-		return hex.EncodeToString(sum[:])
+		return hex.EncodeToString(sum[:]), nil
 	}
 	return fileDigestIfPresent(filepath.Join(dataDir, "ca.bundle"))
 }

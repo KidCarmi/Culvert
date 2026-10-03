@@ -629,3 +629,27 @@ func TestRestoreCommit_LeavesLostAndFoundInPlace(t *testing.T) {
 		t.Fatalf("restored content missing: %v", err)
 	}
 }
+
+// An existing ca.bundle the restore cannot read is still a trust root the
+// commit would move aside. Reading it as "absent" disarmed the root-CA guard
+// and let a full restore replace it without --accept-root-ca-change (Codex P1,
+// PR #1528). A directory in its place is unreadable even as root, so the gate
+// does not depend on who runs the tests.
+func TestRestoreCommit_RootCAGuard_UnreadableCurrentRootRefuses(t *testing.T) {
+	src, currentDir, _, _ := makeCommitFixture(t, 0)
+	if err := os.MkdirAll(filepath.Join(currentDir, "ca.bundle"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	_, err := captureStdout(t, func() error {
+		return runRestoreCommit(src, currentDir, "", restoreOpts{Mode: modeFull, AcceptDPReenrollment: true})
+	})
+	if err == nil || !strings.Contains(err.Error(), "cannot read the current ca.bundle") {
+		t.Fatalf("an unreadable current root CA must refuse the commit, got: %v", err)
+	}
+	if fi, serr := os.Stat(filepath.Join(currentDir, "ca.bundle")); serr != nil || !fi.IsDir() {
+		t.Fatal("a refused commit must leave the current ca.bundle untouched")
+	}
+	if _, ok := readBak(t, currentDir); ok {
+		t.Fatal("a refused commit must not create a bak dir")
+	}
+}

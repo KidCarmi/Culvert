@@ -195,6 +195,11 @@ type Server struct {
 	// admitted as a second mutation.
 	reconcileMu sync.Mutex
 	resolving   map[string]string
+	// claimed holds the op_ids a /v1/reconcile request is currently
+	// deciding on (classification, health probe, admission). Checked and set
+	// with resolving under reconcileMu so a concurrent dismiss and resolve
+	// can never both act on one record (Codex P2, PR #1528).
+	claimed map[string]bool
 }
 
 // New constructs a Server. Returns an error if any required option is

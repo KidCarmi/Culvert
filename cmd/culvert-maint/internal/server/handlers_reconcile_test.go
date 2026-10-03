@@ -420,3 +420,36 @@ func TestReconcileResolve_DedupedReplayDoesNotChargeAnAttempt(t *testing.T) {
 	}
 	rig.waitOp(t, body["op_id"].(string))
 }
+
+// A dismiss and a resolve for the same record must never both act: the
+// in-flight marker used to be installed only after classification and
+// admission, so a dismiss arriving in that window retired the record while
+// the resolve went on to re-up or roll back (Codex P2, PR #1528). While one
+// request holds the claim, every other request for that record is refused
+// before it reads anything.
+func TestReconcile_ClaimRefusesAConcurrentRequestForTheSameRecord(t *testing.T) {
+	rig := startApplyRig(t)
+	defer rig.stop()
+	rig.pinnedDigest = digNew
+	rig.localImages = map[string]bool{digNew: true, digOld: true}
+	opID := rig.seedRecord(t, journal.PhaseRestarting)
+	rig.boot(t)
+
+	if ok, _, _ := rig.srv.claimReconcile(opID); !ok {
+		t.Fatal("first claim must succeed")
+	}
+	for _, action := range []string{"dismiss", "resolve"} {
+		code, body := rig.postReconcile(t, opID, map[string]interface{}{"action": action, "acknowledge_tag_hazard": true, "acknowledge_unresolved": true})
+		if code != http.StatusConflict || body["error"] != "reconcile_in_progress" {
+			t.Fatalf("%s during another request's claim: %d %+v", action, code, body)
+		}
+	}
+	if !rig.recordExists(opID) || rig.sawCommand("up") {
+		t.Fatal("a refused request must neither retire the record nor touch Docker")
+	}
+	// CONTROL: once released, the record is actionable again.
+	rig.srv.releaseReconcile(opID)
+	if code, body := rig.postReconcile(t, opID, map[string]interface{}{"action": "resolve"}); code != http.StatusAccepted {
+		t.Fatalf("after release the resolve must be admitted: %d %+v", code, body)
+	}
+}

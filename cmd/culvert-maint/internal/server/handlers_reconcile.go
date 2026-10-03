@@ -83,10 +83,16 @@ func (s *Server) handleReconcile(w http.ResponseWriter, r *http.Request, peer au
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "op_running", "op_id": opID})
 		return
 	}
-	if rid := s.resolveInFlight(opID); rid != "" {
-		writeJSON(w, http.StatusConflict, map[string]string{"error": "resolve_in_flight", "op_id": opID, "resolve_op_id": rid})
+	ok, busy, rid := s.claimReconcile(opID)
+	if !ok {
+		body := map[string]string{"error": busy, "op_id": opID}
+		if rid != "" {
+			body["resolve_op_id"] = rid
+		}
+		writeJSON(w, http.StatusConflict, body)
 		return
 	}
+	defer s.releaseReconcile(opID)
 	switch req.Action {
 	case "dismiss":
 		s.reconcileDismiss(w, peer, rec, req)
