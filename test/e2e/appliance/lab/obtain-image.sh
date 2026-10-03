@@ -9,8 +9,13 @@ set -euo pipefail
 dest="${1:?DEST_DIR}"; mkdir -p "$dest"
 : "${SOURCE_IMAGE_RUN_ID:?}" "${SOURCE_IMAGE_TAR_SHA256:?}" "${GITHUB_REPOSITORY:?}"
 from=""
+# The artifacts API (not `gh run download`) so a source run that is still in
+# progress — its image job long finished — can be used.
 for attempt in 1 2 3; do
-  if gh run download "$SOURCE_IMAGE_RUN_ID" -R "$GITHUB_REPOSITORY" -n deep-gate-image -D "$dest" >&2; then from=source-run; break; fi
+  id="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_IMAGE_RUN_ID/artifacts" \
+        --jq '.artifacts[] | select(.name == "deep-gate-image" and .expired == false) | .id' | head -1)"
+  if [[ -n "$id" ]] && gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$id/zip" > "$dest/source.zip" \
+     && unzip -q -o "$dest/source.zip" -d "$dest"; then rm -f "$dest/source.zip"; from=source-run; break; fi
   echo "source-run download failed (attempt $attempt)" >&2; sleep $((attempt * 5))
 done
 if [[ -z "$from" ]]; then
