@@ -26,7 +26,8 @@
 # Scenarios:
 #   E0  bounded host up; data root + containerd content proven on the loop fs;
 #       PRED running with seeded state through the agent's own compose project
-#   E1  disk filled to QUAL_ENOSPC_LEAVE_KB free; first, with NO upgrade,
+#   E1  boot-time category sync settled (see below), then the
+#       disk filled to QUAL_ENOSPC_LEAVE_KB free; first, with NO upgrade,
 #       the proxy must keep serving for 15 s; then apply PRED → CUR through
 #       POST /v1/upgrades/apply ⇒ REFUSED at preflight_space before any
 #       pull (the agent never fills the disk), the
@@ -186,6 +187,24 @@ diagnose(){ local tag="$1"; {
   } >> "$EVID/diagnose.log" 2>&1 || true; }
 
 # ── E1: apply with the disk full ─────────────────────────────────────────────
+# Wait out the boot-time category-feed sync before filling. On a fresh store
+# it bulk-writes ~2.5M entries into BadgerDB, whose memtable and value log are
+# sparse mmapped files: a disk that fills DURING that write SIGBUSes the proxy
+# (measured on run 37119291924 — `fatal error: fault` in badger's
+# logFile.writeEntry). That is a data-plane finding recorded in the readiness
+# report, not something this harness qualifies; filling mid-sync would turn
+# every E1 probe into a measurement of that race instead of the upgrade path.
+feed_idle=""
+if IN docker logs culvert 2>&1 | grep -q 'CatFeedDB: BadgerDB at'; then
+  for _ in $(seq 1 120); do
+    feed_idle="$(IN docker logs culvert 2>&1 | grep -m1 -oE 'FeedSync: (sync complete[^"]*|download/parse failed|bulk write failed|write REFUSED)' || true)"
+    [[ -n "$feed_idle" ]] && break; sleep 5
+  done
+  if [[ -n "$feed_idle" ]]; then check E1 feed-sync-settled pass "boot-time category sync finished before the fill: ${feed_idle:0:120}"
+  else check E1 feed-sync-settled fail "the boot-time category sync did not finish within 600 s; the fill would race it"; diagnose E1-feed-sync; exit 1; fi
+else
+  check E1 feed-sync-settled pass "no category feed store configured on this stack"
+fi
 need="$(docker image inspect -f '{{.Size}}' "$CUR_IMAGE")"
 avail="$(df -k --output=avail "$MNT" | tail -1 | tr -d ' ')"
 fill_kb=$(( avail - LEAVE_KB )); (( fill_kb > 0 )) || { check E1 fill fail "only ${avail}KiB available"; exit 1; }
@@ -193,7 +212,8 @@ fallocate -l "$((fill_kb * 1024))" "$MNT/.qual-fill"
 check E1 disk-filled pass "free $(df -k --output=avail "$MNT" | tail -1 | tr -d ' ')KiB on the bounded fs; CUR image size ~$((need/1024))KiB (docker image inspect .Size); outer host untouched (fill is a file inside $IMG)"
 # Before any upgrade: does a nearly-full disk ALONE keep the proxy serving?
 # (Separates a data-plane reaction to the full disk from anything the
-# upgrade does.) The proxy keeps writing /data on the same filesystem.
+# upgrade does.) The proxy keeps writing /data on the same filesystem; the
+# category sync has settled above, so no bulk badger write is in flight.
 sleep 15
 v0="$(health_version 2>/dev/null || echo unreachable)"
 if [[ "$v0" == "$PRED_VER" ]]; then check E1 full-disk-alone-proxy-serving pass "/health 200 version=$v0 15 s after the fill, no upgrade attempted"

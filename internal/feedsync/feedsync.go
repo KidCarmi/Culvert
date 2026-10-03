@@ -158,22 +158,49 @@ type Syncer struct {
 	consecutiveFailures atomic.Int64
 
 	// lastFailure is the BOUNDED reason class for the most recent failed
-	// round ("download", "write", "" when clean) — never a raw error string,
+	// round ("download", "disk_space", "write", "" when clean) — never a raw error string,
 	// which would carry the feed URL into any surface that consumes it.
 	lastFailure atomic.Value // stores string
 
 	// loop tracks the goroutine Start launches, so Wait can join it after the
 	// caller cancels Start's context.
 	loop sync.WaitGroup
+
+	// freeBytes reports the free space on the filesystem holding the store,
+	// or nil when unknown. See SetFreeSpaceProbe.
+	freeBytes func() (uint64, error)
 }
 
 // Bounded reason classes for a failed round. The verbose cause goes to the log.
 // "download" covers the whole fetch-and-parse stage (downloadAndParse), which
 // is a single failure mode for the operator: the tarball did not arrive intact.
 const (
-	failDownload = "download"
-	failWrite    = "write"
+	failDownload  = "download"
+	failDiskSpace = "disk_space"
+	failWrite     = "write"
 )
+
+// Free space a bulk write must find before it starts. BadgerDB backs its
+// memtable and value log with SPARSELY-truncated mmapped files
+// (ristretto z.OpenMmapFile), so a write into a page the filesystem cannot
+// allocate is not an error return but a SIGBUS that kills the whole gateway —
+// measured on a full disk mid-sync (`logFile.writeEntry` → `memclr`, fatal
+// fault). Refusing to START the write below a floor turns the common case — a
+// volume that was already nearly full when the 24h round came due — into a
+// counted, bounded failure while the last-good store keeps serving. It does
+// NOT cover a disk that fills DURING the write; nothing above badger can.
+const (
+	syncFreeFloor     = 512 << 20 // fixed headroom: memtables, flush, compaction
+	syncBytesPerEntry = 256       // per-entry allowance across WAL, vlog and SST
+)
+
+// syncSpaceNeeded is the free space a write of n entries must find.
+func syncSpaceNeeded(n int) uint64 {
+	if n <= 0 {
+		return syncFreeFloor
+	}
+	return syncFreeFloor + uint64(n)*syncBytesPerEntry // #nosec G115 -- n > 0 checked above
+}
 
 // Backoff bounds for a failed UT1 round. The steady-state interval is 24h, so
 // a bare ticker meant one transient fetch error froze category coverage for a
@@ -290,6 +317,27 @@ func (fs *Syncer) schedulerConfig() feedsched.Config {
 	}
 }
 
+// SetFreeSpaceProbe installs the free-space probe for the store's filesystem.
+// Without one (or when it errors) the write proceeds as before: an unknown
+// answer must not stop category coverage on a platform that cannot measure.
+func (fs *Syncer) SetFreeSpaceProbe(probe func() (uint64, error)) { fs.freeBytes = probe }
+
+// spaceRefusal reports why a write of n entries must not start, or "".
+func (fs *Syncer) spaceRefusal(n int) string {
+	if fs.freeBytes == nil {
+		return ""
+	}
+	free, err := fs.freeBytes()
+	if err != nil {
+		return ""
+	}
+	need := syncSpaceNeeded(n)
+	if free >= need {
+		return ""
+	}
+	return fmt.Sprintf("%d MiB free, a %d-entry write needs about %d MiB", free>>20, n, need>>20)
+}
+
 // Sync downloads the UT1 tarball, parses all mapped categories, and performs a
 // bulk write into CommunityDB. The previous DB contents remain readable during
 // the import; BadgerDB's WriteBatch overwrites keys as they arrive.
@@ -306,6 +354,11 @@ func (fs *Syncer) syncRound() bool {
 	if err != nil {
 		fs.noteFailure(failDownload)
 		obs.Printf("FeedSync: download/parse failed: %v", err)
+		return false
+	}
+	if why := fs.spaceRefusal(len(entries)); why != "" {
+		fs.noteFailure(failDiskSpace)
+		obs.Printf("FeedSync: write REFUSED, not enough free space (%s); the previous category data keeps serving", why)
 		return false
 	}
 	obs.Printf("FeedSync: parsed %d domain entries, writing to BadgerDB…", len(entries))

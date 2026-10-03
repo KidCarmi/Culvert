@@ -50,6 +50,17 @@ if [[ "$(id -u)" == 0 && -r "$STACK_DIR/.env" ]]; then
   setup_token="$(sed -n 's/^CULVERT_SETUP_TOKEN=//p' "$STACK_DIR/.env" | head -n1)"
 fi
 
+# Root filesystem: Docker's image store, the /data volume and the backups
+# volume share it, and a BadgerDB write that hits a full disk kills the proxy
+# (SIGBUS — readiness report F-DISK-1). Warn at 80 % used or under 2 GiB free.
+disk="unknown"; disk_low="no"
+if read -r disk_total disk_avail disk_pct < <(df -Pk / 2>/dev/null | awk 'NR==2{gsub("%","",$5); print $2, $4, $5}') && [[ "$disk_avail" =~ ^[0-9]+$ ]]; then
+  disk="${disk_pct}% used, $(( disk_avail / 1024 )) MiB free of $(( disk_total / 1024 )) MiB"
+  if (( disk_pct >= 80 || disk_avail < 2097152 )); then
+    disk_low="yes"; disk="LOW: $disk — free space before upgrades; a full disk stops the proxy"
+  fi
+fi
+
 health_code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 http://127.0.0.1:8080/health 2>/dev/null || true)"; health_code="${health_code:-000}"
 ready_json="$(curl -s --max-time 3 http://127.0.0.1:8080/ready 2>/dev/null || true)"
 ready_code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 http://127.0.0.1:8080/ready 2>/dev/null || true)"; ready_code="${ready_code:-000}"
@@ -89,12 +100,12 @@ fi
 
 case "$MODE" in
   --json)
-    python3 - "$ver" "$addrs" "$prov" "$services" "$needs_setup" "$policy_ok" "$posture_ok" "$ca_ok" "$ready_code" "$state" "$agent" "$sudo_policy" "$candidate" <<'PY'
+    python3 - "$ver" "$addrs" "$prov" "$services" "$needs_setup" "$policy_ok" "$posture_ok" "$ca_ok" "$ready_code" "$state" "$agent" "$sudo_policy" "$candidate" "$disk" "$disk_low" <<'PY'
 import json,sys
 a=sys.argv[1:]
 print(json.dumps({"appliance_version":a[0],"addresses":a[1].split(),"provisioning":a[2],"services_running":a[3]=="yes",
   "needs_setup":a[4],"policy_loaded":a[5],"policy_posture":a[6],"ca":a[7],"ready_http":a[8],"state":a[9],
-  "maintenance_agent":a[10],"sudo_policy":a[11],"candidate":a[12]}))
+  "maintenance_agent":a[10],"sudo_policy":a[11],"candidate":a[12],"root_disk":a[13],"root_disk_low":a[14]=="yes"}))
 PY
     ;;
   --brief)
@@ -104,6 +115,7 @@ PY
     printf '  Management:  https://%s:9090   Proxy: http://%s:8080\n' "${primary:-<no address yet>}" "${primary:-<no address yet>}"
     printf '  Console:     login as "culvert"; run  culvert-status  /  culvert-net  /  culvert-os-update\n'
     [[ "$agent" == installed || "$agent" == unknown ]] || printf '  Agent:       %s\n' "$agent"
+    [[ "$disk_low" == yes ]] && printf '  Disk:        %s\n' "$disk"
     ;;
   *)
     printf 'Culvert appliance %s\n' "$ver"
@@ -117,6 +129,7 @@ PY
     printf '  Ready to enforce:   %s\n' "$enforce"
     printf '  Maintenance agent:  %s\n' "$agent"
     printf '  Console sudo:       %s\n' "$sudo_policy"
+    printf '  Root disk:          %s\n' "$disk"
     printf '  STATE:              %s\n' "$state"
     printf '  Management UI:      https://%s:9090\n' "${primary:-<address>}"
     if [[ "$needs_setup" == yes ]]; then

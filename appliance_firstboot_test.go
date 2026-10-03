@@ -20,6 +20,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -590,6 +591,41 @@ func TestApplianceStatus_ReportsAgentSudoAndToken(t *testing.T) {
 	out, _ = c.CombinedOutput()
 	if !strings.Contains(string(out), `"maintenance_agent": "NOT installed (unit_absent)`) || !strings.Contains(string(out), `"sudo_policy": "passwordless`) {
 		t.Errorf("--json lacks the new fields:\n%s", out)
+	}
+}
+
+// A full root filesystem stops the proxy (BadgerDB writes SIGBUS — readiness
+// report F-DISK-1), so the console summary must say when the disk is low, and
+// must NOT cry wolf on a healthy one (the control).
+func TestApplianceStatus_ReportsRootDiskPressure(t *testing.T) {
+	abs, _ := filepath.Abs(statusScript)
+	run := func(availKB, pct int, args ...string) string {
+		t.Helper()
+		h := newFBHarness(t)
+		h.writeExec(filepath.Join(h.stubs, "df"), fmt.Sprintf(
+			"#!/usr/bin/env bash\necho 'Filesystem 1024-blocks Used Available Capacity Mounted on'\necho '/dev/sda1 41943040 0 %d %d%%%% /'\n", availKB, pct))
+		// #nosec G204 -- program is the literal "bash"; abs is the checked-in script's path.
+		c := exec.CommandContext(t.Context(), "bash", append([]string{abs}, args...)...)
+		c.Env = h.env()
+		out, _ := c.CombinedOutput()
+		return string(out)
+	}
+	low := run(1<<20, 97)
+	if !strings.Contains(low, "Root disk:          LOW: 97% used, 1024 MiB free") {
+		t.Fatalf("a 97%%-full disk is not reported as low:\n%s", low)
+	}
+	if b := run(1<<20, 97, "--brief"); !strings.Contains(b, "Disk:        LOW:") {
+		t.Fatalf("--brief must surface a low disk:\n%s", b)
+	}
+	if j := run(1<<20, 97, "--json"); !strings.Contains(j, `"root_disk_low": true`) {
+		t.Fatalf("--json must carry root_disk_low:\n%s", j)
+	}
+	ok := run(30<<20, 25)
+	if strings.Contains(ok, "LOW") || !strings.Contains(ok, "Root disk:          25% used, 30720 MiB free") {
+		t.Fatalf("a healthy disk is misreported:\n%s", ok)
+	}
+	if b := run(30<<20, 25, "--brief"); strings.Contains(b, "Disk:") {
+		t.Fatalf("--brief must stay quiet on a healthy disk:\n%s", b)
 	}
 }
 
