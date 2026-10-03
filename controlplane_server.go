@@ -876,16 +876,34 @@ func cpServerOption(addr, certFile, keyFile, caFile string) (grpc.ServerOption, 
 	case certFile != "" && keyFile != "":
 		creds, err := buildServerTLS(certFile, keyFile, caFile)
 		if err != nil {
-			return nil, fmt.Errorf("gRPC TLS: %w", err)
+			// CHAOS-71: tagged so classifyCPGRPCBindError can name this class
+			// without matching on the crypto/tls error text. errCPGRPCTLSMaterial
+			// is what separates a certificate-rotation window (self-heals on the
+			// next attempt, operator does nothing) from a socket fault.
+			return nil, fmt.Errorf("gRPC TLS: %w: %w", errCPGRPCTLSMaterial, err)
 		}
-		logger.Printf("ControlPlane: gRPC %s (mTLS)", strings.ReplaceAll(addr, "\n", ""))
 		return grpc.Creds(creds), nil
 	case clusterInsecure:
-		logWarnf("ControlPlane: gRPC %s (insecure — all cluster data unencrypted!)", strings.ReplaceAll(addr, "\n", ""))
 		return grpc.EmptyServerOption{}, nil
 	default:
 		return nil, fmt.Errorf("TLS certificates required for Control Plane (use --cluster-insecure to override for development)")
 	}
+}
+
+// errCPGRPCTLSMaterial tags a failure to load the operator-supplied Control
+// Plane mTLS cert/key pair. CHAOS-71.
+var errCPGRPCTLSMaterial = errors.New("control plane grpc tls material")
+
+// cpGRPCTransportLabel names the transport an already-bound CP listener is
+// serving, for the post-bind announcement. CHAOS-71 moved the announcement
+// here from cpServerOption, which logged it BEFORE lc.Listen — so a bind that
+// failed had already told the operator the listener was up (§33's rule 6: the
+// success log sits strictly downstream of the evidence).
+func cpGRPCTransportLabel(certFile, keyFile string) string {
+	if certFile != "" && keyFile != "" {
+		return "mTLS"
+	}
+	return "insecure"
 }
 
 func StartControlPlaneGRPC(addr, certFile, keyFile, caFile string) error {
@@ -923,10 +941,32 @@ func StartControlPlaneGRPC(addr, certFile, keyFile, caFile string) error {
 	}
 	clusterRole.grpcSrv = srv
 
+	// Announced only now the socket exists. CHAOS-71: this line used to be
+	// emitted by cpServerOption, BEFORE lc.Listen, so a boot that died on the
+	// bind had already claimed a listener that never existed — the same defect
+	// §33 fixed for the admin UI's "UIHTTP:" line.
+	if transport := cpGRPCTransportLabel(certFile, keyFile); transport == "insecure" {
+		logWarnf("ControlPlane: gRPC %s (insecure — all cluster data unencrypted!)", strings.ReplaceAll(addr, "\n", ""))
+	} else {
+		logger.Printf("ControlPlane: gRPC %s (%s)", strings.ReplaceAll(addr, "\n", ""), transport)
+	}
+
 	go func() {
-		if err := srv.Serve(ln); err != nil {
+		err := srv.Serve(ln)
+		// CHAOS-71: a Serve that ENDS leaves clusterRole.role == "control-plane"
+		// with no listener, so every surface would keep reporting a healthy
+		// Control Plane — the PX-18 class. Nothing rebinds here (see the
+		// cluster_grpc_bind.go header: owning the full bind→serve→rebind
+		// lifecycle would restructure clusterRole.grpcSrv and
+		// StopControlPlaneGRPC, which CHAOS-56's shutdown gates pin), but the
+		// state is recorded so the surfaces stop lying. ErrServerStopped is an
+		// ordinary shutdown and is NOT a fault.
+		if err != nil && !errors.Is(err, grpc.ErrServerStopped) {
 			logger.Printf("ControlPlane gRPC error: %v", err)
+			noteCPGRPCServeEnded(classifyCPGRPCBindError(err))
+			return
 		}
+		noteCPGRPCStopped()
 	}()
 	return nil
 }

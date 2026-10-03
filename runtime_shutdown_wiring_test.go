@@ -35,6 +35,9 @@ var canonicalEarlyShutdownHooks = []struct {
 	order int
 }{
 	{"ha-stop", shutdownOrderHAStop},
+	// CHAOS-71: the CP gRPC rebind supervisor stops BEFORE the server it might
+	// otherwise publish behind the stop's back.
+	{"cp-grpc-bind-supervisor-stop", shutdownOrderCPGRPCBindSupervisor},
 	{"control-plane-grpc-stop", shutdownOrderControlPlaneGRPCStop},
 	{"cdr-client-shutdown", shutdownOrderCDRClientShutdown},
 	{"app-lifecycle-cancel", shutdownOrderAppLifecycleCancel},

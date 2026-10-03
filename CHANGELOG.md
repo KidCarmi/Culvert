@@ -7,6 +7,68 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ## [Unreleased]
 
+### Fixed
+
+- A **Control Plane gRPC bind failure terminated the whole appliance**
+  (CHAOS-71). `startControlPlaneWithHAResume` had one error branch —
+  `logFatalf`, i.e. `os.Exit(1)` — reached from `initCluster`, which runs
+  **before** the admin UI and the proxy data plane. So a management-plane
+  listener fault killed the primary data plane: no proxy, no admin UI, no
+  health endpoint, and under `restart: unless-stopped` an unattended crash
+  loop recoverable only with shell access.
+
+  Three routine triggers, all reproduced against the real binary: an occupied
+  gRPC port (`gRPC listen: ... address already in use` → exit 1, `proxy
+  http_code=000`, admin UI `000`); an mTLS cert/key pair momentarily
+  unreadable, because `buildServerTLS` loads it at call time — so an ordinary
+  certbot / cert-manager / Docker-secret rotation was a fatal boot; and
+  `-cp-grpc-addr` colliding with the **proxy** port, which the port-collision
+  validator could not see because it compared only proxy/UI/SOCKS5 to each
+  other — the Control Plane bound first and the *proxy* died, on a port
+  Culvert itself had just taken.
+
+  Process death is not "fail closed": it picks no posture and delegates the
+  choice to the topology (an explicit-proxy fleet loses all egress; a PAC/WPAD
+  or transparent deployment goes **unfiltered**). The listener now degrades
+  and a supervisor retries the bind — 1s doubling to 30s with ±20% jitter,
+  interruptible, rate-bounded and never count-bounded, with the certificate
+  re-read on every attempt so a rotation window self-heals with no restart.
+  A collision with Culvert's own listeners is now refused before boot with a
+  message naming both.
+
+  New surfaces, all on the **proxy** port because the Control Plane's own gRPC
+  endpoint cannot report that it is unreachable: a `control_plane_grpc`
+  operator-contract row with a per-reason-class remedy, a **report-only**
+  `/ready control_plane_grpc` row (gating it would eject a healthy gateway
+  from the load balancer over its cluster-configuration plane; `?strict=1`
+  opts in), a `/health control_plane_grpc` posture field, and
+  `culvert_cp_grpc_{up,unavailable,bind_failures_total,binds_total,bind_backoff_seconds}`.
+  Runbook: `docs/operator/control-plane-listener-recovery.md`.
+
+  Enrolled Data Planes are unaffected by the change — they keep enforcing
+  last-good policy during a Control Plane outage, which is what they already
+  did, and what process death also produced.
+
+- **Eighteen production alert events could not be subscribed to from the admin
+  UI** (SEC-ALERTSUB-1), so no GUI-managed webhook could ever receive them.
+  The alert store matches event names exactly (or the wildcard `"*"`), the
+  webhook modal builds its subscription list only from its checkboxes, and
+  there is no `"*"` option — so an operator who ticked **every** box still
+  received none of: `ha_manual_failover_required` (the one event whose purpose
+  is to say a human must intervene), `ha_self_fenced`, `ha_resume_unfenced`,
+  `ha_lease_reacquired`, `disk_critical`, `dns_failure`, `scan_timeout`,
+  `scan_skipped`, `scan_svc_down`, `yara_degraded`, `cdr_unavailable`,
+  `pac_profile_degraded`, the five `saas_feed_*` events, or
+  `admin_ui_unavailable`.
+
+  Nothing errored and nothing was logged — the dispatch fanned out to zero
+  hooks — so the alerting plane was silent in exactly the way a healthy one
+  is. All nineteen (the eighteen plus the new
+  `controlplane_grpc_unavailable`) are now subscribable, and
+  `TestWall_EveryFiredAlertEventIsSubscribable` fails the build if a new alert
+  event ships without its checkbox. Existing webhooks are unchanged; subscribe
+  to the new events in **Alerts → Webhooks**.
+
 ### Security
 
 - Node-local key material was written with `os.WriteFile` on a predictable

@@ -19719,6 +19719,34 @@ function resetBlockPage() {
              timer so it does not depend on /healthz being scraped. Absent entirely
              on the default disabled-MCP deployment. -->
         <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="mcp_gateway_down"> MCP gateway not serving (enabled but down)</label>
+        <!-- SEC-ALERTSUB-1 — the 18 events below were FIRED by production code and
+             listed NOWHERE here, so no GUI-managed webhook could subscribe to them.
+             The store matches event names EXACTLY (or "*"), and the modal builds its
+             events array only from the checked boxes above — with no "*" option — so
+             an operator who ticked every box still received none of these. Among them
+             were `ha_manual_failover_required` (the one event that says a human must
+             intervene), `disk_critical`, and the entire scan plane. The gap is now
+             walled by TestWall_EveryFiredAlertEventIsSubscribable; add the checkbox in
+             the SAME commit as any new fireAlert/deferStartupAlert/alerts.Fire event. -->
+        <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="controlplane_grpc_unavailable"> Control Plane gRPC listener not serving (Data Planes cannot sync config)</label>
+        <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="admin_ui_unavailable"> Admin UI listener not serving (traffic unaffected)</label>
+        <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="ha_manual_failover_required"> HA requires manual failover (no automatic promotion possible)</label>
+        <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="ha_self_fenced"> HA leader self-fenced (lost its fencing lease)</label>
+        <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="ha_resume_unfenced"> HA leader resumed without a fence (read-only, split-brain risk)</label>
+        <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="ha_lease_reacquired"> HA fencing lease re-acquired after an outage</label>
+        <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="disk_critical"> Disk space critical</label>
+        <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="dns_failure"> Destination DNS resolution failing</label>
+        <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="scan_timeout"> Body scan timed out (request failed closed)</label>
+        <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="scan_skipped"> Body scan skipped (object over the scan size limit)</label>
+        <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="scan_svc_down"> Remote scan sidecar unreachable</label>
+        <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="yara_degraded"> YARA scanning degraded (in-flight cap reached)</label>
+        <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="cdr_unavailable"> CDR (Content Disarm) service unavailable</label>
+        <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="pac_profile_degraded"> PAC profile degraded</label>
+        <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="saas_feed_stale"> Signed SaaS URL-category feed stale</label>
+        <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="saas_feed_refresh_failing"> Signed SaaS URL-category feed refresh failing</label>
+        <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="saas_feed_recovery_degraded"> Signed SaaS URL-category feed recovery degraded</label>
+        <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="saas_feed_missing_authority"> Signed SaaS URL-category feed missing its signing authority</label>
+        <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="saas_feed_recovered"> Signed SaaS URL-category feed recovered</label>
       </div>
     </div>
     <div class="form-group">
