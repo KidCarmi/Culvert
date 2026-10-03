@@ -261,7 +261,11 @@ jobs:
         run: |
           BASE_REF="${GITHUB_BASE_REF:-main}"
           git fetch --no-tags origin "$BASE_REF"
-          golangci-lint run --timeout=5m --new-from-rev "origin/$BASE_REF"
+          # The suppression audit's first successful run took 4m26s; both
+          # follow-up attempts exhausted 5m without completing analysis.
+          # Allow bounded cold analysis inside the existing 12m job budget.
+          # Findings and scanner errors still fail; no rule/filter changes.
+          golangci-lint run --timeout=7m --new-from-rev "origin/$BASE_REF"
 
   # ─── 3. Race + coverage (sharded, stage 5C) ────────────────────────────────
   # THE race + coverage execution for PRs, on the shared engine the QA gate

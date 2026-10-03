@@ -162,5 +162,8 @@ CI cost: one extra unfiltered gosec pass per module in Fast (nightly replaces it
 old report pass); small metadata tests; real tiny ELF fixtures take ~1 second
 locally. Image inspection reuses existing built/qualified artifacts; one cached
 Trivy report pass per PR platform and two per candidate, no rebuild, platform or
-service added. Reports retained 30 days. Existing blocking severity/unfixed
+service added. Fast lint's bounded analysis budget is 7m within its unchanged
+12m job limit: the first audit run passed in 4m26s, and two follow-up attempts
+timed out at 5m. This adds at most two minutes of analysis time; no lint rule,
+filter, verdict or error handling changes. Reports retained 30 days. Existing blocking severity/unfixed
 policies and vulnerability checks are preserved. Run times depend on DB/cache.
