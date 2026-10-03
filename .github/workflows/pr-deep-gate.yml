@@ -642,6 +642,19 @@ jobs:
           sudo -E env "PATH=$PATH" "HOME=$HOME" "GOCACHE=$(go env GOCACHE)" "GOMODCACHE=$(go env GOMODCACHE)" "GOFLAGS=-mod=mod" \
             CUR_IMAGE=culvert:ci-smoke PRED_IMAGE=ghcr.io/kidcarmi/culvert:v1.0.259 \
             EVID="$RUNNER_TEMP/appliance-enospc" ./test/e2e/appliance/upgrade-enospc-qualify.sh
+      - name: "F-DISK-1 (ADVISORY, known open finding): disk exhausted during the boot-time category write, then recovery + integrity"
+        # Not a merge gate: F-DISK-1 is an OPEN finding (a disk that fills
+        # during a BadgerDB write SIGBUSes the proxy). This step keeps it
+        # reproducible on every appliance change and retains the evidence: it
+        # records whether the crash reproduces, then runs the documented
+        # recovery and the integrity checks that must pass to close it. Exit 2
+        # = inconclusive (no write observed), never a pass.
+        if: always()
+        continue-on-error: true
+        run: |
+          sudo -E env "PATH=$PATH" "HOME=$HOME" "GOCACHE=$(go env GOCACHE)" "GOMODCACHE=$(go env GOMODCACHE)" "GOFLAGS=-mod=mod" \
+            QUAL_ENOSPC_SCENARIO=midwrite CUR_IMAGE=culvert:ci-smoke PRED_IMAGE=culvert:ci-smoke \
+            EVID="$RUNNER_TEMP/appliance-fdisk1" ./test/e2e/appliance/upgrade-enospc-qualify.sh
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
@@ -654,6 +667,9 @@ jobs:
             ${{ runner.temp }}/appliance-enospc/op-full-disk.log
             ${{ runner.temp }}/appliance-enospc/op-retry.log
             ${{ runner.temp }}/appliance-enospc/diagnose.log
+            ${{ runner.temp }}/appliance-fdisk1/REPORT.md
+            ${{ runner.temp }}/appliance-fdisk1/checks.jsonl
+            ${{ runner.temp }}/appliance-fdisk1/diagnose.log
           retention-days: 14
 
   # ─── Terraform guardrails skeleton — fmt + validate (declarations-only) ──────

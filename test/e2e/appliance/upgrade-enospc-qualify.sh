@@ -48,6 +48,7 @@ CUR_IMAGE="${CUR_IMAGE:?}"; PRED_IMAGE="${PRED_IMAGE:?}"; EVID="${EVID:?}"
 DISK_MB="${QUAL_ENOSPC_DISK_MB:-2048}"; LEAVE_KB="${QUAL_ENOSPC_LEAVE_KB:-6144}"
 DIND_IMAGE="${QUAL_DIND_IMAGE:-docker:29-dind@sha256:7dcdfc4a20246236f558175182ccace1eb15a41bd3eb119dd2284f393498b7c1}"; REG_PORT="${QUAL_ENOSPC_REG_PORT:-5056}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; ROOT="$(cd "$HERE/../../.." && pwd)"
+SCENARIO="${QUAL_ENOSPC_SCENARIO:-upgrade}"
 mkdir -p "$EVID"; JSONL="$EVID/checks.jsonl"; MD="$EVID/REPORT.md"; : > "$JSONL"; FAILS=0
 RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)"; DIND="eq-dind-$$"; REG="eq-registry-$$"
 IMG="$EVID/appliance-root.img"; MNT="$EVID/mnt"; SOCKDIR="$(mktemp -d /tmp/eqsock.XXXXXX)"; SOCK="$SOCKDIR/agent.sock"
@@ -114,7 +115,8 @@ check E0 dind-image pass "$DIND_IMAGE = $(docker image inspect -f '{{index .Repo
 docker save busybox:stable | docker exec -i "$DIND" docker load -q >/dev/null
 IN docker pull -q "$PRED_REF" >/dev/null; IN docker tag "$PRED_REF" "$PINNED"
 PRED_ID="$(IN docker image inspect -f '{{.Id}}' "$PINNED")"
-if IN docker image inspect "$CUR_REF" >/dev/null 2>&1; then check E0 cur-absent fail "CUR already present inside the bounded host"; else check E0 cur-absent pass "CUR not present inside the bounded host — the apply must pull it"; fi
+if [[ "$SCENARIO" == midwrite ]]; then :
+elif IN docker image inspect "$CUR_REF" >/dev/null 2>&1; then check E0 cur-absent fail "CUR already present inside the bounded host"; else check E0 cur-absent pass "CUR not present inside the bounded host — the apply must pull it"; fi
 
 cid="$(docker create "$CUR_IMAGE")"; docker cp "$cid:/app/deploy/docker-compose.yml" "$MNT/srv-culvert/culvert/docker-compose.yml" >/dev/null; docker rm -f "$cid" >/dev/null
 cp "$HERE/docker-compose.qualify.yml" "$MNT/srv-culvert/culvert/docker-compose.override.yml"
@@ -186,6 +188,81 @@ diagnose(){ local tag="$1"; {
     echo "-- bounded dockerd log"; docker logs --tail 40 "$DIND" 2>&1 | cut -c1-300
   } >> "$EVID/diagnose.log" 2>&1 || true; }
 
+# fill_bounded: the ONLY fill in this harness — a file inside the loop mount,
+# so the runner's own disk never fills. Leaves QUAL_ENOSPC_LEAVE_KB free.
+fill_bounded(){ local avail fill
+  avail="$(df -k --output=avail "$MNT" | tail -1 | tr -d ' ')"; fill=$(( avail - LEAVE_KB ))
+  (( fill > 0 )) || { echo "only ${avail}KiB available"; return 1; }
+  fallocate -l "$((fill * 1024))" "$MNT/.qual-fill"; }
+
+write_report_and_exit(){
+  IN cat /var/lib/culvert-maint/agent.log > "$EVID/agent.log" 2>/dev/null || true
+  local title="Upgrade-under-ENOSPC qualification"
+  [[ "$SCENARIO" == midwrite ]] && title="Disk exhaustion during an active database write (F-DISK-1)"
+  { echo "# $title — run $RUN_ID"; echo
+    echo "| artifact | reference |"; echo "|---|---|"
+    echo "| image under qualification | \`$CUR_IMAGE\` → \`$CUR_REF\` |"; echo "| predecessor | \`$PRED_IMAGE\` → \`$PRED_REF\` |"
+    echo "| bounded host | \`$DIND_IMAGE\`, data root + containerd + stack + agent state on one ${DISK_MB} MiB ext4 loop file (-m 0) |"
+    echo "| agent | built from \`cmd/culvert-maint\` at $(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown), privilege_mode=docker_group_lab, inside the bounded host |"
+    echo; echo "| scenario | check | result | detail |"; echo "|---|---|---|---|"
+    python3 - "$JSONL" <<'PY'
+import json,sys
+for line in open(sys.argv[1]):
+    d=json.loads(line); print(f"| {d['scenario']} | {d['check']} | **{d['result'].upper()}** | {d['detail'].replace('|','/').replace(chr(10),' ')[:260]} |")
+PY
+    echo; echo "Failures: $FAILS"; } > "$MD"
+  [[ -s "$EVID/diagnose.log" ]] && { log "diagnostics:"; cat "$EVID/diagnose.log" >&2; }
+  log "evidence: $MD ($FAILS failure(s))"
+  (( FAILS > 0 )) && exit 1
+  [[ -n "${INCONCLUSIVE:-}" ]] && exit 2   # never report a scenario that did not run as passed
+  exit 0
+}
+
+# ── W: disk exhaustion DURING an active database write (F-DISK-1) ────────────
+# QUAL_ENOSPC_SCENARIO=midwrite. A SEPARATE scenario from the upgrade path:
+# fill the disk the moment the boot-time category sync starts its bulk
+# BadgerDB write, record whether the known failure (SIGBUS in badger's sparse
+# mmapped memtable) reproduces, then run the operator recovery procedure and
+# the post-recovery integrity checks that must pass before F-DISK-1 can be
+# closed. Needs egress to the category feed (the write is what is under
+# test); without it the run is INCONCLUSIVE (exit 2), never a pass.
+if [[ "$SCENARIO" == midwrite ]]; then
+  wline=""
+  for _ in $(seq 1 120); do
+    wline="$(IN docker logs culvert 2>&1 | grep -m1 -oE 'FeedSync: (parsed [0-9]+ domain entries, writing to BadgerDB|download/parse failed|write REFUSED[^"]*)' || true)"
+    [[ -n "$wline" ]] && break; sleep 5
+  done
+  if [[ "$wline" != *"writing to BadgerDB"* ]]; then
+    check W write-started inconclusive "no bulk write observed (${wline:-nothing within 600 s}); this host cannot reproduce F-DISK-1"
+    INCONCLUSIVE=1; write_report_and_exit; fi
+  why="$(fill_bounded)" || { check W filled-during-write fail "$why"; write_report_and_exit; }
+  check W filled-during-write pass "$wline; filled to $(df -k --output=avail "$MNT" | tail -1 | tr -d ' ')KiB free"
+  sleep 30
+  st="$(IN docker inspect -f 'status={{.State.Status}} exit={{.State.ExitCode}} restarts={{.RestartCount}}' culvert 2>&1 || true)"
+  if IN docker logs culvert 2>&1 | grep -q 'SIGBUS'; then
+    check W known-failure-reproduced known-failure "F-DISK-1 reproduced: SIGBUS during the write; $st"
+    diagnose W-crash
+  else
+    v="$(health_version 2>/dev/null || echo unreachable)"
+    check W known-failure-reproduced survived "no SIGBUS; $st; /health version=$v"
+  fi
+  # Recovery procedure (docs/appliance/readiness-report.md F-DISK-1): free
+  # space on the data filesystem, then bring the stack back.
+  rm -f "$MNT/.qual-fill"
+  IN sh -c 'cd /srv/culvert && docker compose up -d' >/dev/null 2>&1 || true
+  for _ in $(seq 1 60); do curl -fsS -m 3 http://127.0.0.1:18080/health >/dev/null 2>&1 && break; sleep 2; done
+  v="$(health_version 2>/dev/null || echo unreachable)"
+  [[ "$v" == "$PRED_VER" ]] && check W recovered-serving pass "/health 200 version=$v after freeing space + compose up" || check W recovered-serving fail "version=$v"
+  c="$(api POST /api/auth/login '{"user":"enospcadmin","pass":"Enospc-Qual-2026!x"}' | tail -n1 || true)"
+  s1="$(state_sum)"
+  [[ "$c" == 200 && "$s1" == "$STATE0" ]] && check W state-intact pass "admin login http $c; ui_users.json+ca.bundle digest $s1 unchanged" || check W state-intact fail "login=$c digest=$s1 want=$STATE0"
+  fp="$(ca_fp || true)"; [[ "$fp" == "$FP0" ]] && check W ca-identity-intact pass "root CA sha256 $fp" || check W ca-identity-intact fail "fp=$fp want=$FP0"
+  assert_enforcement W
+  m="$(curl -fsS -m 5 http://127.0.0.1:18080/metrics 2>/dev/null | grep -E '^culvert_catfeeddb_(available|recovered|quarantined_copies) ' | tr '\n' ' ')"
+  [[ "$m" == *"culvert_catfeeddb_available 1"* ]] && check W category-store-opens pass "$m" || check W category-store-opens fail "category store not available after recovery: ${m:-no metric}"
+  write_report_and_exit
+fi
+
 # ── E1: apply with the disk full ─────────────────────────────────────────────
 # Wait out the boot-time category-feed sync before filling. On a fresh store
 # it bulk-writes ~2.5M entries into BadgerDB, whose memtable and value log are
@@ -212,9 +289,7 @@ else
   check E1 feed-sync-settled pass "no category feed store configured on this stack"
 fi
 need="$(docker image inspect -f '{{.Size}}' "$CUR_IMAGE")"
-avail="$(df -k --output=avail "$MNT" | tail -1 | tr -d ' ')"
-fill_kb=$(( avail - LEAVE_KB )); (( fill_kb > 0 )) || { check E1 fill fail "only ${avail}KiB available"; exit 1; }
-fallocate -l "$((fill_kb * 1024))" "$MNT/.qual-fill"
+why="$(fill_bounded)" || { check E1 fill fail "$why"; exit 1; }
 check E1 disk-filled pass "free $(df -k --output=avail "$MNT" | tail -1 | tr -d ' ')KiB on the bounded fs; CUR image size ~$((need/1024))KiB (docker image inspect .Size); outer host untouched (fill is a file inside $IMG)"
 # Before any upgrade: does a nearly-full disk ALONE keep the proxy serving?
 # (Separates a data-plane reaction to the full disk from anything the
@@ -276,18 +351,4 @@ assert_enforcement E2
 gate="$(grep -E -m2 'baseline:|health_gate' "$EVID/op-retry.log" | tr '\t\n' '  ' | cut -c1-400)"
 grep -q 'baseline: ' "$EVID/op-retry.log" && check E2 agent-ready-gate pass "$gate" || check E2 agent-ready-gate fail "no /ready baseline in the op log: $gate"
 
-IN cat /var/lib/culvert-maint/agent.log > "$EVID/agent.log" 2>/dev/null || true
-{ echo "# Upgrade-under-ENOSPC qualification — run $RUN_ID"; echo
-  echo "| artifact | reference |"; echo "|---|---|"
-  echo "| image under qualification | \`$CUR_IMAGE\` → \`$CUR_REF\` |"; echo "| predecessor | \`$PRED_IMAGE\` → \`$PRED_REF\` |"
-  echo "| bounded host | \`$DIND_IMAGE\`, data root + containerd + stack + agent state on one ${DISK_MB} MiB ext4 loop file (-m 0) |"
-  echo "| agent | built from \`cmd/culvert-maint\` at $(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown), privilege_mode=docker_group_lab, inside the bounded host |"
-  echo; echo "| scenario | check | result | detail |"; echo "|---|---|---|---|"
-  python3 - "$JSONL" <<'PY'
-import json,sys
-for line in open(sys.argv[1]):
-    d=json.loads(line); print(f"| {d['scenario']} | {d['check']} | **{d['result'].upper()}** | {d['detail'].replace('|','/').replace(chr(10),' ')[:260]} |")
-PY
-  echo; echo "Failures: $FAILS"; } > "$MD"
-[[ -s "$EVID/diagnose.log" ]] && { log "diagnostics:"; cat "$EVID/diagnose.log" >&2; }
-log "evidence: $MD ($FAILS failure(s))"; exit $(( FAILS > 0 ))
+write_report_and_exit

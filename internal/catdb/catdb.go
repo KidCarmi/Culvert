@@ -124,6 +124,23 @@ func (c *CommunityDB) BulkWrite(entries map[string]string) error {
 	return wb.Flush()
 }
 
+// HasEntries reports whether the store holds at least one key. Unlike Stats
+// (an LSM-table estimate that reads 0 until the memtable is flushed) it is
+// exact: one key-only iterator step under a read transaction.
+func (c *CommunityDB) HasEntries() bool {
+	found := false
+	_ = c.db.View(func(txn *badger.Txn) error {
+		opts := badger.DefaultIteratorOptions
+		opts.PrefetchValues = false
+		it := txn.NewIterator(opts)
+		defer it.Close()
+		it.Rewind()
+		found = it.Valid()
+		return nil
+	})
+	return found
+}
+
 // Stats returns the estimated number of keys stored in the DB.
 func (c *CommunityDB) Stats() (keys int64) {
 	// BadgerDB provides only estimated counts via LSM metadata.

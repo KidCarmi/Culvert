@@ -50,14 +50,23 @@ if [[ "$(id -u)" == 0 && -r "$STACK_DIR/.env" ]]; then
   setup_token="$(sed -n 's/^CULVERT_SETUP_TOKEN=//p' "$STACK_DIR/.env" | head -n1)"
 fi
 
-# Root filesystem: Docker's image store, the /data volume and the backups
-# volume share it, and a BadgerDB write that hits a full disk kills the proxy
-# (SIGBUS — readiness report F-DISK-1). Warn at 80 % used or under 2 GiB free.
-disk="unknown"; disk_low="no"
-if read -r disk_total disk_avail disk_pct < <(df -Pk / 2>/dev/null | awk 'NR==2{gsub("%","",$5); print $2, $4, $5}') && [[ "$disk_avail" =~ ^[0-9]+$ ]]; then
-  disk="${disk_pct}% used, $(( disk_avail / 1024 )) MiB free of $(( disk_total / 1024 )) MiB"
+# Data filesystem: the one holding the proxy's /data volume, where BadgerDB
+# writes. A write that hits a full filesystem kills the proxy (SIGBUS —
+# readiness report F-DISK-1). Measure THAT filesystem: the volume's own
+# mountpoint when docker can be asked (root), else Docker's data root (where
+# named volumes live), else /. Warn at 80 % used or under 2 GiB free — an
+# OPERATING threshold for early action, not a guarantee against the crash.
+data_path=""
+if [[ "$(id -u)" == 0 ]] && command -v docker >/dev/null 2>&1; then
+  data_path="$(docker volume inspect -f '{{.Mountpoint}}' "${CULVERT_FB_DATA_VOLUME:-culvert_proxy-data}" 2>/dev/null || true)"
+fi
+[[ -n "$data_path" && -d "$data_path" ]] || data_path="${CULVERT_FB_DOCKER_ROOT:-/var/lib/docker}"
+[[ -d "$data_path" ]] || data_path="/"
+disk="unknown ($data_path)"; disk_low="no"
+if read -r disk_total disk_avail disk_pct < <(df -Pk "$data_path" 2>/dev/null | awk 'NR==2{gsub("%","",$5); print $2, $4, $5}') && [[ "$disk_avail" =~ ^[0-9]+$ ]]; then
+  disk="${disk_pct}% used, $(( disk_avail / 1024 )) MiB free of $(( disk_total / 1024 )) MiB on $data_path"
   if (( disk_pct >= 80 || disk_avail < 2097152 )); then
-    disk_low="yes"; disk="LOW: $disk — free space before upgrades; a full disk stops the proxy"
+    disk_low="yes"; disk="LOW: $disk — free space now; a full data filesystem stops the proxy"
   fi
 fi
 
@@ -105,7 +114,7 @@ import json,sys
 a=sys.argv[1:]
 print(json.dumps({"appliance_version":a[0],"addresses":a[1].split(),"provisioning":a[2],"services_running":a[3]=="yes",
   "needs_setup":a[4],"policy_loaded":a[5],"policy_posture":a[6],"ca":a[7],"ready_http":a[8],"state":a[9],
-  "maintenance_agent":a[10],"sudo_policy":a[11],"candidate":a[12],"root_disk":a[13],"root_disk_low":a[14]=="yes"}))
+  "maintenance_agent":a[10],"sudo_policy":a[11],"candidate":a[12],"data_disk":a[13],"data_disk_low":a[14]=="yes"}))
 PY
     ;;
   --brief)
@@ -129,7 +138,7 @@ PY
     printf '  Ready to enforce:   %s\n' "$enforce"
     printf '  Maintenance agent:  %s\n' "$agent"
     printf '  Console sudo:       %s\n' "$sudo_policy"
-    printf '  Root disk:          %s\n' "$disk"
+    printf '  Data disk:          %s\n' "$disk"
     printf '  STATE:              %s\n' "$state"
     printf '  Management UI:      https://%s:9090\n' "${primary:-<address>}"
     if [[ "$needs_setup" == yes ]]; then

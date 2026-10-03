@@ -594,37 +594,63 @@ func TestApplianceStatus_ReportsAgentSudoAndToken(t *testing.T) {
 	}
 }
 
-// A full root filesystem stops the proxy (BadgerDB writes SIGBUS — readiness
-// report F-DISK-1), so the console summary must say when the disk is low, and
-// must NOT cry wolf on a healthy one (the control).
-func TestApplianceStatus_ReportsRootDiskPressure(t *testing.T) {
+// A full DATA filesystem stops the proxy (BadgerDB writes SIGBUS — readiness
+// report F-DISK-1), so the console summary measures the filesystem holding the
+// /data volume, names it, and says when it is low — and must NOT cry wolf on
+// a healthy one (the control).
+func TestApplianceStatus_ReportsDataDiskPressure(t *testing.T) {
 	abs, _ := filepath.Abs(statusScript)
-	run := func(availKB, pct int, args ...string) string {
+	run := func(availKB, pct int, dockerAnswers bool, args ...string) (out, dfPath, mount, dockerRoot string) {
 		t.Helper()
 		h := newFBHarness(t)
+		mount = filepath.Join(h.root, "volumes", "culvert_proxy-data", "_data")
+		dockerRoot = filepath.Join(h.root, "docker-root")
+		for _, d := range []string{mount, dockerRoot} {
+			if err := os.MkdirAll(d, 0o750); err != nil {
+				t.Fatal(err)
+			}
+		}
+		dfLog := filepath.Join(h.root, "df.args")
 		h.writeExec(filepath.Join(h.stubs, "df"), fmt.Sprintf(
-			"#!/usr/bin/env bash\necho 'Filesystem 1024-blocks Used Available Capacity Mounted on'\necho '/dev/sda1 41943040 0 %d %d%%%% /'\n", availKB, pct))
+			"#!/usr/bin/env bash\necho \"${@: -1}\" > %q\necho 'Filesystem 1024-blocks Used Available Capacity Mounted on'\necho '/dev/sda1 41943040 0 %d %d%%%% /'\n", dfLog, availKB, pct))
+		dockerBody := "#!/usr/bin/env bash\nexit 1\n"
+		if dockerAnswers {
+			dockerBody = fmt.Sprintf("#!/usr/bin/env bash\n[ \"$1 $2\" = \"volume inspect\" ] && { echo %q; exit 0; }\nexit 1\n", mount)
+		}
+		h.writeExec(filepath.Join(h.stubs, "docker"), dockerBody)
 		// #nosec G204 -- program is the literal "bash"; abs is the checked-in script's path.
 		c := exec.CommandContext(t.Context(), "bash", append([]string{abs}, args...)...)
-		c.Env = h.env()
-		out, _ := c.CombinedOutput()
-		return string(out)
+		c.Env = append(h.env(), "CULVERT_FB_DOCKER_ROOT="+dockerRoot)
+		b, _ := c.CombinedOutput()
+		p, _ := os.ReadFile(dfLog)
+		return string(b), strings.TrimSpace(string(p)), mount, dockerRoot
 	}
-	low := run(1<<20, 97)
-	if !strings.Contains(low, "Root disk:          LOW: 97% used, 1024 MiB free") {
-		t.Fatalf("a 97%%-full disk is not reported as low:\n%s", low)
+	low, path, mount, _ := run(1<<20, 97, true)
+	if !strings.Contains(low, "Data disk:          LOW: 97% used, 1024 MiB free") {
+		t.Fatalf("a 97%%-full data filesystem is not reported as low:\n%s", low)
 	}
-	if b := run(1<<20, 97, "--brief"); !strings.Contains(b, "Disk:        LOW:") {
+	if os.Getuid() == 0 && path != mount {
+		t.Fatalf("measured %q, want the volume mountpoint %q", path, mount)
+	}
+	if !strings.Contains(low, "on "+path) {
+		t.Fatalf("the row does not name the measured filesystem %q:\n%s", path, low)
+	}
+	if b, _, _, _ := run(1<<20, 97, true, "--brief"); !strings.Contains(b, "Disk:        LOW:") {
 		t.Fatalf("--brief must surface a low disk:\n%s", b)
 	}
-	if j := run(1<<20, 97, "--json"); !strings.Contains(j, `"root_disk_low": true`) {
-		t.Fatalf("--json must carry root_disk_low:\n%s", j)
+	if j, _, _, _ := run(1<<20, 97, true, "--json"); !strings.Contains(j, `"data_disk_low": true`) {
+		t.Fatalf("--json must carry data_disk_low:\n%s", j)
 	}
-	ok := run(30<<20, 25)
-	if strings.Contains(ok, "LOW") || !strings.Contains(ok, "Root disk:          25% used, 30720 MiB free") {
+	// Without an answer from docker, Docker's data root (where named volumes
+	// live) is measured, not /.
+	if _, p, _, root := run(30<<20, 25, false); p != root {
+		t.Fatalf("docker unavailable: measured %q, want the docker data root %q", p, root)
+	}
+	ok, _, _, _ := run(30<<20, 25, true)
+	if strings.Contains(ok, "LOW") || !strings.Contains(ok, "Data disk:          25% used, 30720 MiB free") {
 		t.Fatalf("a healthy disk is misreported:\n%s", ok)
 	}
-	if b := run(30<<20, 25, "--brief"); strings.Contains(b, "Disk:") {
+	if b, _, _, _ := run(30<<20, 25, true, "--brief"); strings.Contains(b, "Disk:") {
 		t.Fatalf("--brief must stay quiet on a healthy disk:\n%s", b)
 	}
 }
