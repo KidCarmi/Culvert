@@ -63,6 +63,12 @@ jobs:
           done
           # supermin (libguestfs) reads the host kernel; Ubuntu ships it 0600.
           sudo chmod 0644 /boot/vmlinuz-*
+          # The runner image ships passt (podman); libguestfs prefers it, and as
+          # root it exits ("passt exited with status 1", run 37138404641). The
+          # recorded build host has no passt, so libguestfs uses QEMU's own
+          # user-mode network there — match it.
+          if dpkg -s passt >/dev/null 2>&1; then sudo apt-get remove -y -q passt; fi
+          ! command -v passt
       - name: Match the recorded build host's Docker engine (29.6.2)
         # The original OVA's build-info.json records Docker 29.6.2 on the
         # containerd image store. The runner ships Docker 28, whose containerd
