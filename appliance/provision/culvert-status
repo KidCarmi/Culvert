@@ -21,6 +21,7 @@ SUDOERS_DIR="${CULVERT_FB_SUDOERS_DIR:-/etc/sudoers.d}"
 MODE="${1:-full}"
 
 ver="$(python3 -c 'import json;d=json.load(open("'"$BUILD"'"));print(d["appliance"]["version"]+" (app "+d["application"]["tag"]+")")' 2>/dev/null || echo unknown)"
+candidate="$(python3 -c 'import json;d=json.load(open("'"$BUILD"'"));c=d.get("candidate") or {};print("CANDIDATE build from source "+str(c.get("image_source_git_commit",""))[:12]+" — qualification only, NOT for production" if c.get("candidate") else "")' 2>/dev/null || true)"
 addrs="$(ip -4 -o addr show scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | paste -sd' ' || true)"
 primary="$(printf '%s' "$addrs" | awk '{print $1}')"
 
@@ -88,16 +89,17 @@ fi
 
 case "$MODE" in
   --json)
-    python3 - "$ver" "$addrs" "$prov" "$services" "$needs_setup" "$policy_ok" "$posture_ok" "$ca_ok" "$ready_code" "$state" "$agent" "$sudo_policy" <<'PY'
+    python3 - "$ver" "$addrs" "$prov" "$services" "$needs_setup" "$policy_ok" "$posture_ok" "$ca_ok" "$ready_code" "$state" "$agent" "$sudo_policy" "$candidate" <<'PY'
 import json,sys
 a=sys.argv[1:]
 print(json.dumps({"appliance_version":a[0],"addresses":a[1].split(),"provisioning":a[2],"services_running":a[3]=="yes",
   "needs_setup":a[4],"policy_loaded":a[5],"policy_posture":a[6],"ca":a[7],"ready_http":a[8],"state":a[9],
-  "maintenance_agent":a[10],"sudo_policy":a[11]}))
+  "maintenance_agent":a[10],"sudo_policy":a[11],"candidate":a[12]}))
 PY
     ;;
   --brief)
     printf 'Culvert appliance %s\n' "$ver"
+    [[ -n "$candidate" ]] && printf '  *** %s ***\n' "$candidate"
     printf '  State:       %s\n' "$state"
     printf '  Management:  https://%s:9090   Proxy: http://%s:8080\n' "${primary:-<no address yet>}" "${primary:-<no address yet>}"
     printf '  Console:     login as "culvert"; run  culvert-status  /  culvert-net  /  culvert-os-update\n'
@@ -105,6 +107,7 @@ PY
     ;;
   *)
     printf 'Culvert appliance %s\n' "$ver"
+    [[ -n "$candidate" ]] && printf '  *** %s ***\n' "$candidate"
     printf '  Addresses:          %s\n' "${addrs:-none}"
     printf '  Provisioning:       %s\n' "$prov"
     printf '  Services running:   %s (GET http://127.0.0.1:8080/health → %s)\n' "$services" "$health_code"

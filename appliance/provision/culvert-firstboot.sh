@@ -271,6 +271,15 @@ run_install_sh() {
     export CULVERT_INSTALL_CHANNEL="${CULVERT_INSTALL_CHANNEL:-stable}"
     export CULVERT_INSTALL_DEFAULT_ACTION=deny
     export CULVERT_INSTALL_SETUP_TOKEN="$token"
+    # CANDIDATE builds only (build-ova.sh --candidate-image-tar): the image is
+    # an unsigned CI artifact, so install.sh's cosign gate cannot admit the
+    # bundled agent. The candidate-scoped break-glass is exported here and
+    # nowhere else, keyed on the guest manifest, and said out loud.
+    if [[ "${CANDIDATE_BUILD:-0}" == 1 ]]; then
+      export CULVERT_MAINT_TRUST_UNVERIFIED_IMAGE=1
+      log "CANDIDATE build (source ${CANDIDATE_SOURCE_SHA:-?}): trusting the bundled maintenance agent from CI-artifact provenance, not cosign — NOT a production posture"
+      console "culvert-firstboot: CANDIDATE build — maintenance agent trusted from CI-artifact provenance (not cosign). Not for production."
+    fi
     bash "$INSTALL_SH" < /dev/null
   )
 }

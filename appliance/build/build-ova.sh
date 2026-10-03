@@ -3,6 +3,28 @@
 #
 #   appliance/build/build-ova.sh [--out DIR] [--work DIR] [--skip-cosign]
 #                                [--stop-after disk|vmdk] [--keep-work]
+#                                [--candidate-image-tar FILE --candidate-source SHA
+#                                 [--candidate-run-id ID] [--candidate-allow-provisioning-drift]]
+#
+# CANDIDATE mode (qualification of an UNPUBLISHED build, never for customers):
+#   --candidate-image-tar takes a `docker save` tarball of the proxy image —
+#   the Deep PR Gate's `deep-gate-image` artifact (culvert-image.tar) — instead
+#   of pulling a signed release by digest. The OVA is then built from THAT
+#   image's deploy bundle (compose files, agent binary, packaging) plus this
+#   checkout's provisioning files, and is named/labelled "candidate": the
+#   version carries "-candidate.<sha12>", the OVF product line says CANDIDATE,
+#   build-info.json records the source SHA, the image tar's SHA-256 and the CI
+#   run id, and the guest manifest carries CANDIDATE_BUILD=1. Signature
+#   verification is NOT bypassed: the image has no signature to verify, and
+#   that fact is recorded verbatim in build-info.json. The ONE candidate-scoped
+#   trust decision is the maintenance agent: install.sh trusts the bundled
+#   agent only for a cosign-verified image, so a candidate first boot passes
+#   its break-glass CULVERT_MAINT_TRUST_UNVERIFIED_IMAGE=1 — exported by
+#   culvert-firstboot ONLY when the manifest says CANDIDATE_BUILD=1, logged on
+#   every boot and on the console. A release OVA never sets it.
+#   --candidate-source must equal this checkout's HEAD (the provisioning files
+#   ride from HEAD, the application from the tar; one SHA ties them) unless
+#   --candidate-allow-provisioning-drift is given, which records both SHAs.
 #
 # Pipeline (every input is a pin in manifest.env; nothing is resolved "latest"):
 #   1. fetch + verify the base cloud image (SHA256 pin, GPG when the Ubuntu
@@ -19,7 +41,8 @@
 #
 # Outputs (in --out): culvert-appliance-<ver>-<os>.ova, .ova.sha256,
 #   build-info.json, dpkg-list.txt (guest package inventory for SBOM evidence),
-#   host-components.txt, prepare-guest.log (the in-guest customization transcript).
+#   host-components.txt, build-upgrades.txt (packages the pinned-snapshot
+#   security upgrade moved), prepare-guest.log (the in-guest transcript).
 #
 # Requires: qemu-img, virt-customize, virt-cat, virt-ls, docker (daemon access),
 # curl, gzip, tar, sha256sum, python3; gpgv + ubuntu-cloudimage-keyring optional.
@@ -33,6 +56,10 @@ WORK="${TMPDIR:-/tmp}/culvert-ova-build"
 SKIP_COSIGN=0
 STOP_AFTER=""
 KEEP_WORK=0
+CANDIDATE_TAR=""
+CANDIDATE_SOURCE=""
+CANDIDATE_RUN_ID=""
+CANDIDATE_ALLOW_DRIFT=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -41,6 +68,10 @@ while [[ $# -gt 0 ]]; do
     --skip-cosign) SKIP_COSIGN=1; shift ;;
     --stop-after) STOP_AFTER="$2"; shift 2 ;;
     --keep-work) KEEP_WORK=1; shift ;;
+    --candidate-image-tar) CANDIDATE_TAR="$2"; shift 2 ;;
+    --candidate-source) CANDIDATE_SOURCE="$2"; shift 2 ;;
+    --candidate-run-id) CANDIDATE_RUN_ID="$2"; shift 2 ;;
+    --candidate-allow-provisioning-drift) CANDIDATE_ALLOW_DRIFT=1; shift ;;
     -h|--help) sed -n '2,24p' "$0"; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
@@ -74,8 +105,6 @@ export SOURCE_DATE_EPOCH
 GIT_COMMIT="$(git -C "$REPO" rev-parse HEAD 2>/dev/null || echo unknown)"
 GIT_DIRTY="false"; [[ -n "$(git -C "$REPO" status --porcelain 2>/dev/null)" ]] && GIT_DIRTY="true"
 
-VERSION="${APPLIANCE_VERSION:-${APP_IMAGE_TAG#v}}"
-OVA_BASENAME="${APPLIANCE_NAME}-${VERSION}-${GUEST_OS_ID}"
 mkdir -p "$OUT" "$WORK/cache" "$WORK/overlay"
 # One build per work dir: a second run would recreate disk.qcow2 under the
 # first (measured: `virt-resize: guestfs_launch failed` when two builds were
@@ -124,11 +153,42 @@ for e in m.get("manifests",[]):
   [[ "$got" == "$amd" ]] || die "${repo}: amd64 platform digest is $got, manifest pins $amd"
   docker tag "${repo}@${idx}" "${repo}:${tag}"
 }
-pull_by_digest "$APP_IMAGE_REPO" "$APP_IMAGE_INDEX_DIGEST" "$APP_IMAGE_AMD64_DIGEST" "$APP_IMAGE_TAG"
+CANDIDATE=0
+CANDIDATE_TAR_SHA=""
+if [[ -n "$CANDIDATE_TAR" ]]; then
+  CANDIDATE=1
+  [[ -f "$CANDIDATE_TAR" ]] || die "--candidate-image-tar: $CANDIDATE_TAR not found"
+  [[ "$CANDIDATE_SOURCE" =~ ^[0-9a-f]{40}$ ]] || die "--candidate-source must be the full 40-hex source commit the image was built from"
+  if [[ "$CANDIDATE_SOURCE" != "$GIT_COMMIT" ]]; then
+    if [[ "$CANDIDATE_ALLOW_DRIFT" -eq 1 ]]; then
+      log "WARNING: candidate image source $CANDIDATE_SOURCE != provisioning checkout $GIT_COMMIT (recorded as provisioning drift)"
+    else
+      die "candidate image source ($CANDIDATE_SOURCE) differs from this checkout ($GIT_COMMIT); build from the same SHA, or pass --candidate-allow-provisioning-drift to record the mismatch"
+    fi
+  fi
+  CANDIDATE_TAR_SHA="$(sha256sum "$CANDIDATE_TAR" | cut -d' ' -f1)"
+  log "CANDIDATE build: docker load $CANDIDATE_TAR (sha256:$CANDIDATE_TAR_SHA)"
+  loaded="$(docker load -q -i "$CANDIDATE_TAR" | sed -n 's/^Loaded image: //p' | head -1)"
+  [[ -n "$loaded" ]] || die "docker load reported no image tag for $CANDIDATE_TAR"
+  APP_IMAGE_REPO="culvert/candidate"
+  APP_IMAGE_TAG="sha-${CANDIDATE_SOURCE:0:12}"
+  docker tag "$loaded" "${APP_IMAGE_REPO}:${APP_IMAGE_TAG}"
+  arch="$(docker image inspect "${APP_IMAGE_REPO}:${APP_IMAGE_TAG}" --format '{{.Architecture}}/{{.Os}}')"
+  [[ "$arch" == "amd64/linux" ]] || die "candidate image is $arch, want amd64/linux"
+  # No registry, no index: the image ID (config digest) is the identity the
+  # guest's first boot re-checks after `docker load`.
+  APP_IMAGE_INDEX_DIGEST="$(docker image inspect "${APP_IMAGE_REPO}:${APP_IMAGE_TAG}" --format '{{.Id}}')"
+  APP_IMAGE_AMD64_DIGEST="$APP_IMAGE_INDEX_DIGEST"
+  APP_REF="${APP_IMAGE_REPO}:${APP_IMAGE_TAG}"
+  COSIGN_RESULT="not applicable — CANDIDATE build from an unsigned CI artifact; provenance = image tar sha256:${CANDIDATE_TAR_SHA}, source ${CANDIDATE_SOURCE}, CI run ${CANDIDATE_RUN_ID:-unspecified}"
+else
+  pull_by_digest "$APP_IMAGE_REPO" "$APP_IMAGE_INDEX_DIGEST" "$APP_IMAGE_AMD64_DIGEST" "$APP_IMAGE_TAG"
+  APP_REF="${APP_IMAGE_REPO}@${APP_IMAGE_INDEX_DIGEST}"
+  COSIGN_RESULT="skipped (--skip-cosign)"
+fi
 pull_by_digest "$CLAMAV_IMAGE_REPO" "$CLAMAV_IMAGE_INDEX_DIGEST" "$CLAMAV_IMAGE_AMD64_DIGEST" "$CLAMAV_IMAGE_TAG"
 
-COSIGN_RESULT="skipped (--skip-cosign)"
-if [[ "$SKIP_COSIGN" -eq 0 ]]; then
+if [[ "$CANDIDATE" -eq 0 && "$SKIP_COSIGN" -eq 0 ]]; then
   log "cosign-verifying ${APP_IMAGE_REPO}@${APP_IMAGE_INDEX_DIGEST} (keyless, pinned identity)"
   # Honour a build-host HTTPS proxy + CA bundle if present; nothing of it reaches the guest.
   cosign_env=(--network host)
@@ -144,7 +204,7 @@ fi
 
 # Versions carried by the image (the deploy bundle's maintenance agent is the
 # host component install.sh installs at first boot).
-cid="$(docker create "${APP_IMAGE_REPO}@${APP_IMAGE_INDEX_DIGEST}")"
+cid="$(docker create "$APP_REF")"
 docker cp "$cid:/app/VERSION" "$WORK/app-VERSION" >/dev/null
 docker cp "$cid:/app/deploy/bin/culvert-maint" "$WORK/culvert-maint" >/dev/null
 docker rm "$cid" >/dev/null
@@ -152,12 +212,38 @@ APP_VERSION="$(tr -d '[:space:]' < "$WORK/app-VERSION")"
 MAINT_VERSION="$("$WORK/culvert-maint" --version 2>/dev/null || echo unknown)"
 rm -f "$WORK/culvert-maint" "$WORK/app-VERSION"
 
+if [[ "$CANDIDATE" -eq 1 ]]; then
+  VERSION="${APPLIANCE_VERSION:-${APP_VERSION#v}}-candidate.${CANDIDATE_SOURCE:0:12}"
+  APPLIANCE_PRODUCT="$APPLIANCE_PRODUCT (CANDIDATE — qualification build, not for production)"
+else
+  VERSION="${APPLIANCE_VERSION:-${APP_IMAGE_TAG#v}}"
+fi
+OVA_BASENAME="${APPLIANCE_NAME}-${VERSION}-${GUEST_OS_ID}"
+
 # ── 3. Overlay ──────────────────────────────────────────────────────────────
 OV="$WORK/overlay"
 rm -rf "$OV"; mkdir -p "$OV/opt/culvert-appliance" "$OV/var/lib/culvert-appliance/images"
 cp -r "$REPO/appliance/provision" "$REPO/appliance/os-maintenance" "$OV/opt/culvert-appliance/"
 cp "$REPO/scripts/install.sh" "$OV/opt/culvert-appliance/install.sh"
 cp "$MANIFEST" "$OV/var/lib/culvert-appliance/manifest.env"
+if [[ "$CANDIDATE" -eq 1 ]]; then
+  # Later keys win when the guest sources the manifest: the application pins
+  # now name the loaded candidate image, and CANDIDATE_BUILD=1 is what makes
+  # culvert-firstboot export the agent's break-glass trust (nowhere else).
+  {
+    echo
+    echo "# ── CANDIDATE build overrides (appended by build-ova.sh --candidate-image-tar) ──"
+    echo "CANDIDATE_BUILD=1"
+    echo "CANDIDATE_SOURCE_SHA=$CANDIDATE_SOURCE"
+    echo "CANDIDATE_PROVISIONING_SHA=$GIT_COMMIT"
+    echo "CANDIDATE_IMAGE_TAR_SHA256=$CANDIDATE_TAR_SHA"
+    echo "CANDIDATE_CI_RUN_ID=${CANDIDATE_RUN_ID:-}"
+    echo "APP_IMAGE_REPO=$APP_IMAGE_REPO"
+    echo "APP_IMAGE_TAG=$APP_IMAGE_TAG"
+    echo "APP_IMAGE_INDEX_DIGEST=$APP_IMAGE_INDEX_DIGEST"
+    echo "APP_IMAGE_AMD64_DIGEST=$APP_IMAGE_AMD64_DIGEST"
+  } >> "$OV/var/lib/culvert-appliance/manifest.env"
+fi
 mkdir -p "$OV/opt/culvert-appliance/bin"
 # prepare-guest.sh rides in the overlay: virt-customize --run executes a script
 # with /bin/sh (dash) regardless of its shebang, so it is invoked via bash.
@@ -204,6 +290,7 @@ BI_INSTALL_SHA="$INSTALL_SHA" BI_APP_VERSION="$APP_VERSION" BI_MAINT_VERSION="$M
 BI_COSIGN="$COSIGN_RESULT" BI_BASE_GPG="$BASE_GPG" BI_APP_TAR_SHA="$APP_TAR_SHA" BI_CLAM_TAR_SHA="$CLAM_TAR_SHA" \
 BI_VERSION="$VERSION" BI_OVA="$OVA_BASENAME.ova" BI_GIT_COMMIT="$GIT_COMMIT" BI_GIT_DIRTY="$GIT_DIRTY" \
 BI_BUILD_TS="$BUILD_TS" BI_BUILD_WALL="$BUILD_WALL" \
+BI_CANDIDATE="$CANDIDATE" BI_CANDIDATE_SOURCE="$CANDIDATE_SOURCE" BI_CANDIDATE_TAR_SHA="$CANDIDATE_TAR_SHA" BI_CANDIDATE_RUN_ID="$CANDIDATE_RUN_ID" \
 python3 - "$OV/var/lib/culvert-appliance/build-info.json" <<'PY'
 import json, os, subprocess, sys
 E = os.environ
@@ -238,6 +325,18 @@ info = {
                   "docker": v("docker version --format '{{.Server.Version}}'"), "cosign_image": E["COSIGN_IMAGE"],
                   "build_host": v(". /etc/os-release && echo $PRETTY_NAME"), "kvm": v("test -e /dev/kvm && echo yes || echo 'no (TCG)'")}
 }
+if E["BI_CANDIDATE"] == "1":
+    info["candidate"] = {
+        "candidate": True,
+        "not_for_production": True,
+        "image_source_git_commit": E["BI_CANDIDATE_SOURCE"],
+        "provisioning_git_commit": E["BI_GIT_COMMIT"],
+        "provisioning_drift": E["BI_CANDIDATE_SOURCE"] != E["BI_GIT_COMMIT"],
+        "image_tar_sha256": E["BI_CANDIDATE_TAR_SHA"],
+        "ci_run_id": E["BI_CANDIDATE_RUN_ID"] or None,
+        "image_signature": "none (unsigned CI artifact; release signature verification is not bypassed, it is inapplicable)",
+        "agent_trust": "culvert-firstboot exports CULVERT_MAINT_TRUST_UNVERIFIED_IMAGE=1 because the manifest carries CANDIDATE_BUILD=1 (candidate-scoped; a release OVA never sets it)",
+    }
 json.dump(info, open(sys.argv[1], "w"), indent=2); open(sys.argv[1], "a").write("\n")
 PY
 cp "$OV/var/lib/culvert-appliance/build-info.json" "$OUT/build-info.json"
@@ -282,6 +381,8 @@ log "prepare-guest.sh completed in the guest at $PREP_DONE"
 log "verifying guest contents"
 virt-cat -a "$DISK" /var/lib/culvert-appliance/dpkg-list.txt       > "$OUT/dpkg-list.txt"
 virt-cat -a "$DISK" /var/lib/culvert-appliance/host-components.txt > "$OUT/host-components.txt"
+# Present only when manifest.env pins GUEST_APT_SNAPSHOT (prepare-guest.sh 1b).
+virt-cat -a "$DISK" /var/lib/culvert-appliance/build-upgrades.txt > "$OUT/build-upgrades.txt" 2>/dev/null || rm -f "$OUT/build-upgrades.txt"
 grep -q "^docker-ce	${DOCKER_CE_VERSION}	amd64$" "$OUT/dpkg-list.txt" || die "docker-ce is not the pinned version in the guest"
 [[ "$(virt-cat -a "$DISK" /etc/machine-id | wc -c)" -eq 0 ]] || die "machine-id not empty"
 if virt-ls -a "$DISK" /etc/ssh/ | grep -q '^ssh_host_'; then die "ssh host keys present in image"; fi
@@ -314,7 +415,7 @@ subs = {
  "@@DISK_GB@@": "$VM_DISK_GB", "@@VM_NAME@@": "$OVA_BASENAME", "@@HW_VERSION@@": "$VM_HW_VERSION",
  "@@VCPUS@@": "$VM_VCPUS", "@@MEMORY_MB@@": "$VM_MEMORY_MB",
  "@@PRODUCT@@": html.escape("$APPLIANCE_PRODUCT"), "@@VENDOR@@": "$APPLIANCE_VENDOR",
- "@@VERSION@@": "$VERSION", "@@FULL_VERSION@@": html.escape("$VERSION ($GUEST_OS_NAME, app $APP_IMAGE_TAG, commit ${GIT_COMMIT:0:12})"),
+ "@@VERSION@@": "$VERSION", "@@FULL_VERSION@@": html.escape("$VERSION ($GUEST_OS_NAME, app $APP_IMAGE_TAG, commit ${GIT_COMMIT:0:12})" + (" — CANDIDATE qualification build from source ${CANDIDATE_SOURCE:0:12}, NOT FOR PRODUCTION" if "$CANDIDATE" == "1" else "")),
 }
 for k, v in subs.items(): t = t.replace(k, v)
 assert "@@" not in t, "unsubstituted token in OVF"

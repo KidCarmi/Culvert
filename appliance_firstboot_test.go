@@ -647,3 +647,70 @@ func TestSudoPolicy_LiveLastMatchPrecedence(t *testing.T) {
 	}
 	t.Logf("live sudoers precedence proven on %s: 90-password refuses -n; 95-NOPASSWD overrides; 10-NOPASSWD loses", user)
 }
+
+// ── candidate builds: the agent break-glass is exported ONLY when labelled ──
+//
+// build-ova.sh --candidate-image-tar appends CANDIDATE_BUILD=1 to the guest
+// manifest; install.sh's cosign gate cannot admit a bundled agent from an
+// unsigned CI artifact, so first boot passes the candidate-scoped
+// CULVERT_MAINT_TRUST_UNVERIFIED_IMAGE=1. The control half matters more: a
+// release OVA (no CANDIDATE_BUILD) must never export it.
+func TestFirstBoot_CandidateBuildExportsScopedAgentTrustOnly(t *testing.T) {
+	h := newFBHarness(t)
+	h.writeExec(filepath.Join(h.root, "install.sh"), "#!/usr/bin/env bash\nprintf 'install.sh TRUST=%s\\n' \"${CULVERT_MAINT_TRUST_UNVERIFIED_IMAGE:-unset}\" >> \"$FB_HARNESS/calls.log\"\n")
+	if out, code := h.run("run_install_sh tok"); code != 0 {
+		t.Fatalf("release shape failed (%d):\n%s", code, out)
+	}
+	calls, _ := os.ReadFile(h.calls)
+	if !strings.Contains(string(calls), "install.sh TRUST=unset") {
+		t.Fatalf("a release build must NOT export the agent break-glass:\n%s", calls)
+	}
+	out, code := h.run("CANDIDATE_BUILD=1 CANDIDATE_SOURCE_SHA=abcdef0123456789 run_install_sh tok")
+	if code != 0 {
+		t.Fatalf("candidate shape failed (%d):\n%s", code, out)
+	}
+	calls, _ = os.ReadFile(h.calls)
+	if !strings.Contains(string(calls), "install.sh TRUST=1") {
+		t.Fatalf("a candidate build must export the candidate-scoped break-glass:\n%s", calls)
+	}
+	if !strings.Contains(out, "CANDIDATE build") || !strings.Contains(out, "NOT a production posture") {
+		t.Fatalf("the candidate trust decision must be logged loudly:\n%s", out)
+	}
+}
+
+// build-ova.sh's candidate contract, pinned structurally: no bypass flag is
+// ever written for a release build, the candidate overrides are appended
+// (later keys win on source) rather than substituted, and the OVF/full
+// version names the candidate.
+func TestBuildOVA_CandidateModeIsLabelledAndScoped(t *testing.T) {
+	b, err := os.ReadFile("appliance/build/build-ova.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := string(b)
+	for _, want := range []string{
+		`[[ "$CANDIDATE_SOURCE" =~ ^[0-9a-f]{40}$ ]] || die`,
+		`echo "CANDIDATE_BUILD=1"`,
+		`-candidate.${CANDIDATE_SOURCE:0:12}`,
+		`NOT FOR PRODUCTION`,
+		`"not_for_production": True`,
+		`if [[ "$CANDIDATE" -eq 0 && "$SKIP_COSIGN" -eq 0 ]]; then`,
+	} {
+		if !strings.Contains(src, want) {
+			t.Errorf("build-ova.sh lacks %q", want)
+		}
+	}
+	if strings.Contains(src, "export CULVERT_MAINT_TRUST_UNVERIFIED_IMAGE") || strings.Contains(src, "-e CULVERT_MAINT_TRUST_UNVERIFIED_IMAGE") {
+		t.Error("build-ova.sh must not set the agent break-glass itself; only culvert-firstboot does, keyed on the guest manifest")
+	}
+	fb, err := os.ReadFile(fbScript)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := strings.Count(string(fb), "export CULVERT_MAINT_TRUST_UNVERIFIED_IMAGE=1"); n != 1 {
+		t.Fatalf("culvert-firstboot must export the break-glass in exactly one place (got %d)", n)
+	}
+	if !strings.Contains(string(fb), `if [[ "${CANDIDATE_BUILD:-0}" == 1 ]]; then`) {
+		t.Fatal("the export must be guarded by CANDIDATE_BUILD=1")
+	}
+}
