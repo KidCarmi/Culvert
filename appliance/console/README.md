@@ -165,6 +165,23 @@ Real ESXi smoke results are recorded separately; unit tests do not establish
 PAM/getty/keyboard behavior. The incomplete ClamAV image remains a product
 failure even if the console handles it correctly.
 
+The [Go ESXi smoke report](evidence/esxi-go-smoke.json) identifies implementation
+commit `654af2fe`, compiler, base OVA and installed binary/hook hashes. Both Go
+test packages passed twice with shuffled execution inside Ubuntu. Linux race
+CI, vet, the static build/compiler check and focused repository lint passed.
+Real PAM password rejection, authenticated login/logout, Docker-independent
+operation and automatic console startup after reboot passed. Machine identity
+was retained. The owned VM was deleted and per-run private files removed.
+
+![Go authenticated recovery menu on ESXi](evidence/esxi-go-admin.png)
+
+The [retained reboot screenshot](evidence/esxi-go-boot-partial.png) is partial,
+even after a tty2/tty1 redraw. It is **not** full visual proof of the boot screen.
+The complete public menu was separately verified in the guest's `/dev/vcs1`
+buffer after reboot. This capture limitation remains open. The Go console
+service reported 10,149,888 bytes at one observation, not a peak or whole-VM
+resource qualification. This was a development overlay, not a rebuilt OVA.
+
 The [historical Python ESXi smoke report](evidence/esxi-smoke.json) records the exact base OVA
 and installed overlay hashes. All 26 tests passed in the Ubuntu guest; real
 VMware keyboard/PAM login, invalid-password refusal, logout, stopped-Docker
