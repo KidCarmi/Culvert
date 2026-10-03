@@ -1,0 +1,176 @@
+# appliance-lab.yml — DISPOSABLE appliance test lab (branch test/appliance-lab only).
+#
+# Boots the appliance OVA's own disk under QEMU/KVM on a standard GitHub-hosted
+# runner and qualifies the guest OS end to end (test/e2e/appliance/lab/), and
+# keeps the F-DISK-1 reproduction on its bounded nested-Docker host. Unpublished
+# test path: no tags, releases, catalog or registry pushes; nothing here is a
+# merge gate. The push trigger is restricted to the lab branch so the workflow
+# can bootstrap without existing on main; workflow_dispatch re-runs it.
+#
+# Artifact identity: the runner cannot receive the OVA built on the qualification
+# host (sha256 e24eb542…). It rebuilds a SEPARATELY IDENTIFIED candidate from the
+# same pinned inputs — the same CI image tar (verified by sha256), the same
+# appliance source commit, the same manifest pins — and records its own checksum.
+# Its guest content is compared with the original's committed fingerprint; a
+# pass here qualifies the rebuilt OVA, never the original one by name.
+name: Appliance Lab
+
+on:
+  push:
+    branches: [test/appliance-lab]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: appliance-lab-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  APPLIANCE_SOURCE_SHA: 4c4b7728c0e6a1746e968d935b635fc652647e6f
+  ORIGINAL_OVA_SHA256: e24eb542f973fb70360bad5124ef81fdab8b6f8d67af601720613cbcca3700a4
+  ORIGINAL_IMAGE_ID: sha256:384f4c4b1bad91be93dc8b78adb974b6c57dd9b4c8f534bfdbafc2c1e4f1ab04
+  SOURCE_IMAGE_RUN_ID: "37124197333"
+  SOURCE_IMAGE_TAR_SHA256: bb8a2c75369ca3397aaf84566eeee6222f30ca5c3b791de7d60bfecac9a8c3a4
+
+jobs:
+  guest-boot:
+    name: "Lab · build OVA + QEMU guest boot + qualify"
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Host preflight (KVM, RAM, disk) and lab directory
+        run: |
+          set -euo pipefail
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules >/dev/null
+          sudo udevadm control --reload-rules && sudo udevadm trigger --name-match=kvm || true
+          ls -l /dev/kvm || echo "no /dev/kvm"
+          nproc; free -m; df -h / /mnt 2>/dev/null || df -h /
+          # Put the lab on the filesystem with the most free space.
+          best=/; [ -d /mnt ] && [ "$(df -Pk /mnt | awk 'NR==2{print $4}')" -gt "$(df -Pk / | awk 'NR==2{print $4}')" ] && best=/mnt
+          sudo mkdir -p "$best/culvert-lab" && sudo chown "$(id -u):$(id -g)" "$best/culvert-lab"
+          echo "LAB_ROOT=$best/culvert-lab" >> "$GITHUB_ENV"
+      - name: Install build + lab tools
+        run: |
+          set -euo pipefail
+          for i in 1 2; do
+            sudo apt-get update -q && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends \
+              libguestfs-tools qemu-utils qemu-system-x86 genisoimage ubuntu-cloudimage-keyring && break
+            sleep 15
+          done
+          # supermin (libguestfs) reads the host kernel; Ubuntu ships it 0600.
+          sudo chmod 0644 /boot/vmlinuz-*
+      - name: Obtain the source image tar (verified sha256)
+        id: image
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: echo "from=$(test/e2e/appliance/lab/obtain-image.sh "$LAB_ROOT/in")" >> "$GITHUB_OUTPUT"
+      - name: Preserve the source image beyond the original artifact's expiry
+        if: steps.image.outputs.from == 'source-run'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: lab-source-image-${{ env.SOURCE_IMAGE_RUN_ID }}
+          path: ${{ env.LAB_ROOT }}/in/culvert-image.tar
+          retention-days: 30
+          compression-level: 0
+      - name: Check out the appliance source the candidate was built from
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.APPLIANCE_SOURCE_SHA }}
+          path: appliance-src
+          persist-credentials: false
+      - name: Build a separately identified candidate OVA (same pinned inputs)
+        run: |
+          set -euo pipefail
+          # The build runs as root over a runner-owned checkout; without this,
+          # git refuses the repo and the candidate-source == HEAD check fails.
+          sudo git config --global --add safe.directory "$GITHUB_WORKSPACE/appliance-src"
+          sudo -E env LIBGUESTFS_BACKEND=direct BASE_IMAGE_KEYRING=/usr/share/keyrings/ubuntu-cloudimage-keyring.gpg \
+            appliance-src/appliance/build/build-ova.sh \
+              --candidate-image-tar "$LAB_ROOT/in/culvert-image.tar" \
+              --candidate-source "$APPLIANCE_SOURCE_SHA" --candidate-run-id "$SOURCE_IMAGE_RUN_ID" \
+              --out "$LAB_ROOT/ova" --work "$LAB_ROOT/build" 2>&1 | tee "$LAB_ROOT/build-ova.log"
+          sudo chown -R "$(id -u):$(id -g)" "$LAB_ROOT/ova"
+          cat "$LAB_ROOT/ova/"*.ova.sha256
+          rm -f "$LAB_ROOT/in/culvert-image.tar"
+      - name: Compare the rebuilt guest content with the original OVA's fingerprint
+        run: |
+          set -euo pipefail
+          export LAB_DIR="$LAB_ROOT/lab"
+          ova="$(ls "$LAB_ROOT/ova/"*.ova)"
+          sudo -E env LIBGUESTFS_BACKEND=direct LAB_DIR="$LAB_DIR" test/e2e/appliance/lab/appliance-lab.sh fingerprint "$ova" "$LAB_ROOT/rebuilt.fingerprint.tsv"
+          sudo chown -R "$(id -u):$(id -g)" "$LAB_DIR" "$LAB_ROOT/rebuilt.fingerprint.tsv"
+          test/e2e/appliance/lab/appliance-lab.sh compare \
+            test/e2e/appliance/lab/reference/candidate-4c4b772-e24eb542.fingerprint.tsv "$LAB_ROOT/rebuilt.fingerprint.tsv" || echo "::warning::rebuilt guest content differs from the original OVA (recorded)"
+      - name: "Lab: preflight → up → qualify (collect + down always run)"
+        run: |
+          set -euo pipefail
+          export LAB_DIR="$LAB_ROOT/lab"
+          export LAB_OVA="$(ls "$LAB_ROOT/ova/"*.ova)"
+          export LAB_OVA_SHA256="$(cut -d' ' -f1 "$LAB_ROOT/ova/"*.ova.sha256)"
+          export LAB_EXPECT_IMAGE_ID="$ORIGINAL_IMAGE_ID" LAB_MIN_FREE_GB=20 LAB_ACCEL=kvm
+          test/e2e/appliance/lab/appliance-lab.sh all
+      - name: Report
+        if: always()
+        run: |
+          [ -f "$LAB_ROOT/lab/evidence/REPORT.md" ] && cat "$LAB_ROOT/lab/evidence/REPORT.md" >> "$GITHUB_STEP_SUMMARY" || echo "no REPORT.md" >> "$GITHUB_STEP_SUMMARY"
+          mkdir -p "$LAB_ROOT/lab/evidence/build"
+          cp "$LAB_ROOT/ova/"{build-info.json,build-upgrades.txt,dpkg-list.txt,host-components.txt,prepare-guest.log} "$LAB_ROOT/ova/"*.ova.sha256 "$LAB_ROOT/lab/evidence/build/" 2>/dev/null || true
+          cp "$LAB_ROOT/rebuilt.fingerprint.tsv" "$LAB_ROOT/build-ova.log" "$LAB_ROOT/lab/evidence/build/" 2>/dev/null || true
+          printf 'lab_commit=%s\nappliance_source=%s\noriginal_ova_sha256=%s (NOT the artifact booted here)\nsource_image_run=%s from=%s\n' \
+            "$GITHUB_SHA" "$APPLIANCE_SOURCE_SHA" "$ORIGINAL_OVA_SHA256" "$SOURCE_IMAGE_RUN_ID" "${{ steps.image.outputs.from }}" > "$LAB_ROOT/lab/evidence/identities.txt"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: appliance-lab-evidence
+          path: ${{ env.LAB_ROOT }}/lab/evidence
+          retention-days: 30
+          if-no-files-found: warn
+
+  f-disk-1:
+    name: "Lab · F-DISK-1 on the bounded nested-Docker host (known failure)"
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/setup-go-cache
+        with:
+          cache-dependency-path: cmd/culvert-maint/go.sum
+      - name: Obtain + load the source image (verified sha256)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          test/e2e/appliance/lab/obtain-image.sh "$RUNNER_TEMP/in"
+          docker load -i "$RUNNER_TEMP/in/culvert-image.tar" && docker image inspect culvert:ci-smoke --format 'id={{.Id}}'
+      - name: Pre-pull harness images (retry)
+        run: |
+          set -euo pipefail
+          pull_retry() { for i in 1 2 3 4; do docker pull -q "$1" && return 0; sleep $((i*3)); done; return 1; }
+          for img in registry:2 busybox:stable docker:29-dind@sha256:7dcdfc4a20246236f558175182ccace1eb15a41bd3eb119dd2284f393498b7c1; do pull_retry "$img"; done
+      - name: "F-DISK-1 midwrite: fill during the active category write, record, recover, verify integrity"
+        # Fill is a file inside a 2 GiB loop-mounted ext4 owned by a nested dockerd;
+        # the runner's filesystem never fills. Reproducing the crash is a KNOWN
+        # FAILURE, never a survival pass; exit 1 = a recovery/integrity check failed,
+        # exit 2 = inconclusive (no write observed).
+        run: |
+          sudo -E env "PATH=$PATH" "HOME=$HOME" "GOCACHE=$(go env GOCACHE)" "GOMODCACHE=$(go env GOMODCACHE)" "GOFLAGS=-mod=mod" \
+            QUAL_ENOSPC_SCENARIO=midwrite CUR_IMAGE=culvert:ci-smoke PRED_IMAGE=culvert:ci-smoke \
+            EVID="$RUNNER_TEMP/fdisk1" ./test/e2e/appliance/upgrade-enospc-qualify.sh
+      - name: Report
+        if: always()
+        run: cat "$RUNNER_TEMP/fdisk1/REPORT.md" >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || echo "no REPORT.md" >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: appliance-lab-fdisk1-evidence
+          # Named files only: the evidence dir also holds the 2 GiB loop image.
+          path: |
+            ${{ runner.temp }}/fdisk1/REPORT.md
+            ${{ runner.temp }}/fdisk1/checks.jsonl
+            ${{ runner.temp }}/fdisk1/diagnose.log
+          retention-days: 30
+          if-no-files-found: warn
