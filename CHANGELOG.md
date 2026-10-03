@@ -70,6 +70,27 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   (requirements matrix, questionnaire, transition matrix, state/key-custody
   matrix, runbooks, readiness report); Docker-driven qualification
   harnesses under `test/e2e/appliance/` run against real released images.
+- **Owner review round 3 (PR #1528).** `--recover-restore` is restartable:
+  the journal records the chosen direction and the progress of the return,
+  an interrupted revert or complete resumes exactly where it stopped, the
+  other direction is refused once one has begun, and a revert whose previous
+  data is missing is refused instead of "succeeding" over an empty volume.
+  The first-admin wizard is gated by a per-instance **setup token**
+  (`CULVERT_SETUP_TOKEN`, header `X-Culvert-Setup-Token`): minted at first
+  boot, shown on the console and by `sudo culvert-status`, enforced by the
+  proxy on the published admin port. A key-only OVA import gets a usable
+  sudo path (`95-culvert-keyonly`, NOPASSWD — the SSH key is the credential;
+  `culvert-sudo-policy require-password` switches back and refuses while no
+  password exists), an interrupted console-password mint is re-minted, and
+  the maintenance-agent step records a verified install or a degraded
+  `agent.pending` with its reason; `sudo culvert-firstboot --repair-agent` is
+  the explicit retry. ext4's `lost+found` no longer blocks a restore on a
+  dedicated data volume. The real-image lifecycle, real-ClamAV and agent
+  harnesses are blocking Deep PR Gate jobs against the PR-head image, with a
+  full-volume (ENOSPC) restore scenario; the OVA build has a labelled
+  candidate mode from a CI image artifact; guest security updates are
+  applied at build time from a pinned archive snapshot; every CVE on the
+  shipped artefacts has a disposition.
 
 ### Security
 

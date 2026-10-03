@@ -68,7 +68,14 @@ Two consequences worth knowing:
 1. **The proxy cannot read backups at runtime.** A compromise of the proxy
    process cannot exfiltrate prior archives. `/backup` only exists inside
    the ephemeral `cli` container.
-2. **`/backup` can be redirected to off-host storage** (NFS, SMB, a host
+2. **`/data` may be a dedicated filesystem.** A block device or loop-backed
+   ext4 image mounted as `proxy-data` works, including for restore: the
+   root-owned `lost+found` ext4 creates at the volume root is treated as a
+   filesystem fixture — never staged, evacuated or promoted by a restore
+   commit (the unprivileged proxy could neither read nor rename it, which
+   used to fail the commit at the stage step). Nothing else at the volume
+   root is exempt; a restore moves every other top-level entry.
+3. **`/backup` can be redirected to off-host storage** (NFS, SMB, a host
    bind mount, or an operator-managed sync target) without exposing
    `/data`. Override the volume in your `docker-compose.override.yml`:
    ```yaml

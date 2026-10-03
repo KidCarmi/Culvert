@@ -58,6 +58,8 @@ stale by import time; the sidecar downloads it on first start (see first-boot).
 # from the repository root, on the commit being released
 appliance/build/build-ova.sh --out appliance/build/out --work /var/tmp/culvert-ova
 #   --skip-cosign        do not cosign-verify the proxy image (dev only; recorded in build-info)
+#   --candidate-image-tar FILE --candidate-source SHA [--candidate-run-id ID]
+#                        CANDIDATE build from a CI image tar (see below)
 #   --stop-after disk    stop at the customized qcow2 (boot/test it; no VMDK/OVA)
 #   --stop-after vmdk    stop after the streamOptimized VMDK
 #   --keep-work          keep the working directory for inspection
@@ -128,6 +130,49 @@ verifies on import.
   `.ova.sha256`/`build-info.json` from the release, not by rebuilding it.
 * The base image serial is pinned, so a newer Ubuntu cloud image is a manifest
   change, never a silent drift.
+* **Guest security updates are pinned too.** `prepare-guest.sh` step 1b runs
+  `apt-get upgrade` against the Ubuntu archive SNAPSHOT named by
+  `GUEST_APT_SNAPSHOT` in `manifest.env` (`apt -o Acquire::Snapshot`,
+  snapshot.ubuntu.com), so the base image's packages ship at a reviewed,
+  dated state instead of the serial's — same manifest, same versions — and
+  `build-upgrades.txt` next to the OVA lists what moved. `upgrade`, never
+  `dist-upgrade`: no new kernel ABI is installed at build time; the kernel
+  moves through `culvert-os-update os` after deployment. Raising the
+  snapshot is a pin change like any other.
+
+## Candidate builds (qualification of an unpublished image — never for customers)
+
+`--candidate-image-tar FILE --candidate-source SHA [--candidate-run-id ID]`
+builds the OVA from a `docker save` tarball instead of a signed release
+pulled by digest — the Deep PR Gate's `deep-gate-image` artifact
+(`culvert-image.tar`) is the intended input, so the OVA carries the
+application, deploy bundle (compose, agent binary, packaging) **and** this
+checkout's provisioning files from one source SHA. `--candidate-source` must
+equal `HEAD` unless `--candidate-allow-provisioning-drift` is given, which
+records both SHAs. What makes it a candidate and not a release:
+
+* the version is `<app>-candidate.<sha12>`, the OVF product line and
+  annotation say CANDIDATE / NOT FOR PRODUCTION, `build-info.json` carries a
+  `candidate` object (image source SHA, provisioning SHA, drift flag, image
+  tar SHA-256, CI run id) and `culvert-status` prints a banner on the guest;
+* **signature verification is not bypassed** — an unsigned CI artifact has no
+  signature to verify, and `build-info.json` records exactly that
+  (`application.cosign: not applicable — CANDIDATE …`) instead of a skipped
+  check;
+* the only candidate-scoped trust decision is the maintenance agent:
+  `install.sh` admits the bundled agent only for a cosign-verified image, so
+  `culvert-firstboot` exports its break-glass
+  `CULVERT_MAINT_TRUST_UNVERIFIED_IMAGE=1` **only** when the guest manifest
+  carries `CANDIDATE_BUILD=1`, logs it on every run and prints it on the
+  console. A release OVA never sets it (`appliance_firstboot_test.go` pins
+  both halves).
+
+```bash
+# from the preserved Deep gate artifact of PR head <sha>
+unzip deep-gate-image.zip            # → culvert-image.tar
+appliance/build/build-ova.sh --candidate-image-tar culvert-image.tar \
+  --candidate-source <sha> --candidate-run-id <run id> --out out/
+```
 
 ## Why Ubuntu 24.04 and not Debian 12 / Ubuntu 26.04
 
