@@ -29,6 +29,10 @@ concurrency:
   cancel-in-progress: false
 
 env:
+  # focused: build (closure + offline cold-load inside it), the disposable-store
+  # replay and the ClamAV readiness check — no QEMU qualification. full: also
+  # boot and qualify the OVA.
+  LAB_STAGE: focused
   # Superseded candidate (historical; does not boot under BIOS, #1528 §3f).
   # Its guest-content fingerprint stays the comparison reference.
   ORIGINAL_OVA_SHA256: e24eb542f973fb70360bad5124ef81fdab8b6f8d67af601720613cbcca3700a4
@@ -150,31 +154,18 @@ jobs:
           path: ${{ env.LAB_ROOT }}/in/culvert-image.tar
           retention-days: 30
           compression-level: 0
-      - name: "Diagnostic: does this Docker save a COMPLETE ClamAV image? (F-OVA-CLAMAV-1)"
-        # Runner builds baked a 69,562-byte ClamAV archive (no config, no
-        # layers) where the qualification host baked 152,380,114 bytes. This
-        # step only observes; build-ova.sh's closure check decides.
+      - name: "Diagnostic: replay the builder's ClamAV save in a FRESH disposable store (F-OVA-CLAMAV-1)"
+        # build-ova.sh pulls by the pinned digest, tags, and saves BY TAG. The
+        # replay runs exactly that in its own docker:dind data root — never in
+        # the daemon the build uses, so it cannot pre-populate or repair it.
+        # Observes only; the build's closure and cold-load checks decide.
         continue-on-error: true
         run: |
           set -uo pipefail
           . appliance/build/manifest.env
-          . appliance/build/archive-identity.sh
-          ref="${CLAMAV_IMAGE_REPO}@${CLAMAV_IMAGE_INDEX_DIGEST}"
-          docker pull -q "$ref"
-          docker image ls --tree "$ref" 2>&1 | head -20 || true
-          docker image inspect "$ref" --format 'inspect: {{.Id}} {{.Os}}/{{.Architecture}} size={{.Size}}'
-          cfg="$(docker manifest inspect "${CLAMAV_IMAGE_REPO}@${CLAMAV_IMAGE_AMD64_DIGEST}" 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin)["config"]["digest"])' || true)"
-          echo "amd64 config digest: $cfg"
-          sudo ctr -n moby content ls -q 2>/dev/null | grep -c . | sed 's/^/moby content blobs: /'
-          [ -n "$cfg" ] && { sudo ctr -n moby content ls -q | grep -qx "$cfg" && echo "config IN content store" || echo "config NOT in content store"; }
-          grep -n -i 'discard\|snapshotter\|root\b' /etc/containerd/config.toml 2>/dev/null | head -20 || echo "no /etc/containerd/config.toml"
-          cat /etc/docker/daemon.json
-          docker save "$ref" | gzip -n -1 > /tmp/clam-plain.tgz
-          docker save --platform linux/amd64 "$ref" | gzip -n -1 > /tmp/clam-amd64.tgz
-          for f in /tmp/clam-plain.tgz /tmp/clam-amd64.tgz; do
-            echo "$f: $(stat -c %s "$f") bytes"; archive_platform_closure "$f" linux/amd64 || echo "$f: CLOSURE FAILED"
-          done
-          rm -f /tmp/clam-plain.tgz /tmp/clam-amd64.tgz
+          test/e2e/appliance/lab/save-replay.sh "$CLAMAV_IMAGE_REPO" "$CLAMAV_IMAGE_TAG" "$CLAMAV_IMAGE_INDEX_DIGEST" \
+            "$CLAMAV_IMAGE_AMD64_DIGEST" "$COLDLOAD_DIND_IMAGE" "$LAB_ROOT/replay" | tee "$LAB_ROOT/save-replay.txt"
+          echo "builder daemon has no ClamAV image before the build: $(docker image ls -q --filter reference='*clamav*' | wc -l) found"
       - name: Check out the appliance source the candidate is built from
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -190,9 +181,13 @@ jobs:
           if [ "${{ matrix.provisioning }}" = lab ]; then
             # Provisioning from this lab commit: prove its appliance/ tree is
             # the image commit's plus the unit fix and nothing else.
-            changed="$(cd "$GITHUB_WORKSPACE" && diff -rq appliance-src/appliance appliance | sed 's#^Files appliance-src/##; s# and .*##' || true)"
-            echo "appliance/ drift vs $APPLIANCE_SOURCE_SHA: $changed"
-            [ "$changed" = appliance/provision/culvert-firstboot.service ] || { echo "::error::unexpected provisioning drift: $changed"; exit 1; }
+            # Every difference is recorded; only the approved files may differ.
+            (cd "$GITHUB_WORKSPACE" && diff -ruN appliance-src/appliance appliance) > "$LAB_ROOT/provisioning-drift.diff" || true
+            changed="$(cd "$GITHUB_WORKSPACE" && diff -rqN appliance-src/appliance appliance | sed -E 's#^(Files|Only in) appliance-src/##; s# and .*##' | sort || true)"
+            echo "appliance/ drift vs $APPLIANCE_SOURCE_SHA:"; echo "$changed"
+            want="$(printf '%s\n' appliance/build/archive-identity.sh appliance/build/build-ova.sh appliance/build/cold-load-check.sh \
+              appliance/build/manifest.env appliance/provision/culvert-firstboot.service | sort)"
+            [ "$changed" = "$want" ] || { echo "::error::provisioning drift differs from the approved set: $changed"; exit 1; }
             src="$GITHUB_WORKSPACE"; drift=(--candidate-allow-provisioning-drift)
           fi
           sudo git config --global --add safe.directory "$src"
@@ -200,10 +195,32 @@ jobs:
             "$src/appliance/build/build-ova.sh" \
               --candidate-image-tar "$LAB_ROOT/in/culvert-image.tar" \
               --candidate-source "$APPLIANCE_SOURCE_SHA" --candidate-run-id "$SOURCE_IMAGE_RUN_ID" "${drift[@]}" \
-              --out "$LAB_ROOT/ova" --work "$LAB_ROOT/build" 2>&1 | tee "$LAB_ROOT/build-ova.log"
+              --out "$LAB_ROOT/ova" --work "$LAB_ROOT/build" --keep-work 2>&1 | tee "$LAB_ROOT/build-ova.log"
           sudo chown -R "$(id -u):$(id -g)" "$LAB_ROOT/ova"
           cat "$LAB_ROOT/ova/"*.ova.sha256
           rm -f "$LAB_ROOT/in/culvert-image.tar"
+      - name: "Diagnostic (after a failed build): what the builder's own daemon holds"
+        # Runs only AFTER the build failed, so it cannot influence it.
+        if: failure()
+        run: |
+          set -uo pipefail
+          . appliance/build/manifest.env
+          docker image ls --tree 2>&1 | head -40
+          sudo ctr -n moby images ls 2>/dev/null | grep -i clamav || true
+          cfg=sha256:5ca07785ce6993ebdac0dc329b1866e09ca28a6336223879f839b7c530d39bd9
+          sudo ctr -n moby content ls -q | grep -qx "$cfg" && echo "amd64 config IN the builder's content store" || echo "amd64 config NOT in the builder's content store"
+          ls -l "$LAB_ROOT/build/overlay/var/lib/culvert-appliance/images/" 2>/dev/null || true
+      - name: "Focused check: ClamAV READY from the baked archive alone (empty store, no registry)"
+        # The build already proved create + execute offline; this adds a real
+        # clamd reaching `clamdscan --ping` (signatures via freshclam; the
+        # disposable daemon's registry access goes to a dead proxy).
+        run: |
+          set -euo pipefail
+          . appliance/build/manifest.env
+          appliance/build/cold-load-check.sh --dind "$COLDLOAD_DIND_IMAGE" \
+            --archive "$LAB_ROOT/build/overlay/var/lib/culvert-appliance/images/clamav.tar.gz" \
+            --ref "${CLAMAV_IMAGE_REPO#docker.io/}:${CLAMAV_IMAGE_TAG}" --id "$CLAMAV_IMAGE_INDEX_DIGEST" \
+            --run "clamd --version" --ready-clamav 900 2>&1 | tee "$LAB_ROOT/coldload-clamav-ready.txt"
       - name: Retain the built OVA (unpublished test artifact, before any boot)
         # For the ESXi qualification (test/esxi-qualification), which imports
         # the bytes on a LAN host: kept BEFORE the QEMU boot so a boot failure
@@ -220,6 +237,7 @@ jobs:
           compression-level: 0
           if-no-files-found: error
       - name: "Diagnostic: guest content vs the superseded candidate's fingerprint"
+        if: env.LAB_STAGE == 'full'
         # Informational only (its own LAB_DIR, so it never counts as a lab
         # failure): the new image legitimately changes manifest.env and the
         # baked image tar; everything else should be identical.
@@ -232,6 +250,7 @@ jobs:
           test/e2e/appliance/lab/appliance-lab.sh compare \
             test/e2e/appliance/lab/reference/candidate-4c4b772-e24eb542.fingerprint.tsv "$LAB_ROOT/rebuilt.fingerprint.tsv" || echo "::warning::rebuilt guest content differs from the original OVA (recorded)"
       - name: "Lab: preflight → up → qualify (collect + down always run)"
+        if: env.LAB_STAGE == 'full'
         run: |
           set -euo pipefail
           export LAB_DIR="$LAB_ROOT/lab"
@@ -246,6 +265,7 @@ jobs:
           mkdir -p "$LAB_ROOT/lab/evidence/build"
           cp "$LAB_ROOT/ova/"{build-info.json,build-upgrades.txt,dpkg-list.txt,host-components.txt,prepare-guest.log} "$LAB_ROOT/ova/"*.ova.sha256 "$LAB_ROOT/lab/evidence/build/" 2>/dev/null || true
           cp "$LAB_ROOT/rebuilt.fingerprint.tsv" "$LAB_ROOT/build-ova.log" "$LAB_ROOT/fpcmp/evidence/fingerprint-diff.txt" "$LAB_ROOT/lab/evidence/build/" 2>/dev/null || true
+          cp "$LAB_ROOT/provisioning-drift.diff" "$LAB_ROOT/save-replay.txt" "$LAB_ROOT/coldload-clamav-ready.txt" "$LAB_ROOT/lab/evidence/build/" 2>/dev/null || true
           printf 'variant=%s\nlab_commit=%s\nimage_source=%s\nprovisioning_source=%s\nsource_image_run=%s tar_sha256=%s from=%s\nexpected_image_id=%s\nsuperseded_ova_sha256=%s (NOT the artifact booted here)\n' \
             "${{ matrix.variant }}" "$GITHUB_SHA" "$APPLIANCE_SOURCE_SHA" "$([ "${{ matrix.provisioning }}" = lab ] && echo "$GITHUB_SHA (lab: $APPLIANCE_SOURCE_SHA + firstboot unit fix; provisioning drift)" || echo "$APPLIANCE_SOURCE_SHA")" \
             "$SOURCE_IMAGE_RUN_ID" "$SOURCE_IMAGE_TAR_SHA256" "${{ steps.image.outputs.from }}" \

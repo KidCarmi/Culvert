@@ -88,7 +88,7 @@ set -a
 set +a
 for v in BASE_IMAGE_URL BASE_IMAGE_SHA256 APP_IMAGE_REPO APP_IMAGE_TAG APP_IMAGE_INDEX_DIGEST \
          APP_IMAGE_AMD64_DIGEST CLAMAV_IMAGE_REPO CLAMAV_IMAGE_TAG CLAMAV_IMAGE_INDEX_DIGEST \
-         CLAMAV_IMAGE_AMD64_DIGEST DOCKER_CE_VERSION VM_DISK_GB VM_VCPUS VM_MEMORY_MB VM_HW_VERSION; do
+         CLAMAV_IMAGE_AMD64_DIGEST COLDLOAD_DIND_IMAGE DOCKER_CE_VERSION VM_DISK_GB VM_VCPUS VM_MEMORY_MB VM_HW_VERSION; do
   [[ -n "${!v:-}" ]] || die "manifest.env: $v is not set"
 done
 
@@ -293,10 +293,20 @@ archive_names_digest "$OV/var/lib/culvert-appliance/images/culvert.tar.gz" "$APP
 # every layer, size and digest checked), not merely name one: a 69 KB ClamAV
 # archive with no layers loaded "successfully" and broke first boot
 # (archive-identity.sh, F-OVA-CLAMAV-1).
-for a in culvert clamav; do
-  archive_platform_closure "$OV/var/lib/culvert-appliance/images/$a.tar.gz" linux/amd64 \
-    || die "the saved $a archive does not carry a complete linux/amd64 image — refusing to bake it"
-done
+archive_platform_closure "$OV/var/lib/culvert-appliance/images/culvert.tar.gz" linux/amd64 "$APP_IMAGE_INDEX_DIGEST" "$APP_IMAGE_AMD64_DIGEST" \
+  || die "the saved application archive does not carry the complete pinned linux/amd64 image — refusing to bake it"
+archive_platform_closure "$OV/var/lib/culvert-appliance/images/clamav.tar.gz" linux/amd64 "$CLAMAV_IMAGE_INDEX_DIGEST" "$CLAMAV_IMAGE_AMD64_DIGEST" \
+  || die "the saved ClamAV archive does not carry the complete pinned linux/amd64 image — refusing to bake it"
+# ...and must RUN from that content alone: load into an empty disposable
+# containerd store with no registry, create a container, execute a binary.
+"$HERE/cold-load-check.sh" --dind "$COLDLOAD_DIND_IMAGE" \
+  --archive "$OV/var/lib/culvert-appliance/images/culvert.tar.gz" --ref "${APP_IMAGE_REPO}:${APP_IMAGE_TAG}" \
+  --id "$APP_IMAGE_INDEX_DIGEST" --run "/app/deploy/bin/culvert-maint -version" \
+  || die "the application archive does not run from its own content in an empty store — refusing to bake it"
+"$HERE/cold-load-check.sh" --dind "$COLDLOAD_DIND_IMAGE" \
+  --archive "$OV/var/lib/culvert-appliance/images/clamav.tar.gz" --ref "${CLAMAV_IMAGE_REPO#docker.io/}:${CLAMAV_IMAGE_TAG}" \
+  --id "$CLAMAV_IMAGE_INDEX_DIGEST" --run "clamd --version" \
+  || die "the ClamAV archive does not run from its own content in an empty store — refusing to bake it"
 APP_TAR_SHA="$(sha256sum "$OV/var/lib/culvert-appliance/images/culvert.tar.gz" | cut -d' ' -f1)"
 CLAM_TAR_SHA="$(sha256sum "$OV/var/lib/culvert-appliance/images/clamav.tar.gz" | cut -d' ' -f1)"
 INSTALL_SHA="$(sha256sum "$REPO/scripts/install.sh" | cut -d' ' -f1)"
