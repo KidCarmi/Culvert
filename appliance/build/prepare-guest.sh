@@ -122,10 +122,14 @@ if [[ -n "${GUEST_APT_SNAPSHOT:-}" ]]; then
     -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold upgrade
   after="$(dpkg-query -W -f='${binary:Package}=${Version}\n' | sort)"
   # Shipped as evidence: exactly which packages the snapshot upgrade moved.
+  # comm, not diff: diff exits 1 whenever the lists differ, which under
+  # `set -o pipefail` aborted the whole first candidate build right after the
+  # upgrade had succeeded (measured). comm exits 0 on differences.
   { echo "# guest packages upgraded at build time from snapshot ${GUEST_APT_SNAPSHOT} (old -> new)"
-    diff <(echo "$before") <(echo "$after") | sed -n 's/^[<>] //p' | sort | awk -F= '{v[$1]=v[$1] (v[$1]?" -> ":"") $2} END{for (p in v) print p " " v[p]}' | sort
+    comm -3 <(echo "$before") <(echo "$after") | tr -d '\t' | sort | awk -F= '{v[$1]=v[$1] (v[$1]?" -> ":"") $2} END{for (p in v) print p " " v[p]}' | sort
   } > "$STATE/build-upgrades.txt"
-  log "build-time upgrades: $(grep -vc '^#' "$STATE/build-upgrades.txt") package(s) moved"
+  moved="$(grep -vc '^#' "$STATE/build-upgrades.txt" || true)"
+  log "build-time upgrades: ${moved:-0} package(s) moved"
   # Leave the snapshot behind: the deployed appliance updates from the live
   # archive (unattended-upgrades + culvert-os-update), never from a snapshot.
   apt-get -qq update
