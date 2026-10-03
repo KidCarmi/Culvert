@@ -194,8 +194,14 @@ diagnose(){ local tag="$1"; {
 # logFile.writeEntry). That is a data-plane finding recorded in the readiness
 # report, not something this harness qualifies; filling mid-sync would turn
 # every E1 probe into a measurement of that race instead of the upgrade path.
+# "Is a category feed store configured?" is read from what EVERY release
+# shares — the container's own -cat-feed-db argument, or the FeedSync start
+# line — never from a log line only newer builds print: E1 runs the
+# PREDECESSOR, and keying on `CatFeedDB: BadgerDB at` (absent in v1.0.259)
+# skipped this wait and filled the disk mid-sync (run 37121524210).
 feed_idle=""
-if IN docker logs culvert 2>&1 | grep -q 'CatFeedDB: BadgerDB at'; then
+feed_cmd="$(IN docker inspect -f '{{json .Config.Cmd}} {{json .Config.Entrypoint}}' culvert 2>/dev/null || true)"
+if [[ "$feed_cmd" == *cat-feed-db* ]] || IN docker logs culvert 2>&1 | grep -q 'FeedSync: starting'; then
   for _ in $(seq 1 120); do
     feed_idle="$(IN docker logs culvert 2>&1 | grep -m1 -oE 'FeedSync: (sync complete[^"]*|download/parse failed|bulk write failed|write REFUSED)' || true)"
     [[ -n "$feed_idle" ]] && break; sleep 5

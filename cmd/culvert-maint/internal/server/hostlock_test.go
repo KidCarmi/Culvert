@@ -5,6 +5,8 @@ package server
 import (
 	"encoding/json"
 	"net/http"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -67,4 +69,33 @@ func TestHostLock_HeldForTheWholeOperation(t *testing.T) {
 		t.Fatal("the lock must be released when the op ends")
 	}
 	release()
+}
+
+// An indeterminate lock (the file cannot be opened) must refuse, not admit
+// with only the in-memory lock (Codex P1, PR #1528). A self-referential
+// symlink fails open(2) with ELOOP even for root, so the gate does not
+// depend on file permissions.
+func TestHostLock_UnopenableLockRefusesAdmission(t *testing.T) {
+	rig := startApplyRig(t)
+	defer rig.stop()
+	lockPath := filepath.Join(rig.stateDir, hostMaintenanceLockName)
+	if err := os.Symlink(lockPath, lockPath); err != nil {
+		t.Fatal(err)
+	}
+	status, body := rig.post(t, map[string]interface{}{"image_ref": repo + "@sha256:" + digNew})
+	var out map[string]interface{}
+	_ = json.Unmarshal(body, &out)
+	if status != http.StatusServiceUnavailable || out["error"] != "host_maintenance_lock_unavailable" {
+		t.Fatalf("admission with an unopenable host lock: %d %s", status, body)
+	}
+	if rig.sawCommand("pull") || rig.sawCommand("up") {
+		t.Fatal("a refused op must not touch Docker")
+	}
+	// CONTROL: a sound lock file admits the same request.
+	if err := os.Remove(lockPath); err != nil {
+		t.Fatal(err)
+	}
+	if op, _ := rig.acceptAndWait(t, map[string]interface{}{"image_ref": repo + "@sha256:" + digNew}); op["state"] != "succeeded" {
+		t.Fatalf("with a sound lock the upgrade must run: %+v", op)
+	}
 }

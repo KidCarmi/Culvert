@@ -939,8 +939,15 @@ func (s *Server) takeHostLock(opID, kind, actor string, params map[string]interf
 			"detail": "culvert-os-update is running on this host; retry when it has finished",
 		}}, opID)
 	case err != nil:
-		log.Printf("culvert-maint: WARN host maintenance lock unavailable (%v); proceeding without it", err)
-		return nil, nil
+		// Indeterminate is not "free": admitting here would let a retag or
+		// stack recreate run under an engine upgrade or reboot, the exact
+		// overlap the shared lock exists to prevent (Codex P1, PR #1528).
+		log.Printf("culvert-maint: ERROR host maintenance lock unavailable (%v); refusing the operation", err)
+		s.recordAdmissionFailure(opID, kind, actor, params, idemKey, "host_maintenance_lock_unavailable")
+		return nil, augmentErrorWithOp(&opError{Status: http.StatusServiceUnavailable, Body: map[string]string{
+			"error":  "host_maintenance_lock_unavailable",
+			"detail": "cannot open or lock " + hostMaintenanceLockName + " in the agent state directory; check its ownership and permissions (the agent must be able to open it read-only)",
+		}}, opID)
 	}
 	return rel, nil
 }

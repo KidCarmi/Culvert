@@ -177,8 +177,11 @@ if [[ -n "$CANDIDATE_TAR" ]]; then
   docker tag "$loaded" "${APP_IMAGE_REPO}:${APP_IMAGE_TAG}"
   arch="$(docker image inspect "${APP_IMAGE_REPO}:${APP_IMAGE_TAG}" --format '{{.Architecture}}/{{.Os}}')"
   [[ "$arch" == "amd64/linux" ]] || die "candidate image is $arch, want amd64/linux"
-  # No registry, no index: the image ID (config digest) is the identity the
-  # guest's first boot re-checks after `docker load`.
+  # No registry: the image ID is the identity the guest's first boot re-checks
+  # after `docker load`. On the containerd image store this build requires,
+  # .Id is the OCI MANIFEST digest the saved archive's index.json lists (not
+  # the config digest, which only the classic store reports as .Id — and the
+  # classic store is refused by archive_names_digest below).
   APP_IMAGE_INDEX_DIGEST="$(docker image inspect "${APP_IMAGE_REPO}:${APP_IMAGE_TAG}" --format '{{.Id}}')"
   APP_IMAGE_AMD64_DIGEST="$APP_IMAGE_INDEX_DIGEST"
   APP_REF="${APP_IMAGE_REPO}:${APP_IMAGE_TAG}"

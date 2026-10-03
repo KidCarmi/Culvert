@@ -9,15 +9,34 @@
 # interface, then `netplan apply`. cloud-init's generated DHCP config stays in
 # place and is overridden by the higher-numbered file; `dhcp` removes ours.
 set -euo pipefail
-NP=/etc/netplan/60-culvert.yaml
+NP="${CULVERT_NET_NETPLAN_FILE:-/etc/netplan/60-culvert.yaml}"
 cmd="${1:-show}"
 # The interface carrying the default route, else the first physical-looking one.
 iface="$(ip -4 route show default 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}')"
 [[ -n "$iface" ]] || iface="$(ip -o link show | awk -F': ' '$2 ~ /^(en|eth)/ {print $2; exit}')"
 [[ -n "$iface" ]] || { echo "no network interface found" >&2; exit 1; }
 need_root() { [[ "$(id -u)" -eq 0 ]] || { echo "run with sudo" >&2; exit 1; }; }
-valid_cidr() { [[ "$1" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}/[0-9]{1,2}$ ]] || [[ "$1" =~ ^[0-9a-fA-F:]+/[0-9]{1,3}$ ]]; }
-valid_ip()   { [[ "$1" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] || [[ "$1" =~ ^[0-9a-fA-F:]+$ ]]; }
+# Real parsing, not shape regexes: `999.1.1.1/99` has the right shape and
+# would be written to netplan, failing first boot and leaving a persistent
+# file that breaks networking on the next boot (Codex P1, PR #1528).
+# ip_family prints 4 or 6 for a valid address (with a prefix when $2=cidr).
+ip_family() {
+  python3 - "$1" "${2:-}" <<'PY' 2>/dev/null
+import ipaddress, sys
+v, kind = sys.argv[1], sys.argv[2]
+if kind == "cidr":
+    if v.count("/") != 1:
+        sys.exit(1)
+    a = ipaddress.ip_interface(v)
+else:
+    a = ipaddress.ip_address(v)
+print(a.version)
+PY
+}
+valid_cidr() { [[ -n "$(ip_family "$1" cidr)" ]]; }
+valid_ip()   { [[ -n "$(ip_family "$1")" ]]; }
+# A search domain is interpolated into YAML: hostname characters only.
+valid_domain() { [[ "$1" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$ ]]; }
 
 case "$cmd" in
   show)
@@ -37,12 +56,16 @@ case "$cmd" in
     [[ -n "$addr" && -n "$gw" ]] || { echo "usage: culvert-net static <addr/prefix> <gateway> [dns,dns] [search,search]" >&2; exit 2; }
     valid_cidr "$addr" || { echo "bad address/prefix: $addr" >&2; exit 2; }
     valid_ip "$gw"     || { echo "bad gateway: $gw" >&2; exit 2; }
+    [[ "$(ip_family "$addr" cidr)" == "$(ip_family "$gw")" ]] || { echo "gateway $gw is not in the address family of $addr" >&2; exit 2; }
     dns_yaml=""; search_yaml=""
     if [[ -n "$dns" ]]; then
       IFS=',' read -ra d <<<"$dns"; for x in "${d[@]}"; do valid_ip "$x" || { echo "bad DNS server: $x" >&2; exit 2; }; done
       dns_yaml="        addresses: [$(printf '%s' "$dns" | sed 's/,/, /g')]"
     fi
-    [[ -n "$search" ]] && search_yaml="        search: [$(printf '%s' "$search" | sed 's/,/, /g')]"
+    if [[ -n "$search" ]]; then
+      IFS=',' read -ra d <<<"$search"; for x in "${d[@]}"; do valid_domain "$x" || { echo "bad search domain: $x" >&2; exit 2; }; done
+      search_yaml="        search: [$(printf '%s' "$search" | sed 's/,/, /g')]"
+    fi
     tmp="$(mktemp)"
     {
       echo "# written by culvert-net; remove with: sudo culvert-net dhcp"
@@ -62,8 +85,18 @@ case "$cmd" in
         [[ -n "$search_yaml" ]] && echo "$search_yaml"
       fi
     } > "$tmp"
+    # Keep the previous file until netplan accepts the new one, so a value
+    # netplan rejects never persists into the next boot.
+    prev=""
+    if [[ -f "$NP" ]]; then prev="$(mktemp)"; cp -p "$NP" "$prev"; fi
     install -m 0600 "$tmp" "$NP"; rm -f "$tmp"
-    netplan generate
+    if ! netplan generate; then
+      if [[ -n "$prev" ]]; then mv -f "$prev" "$NP"; else rm -f "$NP"; fi
+      netplan generate || true
+      echo "netplan rejected the static configuration; the previous network configuration is kept" >&2
+      exit 1
+    fi
+    [[ -n "$prev" ]] && rm -f "$prev"
     netplan apply
     echo "static address $addr via $gw applied on $iface"
     ;;
