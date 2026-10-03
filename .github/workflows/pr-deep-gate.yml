@@ -171,8 +171,14 @@ jobs:
             terraform=true; appliance=true
           fi
 
+          # Every job that `needs: build-image` must be covered here, or a
+          # change that selects that job without selecting the build skips
+          # the job — and the aggregate reads a skipped job as a pass. `maint`
+          # selects `appliance-agent` (Codex P1, PR #1528: a maint-only change
+          # got a green gate with the agent qualification never run).
+          # Pinned by appliance_ci_lane_test.go.
           image_needed=false
-          if $proxy_core || $security || $docker || $deps || $release || $appliance; then
+          if $proxy_core || $security || $docker || $deps || $release || $appliance || $maint; then
             image_needed=true
           fi
           for k in proxy_core security docker deps tests packaging release maint terraform appliance image_needed; do

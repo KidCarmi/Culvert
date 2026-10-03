@@ -11,6 +11,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -29,6 +30,11 @@ func TestApplianceLane_ClassifierRunsTheHarnessesForApplianceChanges(t *testing.
 		"docker-compose.yml":                         {"appliance=true", "docker=true", "image_needed=true"},
 		"packaging/culvert-maint/install.sh":         {"appliance=true", "packaging=true"},
 		"appliance/os-maintenance/culvert-os-update": {"appliance=true", "packaging=true"},
+		// Codex P1 (PR #1528): a maintenance-agent-only change selects the
+		// appliance-agent job, which consumes the gate image — so it must
+		// also build it, or the job is skipped and the aggregate reads the
+		// skip as a pass.
+		"cmd/culvert-maint/internal/runner/runner.go": {"maint=true", "image_needed=true", "appliance=false"},
 	}
 	for path, wants := range cases {
 		t.Run(path, func(t *testing.T) {
@@ -123,5 +129,63 @@ func TestApplianceLane_JobsConsumeTheGateImageAndAreAggregated(t *testing.T) {
 	// The real-ClamAV job must really run the real sidecar.
 	if !strings.Contains(string(raw), "CULVERT_QUALIFY_REAL_CLAMAV: \"1\"") {
 		t.Error("appliance-clamav must set CULVERT_QUALIFY_REAL_CLAMAV=1")
+	}
+}
+
+// Every job that consumes the gate image (`needs: build-image`) must be
+// selected only by classifier outputs that ALSO set image_needed; otherwise a
+// change selecting the job without the build skips it, and needs-verdict
+// reads a skipped job as a pass (Codex P1, PR #1528: `maint` selected
+// appliance-agent while image_needed ignored it). Structural, so a future job
+// or classifier edit cannot reopen the gap without failing here.
+func TestApplianceLane_ImageConsumersAreCoveredByImageNeeded(t *testing.T) {
+	path := filepath.Join(pkgSourceDir(), ".github", "workflows", "pr-deep-gate.yml")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := regexp.MustCompile(`(?m)^\s*if (\$[a-z_]+(?: \|\| \$[a-z_]+)*); then\n\s*image_needed=true`).FindStringSubmatch(string(raw))
+	if m == nil {
+		t.Fatal("image_needed expression not found in the classifier")
+	}
+	covered := map[string]bool{}
+	for _, v := range strings.Split(m[1], "||") {
+		covered[strings.TrimPrefix(strings.TrimSpace(v), "$")] = true
+	}
+	if !covered["appliance"] || !covered["maint"] {
+		t.Fatalf("image_needed must cover appliance and maint, got %v", covered)
+	}
+	jobs := asMap(genericWorkflow(t, path)["jobs"])
+	outRef := regexp.MustCompile(`needs\.changes\.outputs\.([a-z_]+) == 'true'`)
+	consumers := 0
+	for name, raw := range jobs {
+		j := asMap(raw)
+		needs, _ := j["needs"].([]interface{})
+		dependsOnImage := false
+		for _, n := range needs {
+			if toStr(n) == "build-image" {
+				dependsOnImage = true
+			}
+		}
+		if !dependsOnImage {
+			continue
+		}
+		consumers++
+		cond := toStr(j["if"])
+		if strings.Contains(cond, "always()") {
+			continue // the aggregate: it depends on every job and renders the verdict
+		}
+		refs := outRef.FindAllStringSubmatch(cond, -1)
+		if len(refs) == 0 {
+			t.Errorf("job %s needs build-image but has no classifier condition (%q)", name, cond)
+		}
+		for _, r := range refs {
+			if r[1] != "image_needed" && !covered[r[1]] {
+				t.Errorf("job %s is selected by output %q, which does not set image_needed — a %s-only change would skip it silently", name, r[1], r[1])
+			}
+		}
+	}
+	if consumers < 3 {
+		t.Fatalf("expected the three appliance jobs (at least) to consume build-image, found %d", consumers)
 	}
 }

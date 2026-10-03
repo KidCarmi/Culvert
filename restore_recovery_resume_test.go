@@ -260,6 +260,21 @@ func TestRecoverRestore_Revert_MissingBakInPromoting_RefusesAndMovesNothing(t *t
 	if jj, _, _ := readRestoreJournal(dir); jj.Progress != "" {
 		t.Errorf("no progress marker may be written by a refused revert, got %q", jj.Progress)
 	}
+	// Codex review (PR #1528): the refusal recommends `--confirm=complete`,
+	// so it must not have LOCKED the direction to revert first — nothing was
+	// moved, so no direction has begun. Pre-fix the direction was recorded
+	// before the material check and the recommended complete was refused as
+	// "a revert recovery is already in progress".
+	if jj, _, _ := readRestoreJournal(dir); jj.Recovery != "" {
+		t.Errorf("a refused revert must not record a direction, got %q", jj.Recovery)
+	}
+	if err := runRecoverRestore(dir, recoverActionComplete, &out); err != nil {
+		t.Fatalf("the complete the refusal recommends must succeed, got %v\n%s", err, out.String())
+	}
+	assertTreeEqual(t, "complete after the refused revert lands the restored set", snapshotTree(t, dir), restored)
+	if err := checkInterruptedRestore(dir); err != nil {
+		t.Errorf("boot guard must be clear after the complete: %v", err)
+	}
 	// The same holds one phase earlier: an `evacuating` journal with no bak
 	// dir cannot prove the live dir holds everything (the operator may have
 	// removed a bak dir WITH content), so revert refuses there too.
@@ -347,7 +362,7 @@ func TestRecoverRestore_Complete_InterruptedDuringPromote_Resumes(t *testing.T) 
 // marker the commit writes before its rmdir; without it the dir may have
 // been deleted with content, so complete refuses and moves nothing.
 func TestRecoverRestore_Complete_MissingStagingWithoutMarker_Refuses(t *testing.T) {
-	dir, _, _ := promotingFixture(t)
+	dir, previous, _ := promotingFixture(t)
 	j, _, _ := readRestoreJournal(dir)
 	if err := os.RemoveAll(filepath.Join(dir, j.StagingDir)); err != nil {
 		t.Fatal(err)
@@ -360,6 +375,44 @@ func TestRecoverRestore_Complete_MissingStagingWithoutMarker_Refuses(t *testing.
 	assertTreeEqual(t, "live data must be untouched", snapshotTree(t, dir), before)
 	if _, present, _ := readRestoreJournal(dir); !present {
 		t.Error("journal must be kept")
+	}
+	// Codex review (PR #1528): the refusal recommends `--confirm=revert`, so
+	// the direction must not have been locked to complete first.
+	if jj, _, _ := readRestoreJournal(dir); jj.Recovery != "" {
+		t.Errorf("a refused complete must not record a direction, got %q", jj.Recovery)
+	}
+	if err := runRecoverRestore(dir, recoverActionRevert, &out); err != nil {
+		t.Fatalf("the revert the refusal recommends must succeed, got %v\n%s", err, out.String())
+	}
+	assertTreeEqual(t, "revert after the refused complete brings the previous set back", snapshotTree(t, dir), previous)
+	if err := checkInterruptedRestore(dir); err != nil {
+		t.Errorf("boot guard must be clear after the revert: %v", err)
+	}
+}
+
+// A complete whose staging dir is missing must be refused BEFORE the
+// evacuating phase moves anything: pre-fix the evacuate step ran first (live
+// → bak), the promote step then refused on the absent staging dir, and the
+// direction was already locked to complete — a live dir emptied by a
+// recovery that could neither finish nor be reverted.
+func TestRecoverRestore_Complete_MissingStagingInEvacuating_RefusesBeforeEvacuating(t *testing.T) {
+	dir := interruptCommit(t, "evacuating")
+	j, _, _ := readRestoreJournal(dir)
+	if err := os.RemoveAll(filepath.Join(dir, j.StagingDir)); err != nil {
+		t.Fatal(err)
+	}
+	before := snapshotTree(t, dir)
+	if len(before) == 0 {
+		t.Fatal("fixture: the live dir must still hold entries in the evacuating phase")
+	}
+	var out bytes.Buffer
+	if err := runRecoverRestore(dir, recoverActionComplete, &out); !errors.Is(err, errRecoveryMaterialMissing) {
+		t.Fatalf("complete with the staging dir missing must refuse as missing material, got %v\n%s", err, out.String())
+	}
+	assertTreeEqual(t, "nothing may be evacuated before the refusal", snapshotTree(t, dir), before)
+	jj, present, _ := readRestoreJournal(dir)
+	if !present || jj.Recovery != "" || jj.Phase != restorePhaseEvacuating {
+		t.Fatalf("journal must be kept, unlocked and still evacuating: present=%v recovery=%q phase=%q", present, jj.Recovery, jj.Phase)
 	}
 }
 
