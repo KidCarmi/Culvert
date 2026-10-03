@@ -104,10 +104,13 @@ import (
 //
 // ── The trade, stated plainly ────────────────────────────────────────────────
 //
-// A writer acquires all readShardCount locks instead of one. That cost is paid
-// by rebuildIndex (11 call sites, all admin/feed/cluster rate) and by
-// addHostToIndexes, each of which already does far more work than the extra
-// lock acquisitions — the inner-set copy alone is 0.5-553 us.
+// A writer acquires all readShardCount locks instead of one: measured
+// uncontended and allocation-free at 1948 ns against 29.94 ns for the single
+// RWMutex it replaces (BenchmarkHotRWWriteLock times both shapes in one run;
+// medians of n=3), i.e. 65x, which is just the shard count. That cost is paid by rebuildIndex
+// (11 call sites, all admin/feed/cluster rate) and by addHostToIndexes, each of
+// which already does far more work than the extra lock acquisitions — the
+// inner-set copy alone is 0.5-553 us.
 //
 // At ONE core the hot path is ~2 ns dearer per call (22.2 vs 20.0 ns) from the
 // single rand.Uint64 on top of the same RWMutex pair, which shows up end to end

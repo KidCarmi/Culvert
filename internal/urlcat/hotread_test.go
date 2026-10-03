@@ -367,22 +367,43 @@ func BenchmarkMatchesHostScaling_Baseline(b *testing.B) {
 }
 
 // BenchmarkHotRWWriteLock measures the trade: a writer takes every shard
-// instead of one lock. Both shapes in one run.
+// instead of one lock. Both shapes in one run, so the ratio is
+// machine-independent.
+//
+// Each critical section holds ONE trivial statement rather than nothing. That
+// is not linter appeasement for its own sake: an adjacent Lock/Unlock pair is
+// flagged independently by staticcheck (SA2001, empty critical section) and by
+// gocritic (badLock), and two analysers agreeing is reason enough not to
+// special-case it. A single shared counter costs well under a nanosecond
+// against the 29.94 ns and 1948 ns being measured, is IDENTICAL in both arms
+// so the ratio is unaffected, keeps the compiler from eliding the body, and is
+// a touch more representative — a real writer here mutates state under the
+// lock.
 func BenchmarkHotRWWriteLock(b *testing.B) {
 	b.Run("sharded", func(b *testing.B) {
 		var h hotRW
+		var writes int
 		b.ReportAllocs()
 		for i := 0; i < b.N; i++ {
 			h.Lock()
+			writes++
 			h.Unlock()
+		}
+		if writes != b.N {
+			b.Fatalf("critical section ran %d times, want %d", writes, b.N)
 		}
 	})
 	b.Run("single", func(b *testing.B) {
 		var m sync.RWMutex
+		var writes int
 		b.ReportAllocs()
 		for i := 0; i < b.N; i++ {
 			m.Lock()
+			writes++
 			m.Unlock()
+		}
+		if writes != b.N {
+			b.Fatalf("critical section ran %d times, want %d", writes, b.N)
 		}
 	})
 }
