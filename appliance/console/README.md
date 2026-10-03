@@ -207,6 +207,22 @@ full browser setup experience is not delivered by this console slice.
 
 ## Visual console integration
 
+The [visual-console ESXi report](evidence/esxi-ui-smoke.json) records implementation
+`6c7e7927`, the exact guest overlay hashes and focused Linux race CI. Real PTY
+tests cover 80x25/80x24, linux/vt100/dumb, keyboard navigation, resize, bracketed
+paste and termios restoration on exit/SIGTERM. Native guest tests and real
+VMware keyboard navigation, PAM rejection/login/logout, Docker-down operation
+and automatic startup after reboot passed. The disposable VM was deleted.
+
+The known candidate provisioning failure remains visible as a blocker. The
+retained [public capture](evidence/esxi-ui-public-partial.png) and
+[authenticated capture](evidence/esxi-ui-admin-partial.png) from the ESXi API are
+partial and are not full visual proof. Complete frames were visually inspected
+earlier; final live terminal content and all four views were separately checked
+in `/dev/vcs1`. Captures were not edited or reconstructed; this limitation
+remains open. Older evidence above
+belongs to the implementation revisions recorded in those reports.
+
 The home view follows the supplied 80-column terminal composition: cyan brand
 and selection, appliance/network identity, a scoped status and next action,
 browser handoff, four visible choices, and an authentication footer. Both 80x25
