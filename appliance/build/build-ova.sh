@@ -279,12 +279,25 @@ if [[ -n "${HTTPS_PROXY:-}" ]]; then
   fi
 fi
 
-save_image() { # ref out.tar.gz
-  log "docker save $1"
-  docker save "$1" | gzip -n -6 > "$2"
+save_image() { # out.tar.gz ref...
+  local out="$1"; shift
+  log "docker save $*"
+  docker save "$@" | gzip -n -6 > "$out"
 }
-save_image "${APP_IMAGE_REPO}:${APP_IMAGE_TAG}"       "$OV/var/lib/culvert-appliance/images/culvert.tar.gz"
-save_image "${CLAMAV_IMAGE_REPO}:${CLAMAV_IMAGE_TAG}"  "$OV/var/lib/culvert-appliance/images/clamav.tar.gz"
+# An image pulled BY DIGEST and then `docker tag`ged is saved under BOTH
+# references. On the containerd image store the tag created from a digest
+# reference carries no platform content (`docker image ls --tree` lists no
+# platform under it), so saving the tag alone exported only the index and
+# manifests: a 69,562-byte ClamAV archive that "loaded" and could not run
+# (F-OVA-CLAMAV-1, reproduced in a fresh disposable store). The digest
+# reference carries the content; the tag is what first boot and compose name.
+# The closure and cold-load checks below prove the result either way.
+if [[ "$CANDIDATE" -eq 1 ]]; then
+  save_image "$OV/var/lib/culvert-appliance/images/culvert.tar.gz" "${APP_IMAGE_REPO}:${APP_IMAGE_TAG}"
+else
+  save_image "$OV/var/lib/culvert-appliance/images/culvert.tar.gz" "${APP_IMAGE_REPO}@${APP_IMAGE_INDEX_DIGEST}" "${APP_IMAGE_REPO}:${APP_IMAGE_TAG}"
+fi
+save_image "$OV/var/lib/culvert-appliance/images/clamav.tar.gz" "${CLAMAV_IMAGE_REPO}@${CLAMAV_IMAGE_INDEX_DIGEST}" "${CLAMAV_IMAGE_REPO}:${CLAMAV_IMAGE_TAG}"
 # First boot checks the loaded image against APP_IMAGE_INDEX_DIGEST; prove the
 # archive carries that identity before baking it (archive-identity.sh).
 archive_names_digest "$OV/var/lib/culvert-appliance/images/culvert.tar.gz" "$APP_IMAGE_INDEX_DIGEST" \

@@ -8,7 +8,7 @@
 # pinned docker:dind container with its own data root, never in the
 # builder's daemon, so it can neither pre-populate nor repair the store the
 # build uses. For comparison it also saves by digest and by tag with
-# --platform. Every archive is checked with archive_platform_closure against
+# --platform, and with both references (the corrected build). Every archive is checked with archive_platform_closure against
 # the pins. Observes only; never fails the job.
 #
 # Usage: save-replay.sh <repo> <tag> <index-digest> <amd64-digest> <dind-image@sha256:…> <out-dir>
@@ -33,8 +33,9 @@ r docker tag "$ref" "$tagged"
 r docker image ls --tree 2>&1 | sed 's/^/tree: /'
 save() { # label docker-save-args...
   local label="$1"; shift
-  r sh -c "set -o pipefail; docker save $* | gzip -n -1 > /tmp/$label.tgz" || { echo "$label: docker save FAILED"; return; }
-  docker cp "$name:/tmp/$label.tgz" "$out/$label.tgz" >/dev/null || { echo "$label: copy-out FAILED"; return; }
+  # Streamed out of the disposable daemon (docker cp could not reach its /tmp).
+  docker exec "$name" docker save "$@" | gzip -n -1 > "$out/$label.tgz" \
+    || { echo "$label: docker save FAILED"; return; }
   local size; size="$(stat -c %s "$out/$label.tgz")"
   if res="$(archive_platform_closure "$out/$label.tgz" linux/amd64 "$idx" "$amd" 2>&1)"; then
     echo "$label: $size bytes — $res"
@@ -43,8 +44,9 @@ save() { # label docker-save-args...
     tar -tzvf "$out/$label.tgz" | sed "s/^/$label member: /"
   fi
 }
-save by-tag "$tagged"                         # exactly build-ova.sh's save
+save by-tag "$tagged"                         # the save that produced F-OVA-CLAMAV-1
 save by-digest "$ref"
 save by-tag-platform --platform linux/amd64 "$tagged"
+save digest-and-tag "$ref" "$tagged"          # build-ova.sh's corrected save
 rm -f "$out"/*.tgz
 exit 0

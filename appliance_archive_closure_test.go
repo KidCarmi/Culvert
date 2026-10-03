@@ -297,3 +297,25 @@ func TestBuildOVA_ColdLoadsBothArchivesBeforeBaking(t *testing.T) {
 		}
 	}
 }
+
+// F-OVA-CLAMAV-1's cause: on the containerd store, a tag created from a
+// digest reference carries no platform content, so saving the tag alone
+// exported a hollow archive. Pulled images are saved under both references.
+func TestBuildOVA_SavesPulledImagesUnderDigestAndTag(t *testing.T) {
+	b, err := os.ReadFile(buildOVAScript)
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := string(b)
+	for _, want := range []string{
+		`save_image "$OV/var/lib/culvert-appliance/images/clamav.tar.gz" "${CLAMAV_IMAGE_REPO}@${CLAMAV_IMAGE_INDEX_DIGEST}" "${CLAMAV_IMAGE_REPO}:${CLAMAV_IMAGE_TAG}"`,
+		`save_image "$OV/var/lib/culvert-appliance/images/culvert.tar.gz" "${APP_IMAGE_REPO}@${APP_IMAGE_INDEX_DIGEST}" "${APP_IMAGE_REPO}:${APP_IMAGE_TAG}"`,
+	} {
+		if !strings.Contains(src, want) {
+			t.Errorf("build-ova.sh must save a pulled image under its digest AND its tag: missing %s", want)
+		}
+	}
+	if regexp.MustCompile(`(?m)^save_image "[^"]*clamav\.tar\.gz" "\$\{CLAMAV_IMAGE_REPO\}:\$\{CLAMAV_IMAGE_TAG\}"$`).MatchString(src) {
+		t.Error("build-ova.sh saves ClamAV by tag alone (the F-OVA-CLAMAV-1 shape)")
+	}
+}
