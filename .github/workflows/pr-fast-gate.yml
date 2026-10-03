@@ -261,10 +261,32 @@ jobs:
         # (reviewdog filter_mode: diff_context in code-review.yml) only
         # fails on issues in the PR's changed lines. --new-from-rev is the
         # native equivalent: fail only on issues introduced vs the merge base.
+        #
+        # --timeout is 10m, not golangci-lint's 1m default or the 5m this
+        # carried until PR #1544. The ROOT module is 1281 top-level Go files
+        # plus 68 internal packages, and the runner starts with a cold
+        # golangci-lint analysis cache (setup-go-cache persists the Go build
+        # and module caches, not golangci-lint's own). Measured on two
+        # consecutive runs of one PR: 4m56s to COMPLETE (reporting findings),
+        # then 5m07s to be KILLED by the 5m tool timeout with "0 issues" —
+        # i.e. the gate had a FOUR SECOND margin and the next commit to add
+        # any code at all exceeded it, failing a lint-clean tree.
+        #
+        # The bound that matters is the job's timeout-minutes: 12 above, which
+        # also has to cover checkout (fetch-depth: 0), setup-go and the
+        # go install (~1m together). 10m leaves the job ~1m of slack ABOVE
+        # the tool timeout deliberately: a genuinely wedged analysis is then
+        # killed by golangci-lint with its own diagnosable "Timeout exceeded"
+        # message rather than by an opaque job cancellation.
+        #
+        # The two other golangci-lint invocations in CI (the maint-agent job
+        # below and qa-gate.yml) lint the SMALL separate cmd/culvert-maint
+        # module and are nowhere near this wall, so they keep 5m — there is no
+        # measurement justifying a change to them.
         run: |
           BASE_REF="${GITHUB_BASE_REF:-main}"
           git fetch --no-tags origin "$BASE_REF"
-          golangci-lint run --timeout=5m --new-from-rev "origin/$BASE_REF"
+          golangci-lint run --timeout=10m --new-from-rev "origin/$BASE_REF"
 
   # ─── 3. Race + coverage (sharded, stage 5C) ────────────────────────────────
   # THE race + coverage execution for PRs, on the shared engine the QA gate
