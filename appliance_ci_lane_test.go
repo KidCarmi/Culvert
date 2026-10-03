@@ -189,3 +189,68 @@ func TestApplianceLane_ImageConsumersAreCoveredByImageNeeded(t *testing.T) {
 		t.Fatalf("expected the three appliance jobs (at least) to consume build-image, found %d", consumers)
 	}
 }
+
+// CVE-2026-103111 (PR #1528 closeout): the pcre2 derivative is a REVIEW
+// candidate, not a shipped artefact. Three properties keep it that way and
+// keep its evidence honest: it derives from exactly the pinned official image,
+// CI executes the real-ClamAV check against both images, and no shipped file
+// (compose, manifest, installer) references it.
+func TestClamAVCandidate_DerivesFromThePinnedOfficialImage(t *testing.T) {
+	dir := pkgSourceDir()
+	df, err := os.ReadFile(filepath.Join(dir, "appliance", "clamav-candidate", "Dockerfile"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := os.ReadFile(filepath.Join(dir, "appliance", "build", "manifest.env"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pin := regexp.MustCompile(`(?m)^CLAMAV_IMAGE_INDEX_DIGEST=(sha256:[0-9a-f]{64})$`).FindSubmatch(manifest)
+	if pin == nil {
+		t.Fatal("CLAMAV_IMAGE_INDEX_DIGEST not found in manifest.env")
+	}
+	froms := regexp.MustCompile(`(?m)^FROM\s+(\S+)`).FindAllSubmatch(df, -1)
+	if len(froms) != 1 || string(froms[0][1]) != "docker.io/clamav/clamav@"+string(pin[1]) {
+		t.Fatalf("candidate must have exactly one FROM, the pinned official digest %s; got %q", pin[1], froms)
+	}
+	// One package, pinned to an exact version: a floating `apk upgrade` would
+	// make the evidence describe an image nobody can rebuild.
+	if !strings.Contains(string(df), "apk add --no-cache --upgrade 'pcre2=10.49-r0'") {
+		t.Fatal("candidate must upgrade exactly pcre2 to a pinned version")
+	}
+}
+
+func TestClamAVCandidate_CIQualifiesBothImagesAndNothingShipsTheCandidate(t *testing.T) {
+	dir := pkgSourceDir()
+	path := filepath.Join(dir, ".github", "workflows", "pr-deep-gate.yml")
+	jobs := asMap(genericWorkflow(t, path)["jobs"])
+	steps, _ := asMap(jobs["appliance-clamav"])["steps"].([]interface{})
+	official, candidate := false, false
+	for _, st := range steps {
+		run := toStr(asMap(st)["run"])
+		if strings.Contains(run, "docker push") {
+			t.Fatal("appliance-clamav must never push an image")
+		}
+		if !strings.Contains(run, "clamav-image-qualify.sh") {
+			continue
+		}
+		if strings.Contains(run, `CLAMAV_IMAGE="${CLAMAV_IMAGE_REPO}@${CLAMAV_IMAGE_INDEX_DIGEST}"`) {
+			official = true
+		}
+		if strings.Contains(run, "docker build") && strings.Contains(run, "appliance/clamav-candidate") {
+			candidate = true
+		}
+	}
+	if !official || !candidate {
+		t.Fatalf("appliance-clamav must run clamav-image-qualify.sh against the pinned official image (%v) and the built candidate (%v)", official, candidate)
+	}
+	for _, shipped := range []string{"docker-compose.yml", "appliance/build/manifest.env", "scripts/install.sh"} {
+		raw, err := os.ReadFile(filepath.Join(dir, shipped))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(raw), "culvert-candidate/clamav") || strings.Contains(string(raw), "clamav-candidate") {
+			t.Errorf("%s references the unpublished ClamAV candidate — switching the sidecar is an owner decision", shipped)
+		}
+	}
+}

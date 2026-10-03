@@ -460,7 +460,8 @@ jobs:
             appliance/provision/culvert-issue-update appliance/provision/culvert-appliance-reset-identity \
             appliance/os-maintenance/culvert-os-update \
             appliance/build/build-ova.sh appliance/build/prepare-guest.sh \
-            test/e2e/appliance/lifecycle-qualify.sh test/e2e/appliance/agent-qualify.sh
+            test/e2e/appliance/lifecycle-qualify.sh test/e2e/appliance/agent-qualify.sh \
+            test/e2e/appliance/clamav-image-qualify.sh
 
       - name: Validate appliance sudoers + first-boot unit shapes
         run: |
@@ -572,6 +573,24 @@ jobs:
           CULVERT_QUALIFY_REAL_CLAMAV: "1"
           QUAL_HEALTH_WAIT_S: "900"
         run: EVID="$RUNNER_TEMP/appliance-clamav" ./test/e2e/appliance/lifecycle-qualify.sh
+      # Real clamd behind the real proxy: EICAR, a custom PCRE logical
+      # signature (the libpcre2 path of CVE-2026-103111), a regex-miss control
+      # and the clamd-down posture. Run against the PINNED official image and
+      # against the unpublished pcre2 derivative built here (never pushed), so
+      # the owner's decision rests on CI-executed evidence for both.
+      - name: Real-ClamAV scan check — pinned official image
+        run: |
+          set -euo pipefail
+          . appliance/build/manifest.env
+          docker pull -q "${CLAMAV_IMAGE_REPO}@${CLAMAV_IMAGE_INDEX_DIGEST}"
+          CLAMAV_IMAGE="${CLAMAV_IMAGE_REPO}@${CLAMAV_IMAGE_INDEX_DIGEST}" PROXY_IMAGE=culvert:ci-smoke \
+            EVID="$RUNNER_TEMP/clamav-image-official" ./test/e2e/appliance/clamav-image-qualify.sh
+      - name: Real-ClamAV scan check — pcre2 derivative candidate (built, not pushed)
+        run: |
+          set -euo pipefail
+          docker build -q -t culvert-candidate/clamav:pcre2-fix appliance/clamav-candidate
+          CLAMAV_IMAGE=culvert-candidate/clamav:pcre2-fix PROXY_IMAGE=culvert:ci-smoke \
+            EVID="$RUNNER_TEMP/clamav-image-candidate" ./test/e2e/appliance/clamav-image-qualify.sh
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
@@ -579,6 +598,8 @@ jobs:
           path: |
             ${{ runner.temp }}/appliance-clamav/REPORT.md
             ${{ runner.temp }}/appliance-clamav/checks.jsonl
+            ${{ runner.temp }}/clamav-image-official/clamav-image-qualify.jsonl
+            ${{ runner.temp }}/clamav-image-candidate/clamav-image-qualify.jsonl
           retention-days: 14
 
   appliance-agent:
