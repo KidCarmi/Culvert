@@ -7,8 +7,10 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -57,12 +59,14 @@ func TestTerminalProcess(t *testing.T) {
 	}})
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
+	ctx, stop := signal.NotifyContext(ctx, syscall.SIGTERM)
+	defer stop()
 	before, err := unix.IoctlGetTermios(0, unix.TCGETS)
 	if err != nil {
 		t.Fatal(err)
 	}
 	action, err := menu(ctx, collector, false)
-	if err != nil {
+	if err != nil && ctx.Err() == nil {
 		t.Fatal(err)
 	}
 	after, err := unix.IoctlGetTermios(0, unix.TCGETS)
@@ -72,7 +76,23 @@ func TestTerminalProcess(t *testing.T) {
 	if *before != *after {
 		t.Fatal("terminal modes not restored")
 	}
-	fmt.Fprintln(os.Stdout, "RESTORED ACTION:"+action)
+	if ctx.Err() != nil {
+		fmt.Fprintln(os.Stdout, "RESTORED CANCELLED")
+	} else {
+		fmt.Fprintln(os.Stdout, "RESTORED ACTION:"+action)
+	}
+}
+
+func TestRealPTYSignalRestoresTerminal(t *testing.T) {
+	s := startTerminal(t, 25, 80, "linux")
+	s.await(t, "Read-only public console")
+	if err := s.cmd.Process.Signal(syscall.SIGTERM); err != nil {
+		t.Fatal(err)
+	}
+	s.await(t, "RESTORED CANCELLED")
+	if err := s.cmd.Wait(); err != nil {
+		t.Fatal(err)
+	}
 }
 
 type terminalSession struct {
@@ -97,10 +117,11 @@ func startTerminal(t *testing.T, rows, columns uint16, term string) *terminalSes
 	if err != nil {
 		t.Fatal(err)
 	}
-	slave, err := os.OpenFile(fmt.Sprintf("/dev/pts/%d", index), os.O_RDWR, 0)
+	slaveFD, err := unix.Open(fmt.Sprintf("/dev/pts/%d", index), unix.O_RDWR|unix.O_NOCTTY|unix.O_CLOEXEC, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
+	slave := os.NewFile(uintptr(slaveFD), "pts")
 	defer slave.Close()
 	if err := unix.IoctlSetWinsize(fd, unix.TIOCSWINSZ, &unix.Winsize{Row: rows, Col: columns}); err != nil {
 		t.Fatal(err)
