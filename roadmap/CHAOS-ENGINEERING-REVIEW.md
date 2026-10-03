@@ -8690,7 +8690,7 @@ driving the whole sequence.
 
 ### 41.10 Gates
 
-`cluster_grpc_bind_chaos_test.go` — 30 gates. **Twenty-five mutations were each
+`cluster_grpc_bind_chaos_test.go` — 32 gates. **Thirty mutations were each
 verified FAILING against the shape they target**, including the reintroduced
 pre-fix `logFatalf`, asserting role+leadership without a bind, returning before
 the first attempt resolves, re-preparing per attempt, both halves of the
@@ -8764,6 +8764,70 @@ call it: every defect gate stops at a failed bind. The supervisor's panic guard
 contained it and reported the correct TERMINAL state, which is incidental
 evidence that the guard works.
 
+### 41.11 A CI lint found a real blind spot, and deleting the code would have certified it
+
+`Deep · staticcheck` failed on the first push with
+
+```
+cluster_grpc_health.go:438:6: func noteCPGRPCServeEnded is unused (U1000)
+```
+
+The lint was RIGHT: that observer was written for a serve/rebind loop, the
+shipped supervisor returns once activation succeeds, and nothing called it. Dead
+code, which this repo's own PR checklist bans.
+
+**Deleting it to satisfy the linter would have been the wrong instinct**, and
+checking the serve path is what showed why. Two gaps:
+
+1. `StartControlPlaneGRPC`'s serve goroutine has always only LOGGED when
+   `srv.Serve` returns. Harmless while nothing claimed the listener was up — and
+   a LIE the moment a gauge does. **This sweep adds
+   `culvert_cluster_grpc_up`**, so without an observer that gauge reads `1`
+   forever on a listener whose socket has died. The underlying fault is old; the
+   misleading SURFACE is this sweep's. That is the exact defect class §41 exists
+   to remove, reintroduced inside its own fix — §36's *"returning silently would
+   leave every probe green on a dead listener, PX-18 in miniature, reintroduced
+   inside the change that closed it"*.
+
+2. `noteCPGRPCStopped` was reached only from the supervisor loop's FAILURE exit
+   paths. On the happy path the loop returns early (activation succeeded,
+   nothing left to retry), so a clean shutdown of a HEALTHY Control Plane never
+   recorded the teardown: `/health cluster_grpc` reported `ready` on its way
+   out, and the fixed enum's `stopped` value was unreachable for a healthy node.
+
+So the observer was WIRED, not deleted. `Stop` records the teardown;
+`noteCPGRPCServeEnded` records a terminal serve-ended state and no-ops during a
+deliberate shutdown (GracefulStop makes `Serve` return NIL, so the `stopped`
+flag is what tells the two apart) and when no bind was ever observed (the
+bind-failure path owns that state); an observed bind clears it, since a fresh
+socket IS the recovery (§36's rule, where leaving `down` latched reported a fail
+row and a page after the outage was over).
+
+**One judgement call, recorded rather than silently taken.** The supervisor does
+NOT rebind a listener that was already serving — that is a full serve/rebind
+loop with its own shutdown interaction, and folding it in would widen the PR. So
+the state is reported honestly as TERMINAL, and the contract row's remedy says
+*"Restart this node"* and deliberately does NOT say *"rebinds automatically"*,
+which every other remedy in this file does. Promising a recovery that will not
+happen sends an operator away from the one restart that IS needed — §36's
+round-2 finding, and a CONTROL gate pins the absence of that phrase.
+
+**Reproduced and re-verified the way a CI fix must be.** The 2025.1 staticcheck
+`go run` first emitted compile errors rather than reaching U1000, because that
+binary is built with go1.24 and cannot parse this module's go1.26 stdlib — an
+inconclusive reproduction, not a pass. Re-run under `GOTOOLCHAIN=go1.26.8` it
+reports nothing at all, and the identifier now has a production call site
+(`controlplane_server.go:949`), which is what U1000 keys on.
+
+Gates: 6 sub-cases over all four branches plus the happy-path teardown; five
+mutations verified failing (the state not recorded, firing during a clean
+teardown, a remedy promising a rebind, the state staying latched after a
+re-bind, and `Stop` not recording the teardown).
+
+**The transferable lesson: a dead-code lint on a health observer is a question,
+not an instruction. Ask what the observer was for before deleting it — the
+answer may be that the surface it was meant to feed is now lying.**
+
 ### 41.11 Residual risk, deliberately left
 
 - **R-F is unchanged.** The three boot-path DATA-FILE loads (`catStore`,
@@ -8782,6 +8846,10 @@ evidence that the guard works.
   ports to each other, and none of this finding's triggers is a self-collision,
   so adding it would buy nothing for this fault while touching a startup
   validation path inside a sweep about something else. Recorded as **CL-21**.
+- **An established listener that dies is NOT rebound** (§41.11): the state is
+  reported as terminal and the remedy is a restart. A full serve/rebind loop is
+  the shape that would close it, with its own shutdown interaction; recorded as
+  **CL-22** rather than folded into this sweep.
 - **The pre-bind work's own failure modes are unchanged** — a rejected initial
   config publish is logged and alerted via `LastPublishError` and boot
   continues, as before.

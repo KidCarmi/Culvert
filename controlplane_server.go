@@ -941,6 +941,12 @@ func StartControlPlaneGRPC(addr, certFile, keyFile, caFile string) error {
 		if err := srv.Serve(ln); err != nil {
 			logger.Printf("ControlPlane gRPC error: %v", err)
 		}
+		// CHAOS-71: Serve returning means the listening socket is gone. This
+		// branch used to only log, which was harmless while nothing claimed the
+		// listener was up — and becomes a LIE the moment `culvert_cluster_grpc_up`
+		// does. GracefulStop makes Serve return NIL, so the observer is called
+		// unconditionally and decides for itself whether this was a teardown.
+		noteCPGRPCServeEnded()
 	}()
 	return nil
 }

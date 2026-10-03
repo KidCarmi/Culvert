@@ -1136,6 +1136,159 @@ func TestChaos71_SupervisorPanicClaimMatchesTheEvidence(t *testing.T) {
 	})
 }
 
+// TestChaos71_ServeEndedIsNotReportedAsServing closes a lie this sweep's own
+// gauge would otherwise introduce.
+//
+// `StartControlPlaneGRPC`'s serve goroutine has always just LOGGED when
+// `srv.Serve` returns, which was harmless while nothing claimed the listener
+// was up. This sweep adds `culvert_cluster_grpc_up`, so without an observer
+// that gauge reads 1 forever on a listener whose socket has died — the exact
+// defect class the sweep exists to remove, reintroduced inside its own fix
+// (CHAOS-66's PX-18-in-miniature note).
+//
+// Found by `Deep · staticcheck` flagging `noteCPGRPCServeEnded` as UNUSED. The
+// lint was right that it was dead; deleting it to satisfy the linter would have
+// been the wrong instinct, because it would have certified the blind spot
+// instead of closing it.
+func TestChaos71_ServeEndedIsNotReportedAsServing(t *testing.T) {
+	t.Run("a dead socket is reported unavailable, not serving", func(t *testing.T) {
+		cpChaosSetup(t)
+		noteCPGRPCConfigured("127.0.0.1:50051")
+		var alerts int
+		fireCPGRPCUnavailableAlert = func(string) { alerts++ }
+		noteCPGRPCBound()
+		noteCPGRPCRoleAsserted()
+
+		noteCPGRPCServeEnded()
+
+		snap := cpGRPCListenerState()
+		if snap.Serving {
+			t.Error("a listener whose Serve returned is still reported as serving — culvert_cluster_grpc_up would read 1 on a dead socket")
+		}
+		if !snap.ServeEnded {
+			t.Error("the serve-ended state was not recorded")
+		}
+		// No retry is in flight, so there is no episode to age: unavailable is
+		// immediate rather than after the duration threshold, which exists only
+		// to avoid paging on an ordinary redeploy's few seconds of rebinding.
+		if !snap.Unavailable {
+			t.Error("a dead listener is not reported unavailable — it will never rebind, so there is nothing to wait for")
+		}
+		if got := cpGRPCListenerStatus(); got == "ready" {
+			t.Errorf("/health posture = %q on a listener whose socket is gone", got)
+		}
+		if alerts != 1 {
+			t.Errorf("fired %d alerts, want exactly 1", alerts)
+		}
+		// The remedy must NOT promise an automatic rebind: nothing
+		// re-establishes a listener that was already serving, and sending an
+		// operator away from the one restart that IS needed is CHAOS-66's
+		// round-2 finding.
+		row := checkCPGRPCListener()
+		if row.Status != diagFail {
+			t.Errorf("contract row status = %v, want fail", row.Status)
+		}
+		if !strings.Contains(row.OperatorAction, "Restart this node") {
+			t.Errorf("the remedy does not tell the operator to restart: %q", row.OperatorAction)
+		}
+		if strings.Contains(row.OperatorAction, "rebinds automatically") {
+			t.Errorf("the remedy promises an automatic rebind that will never happen: %q", row.OperatorAction)
+		}
+	})
+
+	t.Run("a clean teardown is not reported as a dead socket", func(t *testing.T) {
+		cpChaosSetup(t)
+		noteCPGRPCConfigured("127.0.0.1:50051")
+		fireCPGRPCUnavailableAlert = func(string) {
+			t.Error("a clean shutdown fired the unavailable alert")
+		}
+		noteCPGRPCBound()
+		// GracefulStop makes Serve return NIL, so the observer runs on every
+		// clean shutdown too. The supervisor's Stop recording `stopped` is what
+		// lets it tell the two apart.
+		noteCPGRPCStopped()
+
+		noteCPGRPCServeEnded()
+
+		if snap := cpGRPCListenerState(); snap.ServeEnded {
+			t.Error("a clean teardown was recorded as the socket dying")
+		}
+		if got := cpGRPCListenerStatus(); got != "stopped" {
+			t.Errorf("/health posture = %q during a clean teardown, want stopped", got)
+		}
+	})
+
+	t.Run("a never-bound listener is left to the bind-failure path", func(t *testing.T) {
+		cpChaosSetup(t)
+		noteCPGRPCConfigured("127.0.0.1:50051")
+		fireCPGRPCUnavailableAlert = func(string) {
+			t.Error("a listener that never bound fired the serve-ended alert")
+		}
+
+		noteCPGRPCServeEnded()
+
+		if snap := cpGRPCListenerState(); snap.ServeEnded {
+			t.Error("a listener that never bound was recorded as having stopped serving — there is nothing to contradict, and the bind-failure path owns that state")
+		}
+	})
+
+	t.Run("an observed bind clears a previous serve-ended state", func(t *testing.T) {
+		cpChaosSetup(t)
+		noteCPGRPCConfigured("127.0.0.1:50051")
+		fireCPGRPCUnavailableAlert = func(string) {}
+		noteCPGRPCBound()
+		noteCPGRPCServeEnded()
+
+		noteCPGRPCBound() // a fresh socket IS the recovery
+
+		snap := cpGRPCListenerState()
+		if snap.ServeEnded {
+			t.Error("the serve-ended state stayed latched after an observed bind — a fail row and a page would outlive the outage (CHAOS-66's rule)")
+		}
+		if !snap.Serving || snap.Unavailable {
+			t.Errorf("a re-bound listener is not reported healthy: %+v", snap)
+		}
+	})
+}
+
+// TestChaos71_StopRecordsTheTeardownOnTheHappyPath pins the other half.
+//
+// On a successful activation the supervisor loop RETURNS — there is nothing
+// left to retry — so `noteCPGRPCStopped` on the loop's exit paths is never
+// reached for a healthy Control Plane. Without Stop recording it, a clean
+// shutdown left `/health cluster_grpc` reporting `ready` on its way out, the
+// fixed enum's `stopped` value was unreachable on the happy path, and
+// noteCPGRPCServeEnded would mistake GracefulStop's nil return for a dead
+// socket.
+func TestChaos71_StopRecordsTheTeardownOnTheHappyPath(t *testing.T) {
+	cpChaosSetup(t)
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("pick a port: %v", err)
+	}
+	port := ln.Addr().(*net.TCPAddr).Port
+	_ = ln.Close()
+
+	s := startControlPlaneSupervised(cpInsecureCfg(t, fmt.Sprintf("127.0.0.1:%d", port)), context.Background())
+	if snap := cpGRPCListenerState(); !snap.Serving {
+		t.Fatalf("the gate did not reach a serving listener: %+v", snap)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := s.Stop(ctx); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+
+	if snap := cpGRPCListenerState(); !snap.Stopped {
+		t.Error("a clean shutdown of a HEALTHY Control Plane did not record the teardown — /health keeps reporting ready on the way out")
+	}
+	if got := cpGRPCListenerStatus(); got != "stopped" {
+		t.Errorf("/health posture = %q after Stop, want stopped", got)
+	}
+}
+
 // ── Structural walls ─────────────────────────────────────────────────────────
 
 // TestChaos71_TheControlPlaneActivationPathHasNoFatal is the wall against

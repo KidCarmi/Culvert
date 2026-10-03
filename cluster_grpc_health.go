@@ -131,10 +131,32 @@ type cpGRPCListenerHealth struct {
 	// CP, not yet acting as one" as its own state rather than inferring it.
 	roleAsserted bool
 
-	// stopped records the loop exiting for shutdown rather than for a fault, so
-	// a node in the middle of a clean teardown never reports a cluster fault on
-	// its way out.
+	// stopped records a deliberate teardown rather than a fault, so a node in
+	// the middle of a clean shutdown never reports a cluster fault on its way
+	// out. Set by the supervisor's Stop, which is reached on EVERY shutdown —
+	// including the happy path, where the supervisor loop has already exited
+	// because activation succeeded and there was nothing left to retry.
 	stopped bool
+
+	// serveEnded records grpc-go's Serve returning on a listener that WAS
+	// bound, without a shutdown having been requested — i.e. the socket died
+	// under a serving Control Plane.
+	//
+	// It exists because this sweep introduced `culvert_cluster_grpc_up`, and
+	// `serving` is otherwise only ever cleared by a bind failure or a teardown.
+	// `StartControlPlaneGRPC`'s serve goroutine has always just logged the
+	// error, which was harmless while nothing claimed the listener was up —
+	// and becomes a LIE the moment a gauge does. A surface reading 1 on a dead
+	// listener is the exact defect class this sweep exists to remove, so
+	// shipping the gauge without this would have reintroduced it inside its own
+	// fix (CHAOS-66's PX-18-in-miniature note).
+	//
+	// It is TERMINAL: the supervisor does not rebind an established listener
+	// that died, so every surface must say so rather than promise a recovery
+	// that will not happen. Making it rebind is a larger design (a full
+	// serve/rebind loop with its own shutdown interaction) and is recorded as
+	// an open residual rather than folded in here.
+	serveEnded bool
 
 	// firstFailure is the start of the current run of consecutive failures;
 	// zero while serving. Unavailability is measured from here, so a listener
@@ -178,6 +200,7 @@ type cpGRPCListenerSnapshot struct {
 	EverBound    bool
 	RoleAsserted bool
 	Stopped      bool
+	ServeEnded   bool
 
 	Failing     bool
 	Unavailable bool
@@ -369,6 +392,10 @@ func noteCPGRPCBound() (suppressed int64, recovered bool) {
 	cpGRPCListener.serving = true
 	cpGRPCListener.everBound = true
 	cpGRPCListener.stopped = false
+	// An observed bind IS the recovery, so a previous serve-ended state must
+	// not stay latched — CHAOS-66's rule, where leaving `down` latched reported
+	// a fail row and a page after the outage was over.
+	cpGRPCListener.serveEnded = false
 	cpGRPCListener.binds++
 	cpGRPCListener.firstFailure = time.Time{}
 	cpGRPCListener.lastFailure = time.Time{}
@@ -433,12 +460,39 @@ func noteCPGRPCStopped() {
 	cpGRPCListener.mu.Unlock()
 }
 
-// noteCPGRPCServeEnded records the serve call returning without the supervisor
-// having been stopped — the listener is gone and a rebind is pending.
+// noteCPGRPCServeEnded records grpc-go's Serve returning on a listener that was
+// bound, with no shutdown requested. Called from StartControlPlaneGRPC's serve
+// goroutine.
+//
+// It is a NO-OP during a deliberate teardown, and that check is why the
+// supervisor's Stop records `stopped`: GracefulStop makes Serve return NIL, so
+// without it every clean shutdown of a healthy Control Plane would report its
+// listener as having died.
+//
+// It is also a no-op when no bind was ever observed — there is nothing to
+// contradict, and a bind failure already owns that state.
 func noteCPGRPCServeEnded() {
 	cpGRPCListener.mu.Lock()
+	if cpGRPCListener.stopped || !cpGRPCListener.everBound {
+		cpGRPCListener.mu.Unlock()
+		return
+	}
 	cpGRPCListener.serving = false
+	already := cpGRPCListener.serveEnded
+	cpGRPCListener.serveEnded = true
+	addr := cpGRPCListener.addr
 	cpGRPCListener.mu.Unlock()
+
+	if already {
+		return
+	}
+	logErrorf("ControlPlane: gRPC listener on %s stopped serving and will NOT rebind — the cluster control "+
+		"plane is unavailable until this node is restarted. This node's proxy data plane and admin UI are "+
+		"unaffected, and Data Planes keep enforcing their last-known config.", addr)
+	fireCPGRPCUnavailableAlert("control-plane gRPC listener stopped serving (reason: serve_ended); " +
+		"this node is not distributing config to the fleet and new nodes cannot enrol, and it will NOT rebind " +
+		"on its own — restart this node. Its proxy data plane and admin UI are unaffected, and Data Planes keep " +
+		"enforcing their last-known config.")
 }
 
 // cpGRPCElapsed ages an episode against the clock instead of deriving it from
@@ -512,6 +566,7 @@ func cpGRPCListenerState() cpGRPCListenerSnapshot {
 		EverBound:    cpGRPCListener.everBound,
 		RoleAsserted: cpGRPCListener.roleAsserted,
 		Stopped:      cpGRPCListener.stopped,
+		ServeEnded:   cpGRPCListener.serveEnded,
 		LastReason:   cpGRPCListener.lastReason,
 		Backoff:      cpGRPCListener.backoff,
 		Consecutive:  cpGRPCListener.consecutive,
@@ -522,6 +577,13 @@ func cpGRPCListenerState() cpGRPCListenerSnapshot {
 		snap.Failing = true
 		snap.FailingFor = cpGRPCElapsed(cpGRPCListener.firstFailure, cpGRPCListener.lastFailure, now)
 		snap.Unavailable = snap.FailingFor >= cpGRPCUnavailableAfter
+	}
+	// A listener whose Serve returned is unavailable IMMEDIATELY and with no
+	// episode to age: there is no retry in flight, so the duration threshold —
+	// which exists to avoid paging on an ordinary redeploy's few seconds of
+	// rebinding — has nothing to measure and nothing to wait for.
+	if snap.ServeEnded {
+		snap.Unavailable = true
 	}
 	return snap
 }
@@ -607,6 +669,15 @@ func checkCPGRPCListener() OperatorContractCheck {
 			Code:    "cluster_grpc",
 			Status:  diagOK,
 			Message: "Control Plane gRPC listener stopped (node shutting down)",
+		}
+	}
+	if snap.ServeEnded {
+		return OperatorContractCheck{
+			Code:   "cluster_grpc",
+			Status: diagFail,
+			Message: fmt.Sprintf("Control Plane gRPC on %s stopped serving after having bound; no node in the fleet is receiving config and new nodes cannot enrol",
+				snap.Addr),
+			OperatorAction: "Restart this node. Unlike a bind failure this does NOT recover on its own — the listener socket is gone and the supervisor does not re-establish a listener that was already serving. The full error is on the `ControlPlane gRPC error` line in the process log. This node's proxy data plane and admin UI are unaffected, and Data Planes keep enforcing their last-known config, so the restart can be scheduled.",
 		}
 	}
 	if snap.Unavailable {
@@ -708,6 +779,7 @@ func resetCPGRPCHealthForTest() {
 	cpGRPCListener.everBound = false
 	cpGRPCListener.roleAsserted = false
 	cpGRPCListener.stopped = false
+	cpGRPCListener.serveEnded = false
 	cpGRPCListener.firstFailure = time.Time{}
 	cpGRPCListener.lastFailure = time.Time{}
 	cpGRPCListener.lastReason = ""

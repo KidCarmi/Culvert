@@ -284,6 +284,13 @@ func (s *cpGRPCSupervisor) Stop(ctx context.Context) error {
 		return nil
 	}
 	s.stopOnce.Do(func() { close(s.stopping) })
+	// Recorded HERE, not only on the loop's exit paths. On the happy path the
+	// loop has already returned — activation succeeded and there was nothing
+	// left to retry — so without this a clean shutdown of a HEALTHY Control
+	// Plane never records the teardown, which leaves `/health cluster_grpc`
+	// reporting `ready` on its way out and, worse, lets
+	// noteCPGRPCServeEnded mistake GracefulStop's nil return for a dead socket.
+	noteCPGRPCStopped()
 	select {
 	case <-s.done:
 		return nil

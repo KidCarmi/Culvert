@@ -196,6 +196,16 @@ line. Nothing else is required.
 things this change buys — and the supervisor notices when it succeeds and stops
 retrying.
 
+**The listener stopped serving after having bound (terminal).** If the listening
+socket dies under a serving Control Plane, `/health` reports `unavailable`
+immediately (there is no retry in flight, so nothing to wait for),
+`culvert_cluster_grpc_up` drops to 0, the contract row FAILS, and the alert
+fires once. **This does not recover on its own** — the supervisor does not
+re-establish a listener that was already serving — so the remedy is to restart
+this node. The full error is on the `ControlPlane gRPC error` line. The proxy and
+admin UI are unaffected and Data Planes keep enforcing their last-known config,
+so the restart can be scheduled.
+
 **Supervisor panic (terminal).** A contained panic in the supervisor is the one
 state that does **not** self-heal: nothing rebinds. It is logged as
 
