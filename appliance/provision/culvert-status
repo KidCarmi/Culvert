@@ -14,8 +14,10 @@
 # The loopback probe of the admin UI uses -k: the admin certificate is self-signed
 # at first boot and this reads only a boolean from the local process.
 set -uo pipefail
-STATE=/var/lib/culvert-appliance/state
-BUILD=/var/lib/culvert-appliance/build-info.json
+STATE="${CULVERT_FB_STATE_DIR:-/var/lib/culvert-appliance}/state"
+BUILD="${CULVERT_FB_STATE_DIR:-/var/lib/culvert-appliance}/build-info.json"
+STACK_DIR="${CULVERT_FB_STACK_DIR:-/srv/culvert}"
+SUDOERS_DIR="${CULVERT_FB_SUDOERS_DIR:-/etc/sudoers.d}"
 MODE="${1:-full}"
 
 ver="$(python3 -c 'import json;d=json.load(open("'"$BUILD"'"));print(d["appliance"]["version"]+" (app "+d["application"]["tag"]+")")' 2>/dev/null || echo unknown)"
@@ -26,6 +28,25 @@ prov="incomplete"
 if [[ -f "$STATE/complete.done" ]]; then prov="complete"
 elif systemctl is-failed --quiet culvert-firstboot.service 2>/dev/null; then prov="FAILED (journalctl -u culvert-firstboot; restart with: sudo systemctl restart culvert-firstboot)"
 elif systemctl is-active --quiet culvert-firstboot.service 2>/dev/null; then prov="running"
+fi
+
+# Maintenance agent: first boot records a verified install (agent.done) or a
+# degraded one (agent.pending, with the reason); the repair verb clears it on
+# evidence. Release Management reads "Agent unreachable" until then.
+agent="unknown"
+if [[ -f "$STATE/agent.done" ]]; then agent="installed"
+elif [[ -f "$STATE/agent.pending" ]]; then agent="NOT installed ($(awk '{print $2}' "$STATE/agent.pending" 2>/dev/null)) — Release Management unavailable; repair: sudo culvert-firstboot --repair-agent"
+fi
+# Console sudo policy (see culvert-sudo-policy): key-only provisioning
+# installs a NOPASSWD drop-in because a locked password cannot answer sudo.
+sudo_policy="password required"
+[[ -f "$SUDOERS_DIR/95-culvert-keyonly" ]] && sudo_policy="passwordless (key-only provisioning; change with: sudo passwd culvert && sudo culvert-sudo-policy require-password)"
+# First-admin setup token: gates POST /api/setup/complete on the published
+# admin port. Shown only to root (it lives in the stack's root-owned .env) and
+# only while the first admin has not been created.
+setup_token=""
+if [[ "$(id -u)" == 0 && -r "$STACK_DIR/.env" ]]; then
+  setup_token="$(sed -n 's/^CULVERT_SETUP_TOKEN=//p' "$STACK_DIR/.env" | head -n1)"
 fi
 
 health_code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 http://127.0.0.1:8080/health 2>/dev/null || true)"; health_code="${health_code:-000}"
@@ -67,11 +88,12 @@ fi
 
 case "$MODE" in
   --json)
-    python3 - "$ver" "$addrs" "$prov" "$services" "$needs_setup" "$policy_ok" "$posture_ok" "$ca_ok" "$ready_code" "$state" <<'PY'
+    python3 - "$ver" "$addrs" "$prov" "$services" "$needs_setup" "$policy_ok" "$posture_ok" "$ca_ok" "$ready_code" "$state" "$agent" "$sudo_policy" <<'PY'
 import json,sys
 a=sys.argv[1:]
 print(json.dumps({"appliance_version":a[0],"addresses":a[1].split(),"provisioning":a[2],"services_running":a[3]=="yes",
-  "needs_setup":a[4],"policy_loaded":a[5],"policy_posture":a[6],"ca":a[7],"ready_http":a[8],"state":a[9]}))
+  "needs_setup":a[4],"policy_loaded":a[5],"policy_posture":a[6],"ca":a[7],"ready_http":a[8],"state":a[9],
+  "maintenance_agent":a[10],"sudo_policy":a[11]}))
 PY
     ;;
   --brief)
@@ -79,6 +101,7 @@ PY
     printf '  State:       %s\n' "$state"
     printf '  Management:  https://%s:9090   Proxy: http://%s:8080\n' "${primary:-<no address yet>}" "${primary:-<no address yet>}"
     printf '  Console:     login as "culvert"; run  culvert-status  /  culvert-net  /  culvert-os-update\n'
+    [[ "$agent" == installed || "$agent" == unknown ]] || printf '  Agent:       %s\n' "$agent"
     ;;
   *)
     printf 'Culvert appliance %s\n' "$ver"
@@ -89,8 +112,15 @@ PY
     printf '  Setup complete:     %s\n' "$setup_done"
     printf '  Ready (/ready):     HTTP %s  policy_loaded=%s  ca=%s\n' "$ready_code" "$policy_ok" "$ca_ok"
     printf '  Ready to enforce:   %s\n' "$enforce"
+    printf '  Maintenance agent:  %s\n' "$agent"
+    printf '  Console sudo:       %s\n' "$sudo_policy"
     printf '  STATE:              %s\n' "$state"
     printf '  Management UI:      https://%s:9090\n' "${primary:-<address>}"
+    if [[ "$needs_setup" == yes ]]; then
+      if [[ -n "$setup_token" ]]; then printf '  Setup token:        %s  (enter it once in the setup wizard)\n' "$setup_token"
+      elif [[ "$(id -u)" != 0 ]]; then printf '  Setup token:        run  sudo culvert-status  to see it\n'
+      else printf '  Setup token:        none persisted in %s/.env (setup wizard is open to the network — set one: see docs/appliance/first-boot.md)\n' "$STACK_DIR"; fi
+    fi
     printf '  Proxy endpoint:     http://%s:8080  (PAC: http://%s:8080/proxy.pac)\n' "${primary:-<address>}" "${primary:-<address>}"
     if [[ -n "$ready_json" ]]; then printf '  /ready rows:        '; printf '%s' "$ready_json" | python3 -c '
 import json,sys

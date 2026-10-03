@@ -67,8 +67,19 @@ restored volume without the original passphrase cannot decrypt the CA
 Browse to `https://<address>:9090`. The admin UI serves a **self-signed**
 certificate at this point (accept the warning once). The setup wizard
 (`/api/setup/*`) creates the first admin account — there is no default
-password. `culvert-status` moves from `setup pending` to `setup complete`.
-Alternatively use the console: `sudo culvert-status`.
+password.
+
+The wizard asks for the per-instance **setup token**. First boot mints it
+(32 hex characters), `install.sh` persists it in `/srv/culvert/.env` as
+`CULVERT_SETUP_TOKEN`, and it is shown on the VM console at the end of
+provisioning and by `sudo culvert-status` (root only, while setup is
+pending). The proxy refuses `POST /api/setup/complete` without the matching
+`X-Culvert-Setup-Token` header (403; wrong tokens count towards the login
+lockout), so whoever reaches port 9090 first on the network cannot claim the
+appliance — the credential is on the console/SSH path, which is the one the
+operator already controls. It is a one-time gate: once the first admin exists
+`/api/setup/complete` is closed regardless of the token. `culvert-status`
+moves from `setup pending` to `setup complete`.
 
 ### 7. Management TLS
 Replace the self-signed admin-UI certificate with one from your PKI:
@@ -93,7 +104,25 @@ the management TLS one.
 Create at least one access rule (default is deny), point a test client at
 `http://<address>:8080` (or the PAC at `http://<address>:8080/proxy.pac`) and
 confirm the decision in Live Feed. `culvert-status` reports **ready to
-enforce** when `/ready` is 200 with `policy_loaded=ok` and the CA row `ok`.
+enforce** when `/ready` is 200 with `policy_loaded=ok`, `policy_posture=ok`
+and the CA row `ok`.
+
+What the fresh appliance enforces, and why:
+* **Policy posture is default-DENY.** `install.sh` is run with
+  `CULVERT_INSTALL_DEFAULT_ACTION=deny`, which persists `CULVERT_DEFAULT_ACTION=deny`
+  into `/srv/culvert/.env`; the proxy applies it only when `config.yaml` sets no
+  `default_action`, and a choice saved later in the admin UI wins. Without it an
+  empty rulebase is **allow** (passthrough) — the gateway would forward
+  everything until the first rule was written.
+* **Proxy authentication is `defaultAuthOutcome=Exempt`** (unmatched traffic is
+  not challenged for credentials) until you configure an identity source. The
+  appliance ships no directory binding, so a `Default` (require-auth) posture
+  would have no backend to answer and every client would be refused with 407 —
+  default-deny on the policy side is what keeps the open auth posture safe: a
+  request that is not authenticated is still not *allowed* unless a rule says
+  so. Switch to `Default` from Authentication → Default outcome once LDAP/OIDC
+  is enrolled; `policy_posture` and the `setup_complete` readiness rows do not
+  change.
 
 ### 9. Reboot and verify
 `sudo reboot` from the console or SSH. After boot the stack starts on its own
@@ -103,11 +132,22 @@ before. This is also the moment to take the first VM snapshot/backup.
 
 ## Console access and SSH
 
-* Console user: `culvert` (sudo with password). Credential precedence at first
-  boot: OVF/cloud-init `password` → otherwise, if an SSH key was supplied,
-  console password stays locked (set one later with `sudo passwd culvert`) →
-  otherwise a **one-time random password** is printed on the VM console once
-  and must be changed at first login. It is never written to disk.
+* Console user: `culvert`. Credential precedence at first boot:
+  * OVF/cloud-init `password` supplied → that password; `sudo` asks for it.
+  * otherwise an SSH `public-keys` key supplied → the password stays **locked**
+    and first boot installs `/etc/sudoers.d/95-culvert-keyonly`
+    (`NOPASSWD`): the SSH private key *is* the per-instance credential, and a
+    sudo rule demanding a password nobody was given is a lockout, not a
+    control (the same posture as Ubuntu cloud images). To return to
+    password-gated sudo: `sudo passwd culvert && sudo culvert-sudo-policy
+    require-password` (it refuses while the account has no usable password, so
+    the switch can never strand you). `culvert-sudo-policy status` shows which
+    policy is in force; `culvert-status` prints it too.
+  * otherwise a **one-time random password** is printed on the VM console once
+    and must be changed at first login. It is never written to disk. First boot
+    records that a mint is in progress before it sets the password; a boot that
+    dies between setting it and printing it mints a *new* one on the next run
+    instead of treating the never-shown password as a credential.
 * SSH: `AllowUsers culvert`, keys only, no root, no passwords, no forwarding
   (`/etc/ssh/sshd_config.d/50-culvert.conf`). Inject keys via the OVF
   `public-keys` property or cloud-init `user-data`. To add a key later:
@@ -149,6 +189,17 @@ first-boot service sets (`CULVERT_DIR=/srv/culvert`,
   Completed steps are never repeated and established secrets never regenerated.
 * Common cause: no outbound HTTPS (ClamAV download → compose `--wait` timeout).
   Fix egress, then restart the service.
+* **Maintenance agent not installed** (`culvert-status` → `Maintenance agent:
+  NOT installed (<reason>)`; Release Management shows *Agent unreachable*): the
+  proxy is complete, but `install.sh` could not verify the image signature it
+  trusts the host-root agent from (Sigstore/cosign or GitHub unreachable at
+  first boot). This is recorded in `state/agent.pending`, never claimed as
+  done, and `systemctl restart culvert-firstboot` does **not** retry it
+  (`complete.done` is present, so the unit's condition fails). Fix egress,
+  then run the explicit repair: `sudo culvert-firstboot --repair-agent`. It
+  re-runs `install.sh` under the first boot's exact environment (idempotent;
+  nothing in `.env` is rewritten), re-verifies the unit + enabled state +
+  binary, and clears the pending record only on that evidence.
 
 ## Cloning / templating an appliance
 
