@@ -82,7 +82,9 @@ fi
 gpg --batch --dearmor -o /etc/apt/keyrings/docker.gpg /tmp/docker.gpg.asc
 chmod a+r /etc/apt/keyrings/docker.gpg
 rm -f /tmp/docker.gpg.asc
-echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.gpg] ${DOCKER_APT_URL} ${GUEST_OS_CODENAME} stable" \
+# snapshot=no: Docker's repository has no snapshot service; without the
+# option the pinned-snapshot apt run below would refuse the whole update.
+echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.gpg snapshot=no] ${DOCKER_APT_URL} ${GUEST_OS_CODENAME} stable" \
   > /etc/apt/sources.list.d/docker.list
 
 log "apt-get update"
@@ -99,6 +101,35 @@ apt-get install -y -qq --no-install-recommends pigz psmisc
 # Keep the pinned engine from drifting via an operator's casual `apt upgrade`;
 # culvert-os-update --docker is the deliberate, stack-aware upgrade path.
 apt-mark hold docker-ce docker-ce-cli containerd.io docker-compose-plugin >/dev/null
+
+# ── 1b. Guest security updates, pinned to an Ubuntu archive SNAPSHOT ───────
+# The base cloud image serial is weeks old by the time it is built into an
+# appliance: the run-9 guest scan found 33 findings Ubuntu had already fixed
+# (2 HIGH in openssl/libssl3t64). They are applied at BUILD time — a customer
+# must not boot a known-vulnerable OpenSSL and wait for unattended-upgrades on
+# their own network — but from an archive snapshot pinned in manifest.env
+# (GUEST_APT_SNAPSHOT, snapshot.ubuntu.com), so the input-pinning contract
+# holds: same manifest ⇒ same package versions, and the SBOM/CVE evidence
+# describes exactly what shipped. `upgrade` (not dist-upgrade) never installs
+# new packages, so a new kernel ABI is NOT pulled in here — the kernel moves
+# only through culvert-os-update os (+ reboot) after deployment, which is a
+# deliberate, documented operator step. Docker is held above and cannot move.
+if [[ -n "${GUEST_APT_SNAPSHOT:-}" ]]; then
+  log "applying guest security updates from the Ubuntu archive snapshot ${GUEST_APT_SNAPSHOT}"
+  apt-get -qq -o Acquire::Snapshot="${GUEST_APT_SNAPSHOT}" update
+  before="$(dpkg-query -W -f='${binary:Package}=${Version}\n' | sort)"
+  DEBIAN_FRONTEND=noninteractive apt-get -y -qq -o Acquire::Snapshot="${GUEST_APT_SNAPSHOT}" \
+    -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold upgrade
+  after="$(dpkg-query -W -f='${binary:Package}=${Version}\n' | sort)"
+  # Shipped as evidence: exactly which packages the snapshot upgrade moved.
+  { echo "# guest packages upgraded at build time from snapshot ${GUEST_APT_SNAPSHOT} (old -> new)"
+    diff <(echo "$before") <(echo "$after") | sed -n 's/^[<>] //p' | sort | awk -F= '{v[$1]=v[$1] (v[$1]?" -> ":"") $2} END{for (p in v) print p " " v[p]}' | sort
+  } > "$STATE/build-upgrades.txt"
+  log "build-time upgrades: $(grep -vc '^#' "$STATE/build-upgrades.txt") package(s) moved"
+  # Leave the snapshot behind: the deployed appliance updates from the live
+  # archive (unattended-upgrades + culvert-os-update), never from a snapshot.
+  apt-get -qq update
+fi
 
 # Docker daemon defaults for the appliance: containerd image store (the
 # default on a fresh 29.x install, pinned explicitly so a pre-baked image keeps
