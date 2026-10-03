@@ -127,7 +127,7 @@ In rough order of effectiveness:
    coverage for capacity — the skipped bodies are counted and alerted, so the
    trade stays visible.
 4. **Move scanning off-box** with the remote scan sidecar
-   (`-remote-scan-url`), which takes the local ClamAV/YARA legs out of the
+   (`-scan-svc-url` / `security_scan.scan_svc_url`), which takes the local ClamAV/YARA legs out of the
    request path entirely.
 
    **Read §6.1 before doing this.** The sidecar shares the scan budget and the
