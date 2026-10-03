@@ -48,20 +48,18 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # candidate-78e1bc566e80 (run 37144426441) booted under BIOS but
-        # systemd skipped culvert-firstboot.service (ordering cycle with
-        # cloud-final). This variant is the PROPOSED fix: #1528's head image
-        # (78e1bc56, its own Deep PR Gate tar) with provisioning built from
-        # THIS lab commit, whose appliance/ tree is 78e1bc56's plus the unit's
-        # After= fix only. Recorded as provisioning drift; separately
-        # identified; never presented as the 78e1bc56 candidate.
+        # FINAL candidate for the ESXi handoff: #1528 head c5551a18 (first-boot
+        # ordering fix + ClamAV save-order fix + archive closure/cold-load
+        # guards). Image = that head's own Deep PR Gate tar (run 37156550461,
+        # Fast + Deep APPROVED); provisioning + build script = a clean checkout
+        # of the SAME commit. No provisioning drift.
         include:
-          - variant: firstboot-fix-on-78e1bc566e80
-            provisioning: lab
-            source_sha: "78e1bc566e80055f893de41befbbad190ac4dfec"
-            image_run: "37144115505"
-            image_tar_sha256: "69b711ba05b53ddadd056dd3fa1d8a299c094662b4d81d36343c0fdccffbcedb"
-            expect_image_id: "sha256:921c834451f26df7da1da4cc65455db9a2239c6d8e9370a226daea9007c900f3"
+          - variant: candidate-c5551a18da30
+            provisioning: source
+            source_sha: "c5551a18da30e1178861cd9b488fc2d9aa6de781"
+            image_run: "37156550461"
+            image_tar_sha256: "622560c8a4dd711399f0b8aef0abbcfcec0bda539213a38036cf3633701516a8"
+            expect_image_id: "sha256:33832afe36670b5ccb16fa42fbbb5dc70e21957457123224c075407040a7592f"
     env:
       APPLIANCE_SOURCE_SHA: ${{ matrix.source_sha }}
       SOURCE_IMAGE_RUN_ID: ${{ matrix.image_run }}
@@ -159,6 +157,8 @@ jobs:
         # replay runs exactly that in its own docker:dind data root — never in
         # the daemon the build uses, so it cannot pre-populate or repair it.
         # Observes only; the build's closure and cold-load checks decide.
+        # Not run for a source-provisioned (final) candidate.
+        if: matrix.provisioning == 'lab'
         continue-on-error: true
         run: |
           set -uo pipefail
@@ -234,8 +234,9 @@ jobs:
         # disposable daemon's registry access goes to a dead proxy).
         run: |
           set -euo pipefail
-          . appliance/build/manifest.env
-          appliance/build/cold-load-check.sh --dind "$COLDLOAD_DIND_IMAGE" \
+          # From the candidate's own source tree, not the lab checkout.
+          . appliance-src/appliance/build/manifest.env
+          appliance-src/appliance/build/cold-load-check.sh --dind "$COLDLOAD_DIND_IMAGE" \
             --archive "$LAB_ROOT/build/overlay/var/lib/culvert-appliance/images/clamav.tar.gz" \
             --ref "${CLAMAV_IMAGE_REPO#docker.io/}:${CLAMAV_IMAGE_TAG}" --id "$CLAMAV_IMAGE_INDEX_DIGEST" \
             --run "clamd --version" --ready-clamav 900 2>&1 | tee "$LAB_ROOT/coldload-clamav-ready.txt"
