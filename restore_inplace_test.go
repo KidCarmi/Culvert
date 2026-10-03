@@ -577,3 +577,49 @@ func TestHoldDataDirLock_SurvivesGarbageCollection(t *testing.T) {
 		}
 	}
 }
+
+// A dedicated ext4 volume mounted at /data carries a root-owned 0700
+// `lost+found` the unprivileged proxy can neither read nor rename. The
+// commit must leave it exactly where it is — never staged into the restore,
+// never evacuated into the bak dir, never a collision — and still commit
+// (lifecycle scenario G found the EACCES on a real loop-backed volume).
+func TestRestoreCommit_LeavesLostAndFoundInPlace(t *testing.T) {
+	src, currentDir, _, _ := makeCommitFixture(t, 0)
+	lf := filepath.Join(currentDir, "lost+found")
+	if err := os.Mkdir(lf, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// An unreadable fixture for a non-root test process; root ignores the
+	// mode, so the in-place assertions below are what pin the behaviour.
+	if err := os.Chmod(lf, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(lf, 0o700) })
+	if _, err := captureStdout(t, func() error {
+		return runRestoreCommit(src, currentDir, "", restoreOpts{Mode: modeFull, AcceptDPReenrollment: true})
+	}); err != nil {
+		t.Fatalf("commit on a volume carrying lost+found: %v", err)
+	}
+	st, err := os.Lstat(lf)
+	if err != nil || !st.IsDir() {
+		t.Fatalf("lost+found must stay at the volume root: %v", err)
+	}
+	entries, err := os.ReadDir(currentDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if !strings.HasPrefix(e.Name(), restoreBakPrefix) {
+			continue
+		}
+		if _, err := os.Lstat(filepath.Join(currentDir, e.Name(), "lost+found")); err == nil {
+			t.Fatalf("lost+found was evacuated into %s", e.Name())
+		}
+	}
+	if _, present, _ := readRestoreJournal(currentDir); present {
+		t.Fatal("journal must be retired after a successful commit")
+	}
+	if _, err := os.Stat(filepath.Join(currentDir, "ui_users.json")); err != nil {
+		t.Fatalf("restored content missing: %v", err)
+	}
+}

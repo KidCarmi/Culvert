@@ -171,6 +171,23 @@ func isRestoreInternalEntry(name string) bool {
 	return strings.HasPrefix(name, restoreInternalPrefix) || name == dataDirLockName
 }
 
+// isFilesystemFixtureEntry names the top-level entries that belong to the
+// FILESYSTEM, not to Culvert: `lost+found`, which mkfs.ext4 creates
+// root-owned 0700 at the root of every ext4 volume and fsck expects to find
+// there. A dedicated block device mounted at /data (an operator's data disk,
+// a loop-backed volume) therefore always carries one, and the proxy runs as
+// an unprivileged user that can neither read it (stage-from-current failed
+// with EACCES) nor rename it (evacuation would), so without this exemption
+// a restore could never commit on exactly the deployment shape a dedicated
+// volume is chosen for — found by lifecycle scenario G (owner review, PR
+// #1528). It is left in place through the whole swap: never staged, never
+// evacuated, never promoted, never a collision. A Docker named volume on the
+// root filesystem (the shipped compose layout) has no such entry, so nothing
+// changes there.
+func isFilesystemFixtureEntry(name string) bool {
+	return name == "lost+found"
+}
+
 func restoreJournalPath(dataDir string) string {
 	return filepath.Join(dataDir, restoreJournalName)
 }
@@ -262,7 +279,7 @@ func listTopLevelUserEntries(dir string) ([]string, error) {
 	}
 	names := make([]string, 0, len(entries))
 	for _, e := range entries {
-		if isRestoreInternalEntry(e.Name()) {
+		if isRestoreInternalEntry(e.Name()) || isFilesystemFixtureEntry(e.Name()) {
 			continue
 		}
 		names = append(names, e.Name())

@@ -1347,7 +1347,7 @@ func stageArtifacts(stagingDir, dataDir string, files map[string][]byte, manifes
 		// Never carry over (or descend into) the restore machinery's own
 		// top-level entries: the staging dir being written, previous
 		// .restore-bak.* leftovers, the journal and the lock file.
-		if filepath.Dir(p) == dataDir && isRestoreInternalEntry(info.Name()) {
+		if filepath.Dir(p) == dataDir && (isRestoreInternalEntry(info.Name()) || isFilesystemFixtureEntry(info.Name())) {
 			if info.IsDir() {
 				return filepath.SkipDir
 			}

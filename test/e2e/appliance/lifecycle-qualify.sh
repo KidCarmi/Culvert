@@ -18,6 +18,10 @@
 #      RUNNING stack is refused (data-dir lock)
 #   E  interrupted restore (journal present) → proxy refuses to boot →
 #      --recover-restore --confirm complete → boot → state verified
+#   G  restore onto a FULL volume (/data on a size-bounded loop-backed ext4
+#      image, filled to a few KiB free) → refused at the stage step, before any move: no
+#      journal, no staging/bak, data byte-identical → boots → the same
+#      archive restores once space is freed
 #
 # Requirements: docker + compose v2, root or docker group, the images
 # present locally (or pullable), ports 8080/9090 free on the host.
@@ -41,6 +45,8 @@ mkdir -p "$EVID"
 JSONL="$EVID/checks.jsonl"; MD="$EVID/REPORT.md"; : > "$JSONL"
 RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)"
 FAILS=0
+SUDO=""; [[ "$(id -u)" -eq 0 ]] || SUDO=sudo
+LOOPDEVS=()
 
 log()  { printf '%s %s\n' "$(date -u +%H:%M:%S)" "$*" >&2; }
 digest_of() { docker image inspect --format '{{index .RepoDigests 0}}|{{.Id}}' "$1" 2>/dev/null || echo "unknown|unknown"; }
@@ -66,7 +72,15 @@ newproj() { # newproj <name> <image-for-pinned>
   local cid; cid="$(docker create "$CUR_IMAGE")"
   docker cp "$cid:/app/deploy/docker-compose.yml" "$PDIR/docker-compose.yml" >/dev/null
   docker rm -f "$cid" >/dev/null
-  cp "$HERE/docker-compose.qualify.yml" "$PDIR/docker-compose.override.yml"
+  # Real-ClamAV mode (CULVERT_QUALIFY_REAL_CLAMAV=1, direct egress): the
+  # override keeps the origins and the proxy start_period but does NOT stub
+  # the sidecar, so the bundle's clamav + its healthcheck run for real.
+  if [[ "${CULVERT_QUALIFY_REAL_CLAMAV:-0}" == 1 ]]; then
+    cp "$HERE/docker-compose.qualify.real-clamav.yml" "$PDIR/docker-compose.override.yml"
+  else
+    cp "$HERE/docker-compose.qualify.yml" "$PDIR/docker-compose.override.yml"
+  fi
+  export EXTRA_COMPOSE="${EXTRA_COMPOSE:-}"
   printf 'CULVERT_CA_PASSPHRASE=%s\nCULVERT_LOG_PASSPHRASE=%s\nCULVERT_DEFAULT_ACTION=%s\n' "$CA_PASS" "$CA_PASS" "${QUAL_DEFAULT_ACTION:-}" > "$PDIR/.env"
   chmod 600 "$PDIR/.env"
   docker tag "$2" "$PINNED"
@@ -78,18 +92,49 @@ newproj() { # newproj <name> <image-for-pinned>
   # ran without the cli profile) leaves this project's volumes behind, and a
   # stale /backup/qual.tar.gz.enc makes scenario D refuse the backup and then
   # restore an archive from a DIFFERENT install. Measured once: 7 false FAILs.
+  # It runs BEFORE the loop device below is attached: destroy also detaches
+  # every loop device this run attached, so attaching first handed Docker a
+  # device with no backing file ("unable to read superblock").
   destroy
+  # Size-bounded data volume (scenario G): /data on a loop-backed ext4 image
+  # of QUAL_DATA_LOOP_MB MiB owned by the image's runtime user, so ENOSPC is a
+  # real kernel verdict, not a simulated one. NOT a tmpfs volume: Docker's
+  # local driver mounts a fresh tmpfs per attach and drops it at the last
+  # detach, so a down/up cycle (which every scenario does) silently starts
+  # from an empty /data — the first draft of this scenario "passed" its
+  # data-untouched check on two empty directories. losetup needs root
+  # (sudo on a CI runner); -m 0 so the non-root proxy user sees the same
+  # free space df reports.
+  EXTRA_COMPOSE=""
+  if [[ -n "${QUAL_DATA_LOOP_MB:-}" ]]; then
+    local uid gid img dev
+    uid="$(docker run --rm --entrypoint id "$CUR_IMAGE" -u)"; gid="$(docker run --rm --entrypoint id "$CUR_IMAGE" -g)"
+    img="$PDIR/data-disk.img"
+    truncate -s "${QUAL_DATA_LOOP_MB}M" "$img"
+    mkfs.ext4 -q -m 0 -E root_owner="$uid:$gid" "$img"
+    dev="$($SUDO losetup -f --show "$img")"
+    LOOPDEVS+=("$dev")
+    printf 'volumes:\n  proxy-data:\n    driver: local\n    driver_opts:\n      type: ext4\n      device: %s\n' "$dev" > "$PDIR/docker-compose.loop.yml"
+    EXTRA_COMPOSE="$PDIR/docker-compose.loop.yml"
+    log "data volume: ${QUAL_DATA_LOOP_MB} MiB ext4 on $dev ($img), owner $uid:$gid"
+  fi
 }
-dc() { docker compose -p "$PROJ" --project-directory "$PDIR" -f "$PDIR/docker-compose.yml" -f "$PDIR/docker-compose.override.yml" "$@"; }
+dc() { docker compose -p "$PROJ" --project-directory "$PDIR" -f "$PDIR/docker-compose.yml" -f "$PDIR/docker-compose.override.yml" ${EXTRA_COMPOSE:+-f "$EXTRA_COMPOSE"} "$@"; }
 dcli() { dc --profile cli run --rm -T -e CULVERT_BACKUP_PASSPHRASE="$BK_PASS" cli "$@"; }
 up() { dc up -d --remove-orphans >/dev/null 2>&1 || true; wait_health; }
 down() { dc down --remove-orphans >/dev/null 2>&1 || true; }
 # --profile cli is load-bearing: culvert-backups is referenced only by the
 # profiled cli service, so without the profile compose drops it from the
 # model and `down -v` leaves it on the host across runs.
-destroy() { dc --profile cli down -v --remove-orphans >/dev/null 2>&1 || true; }
+destroy() {
+  dc --profile cli down -v --remove-orphans >/dev/null 2>&1 || true
+  local d; for d in ${LOOPDEVS[@]+"${LOOPDEVS[@]}"}; do $SUDO losetup -d "$d" 2>/dev/null || true; done; LOOPDEVS=()
+}
+# QUAL_HEALTH_WAIT_S bounds the wait (default 120 s; the real ClamAV sidecar
+# downloads ~250 MB of signatures before the proxy may start — give it 900).
 wait_health() {
-  for _ in $(seq 1 60); do
+  local budget="${QUAL_HEALTH_WAIT_S:-120}" i
+  for (( i = 0; i < budget; i += 2 )); do
     if curl -fsS -m 3 "$PROXY/health" >/dev/null 2>&1; then return 0; fi; sleep 2
   done
   return 1
@@ -301,18 +346,64 @@ scE() {
   destroy
 }
 
+# ═══ G. insufficient disk space: refused at the stage step, nothing moved ═══
+# "Restore stages before the swap" was an ARGUMENT in the readiness report;
+# this makes it evidence (owner review, PR #1528). The volume is a real
+# size-bounded ext4 filesystem; the fill leaves a few KiB so the stage's first
+# write hits ENOSPC from the kernel. Also records what the proxy's own data
+# footprint is on that volume (df after seeding), so the bound is reviewable.
+scG() {
+  local sc=G; log "=== $sc restore onto a full volume is refused before any move"
+  QUAL_DEFAULT_ACTION=deny QUAL_DATA_LOOP_MB="${QUAL_DATA_LOOP_MB:-128}" newproj g "$CUR_IMAGE"
+  up || { check $sc boot fail "no /health on a ${QUAL_DATA_LOOP_MB:-128} MiB ext4 data volume: $(docker logs culvert 2>&1 | tail -3)"; destroy; return; }
+  setup_admin >/dev/null; login "$ADMIN_USER" "$ADMIN_PASS" >/dev/null; seed_policy >/dev/null
+  local out; out="$(dcli --encrypt --backup /backup/qual.tar.gz.enc 2>&1 || true)"
+  if echo "$out" | grep -q "Backup written"; then check $sc backup pass "$(echo "$out" | tail -1)"; else check $sc backup fail "$out"; destroy; return; fi
+  down
+  check $sc data-footprint pass "$(onvol 'df -k /data | awk "NR==2{print \"used \"\$3\" KiB of \"\$2\" KiB, \"\$4\" KiB free\"}"; du -sk /data/* /data/.[a-z]* 2>/dev/null | sort -rn | head -4 | tr "\n" " "')"
+  local before; before="$(onvol 'cd /data && find . -path ./.qual-fill -prune -o -type f -print0 | sort -z | xargs -0 sha256sum' | sha256sum | cut -c1-16)"
+  # Fill to 4 KiB free. fallocate is honoured by tmpfs; the staged restore
+  # needs tens of KiB (ca.bundle, ui_users.json, policy …).
+  out="$(onvol 'avail=$(df -k /data | awk "NR==2{print \$4}"); fallocate -l $(( (avail-4)*1024 )) /data/.qual-fill && df -k /data | awk "NR==2{print \"filled: \"\$4\" KiB free of \"\$2}"' 2>&1)"
+  check $sc volume-filled pass "$out"
+  out="$(dcli --restore /backup/qual.tar.gz.enc --confirm --mode full --accept-dp-reenrollment 2>&1 || true)"
+  if echo "$out" | grep -q "stage failed" && echo "$out" | grep -qi "no space left on device"; then check $sc refused-at-stage pass "$(echo "$out" | grep -i 'stage failed' | head -1 | cut -c1-200)"; else check $sc refused-at-stage fail "$out"; fi
+  expect $sc no-journal-no-leftovers bash -c "$(declare -f onvol vol); PROJ=$PROJ; onvol 'cd /data && ! ls -d .restore-journal.json .restore-staging.* .restore-bak.* 2>/dev/null' && echo 'no journal, no staging dir, no bak dir'"
+  local after; after="$(onvol 'cd /data && find . -path ./.qual-fill -prune -o -type f -print0 | sort -z | xargs -0 sha256sum' | sha256sum | cut -c1-16)"
+  if [[ "$before" == "$after" ]]; then check $sc data-untouched pass "content digest $before unchanged"; else check $sc data-untouched fail "content digest changed $before → $after"; fi
+  onvol 'rm -f /data/.qual-fill' >/dev/null
+  up || { check $sc boot-after-refusal fail "$(docker logs culvert 2>&1 | tail -5)"; destroy; return; }
+  check $sc boot-after-refusal pass "version=$(version_of)"
+  expect $sc login-after-refusal bash -c '[[ "$(login "'"$ADMIN_USER"'" "'"$ADMIN_PASS"'")" == 200 ]] && echo "admin logs in"'
+  login "$ADMIN_USER" "$ADMIN_PASS" >/dev/null
+  assert_enforcement $sc after-refusal
+  # The same archive restores once space exists — proves the refusal was the
+  # disk, not the archive.
+  down
+  out="$(dcli --restore /backup/qual.tar.gz.enc --confirm --mode full --accept-dp-reenrollment 2>&1 || true)"
+  if echo "$out" | grep -q "Restore committed"; then check $sc commit-after-space-freed pass "committed"; else check $sc commit-after-space-freed fail "$out"; fi
+  up || { check $sc boot-after-commit fail "$(docker logs culvert 2>&1 | tail -5)"; destroy; return; }
+  expect $sc login-after-commit bash -c '[[ "$(login "'"$ADMIN_USER"'" "'"$ADMIN_PASS"'")" == 200 ]] && echo "admin logs in"'
+  destroy
+}
+
 # ═══ run ═════════════════════════════════════════════════════════════════════
 trap 'destroy >/dev/null 2>&1 || true' EXIT
-SCENARIOS="${SCENARIOS:-A B D E}"   # subset for re-runs, e.g. SCENARIOS="E"
+SCENARIOS="${SCENARIOS:-A B D E G}"   # subset for re-runs, e.g. SCENARIOS="E"
 for sc in $SCENARIOS; do
   case "$sc" in
     A) scA ;;
     B) for p in $PRED_IMAGES; do scB "$p"; done ;;
     D) scD ;;
     E) scE ;;
+    G) scG ;;
   esac
 done
-check X "clamav-real-sidecar" blocked "ClamAV replaced by a stub (docker-compose.qualify.yml); the real sidecar's signature download cannot verify TLS behind this sandbox's intercepting proxy. Prerequisite: run on a host with direct egress and CULVERT_QUALIFY_REAL_CLAMAV=1 (remove the stub)."
+if [[ "${CULVERT_QUALIFY_REAL_CLAMAV:-0}" == 1 ]]; then
+  check X "clamav-real-sidecar" pass "the REAL clamav/clamav sidecar from the deploy bundle ran (signatures downloaded, healthcheck passed, /ready strict incl. the scanner rows)"
+else
+  check X "clamav-real-sidecar" blocked "ClamAV replaced by a stub (docker-compose.qualify.yml); the real sidecar's signature download cannot verify TLS behind this sandbox's intercepting proxy. Prerequisite: run on a host with direct egress and CULVERT_QUALIFY_REAL_CLAMAV=1 (uses docker-compose.qualify.real-clamav.yml, no stub)."
+fi
 
 {
   echo "## Checks"; echo; echo "| scenario | check | result | detail |"; echo "|---|---|---|---|"

@@ -1,0 +1,15 @@
+# test/e2e/appliance/docker-compose.qualify.real-clamav.yml — qualification
+# override for CULVERT_QUALIFY_REAL_CLAMAV=1 (direct egress). Identical to
+# docker-compose.qualify.yml MINUS the ClamAV stub: the deploy bundle's own
+# clamav/clamav sidecar runs, downloads its signatures and must pass its own
+# healthcheck before the proxy starts (depends_on: service_healthy). TEST-ONLY.
+services:
+  proxy:
+    healthcheck:
+      start_period: 15s
+  origin-allowed:
+    image: busybox:stable
+    command: ["sh", "-c", "mkdir -p /www && echo origin-allowed-ok > /www/index.html && httpd -f -p 80 -h /www"]
+  origin-blocked:
+    image: busybox:stable
+    command: ["sh", "-c", "mkdir -p /www && echo origin-blocked-ok > /www/index.html && httpd -f -p 80 -h /www"]
