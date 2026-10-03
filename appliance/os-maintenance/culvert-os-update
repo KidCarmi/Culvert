@@ -60,6 +60,19 @@ finish() {
   if [[ "$reboot_if_required" -eq 1 ]] && reboot_required; then do_reboot; fi
 }
 
+# docker_upgrade_recover is the ERR trap for `culvert-os-update docker`: it
+# re-applies the Docker package holds and tries to bring the stack back,
+# saying plainly when either did not happen.
+docker_upgrade_recover() {
+  trap - ERR
+  if apt-mark hold "${DOCKER_PKGS[@]}" >/dev/null 2>&1; then
+    echo "culvert-os-update: Docker upgrade FAILED — package holds restored; attempting to restart the stack" >&2
+  else
+    echo "culvert-os-update: Docker upgrade FAILED and the package holds could NOT be restored — run: sudo apt-mark hold ${DOCKER_PKGS[*]}" >&2
+  fi
+  stack_start || echo "culvert-os-update: stack did not start — check: cd $STACK && docker compose ps" >&2
+}
+
 case "$mode" in
   check)
     apt-get update -qq
@@ -95,14 +108,17 @@ case "$mode" in
     apt-mark unhold "${DOCKER_PKGS[@]}" >/dev/null
     # The holds are the invariant: a failed upgrade (mirror, dpkg) under set -e
     # would otherwise exit with Docker UNHELD, and the next plain OS upgrade
-    # would move the engine (Codex P2, PR #1528). Re-hold on every failure
-    # path, then try to bring the stack back rather than leave it stopped.
-    trap 'apt-mark hold "${DOCKER_PKGS[@]}" >/dev/null 2>&1 || true; echo "culvert-os-update: Docker upgrade FAILED — package holds restored; attempting to restart the stack" >&2; stack_start || echo "culvert-os-update: stack did not start — check: cd $STACK && docker compose ps" >&2' ERR
+    # would move the engine (Codex P2, PR #1528). The trap stays armed until
+    # the re-hold, the engine restart and the stack start have ALL succeeded —
+    # the re-hold is itself a dpkg write that can fail (Codex P2, second
+    # round) — and it reports what it actually achieved instead of assuming
+    # the hold took.
+    trap docker_upgrade_recover ERR
     apt-get -y -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold install --only-upgrade "${DOCKER_PKGS[@]}"
-    trap - ERR
     apt-mark hold "${DOCKER_PKGS[@]}" >/dev/null
     systemctl restart docker
     stack_start
+    trap - ERR
     docker version --format 'Docker engine {{.Server.Version}}'
     finish
     ;;
