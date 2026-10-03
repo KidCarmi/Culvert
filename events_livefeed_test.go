@@ -14,6 +14,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -37,13 +38,16 @@ import (
 // straggler a `tunnel-allow` CONNECT from TestObservationE2E_CONNECTTunnel).
 // Every such tunnel is registered in activeConns and its accounting lands
 // BEFORE the deferred release (handleTunnelBypass etc.), so activeConns
-// reaching zero proves no straggler can still write. The wait is bounded and
-// does not fail the caller: a gauge held by a genuinely stuck tunnel is the
-// leaking test's defect, reported here, not this test's.
-func isolateLogRing(t *testing.T) {
+// reaching zero proves no straggler can still write.
+//
+// If the tunnels do not drain within the bound the helper FAILS BEFORE
+// SWAPPING: an isolated ring that a leaked tunnel can still write into is not
+// isolated, and a test that proceeded would assert against it and fail later
+// for a reason it cannot name. The failure names the cause instead.
+func isolateLogRing(t testing.TB) {
 	t.Helper()
-	if !waitTunnelsQuiescent(isolateLogRingTunnelWait) {
-		t.Logf("isolateLogRing: %d hijacked tunnel(s) still open after %s — a previous test leaked one; its accounting may still land in this ring", getActiveConns(), isolateLogRingTunnelWait)
+	if err := waitTunnelsQuiescent(isolateLogRingTunnelWait); err != nil {
+		t.Fatalf("isolateLogRing: refusing to isolate the request-log ring: %v — a previous test leaked a hijacked tunnel whose close accounting could land in this test's ring; make that test wait for its tunnel (waitForActiveConnsZero)", err)
 	}
 	t.Cleanup(reqlog.SwapRingForTest())
 }
@@ -53,19 +57,33 @@ func isolateLogRing(t *testing.T) {
 // matters for one that never ends.
 const isolateLogRingTunnelWait = 5 * time.Second
 
+// Seams for waitTunnelsQuiescent, so its gates never depend on runner speed:
+// the clock and the sleep can be replaced, and ringQuiescenceProbe (nil in
+// production) is called on every poll that found a tunnel still in flight —
+// the explicit "the helper is now waiting" signal a gate synchronises on.
+var (
+	ringQuiescenceNow   = time.Now
+	ringQuiescenceSleep = time.Sleep
+	ringQuiescenceProbe func()
+)
+
 // waitTunnelsQuiescent polls until no hijacked tunnel is registered, or the
-// bound passes. Unlike waitForActiveConnsZero it needs no *testing.T, so the
-// helper above can call it before deciding how to report.
-func waitTunnelsQuiescent(within time.Duration) bool {
-	deadline := time.Now().Add(within)
+// bound passes, in which case it reports how many are still open. With
+// nothing in flight it returns on the first check, without sleeping.
+func waitTunnelsQuiescent(within time.Duration) error {
+	deadline := ringQuiescenceNow().Add(within)
 	for {
-		if getActiveConns() <= 0 {
-			return true
+		n := getActiveConns()
+		if n <= 0 {
+			return nil
 		}
-		if !time.Now().Before(deadline) {
-			return false
+		if probe := ringQuiescenceProbe; probe != nil {
+			probe()
 		}
-		time.Sleep(2 * time.Millisecond)
+		if !ringQuiescenceNow().Before(deadline) {
+			return fmt.Errorf("%d hijacked tunnel(s) still open after %s", n, within)
+		}
+		ringQuiescenceSleep(2 * time.Millisecond)
 	}
 }
 
