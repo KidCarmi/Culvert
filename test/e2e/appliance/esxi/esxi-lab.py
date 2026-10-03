@@ -232,6 +232,17 @@ def check_capacity(c, artifact, ds, host):
                 host_free_mb=free_mb, host_free_cpu_mhz=free_cpu)
 
 
+def network_ref(listing, path):
+    elements = listing.get('elements') or []
+    require(len(elements) == 1 and elements[0].get('Path') == path,
+            'one exact network path required')
+    ref = elements[0].get('Object', {}).get('self', {})
+    require(ref.get('type') in ('Network', 'DistributedVirtualPortgroup') and
+            isinstance(ref.get('value'), str) and bool(ref['value']) and
+            not any(ord(c) < 32 for c in ref['value']), 'one supported network required')
+    return dict(type=ref['type'], value=ref['value'])
+
+
 def assert_owned(vm, state, c):
     cfg = vm.get('config') or {}
     require(cfg.get('annotation') == state['owner'], 'ownership marker mismatch; refusing mutation')
@@ -311,9 +322,7 @@ class Lab:
         hs = self.gov('host.info', self.c['host'])['hostSystems']
         dss = self.gov('datastore.info', self.c['datastore'])['datastores']
         require(len(hs) == len(dss) == 1, 'exact host and datastore required')
-        net = self.gov('ls', '-i', self.c['network'], json_output=False)
-        require(re.fullmatch(r'(Network|DistributedVirtualPortgroup):[A-Za-z0-9-]+', net), 'one supported network required')
-        kind, value = net.split(':')
+        net = network_ref(self.gov('ls', '-i', self.c['network']), self.c['network'])
         require(hs[0]['self'] in [x['key'] for x in dss[0]['host']], 'datastore not mounted on designated host')
         capacity = check_capacity(self.c, artifact, dss[0]['summary'], hs[0]['summary'])
         sha = subprocess.run(['git', '-C', str(ROOT), 'rev-parse', 'HEAD'], capture_output=True, text=True, check=True).stdout.strip()
@@ -329,7 +338,7 @@ class Lab:
                     tls_verification='owner-authorized-exception' if self.c.get('tls_insecure') else 'verified',
                     hypervisor=hs[0]['summary']['config']['product'], capacity=capacity,
                     property_delivery='govc ImportVApp + InjectOvfEnv via VMware guestinfo',
-                    host_ref=hs[0]['self'], ds_ref=dss[0]['self'], network_ref=dict(type=kind, value=value))
+                    host_ref=hs[0]['self'], ds_ref=dss[0]['self'], network_ref=net)
         atomic_json(self.ev / 'preflight.json', data)
         self.record('preflight', 'pass', 'checksum, complete manifest, scope and measured capacity verified')
         return data

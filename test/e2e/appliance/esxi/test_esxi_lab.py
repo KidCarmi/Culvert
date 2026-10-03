@@ -355,6 +355,17 @@ class TransportTests(unittest.TestCase):
 
 
 class ObservationTests(unittest.TestCase):
+    def test_esxi_network_ref_with_spaces_is_valid_but_path_must_match(self):
+        path = '/ha-datacenter/network/VM Network'
+        listing = {'elements': [{'Path': path, 'Object': {'self': {
+            'type': 'Network', 'value': 'HaNetwork-VM Network'}}}]}
+        self.assertEqual(lab.network_ref(listing, path)['value'], 'HaNetwork-VM Network')
+        with self.assertRaises(lab.Refused):
+            lab.network_ref(listing, '/ha-datacenter/network/Other')
+        listing['elements'].append(listing['elements'][0])
+        with self.assertRaises(lab.Refused):
+            lab.network_ref(listing, path)
+
     def test_ownership_refusal_prevents_console_or_guest_access(self):
         with tempfile.TemporaryDirectory() as tmp:
             p = Path(tmp)
