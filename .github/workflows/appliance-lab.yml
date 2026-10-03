@@ -58,7 +58,8 @@ jobs:
           set -euo pipefail
           for i in 1 2; do
             sudo apt-get update -q && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends \
-              libguestfs-tools qemu-utils qemu-system-x86 genisoimage ubuntu-cloudimage-keyring && break
+              libguestfs-tools qemu-utils qemu-system-x86 genisoimage ubuntu-cloudimage-keyring \
+              isc-dhcp-client && break  # isc-dhcp-client: the libguestfs appliance brings its network up with it (as on the qualification host)
             sleep 15
           done
           # supermin (libguestfs) reads the host kernel; Ubuntu ships it 0600.
