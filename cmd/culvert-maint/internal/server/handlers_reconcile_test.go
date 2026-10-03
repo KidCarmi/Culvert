@@ -449,7 +449,11 @@ func TestReconcile_ClaimRefusesAConcurrentRequestForTheSameRecord(t *testing.T) 
 	}
 	// CONTROL: once released, the record is actionable again.
 	rig.srv.releaseReconcile(opID)
-	if code, body := rig.postReconcile(t, opID, map[string]interface{}{"action": "resolve"}); code != http.StatusAccepted {
+	code, body := rig.postReconcile(t, opID, map[string]interface{}{"action": "resolve"})
+	if code != http.StatusAccepted {
 		t.Fatalf("after release the resolve must be admitted: %d %+v", code, body)
 	}
+	// The admitted resolve runs asynchronously and writes the journal; wait
+	// for it so the temp dir is not removed underneath it.
+	rig.waitOp(t, body["op_id"].(string))
 }

@@ -18,7 +18,10 @@ const spaceHeadroomBytes = 256 << 20
 // Already-present layers are not credited — refusing on a tight disk is a
 // no-op, filling it is not.
 func spaceNeeded(compressed int64) uint64 {
-	return uint64(3*compressed) + spaceHeadroomBytes //nolint:gosec // compressed is a non-negative registry size
+	if compressed <= 0 || compressed > 1<<50 {
+		return spaceHeadroomBytes
+	}
+	return 3*uint64(compressed) + spaceHeadroomBytes
 }
 
 // preflightSpace refuses an upgrade before the pull when the Docker data

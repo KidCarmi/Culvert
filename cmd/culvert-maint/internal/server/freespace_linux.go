@@ -2,7 +2,10 @@
 
 package server
 
-import "syscall"
+import (
+	"fmt"
+	"syscall"
+)
 
 // statfsFreeBytes returns the bytes available to unprivileged writers on
 // the filesystem holding path (Bavail — what a non-root pull would see is
@@ -12,5 +15,8 @@ func statfsFreeBytes(path string) (uint64, error) {
 	if err := syscall.Statfs(path, &st); err != nil {
 		return 0, err
 	}
-	return st.Bavail * uint64(st.Bsize), nil //nolint:gosec // Bsize is positive
+	if st.Bsize <= 0 {
+		return 0, fmt.Errorf("statfs %s: unexpected block size %d", path, st.Bsize)
+	}
+	return st.Bavail * uint64(st.Bsize), nil
 }
