@@ -12,6 +12,19 @@ import (
 	"time"
 )
 
+func TestRealPTYFragmentedEscapeAfterIdle(t *testing.T) {
+	s := startTerminal(t, 25, 80, "linux")
+	s.await(t, "Read-only public console")
+	time.Sleep(450 * time.Millisecond)
+	s.send(t, "\x1b")
+	time.Sleep(100 * time.Millisecond)
+	s.send(t, "OQ")
+	s.await(t, "RESTORED ACTION:login")
+	if err := s.cmd.Wait(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestRealPTYMalformedInputRestoresWithoutDispatch(t *testing.T) {
 	for _, input := range []string{"\x1b[", "\x1b[" + strings.Repeat("1", 20) + "L", "\x1b[200~REBOOT\nL"} {
 		t.Run(input, func(t *testing.T) {

@@ -63,7 +63,25 @@ func validateTerminal(admin bool) error {
 func readKey(ctx context.Context) (string, error) {
 	inputCtx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
 	defer cancel()
+	b, err := confirmationByte(inputCtx, 0)
+	if err != nil {
+		if ctx.Err() == nil && errors.Is(err, context.DeadlineExceeded) {
+			return "", nil
+		}
+		return "", err
+	}
+	if b == 27 {
+		// Start the sequence budget at Escape, not at the preceding idle poll.
+		return readEscape(ctx)
+	}
+	return applianceconsole.DecodeKey(string(b)), nil
+}
+
+func readEscape(ctx context.Context) (string, error) {
+	inputCtx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
+	defer cancel()
 	var sequence strings.Builder
+	sequence.WriteByte(27)
 	for sequence.Len() < 16 {
 		b, err := confirmationByte(inputCtx, 0)
 		if err != nil {
@@ -79,20 +97,14 @@ func readKey(ctx context.Context) (string, error) {
 		if sequence.String() == "\x1b[200~" {
 			return "", discardPaste(ctx)
 		}
-		if sequence.Len() == 1 && b != 27 {
-			return applianceconsole.DecodeKey(sequence.String()), nil
-		}
 		if key := applianceconsole.DecodeKey(sequence.String()); key != "" {
 			return key, nil
 		}
 	}
-	if sequence.String() == "\x1b" {
+	if sequence.Len() == 1 {
 		return "ESC", nil
 	}
-	if sequence.Len() != 0 {
-		return "", errors.New("incomplete or unsupported console escape sequence")
-	}
-	return "", nil
+	return "", errors.New("incomplete or unsupported console escape sequence")
 }
 
 func menu(ctx context.Context, collector applianceconsole.Collector, admin bool) (choice string, result error) {
