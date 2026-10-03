@@ -130,6 +130,11 @@ services:
       # auto-detect (no rules ⇒ allow/passthrough). A saved admin choice in
       # admin_settings.json still wins at load.
       - CULVERT_DEFAULT_ACTION=${CULVERT_DEFAULT_ACTION:-}
+      # Per-instance first-admin setup token: POST /api/setup/complete refuses
+      # without it while set (the appliance first-boot mints one and shows it
+      # on the console); unset keeps the open bootstrap window of a plain
+      # quick-start install.
+      - CULVERT_SETUP_TOKEN=${CULVERT_SETUP_TOKEN:-}
       # Release Management catalog/dispatch config. The maint-agent URL is
       # intentionally supplied only by docker-compose.maint-agent.yml, because
       # it is valid only when the Maintenance Agent socket is mounted.

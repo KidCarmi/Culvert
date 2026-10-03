@@ -801,6 +801,9 @@ func initAuth(s *startupState) {
 		s.authP,
 		*s.uiUsersFile,
 	))
+	// Per-instance first-admin setup token (setup_token.go): env read ONCE
+	// here, in the shim, like every other startup-scoped env value.
+	loadSetupToken(os.Getenv("CULVERT_SETUP_TOKEN"))
 }
 
 // initSession is the PR3 expansion shim: resolve the session slice

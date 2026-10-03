@@ -19645,6 +19645,10 @@ function resetBlockPage() {
       <input id="su-pass" type="password" autocomplete="new-password" minlength="8" required>
       <label for="su-pass2">Confirm password</label>
       <input id="su-pass2" type="password" autocomplete="new-password" minlength="8" required>
+      <div id="su-token-row" style="display:none">
+        <label for="su-token">Setup token <span style="color:var(--muted)">(this deployment requires it: appliance console or <code>sudo culvert-status</code>)</span></label>
+        <input id="su-token" type="password" autocomplete="off" maxlength="128">
+      </div>
       <div class="setup-err" id="su-err"></div>
       <button class="setup-submit" id="su-btn" type="submit">Set Password &amp; Continue</button>
     </form>
@@ -20012,6 +20016,11 @@ function renderTLSFallbackBanner(idPrefix, active) {
     if (d.needsSetup) {
       // First-time setup - show the setup wizard.
       document.getElementById('setup-overlay').classList.add('active');
+      // A deployment started with CULVERT_SETUP_TOKEN gates the one-time
+      // setup on a per-instance token; the server says so and refuses
+      // without it (setup_token.go), so ask for it up front.
+      const tokenRequired = !!d.setupTokenRequired;
+      if (tokenRequired) document.getElementById('su-token-row').style.display = '';
 
       document.getElementById('setup-form').addEventListener('submit', async (e) => {
         e.preventDefault();
@@ -20028,12 +20037,16 @@ function renderTLSFallbackBanner(idPrefix, active) {
         if (!meetsPasswordComplexity(pass))
           return showErr('Password must contain at least one uppercase letter, one lowercase letter, and one digit.');
         if (pass !== pass2)   return showErr('Passwords do not match.');
+        const token = tokenRequired ? document.getElementById('su-token').value.trim() : '';
+        if (tokenRequired && !token) return showErr('This deployment requires the setup token shown on the appliance console.');
 
         btn.disabled = true; btn.textContent = 'Saving\u2026';
         try {
+          const headers = {'Content-Type': 'application/json'};
+          if (token) headers['X-Culvert-Setup-Token'] = token;
           const r = await fetch('/api/setup/complete', {
             method: 'POST',
-            headers: {'Content-Type': 'application/json'},
+            headers,
             body: JSON.stringify({user, pass})
           });
           if (r.ok) {

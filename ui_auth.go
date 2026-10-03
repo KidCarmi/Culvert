@@ -492,8 +492,9 @@ func apiSetupStatus(w http.ResponseWriter, r *http.Request) {
 	// Flag only — this route is public (isPublicUIAuthPath: /api/setup*), so
 	// the raw self-sign error must not travel with it. See jsonOKAuthStatus.
 	jsonOK(w, map[string]any{
-		"needsSetup":      !cfg.IsConfigured(),
-		"ui_tls_fallback": uiTLSFallbackActive,
+		"needsSetup":         !cfg.IsConfigured(),
+		"ui_tls_fallback":    uiTLSFallbackActive,
+		"setupTokenRequired": setupTokenRequired(),
 	})
 }
 
@@ -529,6 +530,14 @@ func apiSetupComplete(w http.ResponseWriter, r *http.Request) {
 	// during the bootstrap window.
 	if cfg.IsConfigured() {
 		http.Error(w, "setup already complete", http.StatusForbidden)
+		return
+	}
+	// Per-instance setup token (setup_token.go): checked BEFORE the body is
+	// read so a caller without it learns nothing about what the endpoint
+	// accepts, and charged to the pair limiter so a guess costs an attempt.
+	if !setupTokenAccepts(r.Header.Get(headerSetupToken)) {
+		loginLimiter.RecordPairFailure(ip, setupKey)
+		http.Error(w, "setup token required or invalid (see the appliance console or `sudo culvert-status`)", http.StatusForbidden)
 		return
 	}
 

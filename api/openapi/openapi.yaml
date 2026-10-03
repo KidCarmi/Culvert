@@ -186,6 +186,9 @@ components:
           type: boolean
           description: True until an initial admin credential (or explicit open mode) is configured.
         ui_tls_fallback: { type: boolean, description: "True when self-signed TLS setup failed at startup and the admin UI fell back to plain HTTP. Exposed pre-authentication so the setup wizard can warn before the initial admin password is submitted. The FLAG only - this route is unauthenticated, so the underlying self-sign error (which can quote an operator-configured SAN or hostname) is NOT returned here; it is on the viewer-gated GET /api/settings/network and in the server log." }
+        setupTokenRequired:
+          type: boolean
+          description: True when the deployment was started with a per-instance setup token (CULVERT_SETUP_TOKEN; the appliance first boot mints one) and POST /api/setup/complete requires it in the X-Culvert-Setup-Token header. Absent/false on deployments without a token.
     SetupCompleteRequest:
       type: object
       description: Provide credentials, OR set unauth=true for explicit open mode.
@@ -2985,8 +2988,17 @@ paths:
       description: |
         One-time bootstrap. Sets the first admin credential, or enables explicit
         open mode with `{unauth:true}`. Returns 403 once auth is already
-        configured. Rate-limited per source IP.
+        configured, and 403 when the deployment requires a setup token
+        (`GET /api/setup/status` → `setupTokenRequired`) that the request does
+        not present in `X-Culvert-Setup-Token`. Rate-limited per source IP; a
+        missing or wrong token counts as a failed attempt.
       security: []
+      parameters:
+        - in: header
+          name: X-Culvert-Setup-Token
+          required: false
+          description: The per-instance setup token (appliance console / `sudo culvert-status`). Required only when `setupTokenRequired` is true.
+          schema: { type: string }
       x-culvert-visibility: public-supported
       x-culvert-permission: public
       x-culvert-tenant-scope: appliance

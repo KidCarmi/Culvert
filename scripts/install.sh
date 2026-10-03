@@ -1885,6 +1885,20 @@ case "${CULVERT_INSTALL_DEFAULT_ACTION:-}" in
   "") ;;
   *) warn "Ignoring CULVERT_INSTALL_DEFAULT_ACTION='${CULVERT_INSTALL_DEFAULT_ACTION}' (want allow or deny)" ;;
 esac
+# Per-instance first-admin setup token (CULVERT_SETUP_TOKEN, read once by the
+# proxy): the appliance first boot mints one per instance so the one-time
+# setup window on the published admin port is not open to whoever reaches it
+# first. Persisted like the other .env secrets — never overwritten once set, so
+# a re-run after an interrupted first boot keeps the token the console showed.
+# Restricted to a safe .env alphabet (see setup_at_rest_encryption's rationale).
+if [[ -n "${CULVERT_INSTALL_SETUP_TOKEN:-}" ]]; then
+  if [[ "$CULVERT_INSTALL_SETUP_TOKEN" =~ ^[A-Za-z0-9._-]{16,128}$ ]]; then
+    env_put CULVERT_SETUP_TOKEN "$CULVERT_INSTALL_SETUP_TOKEN" "$INSTALL_DIR/.env"
+    info "Persisted the first-admin setup token (CULVERT_SETUP_TOKEN) into $INSTALL_DIR/.env"
+  else
+    warn "Ignoring CULVERT_INSTALL_SETUP_TOKEN: must be 16-128 characters from [A-Za-z0-9._-]"
+  fi
+fi
 
 info "Pulling images and starting services (first run may take a few minutes — ClamAV downloads ~250 MB of virus signatures)..."
 
