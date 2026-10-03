@@ -253,6 +253,10 @@ PY
     sleep 10; done
   check 2 ssh-up pass "SSH with the OVF-delivered key after $(( $(date +%s) - t0 ))s"
   until gssh 'sudo test -f /var/lib/culvert-appliance/state/complete.done' 2>/dev/null; do
+    # systemd deletes a unit's start job to break an ordering cycle: first boot
+    # will then never run, so report it now rather than after the full bound.
+    if grep -qa 'Ordering cycle found, skipping.*culvert-firstboot' "$WORK/console.log" 2>/dev/null; then
+      check 2 firstboot-complete fail "systemd skipped culvert-firstboot.service (ordering cycle; see console.log)"; return 1; fi
     (( $(date +%s) < deadline )) || { check 2 firstboot-complete fail "first boot not complete within ${LAB_FIRSTBOOT_TIMEOUT}s"; return 1; }
     sleep 15; done
   check 2 firstboot-complete pass "complete.done after $(( $(date +%s) - t0 ))s from power-on"

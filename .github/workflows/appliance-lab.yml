@@ -44,11 +44,16 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Final-candidate contract: the application image AND the provisioning
-        # come from ONE commit — #1528's corrected head and that head's own
-        # Deep PR Gate image (no provisioning drift).
+        # candidate-78e1bc566e80 (run 37144426441) booted under BIOS but
+        # systemd skipped culvert-firstboot.service (ordering cycle with
+        # cloud-final). This variant is the PROPOSED fix: #1528's head image
+        # (78e1bc56, its own Deep PR Gate tar) with provisioning built from
+        # THIS lab commit, whose appliance/ tree is 78e1bc56's plus the unit's
+        # After= fix only. Recorded as provisioning drift; separately
+        # identified; never presented as the 78e1bc56 candidate.
         include:
-          - variant: candidate-78e1bc566e80
+          - variant: firstboot-fix-on-78e1bc566e80
+            provisioning: lab
             source_sha: "78e1bc566e80055f893de41befbbad190ac4dfec"
             image_run: "37144115505"
             image_tar_sha256: "69b711ba05b53ddadd056dd3fa1d8a299c094662b4d81d36343c0fdccffbcedb"
@@ -156,12 +161,20 @@ jobs:
           set -euo pipefail
           # The build runs as root over a runner-owned checkout; without this,
           # git refuses the repo and the candidate-source == HEAD check fails.
-          src="$GITHUB_WORKSPACE/appliance-src"
+          src="$GITHUB_WORKSPACE/appliance-src"; drift=()
+          if [ "${{ matrix.provisioning }}" = lab ]; then
+            # Provisioning from this lab commit: prove its appliance/ tree is
+            # the image commit's plus the unit fix and nothing else.
+            changed="$(cd "$GITHUB_WORKSPACE" && diff -rq appliance-src/appliance appliance | sed 's#^Files appliance-src/##; s# and .*##' || true)"
+            echo "appliance/ drift vs $APPLIANCE_SOURCE_SHA: $changed"
+            [ "$changed" = appliance/provision/culvert-firstboot.service ] || { echo "::error::unexpected provisioning drift: $changed"; exit 1; }
+            src="$GITHUB_WORKSPACE"; drift=(--candidate-allow-provisioning-drift)
+          fi
           sudo git config --global --add safe.directory "$src"
           sudo -E env LIBGUESTFS_BACKEND=direct BASE_IMAGE_KEYRING=/usr/share/keyrings/ubuntu-cloudimage-keyring.gpg \
             "$src/appliance/build/build-ova.sh" \
               --candidate-image-tar "$LAB_ROOT/in/culvert-image.tar" \
-              --candidate-source "$APPLIANCE_SOURCE_SHA" --candidate-run-id "$SOURCE_IMAGE_RUN_ID" \
+              --candidate-source "$APPLIANCE_SOURCE_SHA" --candidate-run-id "$SOURCE_IMAGE_RUN_ID" "${drift[@]}" \
               --out "$LAB_ROOT/ova" --work "$LAB_ROOT/build" 2>&1 | tee "$LAB_ROOT/build-ova.log"
           sudo chown -R "$(id -u):$(id -g)" "$LAB_ROOT/ova"
           cat "$LAB_ROOT/ova/"*.ova.sha256
@@ -208,8 +221,9 @@ jobs:
           mkdir -p "$LAB_ROOT/lab/evidence/build"
           cp "$LAB_ROOT/ova/"{build-info.json,build-upgrades.txt,dpkg-list.txt,host-components.txt,prepare-guest.log} "$LAB_ROOT/ova/"*.ova.sha256 "$LAB_ROOT/lab/evidence/build/" 2>/dev/null || true
           cp "$LAB_ROOT/rebuilt.fingerprint.tsv" "$LAB_ROOT/build-ova.log" "$LAB_ROOT/fpcmp/evidence/fingerprint-diff.txt" "$LAB_ROOT/lab/evidence/build/" 2>/dev/null || true
-          printf 'variant=%s\nlab_commit=%s\nappliance_source=%s (image AND provisioning)\nsource_image_run=%s tar_sha256=%s from=%s\nexpected_image_id=%s\nsuperseded_ova_sha256=%s (NOT the artifact booted here)\n' \
-            "${{ matrix.variant }}" "$GITHUB_SHA" "$APPLIANCE_SOURCE_SHA" "$SOURCE_IMAGE_RUN_ID" "$SOURCE_IMAGE_TAR_SHA256" "${{ steps.image.outputs.from }}" \
+          printf 'variant=%s\nlab_commit=%s\nimage_source=%s\nprovisioning_source=%s\nsource_image_run=%s tar_sha256=%s from=%s\nexpected_image_id=%s\nsuperseded_ova_sha256=%s (NOT the artifact booted here)\n' \
+            "${{ matrix.variant }}" "$GITHUB_SHA" "$APPLIANCE_SOURCE_SHA" "$([ "${{ matrix.provisioning }}" = lab ] && echo "$GITHUB_SHA (lab: $APPLIANCE_SOURCE_SHA + firstboot unit fix; provisioning drift)" || echo "$APPLIANCE_SOURCE_SHA")" \
+            "$SOURCE_IMAGE_RUN_ID" "$SOURCE_IMAGE_TAR_SHA256" "${{ steps.image.outputs.from }}" \
             "${{ matrix.expect_image_id }}" "$ORIGINAL_OVA_SHA256" > "$LAB_ROOT/lab/evidence/identities.txt"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
