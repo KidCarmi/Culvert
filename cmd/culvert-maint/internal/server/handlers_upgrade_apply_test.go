@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -71,6 +72,11 @@ type applyRig struct {
 	// readyStatuses: the /ready status code while the keyed digest runs
 	// (absent ⇒ 200 unless healthFail/unhealthyDigests).
 	readyStatuses map[string]int
+	// targetSize, when > 0, adds an OCIManifest with that many compressed
+	// bytes to the canned manifest inspect output; freeBytes is what the
+	// injected free-space probe reports (0 ⇒ plenty).
+	targetSize int64
+	freeBytes  atomic.Uint64
 	// clamUnhealthy makes compose ps list a clamav sidecar whose
 	// healthcheck reports "unhealthy".
 	clamUnhealthy bool
@@ -178,6 +184,9 @@ func (r *applyRig) canned(argv []string) []byte {
 	case contains("{{json .Image}}"):
 		return []byte(`"sha256:` + cfg + `"`)
 	case has("manifest"):
+		if r.targetSize > 0 {
+			return []byte(fmt.Sprintf(`{"Descriptor":{"digest":"sha256:%s"},"OCIManifest":{"config":{"size":1000},"layers":[{"size":%d}]}}`, r.targetDigest, r.targetSize-1000))
+		}
 		return []byte(`{"Descriptor":{"digest":"sha256:` + r.targetDigest + `"}}`)
 	case has("image") && has("inspect"):
 		ref := argv[len(argv)-1]
@@ -348,6 +357,12 @@ func startApplyRigAt(t *testing.T, tmp string) *applyRig {
 		AuditPath: auditPath,
 		Runner:    rn,
 		Journal:   jnl,
+		FreeBytes: func(string) (uint64, error) {
+			if f := rig.freeBytes.Load(); f > 0 {
+				return f, nil
+			}
+			return 1 << 40, nil
+		},
 		HealthProbeFactory: func() health.Probe {
 			baseURL, _ := url.Parse("http://127.0.0.1:8080")
 			return health.Probe{

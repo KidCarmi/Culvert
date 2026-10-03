@@ -53,6 +53,10 @@ socket_path = "/run/culvert-maint/culvert-maint.sock"
 # State directory root: audit log, per-op logs, optional state.json.
 state_dir = "/var/lib/culvert-maint"
 
+# Docker's data root (images, containerd content, container state). The
+# upgrade preflight refuses a pull that would not fit here.
+docker_root = "/var/lib/docker"
+
 # Privilege mode:
 #   "sudoers"          — production default. Agent prepends `sudo -n` to
 #                        every docker compose invocation; the sudoers

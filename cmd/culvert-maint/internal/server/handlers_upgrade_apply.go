@@ -10,6 +10,9 @@
 //	preflight_dependencies → refuse (nothing changed) while a service the
 //	                 proxy depends on is unhealthy: `compose up` would
 //	                 remove the proxy and leave the new one stopped.
+//	preflight_space → refuse (nothing pulled) when the Docker data root
+//	                 has less free space than ~3x the target's compressed
+//	                 size + headroom.
 //	pre_backup     → if requested AND not already_current: encrypted
 //	                 backup; a failure ABORTS before any pull/restart.
 //	pull           → docker pull <pinned repo@sha256> (P1.4; sudo-boundary
@@ -183,9 +186,10 @@ type upgradeApplyAccumulator struct {
 	// preserved is the health.Baseline taken before the restart: the
 	// /ready rows that were "ok" and must be "ok" again for health_gate
 	// to pass (owner review, PR #1528). Empty ⇒ 2xx alone gates.
-	preserved      []string
-	before         *health.Snapshot // the full pre-restart /ready answer (nil: stack did not answer)
-	baselineDetail string
+	targetCompressed int64 // registry size of the pinned target (0 = unknown)
+	preserved        []string
+	before           *health.Snapshot // the full pre-restart /ready answer (nil: stack did not answer)
+	baselineDetail   string
 
 	// Inline auto-rollback state (#375). Set/read across stages + the
 	// result computer; acc.opID/actor feed the rollback audit sub-action.
@@ -258,6 +262,7 @@ func (s *Server) buildUpgradeApplyStages(acc *upgradeApplyAccumulator, racc *rol
 					acc.pinnedDigest = pd
 					acc.pinnedRef = imageRepo(requestedRef) + "@" + acc.pinnedDigest
 				}
+				acc.targetCompressed = targetCompressedBytes(res.Stdout, acc.pinnedDigest)
 				if digestSetsIntersect(acc.priorDigests, acc.targetDigests) {
 					acc.alreadyCurrent = true
 				}
@@ -275,6 +280,14 @@ func (s *Server) buildUpgradeApplyStages(acc *upgradeApplyAccumulator, racc *rol
 			Name:          "preflight_dependencies",
 			FailureReason: ops.ReasonValidation,
 			Run:           skipIfCurrent(acc, "preflight_dependencies", s.preflightDependencies()),
+		},
+		{
+			// Refuse before the pull when the Docker data root cannot hold
+			// the target: a full root disk crashed the running proxy and
+			// left Docker unable to restart it (see preflight_space.go).
+			Name:          "preflight_space",
+			FailureReason: ops.ReasonValidation,
+			Run:           skipIfCurrent(acc, "preflight_space", s.preflightSpace(acc)),
 		},
 		{
 			// Encrypted pre-upgrade backup. Skipped when already current

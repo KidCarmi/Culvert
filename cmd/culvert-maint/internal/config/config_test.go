@@ -460,3 +460,17 @@ func TestLoad_ReconcileOnStartup(t *testing.T) {
 		t.Fatal("a non-boolean reconcile_on_startup must fail closed")
 	}
 }
+
+func TestLoad_DockerRoot(t *testing.T) {
+	cfg, err := Load(writeConfig(t, minimalValid))
+	if err != nil || cfg.DockerRoot != "/var/lib/docker" {
+		t.Fatalf("default docker_root: %v %q", err, cfg.DockerRoot)
+	}
+	cfg, err = Load(writeConfig(t, minimalValid+"\ndocker_root = \"/data/docker/\""))
+	if err != nil || cfg.DockerRoot != "/data/docker" {
+		t.Fatalf("configured docker_root: %v %q", err, cfg.DockerRoot)
+	}
+	if _, err := Load(writeConfig(t, minimalValid+"\ndocker_root = \"docker\"")); err == nil || !strings.Contains(err.Error(), "absolute") {
+		t.Fatalf("a relative docker_root must be refused, got %v", err)
+	}
+}

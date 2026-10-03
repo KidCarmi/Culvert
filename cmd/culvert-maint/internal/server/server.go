@@ -157,6 +157,10 @@ type Options struct {
 	// HealthProbeFactory builds a fresh health.Probe per restore
 	// operation. May be nil in tests that don't exercise restore.
 	HealthProbeFactory func() health.Probe
+
+	// FreeBytes reports the free bytes on the filesystem holding path
+	// (the upgrade space preflight). nil ⇒ the platform statfs.
+	FreeBytes func(path string) (uint64, error)
 }
 
 // DefaultOpDrainTimeout is the shutdown drain window for in-flight orchestrator

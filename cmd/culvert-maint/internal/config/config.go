@@ -59,6 +59,11 @@ type Config struct {
 	// State directory root. Default "/var/lib/culvert-maint".
 	StateDir string
 
+	// DockerRoot is the Docker daemon's data root (images, containerd
+	// content, container state). The upgrade preflight measures its free
+	// space before a pull. Default "/var/lib/docker".
+	DockerRoot string
+
 	// Privilege model. Default PrivilegeSudoers.
 	PrivilegeMode PrivilegeMode
 
@@ -142,6 +147,7 @@ type rawConfig struct {
 	ComposeOverrideFile string   `toml:"compose_override_file"`
 	SocketPath          string   `toml:"socket_path"`
 	StateDir            string   `toml:"state_dir"`
+	DockerRoot          string   `toml:"docker_root"`
 	PrivilegeMode       string   `toml:"privilege_mode"`
 	HealthBaseURL       string   `toml:"health_base_url"`
 	HealthPath          string   `toml:"health_path"`
@@ -160,6 +166,7 @@ const (
 	defaultComposeFile      = "docker-compose.yml"
 	defaultSocketPath       = "/run/culvert-maint/culvert-maint.sock"
 	defaultStateDir         = "/var/lib/culvert-maint"
+	defaultDockerRoot       = "/var/lib/docker"
 	defaultPrivilegeMode    = string(PrivilegeSudoers)
 	defaultHealthBaseURL    = "http://127.0.0.1:8080"
 	defaultHealthPath       = "/health"
@@ -286,6 +293,16 @@ func validate(raw *rawConfig) (*Config, error) {
 		return nil, fmt.Errorf("config: state_dir must be absolute: %q", sd)
 	}
 	cfg.StateDir = filepath.Clean(sd)
+
+	// docker_root — default /var/lib/docker. Must be absolute.
+	dr := raw.DockerRoot
+	if dr == "" {
+		dr = defaultDockerRoot
+	}
+	if !filepath.IsAbs(dr) {
+		return nil, fmt.Errorf("config: docker_root must be absolute: %q", dr)
+	}
+	cfg.DockerRoot = filepath.Clean(dr)
 
 	// privilege_mode — default sudoers. Closed enum.
 	pm := raw.PrivilegeMode

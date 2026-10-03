@@ -26,8 +26,10 @@
 # Scenarios:
 #   E0  bounded host up; data root + containerd content proven on the loop fs;
 #       PRED running with seeded state through the agent's own compose project
-#   E1  disk filled to QUAL_ENOSPC_LEAVE_KB free, apply PRED → CUR through
-#       POST /v1/upgrades/apply ⇒ the op FAILS at the pull with ENOSPC, the
+#   E1  disk filled to QUAL_ENOSPC_LEAVE_KB free; first, with NO upgrade,
+#       the proxy must keep serving for 15 s; then apply PRED → CUR through
+#       POST /v1/upgrades/apply ⇒ REFUSED at preflight_space before any
+#       pull (the agent never fills the disk), the
 #       running container, the pinned tag, /health, admin state, the CA
 #       identity and TRAFFIC ENFORCEMENT are those of PRED, unchanged
 #   E2  fill removed, a NEW apply ⇒ succeeds through the agent's real
@@ -169,22 +171,6 @@ except Exception: print("")')"; case "$st" in succeeded|failed) echo "$j"; retur
 apply(){ ag -X POST http://unix/v1/upgrades/apply -d "{\"image_ref\":\"$1\",\"pre_backup\":false,\"rollback_on_failure\":true,\"idempotency_key\":\"$2\"}" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("op_id",""))'; }
 running_id(){ IN docker inspect -f '{{.Image}}' culvert; }
 
-# ── E1: apply with the disk full ─────────────────────────────────────────────
-need="$(docker image inspect -f '{{.Size}}' "$CUR_IMAGE")"
-avail="$(df -k --output=avail "$MNT" | tail -1 | tr -d ' ')"
-fill_kb=$(( avail - LEAVE_KB )); (( fill_kb > 0 )) || { check E1 fill fail "only ${avail}KiB available"; exit 1; }
-fallocate -l "$((fill_kb * 1024))" "$MNT/.qual-fill"
-check E1 disk-filled pass "free $(df -k --output=avail "$MNT" | tail -1 | tr -d ' ')KiB on the bounded fs; CUR image size ~$((need/1024))KiB (docker image inspect .Size); outer host untouched (fill is a file inside $IMG)"
-OP1="$(apply "$CUR_REF" "eq-full-$RUN_ID")"
-j1="$(wait_op "$OP1")"; st1="$(printf '%s' "$j1" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("state"))')"
-ag "http://unix/v1/operations/$OP1/logs" > "$EVID/op-full-disk.log" 2>&1 || true
-if [[ "$st1" == failed ]] && grep -qi "no space left on device" "$EVID/op-full-disk.log"; then
-  check E1 pull-failed-enospc pass "op=$OP1 state=failed; $(grep -i -m1 'no space left on device' "$EVID/op-full-disk.log" | tr '\t' ' ' | cut -c1-220)"
-else
-  check E1 pull-failed-enospc fail "op=$OP1 state=$st1 (expected failed with ENOSPC); see op-full-disk.log"
-fi
-[[ "$(running_id)" == "$PRED_ID" ]] && check E1 running-unchanged pass "running image $PRED_ID" || check E1 running-unchanged fail "running=$(running_id) want=$PRED_ID"
-[[ "$(IN docker image inspect -f '{{.Id}}' "$PINNED")" == "$PRED_ID" ]] && check E1 pinned-tag-unchanged pass "$PINNED → $PRED_ID" || check E1 pinned-tag-unchanged fail "$PINNED moved"
 # diagnose: what the stack looks like when a probe fails (container state,
 # restarts, OOM, recent logs of the proxy and of the bounded host's dockerd,
 # free space). Evidence only — never changes the verdict.
@@ -192,9 +178,38 @@ diagnose(){ local tag="$1"; {
     echo "== $tag $(date -u +%FT%TZ)"; df -k "$MNT" | tail -1
     IN docker ps -a --format '{{.Names}} {{.Status}}' 2>&1
     IN docker inspect -f 'status={{.State.Status}} restarting={{.State.Restarting}} restarts={{.RestartCount}} oom={{.State.OOMKilled}} exit={{.State.ExitCode}} err={{.State.Error}} started={{.State.StartedAt}}' culvert 2>&1
+    echo "-- proxy crash head (first panic/fatal/signal line + 30)"
+    IN docker logs culvert 2>&1 | grep -m1 -A30 -E '^(panic:|fatal error:|SIG[A-Z]+:|runtime: |\[signal )' | cut -c1-300
     echo "-- proxy log"; IN docker logs --tail 40 culvert 2>&1 | cut -c1-300
+    echo "-- /data usage"; IN docker run --rm -v culvert_proxy-data:/data:ro busybox:stable du -sk /data/* 2>&1 | sort -n | tail -8
     echo "-- bounded dockerd log"; docker logs --tail 40 "$DIND" 2>&1 | cut -c1-300
   } >> "$EVID/diagnose.log" 2>&1 || true; }
+
+# ── E1: apply with the disk full ─────────────────────────────────────────────
+need="$(docker image inspect -f '{{.Size}}' "$CUR_IMAGE")"
+avail="$(df -k --output=avail "$MNT" | tail -1 | tr -d ' ')"
+fill_kb=$(( avail - LEAVE_KB )); (( fill_kb > 0 )) || { check E1 fill fail "only ${avail}KiB available"; exit 1; }
+fallocate -l "$((fill_kb * 1024))" "$MNT/.qual-fill"
+check E1 disk-filled pass "free $(df -k --output=avail "$MNT" | tail -1 | tr -d ' ')KiB on the bounded fs; CUR image size ~$((need/1024))KiB (docker image inspect .Size); outer host untouched (fill is a file inside $IMG)"
+# Before any upgrade: does a nearly-full disk ALONE keep the proxy serving?
+# (Separates a data-plane reaction to the full disk from anything the
+# upgrade does.) The proxy keeps writing /data on the same filesystem.
+sleep 15
+v0="$(health_version 2>/dev/null || echo unreachable)"
+if [[ "$v0" == "$PRED_VER" ]]; then check E1 full-disk-alone-proxy-serving pass "/health 200 version=$v0 15 s after the fill, no upgrade attempted"
+else check E1 full-disk-alone-proxy-serving fail "version=$v0 15 s after the fill, BEFORE any upgrade (see diagnose.log)"; diagnose E1-full-disk-alone; fi
+OP1="$(apply "$CUR_REF" "eq-full-$RUN_ID")"
+j1="$(wait_op "$OP1")"; st1="$(printf '%s' "$j1" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("state"))')"
+ag "http://unix/v1/operations/$OP1/logs" > "$EVID/op-full-disk.log" 2>&1 || true
+# The agent must refuse BEFORE pulling (preflight_space); pulling onto the
+# full disk is what took the running proxy down on the CI runner.
+if [[ "$st1" == failed ]] && grep -q "preflight_space: REFUSED" "$EVID/op-full-disk.log" && ! grep -qE $'\tpull\t(START|out)' "$EVID/op-full-disk.log"; then
+  check E1 refused-before-pull pass "op=$OP1 state=failed; $(grep -m1 'preflight_space: REFUSED' "$EVID/op-full-disk.log" | tr '\t' ' ' | cut -c1-260)"
+else
+  check E1 refused-before-pull fail "op=$OP1 state=$st1 (expected a preflight_space refusal with no pull stage); see op-full-disk.log"
+fi
+[[ "$(running_id)" == "$PRED_ID" ]] && check E1 running-unchanged pass "running image $PRED_ID" || check E1 running-unchanged fail "running=$(running_id) want=$PRED_ID"
+[[ "$(IN docker image inspect -f '{{.Id}}' "$PINNED")" == "$PRED_ID" ]] && check E1 pinned-tag-unchanged pass "$PINNED → $PRED_ID" || check E1 pinned-tag-unchanged fail "$PINNED moved"
 v="$(health_version 2>/dev/null || echo unreachable)"
 if [[ "$v" == "$PRED_VER" ]]; then check E1 health-unchanged pass "/health 200 version=$v"
 else
@@ -212,6 +227,15 @@ check E1 agent-status pass "$(python3 -c 'import json,sys;d=json.load(open(sys.a
 # ── E2: space freed, retry ───────────────────────────────────────────────────
 rm -f "${MNT:?}/.qual-fill"
 check E2 space-freed pass "free $(df -k --output=avail "$MNT" | tail -1 | tr -d ' ')KiB"
+# If the full disk took the proxy down, Docker cannot restart it while the
+# disk is full and does not retry afterwards; an operator runs `up`. That
+# is recorded (it is the data-plane finding, not the upgrade's), then the
+# retry is qualified from a serving stack.
+if ! curl -fsS -m 5 http://127.0.0.1:18080/health >/dev/null 2>&1; then
+  IN sh -c 'cd /srv/culvert && docker compose up -d' >/dev/null 2>&1 || true
+  for _ in $(seq 1 60); do curl -fsS -m 3 http://127.0.0.1:18080/health >/dev/null 2>&1 && break; sleep 2; done
+  check E2 operator-up-after-free fail "the proxy was down after the full disk and came back only after a manual 'docker compose up -d' (data-plane finding; see diagnose.log)"
+fi
 OP2="$(apply "$CUR_REF" "eq-retry-$RUN_ID")"
 j2="$(wait_op "$OP2")"; st2="$(printf '%s' "$j2" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("state"))')"
 ag "http://unix/v1/operations/$OP2/logs" > "$EVID/op-retry.log" 2>&1 || true
