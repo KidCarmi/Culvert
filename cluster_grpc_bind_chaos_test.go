@@ -114,13 +114,16 @@ func cpChaosSetup(t *testing.T) *time.Time {
 // cpOccupyPort binds an ephemeral port and holds it, returning the port and a
 // release func. The supervisor under test is then given an address the kernel
 // will refuse — the real `port_in_use` fault, not a simulated error.
-func cpOccupyPort(t *testing.T) (int, func()) {
+func cpOccupyPort(t *testing.T) (port int, release func()) {
 	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	// ListenConfig.Listen's ctx governs only address resolution, never the
+	// returned listener's lifetime, so t.Context() cannot close the socket
+	// out from under a gate that is still holding the port occupied.
+	ln, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("occupy a port: %v", err)
 	}
-	port := ln.Addr().(*net.TCPAddr).Port
+	port = ln.Addr().(*net.TCPAddr).Port
 	var once sync.Once
 	return port, func() { once.Do(func() { _ = ln.Close() }) }
 }
@@ -381,7 +384,7 @@ func TestChaos71_PrepareRunsWithTheRoleLockReleased(t *testing.T) {
 func TestChaos71_EnableControlPlaneDoesNotDeadlockWithHAEnabled(t *testing.T) {
 	cpChaosSetup(t)
 
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	ln, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("pick a port: %v", err)
 	}
@@ -844,7 +847,7 @@ func TestChaos71_ControlHealthyBootStillServesAndLeads(t *testing.T) {
 	cpChaosSetup(t)
 
 	// A free ephemeral address: bind one, learn the port, release it.
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	ln, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("pick a port: %v", err)
 	}
@@ -987,7 +990,7 @@ func TestChaos71_ControlEachReasonClassCarriesItsOwnRemedy(t *testing.T) {
 func TestChaos71_ControlAnotherPlanesRoleIsNotOverwritten(t *testing.T) {
 	cpChaosSetup(t)
 
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	ln, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("pick a port: %v", err)
 	}
@@ -1268,7 +1271,7 @@ func TestChaos71_ServeEndedIsNotReportedAsServing(t *testing.T) {
 func TestChaos71_StopRecordsTheTeardownOnTheHappyPath(t *testing.T) {
 	cpChaosSetup(t)
 
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	ln, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("pick a port: %v", err)
 	}
@@ -1357,7 +1360,7 @@ func TestChaos71_AnotherActivationStillCompletesTheHATransition(t *testing.T) {
 func TestChaos71_ShutdownCancelsAnInFlightActivation(t *testing.T) {
 	cpChaosSetup(t)
 
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	ln, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("pick a port: %v", err)
 	}
@@ -1403,7 +1406,7 @@ func TestChaos71_ShutdownCancelsAnInFlightActivation(t *testing.T) {
 	// (shutdown lands inside prepare), so no listener is ever created on this
 	// path; the disposal of one that wins the narrower post-bind race is pinned
 	// as a unit by TestChaos71_DiscardActivationTearsDownAListenerThatWonTheRace.
-	probe, perr := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+	probe, perr := (&net.ListenConfig{}).Listen(t.Context(), "tcp", fmt.Sprintf("127.0.0.1:%d", port))
 	if perr != nil {
 		t.Errorf("a listener bound during teardown was left serving: %v", perr)
 	} else {
@@ -1431,7 +1434,7 @@ func TestChaos71_ShutdownCancelsAnInFlightActivation(t *testing.T) {
 func TestChaos71_DiscardActivationTearsDownAListenerThatWonTheRace(t *testing.T) {
 	cpChaosSetup(t)
 
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	ln, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("pick a port: %v", err)
 	}
@@ -1478,7 +1481,7 @@ func TestChaos71_DiscardActivationTearsDownAListenerThatWonTheRace(t *testing.T)
 		t.Error("disposal did not record the teardown, so surfaces keep describing a Control Plane that is exiting")
 	}
 	// The socket is really gone: the same bind must now succeed.
-	probe, perr := net.Listen("tcp", addr)
+	probe, perr := (&net.ListenConfig{}).Listen(t.Context(), "tcp", addr)
 	if perr != nil {
 		t.Errorf("the listener is still bound after disposal: %v", perr)
 	} else {
