@@ -415,3 +415,23 @@ uncertain provisioning summary does not suppress working management access.
 Retry rechecks state after clearing a failure; a new completion marker, running
 unit or missing observation prevents this console from requesting a start.
 These are observation checks, not a cross-process provisioning lock.
+
+The [observation-integrity report](evidence/esxi-observations-smoke.json) records
+runtime `6f40e5b4`. [Linux CI passed](https://github.com/KidCarmi/Culvert/actions/runs/37182487320)
+with race tests, 204,040 fuzz executions, vet, static compiler checks and root
+installer fault tests. Both test packages passed twice in ESXi Ubuntu. A real
+temporary systemd oneshot confirmed active/exited completion and inactive/dead
+condition skipping. Installation, PAM/shell/journal checks and all four live
+views passed; the owned VM and private run files were removed.
+
+**Reboot qualification remains open for this run.** Guest access did not return
+within the helper's 150-second deadline. A later bounded observation found the
+public console automatically active and verified installed hashes, but does not
+erase the timeout failure or establish a boot-time guarantee. The interrupted
+helper did not retain the prior machine ID, so this run does not claim machine-ID
+continuity. Earlier boot/access waits and the incomplete first authentication
+attempt are recorded in the report. No host policy was bypassed to proceed.
+
+Opus's separate [maintenance-reboot finding F-OSU-REBOOT-1](https://github.com/KidCarmi/Culvert/pull/1528#issuecomment-5974258410)
+also remains an appliance qualification concern. This older baseline overlay
+does not validate that candidate or its proposed fix.
