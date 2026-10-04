@@ -41,3 +41,24 @@ func TestBootstrapReadOnlyNavigationKeepsPAMBoundary(t *testing.T) {
 		}
 	}
 }
+
+func TestBootstrapPublicDetailsNeverDispatchPrivilegedActions(t *testing.T) {
+	keys := []string{"0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "E", "S", "Q", "EXIT", "ENTER", "UP", "DOWN", "TAB", "PAGEUP", "PAGEDOWN", "F4", "B", "ESC", "R", "L", "F2"}
+	for _, screen := range []string{"1", "2", "3", "4"} {
+		for _, key := range keys {
+			t.Run(screen+"/"+key, func(t *testing.T) {
+				// Recreate the public state for every key: navigation in one
+				// case must not change the authorization surface of another.
+				d := menuDisplay{password: viewFixtureCredential, view: applianceconsole.NewView(false)}
+				if action := d.handle(screen); action != "" || !d.bootstrapDetail {
+					t.Fatalf("public detail setup returned %q", action)
+				}
+				switch action := d.handle(key); action {
+				case "", "refresh", "login":
+				default:
+					t.Fatalf("pre-login detail dispatched forbidden action %q", action)
+				}
+			})
+		}
+	}
+}
