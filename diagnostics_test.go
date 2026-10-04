@@ -1851,3 +1851,35 @@ func TestApiDiagnostics_MirroredLegacyNonAdminRoleIsPreserved(t *testing.T) {
 		t.Errorf("operator_action = %q, want the role restored before the first sign-in", found.OperatorAction)
 	}
 }
+
+func TestCheckAdminRosterPersistence(t *testing.T) {
+	old := cfg
+	t.Cleanup(func() { cfg = old; resetRosterPersistCountersForTest() })
+	resetRosterPersistCountersForTest()
+
+	cfg = nil
+	if c := checkAdminRosterPersistence(); c.Status != diagOK || c.Code != "admin_roster_persistence" {
+		t.Fatalf("nil cfg: %+v", c)
+	}
+
+	cfg = &Config{user: "admin", cache: authCacheStore{entries: map[string]*authCacheEntry{}}}
+	c := checkAdminRosterPersistence()
+	if c.Status != diagWarn || c.OperatorAction == "" {
+		t.Fatalf("no roster file must warn with an action: %+v", c)
+	}
+
+	cfg.uiUsersFile = filepath.Join(t.TempDir(), "ui_users.json")
+	if c := checkAdminRosterPersistence(); c.Status != diagOK {
+		t.Fatalf("persisting roster must be ok: %+v", c)
+	}
+
+	rosterPersistRefused.Add(2)
+	rosterPersistBestEffort.Add(1)
+	c = checkAdminRosterPersistence()
+	if c.Status != diagWarn || !strings.Contains(c.Message, "2 admin account change(s)") || !strings.Contains(c.Message, "1 login-time") {
+		t.Fatalf("failures must warn with counts: %+v", c)
+	}
+	if strings.Contains(c.Message+c.OperatorAction, cfg.uiUsersFile) {
+		t.Fatal("row must not leak the roster path")
+	}
+}
