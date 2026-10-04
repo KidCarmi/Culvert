@@ -25,8 +25,14 @@ Power on and watch the VM console. Boot sequence:
    installs the SSH key, sets the console password, generates fresh SSH host
    keys (ed25519 + ecdsa), configures DHCP, grows `/` to the disk size.
 2. `culvert-firstboot.service` runs (after cloud-init and Docker):
-   `ovf` → `console` → `images` → `install` → `complete`, each recorded in
-   `/var/lib/culvert-appliance/state/<step>.done`.
+   `console` → `access` → `ovf` → `images` → `install` → `agent` →
+   `complete`, each recorded in `/var/lib/culvert-appliance/state/<step>.done`.
+   The local recovery credential and the read-only operator keys come first
+   because neither needs the network and an operator may need them to repair
+   it. A static network (`culvert.net.*`) that `culvert-net` refuses — for
+   example a gateway outside the address's subnet — leaves the appliance on
+   DHCP, is shown on the console with the fix (`sudo culvert-net static …`),
+   and does not stop provisioning.
 3. The console banner (`/etc/issue.d/50-culvert.issue`, refreshed every
    minute by `culvert-issue.timer`) shows the version, **management URL**,
    proxy URL and state: `provisioning (running)` → `services running — setup
@@ -211,7 +217,9 @@ Do **not** clone a booted appliance as-is: the clone would share the
 machine-id, SSH host keys and — because application state is kept — the Root
 CA, admin accounts and `.env` secrets. Run `sudo culvert-appliance-reset-identity
 && sudo poweroff` first; the clone regenerates machine-id, host keys, the
-cloud-init instance and re-runs the `ovf`/`console` first-boot steps while
-keeping `/srv/culvert` and the data volume. Rotate the Root CA and admin
+cloud-init instance and re-runs the `console`/`access`/`ovf` first-boot steps
+(the read-only operator keys of the source VM are removed, so the clone
+authorizes only the keys its own import supplies) while keeping
+`/srv/culvert` and the data volume. Rotate the Root CA and admin
 credentials on the clone if it must not share trust with the original. For a
 fresh identity *and* fresh application state, import the OVA again instead.

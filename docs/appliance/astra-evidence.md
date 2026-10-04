@@ -231,7 +231,8 @@ was not rebuilt.
 * First-boot state lives in `/var/lib/culvert-appliance/state/*.done`; the
   service has `ConditionPathExists=!…/complete.done`, so it never re-runs
   after completion, and `culvert-appliance-reset-identity` re-arms only the
-  `ovf`/`console` steps (application state kept).
+  `console`/`access`/`ovf` steps and drops the source VM's operator keys
+  (application state kept).
 * The OVF declares `ovf:transport="com.vmware.guestInfo iso"`; cloud-init's
   OVF datasource and `culvert-firstboot` both read `guestinfo.ovfEnv`
   (`vmtoolsd`) or the `ovf-env.xml` ISO.

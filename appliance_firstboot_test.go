@@ -984,3 +984,36 @@ func TestFirstBoot_MainEstablishesIdentityBeforeNetwork(t *testing.T) {
 		t.Fatalf("main must run provision_identity_then_network before any other step:\n%s", body)
 	}
 }
+
+// Owner review follow-up (PR #1528): identity reset kept access.done and the
+// read-only operator authorization, so a clone kept the SOURCE VM's operator
+// keys and skipped importing its own. Reset must forget every per-instance
+// credential first boot re-establishes: console, operator keys (both the
+// authorization file culvert-access writes and the imported-key source it is
+// built from), network, completion.
+func TestResetIdentity_ForgetsPerInstanceOperatorKeys(t *testing.T) {
+	b, err := os.ReadFile(filepath.Join(pkgSourceDir(), "appliance", "provision", "culvert-appliance-reset-identity"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	keys, err := os.ReadFile(filepath.Join(pkgSourceDir(), "cmd", "culvert-access", "keys_linux.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(b)
+	for _, step := range []string{"ovf", "console", "access", "complete"} {
+		if !strings.Contains(s, `"$STATE/`+step+`.done"`) {
+			t.Errorf("reset does not re-arm the %s step", step)
+		}
+	}
+	// The paths reset removes must be the ones culvert-access actually uses.
+	for _, name := range []string{"importedKeys", "operatorKeys"} {
+		m := regexp.MustCompile(`const ` + name + ` = "([^"]+)"`).FindStringSubmatch(string(keys))
+		if m == nil {
+			t.Fatalf("culvert-access no longer declares %s; update this test and the reset script together", name)
+		}
+		if !strings.Contains(s, "rm -f") || !strings.Contains(s, m[1]) {
+			t.Errorf("reset does not remove %s (%s)", name, m[1])
+		}
+	}
+}
