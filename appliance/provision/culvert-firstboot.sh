@@ -103,8 +103,9 @@ step_ovf() {
       if [[ -n "$addr" && -n "$gw" ]]; then
         log "applying static network from OVF properties ($addr via $gw)"
         # A refused or rejected static configuration must NOT abort the first
-        # boot: culvert-net refuses before touching netplan (or restores the
-        # previous file), so the appliance is still on DHCP, and the operator
+        # boot: culvert-net refuses before touching netplan, or restores the
+        # previous file when netplan rejects OR cannot apply the new one, so
+        # the appliance is still on its previous network, and the operator
         # needs the provisioned console credential and a running stack to fix
         # it. Aborting here replayed the same refusal on every retry and, when
         # this step ran first, left no local credential at all (PR #1528 P1).

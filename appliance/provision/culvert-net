@@ -108,19 +108,29 @@ case "$cmd" in
         [[ -n "$search_yaml" ]] && echo "$search_yaml"
       fi
     } > "$tmp"
-    # Keep the previous file until netplan accepts the new one, so a value
-    # netplan rejects never persists into the next boot.
+    # Keep the previous file until netplan has both accepted AND applied the
+    # new one: a value netplan rejects, or one it cannot activate, must never
+    # persist into the next boot (first boot reports a failure here as "stays
+    # on DHCP", which is only true if this restores the previous state).
     prev=""
     if [[ -f "$NP" ]]; then prev="$(mktemp)"; cp -p "$NP" "$prev"; fi
-    install -m 0600 "$tmp" "$NP"; rm -f "$tmp"
-    if ! netplan generate; then
+    restore_prev() {
       if [[ -n "$prev" ]]; then mv -f "$prev" "$NP"; else rm -f "$NP"; fi
       netplan generate || true
+    }
+    install -m 0600 "$tmp" "$NP"; rm -f "$tmp"
+    if ! netplan generate; then
+      restore_prev
       echo "netplan rejected the static configuration; the previous network configuration is kept" >&2
       exit 1
     fi
+    if ! netplan apply; then
+      restore_prev
+      netplan apply || true
+      echo "netplan could not apply the static configuration; the previous network configuration was restored" >&2
+      exit 1
+    fi
     [[ -n "$prev" ]] && rm -f "$prev"
-    netplan apply
     echo "static address $addr via $gw applied on $iface"
     ;;
   *) echo "usage: culvert-net show|dhcp|static <addr/prefix> <gateway> [dns,dns] [search,search]" >&2; exit 2 ;;

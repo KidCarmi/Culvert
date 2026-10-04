@@ -20,19 +20,30 @@ type netHarness struct {
 
 func newNetHarness(t *testing.T, generateFails bool) *netHarness {
 	t.Helper()
+	return newNetHarnessFailing(t, generateFails, false)
+}
+
+// newNetHarnessFailing lets generate and/or apply fail while the candidate
+// static file (address 10.0.10.9) is installed.
+func newNetHarnessFailing(t *testing.T, generateFails, applyFails bool) *netHarness {
+	t.Helper()
 	d := t.TempDir()
 	h := &netHarness{t: t, dir: d, stubs: filepath.Join(d, "stubs"), np: filepath.Join(d, "60-culvert.yaml"), nl: filepath.Join(d, "netplan.log")}
 	if err := os.MkdirAll(h.stubs, 0o750); err != nil {
 		t.Fatal(err)
 	}
-	gen := "exit 0"
+	candidateInstalled := `[ "$(cat "` + h.np + `" 2>/dev/null | grep -c 10.0.10.9)" = 0 ] || exit 1`
+	gen, apply := "exit 0", "exit 0"
 	if generateFails {
-		gen = `[ "$(cat "` + h.np + `" 2>/dev/null | grep -c 10.0.10.9)" = 0 ] || exit 1`
+		gen = candidateInstalled
+	}
+	if applyFails {
+		apply = candidateInstalled
 	}
 	for name, body := range map[string]string{
 		"id":      "echo 0",
 		"ip":      `case "$*" in *route*) echo "default via 10.0.10.1 dev ens192";; *) echo "ens192 UP";; esac`,
-		"netplan": `echo "$1" >> "` + h.nl + `"; if [ "$1" = generate ]; then ` + gen + `; fi`,
+		"netplan": `echo "$1" >> "` + h.nl + `"; if [ "$1" = generate ]; then ` + gen + `; fi; if [ "$1" = apply ]; then ` + apply + `; fi`,
 	} {
 		p := filepath.Join(h.stubs, name)
 		if err := os.WriteFile(p, []byte("#!/usr/bin/env bash\n"+body+"\n"), 0o600); err != nil {
@@ -138,5 +149,36 @@ func TestCulvertNetStatic_RestoresThePreviousFileWhenNetplanRejects(t *testing.T
 	}
 	if _, err := os.Stat(h2.np); !os.IsNotExist(err) {
 		t.Fatal("a rejected configuration was left in place with no previous file to restore")
+	}
+}
+
+// Codex review (PR #1528): `netplan apply` can fail AFTER generate accepted the
+// file. First boot reports any failure here as "stays on DHCP", so the new
+// static file must not survive into the next boot either: the previous file
+// (or none) comes back and is re-applied.
+func TestCulvertNetStatic_RestoresThePreviousFileWhenApplyFails(t *testing.T) {
+	h := newNetHarnessFailing(t, false, true)
+	prev := "# previous\nnetwork: {version: 2}\n"
+	if err := os.WriteFile(h.np, []byte(prev), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out, code := h.run("static", "10.0.10.9/24", "10.0.10.1")
+	if code != 1 || !strings.Contains(out, "previous network configuration was restored") {
+		t.Fatalf("exit %d:\n%s", code, out)
+	}
+	if b, _ := os.ReadFile(h.np); string(b) != prev {
+		t.Fatalf("previous netplan file not restored after a failed apply:\n%s", b)
+	}
+	nl, _ := os.ReadFile(h.nl)
+	if got := strings.Fields(string(nl)); strings.Join(got, ",") != "generate,apply,generate,apply" {
+		t.Fatalf("netplan calls = %q; want the candidate tried, then the previous file regenerated and re-applied", got)
+	}
+
+	h2 := newNetHarnessFailing(t, false, true)
+	if _, code := h2.run("static", "10.0.10.9/24", "10.0.10.1"); code != 1 {
+		t.Fatalf("exit %d, want 1", code)
+	}
+	if _, err := os.Stat(h2.np); !os.IsNotExist(err) {
+		t.Fatal("an unappliable configuration was left in place with no previous file to restore")
 	}
 }
