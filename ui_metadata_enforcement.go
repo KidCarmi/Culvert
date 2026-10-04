@@ -268,13 +268,21 @@ type c2Decision struct {
 	SessionRole  UIRole
 	RequiredRole UIRole
 	MetaPath     string // the metadata Path that matched (may differ from request path under prefix routes)
+
+	// logPath / logMethod are the request path and method for LOG LINES only,
+	// CR/LF-scrubbed at the read site (repo convention, proxy.go: the barrier
+	// CodeQL's go/log-injection query recognises sits where the client value
+	// is read). Path/Method stay raw because route matching needs them.
+	logPath, logMethod string
 }
 
 // c2Evaluate computes the metadata-driven decision for a request.
 // Pure function over (request, index) — no logging, no counters, no
 // side effects. Used by both c2EvaluateAndLog and the test suite.
 func c2Evaluate(r *http.Request, idx *metadataIndex) c2Decision {
-	d := c2Decision{Path: r.URL.Path, Method: r.Method, SessionRole: uiRole(r)}
+	d := c2Decision{Path: r.URL.Path, Method: r.Method, SessionRole: uiRole(r),
+		logPath:   strings.ReplaceAll(strings.ReplaceAll(r.URL.Path, "\n", "_"), "\r", "_"),
+		logMethod: strings.ReplaceAll(strings.ReplaceAll(r.Method, "\n", "_"), "\r", "_")}
 
 	meta, found := idx.Lookup(r.URL.Path)
 	if !found {
@@ -327,15 +335,15 @@ func c2EvaluateAndLog(r *http.Request, idx *metadataIndex) c2Decision {
 	case !d.Matched && d.MetaPath == "":
 		// Missing metadata entry entirely.
 		c2ShadowMissingMetaTotal.Add(1)
-		logPath := strings.ReplaceAll(strings.ReplaceAll(sanitizeLog(d.Path), "\n", "_"), "\r", "_")
-		logMethod := strings.ReplaceAll(strings.ReplaceAll(sanitizeLog(d.Method), "\n", "_"), "\r", "_")
+		logPath := sanitizeLog(d.logPath)
+		logMethod := sanitizeLog(d.logMethod)
 		logger.Printf("C2: no metadata for path=%q method=%q (drift between helpers and uiRoutes)",
 			logPath, logMethod)
 	case !d.Matched && d.MetaPath != "":
 		// Path resolved but method had no policy.
 		c2ShadowNoPolicyTotal.Add(1)
-		logPath := strings.ReplaceAll(strings.ReplaceAll(sanitizeLog(d.Path), "\n", "_"), "\r", "_")
-		logMethod := strings.ReplaceAll(strings.ReplaceAll(sanitizeLog(d.Method), "\n", "_"), "\r", "_")
+		logPath := sanitizeLog(d.logPath)
+		logMethod := sanitizeLog(d.logMethod)
 		logMetaPath := strings.ReplaceAll(strings.ReplaceAll(sanitizeLog(d.MetaPath), "\n", "_"), "\r", "_")
 		logger.Printf("C2: no method policy for path=%q method=%q meta_path=%q",
 			logPath, logMethod, logMetaPath)
@@ -459,8 +467,8 @@ func uiMetadataEnforcement(next http.Handler) http.Handler {
 		if d.WouldDeny {
 			if c2Mode() == c2ModeEnforce {
 				c2EnforceDeniedTotal.Add(1)
-				logPath := strings.ReplaceAll(strings.ReplaceAll(sanitizeLog(d.Path), "\n", "_"), "\r", "_")
-				logMethod := strings.ReplaceAll(strings.ReplaceAll(sanitizeLog(d.Method), "\n", "_"), "\r", "_")
+				logPath := sanitizeLog(d.logPath)
+				logMethod := sanitizeLog(d.logMethod)
 				logRole := strings.ReplaceAll(strings.ReplaceAll(sanitizeLog(string(d.SessionRole)), "\n", "_"), "\r", "_")
 				logMetaPath := strings.ReplaceAll(strings.ReplaceAll(sanitizeLog(d.MetaPath), "\n", "_"), "\r", "_")
 				logger.Printf("C2-enforce: DENIED path=%q method=%q session_role=%q required=%q meta_path=%q",
@@ -469,8 +477,8 @@ func uiMetadataEnforcement(next http.Handler) http.Handler {
 				return
 			}
 			// Shadow mode — record the dry-run decision.
-			logPath := strings.ReplaceAll(strings.ReplaceAll(sanitizeLog(d.Path), "\n", "_"), "\r", "_")
-			logMethod := strings.ReplaceAll(strings.ReplaceAll(sanitizeLog(d.Method), "\n", "_"), "\r", "_")
+			logPath := sanitizeLog(d.logPath)
+			logMethod := sanitizeLog(d.logMethod)
 			logRole := strings.ReplaceAll(strings.ReplaceAll(sanitizeLog(string(d.SessionRole)), "\n", "_"), "\r", "_")
 			logMetaPath := strings.ReplaceAll(strings.ReplaceAll(sanitizeLog(d.MetaPath), "\n", "_"), "\r", "_")
 			logger.Printf("C2-shadow: WOULD-DENY path=%q method=%q session_role=%q required=%q meta_path=%q",
@@ -515,8 +523,8 @@ func uiMetadataEnforcement(next http.Handler) http.Handler {
 			return
 		}
 		c2AuditMissingTotal.Add(1)
-		logPath := strings.ReplaceAll(strings.ReplaceAll(sanitizeLog(d.Path), "\n", "_"), "\r", "_")
-		logMethod := strings.ReplaceAll(strings.ReplaceAll(sanitizeLog(d.Method), "\n", "_"), "\r", "_")
+		logPath := sanitizeLog(d.logPath)
+		logMethod := sanitizeLog(d.logMethod)
 		logMetaPath := strings.ReplaceAll(strings.ReplaceAll(sanitizeLog(d.MetaPath), "\n", "_"), "\r", "_")
 		logger.Printf("C2: audit missing for route=%q method=%q meta_path=%q status=%d",
 			logPath, logMethod, logMetaPath, status)
