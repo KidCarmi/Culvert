@@ -255,7 +255,23 @@ OVA_BASENAME="${APPLIANCE_NAME}-${VERSION}-${GUEST_OS_ID}"
 # ── 3. Overlay ──────────────────────────────────────────────────────────────
 OV="$WORK/overlay"
 rm -rf "$OV"; mkdir -p "$OV/opt/culvert-appliance" "$OV/var/lib/culvert-appliance/images"
-cp -r "$REPO/appliance/provision" "$REPO/appliance/os-maintenance" "$OV/opt/culvert-appliance/"
+# Copy only runtime inputs. Recursive directory copies also shipped host test
+# scripts and could pick up ignored local material from a developer checkout.
+mkdir -p "$OV/opt/culvert-appliance/provision" "$OV/opt/culvert-appliance/os-maintenance"
+for runtime_file in cloud-90-culvert.cfg culvert-appliance-reset-identity \
+  culvert-firstboot.service culvert-firstboot.sh culvert-issue-update \
+  culvert-issue.service culvert-issue.timer culvert-net culvert-status \
+  culvert-sudo-policy nftables.conf sshd-50-culvert.conf; do
+  [[ -f "$REPO/appliance/provision/$runtime_file" && ! -L "$REPO/appliance/provision/$runtime_file" ]] \
+    || die "missing or symlinked provisioning input: $runtime_file"
+  install -m 0644 "$REPO/appliance/provision/$runtime_file" "$OV/opt/culvert-appliance/provision/$runtime_file"
+done
+for runtime_file in 20auto-upgrades-culvert 50unattended-upgrades-culvert \
+  culvert-os-update culvert-stack-resume.service; do
+  [[ -f "$REPO/appliance/os-maintenance/$runtime_file" && ! -L "$REPO/appliance/os-maintenance/$runtime_file" ]] \
+    || die "missing or symlinked maintenance input: $runtime_file"
+  install -m 0644 "$REPO/appliance/os-maintenance/$runtime_file" "$OV/opt/culvert-appliance/os-maintenance/$runtime_file"
+done
 mkdir -p "$OV/opt/culvert-appliance/boot-splash"
 for splash_file in install.sh install-lib.sh culvert.plymouth 99-culvert-splash.cfg; do
   cp "$REPO/appliance/boot-splash/$splash_file" "$OV/opt/culvert-appliance/boot-splash/$splash_file"

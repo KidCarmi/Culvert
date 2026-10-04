@@ -148,3 +148,10 @@ without an OVA, hypervisor, network target or disk parser by installing
 Any source/dependency hardening or newly built image requires another artifact
 audit. These historical results must not be relabeled as evidence for the new
 candidate.
+
+The accompanying source changes exclude local credential files and lab/tool
+directories from the Docker build context, and stage enumerated provisioning
+and OS-maintenance runtime files into the OVA. The previous recursive directory
+copy also included `power_test.sh`; ignored checkout files could have followed
+it. These packaging changes do not remove the upstream SAML binary fixture or
+retroactively change the audited OVA.
