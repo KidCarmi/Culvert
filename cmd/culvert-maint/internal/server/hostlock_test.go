@@ -31,6 +31,7 @@ func TestHostLock_PendingShutdownSurvivesHelperExit(t *testing.T) {
 			}
 			path := filepath.Join(rig.stateDir, shutdownFenceName)
 			data := "culvert-shutdown-v1 " + strings.TrimSpace(string(boot)) + " reboot " + phase + "\n"
+			// #nosec G306 -- mirrors the root-created fence readable by the agent.
 			if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
 				t.Fatal(err)
 			}
@@ -55,6 +56,7 @@ func TestHostLock_PendingShutdownSurvivesHelperExit(t *testing.T) {
 func TestHostLock_StaleShutdownFenceClearedUnderLock(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, shutdownFenceName)
+	// #nosec G306 -- mirrors the root-created fence readable by the agent.
 	if err := os.WriteFile(path, []byte("culvert-shutdown-v1 00000000-0000-0000-0000-000000000000 poweroff pending\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -83,8 +85,10 @@ func TestHostLock_UnsafeShutdownFenceRefuses(t *testing.T) {
 			case "fifo":
 				err = syscall.Mkfifo(path, 0o600)
 			case "oversized":
+				// #nosec G306 -- malformed public fence fixture, no private data.
 				err = os.WriteFile(path, []byte(strings.Repeat("x", 129)), 0o644)
 			default:
+				// #nosec G306 -- malformed public fence fixture, no private data.
 				err = os.WriteFile(path, []byte("malformed\n"), 0o644)
 				if kind == "writable" && err == nil {
 					err = os.Chmod(path, 0o666)
