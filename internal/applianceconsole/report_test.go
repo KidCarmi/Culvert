@@ -2,9 +2,12 @@ package applianceconsole
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
+	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -77,13 +80,41 @@ func TestDiagnosticReportExportsPublicAllowlistAndLocalEvidenceOnly(t *testing.T
 	}
 }
 
+func TestCollectedBuildVersionCanBeExported(t *testing.T) {
+	for _, length := range []int{65, 70, 71} {
+		version := strings.Repeat("v", length)
+		t.Run(strconv.Itoa(length), func(t *testing.T) {
+			collector, _ := fixture(t)
+			build := `{"appliance":{"version":"` + version + `"}}`
+			if err := os.WriteFile(collector.sources.BuildFile, []byte(build), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			snapshot := collector.Collect(context.Background())
+			if snapshot.Version != version[:min(length, 70)] {
+				t.Fatalf("unexpected collected version: %q", snapshot.Version)
+			}
+			var output bytes.Buffer
+			if err := WriteReport(&output, snapshot); err != nil {
+				t.Fatalf("collected %d-byte version cannot be exported: %v; output bytes=%d", len(snapshot.Version), err, output.Len())
+			}
+			var report diagnosticReport
+			if err := json.Unmarshal(output.Bytes(), &report); err != nil {
+				t.Fatal(err)
+			}
+			if report.ApplianceVersion != snapshot.Version {
+				t.Fatalf("report lost collected version: %q", report.ApplianceVersion)
+			}
+		})
+	}
+}
+
 func TestDiagnosticReportRejectsOversizedFieldsAndCollectionsBeforeWriting(t *testing.T) {
 	for _, tt := range []struct {
 		name string
 		edit func(*Snapshot)
 	}{
 		{"hostname", func(s *Snapshot) { s.Hostname = strings.Repeat("a", 254) }},
-		{"build", func(s *Snapshot) { s.Version = strings.Repeat("a", 65) }},
+		{"build", func(s *Snapshot) { s.Version = strings.Repeat("a", 71) }},
 		{"unit field", func(s *Snapshot) { s.Firstboot["Result"] = strings.Repeat("a", 41) }},
 		{"recovery field", func(s *Snapshot) { s.Recovery.Records[0].Observation = strings.Repeat("a", 241) }},
 		{"check detail", func(s *Snapshot) { s.Prerequisites[0].Detail = strings.Repeat("a", 257) }},

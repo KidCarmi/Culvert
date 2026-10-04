@@ -4,6 +4,8 @@ on:
   pull_request:
     paths:
       - 'appliance/console/**'
+      - 'appliance/os-maintenance/**'
+      - 'appliance/build/**'
       - 'cmd/culvert-console/**'
       - 'internal/applianceconsole/**'
       - 'internal/appliancehost/**'
@@ -14,6 +16,8 @@ on:
     branches: [feat/appliance-console]
     paths:
       - 'appliance/console/**'
+      - 'appliance/os-maintenance/**'
+      - 'appliance/build/**'
       - 'cmd/culvert-console/**'
       - 'internal/applianceconsole/**'
       - 'internal/appliancehost/**'
@@ -59,6 +63,8 @@ jobs:
           bash -n appliance/console/install-lib.sh
           bash -n appliance/console/profile.sh
           sudo bash appliance/console/install_test.sh
+          bash appliance/os-maintenance/power_test.sh
+          bash appliance/build/console-bundle_test.sh
           appliance/console/culvert-console --json
           appliance/console/culvert-console --text
           appliance/console/culvert-console --report

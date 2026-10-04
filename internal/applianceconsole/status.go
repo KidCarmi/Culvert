@@ -15,6 +15,7 @@ import (
 )
 
 const maxOutput = 65536
+const maxVersionLength = 70
 
 var stepNames = []string{"ovf", "console", "images", "install", "agent", "complete"}
 var stepLabels = []string{"Network configuration", "Console access", "Application images", "Service installation", "Maintenance agent", "Provisioning complete"}
@@ -197,7 +198,7 @@ func (c Collector) readBuild(s *Snapshot) {
 	data := readPublicFile(c.sources.BuildFile)
 	if json.Unmarshal([]byte(data), &build) == nil {
 		if build.Appliance.Version != "" {
-			s.Version = Clean(build.Appliance.Version, 70)
+			s.Version = Clean(build.Appliance.Version, maxVersionLength)
 		}
 		s.Candidate = build.Candidate.Candidate
 	}

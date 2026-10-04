@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -21,6 +22,7 @@ import (
 
 const hostDirectory = "/var/lib/culvert-console/private"
 const hostPublic = "/var/lib/culvert-console/status.json"
+const maintenanceCommand = "/opt/culvert-appliance/bin/culvert-os-update"
 
 func hostIdentity() (appliancehost.Identity, error) {
 	boot, err := appliancehost.ReadIdentity("/proc/sys/kernel/random/boot_id")
@@ -52,7 +54,19 @@ func hostNetplan() appliancehost.Netplan {
 }
 
 func hostCommand(parent context.Context, path string, args ...string) error {
-	ctx, cancel := context.WithTimeout(parent, 20*time.Second)
+	return hostCommandWithin(parent, 20*time.Second, path, args...)
+}
+
+func hostCommandWithin(parent context.Context, budget time.Duration, path string, args ...string) error {
+	var recoveryGrace time.Duration
+	if path == maintenanceCommand {
+		recoveryGrace = 90 * time.Second
+	}
+	return hostCommandWithGrace(parent, budget, recoveryGrace, path, args...)
+}
+
+func hostCommandWithGrace(parent context.Context, budget, recoveryGrace time.Duration, path string, args ...string) error {
+	ctx, cancel := context.WithTimeout(parent, budget)
 	defer cancel()
 	// #nosec G204 -- private adapter called only with fixed commands in this file.
 	cmd := exec.CommandContext(ctx, path, args...)
@@ -60,8 +74,9 @@ func hostCommand(parent context.Context, path string, args ...string) error {
 	cmd.Stdout = io.Discard
 	cmd.Stderr = io.Discard
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Cancel = func() error { return unix.Kill(-cmd.Process.Pid, unix.SIGKILL) }
-	cmd.WaitDelay = time.Second
+	stopCancellation := cancelHostGroup(cmd, recoveryGrace)
+	defer stopCancellation()
+	cmd.WaitDelay = recoveryGrace + time.Second
 	if err := cmd.Run(); err != nil {
 		if ctx.Err() != nil {
 			return fmt.Errorf("%s %s: %w", filepath.Base(path), args[0], ctx.Err())
@@ -73,6 +88,39 @@ func hostCommand(parent context.Context, path string, args ...string) error {
 		return fmt.Errorf("%s %s could not start", filepath.Base(path), args[0])
 	}
 	return nil
+}
+
+// Power helpers must be allowed to restore a stopped stack while retaining
+// their maintenance locks. Forced termination still leaves the resume marker.
+func cancelHostGroup(cmd *exec.Cmd, grace time.Duration) func() {
+	var mu sync.Mutex
+	var timer *time.Timer
+	cmd.Cancel = func() error {
+		mu.Lock()
+		defer mu.Unlock()
+		if grace == 0 {
+			return unix.Kill(-cmd.Process.Pid, unix.SIGKILL)
+		}
+		err := unix.Kill(-cmd.Process.Pid, unix.SIGTERM)
+		if err == nil {
+			timer = time.AfterFunc(grace, func() {
+				mu.Lock()
+				defer mu.Unlock()
+				if timer != nil {
+					_ = unix.Kill(-cmd.Process.Pid, unix.SIGKILL)
+				}
+			})
+		}
+		return err
+	}
+	return func() {
+		mu.Lock()
+		defer mu.Unlock()
+		if timer != nil {
+			timer.Stop()
+			timer = nil
+		}
+	}
 }
 
 func hostSession(fn func(*appliancehost.Session) error) error {
@@ -121,23 +169,37 @@ func hostAction(ctx context.Context, mode string, c applianceconsole.Collector) 
 		if err != nil {
 			return err
 		}
-		args := []string{mode}
-		switch mode {
-		case "retry-reset":
-			args = []string{"reset-failed", "culvert-firstboot.service"}
-		case "retry-start":
-			args = []string{"start", "--no-block", "culvert-firstboot.service"}
-		}
 		if err := ctx.Err(); err != nil {
 			return errors.Join(err, s.Finish(id, "cancelled"))
 		}
-		err = hostCommand(ctx, "/usr/bin/systemctl", args...)
+		err = dispatchHostAction(ctx, mode, hostCommandWithin)
 		phase := "submitted"
 		if err != nil {
 			phase = "failed"
 		}
 		return errors.Join(err, s.Finish(id, phase))
 	})
+}
+
+// The maintenance helper owns both shared flocks, interrupted-agent checks,
+// graceful stack stop and next-boot resume. Never bypass it with systemctl for
+// normal console power actions, or duplicate its guard with a check-then-unlock.
+func dispatchHostAction(ctx context.Context, mode string, run func(context.Context, time.Duration, string, ...string) error) error {
+	switch mode {
+	case "reboot", "poweroff":
+		// Compose stop honours a 60-second grace per service. Include time for
+		// recovery if systemd rejects the request; the probe's 20s is too short.
+		if err := run(ctx, 5*time.Minute, maintenanceCommand, mode); err != nil {
+			return fmt.Errorf("maintenance power request did not complete: %w; inspect the maintenance log and pending stack resume before retrying", err)
+		}
+		return nil
+	case "retry-reset":
+		return run(ctx, 20*time.Second, "/usr/bin/systemctl", "reset-failed", "culvert-firstboot.service")
+	case "retry-start":
+		return run(ctx, 20*time.Second, "/usr/bin/systemctl", "start", "--no-block", "culvert-firstboot.service")
+	default:
+		return errors.New("unknown host action")
+	}
 }
 
 func checkpoint(s applianceconsole.Snapshot) string {

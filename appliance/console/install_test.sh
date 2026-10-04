@@ -114,6 +114,120 @@ done
 install_console_bundle "$src" "$bin" "$profile" "$getty" "$worker"
 cmp "$worker" "$src/culvert-console-host.service"
 [[ $(stat -c '%a:%u:%g' "$worker") == '644:0:0' ]]
+
+# Exercise the complete production entrypoint with isolated destination paths.
+# Only account/PAM availability is stubbed; binary/profile validation, directory
+# creation, staging, activation, rollback and cleanup are the production path.
+full_source=$TEST_ROOT/full-source
+full_dest=$TEST_ROOT/full-dest
+mkdir "$full_source" "$full_dest"
+cp /bin/true "$full_source/culvert-console"
+printf 'true\n' >"$full_source/profile.sh"
+cp "$src/getty-override.conf" "$full_source/getty-override.conf"
+cp "$HERE/culvert-console-host.service" "$full_source/culvert-console-host.service"
+full_binary=$full_dest/bin/culvert-console
+full_profile=$full_dest/profile/console.sh
+full_getty=$full_dest/getty/console.conf
+full_worker=$full_dest/system/culvert-console-host.service
+activation=$full_dest/system/multi-user.target.wants/culvert-console-host.service
+mkdir -p "${full_binary%/*}" "${full_profile%/*}" "${full_getty%/*}" "${activation%/*}"
+console_install_prerequisites() { [[ $(id -u) == 0 ]]; }
+# Any newly introduced live systemctl call must fail this test.
+systemctl() { echo 'Installer must not invoke live service management.' >&2; return 99; }
+reset_full_targets() {
+    printf 'previous binary\n' >"$full_binary"
+    printf 'previous profile\n' >"$full_profile"
+    printf 'previous getty\n' >"$full_getty"
+    printf 'previous worker\n' >"$full_worker"
+    rm -f -- "$activation"
+}
+assert_full_previous() {
+    [[ $(cat "$full_binary") == 'previous binary' && $(cat "$full_profile") == 'previous profile' ]]
+    [[ $(cat "$full_getty") == 'previous getty' && $(cat "$full_worker") == 'previous worker' ]]
+    [[ -z $(find "$full_dest" -name '.culvert-stage.*' -o -name '.culvert-backup.*') ]]
+}
+full_install() {
+    install_console "$full_source" "$full_binary" "$full_profile" "$full_getty" "$full_worker" "$activation"
+}
+for previous in disabled enabled; do
+    # Failure while publishing enablement and after enablement both restore the
+    # exact previous files/link. The latter models the original partial install.
+    for fail_at in 4 5; do
+        reset_full_targets
+        [[ $previous != enabled ]] || ln -s -- "$full_worker" "$activation"
+        if (
+            count=0
+            mv() { count=$((count+1)); [[ $count != "$fail_at" ]] || return 99; command mv "$@"; }
+            full_install
+        ); then echo 'Full installer ignored activation failure.' >&2; exit 1; fi
+        assert_full_previous
+        if [[ $previous == enabled ]]; then
+            [[ -L $activation && $(readlink -- "$activation") == "$full_worker" ]]
+        else
+            [[ ! -e $activation && ! -L $activation ]]
+        fi
+    done
+done
+# Catchable interruption immediately after creating the activation link is also
+# rolled back, without leaving a previously disabled service enabled.
+reset_full_targets
+if (
+    count=0
+    mv() {
+        command mv "$@" || return
+        count=$((count+1))
+        if [[ $count == 4 ]]; then kill -TERM "$BASHPID"; fi
+    }
+    full_install
+); then exit 1; fi
+assert_full_previous
+[[ ! -L $activation && ! -e $activation ]]
+# Failed symlink preparation cannot publish even the first regular file.
+if (
+    ln() { return 99; }
+    full_install
+); then exit 1; fi
+assert_full_previous
+# Refuse activation paths we do not own rather than clobber an administrator's
+# custom unit or enablement link. Include a dangling foreign link.
+for kind in regular foreign; do
+    reset_full_targets
+    if [[ $kind == regular ]]; then
+        printf 'administrator activation file\n' >"$activation"
+    else
+        ln -s -- "$full_dest/other.service" "$activation"
+    fi
+    if full_install; then exit 1; fi
+    assert_full_previous
+    if [[ $kind == regular ]]; then
+        [[ $(cat "$activation") == 'administrator activation file' ]]
+    else
+        [[ $(readlink -- "$activation") == "$full_dest/other.service" ]]
+    fi
+done
+# First-install failure after enabling leaves neither an enabled broken worker
+# nor any newly installed binary/profile/getty/unit.
+reset_full_targets
+rm -- "$full_binary" "$full_profile" "$full_getty" "$full_worker"
+if (
+    count=0
+    mv() { count=$((count+1)); [[ $count != 5 ]] || return 99; command mv "$@"; }
+    full_install
+); then exit 1; fi
+[[ ! -e $full_binary && ! -e $full_profile && ! -e $full_getty && ! -e $full_worker ]]
+[[ ! -e $activation && ! -L $activation ]]
+# Successful/repeated installs create the persistent WantedBy link without
+# changing an unrelated existing runtime enablement link.
+runtime_link=$full_dest/runtime-enabled
+ln -s -- "$full_worker" "$runtime_link"
+full_install
+full_install
+cmp "$full_binary" "$full_source/culvert-console"
+cmp "$full_worker" "$full_source/culvert-console-host.service"
+[[ $(readlink -- "$activation") == "$full_worker" && $(readlink -- "$runtime_link") == "$full_worker" ]]
+[[ $(stat -c '%u:%g' "$activation") == '0:0' ]]
+[[ -z $(find "$full_dest" -name '.culvert-stage.*' -o -name '.culvert-backup.*') ]]
+
 # If both publication and rollback fail, keep named backups for manual recovery.
 reset_targets
 if (

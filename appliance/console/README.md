@@ -178,34 +178,23 @@ SSH key; the menu never unlocks the account or invents a default password.
 An administrator can set a console password through their authenticated SSH
 session with `sudo passwd culvert`.
 
-## Integration boundary with Opus
+## OVA integration
 
 The Go command lives in `cmd/culvert-console`, with domain logic and white-box
-tests in `internal/applianceconsole` and `internal/appliancehost`. Packaging files stay here to avoid
-conflicts with the ongoing firstboot/image fix. This slice does **not** modify
-`build-ova.sh`, `prepare-guest.sh`, firstboot,
-the network helper, the existing status CLI, or the application UI. It does not
-change the existing application readiness contract.
+tests in `internal/applianceconsole` and `internal/appliancehost`.
+`build-ova.sh` now invokes `console-bundle.sh` to compile a static Linux/amd64
+binary from the same provisioning checkout with the exact root `go.mod`
+compiler. The bundle includes only the executable and five required runtime
+files; development binaries, tests and evidence are excluded. Compiler and
+embedded build settings are checked before the overlay is published and before
+guest disk mutation. Build-info records the console binary hash, compiler and
+provisioning source separately from application-image identity.
 
-Two build hooks are needed when this component is accepted:
-
-1. In `build-ova.sh`, beside the provision/os-maintenance overlay copy, copy
-   `appliance/console` to `$OV/opt/culvert-appliance/console`, then build from the
-   repository root using its pinned Go compiler:
-
-   ```bash
-   CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath \
-     -o "$OV/opt/culvert-appliance/console/culvert-console" ./cmd/culvert-console
-   ```
-
-   The executable must be copied with mode 0755. It is a build artifact and is
-   ignored by Git; no compiler or Python runtime is needed in the guest.
-2. In `prepare-guest.sh`, after the `culvert` account and existing helpers have
-   been installed, run:
-
-   ```bash
-   bash /opt/culvert-appliance/console/install.sh
-   ```
+`prepare-guest.sh` runs the bundled installer after the `culvert` account,
+helpers and sudo policy exist. No Go compiler or Python runtime is added for
+the console inside the guest. These build hooks are implementation, not evidence
+of a completed integrated-OVA qualification; the historical overlay reports
+remain scoped to their recorded artifacts.
 
 The installer checks that the binary executes, PAM login, sudo and the account before
 installing the tty1 getty override and root-owned login profile hook. It does
@@ -537,20 +526,44 @@ records can indicate an interrupted process, host shutdown or delivery loss.
 
 The installer validates the binary under a ten-second timeout and checks profile
 syntax before changing destinations. A local lock excludes concurrent installs.
-All three files are staged and backed up before publication; same-filesystem
-renames replace the binary and profile, then activate getty last. Ordinary errors
+All five entries are staged and backed up before publication: binary, profile,
+worker unit, the persistent `multi-user.target.wants` activation symlink and
+getty override. Same-filesystem renames publish the worker before its activation
+link and getty last. The explicit WantedBy link is part of the transaction;
+there is no post-commit `systemctl enable` step. Existing matching enablement is
+preserved on rollback, and unexpected activation targets are refused. Ordinary errors
 and catchable signals roll back published files; symlink/nonregular targets are
 refused. Atomic binary replacement supports upgrading a running executable.
 If rollback itself fails, backup files are retained with an explicit error.
 This is atomic per file, not a power-loss-safe transaction across filesystems;
 SIGKILL/power loss may leave a mixed bundle or staging files. The installer never
-restarts getty, changes sudo policy or adds network configuration.
+restarts getty, reloads systemd, changes sudo policy or adds network configuration.
 
-Tests inject failure at every publication step, failed staging, failed first
-installation, symlink targets and lock contention; verify rollback, ownership,
-modes and repeated installation. Linux PTYs verify terminal restoration after
+Tests inject failure at every publication step, including activation and its
+following getty publication, failed staging, failed first installation, symlink
+targets and lock contention. Full-entrypoint tests verify rollback restores
+enabled/disabled state, ownership, modes and repeated installation. Linux PTYs verify terminal restoration after
 child success, termination and forced termination. Unix socket tests exercise
 journal serialization, pairing, cancellation, missing transport and backpressure.
+
+Normal console reboot and poweroff use `culvert-os-update` rather than direct
+systemctl power commands. The helper retains the existing OS-maintenance and
+agent locks through graceful stop, dispatch and failure recovery; interrupted
+agent operations refuse the action. Poweroff uses the same resume marker as
+reboot so the manually stopped stack starts on the next power-on. No console
+force override is provided. The helper gets a five-minute operation budget,
+then up to 90 seconds for cancellation recovery; the outer sudo handoff allows
+that grace. Other host commands retain their short budgets. Group cancellation
+keeps the log reader alive and attempts stack restart while holding the locks.
+Forced termination, service-manager kill deadlines and failed recovery can
+still leave the resume marker pending: inspect `/var/log/culvert-os-update.log`
+and use `sudo culvert-os-update resume-stack` through authenticated recovery.
+The existing marker is not a claim of filesystem power-loss durability.
+
+The aggressive-review regressions also exercise real shared-lock contention,
+interrupted journals, rejected power commands, leader/group cancellation and
+failed recovery in isolated Linux fixtures. Diagnostic export now shares the
+collector's 70-byte version bound, including a build-file-to-export regression.
 
 ## Observation integrity and retry rechecks
 

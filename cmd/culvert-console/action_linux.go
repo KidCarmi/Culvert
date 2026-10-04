@@ -69,6 +69,11 @@ func interactiveCommand(ctx context.Context, args []string) (result error) {
 	// Give PAM/sudo a chance to close their session before forced termination.
 	cmd.Cancel = func() error { return cmd.Process.Signal(syscall.SIGTERM) }
 	cmd.WaitDelay = 2 * time.Second
+	if name := commandName(args); name == "reboot" || name == "poweroff" {
+		// Let the root helper's bounded 90s cancellation recovery finish under
+		// the shared maintenance locks before sudo is forcibly terminated.
+		cmd.WaitDelay = 2 * time.Minute
+	}
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("run console action: %w", err)
 	}

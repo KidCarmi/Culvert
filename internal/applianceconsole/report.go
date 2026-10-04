@@ -169,7 +169,7 @@ func WriteReport(destination io.Writer, snapshot Snapshot) error {
 func (b *reportBuilder) build(s Snapshot) diagnosticReport {
 	return diagnosticReport{
 		SchemaVersion: 1, Kind: "culvert-diagnostic-report", GeneratedAt: time.Now().UTC().Format(time.RFC3339),
-		ObservedAt: b.text(s.ObservedAt, 40), ApplianceVersion: b.text(s.Version, 64), Candidate: s.Candidate,
+		ObservedAt: b.text(s.ObservedAt, 40), ApplianceVersion: b.text(s.Version, maxVersionLength), Candidate: s.Candidate,
 		Hostname:           b.text(s.Hostname, 253),
 		Status:             reportStatus{Phase: b.text(s.Phase, 32), Reason: b.text(s.Reason, 64), Message: b.text(s.Message, 256), Setup: b.text(s.SetupStatus, 32), AdministratorEnrolled: s.AdministratorEnrolled},
 		LocalServices:      reportLocalServices{ManagementResponding: s.ManagementAvailable, ApplicationResponding: s.ApplicationResponding},

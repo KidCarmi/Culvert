@@ -6,6 +6,8 @@ import (
 	"context"
 	"errors"
 	"os"
+	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -13,6 +15,52 @@ import (
 	"github.com/KidCarmi/Culvert/internal/applianceconsole"
 	"github.com/KidCarmi/Culvert/internal/appliancehost"
 )
+
+func TestConsolePowerUsesMaintenanceOwnerAndPropagatesRefusal(t *testing.T) {
+	refused := errors.New("maintenance operation in progress")
+	for _, mode := range []string{"reboot", "poweroff"} {
+		t.Run(mode, func(t *testing.T) {
+			calls := 0
+			err := dispatchHostAction(context.Background(), mode, func(_ context.Context, budget time.Duration, path string, args ...string) error {
+				calls++
+				if path != maintenanceCommand || !slices.Equal(args, []string{mode}) || budget < 2*time.Minute {
+					t.Fatalf("unsafe power dispatch: %s %v (budget %s)", path, args, budget)
+				}
+				return refused
+			})
+			if calls != 1 || !errors.Is(err, refused) {
+				t.Fatalf("refusal must reach operator without retry or systemctl fallback: calls=%d, error=%v", calls, err)
+			}
+		})
+	}
+	if err := dispatchHostAction(context.Background(), "reboot --force", func(context.Context, time.Duration, string, ...string) error {
+		t.Fatal("unrecognized action dispatched")
+		return nil
+	}); err == nil {
+		t.Fatal("unrecognized action accepted")
+	}
+}
+
+func TestHostPowerCancellationAllowsRecoveryAndBoundsIgnoredSignals(t *testing.T) {
+	marker := filepath.Join(t.TempDir(), "recovered")
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	err := hostCommandWithGrace(ctx, time.Minute, 2*time.Second, "/bin/sh", "-c",
+		`trap 'printf recovered > "$1"; exit 1' TERM; while :; do sleep 1; done`, "recovery-fixture", marker)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("cancellation lost: %v", err)
+	}
+	if got, err := os.ReadFile(marker); err != nil || string(got) != "recovered" {
+		t.Fatalf("helper killed before recovery: %q, %v", got, err)
+	}
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel2()
+	started := time.Now()
+	err = hostCommandWithGrace(ctx2, time.Minute, 200*time.Millisecond, "/bin/sh", "-c", `trap '' TERM; sleep 60 & wait`)
+	if !errors.Is(err, context.DeadlineExceeded) || time.Since(started) > 3*time.Second {
+		t.Fatalf("ignored termination escaped bound: %v", err)
+	}
+}
 
 func TestHostModesRequireRootBeforeObservationsOrMutation(t *testing.T) {
 	if os.Geteuid() == 0 {
