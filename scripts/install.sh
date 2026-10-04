@@ -2670,8 +2670,19 @@ install_maint_agent() {
         # rather than install a crash-looping systemd unit (#10). (If binfmt IS
         # registered the foreign binary runs emulated and --version succeeds,
         # which is degraded-but-functional and acceptable.)
-        if bundled_version="$("$cand" --version 2>/dev/null)" \
-           && [[ "$bundled_version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]]; then
+        if ! bundled_version="$("$cand" --version 2>/dev/null)"; then
+          bundled_version=""
+          info "Bundled agent binary is not runnable on this host (architecture mismatch or"
+          info "corrupt) — falling back to the signed-release download / source build."
+        elif ! [[ "$bundled_version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]]; then
+          # It RAN, but its stamp is not a release version (e.g. "dev" from an
+          # unversioned build): it cannot be pinned or upgraded, so it is not
+          # installed. Said as such — the old message called this "not
+          # runnable", which sent diagnosis to the wrong place (PR #1528 §3f L11).
+          warn "Bundled agent reports version '${bundled_version}', not a release version (vX.Y.Z[-pre]) — not installing it."
+          bundled_version=""
+        fi
+        if [[ -n "$bundled_version" ]]; then
           if [[ -z "$target_version" ]]; then
             # No explicit target — adopt the verified image's bundled version.
             target_version="$bundled_version"
@@ -2688,9 +2699,6 @@ install_maint_agent() {
             info "Proxy image bundles agent $bundled_version but the target is $target_version —"
             info "using the signed-release download for $target_version instead of the image bundle."
           fi
-        else
-          info "Bundled agent binary is not runnable on this host (architecture mismatch or"
-          info "corrupt) — falling back to the signed-release download / source build."
         fi
       fi
     else

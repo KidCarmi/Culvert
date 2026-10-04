@@ -51,6 +51,31 @@ jobs:
           egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      - name: Candidate version (SemVer prerelease naming the commit built)
+        # vX.Y.(Z+1)-candidate.g<sha12>, supplied to BOTH the proxy and the
+        # bundled maintenance-agent builds (one VERSION build-arg). A "dev"
+        # stamp made first boot refuse the bundled agent, so candidate OVAs
+        # never had one (PR #1528 §3f L11). On a pull_request the checkout is
+        # the merge commit: the stamp names the PR head only when the built
+        # tree IS the head's tree, else the merge commit actually built — and
+        # build-ova.sh then refuses it as a candidate for the head.
+        id: ver
+        env:
+          SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -euo pipefail
+          built="$(git rev-parse HEAD)" src="$SOURCE_SHA"
+          if [ "$built" != "$src" ]; then
+            git fetch -q --no-tags --depth=1 origin "$src"
+            if ! git diff --quiet "$src" "$built"; then
+              echo "::notice::built tree ($built) differs from $src; the version names the commit actually built"
+              src="$built"
+            fi
+          fi
+          v="$(.github/scripts/pr-candidate-version.sh "$src")"
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "candidate version: $v (built $built)"
+
       - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
 
       - name: Build image (amd64 only — no QEMU/arm64 on the PR path)
@@ -62,6 +87,8 @@ jobs:
           push: false
           load: true
           tags: ${{ inputs.image-tag }}
+          build-args: |
+            VERSION=${{ steps.ver.outputs.version }}
           # PR-written GHA caches are branch-isolated (not shared across PRs),
           # so scope=pr-image alone is a permanent cold start. Fall back to
           # the default-scope cache written by ci.yml's main-push docker job.

@@ -158,8 +158,9 @@ jobs:
               # Self-validation: edits to this workflow, its reusable build,
               # or the shared composite action must exercise EVERY deep job —
               # otherwise a broken gate lands silently and degrades all
-              # future PRs (CI review P1-2).
-              .github/workflows/pr-deep-gate.yml|.github/workflows/_build-image.yml|.github/actions/*)
+              # future PRs (CI review P1-2). The candidate version script
+              # shapes the image build (its VERSION build-arg).
+              .github/workflows/pr-deep-gate.yml|.github/workflows/_build-image.yml|.github/scripts/pr-candidate-version.sh|.github/actions/*)
                 self=true ;;
             esac
           done < changed.txt
@@ -459,7 +460,7 @@ jobs:
             appliance/provision/culvert-sudo-policy appliance/provision/culvert-net \
             appliance/provision/culvert-issue-update appliance/provision/culvert-appliance-reset-identity \
             appliance/os-maintenance/culvert-os-update \
-            appliance/build/build-ova.sh appliance/build/prepare-guest.sh appliance/build/archive-identity.sh \
+            appliance/build/build-ova.sh appliance/build/prepare-guest.sh appliance/build/archive-identity.sh appliance/build/cold-load-check.sh \
             test/e2e/appliance/lifecycle-qualify.sh test/e2e/appliance/agent-qualify.sh \
             test/e2e/appliance/clamav-image-qualify.sh test/e2e/appliance/upgrade-enospc-qualify.sh
 

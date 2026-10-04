@@ -171,7 +171,8 @@ done
 install -m 0644 "$APPL/provision/culvert-firstboot.service" /etc/systemd/system/culvert-firstboot.service
 install -m 0644 "$APPL/provision/culvert-issue.service"     /etc/systemd/system/culvert-issue.service
 install -m 0644 "$APPL/provision/culvert-issue.timer"       /etc/systemd/system/culvert-issue.timer
-systemctl enable culvert-firstboot.service culvert-issue.timer >/dev/null 2>&1
+install -m 0644 "$APPL/os-maintenance/culvert-stack-resume.service" /etc/systemd/system/culvert-stack-resume.service
+systemctl enable culvert-firstboot.service culvert-issue.timer culvert-stack-resume.service >/dev/null 2>&1
 
 # Firewall: nftables with an input-drop policy (22/8080/9090 only). ufw stays
 # installed but inactive; Docker's own tables coexist (see nftables.conf).

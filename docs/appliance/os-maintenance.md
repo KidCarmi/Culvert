@@ -31,7 +31,8 @@ arbitrary commands):
 | `check` | `apt update`; lists pending security updates (dry run), all upgradable packages, held Docker packages, last unattended run; says whether a **reboot is required** (`/var/run/reboot-required`) |
 | `security` | run the same security-only policy now |
 | `os` | all guest-OS package updates incl. a new kernel ABI (`apt-get upgrade --with-new-pkgs`; Docker stays held) |
-| `reboot` | `docker compose stop` in `/srv/culvert` (each service's `stop_grace_period` applies — the proxy's is 60 s so its shutdown sequence completes and durable state is flushed; `docs/operator/graceful-shutdown.md`) then `systemctl reboot` |
+| `reboot` | arms the stack-resume marker, then `docker compose stop` in `/srv/culvert` (each service's `stop_grace_period` applies — the proxy's is 60 s so its shutdown sequence completes and durable state is flushed; `docs/operator/graceful-shutdown.md`) then `systemctl reboot`. At boot `culvert-stack-resume.service` starts the stack again and clears the marker (a stopped container is not restarted by `restart: unless-stopped`). If the stop fails or the reboot request is rejected, the stack is started again and the command exits non-zero |
+| `resume-stack` | what `culvert-stack-resume.service` runs at boot; also the manual recovery when a resume is pending (`/var/lib/culvert-appliance/state/stack-resume-on-boot` exists). Fails — and keeps the marker — when the stack does not start or its compose file is missing |
 | any + `--reboot-if-required` | reboot at the end only when the kernel/libc update needs it |
 
 A kernel or glibc update is live only after a reboot; `culvert-status` is not
@@ -71,7 +72,7 @@ installs security packages only and does not stop the stack or reboot.
 **Maintenance-window procedure (host reboot):**
 1. Announce; proxy clients lose the gateway for the reboot duration (~1–2 min).
 2. `sudo culvert-os-update check` → if REBOOT REQUIRED: `sudo culvert-os-update reboot`.
-3. After boot: `sudo culvert-status` must show the previous state; `/ready` 200.
+3. After boot: `sudo culvert-status` must show the previous state; `/ready` 200. If it does not, `systemctl status culvert-stack-resume` and `journalctl -u culvert-stack-resume -b` say why; `sudo culvert-os-update resume-stack` retries.
 
 **Emergency patch (e.g. an actively exploited OpenSSH/glibc CVE):**
 `sudo culvert-os-update security --reboot-if-required` as soon as Ubuntu

@@ -164,6 +164,23 @@ built it, with no permitted transfer route. The replacement candidate is
 built from the corrected source with its own identity (`readiness-report.md`
 §3f).
 
+**Superseded: `60a73475…` (source `78e1bc56`) never runs first boot
+(historical record, kept).** It boots under BIOS (the fix above holds), then
+systemd deletes `culvert-firstboot.service`'s start job to break an ordering
+cycle with cloud-init's `cloud-final.service`; c4 carries the same unit, so it
+would have stopped there too once booted. Fixed in the unit's ordering
+(`readiness-report.md` §3f L5–L6); the replacement is built from the head that
+carries the fix.
+
+**Superseded: `e85e3640…` (lab variant, 78e1bc56 image + the first-boot fix)
+cannot start ClamAV (historical record, kept).** First boot runs, then Compose
+cannot create ClamAV: the baked `clamav.tar.gz` held only the image's index and
+manifests (69,562 bytes). Loading the candidate image archive before pulling
+ClamAV made every later ClamAV save hollow; the build now saves ClamAV first
+and refuses any archive that does not carry and run its pinned image
+(`readiness-report.md` §3f L8–L10). c4's archive was complete (152,380,114
+bytes).
+
 Commits after `4c4b772` change only the qualification harness, evidence and
 documentation (verified with `git diff --stat 4c4b772 HEAD` at the closeout
 commit: no Go source, Dockerfile, compose file, `appliance/build/`,

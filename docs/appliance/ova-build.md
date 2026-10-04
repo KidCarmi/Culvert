@@ -42,6 +42,12 @@ stale by import time; the sidecar downloads it on first start (see first-boot).
   image against the pinned digest — would refuse it. The build checks the
   archive it is about to bake (`archive-identity.sh`) and stops with that
   message instead of producing an OVA that cannot boot.
+* The build must be able to run a **privileged container**: each saved image
+  archive is cold-loaded into a disposable `docker:dind` store (pinned by
+  digest, `COLDLOAD_DIND_IMAGE` in `manifest.env`) with no registry access,
+  and a container is created and run from it before the archive is baked
+  (`cold-load-check.sh`). A host that cannot run privileged containers cannot
+  build the OVA.
 * **No KVM required.** libguestfs falls back to TCG (`accel=kvm:tcg`); the
   in-guest package install then takes 10–30 minutes instead of ~2.
 * A host **kernel package** must be installed (`/boot/vmlinuz-*` +
@@ -101,12 +107,29 @@ verifies on import.
    the pin is the signed value.
 3. `docker pull <repo>@<index digest>` for both images; assert the resolved
    platform is `linux/amd64` and that the index's amd64 entry equals the pinned
-   amd64 digest; tag `repo:tag` locally.
+   amd64 digest; tag `repo:tag` locally. ClamAV is pulled AND `docker save`d
+   first, before any image archive is loaded: in a candidate build, loading the
+   candidate tar into the same store made every later ClamAV save hollow
+   (index and manifests, no config or layers — 69,562 bytes), whether saved by
+   tag, digest or both (F-OVA-CLAMAV-1, `readiness-report.md` §3f; bisected in
+   fresh disposable stores). Pinned by
+   `TestBuildOVA_SavesClamAVBeforeLoadingTheCandidate`.
 4. `cosign verify` (pinned `ghcr.io/sigstore/cosign/cosign:v3.0.6`, issuer +
    SAN regex identical to `scripts/install.sh` / `release_identity.env`) of the
    proxy image. Failure aborts the build.
-5. Stage the overlay: `docker save | gzip -n` of both images, `scripts/install.sh`,
-   provisioning + maintenance files, `manifest.env`, `build-info.json`.
+5. Stage the overlay: the `docker save | gzip -n` archives of both images,
+   `scripts/install.sh`, provisioning + maintenance files, `manifest.env`,
+   `build-info.json`. Before either archive is recorded or baked, each must
+   (a) carry the COMPLETE pinned image — `archive_platform_closure` walks from
+   the pinned digest in `index.json` to the linux/amd64 manifest and requires
+   its config and every layer with the declared size and sha256, so a complete
+   but different image does not pass — and (b) RUN from its own content:
+   `cold-load-check.sh` loads it into an empty disposable containerd store whose
+   registry pull fails, checks the reference's ID and platform, creates a
+   container with `--pull=never` and runs a binary from it
+   (`culvert-maint -version`, `clamd --version`). A successful `docker load`
+   alone proves nothing: the hollow archive "loaded" and first boot then could
+   not create ClamAV.
 6. Convert the base image to a 40 GB qcow2 and grow the root partition IN
    PLACE (`part-expand-gpt`, `part-resize /dev/sda 1`, `e2fsck`, `resize2fs`):
    the cloud image's root is 2.4 GB and cloud-init's `growpart` only runs at
@@ -164,7 +187,12 @@ checkout's provisioning files from one source SHA. `--candidate-source` must
 equal `HEAD` unless `--candidate-allow-provisioning-drift` is given, which
 records both SHAs. What makes it a candidate and not a release:
 
-* the version is `<app>-candidate.<sha12>`, the OVF product line and
+* the image must carry the candidate stamp `vX.Y.Z-candidate.g<sha12>` naming
+  `--candidate-source` (`.github/scripts/pr-candidate-version.sh`, set by the
+  PR image build for the proxy AND the bundled agent); `build-ova.sh` refuses
+  any other stamp, or an agent whose version differs, so the first boot can
+  install that agent (§3f L11 of the readiness report). The OVA version is
+  that stamp; the OVF product line and
   annotation say CANDIDATE / NOT FOR PRODUCTION, `build-info.json` carries a
   `candidate` object (image source SHA, provisioning SHA, drift flag, image
   tar SHA-256, CI run id) and `culvert-status` prints a banner on the guest;
