@@ -2,25 +2,39 @@
 # culvert-appliance-reset-identity — prepare a RUNNING appliance to be cloned
 # or turned into a template. Removes every per-instance OS identity so the
 # next boot regenerates it (machine-id, SSH host keys, cloud-init instance,
-# first-boot console credential step, and the read-only operator SSH keys —
-# a clone must authorize only the keys ITS import supplies, never the
-# source VM's). APPLICATION STATE IS KEPT: /srv/culvert
+# the local console credential, and the read-only operator SSH keys — a clone
+# must authorize only the keys ITS import supplies and get its OWN one-time
+# console password, never the source VM's). APPLICATION STATE IS KEPT: /srv/culvert
 # (.env with the CA/log passphrases) and the proxy-data volume (Root CA, admin
 # roster, policy) are untouched — a clone of a configured appliance is a
 # configured appliance with the SAME secrets. Rotate them on the clone if the
 # clone must not share trust with the original (admin UI → Certificates →
 # rotate CA; change admin passwords).
 #
-#   sudo culvert-appliance-reset-identity && sudo poweroff
+# The console password is cleared, so sudo cannot be used again afterwards:
+# the script powers the VM off itself.
+#
+#   sudo culvert-appliance-reset-identity
 set -euo pipefail
 [[ "$(id -u)" -eq 0 ]] || { echo "run with sudo" >&2; exit 1; }
 STATE=/var/lib/culvert-appliance/state
-echo "This resets OS identity (machine-id, SSH host keys, cloud-init instance) and"
-echo "re-arms the first-boot console/network/operator-key steps. Application data is kept."
+CONSOLE_USER=culvert
+BOOTSTRAP_DIR=/var/lib/culvert-console/bootstrap
+echo "This resets OS identity (machine-id, SSH host keys, cloud-init instance),"
+echo "CLEARS the local console password and re-arms the first-boot console/network/"
+echo "operator-key steps, then POWERS OFF. Application data is kept. The next boot"
+echo "(of this VM or of a clone) prints a new one-time console password."
 read -rp "Continue? [y/N] " a; [[ "${a,,}" == y ]] || exit 1
 cloud-init clean --logs --machine-id 2>/dev/null || { truncate -s 0 /etc/machine-id; rm -rf /var/lib/cloud/instances /var/lib/cloud/instance; }
 rm -f /etc/ssh/ssh_host_*
 rm -f "$STATE/ovf.done" "$STATE/console.done" "$STATE/access.done" "$STATE/complete.done"
+# Local console credential: without this, the console step sees a password
+# already set and keeps the SOURCE VM's (and could re-show its pending one-time
+# credential), so every clone would share one known console login. Replace the
+# hash outright (not `passwd -l`, which keeps it recoverable), and drop the
+# one-time credential record so the next boot mints and records a new one.
+usermod -p '!' "$CONSOLE_USER"
+rm -f "$BOOTSTRAP_DIR/credential.json" "$STATE/console.minting"
 # Read-only operator authorization (culvert-access) and the imported-key source
 # it was built from: both re-imported from the clone's own cloud-init/OVF.
 rm -f /etc/ssh/culvert-authorized-keys/culvert-operator /home/culvert/.ssh/authorized_keys
@@ -28,4 +42,6 @@ rm -f /etc/netplan/60-culvert.yaml
 : > /root/.bash_history 2>/dev/null || true
 : > /home/culvert/.bash_history 2>/dev/null || true
 journalctl --rotate --vacuum-time=1s >/dev/null 2>&1 || true
-echo "Identity reset. Power off now and clone/export; the clone regenerates its identity at boot."
+echo "Identity reset. Powering off; clone/export afterwards. The clone regenerates its identity at boot."
+sync
+systemctl poweroff

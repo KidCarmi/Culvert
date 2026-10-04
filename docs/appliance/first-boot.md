@@ -215,11 +215,14 @@ first-boot service sets (`CULVERT_DIR=/srv/culvert`,
 
 Do **not** clone a booted appliance as-is: the clone would share the
 machine-id, SSH host keys and — because application state is kept — the Root
-CA, admin accounts and `.env` secrets. Run `sudo culvert-appliance-reset-identity
-&& sudo poweroff` first; the clone regenerates machine-id, host keys, the
+CA, admin accounts and `.env` secrets. Run `sudo culvert-appliance-reset-identity`
+first (it powers the VM off itself, because it clears the console password
+sudo would ask for); the clone regenerates machine-id, host keys, the
 cloud-init instance and re-runs the `console`/`access`/`ovf` first-boot steps
 (the read-only operator keys of the source VM are removed, so the clone
-authorizes only the keys its own import supplies) while keeping
+authorizes only the keys its own import supplies, and the source's console
+password and one-time credential are cleared, so the clone prints its own new
+one-time console password) while keeping
 `/srv/culvert` and the data volume. Rotate the Root CA and admin
 credentials on the clone if it must not share trust with the original. For a
 fresh identity *and* fresh application state, import the OVA again instead.

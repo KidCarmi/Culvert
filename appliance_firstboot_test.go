@@ -1006,6 +1006,33 @@ func TestResetIdentity_ForgetsPerInstanceOperatorKeys(t *testing.T) {
 			t.Errorf("reset does not re-arm the %s step", step)
 		}
 	}
+	// Codex review (PR #1528): the console step keeps an existing password, so
+	// a reset that leaves the source's hash (or its pending one-time record)
+	// gives every clone the same known console login. The hash must be
+	// REPLACED, not merely locked (`passwd -l` keeps it recoverable), and the
+	// record removed from the directory culvert-console actually uses.
+	if !strings.Contains(s, `usermod -p '!' "$CONSOLE_USER"`) || !strings.Contains(s, "CONSOLE_USER=culvert") {
+		t.Error("reset does not clear the console password hash")
+	}
+	if regexp.MustCompile(`(?m)^\s*(passwd -l|usermod -L)\b`).MatchString(s) {
+		t.Error("reset locks instead of replacing the console password hash")
+	}
+	console, err := os.ReadFile(filepath.Join(pkgSourceDir(), "cmd", "culvert-console", "bootstrap_linux.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := regexp.MustCompile(`const bootstrapDirectory = "([^"]+)"`).FindStringSubmatch(string(console))
+	if m == nil {
+		t.Fatal("culvert-console no longer declares bootstrapDirectory; update this test and the reset script together")
+	}
+	if !strings.Contains(s, "BOOTSTRAP_DIR="+m[1]) || !strings.Contains(s, `"$BOOTSTRAP_DIR/credential.json"`) || !strings.Contains(s, `"$STATE/console.minting"`) {
+		t.Errorf("reset does not remove the one-time console credential record under %s", m[1])
+	}
+	// With the password cleared, a following `sudo poweroff` could prompt for
+	// a password that no longer exists: the script must power off itself.
+	if !strings.Contains(s, "systemctl poweroff") {
+		t.Error("reset leaves the operator to power off with a sudo password it just cleared")
+	}
 	// The paths reset removes must be the ones culvert-access actually uses.
 	for _, name := range []string{"importedKeys", "operatorKeys"} {
 		m := regexp.MustCompile(`const ` + name + ` = "([^"]+)"`).FindStringSubmatch(string(keys))
