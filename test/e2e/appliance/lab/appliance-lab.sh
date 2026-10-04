@@ -77,11 +77,17 @@ redact_str() { local s="$1" v
   for f in "$SEC/setup-token" "$SEC/admin-pass"; do
     [[ -s "$f" ]] || continue; v="$(cat "$f")"; s="${s//"$v"/[REDACTED]}"
   done; printf '%s' "$s"; }
+# A secret that appears in NO evidence file is the good case, not an error:
+# under pipefail grep's "no match" used to fail the function, which ended
+# cmd_qualify (its last call) before the failure count — so an all-PASS run
+# exited 1 (run 37195991070: 48 pass, 0 fail). Redaction itself is unchanged
+# and collect still refuses evidence that carries private material.
 redact_tree() { local f v
   for f in "$SEC/setup-token" "$SEC/admin-pass"; do
     [[ -s "$f" ]] || continue; v="$(cat "$f")"
-    grep -rlF -- "$v" "$EV" 2>/dev/null | while read -r p; do sed -i "s|$(printf '%s' "$v" | sed 's/[.[\*^$/|]/\\&/g')|[REDACTED]|g" "$p"; done
-  done; }
+    { grep -rlF -- "$v" "$EV" 2>/dev/null || true; } | while read -r p; do sed -i "s|$(printf '%s' "$v" | sed 's/[.[\*^$/|]/\\&/g')|[REDACTED]|g" "$p"; done
+  done
+  return 0; }
 
 # ── access helpers (vsphere-qualification.md step 4 shapes) ──────────────────
 LAB_SSH_KEY="${LAB_SSH_KEY:-$SEC/id_ed25519}"
@@ -130,6 +136,11 @@ cmd_selftest() { local d rc=0 got; d="$(mktemp -d)"
   verdict_case fail '{"error":"forbidden"}' 403 "http 403"
   verdict_case fail 'not json' 200 "unparseable"
   verdict_case pass '{"available":true,"agent_version":"v1.0.260-candidate.gc5551a18da30","privilege_mode":"sudoers","compose_stack_up":true}' 200 "healthy agent"
+  # redact_tree: nothing to redact is success; a present secret is replaced.
+  if ( SEC="$d/sec" EV="$d/ev"; mkdir -p "$SEC" "$EV"; printf 'S3cretValue42' > "$SEC/admin-pass"; echo clean > "$EV/a.txt"; redact_tree ); then
+    log "selftest ok: redact_tree with nothing to redact -> success"; else log "selftest FAILED: redact_tree with nothing to redact failed"; rc=1; fi
+  if ( SEC="$d/sec2" EV="$d/ev2"; mkdir -p "$SEC" "$EV"; printf 'S3cretValue42' > "$SEC/admin-pass"; echo 'pw=S3cretValue42' > "$EV/b.txt"; redact_tree && grep -qx 'pw=\[REDACTED\]' "$EV/b.txt" && ! grep -rq S3cretValue42 "$EV" ); then
+    log "selftest ok: redact_tree replaces a present secret"; else log "selftest FAILED: redact_tree left a secret in the evidence"; rc=1; fi
   rm -rf "$d"; return "$rc"; }
 through_proxy() { curl -sS -m 20 -x "$P" -o /dev/null -w '%{http_code}' "$1" 2>/dev/null || echo 000; }
 # Monitor socket: a short fixed path (AF_UNIX paths are limited to 108 bytes).

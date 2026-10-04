@@ -64,6 +64,11 @@ jobs:
             image_run: "37195117238"
             image_tar_sha256: "40fcc42daa87ba39c3119c1cbda4b3b0df033aa84beced4a093c98b571b024a8"
             expect_image_id: "sha256:2aeee47447ec989111379bcf39bef6d64d2be4dba2db352f5af16db6c70a964f"
+            # Re-qualify the OVA run 37195991070 built and retained (artifact
+            # 11300957991): all 48 checks passed there, but the harness exited
+            # 1 before its failure count (redact_tree, fixed). Same bytes.
+            retained_run: "37195991070"
+            retained_sha256: "7bd09aaac19ab0525654d2863d4382bf0415e0ac75e2b55aee8a424a9df6bca1"
     env:
       APPLIANCE_SOURCE_SHA: ${{ matrix.source_sha }}
       SOURCE_IMAGE_RUN_ID: ${{ matrix.image_run }}
