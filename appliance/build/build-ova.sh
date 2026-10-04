@@ -231,7 +231,17 @@ MAINT_VERSION="$("$WORK/culvert-maint" --version 2>/dev/null || echo unknown)"
 rm -f "$WORK/culvert-maint" "$WORK/app-VERSION"
 
 if [[ "$CANDIDATE" -eq 1 ]]; then
-  VERSION="${APPLIANCE_VERSION:-${APP_VERSION#v}}-candidate.${CANDIDATE_SOURCE:0:12}"
+  # The candidate image must carry the SemVer prerelease stamp naming THIS
+  # source commit (.github/scripts/pr-candidate-version.sh), and its bundled
+  # maintenance agent the same version: first boot installs that agent only
+  # from a release-shaped stamp, and a "dev" or foreign-commit image would
+  # build an OVA whose agent, labels and provenance disagree (PR #1528 §3f L11).
+  want_pre="-candidate.g${CANDIDATE_SOURCE:0:12}"
+  [[ "$APP_VERSION" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+-candidate\.g[0-9a-f]{12}$ && "$APP_VERSION" == *"$want_pre" ]] \
+    || die "candidate image version '$APP_VERSION' is not the candidate stamp for source ${CANDIDATE_SOURCE:0:12} (want vX.Y.Z${want_pre}; build the image with VERSION from .github/scripts/pr-candidate-version.sh)"
+  [[ "$MAINT_VERSION" == "v${APP_VERSION#v}" ]] \
+    || die "bundled maintenance agent reports '$MAINT_VERSION', proxy '$APP_VERSION' — the two must carry one candidate version"
+  VERSION="${APPLIANCE_VERSION:-${APP_VERSION#v}}"
   APPLIANCE_PRODUCT="$APPLIANCE_PRODUCT (CANDIDATE — qualification build, not for production)"
 else
   VERSION="${APPLIANCE_VERSION:-${APP_IMAGE_TAG#v}}"

@@ -35,6 +35,9 @@ func TestApplianceLane_ClassifierRunsTheHarnessesForApplianceChanges(t *testing.
 		// also build it, or the job is skipped and the aggregate reads the
 		// skip as a pass.
 		"cmd/culvert-maint/internal/runner/runner.go": {"maint=true", "image_needed=true", "appliance=false"},
+		// The candidate version script shapes the image build's VERSION
+		// (L11): editing it must rebuild the image and run every deep job.
+		".github/scripts/pr-candidate-version.sh": {"appliance=true", "image_needed=true", "release=true"},
 	}
 	for path, wants := range cases {
 		t.Run(path, func(t *testing.T) {

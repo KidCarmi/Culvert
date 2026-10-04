@@ -8,7 +8,8 @@
 #   sudo culvert-os-update docker           Docker engine + compose plugin: stops the
 #                                           stack gracefully first, upgrades, restarts it
 #   sudo culvert-os-update reboot           graceful stack stop (honours stop_grace_period)
-#                                           then reboot
+#                                           then reboot; the stack is started again at
+#                                           boot by culvert-stack-resume.service
 #   any mode may add --reboot-if-required   reboot at the end when the kernel/libc need it
 #   any mutating mode may add --force       proceed although the maintenance agent has an
 #                                           operation in flight (see below)
@@ -34,6 +35,12 @@ LOG=/var/log/culvert-os-update.log
 MAINT_STATE=/var/lib/culvert-maint
 MAINT_JOURNAL="$MAINT_STATE/reconcile"
 LOCK=/run/culvert-os-update.lock
+# Armed by `reboot` BEFORE the stack is stopped; consumed at boot by
+# culvert-stack-resume.service (`resume-stack`). `docker compose stop` marks
+# the containers manually stopped, so their `restart: unless-stopped` policy
+# does NOT start them when the engine comes back: without this, the gateway
+# stayed down after every maintenance reboot (lab run 37156062516, F-OSU-REBOOT-1).
+STACK_RESUME=/var/lib/culvert-appliance/state/stack-resume-on-boot
 mode="${1:-check}"; shift || true
 reboot_if_required=0; force=0
 for a in "$@"; do
@@ -99,10 +106,42 @@ stack_start() {
     ( cd "$STACK" && docker compose up -d )
   fi
 }
+# stack_start_required: the recovery paths' start. A missing compose file is
+# a FAILURE here, never "nothing to start": the caller is restoring a stack it
+# knows was running, so success must mean Docker actually started it.
+stack_start_required() {
+  [[ -f "$STACK/docker-compose.yml" ]] || { log "missing $STACK/docker-compose.yml — cannot start the stack"; return 1; }
+  stack_start
+}
+# recover_aborted_reboot: the stack was stopped for a reboot that will not
+# happen. Runs under the locks guard_maintenance already holds. The resume
+# marker is removed only once the stack is back; if it is not, the marker
+# stays so the next boot (or `resume-stack`) retries. Always a failure exit:
+# the reboot the operator asked for did not happen.
+recover_aborted_reboot() {
+  log "$1 — not rebooting; starting the stack again"
+  if stack_start_required; then
+    rm -f "$STACK_RESUME"
+    log "stack started again; the reboot did NOT happen"
+  else
+    echo "culvert-os-update: the stack did NOT start — check: cd $STACK && docker compose ps (recovery stays pending: sudo culvert-os-update resume-stack, or the next boot)" >&2
+  fi
+  exit 1
+}
 do_reboot() {
-  stack_stop
+  # Arm before acting: a reboot that happens at any point after the stop
+  # (power loss included) still brings the stack back. Nothing to resume
+  # when there is no stack.
+  if [[ -f "$STACK/docker-compose.yml" ]]; then
+    install -d -m 0755 "$(dirname "$STACK_RESUME")"
+    : > "$STACK_RESUME"
+  fi
+  stack_stop || recover_aborted_reboot "stack stop FAILED"
   log "rebooting"
-  systemctl reboot
+  # A rejected request (systemd refusing, an inhibitor, a shutdown already
+  # in progress) would otherwise exit here under set -e with the stack
+  # stopped and nothing to bring it back until the next boot.
+  systemctl reboot || recover_aborted_reboot "the reboot request was REJECTED (systemctl reboot exit $?)"
 }
 finish() {
   report_reboot
@@ -190,6 +229,28 @@ case "$mode" in
     guard_maintenance
     do_reboot
     ;;
+  resume-stack)
+    # Boot-time half of `reboot` (culvert-stack-resume.service). Waits for
+    # the same locks rather than refusing: at boot the maintenance agent may
+    # briefly hold its lock while it reconciles. The marker is removed only
+    # once the stack has started, so a failure is retried at the next boot
+    # and stays visible (the unit fails).
+    [[ -f "$STACK_RESUME" ]] || { log "no stack resume pending"; exit 0; }
+    exec 9>"$LOCK"
+    flock -w 300 9 || { log "timed out waiting for $LOCK — stack NOT started"; exit 3; }
+    if [[ -d "$MAINT_STATE" ]]; then
+      exec 8>>"$MAINT_STATE/host-maintenance.lock"
+      flock -w 300 8 || { log "timed out waiting for the maintenance agent lock — stack NOT started"; exit 3; }
+      log "holding $LOCK and the maintenance agent lock ($MAINT_STATE/host-maintenance.lock)"
+    fi
+    if stack_start_required; then
+      rm -f "$STACK_RESUME"
+      log "stack started after the maintenance reboot"
+    else
+      log "stack did NOT start after the maintenance reboot — check: cd $STACK && docker compose ps"
+      exit 1
+    fi
+    ;;
   *)
-    sed -n '2,19p' "$0"; exit 2 ;;
+    sed -n '2,20p' "$0"; exit 2 ;;
 esac

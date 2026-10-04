@@ -776,7 +776,7 @@ func TestBuildOVA_CandidateModeIsLabelledAndScoped(t *testing.T) {
 	for _, want := range []string{
 		`[[ "$CANDIDATE_SOURCE" =~ ^[0-9a-f]{40}$ ]] || die`,
 		`echo "CANDIDATE_BUILD=1"`,
-		`-candidate.${CANDIDATE_SOURCE:0:12}`,
+		`want_pre="-candidate.g${CANDIDATE_SOURCE:0:12}"`, // the version names the candidate commit (L11)
 		`NOT FOR PRODUCTION`,
 		`"not_for_production": True`,
 		`if [[ "$CANDIDATE" -eq 0 && "$SKIP_COSIGN" -eq 0 ]]; then`,

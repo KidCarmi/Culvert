@@ -187,7 +187,12 @@ checkout's provisioning files from one source SHA. `--candidate-source` must
 equal `HEAD` unless `--candidate-allow-provisioning-drift` is given, which
 records both SHAs. What makes it a candidate and not a release:
 
-* the version is `<app>-candidate.<sha12>`, the OVF product line and
+* the image must carry the candidate stamp `vX.Y.Z-candidate.g<sha12>` naming
+  `--candidate-source` (`.github/scripts/pr-candidate-version.sh`, set by the
+  PR image build for the proxy AND the bundled agent); `build-ova.sh` refuses
+  any other stamp, or an agent whose version differs, so the first boot can
+  install that agent (§3f L11 of the readiness report). The OVA version is
+  that stamp; the OVF product line and
   annotation say CANDIDATE / NOT FOR PRODUCTION, `build-info.json` carries a
   `candidate` object (image source SHA, provisioning SHA, drift flag, image
   tar SHA-256, CI run id) and `culvert-status` prints a banner on the guest;

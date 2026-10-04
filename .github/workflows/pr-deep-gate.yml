@@ -158,8 +158,9 @@ jobs:
               # Self-validation: edits to this workflow, its reusable build,
               # or the shared composite action must exercise EVERY deep job —
               # otherwise a broken gate lands silently and degrades all
-              # future PRs (CI review P1-2).
-              .github/workflows/pr-deep-gate.yml|.github/workflows/_build-image.yml|.github/actions/*)
+              # future PRs (CI review P1-2). The candidate version script
+              # shapes the image build (its VERSION build-arg).
+              .github/workflows/pr-deep-gate.yml|.github/workflows/_build-image.yml|.github/scripts/pr-candidate-version.sh|.github/actions/*)
                 self=true ;;
             esac
           done < changed.txt
