@@ -5,6 +5,51 @@ self-updater have shipped. Source review is pinned to
 `36b5407e5bd3ff3c883bf855c269b8b7675013ed`; the measured ESXi candidate used
 2 vCPUs and 4 GiB configured RAM. Runtime `nproc`/`MemTotal` were not retained.
 
+## Early boot presentation
+
+The next-candidate builder installs a Culvert cyan-on-black Plymouth text
+theme before exporting the OVA. The sequence is firmware/bootloader, Culvert
+early boot, then the existing Go console with management URL and setup
+guidance. Hypervisor firmware and emergency output are still visible when
+appropriate. The splash is presentation, not an application-readiness signal
+or a boot-speed optimization; its native activity indicator is not a measured
+appliance completion percentage.
+
+The theme uses Ubuntu's packaged `ubuntu-text` renderer, including its existing
+system-prompt and Escape-to-details handling. No new service writes to tty1.
+Both the default and text fallback alternatives select the Culvert theme;
+package-owned themes and `/etc/os-release` remain unchanged. Ubuntu's packaged
+Plymouth quit/panic hooks and getty ordering control the handoff, with no new
+dependency on Docker, network availability or provisioning completion.
+
+Packages come from the existing pinned Ubuntu snapshot and enter the guest
+SBOM before cloning. A custom theme name makes Noble's initramfs hook include
+font support even for the native text renderer, so the build explicitly
+installs `plymouth-label` and `fontconfig` too. The installer rebuilds every
+installed initramfs and rejects one missing the Culvert theme or native
+renderer. The outer build independently compares both selected themes and
+the GRUB drop-in with source hashes.
+
+Normal boot adds `quiet splash plymouth.ignore-serial-consoles
+systemd.show_status=auto` to the existing GRUB default arguments. Existing
+root and serial-console arguments remain present; `quiet` reduces kernel
+verbosity on serial as well. `auto` permits significant boot-delay status.
+For recovery, use Escape for details, or edit the GRUB kernel entry to remove
+`quiet splash` and add `plymouth.enable=0 systemd.show_status=yes`. Normal
+recovery entries do not inherit `GRUB_CMDLINE_LINUX_DEFAULT`. Do not remove
+the serial console or suppress error reporting to hide boot failures.
+
+Before calling this visually qualified, build a new OVA and verify BIOS and
+UEFI VGA startup, Escape details, serial login, a boot failure/emergency path,
+handoff to the Go console and PAM, and retention after a kernel update.
+Mocked build tests establish packaging and failure handling only. The prior
+36b5407e ESXi measurements do not qualify this new presentation.
+
+Primary implementation references: [Noble packaging and ubuntu-text patch](https://archive.ubuntu.com/ubuntu/pool/main/p/plymouth/plymouth_24.004.60-1ubuntu7.2.debian.tar.xz),
+[Plymouth renderer and console handling](https://archive.ubuntu.com/ubuntu/pool/main/p/plymouth/plymouth_24.004.60.orig.tar.xz),
+[Ubuntu Plymouth controls](https://manpages.ubuntu.com/manpages/noble/man1/plymouth.1.html)
+and [systemd boot-status options](https://github.com/systemd/systemd/blob/v255/man/systemd.xml).
+
 ## What the measured reboot tells us
 
 The retained `esxi-run-36b5407e/evidence/post-reboot-observation.json` records

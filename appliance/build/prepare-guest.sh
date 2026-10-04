@@ -10,7 +10,7 @@
 #
 # Inputs (copied in by build-ova.sh before this runs):
 #   /var/lib/culvert-appliance/manifest.env   the build pins
-#   /opt/culvert-appliance/{provision,os-maintenance,console,bin,install.sh}
+#   /opt/culvert-appliance/{provision,os-maintenance,console,boot-splash,bin,install.sh}
 #
 # No systemd is running here: `systemctl enable` works (it edits symlinks);
 # `systemctl start` must not be used.
@@ -130,9 +130,18 @@ if [[ -n "${GUEST_APT_SNAPSHOT:-}" ]]; then
   } > "$STATE/build-upgrades.txt"
   moved="$(grep -vc '^#' "$STATE/build-upgrades.txt" || true)"
   log "build-time upgrades: ${moved:-0} package(s) moved"
+  # Custom theme basenames enter Ubuntu's graphical initramfs-hook branch
+  # even with the native text renderer: label/fontconfig are needed by that
+  # hook. Install from the same pinned snapshot, never at customer first boot.
+  log "installing pinned-snapshot early boot presentation packages"
+  apt-get -y -qq -o Acquire::Snapshot="${GUEST_APT_SNAPSHOT}" install --no-install-recommends \
+    plymouth plymouth-theme-ubuntu-text plymouth-label fontconfig
   # Leave the snapshot behind: the deployed appliance updates from the live
   # archive (unattended-upgrades + culvert-os-update), never from a snapshot.
   apt-get -qq update
+else
+  echo 'Culvert boot splash requires the pinned GUEST_APT_SNAPSHOT.' >&2
+  exit 1
 fi
 
 # Docker daemon defaults for the appliance: containerd image store (the
@@ -216,6 +225,11 @@ visudo -c -q -f /etc/sudoers.d/50-culvert-console
 log "installing Go boot console and local recovery worker"
 bash "$APPL/console/install.sh"
 
+# The packaged Plymouth lifecycle owns early boot and yields to getty/our Go
+# console. No custom daemon, unit-ordering overrides or readiness dependencies.
+log "installing Culvert early boot screen and rebuilding initramfs"
+bash "$APPL/boot-splash/install.sh"
+
 # ── 4. Evidence captured into the image for the SBOM/CVE record ─────────────
 dpkg-query -W -f='${binary:Package}\t${Version}\t${Architecture}\n' | sort > "$STATE/dpkg-list.txt"
 {
@@ -228,6 +242,8 @@ dpkg-query -W -f='${binary:Package}\t${Version}\t${Architecture}\n' | sort > "$S
   echo "unattended-upgrades=$(dpkg-query -W -f='${Version}' unattended-upgrades)"
   echo "openssh-server=$(dpkg-query -W -f='${Version}' openssh-server)"
   echo "nftables=$(dpkg-query -W -f='${Version}' nftables)"
+  echo "plymouth=$(dpkg-query -W -f='${Version}' plymouth)"
+  echo "plymouth-theme-ubuntu-text=$(dpkg-query -W -f='${Version}' plymouth-theme-ubuntu-text)"
   echo "kernel=$(find /boot -maxdepth 1 -name "vmlinuz-*" -printf "%f\n" | sed "s/^vmlinuz-//" | sort -V | tail -1)"
 } > "$STATE/host-components.txt"
 

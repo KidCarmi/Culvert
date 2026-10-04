@@ -6,9 +6,10 @@ on:
   # REQUIRED aggregate rather than a separate advisory check.
   workflow_call:
   push:
-    branches: [feat/appliance-console]
+    branches: [feat/appliance-console, feat/appliance-firstboot-guidance]
     paths:
       - 'appliance/console/**'
+      - 'appliance/boot-splash/**'
       - 'appliance/os-maintenance/**'
       - 'appliance/build/**'
       - 'appliance/provision/**'
@@ -69,9 +70,14 @@ jobs:
           bash -n appliance/console/install.sh
           bash -n appliance/console/install-lib.sh
           bash -n appliance/console/profile.sh
+          bash -n appliance/boot-splash/install.sh
+          bash -n appliance/boot-splash/install-lib.sh
+          bash -n appliance/boot-splash/99-culvert-splash.cfg
+          bash -n appliance/build/boot-splash_test.sh
           sudo bash appliance/console/install_test.sh
           bash appliance/os-maintenance/power_test.sh
           bash appliance/build/console-bundle_test.sh
+          bash appliance/build/boot-splash_test.sh
           appliance/console/culvert-console --json
           appliance/console/culvert-console --text
           appliance/console/culvert-console --report

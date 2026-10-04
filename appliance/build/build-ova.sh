@@ -256,6 +256,10 @@ OVA_BASENAME="${APPLIANCE_NAME}-${VERSION}-${GUEST_OS_ID}"
 OV="$WORK/overlay"
 rm -rf "$OV"; mkdir -p "$OV/opt/culvert-appliance" "$OV/var/lib/culvert-appliance/images"
 cp -r "$REPO/appliance/provision" "$REPO/appliance/os-maintenance" "$OV/opt/culvert-appliance/"
+mkdir -p "$OV/opt/culvert-appliance/boot-splash"
+for splash_file in install.sh install-lib.sh culvert.plymouth 99-culvert-splash.cfg; do
+  cp "$REPO/appliance/boot-splash/$splash_file" "$OV/opt/culvert-appliance/boot-splash/$splash_file"
+done
 build_console_bundle "$REPO" "$OV/opt/culvert-appliance/console"
 CONSOLE_BINARY_SHA="$(sha256sum "$OV/opt/culvert-appliance/console/culvert-console" | cut -d' ' -f1)"
 cp "$REPO/scripts/install.sh" "$OV/opt/culvert-appliance/install.sh"
@@ -463,6 +467,14 @@ log "prepare-guest.sh completed in the guest at $PREP_DONE"
 log "verifying guest contents"
 CONSOLE_INSTALLED_SHA="$(virt-cat -a "$DISK" /opt/culvert-appliance/bin/culvert-console | sha256sum | cut -d' ' -f1)"
 [[ "$CONSOLE_INSTALLED_SHA" == "$CONSOLE_BINARY_SHA" ]] || die "installed console binary does not match its recorded build hash"
+SPLASH_THEME_SHA="$(sha256sum "$REPO/appliance/boot-splash/culvert.plymouth" | cut -d' ' -f1)"
+for splash_name in default.plymouth text.plymouth culvert/culvert.plymouth; do
+  installed_splash_sha="$(virt-cat -a "$DISK" "/usr/share/plymouth/themes/$splash_name" | sha256sum | cut -d' ' -f1)"
+  [[ "$installed_splash_sha" == "$SPLASH_THEME_SHA" ]] || die "boot theme differs from source: $splash_name"
+done
+SPLASH_GRUB_SHA="$(sha256sum "$REPO/appliance/boot-splash/99-culvert-splash.cfg" | cut -d' ' -f1)"
+installed_splash_sha="$(virt-cat -a "$DISK" /etc/default/grub.d/99-culvert-splash.cfg | sha256sum | cut -d' ' -f1)"
+[[ "$installed_splash_sha" == "$SPLASH_GRUB_SHA" ]] || die "boot presentation configuration differs from source"
 virt-cat -a "$DISK" /var/lib/culvert-appliance/dpkg-list.txt       > "$OUT/dpkg-list.txt"
 virt-cat -a "$DISK" /var/lib/culvert-appliance/host-components.txt > "$OUT/host-components.txt"
 # Present only when manifest.env pins GUEST_APT_SNAPSHOT (prepare-guest.sh 1b).

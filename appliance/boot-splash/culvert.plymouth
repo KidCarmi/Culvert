@@ -1,0 +1,11 @@
+[Plymouth Theme]
+Name=Culvert appliance
+Description=Culvert early boot with native text diagnostics and system prompts
+ModuleName=ubuntu-text
+
+[ubuntu-text]
+title=C U L V E R T  |  Starting appliance  |  Esc: details
+black=0x000000
+white=0x00dddd
+brown=0x008888
+blue=0x00aaaa
