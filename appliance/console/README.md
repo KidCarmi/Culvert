@@ -49,7 +49,10 @@ before/after IDs remain available even when a caller disconnects.
 Managed edits serialize with this worker only. Do not run legacy `culvert-net`,
 manual Netplan edits or other privileged network writers during a pending test.
 Unexpected file drift enters `conflict` without overwriting it. Preserve the
-private state/backup and reconcile through authenticated root recovery; do not
+private state/backup and reconcile through authenticated root recovery. Reopen
+`[E]` and type `KEEP CURRENT` to close the conflict while retaining external edits;
+this performs no network write and makes no health claim. The backup is retained
+until the next transaction, with bounded operation history kept separately. Do not
 delete the record to hide the conflict. Firstboot/maintenance lifecycle ownership
 is unchanged; this worker does not restart stopped application containers.
 

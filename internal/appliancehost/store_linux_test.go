@@ -98,6 +98,43 @@ func TestNetplanRestoresAbsenceAndOriginalMode(t *testing.T) {
 	}
 }
 
+func TestPublishUsesDurablePhaseAndSkipsUnchangedWrites(t *testing.T) {
+	dir := rootDirectory(t)
+	store := Store{Directory: filepath.Join(dir, "private")}
+	path := filepath.Join(dir, "status.json")
+	err := store.WithLock(func(s *Session) error {
+		if _, err := s.Append("reboot", "intent", ""); err != nil {
+			return err
+		}
+		if err := store.PublishCurrent(path); err != nil {
+			return err
+		}
+		before, err := os.Stat(path)
+		if err != nil {
+			return err
+		}
+		s.State.Records[0].Phase = "uncommitted"
+		if err := store.PublishCurrent(path); err != nil {
+			return err
+		}
+		after, err := os.Stat(path)
+		if err != nil {
+			return err
+		}
+		if !os.SameFile(before, after) {
+			t.Error("unchanged snapshot rewritten")
+		}
+		data, err := os.ReadFile(path)
+		if strings.Contains(string(data), "uncommitted") || !strings.Contains(string(data), "intent") {
+			t.Error("published uncommitted phase")
+		}
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
 func unsafeFixture(t *testing.T, dir, path, kind string) {
 	t.Helper()
 	var err error

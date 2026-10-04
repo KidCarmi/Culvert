@@ -96,7 +96,23 @@ func (s *Session) Finish(id, phase string) error {
 	return errors.New("operation record missing")
 }
 
-func pending(p string) bool { return p != "confirmed" && p != "rolled_back" }
+func pending(p string) bool { return p != "confirmed" && p != "rolled_back" && p != "external_kept" }
+
+// Pending reports whether a transaction still needs confirmation or recovery.
+func (t Transaction) Pending() bool { return pending(t.Phase) }
+
+// KeepExternal ends only a conflicted transaction following explicit operator
+// acknowledgement. It performs no network writes and makes no health claim.
+func (s *Session) KeepExternal(id string) error {
+	t := s.State.Network
+	if t == nil || t.ID != id || t.Phase != "conflict" {
+		return errors.New("no matching network conflict")
+	}
+	if _, _, err := s.Host.Read(); err != nil {
+		return err
+	}
+	return s.phase("external_kept")
+}
 
 // Stage only queues work. The worker owns applying and reverting it.
 func (s *Session) Stage(candidate File) (string, error) {

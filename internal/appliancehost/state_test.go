@@ -100,6 +100,34 @@ func TestStagePersistsBackupWithoutMutatingNetwork(t *testing.T) {
 	}
 }
 
+func TestKeepingExternalConflictNeverWritesNetwork(t *testing.T) {
+	s, store, host, candidate := transactionFixture(t)
+	id, err := s.Stage(candidate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.KeepExternal(id); err == nil {
+		t.Fatal("active transaction dismissed")
+	}
+	host.file.Data = []byte("external administrator change")
+	if err := s.Tick(context.Background()); err == nil {
+		t.Fatal("drift not detected")
+	}
+	if err := s.KeepExternal("old-id"); err == nil {
+		t.Fatal("stale acknowledgement accepted")
+	}
+	if err := s.KeepExternal(id); err != nil {
+		t.Fatal(err)
+	}
+	reloaded := store.session(t, host, s.Identity)
+	if reloaded.State.Network.Pending() || reloaded.State.Network.Phase != "external_kept" || len(host.writes) != 0 || host.applyCount != 0 || string(host.file.Data) != "external administrator change" {
+		t.Fatal("conflict acknowledgement mutated network or remained pending")
+	}
+	if len(reloaded.State.Network.Original.Data) == 0 {
+		t.Fatal("conflict backup lost")
+	}
+}
+
 func TestSaveFailurePreventsNetworkMutation(t *testing.T) {
 	for _, fail := range []string{"queued", "applying", "rolling_back"} {
 		t.Run(fail, func(t *testing.T) {

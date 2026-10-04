@@ -114,7 +114,7 @@ func hostAction(ctx context.Context, mode string, c applianceconsole.Collector) 
 		if strings.HasPrefix(mode, "retry-") && !applianceconsole.RetryAllowed(snapshot) {
 			return errors.New("retry refused: provisioning is running, complete, or unknown")
 		}
-		if s.State.Network != nil && s.State.Network.Phase != "confirmed" && s.State.Network.Phase != "rolled_back" {
+		if s.State.Network != nil && s.State.Network.Pending() {
 			return errors.New("resolve the pending network transaction before power or provisioning actions")
 		}
 		id, err := s.Append(mode, "intent", checkpoint(snapshot))

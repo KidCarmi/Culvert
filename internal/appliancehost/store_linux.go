@@ -3,6 +3,7 @@
 package appliancehost
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -107,7 +108,7 @@ func (s Store) WithLock(fn func(*Session) error) error {
 	}
 	// The worker's restrictive umask must not make sanitized status unreadable.
 	// Ownership/ancestor checks above precede the explicit public directory mode.
-	if err := os.Chmod(filepath.Dir(s.Directory), 0o755); err != nil {
+	if err := publicDirectoryMode(filepath.Dir(s.Directory)); err != nil {
 		return err
 	}
 	if err := secureDirectory(s.Directory, 0o700); err != nil {
@@ -140,6 +141,17 @@ func (s Store) WithLock(fn func(*Session) error) error {
 	return fn(session)
 }
 
+func publicDirectoryMode(path string) error {
+	st, err := os.Stat(path)
+	if err != nil {
+		return err
+	}
+	if st.Mode().Perm() == 0o755 {
+		return nil
+	}
+	return os.Chmod(path, 0o755)
+}
+
 func (s Store) load() (State, error) {
 	var state State
 	data, _, err := readRegular(filepath.Join(s.Directory, "state.json"), stateLimit, true)
@@ -162,7 +174,7 @@ func validateState(state State) error {
 	}
 	if t := state.Network; t != nil {
 		switch t.Phase {
-		case "queued", "applying", "testing", "rolling_back", "rolled_back", "confirmed", "conflict":
+		case "queued", "applying", "testing", "rolling_back", "rolled_back", "confirmed", "conflict", "external_kept":
 		default:
 			return errors.New("unknown network recovery phase")
 		}
@@ -203,6 +215,13 @@ func (s Store) Publish(state State, path string) error {
 		return err
 	}
 	if err := secureDirectory(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	previous, mode, err := readRegular(path, 65536, false)
+	if err == nil && mode == 0o644 && bytes.Equal(previous, data) {
+		return nil
+	}
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
 	return atomicFile(path, data, 0o644)

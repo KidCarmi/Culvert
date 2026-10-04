@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -20,7 +21,7 @@ func networkDialog(ctx context.Context) error {
 	}
 	var id, phase string
 	if err := hostSession(func(s *appliancehost.Session) error {
-		if t := s.State.Network; t != nil && t.Phase != "confirmed" && t.Phase != "rolled_back" {
+		if t := s.State.Network; t != nil && t.Pending() {
 			id, phase = t.ID, t.Phase
 		}
 		return nil
@@ -28,7 +29,7 @@ func networkDialog(ctx context.Context) error {
 		return err
 	}
 	if phase == "conflict" {
-		return errors.New("network files changed externally; backup preserved in private/state.json; recover through the root shell")
+		return keepExternalNetwork(ctx, id)
 	}
 	if id == "" {
 		var err error
@@ -40,6 +41,17 @@ func networkDialog(ctx context.Context) error {
 	fmt.Println("Network operation:", id)
 	fmt.Println("Verify access from another client. Reopen this menu after reconnecting to confirm.")
 	return confirmNetwork(ctx, id)
+}
+
+func keepExternalNetwork(ctx context.Context, id string) error {
+	fmt.Println("Network files changed outside this operation. Automatic rollback is blocked.")
+	fmt.Println("Inspect/recover through the root shell, or explicitly keep current external settings.")
+	fmt.Println("The backup remains in private/state.json until the next transaction. Reachability is unverified.")
+	answer, err := confirm(ctx, "Type KEEP CURRENT to close this conflict without changing network files: ")
+	if err != nil || answer != "KEEP CURRENT" {
+		return err
+	}
+	return hostSession(func(s *appliancehost.Session) error { return s.KeepExternal(id) })
 }
 
 func queueNetwork(ctx context.Context) (string, error) {
@@ -127,7 +139,7 @@ func confirmNetwork(ctx context.Context, id string) error {
 			if phase == "testing" {
 				break
 			}
-			if phase == "rolled_back" || phase == "confirmed" || phase == "conflict" || phase == "" {
+			if slices.Contains([]string{"rolled_back", "confirmed", "conflict", "external_kept", ""}, phase) {
 				return fmt.Errorf("network operation state: %s", phase)
 			}
 		}
