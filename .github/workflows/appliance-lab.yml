@@ -62,6 +62,10 @@ jobs:
             image_run: "37184223096"
             image_tar_sha256: "670abef9adbd07a289a909e575bf15b17ec4809e87133c3bbbd0e1be0440f891"
             expect_image_id: "sha256:54813760eb62583990194e2a97d7eef0f5273adfc974f4cd7c45eb82f91b120b"
+            # Re-qualify the OVA run 37185033699 built and retained (the
+            # handoff artifact) with the corrected harness oracles.
+            retained_run: "37185033699"
+            retained_sha256: "1ab602f618d6906a7809293cb9d26e6c4601c542f547e36bd2a8c5381e5cf47e"
     env:
       APPLIANCE_SOURCE_SHA: ${{ matrix.source_sha }}
       SOURCE_IMAGE_RUN_ID: ${{ matrix.image_run }}
@@ -109,12 +113,14 @@ jobs:
           printf 'nameserver 8.8.8.8\nnameserver 1.1.1.1\noptions timeout:2 attempts:3\n' | sudo tee /etc/resolv.conf >/dev/null
           getent hosts download.docker.com
       - name: Probe libguestfs appliance networking (fails fast, before a long build)
+        if: matrix.retained_run == ''
         run: |
           set -euo pipefail
           sudo env LIBGUESTFS_BACKEND=direct timeout 300 guestfish --network -a /dev/null run : \
             debug sh "cat /etc/resolv.conf; ip -4 route; getent hosts download.docker.com || echo DNS-FAILED" | tee /tmp/lg-net.txt
           ! grep -q DNS-FAILED /tmp/lg-net.txt
       - name: Match the recorded build host's Docker engine (29.6.2)
+        if: matrix.retained_run == ''
         # The original OVA's build-info.json records Docker 29.6.2 on the
         # containerd image store. The runner ships Docker 28, whose containerd
         # store reports an empty platform for an index-digest reference, so
@@ -131,6 +137,7 @@ jobs:
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q --allow-downgrades "docker-ce=$v" "docker-ce-cli=$v" containerd.io
           docker version --format 'client={{.Client.Version}} server={{.Server.Version}}'
       - name: Use the containerd image store (the build's archive-identity guard requires it)
+        if: matrix.retained_run == ''
         # Under Docker's classic store a loaded image's ID is its CONFIG digest,
         # so the saved archive cannot carry the manifest digest first boot pins
         # (build-ova.sh refuses it — PR #1528 K16). Same requirement as the
@@ -144,6 +151,7 @@ jobs:
           for i in $(seq 1 30); do docker info >/dev/null 2>&1 && break; sleep 2; done
           docker info --format 'server={{.ServerVersion}} driver={{.Driver}} {{.DriverStatus}}' | tee /dev/stderr | grep -q 'server=29.6.2 .*io.containerd.snapshotter.v1'
       - name: Obtain the source image tar (verified sha256)
+        if: matrix.retained_run == ''
         id: image
         env:
           GH_TOKEN: ${{ github.token }}
@@ -178,12 +186,14 @@ jobs:
           done 2>&1 | tee "$LAB_ROOT/save-replay.txt"
           echo "builder daemon has no ClamAV image before the build: $(docker image ls -q --filter reference='*clamav*' | wc -l) found"
       - name: Check out the appliance source the candidate is built from
+        if: matrix.retained_run == ''
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ env.APPLIANCE_SOURCE_SHA }}
           path: appliance-src
           persist-credentials: false
       - name: Build the candidate OVA (image + provisioning from one commit)
+        if: matrix.retained_run == ''
         run: |
           set -euo pipefail
           # The build runs as root over a runner-owned checkout; without this,
@@ -233,6 +243,7 @@ jobs:
           sudo du -sh /var/lib/docker/* /var/lib/containerd 2>/dev/null | head -20
           sudo ctr namespaces ls
       - name: "Focused check: ClamAV READY from the baked archive alone (empty store, no registry)"
+        if: matrix.retained_run == ''
         # The build already proved create + execute offline; this adds a real
         # clamd reaching `clamdscan --ping` (signatures via freshclam; the
         # disposable daemon's registry access goes to a dead proxy).
@@ -245,6 +256,7 @@ jobs:
             --ref "${CLAMAV_IMAGE_REPO#docker.io/}:${CLAMAV_IMAGE_TAG}" --id "$CLAMAV_IMAGE_INDEX_DIGEST" \
             --run "clamd --version" --ready-clamav 900 2>&1 | tee "$LAB_ROOT/coldload-clamav-ready.txt"
       - name: Retain the built OVA (unpublished test artifact, before any boot)
+        if: matrix.retained_run == ''
         # For the ESXi qualification (test/esxi-qualification), which imports
         # the bytes on a LAN host: kept BEFORE the QEMU boot so a boot failure
         # cannot discard the only importable file. Unpublished: a workflow
@@ -259,6 +271,21 @@ jobs:
           retention-days: 14
           compression-level: 0
           if-no-files-found: error
+      - name: Fetch the RETAINED OVA (re-qualification of an existing artifact; verified sha256)
+        # Re-qualifies the exact bytes a previous run built and retained, with
+        # the current harness. Nothing is rebuilt: a rebuild would be a
+        # different artifact.
+        if: matrix.retained_run != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$LAB_ROOT/ova"
+          gh run download "${{ matrix.retained_run }}" -R "$GITHUB_REPOSITORY" -n "appliance-lab-ova-${{ matrix.variant }}" -D "$LAB_ROOT/ova"
+          got="$(sha256sum "$LAB_ROOT/ova/"*.ova | cut -d' ' -f1)"
+          [ "$got" = "${{ matrix.retained_sha256 }}" ] || { echo "::error::retained OVA sha256 $got != ${{ matrix.retained_sha256 }}"; exit 1; }
+          grep -q "$got" "$LAB_ROOT/ova/"*.ova.sha256
+          echo "retained OVA $got from run ${{ matrix.retained_run }}"
       - name: "Diagnostic: guest content vs the superseded candidate's fingerprint"
         if: env.LAB_STAGE == 'full'
         # Informational only (its own LAB_DIR, so it never counts as a lab

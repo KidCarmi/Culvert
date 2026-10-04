@@ -376,14 +376,21 @@ PY
 
   # Step 5b — community category data (the boot-time feed sync), for the persistence check.
   if gate 5b category-data; then
-    local deadline=$(( $(date +%s) + LAB_FEED_TIMEOUT )) fl=""
-    until fl="$(gssh 'sudo docker logs culvert 2>&1 | grep -oE "FeedSync: (sync complete[^\"]*|download/parse failed[^\"]*|bulk write failed[^\"]*|write REFUSED[^\"]*)" | tail -1')" && [[ -n "$fl" ]]; do
+    # Completion is read from the PRODUCT (GET /api/urlcat/feed-status: the
+    # running process's last successful UT1 sync), never from `docker logs`:
+    # the agent install recreates the proxy container during first boot, and
+    # the replaced container's log — with any "sync complete" line — goes with
+    # it (run 37185033699). The log grep is kept as diagnostics only.
+    local deadline=$(( $(date +%s) + LAB_FEED_TIMEOUT )) fs="" fl=""
+    until fs="$(api GET /api/urlcat/feed-status | body | python3 -c 'import json,sys; u=json.load(sys.stdin).get("ut1",{}); print("%s %s" % (u.get("lastSync",""), u.get("entries",0)) if u.get("lastSync") and int(u.get("entries",0))>0 else "")' 2>/dev/null)" && [[ -n "$fs" ]]; do
       (( $(date +%s) < deadline )) || break; sleep 20; done
-    echo "${fl:-no feed completion line within ${LAB_FEED_TIMEOUT}s}" > "$EV/05b-feed.txt"
+    fl="$(gssh 'sudo docker logs culvert 2>&1 | grep -oE "FeedSync: [^\"]*" | tail -3' 2>/dev/null | tr '\n' ';' || true)"
+    api GET /api/urlcat/feed-status > "$EV/05b-feed-status.txt" || true
+    echo "${fs:-no completed UT1 sync reported by /api/urlcat/feed-status within ${LAB_FEED_TIMEOUT}s}; log: ${fl:-none}" > "$EV/05b-feed.txt"
     lookups > "$EV/05b-lookups-before.txt"
-    if [[ "$fl" == *"sync complete"* ]] && grep -q 'category=[^ ]' "$EV/05b-lookups-before.txt"; then
-      check 5b category-data pass "$fl; $(grep -c 'category=[^ ]' "$EV/05b-lookups-before.txt") of $(wc -l < "$EV/05b-lookups-before.txt") probe hosts categorized"
-    else check 5b category-data fail "${fl:-feed did not complete}; lookups: $(tr '\n' ' ' < "$EV/05b-lookups-before.txt")"; fi
+    if [[ -n "$fs" ]] && grep -q 'category=[^ ]' "$EV/05b-lookups-before.txt"; then
+      check 5b category-data pass "UT1 sync complete (lastSync entries: $fs); $(grep -c 'category=[^ ]' "$EV/05b-lookups-before.txt") of $(wc -l < "$EV/05b-lookups-before.txt") probe hosts categorized"
+    else check 5b category-data fail "no completed UT1 sync in this process ($(body < "$EV/05b-feed-status.txt" | head -c 160)); log: ${fl:-none}; lookups: $(tr '\n' ' ' < "$EV/05b-lookups-before.txt")"; fi
   fi
 
   # Step 6 — maintenance agent: backup through the product, restore DRY RUN.
@@ -412,7 +419,12 @@ PY
     [[ -n "$fn" ]] && grep -qF "$fn" "$EV/06-backups.txt" && check 6 backup-listed pass "$fn listed by /api/backups" || check 6 backup-listed fail "backup ${fn:-?} not listed"
     if [[ -n "$fn" ]]; then
       gssh "cd /srv/culvert && sudo docker compose --profile cli run --rm -T cli --restore /backup/$fn --mode full" > "$EV/06-restore-dryrun.txt" 2>&1 || true
-      grep -qi 'validation passed' "$EV/06-restore-dryrun.txt" && check 6 restore-dry-run pass "validation passed (no --confirm; nothing restored)" || check 6 restore-dry-run fail "$(tail -3 "$EV/06-restore-dryrun.txt" | tr '\n' ' ')"
+      # The CLI prints "Validation: PASS" (or FAIL) and, for a dry run, "No files
+      # were written". The old oracle looked for "validation passed", which this
+      # CLI never prints, so a passing dry run read as FAIL (run 37185033699).
+      if grep -qx 'Validation: PASS' "$EV/06-restore-dryrun.txt" && grep -q 'This was a dry-run. No files were written.' "$EV/06-restore-dryrun.txt" && ! grep -q 'Validation: FAIL' "$EV/06-restore-dryrun.txt"; then
+        check 6 restore-dry-run pass "Validation: PASS; dry run, no files written ($(grep -m1 'Culvert version:' "$EV/06-restore-dryrun.txt" | xargs))"
+      else check 6 restore-dry-run fail "$(grep -E 'Validation:|FAIL|error' "$EV/06-restore-dryrun.txt" | head -3 | tr '\n' ' ')$(tail -2 "$EV/06-restore-dryrun.txt" | tr '\n' ' ')"; fi
     else check 6 restore-dry-run not-run "no backup file"; fi
     save_state BACKUP_FILE "$fn"
   fi
@@ -447,7 +459,7 @@ PY
     gssh 'sudo culvert-status; ls /var/lib/culvert-appliance/state/' > "$EV/08-status-after-reboot.txt" 2>&1 || true
     # F-OSU-REBOOT-1: the stack stopped by `culvert-os-update reboot` is started
     # by culvert-stack-resume.service, which clears its marker only on success.
-    gssh 'systemctl show culvert-stack-resume.service -p LoadState -p ActiveState -p Result -p ExecMainStatus; sudo journalctl -b -u culvert-stack-resume --no-pager | tail -8; test -e /var/lib/culvert-appliance/state/stack-resume-on-boot && echo MARKER-PRESENT || echo MARKER-CLEARED' > "$EV/08-stack-resume.txt" 2>&1 || true
+    gssh 'systemctl show culvert-stack-resume.service -p LoadState -p ActiveState -p Result -p ExecMainStatus; sudo journalctl -b -u culvert-stack-resume --no-pager; test -e /var/lib/culvert-appliance/state/stack-resume-on-boot && echo MARKER-PRESENT || echo MARKER-CLEARED' > "$EV/08-stack-resume.txt" 2>&1 || true
     grep -qx 'Result=success' "$EV/08-stack-resume.txt" && grep -qx 'MARKER-CLEARED' "$EV/08-stack-resume.txt" && grep -q 'stack started after the maintenance reboot' "$EV/08-stack-resume.txt" \
       && grep -q 'holding .* and the maintenance agent lock' "$EV/08-stack-resume.txt" \
       && check 8 stack-resumed pass "culvert-stack-resume.service took the os-update + agent locks, started the stack and cleared its marker" \
