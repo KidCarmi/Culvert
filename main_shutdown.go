@@ -156,7 +156,13 @@ func runShutdownPhase(reg *shutdownRegistry, name string, end time.Time) {
 // in registerEarlyShutdownHooks (no shutdown budget); hooks above it belong
 // in registerLateShutdownHooks (under the 30s budget). P2.2 / S5.
 const (
-	shutdownOrderHAStop                 = 10
+	shutdownOrderHAStop = 10
+	// CHAOS-71: the rebind supervisor is stopped BEFORE the gRPC server it
+	// might be about to publish. Reversed, a bind completing concurrently with
+	// StopControlPlaneGRPC would leave a listener serving with nothing left to
+	// stop it (the PX-18 class); the supervisor's own `stopped` flag closes the
+	// remaining microsecond window from the other side.
+	shutdownOrderCPGRPCBindSupervisor   = 15
 	shutdownOrderControlPlaneGRPCStop   = 20
 	shutdownOrderCDRClientShutdown      = 30
 	shutdownOrderAppLifecycleCancel     = 40
@@ -231,6 +237,9 @@ func registerEarlyShutdownHooks(reg *shutdownRegistry, s *startupState) {
 		globalHA.Stop()
 		return nil
 	})
+	// CHAOS-71: stop the CP gRPC rebind supervisor before the server itself,
+	// so no new listener can be published behind the stop's back.
+	reg.Register("cp-grpc-bind-supervisor-stop", shutdownOrderCPGRPCBindSupervisor, stopCPGRPCBindSupervisor)
 	// Gracefully stop gRPC server (drains in-flight RPCs).
 	reg.Register("control-plane-grpc-stop", shutdownOrderControlPlaneGRPCStop, func(context.Context) error {
 		StopControlPlaneGRPC()

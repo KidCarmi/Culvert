@@ -92,9 +92,14 @@ func startControlPlaneWithHAResume(cfg clusterStartupConfig, ctx context.Context
 		return
 	}
 
-	if err := enableControlPlane(cfg.CPAddr, cfg.CPCert, cfg.CPKey, cfg.CPCA, cfg.ClusterDBPath); err != nil {
-		logFatalf("ControlPlane gRPC: %v", err)
-	}
+	// CHAOS-71: this used to be `logFatalf`, which os.Exit(1)s the process —
+	// from a function main.go runs BEFORE the admin UI and the proxy listener,
+	// so an occupied gRPC port or a certificate rotation window took the whole
+	// appliance down. The supervisor makes ONE synchronous attempt (unchanged
+	// boot cost) and retries in the background on failure. See
+	// cluster_grpc_bind.go's header.
+	cpSup := startControlPlaneWithBindRetry(cfg, ctx)
+	registerCPGRPCBindSupervisor(cpSup)
 	// ADR-0005 S4: record resync material BEFORE any leadership assertion —
 	// an unfenced resume (or a later self-fence) re-enters standby with it.
 	globalHA.SetResyncMaterial(ctx, cfg.CPAddr, cfg.CPCert, cfg.CPKey, cfg.CPCA)

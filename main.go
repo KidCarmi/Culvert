@@ -4,13 +4,16 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -630,7 +633,13 @@ func loadFileConfigAndFlags(s *startupState) {
 	if err := validatePortRanges(s.pPort, s.uPort, s.socks5PortVal); err != nil {
 		log.Fatalf("Invalid port configuration: %v", err)
 	}
-	if err := validatePortCollisions(s.pPort, s.uPort, s.socks5PortVal); err != nil {
+	// The CP gRPC address is RESOLVED here, not read from the flag alone: the
+	// cluster slice binds `firstStr(CLI, cluster.grpc_addr)`, so validating the
+	// flag by itself missed a YAML address colliding with the proxy port and
+	// left the crash loop intact (Codex P1 — see cpGRPCAddrFrom). The flag
+	// pointer is deref'd nil-safely because loadFileConfigAndFlags is also
+	// driven by precedence tests that populate only the fields under test.
+	if err := validatePortCollisions(s.pPort, s.uPort, s.socks5PortVal, cpGRPCAddrFrom(flagStr(s.cpGRPCAddr), s.fc)); err != nil {
 		log.Fatalf("Invalid port configuration: %v", err)
 	}
 	s.lPath = firstStr(*s.logFilePath, s.fc.Proxy.LogFile)
@@ -1409,11 +1418,25 @@ func validatePortRanges(proxyPort, uiPort, socks5Port int) error {
 	return nil
 }
 
-// validatePortCollisions checks the three RESOLVED listener ports (proxy,
-// admin UI, SOCKS5 — already merged through firstNonZero(CLI, config.yaml,
-// default)) for duplicates. SOCKS5's documented "disabled" sentinel (0) is
-// exempt. Returns an error naming the two colliding ports, or nil.
-func validatePortCollisions(proxyPort, uiPort, socks5Port int) error {
+// validatePortCollisions checks the RESOLVED listener ports (proxy, admin UI,
+// SOCKS5 and the Control Plane gRPC listener — already merged through
+// firstNonZero(CLI, config.yaml, default)) for duplicates. SOCKS5's documented
+// "disabled" sentinel (0) is exempt, as is an unset CP gRPC address. Returns
+// an error naming the two colliding ports, or nil.
+//
+// CHAOS-71 added the FOURTH port. Leaving it out was not cosmetic: the CP gRPC
+// listener binds in `initCluster` (main.go), which runs BEFORE
+// `buildAndStartProxyServer`, so `-cp-grpc-addr :8080` alongside `-port 8080`
+// had the Control Plane win the port and the PROXY die on
+// `logFatalf("Proxy error")` — an unattended crash loop whose log line
+// ("address already in use") sends the operator hunting for an external
+// squatter on a port Culvert itself had just taken. Reproduced against the
+// real binary. A collision between Culvert's OWN listeners is an unambiguous
+// misconfiguration no retry can resolve, which is why this stays a pre-boot
+// refusal with a precise message rather than something the CHAOS-71 rebind
+// supervisor is asked to paper over — the supervisor cannot help here anyway,
+// because the CP bind SUCCEEDS and it is the proxy that dies.
+func validatePortCollisions(proxyPort, uiPort, socks5Port int, cpGRPCAddr string) error {
 	named := []struct {
 		name string
 		port int
@@ -1421,6 +1444,7 @@ func validatePortCollisions(proxyPort, uiPort, socks5Port int) error {
 		{"proxy port", proxyPort},
 		{"UI port", uiPort},
 		{"SOCKS5 port", socks5Port},
+		{"ControlPlane gRPC port", cpGRPCListenPort(cpGRPCAddr)},
 	}
 	for i := range named {
 		if named[i].port == 0 {
@@ -1436,6 +1460,43 @@ func validatePortCollisions(proxyPort, uiPort, socks5Port int) error {
 		}
 	}
 	return nil
+}
+
+// flagStr dereferences a string flag pointer, treating nil as unset.
+func flagStr(p *string) string {
+	if p == nil {
+		return ""
+	}
+	return *p
+}
+
+// cpGRPCListenPort extracts the port from a Control Plane gRPC listen address
+// (":50051", "0.0.0.0:50051", "[::]:50051"), or 0 when there is none to
+// compare — unset, non-numeric, or out of range.
+//
+// 0 is the "nothing to check" sentinel, matching SOCKS5's disabled sentinel,
+// so an address this helper cannot parse is NEVER reported as a collision. A
+// bind address Culvert cannot parse is the listener's own problem to report
+// with the real kernel error; inventing a collision verdict from a failed
+// parse would be the "evidence must match the claim" defect.
+//
+// A specific host and a wildcard on the same port DO conflict for listening
+// sockets (binding 127.0.0.1:P after 0.0.0.0:P is EADDRINUSE), so the host
+// part is deliberately not consulted — comparing ports alone is the correct,
+// conservative test.
+func cpGRPCListenPort(addr string) int {
+	if addr == "" {
+		return 0
+	}
+	_, portStr, err := net.SplitHostPort(strings.TrimSpace(addr))
+	if err != nil {
+		return 0
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil || port < 1 || port > 65535 {
+		return 0
+	}
+	return port
 }
 
 func firstStr(vals ...string) string {
@@ -1465,6 +1526,29 @@ func initClusterCA(clusterDBPath string) {
 	}
 }
 
+// errCPAlreadyControlPlane / errCPAddrRequired are enableControlPlane's two
+// NON-retryable guard outcomes, as sentinels so the CHAOS-71 bind supervisor
+// can tell them from a listener fault with errors.Is rather than by matching
+// the message text. "already running as control-plane" is success reported as
+// an error; an empty listen address never becomes non-empty. Retrying either
+// is a loop that cannot converge.
+var (
+	errCPAlreadyControlPlane = errors.New("already running as control-plane")
+	errCPAddrRequired        = errors.New("gRPC listen address is required")
+)
+
+// cpPreludeDone records that enableControlPlane's one-time prelude (durable
+// config-version floor + initial publish) has run in this process. Guarded by
+// clusterRoleMu, which every caller already holds. See the rationale in
+// enableControlPlane — CHAOS-71 rule 4.
+var cpPreludeDone bool
+
+// cpPreludeRuns counts prelude executions, so the once-per-process invariant is
+// asserted DIRECTLY rather than inferred from the global config version — which
+// other machinery also advances, making a version-delta assertion both flaky
+// and a statement about the wrong thing. Guarded by clusterRoleMu.
+var cpPreludeRuns int
+
 // enableControlPlane activates Control Plane mode: starts the gRPC server,
 // initialises the cluster CA, and starts the heartbeat monitor.
 // Safe to call at runtime from the admin API (idempotent — returns error if already CP).
@@ -1473,20 +1557,44 @@ func enableControlPlane(grpcAddr, certFile, keyFile, caFile, clusterDBPath strin
 	defer clusterRoleMu.Unlock()
 
 	if clusterRole.role == "control-plane" {
-		return fmt.Errorf("already running as control-plane")
+		return errCPAlreadyControlPlane
 	}
 	if grpcAddr == "" {
-		return fmt.Errorf("gRPC listen address is required")
+		return errCPAddrRequired
 	}
 
-	// CHAOS-01: seed + arm the durable config-version floor BEFORE the first
-	// publish so a restarted (or HA-promoted) CP never re-issues version
-	// numbers at or below what running DPs have already seen.
-	globalConfigStore.armVersionPersistence(filepath.Join(dataDir, cpConfigVersionFile))
-	// Initial publish. A commit-time rejection (startup config already over a
-	// cluster-sync cap) is logged + alerted + surfaced via LastPublishError;
-	// the CP still serves locally, so boot continues.
-	_ = globalConfigStore.Update(CurrentConfigSnapshot())
+	// CHAOS-71 — the prelude below is ONE-TIME PER PROCESS, and the guard is
+	// load-bearing now that a failed bind is RETRIED rather than fatal.
+	//
+	// `globalConfigStore.Update` increments and PERSISTS the durable
+	// config-version floor (`persistVersionLocked`) and records an O(N)
+	// blocklist delta over up to 2 M hosts, and `CurrentConfigSnapshot()`
+	// rebuilds the whole snapshot to feed it. Running that per attempt would
+	// ratchet the floor by one per retry and re-diff the fleet's blocklist
+	// once per retry — for a listener no Data Plane can even reach — so a
+	// 10-minute certificate-rotation outage would churn ~30 versions and emit
+	// ~30 "config vN published" lines. A mitigation for a crash loop must not
+	// itself be a churn loop (the CHAOS-63/69 rule).
+	//
+	// It is guarded rather than hoisted out of the function so all three
+	// callers (boot, the admin API, and an HA promotion) keep reaching it on
+	// the path that first brings the Control Plane up, whichever of them that
+	// turns out to be.
+	if !cpPreludeDone {
+		// CHAOS-01: seed + arm the durable config-version floor BEFORE the first
+		// publish so a restarted (or HA-promoted) CP never re-issues version
+		// numbers at or below what running DPs have already seen.
+		globalConfigStore.armVersionPersistence(filepath.Join(dataDir, cpConfigVersionFile))
+		// Initial publish. A commit-time rejection (startup config already over a
+		// cluster-sync cap) is logged + alerted + surfaced via LastPublishError;
+		// the CP still serves locally, so boot continues.
+		_ = globalConfigStore.Update(CurrentConfigSnapshot())
+		cpPreludeDone = true
+		cpPreludeRuns++
+	}
+	// InitOrLoad is idempotent and cheap, and a cluster CA that failed to
+	// initialise on an earlier attempt should get another chance, so this
+	// stays OUTSIDE the once-guard.
 	initClusterCA(clusterDBPath)
 	if err := StartControlPlaneGRPC(grpcAddr, certFile, keyFile, caFile); err != nil {
 		return err
@@ -1499,7 +1607,12 @@ func enableControlPlane(grpcAddr, certFile, keyFile, caFile, clusterDBPath strin
 	clusterRole.keyFile = keyFile
 	clusterRole.caFile = caFile
 	globalClusterStore.StartHeartbeatMonitor(appLifecycleCtx.Done())
-	logger.Printf("ControlPlane: enabled via GUI (gRPC %s)", strings.ReplaceAll(grpcAddr, "\n", ""))
+	// CHAOS-71: "via GUI" was true when the admin API was the only runtime
+	// caller; this function is now also reached from the boot path and from the
+	// rebind supervisor, so naming a trigger the operator did not pull sends
+	// them looking for an admin action that never happened. The address is the
+	// fact worth logging; the caller logs its own context.
+	logger.Printf("ControlPlane: enabled (gRPC %s)", strings.ReplaceAll(grpcAddr, "\n", ""))
 	return nil
 }
 

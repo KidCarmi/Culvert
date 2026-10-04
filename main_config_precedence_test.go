@@ -152,13 +152,13 @@ func TestLoadFileConfigAndFlags_AuthUser_WhitespaceOnlyCLIFallsBackToYAML(t *tes
 // layer, plus the pure collision-detection logic in isolation.
 
 func TestValidatePortCollisions_AllDistinct(t *testing.T) {
-	if err := validatePortCollisions(8080, 9090, 1080); err != nil {
+	if err := validatePortCollisions(8080, 9090, 1080, ""); err != nil {
 		t.Errorf("expected no error for distinct ports, got: %v", err)
 	}
 }
 
 func TestValidatePortCollisions_ProxyAndUICollide(t *testing.T) {
-	err := validatePortCollisions(8080, 8080, 0)
+	err := validatePortCollisions(8080, 8080, 0, "")
 	if err == nil {
 		t.Fatal("expected an error when the proxy and UI ports collide, got nil")
 	}
@@ -168,7 +168,7 @@ func TestValidatePortCollisions_ProxyAndUICollide(t *testing.T) {
 }
 
 func TestValidatePortCollisions_ProxyAndSOCKS5Collide(t *testing.T) {
-	err := validatePortCollisions(8080, 9090, 8080)
+	err := validatePortCollisions(8080, 9090, 8080, "")
 	if err == nil {
 		t.Fatal("expected an error when the proxy and SOCKS5 ports collide, got nil")
 	}
@@ -178,7 +178,7 @@ func TestValidatePortCollisions_ProxyAndSOCKS5Collide(t *testing.T) {
 }
 
 func TestValidatePortCollisions_UIAndSOCKS5Collide(t *testing.T) {
-	err := validatePortCollisions(8080, 9090, 9090)
+	err := validatePortCollisions(8080, 9090, 9090, "")
 	if err == nil {
 		t.Fatal("expected an error when the UI and SOCKS5 ports collide, got nil")
 	}
@@ -191,7 +191,7 @@ func TestValidatePortCollisions_UIAndSOCKS5Collide(t *testing.T) {
 // documented "disabled" sentinel (0) is never treated as a collision, even
 // when the proxy/UI ports are also 0 (both unset in this direct call).
 func TestValidatePortCollisions_DisabledSOCKS5Ignored(t *testing.T) {
-	if err := validatePortCollisions(8080, 9090, 0); err != nil {
+	if err := validatePortCollisions(8080, 9090, 0, ""); err != nil {
 		t.Errorf("expected no error with SOCKS5 port disabled (0), got: %v", err)
 	}
 }

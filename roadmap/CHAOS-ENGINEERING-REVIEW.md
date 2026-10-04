@@ -8281,3 +8281,253 @@ the sweep happens to be editing.
   from the local-account delete path, which the roster backstop already covers;
   it becomes live the moment user-level revocation is wired to anything else.
   Recorded as **AU-19**, not fixed inside a sweep about durability.
+
+---
+
+## 41. CHAOS-71 — The Control Plane's gRPC bind, and the alert plane's own silence
+
+Two findings, both reproduced, both in the "silent failure / monitoring
+visibility" family. The first was named by §36's own closing note as the
+remaining unexamined analogue; the second was found while wiring the first
+one's alert and is the broader of the two.
+
+### 41.1 Executive summary
+
+| | Finding | Severity | Status |
+|---|---|---|---|
+| **CHAOS-71** | A Control Plane gRPC bind failure `logFatalf`s from a function that runs **before** the admin UI and the proxy, so a management-plane listener fault killed the primary data plane. Three routine triggers, all reproduced against the real binary. | **High** (unattended crash loop; topology decides whether the fleet goes dark or unfiltered) | **FIXED** |
+| **SEC-ALERTSUB-1** | **18 of 40** production alert events had no checkbox in the admin UI, and the webhook modal has no `"*"` option — so no GUI-managed webhook could ever receive them. Among them `ha_manual_failover_required`, `disk_critical`, and the entire scan plane. | **High** (half the alerting plane silently undeliverable) | **FIXED + WALLED** |
+
+### 41.2 Failure scenarios — CHAOS-71
+
+`startControlPlaneWithHAResume` (cluster_startup.go) had exactly one error
+branch:
+
+```go
+if err := enableControlPlane(cfg.CPAddr, cfg.CPCert, cfg.CPKey, cfg.CPCA, cfg.ClusterDBPath); err != nil {
+        logFatalf("ControlPlane gRPC: %v", err)   // ← os.Exit(1)
+}
+```
+
+reached from `initCluster`, **main.go:228** — ahead of `startAdminUI` (269) and
+`buildAndStartProxyServer` (271).
+
+| # | Trigger | Observed (real binary) |
+|---|---|---|
+| 1 | CP gRPC port occupied (predecessor container draining, host-network service, second Culvert) | `gRPC listen: listen tcp :19443: bind: address already in use` → **exit 1**, `proxy http_code=000`, admin UI `000` |
+| 2 | mTLS pair momentarily unreadable (certbot / cert-manager / Docker secret rotation) | `gRPC TLS: tls: failed to find any PEM data in key input` → **exit 1**, `proxy http_code=000` |
+| 3 | `-cp-grpc-addr` collides with the **proxy** port | CP binds first, then `Proxy error: listen tcp :18082: bind: address already in use` → **exit 1** |
+
+Trigger 3 is its own finding: `validatePortCollisions` compared only
+proxy/UI/SOCKS5 **to each other**, so the fourth listener was invisible to it,
+and the failure surfaced as a proxy bind error on a port Culvert itself had
+just taken — sending an operator to hunt an external squatter that does not
+exist. The CHAOS-71 supervisor cannot help there, because the CP bind
+*succeeds*; it needs the pre-boot refusal.
+
+**This is §33 (CHAOS-57) and §36 (CHAOS-66) a third time, and the decisive
+evidence is that the codebase had already made this call for this very
+function, from two other callers.** `enableControlPlane` has three:
+
+| Caller | Posture |
+|---|---|
+| `apiClusterEnableCP` (ui_cluster.go:98) | `409 Conflict` |
+| `HAState.promote` (ha.go:923) | "staying as standby", once-guard reset, **retryable** — and CHAOS-25 *contains a panic* there, reasoning that "a panic in it is operationally identical to the error it already handles: the node did not become a leader. Treat it that way … rather than letting it kill an in-line gateway." |
+| **boot** (cluster_startup.go:95) | **`logFatalf`** |
+
+One fault, three callers, two postures, with the argument for the right one
+already written twenty lines away — the asymmetry is the finding, exactly as
+§40 found `apiSetupComplete`'s durability rule applied to one path and not its
+siblings.
+
+"It exits, so it fails closed" is wrong and must not be re-argued: process
+death picks **no** posture, it delegates the choice to the topology. And the
+Data Plane consequence of degrading is the one HA-1 already documents as
+deliberate — a partitioned DP enforces last-good policy — which is *also* what
+process death produced, minus this node's proxy, minus the admin UI, minus any
+way to see or fix it.
+
+### 41.3 The fix, and the one rule specific to this listener
+
+Rules 1–3 are §33/§36's mechanism borrowed wholesale (one synchronous first
+attempt so no surface describes an unattempted listener; rate-bounded,
+jittered, interruptible retry; recovery on observed evidence only; bounded
+errno reason classes with a **per-class** remedy). Rule 4 is new and is where a
+careless fix does real damage:
+
+> **The one-time CP prelude must not run per attempt.** `enableControlPlane`'s
+> prelude calls `globalConfigStore.Update(CurrentConfigSnapshot())`, and
+> `Update` **increments and persists the durable config-version floor** and
+> records an O(N) blocklist delta over up to 2M hosts. That was harmless while
+> a bind failure was fatal — it ran once — and is not harmless now the bind is
+> retried: a 10-minute rotation outage would ratchet the floor by one per
+> attempt, rebuild the whole snapshot per attempt, and emit a "config vN
+> published" line per attempt, for a listener no DP can reach. A mitigation for
+> a crash loop must not itself be a churn loop (the §32/§39 rule).
+
+Verified post-fix against the real binary: the process survives, `proxy
+http_code=400` (answering), admin UI `200`, `/health control_plane_grpc =
+degraded`, `culvert_cp_grpc_bind_failures_total 3` with
+`bind_backoff_seconds 4`, exactly **one** `config vN published` line — and on
+the port freeing, `up 1` / `binds_total 1` / `ready`, with no restart.
+
+### 41.4 SEC-ALERTSUB-1 — the alert plane could not deliver half its own alerts
+
+`internal/alerts.Store` matches a webhook's subscription against an event name
+**exactly**, or against `"*"`. An empty `Events` list means *nothing* — there is
+no empty-means-all rule. And the admin UI builds that list from one source:
+
+```js
+const events = [...document.querySelectorAll('.wh-event:checked')].map(cb=>cb.value);
+```
+
+— the checked checkboxes, with **no `"*"` option anywhere in the page**. So an
+event with no checkbox is unsubscribable through the product's own UI: an
+operator who opens the webhook modal and ticks *every* box still never
+receives it. `Dispatch` still stamps the payload, still takes the dedup key,
+and fans out to zero hooks. The appliance is quiet in exactly the way a healthy
+one is.
+
+Measured on the tree: **18 of 40** production events had no checkbox —
+
+`ha_manual_failover_required` (the one event whose entire purpose is to say a
+human must intervene), `ha_self_fenced`, `ha_resume_unfenced` (§23's
+split-brain signals), `ha_lease_reacquired`, `disk_critical`, `dns_failure`,
+`cdr_unavailable`, `pac_profile_degraded`, the whole scan plane
+(`scan_timeout`, `scan_skipped`, `scan_svc_down`, `yara_degraded`), the whole
+`saas_feed_*` family, and **`admin_ui_unavailable` — §33's own alert, which has
+been undeliverable to a GUI-managed webhook since the day it shipped.**
+
+**Why a wall and not just the checkboxes.** Every one of those 18 was added by
+somebody who wired a complete Go-side alert — seam, `HasSubscriber` gate,
+bounded Detail, runbook — and had no way to discover that one HTML edit was
+outstanding. There is no compiler relationship between a Go string literal and
+an HTML attribute, so only an assertion can hold them together. The repo had
+already learned this once and written it down *next to the list*
+(static/index.html, at the release-catalog rows: events missing here "would be
+silently filtered for GUI-managed webhooks (Codex review on PR #639)") — and it
+still recurred 18 times, because **a comment cannot fail a build.**
+
+`TestWall_EveryFiredAlertEventIsSubscribable` enumerates from the **emitters**
+(`fireAlert`, `deferStartupAlert`, `alerts.Fire`, and a literal `Event:` field),
+not from one call shape — nine of these events are fired through something
+other than `fireAlert`, so a `fireAlert`-only wall would have passed while
+`ha_manual_failover_required` stayed dark. That is SEC-SOCKS5-LOG-1 round 2's
+lesson (*walling one call shape does not wall the path*) arriving in a new
+place.
+
+### 41.5 Required tests, and two of this sweep's own gates that were WRONG
+
+`cluster_grpc_bind_chaos_test.go` (16) + `alert_event_subscribable_wall_test.go`
+(3). Mutations verified failing their own gate: the prelude guard removed
+(prelude ran 10/10 attempts), the TLS sentinel dropped (class fell back to
+`listen_failed`), the sleep clamp removed, a checkbox removed, the emitter
+regex broken (caught by the not-vacuous check at 16 events).
+
+**Two findings about the gates themselves, kept because they generalise.**
+
+1. **A behavioural gate for this defect is impossible, and the first draft
+   claimed otherwise.** The file header asserted that reintroducing `logFatalf`
+   would kill the test binary and so could never be kept green — §33's
+   property. Measured, that was **false for this path**: the fatal lives in
+   `loadCluster`, nothing in the test binary drives `loadCluster`, so reverting
+   cluster_startup.go left the entire suite **passing**. A gate that passes
+   against the defect is worse than no gate.
+   `TestChaos71_TheControlPlaneListenerPathHasNoFatal` is therefore the wall
+   that actually holds it closed (verified failing against the reintroduced
+   fatal), with the ADR-0005 lease fatal explicitly allowlisted — that one is
+   correctly fatal, because silently running legacy HA when an operator
+   configured a fence is an invisible *safety* downgrade with no degraded mode
+   that preserves the guarantee.
+
+2. **A partial test cleanup is worse than none, and it cost a red determinism
+   gate.** `cpGRPCChaosSetup` restored `clusterRole.role` and not
+   `clusterRole.grpcAddr`, which `bootstrap.EnrollmentAddr` reads to build the
+   DP enrollment authority — so the leak made the SEC-BOOTSTRAP-HOST-1 compose
+   gates answer `400 invalid host` to their own *legitimate-request control*,
+   reachable only under `-shuffle`. Exactly the class CLAUDE.md records for
+   `setupProxyTest`. Snapshot the whole struct, not the field you happen to be
+   reading.
+
+### 41.5a CODEX ROUND (PR #1546) — two defects, and both are this sweep's own rules turned back on it
+
+**P1 — the validator measured a value the binder does not use.** CHAOS-71 added
+the fourth port to `validatePortCollisions` and fed it `flagStr(s.cpGRPCAddr)`,
+the raw CLI flag. The cluster slice binds
+`firstStr(flags.CPGRPCAddr, fc.Cluster.GRPCAddr)`. So with `-cp-grpc-addr`
+unset and `cluster.grpc_addr: ":18090"` beside `proxy.port: 18090`, the
+validator saw an EMPTY address, passed, and the Control Plane took the port
+before the proxy reached it. Reproduced against the real binary:
+
+```
+ControlPlane: enabled (gRPC :18090)
+Proxy: http://localhost:18090
+Proxy error: listen tcp :18090: bind: address already in use   → exit 1
+```
+
+— the unattended crash loop the validation exists to prevent, surviving
+through the YAML path. **This is §39's measure-vs-use finding exactly,
+committed in the change that cites it**: a bound (or a check) is a claim about
+a STRING, so measure the value you will actually hand onward. The fix is
+`cpGRPCAddrFrom`, ONE resolver both call sites use, and the gate pins the
+AGREEMENT rather than either spelling — mutation-proven to be non-redundant
+with the behavioural gate beside it: reverting BOTH sides keeps them agreeing
+(the agreement wall stays green, the YAML defect gate fires), while a
+ONE-SIDED precedence change fires the wall and not the defect gate.
+
+**P2 — a fire-once latch set on a dispatch that reached nobody.**
+`initCluster` arms the supervisor at main.go:231; `initPersistentAdminState`
+loads the persisted webhooks at :258. An unavailability alert crossing the 30s
+threshold inside that window fanned out to an EMPTY hook list and vanished,
+while `noteCPGRPCBindFailure` had already latched `cpGRPC.alerted` — so a
+subscriber loaded moments later never heard about an outage that was still
+running. The window opens whenever the intervening startup work (root CA,
+blocklist, URL categories, scanning) exceeds `cpGRPCBindUnavailableAfter`,
+which on a large config it can.
+
+**The mechanism already existed and §27 had already adopted it for exactly
+this reason** — `deferStartupAlert`, whose own doc comment names the hazard
+("an alert fired by an earlier init would fan out to an empty webhook list and
+vanish"). So the fix is to route through it rather than to invent a
+second dialect, and the `HasSubscriber` gate goes with it: during the pre-flush
+window the store is empty BY DEFINITION, so gating there would drop precisely
+the alert the queue exists to save, and a fire-once-per-episode producer is the
+"bounded by construction" exemption the alert-gate contract already names.
+`Dispatch` spawns its own per-hook delivery goroutines, so calling it from the
+supervisor does not block the rebind loop. Pinned by a defect gate (fire
+pre-flush, assert nothing delivered, flush, assert exactly one) with a CONTROL
+that a post-flush alert passes straight through rather than sitting in a queue
+nothing will drain again.
+
+**The governance lesson from this round**: §41.5 recorded that a behavioural
+gate for the fatal was impossible and a wall was needed. Both of these defects
+were in code that gate could never have reached — one in a value RESOLVED
+somewhere else, one in an init-ORDER relationship between two slices. Neither
+is visible from the file being edited, which is the same conclusion §40 reached
+("enumerate such a class from the PRIMITIVE, not from the file being edited")
+arriving from a third direction: enumerate from the VALUE and from the
+STARTUP ORDER, not from the function.
+
+### 41.6 Residual risk (deliberate, recorded)
+
+- **CL-21** — a bound listener whose `Serve` *ends* is recorded but **not
+  rebound**: the row and `/health` report it terminally down and name the
+  restart. Owning the full bind→serve→rebind lifecycle would restructure
+  `clusterRole.grpcSrv` and `StopControlPlaneGRPC`, which §24's 17 shutdown
+  gates pin.
+- **HA semantics unchanged.** A node whose listener is down still runs the
+  ADR-0004 resume. Lease mode is arbitrated by the fence; legacy auto-failover
+  against a reachable-but-unservable leader is the RISK-001 partition case the
+  resume path already warns about. Changing it would be a posture decision
+  inside a resilience fix.
+- **The GUI still cannot express `"*"`.** The 18 names are now individually
+  subscribable and the wall keeps that true, but a "subscribe to everything"
+  control is a product decision and is not added here. An operator who
+  hand-crafted `events: ["*"]` via the API and then *edits* that webhook in the
+  GUI still has the wildcard silently replaced by whatever is ticked
+  (index.html's edit path sets `cb.checked = events.includes(cb.value)`, which
+  no checkbox satisfies) — recorded, not fixed.
+- `runProxyUntilShutdown`'s `logFatalf("Proxy error")` stays **correct and
+  unchanged**: the proxy IS the product, and a gateway that cannot serve must
+  exit loudly rather than linger as a black hole. That asymmetry is the whole
+  finding.
