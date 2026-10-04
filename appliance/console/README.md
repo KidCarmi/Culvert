@@ -87,7 +87,8 @@ sudo systemctl restart getty@tty1.service
 These are read-only and never include a setup token, `.env`, raw journals or
 OVF data. Seven fixed probes execute concurrently with four-second subprocess
 timeouts (HTTP probes have two-second deadlines). Requests use loopback only,
-disable proxies, do not follow redirects, and limit response size. Only the
+disable curl's default configuration files and proxies, do not follow redirects,
+and reject oversized output instead of accepting a truncated response. Only the
 self-signed loopback setup-status read uses a TLS verification exception.
 No Docker API or command is required to render the display.
 
@@ -100,7 +101,11 @@ No Docker API or command is required to render the display.
 - `administrator_enrolled`: true only on HTTP 200 and an explicit `needsSetup: false`.
 - `ready`: requires application health HTTP 200, explicit enrollment, readiness
   HTTP 200 and `ok` for policy_loaded, policy_posture, ca and setup_complete.
-  Missing rows are not success. This is a conservative console summary.
+  It also requires the completion marker and a loaded, settled firstboot oneshot
+  with `Result=success` and `ExecMainStatus=0`. The accepted states are
+  active/exited or inactive/dead (the normal condition-skipped state after reboot).
+  Missing observations and transitioning services cannot become ready. Independent
+  management availability still permits setup access. This is a conservative console summary.
 - `traffic_verified`: always false; local health probes cannot prove a client
   successfully passes through the proxy.
 
@@ -299,7 +304,8 @@ cancellation-aware polling, including while waiting for an unfinished canonical
 line. Queued input is drained before prompting and after a complete answer.
 Each recovery command rechecks cancellation and effective identity. Retry needs
 a loaded unit in failed/inactive state and a positively absent completion marker,
-then rechecks that state after confirmation. A missing observation, inaccessible
+then rechecks that state after confirmation and after `reset-failed` returns,
+before requesting a start. A missing observation, inaccessible
 marker, symlink or nonregular marker does not authorize retry. These checks do
 not make observation and systemd dispatch atomic; firstboot still owns its
 idempotency and concurrency protection.

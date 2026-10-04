@@ -103,6 +103,12 @@ func (a Actions) retry(ctx context.Context) error {
 	if err := a.run(ctx, []string{"/usr/bin/sudo", "--", "/usr/bin/systemctl", "reset-failed", "culvert-firstboot.service"}); err != nil {
 		return fmt.Errorf("clear failed provisioning: %w", err)
 	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if !canRetry(a.deps.Collect(ctx)) {
+		return errors.New("state changed after clearing failure; provisioning was not started by this console")
+	}
 	if err := a.run(ctx, []string{"/usr/bin/sudo", "--", "/usr/bin/systemctl", "start", "--no-block", "culvert-firstboot.service"}); err != nil {
 		return fmt.Errorf("start provisioning: %w", err)
 	}

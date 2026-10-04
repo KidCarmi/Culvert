@@ -31,7 +31,9 @@ func TestStatusTruthTable(t *testing.T) {
 		{"false_body_on_http_error", "active", "success", "200", "{\"needsSetup\":false}\n403", goodReady, "SETUP_UNKNOWN", true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			s := Snapshot{Firstboot: map[string]string{"ActiveState": tt.active, "Result": tt.result}}
+			s := provisionedSnapshot()
+			s.Firstboot["ActiveState"], s.Firstboot["Result"] = tt.active, tt.result
+			s.Steps = nil
 			if tt.complete {
 				s.Steps = []Step{{ID: "complete", State: "recorded"}}
 			}
@@ -66,7 +68,7 @@ func TestEveryReadinessRowAndHTTPRequired(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			s := Snapshot{Steps: []Step{{ID: "complete", State: "recorded"}}}
+			s := provisionedSnapshot()
 			s.summarize("200", "{\"needsSetup\":false}\n200", string(data)+"\n200")
 			if s.Phase == "ready" {
 				t.Fatal("missing check became ready")
@@ -74,11 +76,55 @@ func TestEveryReadinessRowAndHTTPRequired(t *testing.T) {
 		})
 	}
 	for _, raw := range []string{strings.ReplaceAll(goodReady, "\n200", "\n503"), "null\n200", "[]\n200", "{\n200", "{\"checks\":null}\n200", "{\"checks\":{\"ca\":\"ok\"}}\n200"} {
-		s := Snapshot{Steps: []Step{{ID: "complete", State: "recorded"}}}
+		s := provisionedSnapshot()
 		s.summarize("200", "{\"needsSetup\":false}\n200", raw)
 		if s.Phase == "ready" {
 			t.Errorf("accepted malformed readiness %s", raw)
 		}
+	}
+}
+
+func provisionedSnapshot() Snapshot {
+	return Snapshot{
+		Firstboot: map[string]string{"LoadState": "loaded", "ActiveState": "active", "SubState": "exited", "Result": "success", "ExecMainStatus": "0"},
+		Steps:     []Step{{ID: "complete", State: "recorded"}},
+	}
+}
+
+func TestCompletionMarkerCannotHideUncertainOrTransitioningUnit(t *testing.T) {
+	for _, tt := range []struct{ key, value, reason string }{
+		{"LoadState", "", "FIRSTBOOT_UNKNOWN"},
+		{"LoadState", "not-found", "FIRSTBOOT_UNKNOWN"},
+		{"LoadState", "masked", "FIRSTBOOT_UNKNOWN"},
+		{"ActiveState", "", "FIRSTBOOT_UNKNOWN"},
+		{"ActiveState", "activating", "FIRSTBOOT_RUNNING"},
+		{"ActiveState", "reloading", "FIRSTBOOT_RUNNING"},
+		{"ActiveState", "deactivating", "FIRSTBOOT_STOPPING"},
+		{"SubState", "", "FIRSTBOOT_UNKNOWN"},
+		{"SubState", "running", "FIRSTBOOT_UNKNOWN"},
+		{"Result", "", "FIRSTBOOT_UNKNOWN"},
+		{"Result", "unknown", "FIRSTBOOT_UNKNOWN"},
+		{"Result", "exit-code", "FIRSTBOOT_FAILED"},
+		{"ExecMainStatus", "", "FIRSTBOOT_UNKNOWN"},
+		{"ExecMainStatus", "1", "FIRSTBOOT_UNKNOWN"},
+	} {
+		t.Run(tt.key+"="+tt.value, func(t *testing.T) {
+			s := provisionedSnapshot()
+			s.Firstboot[tt.key] = tt.value
+			s.summarize("200", "{\"needsSetup\":false}\n200", goodReady)
+			if s.Reason != tt.reason || s.Phase == "ready" || !s.ManagementAvailable {
+				t.Fatalf("uncertain service hidden or independent setup access lost: %+v", s)
+			}
+		})
+	}
+}
+
+func TestCompletedOneshotAfterRebootCanBecomeReady(t *testing.T) {
+	s := provisionedSnapshot()
+	s.Firstboot["ActiveState"], s.Firstboot["SubState"] = "inactive", "dead"
+	s.summarize("200", "{\"needsSetup\":false}\n200", goodReady)
+	if s.Phase != "ready" || s.TrafficVerified {
+		t.Fatalf("condition-skipped completed service: %+v", s)
 	}
 }
 

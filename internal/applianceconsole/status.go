@@ -110,10 +110,10 @@ func (c Collector) observations(ctx context.Context) map[string]string {
 		"network": {"/usr/sbin/ip", "-j", "address", "show", "scope", "global"},
 		"route6":  {"/usr/sbin/ip", "-j", "-6", "route", "show", "default"},
 		"route":   {"/usr/sbin/ip", "-j", "route", "show", "default"},
-		"health":  {"/usr/bin/curl", "--noproxy", "*", "--silent", "--max-time", "2", "--output", "/dev/null", "--write-out", "%{http_code}", "http://127.0.0.1:8080/health"},
+		"health":  {"/usr/bin/curl", "--disable", "--noproxy", "*", "--silent", "--max-time", "2", "--output", "/dev/null", "--write-out", "%{http_code}", "http://127.0.0.1:8080/health"},
 		// Only this fixed loopback read permits the appliance's self-signed TLS.
-		"setup": {"/usr/bin/curl", "--noproxy", "*", "--silent", "--insecure", "--max-time", "2", "--max-filesize", "65536", "--write-out", "\n%{http_code}", "https://127.0.0.1:9090/api/setup/status"},
-		"ready": {"/usr/bin/curl", "--noproxy", "*", "--silent", "--max-time", "2", "--max-filesize", "65536", "--write-out", "\n%{http_code}", "http://127.0.0.1:8080/ready"},
+		"setup": {"/usr/bin/curl", "--disable", "--noproxy", "*", "--silent", "--insecure", "--max-time", "2", "--max-filesize", "65536", "--write-out", "\n%{http_code}", "https://127.0.0.1:9090/api/setup/status"},
+		"ready": {"/usr/bin/curl", "--disable", "--noproxy", "*", "--silent", "--max-time", "2", "--max-filesize", "65536", "--write-out", "\n%{http_code}", "http://127.0.0.1:8080/ready"},
 	}
 	raw := make(map[string]string)
 	var mu sync.Mutex
@@ -210,19 +210,40 @@ func (s *Snapshot) summarize(health, setupRaw, readyRaw string) {
 	s.ApplicationResponding = health == "200"
 	s.AdministratorEnrolled = setupKnown && !*setup.NeedsSetup
 	s.TrafficVerified = false
+	s.summarizeFirstboot(setupKnown && *setup.NeedsSetup, readinessPassed(readyRaw))
+}
+
+func (s *Snapshot) summarizeFirstboot(needsSetup, checksOK bool) {
+	s.Phase, s.Reason, s.Message = "unknown", "FIRSTBOOT_UNKNOWN", "Provisioning status is unavailable."
 	active, result := s.Firstboot["ActiveState"], s.Firstboot["Result"]
 	switch {
 	case active == "failed" || (result != "" && result != "success" && result != "unknown"):
 		s.Phase, s.Reason, s.Message = "failed", "FIRSTBOOT_FAILED", "Provisioning failed; open diagnostics."
+	case s.Firstboot["LoadState"] != "loaded":
+		// A checkpoint cannot substitute for a current service observation.
+	case active == "activating" || active == "reloading":
+		s.Phase, s.Reason, s.Message = "running", "FIRSTBOOT_RUNNING", "Preparing the appliance..."
+	case active == "deactivating":
+		s.Phase, s.Reason, s.Message = "running", "FIRSTBOOT_STOPPING", "Provisioning service is stopping."
 	case s.recorded("complete"):
-		s.summarizeProvisioned(setupKnown && *setup.NeedsSetup, readinessPassed(readyRaw))
-	case active == "active" || active == "activating" || active == "reloading":
+		if s.provisioningSettled() {
+			s.summarizeProvisioned(needsSetup, checksOK)
+		}
+	case active == "active":
 		s.Phase, s.Reason, s.Message = "running", "FIRSTBOOT_RUNNING", "Preparing the appliance..."
 	case active == "inactive":
 		s.Phase, s.Reason, s.Message = "waiting", "FIRSTBOOT_NOT_RUNNING", "Provisioning is incomplete and is not running."
-	default:
-		s.Phase, s.Reason, s.Message = "unknown", "FIRSTBOOT_UNKNOWN", "Provisioning status is unavailable."
 	}
+}
+
+func (s Snapshot) provisioningSettled() bool {
+	if s.Firstboot["Result"] != "success" || s.Firstboot["ExecMainStatus"] != "0" {
+		return false
+	}
+	// RemainAfterExit is active/exited after completion. On a later boot the
+	// complete.done condition skips the oneshot and it remains inactive/dead.
+	state := s.Firstboot["ActiveState"] + "/" + s.Firstboot["SubState"]
+	return state == "active/exited" || state == "inactive/dead"
 }
 
 func enrollmentStatus(known bool, needsSetup *bool) string {

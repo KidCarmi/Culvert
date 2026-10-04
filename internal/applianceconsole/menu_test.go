@@ -82,6 +82,39 @@ func TestRetryUsesStartNotRestartAndHonorsSudoFailure(t *testing.T) {
 	}
 }
 
+func TestRetryRechecksAfterClearingFailure(t *testing.T) {
+	for _, change := range []string{"running", "complete", "unknown", "unloaded", "marker_unknown", "identity"} {
+		t.Run(change, func(t *testing.T) {
+			a, calls := actionFixture()
+			s := retrySnapshot("failed")
+			authorized := true
+			a.deps.Authorized = func() bool { return authorized }
+			a.deps.Collect = func(context.Context) Snapshot { return s }
+			a.deps.Run = func(args []string) error {
+				*calls = append(*calls, args)
+				switch change {
+				case "running":
+					s.Firstboot["ActiveState"] = "activating"
+				case "complete":
+					s.Steps[0].State = "recorded"
+				case "unknown":
+					s.Firstboot = nil
+				case "unloaded":
+					s.Firstboot["LoadState"] = "not-found"
+				case "marker_unknown":
+					s.Steps[0].State = "unknown"
+				case "identity":
+					authorized = false
+				}
+				return nil
+			}
+			if err := a.Apply(context.Background(), "4"); err == nil || len(*calls) != 1 {
+				t.Fatalf("start dispatched after %s: calls=%v err=%v", change, *calls, err)
+			}
+		})
+	}
+}
+
 func TestConfirmationCannotInjectCommands(t *testing.T) {
 	for _, choice := range []string{"4", "5"} {
 		a, calls := actionFixture()
