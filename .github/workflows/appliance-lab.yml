@@ -49,26 +49,22 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # FINAL closeout candidate — #1528 frozen head 4f27d945 (catalog
-        # lineage + RM upgrade path, 400 text/plain contract, damaged-state
-        # recovery, CodeQL/first-boot/restore-lock fixes, CA-rotation toast).
-        # Image = that head's own Deep PR Gate tar (run 37226241924; Fast +
-        # Deep APPROVED; every workflow on the head green); app, agent,
-        # console, access binary and provisioning from a clean checkout of
-        # the SAME commit. Built fresh and retained BEFORE boot.
+        # Post-Codex closeout candidate — #1528 frozen head b579ca28 =
+        # 4f27d945 + ab5b7236 (netplan apply rollback) + 96381e47 (identity
+        # reset clears the console credential) + f0492528/18ef7ec1 (non-durable
+        # dispatch resume context + UI) + b579ca28 (yara test determinism).
+        # Image = that head's own Deep PR Gate tar (run 37234612592; every
+        # workflow on the head green); app, agent, console, access binary and
+        # provisioning from a clean checkout of the SAME commit. Image ID is the
+        # tar's OCI INDEX digest (containerd store). Built fresh, retained
+        # BEFORE boot.
         include:
-          - variant: candidate-4f27d945b3c6
+          - variant: candidate-b579ca28c9d9
             provisioning: source
-            source_sha: "4f27d945b3c676899e65018e50aafef693c7c227"
-            image_run: "37226241924"
-            image_tar_sha256: "0c4025218ce5eafe4cfc0697efb30412ec5ba87480213b58bed04730720a869e"
-            # Image ID = the tar's OCI INDEX digest (containerd image store),
-            # not its config digest. Run 37227368983 failed only [3]/[8]
-            # against the config digest I wrongly supplied (the guest ran
-            # 94818bad… = this tar's index). Rebuilt rather than re-qualified:
-            # step 6c needs the build overlay, so one fresh run covers every
-            # check on one retained artifact.
-            expect_image_id: "sha256:94818badd3d81e0d2f091f8477b792ab38a433211d66724226b52a54c47561f2"
+            source_sha: "b579ca28c9d936e9141292ce5ec564a26feeae86"
+            image_run: "37234612592"
+            image_tar_sha256: "ec9ae4071339f0f0dda103765ae7aae2667c1bad08e9996814dd2f12d45aef61"
+            expect_image_id: "sha256:24b37bc217691058e56a838821b86dfbd45b927b1c0ea8ea867a28c54d4bcc47"
             retained_run: ""
             retained_sha256: ""
     env:
