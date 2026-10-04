@@ -67,7 +67,7 @@ func runOSUpdateWith(t *testing.T, args, journal []string, env ...string) (out, 
 	resume := filepath.Join(dir, "state", "stack-resume-on-boot")
 	script = strings.Replace(script, "STACK_RESUME=/var/lib/culvert-appliance/state/stack-resume-on-boot", "STACK_RESUME="+resume, 1)
 	bootPath := filepath.Join(dir, "boot-id")
-	if err := os.WriteFile(bootPath, []byte(osUpdateTestBootID+"\n"), 0o644); err != nil {
+	if err := os.WriteFile(bootPath, []byte(osUpdateTestBootID+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	script = strings.Replace(script, "BOOT_ID_FILE=/proc/sys/kernel/random/boot_id", "BOOT_ID_FILE="+bootPath, 1)

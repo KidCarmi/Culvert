@@ -1,20 +1,10 @@
 name: Appliance Console
 
 on:
-  pull_request:
-    paths:
-      - 'appliance/console/**'
-      - 'appliance/os-maintenance/**'
-      - 'appliance/build/**'
-      - 'appliance/provision/**'
-      - 'cmd/culvert-console/**'
-      - 'cmd/culvert-maint/**'
-      - 'appliance_*test.go'
-      - 'internal/applianceconsole/**'
-      - 'internal/appliancehost/**'
-      - 'go.mod'
-      - 'go.sum'
-      - '.github/workflows/appliance-console.yml'
+  # Pull requests run this suite through the Deep PR Gate
+  # (pr-deep-gate.yml `appliance-console`), so its result is part of the
+  # REQUIRED aggregate rather than a separate advisory check.
+  workflow_call:
   push:
     branches: [feat/appliance-console]
     paths:

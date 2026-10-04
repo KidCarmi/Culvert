@@ -38,6 +38,12 @@ func TestApplianceLane_ClassifierRunsTheHarnessesForApplianceChanges(t *testing.
 		// The candidate version script shapes the image build's VERSION
 		// (L11): editing it must rebuild the image and run every deep job.
 		".github/scripts/pr-candidate-version.sh": {"appliance=true", "image_needed=true", "release=true"},
+		// The appliance console (#1540) and its regression workflow select
+		// the appliance lane, which runs the console suite.
+		"cmd/culvert-console/main_linux.go":       {"appliance=true"},
+		"internal/appliancehost/state.go":         {"appliance=true"},
+		"internal/applianceconsole/view.go":       {"appliance=true"},
+		".github/workflows/appliance-console.yml": {"appliance=true"},
 	}
 	for path, wants := range cases {
 		t.Run(path, func(t *testing.T) {
@@ -287,6 +293,51 @@ func TestApplianceLane_AgentJobRunsTheBoundedENOSPCHarness(t *testing.T) {
 	for _, want := range []string{`mount -o loop "$IMG" "$MNT"`, `-v "$MNT/docker:/var/lib/docker"`, `-v "$MNT/containerd:/var/lib/containerd"`, "mkfs.ext4 -q -F -m 0"} {
 		if !strings.Contains(src, want) {
 			t.Errorf("bounded-host contract missing %q", want)
+		}
+	}
+}
+
+// V1 integration (#1528 + #1540): the console + power/lifecycle regression
+// suite is a REQUIRED result — called from the Deep gate and listed in its
+// aggregate — not a separate path-filtered workflow whose red is advisory.
+func TestApplianceLane_ConsoleSuiteIsPartOfTheRequiredDeepGate(t *testing.T) {
+	path := filepath.Join(pkgSourceDir(), ".github", "workflows", "pr-deep-gate.yml")
+	jobs := asMap(genericWorkflow(t, path)["jobs"])
+	j := asMap(jobs["appliance-console"])
+	if j == nil {
+		t.Fatal("pr-deep-gate.yml has no appliance-console job")
+	}
+	if toStr(j["uses"]) != "./.github/workflows/appliance-console.yml" {
+		t.Errorf("appliance-console must call the console workflow, got %q", toStr(j["uses"]))
+	}
+	for _, out := range []string{"appliance", "maint", "deps"} {
+		if !strings.Contains(toStr(j["if"]), "needs.changes.outputs."+out+" == 'true'") {
+			t.Errorf("appliance-console must run for %s changes (got %q)", out, toStr(j["if"]))
+		}
+	}
+	aggNeeds, _ := asMap(jobs["deep-gate-approved"])["needs"].([]interface{})
+	found := false
+	for _, n := range aggNeeds {
+		found = found || toStr(n) == "appliance-console"
+	}
+	if !found {
+		t.Error("deep-gate-approved does not need appliance-console — a red console suite would not block the gate")
+	}
+	cw := filepath.Join(pkgSourceDir(), ".github", "workflows", "appliance-console.yml")
+	on := asMap(genericWorkflow(t, cw)["on"])
+	if _, ok := on["workflow_call"]; !ok {
+		t.Error("appliance-console.yml must be callable (workflow_call)")
+	}
+	if _, ok := on["pull_request"]; ok {
+		t.Error("appliance-console.yml must not also run on pull_request: the Deep gate runs it, and a duplicate advisory run invites ignoring the required one")
+	}
+	raw, err := os.ReadFile(cw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"appliance/os-maintenance/power_test.sh", "appliance/console/install_test.sh", "appliance/build/console-bundle_test.sh", "CULVERT_STORAGE_FAULTS=1", "./internal/server ./internal/journal"} {
+		if !strings.Contains(string(raw), want) {
+			t.Errorf("appliance-console.yml no longer runs %q", want)
 		}
 	}
 }

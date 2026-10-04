@@ -139,6 +139,11 @@ jobs:
               # appliance/* covers build/, provision/, os-maintenance/, sbom/.
               appliance/*|test/e2e/appliance/*|restore*.go|backup*.go|cleanup*.go|scripts/install.sh|docker-compose.yml|packaging/*)
                 appliance=true ;;
+              # The appliance console (#1540) is host software the OVA
+              # installs: its regression suite (appliance-console) and the
+              # lifecycle harnesses must run when it changes.
+              cmd/culvert-console/*|internal/applianceconsole/*|internal/appliancehost/*|appliance_*test.go|.github/workflows/appliance-console.yml)
+                appliance=true ;;
             esac
             case "$f" in
               # Declarations-only IaC skeleton (M0-PR5). Gates the terraform
@@ -707,6 +712,20 @@ jobs:
           terraform validate
         working-directory: deploy/terraform
 
+  # ─── Appliance console + host power/lifecycle regressions (#1540) ─────────
+  # The same suite .github/workflows/appliance-console.yml defines (console
+  # state/display/auth boundary, root-owned recovery storage faults, the
+  # agent's shutdown-fence admission, culvert-os-update power/resume, staged
+  # console install), called here so a red result blocks the REQUIRED
+  # aggregate instead of landing as an advisory check (V1 integration, #1528).
+  appliance-console:
+    name: "Deep · appliance console + power/lifecycle regressions"
+    needs: changes
+    if: needs.changes.outputs.appliance == 'true' || needs.changes.outputs.maint == 'true' || needs.changes.outputs.deps == 'true'
+    permissions:
+      contents: read
+    uses: ./.github/workflows/appliance-console.yml
+
   # ─── ✅ Aggregate — required check, passes when all-skipped ─────────────────
   deep-gate-approved:
     name: "✅ Deep PR Gate — APPROVED"
@@ -726,6 +745,7 @@ jobs:
       - appliance-lifecycle
       - appliance-clamav
       - appliance-agent
+      - appliance-console
     if: always()
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

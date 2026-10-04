@@ -22,7 +22,7 @@ func armShutdownFence(t *testing.T, boot, phase string) {
 			t.Fatal(err)
 		}
 		data := "culvert-shutdown-v1 " + boot + " reboot " + phase + "\n"
-		if err := os.WriteFile(filepath.Join(state, "host-shutdown.pending"), []byte(data), 0o644); err != nil {
+		if err := os.WriteFile(filepath.Join(state, "host-shutdown.pending"), []byte(data), 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}
