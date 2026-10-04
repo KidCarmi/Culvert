@@ -151,11 +151,15 @@ func TestStoreFailedDurabilityNeverAuthorizes(t *testing.T) {
 
 func TestPolicyFileRejectsCallerOwnedOrWritableAncestry(t *testing.T) {
 	dir := t.TempDir()
+	// Do not depend on TMPDIR being /tmp: root CI may use a private directory.
+	if err := os.Chmod(dir, 0o777); err != nil {
+		t.Fatal(err)
+	}
 	p := filepath.Join(dir, "keys.json")
 	if err := os.WriteFile(p, []byte(`{}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	// /tmp's world-writable ancestor must be rejected even when this test is root.
+	// A writable ancestor must be rejected even when this test is root.
 	if _, err := ReadPolicyFile(p); err == nil {
 		t.Fatal("policy from mutable ancestor accepted")
 	}
@@ -165,4 +169,35 @@ func TestPolicyFileRejectsCallerOwnedOrWritableAncestry(t *testing.T) {
 	if _, err := ReadPolicyFile(filepath.Join(dir, "alias")); err == nil {
 		t.Fatal("symlink policy accepted")
 	}
+}
+
+func TestStateAncestryRejectsReplacementPaths(t *testing.T) {
+	f := newFixture(t)
+	t.Run("writable parent", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.Chmod(dir, 0o777); err != nil {
+			t.Fatal(err)
+		}
+		state := filepath.Join(dir, "state")
+		if err := os.Mkdir(state, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := New(state, f.policy); err == nil {
+			t.Fatal("private final directory hid replaceable ancestor")
+		}
+	})
+	t.Run("symlink parent", func(t *testing.T) {
+		dir := t.TempDir()
+		actual := filepath.Join(dir, "real")
+		if err := os.Mkdir(actual, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		alias := filepath.Join(dir, "alias")
+		if err := os.Symlink(actual, alias); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := New(alias, f.policy); err == nil {
+			t.Fatal("symlink state ancestor accepted")
+		}
+	})
 }

@@ -174,8 +174,9 @@ func (v *Verifier) VerifyAuthenticity(e Evidence, targetRef string) (Authorizati
 }
 
 func (v *Verifier) verifySignature(e Evidence) error {
-	// Match existing catalog precedence: an invalid present Sigstore artifact
-	// never falls back to a second signature scheme.
+	// Match existing catalog precedence: when host Sigstore trust is configured,
+	// an invalid present bundle never falls back to Ed25519. An explicitly
+	// Ed25519-only host policy ignores sidecars for an unconfigured authority.
 	if v.sigstore != nil && len(e.SigstoreBundle) > 0 {
 		pb := new(protobundle.Bundle)
 		if err := protojson.Unmarshal(e.SigstoreBundle, pb); err != nil {

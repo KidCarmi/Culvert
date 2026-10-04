@@ -167,3 +167,26 @@ func TestEmbeddedPolicyMatchesRepository(t *testing.T) {
 		t.Fatal("invalid Sigstore bundle accepted")
 	}
 }
+
+func TestConfiguredSigstoreFailureCannotFallBackToTrustedEd25519(t *testing.T) {
+	edOnly, p, ref, key := signedFixture(t)
+	p.SigstoreBundle = []byte(`{"invalid":"bundle"}`)
+	// An Ed-only policy independently authorizes this exact index using its
+	// configured public key; an unused sidecar does not add another authority.
+	if _, err := edOnly.Verify(p, ref, time.Now()); err != nil {
+		t.Fatalf("explicit Ed-only policy rejected its valid signature: %v", err)
+	}
+	policy := DefaultPolicy(testRepo, testRepo)
+	policy.Ed25519Keys = map[string][]byte{"test": key.Public().(ed25519.PublicKey)}
+	combined, err := NewVerifier(policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := combined.Verify(p, ref, time.Now()); err == nil {
+		t.Fatal("invalid present Sigstore bundle fell back to valid Ed25519 signature")
+	}
+	p.SigstoreBundle = nil
+	if _, err := combined.Verify(p, ref, time.Now()); err != nil {
+		t.Fatalf("absent Sigstore sidecar blocked configured Ed25519 authority: %v", err)
+	}
+}
