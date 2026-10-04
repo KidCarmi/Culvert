@@ -41,6 +41,7 @@ on:
       - "scripts/**"
       - "packaging/**"
       - "cmd/culvert-maint/**"
+      - "pkg/releaseproof/**"
       - "docker-compose*.yml"
       - "Dockerfile*"
       - "test/e2e/**"

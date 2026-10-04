@@ -420,9 +420,22 @@ jobs:
         with:
           fetch-depth: 0    # full history so gitleaks can scan all commits
       - name: Run gitleaks
+        # The canary checks below use this same scanner version.
         uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_VERSION: "8.30.0"
+
+      - uses: ./.github/actions/setup-go-cache
+        if: always()
+      - name: Secret scanner policy and upstream fixture integrity
+        if: always()
+        run: |
+          go install github.com/zricethezav/gitleaks/v8@v8.30.0
+          python3 appliance/artifact-audit/check_gitleaks_policy.py --gitleaks "$(go env GOPATH)/bin/gitleaks"
+          python3 -m venv /tmp/culvert-secret-policy-env
+          /tmp/culvert-secret-policy-env/bin/pip install cryptography==50.0.2
+          /tmp/culvert-secret-policy-env/bin/python appliance/artifact-audit/verify_saml_patch.py
 
   # ─── 7. Maintenance agent (nested module) — gated on agent paths ──────────
   agent:
