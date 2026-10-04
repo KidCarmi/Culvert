@@ -178,15 +178,32 @@ func TestRegexRunner_NoWorkerWithoutRegexStrings(t *testing.T) {
 	base := inflightBaseline(t)
 
 	y := buildRuleSet(t, yaraRule("LiteralOnly", `        $a = "ZZNOPE"`, "any of them"))
-	before := runtime.NumGoroutine()
+	before := regexRunnerStarts.Load()
 	if got := y.Match([]byte("clean body")); len(got) != 0 {
 		t.Fatalf("Match = %v, want no matches", got)
 	}
 	if got := yaraInflight.Load() - base; got != 0 {
 		t.Errorf("inflight delta = %d after a literal-only scan, want 0", got)
 	}
-	if after := runtime.NumGoroutine(); after > before {
-		t.Errorf("goroutines %d -> %d: a literal-only scan must not start a regex worker", before, after)
+	// Counted at creation, not inferred from runtime.NumGoroutine(): under
+	// -shuffle an earlier test's unrelated goroutines move that number (Deep
+	// determinism run 37233390155: 38 -> 42 with no worker involved), and a
+	// worker started and closed within the scan would never show in it at all.
+	if started := regexRunnerStarts.Load() - before; started != 0 {
+		t.Errorf("a literal-only scan started %d regex worker(s), want 0", started)
+	}
+}
+
+// TestRegexRunner_StartsAreCounted is the control: the counter must move for a
+// scan that does run a regex, or the assertion above would pass vacuously.
+func TestRegexRunner_StartsAreCounted(t *testing.T) {
+	y := buildRuleSet(t, yaraRule("RegexRule", `        $a = /ZZ[0-9]+NOPE/`, "any of them"))
+	before := regexRunnerStarts.Load()
+	if got := y.Match([]byte("clean body")); len(got) != 0 {
+		t.Fatalf("Match = %v, want no matches", got)
+	}
+	if started := regexRunnerStarts.Load() - before; started != 1 {
+		t.Fatalf("a regex scan started %d worker(s), want exactly 1", started)
 	}
 }
 
