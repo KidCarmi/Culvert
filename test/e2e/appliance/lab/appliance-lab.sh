@@ -6,12 +6,27 @@
 #   test/e2e/appliance/lab/appliance-lab.sh fingerprint OVA OUT.tsv
 #   test/e2e/appliance/lab/appliance-lab.sh compare REFERENCE.tsv CANDIDATE.tsv
 #
+# ACCESS MODEL (docs/appliance/ssh-access-boundary.md) — the lab uses exactly
+# the two paths an operator has, and never a third:
+#   * observation: SSH as the read-only `culvert-operator` with the imported
+#     key (`help`, `status`, `status-json`, `diagnostics`; nothing else);
+#   * privileged work: a PAM login as the local administrator `culvert` on the
+#     VM console, then `sudo` with that password. Under QEMU the console is
+#     ttyS0 (console-session.py drives the real getty: the one-time password
+#     first boot printed → the forced change → sudo). No key, sudoers drop-in
+#     or other bypass is added to the guest.
+#
 # EXTERNAL target (the same guest checks against an appliance some other tool
 # deployed — e.g. an ESXi import; that tool owns the VM and its credentials):
 #   LAB_EXTERNAL=1 LAB_HOST=<vm address> LAB_SSH_KEY=<key the VM was given>
-#   [LAB_SSH_PORT=22 LAB_PROXY_PORT=8080 LAB_UI_PORT=9090] appliance-lab.sh qualify ; ... collect
-#   `up`/`down` are QEMU-only; with LAB_EXTERNAL=1 `down` removes only the
-#   lab's own disposable admin password and cookies, never the VM or its key.
+#   LAB_PRIV_CMD='<command>'  [LAB_SSH_PORT=22 LAB_PROXY_PORT=8080 LAB_UI_PORT=9090]
+#   appliance-lab.sh qualify ; ... collect
+# LAB_PRIV_CMD is that tool's authenticated-console transport: it reads a bash
+# script on stdin, runs it as root through the local `culvert` login + sudo
+# (or as `culvert` itself when given --as-user), prints the script's output
+# and exits with its status; `--timeout N` and `--nowait` (start, do not wait:
+# reboot) may be passed. `up`/`down` are QEMU-only; with LAB_EXTERNAL=1 `down`
+# removes only the lab's own disposable secrets, never the VM or its key.
 #
 # What it boots: the VMDK inside the OVA, after verifying the OVA's SHA-256
 # (LAB_OVA_SHA256) and every digest in its .mf. The VMDK is converted ONCE to
@@ -28,6 +43,8 @@
 #     CD-ROM — the transport the OVF declares alongside guestinfo, and the one
 #     VirtualBox uses). vSphere's guestinfo transport, vApp property UI,
 #     ovftool import, datastore behaviour and VMware Tools are NOT exercised;
+#   * the VM console: ttyS0 (serial getty) instead of the hypervisor's tty1;
+#     the same PAM stack and account, a different terminal;
 #   * network: QEMU user-mode NAT; the guest's 22/8080/9090 are forwarded to
 #     127.0.0.1 only. The guest reaches the internet through the host (real
 #     ClamAV signatures, the category feed, Ubuntu archives).
@@ -39,9 +56,16 @@
 # (test/e2e/appliance/upgrade-enospc-qualify.sh, QUAL_ENOSPC_SCENARIO=midwrite)
 # owns it, so no fill ever touches the guest disk or the host filesystem.
 #
-# Credentials are disposable and per run (SSH key, admin password); they live
-# in $LAB_DIR/secrets, which collect never copies. The setup token and the
-# admin password are redacted from every evidence file.
+# SIGNED UPDATE / ROLLBACK (step 6c) runs only with LAB_UPDATE_DIR, prepared by
+# the lab workflow OUTSIDE the OVA: a disposable TLS registry the guest reaches
+# as ghcr.io, the OVA's own image (same index digest) as the baseline, a
+# relabelled target, and evidence from test/e2e/release-proof-fixture (ephemeral
+# key, never saved; only its PUBLIC keyring reaches the guest). The guest-side
+# trust configuration it adds is TEST-ONLY and recorded in 06c-test-only-trust.txt.
+#
+# Credentials are disposable and per run (SSH key, console password, admin
+# password); they live in $LAB_DIR/secrets, which collect never copies. Every
+# secret is redacted from every evidence file.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -55,7 +79,7 @@ LAB_EXTERNAL="${LAB_EXTERNAL:-0}"; LAB_HOST="${LAB_HOST:-127.0.0.1}"
 if [[ "$LAB_EXTERNAL" == 1 ]]; then dssh=22 dproxy=8080 dui=9090; else dssh=2222 dproxy=18080 dui=19090; fi
 LAB_SSH_PORT="${LAB_SSH_PORT:-$dssh}"; LAB_PROXY_PORT="${LAB_PROXY_PORT:-$dproxy}"; LAB_UI_PORT="${LAB_UI_PORT:-$dui}"
 LAB_FIRSTBOOT_TIMEOUT="${LAB_FIRSTBOOT_TIMEOUT:-2400}"; LAB_KERNEL_TIMEOUT="${LAB_KERNEL_TIMEOUT:-}"; LAB_FEED_TIMEOUT="${LAB_FEED_TIMEOUT:-1500}"
-LAB_EXPECT_IMAGE_ID="${LAB_EXPECT_IMAGE_ID:-}"
+LAB_EXPECT_IMAGE_ID="${LAB_EXPECT_IMAGE_ID:-}"; LAB_UPDATE_DIR="${LAB_UPDATE_DIR:-}"
 ADMIN_USER=labadmin
 
 log()  { printf '%s [lab] %s\n' "$(date -u +%H:%M:%S)" "$*" >&2; }
@@ -73,9 +97,10 @@ check() { local st="$1" n="$2" r="$3" d="${4:-}"
   log "$r [$st] $n: $d"; }
 
 # Every secret this run holds, replaced wherever it appears.
-redact_str() { local s="$1" v
-  for f in "$SEC/setup-token" "$SEC/admin-pass"; do
-    [[ -s "$f" ]] || continue; v="$(cat "$f")"; s="${s//"$v"/[REDACTED]}"
+SECRET_FILES=(setup-token admin-pass console-pass console-onetime)
+redact_str() { local s="$1" v f
+  for f in "${SECRET_FILES[@]}"; do
+    [[ -s "$SEC/$f" ]] || continue; v="$(cat "$SEC/$f")"; s="${s//"$v"/[REDACTED]}"
   done; printf '%s' "$s"; }
 # A secret that appears in NO evidence file is the good case, not an error:
 # under pipefail grep's "no match" used to fail the function, which ended
@@ -83,21 +108,48 @@ redact_str() { local s="$1" v
 # exited 1 (run 37195991070: 48 pass, 0 fail). Redaction itself is unchanged
 # and collect still refuses evidence that carries private material.
 redact_tree() { local f v
-  for f in "$SEC/setup-token" "$SEC/admin-pass"; do
-    [[ -s "$f" ]] || continue; v="$(cat "$f")"
+  for f in "${SECRET_FILES[@]}"; do
+    [[ -s "$SEC/$f" ]] || continue; v="$(cat "$SEC/$f")"
     { grep -rlF -- "$v" "$EV" 2>/dev/null || true; } | while read -r p; do sed -i "s|$(printf '%s' "$v" | sed 's/[.[\*^$/|]/\\&/g')|[REDACTED]|g" "$p"; done
   done
   return 0; }
 
-# ── access helpers (vsphere-qualification.md step 4 shapes) ──────────────────
+# ── access helpers ───────────────────────────────────────────────────────────
 LAB_SSH_KEY="${LAB_SSH_KEY:-$SEC/id_ed25519}"
 SSH_OPTS=(-i "$LAB_SSH_KEY" -p "$LAB_SSH_PORT" -o StrictHostKeyChecking=no -o "UserKnownHostsFile=$SEC/known_hosts"
-          -o ConnectTimeout=10 -o BatchMode=yes -o LogLevel=ERROR -o ServerAliveInterval=15)
-gssh() { ssh "${SSH_OPTS[@]}" "culvert@$LAB_HOST" "$@"; }
+          -o ConnectTimeout=10 -o BatchMode=yes -o LogLevel=ERROR -o ServerAliveInterval=15 -o IdentitiesOnly=yes)
+# gop CMD — the read-only operator interface (exact command, nothing else).
+gop() { ssh "${SSH_OPTS[@]}" "culvert-operator@$LAB_HOST" "$@"; }
+# Serial console socket (QEMU chardev; its logfile is console.log). Short fixed
+# path: AF_UNIX paths are limited to 108 bytes.
+SER_SOCK="/tmp/culvert-lab-ser-$(printf '%s' "$WORK" | sha256sum | cut -c1-12).sock"
+# gpriv [--as-user] [--timeout N] [--nowait] < script — authenticated local
+# administration: PAM login as culvert on the console, then sudo (root).
+gpriv() {
+  if [[ -n "${LAB_PRIV_CMD:-}" ]]; then
+    # shellcheck disable=SC2086 # the adapter command is a word list by contract
+    $LAB_PRIV_CMD "$@"
+  else
+    python3 "$HERE/console-session.py" --sock "$SER_SOCK" --secrets "$SEC" --console-log "$WORK/console.log" \
+      --trace "$WORK/console-session-trace.txt" "$@"
+  fi; }
+# groot 'command line' — one privileged command line (convenience over gpriv).
+groot() { printf '%s\n' "$1" | gpriv --timeout "${2:-600}"; }
 UI="https://$LAB_HOST:$LAB_UI_PORT"; P="http://$LAB_HOST:$LAB_PROXY_PORT"; JAR="$SEC/cookies"
 ensure_admin_pass() { [[ -s "$SEC/admin-pass" ]] || { head -c 4096 /dev/urandom | tr -dc 'A-Za-z0-9' | cut -c1-24 > "$SEC/admin-pass"; chmod 0600 "$SEC/admin-pass"; }; }
+# api METHOD PATH [BODY] — JAR may be overridden per call (JAR=… api …) for a
+# second administrator session.
 api() { curl -ksS -m 30 -X "$1" "$UI$2" -H "Origin: $UI" -H 'Content-Type: application/json' -b "$JAR" -c "$JAR" ${3:+-d "$3"} -w '\n%{http_code}\n'; }
 body() { sed '$d'; }; code() { tail -n1; }
+# status_field FILE KEY — one field of a status-json snapshot.
+status_field() { python3 -c 'import json,sys
+try: print(json.load(open(sys.argv[1])).get(sys.argv[2],""))
+except Exception: print("")' "$1" "$2"; }
+# recorded_steps FILE — the first-boot steps a status-json snapshot reports recorded.
+recorded_steps() { python3 -c 'import json,sys
+try: d=json.load(open(sys.argv[1]))
+except Exception: sys.exit(0)
+print(" ".join(sorted(s["id"] for s in d.get("steps",[]) if s.get("state")=="recorded")))' "$1"; }
 # agent_status_verdict FILE — FILE is `api GET /api/maintenance-agent` output
 # (JSON body, then the HTTP code). That endpoint answers 200 EVEN WHEN THE
 # AGENT IS DOWN ({available:false, reason}) so the GUI can show why: HTTP 200
@@ -141,6 +193,13 @@ cmd_selftest() { local d rc=0 got; d="$(mktemp -d)"
     log "selftest ok: redact_tree with nothing to redact -> success"; else log "selftest FAILED: redact_tree with nothing to redact failed"; rc=1; fi
   if ( SEC="$d/sec2" EV="$d/ev2"; mkdir -p "$SEC" "$EV"; printf 'S3cretValue42' > "$SEC/admin-pass"; echo 'pw=S3cretValue42' > "$EV/b.txt"; redact_tree && grep -qx 'pw=\[REDACTED\]' "$EV/b.txt" && ! grep -rq S3cretValue42 "$EV" ); then
     log "selftest ok: redact_tree replaces a present secret"; else log "selftest FAILED: redact_tree left a secret in the evidence"; rc=1; fi
+  if ( SEC="$d/sec3" EV="$d/ev3"; mkdir -p "$SEC" "$EV"; printf 'Cons0leSecret_9a' > "$SEC/console-pass"; printf 'OneT1meSecret' > "$SEC/console-onetime"
+       printf "login ok Cons0leSecret_9a\npassword: OneT1meSecret\n" > "$EV/c.txt"; redact_tree && ! grep -rqE 'Cons0leSecret_9a|OneT1meSecret' "$EV" ); then
+    log "selftest ok: redact_tree removes the console passwords"; else log "selftest FAILED: a console password survived redaction"; rc=1; fi
+  # The console helper must refuse to run without any credential (exit 91),
+  # never guess or fall back to another account.
+  local hrc=0; printf 'id\n' | python3 "$HERE/console-session.py" --sock "$d/none.sock" --secrets "$d" --console-log "$d/none.log" --timeout 5 >/dev/null 2>&1 || hrc=$?
+  if [[ $hrc == 99 || $hrc == 91 ]]; then log "selftest ok: console-session without a console/credential -> exit $hrc"; else log "selftest FAILED: console-session exit $hrc"; rc=1; fi
   rm -rf "$d"; return "$rc"; }
 through_proxy() { curl -sS -m 20 -x "$P" -o /dev/null -w '%{http_code}' "$1" 2>/dev/null || echo 000; }
 # Monitor socket: a short fixed path (AF_UNIX paths are limited to 108 bytes).
@@ -235,6 +294,7 @@ print(f"identical={same} volatile={volat} differing={diff}")
 sys.exit(1 if diff else 0)
 PY
 
+
 # ── up: verify → extract → immutable base + overlay → OVF ISO → boot ────────
 cmd_up() {
   [[ -n "${ACCEL:-}" ]] || die "run preflight first"
@@ -250,8 +310,10 @@ cmd_up() {
   qemu-img create -q -f qcow2 -F qcow2 -b "$WORK/base.qcow2" "$WORK/overlay.qcow2"
   qemu-img info "$WORK/base.qcow2" > "$EV/01-base-qcow2-info.txt"
   check 1 disk-chain pass "base.qcow2 (0444, from the OVA's own VMDK) ← overlay.qcow2 (disposable)"
-  # Disposable credentials.
-  rm -f "$SEC/id_ed25519"*; ssh-keygen -q -t ed25519 -N '' -C "culvert-lab-$RUN_ID" -f "$SEC/id_ed25519"
+  # Disposable credentials. No console password is supplied: first boot must
+  # mint and print the one-time password (the default bootstrap under test).
+  rm -f "$SEC/id_ed25519"* "$SEC/console-pass" "$SEC/console-onetime" "$SEC/console-events"
+  ssh-keygen -q -t ed25519 -N '' -C "culvert-lab-$RUN_ID" -f "$SEC/id_ed25519"
   rm -f "$SEC/admin-pass"; ensure_admin_pass
   # OVF environment (ISO transport): the same properties ovftool's --prop sets.
   mkdir -p "$WORK/ovfenv"
@@ -273,19 +335,23 @@ PY
   else xorriso -as mkisofs -quiet -o "$WORK/ovfenv.iso" -V OVFENV -r -J "$WORK/ovfenv"; fi
   local acc=(-machine "pc,accel=tcg" -cpu max)
   [[ "$ACCEL" == kvm ]] && acc=(-machine "pc,accel=kvm" -cpu host)
-  : > "$WORK/console.log"
+  : > "$WORK/console.log"; rm -f "$SER_SOCK"
+  # ttyS0 is a socket (the authenticated console session attaches to it) whose
+  # every byte is ALSO logged, client or not: console.log stays the boot record.
   qemu-system-x86_64 -name culvert-lab "${acc[@]}" -smp "$LAB_CPUS" -m "$LAB_MEM_MB" \
     -drive "file=$WORK/overlay.qcow2,if=none,id=d0,format=qcow2,cache=writeback" \
     -device virtio-scsi-pci,id=scsi0 -device scsi-hd,drive=d0,bus=scsi0.0 \
     -drive "file=$WORK/ovfenv.iso,if=none,id=cd0,media=cdrom,readonly=on" -device ide-cd,drive=cd0 \
     -netdev "user,id=n0,hostfwd=tcp:127.0.0.1:$LAB_SSH_PORT-:22,hostfwd=tcp:127.0.0.1:$LAB_PROXY_PORT-:8080,hostfwd=tcp:127.0.0.1:$LAB_UI_PORT-:9090" \
-    -device e1000,netdev=n0 -display none -serial "file:$WORK/console.log" \
+    -device e1000,netdev=n0 -display none \
+    -chardev "socket,id=ser0,path=$SER_SOCK,server=on,wait=off,logfile=$WORK/console.log,logappend=on" -serial chardev:ser0 \
     -monitor "unix:$MON_SOCK,server,nowait" -pidfile "$WORK/qemu.pid" -daemonize
-  printf 'qemu-system-x86_64 %s -smp %s -m %s virtio-scsi(overlay.qcow2) ide-cd(ovfenv.iso) e1000 user-net hostfwd 127.0.0.1:{%s,%s,%s} SeaBIOS\n' \
+  printf 'qemu-system-x86_64 %s -smp %s -m %s virtio-scsi(overlay.qcow2) ide-cd(ovfenv.iso) e1000 user-net hostfwd 127.0.0.1:{%s,%s,%s} SeaBIOS serial=socket+logfile\n' \
     "${acc[*]}" "$LAB_CPUS" "$LAB_MEM_MB" "$LAB_SSH_PORT" "$LAB_PROXY_PORT" "$LAB_UI_PORT" > "$EV/02-qemu-command.txt"
   save_state BOOT_STARTED "$(date +%s)"
   check 2 boot-started pass "qemu pid $(cat "$WORK/qemu.pid") accel=$ACCEL"
-  # Bounded: SSH, then first boot to completion (the guest's own marker).
+  # Bounded: kernel, operator SSH, then first boot to completion as the
+  # product reports it (status-json: the `complete` step recorded).
   local deadline=$(( $(date +%s) + LAB_FIRSTBOOT_TIMEOUT )) t0; t0=$(date +%s)
   # The guest kernel logs to ttyS0 (cloud image cmdline): no "Linux version"
   # within the bound means firmware/bootloader never handed over — fail fast
@@ -297,52 +363,172 @@ PY
       check 2 kernel-started fail "no kernel output on ttyS0 within ${kt}s — bootloader/firmware stopped; see 02-screen-no-kernel.png"; return 1; fi
     sleep 5; done
   check 2 kernel-started pass "$(grep -am1 'Linux version' "$WORK/console.log" | cut -c1-90) after $(( $(date +%s) - t0 ))s"
-  until gssh true 2>/dev/null; do
-    qemu_alive || { check 2 ssh-up fail "qemu exited during boot (see console.log)"; return 1; }
-    (( $(date +%s) < deadline )) || { screendump 02-screen-no-ssh; check 2 ssh-up fail "no SSH within ${LAB_FIRSTBOOT_TIMEOUT}s"; return 1; }
+  until gop status-json > "$WORK/status-json.tmp" 2>/dev/null; do
+    qemu_alive || { check 2 operator-ssh-up fail "qemu exited during boot (see console.log)"; return 1; }
+    (( $(date +%s) < deadline )) || { screendump 02-screen-no-ssh; check 2 operator-ssh-up fail "no culvert-operator SSH within ${LAB_FIRSTBOOT_TIMEOUT}s"; return 1; }
     sleep 10; done
-  check 2 ssh-up pass "SSH with the OVF-delivered key after $(( $(date +%s) - t0 ))s"
-  until gssh 'sudo test -f /var/lib/culvert-appliance/state/complete.done' 2>/dev/null; do
+  check 2 operator-ssh-up pass "culvert-operator SSH (OVF-delivered key, status-json) after $(( $(date +%s) - t0 ))s"
+  until gop status-json > "$WORK/status-json.tmp" 2>/dev/null && [[ " $(recorded_steps "$WORK/status-json.tmp") " == *" complete "* ]]; do
     # systemd deletes a unit's start job to break an ordering cycle: first boot
     # will then never run, so report it now rather than after the full bound.
     if grep -qa 'Ordering cycle found, skipping.*culvert-firstboot' "$WORK/console.log" 2>/dev/null; then
       check 2 firstboot-complete fail "systemd skipped culvert-firstboot.service (ordering cycle; see console.log)"; return 1; fi
-    (( $(date +%s) < deadline )) || { check 2 firstboot-complete fail "first boot not complete within ${LAB_FIRSTBOOT_TIMEOUT}s"; return 1; }
+    (( $(date +%s) < deadline )) || { check 2 firstboot-complete fail "first boot not complete within ${LAB_FIRSTBOOT_TIMEOUT}s ($(status_field "$WORK/status-json.tmp" phase))"; return 1; }
     sleep 15; done
-  check 2 firstboot-complete pass "complete.done after $(( $(date +%s) - t0 ))s from power-on"
+  cp "$WORK/status-json.tmp" "$EV/02-status-json-complete.json"
+  check 2 firstboot-complete pass "status-json: complete recorded, phase $(status_field "$EV/02-status-json-complete.json" phase), $(( $(date +%s) - t0 ))s from power-on"
 }
 
 # ── qualify: vsphere-qualification.md steps 3–8 ─────────────────────────────
 STOP=0
 gate() { [[ $STOP == 0 ]] || { check "$1" "$2" not-run "an earlier step failed"; return 1; }; }
+# boot_timing PREFIX STEP — where boot time went, from the guest's own record
+# (systemd-analyze + the unit journals that gate the stack). Evidence only: the
+# lab has no timing threshold; this is the capture for the unexplained ESXi
+# boot delay, taken the same way on every target.
+boot_timing() {
+  gpriv --timeout 180 > "$EV/$1-boot-timing.txt" 2>&1 <<'EOS' || true
+systemd-analyze 2>&1
+echo '--- critical-chain'
+systemd-analyze critical-chain multi-user.target docker.service culvert-firstboot.service 2>&1 | head -80
+echo '--- blame (top 30)'
+systemd-analyze blame 2>&1 | head -30
+echo '--- network-online / cloud-init / containerd / docker / first boot (monotonic, this boot)'
+journalctl -b --no-pager -o short-monotonic -u systemd-networkd -u systemd-networkd-wait-online -u cloud-init-local -u cloud-init \
+  -u cloud-config -u cloud-final -u containerd -u docker -u culvert-firstboot -u culvert-stack-resume 2>&1 | head -400
+echo '--- kernel (first lines, monotonic)'
+journalctl -b -k --no-pager -o short-monotonic 2>&1 | head -5
+EOS
+  local s; s="$(grep -m1 '^Startup finished' "$EV/$1-boot-timing.txt" || true)"
+  check "$2" boot-timing info "${s:-no systemd-analyze summary (see $1-boot-timing.txt)}; slowest: $(sed -n '/^--- blame/{n;p;n;p;n;p}' "$EV/$1-boot-timing.txt" | xargs | head -c 200)"
+}
+
 cmd_qualify() {
   if [[ "$LAB_EXTERNAL" == 1 ]]; then
     [[ -r "$LAB_SSH_KEY" ]] || die "LAB_EXTERNAL=1 needs LAB_SSH_KEY (the key the VM was given)"
-    gssh true || die "cannot reach culvert@$LAB_HOST:$LAB_SSH_PORT"
+    [[ -n "${LAB_PRIV_CMD:-}" ]] || die "LAB_EXTERNAL=1 needs LAB_PRIV_CMD (the authenticated-console transport)"
+    gop status-json >/dev/null || die "cannot reach culvert-operator@$LAB_HOST:$LAB_SSH_PORT"
     [[ -n "${ACCEL:-}" ]] || { save_state RUN_ID "$RUN_ID"; save_state ACCEL "external ($LAB_HOST)"; }
     check 2 target info "external appliance at $LAB_HOST (deployed and owned by another tool; up/down not used)"
   else [[ -n "${BOOT_STARTED:-}" ]] || die "run up first"; fi
   ensure_admin_pass
   : > "$JAR"
-  # Step 3 — first-boot evidence, kernel BEFORE, image identity, token.
-  gssh 'uname -r; uname -v' > "$EV/03-kernel-before.txt" 2>&1 || true
-  gssh 'sudo culvert-status' > "$EV/03-status-firstboot.txt" 2>&1 || true
-  gssh 'cat /var/lib/culvert-appliance/build-info.json' > "$EV/03-build-info.json" 2>&1 || true
-  gssh 'ls /var/lib/culvert-appliance/state/' > "$EV/03-state-files.txt" 2>&1 || true
-  gssh 'sudo docker compose -f /srv/culvert/docker-compose.yml ps --format "{{.Name}} {{.Image}} {{.Status}}"' > "$EV/03-stack.txt" 2>&1 || true
-  gssh 'sudo docker inspect -f "{{.Image}}" culvert; dpkg -l "linux-image-*" | awk "/^ii/{print \$2, \$3}"; apt-mark showhold' > "$EV/03-images-kernels-holds.txt" 2>&1 || true
-  grep -q 'setup pending' "$EV/03-status-firstboot.txt" && check 3 status-setup-pending pass "$(grep -m1 -i 'State:' "$EV/03-status-firstboot.txt")" || check 3 status-setup-pending fail "$(grep -m1 -i 'State:' "$EV/03-status-firstboot.txt" || echo 'no State line')"
-  local want_steps="agent complete console images install ovf" got_steps
-  got_steps="$(sed -n 's/\.done$//p' "$EV/03-state-files.txt" | LC_ALL=C sort | tr '\n' ' ' | sed 's/ $//')"
-  [[ "$got_steps" == "$want_steps" ]] && check 3 firstboot-steps pass "$got_steps" || check 3 firstboot-steps fail "got '$got_steps' want '$want_steps'"
-  local img; img="$(head -1 "$EV/03-images-kernels-holds.txt")"; save_state IMAGE_ID "$img"
-  if [[ -n "$LAB_EXPECT_IMAGE_ID" ]]; then [[ "$img" == "$LAB_EXPECT_IMAGE_ID" ]] && check 3 image-identity pass "culvert runs $img" || check 3 image-identity fail "culvert runs $img, want $LAB_EXPECT_IMAGE_ID"
-  else check 3 image-identity info "culvert runs $img"; fi
-  gssh 'sudo culvert-status' | awk -F': *' '/Setup token:/{print $2}' | awk '{print $1}' | tr -d '\n' > "$SEC/setup-token"
-  [[ $(wc -c < "$SEC/setup-token") -eq 32 ]] && check 3 setup-token pass "32 characters, read from culvert-status over SSH" || { check 3 setup-token fail "token length $(wc -c < "$SEC/setup-token")"; STOP=1; }
+  local c rc
 
+  # Step 3 — first-boot evidence through the operator interface.
+  local orc=0
+  gop status > "$EV/03-operator-status.txt" 2>&1 || orc=$?
+  gop status-json > "$EV/03-status-json.json" 2>&1 || orc=$?
+  gop diagnostics > "$EV/03-operator-diagnostics.txt" 2>&1 || orc=$?
+  gop help > "$EV/03-operator-help.txt" 2>&1 || orc=$?
+  if [[ $orc == 0 ]] && python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$EV/03-status-json.json" 2>/dev/null; then
+    check 3 operator-observe pass "culvert-operator: help, status, status-json (valid JSON, version $(status_field "$EV/03-status-json.json" version)), diagnostics"
+  else check 3 operator-observe fail "exit $orc: $(head -c 200 "$EV/03-status-json.json")"; fi
+  local ss; ss="$(status_field "$EV/03-status-json.json" setup_status)"
+  [[ "$ss" == pending ]] && check 3 status-setup-pending pass "status-json setup_status=pending, phase=$(status_field "$EV/03-status-json.json" phase)" || check 3 status-setup-pending fail "setup_status=${ss:-?}"
+  local want_steps="access agent complete console images install ovf" got_steps
+  got_steps="$(recorded_steps "$EV/03-status-json.json")"
+  [[ "$got_steps" == "$want_steps" ]] && check 3 firstboot-steps pass "$got_steps" || check 3 firstboot-steps fail "got '$got_steps' want '$want_steps'"
+
+  # Step 3a — default bootstrap: no console password was supplied, so first
+  # boot must have printed a one-time password, and the first login must be
+  # forced to replace it. The FIRST privileged call below performs that login.
+  if [[ "$LAB_EXTERNAL" != 1 ]]; then
+    grep -qa "One-time console login:  user 'culvert'" "$WORK/console.log" \
+      && check 3a console-onetime-printed pass "first boot printed a one-time console password on the VM console (ttyS0)" \
+      || check 3a console-onetime-printed fail "no one-time console password on the console"
+  fi
+  rc=0; printf 'id -un; chage -l culvert | sed -n "1p;/must be changed/p"\n' | gpriv --timeout 300 > "$EV/03a-first-privileged.txt" 2>&1 || rc=$?
+  if [[ $rc == 0 ]] && grep -qx root "$EV/03a-first-privileged.txt"; then
+    if [[ "$LAB_EXTERNAL" == 1 ]]; then check 3a console-login pass "authenticated console login + sudo via LAB_PRIV_CMD"
+    elif grep -q '^forced-change ' "$SEC/console-events" 2>/dev/null; then
+      check 3a console-login pass "PAM login as culvert with the one-time password → forced change → sudo with the new password → root"
+    else check 3a console-login fail "logged in without the forced change at first login"; fi
+    ! grep -q 'must be changed' "$EV/03a-first-privileged.txt" && check 3a password-changed pass "chage: no change pending after the forced change" || check 3a password-changed fail "$(tr '\n' ' ' < "$EV/03a-first-privileged.txt")"
+  else check 3a console-login fail "console session exit $rc (90-99 = login/transport failure; see the console-session trace in collect)"; STOP=1; fi
+
+  # Step 3b — privileged evidence through that console session.
+  if gate 3b privileged-evidence; then
+    gpriv > "$EV/03-kernel-before.txt" 2>&1 <<<'uname -r; uname -v' || true
+    gpriv > "$EV/03-status-firstboot.txt" 2>&1 <<<'culvert-status' || true
+    gpriv > "$EV/03-build-info.json" 2>&1 <<<'cat /var/lib/culvert-appliance/build-info.json' || true
+    gpriv > "$EV/03-state-files.txt" 2>&1 <<<'ls /var/lib/culvert-appliance/state/' || true
+    gpriv > "$EV/03-stack.txt" 2>&1 <<<'docker compose -f /srv/culvert/docker-compose.yml ps --format "{{.Name}} {{.Image}} {{.Status}}"' || true
+    gpriv > "$EV/03-images-kernels-holds.txt" 2>&1 <<<'docker inspect -f "{{.Image}}" culvert; dpkg -l "linux-image-*" | awk "/^ii/{print \$2, \$3}"; apt-mark showhold' || true
+    grep -q 'setup pending' "$EV/03-status-firstboot.txt" && check 3 culvert-status-setup-pending pass "$(grep -m1 -i 'State:' "$EV/03-status-firstboot.txt")" || check 3 culvert-status-setup-pending fail "$(grep -m1 -i 'State:' "$EV/03-status-firstboot.txt" || echo 'no State line')"
+    local img; img="$(head -1 "$EV/03-images-kernels-holds.txt")"; save_state IMAGE_ID "$img"
+    if [[ -n "$LAB_EXPECT_IMAGE_ID" ]]; then [[ "$img" == "$LAB_EXPECT_IMAGE_ID" ]] && check 3 image-identity pass "culvert runs $img" || check 3 image-identity fail "culvert runs $img, want $LAB_EXPECT_IMAGE_ID"
+    else check 3 image-identity info "culvert runs $img"; fi
+    gpriv <<<'culvert-status' | awk -F': *' '/Setup token:/{print $2}' | awk '{print $1}' | tr -d '\n' > "$SEC/setup-token" || true
+    local ctok=""
+    [[ "$LAB_EXTERNAL" != 1 ]] && ctok="$(grep -a -A1 'First-admin SETUP TOKEN' "$WORK/console.log" | tail -1 | tr -d '\r' | xargs || true)"
+    if [[ $(wc -c < "$SEC/setup-token") -eq 32 ]] && { [[ "$LAB_EXTERNAL" == 1 ]] || [[ "$ctok" == "$(cat "$SEC/setup-token")" ]]; }; then
+      check 3 setup-token pass "32 characters, from culvert-status via the authenticated console$([[ "$LAB_EXTERNAL" != 1 ]] && echo '; identical to the token first boot printed on the VM console')"
+    else check 3 setup-token fail "token length $(wc -c < "$SEC/setup-token"); console token matches: $([[ -n "$ctok" && "$ctok" == "$(cat "$SEC/setup-token")" ]] && echo yes || echo no)"; STOP=1; fi
+  fi
+
+  # Step 3c — the SSH access boundary: everything but the four observations is
+  # refused, and the local administrator is not reachable over SSH.
+  local refused=() admitted=() x
+  for x in bash 'status; id' 'sudo -n id' '/bin/sh -c id' 'status-json --help' 'reboot'; do
+    rc=0; gop "$x" > "$WORK/op-cmd.txt" 2>&1 < /dev/null || rc=$?
+    if [[ $rc != 0 ]] && ! grep -q 'uid=' "$WORK/op-cmd.txt"; then refused+=("'$x'→$rc"); else admitted+=("'$x'→$rc:$(head -c 80 "$WORK/op-cmd.txt")"); fi
+    printf '== %s (exit %s)\n%s\n' "$x" "$rc" "$(head -c 400 "$WORK/op-cmd.txt")" >> "$EV/03c-operator-refusals.txt"
+  done
+  [[ ${#admitted[@]} == 0 ]] && check 3c operator-commands-refused pass "${refused[*]}" || check 3c operator-commands-refused fail "admitted: ${admitted[*]}"
+  local fwd=() fport=$(( 20000 + RANDOM % 20000 ))
+  # A local forward is only refused when a connection uses it (direct-tcpip):
+  # hold one open and try to reach the guest's admin port through it.
+  : > "$WORK/fwd.txt"
+  ssh "${SSH_OPTS[@]}" -N -L "127.0.0.1:$fport:127.0.0.1:9090" "culvert-operator@$LAB_HOST" >> "$WORK/fwd.txt" 2>&1 & local fpid=$!
+  sleep 4; c="$(curl -ksS -m 8 -o /dev/null -w '%{http_code}' "https://127.0.0.1:$fport/" 2>>"$WORK/fwd.txt" || true)"
+  kill "$fpid" 2>/dev/null || true; wait "$fpid" 2>/dev/null || true
+  [[ "$c" =~ ^[1-5][0-9][0-9]$ ]] && fwd+=("local-forward:0(http $c)") || fwd+=("local-forward:refused")
+  rc=0; timeout 30 ssh "${SSH_OPTS[@]}" -o ExitOnForwardFailure=yes -R "127.0.0.1:$fport:127.0.0.1:22" "culvert-operator@$LAB_HOST" status >> "$WORK/fwd.txt" 2>&1 || rc=$?; fwd+=("remote-forward:$rc")
+  rc=0; timeout 30 ssh "${SSH_OPTS[@]}" -W 127.0.0.1:9090 "culvert-operator@$LAB_HOST" < /dev/null >> "$WORK/fwd.txt" 2>&1 || rc=$?; fwd+=("stdio-forward:$rc")
+  printf '%s\n' "${fwd[@]}" > "$EV/03c-forwarding.txt"; cat "$WORK/fwd.txt" >> "$EV/03c-forwarding.txt"
+  [[ "${fwd[*]}" != *':0'* ]] && check 3c forwarding-refused pass "${fwd[*]}" || check 3c forwarding-refused fail "${fwd[*]}"
+  local xfer=() probe="$WORK/scp-probe.txt"; echo lab > "$probe"
+  local SCP_OPTS=(-i "$LAB_SSH_KEY" -P "$LAB_SSH_PORT" -o StrictHostKeyChecking=no -o "UserKnownHostsFile=$SEC/known_hosts" -o BatchMode=yes -o ConnectTimeout=10 -o IdentitiesOnly=yes)
+  rc=0; timeout 30 scp -O "${SCP_OPTS[@]}" "$probe" "culvert-operator@$LAB_HOST:/tmp/lab-probe" > "$WORK/xfer.txt" 2>&1 || rc=$?; xfer+=("scp-legacy:$rc")
+  rc=0; timeout 30 scp "${SCP_OPTS[@]}" "$probe" "culvert-operator@$LAB_HOST:/tmp/lab-probe" >> "$WORK/xfer.txt" 2>&1 || rc=$?; xfer+=("scp-sftp:$rc")
+  rc=0; timeout 30 sftp "${SCP_OPTS[@]}" -b /dev/null "culvert-operator@$LAB_HOST" >> "$WORK/xfer.txt" 2>&1 || rc=$?; xfer+=("sftp:$rc")
+  printf '%s\n' "${xfer[@]}" > "$EV/03c-file-transfer.txt"; cat "$WORK/xfer.txt" >> "$EV/03c-file-transfer.txt"
+  [[ "${xfer[*]}" != *':0'* ]] && check 3c file-transfer-refused pass "${xfer[*]}" || check 3c file-transfer-refused fail "${xfer[*]}"
+  rc=0; ssh "${SSH_OPTS[@]}" "culvert@$LAB_HOST" id > "$EV/03c-culvert-ssh.txt" 2>&1 || rc=$?
+  [[ $rc != 0 ]] && ! grep -q 'uid=' "$EV/03c-culvert-ssh.txt" && check 3c local-admin-ssh-refused pass "culvert@ with the imported key: exit $rc" || check 3c local-admin-ssh-refused fail "culvert@ admitted (exit $rc)"
+  if gate 3c privileged-boundary; then
+    gpriv > "$EV/03c-sshd-effective.txt" 2>&1 <<'EOS' || true
+sshd -T -C user=culvert-operator,host=lab,addr=127.0.0.1 2>/dev/null | grep -Ei '^(allowusers|passwordauthentication|kbdinteractiveauthentication|pubkeyauthentication|authenticationmethods|disableforwarding|allowtcpforwarding|allowstreamlocalforwarding|permittunnel|x11forwarding|permituserrc|permituserenvironment|forcecommand|authorizedkeysfile|permitrootlogin) '
+echo '--- operator account'
+id culvert-operator; getent passwd culvert-operator | cut -d: -f6,7
+sudo -l -U culvert-operator 2>&1 | tail -2
+ls -l /etc/ssh/culvert-authorized-keys/
+EOS
+    local bad=()
+    grep -qix 'allowusers culvert-operator' "$EV/03c-sshd-effective.txt" || bad+=(allowusers)
+    grep -qix 'passwordauthentication no' "$EV/03c-sshd-effective.txt" || bad+=(passwordauthentication)
+    grep -qix 'disableforwarding yes' "$EV/03c-sshd-effective.txt" || bad+=(disableforwarding)
+    grep -qi '^forcecommand .*culvert-access' "$EV/03c-sshd-effective.txt" || bad+=(forcecommand)
+    grep -q 'is not allowed to run sudo' "$EV/03c-sshd-effective.txt" || bad+=(operator-sudo)
+    [[ ${#bad[@]} == 0 ]] && check 3c sshd-effective pass "AllowUsers culvert-operator, PasswordAuthentication no, DisableForwarding yes, ForceCommand culvert-access; operator has no sudo" || check 3c sshd-effective fail "unexpected: ${bad[*]}"
+    rc=0; printf 'sudo -k; sudo -n true 2>&1; echo "sudo-n-rc=$?"\n' | gpriv --as-user > "$EV/03c-culvert-sudo-n.txt" 2>&1 || rc=$?
+    grep -qx 'sudo-n-rc=1' "$EV/03c-culvert-sudo-n.txt" && check 3c local-admin-sudo-needs-password pass "culvert: sudo -n refused (a password is required)" || check 3c local-admin-sudo-needs-password fail "$(tr '\n' ' ' < "$EV/03c-culvert-sudo-n.txt")"
+    boot_timing 03d 3d
+  fi
   # Step 4 — first administrator; the token is REQUIRED.
   local pass c; pass="$(cat "$SEC/admin-pass")"
+  # Step 4a — the temporary bootstrap administrator role shares the setup-token
+  # gate (b526f955): before setup, a protected API without the token is
+  # refused and the appliance stays unconfigured.
+  if gate 4a bootstrap-api-needs-token; then
+    local u1 u2 still
+    u1="$(api POST /api/auth/users "{\"username\":\"lab-bypass\",\"password\":\"$pass\",\"role\":\"admin\"}" | tee "$EV/04a-users-without-token.txt" | code)"
+    u2="$(api PUT /api/settings/default-auth-outcome '{"defaultAuthOutcome":"Exempt"}' | tee "$EV/04a-exempt-without-token.txt" | code)"
+    gop status-json > "$EV/04a-status-json.json" 2>&1 || true; still="$(status_field "$EV/04a-status-json.json" setup_status)"
+    [[ "$u1 $u2 $still" == "403 403 pending" ]] && check 4a bootstrap-api-needs-token pass "POST /api/auth/users 403, PUT default-auth-outcome 403 without the token; status-json still setup_status=pending" \
+      || check 4a bootstrap-api-needs-token fail "users=$u1 exempt=$u2 setup_status=${still:-?} (want 403 403 pending)"
+  fi
   if gate 4 setup-without-token; then
     c="$(api POST /api/setup/complete "{\"user\":\"$ADMIN_USER\",\"pass\":\"$pass\"}" | tee "$EV/04-setup-without-token.txt" | code)"
     [[ $c == 403 ]] && check 4 setup-without-token pass "403" || { check 4 setup-without-token fail "http $c (want 403)"; STOP=1; }
@@ -351,8 +537,29 @@ cmd_qualify() {
     [[ $c == 200 ]] && check 4 setup-with-token pass "200" || { check 4 setup-with-token fail "http $c"; STOP=1; }
     c="$(api POST /api/auth/login "{\"user\":\"$ADMIN_USER\",\"pass\":\"$pass\"}" | tee "$EV/04-login.txt" | code)"
     [[ $c == 200 ]] && check 4 admin-login pass "200" || { check 4 admin-login fail "http $c"; STOP=1; }
-    gssh 'sudo culvert-status' > "$EV/04-status-after-setup.txt" 2>&1 || true
+    gpriv > "$EV/04-status-after-setup.txt" 2>&1 <<<'culvert-status' || true
     grep -qi 'setup complete' "$EV/04-status-after-setup.txt" && check 4 status-setup-complete pass "culvert-status: setup complete" || check 4 status-setup-complete fail "$(grep -m1 -i 'State:' "$EV/04-status-after-setup.txt")"
+    gop status-json > "$EV/04-status-json-after-setup.json" 2>&1 || true
+    [[ "$(status_field "$EV/04-status-json-after-setup.json" setup_status)" == completed ]] && check 4 operator-setup-complete pass "status-json setup_status=completed, administrator_enrolled=$(status_field "$EV/04-status-json-after-setup.json" administrator_enrolled)" \
+      || check 4 operator-setup-complete fail "setup_status=$(status_field "$EV/04-status-json-after-setup.json" setup_status)"
+  fi
+
+  # Step 4b — a demoted administrator loses the role on its EXISTING session,
+  # without a new login (b526f955). Portal-cookie replay (b7b08958) needs an
+  # identity provider, which this lab has none of.
+  if gate 4b demotion-immediate; then
+    local j2="$SEC/cookies-labop" d1 d2 d3 d4
+    : > "$j2"
+    d1="$(api POST /api/auth/users "{\"username\":\"labop\",\"password\":\"$pass\",\"role\":\"admin\"}" | tee "$EV/04b-create.txt" | code)"
+    d2="$(JAR="$j2" api POST /api/auth/login "{\"user\":\"labop\",\"pass\":\"$pass\"}" | code)"
+    d3="$(JAR="$j2" api GET /api/auth/users | code)"
+    api POST /api/auth/users '{"username":"labop","role":"viewer"}' > "$EV/04b-demote.txt"
+    d4="$(JAR="$j2" api GET /api/auth/users | tee "$EV/04b-after-demotion.txt" | code)"
+    printf 'create %s\nlogin %s\nadmin-route-before %s\ndemote %s\nadmin-route-after %s (same session)\n' "$d1" "$d2" "$d3" "$(code < "$EV/04b-demote.txt")" "$d4" > "$EV/04b-demotion.txt"
+    [[ "$d1 $d2 $d3 $(code < "$EV/04b-demote.txt") $d4" == "200 200 200 200 403" ]] && check 4b demotion-immediate pass "labop admin session: GET /api/auth/users 200 → demoted to viewer → the same session 403" \
+      || check 4b demotion-immediate fail "$(tr '\n' ' ' < "$EV/04b-demotion.txt")"
+    api DELETE "/api/auth/users?username=labop" > /dev/null || true; rm -f "$j2"
+    check 4b portal-cookie-replay blocked "needs an identity provider (none in this lab); covered by TestUISessionRole_RejectsReplayedPortalCookie and the proxy cookie-boundary tests in CI"
   fi
 
   # Step 5 — enforcement: default deny, one allow rule, real traffic.
@@ -379,7 +586,7 @@ PY
     # Real ClamAV (the OVA's pinned sidecar with signatures downloaded at first boot).
     local cv; cv="$(awk '$1=="clamav"{print $2}' "$EV/05-ready-rows.txt")"
     [[ "$cv" == ok ]] && check 5 clamav-real pass "/ready clamav ok — the REAL clamav/clamav sidecar from the OVA, signatures fetched by the guest" || check 5 clamav-real fail "/ready clamav=${cv:-absent}"
-    gssh 'sudo culvert-status' > "$EV/05-status.txt" 2>&1 || true
+    gpriv > "$EV/05-status.txt" 2>&1 <<<'culvert-status' || true
     grep -qi 'ready to enforce' "$EV/05-status.txt" && check 5 status-ready-to-enforce pass "culvert-status: ready to enforce" || check 5 status-ready-to-enforce fail "$(grep -m1 -i 'State:' "$EV/05-status.txt")"
     api GET /api/ca-cert | body | openssl x509 -noout -fingerprint -sha256 2>/dev/null | cut -d= -f2 > "$EV/05-ca-fingerprint.txt" || true
     [[ -s "$EV/05-ca-fingerprint.txt" ]] && check 5 ca-identity pass "root CA sha256 $(cat "$EV/05-ca-fingerprint.txt")" || check 5 ca-identity fail "no CA certificate"
@@ -395,7 +602,7 @@ PY
     local deadline=$(( $(date +%s) + LAB_FEED_TIMEOUT )) fs="" fl=""
     until fs="$(api GET /api/urlcat/feed-status | body | python3 -c 'import json,sys; u=json.load(sys.stdin).get("ut1",{}); print("%s %s" % (u.get("lastSync",""), u.get("entries",0)) if u.get("lastSync") and int(u.get("entries",0))>0 else "")' 2>/dev/null)" && [[ -n "$fs" ]]; do
       (( $(date +%s) < deadline )) || break; sleep 20; done
-    fl="$(gssh 'sudo docker logs culvert 2>&1 | grep -oE "FeedSync: [^\"]*" | tail -3' 2>/dev/null | tr '\n' ';' || true)"
+    fl="$(gpriv 2>/dev/null <<<'docker logs culvert 2>&1 | grep -oE "FeedSync: [^\"]*" | tail -3' | tr '\n' ';' || true)"
     api GET /api/urlcat/feed-status > "$EV/05b-feed-status.txt" || true
     echo "${fs:-no completed UT1 sync reported by /api/urlcat/feed-status within ${LAB_FEED_TIMEOUT}s}; log: ${fl:-none}" > "$EV/05b-feed.txt"
     lookups > "$EV/05b-lookups-before.txt"
@@ -435,7 +642,7 @@ PY
     # L11: the first boot must have INSTALLED the bundled agent (not merely
     # left a pending marker), at the image's own version, and the proxy must
     # reach it over its socket.
-    gssh 'systemctl is-active culvert-maint; culvert-maint --version; cat /srv/culvert/.env 2>/dev/null | grep -c "^CULVERT_MAINT_GID=" ; ls /var/lib/culvert-appliance/state/' > "$EV/06-agent-installed.txt" 2>&1 || true
+    gpriv > "$EV/06-agent-installed.txt" 2>&1 <<<'systemctl is-active culvert-maint; culvert-maint --version; grep -c "^CULVERT_MAINT_GID=" /srv/culvert/.env; ls /var/lib/culvert-appliance/state/' || true
     local appv agv; appv="$(curl -fsS -m 10 "$P/health" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("version",""))' 2>/dev/null || true)"
     agv="$(sed -n 2p "$EV/06-agent-installed.txt")"
     if [[ "$(head -1 "$EV/06-agent-installed.txt")" == active && -n "$agv" && "$agv" == "v${appv#v}" ]] && ! grep -qx 'agent.pending' "$EV/06-agent-installed.txt"; then
@@ -454,7 +661,7 @@ PY
     api GET /api/backups > "$EV/06-backups.txt" || true
     [[ -n "$fn" ]] && grep -qF "$fn" "$EV/06-backups.txt" && check 6 backup-listed pass "$fn listed by /api/backups" || check 6 backup-listed fail "backup ${fn:-?} not listed"
     if [[ -n "$fn" ]]; then
-      gssh "cd /srv/culvert && sudo docker compose --profile cli run --rm -T cli --restore /backup/$fn --mode full" > "$EV/06-restore-dryrun.txt" 2>&1 || true
+      groot "cd /srv/culvert && docker compose --profile cli run --rm -T cli --restore /backup/$fn --mode full" 900 > "$EV/06-restore-dryrun.txt" 2>&1 || true
       # The CLI prints "Validation: PASS" (or FAIL) and, for a dry run, "No files
       # were written". The old oracle looked for "validation passed", which this
       # CLI never prints, so a passing dry run read as FAIL (run 37185033699).
@@ -465,21 +672,64 @@ PY
     save_state BACKUP_FILE "$fn"
   fi
 
+
+  # Step 6b — ACTUAL restore of that backup (the documented offline commit),
+  # with a change made after the backup as the oracle: it must be gone after
+  # the restore, and everything the backup held must still be there.
+  if gate 6b restore-commit && [[ -n "${BACKUP_FILE:-}" ]]; then
+    local pb rules
+    pb="$(api POST /api/policy '{"name":"lab-post-backup","priority":20,"action":"Allow","destFQDN":"example.net","sslAction":"Bypass","enabled":true}' | tee "$EV/06b-post-backup-rule.txt" | code)"
+    rules="$(api GET /api/policy | body | python3 -c 'import json,sys;print(" ".join(r["name"] for r in json.load(sys.stdin)["rules"]))' 2>/dev/null || true)"
+    [[ "$pb" == 200 && " $rules " == *" lab-post-backup "* ]] || check 6b post-backup-change fail "could not add the post-backup rule (http $pb; rules: $rules)"
+    # The proxy holds the data-dir lock for its lifetime: a commit against the
+    # RUNNING stack must be refused and change nothing.
+    rc=0; groot "cd /srv/culvert && docker compose --profile cli run --rm -T cli --restore /backup/$BACKUP_FILE --mode full --confirm; echo \"commit-rc=\$?\"" 900 > "$EV/06b-restore-live.txt" 2>&1 || rc=$?
+    rules="$(api GET /api/policy | body | python3 -c 'import json,sys;print(" ".join(r["name"] for r in json.load(sys.stdin)["rules"]))' 2>/dev/null || true)"
+    if grep -qE '^commit-rc=[1-9]' "$EV/06b-restore-live.txt" && [[ " $rules " == *" lab-post-backup "* ]]; then
+      check 6b restore-refused-while-running pass "commit against the running stack refused ($(grep -m1 -iE 'lock|running|refus' "$EV/06b-restore-live.txt" | head -c 160)); the post-backup rule is untouched"
+    else check 6b restore-refused-while-running fail "$(grep -E '^commit-rc=' "$EV/06b-restore-live.txt") rules after: $rules"; fi
+    # Offline: down → commit → up (docs/operator/docker-compose-backup-restore.md §6).
+    rc=0; gpriv --timeout 1500 > "$EV/06b-restore-offline.txt" 2>&1 <<EOS || rc=$?
+cd /srv/culvert || exit 90
+docker compose down 2>&1; echo "down-rc=\$?"
+docker compose --profile cli run --rm -T cli --restore /backup/$BACKUP_FILE --mode full --confirm 2>&1; r=\$?; echo "commit-rc=\$r"
+docker compose up -d 2>&1; echo "up-rc=\$?"
+exit \$r
+EOS
+    local deadline=$(( $(date +%s) + 600 ))
+    until curl -fsS -m 3 "$P/health" >/dev/null 2>&1; do (( $(date +%s) < deadline )) || break; sleep 5; done
+    : > "$JAR"; c="$(api POST /api/auth/login "{\"user\":\"$ADMIN_USER\",\"pass\":\"$pass\"}" | code)"
+    rules="$(api GET /api/policy | body | python3 -c 'import json,sys;print(" ".join(r["name"] for r in json.load(sys.stdin)["rules"]))' 2>/dev/null || true)"
+    local ra; ra="$(through_proxy http://example.com/) $(through_proxy http://example.net/)"
+    printf 'exit %s\nlogin %s\nrules %s\ntraffic example.com/example.net %s\n' "$rc" "$c" "$rules" "$ra" >> "$EV/06b-restore-offline.txt"
+    if [[ $rc == 0 && $c == 200 && " $rules " == *" lab-allow-example "* && " $rules " != *" lab-post-backup "* && "$ra" == "200 403" ]]; then
+      check 6b restore-commit pass "down → restore --confirm → up: login 200, backup rules back ($rules), post-backup rule gone, example.com 200 / example.net 403"
+    else check 6b restore-commit fail "exit $rc login $c rules '$rules' traffic $ra ($(grep -E '^(down|commit|up)-rc=' "$EV/06b-restore-offline.txt" | tr '\n' ' '))"; STOP=1; fi
+  elif [[ $STOP == 0 ]]; then check 6b restore-commit not-run "no backup file"; fi
+
+  # Step 6c — signed update and rollback through the maintenance agent, with
+  # TEST-ONLY trust (LAB_UPDATE_DIR, prepared outside the OVA by the lab).
+  if gate 6c signed-update; then
+    if [[ -z "$LAB_UPDATE_DIR" || ! -s "$LAB_UPDATE_DIR/refs.env" ]]; then
+      check 6c signed-update blocked "no LAB_UPDATE_DIR (registry + fixture evidence are prepared by the lab workflow)"
+    else signed_update_rollback; fi
+  fi
   # Step 7 — OS update + reboot, kernel BEFORE → AFTER.
   if gate 7 os-update; then
-    gssh 'sudo culvert-os-update check' > "$EV/07-check-before.txt" 2>&1 || true
-    local rc=0; timeout 2400 ssh "${SSH_OPTS[@]}" "culvert@$LAB_HOST" 'sudo culvert-os-update os' > "$EV/07-os-update.txt" 2>&1 || rc=$?
+    gpriv > "$EV/07-check-before.txt" 2>&1 <<<'culvert-os-update check' || true
+    local rc=0; groot 'culvert-os-update os' 2700 > "$EV/07-os-update.txt" 2>&1 || rc=$?
     [[ $rc == 0 ]] && check 7 os-update pass "culvert-os-update os exit 0 ($(grep -cE '^(Setting up|Unpacking) ' "$EV/07-os-update.txt" || true) package actions)" || check 7 os-update fail "exit $rc: $(tail -3 "$EV/07-os-update.txt" | tr '\n' ' ')"
-    gssh 'sudo culvert-os-update check; ls -l /var/run/reboot-required 2>/dev/null; dpkg -l "linux-image-*" | awk "/^ii/{print \$2, \$3}"; apt-mark showhold; sudo docker version --format "{{.Server.Version}}"' > "$EV/07-check-after-update.txt" 2>&1 || true
-    gssh 'sudo culvert-os-update reboot' > "$EV/07-reboot.txt" 2>&1 || true
+    gpriv > "$EV/07-check-after-update.txt" 2>&1 <<<'culvert-os-update check; ls -l /var/run/reboot-required 2>/dev/null; dpkg -l "linux-image-*" | awk "/^ii/{print \$2, \$3}"; apt-mark showhold; docker version --format "{{.Server.Version}}"' || true
+    # The reboot ends the console session; the next privileged call logs in again.
+    gpriv --nowait > "$EV/07-reboot.txt" 2>&1 <<<'culvert-os-update reboot' || true
     local deadline=$(( $(date +%s) + LAB_FIRSTBOOT_TIMEOUT )) t0; t0=$(date +%s); sleep 20
-    until curl -fsS -m 3 "$P/health" >/dev/null 2>&1 && gssh true 2>/dev/null; do
+    until curl -fsS -m 3 "$P/health" >/dev/null 2>&1 && gop status-json >/dev/null 2>&1; do
       qemu_alive || { check 7 reboot fail "qemu exited during the reboot"; STOP=1; break; }
       (( $(date +%s) < deadline )) || { check 7 reboot fail "not back within ${LAB_FIRSTBOOT_TIMEOUT}s"; STOP=1; break; }
       sleep 10; done
     if [[ $STOP == 0 ]]; then
-      check 7 reboot pass "proxy /health and SSH back $(( $(date +%s) - t0 ))s after the reboot command"
-      gssh 'uname -r; uname -v' > "$EV/07-kernel-after.txt" 2>&1 || true
+      check 7 reboot pass "proxy /health and operator SSH back $(( $(date +%s) - t0 ))s after the reboot command"
+      gpriv > "$EV/07-kernel-after.txt" 2>&1 <<<'uname -r; uname -v' || true
       local kb ka; kb="$(head -1 "$EV/03-kernel-before.txt")"; ka="$(head -1 "$EV/07-kernel-after.txt")"
       local newer; newer="$(awk -v run="linux-image-$kb" '$1 ~ /^linux-image-[0-9]/ && $1 != run {print $1}' "$EV/07-check-after-update.txt" | tr '\n' ' ')"
       if [[ "$kb" != "$ka" ]]; then check 7 kernel pass "kernel CHANGED $kb → $ka"
@@ -492,10 +742,16 @@ PY
 
   # Step 8 — persistence and readiness after the reboot.
   if gate 8 persistence; then
-    gssh 'sudo culvert-status; ls /var/lib/culvert-appliance/state/' > "$EV/08-status-after-reboot.txt" 2>&1 || true
+    gpriv > "$EV/08-status-after-reboot.txt" 2>&1 <<<'culvert-status; ls /var/lib/culvert-appliance/state/' || true
     # F-OSU-REBOOT-1: the stack stopped by `culvert-os-update reboot` is started
     # by culvert-stack-resume.service, which clears its marker only on success.
-    gssh 'systemctl show culvert-stack-resume.service -p LoadState -p ActiveState -p Result -p ExecMainStatus; sudo journalctl -b -u culvert-stack-resume --no-pager; test -e /var/lib/culvert-appliance/state/stack-resume-on-boot && echo MARKER-PRESENT || echo MARKER-CLEARED; echo "--- /var/log/culvert-os-update.log, resume-stack lines since this boot"; b=$(date -u -d "$(uptime -s)" +%FT%TZ); sudo awk -v b="$b" '"'"'$1 >= b && /\[resume-stack\]/'"'"' /var/log/culvert-os-update.log' > "$EV/08-stack-resume.txt" 2>&1 || true
+    gpriv > "$EV/08-stack-resume.txt" 2>&1 <<'EOS' || true
+systemctl show culvert-stack-resume.service -p LoadState -p ActiveState -p Result -p ExecMainStatus
+journalctl -b -u culvert-stack-resume --no-pager
+test -e /var/lib/culvert-appliance/state/stack-resume-on-boot && echo MARKER-PRESENT || echo MARKER-CLEARED
+echo "--- /var/log/culvert-os-update.log, resume-stack lines since this boot"
+b=$(date -u -d "$(uptime -s)" +%FT%TZ); awk -v b="$b" '$1 >= b && /\[resume-stack\]/' /var/log/culvert-os-update.log
+EOS
     # The script's own log file is the durable record: its last line can miss
     # the journal when systemd reaps the unit's cgroup before tee flushes
     # (run 37193814711), so the success line may come from either; only
@@ -522,11 +778,112 @@ PY
     [[ -n "${BACKUP_FILE:-}" ]] && grep -qF "$BACKUP_FILE" "$EV/08-backups.txt" && check 8 backup-listed pass "$BACKUP_FILE still listed" || check 8 backup-listed fail "backup ${BACKUP_FILE:-?} not listed"
     c="$(api GET /api/maintenance-agent | tee "$EV/08-agent-status.txt" | code)"
     local av8; av8="$(agent_status_verdict "$EV/08-agent-status.txt")"; check 8 agent-reachable "${av8%%|*}" "${av8#*|} (after the maintenance reboot)"
-    gssh 'sudo journalctl -b -u culvert-firstboot --no-pager | tail -20' > "$EV/08-firstboot-journal.txt" 2>&1 || true
+    gpriv > "$EV/08-firstboot-journal.txt" 2>&1 <<<'journalctl -b -u culvert-firstboot --no-pager | tail -20' || true
     grep -q 'step .*: done' "$EV/08-firstboot-journal.txt" && check 8 firstboot-not-rerun fail "a first-boot step ran again" || check 8 firstboot-not-rerun pass "no first-boot step ran on the second boot"
     cmp -s <(sed -n '/\.done$/p' "$EV/03-state-files.txt") <(sed -n '/\.done$/p' "$EV/08-status-after-reboot.txt") && check 8 state-files pass "first-boot state files unchanged" || check 8 state-files info "state listing changed — see 08-status-after-reboot.txt"
+    if [[ ! -s "$EV/06b-restore-offline.txt" ]]; then check 8 restore-persisted not-run "no restore was committed"
+    elif grep -qw lab-post-backup "$EV/08-rules.txt"; then check 8 restore-persisted fail "the rule added after the backup is back after the reboot"
+    else check 8 restore-persisted pass "the restored policy (no lab-post-backup) survived the reboot"; fi
+    gpriv > "$EV/08-image.txt" 2>&1 <<<'docker inspect -f "{{.Image}}" culvert' || true
+    if [[ -n "$LAB_EXPECT_IMAGE_ID" ]]; then grep -qx "$LAB_EXPECT_IMAGE_ID" "$EV/08-image.txt" && check 8 image-identity pass "culvert runs $LAB_EXPECT_IMAGE_ID after the reboot$([[ -n "$LAB_UPDATE_DIR" ]] && echo ' (the signed rollback target)')" || check 8 image-identity fail "runs $(head -1 "$EV/08-image.txt"), want $LAB_EXPECT_IMAGE_ID"; fi
+    gop status-json > "$EV/08-status-json.json" 2>&1 || true
+    [[ "$(status_field "$EV/08-status-json.json" setup_status)" == completed ]] && check 8 operator-status pass "status-json after the reboot: setup_status=completed, phase=$(status_field "$EV/08-status-json.json" phase)" || check 8 operator-status fail "setup_status=$(status_field "$EV/08-status-json.json" setup_status)"
+    boot_timing 08d 8
   fi
   redact_tree
+}
+
+# ── signed update + rollback (step 6c), TEST-ONLY trust ──────────────────────
+# LAB_UPDATE_DIR (prepared by the lab workflow, never part of the OVA):
+#   refs.env            BASELINE_REF / TARGET_REF (ghcr.io/kidcarmi/culvert@sha256:…),
+#                       REGISTRY_ADDR (how the guest reaches the disposable registry)
+#   ca.crt              the disposable registry's CA (its certificate names ghcr.io)
+#   keyring.json        the fixture's PUBLIC ed25519 key (the private key was never saved)
+#   apply-unsigned.json apply-signed.json rollback-signed.json  agent request bodies
+# The guest-side changes are TEST-ONLY and listed in 06c-test-only-trust.txt:
+# /etc/hosts maps ghcr.io to the lab registry, docker trusts its CA, the agent
+# trusts the fixture keyring (release_trust_keys), and the running image is
+# given its registry identity by pulling the SAME index digest it already runs.
+# Calls go to the agent socket as the configured proxy peer (allow_peers UID +
+# the maintenance group), exactly the identity the product's dispatch uses;
+# the proxy's Release Management dispatch itself is NOT exercised here.
+AGENT_LIB='set -u
+CONF=/etc/culvert-maint/config.toml
+U=$(sed -n "s/^allow_peers *= *\[\"\([0-9][0-9]*\)\"\].*/\1/p" "$CONF" | head -1)
+G=$(sed -n "s/^CULVERT_MAINT_GID=//p" /srv/culvert/.env | head -1)
+SOCK=$(sed -n "s/^socket_path *= *\"\(.*\)\".*/\1/p" "$CONF" | head -1); SOCK=${SOCK:-/run/culvert-maint/culvert-maint.sock}
+[ -n "$U" ] && [ -n "$G" ] || { echo "no agent peer identity (allow_peers uid=$U gid=$G)"; exit 90; }
+agentq() { setpriv --reuid="$U" --regid="$G" --clear-groups curl -sS -m 120 --unix-socket "$SOCK" -H "Content-Type: application/json" "$@"; }
+agent() { agentq -w "\nHTTP %{http_code}\n" "$@"; }
+opid() { python3 -c "import json,sys; print(json.loads(sys.stdin.read().rsplit(\"\\nHTTP\",1)[0]).get(\"op_id\",\"\"))" 2>/dev/null; }
+wait_op() { local st="" i
+  for i in $(seq 1 360); do
+    st=$(agentq "http://agent/v1/operations/$1" | python3 -c "import json,sys; print(json.load(sys.stdin).get(\"state\",\"\"))" 2>/dev/null)
+    case "$st" in succeeded|failed|cancelled) break ;; esac; sleep 5; done
+  echo "op-state=$st"; agentq "http://agent/v1/operations/$1" | head -c 20000; echo
+  echo "--- op log (tail)"; agentq "http://agent/v1/operations/$1/logs" | tail -c 6000; echo; }
+running() { local img; img=$(docker inspect culvert -f "{{.Image}}"); echo "running-image=$img"
+  echo "running-label=$(docker inspect culvert -f "{{index .Config.Labels \"org.culvert.lab-target\"}}")"
+  echo "repo-digests=$(docker image inspect "$img" -f "{{json .RepoDigests}}")"; }
+install -d -m 0755 /tmp/.lab-upd
+'
+# embed NAME FILE — a guest line that recreates FILE at /tmp/.lab-upd/NAME (0644).
+embed() { printf "echo '%s' | base64 -d > /tmp/.lab-upd/%s; chmod 0644 /tmp/.lab-upd/%s\n" "$(base64 -w0 "$2")" "$1" "$1"; }
+signed_update_rollback() {
+  local U="$LAB_UPDATE_DIR" BASELINE_REF TARGET_REF REGISTRY_ADDR rc
+  # shellcheck source=/dev/null
+  BASELINE_REF="$(. "$U/refs.env"; echo "$BASELINE_REF")"; TARGET_REF="$(. "$U/refs.env"; echo "$TARGET_REF")"
+  REGISTRY_ADDR="$(. "$U/refs.env"; echo "${REGISTRY_ADDR:-10.0.2.2}")"
+  local bdig="${BASELINE_REF#*@}" tdig="${TARGET_REF#*@}"
+  cp "$U/refs.env" "$EV/06c-refs.env"; [[ -f "$U/fixture.txt" ]] && cp "$U/fixture.txt" "$EV/06c-fixture.txt"
+  # 1. test-only trust + registry identity of the running image
+  rc=0; { printf '%s' "$AGENT_LIB"; embed ca.crt "$U/ca.crt"; embed keyring.json "$U/keyring.json"; cat <<EOS; } | gpriv --timeout 600 > "$EV/06c-test-only-trust.txt" 2>&1 || rc=$?
+set -e
+echo "TEST-ONLY lab trust (never part of the OVA):"
+install -d -m 0755 /etc/docker/certs.d/ghcr.io && install -m 0644 -o root -g root /tmp/.lab-upd/ca.crt /etc/docker/certs.d/ghcr.io/ca.crt && echo "  /etc/docker/certs.d/ghcr.io/ca.crt (disposable registry CA)"
+grep -qE '[[:space:]]ghcr\.io\$' /etc/hosts || echo "$REGISTRY_ADDR ghcr.io  # culvert lab TEST-ONLY" >> /etc/hosts; echo "  /etc/hosts: \$(grep -E '[[:space:]]ghcr\.io' /etc/hosts)"
+install -m 0644 -o root -g root /tmp/.lab-upd/keyring.json /etc/culvert-maint/lab-fixture-keyring.json && echo "  /etc/culvert-maint/lab-fixture-keyring.json (fixture PUBLIC key)"
+[ -e "\$CONF.lab-orig" ] || cp -p "\$CONF" "\$CONF.lab-orig"
+grep -q '^release_trust_keys' "\$CONF" || sed -i '1i release_trust_keys = "/etc/culvert-maint/lab-fixture-keyring.json"' "\$CONF"
+echo "  \$CONF:"; diff -u "\$CONF.lab-orig" "\$CONF" || true
+systemctl restart culvert-maint
+for i in \$(seq 1 30); do [ -S "\$SOCK" ] && break; sleep 1; done
+echo "agent=\$(systemctl is-active culvert-maint)"
+echo "--- registry identity: pull the SAME index digest the stack already runs"
+docker pull "$BASELINE_REF"
+running
+EOS
+  if [[ $rc == 0 ]] && grep -qx "running-image=$bdig" "$EV/06c-test-only-trust.txt" && grep -q "$BASELINE_REF" "$EV/06c-test-only-trust.txt" && grep -qx 'agent=active' "$EV/06c-test-only-trust.txt"; then
+    check 6c test-only-trust pass "registry CA, hosts entry, fixture keyring (public) installed; agent restarted; running image $bdig now carries $BASELINE_REF"
+  else check 6c test-only-trust fail "exit $rc: $(tail -5 "$EV/06c-test-only-trust.txt" | tr '\n' ' ' | head -c 300)"; return 0; fi
+  # 2. an unsigned request is refused before anything changes
+  rc=0; { printf '%s' "$AGENT_LIB"; embed unsigned.json "$U/apply-unsigned.json"; printf '%s\n' 'agent -X POST --data-binary @/tmp/.lab-upd/unsigned.json http://agent/v1/upgrades/apply' 'running'; } \
+    | gpriv --timeout 300 > "$EV/06c-apply-unsigned.txt" 2>&1 || rc=$?
+  grep -qx 'HTTP 403' "$EV/06c-apply-unsigned.txt" && grep -qx "running-image=$bdig" "$EV/06c-apply-unsigned.txt" \
+    && check 6c unsigned-apply-refused pass "apply without release evidence: 403 ($(grep -o '"error":"[^"]*"' "$EV/06c-apply-unsigned.txt" | head -1 | head -c 140)); still running the baseline" \
+    || check 6c unsigned-apply-refused fail "$(grep -E '^HTTP|running-image' "$EV/06c-apply-unsigned.txt" | tr '\n' ' ')"
+  # 3. signed apply baseline → target
+  rc=0; { printf '%s' "$AGENT_LIB"; embed apply.json "$U/apply-signed.json"
+          printf '%s\n' 'r=$(agent -X POST --data-binary @/tmp/.lab-upd/apply.json http://agent/v1/upgrades/apply); echo "$r" | tail -c 2000' \
+                        'op=$(printf "%s" "$r" | opid); echo "op=$op"; [ -n "$op" ] && wait_op "$op"' 'running'; } \
+    | gpriv --timeout 2100 > "$EV/06c-apply-signed.txt" 2>&1 || rc=$?
+  local a1 a2 a3
+  a1="$(grep -m1 '^op-state=' "$EV/06c-apply-signed.txt" || echo op-state=none)"; a2="$(grep -m1 '^running-image=' "$EV/06c-apply-signed.txt" | tail -1)"; a3="$(grep -m1 '^running-label=' "$EV/06c-apply-signed.txt")"
+  local t1 t2; t1="$(through_proxy http://example.com/)"; t2="$(through_proxy http://example.org/)"
+  if [[ "$a1" == op-state=succeeded && "$a2" == "running-image=$tdig" && "$a3" == running-label=1 && "$t1 $t2" == "200 403" ]]; then
+    check 6c signed-apply pass "agent apply with signed target + baseline evidence: succeeded; running $tdig (lab-target label); enforcement after the swap: example.com $t1, example.org $t2"
+  else check 6c signed-apply fail "$a1 $a2 $a3 traffic $t1/$t2 (want succeeded, $tdig)"; return 0; fi
+  # 4. signed rollback target → baseline (the agent's ledger holds the captured prior)
+  rc=0; { printf '%s' "$AGENT_LIB"; embed rollback.json "$U/rollback-signed.json"
+          printf '%s\n' 'r=$(agent -X POST --data-binary @/tmp/.lab-upd/rollback.json http://agent/v1/rollbacks); echo "$r" | tail -c 2000' \
+                        'op=$(printf "%s" "$r" | opid); echo "op=$op"; [ -n "$op" ] && wait_op "$op"' 'running'; } \
+    | gpriv --timeout 2100 > "$EV/06c-rollback-signed.txt" 2>&1 || rc=$?
+  a1="$(grep -m1 '^op-state=' "$EV/06c-rollback-signed.txt" || echo op-state=none)"; a2="$(grep -m1 '^running-image=' "$EV/06c-rollback-signed.txt" | tail -1)"; a3="$(grep -m1 '^running-label=' "$EV/06c-rollback-signed.txt")"
+  t1="$(through_proxy http://example.com/)"; t2="$(through_proxy http://example.org/)"
+  : > "$JAR"; local lc; lc="$(api POST /api/auth/login "{\"user\":\"$ADMIN_USER\",\"pass\":\"$(cat "$SEC/admin-pass")\"}" | code)"
+  if [[ "$a1" == op-state=succeeded && "$a2" == "running-image=$bdig" && "$a3" == running-label= && "$t1 $t2 $lc" == "200 403 200" ]]; then
+    check 6c signed-rollback pass "agent image rollback to the signed baseline: succeeded; running $bdig again; example.com $t1, example.org $t2; admin login $lc"
+  else check 6c signed-rollback fail "$a1 $a2 $a3 traffic $t1/$t2 login $lc (want succeeded, $bdig)"; fi
 }
 # Probe hosts for the community category layer (UT1 feed): recorded before and
 # after the reboot; the comparison, not any one verdict, is the persistence check.
@@ -540,18 +897,25 @@ except Exception: print(f"{h} error"); sys.exit()
 print("%s category=%s tier=%s matchedBy=%s" % (h, d.get("category") or "", d.get("tier") or "", d.get("matchedBy") or ""))' "$h"
   done; }
 
+
 # ── collect: guest diagnostics + identities → REPORT.md (redacted) ──────────
 cmd_collect() {
   mkdir -p "$EV/guest"
-  if qemu_alive && gssh true 2>/dev/null; then
-    gssh 'sudo culvert-status --json' > "$EV/guest/culvert-status.json" 2>&1 || true
-    gssh 'sudo journalctl -u culvert-firstboot --no-pager' > "$EV/guest/firstboot-journal.txt" 2>&1 || true
-    gssh 'sudo cat /var/log/culvert-firstboot.log' > "$EV/guest/firstboot.log" 2>&1 || true
-    gssh 'cloud-init status --long; sudo cloud-init query ds 2>/dev/null | head -5' > "$EV/guest/cloud-init.txt" 2>&1 || true
-    gssh 'sudo docker ps -a --format "{{.Names}} {{.Image}} {{.Status}}"; df -h / /var/lib/docker; uname -a' > "$EV/guest/runtime.txt" 2>&1 || true
-    gssh 'sudo docker logs --tail 200 culvert 2>&1' > "$EV/guest/proxy-log-tail.txt" 2>&1 || true
+  if { [[ "$LAB_EXTERNAL" == 1 ]] || qemu_alive; } && gop status-json > "$EV/guest/status-json.json" 2>/dev/null; then
+    gop diagnostics > "$EV/guest/operator-diagnostics.txt" 2>&1 || true
+    gpriv --timeout 300 > "$EV/guest/privileged-diagnostics.txt" 2>&1 <<'EOS' || true
+echo '=== culvert-status --json'; culvert-status --json
+echo '=== firstboot journal'; journalctl -u culvert-firstboot --no-pager | tail -400
+echo '=== firstboot log'; tail -400 /var/log/culvert-firstboot.log
+echo '=== cloud-init'; cloud-init status --long; cloud-init query ds 2>/dev/null | head -5
+echo '=== runtime'; docker ps -a --format "{{.Names}} {{.Image}} {{.Status}}"; df -h / /var/lib/docker; uname -a
+echo '=== agent'; systemctl status culvert-maint --no-pager | head -20; journalctl -u culvert-maint --no-pager | tail -150
+echo '=== proxy log tail'; docker logs --tail 200 culvert 2>&1
+EOS
   else check C guest-reachable info "guest not reachable at collect time; console log only"; fi
   [[ -f "$WORK/console.log" ]] && tr -d '\r' < "$WORK/console.log" | tail -c 2000000 > "$EV/guest/console.log"
+  [[ -f "$WORK/console-session-trace.txt" ]] && tr -d '\r' < "$WORK/console-session-trace.txt" | tail -c 2000000 > "$EV/guest/console-session-trace.txt"
+  [[ -f "$SEC/console-events" ]] && cp "$SEC/console-events" "$EV/guest/console-events.txt"
   redact_tree
   # Belt and braces: nothing private may leave the lab.
   if grep -rlE 'BEGIN [A-Z ]*PRIVATE KEY|X-Culvert-Setup-Token: [0-9a-f]{32}' "$EV" >/dev/null 2>&1; then check C redaction fail "private material found in evidence"; fi
@@ -564,6 +928,7 @@ cmd_collect() {
     echo "| appliance source (guest build-info) | \`$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["source"]["git_commit"])' "$EV/03-build-info.json" 2>/dev/null || echo '?')\` |"
     echo "| application image in the guest | \`${IMAGE_ID:-?}\` |"
     echo "| accelerator | ${ACCEL:-?} (preflight: \`preflight.json\`) |"
+    echo "| access | read-only \`culvert-operator\` SSH (imported key) + authenticated local console (\`culvert\`, PAM + sudo) |"
     echo; echo "| step | check | result | detail |"; echo "|---|---|---|---|"
     python3 - "$JSONL" <<'PY'
 import json,sys
@@ -574,7 +939,7 @@ PY
 import json,sys,collections
 c=collections.Counter(json.loads(l)["result"] for l in open(sys.argv[1])); print("Totals: "+", ".join(f"{k}={v}" for k,v in sorted(c.items())))
 PY
-    echo; echo "Not qualified by this lab: vSphere/ESXi import (ovftool), the guestinfo OVF transport, VMware Tools, LSI Logic SCSI, datastore/thin-provisioning behaviour, and F-DISK-1 (owned by the bounded nested-Docker harness; still OPEN)."
+    echo; echo "Not qualified by this lab: vSphere/ESXi import (ovftool), the guestinfo OVF transport, VMware Tools, LSI Logic SCSI, the hypervisor's tty1 console (ttyS0 here), datastore/thin-provisioning behaviour, the proxy's Release Management dispatch (6c calls the agent socket as its peer, with TEST-ONLY trust), and F-DISK-1 (owned by the bounded nested-Docker harness; still OPEN)."
   } > "$EV/REPORT.md"
   log "evidence: $EV/REPORT.md"
 }
@@ -586,16 +951,16 @@ cmd_down() {
     log "down (external): removed the lab's own disposable secrets; the VM and its key belong to the deploying tool"; return 0
   fi
   if qemu_alive; then
-    gssh 'sudo systemctl poweroff' >/dev/null 2>&1 || true
+    # ACPI power button through the monitor: no guest credential needed.
+    [[ -S "$MON_SOCK" ]] && python3 -c 'import socket,sys,time; s=socket.socket(socket.AF_UNIX); s.connect(sys.argv[1]); time.sleep(0.3); s.send(b"system_powerdown\n"); time.sleep(0.5)' "$MON_SOCK" 2>/dev/null || true
     for _ in $(seq 1 60); do qemu_alive || break; sleep 2; done
     qemu_alive && kill "$(cat "$WORK/qemu.pid")" 2>/dev/null; sleep 3
     qemu_alive && kill -9 "$(cat "$WORK/qemu.pid")" 2>/dev/null || true
   fi
-  rm -f "$MON_SOCK"
+  rm -f "$MON_SOCK" "$SER_SOCK"
   [[ "${LAB_KEEP_DISKS:-0}" == 1 ]] || rm -rf "$WORK/overlay.qcow2" "$WORK/base.qcow2" "$WORK/ova" "$WORK/ovfenv" "$WORK/ovfenv.iso"
   rm -rf "$SEC"; log "down: guest stopped, disposable disks and credentials removed (evidence kept in $EV)"
 }
-
 failures() { grep -c '"result":"fail"' "$JSONL" 2>/dev/null || true; }
 # Transport adapters may reuse the guest checks without dispatching QEMU.
 [[ "${LAB_LIBRARY_ONLY:-0}" == 1 ]] && return 0
