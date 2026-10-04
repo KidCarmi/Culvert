@@ -102,7 +102,17 @@ step_ovf() {
     if [[ "${mode,,}" == "static" ]]; then
       if [[ -n "$addr" && -n "$gw" ]]; then
         log "applying static network from OVF properties ($addr via $gw)"
-        "$BIN_DIR/culvert-net" static "$addr" "$gw" "${dns:-}" "${search:-}" --from-ovf
+        # A refused or rejected static configuration must NOT abort the first
+        # boot: culvert-net refuses before touching netplan (or restores the
+        # previous file), so the appliance is still on DHCP, and the operator
+        # needs the provisioned console credential and a running stack to fix
+        # it. Aborting here replayed the same refusal on every retry and, when
+        # this step ran first, left no local credential at all (PR #1528 P1).
+        if ! "$BIN_DIR/culvert-net" static "$addr" "$gw" "${dns:-}" "${search:-}" --from-ovf; then
+          log "WARNING: the OVF static network was refused; staying on DHCP. Fix it from the console: sudo culvert-net static <addr/prefix> <gateway> [dns] [search]"
+          console "culvert-firstboot: the OVF static network configuration was REFUSED; the appliance stays on DHCP."
+          console "culvert-firstboot: log in on this console and run: sudo culvert-net static <addr/prefix> <gateway> [dns] [search]"
+        fi
       else
         log "WARNING: culvert.net.mode=static but address/gateway missing — staying on DHCP"
         console "culvert-firstboot: static network requested without address/gateway; using DHCP"
@@ -370,6 +380,15 @@ step_finish() {
   done_step complete
 }
 
+# The local recovery credential (console) and the read-only operator key
+# (access) come FIRST: they never depend on the network, and every later step
+# — networking above all — may need an operator who can log in to repair it.
+provision_identity_then_network() {
+  step_console
+  step_access
+  step_ovf
+}
+
 main() {
   mkdir -p "$STATE"
   exec > >(tee -a "$LOG") 2>&1
@@ -381,9 +400,7 @@ main() {
     *) echo "usage: culvert-firstboot [--repair-agent]" >&2; exit 2 ;;
   esac
   log "start (appliance $(python3 -c 'import json;print(json.load(open("'"$STATE_DIR"'/build-info.json"))["appliance"]["version"])' 2>/dev/null || echo '?'))"
-  step_ovf
-  step_console
-  step_access
+  provision_identity_then_network
   step_images
   step_install
   step_agent

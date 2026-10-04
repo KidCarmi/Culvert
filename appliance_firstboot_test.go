@@ -876,3 +876,101 @@ func TestBuildOVA_CandidateModeIsLabelledAndScoped(t *testing.T) {
 		t.Fatal("the export must be guarded by CANDIDATE_BUILD=1")
 	}
 }
+
+// ── OVF networking must never cost the local recovery credential ────────────
+
+// ovfNetHarness wires the REAL culvert-net into the first-boot world, with an
+// OVF environment (vmtoolsd transport) asking for a static address via gw.
+func ovfNetHarness(t *testing.T, addr, gw string) (*fbHarness, string) {
+	t.Helper()
+	h := newFBHarness(t)
+	h.setShadow("!") // no console password supplied at import
+	h.setKey(true)   // key-only import
+	src, err := os.ReadFile(filepath.Join(pkgSourceDir(), "appliance", "provision", "culvert-net"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.writeExec(filepath.Join(h.bin, "culvert-net"), string(src))
+	h.writeExec(filepath.Join(h.bin, "culvert-access"), "#!/usr/bin/env bash\n[[ $* == --import-keys ]] || exit 2\necho import >> \"$FB_HARNESS/import.calls\"\n")
+	env := `<?xml version="1.0"?><Environment xmlns="http://schemas.dmtf.org/ovf/environment/1" xmlns:oe="http://schemas.dmtf.org/ovf/environment/1"><PropertySection>` +
+		`<Property oe:key="culvert.net.mode" oe:value="static"/>` +
+		`<Property oe:key="culvert.net.address" oe:value="` + addr + `"/>` +
+		`<Property oe:key="culvert.net.gateway" oe:value="` + gw + `"/></PropertySection></Environment>`
+	h.stub("vmtoolsd", "printf '%s' '"+env+"'")
+	h.stub("id", "echo 0")
+	h.stub("ip", `case "$*" in *route*) echo "default via 192.168.1.1 dev ens192";; *) echo "ens192 UP";; esac`)
+	h.stub("netplan", ":")
+	return h, filepath.Join(h.root, "60-culvert.yaml")
+}
+
+// PR #1528 P1 (owner review): a key-only / no-password import whose OVF static
+// network culvert-net refuses used to abort first boot BEFORE the console
+// credential and the operator key existed, so nobody could log in to fix it.
+// The real flow must now mint the change-required local recovery password and
+// import the read-only key, leave the network untouched (DHCP), say so on the
+// console, and keep provisioning.
+func TestFirstBoot_RefusedOVFNetworkKeepsLocalRecoveryUsable(t *testing.T) {
+	h, np := ovfNetHarness(t, "192.168.1.10/24", "192.168.2.1") // gateway outside the subnet
+	out, code := h.run(`export CULVERT_NET_NETPLAN_FILE="` + np + `"; console() { printf '%s\n' "$*" >> "$FB_HARNESS/display"; }; provision_identity_then_network`)
+	if code != 0 {
+		t.Fatalf("provisioning aborted on a refused OVF network (exit %d):\n%s", code, out)
+	}
+	if h.calledCount("chpasswd") != 1 || h.calledCount("chage") != 1 || !h.exists("bootstrap.in") {
+		t.Fatal("no change-required local recovery password was established")
+	}
+	if !h.exists("appliance/state/console.done") || !h.exists("appliance/state/access.done") {
+		t.Fatal("console/access steps were not committed")
+	}
+	if calls, _ := os.ReadFile(filepath.Join(h.root, "import.calls")); string(calls) != "import\n" {
+		t.Fatalf("operator key import calls = %q", calls)
+	}
+	if _, err := os.Stat(np); !os.IsNotExist(err) {
+		t.Fatal("a refused static configuration reached netplan")
+	}
+	if h.calledCount("netplan") != 0 {
+		t.Fatal("netplan ran for a refused configuration")
+	}
+	display, _ := os.ReadFile(filepath.Join(h.root, "display"))
+	if !strings.Contains(string(display), "One-time console login") || !strings.Contains(string(display), "static network configuration was REFUSED") {
+		t.Fatalf("console must show the recovery login AND the refused network:\n%s", display)
+	}
+	if strings.Index(string(display), "One-time console login") > strings.Index(string(display), "REFUSED") {
+		t.Fatal("the recovery credential must be shown before the network step runs")
+	}
+	if !h.exists("appliance/state/ovf.done") {
+		t.Fatal("the OVF step must complete (on DHCP) so later steps run")
+	}
+}
+
+// CONTROL: a valid OVF static network is still applied through netplan.
+func TestFirstBoot_ValidOVFNetworkIsApplied(t *testing.T) {
+	h, np := ovfNetHarness(t, "192.168.1.10/24", "192.168.1.1")
+	out, code := h.run(`export CULVERT_NET_NETPLAN_FILE="` + np + `"; console() { :; }; provision_identity_then_network`)
+	if code != 0 {
+		t.Fatalf("exit %d:\n%s", code, out)
+	}
+	b, err := os.ReadFile(np)
+	if err != nil || !strings.Contains(string(b), "via: 192.168.1.1") {
+		t.Fatalf("valid static network not written: %v\n%s", err, b)
+	}
+	if h.calledCount("netplan") != 2 {
+		t.Fatalf("netplan generate+apply expected, calls=%d", h.calledCount("netplan"))
+	}
+}
+
+// The main sequence itself runs identity before network (the regression above
+// drives the helper; this pins that main still calls it, first).
+func TestFirstBoot_MainEstablishesIdentityBeforeNetwork(t *testing.T) {
+	b, err := os.ReadFile(fbScript)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(b)
+	body := s[strings.Index(s, "\nmain() {"):]
+	body = body[:strings.Index(body, "\n}\n")]
+	first := strings.Index(body, "\n  step_")
+	helper := strings.Index(body, "\n  provision_identity_then_network\n")
+	if helper < 0 || (first >= 0 && first < helper) || strings.Contains(body, "\n  step_ovf\n") {
+		t.Fatalf("main must run provision_identity_then_network before any other step:\n%s", body)
+	}
+}
