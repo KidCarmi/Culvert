@@ -127,3 +127,42 @@ start_agent() {
   done
   echo "FATAL: agent socket/health did not come up"; cat "$AGENT_LOG" || true; return 1
 }
+
+# refused_op <op_id> <reason-pattern> <label> — a trust refusal. The agent
+# accepts an apply (202) before it can know the running baseline: the
+# baseline is captured by the op itself and authorized right after the
+# read-only space preflight. A refusal is therefore an op that FAILED on
+# the trust reason with no mutating stage (pre_backup, pull, restart,
+# health_gate, verify) ever started.
+refused_op() {
+  local st rec="$E2E_ROOT/op-$1.json"
+  st="$(op_wait "$1")"
+  curl -fsS --unix-socket "$SOCK" "http://localhost/v1/operations/$1" > "$rec" || true
+  cat "$rec"; echo
+  [ "$st" = failed ] || { echo "FATAL $3: op $1 state=$st (want failed)"; return 1; }
+  python3 - "$rec" "$2" "$3" <<'PY'
+import json, re, sys
+rec, pattern, label = json.load(open(sys.argv[1])), sys.argv[2], sys.argv[3]
+reason = rec.get("failure_reason", "") + " " + " ".join(s.get("output", "") for s in rec.get("progress") or [])
+if not re.search(pattern, reason):
+    sys.exit(f"FATAL {label}: op failed, but not on {pattern!r}: {rec.get('failure_reason')!r}")
+started = [s["stage"] for s in rec.get("progress") or []
+           if s["stage"] in ("pre_backup", "pull", "restart", "health_gate", "verify") and s.get("state") not in ("", "pending")]
+if started:
+    sys.exit(f"FATAL {label}: mutating stage(s) ran before the trust refusal: {started}")
+print(f"{label}: refused before any mutation — {rec.get('failure_reason')}")
+PY
+}
+
+# wait_dispatch_terminal <label> — the CP's dispatch watch has finished, so
+# the next dispatch is not refused as in-flight.
+wait_dispatch_terminal() {
+  local s phase=""
+  for _ in $(seq 1 90); do
+    s="$(curl -fsS "$ADMIN/api/releases/dispatch/status?agent=local" || true)"
+    phase="$(echo "$s" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("phase",""))' 2>/dev/null || true)"
+    [ "$phase" = terminal ] && { echo "$1 dispatch status: $s"; return 0; }
+    sleep 2
+  done
+  echo "FATAL $1: dispatch never reached a terminal state (phase=$phase)"; return 1
+}

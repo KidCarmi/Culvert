@@ -267,28 +267,23 @@ jobs:
       # lists only the target (the pre-lineage shape every release before the
       # lineage fix published) cannot prove what the node runs, so the proxy
       # sends no prior_release_proof and the agent — with an empty ledger —
-      # must refuse BEFORE any backup, pull or retag.
+      # must refuse BEFORE any backup, pull or retag. The agent accepts the
+      # request (it captures the running baseline inside the op) and the op
+      # fails at authorization — see refused_op.
       - name: "P2 — missing baseline proof is refused (RM API + agent)"
         run: |
           set -euxo pipefail
           . "$E2E_DIR/lib.sh"
           seed 2 2.0.0 "$D2"          # no carried predecessors
           reload_catalog P2
-          OP_BEFORE="$(agent_last_op)"
           CODE="$(dispatch "$RUNNER_TEMP/p2.json")"
           echo "dispatch HTTP $CODE"; cat "$RUNNER_TEMP/p2.json"; echo
-          [ "$CODE" = "502" ] || { echo "FATAL P2: expected the agent refusal (502), got HTTP $CODE"; exit 1; }
-          grep -q 'HTTP 403' "$RUNNER_TEMP/p2.json" || { echo "FATAL P2: refusal was not the agent's 403"; exit 1; }
-          # Same request straight to the agent, to read the agent's own reason.
-          emit planned "$D1_REF" "$RUNNER_TEMP/p2-apply.json"
-          A="$(agent_post /v1/upgrades/apply "$RUNNER_TEMP/p2-apply.json" "$RUNNER_TEMP/p2-agent.json")"
-          echo "agent HTTP $A"; cat "$RUNNER_TEMP/p2-agent.json"; echo
-          [ "$A" = 403 ] && grep -q 'observed signed baseline required' "$RUNNER_TEMP/p2-agent.json" \
-            || { echo "FATAL P2: agent did not refuse for the missing baseline"; exit 1; }
+          [ "$CODE" = "202" ] || { echo "FATAL P2: dispatch was not handed to the agent (HTTP $CODE)"; exit 1; }
+          refused_op "$(op_from "$RUNNER_TEMP/p2.json")" 'observed signed baseline required' P2
+          wait_dispatch_terminal P2
           [ "$(running_ref)" = "$D1_REF" ] || { echo "FATAL P2: image changed on a refused upgrade"; exit 1; }
-          [ "$(agent_last_op)" = "$OP_BEFORE" ] || { echo "FATAL P2: an agent operation was started"; exit 1; }
           [ "$(ledger_entries)" = absent ] || { echo "FATAL P2: a refused request wrote the ledger"; exit 1; }
-          echo "P2 OK: no signed baseline ⇒ refused (RM 502 / agent 403), nothing changed, ledger still empty."
+          echo "P2 OK: no signed baseline ⇒ the dispatched op failed at authorization before any mutation; image unchanged; ledger still empty."
 
       # ── P3: the lineage catalog. v2 now CARRIES v1 byte-identical from v1's own
       # signed catalog, so the proxy sends v1's signed proof. First prove the
@@ -307,13 +302,14 @@ jobs:
           emit no-prior "$D1_REF" "$RUNNER_TEMP/p3-noprior.json"
           A="$(agent_post /v1/upgrades/apply "$RUNNER_TEMP/p3-noprior.json" "$RUNNER_TEMP/p3-noprior.out")"
           echo "no-prior: agent HTTP $A"; cat "$RUNNER_TEMP/p3-noprior.out"; echo
-          [ "$A" = 403 ] && grep -q 'observed signed baseline required' "$RUNNER_TEMP/p3-noprior.out" \
-            || { echo "FATAL P3: an apply without baseline proof was not refused"; exit 1; }
+          [ "$A" = 202 ] || { echo "FATAL P3: no-prior apply not handled as an op (HTTP $A)"; exit 1; }
+          refused_op "$(op_from "$RUNNER_TEMP/p3-noprior.out")" 'observed signed baseline required' P3/no-prior
           emit prior=culvert-2.0.0 "$D1_REF" "$RUNNER_TEMP/p3-mismatch.json"
           A="$(agent_post /v1/upgrades/apply "$RUNNER_TEMP/p3-mismatch.json" "$RUNNER_TEMP/p3-mismatch.out")"
           echo "mismatched: agent HTTP $A"; cat "$RUNNER_TEMP/p3-mismatch.out"; echo
-          [ "$A" = 403 ] && grep -q 'release trust: baseline' "$RUNNER_TEMP/p3-mismatch.out" \
-            || { echo "FATAL P3: a baseline proof for another digest was not refused"; exit 1; }
+          [ "$A" = 202 ] || { echo "FATAL P3: mismatched apply not handled as an op (HTTP $A)"; exit 1; }
+          refused_op "$(op_from "$RUNNER_TEMP/p3-mismatch.out")" 'release trust: baseline' P3/mismatched
+          [ "$(running_ref)" = "$D1_REF" ] || { echo "FATAL P3: image changed on a refused apply"; exit 1; }
           [ "$(ledger_entries)" = absent ] || { echo "FATAL P3: refused requests wrote the ledger"; exit 1; }
 
           CODE="$(dispatch "$RUNNER_TEMP/disp.json")"
@@ -373,6 +369,8 @@ jobs:
           [ -n "$OP5" ] || { echo "FATAL P5: no op_id for the bad upgrade"; exit 1; }
           STATE="$(op_wait "$OP5")"; echo "bad-op terminal state=$STATE"
           wait_health P5
+          wait_admin P5
+          wait_dispatch_terminal P5 || true   # informational: the CP that dispatched was recreated
           [ "$(running_ref)" = "$D2_REF" ] || { echo "FATAL P5: appliance did NOT roll back to v2 (got $(running_ref)) — Sev-1 safety failure"; exit 1; }
           grep -q '^installed-' "$DATA_DIR/e2e_sentinel.txt" || { echo "FATAL P5: /data sentinel lost across the rollback"; exit 1; }
           echo "P5 OK: a failed-health upgrade dispatched by RM auto-rolled-back to v2, healthy, state intact."
