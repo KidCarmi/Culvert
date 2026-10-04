@@ -327,13 +327,18 @@ func c2EvaluateAndLog(r *http.Request, idx *metadataIndex) c2Decision {
 	case !d.Matched && d.MetaPath == "":
 		// Missing metadata entry entirely.
 		c2ShadowMissingMetaTotal.Add(1)
+		logPath := strings.ReplaceAll(strings.ReplaceAll(sanitizeLog(d.Path), "\n", "_"), "\r", "_")
+		logMethod := strings.ReplaceAll(strings.ReplaceAll(sanitizeLog(d.Method), "\n", "_"), "\r", "_")
 		logger.Printf("C2: no metadata for path=%q method=%q (drift between helpers and uiRoutes)",
-			sanitizeLog(strings.ReplaceAll(d.Path, "\n", "_")), sanitizeLog(strings.ReplaceAll(d.Method, "\n", "_")))
+			logPath, logMethod)
 	case !d.Matched && d.MetaPath != "":
 		// Path resolved but method had no policy.
 		c2ShadowNoPolicyTotal.Add(1)
+		logPath := strings.ReplaceAll(strings.ReplaceAll(sanitizeLog(d.Path), "\n", "_"), "\r", "_")
+		logMethod := strings.ReplaceAll(strings.ReplaceAll(sanitizeLog(d.Method), "\n", "_"), "\r", "_")
+		logMetaPath := strings.ReplaceAll(strings.ReplaceAll(sanitizeLog(d.MetaPath), "\n", "_"), "\r", "_")
 		logger.Printf("C2: no method policy for path=%q method=%q meta_path=%q",
-			sanitizeLog(strings.ReplaceAll(d.Path, "\n", "_")), sanitizeLog(strings.ReplaceAll(d.Method, "\n", "_")), sanitizeLog(strings.ReplaceAll(d.MetaPath, "\n", "_")))
+			logPath, logMethod, logMetaPath)
 	case d.WouldDeny:
 		c2ShadowWouldDenyTotal.Add(1)
 		// Log emission deferred to the middleware so the message can
@@ -454,14 +459,22 @@ func uiMetadataEnforcement(next http.Handler) http.Handler {
 		if d.WouldDeny {
 			if c2Mode() == c2ModeEnforce {
 				c2EnforceDeniedTotal.Add(1)
+				logPath := strings.ReplaceAll(strings.ReplaceAll(sanitizeLog(d.Path), "\n", "_"), "\r", "_")
+				logMethod := strings.ReplaceAll(strings.ReplaceAll(sanitizeLog(d.Method), "\n", "_"), "\r", "_")
+				logRole := strings.ReplaceAll(strings.ReplaceAll(sanitizeLog(string(d.SessionRole)), "\n", "_"), "\r", "_")
+				logMetaPath := strings.ReplaceAll(strings.ReplaceAll(sanitizeLog(d.MetaPath), "\n", "_"), "\r", "_")
 				logger.Printf("C2-enforce: DENIED path=%q method=%q session_role=%q required=%q meta_path=%q",
-					sanitizeLog(strings.ReplaceAll(d.Path, "\n", "_")), sanitizeLog(strings.ReplaceAll(d.Method, "\n", "_")), sanitizeLog(strings.ReplaceAll(string(d.SessionRole), "\n", "_")), d.RequiredRole, sanitizeLog(strings.ReplaceAll(d.MetaPath, "\n", "_")))
+					logPath, logMethod, logRole, d.RequiredRole, logMetaPath)
 				http.Error(w, "forbidden", http.StatusForbidden)
 				return
 			}
 			// Shadow mode — record the dry-run decision.
+			logPath := strings.ReplaceAll(strings.ReplaceAll(sanitizeLog(d.Path), "\n", "_"), "\r", "_")
+			logMethod := strings.ReplaceAll(strings.ReplaceAll(sanitizeLog(d.Method), "\n", "_"), "\r", "_")
+			logRole := strings.ReplaceAll(strings.ReplaceAll(sanitizeLog(string(d.SessionRole)), "\n", "_"), "\r", "_")
+			logMetaPath := strings.ReplaceAll(strings.ReplaceAll(sanitizeLog(d.MetaPath), "\n", "_"), "\r", "_")
 			logger.Printf("C2-shadow: WOULD-DENY path=%q method=%q session_role=%q required=%q meta_path=%q",
-				sanitizeLog(strings.ReplaceAll(d.Path, "\n", "_")), sanitizeLog(strings.ReplaceAll(d.Method, "\n", "_")), sanitizeLog(strings.ReplaceAll(string(d.SessionRole), "\n", "_")), d.RequiredRole, sanitizeLog(strings.ReplaceAll(d.MetaPath, "\n", "_")))
+				logPath, logMethod, logRole, d.RequiredRole, logMetaPath)
 		}
 
 		// C4 — inject the C2-evaluated MinRole into the request context
@@ -502,8 +515,11 @@ func uiMetadataEnforcement(next http.Handler) http.Handler {
 			return
 		}
 		c2AuditMissingTotal.Add(1)
+		logPath := strings.ReplaceAll(strings.ReplaceAll(sanitizeLog(d.Path), "\n", "_"), "\r", "_")
+		logMethod := strings.ReplaceAll(strings.ReplaceAll(sanitizeLog(d.Method), "\n", "_"), "\r", "_")
+		logMetaPath := strings.ReplaceAll(strings.ReplaceAll(sanitizeLog(d.MetaPath), "\n", "_"), "\r", "_")
 		logger.Printf("C2: audit missing for route=%q method=%q meta_path=%q status=%d",
-			sanitizeLog(strings.ReplaceAll(d.Path, "\n", "_")), sanitizeLog(strings.ReplaceAll(d.Method, "\n", "_")), sanitizeLog(strings.ReplaceAll(d.MetaPath, "\n", "_")), status)
+			logPath, logMethod, logMetaPath, status)
 	})
 }
 
