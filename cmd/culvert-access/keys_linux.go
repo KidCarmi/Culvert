@@ -114,6 +114,9 @@ func publishOperatorKeys(target string, data []byte) error {
 	if err := safeKeyAncestors(filepath.Dir(directory)); err != nil {
 		return err
 	}
+	// #nosec G301 -- This root-owned directory contains only public keys and
+	// must be searchable by sshd's unprivileged login identity. No non-root
+	// principal may write it; safeKeyAncestors verifies that before publishing.
 	if err := os.Mkdir(directory, 0o755); err != nil && !errors.Is(err, os.ErrExist) {
 		return err
 	}

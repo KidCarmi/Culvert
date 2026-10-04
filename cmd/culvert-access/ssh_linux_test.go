@@ -241,7 +241,9 @@ func TestAccessRealSSHBoundary(t *testing.T) {
 		t.Fatal("interactive SSH prompt or stdin isolation failed")
 	}
 	for _, command := range []string{"status; id", "status && id", "$(id)", "bash", "sudo -n id", "cat /etc/shadow", "curl --unix-socket /run/docker.sock http://localhost/info", "scp -t /tmp/test", "--import-keys", "recover"} {
-		out, err := sshFixture(t, append(append([]string{}, base...), target, command), "")
+		// End client option parsing so option-shaped remote commands reach the
+		// forced shell instead of being rejected by the local ssh executable.
+		out, err := sshFixture(t, append(append([]string{}, base...), "--", target, command), "")
 		if err == nil || !strings.Contains(out, "unsupported command") {
 			t.Fatalf("SSH bypass not explicitly refused: %s", command)
 		}
