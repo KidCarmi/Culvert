@@ -72,6 +72,24 @@ Vendor principles adopted: [Juniper confirmed commits](https://www.juniper.net/d
 and [Netplan's merged input semantics](https://netplan.readthedocs.io/en/stable/netplan-get/).
 This is a candidate implementation, not completed enterprise qualification.
 
+Current recovery evidence: [ESXi recovery smoke](evidence/esxi-recovery-smoke.json)
+records runtime `b4cc8b00`, [passing runtime CI](https://github.com/KidCarmi/Culvert/actions/runs/37184403252)
+and [additional authorization-boundary CI](https://github.com/KidCarmi/Culvert/actions/runs/37184866359).
+Three native Go suites passed twice, including root storage/installer faults.
+Real ESXi tests passed for operator disconnect plus worker SIGKILL and restart,
+timed rollback, explicit confirmation, preserved DHCPv6, unconfirmed static IPv4
+rollback after reboot, retained operation/boot IDs and unchanged machine ID.
+PAM rejection/login/logout, shell restoration, audit checks, four views and root
+poweroff also passed. Native binary and unit hashes match the recorded local bundle.
+
+The report retains the failed initial 150-second IP wait, the earlier DHCPv6
+preflight refusal that led to preservation support, and unsuccessful authentication
+helper attempts before the final state-driven run. The successful reboot check
+used a 300-second reconnection window and does not establish a boot-time SLA.
+The owned VM was deleted, independent inventory was empty, and private run files
+were removed. Full OVA/application qualification and security review remain open;
+older evidence below applies only to its named revisions.
+
 This additive component provides an ESXi-style local console after power-on.
 It is a static Go host binary built with the root `go.mod` toolchain,
 independent of Docker and the Culvert application. There is no new network
@@ -157,11 +175,12 @@ sudo systemctl restart getty@tty1.service
 ```
 
 These are read-only and never include a setup token, `.env`, raw journals or
-OVF data. Seven fixed probes execute concurrently with four-second subprocess
-timeouts (HTTP probes have two-second deadlines). Requests use loopback only,
+OVF data. Seven core probes and the prerequisite observations execute concurrently
+with four-second budgets (HTTP probes have two-second deadlines). HTTP requests use loopback only,
 disable curl's default configuration files and proxies, do not follow redirects,
-and reject oversized output instead of accepting a truncated response. Only the
-self-signed loopback setup-status read uses a TLS verification exception.
+and reject oversized output instead of accepting a truncated response. The
+loopback setup-status read and certificate-metadata inspection use scoped TLS
+verification exceptions; neither establishes certificate trust.
 No Docker API or command is required to render the display.
 
 - `phase`: `unknown`, `waiting`, `running`, `failed`, `provisioned`, `ready`.
@@ -207,8 +226,8 @@ application logging; raw probe stderr and credential-bearing output never enter
 the public status snapshot.
 
 Collection is read-only: existing firstboot code owns marker persistence and
-the application owns enrollment/readiness. A collection call starts seven bounded
-probes and joins them before returning. There are no detached background workers.
+the application owns enrollment/readiness. A collection call joins all core and
+prerequisite probes before returning; it starts no detached background workers.
 The command owns cancellation; child processes use that context. Menu input uses
 bounded polling, never a background stdin reader that could consume a later
 PAM password. Terminal modes/cursor are restored before login, confirmation or
@@ -275,11 +294,10 @@ terminal buffer held the complete menu. The retained reboot capture follows a
 tty2/tty1 switch to force a redraw; no image editing was used. This capture
 limitation remains recorded rather than counting a partial image as visual proof.
 
-Follow-on work: persistent explicit firstboot step/error events, guided network
-editing with host-side rollback (the current menu provides information/recovery
-only), independent browser bootstrap service, and application wizard integration.
-No network Apply button is offered before rollback is implemented. The proposed
-full browser setup experience is not delivered by this console slice.
+The historical prototype did not provide durable observations or network rollback.
+Those capabilities are implemented and qualified within the current scope above.
+Explicit firstboot-script step/error events, an independent browser bootstrap
+service and application wizard integration remain follow-on work.
 
 
 ## Visual console integration
@@ -318,10 +336,10 @@ select only the four visible entries, and Enter opens. B/Escape returns home.
 L/F2 signs in; Q logs out of the authenticated menu. 0 opens authenticated
 recovery (retry, confirmed power operations, shell). Public recovery requests
 only enter normal login; they do not queue an action to run after login. Network
-E opens authenticated recovery. No new network writer or rollback claim is
-introduced. Mode remains unknown instead of inferring DHCP/static from an IP.
-The report is a current observation, not a persisted receipt or attestation;
-configuration revision and external traffic verification are not collected.
+E opens the authenticated confirmed-change flow described above. Mode remains
+unknown instead of inferring DHCP/static from an IP. The report combines current
+observations with separately labelled persisted recovery records. It is not a
+security attestation or proof of external traffic verification.
 
 | Display fact | Authoritative observation |
 | --- | --- |
@@ -403,8 +421,8 @@ FIFO/device metadata, mismatched NIC/address observations and bounded layout
 fuzzing. These tests establish specific behavior, not a production certification.
 The earlier ESXi reports apply only to their recorded revisions.
 
-Remaining release work includes integrated OVA qualification, network changes
-with independent rollback, durable audit retention/forwarding, session policy for
+Remaining release work includes integrated OVA qualification, broader network
+topology qualification, centralized audit retention/forwarding, session policy for
 external PAM/sudo/recovery-shell children, and a completed security review. The
 menu idle timeout does not govern an interactive shell once it has been handed
 off. The firstboot archive-content blocker and ESXi screenshot capture limitation
