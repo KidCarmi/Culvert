@@ -141,7 +141,7 @@ class Bootstrap:
         ensure(png.is_file() and 0 < png.stat().st_size <= 10 * 1024**2, 'private screenshot unavailable or oversized')
         timeout = max(1, int(self.budget(15, deadline)))
         result = subprocess.run(['powershell.exe', '-NoProfile', '-NonInteractive', '-File', str(HERE / 'console-ocr.ps1'),
-                                 '-ImagePath', str(png), '-OutputPath', str(ocr), '-TimeoutSeconds', str(timeout)],
+                                 '-ImagePath', str(png), '-OutputPath', str(ocr), '-TimeoutSeconds', str(timeout), '-Scale', '2'],
                                 env={k: v for k, v in os.environ.items() if k.upper() != 'PSMODULEPATH'},
                                 capture_output=True, timeout=self.budget(timeout + 3, deadline))
         if result.returncode or not ocr.is_file():

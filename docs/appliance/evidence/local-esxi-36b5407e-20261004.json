@@ -1,0 +1,779 @@
+{
+  "schema": 2,
+  "candidate": "36b5407e",
+  "qualification": "functional baseline and same-volume actual restore passed; default bootstrap blocked by console prompt OCR; enterprise signoff not granted",
+  "artifact": {
+    "ova_sha256": "7bd09aaac19ab0525654d2863d4382bf0415e0ac75e2b55aee8a424a9df6bca1",
+    "source_sha": "36b5407e5bd3ff3c883bf855c269b8b7675013ed",
+    "image_source_sha": "36b5407e5bd3ff3c883bf855c269b8b7675013ed",
+    "image_id": "sha256:2aeee47447ec989111379bcf39bef6d64d2be4dba2db352f5af16db6c70a964f",
+    "provisioning_drift": false
+  },
+  "artifact_name": "culvert-appliance-1.0.260-candidate.g36b5407e5bd3-ubuntu-24.04.ova",
+  "github_artifact_id": 11300957991,
+  "zip_sha256": "71ca49e7529133ade59bbefee624a168b88b74857ffe757c8faf1080ec793b72",
+  "hypervisor": {
+    "name": "VMware ESXi",
+    "fullName": "VMware ESXi 8.0.1 build-21813344",
+    "vendor": "VMware, Inc.",
+    "version": "8.0.1",
+    "patchLevel": "0.10",
+    "build": "21813344",
+    "localeVersion": "INTL",
+    "localeBuild": "000",
+    "osType": "vmnix-x86",
+    "productLineId": "embeddedEsx",
+    "apiType": "HostAgent",
+    "apiVersion": "8.0.1.0",
+    "licenseProductName": "VMware ESX Server",
+    "licenseProductVersion": "8.0"
+  },
+  "resources": {
+    "vcpu": 2,
+    "ram_mib": 4096,
+    "guest_disk_gib": 40,
+    "concurrent_vms_max": 1,
+    "firmware": "bios",
+    "network": "VM Network",
+    "datastore": "DataStore2"
+  },
+  "baseline": {
+    "counts": {
+      "pass": 47
+    },
+    "checks": [
+      {
+        "run": "20261004T114422Z",
+        "step": "3",
+        "check": "status-setup-pending",
+        "result": "pass",
+        "detail": "  STATE:              services running \u2014 setup pending (create the first admin at https://192.168.1.137:9090)"
+      },
+      {
+        "run": "20261004T114422Z",
+        "step": "3",
+        "check": "firstboot-steps",
+        "result": "pass",
+        "detail": "agent complete console images install ovf"
+      },
+      {
+        "run": "20261004T114422Z",
+        "step": "3",
+        "check": "image-identity",
+        "result": "pass",
+        "detail": "culvert runs sha256:2aeee47447ec989111379bcf39bef6d64d2be4dba2db352f5af16db6c70a964f"
+      },
+      {
+        "run": "20261004T114422Z",
+        "step": "3",
+        "check": "setup-token",
+        "result": "pass",
+        "detail": "32 characters, read from culvert-status over SSH"
+      },
+      {
+        "run": "20261004T114422Z",
+        "step": "4",
+        "check": "setup-without-token",
+        "result": "pass",
+        "detail": "403"
+      },
+      {
+        "run": "20261004T114422Z",
+        "step": "4",
+        "check": "setup-with-token",
+        "result": "pass",
+        "detail": "200"
+      },
+      {
+        "run": "20261004T114422Z",
+        "step": "4",
+        "check": "admin-login",
+        "result": "pass",
+        "detail": "200 after successful setup"
+      },
+      {
+        "run": "20261004T114422Z",
+        "step": "4",
+        "check": "status-setup-complete",
+        "result": "pass",
+        "detail": "culvert-status: Setup complete: yes"
+      },
+      {
+        "run": "20261004T114422Z",
+        "step": "5",
+        "check": "auth-exempt",
+        "result": "pass",
+        "detail": "200"
+      },
+      {
+        "run": "20261004T114422Z",
+        "step": "5",
+        "check": "default-deny",
+        "result": "pass",
+        "detail": "{\"defaultAction\":\"deny\"}"
+      },
+      {
+        "run": "20261004T114422Z",
+        "step": "5",
+        "check": "traffic",
+        "result": "pass",
+        "detail": "example.com 403 \u2192 rule \u2192 200; example.org 403 (real egress through the guest proxy)"
+      },
+      {
+        "run": "20261004T114422Z",
+        "step": "5",
+        "check": "ready-rows",
+        "result": "pass",
+        "detail": "ca ok;policy_loaded ok;policy_posture ok;"
+      },
+      {
+        "run": "20261004T114422Z",
+        "step": "5",
+        "check": "clamav-real",
+        "result": "pass",
+        "detail": "C:/Program Files/Git/ready clamav ok \u2014 the REAL clamav/clamav sidecar from the OVA, signatures fetched by the guest"
+      },
+      {
+        "run": "20261004T114422Z",
+        "step": "5",
+        "check": "status-ready-to-enforce",
+        "result": "pass",
+        "detail": "culvert-status: ready to enforce"
+      },
+      {
+        "run": "20261004T114422Z",
+        "step": "5",
+        "check": "ca-identity",
+        "result": "pass",
+        "detail": "root CA sha256 CE:E8:08:99:87:F6:AD:CA:5D:2E:2A:7C:33:FD:BB:18:A2:00:DE:60:B6:8E:49:9D:69:AB:41:14:A9:1E:80:73"
+      },
+      {
+        "run": "20261004T114422Z",
+        "step": "5b",
+        "check": "category-data",
+        "result": "pass",
+        "detail": "UT1 sync complete (lastSync entries: 2026-10-04T11:34:57Z 2570741); 2 of 5 probe hosts resolve via the community tier"
+      },
+      {
+        "run": "20261004T114422Z",
+        "step": "5c",
+        "check": "category-enforcement",
+        "result": "pass",
+        "detail": "thepiratebay.org (Malicious via UT1): category rule \u2192 403; without it \u2192 301"
+      },
+      {
+        "run": "20261004T114422Z",
+        "step": "6",
+        "check": "agent-installed",
+        "result": "pass",
+        "detail": "culvert-maint active, version v1.0.260-candidate.g36b5407e5bd3 = proxy v1.0.260-candidate.g36b5407e5bd3, no agent.pending"
+      },
+      {
+        "run": "20261004T114422Z",
+        "step": "6",
+        "check": "agent-reachable",
+        "result": "pass",
+        "detail": "agent v1.0.260-candidate.g36b5407e5bd3 reachable over its socket, privilege_mode=sudoers, compose stack up"
+      },
+      {
+        "run": "20261004T114422Z",
+        "step": "6",
+        "check": "agent-backup",
+        "result": "pass",
+        "detail": "op 01M43BNTB73DEBMVRNFF6G5KGS \u2192 culvert-backup-20261004-114435-175332.tar.gz succeeded (proxy \u2192 agent socket \u2192 sudoers \u2192 cli container)"
+      },
+      {
+        "run": "20261004T114422Z",
+        "step": "6",
+        "check": "backup-listed",
+        "result": "pass",
+        "detail": "culvert-backup-20261004-114435-175332.tar.gz listed by /api/backups"
+      },
+      {
+        "run": "20261004T114422Z",
+        "step": "6",
+        "check": "restore-dry-run",
+        "result": "pass",
+        "detail": "Validation: PASS; dry run, no files written (Culvert version: v1.0.260-candidate.g36b5407e5bd3)"
+      },
+      {
+        "run": "20261004T114422Z",
+        "step": "7",
+        "check": "os-update",
+        "result": "pass",
+        "detail": "culvert-os-update os exit 0 (20 package actions)"
+      },
+      {
+        "run": "20261004T114422Z",
+        "step": "7",
+        "check": "reboot",
+        "result": "pass",
+        "detail": "proxy /health and SSH back 552s after the reboot command"
+      },
+      {
+        "run": "20261004T114422Z",
+        "step": "7",
+        "check": "kernel",
+        "result": "pass",
+        "detail": "kernel CHANGED 6.8.0-142-generic \u2192 6.8.0-146-generic"
+      },
+      {
+        "run": "20261004T114422Z",
+        "step": "7",
+        "check": "docker-held",
+        "result": "pass",
+        "detail": "Docker packages still held; engine 29.8.2"
+      },
+      {
+        "run": "20261004T114422Z",
+        "step": "8",
+        "check": "stack-resumed",
+        "result": "pass",
+        "detail": "culvert-stack-resume.service took the os-update + agent locks, started the stack and cleared its marker"
+      },
+      {
+        "run": "20261004T114422Z",
+        "step": "8",
+        "check": "admin-login",
+        "result": "pass",
+        "detail": "200 after reboot"
+      },
+      {
+        "run": "20261004T114422Z",
+        "step": "8",
+        "check": "policy-persisted",
+        "result": "pass",
+        "detail": "rules: lab-allow-example"
+      },
+      {
+        "run": "20261004T114422Z",
+        "step": "8",
+        "check": "enforcement",
+        "result": "pass",
+        "detail": "example.com 200, example.org 403 (also proves Exempt auth survived)"
+      },
+      {
+        "run": "20261004T114422Z",
+        "step": "8",
+        "check": "ready",
+        "result": "pass",
+        "detail": "C:/Program Files/Git/ready 200"
+      },
+      {
+        "run": "20261004T114422Z",
+        "step": "8",
+        "check": "ca-identity",
+        "result": "pass",
+        "detail": "unchanged CE:E8:08:99:87:F6:AD:CA:5D:2E:2A:7C:33:FD:BB:18:A2:00:DE:60:B6:8E:49:9D:69:AB:41:14:A9:1E:80:73"
+      },
+      {
+        "run": "20261004T114422Z",
+        "step": "8",
+        "check": "category-data",
+        "result": "pass",
+        "detail": "category lookups identical before/after reboot"
+      },
+      {
+        "run": "20261004T114422Z",
+        "step": "8",
+        "check": "backup-listed",
+        "result": "pass",
+        "detail": "culvert-backup-20261004-114435-175332.tar.gz still listed"
+      },
+      {
+        "run": "20261004T114422Z",
+        "step": "8",
+        "check": "agent-reachable",
+        "result": "pass",
+        "detail": "agent v1.0.260-candidate.g36b5407e5bd3 reachable over its socket, privilege_mode=sudoers, compose stack up (after the maintenance reboot)"
+      },
+      {
+        "run": "20261004T114422Z",
+        "step": "8",
+        "check": "firstboot-not-rerun",
+        "result": "pass",
+        "detail": "no first-boot step ran on the second boot"
+      },
+      {
+        "run": "20261004T114422Z",
+        "step": "8",
+        "check": "state-files",
+        "result": "pass",
+        "detail": "first-boot state files unchanged"
+      },
+      {
+        "run": "20261004T114422Z",
+        "step": "7",
+        "check": "esxi-boot-id-changed",
+        "result": "pass",
+        "detail": "guest boot ID changed"
+      },
+      {
+        "run": "20261004T120008Z",
+        "step": "9",
+        "check": "post-backup-mutation",
+        "result": "pass",
+        "detail": "example.com changed from 200 to 403 after the archived backup"
+      },
+      {
+        "run": "20261004T120008Z",
+        "step": "9",
+        "check": "actual-restore",
+        "result": "pass",
+        "detail": "live commit refused; offline full restore committed on the same volume; stack restarted under both maintenance locks"
+      },
+      {
+        "run": "20261004T120008Z",
+        "step": "9",
+        "check": "restore-admin-login",
+        "result": "pass",
+        "detail": "original administrator authenticated after restore"
+      },
+      {
+        "run": "20261004T120008Z",
+        "step": "9",
+        "check": "restore-enforcement",
+        "result": "pass",
+        "detail": "post-backup mutation absent; original allow rule restored; traffic200/403"
+      },
+      {
+        "run": "20261004T120008Z",
+        "step": "9",
+        "check": "restore-ca",
+        "result": "pass",
+        "detail": "inspection root CA fingerprint unchanged"
+      },
+      {
+        "run": "20261004T120008Z",
+        "step": "9",
+        "check": "restore-feed-rehydrated",
+        "result": "pass",
+        "detail": "community feed rebuilt after full restore; current process reports a completed sync"
+      },
+      {
+        "run": "20261004T120008Z",
+        "step": "9",
+        "check": "restore-categories",
+        "result": "pass",
+        "detail": "community category lookups identical to baseline"
+      },
+      {
+        "run": "20261004T120008Z",
+        "step": "9",
+        "check": "restore-agent",
+        "result": "pass",
+        "detail": "agent reachable over its socket with stack up after restore"
+      },
+      {
+        "run": "20261004T120008Z",
+        "step": "9",
+        "check": "restore-complete",
+        "result": "pass",
+        "detail": "same-volume actual restore and all post-restore assertions completed"
+      }
+    ],
+    "native_console": {
+      "tty1-public-console": "pass",
+      "tty1-public-views": "pass",
+      "tty1-pam-rejection": "pass",
+      "tty1-pam-login": "pass",
+      "tty1-shell-restoration": "pass",
+      "tty1-action-audit": "pass",
+      "tty1-logout": "pass"
+    },
+    "qualification_harness": {
+      "harness_sha": "ef8aade63427c741128d65844866926cb490ad06",
+      "harness_file_sha256": {
+        "test/e2e/appliance/esxi/esxi-lab.py": "6f27676104d76c21d72beacef956d254850b538cc059c253c18012e6ac33f889",
+        "test/e2e/appliance/esxi/guest-checks.sh": "5c628c9a6fe7d1d344887009c47bc54d15f8c91ad906f356705e96623289d8fc",
+        "test/e2e/appliance/esxi/restore-checks.sh": "40c8008960a24a6a4bd757146eadbdc8eb3933d03a32a97f9c8350759759c92d",
+        "test/e2e/appliance/esxi/esxi-port-relay.py": "782fa5d7c3550eb7ca6a0044bf34eb7e357db10f1dc93f03caf92eeaf4706815",
+        "test/e2e/appliance/lab/appliance-lab.sh": "a3bb175b6cda1c32858299ccd60d2ef79250555951c047aef133ad383fd04965"
+      }
+    },
+    "restore_harness": {
+      "harness_sha": "f798cc0b0536d3b7eb22100ef962e2c340448469",
+      "harness_file_sha256": {
+        "test/e2e/appliance/esxi/esxi-lab.py": "ee873e520559f271dbc018e70cb5e68ddd035bfa840129370ec1a0151a9eb79d",
+        "test/e2e/appliance/esxi/guest-checks.sh": "e924a7a463d4a19332c8332d44d31938aed24d3623de171f089d62e0279abdf6",
+        "test/e2e/appliance/esxi/restore-checks.sh": "68c6688eb998a1ef8ffc7d56a7d2860f52d77b4110808685b78efcaabd6df8ce",
+        "test/e2e/appliance/esxi/esxi-port-relay.py": "782fa5d7c3550eb7ca6a0044bf34eb7e357db10f1dc93f03caf92eeaf4706815",
+        "test/e2e/appliance/lab/appliance-lab.sh": "a3bb175b6cda1c32858299ccd60d2ef79250555951c047aef133ad383fd04965"
+      }
+    },
+    "post_reboot": {
+      "agent_version": {
+        "outcome": "completed",
+        "returncode": 0,
+        "valid": true,
+        "value": "v1.0.260-candidate.g36b5407e5bd3"
+      },
+      "boot_id_after_observation": "ee23f328-1cf2-4c04-b71d-c68644eebbd6",
+      "boot_id_before_observation": "ee23f328-1cf2-4c04-b71d-c68644eebbd6",
+      "firstboot_journal": {
+        "full_current_boot": true,
+        "line_count": 1,
+        "outcome": "completed",
+        "returncode": 0,
+        "step_done_count": 0,
+        "step_done_counts": {
+          "agent": 0,
+          "complete": 0,
+          "console": 0,
+          "images": 0,
+          "install": 0,
+          "ovf": 0
+        }
+      },
+      "image": {
+        "outcome": "completed",
+        "returncode": 0,
+        "valid": true,
+        "value": "sha256:2aeee47447ec989111379bcf39bef6d64d2be4dba2db352f5af16db6c70a964f"
+      },
+      "kernel": {
+        "outcome": "completed",
+        "returncode": 0,
+        "valid": true,
+        "value": "6.8.0-146-generic"
+      },
+      "ready": {
+        "all_required_ok": true,
+        "http_status": 200,
+        "parsed": true,
+        "rows": {
+          "ca": {
+            "ok": true,
+            "present": true
+          },
+          "clamav": {
+            "ok": true,
+            "present": true
+          },
+          "policy_loaded": {
+            "ok": true,
+            "present": true
+          },
+          "policy_posture": {
+            "ok": true,
+            "present": true
+          }
+        }
+      },
+      "root": true,
+      "same_boot_during_observation": true,
+      "schema": 1,
+      "source": {
+        "git_commit": "36b5407e5bd3ff3c883bf855c269b8b7675013ed",
+        "valid": true
+      },
+      "state": {
+        "done": [
+          "agent.done",
+          "complete.done",
+          "console.done",
+          "images.done",
+          "install.done",
+          "ovf.done"
+        ],
+        "readable": true,
+        "valid": true
+      },
+      "units": {
+        "culvert-console-host.service": {
+          "outcome": "completed",
+          "properties": {
+            "ActiveState": "active",
+            "ConditionResult": "yes",
+            "ExecMainExitTimestampMonotonic": "0",
+            "ExecMainStartTimestampMonotonic": "202948058",
+            "ExecMainStatus": "0",
+            "LoadState": "loaded",
+            "Result": "success",
+            "SubState": "running"
+          },
+          "returncode": 0
+        },
+        "culvert-firstboot.service": {
+          "outcome": "completed",
+          "properties": {
+            "ActiveState": "inactive",
+            "ConditionResult": "no",
+            "ExecMainExitTimestampMonotonic": "0",
+            "ExecMainStartTimestampMonotonic": "0",
+            "ExecMainStatus": "0",
+            "LoadState": "loaded",
+            "Result": "success",
+            "SubState": "dead"
+          },
+          "returncode": 0
+        },
+        "culvert-maint.service": {
+          "outcome": "completed",
+          "properties": {
+            "ActiveState": "active",
+            "ConditionResult": "yes",
+            "ExecMainExitTimestampMonotonic": "0",
+            "ExecMainStartTimestampMonotonic": "367019111",
+            "ExecMainStatus": "0",
+            "LoadState": "loaded",
+            "Result": "success",
+            "SubState": "running"
+          },
+          "returncode": 0
+        },
+        "culvert-stack-resume.service": {
+          "outcome": "completed",
+          "properties": {
+            "ActiveState": "inactive",
+            "ConditionResult": "yes",
+            "ExecMainExitTimestampMonotonic": "476284057",
+            "ExecMainStartTimestampMonotonic": "367022080",
+            "ExecMainStatus": "0",
+            "LoadState": "loaded",
+            "Result": "success",
+            "SubState": "dead"
+          },
+          "returncode": 0
+        },
+        "docker.service": {
+          "outcome": "completed",
+          "properties": {
+            "ActiveState": "active",
+            "ConditionResult": "yes",
+            "ExecMainExitTimestampMonotonic": "0",
+            "ExecMainStartTimestampMonotonic": "302080133",
+            "ExecMainStatus": "0",
+            "LoadState": "loaded",
+            "Result": "success",
+            "SubState": "running"
+          },
+          "returncode": 0
+        }
+      }
+    },
+    "post_restore": {
+      "agent_version": {
+        "outcome": "completed",
+        "returncode": 0,
+        "valid": true,
+        "value": "v1.0.260-candidate.g36b5407e5bd3"
+      },
+      "boot_id_after_observation": "ee23f328-1cf2-4c04-b71d-c68644eebbd6",
+      "boot_id_before_observation": "ee23f328-1cf2-4c04-b71d-c68644eebbd6",
+      "firstboot_journal": {
+        "full_current_boot": true,
+        "line_count": 1,
+        "outcome": "completed",
+        "returncode": 0,
+        "step_done_count": 0,
+        "step_done_counts": {
+          "agent": 0,
+          "complete": 0,
+          "console": 0,
+          "images": 0,
+          "install": 0,
+          "ovf": 0
+        }
+      },
+      "image": {
+        "outcome": "completed",
+        "returncode": 0,
+        "valid": true,
+        "value": "sha256:2aeee47447ec989111379bcf39bef6d64d2be4dba2db352f5af16db6c70a964f"
+      },
+      "kernel": {
+        "outcome": "completed",
+        "returncode": 0,
+        "valid": true,
+        "value": "6.8.0-146-generic"
+      },
+      "ready": {
+        "all_required_ok": true,
+        "http_status": 200,
+        "parsed": true,
+        "rows": {
+          "ca": {
+            "ok": true,
+            "present": true
+          },
+          "clamav": {
+            "ok": true,
+            "present": true
+          },
+          "policy_loaded": {
+            "ok": true,
+            "present": true
+          },
+          "policy_posture": {
+            "ok": true,
+            "present": true
+          }
+        }
+      },
+      "root": true,
+      "same_boot_during_observation": true,
+      "schema": 1,
+      "source": {
+        "git_commit": "36b5407e5bd3ff3c883bf855c269b8b7675013ed",
+        "valid": true
+      },
+      "state": {
+        "done": [
+          "agent.done",
+          "complete.done",
+          "console.done",
+          "images.done",
+          "install.done",
+          "ovf.done"
+        ],
+        "readable": true,
+        "valid": true
+      },
+      "units": {
+        "culvert-console-host.service": {
+          "outcome": "completed",
+          "properties": {
+            "ActiveState": "active",
+            "ConditionResult": "yes",
+            "ExecMainExitTimestampMonotonic": "0",
+            "ExecMainStartTimestampMonotonic": "202948058",
+            "ExecMainStatus": "0",
+            "LoadState": "loaded",
+            "Result": "success",
+            "SubState": "running"
+          },
+          "returncode": 0
+        },
+        "culvert-firstboot.service": {
+          "outcome": "completed",
+          "properties": {
+            "ActiveState": "inactive",
+            "ConditionResult": "no",
+            "ExecMainExitTimestampMonotonic": "0",
+            "ExecMainStartTimestampMonotonic": "0",
+            "ExecMainStatus": "0",
+            "LoadState": "loaded",
+            "Result": "success",
+            "SubState": "dead"
+          },
+          "returncode": 0
+        },
+        "culvert-maint.service": {
+          "outcome": "completed",
+          "properties": {
+            "ActiveState": "active",
+            "ConditionResult": "yes",
+            "ExecMainExitTimestampMonotonic": "0",
+            "ExecMainStartTimestampMonotonic": "367019111",
+            "ExecMainStatus": "0",
+            "LoadState": "loaded",
+            "Result": "success",
+            "SubState": "running"
+          },
+          "returncode": 0
+        },
+        "culvert-stack-resume.service": {
+          "outcome": "completed",
+          "properties": {
+            "ActiveState": "inactive",
+            "ConditionResult": "yes",
+            "ExecMainExitTimestampMonotonic": "476284057",
+            "ExecMainStartTimestampMonotonic": "367022080",
+            "ExecMainStatus": "0",
+            "LoadState": "loaded",
+            "Result": "success",
+            "SubState": "dead"
+          },
+          "returncode": 0
+        },
+        "docker.service": {
+          "outcome": "completed",
+          "properties": {
+            "ActiveState": "active",
+            "ConditionResult": "yes",
+            "ExecMainExitTimestampMonotonic": "0",
+            "ExecMainStartTimestampMonotonic": "302080133",
+            "ExecMainStatus": "0",
+            "LoadState": "loaded",
+            "Result": "success",
+            "SubState": "running"
+          },
+          "returncode": 0
+        }
+      }
+    },
+    "dry_run_exit": {
+      "exit_code": 0,
+      "validation_pass": true,
+      "dry_run_only": true,
+      "validation_fail": false
+    },
+    "ssh_public_key_identity": {
+      "public_host_key_sha256": "93d115f1a02e5af9b97ccb81714611c1953c625a7cc6215f65de67dff46222c9"
+    },
+    "machine_id_sha256": "c75d034d6d20b7d7f8e57a8290abeb4430d0297a9e7739028d6188c039f5f5a4",
+    "vm_deleted": true,
+    "private_directory_empty": true,
+    "controller_bundle_sha256": "c33cab26c551cbdd481f9cb5ef7172252df5939d80ea53eb64d1286e364f3284",
+    "native_console_harness": {
+      "commit": "f530afbc",
+      "source_sha256": "9d5403180d1ebe5fe7ac535eb20978ad3fa1810f8e6a8545bb200c164364541d",
+      "keyboard_source_sha256": "3aa480913e8604a92a88253bd61925b1ba089edacf34a57351e1e368565c3a15",
+      "keyboard_binary_sha256": "d1a8429d5e73fc19eb0ada3f35dd5bdae224a50d170284a78add0e7b5c03ae9d"
+    }
+  },
+  "harness_retries": [
+    "Initial150s guestIP timeout; sameVM became reachable automatically",
+    "Guest SSH forwarding intentionally disabled; replaced with controller-only localhost TCP relay",
+    "WindowsPowerShell module search path inherited through Python prevented ACL/OCR helpers; native module path restored",
+    "Windows text-mode stdin appendedCR to disposable console password; harmless byte probe confirmed; binary stdin corrected it",
+    "Lowercase-only admin password rejected400; old pre-setup login200 and Setup complete:no substring passes invalidated; API needsSetup=true confirmed before corrected enrollment",
+    "Compose consumed remaining SSH script after live refusal; stop/commit logs absent, data journal absent, stack running; test-owned mutation removed; stdin isolated and completion trap added before retry"
+  ],
+  "performance_observation": {
+    "reboot_to_health_and_ssh_seconds": 552,
+    "docker_process_start_seconds_after_boot": 302.080133,
+    "resume_start_seconds_after_boot": 367.02208,
+    "resume_exit_seconds_after_boot": 476.284057,
+    "resume_journal_utc": {
+      "start": "2026-10-04T11:54:30Z",
+      "both_locks": "2026-10-04T11:54:31Z",
+      "compose_start": "2026-10-04T11:54:33Z",
+      "clamav_starting": "2026-10-04T11:54:54Z",
+      "clamav_started_and_waiting": "2026-10-04T11:55:06Z",
+      "clamav_healthy": "2026-10-04T11:56:11Z",
+      "proxy_starting": "2026-10-04T11:56:11Z",
+      "proxy_started_and_resume_finished": "2026-10-04T11:56:19Z"
+    },
+    "interpretation": "ClamAV contributed about 65 seconds after its container start; this does not explain the delay before resume. Docker's 302-second value is a process-start offset, not startup duration. Firstboot was skipped on this reboot.",
+    "not_retained_before_vm_deletion": ["full boot critical chain", "exact proxy healthy transition", "guest nproc and MemTotal"],
+    "sla_qualified": false
+  },
+  "restore_scope": "offline full restore on the existing named data volume with existing .env/key material; not fresh-volume disaster recovery",
+  "default_bootstrap": {
+    "credential_mode": "none",
+    "same_ova_bytes": true,
+    "stable_initial_credential_display": "pass: two fresh captures separated by a display refresh",
+    "initial_observation_retry": "Scale1 OCR was ambiguous before any keyboard input. The previous attempt and private captures were archived before a fixed Scale2 observation attempt; no character substitutions or credential guesses.",
+    "pam_workflow": "blocked: post-F2 OCR contained only a truncated password-prompt suffix; bounded classifier could not identify the next prompt",
+    "keyboard_input_sent": "F2 only; no password was sent",
+    "pam_rejection_observed": false,
+    "forced_password_change_and_private_record_cleanup": "not qualified",
+    "two_import_identity_comparison": "not run: authenticated guest access was not established",
+    "reboot_survival": "not run",
+    "vm_deleted": true,
+    "private_directory_empty": true,
+    "independent_inventory_no_owned_vms_or_datastore_folders": true,
+    "controller_bundle_sha256": "3342028d20aed84f9c2aece6e6467cc6138eb251624ad1c41756fb2a6ab55be5"
+  },
+  "remaining": [
+    "default no-credential PAM bootstrap blocked by capture/OCR; two-import identity comparison not run",
+    "interrupted firstboot/power-loss persistence boundary not run on these bytes",
+    "static networking/DNS outage and ClamAV failure posture not run on these bytes",
+    "F-DISK-1 remains open; no risk acceptance",
+    "ClamAV pcre2 decision remains separate",
+    "fresh-volume, missing-key, corrupt-archive and interrupted-restore recovery not qualified",
+    "no merge, release, image publication or enterprise signoff"
+  ]
+}

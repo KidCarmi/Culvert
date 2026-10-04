@@ -1,19 +1,20 @@
 # LOCAL-ESXI qualification lab
 
-Real ESXi import, BIOS boot, imported SSH access, VMware guestinfo readback
-and owned-VM cleanup have now run on two identified candidates. Full guest
-qualification is **incomplete**: the control skips first boot, and the unit-fix
-variant reaches application startup but its baked ClamAV archive lacks the
-amd64 config and all seven layers. This is not pilot acceptance.
+The integrated `36b5407e` candidate passed the real ESXi functional baseline,
+installed-console checks, maintenance reboot and actual same-volume restore.
 Current sanitized evidence is in
-[`evidence/local-esxi-boot-20261003.json`](evidence/local-esxi-boot-20261003.json);
-the earlier access-only record is historical.
+[`evidence/local-esxi-36b5407e-20261004.json`](evidence/local-esxi-36b5407e-20261004.json).
+Full fault and disaster-recovery qualification is **incomplete**; this is not
+enterprise or release acceptance. The earlier
+[`2026-10-03 report`](evidence/local-esxi-boot-20261003.json) records historical
+firstboot and incomplete-image defects on different candidate bytes.
 
-The harness baseline is `test/appliance-lab` at
-`b9fc086f61df4122d0aa2090acd4d41a8f5f7502`. LOCAL-ESXI owns
-`test/esxi-qualification`, the ESXi adapter and independent reproduction.
-Opus owns product changes and QEMU/CI. The only shared-file change is an
-opt-in library return immediately before the QEMU command dispatcher.
+The shared harness was updated from `test/appliance-lab` at `cd43dca5`.
+LOCAL-ESXI owns `test/esxi-qualification`, the ESXi adapter and independent
+reproduction. Opus owns the integration branch and QEMU/CI. Shared guest
+assertion fixes are documented below; product bytes were not modified to make
+qualification pass. The owner's subsequent console UX work is isolated on
+`feat/appliance-firstboot-guidance` and does not change this candidate's result.
 
 ## Current access and blockers
 
@@ -21,33 +22,33 @@ The owner designated `https://192.168.1.78`, subsequently authorized its TLS
 certificate-verification exception, and supplied a Windows-encrypted
 credential. Authenticated read-only inventory now succeeds: **ESXi 8.0.1
 build-21813344**. Normal trust still fails (`unable to get local issuer
-certificate`); this is an explicit exception, not verified CA trust. The two
-booted disposable VMs and three failed import attempts have been cleaned up;
-no lab VMs or lab datastore directories remain. No host configuration changed.
+certificate`); this is an explicit exception, not verified CA trust. Cleanup
+is recorded per candidate in the structured reports. No host configuration changed.
 
 The owner authorized the default network and 2 vCPU / 4096 MiB / 40 GiB.
 Inventory identifies `VM Network` on vSwitch0, VLAN 0, matching the management
 network's `192.168.1.0/24`; the local guest-address fence uses that subnet.
 The owner accepted `DataStore2` (~498 GiB free). Read-only admission checks
-pass for one VM at the requested size: 46 GiB provisioned-space allowance,
+passed initially for one VM at the requested size: 46 GiB provisioned-space allowance,
 9576 MiB host RAM available and 9847 MHz host CPU available at observation.
-Retained candidate artifacts have now passed checksum/manifest verification
-and real import. The current blocker is defective baked image content
-(`F-OVA-CLAMAV-1`), requiring a corrected, separately identified OVA from Opus.
+The integrated candidate passed checksum/manifest verification, real import
+and ClamAV startup. The historical `F-OVA-CLAMAV-1` archive defect does not
+describe these corrected bytes; see the historical findings below.
 Conservative local admission thresholds retain 64 GiB datastore space,
 4096 MiB host RAM and 2000 MHz host CPU after provisioning. Capacity must be
-checked again when the artifact arrives.
+checked again before every import.
 
 The retained evidence from [Appliance Lab run 37139370715](https://github.com/KidCarmi/Culvert/actions/runs/37139370715)
 contains a rebuilt candidate checksum
 `07ffa55482415016a0654fc24c0debc74abe7d31aeb7de43ff47a832bed826ab`, but no
 OVA bytes. That run records successful build/manifest checks followed by
 `no SSH within 2400s` under QEMU/KVM and an empty serial console log.
-These are remote CI observations, not local ESXi results. Later retained
-artifacts 11282975335 and 11283274993 supplied the bytes used in the current
-ESXi run. The superseded original remains unavailable and unqualified.
+These are historical remote CI observations, not local ESXi results. Artifacts
+11282975335 and 11283274993 supplied the earlier ESXi candidates; artifact
+11300957991 supplied the integrated candidate. The superseded original remains
+unavailable and unqualified.
 
-## Artifact and resources
+## Historical original artifact and resource fencing
 
 The original candidate remains:
 
@@ -288,7 +289,59 @@ Windows executable used for the stream-aware attempt has SHA256
 `a28278c8114497e18a02aa2a47c46797d6ec4b64b7c2bef7fb30eb8c2fa550ac`.
 This is a patched local tool, not the unmodified upstream release.
 
-## Current artifact findings
+## Integrated V1 candidate: 36b5407e (2026-10-04)
+
+The unchanged integrated candidate OVA, SHA256
+`7bd09aaac19ab0525654d2863d4382bf0415e0ac75e2b55aee8a424a9df6bca1`,
+passed the real ESXi functional baseline and an actual offline full restore on
+the existing data volume. The [structured report](evidence/local-esxi-36b5407e-20261004.json)
+records 47 final baseline/restore checks, seven installed-console checks,
+artifact and harness identities, and independent post-reboot observations.
+This result qualifies these bytes; it does not qualify the historical candidates
+below or provide enterprise/release approval.
+
+The maintenance reboot moved the guest from `6.8.0-142-generic` to
+`6.8.0-146-generic`. The resume service took both maintenance locks, restored
+the stack and cleared its marker. Administrator access, policy, real traffic,
+CA, category data and backup persisted. Recovery to health and SSH took
+**552 seconds** on this host; no startup SLA is established.
+
+The restore test first proved that a live commit is refused, then stopped the
+stack and committed onto the same named volume under both maintenance locks.
+A policy added after the backup disappeared; original authentication,
+allow/deny traffic, CA, rebuilt community categories and agent access returned.
+Existing `.env` and key material remained available. Fresh-volume disaster
+recovery, missing keys, interrupted restore and corrupt archives remain outside
+this result. A failed or ambiguous commit must not trigger an automatic retry
+or stack restart.
+
+The installed console was exercised through VMware keyboard events and the
+actual tty1 buffer: public views, invalid-password refusal, F2/PAM login,
+recovery shell, terminal restoration, correlated native audit and logout.
+Passwords use a private stdin-only Go keyboard helper. The key-provisioned
+console result does not establish default-credential bootstrap. A separate
+fresh import with no supplied credentials proved that the initial password
+remained readable across two fresh console captures. After F2, local OCR read
+only a truncated password-prompt suffix and the bounded classifier stopped.
+No password was sent and no PAM rejection was observed. Forced password change,
+handoff cleanup, reboot survival and the two-import identity comparison remain
+unqualified. Both disposable VMs were deleted and all private run files removed.
+
+The adapter uses a controller-side loopback TCP relay because the appliance
+intentionally disables SSH forwarding. It does not change guest SSH policy.
+SSH host keys stay pinned during reconnects. Windows password writes use
+binary stdin to avoid CRLF changing the credential. The restore script keeps
+Compose stdin separate from its own command stream and requires an explicit
+completion marker. Test oracles require successful reads, all mandatory
+readiness rows, the full current-boot journal, and dry-run exit status.
+
+Earlier harness failures and corrected attempts are explicitly described in
+the report. Read-only independent observations close the weak historical
+oracles on the actual guest; improved synthetic tests alone are not presented
+as guest evidence. The first disposable VM was deleted and its nested private
+credential, capture and build-cache files were removed before the next import.
+
+## Historical artifact findings
 
 | Candidate | Identity and observed result |
 |---|---|

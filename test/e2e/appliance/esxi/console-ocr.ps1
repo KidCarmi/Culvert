@@ -6,7 +6,8 @@
 param(
     [Parameter(Mandatory = $true)][string]$ImagePath,
     [Parameter(Mandatory = $true)][string]$OutputPath,
-    [ValidateRange(1, 60)][int]$TimeoutSeconds = 20
+    [ValidateRange(1, 60)][int]$TimeoutSeconds = 20,
+    [ValidateSet(1, 2)][int]$Scale = 1
 )
 
 $ErrorActionPreference = 'Stop'
@@ -92,6 +93,9 @@ try {
     [void][Windows.Graphics.Imaging.SoftwareBitmap, Windows.Graphics.Imaging, ContentType = WindowsRuntime]
     [void][Windows.Graphics.Imaging.BitmapPixelFormat, Windows.Graphics.Imaging, ContentType = WindowsRuntime]
     [void][Windows.Graphics.Imaging.BitmapAlphaMode, Windows.Graphics.Imaging, ContentType = WindowsRuntime]
+    [void][Windows.Graphics.Imaging.BitmapTransform, Windows.Graphics.Imaging, ContentType = WindowsRuntime]
+    [void][Windows.Graphics.Imaging.ExifOrientationMode, Windows.Graphics.Imaging, ContentType = WindowsRuntime]
+    [void][Windows.Graphics.Imaging.ColorManagementMode, Windows.Graphics.Imaging, ContentType = WindowsRuntime]
     [void][Windows.Media.Ocr.OcrEngine, Windows.Foundation, ContentType = WindowsRuntime]
     [void][Windows.Media.Ocr.OcrResult, Windows.Foundation, ContentType = WindowsRuntime]
     [void][Windows.Globalization.Language, Windows.Globalization, ContentType = WindowsRuntime]
@@ -112,8 +116,24 @@ try {
         ([long]$decoder.PixelWidth * [long]$decoder.PixelHeight) -gt 16777216) {
         throw 'OCR image dimensions exceed the bounded decoder limit.'
     }
-    $bitmap = Wait-WinRT ($decoder.GetSoftwareBitmapAsync([Windows.Graphics.Imaging.BitmapPixelFormat]::Bgra8,
-        [Windows.Graphics.Imaging.BitmapAlphaMode]::Premultiplied)) ([Windows.Graphics.Imaging.SoftwareBitmap])
+    $scaledWidth = [long]$decoder.PixelWidth * $Scale
+    $scaledHeight = [long]$decoder.PixelHeight * $Scale
+    if ($scaledWidth -gt $dimensionLimit -or $scaledHeight -gt $dimensionLimit -or
+        ($scaledWidth * $scaledHeight) -gt 16777216) {
+        throw 'OCR scaled image dimensions exceed the bounded decoder limit.'
+    }
+    if ($Scale -eq 1) {
+        $bitmap = Wait-WinRT ($decoder.GetSoftwareBitmapAsync([Windows.Graphics.Imaging.BitmapPixelFormat]::Bgra8,
+            [Windows.Graphics.Imaging.BitmapAlphaMode]::Premultiplied)) ([Windows.Graphics.Imaging.SoftwareBitmap])
+    } else {
+        $transform = [Windows.Graphics.Imaging.BitmapTransform]::new()
+        $transform.ScaledWidth = [uint32]$scaledWidth
+        $transform.ScaledHeight = [uint32]$scaledHeight
+        $bitmap = Wait-WinRT ($decoder.GetSoftwareBitmapAsync([Windows.Graphics.Imaging.BitmapPixelFormat]::Bgra8,
+            [Windows.Graphics.Imaging.BitmapAlphaMode]::Premultiplied, $transform,
+            [Windows.Graphics.Imaging.ExifOrientationMode]::IgnoreExifOrientation,
+            [Windows.Graphics.Imaging.ColorManagementMode]::DoNotColorManage)) ([Windows.Graphics.Imaging.SoftwareBitmap])
+    }
     $result = Wait-WinRT ($engine.RecognizeAsync($bitmap)) ([Windows.Media.Ocr.OcrResult])
     if ([string]::IsNullOrWhiteSpace($result.Text)) { throw 'OCR did not recognize any text.' }
     Save-PrivateText $destination $result.Text
