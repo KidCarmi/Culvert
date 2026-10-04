@@ -49,23 +49,22 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # HANDOFF candidate: #1528 head b80968dc (F-OSU-REBOOT-1 fix incl. the
-        # rejected-reboot and missing-compose paths; L11 candidate SemVer so
-        # the bundled agent installs). Image = that head's own Deep PR Gate tar
-        # (run 37184223096, all four gates APPROVED; stamp
-        # v1.0.260-candidate.gb80968dcdf88); provisioning + build script = a
-        # clean checkout of the SAME commit. No provisioning drift.
+        # HANDOFF candidate: #1528 head 22247248 (F-OSU-REBOOT-1 incl. the
+        # accepted-reboot lock hold and the journal fence on resume; L11
+        # candidate SemVer so the bundled agent installs; F-FEED-1 durable
+        # UT1 import certificate + startup resync of an uncertified store).
+        # Image = that head's own Deep PR Gate tar (run 37192868202, all four
+        # gates APPROVED; stamp v1.0.260-candidate.g22247248cc8d); provisioning
+        # + build script = a clean checkout of the SAME commit. No provisioning
+        # drift. Built fresh (no retained_run): the bytes this run qualifies
+        # are the bytes it uploads.
         include:
-          - variant: candidate-b80968dcdf88
+          - variant: candidate-22247248cc8d
             provisioning: source
-            source_sha: "b80968dcdf887bceb405bf4c31e9bbca8d12fe8c"
-            image_run: "37184223096"
-            image_tar_sha256: "670abef9adbd07a289a909e575bf15b17ec4809e87133c3bbbd0e1be0440f891"
-            expect_image_id: "sha256:54813760eb62583990194e2a97d7eef0f5273adfc974f4cd7c45eb82f91b120b"
-            # Re-qualify the OVA run 37185033699 built and retained (the
-            # handoff artifact) with the corrected harness oracles.
-            retained_run: "37185033699"
-            retained_sha256: "1ab602f618d6906a7809293cb9d26e6c4601c542f547e36bd2a8c5381e5cf47e"
+            source_sha: "22247248cc8d53f4012caa24dbc48fdef08aac13"
+            image_run: "37192868202"
+            image_tar_sha256: "fff46019065538f10c2ef1f754a581032e17275e1e04323ba8dc5367214210ae"
+            expect_image_id: "sha256:605d9b43f83bfcb6468f118afa9afaf10d179a62fff75cae04c36f4c10083481"
     env:
       APPLIANCE_SOURCE_SHA: ${{ matrix.source_sha }}
       SOURCE_IMAGE_RUN_ID: ${{ matrix.image_run }}
