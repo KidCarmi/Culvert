@@ -67,16 +67,6 @@ jobs:
         run: |
           go test -c -o /tmp/culvert-access.test ./cmd/culvert-access
           sudo /tmp/culvert-access.test -test.run '^TestAccessKey' -test.shuffle=on -test.count=2
-      - name: Real SSH operator boundary on disposable runner
-        working-directory: cmd/culvert-access
-        run: |
-          if ! test -x /usr/sbin/sshd; then
-            sudo apt-get update -qq
-            sudo apt-get install -y -qq openssh-server openssh-client
-          fi
-          CGO_ENABLED=0 go build -mod=readonly -trimpath -o /tmp/culvert-access .
-          sudo env CULVERT_ACCESS_SSH_FIXTURE=1 CULVERT_ACCESS_TEST_BINARY=/tmp/culvert-access \
-            /tmp/culvert-access.test -test.run '^TestAccessRealSSHBoundary$' -test.v
       - name: Maintenance agent admission and interrupted journal regressions
         working-directory: cmd/culvert-maint
         run: |
@@ -108,3 +98,28 @@ jobs:
           appliance/console/culvert-console --json
           appliance/console/culvert-console --text
           appliance/console/culvert-console --report
+
+  ssh-boundary:
+    # A fresh disposable runner isolates account/sshd mutations from the other
+    # root fixture suites. Failure still fails this reusable workflow.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Real SSH operator boundary on disposable runner
+        working-directory: cmd/culvert-access
+        run: |
+          if ! test -x /usr/sbin/sshd; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq openssh-server openssh-client
+          fi
+          go test -c -o /tmp/culvert-access.test .
+          CGO_ENABLED=0 go build -mod=readonly -trimpath -o /tmp/culvert-access .
+          sudo env CULVERT_ACCESS_SSH_FIXTURE=1 CULVERT_ACCESS_TEST_BINARY=/tmp/culvert-access \
+            /tmp/culvert-access.test -test.run '^TestAccessRealSSHBoundary$' -test.v

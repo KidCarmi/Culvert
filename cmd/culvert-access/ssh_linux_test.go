@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -13,6 +14,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -55,6 +57,8 @@ func TestAccessRealSSHBoundary(t *testing.T) {
 		t.Fatal("fixture binary is not the built access shell")
 	}
 	dir := accessRootFixture(t)
+	accountMarker := filepath.Base(dir)
+	accountAttempted := false
 	var accountUID, accountGID string
 	var daemon *exec.Cmd
 	t.Cleanup(func() {
@@ -62,19 +66,32 @@ func TestAccessRealSSHBoundary(t *testing.T) {
 			_ = daemon.Process.Kill()
 			_ = daemon.Wait()
 		}
-		if accountUID != "" {
+		if accountAttempted {
 			u, err := user.Lookup("culvert-operator")
-			if err != nil || u.Uid != accountUID || u.HomeDir != home || u.Uid == "0" {
+			var unknown user.UnknownUserError
+			if errors.As(err, &unknown) {
+				// useradd can create its private group before creating the user.
+				// Without the tagged user, do not guess ownership of that group.
+				if _, groupErr := user.LookupGroup("culvert-operator"); groupErr == nil {
+					t.Error("partial account setup left a group without a tagged user; refusing group cleanup")
+					return
+				}
+			} else if err != nil || !ownedFixtureAccount(u, accountMarker, home, accountUID, accountGID) {
 				t.Error("refusing cleanup of changed operator identity")
 				return
-			}
-			_ = exec.Command("/usr/bin/pkill", "-KILL", "-u", accountUID).Run()
-			if err := exec.Command("/usr/sbin/userdel", "culvert-operator").Run(); err != nil {
-				t.Error("fixture account cleanup failed")
-				return
-			}
-			if g, err := user.LookupGroup("culvert-operator"); err == nil && g.Gid == accountGID {
-				_ = exec.Command("/usr/sbin/groupdel", "culvert-operator").Run()
+			} else {
+				accountUID, accountGID = u.Uid, u.Gid
+				_, _ = runFixtureCommand(context.Background(), "/usr/bin/pkill", "-KILL", "-u", accountUID)
+				if output, err := runFixtureCommand(context.Background(), "/usr/sbin/userdel", "culvert-operator"); err != nil {
+					t.Errorf("fixture account cleanup failed: %v; output=%q", err, output)
+					return
+				}
+				if g, err := user.LookupGroup("culvert-operator"); err == nil && g.Gid == accountGID {
+					if output, err := runFixtureCommand(context.Background(), "/usr/sbin/groupdel", "culvert-operator"); err != nil {
+						t.Errorf("fixture group cleanup failed: %v; output=%q", err, output)
+						return
+					}
+				}
 			}
 		}
 		// These exact paths were absent before this fixture created them.
@@ -100,9 +117,10 @@ func TestAccessRealSSHBoundary(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(binDir, "culvert-console"), []byte(stub), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	fixtureCommand(t, "/usr/sbin/useradd", "--user-group", "--create-home", "--shell", applianceaccess.Binary, "--password", "!", "culvert-operator")
+	accountAttempted = true
+	fixtureCommand(t, "/usr/sbin/useradd", "--user-group", "--create-home", "--comment", accountMarker, "--shell", applianceaccess.Binary, "--password", "!", "culvert-operator")
 	u, err := user.Lookup("culvert-operator")
-	if err != nil || u.Uid == "0" || u.HomeDir != home {
+	if err != nil || !ownedFixtureAccount(u, accountMarker, home, "", "") {
 		t.Fatal("fixture account identity unexpected")
 	}
 	accountUID = u.Uid
@@ -255,13 +273,93 @@ func TestAccessRealSSHBoundary(t *testing.T) {
 
 func fixtureCommand(t *testing.T, binary string, args ...string) string {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
-	defer cancel()
-	output, err := exec.CommandContext(ctx, binary, args...).CombinedOutput()
+	output, err := runFixtureCommand(t.Context(), binary, args...)
 	if err != nil {
-		t.Fatalf("fixture command failed: %s", filepath.Base(binary))
+		// Only account tools can expose their output: all input is synthetic and
+		// they never handle key material. Other failures still report their cause.
+		if fixtureCommandTimeout(binary) == 60*time.Second {
+			t.Fatalf("fixture command failed: %s: %v; output=%q", filepath.Base(binary), err, output)
+		}
+		t.Fatalf("fixture command failed: %s: %v", filepath.Base(binary), err)
 	}
-	return string(output)
+	return output
+}
+
+func fixtureCommandTimeout(binary string) time.Duration {
+	switch binary {
+	case "/usr/sbin/useradd", "/usr/sbin/userdel", "/usr/sbin/groupdel":
+		return 60 * time.Second
+	default:
+		return 15 * time.Second
+	}
+}
+
+func runFixtureCommand(parent context.Context, binary string, args ...string) (string, error) {
+	ctx, cancel := context.WithTimeout(parent, fixtureCommandTimeout(binary))
+	defer cancel()
+	cmd := exec.CommandContext(ctx, binary, args...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
+	cmd.WaitDelay = time.Second
+	output, err := cmd.CombinedOutput()
+	if err != nil && len(output) > 4096 {
+		output = append(output[:4096], []byte(" [truncated]")...)
+	}
+	if ctx.Err() != nil {
+		err = fmt.Errorf("%w (limit %s; process: %v)", ctx.Err(), fixtureCommandTimeout(binary), err)
+	}
+	return string(output), err
+}
+
+func ownedFixtureAccount(u *user.User, marker, home, uid, gid string) bool {
+	return u != nil && u.Username == "culvert-operator" && u.Name == marker &&
+		u.HomeDir == home && u.Uid != "" && u.Uid != "0" && u.Gid != "" && u.Gid != "0" &&
+		(uid == "" || uid == u.Uid) && (gid == "" || gid == u.Gid)
+}
+
+func TestAccessFixtureAccountOwnershipFence(t *testing.T) {
+	u := user.User{Username: "culvert-operator", Name: "unique-fixture", HomeDir: "/home/culvert-operator", Uid: "1003", Gid: "1003"}
+	if !ownedFixtureAccount(&u, u.Name, u.HomeDir, "", "") || !ownedFixtureAccount(&u, u.Name, u.HomeDir, u.Uid, u.Gid) {
+		t.Fatal("fixture must recognize its partially created and captured identity")
+	}
+	for _, change := range []func(*user.User){
+		func(v *user.User) { v.Username = "other" },
+		func(v *user.User) { v.Name = "foreign-fixture" },
+		func(v *user.User) { v.HomeDir = "/root" },
+		func(v *user.User) { v.Uid = "0" },
+		func(v *user.User) { v.Gid = "0" },
+	} {
+		foreign := u
+		change(&foreign)
+		if ownedFixtureAccount(&foreign, u.Name, u.HomeDir, "", "") {
+			t.Fatal("cleanup accepted a foreign or privileged identity")
+		}
+	}
+	if ownedFixtureAccount(&u, u.Name, u.HomeDir, "1004", u.Gid) || ownedFixtureAccount(&u, u.Name, u.HomeDir, u.Uid, "1004") {
+		t.Fatal("cleanup accepted a replaced captured identity")
+	}
+}
+
+func TestAccessFixtureCommandTimeoutsAndDiagnostics(t *testing.T) {
+	for _, tool := range []string{"/usr/sbin/useradd", "/usr/sbin/userdel", "/usr/sbin/groupdel"} {
+		if fixtureCommandTimeout(tool) != 60*time.Second {
+			t.Fatal("account tool must have a separate bounded deadline")
+		}
+	}
+	if fixtureCommandTimeout("/usr/bin/ssh-keygen") != 15*time.Second {
+		t.Fatal("ordinary fixture tool timeout changed")
+	}
+	out, err := runFixtureCommand(t.Context(), "/bin/sh", "-c", "printf 'synthetic account failure' >&2; exit 7")
+	if err == nil || out != "synthetic account failure" || !strings.Contains(err.Error(), "exit status 7") {
+		t.Fatal("fixture discarded actionable process diagnostics")
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	_, err = runFixtureCommand(ctx, "/bin/sh", "-c", "sleep 20 & wait")
+	if !errors.Is(err, context.DeadlineExceeded) || time.Since(started) > 2*time.Second {
+		t.Fatal("fixture deadline must terminate descendants and report timeout")
+	}
 }
 
 func copyFixtureBinary(t *testing.T, source, target string) {
