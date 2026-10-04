@@ -2,6 +2,9 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -189,5 +192,53 @@ func TestDispatchStore_UnreadableStateIsSurfacedNotOverwritten(t *testing.T) {
 	fresh := newPersistentDispatchStore(filepath.Join(dir, "absent.json"))
 	if fresh.loadErr != nil {
 		t.Fatalf("absent must stay fresh, got %v", fresh.loadErr)
+	}
+}
+
+// An accepted dispatch whose record cannot reach disk is still a 202 — the
+// agent has started the op and it cannot be taken back — but the response must
+// not imply the durable-record contract was met: a restarted control plane
+// would have nothing to resume (Codex P2). CONTROL: a writable path is durable.
+func TestReleaseAPI_DispatchReportsAnUntrackedOp(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		path    func(t *testing.T) string
+		durable bool
+	}{
+		{"writable", func(t *testing.T) string { return filepath.Join(t.TempDir(), "release_dispatch_state.json") }, true},
+		{"unwritable", func(t *testing.T) string {
+			blocker := filepath.Join(t.TempDir(), "not-a-dir")
+			if err := os.WriteFile(blocker, nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			return filepath.Join(blocker, "release_dispatch_state.json")
+		}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cat := mustLoad(t, validSource())
+			rm, _, _ := newReleaseFixture(t, cat, map[string]*fakeAgent{"A": {runningSeq: freshDispatchSeq(), applyOpID: "op", waitState: agentStateSucceeded}})
+			rm.store.path = tc.path(t)
+			rec := httptest.NewRecorder()
+			apiReleaseDispatch(rec, releaseReq(http.MethodPost, "/api/releases/dispatch",
+				dispatchRequest{ReleaseID: "rel_a", Agent: "A"}, RoleAdmin))
+			if rec.Code != http.StatusAccepted {
+				t.Fatalf("dispatch = %d; want 202 (the op was accepted)", rec.Code)
+			}
+			var body map[string]any
+			if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+				t.Fatal(err)
+			}
+			if body["durable"] != tc.durable {
+				t.Fatalf("durable = %v; want %v (%s)", body["durable"], tc.durable, rec.Body.String())
+			}
+			w, hasWarning := body["warning"].(string)
+			if tc.durable == hasWarning {
+				t.Fatalf("warning present=%v for durable=%v: %q", hasWarning, tc.durable, w)
+			}
+			if !tc.durable && !strings.Contains(w, "dispatch_record_not_persisted") {
+				t.Fatalf("warning does not name the condition: %q", w)
+			}
+			waitTerminal(t, rm, "A")
+		})
 	}
 }

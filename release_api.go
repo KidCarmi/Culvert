@@ -257,13 +257,13 @@ func newDispatchStore() *dispatchStore {
 // order). A stale late update from an older dispatch (smaller ULID) is ignored,
 // so it can never clobber a newer one. If newID ever stops producing ULIDs this
 // ordering invariant breaks.
-func (st *dispatchStore) update(agent, dispatchID string, mut func(*dispatchRecord)) {
+func (st *dispatchStore) update(agent, dispatchID string, mut func(*dispatchRecord)) error {
 	st.mu.Lock()
 	defer st.mu.Unlock()
 	cur, ok := st.byAgent[agent]
 	if ok && cur.DispatchID != dispatchID {
 		if cur.DispatchID > dispatchID {
-			return // a newer dispatch owns the slot
+			return nil // a newer dispatch owns the slot
 		}
 		ok = false // older slot — replace
 	}
@@ -273,11 +273,13 @@ func (st *dispatchStore) update(agent, dispatchID string, mut func(*dispatchReco
 	}
 	mut(cur)
 	cur.UpdatedAt = st.now()
-	st.persistLocked()
+	return st.persistLocked()
 }
 
-func (st *dispatchStore) markDispatched(agent, dispatchID string, rc DispatchResumeContext) {
-	st.update(agent, dispatchID, func(rec *dispatchRecord) {
+// markDispatched records the accepted op; the error says whether that record
+// reached durable storage (see persistLocked).
+func (st *dispatchStore) markDispatched(agent, dispatchID string, rc DispatchResumeContext) error {
+	return st.update(agent, dispatchID, func(rec *dispatchRecord) {
 		rec.Phase = phaseDispatched
 		rec.OpID = rc.OpID
 		rec.ReleaseID = rc.ReleaseID
@@ -286,7 +288,7 @@ func (st *dispatchStore) markDispatched(agent, dispatchID string, rc DispatchRes
 }
 
 func (st *dispatchStore) markTerminal(agent, dispatchID string, rep *DispatchReport) {
-	st.update(agent, dispatchID, func(rec *dispatchRecord) {
+	_ = st.update(agent, dispatchID, func(rec *dispatchRecord) { // best-effort: the outcome is also audited
 		rec.Phase = phaseTerminal
 		if rep != nil {
 			rec.Terminal = rep.Terminal
@@ -680,6 +682,7 @@ func apiReleaseDispatch(w http.ResponseWriter, r *http.Request) {
 	applied := make(chan struct{}, 1)
 	done := make(chan struct{})
 	var appliedFlag atomic.Bool
+	var untracked atomic.Bool // the accepted op's record did not reach disk
 	var rep *DispatchReport
 	var derr error
 	go func() {
@@ -691,7 +694,9 @@ func apiReleaseDispatch(w http.ResponseWriter, r *http.Request) {
 		// executor caps a deadline-less ctx at its maxWatch so it cannot run forever.
 		rep, derr = rm.svc.Dispatch(context.Background(), actor, ep, target, opts,
 			func(opID string, rc DispatchResumeContext) {
-				rm.store.markDispatched(ep.Key, dispatchID, rc)
+				if err := rm.store.markDispatched(ep.Key, dispatchID, rc); err != nil {
+					untracked.Store(true)
+				}
 				appliedFlag.Store(true)
 				select {
 				case applied <- struct{}{}:
@@ -712,27 +717,37 @@ func apiReleaseDispatch(w http.ResponseWriter, r *http.Request) {
 	// both ready ⇒ the appliedFlag check keeps it a 202, never a pre-apply reply).
 	select {
 	case <-applied:
-		rm.write202(w, ep.Key, dispatchID)
+		rm.write202(w, ep.Key, dispatchID, !untracked.Load())
 	case <-done:
 		if appliedFlag.Load() {
-			rm.write202(w, ep.Key, dispatchID)
+			rm.write202(w, ep.Key, dispatchID, !untracked.Load())
 		} else {
 			rm.respondPreApply(w, rep, derr)
 		}
 	}
 }
 
-func (rm *releaseManager) write202(w http.ResponseWriter, agentKey, dispatchID string) {
+// write202 answers an accepted dispatch. durable reports whether the op's
+// record reached disk: the agent has already accepted the op, so 202 is still
+// the truth, but an untracked op cannot be reconciled after this process
+// restarts (the restarted CP has no record to resume), and the response says
+// so instead of implying the durable-record contract was met.
+func (rm *releaseManager) write202(w http.ResponseWriter, agentKey, dispatchID string, durable bool) {
 	loc := "/api/releases/dispatch/status?agent=" + url.QueryEscape(agentKey)
 	rec, _ := rm.store.get(agentKey)
 	w.Header().Set("Location", loc)
-	writeJSONStatus(w, http.StatusAccepted, map[string]any{
+	body := map[string]any{
 		"dispatch_id":     dispatchID,
 		"agent":           agentKey,
 		"op_id":           rec.OpID,
 		"status":          "dispatched",
 		"status_location": loc,
-	})
+		"durable":         durable,
+	}
+	if !durable {
+		body["warning"] = "dispatch_record_not_persisted: the operation is running but this record did not reach disk; if the control plane restarts, reconcile it with POST /api/releases/dispatch/resume using op_id"
+	}
+	writeJSONStatus(w, http.StatusAccepted, body)
 }
 
 // respondPreApply maps a pre-apply outcome (no op started) to an HTTP status.
@@ -859,7 +874,7 @@ func apiReleaseDispatchResume(w http.ResponseWriter, r *http.Request) {
 		// in-flight rejection must not clobber the running op's record (P2).
 		rep, rerr := rm.svc.Resume(context.Background(), actor, ep, rc)
 		if !errors.Is(rerr, errDispatchInFlight) {
-			rm.store.markDispatched(ep.Key, dispatchID, rc) // record the op being resumed
+			_ = rm.store.markDispatched(ep.Key, dispatchID, rc) // record the op being resumed (best-effort, as before)
 			rm.store.markTerminal(ep.Key, dispatchID, rep)
 		}
 	}()

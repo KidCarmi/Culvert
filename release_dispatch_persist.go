@@ -29,6 +29,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -87,18 +88,21 @@ func newPersistentDispatchStore(path string) *dispatchStore {
 }
 
 // persistLocked writes the whole (bounded, per-agent) record set. Called with
-// st.mu held. Best-effort: the in-memory record is already updated, and a
-// dispatch must not fail because its bookkeeping could not be written — but
-// the failure is logged once per store so a read-only volume is visible.
-func (st *dispatchStore) persistLocked() {
+// st.mu held. The in-memory record is already updated and a dispatch whose op
+// the agent has accepted cannot be taken back, so a failure here never fails
+// the dispatch — but it IS returned, so the caller can say the op is accepted
+// yet untracked across a restart instead of claiming the durable-record
+// contract was met (and it is logged once per store). No configured path means
+// persistence is off by configuration, not a failure.
+func (st *dispatchStore) persistLocked() error {
 	if st.path == "" {
-		return
+		return nil
 	}
 	if st.loadErr != nil {
 		st.persistErrOnce.Do(func() {
 			logger.Printf("release dispatch state: not persisting to %s — the file could not be read at startup (%v) and writing would discard the records it holds", sanitizeLog(st.path), st.loadErr)
 		})
-		return
+		return fmt.Errorf("dispatch state file unreadable at startup: %w", st.loadErr)
 	}
 	f := dispatchStateFile{Version: releaseDispatchStateVersion, Records: st.byAgent}
 	body, err := json.MarshalIndent(f, "", "  ")
@@ -110,6 +114,7 @@ func (st *dispatchStore) persistLocked() {
 			logger.Printf("release dispatch state: persist to %s failed (%v); dispatch bookkeeping will not survive a restart", sanitizeLog(st.path), err)
 		})
 	}
+	return err
 }
 
 // interruptedDispatches returns the records whose watch was cut short by a
