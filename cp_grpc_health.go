@@ -482,7 +482,7 @@ func noteCPGRPCBound() (suppressed int64, recovered bool) {
 //
 // Distinct from noteCPGRPCSupervisorDown: a rebind IS in progress here, so the
 // operator action must not be "restart this node".
-func noteCPGRPCServeEnded(reason string) {
+func noteCPGRPCServeEnded(reason string) (shouldLog bool) {
 	cpGRPCEverFailed.Store(true)
 	now := cpGRPCHealthNow()
 	cpGRPCListener.mu.Lock()
@@ -500,12 +500,25 @@ func noteCPGRPCServeEnded(reason string) {
 	if cpGRPCListener.firstFailure.IsZero() {
 		cpGRPCListener.firstFailure = now
 	}
+	// SHARED log gate with noteCPGRPCBindFailure, so the two failure paths
+	// cannot flood past one line per minute between them. Found in self-review:
+	// the serve-death line was unconditional while the bind-failure line was
+	// gated, and a listener that binds and dies immediately cycles once per
+	// backoff — at the 30 s ceiling that is ~6x the bind path's allowance, from
+	// the same episode. Symmetry here is cheaper than a second rate policy.
+	if cpGRPCListener.logAt.IsZero() || now.Sub(cpGRPCListener.logAt) >= cpGRPCBindLogInterval {
+		cpGRPCListener.logAt = now
+		shouldLog = true
+	} else {
+		cpGRPCListener.suppressed++
+	}
 	cpGRPCListener.mu.Unlock()
 	// Deliberately does NOT evaluate the alert latch. A serve-death is followed
 	// by a rebind within the backoff floor, so paging here would page on every
 	// transient socket fault; if the rebinds keep failing, the bind-failure
 	// recorder owns the episode and the page. An immediate successful rebind
 	// clears the episode via noteCPGRPCBound.
+	return shouldLog
 }
 
 // noteCPGRPCSupervisorDown records the TERMINAL state: the supervisor goroutine

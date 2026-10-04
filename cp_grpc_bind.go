@@ -466,8 +466,6 @@ func (s *cpListenerSupervisor) run() {
 		if !s.firstResolved() {
 			s.noteFirstBound()
 		}
-		s.markFirstAttempt() // after the bind is recorded, for the reason above
-
 		logControlPlaneTransport(s.cfg.addr, mode)
 		if recovered {
 			logger.Printf("ControlPlane: gRPC listener bound and serving again on %s (%d suppressed bind-failure log line(s))",
@@ -489,6 +487,32 @@ func (s *cpListenerSupervisor) run() {
 		activateControlPlaneAfterBind(s.cfg, srv)
 		s.runOnActivated()
 
+		// Released only NOW, with the role claimed and onActivated done, and
+		// that ORDER is a correctness argument rather than tidiness.
+		//
+		// It used to sit immediately after noteCPGRPCBound, which was a WINDOW:
+		// `startControlPlaneListener` returns the moment this fires, so
+		// `activateControlPlane` could log "ControlPlane: enabled" and hand
+		// control back to main.go — which goes straight on to Data-Plane
+		// wiring, the admin UI and the proxy — while `clusterRole.role` was
+		// still "standalone" and the HA leadership resume had not run.
+		// Microseconds wide, and the same class of lie this whole change exists
+		// to remove, so the fix is to REMOVE the window rather than report it
+		// (§36's rule, which refused to add a "pending" state for the same
+		// reason).
+		//
+		// Found by this sweep's own control gate
+		// (TestChaos73_ControlHealthyBindIsSilent) under `-race`, which slows
+		// the scheduler enough to make the window observable — it passed
+		// without `-race`, which is why the gate runs under it.
+		//
+		// Blocking here is bounded by exactly the work the pre-change code did
+		// synchronously on this path (a role assignment under a mutex, a
+		// goroutine start, and `globalHA.ResumeAsLeader`), so nothing new can
+		// delay the boot. The deferred markFirstAttempt in the panic guard
+		// still releases the starter on every abnormal exit.
+		s.markFirstAttempt()
+
 		serveErr := srv.Serve(ln)
 		s.release(srv)
 
@@ -504,9 +528,11 @@ func (s *cpListenerSupervisor) run() {
 		if serveErr != nil {
 			reason = classifyCPGRPCBindError(serveErr)
 		}
-		noteCPGRPCServeEnded(reason)
-		logErrorf("ControlPlane gRPC serve on %s ended (%s): %v — rebinding",
-			s.cfg.addr, reason, serveErr)
+		if noteCPGRPCServeEnded(reason) {
+			logErrorf("ControlPlane gRPC serve on %s ended (%s): %v — rebinding; this node's proxy data "+
+				"plane and admin UI are unaffected",
+				s.cfg.addr, reason, serveErr)
+		}
 
 		wait := jitterDuration(backoff, cpGRPCBindJitter)
 		if !haSleepInterruptible(s.stopping, wait) {

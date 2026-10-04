@@ -1311,3 +1311,113 @@ func TestChaos73_WallTheBootPathDefersLeadershipToAnObservedBind(t *testing.T) {
 		}
 	}
 }
+
+// TestChaos73_DefectStarterIsReleasedOnlyAfterActivation pins the ordering
+// inside the supervisor's success path, DETERMINISTICALLY.
+//
+// It exists because the behavioural control gate could not be trusted with
+// this property. `TestChaos73_ControlHealthyBindIsSilent` checks, with a
+// non-blocking receive, that onActivated has run by the time the starter
+// returned — and it *did* catch the window once, under `-race`, which is how
+// the defect was found. But re-running the mutation afterwards
+// (`markFirstAttempt` moved back above the activation) it passed 3/3 under
+// `-race` and 3/3 without: the window is microseconds wide and whether the
+// starter's goroutine wins is pure scheduling. A gate that passes against the
+// defect is worse than no gate, and a gate that can flake gets muted — the
+// standing rule from §36's vacuous adopt/Stop gate and §40's two
+// self-calibration findings.
+//
+// So the ordering is pinned by CONSTRUCTION instead of by timing: onActivated
+// blocks, and the starter must not have returned while it is blocked. That
+// fails every time against the defect and cannot flake against the fix,
+// because the gate controls the schedule rather than racing it.
+//
+// Why the ordering matters: `startControlPlaneListener` returning is what lets
+// `activateControlPlane` log "ControlPlane: enabled" and hand control back to
+// main.go, which goes straight on to Data-Plane wiring, the admin UI and the
+// proxy. Releasing it before the role is claimed means those steps run against
+// a node still reporting `standalone`, with the HA leadership resume not yet
+// done — the same class of lie this whole change exists to remove.
+func TestChaos73_DefectStarterIsReleasedOnlyAfterActivation(t *testing.T) {
+	cpChaosSetup(t)
+	cpInsecure(t)
+
+	addr := fmt.Sprintf("127.0.0.1:%d", cpFreePort(t))
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	returned := make(chan struct{})
+
+	// The handle is published through a mutex, not a bare variable: the
+	// cleanup below can run while the starter goroutine is still blocked (that
+	// is exactly the mutation case), so a plain assignment would be a data
+	// race under -race rather than a clean failure.
+	var supMu sync.Mutex
+	var sup *cpListenerSupervisor
+	go func() {
+		defer close(returned)
+		got, err := startControlPlaneListener(cpListenerConfig{addr: addr}, true, func() {
+			close(entered)
+			<-release // hold activation open
+		})
+		supMu.Lock()
+		sup = got
+		supMu.Unlock()
+		if err != nil {
+			t.Errorf("startControlPlaneListener: %v", err)
+		}
+	}()
+	t.Cleanup(func() {
+		// Let the held activation finish however the test ends, then stop the
+		// supervisor — otherwise a failing run leaks a blocked goroutine and a
+		// bound listener into the next test.
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+		// BOUNDED, not `<-returned`. Against the "never release the starter"
+		// mutation the goroutine never finishes, and an unbounded wait here
+		// turned the gate's failure into a HANG — which is nearly as useless as
+		// passing, because the signal becomes an unexplained package timeout
+		// rather than a named failure. Found by running that very mutation.
+		select {
+		case <-returned:
+		case <-time.After(5 * time.Second):
+			t.Errorf("startControlPlaneListener never returned — the boot would hang before the proxy " +
+				"listener ever starts")
+		}
+		supMu.Lock()
+		got := sup
+		supMu.Unlock()
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_ = got.Stop(ctx) // nil-safe
+	})
+
+	select {
+	case <-entered:
+	case <-time.After(15 * time.Second):
+		t.Fatal("onActivated never ran on a healthy first-attempt bind")
+	}
+
+	// Activation is in flight and deliberately not finishing. The starter must
+	// still be blocked.
+	select {
+	case <-returned:
+		t.Fatal("startControlPlaneListener returned while the CP role was still being claimed: main.go would " +
+			"go on to Data-Plane wiring, the admin UI and the proxy with this node still reporting " +
+			"`standalone` and the HA leadership resume not yet run")
+	case <-time.After(250 * time.Millisecond):
+	}
+
+	// And it DOES return once activation completes — the other half, so a fix
+	// that simply never releases the starter cannot pass this.
+	close(release)
+	select {
+	case <-returned:
+	case <-time.After(15 * time.Second):
+		t.Fatal("startControlPlaneListener never returned after activation completed — the boot would hang " +
+			"before the proxy listener ever starts, which is worse than the defect")
+	}
+}

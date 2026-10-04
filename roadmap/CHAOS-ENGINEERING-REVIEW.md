@@ -8529,6 +8529,32 @@ claimed no role at all, because the half that would have done so lived in a
 caller the gate was not going through). There is now exactly one writer of that
 transition.
 
+**And collapsing them opened a WINDOW, which the same control gate caught one
+round later — under `-race` only.** With one activation path in the supervisor,
+`markFirstAttempt` still sat immediately after the bind was recorded, so
+`startControlPlaneListener` could return — letting `activateControlPlane` log
+*"ControlPlane: enabled"* and hand control back to `main.go`, which goes
+straight on to Data-Plane wiring, the admin UI and the proxy — while
+`clusterRole.role` was still `standalone` and the HA leadership resume had not
+run. Microseconds wide, and the same class of lie this change exists to remove,
+so the fix is to REMOVE the window (release the starter only after activation
+completes), not to report it — §36's rule, which refused to add a "pending"
+state for the same reason.
+
+**The gate that found it could not be trusted to keep finding it**, and that is
+the transferable part. Re-running the mutation afterwards it passed **3/3 under
+`-race` and 3/3 without**: whether the starter's goroutine wins is pure
+scheduling, so the control gate caught the defect once by luck. A gate that
+passes against the defect is worse than no gate, and a gate that can flake gets
+muted. The ordering is therefore pinned by CONSTRUCTION in
+`TestChaos73_DefectStarterIsReleasedOnlyAfterActivation` — `onActivated` blocks
+and the starter must not have returned while it is blocked, which fails every
+time against the defect, with and without `-race`, and cannot flake against the
+fix because the gate controls the schedule instead of racing it. It carries the
+other half too (the starter must still return once activation completes), so a
+"fix" that simply never releases it — a boot that hangs before the proxy
+listener starts, strictly worse than the defect — cannot pass.
+
 ### 41.6b Governance: the collision problem is not confined to the CHAOS id
 
 This sweep allocated its `CHAOS-` id in a committed placeholder row as §0
