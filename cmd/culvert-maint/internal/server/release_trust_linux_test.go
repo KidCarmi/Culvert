@@ -57,6 +57,20 @@ func TestReleaseTrustSpaceRefusalThenRetryWithoutRestart(t *testing.T) {
 	if rig.sawCommand("pull") || rig.sawCommand("tag") || rig.sawCommand("up") {
 		t.Fatal("space refusal mutated images")
 	}
+	// Manager.Finish publishes the terminal state before journal/audit cleanup.
+	// The host flock is released when that orchestrator goroutine exits, and
+	// goOp decrements opWG only after the release. Wait for that actual barrier
+	// rather than treating a terminal status response as admission readiness.
+	drained := make(chan struct{})
+	go func() {
+		rig.srv.opWG.Wait()
+		close(drained)
+	}()
+	select {
+	case <-drained:
+	case <-time.After(5 * time.Second):
+		t.Fatal("terminal operation did not finish host-lock cleanup")
+	}
 	rig.freeBytes.Store(2 << 30)
 	op, _ = rig.acceptAndWait(t, body)
 	if op["state"] != "succeeded" {
