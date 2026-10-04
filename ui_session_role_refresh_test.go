@@ -170,7 +170,7 @@ func TestUISessionRole_ProxyReaderRejectsOtherPurpose(t *testing.T) {
 		t.Fatal(err)
 	}
 	cookie := issued.Result().Cookies()[0] //nolint:gosec // G124: replayed as a REQUEST cookie in a test; response attributes do not apply
-	cookie.Name = sessionCookieName //nolint:gosec // G124: a REQUEST cookie in a test; Secure/HttpOnly/SameSite are response attributes
+	cookie.Name = sessionCookieName        //nolint:gosec // G124: a REQUEST cookie in a test; Secure/HttpOnly/SameSite are response attributes
 	r := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
 	r.AddCookie(cookie) //nolint:gosec // G124: a REQUEST cookie in a test; Secure/HttpOnly/SameSite are response attributes
 	if sess, err := readSessionCookie(r); err == nil || sess != nil {
