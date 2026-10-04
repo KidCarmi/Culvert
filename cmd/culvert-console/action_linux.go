@@ -20,6 +20,13 @@ import (
 var errTerminalState = errors.New("terminal state unavailable; reconnect or use SSH")
 
 func commandName(args []string) string {
+	name, _ := allowlistedCommand(args)
+	return name
+}
+
+// allowlistedCommand returns the allowlist entry args matches exactly, with
+// the allowlist's OWN argv: execute runs that copy, never the caller's slice.
+func allowlistedCommand(args []string) (name string, argv []string) {
 	commands := []struct {
 		name string
 		args []string
@@ -36,18 +43,18 @@ func commandName(args []string) string {
 	}
 	for _, command := range commands {
 		if slices.Equal(command.args, args) {
-			return command.name
+			return command.name, slices.Clone(command.args)
 		}
 	}
-	return ""
+	return "", nil
 }
 
 func execute(ctx context.Context, args []string) error {
-	name := commandName(args)
+	name, argv := allowlistedCommand(args)
 	if name == "" {
 		return errors.New("console command is not allowlisted")
 	}
-	return auditCommand(ctx, name, func() error { return interactiveCommand(ctx, args) }, journalRecord, os.Stderr)
+	return auditCommand(ctx, name, func() error { return interactiveCommand(ctx, argv) }, journalRecord, os.Stderr)
 }
 
 func interactiveCommand(ctx context.Context, args []string) (result error) {
@@ -62,7 +69,8 @@ func interactiveCommand(ctx context.Context, args []string) (result error) {
 			result = errors.Join(result, errTerminalState, restoreErr)
 		}
 	}()
-	// #nosec G204 -- execute accepts only exact fixed argv from commandName.
+	// #nosec G204 G702 -- execute passes only the allowlist's own fixed argv
+	// (allowlistedCommand); the only other caller is the PTY test harness.
 	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 	cmd.Env = actionEnvironment()

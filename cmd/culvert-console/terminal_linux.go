@@ -202,7 +202,7 @@ func positionedFrame(rows []applianceconsole.Row, color bool, height, width, pan
 	top, left := (height-panelHeight)/2+1, (width-panelWidth)/2+1
 	for i := range rows {
 		rows[i].Text += strings.Repeat(" ", max(0, panelWidth-1-len(rows[i].Text)))
-		output.WriteString(fmt.Sprintf("\x1b[%d;%dH", top+i, left))
+		fmt.Fprintf(&output, "\x1b[%d;%dH", top+i, left)
 		output.WriteString(applianceconsole.Render(rows[i:i+1], color))
 	}
 	return output.String()

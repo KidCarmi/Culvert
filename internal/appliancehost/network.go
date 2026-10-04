@@ -2,6 +2,7 @@ package appliancehost
 
 import (
 	"bytes"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"net"
@@ -59,9 +60,9 @@ func staticFields(r NetworkRequest, nic map[string]any) error {
 		return errors.New("use a usable IPv4 host and gateway in the same /1 through /30 subnet")
 	}
 	last := p.Masked().Addr().As4()
-	v := uint32(last[0])<<24 | uint32(last[1])<<16 | uint32(last[2])<<8 | uint32(last[3])
-	v |= uint32(1)<<(32-p.Bits()) - 1
-	broadcast := netip.AddrFrom4([4]byte{byte(v >> 24), byte(v >> 16), byte(v >> 8), byte(v)})
+	v := binary.BigEndian.Uint32(last[:]) | (uint32(1)<<(32-p.Bits()) - 1)
+	binary.BigEndian.PutUint32(last[:], v)
+	broadcast := netip.AddrFrom4(last)
 	if a == broadcast || g == broadcast || g == p.Masked().Addr() {
 		return errors.New("network/broadcast addresses cannot be hosts or gateways")
 	}
