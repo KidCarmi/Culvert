@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -299,7 +300,16 @@ func runFixtureCommand(parent context.Context, binary string, args ...string) (s
 	defer cancel()
 	cmd := exec.CommandContext(ctx, binary, args...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
+	var metadataMu sync.Mutex
+	var metadata string
+	cmd.Cancel = func() error {
+		if fixtureCommandTimeout(binary) == 60*time.Second {
+			metadataMu.Lock()
+			metadata = fixtureProcessMetadata("/proc", cmd.Process.Pid)
+			metadataMu.Unlock()
+		}
+		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	}
 	cmd.WaitDelay = time.Second
 	output, err := cmd.CombinedOutput()
 	if err != nil && len(output) > 4096 {
@@ -308,7 +318,89 @@ func runFixtureCommand(parent context.Context, binary string, args ...string) (s
 	if ctx.Err() != nil {
 		err = fmt.Errorf("%w (limit %s; process: %v)", ctx.Err(), fixtureCommandTimeout(binary), err)
 	}
+	metadataMu.Lock()
+	if metadata != "" {
+		err = fmt.Errorf("%w; account process metadata: %s", err, metadata)
+	}
+	metadataMu.Unlock()
 	return string(output), err
+}
+
+// Read only allowlisted proc metadata. Never inspect cmdline, environ, process
+// memory, FD contents or syscall arguments (which could reference secret data).
+func fixtureProcessMetadata(procRoot string, pid int) string {
+	read := func(path string) string {
+		f, err := os.Open(path)
+		if err != nil {
+			return "unavailable"
+		}
+		defer f.Close()
+		data, err := io.ReadAll(io.LimitReader(f, 256))
+		if err != nil {
+			return "unavailable"
+		}
+		return strings.TrimSpace(string(data))
+	}
+	var out strings.Builder
+	queue := []int{pid}
+	seen := map[int]bool{}
+	for len(queue) > 0 && len(seen) < 12 {
+		current := queue[0]
+		queue = queue[1:]
+		if current <= 0 || seen[current] {
+			continue
+		}
+		seen[current] = true
+		base := filepath.Join(procRoot, strconv.Itoa(current))
+		syscallNumber := strings.Fields(read(filepath.Join(base, "syscall")))
+		if len(syscallNumber) == 0 {
+			syscallNumber = []string{"unavailable"}
+		}
+		fmt.Fprintf(&out, "pid=%d comm=%q wchan=%q syscall=%q ", current, read(filepath.Join(base, "comm")), read(filepath.Join(base, "wchan")), syscallNumber[0])
+		if fds, err := os.Open(filepath.Join(base, "fd")); err == nil {
+			entries, _ := fds.ReadDir(8)
+			fds.Close()
+			for _, fd := range entries {
+				target, err := os.Readlink(filepath.Join(base, "fd", fd.Name()))
+				if err == nil {
+					if len(target) > 160 {
+						target = target[:160] + "..."
+					}
+					fmt.Fprintf(&out, "fd%s=%q ", fd.Name(), target)
+				}
+			}
+		}
+		children := read(filepath.Join(base, "task", strconv.Itoa(current), "children"))
+		for _, child := range strings.Fields(children) {
+			if childPID, err := strconv.Atoi(child); err == nil && len(queue) < 12 {
+				queue = append(queue, childPID)
+			}
+		}
+		out.WriteString("; ")
+		if out.Len() >= 4096 {
+			return out.String()[:4096] + " [truncated]"
+		}
+	}
+	return out.String()
+}
+
+func TestAccessFixtureProcessMetadataExcludesSensitiveContents(t *testing.T) {
+	proc := t.TempDir()
+	for _, pid := range []string{"101", "102"} {
+		base := filepath.Join(proc, pid)
+		if err := os.MkdirAll(filepath.Join(base, "task", pid), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		for name, value := range map[string]string{"comm": "synthetic-account-tool", "wchan": "do_wait", "syscall": "61 SECRET_ARGUMENTS", "cmdline": "SECRET_COMMAND", "environ": "SECRET_ENVIRONMENT", "task/" + pid + "/children": "102"} {
+			if err := os.WriteFile(filepath.Join(base, name), []byte(value), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	got := fixtureProcessMetadata(proc, 101)
+	if !strings.Contains(got, "pid=101") || !strings.Contains(got, "pid=102") || !strings.Contains(got, "do_wait") || !strings.Contains(got, `syscall="61"`) || strings.Contains(got, "SECRET") {
+		t.Fatal("process metadata must follow descendants without disclosing sensitive contents")
+	}
 }
 
 func ownedFixtureAccount(u *user.User, marker, home, uid, gid string) bool {
