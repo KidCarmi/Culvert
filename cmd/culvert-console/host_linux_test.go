@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -11,6 +12,17 @@ import (
 	"github.com/KidCarmi/Culvert/internal/applianceconsole"
 	"github.com/KidCarmi/Culvert/internal/appliancehost"
 )
+
+func TestHostModesRequireRootBeforeObservationsOrMutation(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("exercise the unprivileged entry point")
+	}
+	for _, mode := range []string{"worker", "network", "reboot", "poweroff", "retry-reset", "retry-start"} {
+		if err := runHost(context.Background(), mode, applianceconsole.Collector{}); err == nil {
+			t.Fatalf("unprivileged host mode %s accepted", mode)
+		}
+	}
+}
 
 func TestHostCommandFailureIsCoarseAndCancellationBounded(t *testing.T) {
 	err := hostCommand(context.Background(), "/bin/sh", "-c", "printf PRIVATE_OUTPUT_CANARY >&2; exit 7")

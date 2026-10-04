@@ -23,7 +23,7 @@ func retrySnapshot(state string) Snapshot {
 func TestActionsRequireEffectiveIdentity(t *testing.T) {
 	a, calls := actionFixture()
 	a.deps.Authorized = func() bool { return false }
-	for _, choice := range []string{"1", "2", "4", "5", "6"} {
+	for _, choice := range []string{"1", "2", "4", "5", "6", "7"} {
 		if a.Apply(context.Background(), choice) == nil {
 			t.Fatal("unauthenticated action accepted")
 		}
