@@ -27,10 +27,11 @@ func commandName(args []string) string {
 		{"pam_login", []string{"/bin/login", "culvert"}},
 		{"network_show", []string{"/opt/culvert-appliance/bin/culvert-net", "show"}},
 		{"setup_access", []string{"/usr/bin/sudo", "--", "/opt/culvert-appliance/bin/culvert-status"}},
-		{"retry_reset", []string{"/usr/bin/sudo", "--", "/usr/bin/systemctl", "reset-failed", "culvert-firstboot.service"}},
-		{"retry_start", []string{"/usr/bin/sudo", "--", "/usr/bin/systemctl", "start", "--no-block", "culvert-firstboot.service"}},
-		{"reboot", []string{"/usr/bin/sudo", "--", "/usr/bin/systemctl", "reboot"}},
-		{"poweroff", []string{"/usr/bin/sudo", "--", "/usr/bin/systemctl", "poweroff"}},
+		{"retry_reset", []string{"/usr/bin/sudo", "--", "/opt/culvert-appliance/bin/culvert-console", "--host=retry-reset"}},
+		{"retry_start", []string{"/usr/bin/sudo", "--", "/opt/culvert-appliance/bin/culvert-console", "--host=retry-start"}},
+		{"reboot", []string{"/usr/bin/sudo", "--", "/opt/culvert-appliance/bin/culvert-console", "--host=reboot"}},
+		{"poweroff", []string{"/usr/bin/sudo", "--", "/opt/culvert-appliance/bin/culvert-console", "--host=poweroff"}},
+		{"network_change", []string{"/usr/bin/sudo", "--", "/opt/culvert-appliance/bin/culvert-console", "--host=network"}},
 		{"recovery_shell", []string{"/bin/bash", "--noprofile", "--norc"}},
 	}
 	for _, command := range commands {

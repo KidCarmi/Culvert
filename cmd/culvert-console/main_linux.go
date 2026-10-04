@@ -25,9 +25,10 @@ func run() int {
 	admin := flag.Bool("admin", false, "authenticated culvert account menu")
 	jsonOutput := flag.Bool("json", false, "read-only status without credentials")
 	textOutput := flag.Bool("text", false, "read-only plain text status")
+	host := flag.String("host", "", "root-only worker or recovery action")
 	flag.Parse()
 	count := 0
-	for _, selected := range []bool{*login, *admin, *jsonOutput, *textOutput} {
+	for _, selected := range []bool{*login, *admin, *jsonOutput, *textOutput, *host != ""} {
 		if selected {
 			count++
 		}
@@ -39,8 +40,16 @@ func run() int {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT, syscall.SIGHUP)
 	defer stop()
 	collector := applianceconsole.NewCollector(applianceconsole.Sources{
+		Prerequisites: collectPrerequisites, RecoveryFile: hostPublic,
 		StateDir: "/var/lib/culvert-appliance/state", BuildFile: "/var/lib/culvert-appliance/build-info.json", NetDir: "/sys/class/net", Probe: runProbe, HostnameFile: "/etc/hostname", ResolverFile: "/run/systemd/resolve/resolv.conf",
 	})
+	if *host != "" {
+		if err := runHost(ctx, *host, collector); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 1
+		}
+		return 0
+	}
 	if *jsonOutput || *textOutput {
 		snapshot := collector.Collect(ctx)
 		if *jsonOutput {

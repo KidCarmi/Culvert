@@ -71,7 +71,7 @@ func TestRetryUsesStartNotRestartAndHonorsSudoFailure(t *testing.T) {
 	if err := a.Apply(context.Background(), "4"); err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"/usr/bin/sudo", "--", "/usr/bin/systemctl", "start", "--no-block", "culvert-firstboot.service"}
+	want := []string{"/usr/bin/sudo", "--", "/opt/culvert-appliance/bin/culvert-console", "--host=retry-start"}
 	if len(*calls) != 2 || !reflect.DeepEqual((*calls)[1], want) {
 		t.Fatalf("wrong commands %v", *calls)
 	}
@@ -132,7 +132,7 @@ func TestConfirmationCannotInjectCommands(t *testing.T) {
 		if err := a.Apply(context.Background(), "5"); err != nil {
 			t.Fatal(err)
 		}
-		if len(*calls) != 1 || !strings.EqualFold((*calls)[0][3], answer) {
+		if len(*calls) != 1 || !strings.EqualFold((*calls)[0][3], "--host="+answer) {
 			t.Fatal("wrong power action")
 		}
 	}

@@ -18,7 +18,7 @@ const maxOutput = 65536
 
 var stepNames = []string{"ovf", "console", "images", "install", "agent", "complete"}
 var stepLabels = []string{"Network configuration", "Console access", "Application images", "Service installation", "Maintenance agent", "Provisioning complete"}
-var unitKeys = []string{"LoadState", "ActiveState", "SubState", "Result", "ExecMainStatus", "NRestarts"}
+var unitKeys = []string{"LoadState", "ActiveState", "SubState", "Result", "ExecMainStatus", "NRestarts", "Job"}
 
 // Clean strips terminal controls, non-ASCII and multiline text before display.
 func Clean(value string, limit int) string {
@@ -44,6 +44,8 @@ type Step struct {
 
 // Snapshot is the versioned contract shared by CLI and terminal display.
 type Snapshot struct {
+	Prerequisites         []Check           `json:"prerequisites,omitempty"`
+	Recovery              Recovery          `json:"recovery"`
 	Hostname              string            `json:"hostname"`
 	Interfaces            []Interface       `json:"interfaces"`
 	IPv6Gateway           string            `json:"ipv6_gateway"`
@@ -83,6 +85,8 @@ type Sources struct {
 	StateDir, BuildFile, NetDir string
 	HostnameFile, ResolverFile  string
 	Probe                       func(context.Context, []string) string
+	Prerequisites               func(context.Context) []Check
+	RecoveryFile                string
 }
 
 // Collector owns no persistent state or background workers. Each Collect call
@@ -132,8 +136,16 @@ func (c Collector) observations(ctx context.Context) map[string]string {
 
 // Collect returns a fresh snapshot without changing provisioning or credentials.
 func (c Collector) Collect(ctx context.Context) Snapshot {
+	var checks []Check
+	var diagnostics sync.WaitGroup
+	if c.sources.Prerequisites != nil {
+		diagnostics.Go(func() { checks = c.sources.Prerequisites(ctx) })
+	}
 	raw := c.observations(ctx)
+	diagnostics.Wait()
 	s := Snapshot{SchemaVersion: 1, ObservedAt: time.Now().UTC().Format(time.RFC3339), Version: "unknown", Addresses: []string{}, ManagementURLs: []string{}, Firstboot: make(map[string]string)}
+	s.Prerequisites = checks
+	s.Recovery = readRecovery(c.sources.RecoveryFile)
 	for line := range strings.SplitSeq(raw["unit"], "\n") {
 		key, value, ok := strings.Cut(line, "=")
 		if ok && slices.Contains(unitKeys, key) {

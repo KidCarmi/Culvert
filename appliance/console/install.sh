@@ -18,5 +18,7 @@ install -d -o root -g root -m 0755 "$DEST"
 install -d -m 0755 /etc/systemd/system/getty@tty1.service.d
 install_console_bundle "$HERE" "$DEST/culvert-console" \
     /etc/profile.d/culvert-console.sh \
-    /etc/systemd/system/getty@tty1.service.d/culvert-console.conf
+    /etc/systemd/system/getty@tty1.service.d/culvert-console.conf \
+    /etc/systemd/system/culvert-console-host.service
+systemctl enable culvert-console-host.service
 echo 'Console installed for next boot. tty2 and SSH retain normal login.'

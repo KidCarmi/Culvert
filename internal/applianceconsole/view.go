@@ -93,7 +93,7 @@ func (v *View) handleScreen(key string) string {
 	}
 	switch v.screen + ":" + key {
 	case "network:E":
-		return v.privileged("6")
+		return v.privileged("7")
 	case "access:S":
 		return v.privileged("2")
 	case "recovery:1":
@@ -240,7 +240,10 @@ func networkRows(s Snapshot) []Row {
 	for _, dns := range s.DNS[min(1, len(s.DNS)):] {
 		rows = append(rows, Row{"     " + dns, ""})
 	}
-	return append(rows, Row{"DHCP/static mode: not inferred from an assigned address.", ""}, Row{"Guided changes unavailable. Use authenticated recovery.", "warning"}, Row{"[E] Authenticated recovery shell for existing network tools", ""})
+	if s.Recovery.NetworkID != "" {
+		rows = append(rows, Row{"Last network operation: " + s.Recovery.NetworkID, ""}, Row{"Recorded state: " + s.Recovery.NetworkPhase, "warning"})
+	}
+	return append(rows, Row{"DHCP/static mode: not inferred from an assigned address.", ""}, Row{"[E] Authenticated network change / confirm pending change", ""}, Row{"Unconfirmed changes roll back after 120 seconds.", "warning"}, Row{"Simple physical IPv4 only; complex layouts use recovery.", ""})
 }
 
 func accessRows(s Snapshot) []Row {
@@ -264,6 +267,10 @@ func diagnosticRows(s Snapshot) []Row {
 	for _, step := range s.Steps {
 		rows = append(rows, Row{step.Label + ": " + step.State, ""})
 	}
+	rows = append(rows, Row{"READ-ONLY PREREQUISITES", "cyan"})
+	for _, check := range s.Prerequisites {
+		rows = append(rows, Row{check.ID + ": " + check.State, "cyan"}, Row{check.Detail, ""})
+	}
 	return append(rows, Row{"Missing image content needs repair before retrying startup.", "warning"}, Row{"No address alone does not identify a DHCP, VLAN or link fault.", ""})
 }
 
@@ -271,6 +278,14 @@ func reportRows(s Snapshot) []Row {
 	rows := []Row{{"INSTALLATION REPORT / CURRENT OBSERVATION", "cyan"}, {"Host: " + s.Hostname, ""}, {"Build: " + s.Version, ""}, {"Observed (UTC): " + s.ObservedAt, ""}, {"Provisioning: " + s.Phase, ""}, {"Administrator setup: " + setupLabel(s), ""}, {fmt.Sprintf("Local management response: %t", s.ManagementAvailable), ""}, {fmt.Sprintf("Application health HTTP 200: %t", s.ApplicationResponding), ""}, {"Client traffic: NOT VERIFIED", "warning"}, {"Unresolved status: " + s.Reason, ""}}
 	if s.Candidate {
 		rows = append(rows, Row{"Candidate build; full appliance qualification not established.", "warning"})
+	}
+	rows = append(rows, Row{"PERSISTED RECOVERY OBSERVATIONS", "cyan"})
+	if !s.Recovery.Available {
+		rows = append(rows, Row{"Worker history unavailable; not evidence of success.", "warning"})
+	}
+	for i := len(s.Recovery.Records) - 1; i >= max(0, len(s.Recovery.Records)-5); i-- {
+		r := s.Recovery.Records[i]
+		rows = append(rows, Row{r.At + " " + r.Action + " " + r.Phase, ""}, Row{"Operation: " + r.ID, ""}, Row{"Boot: " + r.Boot, ""}, Row{"Machine: " + r.Machine, ""}, Row{r.Observation, ""})
 	}
 	return append(rows, Row{"Read-only observation; no security attestation or upload.", ""}, Row{"SSH: /opt/culvert-appliance/bin/culvert-console --json", ""})
 }

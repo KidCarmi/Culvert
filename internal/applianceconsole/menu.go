@@ -8,7 +8,8 @@ import (
 	"strings"
 )
 
-func canRetry(s Snapshot) bool {
+// RetryAllowed is shared by the authenticated menu and privileged executor.
+func RetryAllowed(s Snapshot) bool {
 	state := s.Firstboot["ActiveState"]
 	if s.Firstboot["LoadState"] != "loaded" || (state != "failed" && state != "inactive") {
 		return false
@@ -69,6 +70,8 @@ func (a Actions) Apply(ctx context.Context, choice string) error {
 			return fmt.Errorf("display shell instructions: %w", err)
 		}
 		return a.run(ctx, []string{"/bin/bash", "--noprofile", "--norc"})
+	case "7":
+		return a.run(ctx, []string{"/usr/bin/sudo", "--", bin + "culvert-console", "--host=network"})
 	default:
 		return errors.New("unknown recovery action")
 	}
@@ -87,7 +90,7 @@ func (a Actions) run(ctx context.Context, args []string) error {
 }
 
 func (a Actions) retry(ctx context.Context) error {
-	if !canRetry(a.deps.Collect(ctx)) {
+	if !RetryAllowed(a.deps.Collect(ctx)) {
 		return errors.New("retry refused: provisioning is running, complete, or unknown")
 	}
 	answer, err := a.deps.Confirm("Type RETRY to resume incomplete provisioning: ")
@@ -97,19 +100,19 @@ func (a Actions) retry(ctx context.Context) error {
 	if answer != "RETRY" {
 		return nil
 	}
-	if !canRetry(a.deps.Collect(ctx)) {
+	if !RetryAllowed(a.deps.Collect(ctx)) {
 		return errors.New("state changed; no retry dispatched")
 	}
-	if err := a.run(ctx, []string{"/usr/bin/sudo", "--", "/usr/bin/systemctl", "reset-failed", "culvert-firstboot.service"}); err != nil {
+	if err := a.run(ctx, []string{"/usr/bin/sudo", "--", "/opt/culvert-appliance/bin/culvert-console", "--host=retry-reset"}); err != nil {
 		return fmt.Errorf("clear failed provisioning: %w", err)
 	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if !canRetry(a.deps.Collect(ctx)) {
+	if !RetryAllowed(a.deps.Collect(ctx)) {
 		return errors.New("state changed after clearing failure; provisioning was not started by this console")
 	}
-	if err := a.run(ctx, []string{"/usr/bin/sudo", "--", "/usr/bin/systemctl", "start", "--no-block", "culvert-firstboot.service"}); err != nil {
+	if err := a.run(ctx, []string{"/usr/bin/sudo", "--", "/opt/culvert-appliance/bin/culvert-console", "--host=retry-start"}); err != nil {
 		return fmt.Errorf("start provisioning: %w", err)
 	}
 	return nil
@@ -123,7 +126,7 @@ func (a Actions) power(ctx context.Context) error {
 	if answer != "REBOOT" && answer != "POWEROFF" {
 		return nil
 	}
-	if err := a.run(ctx, []string{"/usr/bin/sudo", "--", "/usr/bin/systemctl", strings.ToLower(answer)}); err != nil {
+	if err := a.run(ctx, []string{"/usr/bin/sudo", "--", "/opt/culvert-appliance/bin/culvert-console", "--host=" + strings.ToLower(answer)}); err != nil {
 		return fmt.Errorf("request power action: %w", err)
 	}
 	return nil

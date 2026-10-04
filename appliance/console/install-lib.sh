@@ -9,6 +9,11 @@ install_console_bundle() (
     local -a targets=("$binary" "$profile" "$getty")
     local -a sources=("$source/culvert-console" "$source/profile.sh" "$source/getty-override.conf")
     local -a modes=(0755 0644 0644) staged=() backups=() published=()
+    if [[ -n ${5:-} ]]; then
+        targets=("$binary" "$profile" "$5" "$getty")
+        sources=("$source/culvert-console" "$source/profile.sh" "$source/culvert-console-host.service" "$source/getty-override.conf")
+        modes=(0755 0644 0644 0644)
+    fi
 
     console_install_cleanup() {
         status=$?

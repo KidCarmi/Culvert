@@ -97,6 +97,23 @@ kill -0 "$child"
 kill "$child"
 wait "$child" || true
 child=''
+# The worker unit belongs to the same transaction and publishes before getty.
+worker=$TEST_ROOT/dest/worker
+printf 'new worker\n' >"$src/culvert-console-host.service"
+for fail_at in 1 2 3 4; do
+    reset_targets
+    printf 'old worker\n' >"$worker"
+    if (
+        count=0
+        mv() { count=$((count+1)); [[ $count != "$fail_at" ]] || return 99; command mv "$@"; }
+        install_console_bundle "$src" "$bin" "$profile" "$getty" "$worker"
+    ); then echo 'Four-file rollback failure ignored.' >&2; exit 1; fi
+    assert_old
+    [[ $(cat "$worker") == 'old worker' ]]
+done
+install_console_bundle "$src" "$bin" "$profile" "$getty" "$worker"
+cmp "$worker" "$src/culvert-console-host.service"
+[[ $(stat -c '%a:%u:%g' "$worker") == '644:0:0' ]]
 # If both publication and rollback fail, keep named backups for manual recovery.
 reset_targets
 if (

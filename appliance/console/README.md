@@ -1,4 +1,71 @@
-# Culvert boot console — first implementation slice
+# Culvert boot console and local recovery worker
+
+## Durable recovery and confirmed network changes
+
+The same Go executable now supplies `culvert-console-host.service`, a separate
+root worker with no socket/listener and no Docker or network-online dependency.
+`install.sh` atomically publishes its unit alongside the binary/profile/getty
+bundle, then enables it for the next boot. For an already running disposable
+guest, run `systemctl daemon-reload` and `systemctl start culvert-console-host`
+after installation. Updating a running worker also requires restarting that
+unit; do this only with no pending transaction. No sudo permissions are added.
+
+Authenticated network screen `[E]` invokes `sudo .../culvert-console --host=network`.
+It requires `ovf.done`, an active worker, one physical en*/eth* interface, one
+unambiguous DHCP base file and a compatible managed `60-culvert.yaml`.
+DHCP or IPv4 static address/prefix, same-subnet gateway and 1–3 DNS servers are
+supported. Bonds, bridges, VLANs, IPv6 configuration, wildcard/renaming ambiguity,
+and merged base address/route/DNS lists are refused before queueing. MAC matches
+must identify the chosen physical device. Existing complex layouts remain an
+administrator recovery task; the console does not flatten them.
+
+`APPLY` saves the previous file's exact bytes, mode or absence and a digest of
+the other Netplan files before the worker changes anything. The 120-second
+confirmation window starts when queued, uses kernel BOOTTIME, and cannot be
+extended by a wall-clock correction. Verify management access from another
+client, then type `CONFIRM`; after reconnecting, reopen `[E]` to confirm the same
+operation. Local service response is not proof of client reachability.
+
+Loss of the terminal does not stop the worker. Expiry starts rollback; an
+interrupted apply or different boot also rolls back. Normal worker polls are
+one second, with bounded observations and commands; restoration can take longer
+than the confirmation window. Failed attempts back off to 30 seconds. The unit
+restarts on failure and starts at boot, but does not promise restoration before
+the first network packet. A permanently stopped worker cannot recover until
+restarted. Read-only/full storage, unusable Netplan or host damage can prevent
+restoration; these cases retain the backup and never claim `rolled_back`.
+
+Private state is `/var/lib/culvert-console/private/state.json` (root:root 0600,
+directory 0700), with an exclusive nonblocking flock, bounded regular-file reads,
+symlink/hardlink refusal, atomic replacement and file/directory fsync. Corrupt or
+unknown-version state is not reset. A sanitized public observation appears at
+`/var/lib/culvert-console/status.json`; it excludes Netplan contents and is not a
+liveness guarantee. Up to 64 operation/checkpoint records include operation ID,
+boot ID, machine ID, UTC time, coarse phase and allowlisted firstboot observations.
+Power/retry intent is saved before dispatch. `submitted` means systemd accepted
+the request, not that reboot or provisioning succeeded. Boot observations and
+before/after IDs remain available even when a caller disconnects.
+
+Managed edits serialize with this worker only. Do not run legacy `culvert-net`,
+manual Netplan edits or other privileged network writers during a pending test.
+Unexpected file drift enters `conflict` without overwriting it. Preserve the
+private state/backup and reconcile through authenticated root recovery; do not
+delete the record to hide the conflict. Firstboot/maintenance lifecycle ownership
+is unchanged; this worker does not restart stopped application containers.
+
+Read-only diagnostics now show available filesystem bytes/inodes, reported clock
+synchronization, resolution of a configured FQDN only, the loopback setup leaf
+certificate's dates/SHA256 and the firstboot systemd Job field. Missing data is
+`unknown`, not healthy. No Internet prerequisite is invented. Storage warnings
+use Culvert reserves of 2 GiB or 10% available space, and 5% free inodes; they do
+not delete data or block provisioning. Certificate inspection explicitly does
+not establish chain/hostname trust. These checks add no Go module dependencies.
+
+Vendor principles adopted: [Juniper confirmed commits](https://www.juniper.net/documentation/us/en/software/junos/cli/topics/topic-map/junos-configuration-commit.html),
+[TrueNAS timed network tests](https://www.truenas.com/docs/scale/25.10/scaleuireference/network/networkinterfacescreens/),
+[VMware firstboot prerequisite failures](https://knowledge.broadcom.com/external/article/324989/firstboot-failed-during-install-deployme.html),
+and [Netplan's merged input semantics](https://netplan.readthedocs.io/en/stable/netplan-get/).
+This is a candidate implementation, not completed enterprise qualification.
 
 This additive component provides an ESXi-style local console after power-on.
 It is a static Go host binary built with the root `go.mod` toolchain,
@@ -23,7 +90,7 @@ session with `sudo passwd culvert`.
 ## Integration boundary with Opus
 
 The Go command lives in `cmd/culvert-console`, with domain logic and white-box
-tests in `internal/applianceconsole`. Packaging files stay here to avoid
+tests in `internal/applianceconsole` and `internal/appliancehost`. Packaging files stay here to avoid
 conflicts with the ongoing firstboot/image fix. This slice does **not** modify
 `build-ova.sh`, `prepare-guest.sh`, firstboot,
 the network helper, the existing status CLI, or the application UI. It does not
@@ -68,7 +135,7 @@ The latter command ends any tty1 session; run it through authenticated SSH only
 in the disposable qualification VM. Reboot validation must then prove the same
 menu appears without manually restarting getty.
 
-Rollback through SSH or tty2:
+To remove the menu through SSH or tty2, first resolve pending network transactions. Keep the recovery worker running until rollback completes:
 
 ```bash
 sudo rm /etc/systemd/system/getty@tty1.service.d/culvert-console.conf
@@ -142,7 +209,7 @@ bounded polling, never a background stdin reader that could consume a later
 PAM password. Terminal modes/cursor are restored before login, confirmation or
 recovery actions; those actions synchronously own input until they exit. systemd
 owns the getty process and its shutdown process group. The console adds no
-persistent mutable state or service listener.
+network listener; its separate recovery worker owns bounded persistent state.
 
 GUI parity scope: `--login` and `--admin` select getty/PAM process roles, while
 `--json` and `--text` serialize the same read-only host status. They introduce no

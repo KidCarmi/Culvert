@@ -6,6 +6,7 @@ on:
       - 'appliance/console/**'
       - 'cmd/culvert-console/**'
       - 'internal/applianceconsole/**'
+      - 'internal/appliancehost/**'
       - 'go.mod'
       - 'go.sum'
       - '.github/workflows/appliance-console.yml'
@@ -15,6 +16,7 @@ on:
       - 'appliance/console/**'
       - 'cmd/culvert-console/**'
       - 'internal/applianceconsole/**'
+      - 'internal/appliancehost/**'
       - 'go.mod'
       - 'go.sum'
       - '.github/workflows/appliance-console.yml'
@@ -37,8 +39,12 @@ jobs:
           cache: false
       - name: Console state, display, process and authentication boundary tests
         run: |
-          go test -race -shuffle=on -count=2 ./internal/applianceconsole ./cmd/culvert-console
-          go vet ./internal/applianceconsole ./cmd/culvert-console
+          go test -race -shuffle=on -count=2 ./internal/applianceconsole ./internal/appliancehost ./cmd/culvert-console
+          go vet ./internal/applianceconsole ./internal/appliancehost ./cmd/culvert-console
+      - name: Root-owned recovery storage fault tests
+        run: |
+          go test -c -o /tmp/culvert-host.test ./internal/appliancehost
+          sudo /tmp/culvert-host.test -test.shuffle=on -test.count=2
       - name: Bounded terminal layout fuzzing
         run: go test ./internal/applianceconsole -run '^$' -fuzz '^FuzzFrameBounds$' -fuzztime=10s -parallel=2
       - name: Build static host binary with the repository compiler

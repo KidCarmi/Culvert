@@ -14,14 +14,14 @@ func TestRetryRequiresKnownIncompleteState(t *testing.T) {
 	for _, step := range []string{"", "unknown", "recorded"} {
 		s := retrySnapshot("inactive")
 		s.Steps[0].State = step
-		if canRetry(s) {
+		if RetryAllowed(s) {
 			t.Fatalf("retry accepted completion state %q", step)
 		}
 	}
 	for _, load := range []string{"", "not-found", "masked", "error"} {
 		s := retrySnapshot("failed")
 		s.Firstboot["LoadState"] = load
-		if canRetry(s) {
+		if RetryAllowed(s) {
 			t.Fatalf("retry accepted unit state %q", load)
 		}
 	}
@@ -31,7 +31,7 @@ func TestRetryRequiresKnownIncompleteState(t *testing.T) {
 	}
 	s := retrySnapshot("inactive")
 	s.Steps = c.steps()
-	if canRetry(s) || s.recorded("complete") {
+	if RetryAllowed(s) || s.recorded("complete") {
 		t.Fatal("nonregular completion marker accepted")
 	}
 }
