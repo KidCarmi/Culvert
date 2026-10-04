@@ -267,11 +267,44 @@ func New(db *catdb.CommunityDB, feedURL string, syncInterval time.Duration) *Syn
 	fs.lastSync.Store(time.Time{})
 	fs.lastAttempt.Store(time.Time{})
 	fs.lastFailure.Store("")
+	// A completed import outlives the process that ran it: restore its time
+	// and size from the store's completion record, so a restart does not
+	// report a synced store as never synced (F-FEED-1).
+	if rec, ok := fs.importRecord(); ok {
+		fs.lastSync.Store(rec.CompletedAt)
+		fs.totalDomains.Store(rec.Entries)
+	}
 	return fs
 }
 
+// importRecord returns the store's completion record when it is valid AND
+// names this syncer's feed.
+func (fs *Syncer) importRecord() (catdb.SyncRecord, bool) {
+	if fs.db == nil {
+		return catdb.SyncRecord{}, false
+	}
+	rec, err := fs.db.ImportRecord()
+	if err != nil || rec.FeedURL != fs.feedURL {
+		return catdb.SyncRecord{}, false
+	}
+	return rec, true
+}
+
+// ImportComplete reports whether the store holds a whole, durably certified
+// import of this syncer's feed. False for a never-synced store, a legacy
+// store written before completion records existed, an interrupted import,
+// a damaged record, and a store imported from a different feed.
+func (fs *Syncer) ImportComplete() bool {
+	_, ok := fs.importRecord()
+	return ok
+}
+
 // Start launches the background sync goroutine.
-// An immediate sync is performed on first start when the DB is empty.
+// An immediate sync is performed on start unless the store holds a complete,
+// certified import of this feed (ImportComplete). Keying it on "the store is
+// empty" left a partially imported store unsynced for a full interval: an
+// import cut off by a container recreate during first boot left SOME keys,
+// so the next process skipped its startup sync (F-FEED-1, PR #1528).
 //
 // The loop is a feedsched.Scheduler, not a bare 24-hour ticker. Two reasons,
 // both reachable without any infrastructure fault:
@@ -309,7 +342,7 @@ func (fs *Syncer) schedulerConfig() feedsched.Config {
 		Interval:   func() time.Duration { return fs.syncInterval },
 		BackoffMin: syncRetryMin,
 		BackoffMax: syncRetryMax,
-		RunNow:     func() bool { return fs.db.Stats() == 0 },
+		RunNow:     func() bool { return !fs.ImportComplete() },
 		// CHAOS-24: Sync streams and parses a remote gzip tarball (UT1 mirror).
 		// Guard the ROUND so a malformed/hostile archive costs one sync window
 		// rather than terminating an in-line gateway; the last-good BadgerDB
@@ -374,6 +407,13 @@ func (fs *Syncer) syncRound() bool {
 		obs.Printf("FeedSync: download/parse failed: %v", err)
 		return false
 	}
+	if len(entries) == 0 {
+		// Nothing to certify: a feed with no mapped domains is a broken
+		// download, never a successful sync of an empty list.
+		fs.noteFailure(failDownload)
+		obs.Printf("FeedSync: the feed carried no mapped domains; nothing imported")
+		return false
+	}
 	if class, why := fs.spaceRefusal(len(entries)); class != "" {
 		fs.noteFailure(class)
 		coverage := "the previous category data keeps serving"
@@ -385,14 +425,28 @@ func (fs *Syncer) syncRound() bool {
 	}
 	obs.Printf("FeedSync: parsed %d domain entries, writing to BadgerDB…", len(entries))
 
+	// Withdraw the old certificate before any data moves, then write, then
+	// certify. Only a fully written AND fsynced import is ever reported (or
+	// remembered across a restart) as synced.
+	if err := fs.db.BeginImport(); err != nil {
+		fs.noteFailure(failWrite)
+		obs.Printf("FeedSync: could not begin the import: %v", err)
+		return false
+	}
 	if err := fs.db.BulkWrite(entries); err != nil {
 		fs.noteFailure(failWrite)
-		obs.Printf("FeedSync: bulk write failed: %v", err)
+		obs.Printf("FeedSync: bulk write failed (import NOT complete; it is retried, and redone at the next start): %v", err)
+		return false
+	}
+	rec := catdb.SyncRecord{FeedURL: fs.feedURL, Entries: int64(len(entries)), CompletedAt: time.Now().UTC()}
+	if err := fs.db.CompleteImport(rec); err != nil {
+		fs.noteFailure(failWrite)
+		obs.Printf("FeedSync: import written but could not be certified durable (it is retried): %v", err)
 		return false
 	}
 
-	fs.lastSync.Store(time.Now())
-	fs.totalDomains.Store(int64(len(entries)))
+	fs.lastSync.Store(rec.CompletedAt)
+	fs.totalDomains.Store(rec.Entries)
 	fs.consecutiveFailures.Store(0)
 	fs.lastFailure.Store("")
 	obs.Printf("FeedSync: sync complete: %d domains in %s", len(entries), time.Since(start).Round(time.Second))
