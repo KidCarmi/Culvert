@@ -240,33 +240,40 @@ func TestReleaseAPI_DispatchReportsAnUntrackedOp(t *testing.T) {
 				t.Fatalf("warning does not name the condition: %q", w)
 			}
 			waitTerminal(t, rm, "A")
-			if tc.durable {
-				if _, has := body["resume_context"]; has {
-					t.Fatalf("a durable dispatch must not echo its resume context: %s", rec.Body.String())
-				}
-				return
-			}
-			// The warning promises a recovery handle: it must be enough to
-			// resume after a restart lost the in-memory record (Codex review).
-			if _, has := body["resume_context"]; !has {
-				t.Fatalf("non-durable 202 carries no resume_context: %s", rec.Body.String())
-			}
-			rm.store.mu.Lock()
-			rm.store.byAgent = map[string]*dispatchRecord{} // the restart: no stored record
-			rm.store.mu.Unlock()
-			applies := len(agent.applyReqs)
-			rrec := httptest.NewRecorder()
-			apiReleaseDispatchResume(rrec, releaseReq(http.MethodPost, "/api/releases/dispatch/resume",
-				map[string]any{"agent": "A", "resume_context": body["resume_context"]}, RoleAdmin))
-			if rrec.Code != http.StatusAccepted {
-				t.Fatalf("resume from the 202's own context = %d; want 202 (%s)", rrec.Code, rrec.Body.String())
-			}
-			if got := waitTerminal(t, rm, "A"); got.Terminal != TerminalSucceeded || got.OpID != "op" {
-				t.Fatalf("resumed record = %+v; want op succeeded", got)
-			}
-			if len(agent.applyReqs) != applies {
-				t.Fatalf("resume applied again (%d -> %d)", applies, len(agent.applyReqs))
-			}
+			assertResumeContextRecovery(t, rm, agent, body, tc.durable)
 		})
+	}
+}
+
+// assertResumeContextRecovery: a durable 202 does not echo its resume context;
+// a non-durable one must carry enough to resume after a restart lost the
+// in-memory record (Codex review) — proven by resuming from it alone.
+func assertResumeContextRecovery(t *testing.T, rm *releaseManager, agent *fakeAgent, body map[string]any, durable bool) {
+	t.Helper()
+	_, has := body["resume_context"]
+	if durable {
+		if has {
+			t.Fatalf("a durable dispatch must not echo its resume context: %v", body)
+		}
+		return
+	}
+	if !has {
+		t.Fatalf("non-durable 202 carries no resume_context: %v", body)
+	}
+	rm.store.mu.Lock()
+	rm.store.byAgent = map[string]*dispatchRecord{} // the restart: no stored record
+	rm.store.mu.Unlock()
+	applies := len(agent.applyReqs)
+	rrec := httptest.NewRecorder()
+	apiReleaseDispatchResume(rrec, releaseReq(http.MethodPost, "/api/releases/dispatch/resume",
+		map[string]any{"agent": "A", "resume_context": body["resume_context"]}, RoleAdmin))
+	if rrec.Code != http.StatusAccepted {
+		t.Fatalf("resume from the 202's own context = %d; want 202 (%s)", rrec.Code, rrec.Body.String())
+	}
+	if got := waitTerminal(t, rm, "A"); got.Terminal != TerminalSucceeded || got.OpID != "op" {
+		t.Fatalf("resumed record = %+v; want op succeeded", got)
+	}
+	if len(agent.applyReqs) != applies {
+		t.Fatalf("resume applied again (%d -> %d)", applies, len(agent.applyReqs))
 	}
 }
