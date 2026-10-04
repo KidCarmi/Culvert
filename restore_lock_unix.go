@@ -24,10 +24,12 @@ var errDataDirLocked = errors.New("data directory is locked by another Culvert p
 //     sharing the same volume on the same host sees the lock.
 //   - The restore COMMIT and RECOVERY refuse (errDataDirLocked) when it is
 //     held: quiescing is enforced, not merely documented.
-//   - A lock file that cannot be created (read-only fs, missing dir) is NOT
-//     an error for the proxy — it logs and runs unlocked (the lock is a
-//     safety net, never a reason to refuse to serve) — but IS an error for
-//     the restore side only when the lock is positively held.
+//   - A lock file that cannot be created or locked (read-only fs, missing
+//     dir, ownership/mode drift) is NOT an error for the proxy — it logs and
+//     runs unlocked (the lock is a safety net, never a reason to refuse to
+//     serve) — but IS an error for the restore side, which refuses on every
+//     acquisition failure except an absent data directory
+//     (acquireOfflineDataDirLock).
 func acquireDataDirLock(dataDir string) (release func(), err error) {
 	path := filepath.Join(dataDir, dataDirLockName)
 	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o600) // #nosec G304 -- operator-controlled data dir

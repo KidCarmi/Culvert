@@ -604,15 +604,11 @@ func runBackupCommand(s *startupState) error {
 // the lock exists to prevent.
 func runRecoverRestoreCommand(dataDir string, action restoreRecoverAction) error {
 	if action != "" {
-		release, err := acquireDataDirLock(dataDir)
+		release, err := acquireOfflineDataDirLock(dataDir)
 		if err != nil {
-			if errors.Is(err, errDataDirLocked) {
-				return err
-			}
-			_, _ = fmt.Fprintf(os.Stderr, "WARN: data-dir lock unavailable (%v); continuing without the quiescing guard\n", err)
-		} else {
-			defer release()
+			return err
 		}
+		defer release()
 	}
 	return runRecoverRestore(dataDir, action, os.Stdout)
 }

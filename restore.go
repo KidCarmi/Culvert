@@ -1106,19 +1106,37 @@ func runRestoreCommit(tarPath, dataDir, passphrase string, opts restoreOpts) err
 	// lifetime (see restore_lock_unix.go), so a commit against a live stack
 	// is refused instead of racing it. The lock is taken BEFORE the journal
 	// and mount-point checks so two concurrent commits cannot both pass them.
-	release, lerr := acquireDataDirLock(dataDir)
+	release, lerr := acquireOfflineDataDirLock(dataDir)
 	if lerr != nil {
-		if errors.Is(lerr, errDataDirLocked) {
-			return fmt.Errorf("restore: %w", lerr)
-		}
-		_, _ = fmt.Fprintf(os.Stderr, "WARN: data-dir lock unavailable (%v); continuing without the quiescing guard\n", lerr)
-	} else {
-		defer release()
+		return fmt.Errorf("restore: %w", lerr)
 	}
+	defer release()
 	if err := refuseUnsafeCommitTopology(dataDir); err != nil {
 		return err
 	}
 	return commitRestoreStaged(dataDir, manifest, files, opts)
+}
+
+// acquireOfflineDataDirLock is the lock a restore COMMIT or --recover-restore
+// must hold, or refuse. It differs from the proxy's holdDataDirLock on purpose:
+// the proxy only reads and writes its own state, so an unusable lock file is a
+// warning there, but these paths MOVE the data directory's entries, and doing
+// that without the guard races a live proxy into an inconsistent restore.
+// Ownership or mode drift on .culvert.lock must therefore refuse, not degrade.
+// The single exception is a data directory that does not exist: nothing can be
+// running in it, so there is nothing to quiesce.
+func acquireOfflineDataDirLock(dataDir string) (func(), error) {
+	release, err := acquireDataDirLock(dataDir)
+	if err == nil {
+		return release, nil
+	}
+	if errors.Is(err, errDataDirLocked) {
+		return nil, err
+	}
+	if _, serr := os.Lstat(dataDir); errors.Is(serr, fs.ErrNotExist) {
+		return func() {}, nil
+	}
+	return nil, fmt.Errorf("cannot take the data-directory lock (%w); refusing to move data without the quiescing guard — fix the ownership/mode of %s and retry", err, filepath.Join(dataDir, dataDirLockName))
 }
 
 // enforceCommitGuards is Step 3 of runRestoreCommit: every guard that must

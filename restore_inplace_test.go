@@ -704,3 +704,44 @@ func TestRestoreCommit_NoAdminGuard_UnreadableOrCorruptCurrentRoster(t *testing.
 		}
 	})
 }
+
+// A lock that cannot be TAKEN (here: .culvert.lock is a directory, the shape
+// of ownership/mode drift the open fails on) is not "nobody holds it": the
+// commit and the confirmed recovery move live entries, so both refuse rather
+// than continue without the quiescing guard. Nothing may be staged or moved.
+func TestRestoreCommit_RefusesWhenTheDataDirLockCannotBeTaken(t *testing.T) {
+	src, currentDir, _, _ := makeCommitFixture(t, 0)
+	if err := os.Mkdir(filepath.Join(currentDir, dataDirLockName), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := acquireDataDirLock(currentDir); err == nil {
+		t.Skip("this platform does not take the data-dir lock")
+	}
+	_, cerr := captureStdout(t, func() error {
+		return runRestoreCommit(src, currentDir, "", restoreOpts{Mode: modeFull, AcceptDPReenrollment: true})
+	})
+	if cerr == nil || !strings.Contains(cerr.Error(), "refusing to move data without the quiescing guard") {
+		t.Fatalf("commit must refuse when the lock cannot be taken, got %v", cerr)
+	}
+	if _, ok := readBak(t, currentDir); ok {
+		t.Error("a refused commit must not create a bak dir")
+	}
+	if stagingExists(t, currentDir) {
+		t.Error("a refused commit must not leave a staging dir")
+	}
+	for _, action := range []restoreRecoverAction{recoverActionRevert, recoverActionComplete} {
+		if err := runRecoverRestoreCommand(currentDir, action); err == nil || !strings.Contains(err.Error(), "quiescing guard") {
+			t.Fatalf("--recover-restore --confirm %s must refuse when the lock cannot be taken, got %v", action, err)
+		}
+	}
+}
+
+// The one exception: a data directory that does not exist yet has nothing
+// running in it, so there is nothing to quiesce.
+func TestAcquireOfflineDataDirLock_AbsentDataDirIsNotARefusal(t *testing.T) {
+	release, err := acquireOfflineDataDirLock(filepath.Join(t.TempDir(), "absent"))
+	if err != nil {
+		t.Fatalf("an absent data dir must not refuse: %v", err)
+	}
+	release()
+}
