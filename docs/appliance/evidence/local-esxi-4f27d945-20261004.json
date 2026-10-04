@@ -1,0 +1,1250 @@
+{
+  "schema": 1,
+  "qualification": "SUPERSEDED LAB CANDIDATE; not release approval",
+  "source_sha": "4f27d945b3c676899e65018e50aafef693c7c227",
+  "ova_sha256": "ce84809c15ce453335da7d91238dd7c1ce2cd84c5682e405b1fb666d7da86cdd",
+  "image_id": "sha256:94818badd3d81e0d2f091f8477b792ab38a433211d66724226b52a54c47561f2",
+  "controller_revision": "efc6d9df",
+  "controller_validation": {
+    "python_tests_passed": 83,
+    "python_tests_skipped": 1,
+    "go_keyboard_tests": "passed",
+    "bash_syntax": "passed"
+  },
+  "retained_ova_rehash": "ce84809c15ce453335da7d91238dd7c1ce2cd84c5682e405b1fb666d7da86cdd",
+  "download": "https://github.com/KidCarmi/Culvert/actions/runs/37228734706/artifacts/11312743918",
+  "supersession": "Opus withdrew this candidate after P1 network rollback and identity-reset credential defects; corrected bytes need fresh QEMU and ESXi qualification.",
+  "result_history": [
+    {
+      "step": "ESXi",
+      "check": "access-aware-harness",
+      "result": "info",
+      "evidence_file": "checks.jsonl"
+    },
+    {
+      "step": "2",
+      "check": "target",
+      "result": "info",
+      "evidence_file": "checks.jsonl"
+    },
+    {
+      "step": "3",
+      "check": "operator-observe",
+      "result": "pass",
+      "evidence_file": "checks.jsonl"
+    },
+    {
+      "step": "3",
+      "check": "status-setup-pending",
+      "result": "pass",
+      "evidence_file": "checks.jsonl"
+    },
+    {
+      "step": "3",
+      "check": "firstboot-steps",
+      "result": "pass",
+      "evidence_file": "checks.jsonl"
+    },
+    {
+      "step": "3a",
+      "check": "console-login",
+      "result": "pass",
+      "evidence_file": "checks.jsonl"
+    },
+    {
+      "step": "3a",
+      "check": "password-changed",
+      "result": "pass",
+      "evidence_file": "checks.jsonl"
+    },
+    {
+      "step": "3",
+      "check": "culvert-status-setup-pending",
+      "result": "pass",
+      "evidence_file": "checks.jsonl"
+    },
+    {
+      "step": "3",
+      "check": "image-identity",
+      "result": "pass",
+      "evidence_file": "checks.jsonl"
+    },
+    {
+      "step": "3",
+      "check": "setup-token",
+      "result": "pass",
+      "evidence_file": "checks.jsonl"
+    },
+    {
+      "step": "3c",
+      "check": "operator-commands-refused",
+      "result": "pass",
+      "evidence_file": "checks.jsonl"
+    },
+    {
+      "step": "3c",
+      "check": "forwarding-refused",
+      "result": "pass",
+      "evidence_file": "checks.jsonl"
+    },
+    {
+      "step": "3c",
+      "check": "file-transfer-refused",
+      "result": "pass",
+      "evidence_file": "checks.jsonl"
+    },
+    {
+      "step": "3c",
+      "check": "local-admin-ssh-refused",
+      "result": "pass",
+      "evidence_file": "checks.jsonl"
+    },
+    {
+      "step": "3c",
+      "check": "sshd-effective",
+      "result": "pass",
+      "evidence_file": "checks.jsonl"
+    },
+    {
+      "step": "3c",
+      "check": "local-admin-sudo-needs-password",
+      "result": "pass",
+      "evidence_file": "checks.jsonl"
+    },
+    {
+      "step": "3d",
+      "check": "boot-timing",
+      "result": "info",
+      "evidence_file": "checks.jsonl"
+    },
+    {
+      "step": "4a",
+      "check": "bootstrap-api-needs-token",
+      "result": "pass",
+      "evidence_file": "checks.jsonl"
+    },
+    {
+      "step": "4",
+      "check": "setup-without-token",
+      "result": "pass",
+      "evidence_file": "checks.jsonl"
+    },
+    {
+      "step": "4",
+      "check": "setup-with-token",
+      "result": "pass",
+      "evidence_file": "checks.jsonl"
+    },
+    {
+      "step": "4",
+      "check": "admin-login",
+      "result": "pass",
+      "evidence_file": "checks.jsonl"
+    },
+    {
+      "step": "4",
+      "check": "status-setup-complete",
+      "result": "pass",
+      "evidence_file": "checks.jsonl"
+    },
+    {
+      "step": "4",
+      "check": "operator-setup-complete",
+      "result": "pass",
+      "evidence_file": "checks.jsonl"
+    },
+    {
+      "step": "4b",
+      "check": "demotion-immediate",
+      "result": "pass",
+      "evidence_file": "checks.jsonl"
+    },
+    {
+      "step": "4b",
+      "check": "portal-cookie-replay",
+      "result": "blocked",
+      "evidence_file": "checks.jsonl"
+    },
+    {
+      "step": "5",
+      "check": "auth-exempt",
+      "result": "pass",
+      "evidence_file": "checks.jsonl"
+    },
+    {
+      "step": "5",
+      "check": "default-deny",
+      "result": "pass",
+      "evidence_file": "checks.jsonl"
+    },
+    {
+      "step": "5",
+      "check": "traffic",
+      "result": "pass",
+      "evidence_file": "checks.jsonl"
+    },
+    {
+      "step": "5",
+      "check": "ready-rows",
+      "result": "pass",
+      "evidence_file": "checks.jsonl"
+    },
+    {
+      "step": "5",
+      "check": "clamav-real",
+      "result": "pass",
+      "evidence_file": "checks.jsonl"
+    },
+    {
+      "step": "5",
+      "check": "status-ready-to-enforce",
+      "result": "pass",
+      "evidence_file": "checks.jsonl"
+    },
+    {
+      "step": "5",
+      "check": "ca-identity",
+      "result": "pass",
+      "evidence_file": "checks.jsonl"
+    },
+    {
+      "step": "5b",
+      "check": "category-data",
+      "result": "pass",
+      "evidence_file": "checks.jsonl"
+    },
+    {
+      "step": "5c",
+      "check": "category-enforcement",
+      "result": "pass",
+      "evidence_file": "checks.jsonl"
+    },
+    {
+      "step": "6",
+      "check": "agent-installed",
+      "result": "pass",
+      "evidence_file": "checks.jsonl"
+    },
+    {
+      "step": "6",
+      "check": "agent-reachable",
+      "result": "pass",
+      "evidence_file": "checks.jsonl"
+    },
+    {
+      "step": "6",
+      "check": "agent-backup",
+      "result": "pass",
+      "evidence_file": "checks.jsonl"
+    },
+    {
+      "step": "6",
+      "check": "backup-listed",
+      "result": "pass",
+      "evidence_file": "checks.jsonl"
+    },
+    {
+      "step": "6",
+      "check": "restore-dry-run",
+      "result": "fail",
+      "evidence_file": "checks.jsonl"
+    },
+    {
+      "step": "6b",
+      "check": "restore-commit",
+      "result": "not-run",
+      "evidence_file": "checks.jsonl"
+    },
+    {
+      "step": "9",
+      "check": "actual-restore",
+      "result": "not-run",
+      "evidence_file": "checks.jsonl"
+    },
+    {
+      "step": "ESXi",
+      "check": "observer-resume",
+      "result": "info",
+      "evidence_file": "checks-resume.jsonl"
+    },
+    {
+      "step": "6",
+      "check": "restore-dry-run",
+      "result": "pass",
+      "evidence_file": "checks-resume.jsonl"
+    },
+    {
+      "step": "9",
+      "check": "post-backup-mutation",
+      "result": "pass",
+      "evidence_file": "checks-resume.jsonl"
+    },
+    {
+      "step": "9",
+      "check": "actual-restore",
+      "result": "pass",
+      "evidence_file": "checks-resume.jsonl"
+    },
+    {
+      "step": "9",
+      "check": "restore-admin-login",
+      "result": "pass",
+      "evidence_file": "checks-resume.jsonl"
+    },
+    {
+      "step": "9",
+      "check": "restore-enforcement",
+      "result": "pass",
+      "evidence_file": "checks-resume.jsonl"
+    },
+    {
+      "step": "9",
+      "check": "restore-ca",
+      "result": "pass",
+      "evidence_file": "checks-resume.jsonl"
+    },
+    {
+      "step": "9",
+      "check": "restore-feed-rehydrated",
+      "result": "pass",
+      "evidence_file": "checks-resume.jsonl"
+    },
+    {
+      "step": "9",
+      "check": "restore-categories",
+      "result": "pass",
+      "evidence_file": "checks-resume.jsonl"
+    },
+    {
+      "step": "9",
+      "check": "restore-agent",
+      "result": "pass",
+      "evidence_file": "checks-resume.jsonl"
+    },
+    {
+      "step": "9",
+      "check": "restore-complete",
+      "result": "pass",
+      "evidence_file": "checks-resume.jsonl"
+    },
+    {
+      "step": "6c",
+      "check": "test-only-trust",
+      "result": "pass",
+      "evidence_file": "checks-resume.jsonl"
+    },
+    {
+      "step": "6c",
+      "check": "unsigned-apply-refused",
+      "result": "pass",
+      "evidence_file": "checks-resume.jsonl"
+    },
+    {
+      "step": "6c",
+      "check": "signed-apply",
+      "result": "pass",
+      "evidence_file": "checks-resume.jsonl"
+    },
+    {
+      "step": "6c",
+      "check": "signed-rollback",
+      "result": "pass",
+      "evidence_file": "checks-resume.jsonl"
+    },
+    {
+      "step": "7",
+      "check": "os-update",
+      "result": "pass",
+      "evidence_file": "checks-resume.jsonl"
+    },
+    {
+      "step": "7",
+      "check": "reboot",
+      "result": "pass",
+      "evidence_file": "checks-resume.jsonl"
+    },
+    {
+      "step": "7",
+      "check": "kernel",
+      "result": "pass",
+      "evidence_file": "checks-resume.jsonl"
+    },
+    {
+      "step": "7",
+      "check": "docker-held",
+      "result": "pass",
+      "evidence_file": "checks-resume.jsonl"
+    },
+    {
+      "step": "8",
+      "check": "stack-resumed",
+      "result": "pass",
+      "evidence_file": "checks-resume.jsonl"
+    },
+    {
+      "step": "8",
+      "check": "admin-login",
+      "result": "pass",
+      "evidence_file": "checks-resume.jsonl"
+    },
+    {
+      "step": "8",
+      "check": "policy-persisted",
+      "result": "pass",
+      "evidence_file": "checks-resume.jsonl"
+    },
+    {
+      "step": "8",
+      "check": "enforcement",
+      "result": "pass",
+      "evidence_file": "checks-resume.jsonl"
+    },
+    {
+      "step": "8",
+      "check": "ready",
+      "result": "pass",
+      "evidence_file": "checks-resume.jsonl"
+    },
+    {
+      "step": "8",
+      "check": "ca-identity",
+      "result": "pass",
+      "evidence_file": "checks-resume.jsonl"
+    },
+    {
+      "step": "8",
+      "check": "category-data",
+      "result": "pass",
+      "evidence_file": "checks-resume.jsonl"
+    },
+    {
+      "step": "8",
+      "check": "backup-listed",
+      "result": "fail",
+      "evidence_file": "checks-resume.jsonl"
+    },
+    {
+      "step": "8",
+      "check": "agent-reachable",
+      "result": "pass",
+      "evidence_file": "checks-resume.jsonl"
+    },
+    {
+      "step": "8",
+      "check": "firstboot-not-rerun",
+      "result": "pass",
+      "evidence_file": "checks-resume.jsonl"
+    },
+    {
+      "step": "8",
+      "check": "state-files",
+      "result": "pass",
+      "evidence_file": "checks-resume.jsonl"
+    },
+    {
+      "step": "8",
+      "check": "restore-persisted",
+      "result": "not-run",
+      "evidence_file": "checks-resume.jsonl"
+    },
+    {
+      "step": "8",
+      "check": "image-identity",
+      "result": "pass",
+      "evidence_file": "checks-resume.jsonl"
+    },
+    {
+      "step": "8",
+      "check": "operator-status",
+      "result": "pass",
+      "evidence_file": "checks-resume.jsonl"
+    },
+    {
+      "step": "8",
+      "check": "boot-timing",
+      "result": "info",
+      "evidence_file": "checks-resume.jsonl"
+    },
+    {
+      "step": "7",
+      "check": "esxi-boot-id-changed",
+      "result": "pass",
+      "evidence_file": "checks-resume.jsonl"
+    },
+    {
+      "step": "independent",
+      "check": "postcheck-command-integrity",
+      "result": "pass",
+      "evidence_file": "independent-checks.jsonl"
+    },
+    {
+      "step": "independent",
+      "check": "root-observation",
+      "result": "pass",
+      "evidence_file": "independent-checks.jsonl"
+    },
+    {
+      "step": "independent",
+      "check": "reboot-identity",
+      "result": "pass",
+      "evidence_file": "independent-checks.jsonl"
+    },
+    {
+      "step": "independent",
+      "check": "kernel-observation",
+      "result": "pass",
+      "evidence_file": "independent-checks.jsonl"
+    },
+    {
+      "step": "independent",
+      "check": "source-image-identity",
+      "result": "pass",
+      "evidence_file": "independent-checks.jsonl"
+    },
+    {
+      "step": "independent",
+      "check": "agent-version-active",
+      "result": "pass",
+      "evidence_file": "independent-checks.jsonl"
+    },
+    {
+      "step": "independent",
+      "check": "firstboot-not-rerun",
+      "result": "pass",
+      "evidence_file": "independent-checks.jsonl"
+    },
+    {
+      "step": "independent",
+      "check": "locked-stack-resume",
+      "result": "pass",
+      "evidence_file": "independent-checks.jsonl"
+    },
+    {
+      "step": "independent",
+      "check": "docker-package-holds",
+      "result": "pass",
+      "evidence_file": "independent-checks.jsonl"
+    },
+    {
+      "step": "independent",
+      "check": "restored-policy-persistence",
+      "result": "pass",
+      "evidence_file": "independent-checks.jsonl"
+    },
+    {
+      "step": "independent",
+      "check": "ca-identity",
+      "result": "pass",
+      "evidence_file": "independent-checks.jsonl"
+    },
+    {
+      "step": "independent",
+      "check": "meaningful-category-persistence",
+      "result": "pass",
+      "evidence_file": "independent-checks.jsonl"
+    },
+    {
+      "step": "controller",
+      "check": "late-hook-load",
+      "result": "fail",
+      "evidence_file": "checks-closeout.jsonl"
+    },
+    {
+      "step": "8",
+      "check": "restore-persisted",
+      "result": "pass",
+      "evidence_file": "checks-closeout.jsonl"
+    },
+    {
+      "step": "followup",
+      "check": "backup-persistence",
+      "result": "pass",
+      "evidence_file": "checks-closeout.jsonl"
+    }
+  ],
+  "latest_results": [
+    {
+      "step": "ESXi",
+      "check": "access-aware-harness",
+      "result": "info",
+      "evidence_file": "checks.jsonl"
+    },
+    {
+      "step": "2",
+      "check": "target",
+      "result": "info",
+      "evidence_file": "checks.jsonl"
+    },
+    {
+      "step": "3",
+      "check": "operator-observe",
+      "result": "pass",
+      "evidence_file": "checks.jsonl"
+    },
+    {
+      "step": "3",
+      "check": "status-setup-pending",
+      "result": "pass",
+      "evidence_file": "checks.jsonl"
+    },
+    {
+      "step": "3",
+      "check": "firstboot-steps",
+      "result": "pass",
+      "evidence_file": "checks.jsonl"
+    },
+    {
+      "step": "3a",
+      "check": "console-login",
+      "result": "pass",
+      "evidence_file": "checks.jsonl"
+    },
+    {
+      "step": "3a",
+      "check": "password-changed",
+      "result": "pass",
+      "evidence_file": "checks.jsonl"
+    },
+    {
+      "step": "3",
+      "check": "culvert-status-setup-pending",
+      "result": "pass",
+      "evidence_file": "checks.jsonl"
+    },
+    {
+      "step": "3",
+      "check": "image-identity",
+      "result": "pass",
+      "evidence_file": "checks.jsonl"
+    },
+    {
+      "step": "3",
+      "check": "setup-token",
+      "result": "pass",
+      "evidence_file": "checks.jsonl"
+    },
+    {
+      "step": "3c",
+      "check": "operator-commands-refused",
+      "result": "pass",
+      "evidence_file": "checks.jsonl"
+    },
+    {
+      "step": "3c",
+      "check": "forwarding-refused",
+      "result": "pass",
+      "evidence_file": "checks.jsonl"
+    },
+    {
+      "step": "3c",
+      "check": "file-transfer-refused",
+      "result": "pass",
+      "evidence_file": "checks.jsonl"
+    },
+    {
+      "step": "3c",
+      "check": "local-admin-ssh-refused",
+      "result": "pass",
+      "evidence_file": "checks.jsonl"
+    },
+    {
+      "step": "3c",
+      "check": "sshd-effective",
+      "result": "pass",
+      "evidence_file": "checks.jsonl"
+    },
+    {
+      "step": "3c",
+      "check": "local-admin-sudo-needs-password",
+      "result": "pass",
+      "evidence_file": "checks.jsonl"
+    },
+    {
+      "step": "3d",
+      "check": "boot-timing",
+      "result": "info",
+      "evidence_file": "checks.jsonl"
+    },
+    {
+      "step": "4a",
+      "check": "bootstrap-api-needs-token",
+      "result": "pass",
+      "evidence_file": "checks.jsonl"
+    },
+    {
+      "step": "4",
+      "check": "setup-without-token",
+      "result": "pass",
+      "evidence_file": "checks.jsonl"
+    },
+    {
+      "step": "4",
+      "check": "setup-with-token",
+      "result": "pass",
+      "evidence_file": "checks.jsonl"
+    },
+    {
+      "step": "4",
+      "check": "admin-login",
+      "result": "pass",
+      "evidence_file": "checks.jsonl"
+    },
+    {
+      "step": "4",
+      "check": "status-setup-complete",
+      "result": "pass",
+      "evidence_file": "checks.jsonl"
+    },
+    {
+      "step": "4",
+      "check": "operator-setup-complete",
+      "result": "pass",
+      "evidence_file": "checks.jsonl"
+    },
+    {
+      "step": "4b",
+      "check": "demotion-immediate",
+      "result": "pass",
+      "evidence_file": "checks.jsonl"
+    },
+    {
+      "step": "4b",
+      "check": "portal-cookie-replay",
+      "result": "blocked",
+      "evidence_file": "checks.jsonl"
+    },
+    {
+      "step": "5",
+      "check": "auth-exempt",
+      "result": "pass",
+      "evidence_file": "checks.jsonl"
+    },
+    {
+      "step": "5",
+      "check": "default-deny",
+      "result": "pass",
+      "evidence_file": "checks.jsonl"
+    },
+    {
+      "step": "5",
+      "check": "traffic",
+      "result": "pass",
+      "evidence_file": "checks.jsonl"
+    },
+    {
+      "step": "5",
+      "check": "ready-rows",
+      "result": "pass",
+      "evidence_file": "checks.jsonl"
+    },
+    {
+      "step": "5",
+      "check": "clamav-real",
+      "result": "pass",
+      "evidence_file": "checks.jsonl"
+    },
+    {
+      "step": "5",
+      "check": "status-ready-to-enforce",
+      "result": "pass",
+      "evidence_file": "checks.jsonl"
+    },
+    {
+      "step": "5",
+      "check": "ca-identity",
+      "result": "pass",
+      "evidence_file": "checks.jsonl"
+    },
+    {
+      "step": "5b",
+      "check": "category-data",
+      "result": "pass",
+      "evidence_file": "checks.jsonl"
+    },
+    {
+      "step": "5c",
+      "check": "category-enforcement",
+      "result": "pass",
+      "evidence_file": "checks.jsonl"
+    },
+    {
+      "step": "6",
+      "check": "agent-installed",
+      "result": "pass",
+      "evidence_file": "checks.jsonl"
+    },
+    {
+      "step": "6",
+      "check": "agent-reachable",
+      "result": "pass",
+      "evidence_file": "checks.jsonl"
+    },
+    {
+      "step": "6",
+      "check": "agent-backup",
+      "result": "pass",
+      "evidence_file": "checks.jsonl"
+    },
+    {
+      "step": "6",
+      "check": "backup-listed",
+      "result": "pass",
+      "evidence_file": "checks.jsonl"
+    },
+    {
+      "step": "6",
+      "check": "restore-dry-run",
+      "result": "pass",
+      "evidence_file": "checks-resume.jsonl"
+    },
+    {
+      "step": "6b",
+      "check": "restore-commit",
+      "result": "not-run",
+      "evidence_file": "checks.jsonl"
+    },
+    {
+      "step": "9",
+      "check": "actual-restore",
+      "result": "pass",
+      "evidence_file": "checks-resume.jsonl"
+    },
+    {
+      "step": "ESXi",
+      "check": "observer-resume",
+      "result": "info",
+      "evidence_file": "checks-resume.jsonl"
+    },
+    {
+      "step": "9",
+      "check": "post-backup-mutation",
+      "result": "pass",
+      "evidence_file": "checks-resume.jsonl"
+    },
+    {
+      "step": "9",
+      "check": "restore-admin-login",
+      "result": "pass",
+      "evidence_file": "checks-resume.jsonl"
+    },
+    {
+      "step": "9",
+      "check": "restore-enforcement",
+      "result": "pass",
+      "evidence_file": "checks-resume.jsonl"
+    },
+    {
+      "step": "9",
+      "check": "restore-ca",
+      "result": "pass",
+      "evidence_file": "checks-resume.jsonl"
+    },
+    {
+      "step": "9",
+      "check": "restore-feed-rehydrated",
+      "result": "pass",
+      "evidence_file": "checks-resume.jsonl"
+    },
+    {
+      "step": "9",
+      "check": "restore-categories",
+      "result": "pass",
+      "evidence_file": "checks-resume.jsonl"
+    },
+    {
+      "step": "9",
+      "check": "restore-agent",
+      "result": "pass",
+      "evidence_file": "checks-resume.jsonl"
+    },
+    {
+      "step": "9",
+      "check": "restore-complete",
+      "result": "pass",
+      "evidence_file": "checks-resume.jsonl"
+    },
+    {
+      "step": "6c",
+      "check": "test-only-trust",
+      "result": "pass",
+      "evidence_file": "checks-resume.jsonl"
+    },
+    {
+      "step": "6c",
+      "check": "unsigned-apply-refused",
+      "result": "pass",
+      "evidence_file": "checks-resume.jsonl"
+    },
+    {
+      "step": "6c",
+      "check": "signed-apply",
+      "result": "pass",
+      "evidence_file": "checks-resume.jsonl"
+    },
+    {
+      "step": "6c",
+      "check": "signed-rollback",
+      "result": "pass",
+      "evidence_file": "checks-resume.jsonl"
+    },
+    {
+      "step": "7",
+      "check": "os-update",
+      "result": "pass",
+      "evidence_file": "checks-resume.jsonl"
+    },
+    {
+      "step": "7",
+      "check": "reboot",
+      "result": "pass",
+      "evidence_file": "checks-resume.jsonl"
+    },
+    {
+      "step": "7",
+      "check": "kernel",
+      "result": "pass",
+      "evidence_file": "checks-resume.jsonl"
+    },
+    {
+      "step": "7",
+      "check": "docker-held",
+      "result": "pass",
+      "evidence_file": "checks-resume.jsonl"
+    },
+    {
+      "step": "8",
+      "check": "stack-resumed",
+      "result": "pass",
+      "evidence_file": "checks-resume.jsonl"
+    },
+    {
+      "step": "8",
+      "check": "admin-login",
+      "result": "pass",
+      "evidence_file": "checks-resume.jsonl"
+    },
+    {
+      "step": "8",
+      "check": "policy-persisted",
+      "result": "pass",
+      "evidence_file": "checks-resume.jsonl"
+    },
+    {
+      "step": "8",
+      "check": "enforcement",
+      "result": "pass",
+      "evidence_file": "checks-resume.jsonl"
+    },
+    {
+      "step": "8",
+      "check": "ready",
+      "result": "pass",
+      "evidence_file": "checks-resume.jsonl"
+    },
+    {
+      "step": "8",
+      "check": "ca-identity",
+      "result": "pass",
+      "evidence_file": "checks-resume.jsonl"
+    },
+    {
+      "step": "8",
+      "check": "category-data",
+      "result": "pass",
+      "evidence_file": "checks-resume.jsonl"
+    },
+    {
+      "step": "8",
+      "check": "backup-listed",
+      "result": "fail",
+      "evidence_file": "checks-resume.jsonl"
+    },
+    {
+      "step": "8",
+      "check": "agent-reachable",
+      "result": "pass",
+      "evidence_file": "checks-resume.jsonl"
+    },
+    {
+      "step": "8",
+      "check": "firstboot-not-rerun",
+      "result": "pass",
+      "evidence_file": "checks-resume.jsonl"
+    },
+    {
+      "step": "8",
+      "check": "state-files",
+      "result": "pass",
+      "evidence_file": "checks-resume.jsonl"
+    },
+    {
+      "step": "8",
+      "check": "restore-persisted",
+      "result": "pass",
+      "evidence_file": "checks-closeout.jsonl"
+    },
+    {
+      "step": "8",
+      "check": "image-identity",
+      "result": "pass",
+      "evidence_file": "checks-resume.jsonl"
+    },
+    {
+      "step": "8",
+      "check": "operator-status",
+      "result": "pass",
+      "evidence_file": "checks-resume.jsonl"
+    },
+    {
+      "step": "8",
+      "check": "boot-timing",
+      "result": "info",
+      "evidence_file": "checks-resume.jsonl"
+    },
+    {
+      "step": "7",
+      "check": "esxi-boot-id-changed",
+      "result": "pass",
+      "evidence_file": "checks-resume.jsonl"
+    },
+    {
+      "step": "independent",
+      "check": "postcheck-command-integrity",
+      "result": "pass",
+      "evidence_file": "independent-checks.jsonl"
+    },
+    {
+      "step": "independent",
+      "check": "root-observation",
+      "result": "pass",
+      "evidence_file": "independent-checks.jsonl"
+    },
+    {
+      "step": "independent",
+      "check": "reboot-identity",
+      "result": "pass",
+      "evidence_file": "independent-checks.jsonl"
+    },
+    {
+      "step": "independent",
+      "check": "kernel-observation",
+      "result": "pass",
+      "evidence_file": "independent-checks.jsonl"
+    },
+    {
+      "step": "independent",
+      "check": "source-image-identity",
+      "result": "pass",
+      "evidence_file": "independent-checks.jsonl"
+    },
+    {
+      "step": "independent",
+      "check": "agent-version-active",
+      "result": "pass",
+      "evidence_file": "independent-checks.jsonl"
+    },
+    {
+      "step": "independent",
+      "check": "firstboot-not-rerun",
+      "result": "pass",
+      "evidence_file": "independent-checks.jsonl"
+    },
+    {
+      "step": "independent",
+      "check": "locked-stack-resume",
+      "result": "pass",
+      "evidence_file": "independent-checks.jsonl"
+    },
+    {
+      "step": "independent",
+      "check": "docker-package-holds",
+      "result": "pass",
+      "evidence_file": "independent-checks.jsonl"
+    },
+    {
+      "step": "independent",
+      "check": "restored-policy-persistence",
+      "result": "pass",
+      "evidence_file": "independent-checks.jsonl"
+    },
+    {
+      "step": "independent",
+      "check": "ca-identity",
+      "result": "pass",
+      "evidence_file": "independent-checks.jsonl"
+    },
+    {
+      "step": "independent",
+      "check": "meaningful-category-persistence",
+      "result": "pass",
+      "evidence_file": "independent-checks.jsonl"
+    },
+    {
+      "step": "controller",
+      "check": "late-hook-load",
+      "result": "fail",
+      "evidence_file": "checks-closeout.jsonl"
+    },
+    {
+      "step": "followup",
+      "check": "backup-persistence",
+      "result": "pass",
+      "evidence_file": "checks-closeout.jsonl"
+    }
+  ],
+  "latest_counts": {
+    "info": 5,
+    "pass": 79,
+    "blocked": 1,
+    "not-run": 1,
+    "fail": 2
+  },
+  "history_disposition": "Original pre-dispatch console-observer dry-run failure retained. Narrow resume proven by owned-VM and transport-directory chronology. Later real restore passed. Shared 6b intentionally suppressed; guarded step9 used. Independent postcheck required to confirm otherwise optimistic shared observations.",
+  "controller_closeout_error": "A helper was factored while the running Bash process still held the earlier function definitions. Its final hook reported command not found. No guest mutation was retried; separate read-only postchecks passed, including exact restored-policy persistence. Future runs load the integrated helper at startup.",
+  "backup_api_failure": "Initial post-reboot backup listing returned HTTP 200 with available:false due to maintenance-agent context deadline exceeded. Preserved as FAIL. A follow-up read took 8.05 seconds and confirmed the original backup remains listed; this proves persistence but does not erase the initial availability failure.",
+  "boot": {
+    "firstboot_seconds": 482.408,
+    "kernel_seconds": 22.596,
+    "userspace_seconds": 459.811,
+    "critical_units_seconds": {
+      "firstboot": 176.334,
+      "docker": 51.388,
+      "containerd": 76.376,
+      "cloud_init_local": 76.312,
+      "network_wait_online": 3.469
+    },
+    "note": "Units overlap; do not add durations. Disk latency correlates with slow boot but causality is unproven.",
+    "performance": [
+      {
+        "metric": "virtualDisk.totalWriteLatency.average",
+        "unit": "millisecond",
+        "instance": "scsi0:0",
+        "samples": 19,
+        "sample_mean": 184.89,
+        "peak_sample": 1207,
+        "peak_at": "2026-10-04T20:24:40Z"
+      },
+      {
+        "metric": "cpu.ready.summation",
+        "unit": "millisecond",
+        "instance": "",
+        "samples": 24,
+        "sample_mean": 56.38,
+        "peak_sample": 87,
+        "peak_at": "2026-10-04T20:31:40Z"
+      },
+      {
+        "metric": "virtualDisk.totalReadLatency.average",
+        "unit": "millisecond",
+        "instance": "scsi0:0",
+        "samples": 19,
+        "sample_mean": 105.79,
+        "peak_sample": 392,
+        "peak_at": "2026-10-04T20:27:00Z"
+      }
+    ]
+  },
+  "maintenance_reboot": {
+    "command_to_health_and_operator_seconds": 597,
+    "systemd_total_seconds": 481.822,
+    "kernel_seconds": 54.743,
+    "userspace_seconds": 427.078,
+    "kernel_before": "6.8.0-142-generic",
+    "kernel_after": "6.8.0-146-generic",
+    "resume_service_seconds": 84.62,
+    "network_wait_online_seconds": 1.793,
+    "performance_20_second_samples": [
+      {
+        "metric": "virtualDisk.totalWriteLatency.average",
+        "unit": "millisecond",
+        "samples": 25,
+        "mean": 13.36,
+        "peak_sample": 121,
+        "peak_at": "2026-10-04T21:03:40Z"
+      },
+      {
+        "metric": "mem.vmmemctl.average",
+        "unit": "kiloBytes",
+        "samples": 29,
+        "mean": 0.0,
+        "peak_sample": 0,
+        "peak_at": "2026-10-04T20:59:20Z"
+      },
+      {
+        "metric": "cpu.costop.summation",
+        "unit": "millisecond",
+        "samples": 29,
+        "mean": 0.0,
+        "peak_sample": 0,
+        "peak_at": "2026-10-04T20:59:20Z"
+      },
+      {
+        "metric": "cpu.ready.summation",
+        "unit": "millisecond",
+        "samples": 29,
+        "mean": 48.52,
+        "peak_sample": 73,
+        "peak_at": "2026-10-04T21:05:00Z"
+      },
+      {
+        "metric": "cpu.maxlimited.summation",
+        "unit": "millisecond",
+        "samples": 29,
+        "mean": 0.0,
+        "peak_sample": 0,
+        "peak_at": "2026-10-04T20:59:20Z"
+      },
+      {
+        "metric": "virtualDisk.totalReadLatency.average",
+        "unit": "millisecond",
+        "samples": 25,
+        "mean": 115.32,
+        "peak_sample": 219,
+        "peak_at": "2026-10-04T21:02:00Z"
+      },
+      {
+        "metric": "mem.swapinRate.average",
+        "unit": "kiloBytesPerSecond",
+        "samples": 29,
+        "mean": 0.0,
+        "peak_sample": 0,
+        "peak_at": "2026-10-04T20:59:20Z"
+      }
+    ]
+  },
+  "test_trust": {
+    "deliverable_modified": false,
+    "fixture_source_revision": "4f27d945b3c676899e65018e50aafef693c7c227",
+    "signing_key": "Ephemeral Ed25519 key generated in controller process memory; never written into OVA.",
+    "guest_only_changes_after_boot": [
+      "loopback TLS registry container",
+      "test registry TLS private key in root-only guest fixture directory",
+      "/etc/hosts ghcr.io loopback mapping",
+      "/etc/docker/certs.d/ghcr.io/ca.crt",
+      "/etc/culvert-maint/lab-fixture-keyring.json public verification key",
+      "agent config test keyring reference"
+    ],
+    "target": "Never-started baseline container committed with a test label and pushed to the lab registry; actual signed apply/rollback used the real agent verifier.",
+    "not_covered": "Direct-agent signed lifecycle does not substitute for Release Management API dispatch tests."
+  },
+  "known_open": [
+    "F-DISK-1: reproduced SIGBUS during full-disk write; OPEN, recovery is not survival.",
+    "ClamAV pcre2 risk disposition OPEN; READY is functional evidence, not risk acceptance or fail-closed proof.",
+    "No IdP for portal-cookie replay lab scenario.",
+    "Fresh-appliance DR with separately held recovery secrets, fault/HA campaign, release acceptance remain outside these results."
+  ],
+  "import_history": "First NFC import connection reset left a partial owned VM; adapter deleted it before a second exact-byte import succeeded.",
+  "vm_deleted": true,
+  "evidence_sha256": {
+    "03d-boot-timing.txt": "6c3c94b0c51d00e4aef148f30a650de1666a27255f58751e48f0426f0e7d15f2",
+    "08d-boot-timing.txt": "108d455f3acdb32653ea861c70c0058554fa7b33b6f033baa14b47d777427dbb",
+    "checks-closeout.jsonl": "daa602b39e300b4d63ca3a88dcd5ea8169a40fa7c187d8ad9afdc7de02186712",
+    "checks-resume.jsonl": "220be86469ff485428bb356c89e50b5fdf0b3bb158256df620e4660e58a67304",
+    "checks.jsonl": "b19c54eede97d161e63e94f4d78a8ffe1de8736c47a95fdcd318f251808919da",
+    "esxi-initial-boot-performance-summary.json": "e1128848b39a92b352da53ebaca18fda29083ad1eb4564077a75b543d4fd4dce",
+    "esxi-maintenance-performance-after-reboot.json": "81395a043a23ed5744d0883639f4c81e358862fa5b86f223992d75e37649d1d4",
+    "independent-checks.jsonl": "b14bd93ab529a3ee07eeabcc6916bbe88ad154244e96f733c7b433935fd0e89c",
+    "independent-postcheck.json.dpapi": "070e165faab290e40f69b6c8375c93c44eec713e79764002689aa03046403c5b",
+    "maintenance-vmware.log.dpapi": "97819059db34cbe0d3948a563af423de76a6e39a10afb493c72ca9d38d9c60a8"
+  }
+}

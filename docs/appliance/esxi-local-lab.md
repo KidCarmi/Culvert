@@ -10,6 +10,22 @@ older results and commands below are historical; in particular, do **not** use
 the legacy `esxi-lab.py qualify`, `restore`, or administrative SSH path for
 this candidate. Keep the original OVA unchanged and retained before import.
 
+Completed ESXi evidence for these superseded bytes is in
+[`local-esxi-4f27d945-20261004.json`](evidence/local-esxi-4f27d945-20261004.json).
+Default PAM bootstrap, operator refusals, actual restore, signed apply/rollback,
+OS update and all 12 independent postchecks passed. The report retains the
+post-reboot backup-list timeout (a later read confirmed the backup), the earlier
+observer interruption and a controller hook-loading error. It is **not an
+all-green qualification**. First boot took 482 seconds; maintenance reboot to
+health plus operator SSH took 597 seconds. Both disposable import VMs were
+removed. F-DISK-1 and the ClamAV disposition remain open.
+
+Freeze controller source files for the entire lifetime of each running shell.
+The completed run exposed why: editing a wrapper while Bash retained older
+sourced function definitions made its final hook unavailable. Independent
+read-only postchecks completed that assertion without repeating guest mutations.
+Apply and test harness changes only after the active process exits.
+
 | Input | Pinned identity |
 |---|---|
 | OVA/application/agent/access/console/provisioning revision | `4f27d945b3c676899e65018e50aafef693c7c227` |
