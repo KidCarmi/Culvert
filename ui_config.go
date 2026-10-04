@@ -1766,13 +1766,21 @@ func apiUIAllowIPs(w http.ResponseWriter, r *http.Request) {
 		var body struct {
 			IPs *[]string `json:"ips"`
 		}
-		if err := decodeJSON(r, &body); err != nil || body.IPs == nil {
-			writeUIAccessRefusal(w, http.StatusBadRequest, "invalid_ui_allow_ips", "Provide ips as an array; use [] to remove restrictions.")
+		// Every 400 keeps the established text/plain contract
+		// (PlainBadRequest in the OpenAPI spec); only the 503 refusals
+		// below are typed JSON. The messages are fixed or index-only and
+		// never echo the submitted entries. A refusal changes nothing.
+		if err := decodeJSON(r, &body); err != nil {
+			http.Error(w, "invalid JSON", http.StatusBadRequest)
+			return
+		}
+		if body.IPs == nil {
+			http.Error(w, "ips must be an array; use [] to remove restrictions", http.StatusBadRequest)
 			return
 		}
 		nets, err := parseUIAllowedCIDRs(*body.IPs)
 		if err != nil {
-			writeUIAccessRefusal(w, http.StatusBadRequest, "invalid_ui_allow_ips", err.Error())
+			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
 		if err := persistUIAllowedCIDRs(nets); err != nil {

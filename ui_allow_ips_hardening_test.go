@@ -118,8 +118,8 @@ func TestUIAllowIPsAPIInvalidOrFailedSavePreservesPolicy(t *testing.T) {
 	}
 	for _, body := range []string{`{}`, `{"ips":null}`, `{"ips":[""]}`, `{"ips":["192.0.2.1","bad"]}`, `{"ips":"192.0.2.1"}`} {
 		w := uiPolicyPOST(t, body)
-		if w.Code != 400 || !strings.Contains(w.Body.String(), `"code":"invalid_ui_allow_ips"`) {
-			t.Fatalf("invalid body response: %d %s", w.Code, w.Body.String())
+		if w.Code != 400 || !strings.HasPrefix(w.Header().Get("Content-Type"), "text/plain") {
+			t.Fatalf("invalid body response: %d %q %s", w.Code, w.Header().Get("Content-Type"), w.Body.String())
 		}
 		if !reflect.DeepEqual(ListUIAllowedCIDRs(), seed) {
 			t.Fatal("invalid body changed runtime")
@@ -314,4 +314,85 @@ func readUISettingsFile(t *testing.T, path string) AdminSettings {
 		t.Fatal(err)
 	}
 	return saved
+}
+
+// TestUIAllowIPsAPIResponseMediaTypes pins the wire contract the OpenAPI
+// breaking-change gate holds against main: every 400 from POST
+// /api/ui-allow-ips stays the established text/plain PlainBadRequest (never
+// the typed JSON body), never echoes the submitted entries, and leaves the
+// runtime policy unchanged; the 503 refusals stay typed JSON with a code.
+func TestUIAllowIPsAPIResponseMediaTypes(t *testing.T) {
+	uiPolicyFixture(t)
+	seed := []string{"192.0.2.0/24"}
+	if err := SetUIAllowedCIDRs(seed); err != nil {
+		t.Fatal(err)
+	}
+	const marker = "zz-attacker-chosen-entry"
+	for _, body := range []string{
+		`not json`,
+		`{"ips":"192.0.2.1"}`,
+		`{"ips":[1]}`,
+		`{}`,
+		`{"ips":["   "]}`,
+		`{"ips":["192.0.2.1","` + marker + `"]}`,
+		`{"ips":["` + marker + `/33"]}`,
+	} {
+		w := uiPolicyPOST(t, body)
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("%s: status %d, want 400", body, w.Code)
+		}
+		if ct := w.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/plain") {
+			t.Fatalf("%s: 400 Content-Type %q, want text/plain", body, ct)
+		}
+		got := w.Body.String()
+		if strings.Contains(got, `"code"`) || strings.Contains(got, "invalid_ui_allow_ips") {
+			t.Fatalf("%s: 400 carried the typed JSON body: %s", body, got)
+		}
+		if strings.Contains(got, marker) {
+			t.Fatalf("%s: 400 echoed submitted input: %s", body, got)
+		}
+		if strings.TrimSpace(got) == "" {
+			t.Fatalf("%s: 400 body is empty; the operator needs a reason", body)
+		}
+		if !reflect.DeepEqual(ListUIAllowedCIDRs(), seed) {
+			t.Fatalf("%s: refused request changed runtime policy", body)
+		}
+	}
+
+	// 503 ui_allow_ips_not_saved: typed JSON, policy unchanged.
+	dir := filepath.Join(t.TempDir(), "not-a-file")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	setUISettingsTestPath(t, dir)
+	w := uiPolicyPOST(t, `{"ips":["198.51.100.0/24"]}`)
+	assertUIAccessJSON503(t, w, "ui_allow_ips_not_saved")
+	if !reflect.DeepEqual(ListUIAllowedCIDRs(), seed) {
+		t.Fatal("failed save changed runtime policy")
+	}
+
+	// 503 ui_access_policy_unavailable: typed JSON on a refused loaded policy.
+	refuseLoadedUIAccessPolicy([]string{"192.0.2.0/24", " "})
+	w = uiPolicyPOST(t, `{"ips":[]}`)
+	assertUIAccessJSON503(t, w, "ui_access_policy_unavailable")
+}
+
+func assertUIAccessJSON503(t *testing.T, w *httptest.ResponseRecorder, code string) {
+	t.Helper()
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status %d, want 503: %s", w.Code, w.Body.String())
+	}
+	if ct := w.Header().Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
+		t.Fatalf("503 Content-Type %q, want application/json", ct)
+	}
+	var body struct {
+		Error string `json:"error"`
+		Code  string `json:"code"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("503 body is not JSON: %v (%s)", err, w.Body.String())
+	}
+	if body.Code != code || body.Error == "" {
+		t.Fatalf("503 body = %+v, want code %q with an error message", body, code)
+	}
 }

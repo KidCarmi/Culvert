@@ -11015,14 +11015,26 @@ function removeUIAllowIP(idx) {
   renderUIAllowIPList();
 }
 
-function uiAllowIPsFailure(error) {
+// uiAllowIPsFailure maps a failed POST /api/ui-allow-ips to operator text.
+// A 400 (or 403) is the established plain-text contract: the request was
+// refused and the previous policy stays active; a 400 body is a fixed or
+// index-only message (never an echo of the entries). A 503 is typed JSON and
+// its code decides whether the new policy is active. Callers render the result via textContent
+// / toast (which escapes) - never innerHTML.
+function uiAllowIPsFailure(status, text) {
+  if (status === 400 || status === 403) {
+    const detail = String(text || '').trim().slice(0, 200);
+    return 'Not saved; the previous policy remains active.' + (detail ? ' ' + detail : '');
+  }
   let code = '';
-  try { code = JSON.parse(error.message).code; } catch (_) { /* An untyped failure cannot establish the save outcome. */ }
+  if (status === 503) {
+    try { code = JSON.parse(text).code; } catch (_) { /* An untyped 503 cannot establish the save outcome. */ }
+  }
   if (code === 'ui_allow_ips_persistence_uncertain') {
     return 'New policy is active; storage durability is unconfirmed. Verify storage before restarting.';
   }
-  if (code === 'invalid_ui_allow_ips' || code === 'ui_allow_ips_not_saved') {
-    return 'Not saved; the previous policy remains active. Check the entries and storage, then retry.';
+  if (code === 'ui_allow_ips_not_saved') {
+    return 'Not saved; the previous policy remains active. Check storage, then retry.';
   }
   if (code === 'ui_access_policy_unavailable') {
     return 'Management access policy is unavailable. Local console recovery is required.';
@@ -11050,20 +11062,27 @@ async function saveUIAllowIPs() {
   if (!ok) return;
   statusEl.textContent = 'Saving...';
   statusEl.style.color = 'var(--amber)';
+  let message;
   try {
-    await api('/api/ui-allow-ips', {
+    const r = await apiFetch('/api/ui-allow-ips', {
       method: 'POST', headers: {'Content-Type':'application/json'},
       body: JSON.stringify({ips: _uiAllowIPList})
     });
-    statusEl.textContent = '✓ Saved';
-    statusEl.style.color = 'var(--green)';
-    toast('IP allowlist updated', 'success');
-  } catch(e) {
-    const message = uiAllowIPsFailure(e);
-    statusEl.textContent = message;
-    statusEl.style.color = 'var(--amber)';
-    toast(message, 'error');
+    if (r.ok) {
+      statusEl.textContent = '✓ Saved';
+      statusEl.style.color = 'var(--green)';
+      toast('IP allowlist updated', 'success');
+      return;
+    }
+    if (r.status === 401) { statusEl.textContent = ''; return; } // apiFetch showed the login overlay
+    message = uiAllowIPsFailure(r.status, await r.text());
+  } catch (_) {
+    // Transport failure: the request may or may not have landed.
+    message = uiAllowIPsFailure(0, '');
   }
+  statusEl.textContent = message;
+  statusEl.style.color = 'var(--amber)';
+  toast(message, 'error');
 }
 
 // ── Syslog / SIEM ─────────────────────────────────────────────────────────

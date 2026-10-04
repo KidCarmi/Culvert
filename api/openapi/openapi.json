@@ -5412,7 +5412,6 @@
         "properties": {
           "code": {
             "enum": [
-              "invalid_ui_allow_ips",
               "ui_access_policy_unavailable",
               "ui_allow_ips_not_saved",
               "ui_allow_ips_persistence_uncertain"
@@ -25424,7 +25423,7 @@
         "x-culvert-visibility": "admin-supported"
       },
       "post": {
-        "description": "Validate and persist the complete access list before publishing it. An empty array intentionally removes restrictions. A persistence-uncertain response means the replacement landed and the new policy is active, but crash durability could not be confirmed.",
+        "description": "Validate and persist the complete access list before publishing it. An empty array intentionally removes restrictions; a missing ips field, a blank entry, or a malformed address/CIDR is refused with a plain-text 400 and leaves the active policy unchanged. A persistence-uncertain response means the replacement landed and the new policy is active, but crash durability could not be confirmed.",
         "operationId": "setUIAllowIPs",
         "requestBody": {
           "content": {
@@ -25449,14 +25448,7 @@
             "description": "Validate and persist the complete access list before publishing it. An empty array intentionally removes restrictions. A persistence-uncertain response means the replacement landed and the new policy is active, but crash durability could not be confirmed."
           },
           "400": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/UIAccessPolicyError"
-                }
-              }
-            },
-            "description": "Invalid or missing IP list; the active policy is unchanged."
+            "$ref": "#/components/responses/PlainBadRequest"
           },
           "403": {
             "$ref": "#/components/responses/PlainForbidden"
