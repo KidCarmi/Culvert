@@ -10,9 +10,9 @@
 //
 // It is a PURE, deterministic planner: no I/O, no randomness, no agent contact.
 // The idempotency key is an INPUT (higher orchestration owns op identity); the
-// catalog snapshot is read exactly once at plan start. The agent receives only
-// an image_ref + existing apply flags — no release/channel/version/catalog data
-// crosses to it, and it stays release-agnostic.
+// catalog snapshot is read exactly once at plan start. Exact signed evidence
+// accompanies image_ref so the host independently authorizes the requested
+// release and its recovery predecessor using host-owned trust policy.
 //
 // Scope (roadmap/D1.6d-P1.6-release-dispatch-plan.md — Slice a): planning + the
 // request object + tests. NO agent POST, NO upgrades.check, NO tags, NO tag
@@ -24,6 +24,8 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+
+	"github.com/KidCarmi/Culvert/releaseproof"
 )
 
 var (
@@ -237,14 +239,16 @@ func DefaultDispatchOptions() DispatchOptions { return DispatchOptions{PreBackup
 
 // UpgradeApplyRequest is the CP's view of the agent's existing
 // POST /v1/upgrades/apply body. rollback_on_failure has NO omitempty so it is
-// always serialized explicitly (design §6). image_ref is the ONLY field derived
-// from the release; no release/channel/version data is included.
+// always serialized explicitly. Proof bytes are captured from the same immutable
+// catalog snapshot; the host independently verifies them before any mutation.
 type UpgradeApplyRequest struct {
-	ImageRef          string `json:"image_ref"`
-	PreBackup         bool   `json:"pre_backup"`
-	PassphraseRef     string `json:"passphrase_ref,omitempty"`
-	RollbackOnFailure bool   `json:"rollback_on_failure"`
-	IdempotencyKey    string `json:"idempotency_key,omitempty"`
+	ImageRef          string                 `json:"image_ref"`
+	PreBackup         bool                   `json:"pre_backup"`
+	PassphraseRef     string                 `json:"passphrase_ref,omitempty"`
+	RollbackOnFailure bool                   `json:"rollback_on_failure"`
+	IdempotencyKey    string                 `json:"idempotency_key,omitempty"`
+	ReleaseProof      *releaseproof.Evidence `json:"release_proof,omitempty"`
+	PriorReleaseProof *releaseproof.Evidence `json:"prior_release_proof,omitempty"`
 }
 
 // DispatchPlan is the structured result of planning one dispatch op.
@@ -354,6 +358,10 @@ func (d *Dispatcher) Plan(target DispatchTarget, running []string, opts Dispatch
 	}
 	plan.Outcome = OutcomePlan
 	plan.Apply, plan.BackupSkipped = buildApplyRequest(imageRef, opts)
+	plan.Apply.ReleaseProof = cat.releaseProof(rel.ReleaseID)
+	if current.Known {
+		plan.Apply.PriorReleaseProof = cat.releaseProof(current.ReleaseID)
+	}
 	return plan
 }
 

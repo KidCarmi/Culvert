@@ -416,7 +416,11 @@ func TestToolchain_RejectsConflictingDeclarations(t *testing.T) {
 			replaceDocker("test/e2e/maint-agent/Dockerfile.e2e", "ENV GOTOOLCHAIN=local\n", "ENV GOTOOLCHAIN=local\nARG GOTOOLCHAIN=auto\n")},
 		{"agent go.mod names another toolchain", "cmd/culvert-maint/go.mod toolchain",
 			func(in *toolchainInputs) bool {
-				return replaceIn(&in.maintGoMod, "\ngo 1.25\n", "\ngo 1.25\n\ntoolchain go"+other+"\n")
+				goDirective := goModGoRe.FindString(in.maintGoMod)
+				if goDirective == "" {
+					return false
+				}
+				return replaceIn(&in.maintGoMod, goDirective, goDirective+"\ntoolchain go"+other+"\n")
 			}},
 		{"a workflow sets GOTOOLCHAIN before setup-go", "sets GOTOOLCHAIN in an env block",
 			func(in *toolchainInputs) bool {

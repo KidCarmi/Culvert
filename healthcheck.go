@@ -471,6 +471,7 @@ func computeReadiness() (report readinessReport, code int) {
 	// 8+9. Quarantined state files (CHAOS-05/07) and DP dependency health
 	// (CHAOS-09, cp_poll + node_cert, DP mode only): report-only rows like ca.
 	appendStateFileChecks(checks)
+	appendUIAccessReadinessCheck(checks)
 	appendDPHealthChecks(checks)
 
 	// 9b. SOCKS5 listener (CHAOS-54) — report-only, absent entirely when

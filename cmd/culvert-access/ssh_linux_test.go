@@ -165,14 +165,25 @@ func (f *sshBoundaryFixture) installShell(t *testing.T) {
 
 func (f *sshBoundaryFixture) createAccount(t *testing.T) {
 	t.Helper()
+	// Runner /etc/skel can contain large toolchains (for example .rustup).
+	// Own the fixture's initial home contents instead of copying unrelated
+	// runner state; installUserHooks adds the adversarial startup files next.
+	skeleton := filepath.Join(f.dir, "empty-skeleton")
+	if err := os.Mkdir(skeleton, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	f.accountAttempted = true
-	fixtureCommand(t, "/usr/sbin/useradd", "--user-group", "--create-home", "--comment", f.accountMarker, "--shell", applianceaccess.Binary, "--password", "!", "culvert-operator")
+	fixtureCommand(t, "/usr/sbin/useradd", "--user-group", "--create-home", "--skel", skeleton, "--home-dir", f.home, "--comment", f.accountMarker, "--shell", applianceaccess.Binary, "--password", "!", "culvert-operator")
 	u, err := user.Lookup("culvert-operator")
 	if err != nil || !ownedFixtureAccount(u, f.accountMarker, f.home, "", "") {
 		t.Fatal("fixture account identity unexpected")
 	}
 	f.accountUID = u.Uid
 	f.accountGID = u.Gid
+	entries, err := os.ReadDir(f.home)
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("fixture home must start empty: entries=%d error=%v", len(entries), err)
+	}
 }
 
 func (f *sshBoundaryFixture) installUserHooks(t *testing.T) {

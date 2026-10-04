@@ -97,10 +97,44 @@ finding. Binary SHA-256:
 
 At review time, upstream's latest release remained v0.5.1 and its main branch
 still included this fixture. [Upstream PR #646](https://github.com/crewjam/saml/pull/646)
-moves it into test code but remains unmerged. No module upgrade or cache edit was
-made here. A maintained, provenance-recorded patch needs SAML acceptance and
-signature/audience/replay rejection tests plus a new binary/image scan; a version
-bump alone cannot claim to resolve this finding.
+moves it into test code but remains unmerged. A version bump alone cannot resolve
+this finding. The subsequent source remediation below does not change the
+historical artifact result.
+
+### Reproducible source remediation
+
+`third_party/crewjam-saml` contains the complete verified v0.5.1 module. Its only
+upstream-file change prepends a `gofuzz` build constraint to `xmlenc/fuzz.go`,
+matching the companion fuzz test's existing constraint. Normal XML-encryption and
+SAML source stays byte-identical; ordinary builds omit the fuzz initializer and
+fixture. Explicit `-tags=gofuzz` builds still contain the legacy fixture and are
+not release builds. No module-cache modification or unmerged upstream patch is
+used. Upstream notices are preserved.
+
+The local module's `CULVERT-PROVENANCE.json` retains the tag commit, original
+module and go.mod checksums, independently retrieved module zip hash, and all
+235 upstream file hashes. `verify_saml_patch.py` pins the inventory and exact
+build-tag delta, rejects unexpected source changes, and optionally checks the
+original zip. Its normal verification and synthetic tests do not require the
+original module cache or network access. A local replacement appears in Go build
+metadata; release provenance and SBOM consumers must retain the original version
+and this patch record.
+
+Validation on Windows passed the upstream `xmlenc`, `samlsp`, and root SAML module
+tests, plus Culvert's signed-response acceptance, request/state validation, and
+unsigned/audience/expiry/replay rejection tests. A Linux amd64 Culvert crossbuild
+was inspected without executing it: the known fixture was absent, with zero
+complete parseable PEM occurrences found. This working-tree binary check is not
+qualification of a release image or proof that arbitrary secrets are absent.
+CI should repeat the source check and scan its actual runtime binary:
+
+```text
+python appliance/artifact-audit/verify_saml_patch.py --binary <compiled-culvert>
+```
+
+The verifier fails if the known fixture remains. Its binary inspection uses the
+same bounded complete-PEM parser as the raw sweep; it does not replace the full
+disk and every-container-layer audit. A rebuilt OVA remains to be audited.
 
 ### Separate raw-disk PEM sweep
 
@@ -140,7 +174,7 @@ Sanitized evidence is retained under
 - `candidate-36b5407e-container-key-attribution.json`: actual binary/module and
   source-fixture fingerprint agreement.
 
-Twelve focused synthetic tests passed on Windows Python 3.12. CI can run them
+Sixteen focused synthetic tests passed on Windows Python 3.12. CI can run them
 without an OVA, hypervisor, network target or disk parser by installing
 `cryptography==50.0.2` and running
 `python -m unittest discover -s appliance/artifact-audit -v`.
@@ -153,5 +187,6 @@ The accompanying source changes exclude local credential files and lab/tool
 directories from the Docker build context, and stage enumerated provisioning
 and OS-maintenance runtime files into the OVA. The previous recursive directory
 copy also included `power_test.sh`; ignored checkout files could have followed
-it. These packaging changes do not remove the upstream SAML binary fixture or
-retroactively change the audited OVA.
+it. Packaging exclusions alone do not remove the upstream SAML binary fixture;
+the separate source remediation above addresses that runtime dependency. Neither
+change retroactively changes the audited OVA.

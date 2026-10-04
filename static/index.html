@@ -11015,6 +11015,21 @@ function removeUIAllowIP(idx) {
   renderUIAllowIPList();
 }
 
+function uiAllowIPsFailure(error) {
+  let code = '';
+  try { code = JSON.parse(error.message).code; } catch (_) { /* An untyped failure cannot establish the save outcome. */ }
+  if (code === 'ui_allow_ips_persistence_uncertain') {
+    return 'New policy is active; storage durability is unconfirmed. Verify storage before restarting.';
+  }
+  if (code === 'invalid_ui_allow_ips' || code === 'ui_allow_ips_not_saved') {
+    return 'Not saved; the previous policy remains active. Check the entries and storage, then retry.';
+  }
+  if (code === 'ui_access_policy_unavailable') {
+    return 'Management access policy is unavailable. Local console recovery is required.';
+  }
+  return 'Save result is unconfirmed. Refresh the policy before retrying.';
+}
+
 async function saveUIAllowIPs() {
   const statusEl = document.getElementById('s-uiip-status');
   // Tier 3: a wrong list locks the admin console for everyone, including you.
@@ -11027,12 +11042,14 @@ async function saveUIAllowIPs() {
       ? 'Requests from any other IP get 403 - starting with your NEXT request. If your current IP (or your proxy/VPN egress) is not on the list, you lock yourself out.'
       : 'The admin console becomes reachable from ALL IPs again (authentication still required).',
     rollback: _uiAllowIPList.length
-      ? 'From an allowed IP: edit this list. If fully locked out: restart with the -ui-allow-ip flag or edit the persisted settings on the host.'
+      ? 'From an allowed IP: edit this list. If fully locked out: use authenticated local console recovery to repair the persisted settings, then restart.'
       : 'Re-add CIDRs here at any time.',
     confirmWord: _uiAllowIPList.length ? 'RESTRICT' : 'OPEN',
     okLabel: _uiAllowIPList.length ? 'Apply allowlist' : 'Remove restriction',
   });
   if (!ok) return;
+  statusEl.textContent = 'Saving...';
+  statusEl.style.color = 'var(--amber)';
   try {
     await api('/api/ui-allow-ips', {
       method: 'POST', headers: {'Content-Type':'application/json'},
@@ -11041,7 +11058,12 @@ async function saveUIAllowIPs() {
     statusEl.textContent = '✓ Saved';
     statusEl.style.color = 'var(--green)';
     toast('IP allowlist updated', 'success');
-  } catch(e) { toast('Error: ' + e.message, 'error'); }
+  } catch(e) {
+    const message = uiAllowIPsFailure(e);
+    statusEl.textContent = message;
+    statusEl.style.color = 'var(--amber)';
+    toast(message, 'error');
+  }
 }
 
 // ── Syslog / SIEM ─────────────────────────────────────────────────────────

@@ -364,6 +364,7 @@ var configSurfaces = []configSurfaceRow{
 	{ID: "session_timeout_hours", Kind: kindConfig, Owner: "session", AdminDurable: true,
 		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "SessionTimeoutHours"}}},
 	{ID: "ui_allow_ips", Kind: kindConfig, Owner: "uiIPGuard", AdminDurable: true,
+		Note:     "ui_allow_ips_saved makes an explicit empty list authoritative over startup configuration; malformed stored policy refuses management access",
 		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "UIAllowIPs"}}},
 	{ID: "trusted_proxy_cidrs", Kind: kindConfig, Owner: "trustedProxyNets", AdminDurable: true,
 		Note:     "RISK-019 reverse-proxy trust set for admin-UI client-IP; admin-durable only (per-node topology), NOT cluster-synced; empty len-guarded apply",
@@ -527,6 +528,8 @@ var configSurfaces = []configSurfaceRow{
 		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "SupportRetentionMaxAgeDays"}}},
 
 	// ── AdminSettings sentinels + legacy migration inputs ────────────────
+	{ID: "ui_allow_ips_saved", Kind: kindSentinel,
+		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "UIAllowIPsSaved"}}},
 	{ID: "log_retention_saved", Kind: kindSentinel, AdminDurable: true,
 		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "LogRetentionSaved"}}},
 	{ID: "log_store_enabled_saved", Kind: kindSentinel, AdminDurable: true,

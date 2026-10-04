@@ -106,11 +106,14 @@ func TestSetUIAllowedCIDRs(t *testing.T) {
 		uiAllowedNetsMu.Unlock()
 	}()
 
-	if err := SetUIAllowedCIDRs([]string{"10.0.0.0/8", "", "192.168.0.0/16"}); err != nil {
+	if err := SetUIAllowedCIDRs([]string{"10.0.0.0/8", "192.168.0.0/16"}); err != nil {
 		t.Fatalf("SetUIAllowedCIDRs: %v", err)
 	}
 	if len(ListUIAllowedCIDRs()) != 2 {
-		t.Errorf("expected 2 (blank ignored), got %v", ListUIAllowedCIDRs())
+		t.Errorf("expected 2, got %v", ListUIAllowedCIDRs())
+	}
+	if err := SetUIAllowedCIDRs([]string{"10.0.0.0/8", ""}); err == nil {
+		t.Error("expected error for blank entry")
 	}
 	if err := SetUIAllowedCIDRs([]string{"bad-ip"}); err == nil {
 		t.Error("expected error for invalid entry")

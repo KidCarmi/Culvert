@@ -11,7 +11,14 @@ go 1.26.6
 // roadmap/CI-REDESIGN.md §20.
 toolchain go1.26.8
 
+// Upstream v0.5.1 with only its public fuzz fixture excluded from normal builds.
+// Exact upstream provenance and patch are recorded beside the local module.
+replace github.com/crewjam/saml => ./third_party/crewjam-saml
+
+replace github.com/KidCarmi/Culvert/releaseproof => ./pkg/releaseproof
+
 require (
+	github.com/KidCarmi/Culvert/releaseproof v0.0.0
 	github.com/KidCarmi/Sluice v0.2.1-0.20260902055746-d6d4394ab74f
 	github.com/andybalholm/brotli v1.2.4
 	github.com/beevik/etree v1.8.0

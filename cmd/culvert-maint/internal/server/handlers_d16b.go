@@ -138,7 +138,11 @@ func readPassphraseFromEnv(ref string) (string, error) {
 // `passhprase_ref`) fails loudly rather than silently disabling
 // encryption.
 func decodeJSONBody(r *http.Request, dst interface{}) error {
-	r.Body = http.MaxBytesReader(nil, r.Body, maxBodyBytes)
+	return decodeJSONBodyLimit(r, dst, maxBodyBytes)
+}
+
+func decodeJSONBodyLimit(r *http.Request, dst interface{}, limit int64) error {
+	r.Body = http.MaxBytesReader(nil, r.Body, limit)
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(dst); err != nil {

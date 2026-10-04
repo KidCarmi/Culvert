@@ -7,8 +7,8 @@
 // agent's self-report). It is single-flight per agent and emits audit events
 // via a hook.
 //
-// The agent is untouched and stays release-agnostic: only image_ref + existing
-// apply flags cross the wire (no upgrades.check, no tags, no fallback). The
+// The agent independently verifies exact release evidence carried with the
+// apply request (no upgrades.check, no tags, no unsigned fallback). The
 // transport is behind the AgentClient seam so the orchestration is fully
 // testable with a fake; httpAgentClient is the concrete adapter over the
 // existing /v1 endpoints.

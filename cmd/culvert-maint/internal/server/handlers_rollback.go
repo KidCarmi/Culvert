@@ -21,6 +21,8 @@ import (
 	"net/http"
 	"regexp"
 
+	"github.com/KidCarmi/Culvert/releaseproof"
+
 	"culvert-maint/internal/auth"
 	"culvert-maint/internal/journal"
 	"culvert-maint/internal/ops"
@@ -36,8 +38,10 @@ var rollbackDigestRefRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._/:-]*@sha2
 // mode=image; the Filename/RestoreMode/PassphraseRef/safety-flag fields
 // for mode=data (they map 1:1 to restore.commit).
 type rollbackRequest struct {
-	Mode     string `json:"mode"`
-	ImageRef string `json:"image_ref"`
+	PriorReleaseProof *releaseproof.Evidence `json:"prior_release_proof,omitempty"`
+	ReleaseProof      *releaseproof.Evidence `json:"release_proof,omitempty"`
+	Mode              string                 `json:"mode"`
+	ImageRef          string                 `json:"image_ref"`
 
 	// mode=data fields (see data_rollback.go).
 	Filename             string `json:"filename"`
@@ -59,7 +63,7 @@ func (s *Server) handleRollback(w http.ResponseWriter, r *http.Request, peer aut
 		return
 	}
 	var req rollbackRequest
-	if err := decodeJSONBody(r, &req); err != nil {
+	if err := decodeJSONBodyLimit(r, &req, maxProofBodyBytes); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "decode: " + err.Error()})
 		return
 	}
@@ -96,6 +100,20 @@ func (s *Server) rollbackImage(w http.ResponseWriter, r *http.Request, peer auth
 		return
 	}
 
+	if s.opts.ReleaseTrust == nil {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "release trust unavailable"})
+		return
+	}
+	var trustErr error
+	if req.ReleaseProof != nil {
+		trustErr = s.checkRelease(req.ImageRef, req.ReleaseProof)
+	} else {
+		trustErr = s.knownRelease(req.ImageRef)
+	}
+	if err := trustErr; err != nil {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
+		return
+	}
 	// Same self-heal preflight as apply: a rollback also recreates the proxy via
 	// ComposeUp, so without a compose override the socket wiring is dropped.
 	// Record-only (never blocks); surfaced to the CP/GUI via op params.
@@ -108,7 +126,17 @@ func (s *Server) rollbackImage(w http.ResponseWriter, r *http.Request, peer auth
 
 	acc := &rollbackAccumulator{kind: ops.KindRollbackCreate, actor: peer.String(), mode: "image"}
 	op, deduped, herr := s.startAsyncOp(r, peer, ops.KindRollbackCreate, req.IdempotencyKey, params, func() ([]ops.FlowStage, *opError) {
-		return s.buildImageRollbackStages(targetRef, acc), nil
+		stages := s.buildImageRollbackStages(targetRef, acc)
+		first := stages[0].Run
+		stages[0].Run = func(ctx context.Context) ([]byte, []byte, error) {
+			out, stderr, err := first(ctx)
+			if err != nil {
+				return out, stderr, err
+			}
+			err = s.opts.ReleaseTrust.AdmitRollback(targetRef, req.ReleaseProof, acc.priorRef, req.PriorReleaseProof)
+			return out, stderr, err
+		}
+		return stages, nil
 	}, withOpIDHook(func(id string) { acc.opID = id }))
 	if herr != nil {
 		writeJSON(w, herr.Status, herr.Body)
@@ -141,7 +169,7 @@ func (s *Server) buildImageRollbackStages(targetRef string, acc *rollbackAccumul
 				}
 				acc.priorDigests = bareDigests(ri.RepoDigests)
 				acc.priorImageID = ri.RunningImageID
-				if pr := ri.PriorRef(); rollbackDigestRefRE.MatchString(pr) {
+				if pr, ambiguous := ri.RepositoryRef(s.opts.Cfg.ProxyRepo); !ambiguous && rollbackDigestRefRE.MatchString(pr) {
 					acc.priorRef = pr
 				}
 				// Same baseline as apply: a /ready that was already non-2xx

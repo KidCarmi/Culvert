@@ -11,10 +11,10 @@
 // dispatch to an agent already mid-op is rejected (errDispatchInFlight) and
 // audited, never queued or duplicated.
 //
-// The agent stays release-agnostic: only image_ref + existing apply flags cross
-// the wire (no upgrades.check, no tags, no fallback). Verify-by-digest remains
-// the only success gate, and the CP idempotency key is generated ONCE per
-// dispatch op and threaded through the plan so the executor honors it (P1.6c-0).
+// Exact catalog evidence crosses the wire for independent host authorization.
+// Verify-by-digest remains a post-operation success gate. The CP idempotency key
+// is generated ONCE per dispatch op and threaded through the plan so the executor
+// honors it (P1.6c-0).
 //
 // Scope (roadmap/D1.6d-P1.6-release-dispatch-plan.md — Slice c): service wrapper,
 // agent registry, Resume/re-poll, audit + alert wiring, real transport. NO GUI,
