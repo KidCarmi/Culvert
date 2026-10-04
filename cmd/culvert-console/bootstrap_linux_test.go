@@ -189,6 +189,42 @@ func TestBootstrapLockAndImportedCredential(t *testing.T) {
 	}
 }
 
+func TestBootstrapProducerWaitsForReaderAndHonorsDeadline(t *testing.T) {
+	s, _ := bootstrapFixture(t)
+	bootstrapSaveFixture(t, s)
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancel()
+	result := make(chan error, 1)
+	err := s.withLock(false, func() error {
+		go func() { result <- s.producerLock(ctx, false, func() error { return s.save(bootstrapFixturePassword) }) }()
+		select {
+		case err := <-result:
+			t.Fatalf("producer failed before reader released lock: %v", err)
+		case <-time.After(80 * time.Millisecond):
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-result:
+		if err != nil {
+			t.Fatalf("producer did not resume after lock release: %v", err)
+		}
+	case <-ctx.Done():
+		t.Fatal("producer did not acquire released lock")
+	}
+	err = s.withLock(false, func() error {
+		bounded, stop := context.WithTimeout(t.Context(), 40*time.Millisecond)
+		defer stop()
+		return s.producerLock(bounded, false, func() error { t.Fatal("producer entered held lock"); return nil })
+	})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("held lock ignored producer deadline: %v", err)
+	}
+}
+
 func TestBootstrapInputIsBoundedAndCancelled(t *testing.T) {
 	for _, input := range []string{bootstrapFixturePassword + "\n", "short\n", bootstrapFixturePassword + "extra\n", "ABCDEFGHIJKLMNOP\n"} {
 		t.Run(input, func(t *testing.T) {

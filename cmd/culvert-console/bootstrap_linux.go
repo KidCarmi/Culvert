@@ -58,7 +58,7 @@ func recordBootstrap(parent context.Context) error {
 		return err
 	}
 	store := bootstrapStore{bootstrapDirectory, "/etc/shadow"}
-	return store.withLock(true, func() error { return store.save(password) })
+	return store.producerLock(ctx, true, func() error { return store.save(password) })
 }
 
 func bootstrapInput(ctx context.Context, fd int) (string, error) {
@@ -143,6 +143,32 @@ func (s bootstrapStore) withLock(create bool, fn func() error) error {
 	}
 	defer func() { _ = unix.Flock(fd, unix.LOCK_UN) }()
 	return fn()
+}
+
+// Producers tolerate a reader's brief lock without failing automatic first boot.
+// UI and cleanup retain their nonblocking behavior through withLock directly.
+func (s bootstrapStore) producerLock(ctx context.Context, create bool, fn func() error) error {
+	tick := time.NewTicker(20 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		err := s.withLock(create, func() error {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			return fn()
+		})
+		if !errors.Is(err, unix.EWOULDBLOCK) && !errors.Is(err, unix.EAGAIN) {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-tick.C:
+		}
+	}
 }
 
 func bootstrapMakeDirectory(path string) error {
@@ -297,12 +323,14 @@ func (s bootstrapStore) pending() (string, error) {
 // Commit can be retried after console.done without re-minting a password.
 // The private ready bit is published only after the provisioning checkpoint is
 // durable; a reader can never reveal a credential backed only by a cached touch.
-func recordBootstrapCommit(ctx context.Context) error {
+func recordBootstrapCommit(parent context.Context) error {
+	ctx, cancel := context.WithTimeout(parent, 2*time.Second)
+	defer cancel()
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 	store := bootstrapStore{bootstrapDirectory, "/etc/shadow"}
-	err := store.withLock(false, func() error { return store.commit(bootstrapComplete) })
+	err := store.producerLock(ctx, false, func() error { return store.commit(bootstrapComplete) })
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
