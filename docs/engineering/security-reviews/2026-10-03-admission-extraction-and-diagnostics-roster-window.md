@@ -4,8 +4,10 @@
 **Reviewer role:** Security Regression Engineer (standing scheduled review)
 **Head reviewed:** `3fcc07e` (`main`)
 **Base reviewed:** `f13479b` — covers PRs **#1490, #1522, #1523, #1524, #1525**
-**Verdict:** one **LOW** finding, fixed in this change. The package extraction itself is a
-faithful, well-gated move with **no** security regression.
+**Verdict:** one **LOW** finding in the reviewed window, fixed in this change. The package
+extraction itself is a faithful, well-gated move with **no** security regression. One further
+**MEDIUM** finding (F-2) was found *outside* the window during this review and is reported, not
+fixed — it is pre-existing and its correct fix is a behaviour decision of its own.
 
 ---
 
@@ -31,6 +33,18 @@ operator-contract row (`admin_username_length`) derived from the **admin-only** 
 whether an admin account has **TOTP enrolled**, the legacy login's **effective role**, the
 affected **count** and the longest username's **byte length** to viewers and operators —
 facts otherwise gated at `RoleAdmin` via `GET /api/auth/users`.
+
+**A second, unrelated finding surfaced while driving this PR's CI and is reported rather than
+fixed.** Porting PR #1544's lint-timeout fix switched on the frontend verification gate (the diff
+classifier sets `frontend=true` for any `pr-fast-gate.yml` change), which failed on a dev-only npm
+advisory. One of those advisories describes a NAT64 address-classifier gap; checking Culvert's own
+Go classifier for the same class found that `internal/ssrf` does **not** treat the RFC 8215
+local-use NAT64 prefix `64:ff9b:1::/48` as private, so the same cloud-metadata address that is
+correctly refused through the well-known prefix is **admitted** through the local-use one (F-2,
+MEDIUM). Two process observations ride along: the frontend vulnerability gate has **no scheduled
+run**, so a newly published advisory is invisible until someone happens to touch a frontend path;
+and `npm audit` verdicts change with no code change at all, which is exactly the shape a
+diff-triggered-only gate cannot catch.
 
 ---
 
@@ -102,6 +116,89 @@ defect-pinning tests before (`TestRunShutdownSequence_EarlyCtxHasNoDeadline_Late
 valuable and are kept in full.
 
 ---
+
+### F-2 (MEDIUM) — NAT64 local-use prefix `64:ff9b:1::/48` is not classified as private (REPORTED, not fixed)
+
+| | |
+|---|---|
+| **Severity** | Medium (High impact × Low–Medium likelihood) |
+| **CWE** | CWE-918 (SSRF); CWE-1286 (Improper Validation of Syntactic Correctness of Input); CWE-184 (Incomplete List of Disallowed Inputs) |
+| **OWASP** | A10:2021 Server-Side Request Forgery |
+| **Status** | **Reported, deliberately NOT fixed in this PR** — pre-existing, unrelated to the reviewed window, and the correct fix is not a one-liner (see below) |
+| **Register** | `RISK-030` (OPEN) in [TECHNICAL-RISK-REGISTER.md](../TECHNICAL-RISK-REGISTER.md) |
+
+**How it was found.** Not from the reviewed diff. The frontend verification gate (switched on in this
+branch by the ported lint-timeout change) surfaced npm advisory
+[GHSA-2vr4-cq9g-pvrc](https://github.com/advisories/GHSA-2vr4-cq9g-pvrc) against the dev-only
+`ip-address` package: *"no classifier recognizes the NAT64 local-use range 64:ff9b:1::/48, allowing
+SSRF and trust-boundary bypass."* That npm package is unrelated to Go code and never ships, but the
+**class** of bug is directly relevant to Culvert's own classifier, so it was checked.
+
+**The finding.** `internal/ssrf/ssrf.go`'s `privateRanges` — the documented *"SINGLE source of truth
+for the guard table"* — lists the RFC 6052 well-known NAT64 prefix `64:ff9b::/96` but **not** the
+RFC 8215 local-use translation prefix `64:ff9b:1::/48`. The two are disjoint (they differ in the
+third 16-bit group), so the local-use prefix is classified **public**.
+
+Measured against the real `PrivateAddr`:
+
+| probe | embedded IPv4 | `PrivateAddr` |
+|---|---|---|
+| `64:ff9b::7f00:1` | 127.0.0.1 | `true` ✅ |
+| `64:ff9b::a9fe:a9fe` | 169.254.169.254 | `true` ✅ |
+| `64:ff9b:1::7f00:1` | 127.0.0.1 | **`false`** ❌ |
+| `64:ff9b:1::a9fe:a9fe` | 169.254.169.254 | **`false`** ❌ |
+| `64:ff9b:1::a00:1` | 10.0.0.1 | **`false`** ❌ |
+| `64:ff9b:1:0:0:0:c0a8:1` | 192.168.0.1 | **`false`** ❌ |
+
+**The coverage is inverted, which is what makes this more than a missing row.** RFC 6052 §3.1 states
+the well-known prefix MUST NOT be used to represent non-global IPv4 addresses. So the prefix Culvert
+*does* block is the one that cannot legitimately carry `127.0.0.1` or `169.254.169.254`, while
+RFC 8215's local-use prefix — which exists precisely so operators can translate non-global IPv4 —
+is the one left open.
+
+**Attack scenario.** On a deployment whose egress path includes a NAT64 translator configured with a
+local-use prefix (RFC 8215's stated purpose), a client asks the proxy for
+`[64:ff9b:1::a9fe:a9fe]:80`, or a hostname whose AAAA answer is that address. `PrivateAddr` reports
+public, the guard admits it, and the NAT64 gateway translates it to `169.254.169.254` — the cloud
+metadata endpoint `169.254.0.0/16` is in the table specifically to protect. The same route reaches
+loopback and RFC 1918.
+
+**Preconditions.** A NAT64 translator on the egress path using a prefix inside `64:ff9b:1::/48`.
+Not universal, but standardised and real in IPv6-first enterprise and mobile networks — which is
+Culvert's market. No authentication is needed beyond whatever the proxy already requires, and
+nothing exotic: the address is an ordinary literal or DNS answer.
+
+**Exploitability.** Trivial once the precondition holds (one request). **Likelihood** Low–Medium.
+**Impact** High — SSRF to metadata/loopback/RFC 1918.
+
+**Affected assets.** `internal/ssrf` is the single SSRF trust boundary for the proxy data path
+(`proxy.go`, `proxy_tunnel.go`, `socks5.go`, `proxy_portal.go`) and for every outbound fetcher —
+OCSP, threat feed, blocklist feed, SaaS feed, alert webhooks, OTLP, release catalog, support upload —
+plus MCP destination inspection. One classification gap affects all of them.
+
+**Recommended fix — NOT simply adding the prefix to the list.** Blocking all of `64:ff9b:1::/48`
+would be wrong in the other direction: a /48 holds the /96 a translator actually uses, and the
+embedded IPv4 may be **public**. On an IPv6-only network NAT64 is how clients reach the IPv4
+internet, so a blanket block would deny legitimate egress — and the same over-blocking already
+applies to `64:ff9b::/96`, where Culvert blocks public-IPv4 embeddings too (safe direction, but it
+means NAT64 egress does not work at all today).
+
+The correct shape is to **decode the embedded IPv4 from a recognised NAT64 prefix and classify
+that**, so `64:ff9b:1::a9fe:a9fe` is refused (embeds link-local) while `64:ff9b:1::<public v4>` is
+allowed. That is a behaviour change in both directions and needs its own design decision — which is
+why this is reported rather than patched inside a review about diagnostics redaction. The repo's
+own rule applies: *never change security behavior unless required.*
+
+**Required tests** (for whoever takes it): positive (every RFC 1918/loopback/link-local/CGN
+embedding refused through both the well-known and local-use prefixes); negative (a public-IPv4
+embedding still allowed, if the decode approach is taken); boundary (the `/48` and `/96` edges, and
+`64:ff9b:2::` which is *outside* the local-use prefix); malformed (truncated and zone-bearing
+forms); plus the existing `privateaddr_test.go` table extended so the guard table and the test
+enumerate the same prefixes.
+
+**Regression risk of the fix.** Medium — it changes which destinations the proxy will reach. The
+decode approach must not accidentally widen `64:ff9b::/96` (currently fully blocked) without that
+being an explicit, recorded decision.
 
 ## 3. Suggested fix (implemented)
 
@@ -270,3 +367,11 @@ a CWD-relative source read in the first draft of the governance wall; it is now 
    Unchanged here.
 5. The fix does not change any allow/deny decision, the proxy data path, or the admission
    engine. It is confined to the rendering of one management-plane diagnostic row.
+6. **F-2 (NAT64 local-use prefix) is open.** It is pre-existing, outside the reviewed window, and
+   deliberately not patched here because the correct fix changes which destinations the proxy will
+   reach in both directions. Until it is taken, a deployment whose egress path runs a NAT64
+   translator on an RFC 8215 local-use prefix has an SSRF route past `internal/ssrf`.
+7. **The frontend vulnerability gate is effectively dormant** (no `schedule:` trigger; PR runs only
+   when the classifier flags the frontend surface, main runs only on `frontend/**` pushes). A
+   weekly scheduled run is recommended. Until then the 11 HIGH dev-tree advisories found here can
+   recur unnoticed.
