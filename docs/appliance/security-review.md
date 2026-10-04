@@ -10,7 +10,7 @@ covered `36b5407e`; it does not qualify the changes described here.
 | Finding | Reproduction before the fix | Correction and regression |
 | --- | --- | --- |
 | P1: first-boot setup token bypass | With a per-instance setup token configured, an unauthenticated POST to `/api/auth/users` with a missing or wrong token returned 200 and created an administrator. `uiAuthMiddleware` granted every request the bootstrap administrator role while setup was incomplete. | Protected `/api/` bootstrap requests now require the same token as `/api/setup/complete`. `TestSetupToken_ProtectsBootstrapAdminRoutes` drives the real user-creation handler. Public setup routing/static assets remain available; a setup token does not authenticate after setup. |
-| P1: proxy session accepted as an administrator session | A cookie emitted by the real proxy `setSessionCookie` issuer, renamed from `ps_session` to `ps_ui_session`, reached administrator-only `/api/auth/users` with HTTP 200. Both cookies used the shared HMAC format; the UI accepted external providers and promoted an empty role to administrator. | The UI issuer writes a signed `aud=culvert-admin-ui` purpose. The UI reader requires that purpose, the actual local UI provider, an explicit enrolled role, and a current local account. Tests cover genuine portal-token replay, missing/wrong purpose, and purpose modification without a new signature. The shared decoder and proxy reader remain purpose-neutral. |
+| P1: proxy session accepted as an administrator session | A cookie emitted by the real proxy `setSessionCookie` issuer, renamed from `ps_session` to `ps_ui_session`, reached administrator-only `/api/auth/users` with HTTP 200. Both cookies used the shared HMAC format; the UI accepted external providers and promoted an empty role to administrator. | The UI issuer writes a signed `aud=culvert-admin-ui` purpose. The UI reader requires that purpose, the actual local UI provider, an explicit enrolled role, and a current local account. The proxy reader rejects nonempty purposes, preventing the reverse cookie substitution while preserving genuine current/legacy proxy sessions. Tests cover both directions, missing/wrong purpose, and purpose modification without a new signature. Only the shared HMAC decoder remains purpose-neutral. |
 | P2: a demoted administrator retained authority | After the real user-management handler demoted an administrator to viewer, password verification reported viewer but its existing signed cookie still reached administrator-only APIs with HTTP 200. | The UI reader bounds the role by both the signed cookie and a locked snapshot of the current roster. Demotion applies immediately; promotion does not elevate an existing lower-role cookie. Tests exercise actual demotion, promotion, deleted accounts, and unknown roles. |
 
 The UI cookie change deliberately requires existing sessions without the signed
@@ -60,6 +60,17 @@ window.
   address. [Docker documents the INPUT/OUTPUT bypass for published ports](https://docs.docker.com/engine/network/packet-filtering-firewalls/#docker-and-ufw).
 
 ## Evidence and outstanding qualification
+
+Artifact inspection found a public upstream RSA fuzzing fixture embedded in the
+proxy executable through `github.com/crewjam/saml v0.5.1/xmlenc/fuzz.go`. This is
+test residue, not evidence of an active operator credential leak. As checked on
+2026-10-04, v0.5.1 is the latest published module version and upstream `main`
+still contains the same unguarded fixture. The exact upstream remediation,
+[crewjam/saml PR #646](https://github.com/crewjam/saml/pull/646), remains open and
+unmerged. No released upgrade removes it. It remains an artifact release-audit
+blocker; a maintained fixture-to-test patch or build filter requires a separately
+qualified, provenance-recorded build policy. This slice introduces no fork,
+overlay, module-cache modification, or scanner exception.
 
 The focused bootstrap/session/authentication/audit regressions ran successfully
 against the real production Go files on Windows, including repeated shuffled

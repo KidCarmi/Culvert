@@ -162,3 +162,55 @@ func TestUISessionRole_RequiresSignedAudience(t *testing.T) {
 		}
 	}
 }
+
+func TestUISessionRole_ProxyReaderRejectsOtherPurpose(t *testing.T) {
+	initSessionSecret()
+	issued := httptest.NewRecorder()
+	if err := setUISessionCookie(issued, httptest.NewRequest(http.MethodGet, "/", http.NoBody), "viewer", RoleViewer); err != nil {
+		t.Fatal(err)
+	}
+	cookie := issued.Result().Cookies()[0]
+	cookie.Name = sessionCookieName
+	r := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
+	r.AddCookie(cookie)
+	if sess, err := readSessionCookie(r); err == nil || sess != nil {
+		t.Fatal("renamed administrator UI cookie must not authenticate a proxy identity")
+	}
+	for _, tc := range []struct {
+		name, audience string
+		legacy         bool
+	}{
+		{name: "current-proxy"},
+		{name: "legacy-proxy", legacy: true},
+		{name: "unknown-purpose", audience: "other-service", legacy: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var cookie *http.Cookie
+			if tc.legacy {
+				raw, err := encodeSession(&Session{Sub: "portal-user", Provider: "oidc", Audience: tc.audience, Exp: time.Now().Add(time.Hour).Unix()})
+				if err != nil {
+					t.Fatal(err)
+				}
+				cookie = &http.Cookie{Name: sessionCookieName, Value: raw}
+			} else {
+				w := httptest.NewRecorder()
+				if err := setSessionCookie(w, httptest.NewRequest(http.MethodGet, "/", http.NoBody), &Identity{Sub: "portal-user", Provider: "oidc"}); err != nil {
+					t.Fatal(err)
+				}
+				cookie = w.Result().Cookies()[0]
+			}
+			r := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
+			r.AddCookie(cookie)
+			sess, err := readSessionCookie(r)
+			if tc.audience != "" {
+				if err == nil || sess != nil {
+					t.Fatal("unknown signed purpose must be refused")
+				}
+				return
+			}
+			if err != nil || sess == nil || sess.Sub != "portal-user" {
+				t.Fatalf("genuine proxy session rejected: %v", err)
+			}
+		})
+	}
+}
