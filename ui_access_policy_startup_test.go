@@ -5,6 +5,7 @@ package main
 import (
 	"log"
 	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -32,7 +33,7 @@ func resetUIAccessPolicyGlobals(t *testing.T) {
 	t.Helper()
 	uiAllowedNetsMu.RLock()
 	origNets := append([]*net.IPNet(nil), uiAllowedNets...)
-	origRefused, origUnknown := uiAccessRefused, uiAccessUnknown
+	origRefused, origUnknown, origExplicit := uiAccessRefused, uiAccessUnknown, uiAccessExplicit
 	origRetained := append([]string(nil), uiAccessRetained...)
 	uiAllowedNetsMu.RUnlock()
 	origBase := proxyExternalBaseURL
@@ -44,6 +45,7 @@ func resetUIAccessPolicyGlobals(t *testing.T) {
 		uiAllowedNetsMu.Lock()
 		uiAllowedNets = origNets
 		uiAccessRefused, uiAccessUnknown, uiAccessRetained = origRefused, origUnknown, origRetained
+		uiAccessExplicit = origExplicit
 		uiAllowedNetsMu.Unlock()
 		proxyExternalBaseURL = origBase
 		idpRegistry.mu.Lock()
@@ -134,12 +136,41 @@ func TestLoadUIAccessPolicy_MergesCLIAndFileAllowList(t *testing.T) {
 	}
 }
 
-func TestLoadUIAccessPolicy_InvalidCIDRRefusesStartup(t *testing.T) {
+func TestLoadUIAccessPolicy_InvalidCIDRRefusesUIWithoutKillingTheProcess(t *testing.T) {
 	resetUIAccessPolicyGlobals(t)
 	ensureUIAccessPolicyTestLogger(t)
+	if err := SetUIAllowedCIDRs(nil); err != nil {
+		t.Fatal(err)
+	}
 	c := uiAccessPolicyStartupConfig{AllowIPCLI: "not-a-cidr"}
-	if err := loadUIAccessPolicy(c); err == nil {
-		t.Fatal("invalid configured policy must refuse startup")
+	// A non-nil error is log.Fatalf in initUIAccessPolicy: the admin plane
+	// would terminate the data plane (CHAOS-57). It must refuse the UI instead.
+	if err := loadUIAccessPolicy(c); err != nil {
+		t.Fatalf("invalid configured policy terminated startup: %v", err)
+	}
+	if !uiAccessPolicyRefused() {
+		t.Fatal("invalid configured policy left management unrestricted")
+	}
+	if got := uiPolicyResponse(t, "198.51.100.4:1234").Code; got != http.StatusServiceUnavailable {
+		t.Fatalf("invalid configured policy served the UI: %d", got)
+	}
+}
+
+func TestLoadUIAccessPolicy_BlankEntriesAreSkipped(t *testing.T) {
+	resetUIAccessPolicyGlobals(t)
+	ensureUIAccessPolicyTestLogger(t)
+	if err := SetUIAllowedCIDRs(nil); err != nil {
+		t.Fatal(err)
+	}
+	c := uiAccessPolicyStartupConfig{AllowIPCLI: "192.0.2.0/24, ,", AllowList: []string{" ", "2001:db8::/32"}}
+	if err := loadUIAccessPolicy(c); err != nil {
+		t.Fatal(err)
+	}
+	if uiAccessPolicyRefused() {
+		t.Fatal("a trailing comma refused management")
+	}
+	if got := ListUIAllowedCIDRs(); len(got) != 2 {
+		t.Fatalf("restriction not applied: %v", got)
 	}
 }
 

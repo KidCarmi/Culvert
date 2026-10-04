@@ -18,6 +18,13 @@ var (
 	uiAccessRefused  bool
 	uiAccessUnknown  bool
 	uiAccessRetained []string
+	// uiAccessExplicit records that the management policy was set by an
+	// explicit admin decision (a persisted /api/ui-allow-ips write, or a loaded
+	// document carrying ui_allow_ips_saved). Only then may a save stamp the
+	// list authoritative: stamping every omnibus snapshot made an unrelated
+	// save record the then-empty runtime list as "explicitly open", which
+	// silently overrode a ui_allow_ips restriction added to config later.
+	uiAccessExplicit bool
 )
 
 func parseUIAllowedCIDRs(cidrs []string) ([]*net.IPNet, error) {
@@ -95,7 +102,22 @@ func decodeAdminSettingsObject(data []byte, s *AdminSettings) error {
 	return json.Unmarshal(data, s)
 }
 
+func markUIAccessExplicit() {
+	uiAllowedNetsMu.Lock()
+	defer uiAllowedNetsMu.Unlock()
+	uiAccessExplicit = true
+}
+
+func uiAccessPolicyExplicit() bool {
+	uiAllowedNetsMu.RLock()
+	defer uiAllowedNetsMu.RUnlock()
+	return uiAccessExplicit
+}
+
 func applyAdminUIAccessPolicy(s *AdminSettings) {
+	if s.UIAllowIPsSaved {
+		markUIAccessExplicit()
+	}
 	if !s.UIAllowIPsSaved && len(s.UIAllowIPs) == 0 {
 		return
 	}
@@ -114,8 +136,11 @@ func writeUIAccessRefusal(w http.ResponseWriter, status int, code, message strin
 func persistUIAllowedCIDRs(nets []*net.IPNet) error {
 	target := canonicalUIAllowedCIDRs(nets)
 	return saveAdminSettingsWithOverrides(adminSaveOverrides{
-		uiAllowIPs:     &target,
-		applyOnSuccess: func() { publishUIAllowedCIDRs(nets) },
+		uiAllowIPs: &target,
+		applyOnSuccess: func() {
+			publishUIAllowedCIDRs(nets)
+			markUIAccessExplicit()
+		},
 	})
 }
 

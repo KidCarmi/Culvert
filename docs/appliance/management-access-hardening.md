@@ -5,10 +5,15 @@ access IPs**, `POST /api/ui-allow-ips`, `ui_allow_ips` in application YAML, or
 `-ui-allow-ip`. It filters HTTP requests to the management listener, including
 setup and authentication. It is not a host firewall or a separate management
 network. IPv4 and IPv6 addresses and CIDRs are supported; an explicitly empty
-array removes the restriction. Blank entries are invalid.
+array removes the restriction. Blank entries are invalid in the API; in the
+YAML/CLI startup seed they carry no intent and are skipped (a trailing comma in
+`-ui-allow-ip` is not an error).
 
-Invalid startup CIDRs now refuse startup instead of exposing an unrestricted
-admin listener. A malformed saved list refuses all management requests with
+An invalid startup CIDR refuses all management requests until the YAML/CLI
+source is corrected and the application restarted, instead of exposing an
+unrestricted admin listener. It does not stop the process: the proxy keeps
+serving (the management plane never terminates the data plane). A malformed
+saved list likewise refuses all management requests with
 `503 ui_access_policy_unavailable`; the proxy data plane is not disabled by
 this management guard. `/ready` includes a report-only `ui_access_policy` fail
 row. The original malformed list survives unrelated settings saves and restart.
@@ -30,6 +35,9 @@ policy, the change is audited, and the API returns
 claimed. Check storage and read back the effective policy before restarting.
 The internal `ui_allow_ips_saved` marker makes an explicitly empty saved list
 authoritative over a YAML/CLI seed on restart; it is not another user setting.
+It is written only by an explicit policy change (or carried forward from a
+document that already holds it): an unrelated settings save never claims that
+the administrator chose an open policy.
 
 For recovery, authenticate through the VM's local console as `culvert`. Preserve
 the settings file and any quarantined copy before repairing the existing
@@ -37,7 +45,8 @@ the settings file and any quarantined copy before repairing the existing
 `ui_allow_ips` array; set `ui_allow_ips_saved: true` when deliberately restoring
 an empty array. Restart the application after repairing its stored policy.
 There is no unauthenticated, loopback, or routine-SSH bypass. A malformed startup
-YAML/CLI policy must be repaired at its source before the application can start.
+YAML/CLI policy must be repaired at its source; management stays refused until
+the corrected configuration is loaded by a restart.
 
 ## Remaining network boundary
 

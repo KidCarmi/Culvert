@@ -1003,7 +1003,7 @@ func saveAdminSettingsWithOverrides(ov adminSaveOverrides) error {
 		LogLevel:               effectiveAdminLogLevel().String(),
 		SessionTimeoutHours:    int(getSessionTTL().Hours()),
 		UIAllowIPs:             ListUIAllowedCIDRs(),
-		UIAllowIPsSaved:        true,
+		UIAllowIPsSaved:        uiAccessPolicyExplicit(),
 		TrustForwardedHeaders:  trustForwardedHeaders,
 		TrustedProxyCIDRs:      ListTrustedProxyCIDRs(),
 		TrustedProxyCIDRsSaved: true, // once saved, the persisted list is authoritative (incl. empty)
@@ -1013,6 +1013,7 @@ func saveAdminSettingsWithOverrides(ov adminSaveOverrides) error {
 	snapshotAdminEndpoints(&s)
 	if ov.uiAllowIPs != nil {
 		s.UIAllowIPs = append([]string(nil), (*ov.uiAllowIPs)...)
+		s.UIAllowIPsSaved = true
 	}
 
 	// Rewrite rules: the TARGET set for a rewrite-mutating save (persist-before-

@@ -90,7 +90,7 @@ func TestUIAllowIPsMalformedSavedPolicyStaysRefusedAcrossSave(t *testing.T) {
 	if err := json.Unmarshal(data, &saved); err != nil {
 		t.Fatal(err)
 	}
-	if !saved.UIAllowIPsSaved || !reflect.DeepEqual(saved.UIAllowIPs, bad) {
+	if !reflect.DeepEqual(saved.UIAllowIPs, bad) {
 		t.Fatal("unrelated save erased refused policy")
 	}
 	if err := SetUIAllowedCIDRs(nil); err != nil {
@@ -253,4 +253,65 @@ func setUISettingsTestPath(t *testing.T, path string) {
 		adminSettingsMu.Unlock()
 		adminSettingsOverriddenSurfaces.Store(prevSurfaces)
 	})
+}
+
+// An unrelated save made while the policy came from defaults/config must not
+// record the runtime list as an EXPLICIT admin decision: a saved empty list is
+// authoritative, so stamping it turned "nobody chose" into "admin chose open"
+// and a ui_allow_ips restriction added to config later was silently dropped.
+func TestUIAllowIPsOmnibusSaveDoesNotClaimExplicitOpen(t *testing.T) {
+	uiPolicyFixture(t)
+	path := filepath.Join(t.TempDir(), "settings.json")
+	setUISettingsTestPath(t, path)
+	uiAllowedNetsMu.Lock()
+	uiAccessExplicit = false
+	uiAllowedNetsMu.Unlock()
+	if err := SaveAdminSettings(); err != nil && (runtime.GOOS != "windows" || !errors.Is(err, fileutil.ErrReplacedNotSynced)) {
+		t.Fatal(err)
+	}
+	saved := readUISettingsFile(t, path)
+	if saved.UIAllowIPsSaved {
+		t.Fatal("omnibus save stamped an unchosen empty policy authoritative")
+	}
+	// Restart with a restriction now configured: config seeds it, then the
+	// saved document loads. The restriction must survive.
+	if err := SetUIAllowedCIDRs([]string{"192.0.2.0/24"}); err != nil {
+		t.Fatal(err)
+	}
+	applyAdminUIAccessPolicy(&saved)
+	if got := uiPolicyResponse(t, "198.51.100.8:10").Code; got != http.StatusForbidden {
+		t.Fatalf("configured restriction overridden by unrelated save: %d", got)
+	}
+}
+
+// An explicit admin decision, once loaded, stays authoritative across later
+// unrelated saves (the explicit-empty contract).
+func TestUIAllowIPsExplicitDecisionSurvivesOmnibusSave(t *testing.T) {
+	uiPolicyFixture(t)
+	path := filepath.Join(t.TempDir(), "settings.json")
+	setUISettingsTestPath(t, path)
+	uiAllowedNetsMu.Lock()
+	uiAccessExplicit = false
+	uiAllowedNetsMu.Unlock()
+	applyAdminUIAccessPolicy(&AdminSettings{UIAllowIPsSaved: true, UIAllowIPs: []string{}})
+	if err := SaveAdminSettings(); err != nil && (runtime.GOOS != "windows" || !errors.Is(err, fileutil.ErrReplacedNotSynced)) {
+		t.Fatal(err)
+	}
+	saved := readUISettingsFile(t, path)
+	if !saved.UIAllowIPsSaved || len(saved.UIAllowIPs) != 0 {
+		t.Fatal("explicit empty decision lost by an unrelated save")
+	}
+}
+
+func readUISettingsFile(t *testing.T, path string) AdminSettings {
+	t.Helper()
+	var saved AdminSettings
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(data, &saved); err != nil {
+		t.Fatal(err)
+	}
+	return saved
 }
