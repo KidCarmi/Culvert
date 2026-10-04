@@ -6,7 +6,7 @@ on:
   # REQUIRED aggregate rather than a separate advisory check.
   workflow_call:
   push:
-    branches: [feat/appliance-console, feat/appliance-firstboot-guidance]
+    branches: [feat/appliance-console, feat/appliance-firstboot-guidance, harden/appliance-access-and-artifacts]
     paths:
       - 'appliance/console/**'
       - 'appliance/boot-splash/**'
@@ -14,6 +14,14 @@ on:
       - 'appliance/build/**'
       - 'appliance/provision/**'
       - 'cmd/culvert-console/**'
+      - 'cmd/culvert-access/**'
+      - 'internal/applianceaccess/**'
+      - 'internal/session/**'
+      - 'appliance/artifact-audit/**'
+      - 'setup_token*'
+      - 'ui_session*'
+      - 'ui_middleware*'
+      - 'store.go'
       - 'cmd/culvert-maint/**'
       - 'appliance_*test.go'
       - 'internal/applianceconsole/**'
@@ -40,8 +48,8 @@ jobs:
           cache: false
       - name: Console state, display, process and authentication boundary tests
         run: |
-          go test -race -shuffle=on -count=2 ./internal/applianceconsole ./internal/appliancehost ./cmd/culvert-console
-          go vet ./internal/applianceconsole ./internal/appliancehost ./cmd/culvert-console
+          go test -race -shuffle=on -count=2 ./internal/applianceconsole ./internal/appliancehost ./cmd/culvert-console ./internal/applianceaccess ./cmd/culvert-access ./internal/session
+          go vet ./internal/applianceconsole ./internal/appliancehost ./cmd/culvert-console ./internal/applianceaccess ./cmd/culvert-access ./internal/session
       - name: Root-owned recovery storage fault tests
         run: |
           go test -c -o /tmp/culvert-host.test ./internal/appliancehost
@@ -50,13 +58,32 @@ jobs:
         run: |
           go test -c -o /tmp/culvert-console.test ./cmd/culvert-console
           sudo /tmp/culvert-console.test -test.run '^TestBootstrap' -test.shuffle=on -test.count=2
+      - name: Artifact inspection safety regressions
+        run: |
+          python3 -m venv /tmp/culvert-artifact-audit-env
+          /tmp/culvert-artifact-audit-env/bin/pip install cryptography==50.0.2
+          /tmp/culvert-artifact-audit-env/bin/python -m unittest discover -s appliance/artifact-audit -v
+      - name: Operator key import privilege and filesystem boundaries
+        run: |
+          go test -c -o /tmp/culvert-access.test ./cmd/culvert-access
+          sudo /tmp/culvert-access.test -test.run '^TestAccessKey' -test.shuffle=on -test.count=2
+      - name: Real SSH operator boundary on disposable runner
+        working-directory: cmd/culvert-access
+        run: |
+          if ! test -x /usr/sbin/sshd; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq openssh-server openssh-client
+          fi
+          CGO_ENABLED=0 go build -mod=readonly -trimpath -o /tmp/culvert-access .
+          sudo env CULVERT_ACCESS_SSH_FIXTURE=1 CULVERT_ACCESS_TEST_BINARY=/tmp/culvert-access \
+            /tmp/culvert-access.test -test.run '^TestAccessRealSSHBoundary$' -test.v
       - name: Maintenance agent admission and interrupted journal regressions
         working-directory: cmd/culvert-maint
         run: |
           go test -race -shuffle=on -count=2 ./internal/server ./internal/journal
           go vet ./internal/server ./internal/journal
       - name: Existing firstboot and OS maintenance contracts
-        run: go test -shuffle=on -count=1 -run '^Test(FirstBoot|OSUpdate)' .
+        run: go test -shuffle=on -count=1 -run '^Test(FirstBoot|OSUpdate|SudoPolicy|SetupToken|UIAuthBootstrap|UISessionRole|SessionRole|RoleFailClosed|AuthStatus|RosterToSession|SessionAdmin|AuditActor|APIAuth|LiveTrustHTTP)' .
       - name: Bounded terminal layout fuzzing
         run: go test ./internal/applianceconsole -run '^$' -fuzz '^FuzzFrameBounds$' -fuzztime=10s -parallel=2
       - name: Build static host binary with the repository compiler

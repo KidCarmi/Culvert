@@ -1,0 +1,11 @@
+{
+  "artifact_binary_sha256": "db8c3520a0d334a4006b4cbe2317616adbeb56efab0a8ecba3e14dc3a7b892ab",
+  "actual_binary_module": [
+    "dep\tgithub.com/crewjam/saml\tv0.5.1\th1:g+mfp0CrLuLRZCK793PgJcZeg5dS/0CDwoeAX2zcwNI="
+  ],
+  "fixture_source": "github.com/crewjam/saml@v0.5.1/xmlenc/fuzz.go",
+  "fixture_source_sha256": "f566e1e9b8b98d728fceab6c37e14fc9c0d8f046e80623c4e70c87eda905943b",
+  "fixture_key_source_line": 13,
+  "public_key_sha256": "7ea3450aa488c616e3b6c28a191ab4e7c61a4dafce2d172d4527c9a172a5736f",
+  "finding": "upstream_fuzz_test_key_initialized_in_production_package"
+}
