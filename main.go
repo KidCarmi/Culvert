@@ -1465,41 +1465,96 @@ func initClusterCA(clusterDBPath string) {
 	}
 }
 
-// enableControlPlane activates Control Plane mode: starts the gRPC server,
+// enableControlPlane activates Control Plane mode: starts the gRPC listener,
 // initialises the cluster CA, and starts the heartbeat monitor.
-// Safe to call at runtime from the admin API (idempotent — returns error if already CP).
+//
+// This is the SYNCHRONOUS entry point, used by the live admin API
+// (`apiClusterMode`) and by the HA promote callback. A listener that cannot
+// come up is reported as an error — which is what it always did here, and the
+// asymmetry CHAOS-73 found was that the BOOT path took the same error and
+// called `logFatalf` on it. The boot path is now
+// `enableControlPlaneResilient`; see cp_grpc_bind.go for the finding.
+//
+// Idempotent: returns an error if already CP.
 func enableControlPlane(grpcAddr, certFile, keyFile, caFile, clusterDBPath string) error {
-	clusterRoleMu.Lock()
-	defer clusterRoleMu.Unlock()
+	return activateControlPlane(grpcAddr, certFile, keyFile, caFile, clusterDBPath, false, nil)
+}
 
-	if clusterRole.role == "control-plane" {
+// enableControlPlaneResilient is the BOOT path's entry point: identical to
+// enableControlPlane except that a first-attempt listener failure is TOLERATED
+// — the supervisor keeps retrying at a bounded rate and this node serves
+// traffic meanwhile — instead of terminating the process.
+//
+// onActivated runs ONCE, after the CP role is claimed on an observed bind. It
+// carries the work that must not happen until the listener is real; on the boot
+// path that is the HA leadership resume.
+func enableControlPlaneResilient(grpcAddr, certFile, keyFile, caFile, clusterDBPath string, onActivated func()) error {
+	return activateControlPlane(grpcAddr, certFile, keyFile, caFile, clusterDBPath, true, onActivated)
+}
+
+// activateControlPlane is the shared body: one-time preparation, then the
+// listener, then the role.
+//
+// cpActivationMu is the OUTER lock and is taken for the whole operation —
+// preparation, bind and role claim are four individually-atomic steps that are
+// jointly not, so un-serialised two concurrent activations could each bind and
+// the later role claim could point at a socket the other one is serving (the
+// `caMutationMu` pattern, §18). clusterRoleMu is taken INSIDE it, briefly, by
+// the readers and by activateControlPlaneAfterBind — never held across the
+// bind, which is what lets the supervisor goroutine claim the role on a later
+// successful attempt without deadlocking against a starter waiting on it.
+func activateControlPlane(grpcAddr, certFile, keyFile, caFile, clusterDBPath string, tolerateFirstFailure bool, onActivated func()) error {
+	cpActivationMu.Lock()
+	defer cpActivationMu.Unlock()
+
+	clusterRoleMu.Lock()
+	alreadyCP := clusterRole.role == "control-plane"
+	clusterRoleMu.Unlock()
+	if alreadyCP {
 		return fmt.Errorf("already running as control-plane")
 	}
 	if grpcAddr == "" {
 		return fmt.Errorf("gRPC listen address is required")
 	}
+	if cpSupervisor != nil {
+		return fmt.Errorf("a control-plane listener is already starting")
+	}
 
 	// CHAOS-01: seed + arm the durable config-version floor BEFORE the first
 	// publish so a restarted (or HA-promoted) CP never re-issues version
 	// numbers at or below what running DPs have already seen.
+	//
+	// CHAOS-73: this preparation runs ONCE, outside the retry loop, and that
+	// placement is deliberate. Folding it into the retried unit would
+	// re-publish a config version and rewrite the durable floor file on EVERY
+	// rebind attempt — a write every 30 s for the length of an outage, to
+	// re-derive state that has not changed.
 	globalConfigStore.armVersionPersistence(filepath.Join(dataDir, cpConfigVersionFile))
 	// Initial publish. A commit-time rejection (startup config already over a
 	// cluster-sync cap) is logged + alerted + surfaced via LastPublishError;
 	// the CP still serves locally, so boot continues.
 	_ = globalConfigStore.Update(CurrentConfigSnapshot())
 	initClusterCA(clusterDBPath)
-	if err := StartControlPlaneGRPC(grpcAddr, certFile, keyFile, caFile); err != nil {
+
+	cfg := cpListenerConfig{addr: grpcAddr, certFile: certFile, keyFile: keyFile, caFile: caFile}
+	sup, err := startControlPlaneListener(cfg, tolerateFirstFailure, onActivated)
+	if err != nil {
 		return err
 	}
+	cpSupervisor = sup
 
-	// Only set role after gRPC is successfully started.
-	clusterRole.role = "control-plane"
-	clusterRole.grpcAddr = grpcAddr
-	clusterRole.certFile = certFile
-	clusterRole.keyFile = keyFile
-	clusterRole.caFile = caFile
-	globalClusterStore.StartHeartbeatMonitor(appLifecycleCtx.Done())
-	logger.Printf("ControlPlane: enabled via GUI (gRPC %s)", strings.ReplaceAll(grpcAddr, "\n", ""))
+	// The role is claimed by the supervisor on an OBSERVED bind — never here.
+	// A first-attempt failure therefore leaves the node `standalone` and the
+	// supervisor claims the role itself when a later attempt succeeds, so
+	// there is exactly ONE writer of that transition
+	// (activateControlPlaneAfterBind). All this does is say which happened.
+	if sup.currentServer() == nil {
+		logger.Printf("ControlPlane: gRPC listener on %s is not up yet — this node stays standalone and keeps "+
+			"serving proxy traffic while the listener retries in the background",
+			strings.ReplaceAll(grpcAddr, "\n", ""))
+		return nil
+	}
+	logger.Printf("ControlPlane: enabled (gRPC %s)", strings.ReplaceAll(grpcAddr, "\n", ""))
 	return nil
 }
 

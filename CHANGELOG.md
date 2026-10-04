@@ -7,6 +7,63 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **A Control Plane gRPC listener fault terminated the whole appliance, and a
+  listener that died after binding was silent and terminal (CHAOS-73).** The CP
+  boot path had exactly one error branch — `logFatalf("ControlPlane gRPC: %v",
+  err)` — reached from `initCluster`, which `main.go` runs **before**
+  `initSOCKS5`, `startAdminUI` and `buildAndStartProxyServer`. So an occupied
+  gRPC address or an unreadable mTLS pair meant no proxy, no SOCKS5, no admin
+  UI and no health endpoint; under `restart: unless-stopped`, an unattended
+  crash loop recoverable only with shell access.
+
+  Both triggers were reproduced against the real binary (`EXIT CODE: 1`,
+  `proxy http_code=000`, `adminui http_code=000`). Neither is visible to
+  `validatePortCollisions`, which compares the proxy, UI and SOCKS5 ports to
+  each other — the CP gRPC address is not even among the three it knows about.
+  Process death is *not* "fail closed": it delegates the posture to your
+  topology (an explicit-proxy fleet loses all egress; a PAC/WPAD fleet with a
+  `DIRECT` fallback goes unfiltered).
+
+  Separately, `srv.Serve(ln)` ran in a bare goroutine whose only branch was one
+  log line, so a listener that died after a successful bind never rebound —
+  while `clusterRole.role` and `grpcAddr` stayed set, so
+  `GET /api/cluster/status` reported a healthy Control Plane with its listening
+  address, forever, on a node with no listener. This was the only listener in
+  the appliance with no health plane at all.
+
+  The listener now has a supervisor owning bind → serve → rebind: the boot path
+  is non-fatal and retries at a bounded rate (1 s doubling to 30 s, ±20 %
+  jitter, interruptible by shutdown), the mTLS material is re-read on every
+  attempt so a cert-manager/certbot rotation self-heals with no restart, and a
+  serve that ends is counted, classified and rebound. **The node's role is
+  claimed only on an observed bind** — while the listener is down it reports
+  `standalone`, so every surface says what is true — and the HA leadership
+  resume rides the same rule, so a node never asserts a term it cannot
+  exercise. The live admin path (`POST /api/cluster/mode`) keeps its
+  synchronous `409`: an admin at the keyboard can retype an address, and a
+  background retry there would report success for a Control Plane that may
+  never exist.
+
+  New surfaces, all on the **proxy** port (the CP's own gRPC port cannot report
+  that it is unreachable): a `cp_grpc_listener` diagnostics row with a
+  per-reason operator action, a **report-only** `/ready cp_grpc` row, a
+  `cp_grpc` field on `/health`, and
+  `culvert_cp_grpc_{up,unavailable,bind_failures_total,binds_total,bind_backoff_seconds}`
+  — emitted only on a node that asked to be a Control Plane. Page on
+  `culvert_cp_grpc_unavailable == 1`, not on `up == 0`, which drops for the few
+  seconds of rebinding after an ordinary rollout.
+
+  **Action required for alerting:** `cp_grpc_unavailable` is a new alert event
+  and will not reach existing webhooks until you add it to their
+  subscriptions. See `docs/operator/cp-grpc-listener-recovery.md`.
+
+  Also fixed in the same change: `StopControlPlaneGRPC` read
+  `clusterRole.grpcSrv` with no lock — latent while that field was written once
+  per process, a real data race once anything rebinds. The handle now lives on
+  the supervisor under its own mutex.
+
 ### Security
 
 - Node-local key material was written with `os.WriteFile` on a predictable

@@ -1364,6 +1364,57 @@ culvert_admin_ui_listen_backoff_seconds %g
 		)
 	}
 
+	// CHAOS-73: Control Plane gRPC listener health. Emitted only on a node that
+	// asked to be a Control Plane, for the same reason as the block above: a
+	// flat `up 0` from every standalone proxy and every Data Plane in the fleet
+	// is indistinguishable from a broken CP, and the documented paging rule is
+	// `== 0`.
+	//
+	// `up` is 0 whenever the listener is not currently serving — including
+	// while it is rebinding — because the loop rebinds for as long as the
+	// process lives. The alertable pair is `culvert_cp_grpc_unavailable 1`,
+	// latched only once the fault has persisted past the threshold, so it does
+	// not fire on the few seconds of rebinding that follow an ordinary rollout
+	// of the Control Plane.
+	//
+	// Served by the PROXY port's /metrics, which is what makes it reachable
+	// while the cluster plane is down.
+	if cp := cpGRPCListenerState(); cp.Configured {
+		up, unavailable := 0, 0
+		if cp.Serving {
+			up = 1
+		}
+		if cp.Unavailable {
+			unavailable = 1
+		}
+		_, _ = fmt.Fprintf(w, `# HELP culvert_cp_grpc_up 1 while the Control Plane gRPC listener is serving; 0 while it is not
+# TYPE culvert_cp_grpc_up gauge
+culvert_cp_grpc_up %d
+
+# HELP culvert_cp_grpc_unavailable 1 while the Control Plane gRPC listener has been unable to serve for longer than the unavailability threshold
+# TYPE culvert_cp_grpc_unavailable gauge
+culvert_cp_grpc_unavailable %d
+
+# HELP culvert_cp_grpc_bind_failures_total Control Plane gRPC bind/TLS/serve failures since startup
+# TYPE culvert_cp_grpc_bind_failures_total counter
+culvert_cp_grpc_bind_failures_total %d
+
+# HELP culvert_cp_grpc_binds_total Successful Control Plane gRPC listener binds since startup
+# TYPE culvert_cp_grpc_binds_total counter
+culvert_cp_grpc_binds_total %d
+
+# HELP culvert_cp_grpc_bind_backoff_seconds Current Control Plane gRPC rebind backoff; 0 while the listener is serving
+# TYPE culvert_cp_grpc_bind_backoff_seconds gauge
+culvert_cp_grpc_bind_backoff_seconds %g
+`,
+			up,
+			unavailable,
+			cp.Total,
+			cp.Binds,
+			cp.Backoff.Seconds(),
+		)
+	}
+
 	// CHAOS-64: destination-host DNS resolution health. Emitted ONLY once this
 	// node has actually resolved something — resolution runs on the policy path
 	// only for a DestCountry rule on a node with a GeoIP database, and a block
