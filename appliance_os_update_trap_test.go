@@ -34,6 +34,8 @@ var osUpdateResumeHook func(markerPath string)
 // the script starts (to take the agent's host maintenance lock).
 var osUpdateHook func(agentStateDir string)
 
+const osUpdateTestBootID = "11111111-1111-1111-1111-111111111111"
+
 // runOSUpdateWith runs the script with args. journal == nil leaves the
 // agent's state dir absent (agent not installed); otherwise one journal
 // record per name is written (an operation awaiting reconcile).
@@ -64,13 +66,14 @@ func runOSUpdateWith(t *testing.T, args, journal []string, env ...string) (out, 
 	script = strings.Replace(script, "LOCK=/run/culvert-os-update.lock", "LOCK="+filepath.Join(dir, "lock"), 1)
 	resume := filepath.Join(dir, "state", "stack-resume-on-boot")
 	script = strings.Replace(script, "STACK_RESUME=/var/lib/culvert-appliance/state/stack-resume-on-boot", "STACK_RESUME="+resume, 1)
-	// The post-request lock hold is bounded by SHUTDOWN_HOLD_SECS; a stubbed
-	// systemctl never shuts anything down, so tests use a short bound.
-	script = strings.Replace(script, "SHUTDOWN_HOLD_SECS=600", "SHUTDOWN_HOLD_SECS=${TEST_HOLD_SECS:-1}", 1)
+	bootPath := filepath.Join(dir, "boot-id")
+	if err := os.WriteFile(bootPath, []byte(osUpdateTestBootID+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	script = strings.Replace(script, "BOOT_ID_FILE=/proc/sys/kernel/random/boot_id", "BOOT_ID_FILE="+bootPath, 1)
 	if !strings.Contains(script, "MAINT_STATE="+mstate) || !strings.Contains(script, "LOCK="+filepath.Join(dir, "lock")) ||
-		!strings.Contains(script, "STACK="+stack) || !strings.Contains(script, "STACK_RESUME="+resume) ||
-		!strings.Contains(script, "SHUTDOWN_HOLD_SECS=${TEST_HOLD_SECS:-1}") {
-		t.Fatal("could not relocate STACK/LOG/MAINT_STATE/LOCK/STACK_RESUME in culvert-os-update")
+		!strings.Contains(script, "STACK="+stack) || !strings.Contains(script, "STACK_RESUME="+resume) || !strings.Contains(script, "BOOT_ID_FILE="+bootPath) {
+		t.Fatal("could not relocate maintenance paths in culvert-os-update")
 	}
 	if osUpdateResumeHook != nil {
 		osUpdateResumeHook(resume)
@@ -97,13 +100,8 @@ func runOSUpdateWith(t *testing.T, args, journal []string, env ...string) (out, 
 		"apt-mark":  `echo "apt-mark $*" >> "$CALLS"; [[ "$1" == hold && "${FAIL_HOLD:-0}" == 1 ]] && exit 100; [[ "$1" == unhold && "${FAIL_UNHOLD:-0}" == 1 ]] && exit 100; exit 0`,
 		"apt-get":   `echo "apt-get $*" >> "$CALLS"; [[ "$*" == *only-upgrade* && "${FAIL_UPGRADE:-0}" == 1 ]] && exit 100; exit 0`,
 		"apt-cache": `echo "Candidate: 29.0"; exit 0`,
-		"systemctl": `exec 8>&- 9>&-; echo "systemctl $*" >> "$CALLS"; [[ "$1" == restart && "${FAIL_RESTART:-0}" == 1 ]] && exit 1; [[ "$1" == reboot && "${FAIL_REBOOT:-0}" == 1 ]] && exit 1
-if [[ "$1" == reboot && "${CHECK_LOCKS:-0}" == 1 ]]; then (exec 8>&- 9>&-; sleep 0.3
-  flock -n "$OSU_LOCK" true && echo "lock:free" >> "$CALLS" || echo "lock:held" >> "$CALLS"
-  [[ -d "$OSU_MAINT_STATE" ]] && { flock -n "$OSU_MAINT_STATE/host-maintenance.lock" true && echo "agentlock:free" >> "$CALLS" || echo "agentlock:held" >> "$CALLS"; }) & fi
-if [[ "$1" == reboot && "${SHUTDOWN_KILLS:-0}" == 1 ]]; then (exec 8>&- 9>&-; sleep 0.6; pkill -TERM -P "$PPID"; kill -TERM "$PPID") & fi
-exit 0`,
-		"docker": `echo "docker $*" >> "$CALLS"; [[ "$1 $2" == "compose stop" ]] && { [[ -e "$RESUME_MARKER" ]] && echo "resume-marker:armed" >> "$CALLS" || echo "resume-marker:absent" >> "$CALLS"; }; [[ "$1 $2" == "compose stop" && "${FAIL_STOP:-0}" == 1 ]] && exit 1; [[ "$1 $2" == "compose up" && "${FAIL_START:-0}" == 1 ]] && exit 1; exit 0`,
+		"systemctl": `echo "systemctl $*" >> "$CALLS"; [[ "$1" == restart && "${FAIL_RESTART:-0}" == 1 ]] && exit 1; [[ "$1" == reboot && "${FAIL_REBOOT:-0}" == 1 ]] && exit 1; exit 0`,
+		"docker":    `echo "docker $*" >> "$CALLS"; [[ "$1 $2" == "compose stop" ]] && { [[ -e "$RESUME_MARKER" ]] && echo "resume-marker:armed" >> "$CALLS" || echo "resume-marker:absent" >> "$CALLS"; [[ -e "$OSU_MAINT_STATE/host-shutdown.pending" ]] && echo "shutdown-fence:armed" >> "$CALLS" || echo "shutdown-fence:absent" >> "$CALLS"; }; [[ "$1 $2" == "compose stop" && "${FAIL_STOP:-0}" == 1 ]] && exit 1; [[ "$1 $2" == "compose up" && "${FAIL_START:-0}" == 1 ]] && exit 1; exit 0`,
 	}
 	for name, body := range stubs {
 		if err := os.WriteFile(filepath.Join(bin, name), []byte("#!/bin/bash\n"+body+"\n"), 0o700); err != nil { //nolint:gosec // PATH stub in a test temp dir: must be executable
@@ -113,12 +111,15 @@ exit 0`,
 	callsPath := filepath.Join(dir, "calls")
 	cmd := exec.CommandContext(t.Context(), "bash", append([]string{scriptPath}, args...)...) //nolint:gosec // test-owned copy of the script in t.TempDir(); args are test constants
 	cmd.Env = append([]string{"PATH=" + bin + ":" + os.Getenv("PATH"), "CALLS=" + callsPath, "RESUME_MARKER=" + resume,
-		"OSU_LOCK=" + filepath.Join(dir, "lock"), "OSU_MAINT_STATE=" + mstate}, env...)
+		"OSU_MAINT_STATE=" + mstate}, env...)
 	b, _ := cmd.CombinedOutput()
 	code = cmd.ProcessState.ExitCode()
 	c, _ := os.ReadFile(callsPath)
 	if _, err := os.Stat(resume); err == nil {
 		c = append(c, []byte("final:resume-marker-present\n")...)
+	}
+	if _, err := os.Stat(filepath.Join(mstate, "host-shutdown.pending")); err == nil {
+		c = append(c, []byte("final:shutdown-fence-present\n")...)
 	}
 	return string(b), string(c), code
 }

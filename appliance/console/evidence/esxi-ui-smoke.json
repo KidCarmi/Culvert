@@ -1,0 +1,211 @@
+{
+  "kind": "Go console development overlay smoke, not full appliance qualification",
+  "implementation": "Go",
+  "compiler": "go1.26.8",
+  "tested_at_utc": "2026-10-03T21:38:55Z",
+  "base_ova_sha256": "e85e364081fd13833eb53ea04a365cea4a771911f7edb3e41e6cb6dda401c300",
+  "base_provisioning_sha": "25d0aa83884ec66fe82e82f83d0f9e83b5a85353",
+  "base_image_source_sha": "78e1bc566e80055f893de41befbbad190ac4dfec",
+  "provisioning_drift": true,
+  "runtime_overlay": true,
+  "overlay_sha256": {
+    "command.test": "f30e78a2f4075ac35a3ab12836780c7607fbf344d818995dd377b12e4621e175",
+    "console.test": "50bbe84f50f4723c808e1d598b2b957e5d9a5aebb8c3d593e14962428fa75463",
+    "culvert-console": "18f8fe41e00f3c1cae9790832f170e6839a58e420c0586bf05aa341a1fb81f99",
+    "getty-override.conf": "d9af020bec840a46357dcb9dacdff01e58b52bb914145be991f050f4ecbe2ca9",
+    "install.sh": "6cea7e6fe9baaa4e98df2e54405ea3f40360a2e2dfcf16f5fea80e0f1ae3d317",
+    "profile.sh": "2c1d0dcd0c535341972102440d688dce6877e82f7d744563c4a671d9380fade7"
+  },
+  "hypervisor": "ESXi 8.0.1 build-21813344",
+  "vm": "culvert-esxi-7031303f55e5",
+  "vcpu": 2,
+  "memory_mib": 4096,
+  "disk_gib": 40,
+  "results": {
+    "ubuntu_go_tests": "PASS (domain and Linux command packages, shuffled, count=2)",
+    "installer_twice": "PASS",
+    "failed_firstboot_display": "PASS",
+    "incorrect_console_password": "PASS",
+    "pam_login_to_admin_menu": "PASS",
+    "logout_to_public_menu": "PASS",
+    "docker_stopped_console_active": "PASS",
+    "real_reboot_menu_automatic": "PASS",
+    "machine_identity_retained": "PASS",
+    "full_appliance_qualification": "BLOCKED",
+    "pty_navigation_resize_paste": "PASS: 80x25 linux; 80x24 linux/vt100/dumb; resize to 40x12; twice shuffled",
+    "pty_signal_termios_restoration": "PASS: SIGTERM restores termios, twice shuffled",
+    "readonly_views_vmware_keys": "PASS: all four screens, checked via /dev/vcs1 after real keyboard navigation",
+    "repository_lint": "PASS: golangci-lint v2.5.0, Linux target, zero issues"
+  },
+  "docker_stopped_snapshot": {
+    "hostname": "culvert-esxi-7031303f55e5",
+    "interfaces": [
+      {
+        "name": "ens32",
+        "link": "UP",
+        "addresses": [
+          "192.168.1.219/24"
+        ]
+      }
+    ],
+    "ipv6_gateway": "unknown",
+    "gateway": "192.168.1.1 (ens32)",
+    "dns": [
+      "192.168.1.1"
+    ],
+    "setup_status": "unknown",
+    "management_available": false,
+    "schema_version": 1,
+    "observed_at": "2026-10-03T21:38:13Z",
+    "version": "dev-candidate.78e1bc566e80",
+    "candidate": true,
+    "addresses": [
+      "192.168.1.219"
+    ],
+    "management_urls": [
+      "https://192.168.1.219:9090"
+    ],
+    "network": "address_assigned",
+    "firstboot": {
+      "ActiveState": "inactive",
+      "ExecMainStatus": "1",
+      "LoadState": "loaded",
+      "NRestarts": "0",
+      "Result": "exit-code",
+      "SubState": "dead"
+    },
+    "steps": [
+      {
+        "id": "ovf",
+        "label": "Network configuration",
+        "state": "recorded"
+      },
+      {
+        "id": "console",
+        "label": "Console access",
+        "state": "recorded"
+      },
+      {
+        "id": "images",
+        "label": "Application images",
+        "state": "recorded"
+      },
+      {
+        "id": "install",
+        "label": "Service installation",
+        "state": "not_recorded"
+      },
+      {
+        "id": "agent",
+        "label": "Maintenance agent",
+        "state": "not_recorded"
+      },
+      {
+        "id": "complete",
+        "label": "Provisioning complete",
+        "state": "not_recorded"
+      }
+    ],
+    "phase": "failed",
+    "reason": "FIRSTBOOT_FAILED",
+    "message": "Provisioning failed; open diagnostics.",
+    "application_responding": false,
+    "administrator_enrolled": false,
+    "traffic_verified": false
+  },
+  "after_reboot_snapshot": {
+    "hostname": "culvert-esxi-7031303f55e5",
+    "interfaces": [
+      {
+        "name": "ens32",
+        "link": "UP",
+        "addresses": [
+          "192.168.1.219/24"
+        ]
+      }
+    ],
+    "ipv6_gateway": "unknown",
+    "gateway": "192.168.1.1 (ens32)",
+    "dns": [
+      "192.168.1.1"
+    ],
+    "setup_status": "unknown",
+    "management_available": false,
+    "schema_version": 1,
+    "observed_at": "2026-10-03T21:38:56Z",
+    "version": "dev-candidate.78e1bc566e80",
+    "candidate": true,
+    "addresses": [
+      "192.168.1.219"
+    ],
+    "management_urls": [
+      "https://192.168.1.219:9090"
+    ],
+    "network": "address_assigned",
+    "firstboot": {
+      "ActiveState": "inactive",
+      "ExecMainStatus": "0",
+      "LoadState": "loaded",
+      "NRestarts": "0",
+      "Result": "success",
+      "SubState": "dead"
+    },
+    "steps": [
+      {
+        "id": "ovf",
+        "label": "Network configuration",
+        "state": "recorded"
+      },
+      {
+        "id": "console",
+        "label": "Console access",
+        "state": "recorded"
+      },
+      {
+        "id": "images",
+        "label": "Application images",
+        "state": "recorded"
+      },
+      {
+        "id": "install",
+        "label": "Service installation",
+        "state": "not_recorded"
+      },
+      {
+        "id": "agent",
+        "label": "Maintenance agent",
+        "state": "not_recorded"
+      },
+      {
+        "id": "complete",
+        "label": "Provisioning complete",
+        "state": "not_recorded"
+      }
+    ],
+    "phase": "waiting",
+    "reason": "FIRSTBOOT_NOT_RUNNING",
+    "message": "Provisioning is incomplete and is not running.",
+    "application_responding": false,
+    "administrator_enrolled": false,
+    "traffic_verified": false
+  },
+  "limitations": [
+    "Existing incomplete ClamAV payload remains unfixed in this OVA.",
+    "Console password was set only in this disposable key-only guest to exercise PAM.",
+    "No new OVA built; console installed as an explicit development overlay.",
+    "Browser bootstrap and guided network rollback not implemented in this slice.",
+    "ESXi screenshot API returned partial public/reboot and final authenticated captures. Earlier full frames were visually inspected, but the retained final screenshots are partial and are not full visual proof. The complete live virtual-terminal content and key navigation were checked independently. No image editing or reconstruction was used. A temporary text repaint did not fix the capture issue."
+  ],
+  "memory_current_bytes": "10502144",
+  "cleanup": "PASS: owned VM deleted; zero matching lab VMs; private per-run files removed",
+  "implementation_commit": "6c7e792733a13af79a94206445bda53ab6d09a55",
+  "ci": {
+    "url": "https://github.com/KidCarmi/Culvert/actions/runs/37155793417",
+    "result": "PASS",
+    "checks": "Linux race tests including real PTYs, vet, static build/compiler and shell syntax"
+  },
+  "captures": {
+    "public_partial": "esxi-ui-public-partial.png",
+    "admin_partial": "esxi-ui-admin-partial.png"
+  }
+}

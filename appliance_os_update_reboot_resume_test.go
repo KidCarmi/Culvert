@@ -15,6 +15,56 @@ import (
 	"testing"
 )
 
+func armShutdownFence(t *testing.T, boot, phase string) {
+	t.Helper()
+	osUpdateHook = func(state string) {
+		if err := os.MkdirAll(state, 0o750); err != nil {
+			t.Fatal(err)
+		}
+		data := "culvert-shutdown-v1 " + boot + " reboot " + phase + "\n"
+		if err := os.WriteFile(filepath.Join(state, "host-shutdown.pending"), []byte(data), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Cleanup(func() { osUpdateHook = nil })
+}
+
+func TestOSUpdate_PendingShutdownFenceBlocksAfterOwnerExit(t *testing.T) {
+	armShutdownFence(t, osUpdateTestBootID, "pending")
+	armResumeMarker(t)
+	for _, mode := range []string{"reboot", "poweroff", "os", "security", "docker", "resume-stack"} {
+		out, calls, code := runOSUpdateWith(t, []string{mode, "--force"}, nil)
+		if code != 3 || strings.Contains(calls, "docker ") || strings.Contains(calls, "systemctl ") || !strings.Contains(calls, "final:shutdown-fence-present") {
+			t.Fatalf("pending shutdown admitted %s: code=%d calls=%s\n%s", mode, code, calls, out)
+		}
+	}
+}
+
+func TestOSUpdate_AbortedShutdownCanRetryResumeInSameBoot(t *testing.T) {
+	armShutdownFence(t, osUpdateTestBootID, "aborted")
+	armResumeMarker(t)
+	out, calls, code := runOSUpdate(t, "resume-stack")
+	if code != 0 || !strings.Contains(calls, "docker compose up -d") || strings.Contains(calls, "final:") {
+		t.Fatalf("aborted power did not recover: code=%d calls=%s\n%s", code, calls, out)
+	}
+	out, calls, code = runOSUpdate(t, "resume-stack", "FAIL_START=1")
+	if code == 0 || !strings.Contains(calls, "final:shutdown-fence-present") || !strings.Contains(calls, "final:resume-marker-present") {
+		t.Fatalf("failed retry lost pending recovery: code=%d calls=%s\n%s", code, calls, out)
+	}
+}
+
+func TestOSUpdate_ResumeRefusesInterruptedJournalEvenAfterNewBoot(t *testing.T) {
+	armShutdownFence(t, "00000000-0000-0000-0000-000000000000", "pending")
+	armResumeMarker(t)
+	out, calls, code := runOSUpdateWith(t, []string{"resume-stack", "--force"}, []string{"01ARZ3NDEKTSV4RRFFQ69G5FAV"})
+	if code != 3 || strings.Contains(calls, "docker ") || !strings.Contains(calls, "final:resume-marker-present") {
+		t.Fatalf("resume ignored interrupted journal: code=%d calls=%s\n%s", code, calls, out)
+	}
+	if strings.Contains(calls, "final:shutdown-fence-present") {
+		t.Fatal("valid earlier-boot fence was not cleared under lock")
+	}
+}
+
 func armResumeMarker(t *testing.T) {
 	t.Helper()
 	osUpdateResumeHook = func(p string) {
@@ -29,8 +79,10 @@ func armResumeMarker(t *testing.T) {
 }
 
 func TestOSUpdateReboot_ArmsResumeBeforeStoppingTheStack(t *testing.T) {
-	// SHUTDOWN_KILLS: the accepted reboot ends the script, as a real shutdown does.
-	out, calls, _ := runOSUpdate(t, "reboot", "SHUTDOWN_KILLS=1", "TEST_HOLD_SECS=30")
+	out, calls, code := runOSUpdate(t, "reboot")
+	if code != 0 {
+		t.Fatalf("an accepted reboot request must succeed (code %d):\n%s", code, out)
+	}
 	stop, reboot := strings.Index(calls, "docker compose stop"), strings.Index(calls, "systemctl reboot")
 	if stop < 0 || reboot < stop {
 		t.Fatalf("want the stack stopped, then the reboot:\n%s", calls)
@@ -43,32 +95,26 @@ func TestOSUpdateReboot_ArmsResumeBeforeStoppingTheStack(t *testing.T) {
 	}
 }
 
-// ACCEPTED is not DONE: after systemctl queues the reboot, the script keeps
-// both maintenance locks until the shutdown ends it, so the agent cannot admit
-// an upgrade/restore into a host that is going down (LOCAL-ESXI review of
-// b80968dc: the locks used to drop the moment systemctl returned).
-func TestOSUpdateReboot_HoldsBothLocksUntilTheShutdownEndsIt(t *testing.T) {
-	_, calls, _ := runOSUpdateWith(t, []string{"reboot"}, []string{}, "CHECK_LOCKS=1", "SHUTDOWN_KILLS=1", "TEST_HOLD_SECS=30")
-	if !strings.Contains(calls, "lock:held") || !strings.Contains(calls, "agentlock:held") {
-		t.Fatalf("both locks must still be held after the reboot request was accepted:\n%s", calls)
-	}
-}
-
-// A reboot request that was accepted but has not happened within the bound
-// is NOT proven aborted (the queued shutdown may still run): the command
-// fails, the stack stays stopped and the marker stays for the boot or a
-// manual resume-stack (LOCAL-ESXI review: restoring the stack here races the
-// queued shutdown).
-func TestOSUpdateReboot_AcceptedButNotYetDoneRestoresNothing(t *testing.T) {
-	out, calls, code := runOSUpdate(t, "reboot", "TEST_HOLD_SECS=1")
-	if code == 0 {
-		t.Fatalf("a reboot that has not happened must exit non-zero:\n%s", out)
-	}
-	if strings.Contains(calls, "docker compose up") || !strings.Contains(calls, "final:resume-marker-present") {
-		t.Fatalf("an accepted reboot must not restart the stack, and the marker must stay:\n%s", calls)
-	}
-	if !strings.Contains(out, "NOT restarting the stack") {
-		t.Fatalf("the failure must say what it did not do:\n%s", out)
+// ACCEPTED is not DONE: systemctl returns once the shutdown job is queued and
+// this command then exits, releasing both locks. What keeps the agent from
+// admitting an upgrade/restore into a host that is going down is the durable
+// shutdown fence (#1540), written BEFORE the stack stops and still present
+// when the command has exited. (It replaces the interim foreground lock hold
+// of cf59cefb; TestOSUpdate_PendingShutdownFenceBlocksAfterOwnerExit proves
+// every mode then refuses in the same boot, --force included.)
+func TestOSUpdateReboot_AcceptedRequestLeavesTheShutdownFence(t *testing.T) {
+	for _, mode := range []string{"reboot", "poweroff"} {
+		out, calls, code := runOSUpdate(t, mode)
+		if code != 0 {
+			t.Fatalf("%s: accepted request must succeed (code %d):\n%s", mode, code, out)
+		}
+		if !strings.Contains(calls, "shutdown-fence:armed") {
+			t.Fatalf("%s: the shutdown fence must exist BEFORE the stack is stopped:\n%s", mode, calls)
+		}
+		if !strings.Contains(calls, "final:shutdown-fence-present") || !strings.Contains(calls, "final:resume-marker-present") ||
+			strings.Contains(calls, "docker compose up") {
+			t.Fatalf("%s: an accepted request must leave the fence and the marker and must not restart the stack:\n%s", mode, calls)
+		}
 	}
 }
 

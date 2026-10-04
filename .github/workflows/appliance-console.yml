@@ -1,0 +1,87 @@
+name: Appliance Console
+
+on:
+  pull_request:
+    paths:
+      - 'appliance/console/**'
+      - 'appliance/os-maintenance/**'
+      - 'appliance/build/**'
+      - 'appliance/provision/**'
+      - 'cmd/culvert-console/**'
+      - 'cmd/culvert-maint/**'
+      - 'appliance_*test.go'
+      - 'internal/applianceconsole/**'
+      - 'internal/appliancehost/**'
+      - 'go.mod'
+      - 'go.sum'
+      - '.github/workflows/appliance-console.yml'
+  push:
+    branches: [feat/appliance-console]
+    paths:
+      - 'appliance/console/**'
+      - 'appliance/os-maintenance/**'
+      - 'appliance/build/**'
+      - 'appliance/provision/**'
+      - 'cmd/culvert-console/**'
+      - 'cmd/culvert-maint/**'
+      - 'appliance_*test.go'
+      - 'internal/applianceconsole/**'
+      - 'internal/appliancehost/**'
+      - 'go.mod'
+      - 'go.sum'
+      - '.github/workflows/appliance-console.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  console:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Console state, display, process and authentication boundary tests
+        run: |
+          go test -race -shuffle=on -count=2 ./internal/applianceconsole ./internal/appliancehost ./cmd/culvert-console
+          go vet ./internal/applianceconsole ./internal/appliancehost ./cmd/culvert-console
+      - name: Root-owned recovery storage fault tests
+        run: |
+          go test -c -o /tmp/culvert-host.test ./internal/appliancehost
+          sudo env CULVERT_STORAGE_FAULTS=1 /tmp/culvert-host.test -test.shuffle=on -test.count=2
+      - name: Root-only bootstrap credential lifecycle
+        run: |
+          go test -c -o /tmp/culvert-console.test ./cmd/culvert-console
+          sudo /tmp/culvert-console.test -test.run '^TestBootstrap' -test.shuffle=on -test.count=2
+      - name: Maintenance agent admission and interrupted journal regressions
+        working-directory: cmd/culvert-maint
+        run: |
+          go test -race -shuffle=on -count=2 ./internal/server ./internal/journal
+          go vet ./internal/server ./internal/journal
+      - name: Existing firstboot and OS maintenance contracts
+        run: go test -shuffle=on -count=1 -run '^Test(FirstBoot|OSUpdate)' .
+      - name: Bounded terminal layout fuzzing
+        run: go test ./internal/applianceconsole -run '^$' -fuzz '^FuzzFrameBounds$' -fuzztime=10s -parallel=2
+      - name: Build static host binary with the repository compiler
+        run: |
+          CGO_ENABLED=0 go build -trimpath -o appliance/console/culvert-console ./cmd/culvert-console
+          expected=$(awk '$1 == "toolchain" { print $2 }' go.mod)
+          actual=$(go version -m appliance/console/culvert-console | head -1 | awk '{print $2}')
+          test "$actual" = "$expected"
+      - name: Syntax and degraded-host smoke
+        run: |
+          bash -n appliance/console/install.sh
+          bash -n appliance/console/install-lib.sh
+          bash -n appliance/console/profile.sh
+          sudo bash appliance/console/install_test.sh
+          bash appliance/os-maintenance/power_test.sh
+          bash appliance/build/console-bundle_test.sh
+          appliance/console/culvert-console --json
+          appliance/console/culvert-console --text
+          appliance/console/culvert-console --report

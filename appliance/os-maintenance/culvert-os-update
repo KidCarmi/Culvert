@@ -10,6 +10,7 @@
 #   sudo culvert-os-update reboot           graceful stack stop (honours stop_grace_period)
 #                                           then reboot; the stack is started again at
 #                                           boot by culvert-stack-resume.service
+#   sudo culvert-os-update poweroff         same guarded stop; resume on next power-on
 #   any mode may add --reboot-if-required   reboot at the end when the kernel/libc need it
 #   any mutating mode may add --force       proceed although the maintenance agent has an
 #                                           operation in flight (see below)
@@ -34,6 +35,8 @@ STACK=/srv/culvert
 LOG=/var/log/culvert-os-update.log
 MAINT_STATE=/var/lib/culvert-maint
 MAINT_JOURNAL="$MAINT_STATE/reconcile"
+SHUTDOWN_FENCE="$MAINT_STATE/host-shutdown.pending"
+BOOT_ID_FILE=/proc/sys/kernel/random/boot_id
 LOCK=/run/culvert-os-update.lock
 # Armed by `reboot` BEFORE the stack is stopped; consumed at boot by
 # culvert-stack-resume.service (`resume-stack`). `docker compose stop` marks
@@ -41,7 +44,6 @@ LOCK=/run/culvert-os-update.lock
 # does NOT start them when the engine comes back: without this, the gateway
 # stayed down after every maintenance reboot (lab run 37156062516, F-OSU-REBOOT-1).
 STACK_RESUME=/var/lib/culvert-appliance/state/stack-resume-on-boot
-SHUTDOWN_HOLD_SECS=600
 mode="${1:-check}"; shift || true
 reboot_if_required=0; force=0
 for a in "$@"; do
@@ -50,36 +52,37 @@ for a in "$@"; do
 done
 [[ "$(id -u)" -eq 0 ]] || { echo "run with sudo" >&2; exit 1; }
 export DEBIAN_FRONTEND=noninteractive
-exec > >(tee -a "$LOG") 2>&1
+# Keep the log reader alive during ordinary group cancellation so the recovery
+# trap cannot die on SIGPIPE before restarting the stack. SIGKILL remains the
+# supervisor's bounded fallback if recovery cannot finish.
+exec > >(trap '' TERM HUP INT; exec tee -a "$LOG") 2>&1
 log() { printf '%s culvert-os-update[%s]: %s\n' "$(date -u +%FT%TZ)" "$mode" "$*"; }
 DOCKER_PKGS=(docker-ce docker-ce-cli containerd.io docker-compose-plugin)
-
-# journal_inflight: the maintenance agent's operations interrupted and awaiting
-# POST /v1/reconcile (one journal record each), space-separated; empty when
-# none. An unreadable journal is a refusal, never "nothing in flight".
-journal_inflight() {
-  [[ -d "$MAINT_JOURNAL" ]] || return 0
-  find "$MAINT_JOURNAL" -maxdepth 1 -name '*.json' -type f -printf '%f ' | sed 's/\.json / /g' || {
-    echo "culvert-os-update: cannot read the maintenance agent journal $MAINT_JOURNAL — refusing" >&2; return 1; }
-}
 
 # guard_maintenance: called by every mutating mode before it changes anything.
 guard_maintenance() {
   exec 9>"$LOCK"
   flock -n 9 || { echo "culvert-os-update: another culvert-os-update run holds $LOCK — wait for it to finish" >&2; exit 3; }
-  # The agent's state dir exists only where the agent is installed; without
-  # it there is nothing to sequence against.
-  if [[ -d "$MAINT_STATE" ]]; then
-    exec 8>>"$MAINT_STATE/host-maintenance.lock"
-    flock -n 8 || {
-      echo "culvert-os-update: the maintenance agent is running an operation (it holds $MAINT_STATE/host-maintenance.lock) — wait for it to finish" >&2
-      exit 3
-    }
+  # Always take the agent lock, including while first boot is installing it.
+  [[ -d "$MAINT_STATE" ]] || install -d -m 0755 "$MAINT_STATE"
+  exec 8>>"$MAINT_STATE/host-maintenance.lock"
+  flock -n 8 || {
+    echo "culvert-os-update: the maintenance agent is running an operation (it holds $MAINT_STATE/host-maintenance.lock) — wait for it to finish" >&2
+    exit 3
+  }
+  check_shutdown_fence
+  check_interrupted_journal "$force"
+}
+
+check_interrupted_journal() {
+  local allow_force=$1
+  local inflight=""
+  if [[ -d "$MAINT_JOURNAL" ]]; then
+    inflight="$(find "$MAINT_JOURNAL" -maxdepth 1 -name '*.json' -type f -printf '%f ' | sed 's/\.json / /g')" || {
+      echo "culvert-os-update: cannot read the maintenance agent journal $MAINT_JOURNAL — refusing" >&2; exit 3; }
   fi
-  local inflight
-  inflight="$(journal_inflight)" || exit 3
   if [[ -n "${inflight// /}" ]]; then
-    if [[ "$force" -eq 1 ]]; then
+    if [[ "$allow_force" -eq 1 ]]; then
       log "WARNING: --force: proceeding although the maintenance agent journal holds: $inflight"
     else
       echo "culvert-os-update: the maintenance agent has operation(s) interrupted and awaiting reconcile: $inflight" >&2
@@ -88,6 +91,54 @@ guard_maintenance() {
       echo "  (override with --force only when you know the agent is idle)" >&2
       exit 3
     fi
+  fi
+}
+
+# Shared with the Go agent: exactly one bounded ASCII line, version, boot UUID,
+# action, phase, newline. This is an admission fence, not proof power completed.
+read_boot_id() {
+  local value
+  value="$(head -c 65 "$BOOT_ID_FILE")" || return 1
+  [[ $value =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] || return 1
+  printf '%s' "$value"
+}
+clear_shutdown_fence() {
+  rm -f -- "$SHUTDOWN_FENCE" && sync -f "$MAINT_STATE"
+}
+check_shutdown_fence() {
+  shutdown_recovery_aborted=0
+  [[ -e "$SHUTDOWN_FENCE" || -L "$SHUTDOWN_FENCE" ]] || return 0
+  local data size permissions links current
+  [[ -f "$SHUTDOWN_FENCE" && ! -L "$SHUTDOWN_FENCE" ]] || { log "unsafe pending shutdown fence — refusing"; exit 3; }
+  size=$(stat -c %s -- "$SHUTDOWN_FENCE")
+  permissions=$(stat -c %a -- "$SHUTDOWN_FENCE")
+  links=$(stat -c %h -- "$SHUTDOWN_FENCE")
+  [[ $size -le 128 && $links == 1 ]] && (( (8#$permissions & 022) == 0 )) || { log "unsafe pending shutdown fence — refusing"; exit 3; }
+  data=$(head -c 129 -- "$SHUTDOWN_FENCE") || { log "unreadable pending shutdown fence — refusing"; exit 3; }
+  [[ $size == $((${#data}+1)) && $data =~ ^culvert-shutdown-v1\ ([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\ (reboot|poweroff)\ (pending|aborted)$ ]] || { log "malformed pending shutdown fence — refusing"; exit 3; }
+  local recorded_boot=${BASH_REMATCH[1]} recorded_phase=${BASH_REMATCH[3]}
+  # Bash command substitution drops NUL and trailing newlines. Compare exact
+  # bytes so neither can turn a malformed record into a valid-looking line.
+  cmp -s -- "$SHUTDOWN_FENCE" <(printf '%s\n' "$data") || { log "malformed pending shutdown fence bytes — refusing"; exit 3; }
+  current=$(read_boot_id) || { log "boot identity unavailable — refusing pending shutdown recovery"; exit 3; }
+  if [[ $recorded_boot == "$current" ]]; then
+    if [[ ${1:-0} == 1 && $recorded_phase == aborted ]]; then
+      shutdown_recovery_aborted=1
+      return 0
+    fi
+    log "shutdown pending or aborted recovery unresolved in this boot — refusing (including --force)"
+    exit 3
+  fi
+  clear_shutdown_fence || { log "cannot clear stale shutdown fence — refusing"; exit 3; }
+}
+write_shutdown_fence() {
+  local boot staged
+  boot=$(read_boot_id) || { log "boot identity unavailable — cannot persist shutdown state"; return 1; }
+  staged=$(mktemp "$MAINT_STATE/.host-shutdown.XXXXXX") || return 1
+  if ! { printf 'culvert-shutdown-v1 %s %s %s\n' "$boot" "$1" "$2" >"$staged" && chmod 0644 "$staged" && sync -f "$staged" && mv -f -- "$staged" "$SHUTDOWN_FENCE" && sync -f "$MAINT_STATE"; }; then
+    rm -f -- "$staged"
+    log "could not persist pending shutdown fence"
+    return 1
   fi
 }
 reboot_required() { [[ -f /var/run/reboot-required ]]; }
@@ -126,42 +177,63 @@ stack_start_required() {
 # stays so the next boot (or `resume-stack`) retries. Always a failure exit:
 # the reboot the operator asked for did not happen.
 recover_aborted_reboot() {
-  log "$1 — not rebooting; starting the stack again"
-  if stack_start_required; then
-    rm -f "$STACK_RESUME"
-    log "stack started again; the reboot did NOT happen"
+  # Recovery runs under the original maintenance locks. A second ordinary
+  # cancellation must not interrupt the attempt; the caller bounds its grace.
+  trap '' TERM HUP INT
+  local action=${2:-reboot} outcome=${3:-aborted}
+  if [[ $outcome == aborted ]]; then
+    write_shutdown_fence "$action" aborted || { log "aborted power recovery could not be recorded; pending fence retained"; exit 1; }
+  fi
+  log "$1 — attempting stack recovery (power outcome: $outcome)"
+  if [[ ${power_had_stack:-1} == 0 ]] || stack_start_required; then
+    if [[ $outcome == aborted ]]; then
+      clear_shutdown_fence || { log "stack recovery completed but shutdown fence could not be cleared"; exit 1; }
+      rm -f "$STACK_RESUME"
+      if [[ ${power_had_stack:-1} == 0 ]]; then
+        log "no stack was stopped; the $action did NOT happen"
+      else
+        log "stack started again; the $action did NOT happen"
+      fi
+    else
+      log "stack recovery attempted; power outcome is unknown, so shutdown fence and resume marker remain pending"
+    fi
   else
-    echo "culvert-os-update: the stack did NOT start — check: cd $STACK && docker compose ps (recovery stays pending: sudo culvert-os-update resume-stack, or the next boot)" >&2
+    echo "culvert-os-update: the stack did NOT start — check: cd $STACK && docker compose ps (recovery stays pending: resume-stack may retry a recorded aborted power action; an uncertain pending shutdown requires the next boot)" >&2
   fi
   exit 1
 }
-do_reboot() {
+do_power() {
+  local action=$1
+  local power_had_stack=0 power_phase=aborted power_status
   # Arm before acting: a reboot that happens at any point after the stop
   # (power loss included) still brings the stack back. Nothing to resume
   # when there is no stack.
   if [[ -f "$STACK/docker-compose.yml" ]]; then
+    power_had_stack=1
     install -d -m 0755 "$(dirname "$STACK_RESUME")"
     : > "$STACK_RESUME"
   fi
-  stack_stop || recover_aborted_reboot "stack stop FAILED"
-  log "rebooting"
+  write_shutdown_fence "$action" pending || return 1
+  trap 'recover_aborted_reboot "power action interrupted" "$action" "$power_phase"' TERM HUP INT
+  stack_stop || recover_aborted_reboot "stack stop FAILED" "$action"
+  log "requesting $action"
   # A rejected request (systemd refusing, an inhibitor, a shutdown already
   # in progress) would otherwise exit here under set -e with the stack
   # stopped and nothing to bring it back until the next boot.
-  systemctl reboot || recover_aborted_reboot "the reboot request was REJECTED (systemctl reboot exit $?)"
-  # ACCEPTED is not DONE: systemctl returns once the job is queued. Keep
-  # holding this script's lock and the agent's host-maintenance lock until the
-  # shutdown ends this process, so the agent cannot admit an upgrade/restore
-  # into a host that is going down. An accepted request is NOT proven aborted
-  # by time passing — the queued shutdown may still run — so outliving the
-  # bound restores nothing: the stack stays stopped, the resume marker stays
-  # (the next boot, or `resume-stack`, starts it) and the command fails.
-  # (The durable, agent-checked shutdown fence is #1540's; this hold covers
-  # the window it is not yet integrated.)
-  log "reboot requested; holding the maintenance locks until the shutdown ends this process"
-  sleep "$SHUTDOWN_HOLD_SECS" || true
-  log "the reboot was accepted but has not happened within ${SHUTDOWN_HOLD_SECS}s — NOT restarting the stack while it may still run; reboot the host, or if it was cancelled: sudo culvert-os-update resume-stack"
-  exit 1
+  power_phase=pending
+  if systemctl "$action"; then
+    :
+  else
+    power_status=$?
+    if (( power_status >= 128 )); then
+      recover_aborted_reboot "the $action request was interrupted (exit $power_status)" "$action" pending
+    fi
+    recover_aborted_reboot "the $action request was REJECTED (systemctl $action exit $power_status)" "$action" aborted
+  fi
+  trap - TERM HUP INT
+}
+do_reboot() {
+  do_power reboot
 }
 finish() {
   report_reboot
@@ -245,9 +317,9 @@ case "$mode" in
     docker version --format 'Docker engine {{.Server.Version}}'
     finish
     ;;
-  reboot)
+  reboot|poweroff)
     guard_maintenance
-    do_reboot
+    do_power "$mode"
     ;;
   resume-stack)
     # Boot-time half of `reboot` (culvert-stack-resume.service). Waits for
@@ -258,22 +330,17 @@ case "$mode" in
     [[ -f "$STACK_RESUME" ]] || { log "no stack resume pending"; exit 0; }
     exec 9>"$LOCK"
     flock -w 300 9 || { log "timed out waiting for $LOCK — stack NOT started"; exit 3; }
-    if [[ -d "$MAINT_STATE" ]]; then
-      exec 8>>"$MAINT_STATE/host-maintenance.lock"
-      flock -w 300 8 || { log "timed out waiting for the maintenance agent lock — stack NOT started"; exit 3; }
-      log "holding $LOCK and the maintenance agent lock ($MAINT_STATE/host-maintenance.lock)"
-    fi
-    # The journal fence every mutating mode applies: never start the stack
-    # over an operation the agent must reconcile first (e.g. a data
-    # rollback). The marker stays; resume after reconciling.
-    inflight="$(journal_inflight)" || exit 3
-    # No --force here (unlike the other modes): starting the stack over an
-    # unreconciled data rollback is never the operator's shortcut to take.
-    if [[ -n "${inflight// /}" ]]; then
-      log "NOT starting the stack: the maintenance agent has operation(s) interrupted and awaiting reconcile: $inflight — settle them (Admin UI → Release Management, or POST /v1/reconcile), then: sudo culvert-os-update resume-stack"
-      exit 3
-    fi
+    [[ -d "$MAINT_STATE" ]] || install -d -m 0755 "$MAINT_STATE"
+    exec 8>>"$MAINT_STATE/host-maintenance.lock"
+    flock -w 300 8 || { log "timed out waiting for the maintenance agent lock — stack NOT started"; exit 3; }
+    log "holding $LOCK and the maintenance agent lock ($MAINT_STATE/host-maintenance.lock)"
+    [[ -f "$STACK_RESUME" ]] || { log "stack resume already completed while waiting for the locks"; exit 0; }
+    check_shutdown_fence 1
+    # Locks exclude live operations; interrupted operations have no live lock.
+    # Automatic boot resume must never bypass their explicit reconciliation.
+    check_interrupted_journal 0
     if stack_start_required; then
+      if [[ $shutdown_recovery_aborted == 1 ]]; then clear_shutdown_fence; fi
       rm -f "$STACK_RESUME"
       log "stack started after the maintenance reboot"
     else

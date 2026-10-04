@@ -10,7 +10,7 @@
 #
 # Inputs (copied in by build-ova.sh before this runs):
 #   /var/lib/culvert-appliance/manifest.env   the build pins
-#   /opt/culvert-appliance/{provision,os-maintenance,bin,install.sh}
+#   /opt/culvert-appliance/{provision,os-maintenance,console,bin,install.sh}
 #
 # No systemd is running here: `systemctl enable` works (it edits symlinks);
 # `systemctl start` must not be used.
@@ -209,6 +209,12 @@ passwd -l culvert >/dev/null
 printf 'culvert ALL=(ALL:ALL) ALL\n' > /etc/sudoers.d/50-culvert-console
 chmod 0440 /etc/sudoers.d/50-culvert-console
 visudo -c -q -f /etc/sudoers.d/50-culvert-console
+
+# Account/helpers now exist. The installer validates the bundled executable,
+# publishes the worker/profile/getty, and enables next-boot startup without
+# starting services or opening a PAM session in the build appliance.
+log "installing Go boot console and local recovery worker"
+bash "$APPL/console/install.sh"
 
 # ── 4. Evidence captured into the image for the SBOM/CVE record ─────────────
 dpkg-query -W -f='${binary:Package}\t${Version}\t${Architecture}\n' | sort > "$STATE/dpkg-list.txt"

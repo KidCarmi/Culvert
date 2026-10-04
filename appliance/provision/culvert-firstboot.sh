@@ -166,7 +166,11 @@ mint_console_password() {
 }
 
 step_console() {
-  step_done console && return 0
+  # Retry a durable handoff commit after interruption without minting again.
+  if step_done console; then
+    "$BIN_DIR/culvert-console" --host=bootstrap-commit
+    return
+  fi
   local shadow keys=0 minted=0 policy
   shadow="$(getent shadow "$CONSOLE_USER" | cut -d: -f2 || true)"
   [[ -s "$CONSOLE_HOME/.ssh/authorized_keys" ]] && keys=1
@@ -190,6 +194,17 @@ step_console() {
       printf '%s:%s\n' "$CONSOLE_USER" "$pw" | chpasswd
       passwd -u "$CONSOLE_USER" >/dev/null 2>&1 || true
       chage -d 0 "$CONSOLE_USER"
+      # The root-only handoff survives redraw/reboot. Failure must retain the
+      # minting marker and must not commit console.done or expose an old secret.
+      printf '%s\n' "$pw" | "$BIN_DIR/culvert-console" --host=bootstrap-record || return 1
+      rm -f "$STATE/console.minting"
+      ;;
+  esac
+  done_step console
+  # Also commits a previously recorded credential when interruption occurred
+  # after removing console.minting but before writing console.done.
+  "$BIN_DIR/culvert-console" --host=bootstrap-commit || return 1
+  if [[ -n ${pw:-} ]]; then
       console ""
       console "=================================================================="
       console " Culvert appliance: no SSH key or password was supplied at import."
@@ -198,10 +213,7 @@ step_console() {
       console "=================================================================="
       console ""
       log "minted a one-time console password for '$CONSOLE_USER' (printed on the VM console only${minted:+; re-minted after an interrupted run})"
-      rm -f "$STATE/console.minting"
-      ;;
-  esac
-  done_step console
+  fi
 }
 
 # ── step: images (docker load, verified by content digest) ─────────────────

@@ -45,7 +45,8 @@
 #   security upgrade moved), prepare-guest.log (the in-guest transcript).
 #
 # Requires: qemu-img, guestfish, virt-customize, virt-cat, virt-ls, docker (daemon access),
-# curl, gzip, tar, sha256sum, python3; gpgv + ubuntu-cloudimage-keyring optional.
+# curl, gzip, tar, sha256sum, python3, the root go.mod Go compiler;
+# gpgv + ubuntu-cloudimage-keyring optional.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -53,6 +54,8 @@ REPO="$(cd "$HERE/../.." && pwd)"
 MANIFEST="$HERE/manifest.env"
 # shellcheck source=appliance/build/archive-identity.sh
 . "$HERE/archive-identity.sh"
+# shellcheck source=appliance/build/console-bundle.sh
+. "$HERE/console-bundle.sh"
 OUT="$REPO/appliance/build/out"
 WORK="${TMPDIR:-/tmp}/culvert-ova-build"
 SKIP_COSIGN=0
@@ -92,9 +95,10 @@ for v in BASE_IMAGE_URL BASE_IMAGE_SHA256 APP_IMAGE_REPO APP_IMAGE_TAG APP_IMAGE
   [[ -n "${!v:-}" ]] || die "manifest.env: $v is not set"
 done
 
-for t in qemu-img guestfish virt-customize virt-cat virt-ls docker curl gzip tar sha256sum python3; do
+for t in qemu-img guestfish virt-customize virt-cat virt-ls docker curl gzip tar sha256sum python3 go; do
   command -v "$t" >/dev/null 2>&1 || die "required tool missing: $t"
 done
+CONSOLE_GO_VERSION="$(console_go_version "$REPO")"
 docker info >/dev/null 2>&1 || die "docker daemon not reachable"
 [[ -f "$REPO/scripts/install.sh" ]] || die "scripts/install.sh not found at $REPO"
 
@@ -252,6 +256,8 @@ OVA_BASENAME="${APPLIANCE_NAME}-${VERSION}-${GUEST_OS_ID}"
 OV="$WORK/overlay"
 rm -rf "$OV"; mkdir -p "$OV/opt/culvert-appliance" "$OV/var/lib/culvert-appliance/images"
 cp -r "$REPO/appliance/provision" "$REPO/appliance/os-maintenance" "$OV/opt/culvert-appliance/"
+build_console_bundle "$REPO" "$OV/opt/culvert-appliance/console"
+CONSOLE_BINARY_SHA="$(sha256sum "$OV/opt/culvert-appliance/console/culvert-console" | cut -d' ' -f1)"
 cp "$REPO/scripts/install.sh" "$OV/opt/culvert-appliance/install.sh"
 cp "$MANIFEST" "$OV/var/lib/culvert-appliance/manifest.env"
 if [[ "$CANDIDATE" -eq 1 ]]; then
@@ -340,6 +346,7 @@ BI_INSTALL_SHA="$INSTALL_SHA" BI_APP_VERSION="$APP_VERSION" BI_MAINT_VERSION="$M
 BI_CONTAINERD="$HOST_CONTAINERD" BI_COSIGN="$COSIGN_RESULT" BI_BASE_GPG="$BASE_GPG" BI_APP_TAR_SHA="$APP_TAR_SHA" BI_CLAM_TAR_SHA="$CLAM_TAR_SHA" \
 BI_VERSION="$VERSION" BI_OVA="$OVA_BASENAME.ova" BI_GIT_COMMIT="$GIT_COMMIT" BI_GIT_DIRTY="$GIT_DIRTY" \
 BI_BUILD_TS="$BUILD_TS" BI_BUILD_WALL="$BUILD_WALL" \
+BI_CONSOLE_GO_VERSION="$CONSOLE_GO_VERSION" BI_CONSOLE_BINARY_SHA="$CONSOLE_BINARY_SHA" \
 BI_CANDIDATE="$CANDIDATE" BI_CANDIDATE_SOURCE="$CANDIDATE_SOURCE" BI_CANDIDATE_TAR_SHA="$CANDIDATE_TAR_SHA" BI_CANDIDATE_RUN_ID="$CANDIDATE_RUN_ID" \
 python3 - "$OV/var/lib/culvert-appliance/build-info.json" <<'PY'
 import json, os, subprocess, sys
@@ -354,6 +361,10 @@ info = {
   "source": {"git_commit": E["BI_GIT_COMMIT"], "git_dirty": E["BI_GIT_DIRTY"] == "true",
              "source_date_epoch": int(E["SOURCE_DATE_EPOCH"]), "build_timestamp": E["BI_BUILD_TS"],
              "build_wallclock": E["BI_BUILD_WALL"], "install_sh_sha256": E["BI_INSTALL_SHA"]},
+  "console": {"source_git_commit": E["BI_GIT_COMMIT"], "source_git_dirty": E["BI_GIT_DIRTY"] == "true",
+              "go_compiler": E["BI_CONSOLE_GO_VERSION"], "binary_sha256": E["BI_CONSOLE_BINARY_SHA"],
+              "target": "linux/amd64", "cgo_enabled": False,
+              "origin": "built from this provisioning checkout; separate from the application image"},
   "guest_os": {"id": E["GUEST_OS_ID"], "name": E["GUEST_OS_NAME"], "codename": E["GUEST_OS_CODENAME"],
                "base_image_url": E["BASE_IMAGE_URL"], "base_image_sha256": E["BASE_IMAGE_SHA256"],
                "base_image_serial": E["BASE_IMAGE_SERIAL"], "base_image_gpg": E["BI_BASE_GPG"],
@@ -450,6 +461,8 @@ log "prepare-guest.sh completed in the guest at $PREP_DONE"
 
 # ── 5. Outside-the-guest checks ─────────────────────────────────────────────
 log "verifying guest contents"
+CONSOLE_INSTALLED_SHA="$(virt-cat -a "$DISK" /opt/culvert-appliance/bin/culvert-console | sha256sum | cut -d' ' -f1)"
+[[ "$CONSOLE_INSTALLED_SHA" == "$CONSOLE_BINARY_SHA" ]] || die "installed console binary does not match its recorded build hash"
 virt-cat -a "$DISK" /var/lib/culvert-appliance/dpkg-list.txt       > "$OUT/dpkg-list.txt"
 virt-cat -a "$DISK" /var/lib/culvert-appliance/host-components.txt > "$OUT/host-components.txt"
 # Present only when manifest.env pins GUEST_APT_SNAPSHOT (prepare-guest.sh 1b).

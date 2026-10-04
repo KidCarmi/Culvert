@@ -7,9 +7,110 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
+
+// Models systemctl accepting an asynchronous shutdown and the helper exiting:
+// the flock is free, but this boot must admit no further mutating operation.
+func TestHostLock_PendingShutdownSurvivesHelperExit(t *testing.T) {
+	for _, phase := range []string{"pending", "aborted"} {
+		t.Run(phase, func(t *testing.T) {
+			rig := startApplyRig(t)
+			defer rig.stop()
+			release, busy, err := acquireHostMaintenanceLock(rig.stateDir)
+			if err != nil || busy {
+				t.Fatalf("take maintenance lock: %v busy=%v", err, busy)
+			}
+			t.Cleanup(release)
+			boot, err := os.ReadFile("/proc/sys/kernel/random/boot_id")
+			if err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(rig.stateDir, shutdownFenceName)
+			data := "culvert-shutdown-v1 " + strings.TrimSpace(string(boot)) + " reboot " + phase + "\n"
+			// #nosec G306 -- mirrors the root-created fence readable by the agent.
+			if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			release()
+			status, body := rig.post(t, map[string]interface{}{"image_ref": repo + "@sha256:" + digNew})
+			if status != http.StatusConflict || !strings.Contains(string(body), "host_maintenance_in_progress") {
+				t.Fatalf("fenced request admitted: %d %s", status, body)
+			}
+			if rig.sawCommand("pull") || rig.sawCommand("up") {
+				t.Fatal("fenced admission touched Docker")
+			}
+			if err := os.Remove(path); err != nil {
+				t.Fatal(err)
+			}
+			if op, _ := rig.acceptAndWait(t, map[string]interface{}{"image_ref": repo + "@sha256:" + digNew}); op["state"] != "succeeded" {
+				t.Fatalf("cleared fence should permit admission: %+v", op)
+			}
+		})
+	}
+}
+
+func TestHostLock_StaleShutdownFenceClearedUnderLock(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, shutdownFenceName)
+	// #nosec G306 -- mirrors the root-created fence readable by the agent.
+	if err := os.WriteFile(path, []byte("culvert-shutdown-v1 00000000-0000-0000-0000-000000000000 poweroff pending\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	release, busy, err := acquireHostMaintenanceLock(dir)
+	if err != nil || busy {
+		t.Fatalf("stale fence blocked new boot: %v busy=%v", err, busy)
+	}
+	defer release()
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("stale fence not removed: %v", err)
+	}
+	if _, busy, err := acquireHostMaintenanceLock(dir); err != nil || !busy {
+		t.Fatalf("stale cleanup released serialization: %v busy=%v", err, busy)
+	}
+}
+
+func TestHostLock_UnsafeShutdownFenceRefuses(t *testing.T) {
+	for _, kind := range []string{"malformed", "oversized", "symlink", "fifo", "writable"} {
+		t.Run(kind, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, shutdownFenceName)
+			var err error
+			switch kind {
+			case "symlink":
+				err = os.Symlink(path, path)
+			case "fifo":
+				err = syscall.Mkfifo(path, 0o600)
+			case "oversized":
+				// #nosec G306 -- malformed public fence fixture, no private data.
+				err = os.WriteFile(path, []byte(strings.Repeat("x", 129)), 0o644)
+			default:
+				// #nosec G306 -- malformed public fence fixture, no private data.
+				err = os.WriteFile(path, []byte("malformed\n"), 0o644)
+				if kind == "writable" && err == nil {
+					err = os.Chmod(path, 0o666)
+				}
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if release, busy, err := acquireHostMaintenanceLock(dir); err == nil || busy || release != nil {
+				t.Fatalf("unsafe fence treated as available: err=%v busy=%v release=%v", err, busy, release != nil)
+			}
+			if err := os.Remove(path); err != nil {
+				t.Fatal(err)
+			}
+			release, busy, err := acquireHostMaintenanceLock(dir)
+			if err != nil || busy {
+				t.Fatalf("failed fence read leaked lock: %v busy=%v", err, busy)
+			}
+			release()
+		})
+	}
+}
 
 // While culvert-os-update holds the shared host maintenance lock, no
 // state-changing agent op may be admitted (Codex P1, PR #1528).
