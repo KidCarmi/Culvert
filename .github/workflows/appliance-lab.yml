@@ -49,26 +49,22 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # HANDOFF candidate — the integrated V1 revision: #1528 36b5407e =
-        # 22247248 (F-FEED-1, F-OSU-REBOOT-1, L11) + #1540 660df29c (console,
-        # durable agent/helper shutdown fence replacing the interim lock hold)
-        # + integration fixes. Image = that head's own Deep PR Gate tar (run
-        # 37195117238, all four gates APPROVED incl. the console suite; stamp
-        # v1.0.260-candidate.g36b5407e5bd3); provisioning, agent and console =
-        # a clean checkout of the SAME commit. No provisioning drift; built
-        # fresh, so the bytes this run qualifies are the bytes it uploads.
+        # LAB candidate through #1549 — integration head 658d08f0 = 9e14b2cb
+        # (#1528 36b5407e + #1547 + #1548 + #1549) + cdc96f80 (boot review)
+        # + 442e5dd4 (#1549 review fixes) + 658d08f0 (test isolation only).
+        # Image = that head's own Deep PR Gate tar (run 37218131297, Fast +
+        # Deep APPROVED; stamp v1.0.260-candidate.g658d08f04a88); app, agent,
+        # console, access binary and provisioning from a clean checkout of
+        # the SAME commit. Built fresh and retained BEFORE boot.
         include:
-          - variant: candidate-36b5407e5bd3
+          - variant: candidate-658d08f04a88
             provisioning: source
-            source_sha: "36b5407e5bd3ff3c883bf855c269b8b7675013ed"
-            image_run: "37195117238"
-            image_tar_sha256: "40fcc42daa87ba39c3119c1cbda4b3b0df033aa84beced4a093c98b571b024a8"
-            expect_image_id: "sha256:2aeee47447ec989111379bcf39bef6d64d2be4dba2db352f5af16db6c70a964f"
-            # Re-qualify the OVA run 37195991070 built and retained (artifact
-            # 11300957991): all 48 checks passed there, but the harness exited
-            # 1 before its failure count (redact_tree, fixed). Same bytes.
-            retained_run: "37195991070"
-            retained_sha256: "7bd09aaac19ab0525654d2863d4382bf0415e0ac75e2b55aee8a424a9df6bca1"
+            source_sha: "658d08f04a88d7c08ccc302f2e2e681134a5f716"
+            image_run: "37218131297"
+            image_tar_sha256: "a7603903d76c10243f449a12b1e800b665cde01acda5d39b3a3db06ddb32e9d7"
+            expect_image_id: "sha256:1ed9cddb094e5e0bfadc8d714d605757c9750d7b7f81e0b14b75e9e1430db9f0"
+            retained_run: ""
+            retained_sha256: ""
     env:
       APPLIANCE_SOURCE_SHA: ${{ matrix.source_sha }}
       SOURCE_IMAGE_RUN_ID: ${{ matrix.image_run }}
