@@ -31,6 +31,8 @@ ENV GOTOOLCHAIN=local
 WORKDIR /app
 RUN apk add --no-cache git
 COPY go.mod go.sum ./
+COPY third_party/crewjam-saml/ ./third_party/crewjam-saml/
+COPY pkg/releaseproof/ ./pkg/releaseproof/
 RUN want="$(sed -n 's/^toolchain //p' go.mod)" && have="$(go env GOVERSION)" && \
     echo "compiler: ${have} (go.mod toolchain: ${want})" && \
     [ -n "${want}" ] && [ "${have}" = "${want}" ]
@@ -95,6 +97,7 @@ ENV GOTOOLCHAIN=local
 
 WORKDIR /src
 COPY cmd/culvert-maint/go.mod cmd/culvert-maint/go.sum ./
+COPY pkg/releaseproof/ /pkg/releaseproof/
 COPY go.mod /tmp/culvert-root.go.mod
 RUN want="$(sed -n 's/^toolchain //p' /tmp/culvert-root.go.mod)" && have="$(go env GOVERSION)" && \
     echo "compiler: ${have} (go.mod toolchain: ${want})" && \

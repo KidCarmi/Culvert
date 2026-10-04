@@ -154,7 +154,7 @@ jobs:
               *) code=true ;;
             esac
             case "$f" in
-              cmd/culvert-maint/*) agent=true ;;
+              cmd/culvert-maint/*|pkg/releaseproof/*) agent=true ;;
             esac
             # MCP design surface. Its OWN `case` on purpose: the docs/code
             # classifier above is first-match-wins, so folding these patterns
@@ -391,6 +391,10 @@ jobs:
         working-directory: cmd/culvert-maint
         run: govulncheck ./...
 
+      - name: govulncheck (shared release verifier)
+        working-directory: pkg/releaseproof
+        run: govulncheck ./...
+
       - name: gosec (root module)
         run: |
           go install github.com/securego/gosec/v2/cmd/gosec@v2.27.1
@@ -398,6 +402,10 @@ jobs:
 
       - name: gosec (cmd/culvert-maint)
         working-directory: cmd/culvert-maint
+        run: gosec -exclude=G104,G302,G304,G703,G704 ./...
+
+      - name: gosec (shared release verifier)
+        working-directory: pkg/releaseproof
         run: gosec -exclude=G104,G302,G304,G703,G704 ./...
 
   # ─── 6. Secrets: gitleaks (runs on EVERY PR, docs included) ────────────────
@@ -451,6 +459,13 @@ jobs:
           TEST_SEED: "20260421"
         run: go test -race -count=1 -timeout=10m -v ./...
 
+      - name: Shared release proof verifier
+        working-directory: pkg/releaseproof
+        run: |
+          go mod tidy -diff
+          go vet ./...
+          go test -race -shuffle=on -count=2 ./...
+
       - name: golangci-lint
         # Checksum-verified install (sum.golang.org), not curl|sh off a tag ref.
         run: |
@@ -460,6 +475,12 @@ jobs:
       - name: staticcheck
         run: |
           go install honnef.co/go/tools/cmd/staticcheck@2025.1
+          staticcheck ./...
+
+      - name: Shared verifier lint
+        working-directory: pkg/releaseproof
+        run: |
+          golangci-lint run --timeout=5m
           staticcheck ./...
 
   # ─── 8. MCP design-document predicates — gated on the MCP doc surface ─────

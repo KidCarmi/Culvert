@@ -216,6 +216,11 @@ func (s *Server) persistVerdict(prev *reconcileVerdictRecord, cl *reconcileClass
 // timeout, or missing probe factory leaves the record surfaced (never a
 // rollback at boot). Persists the probe outcome into the verdict either way.
 func (s *Server) adoptIfHealthy(ctx context.Context, rec *journal.Record, v *reconcileVerdictRecord) bool {
+	if err := s.knownRelease(rec.TargetRef); err != nil {
+		v.LastHealth = "release authorization unavailable"
+		_ = s.opts.Journal.WriteVerdict(rec.OpID, *v)
+		return false
+	}
 	ok, detail := s.probeHealth(ctx)
 	v.LastHealth = detail
 	if !ok {

@@ -2,9 +2,9 @@
 //
 // Flow (with inline auto-rollback, #375):
 //
-//	capture_before → CaptureRunningProxyImage (#357); best-effort — a
-//	                 stack that is down is a valid state, not a failure.
-//	                 Also derives the inline-rollback target (priorRef).
+//	capture_before: capture the actual running digest and require signed
+//	                authorization for target and observed baseline. Persist
+//	                recovery evidence before any image mutation.
 //	resolve_target → docker manifest inspect <image_ref> → target digest
 //	                 set; compute already_current (running ∩ target).
 //	preflight_dependencies → refuse (nothing changed) while a service the
@@ -52,6 +52,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/KidCarmi/Culvert/releaseproof"
+
 	"culvert-maint/internal/auth"
 	"culvert-maint/internal/health"
 	"culvert-maint/internal/journal"
@@ -61,9 +63,11 @@ import (
 
 // upgradeApplyRequest is the POST /v1/upgrades/apply body.
 type upgradeApplyRequest struct {
-	ImageRef      string `json:"image_ref"`
-	PreBackup     bool   `json:"pre_backup"`
-	PassphraseRef string `json:"passphrase_ref,omitempty"`
+	ReleaseProof      *releaseproof.Evidence `json:"release_proof,omitempty"`
+	PriorReleaseProof *releaseproof.Evidence `json:"prior_release_proof,omitempty"`
+	ImageRef          string                 `json:"image_ref"`
+	PreBackup         bool                   `json:"pre_backup"`
+	PassphraseRef     string                 `json:"passphrase_ref,omitempty"`
 	// RollbackOnFailure enables inline auto-rollback when the upgrade
 	// fails its post-restart health/verify gate. A pointer so omitted
 	// (nil) DEFAULTS TO TRUE (opt-out); pass false to disable (#375 §1).
@@ -71,6 +75,7 @@ type upgradeApplyRequest struct {
 	IdempotencyKey    string `json:"idempotency_key,omitempty"`
 }
 
+//nolint:cyclop // ordered refusal ladder includes the independent release trust gate
 func (s *Server) handleUpgradeApply(w http.ResponseWriter, r *http.Request, peer auth.PeerInfo) {
 	if s.opts.Runner == nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "runner_not_wired"})
@@ -81,7 +86,7 @@ func (s *Server) handleUpgradeApply(w http.ResponseWriter, r *http.Request, peer
 		return
 	}
 	var req upgradeApplyRequest
-	if err := decodeJSONBody(r, &req); err != nil {
+	if err := decodeJSONBodyLimit(r, &req, maxProofBodyBytes); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "decode: " + err.Error()})
 		return
 	}
@@ -95,6 +100,10 @@ func (s *Server) handleUpgradeApply(w http.ResponseWriter, r *http.Request, peer
 		writeJSON(w, http.StatusBadRequest, map[string]string{
 			"error": fmt.Sprintf("image_ref %q is not permitted by image_allowlist", req.ImageRef),
 		})
+		return
+	}
+	if err := s.checkRelease(req.ImageRef, req.ReleaseProof); err != nil {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
 		return
 	}
 	// pre_backup uses the encrypted backup path, so it requires a
@@ -135,26 +144,22 @@ func (s *Server) handleUpgradeApply(w http.ResponseWriter, r *http.Request, peer
 		"compose_override_configured": composeOverrideConfigured,
 	}
 
-	imageRef := req.ImageRef
-	preBackup := req.PreBackup
-	passRef := req.PassphraseRef
-
 	// acc/racc are shared between the stage closures and the result
 	// computer; acc.actor/opID feed the upgrades.apply:rollback audit.
-	acc := &upgradeApplyAccumulator{actor: peer.String()}
+	acc := &upgradeApplyAccumulator{actor: peer.String(), releaseProof: req.ReleaseProof, priorReleaseProof: req.PriorReleaseProof}
 	racc := &rollbackAccumulator{}
 
 	op, deduped, herr := s.startAsyncOp(r, peer, ops.KindUpgradeApply, req.IdempotencyKey, params,
 		func() ([]ops.FlowStage, *opError) {
 			var resolved string
-			if preBackup {
-				rp, rerr := readPassphraseFromEnv(passRef)
+			if req.PreBackup {
+				rp, rerr := readPassphraseFromEnv(req.PassphraseRef)
 				if rerr != nil {
 					return nil, &opError{Status: http.StatusBadRequest, Body: map[string]string{"error": rerr.Error()}}
 				}
 				resolved = rp
 			}
-			return s.buildUpgradeApplyStages(acc, racc, imageRef, preBackup, resolved, rollbackOnFailure), nil
+			return s.buildUpgradeApplyStages(acc, racc, req.ImageRef, req.PreBackup, resolved, rollbackOnFailure), nil
 		},
 		withOpIDHook(func(id string) { acc.opID = id }),
 		withResultFn(func(state ops.State, _ ops.FailureReason) map[string]interface{} {
@@ -174,6 +179,8 @@ type stageRun = func(context.Context) ([]byte, []byte, error)
 // upgradeApplyAccumulator carries parsed digests + decisions across the
 // apply stages. It holds ONLY parsed identifiers — never raw inspect JSON.
 type upgradeApplyAccumulator struct {
+	releaseProof        *releaseproof.Evidence
+	priorReleaseProof   *releaseproof.Evidence
 	targetDigests       []string // bare sha256, from manifest inspect
 	pinnedRef           string   // repo@sha256:<digest> actually pulled/restarted
 	pinnedDigest        string   // bare sha256 of pinnedRef
@@ -206,9 +213,9 @@ type upgradeApplyAccumulator struct {
 }
 
 // buildUpgradeApplyStages constructs the destructive apply flow.
-// requestedRef is the operator's original image_ref (tag or digest); the
-// flow resolves it to a concrete repo@sha256:<digest> pin (acc.pinnedRef)
-// and pulls/restarts/verifies against THAT, never the raw tag.
+// Production authorization requires requestedRef to be a signed pinned digest.
+// Tag resolution remains for isolated orchestration tests only; production
+// signature policy never authorizes a mutable tag.
 //
 //nolint:funlen // single-pass orchestration; splitting hides the capture→resolve→backup→pull→restart→health→verify ordering
 func (s *Server) buildUpgradeApplyStages(acc *upgradeApplyAccumulator, racc *rollbackAccumulator, requestedRef string, preBackup bool, resolvedPassphrase string, rollbackOnFailure bool) []ops.FlowStage {
@@ -217,12 +224,11 @@ func (s *Server) buildUpgradeApplyStages(acc *upgradeApplyAccumulator, racc *rol
 	stages := []ops.FlowStage{
 		{
 			// Capture what is ACTUALLY running before we touch anything.
-			// A capture failure (stack down / fresh deploy) is a valid
-			// state, not an op failure — we proceed without a prior. Also
-			// derive the inline-rollback target (priorRef) here.
+			// Missing or ambiguous baseline fails signed authorization.
+			// Recovery evidence is persisted before the first side effect.
 			Name:          "capture_before",
 			FailureReason: ops.ReasonCommandError,
-			Run:           s.captureBefore(acc),
+			Run:           s.captureAuthorizedBaseline(acc, requestedRef),
 		},
 		{
 			// Remote registry lookup → target digest set, then PIN a
@@ -263,7 +269,7 @@ func (s *Server) buildUpgradeApplyStages(acc *upgradeApplyAccumulator, racc *rol
 					acc.pinnedRef = imageRepo(requestedRef) + "@" + acc.pinnedDigest
 				}
 				acc.targetCompressed = targetCompressedBytes(res.Stdout, acc.pinnedDigest)
-				if digestSetsIntersect(acc.priorDigests, acc.targetDigests) {
+				if containsString(acc.priorDigests, acc.pinnedDigest) {
 					acc.alreadyCurrent = true
 				}
 				// Target pinned — fold TargetRef/TargetDigest into the journal record.
@@ -323,6 +329,9 @@ func (s *Server) buildUpgradeApplyStages(acc *upgradeApplyAccumulator, racc *rol
 				if s.imagePresentLocally(ctx, acc.pinnedRef) {
 					s.advanceJournalPhaseBestEffort(acc, journal.PhasePulled)
 					return []byte("pull: skipped (image present locally)"), nil, nil
+				}
+				if err := s.knownRelease(acc.pinnedRef); err != nil {
+					return nil, nil, err
 				}
 				res, rerr := s.opts.Runner.ComposePullDigest(ctx, acc.pinnedRef)
 				if res == nil {
@@ -411,8 +420,8 @@ func (s *Server) buildUpgradeApplyStages(acc *upgradeApplyAccumulator, racc *rol
 
 // captureBefore records what is ACTUALLY running before anything is
 // touched, the inline-rollback target, and the /ready baseline the
-// health gate must preserve. A capture failure (stack down / fresh
-// deploy) is a valid state, not an op failure.
+// health gate must preserve. Capture records missing state; the caller then
+// refuses apply when a signed observed baseline cannot be established.
 func (s *Server) captureBefore(acc *upgradeApplyAccumulator) stageRun {
 	return func(ctx context.Context) ([]byte, []byte, error) {
 		ri, err := s.opts.Runner.CaptureRunningProxyImage(ctx)
@@ -530,4 +539,14 @@ func containsString(haystack []string, needle string) bool {
 		}
 	}
 	return false
+}
+
+func (s *Server) captureAuthorizedBaseline(acc *upgradeApplyAccumulator, requestedRef string) stageRun {
+	return func(ctx context.Context) ([]byte, []byte, error) {
+		out, stderr, err := s.captureBefore(acc)(ctx)
+		if err != nil {
+			return out, stderr, err
+		}
+		return out, stderr, s.prepareRelease(requestedRef, acc.releaseProof, acc.priorRef, acc.priorReleaseProof)
+	}
 }

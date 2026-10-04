@@ -867,6 +867,12 @@ jobs:
           set -euxo pipefail
           CFG=/etc/culvert-maint/config.toml
           SOCK=/run/culvert-maint/culvert-maint.sock
+          go run ./test/e2e/release-proof-fixture --output "$RUNNER_TEMP/release-proof" \
+            --ref 'prior=${{ steps.images.outputs.d1_ref }}' --ref 'current=${{ steps.images.outputs.d2_ref }}'
+          sudo install -d -m 0755 /etc/culvert-release-fixture
+          sudo install -m 0644 "$RUNNER_TEMP/release-proof/keyring.json" /etc/culvert-release-fixture/keyring.json
+          sudo sed -i '/^[[:space:]]*release_catalog_repo[[:space:]]*=/d; /^[[:space:]]*release_trust_keys[[:space:]]*=/d' "$CFG"
+          printf '\nrelease_catalog_repo = "127.0.0.1:5000/culvert"\nrelease_trust_keys = "/etc/culvert-release-fixture/keyring.json"\n' | sudo tee -a "$CFG" >/dev/null
           sudo sed -i 's|^allow_peers = .*|allow_peers = ["0"]|' "$CFG"
           sudo grep -n '^allow_peers' "$CFG"
           sudo systemctl enable --now culvert-maint
@@ -893,9 +899,11 @@ jobs:
           set -euxo pipefail
           SOCK=/run/culvert-maint/culvert-maint.sock
           TARGET_REF="${{ steps.images.outputs.d2_ref }}"
+          printf '{"image_ref":"%s"}' "$TARGET_REF" | python3 test/e2e/release-proof-fixture/request.py \
+            --proofs "$RUNNER_TEMP/release-proof/proofs.json" --prior '${{ steps.images.outputs.d1_ref }}' > "$RUNNER_TEMP/release-proof/apply.json"
           APPLY_RESP="$(sudo curl -fsS --unix-socket "$SOCK" \
             -H 'Content-Type: application/json' -X POST \
-            -d "{\"image_ref\":\"$TARGET_REF\"}" \
+            --data-binary @"$RUNNER_TEMP/release-proof/apply.json" \
             http://localhost/v1/upgrades/apply)"
           echo "apply response: $APPLY_RESP"
           OP_ID="$(printf '%s' "$APPLY_RESP" | python3 -c 'import sys,json; print(json.load(sys.stdin)["op_id"])')"

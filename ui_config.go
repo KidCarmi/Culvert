@@ -1749,6 +1749,10 @@ func apiSessionTimeout(w http.ResponseWriter, r *http.Request) {
 //
 //	Send empty array [] to remove all restrictions.
 func apiUIAllowIPs(w http.ResponseWriter, r *http.Request) {
+	if uiAccessPolicyRefused() {
+		writeUIAccessRefusal(w, http.StatusServiceUnavailable, "ui_access_policy_unavailable", "Management access policy requires local recovery.")
+		return
+	}
 	switch r.Method {
 	case http.MethodGet:
 		if !requireRole(w, r, RoleAdmin) {
@@ -1760,18 +1764,29 @@ func apiUIAllowIPs(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		var body struct {
-			IPs []string `json:"ips"`
+			IPs *[]string `json:"ips"`
 		}
-		if err := decodeJSON(r, &body); err != nil {
-			http.Error(w, "invalid JSON", http.StatusBadRequest)
+		if err := decodeJSON(r, &body); err != nil || body.IPs == nil {
+			writeUIAccessRefusal(w, http.StatusBadRequest, "invalid_ui_allow_ips", "Provide ips as an array; use [] to remove restrictions.")
 			return
 		}
-		if err := SetUIAllowedCIDRs(body.IPs); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
+		nets, err := parseUIAllowedCIDRs(*body.IPs)
+		if err != nil {
+			writeUIAccessRefusal(w, http.StatusBadRequest, "invalid_ui_allow_ips", err.Error())
 			return
 		}
-		auditEvent(r, "settings.ui_allow_ips", fmt.Sprintf("%d entries", len(body.IPs)), strings.Join(body.IPs, ", "))
-		adminSettingsSave()
+		if err := persistUIAllowedCIDRs(nets); err != nil {
+			if errors.Is(err, fileutil.ErrReplacedNotSynced) {
+				auditEvent(r, "settings.ui_allow_ips.persistence_uncertain", "replacement landed", "runtime updated; crash durability unconfirmed")
+				writeUIAccessRefusal(w, http.StatusServiceUnavailable, "ui_allow_ips_persistence_uncertain", "The new management policy is active, but crash durability could not be confirmed; verify storage before restarting.")
+				return
+			}
+			writeUIAccessRefusal(w, http.StatusServiceUnavailable, "ui_allow_ips_not_saved", "Management access policy could not be saved; the previous policy remains active.")
+			return
+		}
+		values := canonicalUIAllowedCIDRs(nets)
+		auditEvent(r, "settings.ui_allow_ips", fmt.Sprintf("%d entries", len(values)), strings.Join(values, ", "))
+		saveConfigVersion(sessionAdmin(r), "Updated UI access IP allowlist")
 		jsonOK(w, map[string]any{"ok": true, "ips": ListUIAllowedCIDRs()})
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)

@@ -131,7 +131,10 @@ type AdminSettings struct {
 	SessionTimeoutHours int `json:"session_timeout_hours,omitempty"`
 
 	// Network
-	UIAllowIPs            []string `json:"ui_allow_ips,omitempty"`
+	UIAllowIPs []string `json:"ui_allow_ips,omitempty"`
+	// UIAllowIPsSaved makes an explicitly cleared list authoritative over the
+	// startup seed, while sentinel-less legacy empty settings keep that seed.
+	UIAllowIPsSaved       bool     `json:"ui_allow_ips_saved,omitempty"`
 	BaseURL               string   `json:"base_url,omitempty"`
 	UISANs                []string `json:"ui_sans,omitempty"`
 	TrustForwardedHeaders bool     `json:"trust_forwarded_headers"`
@@ -302,6 +305,7 @@ func snapshotOverriddenSurfaces(s AdminSettings) {
 	add(s.LogRetentionSaved, "log retention")
 	add(s.LogStoreEnabledSaved, "log-store enable")
 	add(s.TrustedProxyCIDRsSaved, "trusted-proxy CIDRs")
+	add(s.UIAllowIPsSaved, "UI access IPs")
 	add(s.BlocklistFeedsSaved, "blocklist feeds")
 	add(s.UpstreamProxiesSaved, "upstream proxy pool")
 	add(s.YARASettingsSaved, "YARA engine settings")
@@ -327,6 +331,7 @@ func LoadAdminSettings(path string) {
 	// a corrupt load we default and the next save writes a clean file, so the /readyz
 	// row + alert would otherwise vanish while every GUI-saved admin setting stays lost.
 	noteResidualQuarantine("admin_settings", path)
+	noteUIAccessQuarantine(path)
 
 	data, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
@@ -339,6 +344,7 @@ func LoadAdminSettings(path string) {
 		return
 	}
 	if err != nil {
+		refuseLoadedUIAccessPolicy(nil)
 		// Read error on an EXISTING file (EACCES/EIO): the content may be intact, so do
 		// NOT quarantine (a rename could move a healthy file aside on a transient
 		// permission blip — the documented state-corruption posture). Surface it
@@ -353,7 +359,8 @@ func LoadAdminSettings(path string) {
 		return
 	}
 	var s AdminSettings
-	if err := json.Unmarshal(data, &s); err != nil {
+	if err := decodeAdminSettingsObject(data, &s); err != nil {
+		refuseLoadedUIAccessPolicy(nil)
 		// Present-but-corrupt settings. Previously this logged and returned — and the
 		// NEXT SaveAdminSettings (any admin mutation) then atomically OVERWROTE the
 		// corrupt file with a defaults-only snapshot, destroying the only copy of the
@@ -367,6 +374,11 @@ func LoadAdminSettings(path string) {
 		finalizeRewriteSeedIdentities()
 		return
 	}
+
+	// Establish access authority before any migration or apply callback can
+	// schedule an omnibus save. Otherwise a malformed saved list could be
+	// replaced with the still-empty runtime policy by an unrelated startup save.
+	applyAdminUIAccessPolicy(&s)
 
 	// F3a-1: initialize the SaaS feed-config schema boundary before applying admin
 	// services. Idempotent (marker-guarded), backed up before mutation, atomic, and
@@ -663,9 +675,7 @@ func applyAdminLogStore(s *AdminSettings) {
 
 // applyAdminNetwork applies UI access, TLS, and network settings.
 func applyAdminNetwork(s *AdminSettings) {
-	if len(s.UIAllowIPs) > 0 {
-		_ = SetUIAllowedCIDRs(s.UIAllowIPs)
-	}
+	applyAdminUIAccessPolicy(s)
 	if s.BaseURL != "" {
 		SetProxyBaseURL(s.BaseURL)
 	}
@@ -845,6 +855,7 @@ func snapshotBlocklistFeeds(s *AdminSettings) {
 // snapshotted in saveAdminSettingsWithOverrides or it is silently dropped on the next
 // unrelated mutation.
 type adminSaveOverrides struct {
+	uiAllowIPs       *[]string
 	autoExclude      *autoExcludeTunables
 	supportRetention *supportRetentionConfig
 	policyLearning   *policyLearnSettings
@@ -895,8 +906,9 @@ type adminSaveOverrides struct {
 	// It runs INSIDE the save's adminSettingsMu critical section, immediately after a
 	// successful write — so no concurrent omnibus save can snapshot the pre-apply
 	// runtime value and then land its own AtomicWrite after this one, reverting the
-	// just-persisted setting on disk. It runs only on a successful write (persist
-	// failure ⇒ never applied ⇒ runtime and disk stay in agreement).
+	// just-persisted setting on disk. The UI-policy override also runs after a
+	// replacement that landed but whose directory sync failed; its caller reports
+	// uncertain durability while keeping runtime aligned with the landed file.
 	applyOnSuccess func()
 }
 
@@ -909,9 +921,9 @@ func SaveAdminSettings() error { return saveAdminSettingsWithOverrides(adminSave
 // saveAdminSettingsWithOverrides is SaveAdminSettings with optional per-feature
 // TARGET overrides. When a field is non-nil the durable file records those TARGET
 // values instead of the live ones — the owning PUT persists the target FIRST, then
-// (only on success) applies it to the live runtime. Because those applies are
-// infallible, a persist failure leaves the live state — and any data it governs —
-// untouched.
+// applies it to the live runtime. Pre-replacement failures leave runtime untouched.
+// The UI-policy override handles ErrReplacedNotSynced as a landed replacement,
+// applying the target while retaining the durability error for its caller.
 func saveAdminSettingsWithOverrides(ov adminSaveOverrides) error {
 	// Hold adminSettingsMu across the ENTIRE snapshot → write → apply sequence, not
 	// just the path read. Every save (omnibus or override-carrying) is thereby
@@ -921,6 +933,12 @@ func saveAdminSettingsWithOverrides(ov adminSaveOverrides) error {
 	// free; adminSettingsSave already runs this off the request goroutine.
 	adminSettingsMu.Lock()
 	defer adminSettingsMu.Unlock()
+	if err := uiAccessSavePrecondition(); err != nil {
+		return err
+	}
+	if ov.uiAllowIPs != nil && uiAccessPolicyRefused() {
+		return errors.New("management access policy requires local recovery")
+	}
 	if ov.precondition != nil {
 		if err := ov.precondition(); err != nil {
 			return err
@@ -985,6 +1003,7 @@ func saveAdminSettingsWithOverrides(ov adminSaveOverrides) error {
 		LogLevel:               effectiveAdminLogLevel().String(),
 		SessionTimeoutHours:    int(getSessionTTL().Hours()),
 		UIAllowIPs:             ListUIAllowedCIDRs(),
+		UIAllowIPsSaved:        true,
 		TrustForwardedHeaders:  trustForwardedHeaders,
 		TrustedProxyCIDRs:      ListTrustedProxyCIDRs(),
 		TrustedProxyCIDRsSaved: true, // once saved, the persisted list is authoritative (incl. empty)
@@ -992,6 +1011,9 @@ func saveAdminSettingsWithOverrides(ov adminSaveOverrides) error {
 	}
 
 	snapshotAdminEndpoints(&s)
+	if ov.uiAllowIPs != nil {
+		s.UIAllowIPs = append([]string(nil), (*ov.uiAllowIPs)...)
+	}
 
 	// Rewrite rules: the TARGET set for a rewrite-mutating save (persist-before-
 	// apply), else the live set. Stamped saved-authoritative so an explicit
@@ -1105,6 +1127,12 @@ func saveAdminSettingsWithOverrides(ov adminSaveOverrides) error {
 	// goroutine per API mutation, so a fixed ".tmp" name lets concurrent
 	// saves interleave into the same temp file and publish a torn result.
 	if err := fileutil.AtomicWrite(path, data, 0o600); err != nil {
+		// A UI-policy replacement that landed must not diverge from runtime.
+		// Keep the error: the API distinguishes this uncertain durability from
+		// a pre-rename refusal and never reports durable success.
+		if ov.uiAllowIPs != nil && errors.Is(err, fileutil.ErrReplacedNotSynced) && ov.applyOnSuccess != nil {
+			ov.applyOnSuccess()
+		}
 		logger.Printf("AdminSettings: write error: %v", err)
 		return err
 	}

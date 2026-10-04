@@ -578,11 +578,11 @@ GH_REPO="${CULVERT_GITHUB_REPO:-KidCarmi/Culvert}"
 # download (fail-closed) rather than trusting an unverified binary.
 MAINT_SIGSTORE_ISSUER="https://token.actions.githubusercontent.com"
 MAINT_SIGSTORE_SAN_REGEX='^https://github\.com/KidCarmi/Culvert/\.github/workflows/ci\.yml@refs/tags/v.*$'
-# Pinned cosign verifier image (the root of trust for the check). A bare tag is
-# mutable; high-assurance operators should override with a digest-pinned ref.
+# Immutable multi-platform cosign verifier (the root of trust for the check).
+# The digest binds the official GHCR v3.0.6 index; never resolve a mutable tag.
 # MUST be cosign v3.x (new-format Sigstore bundles). Mirrors the agent
 # installer's COSIGN_IMAGE default.
-MAINT_COSIGN_IMAGE="${CULVERT_MAINT_COSIGN_IMAGE:-ghcr.io/sigstore/cosign/cosign:v3.0.6}"
+MAINT_COSIGN_IMAGE="${CULVERT_MAINT_COSIGN_IMAGE:-ghcr.io/sigstore/cosign/cosign:v3.0.6@sha256:de9c65609e6bde17e6b48de485ee788407c9502fa08b8f4459f595b21f56cd00}"
 
 # verify_pinned_image_signature — cosign-verify (keyless) the registry image
 # behind $PINNED_TAG against the pinned tag identity. No host cosign needed;

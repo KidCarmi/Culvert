@@ -5407,6 +5407,28 @@
         "description": "Adaptive auto-exclude tunables patch (subset of tunable fields).",
         "type": "object"
       },
+      "UIAccessPolicyError": {
+        "additionalProperties": false,
+        "properties": {
+          "code": {
+            "enum": [
+              "invalid_ui_allow_ips",
+              "ui_access_policy_unavailable",
+              "ui_allow_ips_not_saved",
+              "ui_allow_ips_persistence_uncertain"
+            ],
+            "type": "string"
+          },
+          "error": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "error",
+          "code"
+        ],
+        "type": "object"
+      },
       "UIAllowIPs": {
         "additionalProperties": false,
         "properties": {
@@ -25370,6 +25392,16 @@
           },
           "403": {
             "$ref": "#/components/responses/PlainForbidden"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UIAccessPolicyError"
+                }
+              }
+            },
+            "description": "Access policy is unavailable, or saving failed. Inspect code; ui_allow_ips_persistence_uncertain means the new policy is active but its crash durability is unconfirmed."
           }
         },
         "security": [
@@ -25392,7 +25424,7 @@
         "x-culvert-visibility": "admin-supported"
       },
       "post": {
-        "description": "Set UI allow-IPs.",
+        "description": "Validate and persist the complete access list before publishing it. An empty array intentionally removes restrictions. A persistence-uncertain response means the replacement landed and the new policy is active, but crash durability could not be confirmed.",
         "operationId": "setUIAllowIPs",
         "requestBody": {
           "content": {
@@ -25414,13 +25446,30 @@
                 }
               }
             },
-            "description": "Set UI allow-IPs."
+            "description": "Validate and persist the complete access list before publishing it. An empty array intentionally removes restrictions. A persistence-uncertain response means the replacement landed and the new policy is active, but crash durability could not be confirmed."
           },
           "400": {
-            "$ref": "#/components/responses/PlainBadRequest"
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UIAccessPolicyError"
+                }
+              }
+            },
+            "description": "Invalid or missing IP list; the active policy is unchanged."
           },
           "403": {
             "$ref": "#/components/responses/PlainForbidden"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UIAccessPolicyError"
+                }
+              }
+            },
+            "description": "Access policy is unavailable, or saving failed. Inspect code; ui_allow_ips_persistence_uncertain means the new policy is active but its crash durability is unconfirmed."
           }
         },
         "security": [

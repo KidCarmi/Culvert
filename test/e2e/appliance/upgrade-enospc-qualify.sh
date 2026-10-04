@@ -89,6 +89,9 @@ push_digest(){ docker tag "$1" "$REPO:$2" >/dev/null; docker push -q "$REPO:$2" 
   echo "$REPO@$d"; }
 PRED_REF="$(push_digest "$PRED_IMAGE" pred)"; CUR_REF="$(push_digest "$CUR_IMAGE" cur)"
 log "pred=$PRED_REF cur=$CUR_REF"
+PROOFD="$EVID/release-proof"
+( cd "$ROOT" && go run ./test/e2e/release-proof-fixture --output "$PROOFD" --ref "prior=$PRED_REF" --ref "current=$CUR_REF" )
+proof_request(){ python3 "$ROOT/test/e2e/release-proof-fixture/request.py" --proofs "$PROOFD/proofs.json" "$@"; }
 
 # The nested daemon: its own bridge range so the outer gateway (the registry)
 # stays routable from inside; every state directory on the loop filesystem.
@@ -145,6 +148,11 @@ assert_enforcement E0
 
 ( cd "$ROOT/cmd/culvert-maint" && CGO_ENABLED=0 go build -o "$EVID/culvert-maint" . )
 docker cp "$EVID/culvert-maint" "$DIND:/usr/local/bin/culvert-maint" >/dev/null
+IN mkdir -p /etc/culvert-release-fixture
+docker cp "$PROOFD/keyring.json" "$DIND:/etc/culvert-release-fixture/keyring.json" >/dev/null
+IN chown -R root:root /etc/culvert-release-fixture
+IN chmod 0755 /etc/culvert-release-fixture
+IN chmod 0644 /etc/culvert-release-fixture/keyring.json
 esc_reg="$(printf '%s' "$REGHOST" | sed 's/\./\\\\./g')"
 cat > "$MNT/culvert-maint/config.toml" <<CFG
 privilege_mode = "docker_group_lab"
@@ -154,6 +162,8 @@ compose_override_file = "docker-compose.override.yml"
 socket_path = "/run/culvert-maint/agent.sock"
 state_dir = "/var/lib/culvert-maint/state"
 proxy_repo = "$REPO"
+release_catalog_repo = "$REPO"
+release_trust_keys = "/etc/culvert-release-fixture/keyring.json"
 image_allowlist = "^${esc_reg}/culvert(:[A-Za-z0-9._-]+|@sha256:[a-f0-9]{64})\$"
 allow_peers = ["0"]
 health_base_url = "http://127.0.0.1:8080"
@@ -167,11 +177,13 @@ IN sh -c 'nohup culvert-maint --config /var/lib/culvert-maint/config.toml >> /va
 ag(){ curl -sS --unix-socket "$SOCK" -H 'Content-Type: application/json' "$@"; }
 for _ in $(seq 1 30); do ag http://unix/v1/health >/dev/null 2>&1 && break; sleep 1; done
 if ag http://unix/v1/health >/dev/null 2>&1; then check E0 agent-start pass "$(ag http://unix/v1/health)"; else check E0 agent-start fail "$(tail -5 "$MNT/culvert-maint/agent.log")"; exit 1; fi
+unsigned_code="$(ag -X POST http://unix/v1/upgrades/apply -d "{\"image_ref\":\"$CUR_REF\",\"pre_backup\":false}" -o /dev/null -w '%{http_code}')"
+[[ "$unsigned_code" == 403 ]] && check E0 unsigned-release-refused pass "http 403" || { check E0 unsigned-release-refused fail "http $unsigned_code"; exit 1; }
 wait_op(){ for _ in $(seq 1 300); do local j st; j="$(ag "http://unix/v1/operations/$1" 2>/dev/null || true)"
   st="$(printf '%s' "$j" | python3 -c 'import json,sys
 try: print(json.load(sys.stdin).get("state",""))
 except Exception: print("")')"; case "$st" in succeeded|failed) echo "$j"; return 0;; esac; sleep 2; done; echo '{"state":"timeout"}'; }
-apply(){ ag -X POST http://unix/v1/upgrades/apply -d "{\"image_ref\":\"$1\",\"pre_backup\":false,\"rollback_on_failure\":true,\"idempotency_key\":\"$2\"}" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("op_id",""))'; }
+apply(){ ag -X POST http://unix/v1/upgrades/apply -d "$(printf '%s' "{\"image_ref\":\"$1\",\"pre_backup\":false,\"rollback_on_failure\":true,\"idempotency_key\":\"$2\"}" | proof_request --prior "$PRED_REF")" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("op_id",""))'; }
 running_id(){ IN docker inspect -f '{{.Image}}' culvert; }
 
 # diagnose: what the stack looks like when a probe fails (container state,

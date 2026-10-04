@@ -6,7 +6,7 @@ on:
   # REQUIRED aggregate rather than a separate advisory check.
   workflow_call:
   push:
-    branches: [feat/appliance-console, feat/appliance-firstboot-guidance, harden/appliance-access-and-artifacts]
+    branches: [feat/appliance-console, feat/appliance-firstboot-guidance, harden/appliance-access-and-artifacts, harden/appliance-release-boundaries]
     paths:
       - 'appliance/console/**'
       - 'appliance/boot-splash/**'
@@ -23,6 +23,13 @@ on:
       - 'ui_middleware*'
       - 'store.go'
       - 'cmd/culvert-maint/**'
+      - 'pkg/releaseproof/**'
+      - 'third_party/crewjam-saml/**'
+      - 'release_catalog*'
+      - 'release_dispatch*'
+      - 'ui_allow_ips*'
+      - 'ui_access_policy*'
+      - 'admin_settings*'
       - 'appliance_*test.go'
       - 'internal/applianceconsole/**'
       - 'internal/appliancehost/**'
@@ -63,6 +70,12 @@ jobs:
           python3 -m venv /tmp/culvert-artifact-audit-env
           /tmp/culvert-artifact-audit-env/bin/pip install cryptography==50.0.2
           /tmp/culvert-artifact-audit-env/bin/python -m unittest discover -s appliance/artifact-audit -v
+      - name: Patched SAML runtime and signature regressions
+        run: |
+          (cd third_party/crewjam-saml && go test -mod=readonly ./xmlenc ./samlsp .)
+          go test -run '^Test(SAML|ReleaseProof|CosignVerifier|CosignBundle|UIAllow|UIAccess|AdminSettings|LoadUIAccessPolicy|LoadAdminSettings_|SetUIAllowedCIDRs)' .
+          CGO_ENABLED=0 go build -trimpath -o /tmp/culvert-runtime .
+          /tmp/culvert-artifact-audit-env/bin/python appliance/artifact-audit/verify_saml_patch.py --binary /tmp/culvert-runtime
       - name: Operator key import privilege and filesystem boundaries
         run: |
           go test -c -o /tmp/culvert-access.test ./cmd/culvert-access
@@ -70,8 +83,16 @@ jobs:
       - name: Maintenance agent admission and interrupted journal regressions
         working-directory: cmd/culvert-maint
         run: |
-          go test -race -shuffle=on -count=2 ./internal/server ./internal/journal
-          go vet ./internal/server ./internal/journal
+          go test -race -shuffle=on -count=2 ./internal/server ./internal/journal ./internal/releasetrust
+          go vet ./internal/server ./internal/journal ./internal/releasetrust
+      - name: Management access policy feedback
+        run: node --test test/ui-allow-ips.test.mjs
+      - name: Independent signed release evidence verifier
+        working-directory: pkg/releaseproof
+        run: |
+          go test -race -shuffle=on -count=2 ./...
+          go vet ./...
+          go mod tidy -diff
       - name: Existing firstboot and OS maintenance contracts
         run: go test -shuffle=on -count=1 -run '^Test(FirstBoot|OSUpdate|SudoPolicy|SetupToken|UIAuthBootstrap|UISessionRole|SessionRole|RoleFailClosed|AuthStatus|RosterToSession|SessionAdmin|AuditActor|APIAuth|LiveTrustHTTP)' .
       - name: Bounded terminal layout fuzzing

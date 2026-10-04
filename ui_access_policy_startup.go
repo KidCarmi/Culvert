@@ -11,11 +11,8 @@ import (
 	"strings"
 )
 
-// loadUIAccessPolicy applies cfg. Returns an error only for the
-// IdP-profiles load path — the shim log.Fatalf's it verbatim to match
-// the pre-pilot "IdP profiles load error:" message. Allowlist-parse
-// failures are logged and do NOT fail startup, preserving original
-// behaviour.
+// loadUIAccessPolicy applies configured access policy. Invalid allowlist entries
+// refuse startup; an operator typo must never expose an unrestricted admin UI.
 func loadUIAccessPolicy(cfg uiAccessPolicyStartupConfig) error {
 	allowList := cfg.AllowList
 	if cfg.AllowIPCLI != "" {
@@ -25,7 +22,7 @@ func loadUIAccessPolicy(cfg uiAccessPolicyStartupConfig) error {
 	}
 	if len(allowList) > 0 {
 		if err := SetUIAllowedCIDRs(allowList); err != nil {
-			logger.Printf("UIGuard: invalid IP/CIDR (%v) — allowing all IPs", err)
+			return fmt.Errorf("admin UI access policy: %w", err)
 		} else {
 			logger.Printf("UIGuard: admin panel restricted to %v", allowList)
 		}

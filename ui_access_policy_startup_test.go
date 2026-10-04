@@ -32,6 +32,8 @@ func resetUIAccessPolicyGlobals(t *testing.T) {
 	t.Helper()
 	uiAllowedNetsMu.RLock()
 	origNets := append([]*net.IPNet(nil), uiAllowedNets...)
+	origRefused, origUnknown := uiAccessRefused, uiAccessUnknown
+	origRetained := append([]string(nil), uiAccessRetained...)
 	uiAllowedNetsMu.RUnlock()
 	origBase := proxyExternalBaseURL
 	idpRegistry.mu.RLock()
@@ -41,6 +43,7 @@ func resetUIAccessPolicyGlobals(t *testing.T) {
 	t.Cleanup(func() {
 		uiAllowedNetsMu.Lock()
 		uiAllowedNets = origNets
+		uiAccessRefused, uiAccessUnknown, uiAccessRetained = origRefused, origUnknown, origRetained
 		uiAllowedNetsMu.Unlock()
 		proxyExternalBaseURL = origBase
 		idpRegistry.mu.Lock()
@@ -131,12 +134,12 @@ func TestLoadUIAccessPolicy_MergesCLIAndFileAllowList(t *testing.T) {
 	}
 }
 
-func TestLoadUIAccessPolicy_InvalidCIDRIsNonFatal(t *testing.T) {
+func TestLoadUIAccessPolicy_InvalidCIDRRefusesStartup(t *testing.T) {
 	resetUIAccessPolicyGlobals(t)
 	ensureUIAccessPolicyTestLogger(t)
 	c := uiAccessPolicyStartupConfig{AllowIPCLI: "not-a-cidr"}
-	if err := loadUIAccessPolicy(c); err != nil {
-		t.Fatalf("expected non-fatal CIDR parse failure; got %v", err)
+	if err := loadUIAccessPolicy(c); err == nil {
+		t.Fatal("invalid configured policy must refuse startup")
 	}
 }
 

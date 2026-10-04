@@ -173,6 +173,10 @@ func (s *Server) reconcileResolve(w http.ResponseWriter, r *http.Request, peer a
 		writeJSON(w, http.StatusOK, map[string]interface{}{"op_id": rec.OpID, "resolved": "noop", "reason": cl.verdict.Reason})
 		return
 	case actVerifyAdoptElseRollback:
+		if err := s.knownRelease(rec.TargetRef); err != nil {
+			writeJSON(w, http.StatusConflict, map[string]string{"error": "release_authorization_unavailable"})
+			return
+		}
 		ok, detail := s.probeHealth(r.Context())
 		cl.verdict.LastHealth = detail
 		if ok {
@@ -186,6 +190,10 @@ func (s *Server) reconcileResolve(w http.ResponseWriter, r *http.Request, peer a
 	if targetRef == "" {
 		_ = s.opts.Journal.WriteVerdict(rec.OpID, cl.verdict)
 		writeJSON(w, http.StatusConflict, map[string]interface{}{"error": "no_recovery_target", "op_id": rec.OpID, "verdict": cl.verdict.Verdict, "health": cl.verdict.LastHealth})
+		return
+	}
+	if err := s.knownRelease(targetRef); err != nil {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "release_authorization_unavailable"})
 		return
 	}
 	s.launchResolveOp(w, r, peer, rec, cl.verdict, targetRef, label, req.IdempotencyKey)

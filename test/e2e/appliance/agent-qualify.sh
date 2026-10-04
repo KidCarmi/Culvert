@@ -31,9 +31,9 @@ check(){ local sc="$1" n="$2" r="$3" d="${4:-}"; printf '{"run":"%s","scenario":
 # The agent runs `docker compose -f … up -d` from compose_project_dir, so the
 # compose PROJECT NAME is the directory basename; the harness must start the
 # stack under the same name or the agent's `up` collides with our containers.
-PDIR="$EVID/proj"; PROJ="proj"; rm -rf "$PDIR"; mkdir -p "$PDIR/state"
+PDIR="$EVID/proj"; PROJ="proj"; rm -rf "$PDIR"; mkdir -p "$PDIR"
 dc(){ docker compose -p "$PROJ" --project-directory "$PDIR" -f "$PDIR/docker-compose.yml" -f "$PDIR/docker-compose.override.yml" "$@"; }
-cleanup(){ pkill -f "culvert-maint --config $PDIR/config.toml" 2>/dev/null || true; rm -rf "${SOCKDIR:-}"; dc down -v --remove-orphans >/dev/null 2>&1 || true; docker rm -f aqa-registry >/dev/null 2>&1 || true; rm -rf "/etc/docker/certs.d/127.0.0.1:$REG_PORT"; }
+cleanup(){ pkill -f "culvert-maint --config $PDIR/config.toml" 2>/dev/null || true; rm -rf "${SOCKDIR:-}"; [[ -z "${AGENT_STATE:-}" ]] || rm -rf "$AGENT_STATE"; dc down -v --remove-orphans >/dev/null 2>&1 || true; docker rm -f aqa-registry >/dev/null 2>&1 || true; rm -rf "/etc/docker/certs.d/127.0.0.1:$REG_PORT"; [[ -z "${TRUST_FILE:-}" ]] || rm -f "$TRUST_FILE"; }
 trap cleanup EXIT
 
 # ── registry + images ────────────────────────────────────────────────────────
@@ -58,6 +58,12 @@ push_digest(){ docker tag "$1" "$REPO:$2" >/dev/null; docker push -q "$REPO:$2" 
   echo "$REPO@$d"; }
 PRED_REF="$(push_digest "$PRED_IMAGE" pred)"; CUR_REF="$(push_digest "$CUR_IMAGE" cur)"
 log "pred=$PRED_REF cur=$CUR_REF"
+PROOFD="$PDIR/release-proof"
+( cd "$ROOT" && go run ./test/e2e/release-proof-fixture --output "$PROOFD" --ref "prior=$PRED_REF" --ref "current=$CUR_REF" )
+TRUST_FILE="/etc/culvert-release-fixture/aq-$$.json"
+install -d -o root -g root -m 0755 /etc/culvert-release-fixture
+install -o root -g root -m 0644 "$PROOFD/keyring.json" "$TRUST_FILE"
+proof_request(){ python3 "$ROOT/test/e2e/release-proof-fixture/request.py" --proofs "$PROOFD/proofs.json" "$@"; }
 
 # ── compose project from the CUR deploy bundle ───────────────────────────────
 cid="$(docker create "$CUR_IMAGE")"; docker cp "$cid:/app/deploy/docker-compose.yml" "$PDIR/docker-compose.yml" >/dev/null; docker rm -f "$cid" >/dev/null
@@ -77,14 +83,17 @@ check F0 seeded-predecessor pass "running $(curl -fsS http://127.0.0.1:8080/heal
 # A Unix socket path is limited to ~108 bytes; keep it short and outside the
 # (possibly deep) evidence directory.
 SOCKDIR="$(mktemp -d /tmp/aqsock.XXXXXX)"; SOCK="$SOCKDIR/agent.sock"
+AGENT_STATE="$(mktemp -d /tmp/aqstate.XXXXXX)"
 cat > "$PDIR/config.toml" <<CFG
 privilege_mode = "docker_group_lab"
 compose_project_dir = "$PDIR"
 compose_file = "docker-compose.yml"
 compose_override_file = "docker-compose.override.yml"
 socket_path = "$SOCK"
-state_dir = "$PDIR/state"
+state_dir = "$AGENT_STATE"
 proxy_repo = "$REPO"
+release_catalog_repo = "$REPO"
+release_trust_keys = "$TRUST_FILE"
 image_allowlist = "^127\\\\.0\\\\.0\\\\.1:$REG_PORT/culvert(:[A-Za-z0-9._-]+|@sha256:[a-f0-9]{64})\$"
 allow_peers = ["$(id -u)"]
 health_base_url = "http://127.0.0.1:8080"
@@ -104,10 +113,12 @@ except Exception: print("")' )"; case "$st" in succeeded|failed) echo "$j"; retu
 running_digest(){ docker inspect --format '{{index .Image}}' culvert 2>/dev/null; docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$(docker inspect --format '{{.Image}}' culvert)" | grep "^$REPO@" | head -1; }
 start_agent || { check F0 agent-start fail "$(tail -5 "$PDIR/agent.log")"; exit 1; }
 check F0 agent-start pass "$(ag http://unix/v1/health)"
+unsigned_code="$(ag -X POST http://unix/v1/upgrades/apply -d "{\"image_ref\":\"$CUR_REF\",\"pre_backup\":false}" -o /dev/null -w '%{http_code}')"
+[[ "$unsigned_code" == 403 ]] && check F0 unsigned-release-refused pass "http 403" || { check F0 unsigned-release-refused fail "http $unsigned_code"; exit 1; }
 
 # ── F1 apply PRED → CUR ──────────────────────────────────────────────────────
 KEY="aq-$RUN_ID"
-r="$(ag -X POST http://unix/v1/upgrades/apply -d "{\"image_ref\":\"$CUR_REF\",\"pre_backup\":false,\"rollback_on_failure\":true,\"idempotency_key\":\"$KEY\"}" -w '\n%{http_code}')"
+r="$(ag -X POST http://unix/v1/upgrades/apply -d "$(printf '%s' "{\"image_ref\":\"$CUR_REF\",\"pre_backup\":false,\"rollback_on_failure\":true,\"idempotency_key\":\"$KEY\"}" | proof_request --prior "$PRED_REF")" -w '\n%{http_code}')"
 OP="$(echo "$r" | sed '$d' | python3 -c 'import json,sys;print(json.load(sys.stdin).get("op_id",""))')"
 [[ -n "$OP" ]] && check F1 apply-accepted pass "op=$OP http=$(echo "$r"|tail -n1)" || check F1 apply-accepted fail "$r"
 j="$(wait_op "$OP")"; st="$(echo "$j" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("state"))')"
@@ -115,19 +126,19 @@ j="$(wait_op "$OP")"; st="$(echo "$j" | python3 -c 'import json,sys;print(json.l
 rd="$(running_digest | tail -n1)"; [[ "$rd" == "$CUR_REF" ]] && check F1 running-is-target pass "$rd" || check F1 running-is-target fail "running=$rd want=$CUR_REF"
 c="$(api POST /api/auth/login '{"user":"agentadmin","pass":"Agent-Qual-2026!x"}' | tail -n1)"; [[ "$c" == 200 ]] && check F1 state-preserved pass "admin login http $c after upgrade" || check F1 state-preserved fail "http $c"
 # ── F2 duplicate request ─────────────────────────────────────────────────────
-r="$(ag -X POST http://unix/v1/upgrades/apply -d "{\"image_ref\":\"$CUR_REF\",\"pre_backup\":false,\"rollback_on_failure\":true,\"idempotency_key\":\"$KEY\"}" -w '\n%{http_code}')"
+r="$(ag -X POST http://unix/v1/upgrades/apply -d "$(printf '%s' "{\"image_ref\":\"$CUR_REF\",\"pre_backup\":false,\"rollback_on_failure\":true,\"idempotency_key\":\"$KEY\"}" | proof_request --prior "$PRED_REF")" -w '\n%{http_code}')"
 code="$(echo "$r" | tail -n1)"; dup="$(echo "$r" | sed '$d' | python3 -c 'import json,sys;d=json.load(sys.stdin);print(d.get("op_id",""),d.get("deduped"))')"
 [[ "$code" == 200 && "$dup" == "$OP True" ]] && check F2 duplicate-deduped pass "http 200 $dup" || check F2 duplicate-deduped fail "http $code $dup"
 # ── F5 idempotency across agent restart ──────────────────────────────────────
 stop_agent; start_agent || true
-r="$(ag -X POST http://unix/v1/upgrades/apply -d "{\"image_ref\":\"$CUR_REF\",\"pre_backup\":false,\"rollback_on_failure\":true,\"idempotency_key\":\"$KEY\"}" -w '\n%{http_code}')"
+r="$(ag -X POST http://unix/v1/upgrades/apply -d "$(printf '%s' "{\"image_ref\":\"$CUR_REF\",\"pre_backup\":false,\"rollback_on_failure\":true,\"idempotency_key\":\"$KEY\"}" | proof_request --prior "$PRED_REF")" -w '\n%{http_code}')"
 code="$(echo "$r" | tail -n1)"; dup="$(echo "$r" | sed '$d' | python3 -c 'import json,sys;d=json.load(sys.stdin);print(d.get("op_id",""),d.get("deduped"))')"
 [[ "$code" == 200 && "$dup" == "$OP True" ]] && check F5 duplicate-after-agent-restart pass "http 200 $dup" || check F5 duplicate-after-agent-restart fail "http $code $dup"
 # ── F3 kill mid-apply (PRED ← CUR → PRED again as a fresh target) ──────────────
 # Apply back to PRED; SIGKILL the agent as soon as the op passes the pull
 # stage (the restart stage is where the tag advances). Then restart the agent
 # and read what reconcile classified.
-r="$(ag -X POST http://unix/v1/upgrades/apply -d "{\"image_ref\":\"$PRED_REF\",\"pre_backup\":false,\"rollback_on_failure\":false,\"idempotency_key\":\"aq-kill-$RUN_ID\"}" -w '\n%{http_code}')"
+r="$(ag -X POST http://unix/v1/upgrades/apply -d "$(printf '%s' "{\"image_ref\":\"$PRED_REF\",\"pre_backup\":false,\"rollback_on_failure\":false,\"idempotency_key\":\"aq-kill-$RUN_ID\"}" | proof_request --prior "$CUR_REF")" -w '\n%{http_code}')"
 OP2="$(echo "$r" | sed '$d' | python3 -c 'import json,sys;print(json.load(sys.stdin).get("op_id",""))')"
 killed=no
 for _ in $(seq 1 300); do
@@ -166,12 +177,12 @@ fi
 # ensure we are on PRED now for the rollback test; if not, apply CUR and roll back to PRED
 rd="$(running_digest | tail -n1)"
 if [[ "$rd" != "$CUR_REF" ]]; then
-  r="$(ag -X POST http://unix/v1/upgrades/apply -d "{\"image_ref\":\"$CUR_REF\",\"pre_backup\":false,\"rollback_on_failure\":false,\"idempotency_key\":\"aq-recur-$RUN_ID\"}")"
+  r="$(ag -X POST http://unix/v1/upgrades/apply -d "$(printf '%s' "{\"image_ref\":\"$CUR_REF\",\"pre_backup\":false,\"rollback_on_failure\":false,\"idempotency_key\":\"aq-recur-$RUN_ID\"}" | proof_request --prior "$PRED_REF")")"
   wait_op "$(echo "$r" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("op_id",""))')" >/dev/null
 fi
 # ── F4 rollback with the registry STOPPED ────────────────────────────────────
 docker stop aqa-registry >/dev/null
-r="$(ag -X POST http://unix/v1/rollbacks -d "{\"mode\":\"image\",\"image_ref\":\"$PRED_REF\",\"idempotency_key\":\"aq-rb-$RUN_ID\"}" -w '\n%{http_code}')"
+r="$(ag -X POST http://unix/v1/rollbacks -d "$(printf '%s' "{\"mode\":\"image\",\"image_ref\":\"$PRED_REF\",\"idempotency_key\":\"aq-rb-$RUN_ID\"}" | proof_request)" -w '\n%{http_code}')"
 ROP="$(echo "$r" | sed '$d' | python3 -c 'import json,sys
 try: print(json.load(sys.stdin).get("op_id",""))
 except Exception: print("")')"

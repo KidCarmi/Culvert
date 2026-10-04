@@ -112,6 +112,9 @@ func (s *Server) rollbackAdvancePhase(acc *rollbackAccumulator, phase journal.Ph
 // the rollback core's `rollback_restart` stage (which passes a nil flag — a
 // rollback IS the recovery, never its own trigger).
 func (s *Server) tagAndUp(ctx context.Context, ref string, failedPostRestart *bool) (stdout, stderr []byte, err error) {
+	if err := s.knownRelease(ref); err != nil {
+		return nil, nil, err
+	}
 	tres, terr := s.opts.Runner.ComposeTagPinned(ctx, ref)
 	if terr != nil {
 		if tres != nil {
@@ -187,6 +190,9 @@ func (s *Server) imageRollbackStages(targetRefFn func() string, acc *rollbackAcc
 func (s *Server) rollbackPull(targetRefFn func() string, acc *rollbackAccumulator) stageRun {
 	return func(ctx context.Context) ([]byte, []byte, error) {
 		ref := targetRefFn()
+		if err := s.knownRelease(ref); err != nil {
+			return nil, nil, err
+		}
 		if s.imagePresentLocally(ctx, ref) {
 			acc.pullSkippedLocal = true
 			s.rollbackAdvancePhase(acc, journal.PhasePulled)

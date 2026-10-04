@@ -14,6 +14,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
@@ -23,12 +24,15 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/KidCarmi/Culvert/releaseproof"
+
 	"culvert-maint/internal/audit"
 	"culvert-maint/internal/auth"
 	"culvert-maint/internal/config"
 	"culvert-maint/internal/health"
 	"culvert-maint/internal/journal"
 	"culvert-maint/internal/ops"
+	"culvert-maint/internal/releasetrust"
 	"culvert-maint/internal/runner"
 	"culvert-maint/internal/server"
 	"culvert-maint/internal/status"
@@ -231,16 +235,21 @@ func reconcileOnStartup(ctx context.Context, cfg *config.Config, srv *server.Ser
 // dependencies. Extracted from run() to keep that function within the funlen
 // budget; no behavior change.
 func newServer(cfg *config.Config, pol *auth.Policy, al *audit.Logger, mgr *ops.Manager, stp server.StatusProvider, r *runner.Runner, auditPath string, jnl *journal.Journal) (*server.Server, error) {
+	trust, err := newReleaseTrust(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("release authorization: %w", err)
+	}
 	return server.New(server.Options{
-		Cfg:       cfg,
-		Auth:      pol,
-		Audit:     al,
-		Ops:       mgr,
-		Status:    stp,
-		StateDir:  cfg.StateDir,
-		AuditPath: auditPath,
-		Journal:   jnl,
-		Runner:    r,
+		ReleaseTrust: trust,
+		Cfg:          cfg,
+		Auth:         pol,
+		Audit:        al,
+		Ops:          mgr,
+		Status:       stp,
+		StateDir:     cfg.StateDir,
+		AuditPath:    auditPath,
+		Journal:      jnl,
+		Runner:       r,
 		HealthProbeFactory: func() health.Probe {
 			return health.Probe{
 				BaseURL:    cfg.HealthBaseURL,
@@ -282,4 +291,29 @@ func startOpLogRetention(ctx context.Context, stateDir string, retentionDays int
 			}
 		}
 	}()
+}
+
+// newReleaseTrust constructs host policy independently of socket caller state.
+func newReleaseTrust(cfg *config.Config) (*releasetrust.Store, error) {
+	policy := releaseproof.DefaultPolicy(cfg.ReleaseCatalogRepo, cfg.ProxyRepo)
+	if cfg.ReleaseTrustRoot != "" {
+		b, err := releasetrust.ReadPolicyFile(cfg.ReleaseTrustRoot)
+		if err != nil {
+			return nil, err
+		}
+		policy.TrustedRootJSON = b
+	}
+	if cfg.ReleaseTrustKeys != "" {
+		b, err := releasetrust.ReadPolicyFile(cfg.ReleaseTrustKeys)
+		if err != nil {
+			return nil, err
+		}
+		if err = json.Unmarshal(b, &policy.Ed25519Keys); err != nil {
+			return nil, fmt.Errorf("invalid release signing keyring: %w", err)
+		}
+		if len(policy.Ed25519Keys) == 0 {
+			return nil, fmt.Errorf("empty release signing keyring")
+		}
+	}
+	return releasetrust.New(cfg.StateDir, policy)
 }

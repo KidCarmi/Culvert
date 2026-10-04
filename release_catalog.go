@@ -117,6 +117,9 @@ type Release struct {
 // Catalog is an immutable, read-only release catalog built by LoadCatalog. All
 // query methods are pure and side-effect-free.
 type Catalog struct {
+	// Exact source evidence is immutable and is forwarded for independent host
+	// verification. It is never an assertion that the caller is trusted.
+	proof       *catalogProofSnapshot
 	byReleaseID map[string]Release
 	byPinnedRef map[string]string // PinnedRef → ReleaseID (reverse index)
 	channels    map[Channel]string

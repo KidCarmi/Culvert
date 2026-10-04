@@ -114,7 +114,7 @@ verifies on import.
    tag, digest or both (F-OVA-CLAMAV-1, `readiness-report.md` §3f; bisected in
    fresh disposable stores). Pinned by
    `TestBuildOVA_SavesClamAVBeforeLoadingTheCandidate`.
-4. `cosign verify` (pinned `ghcr.io/sigstore/cosign/cosign:v3.0.6`, issuer +
+4. `cosign verify` (pinned `ghcr.io/sigstore/cosign/cosign:v3.0.6@sha256:de9c65609e6bde17e6b48de485ee788407c9502fa08b8f4459f595b21f56cd00`, issuer +
    SAN regex identical to `scripts/install.sh` / `release_identity.env`) of the
    proxy image. Failure aborts the build.
 5. Stage the overlay: the `docker save | gzip -n` archives of both images,

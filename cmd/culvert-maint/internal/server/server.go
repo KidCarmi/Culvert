@@ -123,6 +123,8 @@ type RunningImage struct {
 
 // Options configures Server.
 type Options struct {
+	ReleaseTrust ReleaseTrust // nil refuses image mutation and adoption
+
 	Cfg       *config.Config
 	Auth      *auth.Policy
 	Audit     *audit.Logger

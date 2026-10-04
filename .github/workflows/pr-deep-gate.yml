@@ -98,16 +98,16 @@ jobs:
               clam.go|yara_scan.go|fileblock.go|fileprofile.go|threatfeed.go|\
               lockout.go|totp.go|identity.go|enrollment.go|controlplane.go|\
               ui_*.go|update*.go|backup*.go|restore.go|geoip.go|events.go|\
-              internal/*)
+              internal/*|pkg/releaseproof/*)
                 security=true ;;
             esac
             case "$f" in
               # .trivyignore: a suppression edit must re-run the scan that
               # consumes it (CI review P1-5).
-              Dockerfile*|docker-compose*.yml|.dockerignore|.trivyignore) docker=true ;;
+              Dockerfile*|docker-compose*.yml|.dockerignore|.trivyignore|third_party/*|pkg/releaseproof/*) docker=true ;;
             esac
             case "$f" in
-              go.mod|go.sum) deps=true ;;
+              go.mod|go.sum|third_party/*|pkg/releaseproof/*) deps=true ;;
             esac
             case "$f" in
               *_test.go) tests=true ;;
@@ -122,7 +122,7 @@ jobs:
               # Test-only maint changes already set tests=true (also gates it).
               # (`*` in a bash case matches `/`, so this catches internal/… too.)
               cmd/culvert-maint/*_test.go) ;;
-              cmd/culvert-maint/*.go|cmd/culvert-maint/go.mod|cmd/culvert-maint/go.sum)
+              cmd/culvert-maint/*.go|cmd/culvert-maint/go.mod|cmd/culvert-maint/go.sum|pkg/releaseproof/*)
                 maint=true ;;
             esac
             case "$f" in
@@ -142,7 +142,7 @@ jobs:
               # The appliance console (#1540) is host software the OVA
               # installs: its regression suite (appliance-console) and the
               # lifecycle harnesses must run when it changes.
-              cmd/culvert-console/*|cmd/culvert-access/*|internal/applianceconsole/*|internal/applianceaccess/*|internal/appliancehost/*|appliance_*test.go|.github/workflows/appliance-console.yml)
+              cmd/culvert-console/*|cmd/culvert-access/*|internal/applianceconsole/*|internal/applianceaccess/*|internal/appliancehost/*|appliance_*test.go|pkg/releaseproof/*|third_party/*|.github/workflows/appliance-console.yml)
                 appliance=true ;;
             esac
             case "$f" in
@@ -156,7 +156,7 @@ jobs:
               # material (baked Sigstore root, CI↔binary identity SSOT).
               # NOTE: catalog-e2e.yml's paths: filter must stay in sync with
               # these globs (see roadmap/CI-REDESIGN.md).
-              release_*.go|test/e2e/*|trusted_root.json|trusted_root.provenance.txt|release_identity.env)
+              release_*.go|pkg/releaseproof/*|test/e2e/*|trusted_root.json|trusted_root.provenance.txt|release_identity.env)
                 release=true ;;
             esac
             case "$f" in

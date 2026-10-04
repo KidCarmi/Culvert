@@ -21,6 +21,8 @@ state_dir = "@@STATE_DIR@@"
 # Repo the pinned pull/tag bind to. Must be a BARE repo (no tag, no @digest);
 # a registry host:port colon before the first '/' is allowed.
 proxy_repo = "127.0.0.1:5000/culvert"
+release_catalog_repo = "127.0.0.1:5000/culvert"
+release_trust_keys = "/etc/culvert-release-fixture/keyring.json"
 # image_allowlist MUST match the local registry repo (the ghcr default does
 # NOT). Accepts a tag or an @sha256:<64hex> digest of exactly this repo.
 image_allowlist = "^127\\.0\\.0\\.1:5000/culvert(:[A-Za-z0-9._-]+|@sha256:[a-f0-9]{64})$"

@@ -288,6 +288,10 @@ func startApplyRig(t *testing.T) *applyRig {
 //
 //nolint:funlen // test rig setup; splitting hides the wiring sequence
 func startApplyRigAt(t *testing.T, tmp string) *applyRig {
+	return startApplyRigWithTrustAt(t, tmp, allowReleaseTrustForTest{})
+}
+
+func startApplyRigWithTrustAt(t *testing.T, tmp string, trust ReleaseTrust) *applyRig {
 	t.Helper()
 	sockPath := filepath.Join(tmp, "agent.sock")
 	auditPath := filepath.Join(tmp, "audit.jsonl")
@@ -348,15 +352,16 @@ func startApplyRigAt(t *testing.T, tmp string) *applyRig {
 	rig.journal = jnl
 	rig.mgr = mgr
 	srv, err := New(Options{
-		Cfg:       cfg,
-		Auth:      pol,
-		Audit:     al,
-		Ops:       mgr,
-		Status:    &fakeStatus{},
-		StateDir:  tmp,
-		AuditPath: auditPath,
-		Runner:    rn,
-		Journal:   jnl,
+		ReleaseTrust: trust,
+		Cfg:          cfg,
+		Auth:         pol,
+		Audit:        al,
+		Ops:          mgr,
+		Status:       &fakeStatus{},
+		StateDir:     tmp,
+		AuditPath:    auditPath,
+		Runner:       rn,
+		Journal:      jnl,
 		FreeBytes: func(string) (uint64, error) {
 			if f := rig.freeBytes.Load(); f > 0 {
 				return f, nil

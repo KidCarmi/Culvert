@@ -99,7 +99,10 @@ type Config struct {
 	// at the sudo boundary (P1.4). A pinned upgrade/rollback ref must be
 	// `<ProxyRepo>@sha256:<64hex>`. Default "ghcr.io/kidcarmi/culvert".
 	// MUST describe the same repository as ImageAllowlist.
-	ProxyRepo string
+	ProxyRepo          string
+	ReleaseCatalogRepo string
+	ReleaseTrustRoot   string
+	ReleaseTrustKeys   string
 
 	// ReconcileOnStartup enables the crash-recovery startup reconciler
 	// (RISK-022 PR-E): at boot every interrupted journal record is classified
@@ -158,6 +161,9 @@ type rawConfig struct {
 	AllowedBackupDir    string   `toml:"allowed_backup_dir"`
 	ImageAllowlist      string   `toml:"image_allowlist"`
 	ProxyRepo           string   `toml:"proxy_repo"`
+	ReleaseCatalogRepo  string   `toml:"release_catalog_repo"`
+	ReleaseTrustRoot    string   `toml:"release_trust_root"`
+	ReleaseTrustKeys    string   `toml:"release_trust_keys"`
 	ReconcileOnStartup  *bool    `toml:"reconcile_on_startup"`
 	AllowPeers          []string `toml:"allow_peers"`
 }
@@ -433,6 +439,17 @@ func validate(raw *rawConfig) (*Config, error) {
 		return nil, fmt.Errorf("config: proxy_repo has an invalid repository shape: %q", pr)
 	}
 	cfg.ProxyRepo = pr
+	cfg.ReleaseCatalogRepo = strings.TrimSpace(raw.ReleaseCatalogRepo)
+	if cfg.ReleaseCatalogRepo == "" {
+		cfg.ReleaseCatalogRepo = defaultProxyRepo
+	}
+	cfg.ReleaseTrustRoot = strings.TrimSpace(raw.ReleaseTrustRoot)
+	cfg.ReleaseTrustKeys = strings.TrimSpace(raw.ReleaseTrustKeys)
+	for _, trustPath := range []string{cfg.ReleaseTrustRoot, cfg.ReleaseTrustKeys} {
+		if trustPath != "" && !filepath.IsAbs(trustPath) {
+			return nil, fmt.Errorf("config: release trust paths must be absolute")
+		}
+	}
 
 	// reconcile_on_startup — default true (classify + auto-resolve only the
 	// non-mutating verdicts). Absent key ⇒ default; an explicit false ⇒ mark-only.
