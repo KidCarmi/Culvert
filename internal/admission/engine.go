@@ -392,15 +392,30 @@ func (f *IPFilter) addLocked(entry string) error {
 	return &net.AddrError{Err: "invalid IP or CIDR", Addr: entry}
 }
 
+// canonicalEntry returns the spelling Add/AddExemption store an entry under
+// (IPNet.String / IP.String), so Remove accepts whatever spelling Add did.
+// An unparseable entry is returned unchanged.
+func canonicalEntry(entry string) string {
+	if _, cidr, err := net.ParseCIDR(entry); err == nil {
+		return cidr.String()
+	}
+	if ip := net.ParseIP(entry); ip != nil {
+		return ip.String()
+	}
+	return entry
+}
+
 // Remove removes an entry and publishes the updated filter view.
 func (f *IPFilter) Remove(entry string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	canon := canonicalEntry(entry)
 	delete(f.single, entry)
+	delete(f.single, canon)
 	// Remove from nets slice.
 	filtered := f.nets[:0]
 	for _, n := range f.nets {
-		if n.String() != entry {
+		if s := n.String(); s != entry && s != canon {
 			filtered = append(filtered, n)
 		}
 	}
@@ -825,10 +840,12 @@ func (r *RateLimiter) addExemptionLocked(entry string) error {
 func (r *RateLimiter) RemoveExemption(entry string) {
 	r.exemptMu.Lock()
 	defer r.exemptMu.Unlock()
+	canon := canonicalEntry(entry)
 	delete(r.exemptIPs, entry)
+	delete(r.exemptIPs, canon)
 	filtered := r.exemptNets[:0]
 	for _, n := range r.exemptNets {
-		if n.String() != entry {
+		if s := n.String(); s != entry && s != canon {
 			filtered = append(filtered, n)
 		}
 	}
