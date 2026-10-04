@@ -545,10 +545,15 @@ func checkSessionSecret() OperatorContractCheck {
 // (ui_auth.go) all cap names at 64 bytes.
 const adminUsernameAccountLimit = 64
 
+// adminUsernameLengthCode is the operator-contract code for the oversize
+// admin-username row. Named so the role redaction below and the check itself
+// cannot drift apart on a string literal.
+const adminUsernameLengthCode = "admin_username_length"
+
 func checkOversizeConfiguredUsernames() OperatorContractCheck {
 	if cfg == nil {
 		return OperatorContractCheck{
-			Code:    "admin_username_length",
+			Code:    adminUsernameLengthCode,
 			Status:  diagOK,
 			Message: "no admin accounts configured",
 		}
@@ -569,7 +574,7 @@ func checkOversizeConfiguredUsernames() OperatorContractCheck {
 	}
 	if n == 0 {
 		return OperatorContractCheck{
-			Code:    "admin_username_length",
+			Code:    adminUsernameLengthCode,
 			Status:  diagOK,
 			Message: "all configured admin usernames are within the login length limit",
 		}
@@ -580,7 +585,7 @@ func checkOversizeConfiguredUsernames() OperatorContractCheck {
 	}
 	action := oversizeUsernameAction(inv, totpOversize)
 	return OperatorContractCheck{
-		Code:   "admin_username_length",
+		Code:   adminUsernameLengthCode,
 		Status: diagWarn,
 		Message: fmt.Sprintf("%d admin account%s have a username above the %d-byte account limit (longest: %d bytes) — "+
 			"the dashboard sign-in form accepts at most %d characters and setup and Admin Users cap new names there "+
@@ -590,6 +595,66 @@ func checkOversizeConfiguredUsernames() OperatorContractCheck {
 			n, plural, adminUsernameAccountLimit, maxLen, adminUsernameAccountLimit),
 		OperatorAction: action,
 	}
+}
+
+// diagnosticsRedactedUsernameMessage is the role-safe form of the oversize
+// admin-username row. It is a CONSTANT and carries no roster-derived value —
+// not the count, not the longest length, not the legacy login's role, not
+// whether any affected account has a second factor enrolled.
+const diagnosticsRedactedUsernameMessage = "one or more admin accounts have a username above the " +
+	"supported account limit; sign in as an admin for the affected count and the remediation steps"
+
+// redactContractForRole strips admin-roster-derived detail from the operator
+// contract for any caller that is not a proven admin.
+//
+// GET /api/diagnostics is deliberately viewer-readable (a management-plane
+// health surface must not need admin), but the roster that
+// checkOversizeConfiguredUsernames describes is admin-only: GET
+// /api/auth/users is RoleAdmin. Its warn row therefore carried facts a viewer
+// or operator cannot otherwise obtain — how many admin accounts exceed the
+// account limit, the longest name's byte length, whether a legacy single-user
+// login exists and is mirrored into the roster, that login's EFFECTIVE ROLE
+// (interpolated verbatim into the remediation text), and whether at least one
+// affected account has TOTP enrolled. The last is the one with real attacker
+// value: it tells a lower-privileged insider whether a high-value admin
+// account is single-factor, which is exactly the input to choosing a
+// credential-stuffing or phishing target.
+//
+// The row stays VISIBLE at every role — status and code are unchanged, so
+// monitoring and the SPA still see the warn — and only the roster-derived
+// detail is withheld. That matches the operator-contract convention this
+// repository already applies to its viewer-role rows: the identity-backend row
+// "carries the backend name and counts, never the cause", and /readyz uses
+// FIXED detail strings precisely so an unauthenticated or lower-privileged
+// reader cannot fingerprint node state.
+//
+// Fail-closed by construction: the ONLY input that un-redacts is a proven
+// admin, so a future role added below admin, or a caller whose role cannot be
+// resolved, gets the redacted form without this function being revisited.
+func redactContractForRole(c OperatorContract, isAdmin bool) OperatorContract {
+	if isAdmin {
+		return c
+	}
+	// Copy the slice before mutating: the caller's OperatorContract must not be
+	// altered in place, so a redacted render can never leak back into a
+	// subsequent unredacted one through a shared backing array.
+	checks := make([]OperatorContractCheck, len(c.Checks))
+	copy(checks, c.Checks)
+	for i := range checks {
+		if checks[i].Code != adminUsernameLengthCode {
+			continue
+		}
+		// An ok row names nothing about the roster, so leave it exactly as it
+		// is — redacting a healthy row would report a condition that does not
+		// exist and send an operator looking for an account that is fine.
+		if checks[i].Status == diagOK {
+			continue
+		}
+		checks[i].Message = diagnosticsRedactedUsernameMessage
+		checks[i].OperatorAction = ""
+	}
+	c.Checks = checks
+	return c
 }
 
 // adminUsernameInventory is the de-duplicated set of configured login names
@@ -1933,7 +1998,10 @@ func apiDiagnostics(w http.ResponseWriter, r *http.Request) {
 	if !requireRole(w, r, RoleViewer) {
 		return
 	}
-	jsonOK(w, buildOperatorContract())
+	// The contract is viewer-readable, but one row is derived from the
+	// admin-only roster (GET /api/auth/users is RoleAdmin). Redact that row's
+	// detail for anything below admin — see redactContractForRole.
+	jsonOK(w, redactContractForRole(buildOperatorContract(), uiRole(r).HasRole(RoleAdmin)))
 }
 
 // registerObservabilityRoutes wires the operator-facing observability
