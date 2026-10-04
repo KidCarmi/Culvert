@@ -609,14 +609,14 @@ func TestChaos71_ControlReadinessRowIsReportOnly(t *testing.T) {
 	// caller that explicitly opts in via ?strict=1 DOES see it fail. Both
 	// halves are needed — without the second, a row that was silently dropped
 	// would satisfy "report-only" while telling nobody anything.
-	lenient := httptest.NewRequest(http.MethodGet, "/ready", nil)
+	lenient := httptest.NewRequest(http.MethodGet, "/ready", http.NoBody)
 	if strictVerdictFails(lenient, checks) {
 		t.Error("a plain /ready failed on the Control Plane listener row: a node whose CP listener " +
 			"cannot bind is proxying perfectly, so gating the default verdict would eject a healthy " +
 			"gateway from the load balancer over its cluster-configuration plane — turning a " +
 			"management outage into the traffic outage this change exists to prevent")
 	}
-	strict := httptest.NewRequest(http.MethodGet, "/ready?strict=1", nil)
+	strict := httptest.NewRequest(http.MethodGet, "/ready?strict=1", http.NoBody)
 	if !strictVerdictFails(strict, checks) {
 		t.Error("/ready?strict=1 did not fail on a failing Control Plane listener row — strict " +
 			"callers must be able to opt in, or the row is unreachable for anyone who wants it")
