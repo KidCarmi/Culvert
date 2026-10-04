@@ -38,6 +38,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -127,6 +128,22 @@ func cpSnapshotRoleAndSupervisor(t *testing.T) {
 		clusterRole = prev
 		clusterRoleMu.Unlock()
 	})
+}
+
+// cpReadSource reads one of this package's own source files for the structural
+// walls below, anchored to the package directory via pkgSourceDir().
+//
+// Never `os.ReadFile("cp_grpc_bind.go")`: a bare relative read races any
+// concurrent `os.Chdir` in the test binary, which is the flake class
+// TestTestFileReadsAreCWDIndependent (static_read_wall_test.go) exists to
+// forbid — and it caught the first draft of these walls.
+func cpReadSource(t *testing.T, name string) string {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join(pkgSourceDir(), name))
+	if err != nil {
+		t.Fatalf("read %s: %v", name, err)
+	}
+	return string(b)
 }
 
 // cpSwapHealthClock points the health READ path at a clock the test drives, so
@@ -857,11 +874,7 @@ func TestChaos73_DefectThePlaneHasEveryOperatorSurface(t *testing.T) {
 	})
 
 	t.Run("the row is registered on /api/diagnostics", func(t *testing.T) {
-		src, err := os.ReadFile("diagnostics.go")
-		if err != nil {
-			t.Fatal(err)
-		}
-		if !strings.Contains(string(src), "checkCPGRPCListener()") {
+		if !strings.Contains(cpReadSource(t, "diagnostics.go"), "checkCPGRPCListener()") {
 			t.Error("the row exists but is not wired into the diagnostics aggregate — a surface nothing renders " +
 				"is not a surface")
 		}
@@ -907,11 +920,7 @@ func TestChaos73_DefectThePlaneHasEveryOperatorSurface(t *testing.T) {
 // logger, every assertion still passes, and the only symptom is a destroyed
 // process log on a node already in trouble.
 func TestChaos73_DefectCPServerOptionIsSilent(t *testing.T) {
-	src, err := os.ReadFile("controlplane_server.go")
-	if err != nil {
-		t.Fatal(err)
-	}
-	lines := strings.Split(string(src), "\n")
+	lines := strings.Split(cpReadSource(t, "controlplane_server.go"), "\n")
 
 	start, end := -1, -1
 	for i, l := range lines {
@@ -961,11 +970,7 @@ func TestChaos73_TheControlPlaneListenerPathHasNoFatal(t *testing.T) {
 	checked := 0
 	haLeaseAllowance := 0
 	for _, f := range files {
-		src, err := os.ReadFile(f)
-		if err != nil {
-			t.Fatalf("read %s: %v", f, err)
-		}
-		for i, line := range strings.Split(string(src), "\n") {
+		for i, line := range strings.Split(cpReadSource(t, f), "\n") {
 			checked++
 			code, _, _ := strings.Cut(line, "//")
 			if !strings.Contains(code, "logFatalf(") && !strings.Contains(code, "log.Fatal") {
@@ -1130,11 +1135,7 @@ func TestChaos73_ControlNotAControlPlaneEmitsNothing(t *testing.T) {
 // serves config to OTHER nodes is down — converting a fleet-management outage
 // into the traffic outage this whole change exists to prevent.
 func TestChaos73_ControlReadinessIsReportOnly(t *testing.T) {
-	src, err := os.ReadFile("healthcheck.go")
-	if err != nil {
-		t.Fatal(err)
-	}
-	s := string(src)
+	s := cpReadSource(t, "healthcheck.go")
 	if !strings.Contains(s, "appendCPGRPCReadinessCheck(checks)") {
 		t.Fatal("the readiness row is not wired into /ready")
 	}
@@ -1176,11 +1177,7 @@ func TestChaos73_ControlRebindDoesNotRestartTheHeartbeatMonitor(t *testing.T) {
 	// monitor-start is guarded rather than unconditional.
 	activateControlPlaneAfterBind(cfg, nil)
 
-	src, err := os.ReadFile("cp_grpc_bind.go")
-	if err != nil {
-		t.Fatal(err)
-	}
-	body := string(src)
+	body := cpReadSource(t, "cp_grpc_bind.go")
 	i := strings.Index(body, "func activateControlPlaneAfterBind(")
 	if i < 0 {
 		t.Fatal("could not locate activateControlPlaneAfterBind")
@@ -1217,11 +1214,7 @@ func TestChaos73_ControlRebindDoesNotRestartTheHeartbeatMonitor(t *testing.T) {
 // pinned instead — the same conclusion, for the same reason, as
 // §36's TestChaos66 recorder wall and the sanitizeLog scan-count gate.
 func TestChaos73_WallThePanicGuardUsesTheTerminalRecorder(t *testing.T) {
-	src, err := os.ReadFile("cp_grpc_bind.go")
-	if err != nil {
-		t.Fatal(err)
-	}
-	body := string(src)
+	body := cpReadSource(t, "cp_grpc_bind.go")
 	i := strings.Index(body, "func (s *cpListenerSupervisor) run() {")
 	if i < 0 {
 		t.Fatal("could not locate the supervisor run loop — the wall is not reading what it claims to")
@@ -1262,11 +1255,7 @@ func TestChaos73_WallThePanicGuardUsesTheTerminalRecorder(t *testing.T) {
 // deferral exists to prevent: a node asserting a leadership term it cannot
 // exercise, because a "leader" no Data Plane can reach cannot serve HASync.
 func TestChaos73_WallTheBootPathDefersLeadershipToAnObservedBind(t *testing.T) {
-	src, err := os.ReadFile("cluster_startup.go")
-	if err != nil {
-		t.Fatal(err)
-	}
-	body := string(src)
+	body := cpReadSource(t, "cluster_startup.go")
 	i := strings.Index(body, "func startControlPlaneWithHAResume(")
 	if i < 0 {
 		t.Fatal("could not locate startControlPlaneWithHAResume")
