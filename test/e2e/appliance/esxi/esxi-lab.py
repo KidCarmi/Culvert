@@ -457,6 +457,15 @@ class Lab:
 
     def qualify(self):
         require(self.state.get('phase') == 'powered-on', 'qualify is single-use on a fresh import')
+        sources = {}
+        for source in (Path(__file__), HERE / 'guest-checks.sh', HERE / 'restore-checks.sh',
+                       HERE.parent / 'lab/appliance-lab.sh'):
+            with source.open('rb') as stream:
+                sources[source.relative_to(ROOT).as_posix()] = digest(stream)
+        revision = subprocess.run(['git', '-C', str(ROOT), 'rev-parse', 'HEAD'],
+                                  capture_output=True, text=True, check=True).stdout.strip()
+        atomic_json(self.ev / 'qualification-harness.json',
+                    dict(harness_sha=revision, harness_file_sha256=sources))
         bash = self.c.get('bash', 'bash')
         # Verify host prerequisites before guest mutations.
         probe = subprocess.run([bash, '-c', 'for t in ssh curl openssl timeout; do command -v "$t" || exit 3; done'], capture_output=True, timeout=30)
