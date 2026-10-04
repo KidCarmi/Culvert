@@ -393,3 +393,25 @@ installation, symlink targets and lock contention; verify rollback, ownership,
 modes and repeated installation. Linux PTYs verify terminal restoration after
 child success, termination and forced termination. Unix socket tests exercise
 journal serialization, pairing, cancellation, missing transport and backpressure.
+
+## Observation integrity and retry rechecks
+
+HTTP probes put `--disable` first, as required by
+[curl's configuration-file opt-out](https://curl.se/docs/manpage.html#-q).
+This prevents an account's curl configuration from changing the request method,
+headers or destinations despite the restricted process environment. A Linux
+regression uses a real curl and an isolated local server: the control request
+loads a hostile configuration, while all three production probe argument lists
+remain GET requests without its injected header.
+
+Subprocess output above 64 KiB is rejected in full. A valid JSON/status prefix
+followed by excess data cannot become a successful observation through truncation.
+Memory retention and execution deadlines remain bounded.
+
+A completion marker cannot hide an unknown, unloading or restarting firstboot
+unit. Readiness additionally requires the known successful oneshot states
+documented above. The setup endpoint remains independently observable so an
+uncertain provisioning summary does not suppress working management access.
+Retry rechecks state after clearing a failure; a new completion marker, running
+unit or missing observation prevents this console from requesting a start.
+These are observation checks, not a cross-process provisioning lock.

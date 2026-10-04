@@ -136,6 +136,8 @@ func headline(s Snapshot) (label, next, style string) {
 		return "[SETUP AVAILABLE] Management responds locally.", "Open [2] and continue in your browser.", "cyan"
 	case s.Phase == "ready":
 		return "[CHECKS PASSED] Local health checks passed.", "Verify proxy traffic from a test client.", "cyan"
+	case s.Reason == "FIRSTBOOT_STOPPING":
+		return "[STOPPING] Provisioning service is stopping.", "Open [3] for observed checkpoints.", "warning"
 	case s.Phase == "running":
 		return "[STARTING] Preparing the appliance.", "Open [3] for observed checkpoints.", "warning"
 	default:

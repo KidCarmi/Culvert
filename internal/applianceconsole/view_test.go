@@ -120,6 +120,18 @@ func TestSetupLabelRequiresLocalEndpointAndNoBroadReadyLabel(t *testing.T) {
 	}
 }
 
+func TestStoppingProvisioningIsNotLabeledStarting(t *testing.T) {
+	s := provisionedSnapshot()
+	s.Firstboot["ActiveState"] = "deactivating"
+	s.Addresses = []string{"192.0.2.10"}
+	s.summarize("", "", "")
+	v := NewView(false)
+	text := Render(v.Frame(s, 25, 80), false)
+	if !strings.Contains(text, "[STOPPING]") || strings.Contains(text, "[STARTING]") {
+		t.Fatal(text)
+	}
+}
+
 func TestReportLongFieldsCanBeReadAcrossPages(t *testing.T) {
 	s := visualFixture()
 	s.Hostname = strings.Repeat("abcdef", 30) + "END"
