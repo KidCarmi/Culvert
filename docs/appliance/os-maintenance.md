@@ -32,7 +32,8 @@ arbitrary commands):
 | `security` | run the same security-only policy now |
 | `os` | all guest-OS package updates incl. a new kernel ABI (`apt-get upgrade --with-new-pkgs`; Docker stays held) |
 | `reboot` | arms the stack-resume marker, then `docker compose stop` in `/srv/culvert` (each service's `stop_grace_period` applies — the proxy's is 60 s so its shutdown sequence completes and durable state is flushed; `docs/operator/graceful-shutdown.md`) then `systemctl reboot`. At boot `culvert-stack-resume.service` starts the stack again and clears the marker (a stopped container is not restarted by `restart: unless-stopped`). If the stop fails or the reboot request is rejected, the stack is started again and the command exits non-zero |
-| `resume-stack` | what `culvert-stack-resume.service` runs at boot; also the manual recovery when a resume is pending (`/var/lib/culvert-appliance/state/stack-resume-on-boot` exists). Fails — and keeps the marker — when the stack does not start or its compose file is missing |
+| `poweroff` | same graceful stop and resume marker as `reboot`, followed by `systemctl poweroff`; the stack resumes at the next power-on |
+| `resume-stack` | what `culvert-stack-resume.service` runs at boot; also manual recovery after a definitely rejected shutdown. Refuses an uncertain shutdown in the same boot and any interrupted agent journal, even with `--force`. Keeps the marker when recovery is refused, the stack does not start, or its compose file is missing |
 | any + `--reboot-if-required` | reboot at the end only when the kernel/libc update needs it |
 
 A kernel or glibc update is live only after a reboot; `culvert-status` is not
@@ -68,6 +69,23 @@ way round. An operation that was interrupted and is awaiting
 agent journal lists one (`--force` overrides only that, never a live lock).
 `check` is read-only and never gated. The daily `unattended-upgrades` run
 installs security packages only and does not stop the stack or reboot.
+
+`systemctl` returns after enqueueing shutdown. To cover the interval after the
+helper releases its locks, it durably records
+`/var/lib/culvert-maint/host-shutdown.pending` before stopping the stack.
+Both the OS tool and the updated agent refuse mutations while this record
+belongs to the current boot; unreadable or malformed records also refuse
+admission. A valid record from a previous boot is removed under the shared
+lock. This requires deploying the helper and agent together.
+
+A failed stop or definitely rejected power request records an aborted attempt
+and tries to restart the stack. If that recovery fails, `resume-stack` can
+retry under the locks after interrupted agent operations are reconciled.
+A signal during dispatch leaves the outcome uncertain: the pending fence
+survives even if a best-effort restart succeeds. Inspect the maintenance log
+and systemd shutdown state through authenticated recovery; do not delete the
+record to admit new work while a queued shutdown may still execute. The next
+boot clears a valid stale fence, but never bypasses the agent journal check.
 
 **Maintenance-window procedure (host reboot):**
 1. Announce; proxy clients lose the gateway for the reboot duration (~1–2 min).

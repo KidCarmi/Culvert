@@ -95,6 +95,7 @@ func hostCommandWithGrace(parent context.Context, budget, recoveryGrace time.Dur
 func cancelHostGroup(cmd *exec.Cmd, grace time.Duration) func() {
 	var mu sync.Mutex
 	var timer *time.Timer
+	var escalated bool
 	cmd.Cancel = func() error {
 		mu.Lock()
 		defer mu.Unlock()
@@ -107,6 +108,7 @@ func cancelHostGroup(cmd *exec.Cmd, grace time.Duration) func() {
 				mu.Lock()
 				defer mu.Unlock()
 				if timer != nil {
+					escalated = true
 					_ = unix.Kill(-cmd.Process.Pid, unix.SIGKILL)
 				}
 			})
@@ -119,6 +121,12 @@ func cancelHostGroup(cmd *exec.Cmd, grace time.Duration) func() {
 		if timer != nil {
 			timer.Stop()
 			timer = nil
+			if !escalated {
+				// A helper may exit before a TERM-ignoring descendant closes an
+				// inherited lock. Finish this private group synchronously rather
+				// than abandon it or retain a delayed kill after reaping its leader.
+				_ = unix.Kill(-cmd.Process.Pid, unix.SIGKILL)
+			}
 		}
 	}
 }
@@ -145,6 +153,10 @@ func runHost(ctx context.Context, mode string, c applianceconsole.Collector) err
 		return errors.New("host recovery requires root")
 	}
 	switch mode {
+	case "bootstrap-record":
+		return recordBootstrap(ctx)
+	case "bootstrap-commit":
+		return recordBootstrapCommit(ctx)
 	case "worker":
 		return hostWorker(ctx, c)
 	case "network":
@@ -220,6 +232,9 @@ func hostWorker(ctx context.Context, c applianceconsole.Collector) error {
 	for {
 		var observed *applianceconsole.Snapshot
 		if time.Now().After(nextObservation) {
+			if err := cleanupBootstrap(); err != nil {
+				fmt.Fprintln(os.Stderr, "Bootstrap credential cleanup needs attention")
+			}
 			snapshot := c.Collect(ctx)
 			observed = &snapshot
 			nextObservation = time.Now().Add(15 * time.Second)

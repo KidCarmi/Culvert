@@ -15,6 +15,56 @@ import (
 	"testing"
 )
 
+func armShutdownFence(t *testing.T, boot, phase string) {
+	t.Helper()
+	osUpdateHook = func(state string) {
+		if err := os.MkdirAll(state, 0o750); err != nil {
+			t.Fatal(err)
+		}
+		data := "culvert-shutdown-v1 " + boot + " reboot " + phase + "\n"
+		if err := os.WriteFile(filepath.Join(state, "host-shutdown.pending"), []byte(data), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Cleanup(func() { osUpdateHook = nil })
+}
+
+func TestOSUpdate_PendingShutdownFenceBlocksAfterOwnerExit(t *testing.T) {
+	armShutdownFence(t, osUpdateTestBootID, "pending")
+	armResumeMarker(t)
+	for _, mode := range []string{"reboot", "poweroff", "os", "security", "docker", "resume-stack"} {
+		out, calls, code := runOSUpdateWith(t, []string{mode, "--force"}, nil)
+		if code != 3 || strings.Contains(calls, "docker ") || strings.Contains(calls, "systemctl ") || !strings.Contains(calls, "final:shutdown-fence-present") {
+			t.Fatalf("pending shutdown admitted %s: code=%d calls=%s\n%s", mode, code, calls, out)
+		}
+	}
+}
+
+func TestOSUpdate_AbortedShutdownCanRetryResumeInSameBoot(t *testing.T) {
+	armShutdownFence(t, osUpdateTestBootID, "aborted")
+	armResumeMarker(t)
+	out, calls, code := runOSUpdate(t, "resume-stack")
+	if code != 0 || !strings.Contains(calls, "docker compose up -d") || strings.Contains(calls, "final:") {
+		t.Fatalf("aborted power did not recover: code=%d calls=%s\n%s", code, calls, out)
+	}
+	out, calls, code = runOSUpdate(t, "resume-stack", "FAIL_START=1")
+	if code == 0 || !strings.Contains(calls, "final:shutdown-fence-present") || !strings.Contains(calls, "final:resume-marker-present") {
+		t.Fatalf("failed retry lost pending recovery: code=%d calls=%s\n%s", code, calls, out)
+	}
+}
+
+func TestOSUpdate_ResumeRefusesInterruptedJournalEvenAfterNewBoot(t *testing.T) {
+	armShutdownFence(t, "00000000-0000-0000-0000-000000000000", "pending")
+	armResumeMarker(t)
+	out, calls, code := runOSUpdateWith(t, []string{"resume-stack", "--force"}, []string{"01ARZ3NDEKTSV4RRFFQ69G5FAV"})
+	if code != 3 || strings.Contains(calls, "docker ") || !strings.Contains(calls, "final:resume-marker-present") {
+		t.Fatalf("resume ignored interrupted journal: code=%d calls=%s\n%s", code, calls, out)
+	}
+	if strings.Contains(calls, "final:shutdown-fence-present") {
+		t.Fatal("valid earlier-boot fence was not cleared under lock")
+	}
+}
+
 func armResumeMarker(t *testing.T) {
 	t.Helper()
 	osUpdateResumeHook = func(p string) {

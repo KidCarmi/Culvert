@@ -71,6 +71,7 @@ func newFBHarness(t *testing.T) *fbHarness {
 	// culvert-issue-update is invoked best-effort by the finish/repair paths.
 	h.writeExec(filepath.Join(h.bin, "culvert-issue-update"), "#!/usr/bin/env bash\nexit 0\n")
 	h.writeExec(filepath.Join(h.bin, "culvert-status"), "#!/usr/bin/env bash\necho 'stub status'\n")
+	h.writeExec(filepath.Join(h.bin, "culvert-console"), "#!/usr/bin/env bash\n[[ $* == --host=bootstrap-commit ]] && exit 0\n[[ $* == --host=bootstrap-record ]] || exit 2\ncat > \"$FB_HARNESS/bootstrap.in\"\n")
 	// Account/system tools: record and succeed. getent answers from a file
 	// the test controls (the simulated shadow field).
 	h.stub("chpasswd", `cat > "$FB_HARNESS/chpasswd.in"`)
@@ -232,6 +233,86 @@ func TestFirstBoot_ConsolePolicyDecision(t *testing.T) {
 }
 
 // ── step_console: the four provisioning shapes + the interrupted mint ───────
+
+func TestFirstBoot_BootstrapHandoffCommitsBeforeDisplay(t *testing.T) {
+	h := newFBHarness(t)
+	h.setShadow("!")
+	h.writeExec(filepath.Join(h.bin, "culvert-console"), `#!/usr/bin/env bash
+set -euo pipefail
+[[ $* == --host=bootstrap-commit ]] && exit 0
+[[ $* == --host=bootstrap-record ]]
+[[ -f "$CULVERT_FB_STATE_DIR/state/console.minting" && ! -e "$CULVERT_FB_STATE_DIR/state/console.done" ]]
+cat > "$FB_HARNESS/bootstrap.in"
+`)
+	out, code := h.run(`console() { [[ -f "$STATE/console.done" && ! -e "$STATE/console.minting" ]] || return 88; printf '%s\n' "$*" >> "$FB_HARNESS/display"; }; step_console`)
+	if code != 0 {
+		t.Fatalf("handoff failed: %d %s", code, out)
+	}
+	initial, err := os.ReadFile(filepath.Join(h.root, "bootstrap.in"))
+	if err != nil || len(strings.TrimSpace(string(initial))) != 16 {
+		t.Fatal("handoff input missing")
+	}
+	if h.chpasswdInput() != "culvert:"+string(initial) {
+		t.Fatal("handoff differs from installed password")
+	}
+	calls, _ := os.ReadFile(h.calls)
+	if strings.Contains(out, string(bytes.TrimSpace(initial))) || bytes.Contains(calls, bytes.TrimSpace(initial)) {
+		t.Fatal("credential entered logs or command arguments")
+	}
+}
+
+func TestFirstBoot_FailedBootstrapHandoffRetainsRetryAndNeverDisplays(t *testing.T) {
+	h := newFBHarness(t)
+	h.setShadow("!")
+	h.writeExec(filepath.Join(h.bin, "culvert-console"), "#!/usr/bin/env bash\ncat >/dev/null\nexit 73\n")
+	out, code := h.run(`console() { touch "$FB_HARNESS/display"; }; step_console`)
+	if code == 0 || h.exists("appliance/state/console.done") || !h.exists("appliance/state/console.minting") || h.exists("display") {
+		t.Fatalf("failed handoff committed or displayed: %d %s", code, out)
+	}
+	// chpasswd already landed, but no operator has seen the uncommitted password.
+	h.setShadow("$6$fixture$interrupted")
+	h.writeExec(filepath.Join(h.bin, "culvert-console"), "#!/usr/bin/env bash\n[[ $* == --host=bootstrap-commit ]] && exit 0\ncat > \"$FB_HARNESS/bootstrap.in\"\n")
+	out, code = h.run(`console() { :; }; step_console`)
+	if code != 0 || h.calledCount("chpasswd") != 2 || !h.exists("appliance/state/console.done") || h.exists("appliance/state/console.minting") {
+		t.Fatalf("interrupted handoff did not recover: %d %s", code, out)
+	}
+}
+
+func TestFirstBoot_BootstrapCommitRetryDoesNotRemint(t *testing.T) {
+	h := newFBHarness(t)
+	h.setShadow("!")
+	h.writeExec(filepath.Join(h.bin, "culvert-console"), `#!/usr/bin/env bash
+if [[ $* == --host=bootstrap-record ]]; then cat > "$FB_HARNESS/bootstrap.in"; exit 0; fi
+[[ -e "$FB_HARNESS/allow-commit" ]] || exit 73
+touch "$FB_HARNESS/committed"
+`)
+	out, code := h.run(`console() { touch "$FB_HARNESS/display"; }; step_console`)
+	if code == 0 || !h.exists("appliance/state/console.done") || h.exists("appliance/state/console.minting") || h.exists("display") {
+		t.Fatalf("commit failure exposed or lost checkpoint: %d %s", code, out)
+	}
+	if err := os.WriteFile(filepath.Join(h.root, "allow-commit"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out, code = h.run(`step_console`)
+	if code != 0 || h.calledCount("chpasswd") != 1 || !h.exists("committed") {
+		t.Fatalf("commit retry regenerated credential: %d %s", code, out)
+	}
+}
+
+func TestFirstBoot_BootstrapRetryAfterMintingRemovalCommitsExistingPassword(t *testing.T) {
+	h := newFBHarness(t)
+	// Reproduce interruption after private record publication and mint marker
+	// removal, before console.done: the account now has a usable initial hash.
+	h.setShadow("$6$fixture$initial")
+	h.writeExec(filepath.Join(h.bin, "culvert-console"), `#!/usr/bin/env bash
+[[ $* == --host=bootstrap-commit && -f "$CULVERT_FB_STATE_DIR/state/console.done" ]] || exit 73
+touch "$FB_HARNESS/committed"
+`)
+	out, code := h.run(`step_console`)
+	if code != 0 || h.calledCount("chpasswd") != 0 || !h.exists("committed") {
+		t.Fatalf("initial credential became stranded or replaced: %d %s", code, out)
+	}
+}
 
 func TestFirstBoot_StepConsole_KeyOnlyInstallsPasswordlessSudo(t *testing.T) {
 	h := newFBHarness(t)

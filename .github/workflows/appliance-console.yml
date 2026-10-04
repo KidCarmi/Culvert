@@ -6,7 +6,10 @@ on:
       - 'appliance/console/**'
       - 'appliance/os-maintenance/**'
       - 'appliance/build/**'
+      - 'appliance/provision/**'
       - 'cmd/culvert-console/**'
+      - 'cmd/culvert-maint/**'
+      - 'appliance_*test.go'
       - 'internal/applianceconsole/**'
       - 'internal/appliancehost/**'
       - 'go.mod'
@@ -18,7 +21,10 @@ on:
       - 'appliance/console/**'
       - 'appliance/os-maintenance/**'
       - 'appliance/build/**'
+      - 'appliance/provision/**'
       - 'cmd/culvert-console/**'
+      - 'cmd/culvert-maint/**'
+      - 'appliance_*test.go'
       - 'internal/applianceconsole/**'
       - 'internal/appliancehost/**'
       - 'go.mod'
@@ -32,7 +38,7 @@ permissions:
 jobs:
   console:
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -49,6 +55,17 @@ jobs:
         run: |
           go test -c -o /tmp/culvert-host.test ./internal/appliancehost
           sudo env CULVERT_STORAGE_FAULTS=1 /tmp/culvert-host.test -test.shuffle=on -test.count=2
+      - name: Root-only bootstrap credential lifecycle
+        run: |
+          go test -c -o /tmp/culvert-console.test ./cmd/culvert-console
+          sudo /tmp/culvert-console.test -test.run '^TestBootstrap' -test.shuffle=on -test.count=2
+      - name: Maintenance agent admission and interrupted journal regressions
+        working-directory: cmd/culvert-maint
+        run: |
+          go test -race -shuffle=on -count=2 ./internal/server ./internal/journal
+          go vet ./internal/server ./internal/journal
+      - name: Existing firstboot and OS maintenance contracts
+        run: go test -shuffle=on -count=1 -run '^Test(FirstBoot|OSUpdate)' .
       - name: Bounded terminal layout fuzzing
         run: go test ./internal/applianceconsole -run '^$' -fuzz '^FuzzFrameBounds$' -fuzztime=10s -parallel=2
       - name: Build static host binary with the repository compiler

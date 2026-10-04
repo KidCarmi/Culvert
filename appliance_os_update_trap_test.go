@@ -34,6 +34,8 @@ var osUpdateResumeHook func(markerPath string)
 // the script starts (to take the agent's host maintenance lock).
 var osUpdateHook func(agentStateDir string)
 
+const osUpdateTestBootID = "11111111-1111-1111-1111-111111111111"
+
 // runOSUpdateWith runs the script with args. journal == nil leaves the
 // agent's state dir absent (agent not installed); otherwise one journal
 // record per name is written (an operation awaiting reconcile).
@@ -64,9 +66,14 @@ func runOSUpdateWith(t *testing.T, args, journal []string, env ...string) (out, 
 	script = strings.Replace(script, "LOCK=/run/culvert-os-update.lock", "LOCK="+filepath.Join(dir, "lock"), 1)
 	resume := filepath.Join(dir, "state", "stack-resume-on-boot")
 	script = strings.Replace(script, "STACK_RESUME=/var/lib/culvert-appliance/state/stack-resume-on-boot", "STACK_RESUME="+resume, 1)
+	bootPath := filepath.Join(dir, "boot-id")
+	if err := os.WriteFile(bootPath, []byte(osUpdateTestBootID+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	script = strings.Replace(script, "BOOT_ID_FILE=/proc/sys/kernel/random/boot_id", "BOOT_ID_FILE="+bootPath, 1)
 	if !strings.Contains(script, "MAINT_STATE="+mstate) || !strings.Contains(script, "LOCK="+filepath.Join(dir, "lock")) ||
-		!strings.Contains(script, "STACK="+stack) || !strings.Contains(script, "STACK_RESUME="+resume) {
-		t.Fatal("could not relocate STACK/LOG/MAINT_STATE/LOCK/STACK_RESUME in culvert-os-update")
+		!strings.Contains(script, "STACK="+stack) || !strings.Contains(script, "STACK_RESUME="+resume) || !strings.Contains(script, "BOOT_ID_FILE="+bootPath) {
+		t.Fatal("could not relocate maintenance paths in culvert-os-update")
 	}
 	if osUpdateResumeHook != nil {
 		osUpdateResumeHook(resume)
@@ -109,6 +116,9 @@ func runOSUpdateWith(t *testing.T, args, journal []string, env ...string) (out, 
 	c, _ := os.ReadFile(callsPath)
 	if _, err := os.Stat(resume); err == nil {
 		c = append(c, []byte("final:resume-marker-present\n")...)
+	}
+	if _, err := os.Stat(filepath.Join(mstate, "host-shutdown.pending")); err == nil {
+		c = append(c, []byte("final:shutdown-fence-present\n")...)
 	}
 	return string(b), string(c), code
 }

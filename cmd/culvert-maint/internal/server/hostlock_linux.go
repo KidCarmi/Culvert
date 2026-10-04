@@ -34,5 +34,12 @@ func acquireHostMaintenanceLock(stateDir string) (release func(), busy bool, err
 		}
 		return nil, false, err
 	}
+	// systemctl returns after enqueueing power, before shutdown actually runs.
+	// The durable boot-bound fence closes admission after the helper exits and
+	// drops its flock. Never interpret an unreadable fence as a free host.
+	if pending, err := pendingShutdown(stateDir); pending || err != nil {
+		_ = f.Close()
+		return nil, pending, err
+	}
 	return func() { _ = f.Close() }, false, nil // closing the descriptor drops the flock
 }

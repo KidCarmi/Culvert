@@ -140,6 +140,8 @@ func menu(ctx context.Context, collector applianceconsole.Collector, admin bool)
 }
 
 type menuDisplay struct {
+	bootstrap     func() string
+	password      string
 	snapshot      applianceconsole.Snapshot
 	refresh       time.Time
 	dirty         bool
@@ -152,6 +154,9 @@ type menuDisplay struct {
 func (d *menuDisplay) redraw(ctx context.Context, collector applianceconsole.Collector) error {
 	if time.Now().After(d.refresh) {
 		d.snapshot = collector.Collect(ctx)
+		if d.bootstrap != nil {
+			d.password = d.bootstrap()
+		}
 		d.refresh = time.Now().Add(5 * time.Second)
 		d.dirty = true
 	}
@@ -161,6 +166,9 @@ func (d *menuDisplay) redraw(ctx context.Context, collector applianceconsole.Col
 	}
 	panelHeight, panelWidth := min(height, 25), min(width, 80)
 	rows := d.view.Frame(d.snapshot, panelHeight, panelWidth)
+	if d.password != "" {
+		rows = bootstrapRows(d.password, panelHeight, panelWidth)
+	}
 	frame := applianceconsole.Render(rows, d.color)
 	if !d.ansi && frame == d.lastFrame {
 		d.dirty = false
@@ -245,6 +253,7 @@ func runMenu(ctx context.Context, collector applianceconsole.Collector, admin bo
 	lastInput := time.Now()
 	ansi, color := terminalCapabilities()
 	display := menuDisplay{dirty: true, view: applianceconsole.NewView(admin), ansi: ansi, color: color}
+	display.enableBootstrap(admin)
 	for {
 		if err := ctx.Err(); err != nil {
 			return "", err
@@ -265,7 +274,7 @@ func runMenu(ctx context.Context, collector applianceconsole.Collector, admin bo
 		if key != "" {
 			display.dirty = true
 		}
-		switch choice := display.view.Handle(key); choice {
+		switch choice := display.handle(key); choice {
 		case "refresh":
 			display.refresh = time.Time{}
 		case "":
@@ -273,6 +282,22 @@ func runMenu(ctx context.Context, collector applianceconsole.Collector, admin bo
 			return choice, nil
 		}
 	}
+}
+
+func (d *menuDisplay) enableBootstrap(admin bool) {
+	if !admin && validateTerminal(false) == nil {
+		d.bootstrap = bootstrapPassword
+	}
+}
+
+func (d *menuDisplay) handle(key string) string {
+	if d.password == "" {
+		return d.view.Handle(key)
+	}
+	if key == "L" || key == "F2" {
+		return "login"
+	}
+	return ""
 }
 
 func confirm(ctx context.Context, prompt string) (string, error) {

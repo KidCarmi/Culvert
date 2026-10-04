@@ -8,12 +8,14 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/KidCarmi/Culvert/internal/applianceconsole"
 	"github.com/KidCarmi/Culvert/internal/appliancehost"
+	"golang.org/x/sys/unix"
 )
 
 func TestConsolePowerUsesMaintenanceOwnerAndPropagatesRefusal(t *testing.T) {
@@ -62,11 +64,81 @@ func TestHostPowerCancellationAllowsRecoveryAndBoundsIgnoredSignals(t *testing.T
 	}
 }
 
+func TestHostCancellationCleansDescendantWhenLeaderExitsFirst(t *testing.T) {
+	dir := t.TempDir()
+	lock, err := os.OpenFile(filepath.Join(dir, "lock"), os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = lock.Close() })
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- hostCommandWithGrace(ctx, 5*time.Second, 5*time.Second, "/bin/sh", "-c", `
+exec 9>"$1/lock"
+flock -x 9 || exit 2
+trap 'exit 1' TERM
+/bin/sh -c 'trap "" TERM; printf ready > "$1/ready"; exec sleep 30' child "$1" </dev/null >/dev/null 2>&1 &
+printf '%s' "$$" > "$1/group"
+wait "$!"
+`, "leader-first-fixture", dir)
+	}()
+	waitHostFixtureFile(t, filepath.Join(dir, "ready"))
+	groupText := waitHostFixtureFile(t, filepath.Join(dir, "group"))
+	group, err := strconv.Atoi(string(groupText))
+	if err != nil || group <= 1 {
+		t.Fatalf("invalid fixture process group: %q", groupText)
+	}
+	// The inherited lock pins the surviving fixture group if the regression
+	// returns; cleanup cannot target a subsequently reused, unrelated group.
+	t.Cleanup(func() {
+		if err := unix.Flock(int(lock.Fd()), unix.LOCK_EX|unix.LOCK_NB); errors.Is(err, unix.EWOULDBLOCK) {
+			_ = unix.Kill(-group, unix.SIGKILL)
+		}
+	})
+	if err := unix.Flock(int(lock.Fd()), unix.LOCK_EX|unix.LOCK_NB); !errors.Is(err, unix.EWOULDBLOCK) {
+		t.Fatalf("fixture did not acquire its inherited lock: %v", err)
+	}
+	started := time.Now()
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("cancellation lost: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("leader exit waited for the full cancellation grace")
+	}
+	for time.Since(started) < 3*time.Second {
+		if err := unix.Flock(int(lock.Fd()), unix.LOCK_EX|unix.LOCK_NB); err == nil {
+			return
+		} else if !errors.Is(err, unix.EWOULDBLOCK) {
+			t.Fatal(err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("TERM-ignoring descendant retained the maintenance lock after its leader exited")
+}
+
+func waitHostFixtureFile(t *testing.T, path string) []byte {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if data, err := os.ReadFile(path); err == nil && len(data) != 0 {
+			return data
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("host fixture did not publish %s", filepath.Base(path))
+	return nil
+}
+
 func TestHostModesRequireRootBeforeObservationsOrMutation(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("exercise the unprivileged entry point")
 	}
-	for _, mode := range []string{"worker", "network", "reboot", "poweroff", "retry-reset", "retry-start"} {
+	for _, mode := range []string{"bootstrap-record", "bootstrap-commit", "worker", "network", "reboot", "poweroff", "retry-reset", "retry-start"} {
 		if err := runHost(context.Background(), mode, applianceconsole.Collector{}); err == nil {
 			t.Fatalf("unprivileged host mode %s accepted", mode)
 		}

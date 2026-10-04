@@ -924,8 +924,8 @@ var (
 // takeHostLock acquires the host maintenance lock for a state-changing op
 // (nil release for other kinds). While culvert-os-update holds it the op is
 // refused (409) and its admission recorded as failed. A lock that cannot be
-// opened at all does not block the agent — logged; the in-memory lock still
-// serializes agent ops.
+// opened, or an unreadable shutdown fence, refuses admission. A pending
+// shutdown remains fenced after the power helper has released its flock.
 func (s *Server) takeHostLock(opID, kind, actor string, params map[string]interface{}, idemKey string) (func(), *opError) {
 	if !ops.IsStateChanging(kind) {
 		return nil, nil
@@ -936,7 +936,7 @@ func (s *Server) takeHostLock(opID, kind, actor string, params map[string]interf
 		s.recordAdmissionFailure(opID, kind, actor, params, idemKey, "host_maintenance_in_progress")
 		return nil, augmentErrorWithOp(&opError{Status: http.StatusConflict, Body: map[string]string{
 			"error":  "host_maintenance_in_progress",
-			"detail": "culvert-os-update is running on this host; retry when it has finished",
+			"detail": "host maintenance is running or shutdown is pending in this boot; retry after maintenance or reboot recovery completes",
 		}}, opID)
 	case err != nil:
 		// Indeterminate is not "free": admitting here would let a retag or
@@ -946,7 +946,7 @@ func (s *Server) takeHostLock(opID, kind, actor string, params map[string]interf
 		s.recordAdmissionFailure(opID, kind, actor, params, idemKey, "host_maintenance_lock_unavailable")
 		return nil, augmentErrorWithOp(&opError{Status: http.StatusServiceUnavailable, Body: map[string]string{
 			"error":  "host_maintenance_lock_unavailable",
-			"detail": "cannot open or lock " + hostMaintenanceLockName + " in the agent state directory; check its ownership and permissions (the agent must be able to open it read-only)",
+			"detail": "host maintenance lock or pending shutdown fence is unavailable; inspect ownership, permissions and pending shutdown state before retrying",
 		}}, opID)
 	}
 	return rel, nil

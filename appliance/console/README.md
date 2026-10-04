@@ -1,5 +1,36 @@
 # Culvert boot console and local recovery worker
 
+## Initial access and shutdown admission
+
+When import supplies neither a console password nor an SSH key, first boot
+creates a forced-change password and a private handoff under
+`/var/lib/culvert-console/bootstrap` (root-only directory 0700, record 0600).
+The physical tty1 console keeps that initial password available for late
+attachment and redraws. It reveals the handoff only after durable firstboot
+completion and while both the account's shadow hash and forced-change state
+still match. Changing the password invalidates the handoff; the root worker
+also removes it while an authenticated session is open. Unreadable account
+state hides the handoff rather than guessing. Imported credentials are never
+recorded by this path. Passwords do not enter status JSON, diagnostic reports,
+command arguments, environment variables or action logs. Physical console
+access is therefore credential access until the initial password is changed.
+
+The OS power helper and maintenance agent share a boot-bound shutdown fence
+in addition to their flock. Accepted asynchronous shutdown leaves the fence
+in place after the helper exits, refusing new state-changing operations in
+that boot. A definitely rejected shutdown can be recovered with
+`sudo culvert-os-update resume-stack`; an uncertain dispatch remains fenced
+until the next boot. Resume checks interrupted agent journals before starting
+containers, and preserves its marker when reconciliation is required.
+`--force` cannot bypass the fence or resume journal checks.
+
+These protections require the updated OS helper **and** maintenance agent
+from this change. A console overlay with an older application/agent image
+does not establish the shutdown-admission guarantee. Qualification must use
+the integrated candidate image and provisioning from the matching revision.
+Targeted Linux regressions exercise these contracts; final OVA qualification
+remains separate.
+
 ## Verified file restoration and diagnostic export
 
 After applying or reverting a managed network change, the worker rereads the
