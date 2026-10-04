@@ -15,6 +15,7 @@ spec.loader.exec_module(bootstrap)
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--scope', type=Path, required=True)
+    parser.add_argument('--initial-timeout', type=int, default=900)
     parser.add_argument('--resume-initial-observation', action='store_true',
                         help='Extend observation only after initial-capture expired without sending credentials')
     args = parser.parse_args()
@@ -40,7 +41,7 @@ def main():
         flow = None
         try:
             flow = bootstrap.Bootstrap(lab, bootstrap.PrivateKeyboard(lab),
-                    initial_timeout=900 if args.resume_initial_observation else 300,
+                    initial_timeout=args.initial_timeout,
                     capture_prefix=('bootstrap-extension' if args.resume_initial_observation else 'bootstrap') +
                                    ('-pixels' if os.environ.get('CULVERT_ESXI_CONSOLE_FONT') else ''))
             flow.authenticate()

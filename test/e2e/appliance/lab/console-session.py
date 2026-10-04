@@ -41,6 +41,8 @@ SUDO = "LABSUDO:"
 
 class Console:
     def __init__(self, path, trace):
+        if not hasattr(socket, "AF_UNIX"):
+            raise OSError("Unix console transport is unavailable on this controller")
         self.s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self.s.connect(path)
         self.s.setblocking(False)

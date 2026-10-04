@@ -1,5 +1,53 @@
 # LOCAL-ESXI qualification lab
 
+## Current corrected candidate: b579ca28
+
+This campaign qualifies the retained OVA from run `37235713308`, artifact
+`11315044688`, source `b579ca28c9d936e9141292ce5ec564a26feeae86`, SHA256
+`1a713a9bedc4ee50ac4212c12048924e03abe6b8f04cb82d4d0ef95e33ef4775`.
+Its application image is
+`sha256:24b37bc217691058e56a838821b86dfbd45b927b1c0ea8ea867a28c54d4bcc47`.
+Controller preparation and offline tests are not guest qualification results.
+
+The controller incorporates shared lab revision
+`a2db201be66e57b11812786a4d6b0eb355d39c1c`. Optional pre-update and reboot
+hooks preserve the guarded restore and add failure-injected network rollback,
+independent readiness timestamps and backup-request elapsed times. The Windows
+QEMU helper explicitly refuses unavailable Unix sockets; ESXi uses tty1 instead.
+
+Commit the whole controller, then create `controller-freeze.py create --manifest
+ABSOLUTE-PATH --external GOVC-BINARY --external PINNED-CONSOLE-FONT`. Set that
+manifest as `controller_manifest` in both new scopes. Every adapter invocation
+checks the exact revision, clean checkout and all frozen file hashes. Keep this
+checkout unchanged until both source and fresh-recovery campaigns have ended.
+Never use the historical staged `.tools/access-aware-shared` copy or the
+4f27d945-specific resume wrapper for this campaign.
+
+Use the existing one-VM limits and `credential_mode: none`. After `esxi-lab.py up`,
+run `access-aware-bootstrap.py`, then `operator-enroll.py --scope S --bind IP`.
+Only local PAM/sudo enrolls the read-only operator and pins its SSH host key.
+Prepare the [disposable registry and signed evidence](esxi-lab-registry.md),
+then invoke `candidate-run.ps1 -Scope S -Bind IP -Python PYTHON -ConsoleFont FONT`.
+It loads the tracked shared library and every hook before lifecycle execution.
+The primary post-reboot backup request retains its response and elapsed time;
+run `capture-guest-timing.py` and `capture-vm-performance.py` afterward, so
+diagnostic listings cannot hide or warm up the primary availability check.
+
+After lifecycle evidence and the network-before/network-after P1 checks, export
+the [fresh-recovery archive and separate secrets](fresh-appliance-recovery-qualification.md).
+Run the [identity reset stages](esxi-p1-regressions.md), including automatic
+power-off, fresh boot and actual rejection of the previous credentials. Require
+verified export and all P1 stages before the [source deletion procedure](esxi-source-deletion.md).
+Only after source VM and backing-disk deletion is proven may the same retained
+OVA be imported into a fresh run and restored through authenticated recovery.
+
+Report each failure and blocker without replacing it with a later success.
+The historical 597-second result mixes console dispatch/observation and readiness
+polling; it is not a pure guest-boot measurement. Storage samples are correlation,
+not proof of causation. F-DISK-1, ClamAV and scanner owner dispositions remain
+explicit release blockers/decisions; this workflow authorizes neither merge nor
+production release. Historical log recovery is outside the supported archive.
+
 ## Access-aware workflow for the 4f27d945 LAB candidate
 
 This records the access-aware workflow for the appliance through #1549. The

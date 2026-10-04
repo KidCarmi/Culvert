@@ -115,6 +115,9 @@ esxi_restore_persistence() {
   fi
 }
 
+if [[ ${ESXI_EXTENDED_CAMPAIGN:-0} == 1 ]]; then
+  source "$ADAPTER_HERE/candidate-hooks.sh"
+fi
 if [[ ${ESXI_ADAPTER_LIBRARY_ONLY:-0} == 1 ]]; then return 0; fi
 check ESXi access-aware-harness info "shared source SHA256 $ESXI_SHARED_SHA256; operator SSH pinned to $ESXI_HOST_KEY_ALIAS; privileged commands use authenticated tty1"
 gpriv <<<'cat /proc/sys/kernel/random/boot_id' > "$EV/esxi-boot-id-before.txt"

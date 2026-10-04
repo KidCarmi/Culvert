@@ -400,6 +400,11 @@ class Lab:
                        HERE / 'govc-sha256-negotiation.patch', HERE.parent / 'lab/appliance-lab.sh'):
             with source.open('rb') as f:
                 sources[source.relative_to(ROOT).as_posix()] = digest(f)
+        controller_freeze = None
+        if self.c.get('controller_manifest'):
+            controller_freeze = json.loads(Path(self.c['controller_manifest']).read_text(encoding='utf-8'))
+            require(controller_freeze['revision'] == sha and not dirty, 'controller is not frozen cleanly')
+            sources = controller_freeze['files']
         data = dict(artifact=artifact, expected_source=self.c['source_sha'], expected_image=self.c['image_id'],
                     original_candidate=artifact['ova_sha256'] == ORIGINAL_SHA,
                     harness_sha=sha, harness_dirty=bool(dirty), harness_file_sha256=sources,
@@ -409,6 +414,8 @@ class Lab:
                     property_delivery='govc ImportVApp + InjectOvfEnv via VMware guestinfo',
                     credential_mode=self.c.get('credential_mode', 'key'),
                     host_ref=hs[0]['self'], ds_ref=dss[0]['self'], network_ref=net)
+        if controller_freeze:
+            data['controller_freeze'] = controller_freeze
         if self.c.get('govc_build'):
             with Path(self.govc).open('rb') as f:
                 actual_binary = digest(f)
