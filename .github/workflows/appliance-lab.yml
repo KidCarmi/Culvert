@@ -69,6 +69,8 @@ jobs:
       SOURCE_IMAGE_TAR_SHA256: ${{ matrix.image_tar_sha256 }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Harness self-test (a known-unavailable agent response must FAIL the agent oracle)
+        run: test/e2e/appliance/lab/appliance-lab.sh selftest
       - name: Host preflight (KVM, RAM, disk) and lab directory
         run: |
           set -euo pipefail

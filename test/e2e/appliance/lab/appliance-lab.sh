@@ -92,6 +92,45 @@ UI="https://$LAB_HOST:$LAB_UI_PORT"; P="http://$LAB_HOST:$LAB_PROXY_PORT"; JAR="
 ensure_admin_pass() { [[ -s "$SEC/admin-pass" ]] || { head -c 4096 /dev/urandom | tr -dc 'A-Za-z0-9' | cut -c1-24 > "$SEC/admin-pass"; chmod 0600 "$SEC/admin-pass"; }; }
 api() { curl -ksS -m 30 -X "$1" "$UI$2" -H "Origin: $UI" -H 'Content-Type: application/json' -b "$JAR" -c "$JAR" ${3:+-d "$3"} -w '\n%{http_code}\n'; }
 body() { sed '$d'; }; code() { tail -n1; }
+# agent_status_verdict FILE — FILE is `api GET /api/maintenance-agent` output
+# (JSON body, then the HTTP code). That endpoint answers 200 EVEN WHEN THE
+# AGENT IS DOWN ({available:false, reason}) so the GUI can show why: HTTP 200
+# alone proves nothing (run 37159302279 recorded PASS with available:false and
+# a missing socket). PASS needs a real reachable agent: HTTP 200, available
+# === true (a JSON boolean), a release-shaped agent_version and the compose
+# stack up. Prints "pass|<detail>" or "fail|<detail>".
+agent_status_verdict() {
+  python3 - "$1" <<'PY'
+import json, re, sys
+lines = open(sys.argv[1]).read().rstrip("\n").split("\n")
+code, body = (lines[-1].strip() if lines else ""), "\n".join(lines[:-1])
+def out(r, d): print(f"{r}|{d}"); sys.exit(0)
+if code != "200": out("fail", f"http {code or '?'}")
+try: j = json.loads(body)
+except Exception: out("fail", "unparseable body: " + body[:120])
+if not isinstance(j, dict) or j.get("available") is not True:
+    out("fail", "agent not available: " + str((j or {}).get("reason", body[:160]) if isinstance(j, dict) else body[:160]))
+v = j.get("agent_version", "")
+if not re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?", v or ""): out("fail", f"agent_version {v!r} is not a release-shaped version")
+if j.get("compose_stack_up") is not True: out("fail", f"agent {v}: compose stack not up ({j.get('compose_error', '')})")
+out("pass", f"agent {v} reachable over its socket, privilege_mode={j.get('privilege_mode', '?')}, compose stack up")
+PY
+}
+# The oracle's own proof: a known-unavailable response must FAIL it, or a
+# PASS from it means nothing.
+cmd_selftest() { local d rc=0 got; d="$(mktemp -d)"
+  verdict_case() { printf '%s\n%s\n' "$2" "$3" > "$d/r"; got="$(agent_status_verdict "$d/r")"
+    if [[ "${got%%|*}" == "$1" ]]; then log "selftest ok: $4 -> $got"; else log "selftest FAILED: $4 -> $got (want $1)"; rc=1; fi; }
+  verdict_case fail '{"available":false,"reason":"maintenance agent unreachable: dial unix /run/culvert-maint/culvert-maint.sock: connect: no such file or directory"}' 200 "run 37159302279's response"
+  verdict_case fail '{"available":false,"reason":"maintenance agent not configured"}' 200 "not configured"
+  verdict_case fail '{"available":false,"agent_version":"v1.0.260-candidate.gc5551a18da30","compose_stack_up":true}' 200 "available:false with otherwise healthy fields"
+  verdict_case fail '{"available":"true","agent_version":"v1.0.260-candidate.gc5551a18da30","compose_stack_up":true}' 200 "available as a string"
+  verdict_case fail '{"available":true,"agent_version":"dev","compose_stack_up":true}' 200 "dev agent"
+  verdict_case fail '{"available":true,"agent_version":"v1.0.260-candidate.gc5551a18da30","compose_stack_up":false}' 200 "stack down"
+  verdict_case fail '{"error":"forbidden"}' 403 "http 403"
+  verdict_case fail 'not json' 200 "unparseable"
+  verdict_case pass '{"available":true,"agent_version":"v1.0.260-candidate.gc5551a18da30","privilege_mode":"sudoers","compose_stack_up":true}' 200 "healthy agent"
+  rm -rf "$d"; return "$rc"; }
 through_proxy() { curl -sS -m 20 -x "$P" -o /dev/null -w '%{http_code}' "$1" 2>/dev/null || echo 000; }
 # Monitor socket: a short fixed path (AF_UNIX paths are limited to 108 bytes).
 MON_SOCK="/tmp/culvert-lab-$(printf '%s' "$WORK" | sha256sum | cut -c1-12).sock"
@@ -350,6 +389,16 @@ PY
   # Step 6 — maintenance agent: backup through the product, restore DRY RUN.
   if gate 6 agent-backup; then
     api GET /api/maintenance-agent > "$EV/06-agent-status.txt" || true
+    # L11: the first boot must have INSTALLED the bundled agent (not merely
+    # left a pending marker), at the image's own version, and the proxy must
+    # reach it over its socket.
+    gssh 'systemctl is-active culvert-maint; culvert-maint --version; cat /srv/culvert/.env 2>/dev/null | grep -c "^CULVERT_MAINT_GID=" ; ls /var/lib/culvert-appliance/state/' > "$EV/06-agent-installed.txt" 2>&1 || true
+    local appv agv; appv="$(curl -fsS -m 10 "$P/health" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("version",""))' 2>/dev/null || true)"
+    agv="$(sed -n 2p "$EV/06-agent-installed.txt")"
+    if [[ "$(head -1 "$EV/06-agent-installed.txt")" == active && -n "$agv" && "$agv" == "v${appv#v}" ]] && ! grep -qx 'agent.pending' "$EV/06-agent-installed.txt"; then
+      check 6 agent-installed pass "culvert-maint active, version $agv = proxy $appv, no agent.pending"
+    else check 6 agent-installed fail "$(tr '\n' ' ' < "$EV/06-agent-installed.txt" | head -c 300) (proxy ${appv:-?})"; fi
+    local av; av="$(agent_status_verdict "$EV/06-agent-status.txt")"; check 6 agent-reachable "${av%%|*}" "${av#*|}"
     local opjson op fn st=""
     opjson="$(api POST /api/backups '{"encrypt":false}' | tee "$EV/06-backup-trigger.txt")"
     op="$(printf '%s\n' "$opjson" | body | python3 -c 'import json,sys;print(json.load(sys.stdin).get("opId",""))' 2>/dev/null || true)"
@@ -360,6 +409,7 @@ PY
     fi
     [[ "$st" == succeeded ]] && check 6 agent-backup pass "op $op → $fn succeeded (proxy → agent socket → sudoers → cli container)" || check 6 agent-backup fail "op=${op:-none} state=${st:-none}: $(body < "$EV/06-backup-trigger.txt" | head -c 300)"
     api GET /api/backups > "$EV/06-backups.txt" || true
+    [[ -n "$fn" ]] && grep -qF "$fn" "$EV/06-backups.txt" && check 6 backup-listed pass "$fn listed by /api/backups" || check 6 backup-listed fail "backup ${fn:-?} not listed"
     if [[ -n "$fn" ]]; then
       gssh "cd /srv/culvert && sudo docker compose --profile cli run --rm -T cli --restore /backup/$fn --mode full" > "$EV/06-restore-dryrun.txt" 2>&1 || true
       grep -qi 'validation passed' "$EV/06-restore-dryrun.txt" && check 6 restore-dry-run pass "validation passed (no --confirm; nothing restored)" || check 6 restore-dry-run fail "$(tail -3 "$EV/06-restore-dryrun.txt" | tr '\n' ' ')"
@@ -399,7 +449,8 @@ PY
     # by culvert-stack-resume.service, which clears its marker only on success.
     gssh 'systemctl show culvert-stack-resume.service -p LoadState -p ActiveState -p Result -p ExecMainStatus; sudo journalctl -b -u culvert-stack-resume --no-pager | tail -8; test -e /var/lib/culvert-appliance/state/stack-resume-on-boot && echo MARKER-PRESENT || echo MARKER-CLEARED' > "$EV/08-stack-resume.txt" 2>&1 || true
     grep -qx 'Result=success' "$EV/08-stack-resume.txt" && grep -qx 'MARKER-CLEARED' "$EV/08-stack-resume.txt" && grep -q 'stack started after the maintenance reboot' "$EV/08-stack-resume.txt" \
-      && check 8 stack-resumed pass "culvert-stack-resume.service started the stack and cleared its marker" \
+      && grep -q 'holding .* and the maintenance agent lock' "$EV/08-stack-resume.txt" \
+      && check 8 stack-resumed pass "culvert-stack-resume.service took the os-update + agent locks, started the stack and cleared its marker" \
       || check 8 stack-resumed fail "$(tr '\n' ' ' < "$EV/08-stack-resume.txt" | head -c 300)"
     : > "$JAR"; c="$(api POST /api/auth/login "{\"user\":\"$ADMIN_USER\",\"pass\":\"$pass\"}" | tee "$EV/08-login.txt" | code)"
     [[ $c == 200 ]] && check 8 admin-login pass "200 after reboot" || check 8 admin-login fail "http $c"
@@ -418,7 +469,7 @@ PY
     api GET /api/backups > "$EV/08-backups.txt" || true
     [[ -n "${BACKUP_FILE:-}" ]] && grep -qF "$BACKUP_FILE" "$EV/08-backups.txt" && check 8 backup-listed pass "$BACKUP_FILE still listed" || check 8 backup-listed fail "backup ${BACKUP_FILE:-?} not listed"
     c="$(api GET /api/maintenance-agent | tee "$EV/08-agent-status.txt" | code)"
-    [[ $c == 200 ]] && check 8 agent-reachable pass "$(body < "$EV/08-agent-status.txt" | head -c 200)" || check 8 agent-reachable fail "http $c"
+    local av8; av8="$(agent_status_verdict "$EV/08-agent-status.txt")"; check 8 agent-reachable "${av8%%|*}" "${av8#*|} (after the maintenance reboot)"
     gssh 'sudo journalctl -b -u culvert-firstboot --no-pager | tail -20' > "$EV/08-firstboot-journal.txt" 2>&1 || true
     grep -q 'step .*: done' "$EV/08-firstboot-journal.txt" && check 8 firstboot-not-rerun fail "a first-boot step ran again" || check 8 firstboot-not-rerun pass "no first-boot step ran on the second boot"
     cmp -s <(sed -n '/\.done$/p' "$EV/03-state-files.txt") <(sed -n '/\.done$/p' "$EV/08-status-after-reboot.txt") && check 8 state-files pass "first-boot state files unchanged" || check 8 state-files info "state listing changed — see 08-status-after-reboot.txt"
@@ -497,6 +548,7 @@ failures() { grep -c '"result":"fail"' "$JSONL" 2>/dev/null || true; }
 # Transport adapters may reuse the guest checks without dispatching QEMU.
 [[ "${LAB_LIBRARY_ONLY:-0}" == 1 ]] && return 0
 case "${1:-}" in
+  selftest) cmd_selftest ;;
   preflight) cmd_preflight ;;
   fingerprint) cmd_fingerprint "${2:?OVA}" "${3:?OUT.tsv}" ;;
   compare) cmd_compare "${2:?REF}" "${3:?CAND}" ;;
