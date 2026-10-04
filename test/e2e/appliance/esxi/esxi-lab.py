@@ -386,6 +386,11 @@ class Lab:
         for source in (Path(__file__), HERE / 'guest-checks.sh', HERE / 'guest-observe.py',
                        HERE / 'restore-checks.sh', HERE / 'console-checks.py', HERE / 'console-ocr.ps1',
                        HERE / 'bootstrap-checks.py', HERE / 'private-keystrokes.go', HERE / 'esxi-port-relay.py',
+                       HERE / 'access-aware-bootstrap.py', HERE / 'console-priv.py',
+                       HERE / 'pixel-console.py', HERE / 'access-aware-qualify.sh', HERE / 'prepare-signed-fixture.py',
+                       HERE / 'access-aware-resume.sh', HERE / 'restore-persistence.py',
+                       HERE / 'independent-postcheck.py', HERE / 'independent-postcheck-guest.py',
+                       HERE / 'shared-before-signed-update.patch',
                        HERE / 'govc-sha256-negotiation.patch', HERE.parent / 'lab/appliance-lab.sh'):
             with source.open('rb') as f:
                 sources[source.relative_to(ROOT).as_posix()] = digest(f)

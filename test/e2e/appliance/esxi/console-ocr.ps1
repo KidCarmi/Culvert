@@ -7,7 +7,7 @@ param(
     [Parameter(Mandatory = $true)][string]$ImagePath,
     [Parameter(Mandatory = $true)][string]$OutputPath,
     [ValidateRange(1, 60)][int]$TimeoutSeconds = 20,
-    [ValidateSet(1, 2)][int]$Scale = 1
+    [ValidateSet(1, 2, 3, 4)][int]$Scale = 1
 )
 
 $ErrorActionPreference = 'Stop'
@@ -127,6 +127,9 @@ try {
             [Windows.Graphics.Imaging.BitmapAlphaMode]::Premultiplied)) ([Windows.Graphics.Imaging.SoftwareBitmap])
     } else {
         $transform = [Windows.Graphics.Imaging.BitmapTransform]::new()
+        # Preserve the VM's pixel font; interpolating adjacent strokes can turn
+        # one glyph into two and is unsafe for one-shot credential recognition.
+        $transform.InterpolationMode = [Windows.Graphics.Imaging.BitmapInterpolationMode]::NearestNeighbor
         $transform.ScaledWidth = [uint32]$scaledWidth
         $transform.ScaledHeight = [uint32]$scaledHeight
         $bitmap = Wait-WinRT ($decoder.GetSoftwareBitmapAsync([Windows.Graphics.Imaging.BitmapPixelFormat]::Bgra8,

@@ -126,9 +126,14 @@ def classify(text):
 
 
 class Bootstrap:
-    def __init__(self, lab, keyboard):
+    def __init__(self, lab, keyboard, initial_timeout=300, capture_prefix='bootstrap'):
+        ensure(1 <= initial_timeout <= 1200, 'initial observation bound refused')
+        ensure(re.fullmatch(r'[a-z0-9-]+', capture_prefix), 'capture prefix refused')
         self.lab, self.keyboard = lab, keyboard
-        self.deadline = time.monotonic() + 900
+        self.initial_timeout = initial_timeout
+        self.capture_prefix = capture_prefix
+        self.capture_limit = 80 + initial_timeout // 6
+        self.deadline = time.monotonic() + initial_timeout + 600
         self.sequence = 0
         self.stage = 'initial-capture'
 
@@ -139,13 +144,24 @@ class Bootstrap:
 
     def screen(self, deadline):
         self.sequence += 1
-        ensure(self.sequence <= 80, 'private capture count exhausted')
-        stem = 'bootstrap-' + str(self.sequence).zfill(3)
+        ensure(self.sequence <= self.capture_limit, 'private capture count exhausted')
+        stem = self.capture_prefix + '-' + str(self.sequence).zfill(3)
         png, ocr = self.lab.sec / (stem + '.png'), self.lab.sec / (stem + '.txt')
         self.lab.vm(timeout=self.budget(15, deadline))
         self.lab.gov('vm.console', '-capture=' + str(png), self.lab.state['path'],
                      json_output=False, timeout=self.budget(20, deadline))
         ensure(png.is_file() and 0 < png.stat().st_size <= 10 * 1024**2, 'private screenshot unavailable or oversized')
+        font = os.environ.get('CULVERT_ESXI_CONSOLE_FONT')
+        if font:
+            decoder_spec = importlib.util.spec_from_file_location('pixel_console', HERE / 'pixel-console.py')
+            decoder = importlib.util.module_from_spec(decoder_spec)
+            decoder_spec.loader.exec_module(decoder)
+            text = decoder.decode(png, font)
+            self.budget(1, deadline)
+            ensure(len(text.encode('utf-8')) <= 65536, 'private pixel text exceeded bounds')
+            with ocr.open('x', encoding='utf-8') as out:
+                out.write(text)
+            return text
         timeout = max(1, int(self.budget(15, deadline)))
         result = subprocess.run(['powershell.exe', '-NoProfile', '-NonInteractive', '-File', str(HERE / 'console-ocr.ps1'),
                                  '-ImagePath', str(png), '-OutputPath', str(ocr), '-TimeoutSeconds', str(timeout), '-Scale', '2'],
@@ -167,7 +183,7 @@ class Bootstrap:
         raise Blocked('console prompt unreadable or unavailable; no credential retry')
 
     def initial(self):
-        deadline = min(self.deadline, time.monotonic() + 300)
+        deadline = min(self.deadline, time.monotonic() + self.initial_timeout)
         previous = None
         while time.monotonic() < deadline:
             current = extract_initial(self.screen(deadline))

@@ -127,8 +127,14 @@ esxi_actual_restore() (
     check "$step" actual-restore not-run 'shared qualification did not finish successfully'
     return 1
   fi
-  if ! esxi_restore_valid_backup "$filename" || [[ $LAB_HOST != 127.0.0.1 && $LAB_HOST != localhost ]]; then
-    check "$step" actual-restore fail 'invalid backup basename or non-local SSH tunnel target'
+  local target_ok=0
+  if declare -F esxi_restore_target_allowed >/dev/null; then
+    esxi_restore_target_allowed "$LAB_HOST" && target_ok=1
+  elif [[ $LAB_HOST == 127.0.0.1 || $LAB_HOST == localhost ]]; then
+    target_ok=1
+  fi
+  if ! esxi_restore_valid_backup "$filename" || [[ $target_ok != 1 ]]; then
+    check "$step" actual-restore fail 'invalid backup basename or unverified restore target'
     return 1
   fi
   if [[ ! -s $SEC/admin-pass || ! -s $EV/05-ca-fingerprint.txt || ! -s $EV/05b-lookups-before.txt ]]; then
@@ -162,6 +168,7 @@ PY
     return 1
   fi
   mutation="esxi-post-backup-block-$(date +%s)-$RANDOM"
+  printf '%s\n' "$mutation" > "$EV/09-post-backup-mutation-name.txt"
   response=$(api POST /api/policy "{\"name\":\"$mutation\",\"priority\":1,\"action\":\"Block_Page\",\"destFQDN\":\"example.com\",\"sslAction\":\"Bypass\",\"enabled\":true}")
   c=$(printf '%s\n' "$response" | code)
   if [[ $c != 200 && $c != 201 ]]; then
@@ -182,9 +189,13 @@ PY
 
   # gssh is capped at 120s. This single 600s session owns both maintenance locks
   # through all disruptive phases; a guest 570s budget leaves time to terminate.
-  esxi_restore_guest_script | timeout 600 ssh "${SSH_OPTS[@]}" "culvert@$LAB_HOST" \
-    "sudo -n timeout --signal=TERM --kill-after=10s 570s bash -s -- '$filename'" \
-    >"$SEC/actual-restore/remote.txt" 2>&1 || rc=$?
+  if declare -F esxi_restore_transport >/dev/null; then
+    esxi_restore_transport "$filename" >"$SEC/actual-restore/remote.txt" 2>&1 || rc=$?
+  else
+    esxi_restore_guest_script | timeout 600 ssh "${SSH_OPTS[@]}" "culvert@$LAB_HOST" \
+      "sudo -n timeout --signal=TERM --kill-after=10s 570s bash -s -- '$filename'" \
+      >"$SEC/actual-restore/remote.txt" 2>&1 || rc=$?
+  fi
   grep -E '^RESTORE (preflight|live-refusal|stop|commit|start) (pass|fail)$' "$SEC/actual-restore/remote.txt" >"$EV/09-restore-phases.txt" || true
   local phase
   for phase in preflight live-refusal stop commit start; do
