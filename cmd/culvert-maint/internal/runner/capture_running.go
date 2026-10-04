@@ -66,14 +66,33 @@ type RunningProxyImage struct {
 	RepoDigests []string
 }
 
-// PriorRef returns the first full `repo@sha256:…` reference, or "" if
-// none is available. Convenience for the future apply slice's rollback
-// pin; policy when empty is the apply handler's decision.
+// PriorRef returns the first captured reference for legacy inspection callers.
+// Deprecated: mutation callers must use RepositoryRef with host repository policy.
 func (ri *RunningProxyImage) PriorRef() string {
 	if len(ri.RepoDigests) == 0 {
 		return ""
 	}
 	return ri.RepoDigests[0]
+}
+
+// RepositoryRef selects the unique exact repository reference captured from the
+// running image. Other repositories may carry different manifest digests for
+// that same image, notably after mirroring. They do not make this repository's
+// identity ambiguous. Conflicting references within this repository do.
+func (ri *RunningProxyImage) RepositoryRef(repo string) (ref string, ambiguous bool) {
+	if ri == nil || repo == "" {
+		return "", false
+	}
+	for _, candidate := range ri.RepoDigests {
+		if !repoDigestRE.MatchString(candidate) || !strings.HasPrefix(candidate, repo+"@") {
+			continue
+		}
+		if ref != "" && ref != candidate {
+			return "", true
+		}
+		ref = candidate
+	}
+	return ref, false
 }
 
 // CaptureRunningProxyImage captures the identity of the image the

@@ -12,6 +12,7 @@ import (
 
 	"culvert-maint/internal/audit"
 	"culvert-maint/internal/ops"
+	"culvert-maint/internal/runner"
 )
 
 // auditKindRollback is the audit sub-action for an inline rollback. It is
@@ -20,17 +21,19 @@ import (
 const auditKindRollback = "upgrades.apply:rollback"
 
 // deriveRollbackTarget validates the captured prior image into a usable
-// rollback target, applying the SAME strict gate as standalone rollback
-// (repo@sha256:<digest> + image_allowlist). On any ambiguity it records a
+// rollback target in the host's exact proxy_repo, then applies image_allowlist.
+// Other repositories attached to that image are not candidate baselines.
+// On ambiguity within proxy_repo it records a
 // priorCaptureReason and leaves priorRef empty so rollback is skipped
 // rather than guessing.
-func (s *Server) deriveRollbackTarget(acc *upgradeApplyAccumulator, priorRef string) {
-	distinct := uniqueDigests(acc.priorDigests)
+func (s *Server) deriveRollbackTarget(acc *upgradeApplyAccumulator, ri *runner.RunningProxyImage) {
+	priorRef, ambiguous := ri.RepositoryRef(s.opts.Cfg.ProxyRepo)
+	acc.priorRef, acc.priorCaptureReason = "", ""
 	switch {
-	case len(distinct) == 0:
-		acc.priorCaptureReason = "no_prior_digest"
-	case len(distinct) > 1:
+	case ambiguous:
 		acc.priorCaptureReason = "ambiguous_prior_digest"
+	case priorRef == "":
+		acc.priorCaptureReason = "no_prior_digest"
 	default:
 		if rollbackDigestRefRE.MatchString(priorRef) &&
 			s.opts.Cfg.ImageAllowlist != nil && s.opts.Cfg.ImageAllowlist.MatchString(priorRef) {
@@ -232,21 +235,6 @@ func rollbackTargetNote(acc *upgradeApplyAccumulator) string {
 		return acc.priorCaptureReason
 	}
 	return "none"
-}
-
-// uniqueDigests returns the distinct members of a bare-digest slice,
-// preserving order.
-func uniqueDigests(digests []string) []string {
-	seen := make(map[string]struct{}, len(digests))
-	out := make([]string, 0, len(digests))
-	for _, d := range digests {
-		if _, ok := seen[d]; ok {
-			continue
-		}
-		seen[d] = struct{}{}
-		out = append(out, d)
-	}
-	return out
 }
 
 // firstOrEmpty returns the first element or "".

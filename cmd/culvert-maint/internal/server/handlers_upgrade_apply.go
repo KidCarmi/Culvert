@@ -2,9 +2,7 @@
 //
 // Flow (with inline auto-rollback, #375):
 //
-//	capture_before: capture the actual running digest and require signed
-//	                authorization for target and observed baseline. Persist
-//	                recovery evidence before any image mutation.
+//	capture_before: capture the actual running digest and baseline.
 //	resolve_target → docker manifest inspect <image_ref> → target digest
 //	                 set; compute already_current (running ∩ target).
 //	preflight_dependencies → refuse (nothing changed) while a service the
@@ -12,7 +10,8 @@
 //	                 remove the proxy and leave the new one stopped.
 //	preflight_space → refuse (nothing pulled) when the Docker data root
 //	                 has less free space than ~3x the target's compressed
-//	                 size + headroom.
+//	                 size + headroom. Then require signed target/baseline
+//	                 authorization and durably persist recovery evidence.
 //	pre_backup     → if requested AND not already_current: encrypted
 //	                 backup; a failure ABORTS before any pull/restart.
 //	pull           → docker pull <pinned repo@sha256> (P1.4; sudo-boundary
@@ -228,7 +227,7 @@ func (s *Server) buildUpgradeApplyStages(acc *upgradeApplyAccumulator, racc *rol
 			// Recovery evidence is persisted before the first side effect.
 			Name:          "capture_before",
 			FailureReason: ops.ReasonCommandError,
-			Run:           s.captureAuthorizedBaseline(acc, requestedRef),
+			Run:           s.captureBefore(acc),
 		},
 		{
 			// Remote registry lookup → target digest set, then PIN a
@@ -293,7 +292,7 @@ func (s *Server) buildUpgradeApplyStages(acc *upgradeApplyAccumulator, racc *rol
 			// left Docker unable to restart it (see preflight_space.go).
 			Name:          "preflight_space",
 			FailureReason: ops.ReasonValidation,
-			Run:           skipIfCurrent(acc, "preflight_space", s.preflightSpace(acc)),
+			Run:           s.preflightAuthorizedSpace(acc, requestedRef),
 		},
 		{
 			// Encrypted pre-upgrade backup. Skipped when already current
@@ -433,7 +432,7 @@ func (s *Server) captureBefore(acc *upgradeApplyAccumulator) stageRun {
 		}
 		acc.priorImageID = ri.RunningImageID
 		acc.priorDigests = bareDigests(ri.RepoDigests)
-		s.deriveRollbackTarget(acc, ri.PriorRef())
+		s.deriveRollbackTarget(acc, ri)
 		// What the running stack reports as healthy now is what the
 		// upgrade must preserve. Best-effort: no answer ⇒ nothing to keep.
 		acc.before, acc.baselineDetail = s.opts.HealthProbeFactory().Baseline(ctx)
@@ -541,9 +540,12 @@ func containsString(haystack []string, needle string) bool {
 	return false
 }
 
-func (s *Server) captureAuthorizedBaseline(acc *upgradeApplyAccumulator, requestedRef string) stageRun {
+// preflightAuthorizedSpace persists trust only after the read-only space gate.
+// A normal ENOSPC preflight refusal therefore needs no agent restart to retry.
+// Authorization remains mandatory before backup, pull, retag, or success.
+func (s *Server) preflightAuthorizedSpace(acc *upgradeApplyAccumulator, requestedRef string) stageRun {
 	return func(ctx context.Context) ([]byte, []byte, error) {
-		out, stderr, err := s.captureBefore(acc)(ctx)
+		out, stderr, err := skipIfCurrent(acc, "preflight_space", s.preflightSpace(acc))(ctx)
 		if err != nil {
 			return out, stderr, err
 		}

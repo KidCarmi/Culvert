@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -37,6 +38,33 @@ func releaseFixture(t *testing.T) (store *releasetrust.Store, target, prior *rel
 		return &releaseproof.Evidence{ReleaseID: id, Index: idx, Signature: sig, Manifest: m}
 	}
 	return s, proof("new", digNew), proof("old", digOld)
+}
+
+func TestReleaseTrustSpaceRefusalThenRetryWithoutRestart(t *testing.T) {
+	s, p, pp := releaseFixture(t)
+	rig := startApplyRigWithTrustAt(t, t.TempDir(), s)
+	defer rig.stop()
+	rig.targetSize = 100 << 20
+	rig.freeBytes.Store(200 << 20)
+	body := map[string]any{"image_ref": targetRef, "release_proof": p, "prior_release_proof": pp}
+	op, id := rig.acceptAndWait(t, body)
+	if op["state"] != "failed" || !strings.Contains(rig.opLog(t, id), "preflight_space: REFUSED") {
+		t.Fatalf("expected ordinary space refusal: %v", op)
+	}
+	if err := s.Known(targetRef); err == nil {
+		t.Fatal("space refusal persisted authorization before checking capacity")
+	}
+	if rig.sawCommand("pull") || rig.sawCommand("tag") || rig.sawCommand("up") {
+		t.Fatal("space refusal mutated images")
+	}
+	rig.freeBytes.Store(2 << 30)
+	op, _ = rig.acceptAndWait(t, body)
+	if op["state"] != "succeeded" {
+		t.Fatalf("retry on same agent/store failed after freeing capacity: %v", op)
+	}
+	if err := s.Known(priorRef); err != nil {
+		t.Fatalf("retry did not durably authorize recovery baseline: %v", err)
+	}
 }
 
 func TestReleaseTrustAgentRejectsBeforeCommands(t *testing.T) {

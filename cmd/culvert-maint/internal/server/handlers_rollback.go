@@ -166,7 +166,7 @@ func (s *Server) buildImageRollbackStages(targetRef string, acc *rollbackAccumul
 				}
 				acc.priorDigests = bareDigests(ri.RepoDigests)
 				acc.priorImageID = ri.RunningImageID
-				if pr := ri.PriorRef(); rollbackDigestRefRE.MatchString(pr) {
+				if pr, ambiguous := ri.RepositoryRef(s.opts.Cfg.ProxyRepo); !ambiguous && rollbackDigestRefRE.MatchString(pr) {
 					acc.priorRef = pr
 				}
 				// Same baseline as apply: a /ready that was already non-2xx

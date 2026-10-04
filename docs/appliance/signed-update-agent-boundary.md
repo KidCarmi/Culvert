@@ -19,14 +19,19 @@ and base64-encoded exact index, manifest, Sigstore bundle and/or Ed25519 envelop
 bytes. Each document is bounded to 1 MiB. Apply and rollback routes accept at
 most 12 MiB JSON; other routes retain their 16 KiB limit.
 
-The agent first verifies the target, then captures the actually running digest.
+The agent first verifies the target, then captures the actually running digest
+from the host's exact `proxy_repo`; unrelated upstream repository digests on a
+mirrored image are not candidate baselines. Missing or conflicting references
+within the configured repository refuse authorization.
 Both target and observed baseline must be signed. Missing, ambiguous, unsigned,
 or unverifiable baselines refuse an upgrade before backup, pull or retag. A
 healthy running candidate does not establish release trust. A signed current
 baseline must be available before such an appliance can use this upgrade path.
 
 The private agent-state ledger records evidence and a monotonic catalog version
-and generation-time floor before mutation. It uses file fsync, atomic rename,
+and generation-time floor after the read-only disk-space preflight and before
+backup, pull or retag. A space-preflight refusal can be retried after freeing
+capacity without restarting the agent. The ledger uses file fsync, atomic rename,
 and parent-directory fsync. A failed durability barrier disables authorization
 in that agent process until restart; corrupt persisted state refuses startup
 instead of silently resetting the replay floor. All state ancestors must be
