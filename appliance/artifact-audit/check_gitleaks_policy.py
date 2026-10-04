@@ -22,6 +22,12 @@ def scan(executable, config, root):
 def check(executable):
     repo = Path(__file__).resolve().parents[2]
     config = repo / '.gitleaks.toml'
+    historical = repo / '.gitleaksignore'
+    if historical.exists():
+        for line in historical.read_text(encoding='utf-8').splitlines():
+            if line and not line.startswith('#') and not re.fullmatch(
+                    r'[0-9a-f]{40}:[A-Za-z0-9_./-]+:[a-z0-9-]+:[1-9][0-9]*', line):
+                raise RuntimeError('historical exception must be an exact finding fingerprint')
     fixture_path = 'cmd/culvert-console/bootstrap_view_linux_test.go'
     source = (repo / fixture_path).read_text(encoding='utf-8')
     match = re.search(r'const viewFixtureCredential = "([A-Za-z0-9]+)"', source)

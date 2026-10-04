@@ -40,3 +40,28 @@ a public private-key fixture in a new vendor file to be detected, and an arbitra
 hexadecimal token in provenance to be detected. The command never reports canary
 values or finding contents. These checks complement the upstream byte verifier;
 they must not replace the actual repository or built-artifact scans.
+
+## Historical findings exposed by restoring the defaults
+
+The pinned Gitleaks action scans all fetched refs on `workflow_dispatch`, using
+`git log --full-history --all`; PR events instead use the PR commit range. The
+first manual run at `a1354270` scanned 5,705 commits and reported 24 additional
+historical indicators. The policy canaries and upstream byte check both passed.
+Each of these findings was inspected in its exact historical commit:
+
+- One local ESXi evidence value is the public SSH host-key SHA-256 at
+  `baseline.ssh_public_key_identity.public_host_key_sha256`. It is not a bootstrap
+  password, password hash or retired lab credential.
+- Six predecessor-upgrade evidence matches are public upstream-entry resource IDs
+  in API route paths ending in `/credential`, not credential values.
+- Four private-key-rule matches are fake PEM markers in unit-test source. The
+  detector spans escaped strings and adjacent Go code; these are not parseable
+  private keys.
+- Twelve matches are synthetic authentication/redaction values in retired
+  regression tests; one is a test identity reference in ownership documentation.
+
+`.gitleaksignore` records only these 24 complete
+`commit:path:rule:line` fingerprints. It suppresses neither whole historical
+commits nor future findings in those files. The policy regression rejects
+non-fingerprint entries. Additional historical findings remain subject to review;
+this list does not claim that every other local or remote Git ref was audited.
