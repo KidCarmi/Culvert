@@ -132,24 +132,37 @@ for BOOT_SPLASH_FAIL in missing-plugin no-initrds alternatives-install alternati
 done
 unset BOOT_SPLASH_FAIL
 
-# Source the real GRUB drop-in twice; root/recovery and serial arguments survive.
+# Source the real GRUB drop-in twice; root/recovery and serial arguments survive,
+# Ubuntu's bootloader identity is untouched, and `quiet` never reaches the
+# kernel (it would silence ttyS0, the boot-failure evidence channel).
 bash -euo pipefail -c '
+    GRUB_DISTRIBUTOR="Ubuntu"
     GRUB_CMDLINE_LINUX="root=UUID=fixture recovery console=ttyS0,115200n8"
     GRUB_CMDLINE_LINUX_DEFAULT="console=tty0 console=ttyS0,115200n8 splash quiet"
     preserved=$GRUB_CMDLINE_LINUX
     source "$1"
     once=$GRUB_CMDLINE_LINUX_DEFAULT
     source "$1"
-    [[ $GRUB_CMDLINE_LINUX == "$preserved" && $GRUB_CMDLINE_LINUX_DEFAULT == "$once" && $GRUB_DISTRIBUTOR == Culvert ]]
+    [[ $GRUB_CMDLINE_LINUX == "$preserved" && $GRUB_CMDLINE_LINUX_DEFAULT == "$once" && $GRUB_DISTRIBUTOR == Ubuntu ]]
     [[ " $once " == *" console=tty0 "* && " $once " == *" console=ttyS0,115200n8 "* ]]
-    for wanted in quiet splash plymouth.ignore-serial-consoles systemd.show_status=auto; do
+    [[ " $once " != *" quiet "* && " $once " != *" systemd.show_status="* ]]
+    for wanted in splash plymouth.ignore-serial-consoles; do
         count=0
         for value in $once; do if [[ $value == "$wanted" ]]; then count=$((count+1)); fi; done
         [[ $count == 1 ]]
     done
     unset GRUB_CMDLINE_LINUX_DEFAULT
     source "$1"
-    [[ $GRUB_CMDLINE_LINUX_DEFAULT == "quiet splash plymouth.ignore-serial-consoles systemd.show_status=auto" ]]
+    [[ $GRUB_CMDLINE_LINUX_DEFAULT == "splash plymouth.ignore-serial-consoles" ]]
+    ! grep -Eq "^[[:space:]]*(export[[:space:]]+)?GRUB_DISTRIBUTOR=" "$1"
+' _ "$SOURCE/99-culvert-splash.cfg"
+
+# grub-mkconfig sources grub.d drop-ins with /bin/sh (dash on Ubuntu): the
+# drop-in must work there too, with the same result.
+sh -euc '
+    GRUB_CMDLINE_LINUX_DEFAULT="console=tty1 console=ttyS0 quiet"
+    . "$1"
+    [ "$GRUB_CMDLINE_LINUX_DEFAULT" = "console=tty1 console=ttyS0 splash plymouth.ignore-serial-consoles" ]
 ' _ "$SOURCE/99-culvert-splash.cfg"
 
 # Execute only the actual overlay copy loop against a fixture repository, with

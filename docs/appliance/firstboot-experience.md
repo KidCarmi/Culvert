@@ -30,14 +30,18 @@ installed initramfs and rejects one missing the Culvert theme or native
 renderer. The outer build independently compares both selected themes and
 the GRUB drop-in with source hashes.
 
-Normal boot adds `quiet splash plymouth.ignore-serial-consoles
-systemd.show_status=auto` to the existing GRUB default arguments. Existing
-root and serial-console arguments remain present; `quiet` reduces kernel
-verbosity on serial as well. `auto` permits significant boot-delay status.
-For recovery, use Escape for details, or edit the GRUB kernel entry to remove
-`quiet splash` and add `plymouth.enable=0 systemd.show_status=yes`. Normal
-recovery entries do not inherit `GRUB_CMDLINE_LINUX_DEFAULT`. Do not remove
-the serial console or suppress error reporting to hide boot failures.
+Normal boot adds `splash plymouth.ignore-serial-consoles` to the existing GRUB
+default arguments: the Culvert screen appears on the VGA console only, and the
+serial console keeps full kernel and per-unit boot output. `quiet` is never
+added, and an inherited `quiet` is removed, because it lowers the kernel log
+level on every console including ttyS0, where boot failures are diagnosed.
+`GRUB_DISTRIBUTOR` is not changed: `grub-install` derives the UEFI bootloader
+directory from it and the signed shim/GRUB chain expects `/EFI/ubuntu`, so a
+routine GRUB package update must keep installing there. Existing root and
+serial-console arguments remain present. For recovery, use Escape for details,
+or edit the GRUB kernel entry to remove `splash` and add `plymouth.enable=0`.
+Normal recovery entries do not inherit `GRUB_CMDLINE_LINUX_DEFAULT`. Do not
+remove the serial console or suppress error reporting to hide boot failures.
 
 Before calling this visually qualified, build a new OVA and verify BIOS and
 UEFI VGA startup, Escape details, serial login, a boot failure/emergency path,
