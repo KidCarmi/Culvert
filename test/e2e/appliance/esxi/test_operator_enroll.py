@@ -17,7 +17,7 @@ class EnrollmentContinuationTests(unittest.TestCase):
             marker=enroll.prepare_attempt(lab)
             old=marker.read_bytes()
             transport=lab.sec/('transport-'+'a'*48);transport.mkdir()
-            result=transport/'result';result.write_bytes(b'0\nNO_ENROLLMENT_MUTATION_AND_FIRSTBOOT_COMPLETE\n')
+            result=transport/'result';result.write_bytes(b'0\nNO_ENROLLMENT_MUTATION_AND_FIRSTBOOT_COMPLETE\n\r')
             self.assertEqual(enroll.prepare_attempt(lab,result),marker)
             self.assertEqual((lab.sec/'operator-enrollment-initial-attempt.json').read_bytes(),old)
             self.assertEqual(lab.record.call_args.args[1],'fail')

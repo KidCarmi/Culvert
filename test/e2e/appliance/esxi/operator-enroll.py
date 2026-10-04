@@ -30,7 +30,10 @@ def prepare_attempt(lab, observation=None):
             or Path(observation).is_symlink() or path.parent.is_symlink()):
         raise ValueError('private authenticated observation required')
     raw=path.read_bytes()
-    if raw != b'0\nNO_ENROLLMENT_MUTATION_AND_FIRSTBOOT_COMPLETE\n':
+    expected=b'0\nNO_ENROLLMENT_MUTATION_AND_FIRSTBOOT_COMPLETE\n'
+    # Windows stdin can retain one terminal CR after the shell's final newline.
+    # Accept only these two complete byte sequences, preserving the raw proof.
+    if raw not in (expected,expected+b'\r'):
         raise ValueError('undispatched observation not established')
     resumed=lab.sec/'operator-enrollment-resume-attempt.json'
     with resumed.open('x') as out:
