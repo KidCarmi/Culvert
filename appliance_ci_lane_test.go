@@ -48,7 +48,7 @@ func TestApplianceLane_ClassifierRunsTheHarnessesForApplianceChanges(t *testing.
 	for path, wants := range cases {
 		t.Run(path, func(t *testing.T) {
 			dir := t.TempDir()
-			script := strings.ReplaceAll(body, "git diff --name-only HEAD^1 HEAD > changed.txt", "printf '%s\\n' '"+path+"' > changed.txt")
+			script := strings.ReplaceAll(body, "git diff --no-renames --name-only HEAD^1 HEAD > changed.txt", "printf '%s\\n' '"+path+"' > changed.txt")
 			out, ok := runShell(t, "export GITHUB_OUTPUT=outputs\n"+script, dir)
 			if !ok {
 				t.Fatalf("classifier: %s", out)
@@ -67,7 +67,7 @@ func TestApplianceLane_ClassifierRunsTheHarnessesForApplianceChanges(t *testing.
 	// Control: an unrelated file must not drag the 40-minute lane in.
 	t.Run("control-unrelated", func(t *testing.T) {
 		dir := t.TempDir()
-		script := strings.ReplaceAll(body, "git diff --name-only HEAD^1 HEAD > changed.txt", "printf '%s\\n' 'docs/operator/upstream-proxies.md' > changed.txt")
+		script := strings.ReplaceAll(body, "git diff --no-renames --name-only HEAD^1 HEAD > changed.txt", "printf '%s\\n' 'docs/operator/upstream-proxies.md' > changed.txt")
 		if out, ok := runShell(t, "export GITHUB_OUTPUT=outputs\n"+script, dir); !ok {
 			t.Fatalf("classifier: %s", out)
 		}

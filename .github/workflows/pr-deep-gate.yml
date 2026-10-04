@@ -71,7 +71,10 @@ jobs:
             echo "Manual run — all deep jobs enabled."
             exit 0
           fi
-          git diff --name-only HEAD^1 HEAD > changed.txt
+          # --no-renames: a rename otherwise lists only its destination, so moving a
+          # file OUT of a classified path would skip that path's jobs while the
+          # aggregate counts the skip as success (same rule as pr-fast-gate.yml).
+          git diff --no-renames --name-only HEAD^1 HEAD > changed.txt
           echo "── Changed files ──"; cat changed.txt
 
           proxy_core=false; security=false; docker=false; deps=false
