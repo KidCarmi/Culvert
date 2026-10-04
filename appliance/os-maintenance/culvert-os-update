@@ -8,7 +8,8 @@
 #   sudo culvert-os-update docker           Docker engine + compose plugin: stops the
 #                                           stack gracefully first, upgrades, restarts it
 #   sudo culvert-os-update reboot           graceful stack stop (honours stop_grace_period)
-#                                           then reboot
+#                                           then reboot; the stack is started again at
+#                                           boot by culvert-stack-resume.service
 #   any mode may add --reboot-if-required   reboot at the end when the kernel/libc need it
 #   any mutating mode may add --force       proceed although the maintenance agent has an
 #                                           operation in flight (see below)
@@ -34,6 +35,12 @@ LOG=/var/log/culvert-os-update.log
 MAINT_STATE=/var/lib/culvert-maint
 MAINT_JOURNAL="$MAINT_STATE/reconcile"
 LOCK=/run/culvert-os-update.lock
+# Armed by `reboot` BEFORE the stack is stopped; consumed at boot by
+# culvert-stack-resume.service (`resume-stack`). `docker compose stop` marks
+# the containers manually stopped, so their `restart: unless-stopped` policy
+# does NOT start them when the engine comes back: without this, the gateway
+# stayed down after every maintenance reboot (lab run 37156062516, F-OSU-REBOOT-1).
+STACK_RESUME=/var/lib/culvert-appliance/state/stack-resume-on-boot
 mode="${1:-check}"; shift || true
 reboot_if_required=0; force=0
 for a in "$@"; do
@@ -100,7 +107,17 @@ stack_start() {
   fi
 }
 do_reboot() {
-  stack_stop
+  # Arm before acting: a reboot that happens at any point after the stop
+  # (power loss included) still brings the stack back.
+  install -d -m 0755 "$(dirname "$STACK_RESUME")"
+  : > "$STACK_RESUME"
+  if ! stack_stop; then
+    log "stack stop FAILED — not rebooting; starting the stack again"
+    if stack_start; then rm -f "$STACK_RESUME"; else
+      echo "culvert-os-update: stack did not start — check: cd $STACK && docker compose ps (it is started at the next boot)" >&2
+    fi
+    exit 1
+  fi
   log "rebooting"
   systemctl reboot
 }
@@ -190,6 +207,27 @@ case "$mode" in
     guard_maintenance
     do_reboot
     ;;
+  resume-stack)
+    # Boot-time half of `reboot` (culvert-stack-resume.service). Waits for
+    # the same locks rather than refusing: at boot the maintenance agent may
+    # briefly hold its lock while it reconciles. The marker is removed only
+    # once the stack has started, so a failure is retried at the next boot
+    # and stays visible (the unit fails).
+    [[ -f "$STACK_RESUME" ]] || { log "no stack resume pending"; exit 0; }
+    exec 9>"$LOCK"
+    flock -w 300 9 || { log "timed out waiting for $LOCK — stack NOT started"; exit 3; }
+    if [[ -d "$MAINT_STATE" ]]; then
+      exec 8>>"$MAINT_STATE/host-maintenance.lock"
+      flock -w 300 8 || { log "timed out waiting for the maintenance agent lock — stack NOT started"; exit 3; }
+    fi
+    if stack_start; then
+      rm -f "$STACK_RESUME"
+      log "stack started after the maintenance reboot"
+    else
+      log "stack did NOT start after the maintenance reboot — check: cd $STACK && docker compose ps"
+      exit 1
+    fi
+    ;;
   *)
-    sed -n '2,19p' "$0"; exit 2 ;;
+    sed -n '2,20p' "$0"; exit 2 ;;
 esac

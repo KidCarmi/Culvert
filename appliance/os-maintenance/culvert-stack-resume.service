@@ -1,0 +1,22 @@
+[Unit]
+Description=Culvert appliance: start the stack stopped by culvert-os-update reboot
+Documentation=file:///opt/culvert-appliance/os-maintenance/culvert-os-update
+# `culvert-os-update reboot` stops the stack with `docker compose stop`, which
+# marks the containers manually stopped: their `restart: unless-stopped`
+# policy then does NOT start them when the engine comes back, and the gateway
+# stayed down after the reboot (lab run 37156062516, F-OSU-REBOOT-1). The
+# marker is armed before the stop and removed only once the stack started.
+ConditionPathExists=/var/lib/culvert-appliance/state/stack-resume-on-boot
+Wants=docker.service network-online.target
+# NEVER After=cloud-final.service: Ubuntu orders it After=multi-user.target,
+# and this unit is WantedBy=multi-user.target (an ordering cycle; systemd
+# would delete this job — the first-boot unit's defect, PR #1528 §3f).
+After=docker.service network-online.target culvert-firstboot.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/culvert-os-update resume-stack
+TimeoutStartSec=900
+
+[Install]
+WantedBy=multi-user.target

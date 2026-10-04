@@ -25,23 +25,56 @@ permissions:
   actions: read
 
 concurrency:
-  group: appliance-lab-${{ github.ref }}
+  # Per commit: a fix-proof variant runs beside a candidate already in progress.
+  group: appliance-lab-${{ github.ref }}-${{ github.sha }}
   cancel-in-progress: false
 
 env:
-  APPLIANCE_SOURCE_SHA: 4c4b7728c0e6a1746e968d935b635fc652647e6f
+  # focused: build (closure + offline cold-load inside it), the disposable-store
+  # replay and the ClamAV readiness check — no QEMU qualification. full: also
+  # boot and qualify the OVA.
+  LAB_STAGE: full
+  # Superseded candidate (historical; does not boot under BIOS, #1528 §3f).
+  # Its guest-content fingerprint stays the comparison reference.
   ORIGINAL_OVA_SHA256: e24eb542f973fb70360bad5124ef81fdab8b6f8d67af601720613cbcca3700a4
-  ORIGINAL_IMAGE_ID: sha256:384f4c4b1bad91be93dc8b78adb974b6c57dd9b4c8f534bfdbafc2c1e4f1ab04
+  # F-DISK-1 job input: the image the original qualification used.
   SOURCE_IMAGE_RUN_ID: "37124197333"
   SOURCE_IMAGE_TAR_SHA256: bb8a2c75369ca3397aaf84566eeee6222f30ca5c3b791de7d60bfecac9a8c3a4
 
 jobs:
   guest-boot:
-    name: "Lab · build OVA + QEMU guest boot + qualify"
+    name: "Lab · ${{ matrix.variant }} OVA: build + QEMU guest boot + qualify"
     runs-on: ubuntu-24.04
     timeout-minutes: 240
+    strategy:
+      fail-fast: false
+      matrix:
+        # Post-Codex closeout candidate — #1528 frozen head b579ca28 =
+        # 4f27d945 + ab5b7236 (netplan apply rollback) + 96381e47 (identity
+        # reset clears the console credential) + f0492528/18ef7ec1 (non-durable
+        # dispatch resume context + UI) + b579ca28 (yara test determinism).
+        # Image = that head's own Deep PR Gate tar (run 37234612592; every
+        # workflow on the head green); app, agent, console, access binary and
+        # provisioning from a clean checkout of the SAME commit. Image ID is the
+        # tar's OCI INDEX digest (containerd store). Built fresh, retained
+        # BEFORE boot.
+        include:
+          - variant: candidate-b579ca28c9d9
+            provisioning: source
+            source_sha: "b579ca28c9d936e9141292ce5ec564a26feeae86"
+            image_run: "37234612592"
+            image_tar_sha256: "ec9ae4071339f0f0dda103765ae7aae2667c1bad08e9996814dd2f12d45aef61"
+            expect_image_id: "sha256:24b37bc217691058e56a838821b86dfbd45b927b1c0ea8ea867a28c54d4bcc47"
+            retained_run: ""
+            retained_sha256: ""
+    env:
+      APPLIANCE_SOURCE_SHA: ${{ matrix.source_sha }}
+      SOURCE_IMAGE_RUN_ID: ${{ matrix.image_run }}
+      SOURCE_IMAGE_TAR_SHA256: ${{ matrix.image_tar_sha256 }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Harness self-test (a known-unavailable agent response must FAIL the agent oracle)
+        run: test/e2e/appliance/lab/appliance-lab.sh selftest
       - name: Host preflight (KVM, RAM, disk) and lab directory
         run: |
           set -euo pipefail
@@ -81,12 +114,14 @@ jobs:
           printf 'nameserver 8.8.8.8\nnameserver 1.1.1.1\noptions timeout:2 attempts:3\n' | sudo tee /etc/resolv.conf >/dev/null
           getent hosts download.docker.com
       - name: Probe libguestfs appliance networking (fails fast, before a long build)
+        if: matrix.retained_run == ''
         run: |
           set -euo pipefail
           sudo env LIBGUESTFS_BACKEND=direct timeout 300 guestfish --network -a /dev/null run : \
             debug sh "cat /etc/resolv.conf; ip -4 route; getent hosts download.docker.com || echo DNS-FAILED" | tee /tmp/lg-net.txt
           ! grep -q DNS-FAILED /tmp/lg-net.txt
       - name: Match the recorded build host's Docker engine (29.6.2)
+        if: matrix.retained_run == ''
         # The original OVA's build-info.json records Docker 29.6.2 on the
         # containerd image store. The runner ships Docker 28, whose containerd
         # store reports an empty platform for an index-digest reference, so
@@ -103,6 +138,7 @@ jobs:
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q --allow-downgrades "docker-ce=$v" "docker-ce-cli=$v" containerd.io
           docker version --format 'client={{.Client.Version}} server={{.Server.Version}}'
       - name: Use the containerd image store (the build's archive-identity guard requires it)
+        if: matrix.retained_run == ''
         # Under Docker's classic store a loaded image's ID is its CONFIG digest,
         # so the saved archive cannot carry the manifest digest first boot pins
         # (build-ova.sh refuses it — PR #1528 K16). Same requirement as the
@@ -116,6 +152,7 @@ jobs:
           for i in $(seq 1 30); do docker info >/dev/null 2>&1 && break; sleep 2; done
           docker info --format 'server={{.ServerVersion}} driver={{.Driver}} {{.DriverStatus}}' | tee /dev/stderr | grep -q 'server=29.6.2 .*io.containerd.snapshotter.v1'
       - name: Obtain the source image tar (verified sha256)
+        if: matrix.retained_run == ''
         id: image
         env:
           GH_TOKEN: ${{ github.token }}
@@ -128,42 +165,219 @@ jobs:
           path: ${{ env.LAB_ROOT }}/in/culvert-image.tar
           retention-days: 30
           compression-level: 0
-      - name: Check out the appliance source the candidate was built from
+      - name: "Diagnostic: replay the builder's ClamAV save in a FRESH disposable store (F-OVA-CLAMAV-1)"
+        # build-ova.sh pulls by the pinned digest, tags, and saves BY TAG. The
+        # replay runs exactly that in its own docker:dind data root — never in
+        # the daemon the build uses, so it cannot pre-populate or repair it.
+        # Observes only; the build's closure and cold-load checks decide.
+        # Not run for a source-provisioned (final) candidate.
+        if: matrix.provisioning == 'lab'
+        continue-on-error: true
+        run: |
+          set -uo pipefail
+          . appliance/build/manifest.env
+          # Bisect: each variant in its OWN fresh disposable store.
+          for v in baseline load-first save-first; do
+            echo "=== replay variant: $v"
+            pre=""; order=""
+            [[ "$v" != baseline ]] && pre="$LAB_ROOT/in/culvert-image.tar"
+            [[ "$v" == save-first ]] && order=save-first
+            REPLAY_PRELOAD_TAR="$pre" REPLAY_ORDER="$order" test/e2e/appliance/lab/save-replay.sh "$CLAMAV_IMAGE_REPO" "$CLAMAV_IMAGE_TAG" \
+              "$CLAMAV_IMAGE_INDEX_DIGEST" "$CLAMAV_IMAGE_AMD64_DIGEST" "$COLDLOAD_DIND_IMAGE" "$LAB_ROOT/replay"
+          done 2>&1 | tee "$LAB_ROOT/save-replay.txt"
+          echo "builder daemon has no ClamAV image before the build: $(docker image ls -q --filter reference='*clamav*' | wc -l) found"
+      - name: Check out the appliance source the candidate is built from
+        if: matrix.retained_run == ''
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ env.APPLIANCE_SOURCE_SHA }}
           path: appliance-src
           persist-credentials: false
-      - name: Build a separately identified candidate OVA (same pinned inputs)
+      # build-ova.sh compiles the appliance console (#1540) and refuses any
+      # compiler other than the source commit's go.mod toolchain line.
+      - name: Go toolchain pinned by the appliance source
+        if: matrix.retained_run == ''
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: appliance-src/go.mod
+          cache: false
+      - name: Build the candidate OVA (image + provisioning from one commit)
+        if: matrix.retained_run == ''
         run: |
           set -euo pipefail
           # The build runs as root over a runner-owned checkout; without this,
           # git refuses the repo and the candidate-source == HEAD check fails.
-          sudo git config --global --add safe.directory "$GITHUB_WORKSPACE/appliance-src"
-          sudo -E env LIBGUESTFS_BACKEND=direct BASE_IMAGE_KEYRING=/usr/share/keyrings/ubuntu-cloudimage-keyring.gpg \
-            appliance-src/appliance/build/build-ova.sh \
+          src="$GITHUB_WORKSPACE/appliance-src"; drift=()
+          if [ "${{ matrix.provisioning }}" = lab ]; then
+            # Provisioning from this lab commit: prove its appliance/ tree is
+            # the image commit's plus the unit fix and nothing else.
+            # Every difference is recorded; only the approved files may differ.
+            (cd "$GITHUB_WORKSPACE" && diff -ruN appliance-src/appliance appliance) > "$LAB_ROOT/provisioning-drift.diff" || true
+            changed="$(cd "$GITHUB_WORKSPACE" && diff -rqN appliance-src/appliance appliance | sed -E 's#^(Files|Only in) appliance-src/##; s# and .*##' | sort || true)"
+            echo "appliance/ drift vs $APPLIANCE_SOURCE_SHA:"; echo "$changed"
+            want="$(printf '%s\n' appliance/build/prepare-guest.sh appliance/os-maintenance/culvert-os-update \
+              appliance/os-maintenance/culvert-stack-resume.service | sort)"
+            [ "$changed" = "$want" ] || { echo "::error::provisioning drift differs from the approved set: $changed"; exit 1; }
+            src="$GITHUB_WORKSPACE"; drift=(--candidate-allow-provisioning-drift)
+          fi
+          sudo git config --global --add safe.directory "$src"
+          # sudo resets PATH (secure_path): pass setup-go's compiler through;
+          # GOTOOLCHAIN=local so a mismatch fails instead of downloading another.
+          sudo -E env PATH="$PATH" GOTOOLCHAIN=local LIBGUESTFS_BACKEND=direct BASE_IMAGE_KEYRING=/usr/share/keyrings/ubuntu-cloudimage-keyring.gpg \
+            "$src/appliance/build/build-ova.sh" \
               --candidate-image-tar "$LAB_ROOT/in/culvert-image.tar" \
-              --candidate-source "$APPLIANCE_SOURCE_SHA" --candidate-run-id "$SOURCE_IMAGE_RUN_ID" \
-              --out "$LAB_ROOT/ova" --work "$LAB_ROOT/build" 2>&1 | tee "$LAB_ROOT/build-ova.log"
+              --candidate-source "$APPLIANCE_SOURCE_SHA" --candidate-run-id "$SOURCE_IMAGE_RUN_ID" "${drift[@]}" \
+              --out "$LAB_ROOT/ova" --work "$LAB_ROOT/build" --keep-work 2>&1 | tee "$LAB_ROOT/build-ova.log"
           sudo chown -R "$(id -u):$(id -g)" "$LAB_ROOT/ova"
           cat "$LAB_ROOT/ova/"*.ova.sha256
           rm -f "$LAB_ROOT/in/culvert-image.tar"
-      - name: Compare the rebuilt guest content with the original OVA's fingerprint
+      - name: "Diagnostic (after a failed build): what the builder's own daemon holds"
+        # Runs only AFTER the build failed, so it cannot influence it.
+        if: failure()
+        run: |
+          set -uo pipefail
+          . appliance/build/manifest.env
+          docker image ls --tree 2>&1 | head -40
+          sudo ctr -n moby images ls 2>/dev/null | grep -i clamav || true
+          cfg=sha256:5ca07785ce6993ebdac0dc329b1866e09ca28a6336223879f839b7c530d39bd9
+          sudo ctr -n moby content ls -q | grep -qx "$cfg" && echo "amd64 config IN the builder's content store" || echo "amd64 config NOT in the builder's content store"
+          ls -l "$LAB_ROOT/build/overlay/var/lib/culvert-appliance/images/" 2>/dev/null || true
+          echo "--- builder daemon: save BY DIGEST now"
+          . appliance/build/archive-identity.sh
+          docker save "${CLAMAV_IMAGE_REPO}@${CLAMAV_IMAGE_INDEX_DIGEST}" | gzip -n -1 > /tmp/b-digest.tgz
+          echo "by-digest: $(stat -c %s /tmp/b-digest.tgz) bytes"; archive_platform_closure /tmp/b-digest.tgz linux/amd64 "$CLAMAV_IMAGE_INDEX_DIGEST" "$CLAMAV_IMAGE_AMD64_DIGEST" || true
+          sudo docker save "${CLAMAV_IMAGE_REPO}:${CLAMAV_IMAGE_TAG}" | gzip -n -1 > /tmp/b-tag.tgz
+          echo "by-tag (root CLI): $(stat -c %s /tmp/b-tag.tgz) bytes"; archive_platform_closure /tmp/b-tag.tgz linux/amd64 "$CLAMAV_IMAGE_INDEX_DIGEST" "$CLAMAV_IMAGE_AMD64_DIGEST" || true
+          echo "--- builder daemon state"
+          docker info 2>&1 | sed -n '1,60p'
+          sudo ls -la /var/lib/docker /var/lib/docker/image 2>&1 | head -30
+          sudo du -sh /var/lib/docker/* /var/lib/containerd 2>/dev/null | head -20
+          sudo ctr namespaces ls
+      - name: "Focused check: ClamAV READY from the baked archive alone (empty store, no registry)"
+        if: matrix.retained_run == ''
+        # The build already proved create + execute offline; this adds a real
+        # clamd reaching `clamdscan --ping` (signatures via freshclam; the
+        # disposable daemon's registry access goes to a dead proxy).
         run: |
           set -euo pipefail
-          export LAB_DIR="$LAB_ROOT/lab"
+          # From the candidate's own source tree, not the lab checkout.
+          . appliance-src/appliance/build/manifest.env
+          appliance-src/appliance/build/cold-load-check.sh --dind "$COLDLOAD_DIND_IMAGE" \
+            --archive "$LAB_ROOT/build/overlay/var/lib/culvert-appliance/images/clamav.tar.gz" \
+            --ref "${CLAMAV_IMAGE_REPO#docker.io/}:${CLAMAV_IMAGE_TAG}" --id "$CLAMAV_IMAGE_INDEX_DIGEST" \
+            --run "clamd --version" --ready-clamav 900 2>&1 | tee "$LAB_ROOT/coldload-clamav-ready.txt"
+      - name: Retain the built OVA (unpublished test artifact, before any boot)
+        if: matrix.retained_run == ''
+        # For the ESXi qualification (test/esxi-qualification), which imports
+        # the bytes on a LAN host: kept BEFORE the QEMU boot so a boot failure
+        # cannot discard the only importable file. Unpublished: a workflow
+        # artifact with short retention, not a release, tag or registry push.
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: appliance-lab-ova-${{ matrix.variant }}
+          path: |
+            ${{ env.LAB_ROOT }}/ova/*.ova
+            ${{ env.LAB_ROOT }}/ova/*.ova.sha256
+            ${{ env.LAB_ROOT }}/ova/build-info.json
+          retention-days: 14
+          compression-level: 0
+          if-no-files-found: error
+      - name: "TEST-ONLY signed-update lab: disposable TLS registry (as ghcr.io) + fixture release evidence"
+        # Outside the OVA: a registry the guest reaches as ghcr.io (its cert names
+        # ghcr.io; the guest is told to trust its CA at qualification time), the
+        # OVA's OWN application archive pushed byte-for-byte as the baseline (the
+        # same index digest the guest runs), a relabelled target, and evidence
+        # from the source revision's release-proof fixture (ephemeral ed25519
+        # key, never written; only the PUBLIC keyring reaches the guest). Any
+        # failure leaves step 6c BLOCKED with the reason, never a fake pass.
+        if: env.LAB_STAGE == 'full' && matrix.retained_run == ''
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          U="$LAB_ROOT/update"; rm -rf "$U"; mkdir -p "$U/certs"; cd "$U/certs"
+          openssl req -x509 -newkey rsa:2048 -nodes -days 3 -subj "/CN=culvert-lab-registry-ca (TEST-ONLY)" \
+            -addext "basicConstraints=critical,CA:TRUE" -addext "keyUsage=critical,keyCertSign" -keyout ca.key -out "$U/ca.crt" 2>/dev/null
+          openssl req -newkey rsa:2048 -nodes -subj "/CN=ghcr.io" -keyout reg.key -out reg.csr 2>/dev/null
+          printf 'subjectAltName=DNS:ghcr.io,IP:127.0.0.1,IP:10.0.2.2\nextendedKeyUsage=serverAuth\n' > ext.cnf
+          openssl x509 -req -in reg.csr -CA "$U/ca.crt" -CAkey ca.key -CAcreateserial -days 3 -extfile ext.cnf -out reg.crt 2>/dev/null
+          rm -f ca.key reg.csr   # the CA signs exactly one certificate
+          for i in 1 2 3; do docker pull -q registry:2 && break; sleep 5; done
+          docker run -d --name lab-registry -p 127.0.0.1:443:443 -v "$U/certs:/certs:ro" \
+            -e REGISTRY_HTTP_ADDR=0.0.0.0:443 -e REGISTRY_HTTP_TLS_CERTIFICATE=/certs/reg.crt -e REGISTRY_HTTP_TLS_KEY=/certs/reg.key registry:2
+          sudo install -D -m 0644 "$U/ca.crt" /etc/docker/certs.d/127.0.0.1:443/ca.crt
+          for i in $(seq 1 30); do curl -fsS --cacert "$U/ca.crt" https://127.0.0.1/v2/ >/dev/null && break; sleep 1; done
+          command -v skopeo >/dev/null || sudo apt-get install -y -q skopeo
+          ME="$LAB_ROOT/build/overlay/var/lib/culvert-appliance/manifest.env"
+          B="$(sed -n 's/^APP_IMAGE_INDEX_DIGEST=//p' "$ME" | tail -1 | tr -d '"')"; REPO="$(sed -n 's/^APP_IMAGE_REPO=//p' "$ME" | tail -1 | tr -d '"')"; TAG="$(sed -n 's/^APP_IMAGE_TAG=//p' "$ME" | tail -1 | tr -d '"')"
+          [[ "$B" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::no APP_IMAGE_INDEX_DIGEST in the OVA manifest"; exit 1; }
+          # Baseline: the archive baked into the OVA, copied with every digest preserved.
+          gunzip -c "$LAB_ROOT/build/overlay/var/lib/culvert-appliance/images/culvert.tar.gz" > "$U/baseline-oci.tar"
+          skopeo copy --all --preserve-digests --dest-cert-dir /etc/docker/certs.d/127.0.0.1:443 \
+            "oci-archive:$U/baseline-oci.tar" docker://127.0.0.1:443/kidcarmi/culvert:lab-baseline
+          rm -f "$U/baseline-oci.tar"
+          got="sha256:$(skopeo inspect --raw --cert-dir /etc/docker/certs.d/127.0.0.1:443 docker://127.0.0.1:443/kidcarmi/culvert:lab-baseline | sha256sum | cut -d' ' -f1)"
+          [ "$got" = "$B" ] || { echo "::error::registry baseline $got != the OVA's index digest $B"; exit 1; }
+          # Target: the same image plus one label (a real, different digest).
+          printf 'FROM %s:%s\nLABEL org.culvert.lab-target="1"\n' "$REPO" "$TAG" | docker build --provenance=false --sbom=false -t 127.0.0.1:443/kidcarmi/culvert:lab-target -
+          docker push -q 127.0.0.1:443/kidcarmi/culvert:lab-target
+          T="sha256:$(skopeo inspect --raw --cert-dir /etc/docker/certs.d/127.0.0.1:443 docker://127.0.0.1:443/kidcarmi/culvert:lab-target | sha256sum | cut -d' ' -f1)"
+          BREF="ghcr.io/kidcarmi/culvert@$B"; TREF="ghcr.io/kidcarmi/culvert@$T"
+          # Evidence from the SOURCE revision's fixture (ephemeral key, never saved).
+          (cd "$GITHUB_WORKSPACE/appliance-src" && GOTOOLCHAIN=local go run ./test/e2e/release-proof-fixture --output "$U/fixture" --ref "baseline=$BREF" --ref "target=$TREF")
+          REQ="$GITHUB_WORKSPACE/appliance-src/test/e2e/release-proof-fixture/request.py"
+          printf '{"image_ref":"%s","pre_backup":false,"rollback_on_failure":true,"idempotency_key":"lab-unsigned-%s"}' "$TREF" "$GITHUB_RUN_ID" > "$U/apply-unsigned.json"
+          printf '{"image_ref":"%s","pre_backup":false,"rollback_on_failure":true,"idempotency_key":"lab-apply-%s"}' "$TREF" "$GITHUB_RUN_ID" | python3 "$REQ" --proofs "$U/fixture/proofs.json" --prior "$BREF" > "$U/apply-signed.json"
+          printf '{"mode":"image","image_ref":"%s","idempotency_key":"lab-rollback-%s"}' "$BREF" "$GITHUB_RUN_ID" | python3 "$REQ" --proofs "$U/fixture/proofs.json" > "$U/rollback-signed.json"
+          cp "$U/fixture/keyring.json" "$U/keyring.json"
+          printf 'BASELINE_REF=%s\nTARGET_REF=%s\nREGISTRY_ADDR=10.0.2.2\n' "$BREF" "$TREF" > "$U/refs.env"
+          {
+            echo "TEST-ONLY trust configuration for step 6c (never part of the OVA)"
+            echo "fixture: test/e2e/release-proof-fixture @ $APPLIANCE_SOURCE_SHA (ephemeral ed25519 key id lab-ephemeral; private key never written)"
+            echo "public keyring sha256: $(sha256sum "$U/keyring.json" | cut -d' ' -f1)"
+            echo "registry: disposable registry:2 on the runner (127.0.0.1:443), reached by the guest as ghcr.io via 10.0.2.2"
+            echo "registry CA sha256: $(sha256sum "$U/ca.crt" | cut -d' ' -f1) (CA private key deleted after signing one certificate)"
+            echo "baseline: $BREF (= the OVA's own index digest, pushed with digests preserved)"
+            echo "target:   $TREF (baseline + LABEL org.culvert.lab-target=1)"
+            echo "guest changes made by the harness: /etc/hosts ghcr.io entry, /etc/docker/certs.d/ghcr.io/ca.crt, /etc/culvert-maint/lab-fixture-keyring.json, release_trust_keys in /etc/culvert-maint/config.toml"
+          } > "$U/fixture.txt"
+          cat "$U/fixture.txt"; touch "$U/READY"
+      - name: Fetch the RETAINED OVA (re-qualification of an existing artifact; verified sha256)
+        # Re-qualifies the exact bytes a previous run built and retained, with
+        # the current harness. Nothing is rebuilt: a rebuild would be a
+        # different artifact.
+        if: matrix.retained_run != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$LAB_ROOT/ova"
+          gh run download "${{ matrix.retained_run }}" -R "$GITHUB_REPOSITORY" -n "appliance-lab-ova-${{ matrix.variant }}" -D "$LAB_ROOT/ova"
+          got="$(sha256sum "$LAB_ROOT/ova/"*.ova | cut -d' ' -f1)"
+          [ "$got" = "${{ matrix.retained_sha256 }}" ] || { echo "::error::retained OVA sha256 $got != ${{ matrix.retained_sha256 }}"; exit 1; }
+          grep -q "$got" "$LAB_ROOT/ova/"*.ova.sha256
+          echo "retained OVA $got from run ${{ matrix.retained_run }}"
+      - name: "Diagnostic: guest content vs the superseded candidate's fingerprint"
+        if: env.LAB_STAGE == 'full'
+        # Informational only (its own LAB_DIR, so it never counts as a lab
+        # failure): the new image legitimately changes manifest.env and the
+        # baked image tar; everything else should be identical.
+        run: |
+          set -euo pipefail
+          export LAB_DIR="$LAB_ROOT/fpcmp"
           ova="$(ls "$LAB_ROOT/ova/"*.ova)"
           sudo -E env LIBGUESTFS_BACKEND=direct LAB_DIR="$LAB_DIR" test/e2e/appliance/lab/appliance-lab.sh fingerprint "$ova" "$LAB_ROOT/rebuilt.fingerprint.tsv"
           sudo chown -R "$(id -u):$(id -g)" "$LAB_DIR" "$LAB_ROOT/rebuilt.fingerprint.tsv"
           test/e2e/appliance/lab/appliance-lab.sh compare \
             test/e2e/appliance/lab/reference/candidate-4c4b772-e24eb542.fingerprint.tsv "$LAB_ROOT/rebuilt.fingerprint.tsv" || echo "::warning::rebuilt guest content differs from the original OVA (recorded)"
       - name: "Lab: preflight → up → qualify (collect + down always run)"
+        if: env.LAB_STAGE == 'full'
         run: |
           set -euo pipefail
           export LAB_DIR="$LAB_ROOT/lab"
           export LAB_OVA="$(ls "$LAB_ROOT/ova/"*.ova)"
           export LAB_OVA_SHA256="$(cut -d' ' -f1 "$LAB_ROOT/ova/"*.ova.sha256)"
-          export LAB_EXPECT_IMAGE_ID="$ORIGINAL_IMAGE_ID" LAB_MIN_FREE_GB=20 LAB_ACCEL=kvm
+          export LAB_EXPECT_IMAGE_ID="${{ matrix.expect_image_id }}" LAB_MIN_FREE_GB=20 LAB_ACCEL=kvm
+          [ -f "$LAB_ROOT/update/READY" ] && export LAB_UPDATE_DIR="$LAB_ROOT/update" || echo "::warning::signed-update lab not prepared — step 6c will report BLOCKED"
           test/e2e/appliance/lab/appliance-lab.sh all
       - name: Report
         if: always()
@@ -171,13 +385,16 @@ jobs:
           [ -f "$LAB_ROOT/lab/evidence/REPORT.md" ] && cat "$LAB_ROOT/lab/evidence/REPORT.md" >> "$GITHUB_STEP_SUMMARY" || echo "no REPORT.md" >> "$GITHUB_STEP_SUMMARY"
           mkdir -p "$LAB_ROOT/lab/evidence/build"
           cp "$LAB_ROOT/ova/"{build-info.json,build-upgrades.txt,dpkg-list.txt,host-components.txt,prepare-guest.log} "$LAB_ROOT/ova/"*.ova.sha256 "$LAB_ROOT/lab/evidence/build/" 2>/dev/null || true
-          cp "$LAB_ROOT/rebuilt.fingerprint.tsv" "$LAB_ROOT/build-ova.log" "$LAB_ROOT/lab/evidence/build/" 2>/dev/null || true
-          printf 'lab_commit=%s\nappliance_source=%s\noriginal_ova_sha256=%s (NOT the artifact booted here)\nsource_image_run=%s from=%s\n' \
-            "$GITHUB_SHA" "$APPLIANCE_SOURCE_SHA" "$ORIGINAL_OVA_SHA256" "$SOURCE_IMAGE_RUN_ID" "${{ steps.image.outputs.from }}" > "$LAB_ROOT/lab/evidence/identities.txt"
+          cp "$LAB_ROOT/rebuilt.fingerprint.tsv" "$LAB_ROOT/build-ova.log" "$LAB_ROOT/fpcmp/evidence/fingerprint-diff.txt" "$LAB_ROOT/lab/evidence/build/" 2>/dev/null || true
+          cp "$LAB_ROOT/provisioning-drift.diff" "$LAB_ROOT/save-replay.txt" "$LAB_ROOT/coldload-clamav-ready.txt" "$LAB_ROOT/lab/evidence/build/" 2>/dev/null || true
+          printf 'variant=%s\nlab_commit=%s\nimage_source=%s\nprovisioning_source=%s\nsource_image_run=%s tar_sha256=%s from=%s\nexpected_image_id=%s\nsuperseded_ova_sha256=%s (NOT the artifact booted here)\n' \
+            "${{ matrix.variant }}" "$GITHUB_SHA" "$APPLIANCE_SOURCE_SHA" "$([ "${{ matrix.provisioning }}" = lab ] && echo "$GITHUB_SHA (lab: $APPLIANCE_SOURCE_SHA + approved provisioning drift, see provisioning-drift.diff)" || echo "$APPLIANCE_SOURCE_SHA")" \
+            "$SOURCE_IMAGE_RUN_ID" "$SOURCE_IMAGE_TAR_SHA256" "${{ steps.image.outputs.from }}" \
+            "${{ matrix.expect_image_id }}" "$ORIGINAL_OVA_SHA256" > "$LAB_ROOT/lab/evidence/identities.txt"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
-          name: appliance-lab-evidence
+          name: appliance-lab-evidence-${{ matrix.variant }}
           path: ${{ env.LAB_ROOT }}/lab/evidence
           retention-days: 30
           if-no-files-found: warn

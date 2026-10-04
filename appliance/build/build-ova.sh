@@ -44,7 +44,7 @@
 #   host-components.txt, build-upgrades.txt (packages the pinned-snapshot
 #   security upgrade moved), prepare-guest.log (the in-guest transcript).
 #
-# Requires: qemu-img, virt-customize, virt-cat, virt-ls, docker (daemon access),
+# Requires: qemu-img, guestfish, virt-customize, virt-cat, virt-ls, docker (daemon access),
 # curl, gzip, tar, sha256sum, python3; gpgv + ubuntu-cloudimage-keyring optional.
 set -euo pipefail
 
@@ -88,11 +88,11 @@ set -a
 set +a
 for v in BASE_IMAGE_URL BASE_IMAGE_SHA256 APP_IMAGE_REPO APP_IMAGE_TAG APP_IMAGE_INDEX_DIGEST \
          APP_IMAGE_AMD64_DIGEST CLAMAV_IMAGE_REPO CLAMAV_IMAGE_TAG CLAMAV_IMAGE_INDEX_DIGEST \
-         CLAMAV_IMAGE_AMD64_DIGEST DOCKER_CE_VERSION VM_DISK_GB VM_VCPUS VM_MEMORY_MB VM_HW_VERSION; do
+         CLAMAV_IMAGE_AMD64_DIGEST COLDLOAD_DIND_IMAGE DOCKER_CE_VERSION VM_DISK_GB VM_VCPUS VM_MEMORY_MB VM_HW_VERSION; do
   [[ -n "${!v:-}" ]] || die "manifest.env: $v is not set"
 done
 
-for t in qemu-img virt-customize virt-cat virt-ls docker curl gzip tar sha256sum python3; do
+for t in qemu-img guestfish virt-customize virt-cat virt-ls docker curl gzip tar sha256sum python3; do
   command -v "$t" >/dev/null 2>&1 || die "required tool missing: $t"
 done
 docker info >/dev/null 2>&1 || die "docker daemon not reachable"
@@ -136,6 +136,10 @@ if command -v gpgv >/dev/null 2>&1 && [[ -f "${BASE_IMAGE_KEYRING:-/nonexistent}
   log "base image GPG: $BASE_GPG"
 fi
 
+# Recorded in build-info.json (provenance; not a gate).
+HOST_CONTAINERD="$(docker version --format '{{range .Server.Components}}{{if eq .Name "containerd"}}{{.Version}}{{end}}{{end}}')"
+log "build host containerd: $HOST_CONTAINERD"
+
 # ── 2. Application images by digest ─────────────────────────────────────────
 pull_by_digest() { # repo index_digest amd64_digest tag
   local repo="$1" idx="$2" amd="$3" tag="$4"
@@ -155,6 +159,16 @@ for e in m.get("manifests",[]):
   [[ "$got" == "$amd" ]] || die "${repo}: amd64 platform digest is $got, manifest pins $amd"
   docker tag "${repo}@${idx}" "${repo}:${tag}"
 }
+# ClamAV is pulled AND saved before the candidate image archive is loaded.
+# Loading that archive into the store first made every later ClamAV save
+# hollow — index and manifests only, no config or layers (69,562 bytes), by
+# tag, by digest or both — while a store that never loaded it saves the full
+# image (F-OVA-CLAMAV-1; bisected in fresh disposable stores, lab run
+# 37154350794). The closure and cold-load checks below verify the result.
+pull_by_digest "$CLAMAV_IMAGE_REPO" "$CLAMAV_IMAGE_INDEX_DIGEST" "$CLAMAV_IMAGE_AMD64_DIGEST" "$CLAMAV_IMAGE_TAG"
+mkdir -p "$WORK"
+log "docker save ${CLAMAV_IMAGE_REPO}:${CLAMAV_IMAGE_TAG} (before any archive is loaded)"
+docker save "${CLAMAV_IMAGE_REPO}:${CLAMAV_IMAGE_TAG}" | gzip -n -6 > "$WORK/clamav.tar.gz"
 CANDIDATE=0
 CANDIDATE_TAR_SHA=""
 if [[ -n "$CANDIDATE_TAR" ]]; then
@@ -191,7 +205,6 @@ else
   APP_REF="${APP_IMAGE_REPO}@${APP_IMAGE_INDEX_DIGEST}"
   COSIGN_RESULT="skipped (--skip-cosign)"
 fi
-pull_by_digest "$CLAMAV_IMAGE_REPO" "$CLAMAV_IMAGE_INDEX_DIGEST" "$CLAMAV_IMAGE_AMD64_DIGEST" "$CLAMAV_IMAGE_TAG"
 
 if [[ "$CANDIDATE" -eq 0 && "$SKIP_COSIGN" -eq 0 ]]; then
   log "cosign-verifying ${APP_IMAGE_REPO}@${APP_IMAGE_INDEX_DIGEST} (keyless, pinned identity)"
@@ -284,11 +297,29 @@ save_image() { # ref out.tar.gz
   docker save "$1" | gzip -n -6 > "$2"
 }
 save_image "${APP_IMAGE_REPO}:${APP_IMAGE_TAG}"       "$OV/var/lib/culvert-appliance/images/culvert.tar.gz"
-save_image "${CLAMAV_IMAGE_REPO}:${CLAMAV_IMAGE_TAG}"  "$OV/var/lib/culvert-appliance/images/clamav.tar.gz"
+mv "$WORK/clamav.tar.gz" "$OV/var/lib/culvert-appliance/images/clamav.tar.gz"  # saved before the candidate load (above)
 # First boot checks the loaded image against APP_IMAGE_INDEX_DIGEST; prove the
 # archive carries that identity before baking it (archive-identity.sh).
 archive_names_digest "$OV/var/lib/culvert-appliance/images/culvert.tar.gz" "$APP_IMAGE_INDEX_DIGEST" \
   || die "the saved application archive does not carry $APP_IMAGE_INDEX_DIGEST — the first boot would refuse it. Build on a Docker daemon with the containerd image store (daemon.json: {\"features\":{\"containerd-snapshotter\":true}})"
+# Both archives must CARRY a complete linux/amd64 image (manifest, config and
+# every layer, size and digest checked), not merely name one: a 69 KB ClamAV
+# archive with no layers loaded "successfully" and broke first boot
+# (archive-identity.sh, F-OVA-CLAMAV-1).
+archive_platform_closure "$OV/var/lib/culvert-appliance/images/culvert.tar.gz" linux/amd64 "$APP_IMAGE_INDEX_DIGEST" "$APP_IMAGE_AMD64_DIGEST" \
+  || die "the saved application archive does not carry the complete pinned linux/amd64 image — refusing to bake it"
+archive_platform_closure "$OV/var/lib/culvert-appliance/images/clamav.tar.gz" linux/amd64 "$CLAMAV_IMAGE_INDEX_DIGEST" "$CLAMAV_IMAGE_AMD64_DIGEST" \
+  || die "the saved ClamAV archive does not carry the complete pinned linux/amd64 image — refusing to bake it"
+# ...and must RUN from that content alone: load into an empty disposable
+# containerd store with no registry, create a container, execute a binary.
+"$HERE/cold-load-check.sh" --dind "$COLDLOAD_DIND_IMAGE" \
+  --archive "$OV/var/lib/culvert-appliance/images/culvert.tar.gz" --ref "${APP_IMAGE_REPO}:${APP_IMAGE_TAG}" \
+  --id "$APP_IMAGE_INDEX_DIGEST" --run "/app/deploy/bin/culvert-maint -version" \
+  || die "the application archive does not run from its own content in an empty store — refusing to bake it"
+"$HERE/cold-load-check.sh" --dind "$COLDLOAD_DIND_IMAGE" \
+  --archive "$OV/var/lib/culvert-appliance/images/clamav.tar.gz" --ref "${CLAMAV_IMAGE_REPO#docker.io/}:${CLAMAV_IMAGE_TAG}" \
+  --id "$CLAMAV_IMAGE_INDEX_DIGEST" --run "clamd --version" \
+  || die "the ClamAV archive does not run from its own content in an empty store — refusing to bake it"
 APP_TAR_SHA="$(sha256sum "$OV/var/lib/culvert-appliance/images/culvert.tar.gz" | cut -d' ' -f1)"
 CLAM_TAR_SHA="$(sha256sum "$OV/var/lib/culvert-appliance/images/clamav.tar.gz" | cut -d' ' -f1)"
 INSTALL_SHA="$(sha256sum "$REPO/scripts/install.sh" | cut -d' ' -f1)"
@@ -296,7 +327,7 @@ INSTALL_SHA="$(sha256sum "$REPO/scripts/install.sh" | cut -d' ' -f1)"
 BUILD_TS="$(date -u -d "@$SOURCE_DATE_EPOCH" +%Y-%m-%dT%H:%M:%SZ)"
 BUILD_WALL="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 BI_INSTALL_SHA="$INSTALL_SHA" BI_APP_VERSION="$APP_VERSION" BI_MAINT_VERSION="$MAINT_VERSION" \
-BI_COSIGN="$COSIGN_RESULT" BI_BASE_GPG="$BASE_GPG" BI_APP_TAR_SHA="$APP_TAR_SHA" BI_CLAM_TAR_SHA="$CLAM_TAR_SHA" \
+BI_CONTAINERD="$HOST_CONTAINERD" BI_COSIGN="$COSIGN_RESULT" BI_BASE_GPG="$BASE_GPG" BI_APP_TAR_SHA="$APP_TAR_SHA" BI_CLAM_TAR_SHA="$CLAM_TAR_SHA" \
 BI_VERSION="$VERSION" BI_OVA="$OVA_BASENAME.ova" BI_GIT_COMMIT="$GIT_COMMIT" BI_GIT_DIRTY="$GIT_DIRTY" \
 BI_BUILD_TS="$BUILD_TS" BI_BUILD_WALL="$BUILD_WALL" \
 BI_CANDIDATE="$CANDIDATE" BI_CANDIDATE_SOURCE="$CANDIDATE_SOURCE" BI_CANDIDATE_TAR_SHA="$CANDIDATE_TAR_SHA" BI_CANDIDATE_RUN_ID="$CANDIDATE_RUN_ID" \
@@ -331,7 +362,8 @@ info = {
   "virtual_hardware": {"vcpus": int(E["VM_VCPUS"]), "memory_mb": int(E["VM_MEMORY_MB"]), "disk_gb": int(E["VM_DISK_GB"]),
                        "hw_version": E["VM_HW_VERSION"], "nic": "E1000 x1", "disk_format": "vmdk streamOptimized (thin)"},
   "build_tools": {"qemu-img": v("qemu-img --version | head -1"), "libguestfs": v("virt-customize --version"),
-                  "docker": v("docker version --format '{{.Server.Version}}'"), "cosign_image": E["COSIGN_IMAGE"],
+                  "docker": v("docker version --format '{{.Server.Version}}'"),
+                  "containerd": E["BI_CONTAINERD"], "cosign_image": E["COSIGN_IMAGE"],
                   "build_host": v(". /etc/os-release && echo $PRETTY_NAME"), "kvm": v("test -e /dev/kvm && echo yes || echo 'no (TCG)'")}
 }
 if E["BI_CANDIDATE"] == "1":
@@ -353,14 +385,34 @@ log "build-info.json written"
 
 # ── 4. Disk ─────────────────────────────────────────────────────────────────
 DISK="$WORK/disk.qcow2"
-log "preparing ${VM_DISK_GB}G qcow2 working disk (virt-resize: root partition grown at BUILD time)"
+log "preparing ${VM_DISK_GB}G qcow2 working disk (root partition grown IN PLACE at build time)"
 # The cloud image's root partition is ~2.4 GB and cloud-init's growpart only
 # runs at FIRST BOOT, so a plain `qemu-img resize` leaves the build with the
 # original filesystem — measured: the Docker install hit ENOSPC at 100 %.
-# virt-resize copies the image into a fresh disk and expands /dev/sda1 now.
+# The root partition (sda1) is the LAST one on the disk, so it is grown in
+# place: GPT backup header moved to the new end, sda1's end extended, the
+# filesystem checked and resized. NOT virt-resize: it copies partitions into a
+# fresh table and RENUMBERS them (14,15,16,1 → 1,2,3,4), while the BIOS GRUB
+# core image embedded in the BIOS-boot partition still names its /boot as
+# partition 16 — every BIOS boot then stopped at "error: no such partition /
+# grub rescue>" (appliance lab, test/appliance-lab; UEFI was unaffected
+# because its grub.cfg finds /boot by UUID). The layout must stay the vendor's.
 rm -f "$DISK"
-qemu-img create -q -f qcow2 "$DISK" "${VM_DISK_GB}G"
-virt-resize --quiet --expand /dev/sda1 "$BASE_FILE" "$DISK"
+qemu-img convert -q -O qcow2 "$BASE_FILE" "$DISK"
+qemu-img resize -q "$DISK" "${VM_DISK_GB}G"
+part_layout() { LIBGUESTFS_BACKEND="${LIBGUESTFS_BACKEND:-direct}" guestfish --ro -a "$1" run : part-list /dev/sda | awk '/part_num:/{n=$2} /part_start:/{print n":"$2}' | tr '\n' ' '; }
+layout_before="$(part_layout "$DISK")"
+LIBGUESTFS_BACKEND="${LIBGUESTFS_BACKEND:-direct}" guestfish -a "$DISK" <<'GF' || die "growing the root partition in place failed"
+run
+part-expand-gpt /dev/sda
+part-resize /dev/sda 1 -34
+e2fsck-f /dev/sda1
+resize2fs /dev/sda1
+GF
+layout_after="$(part_layout "$DISK")"
+# Same partition numbers at the same starts: only sda1's END may move.
+[[ "$layout_before" == "$layout_after" ]] || die "partition layout changed while growing root (before: $layout_before; after: $layout_after) — BIOS GRUB would not find /boot"
+log "root grown in place; partition numbers/starts unchanged: $layout_after"
 
 log "virt-customize (libguestfs; this runs the guest under TCG when no KVM is present — expect 10-30 min)"
 # The host's proxy variables must NOT reach the guest (libguestfs forwards
