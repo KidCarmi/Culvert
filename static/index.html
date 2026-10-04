@@ -5481,6 +5481,10 @@ Firefox (all platforms):
       <label style="font-size:.82rem;display:flex;align-items:center;gap:8px" title="Only needed when the running release is not a catalog release; confirms you verified the transition yourself"><input type="checkbox" id="rel-disp-ack-unknown"> Acknowledge unknown running release (acknowledge_unknown_current)</label>
       <label style="font-size:.82rem;display:flex;align-items:center;gap:8px" title="Break-glass: dispatch a release OLDER than the running one. Restore-from-backup is the supported way back."><input type="checkbox" id="rel-disp-allow-downgrade"> Allow downgrade (allow_downgrade, break-glass)</label>
     </div>
+    <div id="rel-disp-recovery" role="alert" style="display:none;margin-top:16px;padding:10px 12px;border:1px solid var(--red,#e5484d);border-radius:8px;font-size:.78rem;line-height:1.5">
+      <div id="rel-disp-recovery-msg"></div>
+      <pre id="rel-disp-recovery-body" style="margin:8px 0 0;max-height:30vh;overflow:auto;white-space:pre-wrap;word-break:break-all;font-size:.72rem;background:var(--surface);padding:8px;border-radius:6px"></pre>
+    </div>
     <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:20px">
       <button class="btn ghost" data-click="releaseDispatchCancel">Cancel</button>
       <button class="btn primary" id="rel-disp-submit" data-click="releaseDispatchSubmit">Dispatch</button>
@@ -17756,10 +17760,26 @@ function releaseDispatchOpen() {
   document.getElementById('rel-disp-norollback').checked = false;
   document.getElementById('rel-disp-passphrase').value = '';
   document.getElementById('rel-disp-passlabel').style.display = 'none';
+  document.getElementById('rel-disp-recovery').style.display = 'none';
+  document.getElementById('rel-disp-submit').disabled = false;
   modalOpen(document.getElementById('release-dispatch-modal'), '#rel-disp-release');
 }
 function releaseDispatchCancel() {
   modalClose(document.getElementById('release-dispatch-modal'));
+}
+
+// An accepted dispatch whose record did not reach disk (durable:false) is
+// running but untracked: a control-plane restart -- which the upgrade itself
+// causes -- loses it. The response carries the complete resume context; keep it
+// in front of the operator instead of reporting a plain success.
+function releaseDispatchRecovery(payload, agent) {
+  if (!payload || payload.durable !== false) return null;
+  return {
+    message: 'Dispatch accepted (op ' + (payload.op_id || '?') + '), but its record was NOT saved. ' +
+      'If the control plane restarts before the upgrade finishes, nothing will track it. Copy the recovery ' +
+      'context below and, if needed, send it to POST /api/releases/dispatch/resume.',
+    text: JSON.stringify({ agent: payload.agent || agent, resume_context: payload.resume_context || null }, null, 2),
+  };
 }
 
 async function releaseDispatchSubmit() {
@@ -17793,7 +17813,15 @@ async function releaseDispatchSubmit() {
     });
     let payload = {};
     try { payload = await r.json(); } catch (_) {}
-    if (r.status === 202) {
+    const recovery = r.status === 202 ? releaseDispatchRecovery(payload, agent) : null;
+    if (recovery) {
+      toast(recovery.message, 'error');
+      document.getElementById('rel-disp-recovery-msg').textContent = recovery.message;
+      document.getElementById('rel-disp-recovery-body').textContent = recovery.text;
+      document.getElementById('rel-disp-recovery').style.display = 'block';
+      if (agent === releaseCurrentAgent()) loadReleaseStatus(4);
+      btn.dataset.keepDisabled = '1'; // the op is already running; re-submitting would only be refused
+    } else if (r.status === 202) {
       toast('Dispatch accepted (op ' + (payload.op_id || '?') + ')', 'success');
       releaseDispatchCancel();
       if (agent === releaseCurrentAgent()) loadReleaseStatus(4);
@@ -17825,7 +17853,8 @@ async function releaseDispatchSubmit() {
   } catch (err) {
     toast('Dispatch error: ' + err.message, 'error');
   } finally {
-    btn.disabled = false;
+    btn.disabled = btn.dataset.keepDisabled === '1';
+    delete btn.dataset.keepDisabled;
   }
 }
 

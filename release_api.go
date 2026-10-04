@@ -745,7 +745,12 @@ func (rm *releaseManager) write202(w http.ResponseWriter, agentKey, dispatchID s
 		"durable":         durable,
 	}
 	if !durable {
-		body["warning"] = "dispatch_record_not_persisted: the operation is running but this record did not reach disk; if the control plane restarts, reconcile it with POST /api/releases/dispatch/resume using op_id"
+		// The in-memory record is the only copy, so hand the caller the
+		// complete resume context: after a restart the resume endpoint has no
+		// stored dispatch_id to look up, and Resume needs the pinned target
+		// (verify-by-digest) as well as the op_id.
+		body["warning"] = "dispatch_record_not_persisted: the operation is running but this record did not reach disk; if the control plane restarts, reconcile it with POST /api/releases/dispatch/resume and {\"agent\": agent, \"resume_context\": resume_context} from this response"
+		body["resume_context"] = rec.ResumeContext
 	}
 	writeJSONStatus(w, http.StatusAccepted, body)
 }
