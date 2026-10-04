@@ -120,7 +120,11 @@ func TestNormHoist_ViewMatchesCategoryNormMatchesLegacy(t *testing.T) {
 // boundaries above.
 func TestNormHoist_ViewRandomizedSweep(t *testing.T) {
 	v := normHoistView()
-	rng := rand.New(rand.NewSource(0x5EED))
+	// Fixed seed for the same reason as the urlcat sweep: a randomized
+	// differential must be replayable to be debuggable. The suppression uses
+	// golangci-lint's own directive form rather than gosec's `#nosec` comment,
+	// which it does not reliably apply (see urlcat_matcheshost_key_test.go).
+	rng := rand.New(rand.NewSource(0x5EED)) //nolint:gosec // deterministic test corpus, not crypto
 	labels := []string{"a", "example", "EXAMPLE", "com", "linkedin", "sealed",
 		"xn--", "xn--0", "bücher", "xn--bcher-kva", "\xff", "net"}
 	cats := []string{"Social Media", "News", "Blocked", "IDN", "HR & Recruiting", "", "zzz"}
@@ -262,7 +266,7 @@ func TestNormHoist_MatchesCategoryUnchangedWithoutView(t *testing.T) {
 			sc := newHostCatScratch(host)
 			got := sc.matchesCategory(cat)
 			// The pre-hoist decision is MatchesHost over the RAW host.
-			want := catStore.MatchesHost(urlcat.Category(cat), host)
+			want := catStore.MatchesHost(cat, host)
 			if got != want {
 				t.Errorf("matchesCategory(%q) for host %q = %v; pre-hoist MatchesHost = %v",
 					cat, host, got, want)

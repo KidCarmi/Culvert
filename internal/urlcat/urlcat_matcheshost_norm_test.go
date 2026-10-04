@@ -174,7 +174,14 @@ func TestMatchesHostNorm_MatchesLegacyBodies(t *testing.T) {
 // TestMatchesHostNorm_RandomizedSweep drives randomized taxonomies and hosts
 // weighted toward the boundaries above.
 func TestMatchesHostNorm_RandomizedSweep(t *testing.T) {
-	rng := rand.New(rand.NewSource(0xC0FFEE))
+	// A FIXED seed is the point: a differential sweep that cannot be replayed
+	// cannot be debugged, so the generator must be deterministic rather than
+	// cryptographic. The values only choose which shapes are compared.
+	//
+	// The suppression uses golangci-lint's own directive form rather than
+	// gosec's `#nosec` comment, which it does not reliably apply — the same
+	// choice, for the same reason, as urlcat_matcheshost_key_test.go beside it.
+	rng := rand.New(rand.NewSource(0xC0FFEE)) //nolint:gosec // deterministic test corpus, not crypto
 
 	labels := []string{
 		"a", "b", "example", "EXAMPLE", "corp", "xn--bcher-kva", "bücher",
