@@ -23,6 +23,7 @@ import (
 type fixture struct {
 	policy releaseproof.Policy
 	key    ed25519.PrivateKey
+	kid    string // signing key ID; "" means "test"
 	now    time.Time
 }
 
@@ -44,7 +45,11 @@ func (f fixture) versionedProof(digit string, version int, generated time.Time, 
 	m, _ := json.Marshal(map[string]any{"schema_version": 1, "release_id": "r" + digit, "version_id": versionID, "min_upgrade_from": floor, "image": map[string]string{"repo": "test/repo", "list_digest": strings.Split(ref, "@")[1]}})
 	h := sha256.Sum256(m)
 	idx, _ := json.Marshal(map[string]any{"schema_version": 1, "catalog_version": version, "generated_at": generated.Format(time.RFC3339), "expires_at": generated.Add(time.Hour).Format(time.RFC3339), "releases": []map[string]string{{"release_id": "r" + digit, "version_id": versionID, "manifest_ref": "releases/r" + digit + ".json", "manifest_sha256": hex.EncodeToString(h[:])}}})
-	sig, _ := json.Marshal(map[string]any{"schema_version": 1, "alg": "ed25519", "key_id": "test", "sig": base64.StdEncoding.EncodeToString(ed25519.Sign(f.key, idx))})
+	kid := f.kid
+	if kid == "" {
+		kid = "test"
+	}
+	sig, _ := json.Marshal(map[string]any{"schema_version": 1, "alg": "ed25519", "key_id": kid, "sig": base64.StdEncoding.EncodeToString(ed25519.Sign(f.key, idx))})
 	return ref, &releaseproof.Evidence{ReleaseID: "r" + digit, Index: idx, Manifest: m, Signature: sig}
 }
 

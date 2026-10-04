@@ -9,26 +9,42 @@ import (
 	"syscall"
 )
 
-func privateDirectory(path string) error {
+// privateDirectory requires path to be a private directory owned by owner
+// (the agent identity) with no replaceable ancestor. The agent passes its own
+// euid; root-run recovery passes the uid that owns the agent's state.
+func privateDirectory(path string, owner int) error {
 	i, err := os.Lstat(path)
 	if err != nil {
 		return err
 	}
 	st, ok := i.Sys().(*syscall.Stat_t)
-	if !ok || !i.IsDir() || i.Mode().Perm()&0o077 != 0 || int64(st.Uid) != int64(os.Geteuid()) {
+	if !ok || !i.IsDir() || i.Mode().Perm()&0o077 != 0 || int64(st.Uid) != int64(owner) {
 		return errors.New("release trust: state directory must be private and agent-owned")
 	}
-	return stateAncestors(filepath.Dir(path))
+	return stateAncestors(filepath.Dir(path), owner)
 }
 
-func stateAncestors(path string) error {
+// directoryOwner reports the uid/gid owning path (not following a symlink).
+func directoryOwner(path string) (uid, gid int, err error) {
+	i, err := os.Lstat(path)
+	if err != nil {
+		return 0, 0, err
+	}
+	st, ok := i.Sys().(*syscall.Stat_t)
+	if !ok || !i.IsDir() {
+		return 0, 0, errors.New("release trust: state directory must be a real directory")
+	}
+	return int(st.Uid), int(st.Gid), nil
+}
+
+func stateAncestors(path string, owner int) error {
 	for p := path; ; p = filepath.Dir(p) {
 		i, err := os.Lstat(p)
 		if err != nil {
 			return err
 		}
 		st, ok := i.Sys().(*syscall.Stat_t)
-		if !ok || !i.IsDir() || (st.Uid != 0 && int64(st.Uid) != int64(os.Geteuid())) {
+		if !ok || !i.IsDir() || (st.Uid != 0 && int64(st.Uid) != int64(owner)) {
 			return errors.New("release trust: unsafe state ancestor")
 		}
 		// A root-owned sticky directory (/tmp) protects an agent-owned
@@ -44,9 +60,9 @@ func stateAncestors(path string) error {
 	return nil
 }
 
-func privateFileOwner(i os.FileInfo) bool {
+func privateFileOwner(i os.FileInfo, owner int) bool {
 	st, ok := i.Sys().(*syscall.Stat_t)
-	return ok && int64(st.Uid) == int64(os.Geteuid())
+	return ok && int64(st.Uid) == int64(owner)
 }
 
 // ReadPolicyFile accepts only root-controlled files and ancestor directories.

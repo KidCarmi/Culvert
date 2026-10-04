@@ -42,12 +42,26 @@ func main() {
 	var (
 		configPath = flag.String("config", "/etc/culvert-maint/config.toml", "Path to config.toml")
 		printVer   = flag.Bool("version", false, "Print version and exit")
+		recoverRT  = flag.Bool("recover-release-trust", false, "Offline, root-only repair of a refused release-trust ledger (dry run unless --confirm); keeps the replay floor and quarantines the old ledger")
+		confirm    = flag.Bool("confirm", false, "With --recover-release-trust: apply the recovery instead of a dry run")
+		floorVer   = flag.Int("floor-catalog-version", 0, "With --recover-release-trust: operator-stated replay floor catalog_version (required for a corrupt ledger; may only raise a readable floor)")
+		floorAt    = flag.String("floor-generated-at", "", "With --recover-release-trust: operator-stated replay floor generated_at (RFC 3339)")
 	)
 	flag.Parse()
 
 	if *printVer {
 		fmt.Println(server.Version)
 		return
+	}
+	if *recoverRT {
+		f := recoverFlags{confirm: *confirm, floorVersion: *floorVer, floorAt: *floorAt}
+		if err := runRecoverReleaseTrust(*configPath, f, os.Stdout); err != nil {
+			log.Fatalf("culvert-maint: release-trust recovery refused: %v", err)
+		}
+		return
+	}
+	if *confirm || *floorVer != 0 || *floorAt != "" {
+		log.Fatalf("culvert-maint: --confirm/--floor-* are only valid with --recover-release-trust")
 	}
 
 	if err := run(*configPath); err != nil {
@@ -295,25 +309,35 @@ func startOpLogRetention(ctx context.Context, stateDir string, retentionDays int
 
 // newReleaseTrust constructs host policy independently of socket caller state.
 func newReleaseTrust(cfg *config.Config) (*releasetrust.Store, error) {
+	policy, err := releaseTrustPolicy(cfg)
+	if err != nil {
+		return nil, err
+	}
+	return releasetrust.New(cfg.StateDir, policy)
+}
+
+// releaseTrustPolicy builds the host release-trust policy from root-controlled
+// configuration. Startup and offline recovery use the SAME policy.
+func releaseTrustPolicy(cfg *config.Config) (releaseproof.Policy, error) {
 	policy := releaseproof.DefaultPolicy(cfg.ReleaseCatalogRepo, cfg.ProxyRepo)
 	if cfg.ReleaseTrustRoot != "" {
 		b, err := releasetrust.ReadPolicyFile(cfg.ReleaseTrustRoot)
 		if err != nil {
-			return nil, err
+			return policy, err
 		}
 		policy.TrustedRootJSON = b
 	}
 	if cfg.ReleaseTrustKeys != "" {
 		b, err := releasetrust.ReadPolicyFile(cfg.ReleaseTrustKeys)
 		if err != nil {
-			return nil, err
+			return policy, err
 		}
 		if err = json.Unmarshal(b, &policy.Ed25519Keys); err != nil {
-			return nil, fmt.Errorf("invalid release signing keyring: %w", err)
+			return policy, fmt.Errorf("invalid release signing keyring: %w", err)
 		}
 		if len(policy.Ed25519Keys) == 0 {
-			return nil, fmt.Errorf("empty release signing keyring")
+			return policy, fmt.Errorf("empty release signing keyring")
 		}
 	}
-	return releasetrust.New(cfg.StateDir, policy)
+	return policy, nil
 }

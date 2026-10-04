@@ -7,10 +7,14 @@ import (
 	"os"
 )
 
-func privateFileOwner(os.FileInfo) bool { return false }
+func privateFileOwner(os.FileInfo, int) bool { return false }
 
-func privateDirectory(string) error {
+func privateDirectory(string, int) error {
 	return errors.New("release trust requires Linux filesystem ownership")
+}
+
+func directoryOwner(string) (uid, gid int, err error) {
+	return 0, 0, errors.New("release trust requires Linux filesystem ownership")
 }
 
 // ReadPolicyFile refuses host trust configuration on unsupported platforms.

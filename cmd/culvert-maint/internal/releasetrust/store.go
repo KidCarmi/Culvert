@@ -16,7 +16,13 @@ import (
 	"github.com/KidCarmi/Culvert/releaseproof"
 )
 
-const maxLedgerBytes = 24 << 20
+const (
+	maxLedgerBytes = 24 << 20
+	ledgerName     = "ledger.json"
+)
+
+// maxEntries bounds the offline-rollback cache.
+const maxEntries = 4
 
 // Store retains at most four authorized releases. Cached entries may
 // recover offline after expiry; a caller-supplied old proof never gains that privilege.
@@ -26,6 +32,7 @@ type Store struct {
 	verifier *releaseproof.Verifier
 	now      func() time.Time
 	write    func(string, []byte) error
+	owner    int  // uid that must own the ledger (the agent's own euid)
 	poisoned bool // a failed durability barrier must not become a cached authorization
 }
 
@@ -46,7 +53,7 @@ func New(stateDir string, policy releaseproof.Policy) (*Store, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, err
 	}
-	if err := privateDirectory(dir); err != nil {
+	if err := privateDirectory(dir, os.Geteuid()); err != nil {
 		return nil, err
 	}
 	if err := syncDirectory(stateDir); err != nil {
@@ -55,7 +62,7 @@ func New(stateDir string, policy releaseproof.Policy) (*Store, error) {
 	if err := syncDirectory(dir); err != nil {
 		return nil, err
 	}
-	s := &Store{path: filepath.Join(dir, "ledger.json"), verifier: v, now: time.Now, write: atomicWrite}
+	s := &Store{path: filepath.Join(dir, ledgerName), verifier: v, now: time.Now, write: atomicWrite, owner: os.Geteuid()}
 	if _, err = s.read(); err != nil {
 		return nil, err
 	}
@@ -212,34 +219,70 @@ func (s *Store) read() (*ledger, error) {
 	if s.poisoned {
 		return nil, errors.New("release trust: durability failure requires agent restart")
 	}
-	l := &ledger{Schema: 1, Entries: make(map[string]releaseproof.Evidence)}
-	fi, err := os.Lstat(s.path)
+	l, _, err := loadLedger(s.path, s.owner)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.validateEntries(l); err != nil {
+		return nil, err
+	}
+	return l, nil
+}
+
+// loadLedger performs the file-safety checks and the structural decode of the
+// ledger, including its replay floor. It does NOT verify persisted evidence
+// (validateEntries does). A missing file yields an empty ledger and exists=false.
+// Every refusal is a *LedgerError naming its class, so startup can say which
+// recovery applies.
+func loadLedger(path string, owner int) (l *ledger, exists bool, err error) {
+	l = &ledger{Schema: 1, Entries: make(map[string]releaseproof.Evidence)}
+	fi, err := os.Lstat(path)
 	if errors.Is(err, os.ErrNotExist) {
-		return l, nil
+		return l, false, nil
 	}
 	if err != nil {
-		return nil, err
+		return nil, true, err
 	}
-	if !fi.Mode().IsRegular() || !privateFileOwner(fi) || fi.Mode().Perm()&0o077 != 0 || fi.Size() > maxLedgerBytes {
-		return nil, errors.New("release trust: unsafe ledger")
+	if err := ledgerFileSafety(fi, owner); err != nil {
+		return nil, true, err
 	}
-	f, err := os.Open(s.path)
+	f, err := os.Open(path) //nolint:gosec // fixed name under the private agent state dir
 	if err != nil {
-		return nil, err
+		return nil, true, err
 	}
 	defer func() { _ = f.Close() }()
 	d := json.NewDecoder(io.LimitReader(f, maxLedgerBytes+1))
 	d.DisallowUnknownFields()
 	if err = d.Decode(l); err != nil {
-		return nil, errors.New("release trust: corrupt ledger")
+		return nil, true, &LedgerError{Reason: ReasonCorrupt, Detail: "ledger is not a decodable ledger document"}
 	}
 	if err = d.Decode(&struct{}{}); err != io.EOF {
-		return nil, errors.New("release trust: trailing ledger data")
+		return nil, true, &LedgerError{Reason: ReasonCorrupt, Detail: "trailing ledger data"}
 	}
-	if err := s.validateLedger(l); err != nil {
-		return nil, err
+	if l.Schema != 1 || l.Version < 1 || l.Generated.IsZero() {
+		return nil, true, &LedgerError{Reason: ReasonCorrupt, Detail: "ledger replay floor is missing or invalid"}
 	}
-	return l, nil
+	if l.Entries == nil {
+		l.Entries = make(map[string]releaseproof.Evidence)
+	}
+	return l, true, nil
+}
+
+// ledgerFileSafety refuses a ledger that is not a bounded, private, regular
+// file owned by owner. Such a file is never rewritten by recovery: the
+// operator fixes ownership/mode instead, so the content is preserved.
+func ledgerFileSafety(fi os.FileInfo, owner int) error {
+	switch {
+	case !fi.Mode().IsRegular():
+		return &LedgerError{Reason: ReasonUnsafe, Detail: "ledger is not a regular file (" + fi.Mode().Type().String() + ")"}
+	case !privateFileOwner(fi, owner):
+		return &LedgerError{Reason: ReasonUnsafe, Detail: fmt.Sprintf("ledger is not owned by the agent identity (uid %d)", owner)}
+	case fi.Mode().Perm()&0o077 != 0:
+		return &LedgerError{Reason: ReasonUnsafe, Detail: fmt.Sprintf("ledger mode %04o grants group/other access (must be 0600)", fi.Mode().Perm())}
+	case fi.Size() > maxLedgerBytes:
+		return &LedgerError{Reason: ReasonUnsafe, Detail: "ledger exceeds the size bound"}
+	}
+	return nil
 }
 
 func (s *Store) persist(l *ledger, target, prior string) error {
@@ -251,7 +294,7 @@ func (s *Store) persist(l *ledger, target, prior string) error {
 		}
 	}
 	sort.Strings(keys)
-	for len(l.Entries) > 4 {
+	for len(l.Entries) > maxEntries {
 		delete(l.Entries, keys[0])
 		keys = keys[1:]
 	}
@@ -301,15 +344,27 @@ func syncDirectory(path string) error {
 	return f.Sync()
 }
 
-func (s *Store) validateLedger(l *ledger) error {
-	if l.Schema != 1 || l.Version < 1 || l.Generated.IsZero() || len(l.Entries) == 0 || len(l.Entries) > 4 {
-		return errors.New("release trust: invalid ledger")
+// validateEntries re-verifies every persisted entry under the CURRENT host
+// policy and requires each to lie at or below the recorded replay floor. An
+// empty entry set is a valid floor-only ledger (the state an offline recovery
+// leaves when no cached evidence verifies under a rotated policy): the replay
+// floor is still enforced, only the offline-rollback cache is empty.
+func (s *Store) validateEntries(l *ledger) error {
+	if len(l.Entries) > maxEntries {
+		return &LedgerError{Reason: ReasonPolicyMismatch, Detail: fmt.Sprintf("ledger holds %d entries (bound %d)", len(l.Entries), maxEntries)}
 	}
 	for ref, p := range l.Entries {
 		a, e := s.verifier.VerifyAuthenticity(p, ref)
-		if e != nil || a.CatalogVersion > l.Version || (a.CatalogVersion == l.Version && a.GeneratedAt.After(l.Generated)) {
-			return errors.New("release trust: invalid persisted evidence")
+		if e != nil {
+			return &LedgerError{Reason: ReasonPolicyMismatch, Detail: "persisted evidence does not verify under the current host release-trust policy"}
+		}
+		if aboveFloor(a, l) {
+			return &LedgerError{Reason: ReasonPolicyMismatch, Detail: "persisted evidence is newer than the recorded replay floor"}
 		}
 	}
 	return nil
+}
+
+func aboveFloor(a releaseproof.Authorization, l *ledger) bool {
+	return a.CatalogVersion > l.Version || (a.CatalogVersion == l.Version && a.GeneratedAt.After(l.Generated))
 }

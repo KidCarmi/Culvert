@@ -47,9 +47,59 @@ backup, pull or retag. A space-preflight refusal can be retried after freeing
 capacity without restarting the agent. The ledger uses file fsync, atomic rename,
 and parent-directory fsync. A failed durability barrier disables authorization
 in that agent process until restart; corrupt persisted state refuses startup
-instead of silently resetting the replay floor. All state ancestors must be
+instead of silently resetting the replay floor (see "Recovering a refused
+release-trust ledger" below). All state ancestors must be
 root- or agent-owned and protected against replacement. A root-owned sticky
 ancestor is allowed for isolated tests. The ledger file must be agent-owned.
+
+## Recovering a refused release-trust ledger
+
+Startup stays fail-closed: the agent refuses to start on a ledger it cannot
+trust, and the error names one class and this procedure.
+
+- `reason=unsafe`: the file is not a regular, agent-owned, mode-0600 file within
+  the size bound. Fix ownership/mode, for example
+  `chown culvert-maint: /var/lib/culvert-maint/release-trust/ledger.json` and
+  `chmod 0600` on it. Then restart the agent. Recovery never rewrites an
+  unsafe ledger, so its content is preserved.
+- `reason=policy_mismatch`: the replay floor is readable, but cached evidence no
+  longer verifies under the current host policy. A legitimate rotation of
+  `release_trust_keys`, `release_trust_root` or `release_catalog_repo` causes
+  this. Inconsistent cached entries cause it too.
+- `reason=corrupt`: the document, or its floor, cannot be decoded.
+
+For `policy_mismatch` and `corrupt`, recover offline as root:
+
+```
+systemctl stop culvert-maint
+culvert-maint --recover-release-trust            # dry run: prints the plan
+culvert-maint --recover-release-trust --confirm  # applies it
+systemctl start culvert-maint
+```
+
+Recovery refuses unless it runs as root and no agent answers on the socket. It
+also requires the shared `host-maintenance.lock`, so it cannot overlap an agent
+operation or `culvert-os-update`. It never erases trust history:
+
+- The old ledger is preserved byte-for-byte as
+  `ledger.json.quarantine.<UTC timestamp>`. It is hard-linked aside before the
+  replacement is atomically renamed in, so the ledger is never absent. An
+  absent ledger would load as an empty floor.
+- The recorded floor (`catalog_version` and `generated_at`) is kept and can
+  only rise. Cached entries are re-verified under the current policy exactly as
+  startup does. Only the entries that fail are dropped. If none remain, the
+  result is a valid floor-only ledger: replay protection holds, and an offline
+  rollback needs fresh signed evidence.
+- A corrupt ledger is replaced only with an explicit floor:
+  `--floor-catalog-version N --floor-generated-at <RFC 3339>`. Take it from the
+  last signed catalog this appliance accepted. A stated floor below a readable
+  recorded floor is refused.
+
+The summary lists the kept entries, the dropped entries with a reason, and the
+resulting floor. It prints no evidence bytes. The replacement passes the same
+load check as startup before the command reports success. Tests:
+`cmd/culvert-maint/internal/releasetrust/recover_linux_test.go` and
+`cmd/culvert-maint/recover_trust_linux_test.go`.
 
 Offline rollback is restricted to exact references already authorized in that
 ledger. Their signatures and digest binding are checked again, while expiration
