@@ -38,7 +38,10 @@ func filler(n int) []byte {
 // exactly once — which is what these deltas actually test.
 func inflightBaseline(t *testing.T) int64 {
 	t.Helper()
-	for i := 0; i < 100; i++ {
+	// An earlier test's abandoned runaway match can still hold its charge;
+	// a baseline taken before it releases makes this test's delta read -1
+	// (determinism run 37215939268). Wait it out, bounded.
+	for i := 0; i < 1000; i++ {
 		if yaraInflight.Load() == 0 {
 			break
 		}
