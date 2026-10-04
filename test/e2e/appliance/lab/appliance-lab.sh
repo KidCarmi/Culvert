@@ -388,9 +388,34 @@ PY
     api GET /api/urlcat/feed-status > "$EV/05b-feed-status.txt" || true
     echo "${fs:-no completed UT1 sync reported by /api/urlcat/feed-status within ${LAB_FEED_TIMEOUT}s}; log: ${fl:-none}" > "$EV/05b-feed.txt"
     lookups > "$EV/05b-lookups-before.txt"
-    if [[ -n "$fs" ]] && grep -q 'category=[^ ]' "$EV/05b-lookups-before.txt"; then
-      check 5b category-data pass "UT1 sync complete (lastSync entries: $fs); $(grep -c 'category=[^ ]' "$EV/05b-lookups-before.txt") of $(wc -l < "$EV/05b-lookups-before.txt") probe hosts categorized"
+    # A built-in (admin/saas tier) match proves nothing about the feed: at
+    # least one probe host must resolve through the COMMUNITY (UT1) tier.
+    if [[ -n "$fs" ]] && grep -q 'tier=community' "$EV/05b-lookups-before.txt"; then
+      check 5b category-data pass "UT1 sync complete (lastSync entries: $fs); $(grep -c 'tier=community' "$EV/05b-lookups-before.txt") of $(wc -l < "$EV/05b-lookups-before.txt") probe hosts resolve via the community tier"
     else check 5b category-data fail "no completed UT1 sync in this process ($(body < "$EV/05b-feed-status.txt" | head -c 160)); log: ${fl:-none}; lookups: $(tr '\n' ' ' < "$EV/05b-lookups-before.txt")"; fi
+  fi
+
+  # Step 5c — category ENFORCEMENT from the UT1 tier, through the real proxy.
+  # A Block_Page rule on the community category of a UT1-resolved probe host,
+  # above an Allow rule for that host: 403 proves the category rule matched
+  # (default deny is ruled out by the Allow rule; the control removes the
+  # block rule and requires the same request NOT to be 403).
+  if gate 5c category-enforcement; then
+    local ch cc bid aid c1 c2
+    read -r ch cc < <(awk '/tier=community/{for(i=2;i<=NF;i++) if($i ~ /^category=/){sub("category=","",$i); print $1, $i; exit}}' "$EV/05b-lookups-before.txt")
+    if [[ -z "${ch:-}" || -z "${cc:-}" ]]; then check 5c category-enforcement fail "no probe host resolved via the community tier"
+    else
+      aid="$(api POST /api/policy "{\"name\":\"lab-ut1-allow-host\",\"priority\":4,\"action\":\"Allow\",\"destFQDN\":\"$ch\",\"sslAction\":\"Bypass\",\"enabled\":true}" | tee "$EV/05c-allow-rule.txt" | body | python3 -c 'import json,sys;print(json.load(sys.stdin).get("id",""))' 2>/dev/null || true)"
+      bid="$(api POST /api/policy "{\"name\":\"lab-ut1-block-category\",\"priority\":3,\"action\":\"Block_Page\",\"destCategory\":\"$cc\",\"sslAction\":\"Bypass\",\"enabled\":true}" | tee "$EV/05c-block-rule.txt" | body | python3 -c 'import json,sys;print(json.load(sys.stdin).get("id",""))' 2>/dev/null || true)"
+      c1="$(through_proxy "http://$ch/")"
+      [[ -n "$bid" ]] && api DELETE "/api/policy?id=$bid" > /dev/null || true
+      c2="$(through_proxy "http://$ch/")"
+      [[ -n "$aid" ]] && api DELETE "/api/policy?id=$aid" > /dev/null || true
+      printf 'host %s category %s (community tier)\nwith category block rule: %s\nblock rule removed (allow rule only): %s\n' "$ch" "$cc" "$c1" "$c2" > "$EV/05c-enforcement.txt"
+      if [[ -n "$aid" && -n "$bid" && "$c1" == 403 && "$c2" != 403 ]]; then
+        check 5c category-enforcement pass "$ch ($cc via UT1): category rule → 403; without it → $c2"
+      else check 5c category-enforcement fail "$ch ($cc): with rule $c1, without $c2 (rule ids allow=${aid:-?} block=${bid:-?})"; fi
+    fi
   fi
 
   # Step 6 — maintenance agent: backup through the product, restore DRY RUN.
@@ -497,7 +522,7 @@ lookups() { local h
 h=sys.argv[1]
 try: d=json.load(sys.stdin)
 except Exception: print(f"{h} error"); sys.exit()
-print("%s category=%s matchedBy=%s" % (h, d.get("category") or "", d.get("matchedBy") or ""))' "$h"
+print("%s category=%s tier=%s matchedBy=%s" % (h, d.get("category") or "", d.get("tier") or "", d.get("matchedBy") or ""))' "$h"
   done; }
 
 # ── collect: guest diagnostics + identities → REPORT.md (redacted) ──────────
