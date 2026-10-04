@@ -232,9 +232,15 @@ func registerEarlyShutdownHooks(reg *shutdownRegistry, s *startupState) {
 		return nil
 	})
 	// Gracefully stop gRPC server (drains in-flight RPCs).
-	reg.Register("control-plane-grpc-stop", shutdownOrderControlPlaneGRPCStop, func(context.Context) error {
-		StopControlPlaneGRPC()
-		return nil
+	//
+	// CHAOS-73: stops the SUPERVISOR, not just the server. Stopping the server
+	// alone would leave the listener's bind/serve/rebind loop to observe the
+	// serve ending and bind a fresh socket on the way out — a listener coming
+	// up during shutdown, which is worse than the terminal silence it replaced.
+	// The supervisor's backoff sleep is interruptible, so this hook never waits
+	// one out.
+	reg.Register("control-plane-grpc-stop", shutdownOrderControlPlaneGRPCStop, func(ctx context.Context) error {
+		return stopControlPlaneListener(ctx)
 	})
 	// Close the CDR client before cancelling lifecycle context so any
 	// in-flight Sanitize streams get a clean tear-down rather than a

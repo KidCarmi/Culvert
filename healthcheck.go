@@ -21,6 +21,12 @@ type healthReport struct {
 	ClusterCA     string `json:"cluster_ca" redact:"internal"`
 	SOCKS5        string `json:"socks5" redact:"internal"`
 	AdminUI       string `json:"admin_ui" redact:"internal"`
+	// CPGRPC is the Control Plane gRPC listener's posture (CHAOS-73), omitted
+	// entirely on a node that is not a Control Plane: an always-present field
+	// would make every standalone proxy and every Data Plane in the fleet look
+	// like a CP whose listener is down, which is the emission rule the socks5
+	// and cluster_ca gauges follow for the same reason.
+	CPGRPC string `json:"cp_grpc,omitempty" redact:"internal"`
 	// MCP is the MCP Agent Security Gateway capability state (RISK-027). It is
 	// omitted entirely on a node that never requested MCP: an always-present field
 	// would make every node look like it has the capability.
@@ -98,7 +104,14 @@ func computeHealth() healthReport {
 		// nothing at all. Same fixed-enum discipline as the socks5 field: the
 		// posture is public, the resolution (attempt count, reason class) is
 		// not.
-		AdminUI:           adminUIListenerStatus(),
+		AdminUI: adminUIListenerStatus(),
+		// CHAOS-73. Like the admin_ui field above this rides the PROXY port,
+		// and here the reason is structural rather than incidental: the
+		// Control Plane's own gRPC port is the thing being measured, so a
+		// probe against it reports nothing when it is down. Fixed 5-value
+		// enum; the attempt count and reason class stay on the role-gated
+		// /api/diagnostics row, the alert and the logs.
+		CPGRPC:            cpGRPCListenerStatus(),
 		ThreatFeedEntries: tfEntries,
 	}
 }
@@ -459,6 +472,14 @@ func computeReadiness() (report readinessReport, code int) {
 	// management plane, turning a management outage into the traffic outage
 	// this row exists to make visible. Strict callers opt in via ?strict=1.
 	appendAdminUIReadinessCheck(checks)
+
+	// 9b''. Control Plane gRPC listener (CHAOS-73) — REPORT-ONLY, absent
+	// entirely on a node that is not a Control Plane. The strongest case in the
+	// set for report-only: a CP whose gRPC listener cannot bind is proxying its
+	// OWN traffic perfectly, so gating the default verdict would eject a
+	// healthy gateway from rotation because the plane that serves config to
+	// OTHER nodes is down. Strict callers opt in via ?strict=1.
+	appendCPGRPCReadinessCheck(checks)
 
 	// 9c. MCP gateway (RISK-027) — REPORT-ONLY, absent entirely when MCP was never
 	// requested. It must NEVER gate the default verdict: MCP is an optional,

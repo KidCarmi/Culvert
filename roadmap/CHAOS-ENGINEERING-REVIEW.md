@@ -1113,6 +1113,9 @@ Severity key: **C**ritical / **H**igh / **M**edium / **L**ow / **✓** handled w
 | HA-13 | HA-aware CP update handoff uses a **fixed 15s sleep**, never confirms the standby actually promoted before taking the leader down → possible leaderless window; reports success regardless. | GAP | M | `update_cluster.go:593-598,706-746` |
 | HA-14 | Session HMAC / secrets sync: fenced in-band (good), but `persistDPLastGoodConfigSnapshot` writes the whole snapshot **including `SessionHMAC`** as plaintext JSON (0600) — no envelope encryption like the CA key gets. | GAP (at-rest) | M | `controlplane.go:1979-1997,2058-2061` vs DP node-key encrypt `main.go:1757-1760` |
 | HA-15 | Puller "no live holder" reject couples standby replication to a healthy leader lease — a witness outage stalls replication until a holder reappears (intended safety-over-availability; needs a runbook entry). | ✓ (documented) | L | `ha_fencing.go:94-97,83-85` |
+| CL-22 | **CP gRPC listener bind/TLS failure was FATAL on the boot path** — `logFatalf` from `initCluster`, which runs BEFORE the proxy, SOCKS5 and admin UI start, so an occupied gRPC address or an unreadable mTLS pair killed the whole appliance; and a `Serve` that returned after a successful bind was SILENT and TERMINAL while `clusterRole.role`/`grpcAddr` kept reporting a healthy Control Plane. The only listener in the appliance with no health plane at all. | GAP → **CLOSED** (CHAOS-73 §41, `cp_grpc_bind.go` + `cp_grpc_health.go`) | H | `cluster_startup.go:96` (pre-fix); `main.go:228` vs `269`/`271`; `controlplane_server.go` `srv.Serve` goroutine |
+| CL-23 | **The Data Plane's two boot fatals are the same class one plane over**: `dp_enrollment.go` still `logFatalf`s on a DP node-key at-rest failure and on DP client construction, from `startDataPlane`, on the same pre-proxy boot path. NOT closed by CHAOS-73 — one concern per change, and the DP posture question (*may a node that cannot reach its CP serve traffic at all?*) is a genuinely different decision, with a real argument on both sides (a DP serves last-good config, so degrading is defensible; a DP that never enrolled has no config to serve). | GAP (open, recorded) | M | `dp_enrollment.go:277,300` |
+| CL-24 | **A crash-looping CP boot minted and persisted a fresh CLUSTER CA before dying** — `initClusterCA` runs before the bind, so on a node with an EPHEMERAL data volume each iteration would mint a different trust root (§18's *"a retry MUST NEVER MINT"* hazard, for the root that authenticates every DP to the CP). Idempotent on a persistent volume, and the crash loop that reached it is gone (CL-22), so the reachable path is closed; the minting POLICY is unchanged. Observed in CHAOS-73's reproduction. | GAP (open, recorded — latent) | L/M | `main.go` `enableControlPlane` → `initClusterCA` ordering |
 
 ### 2.4 Storage / Filesystem / Persistence / Configuration
 
@@ -8292,3 +8295,302 @@ the sweep happens to be editing.
   from the local-account delete path, which the roster backstop already covers;
   it becomes live the moment user-level revocation is wired to anything else.
   Recorded as **AU-19**, not fixed inside a sweep about durability.
+
+---
+
+## 41. CHAOS-73 — The Control Plane's gRPC listener, and which plane may kill which
+
+**Id allocated at the START of the sweep**, per the governance note in §0 — in a
+committed placeholder row, before any code was written. It took `CHAOS-73`
+rather than the next free number because ids 67–72 were allocated across open
+sweeps in one pass (see the CHAOS-70 revision-log row) and only 70 has merged,
+so the rest of that block may still be held by branches this tree cannot see.
+Taking 73 costs nothing and cannot collide with it.
+
+### 41.1 Why this path, and why now
+
+This sweep did not pick its own target. `CLAUDE.md`'s CHAOS-66 note names it
+verbatim as the remaining one: *"the CP gRPC bind (`cluster_startup.go`) is the
+closest unexamined analogue"*. §33 (CHAOS-57) closed the shape for the admin UI
+listener and recorded SOCKS5 as still open; §36 (CHAOS-66) closed SOCKS5 and
+recorded this. Three sweeps, one rule, each naming the next.
+
+The progression matters because the severity grows at each step:
+
+| Sweep | What killed what |
+|---|---|
+| §33 | the **management** plane killed the **data** plane |
+| §36 | a **secondary, opt-in** data plane killed the **primary** one |
+| **§41** | the **cluster** plane killed this node's data plane, management plane and health endpoints, before any of them existed |
+
+### 41.2 The finding
+
+The Control Plane boot path had exactly one error branch:
+
+```go
+if err := enableControlPlane(cfg.CPAddr, cfg.CPCert, cfg.CPKey, cfg.CPCA, cfg.ClusterDBPath); err != nil {
+        logFatalf("ControlPlane gRPC: %v", err)   // ← os.Exit(1)
+}
+```
+
+reached from `initCluster`, which `main.go` runs at line 228 — **before**
+`initSOCKS5` (254), `startAdminUI` (269) and `buildAndStartProxyServer` (271).
+So every way the cluster plane's listener could fail to come up terminated the
+appliance with no proxy, no SOCKS5, no admin UI and no health endpoint.
+
+**Reproduced against the real binary, both triggers.**
+
+```
+# 1. the gRPC address is already bound
+ControlPlane: config v1791151952 published
+ClusterCA: generated new cluster CA (expires 2036-10-01)
+ControlPlane gRPC: gRPC listen: listen tcp 127.0.0.1:19443: bind: address already in use
+EXIT CODE: 1
+proxy   http_code=000        ← the HTTP proxy port never listened
+adminui http_code=000        ← the admin UI port never listened
+
+# 2. the mTLS material cannot be loaded (a cert-manager/certbot rotation window)
+ControlPlane gRPC: gRPC TLS: tls: failed to find any PEM data in key input
+EXIT CODE: 1
+```
+
+Neither trigger is visible to the check that looks like it should catch them,
+and **here that is sharper than in §33/§36**: `validatePortCollisions` compares
+the proxy, UI and SOCKS5 ports to *each other*, and the Control Plane gRPC
+address is not even among the three it knows about — so it is unchecked in both
+directions. Under `restart: unless-stopped` each is an unattended crash loop
+recoverable only with shell access.
+
+"It exits, so it fails closed" is wrong for §33's reason and must not be
+re-argued: process death picks **no** posture, it delegates the choice to the
+topology. An explicit-proxy fleet loses all egress; a PAC/WPAD fleet with a
+`DIRECT` fallback, or a transparent deployment, goes UNFILTERED.
+
+### 41.3 The asymmetry is the finding — and it is a governance point
+
+The **same function**, `enableControlPlane`, with the **same error**, already
+had a non-fatal caller. `apiClusterMode` (ui_cluster.go) hands it to the live
+admin API, where a bind failure is returned as `409 Conflict` and the appliance
+keeps running; the function's own doc comment says *"Safe to call at runtime
+from the admin API"*. One caller treats an unbindable socket as a recoverable
+error with an HTTP status; the other treats it as grounds to terminate an
+in-line security gateway.
+
+That is the shape §31 (CHAOS-62) found for `enableLogStore` — fatal on the boot
+path, an API error on the live one — and §40 (CHAOS-70) found for
+`apiSetupComplete`, where the durability rule was applied to the one-time path
+and not its sibling. **The rule to carry forward: when one caller of a function
+can report a fault and another can only exit, the exit is the one that needs
+the argument — and "it is the boot path" is not that argument.**
+
+### 41.4 A third defect, with no fatal to blame
+
+Independent of the bind, the listener's death was **silent and terminal**:
+
+```go
+go func() {
+        if err := srv.Serve(ln); err != nil {
+                logger.Printf("ControlPlane gRPC error: %v", err)
+        }
+}()
+```
+
+One log line, no rebind — and `clusterRole.role` stayed `"control-plane"` with
+`clusterRole.grpcAddr` still set, because both are written after a successful
+bind and never cleared. `GET /api/cluster/status` therefore reported a healthy
+Control Plane, with its listening address, forever, on a node with no listener.
+
+There was **no health plane for this listener at all** — no metric, no
+`/health` field, no `/ready` row, no operator-contract row, no alert. It was the
+only listener in the appliance without one (compare `admin_ui_health.go`,
+`socks5_health.go`, `readyz_dp_health.go`). PX-18 in miniature: probes green on
+a dead listener.
+
+A fourth, smaller one rode along: `StopControlPlaneGRPC` read
+`clusterRole.grpcSrv` with **no lock**. Latent while that field was written
+exactly once per process; a real data race the moment anything rebinds. The
+handle now lives on the supervisor under its own mutex and the global-handle
+entry point is gone.
+
+### 41.5 What shipped
+
+`cp_grpc_bind.go` owns bind → serve → rebind; `cp_grpc_health.go` is the
+observability plane. Five rules, borrowed wholesale from CHAOS-54/55/57/66
+rather than invented as a fourth dialect: no bind path is fatal **on the boot
+path**; retry is RATE-bounded and never COUNT-bounded; recovery is declared on
+OBSERVED evidence only; the sleep is INTERRUPTIBLE; reason classes are BOUNDED
+and matched via `errors.As` on `syscall.Errno`.
+
+**Plus one rule this plane needs that the other two did not: the CP role is a
+CLAIM, and it is only true while the socket is real.** The pre-change code
+carried the comment *"Only set role after gRPC is successfully started"*, and
+that invariant is preserved rather than traded for availability — while the bind
+is failing the node stays `standalone`, so every `role == "control-plane"` gate
+reports what is true. A supervisor that claimed the role optimistically would
+have fixed the crash loop by replacing it with the operational lie of §41.4.
+
+The HA leadership resume rides the same rule: it moved from a statement after
+`enableControlPlane` into the `onActivated` callback, so this node never asserts
+a term it cannot exercise (a "leader" no Data Plane can reach cannot serve
+`HASync`). On the happy path — the bind succeeds on the first attempt, i.e.
+every healthy boot — the callback runs synchronously and the ordering is
+byte-identical. Deferring does not *close* the split-brain window (RISK-001 /
+ADR-0004 own that, and the fence closes it properly); it declines to open a
+second one.
+
+Verified against the fixed binary, same reproduction:
+
+```
+proxy  http_code=200        ← the data plane came up
+health http_code=200
+/health  cp_grpc = "rebinding"
+culvert_cp_grpc_up 0 / _bind_failures_total 3 / _bind_backoff_seconds 4
+# …port released, no restart:
+ControlPlane: gRPC listener bound and serving again on 127.0.0.1:19443 (2 suppressed bind-failure log line(s))
+/health  cp_grpc = "ready"
+```
+
+Surfaces reuse the existing vocabulary: a `cp_grpc_listener` contract row, a
+**report-only** `/ready cp_grpc` row, a fixed 5-value `/health cp_grpc` field,
+and `culvert_cp_grpc_{up,unavailable,bind_failures_total,binds_total,bind_backoff_seconds}`
+— emitted **only** on a node that asked to be a Control Plane (the CHAOS-54
+rule: a flat `up 0` from every standalone proxy and every DP in the fleet is
+indistinguishable from a broken CP, and the paging rule is `== 0`).
+
+The readiness row is report-only and that is **load-bearing** — the strongest
+case in the set: a CP whose gRPC listener cannot bind is proxying its *own*
+traffic perfectly, so gating the default verdict would eject a healthy gateway
+from the load balancer because the plane that serves config to *other* nodes is
+down, converting a fleet-management outage into the traffic outage the change
+exists to prevent.
+
+`cp_grpc_unavailable` is a **new** alert event, and the cost is recorded rather
+than waved away: a new name is silently unsubscribed on every configured
+webhook. §36 avoided one by reusing `socks5_listener_down`; there is no existing
+event for this plane, and folding it into `admin_ui_unavailable` would page for
+one subsystem under another's name with the wrong operator action attached. §33
+minted `admin_ui_unavailable` for the same reason.
+
+One thing the retry forced, and it is the kind of detail a rebind loop always
+exposes: **`cpServerOption` had to become silent.** It emitted
+`ControlPlane: gRPC %s (mTLS)` itself, which was correct while it was called
+once per process and became one line per attempt forever the moment the
+listener acquired a loop — beside a failure line that is carefully rate
+limited. The mode is returned instead and logged once per observed bind. *A
+mitigation for a crash loop must not itself be a log flood.*
+
+### 41.6 Gates, and what mutation testing changed
+
+`cp_grpc_bind_chaos_test.go` — 22 gates: 15 defect gates, 5 controls and 2
+structural walls. **Fifteen mutations were each verified failing against the
+gate that targets them**, including the reintroduced fatal (which kills the test
+binary mid-run and takes the package with it — the §33/§36 property that makes
+the defect unreintroducible-and-green).
+
+Three gates exist only because mutation testing proved an earlier version was
+insufficient, and each is a transferable lesson:
+
+* **The panic guard's WIRING needed a structural wall.** The behavioural gate
+  drives both recorders directly and asserts each produces the right state and
+  remedy — and says nothing about which one the guard *calls*. Swapping them
+  (`noteCPGRPCServeEnded` for `noteCPGRPCSupervisorDown`) left it **green**,
+  while a panicked supervisor is then reported as an ordinary rebinding
+  listener whose remedy promises an automatic recovery that cannot happen. This
+  is CHAOS-66's round-2 finding reproduced exactly, in a sweep that had read it
+  — which is the strongest available argument that *a gate on the recorders is
+  never a gate on the call site*.
+* **The HA wall needed to pin the HANDOVER, not just the ordering.** The first
+  version checked that `ResumeAsLeader` sits textually before the activation
+  call. A mutation that kept the closure, passed `nil` in its place and then
+  called it as a bare statement **passed** — the defect wearing the deferral's
+  own vocabulary. The wall now pins the identity of the argument and rejects a
+  direct invocation.
+* **A timing gate must be able to SEE its defect.** The shutdown-promptness gate
+  allowed 3 s, and the first jittered backoff at the floor is 0.8–1.2 s, so a
+  `time.Sleep(wait)` with no interrupt **passed**. The gate now escalates the
+  backoff to ~2 s before stopping and bounds Stop at 400 ms — a ~4x margin over
+  the defect and ~1000x over what an interruptible Stop actually costs. Same
+  standing rule as §40's two self-calibration findings: *a behavioural gate that
+  passes against the defect is worse than no gate.*
+
+The sweep's own gates also found a **live bug in the fix**:
+`activateControlPlaneAfterBind` reached `appLifecycleCtx.Done()` directly, and
+that context is nil in every one-shot command path and in the test binary. The
+pre-change expression was identical and unreachable from any test; the moment it
+ran on the **supervisor goroutine** it became a panic that killed the listener
+permanently and reported it terminal. It now goes through the in-tree
+`resolveLifecycleCtx()`. The self-heal gate is what caught it.
+
+The first draft also **split the activation** — the starter's caller activated a
+first-attempt bind and the supervisor activated any later one, two code paths
+for one state transition differing only in which held the activation lock. Its
+own control gate caught it (a bind driven through `startControlPlaneListener`
+claimed no role at all, because the half that would have done so lived in a
+caller the gate was not going through). There is now exactly one writer of that
+transition.
+
+### 41.6b Governance: the collision problem is not confined to the CHAOS id
+
+This sweep allocated its `CHAOS-` id in a committed placeholder row as §0
+requires, and then **collided anyway — on the ROW id.** The first draft of the
+three new cluster rows below took `CL-9`, `CL-10` and `CL-11`, all three of
+which were already in use: `CL-1`…`CL-13` belong to
+`roadmap/CLUSTER-RUNTIME-DISCOVERY.md` (and `CL-9` additionally names a whole
+plan file, `roadmap/CL-9-METRICS-IMPLEMENTATION-PLAN.md`), while `CL-20`/`CL-21`
+are §30's. They were caught only because a grep for the ids happened to be run
+before commit; nothing in the build would have rejected them, and this document
+would have ended up with two different `CL-11`s — one a DP-connection race, one
+a cluster-CA minting hazard.
+
+§0's remedy is written for the `CHAOS-` namespace only, and that is the gap:
+**the per-domain row ids (`PX-`, `CA-`, `HA-`, `CL-`, `AU-`, `ST-`, `WK-`) are
+allocated by the same "take the next free number" habit, across the same
+concurrent sweeps, with the same absence of a ledger — and they are spread over
+more files than the `CHAOS-` ids are, so a collision in them is HARDER to spot,
+not easier.** The rows were remapped to `CL-22`…`CL-24`.
+
+Two cheap conventions follow, recorded here rather than applied unilaterally
+because they touch every sweep's habits:
+
+1. A sweep that adds register rows should grep the whole tree for its chosen
+   prefix (`grep -rhoE '\bCL-[0-9]+\b' --include='*.md' --include='*.go' . |
+   sort -u -V`) before writing them, exactly as it now claims its `CHAOS-` id —
+   it is one command and it is what caught this.
+2. Row ids should be allocated from the END of the observed range, not the first
+   apparent gap. "The next free number" is what produced this collision: `CL-9`
+   looked free in THIS file because no `CL-` row had ever been added to it.
+
+### 41.7 Deliberately left, recorded rather than silently skipped
+
+* **`logFatalf("Proxy error")` (main.go) is untouched and correct.** The proxy
+  IS the product; a gateway that cannot serve must exit loudly rather than
+  linger as a black hole. The asymmetry is the whole point of all three sweeps.
+* **`armHALease`'s fatal (cluster_startup.go) is untouched and correct**, and
+  the structural wall carries a single, argued allowance for it with a
+  not-vacuous check that fails if it ever moves or is removed. Its own comment
+  has the argument: a malformed fence config that fell back to legacy would be
+  *"an invisible safety downgrade"* — the operator asked for fencing and would
+  not get it. That is a fault whose only safe resolution is refusing to run,
+  which is exactly the test this sweep applies to the listener, and the listener
+  fails it.
+* **Register row CL-23 (NEW, open): the Data Plane's two boot fatals.**
+  `dp_enrollment.go` still `logFatalf`s on a DP node-key at-rest failure and on
+  a DP client construction failure, from `startDataPlane`, which `loadCluster`
+  reaches on the same pre-proxy boot path. Same class one plane over, and
+  **not** touched here: one concern per change, and the DP posture question —
+  *may a node that cannot reach its Control Plane serve traffic at all?* — is a
+  genuinely different decision from this one, with a real argument on both
+  sides (a DP serves last-good config, so degrading is defensible; but a DP
+  that never enrolled has no config to serve).
+* **Register row R-F stays open.** The three boot-path data-file loads
+  (`catStore`, blocklist, policy) remain fatal, defensibly so since they are
+  policy-load-bearing.
+* **A crash-looping boot minted and persisted a fresh cluster CA before dying.**
+  Observed in the reproduction (`ClusterCA: generated new cluster CA`): the
+  preparation runs before the bind, so on a node with an **ephemeral** data
+  volume each crash-loop iteration would mint a different trust root — the
+  hazard §18's `rootca_recovery.go` guards with *"a retry MUST NEVER MINT"*.
+  Idempotent on a persistent volume (the next boot loads it), and the crash loop
+  itself is now gone, which removes the reachable path. Recorded as **CL-24**,
+  not fixed inside this sweep: the fix belongs with the cluster-CA minting
+  policy, not with the listener.

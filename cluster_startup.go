@@ -92,14 +92,35 @@ func startControlPlaneWithHAResume(cfg clusterStartupConfig, ctx context.Context
 		return
 	}
 
-	if err := enableControlPlane(cfg.CPAddr, cfg.CPCert, cfg.CPKey, cfg.CPCA, cfg.ClusterDBPath); err != nil {
-		logFatalf("ControlPlane gRPC: %v", err)
-	}
 	// ADR-0005 S4: record resync material BEFORE any leadership assertion —
 	// an unfenced resume (or a later self-fence) re-enters standby with it.
+	// Unconditional, and deliberately ahead of the listener: it only RECORDS
+	// where a later demotion would resync from, so a node whose listener is
+	// still coming up is better off having it than not.
 	globalHA.SetResyncMaterial(ctx, cfg.CPAddr, cfg.CPCert, cfg.CPKey, cfg.CPCA)
-	// Persisted leader (or legacy config with no role) resumes leadership.
-	if haErr == nil && haCfg.Enabled {
+
+	// CHAOS-73 — this used to be:
+	//
+	//	if err := enableControlPlane(...); err != nil {
+	//	        logFatalf("ControlPlane gRPC: %v", err)   // ← os.Exit(1)
+	//	}
+	//
+	// which terminated the whole appliance — proxy, SOCKS5, admin UI, health
+	// endpoints, none of which have started yet at this point in main.go — for
+	// any reason the CLUSTER plane's listener could not bind. See
+	// cp_grpc_bind.go for the finding, the reproduction and why process death
+	// is not "fail closed" here.
+	//
+	// The leadership resume is the onActivated callback rather than a statement
+	// after this call, so this node never asserts a term it cannot exercise: a
+	// "leader" no Data Plane can reach cannot serve HASync. On the happy path
+	// (the listener binds on its first attempt, i.e. every healthy boot) the
+	// callback runs synchronously inside this call and the ordering is
+	// byte-identical to the code above.
+	resumeLeadership := func() {
+		if haErr != nil || !haCfg.Enabled {
+			return
+		}
 		globalHA.ResumeAsLeader(haCfg) // restores role+token+term+auto_failover (no term bump)
 		if haCfg.AutoFailover {
 			logger.Printf("HA: resumed as leader from %s after restart. WARNING: automatic failover is "+
@@ -108,6 +129,13 @@ func startControlPlaneWithHAResume(cfg clusterStartupConfig, ctx context.Context
 		} else {
 			logger.Printf("HA: resumed as leader from %s after restart (peer=%s)", haConfigFile, haCfg.PeerAddr)
 		}
+	}
+	if err := enableControlPlaneResilient(cfg.CPAddr, cfg.CPCert, cfg.CPKey, cfg.CPCA, cfg.ClusterDBPath, resumeLeadership); err != nil {
+		// Reached only for a refusal that no retry can fix (an empty address, or
+		// a listener already starting) — never for a bind or TLS fault, which
+		// the supervisor owns. Still not fatal: a misconfigured cluster plane
+		// must not cost this node's traffic.
+		logErrorf("ControlPlane: not enabled: %v — this node continues as a standalone gateway", err)
 	}
 }
 

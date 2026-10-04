@@ -1116,6 +1116,11 @@ func resetDiagVerdictGlobals(t *testing.T) {
 	// same class of process-global and also folds into the aggregate verdict.
 	resetAuthCostHealthForTest()
 	t.Cleanup(resetAuthCostHealthForTest)
+	// CHAOS-73: the Control Plane gRPC listener record is a process-global that
+	// folds into the aggregate verdict via the cp_grpc_listener row, so it joins
+	// the same isolation helper — one rule to remember.
+	resetCPGRPCListenerHealthForTest()
+	t.Cleanup(resetCPGRPCListenerHealthForTest)
 	policyStore.mu.Lock()
 	prevRules := policyStore.rules
 	prevVersion := policyStore.version
