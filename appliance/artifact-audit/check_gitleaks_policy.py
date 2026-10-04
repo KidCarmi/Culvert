@@ -19,6 +19,20 @@ def scan(executable, config, root):
     return json.loads(result.stdout)
 
 
+# A canary must always be a FINDING when nothing suppresses it. gitleaks'
+# generic-api-key rule drops any value containing one of its stopwords, so a
+# token_urlsafe canary occasionally spelled one (measured: ~3% of runs failed
+# "different value in allowed path was suppressed" with no suppression at
+# all). This alphabet has no vowels and no m/p/x/0, so it cannot contain any
+# v8.30.0 stopword (the vowel-free ones are md5, vpn, html, http, mqtt, smtp,
+# xmpp, 000000, xxxxxx), while keeping ~5.4 bits of entropy per character.
+CANARY_ALPHABET = 'BCDFGHJKLNQRSTVWZbcdfghjklnqrstvwz123456789'
+
+
+def make_canary(length=40):
+    return ''.join(secrets.choice(CANARY_ALPHABET) for _ in range(length))
+
+
 def check(executable):
     repo = Path(__file__).resolve().parents[2]
     config = repo / '.gitleaks.toml'
@@ -34,7 +48,7 @@ def check(executable):
     if not match:
         raise RuntimeError('fixture source changed; review required')
     known = match.group(1)
-    canary = secrets.token_urlsafe(32)  # Generated here, never an operational key.
+    canary = make_canary()  # Generated here, never an operational key.
     with tempfile.TemporaryDirectory(prefix='culvert-gitleaks-policy-') as temp:
         root = Path(temp)
         target = root / fixture_path
