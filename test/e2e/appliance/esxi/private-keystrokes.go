@@ -40,12 +40,17 @@ func keys(input keyboardInput) ([]types.UsbScanCodeSpecKeyEvent, error) {
 		return nil, errors.New("invalid keyboard input")
 	}
 	if input.Code != "" {
-		codes := map[string]int32{"KEY_ENTER": 0x28, "KEY_F2": 0x3b, "KEY_0": 0x27, "KEY_1": 0x1e, "KEY_2": 0x1f, "KEY_3": 0x20, "KEY_4": 0x21, "KEY_Q": 0x14, "KEY_B": 0x05}
+		codes := map[string]int32{"KEY_ENTER": 0x28, "KEY_F2": 0x3b, "KEY_0": 0x27, "KEY_1": 0x1e, "KEY_2": 0x1f, "KEY_3": 0x20, "KEY_4": 0x21, "KEY_Q": 0x14, "KEY_B": 0x05, "KEY_CTRL_L": 0x0f}
 		code, ok := codes[input.Code]
 		if !ok {
 			return nil, errors.New("key is not allowlisted")
 		}
-		return []types.UsbScanCodeSpecKeyEvent{key(code, false)}, nil
+		event := key(code, false)
+		if input.Code == "KEY_CTRL_L" {
+			control := true
+			event.Modifiers.LeftControl = &control
+		}
+		return []types.UsbScanCodeSpecKeyEvent{event}, nil
 	}
 	var result []types.UsbScanCodeSpecKeyEvent
 	plain := "1234567890-= []\\;'`,./"

@@ -1,0 +1,15 @@
+--- a/appliance-lab.sh
++++ b/appliance-lab.sh
+@@ -707,6 +707,12 @@
+     else check 6b restore-commit fail "exit $rc login $c rules '$rules' traffic $ra ($(grep -E '^(down|commit|up)-rc=' "$EV/06b-restore-offline.txt" | tr '\n' ' '))"; STOP=1; fi
+   elif [[ $STOP == 0 ]]; then check 6b restore-commit not-run "no backup file"; fi
+ 
++  # Controller adapter hook: guarded restore must precede signed updates and
++  # the maintenance reboot so persistence assertions cover restored state.
++  if declare -F lab_before_signed_update >/dev/null; then
++    lab_before_signed_update
++  fi
++
+   # Step 6c — signed update and rollback through the maintenance agent, with
+   # TEST-ONLY trust (LAB_UPDATE_DIR, prepared outside the OVA by the lab).
+   if gate 6c signed-update; then

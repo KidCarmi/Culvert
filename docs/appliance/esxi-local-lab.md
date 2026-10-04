@@ -1,5 +1,328 @@
 # LOCAL-ESXI qualification lab
 
+## Access-aware workflow for the 4f27d945 LAB candidate
+
+This records the access-aware workflow for the appliance through #1549. The
+4f27d945 candidate has since been superseded by integration fixes; completing
+its already-started qualification does not qualify the replacement candidate.
+Qualification results must come from the completed run, not these instructions. The
+older results and commands below are historical; in particular, do **not** use
+the legacy `esxi-lab.py qualify`, `restore`, or administrative SSH path for
+this candidate. Keep the original OVA unchanged and retained before import.
+
+| Input | Pinned identity |
+|---|---|
+| OVA/application/agent/access/console/provisioning revision | `4f27d945b3c676899e65018e50aafef693c7c227` |
+| Retained OVA SHA256 | `ce84809c15ce453335da7d91238dd7c1ce2cd84c5682e405b1fb666d7da86cdd` |
+| Shared lab source, branch `test/appliance-lab` | `f1f04cab46875869dbd9d0cd559cc622de81e4b0` |
+| Original shared `appliance-lab.sh` SHA256 | `36a672e1e85cb7e4a01d79f52fa42618f152399ac73f541b08c1f4974aceb1b6` |
+| Shared script after the local hook patch | `693fd936ab88670b2e7ad4465ded22c5259ac376758db995b74af4d0cc0b7a96` |
+| Candidate fixture `main.go` SHA256 | `33034e5994cc9ae7a2b9e9f98a418ffd48165b2de39cfa26fbc620c25d80330e` |
+| Candidate fixture `request.py` SHA256 | `fbf7e9df27c190b47155ccbff93b3581cd0342f33cf8c8dbce943a57be49c771` |
+
+The controller uses Windows Python with Pillow and cryptography, Git Bash,
+OpenSSH, the approved govc build, and Go **1.26.8**. It uses the same one-VM
+budget: 2 vCPU, 4096 MiB RAM, 40 GiB guest disk and the scope's independent
+host/datastore headroom checks. No host, datastore, port-group or production
+release changes are part of this workflow.
+
+### Stage reproducible controller inputs
+
+Fetch the two pinned commits into the local Git object database. Export
+`test/e2e/appliance/lab/appliance-lab.sh` and `console-session.py` from the
+shared-lab commit into `.tools/access-aware-shared/`. Use Python
+`subprocess.run(['git', 'show', revision + ':' + path], check=True,
+capture_output=True).stdout` and `Path.write_bytes()`; PowerShell text
+redirection can change the bytes. Verify the original SHA256 above before
+applying the checked-in, controller-only patch:
+
+```text
+git -c core.autocrlf=false apply --check --directory=.tools/access-aware-shared test/e2e/appliance/esxi/shared-before-signed-update.patch
+git -c core.autocrlf=false apply --directory=.tools/access-aware-shared test/e2e/appliance/esxi/shared-before-signed-update.patch
+```
+
+The per-command `core.autocrlf=false` preserves LF bytes on Windows; it does
+not alter Git configuration. Verify the modified SHA256 above. Record both hashes and the source commit
+in `appliance-lab-local-delta.json`. The patch adds one optional plain-command
+hook before signed lifecycle step 6c. The external wrapper suppresses the
+shared unguarded restore block and runs the existing guarded ESXi restore
+fixture from that hook, **before signed update/rollback and the maintenance
+reboot**. This makes later persistence checks exercise restored state. The
+upstream shared source and deliverable appliance are not modified.
+
+Export `test/e2e/release-proof-fixture/main.go` and `request.py` from the
+**candidate** commit into `.tools/access-aware-shared/release-proof-fixture/`,
+also preserving exact Git bytes. Its `provenance.json` contains
+`source_revision`, `toolchain: "go1.26.8"`, and a `files` object keyed by
+`main.go`/`request.py`; each entry records `path`, `sha256` and `git_blob`.
+`prepare-signed-fixture.py` refuses source/hash drift before generating trust.
+
+For exact pixel observation, obtain Ubuntu's
+`console-setup-linux_1.226ubuntu1.1_all.deb` from the official Ubuntu archive.
+Verify package SHA256
+`0eb39899bd329dea2286e4223c6a4ec8baa54d26cd292ddce43831805430a415`.
+Extract `Uni2-Fixed16.psf.gz` from its console-font payload, then gzip-decompress
+that member into a controller-only `.psf` file. The **decompressed bytes** must
+hash to `d9025175dcf18f8b7442009a1870837f6ae974fa9561e9d8dae5eb145566fee7`.
+Point `CULVERT_ESXI_CONSOLE_FONT` at those decompressed bytes. The original
+local experiment retained a `.psf.gz` filename after decompression; the
+decoder checks bytes, not the extension. Neither package nor font is installed
+in the guest.
+
+`pixel-console.py` matches exact 8×16 glyph bitmaps against that pinned font.
+Unknown, multicolor or ambiguous cells remain U+FFFD. Partial cells, oversized
+images, expired observations and oversized decoded text are refused. It does
+not repair letters, guess passwords, or fall back to fuzzy OCR when the font
+path is supplied. Two identical complete credential observations are required
+before the first authentication attempt. Shell observation waits for the
+cursor's blink-off capture; it does not strip unknown glyphs.
+
+Kernel bridge messages can arrive below an otherwise live shell prompt after
+a Docker operation. The observer may issue **one Control-L redraw**, without
+Enter, only when it sees a completed-shell marker/recovery banner plus kernel
+output and no subsequent PAM/sudo prompt. It then still requires the exact
+trailing prompt within the original deadline. `KEY_CTRL_L` is a single
+allowlisted USB L event with `LeftControl`; arbitrary control keys remain
+refused. Rebuild the private keyboard helper and retain its updated source and
+binary hashes before using a changed allowlist. This correction does not
+suppress kernel messages or serial diagnostics; pre-redraw captures remain
+private evidence.
+
+### Import and perform the one-time bootstrap
+
+Create a fresh private scope/run directory as described below. Set
+`credential_mode` to `none`; no password or public key is supplied in the OVF.
+Use the normal owner-fenced importer, with the exact retained OVA identities:
+
+```text
+python test/e2e/appliance/esxi/esxi-lab.py --scope ABSOLUTE_SCOPE_JSON preflight
+python test/e2e/appliance/esxi/esxi-lab.py --scope ABSOLUTE_SCOPE_JSON up
+python test/e2e/appliance/esxi/access-aware-bootstrap.py --scope ABSOLUTE_SCOPE_JSON
+```
+
+The bootstrap performs actual F2/PAM authentication and the required password
+change. Its keyboard helper receives credentials over private stdin; it never
+adds administrative SSH or a sudoers exception. Preserve private captures and
+attempt markers when anything stops. Do not retry credentials or delete an
+attempt marker to restart authentication.
+
+`--resume-initial-observation` is permitted only when the first attempt's
+marker is exactly `blocked` at `initial-capture` for the same VM UUID and
+`bootstrap-console-password` does not exist. It creates a separate exclusive
+marker and extends only observation from 300 to 900 seconds. It cannot resume
+a started PAM/password-change attempt. This supports a later font-backed
+observation after an OCR-only observation stopped without sending credentials.
+
+### Authenticated administration and operator enrollment
+
+`console-priv.py --scope ABSOLUTE_SCOPE_JSON --bind CONTROLLER_LAN_IPV4` reads
+a Bash script on stdin. It navigates the authenticated local recovery menu,
+requires the live shell prompt, then asks for password-authenticated sudo.
+`--as-user` runs as local `culvert`; `--timeout N` bounds the response wait;
+`--nowait` acknowledges authenticated execution starting, not completion.
+No privileged operation goes through SSH.
+
+The guest must reach the temporary HTTPS listener on the selected controller
+LAN address. Commands pin its ephemeral TLS public key and the script's
+SHA256. The listener accepts only the owned guest IP and single-use random
+paths, with bounded bodies. A transport timeout is **BLOCKED**, not a reason
+to replay a potentially completed mutation.
+
+After bootstrap, enroll the run's generated `id_ed25519.pub` through this
+authenticated transport into `/etc/ssh/culvert-authorized-keys/culvert-operator`
+as root-owned mode 0644. Validate its `ssh-ed25519` type and base64 key before
+constructing the command; do not install it under `/home/culvert/.ssh`.
+Read `/etc/ssh/ssh_host_ed25519_key.pub` over the same authenticated transport,
+validate it, and create the private `known_hosts` entry as:
+
+```text
+OWNED_VM_NAME ssh-ed25519 AUTHENTICATED_PUBLIC_HOST_KEY
+```
+
+Refuse an existing contradictory pin. Do not trust an unauthenticated
+`ssh-keyscan` result or enable `accept-new`. Record enrollment and the host-key
+fingerprint privately; only then set `ESXI_OPERATOR_ENROLLED=1` and
+`ESXI_HOST_KEY_PINNED=1`. `culvert-operator` permits only `help`, `status`,
+`status-json` and `diagnostics`; shell commands, sudo, forwarding, SCP/SFTP and
+SSH as `culvert` must remain refused.
+
+### Prepare the disposable signed-update fixture
+
+Use the owned guest only after bootstrap, outside the immutable OVA. The
+current fixture registry binds **guest loopback `127.0.0.1:443`**. Re-push the
+OVA's baseline image and verify the registry manifest digest against the
+retained baseline. To create the target without Buildx: `docker create` from
+that baseline without starting the container; `docker commit --change
+'LABEL org.culvert.lab-target=1'`; remove the temporary container; then push
+the target. Record the real returned digest, rather than predicting it.
+Neither image is published to the public registry.
+
+The registry's fresh TLS private key stays in its root-only guest fixture
+directory. Copy only its public `ca.crt` and a `target-digest` record into
+`RUN/secrets/signed-update`. Generate evidence with the existing real fixture:
+
+```text
+python test/e2e/appliance/esxi/prepare-signed-fixture.py --directory ABSOLUTE_RUN/secrets/signed-update --baseline ghcr.io/kidcarmi/culvert@sha256:BASELINE_DIGEST --target ghcr.io/kidcarmi/culvert@sha256:TARGET_DIGEST --registry-address 127.0.0.1
+```
+
+The helper accepts only fresh output or those two parent-prepared files,
+checks the target digest, runs the byte-verified Go fixture with Go 1.26.8,
+and refuses overwrites. The Ed25519 private key exists only in generator
+memory. Outputs include the public keyring, signed baseline/target evidence,
+unsigned apply, signed apply with prior-baseline evidence, signed image
+rollback, provenance, `fixture.txt`, and `refs.env` published last. Evidence
+expires after 24 hours. An expired fixture requires a new recorded directory;
+do not silently replace an existing keyring.
+
+Shared step 6c installs **test-only** registry CA trust, the `ghcr.io` hosts
+mapping and the agent's fixture public keyring after boot. Its report records
+those changes. No fixture key, trust configuration or registry belongs in the
+deliverable OVA. Without a real prepared fixture, signed lifecycle remains
+BLOCKED. These checks call the real agent socket/verifier; they do not qualify
+the web Release Management dispatch path.
+
+### Run, collect and clean up
+
+Invoke `access-aware-qualify.sh` directly through Git Bash, **not** from the
+legacy adapter's `qualify` command: that command holds `operation.lock`,
+which would conflict with each authenticated console invocation. Provide
+these environment variables in the process that launches Git Bash:
+
+| Variable | Value |
+|---|---|
+| `ESXI_SHARED_LAB` | Absolute staged `appliance-lab.sh` path |
+| `ESXI_SHARED_SHA256` | Expected modified hash `693fd936…` above; do not derive the expected pin from arbitrary current bytes |
+| `ESXI_PYTHON`, `ESXI_ADAPTER`, `ESXI_SCOPE` | Absolute Python executable, `esxi-lab.py`, and private scope paths |
+| `ESXI_HOST_KEY_ALIAS` | Exact owned VM name from the ownership ledger |
+| `LAB_DIR`, `LAB_HOST` | Private run directory and current owned guest IPv4 |
+| `LAB_PRIV_CMD` | Python + `console-priv.py --scope ... --bind ...`, as a whitespace-separated command; paths must not contain spaces |
+| `LAB_EXPECT_IMAGE_ID` | Verified candidate image identity |
+| `LAB_UPDATE_DIR` | Prepared private `signed-update` directory, or unset for BLOCKED signed lifecycle |
+| `CULVERT_ESXI_CONSOLE_FONT` | Pinned decompressed font path |
+| Enrollment/pin flags | Both flags above, after recording those prerequisites |
+
+```text
+bash test/e2e/appliance/esxi/access-aware-qualify.sh
+python test/e2e/appliance/esxi/esxi-lab.py --scope ABSOLUTE_SCOPE_JSON collect
+python test/e2e/appliance/esxi/esxi-lab.py --scope ABSOLUTE_SCOPE_JSON down
+python test/e2e/appliance/esxi/esxi-lab.py --scope ABSOLUTE_SCOPE_JSON collect
+```
+
+Use direct guest SSH/API/proxy ports (22/9090/8080), not the historical SSH
+tunnel settings. The wrapper fences ownership, placement, run directory,
+host-key alias and guest address. SSH, SCP and SFTP, including timeout-wrapped
+refusal probes, all use strict pinning. Guest address drift stops the run.
+Never run `down` or another console operation concurrently with qualification;
+reconcile both lock files after an interrupted controller process.
+
+The sequence is bootstrap/access regressions, setup/auth enforcement, backup
+and dry-run, guarded actual restore, signed apply/rollback, OS maintenance,
+reboot, and persistence. The actual restore holds both maintenance locks,
+checks volume mappings and agent compose overrides, and leaves a failed
+commit stopped for inspection instead of guessing a recovery. It remains a
+**same-volume** restore: fresh-appliance disaster recovery using only a backup
+and separately saved CA/log passphrases is not proven by this run.
+
+All console screenshots, decoded text, bootstrap passwords, transport results,
+TLS/controller private keys, cookies, backups and raw logs stay private and
+must never be published. Share only the sanitized allowlisted `collect`
+bundle and reviewed structured verdicts. Record updated hashes for every
+controller file actually used; retain original failed attempts separately.
+The final status must keep **F-DISK-1 open/known failure** and describe ClamAV
+startup, signature availability and failure posture separately. Readiness
+alone does not prove antivirus fail-closed behavior. Record boot timings and
+journals without claiming the unexplained ESXi delay has been diagnosed.
+
+### Narrow resume after the pre-dry-run observer interruption
+
+The first access-aware attempt completed product backup, then stopped because
+kernel bridge messages displaced the shell prompt. The restore dry-run script
+had **not** been dispatched: console transport creates its per-command
+directory only after obtaining the shell, and the latest transport directory's
+creation/birth time preceded creation of the dry-run output file. This is an
+observer failure, not a failed product restore. Preserve that failed attempt.
+
+`access-aware-resume.sh` handles only this boundary. Before resuming, retain
+the captures and write `evidence/observer-resume-evidence.json` recording the
+same owned VM UUID, `restore_dryrun_dispatched: false`, the measured
+`latest_transport_creation` and `dryrun_output_creation` values, and the
+observation `kernel output displaced shell prompt; no transport created for
+dry run`. The script requires the time ordering, the single matching original
+dry-run failure, prerequisite PASS rows, no signed/update/reboot rows, and no
+existing `checks-resume.jsonl`. These measurements and the retained captures
+must establish the boundary; do not fabricate a marker merely to bypass it.
+
+Using the same pinned environment after rebuilding/verifying the keyboard
+helper, invoke:
+
+```text
+bash test/e2e/appliance/esxi/access-aware-resume.sh
+```
+
+The resumed root probe uses `test "$(id -u)" = 0 && echo root`; a semicolon
+would incorrectly print success after a failed UID check. The resume retains
+the original `checks.jsonl` and writes new verdicts to `checks-resume.jsonl`.
+It runs the actual CLI dry run, guarded restore, signed lifecycle and the
+hash-bound original step 7/8 body, without repeating setup or enrollment.
+It additionally records the exact post-backup mutation name and requires that
+mutation to remain absent after the reboot. Do not resume a dispatched or
+ambiguous restore, update, password attempt or reboot using this path.
+
+Final reporting must retain the original failure and correction history, then
+combine the latest **validated** result for each `(step, check)` with separate
+independent observations. A later unsupported PASS must not erase an earlier
+failure. The legacy shared `restore-persisted` NOT RUN concerns its suppressed
+06b restore; the later exact-mutation check qualifies the guarded restore.
+Explain that replacement explicitly. The legacy `esxi-lab.py collect` reads
+`adapter.jsonl` and `checks.jsonl`, not `checks-resume.jsonl`; its unmodified
+aggregate alone is therefore insufficient for a resumed run. Keep a reviewed,
+sanitized combined report alongside both histories.
+
+### Mandatory independent post-reboot evidence
+
+Verify successful reads and expected content, not merely absence of error
+strings. Several original shared checks intentionally continue after a
+diagnostic command fails; their grep-based verdicts need these independent
+checks before claiming PASS. Raw files remain private.
+
+After qualification completes, use the same scope and pinned console observer:
+
+```text
+python test/e2e/appliance/esxi/independent-postcheck.py --scope ABSOLUTE_SCOPE_JSON --bind CONTROLLER_LAN_IPV4 --collect
+```
+
+The collector performs authenticated read-only guest commands. Any required
+command or transport failure invalidates the dependent verdicts. It retains
+the complete observation privately in `secrets/independent-postcheck.json`
+and writes sanitized checks to `evidence/independent-checks.jsonl`; neither
+file is overwritten. Resume proof may use the current-boot journal or the
+durable OS-update log when journal flushing missed the final success line.
+Durable entries must have UTC timestamps at or after this boot's `/proc/stat`
+`btime` and no later than the observation; previous-boot and future lines
+cannot prove success. The independent checks supplement the manual evidence
+review below; they do not establish a newer candidate's qualification.
+
+| Evidence | Required independent assertion |
+|---|---|
+| `esxi-boot-id-before.txt`, `esxi-boot-id-after.txt` | Both contain one valid kernel boot UUID; values differ; the after value matches a fresh read from the owned guest. The `--nowait` acknowledgement alone does not prove a reboot. |
+| `03-kernel-before.txt`, `07-kernel-after.txt`, `07-check-after-update.txt` | Both kernel reads succeeded and contain valid nonempty release/version lines. Compare those values with installed kernel packages. An empty after-file must not count as a changed kernel. Verify all four Docker package holds. |
+| `07-os-update.txt`, `07-reboot.txt` | OS update really completed successfully; distinguish the reboot's start acknowledgement from completion. Correlate with the new boot ID and current-boot service evidence. |
+| `08-stack-resume.txt` | Loaded resume unit, `Result=success`, exit status zero, absent resume marker, and current-boot log entries proving both maintenance locks were held and the stack started. Obtain missing exit-status detail independently. |
+| `08-firstboot-journal.txt`, `03-state-files.txt`, `08-status-after-reboot.txt` | Independently read the **full** current-boot firstboot journal and unit condition/execution state. A failed read or the shared last-20-lines excerpt cannot prove no step reran. Compare complete marker sets; use timestamps if rerun status is ambiguous. |
+| `08-policy.json`, `09-post-backup-mutation-name.txt`, `08-login.txt`, `08-enforce.txt` | Valid authenticated responses; exact mutation absent; original allow rule enabled; original admin login succeeds; actual allowed/denied traffic remains 200/403. |
+| `05-ca-fingerprint.txt`, `09-ca-fingerprint.txt`, `08-ca-fingerprint.txt` | All are valid nonempty SHA256 fingerprints and identical across backup, restore and reboot. |
+| `08-image.txt`, `08-status-json.json`, `08-agent-status.txt`, `08-backups.txt` | Expected rollback image digest, valid read-only operator JSON with setup completed, healthy reachable maintenance agent, and the same backup listed. Read/parse failures are not absence or success. |
+| `05b-lookups-before.txt`, `09-category-lookups.txt`, `08-lookups-after.txt` | Successful meaningful lookups with community-tier results, not three equal error outputs; compare after restore and reboot. Confirm current-process feed synchronization separately. |
+| `08d-boot-timing.txt` | Actual `systemd-analyze` summary, critical chain and current-boot monotonic network/cloud-init/Docker/resume journals. Shared output is truncated; capture full relevant journals if needed to explain the delay. |
+
+Correlate each privileged observation with a successful transport result or a
+fresh authenticated read. Preserve and report any new transport BLOCKED result
+instead of accepting a dependent shared PASS. Independently capture ClamAV
+readiness/signature state and any required failure-posture traffic test; these
+do not follow from a successful maintenance reboot.
+
+## Historical qualification overview
+
 The integrated `36b5407e` candidate passed the real ESXi functional baseline,
 installed-console checks, maintenance reboot and actual same-volume restore.
 Current sanitized evidence is in
@@ -79,10 +402,13 @@ with curl, OpenSSL and GNU timeout. Git Bash works for the shell entry;
 Python is supplied by the adapter, so a separate `python3` Bash alias is
 unnecessary. The guest needs approved network access for Ubuntu updates,
 ClamAV signatures, feed download and the example.com/example.org probes.
-The controller needs HTTPS to ESXi and SSH to the guest. API/proxy probes
-use local SSH forwards bound to `127.0.0.1` only.
+The current access-aware controller needs HTTPS to ESXi and direct access to
+the owned guest's SSH/API/proxy ports (22/9090/8080). The guest must reach the
+controller's temporary pinned HTTPS transport. Read-only operator SSH does
+not permit forwarding. Older transport descriptions below concern historical
+adapter runs and must not be used to bypass this access boundary.
 
-## Commands
+## Historical adapter commands
 
 Copy `test/e2e/appliance/esxi/scope.example.json` into an ignored, private
 directory such as `.tools/esxi-scope.json`. Fill the nulls only with the
