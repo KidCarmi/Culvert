@@ -4,23 +4,36 @@ package applianceaccess
 
 import "errors"
 
+// Binary is the root-owned operator login-shell installation path.
 const Binary = "/opt/culvert-appliance/bin/culvert-access"
+
+// ForcedCommand is the exact sshd invocation accepted by the login shell.
 const ForcedCommand = Binary + " --ssh"
+
+// Version identifies the access-shell packaging contract without host probes.
 const Version = "culvert-access 1"
 
 // Command identifies a fixed operation; no caller text becomes executable argv.
 type Command uint8
 
 const (
+	// Invalid is a refused or unrecognized operation.
 	Invalid Command = iota
+	// Help prints the public command list.
 	Help
+	// Status prints the public text observation.
 	Status
+	// StatusJSON prints the public structured observation.
 	StatusJSON
+	// Diagnostics prints the public diagnostic report.
 	Diagnostics
+	// Interactive opens the bounded read-only command prompt.
 	Interactive
+	// Exit ends the current session.
 	Exit
 )
 
+// HelpText describes the fixed public command surface and recovery boundary.
 const HelpText = `Culvert routine SSH access (read-only)
 Commands: help | status | status-json | diagnostics | exit
 No shell, file transfer, forwarding, setup secrets or privileged operations.
@@ -86,6 +99,7 @@ type Identity struct {
 	Groups               []int
 }
 
+// Allowed requires an unprivileged operator identity with only its own group.
 func (i Identity) Allowed() bool {
 	if i.UID <= 0 || i.UID != i.EUID || i.GID <= 0 || i.GID != i.EGID || i.Username != "culvert-operator" || i.Groupname != "culvert-operator" {
 		return false

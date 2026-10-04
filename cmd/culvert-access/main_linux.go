@@ -22,23 +22,25 @@ func main() { os.Exit(run()) }
 func run() int {
 	// Packaging smoke only: no identity lookup, probe, filesystem or child call.
 	if len(os.Args) == 2 && os.Args[1] == "--version" {
-		fmt.Fprintln(os.Stdout, applianceaccess.Version)
+		if _, err := fmt.Fprintln(os.Stdout, applianceaccess.Version); err != nil {
+			return 1
+		}
 		return 0
 	}
 	if len(os.Args) == 2 && os.Args[1] == "--import-keys" {
 		if err := importKeys(context.Background()); err != nil {
-			fmt.Fprintln(os.Stderr, "Operator key provisioning failed; inspect account and import configuration locally.")
+			_, _ = fmt.Fprintln(os.Stderr, "Operator key provisioning failed; inspect account and import configuration locally.")
 			return 1
 		}
 		return 0
 	}
 	if !operatorIdentity() {
-		fmt.Fprintln(os.Stderr, "Routine SSH requires the unprivileged culvert-operator account with its own group only.")
+		_, _ = fmt.Fprintln(os.Stderr, "Routine SSH requires the unprivileged culvert-operator account with its own group only.")
 		return 1
 	}
 	command, err := applianceaccess.Select(os.Args[1:], os.Getenv("SSH_ORIGINAL_COMMAND"), sameTerminal())
 	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
+		_, _ = fmt.Fprintln(os.Stderr, err)
 		return 2
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT, syscall.SIGHUP)
@@ -49,7 +51,7 @@ func run() int {
 		return prompt(ctx)
 	}
 	if err := dispatch(ctx, command, os.Stdout); err != nil {
-		fmt.Fprintln(os.Stderr, "Culvert observation unavailable; use the local VM console for recovery.")
+		_, _ = fmt.Fprintln(os.Stderr, "Culvert observation unavailable; use the local VM console for recovery.")
 		return 1
 	}
 	return 0
@@ -85,14 +87,18 @@ func prompt(ctx context.Context) int {
 		}
 		command, err := applianceaccess.Parse(line)
 		if err != nil {
-			fmt.Fprintln(os.Stdout, "Unsupported command; type help.")
+			if _, err := fmt.Fprintln(os.Stdout, "Unsupported command; type help."); err != nil {
+				return 1
+			}
 			continue
 		}
 		if command == applianceaccess.Exit {
 			return 0
 		}
 		if err := dispatch(ctx, command, os.Stdout); err != nil {
-			fmt.Fprintln(os.Stdout, "Culvert observation unavailable; use the local VM console for recovery.")
+			if _, err := fmt.Fprintln(os.Stdout, "Culvert observation unavailable; use the local VM console for recovery."); err != nil {
+				return 1
+			}
 		}
 	}
 	return 0

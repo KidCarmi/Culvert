@@ -3,6 +3,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"path/filepath"
@@ -38,7 +39,7 @@ func TestAccessKeysPublicationIsAtomicIdempotentAndRootOwned(t *testing.T) {
 			t.Fatal(err)
 		}
 		got, err := os.ReadFile(target)
-		if err != nil || string(got) != string(data) {
+		if err != nil || !bytes.Equal(got, data) {
 			t.Fatal("published key contents differ")
 		}
 		var st unix.Stat_t
@@ -65,22 +66,7 @@ func TestAccessKeysRefuseSymlinkAndUnsafeParentWithoutChangingTarget(t *testing.
 			}
 			parent := filepath.Join(dir, "keys")
 			target := filepath.Join(parent, "culvert-operator")
-			if kind == "parent-symlink" {
-				if err := os.Symlink(dir, parent); err != nil {
-					t.Fatal(err)
-				}
-			} else {
-				if err := os.Mkdir(parent, 0o755); err != nil {
-					t.Fatal(err)
-				}
-				if kind == "leaf-symlink" {
-					if err := os.Symlink(outside, target); err != nil {
-						t.Fatal(err)
-					}
-				} else if err := os.Chmod(parent, 0o777); err != nil {
-					t.Fatal(err)
-				}
-			}
+			makeUnsafeKeyPath(t, kind, dir, parent, target, outside)
 			if err := publishOperatorKeys(target, []byte("replacement")); err == nil {
 				t.Fatal("unsafe authorization path accepted")
 			}
@@ -136,5 +122,29 @@ func TestAccessKeyReadCancelsBlockedFIFO(t *testing.T) {
 	started := time.Now()
 	if got, err := readImportedKeys(ctx, 65534, 65534, source); err == nil || got != nil || time.Since(started) > 2*time.Second {
 		t.Fatal("blocked unprivileged reader was not bounded")
+	}
+}
+
+func makeUnsafeKeyPath(t *testing.T, kind, dir, parent, target, outside string) {
+	t.Helper()
+	if kind != "parent-symlink" {
+		// #nosec G301 -- public key directory must be searchable by the unprivileged SSH user.
+		if err := os.Mkdir(parent, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	switch kind {
+	case "parent-symlink":
+		if err := os.Symlink(dir, parent); err != nil {
+			t.Fatal(err)
+		}
+	case "leaf-symlink":
+		if err := os.Symlink(outside, target); err != nil {
+			t.Fatal(err)
+		}
+	case "writable-parent":
+		if err := os.Chmod(parent, 0o777); err != nil {
+			t.Fatal(err)
+		}
 	}
 }

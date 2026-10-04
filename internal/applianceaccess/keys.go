@@ -7,7 +7,10 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
+// MaxKeyBytes bounds the entire imported authorized-key file.
 const MaxKeyBytes = 64 * 1024
+
+// MaxKeys bounds noncomment key entries in one import.
 const MaxKeys = 64
 
 // CanonicalKeys refuses options rather than weakening an imported key's

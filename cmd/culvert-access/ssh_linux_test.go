@@ -25,6 +25,32 @@ import (
 // This test mutates only a disposable CI runner, never a deployed appliance.
 // Explicit opt-in and absence guards precede account or fixed-path creation.
 func TestAccessRealSSHBoundary(t *testing.T) {
+	f := newSSHBoundaryFixture(t)
+	f.installShell(t)
+	f.createAccount(t)
+	f.installUserHooks(t)
+	f.installKeys(t)
+	f.startDaemon(t)
+	f.assertReadOnlyCommands(t)
+	f.assertDeniedCommands(t)
+	f.assertDeniedTransports(t)
+	f.assertDeniedIdentities(t)
+	if _, err := os.Stat(filepath.Join(f.home, "RC-MUST-NOT-RUN")); !os.IsNotExist(err) {
+		t.Fatal("user rc/profile hook executed")
+	}
+}
+
+type sshBoundaryFixture struct {
+	dir, binDir, keyDir, home, binary     string
+	accountMarker, accountUID, accountGID string
+	accountAttempted                      bool
+	daemon                                *exec.Cmd
+	base                                  []string
+	clientKey, otherKey, hostKey          string
+}
+
+func newSSHBoundaryFixture(t *testing.T) *sshBoundaryFixture {
+	t.Helper()
 	if os.Getenv("CULVERT_ACCESS_SSH_FIXTURE") != "1" {
 		t.Skip("requires opted-in disposable Linux runner")
 	}
@@ -58,56 +84,72 @@ func TestAccessRealSSHBoundary(t *testing.T) {
 		t.Fatal("fixture binary is not the built access shell")
 	}
 	dir := accessRootFixture(t)
-	accountMarker := filepath.Base(dir)
-	accountAttempted := false
-	var accountUID, accountGID string
-	var daemon *exec.Cmd
-	t.Cleanup(func() {
-		if daemon != nil && daemon.Process != nil {
-			_ = daemon.Process.Kill()
-			_ = daemon.Wait()
+	f := &sshBoundaryFixture{dir: dir, binDir: binDir, keyDir: keyDir, home: home, binary: binary,
+		accountMarker: filepath.Base(dir), clientKey: filepath.Join(dir, "client"),
+		otherKey: filepath.Join(dir, "other-client"), hostKey: filepath.Join(dir, "host")}
+	t.Cleanup(func() { f.cleanup(t) })
+	return f
+}
+
+func (f *sshBoundaryFixture) cleanup(t *testing.T) {
+	t.Helper()
+	if f.daemon != nil && f.daemon.Process != nil {
+		_ = f.daemon.Process.Kill()
+		_ = f.daemon.Wait()
+	}
+	if f.accountAttempted && !f.cleanupAccount(t) {
+		return
+	}
+	// These exact paths were absent before this fixture created them.
+	for _, path := range []string{f.binDir, f.keyDir, f.home} {
+		if filepath.Clean(path) != path || path == "/" {
+			t.Error("unsafe cleanup target")
+			return
 		}
-		if accountAttempted {
-			u, err := user.Lookup("culvert-operator")
-			var unknown user.UnknownUserError
-			if errors.As(err, &unknown) {
-				// useradd can create its private group before creating the user.
-				// Without the tagged user, do not guess ownership of that group.
-				if _, groupErr := user.LookupGroup("culvert-operator"); groupErr == nil {
-					t.Error("partial account setup left a group without a tagged user; refusing group cleanup")
-					return
-				}
-			} else if err != nil || !ownedFixtureAccount(u, accountMarker, home, accountUID, accountGID) {
-				t.Error("refusing cleanup of changed operator identity")
-				return
-			} else {
-				accountUID, accountGID = u.Uid, u.Gid
-				_, _ = runFixtureCommand(context.Background(), "/usr/bin/pkill", "-KILL", "-u", accountUID)
-				if output, err := runFixtureCommand(context.Background(), "/usr/sbin/userdel", "culvert-operator"); err != nil {
-					t.Errorf("fixture account cleanup failed: %v; output=%q", err, output)
-					return
-				}
-				if g, err := user.LookupGroup("culvert-operator"); err == nil && g.Gid == accountGID {
-					if output, err := runFixtureCommand(context.Background(), "/usr/sbin/groupdel", "culvert-operator"); err != nil {
-						t.Errorf("fixture group cleanup failed: %v; output=%q", err, output)
-						return
-					}
-				}
-			}
+		_ = os.RemoveAll(path)
+	}
+}
+
+func (f *sshBoundaryFixture) cleanupAccount(t *testing.T) bool {
+	t.Helper()
+	u, err := user.Lookup("culvert-operator")
+	var unknown user.UnknownUserError
+	if errors.As(err, &unknown) {
+		// Without the tagged user, do not guess ownership of a partial group.
+		if _, groupErr := user.LookupGroup("culvert-operator"); groupErr == nil {
+			t.Error("partial account setup left a group without a tagged user; refusing group cleanup")
+			return false
 		}
-		// These exact paths were absent before this fixture created them.
-		for _, path := range []string{binDir, keyDir, home} {
-			if filepath.Clean(path) != path || path == "/" {
-				t.Error("unsafe cleanup target")
-				return
-			}
-			_ = os.RemoveAll(path)
-		}
-	})
-	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		return true
+	}
+	if err != nil || !ownedFixtureAccount(u, f.accountMarker, f.home, f.accountUID, f.accountGID) {
+		t.Error("refusing cleanup of changed operator identity")
+		return false
+	}
+	f.accountUID, f.accountGID = u.Uid, u.Gid
+	_, _ = runFixtureCommand(context.Background(), "/usr/bin/pkill", "-KILL", "-u", f.accountUID)
+	if output, err := runFixtureCommand(context.Background(), "/usr/sbin/userdel", "culvert-operator"); err != nil {
+		t.Errorf("fixture account cleanup failed: %v; output=%q", err, output)
+		return false
+	}
+	g, err := user.LookupGroup("culvert-operator")
+	if err != nil || g.Gid != f.accountGID {
+		return true
+	}
+	if output, err := runFixtureCommand(context.Background(), "/usr/sbin/groupdel", "culvert-operator"); err != nil {
+		t.Errorf("fixture group cleanup failed: %v; output=%q", err, output)
+		return false
+	}
+	return true
+}
+
+func (f *sshBoundaryFixture) installShell(t *testing.T) {
+	t.Helper()
+	// #nosec G301 -- root-owned executable directory must be searchable by the operator.
+	if err := os.MkdirAll(f.binDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	copyFixtureBinary(t, binary, applianceaccess.Binary)
+	copyFixtureBinary(t, f.binary, applianceaccess.Binary)
 	stub := "#!/bin/sh\nset -eu\n" +
 		"test \"\x24{BASH_ENV-unset}\" = unset\n" +
 		"test \"\x24{ENV-unset}\" = unset\n" +
@@ -115,30 +157,39 @@ func TestAccessRealSSHBoundary(t *testing.T) {
 		"test \"\x24{HOME}\" = /\n" +
 		"case \"\x241\" in\n--text) echo PUBLIC-STATUS;;\n--json) echo '{\"public\":true}';;\n--report) echo PUBLIC-DIAGNOSTICS;;\n*) exit 91;;\nesac\n" +
 		"if IFS= read -r stolen; then exit 92; fi\n"
-	if err := os.WriteFile(filepath.Join(binDir, "culvert-console"), []byte(stub), 0o755); err != nil {
+	// #nosec G306 -- synthetic public console stub must execute as the operator.
+	if err := os.WriteFile(filepath.Join(f.binDir, "culvert-console"), []byte(stub), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	accountAttempted = true
-	fixtureCommand(t, "/usr/sbin/useradd", "--user-group", "--create-home", "--comment", accountMarker, "--shell", applianceaccess.Binary, "--password", "!", "culvert-operator")
+}
+
+func (f *sshBoundaryFixture) createAccount(t *testing.T) {
+	t.Helper()
+	f.accountAttempted = true
+	fixtureCommand(t, "/usr/sbin/useradd", "--user-group", "--create-home", "--comment", f.accountMarker, "--shell", applianceaccess.Binary, "--password", "!", "culvert-operator")
 	u, err := user.Lookup("culvert-operator")
-	if err != nil || !ownedFixtureAccount(u, accountMarker, home, "", "") {
+	if err != nil || !ownedFixtureAccount(u, f.accountMarker, f.home, "", "") {
 		t.Fatal("fixture account identity unexpected")
 	}
-	accountUID = u.Uid
-	accountGID = u.Gid
-	uid, _ := strconv.Atoi(u.Uid)
-	gid, _ := strconv.Atoi(u.Gid)
-	if err := os.MkdirAll(filepath.Join(home, ".ssh"), 0o700); err != nil {
+	f.accountUID = u.Uid
+	f.accountGID = u.Gid
+}
+
+func (f *sshBoundaryFixture) installUserHooks(t *testing.T) {
+	t.Helper()
+	uid, _ := strconv.Atoi(f.accountUID)
+	gid, _ := strconv.Atoi(f.accountGID)
+	if err := os.MkdirAll(filepath.Join(f.home, ".ssh"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	for _, path := range []string{filepath.Join(home, ".ssh"), home} {
+	for _, path := range []string{filepath.Join(f.home, ".ssh"), f.home} {
 		if err := os.Chown(path, uid, gid); err != nil {
 			t.Fatal(err)
 		}
 	}
-	marker := filepath.Join(home, "RC-MUST-NOT-RUN")
-	for _, name := range []string{".bashrc", ".profile", ".ssh/rc"} {
-		path := filepath.Join(home, name)
+	marker := filepath.Join(f.home, "RC-MUST-NOT-RUN")
+	for _, path := range []string{filepath.Join(f.home, ".bashrc"), filepath.Join(f.home, ".profile"), filepath.Join(f.home, ".ssh", "rc")} {
+		// #nosec G306 -- executable user-controlled hook proves the SSH boundary refuses it.
 		if err := os.WriteFile(path, []byte("#!/bin/sh\ntouch "+marker+"\n"), 0o700); err != nil {
 			t.Fatal(err)
 		}
@@ -146,19 +197,22 @@ func TestAccessRealSSHBoundary(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := os.WriteFile(filepath.Join(home, ".ssh/environment"), []byte("BASH_ENV="+filepath.Join(home, ".bashrc")+"\n"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(f.home, ".ssh", "environment"), []byte("BASH_ENV="+filepath.Join(f.home, ".bashrc")+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Chown(filepath.Join(home, ".ssh/environment"), uid, gid); err != nil {
+	if err := os.Chown(filepath.Join(f.home, ".ssh", "environment"), uid, gid); err != nil {
 		t.Fatal(err)
 	}
-	clientKey := filepath.Join(dir, "client")
-	otherKey := filepath.Join(dir, "other-client")
-	hostKey := filepath.Join(dir, "host")
-	for _, key := range []string{clientKey, otherKey, hostKey} {
+}
+
+func (f *sshBoundaryFixture) installKeys(t *testing.T) {
+	t.Helper()
+	uid, _ := strconv.Atoi(f.accountUID)
+	gid, _ := strconv.Atoi(f.accountGID)
+	for _, key := range []string{f.clientKey, f.otherKey, f.hostKey} {
 		fixtureCommand(t, "/usr/bin/ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", key)
 	}
-	public, err := os.ReadFile(clientKey + ".pub")
+	public, err := os.ReadFile(f.clientKey + ".pub")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -170,17 +224,21 @@ func TestAccessRealSSHBoundary(t *testing.T) {
 		t.Fatal(err)
 	}
 	// A key planted in the operator's own home must not grant SSH access.
-	otherPublic, err := os.ReadFile(otherKey + ".pub")
+	otherPublic, err := os.ReadFile(f.otherKey + ".pub")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(home, ".ssh/authorized_keys"), otherPublic, 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(f.home, ".ssh", "authorized_keys"), otherPublic, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Chown(filepath.Join(home, ".ssh/authorized_keys"), uid, gid); err != nil {
+	if err := os.Chown(filepath.Join(f.home, ".ssh", "authorized_keys"), uid, gid); err != nil {
 		t.Fatal(err)
 	}
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
+}
+
+func (f *sshBoundaryFixture) startDaemon(t *testing.T) {
+	t.Helper()
+	listener, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -190,13 +248,14 @@ func TestAccessRealSSHBoundary(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	config := filepath.Join(dir, "sshd_config")
-	settings := fmt.Sprintf("\nPort %d\nListenAddress 127.0.0.1\nHostKey %s\nPidFile %s\nLogLevel ERROR\nSubsystem sftp internal-sftp\nAcceptEnv BASH_ENV ENV SSH_AUTH_SOCK PATH PAGER SYSTEMD_PAGER\n", port, hostKey, filepath.Join(dir, "sshd.pid"))
+	config := filepath.Join(f.dir, "sshd_config")
+	settings := fmt.Sprintf("\nPort %d\nListenAddress 127.0.0.1\nHostKey %s\nPidFile %s\nLogLevel ERROR\nSubsystem sftp internal-sftp\nAcceptEnv BASH_ENV ENV SSH_AUTH_SOCK PATH PAGER SYSTEMD_PAGER\n", port, f.hostKey, filepath.Join(f.dir, "sshd.pid"))
 	if err := os.WriteFile(config, append(source, []byte(settings)...), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	// Ubuntu's privilege-separation directory may be absent on an unused runner.
 	if _, err := os.Lstat("/run/sshd"); os.IsNotExist(err) {
+		// #nosec G301 -- OpenSSH privilege-separation directory has its standard root-owned mode.
 		if err := os.Mkdir("/run/sshd", 0o755); err != nil {
 			t.Fatal(err)
 		}
@@ -208,69 +267,85 @@ func TestAccessRealSSHBoundary(t *testing.T) {
 			t.Fatalf("effective sshd policy missing %s", want)
 		}
 	}
-	log, err := os.Create(filepath.Join(dir, "sshd.log"))
+	log, err := os.Create(filepath.Join(f.dir, "sshd.log"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer log.Close()
-	daemon = exec.Command("/usr/sbin/sshd", "-D", "-e", "-f", config)
-	daemon.Stdout, daemon.Stderr = log, log
-	if err := daemon.Start(); err != nil {
+	t.Cleanup(func() { _ = log.Close() })
+	f.daemon = exec.CommandContext(t.Context(), "/usr/sbin/sshd", "-D", "-e", "-f", config) // #nosec G204 -- fixed sshd binary, flags and fixture-owned configuration.
+	f.daemon.Stdout, f.daemon.Stderr = log, log
+	if err := f.daemon.Start(); err != nil {
 		t.Fatal("could not start isolated sshd")
 	}
 	waitSSHFixture(t, port)
-	base := []string{"-F", "/dev/null", "-p", strconv.Itoa(port), "-i", clientKey, "-o", "IdentitiesOnly=yes", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null", "-o", "LogLevel=ERROR", "-o", "ConnectTimeout=5"}
+	f.base = []string{"-F", "/dev/null", "-p", strconv.Itoa(port), "-i", f.clientKey, "-o", "IdentitiesOnly=yes", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null", "-o", "LogLevel=ERROR", "-o", "ConnectTimeout=5"}
+}
+
+func (f *sshBoundaryFixture) assertReadOnlyCommands(t *testing.T) {
+	t.Helper()
 	target := "culvert-operator@127.0.0.1"
 	for _, tt := range []struct{ command, want string }{{"status", "PUBLIC-STATUS"}, {"status-json", "{\"public\":true}"}, {"diagnostics", "PUBLIC-DIAGNOSTICS"}, {"help", "read-only"}} {
 		for _, pty := range []bool{false, true} {
-			args := append([]string{}, base...)
+			args := append([]string{}, f.base...)
 			if pty {
 				args = append(args, "-tt")
 			} else {
 				args = append(args, "-T")
 			}
-			args = append(args, "-o", "SetEnv=BASH_ENV="+filepath.Join(home, ".bashrc")+" ENV="+filepath.Join(home, ".profile")+" SSH_AUTH_SOCK=/run/docker.sock PATH=/untrusted", target, tt.command)
+			args = append(args, "-o", "SetEnv=BASH_ENV="+filepath.Join(f.home, ".bashrc")+" ENV="+filepath.Join(f.home, ".profile")+" SSH_AUTH_SOCK=/run/docker.sock PATH=/untrusted", target, tt.command)
 			out, err := sshFixture(t, args, "")
 			if err != nil || !strings.Contains(out, tt.want) {
 				t.Fatalf("real SSH command/PTY failed: %s/%t", tt.command, pty)
 			}
 		}
 	}
-	out, err := sshFixture(t, append(append([]string{}, base...), "-tt", target), "status\nexit\n")
+	out, err := sshFixture(t, append(append([]string{}, f.base...), "-tt", target), "status\nexit\n")
 	if err != nil || !strings.Contains(out, "culvert>") || !strings.Contains(out, "PUBLIC-STATUS") {
 		t.Fatal("interactive SSH prompt or stdin isolation failed")
 	}
+}
+
+func (f *sshBoundaryFixture) assertDeniedCommands(t *testing.T) {
+	t.Helper()
+	target := "culvert-operator@127.0.0.1"
 	for _, command := range []string{"status; id", "status && id", "$(id)", "bash", "sudo -n id", "cat /etc/shadow", "curl --unix-socket /run/docker.sock http://localhost/info", "scp -t /tmp/test", "--import-keys", "recover"} {
 		// End client option parsing so option-shaped remote commands reach the
 		// forced shell instead of being rejected by the local ssh executable.
-		out, err := sshFixture(t, append(append([]string{}, base...), "--", target, command), "")
+		out, err := sshFixture(t, append(append([]string{}, f.base...), "--", target, command), "")
 		if err == nil || !strings.Contains(out, "unsupported command") {
 			t.Fatalf("SSH bypass not explicitly refused: %s", command)
 		}
 	}
-	if _, err := sshFixture(t, append(append([]string{}, base...), "-s", target, "sftp"), ""); err == nil {
+}
+
+func (f *sshBoundaryFixture) assertDeniedTransports(t *testing.T) {
+	t.Helper()
+	target := "culvert-operator@127.0.0.1"
+	if _, err := sshFixture(t, append(append([]string{}, f.base...), "-s", target, "sftp"), ""); err == nil {
 		t.Fatal("SFTP subsystem admitted")
 	}
-	if _, err := sshFixture(t, append(append([]string{}, base...), "-N", "-o", "ExitOnForwardFailure=yes", "-R", filepath.Join(home, "forward.sock")+":/run/docker.sock", target), ""); err == nil {
+	if _, err := sshFixture(t, append(append([]string{}, f.base...), "-N", "-o", "ExitOnForwardFailure=yes", "-R", filepath.Join(f.home, "forward.sock")+":/run/docker.sock", target), ""); err == nil {
 		t.Fatal("Unix socket forwarding admitted")
 	}
-	if _, err := sshFixture(t, append(append([]string{}, base...), "-W", "127.0.0.1:22", target), ""); err == nil {
+	if _, err := sshFixture(t, append(append([]string{}, f.base...), "-W", "127.0.0.1:22", target), ""); err == nil {
 		t.Fatal("direct TCP forwarding admitted")
 	}
-	deniedKeyArgs := append([]string{}, base...)
+}
+
+func (f *sshBoundaryFixture) assertDeniedIdentities(t *testing.T) {
+	t.Helper()
+	target := "culvert-operator@127.0.0.1"
+	deniedKeyArgs := append([]string{}, f.base...)
 	for i := range deniedKeyArgs {
-		if deniedKeyArgs[i] == clientKey {
-			deniedKeyArgs[i] = otherKey
+		if deniedKeyArgs[i] == f.clientKey {
+			deniedKeyArgs[i] = f.otherKey
 		}
 	}
 	if _, err := sshFixture(t, append(deniedKeyArgs, target, "status"), ""); err == nil {
 		t.Fatal("user-owned authorization file bypassed root-owned keys")
 	}
-	if _, err := sshFixture(t, append(append([]string{}, base...), "culvert@127.0.0.1", "status"), ""); err == nil {
+	if _, err := sshFixture(t, append(append([]string{}, f.base...), "culvert@127.0.0.1", "status"), ""); err == nil {
 		t.Fatal("local administrative account admitted over SSH")
-	}
-	if _, err := os.Stat(marker); !os.IsNotExist(err) {
-		t.Fatal("user rc/profile hook executed")
 	}
 }
 
@@ -359,19 +434,7 @@ func fixtureProcessMetadata(procRoot string, pid int) string {
 			syscallNumber = []string{"unavailable"}
 		}
 		fmt.Fprintf(&out, "pid=%d comm=%q wchan=%q syscall=%q ", current, read(filepath.Join(base, "comm")), read(filepath.Join(base, "wchan")), syscallNumber[0])
-		if fds, err := os.Open(filepath.Join(base, "fd")); err == nil {
-			entries, _ := fds.ReadDir(8)
-			fds.Close()
-			for _, fd := range entries {
-				target, err := os.Readlink(filepath.Join(base, "fd", fd.Name()))
-				if err == nil {
-					if len(target) > 160 {
-						target = target[:160] + "..."
-					}
-					fmt.Fprintf(&out, "fd%s=%q ", fd.Name(), target)
-				}
-			}
-		}
+		appendFixtureFDMetadata(&out, base)
 		children := read(filepath.Join(base, "task", strconv.Itoa(current), "children"))
 		for _, child := range strings.Fields(children) {
 			if childPID, err := strconv.Atoi(child); err == nil && len(queue) < 12 {
@@ -384,6 +447,25 @@ func fixtureProcessMetadata(procRoot string, pid int) string {
 		}
 	}
 	return out.String()
+}
+
+func appendFixtureFDMetadata(out *strings.Builder, base string) {
+	fds, err := os.Open(filepath.Join(base, "fd"))
+	if err != nil {
+		return
+	}
+	defer fds.Close()
+	entries, _ := fds.ReadDir(8)
+	for _, fd := range entries {
+		target, err := os.Readlink(filepath.Join(base, "fd", fd.Name()))
+		if err != nil {
+			continue
+		}
+		if len(target) > 160 {
+			target = target[:160] + "..."
+		}
+		fmt.Fprintf(out, "fd%s=%q ", fd.Name(), target)
+	}
 }
 
 func TestAccessFixtureProcessMetadataExcludesSensitiveContents(t *testing.T) {
@@ -477,7 +559,7 @@ func copyFixtureBinary(t *testing.T, source, target string) {
 func waitSSHFixture(t *testing.T, port int) {
 	t.Helper()
 	for range 50 {
-		conn, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)), 100*time.Millisecond)
+		conn, err := (&net.Dialer{Timeout: 100 * time.Millisecond}).DialContext(t.Context(), "tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
 		if err == nil {
 			conn.Close()
 			return
