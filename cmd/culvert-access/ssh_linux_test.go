@@ -386,7 +386,7 @@ func fixtureCommandTimeout(binary string) time.Duration {
 func runFixtureCommand(parent context.Context, binary string, args ...string) (string, error) {
 	ctx, cancel := context.WithTimeout(parent, fixtureCommandTimeout(binary))
 	defer cancel()
-	cmd := exec.CommandContext(ctx, binary, args...)
+	cmd := exec.CommandContext(ctx, binary, args...) //nolint:gosec // G204: test fixture runs the fixed binaries it is handed
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	var metadataMu sync.Mutex
 	var metadata string
@@ -584,7 +584,7 @@ func sshFixture(t *testing.T, args []string, input string) (string, error) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "/usr/bin/ssh", args...)
+	cmd := exec.CommandContext(ctx, "/usr/bin/ssh", args...) //nolint:gosec // G204: fixed ssh binary, test-owned arguments
 	cmd.Stdin = strings.NewReader(input)
 	output, err := cmd.CombinedOutput()
 	if ctx.Err() != nil {

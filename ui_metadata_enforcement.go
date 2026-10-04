@@ -328,12 +328,12 @@ func c2EvaluateAndLog(r *http.Request, idx *metadataIndex) c2Decision {
 		// Missing metadata entry entirely.
 		c2ShadowMissingMetaTotal.Add(1)
 		logger.Printf("C2: no metadata for path=%q method=%q (drift between helpers and uiRoutes)",
-			sanitizeLog(d.Path), sanitizeLog(d.Method))
+			sanitizeLog(strings.ReplaceAll(d.Path, "\n", "_")), sanitizeLog(strings.ReplaceAll(d.Method, "\n", "_")))
 	case !d.Matched && d.MetaPath != "":
 		// Path resolved but method had no policy.
 		c2ShadowNoPolicyTotal.Add(1)
 		logger.Printf("C2: no method policy for path=%q method=%q meta_path=%q",
-			sanitizeLog(d.Path), sanitizeLog(d.Method), d.MetaPath)
+			sanitizeLog(strings.ReplaceAll(d.Path, "\n", "_")), sanitizeLog(strings.ReplaceAll(d.Method, "\n", "_")), sanitizeLog(strings.ReplaceAll(d.MetaPath, "\n", "_")))
 	case d.WouldDeny:
 		c2ShadowWouldDenyTotal.Add(1)
 		// Log emission deferred to the middleware so the message can
@@ -455,13 +455,13 @@ func uiMetadataEnforcement(next http.Handler) http.Handler {
 			if c2Mode() == c2ModeEnforce {
 				c2EnforceDeniedTotal.Add(1)
 				logger.Printf("C2-enforce: DENIED path=%q method=%q session_role=%q required=%q meta_path=%q",
-					sanitizeLog(d.Path), sanitizeLog(d.Method), d.SessionRole, d.RequiredRole, d.MetaPath)
+					sanitizeLog(strings.ReplaceAll(d.Path, "\n", "_")), sanitizeLog(strings.ReplaceAll(d.Method, "\n", "_")), sanitizeLog(strings.ReplaceAll(string(d.SessionRole), "\n", "_")), d.RequiredRole, sanitizeLog(strings.ReplaceAll(d.MetaPath, "\n", "_")))
 				http.Error(w, "forbidden", http.StatusForbidden)
 				return
 			}
 			// Shadow mode — record the dry-run decision.
 			logger.Printf("C2-shadow: WOULD-DENY path=%q method=%q session_role=%q required=%q meta_path=%q",
-				sanitizeLog(d.Path), sanitizeLog(d.Method), d.SessionRole, d.RequiredRole, d.MetaPath)
+				sanitizeLog(strings.ReplaceAll(d.Path, "\n", "_")), sanitizeLog(strings.ReplaceAll(d.Method, "\n", "_")), sanitizeLog(strings.ReplaceAll(string(d.SessionRole), "\n", "_")), d.RequiredRole, sanitizeLog(strings.ReplaceAll(d.MetaPath, "\n", "_")))
 		}
 
 		// C4 — inject the C2-evaluated MinRole into the request context
@@ -503,7 +503,7 @@ func uiMetadataEnforcement(next http.Handler) http.Handler {
 		}
 		c2AuditMissingTotal.Add(1)
 		logger.Printf("C2: audit missing for route=%q method=%q meta_path=%q status=%d",
-			sanitizeLog(d.Path), sanitizeLog(d.Method), d.MetaPath, status)
+			sanitizeLog(strings.ReplaceAll(d.Path, "\n", "_")), sanitizeLog(strings.ReplaceAll(d.Method, "\n", "_")), sanitizeLog(strings.ReplaceAll(d.MetaPath, "\n", "_")), status)
 	})
 }
 

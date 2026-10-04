@@ -74,7 +74,7 @@ func TestUISessionRole_NeverExceedsCookieOrRoster(t *testing.T) {
 				t.Fatal(err)
 			}
 			r := httptest.NewRequest(http.MethodGet, "/api/auth/status", http.NoBody)
-			r.AddCookie(&http.Cookie{Name: uiSessionCookieName, Value: raw})
+			r.AddCookie(&http.Cookie{Name: uiSessionCookieName, Value: raw}) //nolint:gosec // G124: a REQUEST cookie; Secure/HttpOnly/SameSite are response attributes
 			sess, err := readUISessionCookie(r)
 			if tc.denied {
 				if err == nil || sess != nil {
@@ -106,7 +106,7 @@ func TestUISessionRole_RejectsReplayedPortalCookie(t *testing.T) {
 			cookie := w.Result().Cookies()[0]
 			cookie.Name = uiSessionCookieName
 			r := httptest.NewRequest(http.MethodGet, "/api/auth/users", http.NoBody)
-			r.AddCookie(cookie)
+			r.AddCookie(cookie) //nolint:gosec // G124: a REQUEST cookie replayed from the response; attributes do not apply
 			w = httptest.NewRecorder()
 			uiAuthMiddleware(http.HandlerFunc(apiAuthUsers)).ServeHTTP(w, r)
 			if w.Code != http.StatusUnauthorized {
@@ -132,7 +132,7 @@ func TestUISessionRole_RequiresSignedAudience(t *testing.T) {
 			t.Fatalf("shared decoder rejected signed purpose %q: %v", audience, err)
 		}
 		r := httptest.NewRequest(http.MethodGet, "/api/auth/users", http.NoBody)
-		r.AddCookie(&http.Cookie{Name: uiSessionCookieName, Value: raw})
+		r.AddCookie(&http.Cookie{Name: uiSessionCookieName, Value: raw}) //nolint:gosec // G124: a REQUEST cookie; Secure/HttpOnly/SameSite are response attributes
 		_, err = readUISessionCookie(r)
 		if (err == nil) != (audience == uiSessionAudience) {
 			t.Fatalf("UI audience %q: error %v", audience, err)
