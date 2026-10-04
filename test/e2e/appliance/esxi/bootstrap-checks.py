@@ -121,7 +121,7 @@ def classify(text):
 class Bootstrap:
     def __init__(self, lab, keyboard):
         self.lab, self.keyboard = lab, keyboard
-        self.deadline = time.monotonic() + 600
+        self.deadline = time.monotonic() + 900
         self.sequence = 0
         self.stage = 'initial-capture'
 
@@ -160,7 +160,7 @@ class Bootstrap:
         raise Blocked('console prompt unreadable or unavailable; no credential retry')
 
     def initial(self):
-        deadline = min(self.deadline, time.monotonic() + 180)
+        deadline = min(self.deadline, time.monotonic() + 300)
         previous = None
         while time.monotonic() < deadline:
             current = extract_initial(self.screen(deadline))

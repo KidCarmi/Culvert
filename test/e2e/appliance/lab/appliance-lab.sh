@@ -102,6 +102,38 @@ api() {
   printf '%s' "${3-}" | curl -ksS -m 30 -X "$1" "$UI$2" -H "Origin: $UI" -H 'Content-Type: application/json' -b "$JAR" -c "$JAR" "${data[@]}" -w '\n%{http_code}\n'
 }
 body() { sed '$d'; }; code() { tail -n1; }
+# These predicates require positive evidence; absent rows and failed reads must
+# never become a passing negative assertion.
+ready_required_ok() {
+  [[ ${2:-} == 200 ]] || return 1
+  python3 - "$1" <<'PY'
+import json,sys
+try:
+    document=json.load(open(sys.argv[1]))
+    checks=document.get('checks') if isinstance(document,dict) else None
+    valid=isinstance(checks,dict) and all(
+        isinstance(checks.get(name),dict) and checks[name].get('status')=='ok'
+        for name in ('policy_loaded','policy_posture','ca'))
+except (OSError,ValueError):
+    valid=False
+sys.exit(0 if valid else 1)
+PY
+}
+kernel_observation_valid() {
+  [[ ${2:-} == 0 && -r $1 ]] || return 1
+  local kernel; kernel=$(head -1 "$1")
+  [[ $kernel =~ ^[0-9]+\.[0-9]+\.[0-9]+[A-Za-z0-9._+~-]*$ ]]
+}
+firstboot_no_steps() {
+  [[ ${2:-} == 0 && -r $1 ]] || return 1
+  if grep -q 'step .*: done' "$1"; then return 1; else [[ $? == 1 ]]; fi
+}
+restore_dryrun_ok() {
+  [[ ${2:-} == 0 && -r $1 ]] &&
+    grep -qxF 'Validation: PASS' "$1" &&
+    grep -qF 'This was a dry-run. No files were written.' "$1" &&
+    ! grep -qF 'Validation: FAIL' "$1"
+}
 # agent_status_verdict FILE — FILE is `api GET /api/maintenance-agent` output
 # (JSON body, then the HTTP code). That endpoint answers 200 EVEN WHEN THE
 # AGENT IS DOWN ({available:false, reason}) so the GUI can show why: HTTP 200
@@ -140,6 +172,37 @@ cmd_selftest() { local d rc=0 got; d="$(mktemp -d)"
   verdict_case fail '{"error":"forbidden"}' 403 "http 403"
   verdict_case fail 'not json' 200 "unparseable"
   verdict_case pass '{"available":true,"agent_version":"v1.0.260-candidate.gc5551a18da30","privilege_mode":"sudoers","compose_stack_up":true}' 200 "healthy agent"
+  oracle_case() {
+    local want=$1 label=$2 observed=fail; shift 2
+    if "$@"; then observed=pass; fi
+    if [[ $observed == "$want" ]]; then log "selftest ok: $label -> $observed"
+    else log "selftest FAILED: $label -> $observed (want $want)"; rc=1; fi
+  }
+  printf '%s\n' '{"checks":{"clamav":{"status":"ok"}}}' > "$d/ready"
+  oracle_case fail 'ready missing all required rows' ready_required_ok "$d/ready" 200
+  printf '%s\n' '{"checks":{"policy_loaded":{"status":"ok"},"policy_posture":{"status":"ok"}}}' > "$d/ready"
+  oracle_case fail 'ready missing CA row' ready_required_ok "$d/ready" 200
+  printf '%s\n' '{"checks":{"policy_loaded":{"status":"ok"},"policy_posture":{"status":"ok"},"ca":{"status":"ok"}}}' > "$d/ready"
+  oracle_case pass 'ready complete required rows' ready_required_ok "$d/ready" 200
+  oracle_case fail 'ready non200 with healthy body' ready_required_ok "$d/ready" 503
+  printf '%s\n' '{"checks":{"policy_loaded":{"status":"ok"},"policy_posture":{"status":"ok"},"ca":{"status":"fail"}}}' > "$d/ready"
+  oracle_case fail 'ready unhealthy required row' ready_required_ok "$d/ready" 200
+  printf '%s\n' '6.1.0-42-amd64' '#1 SMP Debian' > "$d/kernel"
+  oracle_case pass 'valid kernel observation' kernel_observation_valid "$d/kernel" 0
+  oracle_case fail 'kernel read nonzero with valid-looking output' kernel_observation_valid "$d/kernel" 255
+  printf '%s\n' 'ssh: connection reset' > "$d/kernel"
+  oracle_case fail 'kernel error text is not a new kernel' kernel_observation_valid "$d/kernel" 0
+  : > "$d/journal"
+  oracle_case pass 'successfully read empty current-boot journal' firstboot_no_steps "$d/journal" 0
+  oracle_case fail 'failed empty journal read' firstboot_no_steps "$d/journal" 255
+  printf '%s\n' 'step install: done' > "$d/journal"
+  for _ in $(seq 1 21); do echo 'later unrelated journal line' >> "$d/journal"; done
+  oracle_case fail 'rerun step before final20 journal lines' firstboot_no_steps "$d/journal" 0
+  printf '%s\n' 'Validation: PASS' 'This was a dry-run. No files were written. /data unchanged.' > "$d/dryrun"
+  oracle_case pass 'successful restore dry run' restore_dryrun_ok "$d/dryrun" 0
+  oracle_case fail 'dry-run banners despite failed command' restore_dryrun_ok "$d/dryrun" 255
+  echo 'Validation: FAIL' >> "$d/dryrun"
+  oracle_case fail 'contradictory dry-run validation' restore_dryrun_ok "$d/dryrun" 0
   # redact_tree: nothing to redact is success; a present secret is replaced.
   if ( SEC="$d/sec" EV="$d/ev"; mkdir -p "$SEC" "$EV"; printf 'S3cretValue42' > "$SEC/admin-pass"; echo clean > "$EV/a.txt"; redact_tree ); then
     log "selftest ok: redact_tree with nothing to redact -> success"; else log "selftest FAILED: redact_tree with nothing to redact failed"; rc=1; fi
@@ -329,7 +392,8 @@ cmd_qualify() {
   ensure_admin_pass
   : > "$JAR"
   # Step 3 — first-boot evidence, kernel BEFORE, image identity, token.
-  gssh 'uname -r; uname -v' > "$EV/03-kernel-before.txt" 2>&1 || true
+  local kernel_before_rc=0
+  gssh 'uname -r && uname -v' > "$EV/03-kernel-before.txt" 2>&1 || kernel_before_rc=$?
   gssh 'sudo culvert-status' > "$EV/03-status-firstboot.txt" 2>&1 || true
   gssh 'cat /var/lib/culvert-appliance/build-info.json' > "$EV/03-build-info.json" 2>&1 || true
   gssh 'ls /var/lib/culvert-appliance/state/' > "$EV/03-state-files.txt" 2>&1 || true
@@ -378,15 +442,15 @@ cmd_qualify() {
     a="$(through_proxy http://example.com/)"; o="$(through_proxy http://example.org/)"
     printf 'before-rule %s\nafter-rule %s\nother-host %s\n' "$b" "$a" "$o" > "$EV/05-traffic.txt"
     [[ "$b $a $o" == "403 200 403" ]] && check 5 traffic pass "example.com 403 → rule → 200; example.org 403 (real egress through the guest proxy)" || check 5 traffic fail "before=$b after=$a other=$o (want 403 200 403)"
-    curl -sS -m 20 "$P/ready" > "$EV/05-ready.json" || true
+    local ready_code
+    ready_code=$(curl -sS -m 20 -o "$EV/05-ready.json" -w '%{http_code}' "$P/ready") || ready_code=000
     python3 - "$EV/05-ready.json" <<'PY' > "$EV/05-ready-rows.txt" || true
 import json,sys
 d=json.load(open(sys.argv[1])); ch=d.get("checks",d)
 for k in sorted(ch):
     v=ch[k]; print(k, v.get("status") if isinstance(v,dict) else v)
 PY
-    local bad; bad="$(awk '$1~/^(policy_loaded|policy_posture|ca)$/ && $2!="ok"' "$EV/05-ready-rows.txt")"
-    [[ -s "$EV/05-ready-rows.txt" && -z "$bad" ]] && check 5 ready-rows pass "$(grep -E '^(policy_loaded|policy_posture|ca) ' "$EV/05-ready-rows.txt" | tr '\n' ';')" || check 5 ready-rows fail "${bad:-no /ready rows}"
+    ready_required_ok "$EV/05-ready.json" "$ready_code" && check 5 ready-rows pass 'HTTP200; policy_loaded, policy_posture and ca all present and ok' || check 5 ready-rows fail 'required /ready rows missing, invalid or unhealthy, or HTTP request failed'
     # Real ClamAV (the OVA's pinned sidecar with signatures downloaded at first boot).
     local cv; cv="$(awk '$1=="clamav"{print $2}' "$EV/05-ready-rows.txt")"
     [[ "$cv" == ok ]] && check 5 clamav-real pass "/ready clamav ok — the REAL clamav/clamav sidecar from the OVA, signatures fetched by the guest" || check 5 clamav-real fail "/ready clamav=${cv:-absent}"
@@ -465,13 +529,14 @@ PY
     api GET /api/backups > "$EV/06-backups.txt" || true
     [[ -n "$fn" ]] && grep -qF "$fn" "$EV/06-backups.txt" && check 6 backup-listed pass "$fn listed by /api/backups" || check 6 backup-listed fail "backup ${fn:-?} not listed"
     if [[ -n "$fn" ]]; then
-      gssh "cd /srv/culvert && sudo docker compose --profile cli run --rm -T cli --restore /backup/$fn --mode full" > "$EV/06-restore-dryrun.txt" 2>&1 || true
+      local dryrun_rc=0
+      gssh "cd /srv/culvert && sudo docker compose --profile cli run --rm -T cli --restore /backup/$fn --mode full" > "$EV/06-restore-dryrun.txt" 2>&1 || dryrun_rc=$?
       # The CLI prints "Validation: PASS" (or FAIL) and, for a dry run, "No files
       # were written". The old oracle looked for "validation passed", which this
       # CLI never prints, so a passing dry run read as FAIL (run 37185033699).
-      if grep -qx 'Validation: PASS' "$EV/06-restore-dryrun.txt" && grep -q 'This was a dry-run. No files were written.' "$EV/06-restore-dryrun.txt" && ! grep -q 'Validation: FAIL' "$EV/06-restore-dryrun.txt"; then
-        check 6 restore-dry-run pass "Validation: PASS; dry run, no files written ($(grep -m1 'Culvert version:' "$EV/06-restore-dryrun.txt" | xargs))"
-      else check 6 restore-dry-run fail "$(grep -E 'Validation:|FAIL|error' "$EV/06-restore-dryrun.txt" | head -3 | tr '\n' ' ')$(tail -2 "$EV/06-restore-dryrun.txt" | tr '\n' ' ')"; fi
+      if restore_dryrun_ok "$EV/06-restore-dryrun.txt" "$dryrun_rc"; then
+        check 6 restore-dry-run pass "exit0; Validation: PASS; dry run, no files written ($(grep -m1 'Culvert version:' "$EV/06-restore-dryrun.txt" | xargs))"
+      else check 6 restore-dry-run fail "exit $dryrun_rc; $(grep -E 'Validation:|FAIL|error' "$EV/06-restore-dryrun.txt" | head -3 | tr '\n' ' ')$(tail -2 "$EV/06-restore-dryrun.txt" | tr '\n' ' ')"; fi
     else check 6 restore-dry-run not-run "no backup file"; fi
     save_state BACKUP_FILE "$fn"
   fi
@@ -490,10 +555,13 @@ PY
       sleep 10; done
     if [[ $STOP == 0 ]]; then
       check 7 reboot pass "proxy /health and SSH back $(( $(date +%s) - t0 ))s after the reboot command"
-      gssh 'uname -r; uname -v' > "$EV/07-kernel-after.txt" 2>&1 || true
+      local kernel_after_rc=0
+      gssh 'uname -r && uname -v' > "$EV/07-kernel-after.txt" 2>&1 || kernel_after_rc=$?
       local kb ka; kb="$(head -1 "$EV/03-kernel-before.txt")"; ka="$(head -1 "$EV/07-kernel-after.txt")"
       local newer; newer="$(awk -v run="linux-image-$kb" '$1 ~ /^linux-image-[0-9]/ && $1 != run {print $1}' "$EV/07-check-after-update.txt" | tr '\n' ' ')"
-      if [[ "$kb" != "$ka" ]]; then check 7 kernel pass "kernel CHANGED $kb → $ka"
+      if ! kernel_observation_valid "$EV/03-kernel-before.txt" "$kernel_before_rc" || ! kernel_observation_valid "$EV/07-kernel-after.txt" "$kernel_after_rc"; then
+        check 7 kernel fail 'both before/after kernel reads must succeed and contain a valid release string'
+      elif [[ "$kb" != "$ka" ]]; then check 7 kernel pass "kernel CHANGED $kb → $ka"
       elif [[ -n "$newer" ]]; then check 7 kernel fail "installed ${newer}but $kb still runs after the reboot"
       else check 7 kernel info "kernel unchanged ($kb): no newer linux-image was installed"; fi
       local holds; holds="$(grep -cE '^(docker-ce|docker-ce-cli|containerd.io|docker-compose-plugin)$' "$EV/07-check-after-update.txt" || true)"
@@ -533,8 +601,9 @@ PY
     [[ -n "${BACKUP_FILE:-}" ]] && grep -qF "$BACKUP_FILE" "$EV/08-backups.txt" && check 8 backup-listed pass "$BACKUP_FILE still listed" || check 8 backup-listed fail "backup ${BACKUP_FILE:-?} not listed"
     c="$(api GET /api/maintenance-agent | tee "$EV/08-agent-status.txt" | code)"
     local av8; av8="$(agent_status_verdict "$EV/08-agent-status.txt")"; check 8 agent-reachable "${av8%%|*}" "${av8#*|} (after the maintenance reboot)"
-    gssh 'sudo journalctl -b -u culvert-firstboot --no-pager | tail -20' > "$EV/08-firstboot-journal.txt" 2>&1 || true
-    grep -q 'step .*: done' "$EV/08-firstboot-journal.txt" && check 8 firstboot-not-rerun fail "a first-boot step ran again" || check 8 firstboot-not-rerun pass "no first-boot step ran on the second boot"
+    local journal_rc=0
+    gssh 'sudo -n journalctl -b -u culvert-firstboot --no-pager' > "$EV/08-firstboot-journal.txt" 2>&1 || journal_rc=$?
+    firstboot_no_steps "$EV/08-firstboot-journal.txt" "$journal_rc" && check 8 firstboot-not-rerun pass 'full current-boot journal read succeeded; no first-boot step completed' || check 8 firstboot-not-rerun fail 'journal read failed or a first-boot step completed again'
     cmp -s <(sed -n '/\.done$/p' "$EV/03-state-files.txt") <(sed -n '/\.done$/p' "$EV/08-status-after-reboot.txt") && check 8 state-files pass "first-boot state files unchanged" || check 8 state-files info "state listing changed — see 08-status-after-reboot.txt"
   fi
   redact_tree
