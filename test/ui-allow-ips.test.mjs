@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import vm from 'node:vm';
 
-// Execute the shipped handler with a minimal DOM and a refused API promise.
+// Execute the shipped handler with a minimal DOM and a stubbed apiFetch.
 // This catches stale success labels and ambiguous transport failures without
 // needing a live appliance or treating an API error as a successful write.
 const html = readFileSync(new URL('../static/index.html', import.meta.url), 'utf8');
@@ -12,21 +12,27 @@ const end = html.indexOf('// ── Syslog / SIEM', start);
 assert.ok(start >= 0 && end > start, 'shipped allowlist handlers are present');
 const source = html.slice(start, end);
 
-for (const [code, expected] of [
-  ['ui_allow_ips_persistence_uncertain', /New policy is active; storage durability is unconfirmed/],
-  ['ui_allow_ips_not_saved', /Not saved; the previous policy remains active/],
-  ['invalid_ui_allow_ips', /Not saved; the previous policy remains active/],
-  ['ui_access_policy_unavailable', /Local console recovery is required/],
-  ['', /Save result is unconfirmed/],
+// A response as apiFetch returns it: status + a body read once as text.
+const reply = (status, body) => ({ ok: status >= 200 && status < 300, status, text: async () => body });
+const typed = (code) => JSON.stringify({ code, error: '<script>untrusted</script>' });
+
+for (const [label, respond, expected] of [
+  ['503 ui_allow_ips_persistence_uncertain', () => reply(503, typed('ui_allow_ips_persistence_uncertain')), /New policy is active; storage durability is unconfirmed/],
+  ['503 ui_allow_ips_not_saved', () => reply(503, typed('ui_allow_ips_not_saved')), /Not saved; the previous policy remains active/],
+  ['503 ui_access_policy_unavailable', () => reply(503, typed('ui_access_policy_unavailable')), /Local console recovery is required/],
+  ['plain-text 400', () => reply(400, 'entry 0 is not a valid IP address or CIDR\n'), /^Not saved; the previous policy remains active\. entry 0 is not a valid IP address or CIDR$/],
+  ['plain-text 403', () => reply(403, 'forbidden\n'), /^Not saved; the previous policy remains active\. forbidden$/],
+  ['untyped 503', () => reply(503, 'Service Unavailable'), /Save result is unconfirmed/],
+  ['transport uncertainty', () => { throw new Error('Network failed'); }, /Save result is unconfirmed/],
 ]) {
-  test(`allowlist save displays ${code || 'transport uncertainty'}`, async () => {
+  test(`allowlist save displays ${label}`, async () => {
     const status = { textContent: '✓ Saved', style: { color: 'var(--green)' } };
     const toasts = [];
     const context = vm.createContext({
       document: { getElementById: () => status },
       _uiAllowIPList: ['192.0.2.0/24'],
       confirmDanger: async () => true,
-      api: async () => { throw new Error(code ? JSON.stringify({ code, error: '<script>untrusted</script>' }) : 'Network failed'); },
+      apiFetch: async () => respond(),
       toast: (...args) => toasts.push(args),
     });
     vm.runInContext(source, context);
@@ -37,9 +43,39 @@ for (const [code, expected] of [
     assert.equal(toasts[0][0], status.textContent);
     assert.equal(toasts[0][1], 'error');
     assert.doesNotMatch(status.textContent, /<script>|✓ Saved/);
-    if (!code) assert.doesNotMatch(status.textContent, /previous policy remains/);
+    if (/unconfirmed/.test(expected.source)) assert.doesNotMatch(status.textContent, /previous policy remains/);
   });
 }
+
+test('a refusal detail is bounded and rendered as text only', async () => {
+  const status = { textContent: '', style: {} };
+  const context = vm.createContext({
+    document: { getElementById: () => status },
+    _uiAllowIPList: ['192.0.2.0/24'],
+    confirmDanger: async () => true,
+    apiFetch: async () => reply(400, 'x'.repeat(500)),
+    toast: () => {},
+  });
+  vm.runInContext(source, context);
+  await vm.runInContext('saveUIAllowIPs()', context);
+  assert.equal(status.textContent, 'Not saved; the previous policy remains active. ' + 'x'.repeat(200));
+});
+
+test('a 401 clears the status (apiFetch shows the login overlay)', async () => {
+  const status = { textContent: '', style: {} };
+  const toasts = [];
+  const context = vm.createContext({
+    document: { getElementById: () => status },
+    _uiAllowIPList: ['192.0.2.0/24'],
+    confirmDanger: async () => true,
+    apiFetch: async () => reply(401, ''),
+    toast: (...args) => toasts.push(args),
+  });
+  vm.runInContext(source, context);
+  await vm.runInContext('saveUIAllowIPs()', context);
+  assert.equal(status.textContent, '');
+  assert.equal(toasts.length, 0);
+});
 
 test('successful and cancelled allowlist saves preserve their existing contracts', async () => {
   const status = { textContent: '', style: {} };
@@ -49,7 +85,7 @@ test('successful and cancelled allowlist saves preserve their existing contracts
     document: { getElementById: () => status },
     _uiAllowIPList: [],
     confirmDanger: async () => consent,
-    api: async () => { saves++; return { ok: true, ips: [] }; },
+    apiFetch: async () => { saves++; return reply(200, '{"ok":true,"ips":[]}'); },
     toast: () => {},
   });
   vm.runInContext(source, context);
