@@ -27,6 +27,11 @@ Both target and observed baseline must be signed. Missing, ambiguous, unsigned,
 or unverifiable baselines refuse an upgrade before backup, pull or retag. A
 healthy running candidate does not establish release trust. A signed current
 baseline must be available before such an appliance can use this upgrade path.
+The release catalog supplies it: each catalog carries its supported
+predecessors byte-identical from their own verified signed catalogs (release
+lineage, `release_lineage.go`), so the proxy can send `prior_release_proof` for
+the release a node runs, including a skipped one. A proof covers exactly one
+digest; it never authorizes a different running image.
 
 When the signed target declares `min_upgrade_from`, both apply and standalone
 image rollback compare that floor with the independently verified version of

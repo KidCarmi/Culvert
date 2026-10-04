@@ -133,13 +133,16 @@ type DispatchConfig struct {
 	ProxyRepo   string
 	RepoRewrite *RepoRewrite // nil for connected deployments
 	// SelfVersion is this binary's own release version (main.version, linker-
-	// set to the tag on official builds; "dev" otherwise). The published
-	// catalog carries ONE release — the latest — so the RUNNING release is
-	// almost never a catalog entry at upgrade time and detectCurrent reports
-	// Unknown. The transition policy therefore falls back to the binary's own
-	// version when the catalog cannot name the running release: the proxy IS
-	// the thing being upgraded, and its version stamp is the authoritative
-	// predecessor identity. Non-semver ("dev") ⇒ unknown.
+	// set to the tag on official builds; "dev" otherwise). Catalogs published
+	// by a release with lineage (release_lineage.go) carry every supported
+	// predecessor, so the running release is normally a catalog entry and the
+	// agent receives its signed prior_release_proof. A catalog that cannot
+	// name the running release (one published before lineage, or a running
+	// digest no release produced) leaves detectCurrent Unknown; the transition
+	// policy then falls back to the binary's own version — the proxy IS the
+	// thing being upgraded — but no baseline proof can be sent, so the agent
+	// refuses unless its ledger already holds that baseline. Non-semver
+	// ("dev") ⇒ unknown.
 	SelfVersion string
 }
 

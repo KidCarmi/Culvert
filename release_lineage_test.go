@@ -361,3 +361,49 @@ func lineageSourcesIn(t *testing.T, root string) ([]lineageSource, []string) {
 	}
 	return srcs, names
 }
+
+// TestLineage_ReleasePipelineCarriesPredecessors pins the CI wiring: the
+// catalog-pipeline job fetches the predecessor bundles UNCONDITIONALLY (both the
+// main-push gate and the tag release) and hands them to the gate. Removing the
+// step, gating it behind an `if:`, or dropping the env from the gate would
+// silently publish single-entry catalogs again — every behavioural test stays
+// green while every real upgrade is refused by the agent.
+func TestLineage_ReleasePipelineCarriesPredecessors(t *testing.T) {
+	raw, err := os.ReadFile(".github/workflows/ci.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	y := string(raw)
+	start := strings.Index(y, "      - name: Fetch supported predecessor catalogs (release lineage)\n")
+	if start < 0 {
+		t.Fatal("ci.yml: the release-lineage fetch step is missing")
+	}
+	step := y[start:]
+	if end := strings.Index(step[1:], "\n      - "); end > 0 {
+		step = step[:end+1]
+	}
+	for _, want := range []string{"id: lineage", ".github/scripts/fetch-release-lineage.sh \"$VERSION\""} {
+		if !strings.Contains(step, want) {
+			t.Fatalf("lineage step lost %q:\n%s", want, step)
+		}
+	}
+	if strings.Contains(step, "\n        if:") {
+		t.Fatalf("the lineage step must run on every catalog-pipeline execution:\n%s", step)
+	}
+	gate := strings.Index(y, "      - name: Run release catalog gate (build spec + generate + verify + digest-match)\n")
+	if gate < start {
+		t.Fatal("the catalog gate must run after the lineage fetch")
+	}
+	gs := y[gate:]
+	if end := strings.Index(gs[1:], "\n      - "); end > 0 {
+		gs = gs[:end+1]
+	}
+	for _, want := range []string{
+		"CULVERT_RELEASE_LINEAGE_SRC: ${{ steps.lineage.outputs.src }}",
+		"CULVERT_RELEASE_LINEAGE_REQUIRE: ${{ steps.lineage.outputs.require }}",
+	} {
+		if !strings.Contains(gs, want) {
+			t.Fatalf("catalog gate step lost %q:\n%s", want, gs)
+		}
+	}
+}

@@ -30,8 +30,20 @@ Notes
 - Releases published before this PR carry no `min_upgrade_from`, so an
   appliance on one of them is not constrained by the catalog until it runs
   a release that declares the floor; the binary's own version stamp is then
-  the predecessor identity (single-entry catalogs never list the running
-  release).
+  the predecessor identity when the catalog does not list the running
+  release.
+- Catalogs carry their release lineage (`release_lineage.go`): every
+  published release at or above the floor and older than the target is
+  carried, byte-identical, from its own original signed catalog after the
+  release gate verifies that catalog with the baked Sigstore root and the
+  pinned release identity. The running release — including one a node
+  skipped past — is therefore a catalog entry, and the proxy sends its
+  signed `prior_release_proof` so an agent with an empty ledger can
+  authorize the upgrade. A supported release missing its catalog asset
+  fails the release pipeline rather than publishing a catalog that strands
+  its nodes. Catalogs published before lineage (v1.0.250–v1.0.259) list
+  only themselves; the first lineage catalog is what makes them upgradable
+  through Release Management.
 - Raising the floor requires evidence from this harness for every
   predecessor that stays supported; the constant and this file move together.
 
