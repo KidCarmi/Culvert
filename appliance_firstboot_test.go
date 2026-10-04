@@ -881,9 +881,9 @@ func TestBuildOVA_CandidateModeIsLabelledAndScoped(t *testing.T) {
 
 // ovfNetHarness wires the REAL culvert-net into the first-boot world, with an
 // OVF environment (vmtoolsd transport) asking for a static address via gw.
-func ovfNetHarness(t *testing.T, addr, gw string) (*fbHarness, string) {
+func ovfNetHarness(t *testing.T, addr, gw string) (h *fbHarness, netplanFile string) {
 	t.Helper()
-	h := newFBHarness(t)
+	h = newFBHarness(t)
 	h.setShadow("!") // no console password supplied at import
 	h.setKey(true)   // key-only import
 	src, err := os.ReadFile(filepath.Join(pkgSourceDir(), "appliance", "provision", "culvert-net"))
@@ -930,11 +930,13 @@ func TestFirstBoot_RefusedOVFNetworkKeepsLocalRecoveryUsable(t *testing.T) {
 	if h.calledCount("netplan") != 0 {
 		t.Fatal("netplan ran for a refused configuration")
 	}
-	display, _ := os.ReadFile(filepath.Join(h.root, "display"))
-	if !strings.Contains(string(display), "One-time console login") || !strings.Contains(string(display), "static network configuration was REFUSED") {
+	raw, _ := os.ReadFile(filepath.Join(h.root, "display"))
+	display := string(raw)
+	login, refused := strings.Index(display, "One-time console login"), strings.Index(display, "static network configuration was REFUSED")
+	if login < 0 || refused < 0 {
 		t.Fatalf("console must show the recovery login AND the refused network:\n%s", display)
 	}
-	if strings.Index(string(display), "One-time console login") > strings.Index(string(display), "REFUSED") {
+	if login > refused {
 		t.Fatal("the recovery credential must be shown before the network step runs")
 	}
 	if !h.exists("appliance/state/ovf.done") {
@@ -966,8 +968,16 @@ func TestFirstBoot_MainEstablishesIdentityBeforeNetwork(t *testing.T) {
 		t.Fatal(err)
 	}
 	s := string(b)
-	body := s[strings.Index(s, "\nmain() {"):]
-	body = body[:strings.Index(body, "\n}\n")]
+	start := strings.Index(s, "\nmain() {")
+	if start < 0 {
+		t.Fatal("main() not found")
+	}
+	body := s[start:]
+	end := strings.Index(body, "\n}\n")
+	if end < 0 {
+		t.Fatal("end of main() not found")
+	}
+	body = body[:end]
 	first := strings.Index(body, "\n  step_")
 	helper := strings.Index(body, "\n  provision_identity_then_network\n")
 	if helper < 0 || (first >= 0 && first < helper) || strings.Contains(body, "\n  step_ovf\n") {
