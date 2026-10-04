@@ -38,6 +38,15 @@ class ResumeTests(unittest.TestCase):
             (ev/'07-reboot.txt').write_text('')
             with self.assertRaisesRegex(ValueError,'already dispatched'):
                 resume.validate(scope,root)
+            (ev/'07-reboot.txt').unlink()
+            (ev/'checks-post-os-resume.jsonl').write_text(json.dumps({'check':'post-os-resume','result':'info'}))
+            (ev/'post-os-resume-boot-id.txt').write_text('evidence')
+            confirm=root/'secrets/p1-regressions-confirmation'; confirm.mkdir()
+            (confirm/'network-before.attempt.json').write_text(json.dumps({'status':'blocked','campaign':'confirmation'}))
+            self.assertEqual(resume.validate(scope,root,True)['uuid'],'owned')
+            (ev/'checks-post-os-resume.jsonl').write_text(json.dumps({'check':'reboot','result':'pass'}))
+            with self.assertRaisesRegex(ValueError,'progressed beyond precheck'):
+                resume.validate(scope,root,True)
 
 
 if __name__ == '__main__':

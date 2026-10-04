@@ -10,9 +10,11 @@ import importlib.util
 import json
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import sys
 import time
+import traceback
 import uuid
 
 
@@ -47,13 +49,30 @@ def read_record(path):
     return json.loads(path.read_text(encoding='utf-8'))
 
 
+def captured(value):
+    raw = value or b''
+    return {'bytes': len(raw), 'base64': base64.b64encode(raw[:1024 * 1024]).decode(),
+            'truncated': len(raw) > 1024 * 1024}
+
+
 def transport(args, script, nowait=False):
     timeout = 360 if args.campaign == 'confirmation' else 240
     command = [sys.executable, str(HERE / 'console-priv.py'), '--scope', str(args.scope),
                '--bind', args.bind, '--timeout', str(timeout)]
     if nowait:
         command.append('--nowait')
-    result = subprocess.run(command, input=script, capture_output=True, timeout=timeout + 120)
+    diagnostic = {'timeout_seconds': timeout + 120, 'exit': None}
+    try:
+        result = subprocess.run(command, input=script, capture_output=True, timeout=timeout + 120)
+        diagnostic.update(exit=result.returncode, stdout=captured(result.stdout), stderr=captured(result.stderr))
+    except Exception as exc:
+        diagnostic.update(exception=type(exc).__name__, error=str(exc), traceback=traceback.format_exc())
+        if isinstance(exc, subprocess.TimeoutExpired):
+            diagnostic.update(stdout=captured(exc.stdout), stderr=captured(exc.stderr))
+        raise
+    finally:
+        if getattr(args, 'evidence_path', None) is not None:
+            save_new(args.evidence_path / ('console-transport-' + str(time.time_ns()) + '.json'), diagnostic)
     require(result.returncode == 0, 'authenticated console probe refused or failed; no retry')
     require(len(result.stdout) <= 1024 * 1024, 'probe evidence exceeded bound')
     return result.stdout
@@ -145,8 +164,23 @@ def operator_command(lab, pin, key):
             '-o', 'ConnectTimeout=10', 'culvert-operator@' + lab.guest_ip(timeout=30), 'status-json']
 
 
-def prove_operator(lab, pin, key, refused=False):
-    result = subprocess.run(operator_command(lab, pin, key), capture_output=True, timeout=25)
+def prove_operator(lab, pin, key, refused=False, evidence=None):
+    diagnostic = {'ssh_executable': shutil.which('ssh'), 'stdin': 'DEVNULL', 'timeout_seconds': 60,
+                  'expected_refusal': refused, 'exit': None, 'timed_out': False}
+    start = time.monotonic()
+    try:
+        result = subprocess.run(operator_command(lab, pin, key), capture_output=True,
+                                stdin=subprocess.DEVNULL, timeout=60)
+        diagnostic.update(exit=result.returncode, stdout=captured(result.stdout), stderr=captured(result.stderr))
+    except Exception as exc:
+        diagnostic.update(exception=type(exc).__name__, error=str(exc), traceback=traceback.format_exc())
+        if isinstance(exc, subprocess.TimeoutExpired):
+            diagnostic.update(timed_out=True, stdout=captured(exc.stdout), stderr=captured(exc.stderr))
+        raise
+    finally:
+        diagnostic['elapsed_seconds'] = round(time.monotonic() - start, 3)
+        if evidence is not None:
+            save_new(evidence / ('operator-probe-' + str(time.time_ns()) + '.json'), diagnostic)
     if refused:
         require(result.returncode == 255 and b'Permission denied (publickey)' in result.stderr
                 and b'Host key verification failed' not in result.stderr,
@@ -176,23 +210,24 @@ def run(args, lab, boot, private):
     action = args.action
     if action == 'network-before':
         # Establish controller-visible access BEFORE the deliberate network mutation.
-        prove_operator(lab, lab.sec / 'known_hosts', lab.sec / 'id_ed25519')
+        prove_operator(lab, lab.sec / 'known_hosts', lab.sec / 'id_ed25519', evidence=private)
         external_health(lab)
         before_ip = lab.guest_ip(timeout=30)
-        observation = probe(args, action)
+        payload = {'boot_id': args.continuation['boot_id']} if args.continuation else None
+        observation = probe(args, action, payload)
         save_new(private / 'network-before.json', observation)
         require(observation.get('campaign') == args.campaign
                 and (args.campaign == 'initial' or valid_confirmation(observation)), 'confirmation convergence proof incomplete')
         require(before_ip == lab.guest_ip(timeout=30), 'owned IP changed')
-        prove_operator(lab, lab.sec / 'known_hosts', lab.sec / 'id_ed25519')
+        prove_operator(lab, lab.sec / 'known_hosts', lab.sec / 'id_ed25519', evidence=private)
         external_health(lab)
     elif action == 'network-after':
-        require(read_record(private / 'network-before.attempt.json')['status'] == 'pass', 'network fault exercise incomplete')
+        campaigns.effective_stage(lab.sec, args.campaign, 'network-before', lab.state['uuid'])
         observation = probe(args, action)
         save_new(private / 'network-after.json', observation)
         require(validate_network(read_record(private / 'network-before.json'), observation), 'network persistence not proven')
         require(lab.guest_ip(timeout=30) == observation['before']['network']['address'].split('/')[0], 'owned IP changed')
-        prove_operator(lab, lab.sec / 'known_hosts', lab.sec / 'id_ed25519')
+        prove_operator(lab, lab.sec / 'known_hosts', lab.sec / 'id_ed25519', evidence=private)
         external_health(lab)
     elif action == 'identity-before':
         require(read_record(private / 'network-after.attempt.json')['status'] == 'pass', 'network regression incomplete')
@@ -253,7 +288,7 @@ def run(args, lab, boot, private):
         pin = private / 'fresh-known-hosts'
         with pin.open('x', encoding='ascii') as out:
             out.write(lab.state['name'] + ' ' + ' '.join(public[:2]) + '\n')
-        prove_operator(lab, pin, lab.sec / 'id_ed25519', refused=True)
+        prove_operator(lab, pin, lab.sec / 'id_ed25519', refused=True, evidence=private)
         external_health(lab)
     else:
         raise ValueError('unknown regression stage')
@@ -265,12 +300,15 @@ def main():
     parser.add_argument('--bind', required=True)
     parser.add_argument('--escrow-evidence', type=Path)
     parser.add_argument('--campaign', choices=tuple(campaigns.NAMES), default='initial')
+    parser.add_argument('--continue-undispatched', action='store_true')
+    parser.add_argument('--continuation-proof', type=Path)
     parser.add_argument('action', choices=['network-before', 'network-after', 'identity-before', 'identity-reset',
                                          'identity-power-on', 'identity-bootstrap', 'identity-after'])
     args = parser.parse_args()
+    args.continuation = None
     boot = load_module('p1_bootstrap', HERE / 'bootstrap-checks.py')
     lab = boot.module.Lab(args.scope)
-    marker, created, stage_lock = None, False, None
+    marker, created, stage_lock, private, lock_owned = None, False, None, None, False
     try:
         boot.module.validate_scope(lab.c)
         require(lab.c['source_sha'] == SOURCE and lab.c['ova_sha256'] == OVA
@@ -281,21 +319,38 @@ def main():
         private = campaigns.directory(lab.sec, args.campaign)
         private.mkdir(exist_ok=True)
         require(not private.is_symlink(), 'private regression directory link refused')
+        args.evidence_path = private
         stage_lock = private / 'stage.lock'
         stage_lock.mkdir()
-        marker = private / (args.action + '.attempt.json')
+        lock_owned = True
+        if args.continue_undispatched:
+            require(args.action == 'network-before' and args.continuation_proof is not None,
+                    'only network-before supports verified undispatched continuation')
+            args.continuation = campaigns.continuation_binding(lab.sec, args.campaign, lab.state['uuid'],
+                                                                args.continuation_proof)
+        else:
+            require(args.continuation_proof is None, 'proof requires explicit continuation flag')
+        marker = private / (args.action + ('.continuation-attempt.json' if args.continue_undispatched else '.attempt.json'))
         require(not marker.exists(), 'prior stage attempt exists; no retry')
         save_new(marker, {'status': 'started', 'uuid': lab.state['uuid'], 'campaign': args.campaign,
-                          'initial_failure': initial})
+                          'initial_failure': initial, 'continuation': args.continuation})
         created = True
         run(args, lab, boot, private)
-        boot.module.atomic_json(marker, {'status': 'pass', 'uuid': lab.state['uuid'], 'campaign': args.campaign,
-                                        'initial_failure': initial})
+        current = read_record(marker)
+        current['status'] = 'pass'
+        boot.module.atomic_json(marker, current)
         label = 'p1-' + ('confirmation-' if args.campaign == 'confirmation' else '') + args.action
+        if args.continue_undispatched:
+            label += '-undispatched-continuation'
         lab.record(label, 'pass', 'one-shot real guest regression evidence retained privately')
         print('PASS: ' + args.campaign + ' ' + args.action)
         return 0
-    except Exception:
+    except Exception as exc:
+        if private is not None and private.is_dir() and not private.is_symlink():
+            save_new(private / ('controller-exception-' + str(time.time_ns()) + '.json'),
+                     {'type': type(exc).__name__, 'error': str(exc), 'traceback': traceback.format_exc(),
+                      'action': args.action, 'campaign': args.campaign,
+                      'undispatched_continuation': args.continue_undispatched})
         if created:
             # Preserve an existing result when duplicate invocation was refused.
             current = read_record(marker)
@@ -305,10 +360,8 @@ def main():
         print('BLOCKED: ' + args.action + '; private evidence retained; no retry.', file=sys.stderr)
         return 90
     finally:
-        if stage_lock is not None and stage_lock.is_dir():
-            # Only remove the lock created by this invocation.
-            if created or marker is not None:
-                stage_lock.rmdir()
+        if lock_owned:
+            stage_lock.rmdir()
 
 
 if __name__ == '__main__':

@@ -3,12 +3,18 @@
 : "${ESXI_BIND:?controller LAN address required}"
 
 esxi_p1_stage() {
+  local extra=()
+  if [[ $1 == network-before && ${ESXI_CONTINUE_UNDISPATCHED:-0} == 1 ]]; then
+    extra=(--continue-undispatched --continuation-proof "$SEC/confirmation-dispatch-observation-v2.json")
+  fi
   python3 "$ADAPTER_HERE/p1-regressions.py" --scope "$ESXI_SCOPE" --bind "$ESXI_BIND" \
-    --campaign "${ESXI_P1_CAMPAIGN:-initial}" "$1"
+    --campaign "${ESXI_P1_CAMPAIGN:-initial}" "${extra[@]}" "$1"
 }
 
 lab_before_reboot() {
-  esxi_p1_stage network-before > "$EV/p1-${ESXI_P1_CAMPAIGN:-initial}-network-before-controller.txt" 2>&1
+  local suffix=''
+  [[ ${ESXI_CONTINUE_UNDISPATCHED:-0} != 1 ]] || suffix='-continuation'
+  esxi_p1_stage network-before > "$EV/p1-${ESXI_P1_CAMPAIGN:-initial}-network-before-controller$suffix.txt" 2>&1
   python3 "$ADAPTER_HERE/timing-diagnostic.py" observe --scope "$ESXI_SCOPE" \
     --label maintenance --host "$LAB_HOST" --seconds 1800 --interval 5 \
     > "$EV/timing-observer-controller.txt" 2>&1 &

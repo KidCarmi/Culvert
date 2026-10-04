@@ -164,9 +164,12 @@ def reachable():
     return True
 
 
-def network_before(campaign='initial'):
+def network_before(campaign='initial', continuation=None):
     image_guard()
     before = {'identity': identity(), 'network': network(), 'netplan': file_state(NETPLAN)}
+    if continuation is not None:
+        require(campaign == 'confirmation' and set(continuation) == {'boot_id'}
+                and before['identity']['boot_id'] == continuation['boot_id'], 'undispatched observation boot changed')
     initial = confirmation_prevalidation(before) if campaign == 'confirmation' else None
     STATE.mkdir(mode=0o700, exist_ok=campaign == 'initial')
     require(not STATE.is_symlink(), 'guest campaign directory link refused')
@@ -312,7 +315,7 @@ def main(action, private_input=None, campaign='initial'):
     require(campaign in ('initial', 'confirmation'), 'unknown guest P1 campaign')
     STATE = CONFIRMATION_STATE if campaign == 'confirmation' else ORIGINAL_STATE
     if action == 'network-before':
-        return network_before(campaign)
+        return network_before(campaign, private_input)
     if action == 'network-after':
         return network_after(campaign)
     if action == 'identity-before':

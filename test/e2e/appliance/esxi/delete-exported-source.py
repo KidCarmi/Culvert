@@ -162,10 +162,10 @@ def main():
         rows = []
         initial = campaigns.initial_failure(lab.sec, lab.state['uuid'], args.campaign)
         for stage in P1_STAGES:
-            record = fresh.read_json(campaigns.directory(lab.sec, args.campaign) / (stage + '.attempt.json'))
+            record = campaigns.effective_stage(lab.sec, args.campaign, stage, lab.state['uuid'])
             require(record.get('status') == 'pass' and record.get('uuid') == lab.state['uuid'], 'P1 qualification incomplete')
             require(record.get('campaign', 'initial') == args.campaign, 'P1 campaign mismatch')
-            rows.append({'check': 'p1-' + stage, 'result': 'pass'})
+            rows.append({'check': 'p1-' + stage, 'result': 'pass', 'continuation': record.get('continuation')})
         verdicts = {'schema': 1, 'source': SOURCE, 'ova_sha256': OVA, 'campaign': args.campaign,
                     'results': rows, 'initial_failure': initial}
         # These survive lab.down's private run cleanup; raw credentials do not.

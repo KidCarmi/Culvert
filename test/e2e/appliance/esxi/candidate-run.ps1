@@ -3,7 +3,8 @@ param(
     [Parameter(Mandatory=$true)][string]$Bind,
     [Parameter(Mandatory=$true)][string]$Python,
     [Parameter(Mandatory=$true)][string]$ConsoleFont,
-    [switch]$ResumePostOS
+    [switch]$ResumePostOS,
+    [switch]$ContinueUndispatched
 )
 $ErrorActionPreference = 'Stop'
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '../../../..')).Path
@@ -29,6 +30,10 @@ $env:ESXI_OPERATOR_ENROLLED = '1'
 $env:ESXI_HOST_KEY_PINNED = '1'
 $env:ESXI_EXTENDED_CAMPAIGN = '1'
 $env:ESXI_BIND = $Bind
+if ($ContinueUndispatched) {
+    if (-not $ResumePostOS) { throw 'Continuation requires the explicit post-OS resume' }
+    $env:ESXI_CONTINUE_UNDISPATCHED = '1'
+}
 $env:LAB_DIR = $configuration.run_dir.Replace('\','/')
 $env:LAB_HOST = $guestAddress
 $env:LAB_SSH_PORT = '22'

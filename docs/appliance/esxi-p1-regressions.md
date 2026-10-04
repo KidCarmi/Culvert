@@ -83,6 +83,34 @@ There is no automatic retry of either campaign. Tests in
 `test_p1_confirmation.py` cover transient gaps, sustained failure, stability
 window reset, missing evidence and preservation of the original records.
 
+### Continuing a separately proven undispatched controller attempt
+
+If confirmation stops during controller prerequisites, its BLOCKED attempt
+remains unchanged. An explicit one-shot continuation is permitted only with
+private authenticated console evidence showing that confirmation guest scratch
+does not exist, the exact source revision and the current boot ID:
+
+```text
+python test/e2e/appliance/esxi/p1-regressions.py --scope SCOPE --bind CONTROLLER_IP --campaign confirmation --continue-undispatched --continuation-proof PRIVATE_OBSERVATION_JSON network-before
+```
+
+The proof must be a direct private-run file with exit zero and empty stderr;
+its output must exactly match a retained authenticated `transport-*/result`.
+The continuation records the proof and original blocked-attempt hashes, then
+fresh guest prevalidation requires the same boot, unchanged original baseline
+and trace, and absent confirmation scratch before mutation. A separate
+`network-before.continuation-attempt.json` records the outcome. It never changes
+the original marker or invents a cause for its failure. Subsequent network,
+readiness and deletion checks accept only an explicit continuation PASS whose
+proof and original marker still match. The continuation itself cannot retry.
+
+Operator status probes use closed stdin and a 60-second timeout. Their resolved
+SSH executable, timing, exit status, partial stdout/stderr and exceptions are
+retained privately, as are console transport and controller exceptions. This
+is diagnostic hardening; inherited stdin has not been established as the cause
+of the earlier timeout. Tests in `test_p1_undispatched.py` cover preserved failure,
+missing authenticated proof, proof drift, explicit PASS and timeout diagnostics.
+
 ## Reset identity last, after external backup and escrow verification
 
 First run `identity-before`, preserving the old active console password,

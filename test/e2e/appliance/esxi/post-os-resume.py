@@ -27,7 +27,7 @@ def tail(source):
             '  if gate 7 reboot; then\n' + start + body)
 
 
-def validate(scope, run):
+def validate(scope, run, continuation=False):
     require(scope['source_sha'] == SOURCE and scope['ova_sha256'] == OVA, 'wrong candidate')
     ev = run / 'evidence'
     rows = [json.loads(x) for x in (ev / 'checks.jsonl').read_text().splitlines()]
@@ -38,8 +38,17 @@ def validate(scope, run):
     require(not any(r['result'] == 'fail' for r in rows), 'earlier lifecycle failure requires review')
     require(rows[-1]['check'] == 'os-update' and rows[-1]['result'] == 'pass', 'unexpected stop boundary')
     require(not any(r['step'] == '8' or r['check'] == 'reboot' for r in rows), 'reboot already evaluated')
-    for name in ('07-reboot.txt', 'timing-maintenance.jsonl', 'checks-post-os-resume.jsonl'):
+    suffix = '-continuation' if continuation else ''
+    for name in ('07-reboot.txt', 'timing-maintenance.jsonl', 'checks-post-os-resume' + suffix + '.jsonl'):
         require(not (ev / name).exists(), 'resume/reboot already dispatched')
+    if continuation:
+        previous = [json.loads(x) for x in (ev/'checks-post-os-resume.jsonl').read_text().splitlines()]
+        require(len(previous) == 1 and previous[0]['check'] == 'post-os-resume'
+                and previous[0]['result'] == 'info', 'earlier resume progressed beyond precheck')
+        require((ev/'post-os-resume-boot-id.txt').read_bytes() == (ev/'esxi-boot-id-before.txt').read_bytes(),
+                'earlier resume identity changed')
+        attempt = json.loads((run/'secrets/p1-regressions-confirmation/network-before.attempt.json').read_text())
+        require(attempt['status'] == 'blocked' and attempt['campaign'] == 'confirmation', 'wrong precheck boundary')
     for name in ('07-check-after-update.txt', 'esxi-boot-id-before.txt', '09-post-backup-mutation-name.txt'):
         require((ev / name).stat().st_size > 0, 'missing completed phase evidence')
     initial = json.loads((run / 'secrets/p1-regressions/network-before.attempt.json').read_text())
@@ -56,14 +65,16 @@ def main():
     p.add_argument('--scope', type=Path, required=True)
     p.add_argument('--shared', type=Path, required=True)
     p.add_argument('--output', type=Path, required=True)
+    p.add_argument('--continue-undispatched', action='store_true')
     a = p.parse_args()
     scope = json.loads(a.scope.read_text())
     run = Path(scope['run_dir'])
-    record = validate(scope, run)
+    record = validate(scope, run, a.continue_undispatched)
+    suffix = '-continuation' if a.continue_undispatched else ''
     body = tail(a.shared.read_bytes())
     with a.output.open('x', encoding='utf-8', newline='\n') as out:
         out.write(body)
-    with (run / 'evidence/post-os-resume-validation.json').open('x', encoding='utf-8') as out:
+    with (run / ('evidence/post-os-resume-validation' + suffix + '.json')).open('x', encoding='utf-8') as out:
         json.dump(record, out, indent=2)
 
 

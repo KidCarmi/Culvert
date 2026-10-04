@@ -59,6 +59,9 @@ def readiness(escrow, scope, owned, private, campaign='initial'):
             and observation.get('traffic') == {'example.com': 200, 'example.org': 403}
             and observation.get('rules') and observation.get('categories'), 'source recovery baseline incomplete')
     initial = deletion.campaigns.initial_failure(private, owned['uuid'], campaign)
+    network = None
+    if campaign == 'confirmation':
+        network = deletion.campaigns.effective_stage(private, campaign, 'network-before', owned['uuid'])
     p1 = deletion.campaigns.directory(private, campaign)
     before = fresh.read_json(p1 / 'identity-before.attempt.json')
     require(before.get('status') == 'pass' and before.get('uuid') == owned['uuid'], 'identity baseline incomplete')
@@ -70,6 +73,7 @@ def readiness(escrow, scope, owned, private, campaign='initial'):
             'export_receipt_sha256': fresh.file_hash(escrow / 'export-receipt.json'),
             'archive_sha256': receipt['sha256'][archive.name],
             'campaign': campaign, 'initial_failure': initial,
+            'network_continuation': network.get('continuation') if network is not None else None,
             'historical_encrypted_log_recovery': 'blocked: supported archive excludes logs'}
 
 

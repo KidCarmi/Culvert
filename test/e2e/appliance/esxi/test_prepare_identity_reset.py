@@ -105,6 +105,8 @@ class ResetReadinessTests(unittest.TestCase):
         initial.write_text(json.dumps({'status': 'blocked', 'uuid': self.owned['uuid']}))
         confirmation = self.private / 'p1-regressions-confirmation'
         confirmation.mkdir()
+        (confirmation / 'network-before.attempt.json').write_text(json.dumps(
+            {'status': 'pass', 'uuid': self.owned['uuid'], 'campaign': 'confirmation'}))
         with self.assertRaises(ValueError):
             reset.readiness(self.escrow, self.scope, self.owned, self.private, 'confirmation')
         (confirmation / 'identity-before.attempt.json').write_text(json.dumps(
