@@ -238,8 +238,15 @@ passwd -l culvert-operator >/dev/null
 install -d -o root -g root -m 0755 /etc/ssh/culvert-authorized-keys
 # Validate the shipped drop-in against the distribution's full effective
 # configuration; syntax validation alone cannot detect first-value precedence.
+# sshd -T refuses to run without a host key, and the image deliberately has
+# none (cloud-init generates them at first boot; build-ova.sh refuses an image
+# that ships any). Validate with a throwaway key outside /etc/ssh, removed at once.
 mkdir -p /run/sshd
-effective_ssh="$(/usr/sbin/sshd -T -C user=culvert-operator,host=localhost,addr=127.0.0.1)"
+validate_key_dir="$(mktemp -d /run/culvert-sshd-validate.XXXXXX)"
+ssh-keygen -q -t ed25519 -N '' -C build-validation -f "$validate_key_dir/key"
+effective_ssh="$(/usr/sbin/sshd -T -h "$validate_key_dir/key" -C user=culvert-operator,host=localhost,addr=127.0.0.1)" \
+  || { rm -rf "$validate_key_dir"; echo 'sshd rejected the effective configuration' >&2; exit 1; }
+rm -rf "$validate_key_dir"
 for ssh_rule in 'allowusers culvert-operator' 'passwordauthentication no' \
   'kbdinteractiveauthentication no' 'permitrootlogin no' 'disableforwarding yes' \
   'permituserrc no' 'permituserenvironment no' \
