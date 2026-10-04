@@ -191,6 +191,14 @@ jobs:
           ref: ${{ env.APPLIANCE_SOURCE_SHA }}
           path: appliance-src
           persist-credentials: false
+      # build-ova.sh compiles the appliance console (#1540) and refuses any
+      # compiler other than the source commit's go.mod toolchain line.
+      - name: Go toolchain pinned by the appliance source
+        if: matrix.retained_run == ''
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: appliance-src/go.mod
+          cache: false
       - name: Build the candidate OVA (image + provisioning from one commit)
         if: matrix.retained_run == ''
         run: |
@@ -211,7 +219,9 @@ jobs:
             src="$GITHUB_WORKSPACE"; drift=(--candidate-allow-provisioning-drift)
           fi
           sudo git config --global --add safe.directory "$src"
-          sudo -E env LIBGUESTFS_BACKEND=direct BASE_IMAGE_KEYRING=/usr/share/keyrings/ubuntu-cloudimage-keyring.gpg \
+          # sudo resets PATH (secure_path): pass setup-go's compiler through;
+          # GOTOOLCHAIN=local so a mismatch fails instead of downloading another.
+          sudo -E env PATH="$PATH" GOTOOLCHAIN=local LIBGUESTFS_BACKEND=direct BASE_IMAGE_KEYRING=/usr/share/keyrings/ubuntu-cloudimage-keyring.gpg \
             "$src/appliance/build/build-ova.sh" \
               --candidate-image-tar "$LAB_ROOT/in/culvert-image.tar" \
               --candidate-source "$APPLIANCE_SOURCE_SHA" --candidate-run-id "$SOURCE_IMAGE_RUN_ID" "${drift[@]}" \
