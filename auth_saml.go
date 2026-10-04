@@ -36,11 +36,16 @@ import (
 // ---------------------------------------------------------------------------
 
 // SAMLProvider wraps a crewjam/saml Service Provider for one IdP profile.
+//
+// samlsp.New is used ONLY to assemble the ServiceProvider; Culvert runs its
+// own AuthnRequest-state + ACS flow, so the samlsp.Middleware itself (its
+// ServeHTTP/ServeACS/RequireAccount/HandleStartAuthFlow entry points and its
+// cookie session provider / request tracker) is never retained, mounted or
+// called. TestSAMLSPMiddlewareIsNeverServed pins that.
 type SAMLProvider struct {
-	profile    *IdPProfile
-	cfg        *SAMLProfileConfig
-	sp         *saml.ServiceProvider
-	middleware *samlsp.Middleware
+	profile *IdPProfile
+	cfg     *SAMLProfileConfig
+	sp      *saml.ServiceProvider
 }
 
 // NewSAMLProvider builds a SAMLProvider from an IdPProfile.
@@ -82,10 +87,9 @@ func NewSAMLProvider(p *IdPProfile) (*SAMLProvider, error) {
 	middleware.ServiceProvider.AuthnNameIDFormat = saml.NameIDFormat(requestedSAMLNameIDFormat(cfg))
 
 	return &SAMLProvider{
-		profile:    p,
-		cfg:        cfg,
-		sp:         &middleware.ServiceProvider,
-		middleware: middleware,
+		profile: p,
+		cfg:     cfg,
+		sp:      &middleware.ServiceProvider,
 	}, nil
 }
 
