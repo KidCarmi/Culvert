@@ -7,6 +7,68 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ## [Unreleased]
 
+### Performance
+
+- The destination host is now canonicalized **once per policy scan** instead of
+  once per category-scoped rule. `urlcat.Store.MatchesHost` /
+  `MatchesHostAdmin` and `effectiveCategoryView.MatchesCategory` each opened
+  with `host = hostutil.NormalizeHost(host)`, and
+  `hostCatScratch.matchesCategory` calls one of them per category-scoped access
+  rule per proxied request — so a scan re-derived the same canonical host once
+  per rule, and **twice** per rule on a signed-feed-armed deployment, where the
+  `catStore` and view matchers normalized independently.
+
+  Decomposing the probe (shipped taxonomy, 3-label uncategorized destination —
+  the clean-traffic case that cannot short-circuit; medians of n=5, 4-core Xeon
+  @2.10GHz, go1.26.8) put `NormalizeHost` at **45.97 ns of a 105.8 ns total,
+  43%** and the largest single term. The per-rule `RLock` previously recorded
+  as this path's open item is ~10.2 ns of it — the fourth-largest term. The
+  scan already held the value: `matchDestNorm` receives a once-per-request
+  `normHost` as a parameter and handed the matchers the *raw* host beside it.
+
+  `hostCatScratch.normHost()` memoizes it lazily (a scan with no
+  category-scoped rule still normalizes nothing) and the three matchers gained
+  `*Norm` entry points taking the canonical host; the old names survive as
+  normalizing wrappers, so every caller outside the scan is unchanged in cost
+  and behaviour. The hoist relies on **no idempotence property** —
+  `NormalizeHost` is not idempotent, since an empty ACE label decodes to
+  nothing (`NormalizeHost("a.xn--") == "a."`, `NormalizeHost("a.") == "a"`) —
+  because every consumer is handed `NormalizeHost(sc.host)`, the same function
+  on the same input the pre-hoist body used. Only *where* it is computed moves,
+  so no matching decision can change.
+
+  Measured with both arms timed in one run: the per-rule probe **112.6 → 71.0
+  ns (−37%)**; the `DestCategory` policy scan **1474 → 1055 ns at 10 rules
+  (−28.4%)**, **4675 → 2869 ns at 50 (−38.6%)**, **17292 → 9625 ns at 200
+  (−44.3%)**; marginal per-rule cost **83.3 → 45.1 ns (−46%)**; and **0
+  allocations preserved on every path**. Two limits are recorded rather than
+  rounded away: at exactly one category rule the hoisted arm is ~5% *slower*
+  (120.0 vs 114.5 ns — normalization happens once either way and the memo adds
+  bookkeeping), so it pays from two rules upward; and the gain shrinks with
+  core count (50-rule interleaved parallel scan: −39.5% at 1 core, −14.8% at 2,
+  −8.7% at 4) because removing CPU work from a probe whose critical section is
+  unchanged moves the bottleneck onto `catStore.mu`. Both arms take exactly the
+  same number of read locks, so they converge under saturation and the hoist is
+  never the slower of the two.
+
+  Equivalence is the deliverable, not the speed: a divergence here is a
+  silently mis-enforced Allow/Deny rule. Both differentials run against
+  **verbatim frozen copies of the pre-hoist bodies** (comparing the new wrapper
+  against the new `Norm` function would be vacuous, since the wrapper is now
+  defined in terms of it), with randomized sweeps, their own not-vacuous
+  checks, and two fuzz targets (299k and 101k executions, no divergence). The
+  regression gate is **structural** because re-introducing a per-rule
+  `NormalizeHost` changes no decision at all — every differential and control
+  keeps passing while the cost silently returns — so
+  `TestWall_PerRuleCategoryMatchersTakeTheHoistedHost` AST-walks
+  `matchesCategory` and requires every membership matcher to be a `*Norm` entry
+  point handed `sc.normHost()`. Seven reintroduced defects were each verified
+  failing. A pre-existing asymmetry is confirmed unchanged and now asserted so
+  it is not mistaken for a regression: the forward index keys a pattern without
+  IDNA-normalizing it while a query is normalized, so a unicode pattern is
+  stored verbatim and never matches the A-label form its own queries
+  canonicalize to.
+
 ### Security
 
 - Node-local key material was written with `os.WriteFile` on a predictable
