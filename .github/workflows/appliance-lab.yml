@@ -49,22 +49,21 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # HANDOFF candidate: #1528 head 22247248 (F-OSU-REBOOT-1 incl. the
-        # accepted-reboot lock hold and the journal fence on resume; L11
-        # candidate SemVer so the bundled agent installs; F-FEED-1 durable
-        # UT1 import certificate + startup resync of an uncertified store).
-        # Image = that head's own Deep PR Gate tar (run 37192868202, all four
-        # gates APPROVED; stamp v1.0.260-candidate.g22247248cc8d); provisioning
-        # + build script = a clean checkout of the SAME commit. No provisioning
-        # drift. Built fresh (no retained_run): the bytes this run qualifies
-        # are the bytes it uploads.
+        # HANDOFF candidate — the integrated V1 revision: #1528 36b5407e =
+        # 22247248 (F-FEED-1, F-OSU-REBOOT-1, L11) + #1540 660df29c (console,
+        # durable agent/helper shutdown fence replacing the interim lock hold)
+        # + integration fixes. Image = that head's own Deep PR Gate tar (run
+        # 37195117238, all four gates APPROVED incl. the console suite; stamp
+        # v1.0.260-candidate.g36b5407e5bd3); provisioning, agent and console =
+        # a clean checkout of the SAME commit. No provisioning drift; built
+        # fresh, so the bytes this run qualifies are the bytes it uploads.
         include:
-          - variant: candidate-22247248cc8d
+          - variant: candidate-36b5407e5bd3
             provisioning: source
-            source_sha: "22247248cc8d53f4012caa24dbc48fdef08aac13"
-            image_run: "37192868202"
-            image_tar_sha256: "fff46019065538f10c2ef1f754a581032e17275e1e04323ba8dc5367214210ae"
-            expect_image_id: "sha256:605d9b43f83bfcb6468f118afa9afaf10d179a62fff75cae04c36f4c10083481"
+            source_sha: "36b5407e5bd3ff3c883bf855c269b8b7675013ed"
+            image_run: "37195117238"
+            image_tar_sha256: "40fcc42daa87ba39c3119c1cbda4b3b0df033aa84beced4a093c98b571b024a8"
+            expect_image_id: "sha256:2aeee47447ec989111379bcf39bef6d64d2be4dba2db352f5af16db6c70a964f"
     env:
       APPLIANCE_SOURCE_SHA: ${{ matrix.source_sha }}
       SOURCE_IMAGE_RUN_ID: ${{ matrix.image_run }}
