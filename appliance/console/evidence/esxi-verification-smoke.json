@@ -1,0 +1,147 @@
+{
+  "schema_version": 1,
+  "scope": "Development console overlay on an older OVA; not an integrated OVA release qualification",
+  "runtime_source_sha": "95ccb84c53df2ba51a427938b8c3e2bfe6917eaa",
+  "binary_sha256": "2f219a3c9dadb199faf7b188cc88aa0da774c9b9e4d0b440bf8667d719c0cb08",
+  "worker_unit_sha256": "a4b8f59590cc8163c8b70eddd8e7e6a02fa4703f99dbefa8eba1342538523e7c",
+  "baseline": {
+    "ova_sha256": "e85e364081fd13833eb53ea04a365cea4a771911f7edb3e41e6cb6dda401c300",
+    "source_sha": "25d0aa83884ec66fe82e82f83d0f9e83b5a85353",
+    "image_source_sha": "78e1bc566e80055f893de41befbbad190ac4dfec",
+    "image_id": "sha256:921c834451f26df7da1da4cc65455db9a2239c6d8e9370a226daea9007c900f3",
+    "provisioning_drift": true
+  },
+  "ci": {
+    "url": "https://github.com/KidCarmi/Culvert/actions/runs/37187210263",
+    "result": "PASS",
+    "fuzz_executions": 193336,
+    "checks": [
+      "Linux race tests twice shuffled",
+      "vet",
+      "root-owned storage tests",
+      "real 128 KiB tmpfs full-byte, partial-write, inode-exhaustion and read-only faults",
+      "static pinned-compiler build",
+      "installer faults",
+      "degraded status and report export"
+    ]
+  },
+  "local": {
+    "lint": "PASS: zero findings under Linux target",
+    "portable_tests": "PASS: host and console tests twice shuffled"
+  },
+  "native": {
+    "vm": "culvert-esxi-9633ffd66ee2",
+    "runtime_sha": "95ccb84c53df2ba51a427938b8c3e2bfe6917eaa",
+    "checks": {
+      "readonly_diagnostics_and_public_permissions": {
+        "checks": [
+          {
+            "id": "storage:/",
+            "state": "ok",
+            "detail": "Available 36505 MiB / 38608 MiB; free inodes 5024637 / 5111808"
+          },
+          {
+            "id": "storage:/var/lib/docker",
+            "state": "ok",
+            "detail": "Available 36505 MiB / 38608 MiB; free inodes 5024637 / 5111808"
+          },
+          {
+            "id": "storage:/var/lib/culvert-appliance",
+            "state": "ok",
+            "detail": "Available 36505 MiB / 38608 MiB; free inodes 5024637 / 5111808"
+          },
+          {
+            "id": "storage:/var/log/journal",
+            "state": "ok",
+            "detail": "Available 36505 MiB / 38608 MiB; free inodes 5024637 / 5111808"
+          },
+          {
+            "id": "clock",
+            "state": "ok",
+            "detail": "Host reports synchronized clock; independent time accuracy not verified"
+          },
+          {
+            "id": "configured_dns",
+            "state": "not_configured",
+            "detail": "No valid configured FQDN; no external DNS target queried"
+          },
+          {
+            "id": "setup_certificate",
+            "state": "unknown",
+            "detail": "Setup listener certificate unavailable"
+          }
+        ],
+        "history_available": true
+      },
+      "disconnect_worker_crash_and_timed_rollback": {
+        "operation": "8b5c2383489b04adad92064199a66dc3",
+        "original_file_restored": true
+      },
+      "explicit_confirmation": {
+        "operation": "99a24489f89e504fdfa103e90911f16d",
+        "preserved_dhcp6": "true"
+      },
+      "pending_static_change_rolled_back_after_reboot": {
+        "before": {
+          "boot": "1e5d6496-10bb-409c-bde6-a95a5d7f9314",
+          "machine": "41356d6c106342d697372a9309e211f6",
+          "file": "01a52d3fccfd18500b36addaf07ae104a547660f0d6489f2260c6c1be613eb6d  /etc/netplan/60-culvert.yaml\n600\n",
+          "operation": "0a9cbab3cc9607a627fc921e6d6255ee"
+        },
+        "after": {
+          "boot": "6ef8edea-5a53-49a8-ba8c-d09b63df7764",
+          "machine": "41356d6c106342d697372a9309e211f6"
+        },
+        "original_file_restored": true
+      },
+      "bounded_report_separates_files_commands_and_live_network": {
+        "bytes": 4081,
+        "verification": {
+          "files": "verified",
+          "apply": "succeeded",
+          "client_access": "unverified"
+        },
+        "current_interfaces": [
+          {
+            "name": "ens32",
+            "link": "UP",
+            "addresses": [
+              "192.168.1.120/24"
+            ]
+          }
+        ],
+        "current_gateway": "192.168.1.1 (ens32)"
+      }
+    },
+    "before_reboot": {
+      "boot": "1e5d6496-10bb-409c-bde6-a95a5d7f9314",
+      "machine": "41356d6c106342d697372a9309e211f6",
+      "file": "01a52d3fccfd18500b36addaf07ae104a547660f0d6489f2260c6c1be613eb6d  /etc/netplan/60-culvert.yaml\n600\n",
+      "operation": "0a9cbab3cc9607a627fc921e6d6255ee"
+    },
+    "installed_hashes": "2f219a3c9dadb199faf7b188cc88aa0da774c9b9e4d0b440bf8667d719c0cb08  /opt/culvert-appliance/bin/culvert-console\na4b8f59590cc8163c8b70eddd8e7e6a02fa4703f99dbefa8eba1342538523e7c  /etc/systemd/system/culvert-console-host.service\n",
+    "result": "PASS"
+  },
+  "native_suites": "PASS: all three Go suites twice; root host tests include real isolated filesystem faults; installer faults and repeated install",
+  "review": "Adversarial review found stale file verification after drift and mismatched joined-error classification; both fixed and regression-tested. Not a completed product security assessment.",
+  "retained_attempts": [
+    {
+      "result": "FAIL",
+      "stage": "initial_guest_ip",
+      "detail": "Initial 150-second VMware Tools IP wait returned missing or ambiguous before console installation; read-only inspect also could not observe the guest. Cause unproven. A bounded retry was used."
+    }
+  ],
+  "limits": [
+    "File restoration and successful apply are distinct from kernel convergence and remote client reachability.",
+    "Report contains public operational metadata, including hostnames, addresses and identity IDs; no general-purpose secret scrubber or forensic log collection.",
+    "tmpfs failure tests do not establish ext4 power-loss durability.",
+    "Full integrated OVA qualification and an actual restore rehearsal on that final appliance remain separate.",
+    "Permanent worker stoppage, damaged storage and privileged external writers can prevent rollback; retained backup is not a host-failure guarantee.",
+    "No new PAM session/shell containment or centralized audit-retention qualification in this pass."
+  ],
+  "cleanup": {
+    "vm_deleted": true,
+    "independent_inventory_count": 0,
+    "private_run_directory_removed": true
+  }
+}

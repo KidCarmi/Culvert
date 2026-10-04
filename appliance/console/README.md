@@ -45,6 +45,17 @@ exhaustion and read-only remounts. Existing state files must remain byte-identic
 and no temporary replacement may remain. These tests do not establish ext4
 power-loss guarantees or full OVA qualification.
 
+Runtime `95ccb84c` passed [Linux CI](https://github.com/KidCarmi/Culvert/actions/runs/37187210263)
+(race tests twice, root filesystem faults, 193,336 fuzz executions, vet, pinned
+static build and installer/export checks). [ESXi evidence](evidence/esxi-verification-smoke.json)
+records all three native suites twice, the same real filesystem faults, worker
+termination/session-loss rollback, explicit confirmation, unconfirmed static
+IPv4 rollback across reboot and the bounded report after recovery. Binary/unit
+hashes matched the tested bundle. The first guest-IP wait failed before install;
+a bounded retry succeeded while first boot was still progressing. This failure
+is retained and no boot-time SLA is established. The owned VM was deleted,
+independent inventory was empty and private run files were removed.
+
 The existing application lifecycle harness already performs real offline restore
 commits, interrupted-restore recovery and full-volume recovery; this console pass
 does not replace those tests with a dry run or change maintenance-agent ownership.
