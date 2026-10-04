@@ -886,14 +886,20 @@ var clusterInsecure bool
 // load-bearing: re-reading the operator-supplied mTLS pair from disk each time
 // is what lets a cert-manager/certbot rotation that briefly truncated the files
 // self-heal with no restart (§33 rule 4).
-func cpServerOption(addr, certFile, keyFile, caFile string) (grpc.ServerOption, error) {
-	opt, _, err := cpServerOptionMode(addr, certFile, keyFile, caFile)
+func cpServerOption(certFile, keyFile, caFile string) (grpc.ServerOption, error) {
+	opt, _, err := cpServerOptionMode(certFile, keyFile, caFile)
 	return opt, err
 }
 
 // cpServerOptionMode is cpServerOption plus the BOUNDED transport-mode label
 // ("mtls" or "insecure") for the once-per-bind log line.
-func cpServerOptionMode(addr, certFile, keyFile, caFile string) (grpc.ServerOption, string, error) {
+//
+// It deliberately does NOT take the listen address. It used to, only to log it,
+// and once CHAOS-73 moved that line out to logControlPlaneTransport (so the
+// rebind loop does not emit one per attempt) the parameter had no reader —
+// caught by `unparam`. The address belongs to the supervisor, which owns the
+// once-per-observed-bind log line.
+func cpServerOptionMode(certFile, keyFile, caFile string) (grpc.ServerOption, string, error) {
 	switch {
 	case certFile != "" && keyFile != "":
 		creds, err := buildServerTLS(certFile, keyFile, caFile)

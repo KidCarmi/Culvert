@@ -239,9 +239,7 @@ func registerEarlyShutdownHooks(reg *shutdownRegistry, s *startupState) {
 	// up during shutdown, which is worse than the terminal silence it replaced.
 	// The supervisor's backoff sleep is interruptible, so this hook never waits
 	// one out.
-	reg.Register("control-plane-grpc-stop", shutdownOrderControlPlaneGRPCStop, func(ctx context.Context) error {
-		return stopControlPlaneListener(ctx)
-	})
+	reg.Register("control-plane-grpc-stop", shutdownOrderControlPlaneGRPCStop, stopControlPlaneListener)
 	// Close the CDR client before cancelling lifecycle context so any
 	// in-flight Sanitize streams get a clean tear-down rather than a
 	// context-cancelled transport error.

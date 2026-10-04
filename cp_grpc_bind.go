@@ -422,27 +422,7 @@ func (s *cpListenerSupervisor) run() {
 
 		srv, ln, mode, err := buildControlPlaneServer(s.cfg)
 		if err != nil {
-			reason := classifyCPGRPCBindError(err)
-			shouldLog, failingFor := noteCPGRPCBindFailure(reason, backoff, cpGRPCHealthNow())
-			// Released only AFTER the failure is recorded: the starter may
-			// return the moment this fires, and it must never return to a state
-			// that has not been written yet — the same window in miniature.
-			s.markFirstAttempt()
-			// Clamped so this sleep cannot carry us past the unavailability
-			// threshold without an attempt to observe it — the alert is
-			// attempt-driven and nothing else wakes this loop.
-			wait := clampCPGRPCBindSleep(jitterDuration(backoff, cpGRPCBindJitter), failingFor)
-			if shouldLog {
-				// The FULL error goes here and nowhere else: the contract row,
-				// the alert and the readiness detail all carry the bounded
-				// class only. logErrorf applies sanitizeLog (CWE-117) to the
-				// whole line.
-				logErrorf("ControlPlane gRPC listener could not start on %s (%s): %v — retrying in %s; "+
-					"this node's proxy data plane and admin UI are unaffected, and enrolled Data Planes "+
-					"keep serving their last-good config",
-					s.cfg.addr, reason, err, wait.Round(time.Millisecond))
-			}
-			if !haSleepInterruptible(s.stopping, wait) {
+			if !s.handleBindFailure(err, backoff) {
 				noteCPGRPCListenerStopped()
 				return
 			}
@@ -543,6 +523,37 @@ func (s *cpListenerSupervisor) run() {
 	}
 }
 
+// handleBindFailure records one failed bind attempt, logs it if the rate gate
+// allows, and sleeps out the backoff. Reports false when Stop interrupted the
+// sleep, in which case the caller must exit the loop.
+//
+// Extracted from run() purely to keep it inside funlen's 50-statement budget
+// (reported by golangci-lint on this PR); the sequence and every comment below
+// are unchanged from where they sat inline, because each step's ORDER is
+// load-bearing.
+func (s *cpListenerSupervisor) handleBindFailure(err error, backoff time.Duration) (keepGoing bool) {
+	reason := classifyCPGRPCBindError(err)
+	shouldLog, failingFor := noteCPGRPCBindFailure(reason, backoff, cpGRPCHealthNow())
+	// Released only AFTER the failure is recorded: the starter may return the
+	// moment this fires, and it must never return to a state that has not been
+	// written yet — the same window the success path closes, in miniature.
+	s.markFirstAttempt()
+	// Clamped so this sleep cannot carry us past the unavailability threshold
+	// without an attempt to observe it — the alert is attempt-driven and
+	// nothing else wakes this loop.
+	wait := clampCPGRPCBindSleep(jitterDuration(backoff, cpGRPCBindJitter), failingFor)
+	if shouldLog {
+		// The FULL error goes here and nowhere else: the contract row, the
+		// alert and the readiness detail all carry the bounded class only.
+		// logErrorf applies sanitizeLog (CWE-117) to the whole line.
+		logErrorf("ControlPlane gRPC listener could not start on %s (%s): %v — retrying in %s; "+
+			"this node's proxy data plane and admin UI are unaffected, and enrolled Data Planes "+
+			"keep serving their last-good config",
+			s.cfg.addr, reason, err, wait.Round(time.Millisecond))
+	}
+	return haSleepInterruptible(s.stopping, wait)
+}
+
 // firstResolved reports whether the first bind attempt has already been
 // released to the starter.
 func (s *cpListenerSupervisor) firstResolved() bool {
@@ -586,7 +597,7 @@ func nextCPGRPCBindBackoff(cur time.Duration) time.Duration {
 // handed, leaking one socket per attempt — cannot occur here because the TLS
 // material is loaded BEFORE the listener is bound.
 func buildControlPlaneServer(cfg cpListenerConfig) (*grpc.Server, net.Listener, string, error) {
-	serverOpt, mode, err := cpServerOptionMode(cfg.addr, cfg.certFile, cfg.keyFile, cfg.caFile)
+	serverOpt, mode, err := cpServerOptionMode(cfg.certFile, cfg.keyFile, cfg.caFile)
 	if err != nil {
 		// Tag it so the classifier can name `tls_certificate` without matching
 		// on the crypto/tls error text.
