@@ -96,7 +96,11 @@ SSH_OPTS=(-i "$LAB_SSH_KEY" -p "$LAB_SSH_PORT" -o StrictHostKeyChecking=no -o "U
 gssh() { ssh "${SSH_OPTS[@]}" "culvert@$LAB_HOST" "$@"; }
 UI="https://$LAB_HOST:$LAB_UI_PORT"; P="http://$LAB_HOST:$LAB_PROXY_PORT"; JAR="$SEC/cookies"
 ensure_admin_pass() { [[ -s "$SEC/admin-pass" ]] || { head -c 4096 /dev/urandom | tr -dc 'A-Za-z0-9' | cut -c1-24 > "$SEC/admin-pass"; chmod 0600 "$SEC/admin-pass"; }; }
-api() { curl -ksS -m 30 -X "$1" "$UI$2" -H "Origin: $UI" -H 'Content-Type: application/json' -b "$JAR" -c "$JAR" ${3:+-d "$3"} -w '\n%{http_code}\n'; }
+api() {
+  local data=()
+  [[ $# -lt 3 ]] || data=(--data-binary @-)
+  printf '%s' "${3-}" | curl -ksS -m 30 -X "$1" "$UI$2" -H "Origin: $UI" -H 'Content-Type: application/json' -b "$JAR" -c "$JAR" "${data[@]}" -w '\n%{http_code}\n'
+}
 body() { sed '$d'; }; code() { tail -n1; }
 # agent_status_verdict FILE — FILE is `api GET /api/maintenance-agent` output
 # (JSON body, then the HTTP code). That endpoint answers 200 EVEN WHEN THE
@@ -346,8 +350,9 @@ cmd_qualify() {
   if gate 4 setup-without-token; then
     c="$(api POST /api/setup/complete "{\"user\":\"$ADMIN_USER\",\"pass\":\"$pass\"}" | tee "$EV/04-setup-without-token.txt" | code)"
     [[ $c == 403 ]] && check 4 setup-without-token pass "403" || { check 4 setup-without-token fail "http $c (want 403)"; STOP=1; }
-    c="$(curl -ksS -m 30 -X POST "$UI/api/setup/complete" -H "Origin: $UI" -H 'Content-Type: application/json' -H "X-Culvert-Setup-Token: $(cat "$SEC/setup-token")" \
-          -d "{\"user\":\"$ADMIN_USER\",\"pass\":\"$pass\"}" -w '\n%{http_code}\n' | tee "$EV/04-setup-with-token.txt" | code)"
+    printf 'X-Culvert-Setup-Token: %s\n' "$(cat "$SEC/setup-token")" > "$SEC/setup-header"
+    c="$(printf '%s' "{\"user\":\"$ADMIN_USER\",\"pass\":\"$pass\"}" | curl -ksS -m 30 -X POST "$UI/api/setup/complete" -H "Origin: $UI" -H 'Content-Type: application/json' -H "@$SEC/setup-header" \
+          --data-binary @- -w '\n%{http_code}\n' | tee "$EV/04-setup-with-token.txt" | code)"
     [[ $c == 200 ]] && check 4 setup-with-token pass "200" || { check 4 setup-with-token fail "http $c"; STOP=1; }
     c="$(api POST /api/auth/login "{\"user\":\"$ADMIN_USER\",\"pass\":\"$pass\"}" | tee "$EV/04-login.txt" | code)"
     [[ $c == 200 ]] && check 4 admin-login pass "200" || { check 4 admin-login fail "http $c"; STOP=1; }

@@ -14,6 +14,7 @@ from pathlib import Path
 import re
 import secrets
 import socket
+import stat
 import subprocess
 import sys
 import tarfile
@@ -85,6 +86,54 @@ def stop_process(proc):
     except subprocess.TimeoutExpired:
         proc.kill()
         proc.wait(timeout=5)
+
+
+def private_cleanup_entry(path, root):
+    """Validate without following links; return identity for the deletion fence."""
+    info = path.lstat()
+    require(not stat.S_ISLNK(info.st_mode) and not
+            getattr(info, 'st_file_attributes', 0) & getattr(stat, 'FILE_ATTRIBUTE_REPARSE_POINT', 0x400),
+            'private cleanup refuses symlinks, junctions and reparse points')
+    require(stat.S_ISREG(info.st_mode) or stat.S_ISDIR(info.st_mode),
+            'private cleanup refuses nonregular entries')
+    resolved = path.resolve(strict=True)
+    require(resolved == path.absolute() and (resolved == root or root in resolved.parents),
+            'private cleanup path escaped the run secrets directory')
+    return info.st_dev, info.st_ino, info.st_mode
+
+
+def cleanup_private_tree(run, sec):
+    """Validate the COMPLETE private tree before removing any entry; retain SEC.
+
+    No rmtree/shell recursion follows attacker-controlled paths. Recheck each
+    identity/resolved path immediately before unlink/rmdir; unexpected changes
+    stop cleanup and never produce a successful cleanup verdict.
+    """
+    expected = run.resolve(strict=True) / 'secrets'
+    require(sec.absolute() == expected and sec.resolve(strict=True) == expected,
+            'private cleanup requires this exact run secrets directory')
+    root_identity = private_cleanup_entry(sec, expected)
+    require(stat.S_ISDIR(root_identity[2]), 'private cleanup root must be a directory')
+    pending, entries = [sec], []
+    while pending:
+        directory = pending.pop()
+        for path in directory.iterdir():
+            identity = private_cleanup_entry(path, expected)
+            entries.append((path, identity))
+            if stat.S_ISDIR(identity[2]):
+                pending.append(path)
+    # All link/type/containment checks above finish before the first deletion.
+    for path, identity in sorted(entries, key=lambda item: len(item[0].parts), reverse=True):
+        require(private_cleanup_entry(sec, expected) == root_identity,
+                'private cleanup root changed during cleanup')
+        require(private_cleanup_entry(path, expected) == identity,
+                'private cleanup entry changed during cleanup')
+        if stat.S_ISDIR(identity[2]):
+            path.rmdir()
+        else:
+            path.unlink()
+    require(private_cleanup_entry(sec, expected) == root_identity and not any(sec.iterdir()),
+            'private cleanup is incomplete; run secrets were retained')
 
 
 class TunnelSupervisor:
@@ -588,20 +637,18 @@ class Lab:
         print(bundle)
 
     def down(self):
-        if self.state.get('deleted'):
-            return
-        vm = self.vm()  # refuses a same-name replacement or any scope drift
-        if vm['runtime']['powerState'] != 'poweredOff':
-            self.gov('vm.power', '-off', self.state['path'], json_output=False)
-        self.vm()  # recheck identity immediately before deletion
-        self.gov('vm.destroy', self.state['path'], timeout=300, json_output=False)
-        require(not (self.gov('vm.info', self.state['path']).get('virtualMachines') or []), 'deletion not confirmed')
-        self.state.update(deleted=True, phase='deleted')
-        self.save()
-        # Delete only regular files created in this run's secrets directory.
-        for p in self.sec.iterdir():
-            if p.is_file() and not p.is_symlink():
-                p.unlink()
+        if not self.state.get('deleted'):
+            vm = self.vm()  # refuses a same-name replacement or any scope drift
+            if vm['runtime']['powerState'] != 'poweredOff':
+                self.gov('vm.power', '-off', self.state['path'], json_output=False)
+            self.vm()  # recheck identity immediately before deletion
+            self.gov('vm.destroy', self.state['path'], timeout=300, json_output=False)
+            require(not (self.gov('vm.info', self.state['path']).get('virtualMachines') or []), 'deletion not confirmed')
+            self.state.update(deleted=True, phase='deleted')
+            self.save()
+        # A confirmed deletion may be followed by a failed local cleanup. Retry
+        # local cleanup without repeating hypervisor operations on an absent VM.
+        cleanup_private_tree(self.run, self.sec)
         self.record('cleanup', 'pass', 'owned VM deletion confirmed; private run files removed')
 
 

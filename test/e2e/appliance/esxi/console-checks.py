@@ -16,11 +16,15 @@ import time
 spec = importlib.util.spec_from_file_location('esxi_lab', Path(__file__).with_name('esxi-lab.py'))
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
+keyboard_spec = importlib.util.spec_from_file_location('bootstrap_checks', Path(__file__).with_name('bootstrap-checks.py'))
+keyboard_module = importlib.util.module_from_spec(keyboard_spec)
+keyboard_spec.loader.exec_module(keyboard_module)
 
 
 def run(lab):
     lab.vm()
     ssh = lab.ssh_command(lab.guest_ip(timeout=60), strict=True)
+    keyboard = keyboard_module.PrivateKeyboard(lab)
 
     def remote(command, data=None):
         result = subprocess.run(ssh + [command], input=data, capture_output=True,
@@ -30,9 +34,7 @@ def run(lab):
         return result.stdout
 
     def key(value, text=False):
-        lab.vm()
-        lab.gov('vm.keystrokes', '-vm=' + lab.state['path'],
-                ('-s=' if text else '-c=') + value, json_output=False)
+        keyboard.send(value, text=text)
 
     def wait_for(predicate, description, timeout=30):
         end = time.monotonic() + timeout

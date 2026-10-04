@@ -11,6 +11,7 @@ import socket
 import sys
 import tarfile
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -236,6 +237,89 @@ class EvidenceTests(unittest.TestCase):
                 with self.assertRaises(lab.Refused):
                     with lab.locked(p):
                         self.fail('concurrent mutation allowed')
+
+
+class PrivateCleanupTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        cfg = self.root / 'scope.json'
+        cfg.write_text(json.dumps(scope(self.root)))
+        self.obj = lab.Lab(cfg)
+        self.outside = self.root / 'outside'
+        self.outside.mkdir()
+        (self.outside / 'keep').write_text('outside-synthetic-canary')
+        (self.obj.sec / 'top-secret').write_text('synthetic-private-data')
+
+    def test_nested_cleanup_keeps_root_and_outside(self):
+        nested = self.obj.sec / 'go-cache' / 'aa'
+        nested.mkdir(parents=True)
+        (nested / 'compiled').write_text('synthetic-cache')
+        restore = self.obj.sec / 'actual-restore' / 'payload'
+        restore.mkdir(parents=True)
+        (restore / 'backup').write_text('synthetic-backup')
+        lab.cleanup_private_tree(self.obj.run, self.obj.sec)
+        self.assertTrue(self.obj.sec.is_dir())
+        self.assertEqual(list(self.obj.sec.iterdir()), [])
+        self.assertEqual((self.outside / 'keep').read_text(), 'outside-synthetic-canary')
+
+    def test_wrong_root_refused_before_any_deletion(self):
+        with self.assertRaises(lab.Refused):
+            lab.cleanup_private_tree(self.obj.run, self.outside)
+        self.assertTrue((self.obj.sec / 'top-secret').exists())
+        self.assertTrue((self.outside / 'keep').exists())
+
+    def test_reparse_entry_refuses_whole_tree_before_deletion(self):
+        unsafe = self.obj.sec / 'junction'
+        unsafe.mkdir()
+        original = Path.lstat
+
+        def flagged(path):
+            result = original(path)
+            if path == unsafe:
+                return SimpleNamespace(st_mode=result.st_mode, st_dev=result.st_dev, st_ino=result.st_ino,
+                                       st_file_attributes=0x400)
+            return result
+
+        with patch.object(Path, 'lstat', flagged), self.assertRaises(lab.Refused):
+            lab.cleanup_private_tree(self.obj.run, self.obj.sec)
+        self.assertTrue((self.obj.sec / 'top-secret').exists())
+        self.assertTrue(unsafe.is_dir())
+        self.assertTrue((self.outside / 'keep').exists())
+
+    def test_symlink_escape_refuses_whole_tree_before_deletion(self):
+        link = self.obj.sec / 'escape'
+        try:
+            link.symlink_to(self.outside, target_is_directory=True)
+        except OSError:
+            self.skipTest('creating symlinks requires unavailable Windows privilege')
+        with self.assertRaises(lab.Refused):
+            lab.cleanup_private_tree(self.obj.run, self.obj.sec)
+        self.assertTrue((self.obj.sec / 'top-secret').exists())
+        self.assertTrue((self.outside / 'keep').exists())
+        link.unlink()
+
+    def test_deleted_vm_cleanup_failure_can_retry_without_vm_calls(self):
+        self.obj.state = dict(deleted=True, phase='deleted')
+        original = Path.unlink
+
+        def refuse(path, *args, **kwargs):
+            if path == self.obj.sec / 'top-secret':
+                raise PermissionError('synthetic locked file')
+            return original(path, *args, **kwargs)
+
+        with patch.object(self.obj, 'vm') as vm, patch.object(self.obj, 'gov') as gov, \
+                patch.object(self.obj, 'record') as record:
+            with patch.object(Path, 'unlink', refuse), self.assertRaises(PermissionError):
+                self.obj.down()
+            record.assert_not_called()
+            self.assertTrue((self.obj.sec / 'top-secret').exists())
+            self.obj.down()
+            vm.assert_not_called()
+            gov.assert_not_called()
+            record.assert_called_once_with('cleanup', 'pass', 'owned VM deletion confirmed; private run files removed')
+        self.assertEqual(list(self.obj.sec.iterdir()), [])
 
 
 class FakeTunnel:
