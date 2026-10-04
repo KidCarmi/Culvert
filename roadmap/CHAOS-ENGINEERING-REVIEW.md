@@ -95,6 +95,17 @@ everything else is triaged below with a suggested PR and required tests for foll
 > in a committed placeholder row at the START of a sweep), and at six
 > occurrences it is well past overdue.
 
+**2026-10-04 — `CHAOS-73` CLAIMED (placeholder, commit one). Domain: the
+Control Plane's gRPC listener, and the third instance of "which plane may kill
+which". `CLAUDE.md`'s CHAOS-66 note names this path explicitly — *"the CP gRPC
+bind (`cluster_startup.go`) is the closest unexamined analogue"* — after §33
+(CHAOS-57, the admin UI listener) and §36 (CHAOS-66, the SOCKS5 bind) closed
+the same shape on two other planes. Claimed as `CHAOS-73` rather than the next
+free number: ids 67–72 were allocated in one pass across open sweeps (see the
+CHAOS-70 row below) and only 70 has merged, so 67/68/71/72 may still be held by
+branches this tree cannot see. Taking 73 costs nothing and cannot collide with
+that block. Findings and gates are written up in §41 below.**
+
 **2026-09-22 — CHAOS-70 sweep (the admin roster as a durability surface).**
 Written up as `CHAOS-66` and renumbered to `CHAOS-70` (§40) when main was merged
 in, because the SOCKS5-bind sweep below had taken 66 first — another
