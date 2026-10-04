@@ -34,6 +34,9 @@ def load_module(name, path):
     return module
 
 
+campaigns = load_module('p1_campaigns', HERE / 'p1-campaign.py')
+
+
 def save_new(path, value):
     with path.open('x', encoding='utf-8') as out:
         json.dump(value, out, indent=2)
@@ -45,11 +48,12 @@ def read_record(path):
 
 
 def transport(args, script, nowait=False):
+    timeout = 360 if args.campaign == 'confirmation' else 240
     command = [sys.executable, str(HERE / 'console-priv.py'), '--scope', str(args.scope),
-               '--bind', args.bind, '--timeout', '240']
+               '--bind', args.bind, '--timeout', str(timeout)]
     if nowait:
         command.append('--nowait')
-    result = subprocess.run(command, input=script, capture_output=True, timeout=360)
+    result = subprocess.run(command, input=script, capture_output=True, timeout=timeout + 120)
     require(result.returncode == 0, 'authenticated console probe refused or failed; no retry')
     require(len(result.stdout) <= 1024 * 1024, 'probe evidence exceeded bound')
     return result.stdout
@@ -58,10 +62,11 @@ def transport(args, script, nowait=False):
 def probe(args, action, private_input=None):
     source = base64.b64encode((HERE / 'p1-guest-checks.py').read_bytes()).decode()
     # Private credentials, when needed, exist only in private transport input.
-    payload = ("timeout --signal=TERM --kill-after=5s 220s python3 - <<'CULVERT_P1_PROBE'\nimport base64,json\n"
+    guest_timeout = 330 if args.campaign == 'confirmation' else 220
+    payload = (f"timeout --signal=TERM --kill-after=5s {guest_timeout}s python3 - <<'CULVERT_P1_PROBE'\nimport base64,json\n"
                "namespace={'__name__':'culvert_p1_guest'}\n"
                f"exec(compile(base64.b64decode({source!r}), 'p1-guest-checks.py', 'exec'), namespace)\n"
-               f"print(json.dumps(namespace['main']({action!r}, {private_input!r})))\n"
+               f"print(json.dumps(namespace['main']({action!r}, {private_input!r}, {args.campaign!r})))\n"
                "CULVERT_P1_PROBE\n")
     observation = json.loads(transport(args, payload.encode()))
     require(observation.get('schema') == 1, 'probe schema unavailable')
@@ -96,6 +101,8 @@ def validate_identity(before, after):
 def validate_network(before, after):
     try:
         return (before['phase'] == 'network-before-reboot' and after['phase'] == 'network-after-reboot'
+                and before.get('campaign', 'initial') == after.get('campaign', 'initial')
+                and (before.get('campaign', 'initial') == 'initial' or valid_confirmation(before))
                 and before['source'] == after['source'] == SOURCE and before['helper_exit'] != 0
                 and before['injection_sequence'] == ['generate', 'apply', 'real-apply-succeeded-inject-71', 'generate', 'apply', 'real-rollback-apply-succeeded']
                 and before['health'] is True and after['health'] is True
@@ -107,6 +114,25 @@ def validate_network(before, after):
                 and before['before']['netplan'] == before['after']['netplan'] == after['after']['netplan']
                 and before['before']['network'] == before['after']['network'] == after['after']['network'])
     except (KeyError, TypeError):
+        return False
+
+
+def valid_confirmation(value):
+    try:
+        convergence, initial = value['convergence'], value['initial_failure']
+        samples = convergence['observations']
+        tail = samples[-3:]
+        return (value['campaign'] == 'confirmation' and initial['source_unchanged'] is True
+                and all(re.fullmatch(r'[a-f0-9]{64}', initial[key]) for key in
+                        ('original_baseline_sha256', 'original_trace_sha256'))
+                and convergence['result'] == 'stable' and convergence['max_seconds'] == 60
+                and 4 <= convergence['elapsed_seconds'] <= 60 and len(samples) >= 3
+                and convergence['immediate_match'] is samples[0]['matches']
+                and all(type(row['matches']) is bool and 0 <= row['elapsed_seconds'] <= 60 for row in samples)
+                and all(left['elapsed_seconds'] <= right['elapsed_seconds'] for left, right in zip(samples, samples[1:]))
+                and all(row['matches'] is True for row in tail)
+                and tail[-1]['elapsed_seconds'] - tail[0]['elapsed_seconds'] >= 4)
+    except (KeyError, TypeError, IndexError):
         return False
 
 
@@ -149,9 +175,14 @@ def power_state(lab, wanted, timeout=180):
 def run(args, lab, boot, private):
     action = args.action
     if action == 'network-before':
+        # Establish controller-visible access BEFORE the deliberate network mutation.
+        prove_operator(lab, lab.sec / 'known_hosts', lab.sec / 'id_ed25519')
+        external_health(lab)
         before_ip = lab.guest_ip(timeout=30)
         observation = probe(args, action)
         save_new(private / 'network-before.json', observation)
+        require(observation.get('campaign') == args.campaign
+                and (args.campaign == 'initial' or valid_confirmation(observation)), 'confirmation convergence proof incomplete')
         require(before_ip == lab.guest_ip(timeout=30), 'owned IP changed')
         prove_operator(lab, lab.sec / 'known_hosts', lab.sec / 'id_ed25519')
         external_health(lab)
@@ -181,6 +212,7 @@ def run(args, lab, boot, private):
         require(args.escrow_evidence is not None, 'verified external backup/escrow evidence required')
         escrow = read_record(args.escrow_evidence)
         require(escrow.get('uuid') == lab.state['uuid'] and escrow.get('ova_sha256') == OVA
+                and escrow.get('campaign', 'initial') == args.campaign
                 and escrow.get('backup_export_verified') is True and escrow.get('escrow_export_verified') is True,
                 'backup/escrow readiness contract not satisfied')
         save_new(private / 'export-readiness.json', escrow)
@@ -232,6 +264,7 @@ def main():
     parser.add_argument('--scope', type=Path, required=True)
     parser.add_argument('--bind', required=True)
     parser.add_argument('--escrow-evidence', type=Path)
+    parser.add_argument('--campaign', choices=tuple(campaigns.NAMES), default='initial')
     parser.add_argument('action', choices=['network-before', 'network-after', 'identity-before', 'identity-reset',
                                          'identity-power-on', 'identity-bootstrap', 'identity-after'])
     args = parser.parse_args()
@@ -244,26 +277,31 @@ def main():
                 and lab.c.get('credential_mode') == 'none', 'exact default-import candidate required')
         boot.private_directory(lab)
         lab.vm(timeout=15)
-        private = lab.sec / 'p1-regressions'
+        initial = campaigns.initial_failure(lab.sec, lab.state['uuid'], args.campaign)
+        private = campaigns.directory(lab.sec, args.campaign)
         private.mkdir(exist_ok=True)
         require(not private.is_symlink(), 'private regression directory link refused')
         stage_lock = private / 'stage.lock'
         stage_lock.mkdir()
         marker = private / (args.action + '.attempt.json')
         require(not marker.exists(), 'prior stage attempt exists; no retry')
-        save_new(marker, {'status': 'started', 'uuid': lab.state['uuid']})
+        save_new(marker, {'status': 'started', 'uuid': lab.state['uuid'], 'campaign': args.campaign,
+                          'initial_failure': initial})
         created = True
         run(args, lab, boot, private)
-        boot.module.atomic_json(marker, {'status': 'pass', 'uuid': lab.state['uuid']})
-        lab.record('p1-' + args.action, 'pass', 'one-shot real guest regression evidence retained privately')
-        print('PASS: ' + args.action)
+        boot.module.atomic_json(marker, {'status': 'pass', 'uuid': lab.state['uuid'], 'campaign': args.campaign,
+                                        'initial_failure': initial})
+        label = 'p1-' + ('confirmation-' if args.campaign == 'confirmation' else '') + args.action
+        lab.record(label, 'pass', 'one-shot real guest regression evidence retained privately')
+        print('PASS: ' + args.campaign + ' ' + args.action)
         return 0
     except Exception:
         if created:
             # Preserve an existing result when duplicate invocation was refused.
             current = read_record(marker)
             if current.get('status') == 'started':
-                boot.module.atomic_json(marker, {'status': 'blocked', 'uuid': lab.state['uuid']})
+                current['status'] = 'blocked'
+                boot.module.atomic_json(marker, current)
         print('BLOCKED: ' + args.action + '; private evidence retained; no retry.', file=sys.stderr)
         return 90
     finally:

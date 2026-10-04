@@ -3,11 +3,12 @@
 : "${ESXI_BIND:?controller LAN address required}"
 
 esxi_p1_stage() {
-  python3 "$ADAPTER_HERE/p1-regressions.py" --scope "$ESXI_SCOPE" --bind "$ESXI_BIND" "$1"
+  python3 "$ADAPTER_HERE/p1-regressions.py" --scope "$ESXI_SCOPE" --bind "$ESXI_BIND" \
+    --campaign "${ESXI_P1_CAMPAIGN:-initial}" "$1"
 }
 
 lab_before_reboot() {
-  esxi_p1_stage network-before > "$EV/p1-network-before-controller.txt" 2>&1
+  esxi_p1_stage network-before > "$EV/p1-${ESXI_P1_CAMPAIGN:-initial}-network-before-controller.txt" 2>&1
   python3 "$ADAPTER_HERE/timing-diagnostic.py" observe --scope "$ESXI_SCOPE" \
     --label maintenance --host "$LAB_HOST" --seconds 1800 --interval 5 \
     > "$EV/timing-observer-controller.txt" 2>&1 &
@@ -33,7 +34,7 @@ PY
   then check ESXi independent-reboot-timing pass 'TCP, proxy health and ready operator status returned after independently observed failures; timestamped samples retained.'
   else check ESXi independent-reboot-timing fail 'Independent readiness timing incomplete; preserve all observations.'; fi
   if [[ $STOP == 0 ]]; then
-    esxi_p1_stage network-after > "$EV/p1-network-after-controller.txt" 2>&1
+    esxi_p1_stage network-after > "$EV/p1-${ESXI_P1_CAMPAIGN:-initial}-network-after-controller.txt" 2>&1
   fi
 }
 

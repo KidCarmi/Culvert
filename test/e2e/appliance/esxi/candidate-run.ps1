@@ -2,7 +2,8 @@ param(
     [Parameter(Mandatory=$true)][string]$Scope,
     [Parameter(Mandatory=$true)][string]$Bind,
     [Parameter(Mandatory=$true)][string]$Python,
-    [Parameter(Mandatory=$true)][string]$ConsoleFont
+    [Parameter(Mandatory=$true)][string]$ConsoleFont,
+    [switch]$ResumePostOS
 )
 $ErrorActionPreference = 'Stop'
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '../../../..')).Path
@@ -44,5 +45,6 @@ $env:LAB_UPDATE_DIR = "$($env:LAB_DIR)/secrets/signed-update"
 $env:LAB_EXPECT_IMAGE_ID = $configuration.image_id
 $env:CULVERT_ESXI_CONSOLE_FONT = (Resolve-Path -LiteralPath $ConsoleFont).Path.Replace('\','/')
 Set-Location -LiteralPath $repoRoot
-& $configuration.bash (Join-Path $PSScriptRoot 'access-aware-qualify.sh')
+$entrypoint = if ($ResumePostOS) { 'post-os-resume.sh' } else { 'access-aware-qualify.sh' }
+& $configuration.bash (Join-Path $PSScriptRoot $entrypoint)
 exit $LASTEXITCODE

@@ -100,6 +100,20 @@ class ResetReadinessTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.ready()
 
+    def test_confirmation_uses_separate_pass_and_retains_initial_blocked_result(self):
+        initial = self.private / 'p1-regressions' / 'network-before.attempt.json'
+        initial.write_text(json.dumps({'status': 'blocked', 'uuid': self.owned['uuid']}))
+        confirmation = self.private / 'p1-regressions-confirmation'
+        confirmation.mkdir()
+        with self.assertRaises(ValueError):
+            reset.readiness(self.escrow, self.scope, self.owned, self.private, 'confirmation')
+        (confirmation / 'identity-before.attempt.json').write_text(json.dumps(
+            {'status': 'pass', 'uuid': self.owned['uuid'], 'campaign': 'confirmation'}))
+        result = reset.readiness(self.escrow, self.scope, self.owned, self.private, 'confirmation')
+        self.assertEqual(result['campaign'], 'confirmation')
+        self.assertEqual(result['initial_failure']['result'], 'blocked')
+        self.assertEqual(json.loads(initial.read_text())['status'], 'blocked')
+
 
 if __name__ == '__main__':
     unittest.main()

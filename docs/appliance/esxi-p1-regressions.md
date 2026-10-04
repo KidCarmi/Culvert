@@ -37,6 +37,52 @@ a different boot ID, unchanged OS identity, exact original Netplan state,
 the same usable management network, operator SSH and external application
 health. The parent must require both stages to pass.
 
+### Explicit confirmation after the initial availability failure
+
+The original b579 exercise observed real static apply, injected exit 71 and
+successful real rollback, then failed its immediate default-route assertion.
+This initial availability failure remains BLOCKED; a later convergence test
+cannot establish zero interruption or rewrite that result.
+
+After reviewing the original evidence, stopping all qualification processes
+and freezing the new controller, use `--campaign confirmation` on every P1
+stage. It selects controller `secrets/p1-regressions-confirmation` and guest
+`/var/lib/culvert-lab-p1-confirmation`. The original controller and guest
+directories are never renamed, deleted or overwritten. Preparation refuses
+a remaining original stage lock or an original attempt that is not BLOCKED
+for the same owned VM. The initial attempt hash remains in every new stage
+record and in the later escrow/deletion verdict.
+
+Before any new network mutation, operator SSH and external health must work.
+Authenticated guest prevalidation then requires the exact source and helper
+hashes, original real apply/rollback trace, unchanged boot and OS/SSH identity,
+and an exact match to the initial network and Netplan baseline. A reboot or
+configuration drift blocks this campaign. Fresh guest scratch must not exist.
+
+After a new real apply/failure/rollback sequence, the confirmation records both
+route and address JSON immediately and every two seconds for at most 60 seconds.
+PASS requires three consecutive matching observations spanning at least four
+seconds, followed by usable local and external health and operator SSH. A gap,
+flap or command failure resets the stability window and remains in the durable
+private JSONL evidence; timeout keeps all observations and fails the stage.
+The claim is bounded convergence, not continuous availability. Guest execution
+is bounded to 330 seconds, console transport to 360 and controller waiting to
+480, allowing the 180-second Netplan call and 60-second convergence window.
+
+```text
+python test/e2e/appliance/esxi/p1-regressions.py --scope SCOPE --bind CONTROLLER_IP --campaign confirmation network-before
+# Existing lifecycle OS maintenance reboot, then:
+python test/e2e/appliance/esxi/p1-regressions.py --scope SCOPE --bind CONTROLLER_IP --campaign confirmation network-after
+```
+
+Continue all identity stages with `--campaign confirmation`. Also pass that
+flag to `prepare-identity-reset.py` and `delete-exported-source.py`; they require
+PASS records in the separate campaign and preserve the original BLOCKED result.
+The ordinary `fresh-recovery.py export` and restore do not depend on P1 paths.
+There is no automatic retry of either campaign. Tests in
+`test_p1_confirmation.py` cover transient gaps, sustained failure, stability
+window reset, missing evidence and preservation of the original records.
+
 ## Reset identity last, after external backup and escrow verification
 
 First run `identity-before`, preserving the old active console password,

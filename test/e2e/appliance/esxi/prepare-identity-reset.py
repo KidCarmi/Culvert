@@ -20,7 +20,7 @@ IMAGE = 'sha256:24b37bc217691058e56a838821b86dfbd45b927b1c0ea8ea867a28c54d4bcc47
 require = deletion.require
 
 
-def readiness(escrow, scope, owned, private):
+def readiness(escrow, scope, owned, private, campaign='initial'):
     require(scope['source_sha'] == deletion.SOURCE and scope['ova_sha256'] == deletion.OVA
             and scope['image_id'] == IMAGE and scope['max_vms'] == 1, 'exact one-VM candidate scope required')
     require(owned.get('uuid') and owned.get('deleted') is not True
@@ -58,15 +58,18 @@ def readiness(escrow, scope, owned, private):
             and re.fullmatch(r'[a-f0-9]{64}', observation.get('ca_sha256', ''))
             and observation.get('traffic') == {'example.com': 200, 'example.org': 403}
             and observation.get('rules') and observation.get('categories'), 'source recovery baseline incomplete')
-    p1 = private / 'p1-regressions'
+    initial = deletion.campaigns.initial_failure(private, owned['uuid'], campaign)
+    p1 = deletion.campaigns.directory(private, campaign)
     before = fresh.read_json(p1 / 'identity-before.attempt.json')
     require(before.get('status') == 'pass' and before.get('uuid') == owned['uuid'], 'identity baseline incomplete')
+    require(before.get('campaign', 'initial') == campaign, 'identity baseline campaign mismatch')
     require(not (p1 / 'identity-reset.attempt.json').exists(), 'identity reset already attempted')
     return {'schema': 1, 'uuid': owned['uuid'], 'source_path': owned['path'], 'endpoint': scope['endpoint'],
             'source_sha': scope['source_sha'], 'image_id': scope['image_id'], 'ova_sha256': scope['ova_sha256'],
             'backup_export_verified': True, 'escrow_export_verified': True,
             'export_receipt_sha256': fresh.file_hash(escrow / 'export-receipt.json'),
             'archive_sha256': receipt['sha256'][archive.name],
+            'campaign': campaign, 'initial_failure': initial,
             'historical_encrypted_log_recovery': 'blocked: supported archive excludes logs'}
 
 
@@ -74,6 +77,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--scope', type=Path, required=True)
     parser.add_argument('--escrow', type=Path, required=True)
+    parser.add_argument('--campaign', choices=tuple(deletion.campaigns.NAMES), default='initial')
     args = parser.parse_args()
     try:
         adapter = fresh.console.b.module
@@ -82,7 +86,7 @@ def main():
         escrow = fresh.private_escrow(args.escrow, lab.run)
         target = escrow / 'identity-reset-readiness.json'
         with adapter.locked(lab.run):
-            deletion.atomic_new(target, readiness(escrow, lab.c, lab.state, lab.sec))
+            deletion.atomic_new(target, readiness(escrow, lab.c, lab.state, lab.sec, args.campaign))
         print('PASS: private recovery export verified; identity-reset-readiness.json published in escrow.')
         return 0
     except Exception:

@@ -33,6 +33,9 @@ def module(name, path):
     return result
 
 
+campaigns = module('delete_p1_campaigns', HERE / 'p1-campaign.py')
+
+
 def reference(value):
     require(isinstance(value, dict) and value.get('type') == 'Datastore'
             and isinstance(value.get('value'), str) and value['value'], 'datastore reference missing')
@@ -139,6 +142,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--scope', type=Path, required=True)
     parser.add_argument('--escrow', type=Path, required=True)
+    parser.add_argument('--campaign', choices=tuple(campaigns.NAMES), default='initial')
     args = parser.parse_args()
     fresh = module('delete_fresh_recovery', HERE / 'fresh-recovery.py')
     adapter = fresh.console.b.module
@@ -156,11 +160,14 @@ def main():
         require(all(exported.get(field) == lab.state.get(field) for field in ('uuid', 'path', 'endpoint', 'owner', 'ref', 'ds_ref'))
                 and exported.get('uuid'), 'export belongs to another source VM')
         rows = []
+        initial = campaigns.initial_failure(lab.sec, lab.state['uuid'], args.campaign)
         for stage in P1_STAGES:
-            record = fresh.read_json(lab.sec / 'p1-regressions' / (stage + '.attempt.json'))
+            record = fresh.read_json(campaigns.directory(lab.sec, args.campaign) / (stage + '.attempt.json'))
             require(record.get('status') == 'pass' and record.get('uuid') == lab.state['uuid'], 'P1 qualification incomplete')
+            require(record.get('campaign', 'initial') == args.campaign, 'P1 campaign mismatch')
             rows.append({'check': 'p1-' + stage, 'result': 'pass'})
-        verdicts = {'schema': 1, 'source': SOURCE, 'ova_sha256': OVA, 'results': rows}
+        verdicts = {'schema': 1, 'source': SOURCE, 'ova_sha256': OVA, 'campaign': args.campaign,
+                    'results': rows, 'initial_failure': initial}
         # These survive lab.down's private run cleanup; raw credentials do not.
         atomic_new(escrow / 'source-p1-verdicts.json', verdicts)
         atomic_new(lab.ev / 'source-p1-verdicts.json', verdicts)
