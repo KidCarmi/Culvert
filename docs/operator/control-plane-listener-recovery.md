@@ -113,6 +113,11 @@ container still holds the port.
 ### Alert
 
 `controlplane_grpc_unavailable`, fired **once per episode** (not per retry).
+
+It is delivered through the startup-alert queue, so an outage that crosses the
+30s threshold while the appliance is still booting — before the persisted
+webhooks have loaded — is still delivered once they do, rather than being lost
+to an empty subscriber list while the fire-once latch stays set.
 Its payload states explicitly that the proxy and admin UI are unaffected —
 before CHAOS-71 this condition meant the whole gateway was gone, so if you
 remember the old behaviour, do not go looking for a dead data plane.
@@ -171,7 +176,9 @@ ControlPlane: gRPC listener bound and serving again on :19443
 
 ## Port collisions are now refused before boot
 
-`-cp-grpc-addr` is validated against the proxy, admin UI and SOCKS5 ports.
+The **resolved** Control Plane gRPC address — `-cp-grpc-addr` if set, otherwise
+`cluster.grpc_addr` from `config.yaml` — is validated against the proxy, admin
+UI and SOCKS5 ports.
 Previously a collision with the **proxy** port was invisible to the validator,
 and because the Control Plane binds first, the *proxy* died instead:
 
@@ -188,6 +195,13 @@ Invalid port configuration: proxy port and ControlPlane gRPC port must not both 
 
 This stays a pre-boot refusal: a collision between Culvert's own listeners is
 an unambiguous misconfiguration that no retry can resolve.
+
+The **YAML** path matters as much as the flag, and was the gap in the first
+version of this validation: with `-cp-grpc-addr` unset and
+`cluster.grpc_addr: ":8080"` beside `proxy.port: 8080`, the validator read the
+empty flag, passed, and the Control Plane then took the port before the proxy
+reached it — the same crashed proxy, from a config file instead of a command
+line. Reproduced and fixed in the same review round.
 
 ## Known limits (deliberate, recorded)
 

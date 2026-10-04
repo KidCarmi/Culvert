@@ -76,10 +76,41 @@ func (c clusterStartupConfig) cpMode() bool {
 
 // resolveClusterStartupConfig is the single startup-time reader of fc.Cluster
 // for this slice. Pure and deterministic; safe on a zero-value *FileConfig.
+// cpGRPCAddrFrom resolves the Control Plane gRPC listen address this node will
+// actually bind: the CLI flag wins, else `cluster.grpc_addr` from config.yaml.
+//
+// It exists because TWO places need that answer and they must not be able to
+// disagree about it — `validatePortCollisions` (main.go), which refuses a
+// pre-boot collision with the proxy/UI/SOCKS5 ports, and this resolver, which
+// is what `initCluster` actually binds. CHAOS-71 shipped the validator reading
+// only the CLI flag, so with `-cp-grpc-addr` unset and `cluster.grpc_addr`
+// equal to the proxy port the validator saw an EMPTY address, passed, and the
+// Control Plane then took the port before the proxy reached it. Reproduced
+// against the real binary (Codex review P1, PR #1546):
+//
+//	ControlPlane: enabled (gRPC :18090)
+//	Proxy: http://localhost:18090
+//	Proxy error: listen tcp :18090: bind: address already in use   → exit 1
+//
+// i.e. exactly the unattended crash loop that validation exists to prevent,
+// surviving through the YAML path. This is the divergence class CHAOS-69
+// recorded for lockout's `Check`/`RecordFailure` pair and for its own
+// measure-vs-use round: two call sites deriving ONE value separately will
+// drift, and the drift lands where a hostile or merely unlucky input wants it.
+// `TestChaos71_PortValidatorResolvesTheAddressTheClusterSliceBinds` pins the
+// AGREEMENT rather than either spelling, so a future change to the precedence
+// fails the build unless both move together.
+func cpGRPCAddrFrom(cliAddr string, fc *FileConfig) string {
+	if fc == nil {
+		return cliAddr
+	}
+	return firstStr(cliAddr, fc.Cluster.GRPCAddr)
+}
+
 func resolveClusterStartupConfig(fc *FileConfig, flags clusterCLIFlags) clusterStartupConfig {
 	return clusterStartupConfig{
 		ClusterDBPath:   firstStr(flags.ClusterDB, fc.Cluster.StateDB, "cluster.json"),
-		CPAddr:          firstStr(flags.CPGRPCAddr, fc.Cluster.GRPCAddr),
+		CPAddr:          cpGRPCAddrFrom(flags.CPGRPCAddr, fc),
 		CPCert:          firstStr(flags.CPGRPCCert, fc.Cluster.CertFile),
 		CPKey:           firstStr(flags.CPGRPCKey, fc.Cluster.KeyFile),
 		CPCA:            firstStr(flags.CPGRPCCA, fc.Cluster.CAFile),

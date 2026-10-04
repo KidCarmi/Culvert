@@ -34,7 +34,12 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   interruptible, rate-bounded and never count-bounded, with the certificate
   re-read on every attempt so a rotation window self-heals with no restart.
   A collision with Culvert's own listeners is now refused before boot with a
-  message naming both.
+  message naming both — on the **resolved** address, so a `cluster.grpc_addr`
+  in `config.yaml` is checked as well as `-cp-grpc-addr` (the flag-only check
+  in the first revision let a YAML collision through and the proxy died on it).
+  The unavailability alert is delivered through the startup-alert queue, so an
+  outage that crosses the threshold before the persisted webhooks load is still
+  delivered once they do.
 
   New surfaces, all on the **proxy** port because the Control Plane's own gRPC
   endpoint cannot report that it is unreachable: a `control_plane_grpc`

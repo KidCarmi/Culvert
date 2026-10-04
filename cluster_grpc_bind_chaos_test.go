@@ -798,3 +798,178 @@ func TestChaos71_TheFatalWallDetectsAReintroducedFatal(t *testing.T) {
 		t.Fatal("control failed: the ADR-0005 lease fatal is no longer matched by its allowlist marker")
 	}
 }
+
+// ── Codex review round (PR #1546) ───────────────────────────────────────────
+
+// TestChaos71_DefectYAMLGRPCAddressCollidesWithTheProxyPort requires a
+// `cluster.grpc_addr` that equals the proxy port to be refused pre-boot even
+// when `-cp-grpc-addr` is unset.
+//
+// The first shape of this validation read the CLI FLAG only, while the cluster
+// slice binds `firstStr(CLI, cluster.grpc_addr)` — so a YAML-only address was
+// invisible to it and the Control Plane took the proxy's port before the proxy
+// reached it. Reproduced against the real binary (Codex P1):
+//
+//	ControlPlane: enabled (gRPC :18090)
+//	Proxy error: listen tcp :18090: bind: address already in use   → exit 1
+func TestChaos71_DefectYAMLGRPCAddressCollidesWithTheProxyPort(t *testing.T) {
+	cases := []struct {
+		name     string
+		cliAddr  string
+		yamlAddr string
+		wantErr  bool
+	}{
+		{"yaml-only address collides with the proxy port", "", ":8080", true},
+		{"yaml-only address collides with the UI port", "", ":9090", true},
+		{"yaml-only address on its own port", "", ":50051", false},
+		{"cli overrides a colliding yaml with a free port", ":50051", ":8080", false},
+		{"cli collides while yaml is free — the CLI wins and must be caught", ":8080", ":50051", true},
+		{"neither set", "", "", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fc := &FileConfig{}
+			fc.Cluster.GRPCAddr = tc.yamlAddr
+			err := validatePortCollisions(8080, 9090, 0, cpGRPCAddrFrom(tc.cliAddr, fc))
+			if tc.wantErr && err == nil {
+				t.Errorf("cli=%q yaml=%q: no pre-boot refusal; initCluster would bind that port "+
+					"before the proxy and the proxy would die on it", tc.cliAddr, tc.yamlAddr)
+			}
+			if !tc.wantErr && err != nil {
+				t.Errorf("cli=%q yaml=%q: refused a legitimate configuration: %v", tc.cliAddr, tc.yamlAddr, err)
+			}
+		})
+	}
+}
+
+// TestChaos71_PortValidatorResolvesTheAddressTheClusterSliceBinds is the WALL,
+// and it pins the AGREEMENT rather than either spelling of the precedence.
+//
+// The P1 defect above was not a wrong rule — it was two call sites deriving ONE
+// value separately. Asserting that `cpGRPCAddrFrom` returns what
+// `resolveClusterStartupConfig` puts in `CPAddr` means a future change to the
+// precedence fails here unless both move together, which an assertion written
+// against `firstStr(cli, yaml)` directly would not catch (it would simply
+// re-encode whichever spelling the test author had in mind).
+func TestChaos71_PortValidatorResolvesTheAddressTheClusterSliceBinds(t *testing.T) {
+	for _, cli := range []string{"", ":50051", "0.0.0.0:7000"} {
+		for _, yaml := range []string{"", ":8080", "[::]:9999"} {
+			fc := &FileConfig{}
+			fc.Cluster.GRPCAddr = yaml
+
+			validatorSees := cpGRPCAddrFrom(cli, fc)
+			sliceBinds := resolveClusterStartupConfig(fc, clusterCLIFlags{CPGRPCAddr: cli}).CPAddr
+
+			if validatorSees != sliceBinds {
+				t.Errorf("cli=%q yaml=%q: the port validator resolves %q but the cluster slice binds %q — "+
+					"the two must never disagree about which address this node takes",
+					cli, yaml, validatorSees, sliceBinds)
+			}
+		}
+	}
+}
+
+// TestChaos71_DefectAlertSurvivesTheWebhookLoadWindow requires an
+// unavailability alert fired BEFORE the webhook store loads to still reach a
+// subscriber configured afterwards.
+//
+// initCluster arms the supervisor 27 init steps before
+// initPersistentAdminState loads the persisted webhooks, and the alert carries
+// a fire-once-per-episode latch — so a direct dispatch in that window is lost
+// permanently for an outage that is still running (Codex P2).
+func TestChaos71_DefectAlertSurvivesTheWebhookLoadWindow(t *testing.T) {
+	base := cpGRPCChaosSetup(t)
+
+	// Re-arm the startup queue as it is at boot: nothing flushed yet.
+	prevFlushed, prevQueue := startupAlertFlushed, startupAlertQueue
+	startupAlertMu.Lock()
+	startupAlertFlushed = false
+	startupAlertQueue = nil
+	startupAlertMu.Unlock()
+	t.Cleanup(func() {
+		startupAlertMu.Lock()
+		startupAlertFlushed, startupAlertQueue = prevFlushed, prevQueue
+		startupAlertMu.Unlock()
+	})
+
+	// Capture what the flush ultimately delivers, standing in for a webhook
+	// that is configured only once the store has loaded.
+	var mu sync.Mutex
+	var delivered []string
+	prevFire := startupAlertFire
+	startupAlertFire = func(event string, payload AlertPayload) {
+		mu.Lock()
+		delivered = append(delivered, event+":"+payload.Detail)
+		mu.Unlock()
+	}
+	t.Cleanup(func() { startupAlertFire = prevFire })
+
+	// The outage crosses the threshold while the webhook store is still empty.
+	noteCPGRPCConfigured(":50051")
+	noteCPGRPCBindFailure("port_in_use", time.Second, base)
+	noteCPGRPCBindFailure("port_in_use", time.Second, base.Add(cpGRPCBindUnavailableAfter+time.Second))
+
+	mu.Lock()
+	early := len(delivered)
+	mu.Unlock()
+	if early != 0 {
+		t.Fatalf("the alert was delivered before the webhook store loaded (%d) — it would have "+
+			"fanned out to an empty hook list and vanished", early)
+	}
+
+	// initPersistentAdminState loads the webhooks and flushes.
+	flushStartupAlerts()
+
+	mu.Lock()
+	got := append([]string(nil), delivered...)
+	mu.Unlock()
+	if len(got) != 1 {
+		t.Fatalf("after the webhook store loaded, delivered %d alert(s), want exactly 1: %v", len(got), got)
+	}
+	if !strings.HasPrefix(got[0], "controlplane_grpc_unavailable:") {
+		t.Errorf("delivered %q, want the controlplane_grpc_unavailable event", got[0])
+	}
+	if !strings.Contains(got[0], "unaffected") {
+		t.Errorf("the queued page lost its reassurance that the proxy and admin UI are unaffected: %q", got[0])
+	}
+}
+
+// TestChaos71_ControlAlertAfterFlushIsNotQueued is the CONTROL for the fix
+// above: once the startup flush has happened, the alert must pass straight
+// through rather than sitting in a queue nothing will drain again.
+func TestChaos71_ControlAlertAfterFlushIsNotQueued(t *testing.T) {
+	base := cpGRPCChaosSetup(t)
+
+	prevFlushed, prevQueue := startupAlertFlushed, startupAlertQueue
+	startupAlertMu.Lock()
+	startupAlertFlushed = true // the ordinary runtime posture
+	startupAlertQueue = nil
+	startupAlertMu.Unlock()
+	t.Cleanup(func() {
+		startupAlertMu.Lock()
+		startupAlertFlushed, startupAlertQueue = prevFlushed, prevQueue
+		startupAlertMu.Unlock()
+	})
+
+	var mu sync.Mutex
+	var delivered []string
+	prevFire := startupAlertFire
+	startupAlertFire = func(event string, payload AlertPayload) {
+		mu.Lock()
+		delivered = append(delivered, event)
+		mu.Unlock()
+	}
+	t.Cleanup(func() { startupAlertFire = prevFire })
+
+	noteCPGRPCConfigured(":50051")
+	noteCPGRPCBindFailure("port_in_use", time.Second, base)
+	noteCPGRPCBindFailure("port_in_use", time.Second, base.Add(cpGRPCBindUnavailableAfter+time.Second))
+
+	mu.Lock()
+	got := len(delivered)
+	mu.Unlock()
+	if got != 1 {
+		t.Errorf("post-flush delivery = %d alert(s), want 1 immediately — a queued alert after the "+
+			"flush would never be drained", got)
+	}
+}

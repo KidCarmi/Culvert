@@ -8449,6 +8449,65 @@ regex broken (caught by the not-vacuous check at 16 events).
    `setupProxyTest`. Snapshot the whole struct, not the field you happen to be
    reading.
 
+### 41.5a CODEX ROUND (PR #1546) — two defects, and both are this sweep's own rules turned back on it
+
+**P1 — the validator measured a value the binder does not use.** CHAOS-71 added
+the fourth port to `validatePortCollisions` and fed it `flagStr(s.cpGRPCAddr)`,
+the raw CLI flag. The cluster slice binds
+`firstStr(flags.CPGRPCAddr, fc.Cluster.GRPCAddr)`. So with `-cp-grpc-addr`
+unset and `cluster.grpc_addr: ":18090"` beside `proxy.port: 18090`, the
+validator saw an EMPTY address, passed, and the Control Plane took the port
+before the proxy reached it. Reproduced against the real binary:
+
+```
+ControlPlane: enabled (gRPC :18090)
+Proxy: http://localhost:18090
+Proxy error: listen tcp :18090: bind: address already in use   → exit 1
+```
+
+— the unattended crash loop the validation exists to prevent, surviving
+through the YAML path. **This is §39's measure-vs-use finding exactly,
+committed in the change that cites it**: a bound (or a check) is a claim about
+a STRING, so measure the value you will actually hand onward. The fix is
+`cpGRPCAddrFrom`, ONE resolver both call sites use, and the gate pins the
+AGREEMENT rather than either spelling — mutation-proven to be non-redundant
+with the behavioural gate beside it: reverting BOTH sides keeps them agreeing
+(the agreement wall stays green, the YAML defect gate fires), while a
+ONE-SIDED precedence change fires the wall and not the defect gate.
+
+**P2 — a fire-once latch set on a dispatch that reached nobody.**
+`initCluster` arms the supervisor at main.go:231; `initPersistentAdminState`
+loads the persisted webhooks at :258. An unavailability alert crossing the 30s
+threshold inside that window fanned out to an EMPTY hook list and vanished,
+while `noteCPGRPCBindFailure` had already latched `cpGRPC.alerted` — so a
+subscriber loaded moments later never heard about an outage that was still
+running. The window opens whenever the intervening startup work (root CA,
+blocklist, URL categories, scanning) exceeds `cpGRPCBindUnavailableAfter`,
+which on a large config it can.
+
+**The mechanism already existed and §27 had already adopted it for exactly
+this reason** — `deferStartupAlert`, whose own doc comment names the hazard
+("an alert fired by an earlier init would fan out to an empty webhook list and
+vanish"). So the fix is to route through it rather than to invent a
+second dialect, and the `HasSubscriber` gate goes with it: during the pre-flush
+window the store is empty BY DEFINITION, so gating there would drop precisely
+the alert the queue exists to save, and a fire-once-per-episode producer is the
+"bounded by construction" exemption the alert-gate contract already names.
+`Dispatch` spawns its own per-hook delivery goroutines, so calling it from the
+supervisor does not block the rebind loop. Pinned by a defect gate (fire
+pre-flush, assert nothing delivered, flush, assert exactly one) with a CONTROL
+that a post-flush alert passes straight through rather than sitting in a queue
+nothing will drain again.
+
+**The governance lesson from this round**: §41.5 recorded that a behavioural
+gate for the fatal was impossible and a wall was needed. Both of these defects
+were in code that gate could never have reached — one in a value RESOLVED
+somewhere else, one in an init-ORDER relationship between two slices. Neither
+is visible from the file being edited, which is the same conclusion §40 reached
+("enumerate such a class from the PRIMITIVE, not from the file being edited")
+arriving from a third direction: enumerate from the VALUE and from the
+STARTUP ORDER, not from the function.
+
 ### 41.6 Residual risk (deliberate, recorded)
 
 - **CL-21** — a bound listener whose `Serve` *ends* is recorded but **not

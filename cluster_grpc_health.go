@@ -354,14 +354,33 @@ func noteCPGRPCStopped() {
 	cpGRPC.mu.Unlock()
 }
 
-// fireCPGRPCListenerAlert is a package-level var so tests can capture it. It is
-// HasSubscriber-gated so the default posture (no webhooks configured) spawns no
-// goroutine and builds no payload.
+// fireCPGRPCListenerAlert is a package-level var so tests can capture it.
+//
+// It goes through the STARTUP-ALERT QUEUE, and that is load-bearing rather than
+// stylistic. `initCluster` (main.go:231) arms this supervisor 27 init steps
+// before `initPersistentAdminState` (:258) loads the persisted webhooks, so an
+// unavailability alert fired in that window would fan out to an EMPTY hook list
+// and vanish — while `noteCPGRPCBindFailure` has already latched
+// `cpGRPC.alerted`, so a subscriber loaded moments later never hears about the
+// outage that is still running. The window opens whenever the intervening
+// startup work (root CA, blocklist, URL categories, scanning) takes longer than
+// `cpGRPCBindUnavailableAfter`, which on a large config it can
+// (Codex review P2, PR #1546).
+//
+// `deferStartupAlert` queues until `flushStartupAlerts` and is a plain
+// `fireAlert` passthrough after it, so the ordinary runtime case is unchanged.
+// This is the mechanism CHAOS-59 already adopted for `threat_feed_stale` for
+// exactly this reason — not a second dialect.
+//
+// The `HasSubscriber` gate is deliberately GONE with it: during the pre-flush
+// window the store is empty BY DEFINITION, so gating there would drop precisely
+// the alert the queue exists to save. It is not needed either — the gate's
+// documented purpose is to spare work on PER-REQUEST producers, and this one
+// fires at most once per episode, which is the "bounded by construction"
+// exemption CLAUDE.md names. `Dispatch` spawns its own per-hook delivery
+// goroutines, so calling it from the supervisor does not block the rebind loop.
 var fireCPGRPCListenerAlert = func(detail string) {
-	if !globalAlertStore.HasSubscriber("controlplane_grpc_unavailable") {
-		return
-	}
-	go fireAlert("controlplane_grpc_unavailable", AlertPayload{
+	deferStartupAlert("controlplane_grpc_unavailable", AlertPayload{
 		Detail: detail,
 		Source: "control_plane",
 	})

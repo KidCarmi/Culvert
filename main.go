@@ -633,11 +633,13 @@ func loadFileConfigAndFlags(s *startupState) {
 	if err := validatePortRanges(s.pPort, s.uPort, s.socks5PortVal); err != nil {
 		log.Fatalf("Invalid port configuration: %v", err)
 	}
-	// cpGRPCAddr is read through a nil-safe deref: loadFileConfigAndFlags is
-	// also driven by precedence tests that build a startupState with only the
-	// fields under test populated, so dereferencing a flag pointer directly
-	// here panics on an unrelated test rather than reporting a config fault.
-	if err := validatePortCollisions(s.pPort, s.uPort, s.socks5PortVal, flagStr(s.cpGRPCAddr)); err != nil {
+	// The CP gRPC address is RESOLVED here, not read from the flag alone: the
+	// cluster slice binds `firstStr(CLI, cluster.grpc_addr)`, so validating the
+	// flag by itself missed a YAML address colliding with the proxy port and
+	// left the crash loop intact (Codex P1 — see cpGRPCAddrFrom). The flag
+	// pointer is deref'd nil-safely because loadFileConfigAndFlags is also
+	// driven by precedence tests that populate only the fields under test.
+	if err := validatePortCollisions(s.pPort, s.uPort, s.socks5PortVal, cpGRPCAddrFrom(flagStr(s.cpGRPCAddr), s.fc)); err != nil {
 		log.Fatalf("Invalid port configuration: %v", err)
 	}
 	s.lPath = firstStr(*s.logFilePath, s.fc.Proxy.LogFile)
