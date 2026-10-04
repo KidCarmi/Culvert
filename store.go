@@ -1926,6 +1926,18 @@ func (c *Config) UIUserExists(username string) bool {
 	return c.uiUsers[username] != nil
 }
 
+// UIUserRole snapshots the current local authorization under the roster lock.
+// A signed session is not authority to retain a role removed from the roster.
+func (c *Config) UIUserRole(username string) (UIRole, bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	u := c.uiUsers[username]
+	if u == nil || !roleEnrolled(u.role) {
+		return "", false
+	}
+	return u.role, true
+}
+
 // LoginNameConfigured reports whether username names an account VerifyUIUser
 // could authenticate — the roster, or the legacy single user.
 //

@@ -233,6 +233,7 @@ func mintUISessionValue(t *testing.T, user string, role UIRole) string {
 	value, err := encodeSession(&Session{
 		Sub:      user,
 		Provider: "local",
+		Audience: uiSessionAudience,
 		Role:     string(role),
 		Exp:      time.Now().Add(getSessionTTL()).Unix(),
 		Jti:      newSessionJti(),

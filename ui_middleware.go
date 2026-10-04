@@ -255,6 +255,15 @@ func uiAuthMiddleware(next http.Handler) http.Handler {
 		// AuthEnabled): open mode (defaultAuthOutcome=Exempt) counts as configured,
 		// so it keeps the admin UI gated rather than granting RoleAdmin to all.
 		if !cfg.IsConfigured() {
+			// The temporary administrator role must share the first-admin
+			// token gate. Otherwise callers can bypass /api/setup/complete
+			// through protected APIs such as /api/auth/users. Static assets
+			// remain public so the setup wizard can load; token-unset installs
+			// retain their historical bootstrap behavior.
+			if strings.HasPrefix(r.URL.Path, "/api/") && !setupTokenAccepts(r.Header.Get(headerSetupToken)) {
+				http.Error(w, "setup token required or invalid", http.StatusForbidden)
+				return
+			}
 			ctx := context.WithValue(r.Context(), uiRoleKey{}, RoleAdmin)
 			next.ServeHTTP(w, r.WithContext(ctx))
 			return
