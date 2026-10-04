@@ -240,6 +240,16 @@ func TestBenchGate_MatchesHostIsAllocationFree(t *testing.T) {
 		{"MatchesHost/unknown-category", func() { s.MatchesHost("No Such Category", "uncategorized.example.net") }},
 		{"MatchesHost/hit-exact", func() { hitStore.MatchesHost("Social Media", "example.com") }},
 		{"MatchesHost/hit-subdomain", func() { hitStore.MatchesHost("Social Media", "a.b.example.com") }},
+		// The *Norm entry points are the ones the policy scan actually calls
+		// per rule, so they carry the same bound. They take a host the caller
+		// already canonicalized, so the fixtures pass a normalized literal.
+		{"MatchesHostNorm/miss", func() { s.MatchesHostNorm(Category(mixed), "uncategorized.example.net") }},
+		{"MatchesHostNorm/lowercase-name", func() { s.MatchesHostNorm(lowered, "uncategorized.example.net") }},
+		{"MatchesHostNorm/unknown-category", func() { s.MatchesHostNorm("No Such Category", "uncategorized.example.net") }},
+		{"MatchesHostNorm/hit-exact", func() { hitStore.MatchesHostNorm("Social Media", "example.com") }},
+		{"MatchesHostNorm/hit-subdomain", func() { hitStore.MatchesHostNorm("Social Media", "a.b.example.com") }},
+		{"MatchesHostAdminNorm/miss", func() { s.MatchesHostAdminNorm(Category(mixed), "uncategorized.example.net") }},
+		{"MatchesHostAdminNorm/hit", func() { hitStore.MatchesHostAdminNorm("Social Media", "a.b.example.com") }},
 	}
 	for _, tc := range cases {
 		if got := testing.AllocsPerRun(200, tc.fn); got != 0 {

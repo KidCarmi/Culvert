@@ -579,7 +579,10 @@ func (s *authMatchScratch) normHost() string {
 
 func (s *authMatchScratch) hostCat() *hostCatScratch {
 	if !s.catSet {
-		s.cat = newHostCatScratch(s.ctx.Host)
+		// Seed from this scratch's OWN normHost memo: both are
+		// normalizeHost(s.ctx.Host), so the un-seeded form kept two memos of
+		// one value and normalized the destination twice per Stage-1 scan.
+		s.cat = newHostCatScratchNorm(s.ctx.Host, s.normHost())
 		s.catSet = true
 	}
 	return &s.cat

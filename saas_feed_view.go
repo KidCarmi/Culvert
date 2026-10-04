@@ -273,10 +273,27 @@ func (v *effectiveCategoryView) LookupHost(host string) (string, bool) {
 // This is the MEMBERSHIP query; LookupHost answers the separate CLASSIFICATION query
 // and is not a substitute for it.
 func (v *effectiveCategoryView) MatchesCategory(cat, host string) bool {
+	return v.MatchesCategoryNorm(cat, hostutil.NormalizeHost(host))
+}
+
+// MatchesCategoryNorm is MatchesCategory over a host the CALLER has already run
+// through hostutil.NormalizeHost. It is the per-rule entry point for the policy
+// hot path, and the view-armed twin of urlcat.Store.MatchesHostNorm — see that
+// function for why the normalization is hoisted out of the per-rule call.
+//
+// This path is the one that pays TWICE without the hoist: when the signed-feed
+// view is armed, hostCatScratch.matchesCategory calls
+// catStore.MatchesHostAdmin AND this matcher for every category-scoped rule,
+// so each rule re-canonicalized the same destination twice (~92 ns/rule of
+// re-derivation on the measured shape).
+//
+// Semantics are untouched: the value matched against is
+// hostutil.NormalizeHost(host) either way, so only where it is computed moves.
+func (v *effectiveCategoryView) MatchesCategoryNorm(cat, normHost string) bool {
 	if cat == "" {
 		return false
 	}
-	h := hostutil.NormalizeHost(host)
+	h := normHost
 	if h == "" {
 		return false
 	}
