@@ -235,6 +235,28 @@ assert any(r.get("name")=="lab-allow-example" and r.get("enabled") is True for r
     return 1
   fi
   check "$step" restore-ca pass 'inspection root CA fingerprint unchanged'
+  # Full restore intentionally excludes Tier-3 feed caches. /ready establishes
+  # serving readiness, not completion of the asynchronous community DB rebuild.
+  # Require the current process to report a completed sync before comparing
+  # lookup results, with the same 1500s budget as baseline qualification.
+  local feed_synced=0
+  deadline=$(( $(date +%s) + 1500 ))
+  while (( $(date +%s) < deadline )); do
+    api GET /api/urlcat/feed-status >"$SEC/actual-restore/feed-status.txt" || true
+    if [[ $(code <"$SEC/actual-restore/feed-status.txt") == 200 ]] &&
+      body <"$SEC/actual-restore/feed-status.txt" | python3 -c 'import json,sys
+u=json.load(sys.stdin).get("ut1",{})
+assert u.get("lastSync") and int(u.get("entries",0))>0' 2>/dev/null; then
+      feed_synced=1
+      break
+    fi
+    sleep 20
+  done
+  if [[ $feed_synced != 1 ]]; then
+    check "$step" restore-feed-rehydrated fail 'community feed did not report a completed sync within 1500s after restore'
+    return 1
+  fi
+  check "$step" restore-feed-rehydrated pass 'community feed rebuilt after full restore; current process reports a completed sync'
   lookups >"$EV/09-category-lookups.txt"
   if ! grep -q 'tier=community' "$EV/09-category-lookups.txt" || ! cmp -s "$EV/05b-lookups-before.txt" "$EV/09-category-lookups.txt"; then
     check "$step" restore-categories fail 'community category lookups differ from baseline'
