@@ -29,10 +29,8 @@ func armResumeMarker(t *testing.T) {
 }
 
 func TestOSUpdateReboot_ArmsResumeBeforeStoppingTheStack(t *testing.T) {
-	out, calls, code := runOSUpdate(t, "reboot")
-	if code != 0 {
-		t.Fatalf("reboot failed (code %d):\n%s", code, out)
-	}
+	// SHUTDOWN_KILLS: the accepted reboot ends the script, as a real shutdown does.
+	out, calls, _ := runOSUpdate(t, "reboot", "SHUTDOWN_KILLS=1", "TEST_HOLD_SECS=30")
 	stop, reboot := strings.Index(calls, "docker compose stop"), strings.Index(calls, "systemctl reboot")
 	if stop < 0 || reboot < stop {
 		t.Fatalf("want the stack stopped, then the reboot:\n%s", calls)
@@ -40,8 +38,37 @@ func TestOSUpdateReboot_ArmsResumeBeforeStoppingTheStack(t *testing.T) {
 	if !strings.Contains(calls, "resume-marker:armed") {
 		t.Fatalf("the resume marker must be armed BEFORE the stack is stopped (a stop marks the containers manually stopped):\n%s", calls)
 	}
-	if !strings.Contains(calls, "final:resume-marker-present") {
-		t.Fatalf("the marker must survive into the reboot:\n%s", calls)
+	if !strings.Contains(calls, "final:resume-marker-present") || strings.Contains(calls, "docker compose up") {
+		t.Fatalf("an accepted reboot must leave the marker for the boot and must not restart the stack:\n%s\n%s", calls, out)
+	}
+}
+
+// ACCEPTED is not DONE: after systemctl queues the reboot, the script keeps
+// both maintenance locks until the shutdown ends it, so the agent cannot admit
+// an upgrade/restore into a host that is going down (LOCAL-ESXI review of
+// b80968dc: the locks used to drop the moment systemctl returned).
+func TestOSUpdateReboot_HoldsBothLocksUntilTheShutdownEndsIt(t *testing.T) {
+	_, calls, _ := runOSUpdateWith(t, []string{"reboot"}, []string{}, "CHECK_LOCKS=1", "SHUTDOWN_KILLS=1", "TEST_HOLD_SECS=30")
+	if !strings.Contains(calls, "lock:held") || !strings.Contains(calls, "agentlock:held") {
+		t.Fatalf("both locks must still be held after the reboot request was accepted:\n%s", calls)
+	}
+}
+
+// A reboot request that was accepted but has not happened within the bound
+// is NOT proven aborted (the queued shutdown may still run): the command
+// fails, the stack stays stopped and the marker stays for the boot or a
+// manual resume-stack (LOCAL-ESXI review: restoring the stack here races the
+// queued shutdown).
+func TestOSUpdateReboot_AcceptedButNotYetDoneRestoresNothing(t *testing.T) {
+	out, calls, code := runOSUpdate(t, "reboot", "TEST_HOLD_SECS=1")
+	if code == 0 {
+		t.Fatalf("a reboot that has not happened must exit non-zero:\n%s", out)
+	}
+	if strings.Contains(calls, "docker compose up") || !strings.Contains(calls, "final:resume-marker-present") {
+		t.Fatalf("an accepted reboot must not restart the stack, and the marker must stay:\n%s", calls)
+	}
+	if !strings.Contains(out, "NOT restarting the stack") {
+		t.Fatalf("the failure must say what it did not do:\n%s", out)
 	}
 }
 
@@ -218,5 +245,27 @@ func TestStackResumeUnit_NoOrderingCycle(t *testing.T) {
 	body := strings.Replace(string(unit), "ConditionPathExists=", "#ConditionPathExists=", 1)
 	if rep := orderingCycleReport(t, string(fb), map[string]string{"culvert-stack-resume.service": body}); rep != "" {
 		t.Errorf("culvert-stack-resume.service forms an ordering cycle:\n%s", rep)
+	}
+}
+
+// An interrupted maintenance-agent operation awaiting reconcile (a journal
+// record) must stop the boot-time resume exactly as it stops every mutating
+// mode: starting the stack under an unreconciled data rollback is the one
+// thing the journal exists to prevent (LOCAL-ESXI review of b80968dc).
+func TestOSUpdateResumeStack_RefusesWhileTheAgentJournalAwaitsReconcile(t *testing.T) {
+	armResumeMarker(t)
+	// --force does not override this fence (it does for the other modes).
+	out, calls, code := runOSUpdateWith(t, []string{"resume-stack", "--force"}, []string{"op-data-rollback"})
+	if code == 0 {
+		t.Fatalf("resume must fail while the agent journal holds an interrupted operation:\n%s", out)
+	}
+	if strings.Contains(calls, "docker compose up") {
+		t.Fatalf("the stack must not be started over an unreconciled operation:\n%s", calls)
+	}
+	if !strings.Contains(calls, "final:resume-marker-present") {
+		t.Fatalf("the marker must be kept (resume after reconcile):\n%s", calls)
+	}
+	if !strings.Contains(out, "op-data-rollback") {
+		t.Fatalf("the refusal must name the operation:\n%s", out)
 	}
 }

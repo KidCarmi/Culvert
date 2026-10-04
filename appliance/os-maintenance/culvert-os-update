@@ -41,6 +41,7 @@ LOCK=/run/culvert-os-update.lock
 # does NOT start them when the engine comes back: without this, the gateway
 # stayed down after every maintenance reboot (lab run 37156062516, F-OSU-REBOOT-1).
 STACK_RESUME=/var/lib/culvert-appliance/state/stack-resume-on-boot
+SHUTDOWN_HOLD_SECS=600
 mode="${1:-check}"; shift || true
 reboot_if_required=0; force=0
 for a in "$@"; do
@@ -52,6 +53,15 @@ export DEBIAN_FRONTEND=noninteractive
 exec > >(tee -a "$LOG") 2>&1
 log() { printf '%s culvert-os-update[%s]: %s\n' "$(date -u +%FT%TZ)" "$mode" "$*"; }
 DOCKER_PKGS=(docker-ce docker-ce-cli containerd.io docker-compose-plugin)
+
+# journal_inflight: the maintenance agent's operations interrupted and awaiting
+# POST /v1/reconcile (one journal record each), space-separated; empty when
+# none. An unreadable journal is a refusal, never "nothing in flight".
+journal_inflight() {
+  [[ -d "$MAINT_JOURNAL" ]] || return 0
+  find "$MAINT_JOURNAL" -maxdepth 1 -name '*.json' -type f -printf '%f ' | sed 's/\.json / /g' || {
+    echo "culvert-os-update: cannot read the maintenance agent journal $MAINT_JOURNAL — refusing" >&2; return 1; }
+}
 
 # guard_maintenance: called by every mutating mode before it changes anything.
 guard_maintenance() {
@@ -66,11 +76,8 @@ guard_maintenance() {
       exit 3
     }
   fi
-  local inflight=""
-  if [[ -d "$MAINT_JOURNAL" ]]; then
-    inflight="$(find "$MAINT_JOURNAL" -maxdepth 1 -name '*.json' -type f -printf '%f ' | sed 's/\.json / /g')" || {
-      echo "culvert-os-update: cannot read the maintenance agent journal $MAINT_JOURNAL — refusing" >&2; exit 3; }
-  fi
+  local inflight
+  inflight="$(journal_inflight)" || exit 3
   if [[ -n "${inflight// /}" ]]; then
     if [[ "$force" -eq 1 ]]; then
       log "WARNING: --force: proceeding although the maintenance agent journal holds: $inflight"
@@ -142,6 +149,19 @@ do_reboot() {
   # in progress) would otherwise exit here under set -e with the stack
   # stopped and nothing to bring it back until the next boot.
   systemctl reboot || recover_aborted_reboot "the reboot request was REJECTED (systemctl reboot exit $?)"
+  # ACCEPTED is not DONE: systemctl returns once the job is queued. Keep
+  # holding this script's lock and the agent's host-maintenance lock until the
+  # shutdown ends this process, so the agent cannot admit an upgrade/restore
+  # into a host that is going down. An accepted request is NOT proven aborted
+  # by time passing — the queued shutdown may still run — so outliving the
+  # bound restores nothing: the stack stays stopped, the resume marker stays
+  # (the next boot, or `resume-stack`, starts it) and the command fails.
+  # (The durable, agent-checked shutdown fence is #1540's; this hold covers
+  # the window it is not yet integrated.)
+  log "reboot requested; holding the maintenance locks until the shutdown ends this process"
+  sleep "$SHUTDOWN_HOLD_SECS" || true
+  log "the reboot was accepted but has not happened within ${SHUTDOWN_HOLD_SECS}s — NOT restarting the stack while it may still run; reboot the host, or if it was cancelled: sudo culvert-os-update resume-stack"
+  exit 1
 }
 finish() {
   report_reboot
@@ -242,6 +262,16 @@ case "$mode" in
       exec 8>>"$MAINT_STATE/host-maintenance.lock"
       flock -w 300 8 || { log "timed out waiting for the maintenance agent lock — stack NOT started"; exit 3; }
       log "holding $LOCK and the maintenance agent lock ($MAINT_STATE/host-maintenance.lock)"
+    fi
+    # The journal fence every mutating mode applies: never start the stack
+    # over an operation the agent must reconcile first (e.g. a data
+    # rollback). The marker stays; resume after reconciling.
+    inflight="$(journal_inflight)" || exit 3
+    # No --force here (unlike the other modes): starting the stack over an
+    # unreconciled data rollback is never the operator's shortcut to take.
+    if [[ -n "${inflight// /}" ]]; then
+      log "NOT starting the stack: the maintenance agent has operation(s) interrupted and awaiting reconcile: $inflight — settle them (Admin UI → Release Management, or POST /v1/reconcile), then: sudo culvert-os-update resume-stack"
+      exit 3
     fi
     if stack_start_required; then
       rm -f "$STACK_RESUME"
