@@ -64,7 +64,7 @@ func TestCandidateVersion_InstallableButNeverAReleaseIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatalf("%v: %s", err, got)
 	}
-	installerGate := regexp.MustCompile(`^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$`)
+	installerGate := regexp.MustCompile(`^v\d+\.\d+\.\d+(-[0-9A-Za-z.]+)?$`) // = install.sh's gate, checked verbatim below
 	if !installerGate.MatchString(got) {
 		t.Fatalf("%q fails the installer's agent version gate", got)
 	}
@@ -156,10 +156,10 @@ func TestInstallScript_NonReleaseAgentVersionIsReportedAsSuch(t *testing.T) {
 		t.Fatal(err)
 	}
 	s := string(src)
-	exec := strings.Index(s, `if ! bundled_version="$("$cand" --version 2>/dev/null)"; then`)
+	execBranch := strings.Index(s, `if ! bundled_version="$("$cand" --version 2>/dev/null)"; then`)
 	notRunnable := strings.Index(s, "Bundled agent binary is not runnable on this host")
 	gate := strings.Index(s, "not a release version (vX.Y.Z[-pre]) — not installing it.")
-	if exec < 0 || notRunnable < exec || gate < notRunnable {
+	if execBranch < 0 || notRunnable < execBranch || gate < notRunnable {
 		t.Fatal("install.sh must report a failed exec and a non-release stamp separately")
 	}
 	if strings.Count(s, "Bundled agent binary is not runnable on this host") != 1 {
