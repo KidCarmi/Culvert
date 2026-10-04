@@ -31,6 +31,28 @@ In CI: [`.github/workflows/appliance-lab.yml`](../../../../.github/workflows/app
 runs on every push to `test/appliance-lab` (and on `workflow_dispatch`) on a
 standard `ubuntu-24.04` runner.
 
+## The same checks against an appliance deployed elsewhere (ESXi)
+
+`qualify` and `collect` run unchanged against a VM another tool imported and
+owns (the ESXi qualification on `test/esxi-qualification`). That tool keeps
+the hypervisor, the VM and its SSH key; the lab adds only its own disposable
+admin password:
+
+```bash
+LAB_DIR=/var/tmp/culvert-esxi-qual LAB_EXTERNAL=1 LAB_HOST=<vm address> \
+LAB_SSH_KEY=<private key whose .pub was given as the OVF public-keys property> \
+LAB_EXPECT_IMAGE_ID=sha256:384f4c4b1bad91be93dc8b78adb974b6c57dd9b4c8f534bfdbafc2c1e4f1ab04 \
+  test/e2e/appliance/lab/appliance-lab.sh qualify
+LAB_DIR=/var/tmp/culvert-esxi-qual LAB_EXTERNAL=1 LAB_HOST=<vm address> LAB_SSH_KEY=<key> \
+  test/e2e/appliance/lab/appliance-lab.sh collect
+```
+
+Ports default to 22/8080/9090. Step 5's traffic goes from the machine running
+the lab, through the appliance's proxy, to `example.com`/`example.org`. Run it
+on a first boot that has not been set up yet; the setup-token checks need
+`setup pending`. What ESXi adds and the lab cannot cover (import, guestinfo
+delivery, VMware Tools, LSI Logic, datastore) stays with the ESXi procedure.
+
 ## What it does
 
 | phase | does |

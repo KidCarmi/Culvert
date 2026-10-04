@@ -7,6 +7,7 @@ operator-controlled inputs. Simulator/unit tests never qualify an appliance.
 import argparse
 import contextlib
 import hashlib
+import importlib.util
 import ipaddress
 import json
 import os
@@ -310,6 +311,11 @@ class Lab:
     def __init__(self, scope):
         self.scope_path = scope.resolve()
         self.c = json.loads(scope.read_text(encoding='utf-8-sig'))
+        if self.c.get('controller_manifest'):
+            spec = importlib.util.spec_from_file_location('esxi_controller_freeze', HERE / 'controller-freeze.py')
+            frozen = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(frozen)
+            frozen.verify(Path(self.c['controller_manifest']), ROOT)
         run = self.c.get('run_dir') or str(ROOT / '.tools/esxi-run')
         self.run = Path(run).resolve()
         self.ev = self.run / 'evidence'
