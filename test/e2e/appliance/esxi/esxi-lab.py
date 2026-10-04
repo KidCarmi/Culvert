@@ -385,6 +385,7 @@ class Lab:
         sources = {}
         for source in (Path(__file__), HERE / 'guest-checks.sh', HERE / 'guest-observe.py',
                        HERE / 'restore-checks.sh', HERE / 'console-checks.py', HERE / 'console-ocr.ps1',
+                       HERE / 'bootstrap-checks.py', HERE / 'private-keystrokes.go', HERE / 'esxi-port-relay.py',
                        HERE / 'govc-sha256-negotiation.patch', HERE.parent / 'lab/appliance-lab.sh'):
             with source.open('rb') as f:
                 sources[source.relative_to(ROOT).as_posix()] = digest(f)
@@ -508,6 +509,7 @@ class Lab:
         require(self.state.get('phase') == 'powered-on', 'qualify is single-use on a fresh import')
         sources = {}
         for source in (Path(__file__), HERE / 'guest-checks.sh', HERE / 'restore-checks.sh',
+                       HERE / 'esxi-port-relay.py',
                        HERE.parent / 'lab/appliance-lab.sh'):
             with source.open('rb') as stream:
                 sources[source.relative_to(ROOT).as_posix()] = digest(stream)
@@ -547,11 +549,11 @@ class Lab:
             with socket.socket() as sock:
                 sock.bind(('127.0.0.1', port))
         def start_tunnel(address):
-            command = self.ssh_command(address)
-            tunnel = command[:-1] + ['-o', 'ExitOnForwardFailure=yes', '-N']
+            # The appliance intentionally disables SSH forwarding. A controller
+            # loopback relay preserves that policy and exposes no LAN listener.
+            tunnel = [sys.executable, str(HERE / 'esxi-port-relay.py'), '--target', address]
             for local, remote in zip(ports, (22, 8080, 9090)):
-                tunnel += ['-L', f'127.0.0.1:{local}:127.0.0.1:{remote}']
-            tunnel += [command[-1]]
+                tunnel += ['--map', f'{local}:{remote}']
             return subprocess.Popen(tunnel, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
         def forwarding_ready(timeout):

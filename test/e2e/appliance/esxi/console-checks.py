@@ -27,11 +27,12 @@ def run(lab):
     keyboard = keyboard_module.PrivateKeyboard(lab)
 
     def remote(command, data=None):
-        result = subprocess.run(ssh + [command], input=data, capture_output=True,
-                                text=True, timeout=30)
+        # Windows text-mode stdin expands LF to CRLF, changing a chpasswd value.
+        result = subprocess.run(ssh + [command], input=data.encode() if data is not None else None,
+                                capture_output=True, timeout=30)
         if result.returncode:
             raise RuntimeError('guest console observation/action failed')
-        return result.stdout
+        return result.stdout.decode('utf-8', errors='replace')
 
     def key(value, text=False):
         keyboard.send(value, text=text)

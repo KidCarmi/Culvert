@@ -45,8 +45,10 @@ if (-not $a.AreAccessRulesProtected) {exit 1};
 foreach($r in $a.Access) {if ($r.AccessControlType -eq 'Allow' -and $r.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value -notin $allowed) {exit 1}};
 $i=Get-Item -LiteralPath $p -Force; if (($i.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {exit 1}
 """
+    environment = {k: v for k, v in os.environ.items() if k.upper() != 'PSMODULEPATH'}
+    environment['CULVERT_PRIVATE_DIR'] = str(lab.sec)
     result = subprocess.run(['powershell.exe', '-NoProfile', '-NonInteractive', '-Command', script],
-                            env=dict(os.environ, CULVERT_PRIVATE_DIR=str(lab.sec)),
+                            env=environment,
                             capture_output=True, timeout=15)
     ensure(result.returncode == 0, 'private directory ACL verification failed')
 
@@ -140,6 +142,7 @@ class Bootstrap:
         timeout = max(1, int(self.budget(15, deadline)))
         result = subprocess.run(['powershell.exe', '-NoProfile', '-NonInteractive', '-File', str(HERE / 'console-ocr.ps1'),
                                  '-ImagePath', str(png), '-OutputPath', str(ocr), '-TimeoutSeconds', str(timeout)],
+                                env={k: v for k, v in os.environ.items() if k.upper() != 'PSMODULEPATH'},
                                 capture_output=True, timeout=self.budget(timeout + 3, deadline))
         if result.returncode or not ocr.is_file():
             return ''
@@ -248,13 +251,13 @@ class Bootstrap:
         deadline = min(self.deadline, time.monotonic() + 60)
         while time.monotonic() < deadline:
             self.lab.vm(timeout=self.budget(15, deadline))
-            result = subprocess.run(ssh + [command], input=password + '\n', capture_output=True,
-                                    text=True, timeout=self.budget(20, deadline))
+            result = subprocess.run(ssh + [command], input=(password + '\n').encode(), capture_output=True,
+                                    timeout=self.budget(20, deadline))
             # Authentication is never retried: only the post-auth cleanup predicate
             # may still be pending while the worker reaches its next observation.
-            ensure(result.returncode == 0 and result.stdout in ('BOOTSTRAP_CLEAN', 'BOOTSTRAP_PENDING'),
+            ensure(result.returncode == 0 and result.stdout in (b'BOOTSTRAP_CLEAN', b'BOOTSTRAP_PENDING'),
                    'pinned SSH or sudo verification failed; no authentication retry')
-            if result.returncode == 0 and result.stdout == 'BOOTSTRAP_CLEAN':
+            if result.returncode == 0 and result.stdout == b'BOOTSTRAP_CLEAN':
                 self.lab.record('bootstrap-private-record-cleanup', 'pass', 'pinned SSH and password-authenticated sudo confirmed forced-change cleared and private handoff absent')
                 return
             time.sleep(min(2, self.budget(2, deadline)))
