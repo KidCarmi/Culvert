@@ -424,7 +424,7 @@ class Lab:
                            capture_output=True, check=True, timeout=30)
         key = self.sec / 'id_ed25519'
         subprocess.run(['ssh-keygen', '-q', '-t', 'ed25519', '-N', '', '-f', str(key)], check=True, timeout=30)
-        (self.sec / 'admin-pass').write_text(secrets.token_hex(18), encoding='ascii')
+        (self.sec / 'admin-pass').write_text('Qv7' + secrets.token_hex(18), encoding='ascii')
         props = {'instance-id': self.state['name'], 'hostname': self.state['name'],
                  'culvert.net.mode': 'dhcp'}
         if self.c.get('credential_mode', 'key') == 'key':

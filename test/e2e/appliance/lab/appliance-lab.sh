@@ -353,11 +353,17 @@ cmd_qualify() {
     printf 'X-Culvert-Setup-Token: %s\n' "$(cat "$SEC/setup-token")" > "$SEC/setup-header"
     c="$(printf '%s' "{\"user\":\"$ADMIN_USER\",\"pass\":\"$pass\"}" | curl -ksS -m 30 -X POST "$UI/api/setup/complete" -H "Origin: $UI" -H 'Content-Type: application/json' -H "@$SEC/setup-header" \
           --data-binary @- -w '\n%{http_code}\n' | tee "$EV/04-setup-with-token.txt" | code)"
-    [[ $c == 200 ]] && check 4 setup-with-token pass "200" || { check 4 setup-with-token fail "http $c"; STOP=1; }
-    c="$(api POST /api/auth/login "{\"user\":\"$ADMIN_USER\",\"pass\":\"$pass\"}" | tee "$EV/04-login.txt" | code)"
-    [[ $c == 200 ]] && check 4 admin-login pass "200" || { check 4 admin-login fail "http $c"; STOP=1; }
-    gssh 'sudo culvert-status' > "$EV/04-status-after-setup.txt" 2>&1 || true
-    grep -qi 'setup complete' "$EV/04-status-after-setup.txt" && check 4 status-setup-complete pass "culvert-status: setup complete" || check 4 status-setup-complete fail "$(grep -m1 -i 'State:' "$EV/04-status-after-setup.txt")"
+    if [[ $c == 200 ]]; then
+      check 4 setup-with-token pass "200"
+      c="$(api POST /api/auth/login "{\"user\":\"$ADMIN_USER\",\"pass\":\"$pass\"}" | tee "$EV/04-login.txt" | code)"
+      [[ $c == 200 ]] && check 4 admin-login pass "200 after successful setup" || { check 4 admin-login fail "http $c"; STOP=1; }
+      gssh 'sudo culvert-status' > "$EV/04-status-after-setup.txt" 2>&1 || true
+      grep -Eqi '^[[:space:]]*Setup complete:[[:space:]]*yes[[:space:]]*$' "$EV/04-status-after-setup.txt" && check 4 status-setup-complete pass "culvert-status: Setup complete: yes" || { check 4 status-setup-complete fail 'explicit Setup complete: yes absent'; STOP=1; }
+    else
+      check 4 setup-with-token fail "http $c"; STOP=1
+      check 4 admin-login not-run 'setup did not succeed; pre-setup login HTTP200 is not authentication proof'
+      check 4 status-setup-complete not-run 'setup did not succeed'
+    fi
   fi
 
   # Step 5 — enforcement: default deny, one allow rule, real traffic.
