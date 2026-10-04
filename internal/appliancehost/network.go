@@ -17,6 +17,8 @@ import (
 type NetworkRequest struct {
 	Interface, Mode, Address, Gateway string
 	DNS                               []string
+	// DHCP6 is observed from the existing configuration, never an operator toggle.
+	DHCP6 bool
 }
 
 var interfacePattern = regexp.MustCompile(`^(en|eth)[a-zA-Z0-9_-]{1,12}$`)
@@ -34,7 +36,7 @@ func Candidate(r NetworkRequest) (File, error) {
 	if r.Mode != "dhcp" && r.Mode != "static" {
 		return File{}, errors.New("mode must be dhcp or static")
 	}
-	nic := map[string]any{"dhcp4": r.Mode == "dhcp", "dhcp6": false}
+	nic := map[string]any{"dhcp4": r.Mode == "dhcp", "dhcp6": r.DHCP6}
 	if r.Mode == "static" {
 		if err := staticFields(r, nic); err != nil {
 			return File{}, err
@@ -161,10 +163,26 @@ func validateDHCPFields(nic map[string]any) error {
 			return fmt.Errorf("%s must be a boolean", field)
 		}
 	}
-	if nic["dhcp6"] == true {
-		return errors.New("guided IPv4 changes do not support enabled DHCPv6")
-	}
 	return nil
+}
+
+// ExistingDHCP6 extracts the observed DHCPv6 flag without conflating an omitted
+// field with an explicit false override. Callers combine validated base and
+// managed files using Netplan precedence before creating an IPv4 candidate.
+func ExistingDHCP6(data []byte, iface string) (value, present bool, err error) {
+	nic, err := selectedInterface(data, iface)
+	if err != nil {
+		return false, false, err
+	}
+	raw, present := nic["dhcp6"]
+	if !present {
+		return false, false, nil
+	}
+	value, ok := raw.(bool)
+	if !ok {
+		return false, true, errors.New("dhcp6 must be a boolean")
+	}
+	return value, true, nil
 }
 
 func validateManaged(nic map[string]any) error {
@@ -238,17 +256,9 @@ func validateManagedDNS(value any) error {
 // ValidateHardware binds an optional base-file MAC selector to the actual
 // selected interface. Syntax validation alone cannot establish device identity.
 func ValidateHardware(data []byte, iface, hardware string) error {
-	var doc struct {
-		Network struct {
-			Ethernets map[string]map[string]any `yaml:"ethernets"`
-		} `yaml:"network"`
-	}
-	if err := yaml.Unmarshal(data, &doc); err != nil {
-		return errors.New("invalid Netplan YAML")
-	}
-	nic, ok := doc.Network.Ethernets[iface]
-	if !ok {
-		return errors.New("selected interface missing from Netplan")
+	nic, err := selectedInterface(data, iface)
+	if err != nil {
+		return err
 	}
 	match, exists := nic["match"]
 	if !exists {
@@ -268,4 +278,20 @@ func ValidateHardware(data []byte, iface, hardware string) error {
 		return errors.New("netplan MAC match differs from selected physical interface")
 	}
 	return nil
+}
+
+func selectedInterface(data []byte, iface string) (map[string]any, error) {
+	var doc struct {
+		Network struct {
+			Ethernets map[string]map[string]any `yaml:"ethernets"`
+		} `yaml:"network"`
+	}
+	if err := yaml.Unmarshal(data, &doc); err != nil {
+		return nil, errors.New("invalid Netplan YAML")
+	}
+	nic, ok := doc.Network.Ethernets[iface]
+	if !ok || nic == nil {
+		return nil, errors.New("selected interface missing from Netplan")
+	}
+	return nic, nil
 }

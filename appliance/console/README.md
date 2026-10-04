@@ -14,7 +14,9 @@ Authenticated network screen `[E]` invokes `sudo .../culvert-console --host=netw
 It requires `ovf.done`, an active worker, one physical en*/eth* interface, one
 unambiguous DHCP base file and a compatible managed `60-culvert.yaml`.
 DHCP or IPv4 static address/prefix, same-subnet gateway and 1–3 DNS servers are
-supported. Bonds, bridges, VLANs, IPv6 configuration, wildcard/renaming ambiguity,
+supported. The observed DHCPv6 flag is preserved, displayed before confirmation,
+and rechecked immediately before queueing. Bonds, bridges, VLANs, static IPv6
+configuration, wildcard/renaming ambiguity,
 and merged base address/route/DNS lists are refused before queueing. MAC matches
 must identify the chosen physical device. Existing complex layouts remain an
 administrator recovery task; the console does not flatten them.

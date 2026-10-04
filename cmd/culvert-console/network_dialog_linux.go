@@ -59,24 +59,39 @@ func queueNetwork(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	candidate, err := appliancehost.Candidate(request)
+	if _, err := appliancehost.Candidate(request); err != nil {
+		return "", err
+	}
+	err = hostSession(func(*appliancehost.Session) error {
+		var err error
+		request.DHCP6, err = networkPrerequisites(request.Interface)
+		return err
+	})
 	if err != nil {
 		return "", err
 	}
 	fmt.Printf("Interface %s, mode %s, address %s, gateway %s, DNS %s\n", request.Interface, request.Mode, request.Address, request.Gateway, strings.Join(request.DNS, ","))
+	fmt.Printf("Preserve existing DHCPv6: %t\n", request.DHCP6)
 	answer, err := confirm(ctx, "Type APPLY to test for 120 seconds (disconnect or timeout rolls back): ")
 	if err != nil || answer != "APPLY" {
 		return "", err
 	}
 	var id string
 	err = hostSession(func(s *appliancehost.Session) error {
-		if err := networkPrerequisites(request.Interface); err != nil {
+		dhcp6, err := networkPrerequisites(request.Interface)
+		if err != nil {
 			return err
+		}
+		if dhcp6 != request.DHCP6 {
+			return errors.New("DHCPv6 changed during confirmation; start again")
 		}
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		var err error
+		candidate, err := appliancehost.Candidate(request)
+		if err != nil {
+			return err
+		}
 		id, err = s.Stage(candidate)
 		return err
 	})
@@ -110,14 +125,14 @@ func readNetworkRequest(ctx context.Context) (appliancehost.NetworkRequest, erro
 	return r, nil
 }
 
-func networkPrerequisites(iface string) error {
+func networkPrerequisites(iface string) (bool, error) {
 	const interfaces = "/sys/class/net"
 	st, err := os.Lstat("/var/lib/culvert-appliance/state/ovf.done")
 	if err != nil || !st.Mode().IsRegular() {
-		return errors.New("first-boot network configuration has not completed")
+		return false, errors.New("first-boot network configuration has not completed")
 	}
 	if _, err := os.Stat(filepath.Join(interfaces, iface, "device")); err != nil {
-		return errors.New("selected interface is not a physical device")
+		return false, errors.New("selected interface is not a physical device")
 	}
 	return hostNetplan().Preflight(iface)
 }

@@ -4,6 +4,8 @@ package appliancehost
 
 import (
 	"errors"
+	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -132,6 +134,38 @@ func TestPublishUsesDurablePhaseAndSkipsUnchangedWrites(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestNetplanPreflightPreservesEffectiveDHCP6AndRejectsLaterBase(t *testing.T) {
+	dir := rootDirectory(t)
+	devices, err := net.Interfaces()
+	if err != nil || len(devices) == 0 {
+		t.Fatal("no kernel interface for adapter test")
+	}
+	iface := devices[0].Name
+	base := filepath.Join(dir, "50-cloud-init.yaml")
+	config := fmt.Sprintf("network:\n  version: 2\n  ethernets:\n    %s:\n      dhcp4: true\n      dhcp6: true\n", iface)
+	if err := os.WriteFile(base, []byte(config), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	n := Netplan{Target: filepath.Join(dir, "60-culvert.yaml"), Directories: []string{dir}}
+	value, err := n.Preflight(iface)
+	if err != nil || !value {
+		t.Fatalf("DHCPv6 base lost: %t %v", value, err)
+	}
+	if err := n.Write(File{Exists: true, Mode: 0o600, Data: []byte(strings.ReplaceAll(config, "dhcp6: true", "dhcp6: false"))}); err != nil {
+		t.Fatal(err)
+	}
+	value, err = n.Preflight(iface)
+	if err != nil || value {
+		t.Fatalf("explicit managed false lost: %t %v", value, err)
+	}
+	if err := os.Rename(base, filepath.Join(dir, "90-later.yaml")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := n.Preflight(iface); err == nil {
+		t.Fatal("base sorting after managed override accepted")
 	}
 }
 

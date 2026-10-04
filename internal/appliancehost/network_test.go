@@ -12,7 +12,9 @@ func staticRequest() NetworkRequest {
 }
 
 func TestCandidateProducesOneExplicitInterfaceWithoutInputSyntax(t *testing.T) {
-	for _, request := range []NetworkRequest{staticRequest(), {Interface: "eth0", Mode: "dhcp"}} {
+	staticWithDHCP6 := staticRequest()
+	staticWithDHCP6.DHCP6 = true
+	for _, request := range []NetworkRequest{staticRequest(), staticWithDHCP6, {Interface: "eth0", Mode: "dhcp"}, {Interface: "eth0", Mode: "dhcp", DHCP6: true}} {
 		file, err := Candidate(request)
 		if err != nil {
 			t.Fatal(err)
@@ -36,7 +38,7 @@ func TestCandidateProducesOneExplicitInterfaceWithoutInputSyntax(t *testing.T) {
 			t.Fatal(err)
 		}
 		nic, found := doc.Network.Ethernets[request.Interface]
-		if !found || doc.Network.Version != 2 || len(doc.Network.Ethernets) != 1 || nic.DHCP6 || nic.DHCP4 != (request.Mode == "dhcp") {
+		if !found || doc.Network.Version != 2 || len(doc.Network.Ethernets) != 1 || nic.DHCP6 != request.DHCP6 || nic.DHCP4 != (request.Mode == "dhcp") {
 			t.Fatalf("wrong interface configuration: %s", file.Data)
 		}
 		if request.Mode == "static" && (len(nic.Addresses) != 1 || nic.Addresses[0] != request.Address || len(nic.Routes) != 1 || nic.Routes[0].To != "default" || nic.Routes[0].Via != request.Gateway || len(nic.Nameservers.Addresses) != 2) {
@@ -132,7 +134,7 @@ func TestValidateInputRejectsMergedListsAndUnsupportedTopology(t *testing.T) {
 }
 
 func TestValidateInputAcceptsOnlySupportedDHCPBase(t *testing.T) {
-	for _, extra := range []string{"", "      optional: true\n", "      match: {macaddress: '00:50:56:12:34:56'}\n      set-name: ens160\n"} {
+	for _, extra := range []string{"", "      dhcp6: true\n", "      dhcp6: false\n", "      optional: true\n", "      match: {macaddress: '00:50:56:12:34:56'}\n      set-name: ens160\n"} {
 		doc := "network:\n  version: 2\n  renderer: networkd\n  ethernets:\n    ens160:\n      dhcp4: true\n" + extra
 		if err := ValidateInput([]byte(doc), "ens160", true); err != nil {
 			t.Fatalf("supported base rejected: %s: %v", doc, err)
@@ -174,13 +176,43 @@ func TestValidateHardwareBindsMACSelectorToSelectedDevice(t *testing.T) {
 	}
 }
 
-func TestGuidedIPv4ChangesRejectEnabledIPv6AndMalformedBooleans(t *testing.T) {
+func TestGuidedIPv4ChangesRejectMalformedBooleans(t *testing.T) {
 	for _, base := range []bool{true, false} {
-		for _, fields := range []string{"dhcp4: 'true'", "dhcp4: true, dhcp6: true", "dhcp4: true, dhcp6: 'false'", "dhcp4: true, optional: 'true'"} {
+		for _, fields := range []string{"dhcp4: 'true'", "dhcp4: true, dhcp6: 'false'", "dhcp4: true, dhcp6: 1", "dhcp4: true, dhcp6: null", "dhcp4: true, optional: 'true'"} {
 			doc := "network: {version: 2, ethernets: {ens160: {" + fields + "}}}"
 			if err := ValidateInput([]byte(doc), "ens160", base); err == nil {
 				t.Errorf("unsafe IPv4-only input accepted (base=%v): %s", base, fields)
 			}
+		}
+	}
+}
+
+func TestExistingDHCP6DistinguishesAbsentFromExplicitOverride(t *testing.T) {
+	for _, tt := range []struct {
+		name, fields   string
+		value, present bool
+		wantErr        bool
+	}{
+		{"enabled", "dhcp4: true, dhcp6: true", true, true, false},
+		{"disabled", "dhcp4: true, dhcp6: false", false, true, false},
+		{"omitted", "dhcp4: true", false, false, false},
+		{"string", "dhcp6: 'true'", false, true, true},
+		{"integer", "dhcp6: 1", false, true, true},
+		{"null", "dhcp6: null", false, true, true},
+		{"sequence", "dhcp6: [true]", false, true, true},
+		{"map", "dhcp6: {value: true}", false, true, true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			doc := "network: {version: 2, ethernets: {ens160: {" + tt.fields + "}}}"
+			value, present, err := ExistingDHCP6([]byte(doc), "ens160")
+			if value != tt.value || present != tt.present || (err != nil) != tt.wantErr {
+				t.Fatalf("got value=%v present=%v err=%v", value, present, err)
+			}
+		})
+	}
+	for _, doc := range []string{"bad: [", "network: {ethernets: {eth1: {dhcp6: true}}}", "network: {ethernets: {ens160: null}}"} {
+		if _, _, err := ExistingDHCP6([]byte(doc), "ens160"); err == nil {
+			t.Fatalf("accepted malformed or missing interface: %s", doc)
 		}
 	}
 }

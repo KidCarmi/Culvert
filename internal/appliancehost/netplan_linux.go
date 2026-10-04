@@ -61,36 +61,55 @@ func (n Netplan) Read() (File, string, error) {
 
 // Preflight runs before queuing. Existing privileged external writers cannot be
 // serialized by our lock; a digest fence detects their persistent file changes.
-func (n Netplan) Preflight(iface string) error {
+func (n Netplan) Preflight(iface string) (bool, error) {
 	device, err := net.InterfaceByName(iface)
 	if err != nil {
-		return err
+		return false, err
 	}
 	paths, err := n.inputs()
 	if err != nil {
-		return err
+		return false, err
 	}
 	baseCount := 0
+	var baseDHCP6, managedDHCP6, managedPresent bool
 	for _, path := range paths {
-		data, _, err := readRegular(path, 65536, false)
-		if err != nil {
-			return err
-		}
 		base := path != n.Target
-		if err := ValidateInput(data, iface, base); err != nil {
-			return err
-		}
-		if err := ValidateHardware(data, iface, device.HardwareAddr.String()); err != nil {
-			return err
+		value, present, err := n.inspectInput(path, iface, device.HardwareAddr.String())
+		if err != nil {
+			return false, err
 		}
 		if base {
 			baseCount++
+			baseDHCP6 = value
+		} else {
+			managedDHCP6, managedPresent = value, present
 		}
 	}
 	if baseCount != 1 {
-		return errors.New("guided network changes require one unambiguous DHCP base file")
+		return false, errors.New("guided network changes require one unambiguous DHCP base file")
 	}
-	return nil
+	if managedPresent {
+		return managedDHCP6, nil
+	}
+	return baseDHCP6, nil
+}
+
+func (n Netplan) inspectInput(path, iface, hardware string) (value, present bool, result error) {
+	base := path != n.Target
+	if base && filepath.Base(path) >= filepath.Base(n.Target) {
+		return false, false, errors.New("DHCP base must sort before the managed Netplan override")
+	}
+	data, _, err := readRegular(path, 65536, false)
+	if err != nil {
+		return false, false, err
+	}
+	if err := ValidateInput(data, iface, base); err != nil {
+		return false, false, err
+	}
+	if err := ValidateHardware(data, iface, hardware); err != nil {
+		return false, false, err
+	}
+	return ExistingDHCP6(data, iface)
 }
 
 func (n Netplan) Write(file File) error {
