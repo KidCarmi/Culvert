@@ -1,8 +1,8 @@
 package main
 
-// setup_token.go — a per-instance SETUP TOKEN that gates the one-time
-// first-admin bootstrap (POST /api/setup/complete) on the traffic path it is
-// actually exposed on.
+// setup_token.go — a per-instance SETUP TOKEN that gates first-admin setup
+// (POST /api/setup/complete) and the temporary bootstrap administrator role
+// on protected APIs, on the traffic path they are actually exposed on.
 //
 // Until the first admin exists, /api/setup/* is on uiAuthMiddleware's public
 // allowlist by necessity, and the admin port is published by docker-compose
@@ -12,7 +12,8 @@ package main
 // (owner review, PR #1528). So the appliance first boot mints a random token
 // per instance, persists it in the stack's .env (root-only) and hands it to
 // the proxy as CULVERT_SETUP_TOKEN; the proxy then refuses to create the
-// first admin unless the request presents it. The token is shown to the
+// first admin or grant bootstrap API access unless the request presents it.
+// The token is shown to the
 // operator on the hypervisor console and via `sudo culvert-status` — both
 // already-privileged surfaces — never over the network.
 //

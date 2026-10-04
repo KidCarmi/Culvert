@@ -6,6 +6,8 @@ package main
 // path, not a firewall note).
 
 import (
+	"io"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -101,6 +103,75 @@ func TestSetupToken_StatusReportsRequirement(t *testing.T) {
 	apiSetupStatus(rec, req)
 	if !strings.Contains(rec.Body.String(), `"setupTokenRequired":true`) {
 		t.Fatalf("status must report the token requirement so the wizard asks for it: %s", rec.Body.String())
+	}
+}
+
+// The bootstrap credential must protect every route that receives the
+// temporary administrator role, not just /api/setup/complete. Otherwise a
+// caller can bypass setup and persist its own administrator through users.
+func TestSetupToken_ProtectsBootstrapAdminRoutes(t *testing.T) {
+	origLogger := logger
+	logger = log.New(io.Discard, "", 0)
+	t.Cleanup(func() { logger = origLogger })
+	for _, tc := range []struct {
+		name, configured, presented string
+		want                        int
+	}{
+		{"missing", "instance-token", "", http.StatusForbidden},
+		{"wrong", "instance-token", "wrong-token", http.StatusForbidden},
+		{"valid", "instance-token", "instance-token", http.StatusOK},
+		{"legacy-unset", "", "", http.StatusOK},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			setupTokenTestConfig(t)
+			loadSetupToken(tc.configured)
+			req := httptest.NewRequest(http.MethodPost, "/api/auth/users", strings.NewReader(`{"username":"bootstrap-admin","password":"Str0ngPassw0rd!","role":"admin"}`))
+			req.RemoteAddr = "198.51.100.78:4000"
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set(headerSetupToken, tc.presented)
+			rec := httptest.NewRecorder()
+			uiAuthMiddleware(http.HandlerFunc(apiAuthUsers)).ServeHTTP(rec, req)
+			if rec.Code != tc.want {
+				t.Fatalf("want %d, got %d: %s", tc.want, rec.Code, rec.Body.String())
+			}
+			if got := cfg.UIUserExists("bootstrap-admin"); got != (tc.want == http.StatusOK) {
+				t.Fatalf("administrator persisted = %v; HTTP result %d", got, rec.Code)
+			}
+		})
+	}
+}
+
+func TestSetupToken_BootstrapRoutingAndPostSetup(t *testing.T) {
+	setupTokenTestConfig(t)
+	loadSetupToken("instance-token")
+	for _, tc := range []struct {
+		path string
+		want int
+	}{
+		{"/api/auth/users", http.StatusForbidden}, // reads also need bootstrap authority
+		{"/", http.StatusNoContent},
+		{"/api/setup/status", http.StatusNoContent},
+		{"/api/setup/complete", http.StatusNoContent}, // the handler owns its token gate
+	} {
+		t.Run(tc.path, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			uiAuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(http.StatusNoContent)
+			})).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, tc.path, http.NoBody))
+			if rec.Code != tc.want {
+				t.Fatalf("want %d, got %d", tc.want, rec.Code)
+			}
+		})
+	}
+	if err := cfg.SetAuth("admin", "Str0ngPassw0rd!"); err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/api/auth/users", http.NoBody)
+	req.Header.Set(headerSetupToken, "instance-token")
+	rec := httptest.NewRecorder()
+	uiAuthMiddleware(http.HandlerFunc(apiAuthUsers)).ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("setup token must not authenticate after setup: got %d", rec.Code)
 	}
 }
 

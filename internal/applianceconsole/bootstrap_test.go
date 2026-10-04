@@ -32,7 +32,7 @@ func TestBootstrapGuidanceCheckpointsAreNotEstimatedProgress(t *testing.T) {
 	s := visualFixture()
 	s.Steps = append(s.Steps, s.Steps[0], Step{ID: "unknown", State: "recorded"}, Step{ID: "console", State: "not_recorded"})
 	got := Render(BootstrapGuidance(s), false)
-	if !strings.Contains(got, "1/6 (not a progress estimate)") {
+	if !strings.Contains(got, "1/7 (not a progress estimate)") {
 		t.Fatalf("duplicate or unknown checkpoint counted: %s", got)
 	}
 	s.SetupStatus = "completed"

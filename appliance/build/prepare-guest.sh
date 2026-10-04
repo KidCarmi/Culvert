@@ -219,6 +219,39 @@ printf 'culvert ALL=(ALL:ALL) ALL\n' > /etc/sudoers.d/50-culvert-console
 chmod 0440 /etc/sudoers.d/50-culvert-console
 visudo -c -q -f /etc/sudoers.d/50-culvert-console
 
+# Routine remote access is a separate, unprivileged identity. The Go executable
+# is also its login shell: a user-writable shell startup file never runs first.
+install -m 0755 -o root -g root "$APPL/console/culvert-access" "$APPL/bin/culvert-access"
+[[ "$("$APPL/bin/culvert-access" --version)" == 'culvert-access 1' ]] || {
+  echo 'invalid operator access binary' >&2; exit 1;
+}
+if ! id culvert-operator >/dev/null 2>&1; then
+  useradd --create-home --user-group --shell "$APPL/bin/culvert-access" \
+    --comment "Culvert read-only operator" culvert-operator
+fi
+usermod -s "$APPL/bin/culvert-access" -G '' culvert-operator
+passwd -l culvert-operator >/dev/null
+[[ "$(id -gn culvert-operator)" == culvert-operator && "$(id -u culvert-operator)" -ne 0 && \
+   "$(id -G culvert-operator)" == "$(id -g culvert-operator)" ]] || {
+  echo 'operator has unexpected supplementary groups' >&2; exit 1;
+}
+install -d -o root -g root -m 0755 /etc/ssh/culvert-authorized-keys
+# Validate the shipped drop-in against the distribution's full effective
+# configuration; syntax validation alone cannot detect first-value precedence.
+mkdir -p /run/sshd
+effective_ssh="$(/usr/sbin/sshd -T -C user=culvert-operator,host=localhost,addr=127.0.0.1)"
+for ssh_rule in 'allowusers culvert-operator' 'passwordauthentication no' \
+  'kbdinteractiveauthentication no' 'permitrootlogin no' 'disableforwarding yes' \
+  'permituserrc no' 'permituserenvironment no' \
+  'authenticationmethods publickey' 'authorizedkeyscommand none' \
+  'trustedusercakeys none' 'usepam yes' \
+  "forcecommand $APPL/bin/culvert-access --ssh" \
+  'authorizedkeysfile /etc/ssh/culvert-authorized-keys/culvert-operator'; do
+  grep -Fxq "$ssh_rule" <<< "$effective_ssh" || {
+    echo "effective SSH policy does not enforce: $ssh_rule" >&2; exit 1;
+  }
+done
+
 # Account/helpers now exist. The installer validates the bundled executable,
 # publishes the worker/profile/getty, and enables next-boot startup without
 # starting services or opening a PAM session in the build appliance.

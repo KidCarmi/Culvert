@@ -6,14 +6,10 @@
 #                                         key-only drop-in; REFUSES while the
 #                                         account has no usable password, so
 #                                         it can never lock the operator out)
-#   culvert-sudo-policy passwordless      key-only posture (requires an SSH
-#                                         authorized key, for the same reason)
+#   culvert-sudo-policy passwordless      retired; fails without changing policy
 #
-# Background: a key-provisioned appliance has a LOCKED password, and the
-# cloud-init/console sudoers rules demand one. First boot therefore installs
-# /etc/sudoers.d/95-culvert-keyonly (NOPASSWD) when only a key was supplied —
-# the SSH private key is the per-instance credential. sudoers takes the LAST
-# matching rule, which is why the drop-in sorts after 90-cloud-init-users.
+# Legacy drop-ins can still be removed safely. New appliances always provision
+# a local console password; SSH keys belong to the separate read-only operator.
 set -euo pipefail
 USER_NAME="${CULVERT_FB_CONSOLE_USER:-culvert}"
 HOME_DIR="${CULVERT_FB_CONSOLE_HOME:-/home/culvert}"
@@ -42,15 +38,8 @@ case "${1:-status}" in
     echo "sudo policy: password required (removed $DROPIN)"
     ;;
   passwordless)
-    if ! has_key; then
-      echo "refusing: no SSH authorized key for '$USER_NAME' — passwordless sudo without a key credential is unsafe; add a key first" >&2
-      exit 1
-    fi
-    tmp="$(mktemp)"
-    printf '%s ALL=(ALL:ALL) NOPASSWD: ALL\n' "$USER_NAME" > "$tmp"
-    chmod 0440 "$tmp"; visudo -c -q -f "$tmp"
-    install -m 0440 -o root -g root "$tmp" "$DROPIN"; rm -f "$tmp"
-    echo "sudo policy: passwordless ($DROPIN)"
+    echo "refusing: passwordless sudo is retired; use the local VM console with its password" >&2
+    exit 1
     ;;
   *) echo "usage: culvert-sudo-policy {status|require-password|passwordless}" >&2; exit 2 ;;
 esac

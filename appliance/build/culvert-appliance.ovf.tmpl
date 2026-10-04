@@ -53,12 +53,12 @@
         <Description>Guest hostname.</Description>
       </Property>
       <Property ovf:key="public-keys" ovf:type="string" ovf:userConfigurable="true" ovf:value="">
-        <Label>SSH public key for the 'culvert' administrator</Label>
-        <Description>OpenSSH public key(s), one per line. SSH is key-only; leave empty to disable remote SSH login.</Description>
+        <Label>SSH public key for the read-only 'culvert-operator'</Label>
+        <Description>Bare OpenSSH public key(s), one per line, without authorized_keys options. SSH provides read-only status and diagnostics; use the VM console for administration. Leave empty to disable remote SSH login.</Description>
       </Property>
       <Property ovf:key="password" ovf:type="string" ovf:password="true" ovf:userConfigurable="true" ovf:value="">
         <Label>Console password for 'culvert' (optional)</Label>
-        <Description>Initial console password; a change is forced at first login. Leave empty to have a one-time password printed on the VM console at first boot (only when no SSH key is given).</Description>
+        <Description>Initial local console password; a change is forced at first login. Leave empty to have a one-time password shown on the VM console, even when an SSH public key is supplied.</Description>
       </Property>
       <!-- Culvert keys (read by culvert-firstboot; a static address needs all of mode/address/gateway) -->
       <Property ovf:key="culvert.net.mode" ovf:type="string" ovf:userConfigurable="true" ovf:value="dhcp">

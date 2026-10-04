@@ -17,8 +17,8 @@ import (
 const maxOutput = 65536
 const maxVersionLength = 70
 
-var stepNames = []string{"ovf", "console", "images", "install", "agent", "complete"}
-var stepLabels = []string{"Network configuration", "Console access", "Application images", "Service installation", "Maintenance agent", "Provisioning complete"}
+var stepNames = []string{"ovf", "console", "access", "images", "install", "agent", "complete"}
+var stepLabels = []string{"Network configuration", "Console access", "Operator key import", "Application images", "Service installation", "Maintenance agent", "Provisioning complete"}
 var unitKeys = []string{"LoadState", "ActiveState", "SubState", "Result", "ExecMainStatus", "NRestarts", "Job"}
 
 // Clean strips terminal controls, non-ASCII and multiline text before display.

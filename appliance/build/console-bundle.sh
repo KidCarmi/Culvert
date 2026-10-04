@@ -19,7 +19,7 @@ console_go_version() (
 
 build_console_bundle() (
     set -euo pipefail
-    local repo=$1 destination=$2 compiler stage metadata file
+    local repo=$1 destination=$2 compiler stage metadata file binary
     repo=$(cd "$repo" && pwd)
     compiler=$(console_go_version "$repo")
     [[ ! -e $destination && ! -L $destination ]] || {
@@ -31,14 +31,15 @@ build_console_bundle() (
     trap 'rm -rf -- "$stage"' EXIT
     # Explicit flags prevent inherited overlays, alternate workspaces, build modes
     # or CPU targets from changing which source/architecture goes into the OVA.
+    for binary in culvert-console culvert-access; do
     (
         cd "$repo"
         GOENV=off GOWORK=off GOFLAGS= GO111MODULE=on GOEXPERIMENT= \
             CGO_ENABLED=0 GOOS=linux GOARCH=amd64 GOAMD64=v1 \
             go build -mod=readonly -buildmode=exe -trimpath -buildvcs=true \
-            -o "$stage/culvert-console" ./cmd/culvert-console
+            -o "$stage/$binary" "./cmd/$binary"
     )
-    metadata=$(GOENV=off GOWORK=off GOFLAGS= go version -m "$stage/culvert-console")
+    metadata=$(GOENV=off GOWORK=off GOFLAGS= go version -m "$stage/$binary")
     [[ $(awk 'NR == 1 { print $NF }' <<< "$metadata") == "$compiler" ]] || {
         echo 'console bundle: binary compiler does not match the pinned compiler' >&2; exit 1;
     }
@@ -47,7 +48,8 @@ build_console_bundle() (
             echo "console bundle: binary lacks required build setting $file" >&2; exit 1;
         }
     done
-    chmod 0755 "$stage/culvert-console"
+    chmod 0755 "$stage/$binary"
+    done
     for file in install.sh install-lib.sh profile.sh getty-override.conf culvert-console-host.service; do
         [[ -f $repo/appliance/console/$file && ! -L $repo/appliance/console/$file ]] || {
             echo "console bundle: missing or symlinked runtime input $file" >&2; exit 1;

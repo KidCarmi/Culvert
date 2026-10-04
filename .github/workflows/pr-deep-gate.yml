@@ -142,7 +142,7 @@ jobs:
               # The appliance console (#1540) is host software the OVA
               # installs: its regression suite (appliance-console) and the
               # lifecycle harnesses must run when it changes.
-              cmd/culvert-console/*|internal/applianceconsole/*|internal/appliancehost/*|appliance_*test.go|.github/workflows/appliance-console.yml)
+              cmd/culvert-console/*|cmd/culvert-access/*|internal/applianceconsole/*|internal/applianceaccess/*|internal/appliancehost/*|appliance_*test.go|.github/workflows/appliance-console.yml)
                 appliance=true ;;
             esac
             case "$f" in

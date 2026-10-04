@@ -1,0 +1,148 @@
+{
+  "status": "raw_sweep_complete",
+  "bytes_read": 42949672960,
+  "parseable_private_keys": [
+    {
+      "offset": 1494147296,
+      "algorithm": "ECPrivateKey",
+      "public_key_sha256": "5bd7bad40971be901e68d9b97405c3a3e996adbede885869b270185ad499108e"
+    },
+    {
+      "offset": 1494147968,
+      "algorithm": "DSAPrivateKey",
+      "public_key_sha256": "dd0701715ac41b7b96a2c8fe7a762b0ee05215f4f21c44d9458f1d2e2d57427d"
+    },
+    {
+      "offset": 1494149184,
+      "algorithm": "RSAPrivateKey",
+      "public_key_sha256": "5a9214aa789ffe021992636dd17ca313f340948e604d4122735160f3d46688a0"
+    },
+    {
+      "offset": 1800138553,
+      "algorithm": "DSAPrivateKey",
+      "public_key_sha256": "bc18bc5012394e8471463241515cbb374b11537047ed3825520e7ae12bfb4cdb"
+    },
+    {
+      "offset": 1800141231,
+      "algorithm": "DSAPrivateKey",
+      "public_key_sha256": "bc18bc5012394e8471463241515cbb374b11537047ed3825520e7ae12bfb4cdb"
+    },
+    {
+      "offset": 1806223469,
+      "algorithm": "ECPrivateKey",
+      "public_key_sha256": "7362c1b343cbbdacd975f842d05e40cfcd32b4b514c27ccca9a6c4e7b3e9026f"
+    },
+    {
+      "offset": 1806223911,
+      "algorithm": "ECPrivateKey",
+      "public_key_sha256": "7362c1b343cbbdacd975f842d05e40cfcd32b4b514c27ccca9a6c4e7b3e9026f"
+    },
+    {
+      "offset": 1806224984,
+      "algorithm": "ECPrivateKey",
+      "public_key_sha256": "0a8e708c63073c79a888ea33c3d65d704cf5b5aedd1baea4c45043716aad61d5"
+    },
+    {
+      "offset": 1806225349,
+      "algorithm": "ECPrivateKey",
+      "public_key_sha256": "0a8e708c63073c79a888ea33c3d65d704cf5b5aedd1baea4c45043716aad61d5"
+    },
+    {
+      "offset": 1806226456,
+      "algorithm": "ECPrivateKey",
+      "public_key_sha256": "173cfd71a8e276b2163268c31671dfac3e5d48f65f8803623236722d58298999"
+    },
+    {
+      "offset": 1806226757,
+      "algorithm": "ECPrivateKey",
+      "public_key_sha256": "173cfd71a8e276b2163268c31671dfac3e5d48f65f8803623236722d58298999"
+    },
+    {
+      "offset": 1806227477,
+      "algorithm": "Ed25519PrivateKey",
+      "public_key_sha256": "c813513363b6cdabb996c99b577babaed3d288b66ab962948f963a759489d670"
+    },
+    {
+      "offset": 1806228366,
+      "algorithm": "RSAPrivateKey",
+      "public_key_sha256": "4b8c7bc1ccd88b61622ed72ccf917962515d594839be28c3d5c6add6e6c4bd8b"
+    },
+    {
+      "offset": 1806245769,
+      "algorithm": "DSAPrivateKey",
+      "public_key_sha256": "7c405038cca18e98d351c62b23375aea331b15e5d36751a87f8833f4a56d0985"
+    },
+    {
+      "offset": 1806246478,
+      "algorithm": "DSAPrivateKey",
+      "public_key_sha256": "7c405038cca18e98d351c62b23375aea331b15e5d36751a87f8833f4a56d0985"
+    },
+    {
+      "offset": 1806943185,
+      "algorithm": "ECPrivateKey",
+      "public_key_sha256": "7362c1b343cbbdacd975f842d05e40cfcd32b4b514c27ccca9a6c4e7b3e9026f"
+    },
+    {
+      "offset": 1806943554,
+      "algorithm": "ECPrivateKey",
+      "public_key_sha256": "7362c1b343cbbdacd975f842d05e40cfcd32b4b514c27ccca9a6c4e7b3e9026f"
+    },
+    {
+      "offset": 1806944540,
+      "algorithm": "ECPrivateKey",
+      "public_key_sha256": "0a8e708c63073c79a888ea33c3d65d704cf5b5aedd1baea4c45043716aad61d5"
+    },
+    {
+      "offset": 1806944832,
+      "algorithm": "ECPrivateKey",
+      "public_key_sha256": "0a8e708c63073c79a888ea33c3d65d704cf5b5aedd1baea4c45043716aad61d5"
+    },
+    {
+      "offset": 1806945817,
+      "algorithm": "ECPrivateKey",
+      "public_key_sha256": "173cfd71a8e276b2163268c31671dfac3e5d48f65f8803623236722d58298999"
+    },
+    {
+      "offset": 1806946048,
+      "algorithm": "ECPrivateKey",
+      "public_key_sha256": "173cfd71a8e276b2163268c31671dfac3e5d48f65f8803623236722d58298999"
+    },
+    {
+      "offset": 1806946626,
+      "algorithm": "Ed25519PrivateKey",
+      "public_key_sha256": "c813513363b6cdabb996c99b577babaed3d288b66ab962948f963a759489d670"
+    },
+    {
+      "offset": 1806947422,
+      "algorithm": "RSAPrivateKey",
+      "public_key_sha256": "4b8c7bc1ccd88b61622ed72ccf917962515d594839be28c3d5c6add6e6c4bd8b"
+    },
+    {
+      "offset": 1806959512,
+      "algorithm": "DSAPrivateKey",
+      "public_key_sha256": "7c405038cca18e98d351c62b23375aea331b15e5d36751a87f8833f4a56d0985"
+    },
+    {
+      "offset": 1806960188,
+      "algorithm": "DSAPrivateKey",
+      "public_key_sha256": "7c405038cca18e98d351c62b23375aea331b15e5d36751a87f8833f4a56d0985"
+    },
+    {
+      "offset": 1808885150,
+      "algorithm": "DSAPrivateKey",
+      "public_key_sha256": "bc18bc5012394e8471463241515cbb374b11537047ed3825520e7ae12bfb4cdb"
+    },
+    {
+      "offset": 1825333248,
+      "algorithm": "RSAPrivateKey",
+      "public_key_sha256": "94d71115241286373b1f722831bc4ec8abf377b222d618051e931cb7f8a57efa"
+    },
+    {
+      "offset": 1825429640,
+      "algorithm": "RSAPrivateKey",
+      "public_key_sha256": "94d71115241286373b1f722831bc4ec8abf377b222d618051e931cb7f8a57efa"
+    }
+  ],
+  "vmdk_sha256": "ab9300129dd7c96f75a4ef0953a12314c8ca8c6ca3059c771e26322e76d20c4f",
+  "tool_sha256": "735009b36fa42f2e930480196ab624370fd96c0ccc30c17758f1596f84fdb150"
+}

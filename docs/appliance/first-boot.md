@@ -13,8 +13,8 @@ The mechanics behind steps 4–6 are `scripts/install.sh` (unchanged) driven by
 
 ### 2. Configure resources and network
 Accept the defaults (2 vCPU / 4 GB / 40 GB thin) or size up. Map the single NIC.
-Set the OVF properties: an **SSH public key** (`public-keys`) for the `culvert`
-administrator, optionally a console `password`, and `culvert.net.*` for a
+Set the OVF properties: an **SSH public key** (`public-keys`) for the read-only `culvert-operator`
+SSH account, optionally a console `password`, and `culvert.net.*` for a
 static address. Nothing else is required.
 
 ### 3. Boot and discover the address
@@ -125,34 +125,38 @@ What the fresh appliance enforces, and why:
   change.
 
 ### 9. Reboot and verify
-`sudo reboot` from the console or SSH. After boot the stack starts on its own
+`sudo reboot` from the local VM console. After boot the stack starts on its own
 (`restart: unless-stopped`), `culvert-firstboot` does **not** re-run
 (`complete.done` present), and `culvert-status` must show the same state as
 before. This is also the moment to take the first VM snapshot/backup.
 
 ## Console access and SSH
 
-* Console user: `culvert`. Credential precedence at first boot:
-  * OVF/cloud-init `password` supplied → that password; `sudo` asks for it.
-  * otherwise an SSH `public-keys` key supplied → the password stays **locked**
-    and first boot installs `/etc/sudoers.d/95-culvert-keyonly`
-    (`NOPASSWD`): the SSH private key *is* the per-instance credential, and a
-    sudo rule demanding a password nobody was given is a lockout, not a
-    control (the same posture as Ubuntu cloud images). To return to
-    password-gated sudo: `sudo passwd culvert && sudo culvert-sudo-policy
-    require-password` (it refuses while the account has no usable password, so
-    the switch can never strand you). `culvert-sudo-policy status` shows which
-    policy is in force; `culvert-status` prints it too.
-  * otherwise a **one-time random password** is printed on the VM console once
-    and must be changed at first login. It is never written to disk. First boot
-    records that a mint is in progress before it sets the password; a boot that
-    dies between setting it and printing it mints a *new* one on the next run
-    instead of treating the never-shown password as a credential.
-* SSH: `AllowUsers culvert`, keys only, no root, no passwords, no forwarding
-  (`/etc/ssh/sshd_config.d/50-culvert.conf`). Inject keys via the OVF
-  `public-keys` property or cloud-init `user-data`. To add a key later:
-  console login → `sudo tee -a /home/culvert/.ssh/authorized_keys`.
-* Host firewall (nftables): inbound 22/8080/9090 only (`hypervisor-install.md`).
+This access model applies to newly built candidates from the security branch.
+Older OVAs retain their original policy; copying the SSH configuration onto an
+existing deployment is not a supported migration.
+
+* Local VM console: `culvert`, with password-gated sudo. An imported password is
+  retained. If absent, first boot generates a one-time password even when an SSH
+  key was supplied. Its root-only durable handoff survives interrupted startup;
+  the password must be changed at first console login.
+* SSH: `culvert-operator`, key-only, read-only `help`, `status`, `status-json` and
+  `diagnostics`. This identity has no sudo, Docker or maintenance-agent group.
+  Both its Go login shell and the server forced command enforce the fixed verbs;
+  forwarding, tunnels, user rc/environment and file-transfer commands are denied.
+* Import bare public keys through OVF `public-keys` or cloud-init's default-user
+  key field. First boot copies validated public keys into the root-owned
+  `/etc/ssh/culvert-authorized-keys/culvert-operator`. Options-bearing keys are
+  rejected rather than silently widening their restrictions. No key means no SSH
+  access. Existing `ssh culvert@...` automation must be updated for the new model.
+* Rotate operator keys through the local console by maintaining that root-owned
+  file (0644, root:root). Changes to `/home/culvert/.ssh/authorized_keys` after the
+  first import are not automatically republished. Never add operator group grants.
+* `culvert-sudo-policy require-password` can remove a legacy exception only when
+  a password exists; its old `passwordless` verb now refuses the request.
+* The host INPUT firewall is not a management-network allowlist for Docker's
+  published ports. Keep management access isolated upstream; see
+  [the SSH boundary](ssh-access-boundary.md) for the remaining trust boundaries.
 
 ## Required outbound access
 

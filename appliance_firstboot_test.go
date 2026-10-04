@@ -9,9 +9,9 @@ package main
 // last-match precedence) is opt-in and needs root; it is what turns the
 // "95- sorts after 90-" claim into evidence.
 //
-// Why these shapes: (a) a key-only import must leave the operator a usable
-// sudo credential — the SSH key is the credential, so a NOPASSWD drop-in is
-// the policy; (b) an interrupted password mint must re-mint, because a
+// Why these shapes: (a) an SSH key authorizes only the separate read-only
+// account, while every import needs a local console password; (b) an
+// interrupted password mint must re-mint, because a
 // password that landed in /etc/shadow but was never shown is not a credential
 // anyone holds; (c) the agent step may only ever CLAIM an install it
 // verified, and the repair verb must succeed after a transient trust-service
@@ -218,11 +218,11 @@ func TestFirstBoot_ConsolePolicyDecision(t *testing.T) {
 		{"!", "0", "0", "mint"},             // locked, no key  → mint a console password
 		{"*", "0", "0", "mint"},             // absent, no key  → mint
 		{"", "0", "0", "mint"},              // empty field     → mint
-		{"!", "1", "0", "keyonly"},          // locked, key     → passwordless sudo
+		{"!", "1", "0", "mint"},             // locked, key     → passwordless sudo
 		{"$6$x$hash", "0", "0", "password"}, // password set    → password-gated sudo
 		{"$6$x$hash", "1", "0", "password"}, // both supplied   → password wins
 		{"$6$x$hash", "0", "1", "remint"},   // our mint landed but was never shown
-		{"!", "1", "1", "keyonly"},          // marker but still locked (chpasswd never ran) → key wins
+		{"!", "1", "1", "mint"},             // marker but still locked (chpasswd never ran) → key wins
 	}
 	for _, c := range cases {
 		out, code := h.run("console_policy '" + c.shadow + "' " + c.keys + " " + c.minted)
@@ -314,33 +314,38 @@ touch "$FB_HARNESS/committed"
 	}
 }
 
-func TestFirstBoot_StepConsole_KeyOnlyInstallsPasswordlessSudo(t *testing.T) {
+func TestFirstBoot_StepConsole_KeyOnlyMintsLocalPasswordWithoutElevation(t *testing.T) {
 	h := newFBHarness(t)
 	h.setShadow("!")
 	h.setKey(true)
+	_ = os.WriteFile(filepath.Join(h.sudoers, "95-culvert-keyonly"), []byte("culvert ALL=(ALL:ALL) NOPASSWD: ALL\n"), 0o600)
 	out, code := h.run("step_console")
 	if code != 0 {
-		t.Fatalf("step_console failed (%d):\n%s", code, out)
+		t.Fatalf("step_console failed (%d): %s", code, out)
 	}
-	drop, err := os.ReadFile(filepath.Join(h.sudoers, "95-culvert-keyonly"))
-	if err != nil {
-		t.Fatalf("key-only drop-in not written: %v\n%s", err, out)
+	if h.exists("sudoers.d/95-culvert-keyonly") {
+		t.Fatal("key-only import retained passwordless sudo")
 	}
-	if string(drop) != "culvert ALL=(ALL:ALL) NOPASSWD: ALL\n" {
-		t.Fatalf("drop-in content %q", drop)
-	}
-	st, _ := os.Stat(filepath.Join(h.sudoers, "95-culvert-keyonly"))
-	if st.Mode().Perm() != 0o440 {
-		t.Fatalf("drop-in mode %o, want 0440", st.Mode().Perm())
-	}
-	if h.calledCount("visudo") != 1 {
-		t.Fatalf("visudo must validate the drop-in before install; calls=%d", h.calledCount("visudo"))
-	}
-	if h.calledCount("chpasswd") != 0 {
-		t.Fatal("a key-only import must not mint a password")
+	if h.calledCount("chpasswd") != 1 || h.calledCount("chage") != 1 || !h.exists("bootstrap.in") {
+		t.Fatal("missing durable, change-required local recovery password")
 	}
 	if !h.exists("appliance/state/console.done") {
-		t.Fatal("console step not marked done")
+		t.Fatal("console step not committed")
+	}
+}
+
+func TestFirstBoot_AccessImportFailureRetriesWithoutCommitting(t *testing.T) {
+	h := newFBHarness(t)
+	h.writeExec(filepath.Join(h.bin, "culvert-access"), "#!/usr/bin/env bash\nexit 73\n")
+	_, code := h.run("step_access")
+	if code == 0 || h.exists("appliance/state/access.done") {
+		t.Fatal("failed key import was committed")
+	}
+	h.writeExec(filepath.Join(h.bin, "culvert-access"), "#!/usr/bin/env bash\n[[ $* == --import-keys ]] || exit 2\necho import >> \"$FB_HARNESS/import.calls\"\n")
+	out, code := h.run("step_access; step_access")
+	calls, _ := os.ReadFile(filepath.Join(h.root, "import.calls"))
+	if code != 0 || string(calls) != "import\n" || !h.exists("appliance/state/access.done") {
+		t.Fatalf("key import not idempotent: %d %s", code, out)
 	}
 }
 
@@ -625,26 +630,17 @@ func TestSudoPolicy_RequirePasswordRefusesWithoutAPassword(t *testing.T) {
 	}
 }
 
-func TestSudoPolicy_PasswordlessRefusesWithoutAKey(t *testing.T) {
-	h := newFBHarness(t)
-	h.setShadow("$6$set$hash")
-	h.setKey(false)
-	out, code := h.runSudoPolicy("passwordless")
-	if code == 0 || !strings.Contains(out, "no SSH authorized key") {
-		t.Fatalf("must refuse (exit %d):\n%s", code, out)
-	}
-	h.setKey(true)
-	out, code = h.runSudoPolicy("passwordless")
-	if code != 0 || !h.exists("sudoers.d/95-culvert-keyonly") {
-		t.Fatalf("with a key the drop-in must be installed (exit %d):\n%s", code, out)
-	}
-	out, _ = h.runSudoPolicy("status")
-	if !strings.Contains(out, "passwordless") || !strings.Contains(out, "ssh authorized key: present") {
-		t.Fatalf("status:\n%s", out)
+func TestSudoPolicy_PasswordlessRetiredEvenWithAKey(t *testing.T) {
+	for _, key := range []bool{false, true} {
+		h := newFBHarness(t)
+		h.setShadow("$6$set$hash")
+		h.setKey(key)
+		out, code := h.runSudoPolicy("passwordless")
+		if code == 0 || !strings.Contains(out, "passwordless sudo is retired") || h.exists("sudoers.d/95-culvert-keyonly") {
+			t.Fatalf("retired policy admitted (exit %d): %s", code, out)
+		}
 	}
 }
-
-// ── culvert-status: describes degraded capability and the setup token ───────
 
 func TestApplianceStatus_ReportsAgentSudoAndToken(t *testing.T) {
 	h := newFBHarness(t)
@@ -738,7 +734,7 @@ func TestApplianceStatus_ReportsDataDiskPressure(t *testing.T) {
 
 // ── live: sudoers last-match precedence (opt-in, root) ──────────────────────
 //
-// The whole key-only design rests on one claim: sudo takes the LAST matching
+// Historical key-only candidates used this behavior: sudo takes the LAST matching
 // rule, so 95-culvert-keyonly (NOPASSWD) must override 90-cloud-init-users
 // (password). This test proves it with the real sudo on a throwaway account,
 // and proves the reverse (drop-in removed ⇒ password demanded). Run it with:

@@ -16,9 +16,28 @@ import (
 
 func uiSessionCookieForTest(t *testing.T, sub string) *http.Cookie {
 	t.Helper()
+	// A current UI cookie belongs to a current local roster entry. Preserve
+	// the caller's configuration and restore only this fixture account.
+	fixtureCfg := cfg
+	fixtureCfg.mu.RLock()
+	previous := fixtureCfg.uiUsers[sub]
+	fixtureCfg.mu.RUnlock()
+	if err := fixtureCfg.SetUIUser(sub, "FixturePassw0rd!", RoleAdmin); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		fixtureCfg.mu.Lock()
+		defer fixtureCfg.mu.Unlock()
+		if previous == nil {
+			delete(fixtureCfg.uiUsers, sub)
+		} else {
+			fixtureCfg.uiUsers[sub] = previous
+		}
+	})
 	tok, err := encodeSession(&Session{
 		Sub:      sub,
 		Provider: "local",
+		Audience: uiSessionAudience,
 		Role:     string(RoleAdmin),
 		Exp:      time.Now().Add(time.Hour).Unix(),
 		Jti:      newSessionJti(),
