@@ -12,6 +12,7 @@
 # Steps:
 #   ovf        read OVF environment (culvert.* keys) → optional static network
 #   console    make the 'culvert' console account usable + the sudo policy
+#   access     validate/import public keys for the read-only SSH operator
 #   images     docker load the pre-baked image tars (by content digest)
 #   install    run scripts/install.sh non-interactively against the loaded
 #              image, with a per-instance first-admin SETUP TOKEN
@@ -116,8 +117,7 @@ step_ovf() {
 # ── step: console (per-instance credential + sudo policy, never shipped) ───
 # console_policy SHADOW_FIELD HAS_KEY MINT_STARTED → one of:
 #   password   cloud-init/OVF (or a previous run) set a usable password
-#   keyonly    an SSH key was supplied and no password exists
-#   mint       neither credential exists: mint a one-time console password
+#   mint       no console password exists (SSH keys authorize only the operator)
 #   remint     a previous run started minting but never got to show it
 # A field starting with '!' or '*' is a LOCKED/absent password. The order
 # matters: a password that exists is honoured whatever the key state; a
@@ -126,31 +126,22 @@ step_ovf() {
 # by anyone, and chage -d 0 forces a change at first login anyway, so
 # replacing it costs nothing and showing it is the whole point.
 console_policy() {
-  local shadow="$1" keys="$2" minted="$3"
+  # $2 is retained for callers of the original decision helper; SSH keys no
+  # longer affect local-console authentication.
+  local shadow="$1" minted="$3"
   if [[ -n "$shadow" && "$shadow" != '!'* && "$shadow" != '*'* ]]; then
     if [[ "$minted" -eq 1 ]]; then echo remint; else echo password; fi
-  elif [[ "$keys" -eq 1 ]]; then
-    echo keyonly
   else
     echo mint
   fi
 }
 
-# write_keyonly_sudoers — passwordless sudo for the console user. The SSH
-# private key IS the per-instance credential on a key-provisioned appliance
-# (the password is locked, SSH refuses passwords); a sudo rule that demands a
-# password the operator was never given is a lockout, not a control (owner
-# review, PR #1528). Same posture as Ubuntu cloud images' default user.
-# Reverted to password-gated sudo with `culvert-sudo-policy require-password`
-# once the operator has set one.
-write_keyonly_sudoers() {
-  local tmp
-  tmp="$(mktemp)"
-  printf '%s ALL=(ALL:ALL) NOPASSWD: ALL\n' "$CONSOLE_USER" > "$tmp"
-  chmod 0440 "$tmp"
-  visudo -c -q -f "$tmp" || { rm -f "$tmp"; return 1; }
-  install -m 0440 -o root -g root "$tmp" "$KEYONLY_SUDOERS"
-  rm -f "$tmp"
+# Imported public keys authorize only the read-only SSH identity. Key ingestion
+# runs as the console user; a user-controlled path cannot make root read secrets.
+step_access() {
+  step_done access && return 0
+  "$BIN_DIR/culvert-access" --import-keys || return 1
+  done_step access
 }
 
 mint_console_password() {
@@ -180,10 +171,6 @@ step_console() {
     password)
       log "console account already has a password (cloud-init/OVF); sudo asks for it"
       ;;
-    keyonly)
-      write_keyonly_sudoers || { log "ERROR: could not install the key-only sudo policy"; return 1; }
-      log "SSH key present for '$CONSOLE_USER', no password: passwordless sudo installed ($KEYONLY_SUDOERS); require a password later with: sudo passwd $CONSOLE_USER && sudo culvert-sudo-policy require-password"
-      ;;
     mint|remint)
       local pw
       # Durable "minting started" marker BEFORE the password lands, so a
@@ -200,6 +187,9 @@ step_console() {
       rm -f "$STATE/console.minting"
       ;;
   esac
+  # Remove the legacy exception only after a console password and its durable
+  # handoff exist. This script is not an in-place SSH migration mechanism.
+  rm -f "$KEYONLY_SUDOERS"
   done_step console
   # Also commits a previously recorded credential when interruption occurred
   # after removing console.minting but before writing console.done.
@@ -207,7 +197,7 @@ step_console() {
   if [[ -n ${pw:-} ]]; then
       console ""
       console "=================================================================="
-      console " Culvert appliance: no SSH key or password was supplied at import."
+      console " Culvert appliance: no local console password was supplied at import."
       console " One-time console login:  user '$CONSOLE_USER'  password: $pw"
       console " You must change it at first login. SSH password login is disabled."
       console "=================================================================="
@@ -393,6 +383,7 @@ main() {
   log "start (appliance $(python3 -c 'import json;print(json.load(open("'"$STATE_DIR"'/build-info.json"))["appliance"]["version"])' 2>/dev/null || echo '?'))"
   step_ovf
   step_console
+  step_access
   step_images
   step_install
   step_agent

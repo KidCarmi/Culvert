@@ -211,7 +211,7 @@ func (b *reportBuilder) steps(steps []Step) []reportStep {
 		return out
 	}
 	for _, step := range steps {
-		if slices.Contains([]string{"ovf", "console", "images", "install", "agent", "complete"}, step.ID) {
+		if slices.Contains(stepNames, step.ID) {
 			out = append(out, reportStep{ID: step.ID, State: b.text(step.State, 32)})
 		}
 	}

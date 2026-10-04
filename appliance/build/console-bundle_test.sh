@@ -31,7 +31,9 @@ build)
     [[ ${MOCK_MODE:-} != build_failure ]]
     [[ $PWD == "$MOCK_REPO" && $CGO_ENABLED == 0 && $GOOS == linux && $GOARCH == amd64 && $GOAMD64 == v1 ]]
     [[ ${GOENV:-} == off && ${GOWORK:-} == off && -z ${GOFLAGS:-} && ${GO111MODULE:-} == on && -z ${GOEXPERIMENT:-} ]]
-    [[ $* == *'-mod=readonly -buildmode=exe -trimpath -buildvcs=true -o '* && ${!#} == ./cmd/culvert-console ]]
+    [[ $* == *'-mod=readonly -buildmode=exe -trimpath -buildvcs=true -o '* ]]
+    [[ ${!#} == ./cmd/culvert-console || ${!#} == ./cmd/culvert-access ]]
+    [[ ${MOCK_MODE:-} != access_build_failure || ${!#} != ./cmd/culvert-access ]]
     while [[ $1 != -o ]]; do shift; done
     printf '#!/bin/sh\n# Fake compiler output; never executed by this test.\n' > "$2"
     ;;
@@ -52,7 +54,7 @@ esac
 MOCK
 chmod +x "$TEST_DIR/bin/go"
 export PATH="$TEST_DIR/bin:$PATH"
-for mode in wrong_compiler build_failure invalid_binary wrong_binary_compiler wrong_arch dynamic_binary; do
+for mode in wrong_compiler build_failure access_build_failure invalid_binary wrong_binary_compiler wrong_arch dynamic_binary; do
     export MOCK_MODE=$mode
     : > "$MOCK_TRACE"
     if bash -euo pipefail -c 'source "$1"; build_console_bundle "$2" "$3"' \
@@ -69,9 +71,10 @@ done
 unset MOCK_MODE
 build_console_bundle "$MOCK_REPO" "$TEST_DIR/success/console"
 actual=$(find "$TEST_DIR/success/console" -type f -printf '%f\n' | sort)
-expected=$(printf '%s\n' culvert-console install.sh install-lib.sh profile.sh getty-override.conf culvert-console-host.service | sort)
+expected=$(printf '%s\n' culvert-console culvert-access install.sh install-lib.sh profile.sh getty-override.conf culvert-console-host.service | sort)
 [[ $actual == "$expected" ]]
 [[ -x $TEST_DIR/success/console/culvert-console ]]
+[[ -x $TEST_DIR/success/console/culvert-access ]]
 ! cmp -s "$MOCK_REPO/appliance/console/culvert-console" "$TEST_DIR/success/console/culvert-console"
 for file in install.sh install-lib.sh profile.sh getty-override.conf culvert-console-host.service; do
     cmp "$MOCK_REPO/appliance/console/$file" "$TEST_DIR/success/console/$file"

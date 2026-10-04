@@ -16,7 +16,7 @@ func TestBootstrapFullFrameHasSetupAndCredentialGuidance(t *testing.T) {
 	for _, phase := range []string{"running", "failed", "provisioned"} {
 		s := applianceconsole.Snapshot{Phase: phase, SetupStatus: "pending", ManagementAvailable: phase == "provisioned", Addresses: []string{"192.0.2.10"}, ManagementURLs: []string{"https://192.0.2.10:9090"}}
 		if phase == "provisioned" {
-			for _, id := range []string{"ovf", "console", "images", "install", "agent", "complete"} {
+			for _, id := range []string{"ovf", "console", "access", "images", "install", "agent", "complete"} {
 				s.Steps = append(s.Steps, applianceconsole.Step{ID: id, State: "recorded"})
 			}
 		}

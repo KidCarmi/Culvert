@@ -262,6 +262,7 @@ for splash_file in install.sh install-lib.sh culvert.plymouth 99-culvert-splash.
 done
 build_console_bundle "$REPO" "$OV/opt/culvert-appliance/console"
 CONSOLE_BINARY_SHA="$(sha256sum "$OV/opt/culvert-appliance/console/culvert-console" | cut -d' ' -f1)"
+ACCESS_BINARY_SHA="$(sha256sum "$OV/opt/culvert-appliance/console/culvert-access" | cut -d' ' -f1)"
 cp "$REPO/scripts/install.sh" "$OV/opt/culvert-appliance/install.sh"
 cp "$MANIFEST" "$OV/var/lib/culvert-appliance/manifest.env"
 if [[ "$CANDIDATE" -eq 1 ]]; then
@@ -467,6 +468,8 @@ log "prepare-guest.sh completed in the guest at $PREP_DONE"
 log "verifying guest contents"
 CONSOLE_INSTALLED_SHA="$(virt-cat -a "$DISK" /opt/culvert-appliance/bin/culvert-console | sha256sum | cut -d' ' -f1)"
 [[ "$CONSOLE_INSTALLED_SHA" == "$CONSOLE_BINARY_SHA" ]] || die "installed console binary does not match its recorded build hash"
+ACCESS_INSTALLED_SHA="$(virt-cat -a "$DISK" /opt/culvert-appliance/bin/culvert-access | sha256sum | cut -d' ' -f1)"
+[[ "$ACCESS_INSTALLED_SHA" == "$ACCESS_BINARY_SHA" ]] || die "installed access binary does not match its recorded build hash"
 SPLASH_THEME_SHA="$(sha256sum "$REPO/appliance/boot-splash/culvert.plymouth" | cut -d' ' -f1)"
 for splash_name in default.plymouth text.plymouth culvert/culvert.plymouth; do
   installed_splash_sha="$(virt-cat -a "$DISK" "/usr/share/plymouth/themes/$splash_name" | sha256sum | cut -d' ' -f1)"
@@ -490,6 +493,9 @@ if virt-cat -a "$DISK" /etc/environment | grep -qi proxy; then die "proxy variab
 if virt-ls -a "$DISK" /home/culvert/ 2>/dev/null | grep -q '^\.ssh$'; then die "authorized keys leaked into image"; fi
 shadow_line="$(virt-cat -a "$DISK" /etc/shadow | grep '^culvert:' || true)"
 [[ "$shadow_line" == culvert:!* ]] || die "console account is not locked in the image"
+operator_shadow="$(virt-cat -a "$DISK" /etc/shadow | grep '^culvert-operator:' || true)"
+[[ "$operator_shadow" == culvert-operator:!* ]] || die "operator password is not locked in the image"
+if virt-ls -a "$DISK" /etc/ssh/culvert-authorized-keys/ | grep -q .; then die "operator keys leaked into image"; fi
 log "guest checks OK (pinned docker, empty machine-id, no host keys, no proxy/CA residue, console account locked)"
 [[ "$STOP_AFTER" == "disk" ]] && { cp "$DISK" "$OUT/$OVA_BASENAME.qcow2"; log "stopped after disk: $OUT/$OVA_BASENAME.qcow2"; KEEP_WORK=1; exit 0; }
 
