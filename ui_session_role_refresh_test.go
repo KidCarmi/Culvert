@@ -24,7 +24,7 @@ func TestUISessionRole_DemotionTakesEffectWithoutLogin(t *testing.T) {
 	if err := setUISessionCookie(w, httptest.NewRequest(http.MethodGet, "/", http.NoBody), "demoted", RoleAdmin); err != nil {
 		t.Fatal(err)
 	}
-	cookie := w.Result().Cookies()[0]
+	cookie := w.Result().Cookies()[0] //nolint:gosec // G124: replayed as a REQUEST cookie in a test; response attributes do not apply
 	r := httptest.NewRequest(http.MethodPost, "/api/auth/users", strings.NewReader(`{"username":"demoted","role":"viewer"}`))
 	r = r.WithContext(context.WithValue(r.Context(), uiRoleKey{}, RoleAdmin))
 	w = httptest.NewRecorder()
@@ -103,7 +103,7 @@ func TestUISessionRole_RejectsReplayedPortalCookie(t *testing.T) {
 			if err := setSessionCookie(w, httptest.NewRequest(http.MethodGet, "/", http.NoBody), &Identity{Sub: "owner", Provider: provider}); err != nil {
 				t.Fatal(err)
 			}
-			cookie := w.Result().Cookies()[0]
+			cookie := w.Result().Cookies()[0] //nolint:gosec // G124: replayed as a REQUEST cookie in a test; response attributes do not apply
 			cookie.Name = uiSessionCookieName //nolint:gosec // G124: a REQUEST cookie in a test; Secure/HttpOnly/SameSite are response attributes
 			r := httptest.NewRequest(http.MethodGet, "/api/auth/users", http.NoBody)
 			r.AddCookie(cookie) //nolint:gosec // G124: a REQUEST cookie replayed from the response; attributes do not apply
@@ -169,7 +169,7 @@ func TestUISessionRole_ProxyReaderRejectsOtherPurpose(t *testing.T) {
 	if err := setUISessionCookie(issued, httptest.NewRequest(http.MethodGet, "/", http.NoBody), "viewer", RoleViewer); err != nil {
 		t.Fatal(err)
 	}
-	cookie := issued.Result().Cookies()[0]
+	cookie := issued.Result().Cookies()[0] //nolint:gosec // G124: replayed as a REQUEST cookie in a test; response attributes do not apply
 	cookie.Name = sessionCookieName //nolint:gosec // G124: a REQUEST cookie in a test; Secure/HttpOnly/SameSite are response attributes
 	r := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
 	r.AddCookie(cookie) //nolint:gosec // G124: a REQUEST cookie in a test; Secure/HttpOnly/SameSite are response attributes
@@ -197,7 +197,7 @@ func TestUISessionRole_ProxyReaderRejectsOtherPurpose(t *testing.T) {
 				if err := setSessionCookie(w, httptest.NewRequest(http.MethodGet, "/", http.NoBody), &Identity{Sub: "portal-user", Provider: "oidc"}); err != nil {
 					t.Fatal(err)
 				}
-				cookie = w.Result().Cookies()[0]
+				cookie = w.Result().Cookies()[0] //nolint:gosec // G124: replayed as a REQUEST cookie in a test; response attributes do not apply
 			}
 			r := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
 			r.AddCookie(cookie) //nolint:gosec // G124: a REQUEST cookie in a test; Secure/HttpOnly/SameSite are response attributes
