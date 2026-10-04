@@ -135,22 +135,24 @@ start_agent() {
 # the trust reason with no mutating stage (pre_backup, pull, restart,
 # health_gate, verify) ever started.
 refused_op() {
-  local st rec="$E2E_ROOT/op-$1.json"
+  local st rec="$E2E_ROOT/op-$1.json" log="$E2E_ROOT/op-$1.log"
   st="$(op_wait "$1")"
   curl -fsS --unix-socket "$SOCK" "http://localhost/v1/operations/$1" > "$rec" || true
-  cat "$rec"; echo
+  curl -fsS --unix-socket "$SOCK" "http://localhost/v1/operations/$1/logs" > "$log" || true
   [ "$st" = failed ] || { echo "FATAL $3: op $1 state=$st (want failed)"; return 1; }
-  python3 - "$rec" "$2" "$3" <<'PY'
+  python3 - "$rec" "$log" "$2" "$3" <<'PY'
 import json, re, sys
-rec, pattern, label = json.load(open(sys.argv[1])), sys.argv[2], sys.argv[3]
-reason = rec.get("failure_reason", "") + " " + " ".join(s.get("output", "") for s in rec.get("progress") or [])
-if not re.search(pattern, reason):
-    sys.exit(f"FATAL {label}: op failed, but not on {pattern!r}: {rec.get('failure_reason')!r}")
-started = [s["stage"] for s in rec.get("progress") or []
-           if s["stage"] in ("pre_backup", "pull", "restart", "health_gate", "verify") and s.get("state") not in ("", "pending")]
-if started:
-    sys.exit(f"FATAL {label}: mutating stage(s) ran before the trust refusal: {started}")
-print(f"{label}: refused before any mutation — {rec.get('failure_reason')}")
+rec, log, pattern, label = json.load(open(sys.argv[1])), open(sys.argv[2]).read(), sys.argv[3], sys.argv[4]
+# The trust refusal is the failed stage's END line in the op log.
+failed = [l for l in log.splitlines() if "\tEND failed\t" in l]
+if not failed or not re.search(pattern, failed[0]):
+    sys.exit(f"FATAL {label}: op failed, but not on {pattern!r}: {failed[:1]} (failure_reason={rec.get('failure_reason')!r})")
+ran = [s["stage"] for s in rec.get("progress") or []
+       if s["stage"] in ("pre_backup", "pull", "restart", "health_gate", "verify")
+       and s.get("state") in ("running", "succeeded", "failed")]
+if ran:
+    sys.exit(f"FATAL {label}: mutating stage(s) ran before the trust refusal: {ran}")
+print(f"{label}: refused before any mutation — {failed[0].split(chr(9))[-1]}")
 PY
 }
 

@@ -279,7 +279,7 @@ jobs:
           CODE="$(dispatch "$RUNNER_TEMP/p2.json")"
           echo "dispatch HTTP $CODE"; cat "$RUNNER_TEMP/p2.json"; echo
           [ "$CODE" = "202" ] || { echo "FATAL P2: dispatch was not handed to the agent (HTTP $CODE)"; exit 1; }
-          refused_op "$(op_from "$RUNNER_TEMP/p2.json")" 'observed signed baseline required' P2
+          refused_op "$(op_from "$RUNNER_TEMP/p2.json")" 'release trust: baseline: release trust: signed release proof required' P2
           wait_dispatch_terminal P2
           [ "$(running_ref)" = "$D1_REF" ] || { echo "FATAL P2: image changed on a refused upgrade"; exit 1; }
           [ "$(ledger_entries)" = absent ] || { echo "FATAL P2: a refused request wrote the ledger"; exit 1; }
@@ -303,12 +303,12 @@ jobs:
           A="$(agent_post /v1/upgrades/apply "$RUNNER_TEMP/p3-noprior.json" "$RUNNER_TEMP/p3-noprior.out")"
           echo "no-prior: agent HTTP $A"; cat "$RUNNER_TEMP/p3-noprior.out"; echo
           [ "$A" = 202 ] || { echo "FATAL P3: no-prior apply not handled as an op (HTTP $A)"; exit 1; }
-          refused_op "$(op_from "$RUNNER_TEMP/p3-noprior.out")" 'observed signed baseline required' P3/no-prior
+          refused_op "$(op_from "$RUNNER_TEMP/p3-noprior.out")" 'release trust: baseline: release trust: signed release proof required' P3/no-prior
           emit prior=culvert-2.0.0 "$D1_REF" "$RUNNER_TEMP/p3-mismatch.json"
           A="$(agent_post /v1/upgrades/apply "$RUNNER_TEMP/p3-mismatch.json" "$RUNNER_TEMP/p3-mismatch.out")"
           echo "mismatched: agent HTTP $A"; cat "$RUNNER_TEMP/p3-mismatch.out"; echo
           [ "$A" = 202 ] || { echo "FATAL P3: mismatched apply not handled as an op (HTTP $A)"; exit 1; }
-          refused_op "$(op_from "$RUNNER_TEMP/p3-mismatch.out")" 'release trust: baseline' P3/mismatched
+          refused_op "$(op_from "$RUNNER_TEMP/p3-mismatch.out")" 'release trust: baseline: (?!release trust: signed release proof required)' P3/mismatched
           [ "$(running_ref)" = "$D1_REF" ] || { echo "FATAL P3: image changed on a refused apply"; exit 1; }
           [ "$(ledger_entries)" = absent ] || { echo "FATAL P3: refused requests wrote the ledger"; exit 1; }
 
