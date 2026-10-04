@@ -135,6 +135,14 @@ class ScopeTests(unittest.TestCase):
         with self.assertRaises(lab.Refused):
             lab.validate_scope(self.c)
 
+    def test_credential_modes_are_explicit(self):
+        for mode in ('key', 'none'):
+            self.c['credential_mode'] = mode
+            lab.validate_scope(self.c)
+        self.c['credential_mode'] = 'password-in-scope'
+        with self.assertRaisesRegex(lab.Refused, 'credential_mode'):
+            lab.validate_scope(self.c)
+
     def test_no_wildcard_scope(self):
         self.c['datastore'] = '/dc/datastore/*'
         with self.assertRaises(lab.Refused):
@@ -199,6 +207,7 @@ class EvidenceTests(unittest.TestCase):
             (obj.sec / 'admin-pass').write_text('sensitive-password')
             (obj.ev / 'console.log').write_text('BEGIN OPENSSH PRIVATE KEY sensitive-password')
             obj.record('probe', 'blocked', 'sensitive-password')
+            obj.record('actual-restore', 'pass', 'synthetic test evidence')
             obj.collect()
             with tarfile.open(obj.run / 'esxi-evidence.tgz') as tf:
                 self.assertEqual(tf.getnames(), ['results.json'])
@@ -206,6 +215,8 @@ class EvidenceTests(unittest.TestCase):
                 self.assertNotIn(b'sensitive-password', data)
                 self.assertIn(b'not-run', data)
                 self.assertIn(b'incomplete', data)
+                restore = [r for r in json.loads(data)['results'] if r['check'] == 'actual-restore']
+                self.assertEqual(restore, [dict(step='ESXi', check='actual-restore', result='pass')])
 
     def test_govc_errors_never_echo_credentials(self):
         with tempfile.TemporaryDirectory() as tmp:

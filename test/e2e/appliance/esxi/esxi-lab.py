@@ -195,6 +195,7 @@ def validate_scope(c):
             'endpoint must be HTTPS without credentials')
     require(not u.query and not u.fragment and u.path in ('', '/', '/sdk'), 'invalid endpoint')
     require(type(c.get('tls_insecure', False)) is bool, 'tls_insecure must be boolean')
+    require(c.get('credential_mode', 'key') in ('key', 'none'), 'credential_mode must be key or none')
     if c.get('tls_insecure'):
         require(c.get('tls_exception_endpoint') == c['endpoint'], 'TLS exception must name this exact endpoint')
     for k in ('host', 'datastore', 'network', 'folder', 'pool'):
@@ -334,6 +335,7 @@ class Lab:
         dirty = subprocess.run(['git', '-C', str(ROOT), 'status', '--porcelain'], capture_output=True, text=True, check=True).stdout.strip()
         sources = {}
         for source in (Path(__file__), HERE / 'guest-checks.sh', HERE / 'guest-observe.py',
+                       HERE / 'restore-checks.sh', HERE / 'console-checks.py', HERE / 'console-ocr.ps1',
                        HERE / 'govc-sha256-negotiation.patch', HERE.parent / 'lab/appliance-lab.sh'):
             with source.open('rb') as f:
                 sources[source.relative_to(ROOT).as_posix()] = digest(f)
@@ -344,6 +346,7 @@ class Lab:
                     tls_verification='owner-authorized-exception' if self.c.get('tls_insecure') else 'verified',
                     hypervisor=hs[0]['summary']['config']['product'], capacity=capacity,
                     property_delivery='govc ImportVApp + InjectOvfEnv via VMware guestinfo',
+                    credential_mode=self.c.get('credential_mode', 'key'),
                     host_ref=hs[0]['self'], ds_ref=dss[0]['self'], network_ref=net)
         if self.c.get('govc_build'):
             with Path(self.govc).open('rb') as f:
@@ -373,7 +376,9 @@ class Lab:
         subprocess.run(['ssh-keygen', '-q', '-t', 'ed25519', '-N', '', '-f', str(key)], check=True, timeout=30)
         (self.sec / 'admin-pass').write_text(secrets.token_hex(18), encoding='ascii')
         props = {'instance-id': self.state['name'], 'hostname': self.state['name'],
-                 'public-keys': key.with_suffix('.pub').read_text().strip(), 'culvert.net.mode': 'dhcp'}
+                 'culvert.net.mode': 'dhcp'}
+        if self.c.get('credential_mode', 'key') == 'key':
+            props['public-keys'] = key.with_suffix('.pub').read_text().strip()
         static = self.c.get('static')
         if static:
             addr = ipaddress.ip_interface(static['address'])
@@ -549,9 +554,11 @@ class Lab:
                 for line in p.read_text(encoding='utf-8').splitlines():
                     r = json.loads(line)
                     rows.append({k: r[k] for k in ('step', 'check', 'result')})
+        recorded = {row['check'] for row in rows}
         for check in ('actual-restore', 'clamav-failure-posture', 'category-enforcement', 'interrupted-firstboot',
                       'dns-network-fault', 'two-import-identity', 'power-loss-boundary', 'F-DISK-1', 'alarm-delivery'):
-            rows.append(dict(step='extended', check=check, result='not-run'))
+            if check not in recorded:
+                rows.append(dict(step='extended', check=check, result='not-run'))
         report = dict(schema=1, qualification='incomplete', results=rows,
                       known_failure='F-DISK-1 remains OPEN; recovery is not survival',
                       original_candidate_expected_sha256=ORIGINAL_SHA,

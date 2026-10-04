@@ -6,6 +6,13 @@
 #   test/e2e/appliance/lab/appliance-lab.sh fingerprint OVA OUT.tsv
 #   test/e2e/appliance/lab/appliance-lab.sh compare REFERENCE.tsv CANDIDATE.tsv
 #
+# EXTERNAL target (the same guest checks against an appliance some other tool
+# deployed — e.g. an ESXi import; that tool owns the VM and its credentials):
+#   LAB_EXTERNAL=1 LAB_HOST=<vm address> LAB_SSH_KEY=<key the VM was given>
+#   [LAB_SSH_PORT=22 LAB_PROXY_PORT=8080 LAB_UI_PORT=9090] appliance-lab.sh qualify ; ... collect
+#   `up`/`down` are QEMU-only; with LAB_EXTERNAL=1 `down` removes only the
+#   lab's own disposable admin password and cookies, never the VM or its key.
+#
 # What it boots: the VMDK inside the OVA, after verifying the OVA's SHA-256
 # (LAB_OVA_SHA256) and every digest in its .mf. The VMDK is converted ONCE to
 # a read-only qcow2 base; the guest writes only to a disposable qcow2 overlay
@@ -44,8 +51,10 @@ WORK="$LAB_DIR/work"; EV="$LAB_DIR/evidence"; SEC="$LAB_DIR/secrets"; STATEF="$L
 JSONL="$EV/checks.jsonl"
 LAB_MEM_MB="${LAB_MEM_MB:-4096}"; LAB_CPUS="${LAB_CPUS:-2}"; LAB_ACCEL="${LAB_ACCEL:-auto}"
 LAB_MIN_FREE_GB="${LAB_MIN_FREE_GB:-20}"; LAB_MIN_MEM_MB="${LAB_MIN_MEM_MB:-6144}"
-LAB_SSH_PORT="${LAB_SSH_PORT:-2222}"; LAB_PROXY_PORT="${LAB_PROXY_PORT:-18080}"; LAB_UI_PORT="${LAB_UI_PORT:-19090}"
-LAB_FIRSTBOOT_TIMEOUT="${LAB_FIRSTBOOT_TIMEOUT:-2400}"; LAB_FEED_TIMEOUT="${LAB_FEED_TIMEOUT:-1500}"
+LAB_EXTERNAL="${LAB_EXTERNAL:-0}"; LAB_HOST="${LAB_HOST:-127.0.0.1}"
+if [[ "$LAB_EXTERNAL" == 1 ]]; then dssh=22 dproxy=8080 dui=9090; else dssh=2222 dproxy=18080 dui=19090; fi
+LAB_SSH_PORT="${LAB_SSH_PORT:-$dssh}"; LAB_PROXY_PORT="${LAB_PROXY_PORT:-$dproxy}"; LAB_UI_PORT="${LAB_UI_PORT:-$dui}"
+LAB_FIRSTBOOT_TIMEOUT="${LAB_FIRSTBOOT_TIMEOUT:-2400}"; LAB_KERNEL_TIMEOUT="${LAB_KERNEL_TIMEOUT:-}"; LAB_FEED_TIMEOUT="${LAB_FEED_TIMEOUT:-1500}"
 LAB_EXPECT_IMAGE_ID="${LAB_EXPECT_IMAGE_ID:-}"
 ADMIN_USER=labadmin
 
@@ -68,21 +77,88 @@ redact_str() { local s="$1" v
   for f in "$SEC/setup-token" "$SEC/admin-pass"; do
     [[ -s "$f" ]] || continue; v="$(cat "$f")"; s="${s//"$v"/[REDACTED]}"
   done; printf '%s' "$s"; }
+# A secret that appears in NO evidence file is the good case, not an error:
+# under pipefail grep's "no match" used to fail the function, which ended
+# cmd_qualify (its last call) before the failure count — so an all-PASS run
+# exited 1 (run 37195991070: 48 pass, 0 fail). Redaction itself is unchanged
+# and collect still refuses evidence that carries private material.
 redact_tree() { local f v
   for f in "$SEC/setup-token" "$SEC/admin-pass"; do
     [[ -s "$f" ]] || continue; v="$(cat "$f")"
-    grep -rlF -- "$v" "$EV" 2>/dev/null | while read -r p; do sed -i "s|$(printf '%s' "$v" | sed 's/[.[\*^$/|]/\\&/g')|[REDACTED]|g" "$p"; done
-  done; }
+    { grep -rlF -- "$v" "$EV" 2>/dev/null || true; } | while read -r p; do sed -i "s|$(printf '%s' "$v" | sed 's/[.[\*^$/|]/\\&/g')|[REDACTED]|g" "$p"; done
+  done
+  return 0; }
 
 # ── access helpers (vsphere-qualification.md step 4 shapes) ──────────────────
-SSH_OPTS=(-i "$SEC/id_ed25519" -p "$LAB_SSH_PORT" -o StrictHostKeyChecking=no -o "UserKnownHostsFile=$SEC/known_hosts"
+LAB_SSH_KEY="${LAB_SSH_KEY:-$SEC/id_ed25519}"
+SSH_OPTS=(-i "$LAB_SSH_KEY" -p "$LAB_SSH_PORT" -o StrictHostKeyChecking=no -o "UserKnownHostsFile=$SEC/known_hosts"
           -o ConnectTimeout=10 -o BatchMode=yes -o LogLevel=ERROR -o ServerAliveInterval=15)
-gssh() { ssh "${SSH_OPTS[@]}" culvert@127.0.0.1 "$@"; }
-UI="https://127.0.0.1:$LAB_UI_PORT"; P="http://127.0.0.1:$LAB_PROXY_PORT"; JAR="$SEC/cookies"
+gssh() { ssh "${SSH_OPTS[@]}" "culvert@$LAB_HOST" "$@"; }
+UI="https://$LAB_HOST:$LAB_UI_PORT"; P="http://$LAB_HOST:$LAB_PROXY_PORT"; JAR="$SEC/cookies"
+ensure_admin_pass() { [[ -s "$SEC/admin-pass" ]] || { head -c 4096 /dev/urandom | tr -dc 'A-Za-z0-9' | cut -c1-24 > "$SEC/admin-pass"; chmod 0600 "$SEC/admin-pass"; }; }
 api() { curl -ksS -m 30 -X "$1" "$UI$2" -H "Origin: $UI" -H 'Content-Type: application/json' -b "$JAR" -c "$JAR" ${3:+-d "$3"} -w '\n%{http_code}\n'; }
 body() { sed '$d'; }; code() { tail -n1; }
+# agent_status_verdict FILE — FILE is `api GET /api/maintenance-agent` output
+# (JSON body, then the HTTP code). That endpoint answers 200 EVEN WHEN THE
+# AGENT IS DOWN ({available:false, reason}) so the GUI can show why: HTTP 200
+# alone proves nothing (run 37159302279 recorded PASS with available:false and
+# a missing socket). PASS needs a real reachable agent: HTTP 200, available
+# === true (a JSON boolean), a release-shaped agent_version and the compose
+# stack up. Prints "pass|<detail>" or "fail|<detail>".
+agent_status_verdict() {
+  python3 - "$1" <<'PY'
+import json, re, sys
+lines = open(sys.argv[1]).read().rstrip("\n").split("\n")
+code, body = (lines[-1].strip() if lines else ""), "\n".join(lines[:-1])
+def out(r, d): print(f"{r}|{d}"); sys.exit(0)
+if code != "200": out("fail", f"http {code or '?'}")
+try: j = json.loads(body)
+except Exception: out("fail", "unparseable body: " + body[:120])
+if not isinstance(j, dict) or j.get("available") is not True:
+    out("fail", "agent not available: " + str((j or {}).get("reason", body[:160]) if isinstance(j, dict) else body[:160]))
+v = j.get("agent_version", "")
+if not re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?", v or ""): out("fail", f"agent_version {v!r} is not a release-shaped version")
+if j.get("compose_stack_up") is not True: out("fail", f"agent {v}: compose stack not up ({j.get('compose_error', '')})")
+out("pass", f"agent {v} reachable over its socket, privilege_mode={j.get('privilege_mode', '?')}, compose stack up")
+PY
+}
+# The oracle's own proof: a known-unavailable response must FAIL it, or a
+# PASS from it means nothing.
+cmd_selftest() { local d rc=0 got; d="$(mktemp -d)"
+  verdict_case() { printf '%s\n%s\n' "$2" "$3" > "$d/r"; got="$(agent_status_verdict "$d/r")"
+    if [[ "${got%%|*}" == "$1" ]]; then log "selftest ok: $4 -> $got"; else log "selftest FAILED: $4 -> $got (want $1)"; rc=1; fi; }
+  verdict_case fail '{"available":false,"reason":"maintenance agent unreachable: dial unix /run/culvert-maint/culvert-maint.sock: connect: no such file or directory"}' 200 "run 37159302279's response"
+  verdict_case fail '{"available":false,"reason":"maintenance agent not configured"}' 200 "not configured"
+  verdict_case fail '{"available":false,"agent_version":"v1.0.260-candidate.gc5551a18da30","compose_stack_up":true}' 200 "available:false with otherwise healthy fields"
+  verdict_case fail '{"available":"true","agent_version":"v1.0.260-candidate.gc5551a18da30","compose_stack_up":true}' 200 "available as a string"
+  verdict_case fail '{"available":true,"agent_version":"dev","compose_stack_up":true}' 200 "dev agent"
+  verdict_case fail '{"available":true,"agent_version":"v1.0.260-candidate.gc5551a18da30","compose_stack_up":false}' 200 "stack down"
+  verdict_case fail '{"error":"forbidden"}' 403 "http 403"
+  verdict_case fail 'not json' 200 "unparseable"
+  verdict_case pass '{"available":true,"agent_version":"v1.0.260-candidate.gc5551a18da30","privilege_mode":"sudoers","compose_stack_up":true}' 200 "healthy agent"
+  # redact_tree: nothing to redact is success; a present secret is replaced.
+  if ( SEC="$d/sec" EV="$d/ev"; mkdir -p "$SEC" "$EV"; printf 'S3cretValue42' > "$SEC/admin-pass"; echo clean > "$EV/a.txt"; redact_tree ); then
+    log "selftest ok: redact_tree with nothing to redact -> success"; else log "selftest FAILED: redact_tree with nothing to redact failed"; rc=1; fi
+  if ( SEC="$d/sec2" EV="$d/ev2"; mkdir -p "$SEC" "$EV"; printf 'S3cretValue42' > "$SEC/admin-pass"; echo 'pw=S3cretValue42' > "$EV/b.txt"; redact_tree && grep -qx 'pw=\[REDACTED\]' "$EV/b.txt" && ! grep -rq S3cretValue42 "$EV" ); then
+    log "selftest ok: redact_tree replaces a present secret"; else log "selftest FAILED: redact_tree left a secret in the evidence"; rc=1; fi
+  rm -rf "$d"; return "$rc"; }
 through_proxy() { curl -sS -m 20 -x "$P" -o /dev/null -w '%{http_code}' "$1" 2>/dev/null || echo 000; }
+# Monitor socket: a short fixed path (AF_UNIX paths are limited to 108 bytes).
+MON_SOCK="/tmp/culvert-lab-$(printf '%s' "$WORK" | sha256sum | cut -c1-12).sock"
 qemu_alive() { [[ -f "$WORK/qemu.pid" ]] && kill -0 "$(cat "$WORK/qemu.pid")" 2>/dev/null; }
+# screendump NAME — the VGA screen as PNG in the evidence (firmware and GRUB
+# write there, not to the serial console). Stdlib only: monitor socket + PPM→PNG.
+screendump() { qemu_alive && [[ -S "$MON_SOCK" ]] || return 0
+  python3 - "$MON_SOCK" "$WORK/screen.ppm" "$EV/$1.png" <<'PY' || true
+import socket,struct,sys,time,zlib
+s=socket.socket(socket.AF_UNIX); s.connect(sys.argv[1]); time.sleep(0.3); s.recv(65536)
+s.send(f"screendump {sys.argv[2]}\n".encode()); time.sleep(1.5); s.close()
+d=open(sys.argv[2],"rb").read(); p=d.split(b"\n",3); w,h=map(int,p[1].split()); px=p[3]
+raw=b"".join(b"\x00"+px[y*w*3:(y+1)*w*3] for y in range(h))
+c=lambda t,b: struct.pack(">I",len(b))+t+b+struct.pack(">I",zlib.crc32(t+b)&0xffffffff)
+open(sys.argv[3],"wb").write(b"\x89PNG\r\n\x1a\n"+c(b"IHDR",struct.pack(">IIBBBBB",w,h,8,2,0,0,0))+c(b"IDAT",zlib.compress(raw))+c(b"IEND",b""))
+PY
+}
 
 # ── preflight: KVM, RAM, free disk, tools — measured, recorded, enforced ─────
 cmd_preflight() {
@@ -176,7 +252,7 @@ cmd_up() {
   check 1 disk-chain pass "base.qcow2 (0444, from the OVA's own VMDK) ← overlay.qcow2 (disposable)"
   # Disposable credentials.
   rm -f "$SEC/id_ed25519"*; ssh-keygen -q -t ed25519 -N '' -C "culvert-lab-$RUN_ID" -f "$SEC/id_ed25519"
-  head -c 4096 /dev/urandom | tr -dc 'A-Za-z0-9' | cut -c1-24 > "$SEC/admin-pass"; chmod 0600 "$SEC/admin-pass"
+  rm -f "$SEC/admin-pass"; ensure_admin_pass
   # OVF environment (ISO transport): the same properties ovftool's --prop sets.
   mkdir -p "$WORK/ovfenv"
   python3 - "$WORK/ovfenv/ovf-env.xml" "lab-$RUN_ID" "$(cat "$SEC/id_ed25519.pub")" <<'PY'
@@ -204,19 +280,33 @@ PY
     -drive "file=$WORK/ovfenv.iso,if=none,id=cd0,media=cdrom,readonly=on" -device ide-cd,drive=cd0 \
     -netdev "user,id=n0,hostfwd=tcp:127.0.0.1:$LAB_SSH_PORT-:22,hostfwd=tcp:127.0.0.1:$LAB_PROXY_PORT-:8080,hostfwd=tcp:127.0.0.1:$LAB_UI_PORT-:9090" \
     -device e1000,netdev=n0 -display none -serial "file:$WORK/console.log" \
-    -pidfile "$WORK/qemu.pid" -daemonize
+    -monitor "unix:$MON_SOCK,server,nowait" -pidfile "$WORK/qemu.pid" -daemonize
   printf 'qemu-system-x86_64 %s -smp %s -m %s virtio-scsi(overlay.qcow2) ide-cd(ovfenv.iso) e1000 user-net hostfwd 127.0.0.1:{%s,%s,%s} SeaBIOS\n' \
     "${acc[*]}" "$LAB_CPUS" "$LAB_MEM_MB" "$LAB_SSH_PORT" "$LAB_PROXY_PORT" "$LAB_UI_PORT" > "$EV/02-qemu-command.txt"
   save_state BOOT_STARTED "$(date +%s)"
   check 2 boot-started pass "qemu pid $(cat "$WORK/qemu.pid") accel=$ACCEL"
   # Bounded: SSH, then first boot to completion (the guest's own marker).
   local deadline=$(( $(date +%s) + LAB_FIRSTBOOT_TIMEOUT )) t0; t0=$(date +%s)
+  # The guest kernel logs to ttyS0 (cloud image cmdline): no "Linux version"
+  # within the bound means firmware/bootloader never handed over — fail fast
+  # with the VGA screen as evidence instead of waiting out the SSH bound.
+  local kt="${LAB_KERNEL_TIMEOUT:-$([[ "$ACCEL" == kvm ]] && echo 300 || echo 1800)}"
+  until grep -qa 'Linux version' "$WORK/console.log" 2>/dev/null; do
+    qemu_alive || { check 2 kernel-started fail "qemu exited before the kernel started"; return 1; }
+    if (( $(date +%s) - t0 > kt )); then screendump 02-screen-no-kernel
+      check 2 kernel-started fail "no kernel output on ttyS0 within ${kt}s — bootloader/firmware stopped; see 02-screen-no-kernel.png"; return 1; fi
+    sleep 5; done
+  check 2 kernel-started pass "$(grep -am1 'Linux version' "$WORK/console.log" | cut -c1-90) after $(( $(date +%s) - t0 ))s"
   until gssh true 2>/dev/null; do
     qemu_alive || { check 2 ssh-up fail "qemu exited during boot (see console.log)"; return 1; }
-    (( $(date +%s) < deadline )) || { check 2 ssh-up fail "no SSH within ${LAB_FIRSTBOOT_TIMEOUT}s"; return 1; }
+    (( $(date +%s) < deadline )) || { screendump 02-screen-no-ssh; check 2 ssh-up fail "no SSH within ${LAB_FIRSTBOOT_TIMEOUT}s"; return 1; }
     sleep 10; done
   check 2 ssh-up pass "SSH with the OVF-delivered key after $(( $(date +%s) - t0 ))s"
   until gssh 'sudo test -f /var/lib/culvert-appliance/state/complete.done' 2>/dev/null; do
+    # systemd deletes a unit's start job to break an ordering cycle: first boot
+    # will then never run, so report it now rather than after the full bound.
+    if grep -qa 'Ordering cycle found, skipping.*culvert-firstboot' "$WORK/console.log" 2>/dev/null; then
+      check 2 firstboot-complete fail "systemd skipped culvert-firstboot.service (ordering cycle; see console.log)"; return 1; fi
     (( $(date +%s) < deadline )) || { check 2 firstboot-complete fail "first boot not complete within ${LAB_FIRSTBOOT_TIMEOUT}s"; return 1; }
     sleep 15; done
   check 2 firstboot-complete pass "complete.done after $(( $(date +%s) - t0 ))s from power-on"
@@ -226,7 +316,13 @@ PY
 STOP=0
 gate() { [[ $STOP == 0 ]] || { check "$1" "$2" not-run "an earlier step failed"; return 1; }; }
 cmd_qualify() {
-  [[ -n "${BOOT_STARTED:-}" ]] || die "run up first"
+  if [[ "$LAB_EXTERNAL" == 1 ]]; then
+    [[ -r "$LAB_SSH_KEY" ]] || die "LAB_EXTERNAL=1 needs LAB_SSH_KEY (the key the VM was given)"
+    gssh true || die "cannot reach culvert@$LAB_HOST:$LAB_SSH_PORT"
+    [[ -n "${ACCEL:-}" ]] || { save_state RUN_ID "$RUN_ID"; save_state ACCEL "external ($LAB_HOST)"; }
+    check 2 target info "external appliance at $LAB_HOST (deployed and owned by another tool; up/down not used)"
+  else [[ -n "${BOOT_STARTED:-}" ]] || die "run up first"; fi
+  ensure_admin_pass
   : > "$JAR"
   # Step 3 — first-boot evidence, kernel BEFORE, image identity, token.
   gssh 'uname -r; uname -v' > "$EV/03-kernel-before.txt" 2>&1 || true
@@ -291,19 +387,61 @@ PY
 
   # Step 5b — community category data (the boot-time feed sync), for the persistence check.
   if gate 5b category-data; then
-    local deadline=$(( $(date +%s) + LAB_FEED_TIMEOUT )) fl=""
-    until fl="$(gssh 'sudo docker logs culvert 2>&1 | grep -oE "FeedSync: (sync complete[^\"]*|download/parse failed[^\"]*|bulk write failed[^\"]*|write REFUSED[^\"]*)" | tail -1')" && [[ -n "$fl" ]]; do
+    # Completion is read from the PRODUCT (GET /api/urlcat/feed-status: the
+    # running process's last successful UT1 sync), never from `docker logs`:
+    # the agent install recreates the proxy container during first boot, and
+    # the replaced container's log — with any "sync complete" line — goes with
+    # it (run 37185033699). The log grep is kept as diagnostics only.
+    local deadline=$(( $(date +%s) + LAB_FEED_TIMEOUT )) fs="" fl=""
+    until fs="$(api GET /api/urlcat/feed-status | body | python3 -c 'import json,sys; u=json.load(sys.stdin).get("ut1",{}); print("%s %s" % (u.get("lastSync",""), u.get("entries",0)) if u.get("lastSync") and int(u.get("entries",0))>0 else "")' 2>/dev/null)" && [[ -n "$fs" ]]; do
       (( $(date +%s) < deadline )) || break; sleep 20; done
-    echo "${fl:-no feed completion line within ${LAB_FEED_TIMEOUT}s}" > "$EV/05b-feed.txt"
+    fl="$(gssh 'sudo docker logs culvert 2>&1 | grep -oE "FeedSync: [^\"]*" | tail -3' 2>/dev/null | tr '\n' ';' || true)"
+    api GET /api/urlcat/feed-status > "$EV/05b-feed-status.txt" || true
+    echo "${fs:-no completed UT1 sync reported by /api/urlcat/feed-status within ${LAB_FEED_TIMEOUT}s}; log: ${fl:-none}" > "$EV/05b-feed.txt"
     lookups > "$EV/05b-lookups-before.txt"
-    if [[ "$fl" == *"sync complete"* ]] && grep -q 'category=[^ ]' "$EV/05b-lookups-before.txt"; then
-      check 5b category-data pass "$fl; $(grep -c 'category=[^ ]' "$EV/05b-lookups-before.txt") of $(wc -l < "$EV/05b-lookups-before.txt") probe hosts categorized"
-    else check 5b category-data fail "${fl:-feed did not complete}; lookups: $(tr '\n' ' ' < "$EV/05b-lookups-before.txt")"; fi
+    # A built-in (admin/saas tier) match proves nothing about the feed: at
+    # least one probe host must resolve through the COMMUNITY (UT1) tier.
+    if [[ -n "$fs" ]] && grep -q 'tier=community' "$EV/05b-lookups-before.txt"; then
+      check 5b category-data pass "UT1 sync complete (lastSync entries: $fs); $(grep -c 'tier=community' "$EV/05b-lookups-before.txt") of $(wc -l < "$EV/05b-lookups-before.txt") probe hosts resolve via the community tier"
+    else check 5b category-data fail "no completed UT1 sync in this process ($(body < "$EV/05b-feed-status.txt" | head -c 160)); log: ${fl:-none}; lookups: $(tr '\n' ' ' < "$EV/05b-lookups-before.txt")"; fi
+  fi
+
+  # Step 5c — category ENFORCEMENT from the UT1 tier, through the real proxy.
+  # A Block_Page rule on the community category of a UT1-resolved probe host,
+  # above an Allow rule for that host: 403 proves the category rule matched
+  # (default deny is ruled out by the Allow rule; the control removes the
+  # block rule and requires the same request NOT to be 403).
+  if gate 5c category-enforcement; then
+    local ch cc bid aid c1 c2
+    read -r ch cc < <(awk '/tier=community/{for(i=2;i<=NF;i++) if($i ~ /^category=/){sub("category=","",$i); print $1, $i; exit}}' "$EV/05b-lookups-before.txt")
+    if [[ -z "${ch:-}" || -z "${cc:-}" ]]; then check 5c category-enforcement fail "no probe host resolved via the community tier"
+    else
+      aid="$(api POST /api/policy "{\"name\":\"lab-ut1-allow-host\",\"priority\":4,\"action\":\"Allow\",\"destFQDN\":\"$ch\",\"sslAction\":\"Bypass\",\"enabled\":true}" | tee "$EV/05c-allow-rule.txt" | body | python3 -c 'import json,sys;print(json.load(sys.stdin).get("id",""))' 2>/dev/null || true)"
+      bid="$(api POST /api/policy "{\"name\":\"lab-ut1-block-category\",\"priority\":3,\"action\":\"Block_Page\",\"destCategory\":\"$cc\",\"sslAction\":\"Bypass\",\"enabled\":true}" | tee "$EV/05c-block-rule.txt" | body | python3 -c 'import json,sys;print(json.load(sys.stdin).get("id",""))' 2>/dev/null || true)"
+      c1="$(through_proxy "http://$ch/")"
+      [[ -n "$bid" ]] && api DELETE "/api/policy?id=$bid" > /dev/null || true
+      c2="$(through_proxy "http://$ch/")"
+      [[ -n "$aid" ]] && api DELETE "/api/policy?id=$aid" > /dev/null || true
+      printf 'host %s category %s (community tier)\nwith category block rule: %s\nblock rule removed (allow rule only): %s\n' "$ch" "$cc" "$c1" "$c2" > "$EV/05c-enforcement.txt"
+      if [[ -n "$aid" && -n "$bid" && "$c1" == 403 && "$c2" =~ ^[23][0-9][0-9]$ ]]; then
+        check 5c category-enforcement pass "$ch ($cc via UT1): category rule → 403; without it → $c2"
+      else check 5c category-enforcement fail "$ch ($cc): with rule $c1, without $c2 (rule ids allow=${aid:-?} block=${bid:-?})"; fi
+    fi
   fi
 
   # Step 6 — maintenance agent: backup through the product, restore DRY RUN.
   if gate 6 agent-backup; then
     api GET /api/maintenance-agent > "$EV/06-agent-status.txt" || true
+    # L11: the first boot must have INSTALLED the bundled agent (not merely
+    # left a pending marker), at the image's own version, and the proxy must
+    # reach it over its socket.
+    gssh 'systemctl is-active culvert-maint; culvert-maint --version; cat /srv/culvert/.env 2>/dev/null | grep -c "^CULVERT_MAINT_GID=" ; ls /var/lib/culvert-appliance/state/' > "$EV/06-agent-installed.txt" 2>&1 || true
+    local appv agv; appv="$(curl -fsS -m 10 "$P/health" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("version",""))' 2>/dev/null || true)"
+    agv="$(sed -n 2p "$EV/06-agent-installed.txt")"
+    if [[ "$(head -1 "$EV/06-agent-installed.txt")" == active && -n "$agv" && "$agv" == "v${appv#v}" ]] && ! grep -qx 'agent.pending' "$EV/06-agent-installed.txt"; then
+      check 6 agent-installed pass "culvert-maint active, version $agv = proxy $appv, no agent.pending"
+    else check 6 agent-installed fail "$(tr '\n' ' ' < "$EV/06-agent-installed.txt" | head -c 300) (proxy ${appv:-?})"; fi
+    local av; av="$(agent_status_verdict "$EV/06-agent-status.txt")"; check 6 agent-reachable "${av%%|*}" "${av#*|}"
     local opjson op fn st=""
     opjson="$(api POST /api/backups '{"encrypt":false}' | tee "$EV/06-backup-trigger.txt")"
     op="$(printf '%s\n' "$opjson" | body | python3 -c 'import json,sys;print(json.load(sys.stdin).get("opId",""))' 2>/dev/null || true)"
@@ -314,9 +452,15 @@ PY
     fi
     [[ "$st" == succeeded ]] && check 6 agent-backup pass "op $op → $fn succeeded (proxy → agent socket → sudoers → cli container)" || check 6 agent-backup fail "op=${op:-none} state=${st:-none}: $(body < "$EV/06-backup-trigger.txt" | head -c 300)"
     api GET /api/backups > "$EV/06-backups.txt" || true
+    [[ -n "$fn" ]] && grep -qF "$fn" "$EV/06-backups.txt" && check 6 backup-listed pass "$fn listed by /api/backups" || check 6 backup-listed fail "backup ${fn:-?} not listed"
     if [[ -n "$fn" ]]; then
       gssh "cd /srv/culvert && sudo docker compose --profile cli run --rm -T cli --restore /backup/$fn --mode full" > "$EV/06-restore-dryrun.txt" 2>&1 || true
-      grep -qi 'validation passed' "$EV/06-restore-dryrun.txt" && check 6 restore-dry-run pass "validation passed (no --confirm; nothing restored)" || check 6 restore-dry-run fail "$(tail -3 "$EV/06-restore-dryrun.txt" | tr '\n' ' ')"
+      # The CLI prints "Validation: PASS" (or FAIL) and, for a dry run, "No files
+      # were written". The old oracle looked for "validation passed", which this
+      # CLI never prints, so a passing dry run read as FAIL (run 37185033699).
+      if grep -qx 'Validation: PASS' "$EV/06-restore-dryrun.txt" && grep -q 'This was a dry-run. No files were written.' "$EV/06-restore-dryrun.txt" && ! grep -q 'Validation: FAIL' "$EV/06-restore-dryrun.txt"; then
+        check 6 restore-dry-run pass "Validation: PASS; dry run, no files written ($(grep -m1 'Culvert version:' "$EV/06-restore-dryrun.txt" | xargs))"
+      else check 6 restore-dry-run fail "$(grep -E 'Validation:|FAIL|error' "$EV/06-restore-dryrun.txt" | head -3 | tr '\n' ' ')$(tail -2 "$EV/06-restore-dryrun.txt" | tr '\n' ' ')"; fi
     else check 6 restore-dry-run not-run "no backup file"; fi
     save_state BACKUP_FILE "$fn"
   fi
@@ -324,7 +468,7 @@ PY
   # Step 7 — OS update + reboot, kernel BEFORE → AFTER.
   if gate 7 os-update; then
     gssh 'sudo culvert-os-update check' > "$EV/07-check-before.txt" 2>&1 || true
-    local rc=0; timeout 2400 ssh "${SSH_OPTS[@]}" culvert@127.0.0.1 'sudo culvert-os-update os' > "$EV/07-os-update.txt" 2>&1 || rc=$?
+    local rc=0; timeout 2400 ssh "${SSH_OPTS[@]}" "culvert@$LAB_HOST" 'sudo culvert-os-update os' > "$EV/07-os-update.txt" 2>&1 || rc=$?
     [[ $rc == 0 ]] && check 7 os-update pass "culvert-os-update os exit 0 ($(grep -cE '^(Setting up|Unpacking) ' "$EV/07-os-update.txt" || true) package actions)" || check 7 os-update fail "exit $rc: $(tail -3 "$EV/07-os-update.txt" | tr '\n' ' ')"
     gssh 'sudo culvert-os-update check; ls -l /var/run/reboot-required 2>/dev/null; dpkg -l "linux-image-*" | awk "/^ii/{print \$2, \$3}"; apt-mark showhold; sudo docker version --format "{{.Server.Version}}"' > "$EV/07-check-after-update.txt" 2>&1 || true
     gssh 'sudo culvert-os-update reboot' > "$EV/07-reboot.txt" 2>&1 || true
@@ -349,6 +493,17 @@ PY
   # Step 8 — persistence and readiness after the reboot.
   if gate 8 persistence; then
     gssh 'sudo culvert-status; ls /var/lib/culvert-appliance/state/' > "$EV/08-status-after-reboot.txt" 2>&1 || true
+    # F-OSU-REBOOT-1: the stack stopped by `culvert-os-update reboot` is started
+    # by culvert-stack-resume.service, which clears its marker only on success.
+    gssh 'systemctl show culvert-stack-resume.service -p LoadState -p ActiveState -p Result -p ExecMainStatus; sudo journalctl -b -u culvert-stack-resume --no-pager; test -e /var/lib/culvert-appliance/state/stack-resume-on-boot && echo MARKER-PRESENT || echo MARKER-CLEARED; echo "--- /var/log/culvert-os-update.log, resume-stack lines since this boot"; b=$(date -u -d "$(uptime -s)" +%FT%TZ); sudo awk -v b="$b" '"'"'$1 >= b && /\[resume-stack\]/'"'"' /var/log/culvert-os-update.log' > "$EV/08-stack-resume.txt" 2>&1 || true
+    # The script's own log file is the durable record: its last line can miss
+    # the journal when systemd reaps the unit's cgroup before tee flushes
+    # (run 37193814711), so the success line may come from either; only
+    # lines stamped after this boot count.
+    grep -qx 'Result=success' "$EV/08-stack-resume.txt" && grep -qx 'MARKER-CLEARED' "$EV/08-stack-resume.txt" && grep -q 'stack started after the maintenance reboot' "$EV/08-stack-resume.txt" \
+      && grep -q 'holding .* and the maintenance agent lock' "$EV/08-stack-resume.txt" \
+      && check 8 stack-resumed pass "culvert-stack-resume.service took the os-update + agent locks, started the stack and cleared its marker" \
+      || check 8 stack-resumed fail "$(tr '\n' ' ' < "$EV/08-stack-resume.txt" | head -c 300)"
     : > "$JAR"; c="$(api POST /api/auth/login "{\"user\":\"$ADMIN_USER\",\"pass\":\"$pass\"}" | tee "$EV/08-login.txt" | code)"
     [[ $c == 200 ]] && check 8 admin-login pass "200 after reboot" || check 8 admin-login fail "http $c"
     api GET /api/policy | body > "$EV/08-policy.json" || true
@@ -366,7 +521,7 @@ PY
     api GET /api/backups > "$EV/08-backups.txt" || true
     [[ -n "${BACKUP_FILE:-}" ]] && grep -qF "$BACKUP_FILE" "$EV/08-backups.txt" && check 8 backup-listed pass "$BACKUP_FILE still listed" || check 8 backup-listed fail "backup ${BACKUP_FILE:-?} not listed"
     c="$(api GET /api/maintenance-agent | tee "$EV/08-agent-status.txt" | code)"
-    [[ $c == 200 ]] && check 8 agent-reachable pass "$(body < "$EV/08-agent-status.txt" | head -c 200)" || check 8 agent-reachable fail "http $c"
+    local av8; av8="$(agent_status_verdict "$EV/08-agent-status.txt")"; check 8 agent-reachable "${av8%%|*}" "${av8#*|} (after the maintenance reboot)"
     gssh 'sudo journalctl -b -u culvert-firstboot --no-pager | tail -20' > "$EV/08-firstboot-journal.txt" 2>&1 || true
     grep -q 'step .*: done' "$EV/08-firstboot-journal.txt" && check 8 firstboot-not-rerun fail "a first-boot step ran again" || check 8 firstboot-not-rerun pass "no first-boot step ran on the second boot"
     cmp -s <(sed -n '/\.done$/p' "$EV/03-state-files.txt") <(sed -n '/\.done$/p' "$EV/08-status-after-reboot.txt") && check 8 state-files pass "first-boot state files unchanged" || check 8 state-files info "state listing changed — see 08-status-after-reboot.txt"
@@ -382,7 +537,7 @@ lookups() { local h
 h=sys.argv[1]
 try: d=json.load(sys.stdin)
 except Exception: print(f"{h} error"); sys.exit()
-print(f"{h} category={d.get(\"category\") or \"\"} matchedBy={d.get(\"matchedBy\") or \"\"}")' "$h"
+print("%s category=%s tier=%s matchedBy=%s" % (h, d.get("category") or "", d.get("tier") or "", d.get("matchedBy") or ""))' "$h"
   done; }
 
 # ── collect: guest diagnostics + identities → REPORT.md (redacted) ──────────
@@ -426,12 +581,17 @@ PY
 
 # ── down: stop the guest, remove the disposable disks (evidence stays) ──────
 cmd_down() {
+  if [[ "$LAB_EXTERNAL" == 1 ]]; then
+    rm -f "$SEC/admin-pass" "$SEC/setup-token" "$SEC/cookies"
+    log "down (external): removed the lab's own disposable secrets; the VM and its key belong to the deploying tool"; return 0
+  fi
   if qemu_alive; then
     gssh 'sudo systemctl poweroff' >/dev/null 2>&1 || true
     for _ in $(seq 1 60); do qemu_alive || break; sleep 2; done
     qemu_alive && kill "$(cat "$WORK/qemu.pid")" 2>/dev/null; sleep 3
     qemu_alive && kill -9 "$(cat "$WORK/qemu.pid")" 2>/dev/null || true
   fi
+  rm -f "$MON_SOCK"
   [[ "${LAB_KEEP_DISKS:-0}" == 1 ]] || rm -rf "$WORK/overlay.qcow2" "$WORK/base.qcow2" "$WORK/ova" "$WORK/ovfenv" "$WORK/ovfenv.iso"
   rm -rf "$SEC"; log "down: guest stopped, disposable disks and credentials removed (evidence kept in $EV)"
 }
@@ -440,6 +600,7 @@ failures() { grep -c '"result":"fail"' "$JSONL" 2>/dev/null || true; }
 # Transport adapters may reuse the guest checks without dispatching QEMU.
 [[ "${LAB_LIBRARY_ONLY:-0}" == 1 ]] && return 0
 case "${1:-}" in
+  selftest) cmd_selftest ;;
   preflight) cmd_preflight ;;
   fingerprint) cmd_fingerprint "${2:?OVA}" "${3:?OUT.tsv}" ;;
   compare) cmd_compare "${2:?REF}" "${3:?CAND}" ;;

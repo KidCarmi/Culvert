@@ -25,6 +25,8 @@ case "${1:?qualify}" in
        ! cmp -s "$EV/esxi-boot-id-before.txt" "$EV/esxi-boot-id-after.txt"; then
       check 7 esxi-boot-id-changed pass 'guest boot ID changed'
     else check 7 esxi-boot-id-changed fail 'reboot not proven by a changed boot ID'; fi
+    source "$(dirname "$0")/restore-checks.sh"
+    esxi_actual_restore
     redact_tree
     [[ "$(failures)" == 0 ]]
     ;;
