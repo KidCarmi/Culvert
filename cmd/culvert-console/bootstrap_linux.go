@@ -12,7 +12,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/KidCarmi/Culvert/internal/applianceconsole"
 	"golang.org/x/sys/unix"
 )
 
@@ -399,18 +398,4 @@ func cleanupBootstrap() error {
 		return nil
 	}
 	return err
-}
-
-func bootstrapRows(password string, height, width int) []applianceconsole.Row {
-	lines := []string{"INITIAL CONSOLE ACCESS", "User: culvert", "One-time password:", password, "L/F2 Sign in", "Change the password at first login.", "", "No password or SSH key was supplied at import.", "This password remains here until changed.", "SSH password login is disabled."}
-	if height < 6 || width < 18 {
-		lines = []string{"Resize to 18x6", "L/F2 Sign in"}
-	}
-	rows := make([]applianceconsole.Row, max(0, min(height, 25)-1))
-	for i := range rows {
-		if i < len(lines) {
-			rows[i].Text = applianceconsole.Clean(lines[i], max(0, min(width, 80)-1))
-		}
-	}
-	return rows
 }

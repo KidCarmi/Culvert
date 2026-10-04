@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/KidCarmi/Culvert/internal/applianceconsole"
 	"golang.org/x/sys/unix"
 )
 
@@ -261,11 +262,11 @@ func TestBootstrapInputIsBoundedAndCancelled(t *testing.T) {
 }
 
 func TestBootstrapSmallScreenKeepsFullPassword(t *testing.T) {
-	rows := bootstrapRows(bootstrapFixturePassword, 6, 18)
+	rows := bootstrapRows(applianceconsole.Snapshot{}, bootstrapFixturePassword, 6, 18)
 	if rows[3].Text != bootstrapFixturePassword {
 		t.Fatal("small screen truncated credential")
 	}
-	for _, row := range bootstrapRows(bootstrapFixturePassword, 5, 17) {
+	for _, row := range bootstrapRows(applianceconsole.Snapshot{}, bootstrapFixturePassword, 5, 17) {
 		if strings.Contains(row.Text, bootstrapFixturePassword[:8]) {
 			t.Fatal("undersized screen exposed partial credential")
 		}

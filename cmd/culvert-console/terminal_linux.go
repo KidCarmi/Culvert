@@ -140,15 +140,16 @@ func menu(ctx context.Context, collector applianceconsole.Collector, admin bool)
 }
 
 type menuDisplay struct {
-	bootstrap     func() string
-	password      string
-	snapshot      applianceconsole.Snapshot
-	refresh       time.Time
-	dirty         bool
-	view          applianceconsole.View
-	ansi, color   bool
-	lastFrame     string
-	height, width int
+	bootstrap       func() string
+	password        string
+	bootstrapDetail bool
+	snapshot        applianceconsole.Snapshot
+	refresh         time.Time
+	dirty           bool
+	view            applianceconsole.View
+	ansi, color     bool
+	lastFrame       string
+	height, width   int
 }
 
 func (d *menuDisplay) redraw(ctx context.Context, collector applianceconsole.Collector) error {
@@ -166,8 +167,8 @@ func (d *menuDisplay) redraw(ctx context.Context, collector applianceconsole.Col
 	}
 	panelHeight, panelWidth := min(height, 25), min(width, 80)
 	rows := d.view.Frame(d.snapshot, panelHeight, panelWidth)
-	if d.password != "" {
-		rows = bootstrapRows(d.password, panelHeight, panelWidth)
+	if d.password != "" && !d.bootstrapDetail {
+		rows = bootstrapRows(d.snapshot, d.password, panelHeight, panelWidth)
 	}
 	frame := applianceconsole.Render(rows, d.color)
 	if !d.ansi && frame == d.lastFrame {
@@ -296,6 +297,20 @@ func (d *menuDisplay) handle(key string) string {
 	}
 	if key == "L" || key == "F2" {
 		return "login"
+	}
+	if key == "B" || key == "ESC" {
+		d.bootstrapDetail = false
+		return d.view.Handle(key)
+	}
+	if key == "1" || key == "2" || key == "3" || key == "4" || key == "F4" {
+		// These are the existing read-only screens. Authentication remains
+		// enforced by View for every privileged action within them.
+		d.view.Handle("B")
+		d.bootstrapDetail = true
+		return d.view.Handle(key)
+	}
+	if d.bootstrapDetail || key == "R" {
+		return d.view.Handle(key)
 	}
 	return ""
 }
