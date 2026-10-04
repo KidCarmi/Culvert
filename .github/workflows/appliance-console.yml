@@ -86,7 +86,7 @@ jobs:
           go test -race -shuffle=on -count=2 ./internal/server ./internal/journal ./internal/releasetrust
           go vet ./internal/server ./internal/journal ./internal/releasetrust
       - name: Management access policy feedback
-        run: node --test test/ui-allow-ips.test.mjs
+        run: node --test test/ui-allow-ips.test.mjs test/ca-rotate.test.mjs
       - name: Independent signed release evidence verifier
         working-directory: pkg/releaseproof
         run: |

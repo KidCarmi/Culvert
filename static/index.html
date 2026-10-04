@@ -18069,6 +18069,20 @@ async function clearCACache() {
   loadCAMgmt();
 }
 
+// caRotateResultMessage — the toast for a confirmed rotation. persisted:false
+// means the new CA is ACTIVE but exists in memory only (lost on restart): that
+// is never a success. A persisted rotation keeps the existing CA passphrase —
+// nothing new to copy — but invalidates the old trust anchor, so the operator
+// must distribute the new PUBLIC certificate and take a fresh backup that
+// contains the rotated bundle.
+function caRotateResultMessage(r) {
+  if (!r || r.error) return 'Rotation failed: ' + (r?.error || 'unknown');
+  if (r.persisted === false) {
+    return 'Root CA rotated in memory only — NOT saved. ' + String(r.warning || 'It will be lost on restart.').slice(0, 300);
+  }
+  return 'Root CA rotated. Download and distribute the new public CA certificate, then take a fresh backup; the CA recovery passphrase is unchanged.';
+}
+
 async function forceRotateCA() {
   try {
     // Step 1: request confirmation token from server.
@@ -18081,8 +18095,8 @@ async function forceRotateCA() {
     if (!await confirmAction('Rotate Root CA', pending.warning, 'Rotate')) return;
     // Step 3: confirm rotation with token.
     const r = await api('/api/ca/rotate', {method:'POST', body:{confirm:true, confirmation_token:pending.confirmation_token}});
-    if (r && !r.error) { toast('Root CA rotated successfully','success'); loadCAMgmt(); }
-    else toast('Rotation failed: '+(r?.error||'unknown'),'error');
+    toast(caRotateResultMessage(r), r && !r.error && r.persisted !== false ? 'success' : 'error');
+    if (r && !r.error) loadCAMgmt();
   } catch(e) {
     toast('Rotation failed: '+e.message,'error');
   }
