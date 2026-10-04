@@ -62,6 +62,11 @@ func TestCulvertNetStatic_RejectsOutOfRangeValuesBeforeWritingNetplan(t *testing
 		"prefix missing":          {"static", "10.0.10.5", "10.0.10.1"},
 		"gateway out of range":    {"static", "10.0.10.5/24", "10.0.10.256"},
 		"gateway family mismatch": {"static", "10.0.10.5/24", "fe80::1"},
+		"gateway outside subnet":  {"static", "192.168.1.10/24", "192.168.2.1"},
+		"gateway is own address":  {"static", "10.0.10.5/24", "10.0.10.5"},
+		"gateway is network addr": {"static", "10.0.10.5/24", "10.0.10.0"},
+		"gateway is broadcast":    {"static", "10.0.10.5/24", "10.0.10.255"},
+		"ipv6 gateway off-prefix": {"static", "2001:db8::5/64", "2001:db9::1"},
 		"dns out of range":        {"static", "10.0.10.5/24", "10.0.10.1", "10.0.10.2,300.1.1.1"},
 		"search domain YAML":      {"static", "10.0.10.5/24", "10.0.10.1", "", "corp.example]"},
 	} {
@@ -86,6 +91,10 @@ func TestCulvertNetStatic_AcceptsValidValues(t *testing.T) {
 	for name, args := range map[string][]string{
 		"ipv4": {"static", "10.0.10.5/24", "10.0.10.1", "10.0.10.2,10.0.10.3", "corp.example"},
 		"ipv6": {"static", "2001:db8::5/64", "2001:db8::1"},
+		// The usual IPv6 next hop: link-local, reachable on the interface.
+		"ipv6 link-local gateway": {"static", "2001:db8::5/64", "fe80::1"},
+		// A /31 point-to-point link has no network/broadcast addresses.
+		"ipv4 /31 peer": {"static", "10.0.10.0/31", "10.0.10.1"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			h := newNetHarness(t, false)

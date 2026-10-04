@@ -34,6 +34,28 @@ print(a.version)
 PY
 }
 valid_cidr() { [[ -n "$(ip_family "$1" cidr)" ]]; }
+# gateway_reachable ADDR/PREFIX GW — the default route must be reachable
+# through the configured prefix: a gateway outside it is written without an
+# on-link declaration and the appliance loses its default route at first
+# boot (Codex P1, PR #1528). The gateway is also neither the appliance's own
+# address nor (IPv4, prefix <= 30) the network/broadcast address. An IPv6
+# link-local gateway (fe80::/10) is the one exception: it is the usual
+# router next hop and is reachable on the interface whatever the prefix.
+gateway_reachable() {
+  python3 - "$1" "$2" <<'PY' 2>/dev/null
+import ipaddress, sys
+iface, gw = ipaddress.ip_interface(sys.argv[1]), ipaddress.ip_address(sys.argv[2])
+net = iface.network
+if gw.version != iface.version or gw == iface.ip:
+    sys.exit(1)
+if gw.version == 6 and gw.is_link_local:
+    sys.exit(0)
+if gw not in net:
+    sys.exit(1)
+if gw.version == 4 and net.prefixlen <= 30 and gw in (net.network_address, net.broadcast_address):
+    sys.exit(1)
+PY
+}
 valid_ip()   { [[ -n "$(ip_family "$1")" ]]; }
 # A search domain is interpolated into YAML: hostname characters only.
 valid_domain() { [[ "$1" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$ ]]; }
@@ -57,6 +79,7 @@ case "$cmd" in
     valid_cidr "$addr" || { echo "bad address/prefix: $addr" >&2; exit 2; }
     valid_ip "$gw"     || { echo "bad gateway: $gw" >&2; exit 2; }
     [[ "$(ip_family "$addr" cidr)" == "$(ip_family "$gw")" ]] || { echo "gateway $gw is not in the address family of $addr" >&2; exit 2; }
+    gateway_reachable "$addr" "$gw" || { echo "gateway $gw is not a usable host in the subnet of $addr; the default route would be unreachable" >&2; exit 2; }
     dns_yaml=""; search_yaml=""
     if [[ -n "$dns" ]]; then
       IFS=',' read -ra d <<<"$dns"; for x in "${d[@]}"; do valid_ip "$x" || { echo "bad DNS server: $x" >&2; exit 2; }; done
