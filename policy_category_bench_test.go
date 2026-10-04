@@ -69,7 +69,11 @@ func buildCategoryPolicyStore(n int) *PolicyStore {
 
 func BenchmarkPolicyEvaluate_CategoryRules(b *testing.B) {
 	seedCategoryTaxonomy(b, 12, 40)
-	for _, n := range []int{10, 50, 200} {
+	// rules=1 is the boundary the normalization hoist is weakest at — with one
+	// category rule the per-rule saving is a single probe, so it is where the
+	// scratch's own bookkeeping is most visible. It is measured rather than
+	// argued about.
+	for _, n := range []int{1, 10, 50, 200} {
 		ps := buildCategoryPolicyStore(n)
 		b.Run(fmt.Sprintf("rules=%d", n), func(b *testing.B) {
 			b.ReportAllocs()

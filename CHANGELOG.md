@@ -37,19 +37,34 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   on the same input the pre-hoist body used. Only *where* it is computed moves,
   so no matching decision can change.
 
-  Measured with both arms timed in one run: the per-rule probe **112.6 → 71.0
-  ns (−37%)**; the `DestCategory` policy scan **1474 → 1055 ns at 10 rules
-  (−28.4%)**, **4675 → 2869 ns at 50 (−38.6%)**, **17292 → 9625 ns at 200
-  (−44.3%)**; marginal per-rule cost **83.3 → 45.1 ns (−46%)**; and **0
-  allocations preserved on every path**. Two limits are recorded rather than
-  rounded away: at exactly one category rule the hoisted arm is ~5% *slower*
-  (120.0 vs 114.5 ns — normalization happens once either way and the memo adds
-  bookkeeping), so it pays from two rules upward; and the gain shrinks with
-  core count (50-rule interleaved parallel scan: −39.5% at 1 core, −14.8% at 2,
-  −8.7% at 4) because removing CPU work from a probe whose critical section is
-  unchanged moves the bottleneck onto `catStore.mu`. Both arms take exactly the
-  same number of read locks, so they converge under saturation and the hoist is
-  never the slower of the two.
+  The scan entry points already held that value — `accessEvalInput.normHost`,
+  a `normHost :=` one line above the CDR scratch, and `authMatchScratch`'s own
+  memo — so the scratch is **seeded** from it rather than re-deriving it
+  (`newHostCatScratchNorm`), which also collapses the auth path's two memos of
+  one value into one. The seed's contract is `normHost == normalizeHost(host)`,
+  checked at all five production pairs and pinned by a gate that drives the
+  real `Evaluate` with hosts whose raw and canonical forms differ.
+
+  Measured: the per-rule probe **112.6 → 71.0 ns (−37%)**, both arms timed in
+  ONE run. The real `DestCategory` policy scan cannot be timed same-run (that
+  would need two production trees in one binary), so it is an **adjacent pair**
+  — identical command, identical machine state: **1 rule 191.7 → 157.6 ns,
+  10 rules 1035 → 933, 50 rules 2809 → 2519, 200 rules 9617 → 8452**, i.e.
+  **~10–18%**, with **0 allocations preserved on every path**.
+
+  An earlier draft of this entry quoted −28%/−38.6%/−44.3% for that scan.
+  Those were **cross-run and overstated the gain by roughly 3–4x**: the
+  baseline was measured hours before the post arm and this hardware drifted
+  enough to move the same pre-change tree from 17292 ns to 9617 ns at 200
+  rules. Run-to-run drift is up to ~12% even between adjacent pairs, so the
+  claim is the direction and rough magnitude, not a precise percentage.
+
+  One limit recorded rather than rounded away: the gain shrinks with core
+  count (50-rule interleaved parallel scan, same-run: −39.5% at 1 core,
+  −14.8% at 2, −8.7% at 4), because removing CPU work from a probe whose
+  critical section is unchanged moves the bottleneck onto `catStore.mu`. Both
+  arms take exactly the same number of read locks, so they converge under
+  saturation and the hoist is never the slower of the two.
 
   Equivalence is the deliverable, not the speed: a divergence here is a
   silently mis-enforced Allow/Deny rule. Both differentials run against

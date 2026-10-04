@@ -488,7 +488,7 @@ func (s *CDRPolicyStore) Evaluate(clientIP, identity, authSource, host string, g
 	// label on a feed-backed deployment — once per CDR rule. See
 	// policy_hostcat.go.
 	normHost := normalizeHost(host)
-	catScratch := newHostCatScratch(host)
+	catScratch := newHostCatScratchNorm(host, normHost)
 
 	for i := range rules {
 		rule := rules[i]

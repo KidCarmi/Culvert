@@ -1444,7 +1444,10 @@ func evalAccessRules(rules []*PolicyRule, in *accessEvalInput, now func() time.T
 	// host→category fusion depends only on the host, so running it per rule
 	// multiplied an O(all host patterns) taxonomy scan — plus a BadgerDB read
 	// per domain label on a feed-backed deployment — by the rule count.
-	catScratch := newHostCatScratch(in.host)
+	// Seeded, not lazy: in.normHost IS normalizeHost(in.host) (the field's own
+	// contract, set that way at every construction site), so re-deriving it
+	// here would normalize the destination twice per scan.
+	catScratch := newHostCatScratchNorm(in.host, in.normHost)
 	// The control flow is deliberately the parent enforcement loop's exact
 	// continue-based structure: on the nil-trace path (enforcement) it is
 	// branch-for-branch identical to the pre-extraction scan, and the skip-reason

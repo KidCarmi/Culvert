@@ -325,6 +325,185 @@ func TestBenchGate_HoistedCategoryMatchIsAllocationFree(t *testing.T) {
 	}
 }
 
+// ─── the seeding contract ──────────────────────────────────────────────────────
+
+// TestNormHoist_EverySeedingCallerSuppliesTheCanonicalHost asserts the
+// newHostCatScratchNorm contract DIRECTLY, for every production supplier: the
+// seed must be normalizeHost applied to the same host the scratch is built for.
+//
+// This is the invariant the whole seeding change rests on. If it holds, seeding
+// is provably equivalent to the lazy derivation it replaces, because the value
+// is the same function applied to the same input. If it were ever broken, the
+// non-idempotence of NormalizeHost means matching would shift silently rather
+// than fail — so the invariant is asserted here rather than trusted.
+func TestNormHoist_EverySeedingCallerSuppliesTheCanonicalHost(t *testing.T) {
+	// The hosts include the non-idempotent witnesses, where a seed from a
+	// second normalization pass would differ from a first.
+	hosts := []string{
+		"example.com", "A.B.EXAMPLE.COM.", "a.xn--", "a.xn--.", "example.xn--",
+		"bücher.test", "xn--bcher-kva.example", ".", "", "192.0.2.1",
+		"[2001:db8::1]", "host.example:8443",
+	}
+
+	for _, host := range hosts {
+		want := normalizeHost(host)
+
+		// Supplier 1 + 2: accessEvalInput.normHost (PolicyStore.Evaluate and
+		// the Policy Tester both build it the same way).
+		in := accessEvalInput{host: host, normHost: normalizeHost(host)}
+		if in.normHost != want {
+			t.Errorf("accessEvalInput for %q: normHost=%q, want %q", host, in.normHost, want)
+		}
+		seeded := newHostCatScratchNorm(in.host, in.normHost)
+		if got := seeded.normHost(); got != want {
+			t.Errorf("seeded scratch from accessEvalInput for %q: %q, want %q", host, got, want)
+		}
+
+		// Supplier 3: authMatchScratch's own memo.
+		as := authMatchScratch{ctx: RequestContext{Host: host}}
+		if got := as.normHost(); got != want {
+			t.Errorf("authMatchScratch.normHost() for %q: %q, want %q", host, got, want)
+		}
+		if got := as.hostCat().normHost(); got != want {
+			t.Errorf("auth hostCat seed for %q: %q, want %q", host, got, want)
+		}
+		// And the two memos must agree — the point of seeding one from the other.
+		if as.normHost() != as.hostCat().normHost() {
+			t.Errorf("auth memos disagree for %q: %q vs %q",
+				host, as.normHost(), as.hostCat().normHost())
+		}
+	}
+}
+
+// TestNormHoist_RealScanSeedsTheCanonicalHost drives the REAL
+// PolicyStore.Evaluate with a host whose raw and canonical forms DIFFER, and
+// requires a category-scoped rule to still match.
+//
+// This is the gate that covers the production call site, and it exists because
+// the direct-invariant test beside it did NOT: that one builds its own
+// accessEvalInput and asserts the invariant on its own fixture, so seeding
+// evalAccessRules from `in.host` instead of `in.normHost` passed every
+// assertion in this file (verified). The category index is keyed on the
+// lowercased, dot-trimmed host, so a raw seed makes "A.B.EXAMPLE.COM." miss a
+// rule scoped to "example.com" — a rule that silently stops matching, which is
+// the fail-open direction.
+//
+// Hosts whose raw form is already canonical cannot see this defect, which is
+// why the fixture is deliberately mixed-case AND trailing-dotted.
+func TestNormHoist_RealScanSeedsTheCanonicalHost(t *testing.T) {
+	prev := catStore
+	catStore = urlcat.New([]*urlcat.Entry{
+		{Name: "Social Media", Hosts: []string{"example.com"}},
+	})
+	t.Cleanup(func() { catStore = prev })
+
+	// A LOCAL store, as the category benchmarks build one: no global policy
+	// state is touched, so this gate leaks nothing into a shuffled suite.
+	ps := &PolicyStore{}
+	ps.ReplaceAll([]PolicyRule{{
+		Priority:     1,
+		Name:         "cat-allow",
+		DestCategory: "Social Media",
+		Action:       ActionAllow,
+	}})
+
+	// Raw != canonical for each of these; all normalize into example.com's
+	// subtree and must therefore match the category rule.
+	for _, host := range []string{
+		"A.B.EXAMPLE.COM.", "EXAMPLE.COM", "example.com.", "Example.Com",
+	} {
+		if normalizeHost(host) == host {
+			t.Fatalf("fixture host %q is already canonical; it cannot detect a raw seed", host)
+		}
+		m := ps.Evaluate("203.0.113.7", "", "unauth", host, nil)
+		if m == nil {
+			t.Errorf("Evaluate(%q) did not match the category rule: the scan is "+
+				"probing a non-canonical host (a raw seed into the scratch)", host)
+			continue
+		}
+		if m.Rule.Name != "cat-allow" {
+			t.Errorf("Evaluate(%q) matched %q, want cat-allow", host, m.Rule.Name)
+		}
+	}
+
+	// CONTROL: a host outside the category must still NOT match, or the gate
+	// above would pass against a matcher that says yes to everything.
+	if m := ps.Evaluate("203.0.113.7", "", "unauth", "OTHER.EXAMPLE.NET.", nil); m != nil {
+		t.Errorf("Evaluate on an uncategorized host matched %q", m.Rule.Name)
+	}
+}
+
+// TestNormHoist_SeededScratchMatchesLazy is the behavioural half: for every
+// host, a SEEDED scratch and a LAZY one must reach the same category verdict.
+//
+// It is the end-to-end guard against a mismatched seed, and it is driven over
+// the non-idempotent witnesses because those are the only inputs on which a
+// seed taken from a second normalization pass could diverge from a first.
+func TestNormHoist_SeededScratchMatchesLazy(t *testing.T) {
+	prev := catStore
+	catStore = urlcat.New([]*urlcat.Entry{
+		{Name: "Social Media", Hosts: []string{"example.com"}},
+		{Name: "Corp Internal", Hosts: []string{"intranet.corp.invalid"}},
+		{Name: "Dotted", Hosts: []string{"a", "a."}},
+	})
+	t.Cleanup(func() { catStore = prev })
+
+	hosts := []string{
+		"example.com", "a.b.EXAMPLE.com.", "intranet.corp.invalid",
+		"uncategorized.example.net", "a.xn--", "a.xn--.", "example.xn--",
+		"xn--", ".", "", "bücher.test", "ÿþ.example",
+	}
+	cats := []URLCategory{"Social Media", "Corp Internal", "Dotted", "Nope"}
+
+	for _, host := range hosts {
+		for _, cat := range cats {
+			lazy := newHostCatScratch(host)
+			seeded := newHostCatScratchNorm(host, normalizeHost(host))
+			if got, want := seeded.matchesCategory(cat), lazy.matchesCategory(cat); got != want {
+				t.Errorf("matchesCategory(%q) for host %q: seeded=%v lazy=%v",
+					cat, host, got, want)
+			}
+			// The fusion is the other consumer of the memo.
+			lazyF := newHostCatScratch(host)
+			seededF := newHostCatScratchNorm(host, normalizeHost(host))
+			lc, lt, lp := lazyF.fusion()
+			sc, st, sp := seededF.fusion()
+			if lc != sc || lt != st || lp != sp {
+				t.Errorf("fusion for host %q: seeded=(%q,%q,%q) lazy=(%q,%q,%q)",
+					host, sc, st, sp, lc, lt, lp)
+			}
+		}
+	}
+}
+
+// TestNormHoist_SeededScratchDoesNotRenormalize is the CONTROL proving the
+// seeding actually took effect. A seeded scratch must serve its seed verbatim
+// and never call normalizeHost again — so a seed that is deliberately NOT the
+// canonical form of sc.host comes back unchanged.
+//
+// This test is the only place a mismatched pair is constructed on purpose, and
+// it exists precisely to show that the constructor trusts its caller — which is
+// why the two tests above pin that every real caller is trustworthy.
+func TestNormHoist_SeededScratchDoesNotRenormalize(t *testing.T) {
+	sc := newHostCatScratchNorm("A.B.EXAMPLE.COM.", "sentinel.invalid")
+	if !sc.normHostSet {
+		t.Fatal("seeded scratch did not record the memo")
+	}
+	if got := sc.normHost(); got != "sentinel.invalid" {
+		t.Fatalf("seeded scratch re-normalized: got %q, want the seed verbatim", got)
+	}
+	// The empty string is a legitimate seed (normalizeHost(".") == "") and must
+	// not be mistaken for "unseeded" — the same boundary the lazy memo's own
+	// bool guard exists for.
+	empty := newHostCatScratchNorm(".", "")
+	if !empty.normHostSet {
+		t.Error("an empty seed was not recorded as seeded")
+	}
+	if got := empty.normHost(); got != "" {
+		t.Errorf("empty seed re-derived: got %q, want \"\"", got)
+	}
+}
+
 // ─── structural wall ──────────────────────────────────────────────────────────
 
 // TestWall_PerRuleCategoryMatchersTakeTheHoistedHost is the regression gate, and

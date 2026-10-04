@@ -84,9 +84,37 @@ type hostCatScratch struct {
 // throwaway one and are byte-identical to the pre-hoist behaviour.
 func newHostCatScratch(host string) hostCatScratch { return hostCatScratch{host: host} }
 
+// newHostCatScratchNorm is newHostCatScratch for the callers that ALREADY hold
+// normalizeHost(host), which every scan entry point does: PolicyStore.Evaluate
+// and the Policy Tester carry it as accessEvalInput.normHost, CDRPolicyStore
+// .Evaluate computes it one line above its scratch, and authMatchScratch keeps
+// it as its own memo. Seeding it here is what makes the hoist complete — the
+// lazy form below would otherwise re-derive, per scan, a value the scan had in
+// hand, which is the entire cost of the one-category-rule case (the memo's
+// bookkeeping with none of its saving).
+//
+// THE CONTRACT IS normHost == normalizeHost(host), AND IT IS NOT COSMETIC.
+// hostutil.NormalizeHost is NOT idempotent (an empty ACE label decodes to
+// nothing, so NormalizeHost("a.xn--") == "a." and NormalizeHost("a.") == "a"),
+// so a seed taken from a DIFFERENT normalization lineage — normalizeHostStrict,
+// a port-stripped host, a host from a neighbouring variable — would silently
+// change which rules match rather than failing loudly. Callers must pass the
+// output of normalizeHost applied to THIS host and nothing else.
+//
+// The invariant is pinned two ways rather than left to caller discipline:
+// TestNormHoist_EverySeedingCallerSuppliesTheCanonicalHost asserts it directly
+// for every production supplier, and TestNormHoist_SeededScratchMatchesLazy
+// drives the real entry points over the non-idempotent witnesses, where a
+// mismatched seed is exactly what would diverge.
+func newHostCatScratchNorm(host, normHost string) hostCatScratch {
+	return hostCatScratch{host: host, normHostSet: true, normHostVal: normHost}
+}
+
 // normHost returns hostutil.NormalizeHost(sc.host), computed at most once per
-// scan. A scan whose rules carry no category or category-group scope never
-// calls it and normalizes nothing.
+// scan — or zero times, when the scratch was built by newHostCatScratchNorm
+// with the value the caller already held. A scan whose rules carry no category
+// or category-group scope and whose scratch was not seeded never calls it and
+// normalizes nothing.
 //
 // This is a pure HOIST, not a reinterpretation: every consumer below is handed
 // normalizeHost(sc.host) — byte-for-byte the value each of them used to compute
