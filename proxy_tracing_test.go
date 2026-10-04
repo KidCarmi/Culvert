@@ -451,16 +451,15 @@ func TestRequestTracing_SanitisesClientRequestID(t *testing.T) {
 	// requestIDHexLen long" cannot hold unless the value was replaced in full.
 	// The X-Injected probe is kept because none of ITS bytes are hex digits
 	// either, so it states the intent directly and can never flake.
+	//
+	// isLowerHex (saas_feed_floor.go, package main) already means exactly
+	// "length n and every byte in [0-9a-f]", so the characterisation is one
+	// call against an existing predicate rather than a hand-rolled scan.
 	if strings.Contains(got, "X-Injected") {
 		t.Errorf("client-chosen bytes survived into the request id %q", got)
 	}
-	if len(got) != requestIDHexLen {
-		t.Errorf("request id = %q (len %d), want a freshly minted %d-char id", got, len(got), requestIDHexLen)
-	}
-	if i := strings.IndexFunc(got, func(r rune) bool {
-		return !((r >= '0' && r <= '9') || (r >= 'a' && r <= 'f'))
-	}); i >= 0 {
-		t.Errorf("request id = %q carries a non-hex byte at index %d, so it was not minted wholesale", got, i)
+	if !isLowerHex(got, requestIDHexLen) {
+		t.Errorf("request id = %q, want a freshly minted %d-char lowercase-hex id", got, requestIDHexLen)
 	}
 	if h := rec.Header().Get(headerRequestID); h != got {
 		t.Errorf("response header %q does not mirror the minted id %q", h, got)
