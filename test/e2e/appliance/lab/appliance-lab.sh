@@ -484,7 +484,11 @@ PY
     gssh 'sudo culvert-status; ls /var/lib/culvert-appliance/state/' > "$EV/08-status-after-reboot.txt" 2>&1 || true
     # F-OSU-REBOOT-1: the stack stopped by `culvert-os-update reboot` is started
     # by culvert-stack-resume.service, which clears its marker only on success.
-    gssh 'systemctl show culvert-stack-resume.service -p LoadState -p ActiveState -p Result -p ExecMainStatus; sudo journalctl -b -u culvert-stack-resume --no-pager; test -e /var/lib/culvert-appliance/state/stack-resume-on-boot && echo MARKER-PRESENT || echo MARKER-CLEARED' > "$EV/08-stack-resume.txt" 2>&1 || true
+    gssh 'systemctl show culvert-stack-resume.service -p LoadState -p ActiveState -p Result -p ExecMainStatus; sudo journalctl -b -u culvert-stack-resume --no-pager; test -e /var/lib/culvert-appliance/state/stack-resume-on-boot && echo MARKER-PRESENT || echo MARKER-CLEARED; echo "--- /var/log/culvert-os-update.log, resume-stack lines since this boot"; b=$(date -u -d "$(uptime -s)" +%FT%TZ); sudo awk -v b="$b" '"'"'$1 >= b && /\[resume-stack\]/'"'"' /var/log/culvert-os-update.log' > "$EV/08-stack-resume.txt" 2>&1 || true
+    # The script's own log file is the durable record: its last line can miss
+    # the journal when systemd reaps the unit's cgroup before tee flushes
+    # (run 37193814711), so the success line may come from either; only
+    # lines stamped after this boot count.
     grep -qx 'Result=success' "$EV/08-stack-resume.txt" && grep -qx 'MARKER-CLEARED' "$EV/08-stack-resume.txt" && grep -q 'stack started after the maintenance reboot' "$EV/08-stack-resume.txt" \
       && grep -q 'holding .* and the maintenance agent lock' "$EV/08-stack-resume.txt" \
       && check 8 stack-resumed pass "culvert-stack-resume.service took the os-update + agent locks, started the stack and cleared its marker" \
