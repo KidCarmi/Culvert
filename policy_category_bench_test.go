@@ -99,6 +99,35 @@ func BenchmarkPolicyEvaluate_CategoryGroupRulesSynthetic(b *testing.B) {
 	}
 }
 
+// BenchmarkPolicyEvaluate_CategoryRulesParallel is the production-shaped
+// instrument for the destination-host normalization hoist, and the one to read
+// instead of a tight single-probe loop.
+//
+// The micro-benchmark urlcat.BenchmarkStoreMatchesHostNorm_Parallel measures
+// nothing but the membership probe, so at 4 cores every core does nothing but
+// acquire catStore's RLock — the maximally contended case no gateway is in,
+// where removing CPU work from the op simply moves the bottleneck onto the lock
+// and the saving is masked (measured: hoisted 167.8 ns vs the normalizing
+// wrapper 162.4 ns at -cpu 4, i.e. equal throughput). That is this repo's
+// standing methodology note from the topHosts work — speeding one component
+// only raises the arrival rate at the next contended one — so the scan, which
+// separates each probe with real per-rule work, is the honest denominator.
+//
+//	go test -run '^$' -bench 'CategoryRulesParallel' -benchmem -cpu 1,2,4 .
+func BenchmarkPolicyEvaluate_CategoryRulesParallel(b *testing.B) {
+	seedCategoryTaxonomy(b, 12, 40)
+	ps := buildCategoryPolicyStore(50)
+	b.ReportAllocs()
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			if m := ps.Evaluate("203.0.113.7", "", "unauth", "uncategorized.example.net", nil); m != nil {
+				b.Fatalf("expected no match, got %q", m.Rule.Name)
+			}
+		}
+	})
+}
+
 // BenchmarkPolicyEvaluate_CategoryGroupRulesParallel measures the same scan
 // under concurrency. The fusion takes catStore's RLock once per rule, so a
 // per-rule lookup also multiplies lock traffic by the rule count on every
