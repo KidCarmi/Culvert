@@ -44,6 +44,12 @@ the settings file and any quarantined copy before repairing the existing
 `admin_settings.json` on the appliance data volume. Restore the intended valid
 `ui_allow_ips` array; set `ui_allow_ips_saved: true` when deliberately restoring
 an empty array. Restart the application after repairing its stored policy.
+This repair of a corrupt settings file is a tested procedure:
+`TestUIAccessCorruptSettingsDocumentedRecovery` (`ui_access_recovery_e2e_test.go`)
+runs it end to end. A corrupt file refuses management and omnibus saves. A
+replacement without an explicit policy stays refused. A repaired restricted list
+admits only its peers. An explicit open list admits all peers. The quarantined
+copy survives the repair, the restart and later saves.
 There is no unauthenticated, loopback, or routine-SSH bypass. A malformed startup
 YAML/CLI policy must be repaired at its source; management stays refused until
 the corrected configuration is loaded by a restart.
@@ -58,13 +64,16 @@ The current appliance supplies one physical interface and has no authoritative
 customer management CIDR. No private subnet or additional interface is inferred.
 
 A separate host-isolation change needs operator-supplied IPv4/IPv6 management
-sources or an explicit management interface, a tested local recovery path, and
-an appliance-owned nftables guard covering both host INPUT and Docker FORWARD
-paths. It must not flush or rewrite Docker-owned tables, block proxy port 8080,
-or disable forwarding. [Docker's nftables guidance](https://docs.docker.com/engine/network/firewall-nftables/)
-supports separate tables and hook priorities for such filtering. Bootstrap
-reachability and policy persistence across Docker restart, OS update, reboot,
-and restore must be qualified before claiming management-network isolation.
+sources or an explicit management interface, and an appliance-owned nftables
+guard covering both host INPUT and Docker FORWARD paths. It must not flush or
+rewrite Docker-owned tables, block proxy port 8080, or disable forwarding.
+[Docker's nftables guidance](https://docs.docker.com/engine/network/firewall-nftables/)
+supports separate tables and hook priorities for such filtering. It also needs
+its own tested local recovery path for a bad firewall policy. The application
+settings recovery above is tested, but it does not cover a host firewall.
+Bootstrap reachability and policy persistence across Docker restart, OS update,
+reboot, and restore must be qualified before claiming management-network
+isolation.
 
 These source changes do not update an existing deployed or previously qualified
 OVA. A matching image and a new appliance qualification remain required.
