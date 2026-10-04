@@ -49,20 +49,19 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # PROPOSED FIX for F-OSU-REBOOT-1 (run 37156062516: after
-        # `culvert-os-update reboot` the stack stayed Exited — compose stop
-        # marks containers manually stopped, so unless-stopped never restarts
-        # them). Image = #1528 head c5551a18's own Deep PR Gate tar; provisioning
-        # = THIS lab commit, whose appliance/ tree is c5551a18's plus the
-        # resume fix only. Provisioning drift, separately identified; NOT the
-        # handoff candidate (candidate-c5551a18da30 is run 37158853618).
+        # HANDOFF candidate: #1528 head b80968dc (F-OSU-REBOOT-1 fix incl. the
+        # rejected-reboot and missing-compose paths; L11 candidate SemVer so
+        # the bundled agent installs). Image = that head's own Deep PR Gate tar
+        # (run 37184223096, all four gates APPROVED; stamp
+        # v1.0.260-candidate.gb80968dcdf88); provisioning + build script = a
+        # clean checkout of the SAME commit. No provisioning drift.
         include:
-          - variant: stack-resume-fix-on-c5551a18da30
-            provisioning: lab
-            source_sha: "c5551a18da30e1178861cd9b488fc2d9aa6de781"
-            image_run: "37156550461"
-            image_tar_sha256: "622560c8a4dd711399f0b8aef0abbcfcec0bda539213a38036cf3633701516a8"
-            expect_image_id: "sha256:33832afe36670b5ccb16fa42fbbb5dc70e21957457123224c075407040a7592f"
+          - variant: candidate-b80968dcdf88
+            provisioning: source
+            source_sha: "b80968dcdf887bceb405bf4c31e9bbca8d12fe8c"
+            image_run: "37184223096"
+            image_tar_sha256: "670abef9adbd07a289a909e575bf15b17ec4809e87133c3bbbd0e1be0440f891"
+            expect_image_id: "sha256:54813760eb62583990194e2a97d7eef0f5273adfc974f4cd7c45eb82f91b120b"
     env:
       APPLIANCE_SOURCE_SHA: ${{ matrix.source_sha }}
       SOURCE_IMAGE_RUN_ID: ${{ matrix.image_run }}
