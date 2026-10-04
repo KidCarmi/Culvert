@@ -146,6 +146,7 @@ func buildOperatorContract() OperatorContract {
 		checkRootCA(),
 		checkSessionSecret(),
 		checkOversizeConfiguredUsernames(),
+		checkAdminRosterPersistence(),
 		checkCDR(),
 		checkClusterPosture(),
 		checkDPLastGoodConfigSnapshot(),
@@ -589,6 +590,47 @@ func checkOversizeConfiguredUsernames() OperatorContractCheck {
 			"so the account can still authenticate through the API)",
 			n, plural, adminUsernameAccountLimit, maxLen, adminUsernameAccountLimit),
 		OperatorAction: action,
+	}
+}
+
+// checkAdminRosterPersistence surfaces the admin-roster durability evidence
+// (CHAOS-70, roster_persist_durability.go) on the operator contract.
+//
+// Before this row the evidence existed in exactly two places an operator does
+// not look during routine administration: the Prometheus counters
+// culvert_admin_roster_persist_{failures,degraded}_total, and a rate-limited
+// process-log line. An operator whose password rotation or admin deletion
+// returned a 500 — or whose roster has no file at all, so every account change
+// silently reverts at restart — had no way to learn that from the Diagnostics
+// panel. Read-only: it reads two atomics and one config field, writes nothing
+// and changes no enforcement. Counts are since process start (the counters are
+// not persisted), and the message says so.
+func checkAdminRosterPersistence() OperatorContractCheck {
+	const code = "admin_roster_persistence"
+	if cfg == nil || !cfg.IsConfigured() {
+		return OperatorContractCheck{Code: code, Status: diagOK, Message: "no admin accounts configured"}
+	}
+	refused := rosterPersistRefused.Load()
+	degraded := rosterPersistBestEffort.Load()
+	if !cfg.rosterPathConfigured() {
+		return OperatorContractCheck{
+			Code:   code,
+			Status: diagWarn,
+			Message: "no admin roster file is configured — admin account, role and password changes live only in memory " +
+				"and revert to the -user/auth.user credential after a restart (a rotated password is undone and the previous one works again)",
+			OperatorAction: "Set -ui-users-file (for example /data/ui_users.json) on a persistent volume and restart the proxy; then re-apply any account changes made since the last restart.",
+		}
+	}
+	if refused == 0 && degraded == 0 {
+		return OperatorContractCheck{Code: code, Status: diagOK, Message: "admin roster is persisting to disk"}
+	}
+	return OperatorContractCheck{
+		Code:   code,
+		Status: diagWarn,
+		Message: fmt.Sprintf("since this process started, %d admin account change(s) were refused because the roster could not be written "+
+			"(nothing was changed), and %d login-time write(s) failed (a consumed backup code or TOTP replay counter may not survive a restart)",
+			refused, degraded),
+		OperatorAction: "Fix free space or permissions on the data volume (see the storage_write_failed alert), then re-apply the refused change from Admin Users — nothing retries it automatically. The counts clear on restart.",
 	}
 }
 

@@ -172,6 +172,9 @@ administrative decision was affected, and therefore what the operator must redo.
 
 ## Recovery
 
+0. The Diagnostics panel (`GET /api/diagnose`) carries an `admin_roster_persistence` row:
+   `warn` when no `-ui-users-file` is configured (changes revert at restart) or when
+   refused/degraded roster writes have occurred since process start. Read-only; counts clear on restart.
 1. `culvert_admin_roster_persist_failures_total` is climbing, or an operator
    reports a `500` from a user-management action.
 2. Check the process log for `UIUsers: REFUSED` lines — each names the action and
