@@ -214,7 +214,7 @@ func TestLineage_GeneratorRejectsCarriedIdentityMismatch(t *testing.T) {
 
 // lineageCatalog builds the TARGET's catalog the way CI does now: the target
 // generated, every supported predecessor carried from its verified catalog.
-func lineageCatalog(t *testing.T, s *lineageSigner, target string, published []string) (*Catalog, string) {
+func lineageCatalog(t *testing.T, s *lineageSigner, target string, published []string) (cat *Catalog, dir string) {
 	t.Helper()
 	var srcs []lineageSource
 	for _, v := range published {
@@ -224,8 +224,8 @@ func lineageCatalog(t *testing.T, s *lineageSigner, target string, published []s
 	if err != nil {
 		t.Fatal(err)
 	}
-	dir := publishSingle(t, s, target, carried)
-	cat, err := LoadVerifiedCatalog(&dirCatalogSource{dir: dir}, s.trust(t))
+	dir = publishSingle(t, s, target, carried)
+	cat, err = LoadVerifiedCatalog(&dirCatalogSource{dir: dir}, s.trust(t))
 	if err != nil {
 		t.Fatalf("the lineage catalog failed real verification: %v", err)
 	}
@@ -345,14 +345,12 @@ func productionLineageTrust(t *testing.T) TrustStore {
 
 // lineageSourcesIn lists the v<version>/ bundle directories under root and the
 // versions their names claim.
-func lineageSourcesIn(t *testing.T, root string) ([]lineageSource, []string) {
+func lineageSourcesIn(t *testing.T, root string) (srcs []lineageSource, names []string) {
 	t.Helper()
 	ents, err := os.ReadDir(root)
 	if err != nil {
 		t.Fatal(err)
 	}
-	var srcs []lineageSource
-	var names []string
 	for _, e := range ents {
 		if e.IsDir() && strings.HasPrefix(e.Name(), "v") {
 			srcs = append(srcs, lineageSource{Dir: filepath.Join(root, e.Name())})

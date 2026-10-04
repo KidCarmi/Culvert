@@ -127,9 +127,12 @@ func applyAdminUIAccessPolicy(s *AdminSettings) {
 	}
 }
 
-func writeUIAccessRefusal(w http.ResponseWriter, status int, code, message string) {
+// writeUIAccessRefusal answers a typed 503: the management policy is
+// unavailable or its persistence is uncertain. Invalid INPUT is a plain-text
+// 400 (http.Error) and never comes through here.
+func writeUIAccessRefusal(w http.ResponseWriter, code, message string) {
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
+	w.WriteHeader(http.StatusServiceUnavailable)
 	_ = json.NewEncoder(w).Encode(map[string]string{"error": message, "code": code})
 }
 

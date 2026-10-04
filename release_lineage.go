@@ -69,31 +69,8 @@ func collectVerifiedPredecessors(sources []lineageSource, trust TrustStore, repo
 	}
 	byID := map[string]carriedRelease{}
 	for _, src := range sources {
-		cat, err := LoadVerifiedCatalog(&dirCatalogSource{dir: src.Dir}, trust)
-		if err != nil {
-			return nil, fmt.Errorf("release lineage: source %s failed verification (nothing is carried from it): %w", src.Dir, err)
-		}
-		if cat.proof == nil {
-			return nil, fmt.Errorf("release lineage: source %s carries no signature evidence", src.Dir)
-		}
-		for id, rel := range cat.byReleaseID {
-			if !lineageSupported(rel, repo, floor, target) {
-				continue
-			}
-			raw := cat.proof.manifests[id]
-			if len(raw) == 0 {
-				return nil, fmt.Errorf("release lineage: source %s: no verified manifest bytes for %q", src.Dir, id)
-			}
-			c := carriedRelease{ReleaseID: id, VersionID: rel.VersionID, Repo: rel.Repo, ListDigest: rel.ListDigest, Manifest: bytes.Clone(raw)}
-			if prev, dup := byID[id]; dup {
-				// Two verified catalogs disagreeing about one release is a
-				// publication inconsistency; refuse rather than pick one.
-				if !bytes.Equal(prev.Manifest, c.Manifest) {
-					return nil, fmt.Errorf("release lineage: release %q has different verified manifests in two sources (fail closed)", id)
-				}
-				continue
-			}
-			byID[id] = c
+		if err := collectFromSource(byID, src, trust, repo, floor, target); err != nil {
+			return nil, err
 		}
 	}
 	out := make([]carriedRelease, 0, len(byID))
@@ -123,10 +100,42 @@ func collectVerifiedPredecessors(sources []lineageSource, trust TrustStore, repo
 	return out, nil
 }
 
+// collectFromSource verifies one source catalog and adds its supported
+// releases to byID, refusing a release two verified sources disagree about.
+func collectFromSource(byID map[string]carriedRelease, src lineageSource, trust TrustStore, repo, floor, target string) error {
+	cat, err := LoadVerifiedCatalog(&dirCatalogSource{dir: src.Dir}, trust)
+	if err != nil {
+		return fmt.Errorf("release lineage: source %s failed verification (nothing is carried from it): %w", src.Dir, err)
+	}
+	if cat.proof == nil {
+		return fmt.Errorf("release lineage: source %s carries no signature evidence", src.Dir)
+	}
+	for id := range cat.byReleaseID {
+		rel := cat.byReleaseID[id]
+		if !lineageSupported(&rel, repo, floor, target) {
+			continue
+		}
+		raw := cat.proof.manifests[id]
+		if len(raw) == 0 {
+			return fmt.Errorf("release lineage: source %s: no verified manifest bytes for %q", src.Dir, id)
+		}
+		if prev, dup := byID[id]; dup {
+			// Two verified catalogs disagreeing about one release is a
+			// publication inconsistency; refuse rather than pick one.
+			if !bytes.Equal(prev.Manifest, raw) {
+				return fmt.Errorf("release lineage: release %q has different verified manifests in two sources (fail closed)", id)
+			}
+			continue
+		}
+		byID[id] = carriedRelease{ReleaseID: id, VersionID: rel.VersionID, Repo: rel.Repo, ListDigest: rel.ListDigest, Manifest: bytes.Clone(raw)}
+	}
+	return nil
+}
+
 // lineageSupported reports whether rel is a supported upgrade source for the
 // target: same repository, version >= floor (when set) and strictly older
 // than the target. The target itself is never carried — it is generated.
-func lineageSupported(rel Release, repo, floor, target string) bool {
+func lineageSupported(rel *Release, repo, floor, target string) bool {
 	if rel.Repo != repo || !catalogSemverRE.MatchString(rel.VersionID) {
 		return false
 	}

@@ -92,7 +92,7 @@ func uiIPGuardMiddleware(next http.Handler) http.Handler {
 		allowed, refused := uiAllowedNets, uiAccessRefused
 		uiAllowedNetsMu.RUnlock()
 		if refused {
-			writeUIAccessRefusal(w, http.StatusServiceUnavailable, "ui_access_policy_unavailable", "Management access policy requires local recovery.")
+			writeUIAccessRefusal(w, "ui_access_policy_unavailable", "Management access policy requires local recovery.")
 			return
 		}
 		if len(allowed) == 0 {

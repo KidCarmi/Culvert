@@ -70,14 +70,14 @@ func TestPrepareGuest_SSHPolicyValidationNeedsNoImageHostKey(t *testing.T) {
 	if err := os.WriteFile(cfg, []byte("HostKey "+d+"/absent\nAllowUsers culvert-operator\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if out, err := exec.Command(sshd, "-T", "-f", cfg, "-C", "user=culvert-operator,host=localhost,addr=127.0.0.1").CombinedOutput(); err == nil { // #nosec G204 -- fixed binary, test-owned args
+	if out, err := exec.CommandContext(t.Context(), sshd, "-T", "-f", cfg, "-C", "user=culvert-operator,host=localhost,addr=127.0.0.1").CombinedOutput(); err == nil { //nolint:gosec // G204: the system sshd binary, test-owned args
 		t.Fatalf("sshd -T unexpectedly succeeded without a host key: %s", out)
 	}
 	key := d + "/key"
-	if out, err := exec.Command("ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", key).CombinedOutput(); err != nil { // #nosec G204 -- fixed args
+	if out, err := exec.CommandContext(t.Context(), "ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", key).CombinedOutput(); err != nil { //nolint:gosec // G204: fixed binary, test-owned temp path
 		t.Skipf("ssh-keygen unavailable: %v %s", err, out)
 	}
-	out, err := exec.Command(sshd, "-T", "-f", cfg, "-h", key, "-C", "user=culvert-operator,host=localhost,addr=127.0.0.1").CombinedOutput() // #nosec G204 -- fixed binary, test-owned args
+	out, err := exec.CommandContext(t.Context(), sshd, "-T", "-f", cfg, "-h", key, "-C", "user=culvert-operator,host=localhost,addr=127.0.0.1").CombinedOutput() // #nosec G204 -- fixed binary, test-owned args
 	if err != nil || !strings.Contains(string(out), "allowusers culvert-operator") {
 		t.Fatalf("sshd -T with a throwaway key failed: %v %s", err, out)
 	}

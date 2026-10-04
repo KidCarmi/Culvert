@@ -76,8 +76,8 @@ func buildResignSpecFromVerified(src string, trust TrustStore, version, resignNo
 	// entry is a carried predecessor (release_lineage.go) and is re-emitted
 	// byte-identical. A catalog naming the version twice, or none, is refused.
 	targetID := ""
-	for id, rel := range cat.byReleaseID {
-		if rel.VersionID == version {
+	for id := range cat.byReleaseID {
+		if cat.byReleaseID[id].VersionID == version {
 			if targetID != "" {
 				return nil, fmt.Errorf("resign source names version %q twice (fail closed)", version)
 			}

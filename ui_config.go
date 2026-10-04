@@ -1750,7 +1750,7 @@ func apiSessionTimeout(w http.ResponseWriter, r *http.Request) {
 //	Send empty array [] to remove all restrictions.
 func apiUIAllowIPs(w http.ResponseWriter, r *http.Request) {
 	if uiAccessPolicyRefused() {
-		writeUIAccessRefusal(w, http.StatusServiceUnavailable, "ui_access_policy_unavailable", "Management access policy requires local recovery.")
+		writeUIAccessRefusal(w, "ui_access_policy_unavailable", "Management access policy requires local recovery.")
 		return
 	}
 	switch r.Method {
@@ -1786,10 +1786,10 @@ func apiUIAllowIPs(w http.ResponseWriter, r *http.Request) {
 		if err := persistUIAllowedCIDRs(nets); err != nil {
 			if errors.Is(err, fileutil.ErrReplacedNotSynced) {
 				auditEvent(r, "settings.ui_allow_ips.persistence_uncertain", "replacement landed", "runtime updated; crash durability unconfirmed")
-				writeUIAccessRefusal(w, http.StatusServiceUnavailable, "ui_allow_ips_persistence_uncertain", "The new management policy is active, but crash durability could not be confirmed; verify storage before restarting.")
+				writeUIAccessRefusal(w, "ui_allow_ips_persistence_uncertain", "The new management policy is active, but crash durability could not be confirmed; verify storage before restarting.")
 				return
 			}
-			writeUIAccessRefusal(w, http.StatusServiceUnavailable, "ui_allow_ips_not_saved", "Management access policy could not be saved; the previous policy remains active.")
+			writeUIAccessRefusal(w, "ui_allow_ips_not_saved", "Management access policy could not be saved; the previous policy remains active.")
 			return
 		}
 		values := canonicalUIAllowedCIDRs(nets)

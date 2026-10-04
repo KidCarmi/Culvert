@@ -219,36 +219,9 @@ func TestE2EEmitAgentRequest(t *testing.T) {
 	mode := envOr("CULVERT_E2E_REQ_MODE", "planned")
 	var body any
 	if id, ok := strings.CutPrefix(mode, "rollback="); ok {
-		rel, found := cat.byReleaseID[id]
-		cur, known := cat.Lookup(running)
-		if !found || !known {
-			t.Fatalf("rollback: target %q found=%v, running %q listed=%v", id, found, running, known)
-		}
-		body = map[string]any{"mode": "image", "image_ref": rel.PinnedRef,
-			"release_proof": cat.releaseProof(id), "prior_release_proof": cat.releaseProof(cur.ReleaseID)}
+		body = e2eRollbackRequest(t, cat, id, running)
 	} else {
-		d, err := NewDispatcher(e2eCatalogProvider{cat: cat}, DispatchConfig{ProxyRepo: repo})
-		if err != nil {
-			t.Fatal(err)
-		}
-		plan := d.Plan(DispatchTarget{Channel: ChannelRecommended}, []string{running}, DispatchOptions{})
-		if plan.Outcome != OutcomePlan {
-			t.Fatalf("planner did not plan an apply: outcome=%v kind=%v reason=%v", plan.Outcome, plan.Kind, plan.Reason)
-		}
-		req := plan.Apply
-		switch {
-		case mode == "planned":
-		case mode == "no-prior":
-			req.PriorReleaseProof = nil
-		case strings.HasPrefix(mode, "prior="):
-			other := strings.TrimPrefix(mode, "prior=")
-			if req.PriorReleaseProof = cat.releaseProof(other); req.PriorReleaseProof == nil {
-				t.Fatalf("no proof for %q in the catalog", other)
-			}
-		default:
-			t.Fatalf("unknown CULVERT_E2E_REQ_MODE %q", mode)
-		}
-		body = req
+		body = e2eApplyRequest(t, cat, repo, running, mode)
 	}
 	b, err := json.Marshal(body)
 	if err != nil {
@@ -258,4 +231,45 @@ func TestE2EEmitAgentRequest(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Logf("wrote %s request (%d bytes)", mode, len(b))
+}
+
+// e2eRollbackRequest builds a standalone image-rollback body to release id,
+// with the running release's catalog proof as the observed baseline.
+func e2eRollbackRequest(t *testing.T, cat *Catalog, id, running string) map[string]any {
+	t.Helper()
+	rel, found := cat.byReleaseID[id]
+	cur, known := cat.Lookup(running)
+	if !found || !known {
+		t.Fatalf("rollback: target %q found=%v, running %q listed=%v", id, found, running, known)
+	}
+	return map[string]any{"mode": "image", "image_ref": rel.PinnedRef,
+		"release_proof": cat.releaseProof(id), "prior_release_proof": cat.releaseProof(cur.ReleaseID)}
+}
+
+// e2eApplyRequest runs the REAL dispatch planner and returns its apply body,
+// optionally with the baseline proof removed or replaced (see the modes).
+func e2eApplyRequest(t *testing.T, cat *Catalog, repo, running, mode string) UpgradeApplyRequest {
+	t.Helper()
+	d, err := NewDispatcher(e2eCatalogProvider{cat: cat}, DispatchConfig{ProxyRepo: repo})
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan := d.Plan(DispatchTarget{Channel: ChannelRecommended}, []string{running}, DispatchOptions{})
+	if plan.Outcome != OutcomePlan {
+		t.Fatalf("planner did not plan an apply: outcome=%v kind=%v reason=%v", plan.Outcome, plan.Kind, plan.Reason)
+	}
+	req := plan.Apply
+	switch {
+	case mode == "planned":
+	case mode == "no-prior":
+		req.PriorReleaseProof = nil
+	case strings.HasPrefix(mode, "prior="):
+		other := strings.TrimPrefix(mode, "prior=")
+		if req.PriorReleaseProof = cat.releaseProof(other); req.PriorReleaseProof == nil {
+			t.Fatalf("no proof for %q in the catalog", other)
+		}
+	default:
+		t.Fatalf("unknown CULVERT_E2E_REQ_MODE %q", mode)
+	}
+	return req
 }
