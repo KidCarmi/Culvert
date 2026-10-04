@@ -434,11 +434,32 @@ func TestRequestTracing_SanitisesClientRequestID(t *testing.T) {
 		t.Errorf("returned request id %q still carries CR/LF", got)
 	}
 	// Nothing the client chose survives: the value is replaced wholesale.
-	if strings.Contains(got, "X-Injected") || strings.Contains(got, "abc") || strings.Contains(got, "def") {
+	//
+	// That is asserted as a TOTAL CHARACTERISATION of the result — every byte
+	// is lowercase hex and the length is exactly requestIDHexLen — and NOT as
+	// a substring probe against the payload. The substring form was unsound
+	// and flaked: it required the minted id to contain neither "abc" nor
+	// "def", and BOTH are valid hex strings, so a freshly minted 16-char hex
+	// id hits one by chance (measured over 2e6 draws: "abc" 0.346%, "def"
+	// 0.346%, either 0.691% — 1.378% per `-count=2` determinism run). It
+	// failed exactly that way on the Deep determinism gate with the minted id
+	// "def2e7323f9aa73f", which merely starts with "def".
+	//
+	// The characterisation is STRICTLY STRONGER than the probe it replaces:
+	// the client payload is 22 bytes containing CR, LF, a space, 'X', '-' and
+	// ':' — none of them a hex digit — so "all lowercase hex, exactly
+	// requestIDHexLen long" cannot hold unless the value was replaced in full.
+	// The X-Injected probe is kept because none of ITS bytes are hex digits
+	// either, so it states the intent directly and can never flake.
+	//
+	// isLowerHex (saas_feed_floor.go, package main) already means exactly
+	// "length n and every byte in [0-9a-f]", so the characterisation is one
+	// call against an existing predicate rather than a hand-rolled scan.
+	if strings.Contains(got, "X-Injected") {
 		t.Errorf("client-chosen bytes survived into the request id %q", got)
 	}
-	if len(got) != requestIDHexLen {
-		t.Errorf("request id = %q (len %d), want a freshly minted %d-char id", got, len(got), requestIDHexLen)
+	if !isLowerHex(got, requestIDHexLen) {
+		t.Errorf("request id = %q, want a freshly minted %d-char lowercase-hex id", got, requestIDHexLen)
 	}
 	if h := rec.Header().Get(headerRequestID); h != got {
 		t.Errorf("response header %q does not mirror the minted id %q", h, got)

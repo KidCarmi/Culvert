@@ -94,7 +94,13 @@ type Entry struct {
 // F3b-4 cutover consults it so the SaaS taxonomy (BuiltIn=true) is served by
 // the atomic effective view instead of double-served from here.
 type Store struct {
-	mu         sync.RWMutex
+	// mu is a hotRW: a sync.RWMutex whose READ side is sharded across
+	// cache-line-isolated locks, because MatchesHost/MatchesHostAdmin are
+	// read once per category-scoped rule per proxied request. The Lock /
+	// Unlock / RLock / RUnlock surface and the mutual-exclusion guarantee
+	// are identical to the sync.RWMutex it replaces; only the two hot
+	// readers use rlockHot(). See hotread.go.
+	mu         hotRW
 	entries    []*Entry
 	index      map[string]map[string]bool // lowercase cat → lowercase host set (ALL entries)
 	adminIndex map[string]map[string]bool // same, BuiltIn=false entries only
@@ -1117,14 +1123,16 @@ func (s *Store) MatchesHost(cat Category, host string) bool {
 	var keyBuf [maxInlineCategoryKey]byte
 	inlineKey, strKey, inlineOK := categoryKey(keyBuf[:], string(cat))
 
-	s.mu.RLock()
+	// Per-rule-per-request read: take ONE sharded reader lock, not the single
+	// process-wide one every core would otherwise write to. See hotread.go.
+	sh := s.mu.rlockHot()
 	var hostSet map[string]bool
 	if inlineOK {
 		hostSet = s.index[string(inlineKey)]
 	} else {
 		hostSet = s.index[strKey]
 	}
-	s.mu.RUnlock()
+	sh.RUnlock()
 
 	if hostSet == nil {
 		return false
@@ -1153,14 +1161,15 @@ func (s *Store) MatchesHostAdmin(cat Category, host string) bool {
 	var keyBuf [maxInlineCategoryKey]byte
 	inlineKey, strKey, inlineOK := categoryKey(keyBuf[:], string(cat))
 
-	s.mu.RLock()
+	// Per-rule-per-request read: one sharded reader lock. See hotread.go.
+	sh := s.mu.rlockHot()
 	var hostSet map[string]bool
 	if inlineOK {
 		hostSet = s.adminIndex[string(inlineKey)]
 	} else {
 		hostSet = s.adminIndex[strKey]
 	}
-	s.mu.RUnlock()
+	sh.RUnlock()
 
 	if hostSet == nil {
 		return false

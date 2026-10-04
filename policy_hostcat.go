@@ -45,6 +45,14 @@ import "strings"
 // MatchesHostAdmin depend on the rule's category as well as the host, and they
 // are index lookups (O(labels)), not scans — memoizing them would trade a cheap
 // map probe for a map allocation.
+//
+// "Cheap map probe" is the premise that decision rests on, and it has twice been
+// less true than it reads. It allocated, until categoryKey folded the index key
+// into a caller-owned buffer (internal/urlcat), and it serialised every core on
+// ONE sync.RWMutex readerCount word, until that read lock was sharded
+// (internal/urlcat/hotread.go) — which cost 1.8x-2.27x of the whole scan's
+// four-core throughput at 10-50 category rules. The conclusion still holds; if
+// it is revisited, re-measure the probe rather than re-reading this sentence.
 type hostCatScratch struct {
 	host string
 
