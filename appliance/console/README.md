@@ -1,5 +1,62 @@
 # Culvert boot console and local recovery worker
 
+## Verified file restoration and diagnostic export
+
+After applying or reverting a managed network change, the worker rereads the
+managed file (including its mode or absence) and all other Netplan input digests.
+An exit-zero command with mismatched files cannot enter `testing` or
+`rolled_back`. Persistent external changes enter `conflict`; unavailable reads
+remain pending and retryable. A successful rollback means the original files
+were verified and the apply command succeeded. It does **not** prove that the
+kernel converged, DHCP obtained a lease, or another client can reach the appliance.
+Network view and the report show current kernel address/route observations
+separately. Old records without verification fields mean unknown.
+
+Network history retains the latest failure stage and a fixed reason code:
+`no_space`, `read_only`, `permission_denied`, `timeout`, `cancelled`,
+`configuration_changed`, or `operation_failed`. Netplan generate and apply are
+distinguished. These fields never contain command output, credentials or private
+configuration. A successful retry retains the preceding failure for diagnosis.
+If durable storage itself is unavailable, saving failure evidence can also fail;
+the worker reports the error and does not promise a persisted record. A failed
+phase save cannot be committed accidentally by the subsequent failure report.
+
+Before repair or reboot, from an existing SSH session:
+
+```sh
+umask 077
+/opt/culvert-appliance/bin/culvert-console --report > culvert-diagnostics.json
+```
+
+Check the command's exit status before sharing the file. This read-only JSON
+export has its own schema, explicit field/collection bounds and a 64 KiB total
+cap, checked before output. It includes public build/status data, current network
+observations, prerequisite checks and sanitized recovery history. There is no
+upload and no collection of `.env`, setup tokens, private recovery backups or raw
+journals. Hostnames, IP addresses and machine/boot IDs are operational metadata
+and remain in the export. It is not a generic secret scrubber or forensic bundle.
+An output-device failure can leave a partial file; oversize reports emit no JSON.
+
+Regression coverage includes acknowledged-but-unwritten files, changes during
+apply, permission failures, cancelled work, rejected durable transitions and
+restart/retry after storage failure. The Linux CI root lane explicitly enables
+isolated 128 KiB tmpfs faults for full bytes, partial replacement writes, inode
+exhaustion and read-only remounts. Existing state files must remain byte-identical
+and no temporary replacement may remain. These tests do not establish ext4
+power-loss guarantees or full OVA qualification.
+
+The existing application lifecycle harness already performs real offline restore
+commits, interrupted-restore recovery and full-volume recovery; this console pass
+does not replace those tests with a dry run or change maintenance-agent ownership.
+An actual restore rehearsal on the final integrated appliance remains a separate
+qualification step. Whole-OS boot environments are not introduced here.
+
+Vendor evidence behind this pass: [Netplan rollback caveats](https://manpages.ubuntu.com/manpages/noble/man8/netplan-try.8.html),
+[vCenter misleading staging/space failures](https://knowledge.broadcom.com/external/article/422619),
+[vCenter disk protection](https://knowledge.broadcom.com/external/article/318953),
+[pfSense restore compatibility](https://docs.netgate.com/pfsense/en/latest/backup/restore.html),
+and [PAN-OS evidence collection before reboot](https://security.paloaltonetworks.com/CVE-2024-3400).
+
 ## Durable recovery and confirmed network changes
 
 The same Go executable now supplies `culvert-console-host.service`, a separate

@@ -44,7 +44,7 @@ jobs:
       - name: Root-owned recovery storage fault tests
         run: |
           go test -c -o /tmp/culvert-host.test ./internal/appliancehost
-          sudo /tmp/culvert-host.test -test.shuffle=on -test.count=2
+          sudo env CULVERT_STORAGE_FAULTS=1 /tmp/culvert-host.test -test.shuffle=on -test.count=2
       - name: Bounded terminal layout fuzzing
         run: go test ./internal/applianceconsole -run '^$' -fuzz '^FuzzFrameBounds$' -fuzztime=10s -parallel=2
       - name: Build static host binary with the repository compiler
@@ -61,3 +61,4 @@ jobs:
           sudo bash appliance/console/install_test.sh
           appliance/console/culvert-console --json
           appliance/console/culvert-console --text
+          appliance/console/culvert-console --report

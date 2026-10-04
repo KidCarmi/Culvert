@@ -45,9 +45,9 @@ func hostIdentity() (appliancehost.Identity, error) {
 func hostNetplan() appliancehost.Netplan {
 	return appliancehost.Netplan{Target: "/etc/netplan/60-culvert.yaml", Directories: []string{"/etc/netplan", "/lib/netplan", "/run/netplan"}, Run: func(ctx context.Context) error {
 		if err := hostCommand(ctx, "/usr/sbin/netplan", "generate"); err != nil {
-			return err
+			return appliancehost.AtStage("netplan_generate", err)
 		}
-		return hostCommand(ctx, "/usr/sbin/netplan", "apply")
+		return appliancehost.AtStage("netplan_apply", hostCommand(ctx, "/usr/sbin/netplan", "apply"))
 	}}
 }
 
@@ -64,7 +64,7 @@ func hostCommand(parent context.Context, path string, args ...string) error {
 	cmd.WaitDelay = time.Second
 	if err := cmd.Run(); err != nil {
 		if ctx.Err() != nil {
-			return fmt.Errorf("%s %s cancelled or timed out", filepath.Base(path), args[0])
+			return fmt.Errorf("%s %s: %w", filepath.Base(path), args[0], ctx.Err())
 		}
 		var exit *exec.ExitError
 		if errors.As(err, &exit) {

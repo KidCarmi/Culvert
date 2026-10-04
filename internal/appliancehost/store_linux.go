@@ -202,13 +202,15 @@ func (s Store) save(state State) error {
 // Publish omits network configuration/backup data; it is explicitly an observation.
 func (s Store) Publish(state State, path string) error {
 	view := struct {
-		Version      int      `json:"version"`
-		Records      []Record `json:"records"`
-		NetworkID    string   `json:"network_id,omitempty"`
-		NetworkPhase string   `json:"network_phase,omitempty"`
+		Version      int           `json:"version"`
+		Records      []Record      `json:"records"`
+		NetworkID    string        `json:"network_id,omitempty"`
+		NetworkPhase string        `json:"network_phase,omitempty"`
+		Verification *Verification `json:"verification,omitempty"`
 	}{Version: 1, Records: state.Records}
 	if t := state.Network; t != nil {
 		view.NetworkID, view.NetworkPhase = t.ID, t.Phase
+		view.Verification = &t.Verification
 	}
 	data, err := json.Marshal(view)
 	if err != nil {

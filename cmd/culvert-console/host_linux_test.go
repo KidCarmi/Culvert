@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"os"
 	"strings"
 	"testing"
@@ -33,7 +34,7 @@ func TestHostCommandFailureIsCoarseAndCancellationBounded(t *testing.T) {
 	defer cancel()
 	started := time.Now()
 	err = hostCommand(ctx, "/bin/sh", "-c", "sleep 60 & wait")
-	if err == nil || time.Since(started) > 3*time.Second {
+	if !errors.Is(err, context.DeadlineExceeded) || time.Since(started) > 3*time.Second {
 		t.Fatalf("host process group did not stop promptly: %v", err)
 	}
 }

@@ -25,16 +25,17 @@ func run() int {
 	admin := flag.Bool("admin", false, "authenticated culvert account menu")
 	jsonOutput := flag.Bool("json", false, "read-only status without credentials")
 	textOutput := flag.Bool("text", false, "read-only plain text status")
+	report := flag.Bool("report", false, "bounded public diagnostic report on stdout; no upload")
 	host := flag.String("host", "", "root-only worker or recovery action")
 	flag.Parse()
 	count := 0
-	for _, selected := range []bool{*login, *admin, *jsonOutput, *textOutput, *host != ""} {
+	for _, selected := range []bool{*login, *admin, *jsonOutput, *textOutput, *report, *host != ""} {
 		if selected {
 			count++
 		}
 	}
 	if count != 1 || flag.NArg() != 0 {
-		fmt.Fprintln(os.Stderr, "select exactly one of --login, --admin, --json, --text")
+		fmt.Fprintln(os.Stderr, "select exactly one of --login, --admin, --json, --text, --report, --host")
 		return 2
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT, syscall.SIGHUP)
@@ -46,6 +47,13 @@ func run() int {
 	if *host != "" {
 		if err := runHost(ctx, *host, collector); err != nil {
 			fmt.Fprintln(os.Stderr, err)
+			return 1
+		}
+		return 0
+	}
+	if *report {
+		if err := applianceconsole.WriteReport(os.Stdout, collector.Collect(ctx)); err != nil {
+			fmt.Fprintln(os.Stderr, "Diagnostic export failed:", err)
 			return 1
 		}
 		return 0

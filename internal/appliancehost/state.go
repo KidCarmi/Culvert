@@ -8,7 +8,6 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
-	"fmt"
 	"time"
 )
 
@@ -20,13 +19,14 @@ type Identity struct {
 
 // Record is bounded, allowlisted evidence, not a transcript or security attestation.
 type Record struct {
-	ID          string `json:"id"`
-	Action      string `json:"action"`
-	Phase       string `json:"phase"`
-	Boot        string `json:"boot"`
-	Machine     string `json:"machine"`
-	At          string `json:"at"`
-	Observation string `json:"observation,omitempty"`
+	ID          string   `json:"id"`
+	Action      string   `json:"action"`
+	Phase       string   `json:"phase"`
+	Boot        string   `json:"boot"`
+	Machine     string   `json:"machine"`
+	At          string   `json:"at"`
+	Observation string   `json:"observation,omitempty"`
+	Failure     *Failure `json:"failure,omitempty"`
 }
 
 // File preserves absence, content and permissions for exact rollback.
@@ -38,13 +38,22 @@ type File struct {
 
 // Transaction retains the original configuration even after a failed rollback.
 type Transaction struct {
-	ID          string        `json:"id"`
-	Phase       string        `json:"phase"`
-	Boot        string        `json:"boot"`
-	Deadline    time.Duration `json:"deadline"`
-	Original    File          `json:"original"`
-	Candidate   File          `json:"candidate"`
-	OtherDigest string        `json:"other_digest"`
+	ID           string        `json:"id"`
+	Phase        string        `json:"phase"`
+	Boot         string        `json:"boot"`
+	Deadline     time.Duration `json:"deadline"`
+	Original     File          `json:"original"`
+	Candidate    File          `json:"candidate"`
+	OtherDigest  string        `json:"other_digest"`
+	Verification Verification  `json:"verification"`
+}
+
+// Verification separates restored files and command completion from remote
+// reachability. Empty values in older records mean unknown, never success.
+type Verification struct {
+	Files        string `json:"files"`
+	Apply        string `json:"apply"`
+	ClientAccess string `json:"client_access"`
 }
 
 // State has one pending network transaction and a bounded operation history.
@@ -111,6 +120,7 @@ func (s *Session) KeepExternal(id string) error {
 	if _, _, err := s.Host.Read(); err != nil {
 		return err
 	}
+	t.Verification = Verification{ClientAccess: "unverified"}
 	return s.phase("external_kept")
 }
 
@@ -135,9 +145,11 @@ func (s *Session) Confirm(id string) error {
 	if t == nil || t.ID != id || t.Phase != "testing" || t.Boot != s.Identity.Boot || s.Identity.Uptime >= t.Deadline {
 		return errors.New("network confirmation is stale or unavailable")
 	}
-	if err := s.matches(t.Candidate); err != nil {
-		return err
+	if err := s.verifyFiles(t.Candidate, "confirm_verify"); err != nil {
+		return s.recordFailure(err)
 	}
+	t.Verification.Files = "verified"
+	t.Verification.ClientAccess = "operator_confirmed"
 	return s.phase("confirmed")
 }
 
@@ -150,17 +162,25 @@ func (s *Session) matches(expected File) error {
 		return err
 	}
 	if digest != s.State.Network.OtherDigest || !same(current, expected) {
-		return errors.New("network configuration changed outside the transaction")
+		return errNetworkDrift
 	}
 	return nil
 }
 
 // Tick must run under the durable store lock in the independent root worker.
 // Interrupted apply always rolls back. A new boot never confirms old work.
-func (s *Session) Tick(ctx context.Context) error {
+func (s *Session) Tick(ctx context.Context) (result error) {
 	t := s.State.Network
 	if t == nil || !pending(t.Phase) || t.Phase == "conflict" {
 		return nil
+	}
+	defer func() {
+		if result != nil {
+			result = s.recordFailure(result)
+		}
+	}()
+	if err := ctx.Err(); err != nil {
+		return AtStage("recovery", err)
 	}
 	if t.Phase == "queued" && t.Boot == s.Identity.Boot && s.Identity.Uptime < t.Deadline {
 		return s.apply(ctx)
@@ -172,49 +192,85 @@ func (s *Session) Tick(ctx context.Context) error {
 }
 
 func (s *Session) phase(value string) error {
+	previous := s.State.Network.Phase
+	s.setPhase(value)
+	if err := s.Save(s.State); err != nil {
+		// Failure evidence must not accidentally commit the refused transition.
+		s.setPhase(previous)
+		return AtStage("persist_phase", err)
+	}
+	return nil
+}
+
+func (s *Session) setPhase(value string) {
 	s.State.Network.Phase = value
 	for i := range s.State.Records {
 		if s.State.Records[i].ID == s.State.Network.ID {
 			s.State.Records[i].Phase = value
 		}
 	}
-	return s.Save(s.State)
 }
 
 func (s *Session) apply(ctx context.Context) error {
 	if err := s.matches(s.State.Network.Original); err != nil {
-		return errors.Join(err, s.phase("conflict"))
+		if errors.Is(err, errNetworkDrift) {
+			return errors.Join(AtStage("apply_precheck", err), s.phase("conflict"))
+		}
+		return AtStage("apply_precheck", err)
 	}
+	s.State.Network.Verification = Verification{ClientAccess: "unverified"}
 	if err := s.phase("applying"); err != nil {
 		return err
 	}
 	if err := s.Host.Write(s.State.Network.Candidate); err != nil {
-		return fmt.Errorf("stage network file: %w", err)
+		return AtStage("apply_write", err)
 	}
 	if err := s.Host.Apply(ctx); err != nil {
-		return errors.Join(err, s.rollback(ctx))
+		return errors.Join(s.rollback(ctx), AtStage("apply_command", err))
+	}
+	s.State.Network.Verification.Apply = "succeeded"
+	if err := s.verifyFiles(s.State.Network.Candidate, "apply_verify"); err != nil {
+		return err
 	}
 	return s.phase("testing")
 }
 
 func (s *Session) rollback(ctx context.Context) error {
 	t := s.State.Network
+	t.Verification = Verification{ClientAccess: "unverified"}
 	// Either version is valid after a crash between file replacement and save.
 	current, digest, err := s.Host.Read()
 	if err != nil {
-		return err
+		return AtStage("rollback_read", err)
 	}
 	if digest != t.OtherDigest || (!same(current, t.Candidate) && !same(current, t.Original)) {
-		return errors.Join(errors.New("rollback conflict; preserved backup requires recovery"), s.phase("conflict"))
+		t.Verification.Files = "unverified"
+		return errors.Join(AtStage("rollback_precheck", errNetworkDrift), s.phase("conflict"))
 	}
 	if err := s.phase("rolling_back"); err != nil {
 		return err
 	}
 	if err := s.Host.Write(t.Original); err != nil {
-		return err
+		return AtStage("rollback_write", err)
 	}
 	if err := s.Host.Apply(ctx); err != nil {
+		return AtStage("rollback_command", err)
+	}
+	t.Verification.Apply = "succeeded"
+	if err := s.verifyFiles(t.Original, "rollback_verify"); err != nil {
 		return err
 	}
 	return s.phase("rolled_back")
+}
+
+func (s *Session) verifyFiles(expected File, stage string) error {
+	if err := s.matches(expected); err != nil {
+		s.State.Network.Verification.Files = "unverified"
+		if errors.Is(err, errNetworkDrift) {
+			return errors.Join(AtStage(stage, err), s.phase("conflict"))
+		}
+		return AtStage(stage, err)
+	}
+	s.State.Network.Verification.Files = "verified"
+	return nil
 }
