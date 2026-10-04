@@ -38,9 +38,10 @@ var rollbackDigestRefRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._/:-]*@sha2
 // mode=image; the Filename/RestoreMode/PassphraseRef/safety-flag fields
 // for mode=data (they map 1:1 to restore.commit).
 type rollbackRequest struct {
-	ReleaseProof *releaseproof.Evidence `json:"release_proof,omitempty"`
-	Mode         string                 `json:"mode"`
-	ImageRef     string                 `json:"image_ref"`
+	PriorReleaseProof *releaseproof.Evidence `json:"prior_release_proof,omitempty"`
+	ReleaseProof      *releaseproof.Evidence `json:"release_proof,omitempty"`
+	Mode              string                 `json:"mode"`
+	ImageRef          string                 `json:"image_ref"`
 
 	// mode=data fields (see data_rollback.go).
 	Filename             string `json:"filename"`
@@ -128,10 +129,12 @@ func (s *Server) rollbackImage(w http.ResponseWriter, r *http.Request, peer auth
 		stages := s.buildImageRollbackStages(targetRef, acc)
 		first := stages[0].Run
 		stages[0].Run = func(ctx context.Context) ([]byte, []byte, error) {
-			if err := s.opts.ReleaseTrust.AdmitRollback(targetRef, req.ReleaseProof); err != nil {
-				return nil, nil, err
+			out, stderr, err := first(ctx)
+			if err != nil {
+				return out, stderr, err
 			}
-			return first(ctx)
+			err = s.opts.ReleaseTrust.AdmitRollback(targetRef, req.ReleaseProof, acc.priorRef, req.PriorReleaseProof)
+			return out, stderr, err
 		}
 		return stages, nil
 	}, withOpIDHook(func(id string) { acc.opID = id }))

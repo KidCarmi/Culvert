@@ -17,8 +17,10 @@ func (allowReleaseTrustForTest) Check(string, *releaseproof.Evidence) error { re
 func (allowReleaseTrustForTest) Prepare(string, *releaseproof.Evidence, string, *releaseproof.Evidence) error {
 	return nil
 }
-func (allowReleaseTrustForTest) AdmitRollback(string, *releaseproof.Evidence) error { return nil }
-func (allowReleaseTrustForTest) Known(string) error                                 { return nil }
+func (allowReleaseTrustForTest) AdmitRollback(string, *releaseproof.Evidence, string, *releaseproof.Evidence) error {
+	return nil
+}
+func (allowReleaseTrustForTest) Known(string) error { return nil }
 
 func TestReleaseTrustMissingStopsSharedMutation(t *testing.T) {
 	s := &Server{}

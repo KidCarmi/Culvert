@@ -15,7 +15,7 @@ const maxProofBodyBytes = 12 << 20
 type ReleaseTrust interface {
 	Check(string, *releaseproof.Evidence) error
 	Prepare(string, *releaseproof.Evidence, string, *releaseproof.Evidence) error
-	AdmitRollback(string, *releaseproof.Evidence) error
+	AdmitRollback(string, *releaseproof.Evidence, string, *releaseproof.Evidence) error
 	Known(string) error
 }
 

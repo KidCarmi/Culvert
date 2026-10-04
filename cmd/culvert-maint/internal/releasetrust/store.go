@@ -87,16 +87,12 @@ func (s *Store) Prepare(ref string, proof *releaseproof.Evidence, prior string, 
 	if err != nil {
 		return err
 	}
-	if prior == "" {
-		return errors.New("release trust: observed signed baseline required")
+	pa, err := s.authorizeBaseline(l, prior, priorProof)
+	if err != nil {
+		return err
 	}
-	if err = s.known(l, prior); err != nil {
-		pa, perr := s.fresh(l, prior, priorProof)
-		if perr != nil {
-			return fmt.Errorf("release trust: baseline: %w", perr)
-		}
-		l.Entries[prior] = *priorProof
-		advance(l, pa)
+	if err := a.CheckUpgradeFrom(pa); err != nil {
+		return err
 	}
 	if a.CatalogVersion < l.Version || (a.CatalogVersion == l.Version && a.GeneratedAt.Before(l.Generated)) {
 		return errors.New("release trust: target catalog predates signed baseline")
@@ -108,24 +104,62 @@ func (s *Store) Prepare(ref string, proof *releaseproof.Evidence, prior string, 
 	return s.persist(l, ref, prior)
 }
 
-// AdmitRollback accepts exact cached recovery membership or fresh signed proof.
-func (s *Store) AdmitRollback(ref string, proof *releaseproof.Evidence) error {
+// AdmitRollback authorizes standalone image activation. Cached target evidence
+// may be expired, but its signed minimum still constrains the observed baseline.
+// Inline/journal recovery uses Known for an already-authorized exact transition.
+func (s *Store) AdmitRollback(ref string, proof *releaseproof.Evidence, prior string, priorProof *releaseproof.Evidence) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	l, err := s.read()
 	if err != nil {
 		return err
 	}
-	if proof == nil {
-		return s.known(l, ref)
+	a, err := s.knownAuthorization(l, ref)
+	if proof != nil {
+		a, err = s.fresh(l, ref, proof)
 	}
-	a, err := s.fresh(l, ref, proof)
 	if err != nil {
 		return err
 	}
-	l.Entries[ref] = *proof
+	_, baselineCached := l.Entries[prior]
+	if a.MinUpgradeFrom != "" {
+		pa, err := s.authorizeBaseline(l, prior, priorProof)
+		if err != nil {
+			return err
+		}
+		if err := a.CheckUpgradeFrom(pa); err != nil {
+			return err
+		}
+	}
+	if proof == nil && (a.MinUpgradeFrom == "" || baselineCached) {
+		return nil
+	}
+	if proof != nil {
+		if a.CatalogVersion < l.Version || (a.CatalogVersion == l.Version && a.GeneratedAt.Before(l.Generated)) {
+			return errors.New("release trust: target catalog predates signed baseline")
+		}
+		l.Entries[ref] = *proof
+		advance(l, a)
+	}
+	return s.persist(l, ref, prior)
+}
+
+// authorizeBaseline authenticates the captured reference; additions are only
+// in the private in-memory candidate ledger until the caller persists success.
+func (s *Store) authorizeBaseline(l *ledger, prior string, proof *releaseproof.Evidence) (releaseproof.Authorization, error) {
+	if prior == "" {
+		return releaseproof.Authorization{}, errors.New("release trust: observed signed baseline required")
+	}
+	if a, err := s.knownAuthorization(l, prior); err == nil {
+		return a, nil
+	}
+	a, err := s.fresh(l, prior, proof)
+	if err != nil {
+		return a, fmt.Errorf("release trust: baseline: %w", err)
+	}
+	l.Entries[prior] = *proof
 	advance(l, a)
-	return s.persist(l, ref, "")
+	return a, nil
 }
 
 // Known re-verifies persisted evidence, deliberately ignoring only expiry and
@@ -141,12 +175,16 @@ func (s *Store) Known(ref string) error {
 }
 
 func (s *Store) known(l *ledger, ref string) error {
+	_, err := s.knownAuthorization(l, ref)
+	return err
+}
+
+func (s *Store) knownAuthorization(l *ledger, ref string) (releaseproof.Authorization, error) {
 	p, ok := l.Entries[ref]
 	if !ok {
-		return errors.New("release trust: no durable authorization for target")
+		return releaseproof.Authorization{}, errors.New("release trust: no durable authorization for target")
 	}
-	_, err := s.verifier.VerifyAuthenticity(p, ref)
-	return err
+	return s.verifier.VerifyAuthenticity(p, ref)
 }
 
 func (s *Store) fresh(l *ledger, ref string, p *releaseproof.Evidence) (releaseproof.Authorization, error) {

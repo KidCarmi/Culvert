@@ -74,6 +74,7 @@ type Authorization struct {
 	Ref            string    `json:"ref"`
 	ReleaseID      string    `json:"release_id"`
 	VersionID      string    `json:"version_id"`
+	MinUpgradeFrom string    `json:"min_upgrade_from,omitempty"`
 	CatalogVersion int       `json:"catalog_version"`
 	GeneratedAt    time.Time `json:"generated_at"`
 	ExpiresAt      time.Time `json:"expires_at"`
@@ -230,10 +231,11 @@ type indexFile struct {
 	Releases       []indexEntry `json:"releases"`
 }
 type manifestFile struct {
-	SchemaVersion int    `json:"schema_version"`
-	ReleaseID     string `json:"release_id"`
-	VersionID     string `json:"version_id"`
-	Image         struct {
+	SchemaVersion  int    `json:"schema_version"`
+	ReleaseID      string `json:"release_id"`
+	VersionID      string `json:"version_id"`
+	MinUpgradeFrom string `json:"min_upgrade_from"`
+	Image          struct {
 		Repo       string `json:"repo"`
 		ListDigest string `json:"list_digest"`
 	} `json:"image"`
@@ -259,7 +261,10 @@ func (v *Verifier) bindManifest(e Evidence, targetRef string) (Authorization, er
 	if m.Image.Repo != v.catalogRepo || !digestRE.MatchString(m.Image.ListDigest) || targetRef != v.proxyRepo+"@"+m.Image.ListDigest {
 		return Authorization{}, errors.New("release proof: target repository or digest mismatch")
 	}
-	return Authorization{Ref: targetRef, ReleaseID: m.ReleaseID, VersionID: m.VersionID, CatalogVersion: idx.CatalogVersion, GeneratedAt: generated, ExpiresAt: expires}, nil
+	if m.MinUpgradeFrom != "" && (!ValidVersion(m.MinUpgradeFrom) || !ValidVersion(m.VersionID)) {
+		return Authorization{}, errors.New("release proof: malformed signed upgrade floor or target version")
+	}
+	return Authorization{Ref: targetRef, ReleaseID: m.ReleaseID, VersionID: m.VersionID, MinUpgradeFrom: m.MinUpgradeFrom, CatalogVersion: idx.CatalogVersion, GeneratedAt: generated, ExpiresAt: expires}, nil
 }
 
 func parseIndex(b []byte) (idx indexFile, generated, expires time.Time, err error) {

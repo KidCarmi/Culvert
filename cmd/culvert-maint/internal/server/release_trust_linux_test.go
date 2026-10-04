@@ -20,6 +20,10 @@ import (
 )
 
 func releaseFixture(t *testing.T) (store *releasetrust.Store, target, prior *releaseproof.Evidence) {
+	return versionedReleaseFixture(t, "new", "old", "")
+}
+
+func versionedReleaseFixture(t *testing.T, targetVersion, priorVersion, floor string) (store *releasetrust.Store, target, prior *releaseproof.Evidence) {
 	t.Helper()
 	pub, key, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
@@ -30,14 +34,14 @@ func releaseFixture(t *testing.T) (store *releasetrust.Store, target, prior *rel
 		t.Fatal(err)
 	}
 	now := time.Now()
-	proof := func(id, digest string) *releaseproof.Evidence {
-		m, _ := json.Marshal(map[string]any{"schema_version": 1, "release_id": id, "version_id": id, "image": map[string]string{"repo": repo, "list_digest": "sha256:" + digest}})
+	proof := func(id, digest, versionID, minUpgrade string) *releaseproof.Evidence {
+		m, _ := json.Marshal(map[string]any{"schema_version": 1, "release_id": id, "version_id": versionID, "min_upgrade_from": minUpgrade, "image": map[string]string{"repo": repo, "list_digest": "sha256:" + digest}})
 		h := sha256.Sum256(m)
-		idx, _ := json.Marshal(map[string]any{"schema_version": 1, "catalog_version": 1, "generated_at": now.Add(-time.Minute).UTC().Format(time.RFC3339), "expires_at": now.Add(time.Hour).UTC().Format(time.RFC3339), "releases": []map[string]string{{"release_id": id, "version_id": id, "manifest_ref": "releases/" + id + ".json", "manifest_sha256": hex.EncodeToString(h[:])}}})
+		idx, _ := json.Marshal(map[string]any{"schema_version": 1, "catalog_version": 1, "generated_at": now.Add(-time.Minute).UTC().Format(time.RFC3339), "expires_at": now.Add(time.Hour).UTC().Format(time.RFC3339), "releases": []map[string]string{{"release_id": id, "version_id": versionID, "manifest_ref": "releases/" + id + ".json", "manifest_sha256": hex.EncodeToString(h[:])}}})
 		sig, _ := json.Marshal(map[string]any{"schema_version": 1, "alg": "ed25519", "key_id": "test", "sig": base64.StdEncoding.EncodeToString(ed25519.Sign(key, idx))})
 		return &releaseproof.Evidence{ReleaseID: id, Index: idx, Signature: sig, Manifest: m}
 	}
-	return s, proof("new", digNew), proof("old", digOld)
+	return s, proof("new", digNew, targetVersion, floor), proof("old", digOld, priorVersion, "")
 }
 
 func TestReleaseTrustSpaceRefusalThenRetryWithoutRestart(t *testing.T) {
@@ -78,6 +82,78 @@ func TestReleaseTrustSpaceRefusalThenRetryWithoutRestart(t *testing.T) {
 	}
 	if err := s.Known(priorRef); err != nil {
 		t.Fatalf("retry did not durably authorize recovery baseline: %v", err)
+	}
+}
+
+func TestReleaseTrustUnsupportedJumpCannotMutate(t *testing.T) {
+	s, p, pp := versionedReleaseFixture(t, "1.0.260", "1.0.249", "1.0.250")
+	rig := startApplyRigWithTrustAt(t, t.TempDir(), s)
+	defer rig.stop()
+	t.Setenv("CULVERT_BACKUP_PASSPHRASE", "test-only-passphrase")
+	op, id := rig.acceptAndWait(t, map[string]any{"image_ref": targetRef, "release_proof": p, "prior_release_proof": pp, "pre_backup": true, "passphrase_ref": "env:CULVERT_BACKUP_PASSPHRASE"})
+	if op["state"] != "failed" || !strings.Contains(rig.opLog(t, id), "min_upgrade_from") {
+		t.Fatalf("unsupported transition not refused: %v", op)
+	}
+	for _, cmd := range []string{"backup", "pull", "tag", "up"} {
+		if rig.sawCommand(cmd) {
+			t.Fatalf("%s ran for unsupported signed transition", cmd)
+		}
+	}
+	if err := s.Known(targetRef); err == nil {
+		t.Fatal("unsupported target persisted")
+	}
+}
+
+func TestReleaseTrustRollbackCannotBypassSignedMinimum(t *testing.T) {
+	for _, tc := range []struct {
+		name, baseline           string
+		cached, missing, allowed bool
+	}{
+		{name: "below minimum", baseline: "1.0.249"},
+		{name: "at minimum", baseline: "1.0.250", allowed: true},
+		{name: "cached target below minimum", baseline: "1.0.249", cached: true},
+		{name: "no observed baseline", baseline: "1.0.250", missing: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, p, pp := versionedReleaseFixture(t, "1.0.260", tc.baseline, "1.0.250")
+			if tc.cached {
+				if err := s.Prepare(targetRef, p, targetRef, p); err != nil {
+					t.Fatal(err)
+				}
+			}
+			rig := startApplyRigWithTrustAt(t, t.TempDir(), s)
+			defer rig.stop()
+			rig.noPriorDigest = tc.missing
+			body := map[string]any{"mode": "image", "image_ref": targetRef, "prior_release_proof": pp}
+			if !tc.cached {
+				body["release_proof"] = p
+			}
+			op, _ := rig.rollbackAndWait(t, body)
+			checkRollbackMinimumOutcome(t, rig, s, op, tc.allowed, tc.cached)
+		})
+	}
+}
+
+func checkRollbackMinimumOutcome(t *testing.T, rig *applyRig, s *releasetrust.Store, op map[string]interface{}, allowed, cached bool) {
+	t.Helper()
+	if allowed {
+		if op["state"] != "succeeded" {
+			t.Fatalf("supported standalone transition failed: %v", op)
+		}
+		return
+	}
+	if op["state"] != "failed" {
+		t.Fatalf("unsupported standalone transition accepted: %v", op)
+	}
+	for _, cmd := range []string{"pull", "tag", "up"} {
+		if rig.sawCommand(cmd) {
+			t.Fatalf("%s ran for refused standalone transition", cmd)
+		}
+	}
+	if !cached {
+		if err := s.Known(targetRef); err == nil {
+			t.Fatal("failed standalone transition primed target recovery membership")
+		}
 	}
 }
 

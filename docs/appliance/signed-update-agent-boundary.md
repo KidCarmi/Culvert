@@ -28,6 +28,14 @@ or unverifiable baselines refuse an upgrade before backup, pull or retag. A
 healthy running candidate does not establish release trust. A signed current
 baseline must be available before such an appliance can use this upgrade path.
 
+When the signed target declares `min_upgrade_from`, both apply and standalone
+image rollback compare that floor with the independently verified version of
+the actually observed baseline. Malformed floors and unverifiable baseline
+versions refuse before backup, pull, retag or durable target authorization.
+An empty floor preserves the existing unconstrained legacy contract. A cached
+target does not bypass this check on a new standalone request. Explicit rollback
+also accepts `prior_release_proof` when its observed baseline is not cached.
+
 The private agent-state ledger records evidence and a monotonic catalog version
 and generation-time floor after the read-only disk-space preflight and before
 backup, pull or retag. A space-preflight refusal can be retried after freeing
@@ -42,7 +50,12 @@ Offline rollback is restricted to exact references already authorized in that
 ledger. Their signatures and digest binding are checked again, while expiration
 and the newer catalog floor are waived only for those cached references.
 Caller-supplied expired evidence never receives this exception. Standalone
-rollback may also admit fresh evidence under the current replay floor. Shared
+rollback may also admit fresh evidence under the current replay floor, but a
+target's signed minimum still applies before activation. If that target has a
+floor and the stack is down so no current image can be identified, standalone
+activation refuses. Inline and journal-directed recovery retain their exact
+previously authorized target/prior recovery contract rather than becoming new
+caller-selected release transitions. Shared
 pull and retag paths enforce ledger membership for standalone, inline and
 reconcile recovery; reconcile adoption also requires authorization.
 

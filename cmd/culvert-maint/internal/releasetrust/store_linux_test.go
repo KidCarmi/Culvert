@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -35,10 +36,14 @@ func newFixture(t *testing.T) fixture {
 }
 
 func (f fixture) proof(digit string, version int, generated time.Time) (string, *releaseproof.Evidence) {
+	return f.versionedProof(digit, version, generated, "v1.0."+digit, "")
+}
+
+func (f fixture) versionedProof(digit string, version int, generated time.Time, versionID, floor string) (string, *releaseproof.Evidence) {
 	ref := "test/repo@sha256:" + strings.Repeat(digit, 64)
-	m, _ := json.Marshal(map[string]any{"schema_version": 1, "release_id": "r" + digit, "version_id": "v1.0." + digit, "image": map[string]string{"repo": "test/repo", "list_digest": strings.Split(ref, "@")[1]}})
+	m, _ := json.Marshal(map[string]any{"schema_version": 1, "release_id": "r" + digit, "version_id": versionID, "min_upgrade_from": floor, "image": map[string]string{"repo": "test/repo", "list_digest": strings.Split(ref, "@")[1]}})
 	h := sha256.Sum256(m)
-	idx, _ := json.Marshal(map[string]any{"schema_version": 1, "catalog_version": version, "generated_at": generated.Format(time.RFC3339), "expires_at": generated.Add(time.Hour).Format(time.RFC3339), "releases": []map[string]string{{"release_id": "r" + digit, "version_id": "v1.0." + digit, "manifest_ref": "releases/r" + digit + ".json", "manifest_sha256": hex.EncodeToString(h[:])}}})
+	idx, _ := json.Marshal(map[string]any{"schema_version": 1, "catalog_version": version, "generated_at": generated.Format(time.RFC3339), "expires_at": generated.Add(time.Hour).Format(time.RFC3339), "releases": []map[string]string{{"release_id": "r" + digit, "version_id": versionID, "manifest_ref": "releases/r" + digit + ".json", "manifest_sha256": hex.EncodeToString(h[:])}}})
 	sig, _ := json.Marshal(map[string]any{"schema_version": 1, "alg": "ed25519", "key_id": "test", "sig": base64.StdEncoding.EncodeToString(ed25519.Sign(f.key, idx))})
 	return ref, &releaseproof.Evidence{ReleaseID: "r" + digit, Index: idx, Manifest: m, Signature: sig}
 }
@@ -76,11 +81,11 @@ func TestStoreSignedBaselineAndOfflineRecovery(t *testing.T) {
 	if err = s.Known(prior); err != nil {
 		t.Fatalf("durable expired offline recovery failed: %v", err)
 	}
-	if err = s.AdmitRollback(prior, nil); err != nil {
+	if err = s.AdmitRollback(prior, nil, "", nil); err != nil {
 		t.Fatal(err)
 	}
 	other, op := f.proof("c", 2, f.now)
-	if err = s.AdmitRollback(other, op); err == nil {
+	if err = s.AdmitRollback(other, op, "", nil); err == nil {
 		t.Fatal("uncached expired evidence accepted")
 	}
 	if err = s.Check(target, p); err == nil {
@@ -97,7 +102,7 @@ func TestStoreFloorAndTampering(t *testing.T) {
 	}
 	s.now = func() time.Time { return f.now }
 	r, p := f.proof("a", 3, f.now)
-	if err = s.AdmitRollback(r, p); err != nil {
+	if err = s.AdmitRollback(r, p, "", nil); err != nil {
 		t.Fatal(err)
 	}
 	old, op := f.proof("b", 2, f.now)
@@ -141,7 +146,7 @@ func TestStoreFailedDurabilityNeverAuthorizes(t *testing.T) {
 		}
 		return errors.New("fsync failed")
 	}
-	if err = s.AdmitRollback(r, p); err == nil {
+	if err = s.AdmitRollback(r, p, "", nil); err == nil {
 		t.Fatal("durability error ignored")
 	}
 	if err = s.Known(r); err == nil {
@@ -200,4 +205,42 @@ func TestStateAncestryRejectsReplacementPaths(t *testing.T) {
 			t.Fatal("symlink state ancestor accepted")
 		}
 	})
+}
+
+func TestStorePrepareEnforcesSignedMinimum(t *testing.T) {
+	for _, tc := range []struct {
+		cached  bool
+		version string
+	}{
+		{false, "1.0.249"}, {false, "1.0.250"}, {false, "1.0.251"},
+		{true, "1.0.249"}, {true, "1.0.250"}, {true, "1.0.251"},
+	} {
+		cached, version := tc.cached, tc.version
+		t.Run(fmt.Sprintf("cached=%v/%s", cached, version), func(t *testing.T) {
+			f := newFixture(t)
+			s, err := New(t.TempDir(), f.policy)
+			if err != nil {
+				t.Fatal(err)
+			}
+			target, p := f.versionedProof("b", 2, f.now, "1.0.260", "1.0.250")
+			prior, pp := f.versionedProof("a", 2, f.now, version, "")
+			if cached {
+				if err := s.AdmitRollback(prior, pp, "", nil); err != nil {
+					t.Fatal(err)
+				}
+				pp = nil
+			}
+			err = s.Prepare(target, p, prior, pp)
+			if version == "1.0.249" {
+				if err == nil || !strings.Contains(err.Error(), "min_upgrade_from") {
+					t.Fatalf("unsupported transition not rejected: %v", err)
+				}
+				if err = s.Known(target); err == nil {
+					t.Fatal("unsupported target entered recovery ledger")
+				}
+			} else if err != nil {
+				t.Fatalf("supported boundary rejected: %v", err)
+			}
+		})
+	}
 }
