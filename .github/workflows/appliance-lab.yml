@@ -62,7 +62,13 @@ jobs:
             source_sha: "4f27d945b3c676899e65018e50aafef693c7c227"
             image_run: "37226241924"
             image_tar_sha256: "0c4025218ce5eafe4cfc0697efb30412ec5ba87480213b58bed04730720a869e"
-            expect_image_id: "sha256:43a9011fb635db718c699ae0314a8fec528e224423814900518cc3323618543f"
+            # Image ID = the tar's OCI INDEX digest (containerd image store),
+            # not its config digest. Run 37227368983 failed only [3]/[8]
+            # against the config digest I wrongly supplied (the guest ran
+            # 94818bad… = this tar's index). Rebuilt rather than re-qualified:
+            # step 6c needs the build overlay, so one fresh run covers every
+            # check on one retained artifact.
+            expect_image_id: "sha256:94818badd3d81e0d2f091f8477b792ab38a433211d66724226b52a54c47561f2"
             retained_run: ""
             retained_sha256: ""
     env:
