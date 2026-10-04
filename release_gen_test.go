@@ -254,6 +254,7 @@ func resolveGateSpec(t *testing.T) (releaseCatalogSpec, bool) {
 		if err != nil {
 			t.Fatalf("buildReleaseSpec from env: %v", err)
 		}
+		gateCarryLineage(t, &spec)
 		return spec, true
 	}
 	if path := os.Getenv("CULVERT_RELEASE_GEN_SPEC"); path != "" {
@@ -330,6 +331,39 @@ func assertGatePushedDigest(t *testing.T, spec releaseCatalogSpec) {
 				spec.Entries[i].ReleaseID, spec.Entries[i].ListDigest, want)
 		}
 	}
+}
+
+// gateCarryLineage carries every supported predecessor into the release
+// catalog (release_lineage.go). CI downloads the ORIGINAL signed catalog asset
+// of each published release at or above the transition floor into
+// CULVERT_RELEASE_LINEAGE_SRC (one v<version>/ directory each) and names those
+// versions in CULVERT_RELEASE_LINEAGE_REQUIRE; each is verified with the baked
+// production trust before a byte of it is carried, and a required version that
+// is absent or unverifiable fails the release. Without the env (a local run, or
+// the main-push gate) nothing is carried.
+func gateCarryLineage(t *testing.T, spec *releaseCatalogSpec) {
+	t.Helper()
+	src := os.Getenv("CULVERT_RELEASE_LINEAGE_SRC")
+	if src == "" {
+		return
+	}
+	if len(spec.Entries) != 1 {
+		t.Fatalf("release lineage: the gate spec must carry exactly one generated release, got %d", len(spec.Entries))
+	}
+	var require []string
+	for _, v := range strings.Split(os.Getenv("CULVERT_RELEASE_LINEAGE_REQUIRE"), ",") {
+		if v = strings.TrimSpace(v); v != "" {
+			require = append(require, v)
+		}
+	}
+	srcs, _ := lineageSourcesIn(t, src)
+	e := spec.Entries[0]
+	carried, err := collectVerifiedPredecessors(srcs, productionLineageTrust(t), e.Repo, e.MinUpgradeFrom, e.VersionID, require)
+	if err != nil {
+		t.Fatalf("release lineage: %v", err)
+	}
+	spec.Carried = carried
+	t.Logf("release lineage: carrying %d verified predecessor(s): %s", len(carried), carriedVersions(carried))
 }
 
 // emitGateBundle writes the UNSIGNED official bundle for attachment when
