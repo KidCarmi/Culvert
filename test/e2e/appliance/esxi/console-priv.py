@@ -165,6 +165,43 @@ def make_tls(directory):
     return ctx, pin
 
 
+def sudo_prompt_ready(text, prompt):
+    """Recognize our nonce prompt despite narrowly known kernel diagnostics.
+
+    Kernel output may displace a waiting sudo prompt without changing who owns
+    terminal input. Never normalize arbitrary suffixes or repair unknown glyphs:
+    an unrecognized line must leave credentials unsent.
+    """
+    if text.count(prompt) != 1:
+        return False
+    lines = text.replace('\r\n', '\n').split('\n')
+    for index, line in enumerate(lines):
+        line = line.lstrip(' ')
+        if line.startswith(prompt):
+            suffix = [line[len(prompt):]] + lines[index + 1:]
+            break
+    else:
+        return False
+    veth = r'veth[0-9a-f]{1,11}'
+    bridge = r'(?:br-[0-9a-f]{12}|docker0)'
+    ethernet = r'eth[0-9]{1,3}'
+    diagnostic = (
+        bridge + r': port [0-9]+\(' + veth + r'\) entered (?:blocking|disabled|forwarding) state'
+        + r'|' + veth + r': (?:entered|left) (?:allmulticast|promiscuous) mode'
+        + r'|' + veth + r' \(unregistering\): left (?:allmulticast|promiscuous) mode'
+        + r'|device ' + veth + r' (?:entered|left) (?:allmulticast|promiscuous) mode'
+        + r'|' + ethernet + r': renamed from ' + veth
+        + r'|' + veth + r': renamed from ' + ethernet)
+    kernel = r'\[ *[0-9]{1,10}(?:\.[0-9]{1,6})?\] (?:' + diagnostic + r')'
+    for line in suffix:
+        if any(ord(char) < 32 or ord(char) > 126 for char in line):
+            return False
+        line = line.strip(' ')
+        if line and re.fullmatch(kernel, line) is None:
+            return False
+    return True
+
+
 def execute(lab, args, script):
     b.private_directory(lab)
     b.ensure(len(script) <= 1024 * 1024, 'script exceeds controller bound')
@@ -252,7 +289,7 @@ def execute(lab, args, script):
             deadline = time.monotonic() + 45
             while time.monotonic() < deadline:
                 observed = console.screen(deadline)
-                if ' '.join(observed.split()).endswith(prompt):
+                if state['fetched'] and state['result'] is None and sudo_prompt_ready(observed, prompt):
                     console.enter(password)
                     break
                 time.sleep(1)

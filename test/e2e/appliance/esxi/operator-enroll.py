@@ -2,6 +2,7 @@
 """Enroll only read-only operator access through authenticated local recovery."""
 import argparse
 import base64
+import hashlib
 import importlib.util
 import json
 from pathlib import Path
@@ -12,16 +13,46 @@ import sys
 HERE=Path(__file__).resolve().parent
 
 
+def prepare_attempt(lab, observation=None):
+    marker=lab.sec/'operator-enrollment-attempt.json'
+    if observation is None:
+        with marker.open('x') as out:json.dump({'status':'started','uuid':lab.state['uuid']},out)
+        return marker
+    # A stopped attempt may continue only after a separate authenticated local
+    # observation proved no key was enrolled and first boot completed. Preserve
+    # the failed attempt and accept this continuation once, never a blind retry.
+    previous=json.loads(marker.read_text())
+    if previous != {'status':'started','uuid':lab.state['uuid']} or (lab.sec/'known_hosts').exists():
+        raise ValueError('enrollment is not an undispatched initial attempt')
+    path=Path(observation).resolve(strict=True)
+    if (path.name!='result' or path.parent.parent!=lab.sec.resolve()
+            or not re.fullmatch(r'transport-[a-f0-9]{48}',path.parent.name)
+            or Path(observation).is_symlink() or path.parent.is_symlink()):
+        raise ValueError('private authenticated observation required')
+    raw=path.read_bytes()
+    if raw != b'0\nNO_ENROLLMENT_MUTATION_AND_FIRSTBOOT_COMPLETE\n':
+        raise ValueError('undispatched observation not established')
+    resumed=lab.sec/'operator-enrollment-resume-attempt.json'
+    with resumed.open('x') as out:
+        json.dump({'status':'started','uuid':lab.state['uuid'],
+                   'observation_sha256':hashlib.sha256(raw).hexdigest()},out)
+    with (lab.sec/'operator-enrollment-initial-attempt.json').open('xb') as out:
+        out.write(marker.read_bytes())
+    lab.record('operator-enrollment-initial','fail',
+               'Controller refused a kernel-displaced sudo prompt; foreground cancelled and separate local observation proved no enrollment mutation; failure preserved')
+    return marker
+
+
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--scope',type=Path,required=True)
     parser.add_argument('--bind',required=True)
+    parser.add_argument('--resume-undispatched-observation',type=Path)
     args=parser.parse_args()
     spec=importlib.util.spec_from_file_location('enroll_boot',HERE/'bootstrap-checks.py')
     boot=importlib.util.module_from_spec(spec);spec.loader.exec_module(boot)
     lab=boot.module.Lab(args.scope);boot.private_directory(lab)
-    marker=lab.sec/'operator-enrollment-attempt.json'
-    with marker.open('x') as out:json.dump({'status':'started','uuid':lab.state['uuid']},out)
+    marker=prepare_attempt(lab,args.resume_undispatched_observation)
     public=(lab.sec/'id_ed25519.pub').read_text().split()
     if len(public)<2 or public[0]!='ssh-ed25519' or len(base64.b64decode(public[1],validate=True))!=51:
         raise ValueError('invalid operator key')

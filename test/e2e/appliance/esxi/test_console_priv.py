@@ -105,7 +105,7 @@ class ConsoleTransportTests(unittest.TestCase):
             'LAB AUTH:\nculvert@appliance:~$',
             'LAB AUTH OLDNONCE:\nculvert@appliance:~$',
             prompt + '\nculvert@appliance:~$',
-            'prior output\n' + prompt + ' ',
+            'prior output\n' + prompt + ' [317.500001] br-123456789abc: port 1(veth123abcd) entered forwarding state',
         ]
         captured = {}
 
@@ -146,6 +146,96 @@ class ConsoleTransportTests(unittest.TestCase):
         self.assertTrue(captured['password_entered'])
         self.assertNotIn(prompt, captured['command'])
         self.assertIn(base64.b64encode((prompt + ' ').encode()).decode(), captured['command'])
+
+    def test_password_is_refused_before_fetch_or_after_result(self):
+        for completed in (False, True):
+            with self.subTest(completed=completed), tempfile.TemporaryDirectory() as directory:
+                self.lab.sec = Path(directory)
+                (self.lab.sec / 'bootstrap-console-password').write_text('synthetic-password')
+                captured = {}
+
+                class Server:
+                    server_port = 12345
+
+                    def __init__(self, address, handler):
+                        captured['handler'] = handler
+
+                    def serve_forever(self):
+                        pass
+
+                    def shutdown(self):
+                        pass
+
+                    def server_close(self):
+                        pass
+
+                def enter(value):
+                    captured.setdefault('inputs', []).append(value)
+                    if completed:
+                        request(captured['handler'], 'GET')
+                        request(captured['handler'], 'POST', path='/synthetic/result')
+
+                console = SimpleNamespace(shell=lambda password: None, enter=enter,
+                                          screen=lambda deadline: 'LAB AUTH SYNTHETIC:')
+                self.args.as_user = False
+                with patch.object(transport, 'HTTPServer', Server), \
+                        patch.object(transport, 'Console', return_value=console), \
+                        patch.object(transport.threading, 'Thread'), \
+                        patch.object(transport.time, 'sleep'), \
+                        patch.object(transport.time, 'monotonic', side_effect=[0, 1, 46]):
+                    with self.assertRaisesRegex(transport.b.Blocked, 'credential not entered'):
+                        transport.execute(self.lab, self.args, b'true\n')
+                self.assertEqual(len(captured['inputs']), 1)
+                self.assertNotIn('synthetic-password', captured['inputs'][0])
+
+
+class SudoPromptTests(unittest.TestCase):
+    prompt = 'LAB AUTH 0123456789ABCDEF:'
+    kernel = '[317.500001] br-123456789abc: port 1(veth123abcd) entered forwarding state'
+
+    def test_exact_prompt_and_only_known_kernel_diagnostics_are_accepted(self):
+        lines = [self.kernel,
+                 '[318.1] docker0: port 2(veth123abcd) entered blocking state',
+                 '[318.2] br-123456789abc: port 1(veth123abcd) entered disabled state',
+                 '[318.3] veth123abcd: entered allmulticast mode',
+                 '[318.4] veth123abcd: left promiscuous mode',
+                 '[318.5] device veth123abcd entered promiscuous mode',
+                 '[318.6] eth0: renamed from veth123abcd',
+                 '[318.7] veth123abcd: renamed from eth0']
+        for separator in (' ', '\n', '\r\n'):
+            with self.subTest(separator=separator):
+                self.assertTrue(transport.sudo_prompt_ready(
+                    'old banner\n' + self.prompt + separator + '\n'.join(lines) + '\n  ', self.prompt))
+        self.assertTrue(transport.sudo_prompt_ready(self.prompt + ' ', self.prompt))
+
+    def test_ambiguous_or_changed_input_owner_never_receives_credentials(self):
+        suffixes = ['\ufffd', self.kernel + '\ufffd', 'bash-5.2$', 'LAB SHELL READY',
+                    'Password:', 'Sorry, try again.', self.prompt, 'arbitrary output',
+                    '[318.1] arbitrary kernel-looking output',
+                    '[318.1] veth123abcd: entered Password: mode',
+                    self.kernel + '; echo unexpected', self.kernel + '\nwrapped continuation',
+                    self.kernel + '\nLAB AUTH OLDNONCE:',
+                    self.kernel + '\n\t', self.kernel + '\r', self.kernel + '\x1b[0m']
+        for suffix in suffixes:
+            with self.subTest(suffix=suffix):
+                self.assertFalse(transport.sudo_prompt_ready(self.prompt + '\n' + suffix, self.prompt))
+        for text in ['LAB AUTH OLDNONCE:\n' + self.kernel, 'echo ' + self.prompt,
+                     self.prompt[:-1] + '\n' + self.kernel, self.prompt + '\n' + self.prompt,
+                     self.prompt + '\nbash-5.2$\n' + self.kernel]:
+            with self.subTest(text=text):
+                self.assertFalse(transport.sudo_prompt_ready(text, self.prompt))
+
+    def test_observed_unregistering_teardown_is_narrowly_accepted(self):
+        observed = ' [  364.833530] veth7eccb72 (unregistering): left allmulticast mode'
+        self.assertTrue(transport.sudo_prompt_ready(self.prompt + '\n' + observed, self.prompt))
+        self.assertTrue(transport.sudo_prompt_ready(
+            self.prompt + '\n' + observed.replace('allmulticast', 'promiscuous'), self.prompt))
+        for changed in [observed.replace('left', 'entered'),
+                        observed.replace('unregistering', 'unknown'),
+                        observed.replace('veth7eccb72', 'eth0'),
+                        observed.replace('allmulticast', 'unknown'), observed + ' extra']:
+            with self.subTest(changed=changed):
+                self.assertFalse(transport.sudo_prompt_ready(self.prompt + '\n' + changed, self.prompt))
 
 
 class ShellPromptTests(unittest.TestCase):

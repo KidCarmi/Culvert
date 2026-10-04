@@ -9,6 +9,16 @@ Its application image is
 `sha256:24b37bc217691058e56a838821b86dfbd45b927b1c0ea8ea867a28c54d4bcc47`.
 Controller preparation and offline tests are not guest qualification results.
 
+The first controller freeze (`778117da`) imported and bootstrapped these bytes,
+then stopped safely when Docker kernel messages displaced its exact sudo
+prompt during operator enrollment. No password was submitted to that prompt.
+The original checkout and failed attempt remain intact. A separate checkout
+adds strict recognition of that unique prompt followed only by known complete
+kernel diagnostics; unknown text still refuses credential input. Continuation
+requires a separately authenticated observation proving both key files empty
+and first boot complete, and preserves the original failure. The report must
+name both frozen controller revisions; this is not a change to the OVA.
+
 The controller incorporates shared lab revision
 `a2db201be66e57b11812786a4d6b0eb355d39c1c`. Optional pre-update and reboot
 hooks preserve the guarded restore and add failure-injected network rollback,
