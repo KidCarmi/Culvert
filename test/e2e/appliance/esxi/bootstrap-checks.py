@@ -88,10 +88,17 @@ class PrivateKeyboard:
 
 
 def extract_initial(text):
-    if 'initial console access' not in text.lower():
+    # OCR may flatten line breaks. Accept only the shipped handoff blocks;
+    # never case-fold, repair, or infer any character of the credential itself.
+    headings = re.findall(r'(?i)(?<!\w)(?:initial|local)\s+console\s+access(?!\w)', text)
+    labels = re.findall(r'(?i)(?<!\w)(?:one[ -]time|initial)\s+password\s*:', text)
+    if len(headings) != 1 or len(labels) != 1:
         return None
-    matches = re.findall(r'one[ -]time\s+password\s*:\s*([' + ALPHABET + r']{16})(?![' + ALPHABET + '])', text, re.I)
-    # Do not case-fold/repair the credential; validate exact original characters.
+    user = r'\s+(?:(?i:user\s*:\s*culvert)\s+)?'
+    block = (r'(?:(?i:(?<!\w)initial\s+console\s+access)' + user + r'(?i:(?:one[ -]time|initial)\s+password)'
+             r'|(?i:(?<!\w)local\s+console\s+access)' + user + r'(?i:initial\s+password))'
+             r'\s*:\s*([' + ALPHABET + r']{16})(?=\s|$)')
+    matches = re.findall(block, text)
     if len(matches) == 1 and re.fullmatch('[' + ALPHABET + ']{16}', matches[0]):
         return matches[0]
     return None
