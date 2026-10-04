@@ -17,6 +17,12 @@ gssh() { timeout 120 ssh "${SSH_OPTS[@]}" culvert@127.0.0.1 "$@"; }
 qemu_alive() { "$ESXI_PYTHON" "$ESXI_ADAPTER" --scope "$ESXI_SCOPE" alive >/dev/null 2>&1; }
 BOOT_STARTED=1
 case "${1:?qualify}" in
+  restore)
+    source "$(dirname "$0")/restore-checks.sh"
+    esxi_actual_restore
+    redact_tree
+    [[ "$(failures)" == 0 ]]
+    ;;
   qualify)
     gssh 'cat /proc/sys/kernel/random/boot_id' > "$EV/esxi-boot-id-before.txt"
     cmd_qualify

@@ -505,8 +505,13 @@ class Lab:
         self.record('vmware-property-observed', 'pass' if guest['instance_id'] == self.state['name'] else 'fail',
                     'guestinfo instance identity matched' if guest['instance_id'] == self.state['name'] else 'guestinfo identity missing or mismatched')
 
-    def qualify(self):
-        require(self.state.get('phase') == 'powered-on', 'qualify is single-use on a fresh import')
+    def restore(self):
+        self.qualify(restore_only=True)
+
+    def qualify(self, restore_only=False):
+        mode = 'restore' if restore_only else 'qualify'
+        required_phase = 'baseline-verified' if restore_only else 'powered-on'
+        require(self.state.get('phase') == required_phase, 'qualification phase does not authorize this scenario')
         sources = {}
         for source in (Path(__file__), HERE / 'guest-checks.sh', HERE / 'restore-checks.sh',
                        HERE / 'esxi-port-relay.py',
@@ -515,7 +520,7 @@ class Lab:
                 sources[source.relative_to(ROOT).as_posix()] = digest(stream)
         revision = subprocess.run(['git', '-C', str(ROOT), 'rev-parse', 'HEAD'],
                                   capture_output=True, text=True, check=True).stdout.strip()
-        atomic_json(self.ev / 'qualification-harness.json',
+        atomic_json(self.ev / ('restore-harness.json' if restore_only else 'qualification-harness.json'),
                     dict(harness_sha=revision, harness_file_sha256=sources))
         bash = self.c.get('bash', 'bash')
         # Verify host prerequisites before guest mutations.
@@ -572,12 +577,12 @@ class Lab:
                   'GOVC_CERTIFICATE', 'GOVC_PRIVATE_KEY'):
             if k in os.environ:
                 env[k] = os.environ[k]
-        self.state['phase'] = 'qualification-started'
+        self.state['phase'] = 'restore-qualification-started' if restore_only else 'qualification-started'
         self.save()
         try:
             transport.ensure()
-            with (self.sec / 'qualification.log').open('w', encoding='utf-8') as log:
-                with subprocess.Popen([bash, (HERE / 'guest-checks.sh').as_posix(), 'qualify'], env=env,
+            with (self.sec / ('restore-qualification.log' if restore_only else 'qualification.log')).open('w', encoding='utf-8') as log:
+                with subprocess.Popen([bash, (HERE / 'guest-checks.sh').as_posix(), mode], env=env,
                                       stdout=log, stderr=subprocess.STDOUT,
                                       start_new_session=os.name != 'nt') as guest_checks:
                     try:
@@ -597,9 +602,9 @@ class Lab:
                             os.killpg(guest_checks.pid, signal.SIGKILL)
                         guest_checks.wait(timeout=30)
                         raise
-            self.record('baseline-guest-checks', 'pass' if rc == 0 else 'fail',
+            self.record('restore-guest-checks' if restore_only else 'baseline-guest-checks', 'pass' if rc == 0 else 'fail',
                         'shared guest assertions completed; inspect each checks.jsonl verdict')
-            require(rc == 0, 'baseline guest checks failed')
+            require(rc == 0, 'guest checks failed; inspect scenario evidence')
         finally:
             transport.close()
         self.state['phase'] = 'baseline-completed'
@@ -672,7 +677,7 @@ def locked(run):
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--scope', required=True, type=Path)
-    p.add_argument('command', choices=('preflight', 'up', 'inspect', 'qualify', 'collect', 'down', 'alive'))
+    p.add_argument('command', choices=('preflight', 'up', 'inspect', 'qualify', 'restore', 'collect', 'down', 'alive'))
     args = p.parse_args()
     lab = Lab(args.scope)
     try:

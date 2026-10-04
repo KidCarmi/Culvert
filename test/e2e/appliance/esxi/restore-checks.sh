@@ -22,8 +22,9 @@ work=$(mktemp -d /var/tmp/culvert-esxi-restore.XXXXXXXX)
 exec 3>&1
 exec >>"$work/session.log" 2>&1
 stage=preflight
+completed=0
 emit() { printf 'RESTORE %s %s\n' "$1" "$2" >&3; }
-trap 'rc=$?; if (( rc != 0 )); then emit "$stage" fail; fi' EXIT
+trap 'rc=$?; if (( rc != 0 || completed != 1 )); then emit "$stage" fail; (( rc != 0 )) || rc=1; fi; exit "$rc"' EXIT
 trap 'exit 143' TERM HUP INT
 cd /srv/culvert
 [[ -f docker-compose.yml && -f .env ]]
@@ -49,7 +50,9 @@ compose=(-f docker-compose.yml)
 [[ -f docker-compose.maint-agent.yml ]]
 grep -q '^CULVERT_MAINT_GID=' .env
 compose+=(-f docker-compose.maint-agent.yml)
-dc() { docker compose "${compose[@]}" "$@"; }
+# The script itself arrives on SSH stdin. Compose run otherwise forwards that
+# stream into the CLI container and can swallow all subsequent shell commands.
+dc() { docker compose "${compose[@]}" "$@" </dev/null; }
 [[ $(docker inspect -f '{{.State.Running}}' culvert) == true ]]
 image_before=$(docker inspect -f '{{.Image}}' culvert)
 [[ $image_before == "$(docker image inspect -f '{{.Id}}' culvert/proxy:pinned)" ]]
@@ -111,6 +114,7 @@ dc up -d >"$work/start.log" 2>&1
 [[ $image_before == "$(docker inspect -f '{{.Image}}' culvert)" ]]
 [[ $data_volume == "$(docker inspect -f '{{range .Mounts}}{{if eq .Destination "/data"}}{{.Name}}{{end}}{{end}}' culvert)" ]]
 emit start pass
+completed=1
 GUEST
 }
 
@@ -275,7 +279,7 @@ assert u.get("lastSync") and int(u.get("entries",0))>0' 2>/dev/null; then
 )
 
 esxi_restore_selftest() {
-  local name
+  local name wrapper result trial
   for name in culvert-20261004T120000Z.tar.gz backup_012345.tar.gz; do
     esxi_restore_valid_backup "$name" || return 1
   done
@@ -283,4 +287,38 @@ esxi_restore_selftest() {
     if esxi_restore_valid_backup "$name"; then return 1; fi
   done
   printf 'PASS: restore backup basename validation\n'
+  wrapper=$(esxi_restore_guest_script | sed -n '/^dc() {/p')
+  [[ -n $wrapper ]] || return 1
+  for trial in protected unprotected; do
+    # Exercise the production wrapper with a fake Docker that tries to read
+    # one following script line. The unprotected control must fail, proving
+    # this fixture actually exposes script-stream consumption on this shell.
+    result=$({
+      printf '%s\n' 'set -e' 'compose=()' 'docker() { local stolen; if IFS= read -r stolen; then return 42; fi; }'
+      if [[ $trial == protected ]]; then printf '%s\n' "$wrapper"
+      else printf '%s\n' "${wrapper/ <\/dev\/null/}"; fi
+      printf '%s\n' 'dc --profile cli run --rm -T --no-deps cli' 'printf "following-script-survived\n"'
+    } | bash -s) || result=blocked
+    if [[ $trial == protected ]]; then
+      [[ $result == following-script-survived ]] || return 1
+    else
+      [[ $result == blocked ]] || return 1
+    fi
+  done
+  printf 'PASS: Compose cannot consume the remaining SSH script (negative control verified)\n'
+  local exit_trap
+  exit_trap=$(esxi_restore_guest_script | sed -n '/^trap .* EXIT$/p')
+  [[ -n $exit_trap ]] || return 1
+  for trial in 0 1; do
+    local exit_rc=0
+    result=$({
+      printf '%s\n' 'set -e' 'exec 3>&1' 'stage=fixture' "completed=$trial" 'emit() { printf "RESTORE %s %s\n" "$1" "$2" >&3; }' "$exit_trap"
+    } | bash -s) || exit_rc=$?
+    if [[ $trial == 0 ]]; then
+      [[ $exit_rc == 1 && $result == 'RESTORE fixture fail' ]] || return 1
+    else
+      [[ $exit_rc == 0 && -z $result ]] || return 1
+    fi
+  done
+  printf 'PASS: incomplete remote script EOF fails closed; completed script exits successfully\n'
 }
