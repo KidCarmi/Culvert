@@ -46,12 +46,24 @@ WantedBy=sysinit.target
 IO_ACCOUNTING = '[Manager]\nDefaultIOAccounting=yes\n'
 
 GUEST = '''
-import base64, hashlib, ipaddress, json, os, pathlib, re, stat, subprocess
+import base64, hashlib, ipaddress, json, os, pathlib, re, stat, subprocess, uuid
 def need(ok):
     if not ok:
         raise ValueError('lab sampler identity/precondition failed')
+def vmware_guest_identity(owner, guest, vendor):
+    # SMBIOS 2.6+ exposes the first 4/2/2 GUID bytes little-endian. VMware's
+    # API UUID remains the owner identity; accept only that deterministic alias.
+    need(vendor == 'VMware, Inc.')
+    parsed_owner, parsed_guest = uuid.UUID(owner), uuid.UUID(guest)
+    need(str(parsed_owner) == owner and str(parsed_guest) == guest)
+    if guest == owner:
+        return 'exact'
+    need(guest == str(uuid.UUID(bytes_le=parsed_owner.bytes)))
+    return 'smbios-byte-swapped'
 need(os.geteuid() == 0)
-need(pathlib.Path('/sys/class/dmi/id/product_uuid').read_text().strip().lower() == configuration['owner_uuid'])
+guest_uuid = pathlib.Path('/sys/class/dmi/id/product_uuid').read_text().strip().lower()
+guest_vendor = pathlib.Path('/sys/class/dmi/id/sys_vendor').read_text().strip()
+uuid_binding = vmware_guest_identity(configuration['owner_uuid'], guest_uuid, guest_vendor)
 build = json.loads(pathlib.Path('/var/lib/culvert-appliance/build-info.json').read_text())
 need(build['source']['git_commit'] == configuration['source_sha'] and build['source']['git_dirty'] is False)
 script = pathlib.Path('/usr/local/libexec/culvert-lab-boot-sampler.py')
@@ -81,6 +93,7 @@ def write_new(path, content, mode):
         output.flush()
         os.fsync(output.fileno())
 record = {key: configuration[key] for key in ('owner_uuid', 'source_sha', 'sampler_sha256', 'unit_sha256', 'accounting_sha256', 'generator_sha256')}
+record.update(guest_product_uuid=guest_uuid, guest_sys_vendor=guest_vendor, uuid_binding=uuid_binding)
 if configuration['action'] == 'install':
     need(not any(os.path.lexists(path) for path in (script, unit, accounting, clamav_config, receipt, enabled, runtime)))
     container = docker_json(['inspect', '--format', '{"id":{{json .Id}},"networks":{{json .NetworkSettings.Networks}}}', 'culvert-clamav'])

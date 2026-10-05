@@ -240,6 +240,52 @@ class ClamAVTests(unittest.TestCase):
 
 
 class GeneratorTests(unittest.TestCase):
+    def generated_identity_guard(self):
+        script = control.generate('install', BOOT, 'b' * 40, b'# synthetic', 'a' * 64)
+        guest = script.split("python3 - <<'CULVERT_LAB_BOOT_SAMPLER'\n", 1)[1].rsplit('\nCULVERT_LAB_BOOT_SAMPLER', 1)[0]
+        tree = ast.parse(guest)
+        # Run only the actual emitted guard functions, never installer operations.
+        functions = [node for node in tree.body if isinstance(node, ast.FunctionDef)
+                     and node.name in ('need', 'vmware_guest_identity')]
+        self.assertEqual(len(functions), 2)
+        namespace = {'uuid': control.uuid}
+        exec(compile(ast.Module(body=functions, type_ignores=[]), '<generated identity guards>', 'exec'), namespace)
+        return namespace['vmware_guest_identity'], tree
+
+    def test_vmware_uuid_accepts_only_exact_or_guid_byte_order_alias(self):
+        guard, _ = self.generated_identity_guard()
+        owner = '564de9b1-cdf7-0472-e998-f3f50d80816d'
+        swapped = 'b1e94d56-f7cd-7204-e998-f3f50d80816d'
+        self.assertEqual(guard(owner, owner, 'VMware, Inc.'), 'exact')
+        self.assertEqual(guard(owner, swapped, 'VMware, Inc.'), 'smbios-byte-swapped')
+        for guest, vendor in [(swapped, 'QEMU'), (owner, 'QEMU'), (owner, ''),
+                              (owner, 'VMware, Inc. spoof'),
+                              ('b1e94d56-f7cd-7204-e998-f3f50d80816e', 'VMware, Inc.'),
+                              ('564de9b1-cdf7-0472-98e9-f3f50d80816d', 'VMware, Inc.'),
+                              ('00000000-0000-0000-0000-000000000000', 'VMware, Inc.'),
+                              (owner.replace('-', ''), 'VMware, Inc.'),
+                              ('not-a-uuid', 'VMware, Inc.')]:
+            with self.subTest(guest=guest, vendor=vendor):
+                with self.assertRaises(ValueError):
+                    guard(owner, guest, vendor)
+
+    def test_receipt_preserves_api_owner_and_records_guest_alias_separately(self):
+        _, tree = self.generated_identity_guard()
+        namespace = {'configuration': dict(owner_uuid=BOOT, source_sha='b'*40, sampler_sha256='c'*64,
+                      unit_sha256='d'*64, accounting_sha256='e'*64, generator_sha256='f'*64),
+                     'guest_uuid': '22222222-2222-4222-8222-222222222222',
+                     'guest_vendor': 'VMware, Inc.', 'uuid_binding': 'smbios-byte-swapped'}
+        nodes = [node for node in tree.body if
+                 (isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id == 'record' for t in node.targets))
+                 or (isinstance(node, ast.Expr) and isinstance(node.value, ast.Call)
+                     and isinstance(node.value.func, ast.Attribute)
+                     and isinstance(node.value.func.value, ast.Name) and node.value.func.value.id == 'record')]
+        self.assertEqual(len(nodes), 2)
+        exec(compile(ast.Module(body=nodes, type_ignores=[]), '<generated receipt identity>', 'exec'), namespace)
+        self.assertEqual(namespace['record']['owner_uuid'], BOOT)
+        self.assertEqual(namespace['record']['guest_product_uuid'], namespace['guest_uuid'])
+        self.assertEqual(namespace['record']['uuid_binding'], 'smbios-byte-swapped')
+
     def test_generated_receipt_bytes_parse_as_json_with_actual_newline(self):
         # Evaluate only the real generated receipt-content expression, not the
         # installer. This catches double escaping across both source layers.
