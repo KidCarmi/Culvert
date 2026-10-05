@@ -747,6 +747,37 @@ jobs:
       contents: read
     uses: ./.github/workflows/appliance-console.yml
 
+  # F-DISK-1: the badger stores on a REAL full filesystem (a size-capped
+  # tmpfs). Mounting needs root, so these tests skip in the ordinary suites;
+  # here they run as root and a skip fails the job. Covers the category store
+  # (write refused not SIGBUS, bounded Close, reopen) and request history
+  # (purge frees a full disk, writes resume).
+  full-disk:
+    name: "Deep · F-DISK-1 full-filesystem stores (root tmpfs)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: changes
+    if: needs.changes.outputs.security == 'true' || needs.changes.outputs.deps == 'true'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/setup-go-cache
+      - name: Badger stores on a size-capped tmpfs
+        run: |
+          set -euo pipefail
+          go test -c -o "$RUNNER_TEMP/catdb.test" ./internal/catdb
+          go test -c -o "$RUNNER_TEMP/logstore.test" ./internal/logstore
+          # Only the test binaries run as root (to mount); they were built as
+          # the runner user.
+          for t in catdb:TestFullFilesystemWriteReturnsErrorNotSIGBUS logstore:TestPurgeOnFullFilesystemFreesSpaceAndWritesResume; do
+            pkg="${t%%:*}"; name="${t#*:}"
+            rc=0; out="$(cd "internal/$pkg" && sudo "$RUNNER_TEMP/$pkg.test" -test.run "^${name}\$" -test.v -test.count=1 2>&1)" || rc=$?
+            echo "$out"
+            [ "$rc" = 0 ] || { echo "::error::$name failed (exit $rc)"; exit 1; }
+            # A skip proves nothing: the gate exists to run these.
+            if grep -q -- "--- SKIP" <<<"$out"; then echo "::error::$name skipped"; exit 1; fi
+            grep -q -- "--- PASS: $name " <<<"$out" || { echo "::error::$name did not report PASS"; exit 1; }
+          done
+
   # ─── ✅ Aggregate — required check, passes when all-skipped ─────────────────
   deep-gate-approved:
     name: "✅ Deep PR Gate — APPROVED"
@@ -767,6 +798,7 @@ jobs:
       - appliance-clamav
       - appliance-agent
       - appliance-console
+      - full-disk
     if: always()
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

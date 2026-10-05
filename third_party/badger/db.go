@@ -1868,19 +1868,19 @@ func (db *DB) dropAll() (func(), error) {
 	db.lock.Lock()
 	defer db.lock.Unlock()
 
-	// CULVERT PATCH (F-DISK-1): allocate the replacement first, so a failed
-	// allocation leaves the current memtable in place instead of a nil db.mt.
-	next, err := db.newMemTable() // Set it up for future writes.
-	if err != nil {
-		return resume, y.Wrapf(err, "cannot open new memtable")
-	}
-	// Remove inmemory tables. Calling DecrRef for safety. Not sure if they're absolutely needed.
-	db.mt.DecrRef()
+	// CULVERT PATCH (F-DISK-1): FREE before allocating. DropAll is how an
+	// operator recovers a disk the store has filled, and the replacement
+	// memtable's WAL and the new value log are preallocated, so allocating
+	// them first made DropAll fail with ENOSPC before it had deleted anything
+	// (measured on a full tmpfs, internal/logstore fulldisk_purge_test.go).
+	// The immutable memtables (their WALs), the tables and the value logs go
+	// first; the replacement memtable is allocated last. A failed allocation
+	// still never leaves db.mt nil: the current memtable stays in place, its
+	// entries survive until DropAll is retried, and the error is returned.
 	for _, mt := range db.imm {
 		mt.DecrRef()
 	}
 	db.imm = db.imm[:0]
-	db.mt = next
 
 	num, err := db.lc.dropTree()
 	if err != nil {
@@ -1893,6 +1893,13 @@ func (db *DB) dropAll() (func(), error) {
 		return resume, err
 	}
 	db.lc.nextFileID.Store(1)
+
+	next, err := db.newMemTable() // Set it up for future writes.
+	if err != nil {
+		return resume, y.Wrapf(err, "cannot open new memtable")
+	}
+	db.mt.DecrRef()
+	db.mt = next
 	db.opt.Infof("Deleted %d value log files. DropAll done.\n", num)
 	db.blockCache.Clear()
 	db.indexCache.Clear()
