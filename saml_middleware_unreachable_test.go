@@ -1,224 +1,112 @@
 package main
 
-// saml_middleware_unreachable_test.go — structural wall over the vendored
-// crewjam/saml samlsp package.
+// saml_middleware_unreachable_test.go — samlsp is not linked at all.
 //
 // Culvert runs its own SAML AuthnRequest-state + ACS flow (auth_saml.go,
-// internal/authstate). samlsp.New is called ONLY to assemble a
-// ServiceProvider. The samlsp.Middleware HTTP entry points (ServeHTTP,
-// ServeACS, RequireAccount, HandleStartAuthFlow, ...) and its cookie session
-// provider / request tracker carry CodeQL findings in
+// internal/authstate) and needs only a saml.ServiceProvider. The vendored
+// crewjam/saml samlsp package — its Middleware HTTP entry points, cookie
+// session provider and request tracker, which carry CodeQL findings in
 // third_party/crewjam-saml (open redirect via RelayState, cookies without a
-// forced Secure flag) that are UNREACHABLE today precisely because nothing
-// mounts or calls them. This wall keeps it that way: production code outside
-// third_party/ may bind samlsp.New's result only to read .ServiceProvider,
-// and may never name the middleware type or its session/tracker machinery.
+// forced Secure flag) — used to be imported only to assemble that provider.
+// It is now not imported anywhere: the provider is built directly
+// (newSAMLServiceProvider) and metadata is parsed locally
+// (parseSAMLMetadata). These tests keep the package out of every binary and
+// pin the replacement to samlsp's behaviour for the options Culvert used.
 
 import (
-	"go/ast"
-	"go/parser"
-	"go/token"
-	"io/fs"
-	"path/filepath"
-	"strconv"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
+	"net/url"
+	"os/exec"
+	"reflect"
+	"slices"
 	"strings"
 	"testing"
+
+	"github.com/crewjam/saml"
 )
 
 const samlspImportPath = "github.com/crewjam/saml/samlsp"
 
-// samlspForbiddenSymbols are package-level samlsp names production code must
-// not reference: the middleware type (so it cannot be stored or mounted) and
-// the cookie session/request-tracking machinery behind its ACS flow.
-var samlspForbiddenSymbols = map[string]bool{
-	"Middleware":                 true,
-	"CookieSessionProvider":      true,
-	"CookieRequestTracker":       true,
-	"DefaultSessionProvider":     true,
-	"DefaultRequestTracker":      true,
-	"DefaultSessionCodec":        true,
-	"DefaultTrackedRequestCodec": true,
-}
-
-type samlspScan struct {
-	files      int // files importing samlsp
-	bindings   int // samlsp.New results bound to a local
-	spReads    int // allowed <binding>.ServiceProvider reads
-	violations []string
-}
-
-func (s *samlspScan) violate(fset *token.FileSet, pos token.Pos, what string) {
-	s.violations = append(s.violations, fset.Position(pos).String()+": "+what)
-}
-
-// samlspLocalName returns the name the file uses for samlsp, or "".
-func samlspLocalName(f *ast.File) string {
-	for _, imp := range f.Imports {
-		if p, err := strconv.Unquote(imp.Path.Value); err != nil || p != samlspImportPath {
-			continue
-		}
-		if imp.Name != nil {
-			return imp.Name.Name
-		}
-		return "samlsp"
+// The authoritative check is the BUILD GRAPH, not a source scan: any package
+// of this module (tests included) that pulled samlsp in, directly or through
+// another package, would compile its middleware again.
+func TestSAMLSPIsNotLinked(t *testing.T) {
+	if testing.Short() {
+		t.Skip("go list over the module is not a -short check")
 	}
-	return ""
-}
-
-func isSamlspSel(n ast.Node, pkg, name string) bool {
-	sel, ok := n.(*ast.SelectorExpr)
-	if !ok {
-		return false
-	}
-	id, ok := sel.X.(*ast.Ident)
-	return ok && id.Name == pkg && (name == "" || sel.Sel.Name == name)
-}
-
-func scanSAMLSPFile(fset *token.FileSet, f *ast.File, s *samlspScan) {
-	pkg := samlspLocalName(f)
-	if pkg == "" {
-		return
-	}
-	s.files++
-	ast.Inspect(f, func(n ast.Node) bool {
-		if sel, ok := n.(*ast.SelectorExpr); ok && isSamlspSel(sel, pkg, "") && samlspForbiddenSymbols[sel.Sel.Name] {
-			s.violate(fset, sel.Pos(), "references samlsp."+sel.Sel.Name)
-		}
-		return true
-	})
-	for _, d := range f.Decls {
-		if fn, ok := d.(*ast.FuncDecl); ok && fn.Body != nil {
-			scanSAMLSPFunc(fset, fn.Body, pkg, s)
-		}
-	}
-}
-
-// scanSAMLSPFunc requires every samlsp.New result to be bound to a local
-// whose ONLY use is reading .ServiceProvider. Passing the middleware anywhere
-// (mux.Handle, a struct field, a return), calling any of its methods, or
-// touching its Session/RequestTracker/OnError fields is a violation.
-func scanSAMLSPFunc(fset *token.FileSet, body *ast.BlockStmt, pkg string, s *samlspScan) {
-	bound := map[string]bool{}
-	defs := map[*ast.Ident]bool{}
-	newCalls := map[*ast.CallExpr]bool{}
-	ast.Inspect(body, func(n ast.Node) bool {
-		as, ok := n.(*ast.AssignStmt)
-		if !ok || len(as.Rhs) != 1 || len(as.Lhs) == 0 {
-			return true
-		}
-		call, ok := as.Rhs[0].(*ast.CallExpr)
-		if !ok || !isSamlspSel(call.Fun, pkg, "New") {
-			return true
-		}
-		newCalls[call] = true
-		if id, ok := as.Lhs[0].(*ast.Ident); ok && id.Name != "_" {
-			bound[id.Name], defs[id] = true, true
-			s.bindings++
-		} else {
-			s.violate(fset, as.Pos(), "samlsp.New result discarded or stored outside a local")
-		}
-		return true
-	})
-	allowed := map[*ast.Ident]bool{}
-	ast.Inspect(body, func(n ast.Node) bool {
-		switch x := n.(type) {
-		case *ast.CallExpr:
-			if isSamlspSel(x.Fun, pkg, "New") && !newCalls[x] {
-				s.violate(fset, x.Pos(), "samlsp.New result used directly (not bound to a local)")
-			}
-		case *ast.SelectorExpr:
-			if id, ok := x.X.(*ast.Ident); ok && bound[id.Name] && x.Sel.Name == "ServiceProvider" {
-				allowed[id] = true
-				s.spReads++
-			}
-		}
-		return true
-	})
-	ast.Inspect(body, func(n ast.Node) bool {
-		if id, ok := n.(*ast.Ident); ok && bound[id.Name] && !defs[id] && !allowed[id] {
-			s.violate(fset, id.Pos(), "samlsp middleware "+id.Name+" used beyond .ServiceProvider")
-		}
-		return true
-	})
-}
-
-func scanSAMLSPSource(t *testing.T, name, src string) *samlspScan {
-	t.Helper()
-	fset := token.NewFileSet()
-	f, err := parser.ParseFile(fset, name, src, 0)
+	out, err := exec.CommandContext(t.Context(), "go", "list", "-deps", "-test", "./...").CombinedOutput()
 	if err != nil {
-		t.Fatalf("parse %s: %v", name, err)
+		t.Fatalf("go list: %v\n%s", err, out)
 	}
-	s := &samlspScan{}
-	scanSAMLSPFile(fset, f, s)
-	return s
+	pkgs := strings.Fields(string(out))
+	if len(pkgs) < 50 || !slices.Contains(pkgs, "github.com/crewjam/saml") {
+		t.Fatalf("go list returned an implausible graph (%d packages, crewjam/saml present=%v) — the check would pass against anything", len(pkgs), slices.Contains(pkgs, "github.com/crewjam/saml"))
+	}
+	for _, p := range pkgs {
+		if p == samlspImportPath || strings.HasPrefix(p, samlspImportPath+" ") || strings.HasPrefix(p, samlspImportPath+".") {
+			t.Fatalf("%s is linked again; build the ServiceProvider with newSAMLServiceProvider instead", samlspImportPath)
+		}
+	}
 }
 
-func TestSAMLSPMiddlewareIsNeverServed(t *testing.T) {
-	skipDirs := map[string]bool{"third_party": true, ".git": true, "node_modules": true, "frontend": true, "testdata": true, "vendor": true}
-	fset := token.NewFileSet()
-	s := &samlspScan{}
-	err := filepath.WalkDir(".", func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if d.IsDir() {
-			if skipDirs[d.Name()] {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
-			return nil
-		}
-		f, perr := parser.ParseFile(fset, path, nil, parser.ImportsOnly)
-		if perr != nil || samlspLocalName(f) == "" {
-			return nil //nolint:nilerr // unparsable files are the compiler's job
-		}
-		if f, perr = parser.ParseFile(fset, path, nil, 0); perr != nil {
-			return perr
-		}
-		scanSAMLSPFile(fset, f, s)
-		return nil
-	})
+// newSAMLServiceProvider must produce what samlsp.DefaultServiceProvider
+// produced for Options{URL, Key, Certificate, IDPMetadata,
+// AllowIDPInitiated:false} (samlsp/new.go, v0.5.1): metadata/acs/slo URLs
+// resolved under the root, no request signing, no forced authn, "/" default
+// redirect, POST logout binding, and nothing else set.
+func TestNewSAMLServiceProvider_MatchesSAMLSPDefaults(t *testing.T) {
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, v := range s.violations {
-		t.Errorf("samlsp middleware reachable: %s", v)
-	}
-	// Not vacuous: the scan must actually see the one production use.
-	if s.files == 0 || s.bindings == 0 || s.spReads == 0 {
-		t.Fatalf("scan saw no samlsp use (files=%d bindings=%d serviceProvider reads=%d) — the wall would pass against anything", s.files, s.bindings, s.spReads)
+	cert := &x509.Certificate{}
+	idp := &saml.EntityDescriptor{EntityID: "https://idp.example/"}
+	for _, root := range []string{"https://proxy.example:9090/", "https://proxy.example/base/"} {
+		u, _ := url.Parse(root)
+		at := func(p string) url.URL { return *u.ResolveReference(&url.URL{Path: p}) }
+		want := saml.ServiceProvider{
+			Key: key, Certificate: cert, IDPMetadata: idp,
+			MetadataURL: at("saml/metadata"), AcsURL: at("saml/acs"), SloURL: at("saml/slo"),
+			DefaultRedirectURI: "/",
+			LogoutBindings:     []string{saml.HTTPPostBinding},
+		}
+		got := newSAMLServiceProvider(u, key, cert, idp)
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("root %s: provider differs from samlsp's defaults:\n got %+v\nwant %+v", root, got, want)
+		}
+		if got.SignatureMethod != "" || got.ForceAuthn != nil || got.AllowIDPInitiated || got.HTTPClient != nil {
+			t.Errorf("root %s: request signing, forced authn, IdP-initiated SSO and a custom client must stay off", root)
+		}
 	}
 }
 
-// The checker must REJECT each way the middleware could become reachable,
-// and accept the shape auth_saml.go uses.
-func TestSAMLSPMiddlewareWallRejectsReachableShapes(t *testing.T) {
-	const head = "package p\nimport (\n\"net/http\"\n\"github.com/crewjam/saml/samlsp\"\n)\nvar _ http.Handler\n"
-	allowed := head + `func ok(o samlsp.Options) { m, err := samlsp.New(o); _ = err; sp := &m.ServiceProvider; _ = sp; m.ServiceProvider.EntityID = "x" }`
-	if s := scanSAMLSPSource(t, "ok.go", allowed); len(s.violations) != 0 || s.bindings != 1 || s.spReads != 2 {
-		t.Fatalf("allowed shape rejected or miscounted: %+v", s)
+const testIDPEntity = `<EntityDescriptor xmlns="urn:oasis:names:tc:SAML:2.0:metadata" entityID="https://idp.example/"><IDPSSODescriptor protocolSupportEnumeration="urn:oasis:names:tc:SAML:2.0:protocol"><SingleSignOnService Binding="urn:oasis:names:tc:SAML:2.0:bindings:HTTP-Redirect" Location="https://idp.example/sso"></SingleSignOnService></IDPSSODescriptor></EntityDescriptor>`
+
+func TestParseSAMLMetadata(t *testing.T) {
+	ed, err := parseSAMLMetadata([]byte(testIDPEntity))
+	if err != nil || ed.EntityID != "https://idp.example/" || len(ed.IDPSSODescriptors) != 1 {
+		t.Fatalf("single EntityDescriptor: %+v, %v", ed, err)
 	}
-	for name, body := range map[string]string{
-		"mounted":       `func f(o samlsp.Options, mux *http.ServeMux) { m, _ := samlsp.New(o); mux.Handle("/saml/", m) }`,
-		"ServeACS":      `func f(o samlsp.Options, w http.ResponseWriter, r *http.Request) { m, _ := samlsp.New(o); m.ServeACS(w, r) }`,
-		"RequireAcct":   `func f(o samlsp.Options, h http.Handler) http.Handler { m, _ := samlsp.New(o); return m.RequireAccount(h) }`,
-		"StartFlow":     `func f(o samlsp.Options, w http.ResponseWriter, r *http.Request) { m, _ := samlsp.New(o); m.HandleStartAuthFlow(w, r) }`,
-		"ServeHTTP":     `func f(o samlsp.Options, w http.ResponseWriter, r *http.Request) { m, _ := samlsp.New(o); m.ServeHTTP(w, r) }`,
-		"session":       `func f(o samlsp.Options) { m, _ := samlsp.New(o); _ = m.Session }`,
-		"direct":        `func f(o samlsp.Options, mux *http.ServeMux) { mux.Handle("/", must(samlsp.New(o))) }`,
-		"field":         `type t struct{ m *samlsp.Middleware }`,
-		"cookieSession": `var _ = samlsp.CookieSessionProvider{}`,
-		"tracker":       `func f(o samlsp.Options) { _ = samlsp.DefaultRequestTracker(o, nil) }`,
-	} {
-		if s := scanSAMLSPSource(t, name+".go", head+body); len(s.violations) == 0 {
-			t.Errorf("%s: reachable middleware shape not rejected", name)
-		}
+	// An EntitiesDescriptor yields the first entity that has an IdP role.
+	sp := `<EntityDescriptor xmlns="urn:oasis:names:tc:SAML:2.0:metadata" entityID="https://sp.example/"></EntityDescriptor>`
+	both := `<EntitiesDescriptor xmlns="urn:oasis:names:tc:SAML:2.0:metadata">` + sp + testIDPEntity + `</EntitiesDescriptor>`
+	if ed, err = parseSAMLMetadata([]byte(both)); err != nil || ed.EntityID != "https://idp.example/" {
+		t.Fatalf("EntitiesDescriptor: %+v, %v", ed, err)
 	}
-	aliased := "package p\nimport sp \"github.com/crewjam/saml/samlsp\"\nfunc f(o sp.Options) { _ = sp.DefaultSessionProvider(o) }"
-	if s := scanSAMLSPSource(t, "alias.go", aliased); len(s.violations) == 0 {
-		t.Error("aliased samlsp import escaped the wall")
+	none := `<EntitiesDescriptor xmlns="urn:oasis:names:tc:SAML:2.0:metadata">` + sp + `</EntitiesDescriptor>`
+	if _, err = parseSAMLMetadata([]byte(none)); err == nil || !strings.Contains(err.Error(), "no entity found with IDPSSODescriptor") {
+		t.Fatalf("EntitiesDescriptor without an IdP must be refused: %v", err)
+	}
+	// The round-trip validator stays in front of the parser: XML whose
+	// meaning changes across an encoding/xml round trip (here a multi-colon
+	// attribute name, which encoding/xml splits at the first colon) is refused.
+	ambiguous := `<EntityDescriptor xmlns="urn:oasis:names:tc:SAML:2.0:metadata" entityID="x" a:b:c="1"></EntityDescriptor>`
+	if _, err = parseSAMLMetadata([]byte(ambiguous)); err == nil {
+		t.Fatal("metadata that does not survive the round-trip validator must be refused")
+	}
+	if _, err = parseSAMLMetadata([]byte("not xml")); err == nil {
+		t.Fatal("garbage must be refused")
 	}
 }

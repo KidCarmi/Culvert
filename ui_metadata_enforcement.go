@@ -342,8 +342,11 @@ func c2EvaluateAndLog(r *http.Request, idx *metadataIndex) c2Decision {
 	case !d.Matched && d.MetaPath != "":
 		// Path resolved but method had no policy.
 		c2ShadowNoPolicyTotal.Add(1)
-		logPath := sanitizeLog(d.logPath)
-		logMethod := sanitizeLog(d.logMethod)
+		// The inline ReplaceAll at the call site is the barrier CodeQL's
+		// go/log-injection query recognises (repo convention): the values reach
+		// here through a struct, where it does not follow sanitizeLog.
+		logPath := strings.ReplaceAll(strings.ReplaceAll(sanitizeLog(d.logPath), "\n", "_"), "\r", "_")
+		logMethod := strings.ReplaceAll(strings.ReplaceAll(sanitizeLog(d.logMethod), "\n", "_"), "\r", "_")
 		logMetaPath := strings.ReplaceAll(strings.ReplaceAll(sanitizeLog(d.MetaPath), "\n", "_"), "\r", "_")
 		logger.Printf("C2: no method policy for path=%q method=%q meta_path=%q",
 			logPath, logMethod, logMetaPath)
@@ -523,8 +526,11 @@ func uiMetadataEnforcement(next http.Handler) http.Handler {
 			return
 		}
 		c2AuditMissingTotal.Add(1)
-		logPath := sanitizeLog(d.logPath)
-		logMethod := sanitizeLog(d.logMethod)
+		// The inline ReplaceAll at the call site is the barrier CodeQL's
+		// go/log-injection query recognises (repo convention): the values reach
+		// here through a struct, where it does not follow sanitizeLog.
+		logPath := strings.ReplaceAll(strings.ReplaceAll(sanitizeLog(d.logPath), "\n", "_"), "\r", "_")
+		logMethod := strings.ReplaceAll(strings.ReplaceAll(sanitizeLog(d.logMethod), "\n", "_"), "\r", "_")
 		logMetaPath := strings.ReplaceAll(strings.ReplaceAll(sanitizeLog(d.MetaPath), "\n", "_"), "\r", "_")
 		logger.Printf("C2: audit missing for route=%q method=%q meta_path=%q status=%d",
 			logPath, logMethod, logMetaPath, status)

@@ -10,11 +10,13 @@ package main
 //   - Replay detection via one-time use of the assertion ID.
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/xml"
 	"errors"
 	"fmt"
 	"io"
@@ -26,7 +28,7 @@ import (
 	"time"
 
 	"github.com/crewjam/saml"
-	"github.com/crewjam/saml/samlsp"
+	xrv "github.com/mattermost/xml-roundtrip-validator"
 
 	"github.com/KidCarmi/Culvert/internal/authstate"
 )
@@ -37,11 +39,12 @@ import (
 
 // SAMLProvider wraps a crewjam/saml Service Provider for one IdP profile.
 //
-// samlsp.New is used ONLY to assemble the ServiceProvider; Culvert runs its
-// own AuthnRequest-state + ACS flow, so the samlsp.Middleware itself (its
-// ServeHTTP/ServeACS/RequireAccount/HandleStartAuthFlow entry points and its
-// cookie session provider / request tracker) is never retained, mounted or
-// called. TestSAMLSPMiddlewareIsNeverServed pins that.
+// Culvert runs its own AuthnRequest-state + ACS flow, so it needs only the
+// ServiceProvider. It is assembled directly (newSAMLServiceProvider) rather
+// than through samlsp.New: samlsp's Middleware, cookie session provider and
+// request tracker were never mounted, but linking the package compiled their
+// CodeQL findings (RelayState open redirect, cookies without a forced Secure
+// flag) into the binary. TestSAMLSPIsNotLinked keeps samlsp out of the build.
 type SAMLProvider struct {
 	profile *IdPProfile
 	cfg     *SAMLProfileConfig
@@ -73,24 +76,65 @@ func NewSAMLProvider(p *IdPProfile) (*SAMLProvider, error) {
 		return nil, fmt.Errorf("saml[%s] base url: %w", p.ID, err)
 	}
 
-	middleware, err := samlsp.New(samlsp.Options{
-		URL:               *rootURL,
-		Key:               spKey,
-		Certificate:       spCert,
-		IDPMetadata:       idpMeta,
-		AllowIDPInitiated: false, // SP-initiated only for security
-	})
-	if err != nil {
-		return nil, fmt.Errorf("saml[%s] sp init: %w", p.ID, err)
-	}
-	configureSAMLServiceProviderURLs(&middleware.ServiceProvider, rootURL)
-	middleware.ServiceProvider.AuthnNameIDFormat = saml.NameIDFormat(requestedSAMLNameIDFormat(cfg))
+	sp := newSAMLServiceProvider(rootURL, spKey, spCert, idpMeta)
+	configureSAMLServiceProviderURLs(&sp, rootURL)
+	sp.AuthnNameIDFormat = saml.NameIDFormat(requestedSAMLNameIDFormat(cfg))
 
 	return &SAMLProvider{
 		profile: p,
 		cfg:     cfg,
-		sp:      &middleware.ServiceProvider,
+		sp:      &sp,
 	}, nil
+}
+
+// newSAMLServiceProvider builds the ServiceProvider exactly as samlsp's
+// DefaultServiceProvider did for the options Culvert used (SP-initiated only,
+// unsigned AuthnRequests, POST logout binding, "/" default redirect), without
+// linking samlsp. EntityID and AcsURL are then set by
+// configureSAMLServiceProviderURLs. Pinned field by field by
+// TestNewSAMLServiceProvider_MatchesSAMLSPDefaults.
+func newSAMLServiceProvider(rootURL *url.URL, key *rsa.PrivateKey, cert *x509.Certificate, idp *saml.EntityDescriptor) saml.ServiceProvider {
+	at := func(p string) url.URL { return *rootURL.ResolveReference(&url.URL{Path: p}) }
+	return saml.ServiceProvider{
+		Key:                key,
+		Certificate:        cert,
+		MetadataURL:        at("saml/metadata"),
+		AcsURL:             at("saml/acs"),
+		SloURL:             at("saml/slo"),
+		IDPMetadata:        idp,
+		AllowIDPInitiated:  false, // SP-initiated only for security
+		DefaultRedirectURI: "/",
+		LogoutBindings:     []string{saml.HTTPPostBinding},
+	}
+}
+
+// parseSAMLMetadata is samlsp.ParseMetadata without linking samlsp: the XML
+// must survive an encoding/xml round trip unchanged (the
+// xml-roundtrip-validator guard against XML signature-wrapping ambiguities),
+// and an EntitiesDescriptor yields its first entity that has an IdP role.
+func parseSAMLMetadata(data []byte) (*saml.EntityDescriptor, error) {
+	if err := xrv.Validate(bytes.NewBuffer(data)); err != nil {
+		return nil, err
+	}
+	entity := &saml.EntityDescriptor{}
+	err := xml.Unmarshal(data, entity)
+	// encoding/xml reports the root element mismatch only as this text.
+	if err != nil && err.Error() == "expected element type <EntityDescriptor> but have <EntitiesDescriptor>" {
+		entities := &saml.EntitiesDescriptor{}
+		if err := xml.Unmarshal(data, entities); err != nil {
+			return nil, err
+		}
+		for i := range entities.EntityDescriptors {
+			if len(entities.EntityDescriptors[i].IDPSSODescriptors) > 0 {
+				return &entities.EntityDescriptors[i], nil
+			}
+		}
+		return nil, errors.New("no entity found with IDPSSODescriptor")
+	}
+	if err != nil {
+		return nil, err
+	}
+	return entity, nil
 }
 
 func configureSAMLServiceProviderURLs(sp *saml.ServiceProvider, rootURL *url.URL) {
@@ -266,7 +310,7 @@ func fetchSAMLMetadata(cfg *SAMLProfileConfig) (*saml.EntityDescriptor, error) {
 		xmlData = []byte(cfg.MetadataXML)
 	}
 
-	return samlsp.ParseMetadata(xmlData)
+	return parseSAMLMetadata(xmlData)
 }
 
 // ---------------------------------------------------------------------------
