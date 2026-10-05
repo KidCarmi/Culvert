@@ -140,6 +140,10 @@ SSH_OPTS=(-i "$LAB_SSH_KEY" -p "$LAB_SSH_PORT" -o StrictHostKeyChecking=no -o "U
           -o ConnectTimeout=10 -o BatchMode=yes -o LogLevel=ERROR -o ServerAliveInterval=15 -o IdentitiesOnly=yes)
 # gop CMD — the read-only operator interface (exact command, nothing else).
 gop() { ssh "${SSH_OPTS[@]}" "culvert-operator@$LAB_HOST" "$@"; }
+# gop_within SECS ARGS — gop with a hard deadline. `timeout` executes a
+# PROGRAM, so it must wrap the ssh argv itself: `timeout 3 gop …` cannot run
+# a shell function and fails with 127 every time (ASTRA review of a4797481).
+gop_within() { local t="$1"; shift; timeout "$t" ssh "${SSH_OPTS[@]}" "culvert-operator@$LAB_HOST" "$@"; }
 # Serial console socket (QEMU chardev; its logfile is console.log). Short fixed
 # path: AF_UNIX paths are limited to 108 bytes.
 SER_SOCK="/tmp/culvert-lab-ser-$(printf '%s' "$WORK" | sha256sum | cut -c1-12).sock"
@@ -221,6 +225,10 @@ cmd_selftest() { local d rc=0 got; d="$(mktemp -d)"
   # never guess or fall back to another account.
   local hrc=0; printf 'id\n' | python3 "$HERE/console-session.py" --sock "$d/none.sock" --secrets "$d" --console-log "$d/none.log" --timeout 5 >/dev/null 2>&1 || hrc=$?
   if [[ $hrc == 99 || $hrc == 91 ]]; then log "selftest ok: console-session without a console/credential -> exit $hrc"; else log "selftest FAILED: console-session exit $hrc"; rc=1; fi
+  # The bounded operator probe must EXECUTE ssh: against a closed port ssh
+  # fails (255); 127 would mean timeout could not run the command at all.
+  local prc=0; ( LAB_HOST=127.0.0.1; SSH_OPTS=(-p 1 -o ConnectTimeout=2 -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=QUIET); gop_within 5 status-json ) >/dev/null 2>&1 || prc=$?
+  if [[ $prc == 255 ]]; then log "selftest ok: bounded operator probe executes ssh (closed port -> 255)"; else log "selftest FAILED: bounded operator probe exit $prc (127 = the probe never ran)"; rc=1; fi
   rm -rf "$d"; return "$rc"; }
 through_proxy() { curl -sS -m 20 -x "$P" -o /dev/null -w '%{http_code}' "$1" 2>/dev/null || echo 000; }
 # Monitor socket: a short fixed path (AF_UNIX paths are limited to 108 bytes).
@@ -1080,7 +1088,7 @@ PY
 echo $!; }
 recovery_once() { local name="$1" i="$2" budget="$3"; local tag="R-$name-$i"
   local k0 acc t0 st0 st1 ok=0 samples=0 s_start s s_prev="" pr pt pa pp dur gap why marks_pid
-  local tk="" ts_ready="" ts_traffic="" ts_av="" ts_phase="" first_joint="" end=""
+  local tk="" ts_ready="" ts_traffic="" ts_av="" ts_phase="" first_joint="" end="" bk_pid=""
   k0="$(grep -ac 'Linux version' "$WORK/console.log" || true)"
   st0="$(host_disk_stat)"
   # Authenticate BEFORE the reboot: the first backup listing after recovery
@@ -1110,7 +1118,7 @@ recovery_once() { local name="$1" i="$2" budget="$3"; local tag="R-$name-$i"
     if rec_traffic; then pt=ok; else pt=no; fi
     s="$(mono)"; [[ $pt == ok && -z "$ts_traffic" ]] && ts_traffic="$s"
     pa="$(eicar_verdict)"; s="$(mono)"; [[ $pa == av && -z "$ts_av" ]] && ts_av="$s"
-    if timeout 3 gop status-json > "$WORK/rec-status.json" 2>/dev/null && [[ "$(status_field "$WORK/rec-status.json" phase)" == ready ]]; then pp=ok; else pp=no; fi
+    if gop_within 3 status-json > "$WORK/rec-status.json" 2>/dev/null && [[ "$(status_field "$WORK/rec-status.json" phase)" == ready ]]; then pp=ok; else pp=no; fi
     s="$(mono)"; [[ $pp == ok && -z "$ts_phase" ]] && ts_phase="$s"
     # Declared cadence: a sample counts only if it completed within 5 s and
     # started at most 5.5 s after the previous one. Overruns are retained in
@@ -1126,14 +1134,18 @@ recovery_once() { local name="$1" i="$2" budget="$3"; local tag="R-$name-$i"
     s_prev="$s_start"
     if [[ $why == yes ]]; then
       ok=$((ok+1)); (( ok == 1 )) && first_joint="$s"
+      # The ONE backup-listing attempt starts at the FIRST healthy joint
+      # sample, on the session authenticated before the reboot, in the
+      # background so the sample cadence is not delayed; its outcome is kept
+      # even if a later sample resets the count (ASTRA review of a4797481).
+      if [[ -z "$bk_pid" ]]; then recovery_backup_first_list "$name" "$i" & bk_pid=$!; fi
       if (( ok == 3 )); then end="$s"; break; fi
     else ok=0; first_joint=""; fi
     # The next sample starts 5 s after this one STARTED, never sooner.
     python3 -c 'import sys,time; d=float(sys.argv[1])+5-time.monotonic(); time.sleep(d if d>0 else 0)' "$s_start"
   done
-  # The ONE backup-listing attempt happens at the first healthy completion,
-  # on the session authenticated before the reboot (ASTRA review, item 3).
-  [[ -n "$end" ]] && recovery_backup_first_list "$name" "$i"
+  [[ -n "$bk_pid" ]] && wait "$bk_pid"
+  [[ -n "$bk_pid" ]] || check R "backup-list-$name-$i" fail "no healthy joint sample, so the backup listing was never attempted"
   kill "$marks_pid" 2>/dev/null || true
   st1="$(host_disk_stat)"
   local rec; rec="$(python3 "$HERE/recovery-timeline.py" "$t0" "$tk" "$ts_ready" "$ts_traffic" "$ts_av" "$ts_phase" "$first_joint" "$end" \
