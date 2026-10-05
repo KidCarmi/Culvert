@@ -1,0 +1,10 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["local>dgraph-io/renovate-config"],
+  "rangeStrategy": "widen",
+  "packageRules": [
+    { "matchManagers": ["gomod"], "matchPackageNames": ["go"], "enabled": false },
+    { "matchManagers": ["gomod"], "matchDepNames": ["go"], "enabled": false }
+  ],
+  "ignoreDeps": ["go"]
+}

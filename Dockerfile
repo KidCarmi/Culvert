@@ -33,6 +33,7 @@ RUN apk add --no-cache git
 COPY go.mod go.sum ./
 COPY third_party/crewjam-saml/ ./third_party/crewjam-saml/
 COPY third_party/ristretto/ ./third_party/ristretto/
+COPY third_party/badger/ ./third_party/badger/
 COPY pkg/releaseproof/ ./pkg/releaseproof/
 RUN want="$(sed -n 's/^toolchain //p' go.mod)" && have="$(go env GOVERSION)" && \
     echo "compiler: ${have} (go.mod toolchain: ${want})" && \

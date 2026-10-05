@@ -18,6 +18,9 @@ replace github.com/crewjam/saml => ./third_party/crewjam-saml
 // F-DISK-1: preallocates badger's writable mmapped files (third_party/ristretto/CULVERT-PATCH.md).
 replace github.com/dgraph-io/ristretto/v2 => ./third_party/ristretto
 
+// F-DISK-1: a failed memtable/value-log allocation is refused, not fatal (third_party/badger/CULVERT-PATCH.md).
+replace github.com/dgraph-io/badger/v4 => ./third_party/badger
+
 replace github.com/KidCarmi/Culvert/releaseproof => ./pkg/releaseproof
 
 require (

@@ -41,7 +41,7 @@ stores never reach.
 ## Verification
 
 ```text
-python3 appliance/artifact-audit/verify_ristretto_patch.py      # upstream bytes + exact patch
+python3 appliance/artifact-audit/verify_dependency_forks.py      # upstream bytes + exact patches (both forks)
 go test ./internal/catdb -run 'TestStoreFilesAreFullyAllocated|TestFullFilesystemWriteReturnsErrorNotSIGBUS'
 (cd third_party/ristretto && go test ./z/...)                    # upstream z tests on the patched code
 ```

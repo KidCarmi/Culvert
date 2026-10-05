@@ -56,6 +56,13 @@
   regexTarget = "secret"
   regexes = ['''^(?:013de938509f1af36a7fbaa396f75b3a92ac91fc87a0ff4899d2f9cd84970887|1303eeb428d92e900a2de14f6ece49f2f0d75a0fcba0c9f5f23d12f87694bd85|2db4616177c15527c1a32cb12a79093153deea51e686898af02c27049d37c027|2dc24b2250b1ef7da2469523725c545c4675f52fffd5e53a2b84a6222455b2e4|6b859f52da07e3c4056216c6d73f08e9431917528cfdb09985d0fc6fbf86c4c2|83a857bead7c29a33a8d5b010b19271b9469535ede50b04eb18dde5c7af7befb|a85bd94ebcd83406f78defc09d5370748bd5552c2e6c0224130f8f99de9d5d0d|b7bd9b5d93f6244b35cbf662982c53c006d44f7361abd6823cc3fbb65a6f7d3d|de46601f6e2db4b1b8ca6e542e10981ce8933742e3dba546f72a1628263b652c|ea3d0389194b309394c325ab77fabff50ef55b8e6f1123efacf75b20061fca11)$''']
 
+[[rules.allowlists]]
+  description = "Exact reviewed SHA-256 inventory values in the badger fork provenance (F-DISK-1)"
+  condition = "AND"
+  paths = ['''^third_party/badger/CULVERT-PROVENANCE\.json$''']
+  regexTarget = "secret"
+  regexes = ['''^(?:91183b50e72557ab5c6b0cc3b3e5f40eaf4720342afec52eb70d763505f4d759|ee6f82c8922af1f10ea36930895765e2834df9a246335f892cc7f5dcd8f9a5be)$''']
+
 # Existing public test vectors, public fingerprints, documentation placeholders,
 # and literal source expressions. Both exact file AND exact value must match.
 

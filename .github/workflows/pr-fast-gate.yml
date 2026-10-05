@@ -436,8 +436,8 @@ jobs:
           python3 -m venv /tmp/culvert-secret-policy-env
           /tmp/culvert-secret-policy-env/bin/pip install cryptography==50.0.2
           /tmp/culvert-secret-policy-env/bin/python appliance/artifact-audit/verify_saml_patch.py
-          # F-DISK-1: the ristretto fork is upstream v2.2.0 plus exactly the recorded patch.
-          python3 appliance/artifact-audit/verify_ristretto_patch.py
+          # F-DISK-1: the ristretto + badger forks are their pinned upstream plus exactly the recorded patches.
+          python3 appliance/artifact-audit/verify_dependency_forks.py
 
   # ─── 7. Maintenance agent (nested module) — gated on agent paths ──────────
   agent:
