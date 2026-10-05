@@ -1,0 +1,3837 @@
+{
+  "schema_version": 1,
+  "date": "2026-10-05",
+  "scope": "Controlled lab read-ahead comparison A0(128 KiB), B1/B2/B3(1024 KiB), A1(128 KiB) on one owned VM. This is not final production qualification.",
+  "result": "fail",
+  "production_qualified": false,
+  "intervention_met_three_run_requirement": false,
+  "causal_verdict": "The binary pre-log phase improves during all three B runs and slows again on return-A. End-to-end benefit is not sufficient or repeatable: B3 fails. Shared host/device pressure and acceptance-to-boot variation prevent assigning all timing changes to read-ahead.",
+  "acceptance": {
+    "maximum_seconds": 120,
+    "three_consecutive_B_reboots_required": true,
+    "consecutive_healthy_samples": 3,
+    "sample_interval_seconds": 5,
+    "first_backup_maximum_seconds": 5
+  },
+  "artifact": {
+    "ova_sha256": "1a713a9bedc4ee50ac4212c12048924e03abe6b8f04cb82d4d0ef95e33ef4775",
+    "source_sha": "b579ca28c9d936e9141292ce5ec564a26feeae86",
+    "image_id": "sha256:24b37bc217691058e56a838821b86dfbd45b927b1c0ea8ea867a28c54d4bcc47",
+    "resources": {
+      "vcpus": 2,
+      "memory_mib": 4096,
+      "virtual_disk_bytes": 42949672960
+    },
+    "newer_product_fixes_included": false
+  },
+  "controller": {
+    "revision": "aceef6defe790cda62c22978371517a293c533b7",
+    "identical_for_all_five_cycles": true,
+    "freeze_sha256": "43fdaad4332ec70d8842a4c150e76fcdebd344de9ea7bec7f4c2b6240653acec",
+    "probes_sha256": "8d3947ab027686bf6937123ccff30022daf0208ee1bc86b5d50f015d8f8f28ec",
+    "collector_sha256": "e2f2b8bcdd3ba3aaa8b3e9307bcc05373519eaa41ef66fd51741f81d9998b0ac",
+    "readahead_helper_sha256": "f265e61b56e0829b1030edb9563cd09f94cb6eff0c935c7b20fcdd193968098c"
+  },
+  "intervention": {
+    "only_planned_change": "Same early udev rule placement with read_ahead_kb value 128 or 1024; readiness checks, locks and image unchanged.",
+    "sequence": [
+      "ra-a0",
+      "ra-b1",
+      "ra-b2",
+      "ra-b3",
+      "ra-a1"
+    ],
+    "application_timing_limit": "Postboot effective-value verification is not a timestamp proving the rule applied before every early-boot read. Reads before udev application are outside the intervention.",
+    "transition_receipts": [
+      {
+        "evidence": {
+          "path": "secrets/readahead-a0-set.json",
+          "sha256": "fea404efe20f71dd76f040e64aaf48d372fe0de317dcd8aac682c4bf0623a44b",
+          "private": true,
+          "bytes": 1426
+        },
+        "action": "set",
+        "status": "complete",
+        "old_value": 128,
+        "new_value": 128,
+        "effective": 128,
+        "rule_sha256": "b2d63eb130bdd09d1cde3d49f959aacc9bc36bd21d5aea78fea9cff41ea74795",
+        "generator_sha256": "f265e61b56e0829b1030edb9563cd09f94cb6eff0c935c7b20fcdd193968098c",
+        "source_sha": "b579ca28c9d936e9141292ce5ec564a26feeae86",
+        "image_id": "sha256:24b37bc217691058e56a838821b86dfbd45b927b1c0ea8ea867a28c54d4bcc47"
+      },
+      {
+        "evidence": {
+          "path": "secrets/readahead-b-set.json",
+          "sha256": "7168a19a5d0c76dbba068dd4868c0fed8ef0a79dff7f9d55d348119bf63c79be",
+          "private": true,
+          "bytes": 1428
+        },
+        "action": "set",
+        "status": "complete",
+        "old_value": 128,
+        "new_value": 1024,
+        "effective": 1024,
+        "rule_sha256": "216cd9693fc9c241a21dd41a2084b821f2ba473eaf1d800b677df0f4a0cc9230",
+        "generator_sha256": "f265e61b56e0829b1030edb9563cd09f94cb6eff0c935c7b20fcdd193968098c",
+        "source_sha": "b579ca28c9d936e9141292ce5ec564a26feeae86",
+        "image_id": "sha256:24b37bc217691058e56a838821b86dfbd45b927b1c0ea8ea867a28c54d4bcc47"
+      },
+      {
+        "evidence": {
+          "path": "secrets/readahead-a1-set.json",
+          "sha256": "7b6b07cf446b46d913318b1e2df93e29096847918db84ab450b51c27154057d5",
+          "private": true,
+          "bytes": 1428
+        },
+        "action": "set",
+        "status": "complete",
+        "old_value": 1024,
+        "new_value": 128,
+        "effective": 128,
+        "rule_sha256": "b2d63eb130bdd09d1cde3d49f959aacc9bc36bd21d5aea78fea9cff41ea74795",
+        "generator_sha256": "f265e61b56e0829b1030edb9563cd09f94cb6eff0c935c7b20fcdd193968098c",
+        "source_sha": "b579ca28c9d936e9141292ce5ec564a26feeae86",
+        "image_id": "sha256:24b37bc217691058e56a838821b86dfbd45b927b1c0ea8ea867a28c54d4bcc47"
+      }
+    ]
+  },
+  "cycles": [
+    {
+      "cycle": "ra-a0",
+      "read_ahead_kib": 128,
+      "timing_result": "fail",
+      "timing_reason": "recovered_after_120_second_budget",
+      "seconds_to_three_healthy_samples": 178.75,
+      "acceptance_utc": "2026-10-05T18:05:00.102587+00:00",
+      "boot_id": "6e178656-8e0e-4c0e-8a6d-7ad961696a31",
+      "guest_boot_epoch_seconds": 1791223531,
+      "authenticated_boot_origin_after_acceptance_window_seconds": [
+        25.801686602,
+        31.130686602
+      ],
+      "boot_origin_note": "Correlation uncertainty window, not measured shutdown duration; a negative lower bound reflects uncertainty. Shutdown/reboot and guest startup remain separate stages.",
+      "backup": {
+        "result": "pass",
+        "seconds": 0.828,
+        "dispatch_delay_after_first_ready_seconds": 0.0,
+        "strict_frozen_assertions": {
+          "one_attempt": true,
+          "recorded_pass": true,
+          "listing_available": true,
+          "archive_matches_baseline": true,
+          "after_new_boot_upper_bound": true,
+          "first_ready_trigger_matches": true,
+          "dispatch_within_one_second": true,
+          "elapsed_matches_timestamps": true,
+          "elapsed_within_five_seconds": true
+        },
+        "archive_identity_scope": "Frozen collector checks unique expected filename, size_bytes and encrypted flag; original API listing is not retained, so equality is not independently replayable and archive content integrity is not proven."
+      },
+      "independent_ClamAV_coverage": {
+        "result": "pass",
+        "guest_interval_start_ns": 134837313398,
+        "guest_interval_end_ns": 155448313398,
+        "pong_samples": 12,
+        "maximum_sample_gap_ns": 2008983790,
+        "current_container_endpoint_verified": true,
+        "does_not_override_timing_failure": true
+      },
+      "guest_phases_seconds": {
+        "local_fs_active": 28.291703,
+        "cloud_init_local_start": 31.533276,
+        "cloud_init_local_end": 57.720916,
+        "containerd_start": 63.144631,
+        "containerd_first_log": 83.897156,
+        "containerd_active": 95.919064,
+        "containerd_prelog_duration": 20.752525,
+        "containerd_startup_duration": 32.774433,
+        "containerd_metadata_marker_gap": 11.818296,
+        "dockerd_start": 95.926066,
+        "dockerd_first_log": 103.328131,
+        "dockerd_active": 107.143886,
+        "dockerd_prelog_duration": 7.402065,
+        "dockerd_startup_duration": 11.21782,
+        "stack_resume_start": 107.153871,
+        "stack_resume_end": 127.368611,
+        "stack_resume_duration": 20.21474,
+        "systemd_startup_complete": 128.216,
+        "first_sampled_direct_pong": 128.405433458
+      },
+      "software_identity": {
+        "kernel_version": "6.8.0-146-generic",
+        "compose_version": "5.5.1",
+        "clamav_signature_version": "ClamAV 1.4.6/28144/Mon Oct  5 06:24:24 2026"
+      },
+      "matches_A0": {
+        "kernel_version": true,
+        "package_versions": true,
+        "compose_version": true,
+        "clamav_signature_version": true,
+        "clamav_signature_files": true
+      },
+      "persistence": {
+        "admin_login": "pass",
+        "ca_decryption": "pass",
+        "agent": "pass",
+        "matches_A0": {
+          "ca_sha256": true,
+          "rules": true,
+          "categories": true,
+          "traffic": true,
+          "agent_version": true
+        },
+        "historical_encrypted_log_recovery": {
+          "result": "blocked",
+          "reason": "Supported Tier-1/Tier-2 backup excludes Tier-3 historical logs; retaining the log passphrase alone cannot recover them."
+        }
+      },
+      "sampler": {
+        "first_kernel_seconds": 32.39509079,
+        "last_kernel_seconds": 196.395221446,
+        "raw_sha256": "86ab66c816e7ffa5d89da106b1deea98f6989891f74145db4958705fb5deb1ab",
+        "result": "active_snapshot",
+        "sample_count": 83
+      },
+      "lock_transitions_observed": [
+        {
+          "kernel_seconds": 32.39509079,
+          "locks": {
+            "os_update": {
+              "available": false,
+              "held": null
+            },
+            "maintenance_agent": {
+              "available": true,
+              "held": false
+            }
+          }
+        },
+        {
+          "kernel_seconds": 108.395180701,
+          "locks": {
+            "os_update": {
+              "available": true,
+              "held": true
+            },
+            "maintenance_agent": {
+              "available": true,
+              "held": true
+            }
+          }
+        },
+        {
+          "kernel_seconds": 128.395133532,
+          "locks": {
+            "os_update": {
+              "available": true,
+              "held": false
+            },
+            "maintenance_agent": {
+              "available": true,
+              "held": false
+            }
+          }
+        }
+      ],
+      "final_three_authenticated_checks": [
+        {
+          "admin": true,
+          "agent": true,
+          "clamav_scan": true,
+          "policy": true,
+          "ca": true,
+          "agent_version": true
+        },
+        {
+          "admin": true,
+          "agent": true,
+          "clamav_scan": true,
+          "policy": true,
+          "ca": true,
+          "agent_version": true
+        },
+        {
+          "admin": true,
+          "agent": true,
+          "clamav_scan": true,
+          "policy": true,
+          "ca": true,
+          "agent_version": true
+        }
+      ],
+      "post_public_readiness_nonhealthy_samples": [
+        {
+          "start_after_acceptance_seconds": 163.468,
+          "sample_elapsed_seconds": 2.688,
+          "authenticated_checks": {
+            "admin": true,
+            "agent": true,
+            "clamav_scan": true,
+            "policy": true,
+            "ca": true,
+            "agent_version": true
+          },
+          "authenticated_probe_error": null,
+          "operator_ok": false,
+          "operator_error": null
+        }
+      ],
+      "host_metrics": {
+        "timestamps": [
+          "2026-10-05T18:05:40Z",
+          "2026-10-05T18:06:00Z",
+          "2026-10-05T18:06:20Z",
+          "2026-10-05T18:06:40Z",
+          "2026-10-05T18:07:00Z",
+          "2026-10-05T18:07:20Z"
+        ],
+        "interval_seconds": 20,
+        "series": [
+          {
+            "name": "cpu.usage.average",
+            "native_unit": "percent",
+            "instance_class": "aggregate",
+            "values": [
+              3410,
+              1194,
+              1294,
+              1690,
+              1957,
+              1339
+            ],
+            "missing_count": 0,
+            "native_scaling": "hundredths of percent",
+            "mean_percent": 18.14
+          },
+          {
+            "name": "cpu.usagemhz.average",
+            "native_unit": "megaHertz",
+            "instance_class": "aggregate",
+            "values": [
+              3692,
+              1293,
+              1402,
+              1830,
+              2119,
+              1450
+            ],
+            "missing_count": 0
+          },
+          {
+            "name": "cpu.demand.average",
+            "native_unit": "megaHertz",
+            "instance_class": "aggregate",
+            "values": [
+              2233,
+              2223,
+              2084,
+              1435,
+              1589,
+              1741
+            ],
+            "missing_count": 0
+          },
+          {
+            "name": "mem.usage.average",
+            "native_unit": "percent",
+            "instance_class": "aggregate",
+            "values": [
+              7930,
+              7931,
+              7931,
+              7930,
+              7930,
+              7930
+            ],
+            "missing_count": 0,
+            "native_scaling": "hundredths of percent",
+            "mean_percent": 79.303333
+          },
+          {
+            "name": "mem.swapoutRate.average",
+            "native_unit": "kiloBytesPerSecond",
+            "instance_class": "aggregate",
+            "values": [
+              0,
+              0,
+              0,
+              0,
+              0,
+              0
+            ],
+            "missing_count": 0
+          },
+          {
+            "name": "mem.swapinRate.average",
+            "native_unit": "kiloBytesPerSecond",
+            "instance_class": "aggregate",
+            "values": [
+              0,
+              0,
+              0,
+              0,
+              0,
+              0
+            ],
+            "missing_count": 0
+          },
+          {
+            "name": "mem.compressed.average",
+            "native_unit": "kiloBytes",
+            "instance_class": "aggregate",
+            "values": [
+              0,
+              0,
+              0,
+              0,
+              0,
+              0
+            ],
+            "missing_count": 0
+          },
+          {
+            "name": "mem.vmmemctl.average",
+            "native_unit": "kiloBytes",
+            "instance_class": "aggregate",
+            "values": [
+              0,
+              0,
+              0,
+              0,
+              0,
+              0
+            ],
+            "missing_count": 0
+          }
+        ]
+      },
+      "vm_metrics": {
+        "timestamps": [
+          "2026-10-05T18:05:40Z",
+          "2026-10-05T18:06:00Z",
+          "2026-10-05T18:06:20Z",
+          "2026-10-05T18:06:40Z",
+          "2026-10-05T18:07:00Z",
+          "2026-10-05T18:07:20Z"
+        ],
+        "interval_seconds": 20,
+        "series": [
+          {
+            "name": "cpu.maxlimited.summation",
+            "native_unit": "millisecond",
+            "instance_class": "per-instance",
+            "values": [
+              0,
+              0,
+              0,
+              0,
+              0,
+              0
+            ],
+            "missing_count": 0
+          },
+          {
+            "name": "cpu.costop.summation",
+            "native_unit": "millisecond",
+            "instance_class": "per-instance",
+            "values": [
+              0,
+              0,
+              0,
+              0,
+              0,
+              0
+            ],
+            "missing_count": 0
+          },
+          {
+            "name": "mem.vmmemctl.average",
+            "native_unit": "kiloBytes",
+            "instance_class": "aggregate",
+            "values": [
+              0,
+              0,
+              0,
+              0,
+              0,
+              0
+            ],
+            "missing_count": 0
+          },
+          {
+            "name": "cpu.maxlimited.summation",
+            "native_unit": "millisecond",
+            "instance_class": "per-instance",
+            "values": [
+              0,
+              0,
+              0,
+              0,
+              0,
+              0
+            ],
+            "missing_count": 0
+          },
+          {
+            "name": "cpu.costop.summation",
+            "native_unit": "millisecond",
+            "instance_class": "aggregate",
+            "values": [
+              0,
+              0,
+              0,
+              0,
+              0,
+              0
+            ],
+            "missing_count": 0
+          },
+          {
+            "name": "cpu.costop.summation",
+            "native_unit": "millisecond",
+            "instance_class": "per-instance",
+            "values": [
+              0,
+              0,
+              0,
+              0,
+              0,
+              0
+            ],
+            "missing_count": 0
+          },
+          {
+            "name": "cpu.ready.summation",
+            "native_unit": "millisecond",
+            "instance_class": "aggregate",
+            "values": [
+              19,
+              46,
+              57,
+              63,
+              87,
+              101
+            ],
+            "missing_count": 0
+          },
+          {
+            "name": "cpu.maxlimited.summation",
+            "native_unit": "millisecond",
+            "instance_class": "aggregate",
+            "values": [
+              0,
+              0,
+              0,
+              0,
+              0,
+              0
+            ],
+            "missing_count": 0
+          },
+          {
+            "name": "cpu.ready.summation",
+            "native_unit": "millisecond",
+            "instance_class": "per-instance",
+            "values": [
+              9,
+              24,
+              25,
+              30,
+              46,
+              44
+            ],
+            "missing_count": 0
+          },
+          {
+            "name": "mem.swapinRate.average",
+            "native_unit": "kiloBytesPerSecond",
+            "instance_class": "aggregate",
+            "values": [
+              0,
+              0,
+              0,
+              0,
+              0,
+              0
+            ],
+            "missing_count": 0
+          },
+          {
+            "name": "cpu.ready.summation",
+            "native_unit": "millisecond",
+            "instance_class": "per-instance",
+            "values": [
+              10,
+              22,
+              32,
+              32,
+              42,
+              56
+            ],
+            "missing_count": 0
+          }
+        ]
+      },
+      "device_metrics": {
+        "timestamps": [
+          "2026-10-05T18:05:40Z",
+          "2026-10-05T18:06:00Z",
+          "2026-10-05T18:06:20Z",
+          "2026-10-05T18:06:40Z",
+          "2026-10-05T18:07:00Z",
+          "2026-10-05T18:07:20Z"
+        ],
+        "interval_seconds": 20,
+        "series": [
+          {
+            "name": "disk.deviceReadLatency.average",
+            "native_unit": "millisecond",
+            "instance_class": "per-instance",
+            "values": [
+              10,
+              32,
+              35,
+              53,
+              117,
+              33
+            ],
+            "missing_count": 0
+          },
+          {
+            "name": "disk.kernelReadLatency.average",
+            "native_unit": "millisecond",
+            "instance_class": "per-instance",
+            "values": [
+              0,
+              0,
+              0,
+              0,
+              2,
+              1
+            ],
+            "missing_count": 0
+          },
+          {
+            "name": "disk.queueReadLatency.average",
+            "native_unit": "millisecond",
+            "instance_class": "per-instance",
+            "values": [
+              0,
+              0,
+              0,
+              0,
+              1,
+              1
+            ],
+            "missing_count": 0
+          },
+          {
+            "name": "disk.deviceWriteLatency.average",
+            "native_unit": "millisecond",
+            "instance_class": "per-instance",
+            "values": [
+              5,
+              23,
+              22,
+              11,
+              21,
+              23
+            ],
+            "missing_count": 0
+          },
+          {
+            "name": "disk.kernelWriteLatency.average",
+            "native_unit": "millisecond",
+            "instance_class": "per-instance",
+            "values": [
+              0,
+              17,
+              14,
+              10,
+              14,
+              19
+            ],
+            "missing_count": 0
+          },
+          {
+            "name": "disk.queueWriteLatency.average",
+            "native_unit": "millisecond",
+            "instance_class": "per-instance",
+            "values": [
+              0,
+              16,
+              14,
+              9,
+              14,
+              18
+            ],
+            "missing_count": 0
+          },
+          {
+            "name": "disk.read.average",
+            "native_unit": "kiloBytesPerSecond",
+            "instance_class": "per-instance",
+            "values": [
+              3336,
+              2730,
+              2978,
+              6427,
+              5240,
+              5445
+            ],
+            "missing_count": 0
+          },
+          {
+            "name": "disk.write.average",
+            "native_unit": "kiloBytesPerSecond",
+            "instance_class": "per-instance",
+            "values": [
+              1623,
+              1466,
+              3601,
+              1842,
+              2691,
+              4230
+            ],
+            "missing_count": 0
+          },
+          {
+            "name": "disk.numberReadAveraged.average",
+            "native_unit": "number",
+            "instance_class": "per-instance",
+            "values": [
+              192,
+              96,
+              103,
+              126,
+              72,
+              79
+            ],
+            "missing_count": 0
+          },
+          {
+            "name": "disk.numberWriteAveraged.average",
+            "native_unit": "number",
+            "instance_class": "per-instance",
+            "values": [
+              158,
+              186,
+              194,
+              194,
+              275,
+              211
+            ],
+            "missing_count": 0
+          }
+        ]
+      },
+      "evidence": [
+        {
+          "path": "secrets/production-recovery/ra-a0/full.json",
+          "sha256": "7db0b192dcb7dd8b37fda2628403c91ea4ddc01c95fea45d270e4a36f0f46a58",
+          "private": true,
+          "bytes": 321891
+        },
+        {
+          "path": "secrets/production-recovery/ra-a0/correlation.json",
+          "sha256": "1b054b05b40767f520484ecdcb352f8c5a697d4ad22d4821cddaa19577b1f8ff",
+          "private": true,
+          "bytes": 451
+        },
+        {
+          "path": "secrets/production-recovery/ra-a0/authenticated-boot-proof.json",
+          "sha256": "dd7f050cd833ce22d5ed180a185beb8873699527bd6ea657add9c80cdb6ff5ef",
+          "private": true,
+          "bytes": 30805
+        },
+        {
+          "path": "secrets/production-recovery-ra-a0.jsonl",
+          "sha256": "d41f44ab7cc943bc8da2dcfccb3b4f0f2b552126a958b318cb073fa6f1ac9768",
+          "private": true,
+          "bytes": 26969
+        },
+        {
+          "path": "secrets/ra-a0-persistence.json",
+          "sha256": "49db622affd4454a1336094a4f8b549b766b54e0060b670a33d72fcfdab7d443",
+          "private": true,
+          "bytes": 1774
+        },
+        {
+          "path": "secrets/ra-a0-readahead-verify.json",
+          "sha256": "b765a125cf51b34ba9f4998084f70bbf5bd14b68d65dadb37bda902327ae9c31",
+          "private": true,
+          "bytes": 1248
+        },
+        {
+          "path": "secrets/host-storage-ra-a0.raw",
+          "sha256": "a9eb2aecc164e0dd0441840830405eaa21b28479ea58bb9eb361c62d3cec2526",
+          "private": true,
+          "bytes": 13883
+        },
+        {
+          "path": "secrets/vm-performance-ra-a0.raw",
+          "sha256": "a51aa8bf027544d3191fc02d311bccf870190903c898b92376bd66268f2079e9",
+          "private": true,
+          "bytes": 12728
+        },
+        {
+          "path": "evidence/production-recovery-ra-a0-summary.json",
+          "sha256": "90fdb4fbbd12fdb841d67d4b84e6c744168ebd0749b5f9fc06a8bca1080957c3",
+          "private": false,
+          "bytes": 452
+        },
+        {
+          "path": "secrets/production-recovery/ra-a0/full-receipt.json",
+          "sha256": "2c2a82c6379d5798efc7b9e9732379b7453c44714623165be3a6b5002e864e21",
+          "private": true,
+          "bytes": 562
+        },
+        {
+          "path": "secrets/production-recovery/ra-a0/correlation-receipt.json",
+          "sha256": "7c3bf83e20c88bb0dc8bd9b475316d7fae55409253ed6127d3fab56370560e5a",
+          "private": true,
+          "bytes": 569
+        }
+      ],
+      "capture_receipts": [
+        {
+          "mode": "full",
+          "exit_code": 0,
+          "controller_revision": "aceef6defe790cda62c22978371517a293c533b7",
+          "guest_source_sha256": "e2f2b8bcdd3ba3aaa8b3e9307bcc05373519eaa41ef66fd51741f81d9998b0ac",
+          "raw_sha256": "7db0b192dcb7dd8b37fda2628403c91ea4ddc01c95fea45d270e4a36f0f46a58",
+          "controller_started_monotonic_ns": 1565091093000000,
+          "controller_finished_monotonic_ns": 1565112375000000
+        },
+        {
+          "mode": "correlation",
+          "exit_code": 0,
+          "controller_revision": "aceef6defe790cda62c22978371517a293c533b7",
+          "guest_source_sha256": "e2f2b8bcdd3ba3aaa8b3e9307bcc05373519eaa41ef66fd51741f81d9998b0ac",
+          "raw_sha256": "1b054b05b40767f520484ecdcb352f8c5a697d4ad22d4821cddaa19577b1f8ff",
+          "controller_started_monotonic_ns": 1565113546000000,
+          "controller_finished_monotonic_ns": 1565118875000000
+        }
+      ],
+      "first_sample_cumulative_diskstats": [
+        {
+          "device_role": "whole_virtual_disk",
+          "read_operations": 3051,
+          "read_sectors": 198078,
+          "read_milliseconds": 78858,
+          "write_milliseconds": 715,
+          "io_milliseconds": 29159,
+          "discard_operations": 1,
+          "discard_sectors": 7800,
+          "discard_milliseconds": 2
+        },
+        {
+          "device_role": "root_partition",
+          "read_operations": 2462,
+          "read_sectors": 162006,
+          "read_milliseconds": 72431,
+          "write_milliseconds": 714,
+          "io_milliseconds": 26105,
+          "discard_operations": 1,
+          "discard_sectors": 7800,
+          "discard_milliseconds": 2
+        }
+      ],
+      "docker_events_result": "ok",
+      "full_capture_truncated": false
+    },
+    {
+      "cycle": "ra-b1",
+      "read_ahead_kib": 1024,
+      "timing_result": "pass",
+      "timing_reason": null,
+      "seconds_to_three_healthy_samples": 98.672,
+      "acceptance_utc": "2026-10-05T18:10:07.442130+00:00",
+      "boot_id": "e4e1aa9d-59b0-487b-9ddf-c63919311119",
+      "guest_boot_epoch_seconds": 1791223817,
+      "authenticated_boot_origin_after_acceptance_window_seconds": [
+        -3.452711329,
+        9.765288671
+      ],
+      "boot_origin_note": "Correlation uncertainty window, not measured shutdown duration; a negative lower bound reflects uncertainty. Shutdown/reboot and guest startup remain separate stages.",
+      "backup": {
+        "result": "pass",
+        "seconds": 1.812,
+        "dispatch_delay_after_first_ready_seconds": 0.0,
+        "strict_frozen_assertions": {
+          "one_attempt": true,
+          "recorded_pass": true,
+          "listing_available": true,
+          "archive_matches_baseline": true,
+          "after_new_boot_upper_bound": true,
+          "first_ready_trigger_matches": true,
+          "dispatch_within_one_second": true,
+          "elapsed_matches_timestamps": true,
+          "elapsed_within_five_seconds": true
+        },
+        "archive_identity_scope": "Frozen collector checks unique expected filename, size_bytes and encrypted flag; original API listing is not retained, so equality is not independently replayable and archive content integrity is not proven."
+      },
+      "independent_ClamAV_coverage": {
+        "result": "pass",
+        "guest_interval_start_ns": 76141711329,
+        "guest_interval_end_ns": 104624711329,
+        "pong_samples": 16,
+        "maximum_sample_gap_ns": 2008955500,
+        "current_container_endpoint_verified": true,
+        "does_not_override_timing_failure": true
+      },
+      "guest_phases_seconds": {
+        "local_fs_active": 18.314199,
+        "cloud_init_local_start": 21.068107,
+        "cloud_init_local_end": 25.159216,
+        "containerd_start": 30.94307,
+        "containerd_first_log": 36.747959,
+        "containerd_active": 40.141935,
+        "containerd_prelog_duration": 5.804889,
+        "containerd_startup_duration": 9.198865,
+        "containerd_metadata_marker_gap": 3.287531,
+        "dockerd_start": 40.152116,
+        "dockerd_first_log": 45.948549,
+        "dockerd_active": 48.287137,
+        "dockerd_prelog_duration": 5.796433,
+        "dockerd_startup_duration": 8.135021,
+        "stack_resume_start": 48.293713,
+        "stack_resume_end": 71.166958,
+        "stack_resume_duration": 22.873245,
+        "systemd_startup_complete": 72.201,
+        "first_sampled_direct_pong": 67.540430442
+      },
+      "software_identity": {
+        "kernel_version": "6.8.0-146-generic",
+        "compose_version": "5.5.1",
+        "clamav_signature_version": "ClamAV 1.4.6/28144/Mon Oct  5 06:24:24 2026"
+      },
+      "matches_A0": {
+        "kernel_version": true,
+        "package_versions": true,
+        "compose_version": true,
+        "clamav_signature_version": true,
+        "clamav_signature_files": true
+      },
+      "persistence": {
+        "admin_login": "pass",
+        "ca_decryption": "pass",
+        "agent": "pass",
+        "matches_A0": {
+          "ca_sha256": true,
+          "rules": true,
+          "categories": true,
+          "traffic": true,
+          "agent_version": true
+        },
+        "historical_encrypted_log_recovery": {
+          "result": "blocked",
+          "reason": "Supported Tier-1/Tier-2 backup excludes Tier-3 historical logs; retaining the log passphrase alone cannot recover them."
+        }
+      },
+      "sampler": {
+        "first_kernel_seconds": 21.529549962,
+        "last_kernel_seconds": 131.529563487,
+        "raw_sha256": "fa3d5172b003eb68c272921743eadf6cc80e5f86006d30519c506f737393526b",
+        "result": "active_snapshot",
+        "sample_count": 56
+      },
+      "lock_transitions_observed": [
+        {
+          "kernel_seconds": 21.529549962,
+          "locks": {
+            "os_update": {
+              "available": false,
+              "held": null
+            },
+            "maintenance_agent": {
+              "available": true,
+              "held": false
+            }
+          }
+        },
+        {
+          "kernel_seconds": 49.529511937,
+          "locks": {
+            "os_update": {
+              "available": true,
+              "held": true
+            },
+            "maintenance_agent": {
+              "available": true,
+              "held": true
+            }
+          }
+        },
+        {
+          "kernel_seconds": 71.529542809,
+          "locks": {
+            "os_update": {
+              "available": true,
+              "held": false
+            },
+            "maintenance_agent": {
+              "available": true,
+              "held": false
+            }
+          }
+        }
+      ],
+      "final_three_authenticated_checks": [
+        {
+          "admin": true,
+          "agent": true,
+          "clamav_scan": true,
+          "policy": true,
+          "ca": true,
+          "agent_version": true
+        },
+        {
+          "admin": true,
+          "agent": true,
+          "clamav_scan": true,
+          "policy": true,
+          "ca": true,
+          "agent_version": true
+        },
+        {
+          "admin": true,
+          "agent": true,
+          "clamav_scan": true,
+          "policy": true,
+          "ca": true,
+          "agent_version": true
+        }
+      ],
+      "post_public_readiness_nonhealthy_samples": [],
+      "host_metrics": {
+        "timestamps": [
+          "2026-10-05T18:10:20Z",
+          "2026-10-05T18:10:40Z",
+          "2026-10-05T18:11:00Z",
+          "2026-10-05T18:11:20Z"
+        ],
+        "interval_seconds": 20,
+        "series": [
+          {
+            "name": "cpu.usage.average",
+            "native_unit": "percent",
+            "instance_class": "aggregate",
+            "values": [
+              5068,
+              3557,
+              1923,
+              2381
+            ],
+            "missing_count": 0,
+            "native_scaling": "hundredths of percent",
+            "mean_percent": 32.3225
+          },
+          {
+            "name": "cpu.usagemhz.average",
+            "native_unit": "megaHertz",
+            "instance_class": "aggregate",
+            "values": [
+              5487,
+              3852,
+              2082,
+              2578
+            ],
+            "missing_count": 0
+          },
+          {
+            "name": "cpu.demand.average",
+            "native_unit": "megaHertz",
+            "instance_class": "aggregate",
+            "values": [
+              2615,
+              3341,
+              3743,
+              2866
+            ],
+            "missing_count": 0
+          },
+          {
+            "name": "mem.usage.average",
+            "native_unit": "percent",
+            "instance_class": "aggregate",
+            "values": [
+              7930,
+              7929,
+              7929,
+              7929
+            ],
+            "missing_count": 0,
+            "native_scaling": "hundredths of percent",
+            "mean_percent": 79.2925
+          },
+          {
+            "name": "mem.swapoutRate.average",
+            "native_unit": "kiloBytesPerSecond",
+            "instance_class": "aggregate",
+            "values": [
+              0,
+              0,
+              0,
+              0
+            ],
+            "missing_count": 0
+          },
+          {
+            "name": "mem.swapinRate.average",
+            "native_unit": "kiloBytesPerSecond",
+            "instance_class": "aggregate",
+            "values": [
+              0,
+              0,
+              0,
+              0
+            ],
+            "missing_count": 0
+          },
+          {
+            "name": "mem.compressed.average",
+            "native_unit": "kiloBytes",
+            "instance_class": "aggregate",
+            "values": [
+              0,
+              0,
+              0,
+              0
+            ],
+            "missing_count": 0
+          },
+          {
+            "name": "mem.vmmemctl.average",
+            "native_unit": "kiloBytes",
+            "instance_class": "aggregate",
+            "values": [
+              0,
+              0,
+              0,
+              0
+            ],
+            "missing_count": 0
+          }
+        ]
+      },
+      "vm_metrics": {
+        "timestamps": [
+          "2026-10-05T18:10:20Z",
+          "2026-10-05T18:10:40Z",
+          "2026-10-05T18:11:00Z",
+          "2026-10-05T18:11:20Z"
+        ],
+        "interval_seconds": 20,
+        "series": [
+          {
+            "name": "cpu.maxlimited.summation",
+            "native_unit": "millisecond",
+            "instance_class": "per-instance",
+            "values": [
+              0,
+              0,
+              0,
+              0
+            ],
+            "missing_count": 0
+          },
+          {
+            "name": "cpu.costop.summation",
+            "native_unit": "millisecond",
+            "instance_class": "per-instance",
+            "values": [
+              0,
+              0,
+              0,
+              0
+            ],
+            "missing_count": 0
+          },
+          {
+            "name": "mem.vmmemctl.average",
+            "native_unit": "kiloBytes",
+            "instance_class": "aggregate",
+            "values": [
+              0,
+              0,
+              0,
+              0
+            ],
+            "missing_count": 0
+          },
+          {
+            "name": "cpu.maxlimited.summation",
+            "native_unit": "millisecond",
+            "instance_class": "per-instance",
+            "values": [
+              0,
+              0,
+              0,
+              0
+            ],
+            "missing_count": 0
+          },
+          {
+            "name": "cpu.costop.summation",
+            "native_unit": "millisecond",
+            "instance_class": "aggregate",
+            "values": [
+              0,
+              0,
+              0,
+              0
+            ],
+            "missing_count": 0
+          },
+          {
+            "name": "cpu.costop.summation",
+            "native_unit": "millisecond",
+            "instance_class": "per-instance",
+            "values": [
+              0,
+              0,
+              0,
+              0
+            ],
+            "missing_count": 0
+          },
+          {
+            "name": "cpu.ready.summation",
+            "native_unit": "millisecond",
+            "instance_class": "aggregate",
+            "values": [
+              68,
+              80,
+              107,
+              82
+            ],
+            "missing_count": 0
+          },
+          {
+            "name": "cpu.maxlimited.summation",
+            "native_unit": "millisecond",
+            "instance_class": "aggregate",
+            "values": [
+              0,
+              0,
+              0,
+              0
+            ],
+            "missing_count": 0
+          },
+          {
+            "name": "cpu.ready.summation",
+            "native_unit": "millisecond",
+            "instance_class": "per-instance",
+            "values": [
+              29,
+              40,
+              55,
+              45
+            ],
+            "missing_count": 0
+          },
+          {
+            "name": "mem.swapinRate.average",
+            "native_unit": "kiloBytesPerSecond",
+            "instance_class": "aggregate",
+            "values": [
+              0,
+              0,
+              0,
+              0
+            ],
+            "missing_count": 0
+          },
+          {
+            "name": "cpu.ready.summation",
+            "native_unit": "millisecond",
+            "instance_class": "per-instance",
+            "values": [
+              39,
+              39,
+              52,
+              37
+            ],
+            "missing_count": 0
+          }
+        ]
+      },
+      "device_metrics": {
+        "timestamps": [
+          "2026-10-05T18:10:20Z",
+          "2026-10-05T18:10:40Z",
+          "2026-10-05T18:11:00Z",
+          "2026-10-05T18:11:20Z"
+        ],
+        "interval_seconds": 20,
+        "series": [
+          {
+            "name": "disk.deviceReadLatency.average",
+            "native_unit": "millisecond",
+            "instance_class": "per-instance",
+            "values": [
+              4,
+              26,
+              48,
+              41
+            ],
+            "missing_count": 0
+          },
+          {
+            "name": "disk.kernelReadLatency.average",
+            "native_unit": "millisecond",
+            "instance_class": "per-instance",
+            "values": [
+              0,
+              0,
+              1,
+              0
+            ],
+            "missing_count": 0
+          },
+          {
+            "name": "disk.queueReadLatency.average",
+            "native_unit": "millisecond",
+            "instance_class": "per-instance",
+            "values": [
+              0,
+              0,
+              0,
+              0
+            ],
+            "missing_count": 0
+          },
+          {
+            "name": "disk.deviceWriteLatency.average",
+            "native_unit": "millisecond",
+            "instance_class": "per-instance",
+            "values": [
+              14,
+              23,
+              29,
+              20
+            ],
+            "missing_count": 0
+          },
+          {
+            "name": "disk.kernelWriteLatency.average",
+            "native_unit": "millisecond",
+            "instance_class": "per-instance",
+            "values": [
+              8,
+              0,
+              65,
+              12
+            ],
+            "missing_count": 0
+          },
+          {
+            "name": "disk.queueWriteLatency.average",
+            "native_unit": "millisecond",
+            "instance_class": "per-instance",
+            "values": [
+              7,
+              0,
+              65,
+              12
+            ],
+            "missing_count": 0
+          },
+          {
+            "name": "disk.read.average",
+            "native_unit": "kiloBytesPerSecond",
+            "instance_class": "per-instance",
+            "values": [
+              3250,
+              5471,
+              10537,
+              20263
+            ],
+            "missing_count": 0
+          },
+          {
+            "name": "disk.write.average",
+            "native_unit": "kiloBytesPerSecond",
+            "instance_class": "per-instance",
+            "values": [
+              4189,
+              2531,
+              6167,
+              5930
+            ],
+            "missing_count": 0
+          },
+          {
+            "name": "disk.numberReadAveraged.average",
+            "native_unit": "number",
+            "instance_class": "per-instance",
+            "values": [
+              188,
+              153,
+              100,
+              56
+            ],
+            "missing_count": 0
+          },
+          {
+            "name": "disk.numberWriteAveraged.average",
+            "native_unit": "number",
+            "instance_class": "per-instance",
+            "values": [
+              99,
+              21,
+              129,
+              72
+            ],
+            "missing_count": 0
+          }
+        ]
+      },
+      "evidence": [
+        {
+          "path": "secrets/production-recovery/ra-b1/full.json",
+          "sha256": "f0742fd2d78c58bb02449de09892f705f0ec60f0b38e523b26b665dbbd5932b8",
+          "private": true,
+          "bytes": 311777
+        },
+        {
+          "path": "secrets/production-recovery/ra-b1/correlation.json",
+          "sha256": "83dc4d0bf8b44bbe2feccd6bc4379b52d9ae412a421e2bd3048fc2ba15ae5fdf",
+          "private": true,
+          "bytes": 451
+        },
+        {
+          "path": "secrets/production-recovery/ra-b1/authenticated-boot-proof.json",
+          "sha256": "99d222def4db1b6bf00c4b29e69efb35f26247b113bc51e1240ffe89b4147700",
+          "private": true,
+          "bytes": 20918
+        },
+        {
+          "path": "secrets/production-recovery-ra-b1.jsonl",
+          "sha256": "813f43162b33e8b7bf12870a3da36be9f141544f98d8bbe7433fe99761b53c8b",
+          "private": true,
+          "bytes": 17296
+        },
+        {
+          "path": "secrets/ra-b1-persistence.json",
+          "sha256": "49db622affd4454a1336094a4f8b549b766b54e0060b670a33d72fcfdab7d443",
+          "private": true,
+          "bytes": 1774
+        },
+        {
+          "path": "secrets/ra-b1-readahead-verify.json",
+          "sha256": "147d8341d7d7cb35f0907a1e8bfd790ab82672ed5e1d62e474bfdd5f4b0ad26c",
+          "private": true,
+          "bytes": 1252
+        },
+        {
+          "path": "secrets/host-storage-ra-b1.raw",
+          "sha256": "b75c745194f8af2c40934014efd0c193f715d5f401845b965eebe121a7720759",
+          "private": true,
+          "bytes": 13939
+        },
+        {
+          "path": "secrets/vm-performance-ra-b1.raw",
+          "sha256": "359861a5e65dc11ea6e6ecbd38399fba42c8e43254b95d89ed53a2e07deddf84",
+          "private": true,
+          "bytes": 12750
+        },
+        {
+          "path": "evidence/production-recovery-ra-b1-summary.json",
+          "sha256": "0576e030dc4e4961051594c7fd1a59017f264462b58e71a6c3b6d14c828714c2",
+          "private": false,
+          "bytes": 931
+        },
+        {
+          "path": "secrets/production-recovery/ra-b1/full-receipt.json",
+          "sha256": "a78fe09cccfe59248bb1e7e63878c356ab82c571432f071eeb7b73842abd4cde",
+          "private": true,
+          "bytes": 562
+        },
+        {
+          "path": "secrets/production-recovery/ra-b1/correlation-receipt.json",
+          "sha256": "3b5ca4f89da37ab08fac3139b94e16ecdb460f6e594627590b56c91c306637ac",
+          "private": true,
+          "bytes": 569
+        }
+      ],
+      "capture_receipts": [
+        {
+          "mode": "full",
+          "exit_code": 0,
+          "controller_revision": "aceef6defe790cda62c22978371517a293c533b7",
+          "guest_source_sha256": "e2f2b8bcdd3ba3aaa8b3e9307bcc05373519eaa41ef66fd51741f81d9998b0ac",
+          "raw_sha256": "f0742fd2d78c58bb02449de09892f705f0ec60f0b38e523b26b665dbbd5932b8",
+          "controller_started_monotonic_ns": 1565309578000000,
+          "controller_finished_monotonic_ns": 1565336406000000
+        },
+        {
+          "mode": "correlation",
+          "exit_code": 0,
+          "controller_revision": "aceef6defe790cda62c22978371517a293c533b7",
+          "guest_source_sha256": "e2f2b8bcdd3ba3aaa8b3e9307bcc05373519eaa41ef66fd51741f81d9998b0ac",
+          "raw_sha256": "83dc4d0bf8b44bbe2feccd6bc4379b52d9ae412a421e2bd3048fc2ba15ae5fdf",
+          "controller_started_monotonic_ns": 1565337500000000,
+          "controller_finished_monotonic_ns": 1565350718000000
+        }
+      ],
+      "first_sample_cumulative_diskstats": [
+        {
+          "device_role": "whole_virtual_disk",
+          "read_operations": 2922,
+          "read_sectors": 210774,
+          "read_milliseconds": 61464,
+          "write_milliseconds": 2823,
+          "io_milliseconds": 18182,
+          "discard_operations": 1,
+          "discard_sectors": 7840,
+          "discard_milliseconds": 2
+        },
+        {
+          "device_role": "root_partition",
+          "read_operations": 2342,
+          "read_sectors": 172886,
+          "read_milliseconds": 56683,
+          "write_milliseconds": 2799,
+          "io_milliseconds": 16981,
+          "discard_operations": 1,
+          "discard_sectors": 7840,
+          "discard_milliseconds": 2
+        }
+      ],
+      "docker_events_result": "ok",
+      "full_capture_truncated": false
+    },
+    {
+      "cycle": "ra-b2",
+      "read_ahead_kib": 1024,
+      "timing_result": "pass",
+      "timing_reason": null,
+      "seconds_to_three_healthy_samples": 73.89,
+      "acceptance_utc": "2026-10-05T18:14:01.675980+00:00",
+      "boot_id": "3c11b408-d43c-4881-8e7c-e4d0f544a1f8",
+      "guest_boot_epoch_seconds": 1791224048,
+      "authenticated_boot_origin_after_acceptance_window_seconds": [
+        0.788881413,
+        6.116881413
+      ],
+      "boot_origin_note": "Correlation uncertainty window, not measured shutdown duration; a negative lower bound reflects uncertainty. Shutdown/reboot and guest startup remain separate stages.",
+      "backup": {
+        "result": "pass",
+        "seconds": 0.734,
+        "dispatch_delay_after_first_ready_seconds": 0.0,
+        "strict_frozen_assertions": {
+          "one_attempt": true,
+          "recorded_pass": true,
+          "listing_available": true,
+          "archive_matches_baseline": true,
+          "after_new_boot_upper_bound": true,
+          "first_ready_trigger_matches": true,
+          "dispatch_within_one_second": true,
+          "elapsed_matches_timestamps": true,
+          "elapsed_within_five_seconds": true
+        },
+        "archive_identity_scope": "Frozen collector checks unique expected filename, size_bytes and encrypted flag; original API listing is not retained, so equality is not independently replayable and archive content integrity is not proven."
+      },
+      "independent_ClamAV_coverage": {
+        "result": "pass",
+        "guest_interval_start_ns": 54961118587,
+        "guest_interval_end_ns": 75601118587,
+        "pong_samples": 12,
+        "maximum_sample_gap_ns": 2013005461,
+        "current_container_endpoint_verified": true,
+        "does_not_override_timing_failure": true
+      },
+      "guest_phases_seconds": {
+        "local_fs_active": 11.830771,
+        "cloud_init_local_start": 13.90059,
+        "cloud_init_local_end": 17.841162,
+        "containerd_start": 22.749112,
+        "containerd_first_log": 26.386406,
+        "containerd_active": 29.227958,
+        "containerd_prelog_duration": 3.637294,
+        "containerd_startup_duration": 6.478846,
+        "containerd_metadata_marker_gap": 2.80011,
+        "dockerd_start": 29.235113,
+        "dockerd_first_log": 34.114171,
+        "dockerd_active": 35.358444,
+        "dockerd_prelog_duration": 4.879058,
+        "dockerd_startup_duration": 6.123331,
+        "stack_resume_start": 35.368267,
+        "stack_resume_end": 51.716567,
+        "stack_resume_duration": 16.3483,
+        "systemd_startup_complete": 52.793,
+        "first_sampled_direct_pong": 50.907450989
+      },
+      "software_identity": {
+        "kernel_version": "6.8.0-146-generic",
+        "compose_version": "5.5.1",
+        "clamav_signature_version": "ClamAV 1.4.6/28144/Mon Oct  5 06:24:24 2026"
+      },
+      "matches_A0": {
+        "kernel_version": true,
+        "package_versions": true,
+        "compose_version": true,
+        "clamav_signature_version": true,
+        "clamav_signature_files": true
+      },
+      "persistence": {
+        "admin_login": "pass",
+        "ca_decryption": "pass",
+        "agent": "pass",
+        "matches_A0": {
+          "ca_sha256": true,
+          "rules": true,
+          "categories": true,
+          "traffic": true,
+          "agent_version": true
+        },
+        "historical_encrypted_log_recovery": {
+          "result": "blocked",
+          "reason": "Supported Tier-1/Tier-2 backup excludes Tier-3 historical logs; retaining the log passphrase alone cannot recover them."
+        }
+      },
+      "sampler": {
+        "first_kernel_seconds": 14.895843353,
+        "last_kernel_seconds": 100.895936319,
+        "raw_sha256": "b21dd16bebed26fdbbdf09c002501dc270e51b19f2fb1f165009510c17b88676",
+        "result": "active_snapshot",
+        "sample_count": 44
+      },
+      "lock_transitions_observed": [
+        {
+          "kernel_seconds": 14.895843353,
+          "locks": {
+            "os_update": {
+              "available": false,
+              "held": null
+            },
+            "maintenance_agent": {
+              "available": true,
+              "held": false
+            }
+          }
+        },
+        {
+          "kernel_seconds": 36.8958841,
+          "locks": {
+            "os_update": {
+              "available": true,
+              "held": true
+            },
+            "maintenance_agent": {
+              "available": true,
+              "held": true
+            }
+          }
+        },
+        {
+          "kernel_seconds": 52.895929114,
+          "locks": {
+            "os_update": {
+              "available": true,
+              "held": false
+            },
+            "maintenance_agent": {
+              "available": true,
+              "held": false
+            }
+          }
+        }
+      ],
+      "final_three_authenticated_checks": [
+        {
+          "admin": true,
+          "agent": true,
+          "clamav_scan": true,
+          "policy": true,
+          "ca": true,
+          "agent_version": true
+        },
+        {
+          "admin": true,
+          "agent": true,
+          "clamav_scan": true,
+          "policy": true,
+          "ca": true,
+          "agent_version": true
+        },
+        {
+          "admin": true,
+          "agent": true,
+          "clamav_scan": true,
+          "policy": true,
+          "ca": true,
+          "agent_version": true
+        }
+      ],
+      "post_public_readiness_nonhealthy_samples": [],
+      "host_metrics": {
+        "timestamps": [
+          "2026-10-05T18:14:20Z",
+          "2026-10-05T18:14:40Z",
+          "2026-10-05T18:15:00Z"
+        ],
+        "interval_seconds": 20,
+        "series": [
+          {
+            "name": "cpu.usage.average",
+            "native_unit": "percent",
+            "instance_class": "aggregate",
+            "values": [
+              1738,
+              1390,
+              2639
+            ],
+            "missing_count": 0,
+            "native_scaling": "hundredths of percent",
+            "mean_percent": 19.223333
+          },
+          {
+            "name": "cpu.usagemhz.average",
+            "native_unit": "megaHertz",
+            "instance_class": "aggregate",
+            "values": [
+              1882,
+              1505,
+              2858
+            ],
+            "missing_count": 0
+          },
+          {
+            "name": "cpu.demand.average",
+            "native_unit": "megaHertz",
+            "instance_class": "aggregate",
+            "values": [
+              1109,
+              1251,
+              1582
+            ],
+            "missing_count": 0
+          },
+          {
+            "name": "mem.usage.average",
+            "native_unit": "percent",
+            "instance_class": "aggregate",
+            "values": [
+              7928,
+              7927,
+              7928
+            ],
+            "missing_count": 0,
+            "native_scaling": "hundredths of percent",
+            "mean_percent": 79.276667
+          },
+          {
+            "name": "mem.swapoutRate.average",
+            "native_unit": "kiloBytesPerSecond",
+            "instance_class": "aggregate",
+            "values": [
+              0,
+              0,
+              0
+            ],
+            "missing_count": 0
+          },
+          {
+            "name": "mem.swapinRate.average",
+            "native_unit": "kiloBytesPerSecond",
+            "instance_class": "aggregate",
+            "values": [
+              0,
+              0,
+              0
+            ],
+            "missing_count": 0
+          },
+          {
+            "name": "mem.compressed.average",
+            "native_unit": "kiloBytes",
+            "instance_class": "aggregate",
+            "values": [
+              0,
+              0,
+              0
+            ],
+            "missing_count": 0
+          },
+          {
+            "name": "mem.vmmemctl.average",
+            "native_unit": "kiloBytes",
+            "instance_class": "aggregate",
+            "values": [
+              0,
+              0,
+              0
+            ],
+            "missing_count": 0
+          }
+        ]
+      },
+      "vm_metrics": {
+        "timestamps": [
+          "2026-10-05T18:14:20Z",
+          "2026-10-05T18:14:40Z",
+          "2026-10-05T18:15:00Z"
+        ],
+        "interval_seconds": 20,
+        "series": [
+          {
+            "name": "cpu.maxlimited.summation",
+            "native_unit": "millisecond",
+            "instance_class": "per-instance",
+            "values": [
+              0,
+              0,
+              0
+            ],
+            "missing_count": 0
+          },
+          {
+            "name": "cpu.costop.summation",
+            "native_unit": "millisecond",
+            "instance_class": "per-instance",
+            "values": [
+              0,
+              0,
+              0
+            ],
+            "missing_count": 0
+          },
+          {
+            "name": "mem.vmmemctl.average",
+            "native_unit": "kiloBytes",
+            "instance_class": "aggregate",
+            "values": [
+              0,
+              0,
+              0
+            ],
+            "missing_count": 0
+          },
+          {
+            "name": "cpu.maxlimited.summation",
+            "native_unit": "millisecond",
+            "instance_class": "per-instance",
+            "values": [
+              0,
+              0,
+              0
+            ],
+            "missing_count": 0
+          },
+          {
+            "name": "cpu.costop.summation",
+            "native_unit": "millisecond",
+            "instance_class": "aggregate",
+            "values": [
+              0,
+              0,
+              0
+            ],
+            "missing_count": 0
+          },
+          {
+            "name": "cpu.costop.summation",
+            "native_unit": "millisecond",
+            "instance_class": "per-instance",
+            "values": [
+              0,
+              0,
+              0
+            ],
+            "missing_count": 0
+          },
+          {
+            "name": "cpu.ready.summation",
+            "native_unit": "millisecond",
+            "instance_class": "aggregate",
+            "values": [
+              75,
+              93,
+              69
+            ],
+            "missing_count": 0
+          },
+          {
+            "name": "cpu.maxlimited.summation",
+            "native_unit": "millisecond",
+            "instance_class": "aggregate",
+            "values": [
+              0,
+              0,
+              0
+            ],
+            "missing_count": 0
+          },
+          {
+            "name": "cpu.ready.summation",
+            "native_unit": "millisecond",
+            "instance_class": "per-instance",
+            "values": [
+              43,
+              49,
+              26
+            ],
+            "missing_count": 0
+          },
+          {
+            "name": "mem.swapinRate.average",
+            "native_unit": "kiloBytesPerSecond",
+            "instance_class": "aggregate",
+            "values": [
+              0,
+              0,
+              0
+            ],
+            "missing_count": 0
+          },
+          {
+            "name": "cpu.ready.summation",
+            "native_unit": "millisecond",
+            "instance_class": "per-instance",
+            "values": [
+              33,
+              44,
+              42
+            ],
+            "missing_count": 0
+          }
+        ]
+      },
+      "device_metrics": {
+        "timestamps": [
+          "2026-10-05T18:14:20Z",
+          "2026-10-05T18:14:40Z",
+          "2026-10-05T18:15:00Z"
+        ],
+        "interval_seconds": 20,
+        "series": [
+          {
+            "name": "disk.deviceReadLatency.average",
+            "native_unit": "millisecond",
+            "instance_class": "per-instance",
+            "values": [
+              7,
+              31,
+              16
+            ],
+            "missing_count": 0
+          },
+          {
+            "name": "disk.kernelReadLatency.average",
+            "native_unit": "millisecond",
+            "instance_class": "per-instance",
+            "values": [
+              0,
+              0,
+              0
+            ],
+            "missing_count": 0
+          },
+          {
+            "name": "disk.queueReadLatency.average",
+            "native_unit": "millisecond",
+            "instance_class": "per-instance",
+            "values": [
+              0,
+              0,
+              0
+            ],
+            "missing_count": 0
+          },
+          {
+            "name": "disk.deviceWriteLatency.average",
+            "native_unit": "millisecond",
+            "instance_class": "per-instance",
+            "values": [
+              5,
+              5,
+              27
+            ],
+            "missing_count": 0
+          },
+          {
+            "name": "disk.kernelWriteLatency.average",
+            "native_unit": "millisecond",
+            "instance_class": "per-instance",
+            "values": [
+              0,
+              0,
+              9
+            ],
+            "missing_count": 0
+          },
+          {
+            "name": "disk.queueWriteLatency.average",
+            "native_unit": "millisecond",
+            "instance_class": "per-instance",
+            "values": [
+              0,
+              0,
+              8
+            ],
+            "missing_count": 0
+          },
+          {
+            "name": "disk.read.average",
+            "native_unit": "kiloBytesPerSecond",
+            "instance_class": "per-instance",
+            "values": [
+              6932,
+              13676,
+              20184
+            ],
+            "missing_count": 0
+          },
+          {
+            "name": "disk.write.average",
+            "native_unit": "kiloBytesPerSecond",
+            "instance_class": "per-instance",
+            "values": [
+              1122,
+              558,
+              2729
+            ],
+            "missing_count": 0
+          },
+          {
+            "name": "disk.numberReadAveraged.average",
+            "native_unit": "number",
+            "instance_class": "per-instance",
+            "values": [
+              288,
+              137,
+              69
+            ],
+            "missing_count": 0
+          },
+          {
+            "name": "disk.numberWriteAveraged.average",
+            "native_unit": "number",
+            "instance_class": "per-instance",
+            "values": [
+              55,
+              25,
+              21
+            ],
+            "missing_count": 0
+          }
+        ]
+      },
+      "evidence": [
+        {
+          "path": "secrets/production-recovery/ra-b2/full.json",
+          "sha256": "a6d4b1487430aa48815d953500c3f6f3a57bbf2d920779634cadf38aa9fe862f",
+          "private": true,
+          "bytes": 308156
+        },
+        {
+          "path": "secrets/production-recovery/ra-b2/correlation.json",
+          "sha256": "65021d8626297556082acd8a47e4d84bcd2a15df9d0a604beeb7f07fffdeed2e",
+          "private": true,
+          "bytes": 451
+        },
+        {
+          "path": "secrets/production-recovery/ra-b2/authenticated-boot-proof.json",
+          "sha256": "7d2e9935a85f7165a4991ef2b5394a369aaff9e2aef65e690bafd4eb4547866b",
+          "private": true,
+          "bytes": 16590
+        },
+        {
+          "path": "secrets/production-recovery-ra-b2.jsonl",
+          "sha256": "727e81a49f98a5e828251cba054f240ef1ab680ac9c575f50613289941e7b21b",
+          "private": true,
+          "bytes": 14342
+        },
+        {
+          "path": "secrets/ra-b2-persistence.json",
+          "sha256": "49db622affd4454a1336094a4f8b549b766b54e0060b670a33d72fcfdab7d443",
+          "private": true,
+          "bytes": 1774
+        },
+        {
+          "path": "secrets/ra-b2-readahead-verify.json",
+          "sha256": "dd63bc3ccb56a1a7b0a4dc1c82f294e8037e3c52690f0e18543794d25e481382",
+          "private": true,
+          "bytes": 1252
+        },
+        {
+          "path": "secrets/host-storage-ra-b2.raw",
+          "sha256": "979a5aeb8fdee6f47282cffad16e5b3eaea32e8f3303f8a21b1a1535942e8f85",
+          "private": true,
+          "bytes": 13941
+        },
+        {
+          "path": "secrets/vm-performance-ra-b2.raw",
+          "sha256": "5c37e9cc17adb1187858e884d858ccc71cda4185edbb520f301d84d80bbf8b0a",
+          "private": true,
+          "bytes": 12782
+        },
+        {
+          "path": "evidence/production-recovery-ra-b2-summary.json",
+          "sha256": "cb3d57fda002ceff746a06a128bcc4ef444004ff6d12edbe4eb4609bde7851ae",
+          "private": false,
+          "bytes": 929
+        },
+        {
+          "path": "secrets/production-recovery/ra-b2/full-receipt.json",
+          "sha256": "253b8ae90b019182ec8e03f3aa5b54bd6f8e4c5943dc8ceffcd496a8cb39787f",
+          "private": true,
+          "bytes": 562
+        },
+        {
+          "path": "secrets/production-recovery/ra-b2/correlation-receipt.json",
+          "sha256": "0abb8aa2334ec27cac21afd8bb8984170de272f7d1ef8714fa7135f5874e49e0",
+          "private": true,
+          "bytes": 569
+        }
+      ],
+      "capture_receipts": [
+        {
+          "mode": "full",
+          "exit_code": 0,
+          "controller_revision": "aceef6defe790cda62c22978371517a293c533b7",
+          "guest_source_sha256": "e2f2b8bcdd3ba3aaa8b3e9307bcc05373519eaa41ef66fd51741f81d9998b0ac",
+          "raw_sha256": "a6d4b1487430aa48815d953500c3f6f3a57bbf2d920779634cadf38aa9fe862f",
+          "controller_started_monotonic_ns": 1565502953000000,
+          "controller_finished_monotonic_ns": 1565534359000000
+        },
+        {
+          "mode": "correlation",
+          "exit_code": 0,
+          "controller_revision": "aceef6defe790cda62c22978371517a293c533b7",
+          "guest_source_sha256": "e2f2b8bcdd3ba3aaa8b3e9307bcc05373519eaa41ef66fd51741f81d9998b0ac",
+          "raw_sha256": "65021d8626297556082acd8a47e4d84bcd2a15df9d0a604beeb7f07fffdeed2e",
+          "controller_started_monotonic_ns": 1565535531000000,
+          "controller_finished_monotonic_ns": 1565540859000000
+        }
+      ],
+      "first_sample_cumulative_diskstats": [
+        {
+          "device_role": "whole_virtual_disk",
+          "read_operations": 2933,
+          "read_sectors": 225225,
+          "read_milliseconds": 46889,
+          "write_milliseconds": 2380,
+          "io_milliseconds": 11858,
+          "discard_operations": 1,
+          "discard_sectors": 7936,
+          "discard_milliseconds": 4
+        },
+        {
+          "device_role": "root_partition",
+          "read_operations": 2351,
+          "read_sectors": 187381,
+          "read_milliseconds": 44505,
+          "write_milliseconds": 2353,
+          "io_milliseconds": 11315,
+          "discard_operations": 1,
+          "discard_sectors": 7936,
+          "discard_milliseconds": 4
+        }
+      ],
+      "docker_events_result": "ok",
+      "full_capture_truncated": false
+    },
+    {
+      "cycle": "ra-b3",
+      "read_ahead_kib": 1024,
+      "timing_result": "fail",
+      "timing_reason": "recovered_after_120_second_budget",
+      "seconds_to_three_healthy_samples": 159.859,
+      "acceptance_utc": "2026-10-05T18:17:03.463433+00:00",
+      "boot_id": "7300b940-e7e2-4950-9f8f-4b18a7ee8180",
+      "guest_boot_epoch_seconds": 1791224248,
+      "authenticated_boot_origin_after_acceptance_window_seconds": [
+        17.477735736,
+        23.837735736
+      ],
+      "boot_origin_note": "Correlation uncertainty window, not measured shutdown duration; a negative lower bound reflects uncertainty. Shutdown/reboot and guest startup remain separate stages.",
+      "backup": {
+        "result": "pass",
+        "seconds": 2.141,
+        "dispatch_delay_after_first_ready_seconds": 0.0,
+        "strict_frozen_assertions": {
+          "one_attempt": true,
+          "recorded_pass": true,
+          "listing_available": true,
+          "archive_matches_baseline": true,
+          "after_new_boot_upper_bound": true,
+          "first_ready_trigger_matches": true,
+          "dispatch_within_one_second": true,
+          "elapsed_matches_timestamps": true,
+          "elapsed_within_five_seconds": true
+        },
+        "archive_identity_scope": "Frozen collector checks unique expected filename, size_bytes and encrypted flag; original API listing is not retained, so equality is not independently replayable and archive content integrity is not proven."
+      },
+      "independent_ClamAV_coverage": {
+        "result": "pass",
+        "guest_interval_start_ns": 123256264264,
+        "guest_interval_end_ns": 144881264264,
+        "pong_samples": 12,
+        "maximum_sample_gap_ns": 2008984617,
+        "current_container_endpoint_verified": true,
+        "does_not_override_timing_failure": true
+      },
+      "guest_phases_seconds": {
+        "local_fs_active": 53.376387,
+        "cloud_init_local_start": 55.882034,
+        "cloud_init_local_end": 76.889923,
+        "containerd_start": 85.003071,
+        "containerd_first_log": 89.441016,
+        "containerd_active": 94.182563,
+        "containerd_prelog_duration": 4.437945,
+        "containerd_startup_duration": 9.179492,
+        "containerd_metadata_marker_gap": 4.682796,
+        "dockerd_start": 94.187069,
+        "dockerd_first_log": 99.850451,
+        "dockerd_active": 101.258632,
+        "dockerd_prelog_duration": 5.663382,
+        "dockerd_startup_duration": 7.071563,
+        "stack_resume_start": 101.265292,
+        "stack_resume_end": 118.211869,
+        "stack_resume_duration": 16.946577,
+        "systemd_startup_complete": 119.56700000000001,
+        "first_sampled_direct_pong": 117.052377344
+      },
+      "software_identity": {
+        "kernel_version": "6.8.0-146-generic",
+        "compose_version": "5.5.1",
+        "clamav_signature_version": "ClamAV 1.4.6/28144/Mon Oct  5 06:24:24 2026"
+      },
+      "matches_A0": {
+        "kernel_version": true,
+        "package_versions": true,
+        "compose_version": true,
+        "clamav_signature_version": true,
+        "clamav_signature_files": true
+      },
+      "persistence": {
+        "admin_login": "pass",
+        "ca_decryption": "pass",
+        "agent": "pass",
+        "matches_A0": {
+          "ca_sha256": true,
+          "rules": true,
+          "categories": true,
+          "traffic": true,
+          "agent_version": true
+        },
+        "historical_encrypted_log_recovery": {
+          "result": "blocked",
+          "reason": "Supported Tier-1/Tier-2 backup excludes Tier-3 historical logs; retaining the log passphrase alone cannot recover them."
+        }
+      },
+      "sampler": {
+        "first_kernel_seconds": 57.038602186,
+        "last_kernel_seconds": 157.03866506,
+        "raw_sha256": "bcd27bb2ecc8de18c0061eced6ab7db5438ecfa7fc43ad3d6b56796ebe2d08da",
+        "result": "active_snapshot",
+        "sample_count": 51
+      },
+      "lock_transitions_observed": [
+        {
+          "kernel_seconds": 57.038602186,
+          "locks": {
+            "os_update": {
+              "available": false,
+              "held": null
+            },
+            "maintenance_agent": {
+              "available": true,
+              "held": false
+            }
+          }
+        },
+        {
+          "kernel_seconds": 103.038695308,
+          "locks": {
+            "os_update": {
+              "available": true,
+              "held": true
+            },
+            "maintenance_agent": {
+              "available": true,
+              "held": true
+            }
+          }
+        },
+        {
+          "kernel_seconds": 119.038704245,
+          "locks": {
+            "os_update": {
+              "available": true,
+              "held": false
+            },
+            "maintenance_agent": {
+              "available": true,
+              "held": false
+            }
+          }
+        }
+      ],
+      "final_three_authenticated_checks": [
+        {
+          "admin": true,
+          "agent": true,
+          "clamav_scan": true,
+          "policy": true,
+          "ca": true,
+          "agent_version": true
+        },
+        {
+          "admin": true,
+          "agent": true,
+          "clamav_scan": true,
+          "policy": true,
+          "ca": true,
+          "agent_version": true
+        },
+        {
+          "admin": true,
+          "agent": true,
+          "clamav_scan": true,
+          "policy": true,
+          "ca": true,
+          "agent_version": true
+        }
+      ],
+      "post_public_readiness_nonhealthy_samples": [],
+      "host_metrics": {
+        "timestamps": [
+          "2026-10-05T18:17:40Z",
+          "2026-10-05T18:18:00Z",
+          "2026-10-05T18:18:20Z",
+          "2026-10-05T18:18:40Z",
+          "2026-10-05T18:19:00Z",
+          "2026-10-05T18:19:20Z"
+        ],
+        "interval_seconds": 20,
+        "series": [
+          {
+            "name": "cpu.usage.average",
+            "native_unit": "percent",
+            "instance_class": "aggregate",
+            "values": [
+              3455,
+              1046,
+              869,
+              1331,
+              1780,
+              2577
+            ],
+            "missing_count": 0,
+            "native_scaling": "hundredths of percent",
+            "mean_percent": 18.43
+          },
+          {
+            "name": "cpu.usagemhz.average",
+            "native_unit": "megaHertz",
+            "instance_class": "aggregate",
+            "values": [
+              3741,
+              1132,
+              941,
+              1442,
+              1928,
+              2791
+            ],
+            "missing_count": 0
+          },
+          {
+            "name": "cpu.demand.average",
+            "native_unit": "megaHertz",
+            "instance_class": "aggregate",
+            "values": [
+              2664,
+              2711,
+              1929,
+              1040,
+              1230,
+              1935
+            ],
+            "missing_count": 0
+          },
+          {
+            "name": "mem.usage.average",
+            "native_unit": "percent",
+            "instance_class": "aggregate",
+            "values": [
+              7929,
+              7930,
+              7929,
+              7928,
+              7928,
+              7929
+            ],
+            "missing_count": 0,
+            "native_scaling": "hundredths of percent",
+            "mean_percent": 79.288333
+          },
+          {
+            "name": "mem.swapoutRate.average",
+            "native_unit": "kiloBytesPerSecond",
+            "instance_class": "aggregate",
+            "values": [
+              0,
+              0,
+              0,
+              0,
+              0,
+              0
+            ],
+            "missing_count": 0
+          },
+          {
+            "name": "mem.swapinRate.average",
+            "native_unit": "kiloBytesPerSecond",
+            "instance_class": "aggregate",
+            "values": [
+              0,
+              0,
+              0,
+              0,
+              0,
+              0
+            ],
+            "missing_count": 0
+          },
+          {
+            "name": "mem.compressed.average",
+            "native_unit": "kiloBytes",
+            "instance_class": "aggregate",
+            "values": [
+              0,
+              0,
+              0,
+              0,
+              0,
+              0
+            ],
+            "missing_count": 0
+          },
+          {
+            "name": "mem.vmmemctl.average",
+            "native_unit": "kiloBytes",
+            "instance_class": "aggregate",
+            "values": [
+              0,
+              0,
+              0,
+              0,
+              0,
+              0
+            ],
+            "missing_count": 0
+          }
+        ]
+      },
+      "vm_metrics": {
+        "timestamps": [
+          "2026-10-05T18:17:40Z",
+          "2026-10-05T18:18:00Z",
+          "2026-10-05T18:18:20Z",
+          "2026-10-05T18:18:40Z",
+          "2026-10-05T18:19:00Z",
+          "2026-10-05T18:19:20Z"
+        ],
+        "interval_seconds": 20,
+        "series": [
+          {
+            "name": "cpu.maxlimited.summation",
+            "native_unit": "millisecond",
+            "instance_class": "per-instance",
+            "values": [
+              0,
+              0,
+              0,
+              0,
+              0,
+              0
+            ],
+            "missing_count": 0
+          },
+          {
+            "name": "cpu.costop.summation",
+            "native_unit": "millisecond",
+            "instance_class": "per-instance",
+            "values": [
+              0,
+              0,
+              0,
+              0,
+              0,
+              0
+            ],
+            "missing_count": 0
+          },
+          {
+            "name": "mem.vmmemctl.average",
+            "native_unit": "kiloBytes",
+            "instance_class": "aggregate",
+            "values": [
+              0,
+              0,
+              0,
+              0,
+              0,
+              0
+            ],
+            "missing_count": 0
+          },
+          {
+            "name": "cpu.maxlimited.summation",
+            "native_unit": "millisecond",
+            "instance_class": "per-instance",
+            "values": [
+              0,
+              0,
+              0,
+              0,
+              0,
+              0
+            ],
+            "missing_count": 0
+          },
+          {
+            "name": "cpu.costop.summation",
+            "native_unit": "millisecond",
+            "instance_class": "aggregate",
+            "values": [
+              0,
+              0,
+              0,
+              0,
+              0,
+              0
+            ],
+            "missing_count": 0
+          },
+          {
+            "name": "cpu.costop.summation",
+            "native_unit": "millisecond",
+            "instance_class": "per-instance",
+            "values": [
+              0,
+              0,
+              0,
+              0,
+              0,
+              0
+            ],
+            "missing_count": 0
+          },
+          {
+            "name": "cpu.ready.summation",
+            "native_unit": "millisecond",
+            "instance_class": "aggregate",
+            "values": [
+              16,
+              27,
+              45,
+              70,
+              82,
+              85
+            ],
+            "missing_count": 0
+          },
+          {
+            "name": "cpu.maxlimited.summation",
+            "native_unit": "millisecond",
+            "instance_class": "aggregate",
+            "values": [
+              0,
+              0,
+              0,
+              0,
+              0,
+              0
+            ],
+            "missing_count": 0
+          },
+          {
+            "name": "cpu.ready.summation",
+            "native_unit": "millisecond",
+            "instance_class": "per-instance",
+            "values": [
+              8,
+              13,
+              23,
+              34,
+              45,
+              40
+            ],
+            "missing_count": 0
+          },
+          {
+            "name": "mem.swapinRate.average",
+            "native_unit": "kiloBytesPerSecond",
+            "instance_class": "aggregate",
+            "values": [
+              0,
+              0,
+              0,
+              0,
+              0,
+              0
+            ],
+            "missing_count": 0
+          },
+          {
+            "name": "cpu.ready.summation",
+            "native_unit": "millisecond",
+            "instance_class": "per-instance",
+            "values": [
+              8,
+              14,
+              23,
+              35,
+              37,
+              46
+            ],
+            "missing_count": 0
+          }
+        ]
+      },
+      "device_metrics": {
+        "timestamps": [
+          "2026-10-05T18:17:40Z",
+          "2026-10-05T18:18:00Z",
+          "2026-10-05T18:18:20Z",
+          "2026-10-05T18:18:40Z",
+          "2026-10-05T18:19:00Z",
+          "2026-10-05T18:19:20Z"
+        ],
+        "interval_seconds": 20,
+        "series": [
+          {
+            "name": "disk.deviceReadLatency.average",
+            "native_unit": "millisecond",
+            "instance_class": "per-instance",
+            "values": [
+              11,
+              117,
+              40,
+              27,
+              64,
+              39
+            ],
+            "missing_count": 0
+          },
+          {
+            "name": "disk.kernelReadLatency.average",
+            "native_unit": "millisecond",
+            "instance_class": "per-instance",
+            "values": [
+              0,
+              3,
+              0,
+              0,
+              0,
+              2
+            ],
+            "missing_count": 0
+          },
+          {
+            "name": "disk.queueReadLatency.average",
+            "native_unit": "millisecond",
+            "instance_class": "per-instance",
+            "values": [
+              0,
+              3,
+              0,
+              0,
+              0,
+              1
+            ],
+            "missing_count": 0
+          },
+          {
+            "name": "disk.deviceWriteLatency.average",
+            "native_unit": "millisecond",
+            "instance_class": "per-instance",
+            "values": [
+              132,
+              122,
+              7,
+              4,
+              11,
+              28
+            ],
+            "missing_count": 0
+          },
+          {
+            "name": "disk.kernelWriteLatency.average",
+            "native_unit": "millisecond",
+            "instance_class": "per-instance",
+            "values": [
+              259,
+              189,
+              0,
+              0,
+              12,
+              12
+            ],
+            "missing_count": 0
+          },
+          {
+            "name": "disk.queueWriteLatency.average",
+            "native_unit": "millisecond",
+            "instance_class": "per-instance",
+            "values": [
+              255,
+              189,
+              0,
+              0,
+              12,
+              12
+            ],
+            "missing_count": 0
+          },
+          {
+            "name": "disk.read.average",
+            "native_unit": "kiloBytesPerSecond",
+            "instance_class": "per-instance",
+            "values": [
+              3154,
+              1595,
+              3811,
+              4565,
+              9836,
+              22148
+            ],
+            "missing_count": 0
+          },
+          {
+            "name": "disk.write.average",
+            "native_unit": "kiloBytesPerSecond",
+            "instance_class": "per-instance",
+            "values": [
+              28493,
+              56159,
+              9476,
+              75,
+              1168,
+              5948
+            ],
+            "missing_count": 0
+          },
+          {
+            "name": "disk.numberReadAveraged.average",
+            "native_unit": "number",
+            "instance_class": "per-instance",
+            "values": [
+              161,
+              28,
+              83,
+              131,
+              103,
+              64
+            ],
+            "missing_count": 0
+          },
+          {
+            "name": "disk.numberWriteAveraged.average",
+            "native_unit": "number",
+            "instance_class": "per-instance",
+            "values": [
+              93,
+              63,
+              17,
+              3,
+              56,
+              58
+            ],
+            "missing_count": 0
+          }
+        ]
+      },
+      "evidence": [
+        {
+          "path": "secrets/production-recovery/ra-b3/full.json",
+          "sha256": "dc8f5736e8f04e9ddb53c9b06f6c95c427dd2709b9dd4c92e1a17180156aff85",
+          "private": true,
+          "bytes": 316142
+        },
+        {
+          "path": "secrets/production-recovery/ra-b3/correlation.json",
+          "sha256": "9e5f4a86209c5e6ed0f2163d863c6b67b24eb472acf9812a1758cac15f9d8e97",
+          "private": true,
+          "bytes": 451
+        },
+        {
+          "path": "secrets/production-recovery/ra-b3/authenticated-boot-proof.json",
+          "sha256": "f03f444e01ad4b9f20f53a61604615ea08cd48d4ea18d0bcb6480a3227cc98b6",
+          "private": true,
+          "bytes": 19301
+        },
+        {
+          "path": "secrets/production-recovery-ra-b3.jsonl",
+          "sha256": "3b29f92cb732ecf5d9854a3ba01c2e4c4b3eb56f1670d29a3d328619b4e504e4",
+          "private": true,
+          "bytes": 24154
+        },
+        {
+          "path": "secrets/ra-b3-persistence.json",
+          "sha256": "49db622affd4454a1336094a4f8b549b766b54e0060b670a33d72fcfdab7d443",
+          "private": true,
+          "bytes": 1774
+        },
+        {
+          "path": "secrets/ra-b3-readahead-verify.json",
+          "sha256": "143649120e72485f2aff92e394aa22ce4785ef4d82de7aedca6eeb70c683c966",
+          "private": true,
+          "bytes": 1252
+        },
+        {
+          "path": "secrets/host-storage-ra-b3.raw",
+          "sha256": "08ac9886402eb312e6a1fdd53cd67139168003ba13abac231c234067bb51cc53",
+          "private": true,
+          "bytes": 13932
+        },
+        {
+          "path": "secrets/vm-performance-ra-b3.raw",
+          "sha256": "510a7ac95f2f8ae5c4e9f22985c11e1656231f12e8d42cb204f44ead0b8c6f6a",
+          "private": true,
+          "bytes": 12785
+        },
+        {
+          "path": "evidence/production-recovery-ra-b3-summary.json",
+          "sha256": "121bb6eaf7a4a6372d58def68811aa53bad855a6f923a598a40116598d47559e",
+          "private": false,
+          "bytes": 453
+        },
+        {
+          "path": "secrets/production-recovery/ra-b3/full-receipt.json",
+          "sha256": "1875c17d3e1a8b668fac63e4347ddc0bf16713ebcb03c9b8b8dd4284d21b28b1",
+          "private": true,
+          "bytes": 562
+        },
+        {
+          "path": "secrets/production-recovery/ra-b3/correlation-receipt.json",
+          "sha256": "4292298f4f9a0f4d5862ccc8c7f4be174bc7bd280342ca56f1466cb2b6e288cb",
+          "private": true,
+          "bytes": 569
+        }
+      ],
+      "capture_receipts": [
+        {
+          "mode": "full",
+          "exit_code": 0,
+          "controller_revision": "aceef6defe790cda62c22978371517a293c533b7",
+          "guest_source_sha256": "e2f2b8bcdd3ba3aaa8b3e9307bcc05373519eaa41ef66fd51741f81d9998b0ac",
+          "raw_sha256": "dc8f5736e8f04e9ddb53c9b06f6c95c427dd2709b9dd4c92e1a17180156aff85",
+          "controller_started_monotonic_ns": 1565772406000000,
+          "controller_finished_monotonic_ns": 1565792031000000
+        },
+        {
+          "mode": "correlation",
+          "exit_code": 0,
+          "controller_revision": "aceef6defe790cda62c22978371517a293c533b7",
+          "guest_source_sha256": "e2f2b8bcdd3ba3aaa8b3e9307bcc05373519eaa41ef66fd51741f81d9998b0ac",
+          "raw_sha256": "9e5f4a86209c5e6ed0f2163d863c6b67b24eb472acf9812a1758cac15f9d8e97",
+          "controller_started_monotonic_ns": 1565793296000000,
+          "controller_finished_monotonic_ns": 1565799656000000
+        }
+      ],
+      "first_sample_cumulative_diskstats": [
+        {
+          "device_role": "whole_virtual_disk",
+          "read_operations": 2970,
+          "read_sectors": 229675,
+          "read_milliseconds": 122278,
+          "write_milliseconds": 1848,
+          "io_milliseconds": 53777,
+          "discard_operations": 1,
+          "discard_sectors": 7936,
+          "discard_milliseconds": 40
+        },
+        {
+          "device_role": "root_partition",
+          "read_operations": 2312,
+          "read_sectors": 187542,
+          "read_milliseconds": 99485,
+          "write_milliseconds": 1847,
+          "io_milliseconds": 42027,
+          "discard_operations": 1,
+          "discard_sectors": 7936,
+          "discard_milliseconds": 40
+        }
+      ],
+      "docker_events_result": "ok",
+      "full_capture_truncated": false
+    },
+    {
+      "cycle": "ra-a1",
+      "read_ahead_kib": 128,
+      "timing_result": "fail",
+      "timing_reason": "recovered_after_120_second_budget",
+      "seconds_to_three_healthy_samples": 143.781,
+      "acceptance_utc": "2026-10-05T18:25:51.171869+00:00",
+      "boot_id": "5439a1f6-d7b5-4d61-bbe4-f977ee31710f",
+      "guest_boot_epoch_seconds": 1791224764,
+      "authenticated_boot_origin_after_acceptance_window_seconds": [
+        7.421735615,
+        12.671735615
+      ],
+      "boot_origin_note": "Correlation uncertainty window, not measured shutdown duration; a negative lower bound reflects uncertainty. Shutdown/reboot and guest startup remain separate stages.",
+      "backup": {
+        "result": "pass",
+        "seconds": 1.828,
+        "dispatch_delay_after_first_ready_seconds": 0.0,
+        "strict_frozen_assertions": {
+          "one_attempt": true,
+          "recorded_pass": true,
+          "listing_available": true,
+          "archive_matches_baseline": true,
+          "after_new_boot_upper_bound": true,
+          "first_ready_trigger_matches": true,
+          "dispatch_within_one_second": true,
+          "elapsed_matches_timestamps": true,
+          "elapsed_within_five_seconds": true
+        },
+        "archive_identity_scope": "Frozen collector checks unique expected filename, size_bytes and encrypted flag; original API listing is not retained, so equality is not independently replayable and archive content integrity is not proven."
+      },
+      "independent_ClamAV_coverage": {
+        "result": "pass",
+        "guest_interval_start_ns": 118312264385,
+        "guest_interval_end_ns": 138859264385,
+        "pong_samples": 12,
+        "maximum_sample_gap_ns": 2008006883,
+        "current_container_endpoint_verified": true,
+        "does_not_override_timing_failure": true
+      },
+      "guest_phases_seconds": {
+        "local_fs_active": 12.52663,
+        "cloud_init_local_start": 18.123481,
+        "cloud_init_local_end": 23.159482,
+        "containerd_start": 29.527044,
+        "containerd_first_log": 44.35249,
+        "containerd_active": 44.75326,
+        "containerd_prelog_duration": 14.825446,
+        "containerd_startup_duration": 15.226216,
+        "containerd_metadata_marker_gap": 0.276178,
+        "dockerd_start": 44.758118,
+        "dockerd_first_log": 53.747178,
+        "dockerd_active": 57.067481,
+        "dockerd_prelog_duration": 8.98906,
+        "dockerd_startup_duration": 12.309363,
+        "stack_resume_start": 57.079906,
+        "stack_resume_end": 82.021957,
+        "stack_resume_duration": 24.942051,
+        "systemd_startup_complete": 84.381,
+        "first_sampled_direct_pong": 77.454503872
+      },
+      "software_identity": {
+        "kernel_version": "6.8.0-146-generic",
+        "compose_version": "5.5.1",
+        "clamav_signature_version": "ClamAV 1.4.6/28144/Mon Oct  5 06:24:24 2026"
+      },
+      "matches_A0": {
+        "kernel_version": true,
+        "package_versions": true,
+        "compose_version": true,
+        "clamav_signature_version": true,
+        "clamav_signature_files": true
+      },
+      "persistence": {
+        "admin_login": "pass",
+        "ca_decryption": "pass",
+        "agent": "pass",
+        "matches_A0": {
+          "ca_sha256": true,
+          "rules": true,
+          "categories": true,
+          "traffic": true,
+          "agent_version": true
+        },
+        "historical_encrypted_log_recovery": {
+          "result": "blocked",
+          "reason": "Supported Tier-1/Tier-2 backup excludes Tier-3 historical logs; retaining the log passphrase alone cannot recover them."
+        }
+      },
+      "sampler": {
+        "first_kernel_seconds": 19.445501452,
+        "last_kernel_seconds": 159.445550156,
+        "raw_sha256": "c88ad32cc7cd6ff3930f9f13bdcbbc8226f7eb1e0d93f92975349b4c8f10415c",
+        "result": "active_snapshot",
+        "sample_count": 71
+      },
+      "lock_transitions_observed": [
+        {
+          "kernel_seconds": 19.445501452,
+          "locks": {
+            "os_update": {
+              "available": false,
+              "held": null
+            },
+            "maintenance_agent": {
+              "available": true,
+              "held": false
+            }
+          }
+        },
+        {
+          "kernel_seconds": 57.445614174,
+          "locks": {
+            "os_update": {
+              "available": true,
+              "held": true
+            },
+            "maintenance_agent": {
+              "available": true,
+              "held": true
+            }
+          }
+        },
+        {
+          "kernel_seconds": 83.445560451,
+          "locks": {
+            "os_update": {
+              "available": true,
+              "held": false
+            },
+            "maintenance_agent": {
+              "available": true,
+              "held": false
+            }
+          }
+        }
+      ],
+      "final_three_authenticated_checks": [
+        {
+          "admin": true,
+          "agent": true,
+          "clamav_scan": true,
+          "policy": true,
+          "ca": true,
+          "agent_version": true
+        },
+        {
+          "admin": true,
+          "agent": true,
+          "clamav_scan": true,
+          "policy": true,
+          "ca": true,
+          "agent_version": true
+        },
+        {
+          "admin": true,
+          "agent": true,
+          "clamav_scan": true,
+          "policy": true,
+          "ca": true,
+          "agent_version": true
+        }
+      ],
+      "post_public_readiness_nonhealthy_samples": [
+        {
+          "start_after_acceptance_seconds": 113.484,
+          "sample_elapsed_seconds": 4.516,
+          "authenticated_checks": null,
+          "authenticated_probe_error": "RemoteDisconnected",
+          "operator_ok": false,
+          "operator_error": "ValueError"
+        },
+        {
+          "start_after_acceptance_seconds": 118.484,
+          "sample_elapsed_seconds": 4.031,
+          "authenticated_checks": {
+            "admin": true,
+            "agent": false,
+            "clamav_scan": true,
+            "policy": true,
+            "ca": true,
+            "agent_version": false
+          },
+          "authenticated_probe_error": null,
+          "operator_ok": false,
+          "operator_error": "ValueError"
+        },
+        {
+          "start_after_acceptance_seconds": 123.484,
+          "sample_elapsed_seconds": 4.016,
+          "authenticated_checks": {
+            "admin": true,
+            "agent": false,
+            "clamav_scan": true,
+            "policy": true,
+            "ca": true,
+            "agent_version": false
+          },
+          "authenticated_probe_error": null,
+          "operator_ok": false,
+          "operator_error": "ValueError"
+        },
+        {
+          "start_after_acceptance_seconds": 128.484,
+          "sample_elapsed_seconds": 0.266,
+          "authenticated_checks": {
+            "admin": true,
+            "agent": false,
+            "clamav_scan": true,
+            "policy": true,
+            "ca": true,
+            "agent_version": false
+          },
+          "authenticated_probe_error": null,
+          "operator_ok": true,
+          "operator_error": null
+        }
+      ],
+      "host_metrics": {
+        "timestamps": [
+          "2026-10-05T18:26:20Z",
+          "2026-10-05T18:26:40Z",
+          "2026-10-05T18:27:00Z",
+          "2026-10-05T18:27:20Z"
+        ],
+        "interval_seconds": 20,
+        "series": [
+          {
+            "name": "cpu.usage.average",
+            "native_unit": "percent",
+            "instance_class": "aggregate",
+            "values": [
+              1967,
+              2204,
+              1753,
+              4224
+            ],
+            "missing_count": 0,
+            "native_scaling": "hundredths of percent",
+            "mean_percent": 25.37
+          },
+          {
+            "name": "cpu.usagemhz.average",
+            "native_unit": "megaHertz",
+            "instance_class": "aggregate",
+            "values": [
+              2130,
+              2387,
+              1898,
+              4573
+            ],
+            "missing_count": 0
+          },
+          {
+            "name": "cpu.demand.average",
+            "native_unit": "megaHertz",
+            "instance_class": "aggregate",
+            "values": [
+              1856,
+              2020,
+              2006,
+              2862
+            ],
+            "missing_count": 0
+          },
+          {
+            "name": "mem.usage.average",
+            "native_unit": "percent",
+            "instance_class": "aggregate",
+            "values": [
+              7929,
+              7930,
+              7929,
+              7929
+            ],
+            "missing_count": 0,
+            "native_scaling": "hundredths of percent",
+            "mean_percent": 79.2925
+          },
+          {
+            "name": "mem.swapoutRate.average",
+            "native_unit": "kiloBytesPerSecond",
+            "instance_class": "aggregate",
+            "values": [
+              0,
+              0,
+              0,
+              0
+            ],
+            "missing_count": 0
+          },
+          {
+            "name": "mem.swapinRate.average",
+            "native_unit": "kiloBytesPerSecond",
+            "instance_class": "aggregate",
+            "values": [
+              0,
+              0,
+              0,
+              0
+            ],
+            "missing_count": 0
+          },
+          {
+            "name": "mem.compressed.average",
+            "native_unit": "kiloBytes",
+            "instance_class": "aggregate",
+            "values": [
+              0,
+              0,
+              0,
+              0
+            ],
+            "missing_count": 0
+          },
+          {
+            "name": "mem.vmmemctl.average",
+            "native_unit": "kiloBytes",
+            "instance_class": "aggregate",
+            "values": [
+              0,
+              0,
+              0,
+              0
+            ],
+            "missing_count": 0
+          }
+        ]
+      },
+      "vm_metrics": {
+        "timestamps": [
+          "2026-10-05T18:26:20Z",
+          "2026-10-05T18:26:40Z",
+          "2026-10-05T18:27:00Z",
+          "2026-10-05T18:27:20Z"
+        ],
+        "interval_seconds": 20,
+        "series": [
+          {
+            "name": "cpu.maxlimited.summation",
+            "native_unit": "millisecond",
+            "instance_class": "per-instance",
+            "values": [
+              0,
+              0,
+              0,
+              0
+            ],
+            "missing_count": 0
+          },
+          {
+            "name": "cpu.costop.summation",
+            "native_unit": "millisecond",
+            "instance_class": "per-instance",
+            "values": [
+              0,
+              0,
+              0,
+              0
+            ],
+            "missing_count": 0
+          },
+          {
+            "name": "mem.vmmemctl.average",
+            "native_unit": "kiloBytes",
+            "instance_class": "aggregate",
+            "values": [
+              0,
+              0,
+              0,
+              0
+            ],
+            "missing_count": 0
+          },
+          {
+            "name": "cpu.maxlimited.summation",
+            "native_unit": "millisecond",
+            "instance_class": "per-instance",
+            "values": [
+              0,
+              0,
+              0,
+              0
+            ],
+            "missing_count": 0
+          },
+          {
+            "name": "cpu.costop.summation",
+            "native_unit": "millisecond",
+            "instance_class": "aggregate",
+            "values": [
+              0,
+              0,
+              0,
+              0
+            ],
+            "missing_count": 0
+          },
+          {
+            "name": "cpu.costop.summation",
+            "native_unit": "millisecond",
+            "instance_class": "per-instance",
+            "values": [
+              0,
+              0,
+              0,
+              0
+            ],
+            "missing_count": 0
+          },
+          {
+            "name": "cpu.ready.summation",
+            "native_unit": "millisecond",
+            "instance_class": "aggregate",
+            "values": [
+              77,
+              105,
+              117,
+              92
+            ],
+            "missing_count": 0
+          },
+          {
+            "name": "cpu.maxlimited.summation",
+            "native_unit": "millisecond",
+            "instance_class": "aggregate",
+            "values": [
+              0,
+              0,
+              0,
+              0
+            ],
+            "missing_count": 0
+          },
+          {
+            "name": "cpu.ready.summation",
+            "native_unit": "millisecond",
+            "instance_class": "per-instance",
+            "values": [
+              39,
+              49,
+              58,
+              52
+            ],
+            "missing_count": 0
+          },
+          {
+            "name": "mem.swapinRate.average",
+            "native_unit": "kiloBytesPerSecond",
+            "instance_class": "aggregate",
+            "values": [
+              0,
+              0,
+              0,
+              0
+            ],
+            "missing_count": 0
+          },
+          {
+            "name": "cpu.ready.summation",
+            "native_unit": "millisecond",
+            "instance_class": "per-instance",
+            "values": [
+              38,
+              56,
+              59,
+              41
+            ],
+            "missing_count": 0
+          }
+        ]
+      },
+      "device_metrics": {
+        "timestamps": [
+          "2026-10-05T18:26:20Z",
+          "2026-10-05T18:26:40Z",
+          "2026-10-05T18:27:00Z",
+          "2026-10-05T18:27:20Z"
+        ],
+        "interval_seconds": 20,
+        "series": [
+          {
+            "name": "disk.deviceReadLatency.average",
+            "native_unit": "millisecond",
+            "instance_class": "per-instance",
+            "values": [
+              10,
+              45,
+              27,
+              9
+            ],
+            "missing_count": 0
+          },
+          {
+            "name": "disk.kernelReadLatency.average",
+            "native_unit": "millisecond",
+            "instance_class": "per-instance",
+            "values": [
+              0,
+              1,
+              1,
+              0
+            ],
+            "missing_count": 0
+          },
+          {
+            "name": "disk.queueReadLatency.average",
+            "native_unit": "millisecond",
+            "instance_class": "per-instance",
+            "values": [
+              0,
+              0,
+              0,
+              0
+            ],
+            "missing_count": 0
+          },
+          {
+            "name": "disk.deviceWriteLatency.average",
+            "native_unit": "millisecond",
+            "instance_class": "per-instance",
+            "values": [
+              6,
+              38,
+              18,
+              28
+            ],
+            "missing_count": 0
+          },
+          {
+            "name": "disk.kernelWriteLatency.average",
+            "native_unit": "millisecond",
+            "instance_class": "per-instance",
+            "values": [
+              1,
+              56,
+              26,
+              44
+            ],
+            "missing_count": 0
+          },
+          {
+            "name": "disk.queueWriteLatency.average",
+            "native_unit": "millisecond",
+            "instance_class": "per-instance",
+            "values": [
+              0,
+              55,
+              25,
+              43
+            ],
+            "missing_count": 0
+          },
+          {
+            "name": "disk.read.average",
+            "native_unit": "kiloBytesPerSecond",
+            "instance_class": "per-instance",
+            "values": [
+              7547,
+              5916,
+              9529,
+              12490
+            ],
+            "missing_count": 0
+          },
+          {
+            "name": "disk.write.average",
+            "native_unit": "kiloBytesPerSecond",
+            "instance_class": "per-instance",
+            "values": [
+              883,
+              5516,
+              2137,
+              5814
+            ],
+            "missing_count": 0
+          },
+          {
+            "name": "disk.numberReadAveraged.average",
+            "native_unit": "number",
+            "instance_class": "per-instance",
+            "values": [
+              316,
+              121,
+              125,
+              129
+            ],
+            "missing_count": 0
+          },
+          {
+            "name": "disk.numberWriteAveraged.average",
+            "native_unit": "number",
+            "instance_class": "per-instance",
+            "values": [
+              30,
+              100,
+              29,
+              66
+            ],
+            "missing_count": 0
+          }
+        ]
+      },
+      "evidence": [
+        {
+          "path": "secrets/production-recovery/ra-a1/full.json",
+          "sha256": "6f7662e1521862505c47d1caaac70e57436ed1dd5b7ac62a1cdc50c941af6bb4",
+          "private": true,
+          "bytes": 336987
+        },
+        {
+          "path": "secrets/production-recovery/ra-a1/correlation.json",
+          "sha256": "74a05b2a277727b90ac732e8ea93200653aa6e7b622b406e370991dd685db0e1",
+          "private": true,
+          "bytes": 451
+        },
+        {
+          "path": "secrets/production-recovery/ra-a1/authenticated-boot-proof.json",
+          "sha256": "1794e5cdca1d896231c02825d3b92f89a482315f74ddd059069e8402f88d28ab",
+          "private": true,
+          "bytes": 26281
+        },
+        {
+          "path": "secrets/production-recovery-ra-a1.jsonl",
+          "sha256": "3c4fe65f288cd0428a1ae55efb6ebbede57edda15c2938cfee8836787d1f9756",
+          "private": true,
+          "bytes": 23954
+        },
+        {
+          "path": "secrets/ra-a1-persistence.json",
+          "sha256": "49db622affd4454a1336094a4f8b549b766b54e0060b670a33d72fcfdab7d443",
+          "private": true,
+          "bytes": 1774
+        },
+        {
+          "path": "secrets/ra-a1-readahead-verify.json",
+          "sha256": "c62928c772bda4e7564c5930bf2049424ef4753e852636f8abe65132e8f6cdd6",
+          "private": true,
+          "bytes": 1248
+        },
+        {
+          "path": "secrets/host-storage-ra-a1.raw",
+          "sha256": "8773f05156ba3ab9d79c71777f181656c8565a026b935a0d1fa82fbb765f2e3c",
+          "private": true,
+          "bytes": 13951
+        },
+        {
+          "path": "secrets/vm-performance-ra-a1.raw",
+          "sha256": "4d95f79049a9ed7cd4d4fc0719d437faa9e6aa015cfb0e085d07b89705ed43c6",
+          "private": true,
+          "bytes": 12791
+        },
+        {
+          "path": "evidence/production-recovery-ra-a1-summary.json",
+          "sha256": "da12cc5def5756eab30d27e0d611281c2e0e6f0c24ba6843e609e4ca772dd27b",
+          "private": false,
+          "bytes": 453
+        },
+        {
+          "path": "secrets/production-recovery/ra-a1/full-receipt.json",
+          "sha256": "a187189b549375fb824fc9c17ec61a39df9136d6b0cc3bfcae98e5828333bd9c",
+          "private": true,
+          "bytes": 562
+        },
+        {
+          "path": "secrets/production-recovery/ra-a1/correlation-receipt.json",
+          "sha256": "a2d50620b3ac04446fe6811f7e538294ad95665d804c0bfca2ce58f7fb013249",
+          "private": true,
+          "bytes": 569
+        }
+      ],
+      "capture_receipts": [
+        {
+          "mode": "full",
+          "exit_code": 0,
+          "controller_revision": "aceef6defe790cda62c22978371517a293c533b7",
+          "guest_source_sha256": "e2f2b8bcdd3ba3aaa8b3e9307bcc05373519eaa41ef66fd51741f81d9998b0ac",
+          "raw_sha256": "6f7662e1521862505c47d1caaac70e57436ed1dd5b7ac62a1cdc50c941af6bb4",
+          "controller_started_monotonic_ns": 1566282281000000,
+          "controller_finished_monotonic_ns": 1566325562000000
+        },
+        {
+          "mode": "correlation",
+          "exit_code": 0,
+          "controller_revision": "aceef6defe790cda62c22978371517a293c533b7",
+          "guest_source_sha256": "e2f2b8bcdd3ba3aaa8b3e9307bcc05373519eaa41ef66fd51741f81d9998b0ac",
+          "raw_sha256": "74a05b2a277727b90ac732e8ea93200653aa6e7b622b406e370991dd685db0e1",
+          "controller_started_monotonic_ns": 1566326656000000,
+          "controller_finished_monotonic_ns": 1566331906000000
+        }
+      ],
+      "first_sample_cumulative_diskstats": [
+        {
+          "device_role": "whole_virtual_disk",
+          "read_operations": 3125,
+          "read_sectors": 204158,
+          "read_milliseconds": 66908,
+          "write_milliseconds": 4108,
+          "io_milliseconds": 16237,
+          "discard_operations": 1,
+          "discard_sectors": 7928,
+          "discard_milliseconds": 5
+        },
+        {
+          "device_role": "root_partition",
+          "read_operations": 2537,
+          "read_sectors": 168094,
+          "read_milliseconds": 60325,
+          "write_milliseconds": 4106,
+          "io_milliseconds": 16051,
+          "discard_operations": 1,
+          "discard_sectors": 7928,
+          "discard_milliseconds": 5
+        }
+      ],
+      "docker_events_result": "ok",
+      "full_capture_truncated": false
+    }
+  ],
+  "host_pressure": {
+    "evidence": {
+      "path": "secrets/host-pressure-ra-a1.json",
+      "sha256": "80fbd9dc78f81ed979b8e44265bbaa3f2f9ca28327199f26d8a1e5b5b2cc8abc",
+      "private": true,
+      "bytes": 10162
+    },
+    "sample_count": 120,
+    "interval_seconds": 20,
+    "start": "2026-10-05T17:49:40Z",
+    "end": "2026-10-05T18:29:20Z",
+    "window_selection": "Only sample timestamps within each guest boot-to-systemd-complete interval. 20s bins overlap phase boundaries; shared host/device series include unrelated workloads."
+  },
+  "journal_diagnostics": [
+    {
+      "evidence": {
+        "path": "secrets/readahead-initial-shutdown-journals.json",
+        "sha256": "3a72903e76f1b1f87bcca1b6ffffedef3d12e657c2713458c873bf5fc8a02cf2",
+        "private": true,
+        "bytes": 1333
+      },
+      "classification": "Syntax failure: --boot and UUID were separate arguments; UUID parsed as journal match; Invalid argument. No evidence of journal absence.",
+      "attempts": [
+        {
+          "cycle": "ra-a0",
+          "result": "command_failed",
+          "exit_code": 1,
+          "timed_out": false
+        },
+        {
+          "cycle": "ra-b1",
+          "result": "command_failed",
+          "exit_code": 1,
+          "timed_out": false
+        }
+      ],
+      "journal_availability": "unknown",
+      "empty_binding_is_not_proof": true
+    },
+    {
+      "evidence": {
+        "path": "secrets/readahead-initial-shutdown-journals-v2.json",
+        "sha256": "5a6b0263012c7cbf865442b9333425f312e1468feed6e7b237b9f1bf7070651e",
+        "private": true,
+        "bytes": 1972
+      },
+      "classification": "Descriptor parsing failure for hyphenated old-boot UUID. No evidence of journal absence.",
+      "attempts": [
+        {
+          "cycle": "ra-a0",
+          "result": "command_failed",
+          "exit_code": 1,
+          "timed_out": false
+        },
+        {
+          "cycle": "ra-b1",
+          "result": "command_failed",
+          "exit_code": 1,
+          "timed_out": false
+        },
+        {
+          "cycle": "ra-b2",
+          "result": "command_failed",
+          "exit_code": 1,
+          "timed_out": false
+        }
+      ],
+      "journal_availability": "unknown",
+      "empty_binding_is_not_proof": true
+    },
+    {
+      "evidence": {
+        "path": "secrets/readahead-initial-shutdown-journals-v3.json",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "private": true,
+        "bytes": 0
+      },
+      "status": "transport_blocked",
+      "classification": "Canonical old-boot hexadecimal query attempted; retained result empty. Parent reports bounded 90-second transport failure/HTTP403; subsequently confirmed local completion marker and shell ready. This is not proof of absent journals.",
+      "source_of_transport_classification": "Parent-controlled console observation, not inferred from empty payload.",
+      "stderr_evidence": {
+        "path": "secrets/readahead-initial-shutdown-journals-v3.stderr",
+        "sha256": "4de0dd088fc5545b08d37c5231e310d668b30bfc997369e997bb3f6cbbcf0f15",
+        "private": true,
+        "bytes": 78
+      },
+      "journal_availability": "unknown",
+      "followup": "Separate v4 capture proves retained selected-unit prior-boot entries; original v3 transport failure is preserved."
+    },
+    {
+      "status": "partial_retained_evidence",
+      "evidence": {
+        "path": "secrets/early-boot-order-and-shutdown-v4.json",
+        "sha256": "df6188e1171e9fefc7006f76b8dbac50e3a62088c0931653a517eb02d75ebe9d",
+        "bytes": 390686,
+        "private": true
+      },
+      "classification": "Canonical 32-hex boot-ID queries returned actual previous-boot entries for all five cycles. Journals are retained for these queried units; no journal-absence claim.",
+      "query_scope": [
+        "docker.service",
+        "containerd.service",
+        "culvert-stack-resume.service",
+        "systemd-shutdown.service"
+      ],
+      "order": "newest first",
+      "requested_entry_limit": 120,
+      "per_query_capture_limit_bytes": 65536,
+      "complete_shutdown_trace": false,
+      "attempts": [
+        {
+          "cycle": "ra-a0",
+          "result": "output_limit",
+          "exit_code": 0,
+          "truncated": true,
+          "captured_bytes": 65536,
+          "valid_entries": 116,
+          "actual_old_boot_binding_verified": true,
+          "old_boot_monotonic_range_seconds": [
+            75.93062,
+            889.954683
+          ],
+          "shutdown_records_seconds_after_guest_acceptance": {
+            "containerd_unit_stopped": 3.612479,
+            "docker_unit_stopped": 3.608693,
+            "docker_daemon_shutdown_complete": 3.593597
+          }
+        },
+        {
+          "cycle": "ra-b1",
+          "result": "output_limit",
+          "exit_code": 0,
+          "truncated": true,
+          "captured_bytes": 65536,
+          "valid_entries": 116,
+          "actual_old_boot_binding_verified": true,
+          "old_boot_monotonic_range_seconds": [
+            95.801198,
+            277.704213
+          ],
+          "shutdown_records_seconds_after_guest_acceptance": {
+            "containerd_unit_stopped": 0.968721,
+            "docker_unit_stopped": 0.898408,
+            "docker_daemon_shutdown_complete": 0.884691
+          }
+        },
+        {
+          "cycle": "ra-b2",
+          "result": "output_limit",
+          "exit_code": 0,
+          "truncated": true,
+          "captured_bytes": 65536,
+          "valid_entries": 116,
+          "actual_old_boot_binding_verified": true,
+          "old_boot_monotonic_range_seconds": [
+            40.138174,
+            225.704843
+          ],
+          "shutdown_records_seconds_after_guest_acceptance": {
+            "containerd_unit_stopped": 0.705414,
+            "docker_unit_stopped": 0.705137,
+            "docker_daemon_shutdown_complete": 0.701666
+          }
+        },
+        {
+          "cycle": "ra-b3",
+          "result": "output_limit",
+          "exit_code": 0,
+          "truncated": true,
+          "captured_bytes": 65536,
+          "valid_entries": 116,
+          "actual_old_boot_binding_verified": true,
+          "old_boot_monotonic_range_seconds": [
+            29.220496,
+            177.918619
+          ],
+          "shutdown_records_seconds_after_guest_acceptance": {
+            "containerd_unit_stopped": 1.710034,
+            "docker_unit_stopped": 1.709384,
+            "docker_daemon_shutdown_complete": 1.708568
+          }
+        },
+        {
+          "cycle": "ra-a1",
+          "result": "output_limit",
+          "exit_code": 0,
+          "truncated": true,
+          "captured_bytes": 65536,
+          "valid_entries": 116,
+          "actual_old_boot_binding_verified": true,
+          "old_boot_monotonic_range_seconds": [
+            94.178809,
+            511.014398
+          ],
+          "shutdown_records_seconds_after_guest_acceptance": {
+            "containerd_unit_stopped": 6.590991,
+            "docker_unit_stopped": 6.587472,
+            "docker_daemon_shutdown_complete": 6.582601
+          }
+        }
+      ],
+      "interpretation": "Selected-unit shutdown records appear by approximately3.612/0.969/0.705/1.710/6.591 seconds after guest acceptance for A0/B1/B2/B3/A1. They do not cover the complete unmount, shutdown, firmware and reboot path or explain the entire acceptance-to-new-boot interval."
+    }
+  ],
+  "limitations": [
+    "No exact execution timestamp for udev setting; pre-udev I/O is not covered.",
+    "Only one owned VM; shared host workloads and cache state were not controlled.",
+    "20-second samples overlap phase boundaries and VM latency has missing samples; no interpolation.",
+    "Sampler starts after substantial early boot; main-thread states do not represent all threads or continuous waits.",
+    "Controller boot-origin correlation includes uncertainty and is not a direct shutdown duration.",
+    "Software/signature equality means captured version/package output and signature-file size/mtime; no database content-hash claim.",
+    "First-backup identity is the frozen recorded filename/size/encryption comparison, not archive-content verification or full restored-data coverage.",
+    "Supported backup still excludes Tier-3 historical logs; passphrase possession alone does not establish their recovery.",
+    "b579 artifact predates later product fixes; this experiment grants no production approval or scanner/full-disk remediation acceptance.",
+    "No private configuration values, credentials, raw logs, IP addresses, keys or certificates are embedded."
+  ],
+  "preserved_failures": [
+    "Original E0 baseline remains PASS/FAIL/FAIL at113.906/138.328/161.703 seconds.",
+    "A0 FAIL178.750; B3 FAIL159.859; return-A1 FAIL143.781 remain failures despite successful backup/state/PONG checks.",
+    "A1 agent and agent_version checks remain false after public readiness in three samples; not merely operator latency.",
+    "Historical597-second recovery and10-second backup timeout remain unresolved and are not explained by this experiment.",
+    "Journal syntax, descriptor and transport failures are retained as separate diagnostic outcomes."
+  ],
+  "conclusions": {
+    "binary_loading_phase": "Containerd pre-log A0/B1/B2/B3/A1 seconds:20.753/5.805/3.637/4.438/14.825. This reversible association is consistent with a bounded read-ahead benefit, but is not sufficient production recovery remediation.",
+    "metadata_gap": "Metadata-marker gap does not track read-ahead monotonically:11.818/3.288/2.800/4.683/0.276 seconds. Main-thread futex snapshots do not establish its blocking syscall or storage cause.",
+    "early_boot": "B3 first root mount3.018s, remount47.498s, local-fs53.376s precede its sampler57.039s. Cause is unobserved at process level.",
+    "discard": "At first B3 sample one completed discard totals40ms. This does not directly explain47-second root-remount timestamp; aggregate request times are not wall-clock attribution.",
+    "host_confounding": "Shared-device latency/queue pressure, aggregate host load and acceptance-to-boot timing vary between runs. VM CPU-ready/co-stop/maxlimited and memory metrics are retained in native units; no percentage conversion or CPU-contention conclusion is inferred.",
+    "production": "Two B passes followed by B3 failure do not satisfy three consecutive reboots. Return-A preserves phase-level evidence but does not change this verdict."
+  },
+  "early_boot_followup": {
+    "evidence": {
+      "path": "secrets/early-boot-order-and-shutdown-v4.json",
+      "sha256": "df6188e1171e9fefc7006f76b8dbac50e3a62088c0931653a517eb02d75ebe9d",
+      "bytes": 390686,
+      "private": true
+    },
+    "initrd_identity": {
+      "kernel": "6.8.0-146-generic",
+      "bytes": 37347640,
+      "mode": "0o644",
+      "uid": 0,
+      "sha256": "d22af6fa8e3b0c609ae3227b7e036b1262b3054b4f395ced2a4d3beedf32bf54"
+    },
+    "initrd_listing_result": "ok",
+    "initrd_listing_exit_code": 0,
+    "initrd_listing_truncated": false,
+    "matching_readahead_rule_entries": [],
+    "interpretation": "Successful retained initrd listing found no matching experiment readahead rule entries. Root-filesystem udev rule intervention must not be credited with changing pre-root/initrd reads. This snapshot does not timestamp rule application within each earlier run."
+  }
+}
