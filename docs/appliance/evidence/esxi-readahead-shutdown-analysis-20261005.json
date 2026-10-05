@@ -1,0 +1,449 @@
+{
+  "schema": 1,
+  "scope": "Offline selected previous-boot shutdown evidence for earlier rootfs-udev readahead campaign; not early-initrd v3 results",
+  "evidence": [
+    {
+      "path": "early-boot-order-and-shutdown-v4.json",
+      "sha256": "df6188e1171e9fefc7006f76b8dbac50e3a62088c0931653a517eb02d75ebe9d",
+      "bytes": 390686,
+      "private": true
+    }
+  ],
+  "cycles": [
+    {
+      "cycle": "ra-a0",
+      "docker_stopped_after_guest_acceptance_seconds": 3.608693,
+      "containerd_stopped_after_guest_acceptance_seconds": 3.612479,
+      "new_boot_origin_after_controller_acceptance_bounds_seconds": [
+        25.801686602,
+        31.130686602
+      ],
+      "timing_result": "fail",
+      "seconds_to_three_healthy_samples": 178.75,
+      "guest_phases_seconds": {
+        "local_fs_active": 28.291703,
+        "cloud_init_local_start": 31.533276,
+        "cloud_init_local_end": 57.720916,
+        "containerd_start": 63.144631,
+        "containerd_first_log": 83.897156,
+        "containerd_active": 95.919064,
+        "containerd_prelog_duration": 20.752525,
+        "containerd_startup_duration": 32.774433,
+        "containerd_metadata_marker_gap": 11.818296,
+        "dockerd_start": 95.926066,
+        "dockerd_first_log": 103.328131,
+        "dockerd_active": 107.143886,
+        "dockerd_prelog_duration": 7.402065,
+        "dockerd_startup_duration": 11.21782,
+        "stack_resume_start": 107.153871,
+        "stack_resume_end": 127.368611,
+        "stack_resume_duration": 20.21474,
+        "systemd_startup_complete": 128.216,
+        "first_sampled_direct_pong": 128.405433458
+      },
+      "evidence": [
+        {
+          "path": "production-recovery/ra-a0/acceptance.json",
+          "sha256": "24844dab54d42bfd27c6d5de82b8c7599ce846fffd0879ff91791ad55847a6c7",
+          "bytes": 685,
+          "private": true
+        },
+        {
+          "path": "production-recovery/ra-a0/full.json",
+          "sha256": "7db0b192dcb7dd8b37fda2628403c91ea4ddc01c95fea45d270e4a36f0f46a58",
+          "bytes": 321891,
+          "private": true
+        },
+        {
+          "path": "production-recovery/ra-a0/correlation.json",
+          "sha256": "1b054b05b40767f520484ecdcb352f8c5a697d4ad22d4821cddaa19577b1f8ff",
+          "bytes": 451,
+          "private": true
+        },
+        {
+          "path": "production-recovery/ra-a0/authenticated-boot-proof.json",
+          "sha256": "dd7f050cd833ce22d5ed180a185beb8873699527bd6ea657add9c80cdb6ff5ef",
+          "bytes": 30805,
+          "private": true
+        },
+        {
+          "path": "production-recovery-ra-a0.jsonl",
+          "sha256": "d41f44ab7cc943bc8da2dcfccb3b4f0f2b552126a958b318cb073fa6f1ac9768",
+          "bytes": 26969,
+          "private": true
+        }
+      ]
+    },
+    {
+      "cycle": "ra-b1",
+      "docker_stopped_after_guest_acceptance_seconds": 0.898408,
+      "containerd_stopped_after_guest_acceptance_seconds": 0.968721,
+      "new_boot_origin_after_controller_acceptance_bounds_seconds": [
+        -3.452711329,
+        9.765288671
+      ],
+      "timing_result": "pass",
+      "seconds_to_three_healthy_samples": 98.672,
+      "guest_phases_seconds": {
+        "local_fs_active": 18.314199,
+        "cloud_init_local_start": 21.068107,
+        "cloud_init_local_end": 25.159216,
+        "containerd_start": 30.94307,
+        "containerd_first_log": 36.747959,
+        "containerd_active": 40.141935,
+        "containerd_prelog_duration": 5.804889,
+        "containerd_startup_duration": 9.198865,
+        "containerd_metadata_marker_gap": 3.287531,
+        "dockerd_start": 40.152116,
+        "dockerd_first_log": 45.948549,
+        "dockerd_active": 48.287137,
+        "dockerd_prelog_duration": 5.796433,
+        "dockerd_startup_duration": 8.135021,
+        "stack_resume_start": 48.293713,
+        "stack_resume_end": 71.166958,
+        "stack_resume_duration": 22.873245,
+        "systemd_startup_complete": 72.201,
+        "first_sampled_direct_pong": 67.540430442
+      },
+      "evidence": [
+        {
+          "path": "production-recovery/ra-b1/acceptance.json",
+          "sha256": "4bb828a6e747146578e4b65d18fbc0bd3415e1b9f651095c6c385341dc8fee51",
+          "bytes": 685,
+          "private": true
+        },
+        {
+          "path": "production-recovery/ra-b1/full.json",
+          "sha256": "f0742fd2d78c58bb02449de09892f705f0ec60f0b38e523b26b665dbbd5932b8",
+          "bytes": 311777,
+          "private": true
+        },
+        {
+          "path": "production-recovery/ra-b1/correlation.json",
+          "sha256": "83dc4d0bf8b44bbe2feccd6bc4379b52d9ae412a421e2bd3048fc2ba15ae5fdf",
+          "bytes": 451,
+          "private": true
+        },
+        {
+          "path": "production-recovery/ra-b1/authenticated-boot-proof.json",
+          "sha256": "99d222def4db1b6bf00c4b29e69efb35f26247b113bc51e1240ffe89b4147700",
+          "bytes": 20918,
+          "private": true
+        },
+        {
+          "path": "production-recovery-ra-b1.jsonl",
+          "sha256": "813f43162b33e8b7bf12870a3da36be9f141544f98d8bbe7433fe99761b53c8b",
+          "bytes": 17296,
+          "private": true
+        }
+      ]
+    },
+    {
+      "cycle": "ra-b2",
+      "docker_stopped_after_guest_acceptance_seconds": 0.705137,
+      "containerd_stopped_after_guest_acceptance_seconds": 0.705414,
+      "new_boot_origin_after_controller_acceptance_bounds_seconds": [
+        0.788881413,
+        6.116881413
+      ],
+      "timing_result": "pass",
+      "seconds_to_three_healthy_samples": 73.89,
+      "guest_phases_seconds": {
+        "local_fs_active": 11.830771,
+        "cloud_init_local_start": 13.90059,
+        "cloud_init_local_end": 17.841162,
+        "containerd_start": 22.749112,
+        "containerd_first_log": 26.386406,
+        "containerd_active": 29.227958,
+        "containerd_prelog_duration": 3.637294,
+        "containerd_startup_duration": 6.478846,
+        "containerd_metadata_marker_gap": 2.80011,
+        "dockerd_start": 29.235113,
+        "dockerd_first_log": 34.114171,
+        "dockerd_active": 35.358444,
+        "dockerd_prelog_duration": 4.879058,
+        "dockerd_startup_duration": 6.123331,
+        "stack_resume_start": 35.368267,
+        "stack_resume_end": 51.716567,
+        "stack_resume_duration": 16.3483,
+        "systemd_startup_complete": 52.793,
+        "first_sampled_direct_pong": 50.907450989
+      },
+      "evidence": [
+        {
+          "path": "production-recovery/ra-b2/acceptance.json",
+          "sha256": "91f403819453c9544ddaaa7d40ddfbfabdc9650e16b8c9f53d76884c1d09f467",
+          "bytes": 685,
+          "private": true
+        },
+        {
+          "path": "production-recovery/ra-b2/full.json",
+          "sha256": "a6d4b1487430aa48815d953500c3f6f3a57bbf2d920779634cadf38aa9fe862f",
+          "bytes": 308156,
+          "private": true
+        },
+        {
+          "path": "production-recovery/ra-b2/correlation.json",
+          "sha256": "65021d8626297556082acd8a47e4d84bcd2a15df9d0a604beeb7f07fffdeed2e",
+          "bytes": 451,
+          "private": true
+        },
+        {
+          "path": "production-recovery/ra-b2/authenticated-boot-proof.json",
+          "sha256": "7d2e9935a85f7165a4991ef2b5394a369aaff9e2aef65e690bafd4eb4547866b",
+          "bytes": 16590,
+          "private": true
+        },
+        {
+          "path": "production-recovery-ra-b2.jsonl",
+          "sha256": "727e81a49f98a5e828251cba054f240ef1ab680ac9c575f50613289941e7b21b",
+          "bytes": 14342,
+          "private": true
+        }
+      ]
+    },
+    {
+      "cycle": "ra-b3",
+      "docker_stopped_after_guest_acceptance_seconds": 1.709384,
+      "containerd_stopped_after_guest_acceptance_seconds": 1.710034,
+      "new_boot_origin_after_controller_acceptance_bounds_seconds": [
+        17.477735736,
+        23.837735736
+      ],
+      "timing_result": "fail",
+      "seconds_to_three_healthy_samples": 159.859,
+      "guest_phases_seconds": {
+        "local_fs_active": 53.376387,
+        "cloud_init_local_start": 55.882034,
+        "cloud_init_local_end": 76.889923,
+        "containerd_start": 85.003071,
+        "containerd_first_log": 89.441016,
+        "containerd_active": 94.182563,
+        "containerd_prelog_duration": 4.437945,
+        "containerd_startup_duration": 9.179492,
+        "containerd_metadata_marker_gap": 4.682796,
+        "dockerd_start": 94.187069,
+        "dockerd_first_log": 99.850451,
+        "dockerd_active": 101.258632,
+        "dockerd_prelog_duration": 5.663382,
+        "dockerd_startup_duration": 7.071563,
+        "stack_resume_start": 101.265292,
+        "stack_resume_end": 118.211869,
+        "stack_resume_duration": 16.946577,
+        "systemd_startup_complete": 119.56700000000001,
+        "first_sampled_direct_pong": 117.052377344
+      },
+      "evidence": [
+        {
+          "path": "production-recovery/ra-b3/acceptance.json",
+          "sha256": "385628cbdd56aef0bdc2f5fbfcc67de4563fc17963f60cd00a6dfde68cb9c5d9",
+          "bytes": 685,
+          "private": true
+        },
+        {
+          "path": "production-recovery/ra-b3/full.json",
+          "sha256": "dc8f5736e8f04e9ddb53c9b06f6c95c427dd2709b9dd4c92e1a17180156aff85",
+          "bytes": 316142,
+          "private": true
+        },
+        {
+          "path": "production-recovery/ra-b3/correlation.json",
+          "sha256": "9e5f4a86209c5e6ed0f2163d863c6b67b24eb472acf9812a1758cac15f9d8e97",
+          "bytes": 451,
+          "private": true
+        },
+        {
+          "path": "production-recovery/ra-b3/authenticated-boot-proof.json",
+          "sha256": "f03f444e01ad4b9f20f53a61604615ea08cd48d4ea18d0bcb6480a3227cc98b6",
+          "bytes": 19301,
+          "private": true
+        },
+        {
+          "path": "production-recovery-ra-b3.jsonl",
+          "sha256": "3b29f92cb732ecf5d9854a3ba01c2e4c4b3eb56f1670d29a3d328619b4e504e4",
+          "bytes": 24154,
+          "private": true
+        }
+      ]
+    },
+    {
+      "cycle": "ra-a1",
+      "docker_stopped_after_guest_acceptance_seconds": 6.587472,
+      "containerd_stopped_after_guest_acceptance_seconds": 6.590991,
+      "new_boot_origin_after_controller_acceptance_bounds_seconds": [
+        7.421735615,
+        12.671735615
+      ],
+      "timing_result": "fail",
+      "seconds_to_three_healthy_samples": 143.781,
+      "guest_phases_seconds": {
+        "local_fs_active": 12.52663,
+        "cloud_init_local_start": 18.123481,
+        "cloud_init_local_end": 23.159482,
+        "containerd_start": 29.527044,
+        "containerd_first_log": 44.35249,
+        "containerd_active": 44.75326,
+        "containerd_prelog_duration": 14.825446,
+        "containerd_startup_duration": 15.226216,
+        "containerd_metadata_marker_gap": 0.276178,
+        "dockerd_start": 44.758118,
+        "dockerd_first_log": 53.747178,
+        "dockerd_active": 57.067481,
+        "dockerd_prelog_duration": 8.98906,
+        "dockerd_startup_duration": 12.309363,
+        "stack_resume_start": 57.079906,
+        "stack_resume_end": 82.021957,
+        "stack_resume_duration": 24.942051,
+        "systemd_startup_complete": 84.381,
+        "first_sampled_direct_pong": 77.454503872
+      },
+      "evidence": [
+        {
+          "path": "production-recovery/ra-a1/acceptance.json",
+          "sha256": "10063f6b314165b3a3fc95300155be5a15fbb627cb495a0f90cc2cf86f108e0b",
+          "bytes": 685,
+          "private": true
+        },
+        {
+          "path": "production-recovery/ra-a1/full.json",
+          "sha256": "6f7662e1521862505c47d1caaac70e57436ed1dd5b7ac62a1cdc50c941af6bb4",
+          "bytes": 336987,
+          "private": true
+        },
+        {
+          "path": "production-recovery/ra-a1/correlation.json",
+          "sha256": "74a05b2a277727b90ac732e8ea93200653aa6e7b622b406e370991dd685db0e1",
+          "bytes": 451,
+          "private": true
+        },
+        {
+          "path": "production-recovery/ra-a1/authenticated-boot-proof.json",
+          "sha256": "1794e5cdca1d896231c02825d3b92f89a482315f74ddd059069e8402f88d28ab",
+          "bytes": 26281,
+          "private": true
+        },
+        {
+          "path": "production-recovery-ra-a1.jsonl",
+          "sha256": "3c4fe65f288cd0428a1ae55efb6ebbede57edda15c2938cfee8836787d1f9756",
+          "bytes": 23954,
+          "private": true
+        }
+      ]
+    }
+  ],
+  "journal_scope": [
+    "docker.service",
+    "containerd.service",
+    "culvert-stack-resume.service",
+    "systemd-shutdown.service"
+  ],
+  "all_five_old_boot_ids_verified": true,
+  "valid_entries_per_cycle": 116,
+  "per_cycle_limit_bytes": 65536,
+  "all_queries_truncated": true,
+  "order": "newest first",
+  "complete_shutdown_trace": false,
+  "interpretation": [
+    "Guest monotonic journal minus guest acceptance gives same-boot measured intervals; this is distinct from controller clock-correlation bounds for next boot.",
+    "Selected Docker/containerd stop records finish within 0.705 to 6.591 seconds after guest acceptance. No timeout/failure text occurs in the retained post-acceptance selected-unit subset.",
+    "Final unmount, kernel shutdown, firmware and next-kernel transition are not covered. Do not assign the remaining interval to storage or controller delay.",
+    "Negative B1 boot-origin lower bound is correlation uncertainty, not negative shutdown.",
+    "A1 post-public-ready agent and agent_version checks fail at acceptance+118.484,123.484,128.484 seconds; not merely operator probe latency."
+  ],
+  "precise_stop_intervals_seconds": {
+    "ra-b3": {
+      "docker": 0.000158,
+      "containerd": 4.7e-05
+    },
+    "ra-a1": {
+      "docker": 0.006338,
+      "containerd": 0.002931
+    }
+  },
+  "preserved_failures": [
+    "Original E0 baseline remains PASS/FAIL/FAIL at113.906/138.328/161.703 seconds.",
+    "A0 FAIL178.750; B3 FAIL159.859; return-A1 FAIL143.781 remain failures despite successful backup/state/PONG checks.",
+    "A1 agent and agent_version checks remain false after public readiness in three samples; not merely operator latency.",
+    "Historical597-second recovery and10-second backup timeout remain unresolved and are not explained by this experiment.",
+    "Journal syntax, descriptor and transport failures are retained as separate diagnostic outcomes."
+  ],
+  "journal_diagnostic_failures": [
+    {
+      "evidence": {
+        "path": "secrets/readahead-initial-shutdown-journals.json",
+        "sha256": "3a72903e76f1b1f87bcca1b6ffffedef3d12e657c2713458c873bf5fc8a02cf2",
+        "private": true,
+        "bytes": 1333
+      },
+      "classification": "Syntax failure: --boot and UUID were separate arguments; UUID parsed as journal match; Invalid argument. No evidence of journal absence.",
+      "attempts": [
+        {
+          "cycle": "ra-a0",
+          "result": "command_failed",
+          "exit_code": 1,
+          "timed_out": false
+        },
+        {
+          "cycle": "ra-b1",
+          "result": "command_failed",
+          "exit_code": 1,
+          "timed_out": false
+        }
+      ],
+      "journal_availability": "unknown",
+      "empty_binding_is_not_proof": true
+    },
+    {
+      "evidence": {
+        "path": "secrets/readahead-initial-shutdown-journals-v2.json",
+        "sha256": "5a6b0263012c7cbf865442b9333425f312e1468feed6e7b237b9f1bf7070651e",
+        "private": true,
+        "bytes": 1972
+      },
+      "classification": "Descriptor parsing failure for hyphenated old-boot UUID. No evidence of journal absence.",
+      "attempts": [
+        {
+          "cycle": "ra-a0",
+          "result": "command_failed",
+          "exit_code": 1,
+          "timed_out": false
+        },
+        {
+          "cycle": "ra-b1",
+          "result": "command_failed",
+          "exit_code": 1,
+          "timed_out": false
+        },
+        {
+          "cycle": "ra-b2",
+          "result": "command_failed",
+          "exit_code": 1,
+          "timed_out": false
+        }
+      ],
+      "journal_availability": "unknown",
+      "empty_binding_is_not_proof": true
+    },
+    {
+      "evidence": {
+        "path": "secrets/readahead-initial-shutdown-journals-v3.json",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "private": true,
+        "bytes": 0
+      },
+      "status": "transport_blocked",
+      "classification": "Canonical old-boot hexadecimal query attempted; retained result empty. Parent reports bounded 90-second transport failure/HTTP403; subsequently confirmed local completion marker and shell ready. This is not proof of absent journals.",
+      "source_of_transport_classification": "Parent-controlled console observation, not inferred from empty payload.",
+      "stderr_evidence": {
+        "path": "secrets/readahead-initial-shutdown-journals-v3.stderr",
+        "sha256": "4de0dd088fc5545b08d37c5231e310d668b30bfc997369e997bb3f6cbbcf0f15",
+        "private": true,
+        "bytes": 78
+      },
+      "journal_availability": "unknown",
+      "followup": "Separate v4 capture proves retained selected-unit prior-boot entries; original v3 transport failure is preserved."
+    }
+  ],
+  "source_public_report_sha256": "d96dfb44d035d0ece515afa8ca74f28117aff85b41460d94c0b1b98cac149a7e",
+  "source_public_report_path": "docs/appliance/evidence/esxi-readahead-20261005.json"
+}
