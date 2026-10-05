@@ -41,6 +41,8 @@ func bootstrapRows(s applianceconsole.Snapshot, password string, height, width i
 		)
 	}
 	full = append(full,
+		applianceconsole.Row{Text: "SAVE RECOVERY SECRETS: after sign-in, [0] Recovery, [4].", Style: "warning"},
+		applianceconsole.Row{Text: "Neither this password nor the token replaces them."},
 		applianceconsole.Row{Text: "SSH password login is disabled."},
 		applianceconsole.Row{Text: "1 Network | 2 Setup | 3 Diagnostics | 4 Report | B Back"},
 	)

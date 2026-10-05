@@ -40,6 +40,7 @@ func allowlistedCommand(args []string) (name string, argv []string) {
 		{"poweroff", []string{"/usr/bin/sudo", "--", "/opt/culvert-appliance/bin/culvert-console", "--host=poweroff"}},
 		{"network_change", []string{"/usr/bin/sudo", "--", "/opt/culvert-appliance/bin/culvert-console", "--host=network"}},
 		{"recovery_shell", []string{"/bin/bash", "--noprofile", "--norc"}},
+		{"recovery_secrets", []string{"/usr/bin/sudo", "-k", "--", "/opt/culvert-appliance/bin/culvert-console", "--host=recovery-secrets"}},
 	}
 	for _, command := range commands {
 		if slices.Equal(command.args, args) {

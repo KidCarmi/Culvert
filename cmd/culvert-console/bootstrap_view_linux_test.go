@@ -100,3 +100,19 @@ func TestBootstrapFrameHandlesUnavailableAndCompletedSetup(t *testing.T) {
 		t.Fatal("completed browser setup offered a new setup token")
 	}
 }
+
+// The first screen reminds the operator to save the recovery secrets and says
+// where they are, on a standard 80x25 console in both setup states, and never
+// carries a passphrase itself (this view is shown BEFORE authentication).
+func TestBootstrapRemindsToSaveRecoverySecrets(t *testing.T) {
+	for _, setup := range []string{"pending", "completed"} {
+		s := applianceconsole.Snapshot{Phase: "ready", SetupStatus: setup, ManagementAvailable: true, Addresses: []string{"192.0.2.10"}, ManagementURLs: []string{"https://192.0.2.10:9090"}}
+		got := applianceconsole.Render(bootstrapRows(s, viewFixtureCredential, 25, 80), false)
+		if !strings.Contains(got, "SAVE RECOVERY SECRETS: after sign-in, [0] Recovery, [4].") || !strings.Contains(got, "Neither this password nor the token replaces them.") {
+			t.Errorf("setup %s: recovery-secret reminder missing at 80x25:\n%s", setup, got)
+		}
+		if strings.Contains(got, "PASSPHRASE=") {
+			t.Errorf("setup %s: the pre-authentication screen must never carry a passphrase", setup)
+		}
+	}
+}

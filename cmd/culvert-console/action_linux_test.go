@@ -24,6 +24,15 @@ func TestCommandAdapterRejectsModifiedArguments(t *testing.T) {
 	if commandName([]string{"/bin/bash", "--noprofile", "--norc"}) != "recovery_shell" {
 		t.Fatal("missing shell action")
 	}
+	// The recovery-secret reveal is allowlisted ONLY with sudo -k (a fresh
+	// password prompt); the same verb without -k is refused.
+	secrets := []string{"/usr/bin/sudo", "-k", "--", "/opt/culvert-appliance/bin/culvert-console", "--host=recovery-secrets"}
+	if commandName(secrets) != "recovery_secrets" {
+		t.Fatal("missing recovery_secrets action")
+	}
+	if commandName([]string{"/usr/bin/sudo", "--", "/opt/culvert-appliance/bin/culvert-console", "--host=recovery-secrets"}) != "" {
+		t.Fatal("recovery secrets allowlisted without a fresh sudo authentication")
+	}
 }
 
 func TestActionEnvironmentExcludesParentSecrets(t *testing.T) {

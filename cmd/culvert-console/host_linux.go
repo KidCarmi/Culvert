@@ -161,6 +161,8 @@ func runHost(ctx context.Context, mode string, c applianceconsole.Collector) err
 		return hostWorker(ctx, c)
 	case "network":
 		return networkDialog(ctx)
+	case "recovery-secrets":
+		return showRecoverySecrets(os.Stdin, os.Stdout)
 	case "reboot", "poweroff", "retry-reset", "retry-start":
 		return hostAction(ctx, mode, c)
 	default:

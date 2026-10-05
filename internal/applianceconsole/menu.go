@@ -72,6 +72,10 @@ func (a Actions) Apply(ctx context.Context, choice string) error {
 		return a.run(ctx, []string{"/bin/bash", "--noprofile", "--norc"})
 	case "7":
 		return a.run(ctx, []string{"/usr/bin/sudo", "--", bin + "culvert-console", "--host=network"})
+	case "8":
+		// sudo re-asks the operator's password: the reveal needs a fresh
+		// local authentication, not only the console session.
+		return a.run(ctx, []string{"/usr/bin/sudo", "-k", "--", bin + "culvert-console", "--host=recovery-secrets"})
 	default:
 		return errors.New("unknown recovery action")
 	}

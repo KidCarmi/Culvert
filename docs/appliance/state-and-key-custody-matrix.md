@@ -62,6 +62,10 @@ retention/cache data; a full restore keeps the previous copies in
 passphrases) to the secret store SEPARATELY from the archive; a VM snapshot
 is not an application-consistent backup and does not replace the archive +
 passphrase pair.
+On the OVA the values are read from the authenticated VM console:
+`[0]` Recovery → `[4]` Show recovery secrets (password asked again; only the
+two passphrase keys are printed; screen and scrollback cleared afterwards;
+audited by name, never by value). See `first-boot.md` §5.
 
 ## 5. What a restore proves (executed here)
 

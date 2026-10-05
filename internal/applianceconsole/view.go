@@ -102,6 +102,8 @@ func (v *View) handleScreen(key string) string {
 		return v.privileged("5")
 	case "recovery:3":
 		return v.privileged("6")
+	case "recovery:4":
+		return v.privileged("8")
 	}
 	return ""
 }
@@ -223,7 +225,7 @@ func (v View) details(s Snapshot) []Row {
 	case "report":
 		return reportRows(s)
 	case "recovery":
-		return []Row{{"AUTHENTICATED RECOVERY", "cyan"}, {"[1] Retry incomplete provisioning", ""}, {"[2] Restart / shutdown (confirmation required)", ""}, {"[3] Recovery shell", ""}, {"Retry cannot restore missing image content.", "warning"}}
+		return []Row{{"AUTHENTICATED RECOVERY", "cyan"}, {"[1] Retry incomplete provisioning", ""}, {"[2] Restart / shutdown (confirmation required)", ""}, {"[3] Recovery shell", ""}, {"[4] Show recovery secrets (your password is asked again)", ""}, {"Retry cannot restore missing image content.", "warning"}}
 	}
 	return nil
 }

@@ -24,7 +24,7 @@ func TestViewOnlyDispatchesAuthenticatedActions(t *testing.T) {
 			}
 		}
 	}
-	for _, tt := range []struct{ screen, key, action string }{{"access", "S", "2"}, {"network", "E", "7"}, {"recovery", "1", "4"}, {"recovery", "2", "5"}, {"recovery", "3", "6"}, {"home", "Q", "logout"}} {
+	for _, tt := range []struct{ screen, key, action string }{{"access", "S", "2"}, {"network", "E", "7"}, {"recovery", "1", "4"}, {"recovery", "2", "5"}, {"recovery", "3", "6"}, {"recovery", "4", "8"}, {"home", "Q", "logout"}} {
 		v := NewView(true)
 		v.screen = tt.screen
 		if got := v.Handle(tt.key); got != tt.action {

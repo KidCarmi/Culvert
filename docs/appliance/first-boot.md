@@ -69,6 +69,20 @@ Back up `/srv/culvert/.env` together with any backup of the data volume: a
 restored volume without the original passphrase cannot decrypt the CA
 (`install.sh` warns about exactly this case).
 
+**Save the recovery secrets before production.** First boot runs the
+installer non-interactively, so the generated passphrase is never printed.
+The first-boot screen reminds you; to read it, sign in on the VM console,
+press `[0]` Recovery, then `[4]` Show recovery secrets. That asks for your
+console password again (`sudo -k`), prints only `CULVERT_CA_PASSPHRASE` and
+`CULVERT_LOG_PASSPHRASE` from `/srv/culvert/.env` (on the appliance they
+are the same value) with the custody guidance, and clears the screen and
+its scrollback when you press Enter. The audit records that the reveal ran,
+never the value. It is not available over the read-only `culvert-operator`
+SSH, in `--json`/`--report`, or in diagnostics. `CULVERT_BACKUP_PASSPHRASE`
+is yours and is not stored on the appliance; the console password and the
+setup token replace none of these. A fresh-appliance restore needs the
+archive, these passphrases and the backup passphrase.
+
 ### 6. Enrol the first administrator
 Browse to `https://<address>:9090`. The admin UI serves a **self-signed**
 certificate at this point (accept the warning once). The setup wizard
