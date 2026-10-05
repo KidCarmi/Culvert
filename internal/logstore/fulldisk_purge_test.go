@@ -41,7 +41,7 @@ func TestPurgeOnFullFilesystemFreesSpaceAndWritesResume(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = syscall.Unmount(mnt, syscall.MNT_DETACH) })
 
-	cmd := exec.CommandContext(t.Context(), os.Args[0], "-test.run=^TestPurgeOnFullFilesystemFreesSpaceAndWritesResume$") // #nosec G204 -- re-runs this test binary as the child
+	cmd := exec.CommandContext(t.Context(), os.Args[0], "-test.run=^TestPurgeOnFullFilesystemFreesSpaceAndWritesResume$") // #nosec G204 G702 -- re-runs this test binary as the child
 	cmd.Env = append(os.Environ(), "LOGSTORE_PURGE_FULL_CHILD="+mnt)
 	out, err := cmd.CombinedOutput()
 	if err != nil {

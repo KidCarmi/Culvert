@@ -261,7 +261,7 @@ func (f *sshBoundaryFixture) startDaemon(t *testing.T) {
 	}
 	config := filepath.Join(f.dir, "sshd_config")
 	settings := fmt.Sprintf("\nPort %d\nListenAddress 127.0.0.1\nHostKey %s\nPidFile %s\nLogLevel ERROR\nSubsystem sftp internal-sftp\nAcceptEnv BASH_ENV ENV SSH_AUTH_SOCK PATH PAGER SYSTEMD_PAGER\n", port, f.hostKey, filepath.Join(f.dir, "sshd.pid"))
-	if err := os.WriteFile(config, append(source, []byte(settings)...), 0o600); err != nil {
+	if err := os.WriteFile(config, append(source, []byte(settings)...), 0o600); err != nil { // #nosec G703 -- config is a file in this test's own temp dir
 		t.Fatal(err)
 	}
 	// Ubuntu's privilege-separation directory may be absent on an unused runner.
