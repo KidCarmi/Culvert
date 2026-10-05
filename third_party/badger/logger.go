@@ -6,8 +6,10 @@
 package badger
 
 import (
+	"fmt"
 	"log"
 	"os"
+	"strings"
 )
 
 // Logger is implemented by any logging system that is used for standard logs.
@@ -24,7 +26,7 @@ func (opt *Options) Errorf(format string, v ...interface{}) {
 	if opt.Logger == nil {
 		return
 	}
-	opt.Logger.Errorf(format, v...)
+	opt.Logger.Errorf("%s", logLine(format, v...))
 }
 
 // Infof logs an INFO message to the logger specified in opts.
@@ -32,7 +34,7 @@ func (opt *Options) Infof(format string, v ...interface{}) {
 	if opt.Logger == nil {
 		return
 	}
-	opt.Logger.Infof(format, v...)
+	opt.Logger.Infof("%s", logLine(format, v...))
 }
 
 // Warningf logs a WARNING message to the logger specified in opts.
@@ -40,7 +42,7 @@ func (opt *Options) Warningf(format string, v ...interface{}) {
 	if opt.Logger == nil {
 		return
 	}
-	opt.Logger.Warningf(format, v...)
+	opt.Logger.Warningf("%s", logLine(format, v...))
 }
 
 // Debugf logs a DEBUG message to the logger specified in opts.
@@ -48,7 +50,16 @@ func (opt *Options) Debugf(format string, v ...interface{}) {
 	if opt.Logger == nil {
 		return
 	}
-	opt.Logger.Debugf(format, v...)
+	opt.Logger.Debugf("%s", logLine(format, v...))
+}
+
+// logLine renders a log message with CR/LF escaped. CULVERT PATCH (scanner):
+// keys and values reach these messages (e.g. "Unable to read: Key: %v"), so a
+// key carrying a newline could forge a log line (CWE-117).
+func logLine(format string, v ...interface{}) string {
+	s := fmt.Sprintf(format, v...)
+	s = strings.ReplaceAll(s, "\n", `\n`)
+	return strings.ReplaceAll(s, "\r", `\r`)
 }
 
 type loggingLevel int

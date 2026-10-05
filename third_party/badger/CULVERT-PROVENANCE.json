@@ -6,11 +6,23 @@
   "module_zip_url": "https://proxy.golang.org/github.com/dgraph-io/badger/v4/@v/v4.9.6.zip",
   "patch": {
     "added": {},
-    "effect": "a failed memtable allocation (ensureRoomForWrite, dropAll, dropPrefixes) leaves the current memtable in place and returns the error instead of leaving db.mt nil (the next write was a fatal AssertTrue); a failed value-log grow returns the reserved offset (F-DISK-1)",
+    "effect": "a failed memtable allocation (ensureRoomForWrite, dropAll, dropPrefixes) leaves the current memtable in place and returns the error instead of leaving db.mt nil (the next write was a fatal AssertTrue); a failed value-log grow returns the reserved offset (F-DISK-1); scanner fixes: memtable ids parse bounded to 31 bits (they become a uint32 WAL fid) and table ids parse as unsigned 32-bit (a negative or >= 2^32 name is not a table file instead of a fatal AssertTrue), and Options log methods escape CR/LF (CWE-117)",
     "modified": {
       "db.go": {
         "patched_sha256": "8688146e55fdb365f5cda3964f651c8bd24654bd3cd4a61b7b89ddb0710b41cb",
         "upstream_sha256": "823fe02d0797e1e95bab29523a26fb4fda0bee8f7635397d41acad6e05359f7a"
+      },
+      "logger.go": {
+        "patched_sha256": "b7018f2246b98be17e85dba0afd5a3a34cf80088c4c05a3516ff9606580d8342",
+        "upstream_sha256": "f0cc1665b8b12640b1c7394734b85e038fc375f04aa1218b5cf1d68aeb95f225"
+      },
+      "memtable.go": {
+        "patched_sha256": "6e863fdea8bdfb456870a1aa2c6d0704a81602bb15084662e9a6c152d5ece4b9",
+        "upstream_sha256": "6bb2c6aced2934ca6363f31da71c306695fa3b996a04c9e953d9bc086e21886c"
+      },
+      "table/table.go": {
+        "patched_sha256": "519a50d3cb6a4f826d1b4ffb252ee5c3e8c161577787404a22d5947bac73fb2d",
+        "upstream_sha256": "eadaeb76de9e82f21d9fe77e52ae2ee164256c656e3c9a2f8ad2ba76c6808677"
       },
       "value.go": {
         "patched_sha256": "a5202a27c2e7ec0ec9ea315074576c4bd1d184b302be4f8005709f554cb2033f",

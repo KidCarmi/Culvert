@@ -1,4 +1,4 @@
-# Survive a failed memtable / value-log allocation (F-DISK-1)
+# Survive a failed memtable / value-log allocation (F-DISK-1) + scanner fixes
 
 This directory is the complete `github.com/dgraph-io/badger/v4 v4.9.6` Go
 module (tag commit `fbd8d2eefad8be8757249767255faf989945b599`, module sum and
@@ -28,6 +28,18 @@ the request-history store's `PurgeAll`) had the same nil-on-failure shape.
 | `db.go` `dropAll`, `dropPrefixes` | Allocate the replacement before tearing the old memtables down; a failed allocation changes nothing. `dropPrefixes` discards the spare if a flush fails. |
 | `value.go` `write` | When the grow of the current value log fails, return the offset reserved for the entry (`writableLogOffset`) before returning the error. Measured: upstream's kept offset leaves an unused hole and does NOT lose acknowledged values in `TestFullFilesystemWriteReturnsErrorNotSIGBUS/vlog-grow` (values are read by pointer), so this is hygiene, not a demonstrated data-loss fix. |
 
+Scanner findings closed in the same fork (CodeQL scans `third_party/` as
+repository code), each a behaviour fix rather than a suppression:
+
+| File | Change |
+|---|---|
+| `table/table.go` `ParseFileID` | Parse the id with `strconv.ParseUint(name, 10, 32)`. Upstream used `Atoi` and then `y.AssertTrue(id >= 0)`, so a file named `-1.sst` in the store directory was `log.Fatalf` at open, and an id `>= 2^32` was fatal in `blockCacheKey` (it packs the id into 4 bytes). Such a name is now "not a table file". |
+| `memtable.go` `openMemTables` | Parse memtable ids with `ParseUint(…, 10, 31)`: the id becomes both an `int` and the WAL's `uint32` fid. Upstream parsed 64 bits and truncated silently into the fid; an out-of-range `.mem` name is now an error at open. |
+| `logger.go` `Options.{Errorf,Warningf,Infof,Debugf}` | Render the message and escape CR/LF before it reaches the logger (CWE-117: keys reach messages such as `Unable to read: Key: %v`). The product stores pass `WithLogger(nil)`, so this is defence in depth. |
+
+Pinned by `internal/catdb/badger_patch_test.go` (fails against upstream:
+`Assert failed` for `-1.sst`, and raw CR/LF in four log lines).
+
 Already safe without a badger change, and why:
 - `flushMemtable` retries a failed L0 table build once a second. A failed
   `O_EXCL` table or value-log creation leaves no file and no descriptor
@@ -43,7 +55,7 @@ Already safe without a badger change, and why:
 
 ```text
 python3 appliance/artifact-audit/verify_dependency_forks.py      # upstream bytes + exact patches (both forks)
-go test ./internal/catdb -run 'TestStoreFilesAreFullyAllocated|TestFullFilesystemWriteReturnsErrorNotSIGBUS'   # as root for the tmpfs cases
+go test ./internal/catdb -run 'TestStoreFilesAreFullyAllocated|TestFullFilesystemWriteReturnsErrorNotSIGBUS|TestBadgerFork'   # as root for the tmpfs cases
 ```
 
 The `retry` case writes the real category store into a full tmpfs, then

@@ -56,7 +56,10 @@ func (db *DB) openMemTables(opt Options) error {
 			continue
 		}
 		fsz := len(file.Name())
-		fid, err := strconv.ParseInt(file.Name()[:fsz-len(memFileExt)], 10, 64)
+		// CULVERT PATCH (scanner): the id becomes the WAL's uint32 fid and an
+		// int, so parse it bounded to both (31 bits). Upstream parsed 64 bits
+		// and truncated silently; an out-of-range name is now an error at open.
+		fid, err := strconv.ParseUint(file.Name()[:fsz-len(memFileExt)], 10, 31)
 		if err != nil {
 			return errFile(err, file.Name(), "Unable to parse log id.")
 		}

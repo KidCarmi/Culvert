@@ -41,11 +41,14 @@ FORKS = {
         'zip_sha256': 'f1b41e7c0114195c44ac816fba9d17dcbaf20a0587c1216e0d7ebe499a647bce',
         'tree_sha256': 'c8b3ad195cfb132f9f43c6ca9124bd8539474af672cb5025d4389ccaf8819485',
         'files': 161,
-        'modified': {'db.go', 'value.go'},
+        'modified': {'db.go', 'value.go', 'memtable.go', 'table/table.go', 'logger.go'},
         'added': set(),
         'markers': {
             'db.go': [b'CULVERT PATCH (F-DISK-1', b'next, err := db.newMemTable()', b'db.mt = next', b'next.DecrRef()'],
             'value.go': [b'CULVERT PATCH (F-DISK-1', b'vlog.writableLogOffset.Store(endOffset - n)'],
+            'memtable.go': [b'CULVERT PATCH (scanner)', b'strconv.ParseUint(file.Name()[:fsz-len(memFileExt)], 10, 31)'],
+            'table/table.go': [b'CULVERT PATCH (scanner)', b'strconv.ParseUint(name, 10, 32)'],
+            'logger.go': [b'CULVERT PATCH (scanner)', b'opt.Logger.Errorf("%s", logLine(format, v...))'],
         },
     },
 }

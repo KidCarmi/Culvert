@@ -767,12 +767,15 @@ func ParseFileID(name string) (uint64, bool) {
 	}
 	//	suffix := name[len(fileSuffix):]
 	name = strings.TrimSuffix(name, fileSuffix)
-	id, err := strconv.Atoi(name)
+	// CULVERT PATCH (scanner): parse as an unsigned 32-bit id. A negative or
+	// out-of-range name is "not a table file" instead of a fatal AssertTrue
+	// here (negative) or in blockCacheKey (>= MaxUint32, which packs the id
+	// into 4 bytes).
+	id, err := strconv.ParseUint(name, 10, 32)
 	if err != nil {
 		return 0, false
 	}
-	y.AssertTrue(id >= 0)
-	return uint64(id), true
+	return id, true
 }
 
 // IDToFilename does the inverse of ParseFileID
