@@ -9,6 +9,37 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Security
 
+- The ADR-0039 admission extraction left the zero value of both front-door
+  gates usable only under a documented PRECONDITION, with nothing enforcing it.
+  Three map writes panicked on a nil map — `IPFilter.addLocked`,
+  `RateLimiter.Allow` and `RateLimiter.AllowClusterAware` — while
+  `addExemptionLocked` in the same file already lazily initialized, so the
+  package was internally inconsistent about an invariant it already asserts for
+  the exemption path (`TestRLExemptView_BareLiteralLimiterIsSafe`: a bare
+  limiter "must still accept a first mutation").
+
+  Measured against the tree: a bare `IPFilter{}` panics on `Add` and on
+  `AddAll`, and a bare `RateLimiter{}` that has been `Configure`d panics on
+  `Allow`. The extraction makes that trap easier to reach rather than harder —
+  both types now carry only unexported fields, so the complete literal package
+  main used to write (`&IPFilter{single: map[string]bool{}}`) no longer compiles
+  outside the package and `&IPFilter{}`, the silently broken shape, is the only
+  literal form left. The two reachable panic sites are the DP snapshot apply
+  path (`applySnapshotAdmission` → `AddAll`, so a Control Plane config push
+  would crash the node applying it) and the request path.
+
+  The precondition is replaced by a guarantee using the idiom already present
+  in `addExemptionLocked`. This is an availability hardening, not a policy
+  change: the nil checks sit in the cold miss branch (a nil map reads as a
+  miss), so the steady-state hot path pays nothing, the allocation benchgates
+  still measure zero, and no allow/deny verdict moves — a bare instance is
+  differentially pinned equal to a constructed one across every mode and probe.
+  Gates: 5 in `internal/admission/bare_literal_safety_test.go`, each verified
+  failing against the reintroduced pre-fix shape and four of them additionally
+  against the cheapest wrong fix (skip the store when the map is nil, which
+  silences the panic while silently not enforcing the entry). `doc.go` and
+  ADR-0039 are amended rather than left asserting the narrower contract.
+
 - Node-local key material was written with `os.WriteFile` on a predictable
   path, which follows a planted symlink and inherits a planted file's mode
   (SEC-SECRETWRITE-1). Four writers introduced in this window were affected:
