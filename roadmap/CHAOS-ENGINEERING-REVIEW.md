@@ -95,6 +95,16 @@ everything else is triaged below with a suggested PR and required tests for foll
 > in a committed placeholder row at the START of a sweep), and at six
 > occurrences it is well past overdue.
 
+**2026-10-05 — `CHAOS-71` CLAIMED (placeholder, commit one). Domain: the
+identity-revocation plane on the proxy data path — what deleting or disabling
+an IdP actually revokes (register row **AU-2**, open since the first sweep and
+scored **H**).** This row exists so the id is allocated in a committed line
+before any code is written — the remedy the header above reaches twice
+independently after ten collisions, and which §35, §39 and §40 each applied in
+turn. Ids 67 and 68 are allocated to other open sweeps and 69/70 are merged
+(§39/§40), so 71 is the next free one. Findings and gates are written up in §41
+below.
+
 **2026-09-22 — CHAOS-70 sweep (the admin roster as a durability surface).**
 Written up as `CHAOS-66` and renumbered to `CHAOS-70` (§40) when main was merged
 in, because the SOCKS5-bind sweep below had taken 66 first — another
