@@ -19,12 +19,13 @@ NAMES = ["kernel", "first_ready_clamav_ok", "first_traffic_allow_block", "first_
 
 def build(argv):
     t0 = float(argv[0])
-    pts = {n: (round(float(v) - t0, 1) if v else None) for n, v in zip(NAMES, argv[1:8])}
+    # Unrounded: the verdict compares these raw values; rounding is display only.
+    pts = {n: ((float(v) - t0) if v else None) for n, v in zip(NAMES, argv[1:8])}
     a = [int(x) for x in argv[8].split()]
     b = [int(x) for x in argv[9].split()]
     d = [y - x for x, y in zip(a, b)]
     out = {
-        "t0": "authenticated acceptance (LABACCEPT, host epoch %s; detection-to-t0 lag %ss subtracted)" % (argv[11], argv[12]),
+        "t0": "authenticated acceptance (LABACCEPT; host clock taken BEFORE the go-ahead the guest waits for; host epoch %s; t0-to-harness lag %ss subtracted)" % (argv[11], argv[12]),
         "seconds_after_acceptance": pts,
         "recovery_seconds": pts["third_consecutive_joint_sample"],
         "budget_seconds": int(argv[10]),
@@ -36,13 +37,13 @@ def build(argv):
     with open(argv[14], "w") as f:
         json.dump(out, f, indent=1)
     rec = out["recovery_seconds"]
-    return "none" if rec is None else str(rec)
+    return "none" if rec is None else repr(rec)
 
 
 def describe(path):
     d = json.load(open(path))
     p, h = d["seconds_after_acceptance"], d["host_device"]
-    parts = [f"{k}=+{v}s" if v is not None else f"{k}=never" for k, v in p.items()]
+    parts = [f"{k}=+{v:.1f}s" if v is not None else f"{k}=never" for k, v in p.items()]
     return " ".join(parts) + f"; samples={d['joint_samples_taken']}; host disk: {h['reads']} reads/{h['read_mib']} MiB, {h['writes']} writes/{h['write_mib']} MiB"
 
 

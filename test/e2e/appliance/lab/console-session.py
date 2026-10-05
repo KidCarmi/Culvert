@@ -225,7 +225,12 @@ def run(c, args, script, timeout, root, quiet=False, nowait=False):
         if nowait:
             a = accept_re.search(c.buf)
             if a:
-                sys.stdout.write("ACCEPTED host_epoch=%.3f guest_epoch=%s\n" % (time.time(), a.group(1)))
+                # t0 is taken HERE, then the go-ahead is sent: the guest script
+                # waits for it before it runs the maintenance command, so the
+                # command cannot start before t0 (conservative by construction).
+                t0 = time.time()
+                c.send("LABGO\r")
+                sys.stdout.write("ACCEPTED host_epoch=%.6f guest_epoch=%s\n" % (t0, a.group(1)))
                 sys.stdout.flush()
                 return 0
             if time.time() > deadline - timeout + 8 and "LABACCEPT" not in script:

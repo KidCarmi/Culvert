@@ -65,13 +65,20 @@ jobs:
             image_run: "37234612592"
             image_tar_sha256: "ec9ae4071339f0f0dda103765ae7aae2667c1bad08e9996814dd2f12d45aef61"
             expect_image_id: "sha256:24b37bc217691058e56a838821b86dfbd45b927b1c0ea8ea867a28c54d4bcc47"
-            retained_run: ""
-            retained_sha256: ""
-            # Recovery measurement (cmd_recovery): raw disk behind device-mapper,
-            # 3 maintenance reboots on the fast disk, then 3 with ESXi's measured
-            # per-I/O latency injected (dm-delay: read 110 ms, write 18 ms).
+            # Recovery A/B: the EXACT OVA run 37342970308 built and retained
+            # (sha256 below) — nothing rebuilt, so variants differ only by the
+            # lab-only guest changes listed in recovery_variants.
+            retained_run: "37342970308"
+            retained_sha256: "a5e5b21b87f71310d292f418df5b9963872d51705f69fb992308e65d03dc620d"
+            # Raw disk behind device-mapper. Run 37342970308 measured recovery
+            # = 31 s + ~9.1 s per ms of injected read latency (fast 31 s, 110 ms
+            # 1036 s, same ~15k reads), which puts ASTRA's ESXi E0 (114-162 s)
+            # at ~9-14 ms: the calibrated proxy is 12 ms read / 3 ms write,
+            # judged against the real ESXi budget (120 s).
             disk: dm
             recovery_reboots: "3"
+            recovery_profiles: "esxi12:12:3:120"
+            recovery_variants: "base ra ra+svc ra+svc+ci ra+svc+ci+ird"
     env:
       APPLIANCE_SOURCE_SHA: ${{ matrix.source_sha }}
       SOURCE_IMAGE_RUN_ID: ${{ matrix.image_run }}
@@ -386,6 +393,8 @@ jobs:
           set -euo pipefail
           export LAB_DIR="$LAB_ROOT/lab"
           export LAB_DISK="${{ matrix.disk || 'overlay' }}" LAB_RECOVERY_REBOOTS="${{ matrix.recovery_reboots || '0' }}"
+          [ -z "${{ matrix.recovery_profiles }}" ] || export LAB_RECOVERY_PROFILES="${{ matrix.recovery_profiles }}"
+          [ -z "${{ matrix.recovery_variants }}" ] || export LAB_RECOVERY_VARIANTS="${{ matrix.recovery_variants }}"
           export LAB_OVA="$(ls "$LAB_ROOT/ova/"*.ova)"
           export LAB_OVA_SHA256="$(cut -d' ' -f1 "$LAB_ROOT/ova/"*.ova.sha256)"
           export LAB_EXPECT_IMAGE_ID="${{ matrix.expect_image_id }}" LAB_MIN_FREE_GB=20 LAB_ACCEL=kvm
