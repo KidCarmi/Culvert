@@ -56,19 +56,34 @@ func (l *legacyTwoPhaseLimiter) acquire(ip string) bool {
 	return true
 }
 
+// pause runs the injected interleaving hook, if one was supplied.
+//
+// It exists so the nil check — which is TEST SCAFFOLDING, not part of the shape
+// being frozen — lives outside the verbatim body below. Keeping it inline cost
+// two levels of nesting inside the frozen region and was the only reason this
+// copy tripped `nestif` (complexity 5) while the identically-nested verbatim
+// copy in connlimit_critsec_bench_test.go, which takes no hook, sits at 3. A
+// frozen reference copy should contain the frozen shape and nothing else.
+func pause(hook func()) {
+	if hook != nil {
+		hook()
+	}
+}
+
 // release is the pre-change Release, verbatim, with ONE injected pause point in
-// the window between the unlocked decrement and the re-lock. The hook is the
-// only addition: it schedules the interleaving the window already permitted, so
-// the defect is demonstrated deterministically instead of raced for.
+// the window between the unlocked decrement and the re-lock. That single `pause`
+// call is the only addition: it schedules the interleaving the window already
+// permitted, so the defect is demonstrated deterministically instead of raced
+// for. Everything else — the lookup under the lock, the unlock, the UNLOCKED
+// decrement, the re-lock, the value-only re-check and the delete — is the shape
+// that shipped, and must stay that way for the proof to mean anything.
 func (l *legacyTwoPhaseLimiter) release(ip string, hook func()) {
 	l.mu.Lock()
 	ctr, ok := l.conns[ip]
 	l.mu.Unlock()
 	if ok {
 		if atomic.AddInt64(ctr, -1) <= 0 {
-			if hook != nil {
-				hook() // ← nothing holds the lock here
-			}
+			pause(hook) // ← nothing holds the lock here
 			l.mu.Lock()
 			if atomic.LoadInt64(ctr) <= 0 { // VALUE re-checked; IDENTITY is not
 				delete(l.conns, ip)
@@ -96,9 +111,11 @@ func TestRelease_LegacyTwoPhaseLosesALiveSlot(t *testing.T) {
 	}
 
 	var once sync.Once
+	interleaved := 0
 	// Release A: decrements 1 -> 0, then pauses before re-locking.
 	l.release(ip, func() {
 		once.Do(func() {
+			interleaved++
 			// B arrives and leaves: this deletes the counter A still points at.
 			if !l.acquire(ip) {
 				t.Error("B must be admitted")
@@ -110,6 +127,20 @@ func TestRelease_LegacyTwoPhaseLosesALiveSlot(t *testing.T) {
 			}
 		})
 	})
+
+	// NOT-VACUOUS CHECK, and it is not optional. Every assertion below is
+	// satisfied by a hook that NEVER RAN: release A would then delete its own
+	// entry, nothing would be tracked, and a cap of 2 would admit exactly the 2
+	// the fail-open assertion expects. So a future change that broke the hook
+	// plumbing — an inverted nil check in `pause`, a dropped `pause(hook)` call
+	// — would leave this "defect proof" green while proving nothing. Absence is
+	// what a working gate and an unreachable one have in common (CHAOS-69's
+	// standing rule), so the interleaving is asserted DIRECTLY.
+	if interleaved != 1 {
+		t.Fatalf("the injected interleaving ran %d times, want exactly 1 — the "+
+			"hook plumbing is broken and every assertion below would pass "+
+			"vacuously", interleaved)
+	}
 
 	// A's stale pointer still reads 0, so A deleted C's entry.
 	if got := l.active(ip); got != 0 {
