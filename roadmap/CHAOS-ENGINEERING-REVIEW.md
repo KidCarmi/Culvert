@@ -1135,7 +1135,8 @@ Severity key: **C**ritical / **H**igh / **M**edium / **L**ow / **✓** handled w
 | # | Scenario | Verdict | Sev | Evidence |
 |---|----------|---------|-----|----------|
 | AU-1 | Registry OIDC introspection has **no result cache** → one IdP round-trip per request, ×N providers, each 10s timeout. The legacy `OIDCAuth` *does* cache (2-min TTL); the newer registry path dropped it. | GAP | H | `auth_oidc_flow.go:344-363,608-627` (no cache field); loop `proxy.go:209-220`; contrast `auth_oidc.go:210-238` |
-| AU-2 | In-flight SSO sessions **survive IdP deletion** — no `RevokeProvider`; cookies are self-contained and keep full access up to TTL (default 8h). User-delete *does* revoke. | GAP | H | `auth_idp.go:319-330`, `ui_auth.go:517-529` vs `ui_auth.go:245` |
+| AU-2 | In-flight SSO sessions **survive IdP deletion** — no `RevokeProvider`; cookies are self-contained and keep full access up to TTL (default 8h). User-delete *does* revoke. **§41 re-measured this and found it lands harder than recorded: the cookie carries the GROUPS the deleted provider asserted, and those go straight into `policyStore.Evaluate`, so group-scoped ALLOW rules kept matching for a removed federation — while arm 2 of the SAME function consults the live provider set on every request.** | GAP → **CLOSED** (CHAOS-71, §41: `sessionProviderLive` probes the live set per request in `resolveRequestAuth` arm 1; a refusal degrades to exactly "no cookie" and re-challenges through the existing no-credential dispatch; `culvert_session_provider_revoked_total`). Fixed as DERIVED STATE, not a `RevokeProvider` event — the admin handler is only one writer of the registry (`ReplaceAll` is also reached from config import, config-version rollback and the CP→DP snapshot), and the absence is already durable and already synced. | **H** | was: `auth_idp.go:319-330`, `ui_auth.go:517-529` vs `ui_auth.go:245`; now `session_provider_bounds.go` `sessionProviderLive`, gate `proxy.go` arm 1, tests `session_provider_bounds_chaos_test.go` |
+| AU-20 | **There is no "revoke one federated subject" lever at all.** `RevokeUser` has exactly one caller — the LOCAL account-delete handler — so for an SSO subject the only options are cutting the whole federation (now effective, AU-2) or waiting out the session TTL. An operator responding to one compromised SSO account must therefore either terminate the federation for everyone or accept up to 8 h (7 d at a raised TTL) of continued access. | **NEW** (recorded, needs a product surface — a revocation primitive with no admin route is not a control) | M | `internal/session/session.go:155` `RevokeUser` (sole caller `ui_auth.go` user DELETE); no route in `uiRoutes`; see §41.7 |
 | AU-3 | Proxy-path Basic-auth bcrypt is **not rate-limited** — correct-username + N wrong-passwords is a cache miss every time → full ~100ms bcrypt per request → CPU starvation. The `loginLimiter` guards only the admin UI. **Understated: the WRONG-username branch is worse (AU-3a) and needs no valid username at all.** | GAP → **CLOSED** (CHAOS-57, §25: `internal/authcost` bounds concurrency globally + per client, fail-closed) | M → **C** | `store.go` `verifyAuthFrom`, `internal/authcost`, `auth_cost_health.go` |
 | AU-3a | The wrong-username branch runs an unconditional bcrypt against the dummy hash (RISK-008 timing equaliser), is reached BEFORE the result cache, and never populates it — so a flood of DISTINCT usernames is a guaranteed miss every time. Measured **79.6 ms of exclusive CPU per ~200-byte request (51,631x a cached auth)**; **66 req/s (~13 KB/s) consumed 100% of a 4-core box** and degraded other CPU work **15.6x**. Unauthenticated, remotely triggerable, and in the DEFAULT posture nothing stands in front of it — the connection limiter, rate limiter and IP filter all ship disabled. | GAP → **CLOSED** (CHAOS-57) | **C** | `store.go:521` (pre-fix), gates `TestChaos57_WrongUsernamePathIsGoverned`, `..._ConcurrentVerificationsAreBounded` |
 | AU-3c | The auth result cache evicted **one arbitrary LIVE entry** at capacity (a Go map range stopping at the first key), so a flood of distinct passwords under a known username displaced OTHER clients' cached positives. Measured: an honest client's cached credential survived a 1x-capacity flood and was reliably gone by 2x — after which that user paid a full ~80 ms bcrypt on EVERY request. The attacker's amplification lands on legitimate traffic. Same class as the `internal/authstate` finding. | GAP → **CLOSED** (CHAOS-57: `internal/authstate`'s fair-eviction policy ported — oldest entry of the largest holder, deterministic) | H | `store.go` `evictOneLocked`, gate `TestChaos57_FloodCannotDisplaceAnHonestClientsCachedResult` |
@@ -8291,3 +8292,345 @@ the sweep happens to be editing.
   from the local-account delete path, which the roster backstop already covers;
   it becomes live the moment user-level revocation is wired to anything else.
   Recorded as **AU-19**, not fixed inside a sweep about durability.
+
+---
+
+## 41. CHAOS-71 — The identity-revocation plane: what deleting an IdP actually revokes
+
+> **Id allocated in a committed placeholder row as this sweep's FIRST commit**
+> (see the 2026-10-05 revision-log entry), which is the remedy the header
+> reaches twice independently after ten collisions across six concurrent
+> sweeps, and which §§35/39/40 each applied in turn. Ids 67–68 are allocated
+> to other open sweeps; 69 and 70 are merged as §39/§40.
+
+**Domain:** register row **AU-2**, open and scored **H** since the first sweep:
+*"In-flight SSO sessions survive IdP deletion — no `RevokeProvider`; cookies
+are self-contained and keep full access up to TTL (default 8h). User-delete
+does revoke."* Re-measured against the live tree, the row was right about the
+mechanism and understated where it lands.
+
+### 41.1 The finding
+
+A `ps_session` cookie is minted in exactly two places — `authOIDCCallback` and
+`authSAMLCallback`, both via `setSessionCookie` — and it carries three things
+the appliance later trusts: the subject, the asserting profile's id in `pvd`,
+and **the groups that provider asserted**. `resolveRequestAuth`'s arm 1 read
+all three straight out of the verified cookie and consulted **nothing** about
+the provider:
+
+```go
+// ── 1. Session cookie (browser SSO) ──────────────────────────────────
+if sess, err := readSessionCookie(r); err == nil && sess != nil {
+        id := sessionIdentity(sess)
+        authenticatedIdentity = id.Sub
+        ...
+        authenticatedGroups = id.Groups
+        authenticatedSource = identityAuthSource(id, "local")
+```
+
+So deleting or disabling an identity provider — the one lever an operator has
+for *"cut this federation off"*, the thing you press when an IdP is compromised
+or a partner's federation is being terminated — revoked nothing already minted.
+`idpRegistry.Delete(id)` returned `204`, the change was audited as
+`idp.delete`, and every browser holding such a cookie kept its subject and its
+groups for the rest of the session lifetime: **8 hours by default, up to 7 days
+if the TTL was raised** (`session.SetTTL` clamps at `7*24h`).
+
+**The groups are the severity, not the subject.** `authenticatedGroups` is
+handed to `policyStore.Evaluate(clientIP, identity, source, host, groups)`
+(`proxy.go:1570`), so a group-scoped **allow** rule kept matching on groups
+asserted by a federation the operator had just removed. The security control
+the operator believed they had turned off was still open, and the audit trail
+recorded the revocation as successful — the CHAOS-70 **mis-reporting** class one
+plane over (there a `204` over a failed write, here a `204` over a revocation
+that reached nothing already issued).
+
+Reproduced against the real `resolveRequestAuth`:
+
+```
+proceed=true identity="alice@corp.example" source="corp" groups=[engineering] status=200
+DEFECT REPRODUCED: deleted provider "corp" still authenticated "alice@corp.example"
+```
+
+### 41.2 The asymmetry is INSIDE ONE FUNCTION, and that is the whole finding
+
+Arm 2 of the same function — `Proxy-Authorization: Basic` — iterates
+`idpRegistry.EnabledCredentialProviders()` on **every request**, so a deleted
+provider stops validating credentials immediately. That posture is not
+incidental: `TestResolveRequestAuthRejectsEnabledOIDCWithoutLiveBackend`
+already pins it, fail-closed, for a provider that is enabled but has no live
+backend. Every *other* consumer of the registry consults the live set per
+request too — `resolveSSOPortalURL`, `authSelectProvider`
+(`EnabledInteractiveProviders`), `RouteByDomain`, `LiveProvider` in both
+callbacks.
+
+**Arm 1 was the single outlier.** One revocation action, two postures, decided
+only by which arm the client happens to be on — the "one fault, two postures"
+shape §16 (CA-1/CA-3b), §22 and §25 each recorded, here with the two postures
+twenty lines apart in one function.
+
+### 41.3 Reachability
+
+It survives every plausible narrowing:
+
+- **A local admin account exists** — the overwhelmingly common case — so
+  `credCapable` is true, `authRequired` stays true, and arm 1 is still entered
+  after the last IdP is deleted.
+- **More than one IdP is configured** — the realistic *"this federation is
+  compromised"* shape — so `ssoCapable` stays true and the surviving providers
+  keep arm 1 armed for the deleted one's cookies.
+- **`defaultAuthOutcome == Exempt`** keeps `authRequired` true unconditionally.
+
+The only shape that closes it by accident is deleting the *only* provider on an
+appliance with *no* local account and a `Default` posture, where `authRequired`
+goes false and the cookie is never read — i.e. the configuration nobody runs.
+
+### 41.4 The fix is DERIVED STATE, not a revocation event
+
+`sessionProviderLive` (`session_provider_bounds.go`) answers, per request, *"is
+the provider this session names still a live identity source?"*; a refusal
+charges a counter and sets `sess = nil`, so the request degrades to **exactly**
+"no cookie" and is re-challenged through the **existing** no-credential
+dispatch. No new posture, no second path to keep in step with arm 3.
+
+The obvious alternative — a `RevocationList.RevokeProvider` entry emitted from
+the DELETE handler, mirroring the `RevokeUser` that sits twenty lines away in
+the same package — was built out on paper and **rejected**, and the four
+reasons are the load-bearing part of this sweep:
+
+1. **The admin handler is not the only writer of the registry.**
+   `IdPRegistry.ReplaceAll` is also reached from config import, config-version
+   rollback and the CP→DP `syncSnapshotIdPProfiles` path, none of which run
+   that handler. An event emitted there would cover none of them. (Pinned by
+   `TestChaos71_DefectProviderRemovedByReplaceAllIsAlsoRevoked`.)
+2. **It needs no persistence.** The provider set is already durable
+   (`idp_profiles.json`), so the revocation survives a restart because the
+   *absence* does — whereas `RevokeUser`'s own `users` map is **neither
+   persisted nor gossiped** while the sibling `tokens` map in the same struct
+   is both (row **AU-19**, recorded by §40). Building the new mechanism in that
+   mould would have inherited exactly the volatility that makes the old one
+   unreliable.
+3. **It needs no gossip.** `ConfigSnapshot.IdPProfiles` already carries the set
+   fleet-wide, so a CP deletion reaches every DP on the next sync.
+4. **It cannot go stale or be evicted.** Freshness is **evaluated** per
+   request, never latched at the instant of an admin action — the
+   `ca_health.go` / CHAOS-61 discipline, which also means there is no clearing
+   path to get wrong and no cap whose eviction policy becomes a security
+   control (the CHAOS-57 auth-cache lesson).
+
+A second mechanism answering one question is the defect this review keeps
+recording, so **`RevokeProvider` is deliberately not added.** The operational
+consequence is recorded in the runbook rather than left implicit: because the
+revocation *is* the absence, **restoring a backup that still contains the
+provider restores its ability to authenticate.**
+
+### 41.5 Rules the predicate holds, and why each exclusion exists
+
+A fail-closed predicate on an identity path is an availability regression the
+moment it refuses something legitimate, so each admitted shape is argued:
+
+- **`""` — exactly the empty string.** A cookie minted before the `pvd` field
+  existed. Refusing these logs out every pre-upgrade session on the deploy that
+  adds the check, for no security gain: such a cookie names no federation, so
+  there is no federation to have been cut off.
+- **`"local"`.** `setUISessionCookie`'s value. It names no registry profile and
+  the admin UI owns its own backstop (`uiAuthMiddleware`'s `cfg.UIUserExists`).
+  Refusing it would lock every administrator out of an appliance with no IdP
+  configured — the default posture.
+- **A profile id in `r.live`,** i.e. enabled **and** compiled. Delete, disable
+  and a failed compile all remove it, and in all three the operator's intent is
+  that this federation authenticates nobody.
+
+**BOTH representations are probed, and that is not defensive clutter.** This
+codebase carries two spellings of one provider identity on purpose: the
+interactive providers stamp the **bare** profile id into `Identity.Provider`
+(`ExchangeCode`, `extractSAMLIdentity`) while `Name()` returns `oidc:<id>` /
+`saml:<id>` — which is why `stripIdPPrefix` exists at all. A bound applied to
+the wrong representation is a customer-visible outage rather than a tightening
+(CHAOS-69's round-1 IDN regression, learned the expensive way), and probing
+both cannot widen anything: each form must still resolve to a live provider.
+
+**A SELF-REVIEW CONTROL CAUGHT THE FIX'S OWN DEFECT, and it is the sharpest
+lesson here.** The first shape opened with `p := strings.TrimSpace(provider)`
+before the emptiness test, so a `pvd` of `"  "` was admitted as *"legacy, names
+no federation"*. `ControlPrefixAloneIsNotAProvider` — written to prove the
+prefix probe could not widen — enumerated whitespace and failed. Trimming first
+is the mistake `initSessionSecret` (session.go) documents at length and
+deliberately avoids (*"trimming before the emptiness check would make a
+whitespace-only value indistinguishable from unset"*), and **here it is also a
+DIVERGENCE, which is the worse half**: `identityAuthSource` tests
+`id.Provider != ""` on the **raw** value, so such a session would be exempt
+from revocation by this predicate while still being stamped into
+`authenticatedSource` and carried into the policy decision **as a federation
+name** — a value exempt from revocation that is nevertheless used for
+authorization. Two layers disagreeing about which values mean "no provider" is
+the defect; the rule is that this predicate asks the question
+`identityAuthSource` asks and never a re-derived one, and
+`TestChaos71_ProviderEmptinessAgreesWithIdentityAuthSource` pins the
+**agreement** from both sides rather than either spelling of the rule — the
+`TestTOTPSameKey_AgreesWithTheVerifier` (§40) and
+`TestChaos63_LoginNameConfiguredMatchesVerifyUIUser` (§32) precedent.
+
+**Standing rule from that round:** *when a value's meaning is decided by one
+layer, every other layer that tests it must ask that layer, never re-derive the
+rule — and a canonicalisation added for tidiness is a semantic change when the
+layer beside you does not perform it.*
+
+### 41.6 Visibility
+
+The refusal is deliberately indistinguishable from an absent cookie, which is
+what makes the degradation safe **and** is exactly why it needs its own
+counter: without one, an operator cannot tell whether the revocation reached
+live traffic at all.
+
+- `culvert_session_provider_revoked_total` — **always emitted**, since there is
+  no configuration to gate it on, so a flat `0` means "nothing has carried such
+  a session" and can never mean "the check is off" (the inverse of the
+  socks5/cluster_ca emission rule, for the same one-reading-per-series reason).
+- `sessionProviderRevoked` on `GET /api/stats`, and a banner on the **Identity
+  Providers** panel — the panel the admin is standing on when they press
+  Delete.
+- One `AUTH_SESSION_PROVIDER_REVOKED` process-log line per minute, carrying the
+  provider, the subject and the **cumulative** count, so the line is suppressed
+  and the magnitude never is. The gate **claims** its window with a
+  compare-and-swap rather than read-compare-store (§40 round 1 P2: concurrent
+  requests would otherwise all observe the same expired stamp and all emit,
+  making a mitigation into a log-volume problem), and a clock rollback **re-arms**
+  it rather than silencing the line until wall-clock catches up (CHAOS-61: a
+  negative age is STALE, not fresh).
+
+**It counts REQUESTS, not distinct sessions,** and the metric help and runbook
+both say so: a browser re-sends a dead cookie until it re-authenticates, so the
+rate is set by traffic. A step that settles is the expected shape; a count that
+keeps climbing means clients are not completing re-authentication.
+
+The accounting lands **before** anything observable, which is the one place the
+sequence is hand-written rather than inherited from a shared helper — CHAOS-69
+round 3 found exactly one of four entry points with the accounting after the
+reply, and it was the one written inline.
+
+### 41.6b The one availability interaction, and why it is not a regression
+
+A fail-closed check on an identity path earns its keep only if every shape it
+refuses is one the operator meant to refuse, so the awkward case is named here
+rather than discovered later.
+
+**A deployment with no `-idp-profiles-file` loses its registry on restart** —
+the IdP panel carries a standing banner saying exactly that — so after a
+restart every live SSO session names a provider that is not in the live set and
+is now refused. That reads like a new way to log a fleet out, and it is not,
+for a reason that holds independently of this change: **the session signing key
+is random per restart by default** (`initSessionSecret` →
+`session.InitRandomKey()` when `CULVERT_SESSION_SECRET` is unset and no
+`session_secret` is configured — register row **CA-8**), so on that same
+deployment every cookie already fails its HMAC check after a restart and never
+reaches this predicate at all.
+
+For a session to survive a restart the operator must have set a shared signing
+key, and an operator who has done that has a persisted or cluster-synced
+configuration — which persists the IdP registry too. The remaining combination
+(shared signing key, non-persisted IdP profiles) is a misconfiguration whose
+symptom under this change is *"re-authenticate"* and whose symptom without it
+is *"groups honoured from a provider this appliance has no record of"*. The
+refusal is the better of the two, and the runbook says what to look at.
+
+**And the three test fixtures this change broke are the same shape, which is
+worth recording because it is evidence rather than inconvenience.** Four
+existing tests minted a session naming a provider absent from their own
+registry — `"saml:corp"`, `"oidc:corp-oidc"`, `"test-idp"` against a helper that
+installed no registry at all — and all four passed before. That is not evidence
+that real deployments carry such sessions; it is evidence that the field was
+**never validated**, so fixtures were free to invent an id. A real `pvd` comes
+from a live provider's own callback at login time. Each fixture was pointed at
+the live profile its own helper installs, in the spelling it was written to
+cover, so each keeps pinning the property it states (verbatim auth-source
+attribution; OIDC-shaped parity across both arms; a valid session winning over
+an Exempt or CredentialRequired rule) instead of silently becoming a
+removed-provider test. The removed-provider case is owned by `TestChaos71_*`,
+where it is asserted deliberately. **A fixture that only passes because nothing
+validated the field it chose is not a contract — but it is a good detector of
+which fields nothing validates.**
+
+**Repairing them produced a fifth failure and a transferable rule.** The first
+repair put the live profile into the SHARED `setupAuthGateTest` helper, which
+looked obviously right and broke `TestS3_DefaultMode_Parity`: that test's
+second half calls `setupProxyTest` **again**, mid-test, to reach a NO-BACKEND
+appliance and assert Stage-1 stays inert — and a registry the helper installs
+is restored only by `t.Cleanup`, so it survived that reset, made `ssoCapable`
+true, and turned the inert case into a `407`. This is CLAUDE.md's own
+`setupProxyTest` pitfall from the other direction: the documented hazard is
+that it clears globals at test START and never at cleanup, so a leaked rule
+flows IN from a previous test — the same asymmetry means state a shared fixture
+INSTALLS leaks **forward within one test** past any later re-reset. The
+registry install is therefore per-test (`installAuthGateTestIdP`, called by the
+two tests that mint such a session) with the reason recorded on the helper, not
+folded into a fixture other tests re-reset underneath. **Rule: a shared setup
+helper may reset state; adding state to one is only safe once you know no test
+on it re-resets the globals mid-run.**
+
+### 41.7 Deliberately NOT done
+
+- **No `/readyz` or `/healthz` row, and no alert.** A node re-challenging
+  sessions from a removed provider is a fully serving gateway doing precisely
+  what it was told; failing readiness would eject it over an administrator's own
+  deliberate action, and a new alert event name is silently unsubscribed on
+  every configured webhook (the §27/§36 rule).
+- **No cookie clear on the refusal.** `clearSessionCookie` exists, and setting
+  it would stop the browser re-sending a dead cookie (and so flatten the
+  counter). It is not done because arm 3 owns the terminal response on this path
+  and may redirect a browser to a captive portal whose own successful login
+  overwrites the cookie anyway, while a non-browser client gets a `407` it will
+  retry. Adding a `Set-Cookie` to a response shape shared with every other
+  no-credential outcome is a behaviour change outside this finding; the
+  rate-limited log and the counter carry the volume instead.
+- **`RevokeUser` is still neither persisted nor gossiped** (row **AU-19**).
+  Unreachable from the proxy cookie — no local login mints one
+  (`setSessionCookie` has two callers, both SSO) — and bounded for the admin UI
+  by the roster backstop. Recorded, not fixed: closing it means deciding whether
+  a user revocation should be replicated, which is a cluster-semantics decision.
+- **There is no "revoke one federated subject" lever at all.** You can cut a
+  whole federation or wait out the TTL. Recorded as a new row **AU-20**; it
+  needs a product surface, not a resilience fix.
+- **`CA-8`/`AU-9` (random per-restart session HMAC) is untouched.** It is the
+  blunt instrument that happens to revoke everything, and relying on it is not
+  a revocation design.
+
+### 41.8 Gates
+
+`session_provider_bounds_chaos_test.go` (17 functions):
+
+**Six defect gates**, each verified failing against the reintroduced pre-fix
+shape: deleted provider, disabled provider, the **groups** half across both
+postures (asserting on the identity alone would leave the severity reachable
+through any future change that cleared the subject and kept the groups),
+removal via `ReplaceAll` (the config-import / rollback / CP→DP path, which is
+what proves the state-based choice), the refusal being counted, and the refusal
+being byte-indistinguishable from an absent cookie.
+
+**Six controls**, each verified failing against a wrong fix and passing against
+**both** the pre-fix and the fixed tree — which is what makes them controls
+rather than second defect gates: a live provider still authenticates **with its
+groups** (the cheapest way to pass every defect gate is to stop honouring
+session cookies, which deletes browser SSO through the gateway), `"local"` is
+never refused, a legacy empty `pvd` is never refused, anonymous traffic charges
+nothing, a prefix alone is not a provider, and the log is suppressed while the
+count never is.
+
+Plus the representation gate, the emptiness-agreement gate, two structural
+walls (the `setSessionCookie` minter inventory — enumerated from the
+**primitive**, not from the file being edited, per §40's own lesson that its
+wall AST-walked one file while the escaping mutator lived in another — and the
+CAS claim, asserted structurally because a TOCTOU on an atomic is invisible to
+`-race` and was measured unreachable behaviourally), the clock-rollback gate,
+and a `-race` concurrency gate requiring exact accounting under 400 concurrent
+refusals.
+
+**Eight mutations verified:** pre-fix (no gate) → 6 defect gates + the
+concurrency gate red, every control green; no local/legacy exemption → 2
+controls red; trim-before-emptiness → the control and the agreement gate red;
+predicate always false → 1 defect gate + 4 controls red; refusal uncharged → 3
+gates red; terminal `403` instead of re-challenge → the indistinguishability
+gate red; read-compare-store rate gate → the CAS wall red; bare representation
+only → the representation gate red.
+
+Runbook: `docs/operator/identity-provider-revocation.md`.

@@ -9,6 +9,50 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Security
 
+- Deleting or disabling an identity provider revoked nothing it had already
+  minted (**CHAOS-71**, register row **AU-2**). A `ps_session` cookie carries
+  the asserting profile's id and **the groups that provider asserted**, and
+  `resolveRequestAuth`'s session arm read all of it straight out of the
+  verified cookie without consulting the provider — so a browser holding such a
+  cookie kept its subject and groups for the rest of the session lifetime
+  (8 hours by default, up to 7 days at a raised TTL) after the operator removed
+  the federation. Those groups feed `policyStore.Evaluate` directly, so
+  group-scoped **allow** rules kept matching for a provider that was gone, while
+  `idpRegistry.Delete` answered `204` and the change was audited as a successful
+  `idp.delete`.
+
+  The asymmetry was inside one function: the `Proxy-Authorization: Basic` arm
+  twenty lines below consults `EnabledCredentialProviders()` on every request,
+  as does every other registry consumer — the session arm was the single
+  outlier.
+
+  Fixed as **derived state, not a revocation event**: `sessionProviderLive`
+  (`session_provider_bounds.go`) probes the live provider set per request, and a
+  refusal degrades to exactly "no cookie" — the client is re-challenged through
+  the existing no-credential dispatch. A `RevokeProvider` entry was deliberately
+  not added: the admin handler is only one writer of the registry
+  (`ReplaceAll` is also reached from config import, config-version rollback and
+  the CP→DP snapshot), whereas the provider set is already durable and already
+  synced fleet-wide, so the absence *is* the revocation and needs no
+  persistence, no gossip, and no expiry.
+
+  Sessions naming `"local"` (the admin-UI cookie, which has its own roster
+  backstop) and pre-`pvd` legacy sessions are never refused. Both provider
+  spellings — the bare profile id and the prefixed `oidc:`/`saml:` form — are
+  accepted for a live provider.
+
+  **Operator-visible:** `culvert_session_provider_revoked_total` (always
+  emitted; counts *requests*, not sessions), `sessionProviderRevoked` on
+  `GET /api/stats`, a banner on the Identity Providers panel, and a
+  rate-limited `AUTH_SESSION_PROVIDER_REVOKED` log line carrying the cumulative
+  count. A step that settles after removing a provider is expected; a count
+  that keeps climbing means clients are not re-authenticating. Runbook:
+  `docs/operator/identity-provider-revocation.md`.
+
+  **Recorded, not fixed:** there is still no lever to revoke a single federated
+  subject — `RevokeUser` has one caller, the local account-delete handler, and
+  no admin route (new register row **AU-20**).
+
 - Node-local key material was written with `os.WriteFile` on a predictable
   path, which follows a planted symlink and inherits a planted file's mode
   (SEC-SECRETWRITE-1). Four writers introduced in this window were affected:

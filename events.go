@@ -295,6 +295,17 @@ func liveFeedWritePrometheus(w *strings.Builder) {
 	fmt.Fprintf(w, "# TYPE culvert_login_oversize_rejected_total counter\nculvert_login_oversize_rejected_total %d\n",
 		loginOversizeRejected.Load())
 
+	// CHAOS-71: proxied requests whose VERIFIED session named an identity
+	// provider that is no longer enabled. Always emitted, for the same reason
+	// as the CHAOS-69 counter below: there is no configuration to gate it on,
+	// so a flat zero means "nothing has carried a session from a removed
+	// provider" and can never mean "the check is off". Counts REQUESTS, not
+	// distinct sessions — a browser re-sends a dead cookie until it is
+	// re-challenged, so the rate is set by traffic.
+	fmt.Fprintf(w, "\n# HELP culvert_session_provider_revoked_total Proxied requests whose signed session named an identity provider that is no longer enabled, treated as unauthenticated and re-challenged. Expected to rise once after an IdP is deleted or disabled and then settle; sustained growth means clients are not re-authenticating\n")
+	fmt.Fprintf(w, "# TYPE culvert_session_provider_revoked_total counter\nculvert_session_provider_revoked_total %d\n",
+		sessionProviderRevokedCount())
+
 	// CHAOS-69: proxied requests refused for an over-long destination
 	// authority. Unlike the login counter above this one is ALWAYS emitted —
 	// there is no configuration to gate it on (every build bounds the

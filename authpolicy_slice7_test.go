@@ -47,6 +47,37 @@ func setupAuthGateTest(t *testing.T) {
 	t.Cleanup(func() { setAuthExemptDisabled(false) })
 }
 
+// installAuthGateTestIdP makes "test-idp" a LIVE provider for the duration of
+// the test.
+//
+// Call it from the tests that mint a SESSION naming "test-idp" to assert that
+// a valid session wins over an Exempt or CredentialRequired rule. Before
+// CHAOS-71 the `pvd` field was never validated, so those fixtures
+// authenticated against no registry at all; now a session naming a provider
+// outside the live set stops being an identity, so an empty registry would
+// turn each of them into the REMOVED-provider case — testing the opposite of
+// the property each one states. TestChaos71_* owns that case deliberately.
+//
+// IT IS DELIBERATELY NOT FOLDED INTO setupAuthGateTest. Several tests on that
+// helper re-reset the globals MID-TEST to reach a different posture —
+// TestS3_DefaultMode_Parity's second half calls setupProxyTest again for a
+// NO-BACKEND appliance and asserts Stage-1 stays inert — and a registry
+// installed by the helper is restored only by t.Cleanup, so it survives that
+// reset, makes ssoCapable true, and turns the inert case into a 407. This is
+// the pitfall CLAUDE.md records about setupProxyTest: it clears globals at
+// test START and never at cleanup, so a shared fixture that installs state
+// leaks FORWARD within the same test.
+func installAuthGateTestIdP(t *testing.T) {
+	t.Helper()
+	prev := idpRegistry
+	profile := &IdPProfile{ID: "test-idp", Name: "Test IdP", Type: IdPTypeOIDC, Enabled: true}
+	idpRegistry = &IdPRegistry{
+		profiles: []*IdPProfile{profile},
+		live:     map[string]IdentityProvider{"test-idp": &testProxyIdentityProvider{}},
+	}
+	t.Cleanup(func() { idpRegistry = prev })
+}
+
 func exemptCount() int64 { return atomic.LoadInt64(&statAuthExempt) }
 
 // ── Exempt skips the challenge; Stage-2 default-deny still applies ───────────
@@ -261,6 +292,7 @@ func TestSlice7_ValidCredentialsWin(t *testing.T) {
 
 func TestSlice7_ValidSessionWins(t *testing.T) {
 	setupAuthGateTest(t)
+	installAuthGateTestIdP(t) // the session below names it; see CHAOS-71
 	const host = "slice7-session.example.test"
 	policyStore.Add(slice7ExemptRule(host))
 
