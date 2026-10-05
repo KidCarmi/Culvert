@@ -142,5 +142,11 @@ func (t *backupListTiming) line(accepted time.Time, end time.Time) string {
 
 func (t *backupListTiming) log(ctx context.Context) {
 	accepted, _ := ctx.Value(connAcceptedKey{}).(time.Time)
-	log.Print(t.line(accepted, time.Now()))
+	line := t.line(accepted, time.Now())
+	// CWE-117 barrier the analyzers can see (logSafeOpID's rule: gosec G706
+	// clears taint at an inline strings.ReplaceAll, never through a helper or
+	// a validator). A no-op on every real value: corr is 16 hex or "-", and
+	// every other field is a timestamp, a number or a bounded class.
+	line = strings.ReplaceAll(strings.ReplaceAll(line, "\n", ""), "\r", "")
+	log.Print(line)
 }
