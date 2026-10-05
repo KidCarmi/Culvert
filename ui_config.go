@@ -202,6 +202,14 @@ func apiStats(w http.ResponseWriter, r *http.Request) {
 		// without this count the probing is invisible to an operator who has
 		// no metrics scraper or shell access to the log.
 		"tracingHeaderRejected": requestIDRejected.Load() + traceparentRejected.Load(),
+		// CHAOS-71: proxied requests whose signed session named an identity
+		// provider that is no longer enabled. Deleting or disabling an IdP is
+		// the operator's revocation lever, and the refusal it now causes looks
+		// exactly like a user with no cookie — so without this count the
+		// operator cannot tell whether the revocation reached live traffic at
+		// all. Expected to rise once after the change and settle as clients
+		// re-authenticate.
+		"sessionProviderRevoked": sessionProviderRevokedCount(),
 	})
 }
 

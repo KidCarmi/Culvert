@@ -352,7 +352,21 @@ func resolveRequestAuth(w http.ResponseWriter, r *http.Request, clientIP, reqID 
 
 	if authRequired { //nolint:nestif // adaptive-auth decision tree is inherently nested (matches the if-match dispatch convention; DEBT-002 isolated it for testability)
 		// ── 1. Session cookie (browser SSO) ──────────────────────────────────
-		if sess, err := readSessionCookie(r); err == nil && sess != nil {
+		sess, sessErr := readSessionCookie(r)
+		// CHAOS-71: a verified session is an identity only while the provider
+		// that minted it is still live. Delete or disable an IdP and its
+		// cookies used to keep their subject AND the groups that provider
+		// asserted for the rest of the TTL, straight into policyStore.Evaluate
+		// — while arm 2 below, in this same function, consults
+		// EnabledCredentialProviders on every request. The refusal degrades to
+		// exactly "no cookie": arm 2 then arm 3 re-challenge the client
+		// through the EXISTING no-credential dispatch, so there is no new
+		// posture and nothing to keep in step with it.
+		if sessErr == nil && sess != nil && !sessionProviderLive(sess.Provider) {
+			noteSessionProviderRevoked(sess.Provider, sess.Sub, clientIP)
+			sess = nil
+		}
+		if sessErr == nil && sess != nil {
 			id := sessionIdentity(sess)
 			authenticatedIdentity = id.Sub
 			if authenticatedIdentity == "" {

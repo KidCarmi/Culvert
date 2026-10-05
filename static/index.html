@@ -1798,6 +1798,9 @@ table.mcpx-cat-tbl td{padding:6px 10px;border-bottom:1px solid var(--border)}
         <svg class="ico" aria-hidden="true"><use href="#i-alert-triangle"/></svg> <strong>Not persisted:</strong> identity providers are stored in memory only and will be <strong>lost on restart or update</strong>. Start Culvert with <code>-idp-profiles-file /data/idp_profiles.json</code> (or set <code>proxy.idp_profiles_file</code> in config.yaml) to persist them.
       </div>
       <div id="idp-legacy-ldap-banner" style="display:none;background:rgba(245,158,11,.08);border:1px solid rgba(245,158,11,.3);color:var(--text);border-radius:8px;padding:12px 14px;margin:0 0 16px;font-size:.82rem;line-height:1.6"></div>
+      <div id="idp-session-revoked-banner" style="display:none;background:rgba(245,158,11,.08);border:1px solid rgba(245,158,11,.3);color:var(--text);border-radius:8px;padding:12px 14px;margin:0 0 16px;font-size:.82rem;line-height:1.6">
+        <svg class="ico" aria-hidden="true"><use href="#i-alert-triangle"/></svg> <strong>Sessions from a removed provider were re-challenged:</strong> <span id="idp-session-revoked-text"></span>
+      </div>
       <div id="idp-list" style="display:flex;flex-direction:column;gap:10px"></div>
     </div>
 
@@ -13863,8 +13866,36 @@ function idpProviderMeta(p) {
   return { label: p.type === 'saml' ? 'SAML 2.0' : 'OIDC',  color: '#14b8a6' };
 }
 
+// CHAOS-71: deleting or disabling a provider now also cuts the sessions it
+// already minted, and that refusal is deliberately indistinguishable from a
+// user who simply has no cookie — the client is re-challenged through the
+// ordinary no-credential path. So the only way an admin can confirm the
+// revocation reached live traffic is this count. Shown on THIS panel because
+// it is where the admin is standing when they delete a provider.
+async function loadIdPSessionRevokedBanner() {
+  const banner = document.getElementById('idp-session-revoked-banner');
+  if (!banner) return;
+  try {
+    const res = await apiFetch('/api/stats');
+    if (!res.ok) { banner.style.display = 'none'; return; }
+    const s = await res.json();
+    const n = s.sessionProviderRevoked || 0;
+    if (n > 0) {
+      document.getElementById('idp-session-revoked-text').textContent =
+        n + ' request' + (n === 1 ? '' : 's') +
+        ' since the last restart carried a signed session whose identity provider is no longer enabled. ' +
+        'Each was treated as unauthenticated and re-challenged. A one-off rise after deleting or disabling ' +
+        'a provider is expected; a count that keeps climbing means those clients are not re-authenticating.';
+      banner.style.display = '';
+    } else {
+      banner.style.display = 'none';
+    }
+  } catch (e) { banner.style.display = 'none'; }
+}
+
 async function loadIdPList() {
   loadLegacyLDAPBanner();
+  loadIdPSessionRevokedBanner();
   const res = await apiFetch('/api/idp');
   if (!res.ok) return;
   const data = await res.json();

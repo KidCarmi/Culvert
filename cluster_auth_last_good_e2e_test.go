@@ -331,7 +331,7 @@ func TestClusterAuth_ProxyTokenProviderParityFixtureStillCoversOIDC(t *testing.T
 			Sub:      "alice@example.test",
 			Email:    "alice@example.test",
 			Groups:   []string{"engineering"},
-			Provider: "oidc:corp-oidc",
+			Provider: "oidc:test-idp",
 		},
 	}}
 	backend := setupProxyIdentityE2E(t, provider)
@@ -347,10 +347,15 @@ func TestClusterAuth_ProxyTokenProviderParityFixtureStillCoversOIDC(t *testing.T
 	w = httptest.NewRecorder()
 	r = makeRequest(backend.URL, nil)
 	r.AddCookie(sessionCookieForIdentity(t, &Identity{
-		Sub:      "alice@example.test",
-		Email:    "alice@example.test",
-		Groups:   []string{"engineering"},
-		Provider: "oidc:corp-oidc",
+		Sub:    "alice@example.test",
+		Email:  "alice@example.test",
+		Groups: []string{"engineering"},
+		// OIDC-SHAPED and LIVE: the prefixed spelling is what this fixture
+		// exists to cover, and since CHAOS-71 a session naming a provider
+		// outside the live set is no longer an identity — so it points at the
+		// profile setupProxyIdentityE2E installs rather than an id no
+		// registry holds.
+		Provider: "oidc:test-idp",
 	}))
 	handleRequest(w, r)
 	if w.Code != http.StatusOK {
