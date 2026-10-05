@@ -229,6 +229,15 @@ cmd_selftest() { local d rc=0 got; d="$(mktemp -d)"
   # fails (255); 127 would mean timeout could not run the command at all.
   local prc=0; ( LAB_HOST=127.0.0.1; SSH_OPTS=(-p 1 -o ConnectTimeout=2 -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=QUIET); gop_within 5 status-json ) >/dev/null 2>&1 || prc=$?
   if [[ $prc == 255 ]]; then log "selftest ok: bounded operator probe executes ssh (closed port -> 255)"; else log "selftest FAILED: bounded operator probe exit $prc (127 = the probe never ran)"; rc=1; fi
+  # The console-marks watcher runs in the background for up to an hour; the
+  # caller captures its pid with $(...), which must return at once (run
+  # 37363074909 lost ~60 min per reboot waiting for the watcher to exit).
+  # Bounded: a regression must fail in 2 s, not hang the selftest for an hour.
+  local cp n; : > "$d/console.log"
+  ( mp="$( WORK="$d" rec_console_marks "$(date +%s.%N)" "$d/marks.tsv" )"; echo "$mp" > "$d/marks.pid" ) & cp=$!
+  for n in $(seq 1 20); do [[ -s "$d/marks.pid" ]] && break; sleep 0.1; done
+  if [[ -s "$d/marks.pid" ]]; then log "selftest ok: console-marks pid capture returns at once"; kill "$(cat "$d/marks.pid")" 2>/dev/null || true
+  else log "selftest FAILED: console-marks pid capture blocked (the watcher holds the substitution pipe)"; rc=1; pkill -P "$cp" 2>/dev/null || true; kill "$cp" 2>/dev/null || true; fi
   # The backup-listing oracle must reject what HTTP 200 + a filename grep
   # accepted (ASTRA 6001710160), and accept the genuine listing.
   printf '%s' '{"filename":"baseline.enc","path":"/backup/baseline.enc","size_bytes":4096,"encrypted":true}' > "$d/exp.json"
@@ -1091,7 +1100,11 @@ rec_traffic() { local a b
 # rec_console_marks START_EPOCH OUT — timestamp boot-path console markers while
 # the reboot runs (shutdown, firmware, bootloader, kernel). Only lines matching
 # a fixed marker list are kept, so no console secret reaches the evidence.
-rec_console_marks() { python3 - "$WORK/console.log" "$2" "$1" <<'PY' &
+# Its stdout goes to /dev/null: called as marks_pid="$(rec_console_marks …)",
+# a backgrounded child still holding the substitution's pipe makes the
+# caller wait for the child to EXIT (its 3600 s deadline) — which is what
+# stretched every reboot cycle to ~64 minutes in run 37363074909.
+rec_console_marks() { python3 - "$WORK/console.log" "$2" "$1" > /dev/null 2>&1 <<'PY' &
 import os, re, sys, time
 log, out, t0 = sys.argv[1], sys.argv[2], float(sys.argv[3])
 pat = re.compile(r"(reboot: |Linux version|SeaBIOS|Booting from|iPXE|GRUB|Loading Linux|Loading initial ramdisk|Run /init|EXT4-fs \(sda1\): mounted|systemd\[1\]: (Reached target|Stopping|Stopped|Finished|Started) |Culvert|login:)")
@@ -1116,8 +1129,10 @@ recovery_once() { local name="$1" i="$2" budget="$3"; local tag="R-$name-$i"
   local tk="" ts_ready="" ts_traffic="" ts_av="" ts_phase="" first_joint="" end="" bk_pid=""
   k0="$(grep -ac 'Linux version' "$WORK/console.log" || true)"
   st0="$(host_disk_stat)"
-  # Authenticate BEFORE the reboot: the first backup listing after recovery
-  # must not wait for a login (ASTRA review of fd65e244, item 3).
+  # Authenticate BEFORE the reboot for the pre-reboot baseline listing. The
+  # post-reboot listing cannot reuse this session: the session signing key is
+  # per-process unless CULVERT_SESSION_SECRET is set (documented in the
+  # state-and-key-custody matrix), so every pre-reboot cookie answers 401.
   : > "$JAR"; api POST /api/auth/login "{\"user\":\"$ADMIN_USER\",\"pass\":\"$(cat "$SEC/admin-pass")\"}" > /dev/null
   recovery_backup_baseline "$EV/$tag-backup-baseline.json"
   marks_pid="$(rec_console_marks "$(date +%s.%N)" "$EV/$tag-console-marks.tsv")"
@@ -1188,7 +1203,9 @@ recovery_once() { local name="$1" i="$2" budget="$3"; local tag="R-$name-$i"
 }
 # The FIRST backup listing after the reboot must answer within 5 s, with the
 # baseline backup in it. Never retried: a slow first answer is the finding.
-# It reuses the session established before the reboot (no login here).
+# Sessions do not survive the restart (per-process signing key), so it logs in
+# on its own cookie jar first; the login is timed and reported separately and
+# only the listing itself is held to the 5 s limit.
 # The oracle is STRUCTURED (ASTRA review 6001710160): HTTP 200 alone, or the
 # filename appearing anywhere in the body, also matches
 # {"available":false,"reason":"could not read <file>",...}. It requires
@@ -1251,9 +1268,17 @@ if len(m) == 1 and all(k in m[0] for k in ("filename", "path", "size_bytes", "en
     json.dump({k: m[0][k] for k in ("filename", "path", "size_bytes", "encrypted")}, open(sys.argv[3], "w"))
 PY
 }
-recovery_backup_first_list() { local name="$1" i="$2" t1 t2 c dt v
+recovery_backup_first_list() { local name="$1" i="$2" t1 t2 c dt v jar="$WORK/rec-backup-jar" l0 lc ldt
+  : > "$jar"
+  l0="$(mono_raw)"
+  lc="$(curl -ksS -m 30 -X POST "$UI/api/auth/login" -H "Origin: $UI" -H 'Content-Type: application/json' -c "$jar" \
+    -d "{\"user\":\"$ADMIN_USER\",\"pass\":\"$(cat "$SEC/admin-pass")\"}" -o /dev/null -w '%{http_code}' 2>/dev/null || echo 000)"
+  ldt="$(python3 -c 'import sys,time; print("%.3f" % (time.monotonic()-float(sys.argv[1])))' "$l0")"
+  if [[ "$lc" != 200 ]]; then
+    check R "backup-list-$name-$i" fail "could not log in for the first listing (http $lc in ${ldt}s)"; return 0
+  fi
   t1="$(mono_raw)"
-  c="$(curl -ksS -m 5 "$UI/api/backups" -H "Origin: $UI" -b "$JAR" -o "$EV/R-$name-$i-backups.json" -w '%{http_code}' 2>/dev/null || echo 000)"
+  c="$(curl -ksS -m 5 "$UI/api/backups" -H "Origin: $UI" -b "$jar" -o "$EV/R-$name-$i-backups.json" -w '%{http_code}' 2>/dev/null || echo 000)"
   t2="$(mono_raw)"
   dt="$(python3 -c 'import sys; print("%.6f" % (float(sys.argv[2])-float(sys.argv[1])))' "$t1" "$t2")"
   if [[ -z "${BACKUP_FILE:-}" ]]; then
@@ -1263,7 +1288,7 @@ recovery_backup_first_list() { local name="$1" i="$2" t1 t2 c dt v
     check R "backup-list-$name-$i" fail "first listing http $c in ${dt}s (limit 5 s, no retry); $BACKUP_FILE expected"; return 0
   fi
   v="$(backup_listing_verdict "$EV/R-$name-$i-backups.json" "$EV/R-$name-$i-backup-baseline.json" "$dt")"
-  if [[ "$v" == PASS* ]]; then check R "backup-list-$name-$i" pass "first listing http 200: ${v#PASS }"
+  if [[ "$v" == PASS* ]]; then check R "backup-list-$name-$i" pass "first listing http 200: ${v#PASS } (login ${ldt}s, not counted)"
   else check R "backup-list-$name-$i" fail "first listing http 200 in ${dt}s (no retry): ${v#FAIL }"; fi
 }
 recovery_guest() {
