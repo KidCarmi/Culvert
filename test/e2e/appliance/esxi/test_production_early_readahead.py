@@ -12,13 +12,15 @@ import stat
 import subprocess
 import tempfile
 import unittest
+import sys
+import uuid
 from unittest import mock
 
 HERE = Path(__file__).resolve().parent
 SPEC = importlib.util.spec_from_file_location('early_readahead', HERE / 'production-early-readahead.py')
 p = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(p)
-COMMON = dict(need=p.need, hashlib=hashlib, os=os, re=re, stat=stat, file_hash=p.file_hash)
+COMMON = dict(need=p.need, hashlib=hashlib, os=os, re=re, stat=stat, file_hash=p.file_hash, uuid=uuid)
 exec(compile(p.COMMON, '<early-common>', 'exec'), COMMON)
 OWNER = '12345678-1234-4567-89ab-123456789abc'
 CAMPAIGN = '23456789-2345-4678-9abc-23456789abcd'
@@ -57,6 +59,96 @@ def fixture_manifests():
 
 
 class EarlyTests(unittest.TestCase):
+    def test_campaign_state_is_canonical_and_does_not_reuse_legacy_directory(self):
+        parent = Path('/var/lib/culvert-lab-early-read-ahead-campaigns')
+        self.assertEqual(COMMON['campaign_state'](parent, CAMPAIGN), parent / CAMPAIGN)
+        self.assertNotEqual(COMMON['campaign_state'](parent, OWNER), parent / CAMPAIGN)
+        for bad in ('../legacy', CAMPAIGN.upper(), CAMPAIGN + '/other', '', None):
+            with self.subTest(bad=bad), self.assertRaises((ValueError, TypeError)):
+                COMMON['campaign_state'](parent, bad)
+        self.assertNotIn("pathlib.Path('/var/lib/culvert-lab-early-read-ahead')", p.GUEST)
+        self.assertIn("need(not os.path.lexists(state), 'prepare already attempted')", p.GUEST)
+
+    def test_boot_tool_probe_has_no_device_redirection_and_fails_missing_functions(self):
+        guest = {}; exec(p.GUEST, guest)
+        calls = []
+        guest['bounded'] = lambda args, **kwargs: calls.append(args)
+        guest['boot_tools'](Path('/expanded'), {'main/scripts/functions': {'kind': 'file'}})
+        command = calls[0][-1]
+        self.assertNotIn('>', command)
+        self.assertNotIn('/dev/', command)
+        self.assertIn('command -v get_fstype || exit 1', command)
+        self.assertIn('. /scripts/functions || exit 1', command)
+        shell = shutil.which('bash') or ('C:/Program Files/Git/bin/bash.exe' if os.name == 'nt' else None)
+        if not shell: self.skipTest('shell unavailable')
+        # Execute the exact discovery program with only the sourced fixture path
+        # redirected to an ordinary temporary file. No guest, chroot or mounts.
+        with tempfile.TemporaryDirectory() as directory:
+            functions = Path(directory) / 'functions'
+            fixture_path = functions.as_posix()
+            if os.name == 'nt': fixture_path = '/' + fixture_path[0].lower() + fixture_path[2:]
+            probe = command.replace('/scripts/functions', "'" + fixture_path + "'")
+            for definitions, expected in [('get_fstype() { :; }; blkid() { :; }', 0),
+                                           ('blkid() { :; }', 1)]:
+                functions.write_bytes(definitions.encode())
+                result = subprocess.run([shell, '-c', probe], capture_output=True, timeout=10)
+                self.assertEqual(result.returncode, expected, result.stderr.decode(errors='replace'))
+
+    @unittest.skipUnless(sys.platform.startswith('linux') and hasattr(os, 'geteuid') and os.geteuid() == 0,
+                         'real empty-dev chroot requires Linux root; Windows runs discovery/shell tests')
+    def test_real_chroot_discovery_without_dev_null(self):
+        guest = {}; exec(p.GUEST, guest); guest['tempfile'] = tempfile
+        with tempfile.TemporaryDirectory() as directory:
+            expanded = Path(directory); root = expanded / 'main'
+            (root / 'bin').mkdir(parents=True); (root / 'scripts').mkdir()
+            # Copy the host shell plus its dynamic dependencies, never any device.
+            shell = Path('/bin/sh').resolve()
+            shutil.copyfile(shell, root / 'bin/sh'); (root / 'bin/sh').chmod(0o755)
+            linked = subprocess.run(['ldd', str(shell)], capture_output=True, text=True, timeout=10)
+            if linked.returncode != 0: self.skipTest('dynamic library inventory unavailable')
+            for library in set(re.findall(r'(/[^\s()]+)', linked.stdout)):
+                source = Path(library)
+                if source.is_file():
+                    target = root / library.lstrip('/'); target.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copyfile(source, target)
+            (root / 'scripts/functions').write_text('get_fstype() { :; }\nblkid() { :; }\n')
+            for name in ('cat', 'tr', 'readlink'):
+                (root / 'bin' / name).write_text('#!/bin/sh\nexit 0\n'); (root / 'bin' / name).chmod(0o755)
+            self.assertFalse((root / 'dev').exists())
+            guest['boot_tools'](expanded, {'main/scripts/functions': {'kind': 'file'}})
+            self.assertFalse((root / 'dev').exists())
+            (root / 'scripts/functions').write_text('blkid() { :; }\n')
+            with self.assertRaisesRegex(ValueError, 'bounded command failed'):
+                guest['boot_tools'](expanded, {'main/scripts/functions': {'kind': 'file'}})
+
+    def test_bounded_command_keeps_nonzero_timeout_and_oversize_diagnostics_private(self):
+        guest = {}; exec(p.GUEST, guest); guest['tempfile'] = tempfile
+        with tempfile.TemporaryDirectory() as directory:
+            guest['COMMAND_DIAGNOSTICS'] = Path(directory)
+            # The production O_EXCL/fsync writer is Linux-specific; substitute
+            # only persistence so the real bounded child process runs on Windows.
+            def private_new(path, content):
+                with path.open('xb') as output: output.write(content)
+            guest['new'] = private_new
+            for command, timeout, expected in [
+                ('import sys; print("probe"); print("missing /dev/null", file=sys.stderr); sys.exit(7)', 5, 7),
+                ('import sys,time; print("before timeout", flush=True); time.sleep(5)', 0.2, None),
+                ('print("x" * 2048)', 5, 0)]:
+                prior = set(Path(directory).glob('*.json'))
+                with self.assertRaisesRegex(ValueError, 'bounded command failed'):
+                    guest['bounded']([sys.executable, '-c', command], timeout=timeout, limit=1024)
+                paths = set(Path(directory).glob('*.json')) - prior
+                self.assertEqual(len(paths), 1)
+                row = json.loads(paths.pop().read_bytes())
+                self.assertEqual(row['argv'], [sys.executable, '-c', command])
+                self.assertEqual(row['returncode'], expected)
+                self.assertGreater(row['elapsed_ns'], 0)
+                if expected == 7: self.assertIn('missing /dev/null', row['stderr'])
+                if expected is None:
+                    self.assertIn('TimeoutExpired', row['error']); self.assertIn('before timeout', row['stdout'])
+                if expected == 0: self.assertTrue(row['truncated']); self.assertLessEqual(len(row['stdout']), 1024)
+            self.assertEqual(guest['bounded']([sys.executable, '-c', 'print("ok")']).strip(), 'ok')
+
     def test_facts_require_exact_original_and_actual_premount_ordering(self):
         self.assertEqual(p.private_facts(facts()), ROOT)
         for part, key, value in [('initrd', 'sha256', '0' * 64), ('initrd', 'bytes', 128),

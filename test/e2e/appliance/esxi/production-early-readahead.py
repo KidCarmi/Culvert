@@ -121,6 +121,10 @@ exit 0
 
 # These functions also run offline in the tests; no guest activity on import.
 COMMON = r'''
+def campaign_state(parent, campaign):
+    need(isinstance(campaign, str) and str(uuid.UUID(campaign)) == campaign, 'canonical campaign required')
+    return parent / campaign
+
 def target_profile(action, active, exported):
     need(exported is True, 'offguest export required before apply or restore')
     target = {'applyA': 'A', 'applyB': 'B', 'restore': 'original'}[action]
@@ -224,11 +228,32 @@ def replace_json(path, value, operation):
     temporary = path.with_name(path.name + '.' + operation + '.new')
     new(temporary, json_bytes(value)); os.replace(temporary, path); syncdir(path.parent)
 def bounded(args, timeout=30, limit=65536):
-    # Output goes to private regular files, bounded after child completion. No stdout evidence leak.
+    # Capture privately even on timeout/nonzero/oversize; never discard the cause.
     with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
-        result = subprocess.run(args, stdin=subprocess.DEVNULL, stdout=stdout, stderr=stderr, timeout=timeout)
-        need(stdout.tell() <= limit and stderr.tell() <= limit and result.returncode == 0, 'bounded command failed: ' + args[0])
-        stdout.seek(0); return stdout.read().decode('utf-8')
+        started = time.monotonic_ns()
+        error = None
+        try:
+            result = subprocess.run(args, stdin=subprocess.DEVNULL, stdout=stdout, stderr=stderr, timeout=timeout)
+            returncode = result.returncode
+        except (subprocess.TimeoutExpired, OSError) as exc:
+            returncode, error = None, type(exc).__name__ + ': ' + str(exc)
+        sizes = (stdout.tell(), stderr.tell())
+        stdout.seek(0); stderr.seek(0)
+        if error is not None or returncode != 0 or max(sizes) > limit:
+            diagnostic = dict(argv=args, returncode=returncode, error=error,
+                              timeout_seconds=timeout, elapsed_ns=time.monotonic_ns() - started,
+                              stdout_bytes=sizes[0], stderr_bytes=sizes[1],
+                              stdout=stdout.read(min(limit, 16384)).decode('utf-8', errors='replace'),
+                              stderr=stderr.read(min(limit, 16384)).decode('utf-8', errors='replace'))
+            diagnostic['truncated'] = max(sizes) > min(limit, 16384)
+            directory = globals().get('COMMAND_DIAGNOSTICS')
+            if directory is not None:
+                new(directory / ('command-failure-' + str(uuid.uuid4()) + '.json'), json_bytes(diagnostic))
+            # Before campaign creation the authenticated transport still captures
+            # this diagnostic in its private guest-result, never public stdout.
+            raise ValueError('bounded command failed: ' + json.dumps(diagnostic, sort_keys=True))
+        return stdout.read().decode('utf-8')
+
 def copy_exact(source, target, expected, size, mode=0o600):
     regular(source, stat.S_IMODE(source.lstat().st_mode))
     need(source.stat().st_size == size and file_hash(source) == expected, 'copy source mismatch')
@@ -274,15 +299,16 @@ def boot_tools(expanded, rows):
     # Executes only the original package shell's tool discovery in an isolated
     # expanded initrd: no /proc,/sys,/dev mounts, no boot script execution.
     command = ('PATH=/usr/sbin:/usr/bin:/sbin:/bin; export PATH; '
-               'for tool in cat tr readlink; do command -v "$tool" >/dev/null || exit 1; done; '
-               '. /scripts/functions; command -v get_fstype >/dev/null; '
-               'command -v blkid >/dev/null || command -v fstype >/dev/null')
+               'for tool in cat tr readlink; do command -v "$tool" || exit 1; done; '
+               '. /scripts/functions || exit 1; command -v get_fstype || exit 1; '
+               'command -v blkid || command -v fstype || exit 1')
     bounded(['chroot', str(root), '/bin/sh', '-c', command], timeout=15)
     return root
 def prepare(c, state, ra, prior):
     need(prior['new_value'] == 128, 'prepare requires returned A128')
     need(not os.path.lexists(state), 'prepare already attempted')
     state.mkdir(mode=0o700); syncdir(state.parent)
+    globals()['COMMAND_DIAGNOSTICS'] = state
     new(state / 'operation.lock', json_bytes({'operation': c['operation']}))
     record = {key: c[key] for key in ('schema', 'campaign', 'owner_uuid', 'source_sha', 'image_id', 'kernel', 'root_uuid', 'generator_sha256', 'ra_campaign', 'ra_generator')}
     record.update(status='preparing', operation=c['operation'])
@@ -377,11 +403,16 @@ def main(c):
     ra = {}; exec(base64.b64decode(c['ra_guest_b64']), ra)
     for directory in (pathlib.Path('/boot'), pathlib.Path('/var/lib')): ra['trusted_dir'](directory)
     observed, prior, rc = immutable_guard(c, ra)
-    state = pathlib.Path('/var/lib/culvert-lab-early-read-ahead')
+    state_parent = pathlib.Path('/var/lib/culvert-lab-early-read-ahead-campaigns')
+    state = campaign_state(state_parent, c['campaign'])
+    if c['action'] == 'prepare' and not os.path.lexists(state_parent):
+        state_parent.mkdir(mode=0o700); syncdir(state_parent.parent)
+    ra['trusted_dir'](state_parent, 0o700)
     if c['action'] == 'prepare':
         result = prepare(c, state, ra, prior)
         print(json.dumps({'result': 'pass', 'action': 'prepare', 'stages': result['stages']})); return
     ra['trusted_dir'](state, 0o700)
+    globals()['COMMAND_DIAGNOSTICS'] = state
     record = receipt_guard(c, state)
     if c['action'] == 'verify':
         need(record['active'] == c['profile'], 'verification profile differs')

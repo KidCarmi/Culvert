@@ -66,3 +66,20 @@ replaces only the selected146 initrd and fsyncs `/boot`. Rollback uses the prese
 original bytes and must restore their exact hash. Private write-ahead receipts
 and incomplete-operation locks prohibit automatic replay after partial failure.
 All altered-guest results are experimental evidence only.
+
+## Pre-staging tool-check failure and isolated replacement campaign
+
+The first prepare attempt stopped while checking tools in the expanded original
+initrd, before staging or activation. Its private fixed state directory, lock,
+intent and original copy remain untouched. The corrected check uses no in-chroot
+redirection or device mounts: an unpacked initrd need not contain `/dev/null`.
+Every required discovery step must succeed. Failed commands retain bounded private
+argv, stdout, stderr, exit status and timeout evidence.
+
+A reviewed replacement uses a **new campaign UUID** beneath the root-private
+`/var/lib/culvert-lab-early-read-ahead-campaigns/` directory. It repeats original
+identity, headroom and expansion checks from the unchanged active initrd. Existing
+campaign directories remain exclusive and cannot be retried automatically. This
+is a separate attempt, not an unlock or a rewrite of the original failed result.
+The A/B allowlist, export prerequisite, boot-file guards and recovery budget are
+unchanged. Freeze the revised controller before invoking the new campaign.
