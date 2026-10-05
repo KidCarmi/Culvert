@@ -162,7 +162,7 @@ func apiBackupsList(w http.ResponseWriter, r *http.Request) {
 func backupsListingPayload(ctx context.Context) map[string]any {
 	backupsCache.mu.Lock()
 	defer backupsCache.mu.Unlock()
-	if backupsCache.payload != nil && time.Since(backupsCache.at) < backupsCacheTTL {
+	if backupsCache.payload != nil && time.Since(backupsCache.at) < agentReadTTL(backupsCache.payload, backupsCacheTTL) {
 		return backupsCache.payload
 	}
 	// Stamp the FETCH START, not its return: the agent scans the directory
@@ -171,7 +171,10 @@ func backupsListingPayload(ctx context.Context) map[string]any {
 	// invalidation compares this stamp against finished_at, so it must never
 	// claim a snapshot is newer than it can prove.
 	start := time.Now()
-	out := buildBackupsPayload(ctx)
+	// Detached from the requester (bounded by the fetch's own timeout): the
+	// listing is shared, so one viewer's disconnect must not be cached as
+	// "agent unavailable" for everyone.
+	out := buildBackupsPayload(context.WithoutCancel(ctx))
 	backupsCache.payload, backupsCache.at = out, start
 	return out
 }
