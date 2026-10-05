@@ -574,6 +574,37 @@ docker compose --profile cli run --rm \
 For routine off-host transfers, prefer the host-bind-mount override
 shown in § 2.
 
+### Diagnosing a slow or failed backup listing
+
+`GET /api/backups` (the admin panel's backup list) asks the maintenance
+agent, which runs `cli --list-backups` in a transient container. A listing
+that answers `available:false` can be traced end to end. Each fresh fetch
+writes one proxy log line and one agent log line that share a correlation id:
+
+```text
+# proxy log (docker compose logs proxy)
+BACKUP_LIST corr=3f9a0c2e7b1d4a55 start=… conn_ms=0.4 reused=false first_byte_ms=4123.8 total_ms=4124.0 status=200 entries=3 outcome=ok
+# agent log (journalctl -u culvert-maint)
+culvert-maint: backup_list corr=3f9a0c2e7b1d4a55 conn_accepted=… handler_at=… accept_to_handler_ms=0.2 compose_ms=4110.6 cli_start_ms=3890.1 enumerate_ms=1.9 handler_ms=4111.3 entries=3 outcome=ok
+```
+
+The two lines show where the time went:
+
+- `compose_ms` is the whole `docker compose run`.
+- `cli_start_ms` is how long the container took to start the cli process.
+- `enumerate_ms` is the directory scan itself.
+- `outcome` is a bounded class:
+  - proxy: `ok`, `timeout`, `unreachable`, `agent_http_error`, `parse_error`;
+  - agent: `ok`, `runner_error`, `runner_canceled`, `parse_error`, `invalid_entry`.
+
+A failed listing is cached for a few seconds. A caller who receives that cached answer causes a proxy line that names the fetch which produced it:
+
+```text
+BACKUP_LIST served cached available=false from corr=<id> age_ms=<n>
+```
+
+That line is rate-limited to one every 5 s. Neither log carries paths, file names or error text.
+
 ---
 
 ## 12. What NOT to do

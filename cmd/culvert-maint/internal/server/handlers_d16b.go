@@ -576,7 +576,12 @@ type backupListEntry struct {
 }
 
 func (s *Server) handleBackupList(w http.ResponseWriter, r *http.Request, peer auth.PeerInfo) {
+	// One correlated timing line per listing, whatever the outcome
+	// (backup_list_timing.go).
+	tm := newBackupListTiming(r.Header.Get(headerCorrelation))
+	defer tm.log(r.Context())
 	if s.opts.Runner == nil {
+		tm.outcome = "runner_not_wired"
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "runner_not_wired"})
 		return
 	}
@@ -584,8 +589,16 @@ func (s *Server) handleBackupList(w http.ResponseWriter, r *http.Request, peer a
 	// array on stdout; the agent unmarshals it (so a malformed CLI
 	// output produces a clean 500 rather than corrupting the Content-
 	// Type contract) and re-encodes via writeJSON.
+	tm.composeAt = time.Now()
 	res, err := s.opts.Runner.ComposeBackupList(r.Context())
+	tm.composeDur = time.Since(tm.composeAt)
+	if res != nil {
+		tm.stderr = res.Stderr
+	}
 	if err != nil {
+		if r.Context().Err() != nil {
+			tm.outcome = "runner_canceled"
+		}
 		writeJSON(w, http.StatusInternalServerError, map[string]interface{}{
 			"error":  "list_backups_failed",
 			"detail": err.Error(),
@@ -594,6 +607,7 @@ func (s *Server) handleBackupList(w http.ResponseWriter, r *http.Request, peer a
 	}
 	var entries []backupListEntry
 	if jerr := json.Unmarshal(res.Stdout, &entries); jerr != nil {
+		tm.outcome = "parse_error"
 		writeJSON(w, http.StatusInternalServerError, map[string]interface{}{
 			"error":  "list_backups_parse_failed",
 			"detail": jerr.Error(),
@@ -604,6 +618,7 @@ func (s *Server) handleBackupList(w http.ResponseWriter, r *http.Request, peer a
 	if entries == nil {
 		entries = []backupListEntry{}
 	}
+	tm.entries = len(entries)
 	// Per-entry shape validation. The cli is trusted enough that we
 	// accept its output, but a buggy or compromised cli could emit
 	// entries that would mislead the operator (path traversal in
@@ -611,12 +626,14 @@ func (s *Server) handleBackupList(w http.ResponseWriter, r *http.Request, peer a
 	// filename), so we surface a clean 500 rather than serve them
 	// up with the agent's stamp of approval.
 	if verr := validateBackupListEntries(entries, s.opts.Cfg.AllowedBackupDir); verr != nil {
+		tm.outcome = "invalid_entry"
 		writeJSON(w, http.StatusInternalServerError, map[string]interface{}{
 			"error":  "list_backups_invalid_entry",
 			"detail": verr.Error(),
 		})
 		return
 	}
+	tm.outcome = backupListOutcomeOK
 	writeJSON(w, http.StatusOK, entries)
 	_ = peer
 }

@@ -477,7 +477,7 @@ func handleOneShotCommands(s *startupState) {
 	}
 	// ── One-shot: list backup archives (D1.6b) ─────────────────────────────
 	if *s.listBackups {
-		if err := runListBackups(*s.listBackupsDir, os.Stdout); err != nil {
+		if err := runListBackupsTimed(*s.listBackupsDir, os.Stdout, os.Stderr); err != nil {
 			fmt.Fprintf(os.Stderr, "List backups error: %v\n", err)
 			os.Exit(1)
 		}

@@ -341,6 +341,7 @@ func (s *Server) Serve(ctx context.Context) error {
 		WriteTimeout:      30 * time.Second,
 		IdleTimeout:       2 * time.Minute,
 		ConnContext: func(ctx context.Context, c net.Conn) context.Context {
+			ctx = context.WithValue(ctx, connAcceptedKey{}, time.Now())
 			return context.WithValue(ctx, connContextKey{}, c)
 		},
 	}
