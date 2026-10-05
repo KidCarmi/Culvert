@@ -577,6 +577,24 @@ EOS
     rc=0; printf 'sudo -k; sudo -n true 2>&1; echo "sudo-n-rc=$?"\n' | gpriv --as-user > "$EV/03c-culvert-sudo-n.txt" 2>&1 || rc=$?
     grep -qx 'sudo-n-rc=1' "$EV/03c-culvert-sudo-n.txt" && check 3c local-admin-sudo-needs-password pass "culvert: sudo -n refused (a password is required)" || check 3c local-admin-sudo-needs-password fail "$(tr '\n' ' ' < "$EV/03c-culvert-sudo-n.txt")"
     boot_timing 03d 3d
+    # Step 3e — recovery-secret custody: the root-only reveal prints exactly the
+    # stack .env passphrases. Compared INSIDE the guest; only booleans and key
+    # names reach the evidence, never a value.
+    gpriv > "$EV/03e-recovery-secrets.txt" 2>&1 <<'EOS' || true
+out="$(printf '\n' | /opt/culvert-appliance/bin/culvert-console --host=recovery-secrets 2>&1)"
+for k in CULVERT_CA_PASSPHRASE CULVERT_LOG_PASSPHRASE; do
+  v="$(sed -n "s/^$k=//p" /srv/culvert/.env | tail -1)"
+  if [ -n "$v" ] && printf '%s\n' "$out" | grep -qxF "$k=$v"; then echo "$k=shown-and-matches-env"; else echo "$k=MISMATCH-or-missing"; fi
+done
+printf '%s\n' "$out" | grep -q 'CULVERT_SETUP_TOKEN' && echo "setup-token=LEAKED" || echo "setup-token=not-shown"
+printf '%s\n' "$out" | grep -q 'A backup archive does NOT contain them' && echo "guidance=present" || echo "guidance=missing"
+EOS
+    printf '/opt/culvert-appliance/bin/culvert-console --host=recovery-secrets </dev/null >/dev/null 2>&1; echo "unprivileged-rc=$?"\n' | gpriv --as-user >> "$EV/03e-recovery-secrets.txt" 2>&1 || true
+    if grep -qx 'CULVERT_CA_PASSPHRASE=shown-and-matches-env' "$EV/03e-recovery-secrets.txt" && grep -qx 'CULVERT_LOG_PASSPHRASE=shown-and-matches-env' "$EV/03e-recovery-secrets.txt" \
+       && grep -qx 'setup-token=not-shown' "$EV/03e-recovery-secrets.txt" && grep -qx 'guidance=present' "$EV/03e-recovery-secrets.txt" \
+       && grep -qE '^unprivileged-rc=[1-9]' "$EV/03e-recovery-secrets.txt"; then
+      check 3e recovery-secrets pass "root reveal shows both .env passphrases exactly, no setup token, with custody guidance; unprivileged invocation refused"
+    else check 3e recovery-secrets fail "$(tr '\n' ' ' < "$EV/03e-recovery-secrets.txt")"; fi
   fi
   # Step 4 — first administrator; the token is REQUIRED.
   local pass c; pass="$(cat "$SEC/admin-pass")"
