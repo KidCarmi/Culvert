@@ -102,7 +102,17 @@ guest=$(tr 'A-F' 'a-f' < /sys/class/dmi/id/product_uuid) || refuse uuid
 case "$guest" in OWNER|ALIAS) :;; *) refuse uuid;; esac
 read -r kernel < /proc/sys/kernel/osrelease
 [ "$kernel" = KERNEL ] || refuse kernel
-[ "${ROOT:-}" = /dev/sda1 ] || refuse root
+read -r boot_cmdline < /proc/cmdline || refuse root
+root_count=0
+set -f
+for argument in $boot_cmdline; do
+    case "$argument" in root=*)
+        root_count=$((root_count + 1))
+        [ "$argument" = root=UUID=ROOT_UUID ] || refuse root
+    ;; esac
+done
+set +f
+[ "$root_count" -eq 1 ] || refuse root
 [ "$(readlink -f /dev/disk/by-uuid/ROOT_UUID)" = /dev/sda1 ] || refuse root_uuid
 [ "$(get_fstype /dev/sda1)" = ext4 ] || refuse filesystem
 read -r sectors < /sys/block/sda/size
@@ -531,7 +541,7 @@ def main(c):
         need(boot != record['before_boot'], 'new boot not observed')
         result = {'profile': c['profile'], 'boot_id': boot}
         if c['profile'] != 'original':
-            text = bounded(['dmesg', '--time-format=raw', '--color=never'], limit=4 * 1024**2)
+            text = bounded(['dmesg', '--raw', '--color=never'], limit=4 * 1024**2)
             result.update(verify_boot_marker(text, c['campaign'], value, boot))
         need(pathlib.Path('/proc/sys/kernel/random/boot_id').read_text().strip() == boot, 'boot changed during proof')
         print(json.dumps(dict(result, result='pass', action='verify'))); return

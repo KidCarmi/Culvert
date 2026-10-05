@@ -111,3 +111,20 @@ on an appended archive that an extractor might silently ignore.
 Recompression changes the compressed main archive layout, so the initial A boot
 is a necessary control. This remains an altered-guest comparison, never evidence
 that the deliverable OVA itself acquired the fixture or passed qualification.
+
+## Root identity in the child hook
+
+The first surgical-fixture A boot retained useful recovery measurements but is
+invalid for the early-readahead comparison: its kernel marker reported a root
+identity refusal before mount. The initramfs parent had resolved `ROOT`, but did
+not export that shell variable to the child hook. Its separate verifier also used
+an unsupported `dmesg --time-format=raw` argument. Both failures remain recorded;
+the original initrd was restored before preparing another campaign.
+
+The corrected hook reads `/proc/cmdline` without evaluation, requires exactly one
+`root=` argument equal to the approved `root=UUID=...`, and still verifies that
+UUID resolves to `/dev/sda1`, plus the existing filesystem/disk/kernel/VM guards.
+It neither depends on nor trusts an inherited `ROOT` variable. The verifier uses
+`dmesg --raw --color=never` and accepts its priority-prefixed monotonic timestamps.
+A new campaign and frozen generator are required; prior failed markers are never
+reinterpreted as applied fixtures.

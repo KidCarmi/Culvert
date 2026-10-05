@@ -310,6 +310,62 @@ class EarlyTests(unittest.TestCase):
                 prereqs = subprocess.run([shell, '-s', '--', 'prereqs'], input=hook, capture_output=True, timeout=10)
                 self.assertEqual((prereqs.returncode, prereqs.stdout), (0, b'\n'))
 
+    def test_real_shell_hook_uses_cmdline_with_ROOT_unset_and_refuses_ambiguous_identity(self):
+        shell = shutil.which('bash') or ('C:/Program Files/Git/bin/bash.exe' if os.name == 'nt' else None)
+        if not shell: self.skipTest('POSIX shell unavailable')
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            shell_base = base.as_posix()
+            if os.name == 'nt': shell_base = '/' + shell_base[0].lower() + shell_base[2:]
+            quoted = "'" + shell_base.replace("'", "'\"'\"'") + "'"
+            values = {'proc/uptime': '2.5 1.0', 'proc/sys/kernel/random/boot_id': BOOT,
+                      'proc/sys/kernel/osrelease': p.KERNEL, 'sys/class/dmi/id/sys_vendor': 'VMware, Inc.',
+                      'sys/class/dmi/id/product_uuid': OWNER, 'sys/block/sda/size': '83886080',
+                      'sys/block/sda/queue/scheduler': 'none [mq-deadline]', 'dev/kmsg': ''}
+            for name, value in values.items():
+                path = base / name; path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes((value + '\n').encode())
+            functions = base / 'scripts/functions'; functions.parent.mkdir()
+            hook = p.boot_hook(OWNER, CAMPAIGN, ROOT, 1024).decode('ascii')
+            # Map every accessed kernel pseudo-file to an ordinary private fixture.
+            # readlink/get_fstype are fixture functions; no real device is touched.
+            hook = re.sub(r'/proc/|/sys/|/dev/disk/|/scripts/', lambda match: quoted + match[0], hook)
+            hook = hook.replace('/dev/kmsg', quoted + '/dev/kmsg')
+            good = 'BOOT_IMAGE=/vmlinuz root=UUID=' + ROOT + ' ro console=ttyS0'
+            cases = [(good, None, '/dev/sda1', 'applied', 'verified'),
+                     (good, '/dev/wrong', '/dev/sda1', 'applied', 'verified'),
+                     (good + ' root=UUID=' + ROOT, None, '/dev/sda1', 'refused', 'root'),
+                     ('ro console=ttyS0', None, '/dev/sda1', 'refused', 'root'),
+                     ('root=UUID=' + OWNER, None, '/dev/sda1', 'refused', 'root'),
+                     ('root=/dev/sda1', None, '/dev/sda1', 'refused', 'root'),
+                     (good, None, '/dev/sdb1', 'refused', 'root_uuid'),
+                     (good + ' ignored=$(touch ' + shell_base + '/must-not-exist)', None, '/dev/sda1', 'applied', 'verified')]
+            for cmdline, environment_root, resolved, result, reason in cases:
+                (base / 'proc/cmdline').write_bytes((cmdline + '\n').encode())
+                queue = base / 'sys/block/sda/queue/read_ahead_kb'; queue.write_bytes(b'128\n')
+                (base / 'dev/kmsg').write_bytes(b'')
+                functions.write_bytes(('get_fstype() { [ "$1" = /dev/sda1 ] || return 1; echo ext4; }\n'
+                                       'readlink() { [ "$1" = -f ] || return 1; echo ' + resolved + '; }\n').encode())
+                environment = os.environ.copy(); environment.pop('ROOT', None)
+                if environment_root is not None: environment['ROOT'] = environment_root
+                run = subprocess.run([shell, '--posix', '-s'], input=hook.encode(), capture_output=True,
+                                     timeout=10, env=environment)
+                with self.subTest(cmdline=cmdline, resolved=resolved, environment_root=environment_root):
+                    self.assertEqual(run.returncode, 0, run.stderr.decode(errors='replace'))
+                    marker = (base / 'dev/kmsg').read_text(encoding='ascii')
+                    self.assertIn('result=' + result, marker)
+                    self.assertIn('reason=' + reason, marker)
+                    self.assertEqual(queue.read_bytes(), b'1024\n' if result == 'applied' else b'128\n')
+                    self.assertFalse((base / 'must-not-exist').exists())
+
+    def test_supported_raw_dmesg_priority_prefix_is_parsed(self):
+        self.assertIn("['dmesg', '--raw', '--color=never']", p.GUEST)
+        self.assertNotIn('--time-format=raw', p.GUEST)
+        raw = ('<6>[    2.938219] CULVERT_LAB_EARLY_RA campaign=' + CAMPAIGN + ' boot=' + BOOT
+               + ' profile=1024 result=applied old=128 effective=1024 uptime=2.93 reason=verified\n'
+               '<6>[    3.100000] EXT4-fs (sda1): mounted filesystem uuid ro\n')
+        self.assertEqual(COMMON['verify_boot_marker'](raw, CAMPAIGN, 1024, BOOT)['marker_monotonic_seconds'], 2.938219)
+
     def test_A_B_hooks_differ_only_in_target_value(self):
         a, b = p.boot_hook(OWNER, CAMPAIGN, ROOT, 128), p.boot_hook(OWNER, CAMPAIGN, ROOT, 1024)
         # The default-value guard stays128 in BOTH profiles.
