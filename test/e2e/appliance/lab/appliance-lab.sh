@@ -80,6 +80,18 @@ if [[ "$LAB_EXTERNAL" == 1 ]]; then dssh=22 dproxy=8080 dui=9090; else dssh=2222
 LAB_SSH_PORT="${LAB_SSH_PORT:-$dssh}"; LAB_PROXY_PORT="${LAB_PROXY_PORT:-$dproxy}"; LAB_UI_PORT="${LAB_UI_PORT:-$dui}"
 LAB_FIRSTBOOT_TIMEOUT="${LAB_FIRSTBOOT_TIMEOUT:-2400}"; LAB_KERNEL_TIMEOUT="${LAB_KERNEL_TIMEOUT:-}"; LAB_FEED_TIMEOUT="${LAB_FEED_TIMEOUT:-1500}"
 LAB_EXPECT_IMAGE_ID="${LAB_EXPECT_IMAGE_ID:-}"; LAB_UPDATE_DIR="${LAB_UPDATE_DIR:-}"
+# Disk model. overlay (default): qcow2 overlay over the read-only base, host page
+# cache on — the qualification lab. dm: a disposable raw copy of the OVA's VMDK
+# behind a device-mapper target, cache=none + a direct-I/O loop, so every guest
+# read reaches the device and latency can be injected (dm-delay) while the guest
+# runs. `recovery` requires dm.
+LAB_DISK="${LAB_DISK:-overlay}"
+# Maintenance-reboot recovery (cmd_recovery): N reboots per profile; a profile is
+# name:read_ms:write_ms:budget_s (the injected per-I/O latency and the recovery
+# budget each reboot of that profile must meet).
+LAB_RECOVERY_REBOOTS="${LAB_RECOVERY_REBOOTS:-0}"
+LAB_RECOVERY_PROFILES="${LAB_RECOVERY_PROFILES:-fast:0:0:60 esxi110:110:18:300}"
+LAB_RECOVERY_TIMEOUT="${LAB_RECOVERY_TIMEOUT:-1800}"
 ADMIN_USER=labadmin
 
 log()  { printf '%s [lab] %s\n' "$(date -u +%H:%M:%S)" "$*" >&2; }
@@ -123,6 +135,7 @@ gop() { ssh "${SSH_OPTS[@]}" "culvert-operator@$LAB_HOST" "$@"; }
 # Serial console socket (QEMU chardev; its logfile is console.log). Short fixed
 # path: AF_UNIX paths are limited to 108 bytes.
 SER_SOCK="/tmp/culvert-lab-ser-$(printf '%s' "$WORK" | sha256sum | cut -c1-12).sock"
+DM_NAME="culvert-lab-$(printf '%s' "$WORK" | sha256sum | cut -c1-8)"
 # gpriv [--as-user] [--timeout N] [--nowait] < script — authenticated local
 # administration: PAM login as culvert on the console, then sudo (root).
 gpriv() {
@@ -296,6 +309,37 @@ PY
 
 
 # ── up: verify → extract → immutable base + overlay → OVF ISO → boot ────────
+# ── device-mapper disk (LAB_DISK=dm) ─────────────────────────────────────────
+# The guest disk is a raw file on a direct-I/O loop device under a dm target, so
+# neither the host page cache nor QEMU's (cache=none) hides a read: what the guest
+# reads after a reboot is what the device serves, as on a hypervisor datastore.
+# set_disk_latency swaps the live table between `linear` and `delay` (dm-delay:
+# a fixed per-I/O delay, reads and writes separately, unlimited concurrency).
+dm_attach() { local loop sectors dev
+  sudo modprobe dm_delay 2>/dev/null || log "dm_delay module not loaded — latency injection will be unavailable"
+  loop="$(sudo losetup --find --show --direct-io=on "$1")" || return 1
+  sectors="$(sudo blockdev --getsz "$loop")" || return 1
+  echo "0 $sectors linear $loop 0" | sudo dmsetup create "$DM_NAME" || return 1
+  dev="$(readlink -f "/dev/mapper/$DM_NAME")"
+  sudo chown "$(id -u):$(id -g)" "$dev"
+  save_state DM_LOOP "$loop"; save_state DM_SECTORS "$sectors"; save_state DM_DEV "$(basename "$dev")"
+}
+set_disk_latency() { local r="$1" w="$2" t
+  if (( r == 0 && w == 0 )); then t="0 $DM_SECTORS linear $DM_LOOP 0"
+  else t="0 $DM_SECTORS delay $DM_LOOP 0 $r $DM_LOOP 0 $w"; fi
+  sudo dmsetup suspend "$DM_NAME" && echo "$t" | sudo dmsetup reload "$DM_NAME" && sudo dmsetup resume "$DM_NAME" || return 1
+  sudo dmsetup table "$DM_NAME"
+}
+dm_detach() {
+  [[ -n "${DM_LOOP:-}" ]] || return 0
+  sudo dmsetup remove "$DM_NAME" 2>/dev/null || true
+  sudo losetup -d "$DM_LOOP" 2>/dev/null || true
+}
+# Host-side view of the guest disk: /sys/block/<dm>/stat (reads, merged,
+# sectors, ms reading, writes, merged, sectors, ms writing, in flight, io ticks,
+# time in queue).
+host_disk_stat() { cat "/sys/block/${DM_DEV:?}/stat"; }
+
 cmd_up() {
   [[ -n "${ACCEL:-}" ]] || die "run preflight first"
   local ova="${LAB_OVA:?LAB_OVA=path to the .ova}" want="${LAB_OVA_SHA256:?LAB_OVA_SHA256=expected sha256}"
@@ -304,12 +348,22 @@ cmd_up() {
   save_state OVA_NAME "$(basename "$ova")"; save_state OVA_SHA256 "$got"
   rm -rf "$WORK/ova"; extract_ova "$ova" "$WORK/ova" && check 1 ova-manifest pass "every .mf digest matches" || { check 1 ova-manifest fail ".mf mismatch"; return 1; }
   grep -oE 'CANDIDATE[^<]*|<Version>[^<]*' "$WORK/ova/"*.ovf | head -3 > "$EV/01-ovf-head.txt" || true
-  local vmdk; vmdk="$(ls "$WORK/ova/"*.vmdk)"
-  log "converting $(basename "$vmdk") → immutable qcow2 base"
-  qemu-img convert -p -O qcow2 "$vmdk" "$WORK/base.qcow2" >/dev/null; rm -f "$vmdk"; chmod 0444 "$WORK/base.qcow2"
-  qemu-img create -q -f qcow2 -F qcow2 -b "$WORK/base.qcow2" "$WORK/overlay.qcow2"
-  qemu-img info "$WORK/base.qcow2" > "$EV/01-base-qcow2-info.txt"
-  check 1 disk-chain pass "base.qcow2 (0444, from the OVA's own VMDK) ← overlay.qcow2 (disposable)"
+  local vmdk drive; vmdk="$(ls "$WORK/ova/"*.vmdk)"
+  if [[ "$LAB_DISK" == dm ]]; then
+    log "converting $(basename "$vmdk") → disposable raw disk behind device-mapper"
+    qemu-img convert -p -O raw "$vmdk" "$WORK/disk.raw" >/dev/null; rm -f "$vmdk"
+    qemu-img info "$WORK/disk.raw" > "$EV/01-base-qcow2-info.txt"
+    dm_attach "$WORK/disk.raw" || { check 1 disk-chain blocked "device-mapper disk unavailable (see log)"; return 1; }
+    drive="file=/dev/mapper/$DM_NAME,if=none,id=d0,format=raw,cache=none,aio=native"
+    check 1 disk-chain pass "disk.raw (disposable copy of the OVA's own VMDK) → direct-I/O loop $DM_LOOP → dm $DM_NAME (linear; latency injectable); QEMU cache=none"
+  else
+    log "converting $(basename "$vmdk") → immutable qcow2 base"
+    qemu-img convert -p -O qcow2 "$vmdk" "$WORK/base.qcow2" >/dev/null; rm -f "$vmdk"; chmod 0444 "$WORK/base.qcow2"
+    qemu-img create -q -f qcow2 -F qcow2 -b "$WORK/base.qcow2" "$WORK/overlay.qcow2"
+    qemu-img info "$WORK/base.qcow2" > "$EV/01-base-qcow2-info.txt"
+    drive="file=$WORK/overlay.qcow2,if=none,id=d0,format=qcow2,cache=writeback"
+    check 1 disk-chain pass "base.qcow2 (0444, from the OVA's own VMDK) ← overlay.qcow2 (disposable)"
+  fi
   # Disposable credentials. No console password is supplied: first boot must
   # mint and print the one-time password (the default bootstrap under test).
   rm -f "$SEC/id_ed25519"* "$SEC/console-pass" "$SEC/console-onetime" "$SEC/console-events"
@@ -339,15 +393,15 @@ PY
   # ttyS0 is a socket (the authenticated console session attaches to it) whose
   # every byte is ALSO logged, client or not: console.log stays the boot record.
   qemu-system-x86_64 -name culvert-lab "${acc[@]}" -smp "$LAB_CPUS" -m "$LAB_MEM_MB" \
-    -drive "file=$WORK/overlay.qcow2,if=none,id=d0,format=qcow2,cache=writeback" \
+    -drive "$drive" \
     -device virtio-scsi-pci,id=scsi0 -device scsi-hd,drive=d0,bus=scsi0.0 \
     -drive "file=$WORK/ovfenv.iso,if=none,id=cd0,media=cdrom,readonly=on" -device ide-cd,drive=cd0 \
     -netdev "user,id=n0,hostfwd=tcp:127.0.0.1:$LAB_SSH_PORT-:22,hostfwd=tcp:127.0.0.1:$LAB_PROXY_PORT-:8080,hostfwd=tcp:127.0.0.1:$LAB_UI_PORT-:9090" \
     -device e1000,netdev=n0 -display none \
     -chardev "socket,id=ser0,path=$SER_SOCK,server=on,wait=off,logfile=$WORK/console.log,logappend=on" -serial chardev:ser0 \
     -monitor "unix:$MON_SOCK,server,nowait" -pidfile "$WORK/qemu.pid" -daemonize
-  printf 'qemu-system-x86_64 %s -smp %s -m %s virtio-scsi(overlay.qcow2) ide-cd(ovfenv.iso) e1000 user-net hostfwd 127.0.0.1:{%s,%s,%s} SeaBIOS serial=socket+logfile\n' \
-    "${acc[*]}" "$LAB_CPUS" "$LAB_MEM_MB" "$LAB_SSH_PORT" "$LAB_PROXY_PORT" "$LAB_UI_PORT" > "$EV/02-qemu-command.txt"
+  printf 'qemu-system-x86_64 %s -smp %s -m %s virtio-scsi(%s) ide-cd(ovfenv.iso) e1000 user-net hostfwd 127.0.0.1:{%s,%s,%s} SeaBIOS serial=socket+logfile\n' \
+    "${acc[*]}" "$LAB_CPUS" "$LAB_MEM_MB" "$drive" "$LAB_SSH_PORT" "$LAB_PROXY_PORT" "$LAB_UI_PORT" > "$EV/02-qemu-command.txt"
   save_state BOOT_STARTED "$(date +%s)"
   check 2 boot-started pass "qemu pid $(cat "$WORK/qemu.pid") accel=$ACCEL"
   # Bounded: kernel, operator SSH, then first boot to completion as the
@@ -899,6 +953,127 @@ print("%s category=%s tier=%s matchedBy=%s" % (h, d.get("category") or "", d.get
 
 
 # ── collect: guest diagnostics + identities → REPORT.md (redacted) ──────────
+# ── recovery: maintenance-reboot recovery time, per storage profile ──────────
+# Each reboot is the product's own maintenance reboot (`culvert-os-update
+# reboot`: stack stop + resume marker under both locks, then the boot-time
+# culvert-stack-resume). Recovery is measured from the moment the command was
+# dispatched to the LAST of:
+#   * /ready HTTP 200 with the clamav row ok (truthful readiness incl. the scanner)
+#   * real traffic through the guest proxy: example.com 200, example.org 403
+#   * operator status-json phase=ready
+# and is checked against the profile's budget. State is checked after every
+# reboot (admin login, policy, CA identity, image identity). The guest-side
+# timeline (systemd units, container start/health, per-unit I/O) and the
+# host-side device counters are captured for attribution. Lab-only guest change:
+# systemd DefaultIOAccounting=yes, so per-unit read volume is recorded.
+recovery_once() { local name="$1" i="$2" budget="$3"; local tag="R-$name-$i"
+  local k0 t0 now tk="" ts="" th="" tr="" tt="" tp="" deadline st0 st1 code cv ph
+  k0="$(grep -ac 'Linux version' "$WORK/console.log" || true)"
+  st0="$(host_disk_stat)"
+  gpriv --nowait > "$EV/$tag-reboot.txt" 2>&1 <<<'culvert-os-update reboot' || true
+  t0="$(date +%s.%N)"; deadline=$(( ${t0%.*} + LAB_RECOVERY_TIMEOUT ))
+  while :; do
+    qemu_alive || { check R "recovery-$name-$i" fail "qemu exited during the reboot"; return 1; }
+    now="$(date +%s.%N)"
+    if [[ -z "$tk" ]]; then
+      (( $(grep -ac 'Linux version' "$WORK/console.log" || true) > k0 )) && tk="$now"
+    else
+      [[ -z "$ts" ]] && gop status-json > "$WORK/rec-status.json" 2>/dev/null && ts="$now"
+      [[ -z "$th" ]] && curl -fsS -m 3 "$P/health" >/dev/null 2>&1 && th="$now"
+      if [[ -z "$tr" ]]; then
+        code="$(curl -sS -m 5 -o "$WORK/rec-ready.json" -w '%{http_code}' "$P/ready" 2>/dev/null || echo 000)"
+        cv="$(python3 -c 'import json,sys
+d=json.load(open(sys.argv[1])); c=d.get("checks",d).get("clamav",{})
+print(c.get("status") if isinstance(c,dict) else c)' "$WORK/rec-ready.json" 2>/dev/null || true)"
+        [[ "$code" == 200 && "$cv" == ok ]] && tr="$now"
+      fi
+      [[ -z "$tt" && -n "$th" ]] && [[ "$(through_proxy http://example.com/) $(through_proxy http://example.org/)" == "200 403" ]] && tt="$now"
+      if [[ -z "$tp" && -n "$ts" ]] && gop status-json > "$WORK/rec-status.json" 2>/dev/null; then
+        ph="$(status_field "$WORK/rec-status.json" phase)"; [[ "$ph" == ready ]] && tp="$now"
+      fi
+      [[ -n "$tr" && -n "$tt" && -n "$tp" ]] && break
+    fi
+    (( ${now%.*} < deadline )) || break
+    sleep 2
+  done
+  st1="$(host_disk_stat)"
+  local rec; rec="$(python3 - "$t0" "$tk" "$ts" "$th" "$tr" "$tt" "$tp" "$st0" "$st1" "$budget" "$EV/$tag-timeline.json" <<'PY'
+import json,sys
+t0=float(sys.argv[1]); names=["kernel","operator_ssh","proxy_health","ready_clamav_ok","traffic_allow_block","operator_phase_ready"]
+pts={n:(round(float(v)-t0,1) if v else None) for n,v in zip(names,sys.argv[2:8])}
+a=[int(x) for x in sys.argv[8].split()]; b=[int(x) for x in sys.argv[9].split()]; d=[y-x for x,y in zip(a,b)]
+done=[pts[n] for n in ("ready_clamav_ok","traffic_allow_block","operator_phase_ready")]
+rec=max(done) if all(v is not None for v in done) else None
+out={"t0_epoch":t0,"seconds_after_reboot_command":pts,"recovery_seconds":rec,"budget_seconds":int(sys.argv[10]),
+     "host_device":{"reads":d[0],"read_mib":round(d[2]*512/1048576,1),"read_ms":d[3],"writes":d[4],"write_mib":round(d[6]*512/1048576,1),"write_ms":d[7],"io_ticks_ms":d[9]}}
+json.dump(out,open(sys.argv[11],"w"),indent=1)
+print(rec if rec is not None else "none")
+PY
+)"
+  local tl; tl="$(python3 -c 'import json,sys;d=json.load(open(sys.argv[1]));p=d["seconds_after_reboot_command"];h=d["host_device"]
+print(" ".join(f"{k}=+{v}s" if v is not None else f"{k}=never" for k,v in p.items())+f"; host disk: {h[\"reads\"]} reads/{h[\"read_mib\"]} MiB, {h[\"writes\"]} writes/{h[\"write_mib\"]} MiB")' "$EV/$tag-timeline.json")"
+  if [[ "$rec" == none ]]; then check R "recovery-$name-$i" fail "not recovered within ${LAB_RECOVERY_TIMEOUT}s: $tl"; recovery_guest "$tag"; return 1; fi
+  if python3 -c 'import sys; sys.exit(0 if float(sys.argv[1]) <= float(sys.argv[2]) else 1)' "$rec" "$budget"; then
+    check R "recovery-$name-$i" pass "recovered in ${rec}s (budget ${budget}s): $tl"
+  else check R "recovery-$name-$i" fail "recovered in ${rec}s — OVER the ${budget}s budget: $tl"; fi
+  recovery_guest "$tag"
+  recovery_state "$name" "$i"
+  printf '%s\t%s\t%s\t%s\n' "$name" "$i" "$rec" "$budget" >> "$EV/R-summary.tsv"
+}
+recovery_guest() {
+  gpriv --timeout 300 > "$EV/$1-guest.txt" 2>&1 <<'EOS' || true
+echo "--- clock: epoch uptime"; date -u +%s.%N; cat /proc/uptime
+systemd-analyze 2>&1
+echo '--- blame (top 40)'; systemd-analyze blame 2>&1 | head -40
+echo '--- critical-chain'; systemd-analyze critical-chain containerd.service docker.service culvert-stack-resume.service 2>&1 | head -80
+echo '--- unit timestamps (monotonic us since kernel start)'
+for u in cloud-init-local cloud-init cloud-config cloud-final systemd-networkd-wait-online snapd snapd.seeded ssh containerd docker culvert-maint culvert-stack-resume; do
+  systemctl show "$u.service" -p Id -p ExecMainStartTimestampMonotonic -p ActiveEnterTimestampMonotonic -p ExecMainExitTimestampMonotonic | paste -sd' '; done
+echo '--- per-unit I/O since boot (DefaultIOAccounting; services and container scopes)'
+for u in $(systemctl list-units --all --plain --no-legend --type=service,scope | awk '{print $1}'); do
+  printf '%s ' "$u"; systemctl show "$u" -p IOReadBytes -p IOReadOperations -p IOWriteBytes | paste -sd' '; done
+echo '--- guest disk counters since boot'; grep -E ' (sda|vda) ' /proc/diskstats
+echo '--- io pressure'; cat /proc/pressure/io
+echo '--- containers'; for c in culvert-clamav culvert; do docker inspect -f '{{.Name}} started={{.State.StartedAt}} health={{if .State.Health}}{{.State.Health.Status}}{{end}}' "$c"
+  docker inspect -f '{{if .State.Health}}{{range .State.Health.Log}}  probe {{.Start}} -> {{.End}} exit={{.ExitCode}}{{"\n"}}{{end}}{{end}}' "$c"; done
+echo '--- clamav container log (timestamps)'; docker logs -t culvert-clamav 2>&1 | head -80
+echo '--- proxy container log (first lines, timestamps)'; docker logs -t culvert 2>&1 | head -60
+echo '--- engine + resume journal (monotonic)'
+journalctl -b --no-pager -o short-monotonic -u containerd -u docker -u culvert-stack-resume 2>&1 | head -250
+EOS
+}
+recovery_state() { local name="$1" i="$2" c f rules img
+  : > "$JAR"; c="$(api POST /api/auth/login "{\"user\":\"$ADMIN_USER\",\"pass\":\"$(cat "$SEC/admin-pass")\"}" | code)"
+  rules="$(api GET /api/policy | body | python3 -c 'import json,sys;print(" ".join(r["name"] for r in json.load(sys.stdin)["rules"]))' 2>/dev/null || true)"
+  f="$(api GET /api/ca-cert | body | openssl x509 -noout -fingerprint -sha256 2>/dev/null | cut -d= -f2 || true)"
+  img="$(gpriv 2>/dev/null <<<'docker inspect -f "{{.Image}}" culvert' | tr -d '\r' | grep -m1 '^sha256:' || true)"
+  if [[ $c == 200 ]] && grep -qw lab-allow-example <<<"$rules" && [[ -n "$f" && "$f" == "$(cat "$EV/05-ca-fingerprint.txt" 2>/dev/null)" ]] \
+     && { [[ -z "$LAB_EXPECT_IMAGE_ID" ]] || [[ "$img" == "$LAB_EXPECT_IMAGE_ID" ]]; }; then
+    check R "state-$name-$i" pass "admin login 200, policy ($rules), CA $f and image ${img:-?} preserved"
+  else check R "state-$name-$i" fail "login=$c rules=[$rules] ca=$f image=$img"; fi
+}
+cmd_recovery() { local prof name r w budget i
+  (( LAB_RECOVERY_REBOOTS > 0 )) || return 0
+  if [[ "$LAB_EXTERNAL" == 1 || "$LAB_DISK" != dm ]]; then check R recovery blocked "needs a QEMU guest with LAB_DISK=dm"; return 0; fi
+  gate R recovery || return 0
+  gpriv > "$EV/R-io-accounting.txt" 2>&1 <<'EOS' || true
+install -d /etc/systemd/system.conf.d
+printf '[Manager]\nDefaultIOAccounting=yes\n' > /etc/systemd/system.conf.d/90-culvert-lab-ioaccounting.conf
+systemctl daemon-reexec && echo "DefaultIOAccounting=$(systemctl show -p DefaultIOAccounting --value)"
+EOS
+  check R io-accounting info "LAB-ONLY guest change for attribution: systemd DefaultIOAccounting=yes ($(tail -1 "$EV/R-io-accounting.txt"))"
+  printf 'profile\treboot\trecovery_s\tbudget_s\n' > "$EV/R-summary.tsv"
+  for prof in $LAB_RECOVERY_PROFILES; do
+    IFS=: read -r name r w budget <<<"$prof"
+    if ! set_disk_latency "$r" "$w" > "$EV/R-$name-dm-table.txt" 2>&1; then
+      check R "profile-$name" blocked "could not set the disk to read ${r}ms / write ${w}ms: $(tail -1 "$EV/R-$name-dm-table.txt")"; continue; fi
+    check R "profile-$name" info "disk: read +${r}ms, write +${w}ms per I/O ($(tr '\n' ' ' < "$EV/R-$name-dm-table.txt" | head -c 160)); budget ${budget}s; ${LAB_RECOVERY_REBOOTS} maintenance reboots"
+    for i in $(seq 1 "$LAB_RECOVERY_REBOOTS"); do recovery_once "$name" "$i" "$budget" || break; done
+  done
+  set_disk_latency 0 0 > /dev/null 2>&1 || true
+  redact_tree
+}
+
 cmd_collect() {
   mkdir -p "$EV/guest"
   if { [[ "$LAB_EXTERNAL" == 1 ]] || qemu_alive; } && gop status-json > "$EV/guest/status-json.json" 2>/dev/null; then
@@ -958,7 +1133,8 @@ cmd_down() {
     qemu_alive && kill -9 "$(cat "$WORK/qemu.pid")" 2>/dev/null || true
   fi
   rm -f "$MON_SOCK" "$SER_SOCK"
-  [[ "${LAB_KEEP_DISKS:-0}" == 1 ]] || rm -rf "$WORK/overlay.qcow2" "$WORK/base.qcow2" "$WORK/ova" "$WORK/ovfenv" "$WORK/ovfenv.iso"
+  dm_detach
+  [[ "${LAB_KEEP_DISKS:-0}" == 1 ]] || rm -rf "$WORK/overlay.qcow2" "$WORK/base.qcow2" "$WORK/disk.raw" "$WORK/ova" "$WORK/ovfenv" "$WORK/ovfenv.iso"
   rm -rf "$SEC"; log "down: guest stopped, disposable disks and credentials removed (evidence kept in $EV)"
 }
 failures() { grep -c '"result":"fail"' "$JSONL" 2>/dev/null || true; }
@@ -971,10 +1147,11 @@ case "${1:-}" in
   compare) cmd_compare "${2:?REF}" "${3:?CAND}" ;;
   up) cmd_up ;;
   qualify) cmd_qualify; [[ "$(failures)" == 0 ]] ;;
+  recovery) cmd_recovery; [[ "$(failures)" == 0 ]] ;;
   collect) cmd_collect ;;
   down) cmd_down ;;
   all)
     trap 'cmd_collect || true; cmd_down || true' EXIT
-    cmd_preflight; cmd_up; cmd_qualify; n="$(failures)"; log "failures: $n"; [[ "$n" == 0 ]] ;;
+    cmd_preflight; cmd_up; cmd_qualify; cmd_recovery; n="$(failures)"; log "failures: $n"; [[ "$n" == 0 ]] ;;
   *) sed -n '2,32p' "$0"; exit 2 ;;
 esac

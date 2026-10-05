@@ -67,6 +67,11 @@ jobs:
             expect_image_id: "sha256:24b37bc217691058e56a838821b86dfbd45b927b1c0ea8ea867a28c54d4bcc47"
             retained_run: ""
             retained_sha256: ""
+            # Recovery measurement (cmd_recovery): raw disk behind device-mapper,
+            # 3 maintenance reboots on the fast disk, then 3 with ESXi's measured
+            # per-I/O latency injected (dm-delay: read 110 ms, write 18 ms).
+            disk: dm
+            recovery_reboots: "3"
     env:
       APPLIANCE_SOURCE_SHA: ${{ matrix.source_sha }}
       SOURCE_IMAGE_RUN_ID: ${{ matrix.image_run }}
@@ -369,11 +374,18 @@ jobs:
           sudo chown -R "$(id -u):$(id -g)" "$LAB_DIR" "$LAB_ROOT/rebuilt.fingerprint.tsv"
           test/e2e/appliance/lab/appliance-lab.sh compare \
             test/e2e/appliance/lab/reference/candidate-4c4b772-e24eb542.fingerprint.tsv "$LAB_ROOT/rebuilt.fingerprint.tsv" || echo "::warning::rebuilt guest content differs from the original OVA (recorded)"
-      - name: "Lab: preflight → up → qualify (collect + down always run)"
+      - name: "Recovery lab: device-mapper delay target available"
+        if: env.LAB_STAGE == 'full' && matrix.disk == 'dm'
+        run: |
+          set -euo pipefail
+          sudo modprobe dm_delay 2>/dev/null || { sudo apt-get install -y -q "linux-modules-extra-$(uname -r)" && sudo modprobe dm_delay; }
+          lsmod | grep -E '^dm_delay' && sudo dmsetup targets | grep -E '^(delay|linear) '
+      - name: "Lab: preflight → up → qualify → recovery (collect + down always run)"
         if: env.LAB_STAGE == 'full'
         run: |
           set -euo pipefail
           export LAB_DIR="$LAB_ROOT/lab"
+          export LAB_DISK="${{ matrix.disk || 'overlay' }}" LAB_RECOVERY_REBOOTS="${{ matrix.recovery_reboots || '0' }}"
           export LAB_OVA="$(ls "$LAB_ROOT/ova/"*.ova)"
           export LAB_OVA_SHA256="$(cut -d' ' -f1 "$LAB_ROOT/ova/"*.ova.sha256)"
           export LAB_EXPECT_IMAGE_ID="${{ matrix.expect_image_id }}" LAB_MIN_FREE_GB=20 LAB_ACCEL=kvm
