@@ -6,10 +6,18 @@
 // ownership and must not subsequently be mutated. Configuration/enablement
 // changes retain local and remote history.
 //
-// A zero filter supports reads and mode/CIDR operations as before; use
-// NewIPFilter before adding individual addresses. A zero limiter supports
-// disabled admission, configuration and distributed-state diagnostics; active
-// local admission requires NewRateLimiter to initialize its shard maps.
+// The constructors remain the blessed construction path, but a zero filter and
+// a zero limiter are now fully usable rather than usable-with-a-precondition:
+// every map write lazily initializes, so a bare IPFilter{} accepts Add/AddAll
+// and a bare RateLimiter{} enforces once Configure()d. ADR-0039 recorded the
+// narrower contract ("use NewIPFilter before adding individual addresses";
+// "active local admission requires NewRateLimiter"), which this deliberately
+// strengthens: both types have only unexported fields, so the bare literal is
+// the sole literal form available outside this package, and the three write
+// sites that lacked the lazy init already present in addExemptionLocked
+// panicked on a nil map — on the DP snapshot apply path (AddAll) and on the
+// request path (Allow/AllowClusterAware). Verdicts are unchanged; a bare
+// instance is differentially pinned equal to a constructed one.
 //
 // ClusterFreshness derives the verdict from the current window and receipt
 // stamp. ObserveClusterFreshness additionally owns diagnostic episode accounting;

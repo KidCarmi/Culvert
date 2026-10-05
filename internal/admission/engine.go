@@ -386,6 +386,15 @@ func (f *IPFilter) addLocked(entry string) error {
 		return nil
 	}
 	if ip := net.ParseIP(entry); ip != nil {
+		// Lazy init, exactly as addExemptionLocked does: a bare IPFilter{}
+		// composite literal is a reachable shape (its fields are unexported, so
+		// it is the only literal form outside this package), and a nil map here
+		// would panic on the first mutation instead of storing the entry. The
+		// panic site is the DP snapshot apply path via AddAll, where it would
+		// take down the node applying a Control Plane config push.
+		if f.single == nil {
+			f.single = map[string]bool{}
+		}
 		f.single[ip.String()] = true
 		return nil
 	}
@@ -917,6 +926,12 @@ func (r *RateLimiter) Allow(ip string) bool {
 	b, ok := s.clients[ip]
 	if !ok {
 		b = &clientBucket{}
+		// A nil shard map reads as a miss, so this cold branch is the only one
+		// that writes — a bare RateLimiter{} that was Configure()d would
+		// otherwise panic here, on the request path. Zero cost once warm.
+		if s.clients == nil {
+			s.clients = map[string]*clientBucket{}
+		}
 		s.clients[ip] = b
 	}
 	b.lastSeen = now
@@ -1169,6 +1184,12 @@ func (r *RateLimiter) AllowClusterAware(ip string) bool {
 	b, ok := s.clients[ip]
 	if !ok {
 		b = &clientBucket{}
+		// A nil shard map reads as a miss, so this cold branch is the only one
+		// that writes — a bare RateLimiter{} that was Configure()d would
+		// otherwise panic here, on the request path. Zero cost once warm.
+		if s.clients == nil {
+			s.clients = map[string]*clientBucket{}
+		}
 		s.clients[ip] = b
 	}
 	b.lastSeen = now
