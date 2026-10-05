@@ -95,10 +95,10 @@ func c71Request(t *testing.T, provider string) *http.Request {
 	return r
 }
 
-func c71Resolve(t *testing.T, provider string) (authOutcome, bool, int) {
+func c71Resolve(t *testing.T, provider string) (outcome authOutcome, proceed bool, status int) {
 	t.Helper()
 	w := httptest.NewRecorder()
-	outcome, proceed := resolveRequestAuth(w, c71Request(t, provider), "192.0.2.10", "chaos-71")
+	outcome, proceed = resolveRequestAuth(w, c71Request(t, provider), "192.0.2.10", "chaos-71")
 	return outcome, proceed, w.Code
 }
 
@@ -249,8 +249,9 @@ func TestChaos71_ControlLegacyEmptyProviderIsNeverRefused(t *testing.T) {
 	if !sessionProviderLive("") {
 		t.Fatal("a pre-pvd legacy session must not be refused")
 	}
-	if _, _, _ = c71Resolve(t, ""); sessionProviderRevokedCount() != 0 {
-		t.Fatalf("counter = %d for a legacy session, want 0", sessionProviderRevokedCount())
+	c71Resolve(t, "")
+	if got := sessionProviderRevokedCount(); got != 0 {
+		t.Fatalf("counter = %d for a legacy session, want 0", got)
 	}
 }
 
