@@ -100,3 +100,28 @@ the supported archive and separately retained secrets; it does not recover
 historical logs excluded by that archive. Historical availability failures and
 incomplete diagnoses remain in the record. Risk acceptance is not the default
 resolution.
+
+## Read-ahead comparison declared after E0, before intervention
+
+E0 retained all three outcomes: 113.906 seconds PASS, 138.328 seconds FAIL and
+161.703 seconds FAIL. The unchanged guest has ext4 on a rotational sda,
+mq-deadline and 128 KiB read-ahead. Early process sampling misses filesystem
+mount/journal-flush work; later engine pre-log samples show read/page-fault
+blocking. Shared-host pressure varies and is a confound, not a diagnosed cause.
+
+Use one guarded lab-only udev rule for both profiles. Establish an A128 rule and
+measure one A reboot; switch only read_ahead_kb to B1024 and measure three
+reboots; return to A128 and measure one reversal. Keep exact product bytes,
+OS/kernel, resource allocation, sampler, external probes, maintenance locks and
+acceptance budget unchanged. Each operation uses authenticated local recovery;
+operator SSH stays read-only. Freeze the complete controller before any action.
+
+The rule affects early userspace device events, not initramfs. A read-only
+postboot check proves the effective value at its observation timestamp, not the
+exact time udev applied it. Record transition and verification receipts privately.
+Compare filesystem, executable-loading, metadata and stack phases separately,
+with matched guest/ESXi windows. Record host-load changes and missing samples.
+Three B timing passes alone are neither causal proof nor artifact qualification;
+an improvement that reverses with A under comparable host conditions supports
+this intervention. A failed or confounded experiment remains inconclusive and
+does not relax the 120-second budget. No packages or unrelated VMs are changed.

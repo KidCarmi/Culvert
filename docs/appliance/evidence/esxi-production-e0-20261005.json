@@ -1,0 +1,1774 @@
+{
+  "schema_version": 1,
+  "report_date": "2026-10-05",
+  "scope": "Single owned VM, restored baseline, three unchanged E0 maintenance reboots; sanitized aggregate only. Not final production qualification.",
+  "result": "fail",
+  "production_qualified": false,
+  "acceptance": {
+    "maximum_seconds": 120,
+    "required_consecutive_reboots": 3,
+    "required_consecutive_healthy_samples": 3,
+    "probe_interval_seconds": 5,
+    "first_backup_maximum_seconds": 5,
+    "E0_results": [
+      "pass",
+      "fail",
+      "fail"
+    ],
+    "timing_basis": "Authenticated maintenance acceptance to completion of the third consecutive externally healthy sample; guest kernel-relative phases are separate clocks."
+  },
+  "artifact": {
+    "ova_filename": "culvert-appliance-1.0.260-candidate.gb579ca28c9d9-ubuntu-24.04.ova",
+    "ova_sha256": "1a713a9bedc4ee50ac4212c12048924e03abe6b8f04cb82d4d0ef95e33ef4775",
+    "source_revision": "b579ca28c9d936e9141292ce5ec564a26feeae86",
+    "image_id": "sha256:24b37bc217691058e56a838821b86dfbd45b927b1c0ea8ea867a28c54d4bcc47",
+    "ovf_and_vmdk_manifest": {
+      "culvert-appliance-1.0.260-candidate.gb579ca28c9d9-ubuntu-24.04.ovf": "997409553c123dc33b8f99f0c8cf68101922db2634b3c4fc06d9c1d6810d7ec8",
+      "culvert-appliance-1.0.260-candidate.gb579ca28c9d9-ubuntu-24.04-disk1.vmdk": "a735c3443670f9fe57d22b86a16c0905ee473eb664b7aa64aba5299f0ba02da6"
+    },
+    "resources": {
+      "vcpus": 2,
+      "memory_mb": 4096,
+      "disk_bytes": 42949672960
+    },
+    "newer_product_fixes_included": false
+  },
+  "controller_chain": {
+    "import_revision": "d2ffc960db8cea7fd2b4c4d82a1681cb806926ef",
+    "tool_preparation_revision": "11e19293d0e6640b890c2d1f8b44d6b9cf9e1fa9",
+    "observation_continuation_revision": "2c2ef02d401083373d24ec2d44307f5bc27fcd9d",
+    "prep_kernel_revision": "df179ed08364f29314d4cc9c6819c1675395cc77",
+    "E0_frozen_revision": "a67826f11ab06862f8bafccd4453fe777396f482",
+    "E0_freeze_sha256": "fb3168166abb0eb20f9df60817b8e0ef6b6bb3867f37301b425de365e65f5599",
+    "E0_probes_sha256": "8d3947ab027686bf6937123ccff30022daf0208ee1bc86b5d50f015d8f8f28ec",
+    "E0_collector_sha256": "e2f2b8bcdd3ba3aaa8b3e9307bcc05373519eaa41ef66fd51741f81d9998b0ac",
+    "phase_transition_receipt": {
+      "evidence_path": "evidence/controller-phase-transition.json",
+      "sha256": "73513951d66a3f6caf39129457fe5abe8a744923a44fbdf471029f35b128aa4a",
+      "private": false
+    },
+    "preparation_not_counted_as_E0": true,
+    "v5_change": "Docker events projection changed from .ID to .Actor.ID; v4 preparation exit-64 failure retained."
+  },
+  "cycles": [
+    {
+      "cycle": "e0-1",
+      "timing_result": "pass",
+      "timing_reason": null,
+      "seconds_to_three_healthy_samples": 113.906,
+      "acceptance_utc": "2026-10-05T17:41:05.211497+00:00",
+      "boot_id": "5c5d40d8-3c01-4315-8510-9af8f77b941a",
+      "guest_boot_epoch_seconds": 1791222071,
+      "source_revision": "b579ca28c9d936e9141292ce5ec564a26feeae86",
+      "source_dirty": false,
+      "first_backup": {
+        "result": "pass",
+        "seconds": 0.891,
+        "available": true,
+        "archive_matches": true
+      },
+      "independent_direct_ClamAV_coverage": {
+        "result": "pass",
+        "verification": "Frozen boot_window and clamav_coverage called independently on the actual baseline and original proof; does not override timing failure.",
+        "guest_interval_start_ns": 95439900067,
+        "guest_interval_end_ns": 116017900067,
+        "pong_samples": 13,
+        "maximum_sample_gap_ns": 2005030730,
+        "current_container_endpoint_verified": true
+      },
+      "guest_phases_seconds": {
+        "local_fs_active": 17.854692,
+        "containerd_main_start": 29.483125,
+        "containerd_first_log": 43.944989,
+        "containerd_active": 44.346601,
+        "containerd_prelog_duration": 14.461864,
+        "containerd_startup_duration": 14.863476,
+        "containerd_metadata_marker_gap": 0.307665,
+        "dockerd_main_start": 44.356271,
+        "dockerd_first_log": 51.508228,
+        "dockerd_active": 56.071511,
+        "dockerd_prelog_duration": 7.151957,
+        "dockerd_startup_duration": 11.71524,
+        "stack_resume_start": 56.077832,
+        "stack_resume_end": 76.150063,
+        "stack_resume_duration": 20.072231,
+        "systemd_startup_total": 76.987,
+        "first_sampled_direct_pong": 75.941404253
+      },
+      "early_units_seconds": {
+        "systemd-journal-flush.service": {
+          "start": 13.449111,
+          "end": 15.962718
+        },
+        "lvm2-monitor.service": {
+          "start": 13.164864,
+          "end": 15.613914
+        },
+        "apparmor.service": {
+          "start": 17.879107,
+          "end": 20.730515
+        },
+        "cloud-init-local.service": {
+          "start": 20.782058,
+          "end": 25.44235
+        }
+      },
+      "sampler": {
+        "first_sample_kernel_seconds": 21.927157143,
+        "last_sample_kernel_seconds": 151.9272363,
+        "sample_count": 66,
+        "raw_sha256": "91572e63b8568efbc69b660e039df3a39eeec85999c927cd2aa165e4da135e51",
+        "uncompressed_bytes": 271408,
+        "capture_result": "active_snapshot",
+        "recording_complete": false,
+        "before_first_sample": "unobserved; no early process-level attribution"
+      },
+      "maintenance_lock_observations": [
+        {
+          "kernel_seconds": 21.927157143,
+          "locks": {
+            "os_update": {
+              "available": false,
+              "held": null
+            },
+            "maintenance_agent": {
+              "available": true,
+              "held": false
+            }
+          }
+        },
+        {
+          "kernel_seconds": 57.927203148,
+          "locks": {
+            "os_update": {
+              "available": true,
+              "held": true
+            },
+            "maintenance_agent": {
+              "available": true,
+              "held": true
+            }
+          }
+        },
+        {
+          "kernel_seconds": 77.927237159,
+          "locks": {
+            "os_update": {
+              "available": true,
+              "held": false
+            },
+            "maintenance_agent": {
+              "available": true,
+              "held": false
+            }
+          }
+        }
+      ],
+      "state_persistence": {
+        "admin_login": "pass",
+        "ca_decryption": "pass",
+        "agent": "pass",
+        "ca_sha256_matches_preparation": true,
+        "rules_match_preparation": true,
+        "categories_match_preparation": true,
+        "category_sample_count": 5,
+        "unclassified_samples_retained": 1,
+        "traffic_matches_preparation": true,
+        "traffic_status_codes": [
+          200,
+          403
+        ],
+        "agent_version_matches_preparation": true,
+        "historical_encrypted_log_recovery": {
+          "result": "blocked",
+          "reason": "Supported Tier-1/Tier-2 backup excludes Tier-3 historical logs; retaining the log passphrase alone cannot recover them."
+        }
+      },
+      "authenticated_checks_last_three": [
+        {
+          "admin": true,
+          "agent": true,
+          "clamav_scan": true,
+          "policy": true,
+          "ca": true,
+          "agent_version": true
+        },
+        {
+          "admin": true,
+          "agent": true,
+          "clamav_scan": true,
+          "policy": true,
+          "ca": true,
+          "agent_version": true
+        },
+        {
+          "admin": true,
+          "agent": true,
+          "clamav_scan": true,
+          "policy": true,
+          "ca": true,
+          "agent_version": true
+        }
+      ],
+      "docker_events": {
+        "result": "ok",
+        "exit_code": 0,
+        "truncated": false
+      },
+      "raw_capture_truncated": false,
+      "evidence": [
+        {
+          "evidence_path": "secrets/production-recovery/e0-1/full.json",
+          "sha256": "7db7123df2b90e1da410786f33ef17327081b3b6c2d4b4afc6330d4d6a0fdfa6",
+          "private": true
+        },
+        {
+          "evidence_path": "secrets/production-recovery/e0-1/correlation.json",
+          "sha256": "3f2a35d22aa67f3d74235f61c6287fd6ca4823f0325ca4ddde4d20a9ea0c381c",
+          "private": true
+        },
+        {
+          "evidence_path": "secrets/production-recovery/e0-1/authenticated-boot-proof.json",
+          "sha256": "025638bd8c8f638b705d29b9ded497a251fd15f1f0d61b82a0f71084d26b6b95",
+          "private": true
+        },
+        {
+          "evidence_path": "secrets/production-recovery-e0-1.jsonl",
+          "sha256": "c065a5f66f2dd46d2fea80929c959ac6a0ccf1a50e5aad778c29dd23618070b6",
+          "private": true
+        },
+        {
+          "evidence_path": "secrets/e0-1-persistence.json",
+          "sha256": "f5d53c7ae7e102910c901a7bce4ea15588873dd77bd0c48223a1c8c1fda63cc2",
+          "private": true
+        },
+        {
+          "evidence_path": "secrets/host-storage-e0-1.raw",
+          "sha256": "ffcd7aea76e3b0f0ade86cd644402cd3e22458a07ec90c567af6d5f29dce90d6",
+          "private": true
+        },
+        {
+          "evidence_path": "secrets/vm-performance-e0-1.raw",
+          "sha256": "bf7aa6d4dcfdbdef6230c332f44e779455c7c7311e3608a4e3761a8192367576",
+          "private": true
+        },
+        {
+          "evidence_path": "evidence/production-recovery-e0-1-summary.json",
+          "sha256": "64154b515c678130a2d50bbb729038d0110ea32b64ab2a4bef15b964ab85c9e9",
+          "private": false
+        },
+        {
+          "evidence_path": "evidence/host-storage-e0-1.json",
+          "sha256": "801e4a72f72d0d4fd9b616427f3866d0ad7a746a48ad6a20c8d25075a39cebcd",
+          "private": false
+        },
+        {
+          "evidence_path": "evidence/vm-performance-e0-1.json",
+          "sha256": "bb2895431134eed708fc6a0dbc79404b39fe9992c0bc7006521c6c33186217e9",
+          "private": false
+        },
+        {
+          "evidence_path": "secrets/production-recovery/e0-1/full-receipt.json",
+          "sha256": "9d5e30f23d87d2c9234a9fbbd795f71231e7a39b16b7d664c25245ebe2238b0b",
+          "private": true
+        },
+        {
+          "evidence_path": "secrets/production-recovery/e0-1/correlation-receipt.json",
+          "sha256": "d6a9043f6b9075dab6606501124198852c911d0c34380bc1b962785285f4c18f",
+          "private": true
+        }
+      ],
+      "capture_receipts": [
+        {
+          "mode": "full",
+          "exit_code": 0,
+          "controller_revision": "a67826f11ab06862f8bafccd4453fe777396f482",
+          "guest_source_sha256": "e2f2b8bcdd3ba3aaa8b3e9307bcc05373519eaa41ef66fd51741f81d9998b0ac",
+          "raw_sha256": "7db7123df2b90e1da410786f33ef17327081b3b6c2d4b4afc6330d4d6a0fdfa6",
+          "controller_started_monotonic_ns": 1563589734000000,
+          "controller_finished_monotonic_ns": 1563605812000000
+        },
+        {
+          "mode": "correlation",
+          "exit_code": 0,
+          "controller_revision": "a67826f11ab06862f8bafccd4453fe777396f482",
+          "guest_source_sha256": "e2f2b8bcdd3ba3aaa8b3e9307bcc05373519eaa41ef66fd51741f81d9998b0ac",
+          "raw_sha256": "3f2a35d22aa67f3d74235f61c6287fd6ca4823f0325ca4ddde4d20a9ea0c381c",
+          "controller_started_monotonic_ns": 1563606984000000,
+          "controller_finished_monotonic_ns": 1563612281000000
+        }
+      ],
+      "software_identity": {
+        "kernel_version": "6.8.0-146-generic",
+        "compose_version": "5.5.1",
+        "clamav_signature_version": "ClamAV 1.4.6/28144/Mon Oct  5 06:24:24 2026"
+      },
+      "identity_matches_preparation": {
+        "package_versions": true,
+        "kernel_version": true,
+        "compose_version": true,
+        "clamav_signature_version": true,
+        "clamav_signature_files": true
+      },
+      "host_pressure": {
+        "selection": "20-second sample timestamps inside guest boot-to-systemd-finished window; not boundary-exact integration",
+        "metrics": {
+          "cpu.usage.average": {
+            "unit": "percent",
+            "valid_samples": 4,
+            "minimum": 11.01,
+            "maximum": 20.88,
+            "mean": 15.7875
+          },
+          "cpu.usagemhz.average": {
+            "unit": "megaHertz",
+            "valid_samples": 4,
+            "minimum": 1192.0,
+            "maximum": 2261.0,
+            "mean": 1709.5
+          },
+          "cpu.demand.average": {
+            "unit": "megaHertz",
+            "valid_samples": 4,
+            "minimum": 1103.0,
+            "maximum": 1484.0,
+            "mean": 1300.0
+          },
+          "mem.usage.average": {
+            "unit": "percent",
+            "valid_samples": 4,
+            "minimum": 79.23,
+            "maximum": 79.23,
+            "mean": 79.23
+          },
+          "mem.swapoutRate.average": {
+            "unit": "kiloBytesPerSecond",
+            "valid_samples": 4,
+            "minimum": 0.0,
+            "maximum": 0.0,
+            "mean": 0.0
+          },
+          "mem.swapinRate.average": {
+            "unit": "kiloBytesPerSecond",
+            "valid_samples": 4,
+            "minimum": 0.0,
+            "maximum": 0.0,
+            "mean": 0.0
+          },
+          "mem.compressed.average": {
+            "unit": "kiloBytes",
+            "valid_samples": 4,
+            "minimum": 0.0,
+            "maximum": 0.0,
+            "mean": 0.0
+          },
+          "mem.vmmemctl.average": {
+            "unit": "kiloBytes",
+            "valid_samples": 4,
+            "minimum": 0.0,
+            "maximum": 0.0,
+            "mean": 0.0
+          }
+        },
+        "sample_count": 4
+      },
+      "shared_backing_device_metrics": {
+        "selection": "20-second sample timestamps inside guest boot-to-systemd-finished window; not boundary-exact integration",
+        "timestamps": [
+          "2026-10-05T17:41:20Z",
+          "2026-10-05T17:41:40Z",
+          "2026-10-05T17:42:00Z",
+          "2026-10-05T17:42:20Z"
+        ],
+        "series": {
+          "disk.deviceReadLatency.average": {
+            "unit": "millisecond",
+            "values": [
+              4,
+              19,
+              37,
+              12
+            ]
+          },
+          "disk.kernelReadLatency.average": {
+            "unit": "millisecond",
+            "values": [
+              0,
+              0,
+              0,
+              0
+            ]
+          },
+          "disk.queueReadLatency.average": {
+            "unit": "millisecond",
+            "values": [
+              0,
+              0,
+              0,
+              0
+            ]
+          },
+          "disk.deviceWriteLatency.average": {
+            "unit": "millisecond",
+            "values": [
+              5,
+              5,
+              2,
+              4
+            ]
+          },
+          "disk.kernelWriteLatency.average": {
+            "unit": "millisecond",
+            "values": [
+              0,
+              0,
+              0,
+              0
+            ]
+          },
+          "disk.queueWriteLatency.average": {
+            "unit": "millisecond",
+            "values": [
+              0,
+              0,
+              0,
+              0
+            ]
+          }
+        }
+      },
+      "operator_probe_failures_after_other_checks_pass": [
+        {
+          "sample_start_seconds_after_acceptance": 98.625,
+          "whole_sample_elapsed_seconds": 4.016,
+          "operator_error": "ValueError",
+          "authenticated_checks_passed": true,
+          "interpretation": "Operator-probe failure resets consecutive streak; not authentication failure. Whole sample time is not isolated operator execution time."
+        }
+      ]
+    },
+    {
+      "cycle": "e0-2",
+      "timing_result": "fail",
+      "timing_reason": "recovered_after_120_second_budget",
+      "seconds_to_three_healthy_samples": 138.328,
+      "acceptance_utc": "2026-10-05T17:45:34.837791+00:00",
+      "boot_id": "372e08e9-7832-4d90-82e9-79369fe85271",
+      "guest_boot_epoch_seconds": 1791222344,
+      "source_revision": "b579ca28c9d936e9141292ce5ec564a26feeae86",
+      "source_dirty": false,
+      "first_backup": {
+        "result": "pass",
+        "seconds": 0.844,
+        "available": true,
+        "archive_matches": true
+      },
+      "independent_direct_ClamAV_coverage": {
+        "result": "pass",
+        "verification": "Frozen boot_window and clamav_coverage called independently on the actual baseline and original proof; does not override timing failure.",
+        "guest_interval_start_ns": 115060058752,
+        "guest_interval_end_ns": 138326058752,
+        "pong_samples": 13,
+        "maximum_sample_gap_ns": 2004027789,
+        "current_container_endpoint_verified": true
+      },
+      "guest_phases_seconds": {
+        "local_fs_active": 29.904286,
+        "containerd_main_start": 47.887101,
+        "containerd_first_log": 61.827178,
+        "containerd_active": 73.519044,
+        "containerd_prelog_duration": 13.940077,
+        "containerd_startup_duration": 25.631943,
+        "containerd_metadata_marker_gap": 9.639422,
+        "dockerd_main_start": 73.5281,
+        "dockerd_first_log": 82.850994,
+        "dockerd_active": 86.463411,
+        "dockerd_prelog_duration": 9.322894,
+        "dockerd_startup_duration": 12.935311,
+        "stack_resume_start": 86.46879,
+        "stack_resume_end": 106.745917,
+        "stack_resume_duration": 20.277127,
+        "systemd_startup_total": 107.584,
+        "first_sampled_direct_pong": 106.430081004
+      },
+      "early_units_seconds": {
+        "systemd-journal-flush.service": {
+          "start": 19.926118,
+          "end": 22.892215
+        },
+        "lvm2-monitor.service": {
+          "start": 19.67607,
+          "end": 22.09469
+        },
+        "apparmor.service": {
+          "start": 29.95312,
+          "end": 32.613278
+        },
+        "cloud-init-local.service": {
+          "start": 32.753058,
+          "end": 43.464117
+        }
+      },
+      "sampler": {
+        "first_sample_kernel_seconds": 34.418220437,
+        "last_sample_kernel_seconds": 190.418274134,
+        "sample_count": 79,
+        "raw_sha256": "95489686965682a5a776ca3eacfe538034719673153fccf83a012cc3a8f3ea4d",
+        "uncompressed_bytes": 328891,
+        "capture_result": "active_snapshot",
+        "recording_complete": false,
+        "before_first_sample": "unobserved; no early process-level attribution"
+      },
+      "maintenance_lock_observations": [
+        {
+          "kernel_seconds": 34.418220437,
+          "locks": {
+            "os_update": {
+              "available": false,
+              "held": null
+            },
+            "maintenance_agent": {
+              "available": true,
+              "held": false
+            }
+          }
+        },
+        {
+          "kernel_seconds": 88.418267631,
+          "locks": {
+            "os_update": {
+              "available": true,
+              "held": true
+            },
+            "maintenance_agent": {
+              "available": true,
+              "held": true
+            }
+          }
+        },
+        {
+          "kernel_seconds": 108.41829612,
+          "locks": {
+            "os_update": {
+              "available": true,
+              "held": false
+            },
+            "maintenance_agent": {
+              "available": true,
+              "held": false
+            }
+          }
+        }
+      ],
+      "state_persistence": {
+        "admin_login": "pass",
+        "ca_decryption": "pass",
+        "agent": "pass",
+        "ca_sha256_matches_preparation": true,
+        "rules_match_preparation": true,
+        "categories_match_preparation": true,
+        "category_sample_count": 5,
+        "unclassified_samples_retained": 1,
+        "traffic_matches_preparation": true,
+        "traffic_status_codes": [
+          200,
+          403
+        ],
+        "agent_version_matches_preparation": true,
+        "historical_encrypted_log_recovery": {
+          "result": "blocked",
+          "reason": "Supported Tier-1/Tier-2 backup excludes Tier-3 historical logs; retaining the log passphrase alone cannot recover them."
+        }
+      },
+      "authenticated_checks_last_three": [
+        {
+          "admin": true,
+          "agent": true,
+          "clamav_scan": true,
+          "policy": true,
+          "ca": true,
+          "agent_version": true
+        },
+        {
+          "admin": true,
+          "agent": true,
+          "clamav_scan": true,
+          "policy": true,
+          "ca": true,
+          "agent_version": true
+        },
+        {
+          "admin": true,
+          "agent": true,
+          "clamav_scan": true,
+          "policy": true,
+          "ca": true,
+          "agent_version": true
+        }
+      ],
+      "docker_events": {
+        "result": "ok",
+        "exit_code": 0,
+        "truncated": false
+      },
+      "raw_capture_truncated": false,
+      "evidence": [
+        {
+          "evidence_path": "secrets/production-recovery/e0-2/full.json",
+          "sha256": "ed3ac7e741d348196a704ed4a658497838f7b0f216f08dc6239ee160bcf80de5",
+          "private": true
+        },
+        {
+          "evidence_path": "secrets/production-recovery/e0-2/correlation.json",
+          "sha256": "0797a3ff112c40df0c2b2a47d629875bbdf7227d18bca7d6dab6747001bb4be3",
+          "private": true
+        },
+        {
+          "evidence_path": "secrets/production-recovery/e0-2/authenticated-boot-proof.json",
+          "sha256": "b98ab81953e30944e2510c0116c931bd23d903fed106baba728dddb65111a94b",
+          "private": true
+        },
+        {
+          "evidence_path": "secrets/production-recovery-e0-2.jsonl",
+          "sha256": "2a7faa8bc61f7e4686f2e1c72187028df664e8f5b3c425bf590068fd26b2411a",
+          "private": true
+        },
+        {
+          "evidence_path": "secrets/e0-2-persistence.json",
+          "sha256": "f5d53c7ae7e102910c901a7bce4ea15588873dd77bd0c48223a1c8c1fda63cc2",
+          "private": true
+        },
+        {
+          "evidence_path": "secrets/host-storage-e0-2.raw",
+          "sha256": "65bd7e12b7191c994ee9b036ba19a6cdc5797a6e3eb8e91fa2c44c888d08d852",
+          "private": true
+        },
+        {
+          "evidence_path": "secrets/vm-performance-e0-2.raw",
+          "sha256": "7d60a8c45e1c3f9f4baf4a06621cfe3e0bb4ae7c916bba1acbd0216b773586d4",
+          "private": true
+        },
+        {
+          "evidence_path": "evidence/production-recovery-e0-2-summary.json",
+          "sha256": "bb05c30d94496bfe05f288d8cb088517d761a7820457ab2e91dc1396c516e26b",
+          "private": false
+        },
+        {
+          "evidence_path": "evidence/host-storage-e0-2.json",
+          "sha256": "118c739070cd0b8dc1e3fc877ebda2859eadd9272f3690dc801d9ce532e5091b",
+          "private": false
+        },
+        {
+          "evidence_path": "evidence/vm-performance-e0-2.json",
+          "sha256": "f3ec9717a780e5a685df63d7da0ce775dbd9367e02bfd8cb86c46cc8b9493fbf",
+          "private": false
+        },
+        {
+          "evidence_path": "secrets/production-recovery/e0-2/full-receipt.json",
+          "sha256": "7379a262e9d4fd8e82b2a121ef3334bf5938d3096428a7483268f3198472121f",
+          "private": true
+        },
+        {
+          "evidence_path": "secrets/production-recovery/e0-2/correlation-receipt.json",
+          "sha256": "022d1576521e049f13f1512eb77210a84f2f8e05bba361377dbb966647c9facc",
+          "private": true
+        }
+      ],
+      "capture_receipts": [
+        {
+          "mode": "full",
+          "exit_code": 0,
+          "controller_revision": "a67826f11ab06862f8bafccd4453fe777396f482",
+          "guest_source_sha256": "e2f2b8bcdd3ba3aaa8b3e9307bcc05373519eaa41ef66fd51741f81d9998b0ac",
+          "raw_sha256": "ed3ac7e741d348196a704ed4a658497838f7b0f216f08dc6239ee160bcf80de5",
+          "controller_started_monotonic_ns": 1563899609000000,
+          "controller_finished_monotonic_ns": 1563921859000000
+        },
+        {
+          "mode": "correlation",
+          "exit_code": 0,
+          "controller_revision": "a67826f11ab06862f8bafccd4453fe777396f482",
+          "guest_source_sha256": "e2f2b8bcdd3ba3aaa8b3e9307bcc05373519eaa41ef66fd51741f81d9998b0ac",
+          "raw_sha256": "0797a3ff112c40df0c2b2a47d629875bbdf7227d18bca7d6dab6747001bb4be3",
+          "controller_started_monotonic_ns": 1563923062000000,
+          "controller_finished_monotonic_ns": 1563929484000000
+        }
+      ],
+      "software_identity": {
+        "kernel_version": "6.8.0-146-generic",
+        "compose_version": "5.5.1",
+        "clamav_signature_version": "ClamAV 1.4.6/28144/Mon Oct  5 06:24:24 2026"
+      },
+      "identity_matches_preparation": {
+        "package_versions": true,
+        "kernel_version": true,
+        "compose_version": true,
+        "clamav_signature_version": true,
+        "clamav_signature_files": true
+      },
+      "host_pressure": {
+        "selection": "20-second sample timestamps inside guest boot-to-systemd-finished window; not boundary-exact integration",
+        "metrics": {
+          "cpu.usage.average": {
+            "unit": "percent",
+            "valid_samples": 5,
+            "minimum": 13.27,
+            "maximum": 29.18,
+            "mean": 22.43
+          },
+          "cpu.usagemhz.average": {
+            "unit": "megaHertz",
+            "valid_samples": 5,
+            "minimum": 1437.0,
+            "maximum": 3160.0,
+            "mean": 2429.0
+          },
+          "cpu.demand.average": {
+            "unit": "megaHertz",
+            "valid_samples": 5,
+            "minimum": 1757.0,
+            "maximum": 2622.0,
+            "mean": 2220.4
+          },
+          "mem.usage.average": {
+            "unit": "percent",
+            "valid_samples": 5,
+            "minimum": 79.2,
+            "maximum": 79.21,
+            "mean": 79.208
+          },
+          "mem.swapoutRate.average": {
+            "unit": "kiloBytesPerSecond",
+            "valid_samples": 5,
+            "minimum": 0.0,
+            "maximum": 0.0,
+            "mean": 0.0
+          },
+          "mem.swapinRate.average": {
+            "unit": "kiloBytesPerSecond",
+            "valid_samples": 5,
+            "minimum": 0.0,
+            "maximum": 0.0,
+            "mean": 0.0
+          },
+          "mem.compressed.average": {
+            "unit": "kiloBytes",
+            "valid_samples": 5,
+            "minimum": 0.0,
+            "maximum": 0.0,
+            "mean": 0.0
+          },
+          "mem.vmmemctl.average": {
+            "unit": "kiloBytes",
+            "valid_samples": 5,
+            "minimum": 0.0,
+            "maximum": 0.0,
+            "mean": 0.0
+          }
+        },
+        "sample_count": 5
+      },
+      "shared_backing_device_metrics": {
+        "selection": "20-second sample timestamps inside guest boot-to-systemd-finished window; not boundary-exact integration",
+        "timestamps": [
+          "2026-10-05T17:46:00Z",
+          "2026-10-05T17:46:20Z",
+          "2026-10-05T17:46:40Z",
+          "2026-10-05T17:47:00Z",
+          "2026-10-05T17:47:20Z"
+        ],
+        "series": {
+          "disk.deviceReadLatency.average": {
+            "unit": "millisecond",
+            "values": [
+              8,
+              36,
+              55,
+              71,
+              13
+            ]
+          },
+          "disk.kernelReadLatency.average": {
+            "unit": "millisecond",
+            "values": [
+              0,
+              0,
+              0,
+              1,
+              0
+            ]
+          },
+          "disk.queueReadLatency.average": {
+            "unit": "millisecond",
+            "values": [
+              0,
+              0,
+              0,
+              1,
+              0
+            ]
+          },
+          "disk.deviceWriteLatency.average": {
+            "unit": "millisecond",
+            "values": [
+              42,
+              14,
+              33,
+              53,
+              7
+            ]
+          },
+          "disk.kernelWriteLatency.average": {
+            "unit": "millisecond",
+            "values": [
+              37,
+              5,
+              35,
+              56,
+              1
+            ]
+          },
+          "disk.queueWriteLatency.average": {
+            "unit": "millisecond",
+            "values": [
+              36,
+              5,
+              28,
+              53,
+              0
+            ]
+          }
+        }
+      },
+      "operator_probe_failures_after_other_checks_pass": [
+        {
+          "sample_start_seconds_after_acceptance": 121.5,
+          "whole_sample_elapsed_seconds": 3.453,
+          "operator_error": null,
+          "authenticated_checks_passed": true,
+          "interpretation": "Operator-probe failure resets consecutive streak; not authentication failure. Whole sample time is not isolated operator execution time."
+        }
+      ]
+    },
+    {
+      "cycle": "e0-3",
+      "timing_result": "fail",
+      "timing_reason": "recovered_after_120_second_budget",
+      "seconds_to_three_healthy_samples": 161.703,
+      "acceptance_utc": "2026-10-05T17:50:07.195902+00:00",
+      "boot_id": "f4d6f797-8df1-4090-80db-d6961a05961c",
+      "guest_boot_epoch_seconds": 1791222615,
+      "source_revision": "b579ca28c9d936e9141292ce5ec564a26feeae86",
+      "source_dirty": false,
+      "first_backup": {
+        "result": "pass",
+        "seconds": 0.688,
+        "available": true,
+        "archive_matches": true
+      },
+      "independent_direct_ClamAV_coverage": {
+        "result": "pass",
+        "verification": "Frozen boot_window and clamav_coverage called independently on the actual baseline and original proof; does not override timing failure.",
+        "guest_interval_start_ns": 141822646720,
+        "guest_interval_end_ns": 163603646720,
+        "pong_samples": 13,
+        "maximum_sample_gap_ns": 2008864169,
+        "current_container_endpoint_verified": true
+      },
+      "guest_phases_seconds": {
+        "local_fs_active": 33.941169,
+        "containerd_main_start": 58.712117,
+        "containerd_first_log": 74.006745,
+        "containerd_active": 77.967376,
+        "containerd_prelog_duration": 15.294628,
+        "containerd_startup_duration": 19.255259,
+        "containerd_metadata_marker_gap": 1.877057,
+        "dockerd_main_start": 77.975067,
+        "dockerd_first_log": 93.992427,
+        "dockerd_active": 98.758458,
+        "dockerd_prelog_duration": 16.01736,
+        "dockerd_startup_duration": 20.783391,
+        "stack_resume_start": 98.765888,
+        "stack_resume_end": 134.521099,
+        "stack_resume_duration": 35.755211,
+        "systemd_startup_total": 135.379,
+        "first_sampled_direct_pong": 134.172435536
+      },
+      "early_units_seconds": {
+        "systemd-journal-flush.service": {
+          "start": 7.902088,
+          "end": 31.844733
+        },
+        "lvm2-monitor.service": {
+          "start": 7.59174,
+          "end": 19.439348
+        },
+        "apparmor.service": {
+          "start": 34.029128,
+          "end": 48.98103
+        },
+        "cloud-init-local.service": {
+          "start": 49.083383,
+          "end": 54.620928
+        }
+      },
+      "sampler": {
+        "first_sample_kernel_seconds": 50.162401103,
+        "last_sample_kernel_seconds": 358.162507748,
+        "sample_count": 155,
+        "raw_sha256": "e1fb3e10dfd77d0096690820f9f7309d7d801b1aa93949b884fd551be19e7dae",
+        "uncompressed_bytes": 650916,
+        "capture_result": "active_snapshot",
+        "recording_complete": false,
+        "before_first_sample": "unobserved; no early process-level attribution"
+      },
+      "maintenance_lock_observations": [
+        {
+          "kernel_seconds": 50.162401103,
+          "locks": {
+            "os_update": {
+              "available": false,
+              "held": null
+            },
+            "maintenance_agent": {
+              "available": true,
+              "held": false
+            }
+          }
+        },
+        {
+          "kernel_seconds": 100.162398286,
+          "locks": {
+            "os_update": {
+              "available": true,
+              "held": true
+            },
+            "maintenance_agent": {
+              "available": true,
+              "held": true
+            }
+          }
+        },
+        {
+          "kernel_seconds": 136.162500759,
+          "locks": {
+            "os_update": {
+              "available": true,
+              "held": false
+            },
+            "maintenance_agent": {
+              "available": true,
+              "held": false
+            }
+          }
+        }
+      ],
+      "state_persistence": {
+        "admin_login": "pass",
+        "ca_decryption": "pass",
+        "agent": "pass",
+        "ca_sha256_matches_preparation": true,
+        "rules_match_preparation": true,
+        "categories_match_preparation": true,
+        "category_sample_count": 5,
+        "unclassified_samples_retained": 1,
+        "traffic_matches_preparation": true,
+        "traffic_status_codes": [
+          200,
+          403
+        ],
+        "agent_version_matches_preparation": true,
+        "historical_encrypted_log_recovery": {
+          "result": "blocked",
+          "reason": "Supported Tier-1/Tier-2 backup excludes Tier-3 historical logs; retaining the log passphrase alone cannot recover them."
+        }
+      },
+      "authenticated_checks_last_three": [
+        {
+          "admin": true,
+          "agent": true,
+          "clamav_scan": true,
+          "policy": true,
+          "ca": true,
+          "agent_version": true
+        },
+        {
+          "admin": true,
+          "agent": true,
+          "clamav_scan": true,
+          "policy": true,
+          "ca": true,
+          "agent_version": true
+        },
+        {
+          "admin": true,
+          "agent": true,
+          "clamav_scan": true,
+          "policy": true,
+          "ca": true,
+          "agent_version": true
+        }
+      ],
+      "docker_events": {
+        "result": "ok",
+        "exit_code": 0,
+        "truncated": false
+      },
+      "raw_capture_truncated": false,
+      "evidence": [
+        {
+          "evidence_path": "secrets/production-recovery/e0-3/full.json",
+          "sha256": "d349e7deff0807a4fb5d0b39a407d354cdf158b30850fa59323d18f9b148e1f0",
+          "private": true
+        },
+        {
+          "evidence_path": "secrets/production-recovery/e0-3/correlation.json",
+          "sha256": "c33926f097f07140fa722fe9d1ea82d98ca38112a2660d35404c49905207ea71",
+          "private": true
+        },
+        {
+          "evidence_path": "secrets/production-recovery/e0-3/authenticated-boot-proof.json",
+          "sha256": "3ac6baef75ba0528116e6a7e8e93837665118dad6a0dd55bf1eec6ce39cfc11e",
+          "private": true
+        },
+        {
+          "evidence_path": "secrets/production-recovery-e0-3.jsonl",
+          "sha256": "ae63ded0900bf218bcfc4396b3328dfd6f542038d110f9139c0a75589d250138",
+          "private": true
+        },
+        {
+          "evidence_path": "secrets/e0-3-persistence.json",
+          "sha256": "49db622affd4454a1336094a4f8b549b766b54e0060b670a33d72fcfdab7d443",
+          "private": true
+        },
+        {
+          "evidence_path": "secrets/host-storage-e0-3.raw",
+          "sha256": "d50032527f579bbb32695120feb4c1efc1a5241a31e71435b5c421001f2527b7",
+          "private": true
+        },
+        {
+          "evidence_path": "secrets/vm-performance-e0-3.raw",
+          "sha256": "f8ee8bcc7bc705cd57d1e5d5eb59b57ea904378956c0d19e99b59cb1821fac13",
+          "private": true
+        },
+        {
+          "evidence_path": "evidence/production-recovery-e0-3-summary.json",
+          "sha256": "3d8dfab53260a6d3b2e84f88298208aca1d071073de6e58023a7cb51bfb516ac",
+          "private": false
+        },
+        {
+          "evidence_path": "evidence/host-storage-e0-3.json",
+          "sha256": "4abcdf253276c082a689a7759209520d51679937e7a0708fab67fd9c03457ba2",
+          "private": false
+        },
+        {
+          "evidence_path": "evidence/vm-performance-e0-3.json",
+          "sha256": "120a8a4481328f421244e50f2fe843d096b8207786d7a541a10a5c06e7aae52e",
+          "private": false
+        },
+        {
+          "evidence_path": "secrets/production-recovery/e0-3/full-receipt.json",
+          "sha256": "c151399f623f575dae6380acf7e2311870dc81dce39d28b26551fdf86602ba35",
+          "private": true
+        },
+        {
+          "evidence_path": "secrets/production-recovery/e0-3/correlation-receipt.json",
+          "sha256": "db0c64887f172ca0bc5327c417eb578b32fc830f8a6f15fd77fc8ec1b0859e07",
+          "private": true
+        }
+      ],
+      "capture_receipts": [
+        {
+          "mode": "full",
+          "exit_code": 0,
+          "controller_revision": "a67826f11ab06862f8bafccd4453fe777396f482",
+          "guest_source_sha256": "e2f2b8bcdd3ba3aaa8b3e9307bcc05373519eaa41ef66fd51741f81d9998b0ac",
+          "raw_sha256": "d349e7deff0807a4fb5d0b39a407d354cdf158b30850fa59323d18f9b148e1f0",
+          "controller_started_monotonic_ns": 1564333421000000,
+          "controller_finished_monotonic_ns": 1564359281000000
+        },
+        {
+          "mode": "correlation",
+          "exit_code": 0,
+          "controller_revision": "a67826f11ab06862f8bafccd4453fe777396f482",
+          "guest_source_sha256": "e2f2b8bcdd3ba3aaa8b3e9307bcc05373519eaa41ef66fd51741f81d9998b0ac",
+          "raw_sha256": "c33926f097f07140fa722fe9d1ea82d98ca38112a2660d35404c49905207ea71",
+          "controller_started_monotonic_ns": 1564360468000000,
+          "controller_finished_monotonic_ns": 1564366984000000
+        }
+      ],
+      "software_identity": {
+        "kernel_version": "6.8.0-146-generic",
+        "compose_version": "5.5.1",
+        "clamav_signature_version": "ClamAV 1.4.6/28144/Mon Oct  5 06:24:24 2026"
+      },
+      "identity_matches_preparation": {
+        "package_versions": true,
+        "kernel_version": true,
+        "compose_version": true,
+        "clamav_signature_version": true,
+        "clamav_signature_files": true
+      },
+      "host_pressure": {
+        "selection": "20-second sample timestamps inside guest boot-to-systemd-finished window; not boundary-exact integration",
+        "metrics": {
+          "cpu.usage.average": {
+            "unit": "percent",
+            "valid_samples": 7,
+            "minimum": 15.05,
+            "maximum": 46.33,
+            "mean": 27.365714
+          },
+          "cpu.usagemhz.average": {
+            "unit": "megaHertz",
+            "valid_samples": 7,
+            "minimum": 1629.0,
+            "maximum": 5016.0,
+            "mean": 2962.857143
+          },
+          "cpu.demand.average": {
+            "unit": "megaHertz",
+            "valid_samples": 7,
+            "minimum": 2059.0,
+            "maximum": 4165.0,
+            "mean": 2878.285714
+          },
+          "mem.usage.average": {
+            "unit": "percent",
+            "valid_samples": 7,
+            "minimum": 79.31,
+            "maximum": 79.32,
+            "mean": 79.317143
+          },
+          "mem.swapoutRate.average": {
+            "unit": "kiloBytesPerSecond",
+            "valid_samples": 7,
+            "minimum": 0.0,
+            "maximum": 0.0,
+            "mean": 0.0
+          },
+          "mem.swapinRate.average": {
+            "unit": "kiloBytesPerSecond",
+            "valid_samples": 7,
+            "minimum": 0.0,
+            "maximum": 0.0,
+            "mean": 0.0
+          },
+          "mem.compressed.average": {
+            "unit": "kiloBytes",
+            "valid_samples": 7,
+            "minimum": 0.0,
+            "maximum": 0.0,
+            "mean": 0.0
+          },
+          "mem.vmmemctl.average": {
+            "unit": "kiloBytes",
+            "valid_samples": 7,
+            "minimum": 0.0,
+            "maximum": 0.0,
+            "mean": 0.0
+          }
+        },
+        "sample_count": 7
+      },
+      "shared_backing_device_metrics": {
+        "selection": "20-second sample timestamps inside guest boot-to-systemd-finished window; not boundary-exact integration",
+        "timestamps": [
+          "2026-10-05T17:50:20Z",
+          "2026-10-05T17:50:40Z",
+          "2026-10-05T17:51:00Z",
+          "2026-10-05T17:51:20Z",
+          "2026-10-05T17:51:40Z",
+          "2026-10-05T17:52:00Z",
+          "2026-10-05T17:52:20Z"
+        ],
+        "series": {
+          "disk.deviceReadLatency.average": {
+            "unit": "millisecond",
+            "values": [
+              2,
+              94,
+              94,
+              44,
+              52,
+              32,
+              19
+            ]
+          },
+          "disk.kernelReadLatency.average": {
+            "unit": "millisecond",
+            "values": [
+              0,
+              5,
+              12,
+              1,
+              1,
+              1,
+              2
+            ]
+          },
+          "disk.queueReadLatency.average": {
+            "unit": "millisecond",
+            "values": [
+              0,
+              3,
+              8,
+              0,
+              0,
+              0,
+              1
+            ]
+          },
+          "disk.deviceWriteLatency.average": {
+            "unit": "millisecond",
+            "values": [
+              10,
+              124,
+              169,
+              58,
+              36,
+              29,
+              60
+            ]
+          },
+          "disk.kernelWriteLatency.average": {
+            "unit": "millisecond",
+            "values": [
+              2,
+              182,
+              297,
+              67,
+              68,
+              20,
+              38
+            ]
+          },
+          "disk.queueWriteLatency.average": {
+            "unit": "millisecond",
+            "values": [
+              2,
+              170,
+              285,
+              65,
+              67,
+              18,
+              36
+            ]
+          }
+        }
+      },
+      "operator_probe_failures_after_other_checks_pass": []
+    }
+  ],
+  "preparation": {
+    "cycle": "prep-kernel",
+    "timing_result": "pass",
+    "timing_reason": null,
+    "seconds_to_three_healthy_samples": 99.906,
+    "acceptance_utc": "2026-10-05T17:35:34.827257+00:00",
+    "boot_id": "d63a2d6d-4a2b-435b-996c-9df36b394b95",
+    "guest_boot_epoch_seconds": 1791221742,
+    "source_revision": "b579ca28c9d936e9141292ce5ec564a26feeae86",
+    "source_dirty": false,
+    "first_backup": {
+      "result": "pass",
+      "seconds": 0.703,
+      "available": true,
+      "archive_matches": true
+    },
+    "independent_direct_ClamAV_coverage": {
+      "result": "pass",
+      "verification": "Frozen boot_window and clamav_coverage called independently on the actual baseline and original proof; does not override timing failure.",
+      "guest_interval_start_ns": 80634749044,
+      "guest_interval_end_ns": 101228749044,
+      "pong_samples": 12,
+      "maximum_sample_gap_ns": 2005862054,
+      "current_container_endpoint_verified": true
+    },
+    "guest_phases_seconds": {
+      "local_fs_active": 12.208911,
+      "containerd_main_start": 25.421074,
+      "containerd_first_log": 39.306014,
+      "containerd_active": 39.72849,
+      "containerd_prelog_duration": 13.88494,
+      "containerd_startup_duration": 14.307416,
+      "containerd_metadata_marker_gap": 0.296577,
+      "dockerd_main_start": 39.736106,
+      "dockerd_first_log": 45.363435,
+      "dockerd_active": 49.244995,
+      "dockerd_prelog_duration": 5.627329,
+      "dockerd_startup_duration": 9.508889,
+      "stack_resume_start": 49.250108,
+      "stack_resume_end": 72.71581,
+      "stack_resume_duration": 23.465702,
+      "systemd_startup_total": 73.496,
+      "first_sampled_direct_pong": 71.775407836
+    },
+    "early_units_seconds": {
+      "systemd-journal-flush.service": {
+        "start": 7.822115,
+        "end": 15.903211
+      },
+      "lvm2-monitor.service": {
+        "start": 7.561052,
+        "end": 10.010679
+      },
+      "apparmor.service": {
+        "start": 12.261114,
+        "end": 14.383571
+      },
+      "cloud-init-local.service": {
+        "start": 16.396162,
+        "end": 22.188731
+      }
+    },
+    "sampler": {
+      "first_sample_kernel_seconds": 17.764030634,
+      "last_sample_kernel_seconds": 139.764111777,
+      "sample_count": 62,
+      "raw_sha256": "18e88b52b15358837b37c9c958589d2c216e33d65aa22ade45840638619817e4",
+      "uncompressed_bytes": 257135,
+      "capture_result": "active_snapshot",
+      "recording_complete": false,
+      "before_first_sample": "unobserved; no early process-level attribution"
+    },
+    "maintenance_lock_observations": [
+      {
+        "kernel_seconds": 17.764030634,
+        "locks": {
+          "os_update": {
+            "available": false,
+            "held": null
+          },
+          "maintenance_agent": {
+            "available": true,
+            "held": false
+          }
+        }
+      },
+      {
+        "kernel_seconds": 49.764273065,
+        "locks": {
+          "os_update": {
+            "available": true,
+            "held": true
+          },
+          "maintenance_agent": {
+            "available": true,
+            "held": true
+          }
+        }
+      },
+      {
+        "kernel_seconds": 73.764138222,
+        "locks": {
+          "os_update": {
+            "available": true,
+            "held": false
+          },
+          "maintenance_agent": {
+            "available": true,
+            "held": false
+          }
+        }
+      }
+    ],
+    "state_persistence": {
+      "admin_login": "pass",
+      "ca_decryption": "pass",
+      "agent": "pass",
+      "ca_sha256_matches_preparation": true,
+      "rules_match_preparation": true,
+      "categories_match_preparation": true,
+      "category_sample_count": 5,
+      "unclassified_samples_retained": 1,
+      "traffic_matches_preparation": true,
+      "traffic_status_codes": [
+        200,
+        403
+      ],
+      "agent_version_matches_preparation": true,
+      "historical_encrypted_log_recovery": {
+        "result": "blocked",
+        "reason": "Supported Tier-1/Tier-2 backup excludes Tier-3 historical logs; retaining the log passphrase alone cannot recover them."
+      }
+    },
+    "authenticated_checks_last_three": [
+      {
+        "admin": true,
+        "agent": true,
+        "clamav_scan": true,
+        "policy": true,
+        "ca": true,
+        "agent_version": true
+      },
+      {
+        "admin": true,
+        "agent": true,
+        "clamav_scan": true,
+        "policy": true,
+        "ca": true,
+        "agent_version": true
+      },
+      {
+        "admin": true,
+        "agent": true,
+        "clamav_scan": true,
+        "policy": true,
+        "ca": true,
+        "agent_version": true
+      }
+    ],
+    "docker_events": {
+      "result": "command_failed",
+      "exit_code": 64,
+      "truncated": false
+    },
+    "raw_capture_truncated": false,
+    "evidence": [
+      {
+        "evidence_path": "secrets/production-recovery/prep-kernel/full.json",
+        "sha256": "cd910a623aacc6a6bc4e611fb29e7d481dec66bf474adab18caafabbde31781f",
+        "private": true
+      },
+      {
+        "evidence_path": "secrets/production-recovery/prep-kernel/correlation.json",
+        "sha256": "be2c0f53306a81f74d49dea99083cc484e24b807243d3533201e676af6238a4b",
+        "private": true
+      },
+      {
+        "evidence_path": "secrets/production-recovery/prep-kernel/authenticated-boot-proof.json",
+        "sha256": "43f40195634126b6bfead3043c19ea821526727de1c28409021b64332e74456f",
+        "private": true
+      },
+      {
+        "evidence_path": "secrets/production-recovery-prep-kernel.jsonl",
+        "sha256": "f4ec24d2b29e63113c0de54928c2073eeb7ac92ca88024a5d3a203a8f7b96467",
+        "private": true
+      },
+      {
+        "evidence_path": "secrets/prep-kernel-persistence.json",
+        "sha256": "f5d53c7ae7e102910c901a7bce4ea15588873dd77bd0c48223a1c8c1fda63cc2",
+        "private": true
+      },
+      {
+        "evidence_path": "secrets/host-storage-prep-kernel.raw",
+        "sha256": "e6f1bfb79b778810eb032f53904c08eacaa33e0c2a23221b526a346666ce3298",
+        "private": true
+      },
+      {
+        "evidence_path": "secrets/vm-performance-prep-kernel.raw",
+        "sha256": "71d80f7f37fba0f02ea2141ab854d7b1b1f1b84050adad1dce187469ef1feb84",
+        "private": true
+      },
+      {
+        "evidence_path": "evidence/production-recovery-prep-kernel-summary.json",
+        "sha256": "3cd8de9dbe17e914bbe57d738d3592e6b4f3db06c0a8cde576de4ade4815972a",
+        "private": false
+      },
+      {
+        "evidence_path": "evidence/host-storage-prep-kernel.json",
+        "sha256": "a0d0a29bf34d715f0e71a6eb55dcab501b1e5c893601747432e05928e8c5982a",
+        "private": false
+      },
+      {
+        "evidence_path": "evidence/vm-performance-prep-kernel.json",
+        "sha256": "3dbe30f51dfb35e996673e4d0473fb5a4af317d38ab8e7f5e32171e692781cd5",
+        "private": false
+      },
+      {
+        "evidence_path": "secrets/production-recovery/prep-kernel/full-receipt.json",
+        "sha256": "21aacce934c59f129e7016d4dfbadf1a2bb0f1eaacafbb84da41b513a3022e92",
+        "private": true
+      },
+      {
+        "evidence_path": "secrets/production-recovery/prep-kernel/correlation-receipt.json",
+        "sha256": "3b00ecbf203e45799a1f5c3a3894079242958cdbb1f3193681a67148925b234a",
+        "private": true
+      }
+    ],
+    "capture_receipts": [
+      {
+        "mode": "full",
+        "exit_code": 0,
+        "controller_revision": "df179ed08364f29314d4cc9c6819c1675395cc77",
+        "guest_source_sha256": "aabc4316dd8afdb7f4a7ec7379b99cee597873ba692d7be78df768a320dd2a0b",
+        "raw_sha256": "cd910a623aacc6a6bc4e611fb29e7d481dec66bf474adab18caafabbde31781f",
+        "controller_started_monotonic_ns": 1563244109000000,
+        "controller_finished_monotonic_ns": 1563262890000000
+      },
+      {
+        "mode": "correlation",
+        "exit_code": 0,
+        "controller_revision": "df179ed08364f29314d4cc9c6819c1675395cc77",
+        "guest_source_sha256": "aabc4316dd8afdb7f4a7ec7379b99cee597873ba692d7be78df768a320dd2a0b",
+        "raw_sha256": "be2c0f53306a81f74d49dea99083cc484e24b807243d3533201e676af6238a4b",
+        "controller_started_monotonic_ns": 1563275640000000,
+        "controller_finished_monotonic_ns": 1563281000000000
+      }
+    ],
+    "software_identity": {
+      "kernel_version": "6.8.0-146-generic",
+      "compose_version": "5.5.1",
+      "clamav_signature_version": "ClamAV 1.4.6/28144/Mon Oct  5 06:24:24 2026"
+    },
+    "identity_matches_preparation": {
+      "package_versions": true,
+      "kernel_version": true,
+      "compose_version": true,
+      "clamav_signature_version": true,
+      "clamav_signature_files": true
+    },
+    "host_pressure": {
+      "selection": "20-second sample timestamps inside guest boot-to-systemd-finished window; not boundary-exact integration",
+      "metrics": {
+        "cpu.usage.average": {
+          "unit": "percent",
+          "valid_samples": 3,
+          "minimum": 10.78,
+          "maximum": 16.26,
+          "mean": 13.626667
+        },
+        "cpu.usagemhz.average": {
+          "unit": "megaHertz",
+          "valid_samples": 3,
+          "minimum": 1168.0,
+          "maximum": 1760.0,
+          "mean": 1475.666667
+        },
+        "cpu.demand.average": {
+          "unit": "megaHertz",
+          "valid_samples": 3,
+          "minimum": 1286.0,
+          "maximum": 1445.0,
+          "mean": 1363.666667
+        },
+        "mem.usage.average": {
+          "unit": "percent",
+          "valid_samples": 3,
+          "minimum": 79.22,
+          "maximum": 79.23,
+          "mean": 79.223333
+        },
+        "mem.swapoutRate.average": {
+          "unit": "kiloBytesPerSecond",
+          "valid_samples": 3,
+          "minimum": 0.0,
+          "maximum": 0.0,
+          "mean": 0.0
+        },
+        "mem.swapinRate.average": {
+          "unit": "kiloBytesPerSecond",
+          "valid_samples": 3,
+          "minimum": 0.0,
+          "maximum": 0.0,
+          "mean": 0.0
+        },
+        "mem.compressed.average": {
+          "unit": "kiloBytes",
+          "valid_samples": 3,
+          "minimum": 0.0,
+          "maximum": 0.0,
+          "mean": 0.0
+        },
+        "mem.vmmemctl.average": {
+          "unit": "kiloBytes",
+          "valid_samples": 3,
+          "minimum": 0.0,
+          "maximum": 0.0,
+          "mean": 0.0
+        }
+      },
+      "sample_count": 3
+    },
+    "shared_backing_device_metrics": {
+      "selection": "20-second sample timestamps inside guest boot-to-systemd-finished window; not boundary-exact integration",
+      "timestamps": [
+        "2026-10-05T17:36:00Z",
+        "2026-10-05T17:36:20Z",
+        "2026-10-05T17:36:40Z"
+      ],
+      "series": {
+        "disk.deviceReadLatency.average": {
+          "unit": "millisecond",
+          "values": [
+            9,
+            37,
+            18
+          ]
+        },
+        "disk.kernelReadLatency.average": {
+          "unit": "millisecond",
+          "values": [
+            0,
+            0,
+            0
+          ]
+        },
+        "disk.queueReadLatency.average": {
+          "unit": "millisecond",
+          "values": [
+            0,
+            0,
+            0
+          ]
+        },
+        "disk.deviceWriteLatency.average": {
+          "unit": "millisecond",
+          "values": [
+            25,
+            2,
+            6
+          ]
+        },
+        "disk.kernelWriteLatency.average": {
+          "unit": "millisecond",
+          "values": [
+            1,
+            0,
+            0
+          ]
+        },
+        "disk.queueWriteLatency.average": {
+          "unit": "millisecond",
+          "values": [
+            1,
+            0,
+            0
+          ]
+        }
+      }
+    },
+    "operator_probe_failures_after_other_checks_pass": [
+      {
+        "sample_start_seconds_after_acceptance": 84.672,
+        "whole_sample_elapsed_seconds": 2.234,
+        "operator_error": null,
+        "authenticated_checks_passed": true,
+        "interpretation": "Operator-probe failure resets consecutive streak; not authentication failure. Whole sample time is not isolated operator execution time."
+      }
+    ]
+  },
+  "preserved_original_outcomes": [
+    {
+      "stage": "initial_capacity_preflight",
+      "result": "blocked",
+      "reason": "Insufficient host RAM headroom; later permitted import does not erase original block."
+    },
+    {
+      "stage": "bootstrap_private_tool_preparation",
+      "result": "blocked",
+      "evidence": {
+        "evidence_path": "secrets/access-bootstrap-attempt.json",
+        "sha256": "d245db4b304beafa60c7ce94cfd3b1d5ed36b17f80f6f896ab6b5d7877e00908",
+        "private": true
+      }
+    },
+    {
+      "stage": "bootstrap_initial_capture",
+      "result": "blocked",
+      "evidence": {
+        "evidence_path": "secrets/access-bootstrap-tool-preparation-extension.json",
+        "sha256": "02a12b28088071ab6abb25c7f0ef74bfbb7b8662d27d7aa153759cd4ff7f36af",
+        "private": true
+      }
+    },
+    {
+      "stage": "bootstrap_observation_continuation",
+      "result": "pass",
+      "evidence": {
+        "evidence_path": "secrets/access-bootstrap-observation-extension.json",
+        "sha256": "8267f60a53da54934e094f973996f2af20dcb8caba46a793de9cf3e01a83dcda",
+        "private": true
+      },
+      "scope": "PAM forced password change through console; earlier blocks retained."
+    },
+    {
+      "stage": "operator_enrollment",
+      "result": "pass",
+      "evidence": {
+        "evidence_path": "secrets/operator-enrollment-attempt.json",
+        "sha256": "460f52fe215927dd4a7e36fee4da55e64d0859b12f2a88a8c34de0af7068f333",
+        "private": true
+      }
+    },
+    {
+      "stage": "v4_preparation_docker_events",
+      "result": "command_failed",
+      "exit_code": 64,
+      "later_fix_does_not_rewrite_original": true
+    },
+    {
+      "stage": "historical_4f_recovery",
+      "result": "fail",
+      "scope": "Previously recorded 597-second controller recovery and 10-second backup timeout remain unresolved historical failures; not rerun or causally explained by E0."
+    }
+  ],
+  "production_blockers": [
+    {
+      "id": "E0-120S",
+      "status": "confirmed_open",
+      "detail": "Only one of three unchanged E0 reboots meets 120 seconds; E0-2=138.328 and E0-3=161.703 seconds. Later successful state/backup checks do not override timing failure."
+    },
+    {
+      "id": "STARTUP-CAUSE",
+      "status": "unresolved",
+      "detail": "Early filesystem/service waits, executable page-fault waits, metadata initialization and shared backing-device pressure are observed. No controlled intervention establishes a cause."
+    },
+    {
+      "id": "F-DISK-1",
+      "status": "new_fix_requires_review_and_artifact_qualification",
+      "detail": "Current product head 42ba4f38 includes later full-disk fixes be249/d943; b579 E0 artifact predates them. Open review reports Close SST ENOSPC indefinite retry and QEMU false-PASS risk. E0 performs no disk-fill test.",
+      "review_comments": [
+        "6000150923",
+        "6000113712"
+      ]
+    },
+    {
+      "id": "CLAMAV-PCRE2",
+      "status": "resolution_pending_new_candidate",
+      "detail": "Later claimed fix a7c07fe1 is absent from E0 artifact; final candidate build, scan and qualification remain pending. No risk acceptance implied. Missing Compose pull_policy can bypass the locally built derivative on absent-cache deployments.",
+      "review_comment": "6000190244"
+    },
+    {
+      "id": "SCANNER-FINDINGS",
+      "status": "resolution_pending_new_candidate",
+      "detail": "Later claimed scanner/code fix 23dae620 is absent from E0 artifact; previously tracked Snyk GO-2026-5932 and four CodeQL medium findings require final-candidate evidence. No scanner waiver or current resolution inferred. Latest review also observes additional findings in newly vendored Badger; the historical four-row list is not the final inventory."
+    },
+    {
+      "id": "CUSTODY-HISTORICAL-LOGS",
+      "status": "resolution_pending_new_candidate",
+      "detail": "E0 persistence captures explicitly block Tier-3 historical encrypted-log recovery because supported backups omit those logs. Later custody UX change 42ba4f38 is not in this artifact and does not itself prove log recovery."
+    },
+    {
+      "id": "FINAL-ARTIFACT",
+      "status": "pending",
+      "detail": "E0 is a baseline on b579, not approval of newer fixes or a final production artifact. No readahead experiment result is included."
+    },
+    {
+      "id": "CLAMAV-OUTAGE",
+      "status": "confirmed_open",
+      "detail": "Current42ba4f38 still forwards fresh content unscanned on daemon errors and caches health for30seconds. A pcre2 image fix and repeated cached EICAR verdicts do not close outage semantics; explicit production behavior and final-artifact tests required."
+    }
+  ],
+  "limitations": [
+    "Only one approved VM and shared datastore; unrelated host workload was not stopped or controlled.",
+    "Sampler starts 21.927s,34.418s,50.162s in E0-1/2/3; earlier per-process I/O and waits are unavailable.",
+    "Host/device samples are 20-second averages with phase-boundary overlap; device metrics include unrelated workloads. VM metrics contain missing values and are retained separately, never interpolated.",
+    "Host aggregate CPU does not exclude per-core contention; observed zero swap/compression/ballooning does not establish absence outside sampled windows.",
+    "Process state/wchan describes sampled main threads, not every thread or continuous duration. Metadata-marker gap is localization, not proof of a particular syscall or storage layer.",
+    "Postboot systemd critical-chain includes later Docker namespace mounts; these are not evidence that such mounts blocked early boot.",
+    "Signature identities here are version plus file size/mtime, not signature database content hashes.",
+    "ClamAV coverage is checked separately on failed cycles because the normal verifier returns on budget failure first; its pass cannot change the budget verdict.",
+    "Public JSON contains only allowlisted facts and hashes. Private raw logs, proofs, configurations, addresses and credentials are not embedded or uploaded."
+  ],
+  "host_pressure_evidence": {
+    "evidence_path": "secrets/host-pressure-e0-three.json",
+    "sha256": "3cd77e1c34e0555ab7b5ae7d3646e4b52748bc98e45777a2b5918dff43f01ca3",
+    "private": true,
+    "sample_count": 120,
+    "interval_seconds": 20,
+    "window_start": "2026-10-05T17:17:00Z",
+    "window_end": "2026-10-05T17:56:40Z"
+  }
+}
