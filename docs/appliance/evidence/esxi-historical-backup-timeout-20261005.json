@@ -22,7 +22,7 @@
   "elapsed_timing": {
     "original_request_start_end_retained": false,
     "ten_seconds_is": "Configured request-context deadline, not independently measured outer request elapsed",
-    "outer_controller_deadline": "Not asserted from artifact-source code; actual controller revision must be established separately"
+    "outer_controller_deadline": "30 seconds in the preserved adapted ESXi shared harness; not the artifact-source lifecycle script"
   },
   "unresolved": [
     "Whether this controller response represented a fresh RPC timeout or a cached negative result",
@@ -37,5 +37,34 @@
     "Later b579 4.359-second success and current first-list passes do not erase this failure",
     "Cancellation-cache source fixes do not prove the historical cause",
     "No storage causal attribution or production acceptance"
-  ]
+  ],
+  "preserved_controller_provenance": {
+    "shared_revision": "f1f04cab46875869dbd9d0cd559cc622de81e4b0",
+    "shared_script_sha256": "693fd936ab88670b2e7ad4465ded22c5259ac376758db995b74af4d0cc0b7a96",
+    "api_line": 142,
+    "adaptation": "Recorded local lab_before_signed_update hook; api() unchanged",
+    "historical_wrapper": "Current wrapper bytes are not claimed as exact historical bytes",
+    "evidence_references": [
+      {
+        "path": "access-aware-shared/appliance-lab.sh",
+        "sha256": "693fd936ab88670b2e7ad4465ded22c5259ac376758db995b74af4d0cc0b7a96",
+        "bytes": 81870
+      },
+      {
+        "path": "esxi-run-4f27d945-attempt2/evidence/access-aware-harness-before-resume.json",
+        "sha256": "80d300ff89a89cd4e5e9ca374b6a3545bbbc092fde0d2fef1d35d93771c99daf",
+        "bytes": 3241
+      },
+      {
+        "path": "esxi-run-4f27d945-attempt2/evidence/checks.jsonl",
+        "sha256": "b19c54eede97d161e63e94f4d78a8ffe1de8736c47a95fdcd318f251808919da",
+        "bytes": 7069
+      },
+      {
+        "path": "esxi-run-4f27d945-attempt2/work/lifecycle-tail.sh",
+        "sha256": "b7e8df9c3a738738fe6c2a80bc81a133fd9b0bb946744bd3b3a06a539f725bee",
+        "bytes": 8457
+      }
+    ]
+  }
 }
