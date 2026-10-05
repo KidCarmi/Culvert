@@ -362,9 +362,16 @@ func TestApplianceLane_FullDiskMidwriteIsARequiredGate(t *testing.T) {
 			t.Errorf("midwrite harness must fail on %q", want)
 		}
 	}
-	w := src[strings.Index(src, `if [[ "$SCENARIO" == midwrite ]]; then`+"\n  # Poll"):]
-	w = w[:strings.Index(w, "\n# ── E1:")]
-	if strings.Contains(w, "known-failure") {
+	start := strings.Index(src, `if [[ "$SCENARIO" == midwrite ]]; then`+"\n  # Poll")
+	if start < 0 {
+		t.Fatal("midwrite scenario block not found")
+	}
+	w := src[start:]
+	end := strings.Index(w, "\n# ── E1:")
+	if end < 0 {
+		t.Fatal("end of the midwrite scenario block not found")
+	}
+	if strings.Contains(w[:end], "known-failure") {
 		t.Error("the midwrite scenario still reports a known-failure verdict; F-DISK-1 is fixed, a crash is a failure")
 	}
 }
