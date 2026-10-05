@@ -54,3 +54,35 @@ and #1414 touch gossip (the latter also CHAOS-61); #1470 touches policy's prefix
 consumer; #1509 changes QA's action version. Several touch CLAUDE.md. Preserve
 these behaviors; recheck overlap before handoff. No open PR uses ADR-0039.
 The policy pure-core assessment is the next separate design, not this extraction.
+
+## Amendment, 2026-10-05 — zero-value precondition replaced by a guarantee
+
+Security regression review of the extraction found the recorded zero-value
+contract above ("use NewIPFilter before adding individual addresses"; "active
+local admission requires NewRateLimiter") to be a documented PRECONDITION with
+no enforcement: the three remaining map writes — `IPFilter.addLocked`,
+`RateLimiter.Allow`, `RateLimiter.AllowClusterAware` — panicked on a nil map,
+while `addExemptionLocked` already lazily initialized. Measured: a bare
+`IPFilter{}` panics on `Add` and on `AddAll`, and a bare `RateLimiter{}` that
+has been `Configure`d panics on `Allow`.
+
+The extraction makes that trap strictly easier to reach rather than harder.
+Both types now carry only unexported fields, so the complete literal package
+main previously wrote (`&IPFilter{single: map[string]bool{}}`) no longer
+compiles outside this package and `&IPFilter{}` — the silently broken shape —
+is the only literal form left. The two reachable panic sites are the DP
+snapshot apply path (`applySnapshotAdmission` → `AddAll`, so a Control Plane
+config push would crash the node applying it) and the request path.
+
+The precondition is therefore replaced by a guarantee: every map write lazily
+initializes, using the idiom already present in `addExemptionLocked`. This is
+an availability hardening, not a policy change — the nil checks sit in the cold
+miss branch (a nil map reads as a miss), the allocation benchgates still measure
+zero, and `TestBareLiteral_MatchesConstructedInstance` differentially pins a
+bare instance equal to a constructed one across every mode and probe. The
+constructors remain the blessed construction path.
+
+Gates: `internal/admission/bare_literal_safety_test.go` (5), each verified
+failing against the reintroduced pre-fix shape, and four of them additionally
+verified failing against the cheapest wrong fix — skipping the store when the
+map is nil, which silences the panic while silently not enforcing the entry.
