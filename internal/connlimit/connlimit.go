@@ -47,7 +47,75 @@ const defaultMaxConnsPerIP = 1024
 //
 // Sharding spreads DISTINCT clients, so it does nothing for traffic arriving
 // from a single NAT egress — BenchmarkAcquireRelease_SingleIPParallel pins that
-// case as unchanged rather than pretending otherwise.
+// case rather than pretending otherwise. That residual, and the three lock
+// acquisitions counted above, are what the next section closes.
+//
+// ── One critical section per call ────────────────────────────────────────────
+//
+// Splitting the lock reduced CONTENTION for distinct clients and left the
+// per-request lock COUNT at three, because Release took the shard lock twice:
+// once to look the counter up and again to delete the entry after an unlocked
+// decrement returned zero. On a keep-alive connection with no second request in
+// flight — the ordinary shape — the count returns to zero on EVERY request, so
+// every request paid: an 8-byte allocation, a map insert, a map delete, three
+// lock acquisitions and two atomic read-modify-writes.
+//
+// The profile said so plainly. BenchmarkAcquireRelease_DistinctIPsParallel at
+// GOMAXPROCS=1: mutex Lock+Unlock 34% of all samples, mapdelete_faststr 28%,
+// and Release 62% of cumulative time against Acquire's 34% — the cheaper half
+// of the pair costing nearly twice as much, structurally. In the single-NAT
+// case at four cores it is starker: mutex machinery 64% of all samples, with
+// procyieldAsm and futex showing real parking, because every request in the
+// process serialises on one shard and takes it three times to do it.
+//
+// Both halves now do their whole job inside ONE critical section, and the
+// counter is stored by value (see the shard type). That removes the allocation,
+// the pointer chase, the write barriers, the per-counter atomics, one of
+// Release's two lock acquisitions and Acquire's increment-then-undo dance on the
+// reject path. The admit/reject boundary, the unconditional-accounting contract
+// and the delete-when-last behaviour are byte-for-byte the same decisions.
+//
+// Measured on a 4-core Xeon @2.10GHz, Go 1.26.8, one Acquire+Release pair per
+// iteration, medians of n=6, with the pre-change shape frozen in-tree as the
+// _Legacy arms of connlimit_critsec_bench_test.go so BOTH arms are timed in ONE
+// run. The box drifted by half again between measurement rounds, so the RATIO
+// is the claim and these absolutes are indicative (ns/op):
+//
+//	shape                      │ before │ after │        │ allocs
+//	single NAT egress, 1 core  │  103.2 │  66.3 │ -35.8% │ 1 -> 0
+//	single NAT egress, 4 cores │  267.6 │ 199.6 │ -25.4% │ 1 -> 0
+//	distinct IPs,      1 core  │  105.7 │  70.0 │ -33.8% │ 1 -> 0
+//	distinct IPs,      4 cores │  108.3 │   85.6│ -21.0% │ 1 -> 0
+//	entry churn,       1 core  │   99.8 │  67.4 │ -32.5% │ 1 -> 0
+//	entry churn,       4 cores │  105.9 │  68.0 │ -35.8% │ 1 -> 0
+//	reject path,       1 core  │   62.6 │  29.6 │ -52.7% │ 0 -> 0
+//	reject path,       4 cores │  245.1 │ 101.3 │ -58.7% │ 0 -> 0
+//	steady state,      1 core  │   58.3 │  60.7 │  +4.2% │ 0 -> 0
+//	steady state,      4 cores │   61.8 │  61.7 │   0.0% │ 0 -> 0
+//
+// THE LAST ROW IS THE HONEST PRICE and it is recorded rather than rounded away.
+// "Steady state" is the one shape where the entry is RETAINED across the pair —
+// an IP with a second request already in flight, so the count never returns to
+// zero. There, the previous form did a map lookup plus an atomic add through the
+// retained pointer and took Release's lock only once (its second acquisition
+// fired only on the decrement to zero), whereas this form does a lookup plus a
+// mapassign in each half. A mapassign on an existing key is ~1.2ns dearer than
+// an atomic add through a pointer that is already in hand, twice per pair. n=15
+// puts it at 58.3 -> 60.7 ns with OVERLAPPING distributions, it is parity at
+// four cores, and it is the only one of the ten measured shapes that regressed.
+//
+// It is the right trade because it is bought with the two shapes that dominate a
+// real gateway. Entry CHURN is the ordinary keep-alive request (one request in
+// flight, count back to zero, entry created and destroyed) and is 32-36% cheaper
+// with the allocation gone. The REJECT path is 53-59% cheaper, and that is the
+// path an attacker drives — a flood used to cost the limiter MORE per refusal
+// than per admission, which is backwards for a mitigation. Even the retained-
+// entry case wins once there is contention, because what dominates then is lock
+// hold time and acquisition count, not the work inside.
+//
+// The Release rewrite is also a CORRECTNESS fix — the two-phase shape could
+// delete a live connection's entry and admit past the cap. The window, and the
+// deterministic reproduction, are documented on Release itself.
 //
 // 64 shards mirrors the per-IP rate limiter already in this tree (rlShardCount,
 // security.go), which reached the same conclusion for the same reason.
@@ -68,9 +136,20 @@ const cacheLine = 64
 // at n=25 it is decisive: -22% on the distinct-IP parallel benchmark (p=0.005)
 // and -19% on the enabled one (p=0.000), -21% geomean. Removing it does not
 // break anything — it just gives back a fifth of the gain.
+// The counter is stored BY VALUE, not as a *int64. Every mutation of a given
+// IP's count already happens under that IP's shard lock, so the indirection
+// bought nothing and cost four things on the per-request path: one 8-byte heap
+// allocation per tracked IP (and the entry is created and destroyed on EVERY
+// request of a keep-alive connection that has no second request in flight, so
+// that is an allocation per request, not per client), a pointer chase, GC write
+// barriers on every map insert and delete, and an atomic read-modify-write on
+// a value the lock already serialises. It also made the counter's IDENTITY a
+// thing Release had to reason about, which is where the fail-open window below
+// came from. Measured: 100.1 -> 69.0 ns/op per Acquire+Release pair serially and
+// 1 -> 0 allocs/op (see the package header).
 type shard struct {
 	mu    sync.Mutex
-	conns map[string]*int64
+	conns map[string]int64
 	_     [cacheLine - 16]byte
 }
 
@@ -95,7 +174,7 @@ type ConnLimiter struct {
 func New() *ConnLimiter {
 	cl := &ConnLimiter{seed: maphash.MakeSeed()}
 	for i := range cl.shards {
-		cl.shards[i].conns = make(map[string]*int64)
+		cl.shards[i].conns = make(map[string]int64)
 	}
 	cl.maxPerIP.Store(defaultMaxConnsPerIP)
 	return cl
@@ -194,68 +273,95 @@ func (cl *ConnLimiter) Rejected() int64 {
 // enabled and released after disable, wedging that IP over-limit forever
 // (the #503 fail-closed bug). Counting unconditionally closes both.
 func (cl *ConnLimiter) Acquire(ip string) bool {
-	sh := cl.shard(ip)
-	sh.mu.Lock()
-	ctr, ok := sh.conns[ip]
-	if !ok {
-		v := int64(0)
-		ctr = &v
-		sh.conns[ip] = ctr
-	}
-	// Hold the shard lock through the increment to prevent a TOCTOU race with
-	// Release(), which routes the same ip to this same shard.
-	n := atomic.AddInt64(ctr, 1)
-	// Snapshot enabled + the limit for this decision — Enable()/Disable() may
-	// rewrite them at runtime.
+	// Snapshot enabled + the limit for this decision BEFORE taking the shard
+	// lock: neither is lock-guarded (both are atomics, and the lock never
+	// protected them — see the ConnLimiter doc), the decision is point-in-time
+	// either way, and keeping them out shortens the one critical section every
+	// request from a given IP serialises on.
+	//
+	// The READ ORDER is load-bearing and must stay enabled-then-cap: Enable
+	// publishes the cap BEFORE the flag, so a reader that observes
+	// enabled==true can never pair it with a stale cap.
 	enabled := cl.enabled.Load()
 	limit := cl.maxPerIP.Load()
-	sh.mu.Unlock()
 
+	sh := cl.shard(ip)
+	sh.mu.Lock()
+	// A missing key reads as 0, so the absent and zero cases need no branch —
+	// n is this connection's would-be count either way. The whole decision
+	// (read, compare, commit) happens inside ONE critical section, which is
+	// what makes the TOCTOU guard the previous shape needed against Release
+	// unnecessary rather than merely reordered.
+	n := sh.conns[ip] + 1
 	if enabled && n > limit {
 		// Over the cap: this connection is NOT admitted, so it will never be
-		// Released — undo its count now (and drop the entry if it was the last).
-		sh.mu.Lock()
-		if cur, exists := sh.conns[ip]; exists && cur == ctr {
-			if atomic.AddInt64(ctr, -1) <= 0 {
-				delete(sh.conns, ip)
-			}
-		}
+		// Released — simply do not commit the count. The previous shape
+		// incremented first and then undid it under a second lock; not writing
+		// is the same net accounting with no window to guard.
 		sh.mu.Unlock()
 		cl.rejected.Add(1)
 		return false
 	}
+	sh.conns[ip] = n
+	sh.mu.Unlock()
 	return true
 }
 
 // Release decrements the connection count for ip. It does NOT gate on enabled:
 // Acquire counts every admitted connection unconditionally (see its doc), so
 // Release must mirror that exactly. The decrement is guarded by map-entry
-// presence, and the ≤0 delete prevents underflow, so releasing an IP with no
-// live count is a safe no-op.
+// presence, and the delete-at-one prevents underflow, so releasing an IP with
+// no live count is a safe no-op.
+//
+// ONE CRITICAL SECTION, and that is a correctness property before it is a cost
+// one. Release used to take the shard lock TWICE — once to look the counter up,
+// then again to delete the entry once an UNLOCKED decrement had taken it to
+// zero — and the second pass re-checked the counter's VALUE without re-checking
+// its IDENTITY. Acquire's reject path had exactly that identity guard
+// (`cur == ctr`), so the pattern was known and applied in one of the two places
+// that needed it.
+//
+// What the gap permitted (reproduced deterministically by
+// TestRelease_LegacyTwoPhaseLosesALiveSlot, which drives the interleaving
+// rather than racing for it): Release A reads the counter, unlocks, decrements
+// 1 -> 0 and is descheduled. Acquire B finds the still-mapped counter, takes it
+// 0 -> 1; Release B takes it back to 0 and deletes the entry. Acquire C then
+// misses, allocates a FRESH counter, maps it, and takes it to 1 — a live,
+// admitted connection. A now re-locks, loads its STALE pointer, sees 0, and
+// deletes whatever is at ip — which is C's entry, count 1. C's accounting is
+// destroyed, so the IP goes on to hold limit+1 concurrent connections: a
+// fail-OPEN past a configured per-IP cap, the same direction as the #503 bug
+// the unconditional-accounting contract above exists to close.
+//
+// Doing the lookup, the decrement and the conditional delete in one critical
+// section removes the window outright. There is no longer a pointer that can go
+// stale, no unlocked mutation of a count the lock is supposed to serialise, and
+// no value-vs-identity re-check to get wrong — and it halves this function's
+// lock traffic, which is the dominant cost when traffic arrives from a single
+// NAT egress (see the package header).
 func (cl *ConnLimiter) Release(ip string) {
 	sh := cl.shard(ip)
 	sh.mu.Lock()
-	ctr, ok := sh.conns[ip]
-	sh.mu.Unlock()
-	if ok {
-		if atomic.AddInt64(ctr, -1) <= 0 {
-			sh.mu.Lock()
-			if atomic.LoadInt64(ctr) <= 0 {
-				delete(sh.conns, ip)
-			}
-			sh.mu.Unlock()
+	if n, ok := sh.conns[ip]; ok {
+		if n <= 1 {
+			// Last live connection for this IP (or a stray release against a
+			// count the map should never hold) — drop the entry so the map
+			// stays bounded by LIVE clients, not by every client ever seen.
+			delete(sh.conns, ip)
+		} else {
+			sh.conns[ip] = n - 1
 		}
 	}
+	sh.mu.Unlock()
 }
 
 // ActiveConns returns the current connection count for an IP (testing).
 func (cl *ConnLimiter) ActiveConns(ip string) int64 {
 	sh := cl.shard(ip)
 	sh.mu.Lock()
-	ctr, ok := sh.conns[ip]
-	sh.mu.Unlock()
-	if !ok {
-		return 0
-	}
-	return atomic.LoadInt64(ctr)
+	defer sh.mu.Unlock()
+	// A missing key reads as 0, which is exactly the answer for an untracked
+	// IP. Reading under the lock (rather than atomically off a pointer) is what
+	// makes this a consistent snapshot of the same state Acquire/Release commit.
+	return sh.conns[ip]
 }
