@@ -249,11 +249,18 @@ func TestClamAVSidecar_EveryShippedFileNamesTheSameLocalTag(t *testing.T) {
 	}
 	for _, compose := range []string{"docker-compose.yml", "docker-compose.ha.yml"} {
 		c := read(compose)
-		if !strings.Contains(c, "    image: "+ref+"\n    build:\n      context: ./appliance/clamav\n") {
-			t.Errorf("%s: the clamav service must name image %s with build context ./appliance/clamav", compose, ref)
+		// pull_policy: never — without it Compose asks the registry for the
+		// absent local tag before building (measured, ASTRA review of 42ba4f38).
+		if !strings.Contains(c, "    image: "+ref+"\n    pull_policy: never\n    build:\n      context: ./appliance/clamav\n") {
+			t.Errorf("%s: the clamav service must name image %s, pull_policy: never and build context ./appliance/clamav", compose, ref)
 		}
 		if strings.Contains(c, "image: clamav/clamav") {
 			t.Errorf("%s still runs the official image (pcre2 10.48, CVE-2026-103111)", compose)
+		}
+	}
+	for _, stub := range []string{"test/e2e/appliance/docker-compose.qualify.yml", "test/e2e/install-lifecycle/docker-compose.override.yml"} {
+		if !strings.Contains(read(stub), "    build: !reset null\n    # The base service never pulls (its tag is local-only); a stub image must.\n    pull_policy: missing\n") {
+			t.Errorf("%s: a stub replacing the sidecar must drop its build and restore pull_policy: missing", stub)
 		}
 	}
 	if !strings.Contains(read("Dockerfile"), "COPY --chown=proxy:proxy appliance/clamav/Dockerfile ./deploy/appliance/clamav/Dockerfile") {

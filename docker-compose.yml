@@ -38,9 +38,12 @@ services:
   clamav:
     # The official ClamAV 1.4.6 image (pinned by digest) + pcre2 10.49 for
     # CVE-2026-103111, built LOCALLY from appliance/clamav when this
-    # local-only tag is absent (the OVA ships it pre-built). Compose never
-    # pulls this name: with `build:` present a missing image is built.
+    # local-only tag is absent (the OVA ships it pre-built). pull_policy:
+    # never is REQUIRED: without it Compose tries the registry first when the
+    # tag is absent (measured on v5.3.1) and would run whatever answered for
+    # this name instead of building the pinned derivative.
     image: culvert/clamav:1.4.6-pcre2-10.49
+    pull_policy: never
     build:
       context: ./appliance/clamav
     container_name: culvert-clamav
