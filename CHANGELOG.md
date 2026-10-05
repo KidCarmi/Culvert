@@ -573,6 +573,75 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Performance
 
+- The per-IP connection limiter now does its whole job in ONE critical section
+  per call, and stores the counter by value. `Acquire` + a deferred `Release`
+  run on every proxied request (`handleRequest`, `socks5.go`), not once per TCP
+  connection. Sharding the limiter reduced contention between distinct clients
+  and left the per-request lock COUNT at three, because `Release` took the shard
+  lock twice: once to look the counter up and again to delete the entry after an
+  unlocked decrement returned zero. On a keep-alive connection with no second
+  request in flight — the ordinary shape — the count returns to zero on every
+  request, so every request paid an 8-byte allocation, a map insert, a map
+  delete, three lock acquisitions and two atomic read-modify-writes.
+
+  The profile named it. On the distinct-IP parallel benchmark at GOMAXPROCS=1,
+  mutex `Lock`+`Unlock` was 34% of all samples and `mapdelete_faststr` 28%, with
+  `Release` at 62% of cumulative time against `Acquire`'s 34% — the cheaper half
+  of the pair costing nearly twice as much, structurally. In the single-NAT-
+  egress case at four cores, mutex machinery was 64% of all samples, with
+  `procyieldAsm` and `futex` showing real parking. That case is an ordinary
+  enterprise deployment and the package header had recorded it, together with
+  the three lock acquisitions, as deliberately unfixed.
+
+  Storing the count as `map[string]int64` and collapsing both halves removes the
+  allocation, the pointer chase, the GC write barriers, the per-counter atomics,
+  one of `Release`'s two lock acquisitions, and `Acquire`'s increment-then-undo
+  dance on the reject path (it simply never commits the count — the same net
+  accounting with no window to guard). Measured with the pre-change shape frozen
+  in-tree as the `_Legacy` benchmark arms so both are timed in one run (4-core
+  Xeon @2.10GHz, Go 1.26.8, medians of n=6, ns/op per `Acquire`+`Release` pair):
+  single NAT egress **103.2 → 66.3 (−35.8%)** at one core and **267.6 → 199.6
+  (−25.4%)** at four; distinct IPs **105.7 → 70.0 (−33.8%)** and **108.3 → 85.6
+  (−21.0%)**; entry churn **99.8 → 67.4 (−32.5%)** and **105.9 → 68.0
+  (−35.8%)**; the reject path **62.6 → 29.6 (−52.7%)** and **245.1 → 101.3
+  (−58.7%)** — with **1 → 0 allocs/op** throughout. End to end,
+  `BenchmarkPerfQual_ProxyHTTPForward` goes 177 → 176 allocs/op and `connlimit`
+  leaves the `alloc_objects` profile entirely.
+
+  One of the ten measured shapes regressed and is recorded rather than rounded
+  away: the retained-entry case (an IP with a second request already in flight,
+  so the count never returns to zero) is 58.3 → 60.7 ns at one core, **+4.2%**
+  with overlapping distributions at n=15, and parity at four cores — there the
+  old form did a lookup plus an atomic add through the pointer already in hand,
+  where this one does a lookup plus a `mapassign` in each half. It is bought
+  with the two shapes that dominate a real gateway: entry churn, and the reject
+  path an attacker drives, where a flood used to cost the limiter more per
+  refusal than per admission.
+
+  It is also a **fail-open fix**. `Release`'s second pass re-checked the
+  counter's *value* without re-checking its *identity*, while `Acquire`'s reject
+  path carried exactly that guard (`cur == ctr`) — the pattern was known and
+  applied in one of the two places that needed it. Release A reads the counter,
+  unlocks, decrements 1 → 0 and is descheduled; B acquires and releases,
+  deleting the entry; C then misses, allocates a fresh counter and takes it to 1
+  (a live, admitted connection); A re-locks, loads its stale pointer, sees 0,
+  and deletes C's entry. C's accounting is destroyed and the IP goes on to hold
+  `limit+1` concurrent connections — past a configured per-IP cap, the same
+  direction as the #503 bug the unconditional-accounting contract exists to
+  close (measured: 3 admitted against a cap of 2). Reproduced deterministically
+  by `TestRelease_LegacyTwoPhaseLosesALiveSlot`, which owns a verbatim legacy
+  copy with one injected pause point rather than racing for the interleaving.
+  Every behavioural test in the package keeps passing against the two-phase
+  shape, so the regression instruments are deliberately structural: an AST wall
+  requiring exactly one `sh.mu.Lock()` and zero per-counter atomics in each half
+  (with a not-vacuous control that rejects a verbatim pre-fix copy), and a
+  `testing.AllocsPerRun` gate across the churning, steady-state and reject
+  postures — the churn posture is load-bearing, since a gate measuring only the
+  retained entry reads zero against the defect too. Both were verified failing
+  against the reverted implementation. The admit/reject boundary, the
+  unconditional-accounting contract and the delete-when-last behaviour are
+  unchanged.
+
 - The threat feed's full-URL check no longer re-parses a URL it was handed
   already parsed. `preDispatchBlocked` runs it on every forwarded plain-HTTP
   request, on the request goroutine, before the policy engine — and called it
