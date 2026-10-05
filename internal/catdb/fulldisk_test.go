@@ -37,6 +37,8 @@ func TestFullFilesystemWriteReturnsErrorNotSIGBUS(t *testing.T) {
 			fullDiskCloseChild(t, mnt)
 		case "vlog-grow":
 			fullDiskVlogChild(t, mnt)
+		case "sst-full":
+			fullDiskSSTChild(t, mnt)
 		default:
 			fullDiskChild(t, mnt)
 		}
@@ -52,6 +54,7 @@ func TestFullFilesystemWriteReturnsErrorNotSIGBUS(t *testing.T) {
 		{"retry", []string{"WRITE-REFUSED", "RETRIES-REFUSED", "WRITE-RESUMED", "REOPENED"}},
 		{"close-full", []string{"CLOSED", "REOPENED"}},
 		{"vlog-grow", []string{"VLOG-GROW-REFUSED", "VLOG-REOPENED"}},
+		{"sst-full", []string{"SST-FLUSH-REFUSED", "CLOSED-BOUNDED", "SST-REOPENED"}},
 	} {
 		t.Run(tc.mode, func(t *testing.T) { runFullDiskChild(t, tc.mode, tc.want) })
 	}
@@ -345,6 +348,86 @@ func fullDiskCloseChild(t *testing.T, mnt string) {
 	}
 	closeWithin(t, db2, 60*time.Second)
 	fmt.Println("REOPENED")
+}
+
+// fullDiskSSTChild makes the FINAL flush fail (ASTRA review of d943a9a1):
+// after the first refused write it consumes every remaining byte, so Close's
+// flush of the last memtable cannot create its SST. Close must still return
+// within a bound (badger's flusher used to retry forever and Close waited on
+// it), must report that the memtable was not flushed, and must leave its WAL
+// in place: once space returns, every acknowledged batch reads back.
+func fullDiskSSTChild(t *testing.T, mnt string) {
+	filler := filepath.Join(mnt, "filler")
+	if err := os.WriteFile(filler, make([]byte, 512<<20), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(mnt, "catfeeddb")
+	db, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var acked []int
+	var werr error
+	for batch := 0; batch < 400 && werr == nil; batch++ {
+		if werr = db.BulkWrite(fullDiskBatch(batch)); werr == nil {
+			acked = append(acked, batch)
+		}
+	}
+	if werr == nil || !isNoSpace(werr) {
+		t.Fatalf("expected the write to be refused on the full filesystem, got %v", werr)
+	}
+	// Take the rest: whatever the flusher or the next SST would need.
+	rest := filepath.Join(mnt, "filler-rest")
+	f, err := os.OpenFile(rest, os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	chunk := make([]byte, 1<<20)
+	for {
+		if _, err := f.Write(chunk); err != nil {
+			break
+		}
+	}
+	for {
+		if _, err := f.Write(chunk[:4096]); err != nil {
+			break
+		}
+	}
+	_ = f.Close()
+	var st syscall.Statfs_t
+	_ = syscall.Statfs(mnt, &st)
+	fmt.Printf("SST-FLUSH-REFUSED setup: %d acknowledged batches, %d bytes free\n", len(acked), st.Bavail*uint64(st.Bsize)) // #nosec G115 -- positive block size
+
+	done := make(chan error, 1)
+	go func() { done <- db.Close() }()
+	select {
+	case cerr := <-done:
+		if cerr == nil || !strings.Contains(cerr.Error(), "not flushed") {
+			t.Fatalf("Close on a full disk returned %v; want the unflushed-memtable error (did the final flush really fail?)", cerr)
+		}
+		fmt.Printf("CLOSED-BOUNDED err=%v\n", cerr)
+	case <-time.After(60 * time.Second):
+		t.Fatal("Close did not return within 60s while the final SST could not be created")
+	}
+	for _, p := range []string{filler, rest} {
+		if err := os.Remove(p); err != nil {
+			t.Fatal(err)
+		}
+	}
+	db2, err := Open(dir)
+	if err != nil {
+		t.Fatalf("reopen after freeing space: %v", err)
+	}
+	for _, b := range acked {
+		for _, i := range []int{0, 19999} {
+			k := fmt.Sprintf("host-%07d-%05d.example.test", b, i)
+			if _, ok := db2.getExact(k); !ok {
+				t.Fatalf("acknowledged entry %s is missing after reopen (the unflushed memtable's WAL was lost)", k)
+			}
+		}
+	}
+	closeWithin(t, db2, 60*time.Second)
+	fmt.Printf("SST-REOPENED with %d acknowledged batches intact\n", len(acked))
 }
 
 func tail(b []byte) string {

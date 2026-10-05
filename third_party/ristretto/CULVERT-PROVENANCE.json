@@ -6,10 +6,11 @@
  "module_zip_url": "https://proxy.golang.org/github.com/dgraph-io/ristretto/v2/@v/v2.2.0.zip",
  "patch": {
   "added": {
-   "z/prealloc_linux.go": "7548fcd031ea4855347512206bfae31e3b373913413e6649f897f14e54dd57e0",
+   "z/prealloc_linux.go": "81359628a0d2dfd22a6fa6ddf35ef746d1c7f3a04d77af7dc76629227d2b9e29",
+   "z/prealloc_linux_test.go": "c49451f61ddba39c248703df61cc85b1f4d7b3d5ca1139e54e947cde3884c7bf",
    "z/prealloc_other.go": "1fa2206a9048313d3190766b8b7e7dd367169215743db7fabcab5d9c861622bf"
   },
-  "effect": "writable mmapped files are preallocated (fallocate) on create, grow and writable reopen, so a full filesystem returns ENOSPC instead of SIGBUS at the first store into a hole (F-DISK-1); a file the failed open created is removed; OpenMmapFile closes the descriptor on error",
+  "effect": "writable mmapped files are preallocated (fallocate) on create, grow and writable reopen, so a full filesystem returns ENOSPC instead of SIGBUS at the first store into a hole (F-DISK-1); a file the failed open created is removed; OpenMmapFile closes the descriptor on error; a filesystem without fallocate gets glibc's posix_fallocate emulation (a zero byte into each block that reads zero) instead of staying sparse",
   "modified": {
    "z/file.go": {
     "patched_sha256": "06044d43ac65780bcb8ffbf40b5641b94e121e32fc00e5df88bc70b5b55c48f8",

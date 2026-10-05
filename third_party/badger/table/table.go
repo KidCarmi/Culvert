@@ -772,7 +772,7 @@ func ParseFileID(name string) (uint64, bool) {
 	// here (negative) or in blockCacheKey (>= MaxUint32, which packs the id
 	// into 4 bytes).
 	id, err := strconv.ParseUint(name, 10, 32)
-	if err != nil {
+	if err != nil || id == math.MaxUint32 { // blockCacheKey requires id < MaxUint32
 		return 0, false
 	}
 	return id, true

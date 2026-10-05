@@ -22,7 +22,8 @@ func TestBadgerFork_TableFileIDIsUnsigned32(t *testing.T) {
 		ok bool
 	}{
 		"000001.sst":     {1, true},
-		"4294967295.sst": {4294967295, true},
+		"4294967294.sst": {4294967294, true},
+		"4294967295.sst": {0, false}, // MaxUint32 is reserved by blockCacheKey
 		// Upstream: Atoi accepts "-1", then y.AssertTrue(id >= 0) is log.Fatalf.
 		"-1.sst":         {0, false},
 		"4294967296.sst": {0, false}, // would not fit the 4-byte block-cache key

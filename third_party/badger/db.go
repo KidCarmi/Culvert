@@ -84,6 +84,11 @@ type DB struct {
 
 	lock sync.RWMutex // Guards list of inmemory tables, not individual reads and writes.
 
+	// CULVERT PATCH (F-DISK-1): set by the flusher when Close has asked it to
+	// stop and a memtable still cannot be flushed; read by close() after the
+	// flusher has exited (stopMemoryFlush waits for it).
+	flushAbandonErr error
+
 	dirLockGuard *directoryLockGuard
 	// nil if Dir and ValueDir are the same
 	valueDirGuard *directoryLockGuard
@@ -610,6 +615,10 @@ func (db *DB) close() (err error) {
 						db.opt.Debugf("pushed to flush chan\n")
 						return true
 					default:
+						// CULVERT PATCH (F-DISK-1): the flusher is behind (possibly
+						// retrying a flush that cannot succeed): tell it Close is under
+						// way so a failing flush gives up and frees the channel.
+						db.closers.memtable.Signal()
 						// If we fail to push, we need to unlock and wait for a short while.
 						// The flushing operation needs to update s.imm. Otherwise, we have a
 						// deadlock.
@@ -626,6 +635,9 @@ func (db *DB) close() (err error) {
 	}
 	db.stopMemoryFlush()
 	db.stopCompactions()
+	if db.flushAbandonErr != nil {
+		err = y.Wrapf(db.flushAbandonErr, "DB.Close: memtable not flushed (kept in its WAL, replayed on the next open)")
+	}
 
 	// Force Compact L0
 	// We don't need to care about cstatus since no parallel compaction is running.
@@ -647,7 +659,7 @@ func (db *DB) close() (err error) {
 		err = y.Wrap(vlogErr, "DB.Close")
 	}
 
-	db.opt.Infof(db.LevelsToString())
+	db.opt.Infof("%s", db.LevelsToString()) // CULVERT PATCH (scanner): not a format string
 	if lcErr := db.lc.close(); err == nil {
 		err = y.Wrap(lcErr, "DB.Close")
 	}
@@ -1165,12 +1177,27 @@ func (db *DB) flushMemtable(lc *z.Closer) {
 			continue
 		}
 
+		// CULVERT PATCH (F-DISK-1): a flush that keeps failing is retried until
+		// Close asks the flusher to stop; then it gives up instead of retrying
+		// forever (Close waited on it with no bound). An abandoned memtable keeps
+		// its reference, so its WAL is NOT deleted and the next Open replays it;
+		// every later memtable is kept the same way, in order (flushing a later
+		// one would break the db.imm ordering the code below asserts).
+		if db.flushAbandonErr != nil {
+			db.keepUnflushed(mt)
+			continue
+		}
 		for {
 			if err := db.handleMemTableFlush(mt, nil); err != nil {
-				// Encountered error. Retry indefinitely.
 				db.opt.Errorf("error flushing memtable to disk: %v, retrying", err)
-				time.Sleep(time.Second)
-				continue
+				select {
+				case <-lc.HasBeenClosed():
+					db.flushAbandonErr = err
+					db.keepUnflushed(mt)
+				case <-time.After(time.Second):
+					continue
+				}
+				break
 			}
 
 			// Update s.imm. Need a lock.
@@ -1193,6 +1220,15 @@ func (db *DB) flushMemtable(lc *z.Closer) {
 			break
 		}
 	}
+}
+
+// keepUnflushed leaves mt in db.imm with its reference held (so its WAL file
+// stays on disk for replay) and syncs that WAL. CULVERT PATCH (F-DISK-1).
+func (db *DB) keepUnflushed(mt *memTable) {
+	if err := mt.SyncWAL(); err != nil {
+		db.opt.Errorf("syncing the WAL of an unflushed memtable: %v", err)
+	}
+	db.opt.Errorf("memtable not flushed at close; kept in its WAL for replay on the next open")
 }
 
 func exists(path string) (bool, error) {

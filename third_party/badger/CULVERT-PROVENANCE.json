@@ -5,12 +5,18 @@
   "module_zip_sha256": "f1b41e7c0114195c44ac816fba9d17dcbaf20a0587c1216e0d7ebe499a647bce",
   "module_zip_url": "https://proxy.golang.org/github.com/dgraph-io/badger/v4/@v/v4.9.6.zip",
   "patch": {
-    "added": {},
-    "effect": "a failed memtable allocation (ensureRoomForWrite, dropAll, dropPrefixes) leaves the current memtable in place and returns the error instead of leaving db.mt nil (the next write was a fatal AssertTrue); a failed value-log grow returns the reserved offset (F-DISK-1); scanner fixes: memtable ids parse bounded to 31 bits (they become a uint32 WAL fid) and table ids parse as unsigned 32-bit (a negative or >= 2^32 name is not a table file instead of a fatal AssertTrue), and Options log methods escape CR/LF (CWE-117)",
+    "added": {
+      "table/culvert_fileid_test.go": "21d9353e35a3dd5a3d4286055973ab6c2a487aa9a8ea3c79f3e975379c6fab3e"
+    },
+    "effect": "a failed memtable allocation (ensureRoomForWrite, dropAll, dropPrefixes) leaves the current memtable in place and returns the error instead of leaving db.mt nil (the next write was a fatal AssertTrue); a failed value-log grow returns the reserved offset (F-DISK-1); scanner fixes: memtable ids parse bounded to 31 bits (they become a uint32 WAL fid) and table ids parse as unsigned 32-bit below MaxUint32 (a negative, >= 2^32 or exactly MaxUint32 name is not a table file instead of a fatal AssertTrue), and Options log methods escape CR/LF (CWE-117); once Close has asked the flusher to stop, a memtable flush that still fails is abandoned (WAL kept and synced, replayed on the next open) and Close returns that error instead of waiting forever",
     "modified": {
       "db.go": {
-        "patched_sha256": "8688146e55fdb365f5cda3964f651c8bd24654bd3cd4a61b7b89ddb0710b41cb",
+        "patched_sha256": "02abcb98d2728209633d8802a1ce080ace241293568c0dc27e6132e19e485369",
         "upstream_sha256": "823fe02d0797e1e95bab29523a26fb4fda0bee8f7635397d41acad6e05359f7a"
+      },
+      "levels.go": {
+        "patched_sha256": "4cd1412d4ca651acd0d6200be6110885fe9bd045ec78912c2fe687f5c5d2824f",
+        "upstream_sha256": "14b18b6371bdf778e03f25bb88d6100f096cce6f5828f3c71a40f8572e43e557"
       },
       "logger.go": {
         "patched_sha256": "b7018f2246b98be17e85dba0afd5a3a34cf80088c4c05a3516ff9606580d8342",
@@ -21,7 +27,7 @@
         "upstream_sha256": "6bb2c6aced2934ca6363f31da71c306695fa3b996a04c9e953d9bc086e21886c"
       },
       "table/table.go": {
-        "patched_sha256": "519a50d3cb6a4f826d1b4ffb252ee5c3e8c161577787404a22d5947bac73fb2d",
+        "patched_sha256": "bba559531cb16ca8381544b02553a3b60b72604029cebc3b7933ee470de01145",
         "upstream_sha256": "eadaeb76de9e82f21d9fe77e52ae2ee164256c656e3c9a2f8ad2ba76c6808677"
       },
       "value.go": {

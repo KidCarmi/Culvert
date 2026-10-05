@@ -140,7 +140,7 @@ func newLevelsController(db *DB, mf *Manifest) (*levelsController, error) {
 			t, err := table.OpenTable(mf, topt)
 			if err != nil {
 				if strings.HasPrefix(err.Error(), "CHECKSUM_MISMATCH:") {
-					db.opt.Errorf(err.Error())
+					db.opt.Errorf("%s", err.Error()) // CULVERT PATCH (scanner): not a format string
 					db.opt.Errorf("Ignoring table %s", mf.Fd.Name())
 					// Do not set rerr. We will continue without this table.
 				} else {
