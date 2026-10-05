@@ -4,7 +4,10 @@ import gzip
 import hashlib
 import importlib.util
 import json
+import os
 from pathlib import Path
+import shutil
+import subprocess
 import sys
 import tempfile
 import time
@@ -119,6 +122,56 @@ class CollectorTests(unittest.TestCase):
             self.assertNotIn('curl', argv)
             self.assertNotIn('up', argv)
         self.assertFalse(any('.env' in path for path in C.HASH_FILES))
+
+    def test_docker_event_template_matches_actor_schema_and_keeps_bounds(self):
+        with mock.patch.object(C.time, 'time', return_value=200.9):
+            events = [entry for entry in C.command_plan(100) if entry[0] == 'docker_events']
+        self.assertEqual(len(events), 1)
+        _, argv, timeout, limit = events[0]
+        self.assertEqual(argv[:-1], ['docker', 'events', '--since', '100', '--until', '200',
+                                   '--filter', 'type=container', '--format'])
+        self.assertEqual((timeout, limit), (10, 180000))
+        self.assertEqual(argv[-1], '{"timeNano":{{.TimeNano}},"action":{{json .Action}},'
+                                  '"id":{{json .Actor.ID}}}')
+
+        # Exercise the real Go template engine against the modern events.Message
+        # field shape: ID belongs to Actor, and there is no top-level ID field.
+        # Attributes are deliberately present but must never enter the projection.
+        go = shutil.which('go')
+        self.assertIsNotNone(go, 'Go is required for the Docker event schema regression')
+        source = r'''package main
+import ("encoding/json"; "io"; "os"; "text/template")
+type Actor struct { ID string; Attributes map[string]string }
+type Message struct { TimeNano int64; Action string; Actor Actor }
+func main() {
+    raw, err := io.ReadAll(os.Stdin); if err != nil { os.Exit(2) }
+    t, err := template.New("event").Funcs(template.FuncMap{
+        "json": func(v any) (string, error) { b, e := json.Marshal(v); return string(b), e },
+    }).Parse(string(raw)); if err != nil { os.Exit(3) }
+    event := Message{123456789, "health_status: healthy", Actor{
+        "synthetic-\"id\\canary", map[string]string{"private": "must-not-export"},
+    }}
+    if err = t.Execute(os.Stdout, event); err != nil { os.Exit(4) }
+}
+'''
+        env = dict(os.environ, GOTOOLCHAIN='local', GOWORK='off', GOPROXY='off', GOSUMDB='off')
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'event.go'
+            path.write_text(source, encoding='utf-8')
+            binary = Path(directory) / ('event.exe' if os.name == 'nt' else 'event')
+            built = subprocess.run([go, 'build', '-o', str(binary), str(path)], cwd=directory,
+                                   env=env, capture_output=True, timeout=60, check=False)
+            self.assertEqual(built.returncode, 0, built.stderr.decode(errors='replace'))
+            projected = subprocess.run([str(binary)], input=argv[-1], text=True,
+                                       capture_output=True, timeout=5, check=False)
+            self.assertEqual(projected.returncode, 0)
+            self.assertEqual(json.loads(projected.stdout), {
+                'timeNano': 123456789, 'action': 'health_status: healthy',
+                'id': 'synthetic-"id\\canary'})
+            self.assertNotIn('must-not-export', projected.stdout)
+            legacy = subprocess.run([str(binary)], input=argv[-1].replace('.Actor.ID', '.ID'),
+                                    text=True, capture_output=True, timeout=5, check=False)
+            self.assertEqual(legacy.returncode, 4, 'Legacy top-level ID must fail this schema')
 
     def test_total_cap_omits_payload_and_keeps_failure_metadata(self):
         report = {'full': {'commands': [{'output': '\u0000' * 1000, 'result': 'timeout',

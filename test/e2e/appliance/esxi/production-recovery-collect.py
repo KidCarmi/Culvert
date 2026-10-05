@@ -183,7 +183,7 @@ def command_plan(boot_epoch):
             (name + '_logs', ['docker', 'logs', '--timestamps', '--since', since, '--tail', '1500', name], 15, 600000)])
     plan.append(('docker_events', ['docker', 'events', '--since', since, '--until', str(int(time.time())),
                                   '--filter', 'type=container', '--format',
-                                  '{"timeNano":{{.TimeNano}},"action":{{json .Action}},"id":{{json .ID}}}'], 10, 180000))
+                                  '{"timeNano":{{.TimeNano}},"action":{{json .Action}},"id":{{json .Actor.ID}}}'], 10, 180000))
     return plan
 
 
