@@ -229,6 +229,21 @@ cmd_selftest() { local d rc=0 got; d="$(mktemp -d)"
   # fails (255); 127 would mean timeout could not run the command at all.
   local prc=0; ( LAB_HOST=127.0.0.1; SSH_OPTS=(-p 1 -o ConnectTimeout=2 -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=QUIET); gop_within 5 status-json ) >/dev/null 2>&1 || prc=$?
   if [[ $prc == 255 ]]; then log "selftest ok: bounded operator probe executes ssh (closed port -> 255)"; else log "selftest FAILED: bounded operator probe exit $prc (127 = the probe never ran)"; rc=1; fi
+  # The backup-listing oracle must reject what HTTP 200 + a filename grep
+  # accepted (ASTRA 6001710160), and accept the genuine listing.
+  printf '%s' '{"filename":"baseline.enc","path":"/backup/baseline.enc","size_bytes":4096,"encrypted":true}' > "$d/exp.json"
+  bl() { printf '%s' "$1" > "$d/b.json"; got="$(backup_listing_verdict "$d/b.json" "$d/exp.json" "$2")"
+    if [[ "${got%% *}" == "$3" ]]; then log "selftest ok: backup oracle $4 -> ${got%% *}"; else log "selftest FAILED: backup oracle $4 -> $got (want $3)"; rc=1; fi; }
+  local good='{"available":true,"count":1,"backups":[{"filename":"baseline.enc","path":"/backup/baseline.enc","size_bytes":4096,"encrypted":true}]}'
+  bl "$good" 0.8 PASS "genuine listing"
+  bl '{ "available": false, "reason": "could not read baseline.enc", "backups": [], "count": 0 }' 0.8 FAIL "available=false naming the file"
+  bl "$good" 5.000001 FAIL "measured just over 5 s"
+  bl '{"available":true,"count":2,"backups":[{"filename":"baseline.enc","path":"/backup/baseline.enc","size_bytes":4096,"encrypted":true}]}' 0.8 FAIL "count mismatch"
+  bl '{"available":true,"count":1,"backups":[{"filename":"baseline.enc","path":"/backup/baseline.enc","size_bytes":17,"encrypted":true}]}' 0.8 FAIL "size changed"
+  bl '{"available":true,"count":1,"backups":[{"filename":"baseline.enc","path":"/backup/baseline.enc","size_bytes":4096,"encrypted":false}]}' 0.8 FAIL "encryption changed"
+  bl '{"available":true,"count":2,"backups":[{"filename":"baseline.enc","path":"/backup/baseline.enc","size_bytes":4096,"encrypted":true},{"filename":"baseline.enc","path":"/backup/baseline.enc","size_bytes":4096,"encrypted":true}]}' 0.8 FAIL "duplicate entry"
+  bl '{"available":true,"count":0,"backups":[],"note":"baseline.enc"}' 0.8 FAIL "filename only in another field"
+  rm -f "$d/exp.json"; bl "$good" 0.8 FAIL "no pre-reboot baseline"
   rm -rf "$d"; return "$rc"; }
 through_proxy() { curl -sS -m 20 -x "$P" -o /dev/null -w '%{http_code}' "$1" 2>/dev/null || echo 000; }
 # Monitor socket: a short fixed path (AF_UNIX paths are limited to 108 bytes).
@@ -747,7 +762,11 @@ PY
     fi
     [[ "$st" == succeeded ]] && check 6 agent-backup pass "op $op → $fn succeeded (proxy → agent socket → sudoers → cli container)" || check 6 agent-backup fail "op=${op:-none} state=${st:-none}: $(body < "$EV/06-backup-trigger.txt" | head -c 300)"
     api GET /api/backups > "$EV/06-backups.txt" || true
-    [[ -n "$fn" ]] && grep -qF "$fn" "$EV/06-backups.txt" && check 6 backup-listed pass "$fn listed by /api/backups" || check 6 backup-listed fail "backup ${fn:-?} not listed"
+    if [[ -n "$fn" ]] && body < "$EV/06-backups.txt" | python3 -c 'import json,sys
+d=json.load(sys.stdin); b=d.get("backups")
+sys.exit(0 if d.get("available") is True and isinstance(b,list) and d.get("count")==len(b) and sum(1 for e in b if isinstance(e,dict) and e.get("filename")==sys.argv[1])==1 else 1)' "$fn" 2>/dev/null; then
+      check 6 backup-listed pass "$fn listed by /api/backups (available=true, one entry)"
+    else check 6 backup-listed fail "backup ${fn:-?} not listed by a valid listing: $(body < "$EV/06-backups.txt" | head -c 200)"; fi
     if [[ -n "$fn" ]]; then
       groot "cd /srv/culvert && docker compose --profile cli run --rm -T cli --restore /backup/$fn --mode full" 900 > "$EV/06-restore-dryrun.txt" 2>&1 || true
       # The CLI prints "Validation: PASS" (or FAIL) and, for a dry run, "No files
@@ -863,7 +882,12 @@ EOS
     lookups > "$EV/08-lookups-after.txt"
     cmp -s "$EV/05b-lookups-before.txt" "$EV/08-lookups-after.txt" && check 8 category-data pass "category lookups identical before/after reboot" || check 8 category-data fail "$(diff "$EV/05b-lookups-before.txt" "$EV/08-lookups-after.txt" | tr '\n' ' ' | head -c 300)"
     api GET /api/backups > "$EV/08-backups.txt" || true
-    [[ -n "${BACKUP_FILE:-}" ]] && grep -qF "$BACKUP_FILE" "$EV/08-backups.txt" && check 8 backup-listed pass "$BACKUP_FILE still listed" || check 8 backup-listed fail "backup ${BACKUP_FILE:-?} not listed"
+    # Structured, like the recovery oracle: a grep also matches available=false.
+    if [[ -n "${BACKUP_FILE:-}" ]] && body < "$EV/08-backups.txt" | python3 -c 'import json,sys
+d=json.load(sys.stdin); b=d.get("backups")
+sys.exit(0 if d.get("available") is True and isinstance(b,list) and d.get("count")==len(b) and sum(1 for e in b if isinstance(e,dict) and e.get("filename")==sys.argv[1])==1 else 1)' "$BACKUP_FILE" 2>/dev/null; then
+      check 8 backup-listed pass "$BACKUP_FILE still listed (available=true, one entry)"
+    else check 8 backup-listed fail "backup ${BACKUP_FILE:-?} not listed by a valid listing: $(body < "$EV/08-backups.txt" | head -c 200)"; fi
     c="$(api GET /api/maintenance-agent | tee "$EV/08-agent-status.txt" | code)"
     local av8; av8="$(agent_status_verdict "$EV/08-agent-status.txt")"; check 8 agent-reachable "${av8%%|*}" "${av8#*|} (after the maintenance reboot)"
     gpriv > "$EV/08-firstboot-journal.txt" 2>&1 <<<'journalctl -b -u culvert-firstboot --no-pager | tail -20' || true
@@ -1010,6 +1034,7 @@ print("%s category=%s tier=%s matchedBy=%s" % (h, d.get("category") or "", d.get
 # DefaultIOAccounting=yes, so per-unit read volume is recorded.
 LAB_EICAR_PORT="${LAB_EICAR_PORT:-18431}"
 mono() { python3 -c 'import time; print("%.3f" % time.monotonic())'; }
+mono_raw() { python3 -c 'import time; print("%.9f" % time.monotonic())'; }
 # since T — seconds from monotonic T to now (one decimal).
 since() { python3 -c 'import sys,time; print(round(time.monotonic()-float(sys.argv[1]),1))' "$1"; }
 rec_origin_start() {
@@ -1094,6 +1119,7 @@ recovery_once() { local name="$1" i="$2" budget="$3"; local tag="R-$name-$i"
   # Authenticate BEFORE the reboot: the first backup listing after recovery
   # must not wait for a login (ASTRA review of fd65e244, item 3).
   : > "$JAR"; api POST /api/auth/login "{\"user\":\"$ADMIN_USER\",\"pass\":\"$(cat "$SEC/admin-pass")\"}" > /dev/null
+  recovery_backup_baseline "$EV/$tag-backup-baseline.json"
   marks_pid="$(rec_console_marks "$(date +%s.%N)" "$EV/$tag-console-marks.tsv")"
   # The guest prints LABACCEPT after PAM login and sudo, then WAITS for the
   # controller's go-ahead; the controller takes t0 before sending it.
@@ -1163,13 +1189,82 @@ recovery_once() { local name="$1" i="$2" budget="$3"; local tag="R-$name-$i"
 # The FIRST backup listing after the reboot must answer within 5 s, with the
 # baseline backup in it. Never retried: a slow first answer is the finding.
 # It reuses the session established before the reboot (no login here).
-recovery_backup_first_list() { local name="$1" i="$2" t1 c dt
-  t1="$(mono)"
+# The oracle is STRUCTURED (ASTRA review 6001710160): HTTP 200 alone, or the
+# filename appearing anywhere in the body, also matches
+# {"available":false,"reason":"could not read <file>",...}. It requires
+# available=true, count == len(backups), exactly one entry for the baseline
+# archive and that entry equal to the one listed before the reboot
+# (filename, path, size_bytes, encrypted). The 5 s limit is checked against
+# the MEASURED, unrounded elapsed time, not only enforced by curl's timeout.
+backup_listing_verdict() { python3 - "$1" "$2" "$3" <<'PY'
+import json, sys
+body, expected, elapsed = sys.argv[1], sys.argv[2], float(sys.argv[3])
+problems = []
+try:
+    d = json.load(open(body))
+except Exception as e:
+    print("FAIL body is not JSON: %s" % str(e)[:120]); sys.exit(0)
+try:
+    exp = json.load(open(expected))
+except Exception as e:
+    print("FAIL no pre-reboot baseline entry: %s" % str(e)[:120]); sys.exit(0)
+if not isinstance(d, dict):
+    print("FAIL body is not a JSON object"); sys.exit(0)
+if d.get("available") is not True:
+    problems.append("available=%r reason=%r" % (d.get("available"), str(d.get("reason", ""))[:160]))
+b = d.get("backups")
+if not isinstance(b, list):
+    problems.append("backups is %s, not a list" % type(b).__name__)
+    b = []
+if d.get("count") != len(b):
+    problems.append("count=%r but %d entries" % (d.get("count"), len(b)))
+m = [e for e in b if isinstance(e, dict) and e.get("filename") == exp.get("filename")]
+if len(m) != 1:
+    problems.append("%d entries named %r (want exactly 1)" % (len(m), exp.get("filename")))
+else:
+    for k in ("filename", "path", "size_bytes", "encrypted"):
+        if m[0].get(k) != exp.get(k):
+            problems.append("%s=%r, baseline %r" % (k, m[0].get(k), exp.get(k)))
+if elapsed > 5.0:
+    problems.append("measured %.3fs > 5s" % elapsed)
+if problems:
+    print("FAIL " + "; ".join(problems))
+else:
+    print("PASS %s (%d bytes, encrypted=%s) in %.3fs, count=%d" % (exp["filename"], exp["size_bytes"], exp["encrypted"], elapsed, len(b)))
+PY
+}
+# The pre-reboot baseline entry the post-reboot listing must reproduce. A
+# listing that is itself not structurally valid yields no baseline, and the
+# post-reboot check then fails rather than comparing against nothing.
+recovery_backup_baseline() { local out="$1" raw="$1.raw"
+  rm -f "$out"
+  [[ -n "${BACKUP_FILE:-}" ]] || return 0
+  curl -ksS -m 30 "$UI/api/backups" -H "Origin: $UI" -b "$JAR" -o "$raw" 2>/dev/null || return 0
+  python3 - "$raw" "$BACKUP_FILE" "$out" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+b = d.get("backups") if isinstance(d, dict) else None
+if not (isinstance(d, dict) and d.get("available") is True and isinstance(b, list) and d.get("count") == len(b)):
+    sys.exit(0)
+m = [e for e in b if isinstance(e, dict) and e.get("filename") == sys.argv[2]]
+if len(m) == 1 and all(k in m[0] for k in ("filename", "path", "size_bytes", "encrypted")):
+    json.dump({k: m[0][k] for k in ("filename", "path", "size_bytes", "encrypted")}, open(sys.argv[3], "w"))
+PY
+}
+recovery_backup_first_list() { local name="$1" i="$2" t1 t2 c dt v
+  t1="$(mono_raw)"
   c="$(curl -ksS -m 5 "$UI/api/backups" -H "Origin: $UI" -b "$JAR" -o "$EV/R-$name-$i-backups.json" -w '%{http_code}' 2>/dev/null || echo 000)"
-  dt="$(since "$t1")"
-  if [[ "$c" == 200 ]] && { [[ -z "${BACKUP_FILE:-}" ]] || grep -qF "$BACKUP_FILE" "$EV/R-$name-$i-backups.json"; }; then
-    check R "backup-list-$name-$i" pass "first listing http 200 in ${dt}s${BACKUP_FILE:+, $BACKUP_FILE present}"
-  else check R "backup-list-$name-$i" fail "first listing http $c in ${dt}s (limit 5 s, no retry)${BACKUP_FILE:+; $BACKUP_FILE expected}"; fi
+  t2="$(mono_raw)"
+  dt="$(python3 -c 'import sys; print("%.6f" % (float(sys.argv[2])-float(sys.argv[1])))' "$t1" "$t2")"
+  if [[ -z "${BACKUP_FILE:-}" ]]; then
+    check R "backup-list-$name-$i" fail "no baseline backup file recorded, so the listing cannot be verified (http $c in ${dt}s)"; return 0
+  fi
+  if [[ "$c" != 200 ]]; then
+    check R "backup-list-$name-$i" fail "first listing http $c in ${dt}s (limit 5 s, no retry); $BACKUP_FILE expected"; return 0
+  fi
+  v="$(backup_listing_verdict "$EV/R-$name-$i-backups.json" "$EV/R-$name-$i-backup-baseline.json" "$dt")"
+  if [[ "$v" == PASS* ]]; then check R "backup-list-$name-$i" pass "first listing http 200: ${v#PASS }"
+  else check R "backup-list-$name-$i" fail "first listing http 200 in ${dt}s (no retry): ${v#FAIL }"; fi
 }
 recovery_guest() {
   gpriv --timeout 300 > "$EV/$1-guest.txt" 2>&1 <<'EOS' || true
