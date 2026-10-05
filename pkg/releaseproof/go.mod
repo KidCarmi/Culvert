@@ -87,3 +87,7 @@ require (
 	google.golang.org/grpc v1.83.2 // indirect
 	k8s.io/klog/v2 v2.140.0 // indirect
 )
+
+// CVE-2026-37236: rekor-tiles without its grpc-gateway HTTP handler file
+// (third_party/rekor-tiles/CULVERT-PATCH.md).
+replace github.com/sigstore/rekor-tiles/v2 => ../../third_party/rekor-tiles

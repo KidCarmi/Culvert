@@ -14,6 +14,10 @@ CASES = {
     'ristretto': {'upstream': 'cache.go', 'patched': 'z/file_linux.go',
                   'element': b'preallocate(m.Fd, oldSz, maxSz-oldSz)', 'added': 'z/prealloc_linux.go'},
     'badger': {'upstream': 'txn.go', 'patched': 'db.go', 'element': b'db.mt = next', 'added': None},
+    # rekor-tiles is upstream minus one file: "reverting the patch" means the
+    # removed file comes back.
+    'rekor-tiles': {'upstream': 'pkg/verify/verify.go', 'patched': None, 'element': None, 'added': None,
+                    'removed': 'pkg/generated/protobuf/rekor_service.pb.gw.go'},
 }
 
 
@@ -41,7 +45,7 @@ class DependencyForkTest(unittest.TestCase):
             with self.subTest(fork=name):
                 self.assertEqual(v.verify_tree(name, ROOT / 'third_party' / name)['upstream_files_verified'],
                                  v.FORKS[name]['files'])
-                self.assertTrue(v.verify_replace(name, ROOT / 'go.mod'))
+                self.assertTrue(v.verify_replace(name, ROOT))
 
     def test_upstream_file_change_refused(self):
         for name, c in CASES.items():
@@ -55,8 +59,11 @@ class DependencyForkTest(unittest.TestCase):
         for name, c in CASES.items():
             with self.subTest(fork=name):
                 mod = self.fork(name)
-                p = mod / c['patched']
-                p.write_bytes(p.read_bytes().replace(c['element'], b'error(nil)'))
+                if c.get('removed'):
+                    (mod / c['removed']).write_text('package protobuf\n')
+                else:
+                    p = mod / c['patched']
+                    p.write_bytes(p.read_bytes().replace(c['element'], b'error(nil)'))
                 self.refused(name, mod)
 
     def test_extra_file_refused(self):
@@ -80,11 +87,16 @@ class DependencyForkTest(unittest.TestCase):
 
     def test_replace_removed_refused(self):
         for name in CASES:
-            with self.subTest(fork=name):
-                gomod = self.tmp / 'go.mod'
-                gomod.write_text((ROOT / 'go.mod').read_text().replace(f'=> ./third_party/{name}\n', '=> ./elsewhere\n'))
-                with self.assertRaises(v.InvalidPatch):
-                    v.verify_replace(name, gomod)
+            for rel, target in v.FORKS[name].get('replaced_in', {'go.mod': f'./third_party/{name}'}).items():
+                with self.subTest(fork=name, gomod=rel):
+                    root = self.tmp / f'root-{name}-{rel.replace("/", "_")}'
+                    for other in ('go.mod', 'cmd/culvert-maint/go.mod', 'pkg/releaseproof/go.mod'):
+                        (root / other).parent.mkdir(parents=True, exist_ok=True)
+                        shutil.copy(ROOT / other, root / other)
+                    gomod = root / rel
+                    gomod.write_text(gomod.read_text().replace(f'=> {target}\n', '=> ./elsewhere\n'))
+                    with self.assertRaises(v.InvalidPatch):
+                        v.verify_replace(name, root)
 
 
 if __name__ == '__main__':

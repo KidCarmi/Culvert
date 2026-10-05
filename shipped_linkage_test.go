@@ -14,9 +14,9 @@ package main
 // silently making the disposition false.
 
 import (
-	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -58,58 +58,39 @@ func TestShippedBinariesDoNotLinkOpenPGP(t *testing.T) {
 
 // CVE-2026-37236 (SNYK-GOLANG-GITHUBCOMGRPCECOSYSTEMGRPCGATEWAYV2RUNTIME-19432132,
 // no fixed release): grpc-gateway's runtime.(*ServeMux).ServeHTTP honours
-// X-HTTP-Method-Override on form POSTs. Unlike openpgp, grpc-gateway/v2/runtime
-// IS compiled in (sigstore-go -> rekor-tiles' generated protobuf package, whose
-// .pb.gw.go server registration file imports it), so a package-level gate
-// cannot close it. What the LINKER keeps can: neither shipped binary serves a
-// gateway mux, so dead-code elimination drops ServeMux entirely and keeps only
-// the package init, the route-pattern constructor its importer's init calls
-// with compile-time constants, and scalar converters. This test builds each
-// binary that links the package (without -s, so the symbol table survives;
-// stripping happens after dead-code elimination and does not change it) and
-// fails if any OTHER runtime function is linked — a new caller would put the
-// vulnerable mux, its marshalers or its error handlers back in a binary.
-var gatewayRuntimeAllowed = map[string]bool{
-	"init": true, "NewPattern": true,
-	"Bool": true, "Bytes": true, "String": true,
-	"Float32": true, "Float64": true, "Int32": true, "Int64": true, "Uint32": true, "Uint64": true,
-}
-
-func TestShippedBinariesDoNotLinkGatewayServeMux(t *testing.T) {
+// X-HTTP-Method-Override on form POSTs. The package used to be COMPILED IN
+// (sigstore-go -> rekor-tiles' generated protobuf package, whose server-side
+// rekor_service.pb.gw.go imports it) even though nothing served a gateway mux.
+// third_party/rekor-tiles is upstream v2.3.0 minus that one file
+// (CULVERT-PATCH.md), so the vulnerable package is in no build graph. This
+// test pins that for every module this repository ships or verifies with,
+// and that the importer itself is still linked from the fork (not vacuous).
+func TestNoModuleBuildsGrpcGatewayRuntime(t *testing.T) {
 	if testing.Short() {
-		t.Skip("builds the shipped binaries")
+		t.Skip("go list over the modules is not a -short check")
 	}
-	const pkg = "github.com/grpc-ecosystem/grpc-gateway/v2/runtime."
-	for _, b := range []struct{ dir, target string }{{".", "."}, {"cmd/culvert-maint", "."}} {
-		out := filepath.Join(t.TempDir(), "bin")
-		build := exec.CommandContext(t.Context(), "go", "build", "-trimpath", "-o", out, b.target) // #nosec G204 -- fixed tool, test-owned temp path
-		build.Dir = b.dir
-		build.Env = append(os.Environ(), "CGO_ENABLED=0")
-		if msg, err := build.CombinedOutput(); err != nil {
-			t.Fatalf("build %s: %v\n%s", b.dir, err, msg)
+	const (
+		forbidden = "github.com/grpc-ecosystem/grpc-gateway/v2/runtime"
+		importer  = "github.com/sigstore/rekor-tiles/v2/pkg/generated/protobuf"
+	)
+	for _, mod := range []string{".", "cmd/culvert-maint", "pkg/releaseproof"} {
+		pkgs := shippedGraph(t, mod)
+		if !slices.Contains(pkgs, importer) {
+			t.Errorf("module %s: %s is not linked — the check would pass against anything", mod, importer)
 		}
-		nm, err := exec.CommandContext(t.Context(), "go", "tool", "nm", out).Output() // #nosec G204 -- fixed tool, test-owned temp path
+		for _, p := range pkgs {
+			if p == forbidden || strings.HasPrefix(p, forbidden+"/") {
+				t.Errorf("module %s builds %s (CVE-2026-37236, no fixed release); is it still replaced by third_party/rekor-tiles?", mod, p)
+			}
+		}
+		cmd := exec.CommandContext(t.Context(), "go", "list", "-m", "-f", "{{.Dir}}", "github.com/sigstore/rekor-tiles/v2")
+		cmd.Dir = mod
+		out, err := cmd.Output()
 		if err != nil {
-			t.Fatalf("nm %s: %v", b.dir, err)
+			t.Fatalf("go list -m in %s: %v", mod, err)
 		}
-		sawInit := false
-		for _, line := range strings.Split(string(nm), "\n") {
-			f := strings.Fields(line)
-			if len(f) < 3 || f[1] != "T" || !strings.HasPrefix(f[2], pkg) {
-				continue
-			}
-			name := strings.TrimPrefix(f[2], pkg)
-			base, _, _ := strings.Cut(name, ".") // init.func1 -> init
-			if base == "init" {
-				sawInit = true
-			}
-			if !gatewayRuntimeAllowed[base] {
-				t.Errorf("%s links grpc-gateway runtime.%s — gateway serving code is reachable (CVE-2026-37236 has no fix)", b.dir, name)
-			}
-		}
-		// Not vacuous: the package IS in the binary and nm reported it.
-		if !sawInit {
-			t.Errorf("%s: no grpc-gateway runtime symbols at all — the check would pass against anything (did the dependency go away? then update the disposition)", b.dir)
+		if !strings.HasSuffix(filepath.ToSlash(strings.TrimSpace(string(out))), "third_party/rekor-tiles") {
+			t.Errorf("module %s resolves rekor-tiles to %s, not the fork", mod, strings.TrimSpace(string(out)))
 		}
 	}
 }

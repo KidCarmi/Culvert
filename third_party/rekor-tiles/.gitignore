@@ -1,0 +1,7 @@
+rekorImagerefs
+/rekor-server
+.idea
+tools/bin/
+.vscode/
+# Added by goreleaser init:
+dist/

@@ -53,6 +53,28 @@ FORKS = {
             'logger.go': [b'CULVERT PATCH (scanner)', b'opt.Logger.Errorf("%s", logLine(format, v...))'],
         },
     },
+    'rekor-tiles': {
+        'module': 'github.com/sigstore/rekor-tiles/v2',
+        'version': 'v2.3.0',
+        'commit': 'fa390b1c17f9685f7a164da2c06e82dc295cfdca',
+        'module_sum': 'h1:HhMgH61UP0t899V8Fjt7pz1YdgOBptbaQdnCF+79cdc=',
+        'module_go_mod_sum': 'h1:DEFiKSyQ4nF75QRVNdOPaIH3cmvMkO2B6xDZjNYngPc=',
+        'zip_sha256': '5b8f617e17ceb7684643daf95facbb020cfd302d4178e0a0d9d9a8239e59bd48',
+        'tree_sha256': '6e7e5b7a7e300dbafcb7a936b0e964a030d09dc97849c5256c56380e4e544b11',
+        'files': 144,
+        'modified': set(),
+        'added': set(),
+        # The gateway handler file (CVE-2026-37236), plus four TEST-ONLY files
+        # that embed private test keys (not vendored: no key material here).
+        'removed': {'pkg/generated/protobuf/rekor_service.pb.gw.go', 'pkg/client/read/read_test.go',
+                    'pkg/note/note_test.go', 'tests/testdata/pki/ed25519-priv-key.pem',
+                    'internal/signerverifier/file_test.go'},
+        'markers': {},
+        # Every module that links rekor-tiles builds against the fork.
+        'replaced_in': {'go.mod': './third_party/rekor-tiles',
+                        'cmd/culvert-maint/go.mod': '../../third_party/rekor-tiles',
+                        'pkg/releaseproof/go.mod': '../../third_party/rekor-tiles'},
+    },
 }
 
 
@@ -81,17 +103,23 @@ def verify_tree(name, module, upstream_zip=None):
     check(sha(json.dumps(upstream, sort_keys=True, separators=(',', ':')).encode()) == cfg['tree_sha256'],
           f'{name}: pinned upstream inventory changed')
     patch = prov['patch']
-    check(set(patch['modified']) == cfg['modified'] and set(patch['added']) == cfg['added'],
-          f'{name}: patch scope changed')
+    removed = cfg.get('removed', set())
+    check(set(patch['modified']) == cfg['modified'] and set(patch['added']) == cfg['added']
+          and set(patch.get('removed', {})) == removed, f'{name}: patch scope changed')
     actual = set()
     for path in module.rglob('*'):
         check(not path.is_symlink(), f'{name}: local dependency symlink refused')
         if path.is_file():
             actual.add(path.relative_to(module).as_posix())
-    check(actual - LOCAL_FILES == set(upstream) | cfg['added'], f'{name}: local dependency inventory changed')
+    local = LOCAL_FILES - set(upstream)  # an upstream .gitattributes is upstream content
+    check(actual - local == (set(upstream) - removed) | cfg['added'], f'{name}: local dependency inventory changed')
     for rel, digest in upstream.items():
         safe = PurePosixPath(rel)
         check(not safe.is_absolute() and '..' not in safe.parts, f'{name}: upstream path refused')
+        if rel in removed:
+            check(patch['removed'][rel] == digest, f'{name}/{rel}: recorded upstream hash changed')
+            check(not (module / rel).exists(), f'{name}/{rel}: a removed file is present')
+            continue
         data = (module / rel).read_bytes()
         if rel in cfg['modified']:
             rec = patch['modified'][rel]
@@ -116,10 +144,11 @@ def verify_tree(name, module, upstream_zip=None):
     return {'upstream_files_verified': len(upstream), 'modified': sorted(cfg['modified']), 'added': sorted(cfg['added'])}
 
 
-def verify_replace(name, gomod):
-    text = gomod.read_text(encoding='utf-8')
-    check(f'replace {FORKS[name]["module"]} => ./third_party/{name}\n' in text,
-          f'root go.mod no longer builds against the {name} fork')
+def verify_replace(name, root):
+    for rel, target in FORKS[name].get('replaced_in', {'go.mod': f'./third_party/{name}'}).items():
+        text = (root / rel).read_text(encoding='utf-8')
+        check(f'replace {FORKS[name]["module"]} => {target}\n' in text,
+              f'{rel} no longer builds against the {name} fork')
     return True
 
 
@@ -136,7 +165,7 @@ def main(argv=None):
         check(set(zips) <= set(FORKS), 'unknown fork in --upstream-zip')
         for name in sorted(FORKS):
             out[name] = verify_tree(name, a.root / 'third_party' / name, Path(zips[name]) if name in zips else None)
-            verify_replace(name, a.root / 'go.mod')
+            verify_replace(name, a.root)
     except (InvalidPatch, OSError, KeyError, ValueError) as exc:
         print(f'dependency fork verification FAILED: {exc}', file=sys.stderr)
         return 1

@@ -172,3 +172,7 @@ require (
 	k8s.io/utils v0.0.0-20260108192941-914a6e750570 // indirect
 	sigs.k8s.io/yaml v1.6.0 // indirect
 )
+
+// CVE-2026-37236: rekor-tiles without its grpc-gateway HTTP handler file
+// (third_party/rekor-tiles/CULVERT-PATCH.md).
+replace github.com/sigstore/rekor-tiles/v2 => ./third_party/rekor-tiles

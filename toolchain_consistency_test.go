@@ -487,6 +487,12 @@ func TestToolchain_WallSeesEveryCompilerPath(t *testing.T) {
 		if d.IsDir() && (d.Name() == ".git" || d.Name() == "node_modules") {
 			return filepath.SkipDir
 		}
+		// Vendored upstream module trees (third_party/*, byte-pinned by
+		// verify_dependency_forks.py / verify_saml_patch.py) keep their own
+		// build files; none of them is a compiler path of this repository.
+		if d.IsDir() && filepath.ToSlash(p) == "third_party" {
+			return filepath.SkipDir
+		}
 		if !d.IsDir() && strings.HasPrefix(d.Name(), "Dockerfile") {
 			all = append(all, p)
 		}

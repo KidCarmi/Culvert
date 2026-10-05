@@ -63,6 +63,13 @@
   regexTarget = "secret"
   regexes = ['''^(?:91183b50e72557ab5c6b0cc3b3e5f40eaf4720342afec52eb70d763505f4d759|ee6f82c8922af1f10ea36930895765e2834df9a246335f892cc7f5dcd8f9a5be)$''']
 
+[[rules.allowlists]]
+  description = "Exact reviewed SHA-256 inventory values in the rekor-tiles fork provenance (CVE-2026-37236)"
+  condition = "AND"
+  paths = ['''^third_party/rekor-tiles/CULVERT-PROVENANCE\.json$''']
+  regexTarget = "secret"
+  regexes = ['''^(?:0895fa698de09dea193cae18d4679a0eb9fd90f5c71345c73b68e82e16ddf8da|9ab27c01029e4828de4d26faf1ee30ef8cf131d354b53e3be882a63d355d48be)$''']
+
 # Existing public test vectors, public fingerprints, documentation placeholders,
 # and literal source expressions. Both exact file AND exact value must match.
 

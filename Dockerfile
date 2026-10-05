@@ -34,6 +34,7 @@ COPY go.mod go.sum ./
 COPY third_party/crewjam-saml/ ./third_party/crewjam-saml/
 COPY third_party/ristretto/ ./third_party/ristretto/
 COPY third_party/badger/ ./third_party/badger/
+COPY third_party/rekor-tiles/ ./third_party/rekor-tiles/
 COPY pkg/releaseproof/ ./pkg/releaseproof/
 RUN want="$(sed -n 's/^toolchain //p' go.mod)" && have="$(go env GOVERSION)" && \
     echo "compiler: ${have} (go.mod toolchain: ${want})" && \
@@ -100,6 +101,8 @@ ENV GOTOOLCHAIN=local
 WORKDIR /src
 COPY cmd/culvert-maint/go.mod cmd/culvert-maint/go.sum ./
 COPY pkg/releaseproof/ /pkg/releaseproof/
+# The agent module replaces rekor-tiles with ../../third_party/rekor-tiles (CVE-2026-37236).
+COPY third_party/rekor-tiles/ /third_party/rekor-tiles/
 COPY go.mod /tmp/culvert-root.go.mod
 RUN want="$(sed -n 's/^toolchain //p' /tmp/culvert-root.go.mod)" && have="$(go env GOVERSION)" && \
     echo "compiler: ${have} (go.mod toolchain: ${want})" && \

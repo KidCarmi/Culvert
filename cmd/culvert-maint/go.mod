@@ -82,3 +82,7 @@ require (
 )
 
 replace github.com/KidCarmi/Culvert/releaseproof => ../../pkg/releaseproof
+
+// CVE-2026-37236: rekor-tiles without its grpc-gateway HTTP handler file
+// (third_party/rekor-tiles/CULVERT-PATCH.md).
+replace github.com/sigstore/rekor-tiles/v2 => ../../third_party/rekor-tiles
