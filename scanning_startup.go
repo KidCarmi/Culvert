@@ -15,6 +15,9 @@ import "context"
 // ClamAV/YARA off, threat feeds still local); otherwise local scanning
 // initialises when enabled or any backend is configured.
 func loadScanning(cfg scanningStartupConfig, ctx context.Context) *ScanService {
+	// The av_unavailable boot posture applies to whichever back end runs
+	// (local ClamAV or the sidecar), so it is installed before the mode split.
+	applyAVUnavailableBootPosture(cfg.AVUnavailableEnv)
 	switch {
 	case cfg.RemoteScanURL != "":
 		globalRemoteScanner.Init(cfg.RemoteScanURL)

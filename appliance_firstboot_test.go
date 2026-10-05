@@ -190,7 +190,7 @@ func (h *fbHarness) installSHStub(persistToken bool) {
 	h.t.Helper()
 	body := `#!/usr/bin/env bash
 set -euo pipefail
-printf 'install.sh %s\n' "DEFAULT_ACTION=$CULVERT_INSTALL_DEFAULT_ACTION ASSUME_DOCKER=$CULVERT_INSTALL_ASSUME_DOCKER SEED=$CULVERT_PROXY_SEED_REF TOKEN=$CULVERT_INSTALL_SETUP_TOKEN" >> "$FB_HARNESS/calls.log"
+printf 'install.sh %s\n' "DEFAULT_ACTION=$CULVERT_INSTALL_DEFAULT_ACTION AV_UNAVAILABLE=$CULVERT_INSTALL_AV_UNAVAILABLE ASSUME_DOCKER=$CULVERT_INSTALL_ASSUME_DOCKER SEED=$CULVERT_PROXY_SEED_REF TOKEN=$CULVERT_INSTALL_SETUP_TOKEN" >> "$FB_HARNESS/calls.log"
 mkdir -p "$CULVERT_DIR"
 touch "$CULVERT_DIR/docker-compose.yml"
 touch "$CULVERT_DIR/.env"
@@ -459,8 +459,8 @@ func TestFirstBoot_StepInstall_MintsAndPersistsSetupToken(t *testing.T) {
 		t.Fatalf(".env must carry a 32-hex setup token:\n%s", envb)
 	}
 	calls, _ := os.ReadFile(h.calls)
-	if !strings.Contains(string(calls), "TOKEN="+m[1]) || !strings.Contains(string(calls), "DEFAULT_ACTION=deny") || !strings.Contains(string(calls), "ASSUME_DOCKER=1") {
-		t.Fatalf("install.sh must receive the token, default-deny and assume-docker:\n%s", calls)
+	if !strings.Contains(string(calls), "TOKEN="+m[1]) || !strings.Contains(string(calls), "DEFAULT_ACTION=deny") || !strings.Contains(string(calls), "AV_UNAVAILABLE=closed") || !strings.Contains(string(calls), "ASSUME_DOCKER=1") {
+		t.Fatalf("install.sh must receive the token, default-deny, av_unavailable=closed and assume-docker:\n%s", calls)
 	}
 	st, _ := os.Stat(filepath.Join(h.stack, ".env"))
 	if st.Mode().Perm() != 0o600 {

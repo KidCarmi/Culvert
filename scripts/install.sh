@@ -1897,6 +1897,16 @@ case "${CULVERT_INSTALL_DEFAULT_ACTION:-}" in
   "") ;;
   *) warn "Ignoring CULVERT_INSTALL_DEFAULT_ACTION='${CULVERT_INSTALL_DEFAULT_ACTION}' (want allow or deny)" ;;
 esac
+# Scanner AV-unavailable posture (CULVERT_AV_UNAVAILABLE, read once by the
+# proxy; a saved admin choice still wins). The appliance first boot passes
+# CULVERT_INSTALL_AV_UNAVAILABLE=closed so content the AV engine cannot scan
+# (ClamAV stopped/crashed/unreachable) is REFUSED rather than forwarded
+# unscanned; a quick-start host keeps the historical fail-open unless asked.
+case "${CULVERT_INSTALL_AV_UNAVAILABLE:-}" in
+  open|closed) env_put CULVERT_AV_UNAVAILABLE "$CULVERT_INSTALL_AV_UNAVAILABLE" "$INSTALL_DIR/.env" ;;
+  "") ;;
+  *) warn "Ignoring CULVERT_INSTALL_AV_UNAVAILABLE='${CULVERT_INSTALL_AV_UNAVAILABLE}' (want open or closed)" ;;
+esac
 # Per-instance first-admin setup token (CULVERT_SETUP_TOKEN, read once by the
 # proxy): the appliance first boot mints one per instance so the one-time
 # setup window on the published admin port is not open to whoever reaches it

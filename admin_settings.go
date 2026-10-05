@@ -216,6 +216,15 @@ type AdminSettings struct {
 	YARAOnSaturation  string `json:"yara_on_saturation,omitempty"`
 	YARAAlertDegraded bool   `json:"yara_alert_degraded"`
 
+	// Scanner av_unavailable posture (open|closed): what a body scan does when
+	// the AV engine is faulted. AVUnavailableSaved is a sentinel, but unlike
+	// YARASettingsSaved it is written ONLY by an explicit admin save (the
+	// av-settings PUT, then carried forward), so an unrelated save never
+	// freezes the CULVERT_AV_UNAVAILABLE boot posture into the file. Absent ⇒
+	// the boot posture stands (env, else open — byte-identical).
+	AVUnavailableSaved bool   `json:"av_unavailable_saved,omitempty"`
+	AVUnavailable      string `json:"av_unavailable,omitempty"`
+
 	// Adaptive decryption-exclusion tunables (F10). AutoExcludeTunablesSaved is a
 	// sentinel (like YARASettingsSaved): when false the values below are not applied
 	// on load, so a zero-value field can't override the engine defaults on settings
@@ -309,6 +318,7 @@ func snapshotOverriddenSurfaces(s AdminSettings) {
 	add(s.BlocklistFeedsSaved, "blocklist feeds")
 	add(s.UpstreamProxiesSaved, "upstream proxy pool")
 	add(s.YARASettingsSaved, "YARA engine settings")
+	add(s.AVUnavailableSaved, "AV-unavailable scan posture")
 	add(s.AutoExcludeTunablesSaved, "decryption auto-exclusion tunables")
 	add(s.SupportRetentionSaved, "support-bundle retention")
 	adminSettingsOverriddenSurfaces.Store(&out)
@@ -406,6 +416,7 @@ func LoadAdminSettings(path string) {
 	applyLegacyLDAPRetirement(&s)
 	applyAdminNetwork(&s)
 	applyAdminYARA(&s)
+	applyAdminAVUnavailable(&s) // explicit admin choice wins over CULVERT_AV_UNAVAILABLE
 	applyAdminAutoExcludeTunables(&s)
 	applyAdminSupportRetention(&s)             // Slice B: configurable support-bundle retention caps
 	applyAdminPolicyLearning(&s)               // ADR-0025 M5A: record governed desired state (materialized by loadPolicyLearning)
@@ -866,6 +877,9 @@ type adminSaveOverrides struct {
 	// failure leaves the running posture untouched (never a 200 over a
 	// change that silently reverts on restart).
 	yaraSettings *yaraSettingsTarget
+	// avUnavailable carries the TARGET av_unavailable posture for the
+	// persist-before-apply av-settings PUT (same contract as yaraSettings).
+	avUnavailable *string
 	// decRedaction carries the TARGET destination-privacy state (posture + key
 	// + non-secret generation id) for the persist-before-apply redaction PUT
 	// (2E-B §A/§B/§C): the durable file records the target while the live
@@ -1098,6 +1112,7 @@ func saveAdminSettingsWithOverrides(ov adminSaveOverrides) error {
 		s.YARAAlertDegraded = yaraGetAlertDegraded()
 	}
 
+	snapshotAVUnavailable(&s, ov.avUnavailable)
 	snapshotAutoExcludeTunables(&s, ov.autoExclude)
 	snapshotSupportRetention(&s, ov.supportRetention) // Slice B: configurable retention caps
 	snapshotPolicyLearning(&s, ov.policyLearning)     // ADR-0025 M5A: governed enablement + recommendable guardrail

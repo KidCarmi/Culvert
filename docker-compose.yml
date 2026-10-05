@@ -139,6 +139,12 @@ services:
       # auto-detect (no rules ⇒ allow/passthrough). A saved admin choice in
       # admin_settings.json still wins at load.
       - CULVERT_DEFAULT_ACTION=${CULVERT_DEFAULT_ACTION:-}
+      # Scanner posture when the AV engine (ClamAV) cannot scan a response
+      # because it is stopped/crashed/unreachable: "closed" REFUSES the content
+      # (the appliance first-boot sets this), "open"/unset forwards it
+      # unscanned, counted and alerted (historical). A saved admin choice in
+      # admin_settings.json still wins at load.
+      - CULVERT_AV_UNAVAILABLE=${CULVERT_AV_UNAVAILABLE:-}
       # Per-instance first-admin setup token: POST /api/setup/complete refuses
       # without it while set (the appliance first-boot mints one and shows it
       # on the console); unset keeps the open bootstrap window of a plain

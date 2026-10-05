@@ -276,6 +276,8 @@ mint_setup_token() {
 #                             auto-generated into /srv/culvert/.env (never overwritten)
 #   CULVERT_INSTALL_DEFAULT_ACTION=deny → the appliance contract is default-DENY
 #                             at first boot (readiness row policy_posture)
+#   CULVERT_INSTALL_AV_UNAVAILABLE=closed → content the AV engine cannot scan
+#                             (ClamAV down) is REFUSED, not forwarded unscanned
 #   CULVERT_INSTALL_SETUP_TOKEN → per-instance first-admin setup token
 #                             (persisted once; env_put never overwrites)
 #   maintenance agent       → the loaded image keeps its registry digest (containerd
@@ -292,6 +294,7 @@ run_install_sh() {
     export CULVERT_INSTALL_ASSUME_DOCKER=1
     export CULVERT_INSTALL_CHANNEL="${CULVERT_INSTALL_CHANNEL:-stable}"
     export CULVERT_INSTALL_DEFAULT_ACTION=deny
+    export CULVERT_INSTALL_AV_UNAVAILABLE=closed
     export CULVERT_INSTALL_SETUP_TOKEN="$token"
     # CANDIDATE builds only (build-ova.sh --candidate-image-tar): the image is
     # an unsigned CI artifact, so install.sh's cosign gate cannot admit the

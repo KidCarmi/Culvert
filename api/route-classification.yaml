@@ -2284,6 +2284,26 @@ routes:
     audit_expected: true
     danger_level: medium
     documented: true
+  - route: "/api/security-scan/av-settings"
+    method: "GET"
+    handler: "apiSecAVSettings"
+    domain: "security"
+    visibility: admin-supported
+    min_role: "viewer"
+    mutating: false
+    audit_expected: false
+    danger_level: none
+    documented: true
+  - route: "/api/security-scan/av-settings"
+    method: "PUT"
+    handler: "apiSecAVSettings"
+    domain: "security"
+    visibility: admin-supported
+    min_role: "admin"
+    mutating: true
+    audit_expected: true
+    danger_level: medium
+    documented: true
   - route: "/api/security-scan/cache"
     method: "GET"
     handler: "apiScanCache"

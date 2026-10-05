@@ -107,10 +107,13 @@ docker logs "$N-clamd" > "$EVID/clamd.log" 2>&1 || true
 grep -q "Culvert.Qual.PCRE-1" "$EVID/clamd.log" "$EVID/proxy-scan-blocks.log" \
   && check pcre-signature-named pass "Culvert.Qual.PCRE-1 named in clamd/proxy logs" \
   || check pcre-signature-named fail "custom PCRE signature not named in any log"
-# Posture when clamd is DOWN, measured rather than asserted: the scan path is
-# fail-OPEN by design (internal/secscan clamScanError — "forwarding UNSCANNED";
-# owner decision WK-1b). The check pins that the documentation matches the
-# shipped behaviour; it is not a statement that fail-open is desirable.
+# Posture when clamd is DOWN, measured rather than asserted. This container is
+# started WITHOUT CULVERT_AV_UNAVAILABLE, so it measures the DEFAULT `open`
+# posture: fail-OPEN (internal/secscan clamScanError — "forwarding UNSCANNED";
+# owner decision WK-1b). The installed appliance ships av_unavailable=closed
+# (refuse); that posture is gated in-tree by av_unavailable_integration_test.go.
+# The check pins that the documentation matches the shipped default; it is not
+# a statement that fail-open is desirable.
 # A body NEVER scanned before is required: Culvert caches verdicts by SHA-256
 # (internal/hashcache), so re-fetching eicar.txt would be answered from the
 # cache and measure nothing about the scanner. EICAR permits trailing

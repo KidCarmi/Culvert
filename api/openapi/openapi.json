@@ -100,6 +100,38 @@
       }
     },
     "schemas": {
+      "AVSettings": {
+        "additionalProperties": false,
+        "description": "Scanner av_unavailable posture: what a body scan does when the AV engine (local ClamAV or the remote scan sidecar) is faulted — stopped, crashed, restarting, unreachable, or answering without a verdict. Node-local — outside export/import, config-version rollback, and CP→DP sync. Budget/capacity refusals are fail-closed in both postures and are not governed by this setting.",
+        "properties": {
+          "av_unavailable": {
+            "description": "open = forward the content UNSCANNED for that request (counted + alerted; the default). closed = refuse the content (HTTP 403, Source av_unavailable); never cached, so the next request rescans.",
+            "enum": [
+              "open",
+              "closed"
+            ],
+            "type": "string"
+          },
+          "revision": {
+            "description": "Server-owned content-derived revision of the returned posture. Echo back as `ifRevision` on the write for stale-overwrite protection; a mismatch is the structured 409 ({error, currentRevision, yourRevision}).",
+            "type": "string"
+          },
+          "source": {
+            "description": "admin = an explicit admin save owns the posture (admin_settings.json); boot = the CULVERT_AV_UNAVAILABLE boot default (or open when unset) is in force.",
+            "enum": [
+              "admin",
+              "boot"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "av_unavailable",
+          "source",
+          "revision"
+        ],
+        "type": "object"
+      },
       "AddBlocklistEntry": {
         "additionalProperties": false,
         "description": "Provide a single host or a list.",
@@ -4472,6 +4504,26 @@
         },
         "required": [
           "hours"
+        ],
+        "type": "object"
+      },
+      "SetAVSettings": {
+        "additionalProperties": false,
+        "properties": {
+          "av_unavailable": {
+            "enum": [
+              "open",
+              "closed"
+            ],
+            "type": "string"
+          },
+          "ifRevision": {
+            "description": "Optional stale-writer fence (2E-A): the `revision` from the matching GET. When present, a mismatch refuses the write with the structured 409 and no mutation; when absent, last-writer-wins applies.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "av_unavailable"
         ],
         "type": "object"
       },
@@ -21518,6 +21570,110 @@
         "x-culvert-danger-level": "medium",
         "x-culvert-idempotency": "idempotent",
         "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "admin",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/security-scan/av-settings": {
+      "get": {
+        "description": "Returns the scanner's av_unavailable posture (open|closed), whether an admin save or the boot default owns it, and a revision fingerprinting exactly the returned value.",
+        "operationId": "getAVSettings",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AVSettings"
+                }
+              }
+            },
+            "description": "The live posture."
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "AV-unavailable scan posture",
+        "tags": [
+          "security"
+        ],
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "2.1.0",
+        "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      },
+      "put": {
+        "description": "Sets the av_unavailable posture. closed refuses content that cannot be scanned while the AV engine is unavailable; open forwards it unscanned (counted + alerted). Persist-before-apply: a 200 means the posture is durable AND live.",
+        "operationId": "setAVSettings",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetAVSettings"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AVSettings"
+                }
+              }
+            },
+            "description": "Updated (durable AND live; carries the new revision)."
+          },
+          "400": {
+            "$ref": "#/components/responses/PlainBadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          },
+          "409": {
+            "description": "Stale-writer fence conflict ({error, currentRevision, yourRevision}) — the posture changed since the asserted revision; nothing mutated."
+          },
+          "500": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The posture could not be persisted; the live posture is UNCHANGED (persist-before-apply). Body is plain text."
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Set AV-unavailable scan posture",
+        "tags": [
+          "security"
+        ],
+        "x-culvert-audit-event": "security.av_unavailable",
+        "x-culvert-danger-level": "medium",
+        "x-culvert-idempotency": "idempotent",
+        "x-culvert-introduced-version": "2.1.0",
         "x-culvert-permission": "admin",
         "x-culvert-stability": "stable",
         "x-culvert-tenant-scope": "appliance",

@@ -14,7 +14,7 @@ blocked, unsupported — with SHAs and digests). Then:
 | `recovery-restore-runbook.md` | Image rollback vs persistent-state restore vs disaster recovery; interrupted operations; failure matrix |
 | `state-and-key-custody-matrix.md` | Every persisted file: preserved on upgrade, in backup, restored, separate custody |
 | `os-maintenance.md` | Guest OS / Docker / container-base patching, cadence, ownership, reboot procedure |
-| `scanning-outage-posture.md` | What happens when the ClamAV sidecar is down (measured: fail-open mid-run, no start at boot, upgrades refused), how it is surfaced, the recommended pilot policy |
+| `scanning-outage-posture.md` | What happens when the ClamAV sidecar is down (appliance posture `av_unavailable=closed`: unscannable content refused mid-run; no start at boot; upgrades refused), how it is surfaced, the recommended pilot policy |
 | `vsphere-qualification.md` | One copy-paste ESXi/vSphere procedure for the candidate OVA: import, first boot, enforcement, agent, OS update + reboot (kernel before/after), persistence |
 | `ova-build.md` | Reproducible OVA build record (pinned inputs, tool versions, digests) |
 | `sbom-cve-evidence.md` | SBOMs and CVE scans with tool/database timestamps and coverage limits |

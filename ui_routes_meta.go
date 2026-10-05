@@ -537,6 +537,11 @@ var uiRoutes = []uiRouteMetadata{
 			{Method: "GET", MinRole: RoleViewer},
 			{Method: "PUT", MinRole: RoleAdmin, Mutating: true, AuditExpected: true},
 		}},
+	{Path: "/api/security-scan/av-settings", Handler: "apiSecAVSettings", Domain: "security", Public: false,
+		Methods: []uiRouteMethod{
+			{Method: "GET", MinRole: RoleViewer},
+			{Method: "PUT", MinRole: RoleAdmin, Mutating: true, AuditExpected: true},
+		}},
 	{Path: "/api/security-scan/exclusions", Handler: "apiSecScanExclusions", Domain: "security", Public: false,
 		Methods: []uiRouteMethod{
 			{Method: "GET", MinRole: RoleViewer},

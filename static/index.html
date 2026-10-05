@@ -1612,6 +1612,10 @@ table.mcpx-cat-tbl td{padding:6px 10px;border-bottom:1px solid var(--border)}
               <div id="sec-remote-inflight" style="font-weight:600;font-size:.85rem">0</div>
             </div>
             <div style="background:var(--surface2);border-radius:8px;padding:10px">
+              <div style="font-size:.7rem;color:var(--muted);margin-bottom:2px" title="Bodies REFUSED because the AV engine (ClamAV or the scan sidecar) was unavailable while the AV-unavailable posture is closed. Non-zero means users are being denied content until the AV engine recovers.">Refused: AV unavailable</div>
+              <div id="sec-av-unavailable-refused" style="font-weight:600;font-size:.85rem">0</div>
+            </div>
+            <div style="background:var(--surface2);border-radius:8px;padding:10px">
               <div style="font-size:.7rem;color:var(--muted);margin-bottom:2px" title="A YARA regex match panicked (an internal crash, not a slow match) and was contained instead of taking down the scan. The verdict was decided by the configured on-timeout posture (block/allow), not by the rule itself. Non-zero points at a bug in a specific rule's regex, not a timeout — raising the timeout will not help.">YARA match panics</div>
               <div id="sec-yara-match-panics" style="font-weight:600;font-size:.85rem">0</div>
             </div>
@@ -1693,6 +1697,28 @@ table.mcpx-cat-tbl td{padding:6px 10px;border-bottom:1px solid var(--border)}
             <div style="display:flex;gap:8px;align-items:center">
               <button class="btn ghost sm" data-click="saveYARASettings">Save YARA Settings</button>
               <div id="yara-settings-status" style="font-size:.78rem;display:none"></div>
+            </div>
+          </div>
+
+          <!-- AV-unavailable posture (av_unavailable) -->
+          <div style="margin-top:20px;border-top:1px solid var(--border);padding-top:16px">
+            <div style="font-weight:600;font-size:.88rem;margin-bottom:4px">When ClamAV Is Unavailable</div>
+            <div style="font-size:.72rem;color:var(--muted);margin-bottom:10px">What happens to a response when the AV engine (ClamAV, or the remote scan sidecar) is stopped, crashed, restarting or unreachable and cannot scan it. <b>closed</b> refuses content that cannot be scanned while ClamAV is unavailable (HTTP 403, never cached — the next request rescans). <b>open</b> forwards it unscanned, counted and alerted. Scans that run out of time are refused in both modes.</div>
+            <div id="av-settings-warn" style="display:none;background:rgba(234,179,8,.1);border-left:3px solid var(--yellow);padding:8px 12px;border-radius:6px;margin-bottom:10px;font-size:.78rem;color:var(--yellow)">
+              Warning: open forwards content UNSCANNED whenever the AV engine is down. Ensure scan_clam_error / scan_svc_down alerting is operational before using this mode.
+            </div>
+            <div style="display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap;margin-bottom:10px">
+              <label style="display:flex;flex-direction:column;gap:4px;font-size:.78rem">AV unavailable
+                <select id="av-setting-unavailable" data-change="avSettingCheckWarn" style="padding:5px 8px;background:var(--surface2);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:.8rem">
+                  <option value="closed">closed (refuse unscanned content)</option>
+                  <option value="open">open (forward unscanned, alert)</option>
+                </select>
+              </label>
+              <div id="av-settings-source" style="font-size:.72rem;color:var(--muted)"></div>
+            </div>
+            <div style="display:flex;gap:8px;align-items:center">
+              <button class="btn ghost sm" data-click="saveAVSettings">Save AV Posture</button>
+              <div id="av-settings-status" style="font-size:.78rem;display:none"></div>
             </div>
           </div>
 
@@ -5612,6 +5638,7 @@ document.addEventListener('click', e => {
     case 'deleteYARARule':    deleteYARARule(); break;
     case 'selectYARARule':    selectYARARule(arg); break;
     case 'saveYARASettings':  saveYARASettings(); break;
+    case 'saveAVSettings':    saveAVSettings(); break;
     case 'saveScanExclusions': saveScanExclusions(); break;
     case 'saveDPIBypass':     saveDPIBypass(); break;
     case 'addTFAllowlistDomain': addTFAllowlistDomain(); break;
@@ -5956,6 +5983,7 @@ document.addEventListener('change', e => {
     case 'backupNowEncryptToggle':   document.getElementById('backup-now-passlabel').style.display = el.checked ? '' : 'none'; break;
     case 'apOutcomeChanged':  apOutcomeChanged(); break;
     case 'yaraSettingCheckWarn': yaraSettingCheckWarn(); break;
+    case 'avSettingCheckWarn': avSettingCheckWarn(); break;
     case 'toggleDecRedaction': toggleDecRedaction(); break;
     default: console.warn('CSP delegation: unknown change action:', el.dataset.change);
   }
@@ -9550,6 +9578,7 @@ async function loadSecurity() {
   loadTFAllowlist();
   loadYARARules();
   loadYARASettings();
+  loadAVSettings();
   loadScanExclusions();
   loadDPIBypass();
 }
@@ -9797,6 +9826,7 @@ async function loadSecScanStatus() {
     setMetric('sec-scan-inflight', s.scan_inflight, 4, 16);
     setMetric('sec-yara-match-panics', s.yara_match_panics, 1, 10);
     setMetric('sec-scan-late-discard', s.stat_scan_late_discard, 1, 10);
+    setMetric('sec-av-unavailable-refused', s.stat_av_unavailable_refused, 1, 10);
   } catch(e) { console.error(e); }
 }
 
@@ -9880,6 +9910,52 @@ async function saveYARASettings() {
   } catch(e) {
     statusEl.style.color = 'var(--red)';
     statusEl.textContent = 'Error: ' + e.message;
+  }
+}
+
+// ── AV-unavailable posture (av_unavailable) ─────────────────────────────
+let avSettingsRevision = '';
+async function loadAVSettings() {
+  try {
+    const s = await api('/api/security-scan/av-settings');
+    const sel = document.getElementById('av-setting-unavailable');
+    if (sel) sel.value = s.av_unavailable;
+    avSettingsRevision = s.revision || '';
+    const src = document.getElementById('av-settings-source');
+    if (src) src.textContent = s.source === 'admin'
+      ? 'Saved by an admin.'
+      : 'Boot default (CULVERT_AV_UNAVAILABLE, else open) — save to take ownership.';
+    avSettingCheckWarn();
+  } catch(e) { console.error('loadAVSettings:', e); }
+}
+
+function avSettingCheckWarn() {
+  const sel = document.getElementById('av-setting-unavailable');
+  const warn = document.getElementById('av-settings-warn');
+  if (!warn) return;
+  warn.style.display = (sel && sel.value === 'open') ? 'block' : 'none';
+}
+
+async function saveAVSettings() {
+  const statusEl = document.getElementById('av-settings-status');
+  statusEl.style.display = 'block';
+  statusEl.style.color = 'var(--muted)';
+  statusEl.textContent = 'Saving…';
+  try {
+    const body = {
+      av_unavailable: document.getElementById('av-setting-unavailable')?.value,
+      ifRevision: avSettingsRevision,
+    };
+    await api('/api/security-scan/av-settings', { method: 'PUT', body: JSON.stringify(body) });
+    statusEl.style.color = 'var(--green)';
+    statusEl.textContent = 'Saved.';
+    setTimeout(() => { statusEl.style.display = 'none'; }, 2000);
+    loadAVSettings();
+    loadSecScanStatus();
+  } catch(e) {
+    statusEl.style.color = 'var(--red)';
+    statusEl.textContent = 'Error: ' + e.message;
+    loadAVSettings();
   }
 }
 

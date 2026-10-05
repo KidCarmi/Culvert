@@ -131,9 +131,10 @@ In rough order of effectiveness:
    request path entirely.
 
    **Read §6.1 before doing this.** The sidecar shares the scan budget and the
-   fail-closed posture for slowness and capacity (CHAOS-53), but a sidecar that
-   is genuinely unreachable or erroring still **fails open** — a recorded owner
-   decision (register row WK-2b), same shape as a down ClamAV daemon. Note also
+   fail-closed posture for slowness and capacity (CHAOS-53), and a sidecar that
+   is genuinely unreachable or erroring follows the SAME `av_unavailable`
+   posture as a down ClamAV daemon (§6.2): forwarded unscanned under `open`
+   (register row WK-2b), refused under `closed`. Note also
    that the sidecar is an HTTP front end to a ClamAV with the same 4-slot cap,
    so moving scanning off-box relocates the queue rather than removing it; it
    buys capacity when the sidecar host has more CPU than the proxy host, or
@@ -152,13 +153,41 @@ see the follow-up recorded in `roadmap/CHAOS-ENGINEERING-REVIEW.md` §20.4.
 | Condition | Posture | Why |
 |---|---|---|
 | Scan exceeds the budget (slow engine, or queued too long) | **Fail closed** — refuse | Transient, self-clearing in seconds, retryable by the client, and inducible on demand by anyone who wants the gap. |
-| ClamAV daemon down / unreachable | **Fail open** — forward, counted + alerted | An operator-visible infrastructure state with its own alert and status surface; refusing all traffic on it is a fleet-wide outage. Recorded as an owner decision (register row WK-1b). |
+| ClamAV daemon down / unreachable | **`av_unavailable` posture (§6.2)** — `open` (default): forward, counted + alerted (register row WK-1b); `closed` (appliance default): **refuse** (403), counted + alerted | An explicit, operator-visible posture: `open` keeps traffic flowing through a daemon restart at the cost of unscanned content; `closed` makes required AV scanning hold — a daemon outage becomes a download outage until it recovers. |
 | Body larger than the scan window | **Fail open** — forward, counted + alerted (`scan_skipped`) | An explicit, configured limit rather than a failure. |
 | Content matched by ClamAV or YARA | Block | — |
 
-The asymmetry between the first two rows is intentional and is the subject of
-register row WK-1b. If your risk posture requires the daemon-down case to fail
-closed as well, that is a product change, not a configuration one — raise it.
+The first two rows are different conditions: a budget overrun is refused in
+BOTH postures; only a genuine engine FAULT (daemon stopped, crashed,
+restarting, unreachable, or a sidecar that is down or answers without a
+verdict) is governed by `av_unavailable`.
+
+### 6.2 The `av_unavailable` posture
+
+One setting, both back ends (local ClamAV and the remote sidecar — CHAOS-53's
+one budget, one posture):
+
+| Value | A body the AV engine cannot scan because it is faulted | Signal |
+|---|---|---|
+| `open` (default when nothing is configured) | Forwarded **unscanned** for that request; never cached | `culvert_clamav_scan_errors_total` / `culvert_remote_scan_fail_total`, `scan_clam_error` / `scan_svc_down` alerts |
+| `closed` (the appliance default) | **Refused**: HTTP 403 "antivirus scanning is currently unavailable", log `SecurityScan: refused host=… AV is unavailable`, request log `SCAN_BLOCKED` with source `av_unavailable`; never cached, so the next request rescans and the object is judged on its merits the moment the engine recovers | `culvert_scan_av_unavailable_refused_total`, the same fault counters + alerts as `open` |
+
+The active posture is `culvert_scan_av_unavailable_closed` (1 = closed) and
+`av_unavailable` on `GET /api/security-scan/status`.
+
+**Set it** in the admin UI (Security → Security Scanning → *When ClamAV Is
+Unavailable*) or `PUT /api/security-scan/av-settings`
+`{"av_unavailable":"closed"}` (admin; viewers can `GET`). The admin choice is
+durable in `admin_settings.json` and wins over the boot default
+`CULVERT_AV_UNAVAILABLE=open|closed` (read once at startup; an unrecognised
+value is ignored with a warning and the posture stays `open`). The appliance
+first boot writes `CULVERT_AV_UNAVAILABLE=closed`. The setting is node-local:
+not exported, not rolled back with config versions, not pushed CP→DP.
+
+**Readiness while closed.** A request-path ClamAV fault invalidates the cached
+daemon status, so `/ready`'s `clamav` row turns `fail` on its next read rather
+than serving a `connected` cached for up to 30 s. Under `closed` a failing
+`clamav` row means downloads are being refused, not merely unscanned.
 
 ### 6.1 The remote scan sidecar
 
@@ -173,15 +202,17 @@ for "the scan did not finish in time."
 |---|---|---|
 | Sidecar exceeds the scan budget | **Fail closed** — refuse | `culvert_scan_timeout_total` (shared with the local path), `scan_timeout` alert |
 | Sidecar reports capacity (HTTP 429) | **Fail closed** — refuse | `culvert_remote_scan_saturated_total` + the timeout counter above |
-| Sidecar unreachable / 5xx / unintelligible reply | **Fail open** — forward, counted + alerted | `culvert_remote_scan_fail_total`, `scan_svc_down` alert (register row WK-2b) |
-| Sidecar returns 200 without a verdict | **Fail open**, counted as a fault | `culvert_remote_scan_fail_total`, alert detail `no verdict in response` |
+| Sidecar unreachable / 5xx / unintelligible reply | **`av_unavailable` posture (§6.2)** — `open`: forward, counted + alerted (register row WK-2b); `closed`: refuse | `culvert_remote_scan_fail_total` (open) or `culvert_scan_av_unavailable_refused_total` (closed); `scan_svc_down` alert in both |
+| Sidecar returns 200 without a verdict | Same as above, counted as a fault | as above, alert detail `no verdict in response` |
 | Content matched by the sidecar | Block | — |
 
 **Suggested paging rules on a sidecar deployment.** Every `culvert_scan_*`
 series except `culvert_scan_timeout_total` is structurally zero here, so page on:
 
 - `rate(culvert_remote_scan_fail_total[5m]) > 0` — content is being forwarded
-  unscanned. This is the one that matters.
+  unscanned (`open` posture). This is the one that matters.
+- `rate(culvert_scan_av_unavailable_refused_total[5m]) > 0` — content is being
+  refused because the scanner is down (`closed` posture).
 - `culvert_remote_scan_inflight` sustained near your sidecar's concurrency — the
   leading indicator of budget refusals.
 - `rate(culvert_scan_timeout_total[5m])` rising — users will be seeing

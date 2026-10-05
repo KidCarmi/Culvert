@@ -989,6 +989,23 @@ components:
       type: object
       description: YARA engine runtime settings (fields vary by build/config).
       additionalProperties: true
+    AVSettings:
+      type: object
+      description: "Scanner av_unavailable posture: what a body scan does when the AV engine (local ClamAV or the remote scan sidecar) is faulted — stopped, crashed, restarting, unreachable, or answering without a verdict. Node-local — outside export/import, config-version rollback, and CP→DP sync. Budget/capacity refusals are fail-closed in both postures and are not governed by this setting."
+      required: [av_unavailable, source, revision]
+      additionalProperties: false
+      properties:
+        av_unavailable:
+          type: string
+          enum: [open, closed]
+          description: "open = forward the content UNSCANNED for that request (counted + alerted; the default). closed = refuse the content (HTTP 403, Source av_unavailable); never cached, so the next request rescans."
+        source:
+          type: string
+          enum: [admin, boot]
+          description: "admin = an explicit admin save owns the posture (admin_settings.json); boot = the CULVERT_AV_UNAVAILABLE boot default (or open when unset) is in force."
+        revision:
+          type: string
+          description: "Server-owned content-derived revision of the returned posture. Echo back as `ifRevision` on the write for stale-overwrite protection; a mismatch is the structured 409 ({error, currentRevision, yourRevision})."
     DecryptionRedaction:
       type: object
       description: "Global destination-privacy posture (traffic-log destination pseudonymization). Node-local — outside export/import, config-version rollback, and CP→DP sync. Controls what destination information is retained in logs/observability; it does NOT control whether traffic is decrypted."
@@ -1997,6 +2014,17 @@ components:
         ifRevision:
           type: string
           description: "Optional stale-writer fence (2E-A): the `revision` from the matching GET. When present, a mismatch refuses the write with the structured 409 and no mutation; when absent, the legacy last-writer-wins contract applies."
+    SetAVSettings:
+      type: object
+      required: [av_unavailable]
+      additionalProperties: false
+      properties:
+        av_unavailable:
+          type: string
+          enum: [open, closed]
+        ifRevision:
+          type: string
+          description: "Optional stale-writer fence (2E-A): the `revision` from the matching GET. When present, a mismatch refuses the write with the structured 409 and no mutation; when absent, last-writer-wins applies."
     SetLogsRetention:
       type: object
       additionalProperties: false
@@ -6113,6 +6141,63 @@ paths:
         '409': { description: 'Stale-writer fence conflict ({error, currentRevision, yourRevision}) — the surface changed since the asserted revision; nothing mutated. Also returned (plain text) when the allowlist is control-plane managed on this data-plane node (2E-A-2 ownership refusal, before any mutation).' }
         '500':
           description: Applied in memory but failed to persist (fail-safe; audited as threatfeed.allowlist.update_unpersisted). Body is plain text.
+          content:
+            text/plain: { schema: { type: string } }
+
+  /api/security-scan/av-settings:
+    get:
+      operationId: getAVSettings
+      tags: [security]
+      summary: AV-unavailable scan posture
+      description: "Returns the scanner's av_unavailable posture (open|closed), whether an admin save or the boot default owns it, and a revision fingerprinting exactly the returned value."
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 2.1.0
+      responses:
+        '200':
+          description: The live posture.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AVSettings' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+    put:
+      operationId: setAVSettings
+      tags: [security]
+      summary: Set AV-unavailable scan posture
+      description: "Sets the av_unavailable posture. closed refuses content that cannot be scanned while the AV engine is unavailable; open forwards it unscanned (counted + alerted). Persist-before-apply: a 200 means the posture is durable AND live."
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: admin
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 2.1.0
+      x-culvert-danger-level: medium
+      x-culvert-audit-event: security.av_unavailable
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SetAVSettings' }
+      responses:
+        '200':
+          description: Updated (durable AND live; carries the new revision).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AVSettings' }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+        '409': { description: 'Stale-writer fence conflict ({error, currentRevision, yourRevision}) — the posture changed since the asserted revision; nothing mutated.' }
+        '500':
+          description: The posture could not be persisted; the live posture is UNCHANGED (persist-before-apply). Body is plain text.
           content:
             text/plain: { schema: { type: string } }
 

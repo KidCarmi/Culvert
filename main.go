@@ -1032,6 +1032,9 @@ func initScanning(s *startupState) {
 			ThreatFeedDB:  *s.threatFeedDB,
 			ScanSvcURL:    *s.scanSvcURL,
 			ScanSvcListen: *s.scanSvcListen,
+			// Env read in the shim (resolvers stay pure): the appliance's
+			// av_unavailable boot posture (av_unavailable_posture.go).
+			AVUnavailableEnv: os.Getenv(avUnavailableEnv),
 		}, dataDir),
 		appLifecycleCtx,
 	)

@@ -76,7 +76,7 @@ var (
 	statScanTimeout       int64 // body scans that hit ScanBodyTimeout (fail-closed)
 	statScanSkipped       int64 // responses forwarded unscanned (size > maxBytes)
 	statRemoteScanFail    int64 // remote scan sidecar failures (fail-open)
-	statClamScanError     int64 // ClamAV scan errors mid-request (fail-open, alerted)
+	statClamScanError     int64 // ClamAV scan errors mid-request (alerted; forwarded unscanned under av_unavailable=open, refused under closed)
 	statClamSaturated     int64 // scans that could not get a ClamAV slot within the budget
 	statScanLateDiscarded int64 // clean verdicts computed after the deadline and discarded
 
@@ -136,6 +136,12 @@ type CounterSnapshot struct {
 	// scanning signal at all.
 	RemoteScanSaturated int64
 	RemoteScanInflight  int64
+
+	// AVUnavailableRefused counts bodies REFUSED because the AV engine (either
+	// back end) was faulted while the av_unavailable posture was closed. Under
+	// the open posture it stays zero and the fault counters above carry the
+	// fail-open magnitude instead.
+	AVUnavailableRefused int64
 }
 
 // Counters returns a snapshot of all scan counters.
@@ -154,6 +160,8 @@ func Counters() CounterSnapshot {
 
 		RemoteScanSaturated: atomic.LoadInt64(&statRemoteScanSaturated),
 		RemoteScanInflight:  remoteScanInflight.Load(),
+
+		AVUnavailableRefused: atomic.LoadInt64(&statAVUnavailableRefused),
 	}
 }
 
@@ -236,6 +244,13 @@ type Scanner struct {
 	// opening a fresh TCP connection to ClamAV on every status poll.
 	clamStatusVal    string
 	clamStatusExpiry time.Time
+
+	// clamStatusStale is set by the REQUEST path when a scan hits a genuine
+	// ClamAV fault, so the next status read (/ready, /health, the admin status
+	// API) re-pings instead of serving a "connected" cached up to
+	// clamStatusTTL before the daemon died. Atomic so a failing request never
+	// takes mu for writing; it is only ever stored when not already set.
+	clamStatusStale atomic.Bool
 
 	// ClamAV VERSION cache. Signature databases update at most a few times a
 	// day, so this is cached far longer than the ping status.
@@ -366,15 +381,20 @@ func (ss *Scanner) ClamAVStatus() string {
 		ss.mu.RUnlock()
 		return "disabled"
 	}
-	// Cache hit: return stored status without pinging.
-	if ss.clamStatusVal != "" && time.Now().Before(ss.clamStatusExpiry) {
+	// Cache hit: return stored status without pinging — unless a request-path
+	// scan has since observed the daemon faulted, in which case the cached
+	// value is no longer evidence of anything.
+	if ss.clamStatusVal != "" && time.Now().Before(ss.clamStatusExpiry) && !ss.clamStatusStale.Load() {
 		v := ss.clamStatusVal
 		ss.mu.RUnlock()
 		return v
 	}
 	ss.mu.RUnlock()
 
-	// Cache miss or expired — ping outside any lock, then cache result.
+	// Cache miss or expired — ping outside any lock, then cache result. The
+	// stale mark is consumed BEFORE the ping, so a fault observed while the
+	// ping is in flight re-marks it and the next read pings again.
+	ss.clamStatusStale.Store(false)
 	var val string
 	if err := clam.Ping(); err != nil {
 		val = fmt.Sprintf("unreachable: %v", err)
@@ -686,6 +706,16 @@ func scanBodyTimeout() time.Duration {
 	return ScanBodyTimeout
 }
 
+// SetScanBudgetForTest overrides the scan budget for a cross-package
+// integration test (package main drives the real proxy path against a stalled
+// clamd stand-in) and returns the restore func. Test seam only: production
+// never calls it, and a non-positive d restores the exported contract.
+func SetScanBudgetForTest(d time.Duration) (restore func()) {
+	prev := scanBodyTimeoutOverride.Load()
+	scanBodyTimeoutOverride.Store(int64(d))
+	return func() { scanBodyTimeoutOverride.Store(prev) }
+}
+
 // clamScanError records a ClamAV mid-request scan failure: counter + webhook
 // alert (deduped by the alerts store), mirroring the remote sidecar's
 // remoteScanFail model (CHAOS-10). Fired on its own goroutine like
@@ -698,8 +728,8 @@ func clamScanError(err error) {
 	if degradedLogAllowed(&lastClamErrorLog) {
 		// The cause embeds daemon-supplied response text, so it is sanitised
 		// (CWE-117) rather than only newline-stripped.
-		obs.Warnf("SecurityScan: ClamAV error (%s): %s — forwarding UNSCANNED (fail-open); total %d",
-			clamFailureClass(err), obs.Sanitize(err.Error()), total)
+		obs.Warnf("SecurityScan: ClamAV error (%s): %s — %s; total %d",
+			clamFailureClass(err), obs.Sanitize(err.Error()), avFaultOutcome(), total)
 	}
 	// Same HasSubscriber gate, and the same class/cause split, remoteScanFail
 	// applies to the sidecar leg: this fires once per proxied response for as
@@ -839,10 +869,14 @@ func (ss *Scanner) scanBodyInner(ctx context.Context, data []byte, hash string, 
 	clam := ss.clam
 	ss.mu.RUnlock()
 
-	// ClamAV scan. An engine error (daemon crash mid-stream) falls through to
+	// ClamAV scan. An engine error (daemon crash mid-stream) is governed by the
+	// av_unavailable posture. Under "open" (the default) it falls through to
 	// YARA — fail-open for THIS request, but counted + alerted, and the verdict
 	// is never cached: a "clean" computed while ClamAV was dark would otherwise
 	// keep admitting the same content by hash long after the daemon recovers.
+	// Under "closed" the content is refused and that refusal is not cached
+	// either. A budget that is already gone is NOT this branch: it falls
+	// through to the fail-closed timeout check below in both postures.
 	clamDark := false
 	if clam != nil {
 		name, found, err := runClam(ctx, clam, data)
@@ -850,6 +884,9 @@ func (ss *Scanner) scanBodyInner(ctx context.Context, data []byte, hash string, 
 		case err != nil:
 			clamDark = true
 			ss.recordClamFailure(ctx, err)
+			if !budgetExhausted(ctx) && avUnavailableClosed.Load() {
+				return avUnavailableRefusal(hash, "clamav", clamFailureClass(err), "")
+			}
 		case found:
 			atomic.AddInt64(&statClamBlocked, 1)
 			ss.publishVerdict(hash, hashcache.ScanCacheResult{Clean: false, Reason: name, Source: "clamav"}, abandoned)
@@ -872,7 +909,7 @@ func (ss *Scanner) scanBodyInner(ctx context.Context, data []byte, hash string, 
 	// either — so without this check an overrun could be laundered into a
 	// clean verdict by winning a coin flip. A scan that finishes outside its
 	// budget returns the same fail-closed refusal its caller would have.
-	if ctx.Err() != nil {
+	if budgetExhausted(ctx) {
 		noteLateCleanDiscarded(hash)
 		return &Result{Blocked: true, Reason: "scan timeout", Source: "timeout", Hash: hash}
 	}
@@ -883,6 +920,24 @@ func (ss *Scanner) scanBodyInner(ctx context.Context, data []byte, hash string, 
 		ss.publishVerdict(hash, hashcache.ScanCacheResult{Clean: true, Source: "clean"}, abandoned)
 	}
 	return nil
+}
+
+// budgetExhausted reports whether the scan budget carried by ctx is gone. It
+// asks the CLOCK as well as ctx.Err(), and the difference is load-bearing: the
+// ClamAV client arms its connection deadline AT the budget deadline, so a
+// stalled daemon surfaces as an i/o timeout that can be observed a moment
+// BEFORE the context's own timer has fired and set ctx.Err(). Reading only
+// ctx.Err() at that instant classified a budget overrun as a daemon FAULT:
+// under av_unavailable=closed it relabelled a timeout as "AV unavailable"
+// (observed under full-suite load in the stalled-clamd integration gate), and
+// the end-of-scan budget check below could likewise miss an overrun that had
+// not yet been reflected in ctx.Err().
+func budgetExhausted(ctx context.Context) bool {
+	if ctx.Err() != nil {
+		return true
+	}
+	d, ok := ctx.Deadline()
+	return ok && !time.Now().Before(d)
 }
 
 // recordClamFailure classifies a failed ClamAV leg. The three causes need
@@ -898,7 +953,7 @@ func (ss *Scanner) scanBodyInner(ctx context.Context, data []byte, hash string, 
 //	engine error     — a genuine daemon fault: counted + alerted as before.
 func (ss *Scanner) recordClamFailure(ctx context.Context, err error) {
 	switch {
-	case ctx.Err() != nil || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled):
+	case budgetExhausted(ctx) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled):
 		if errors.Is(err, clamav.ErrQueueFull) {
 			ss.noteClamSaturated(err, "scan budget exhausted while queued")
 			return
@@ -912,6 +967,12 @@ func (ss *Scanner) recordClamFailure(ctx context.Context, err error) {
 		// The (rate-limited) line carrying the cause is emitted by
 		// clamScanError, beside the counter that carries the magnitude.
 		clamScanError(err)
+		// Readiness truth: a genuine daemon fault means any cached
+		// "connected" is stale. Mark it (never take mu on the request path)
+		// so /ready and /health re-ping on their next read.
+		if !ss.clamStatusStale.Load() {
+			ss.clamStatusStale.Store(true)
+		}
 	}
 }
 

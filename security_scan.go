@@ -128,17 +128,41 @@ func safeDPIScan(data []byte) (pattern string, matched bool) {
 
 // scanBlock sends a 403 Forbidden response to a plain http.ResponseWriter.
 func scanBlock(w http.ResponseWriter, host, reason, source string) {
-	logger.Printf("SecurityScan: blocked host=%q source=%s reason=%q", sanitizeLog(host), source, reason)
-	body := fmt.Sprintf("Blocked by %s scan: %s", strings.ToUpper(source), reason)
-	http.Error(w, body, http.StatusForbidden)
+	logScanBlock(host, reason, source)
+	http.Error(w, scanBlockBody(reason, source), http.StatusForbidden)
 }
 
 // scanBlockConn sends a 403 Forbidden HTTP/1.1 response to a raw connection
 // (used inside SSL-inspect tunnels where http.ResponseWriter is not available).
 func scanBlockConn(br blockResponder, host, reason, source string) {
-	logger.Printf("SecurityScan: blocked host=%q source=%s reason=%q", sanitizeLog(host), source, reason)
-	body := fmt.Sprintf("Blocked by %s scan: %s\r\n", strings.ToUpper(source), reason)
-	br.blockBeforeResponse("text/plain; charset=utf-8", body)
+	logScanBlock(host, reason, source)
+	br.blockBeforeResponse("text/plain; charset=utf-8", scanBlockBody(reason, source)+"\r\n")
+}
+
+// logScanBlock emits the per-block log line. An av_unavailable refusal is NOT
+// a detection, and the line must not read like one: it says the content was
+// refused because the AV engine could not scan it, which is the fact an
+// operator triaging a burst of 403s needs first.
+func logScanBlock(host, reason, source string) {
+	switch source {
+	case secscan.SourceAVUnavailable:
+		logger.Printf("SecurityScan: refused host=%q — content could not be scanned because AV is unavailable (av_unavailable=closed)", sanitizeLog(host))
+	default:
+		logger.Printf("SecurityScan: blocked host=%q source=%s reason=%q", sanitizeLog(host), source, reason)
+	}
+}
+
+// scanBlockBody is the 403 body for a scan block. Every Result.Source the
+// scanners produce is handled deliberately: detections name the engine, the
+// two infrastructure refusals (timeout, av_unavailable) say the content was
+// not judged rather than implying a threat was found.
+func scanBlockBody(reason, source string) string {
+	switch source {
+	case secscan.SourceAVUnavailable:
+		return "Blocked: antivirus scanning is currently unavailable, so this content could not be scanned and was refused (av_unavailable=closed)"
+	default:
+		return fmt.Sprintf("Blocked by %s scan: %s", strings.ToUpper(source), reason)
+	}
 }
 
 // ── Buffer sizing helpers ─────────────────────────────────────────────────────
@@ -332,6 +356,7 @@ func secScanStatusMap() map[string]interface{} {
 		m["stat_scan_timeout"] = counters.ScanTimeout
 		m["stat_remote_scan_saturated"] = counters.RemoteScanSaturated
 		m["remote_scan_inflight"] = counters.RemoteScanInflight
+		addAVUnavailableStatus(m, counters)
 		return m
 	}
 
@@ -387,5 +412,15 @@ func secScanStatusMap() map[string]interface{} {
 	if feedErr != "" {
 		m["threat_feed_sync_error"] = feedErr
 	}
+	addAVUnavailableStatus(m, counters)
 	return m
+}
+
+// addAVUnavailableStatus surfaces the av_unavailable posture and its refusal
+// counter on the scan status map, in BOTH scanning modes: the posture governs
+// the local ClamAV leg and the remote sidecar alike, so an operator must be
+// able to see which one is active wherever scanning runs.
+func addAVUnavailableStatus(m map[string]interface{}, counters secscan.CounterSnapshot) {
+	m["av_unavailable"] = secscan.AVUnavailablePosture()
+	m["stat_av_unavailable_refused"] = counters.AVUnavailableRefused
 }
