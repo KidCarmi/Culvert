@@ -238,8 +238,17 @@ step_images() {
       return 1
     fi
   fi
-  docker image inspect "${CLAMAV_IMAGE_REPO#docker.io/}:${CLAMAV_IMAGE_TAG}" >/dev/null
-  log "images loaded: $ref ($id), ${CLAMAV_IMAGE_REPO}:${CLAMAV_IMAGE_TAG}"
+  # The ClamAV sidecar is BUILT by the OVA build (pinned base + pcre2 fix), so
+  # its identity is the image ID the build recorded, not a registry digest.
+  local cid
+  [[ -n "${CLAMAV_SIDECAR_REF:-}" && -n "${CLAMAV_SIDECAR_ID:-}" ]] \
+    || { log "ERROR: the manifest does not name the ClamAV sidecar (CLAMAV_SIDECAR_REF/CLAMAV_SIDECAR_ID)"; return 1; }
+  cid="$(docker image inspect "$CLAMAV_SIDECAR_REF" --format '{{.Id}}' 2>/dev/null || true)"
+  if [[ "$cid" != "$CLAMAV_SIDECAR_ID" ]]; then
+    log "ERROR: loaded ClamAV sidecar ${CLAMAV_SIDECAR_REF} is '${cid:-absent}', the build recorded $CLAMAV_SIDECAR_ID"
+    return 1
+  fi
+  log "images loaded: $ref ($id), $CLAMAV_SIDECAR_REF ($cid)"
   done_step images
 }
 

@@ -570,11 +570,17 @@ jobs:
           name: deep-gate-image
       - name: Load the PR-head image
         run: docker load -i culvert-image.tar
-      - name: Pre-pull the real sidecar + fixtures (retry)
+      - name: Build the shipped ClamAV sidecar + pre-pull fixtures (retry)
+        # The sidecar the appliance runs is built from appliance/clamav (the
+        # pinned official image + pcre2 10.49, CVE-2026-103111) under its
+        # local-only tag, so scenario A below runs exactly that image.
         run: |
           set -euo pipefail
+          . appliance/build/manifest.env
           pull_retry() { for i in 1 2 3 4; do docker pull -q "$1" && return 0; echo "pull $1 failed (attempt $i)"; sleep $((i*3)); done; return 1; }
-          for img in clamav/clamav:1.4 busybox:stable alpine:3.20; do pull_retry "$img"; done
+          for img in "${CLAMAV_IMAGE_REPO}@${CLAMAV_IMAGE_INDEX_DIGEST}" busybox:stable alpine:3.20; do pull_retry "$img"; done
+          docker build -q -t "$CLAMAV_SIDECAR_REF" appliance/clamav
+          docker image inspect "$CLAMAV_SIDECAR_REF" --format '{{.Id}}'
       - name: Scenario A against the real ClamAV sidecar
         env:
           CUR_IMAGE: culvert:ci-smoke
@@ -584,9 +590,8 @@ jobs:
         run: EVID="$RUNNER_TEMP/appliance-clamav" ./test/e2e/appliance/lifecycle-qualify.sh
       # Real clamd behind the real proxy: EICAR, a custom PCRE logical
       # signature (the libpcre2 path of CVE-2026-103111), a regex-miss control
-      # and the clamd-down posture. Run against the PINNED official image and
-      # against the unpublished pcre2 derivative built here (never pushed), so
-      # the owner's decision rests on CI-executed evidence for both.
+      # and the clamd-down posture. Run against the SHIPPED sidecar (built
+      # here, never pushed) and, for comparison, the pinned official base.
       - name: Real-ClamAV scan check — pinned official image
         run: |
           set -euo pipefail
@@ -594,12 +599,24 @@ jobs:
           docker pull -q "${CLAMAV_IMAGE_REPO}@${CLAMAV_IMAGE_INDEX_DIGEST}"
           CLAMAV_IMAGE="${CLAMAV_IMAGE_REPO}@${CLAMAV_IMAGE_INDEX_DIGEST}" PROXY_IMAGE=culvert:ci-smoke \
             EVID="$RUNNER_TEMP/clamav-image-official" ./test/e2e/appliance/clamav-image-qualify.sh
-      - name: Real-ClamAV scan check — pcre2 derivative candidate (built, not pushed)
+      - name: Real-ClamAV scan check — the shipped sidecar (built from appliance/clamav, never pushed)
         run: |
           set -euo pipefail
-          docker build -q -t culvert-candidate/clamav:pcre2-fix appliance/clamav-candidate
-          CLAMAV_IMAGE=culvert-candidate/clamav:pcre2-fix PROXY_IMAGE=culvert:ci-smoke \
-            EVID="$RUNNER_TEMP/clamav-image-candidate" ./test/e2e/appliance/clamav-image-qualify.sh
+          . appliance/build/manifest.env
+          docker build -q -t "$CLAMAV_SIDECAR_REF" appliance/clamav
+          CLAMAV_IMAGE="$CLAMAV_SIDECAR_REF" PROXY_IMAGE=culvert:ci-smoke \
+            EVID="$RUNNER_TEMP/clamav-image-shipped" ./test/e2e/appliance/clamav-image-qualify.sh
+      - uses: aquasecurity/setup-trivy@81e514348e19b6112ce2a7e3ecbafe19c1e1f567 # v0.2.0
+        with:
+          version: v0.69.3
+          cache: true
+      - name: CVE gate on the shipped sidecar (no fixable HIGH/CRITICAL)
+        run: |
+          set -euo pipefail
+          . appliance/build/manifest.env
+          trivy image --download-db-only --db-repository mirror.gcr.io/aquasec/trivy-db:2
+          trivy image --skip-db-update --scanners vuln --severity CRITICAL,HIGH --ignore-unfixed \
+            --format table --exit-code 1 "$CLAMAV_SIDECAR_REF" | tee "$RUNNER_TEMP/clamav-image-shipped/trivy.txt"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
@@ -608,7 +625,8 @@ jobs:
             ${{ runner.temp }}/appliance-clamav/REPORT.md
             ${{ runner.temp }}/appliance-clamav/checks.jsonl
             ${{ runner.temp }}/clamav-image-official/clamav-image-qualify.jsonl
-            ${{ runner.temp }}/clamav-image-candidate/clamav-image-qualify.jsonl
+            ${{ runner.temp }}/clamav-image-shipped/clamav-image-qualify.jsonl
+            ${{ runner.temp }}/clamav-image-shipped/trivy.txt
           retention-days: 14
 
   appliance-agent:

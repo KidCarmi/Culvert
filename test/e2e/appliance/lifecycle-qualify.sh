@@ -482,7 +482,15 @@ for sc in $SCENARIOS; do
   esac
 done
 if [[ "${CULVERT_QUALIFY_REAL_CLAMAV:-0}" == 1 ]]; then
-  check X "clamav-real-sidecar" pass "the REAL clamav/clamav sidecar from the deploy bundle ran (signatures downloaded, healthcheck passed, /ready strict incl. the scanner rows)"
+  # The bundle's compose must name the shipped sidecar (pinned official image
+  # + pcre2 10.49, CVE-2026-103111), and that image must carry the fix.
+  sref="$(sed -n 's/^CLAMAV_SIDECAR_REF=//p' "$HERE/../../../appliance/build/manifest.env")"
+  sp="$(docker run --rm --network none --entrypoint sh "$sref" -c "apk info -v 2>/dev/null | grep '^pcre2-[0-9]'" 2>/dev/null || echo unknown)"
+  if [[ -n "$sref" ]] && grep -rqs "image: $sref" "$EVID"/proj-*/docker-compose.yml && [[ "$sp" == pcre2-10.49-r0 ]]; then
+    check X "clamav-real-sidecar" pass "the REAL sidecar $sref from the deploy bundle ran ($sp; signatures downloaded, healthcheck passed, /ready strict incl. the scanner rows)"
+  else
+    check X "clamav-real-sidecar" fail "the deploy bundle did not run the shipped sidecar: ref=${sref:-?} pcre2=$sp"
+  fi
 else
   check X "clamav-real-sidecar" blocked "ClamAV replaced by a stub (docker-compose.qualify.yml); the real sidecar's signature download cannot verify TLS behind this sandbox's intercepting proxy. Prerequisite: run on a host with direct egress and CULVERT_QUALIFY_REAL_CLAMAV=1 (uses docker-compose.qualify.real-clamav.yml, no stub)."
 fi

@@ -36,7 +36,13 @@ services:
   # Official image from the ClamAV project (Cisco Talos).
   # clamd listens on TCP 3310 inside the compose network (not exposed to host).
   clamav:
-    image: clamav/clamav:1.4
+    # The official ClamAV 1.4.6 image (pinned by digest) + pcre2 10.49 for
+    # CVE-2026-103111, built LOCALLY from appliance/clamav when this
+    # local-only tag is absent (the OVA ships it pre-built). Compose never
+    # pulls this name: with `build:` present a missing image is built.
+    image: culvert/clamav:1.4.6-pcre2-10.49
+    build:
+      context: ./appliance/clamav
     container_name: culvert-clamav
     restart: unless-stopped
     volumes:

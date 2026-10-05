@@ -1250,6 +1250,18 @@ extract_deploy_bundle() {
     copy_bundle_file "$tmp/docker-compose.maint-agent.yml" \
       "$INSTALL_DIR/docker-compose.maint-agent.yml" 0644 || ok=0
   fi
+  # The ClamAV sidecar build context (pinned official image + pcre2 fix):
+  # compose builds the local-only sidecar tag from it when the tag is absent.
+  # Required exactly when this bundle's compose file names that context.
+  if [[ "$ok" -eq 1 ]]; then
+    if sudo test -f "$tmp/appliance/clamav/Dockerfile"; then
+      sudo mkdir -p "$INSTALL_DIR/appliance/clamav" \
+        && copy_bundle_file "$tmp/appliance/clamav/Dockerfile" "$INSTALL_DIR/appliance/clamav/Dockerfile" 0644 || ok=0
+    elif sudo grep -q 'context: ./appliance/clamav' "$tmp/docker-compose.yml"; then
+      echo "deploy bundle names the ClamAV build context but does not carry appliance/clamav/Dockerfile" >&2
+      ok=0
+    fi
+  fi
   if [[ "$ok" -eq 1 ]]; then
     # LAST — the sentinel. Only now is the deployment considered complete.
     copy_bundle_file "$tmp/docker-compose.yml" "$INSTALL_DIR/docker-compose.yml" 0644 || ok=0

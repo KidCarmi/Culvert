@@ -122,8 +122,10 @@ repo-bound digest and retags `culvert/proxy:pinned` at the sudo boundary
 Alpine package CVEs in the image are fixed by a new Culvert release (the image
 is rebuilt per release); the SBOM/CVE evidence for the pinned image is in
 [`sbom-cve-evidence.md`](sbom-cve-evidence.md). The ClamAV sidecar's **engine**
-follows the compose file's `clamav/clamav:1.4` tag (updated with Culvert
-releases); its **signatures** are refreshed by freshclam inside the container.
+is the compose file's local `culvert/clamav` tag — the official 1.4.6 image
+pinned by digest plus pcre2 10.49 (CVE-2026-103111), built from
+`appliance/clamav` and updated with Culvert releases; its **signatures** are
+refreshed by freshclam inside the container.
 
 ## Ownership and cadence summary
 

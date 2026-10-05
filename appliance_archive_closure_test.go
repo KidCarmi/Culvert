@@ -218,7 +218,9 @@ func TestBuildOVA_ChecksBothArchivesCarryTheirImageBeforeBaking(t *testing.T) {
 	j := strings.Index(src, `APP_TAR_SHA="$(sha256sum`)
 	for _, check := range []string{
 		`archive_platform_closure "$OV/var/lib/culvert-appliance/images/culvert.tar.gz" linux/amd64 "$APP_IMAGE_INDEX_DIGEST" "$APP_IMAGE_AMD64_DIGEST"`,
-		`archive_platform_closure "$OV/var/lib/culvert-appliance/images/clamav.tar.gz" linux/amd64 "$CLAMAV_IMAGE_INDEX_DIGEST" "$CLAMAV_IMAGE_AMD64_DIGEST"`,
+		// The sidecar is BUILT (pinned base + pcre2 fix): its identity is the
+		// built image ID, carried as both the index and the platform manifest.
+		`archive_platform_closure "$OV/var/lib/culvert-appliance/images/clamav.tar.gz" linux/amd64 "$CLAMAV_SIDECAR_ID" "$CLAMAV_SIDECAR_ID"`,
 	} {
 		if i := strings.Index(src, check); i < 0 || j < 0 || i > j {
 			t.Errorf("build-ova.sh must run %s before recording and baking the archives", check)
@@ -269,7 +271,7 @@ func TestBuildOVA_ColdLoadsBothArchivesBeforeBaking(t *testing.T) {
 	j := strings.Index(src, `APP_TAR_SHA="$(sha256sum`)
 	for _, want := range []string{
 		`--archive "$OV/var/lib/culvert-appliance/images/culvert.tar.gz" --ref "${APP_IMAGE_REPO}:${APP_IMAGE_TAG}"`,
-		`--archive "$OV/var/lib/culvert-appliance/images/clamav.tar.gz" --ref "${CLAMAV_IMAGE_REPO#docker.io/}:${CLAMAV_IMAGE_TAG}"`,
+		`--archive "$OV/var/lib/culvert-appliance/images/clamav.tar.gz" --ref "$CLAMAV_SIDECAR_REF"`,
 	} {
 		i := strings.Index(src, want)
 		if i < 0 || j < 0 || i > j {
@@ -302,8 +304,9 @@ func TestBuildOVA_ColdLoadsBothArchivesBeforeBaking(t *testing.T) {
 // 37154350794): once the candidate image archive had been loaded into the
 // store, every later save of the pulled ClamAV image was hollow (index and
 // manifests only) — by tag, by digest or both — while a store that never
-// loaded it saved the full image. The build pulls and saves ClamAV before any
-// archive is loaded, and bakes that early save.
+// loaded it saved the full image. The build pulls the ClamAV base, builds the
+// sidecar from it and saves the sidecar before any archive is loaded, and
+// bakes that early save.
 func TestBuildOVA_SavesClamAVBeforeLoadingTheCandidate(t *testing.T) {
 	b, err := os.ReadFile(buildOVAScript)
 	if err != nil {
@@ -311,14 +314,18 @@ func TestBuildOVA_SavesClamAVBeforeLoadingTheCandidate(t *testing.T) {
 	}
 	src := string(b)
 	pull := strings.Index(src, `pull_by_digest "$CLAMAV_IMAGE_REPO" "$CLAMAV_IMAGE_INDEX_DIGEST" "$CLAMAV_IMAGE_AMD64_DIGEST" "$CLAMAV_IMAGE_TAG"`)
-	save := strings.Index(src, `docker save "${CLAMAV_IMAGE_REPO}:${CLAMAV_IMAGE_TAG}" | gzip -n -6 > "$WORK/clamav.tar.gz"`)
+	build := strings.Index(src, `docker build -q --platform linux/amd64 -t "$CLAMAV_SIDECAR_REF" "$REPO/appliance/clamav"`)
+	save := strings.Index(src, `docker save "${CLAMAV_SIDECAR_REF}" | gzip -n -6 > "$WORK/clamav.tar.gz"`)
 	load := strings.Index(src, `docker load -q -i "$CANDIDATE_TAR"`)
 	bake := strings.Index(src, `mv "$WORK/clamav.tar.gz" "$OV/var/lib/culvert-appliance/images/clamav.tar.gz"`)
-	if pull < 0 || save < 0 || load < 0 || bake < 0 || pull > save || save > load || bake < load {
-		t.Fatalf("build-ova.sh must pull and save ClamAV before loading the candidate archive, and bake that save (pull=%d save=%d load=%d bake=%d)", pull, save, load, bake)
+	if pull < 0 || build < 0 || save < 0 || load < 0 || bake < 0 || pull > build || build > save || save > load || bake < load {
+		t.Fatalf("build-ova.sh must pull the ClamAV base, build and save the sidecar before loading the candidate archive, and bake that save (pull=%d build=%d save=%d load=%d bake=%d)", pull, build, save, load, bake)
 	}
-	if strings.Count(src, `pull_by_digest "$CLAMAV_IMAGE_REPO"`) != 1 || strings.Count(src, `docker save "${CLAMAV_IMAGE_REPO}:${CLAMAV_IMAGE_TAG}"`) != 1 {
-		t.Error("ClamAV must be pulled and saved exactly once, before the load")
+	if strings.Count(src, `pull_by_digest "$CLAMAV_IMAGE_REPO"`) != 1 || strings.Count(src, `docker save "${CLAMAV_SIDECAR_REF}"`) != 1 {
+		t.Error("the ClamAV base must be pulled, and the sidecar saved, exactly once, before the load")
+	}
+	if !strings.Contains(src, `[[ "$CLAMAV_PCRE2" == "pcre2-10.49-r0" ]] || die`) {
+		t.Error("build-ova.sh must refuse a sidecar that does not carry pcre2 10.49 (CVE-2026-103111)")
 	}
 	if !strings.Contains(src, `"containerd": E["BI_CONTAINERD"]`) {
 		t.Error("build-info.json must record the build host's containerd")

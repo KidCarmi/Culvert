@@ -23,6 +23,9 @@
 services:
   clamav:
     image: busybox:stable
+    # The base service BUILDS the sidecar (appliance/clamav); a stub must drop
+    # that build, or Compose would build the real sidecar and tag it busybox.
+    build: !reset null
     command: ["sleep", "infinity"]
     healthcheck:
       test: ["CMD-SHELL", "true"]

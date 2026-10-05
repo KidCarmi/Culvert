@@ -199,14 +199,15 @@ func TestApplianceLane_ImageConsumersAreCoveredByImageNeeded(t *testing.T) {
 	}
 }
 
-// CVE-2026-103111 (PR #1528 closeout): the pcre2 derivative is a REVIEW
-// candidate, not a shipped artefact. Three properties keep it that way and
-// keep its evidence honest: it derives from exactly the pinned official image,
-// CI executes the real-ClamAV check against both images, and no shipped file
-// (compose, manifest, installer) references it.
-func TestClamAVCandidate_DerivesFromThePinnedOfficialImage(t *testing.T) {
+// CVE-2026-103111: the appliance RUNS the pcre2 derivative of the pinned
+// official ClamAV image, built locally and never published. These tests keep
+// that true end to end: it derives from exactly the pinned digest with one
+// pinned package; every file that names the sidecar names the SAME local tag;
+// the build context ships in the deploy bundle; and CI qualifies the image
+// the appliance runs (plus the official base, for comparison) without pushing.
+func TestClamAVSidecar_DerivesFromThePinnedOfficialImage(t *testing.T) {
 	dir := pkgSourceDir()
-	df, err := os.ReadFile(filepath.Join(dir, "appliance", "clamav-candidate", "Dockerfile"))
+	df, err := os.ReadFile(filepath.Join(dir, "appliance", "clamav", "Dockerfile"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -220,21 +221,58 @@ func TestClamAVCandidate_DerivesFromThePinnedOfficialImage(t *testing.T) {
 	}
 	froms := regexp.MustCompile(`(?m)^FROM\s+(\S+)`).FindAllSubmatch(df, -1)
 	if len(froms) != 1 || string(froms[0][1]) != "docker.io/clamav/clamav@"+string(pin[1]) {
-		t.Fatalf("candidate must have exactly one FROM, the pinned official digest %s; got %q", pin[1], froms)
+		t.Fatalf("the sidecar must have exactly one FROM, the pinned official digest %s; got %q", pin[1], froms)
 	}
 	// One package, pinned to an exact version: a floating `apk upgrade` would
 	// make the evidence describe an image nobody can rebuild.
 	if !strings.Contains(string(df), "apk add --no-cache --upgrade 'pcre2=10.49-r0'") {
-		t.Fatal("candidate must upgrade exactly pcre2 to a pinned version")
+		t.Fatal("the sidecar must upgrade exactly pcre2 to a pinned version")
 	}
 }
 
-func TestClamAVCandidate_CIQualifiesBothImagesAndNothingShipsTheCandidate(t *testing.T) {
+func TestClamAVSidecar_EveryShippedFileNamesTheSameLocalTag(t *testing.T) {
+	dir := pkgSourceDir()
+	read := func(rel string) string {
+		raw, err := os.ReadFile(filepath.Join(dir, rel))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(raw)
+	}
+	m := regexp.MustCompile(`(?m)^CLAMAV_SIDECAR_REF=(\S+)$`).FindStringSubmatch(read("appliance/build/manifest.env"))
+	if m == nil {
+		t.Fatal("manifest.env must pin CLAMAV_SIDECAR_REF")
+	}
+	ref := m[1]
+	if !strings.HasPrefix(ref, "culvert/clamav:") || !strings.Contains(ref, "pcre2-10.49") {
+		t.Fatalf("CLAMAV_SIDECAR_REF %q must be the local-only culvert/clamav tag naming the pcre2 fix", ref)
+	}
+	for _, compose := range []string{"docker-compose.yml", "docker-compose.ha.yml"} {
+		c := read(compose)
+		if !strings.Contains(c, "    image: "+ref+"\n    build:\n      context: ./appliance/clamav\n") {
+			t.Errorf("%s: the clamav service must name image %s with build context ./appliance/clamav", compose, ref)
+		}
+		if strings.Contains(c, "image: clamav/clamav") {
+			t.Errorf("%s still runs the official image (pcre2 10.48, CVE-2026-103111)", compose)
+		}
+	}
+	if !strings.Contains(read("Dockerfile"), "COPY --chown=proxy:proxy appliance/clamav/Dockerfile ./deploy/appliance/clamav/Dockerfile") {
+		t.Error("the deploy bundle must carry the sidecar build context, or a host without the tag cannot start ClamAV")
+	}
+	if !strings.Contains(read("scripts/install.sh"), `"$INSTALL_DIR/appliance/clamav/Dockerfile"`) {
+		t.Error("install.sh must copy the sidecar build context into the stack directory")
+	}
+	if fb := read("appliance/provision/culvert-firstboot.sh"); !strings.Contains(fb, `docker image inspect "$CLAMAV_SIDECAR_REF"`) || !strings.Contains(fb, "CLAMAV_SIDECAR_ID") {
+		t.Error("first boot must verify the loaded sidecar against the ID the build recorded")
+	}
+}
+
+func TestClamAVSidecar_CIQualifiesTheShippedImageAndPushesNothing(t *testing.T) {
 	dir := pkgSourceDir()
 	path := filepath.Join(dir, ".github", "workflows", "pr-deep-gate.yml")
 	jobs := asMap(genericWorkflow(t, path)["jobs"])
 	steps, _ := asMap(jobs["appliance-clamav"])["steps"].([]interface{})
-	official, candidate := false, false
+	official, shipped := false, false
 	for _, st := range steps {
 		run := toStr(asMap(st)["run"])
 		if strings.Contains(run, "docker push") {
@@ -246,21 +284,12 @@ func TestClamAVCandidate_CIQualifiesBothImagesAndNothingShipsTheCandidate(t *tes
 		if strings.Contains(run, `CLAMAV_IMAGE="${CLAMAV_IMAGE_REPO}@${CLAMAV_IMAGE_INDEX_DIGEST}"`) {
 			official = true
 		}
-		if strings.Contains(run, "docker build") && strings.Contains(run, "appliance/clamav-candidate") {
-			candidate = true
+		if strings.Contains(run, "docker build") && strings.Contains(run, "appliance/clamav") && strings.Contains(run, `CLAMAV_IMAGE="$CLAMAV_SIDECAR_REF"`) {
+			shipped = true
 		}
 	}
-	if !official || !candidate {
-		t.Fatalf("appliance-clamav must run clamav-image-qualify.sh against the pinned official image (%v) and the built candidate (%v)", official, candidate)
-	}
-	for _, shipped := range []string{"docker-compose.yml", "appliance/build/manifest.env", "scripts/install.sh"} {
-		raw, err := os.ReadFile(filepath.Join(dir, shipped))
-		if err != nil {
-			t.Fatal(err)
-		}
-		if strings.Contains(string(raw), "culvert-candidate/clamav") || strings.Contains(string(raw), "clamav-candidate") {
-			t.Errorf("%s references the unpublished ClamAV candidate — switching the sidecar is an owner decision", shipped)
-		}
+	if !official || !shipped {
+		t.Fatalf("appliance-clamav must run clamav-image-qualify.sh against the official base (%v) and the shipped sidecar built from appliance/clamav (%v)", official, shipped)
 	}
 }
 

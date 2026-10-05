@@ -17,7 +17,7 @@ disk, all pinned in [`appliance/build/manifest.env`](../../appliance/build/manif
 | Guest OS | Ubuntu `noble` cloud image, serial `20260926` | SHA256 + Ubuntu's GPG signature on `SHA256SUMS` |
 | Container engine | `docker-ce`, `docker-ce-cli`, `containerd.io`, `docker-compose-plugin` from `download.docker.com` (`apt-mark hold`) | exact `.deb` versions + repo key fingerprint |
 | Application | `ghcr.io/kidcarmi/culvert:v1.0.259` as a `docker save` tar, loaded at first boot | OCI **index digest** + asserted amd64 manifest digest; cosign keyless verification against the pinned release identity **at build time** |
-| AV sidecar | `clamav/clamav:1.4` (as `docker-compose.yml` names it) as a tar | index + amd64 digests |
+| AV sidecar | `culvert/clamav:1.4.6-pcre2-10.49` (as `docker-compose.yml` names it): built from `appliance/clamav` — the official `clamav/clamav` base pinned by index + amd64 digests, plus pcre2 10.49 (CVE-2026-103111) — saved as a tar | base digests; the built image ID (guest manifest `CLAMAV_SIDECAR_ID`, re-checked by first boot); pcre2 version asserted by the build |
 | Installer | `scripts/install.sh` from the building checkout (SHA256 recorded) | git commit in `build-info.json` |
 | Provisioning | `appliance/provision/*`, `appliance/os-maintenance/*` | git commit |
 
@@ -232,7 +232,7 @@ project CI run on 24.04. Moving is a manifest change plus a re-qualification.
 | Base image | `https://cloud-images.ubuntu.com/releases/noble/` → newest `release-YYYYMMDD` → `SHA256SUMS` line for `ubuntu-24.04-server-cloudimg-amd64.img` |
 | Docker packages | `https://download.docker.com/linux/ubuntu/dists/noble/stable/binary-amd64/Packages` (the build script's own `pull`/`apt` steps fail loudly on a typo) |
 | Proxy image | the signed release catalog's `recommended` digest for the channel (`docs/operator/catalog-bootstrap-install-runbook.md`); `docker manifest inspect ghcr.io/kidcarmi/culvert:vX.Y.Z` for the amd64 entry |
-| ClamAV | `docker manifest inspect clamav/clamav:1.4` |
+| ClamAV base | `docker manifest inspect clamav/clamav:1.4`; keep `appliance/clamav/Dockerfile`'s `FROM` digest equal to it (a test pins this), and return to the plain official image once it ships pcre2 >= 10.49 |
 
 A pin change is a reviewed commit; `build-info.json` of the resulting OVA is
 the release record.

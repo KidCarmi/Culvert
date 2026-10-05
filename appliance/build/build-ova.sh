@@ -91,7 +91,7 @@ set -a
 set +a
 for v in BASE_IMAGE_URL BASE_IMAGE_SHA256 APP_IMAGE_REPO APP_IMAGE_TAG APP_IMAGE_INDEX_DIGEST \
          APP_IMAGE_AMD64_DIGEST CLAMAV_IMAGE_REPO CLAMAV_IMAGE_TAG CLAMAV_IMAGE_INDEX_DIGEST \
-         CLAMAV_IMAGE_AMD64_DIGEST COLDLOAD_DIND_IMAGE DOCKER_CE_VERSION VM_DISK_GB VM_VCPUS VM_MEMORY_MB VM_HW_VERSION; do
+         CLAMAV_IMAGE_AMD64_DIGEST CLAMAV_SIDECAR_REF COLDLOAD_DIND_IMAGE DOCKER_CE_VERSION VM_DISK_GB VM_VCPUS VM_MEMORY_MB VM_HW_VERSION; do
   [[ -n "${!v:-}" ]] || die "manifest.env: $v is not set"
 done
 
@@ -170,9 +170,21 @@ for e in m.get("manifests",[]):
 # image (F-OVA-CLAMAV-1; bisected in fresh disposable stores, lab run
 # 37154350794). The closure and cold-load checks below verify the result.
 pull_by_digest "$CLAMAV_IMAGE_REPO" "$CLAMAV_IMAGE_INDEX_DIGEST" "$CLAMAV_IMAGE_AMD64_DIGEST" "$CLAMAV_IMAGE_TAG"
+# The sidecar the appliance runs is the pinned base + pcre2 10.49
+# (CVE-2026-103111), built here from appliance/clamav and never published.
+# Its FROM is the base digest pulled above, so the build reuses those layers.
+# The derived image's identity is its ID in this (containerd) store, the same
+# identity model as a candidate application image: recorded in the guest
+# manifest and re-checked by first boot.
+log "building the ClamAV sidecar $CLAMAV_SIDECAR_REF from appliance/clamav (pinned base + pcre2 fix)"
+docker build -q --platform linux/amd64 -t "$CLAMAV_SIDECAR_REF" "$REPO/appliance/clamav" >/dev/null
+CLAMAV_SIDECAR_ID="$(docker image inspect "$CLAMAV_SIDECAR_REF" --format '{{.Id}}')"
+CLAMAV_PCRE2="$(docker run --rm --network none --entrypoint sh "$CLAMAV_SIDECAR_REF" -c "apk info -v 2>/dev/null | grep '^pcre2-[0-9]'")"
+[[ "$CLAMAV_PCRE2" == "pcre2-10.49-r0" ]] || die "ClamAV sidecar carries $CLAMAV_PCRE2, want pcre2-10.49-r0 (CVE-2026-103111)"
+log "ClamAV sidecar $CLAMAV_SIDECAR_REF = $CLAMAV_SIDECAR_ID ($CLAMAV_PCRE2)"
 mkdir -p "$WORK"
-log "docker save ${CLAMAV_IMAGE_REPO}:${CLAMAV_IMAGE_TAG} (before any archive is loaded)"
-docker save "${CLAMAV_IMAGE_REPO}:${CLAMAV_IMAGE_TAG}" | gzip -n -6 > "$WORK/clamav.tar.gz"
+log "docker save ${CLAMAV_SIDECAR_REF} (before any archive is loaded)"
+docker save "${CLAMAV_SIDECAR_REF}" | gzip -n -6 > "$WORK/clamav.tar.gz"
 CANDIDATE=0
 CANDIDATE_TAR_SHA=""
 if [[ -n "$CANDIDATE_TAR" ]]; then
@@ -281,6 +293,9 @@ CONSOLE_BINARY_SHA="$(sha256sum "$OV/opt/culvert-appliance/console/culvert-conso
 ACCESS_BINARY_SHA="$(sha256sum "$OV/opt/culvert-appliance/console/culvert-access" | cut -d' ' -f1)"
 cp "$REPO/scripts/install.sh" "$OV/opt/culvert-appliance/install.sh"
 cp "$MANIFEST" "$OV/var/lib/culvert-appliance/manifest.env"
+# The built sidecar's identity (first boot refuses a loaded image without it).
+printf '\n# ── ClamAV sidecar built by build-ova.sh ──\nCLAMAV_SIDECAR_ID=%s\n' "$CLAMAV_SIDECAR_ID" \
+  >> "$OV/var/lib/culvert-appliance/manifest.env"
 if [[ "$CANDIDATE" -eq 1 ]]; then
   # Later keys win when the guest sources the manifest: the application pins
   # now name the loaded candidate image, and CANDIDATE_BUILD=1 is what makes
@@ -345,8 +360,8 @@ archive_names_digest "$OV/var/lib/culvert-appliance/images/culvert.tar.gz" "$APP
 # (archive-identity.sh, F-OVA-CLAMAV-1).
 archive_platform_closure "$OV/var/lib/culvert-appliance/images/culvert.tar.gz" linux/amd64 "$APP_IMAGE_INDEX_DIGEST" "$APP_IMAGE_AMD64_DIGEST" \
   || die "the saved application archive does not carry the complete pinned linux/amd64 image — refusing to bake it"
-archive_platform_closure "$OV/var/lib/culvert-appliance/images/clamav.tar.gz" linux/amd64 "$CLAMAV_IMAGE_INDEX_DIGEST" "$CLAMAV_IMAGE_AMD64_DIGEST" \
-  || die "the saved ClamAV archive does not carry the complete pinned linux/amd64 image — refusing to bake it"
+archive_platform_closure "$OV/var/lib/culvert-appliance/images/clamav.tar.gz" linux/amd64 "$CLAMAV_SIDECAR_ID" "$CLAMAV_SIDECAR_ID" \
+  || die "the saved ClamAV archive does not carry the complete built linux/amd64 sidecar image — refusing to bake it"
 # ...and must RUN from that content alone: load into an empty disposable
 # containerd store with no registry, create a container, execute a binary.
 "$HERE/cold-load-check.sh" --dind "$COLDLOAD_DIND_IMAGE" \
@@ -354,8 +369,8 @@ archive_platform_closure "$OV/var/lib/culvert-appliance/images/clamav.tar.gz" li
   --id "$APP_IMAGE_INDEX_DIGEST" --run "/app/deploy/bin/culvert-maint -version" \
   || die "the application archive does not run from its own content in an empty store — refusing to bake it"
 "$HERE/cold-load-check.sh" --dind "$COLDLOAD_DIND_IMAGE" \
-  --archive "$OV/var/lib/culvert-appliance/images/clamav.tar.gz" --ref "${CLAMAV_IMAGE_REPO#docker.io/}:${CLAMAV_IMAGE_TAG}" \
-  --id "$CLAMAV_IMAGE_INDEX_DIGEST" --run "clamd --version" \
+  --archive "$OV/var/lib/culvert-appliance/images/clamav.tar.gz" --ref "$CLAMAV_SIDECAR_REF" \
+  --id "$CLAMAV_SIDECAR_ID" --run "clamd --version" \
   || die "the ClamAV archive does not run from its own content in an empty store — refusing to bake it"
 APP_TAR_SHA="$(sha256sum "$OV/var/lib/culvert-appliance/images/culvert.tar.gz" | cut -d' ' -f1)"
 CLAM_TAR_SHA="$(sha256sum "$OV/var/lib/culvert-appliance/images/clamav.tar.gz" | cut -d' ' -f1)"
@@ -364,6 +379,7 @@ INSTALL_SHA="$(sha256sum "$REPO/scripts/install.sh" | cut -d' ' -f1)"
 BUILD_TS="$(date -u -d "@$SOURCE_DATE_EPOCH" +%Y-%m-%dT%H:%M:%SZ)"
 BUILD_WALL="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 BI_INSTALL_SHA="$INSTALL_SHA" BI_APP_VERSION="$APP_VERSION" BI_MAINT_VERSION="$MAINT_VERSION" \
+BI_CLAM_SIDECAR_ID="$CLAMAV_SIDECAR_ID" BI_CLAM_PCRE2="$CLAMAV_PCRE2" \
 BI_CONTAINERD="$HOST_CONTAINERD" BI_COSIGN="$COSIGN_RESULT" BI_BASE_GPG="$BASE_GPG" BI_APP_TAR_SHA="$APP_TAR_SHA" BI_CLAM_TAR_SHA="$CLAM_TAR_SHA" \
 BI_VERSION="$VERSION" BI_OVA="$OVA_BASENAME.ova" BI_GIT_COMMIT="$GIT_COMMIT" BI_GIT_DIRTY="$GIT_DIRTY" \
 BI_BUILD_TS="$BUILD_TS" BI_BUILD_WALL="$BUILD_WALL" \
@@ -400,7 +416,9 @@ info = {
                   "cosign": E["BI_COSIGN"], "baked_tar_sha256": E["BI_APP_TAR_SHA"],
                   "clamav_image": E["CLAMAV_IMAGE_REPO"], "clamav_tag": E["CLAMAV_IMAGE_TAG"],
                   "clamav_index_digest": E["CLAMAV_IMAGE_INDEX_DIGEST"], "clamav_amd64_digest": E["CLAMAV_IMAGE_AMD64_DIGEST"],
-                  "clamav_baked_tar_sha256": E["BI_CLAM_TAR_SHA"]},
+                  "clamav_baked_tar_sha256": E["BI_CLAM_TAR_SHA"],
+                  "clamav_sidecar_ref": E["CLAMAV_SIDECAR_REF"], "clamav_sidecar_image_id": E["BI_CLAM_SIDECAR_ID"],
+                  "clamav_sidecar_pcre2": E["BI_CLAM_PCRE2"]},
   "virtual_hardware": {"vcpus": int(E["VM_VCPUS"]), "memory_mb": int(E["VM_MEMORY_MB"]), "disk_gb": int(E["VM_DISK_GB"]),
                        "hw_version": E["VM_HW_VERSION"], "nic": "E1000 x1", "disk_format": "vmdk streamOptimized (thin)"},
   "build_tools": {"qemu-img": v("qemu-img --version | head -1"), "libguestfs": v("virt-customize --version"),

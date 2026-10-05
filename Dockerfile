@@ -182,6 +182,9 @@ COPY --chown=proxy:proxy yara/ ./yara/
 # channel. Never read at container runtime; the proxy process ignores it.
 COPY --chown=proxy:proxy docker-compose.yml docker-compose.maint-agent.yml ./deploy/
 COPY --chown=proxy:proxy packaging/ ./deploy/packaging/
+# The ClamAV sidecar build context (docker-compose.yml `build:`), so a host
+# without the local-only sidecar tag can build it from the pinned base.
+COPY --chown=proxy:proxy appliance/clamav/Dockerfile ./deploy/appliance/clamav/Dockerfile
 COPY --from=maintbuilder --chown=proxy:proxy /culvert-maint ./deploy/bin/culvert-maint
 
 # /data is the persistent volume for the Root CA bundle, policy rules, and
