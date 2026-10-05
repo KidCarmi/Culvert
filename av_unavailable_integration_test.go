@@ -21,6 +21,7 @@ package main
 import (
 	"bufio"
 	"encoding/binary"
+	"html"
 	"io"
 	"net"
 	"net/http"
@@ -199,7 +200,9 @@ func avIntegrationSetup(t *testing.T, posture string) (*fakeClamd, *httptest.Ser
 
 	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/octet-stream")
-		_, _ = w.Write([]byte("payload-for:" + r.URL.Path))
+		// A distinct body per path (so each fetch is a fresh, uncached scan);
+		// escaped because it reflects request input.
+		_, _ = w.Write([]byte("payload-for:" + html.EscapeString(r.URL.Path)))
 	}))
 	t.Cleanup(origin.Close)
 	return clamd, origin

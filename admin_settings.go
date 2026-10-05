@@ -938,6 +938,102 @@ func SaveAdminSettings() error { return saveAdminSettingsWithOverrides(adminSave
 // applies it to the live runtime. Pre-replacement failures leave runtime untouched.
 // The UI-policy override handles ErrReplacedNotSynced as a landed replacement,
 // applying the target while retaining the durability error for its caller.
+// snapshotYARASettings records the YARA engine settings — the TARGET posture
+// for a persist-before-apply settings PUT (2E-A), else the live values.
+func snapshotYARASettings(s *AdminSettings, target *yaraSettingsTarget) {
+	s.YARASettingsSaved = true
+	if target != nil {
+		s.YARAEnabled = target.Enabled
+		s.YARATimeoutSecs = target.TimeoutSecs
+		s.YARAMaxInflight = target.MaxInflight
+		s.YARAOnTimeout = target.OnTimeout
+		s.YARAOnSaturation = target.OnSaturation
+		s.YARAAlertDegraded = target.AlertDegraded
+		return
+	}
+	s.YARAEnabled = yaraGetEnabled()
+	s.YARATimeoutSecs = yaraGetTimeoutSecs()
+	s.YARAMaxInflight = yaraGetMaxInflight()
+	s.YARAOnTimeout = yaraGetOnTimeout()
+	s.YARAOnSaturation = yaraGetOnSaturation()
+	s.YARAAlertDegraded = yaraGetAlertDegraded()
+}
+
+// snapshotDecRedaction records destination privacy (ADR-0011 §4 / PR3 Option
+// B / 2E-B): the TARGET posture+key+id for a persist-before-apply redaction
+// PUT, else the live values. The target path is what makes the redaction
+// write durable-before-live and serialized under the caller's
+// adminSettingsMu (which also guards the rotation sequence and receipts).
+func snapshotDecRedaction(s *AdminSettings, target *decRedactionTarget) {
+	if target != nil {
+		s.DecryptionRedactHosts = target.RedactHosts
+		s.TrafficPseudonymKey = target.Key
+		s.TrafficPseudonymKeyID = target.KeyID
+		s.TrafficKeyRotationSeq = target.Seq
+		s.TrafficKeyRotationReceipts = target.Receipts
+		return
+	}
+	s.DecryptionRedactHosts = decRedactHosts()
+	s.TrafficPseudonymKey = getTrafficPseudonymKey() // node-local pseudonym key (nil when unset)
+	s.TrafficPseudonymKeyID = getTrafficPseudonymKeyID()
+	s.TrafficKeyRotationSeq = trafficRotationSeq
+	s.TrafficKeyRotationReceipts = trafficRotationReceipts
+}
+
+// adminSaveTargets is what a save resolves INSIDE adminSettingsMu before it
+// snapshots anything: the rewrite and upstream TARGETS a persist-before-apply
+// mutation will publish once the durable write lands, and the upstream
+// sections a rejected stored document forces the save to carry forward.
+type adminSaveTargets struct {
+	rewrite          []RewriteRule
+	rewriteApply     bool
+	upstreamDoc      upstream.Document
+	upstreamApply    bool
+	retainedLegacy   []UpstreamEntry
+	upstreamRetained bool
+}
+
+// resolveAdminSaveTargets must be called with adminSettingsMu held.
+func resolveAdminSaveTargets(ov adminSaveOverrides) (adminSaveTargets, error) {
+	// Rewrite target construction (2D-C §24/§27): read-current + fence + build
+	// INSIDE the lock, so no other save (or bulk publish, which also enters
+	// adminSettingsMu) can land between the read and this save's publication.
+	var t adminSaveTargets
+	if ov.rewriteMutate != nil {
+		target, err := ov.rewriteMutate(rewriter.List())
+		if err != nil {
+			return t, err
+		}
+		t.rewrite, t.rewriteApply = target, true
+	}
+	// Upstream target construction (2F-C): fence + build + validate INSIDE
+	// the lock against the CURRENT managed document; the pool is untouched
+	// until the durable write lands.
+	t.upstreamDoc = upstreamPool.Document()
+	// Review blocker 3: while the STORED document is rejected the save
+	// carries the rejected sections forward verbatim (never the empty live
+	// pool) and no managed mutation is accepted.
+	var retainedDoc upstream.Document
+	retainedDoc, t.retainedLegacy, t.upstreamRetained = upstreamRetainedSections()
+	if t.upstreamRetained {
+		if ov.upstreamMutate != nil {
+			return t, errUpstreamDocumentRejected
+		}
+		t.upstreamDoc = retainedDoc
+	}
+	if ov.upstreamMutate != nil {
+		target, err := ov.upstreamMutate(t.upstreamDoc)
+		if err != nil {
+			return t, err
+		}
+		if err := upstream.ValidateEffective(upstreamPool.YAMLEntries(), target.Entries); err != nil {
+			return t, err
+		}
+		t.upstreamDoc, t.upstreamApply = target, true
+	}
+	return t, nil
+}
+
 func saveAdminSettingsWithOverrides(ov adminSaveOverrides) error {
 	// Hold adminSettingsMu across the ENTIRE snapshot → write → apply sequence, not
 	// just the path read. Every save (omnibus or override-carrying) is thereby
@@ -958,43 +1054,13 @@ func saveAdminSettingsWithOverrides(ov adminSaveOverrides) error {
 			return err
 		}
 	}
-	// Rewrite target construction (2D-C §24/§27): read-current + fence + build
-	// INSIDE the lock, so no other save (or bulk publish, which also enters
-	// adminSettingsMu) can land between the read and this save's publication.
-	var rewriteTarget []RewriteRule
-	rewriteApply := false
-	if ov.rewriteMutate != nil {
-		target, err := ov.rewriteMutate(rewriter.List())
-		if err != nil {
-			return err
-		}
-		rewriteTarget, rewriteApply = target, true
+	t, err := resolveAdminSaveTargets(ov)
+	if err != nil {
+		return err
 	}
-	// Upstream target construction (2F-C): fence + build + validate INSIDE
-	// the lock against the CURRENT managed document; the pool is untouched
-	// until the durable write lands.
-	upstreamDoc := upstreamPool.Document()
-	upstreamApply := false
-	// Review blocker 3: while the STORED document is rejected the save
-	// carries the rejected sections forward verbatim (never the empty live
-	// pool) and no managed mutation is accepted.
-	retainedDoc, retainedLegacy, upstreamRetained := upstreamRetainedSections()
-	if upstreamRetained {
-		if ov.upstreamMutate != nil {
-			return errUpstreamDocumentRejected
-		}
-		upstreamDoc = retainedDoc
-	}
-	if ov.upstreamMutate != nil {
-		target, err := ov.upstreamMutate(upstreamDoc)
-		if err != nil {
-			return err
-		}
-		if err := upstream.ValidateEffective(upstreamPool.YAMLEntries(), target.Entries); err != nil {
-			return err
-		}
-		upstreamDoc, upstreamApply = target, true
-	}
+	rewriteTarget, rewriteApply := t.rewrite, t.rewriteApply
+	upstreamDoc, upstreamApply := t.upstreamDoc, t.upstreamApply
+	retainedLegacy, upstreamRetained := t.retainedLegacy, t.upstreamRetained
 	path := adminSettingsPath
 	if path == "" {
 		// No persistence configured: the (empty) write trivially succeeds, so a
@@ -1093,46 +1159,12 @@ func saveAdminSettingsWithOverrides(ov adminSaveOverrides) error {
 	s.LogRetentionDays, s.LogRetentionMaxGB = getLogStoreDesired()
 	s.LogCriticalDiskPct = getCriticalDiskPct()
 
-	// YARA engine settings — the TARGET posture for a persist-before-apply
-	// settings PUT (2E-A), else the live values.
-	s.YARASettingsSaved = true
-	if ov.yaraSettings != nil {
-		s.YARAEnabled = ov.yaraSettings.Enabled
-		s.YARATimeoutSecs = ov.yaraSettings.TimeoutSecs
-		s.YARAMaxInflight = ov.yaraSettings.MaxInflight
-		s.YARAOnTimeout = ov.yaraSettings.OnTimeout
-		s.YARAOnSaturation = ov.yaraSettings.OnSaturation
-		s.YARAAlertDegraded = ov.yaraSettings.AlertDegraded
-	} else {
-		s.YARAEnabled = yaraGetEnabled()
-		s.YARATimeoutSecs = yaraGetTimeoutSecs()
-		s.YARAMaxInflight = yaraGetMaxInflight()
-		s.YARAOnTimeout = yaraGetOnTimeout()
-		s.YARAOnSaturation = yaraGetOnSaturation()
-		s.YARAAlertDegraded = yaraGetAlertDegraded()
-	}
-
+	snapshotYARASettings(&s, ov.yaraSettings)
 	snapshotAVUnavailable(&s, ov.avUnavailable)
 	snapshotAutoExcludeTunables(&s, ov.autoExclude)
 	snapshotSupportRetention(&s, ov.supportRetention) // Slice B: configurable retention caps
 	snapshotPolicyLearning(&s, ov.policyLearning)     // ADR-0025 M5A: governed enablement + recommendable guardrail
-	// Destination privacy (ADR-0011 §4 / PR3 Option B / 2E-B): the TARGET
-	// posture+key+id for a persist-before-apply redaction PUT, else the live
-	// values. The target path is what makes the redaction write durable-
-	// before-live and serialized under this save's adminSettingsMu.
-	if ov.decRedaction != nil {
-		s.DecryptionRedactHosts = ov.decRedaction.RedactHosts
-		s.TrafficPseudonymKey = ov.decRedaction.Key
-		s.TrafficPseudonymKeyID = ov.decRedaction.KeyID
-		s.TrafficKeyRotationSeq = ov.decRedaction.Seq
-		s.TrafficKeyRotationReceipts = ov.decRedaction.Receipts
-	} else {
-		s.DecryptionRedactHosts = decRedactHosts()
-		s.TrafficPseudonymKey = getTrafficPseudonymKey() // node-local pseudonym key (nil when unset)
-		s.TrafficPseudonymKeyID = getTrafficPseudonymKeyID()
-		s.TrafficKeyRotationSeq = trafficRotationSeq // guarded by this save's adminSettingsMu
-		s.TrafficKeyRotationReceipts = trafficRotationReceipts
-	}
+	snapshotDecRedaction(&s, ov.decRedaction)
 
 	data, err := json.MarshalIndent(s, "", "  ")
 	if err != nil {
