@@ -1,0 +1,41 @@
+{
+  "schema": 1,
+  "date": "2026-10-05",
+  "result": "fail_preserved",
+  "source_revision": "4f27d945b3c676899e65018e50aafef693c7c227",
+  "evidence": {
+    "campaign": "esxi-run-4f27d945-attempt2",
+    "path": "evidence/08-backups.txt",
+    "sha256": "d013e4c306d91a5150e48357753e46f039d9685722112ff3d69c22da46b5d86e",
+    "bytes": 125,
+    "http_status": 200,
+    "available": false,
+    "reason": "maintenance agent unreachable: Get \"http://unix/v1/backups\": context deadline exceeded"
+  },
+  "localized_failure": "Control-plane Unix HTTP request to maintenance-agent GET /v1/backups returned context deadline exceeded before a usable agent response; the outer controller received the application HTTP response.",
+  "source_configuration": {
+    "backups_api.go:193": "context.WithTimeout(ctx, 10*time.Second)",
+    "backups_api.go:84": "client.Do(req); error wrapped as maintenance agent unreachable",
+    "release_wiring.go:769": "Unix dialer timeout 10 seconds; endpoint HTTP client total timeout 30 seconds",
+    "backups_api.go:162": "Shared negative listing result could be reused from cache"
+  },
+  "elapsed_timing": {
+    "original_request_start_end_retained": false,
+    "ten_seconds_is": "Configured request-context deadline, not independently measured outer request elapsed",
+    "outer_controller_deadline": "Not asserted from artifact-source code; actual controller revision must be established separately"
+  },
+  "unresolved": [
+    "Whether this controller response represented a fresh RPC timeout or a cached negative result",
+    "Unix socket connection/accept wait versus agent handler work",
+    "Docker Compose CLI startup versus backup enumeration/storage delay"
+  ],
+  "missing_evidence": [
+    "Correlated original request/agent/runner span timestamps and request identity",
+    "Original controller request start/end timestamps"
+  ],
+  "non_closure": [
+    "Later b579 4.359-second success and current first-list passes do not erase this failure",
+    "Cancellation-cache source fixes do not prove the historical cause",
+    "No storage causal attribution or production acceptance"
+  ]
+}
