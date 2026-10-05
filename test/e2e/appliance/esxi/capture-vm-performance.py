@@ -23,6 +23,10 @@ METRICS = {
     'mem.vmmemctl.average': 'kiloBytes',
     'virtualDisk.totalReadLatency.average': 'millisecond',
     'virtualDisk.totalWriteLatency.average': 'millisecond',
+    'virtualDisk.read.average': 'kiloBytesPerSecond',
+    'virtualDisk.write.average': 'kiloBytesPerSecond',
+    'virtualDisk.numberReadAveraged.average': 'number',
+    'virtualDisk.numberWriteAveraged.average': 'number',
 }
 
 
@@ -35,7 +39,7 @@ def timestamp(value):
     return parsed
 
 
-def summarize(data, expected_ref, start=None, end=None):
+def summarize(data, expected_ref, start=None, end=None, required_interval=None):
     if (start is None) != (end is None) or (start and start > end):
         raise ValueError('invalid sample window')
     samples = data.get('sample')
@@ -54,6 +58,8 @@ def summarize(data, expected_ref, start=None, end=None):
         if type(interval) is not int or not 1 <= interval <= 86400:
             raise ValueError('invalid sampling interval')
         intervals.add(interval)
+    if required_interval is not None and intervals != {required_interval}:
+        raise ValueError('required realtime sample interval unavailable')
     selected = [i for i, time in enumerate(times) if start is None or start <= time <= end]
     result = []
     seen = set()
@@ -97,6 +103,7 @@ def main(argv=None):
     parser.add_argument('--samples', type=int, choices=range(1, 181), default=120)
     parser.add_argument('--start')
     parser.add_argument('--end')
+    parser.add_argument('--require-realtime', action='store_true', help='Refuse a fallback interval other than 20 seconds')
     args = parser.parse_args(argv)
     start = timestamp(args.start) if args.start else None
     end = timestamp(args.end) if args.end else None
@@ -106,7 +113,7 @@ def main(argv=None):
     raw, _stderr, summary = destinations(lab, args.label, 'vm-performance')
     vm = lab.vm(timeout=20)
     report = {'schema_version': 1, 'started_at': utc()}
-    data = lab.gov('metric.sample', f'-n={args.samples}', '-t', lab.state['path'], *METRICS, timeout=60)
+    data = lab.gov('metric.sample', '-i=real', f'-n={args.samples}', '-t', lab.state['path'], *METRICS, timeout=60)
     encoded = json.dumps(data).encode('utf-8')
     if len(encoded) > LIMIT:
         raise ValueError('raw performance bound')
@@ -115,7 +122,7 @@ def main(argv=None):
     # Recheck ownership/placement following the query, before attributing it.
     lab.vm(timeout=20)
     try:
-        report.update(summarize(data, vm['self'], start, end), complete=True)
+        report.update(summarize(data, vm['self'], start, end, 20 if args.require_realtime else None), complete=True)
     except (ValueError, TypeError, KeyError):
         report.update(complete=False, diagnosis='invalid_or_unattributable_metric_response')
     report['finished_at'] = utc()

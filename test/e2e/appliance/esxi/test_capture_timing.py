@@ -98,6 +98,14 @@ class CaptureTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 vm.timestamp(value)
 
+    def test_production_window_refuses_five_minute_fallback(self):
+        data, ref = self.fixture()
+        self.assertEqual(vm.summarize(data, ref, required_interval=20)['intervals_seconds'], [20])
+        for row in data['sample'][0]['sampleInfo']:
+            row['interval'] = 300
+        with self.assertRaises(ValueError):
+            vm.summarize(data, ref, required_interval=20)
+
 
 if __name__ == '__main__':
     unittest.main()
