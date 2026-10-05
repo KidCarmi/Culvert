@@ -91,7 +91,7 @@ func c71Request(t *testing.T, provider string) *http.Request {
 	if err != nil {
 		t.Fatalf("encodeSession: %v", err)
 	}
-	r.AddCookie(&http.Cookie{Name: sessionCookieName, Value: tok})
+	r.AddCookie(&http.Cookie{Name: sessionCookieName, Value: tok}) // #nosec G124 -- request-side session-cookie fixture sent TO the handler; Secure/HttpOnly/SameSite are response attributes and AddCookie serialises only name=value
 	return r
 }
 
