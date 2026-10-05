@@ -1,0 +1,23 @@
+{
+  "endpoint": "https://192.168.1.78",
+  "host": null,
+  "datastore": null,
+  "network": null,
+  "folder": null,
+  "pool": null,
+  "guest_cidr": null,
+  "max_vms": null,
+  "max_vcpus": null,
+  "max_memory_mb": null,
+  "max_disk_gib": null,
+  "datastore_headroom_gib": null,
+  "host_headroom_mb": null,
+  "host_cpu_headroom_mhz": null,
+  "ova": null,
+  "ova_sha256": "e24eb542f973fb70360bad5124ef81fdab8b6f8d67af601720613cbcca3700a4",
+  "source_sha": "4c4b7728c0e6a1746e968d935b635fc652647e6f",
+  "image_id": "sha256:384f4c4b1bad91be93dc8b78adb974b6c57dd9b4c8f534bfdbafc2c1e4f1ab04",
+  "run_dir": null,
+  "govc": "govc",
+  "bash": "bash"
+}

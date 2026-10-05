@@ -1,0 +1,180 @@
+{
+  "schema": 1,
+  "date": "2026-10-03",
+  "operator": "LOCAL-ESXI",
+  "branch": "test/esxi-qualification",
+  "pinned_harness_baseline": "b9fc086f61df4122d0aa2090acd4d41a8f5f7502",
+  "expected_original_artifact": {
+    "source_sha": "4c4b7728c0e6a1746e968d935b635fc652647e6f",
+    "ova_sha256": "e24eb542f973fb70360bad5124ef81fdab8b6f8d67af601720613cbcca3700a4",
+    "image_id": "sha256:384f4c4b1bad91be93dc8b78adb974b6c57dd9b4c8f534bfdbafc2c1e4f1ab04",
+    "locally_verified": false
+  },
+  "controller": {
+    "os": "Windows",
+    "git": "2.53.0.windows.1",
+    "openssh": "OpenSSH_for_Windows_9.5p2",
+    "python": "3.12",
+    "pyvmomi_import_available": true,
+    "github_read_write": true,
+    "govc": "0.56.0",
+    "govc_windows_x86_64_zip_sha256": "c97b7d7982b8ce1876213d4fff61c02cef404885bc41b4829f47719881ad8c6c",
+    "vcsim_windows_x86_64_zip_sha256": "5fb462927f839606f012e4c6ddf3534d006b9461640d6289ce7afb035b9b19e6",
+    "tool_provenance": "https://github.com/vmware/govmomi/releases/tag/v0.56.0",
+    "credential_values_recorded": false
+  },
+  "results": [
+    {
+      "id": "LOCAL-ACCESS-1",
+      "result": "PASS",
+      "scope": "TCP 443 on owner-designated endpoint is reachable from this terminal"
+    },
+    {
+      "id": "LOCAL-TLS-1",
+      "result": "BLOCKED",
+      "scope": "Default certificate validation",
+      "observed": "unable to get local issuer certificate"
+    },
+    {
+      "id": "ADAPTER-UNIT",
+      "result": "PASS",
+      "scope": "32 controller safety/evidence tests; no hypervisor or appliance claims"
+    },
+    {
+      "id": "ADAPTER-SHELL",
+      "result": "PASS",
+      "scope": "Both shell scripts parse; library hook sources guest functions without QEMU dispatch"
+    },
+    {
+      "id": "ADAPTER-SIM",
+      "result": "PASS",
+      "scope": "Loopback vcsim: govc JSON, powered-on read, wrong-UUID refusal before power-off, owned deletion, idempotent down, partial-import ownership and cleanup"
+    },
+    {
+      "id": "SIM-UPLOAD-DIGEST",
+      "result": "BLOCKED",
+      "scope": "Synthetic OVA only",
+      "observed": "vcsim has no NFC upload checksum; govc -m refuses before power-on. Gate retained."
+    },
+    {
+      "id": "SCOPE-PREFLIGHT",
+      "result": "BLOCKED",
+      "scope": "Real adapter command",
+      "observed": "missing scope: ova; placement and requested-profile capacity independently checked read-only; refused before import"
+    },
+    {
+      "id": "OVA-VERIFY",
+      "result": "BLOCKED",
+      "scope": "Original file location unavailable"
+    },
+    {
+      "id": "ESXI-IMPORT-BOOT",
+      "result": "NOT RUN"
+    },
+    {
+      "id": "VMWARE-PROPERTY-DELIVERY",
+      "result": "NOT RUN"
+    },
+    {
+      "id": "BASELINE-GUEST",
+      "result": "NOT RUN"
+    },
+    {
+      "id": "OS-UPDATE-REBOOT-PERSISTENCE",
+      "result": "NOT RUN"
+    },
+    {
+      "id": "CLAMAV-FAILURE-POSTURE",
+      "result": "NOT RUN"
+    },
+    {
+      "id": "ACTUAL-RESTORE",
+      "result": "NOT RUN"
+    },
+    {
+      "id": "TWO-IMPORT-IDENTITY",
+      "result": "NOT RUN"
+    },
+    {
+      "id": "FIRSTBOOT-NETWORK-POWER-FAULTS",
+      "result": "NOT RUN"
+    },
+    {
+      "id": "F-DISK-1",
+      "result": "KNOWN FAILURE",
+      "scope": "Prior CI finding in #1535, not reproduced locally; remains open"
+    },
+    {
+      "id": "AUTHORIZED-CAPACITY",
+      "result": "PASS",
+      "scope": "Read-only admission for requested 2 vCPU / 4096 MiB / 40 GiB on DataStore2; not OVA verification"
+    }
+  ],
+  "real_vms_created": 0,
+  "real_host_configuration_changes": 0,
+  "risk_acceptance": false,
+  "qualification": "BLOCKED / INCOMPLETE",
+  "next_inputs": [
+    "original OVA transfer route or separately identified rebuilt OVA file"
+  ],
+  "followup": {
+    "date": "2026-10-03",
+    "authenticated_inventory": "PASS",
+    "esxi_version": "VMware ESXi 8.0.1 build-21813344",
+    "tls": "owner-authorized endpoint-specific verification exception; original CA trust failure remains",
+    "credentials": "Windows DPAPI PSCredential file; decrypted locally into child environment; no values recorded",
+    "authorized_vm_budget": {
+      "vcpus": 2,
+      "memory_mib": 4096,
+      "disk_gib": 40,
+      "network": "default VM Network",
+      "datastore": "DataStore2",
+      "max_vms": 1
+    },
+    "real_vms_created": 0,
+    "controller_tests": {
+      "result": "PASS",
+      "count": 32,
+      "includes": [
+        "SSH tunnel loss and bounded reconnect",
+        "DHCP change with stable strict host-key alias",
+        "never-returning guest deadline",
+        "remaining suite budget",
+        "real loopback forwarding process loss/recovery"
+      ]
+    },
+    "simulator_regression": "PASS for ownership/cleanup; NFC upload checksum still BLOCKED on simulator",
+    "remaining_inputs": [
+      "original OVA transfer route or separately identified rebuilt OVA file"
+    ],
+    "read_only_capacity": {
+      "checked_at": "2026-10-03T18:06:45.990594+00:00",
+      "capacity": {
+        "datastore_reserve_bytes": 49392123904,
+        "datastore_free_bytes": 534493790208,
+        "host_free_mb": 9576,
+        "host_free_cpu_mhz": 9847
+      },
+      "existing_lab_vm_count": 0,
+      "result": "PASS",
+      "scope": "Read-only admission for requested profile; OVA bytes not verified"
+    },
+    "admission_headroom": {
+      "datastore_gib": 64,
+      "host_ram_mib": 4096,
+      "host_cpu_mhz": 2000,
+      "basis": "conservative local thresholds"
+    },
+    "artifact_search": {
+      "ci_run_url": "https://github.com/KidCarmi/Culvert/actions/runs/37139370715",
+      "artifact_id": 11280813229,
+      "archive_sha256": "3063db4a03e6ffc26946fd1eafe6ef0c0558a286d1ed3b5872e287722079412f",
+      "archive_contains_ova": false,
+      "rebuilt_ova_sha256_from_ci_evidence": "07ffa55482415016a0654fc24c0debc74abe7d31aeb7de43ff47a832bed826ab",
+      "rebuilt_ova_locally_verified": false,
+      "remote_ci_guest_boot": "FAIL: no SSH within 2400s; serial console file empty",
+      "local_build_capability": "WSL not installed; docker and qemu-system-x86_64 not on PATH",
+      "interpretation": "Build evidence is not the artifact and does not qualify original OVA or ESXi"
+    }
+  }
+}

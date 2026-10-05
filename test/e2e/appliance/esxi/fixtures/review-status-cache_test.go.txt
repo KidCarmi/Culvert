@@ -1,0 +1,29 @@
+package main
+import("context";"encoding/json";"net/http";"net/http/httptest";"sync/atomic";"testing";"time")
+type AgentEndpoint struct{BaseURL string;Client *http.Client}
+var endpoint AgentEndpoint
+const RoleViewer=1
+func requireRole(http.ResponseWriter,*http.Request,int)bool{return true} // Cache-only proof; does not test authentication.
+func resolveLocalMaintAgentEndpoint()(AgentEndpoint,bool){return endpoint,true}
+func jsonOK(w http.ResponseWriter,v any){w.Header().Set("Content-Type","application/json");_ = json.NewEncoder(w).Encode(v)}
+func TestCancelledFetchPoisonsNextHealthyViewerForCacheTTL(t *testing.T){
+ entered:=make(chan struct{}); var hits atomic.Int32
+ agent:=httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter,r *http.Request){
+  if hits.Add(1)==1{close(entered);<-r.Context().Done();return}
+  jsonOK(w,map[string]any{"agent_version":"v1.0.260-candidate.gb579ca28c9d9","privilege_mode":"sudoers","compose_stack_up":true})
+ })); defer agent.Close();endpoint=AgentEndpoint{agent.URL,agent.Client()}
+ ctx,cancel:=context.WithCancel(context.Background());defer cancel()
+ request:=httptest.NewRequest("GET","/api/maintenance-agent",nil).WithContext(ctx)
+ done:=make(chan struct{});go func(){apiMaintAgentStatus(httptest.NewRecorder(),request);close(done)}()
+ select{case <-entered:case <-time.After(3*time.Second):t.Fatal("agent did not receive initial request")}
+ cancel();select{case <-done:case <-time.After(3*time.Second):t.Fatal("handler did not finish after cancellation")}
+ healthy:=httptest.NewRecorder();apiMaintAgentStatus(healthy,httptest.NewRequest("GET","/api/maintenance-agent",nil))
+ var result map[string]any;if err:=json.Unmarshal(healthy.Body.Bytes(),&result);err!=nil{t.Fatal(err)}
+ if result["available"]!=false || hits.Load()!=1{t.Fatalf("reproduction absent: available=%v backend_hits=%d",result["available"],hits.Load())}
+ t.Log("REPRODUCED: one cancelled request leaves next healthy viewer unavailable without querying healthy backend")
+ maintAgentStatusCache.at=time.Now().Add(-maintAgentStatusCacheTTL-time.Second)
+ after:=httptest.NewRecorder();apiMaintAgentStatus(after,httptest.NewRequest("GET","/api/maintenance-agent",nil))
+ if err:=json.Unmarshal(after.Body.Bytes(),&result);err!=nil{t.Fatal(err)}
+ if result["available"]!=true || hits.Load()!=2{t.Fatalf("expiry did not recover: available=%v backend_hits=%d",result["available"],hits.Load())}
+ t.Log("After cache expiry the unchanged backend is available; real auth bypass was not exercised")
+}

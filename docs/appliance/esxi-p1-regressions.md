@@ -1,0 +1,164 @@
+# b579 LAB P1 regressions
+
+These are one-shot controller stages for source
+`b579ca28c9d936e9141292ce5ec564a26feeae86` and retained OVA SHA256
+`1a713a9bedc4ee50ac4212c12048924e03abe6b8f04cb82d4d0ef95e33ef4775`.
+They neither change the OVA nor grant administrative SSH. Do not run against
+the superseded 4f candidate. One owned VM remains the resource limit.
+
+Invoke `p1-regressions.py --scope SCOPE --bind CONTROLLER_IP STAGE` through
+the existing Windows Python environment. The parent must freeze/hash all
+controller inputs before using them, retain all private attempt records, and
+run stages sequentially. The helpers perform no guest operations on import.
+No automatic retry is permitted after any stage starts. A stopped or ambiguous
+stage is BLOCKED and requires evidence review; do not remove its attempt file.
+
+## Network rollback around the lifecycle maintenance reboot
+
+After ordinary bootstrap, operator enrollment and application qualification,
+run `network-before` before the existing lifecycle maintenance reboot. This
+requires one physical management interface with one IPv4 address and an
+on-link default gateway. It uses that same address/prefix/gateway for a
+temporary static configuration; it does not invent another address.
+
+The installed, hash-pinned `culvert-net` invokes a private PATH-local shim.
+The shim runs real `netplan generate` and real `netplan apply`, then injects
+exit 71 once, after apply succeeded. It subsequently delegates both rollback
+generate/apply calls to real Netplan. This is fault injection after actual
+network activation, not proof of every possible native Netplan failure.
+The product helper must report failure while restoring the original file
+bytes/mode or absence, the address and gateway. The controller checks the
+unchanged owned IP, strict-pinned read-only operator SSH and external `/health`.
+The shim never enters any service's global PATH and is removed after success;
+failure preserves scratch evidence without automatically modifying networking.
+
+After the lifecycle's real maintenance reboot, run `network-after`. It requires
+a different boot ID, unchanged OS identity, exact original Netplan state,
+the same usable management network, operator SSH and external application
+health. The parent must require both stages to pass.
+
+### Explicit confirmation after the initial availability failure
+
+The original b579 exercise observed real static apply, injected exit 71 and
+successful real rollback, then failed its immediate default-route assertion.
+This initial availability failure remains BLOCKED; a later convergence test
+cannot establish zero interruption or rewrite that result.
+
+After reviewing the original evidence, stopping all qualification processes
+and freezing the new controller, use `--campaign confirmation` on every P1
+stage. It selects controller `secrets/p1-regressions-confirmation` and guest
+`/var/lib/culvert-lab-p1-confirmation`. The original controller and guest
+directories are never renamed, deleted or overwritten. Preparation refuses
+a remaining original stage lock or an original attempt that is not BLOCKED
+for the same owned VM. The initial attempt hash remains in every new stage
+record and in the later escrow/deletion verdict.
+
+Before any new network mutation, operator SSH and external health must work.
+Authenticated guest prevalidation then requires the exact source and helper
+hashes, original real apply/rollback trace, unchanged boot and OS/SSH identity,
+and an exact match to the initial network and Netplan baseline. A reboot or
+configuration drift blocks this campaign. Fresh guest scratch must not exist.
+
+After a new real apply/failure/rollback sequence, the confirmation records both
+route and address JSON immediately and every two seconds for at most 60 seconds.
+PASS requires three consecutive matching observations spanning at least four
+seconds, followed by usable local and external health and operator SSH. A gap,
+flap or command failure resets the stability window and remains in the durable
+private JSONL evidence; timeout keeps all observations and fails the stage.
+The claim is bounded convergence, not continuous availability. Guest execution
+is bounded to 330 seconds, console transport to 360 and controller waiting to
+480, allowing the 180-second Netplan call and 60-second convergence window.
+
+```text
+python test/e2e/appliance/esxi/p1-regressions.py --scope SCOPE --bind CONTROLLER_IP --campaign confirmation network-before
+# Existing lifecycle OS maintenance reboot, then:
+python test/e2e/appliance/esxi/p1-regressions.py --scope SCOPE --bind CONTROLLER_IP --campaign confirmation network-after
+```
+
+Continue all identity stages with `--campaign confirmation`. Also pass that
+flag to `prepare-identity-reset.py` and `delete-exported-source.py`; they require
+PASS records in the separate campaign and preserve the original BLOCKED result.
+The ordinary `fresh-recovery.py export` and restore do not depend on P1 paths.
+There is no automatic retry of either campaign. Tests in
+`test_p1_confirmation.py` cover transient gaps, sustained failure, stability
+window reset, missing evidence and preservation of the original records.
+
+### Continuing a separately proven undispatched controller attempt
+
+If confirmation stops during controller prerequisites, its BLOCKED attempt
+remains unchanged. An explicit one-shot continuation is permitted only with
+private authenticated console evidence showing that confirmation guest scratch
+does not exist, the exact source revision and the current boot ID:
+
+```text
+python test/e2e/appliance/esxi/p1-regressions.py --scope SCOPE --bind CONTROLLER_IP --campaign confirmation --continue-undispatched --continuation-proof PRIVATE_OBSERVATION_JSON network-before
+```
+
+The proof must be a direct private-run file with exit zero and empty stderr;
+its output must exactly match a retained authenticated `transport-*/result`.
+The continuation records the proof and original blocked-attempt hashes, then
+fresh guest prevalidation requires the same boot, unchanged original baseline
+and trace, and absent confirmation scratch before mutation. A separate
+`network-before.continuation-attempt.json` records the outcome. It never changes
+the original marker or invents a cause for its failure. Subsequent network,
+readiness and deletion checks accept only an explicit continuation PASS whose
+proof and original marker still match. The continuation itself cannot retry.
+
+Operator status probes use closed stdin and a 60-second timeout. Their resolved
+SSH executable, timing, exit status, partial stdout/stderr and exceptions are
+retained privately, as are console transport and controller exceptions. This
+is diagnostic hardening; inherited stdin has not been established as the cause
+of the earlier timeout. Tests in `test_p1_undispatched.py` cover preserved failure,
+missing authenticated proof, proof drift, explicit PASS and timeout diagnostics.
+
+## Reset identity last, after external backup and escrow verification
+
+First run `identity-before`, preserving the old active console password,
+operator public key, host pin and OS/SSH identity in the private run directory.
+Export the backup and CA/log passphrase escrow before reset. The parent's
+verified exporter supplies a private JSON readiness record containing the
+same `uuid`, exact `ova_sha256`, `backup_export_verified: true` and
+`escrow_export_verified: true`. These are an explicit parent evidence contract;
+this helper does not itself prove that backup restoration into a fresh VM works.
+
+Run `identity-reset --escrow-evidence RECORD`. Authenticated local sudo invokes
+the exact installed reset helper and answers its confirmation through stdin.
+The initial transport acknowledgment proves only dispatch. PASS requires the
+owned VM to become powered off independently; no hypervisor force-off is used.
+
+Run `identity-power-on`, which powers on only that same owned, observed-off VM.
+Run `identity-bootstrap`: the original active password file is preserved,
+the existing exact-pixel observer reads the new one-time handoff twice, and
+the genuine F2/PAM forced-password-change sequence authenticates a new password.
+Neither old host pin nor old operator key is replaced or re-enrolled.
+
+After first boot completes, run `identity-after`. The local authenticated
+console collects a changed machine ID, boot ID and Ed25519 host key, an empty
+fresh operator authorization file and completed key re-import. It makes one
+`pam_authenticate` call against the real `login` PAM service with the old
+password; exactly one password conversation and `PAM_AUTH_ERR` are required.
+This is a real PAM refusal, not a hash comparison, but it does not inject a
+failed password into the interactive F2 login session. New password acceptance
+was separately proved by the genuine interactive PAM bootstrap.
+
+The controller pins the new SSH public key observed over authenticated console
+in a separate private known-hosts file. It then requires explicit public-key
+authentication refusal for the old operator key. A timeout, changed host-key
+warning, routing error or unavailable SSH server is BLOCKED, never a refusal
+PASS. External application health must remain available.
+
+After collecting these results, the parent can delete the source VM/volumes and
+import the retained original OVA for separate fresh-appliance disaster recovery.
+These helpers do not delete VMs, import a second VM, alter ESXi configuration,
+prove fresh-appliance restore, resolve F-DISK-1 or change ClamAV disposition.
+
+## Local validation and evidence
+
+`python -m unittest discover -s test/e2e/appliance/esxi -p test_p1_regressions.py`
+uses synthetic records only; it does not connect to ESXi, authenticate or call
+PAM. Local tests validate refusal of stale identity, missing real-apply proof,
+network drift, old-password acceptance and overwritten attempt evidence.
+All raw records, scripts containing old credentials, transport results and
+screenshots remain under the existing private `secrets` ACL. Publish only
+reviewed stage verdicts and source hashes. Native runtime qualification is
+pending until these exact staged helpers run on the owned candidate.

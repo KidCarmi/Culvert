@@ -1,0 +1,58 @@
+{
+  "schema": 1,
+  "date": "2026-10-05",
+  "production_qualified": false,
+  "artifact": {
+    "source": "b579ca28c9d936e9141292ce5ec564a26feeae86",
+    "ova_sha256": "1a713a9bedc4ee50ac4212c12048924e03abe6b8f04cb82d4d0ef95e33ef4775"
+  },
+  "status_cache": {
+    "result": "defect_reproduced",
+    "controller_revision": "641ca7692f60107f072d2c8d9872251d31f906e4",
+    "controller_freeze_sha256": "02f979fc9ae06e55ac4807fdb4e4a374f3d9c75cc07f20ca5f76862302aa3324",
+    "live_summary": {
+      "kind": "summary",
+      "result": "observed",
+      "cancellation_negative_cache_pattern": true,
+      "status_samples": 20,
+      "context_cancelled_samples": 15,
+      "fresh_backup_listing_matches": true,
+      "historical_A1_attribution": "not_established"
+    },
+    "cancel_elapsed_seconds": 0.109,
+    "backup_elapsed_seconds": 0.625,
+    "private_evidence_sha256": "90dfdfc3c242fdd125ec489545799f8be0c1ae987106a38e310e332e70182aed",
+    "source_repro_sha256": "475da7f54ba062ee9dadd61fafb6c6daeefce585b192c95cbcd85b2fe901c541",
+    "historical_attribution": "not_established"
+  },
+  "purge_after_flush_error": {
+    "result": "regression_reproduced",
+    "source_revision": "6a9d387383c337f47f5182bf0ba4a414a3be78c7",
+    "scope": "Native Windows actual-fork test. SST filename directories cause genuine file creation errors; not a Linux full-filesystem test. Public DropAll succeeds, clears old imm, then all blockers are removed before new writes.",
+    "new_writes": 15000,
+    "value_bytes": 512,
+    "post_drain_seconds": 1,
+    "immutable_memtables": 8,
+    "configured_NumMemtables": 5,
+    "sst_tables": 0,
+    "queued_memtables": 0,
+    "output_sha256": "50f3401bc79e545ccc648ca8e2387085b3290d4bf0bc1ccc49756ac23ac8b66d",
+    "output": "=== RUN   TestReviewPurgeAfterFlushFailure\n    review_purge_flush_test.go:27: observed actual SST creation error before calling public DropAll\n    review_purge_flush_test.go:31: DropAll returned nil and cleared every pre-purge immutable memtable\n    review_purge_flush_test.go:33: removed all 50 SST filename blockers before subsequent writes\n    review_purge_flush_test.go:37: after 1s drain wait: retained=8 NumMemtables=5 tables=0 queued=0\n    review_purge_flush_test.go:38: resumed flusher remains poisoned: unbounded retained memtables and no SST\n--- FAIL: TestReviewPurgeAfterFlushFailure (1.17s)\nFAIL\nFAIL\tgithub.com/dgraph-io/badger/v4\t1.898s\nFAIL\n"
+  },
+  "early_initrd_preparation": {
+    "result": "blocked_before_activation",
+    "active_original_sha256": "d22af6fa8e3b0c609ae3227b7e036b1262b3054b4f395ced2a4d3beedf32bf54",
+    "failures": [
+      {
+        "controller": "0b9b4955d62f9a253909c91db51f3880dae9aa25",
+        "cause": "tool discovery redirected to missing /dev/null in unpacked image",
+        "diagnostic_sha256": "12a8da02524090dbdd8ad273e1b87b4ab22bf85c2bc576d56d651a46ecd6f1b9"
+      },
+      {
+        "controller": "3fad53f2e6045ec6d4cc0284723667e2ccd0801f",
+        "cause": "strict manifest rejected regenerated random seed/mdadm/font caches and relocated rootfs udev rule",
+        "diagnostic_sha256": "75d89544d9c0f0bc9a7ae89844621a0c3fe87f062a9651be9c942f4c1459c4aa"
+      }
+    ]
+  }
+}

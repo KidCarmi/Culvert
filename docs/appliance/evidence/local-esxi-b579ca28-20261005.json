@@ -1,0 +1,1817 @@
+{
+  "schema_version": 1,
+  "date": "2026-10-05",
+  "campaign": "local-esxi-b579ca28",
+  "qualification": "COMPLETED_WITH_PRESERVED_FAILURES_AND_BLOCKERS",
+  "report_state": "SOURCE_AND_FRESH_RECOVERY_COMPLETE; NO_RELEASE_APPROVAL",
+  "production_approval": false,
+  "scope": {
+    "platform": "VMware ESXi 8.0.1 build-21813344",
+    "max_simultaneous_vms": 1,
+    "vcpus": 2,
+    "memory_mib": 4096,
+    "disk_bytes": 42949672960,
+    "virtual_hardware": "vmx-13",
+    "credential_mode": "none",
+    "tls_verification": "owner-authorized-exception",
+    "guest_network": "authorized default management port group; addresses omitted",
+    "source_vm_disposition": "deleted with backing disks; receipt and ownership ledger matched"
+  },
+  "provenance": {
+    "source_revision": "b579ca28c9d936e9141292ce5ec564a26feeae86",
+    "source_dirty": false,
+    "ova_name": "culvert-appliance-1.0.260-candidate.gb579ca28c9d9-ubuntu-24.04.ova",
+    "ova_sha256": "1a713a9bedc4ee50ac4212c12048924e03abe6b8f04cb82d4d0ef95e33ef4775",
+    "ova_workflow_run_id": 37235713308,
+    "ova_artifact_id": 11315044688,
+    "application_image_id": "sha256:24b37bc217691058e56a838821b86dfbd45b927b1c0ea8ea867a28c54d4bcc47",
+    "application_build_run_id": 37234612592,
+    "application_artifact_tar_sha256": "ec9ae4071339f0f0dda103765ae7aae2667c1bad08e9996814dd2f12d45aef61",
+    "application_baked_tar_sha256": "566ebbbaa235c3f8c87e466f9ffe561fcf02797f1ef24f4bd546707eae952a42",
+    "appliance_version": "1.0.260-candidate.gb579ca28c9d9",
+    "console_binary_sha256": "81224233df78bf182537243259e31ea5303352916fe8a0be70c736bb1053220d",
+    "compiler": "go1.26.8",
+    "provisioning_drift": false,
+    "candidate_trust_scope": "Candidate-scoped unverified image bootstrap only; this is not a release-signature qualification or production OVA approval.",
+    "clamav_image_digest": "sha256:da8463f630e2c9467c74f3da1dee6f096e61a71650e4e9f1ff9b5f687ba91aa0",
+    "shared_lab_revision": "a2db201be66e57b11812786a4d6b0eb355d39c1c",
+    "controllers": [
+      {
+        "revision": "778117dae3dbcda398ba4df0e67afd9a666c46b8",
+        "manifest_sha256": "2ed597830aa7f21e142a746f86ddbc8263d8ab2f002c9ccd0c53ce2f82a520cc",
+        "role": "import/default-PAM bootstrap"
+      },
+      {
+        "revision": "71004cb1551e199fba3bc3fd5c706fead8850afc",
+        "manifest_sha256": "31b5d5de0d4f614768844dad8f265538ad311ef9e0e0959efdd4d4e9bc9f3565",
+        "role": "pre-execution observation encoding check refused; no guest command dispatched"
+      },
+      {
+        "revision": "10b43dbd804847eff6a42c5c2c1becb4c88ad00b",
+        "manifest_sha256": "34378ea5a46820232e7b2ac9df1c614b7351218b988b60c4723ae30202ca385e",
+        "role": "remaining qualification; terminal CR accepted exactly, raw observation retained"
+      },
+      {
+        "revision": "0fa1dec453b8bdc5adf7624b09c0a9f2d61b9224",
+        "role": "separate post-OS confirmation attempt; blocked before guest probe"
+      },
+      {
+        "revision": "55444fcb41c55fe70182deb2be6df677e73de40b",
+        "role": "verified undispatched continuation, remaining source qualification, identity reset and deletion",
+        "manifest_sha256": "39fb7b8ecd375bed4cb9ebafb2bd69c537c585358fce6870a92a946b6b2036f0"
+      }
+    ],
+    "govc_local_build": {
+      "base_tag": "v0.56.0",
+      "base_commit": "81608f9b9725d64e4ed447b9a338c9f03dbf8840",
+      "patch": "test/e2e/appliance/esxi/govc-sha256-negotiation.patch",
+      "binary_sha256": "a28278c8114497e18a02aa2a47c46797d6ec4b64b7c2bef7fb30eb8c2fa550ac"
+    },
+    "production_release_signature_qualification": "not performed; disposable fixture verification is a separate LAB assertion",
+    "ova_download_url": "https://github.com/KidCarmi/Culvert/actions/runs/37235713308/artifacts/11315044688"
+  },
+  "result_categories": {
+    "PASS": "The named bounded assertion completed with retained evidence.",
+    "FAIL": "An attempted assertion or controller operation failed; later success does not erase it.",
+    "BLOCKED": "Could not validly exercise the named assertion; no pass inferred.",
+    "NOT_RUN": "Retained harness row, including generic restore placeholders; explicit later checks are listed separately.",
+    "OPEN": "Known defect or owner/security decision not closed by these tests."
+  },
+  "source_results": [
+    {
+      "area": "default-bootstrap-and-access",
+      "result": "PASS",
+      "evidence": "Default credential persisted across refresh; real F2/PAM forced password change; operator allowlisted SSH commands; shell/forwarding/file-transfer/local-admin SSH refusals.",
+      "limits": "Two enrollment controller failures remain separately recorded."
+    },
+    {
+      "area": "setup-and-traffic",
+      "result": "PASS",
+      "evidence": "Setup token required; admin setup/login; immediate role demotion; actual allow/deny egress and community category enforcement.",
+      "limits": "Identity-provider portal-cookie replay blocked; console traffic_verified boolean alone is not egress proof."
+    },
+    {
+      "area": "same-volume-actual-restore",
+      "result": "PASS",
+      "evidence": "Live commit refused; offline full restore committed under both maintenance locks; changed policy reverted, original administrator/CA/enforcement/categories/agent restored.",
+      "limits": "Same volume recovery, distinct from pending fresh-appliance recovery; historical logs outside supported archive."
+    },
+    {
+      "area": "signed-lifecycle",
+      "result": "PASS",
+      "evidence": "Unsigned apply rejected403; test-signed target apply succeeded; signed rollback restored original digest, administrator and enforcement.",
+      "limits": "Disposable registry and explicit test-only public trust were used; this is not production signing authority or approval."
+    },
+    {
+      "area": "os-maintenance-and-persistence",
+      "result": "PASS",
+      "evidence": "OS update completed20 package actions; kernel6.8.0-142 to6.8.0-146; Docker packages held; locked stack resume; no firstboot rerun; policy/CA/categories/backups/agent preserved.",
+      "limits": "Shared565s includes post-readiness test work; timing analysis distinguishes exact samples."
+    },
+    {
+      "area": "independent-postchecks",
+      "result": "PASS",
+      "evidence": "All12 independently gathered postchecks passed.",
+      "limits": "Source phase only; does not close fresh recovery or release blockers."
+    },
+    {
+      "area": "p1-network-confirmation",
+      "result": "PASS",
+      "evidence": "Real apply/rollback failure injection with bounded convergence before maintenance reboot; configuration persistence and usable networking verified after reboot passed bounded convergence checks.",
+      "limits": "Original immediate assertion failed; no zero-outage claim."
+    },
+    {
+      "area": "p1-identity-reset",
+      "result": "PASS",
+      "evidence": "All identity stages passed; reset powered off, fresh boot generated new local password/machine ID/boot ID/SSH host key; previous password and operator key rejected.",
+      "limits": "Fresh boot of the same owned VM under one-VM limit; not simultaneous clone/copy uniqueness qualification."
+    },
+    {
+      "area": "source-export-and-deletion",
+      "result": "PASS",
+      "evidence": "Recovery export receipt passed; source VM and backing disks deleted; private source evidence encrypted and plaintext run contents removed.",
+      "limits": "Recovery restore into the distinct fresh import remains pending."
+    }
+  ],
+  "preserved_failures_and_blockers": [
+    {
+      "id": "operator-enrollment-initial",
+      "result": "FAIL",
+      "domain": "controller",
+      "reason": "Kernel diagnostics displaced the exact sudo prompt. Controller refused credential input; foreground cancellation and separate authenticated observation established no enrollment mutation.",
+      "later_evidence": "Separate frozen controller continued after verified observation; original failure retained."
+    },
+    {
+      "id": "operator-enrollment-status-initial",
+      "result": "FAIL",
+      "domain": "controller observation",
+      "reason": "Post-import operator SSH validation did not complete; helper did not retain its exact underlying error.",
+      "later_evidence": "Two pinned read-only operator status checks succeeded; enrollment was not repeated."
+    },
+    {
+      "id": "network-before-initial",
+      "result": "FAIL",
+      "recorded_controller_status": "blocked",
+      "domain": "immediate availability assertion",
+      "reason": "Real apply failure injection and rollback completed, but immediate route/network assertion failed.",
+      "later_evidence": "Separate confirmation proves bounded convergence only; does not erase the transient gap or qualify zero outage."
+    },
+    {
+      "id": "network-before-confirmation-precheck",
+      "result": "BLOCKED",
+      "domain": "controller before guest dispatch",
+      "reason": "Original confirmation stopped before probe; authenticated observation proved confirmation scratch absent and same boot/source. Underlying cause unproven.",
+      "later_evidence": "Continuation bound to original attempt and authenticated result hashes under 55444fcb."
+    },
+    {
+      "id": "enrollment-observation-encoding",
+      "result": "BLOCKED",
+      "domain": "controller before guest dispatch",
+      "reason": "71004cb pre-execution encoding validation refused the observation; no guest command dispatched.",
+      "later_evidence": "10b43db accepted only the exact terminal CR form, retaining raw observation privately."
+    },
+    {
+      "id": "portal-cookie-replay",
+      "result": "BLOCKED",
+      "domain": "lab coverage",
+      "reason": "No identity provider in this lab. CI coverage is separate and does not convert this ESXi check to PASS."
+    },
+    {
+      "id": "direct-agent-backup-diagnostic",
+      "result": "BLOCKED",
+      "domain": "unsupported diagnostic identity",
+      "reason": "Two local root curl requests returned403 under Unix peer UID authentication; listing_succeeded=false. Their .004-second durations are rejection timing, not successful backup latency."
+    }
+  ],
+  "source_ledgers": [
+    {
+      "file": "checks.jsonl",
+      "sha256": "70fcef3558177b3783b8d3067ca43d43293378454273db38ff3e6cd2737b53f7",
+      "counts": {
+        "info": 3,
+        "pass": 49,
+        "blocked": 1,
+        "not-run": 1
+      },
+      "rows": [
+        {
+          "step": "ESXi",
+          "check": "access-aware-harness",
+          "result": "info"
+        },
+        {
+          "step": "2",
+          "check": "target",
+          "result": "info"
+        },
+        {
+          "step": "3",
+          "check": "operator-observe",
+          "result": "pass"
+        },
+        {
+          "step": "3",
+          "check": "status-setup-pending",
+          "result": "pass"
+        },
+        {
+          "step": "3",
+          "check": "firstboot-steps",
+          "result": "pass"
+        },
+        {
+          "step": "3a",
+          "check": "console-login",
+          "result": "pass"
+        },
+        {
+          "step": "3a",
+          "check": "password-changed",
+          "result": "pass"
+        },
+        {
+          "step": "3",
+          "check": "culvert-status-setup-pending",
+          "result": "pass"
+        },
+        {
+          "step": "3",
+          "check": "image-identity",
+          "result": "pass"
+        },
+        {
+          "step": "3",
+          "check": "setup-token",
+          "result": "pass"
+        },
+        {
+          "step": "3c",
+          "check": "operator-commands-refused",
+          "result": "pass"
+        },
+        {
+          "step": "3c",
+          "check": "forwarding-refused",
+          "result": "pass"
+        },
+        {
+          "step": "3c",
+          "check": "file-transfer-refused",
+          "result": "pass"
+        },
+        {
+          "step": "3c",
+          "check": "local-admin-ssh-refused",
+          "result": "pass"
+        },
+        {
+          "step": "3c",
+          "check": "sshd-effective",
+          "result": "pass"
+        },
+        {
+          "step": "3c",
+          "check": "local-admin-sudo-needs-password",
+          "result": "pass"
+        },
+        {
+          "step": "3d",
+          "check": "boot-timing",
+          "result": "info"
+        },
+        {
+          "step": "4a",
+          "check": "bootstrap-api-needs-token",
+          "result": "pass"
+        },
+        {
+          "step": "4",
+          "check": "setup-without-token",
+          "result": "pass"
+        },
+        {
+          "step": "4",
+          "check": "setup-with-token",
+          "result": "pass"
+        },
+        {
+          "step": "4",
+          "check": "admin-login",
+          "result": "pass"
+        },
+        {
+          "step": "4",
+          "check": "status-setup-complete",
+          "result": "pass"
+        },
+        {
+          "step": "4",
+          "check": "operator-setup-complete",
+          "result": "pass"
+        },
+        {
+          "step": "4b",
+          "check": "demotion-immediate",
+          "result": "pass"
+        },
+        {
+          "step": "4b",
+          "check": "portal-cookie-replay",
+          "result": "blocked"
+        },
+        {
+          "step": "5",
+          "check": "auth-exempt",
+          "result": "pass"
+        },
+        {
+          "step": "5",
+          "check": "default-deny",
+          "result": "pass"
+        },
+        {
+          "step": "5",
+          "check": "traffic",
+          "result": "pass"
+        },
+        {
+          "step": "5",
+          "check": "ready-rows",
+          "result": "pass"
+        },
+        {
+          "step": "5",
+          "check": "clamav-real",
+          "result": "pass"
+        },
+        {
+          "step": "5",
+          "check": "status-ready-to-enforce",
+          "result": "pass"
+        },
+        {
+          "step": "5",
+          "check": "ca-identity",
+          "result": "pass"
+        },
+        {
+          "step": "5b",
+          "check": "category-data",
+          "result": "pass"
+        },
+        {
+          "step": "5c",
+          "check": "category-enforcement",
+          "result": "pass"
+        },
+        {
+          "step": "6",
+          "check": "agent-installed",
+          "result": "pass"
+        },
+        {
+          "step": "6",
+          "check": "agent-reachable",
+          "result": "pass"
+        },
+        {
+          "step": "6",
+          "check": "agent-backup",
+          "result": "pass"
+        },
+        {
+          "step": "6",
+          "check": "backup-listed",
+          "result": "pass"
+        },
+        {
+          "step": "6",
+          "check": "restore-dry-run",
+          "result": "pass"
+        },
+        {
+          "step": "6b",
+          "check": "restore-commit",
+          "result": "not-run"
+        },
+        {
+          "step": "9",
+          "check": "post-backup-mutation",
+          "result": "pass"
+        },
+        {
+          "step": "9",
+          "check": "actual-restore",
+          "result": "pass"
+        },
+        {
+          "step": "9",
+          "check": "restore-admin-login",
+          "result": "pass"
+        },
+        {
+          "step": "9",
+          "check": "restore-enforcement",
+          "result": "pass"
+        },
+        {
+          "step": "9",
+          "check": "restore-ca",
+          "result": "pass"
+        },
+        {
+          "step": "9",
+          "check": "restore-feed-rehydrated",
+          "result": "pass"
+        },
+        {
+          "step": "9",
+          "check": "restore-categories",
+          "result": "pass"
+        },
+        {
+          "step": "9",
+          "check": "restore-agent",
+          "result": "pass"
+        },
+        {
+          "step": "9",
+          "check": "restore-complete",
+          "result": "pass"
+        },
+        {
+          "step": "6c",
+          "check": "test-only-trust",
+          "result": "pass"
+        },
+        {
+          "step": "6c",
+          "check": "unsigned-apply-refused",
+          "result": "pass"
+        },
+        {
+          "step": "6c",
+          "check": "signed-apply",
+          "result": "pass"
+        },
+        {
+          "step": "6c",
+          "check": "signed-rollback",
+          "result": "pass"
+        },
+        {
+          "step": "7",
+          "check": "os-update",
+          "result": "pass"
+        }
+      ]
+    },
+    {
+      "file": "checks-post-os-resume.jsonl",
+      "sha256": "4a0c2049415f3ffe5b194643f39ae875cb14834031ee10d676ad42da4c39e8ed",
+      "counts": {
+        "info": 1
+      },
+      "rows": [
+        {
+          "step": "ESXi",
+          "check": "post-os-resume",
+          "result": "info"
+        }
+      ]
+    },
+    {
+      "file": "checks-post-os-resume-continuation.jsonl",
+      "sha256": "33623c4af51ef07d7eac354b735843b0b190187d0cb7a93c2ef03f6ccfd527a1",
+      "counts": {
+        "info": 2,
+        "pass": 19,
+        "not-run": 1
+      },
+      "rows": [
+        {
+          "step": "ESXi",
+          "check": "post-os-resume",
+          "result": "info"
+        },
+        {
+          "step": "ESXi",
+          "check": "independent-reboot-timing",
+          "result": "pass"
+        },
+        {
+          "step": "7",
+          "check": "reboot",
+          "result": "pass"
+        },
+        {
+          "step": "7",
+          "check": "kernel",
+          "result": "pass"
+        },
+        {
+          "step": "7",
+          "check": "docker-held",
+          "result": "pass"
+        },
+        {
+          "step": "8",
+          "check": "stack-resumed",
+          "result": "pass"
+        },
+        {
+          "step": "8",
+          "check": "admin-login",
+          "result": "pass"
+        },
+        {
+          "step": "8",
+          "check": "policy-persisted",
+          "result": "pass"
+        },
+        {
+          "step": "8",
+          "check": "enforcement",
+          "result": "pass"
+        },
+        {
+          "step": "8",
+          "check": "ready",
+          "result": "pass"
+        },
+        {
+          "step": "8",
+          "check": "ca-identity",
+          "result": "pass"
+        },
+        {
+          "step": "8",
+          "check": "category-data",
+          "result": "pass"
+        },
+        {
+          "step": "8",
+          "check": "backup-listed",
+          "result": "pass"
+        },
+        {
+          "step": "8",
+          "check": "agent-reachable",
+          "result": "pass"
+        },
+        {
+          "step": "8",
+          "check": "firstboot-not-rerun",
+          "result": "pass"
+        },
+        {
+          "step": "8",
+          "check": "state-files",
+          "result": "pass"
+        },
+        {
+          "step": "8",
+          "check": "restore-persisted",
+          "result": "not-run"
+        },
+        {
+          "step": "8",
+          "check": "image-identity",
+          "result": "pass"
+        },
+        {
+          "step": "8",
+          "check": "operator-status",
+          "result": "pass"
+        },
+        {
+          "step": "8",
+          "check": "boot-timing",
+          "result": "info"
+        },
+        {
+          "step": "7",
+          "check": "esxi-boot-id-changed",
+          "result": "pass"
+        },
+        {
+          "step": "8",
+          "check": "restore-persisted",
+          "result": "pass"
+        }
+      ]
+    },
+    {
+      "file": "adapter.jsonl",
+      "sha256": "0966dfeb20a45a6af9873267e7bb7799bc34d944a36d03af231d87774f842d6d",
+      "counts": {
+        "pass": 17,
+        "info": 2,
+        "fail": 2
+      },
+      "rows": [
+        {
+          "step": "ESXi",
+          "check": "preflight",
+          "result": "pass"
+        },
+        {
+          "step": "ESXi",
+          "check": "import",
+          "result": "pass"
+        },
+        {
+          "step": "ESXi",
+          "check": "power-on",
+          "result": "pass"
+        },
+        {
+          "step": "ESXi",
+          "check": "private-keyboard-helper",
+          "result": "info"
+        },
+        {
+          "step": "ESXi",
+          "check": "bootstrap-persistent-display",
+          "result": "pass"
+        },
+        {
+          "step": "ESXi",
+          "check": "bootstrap-pam-forced-change",
+          "result": "pass"
+        },
+        {
+          "step": "ESXi",
+          "check": "access-aware-bootstrap",
+          "result": "pass"
+        },
+        {
+          "step": "ESXi",
+          "check": "enrollment-foreground-cancelled",
+          "result": "info"
+        },
+        {
+          "step": "ESXi",
+          "check": "operator-enrollment-initial",
+          "result": "fail"
+        },
+        {
+          "step": "ESXi",
+          "check": "operator-enrollment-status-initial",
+          "result": "fail"
+        },
+        {
+          "step": "ESXi",
+          "check": "operator-enrollment-followup",
+          "result": "pass"
+        },
+        {
+          "step": "ESXi",
+          "check": "p1-confirmation-network-before-undispatched-continuation",
+          "result": "pass"
+        },
+        {
+          "step": "ESXi",
+          "check": "p1-confirmation-network-after",
+          "result": "pass"
+        },
+        {
+          "step": "ESXi",
+          "check": "p1-confirmation-identity-before",
+          "result": "pass"
+        },
+        {
+          "step": "ESXi",
+          "check": "p1-confirmation-identity-reset",
+          "result": "pass"
+        },
+        {
+          "step": "ESXi",
+          "check": "p1-confirmation-identity-power-on",
+          "result": "pass"
+        },
+        {
+          "step": "ESXi",
+          "check": "bootstrap-persistent-display",
+          "result": "pass"
+        },
+        {
+          "step": "ESXi",
+          "check": "bootstrap-pam-forced-change",
+          "result": "pass"
+        },
+        {
+          "step": "ESXi",
+          "check": "p1-confirmation-identity-bootstrap",
+          "result": "pass"
+        },
+        {
+          "step": "ESXi",
+          "check": "p1-confirmation-identity-after",
+          "result": "pass"
+        },
+        {
+          "step": "ESXi",
+          "check": "cleanup",
+          "result": "pass"
+        }
+      ]
+    },
+    {
+      "file": "independent-checks.jsonl",
+      "sha256": "b14bd93ab529a3ee07eeabcc6916bbe88ad154244e96f733c7b433935fd0e89c",
+      "counts": {
+        "pass": 12
+      },
+      "rows": [
+        {
+          "step": "independent",
+          "check": "postcheck-command-integrity",
+          "result": "pass"
+        },
+        {
+          "step": "independent",
+          "check": "root-observation",
+          "result": "pass"
+        },
+        {
+          "step": "independent",
+          "check": "reboot-identity",
+          "result": "pass"
+        },
+        {
+          "step": "independent",
+          "check": "kernel-observation",
+          "result": "pass"
+        },
+        {
+          "step": "independent",
+          "check": "source-image-identity",
+          "result": "pass"
+        },
+        {
+          "step": "independent",
+          "check": "agent-version-active",
+          "result": "pass"
+        },
+        {
+          "step": "independent",
+          "check": "firstboot-not-rerun",
+          "result": "pass"
+        },
+        {
+          "step": "independent",
+          "check": "locked-stack-resume",
+          "result": "pass"
+        },
+        {
+          "step": "independent",
+          "check": "docker-package-holds",
+          "result": "pass"
+        },
+        {
+          "step": "independent",
+          "check": "restored-policy-persistence",
+          "result": "pass"
+        },
+        {
+          "step": "independent",
+          "check": "ca-identity",
+          "result": "pass"
+        },
+        {
+          "step": "independent",
+          "check": "meaningful-category-persistence",
+          "result": "pass"
+        }
+      ]
+    }
+  ],
+  "ledger_interpretation": "Counts are per preserved file, not deduplicated scenario totals. Generic restore-commit/restore-persisted NOT-RUN rows remain; guarded actual-restore and later explicit restore-persisted PASS provide separate positive evidence. Original route assertion failure is retained outside these main JSONL rows. No zero-failure claim.",
+  "p1": {
+    "campaign": "confirmation",
+    "results": [
+      {
+        "check": "p1-network-before",
+        "result": "pass"
+      },
+      {
+        "check": "p1-network-after",
+        "result": "pass"
+      },
+      {
+        "check": "p1-identity-before",
+        "result": "pass"
+      },
+      {
+        "check": "p1-identity-reset",
+        "result": "pass"
+      },
+      {
+        "check": "p1-identity-power-on",
+        "result": "pass"
+      },
+      {
+        "check": "p1-identity-bootstrap",
+        "result": "pass"
+      },
+      {
+        "check": "p1-identity-after",
+        "result": "pass"
+      }
+    ],
+    "initial_failure": {
+      "campaign": "initial",
+      "check": "p1-network-before",
+      "result": "blocked",
+      "attempt_sha256": "76f4e4d485f0beb14ec78f9c27e9d4427c6e1d9ec9079269d9a0e5614e990a97",
+      "disposition": "original availability failure retained; confirmation is a separate campaign"
+    },
+    "continuation_binding": {
+      "proof_sha256": "c11fc55537b6df797ecedd9a72020a372e650476eb8cc6be7b17e34cec9d8351",
+      "authenticated_result_sha256": "1d693030e8fb4133f343da7bf0b8810e185367d45664293695296cdb714b9d6b",
+      "original_attempt_sha256": "ebd76a681543453877b22f7488677f358bc57bad979d716f1c13c0e77f7e6acd"
+    },
+    "network_confirmation": {
+      "campaigns": {
+        "initial": {
+          "result": "failed immediate availability assertion; remains failed",
+          "controller_status": "blocked",
+          "evidence_preserved": true,
+          "baseline_and_trace_binding": {
+            "original_baseline_sha256": "fe05f95ffd99e603e7cbcef68b5ddd18badad042aee59ead7a27c0c14eeaa7a8",
+            "original_trace_sha256": "296de7b285d7d09dd12b5440dbaf1e51ea81f0cc3bb68f4a80d9113a4e1898b7",
+            "original_availability": "failed immediate assertion; retained unchanged",
+            "source_unchanged": true
+          }
+        },
+        "original_confirmation": {
+          "controller_status": "blocked",
+          "guest_regression_dispatched": false,
+          "basis": "Preserved successful authenticated observation reports confirmation state absent on the same source and boot; exact console result and original attempt hashes verified offline.",
+          "root_cause": "Not established; no attribution to guest network convergence or timeout."
+        },
+        "continuation_confirmation": {
+          "controller_status": "pass",
+          "authenticated_proof_binding_verified": true,
+          "original_attempt_binding_verified": true,
+          "initial_failure_attempt_binding_verified": true,
+          "distinct_campaign_from_initial": true
+        }
+      },
+      "fault_exercise": {
+        "description": "The test shim runs real netplan apply, then injects exit 71. Packaged network helper performs real rollback apply.",
+        "sequence": [
+          "generate",
+          "apply",
+          "real-apply-succeeded-inject-71",
+          "generate",
+          "apply",
+          "real-rollback-apply-succeeded"
+        ],
+        "packaged_helper_exit": 1,
+        "nonzero_helper_exit_expected": true,
+        "before_after_identity_equal": true,
+        "before_after_netplan_equal": true,
+        "before_after_network_equal": true,
+        "local_health_and_gateway_route_check_passed": true
+      },
+      "convergence": {
+        "result": "stable",
+        "budget_seconds": 60,
+        "completed_seconds": 6.179,
+        "immediate_match": false,
+        "stable_sample_count": 3,
+        "observations": [
+          {
+            "elapsed_seconds": 0.003,
+            "matches_baseline": false,
+            "default_route_count": 0,
+            "interface_count": 0,
+            "global_address_count": 0,
+            "observation_error_count": 0
+          },
+          {
+            "elapsed_seconds": 2.162,
+            "matches_baseline": true,
+            "default_route_count": 1,
+            "interface_count": 1,
+            "global_address_count": 1,
+            "observation_error_count": 0
+          },
+          {
+            "elapsed_seconds": 4.165,
+            "matches_baseline": true,
+            "default_route_count": 1,
+            "interface_count": 1,
+            "global_address_count": 1,
+            "observation_error_count": 0
+          },
+          {
+            "elapsed_seconds": 6.179,
+            "matches_baseline": true,
+            "default_route_count": 1,
+            "interface_count": 1,
+            "global_address_count": 1,
+            "observation_error_count": 0
+          }
+        ],
+        "criterion": "Three consecutive matching observations spanning at least four seconds, within a sixty-second budget.",
+        "first_observed_matching_seconds": 2.162,
+        "last_nonmatching_seconds": 0.003
+      },
+      "conclusions": [
+        "Real rollback restored identical recorded network and netplan state and preserved the helper failure exit.",
+        "A transient route/interface gap was observed immediately after rollback; matching state was first sampled at 2.162 seconds and remained matched in samples at 4.165 and 6.179 seconds.",
+        "Operator status was ready before and after the confirmation, with traffic_verified false."
+      ],
+      "limits": [
+        "The clock starts at post-rollback convergence observation, not the beginning of network disruption. Exact outage duration and recovery instant are unknown.",
+        "Spaced observations and endpoint checks do not establish continuous availability, external client traffic, or behavior across reboot.",
+        "The original failed assertion remains failed; this separate confirmation qualifies bounded convergence only.",
+        "The original controller-blocked confirmation was verified undispatched. Its root cause is not established by this network evidence.",
+        "No conclusion about historical backup timeout, the 597-second reboot observation, or storage causation follows from this check."
+      ],
+      "operator_probes": [
+        {
+          "exit": 0,
+          "timed_out": false,
+          "elapsed_seconds": 0.735,
+          "stdout_truncated": false,
+          "observed_at": "2026-10-04T23:03:04Z",
+          "phase": "ready",
+          "reason": "HEALTH_CHECKS_PASSED",
+          "application_responding": true,
+          "management_available": true,
+          "traffic_verified": false,
+          "setup_status": "completed",
+          "administrator_enrolled": true
+        },
+        {
+          "exit": 0,
+          "timed_out": false,
+          "elapsed_seconds": 0.719,
+          "stdout_truncated": false,
+          "observed_at": "2026-10-04T23:03:20Z",
+          "phase": "ready",
+          "reason": "HEALTH_CHECKS_PASSED",
+          "application_responding": true,
+          "management_available": true,
+          "traffic_verified": false,
+          "setup_status": "completed",
+          "administrator_enrolled": true
+        }
+      ]
+    },
+    "identity_reset": {
+      "schema": 1,
+      "source": "b579ca28c9d936e9141292ce5ec564a26feeae86",
+      "controller": "55444fcb41c55fe70182deb2be6df677e73de40b",
+      "method": "identity reset -> observed automatic power-off -> fresh boot of same owned VM (one-VM limit)",
+      "new_console_credential": true,
+      "new_machine_id": true,
+      "new_boot_id": true,
+      "new_ssh_host_key": true,
+      "old_password_pam": {
+        "service": "login",
+        "pam_status": 7,
+        "password_prompts": 1
+      },
+      "old_operator_key_refused": true,
+      "operator_authorized_keys_empty": true,
+      "firstboot_completed": true
+    }
+  },
+  "timing": {
+    "initial_boot": {
+      "seconds": [
+        {
+          "measurement": "kernel",
+          "b579": 16.258,
+          "prior4f": 22.596,
+          "difference": -6.338
+        },
+        {
+          "measurement": "userspace_systemd_completion",
+          "b579": 555.555,
+          "prior4f": 459.811,
+          "difference": 95.744
+        },
+        {
+          "measurement": "systemd_total",
+          "b579": 571.814,
+          "prior4f": 482.408,
+          "difference": 89.406
+        },
+        {
+          "measurement": "multi_user_since_kernel_start",
+          "b579": 469.248,
+          "prior4f": 479.839,
+          "difference": -10.591
+        },
+        {
+          "measurement": "systemd_tail_after_multi_user",
+          "b579": 102.566,
+          "prior4f": 2.569,
+          "difference": 99.997
+        },
+        {
+          "measurement": "cloud_init_local",
+          "b579": 48.791,
+          "prior4f": 76.312,
+          "difference": -27.521
+        },
+        {
+          "measurement": "containerd",
+          "b579": 68.321,
+          "prior4f": 76.376,
+          "difference": -8.055
+        },
+        {
+          "measurement": "docker",
+          "b579": 80.064,
+          "prior4f": 51.388,
+          "difference": 28.676
+        },
+        {
+          "measurement": "firstboot_service",
+          "b579": 173.071,
+          "prior4f": 176.334,
+          "difference": -3.263
+        },
+        {
+          "measurement": "network_wait_online",
+          "b579": 3.574,
+          "prior4f": 3.469,
+          "difference": 0.105
+        }
+      ],
+      "cloud_final_tail": {
+        "b579_cloud_final_duration_seconds": 102.559,
+        "inference": "The 102.566s gap after multi-user nearly equals cloud-final duration; late systemd completion is not application-ready latency. No full cloud-final journal/dependency proof collected here."
+      },
+      "readiness": {
+        "before_setup": {
+          "observed_at": "2026-10-04T22:37:58Z",
+          "phase": "provisioned",
+          "reason": "SETUP_REQUIRED",
+          "setup_status": "pending",
+          "application_responding": true,
+          "management_available": true,
+          "traffic_verified": false
+        },
+        "after_setup": {
+          "observed_at": "2026-10-04T22:40:08Z",
+          "phase": "provisioned",
+          "reason": "READINESS_INCOMPLETE",
+          "setup_status": "completed",
+          "application_responding": true,
+          "management_available": true,
+          "traffic_verified": false
+        },
+        "first_ready_time": "unknown; retained status observations are point-in-time samples",
+        "later_ready_endpoint": {
+          "evidence_file": "05-ready.json",
+          "statuses": {
+            "admin_ui": "ok",
+            "ca": "ok",
+            "clamav": "ok",
+            "config_snapshot_validator": "ok",
+            "geoip": "ok",
+            "policy_loaded": "ok",
+            "policy_posture": "ok",
+            "saas_feed": "ok",
+            "session_secret": "ok",
+            "setup_complete": "ok",
+            "yara": "ok"
+          },
+          "collection_time": "not encoded in this retained response; no first-ready timestamp inferred"
+        }
+      },
+      "limit": "571.814s systemd total includes a102.566s tail after multi-user; it is not exact application ready time."
+    },
+    "maintenance_reboot": {
+      "guest_boot": {
+        "proc_stat_btime_epoch": 1791155034,
+        "proc_stat_btime_utc": "2026-10-04T23:03:54+00:00",
+        "btime_evidence": "independent-postcheck.json observation.values.resume_durable_log.boot_start_epoch",
+        "btime_resolution_seconds": 1,
+        "postboot_wallclock_minus_monotonic_origin": "2026-10-04T23:03:54.996844+00:00",
+        "postboot_clock_origin_caveat": "Derived from a later paired guest UTC/monotonic sample; does not establish no clock adjustment during boot.",
+        "systemd_boot_total_seconds": 466.18,
+        "kernel_seconds": 19.346,
+        "userspace_seconds": 446.834,
+        "multi_user_userspace_seconds": 443.8,
+        "multi_user_kernel_origin_seconds": 463.146,
+        "key_unit_elapsed_seconds": {
+          "cloud-init-local.service": 47.164,
+          "containerd.service": 82.037,
+          "docker.service": 62.274,
+          "culvert-stack-resume.service": 127.171641,
+          "systemd-networkd-wait-online.service": 2.074
+        },
+        "unit_timestamps_microseconds_since_kernel_origin": [
+          {
+            "unit": "docker.service",
+            "ActiveState": "active",
+            "SubState": "running",
+            "ExecMainStatus": 0,
+            "ActiveEnterTimestampMonotonic": 335966656,
+            "ExecMainStartTimestampMonotonic": 273692082,
+            "ExecMainExitTimestampMonotonic": 0
+          },
+          {
+            "unit": "containerd.service",
+            "ActiveState": "active",
+            "SubState": "running",
+            "ExecMainStatus": 0,
+            "ActiveEnterTimestampMonotonic": 273685998,
+            "ExecMainStartTimestampMonotonic": 193436320,
+            "ExecMainExitTimestampMonotonic": 0
+          },
+          {
+            "unit": "culvert-maint.service",
+            "ActiveState": "active",
+            "SubState": "running",
+            "ExecMainStatus": 0,
+            "ActiveEnterTimestampMonotonic": 335972234,
+            "ExecMainStartTimestampMonotonic": 335972085,
+            "ExecMainExitTimestampMonotonic": 0
+          },
+          {
+            "unit": "culvert-firstboot.service",
+            "ActiveState": "inactive",
+            "SubState": "dead",
+            "ExecMainStatus": 0,
+            "ActiveEnterTimestampMonotonic": 0,
+            "ExecMainStartTimestampMonotonic": 0,
+            "ExecMainExitTimestampMonotonic": 0
+          },
+          {
+            "unit": "culvert-stack-resume.service",
+            "ActiveState": "inactive",
+            "SubState": "dead",
+            "ExecMainStatus": 0,
+            "ActiveEnterTimestampMonotonic": 0,
+            "ExecMainStartTimestampMonotonic": 335973474,
+            "ExecMainExitTimestampMonotonic": 463145115
+          },
+          {
+            "unit": "ssh.service",
+            "ActiveState": "active",
+            "SubState": "running",
+            "ExecMainStatus": 0,
+            "ActiveEnterTimestampMonotonic": 188985534,
+            "ExecMainStartTimestampMonotonic": 188981069,
+            "ExecMainExitTimestampMonotonic": 0
+          },
+          {
+            "unit": "systemd-networkd-wait-online.service",
+            "ActiveState": "active",
+            "SubState": "exited",
+            "ExecMainStatus": 0,
+            "ActiveEnterTimestampMonotonic": 175831545,
+            "ExecMainStartTimestampMonotonic": 175829085,
+            "ExecMainExitTimestampMonotonic": 175831457
+          }
+        ],
+        "firstboot_rerun": false,
+        "firstboot_evidence": "08d records skipped ConditionPathExists=!complete.done; unit ExecMainStartTimestampMonotonic zero.",
+        "ready_observation_seconds_after_btime_wallclock": 498.41559,
+        "ready_observation_in_estimated_guest_monotonic_seconds": 497.418746,
+        "readiness_semantics": "Ready means the sampled operator status phase was ready and HTTP proxy health succeeded; systemd boot completion and stack-start exit are separate events, not readiness promises.",
+        "critical_chain_caveat": "systemd-analyze output is a postboot dependency snapshot, not per-stage causal attribution; unit durations can overlap."
+      },
+      "backup_readiness": {
+        "first_postreboot_product_request": {
+          "started_at": "2026-10-04T23:13:17.802944+00:00",
+          "ended_at": "2026-10-04T23:13:22.156643+00:00",
+          "elapsed_monotonic_seconds": 4.359,
+          "elapsed_wall_seconds": 4.353699,
+          "http_status": 200,
+          "transport_exit": 0,
+          "available": true,
+          "entry_count": 1,
+          "measurement_scope": "Controller wrapper duration includes transport/request work; not direct agent-only latency."
+        },
+        "later_diagnostics": [
+          {
+            "probe": "agent_backups",
+            "elapsed_seconds": 0.004156,
+            "result": "ok",
+            "listing_succeeded": false,
+            "http_status": 403
+          },
+          {
+            "probe": "compose_backups",
+            "elapsed_seconds": 1.424767,
+            "result": "ok",
+            "listing_succeeded": true,
+            "entry_count": 1
+          },
+          {
+            "probe": "agent_backups",
+            "elapsed_seconds": 0.004443,
+            "result": "ok",
+            "listing_succeeded": false,
+            "http_status": 403
+          },
+          {
+            "probe": "compose_backups",
+            "elapsed_seconds": 1.610326,
+            "result": "ok",
+            "listing_succeeded": true,
+            "entry_count": 1
+          }
+        ],
+        "agent_diagnostic_classification": "Both root curl calls returned HTTP403; listing_succeeded false. Millisecond durations measure authorization rejection, not backup-list performance.",
+        "authentication_source_evidence": [
+          "b579ca28 cmd/culvert-maint/internal/server/server.go:428 wraps GET /v1/backups in withAuth",
+          "server.go:455-471 obtains Unix peer credentials and rejects peers not permitted by policy before handler",
+          "cmd/culvert-maint/internal/auth/auth.go:83-89 matches peer UID against explicit allowlist; root is not inherently exempt",
+          "timing-diagnostic-guest.py:119-122 directly invokes curl as diagnostic root; it does not impersonate the authorized product UID"
+        ],
+        "diagnostic_limit": "Unsupported diagnostic caller identity; no bypass, allowlist change or authentication weakening was attempted. Successful public product listing is the supported-path evidence.",
+        "compose_listing_seconds": [
+          1.424767,
+          1.610326
+        ],
+        "compose_limit": "Later sequential warm observations, not concurrent measurements of the original postreboot product request."
+      },
+      "performance": {
+        "summary": {
+          "schema_version": 1,
+          "started_at": "2026-10-04T23:12:43.588622+00:00",
+          "metrics": [
+            {
+              "metric": "virtualDisk.totalWriteLatency.average",
+              "unit": "millisecond",
+              "instance": "scsi0:0",
+              "selected_samples": 28,
+              "valid_samples": 24,
+              "missing_samples": 4,
+              "sample_mean": 19.0,
+              "maximum_sample": 160,
+              "maximum_at": "2026-10-04T23:12:00+00:00"
+            },
+            {
+              "metric": "cpu.maxlimited.summation",
+              "unit": "millisecond",
+              "instance": "0",
+              "selected_samples": 28,
+              "valid_samples": 28,
+              "missing_samples": 0,
+              "sample_mean": 0.0,
+              "maximum_sample": 0,
+              "maximum_at": "2026-10-04T23:03:20+00:00"
+            },
+            {
+              "metric": "cpu.costop.summation",
+              "unit": "millisecond",
+              "instance": "1",
+              "selected_samples": 28,
+              "valid_samples": 28,
+              "missing_samples": 0,
+              "sample_mean": 0.0,
+              "maximum_sample": 0,
+              "maximum_at": "2026-10-04T23:03:20+00:00"
+            },
+            {
+              "metric": "mem.vmmemctl.average",
+              "unit": "kiloBytes",
+              "instance": "",
+              "selected_samples": 28,
+              "valid_samples": 28,
+              "missing_samples": 0,
+              "sample_mean": 0.0,
+              "maximum_sample": 0,
+              "maximum_at": "2026-10-04T23:03:20+00:00"
+            },
+            {
+              "metric": "cpu.maxlimited.summation",
+              "unit": "millisecond",
+              "instance": "1",
+              "selected_samples": 28,
+              "valid_samples": 28,
+              "missing_samples": 0,
+              "sample_mean": 0.0,
+              "maximum_sample": 0,
+              "maximum_at": "2026-10-04T23:03:20+00:00"
+            },
+            {
+              "metric": "cpu.costop.summation",
+              "unit": "millisecond",
+              "instance": "",
+              "selected_samples": 28,
+              "valid_samples": 28,
+              "missing_samples": 0,
+              "sample_mean": 0.0,
+              "maximum_sample": 0,
+              "maximum_at": "2026-10-04T23:03:20+00:00"
+            },
+            {
+              "metric": "cpu.costop.summation",
+              "unit": "millisecond",
+              "instance": "0",
+              "selected_samples": 28,
+              "valid_samples": 28,
+              "missing_samples": 0,
+              "sample_mean": 0.0,
+              "maximum_sample": 0,
+              "maximum_at": "2026-10-04T23:03:20+00:00"
+            },
+            {
+              "metric": "cpu.ready.summation",
+              "unit": "millisecond",
+              "instance": "",
+              "selected_samples": 28,
+              "valid_samples": 28,
+              "missing_samples": 0,
+              "sample_mean": 52.7857,
+              "maximum_sample": 80,
+              "maximum_at": "2026-10-04T23:08:20+00:00"
+            },
+            {
+              "metric": "cpu.maxlimited.summation",
+              "unit": "millisecond",
+              "instance": "",
+              "selected_samples": 28,
+              "valid_samples": 28,
+              "missing_samples": 0,
+              "sample_mean": 0.0,
+              "maximum_sample": 0,
+              "maximum_at": "2026-10-04T23:03:20+00:00"
+            },
+            {
+              "metric": "cpu.ready.summation",
+              "unit": "millisecond",
+              "instance": "1",
+              "selected_samples": 28,
+              "valid_samples": 28,
+              "missing_samples": 0,
+              "sample_mean": 25.3571,
+              "maximum_sample": 43,
+              "maximum_at": "2026-10-04T23:08:20+00:00"
+            },
+            {
+              "metric": "virtualDisk.totalReadLatency.average",
+              "unit": "millisecond",
+              "instance": "scsi0:0",
+              "selected_samples": 28,
+              "valid_samples": 24,
+              "missing_samples": 4,
+              "sample_mean": 111.25,
+              "maximum_sample": 276,
+              "maximum_at": "2026-10-04T23:07:40+00:00"
+            },
+            {
+              "metric": "mem.swapinRate.average",
+              "unit": "kiloBytesPerSecond",
+              "instance": "",
+              "selected_samples": 28,
+              "valid_samples": 28,
+              "missing_samples": 0,
+              "sample_mean": 0.0,
+              "maximum_sample": 0,
+              "maximum_at": "2026-10-04T23:03:20+00:00"
+            },
+            {
+              "metric": "cpu.ready.summation",
+              "unit": "millisecond",
+              "instance": "0",
+              "selected_samples": 28,
+              "valid_samples": 28,
+              "missing_samples": 0,
+              "sample_mean": 27.4286,
+              "maximum_sample": 42,
+              "maximum_at": "2026-10-04T23:07:20+00:00"
+            }
+          ],
+          "unavailable_metrics": [],
+          "intervals_seconds": [
+            20
+          ],
+          "returned_start": "2026-10-04T22:53:00+00:00",
+          "returned_end": "2026-10-04T23:12:40+00:00",
+          "window_start": "2026-10-04T23:03:20+00:00",
+          "window_end": "2026-10-04T23:12:20+00:00",
+          "note": "Means and maxima of available samples; missing samples excluded. Not per-I/O percentiles, guest readiness timestamps or causal proof.",
+          "complete": true,
+          "finished_at": "2026-10-04T23:12:43.831778+00:00"
+        },
+        "boot_to_observed_ready": {
+          "start": "2026-10-04T23:03:54+00:00",
+          "end": "2026-10-04T23:12:12.415590+00:00",
+          "metrics": [
+            {
+              "metric": "virtualDisk.totalWriteLatency.average",
+              "unit": "millisecond",
+              "instance": "scsi0:0",
+              "selected_samples": 25,
+              "valid_samples": 21,
+              "missing_samples": 4,
+              "mean_of_valid_samples": 17.0952,
+              "maximum_sample": 160
+            },
+            {
+              "metric": "mem.vmmemctl.average",
+              "unit": "kiloBytes",
+              "instance": "",
+              "selected_samples": 25,
+              "valid_samples": 25,
+              "missing_samples": 0,
+              "mean_of_valid_samples": 0,
+              "maximum_sample": 0
+            },
+            {
+              "metric": "cpu.costop.summation",
+              "unit": "millisecond",
+              "instance": "",
+              "selected_samples": 25,
+              "valid_samples": 25,
+              "missing_samples": 0,
+              "mean_of_valid_samples": 0,
+              "maximum_sample": 0
+            },
+            {
+              "metric": "cpu.ready.summation",
+              "unit": "millisecond",
+              "instance": "",
+              "selected_samples": 25,
+              "valid_samples": 25,
+              "missing_samples": 0,
+              "mean_of_valid_samples": 51.36,
+              "maximum_sample": 80
+            },
+            {
+              "metric": "cpu.maxlimited.summation",
+              "unit": "millisecond",
+              "instance": "",
+              "selected_samples": 25,
+              "valid_samples": 25,
+              "missing_samples": 0,
+              "mean_of_valid_samples": 0,
+              "maximum_sample": 0
+            },
+            {
+              "metric": "virtualDisk.totalReadLatency.average",
+              "unit": "millisecond",
+              "instance": "scsi0:0",
+              "selected_samples": 25,
+              "valid_samples": 21,
+              "missing_samples": 4,
+              "mean_of_valid_samples": 119.0952,
+              "maximum_sample": 276
+            },
+            {
+              "metric": "mem.swapinRate.average",
+              "unit": "kiloBytesPerSecond",
+              "instance": "",
+              "selected_samples": 25,
+              "valid_samples": 25,
+              "missing_samples": 0,
+              "mean_of_valid_samples": 0,
+              "maximum_sample": 0
+            }
+          ]
+        },
+        "metric_interpretation": [
+          "All requested metric names returned, but four disk sample slots were missing in the selected overall window. Series availability is not complete sample coverage.",
+          "Latency summaries are means/maxima of 20-second sample averages, not per-I/O percentiles. CPU ready is milliseconds per sample and instance, not a percent or wall-time delay.",
+          "Sampled zero costop, CPU limitation, memory swapping and ballooning do not prove absence between samples.",
+          "Read latency is elevated concurrently with slow startup, but these observations do not establish storage as cause. No IO-size/IOPS/datastore queue attribution or controlled comparison was retained.",
+          "Guest btime and host metric timestamps are aligned by wallclock; their independent synchronization error was not measured."
+        ]
+      },
+      "historical_comparison": {
+        "old_source": "4f27d945",
+        "old_controller_report_seconds": 597,
+        "old_guest_systemd_boot_seconds": 481.822,
+        "new_guest_systemd_boot_seconds": 466.18,
+        "guest_boot_delta_seconds": -15.642,
+        "old_exact_ready_time": "unknown",
+        "comparison_limit": "The historical597s timer had no equivalent exact readiness observer; the current565s includes an after-readiness network test. Do not interpret the difference as measured guest-ready improvement.",
+        "old_backup_first_request": "FAIL: HTTP200 wrapper with available=false and underlying /v1/backups context deadline exceeded under ten-second request budget.",
+        "old_backup_later_read": "8.05-second success showed archive persisted; does not erase timeout failure.",
+        "historical_timeout_cause": "unresolved",
+        "storage_hypothesis": "Plausible observation to investigate, not proven causation."
+      },
+      "limits": [
+        "Intent, authenticated execution-start acknowledgement, guest kernel boot origin, systemd completion, and client readiness are distinct events.",
+        "Sampling bounds the first observed recovery but does not timestamp the exact recovery instant.",
+        "Guest monotonic and controller monotonic clocks have different origins; only paired wallclock conversion is used across machines.",
+        "No exact shutdown duration or guest kernel-start acknowledgement was captured; btime has one-second resolution.",
+        "This analysis makes no new live guest/hypervisor calls and does not alter the frozen controller."
+      ],
+      "controller_timeline": {
+        "intent": {
+          "event": "dispatch_intent",
+          "utc": "2026-10-04T23:03:21.565782+00:00",
+          "monotonic_ns": 1496381343000000
+        },
+        "readiness_observed_at": "2026-10-04T23:12:12.415590+00:00",
+        "intent_to_ready_monotonic_seconds": 530.844,
+        "probes": [
+          {
+            "probe": "tcp_ssh",
+            "post_marker_samples": 104,
+            "failed_or_not_ready_samples": 40,
+            "first_failure_completed_at": "2026-10-04T23:03:38.154613+00:00",
+            "last_failure_completed_at": "2026-10-04T23:06:54.620494+00:00",
+            "first_success_after_failure": "2026-10-04T23:06:57.618404+00:00",
+            "seconds_after_intent_monotonic": 216.047
+          },
+          {
+            "probe": "proxy_health",
+            "post_marker_samples": 104,
+            "failed_or_not_ready_samples": 102,
+            "first_failure_completed_at": "2026-10-04T23:03:33.219318+00:00",
+            "last_failure_completed_at": "2026-10-04T23:12:09.044432+00:00",
+            "first_success_after_failure": "2026-10-04T23:12:12.001117+00:00",
+            "seconds_after_intent_monotonic": 530.438
+          },
+          {
+            "probe": "operator_status",
+            "post_marker_samples": 104,
+            "failed_or_not_ready_samples": 102,
+            "first_failure_completed_at": "2026-10-04T23:03:33.022688+00:00",
+            "last_failure_completed_at": "2026-10-04T23:12:07.236609+00:00",
+            "first_success_after_failure": "2026-10-04T23:12:12.415590+00:00",
+            "seconds_after_intent_monotonic": 530.844
+          }
+        ],
+        "shared_lifecycle_reported_seconds": 565,
+        "shared_measurement_scope": "Timer begins after nowait transport returns; report emitted after lab_after_reboot_observation waits for independent observer and runs the network persistence check. Includes post-readiness work.",
+        "network_after_check_pass_timestamp": "2026-10-04T23:12:53Z",
+        "independent_ready_to_network_after_pass_wall_seconds": 40.58441,
+        "source_references": [
+          "test/e2e/appliance/lab/appliance-lab.sh:728-736",
+          "test/e2e/appliance/esxi/candidate-hooks.sh:32-45",
+          "test/e2e/appliance/esxi/console-priv.py:275-280"
+        ],
+        "acknowledgement": {
+          "authenticated_execution_started_ack_preserved": true,
+          "result_bytes": 2,
+          "file_mtime_utc": "2026-10-04T23:03:27.986881+00:00",
+          "timestamp_quality": "Controller file modification time; not a separately recorded guest acknowledgement or reboot-execution timestamp.",
+          "semantics": "console-priv.py nowait emits started acknowledgement before executing the reboot script; does not prove reboot completion or exact command dispatch."
+        }
+      }
+    }
+  },
+  "private_evidence_custody": {
+    "encryption": "Windows DPAPI CurrentUser",
+    "encrypted_sha256": "3877ba368225a051606b1d9068f8016c7bbb9e0a50a7bc7c850754b0aab86ec1",
+    "file_count": 2426,
+    "roundtrip_verified": true,
+    "public_export": false,
+    "source_private_directory_empty": true,
+    "private_artifact_upload": false,
+    "note": "Raw terminal/screenshots, credentials, keys, certificates, private endpoint/VM identifiers and raw stdout are excluded. Recovery escrow is separate from the cleared source run directory."
+  },
+  "source_deletion": {
+    "result": "PASS",
+    "source_vm_deleted": true,
+    "backing_disks_deleted": true,
+    "ownership_receipt_ledger_match": true,
+    "one_vm_limit": 1,
+    "receipt_sha256": "d463fcd0373d23b65028ae31ced00a1f18795dbce81b02e980ea2580ff715ca2",
+    "deleted_ledger_sha256": "6119dcd28a5fd98d458a2291056f03d912a6f882a1ae088cd2f4880b0224f9c0"
+  },
+  "fresh_appliance_recovery": {
+    "result": "PASS",
+    "controller": "55444fcb41c55fe70182deb2be6df677e73de40b",
+    "phase": "fresh unclaimed appliance restored and independently observed; owned VM deleted",
+    "source_deleted_first": true,
+    "archive_sha256": "cf7459c39f5b4acb917e6e944e8b4d0c10d46843c8f8a1d711901a069cc10f1b",
+    "archive_bytes": 11672,
+    "expected_ova_sha256": "1a713a9bedc4ee50ac4212c12048924e03abe6b8f04cb82d4d0ef95e33ef4775",
+    "expected_source_revision": "b579ca28c9d936e9141292ce5ec564a26feeae86",
+    "restoration": {
+      "result": "PASS",
+      "default_PAM_forced_change": true,
+      "firstboot_complete_before_restore": true,
+      "no_web_setup_before_restore": true,
+      "no_operator_key_enrolled": true,
+      "authenticated_tty1_and_sudo": true,
+      "both_maintenance_locks_held": true,
+      "encrypted_archive_dry_run": true,
+      "root_ca_change_without_acceptance_refused": true,
+      "actual_full_offline_commit": true,
+      "restored_ca_log_session_secrets_separately": true,
+      "exact_source_and_image_verified": true
+    },
+    "identity_checks": {
+      "distinct_vm_uuid": true,
+      "no_source_disk_attached": true,
+      "source_vm_and_disks_unavailable_before_restore": true,
+      "fresh_os_identity_comparison_after_restore": "NOT_RUN; separate identity-reset P1 is reported independently"
+    },
+    "post_restore_checks": {
+      "original_admin_login": "PASS",
+      "original_CA_decryption_and_fingerprint": "PASS",
+      "persisted_policy_exact_normalized_match": "PASS",
+      "default_action_deny": "PASS",
+      "traffic": {
+        "example.com": 200,
+        "example.org": 403
+      },
+      "maintenance_agent": "PASS",
+      "agent_version": "v1.0.260-candidate.gb579ca28c9d9",
+      "community_category_lookup_baseline_match": "PASS",
+      "historical_encrypted_log_recovery": {
+        "result": "blocked",
+        "reason": "Supported Tier-1/Tier-2 backup excludes Tier-3 historical logs; retaining the log passphrase alone cannot recover them."
+      }
+    },
+    "cleanup": {
+      "result": "PASS",
+      "owned_vm_deletion_confirmed": true,
+      "private_run_directory_empty": true,
+      "source_and_recovery_private_evidence_encrypted_separately": true,
+      "recovery_escrow_retained_privately": true,
+      "timestamp": "2026-10-04T23:44:06Z"
+    },
+    "private_evidence_custody": {
+      "file_count": 1671,
+      "schema": 1,
+      "encrypted_sha256": "f9e4cc77416f0fd85c9facf526b5143528c9de79704d841872f9b87c6ca6b5fb",
+      "zip_bytes": 46559174,
+      "public_export": false,
+      "controller": "55444fcb41c55fe70182deb2be6df677e73de40b",
+      "zip_sha256": "a04a67ee178d35ec957ed0d847dea1aa946dedb9da2706d673488279fda90443",
+      "roundtrip_verified": true,
+      "encryption": "Windows DPAPI CurrentUser"
+    },
+    "adapter_ledger": [
+      {
+        "step": "ESXi",
+        "check": "preflight",
+        "result": "pass",
+        "detail": "checksum, complete manifest, scope and measured capacity verified",
+        "timestamp": "2026-10-04T23:27:14Z"
+      },
+      {
+        "step": "ESXi",
+        "check": "import",
+        "result": "pass",
+        "detail": "owned VM imported powered off; VMware guestinfo injection enabled",
+        "timestamp": "2026-10-04T23:31:42Z"
+      },
+      {
+        "step": "ESXi",
+        "check": "power-on",
+        "result": "pass",
+        "detail": "owned VM powered on; guest qualification is separate",
+        "timestamp": "2026-10-04T23:31:59Z"
+      },
+      {
+        "step": "ESXi",
+        "check": "private-keyboard-helper",
+        "result": "info",
+        "detail": "stdin helper compiled locally; source/binary SHA256 9b155956dec981fe8163b193f8df0791591b0d68b627c83a9c9dee69780489d3/0b1d7b2951fc9e8c07d74225910d620279b59b8d306f36acb1797e30fbb6bb03",
+        "timestamp": "2026-10-04T23:32:23Z"
+      },
+      {
+        "step": "ESXi",
+        "check": "bootstrap-persistent-display",
+        "result": "pass",
+        "detail": "identical initial credential recognized in two private captures separated by a refresh; reboot not tested",
+        "timestamp": "2026-10-04T23:36:49Z"
+      },
+      {
+        "step": "ESXi",
+        "check": "bootstrap-pam-forced-change",
+        "result": "pass",
+        "detail": "real F2/PAM login and required password change reached authenticated menu; no authentication retries",
+        "timestamp": "2026-10-04T23:37:32Z"
+      },
+      {
+        "step": "ESXi",
+        "check": "access-aware-bootstrap",
+        "result": "pass",
+        "detail": "default import reached authenticated tty1 through PAM forced password change; no SSH administration added",
+        "timestamp": "2026-10-04T23:37:32Z"
+      },
+      {
+        "step": "ESXi",
+        "check": "cleanup",
+        "result": "pass",
+        "detail": "owned VM deletion confirmed; private run files removed",
+        "timestamp": "2026-10-04T23:44:06Z"
+      }
+    ],
+    "adapter_counts": {
+      "pass": 7,
+      "info": 1
+    },
+    "completion_evidence": [
+      {
+        "file": "fresh/guest-result.json",
+        "sha256": "72828a5cdeb5d1ebd1b6e66151cd01566bb4174c75bedea79ed206fcd01bce19"
+      },
+      {
+        "file": "fresh/restored-observation.json (private)",
+        "sha256": "f5d53c7ae7e102910c901a7bce4ea15588873dd77bd0c48223a1c8c1fda63cc2"
+      },
+      {
+        "file": "fresh/adapter.jsonl",
+        "sha256": "9e469df4436640eebaa6d0f2f3025bf0fbf2864003d09dec8b99d1040ee7a950"
+      },
+      {
+        "file": "fresh/firstboot-completion.json",
+        "sha256": "378b3d603ee055f06473dbb010805827d163426519ded1d1a1d2e1c12579c4e4"
+      },
+      {
+        "file": "fresh/private-evidence-custody.json",
+        "sha256": "f680ee94d3ac6421286180a8604cdac86b7aaf672b03a35ab58c6d606181e763"
+      },
+      {
+        "file": "fresh/owned.json (private)",
+        "sha256": "d102d5d20f3db957f7496746259cd7b38c44363533f28b0f7b493ec6d4845684"
+      }
+    ]
+  },
+  "open_release_items": [
+    {
+      "id": "F-DISK-1",
+      "status": "OPEN",
+      "evidence": "QEMU run37235713308 artifact11316095044 reproduced proxy death during full-disk active database write.",
+      "limit": "Not injected on ESXi; recovery is not survival; this campaign does not close the defect."
+    },
+    {
+      "id": "ClamAV-pcre2",
+      "status": "OWNER_DECISION_OPEN",
+      "evidence": "Existing pcre2 exposure disposition and prepared derivative remain owner decisions.",
+      "limit": "Readiness/real-sidecar PASS does not accept exposure; clamd outage is fail-open."
+    },
+    {
+      "id": "Snyk-GO-2026-5932",
+      "status": "OWNER_SECURITY_DISPOSITION_OPEN",
+      "evidence": "Current PR#1528 reports one medium golang.org/x/crypto/openpgp issue with no fixed release; neither production module compiles openpgp.",
+      "limit": "Reachability evidence is distinct from owner disposition; nothing muted or waived."
+    },
+    {
+      "id": "CodeQL-four-medium",
+      "status": "OWNER_SECURITY_DISPOSITION_OPEN",
+      "evidence": "Passing check still reports four medium alerts: three vendored crewjam-saml/samlsp middleware never mounted (structural test enforces); one C2 ui_metadata_enforcement.go:530 through sanitizeLog.",
+      "limit": "Dismissal remains owner decision; passing check is not zero-alert evidence."
+    }
+  ],
+  "security_disposition_source": "PR#1528 comment5978949299 snapshot verified by parent; no new remote query or waiver in this offline report.",
+  "excluded_claims": [
+    "No enterprise or production release approval.",
+    "No fresh-appliance recovery PASS before its pending phase finishes.",
+    "No zero-failure or continuous-network-availability claim.",
+    "No simultaneous clone/copy test under one-VM budget.",
+    "No ESXi disk-fill survival qualification.",
+    "No proof that storage caused slow boot or historical backup timeout.",
+    "No supported restoration of historical runtime logs."
+  ],
+  "evidence_manifest": [
+    {
+      "file": "preflight.json",
+      "sha256": "76d7e697ce69b5dcfef3bb4e770d88a13039780018a2917ee4cafe131b2ce53b"
+    },
+    {
+      "file": "03-build-info.json",
+      "sha256": "0f9d13aaaba6631fce11e802bf4065ea7eb14f12bbc1d00ec42dded18756cf94"
+    },
+    {
+      "file": "source-p1-verdicts.json",
+      "sha256": "1aa0b96d1df213a393b4c11e2f1cfe51f675a0e36d1b7db99c5ae1204877ec7f"
+    },
+    {
+      "file": "identity-reset-summary.json",
+      "sha256": "009072abbe4d86367b138ca1c491b1e838e29d5397c08e150a0ea2f4447e47a7"
+    },
+    {
+      "file": "private-evidence-custody.json",
+      "sha256": "95b0de1876a8cda5e245943a2cdcda82d7f3a74d878ebb15eedc4098a07387d4"
+    },
+    {
+      "file": "controller-transition-v3.json",
+      "sha256": "cd290ec209206852c3044374c931c303f08bd4151046fba2a705481fd8f692f5"
+    },
+    {
+      "file": "controller-transition-post-os.json",
+      "sha256": "f8b064d0123e36f679a1c46b4f0e2e728e5ac536eff9f7a095fbdced5105e6fd"
+    },
+    {
+      "file": "controller-transition-undispatched.json",
+      "sha256": "2f85da551cc49a5beee12cf8dc7d01dafec5f74ad8f84f9fb36fd579aa95969f"
+    },
+    {
+      "file": "guest-timing-after-maintenance-reboot.json",
+      "sha256": "ba2e626e004786b7496d5d2a89d39f458bbd2a2e06694f496e1d5e5af7d2a17d"
+    },
+    {
+      "file": "vm-performance-maintenance-reboot-complete.json",
+      "sha256": "9c5399e393e05955a1f96b36cb518fecae6547c70b97bf8661e109a7850c931d"
+    },
+    {
+      "file": "fresh/fresh-recovery-summary.json",
+      "sha256": "c089f0f0bb3efd0aec90a0185744f62a20c8cdd6b823f227dd85032420ae29fa"
+    }
+  ]
+}

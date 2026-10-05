@@ -1,0 +1,3358 @@
+{
+  "schema": 1,
+  "campaign": "13222c13-21fb-4ad3-ad38-48d0acf84778",
+  "initial_controller_revision": "34e69951648f886fb8f8fe034345e7b5480d12cf",
+  "initial_freeze_sha256": "0bad4c489327f6c610a445d7376ad0c9e7a83c3628c30eb862542789747f8169",
+  "result": "fail",
+  "production_qualified": false,
+  "scope": "Offline six-cycle early-initrd v4 comparison; source/kernel/proof/receipt bindings and strict timing/backup/PONG. Final artifact qualification is separate.",
+  "cycles": [
+    {
+      "cycle": "early4-a0",
+      "measurement_controller_revision": "34e69951648f886fb8f8fe034345e7b5480d12cf",
+      "measurement_freeze_sha256": "0bad4c489327f6c610a445d7376ad0c9e7a83c3628c30eb862542789747f8169",
+      "timing_result": "pass",
+      "timing_reason": null,
+      "seconds_to_three_healthy_samples": 95.187,
+      "new_boot_origin_after_controller_acceptance_bounds_seconds": [
+        1.102180699,
+        7.024180699
+      ],
+      "three_healthy_completion_kernel_relative_bounds_seconds": [
+        88.162819301,
+        94.084819301
+      ],
+      "backup": {
+        "result": "pass",
+        "strict_checks": {
+          "exactly_one_attempt": true,
+          "recorded_pass": true,
+          "listing_available": true,
+          "archive_matches_recorded_baseline": true,
+          "after_new_boot_upper_bound": true,
+          "first_ready_trigger_matches": true,
+          "dispatch_within_one_second": true,
+          "elapsed_matches_timestamps": true,
+          "elapsed_within_five_seconds": true
+        },
+        "seconds": 0.922,
+        "limitation": "Archive equality rechecks the frozen recorded baseline-match predicate; original API listing/archive bytes are not retained here."
+      },
+      "independent_clamav_coverage": {
+        "result": "pass",
+        "guest_interval_start_ns": 73881819301,
+        "guest_interval_end_ns": 96584819301,
+        "pong_samples": 14,
+        "maximum_sample_gap_ns": 2007991443,
+        "current_container_endpoint_verified": true
+      },
+      "phases": {
+        "unit_timestamps_kernel_relative_seconds": {
+          "local-fs.target": {
+            "InactiveExitTimestampMonotonic_seconds": 12.328066,
+            "ActiveEnterTimestampMonotonic_seconds": 12.328066
+          },
+          "sysinit.target": {
+            "InactiveExitTimestampMonotonic_seconds": 22.37816,
+            "ActiveEnterTimestampMonotonic_seconds": 22.37816
+          },
+          "basic.target": {
+            "InactiveExitTimestampMonotonic_seconds": 22.465356,
+            "ActiveEnterTimestampMonotonic_seconds": 22.465356
+          },
+          "network-online.target": {
+            "InactiveExitTimestampMonotonic_seconds": 22.378126,
+            "ActiveEnterTimestampMonotonic_seconds": 22.378126
+          },
+          "cloud-init-local.service": {
+            "InactiveExitTimestampMonotonic_seconds": 15.196086,
+            "ExecMainStartTimestampMonotonic_seconds": 15.19606,
+            "ExecMainExitTimestampMonotonic_seconds": 19.799031,
+            "ActiveEnterTimestampMonotonic_seconds": 19.799289
+          },
+          "cloud-init.service": {
+            "InactiveExitTimestampMonotonic_seconds": 21.722092,
+            "ExecMainStartTimestampMonotonic_seconds": 21.722067,
+            "ExecMainExitTimestampMonotonic_seconds": 22.377547,
+            "ActiveEnterTimestampMonotonic_seconds": 22.377595
+          },
+          "cloud-final.service": {
+            "InactiveExitTimestampMonotonic_seconds": 68.018194,
+            "ExecMainStartTimestampMonotonic_seconds": 68.018108,
+            "ExecMainExitTimestampMonotonic_seconds": 68.855745,
+            "ActiveEnterTimestampMonotonic_seconds": 68.855798
+          },
+          "systemd-journal-flush.service": {
+            "InactiveExitTimestampMonotonic_seconds": 6.904107,
+            "ExecMainStartTimestampMonotonic_seconds": 6.904075,
+            "ExecMainExitTimestampMonotonic_seconds": 10.16897,
+            "ActiveEnterTimestampMonotonic_seconds": 10.16908
+          },
+          "systemd-udev-settle.service": {
+            "InactiveExitTimestampMonotonic_seconds": 0.0,
+            "ExecMainStartTimestampMonotonic_seconds": 0.0,
+            "ExecMainExitTimestampMonotonic_seconds": 0.0,
+            "ActiveEnterTimestampMonotonic_seconds": 0.0
+          },
+          "containerd.service": {
+            "InactiveExitTimestampMonotonic_seconds": 24.037124,
+            "ExecMainStartTimestampMonotonic_seconds": 24.470071,
+            "ExecMainExitTimestampMonotonic_seconds": 0.0,
+            "ActiveEnterTimestampMonotonic_seconds": 38.226747
+          },
+          "docker.service": {
+            "InactiveExitTimestampMonotonic_seconds": 38.232254,
+            "ExecMainStartTimestampMonotonic_seconds": 38.232052,
+            "ExecMainExitTimestampMonotonic_seconds": 0.0,
+            "ActiveEnterTimestampMonotonic_seconds": 46.885726
+          },
+          "culvert-maint.service": {
+            "InactiveExitTimestampMonotonic_seconds": 46.891149,
+            "ExecMainStartTimestampMonotonic_seconds": 46.891069,
+            "ExecMainExitTimestampMonotonic_seconds": 0.0,
+            "ActiveEnterTimestampMonotonic_seconds": 46.891149
+          },
+          "culvert-stack-resume.service": {
+            "InactiveExitTimestampMonotonic_seconds": 46.891896,
+            "ExecMainStartTimestampMonotonic_seconds": 46.891809,
+            "ExecMainExitTimestampMonotonic_seconds": 68.008497,
+            "ActiveEnterTimestampMonotonic_seconds": 0.0
+          },
+          "culvert-lab-boot-sampler.service": {
+            "InactiveExitTimestampMonotonic_seconds": 12.412237,
+            "ExecMainStartTimestampMonotonic_seconds": 12.412215,
+            "ExecMainExitTimestampMonotonic_seconds": 0.0,
+            "ActiveEnterTimestampMonotonic_seconds": 12.412237
+          }
+        },
+        "first_daemon_log_kernel_seconds": {
+          "containerd": 37.867974,
+          "dockerd": 43.44095
+        },
+        "daemon_log_capture_complete": true
+      },
+      "first_sampled_PONG_kernel_seconds": 68.537112424,
+      "sampler_first_kernel_seconds": 16.527805091,
+      "sampler_raw_sha256": "2cb02aff275357ef7aa195b75f9604c622a79732738152772e08f855085347d9",
+      "early_hook_verification": {
+        "result": "pass",
+        "checks": {
+          "campaign_bound": true,
+          "boot_bound": true,
+          "profile_matches": true,
+          "applied": true,
+          "old_128": true,
+          "effective_matches": true,
+          "reason_verified": true,
+          "before_root_mount": true
+        },
+        "profile_kib": 128,
+        "marker_kernel_seconds": 2.902043,
+        "initial_root_mount_kernel_seconds": 2.999911
+      },
+      "boot_id": "f73683af-9965-4dca-869d-3e37bd8c90ad",
+      "original_initrd_restoration_verified": null,
+      "evidence": [
+        {
+          "path": "secrets/production-recovery-early4-a0.jsonl",
+          "sha256": "0b8063eb834524436d616d7d594d61db8ddf4d5257c8edeba4b610d62f83e163",
+          "bytes": 17628,
+          "private": true
+        },
+        {
+          "path": "evidence/production-recovery-early4-a0-summary.json",
+          "sha256": "05ff5e05cdff31943479005394f00825ab4cd72b96a2668585c8928bb295023e",
+          "bytes": 934,
+          "private": false
+        },
+        {
+          "path": "secrets/production-recovery/early4-a0/acceptance.json",
+          "sha256": "53cf4cbb0de4cf08b850aeff81fd2af9907c5eca85cf285fe364827dbc79a776",
+          "bytes": 689,
+          "private": true
+        },
+        {
+          "path": "secrets/production-recovery/early4-a0/full.json",
+          "sha256": "11ed21c7b2b37273a60f7a9b477a9d21a74ca8d9f62f3318aad67c24a97f9d68",
+          "bytes": 329159,
+          "private": true
+        },
+        {
+          "path": "secrets/production-recovery/early4-a0/full-receipt.json",
+          "sha256": "7b67aab8b9970edeace89fae145e89dfdc1df2a5d27baf2ddd8d4cbd3c670958",
+          "bytes": 566,
+          "private": true
+        },
+        {
+          "path": "secrets/production-recovery/early4-a0/correlation.json",
+          "sha256": "9afa547a0c42d8516209bd41ef8373a9cfc73b1fb863e257a9d73145d96bce8f",
+          "bytes": 451,
+          "private": true
+        },
+        {
+          "path": "secrets/production-recovery/early4-a0/correlation-receipt.json",
+          "sha256": "1d6933b8d41f5de1f81357f5e567d546d2e5c51996a75967643929774a1b2f78",
+          "bytes": 573,
+          "private": true
+        },
+        {
+          "path": "secrets/production-recovery/early4-a0/authenticated-boot-proof.json",
+          "sha256": "511c89e176a72da5bf4b0118044660a9dc32c10a7165174f9c72ebd3ba9ed45f",
+          "bytes": 17734,
+          "private": true
+        },
+        {
+          "path": "evidence/host-storage-early4-a0.json",
+          "sha256": "e4021ae2dd90b7a262dd7016c261b2abb5fd3ac800d285593e40affc146c793f",
+          "bytes": 6531,
+          "private": false
+        },
+        {
+          "path": "evidence/vm-performance-early4-a0.json",
+          "sha256": "ec76470ee7d2c28b4a554f293d3475bea3f7083efe351b6d5b572ab9ab093230",
+          "bytes": 6493,
+          "private": false
+        },
+        {
+          "path": "secrets/host-storage-early4-a0.raw",
+          "sha256": "65b1e14cae16ccd95d9b628cf4abf64406ffa9a6738045038e3e147e2d53f41c",
+          "bytes": 13399,
+          "private": true
+        },
+        {
+          "path": "secrets/vm-performance-early4-a0.raw",
+          "sha256": "d95d2572389da3b0c1c89008efc02777b7b76f35467702a9c2c6d8b523080c54",
+          "bytes": 12685,
+          "private": true
+        }
+      ],
+      "supplemental_journal_verification": {
+        "result": "pass",
+        "controller_revision": "ff0d0151cc39ac98718ca979e8ed70160a100e66",
+        "freeze_sha256": "edd16c9d224c2f12603be61fa9f19017879c2c9461556adaafbeb4c413903ee8",
+        "journal_sha256": "f945ab56984d8a2885e63492d43e8d63083e6d3b6d2410b5b1661f4fb2fc2fa8",
+        "hook": {
+          "result": "pass",
+          "checks": {
+            "campaign_bound": true,
+            "boot_bound": true,
+            "profile_matches": true,
+            "applied": true,
+            "old_128": true,
+            "effective_matches": true,
+            "reason_verified": true,
+            "before_root_mount": true
+          },
+          "profile_kib": 128,
+          "marker_kernel_seconds": 2.902043,
+          "initial_root_mount_kernel_seconds": 2.999911
+        },
+        "active_initrd_sha256": "07fe416d7820f619f83b8a9a72792505917551f1bb2e9153f9d0e6da520cb5d3",
+        "active_initrd_bytes": 35260429,
+        "receipt_sha256": "6301358b05856e8fa8b7bbe5194c554b03084b44c0b8d60bf336d147b28d978b",
+        "evidence": [
+          {
+            "path": "secrets/early-read-ahead/13222c13-21fb-4ad3-ad38-48d0acf84778/journal-proof-c020379c-8e11-4b49-a8bd-acab8f5eec4a/intent.json",
+            "sha256": "7697c93bbe088ede1de0c0f3457e8e98b7b277b0fbd5e39c8216563d0c69d43f",
+            "bytes": 569,
+            "private": true
+          },
+          {
+            "path": "secrets/early-read-ahead/13222c13-21fb-4ad3-ad38-48d0acf84778/journal-proof-c020379c-8e11-4b49-a8bd-acab8f5eec4a/payload.sh",
+            "sha256": "3a98c9603ff214b47cc81487a5580f2c56d08bcd0c9413fcb801d1b4bb771a33",
+            "bytes": 46438,
+            "private": true
+          },
+          {
+            "path": "secrets/early-read-ahead/13222c13-21fb-4ad3-ad38-48d0acf84778/journal-proof-c020379c-8e11-4b49-a8bd-acab8f5eec4a/guest-result.json",
+            "sha256": "bf3347e11971e5d315857f9bf9023fc622086108eafed70583b1342b5b9a4b8b",
+            "bytes": 146099,
+            "private": true
+          },
+          {
+            "path": "secrets/early-read-ahead/13222c13-21fb-4ad3-ad38-48d0acf84778/journal-proof-c020379c-8e11-4b49-a8bd-acab8f5eec4a/complete.json",
+            "sha256": "c1ec1162a034b998a9dff86ded7233fe71471bde099ca0e033ae30a9a70d2f9d",
+            "bytes": 691,
+            "private": true
+          }
+        ]
+      },
+      "persistence": {
+        "result": "pass",
+        "checks": {
+          "ca_sha256": true,
+          "rules": true,
+          "categories": true,
+          "traffic": true,
+          "agent_version": true,
+          "admin_login": true,
+          "ca_decryption": true,
+          "agent": true
+        },
+        "evidence": {
+          "path": "secrets/early4-a0-persistence.json",
+          "sha256": "49db622affd4454a1336094a4f8b549b766b54e0060b670a33d72fcfdab7d443",
+          "bytes": 1774,
+          "private": true
+        },
+        "baseline_evidence": {
+          "path": "secrets/ra-a0-persistence.json",
+          "sha256": "49db622affd4454a1336094a4f8b549b766b54e0060b670a33d72fcfdab7d443",
+          "bytes": 1774,
+          "private": true
+        },
+        "historical_encrypted_log_recovery": "blocked: Tier-3 historical logs excluded from Tier-1/Tier-2 backup"
+      },
+      "kernel_relative_phases_seconds": {
+        "local_fs_active": 12.328066,
+        "cloud_init_local_start": 15.19606,
+        "cloud_init_local_end": 19.799031,
+        "containerd_start": 24.470071,
+        "containerd_active": 38.226747,
+        "docker_start": 38.232052,
+        "docker_active": 46.885726,
+        "resume_start": 46.891809,
+        "resume_end": 68.008497,
+        "containerd_startup_duration": 13.756676,
+        "docker_startup_duration": 8.653674,
+        "resume_duration": 21.116688,
+        "containerd_prelog_duration": 13.397903,
+        "docker_prelog_duration": 5.208898
+      },
+      "root_filesystem_events": [
+        {
+          "seconds": 2.999911,
+          "event": "mount"
+        },
+        {
+          "seconds": 6.843187,
+          "event": "remount"
+        }
+      ],
+      "software_matches_A0": {
+        "kernel_version": true,
+        "package_versions": true,
+        "compose_version": true,
+        "clamav_signature_version": true,
+        "clamav_signature_files": true
+      },
+      "lock_transitions": [
+        {
+          "kernel_seconds": 16.527805091,
+          "locks": {
+            "os_update": {
+              "available": false,
+              "held": null
+            },
+            "maintenance_agent": {
+              "available": true,
+              "held": false
+            }
+          }
+        },
+        {
+          "kernel_seconds": 48.527866349,
+          "locks": {
+            "os_update": {
+              "available": true,
+              "held": true
+            },
+            "maintenance_agent": {
+              "available": true,
+              "held": true
+            }
+          }
+        },
+        {
+          "kernel_seconds": 68.52788062,
+          "locks": {
+            "os_update": {
+              "available": true,
+              "held": false
+            },
+            "maintenance_agent": {
+              "available": true,
+              "held": false
+            }
+          }
+        }
+      ],
+      "unit_log_capture": {
+        "result": "ok",
+        "exit_code": 0,
+        "timeout_seconds": 20,
+        "truncated": false,
+        "captured_bytes": 54183
+      },
+      "kernel_error_pattern_counts": {
+        "io_error": 0,
+        "ext4_error": 0,
+        "blk_timeout": 0
+      },
+      "device_window": {
+        "selected_start": "2026-10-05T19:23:00+00:00",
+        "selected_end": "2026-10-05T19:25:20+00:00",
+        "interval_seconds": 20,
+        "requested_window_covered": true,
+        "timestamp_gaps": []
+      },
+      "device_metrics": [
+        {
+          "metric": "disk.deviceReadLatency.average",
+          "unit": "millisecond",
+          "selected_samples": 8,
+          "valid_samples": 8,
+          "missing_samples": 0,
+          "sample_mean": 11.125,
+          "maximum_sample": 37,
+          "maximum_at": "2026-10-05T19:24:20+00:00"
+        },
+        {
+          "metric": "disk.queueReadLatency.average",
+          "unit": "millisecond",
+          "selected_samples": 8,
+          "valid_samples": 8,
+          "missing_samples": 0,
+          "sample_mean": 0.0,
+          "maximum_sample": 0,
+          "maximum_at": "2026-10-05T19:23:00+00:00"
+        },
+        {
+          "metric": "disk.deviceWriteLatency.average",
+          "unit": "millisecond",
+          "selected_samples": 8,
+          "valid_samples": 8,
+          "missing_samples": 0,
+          "sample_mean": 11.875,
+          "maximum_sample": 71,
+          "maximum_at": "2026-10-05T19:23:20+00:00"
+        },
+        {
+          "metric": "disk.queueWriteLatency.average",
+          "unit": "millisecond",
+          "selected_samples": 8,
+          "valid_samples": 8,
+          "missing_samples": 0,
+          "sample_mean": 0.75,
+          "maximum_sample": 6,
+          "maximum_at": "2026-10-05T19:23:20+00:00"
+        },
+        {
+          "metric": "disk.read.average",
+          "unit": "kiloBytesPerSecond",
+          "selected_samples": 8,
+          "valid_samples": 8,
+          "missing_samples": 0,
+          "sample_mean": 4858.5,
+          "maximum_sample": 11462,
+          "maximum_at": "2026-10-05T19:25:00+00:00"
+        },
+        {
+          "metric": "disk.write.average",
+          "unit": "kiloBytesPerSecond",
+          "selected_samples": 8,
+          "valid_samples": 8,
+          "missing_samples": 0,
+          "sample_mean": 640.375,
+          "maximum_sample": 1776,
+          "maximum_at": "2026-10-05T19:23:20+00:00"
+        }
+      ],
+      "vm_metrics": [
+        {
+          "metric": "cpu.ready.summation",
+          "unit": "millisecond",
+          "selected_samples": 8,
+          "valid_samples": 8,
+          "missing_samples": 0,
+          "sample_mean": 77.625,
+          "maximum_sample": 103,
+          "maximum_at": "2026-10-05T19:24:20+00:00"
+        },
+        {
+          "metric": "cpu.costop.summation",
+          "unit": "millisecond",
+          "selected_samples": 8,
+          "valid_samples": 8,
+          "missing_samples": 0,
+          "sample_mean": 0.0,
+          "maximum_sample": 0,
+          "maximum_at": "2026-10-05T19:23:00+00:00"
+        },
+        {
+          "metric": "cpu.maxlimited.summation",
+          "unit": "millisecond",
+          "selected_samples": 8,
+          "valid_samples": 8,
+          "missing_samples": 0,
+          "sample_mean": 0.0,
+          "maximum_sample": 0,
+          "maximum_at": "2026-10-05T19:23:00+00:00"
+        },
+        {
+          "metric": "mem.vmmemctl.average",
+          "unit": "kiloBytes",
+          "selected_samples": 8,
+          "valid_samples": 8,
+          "missing_samples": 0,
+          "sample_mean": 0.0,
+          "maximum_sample": 0,
+          "maximum_at": "2026-10-05T19:23:00+00:00"
+        },
+        {
+          "metric": "mem.swapinRate.average",
+          "unit": "kiloBytesPerSecond",
+          "selected_samples": 8,
+          "valid_samples": 8,
+          "missing_samples": 0,
+          "sample_mean": 0.0,
+          "maximum_sample": 0,
+          "maximum_at": "2026-10-05T19:23:00+00:00"
+        },
+        {
+          "metric": "virtualDisk.totalReadLatency.average",
+          "unit": "millisecond",
+          "selected_samples": 8,
+          "valid_samples": 5,
+          "missing_samples": 3,
+          "sample_mean": 5.8,
+          "maximum_sample": 20,
+          "maximum_at": "2026-10-05T19:23:40+00:00"
+        },
+        {
+          "metric": "virtualDisk.totalWriteLatency.average",
+          "unit": "millisecond",
+          "selected_samples": 8,
+          "valid_samples": 5,
+          "missing_samples": 3,
+          "sample_mean": 21.4,
+          "maximum_sample": 88,
+          "maximum_at": "2026-10-05T19:23:20+00:00"
+        },
+        {
+          "metric": "virtualDisk.read.average",
+          "unit": "kiloBytesPerSecond",
+          "selected_samples": 8,
+          "valid_samples": 7,
+          "missing_samples": 1,
+          "sample_mean": 4447.0,
+          "maximum_sample": 11404,
+          "maximum_at": "2026-10-05T19:25:00+00:00"
+        },
+        {
+          "metric": "virtualDisk.write.average",
+          "unit": "kiloBytesPerSecond",
+          "selected_samples": 8,
+          "valid_samples": 7,
+          "missing_samples": 1,
+          "sample_mean": 471.4286,
+          "maximum_sample": 1759,
+          "maximum_at": "2026-10-05T19:23:20+00:00"
+        }
+      ]
+    },
+    {
+      "cycle": "early4-b1",
+      "measurement_controller_revision": "ff0d0151cc39ac98718ca979e8ed70160a100e66",
+      "measurement_freeze_sha256": "edd16c9d224c2f12603be61fa9f19017879c2c9461556adaafbeb4c413903ee8",
+      "timing_result": "fail",
+      "timing_reason": "recovered_after_120_second_budget",
+      "seconds_to_three_healthy_samples": 165.781,
+      "new_boot_origin_after_controller_acceptance_bounds_seconds": [
+        22.990674692,
+        29.849674692
+      ],
+      "three_healthy_completion_kernel_relative_bounds_seconds": [
+        135.931325308,
+        142.790325308
+      ],
+      "backup": {
+        "result": "pass",
+        "strict_checks": {
+          "exactly_one_attempt": true,
+          "recorded_pass": true,
+          "listing_available": true,
+          "archive_matches_recorded_baseline": true,
+          "after_new_boot_upper_bound": true,
+          "first_ready_trigger_matches": true,
+          "dispatch_within_one_second": true,
+          "elapsed_matches_timestamps": true,
+          "elapsed_within_five_seconds": true
+        },
+        "seconds": 0.766,
+        "limitation": "Archive equality rechecks the frozen recorded baseline-match predicate; original API listing/archive bytes are not retained here."
+      },
+      "independent_clamav_coverage": {
+        "result": "pass",
+        "guest_interval_start_ns": 123165325308,
+        "guest_interval_end_ns": 145290325308,
+        "pong_samples": 13,
+        "maximum_sample_gap_ns": 2006484040,
+        "current_container_endpoint_verified": true
+      },
+      "phases": {
+        "unit_timestamps_kernel_relative_seconds": {
+          "local-fs.target": {
+            "InactiveExitTimestampMonotonic_seconds": 11.058522,
+            "ActiveEnterTimestampMonotonic_seconds": 11.058522
+          },
+          "sysinit.target": {
+            "InactiveExitTimestampMonotonic_seconds": 20.335835,
+            "ActiveEnterTimestampMonotonic_seconds": 20.335835
+          },
+          "basic.target": {
+            "InactiveExitTimestampMonotonic_seconds": 20.390097,
+            "ActiveEnterTimestampMonotonic_seconds": 20.390097
+          },
+          "network-online.target": {
+            "InactiveExitTimestampMonotonic_seconds": 20.335795,
+            "ActiveEnterTimestampMonotonic_seconds": 20.335795
+          },
+          "cloud-init-local.service": {
+            "InactiveExitTimestampMonotonic_seconds": 13.338094,
+            "ExecMainStartTimestampMonotonic_seconds": 13.338067,
+            "ExecMainExitTimestampMonotonic_seconds": 18.40267,
+            "ActiveEnterTimestampMonotonic_seconds": 18.402717
+          },
+          "cloud-init.service": {
+            "InactiveExitTimestampMonotonic_seconds": 19.614923,
+            "ExecMainStartTimestampMonotonic_seconds": 19.614893,
+            "ExecMainExitTimestampMonotonic_seconds": 20.335292,
+            "ActiveEnterTimestampMonotonic_seconds": 20.33535
+          },
+          "cloud-final.service": {
+            "InactiveExitTimestampMonotonic_seconds": 115.774422,
+            "ExecMainStartTimestampMonotonic_seconds": 115.774148,
+            "ExecMainExitTimestampMonotonic_seconds": 118.525852,
+            "ActiveEnterTimestampMonotonic_seconds": 118.525966
+          },
+          "systemd-journal-flush.service": {
+            "InactiveExitTimestampMonotonic_seconds": 7.185235,
+            "ExecMainStartTimestampMonotonic_seconds": 7.185212,
+            "ExecMainExitTimestampMonotonic_seconds": 10.765922,
+            "ActiveEnterTimestampMonotonic_seconds": 10.766021
+          },
+          "systemd-udev-settle.service": {
+            "InactiveExitTimestampMonotonic_seconds": 0.0,
+            "ExecMainStartTimestampMonotonic_seconds": 0.0,
+            "ExecMainExitTimestampMonotonic_seconds": 0.0,
+            "ActiveEnterTimestampMonotonic_seconds": 0.0
+          },
+          "containerd.service": {
+            "InactiveExitTimestampMonotonic_seconds": 21.125351,
+            "ExecMainStartTimestampMonotonic_seconds": 22.206074,
+            "ExecMainExitTimestampMonotonic_seconds": 0.0,
+            "ActiveEnterTimestampMonotonic_seconds": 49.270697
+          },
+          "docker.service": {
+            "InactiveExitTimestampMonotonic_seconds": 49.284181,
+            "ExecMainStartTimestampMonotonic_seconds": 49.284089,
+            "ExecMainExitTimestampMonotonic_seconds": 0.0,
+            "ActiveEnterTimestampMonotonic_seconds": 65.221922
+          },
+          "culvert-maint.service": {
+            "InactiveExitTimestampMonotonic_seconds": 65.228151,
+            "ExecMainStartTimestampMonotonic_seconds": 65.228055,
+            "ExecMainExitTimestampMonotonic_seconds": 0.0,
+            "ActiveEnterTimestampMonotonic_seconds": 65.228151
+          },
+          "culvert-stack-resume.service": {
+            "InactiveExitTimestampMonotonic_seconds": 65.229834,
+            "ExecMainStartTimestampMonotonic_seconds": 65.229754,
+            "ExecMainExitTimestampMonotonic_seconds": 115.769188,
+            "ActiveEnterTimestampMonotonic_seconds": 0.0
+          },
+          "culvert-lab-boot-sampler.service": {
+            "InactiveExitTimestampMonotonic_seconds": 11.164319,
+            "ExecMainStartTimestampMonotonic_seconds": 11.164291,
+            "ExecMainExitTimestampMonotonic_seconds": 0.0,
+            "ActiveEnterTimestampMonotonic_seconds": 11.164319
+          }
+        },
+        "first_daemon_log_kernel_seconds": {
+          "containerd": 45.431203,
+          "dockerd": 63.43015
+        },
+        "daemon_log_capture_complete": true
+      },
+      "first_sampled_PONG_kernel_seconds": 106.143109805,
+      "sampler_first_kernel_seconds": 14.129490046,
+      "sampler_raw_sha256": "5914c8c2de31f19fc864060b95bf74f372d1e8ffb061f93e094472ea943fa955",
+      "early_hook_verification": {
+        "result": "pass",
+        "checks": {
+          "campaign_bound": true,
+          "boot_bound": true,
+          "profile_matches": true,
+          "applied": true,
+          "old_128": true,
+          "effective_matches": true,
+          "reason_verified": true,
+          "before_root_mount": true
+        },
+        "profile_kib": 1024,
+        "marker_kernel_seconds": 3.054056,
+        "initial_root_mount_kernel_seconds": 3.145492
+      },
+      "boot_id": "02908c37-2487-4a35-b3ac-02222d069008",
+      "original_initrd_restoration_verified": null,
+      "evidence": [
+        {
+          "path": "secrets/production-recovery-early4-b1.jsonl",
+          "sha256": "15ac6a39d251b5d03d4be5a3a79e22a5c15f961d1b0ee13e4841174982563704",
+          "bytes": 26559,
+          "private": true
+        },
+        {
+          "path": "evidence/production-recovery-early4-b1-summary.json",
+          "sha256": "e2d4129c5b8ec3677704025265e11dd87b0ac60aa80c9b37c97243966fb5c3a6",
+          "bytes": 453,
+          "private": false
+        },
+        {
+          "path": "secrets/production-recovery/early4-b1/acceptance.json",
+          "sha256": "4cd35ae809c57875d2ac7379978d5c684130da93bdbd8ee2f8344a7b3bb361c1",
+          "bytes": 689,
+          "private": true
+        },
+        {
+          "path": "secrets/production-recovery/early4-b1/full.json",
+          "sha256": "f59427146de618971b2336ac335700673abbbe3ce41d564e5b4b494e312f4f6b",
+          "bytes": 349481,
+          "private": true
+        },
+        {
+          "path": "secrets/production-recovery/early4-b1/full-receipt.json",
+          "sha256": "9fc4f04945a4140a60b96c3bce2d908047f57f4946f921136261d6c65826b96c",
+          "bytes": 566,
+          "private": true
+        },
+        {
+          "path": "secrets/production-recovery/early4-b1/correlation.json",
+          "sha256": "7aa42117a4ff14444b365302bf86a47bc9d401bf62e8831027e54dda9cb2e4c5",
+          "bytes": 451,
+          "private": true
+        },
+        {
+          "path": "secrets/production-recovery/early4-b1/correlation-receipt.json",
+          "sha256": "6436b58fd2ee0e9f9bc0cfbb25ee4e0ac5d79645bab16645b6c189afdb1bf7cf",
+          "bytes": 573,
+          "private": true
+        },
+        {
+          "path": "secrets/production-recovery/early4-b1/authenticated-boot-proof.json",
+          "sha256": "a36a2f137c63eb561f5a2cd92541b0af9e9ef3fa7460c519850c16477a89f8f6",
+          "bytes": 26884,
+          "private": true
+        },
+        {
+          "path": "evidence/host-storage-early4-b1.json",
+          "sha256": "a63ee2f62d8ded04b582789e974b4c16f36559139c66ff951f51fcb304b7837a",
+          "bytes": 7272,
+          "private": false
+        },
+        {
+          "path": "evidence/vm-performance-early4-b1.json",
+          "sha256": "0981236ec61569a015c9a8eddcf70f66172041a2e41bdca3eabbb50ec9ca4ff3",
+          "bytes": 6528,
+          "private": false
+        },
+        {
+          "path": "secrets/host-storage-early4-b1.raw",
+          "sha256": "53b2b89a31ef79d999901269b43c213483b4d8add7fa47cdc460b82629b6b755",
+          "bytes": 13628,
+          "private": true
+        },
+        {
+          "path": "secrets/vm-performance-early4-b1.raw",
+          "sha256": "8c107156dfb03e07ef04314d186ce4ca35304a0e93966ab9cb6036123793ce67",
+          "bytes": 12799,
+          "private": true
+        }
+      ],
+      "supplemental_journal_verification": {
+        "result": "pass",
+        "controller_revision": "ff0d0151cc39ac98718ca979e8ed70160a100e66",
+        "freeze_sha256": "edd16c9d224c2f12603be61fa9f19017879c2c9461556adaafbeb4c413903ee8",
+        "journal_sha256": "185e014cf49f9654ceb5d4a7b05f9b5db129c49fa04b326d35afee8bd820a013",
+        "hook": {
+          "result": "pass",
+          "checks": {
+            "campaign_bound": true,
+            "boot_bound": true,
+            "profile_matches": true,
+            "applied": true,
+            "old_128": true,
+            "effective_matches": true,
+            "reason_verified": true,
+            "before_root_mount": true
+          },
+          "profile_kib": 1024,
+          "marker_kernel_seconds": 3.054056,
+          "initial_root_mount_kernel_seconds": 3.145492
+        },
+        "active_initrd_sha256": "45f8ee3292edb7feedfde7acab6d409a07c4e0b4a92f00be02c090a03f2d6e6b",
+        "active_initrd_bytes": 35260430,
+        "receipt_sha256": "b20ff68257f1f13d433882e0c5d191d1182229723e2e3cc55a0e7bebd552f92a",
+        "evidence": [
+          {
+            "path": "secrets/early-read-ahead/13222c13-21fb-4ad3-ad38-48d0acf84778/journal-proof-5651f7df-320c-4db8-8c2f-5af2bf426d4b/intent.json",
+            "sha256": "581dab5947adbdcd008e3bfd06298118fb44b81be5eaae9ecc28815d3618681b",
+            "bytes": 569,
+            "private": true
+          },
+          {
+            "path": "secrets/early-read-ahead/13222c13-21fb-4ad3-ad38-48d0acf84778/journal-proof-5651f7df-320c-4db8-8c2f-5af2bf426d4b/payload.sh",
+            "sha256": "c0efac498513ba49832aa01cd134f104731c7616d3373650f21556edb1458d4d",
+            "bytes": 46438,
+            "private": true
+          },
+          {
+            "path": "secrets/early-read-ahead/13222c13-21fb-4ad3-ad38-48d0acf84778/journal-proof-5651f7df-320c-4db8-8c2f-5af2bf426d4b/guest-result.json",
+            "sha256": "76646a7a8211ccda1f16ea74e3857d3df0414856e619a599a38f81dc123302ce",
+            "bytes": 146632,
+            "private": true
+          },
+          {
+            "path": "secrets/early-read-ahead/13222c13-21fb-4ad3-ad38-48d0acf84778/journal-proof-5651f7df-320c-4db8-8c2f-5af2bf426d4b/complete.json",
+            "sha256": "f2a8808e84f98d8545952b059dc34b06f0e73e672a56d5f1e7023f9452b6feff",
+            "bytes": 691,
+            "private": true
+          }
+        ]
+      },
+      "persistence": {
+        "result": "pass",
+        "checks": {
+          "ca_sha256": true,
+          "rules": true,
+          "categories": true,
+          "traffic": true,
+          "agent_version": true,
+          "admin_login": true,
+          "ca_decryption": true,
+          "agent": true
+        },
+        "evidence": {
+          "path": "secrets/early4-b1-persistence.json",
+          "sha256": "49db622affd4454a1336094a4f8b549b766b54e0060b670a33d72fcfdab7d443",
+          "bytes": 1774,
+          "private": true
+        },
+        "baseline_evidence": {
+          "path": "secrets/ra-a0-persistence.json",
+          "sha256": "49db622affd4454a1336094a4f8b549b766b54e0060b670a33d72fcfdab7d443",
+          "bytes": 1774,
+          "private": true
+        },
+        "historical_encrypted_log_recovery": "blocked: Tier-3 historical logs excluded from Tier-1/Tier-2 backup"
+      },
+      "kernel_relative_phases_seconds": {
+        "local_fs_active": 11.058522,
+        "cloud_init_local_start": 13.338067,
+        "cloud_init_local_end": 18.40267,
+        "containerd_start": 22.206074,
+        "containerd_active": 49.270697,
+        "docker_start": 49.284089,
+        "docker_active": 65.221922,
+        "resume_start": 65.229754,
+        "resume_end": 115.769188,
+        "containerd_startup_duration": 27.064623,
+        "docker_startup_duration": 15.937833,
+        "resume_duration": 50.539434,
+        "containerd_prelog_duration": 23.225129,
+        "docker_prelog_duration": 14.146061
+      },
+      "root_filesystem_events": [
+        {
+          "seconds": 3.145492,
+          "event": "mount"
+        },
+        {
+          "seconds": 7.151075,
+          "event": "remount"
+        }
+      ],
+      "software_matches_A0": {
+        "kernel_version": true,
+        "package_versions": true,
+        "compose_version": true,
+        "clamav_signature_version": true,
+        "clamav_signature_files": true
+      },
+      "lock_transitions": [
+        {
+          "kernel_seconds": 14.129490046,
+          "locks": {
+            "os_update": {
+              "available": false,
+              "held": null
+            },
+            "maintenance_agent": {
+              "available": true,
+              "held": false
+            }
+          }
+        },
+        {
+          "kernel_seconds": 66.129541755,
+          "locks": {
+            "os_update": {
+              "available": true,
+              "held": true
+            },
+            "maintenance_agent": {
+              "available": true,
+              "held": true
+            }
+          }
+        },
+        {
+          "kernel_seconds": 116.129563029,
+          "locks": {
+            "os_update": {
+              "available": true,
+              "held": false
+            },
+            "maintenance_agent": {
+              "available": true,
+              "held": false
+            }
+          }
+        }
+      ],
+      "unit_log_capture": {
+        "result": "ok",
+        "exit_code": 0,
+        "timeout_seconds": 20,
+        "truncated": false,
+        "captured_bytes": 57743
+      },
+      "kernel_error_pattern_counts": {
+        "io_error": 0,
+        "ext4_error": 0,
+        "blk_timeout": 0
+      },
+      "device_window": {
+        "selected_start": "2026-10-05T19:32:00+00:00",
+        "selected_end": "2026-10-05T19:35:20+00:00",
+        "interval_seconds": 20,
+        "requested_window_covered": true,
+        "timestamp_gaps": []
+      },
+      "device_metrics": [
+        {
+          "metric": "disk.deviceReadLatency.average",
+          "unit": "millisecond",
+          "selected_samples": 11,
+          "valid_samples": 11,
+          "missing_samples": 0,
+          "sample_mean": 90.7273,
+          "maximum_sample": 286,
+          "maximum_at": "2026-10-05T19:32:40+00:00"
+        },
+        {
+          "metric": "disk.queueReadLatency.average",
+          "unit": "millisecond",
+          "selected_samples": 11,
+          "valid_samples": 11,
+          "missing_samples": 0,
+          "sample_mean": 4.3636,
+          "maximum_sample": 32,
+          "maximum_at": "2026-10-05T19:34:40+00:00"
+        },
+        {
+          "metric": "disk.deviceWriteLatency.average",
+          "unit": "millisecond",
+          "selected_samples": 11,
+          "valid_samples": 11,
+          "missing_samples": 0,
+          "sample_mean": 84.5455,
+          "maximum_sample": 177,
+          "maximum_at": "2026-10-05T19:33:40+00:00"
+        },
+        {
+          "metric": "disk.queueWriteLatency.average",
+          "unit": "millisecond",
+          "selected_samples": 11,
+          "valid_samples": 11,
+          "missing_samples": 0,
+          "sample_mean": 147.0,
+          "maximum_sample": 444,
+          "maximum_at": "2026-10-05T19:33:40+00:00"
+        },
+        {
+          "metric": "disk.read.average",
+          "unit": "kiloBytesPerSecond",
+          "selected_samples": 11,
+          "valid_samples": 11,
+          "missing_samples": 0,
+          "sample_mean": 4449.3636,
+          "maximum_sample": 14655,
+          "maximum_at": "2026-10-05T19:34:20+00:00"
+        },
+        {
+          "metric": "disk.write.average",
+          "unit": "kiloBytesPerSecond",
+          "selected_samples": 11,
+          "valid_samples": 11,
+          "missing_samples": 0,
+          "sample_mean": 26085.5455,
+          "maximum_sample": 51797,
+          "maximum_at": "2026-10-05T19:34:00+00:00"
+        }
+      ],
+      "vm_metrics": [
+        {
+          "metric": "cpu.ready.summation",
+          "unit": "millisecond",
+          "selected_samples": 11,
+          "valid_samples": 11,
+          "missing_samples": 0,
+          "sample_mean": 72.3636,
+          "maximum_sample": 97,
+          "maximum_at": "2026-10-05T19:35:20+00:00"
+        },
+        {
+          "metric": "cpu.costop.summation",
+          "unit": "millisecond",
+          "selected_samples": 11,
+          "valid_samples": 11,
+          "missing_samples": 0,
+          "sample_mean": 0.0,
+          "maximum_sample": 0,
+          "maximum_at": "2026-10-05T19:32:00+00:00"
+        },
+        {
+          "metric": "cpu.maxlimited.summation",
+          "unit": "millisecond",
+          "selected_samples": 11,
+          "valid_samples": 11,
+          "missing_samples": 0,
+          "sample_mean": 0.0,
+          "maximum_sample": 0,
+          "maximum_at": "2026-10-05T19:32:00+00:00"
+        },
+        {
+          "metric": "mem.vmmemctl.average",
+          "unit": "kiloBytes",
+          "selected_samples": 11,
+          "valid_samples": 11,
+          "missing_samples": 0,
+          "sample_mean": 0.0,
+          "maximum_sample": 0,
+          "maximum_at": "2026-10-05T19:32:00+00:00"
+        },
+        {
+          "metric": "mem.swapinRate.average",
+          "unit": "kiloBytesPerSecond",
+          "selected_samples": 11,
+          "valid_samples": 11,
+          "missing_samples": 0,
+          "sample_mean": 0.0,
+          "maximum_sample": 0,
+          "maximum_at": "2026-10-05T19:32:00+00:00"
+        },
+        {
+          "metric": "virtualDisk.totalReadLatency.average",
+          "unit": "millisecond",
+          "selected_samples": 11,
+          "valid_samples": 8,
+          "missing_samples": 3,
+          "sample_mean": 121.125,
+          "maximum_sample": 409,
+          "maximum_at": "2026-10-05T19:34:40+00:00"
+        },
+        {
+          "metric": "virtualDisk.totalWriteLatency.average",
+          "unit": "millisecond",
+          "selected_samples": 11,
+          "valid_samples": 8,
+          "missing_samples": 3,
+          "sample_mean": 52.5,
+          "maximum_sample": 173,
+          "maximum_at": "2026-10-05T19:32:40+00:00"
+        },
+        {
+          "metric": "virtualDisk.read.average",
+          "unit": "kiloBytesPerSecond",
+          "selected_samples": 11,
+          "valid_samples": 10,
+          "missing_samples": 1,
+          "sample_mean": 4690.8,
+          "maximum_sample": 14655,
+          "maximum_at": "2026-10-05T19:34:20+00:00"
+        },
+        {
+          "metric": "virtualDisk.write.average",
+          "unit": "kiloBytesPerSecond",
+          "selected_samples": 11,
+          "valid_samples": 10,
+          "missing_samples": 1,
+          "sample_mean": 331.1,
+          "maximum_sample": 1771,
+          "maximum_at": "2026-10-05T19:32:00+00:00"
+        }
+      ]
+    },
+    {
+      "cycle": "early4-b2",
+      "measurement_controller_revision": "ff0d0151cc39ac98718ca979e8ed70160a100e66",
+      "measurement_freeze_sha256": "edd16c9d224c2f12603be61fa9f19017879c2c9461556adaafbeb4c413903ee8",
+      "timing_result": "pass",
+      "timing_reason": null,
+      "seconds_to_three_healthy_samples": 114.406,
+      "new_boot_origin_after_controller_acceptance_bounds_seconds": [
+        13.660960521,
+        19.957960521
+      ],
+      "three_healthy_completion_kernel_relative_bounds_seconds": [
+        94.448039479,
+        100.745039479
+      ],
+      "backup": {
+        "result": "pass",
+        "strict_checks": {
+          "exactly_one_attempt": true,
+          "recorded_pass": true,
+          "listing_available": true,
+          "archive_matches_recorded_baseline": true,
+          "after_new_boot_upper_bound": true,
+          "first_ready_trigger_matches": true,
+          "dispatch_within_one_second": true,
+          "elapsed_matches_timestamps": true,
+          "elapsed_within_five_seconds": true
+        },
+        "seconds": 1.094,
+        "limitation": "Archive equality rechecks the frozen recorded baseline-match predicate; original API listing/archive bytes are not retained here."
+      },
+      "independent_clamav_coverage": {
+        "result": "pass",
+        "guest_interval_start_ns": 81667039479,
+        "guest_interval_end_ns": 103245039479,
+        "pong_samples": 13,
+        "maximum_sample_gap_ns": 2006993844,
+        "current_container_endpoint_verified": true
+      },
+      "phases": {
+        "unit_timestamps_kernel_relative_seconds": {
+          "local-fs.target": {
+            "InactiveExitTimestampMonotonic_seconds": 24.877503,
+            "ActiveEnterTimestampMonotonic_seconds": 24.877503
+          },
+          "sysinit.target": {
+            "InactiveExitTimestampMonotonic_seconds": 37.141708,
+            "ActiveEnterTimestampMonotonic_seconds": 37.141708
+          },
+          "basic.target": {
+            "InactiveExitTimestampMonotonic_seconds": 37.229846,
+            "ActiveEnterTimestampMonotonic_seconds": 37.229846
+          },
+          "network-online.target": {
+            "InactiveExitTimestampMonotonic_seconds": 37.141678,
+            "ActiveEnterTimestampMonotonic_seconds": 37.141678
+          },
+          "cloud-init-local.service": {
+            "InactiveExitTimestampMonotonic_seconds": 27.298141,
+            "ExecMainStartTimestampMonotonic_seconds": 27.298107,
+            "ExecMainExitTimestampMonotonic_seconds": 35.013254,
+            "ActiveEnterTimestampMonotonic_seconds": 35.013308
+          },
+          "cloud-init.service": {
+            "InactiveExitTimestampMonotonic_seconds": 36.44867,
+            "ExecMainStartTimestampMonotonic_seconds": 36.448648,
+            "ExecMainExitTimestampMonotonic_seconds": 37.141434,
+            "ActiveEnterTimestampMonotonic_seconds": 37.141482
+          },
+          "cloud-final.service": {
+            "InactiveExitTimestampMonotonic_seconds": 76.518218,
+            "ExecMainStartTimestampMonotonic_seconds": 76.518137,
+            "ExecMainExitTimestampMonotonic_seconds": 77.981567,
+            "ActiveEnterTimestampMonotonic_seconds": 77.981672
+          },
+          "systemd-journal-flush.service": {
+            "InactiveExitTimestampMonotonic_seconds": 18.2347,
+            "ExecMainStartTimestampMonotonic_seconds": 18.234667,
+            "ExecMainExitTimestampMonotonic_seconds": 23.03548,
+            "ActiveEnterTimestampMonotonic_seconds": 23.035568
+          },
+          "systemd-udev-settle.service": {
+            "InactiveExitTimestampMonotonic_seconds": 0.0,
+            "ExecMainStartTimestampMonotonic_seconds": 0.0,
+            "ExecMainExitTimestampMonotonic_seconds": 0.0,
+            "ActiveEnterTimestampMonotonic_seconds": 0.0
+          },
+          "containerd.service": {
+            "InactiveExitTimestampMonotonic_seconds": 38.66429,
+            "ExecMainStartTimestampMonotonic_seconds": 39.276193,
+            "ExecMainExitTimestampMonotonic_seconds": 0.0,
+            "ActiveEnterTimestampMonotonic_seconds": 47.852156
+          },
+          "docker.service": {
+            "InactiveExitTimestampMonotonic_seconds": 47.859175,
+            "ExecMainStartTimestampMonotonic_seconds": 47.859088,
+            "ExecMainExitTimestampMonotonic_seconds": 0.0,
+            "ActiveEnterTimestampMonotonic_seconds": 57.508377
+          },
+          "culvert-maint.service": {
+            "InactiveExitTimestampMonotonic_seconds": 57.513236,
+            "ExecMainStartTimestampMonotonic_seconds": 57.513149,
+            "ExecMainExitTimestampMonotonic_seconds": 0.0,
+            "ActiveEnterTimestampMonotonic_seconds": 57.513236
+          },
+          "culvert-stack-resume.service": {
+            "InactiveExitTimestampMonotonic_seconds": 57.516952,
+            "ExecMainStartTimestampMonotonic_seconds": 57.516063,
+            "ExecMainExitTimestampMonotonic_seconds": 76.515292,
+            "ActiveEnterTimestampMonotonic_seconds": 0.0
+          },
+          "culvert-lab-boot-sampler.service": {
+            "InactiveExitTimestampMonotonic_seconds": 25.033085,
+            "ExecMainStartTimestampMonotonic_seconds": 25.033059,
+            "ExecMainExitTimestampMonotonic_seconds": 0.0,
+            "ActiveEnterTimestampMonotonic_seconds": 25.033085
+          }
+        },
+        "first_daemon_log_kernel_seconds": {
+          "containerd": 43.605114,
+          "dockerd": 54.307198
+        },
+        "daemon_log_capture_complete": true
+      },
+      "first_sampled_PONG_kernel_seconds": 76.323086035,
+      "sampler_first_kernel_seconds": 28.313316102,
+      "sampler_raw_sha256": "8e15aa9a970b361ac3f7ae2ff14539db3aca8fef758aa34347532d6d43fdb539",
+      "early_hook_verification": {
+        "result": "pass",
+        "checks": {
+          "campaign_bound": true,
+          "boot_bound": true,
+          "profile_matches": true,
+          "applied": true,
+          "old_128": true,
+          "effective_matches": true,
+          "reason_verified": true,
+          "before_root_mount": true
+        },
+        "profile_kib": 1024,
+        "marker_kernel_seconds": 3.180942,
+        "initial_root_mount_kernel_seconds": 3.309265
+      },
+      "boot_id": "168b1caa-71cd-4782-9b9e-69f8725cf7a6",
+      "original_initrd_restoration_verified": null,
+      "evidence": [
+        {
+          "path": "secrets/production-recovery-early4-b2.jsonl",
+          "sha256": "0d14a88d3f7891cb90a9a7e4e3dab7acb86b038879c2aed74b5bcc086d5dfedd",
+          "bytes": 19815,
+          "private": true
+        },
+        {
+          "path": "evidence/production-recovery-early4-b2-summary.json",
+          "sha256": "ace4bbea20f83c1574046adf3f35098f0344b5e93c48d40549eae7f183c896a0",
+          "bytes": 936,
+          "private": false
+        },
+        {
+          "path": "secrets/production-recovery/early4-b2/acceptance.json",
+          "sha256": "c713bf8410a5c6868499b12a9c1282ec90c50504b9c163cc650bf742e930673f",
+          "bytes": 689,
+          "private": true
+        },
+        {
+          "path": "secrets/production-recovery/early4-b2/full.json",
+          "sha256": "099a0bb34e72f76e5e8dd3ad80af220e486527ea5c2ab6030b10880ae67219bc",
+          "bytes": 341270,
+          "private": true
+        },
+        {
+          "path": "secrets/production-recovery/early4-b2/full-receipt.json",
+          "sha256": "c791d2af78e3208b1f8de4044039bbed04e0b7378b3d04ec28a02ab31f4d870b",
+          "bytes": 566,
+          "private": true
+        },
+        {
+          "path": "secrets/production-recovery/early4-b2/correlation.json",
+          "sha256": "0b92c34d5a1628ed03838148a47f2097f3aa2aac5c74f5b097f0852fe2b62648",
+          "bytes": 451,
+          "private": true
+        },
+        {
+          "path": "secrets/production-recovery/early4-b2/correlation-receipt.json",
+          "sha256": "0c6aba1f13fea2fba0b181d2b6f91c5af196132dc24835d68f2fd226ce34eaef",
+          "bytes": 573,
+          "private": true
+        },
+        {
+          "path": "secrets/production-recovery/early4-b2/authenticated-boot-proof.json",
+          "sha256": "e5419755e8a7499f76ecaee4481782a13904d8449c7d042345433af579f96f92",
+          "bytes": 25563,
+          "private": true
+        },
+        {
+          "path": "evidence/host-storage-early4-b2.json",
+          "sha256": "ee46274428e7e3a744bb68854c5c3a6fdebd2a36d707a9f6649cbd5fd60693d9",
+          "bytes": 6569,
+          "private": false
+        },
+        {
+          "path": "evidence/vm-performance-early4-b2.json",
+          "sha256": "334d8d4664d60da5e8b92d33cf010bd17fd6ed9508336f633e96ef09035a2587",
+          "bytes": 6494,
+          "private": false
+        },
+        {
+          "path": "secrets/host-storage-early4-b2.raw",
+          "sha256": "6866b6f11d94ee9d16503a0a9ea8c08acb6ed5687a735346edcfd0ee324126e7",
+          "bytes": 13749,
+          "private": true
+        },
+        {
+          "path": "secrets/vm-performance-early4-b2.raw",
+          "sha256": "d60b91797dd4e3b65098b063444291c26d80ed214b57ee3ce3eb2eb02712ef1e",
+          "bytes": 12904,
+          "private": true
+        }
+      ],
+      "supplemental_journal_verification": {
+        "result": "pass",
+        "controller_revision": "ff0d0151cc39ac98718ca979e8ed70160a100e66",
+        "freeze_sha256": "edd16c9d224c2f12603be61fa9f19017879c2c9461556adaafbeb4c413903ee8",
+        "journal_sha256": "94770999cb65d3828b12ea92c88dfc9a408271b8da562040d1a0ca6c8daedf8e",
+        "hook": {
+          "result": "pass",
+          "checks": {
+            "campaign_bound": true,
+            "boot_bound": true,
+            "profile_matches": true,
+            "applied": true,
+            "old_128": true,
+            "effective_matches": true,
+            "reason_verified": true,
+            "before_root_mount": true
+          },
+          "profile_kib": 1024,
+          "marker_kernel_seconds": 3.180942,
+          "initial_root_mount_kernel_seconds": 3.309265
+        },
+        "active_initrd_sha256": "45f8ee3292edb7feedfde7acab6d409a07c4e0b4a92f00be02c090a03f2d6e6b",
+        "active_initrd_bytes": 35260430,
+        "receipt_sha256": "b20ff68257f1f13d433882e0c5d191d1182229723e2e3cc55a0e7bebd552f92a",
+        "evidence": [
+          {
+            "path": "secrets/early-read-ahead/13222c13-21fb-4ad3-ad38-48d0acf84778/journal-proof-e60fd926-b200-41c4-be98-dc54da0e08d7/intent.json",
+            "sha256": "4e6bf95e5f3560f5981aa1dcd42e06be1b8f5f17f360d90a3e4dff1c28cc5b90",
+            "bytes": 569,
+            "private": true
+          },
+          {
+            "path": "secrets/early-read-ahead/13222c13-21fb-4ad3-ad38-48d0acf84778/journal-proof-e60fd926-b200-41c4-be98-dc54da0e08d7/payload.sh",
+            "sha256": "9d6435972f8fefb035196ea3f6ee26978793901281de15eed19f461bc6d6522c",
+            "bytes": 46438,
+            "private": true
+          },
+          {
+            "path": "secrets/early-read-ahead/13222c13-21fb-4ad3-ad38-48d0acf84778/journal-proof-e60fd926-b200-41c4-be98-dc54da0e08d7/guest-result.json",
+            "sha256": "036a002ceec8929d1d06e8298c8aa6841e8f3eff38e29b94c7a99f628b6b6544",
+            "bytes": 146621,
+            "private": true
+          },
+          {
+            "path": "secrets/early-read-ahead/13222c13-21fb-4ad3-ad38-48d0acf84778/journal-proof-e60fd926-b200-41c4-be98-dc54da0e08d7/complete.json",
+            "sha256": "27d215ac554ce5cfa7cffdd6778036ff4f8c5ebf678b7b5c171275c8ba14d15e",
+            "bytes": 691,
+            "private": true
+          }
+        ]
+      },
+      "persistence": {
+        "result": "pass",
+        "checks": {
+          "ca_sha256": true,
+          "rules": true,
+          "categories": true,
+          "traffic": true,
+          "agent_version": true,
+          "admin_login": true,
+          "ca_decryption": true,
+          "agent": true
+        },
+        "evidence": {
+          "path": "secrets/early4-b2-persistence.json",
+          "sha256": "49db622affd4454a1336094a4f8b549b766b54e0060b670a33d72fcfdab7d443",
+          "bytes": 1774,
+          "private": true
+        },
+        "baseline_evidence": {
+          "path": "secrets/ra-a0-persistence.json",
+          "sha256": "49db622affd4454a1336094a4f8b549b766b54e0060b670a33d72fcfdab7d443",
+          "bytes": 1774,
+          "private": true
+        },
+        "historical_encrypted_log_recovery": "blocked: Tier-3 historical logs excluded from Tier-1/Tier-2 backup"
+      },
+      "kernel_relative_phases_seconds": {
+        "local_fs_active": 24.877503,
+        "cloud_init_local_start": 27.298107,
+        "cloud_init_local_end": 35.013254,
+        "containerd_start": 39.276193,
+        "containerd_active": 47.852156,
+        "docker_start": 47.859088,
+        "docker_active": 57.508377,
+        "resume_start": 57.516063,
+        "resume_end": 76.515292,
+        "containerd_startup_duration": 8.575963,
+        "docker_startup_duration": 9.649289,
+        "resume_duration": 18.999229,
+        "containerd_prelog_duration": 4.328921,
+        "docker_prelog_duration": 6.44811
+      },
+      "root_filesystem_events": [
+        {
+          "seconds": 3.309265,
+          "event": "mount"
+        },
+        {
+          "seconds": 18.151865,
+          "event": "remount"
+        }
+      ],
+      "software_matches_A0": {
+        "kernel_version": true,
+        "package_versions": true,
+        "compose_version": true,
+        "clamav_signature_version": true,
+        "clamav_signature_files": true
+      },
+      "lock_transitions": [
+        {
+          "kernel_seconds": 28.313316102,
+          "locks": {
+            "os_update": {
+              "available": false,
+              "held": null
+            },
+            "maintenance_agent": {
+              "available": true,
+              "held": false
+            }
+          }
+        },
+        {
+          "kernel_seconds": 58.313499583,
+          "locks": {
+            "os_update": {
+              "available": true,
+              "held": true
+            },
+            "maintenance_agent": {
+              "available": true,
+              "held": true
+            }
+          }
+        },
+        {
+          "kernel_seconds": 78.313364795,
+          "locks": {
+            "os_update": {
+              "available": true,
+              "held": false
+            },
+            "maintenance_agent": {
+              "available": true,
+              "held": false
+            }
+          }
+        }
+      ],
+      "unit_log_capture": {
+        "result": "ok",
+        "exit_code": 0,
+        "timeout_seconds": 20,
+        "truncated": false,
+        "captured_bytes": 53285
+      },
+      "kernel_error_pattern_counts": {
+        "io_error": 0,
+        "ext4_error": 0,
+        "blk_timeout": 0
+      },
+      "device_window": {
+        "selected_start": "2026-10-05T19:36:20+00:00",
+        "selected_end": "2026-10-05T19:38:40+00:00",
+        "interval_seconds": 20,
+        "requested_window_covered": true,
+        "timestamp_gaps": []
+      },
+      "device_metrics": [
+        {
+          "metric": "disk.deviceReadLatency.average",
+          "unit": "millisecond",
+          "selected_samples": 8,
+          "valid_samples": 8,
+          "missing_samples": 0,
+          "sample_mean": 25.5,
+          "maximum_sample": 66,
+          "maximum_at": "2026-10-05T19:38:00+00:00"
+        },
+        {
+          "metric": "disk.queueReadLatency.average",
+          "unit": "millisecond",
+          "selected_samples": 8,
+          "valid_samples": 8,
+          "missing_samples": 0,
+          "sample_mean": 0.0,
+          "maximum_sample": 0,
+          "maximum_at": "2026-10-05T19:36:20+00:00"
+        },
+        {
+          "metric": "disk.deviceWriteLatency.average",
+          "unit": "millisecond",
+          "selected_samples": 8,
+          "valid_samples": 8,
+          "missing_samples": 0,
+          "sample_mean": 20.5,
+          "maximum_sample": 37,
+          "maximum_at": "2026-10-05T19:36:20+00:00"
+        },
+        {
+          "metric": "disk.queueWriteLatency.average",
+          "unit": "millisecond",
+          "selected_samples": 8,
+          "valid_samples": 8,
+          "missing_samples": 0,
+          "sample_mean": 17.0,
+          "maximum_sample": 65,
+          "maximum_at": "2026-10-05T19:38:40+00:00"
+        },
+        {
+          "metric": "disk.read.average",
+          "unit": "kiloBytesPerSecond",
+          "selected_samples": 8,
+          "valid_samples": 8,
+          "missing_samples": 0,
+          "sample_mean": 7315.125,
+          "maximum_sample": 18339,
+          "maximum_at": "2026-10-05T19:38:00+00:00"
+        },
+        {
+          "metric": "disk.write.average",
+          "unit": "kiloBytesPerSecond",
+          "selected_samples": 8,
+          "valid_samples": 8,
+          "missing_samples": 0,
+          "sample_mean": 3512.0,
+          "maximum_sample": 5186,
+          "maximum_at": "2026-10-05T19:36:20+00:00"
+        }
+      ],
+      "vm_metrics": [
+        {
+          "metric": "cpu.ready.summation",
+          "unit": "millisecond",
+          "selected_samples": 8,
+          "valid_samples": 8,
+          "missing_samples": 0,
+          "sample_mean": 78.0,
+          "maximum_sample": 109,
+          "maximum_at": "2026-10-05T19:38:00+00:00"
+        },
+        {
+          "metric": "cpu.costop.summation",
+          "unit": "millisecond",
+          "selected_samples": 8,
+          "valid_samples": 8,
+          "missing_samples": 0,
+          "sample_mean": 0.0,
+          "maximum_sample": 0,
+          "maximum_at": "2026-10-05T19:36:20+00:00"
+        },
+        {
+          "metric": "cpu.maxlimited.summation",
+          "unit": "millisecond",
+          "selected_samples": 8,
+          "valid_samples": 8,
+          "missing_samples": 0,
+          "sample_mean": 0.0,
+          "maximum_sample": 0,
+          "maximum_at": "2026-10-05T19:36:20+00:00"
+        },
+        {
+          "metric": "mem.vmmemctl.average",
+          "unit": "kiloBytes",
+          "selected_samples": 8,
+          "valid_samples": 8,
+          "missing_samples": 0,
+          "sample_mean": 0.0,
+          "maximum_sample": 0,
+          "maximum_at": "2026-10-05T19:36:20+00:00"
+        },
+        {
+          "metric": "mem.swapinRate.average",
+          "unit": "kiloBytesPerSecond",
+          "selected_samples": 8,
+          "valid_samples": 8,
+          "missing_samples": 0,
+          "sample_mean": 0.0,
+          "maximum_sample": 0,
+          "maximum_at": "2026-10-05T19:36:20+00:00"
+        },
+        {
+          "metric": "virtualDisk.totalReadLatency.average",
+          "unit": "millisecond",
+          "selected_samples": 8,
+          "valid_samples": 5,
+          "missing_samples": 3,
+          "sample_mean": 19.4,
+          "maximum_sample": 54,
+          "maximum_at": "2026-10-05T19:38:00+00:00"
+        },
+        {
+          "metric": "virtualDisk.totalWriteLatency.average",
+          "unit": "millisecond",
+          "selected_samples": 8,
+          "valid_samples": 5,
+          "missing_samples": 3,
+          "sample_mean": 7.2,
+          "maximum_sample": 19,
+          "maximum_at": "2026-10-05T19:38:00+00:00"
+        },
+        {
+          "metric": "virtualDisk.read.average",
+          "unit": "kiloBytesPerSecond",
+          "selected_samples": 8,
+          "valid_samples": 7,
+          "missing_samples": 1,
+          "sample_mean": 7246.1429,
+          "maximum_sample": 18202,
+          "maximum_at": "2026-10-05T19:38:00+00:00"
+        },
+        {
+          "metric": "virtualDisk.write.average",
+          "unit": "kiloBytesPerSecond",
+          "selected_samples": 8,
+          "valid_samples": 7,
+          "missing_samples": 1,
+          "sample_mean": 213.4286,
+          "maximum_sample": 477,
+          "maximum_at": "2026-10-05T19:38:20+00:00"
+        }
+      ]
+    },
+    {
+      "cycle": "early4-b3",
+      "measurement_controller_revision": "ff0d0151cc39ac98718ca979e8ed70160a100e66",
+      "measurement_freeze_sha256": "edd16c9d224c2f12603be61fa9f19017879c2c9461556adaafbeb4c413903ee8",
+      "timing_result": "pass",
+      "timing_reason": null,
+      "seconds_to_three_healthy_samples": 80.922,
+      "new_boot_origin_after_controller_acceptance_bounds_seconds": [
+        0.942076187,
+        6.458076187
+      ],
+      "three_healthy_completion_kernel_relative_bounds_seconds": [
+        74.463923813,
+        79.979923813
+      ],
+      "backup": {
+        "result": "pass",
+        "strict_checks": {
+          "exactly_one_attempt": true,
+          "recorded_pass": true,
+          "listing_available": true,
+          "archive_matches_recorded_baseline": true,
+          "after_new_boot_upper_bound": true,
+          "first_ready_trigger_matches": true,
+          "dispatch_within_one_second": true,
+          "elapsed_matches_timestamps": true,
+          "elapsed_within_five_seconds": true
+        },
+        "seconds": 1.25,
+        "limitation": "Archive equality rechecks the frozen recorded baseline-match predicate; original API listing/archive bytes are not retained here."
+      },
+      "independent_clamav_coverage": {
+        "result": "pass",
+        "guest_interval_start_ns": 61681923813,
+        "guest_interval_end_ns": 82479923813,
+        "pong_samples": 13,
+        "maximum_sample_gap_ns": 2013996959,
+        "current_container_endpoint_verified": true
+      },
+      "phases": {
+        "unit_timestamps_kernel_relative_seconds": {
+          "local-fs.target": {
+            "InactiveExitTimestampMonotonic_seconds": 11.488305,
+            "ActiveEnterTimestampMonotonic_seconds": 11.488305
+          },
+          "sysinit.target": {
+            "InactiveExitTimestampMonotonic_seconds": 19.029893,
+            "ActiveEnterTimestampMonotonic_seconds": 19.029893
+          },
+          "basic.target": {
+            "InactiveExitTimestampMonotonic_seconds": 19.081304,
+            "ActiveEnterTimestampMonotonic_seconds": 19.081304
+          },
+          "network-online.target": {
+            "InactiveExitTimestampMonotonic_seconds": 19.029861,
+            "ActiveEnterTimestampMonotonic_seconds": 19.029861
+          },
+          "cloud-init-local.service": {
+            "InactiveExitTimestampMonotonic_seconds": 13.430865,
+            "ExecMainStartTimestampMonotonic_seconds": 13.430842,
+            "ExecMainExitTimestampMonotonic_seconds": 16.958777,
+            "ActiveEnterTimestampMonotonic_seconds": 16.958823
+          },
+          "cloud-init.service": {
+            "InactiveExitTimestampMonotonic_seconds": 18.208272,
+            "ExecMainStartTimestampMonotonic_seconds": 18.207968,
+            "ExecMainExitTimestampMonotonic_seconds": 19.029254,
+            "ActiveEnterTimestampMonotonic_seconds": 19.029356
+          },
+          "cloud-final.service": {
+            "InactiveExitTimestampMonotonic_seconds": 56.676159,
+            "ExecMainStartTimestampMonotonic_seconds": 56.676074,
+            "ExecMainExitTimestampMonotonic_seconds": 57.705654,
+            "ActiveEnterTimestampMonotonic_seconds": 57.7058
+          },
+          "systemd-journal-flush.service": {
+            "InactiveExitTimestampMonotonic_seconds": 6.714099,
+            "ExecMainStartTimestampMonotonic_seconds": 6.714067,
+            "ExecMainExitTimestampMonotonic_seconds": 9.548266,
+            "ActiveEnterTimestampMonotonic_seconds": 9.548367
+          },
+          "systemd-udev-settle.service": {
+            "InactiveExitTimestampMonotonic_seconds": 0.0,
+            "ExecMainStartTimestampMonotonic_seconds": 0.0,
+            "ExecMainExitTimestampMonotonic_seconds": 0.0,
+            "ActiveEnterTimestampMonotonic_seconds": 0.0
+          },
+          "containerd.service": {
+            "InactiveExitTimestampMonotonic_seconds": 20.804148,
+            "ExecMainStartTimestampMonotonic_seconds": 21.168144,
+            "ExecMainExitTimestampMonotonic_seconds": 0.0,
+            "ActiveEnterTimestampMonotonic_seconds": 28.534064
+          },
+          "docker.service": {
+            "InactiveExitTimestampMonotonic_seconds": 28.540146,
+            "ExecMainStartTimestampMonotonic_seconds": 28.540057,
+            "ExecMainExitTimestampMonotonic_seconds": 0.0,
+            "ActiveEnterTimestampMonotonic_seconds": 36.185008
+          },
+          "culvert-maint.service": {
+            "InactiveExitTimestampMonotonic_seconds": 36.197276,
+            "ExecMainStartTimestampMonotonic_seconds": 36.197184,
+            "ExecMainExitTimestampMonotonic_seconds": 0.0,
+            "ActiveEnterTimestampMonotonic_seconds": 36.197276
+          },
+          "culvert-stack-resume.service": {
+            "InactiveExitTimestampMonotonic_seconds": 36.198559,
+            "ExecMainStartTimestampMonotonic_seconds": 36.198075,
+            "ExecMainExitTimestampMonotonic_seconds": 56.672388,
+            "ActiveEnterTimestampMonotonic_seconds": 0.0
+          },
+          "culvert-lab-boot-sampler.service": {
+            "InactiveExitTimestampMonotonic_seconds": 11.609353,
+            "ExecMainStartTimestampMonotonic_seconds": 11.609261,
+            "ExecMainExitTimestampMonotonic_seconds": 0.0,
+            "ActiveEnterTimestampMonotonic_seconds": 11.609353
+          }
+        },
+        "first_daemon_log_kernel_seconds": {
+          "containerd": 25.515935,
+          "dockerd": 32.602991
+        },
+        "daemon_log_capture_complete": true
+      },
+      "first_sampled_PONG_kernel_seconds": 56.260141629,
+      "sampler_first_kernel_seconds": 14.250250567,
+      "sampler_raw_sha256": "235faeb78f68ca7323b24af2cc820fcee6e78753b8ae4692b1f670a9c343f151",
+      "early_hook_verification": {
+        "result": "pass",
+        "checks": {
+          "campaign_bound": true,
+          "boot_bound": true,
+          "profile_matches": true,
+          "applied": true,
+          "old_128": true,
+          "effective_matches": true,
+          "reason_verified": true,
+          "before_root_mount": true
+        },
+        "profile_kib": 1024,
+        "marker_kernel_seconds": 2.985612,
+        "initial_root_mount_kernel_seconds": 3.124033
+      },
+      "boot_id": "e6ac51f6-4522-487c-9b25-9d505d3992bf",
+      "original_initrd_restoration_verified": null,
+      "evidence": [
+        {
+          "path": "secrets/production-recovery-early4-b3.jsonl",
+          "sha256": "bfb9d37cf25fbf16a2ff744cad7725809cc3594cc595bfb18f713ffbb0781607",
+          "bytes": 15528,
+          "private": true
+        },
+        {
+          "path": "evidence/production-recovery-early4-b3-summary.json",
+          "sha256": "46cf91331627f7e309f0f2180e3d6a07a89abd8fcf13afe008c8b73591110e99",
+          "bytes": 933,
+          "private": false
+        },
+        {
+          "path": "secrets/production-recovery/early4-b3/acceptance.json",
+          "sha256": "e31b02c1713b3bfcb4798aa4c01cddb48a3b225b1fa4ec7f97de6b36d303a3dd",
+          "bytes": 689,
+          "private": true
+        },
+        {
+          "path": "secrets/production-recovery/early4-b3/full.json",
+          "sha256": "48192aa49c324a16858449dda51fcd1bfe654021558be94c68a48cf2f597b576",
+          "bytes": 336165,
+          "private": true
+        },
+        {
+          "path": "secrets/production-recovery/early4-b3/full-receipt.json",
+          "sha256": "ab823b4af0f2a595af6ba225362a4ec71289613d44936f9b65edc450493a653a",
+          "bytes": 566,
+          "private": true
+        },
+        {
+          "path": "secrets/production-recovery/early4-b3/correlation.json",
+          "sha256": "ff09cd9301b41977df037432f948b43f7f5288b320515767871e43db151820a8",
+          "bytes": 451,
+          "private": true
+        },
+        {
+          "path": "secrets/production-recovery/early4-b3/correlation-receipt.json",
+          "sha256": "1cb46684b71b82a12a587db179dd7a07b0bbddf0c3c095c0d335cb96a39fedd8",
+          "bytes": 573,
+          "private": true
+        },
+        {
+          "path": "secrets/production-recovery/early4-b3/authenticated-boot-proof.json",
+          "sha256": "6e20bc50b09d098c87f9c2b4bf30da332f267ce7ea2d85d19e861af9ed6a3a5c",
+          "bytes": 15570,
+          "private": true
+        },
+        {
+          "path": "evidence/host-storage-early4-b3.json",
+          "sha256": "e0b17990c5d1abcce0ad9734c2082529f98f7874a177b9d01a090283bf140f63",
+          "bytes": 6367,
+          "private": false
+        },
+        {
+          "path": "evidence/vm-performance-early4-b3.json",
+          "sha256": "9c4a608cc69f947058d09cbab432eae7e9ac469528359f01448f7628fbf178f4",
+          "bytes": 6502,
+          "private": false
+        },
+        {
+          "path": "secrets/host-storage-early4-b3.raw",
+          "sha256": "fd2d0562ffb2534609bd71548d1bf1119832b6ae2977e96de64a8dae3bb8e633",
+          "bytes": 13801,
+          "private": true
+        },
+        {
+          "path": "secrets/vm-performance-early4-b3.raw",
+          "sha256": "464ca5d6c79e485ece58b6c8f6e69d008404f9ee8ef39cb0117ba45bad0e5b45",
+          "bytes": 12940,
+          "private": true
+        }
+      ],
+      "supplemental_journal_verification": {
+        "result": "pass",
+        "controller_revision": "ff0d0151cc39ac98718ca979e8ed70160a100e66",
+        "freeze_sha256": "edd16c9d224c2f12603be61fa9f19017879c2c9461556adaafbeb4c413903ee8",
+        "journal_sha256": "ddee22c2c84a6ba2306e9f0da773d0fe26783508c035c460a1e58b49422214c3",
+        "hook": {
+          "result": "pass",
+          "checks": {
+            "campaign_bound": true,
+            "boot_bound": true,
+            "profile_matches": true,
+            "applied": true,
+            "old_128": true,
+            "effective_matches": true,
+            "reason_verified": true,
+            "before_root_mount": true
+          },
+          "profile_kib": 1024,
+          "marker_kernel_seconds": 2.985612,
+          "initial_root_mount_kernel_seconds": 3.124033
+        },
+        "active_initrd_sha256": "45f8ee3292edb7feedfde7acab6d409a07c4e0b4a92f00be02c090a03f2d6e6b",
+        "active_initrd_bytes": 35260430,
+        "receipt_sha256": "b20ff68257f1f13d433882e0c5d191d1182229723e2e3cc55a0e7bebd552f92a",
+        "evidence": [
+          {
+            "path": "secrets/early-read-ahead/13222c13-21fb-4ad3-ad38-48d0acf84778/journal-proof-397ac566-4b3f-4a91-8aab-79eded2b6a84/intent.json",
+            "sha256": "eaeb8ae61c1ad6e53903c5b5f01152d872d89a50b984e216013bc50976771273",
+            "bytes": 569,
+            "private": true
+          },
+          {
+            "path": "secrets/early-read-ahead/13222c13-21fb-4ad3-ad38-48d0acf84778/journal-proof-397ac566-4b3f-4a91-8aab-79eded2b6a84/payload.sh",
+            "sha256": "dffe26e8e6d31ecc1dbc2c9196f93f0edeedbf39dc8448207cdd2e425ee0f82f",
+            "bytes": 46438,
+            "private": true
+          },
+          {
+            "path": "secrets/early-read-ahead/13222c13-21fb-4ad3-ad38-48d0acf84778/journal-proof-397ac566-4b3f-4a91-8aab-79eded2b6a84/guest-result.json",
+            "sha256": "6165c0cf1ad079033c6e805ae798b77e9d980bbcb338efbd912ba28e12454bf0",
+            "bytes": 146628,
+            "private": true
+          },
+          {
+            "path": "secrets/early-read-ahead/13222c13-21fb-4ad3-ad38-48d0acf84778/journal-proof-397ac566-4b3f-4a91-8aab-79eded2b6a84/complete.json",
+            "sha256": "10b846644fab0ad83c66adfb46a375eafd609df260c1fc1279c3167830209bf6",
+            "bytes": 691,
+            "private": true
+          }
+        ]
+      },
+      "persistence": {
+        "result": "pass",
+        "checks": {
+          "ca_sha256": true,
+          "rules": true,
+          "categories": true,
+          "traffic": true,
+          "agent_version": true,
+          "admin_login": true,
+          "ca_decryption": true,
+          "agent": true
+        },
+        "evidence": {
+          "path": "secrets/early4-b3-persistence.json",
+          "sha256": "49db622affd4454a1336094a4f8b549b766b54e0060b670a33d72fcfdab7d443",
+          "bytes": 1774,
+          "private": true
+        },
+        "baseline_evidence": {
+          "path": "secrets/ra-a0-persistence.json",
+          "sha256": "49db622affd4454a1336094a4f8b549b766b54e0060b670a33d72fcfdab7d443",
+          "bytes": 1774,
+          "private": true
+        },
+        "historical_encrypted_log_recovery": "blocked: Tier-3 historical logs excluded from Tier-1/Tier-2 backup"
+      },
+      "kernel_relative_phases_seconds": {
+        "local_fs_active": 11.488305,
+        "cloud_init_local_start": 13.430842,
+        "cloud_init_local_end": 16.958777,
+        "containerd_start": 21.168144,
+        "containerd_active": 28.534064,
+        "docker_start": 28.540057,
+        "docker_active": 36.185008,
+        "resume_start": 36.198075,
+        "resume_end": 56.672388,
+        "containerd_startup_duration": 7.36592,
+        "docker_startup_duration": 7.644951,
+        "resume_duration": 20.474313,
+        "containerd_prelog_duration": 4.347791,
+        "docker_prelog_duration": 4.062934
+      },
+      "root_filesystem_events": [
+        {
+          "seconds": 3.124033,
+          "event": "mount"
+        },
+        {
+          "seconds": 6.609425,
+          "event": "remount"
+        }
+      ],
+      "software_matches_A0": {
+        "kernel_version": true,
+        "package_versions": true,
+        "compose_version": true,
+        "clamav_signature_version": true,
+        "clamav_signature_files": true
+      },
+      "lock_transitions": [
+        {
+          "kernel_seconds": 14.250250567,
+          "locks": {
+            "os_update": {
+              "available": false,
+              "held": null
+            },
+            "maintenance_agent": {
+              "available": true,
+              "held": false
+            }
+          }
+        },
+        {
+          "kernel_seconds": 36.2502399,
+          "locks": {
+            "os_update": {
+              "available": true,
+              "held": false
+            },
+            "maintenance_agent": {
+              "available": true,
+              "held": false
+            }
+          }
+        },
+        {
+          "kernel_seconds": 38.250232719,
+          "locks": {
+            "os_update": {
+              "available": true,
+              "held": true
+            },
+            "maintenance_agent": {
+              "available": true,
+              "held": true
+            }
+          }
+        },
+        {
+          "kernel_seconds": 58.251022904,
+          "locks": {
+            "os_update": {
+              "available": true,
+              "held": false
+            },
+            "maintenance_agent": {
+              "available": true,
+              "held": false
+            }
+          }
+        }
+      ],
+      "unit_log_capture": {
+        "result": "ok",
+        "exit_code": 0,
+        "timeout_seconds": 20,
+        "truncated": false,
+        "captured_bytes": 53340
+      },
+      "kernel_error_pattern_counts": {
+        "io_error": 0,
+        "ext4_error": 0,
+        "blk_timeout": 0
+      },
+      "device_window": {
+        "selected_start": "2026-10-05T19:40:40+00:00",
+        "selected_end": "2026-10-05T19:42:40+00:00",
+        "interval_seconds": 20,
+        "requested_window_covered": true,
+        "timestamp_gaps": []
+      },
+      "device_metrics": [
+        {
+          "metric": "disk.deviceReadLatency.average",
+          "unit": "millisecond",
+          "selected_samples": 7,
+          "valid_samples": 7,
+          "missing_samples": 0,
+          "sample_mean": 17.5714,
+          "maximum_sample": 44,
+          "maximum_at": "2026-10-05T19:42:00+00:00"
+        },
+        {
+          "metric": "disk.queueReadLatency.average",
+          "unit": "millisecond",
+          "selected_samples": 7,
+          "valid_samples": 7,
+          "missing_samples": 0,
+          "sample_mean": 0.0,
+          "maximum_sample": 0,
+          "maximum_at": "2026-10-05T19:40:40+00:00"
+        },
+        {
+          "metric": "disk.deviceWriteLatency.average",
+          "unit": "millisecond",
+          "selected_samples": 7,
+          "valid_samples": 7,
+          "missing_samples": 0,
+          "sample_mean": 17.1429,
+          "maximum_sample": 31,
+          "maximum_at": "2026-10-05T19:40:40+00:00"
+        },
+        {
+          "metric": "disk.queueWriteLatency.average",
+          "unit": "millisecond",
+          "selected_samples": 7,
+          "valid_samples": 7,
+          "missing_samples": 0,
+          "sample_mean": 10.1429,
+          "maximum_sample": 36,
+          "maximum_at": "2026-10-05T19:41:00+00:00"
+        },
+        {
+          "metric": "disk.read.average",
+          "unit": "kiloBytesPerSecond",
+          "selected_samples": 7,
+          "valid_samples": 7,
+          "missing_samples": 0,
+          "sample_mean": 7724.0,
+          "maximum_sample": 19976,
+          "maximum_at": "2026-10-05T19:42:00+00:00"
+        },
+        {
+          "metric": "disk.write.average",
+          "unit": "kiloBytesPerSecond",
+          "selected_samples": 7,
+          "valid_samples": 7,
+          "missing_samples": 0,
+          "sample_mean": 2918.4286,
+          "maximum_sample": 6562,
+          "maximum_at": "2026-10-05T19:42:40+00:00"
+        }
+      ],
+      "vm_metrics": [
+        {
+          "metric": "cpu.ready.summation",
+          "unit": "millisecond",
+          "selected_samples": 7,
+          "valid_samples": 7,
+          "missing_samples": 0,
+          "sample_mean": 84.2857,
+          "maximum_sample": 98,
+          "maximum_at": "2026-10-05T19:42:00+00:00"
+        },
+        {
+          "metric": "cpu.costop.summation",
+          "unit": "millisecond",
+          "selected_samples": 7,
+          "valid_samples": 7,
+          "missing_samples": 0,
+          "sample_mean": 0.0,
+          "maximum_sample": 0,
+          "maximum_at": "2026-10-05T19:40:40+00:00"
+        },
+        {
+          "metric": "cpu.maxlimited.summation",
+          "unit": "millisecond",
+          "selected_samples": 7,
+          "valid_samples": 7,
+          "missing_samples": 0,
+          "sample_mean": 0.0,
+          "maximum_sample": 0,
+          "maximum_at": "2026-10-05T19:40:40+00:00"
+        },
+        {
+          "metric": "mem.vmmemctl.average",
+          "unit": "kiloBytes",
+          "selected_samples": 7,
+          "valid_samples": 7,
+          "missing_samples": 0,
+          "sample_mean": 0.0,
+          "maximum_sample": 0,
+          "maximum_at": "2026-10-05T19:40:40+00:00"
+        },
+        {
+          "metric": "mem.swapinRate.average",
+          "unit": "kiloBytesPerSecond",
+          "selected_samples": 7,
+          "valid_samples": 7,
+          "missing_samples": 0,
+          "sample_mean": 0.0,
+          "maximum_sample": 0,
+          "maximum_at": "2026-10-05T19:40:40+00:00"
+        },
+        {
+          "metric": "virtualDisk.totalReadLatency.average",
+          "unit": "millisecond",
+          "selected_samples": 7,
+          "valid_samples": 4,
+          "missing_samples": 3,
+          "sample_mean": 19.5,
+          "maximum_sample": 44,
+          "maximum_at": "2026-10-05T19:42:00+00:00"
+        },
+        {
+          "metric": "virtualDisk.totalWriteLatency.average",
+          "unit": "millisecond",
+          "selected_samples": 7,
+          "valid_samples": 4,
+          "missing_samples": 3,
+          "sample_mean": 6.25,
+          "maximum_sample": 13,
+          "maximum_at": "2026-10-05T19:42:00+00:00"
+        },
+        {
+          "metric": "virtualDisk.read.average",
+          "unit": "kiloBytesPerSecond",
+          "selected_samples": 7,
+          "valid_samples": 6,
+          "missing_samples": 1,
+          "sample_mean": 7146.6667,
+          "maximum_sample": 19976,
+          "maximum_at": "2026-10-05T19:42:00+00:00"
+        },
+        {
+          "metric": "virtualDisk.write.average",
+          "unit": "kiloBytesPerSecond",
+          "selected_samples": 7,
+          "valid_samples": 6,
+          "missing_samples": 1,
+          "sample_mean": 253.8333,
+          "maximum_sample": 445,
+          "maximum_at": "2026-10-05T19:41:20+00:00"
+        }
+      ]
+    },
+    {
+      "cycle": "early4-a1",
+      "measurement_controller_revision": "ff0d0151cc39ac98718ca979e8ed70160a100e66",
+      "measurement_freeze_sha256": "edd16c9d224c2f12603be61fa9f19017879c2c9461556adaafbeb4c413903ee8",
+      "timing_result": "fail",
+      "timing_reason": "recovered_after_120_second_budget",
+      "seconds_to_three_healthy_samples": 132.453,
+      "new_boot_origin_after_controller_acceptance_bounds_seconds": [
+        6.546397912,
+        15.968397912
+      ],
+      "three_healthy_completion_kernel_relative_bounds_seconds": [
+        116.484602088,
+        125.906602088
+      ],
+      "backup": {
+        "result": "pass",
+        "strict_checks": {
+          "exactly_one_attempt": true,
+          "recorded_pass": true,
+          "listing_available": true,
+          "archive_matches_recorded_baseline": true,
+          "after_new_boot_upper_bound": true,
+          "first_ready_trigger_matches": true,
+          "dispatch_within_one_second": true,
+          "elapsed_matches_timestamps": true,
+          "elapsed_within_five_seconds": true
+        },
+        "seconds": 2.218,
+        "limitation": "Archive equality rechecks the frozen recorded baseline-match predicate; original API listing/archive bytes are not retained here."
+      },
+      "independent_clamav_coverage": {
+        "result": "pass",
+        "guest_interval_start_ns": 103718602088,
+        "guest_interval_end_ns": 128406602088,
+        "pong_samples": 14,
+        "maximum_sample_gap_ns": 2007037519,
+        "current_container_endpoint_verified": true
+      },
+      "phases": {
+        "unit_timestamps_kernel_relative_seconds": {
+          "local-fs.target": {
+            "InactiveExitTimestampMonotonic_seconds": 17.539339,
+            "ActiveEnterTimestampMonotonic_seconds": 17.539339
+          },
+          "sysinit.target": {
+            "InactiveExitTimestampMonotonic_seconds": 37.125782,
+            "ActiveEnterTimestampMonotonic_seconds": 37.125782
+          },
+          "basic.target": {
+            "InactiveExitTimestampMonotonic_seconds": 37.279955,
+            "ActiveEnterTimestampMonotonic_seconds": 37.279955
+          },
+          "network-online.target": {
+            "InactiveExitTimestampMonotonic_seconds": 37.125731,
+            "ActiveEnterTimestampMonotonic_seconds": 37.125731
+          },
+          "cloud-init-local.service": {
+            "InactiveExitTimestampMonotonic_seconds": 22.275108,
+            "ExecMainStartTimestampMonotonic_seconds": 22.275082,
+            "ExecMainExitTimestampMonotonic_seconds": 31.39696,
+            "ActiveEnterTimestampMonotonic_seconds": 31.397212
+          },
+          "cloud-init.service": {
+            "InactiveExitTimestampMonotonic_seconds": 34.39849,
+            "ExecMainStartTimestampMonotonic_seconds": 34.398463,
+            "ExecMainExitTimestampMonotonic_seconds": 37.125055,
+            "ActiveEnterTimestampMonotonic_seconds": 37.125172
+          },
+          "cloud-final.service": {
+            "InactiveExitTimestampMonotonic_seconds": 96.224299,
+            "ExecMainStartTimestampMonotonic_seconds": 96.224119,
+            "ExecMainExitTimestampMonotonic_seconds": 97.165585,
+            "ActiveEnterTimestampMonotonic_seconds": 97.165639
+          },
+          "systemd-journal-flush.service": {
+            "InactiveExitTimestampMonotonic_seconds": 11.100598,
+            "ExecMainStartTimestampMonotonic_seconds": 11.100535,
+            "ExecMainExitTimestampMonotonic_seconds": 15.021947,
+            "ActiveEnterTimestampMonotonic_seconds": 15.022051
+          },
+          "systemd-udev-settle.service": {
+            "InactiveExitTimestampMonotonic_seconds": 0.0,
+            "ExecMainStartTimestampMonotonic_seconds": 0.0,
+            "ExecMainExitTimestampMonotonic_seconds": 0.0,
+            "ActiveEnterTimestampMonotonic_seconds": 0.0
+          },
+          "containerd.service": {
+            "InactiveExitTimestampMonotonic_seconds": 39.010088,
+            "ExecMainStartTimestampMonotonic_seconds": 39.184076,
+            "ExecMainExitTimestampMonotonic_seconds": 0.0,
+            "ActiveEnterTimestampMonotonic_seconds": 57.53378
+          },
+          "docker.service": {
+            "InactiveExitTimestampMonotonic_seconds": 57.539146,
+            "ExecMainStartTimestampMonotonic_seconds": 57.539061,
+            "ExecMainExitTimestampMonotonic_seconds": 0.0,
+            "ActiveEnterTimestampMonotonic_seconds": 75.817397
+          },
+          "culvert-maint.service": {
+            "InactiveExitTimestampMonotonic_seconds": 75.824176,
+            "ExecMainStartTimestampMonotonic_seconds": 75.824056,
+            "ExecMainExitTimestampMonotonic_seconds": 0.0,
+            "ActiveEnterTimestampMonotonic_seconds": 75.824176
+          },
+          "culvert-stack-resume.service": {
+            "InactiveExitTimestampMonotonic_seconds": 75.858178,
+            "ExecMainStartTimestampMonotonic_seconds": 75.858094,
+            "ExecMainExitTimestampMonotonic_seconds": 96.218448,
+            "ActiveEnterTimestampMonotonic_seconds": 0.0
+          },
+          "culvert-lab-boot-sampler.service": {
+            "InactiveExitTimestampMonotonic_seconds": 17.651092,
+            "ExecMainStartTimestampMonotonic_seconds": 17.651066,
+            "ExecMainExitTimestampMonotonic_seconds": 0.0,
+            "ActiveEnterTimestampMonotonic_seconds": 17.651092
+          }
+        },
+        "first_daemon_log_kernel_seconds": {},
+        "daemon_log_capture_complete": false
+      },
+      "first_sampled_PONG_kernel_seconds": 95.41608504,
+      "sampler_first_kernel_seconds": 23.399442631,
+      "sampler_raw_sha256": "047b24de7aafea8a777eaf44e112e56514238abf526fe78ede2d204a447a01d1",
+      "early_hook_verification": {
+        "result": "pass",
+        "checks": {
+          "campaign_bound": true,
+          "boot_bound": true,
+          "profile_matches": true,
+          "applied": true,
+          "old_128": true,
+          "effective_matches": true,
+          "reason_verified": true,
+          "before_root_mount": true
+        },
+        "profile_kib": 128,
+        "marker_kernel_seconds": 4.133357,
+        "initial_root_mount_kernel_seconds": 4.228495
+      },
+      "boot_id": "3b7168ef-8983-40b8-aa64-d4587a549464",
+      "original_initrd_restoration_verified": null,
+      "evidence": [
+        {
+          "path": "secrets/production-recovery-early4-a1.jsonl",
+          "sha256": "870d7549feb26deb54d874dedff133fafa9c22e511958c38b98fdfcefeb96206",
+          "bytes": 22479,
+          "private": true
+        },
+        {
+          "path": "evidence/production-recovery-early4-a1-summary.json",
+          "sha256": "614dc616f77eedc9734a9bbe5e5c5954d26817213d3d38d67e67f9cdfc1df37a",
+          "bytes": 453,
+          "private": false
+        },
+        {
+          "path": "secrets/production-recovery/early4-a1/acceptance.json",
+          "sha256": "9ac8d0204e4c34082856ee8da2ac99cf0f27dc61c9e4e58bef351e28c9103ff5",
+          "bytes": 689,
+          "private": true
+        },
+        {
+          "path": "secrets/production-recovery/early4-a1/full.json",
+          "sha256": "d07e504eb6708cd59c1c04d1df193fad6b3fa813fa280451f1dd4198ee2efb74",
+          "bytes": 292464,
+          "private": true
+        },
+        {
+          "path": "secrets/production-recovery/early4-a1/full-receipt.json",
+          "sha256": "e31bf4794cd16534791222da845875eb10b6fac59c6ea991d8a2223c3ca9d4e9",
+          "bytes": 566,
+          "private": true
+        },
+        {
+          "path": "secrets/production-recovery/early4-a1/correlation.json",
+          "sha256": "917e5abe68ee8d4351ed4f82a08a3240a1234691fc7c1a6235ae834bde2eda22",
+          "bytes": 452,
+          "private": true
+        },
+        {
+          "path": "secrets/production-recovery/early4-a1/correlation-receipt.json",
+          "sha256": "ad052ea1d55c1e3ef54e1488667933af182db6cfd0a8dc933f41fa1cb09f082a",
+          "bytes": 573,
+          "private": true
+        },
+        {
+          "path": "secrets/production-recovery/early4-a1/authenticated-boot-proof.json",
+          "sha256": "2b838a0a88f81fd58ff085be1fc010829658dc5301cf39f0f6547a5566016f29",
+          "bytes": 23531,
+          "private": true
+        },
+        {
+          "path": "evidence/host-storage-early4-a1.json",
+          "sha256": "7dab48f6199841c9cbbfd7b367cdd7f62ae0135ef04c8e975f9bceb6c7daf329",
+          "bytes": 6790,
+          "private": false
+        },
+        {
+          "path": "evidence/vm-performance-early4-a1.json",
+          "sha256": "7a0ada1a975b091a14a9e29f38f359aefbea3541474afa7d0a5ae317d8dd134c",
+          "bytes": 6497,
+          "private": false
+        },
+        {
+          "path": "secrets/host-storage-early4-a1.raw",
+          "sha256": "681a325465eaa1f0ceadd3a79fc625a3187e7869e7f6a03884451184a491aa0c",
+          "bytes": 13897,
+          "private": true
+        },
+        {
+          "path": "secrets/vm-performance-early4-a1.raw",
+          "sha256": "620727d161d29ceaaa65d62215e425916720c24b8851b4e27159ff5072b8e82a",
+          "bytes": 12985,
+          "private": true
+        }
+      ],
+      "supplemental_journal_verification": {
+        "result": "pass",
+        "controller_revision": "ff0d0151cc39ac98718ca979e8ed70160a100e66",
+        "freeze_sha256": "edd16c9d224c2f12603be61fa9f19017879c2c9461556adaafbeb4c413903ee8",
+        "journal_sha256": "06079623c2f69dfe7da28df5ccfe2bd4dd8cdc3a66544e9ff72b0e7241a9218f",
+        "hook": {
+          "result": "pass",
+          "checks": {
+            "campaign_bound": true,
+            "boot_bound": true,
+            "profile_matches": true,
+            "applied": true,
+            "old_128": true,
+            "effective_matches": true,
+            "reason_verified": true,
+            "before_root_mount": true
+          },
+          "profile_kib": 128,
+          "marker_kernel_seconds": 4.133357,
+          "initial_root_mount_kernel_seconds": 4.228495
+        },
+        "active_initrd_sha256": "07fe416d7820f619f83b8a9a72792505917551f1bb2e9153f9d0e6da520cb5d3",
+        "active_initrd_bytes": 35260429,
+        "receipt_sha256": "c7e2f793a70d9a583c3d9402079cecd496873d6163135e93b048c3aec76d3737",
+        "evidence": [
+          {
+            "path": "secrets/early-read-ahead/13222c13-21fb-4ad3-ad38-48d0acf84778/journal-proof-40f658a3-3066-4185-b9b5-05e40559ef36/intent.json",
+            "sha256": "01599b12c6fb67a5d2ec286c37f1ffd711ff97b5b1665afdc4cd508be077fb0d",
+            "bytes": 569,
+            "private": true
+          },
+          {
+            "path": "secrets/early-read-ahead/13222c13-21fb-4ad3-ad38-48d0acf84778/journal-proof-40f658a3-3066-4185-b9b5-05e40559ef36/payload.sh",
+            "sha256": "96f6c7353f72909985eb696004b5244effd45031d0ea9243061c746d3a14b398",
+            "bytes": 46438,
+            "private": true
+          },
+          {
+            "path": "secrets/early-read-ahead/13222c13-21fb-4ad3-ad38-48d0acf84778/journal-proof-40f658a3-3066-4185-b9b5-05e40559ef36/guest-result.json",
+            "sha256": "a6bf834b576b42484d84e2125d1c27eade08ef2d046954e354fbed76da87c438",
+            "bytes": 146475,
+            "private": true
+          },
+          {
+            "path": "secrets/early-read-ahead/13222c13-21fb-4ad3-ad38-48d0acf84778/journal-proof-40f658a3-3066-4185-b9b5-05e40559ef36/complete.json",
+            "sha256": "bcdf8f40c47f1a0603051367ca5073fb7ee1a50c67266e29e5422da2f0e92abd",
+            "bytes": 691,
+            "private": true
+          }
+        ]
+      },
+      "persistence": {
+        "result": "pass",
+        "checks": {
+          "ca_sha256": true,
+          "rules": true,
+          "categories": true,
+          "traffic": true,
+          "agent_version": true,
+          "admin_login": true,
+          "ca_decryption": true,
+          "agent": true
+        },
+        "evidence": {
+          "path": "secrets/early4-a1-persistence.json",
+          "sha256": "49db622affd4454a1336094a4f8b549b766b54e0060b670a33d72fcfdab7d443",
+          "bytes": 1774,
+          "private": true
+        },
+        "baseline_evidence": {
+          "path": "secrets/ra-a0-persistence.json",
+          "sha256": "49db622affd4454a1336094a4f8b549b766b54e0060b670a33d72fcfdab7d443",
+          "bytes": 1774,
+          "private": true
+        },
+        "historical_encrypted_log_recovery": "blocked: Tier-3 historical logs excluded from Tier-1/Tier-2 backup"
+      },
+      "kernel_relative_phases_seconds": {
+        "local_fs_active": 17.539339,
+        "cloud_init_local_start": 22.275082,
+        "cloud_init_local_end": 31.39696,
+        "containerd_start": 39.184076,
+        "containerd_active": 57.53378,
+        "docker_start": 57.539061,
+        "docker_active": 75.817397,
+        "resume_start": 75.858094,
+        "resume_end": 96.218448,
+        "containerd_startup_duration": 18.349704,
+        "docker_startup_duration": 18.278336,
+        "resume_duration": 20.360354,
+        "containerd_prelog_duration": null,
+        "docker_prelog_duration": null
+      },
+      "root_filesystem_events": [
+        {
+          "seconds": 4.228495,
+          "event": "mount"
+        },
+        {
+          "seconds": 10.8513,
+          "event": "remount"
+        }
+      ],
+      "software_matches_A0": {
+        "kernel_version": true,
+        "package_versions": true,
+        "compose_version": true,
+        "clamav_signature_version": true,
+        "clamav_signature_files": true
+      },
+      "lock_transitions": [
+        {
+          "kernel_seconds": 23.399442631,
+          "locks": {
+            "os_update": {
+              "available": false,
+              "held": null
+            },
+            "maintenance_agent": {
+              "available": true,
+              "held": false
+            }
+          }
+        },
+        {
+          "kernel_seconds": 77.399524677,
+          "locks": {
+            "os_update": {
+              "available": true,
+              "held": true
+            },
+            "maintenance_agent": {
+              "available": true,
+              "held": true
+            }
+          }
+        },
+        {
+          "kernel_seconds": 97.399524012,
+          "locks": {
+            "os_update": {
+              "available": true,
+              "held": false
+            },
+            "maintenance_agent": {
+              "available": true,
+              "held": false
+            }
+          }
+        }
+      ],
+      "unit_log_capture": {
+        "result": "timeout",
+        "exit_code": -9,
+        "timeout_seconds": 20,
+        "truncated": false,
+        "captured_bytes": 0
+      },
+      "kernel_error_pattern_counts": {
+        "io_error": 0,
+        "ext4_error": 0,
+        "blk_timeout": 0
+      },
+      "device_window": {
+        "selected_start": "2026-10-05T19:44:00+00:00",
+        "selected_end": "2026-10-05T19:46:40+00:00",
+        "interval_seconds": 20,
+        "requested_window_covered": true,
+        "timestamp_gaps": []
+      },
+      "device_metrics": [
+        {
+          "metric": "disk.deviceReadLatency.average",
+          "unit": "millisecond",
+          "selected_samples": 9,
+          "valid_samples": 9,
+          "missing_samples": 0,
+          "sample_mean": 24.0,
+          "maximum_sample": 70,
+          "maximum_at": "2026-10-05T19:45:40+00:00"
+        },
+        {
+          "metric": "disk.queueReadLatency.average",
+          "unit": "millisecond",
+          "selected_samples": 9,
+          "valid_samples": 9,
+          "missing_samples": 0,
+          "sample_mean": 0.0,
+          "maximum_sample": 0,
+          "maximum_at": "2026-10-05T19:44:00+00:00"
+        },
+        {
+          "metric": "disk.deviceWriteLatency.average",
+          "unit": "millisecond",
+          "selected_samples": 9,
+          "valid_samples": 9,
+          "missing_samples": 0,
+          "sample_mean": 22.8889,
+          "maximum_sample": 39,
+          "maximum_at": "2026-10-05T19:45:20+00:00"
+        },
+        {
+          "metric": "disk.queueWriteLatency.average",
+          "unit": "millisecond",
+          "selected_samples": 9,
+          "valid_samples": 9,
+          "missing_samples": 0,
+          "sample_mean": 23.0,
+          "maximum_sample": 70,
+          "maximum_at": "2026-10-05T19:45:00+00:00"
+        },
+        {
+          "metric": "disk.read.average",
+          "unit": "kiloBytesPerSecond",
+          "selected_samples": 9,
+          "valid_samples": 9,
+          "missing_samples": 0,
+          "sample_mean": 4997.2222,
+          "maximum_sample": 12253,
+          "maximum_at": "2026-10-05T19:46:20+00:00"
+        },
+        {
+          "metric": "disk.write.average",
+          "unit": "kiloBytesPerSecond",
+          "selected_samples": 9,
+          "valid_samples": 9,
+          "missing_samples": 0,
+          "sample_mean": 4760.0,
+          "maximum_sample": 11134,
+          "maximum_at": "2026-10-05T19:44:20+00:00"
+        }
+      ],
+      "vm_metrics": [
+        {
+          "metric": "cpu.ready.summation",
+          "unit": "millisecond",
+          "selected_samples": 9,
+          "valid_samples": 9,
+          "missing_samples": 0,
+          "sample_mean": 79.2222,
+          "maximum_sample": 112,
+          "maximum_at": "2026-10-05T19:45:40+00:00"
+        },
+        {
+          "metric": "cpu.costop.summation",
+          "unit": "millisecond",
+          "selected_samples": 9,
+          "valid_samples": 9,
+          "missing_samples": 0,
+          "sample_mean": 0.0,
+          "maximum_sample": 0,
+          "maximum_at": "2026-10-05T19:44:00+00:00"
+        },
+        {
+          "metric": "cpu.maxlimited.summation",
+          "unit": "millisecond",
+          "selected_samples": 9,
+          "valid_samples": 9,
+          "missing_samples": 0,
+          "sample_mean": 0.0,
+          "maximum_sample": 0,
+          "maximum_at": "2026-10-05T19:44:00+00:00"
+        },
+        {
+          "metric": "mem.vmmemctl.average",
+          "unit": "kiloBytes",
+          "selected_samples": 9,
+          "valid_samples": 9,
+          "missing_samples": 0,
+          "sample_mean": 0.0,
+          "maximum_sample": 0,
+          "maximum_at": "2026-10-05T19:44:00+00:00"
+        },
+        {
+          "metric": "mem.swapinRate.average",
+          "unit": "kiloBytesPerSecond",
+          "selected_samples": 9,
+          "valid_samples": 9,
+          "missing_samples": 0,
+          "sample_mean": 0.0,
+          "maximum_sample": 0,
+          "maximum_at": "2026-10-05T19:44:00+00:00"
+        },
+        {
+          "metric": "virtualDisk.totalReadLatency.average",
+          "unit": "millisecond",
+          "selected_samples": 9,
+          "valid_samples": 6,
+          "missing_samples": 3,
+          "sample_mean": 61.0,
+          "maximum_sample": 198,
+          "maximum_at": "2026-10-05T19:44:20+00:00"
+        },
+        {
+          "metric": "virtualDisk.totalWriteLatency.average",
+          "unit": "millisecond",
+          "selected_samples": 9,
+          "valid_samples": 6,
+          "missing_samples": 3,
+          "sample_mean": 14.8333,
+          "maximum_sample": 42,
+          "maximum_at": "2026-10-05T19:44:20+00:00"
+        },
+        {
+          "metric": "virtualDisk.read.average",
+          "unit": "kiloBytesPerSecond",
+          "selected_samples": 9,
+          "valid_samples": 8,
+          "missing_samples": 1,
+          "sample_mean": 4836.5,
+          "maximum_sample": 12252,
+          "maximum_at": "2026-10-05T19:46:20+00:00"
+        },
+        {
+          "metric": "virtualDisk.write.average",
+          "unit": "kiloBytesPerSecond",
+          "selected_samples": 9,
+          "valid_samples": 8,
+          "missing_samples": 1,
+          "sample_mean": 398.25,
+          "maximum_sample": 1816,
+          "maximum_at": "2026-10-05T19:44:20+00:00"
+        }
+      ]
+    },
+    {
+      "cycle": "early4-original",
+      "measurement_controller_revision": "ff0d0151cc39ac98718ca979e8ed70160a100e66",
+      "measurement_freeze_sha256": "edd16c9d224c2f12603be61fa9f19017879c2c9461556adaafbeb4c413903ee8",
+      "timing_result": "pass",
+      "timing_reason": null,
+      "seconds_to_three_healthy_samples": 97.515,
+      "new_boot_origin_after_controller_acceptance_bounds_seconds": [
+        1.115821437,
+        7.490821437
+      ],
+      "three_healthy_completion_kernel_relative_bounds_seconds": [
+        90.024178563,
+        96.399178563
+      ],
+      "backup": {
+        "result": "pass",
+        "strict_checks": {
+          "exactly_one_attempt": true,
+          "recorded_pass": true,
+          "listing_available": true,
+          "archive_matches_recorded_baseline": true,
+          "after_new_boot_upper_bound": true,
+          "first_ready_trigger_matches": true,
+          "dispatch_within_one_second": true,
+          "elapsed_matches_timestamps": true,
+          "elapsed_within_five_seconds": true
+        },
+        "seconds": 0.797,
+        "limitation": "Archive equality rechecks the frozen recorded baseline-match predicate; original API listing/archive bytes are not retained here."
+      },
+      "independent_clamav_coverage": {
+        "result": "pass",
+        "guest_interval_start_ns": 77274178563,
+        "guest_interval_end_ns": 98899178563,
+        "pong_samples": 12,
+        "maximum_sample_gap_ns": 2008046659,
+        "current_container_endpoint_verified": true
+      },
+      "phases": {
+        "unit_timestamps_kernel_relative_seconds": {
+          "local-fs.target": {
+            "InactiveExitTimestampMonotonic_seconds": 12.658929,
+            "ActiveEnterTimestampMonotonic_seconds": 12.658929
+          },
+          "sysinit.target": {
+            "InactiveExitTimestampMonotonic_seconds": 22.649142,
+            "ActiveEnterTimestampMonotonic_seconds": 22.649142
+          },
+          "basic.target": {
+            "InactiveExitTimestampMonotonic_seconds": 22.696754,
+            "ActiveEnterTimestampMonotonic_seconds": 22.696754
+          },
+          "network-online.target": {
+            "InactiveExitTimestampMonotonic_seconds": 22.649107,
+            "ActiveEnterTimestampMonotonic_seconds": 22.649107
+          },
+          "cloud-init-local.service": {
+            "InactiveExitTimestampMonotonic_seconds": 15.916113,
+            "ExecMainStartTimestampMonotonic_seconds": 15.916087,
+            "ExecMainExitTimestampMonotonic_seconds": 20.779755,
+            "ActiveEnterTimestampMonotonic_seconds": 20.779803
+          },
+          "cloud-init.service": {
+            "InactiveExitTimestampMonotonic_seconds": 21.912209,
+            "ExecMainStartTimestampMonotonic_seconds": 21.912187,
+            "ExecMainExitTimestampMonotonic_seconds": 22.648483,
+            "ActiveEnterTimestampMonotonic_seconds": 22.64853
+          },
+          "cloud-final.service": {
+            "InactiveExitTimestampMonotonic_seconds": 71.312146,
+            "ExecMainStartTimestampMonotonic_seconds": 71.31207,
+            "ExecMainExitTimestampMonotonic_seconds": 72.16179,
+            "ActiveEnterTimestampMonotonic_seconds": 72.161842
+          },
+          "systemd-journal-flush.service": {
+            "InactiveExitTimestampMonotonic_seconds": 7.602633,
+            "ExecMainStartTimestampMonotonic_seconds": 7.602607,
+            "ExecMainExitTimestampMonotonic_seconds": 12.540139,
+            "ActiveEnterTimestampMonotonic_seconds": 12.540217
+          },
+          "systemd-udev-settle.service": {
+            "InactiveExitTimestampMonotonic_seconds": 0.0,
+            "ExecMainStartTimestampMonotonic_seconds": 0.0,
+            "ExecMainExitTimestampMonotonic_seconds": 0.0,
+            "ActiveEnterTimestampMonotonic_seconds": 0.0
+          },
+          "containerd.service": {
+            "InactiveExitTimestampMonotonic_seconds": 24.037161,
+            "ExecMainStartTimestampMonotonic_seconds": 24.172053,
+            "ExecMainExitTimestampMonotonic_seconds": 0.0,
+            "ActiveEnterTimestampMonotonic_seconds": 39.15628
+          },
+          "docker.service": {
+            "InactiveExitTimestampMonotonic_seconds": 39.16236,
+            "ExecMainStartTimestampMonotonic_seconds": 39.162127,
+            "ExecMainExitTimestampMonotonic_seconds": 0.0,
+            "ActiveEnterTimestampMonotonic_seconds": 50.838147
+          },
+          "culvert-maint.service": {
+            "InactiveExitTimestampMonotonic_seconds": 50.846153,
+            "ExecMainStartTimestampMonotonic_seconds": 50.84606,
+            "ExecMainExitTimestampMonotonic_seconds": 0.0,
+            "ActiveEnterTimestampMonotonic_seconds": 50.846153
+          },
+          "culvert-stack-resume.service": {
+            "InactiveExitTimestampMonotonic_seconds": 50.848335,
+            "ExecMainStartTimestampMonotonic_seconds": 50.84825,
+            "ExecMainExitTimestampMonotonic_seconds": 71.307522,
+            "ActiveEnterTimestampMonotonic_seconds": 0.0
+          },
+          "culvert-lab-boot-sampler.service": {
+            "InactiveExitTimestampMonotonic_seconds": 12.781058,
+            "ExecMainStartTimestampMonotonic_seconds": 12.78104,
+            "ExecMainExitTimestampMonotonic_seconds": 0.0,
+            "ActiveEnterTimestampMonotonic_seconds": 12.781058
+          }
+        },
+        "first_daemon_log_kernel_seconds": {
+          "containerd": 38.874348,
+          "dockerd": 45.111643
+        },
+        "daemon_log_capture_complete": true
+      },
+      "first_sampled_PONG_kernel_seconds": 71.160118008,
+      "sampler_first_kernel_seconds": 17.14672215,
+      "sampler_raw_sha256": "31adb3af81a9e86ae44837e12c99589e8624314b5a22afd69f9005e3afa39d32",
+      "early_hook_verification": {
+        "result": "pass",
+        "scope": "No experiment marker in complete retained kernel capture; separate original-profile receipt required.",
+        "initial_root_mount_kernel_seconds": 3.05313
+      },
+      "boot_id": "d4ddcdaa-2d84-4787-b9f3-dcf84e786d0b",
+      "original_initrd_restoration_verified": true,
+      "evidence": [
+        {
+          "path": "secrets/production-recovery-early4-original.jsonl",
+          "sha256": "68635a489f62fa981529995ce65ae3f0099e65679f97b8f6b511e63cdd4a0d8a",
+          "bytes": 18235,
+          "private": true
+        },
+        {
+          "path": "evidence/production-recovery-early4-original-summary.json",
+          "sha256": "342d479a2f66f07da5baf41834e336294302ea7562e3a13a8bd3c60f9dce902e",
+          "bytes": 940,
+          "private": false
+        },
+        {
+          "path": "secrets/production-recovery/early4-original/acceptance.json",
+          "sha256": "39f0f9b7ad13feeb084e8aa4af306ed83046cb4f18ba4f6e5d4894a02c87211f",
+          "bytes": 695,
+          "private": true
+        },
+        {
+          "path": "secrets/production-recovery/early4-original/full.json",
+          "sha256": "f9757d683ce34d9d5718ce42c53a319a481a7d058856decbec0c73f5cb96a6b3",
+          "bytes": 346118,
+          "private": true
+        },
+        {
+          "path": "secrets/production-recovery/early4-original/full-receipt.json",
+          "sha256": "dc3e7d4893ba260e22f12c4578fbe12c3baf1e28bd53f1b04254eea7e3c9cfb1",
+          "bytes": 572,
+          "private": true
+        },
+        {
+          "path": "secrets/production-recovery/early4-original/correlation.json",
+          "sha256": "0e5588ebb9a39700bc02a5d56199134aa5ea40f6fb8b83d48aa50972071ab5a8",
+          "bytes": 451,
+          "private": true
+        },
+        {
+          "path": "secrets/production-recovery/early4-original/correlation-receipt.json",
+          "sha256": "31e48e72b8acc617d9f0a4f79eae94ae569c34a95171335506a937b97466fe5f",
+          "bytes": 579,
+          "private": true
+        },
+        {
+          "path": "secrets/production-recovery/early4-original/authenticated-boot-proof.json",
+          "sha256": "cde38a91034476eb64c1bddbcc9fe8eea3a9255ff1b9ffd8f43adaa08a1ead22",
+          "bytes": 17759,
+          "private": true
+        }
+      ],
+      "supplemental_journal_verification": {
+        "result": "pass",
+        "controller_revision": "ff0d0151cc39ac98718ca979e8ed70160a100e66",
+        "freeze_sha256": "edd16c9d224c2f12603be61fa9f19017879c2c9461556adaafbeb4c413903ee8",
+        "journal_sha256": "91917862ffa175d0613ddf66161a9c174eacf133d56a4c615f9a9efda099a428",
+        "hook": {
+          "result": "pass",
+          "scope": "No experiment marker in complete retained kernel capture; separate original-profile receipt required.",
+          "initial_root_mount_kernel_seconds": 3.05313
+        },
+        "active_initrd_sha256": "d22af6fa8e3b0c609ae3227b7e036b1262b3054b4f395ced2a4d3beedf32bf54",
+        "active_initrd_bytes": 37347640,
+        "receipt_sha256": "58d7d96ed6967b022c764e4734fe4a7bab60ed1427aee4d7c3e6ed7355968562",
+        "evidence": [
+          {
+            "path": "secrets/early-read-ahead/13222c13-21fb-4ad3-ad38-48d0acf84778/journal-proof-b13005d1-b873-4735-a5e4-c5862035b65a/intent.json",
+            "sha256": "a1bf82c135c6acdd15e4e23c9dc918e43bb0328a633addb007357fc73bf3cbad",
+            "bytes": 569,
+            "private": true
+          },
+          {
+            "path": "secrets/early-read-ahead/13222c13-21fb-4ad3-ad38-48d0acf84778/journal-proof-b13005d1-b873-4735-a5e4-c5862035b65a/payload.sh",
+            "sha256": "f1559fdbf9e61bae283ed7a3a27f3e7c80632295f2172fb06ae6b952e5e473fa",
+            "bytes": 46445,
+            "private": true
+          },
+          {
+            "path": "secrets/early-read-ahead/13222c13-21fb-4ad3-ad38-48d0acf84778/journal-proof-b13005d1-b873-4735-a5e4-c5862035b65a/guest-result.json",
+            "sha256": "706837efdbc0c0e7adfc2a6ac76a95be0841d01c66a3f6f0ac2e42ad39bd8c21",
+            "bytes": 146245,
+            "private": true
+          },
+          {
+            "path": "secrets/early-read-ahead/13222c13-21fb-4ad3-ad38-48d0acf84778/journal-proof-b13005d1-b873-4735-a5e4-c5862035b65a/complete.json",
+            "sha256": "0fd275045369d8ac0c978ffad7a789707a8ff76d58033cf0ba234cf0d5fe9b90",
+            "bytes": 691,
+            "private": true
+          }
+        ]
+      },
+      "persistence": {
+        "result": "pass",
+        "checks": {
+          "ca_sha256": true,
+          "rules": true,
+          "categories": true,
+          "traffic": true,
+          "agent_version": true,
+          "admin_login": true,
+          "ca_decryption": true,
+          "agent": true
+        },
+        "evidence": {
+          "path": "secrets/early4-original-persistence.json",
+          "sha256": "49db622affd4454a1336094a4f8b549b766b54e0060b670a33d72fcfdab7d443",
+          "bytes": 1774,
+          "private": true
+        },
+        "baseline_evidence": {
+          "path": "secrets/ra-a0-persistence.json",
+          "sha256": "49db622affd4454a1336094a4f8b549b766b54e0060b670a33d72fcfdab7d443",
+          "bytes": 1774,
+          "private": true
+        },
+        "historical_encrypted_log_recovery": "blocked: Tier-3 historical logs excluded from Tier-1/Tier-2 backup"
+      },
+      "kernel_relative_phases_seconds": {
+        "local_fs_active": 12.658929,
+        "cloud_init_local_start": 15.916087,
+        "cloud_init_local_end": 20.779755,
+        "containerd_start": 24.172053,
+        "containerd_active": 39.15628,
+        "docker_start": 39.162127,
+        "docker_active": 50.838147,
+        "resume_start": 50.84825,
+        "resume_end": 71.307522,
+        "containerd_startup_duration": 14.984227,
+        "docker_startup_duration": 11.67602,
+        "resume_duration": 20.459272,
+        "containerd_prelog_duration": 14.702295,
+        "docker_prelog_duration": 5.949516
+      },
+      "unit_log_capture": {
+        "result": "ok",
+        "exit_code": 0,
+        "timeout_seconds": 20,
+        "truncated": false,
+        "captured_bytes": 53840
+      },
+      "software_matches_A0": {
+        "kernel_version": true,
+        "package_versions": true,
+        "compose_version": true,
+        "clamav_signature_version": true,
+        "clamav_signature_files": true
+      }
+    }
+  ],
+  "operations": [
+    {
+      "action": "restore",
+      "result": "pass",
+      "profile": null,
+      "boot_id": null,
+      "original_sha256": "d22af6fa8e3b0c609ae3227b7e036b1262b3054b4f395ced2a4d3beedf32bf54",
+      "active": "original",
+      "evidence": [
+        {
+          "path": "secrets/early-read-ahead/13222c13-21fb-4ad3-ad38-48d0acf84778/operation-70860b18-5131-424a-9776-788954c0e1f1/intent.json",
+          "sha256": "1310b736d5b64d92bbacd7b51f25827e03b64c71a4431eb9e2f9269bbe23b6b8",
+          "bytes": 287,
+          "private": true
+        },
+        {
+          "path": "secrets/early-read-ahead/13222c13-21fb-4ad3-ad38-48d0acf84778/operation-70860b18-5131-424a-9776-788954c0e1f1/guest-result.json",
+          "sha256": "283e2356ad69c98a99a93f824b6e5fe4ad0a3ae286d67cefca131da321713da2",
+          "bytes": 174,
+          "private": true
+        },
+        {
+          "path": "secrets/early-read-ahead/13222c13-21fb-4ad3-ad38-48d0acf84778/operation-70860b18-5131-424a-9776-788954c0e1f1/complete.json",
+          "sha256": "448b57f3a7e6ce7a0d685d8b346adaa04913e425e5755ee9988483aa3ba61297",
+          "bytes": 197,
+          "private": true
+        },
+        {
+          "path": "secrets/early-read-ahead/13222c13-21fb-4ad3-ad38-48d0acf84778/operation-70860b18-5131-424a-9776-788954c0e1f1/payload.sh",
+          "sha256": "21215c387d9726f9750b5ac5461708dc42c10d5347f9251b314c0e6f31805d97",
+          "bytes": 48509,
+          "private": true
+        }
+      ]
+    },
+    {
+      "action": "applyA",
+      "result": "pass",
+      "profile": null,
+      "boot_id": null,
+      "original_sha256": "d22af6fa8e3b0c609ae3227b7e036b1262b3054b4f395ced2a4d3beedf32bf54",
+      "active": "A",
+      "evidence": [
+        {
+          "path": "secrets/early-read-ahead/13222c13-21fb-4ad3-ad38-48d0acf84778/operation-7d081c8c-6e75-439c-8b4a-d606c59d6848/intent.json",
+          "sha256": "024faeabbee5a2bc9683aeb78d0d9b7ffada92f5a8476c574d785b25dc0f2754",
+          "bytes": 286,
+          "private": true
+        },
+        {
+          "path": "secrets/early-read-ahead/13222c13-21fb-4ad3-ad38-48d0acf84778/operation-7d081c8c-6e75-439c-8b4a-d606c59d6848/guest-result.json",
+          "sha256": "43efcfa0b4a8da4ad325c75221fbed7f9912b7ec28040363385fe9961977c88d",
+          "bytes": 166,
+          "private": true
+        },
+        {
+          "path": "secrets/early-read-ahead/13222c13-21fb-4ad3-ad38-48d0acf84778/operation-7d081c8c-6e75-439c-8b4a-d606c59d6848/complete.json",
+          "sha256": "f0be759a01485578aaf722f119a626a7be1a08d10c5b4583fe5e6bcba4cc0b17",
+          "bytes": 197,
+          "private": true
+        },
+        {
+          "path": "secrets/early-read-ahead/13222c13-21fb-4ad3-ad38-48d0acf84778/operation-7d081c8c-6e75-439c-8b4a-d606c59d6848/payload.sh",
+          "sha256": "72a84e81cac1f9508fc1fbd041c17a145cceffa6497af614e23cc8d5f4b8cd0d",
+          "bytes": 48508,
+          "private": true
+        }
+      ]
+    },
+    {
+      "action": "applyB",
+      "result": "pass",
+      "profile": null,
+      "boot_id": null,
+      "original_sha256": "d22af6fa8e3b0c609ae3227b7e036b1262b3054b4f395ced2a4d3beedf32bf54",
+      "active": "B",
+      "evidence": [
+        {
+          "path": "secrets/early-read-ahead/13222c13-21fb-4ad3-ad38-48d0acf84778/operation-8635a961-5e78-4b04-ad10-457b6cf473b6/intent.json",
+          "sha256": "6d388f314225ad10c002fcde8384099277c689362a2f6d018e69f42b93e0d35a",
+          "bytes": 286,
+          "private": true
+        },
+        {
+          "path": "secrets/early-read-ahead/13222c13-21fb-4ad3-ad38-48d0acf84778/operation-8635a961-5e78-4b04-ad10-457b6cf473b6/guest-result.json",
+          "sha256": "9bc30dfc2c674204133624b2f90312038684bf206c747d7f13cb8e80690bcf13",
+          "bytes": 166,
+          "private": true
+        },
+        {
+          "path": "secrets/early-read-ahead/13222c13-21fb-4ad3-ad38-48d0acf84778/operation-8635a961-5e78-4b04-ad10-457b6cf473b6/complete.json",
+          "sha256": "8f3090847438c5a99f820f9cc3080fd7a10c9bcfe490165de8bdbf4f4cdaaf9b",
+          "bytes": 197,
+          "private": true
+        },
+        {
+          "path": "secrets/early-read-ahead/13222c13-21fb-4ad3-ad38-48d0acf84778/operation-8635a961-5e78-4b04-ad10-457b6cf473b6/payload.sh",
+          "sha256": "1bfe39124e60fbcc70dd2476f215ee4ae22d938a51f1c223211f7ccb577f7075",
+          "bytes": 48508,
+          "private": true
+        }
+      ]
+    },
+    {
+      "action": "verify",
+      "result": "preserved_builtin_failure",
+      "classification": "dmesg_raw_color_mutual_exclusion",
+      "evidence": [
+        {
+          "path": "secrets/early-read-ahead/13222c13-21fb-4ad3-ad38-48d0acf84778/operation-9bd3dcdf-5cbd-43fd-946c-f0ae311701e1/intent.json",
+          "sha256": "a2a3134c14e88f5ad9bc8c45a1d45535df27cf8b82c79068188e02fdf61f0856",
+          "bytes": 285,
+          "private": true
+        },
+        {
+          "path": "secrets/early-read-ahead/13222c13-21fb-4ad3-ad38-48d0acf84778/operation-9bd3dcdf-5cbd-43fd-946c-f0ae311701e1/guest-result.json",
+          "sha256": "81ea6638eab924386f1fbf4952ef4b651bdcbe1d06bec854af3e0211cf607982",
+          "bytes": 449,
+          "private": true
+        },
+        {
+          "path": "secrets/early-read-ahead/13222c13-21fb-4ad3-ad38-48d0acf84778/operation-9bd3dcdf-5cbd-43fd-946c-f0ae311701e1/payload.sh",
+          "sha256": "43baa2acb63e718ac9366c3fca27977a29aa6dbb45215ea9332ff42772c4cff9",
+          "bytes": 48507,
+          "private": true
+        }
+      ]
+    },
+    {
+      "action": "applyA",
+      "result": "pass",
+      "profile": null,
+      "boot_id": null,
+      "original_sha256": "d22af6fa8e3b0c609ae3227b7e036b1262b3054b4f395ced2a4d3beedf32bf54",
+      "active": "A",
+      "evidence": [
+        {
+          "path": "secrets/early-read-ahead/13222c13-21fb-4ad3-ad38-48d0acf84778/operation-a37d56c8-eda8-469c-8eee-5e3991f54931/intent.json",
+          "sha256": "a7784dca29946d803a95966df79430de25dc56f9602b748f0f25a1db1b8588aa",
+          "bytes": 286,
+          "private": true
+        },
+        {
+          "path": "secrets/early-read-ahead/13222c13-21fb-4ad3-ad38-48d0acf84778/operation-a37d56c8-eda8-469c-8eee-5e3991f54931/guest-result.json",
+          "sha256": "43efcfa0b4a8da4ad325c75221fbed7f9912b7ec28040363385fe9961977c88d",
+          "bytes": 166,
+          "private": true
+        },
+        {
+          "path": "secrets/early-read-ahead/13222c13-21fb-4ad3-ad38-48d0acf84778/operation-a37d56c8-eda8-469c-8eee-5e3991f54931/complete.json",
+          "sha256": "ca9f37448df9ff236d1e602c8f1cfecb35ef6d657dc9c0fbfdadc6b18ec319e7",
+          "bytes": 197,
+          "private": true
+        },
+        {
+          "path": "secrets/early-read-ahead/13222c13-21fb-4ad3-ad38-48d0acf84778/operation-a37d56c8-eda8-469c-8eee-5e3991f54931/payload.sh",
+          "sha256": "83e986deff619cf6b899ebe525fc667671f0c1aee6fdaaded031f52599e7f4bf",
+          "bytes": 48508,
+          "private": true
+        }
+      ]
+    },
+    {
+      "action": "export",
+      "result": "pass",
+      "profile": null,
+      "boot_id": null,
+      "original_sha256": "d22af6fa8e3b0c609ae3227b7e036b1262b3054b4f395ced2a4d3beedf32bf54",
+      "active": "original",
+      "evidence": [
+        {
+          "path": "secrets/early-read-ahead/13222c13-21fb-4ad3-ad38-48d0acf84778/operation-ccb46095-a94e-4838-98c8-1f7dfb827bd8/intent.json",
+          "sha256": "647e1d1d0601c80a23180d49814b16b788ee333409018252652d0d413ab5ad6c",
+          "bytes": 286,
+          "private": true
+        },
+        {
+          "path": "secrets/early-read-ahead/13222c13-21fb-4ad3-ad38-48d0acf84778/operation-ccb46095-a94e-4838-98c8-1f7dfb827bd8/guest-result.json",
+          "sha256": "b72a20fca77392c219b3ae53e9dc235f252a51148e8742fe1d72a1b8c618bbc4",
+          "bytes": 174,
+          "private": true
+        },
+        {
+          "path": "secrets/early-read-ahead/13222c13-21fb-4ad3-ad38-48d0acf84778/operation-ccb46095-a94e-4838-98c8-1f7dfb827bd8/complete.json",
+          "sha256": "590f7dbef2aaba4172129cfeb962988e40c4683c1b933da14920bf7c21a2f283",
+          "bytes": 197,
+          "private": true
+        },
+        {
+          "path": "secrets/early-read-ahead/13222c13-21fb-4ad3-ad38-48d0acf84778/operation-ccb46095-a94e-4838-98c8-1f7dfb827bd8/payload.sh",
+          "sha256": "71fa28b2d05f260ab8e3a8d41021ccdba8db04731cdadb4dd16475a3aa638c3a",
+          "bytes": 48674,
+          "private": true
+        }
+      ]
+    },
+    {
+      "action": "prepare",
+      "result": "pass",
+      "profile": null,
+      "boot_id": null,
+      "original_sha256": null,
+      "active": null,
+      "evidence": [
+        {
+          "path": "secrets/early-read-ahead/13222c13-21fb-4ad3-ad38-48d0acf84778/operation-eaf5d664-5b5e-4988-9f59-0a5f4c6b935e/intent.json",
+          "sha256": "713c756a7dc3fb4cec356af11eaefead003a32b9e0766d7325ac1c9e95d7841f",
+          "bytes": 287,
+          "private": true
+        },
+        {
+          "path": "secrets/early-read-ahead/13222c13-21fb-4ad3-ad38-48d0acf84778/operation-eaf5d664-5b5e-4988-9f59-0a5f4c6b935e/guest-result.json",
+          "sha256": "5df25228c3112bbae07b6e5472c161fa943ce3091bbe0d49447cbd31c43edf15",
+          "bytes": 610,
+          "private": true
+        },
+        {
+          "path": "secrets/early-read-ahead/13222c13-21fb-4ad3-ad38-48d0acf84778/operation-eaf5d664-5b5e-4988-9f59-0a5f4c6b935e/complete.json",
+          "sha256": "e31fe761565d4eeac95e8d3c72220280a903b4876c07401b5f095781c87ecf1f",
+          "bytes": 197,
+          "private": true
+        },
+        {
+          "path": "secrets/early-read-ahead/13222c13-21fb-4ad3-ad38-48d0acf84778/operation-eaf5d664-5b5e-4988-9f59-0a5f4c6b935e/payload.sh",
+          "sha256": "d3c44b3889a7f290fd9de777b2be8c02dbfdcf18fbaa88e594f9a888c64f9e4b",
+          "bytes": 48509,
+          "private": true
+        }
+      ]
+    }
+  ],
+  "controller_phase_chain": [
+    {
+      "revision": "34e69951648f886fb8f8fe034345e7b5480d12cf",
+      "freeze_sha256": "0bad4c489327f6c610a445d7376ad0c9e7a83c3628c30eb862542789747f8169",
+      "measurement_cycles": [
+        "early4-a0"
+      ]
+    },
+    {
+      "revision": "ff0d0151cc39ac98718ca979e8ed70160a100e66",
+      "freeze_sha256": "edd16c9d224c2f12603be61fa9f19017879c2c9461556adaafbeb4c413903ee8",
+      "measurement_cycles": [
+        "early4-b1",
+        "early4-b2",
+        "early4-b3",
+        "early4-a1",
+        "early4-original"
+      ],
+      "supplemental_journal_proof_cycles": [
+        "early4-a0",
+        "early4-b1",
+        "early4-b2",
+        "early4-b3",
+        "early4-a1",
+        "early4-original"
+      ],
+      "inherited_manifest_files_raw_bytes_identical": true
+    }
+  ],
+  "builtin_verifier_failure_preserved": true,
+  "verifier_failure_does_not_invalidate_independently_proven_hook": true,
+  "prior_invalid_campaign": "df66b082-2052-4174-8244-597022d50dd0",
+  "limitations": [
+    "Prior v3 hook refusal and verifier failure remain invalid; this campaign cannot replace that evidence.",
+    "Clock-correlated boot origin is an interval, not a measured full shutdown duration.",
+    "Authenticated service readiness is distinct from systemd units or direct PONG.",
+    "Shared host/device load and cache state confound causation. No automatic storage-cause conclusion.",
+    "Archive identity checks use retained frozen predicates, not independently archived original API responses.",
+    "Final production qualification and other open blockers remain separate."
+  ],
+  "baseline_reference": {
+    "path": "secrets/production-baseline.json",
+    "sha256": "8746e65ac05663cf9bb7e072c1399d87264ad5456257a08e7157b1006a470712",
+    "bytes": 619,
+    "private": true
+  },
+  "artifact": {
+    "source_sha": "b579ca28c9d936e9141292ce5ec564a26feeae86",
+    "image_id": "sha256:24b37bc217691058e56a838821b86dfbd45b927b1c0ea8ea867a28c54d4bcc47",
+    "ova_sha256": "1a713a9bedc4ee50ac4212c12048924e03abe6b8f04cb82d4d0ef95e33ef4775"
+  },
+  "date": "2026-10-05",
+  "experiment": "Unchanged Culvert product image with a lab-only guest initrd read-ahead intervention (128/1024KiB), followed by exact original initrd restoration.",
+  "recovery_gate_result": "fail",
+  "three_consecutive_B_runs_within_120_seconds": false,
+  "intervention_valid_for_all_five_comparison_boots": true,
+  "final_original_restoration_result": "pass",
+  "later_source_review": {
+    "head": "4dba8b9b516cccfda369d582396d4210f942df9f",
+    "scope": "Separate source fixes/review, not the measured b579 OVA. These captures neither qualify the newer artifact nor close its full-disk/scanner/sidecar validation requirements."
+  },
+  "production_blocker_disposition": "Unchanged: the 120-second repeated recovery gate failed; other authoritative appliance readiness blockers are not closed or accepted by this experiment. A rebuilt integrated artifact requires separate qualification.",
+  "preserved_failures": [
+    "E0 repeatability failed; earlier 128/1024 rootfs-udev comparison failed.",
+    "V3 experiment invalid: hook refused reason=root; builtin dmesg format failure retained.",
+    "V4 builtin dmesg raw/color mutual exclusion retained separately; supplemental evidence proves valid actual hook.",
+    "V4 B1 FAIL165.781 seconds and returnA1 FAIL132.453 seconds remain FAIL despite backup/PONG/persistence PASS.",
+    "ReturnA1 unit_logs capture timed out at15seconds with exit-9 and zero bytes; daemon pre-log durations unknown.",
+    "Historical597-second recovery and10-second backup timeout remain unresolved."
+  ],
+  "conclusions": [
+    "Valid pre-root application is demonstrated on all five measured boots. The required three-consecutive-B timing gate nevertheless fails (FAIL/PASS/PASS).",
+    "Containerd pre-log improves on B2/B3 but not B1; returnA1 pre-log is unknown due collector timeout. This does not establish a clean reversible binary-load effect.",
+    "B1 coincides with materially heavier shared-device writes/queueing. Device counters include unrelated workloads and20second aggregation; no causal storage claim.",
+    "VM CPU ready remains low relative to20second intervals with zero observed co-stop/max-limited/balloon/swap-in. This is not proof of absence of every host scheduling confound.",
+    "Clock-correlated acceptance-to-next-boot windows differ substantially; they do not isolate shutdown from firmware/early kernel transition.",
+    "Do not equate systemd unit completion or first sampled PONG with authenticated three-sample ready/traffic/ClamAV acceptance.",
+    "Final original-initrd boot passes97.515seconds; original bytes/hash and128KiB effective value are verified and experiment marker is absent. This restores the original boot image without converting earlier timing failures to passes."
+  ],
+  "offline_aggregator_sha256": "d9d540b1f0dfa2991ef6d5375980b34ff827bf9add2731d13033e6a54c9eb2e1",
+  "original_initrd": {
+    "kernel": "6.8.0-146-generic",
+    "sha256": "d22af6fa8e3b0c609ae3227b7e036b1262b3054b4f395ced2a4d3beedf32bf54",
+    "bytes": 37347640,
+    "postboot_effective_read_ahead_kib": 128,
+    "experiment_marker_absent": true,
+    "supplemental_result_sha256": "706837efdbc0c0e7adfc2a6ac76a95be0841d01c66a3f6f0ac2e42ad39bd8c21"
+  },
+  "unique_file_references_verified": 128,
+  "alternate_datastore_control": {
+    "result": "blocked_capacity",
+    "observed_at": "2026-10-05T19:53:33Z",
+    "ssd_datastore": "datastore1",
+    "free_gib": 68.6728515625,
+    "frozen_import_guard_gib": 110,
+    "guard_relaxed": false,
+    "unrelated_workloads_modified": false,
+    "interpretation": "Capacity prevents the alternate-datastore control; this is not storage causation or risk acceptance.",
+    "evidence": {
+      "path": "secrets/ssd-capacity-final-early-check.json",
+      "sha256": "2c08a3d90195928217ab034c09abe91d3d27fedc7087be952882e7c4cf402a80",
+      "bytes": 2361,
+      "private": true
+    }
+  }
+}

@@ -795,6 +795,9 @@ EOS
     else check 6b restore-commit fail "exit $rc login $c rules '$rules' traffic $ra ($(grep -E '^(down|commit|up)-rc=' "$EV/06b-restore-offline.txt" | tr '\n' ' '))"; STOP=1; fi
   elif [[ $STOP == 0 ]]; then check 6b restore-commit not-run "no backup file"; fi
 
+  # Optional controller hooks are defined before cmd_qualify starts.
+  if declare -F lab_before_signed_update >/dev/null; then lab_before_signed_update; fi
+
   # Step 6c — signed update and rollback through the maintenance agent, with
   # TEST-ONLY trust (LAB_UPDATE_DIR, prepared outside the OVA by the lab).
   if gate 6c signed-update; then
@@ -808,6 +811,7 @@ EOS
     local rc=0; groot 'culvert-os-update os' 2700 > "$EV/07-os-update.txt" 2>&1 || rc=$?
     [[ $rc == 0 ]] && check 7 os-update pass "culvert-os-update os exit 0 ($(grep -cE '^(Setting up|Unpacking) ' "$EV/07-os-update.txt" || true) package actions)" || check 7 os-update fail "exit $rc: $(tail -3 "$EV/07-os-update.txt" | tr '\n' ' ')"
     gpriv > "$EV/07-check-after-update.txt" 2>&1 <<<'culvert-os-update check; ls -l /var/run/reboot-required 2>/dev/null; dpkg -l "linux-image-*" | awk "/^ii/{print \$2, \$3}"; apt-mark showhold; docker version --format "{{.Server.Version}}"' || true
+    if declare -F lab_before_reboot >/dev/null; then lab_before_reboot; fi
     # The reboot ends the console session; the next privileged call logs in again.
     gpriv --nowait > "$EV/07-reboot.txt" 2>&1 <<<'culvert-os-update reboot' || true
     local deadline=$(( $(date +%s) + LAB_FIRSTBOOT_TIMEOUT )) t0; t0=$(date +%s); sleep 20
@@ -815,6 +819,7 @@ EOS
       qemu_alive || { check 7 reboot fail "qemu exited during the reboot"; STOP=1; break; }
       (( $(date +%s) < deadline )) || { check 7 reboot fail "not back within ${LAB_FIRSTBOOT_TIMEOUT}s"; STOP=1; break; }
       sleep 10; done
+    if declare -F lab_after_reboot_observation >/dev/null; then lab_after_reboot_observation; fi
     if [[ $STOP == 0 ]]; then
       check 7 reboot pass "proxy /health and operator SSH back $(( $(date +%s) - t0 ))s after the reboot command"
       gpriv > "$EV/07-kernel-after.txt" 2>&1 <<<'uname -r; uname -v' || true

@@ -1,0 +1,18 @@
+Offline review reproductions (2026-10-05). These are diagnostic tests, not shipped code.
+
+Purge/flush regression: on source6a9d387383c337f47f5182bf0ba4a414a3be78c7,
+copy review-purge-flush_test.go.txt temporarily to third_party/badger/review_purge_flush_test.go.
+Run: go test github.com/dgraph-io/badger/v4 -run '^TestReviewPurgeAfterFlushFailure$' -count=1 -timeout=30s -v
+Then remove only that temporary test. The unfixed source FAILS: DropAll returns nil and
+clears old immutable memtables, but after blockers are removed new writes retain8
+immutable memtables with limit5 and zero SST tables. Filename directories cause actual
+SST creation errors; this is not a Linux/ext4 full-filesystem reproduction.
+
+Status cache proof: save the exact b579ca28c9d936e9141292ce5ec564a26feeae86 version of
+maint_agent_status_api.go and review-status-cache_test.go.txt (renamed cache_repro_test.go)
+in an isolated directory. Run: go test -v maint_agent_status_api.go cache_repro_test.go
+The diagnostic PASSES when the defect is reproduced, not when fixed. It supplies only
+auth/endpoint stubs and proves the real cache behavior; it does not test authentication.
+It cancels one in-flight backend fetch, verifies the next healthy caller receives the
+cached negative without a backend call, then verifies recovery after simulated TTL expiry.
+The separate actual ESXi one-cancellation result is in esxi-production-defects-20261005.json.

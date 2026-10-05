@@ -1,0 +1,290 @@
+diff --git a/ovf/importer/checksum_local_test.go b/ovf/importer/checksum_local_test.go
+new file mode 100644
+index 0000000..006b5dd
+--- /dev/null
++++ b/ovf/importer/checksum_local_test.go
+@@ -0,0 +1,31 @@
++package importer
++
++import (
++	"github.com/vmware/govmomi/nfc"
++	"github.com/vmware/govmomi/vapi/library"
++	"github.com/vmware/govmomi/vim25/types"
++	"testing"
++)
++
++func TestLocalImportChecksumTypes(t *testing.T) {
++	info := &nfc.LeaseInfo{HttpNfcLeaseInfo: types.HttpNfcLeaseInfo{DeviceUrl: []types.HttpNfcLeaseDeviceUrl{{Key: "disk-key", ImportKey: "disk-id"}}},
++		Items: []nfc.FileItem{{OvfFileItem: types.OvfFileItem{Path: "disk.vmdk", DeviceId: "disk-id"}}}}
++	manifest := map[string]*library.Checksum{"disk.vmdk": {Algorithm: "SHA256", Checksum: "unused"}}
++	pairs, err := importChecksumTypes(info, manifest)
++	if err != nil || len(pairs) != 1 || pairs[0].Key != "disk-key" || pairs[0].Value != "sha256" {
++		t.Fatalf("unexpected negotiation: %v %v", pairs, err)
++	}
++	delete(manifest, "disk.vmdk")
++	if _, err := importChecksumTypes(info, manifest); err == nil {
++		t.Fatal("missing digest accepted")
++	}
++	manifest["disk.vmdk"] = &library.Checksum{Algorithm: "SHA512"}
++	if _, err := importChecksumTypes(info, manifest); err == nil {
++		t.Fatal("unsupported algorithm accepted")
++	}
++	manifest["disk.vmdk"].Algorithm = "SHA256"
++	info.DeviceUrl[0].ImportKey = "different"
++	if _, err := importChecksumTypes(info, manifest); err == nil {
++		t.Fatal("mismatched device accepted")
++	}
++}
+diff --git a/ovf/importer/importer.go b/ovf/importer/importer.go
+index 8a20242..317e77d 100644
+--- a/ovf/importer/importer.go
++++ b/ovf/importer/importer.go
+@@ -20,6 +20,7 @@ import (
+ 	"github.com/vmware/govmomi/task"
+ 	"github.com/vmware/govmomi/vapi/library"
+ 	"github.com/vmware/govmomi/vim25"
++	"github.com/vmware/govmomi/vim25/methods"
+ 	"github.com/vmware/govmomi/vim25/progress"
+ 	"github.com/vmware/govmomi/vim25/soap"
+ 	"github.com/vmware/govmomi/vim25/types"
+@@ -162,6 +163,21 @@ func (imp *Importer) Import(ctx context.Context, fpath string, opts Options) (*t
+ 		return nil, err
+ 	}
+ 
++	// LOCAL-ESXI: request the manifest's algorithm before transferring any bytes.
++	// ESXi 8.0 defaults to SHA1 even for an OVA carrying a SHA256 manifest.
++	// Keep ValidateChecksum mandatory; never downgrade or rewrite the artifact.
++	if imp.VerifyManifest {
++		pairs, err := importChecksumTypes(info, imp.Manifest)
++		if err == nil {
++			_, err = methods.HttpNfcLeaseSetManifestChecksumType(ctx, imp.Client,
++				&types.HttpNfcLeaseSetManifestChecksumType{This: lease.Reference(), DeviceUrlsToChecksumTypes: pairs})
++		}
++		if err != nil {
++			_ = lease.Abort(ctx, nil)
++			return nil, fmt.Errorf("manifest checksum negotiation: %w", err)
++		}
++	}
++
+ 	u := lease.StartUpdater(ctx, info)
+ 	defer u.Done()
+ 
+@@ -179,6 +195,31 @@ func (imp *Importer) Import(ctx context.Context, fpath string, opts Options) (*t
+ 	return &info.Entity, lease.Complete(ctx)
+ }
+ 
++func importChecksumTypes(info *nfc.LeaseInfo, manifest map[string]*library.Checksum) ([]types.KeyValue, error) {
++	var pairs []types.KeyValue
++	for _, item := range info.Items {
++		sum := manifest[item.Path]
++		if sum == nil {
++			return nil, fmt.Errorf("missing checksum for %s", item.Path)
++		}
++		algorithm := strings.ToLower(sum.Algorithm)
++		if algorithm != "sha1" && algorithm != "sha256" {
++			return nil, fmt.Errorf("unsupported checksum algorithm %s", algorithm)
++		}
++		matches := 0
++		for _, device := range info.DeviceUrl {
++			if device.ImportKey == item.DeviceId {
++				pairs = append(pairs, types.KeyValue{Key: device.Key, Value: algorithm})
++				matches++
++			}
++		}
++		if matches != 1 {
++			return nil, fmt.Errorf("expected one lease device for %s", item.Path)
++		}
++	}
++	return pairs, nil
++}
++
+ func (imp *Importer) NetworkMap(ctx context.Context, e *ovf.Envelope, networks []Network) ([]types.OvfNetworkMapping, error) {
+ 	var nmap []types.OvfNetworkMapping
+ 	for _, m := range networks {
+@@ -293,6 +334,22 @@ func (imp *Importer) Upload(ctx context.Context, lease *nfc.Lease, item nfc.File
+ 	}
+ 	defer f.Close()
+ 
++	// Verify the complete original file first, then derive the digest of the
++	// valid stream consumed by ESXi. Upload the unchanged original bytes.
++	uploadChecksum := imp.Manifest[file]
++	if imp.VerifyManifest && !item.Create {
++		uploadChecksum, err = verifiedStreamChecksum(f, size, uploadChecksum)
++		if err != nil {
++			return err
++		}
++		_ = f.Close()
++		f, size, err = imp.Archive.Open(file)
++		if err != nil {
++			return err
++		}
++		defer f.Close()
++	}
++
+ 	logger := progress.NewProgressLogger(imp.Log, fmt.Sprintf("Uploading %s... ", path.Base(file)))
+ 	defer logger.Wait()
+ 
+@@ -323,6 +380,9 @@ func (imp *Importer) Upload(ctx context.Context, lease *nfc.Lease, item nfc.File
+ 		if !ok {
+ 			return fmt.Errorf("missing checksum for %v in manifest file", file)
+ 		}
++		if !item.Create {
++			sum = uploadChecksum
++		}
+ 		return ValidateChecksum(ctx, lease, sum, file, mapImportKeyToKey(leaseInfo.DeviceUrl, item.DeviceId))
+ 	}
+ 	return nil
+diff --git a/ovf/importer/stream_checksum_local.go b/ovf/importer/stream_checksum_local.go
+new file mode 100644
+index 0000000..ddeed86
+--- /dev/null
++++ b/ovf/importer/stream_checksum_local.go
+@@ -0,0 +1,90 @@
++// SPDX-License-Identifier: Apache-2.0
++package importer
++
++import (
++	"crypto/sha256"
++	"encoding/binary"
++	"encoding/hex"
++	"fmt"
++	"io"
++	"strings"
++
++	"github.com/vmware/govmomi/vapi/library"
++)
++
++// verifiedStreamChecksum supports the QEMU v3 streamOptimized layout with
++// metadata before the grain stream. ESXi hashes through the EOS sector, not
++// QEMU's trailing grain-alignment zero padding. The full file MUST still match
++// its original SHA256 manifest. No artifact or transmitted byte is changed.
++func verifiedStreamChecksum(r io.Reader, size int64, want *library.Checksum) (*library.Checksum, error) {
++	if want == nil || !strings.EqualFold(want.Algorithm, "SHA256") {
++		return nil, fmt.Errorf("SHA256 manifest required")
++	}
++	full, stream := sha256.New(), sha256.New()
++	all := io.TeeReader(r, full)
++	consumed := io.TeeReader(all, stream)
++	header := make([]byte, 512)
++	if _, err := io.ReadFull(consumed, header); err != nil {
++		return nil, err
++	}
++	le := binary.LittleEndian
++	capacity, grain := le.Uint64(header[12:20]), le.Uint64(header[20:28])
++	overhead := le.Uint64(header[64:72]) * 512
++	if le.Uint32(header[:4]) != 0x564d444b || le.Uint32(header[4:8]) != 3 ||
++		le.Uint32(header[8:12]) != 0x30003 || le.Uint16(header[77:79]) != 1 ||
++		grain != 128 || capacity == 0 || overhead < 512 || overhead > uint64(size) ||
++		le.Uint64(header[56:64]) == ^uint64(0) {
++		return nil, fmt.Errorf("unsupported streamOptimized layout")
++	}
++	if _, err := io.CopyN(io.Discard, consumed, int64(overhead)-512); err != nil {
++		return nil, err
++	}
++	offset := int64(overhead)
++	grains := 0
++	for {
++		if offset+512 > size {
++			return nil, fmt.Errorf("missing EOS sector")
++		}
++		sector := make([]byte, 512)
++		if _, err := io.ReadFull(consumed, sector); err != nil {
++			return nil, err
++		}
++		offset += 512
++		lba, n := le.Uint64(sector[:8]), le.Uint32(sector[8:12])
++		if n == 0 {
++			for _, b := range sector {
++				if b != 0 {
++					return nil, fmt.Errorf("unsupported metadata marker")
++				}
++			}
++			if grains == 0 || size-offset >= int64(grain*512) {
++				return nil, fmt.Errorf("invalid EOS or excessive trailing padding")
++			}
++			padding := make([]byte, size-offset)
++			if _, err := io.ReadFull(all, padding); err != nil {
++				return nil, err
++			}
++			for _, b := range padding {
++				if b != 0 {
++					return nil, fmt.Errorf("nonzero bytes after EOS")
++				}
++			}
++			if hex.EncodeToString(full.Sum(nil)) != strings.ToLower(want.Checksum) {
++				return nil, fmt.Errorf("full local VMDK manifest mismatch")
++			}
++			return &library.Checksum{Algorithm: "SHA256", Checksum: hex.EncodeToString(stream.Sum(nil))}, nil
++		}
++		if lba >= capacity || lba%grain != 0 || uint64(n) > grain*512+8192 {
++			return nil, fmt.Errorf("invalid grain marker")
++		}
++		remaining := ((int64(n)+12+511)/512)*512 - 512
++		if offset+remaining > size {
++			return nil, fmt.Errorf("truncated grain")
++		}
++		if _, err := io.CopyN(io.Discard, consumed, remaining); err != nil {
++			return nil, err
++		}
++		offset += remaining
++		grains++
++	}
++}
+diff --git a/ovf/importer/stream_checksum_local_test.go b/ovf/importer/stream_checksum_local_test.go
+new file mode 100644
+index 0000000..740c92f
+--- /dev/null
++++ b/ovf/importer/stream_checksum_local_test.go
+@@ -0,0 +1,52 @@
++package importer
++
++import (
++	"bytes"
++	"crypto/sha256"
++	"encoding/binary"
++	"fmt"
++	"github.com/vmware/govmomi/vapi/library"
++	"testing"
++)
++
++func TestLocalStreamChecksum(t *testing.T) {
++	// Header, one grain, EOS, optional zero padding. Not a bootable image.
++	data := make([]byte, 2048)
++	le := binary.LittleEndian
++	le.PutUint32(data[0:4], 0x564d444b)
++	le.PutUint32(data[4:8], 3)
++	le.PutUint32(data[8:12], 0x30003)
++	le.PutUint64(data[12:20], 128)
++	le.PutUint64(data[20:28], 128)
++	le.PutUint64(data[64:72], 1)
++	le.PutUint16(data[77:79], 1)
++	le.PutUint32(data[520:524], 1)
++	data[524] = 42
++	manifest := func(b []byte) *library.Checksum {
++		return &library.Checksum{Algorithm: "SHA256", Checksum: fmt.Sprintf("%x", sha256.Sum256(b))}
++	}
++	result, err := verifiedStreamChecksum(bytes.NewReader(data), int64(len(data)), manifest(data))
++	if err != nil || result.Checksum != manifest(data[:1536]).Checksum {
++		t.Fatalf("stream digest: %v %v", result, err)
++	}
++	if _, err := verifiedStreamChecksum(bytes.NewReader(data), int64(len(data)), manifest(data[:1536])); err == nil {
++		t.Fatal("full-file corruption accepted")
++	}
++	data[2047] = 1
++	if _, err := verifiedStreamChecksum(bytes.NewReader(data), int64(len(data)), manifest(data)); err == nil {
++		t.Fatal("nonzero trailing data accepted")
++	}
++	data[2047] = 0
++	data[1024] = 1
++	if _, err := verifiedStreamChecksum(bytes.NewReader(data), int64(len(data)), manifest(data)); err == nil {
++		t.Fatal("non-EOS marker accepted")
++	}
++	data[1024] = 0
++	if _, err := verifiedStreamChecksum(bytes.NewReader(data[:1000]), 1000, manifest(data[:1000])); err == nil {
++		t.Fatal("truncated grain accepted")
++	}
++	data = append(data, make([]byte, 65536)...)
++	if _, err := verifiedStreamChecksum(bytes.NewReader(data), int64(len(data)), manifest(data)); err == nil {
++		t.Fatal("unbounded padding accepted")
++	}
++}
