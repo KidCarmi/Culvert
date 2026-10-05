@@ -192,6 +192,7 @@ func buildOperatorContract() OperatorContract {
 	// Auth Exempt risk diagnostics (Slice 8): WARN-only rows for risky Stage-1
 	// exemption postures. Contributes nothing when no exempt rules exist.
 	checks = append(checks, authExemptDiagnostics(policyStore.List(), policyActionFromDefault())...)
+	checks = append(checks, checkAuthExemptKillSwitch()...)
 	checks = append(checks, authCredentialRequiredDiagnostics(policyStore.List(), hasCredentialCapableProvider())...)
 	// LDAP profile hygiene diagnostics (ADR-0027). Report-only; contribute
 	// nothing when no LDAP profiles exist.
