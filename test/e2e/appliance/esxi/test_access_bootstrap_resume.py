@@ -108,6 +108,68 @@ class PreparationResumeTests(unittest.TestCase):
             access.main()
         keyboard.assert_called_once()
 
+    def write_blocked_observation(self):
+        record = {'status': 'blocked', 'stage': 'initial-capture', 'uuid': UUID,
+                  'prior_marker_sha256': hashlib.sha256(self.marker.read_bytes()).hexdigest(),
+                  'bootstrap_helper_sha256': access.TOOL_OBSERVATION_HELPER_SHA256,
+                  'keyboard_source_sha256': hashlib.sha256((access.HERE / 'private-keystrokes.go').read_bytes()).hexdigest()}
+        path = self.sec / 'access-bootstrap-tool-preparation-extension.json'
+        path.write_text(json.dumps(record))
+        return path, record
+
+    def test_bound_tool_observation_resumes_without_changing_either_prior_marker(self):
+        extension, record = self.write_blocked_observation()
+        originals = self.marker.read_bytes(), extension.read_bytes()
+        result = access.observation_continuation(self.lab, self.marker)
+        self.assertEqual(result['prior_marker_sha256'], hashlib.sha256(originals[1]).hexdigest())
+        self.assertEqual(result['original_marker_sha256'], hashlib.sha256(originals[0]).hexdigest())
+        self.assertEqual((self.marker.read_bytes(), extension.read_bytes()), originals)
+
+    def test_observation_rejects_unfinished_auth_or_changed_bindings(self):
+        extension, record = self.write_blocked_observation()
+        for change in ({'status': 'started'}, {'status': 'passed'}, {'stage': 'password'},
+                       {'uuid': 'wrong'}, {'prior_marker_sha256': '0'*64},
+                       {'bootstrap_helper_sha256': '0'*64}, {'keyboard_source_sha256': '0'*64},
+                       {'unknown': True}):
+            with self.subTest(change=change):
+                extension.write_text(json.dumps(dict(record, **change)))
+                with self.assertRaises(access.bootstrap.Blocked):
+                    access.observation_continuation(self.lab, self.marker)
+        extension.write_text(json.dumps(record))
+        for name in ('bootstrap-console-password', 'access-bootstrap-observation-extension.json'):
+            path = self.sec / name
+            path.write_bytes(b'')
+            try:
+                with self.assertRaises(access.bootstrap.Blocked):
+                    access.observation_continuation(self.lab, self.marker)
+            finally:
+                path.unlink()
+
+    def test_observation_original_legacy_boundary_remains_exact(self):
+        self.marker.write_text(json.dumps(dict(self.original, stage='initial-capture')))
+        access.observation_continuation(self.lab, self.marker)
+        self.write_blocked_observation()
+        with self.assertRaises(access.bootstrap.Blocked):
+            access.observation_continuation(self.lab, self.marker)
+
+    def test_observation_continuation_is_exclusive_and_preserves_failed_history(self):
+        extension, _ = self.write_blocked_observation()
+        originals = self.marker.read_bytes(), extension.read_bytes()
+        flow = Mock(stage='initial-capture')
+        flow.authenticate.side_effect = access.bootstrap.Blocked('synthetic capture expiry')
+        keyboard, _, _ = self.invoke_main(flow)
+        with patch('sys.argv', ['access-aware-bootstrap.py', '--scope', 'synthetic.json', '--resume-initial-observation']):
+            with self.assertRaises(SystemExit):
+                access.main()
+            with self.assertRaises(access.bootstrap.Blocked):
+                access.main()
+        self.assertEqual((self.marker.read_bytes(), extension.read_bytes()), originals)
+        result = json.loads((self.sec / 'access-bootstrap-observation-extension.json').read_text())
+        self.assertEqual((result['status'], result['stage']), ('blocked', 'initial-capture'))
+        self.assertEqual(result['prior_marker_sha256'], hashlib.sha256(originals[1]).hexdigest())
+        keyboard.assert_called_once()
+        flow.authenticate.assert_called_once()
+
     def test_missing_dependency_stops_before_lab_or_attempt_creation(self):
         self.marker.unlink()
         with patch('sys.argv', ['access-aware-bootstrap.py', '--scope', 'synthetic.json']), \

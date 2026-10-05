@@ -81,6 +81,59 @@ class PixelConsoleTests(unittest.TestCase):
         self.assertIn('\ufffd', decoded.splitlines()[3])
         self.assertIsNone(bootstrap.extract_initial(decoded))
 
+    def second_font(self, ambiguous=False):
+        data = bytearray(self.font.read_bytes())
+        if ambiguous:
+            a, b = 4 + ord('Q') * 16, 4 + ord('v') * 16
+            data[a:a+16], data[b:b+16] = data[b:b+16], data[a:a+16]
+        else:
+            for code in range(33, 127):
+                start = 4 + code * 16
+                data[start:start+16] = bytes([1]) + data[start+1:start+16]
+        other = self.directory / 'other.psf'
+        other.write_bytes(data)
+        pin = patch.object(pixel, 'GOHA_FONT_SHA256', hashlib.sha256(data).hexdigest())
+        pin.start()
+        self.addCleanup(pin.stop)
+        return other, bytes(data)
+
+    def test_one_global_font_is_selected_for_each_capture(self):
+        other, data = self.second_font()
+        paths = str(self.font) + os.pathsep + str(other)
+        self.render().save(self.png)
+        self.assertEqual(pixel.decode(self.png, paths), TEXT)
+        self.glyphs = [data[4+c*16:4+(c+1)*16] for c in range(256)]
+        self.render().save(self.png)
+        self.assertEqual(pixel.decode(self.png, paths), TEXT)
+
+    def test_mixed_font_capture_is_not_assembled_into_a_credential(self):
+        other, data = self.second_font()
+        image = self.render()
+        self.glyphs = [data[4+c*16:4+(c+1)*16] for c in range(256)]
+        alternate = self.render()
+        image.paste(alternate.crop((0, 48, 8, 64)), (0, 48))
+        image.save(self.png)
+        decoded = pixel.decode(self.png, str(self.font) + os.pathsep + str(other))
+        self.assertIsNone(bootstrap.extract_initial(decoded))
+        self.assertIn('\ufffd', decoded)
+
+    def test_conflicting_character_maps_remain_unknown(self):
+        other, _ = self.second_font(ambiguous=True)
+        self.render().save(self.png)
+        decoded = pixel.decode(self.png, str(self.font) + os.pathsep + str(other))
+        self.assertIn('\ufffd', decoded.splitlines()[3])
+        self.assertIsNone(bootstrap.extract_initial(decoded))
+
+    def test_font_list_is_bounded_and_unknown_second_pin_refuses(self):
+        self.render().save(self.png)
+        for paths in (str(self.font) + os.pathsep, os.pathsep.join([str(self.font)] * 3)):
+            with self.assertRaises(ValueError):
+                pixel.decode(self.png, paths)
+        other = self.directory / 'untrusted.psf'
+        other.write_bytes(self.font.read_bytes() + b'untrusted')
+        with self.assertRaisesRegex(ValueError, 'identity mismatch'):
+            pixel.decode(self.png, str(self.font) + os.pathsep + str(other))
+
     def test_wrong_font_identity_is_refused(self):
         self.font.write_bytes(self.font.read_bytes() + b'changed')
         with self.assertRaisesRegex(ValueError, 'font identity mismatch'):
@@ -158,9 +211,9 @@ class BootstrapObservationTests(unittest.TestCase):
 class OptionalPinnedFontTests(unittest.TestCase):
     @unittest.skipUnless(os.environ.get('CULVERT_ESXI_CONSOLE_FONT'), 'external Ubuntu font not provided')
     def test_real_pinned_font_renders_exact_ascii_without_credential_capture(self):
-        font_path = Path(os.environ['CULVERT_ESXI_CONSOLE_FONT'])
+        font_path = Path(os.environ['CULVERT_ESXI_CONSOLE_FONT'].split(os.pathsep)[0])
         font = font_path.read_bytes()
-        self.assertEqual(hashlib.sha256(font).hexdigest(), pixel.FONT_SHA256)
+        self.assertIn(hashlib.sha256(font).hexdigest(), {pixel.FONT_SHA256, pixel.GOHA_FONT_SHA256})
         text = 'Synthetic ABC xyz 0123456789'
         image = Image.new('RGB', (len(text) * 8, 16), 'black')
         for column, character in enumerate(text):
