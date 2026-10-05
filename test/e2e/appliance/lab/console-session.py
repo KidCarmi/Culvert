@@ -208,6 +208,11 @@ def run(c, args, script, timeout, root, quiet=False, nowait=False):
                 "base64 -w 76 /tmp/.lab/o%s; printf 'LAB%%s%%s %%s\\n' END %s \"$r\"; rm -f /tmp/.lab/c%s /tmp/.lab/o%s\r")
                % (runner, tag, tag, tag, tag, tag, tag, tag))
     end_re = re.compile(r"LABEND%s (\d+)" % tag)
+    # A --nowait script that prints LABACCEPT <guest epoch> (as root, i.e.
+    # after PAM login AND sudo succeeded) is ACCEPTED at that moment: return
+    # then, reporting the host clock at detection, instead of after a fixed
+    # wait. The recovery timer starts here, never after the 8 s grace.
+    accept_re = re.compile(r"LABACCEPT (\d+\.\d+)")
     deadline = time.time() + timeout
     answered = 0
     while time.time() < deadline:
@@ -217,8 +222,14 @@ def run(c, args, script, timeout, root, quiet=False, nowait=False):
             c.buf = c.buf.replace(SUDO, "")
             c.send(read_secret(args.secrets, "console-pass") + "\r")
             answered += 1
-        if nowait and time.time() > deadline - timeout + 8:
-            return 0
+        if nowait:
+            a = accept_re.search(c.buf)
+            if a:
+                sys.stdout.write("ACCEPTED host_epoch=%.3f guest_epoch=%s\n" % (time.time(), a.group(1)))
+                sys.stdout.flush()
+                return 0
+            if time.time() > deadline - timeout + 8 and "LABACCEPT" not in script:
+                return 0
         m = end_re.search(c.buf)
         if m:
             begin = c.buf.find("LABBEGIN" + tag)

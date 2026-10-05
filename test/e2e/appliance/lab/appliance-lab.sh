@@ -956,69 +956,120 @@ print("%s category=%s tier=%s matchedBy=%s" % (h, d.get("category") or "", d.get
 # ── recovery: maintenance-reboot recovery time, per storage profile ──────────
 # Each reboot is the product's own maintenance reboot (`culvert-os-update
 # reboot`: stack stop + resume marker under both locks, then the boot-time
-# culvert-stack-resume). Recovery is measured from the moment the command was
-# dispatched to the LAST of:
-#   * /ready HTTP 200 with the clamav row ok (truthful readiness incl. the scanner)
-#   * real traffic through the guest proxy: example.com 200, example.org 403
-#   * operator status-json phase=ready
-# and is checked against the profile's budget. State is checked after every
-# reboot (admin login, policy, CA identity, image identity). The guest-side
-# timeline (systemd units, container start/health, per-unit I/O) and the
-# host-side device counters are captured for attribution. Lab-only guest change:
-# systemd DefaultIOAccounting=yes, so per-unit read volume is recorded.
-recovery_once() { local name="$1" i="$2" budget="$3"; local tag="R-$name-$i"
-  local k0 t0 now tk="" ts="" th="" tr="" tt="" tp="" deadline st0 st1 code cv ph
-  k0="$(grep -ac 'Linux version' "$WORK/console.log" || true)"
-  st0="$(host_disk_stat)"
-  gpriv --nowait > "$EV/$tag-reboot.txt" 2>&1 <<<'culvert-os-update reboot' || true
-  t0="$(date +%s.%N)"; deadline=$(( ${t0%.*} + LAB_RECOVERY_TIMEOUT ))
-  while :; do
-    qemu_alive || { check R "recovery-$name-$i" fail "qemu exited during the reboot"; return 1; }
-    now="$(date +%s.%N)"
-    if [[ -z "$tk" ]]; then
-      (( $(grep -ac 'Linux version' "$WORK/console.log" || true) > k0 )) && tk="$now"
-    else
-      [[ -z "$ts" ]] && gop status-json > "$WORK/rec-status.json" 2>/dev/null && ts="$now"
-      [[ -z "$th" ]] && curl -fsS -m 3 "$P/health" >/dev/null 2>&1 && th="$now"
-      if [[ -z "$tr" ]]; then
-        code="$(curl -sS -m 5 -o "$WORK/rec-ready.json" -w '%{http_code}' "$P/ready" 2>/dev/null || echo 000)"
-        cv="$(python3 -c 'import json,sys
+# culvert-stack-resume). Definition (agreed with ASTRA, PR #1528):
+#   t0  = AUTHENTICATED acceptance: the root script prints LABACCEPT after the
+#         console PAM login and sudo succeeded, before the product's guard or
+#         stack stop; console-session returns the host clock at detection.
+#   end = completion of the THIRD of three consecutive joint samples started
+#         5 s apart. A joint sample passes only if, in that sample:
+#           /ready 200 with the clamav row ok; example.com 200 AND example.org
+#           403 through the proxy; an EICAR body from the host origin answered
+#           `403 Blocked by CLAMAV scan` (a LIVE clamd verdict — clamd down is
+#           fail-open, 200; the /ready row is cached up to 30 s); operator
+#           status-json phase=ready. Any failed sample resets the count.
+# Every probe is stamped when it COMPLETES (monotonic clock), never with the
+# sample's start time. After each reboot: the FIRST backup listing must answer
+# within 5 s (no retry), and the normalized persisted policy, default action,
+# CA identity, image identity and agent availability must equal the baseline
+# taken before the first reboot. Every expected profile x reboot case must run:
+# a BLOCKED case fails the run. Lab-only guest change: systemd
+# DefaultIOAccounting=yes, so per-unit read volume is recorded.
+LAB_EICAR_PORT="${LAB_EICAR_PORT:-18431}"
+EICAR_URL="http://10.0.2.2:$LAB_EICAR_PORT/eicar.txt"
+mono() { python3 -c 'import time; print("%.3f" % time.monotonic())'; }
+# since T — seconds from monotonic T to now (one decimal).
+since() { python3 -c 'import sys,time; print(round(time.monotonic()-float(sys.argv[1]),1))' "$1"; }
+rec_origin_start() {
+  mkdir -p "$WORK/eicar-origin"
+  # Built at run time, so no file in the repository carries the test signature.
+  printf '%s%s' 'X5O!P%@AP[4\PZX54(P^)7CC)7}$' 'EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*' > "$WORK/eicar-origin/eicar.txt"
+  python3 -m http.server "$LAB_EICAR_PORT" --bind 127.0.0.1 --directory "$WORK/eicar-origin" > "$WORK/eicar-origin.log" 2>&1 &
+  echo $! > "$WORK/eicar-origin.pid"; sleep 1; }
+rec_origin_stop() { [[ -f "$WORK/eicar-origin.pid" ]] && kill "$(cat "$WORK/eicar-origin.pid")" 2>/dev/null; rm -f "$WORK/eicar-origin.pid"; }
+# eicar_verdict — "av" when the proxy returned the ClamAV block, else code:body-head.
+eicar_verdict() { local out c
+  out="$(curl -sS -m 20 -x "$P" -w '\n%{http_code}' "$EICAR_URL" 2>/dev/null || printf '\n000')"
+  c="$(tail -n1 <<<"$out")"
+  if [[ "$c" == 403 ]] && grep -q 'Blocked by CLAMAV scan' <<<"$out"; then echo av; else echo "$c:$(head -c 60 <<<"$out" | tr -d '\n')"; fi; }
+ready_clamav_ok() { local code cv
+  code="$(curl -sS -m 5 -o "$WORK/rec-ready.json" -w '%{http_code}' "$P/ready" 2>/dev/null || echo 000)"
+  cv="$(python3 -c 'import json,sys
 d=json.load(open(sys.argv[1])); c=d.get("checks",d).get("clamav",{})
 print(c.get("status") if isinstance(c,dict) else c)' "$WORK/rec-ready.json" 2>/dev/null || true)"
-        [[ "$code" == 200 && "$cv" == ok ]] && tr="$now"
-      fi
-      [[ -z "$tt" && -n "$th" ]] && [[ "$(through_proxy http://example.com/) $(through_proxy http://example.org/)" == "200 403" ]] && tt="$now"
-      if [[ -z "$tp" && -n "$ts" ]] && gop status-json > "$WORK/rec-status.json" 2>/dev/null; then
-        ph="$(status_field "$WORK/rec-status.json" phase)"; [[ "$ph" == ready ]] && tp="$now"
-      fi
-      [[ -n "$tr" && -n "$tt" && -n "$tp" ]] && break
+  [[ "$code" == 200 && "$cv" == ok ]]; }
+# rec_state_snapshot FILE — normalized persisted state the reboots must preserve.
+rec_state_snapshot() { local out="$1" c pol f img ag
+  : > "$JAR"; c="$(api POST /api/auth/login "{\"user\":\"$ADMIN_USER\",\"pass\":\"$(cat "$SEC/admin-pass")\"}" | code)"
+  pol="$(api GET /api/policy | body | python3 -c 'import json,sys
+d=json.load(sys.stdin); keys=("name","priority","action","enabled","destFQDN","destCategory","destCategoryGroup","destCountry","sslAction")
+rules=sorted(([r.get(k) for k in keys] for r in d.get("rules",[])), key=lambda r: (r[1] or 0, r[0] or ""))
+print(json.dumps({"default_action":d.get("defaultAction", d.get("default_action")),"rules":rules},sort_keys=True))' 2>/dev/null || echo unreadable)"
+  f="$(api GET /api/ca-cert | body | openssl x509 -noout -fingerprint -sha256 2>/dev/null | cut -d= -f2 || true)"
+  img="$(gpriv 2>/dev/null <<<'docker inspect -f "{{.Image}}" culvert' | tr -d '\r' | grep -m1 '^sha256:' || true)"
+  ag="$(api GET /api/maintenance-agent | body | python3 -c 'import json,sys;print(json.load(sys.stdin).get("available"))' 2>/dev/null || echo unreadable)"
+  python3 -c 'import json,sys; print(json.dumps({"login":sys.argv[1],"policy":sys.argv[2],"ca":sys.argv[3],"image":sys.argv[4],"agent_available":sys.argv[5]},sort_keys=True))' \
+    "$c" "$pol" "$f" "$img" "$ag" > "$out"; }
+recovery_once() { local name="$1" i="$2" budget="$3"; local tag="R-$name-$i"
+  local k0 acc t0 st0 st1 ok=0 samples=0 s_start s pr pt pa pp
+  local tk="" ts_ready="" ts_traffic="" ts_av="" ts_phase="" first_joint="" end=""
+  k0="$(grep -ac 'Linux version' "$WORK/console.log" || true)"
+  st0="$(host_disk_stat)"
+  printf 'echo "LABACCEPT $(date +%%s.%%N)"\nexec culvert-os-update reboot\n' | gpriv --nowait --timeout 180 > "$EV/$tag-reboot.txt" 2>&1 || true
+  # t0 is taken right after console-session returns on the marker; the gap
+  # between detection and this line is recorded rather than hidden.
+  t0="$(mono)"
+  acc="$(grep -m1 -oE 'host_epoch=[0-9.]+' "$EV/$tag-reboot.txt" | cut -d= -f2 || true)"
+  if [[ -z "$acc" ]]; then check R "recovery-$name-$i" fail "the maintenance reboot was not accepted (no authenticated acceptance marker): $(tail -c 300 "$EV/$tag-reboot.txt")"; return 1; fi
+  local lag; lag="$(python3 -c 'import sys,time; print(round(time.time()-float(sys.argv[1]),3))' "$acc")"
+  t0="$(python3 -c 'import sys; print("%.3f" % (float(sys.argv[1]) - float(sys.argv[2])))' "$t0" "$lag")"
+  printf 'sample_start_s\tsample_end_s\tready_clamav\ttraffic\teicar\tphase\n' > "$EV/$tag-samples.tsv"
+  while :; do
+    qemu_alive || { check R "recovery-$name-$i" fail "qemu exited during the reboot"; return 1; }
+    s_start="$(mono)"
+    python3 -c 'import sys; sys.exit(0 if float(sys.argv[1])-float(sys.argv[2]) < float(sys.argv[3]) else 1)' "$s_start" "$t0" "$LAB_RECOVERY_TIMEOUT" || break
+    if [[ -z "$tk" ]]; then
+      (( $(grep -ac 'Linux version' "$WORK/console.log" || true) > k0 )) && tk="$(mono)"
+      sleep 2; continue
     fi
-    (( ${now%.*} < deadline )) || break
-    sleep 2
+    samples=$((samples+1))
+    if ready_clamav_ok; then pr=ok; else pr=no; fi; s="$(mono)"; [[ $pr == ok && -z "$ts_ready" ]] && ts_ready="$s"
+    if [[ "$(through_proxy http://example.com/) $(through_proxy http://example.org/)" == "200 403" ]]; then pt=ok; else pt=no; fi
+    s="$(mono)"; [[ $pt == ok && -z "$ts_traffic" ]] && ts_traffic="$s"
+    pa="$(eicar_verdict)"; s="$(mono)"; [[ $pa == av && -z "$ts_av" ]] && ts_av="$s"
+    if gop status-json > "$WORK/rec-status.json" 2>/dev/null && [[ "$(status_field "$WORK/rec-status.json" phase)" == ready ]]; then pp=ok; else pp=no; fi
+    s="$(mono)"; [[ $pp == ok && -z "$ts_phase" ]] && ts_phase="$s"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$(python3 -c 'import sys;print(round(float(sys.argv[1])-float(sys.argv[2]),1))' "$s_start" "$t0")" \
+      "$(python3 -c 'import sys;print(round(float(sys.argv[1])-float(sys.argv[2]),1))' "$s" "$t0")" "$pr" "$pt" "$pa" "$pp" >> "$EV/$tag-samples.tsv"
+    if [[ $pr == ok && $pt == ok && $pa == av && $pp == ok ]]; then
+      ok=$((ok+1)); (( ok == 1 )) && first_joint="$s"
+      if (( ok == 3 )); then end="$s"; break; fi
+    else ok=0; first_joint=""; fi
+    # The next sample starts 5 s after this one STARTED, never sooner.
+    python3 -c 'import sys,time; d=float(sys.argv[1])+5-time.monotonic(); time.sleep(d if d>0 else 0)' "$s_start"
   done
   st1="$(host_disk_stat)"
-  local rec; rec="$(python3 - "$t0" "$tk" "$ts" "$th" "$tr" "$tt" "$tp" "$st0" "$st1" "$budget" "$EV/$tag-timeline.json" <<'PY'
-import json,sys
-t0=float(sys.argv[1]); names=["kernel","operator_ssh","proxy_health","ready_clamav_ok","traffic_allow_block","operator_phase_ready"]
-pts={n:(round(float(v)-t0,1) if v else None) for n,v in zip(names,sys.argv[2:8])}
-a=[int(x) for x in sys.argv[8].split()]; b=[int(x) for x in sys.argv[9].split()]; d=[y-x for x,y in zip(a,b)]
-done=[pts[n] for n in ("ready_clamav_ok","traffic_allow_block","operator_phase_ready")]
-rec=max(done) if all(v is not None for v in done) else None
-out={"t0_epoch":t0,"seconds_after_reboot_command":pts,"recovery_seconds":rec,"budget_seconds":int(sys.argv[10]),
-     "host_device":{"reads":d[0],"read_mib":round(d[2]*512/1048576,1),"read_ms":d[3],"writes":d[4],"write_mib":round(d[6]*512/1048576,1),"write_ms":d[7],"io_ticks_ms":d[9]}}
-json.dump(out,open(sys.argv[11],"w"),indent=1)
-print(rec if rec is not None else "none")
-PY
-)"
-  local tl; tl="$(python3 -c 'import json,sys;d=json.load(open(sys.argv[1]));p=d["seconds_after_reboot_command"];h=d["host_device"]
-print(" ".join(f"{k}=+{v}s" if v is not None else f"{k}=never" for k,v in p.items())+f"; host disk: {h[\"reads\"]} reads/{h[\"read_mib\"]} MiB, {h[\"writes\"]} writes/{h[\"write_mib\"]} MiB")' "$EV/$tag-timeline.json")"
-  if [[ "$rec" == none ]]; then check R "recovery-$name-$i" fail "not recovered within ${LAB_RECOVERY_TIMEOUT}s: $tl"; recovery_guest "$tag"; return 1; fi
+  local rec; rec="$(python3 "$HERE/recovery-timeline.py" "$t0" "$tk" "$ts_ready" "$ts_traffic" "$ts_av" "$ts_phase" "$first_joint" "$end" \
+    "$st0" "$st1" "$budget" "$acc" "$lag" "$samples" "$EV/$tag-timeline.json")"
+  local tl; tl="$(python3 "$HERE/recovery-timeline.py" --describe "$EV/$tag-timeline.json")"
+  if [[ "$rec" == none ]]; then check R "recovery-$name-$i" fail "not recovered (3 consecutive joint samples) within ${LAB_RECOVERY_TIMEOUT}s: $tl"; recovery_guest "$tag"; return 1; fi
   if python3 -c 'import sys; sys.exit(0 if float(sys.argv[1]) <= float(sys.argv[2]) else 1)' "$rec" "$budget"; then
     check R "recovery-$name-$i" pass "recovered in ${rec}s (budget ${budget}s): $tl"
   else check R "recovery-$name-$i" fail "recovered in ${rec}s — OVER the ${budget}s budget: $tl"; fi
+  recovery_backup_first_list "$name" "$i"
   recovery_guest "$tag"
   recovery_state "$name" "$i"
   printf '%s\t%s\t%s\t%s\n' "$name" "$i" "$rec" "$budget" >> "$EV/R-summary.tsv"
+}
+# The FIRST backup listing after the reboot must answer within 5 s, with the
+# baseline backup in it. Never retried: a slow first answer is the finding.
+recovery_backup_first_list() { local name="$1" i="$2" t1 c dt
+  : > "$JAR"; api POST /api/auth/login "{\"user\":\"$ADMIN_USER\",\"pass\":\"$(cat "$SEC/admin-pass")\"}" > /dev/null
+  t1="$(mono)"
+  c="$(curl -ksS -m 5 "$UI/api/backups" -H "Origin: $UI" -b "$JAR" -o "$EV/R-$name-$i-backups.json" -w '%{http_code}' 2>/dev/null || echo 000)"
+  dt="$(since "$t1")"
+  if [[ "$c" == 200 ]] && { [[ -z "${BACKUP_FILE:-}" ]] || grep -qF "$BACKUP_FILE" "$EV/R-$name-$i-backups.json"; }; then
+    check R "backup-list-$name-$i" pass "first listing http 200 in ${dt}s${BACKUP_FILE:+, $BACKUP_FILE present}"
+  else check R "backup-list-$name-$i" fail "first listing http $c in ${dt}s (limit 5 s, no retry)${BACKUP_FILE:+; $BACKUP_FILE expected}"; fi
 }
 recovery_guest() {
   gpriv --timeout 300 > "$EV/$1-guest.txt" 2>&1 <<'EOS' || true
@@ -1042,35 +1093,48 @@ echo '--- engine + resume journal (monotonic)'
 journalctl -b --no-pager -o short-monotonic -u containerd -u docker -u culvert-stack-resume 2>&1 | head -250
 EOS
 }
-recovery_state() { local name="$1" i="$2" c f rules img
-  : > "$JAR"; c="$(api POST /api/auth/login "{\"user\":\"$ADMIN_USER\",\"pass\":\"$(cat "$SEC/admin-pass")\"}" | code)"
-  rules="$(api GET /api/policy | body | python3 -c 'import json,sys;print(" ".join(r["name"] for r in json.load(sys.stdin)["rules"]))' 2>/dev/null || true)"
-  f="$(api GET /api/ca-cert | body | openssl x509 -noout -fingerprint -sha256 2>/dev/null | cut -d= -f2 || true)"
-  img="$(gpriv 2>/dev/null <<<'docker inspect -f "{{.Image}}" culvert' | tr -d '\r' | grep -m1 '^sha256:' || true)"
-  if [[ $c == 200 ]] && grep -qw lab-allow-example <<<"$rules" && [[ -n "$f" && "$f" == "$(cat "$EV/05-ca-fingerprint.txt" 2>/dev/null)" ]] \
-     && { [[ -z "$LAB_EXPECT_IMAGE_ID" ]] || [[ "$img" == "$LAB_EXPECT_IMAGE_ID" ]]; }; then
-    check R "state-$name-$i" pass "admin login 200, policy ($rules), CA $f and image ${img:-?} preserved"
-  else check R "state-$name-$i" fail "login=$c rules=[$rules] ca=$f image=$img"; fi
+recovery_state() { local name="$1" i="$2"
+  rec_state_snapshot "$EV/R-$name-$i-state.json"
+  if [[ "$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["login"])' "$EV/R-$name-$i-state.json")" == 200 ]] \
+     && cmp -s "$EV/R-state-baseline.json" "$EV/R-$name-$i-state.json"; then
+    check R "state-$name-$i" pass "admin login, normalized policy + default action, CA, image and agent availability equal the pre-reboot baseline"
+  else check R "state-$name-$i" fail "differs from the baseline: $(diff <(python3 -m json.tool "$EV/R-state-baseline.json") <(python3 -m json.tool "$EV/R-$name-$i-state.json") | head -c 600 | tr '\n' ' ')"; fi
 }
-cmd_recovery() { local prof name r w budget i
+cmd_recovery() { local prof name r w budget i expected=0 ran=0 v0
   (( LAB_RECOVERY_REBOOTS > 0 )) || return 0
-  if [[ "$LAB_EXTERNAL" == 1 || "$LAB_DISK" != dm ]]; then check R recovery blocked "needs a QEMU guest with LAB_DISK=dm"; return 0; fi
-  gate R recovery || return 0
+  if [[ "$LAB_EXTERNAL" == 1 || "$LAB_DISK" != dm ]]; then check R recovery fail "BLOCKED: needs a QEMU guest with LAB_DISK=dm"; return 0; fi
+  gate R recovery || { check R recovery fail "BLOCKED: an earlier gate did not pass"; return 0; }
   gpriv > "$EV/R-io-accounting.txt" 2>&1 <<'EOS' || true
 install -d /etc/systemd/system.conf.d
 printf '[Manager]\nDefaultIOAccounting=yes\n' > /etc/systemd/system.conf.d/90-culvert-lab-ioaccounting.conf
 systemctl daemon-reexec && echo "DefaultIOAccounting=$(systemctl show -p DefaultIOAccounting --value)"
 EOS
   check R io-accounting info "LAB-ONLY guest change for attribution: systemd DefaultIOAccounting=yes ($(tail -1 "$EV/R-io-accounting.txt"))"
+  # ClamAV evidence path: an allow rule for the host origin, then prove the
+  # verdict is live BEFORE the first reboot (otherwise the gate measures nothing).
+  rec_origin_start
+  : > "$JAR"; api POST /api/auth/login "{\"user\":\"$ADMIN_USER\",\"pass\":\"$(cat "$SEC/admin-pass")\"}" > /dev/null
+  api POST /api/policy '{"name":"lab-allow-eicar-origin","priority":15,"action":"Allow","destFQDN":"10.0.2.2","sslAction":"Bypass","enabled":true}' > "$EV/R-eicar-rule.txt"
+  v0="$(eicar_verdict)"
+  if [[ "$v0" != av ]]; then check R clamav-evidence fail "BLOCKED: EICAR through the proxy did not draw a ClamAV block before any reboot ($v0)"; rec_origin_stop; return 0; fi
+  check R clamav-evidence pass "EICAR from the host origin is answered '403 Blocked by CLAMAV scan' before the first reboot"
+  rec_state_snapshot "$EV/R-state-baseline.json"
   printf 'profile\treboot\trecovery_s\tbudget_s\n' > "$EV/R-summary.tsv"
   for prof in $LAB_RECOVERY_PROFILES; do
     IFS=: read -r name r w budget <<<"$prof"
+    expected=$((expected + LAB_RECOVERY_REBOOTS))
     if ! set_disk_latency "$r" "$w" > "$EV/R-$name-dm-table.txt" 2>&1; then
-      check R "profile-$name" blocked "could not set the disk to read ${r}ms / write ${w}ms: $(tail -1 "$EV/R-$name-dm-table.txt")"; continue; fi
+      check R "profile-$name" fail "BLOCKED: could not set the disk to read ${r}ms / write ${w}ms: $(tail -1 "$EV/R-$name-dm-table.txt")"; continue; fi
     check R "profile-$name" info "disk: read +${r}ms, write +${w}ms per I/O ($(tr '\n' ' ' < "$EV/R-$name-dm-table.txt" | head -c 160)); budget ${budget}s; ${LAB_RECOVERY_REBOOTS} maintenance reboots"
-    for i in $(seq 1 "$LAB_RECOVERY_REBOOTS"); do recovery_once "$name" "$i" "$budget" || break; done
+    for i in $(seq 1 "$LAB_RECOVERY_REBOOTS"); do
+      ran=$((ran+1))
+      recovery_once "$name" "$i" "$budget" || { check R "profile-$name" fail "stopped after reboot $i; the remaining reboots of this profile did not run"; break; }
+    done
   done
   set_disk_latency 0 0 > /dev/null 2>&1 || true
+  rec_origin_stop
+  if [[ $ran == "$expected" ]]; then check R recovery-cases pass "$ran of $expected profile x reboot cases ran"
+  else check R recovery-cases fail "only $ran of $expected profile x reboot cases ran"; fi
   redact_tree
 }
 
