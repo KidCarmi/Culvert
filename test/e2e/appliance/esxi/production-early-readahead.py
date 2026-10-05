@@ -33,6 +33,9 @@ KERNEL = '6.8.0-146-generic'
 ORIGINAL_BYTES = 37347640
 ORIGINAL_SHA = 'd22af6fa8e3b0c609ae3227b7e036b1262b3054b4f395ced2a4d3beedf32bf54'
 MAX_INITRD = 128 * 1024**2
+MAIN_OFFSET = 13732352
+PREFIX_SHA = 'a0882502b00f90f80306735a373a1f96fbba53889ce2c6f0ac8a36a7a720b709'
+MAX_MAIN = 512 * 1024**2
 HOOK_NAME = 'culvert-lab-early-read-ahead'
 
 
@@ -121,6 +124,91 @@ exit 0
 
 # These functions also run offline in the tests; no guest activity on import.
 COMMON = r'''
+def newc_records(path, limit=512 * 1024**2):
+    size = path.stat().st_size
+    need(0 < size <= limit, 'newc size bound')
+    rows, names, offset = [], set(), 0
+    with path.open('rb') as source:
+        while offset + 110 <= size:
+            need(len(rows) < 100000, 'newc entry bound')
+            source.seek(offset); header = source.read(110)
+            need(header[:6] == b'070701' and re.fullmatch(b'[0-9a-fA-F]{104}', header[6:]), 'unsupported newc header')
+            fields = [int(header[i:i+8], 16) for i in range(6, 110, 8)]
+            length, namesize = fields[6], fields[11]
+            need(1 < namesize <= 4096 and fields[12] == 0, 'newc name/checksum')
+            name = source.read(namesize)
+            need(len(name) == namesize and name[-1:] == b'\0' and b'\0' not in name[:-1], 'newc filename terminator')
+            name = name[:-1]
+            normalized = name[2:] if name.startswith(b'./') else name
+            need(normalized == b'.' or (not normalized.startswith(b'/') and all(p not in (b'', b'.', b'..')
+                 for p in normalized.split(b'/'))), 'unsafe newc path')
+            need(normalized not in names, 'duplicate newc path'); names.add(normalized)
+            data = (offset + 110 + namesize + 3) & ~3
+            end = (data + length + 3) & ~3
+            need(end <= size, 'truncated newc record')
+            row = dict(start=offset, end=end, data=data, name=name, normalized=normalized, header=header, fields=fields)
+            rows.append(row)
+            if normalized == b'TRAILER!!!':
+                need(length == 0 and size - end <= 4096, 'newc trailer shape')
+                source.seek(end); need(not source.read().strip(b'\0'), 'data after newc trailer')
+                return rows
+            offset = end
+    need(False, 'newc trailer missing')
+
+def copy_span(source, target, start, length):
+    source.seek(start)
+    while length:
+        block = source.read(min(65536, length))
+        need(block, 'incomplete archive span')
+        target.write(block); length -= len(block)
+
+def rewrite_newc(source_path, target_path, hook, expected_order):
+    rows = newc_records(source_path)
+    index = {r['normalized']: r for r in rows}
+    order_name = b'scripts/local-premount/ORDER'
+    hook_name = b'scripts/local-premount/culvert-lab-early-read-ahead'
+    need(order_name in index and hook_name not in index, 'original ORDER or absent fixture required')
+    for name in (b'scripts', b'scripts/local-premount'):
+        need(name in index and stat.S_ISDIR(index[name]['fields'][1]), 'premount parent must be a directory')
+    order = index[order_name]
+    need(stat.S_ISREG(order['fields'][1]) and order['fields'][4] == 1 and order['fields'][2:4] == [0, 0],
+         'ORDER must be an unlinked root-owned regular file')
+    need(0 < len(hook) <= 16384 and b'\r' not in hook and 0 < len(expected_order) <= 65536,
+         'fixture/ORDER bounds')
+    invocation = (b'/scripts/local-premount/culvert-lab-early-read-ahead "$@"\n'
+                  b'[ -e /conf/param.conf ] && . /conf/param.conf\n')
+    need(expected_order.endswith(b'\n') and hook_name not in expected_order, 'original ORDER termination/fixture')
+    order_bytes = expected_order + invocation
+    ino = max(r['fields'][0] for r in rows) + 1
+    need(ino <= 0xffffffff, 'newc inode overflow')
+    name = (b'./' if order['name'].startswith(b'./') else b'') + hook_name + b'\0'
+    fields = [ino, stat.S_IFREG | 0o755, 0, 0, 1, order['fields'][5], len(hook),
+              order['fields'][7], order['fields'][8], 0, 0, len(name), 0]
+    hook_header = b'070701' + b''.join(('%08x' % value).encode('ascii') for value in fields)
+    with source_path.open('rb') as incoming, target_path.open('xb') as output:
+        incoming.seek(order['data'])
+        need(incoming.read(order['fields'][6]) == expected_order, 'expanded/archive ORDER differs')
+        for row in rows:
+            if row is order:
+                output.write(row['header'][:54] + ('%08x' % len(order_bytes)).encode('ascii') + row['header'][62:])
+                copy_span(incoming, output, row['start'] + 110, row['data'] - row['start'] - 110)
+                output.write(order_bytes); output.write(b'\0' * (-len(order_bytes) % 4))
+            else:
+                if row['normalized'] == b'TRAILER!!!':
+                    output.write(hook_header + name); output.write(b'\0' * (-(110 + len(name)) % 4))
+                    output.write(hook); output.write(b'\0' * (-len(hook) % 4))
+                copy_span(incoming, output, row['start'], row['end'] - row['start'])
+        copy_span(incoming, output, rows[-1]['end'], source_path.stat().st_size - rows[-1]['end'])
+        # Keep the existing trailer/padding and complete the conventional cpio
+        # 512-byte block with zeros; this changes no archive member.
+        output.write(b'\0' * (-output.tell() % 512))
+        output.flush(); os.fsync(output.fileno())
+    # Independently parse generated bytes before handing them to compression.
+    changed = newc_records(target_path)
+    need([r['normalized'] for r in changed] == [r['normalized'] for r in rows[:-1]]
+         + [hook_name, b'TRAILER!!!'], 'generated archive structure differs')
+    return order_bytes
+
 def campaign_state(parent, campaign):
     need(isinstance(campaign, str) and str(uuid.UUID(campaign)) == campaign, 'canonical campaign required')
     return parent / campaign
@@ -227,23 +315,32 @@ def json_bytes(value): return (json.dumps(value, sort_keys=True) + '\n').encode(
 def replace_json(path, value, operation):
     temporary = path.with_name(path.name + '.' + operation + '.new')
     new(temporary, json_bytes(value)); os.replace(temporary, path); syncdir(path.parent)
-def bounded(args, timeout=30, limit=65536):
+def bounded(args, timeout=30, limit=65536, binary_target=None):
     # Capture privately even on timeout/nonzero/oversize; never discard the cause.
-    with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
+    output_context = binary_target.open('xb') if binary_target is not None else tempfile.TemporaryFile()
+    with output_context as stdout, tempfile.TemporaryFile() as stderr:
+        preexec = None
+        if binary_target is not None:
+            import resource
+            os.fchmod(stdout.fileno(), 0o600)
+            def preexec(): resource.setrlimit(resource.RLIMIT_FSIZE, (limit, limit))
         started = time.monotonic_ns()
         error = None
         try:
-            result = subprocess.run(args, stdin=subprocess.DEVNULL, stdout=stdout, stderr=stderr, timeout=timeout)
+            result = subprocess.run(args, stdin=subprocess.DEVNULL, stdout=stdout, stderr=stderr, timeout=timeout, preexec_fn=preexec)
             returncode = result.returncode
         except (subprocess.TimeoutExpired, OSError) as exc:
             returncode, error = None, type(exc).__name__ + ': ' + str(exc)
+        stdout.flush()
+        if binary_target is not None:
+            os.fsync(stdout.fileno()); syncdir(binary_target.parent)
         sizes = (stdout.tell(), stderr.tell())
         stdout.seek(0); stderr.seek(0)
         if error is not None or returncode != 0 or max(sizes) > limit:
             diagnostic = dict(argv=args, returncode=returncode, error=error,
                               timeout_seconds=timeout, elapsed_ns=time.monotonic_ns() - started,
                               stdout_bytes=sizes[0], stderr_bytes=sizes[1],
-                              stdout=stdout.read(min(limit, 16384)).decode('utf-8', errors='replace'),
+                              stdout=(stdout.read(min(limit, 16384)).decode('utf-8', errors='replace') if binary_target is None else '[private binary output]'),
                               stderr=stderr.read(min(limit, 16384)).decode('utf-8', errors='replace'))
             diagnostic['truncated'] = max(sizes) > min(limit, 16384)
             directory = globals().get('COMMAND_DIAGNOSTICS')
@@ -252,7 +349,7 @@ def bounded(args, timeout=30, limit=65536):
             # Before campaign creation the authenticated transport still captures
             # this diagnostic in its private guest-result, never public stdout.
             raise ValueError('bounded command failed: ' + json.dumps(diagnostic, sort_keys=True))
-        return stdout.read().decode('utf-8')
+        return stdout.read().decode('utf-8') if binary_target is None else None
 
 def copy_exact(source, target, expected, size, mode=0o600):
     regular(source, stat.S_IMODE(source.lstat().st_mode))
@@ -323,41 +420,53 @@ def prepare(c, state, ra, prior):
     order_path = 'scripts/local-premount/ORDER'
     orders = {'original': (original_root / order_path).read_bytes()}
     record['stages'] = {}
-    source_config = pathlib.Path('/etc/initramfs-tools')
-    ra['trusted_dir'](source_config)
-    entries = list(source_config.rglob('*'))
-    need(len(entries) <= 512 and sum(p.lstat().st_size for p in entries) <= 16 * 1024**2, 'initramfs config too large')
-    need(all(not p.is_symlink() and (p.is_dir() or p.is_file()) and p.lstat().st_uid == 0
-             and not p.lstat().st_mode & 0o022 for p in entries), 'unsafe initramfs config tree')
+    original_copy = state / 'original.initrd'
+    with original_copy.open('rb') as source:
+        prefix = source.read(c['main_offset'])
+        need(len(prefix) == c['main_offset'] and hashlib.sha256(prefix).hexdigest() == c['prefix_sha'], 'original prefix differs')
+        need(source.read(4) == b'\x28\xb5\x2f\xfd', 'original main compression differs')
+        source.seek(c['main_offset'])
+        main = state / 'original-main.zstd'
+        with main.open('xb') as output:
+            os.fchmod(output.fileno(), 0o600)
+            shutil.copyfileobj(source, output, 65536); output.flush(); os.fsync(output.fileno())
+        syncdir(state)
+    need('CONFIG_RD_ZSTD=y' in pathlib.Path('/boot/config-' + c['kernel']).read_text().splitlines(), 'kernel zstd support missing')
+    raw = state / 'original-main.cpio'
+    bounded(['zstd', '-q', '-d', '-c', str(main)], timeout=180, limit=c['max_main'], binary_target=raw)
+    compressor = ['zstd', '-q', '-3', '--single-thread', '-c']
+    record['archive_format'] = dict(main_offset=c['main_offset'], prefix_sha256=c['prefix_sha'],
+                                  raw_original_sha256=file_hash(raw), compressor=compressor,
+                                  compressor_version=bounded(['zstd', '--version']).strip())
     for profile in ('A', 'B'):
-        config = state / ('config-' + profile)
-        shutil.copytree(source_config, config, symlinks=True)
         fixture = base64.b64decode(c['hooks'][profile])
-        scripts = config / 'scripts' / 'local-premount'
-        scripts.mkdir(parents=True, exist_ok=True)
-        new(scripts / 'culvert-lab-early-read-ahead', fixture, 0o755)
-        hooks = config / 'hooks'; hooks.mkdir(exist_ok=True)
-        names = [p.name for p in hooks.iterdir() if p.is_file() and os.access(p, os.X_OK)]
-        need(all(re.fullmatch(r'[A-Za-z0-9_-]+', name) for name in names), 'unsafe existing hook name')
-        rule_a, rule_b = (base64.b64decode(c['rules'][p]) for p in ('A', 'B'))
-        # The live-root rule must NOT run in initrd before our128-default guard.
-        hook = ('#!/bin/sh\nset -eu\nPREREQ=' + repr(' '.join(names)) + '\n'
-                'case "${1:-}" in prereqs) echo "$PREREQ"; exit 0;; esac\n'
-                'p="$DESTDIR/etc/udev/rules.d/65-culvert-lab-read-ahead.rules"\n'
-                'if [ -e "$p" ] || [ -L "$p" ]; then\n'
-                '  [ -f "$p" ] && [ ! -L "$p" ] || exit 1\n'
-                '  sum=$(sha256sum "$p"); sum=${sum%% *}\n'
-                '  case "$sum" in ' + hashlib.sha256(rule_a).hexdigest() + '|' + hashlib.sha256(rule_b).hexdigest()
-                + ') unlink "$p";; *) exit 1;; esac\nfi\n')
-        new(hooks / 'zz-culvert-lab-exclude-root-rule', hook.encode(), 0o755)
+        edited = state / (profile + '-main.cpio')
+        orders[profile] = rewrite_newc(raw, edited, fixture, orders['original'])
+        os.chmod(edited, 0o600); syncdir(state)
+        compressed = state / (profile + '-main.zstd')
+        bounded(compressor + [str(edited)], timeout=180, limit=128 * 1024**2, binary_target=compressed)
+        if profile == 'A':
+            repeated_raw = state / 'A-main-repeat.cpio'
+            need(rewrite_newc(raw, repeated_raw, fixture, orders['original']) == orders[profile]
+                 and file_hash(repeated_raw) == file_hash(edited), 'newc rewrite is not deterministic')
+            os.chmod(repeated_raw, 0o600); syncdir(state)
+            repeated = state / 'A-main-repeat.zstd'
+            bounded(compressor + [str(repeated_raw)], timeout=180, limit=128 * 1024**2, binary_target=repeated)
+            need(file_hash(compressed) == file_hash(repeated) and compressed.stat().st_size == repeated.stat().st_size,
+                 'compression is not deterministic')
+            record['archive_format']['repeat_A_sha256'] = file_hash(repeated)
         staged = state / (profile + '.initrd')
-        need(not os.path.lexists(staged), 'staged initrd exists')
-        bounded(['mkinitramfs', '-d', str(config), '-o', str(staged), c['kernel']], timeout=480, limit=1024**2)
-        os.chmod(staged, 0o600); info = regular(staged, 0o600)
+        with staged.open('xb') as output, compressed.open('rb') as source:
+            os.fchmod(output.fileno(), 0o600); output.write(prefix)
+            shutil.copyfileobj(source, output, 65536); output.flush(); os.fsync(output.fileno())
+        syncdir(state); info = regular(staged, 0o600)
+        with staged.open('rb') as source:
+            need(hashlib.sha256(source.read(c['main_offset'])).hexdigest() == c['prefix_sha'], 'staged prefix differs')
         manifests[profile] = expand(staged, state / ('expanded-' + profile))
         expanded_root = boot_tools(state / ('expanded-' + profile), manifests[profile])
-        orders[profile] = (expanded_root / order_path).read_bytes()
-        record['stages'][profile] = {'sha256': file_hash(staged), 'bytes': info.st_size}
+        need((expanded_root / order_path).read_bytes() == orders[profile], 'staged ORDER differs')
+        record['stages'][profile] = {'sha256': file_hash(staged), 'bytes': info.st_size,
+                                    'main_raw_sha256': file_hash(edited), 'main_zstd_sha256': file_hash(compressed)}
     fixture_path = compare_manifests(manifests['original'], manifests['A'], manifests['B'],
                                     base64.b64decode(c['hooks']['A']), base64.b64decode(c['hooks']['B']), orders)
     need(preserved_files(c) == record['preserved'] and file_hash(original) == c['original_sha'], 'boot files changed during prepare')
@@ -552,6 +661,7 @@ def run(args):
         config = dict(schema=1, action=args.action, profile=args.profile, campaign=args.campaign,
                       operation=operation, owner_uuid=lab.state['uuid'], source_sha=SOURCE, image_id=IMAGE,
                       kernel=KERNEL, root_uuid=root_uuid, original_sha=ORIGINAL_SHA, original_bytes=ORIGINAL_BYTES,
+                      main_offset=MAIN_OFFSET, prefix_sha=PREFIX_SHA, max_main=MAX_MAIN,
                       generator_sha256=file_hash(Path(__file__)), ra_campaign=args.ra_campaign,
                       ra_generator=args.ra_generator, ra_guest_b64=base64.b64encode(ra.GUEST.encode()).decode())
         config['hooks'] = {name: base64.b64encode(boot_hook(config['owner_uuid'], args.campaign, root_uuid, value)).decode()

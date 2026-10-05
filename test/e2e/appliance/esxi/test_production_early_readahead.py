@@ -58,7 +58,113 @@ def fixture_manifests():
     return original, added(a), added(b), a, b, {'original': prior_order, 'A': new_order, 'B': new_order}
 
 
+def cpio_record(name, data=b'', mode=stat.S_IFREG | 0o644, ino=1, links=1):
+    name = name.encode() + b'\0'
+    fields = [ino, mode, 0, 0, links, 1234567890, len(data), 8, 1, 0, 0, len(name), 0]
+    header = b'070701' + b''.join(('%08x' % field).encode() for field in fields)
+    value = header + name + b'\0' * (-(len(header) + len(name)) % 4)
+    return value + data + b'\0' * (-len(data) % 4)
+
+
+def synthetic_main(order=b'/scripts/local-premount/resume "$@"\n', extra=b''):
+    records = [cpio_record('.', mode=stat.S_IFDIR | 0o755),
+               cpio_record('scripts', mode=stat.S_IFDIR | 0o755),
+               cpio_record('scripts/local-premount', mode=stat.S_IFDIR | 0o755),
+               cpio_record('scripts/local-premount/ORDER', order, ino=2),
+               cpio_record('.random-seed', bytes(range(256)) * 16, ino=3),
+               cpio_record('mdadm.conf', b'fixed generated timestamp\n', ino=4),
+               cpio_record('font-cache', b'\0\xfffontcache', ino=5),
+               cpio_record('hardlink-one', b'payload', ino=6, links=2),
+               cpio_record('hardlink-two', b'', ino=6, links=2),
+               cpio_record('symlink', b'hardlink-one', mode=stat.S_IFLNK | 0o777, ino=7),
+               extra,
+               cpio_record('TRAILER!!!', mode=0, ino=0)]
+    return b''.join(records) + b'\0' * 16
+
+
 class EarlyTests(unittest.TestCase):
+    def test_newc_surgery_preserves_all_unrelated_record_bytes_and_metadata(self):
+        order = b'/scripts/local-premount/resume "$@"\n'
+        original = synthetic_main(order)
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / 'original.cpio'; source.write_bytes(original)
+            source_rows = COMMON['newc_records'](source)
+            products = {}
+            for profile, value in [('A', 128), ('B', 1024), ('A-repeat', 128)]:
+                target = Path(directory) / (profile + '.cpio')
+                hook = p.boot_hook(OWNER, CAMPAIGN, ROOT, value)
+                changed_order = COMMON['rewrite_newc'](source, target, hook, order)
+                data = target.read_bytes(); rows = COMMON['newc_records'](target)
+                self.assertEqual(len(data) % 512, 0)
+                by_name = {r['normalized']: r for r in rows}
+                for previous in source_rows:
+                    current = by_name[previous['normalized']]
+                    if previous['normalized'] == b'scripts/local-premount/ORDER':
+                        self.assertEqual(current['header'][:54], previous['header'][:54])
+                        self.assertEqual(current['header'][62:], previous['header'][62:])
+                        self.assertEqual(data[current['data']:current['data'] + current['fields'][6]], changed_order)
+                    else:
+                        self.assertEqual(data[current['start']:current['end']], original[previous['start']:previous['end']])
+                fixture = by_name[b'scripts/local-premount/culvert-lab-early-read-ahead']
+                self.assertEqual(fixture['fields'][1:6], [stat.S_IFREG | 0o755, 0, 0, 1, 1234567890])
+                self.assertEqual(data[fixture['data']:fixture['data'] + fixture['fields'][6]], hook)
+                products[profile] = (data, rows)
+            self.assertEqual(products['A'][0], products['A-repeat'][0])
+            for left, right in zip(products['A'][1], products['B'][1]):
+                if left['normalized'] != b'scripts/local-premount/culvert-lab-early-read-ahead':
+                    self.assertEqual(products['A'][0][left['start']:left['end']], products['B'][0][right['start']:right['end']])
+            self.assertEqual(source.read_bytes(), original)
+
+    def test_newc_parser_refuses_ambiguous_truncated_unsafe_and_nonzero_trailing_data(self):
+        good = synthetic_main()
+        cases = [good[:-128], good + b'nonzero', b'070702' + good[6:],
+                 synthetic_main(extra=cpio_record('../escape', b'x')),
+                 synthetic_main(extra=cpio_record('scripts/local-premount/ORDER', b'x')),
+                 synthetic_main(extra=cpio_record('/absolute', b'x')),
+                 good.replace(b'070701', b'07070!', 1)]
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / 'bad.cpio'
+            for data in cases:
+                target.write_bytes(data)
+                with self.subTest(sha=hashlib.sha256(data).hexdigest()), self.assertRaises(ValueError):
+                    COMMON['newc_records'](target)
+            target.write_bytes(good)
+            with self.assertRaises(ValueError): COMMON['newc_records'](target, limit=len(good) - 1)
+
+    def test_newc_rewriter_refuses_wrong_order_hardlinked_order_or_preexisting_fixture(self):
+        order = b'original order\n'
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / 'original.cpio'
+            output = Path(directory) / 'output.cpio'
+            source.write_bytes(synthetic_main(order))
+            with self.assertRaises(ValueError):
+                COMMON['rewrite_newc'](source, output, b'#!/bin/sh\n', b'wrong order\n')
+            # A failed output remains exclusive evidence; never replay it.
+            with self.assertRaises(FileExistsError):
+                COMMON['rewrite_newc'](source, output, b'#!/bin/sh\n', order)
+            for mutation in ('hardlink', 'symlink-parent', 'fixture'):
+                data = synthetic_main(order)
+                if mutation == 'hardlink':
+                    data = data.replace(cpio_record('scripts/local-premount/ORDER', order, ino=2),
+                                        cpio_record('scripts/local-premount/ORDER', order, ino=2, links=2))
+                elif mutation == 'symlink-parent':
+                    data = data.replace(cpio_record('scripts/local-premount', mode=stat.S_IFDIR | 0o755),
+                                        cpio_record('scripts/local-premount', b'/other', mode=stat.S_IFLNK | 0o777))
+                else: data = synthetic_main(order, cpio_record('scripts/local-premount/culvert-lab-early-read-ahead', b'existing'))
+                source.write_bytes(data)
+                with self.subTest(mutation=mutation), self.assertRaises(ValueError):
+                    COMMON['rewrite_newc'](source, Path(directory) / mutation, b'#!/bin/sh\n', order)
+
+    def test_staging_preserves_exact_prefix_and_uses_bounded_single_thread_compression(self):
+        self.assertEqual(p.MAIN_OFFSET, 13732352)
+        self.assertEqual(p.PREFIX_SHA, 'a0882502b00f90f80306735a373a1f96fbba53889ce2c6f0ac8a36a7a720b709')
+        self.assertNotIn("['mkinitramfs'", p.GUEST)
+        self.assertNotIn('source_config', p.GUEST)
+        self.assertIn("['zstd', '-q', '-3', '--single-thread', '-c']", p.GUEST)
+        self.assertIn('resource.RLIMIT_FSIZE', p.GUEST)
+        self.assertIn("file_hash(compressed) == file_hash(repeated)", p.GUEST)
+        self.assertIn("hashlib.sha256(source.read(c['main_offset'])).hexdigest() == c['prefix_sha']", p.GUEST)
+
     def test_campaign_state_is_canonical_and_does_not_reuse_legacy_directory(self):
         parent = Path('/var/lib/culvert-lab-early-read-ahead-campaigns')
         self.assertEqual(COMMON['campaign_state'](parent, CAMPAIGN), parent / CAMPAIGN)

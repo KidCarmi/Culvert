@@ -29,8 +29,8 @@ owned real-root udev rule; they must match its actual private receipt.
 
 Preparation validates the original146 initrd: 37,347,640 bytes, SHA256
 `d22af6fa8e3b0c609ae3227b7e036b1262b3054b4f395ced2a4d3beedf32bf54`.
-It copies those bytes to root-private guest storage and builds A/B in private
-configuration trees. It does not install a persistent hook in `/etc`, regenerate
+It copies those bytes to root-private guest storage and builds A/B by editing
+only the original main cpio archive in private campaign storage. It does not install a persistent hook in `/etc`, regenerate
 GRUB, change kernel arguments or touch the142 kernel/initrd. Presence of the142
 fallback is recorded; its usability is **not** asserted.
 
@@ -45,8 +45,8 @@ Original→A expanded manifests may differ only by the exact owned local-premoun
 script and its exact two-line invocation in `scripts/local-premount/ORDER`.
 All original ORDER lines and all other file contents, modes, owners and symlink
 targets must remain unchanged. A→B manifests must be identical except for the
-fixture's128/1024 target value. The exact-owned live-root udev rule is excluded
-from both initrds so it cannot preempt the hook's128-default guard; it remains
+fixture's128/1024 target value. The original initrd contains no owned live-root udev rule, and neither fixture
+adds it, so that rule cannot preempt the hook's128-default guard; it remains
 owned on the real root and follows the selected profile after switch-root.
 Original and staged initrds must contain the tools used by the hook. Unapproved
 manifest differences or unavailable tools block activation; do not widen the
@@ -83,3 +83,31 @@ campaign directories remain exclusive and cannot be retried automatically. This
 is a separate attempt, not an unlock or a rewrite of the original failed result.
 The A/B allowlist, export prerequisite, boot-file guards and recovery budget are
 unchanged. Freeze the revised controller before invoking the new campaign.
+
+## Deterministic staging after the manifest refusal
+
+The second prepare attempt correctly rejected `mkinitramfs` output: it imported
+an owned rule under `usr/lib/udev/rules.d` and regenerated random seed, mdadm
+configuration and font caches differently between A and B. That failed campaign
+is retained. The allowlist is not expanded.
+
+The next reviewed campaign preserves the original 13,732,352-byte prefix exactly
+(SHA256 `a0882502b00f90f80306735a373a1f96fbba53889ce2c6f0ac8a36a7a720b709`).
+Its remaining 23,615,288 bytes are the observed zstd main archive; kernel146 has
+`CONFIG_RD_ZSTD=y`. Decompression is time bounded and file-size limited to512 MiB.
+A strict streaming newc parser rejects malformed or duplicate paths, a nonregular
+or linked ORDER, existing fixture, symlink parents, additional archives and
+unexpected trailing data. Surgery preserves each other record byte-for-byte,
+including timestamps, hardlink records and data. It changes only ORDER's size and
+payload and inserts the exact hook before the original trailer.
+
+Both profiles use recorded `zstd -q -3 --single-thread -c` arguments. A complete A
+rewrite and compression is repeated and must yield identical bytes. The original
+prefix is prepended unchanged. The installed `unmkinitramfs` then extracts each
+complete staged image, followed by the existing exact manifest and tool checks.
+No package hook runs and no host configuration is imported. This avoids relying
+on an appended archive that an extractor might silently ignore.
+
+Recompression changes the compressed main archive layout, so the initial A boot
+is a necessary control. This remains an altered-guest comparison, never evidence
+that the deliverable OVA itself acquired the fixture or passed qualification.
