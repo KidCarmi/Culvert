@@ -297,6 +297,49 @@ func TestApplianceLane_AgentJobRunsTheBoundedENOSPCHarness(t *testing.T) {
 	}
 }
 
+// F-DISK-1 is FIXED (third_party/ristretto/CULVERT-PATCH.md), so the midwrite
+// scenario is a merge gate: the step may not be advisory, and the harness must
+// count a crash, an unrefused write and an insufficient recovery as FAILURES —
+// a "known-failure" verdict there would let the regression pass silently.
+func TestApplianceLane_FullDiskMidwriteIsARequiredGate(t *testing.T) {
+	dir := pkgSourceDir()
+	jobs := asMap(genericWorkflow(t, filepath.Join(dir, ".github", "workflows", "pr-deep-gate.yml"))["jobs"])
+	steps, _ := asMap(jobs["appliance-agent"])["steps"].([]interface{})
+	found := false
+	for _, st := range steps {
+		m := asMap(st)
+		if !strings.Contains(toStr(m["run"]), "QUAL_ENOSPC_SCENARIO=midwrite") {
+			continue
+		}
+		found = true
+		if v, ok := m["continue-on-error"]; ok && toStr(v) != "false" {
+			t.Errorf("the F-DISK-1 midwrite step must not be continue-on-error (got %v)", v)
+		}
+	}
+	if !found {
+		t.Fatal("appliance-agent must run the F-DISK-1 midwrite scenario")
+	}
+	raw, err := os.ReadFile(filepath.Join(dir, "test", "e2e", "appliance", "upgrade-enospc-qualify.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := string(raw)
+	for _, want := range []string{
+		`check W survived-full-disk fail "F-DISK-1 REGRESSED`,
+		`check W write-refused-with-error fail`,
+		`check W recovery-step-1-sufficient fail`,
+	} {
+		if !strings.Contains(src, want) {
+			t.Errorf("midwrite harness must fail on %q", want)
+		}
+	}
+	w := src[strings.Index(src, `if [[ "$SCENARIO" == midwrite ]]; then`+"\n  # Poll"):]
+	w = w[:strings.Index(w, "\n# ── E1:")]
+	if strings.Contains(w, "known-failure") {
+		t.Error("the midwrite scenario still reports a known-failure verdict; F-DISK-1 is fixed, a crash is a failure")
+	}
+}
+
 // V1 integration (#1528 + #1540): the console + power/lifecycle regression
 // suite is a REQUIRED result — called from the Deep gate and listed in its
 // aggregate — not a separate path-filtered workflow whose red is advisory.

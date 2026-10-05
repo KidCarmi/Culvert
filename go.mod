@@ -15,6 +15,9 @@ toolchain go1.26.8
 // Exact upstream provenance and patch are recorded beside the local module.
 replace github.com/crewjam/saml => ./third_party/crewjam-saml
 
+// F-DISK-1: preallocates badger's writable mmapped files (third_party/ristretto/CULVERT-PATCH.md).
+replace github.com/dgraph-io/ristretto/v2 => ./third_party/ristretto
+
 replace github.com/KidCarmi/Culvert/releaseproof => ./pkg/releaseproof
 
 require (

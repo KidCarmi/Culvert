@@ -189,9 +189,11 @@ step 3, no new run in the journal).
 
 ## 9. Data-disk alarm delivery (pilot acceptance — readiness report F-DISK-1)
 
-A filesystem that fills during a database write stops the proxy (F-DISK-1,
-open). The appliance cannot page anyone about it: `culvert-status` only SHOWS
-the data filesystem's usage. Before the pilot carries traffic, prove that YOUR
+A full data filesystem no longer kills the proxy during a database write
+(F-DISK-1, fixed: the write is refused with an error), but it still stops the
+category store, request history and image pulls from making progress. The
+appliance cannot page anyone about it: `culvert-status` only SHOWS the data
+filesystem's usage. Before the pilot carries traffic, prove that YOUR
 monitoring pages an operator for the guest filesystem holding the data volume,
 and that the datastore under the VM is alarmed too (a thin-provisioned
 datastore can fill while the guest still reports free space).

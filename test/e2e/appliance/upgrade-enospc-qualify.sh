@@ -233,11 +233,12 @@ PY
 # ── W: disk exhaustion DURING an active database write (F-DISK-1) ────────────
 # QUAL_ENOSPC_SCENARIO=midwrite. A SEPARATE scenario from the upgrade path:
 # fill the disk the moment the boot-time category sync starts its bulk
-# BadgerDB write, record whether the known failure (SIGBUS in badger's sparse
-# mmapped memtable) reproduces, then run the operator recovery procedure and
-# the post-recovery integrity checks that must pass before F-DISK-1 can be
-# closed. Needs egress to the category feed (the write is what is under
-# test); without it the run is INCONCLUSIVE (exit 2), never a pass.
+# BadgerDB write. F-DISK-1 (SIGBUS in badger's sparse mmapped memtable) is
+# FIXED by the ristretto fork (third_party/ristretto/CULVERT-PATCH.md), so the
+# proxy must SURVIVE: a crash is a FAILURE, the write must be refused with an
+# error, and free-space + `compose up -d` must be enough to recover. Needs
+# egress to the category feed (the write is what is under test); without it
+# the run is INCONCLUSIVE (exit 2), never a pass.
 if [[ "$SCENARIO" == midwrite ]]; then
   # Poll fast: the write lasts seconds, and a coarse poll lands the fill
   # after it has finished — which then reads as "survived" when nothing was
@@ -273,15 +274,19 @@ if [[ "$SCENARIO" == midwrite ]]; then
   read -r cst cex crs <<<"$(IN docker inspect -f '{{.State.Status}} {{.State.ExitCode}} {{.RestartCount}}' culvert 2>/dev/null || echo 'unknown 0 0')"
   trace=lost; IN docker logs culvert 2>&1 | grep -q 'SIGBUS' && trace=SIGBUS
   if [[ "$cst" != running || "$cex" != 0 || "$crs" != "$r0" ]]; then
-    check W known-failure-reproduced known-failure "F-DISK-1 reproduced: the proxy died during the write ($st; restarts before fill=$r0); crash trace: $trace"
+    check W survived-full-disk fail "F-DISK-1 REGRESSED: the proxy died during the write ($st; restarts before fill=$r0); crash trace: $trace"
     diagnose W-crash
   else
     v="$(health_version 2>/dev/null || echo unreachable)"
     if [[ "$v" == unreachable ]]; then
-      check W known-failure-reproduced fail "container running but /health unreachable; $st"
+      check W survived-full-disk fail "container running but /health unreachable; $st"
     else
-      check W known-failure-reproduced survived "no crash: still running, no restart since the fill; $st; /health version=$v; the write then reported: ${after}"
+      check W survived-full-disk pass "no crash: still running, no restart since the fill; $st; /health version=$v; the write then reported: ${after}"
     fi
+    # Surviving is not enough: the shortage must SURFACE as a refused write,
+    # never as a silent success over a store that holds part of the feed.
+    if [[ "$after" == *"bulk write failed"* ]]; then check W write-refused-with-error pass "$after"
+    else check W write-refused-with-error fail "expected the write to fail on the full filesystem; got: ${after}"; fi
   fi
   # Recovery procedure (docs/appliance/readiness-report.md F-DISK-1): free
   # space on the data filesystem, then bring the stack back. The FIRST runner
@@ -316,7 +321,7 @@ if [[ "$SCENARIO" == midwrite ]]; then
   v="$(health_version 2>/dev/null || echo unreachable)"
   [[ "$v" == "$PRED_VER" ]] && check W recovered-serving pass "/health 200 version=$v; recovered at step $recovered" || check W recovered-serving fail "version=$v after step $recovered"
   [[ "$recovered" == 1:* ]] && check W recovery-step-1-sufficient pass "free space + docker compose up -d" \
-    || check W recovery-step-1-sufficient known-failure "free space + compose up -d did NOT restore the proxy; needed step $recovered (runbook must say so)"
+    || check W recovery-step-1-sufficient fail "free space + compose up -d did NOT restore the proxy; needed step $recovered"
   c="$(api POST /api/auth/login '{"user":"enospcadmin","pass":"Enospc-Qual-2026!x"}' | tail -n1 || true)"
   s1="$(state_sum || true)"
   [[ "$c" == 200 && "$s1" == "$STATE0" ]] && check W state-intact pass "admin login http $c; ui_users.json+ca.bundle digest $s1 unchanged" || check W state-intact fail "login=$c digest=$s1 want=$STATE0"

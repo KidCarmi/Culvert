@@ -651,15 +651,15 @@ jobs:
           sudo -E env "PATH=$PATH" "HOME=$HOME" "GOCACHE=$(go env GOCACHE)" "GOMODCACHE=$(go env GOMODCACHE)" "GOFLAGS=-mod=mod" \
             CUR_IMAGE=culvert:ci-smoke PRED_IMAGE=ghcr.io/kidcarmi/culvert:v1.0.259 \
             EVID="$RUNNER_TEMP/appliance-enospc" ./test/e2e/appliance/upgrade-enospc-qualify.sh
-      - name: "F-DISK-1 (ADVISORY, known open finding): disk exhausted during the boot-time category write, then recovery + integrity"
-        # Not a merge gate: F-DISK-1 is an OPEN finding (a disk that fills
-        # during a BadgerDB write SIGBUSes the proxy). This step keeps it
-        # reproducible on every appliance change and retains the evidence: it
-        # records whether the crash reproduces, then runs the documented
-        # recovery and the integrity checks that must pass to close it. Exit 2
-        # = inconclusive (no write observed), never a pass.
+      - name: "F-DISK-1 (REQUIRED): disk exhausted during the boot-time category write — proxy survives, write refused, recovery + integrity"
+        # A merge gate since the fix (third_party/ristretto/CULVERT-PATCH.md):
+        # a disk that fills during a BadgerDB write must surface as a refused
+        # write, never a SIGBUS. Any crash, a write that does not fail, a
+        # recovery that needs more than free-space + `compose up -d`, or a
+        # failed integrity check fails the step. Exit 2 = inconclusive (no
+        # write observed) also fails it: a scenario that did not run is never
+        # reported as passed.
         if: always()
-        continue-on-error: true
         run: |
           sudo -E env "PATH=$PATH" "HOME=$HOME" "GOCACHE=$(go env GOCACHE)" "GOMODCACHE=$(go env GOMODCACHE)" "GOFLAGS=-mod=mod" \
             QUAL_ENOSPC_SCENARIO=midwrite CUR_IMAGE=culvert:ci-smoke PRED_IMAGE=culvert:ci-smoke \

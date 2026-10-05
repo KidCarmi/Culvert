@@ -18,6 +18,7 @@ on:
       - 'internal/applianceaccess/**'
       - 'internal/session/**'
       - 'appliance/artifact-audit/**'
+      - 'third_party/**'
       - 'setup_token*'
       - 'ui_session*'
       - 'ui_middleware*'
