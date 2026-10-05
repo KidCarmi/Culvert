@@ -84,9 +84,12 @@ type DB struct {
 
 	lock sync.RWMutex // Guards list of inmemory tables, not individual reads and writes.
 
-	// CULVERT PATCH (F-DISK-1): set by the flusher when Close has asked it to
-	// stop and a memtable still cannot be flushed; read by close() after the
-	// flusher has exited (stopMemoryFlush waits for it).
+	// CULVERT PATCH (F-DISK-1): flushClosing marks the flusher's stop as
+	// TERMINAL (close), as opposed to the reversible pause DropAll/DropPrefix
+	// take through the same stopMemoryFlush. flushAbandonErr is set by the
+	// flusher only on a terminal stop, when a memtable still cannot be flushed;
+	// close() reads it after the flusher has exited.
+	flushClosing    atomic.Bool
 	flushAbandonErr error
 
 	dirLockGuard *directoryLockGuard
@@ -597,6 +600,7 @@ func (db *DB) close() (err error) {
 	// and remove them completely, while the block / memtable writer is still
 	// trying to push stuff into the memtable. This will also resolve the value
 	// offset problem: as we push into memtable, we update value offsets there.
+	db.flushClosing.Store(true) // CULVERT PATCH (F-DISK-1): this stop is terminal
 	if db.mt != nil {
 		if db.mt.sl.Empty() {
 			// Remove the memtable if empty.
@@ -619,6 +623,9 @@ func (db *DB) close() (err error) {
 						// retrying a flush that cannot succeed): tell it Close is under
 						// way so a failing flush gives up and frees the channel.
 						db.closers.memtable.Signal()
+						// ...and wake a flusher parked on a full L0 so it sees the stop
+						// (stopMemoryFlush's own wake is unreachable until this push lands).
+						db.lc.levels[0].signalL0Drained()
 						// If we fail to push, we need to unlock and wait for a short while.
 						// The flushing operation needs to update s.imm. Otherwise, we have a
 						// deadlock.
@@ -1171,6 +1178,7 @@ func (db *DB) handleMemTableFlush(mt *memTable, dropPrefixes [][]byte) error {
 // are errors during handling the memtable flush, we'll retry indefinitely.
 func (db *DB) flushMemtable(lc *z.Closer) {
 	defer lc.Done()
+	stopped := false // CULVERT PATCH (F-DISK-1): local to this flusher, never sticky
 
 	for mt := range db.flushChan {
 		if mt == nil {
@@ -1178,12 +1186,14 @@ func (db *DB) flushMemtable(lc *z.Closer) {
 		}
 
 		// CULVERT PATCH (F-DISK-1): a flush that keeps failing is retried until
-		// Close asks the flusher to stop; then it gives up instead of retrying
-		// forever (Close waited on it with no bound). An abandoned memtable keeps
-		// its reference, so its WAL is NOT deleted and the next Open replays it;
-		// every later memtable is kept the same way, in order (flushing a later
-		// one would break the db.imm ordering the code below asserts).
-		if db.flushAbandonErr != nil {
+		// the flusher is asked to stop; then it stops retrying instead of
+		// blocking that stop forever (Close and DropAll/DropPrefix waited on it
+		// with no bound). The memtable stays in db.imm with its reference held,
+		// so its WAL is NOT deleted, and so does every later one, in order
+		// (flushing a later one would break the db.imm ordering asserted below).
+		// After a PAUSE, startMemoryFlush re-queues them; after a CLOSE they are
+		// replayed from their WALs by the next Open and Close reports it.
+		if stopped {
 			db.keepUnflushed(mt)
 			continue
 		}
@@ -1192,7 +1202,10 @@ func (db *DB) flushMemtable(lc *z.Closer) {
 				db.opt.Errorf("error flushing memtable to disk: %v, retrying", err)
 				select {
 				case <-lc.HasBeenClosed():
-					db.flushAbandonErr = err
+					stopped = true
+					if db.flushClosing.Load() {
+						db.flushAbandonErr = err
+					}
 					db.keepUnflushed(mt)
 				case <-time.After(time.Second):
 					continue
@@ -1223,12 +1236,12 @@ func (db *DB) flushMemtable(lc *z.Closer) {
 }
 
 // keepUnflushed leaves mt in db.imm with its reference held (so its WAL file
-// stays on disk for replay) and syncs that WAL. CULVERT PATCH (F-DISK-1).
+// stays on disk) and syncs that WAL. CULVERT PATCH (F-DISK-1).
 func (db *DB) keepUnflushed(mt *memTable) {
 	if err := mt.SyncWAL(); err != nil {
 		db.opt.Errorf("syncing the WAL of an unflushed memtable: %v", err)
 	}
-	db.opt.Errorf("memtable not flushed at close; kept in its WAL for replay on the next open")
+	db.opt.Errorf("memtable not flushed before the flusher stopped; kept (with its WAL) for a later flush or replay")
 }
 
 func exists(path string) (bool, error) {
@@ -1676,7 +1689,16 @@ func (db *DB) startCompactions() {
 func (db *DB) startMemoryFlush() {
 	// Start memory fluhser.
 	if db.closers.memtable != nil {
-		db.flushChan = make(chan *memTable, db.opt.NumMemtables)
+		// CULVERT PATCH (F-DISK-1): memtables a paused flusher could not flush
+		// are still in db.imm; give them back to the new flusher, in order (as
+		// Open does with replayed memtables), or they would never be flushed.
+		db.lock.RLock()
+		pending := append([]*memTable(nil), db.imm...)
+		db.lock.RUnlock()
+		db.flushChan = make(chan *memTable, db.opt.NumMemtables+len(pending))
+		for _, mt := range pending {
+			db.flushChan <- mt
+		}
 		db.closers.memtable = z.NewCloser(1)
 		go func() {
 			db.flushMemtable(db.closers.memtable)
@@ -1920,7 +1942,7 @@ func (db *DB) DropPrefix(prefixes ...[]byte) error {
 		return y.Wrapf(err, "cannot create new mem table")
 	}
 	db.imm = append(db.imm, db.mt)
-	for _, memtable := range db.imm {
+	for i, memtable := range db.imm {
 		if memtable.sl.Empty() {
 			memtable.DecrRef()
 			continue
@@ -1929,6 +1951,12 @@ func (db *DB) DropPrefix(prefixes ...[]byte) error {
 		if err := db.handleMemTableFlush(memtable, filtered); err != nil {
 			db.opt.Errorf("While trying to flush memtable: %v", err)
 			next.DecrRef()
+			// CULVERT PATCH (F-DISK-1): upstream returned here with the memtables
+			// already flushed (and released) still in db.imm and the CURRENT
+			// memtable appended to it as well. Keep exactly the unflushed ones,
+			// in order, and leave the current memtable current.
+			rest := append([]*memTable(nil), db.imm[i:len(db.imm)-1]...)
+			db.imm = rest
 			return err
 		}
 		memtable.DecrRef()

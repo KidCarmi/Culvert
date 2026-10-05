@@ -6,12 +6,13 @@
   "module_zip_url": "https://proxy.golang.org/github.com/dgraph-io/badger/v4/@v/v4.9.6.zip",
   "patch": {
     "added": {
+      "culvert_flushstop_test.go": "8fb7edadebe4ea0775ea95b21403b5066c70dd97872bbc08307da75eb76bd89f",
       "table/culvert_fileid_test.go": "21d9353e35a3dd5a3d4286055973ab6c2a487aa9a8ea3c79f3e975379c6fab3e"
     },
-    "effect": "a failed memtable allocation (ensureRoomForWrite, dropAll, dropPrefixes) leaves the current memtable in place and returns the error instead of leaving db.mt nil (the next write was a fatal AssertTrue); a failed value-log grow returns the reserved offset (F-DISK-1); scanner fixes: memtable ids parse bounded to 31 bits (they become a uint32 WAL fid) and table ids parse as unsigned 32-bit below MaxUint32 (a negative, >= 2^32 or exactly MaxUint32 name is not a table file instead of a fatal AssertTrue), and Options log methods escape CR/LF (CWE-117); once Close has asked the flusher to stop, a memtable flush that still fails is abandoned (WAL kept and synced, replayed on the next open) and Close returns that error instead of waiting forever",
+    "effect": "a failed memtable allocation (ensureRoomForWrite, dropAll, dropPrefixes) leaves the current memtable in place and returns the error instead of leaving db.mt nil (the next write was a fatal AssertTrue); a failed value-log grow returns the reserved offset (F-DISK-1); scanner fixes: memtable ids parse bounded to 31 bits (they become a uint32 WAL fid) and table ids parse as unsigned 32-bit below MaxUint32 (a negative, >= 2^32 or exactly MaxUint32 name is not a table file instead of a fatal AssertTrue), and Options log methods escape CR/LF (CWE-117); a flush that still fails when the flusher is asked to stop is no longer retried forever: on Close the memtables keep their WALs (synced, replayed on the next open) and Close returns that error; on a DropAll/DropPrefix pause they stay in db.imm and are re-queued in order when flushing resumes; a failed DropPrefix keeps db.imm consistent",
     "modified": {
       "db.go": {
-        "patched_sha256": "02abcb98d2728209633d8802a1ce080ace241293568c0dc27e6132e19e485369",
+        "patched_sha256": "68ff7868ea77ad4cc4170f688aee21b19b2c7ce0de7f2fc2a79fce812d982c04",
         "upstream_sha256": "823fe02d0797e1e95bab29523a26fb4fda0bee8f7635397d41acad6e05359f7a"
       },
       "levels.go": {
