@@ -136,7 +136,9 @@ func startControlPlaneWithHAResume(cfg clusterStartupConfig, ctx context.Context
 		armCPGRPCRecovery()
 		return
 	}
-	noteCPGRPCServing()
+	// enableControlPlane records the serving state itself (it is the one place
+	// all three callers pass through — see the note there). Calling it again
+	// here would count two binds for one listener.
 	resumeCPLeadership(cfg, ctx, haCfg, haErr)
 }
 

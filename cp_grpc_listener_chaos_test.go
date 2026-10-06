@@ -711,6 +711,99 @@ func TestChaos73_ControlRemediesAreDistinctPerReasonClass(t *testing.T) {
 	}
 }
 
+// TestChaos73_WallEveryCallerOfTheListenerIsMonitored is the completeness wall,
+// and it exists because the first version of this sweep got this wrong.
+//
+// Health was recorded only in `startControlPlaneWithHAResume`, so a Control
+// Plane reached by an HA PROMOTION (`ha.go` promote() → the standby's
+// onPromote) or by the LIVE ADMIN API (`apiClusterMode`) had a working gRPC
+// listener while every surface reported `disabled` — "not a Control Plane",
+// indistinguishable from a standalone proxy, which is exactly what the
+// configured-before-the-first-attempt ordering rule exists to prevent. Found by
+// re-reading the diff from the PRIMITIVE rather than from the file being
+// edited, which is §40's recorded governance lesson.
+//
+// Asserted structurally: the recording must live inside `enableControlPlane`,
+// the one function all three callers pass through. A behavioural gate would
+// need to drive an HA promotion and the admin handler, and would still say
+// nothing about a FOURTH caller added later — the exact shape of the gap.
+func TestChaos73_WallEveryCallerOfTheListenerIsMonitored(t *testing.T) {
+	fset := token.NewFileSet()
+	dir := pkgSourceDir()
+
+	// 1. enableControlPlane must record configured + serving.
+	mainFile, err := parser.ParseFile(fset, filepath.Join(dir, "main.go"), nil, 0)
+	if err != nil {
+		t.Fatalf("parse main.go: %v", err)
+	}
+	var found bool
+	wantCalls := map[string]bool{"noteCPGRPCConfigured": false, "noteCPGRPCServing": false}
+	for _, decl := range mainFile.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if !ok || fn.Name.Name != "enableControlPlane" {
+			continue
+		}
+		found = true
+		ast.Inspect(fn, func(n ast.Node) bool {
+			if call, ok := n.(*ast.CallExpr); ok {
+				if id, ok := call.Fun.(*ast.Ident); ok {
+					if _, tracked := wantCalls[id.Name]; tracked {
+						wantCalls[id.Name] = true
+					}
+				}
+			}
+			return true
+		})
+	}
+	if !found {
+		t.Fatal("enableControlPlane not found in main.go — this wall is stale")
+	}
+	for name, seen := range wantCalls {
+		if !seen {
+			t.Errorf("enableControlPlane does not call %s — a Control Plane reached by HA promotion or by the "+
+				"live admin API would have a working listener that every surface reports as `disabled`", name)
+		}
+	}
+
+	// 2. NOT VACUOUS, and the completeness half: every caller of
+	//    enableControlPlane outside main.go must be one this wall knows about.
+	//    A new caller is a new way to become a Control Plane, and the whole
+	//    point is that it inherits the monitoring automatically — but if one
+	//    appears, somebody should confirm that.
+	knownCallers := map[string]bool{"cluster_startup.go": true, "ui_cluster.go": true}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	callers := 0
+	for _, e := range entries {
+		n := e.Name()
+		if !strings.HasSuffix(n, ".go") || strings.HasSuffix(n, "_test.go") || n == "main.go" {
+			continue
+		}
+		b, err := os.ReadFile(filepath.Join(dir, n))
+		if err != nil {
+			continue
+		}
+		for _, line := range strings.Split(string(b), "\n") {
+			code := line
+			if idx := strings.Index(code, "//"); idx >= 0 {
+				code = code[:idx]
+			}
+			if strings.Contains(code, "enableControlPlane(") {
+				callers++
+				if !knownCallers[n] {
+					t.Errorf("%s calls enableControlPlane and is not in this wall's known set — a new way to "+
+						"become a Control Plane; confirm it inherits the listener monitoring and add it here", n)
+				}
+			}
+		}
+	}
+	if callers < 2 {
+		t.Errorf("found %d caller(s) of enableControlPlane outside main.go, want >= 2 — the scan is stale", callers)
+	}
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // The classifier — one copy, and the network_error narrowing CHAOS-66 had to
 // apply twice

@@ -8590,6 +8590,26 @@ monotonic escalation bounds the pathological case at one attempt per ceiling.
 Its CONTROL is the cheapest wrong fix — a loop that never returns, leaving every
 healthy node carrying a goroutine that rebinds forever.
 
+**A completeness gap: two of the three callers had no monitoring at all.** The
+first version recorded listener health only in `startControlPlaneWithHAResume`,
+so a Control Plane reached by an **HA promotion** (the standby's `onPromote`) or
+by the **live admin API** (`apiClusterMode`) had a working gRPC listener while
+every surface reported `disabled` — "not a Control Plane", indistinguishable
+from a standalone proxy, which is precisely the state the
+configured-before-the-first-attempt ordering rule exists to prevent, on two of
+the three ways a node becomes a CP. Found by re-reading the diff **from the
+primitive instead of from the file being edited**, which is §40's recorded
+governance lesson in as many words: *"enumerate such a class from the PRIMITIVE,
+not from the file being edited."* The recording moved into `enableControlPlane`,
+the one function all three callers pass through — observability only, so the
+returned error `promote()` depends on is untouched — and it is recorded on
+SUCCESS, deliberately: a FAILED promote leaves the node a standby, so marking it
+"configured" on the attempt would report a permanently degraded Control Plane on
+a perfectly healthy standby. The boot path keeps its pre-attempt recording,
+because it is the one caller that keeps retrying and therefore really is a
+Control Plane that has not come up yet. Pinned by a structural wall that also
+fails on a FOURTH caller appearing, since that is the shape of the gap.
+
 **A data race on `clusterRole.grpcSrv`.** `retryControlPlaneGRPC` compared the
 stale server against `clusterRole.grpcSrv` *after* releasing `clusterRoleMu`, on
 a field three paths write. The new server is now captured under the lock. Worth
@@ -8600,15 +8620,16 @@ TOCTOU-on-an-atomic had to be pinned structurally rather than behaviourally.
 
 ### Gates
 
-`cp_grpc_listener_chaos_test.go` (15). Twelve mutations each verified failing
+`cp_grpc_listener_chaos_test.go` (16). Thirteen mutations each verified failing
 against the shape they target: the serve-exit observer gutted, the
 `network_error` branch unqualified (which fails for all **three** planes at once
 — the shared-copy payoff), the per-attempt announcement reinstated, the
 announcement moved before the `Listen`, a refuse-everything status, rows emitted
 on a non-CP node, one remedy printed for every reason class, recovery declared on
 elapsed time, the fatal boot branch reinstated, the pending-rebind latch
-dropped, the loop made never to settle, and the fatal branch re-checked after
-the structural walls were anchored to `pkgSourceDir()`.
+dropped, the loop made never to settle, the fatal branch re-checked after the
+structural walls were anchored to `pkgSourceDir()`, and the health recording
+removed from the primitive.
 
 Seven CONTROLS, because the cheapest way to pass every defect gate is to stop
 asserting leadership and stop reporting anything, which would delete HA and the
@@ -8621,7 +8642,7 @@ recovery must require observed evidence; and the four diagnosable reason classes
 must carry **distinct** remedies (§36 round 3's lesson — *a bounded classifier is
 worth nothing if one remedy is printed for every class*).
 
-Two structural WALLS: no fatal gRPC listener path in the four files
+Three structural WALLS: no fatal gRPC listener path in the four files
 (behavioural coverage cannot reach a `logFatalf` — against that tree the test
 binary dies mid-run rather than reporting a failure), with a not-vacuous check
 requiring the HA-lease fatal to still be present, since **that** one is

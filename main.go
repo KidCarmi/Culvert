@@ -1491,6 +1491,31 @@ func enableControlPlane(grpcAddr, certFile, keyFile, caFile, clusterDBPath strin
 	if err := StartControlPlaneGRPC(grpcAddr, certFile, keyFile, caFile); err != nil {
 		return err
 	}
+	// CHAOS-73: record the listener health HERE, in the one place all three
+	// callers pass through, not in the boot path alone.
+	//
+	// This was a completeness gap found by re-reading the diff from the
+	// PRIMITIVE instead of from the file being edited — §40's governance
+	// lesson, which is recorded there in as many words: *"enumerate such a
+	// class from the PRIMITIVE, not from the file being edited."* The first
+	// version recorded health only in startControlPlaneWithHAResume, so a
+	// Control Plane reached by an HA PROMOTION or by the live admin API
+	// (`apiClusterMode`) had a live gRPC listener while every surface reported
+	// `disabled` — "not a Control Plane" — which is exactly the
+	// indistinguishable-from-a-standalone-proxy state the ordering rule above
+	// exists to prevent, on two of the three ways a node becomes a CP.
+	//
+	// Observability only: the returned error is untouched, which is what
+	// `promote()` depends on. And it is recorded on SUCCESS, deliberately: a
+	// FAILED promote leaves the node a standby, so marking it "configured" on
+	// the attempt would report a permanently degraded Control Plane on a
+	// perfectly healthy standby. The boot path is the one caller that does
+	// record before its first attempt, because it is the one that keeps
+	// retrying and therefore really is a Control Plane that has not come up
+	// yet.
+	noteCPGRPCConfigured(grpcAddr)
+	noteCPGRPCRequested(grpcAddr, certFile, keyFile, caFile)
+	noteCPGRPCServing()
 
 	// Only set role after gRPC is successfully started.
 	clusterRole.role = "control-plane"
