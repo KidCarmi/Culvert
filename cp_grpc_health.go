@@ -331,6 +331,31 @@ func noteCPGRPCConfigured(addr string) {
 
 // noteCPGRPCListenFailure records one failed bind/serve attempt and returns
 // whether the caller should emit a log line for it.
+// The parallel shape with noteAdminUIListenFailure is deliberate, and `dupl`
+// is right that it is a copy — this is the FOURTH instance of this state
+// machine (admin_ui, socks5 accept, socks5 bind, and this). That is worth
+// naming rather than waving away, and it is NOT the same case as the socket
+// classifier this change extracted to one copy:
+//
+//   - the CLASSIFIER's duplication was a CORRECTNESS hazard. One errno table
+//     and one `network_error` predicate, identical by nature, and CHAOS-66 had
+//     to fix the SAME defect in both copies at once. A third copy is a third
+//     place to get one piece of logic wrong, so it was extracted.
+//   - this is STRUCTURAL similarity over DIFFERENT state, and the copies have
+//     already diverged ON PURPOSE: socks5's bind variant additionally returns
+//     `failingFor` and ages its episode against an injected clock
+//     (`socks5ElapsedSince`, CHAOS-66 round 3), while the admin UI's does not;
+//     each record carries different fields (`port` vs `addr`). Merging them
+//     means one generic engine over four struct shapes with two clock
+//     semantics, touching three shipped health planes and their 66 existing
+//     gates.
+//
+// So the extraction is a real follow-up and deliberately not done inside a
+// sweep about listener fatality — recorded in the register, not hidden here.
+// Suppressed following the repo's existing precedent for an intentional
+// parallel shape (`cdr_client_keyatrest_test.go`).
+//
+//nolint:dupl // fourth instance of one state machine over four different record shapes; extraction recorded as a follow-up, see the note above
 func noteCPGRPCListenFailure(reason string, backoff time.Duration, now time.Time) (shouldLog bool) {
 	cpGRPCEverFailed.Store(true)
 

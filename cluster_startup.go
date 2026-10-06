@@ -132,20 +132,23 @@ func startControlPlaneWithHAResume(cfg clusterStartupConfig, ctx context.Context
 		// Deferring it is also the closest thing to the pre-change semantics:
 		// before this change a failed bind exited, so leadership was only ever
 		// asserted after a listener was actually up. It still is.
-		cpGRPCOnRecovered(func() { resumeCPLeadership(cfg, ctx, haCfg, haErr) })
+		cpGRPCOnRecovered(func() { resumeCPLeadership(ctx, cfg, haCfg, haErr) })
 		armCPGRPCRecovery()
 		return
 	}
 	// enableControlPlane records the serving state itself (it is the one place
 	// all three callers pass through — see the note there). Calling it again
 	// here would count two binds for one listener.
-	resumeCPLeadership(cfg, ctx, haCfg, haErr)
+	resumeCPLeadership(ctx, cfg, haCfg, haErr)
 }
 
 // resumeCPLeadership is the ADR-0004/ADR-0005 leadership resume, reached once a
 // CP gRPC listener is actually serving — on the boot path directly, or from the
 // recovery loop after a listener that failed its first attempt came up.
-func resumeCPLeadership(cfg clusterStartupConfig, ctx context.Context, haCfg *haConfig, haErr error) {
+// ctx is first per revive's context-as-argument rule. The neighbouring
+// startControlPlaneWithHAResume takes (cfg, ctx) — a pre-existing order in this
+// file, left alone rather than churned by a sweep about listener fatality.
+func resumeCPLeadership(ctx context.Context, cfg clusterStartupConfig, haCfg *haConfig, haErr error) {
 	// ADR-0005 S4: record resync material BEFORE any leadership assertion —
 	// an unfenced resume (or a later self-fence) re-enters standby with it.
 	globalHA.SetResyncMaterial(ctx, cfg.CPAddr, cfg.CPCert, cfg.CPKey, cfg.CPCA)

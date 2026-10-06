@@ -339,7 +339,7 @@ func TestCPServerOption_NoTLS_NoInsecure(t *testing.T) {
 	defer func() { clusterInsecure = origInsecure }()
 	clusterInsecure = false
 
-	_, _, err := cpServerOption(":50051", "", "", "")
+	_, _, err := cpServerOption("", "", "")
 	if err == nil {
 		t.Fatal("expected error when no TLS and not insecure")
 	}
@@ -350,7 +350,7 @@ func TestCPServerOption_Insecure(t *testing.T) {
 	defer func() { clusterInsecure = origInsecure }()
 	clusterInsecure = true
 
-	opt, mode, err := cpServerOption(":50051", "", "", "")
+	opt, mode, err := cpServerOption("", "", "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

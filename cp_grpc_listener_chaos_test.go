@@ -16,6 +16,7 @@ package main
 //     exactly ONE copy of the socket-error classifier.
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	crand "crypto/rand"
@@ -92,12 +93,15 @@ func captureCPAlerts(t *testing.T) func() []string {
 func TestChaos73_DefectBootBindFailureIsNotFatal(t *testing.T) {
 	cpChaosSetup(t)
 
-	// A squatter on the port the "boot" will try.
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	// A squatter on the port the "boot" will try. ListenConfig rather than
+	// net.Listen because the repo bans the latter (noctx) — and
+	// StartControlPlaneGRPC, the function under test, uses ListenConfig too.
+	lc := net.ListenConfig{}
+	ln, err := lc.Listen(context.Background(), "tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("squatter listen: %v", err)
 	}
-	defer ln.Close()
+	defer func() { _ = ln.Close() }()
 	addr := ln.Addr().String()
 
 	noteCPGRPCConfigured(addr)
@@ -238,7 +242,7 @@ func TestChaos73_DefectCertificateIsReReadOnEveryAttempt(t *testing.T) {
 	var reads atomic.Int64
 	cpGRPCRecoveryAttempt = func() error {
 		reads.Add(1)
-		_, _, err := cpServerOption("127.0.0.1:0", certPath, keyPath, "")
+		_, _, err := cpServerOption(certPath, keyPath, "")
 		return err
 	}
 
@@ -300,28 +304,6 @@ func TestChaos73_WallTheTransportAnnouncementIsNotPerAttempt(t *testing.T) {
 		t.Fatalf("parse: %v", err)
 	}
 
-	logCalls := func(fn *ast.FuncDecl) []string {
-		var got []string
-		ast.Inspect(fn, func(n ast.Node) bool {
-			call, ok := n.(*ast.CallExpr)
-			if !ok {
-				return true
-			}
-			switch c := call.Fun.(type) {
-			case *ast.Ident:
-				if strings.HasPrefix(c.Name, "logWarnf") || strings.HasPrefix(c.Name, "logErrorf") || strings.HasPrefix(c.Name, "logFatalf") {
-					got = append(got, c.Name)
-				}
-			case *ast.SelectorExpr:
-				if id, ok := c.X.(*ast.Ident); ok && id.Name == "logger" {
-					got = append(got, "logger."+c.Sel.Name)
-				}
-			}
-			return true
-		})
-		return got
-	}
-
 	var sawOption, sawStart bool
 	for _, decl := range f.Decls {
 		fn, ok := decl.(*ast.FuncDecl)
@@ -331,46 +313,77 @@ func TestChaos73_WallTheTransportAnnouncementIsNotPerAttempt(t *testing.T) {
 		switch fn.Name.Name {
 		case "cpServerOption":
 			sawOption = true
-			if calls := logCalls(fn); len(calls) != 0 {
+			if calls := cpLogCallsIn(fn); len(calls) != 0 {
 				t.Errorf("cpServerOption logs %v — it is called once per rebind attempt, so a retried bind "+
 					"turns this into one line per attempt for the whole outage, each announcing a listener "+
 					"that does not exist yet (CHAOS-57 rule 6)", calls)
 			}
 		case "StartControlPlaneGRPC":
 			sawStart = true
-			// The announcement must come AFTER the listen, so it only ever
-			// claims a listener that exists. Compare source positions of the
-			// lc.Listen call and the announcement.
-			var listenPos, announcePos token.Pos
-			ast.Inspect(fn, func(n ast.Node) bool {
-				call, ok := n.(*ast.CallExpr)
-				if !ok {
-					return true
-				}
-				if sel, ok := call.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "Listen" && listenPos == token.NoPos {
-					listenPos = call.Pos()
-				}
-				if id, ok := call.Fun.(*ast.Ident); ok && id.Name == "logWarnf" && announcePos == token.NoPos {
-					announcePos = call.Pos()
-				}
-				return true
-			})
-			if listenPos == token.NoPos {
-				t.Error("StartControlPlaneGRPC no longer calls Listen — this wall is scanning the wrong thing")
-			}
-			if announcePos == token.NoPos {
-				t.Error("StartControlPlaneGRPC does not announce the transport mode — the insecure WARNING is security-relevant and must still be emitted somewhere")
-			}
-			if listenPos != token.NoPos && announcePos != token.NoPos && announcePos < listenPos {
-				t.Errorf("the transport announcement (line %d) precedes the Listen (line %d) — it claims a listener that does not exist yet",
-					fset.Position(announcePos).Line, fset.Position(listenPos).Line)
-			}
+			cpAssertAnnouncementFollowsListen(t, fset, fn)
 		}
 	}
 	// NOT VACUOUS: both functions must have been found, or the scan matched
 	// nothing and would pass forever.
 	if !sawOption || !sawStart {
 		t.Errorf("scan did not find both functions (cpServerOption=%v StartControlPlaneGRPC=%v) — the selector is stale", sawOption, sawStart)
+	}
+}
+
+// cpLogCallsIn returns the names of every logging call inside fn. Extracted
+// from the wall above so neither function carries the whole AST walk (gocognit).
+func cpLogCallsIn(fn *ast.FuncDecl) []string {
+	var got []string
+	ast.Inspect(fn, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		switch c := call.Fun.(type) {
+		case *ast.Ident:
+			if c.Name == "logWarnf" || c.Name == "logErrorf" || c.Name == "logFatalf" {
+				got = append(got, c.Name)
+			}
+		case *ast.SelectorExpr:
+			if id, ok := c.X.(*ast.Ident); ok && id.Name == "logger" {
+				got = append(got, "logger."+c.Sel.Name)
+			}
+		}
+		return true
+	})
+	return got
+}
+
+// cpAssertAnnouncementFollowsListen requires the transport-mode announcement to
+// appear AFTER the Listen call, so it can only ever claim a listener that
+// exists (CHAOS-57 rule 6).
+func cpAssertAnnouncementFollowsListen(t *testing.T, fset *token.FileSet, fn *ast.FuncDecl) {
+	t.Helper()
+	var listenPos, announcePos token.Pos
+	ast.Inspect(fn, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		if sel, ok := call.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "Listen" && listenPos == token.NoPos {
+			listenPos = call.Pos()
+		}
+		if id, ok := call.Fun.(*ast.Ident); ok && id.Name == "logWarnf" && announcePos == token.NoPos {
+			announcePos = call.Pos()
+		}
+		return true
+	})
+	if listenPos == token.NoPos {
+		t.Error("StartControlPlaneGRPC no longer calls Listen — this wall is scanning the wrong thing")
+		return
+	}
+	if announcePos == token.NoPos {
+		t.Error("StartControlPlaneGRPC does not announce the transport mode — the insecure WARNING is security-relevant and must still be emitted somewhere")
+		return
+	}
+	if announcePos < listenPos {
+		t.Errorf("the transport announcement (line %d) precedes the Listen (line %d) — it claims a listener that does not exist yet",
+			fset.Position(announcePos).Line, fset.Position(listenPos).Line)
 	}
 }
 
@@ -728,49 +741,66 @@ func TestChaos73_ControlRemediesAreDistinctPerReasonClass(t *testing.T) {
 // need to drive an HA promotion and the admin handler, and would still say
 // nothing about a FOURTH caller added later — the exact shape of the gap.
 func TestChaos73_WallEveryCallerOfTheListenerIsMonitored(t *testing.T) {
-	fset := token.NewFileSet()
 	dir := pkgSourceDir()
+	cpAssertPrimitiveRecordsHealth(t, dir)
+	cpAssertEveryCallerIsKnown(t, dir)
+}
 
-	// 1. enableControlPlane must record configured + serving.
+// cpAssertPrimitiveRecordsHealth requires enableControlPlane — the one function
+// all three callers pass through — to record the listener's health itself.
+func cpAssertPrimitiveRecordsHealth(t *testing.T, dir string) {
+	t.Helper()
+	fset := token.NewFileSet()
 	mainFile, err := parser.ParseFile(fset, filepath.Join(dir, "main.go"), nil, 0)
 	if err != nil {
 		t.Fatalf("parse main.go: %v", err)
 	}
+	want := map[string]bool{"noteCPGRPCConfigured": false, "noteCPGRPCServing": false}
 	var found bool
-	wantCalls := map[string]bool{"noteCPGRPCConfigured": false, "noteCPGRPCServing": false}
 	for _, decl := range mainFile.Decls {
 		fn, ok := decl.(*ast.FuncDecl)
 		if !ok || fn.Name.Name != "enableControlPlane" {
 			continue
 		}
 		found = true
-		ast.Inspect(fn, func(n ast.Node) bool {
-			if call, ok := n.(*ast.CallExpr); ok {
-				if id, ok := call.Fun.(*ast.Ident); ok {
-					if _, tracked := wantCalls[id.Name]; tracked {
-						wantCalls[id.Name] = true
-					}
-				}
+		for _, name := range cpCalledIdents(fn) {
+			if _, tracked := want[name]; tracked {
+				want[name] = true
 			}
-			return true
-		})
+		}
 	}
 	if !found {
 		t.Fatal("enableControlPlane not found in main.go — this wall is stale")
 	}
-	for name, seen := range wantCalls {
+	for name, seen := range want {
 		if !seen {
 			t.Errorf("enableControlPlane does not call %s — a Control Plane reached by HA promotion or by the "+
 				"live admin API would have a working listener that every surface reports as `disabled`", name)
 		}
 	}
+}
 
-	// 2. NOT VACUOUS, and the completeness half: every caller of
-	//    enableControlPlane outside main.go must be one this wall knows about.
-	//    A new caller is a new way to become a Control Plane, and the whole
-	//    point is that it inherits the monitoring automatically — but if one
-	//    appears, somebody should confirm that.
-	knownCallers := map[string]bool{"cluster_startup.go": true, "ui_cluster.go": true}
+// cpCalledIdents returns the names of every plain-identifier call in fn.
+func cpCalledIdents(fn *ast.FuncDecl) []string {
+	var got []string
+	ast.Inspect(fn, func(n ast.Node) bool {
+		if call, ok := n.(*ast.CallExpr); ok {
+			if id, ok := call.Fun.(*ast.Ident); ok {
+				got = append(got, id.Name)
+			}
+		}
+		return true
+	})
+	return got
+}
+
+// cpAssertEveryCallerIsKnown is the completeness half: a NEW caller of
+// enableControlPlane is a new way to become a Control Plane. It inherits the
+// monitoring automatically now, but somebody should confirm that, so an
+// unrecognised caller fails here.
+func cpAssertEveryCallerIsKnown(t *testing.T, dir string) {
+	t.Helper()
+	known := map[string]bool{"cluster_startup.go": true, "ui_cluster.go": true}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		t.Fatal(err)
@@ -785,23 +815,33 @@ func TestChaos73_WallEveryCallerOfTheListenerIsMonitored(t *testing.T) {
 		if err != nil {
 			continue
 		}
-		for _, line := range strings.Split(string(b), "\n") {
-			code := line
-			if idx := strings.Index(code, "//"); idx >= 0 {
-				code = code[:idx]
-			}
-			if strings.Contains(code, "enableControlPlane(") {
-				callers++
-				if !knownCallers[n] {
-					t.Errorf("%s calls enableControlPlane and is not in this wall's known set — a new way to "+
-						"become a Control Plane; confirm it inherits the listener monitoring and add it here", n)
-				}
-			}
+		if !cpFileCallsEnableControlPlane(string(b)) {
+			continue
+		}
+		callers++
+		if !known[n] {
+			t.Errorf("%s calls enableControlPlane and is not in this wall's known set — a new way to "+
+				"become a Control Plane; confirm it inherits the listener monitoring and add it here", n)
 		}
 	}
 	if callers < 2 {
 		t.Errorf("found %d caller(s) of enableControlPlane outside main.go, want >= 2 — the scan is stale", callers)
 	}
+}
+
+// cpFileCallsEnableControlPlane reports whether src calls enableControlPlane
+// outside a comment.
+func cpFileCallsEnableControlPlane(src string) bool {
+	for _, line := range strings.Split(src, "\n") {
+		code := line
+		if idx := strings.Index(code, "//"); idx >= 0 {
+			code = code[:idx]
+		}
+		if strings.Contains(code, "enableControlPlane(") {
+			return true
+		}
+	}
+	return false
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

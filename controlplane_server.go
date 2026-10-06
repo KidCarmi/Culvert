@@ -892,7 +892,12 @@ var clusterInsecure bool
 // The mode is therefore returned and logged ONCE, by the caller, after a
 // listener is actually bound. The insecure warning is security-relevant and
 // still appears — it just appears when it is true.
-func cpServerOption(addr, certFile, keyFile, caFile string) (grpc.ServerOption, string, error) {
+//
+// `addr` was dropped with the log lines: it existed only to be interpolated
+// into them, so keeping it would be a parameter no branch reads (caught by
+// unparam, correctly). The caller already holds the address it is about to
+// bind, which is the only place it is now needed.
+func cpServerOption(certFile, keyFile, caFile string) (grpc.ServerOption, string, error) {
 	switch {
 	case certFile != "" && keyFile != "":
 		creds, err := buildServerTLS(certFile, keyFile, caFile)
@@ -919,7 +924,7 @@ func cpServerOption(addr, certFile, keyFile, caFile string) (grpc.ServerOption, 
 }
 
 func StartControlPlaneGRPC(addr, certFile, keyFile, caFile string) error {
-	serverOpt, mode, err := cpServerOption(addr, certFile, keyFile, caFile)
+	serverOpt, mode, err := cpServerOption(certFile, keyFile, caFile)
 	if err != nil {
 		return err
 	}

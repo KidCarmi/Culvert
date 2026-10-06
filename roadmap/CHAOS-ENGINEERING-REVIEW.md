@@ -8668,6 +8668,22 @@ recorded at the primitive**, which also fails when a FOURTH caller of
   correct** — the proxy IS the product, and a gateway that cannot serve must exit
   loudly rather than linger as a black hole. That asymmetry is the whole finding,
   and the wall is scoped to exclude it.
+- **CP-7 (new) — the listener-health state machine is now written FOUR times.**
+  `noteAdminUIListenFailure`, `noteSOCKS5AcceptFailure`, `noteSOCKS5BindFailure`
+  and this sweep's `noteCPGRPCListenFailure` are the same shape: charge the
+  counters, open or extend the episode, decide whether the rate gate emits,
+  latch the fire-once alert. `dupl` flags it, correctly. **It is deliberately
+  NOT extracted, and the distinction from the classifier this sweep DID extract
+  is the point**: the classifier's duplication was a CORRECTNESS hazard — one
+  errno table, identical by nature, where §36 had to fix the same defect in
+  both copies at once — whereas this is structural similarity over DIFFERENT
+  state that has already diverged ON PURPOSE (socks5's bind variant returns
+  `failingFor` and ages its episode against an injected clock per §36 round 3;
+  the admin UI's does not; each record carries different fields). Merging them
+  means one generic engine over four struct shapes with two clock semantics,
+  touching three shipped health planes and their 66 existing gates. A real
+  follow-up, recorded rather than done inside a sweep about listener fatality —
+  and the fourth instance is the evidence that it is now worth doing.
 - **The three boot-path DATA-FILE loads stay fatal** (register row R-F:
   `catStore`, blocklist, policy), defensibly so since they are policy-load-bearing
   — unchanged, and now the only remaining fatal boot paths besides the HA lease.
