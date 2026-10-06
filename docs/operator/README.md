@@ -57,6 +57,7 @@ and `docs/engineering/`.
 - [`pac-traffic-steering.md`](pac-traffic-steering.md) — PAC-based traffic steering.
 - [`socks5-listener-health.md`](socks5-listener-health.md) — SOCKS5 listener accept-loop health, backoff, and degradation reporting.
 - [`admin-ui-listener-recovery.md`](admin-ui-listener-recovery.md) — why an admin-UI listener failure never takes down the data plane, and how it recovers.
+- [`control-plane-grpc-listener.md`](control-plane-grpc-listener.md) — why a Control Plane gRPC listener failure never takes down the data plane, what it does to the fleet, and how it recovers.
 - [`dns-resolution-health.md`](dns-resolution-health.md) — destination-host DNS resolution health, bounding, and recovery.
 - [`geoip-resolution-health.md`](geoip-resolution-health.md) — GeoIP policy resolution health and the warmer that backs it.
 - [`traffic-log-destination-privacy.md`](traffic-log-destination-privacy.md) — controlling how much destination detail lands in traffic logs.

@@ -1128,6 +1128,10 @@ components:
         role: { type: string }
         nodeID: { type: string }
         grpcCompressionEnabled: { type: boolean, description: 'Resolved CULVERT_CLUSTER_GRPC_COMPRESSION value for this node (startup-scoped, read-only here).' }
+        cpGRPCStatus: { type: string, enum: [disabled, ready, degraded, unavailable, stopped], description: 'CHAOS-73: the Control Plane gRPC listener''s real posture. Absent on a node that is not a Control Plane. `role` says what this node was asked to be; this says whether the fleet can reach it.' }
+        cpGRPCServeExits: { type: integer, format: int64, description: 'Serve-loop exits that were not a shutdown. Non-zero on an otherwise-ready listener means the accept loop died and was rebuilt.' }
+        cpGRPCListenFailures: { type: integer, format: int64, description: 'Cumulative bind/serve failures since startup.' }
+        cpGRPCReason: { type: string, description: 'Bounded reason class for the current failure episode; absent while serving.' }
     ClusterNodes:
       type: object
       required: [nodes]

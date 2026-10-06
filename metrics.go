@@ -1364,6 +1364,66 @@ culvert_admin_ui_listen_backoff_seconds %g
 		)
 	}
 
+	// CHAOS-73: Control Plane gRPC listener health. Emitted ONLY on a node that
+	// asked to be a Control Plane, for the reason the socks5 and admin_ui
+	// blocks state: `up 0` from a standalone proxy or a Data Plane node is
+	// indistinguishable from a dead Control Plane, and the documented paging
+	// rule is `== 0`.
+	//
+	// `up` is 0 whenever the listener is not currently serving — including
+	// while it is rebinding — because, as with the admin UI, there is no
+	// terminal "down" state: the loop rebinds for as long as the process
+	// lives. The alertable pair is `culvert_cp_grpc_unavailable 1`, latched
+	// only after the fault has persisted past the threshold, so it does not
+	// fire on the few seconds of rebinding that follow an ordinary redeploy.
+	//
+	// `serve_exits_total` is the series that did not exist before this change:
+	// a non-zero value on a node whose `up` is 1 means the accept loop died and
+	// was rebuilt, which was previously one log line and no durable evidence.
+	//
+	// This block is emitted by the PROXY port's /metrics, which is what makes
+	// it reachable at all while the control plane's own port is not.
+	if cp := cpGRPCListenerState(); cp.Configured {
+		up, unavailable := 0, 0
+		if cp.Serving {
+			up = 1
+		}
+		if cp.Unavailable {
+			unavailable = 1
+		}
+		_, _ = fmt.Fprintf(w, `# HELP culvert_cp_grpc_up 1 while the Control Plane gRPC listener is serving; 0 while it is not
+# TYPE culvert_cp_grpc_up gauge
+culvert_cp_grpc_up %d
+
+# HELP culvert_cp_grpc_unavailable 1 while the Control Plane gRPC listener has been unusable for longer than the unavailability threshold
+# TYPE culvert_cp_grpc_unavailable gauge
+culvert_cp_grpc_unavailable %d
+
+# HELP culvert_cp_grpc_listen_failures_total Control Plane gRPC bind/serve failures since startup
+# TYPE culvert_cp_grpc_listen_failures_total counter
+culvert_cp_grpc_listen_failures_total %d
+
+# HELP culvert_cp_grpc_binds_total Successful Control Plane gRPC listener binds since startup
+# TYPE culvert_cp_grpc_binds_total counter
+culvert_cp_grpc_binds_total %d
+
+# HELP culvert_cp_grpc_serve_exits_total Control Plane gRPC serve-loop exits that were not a shutdown
+# TYPE culvert_cp_grpc_serve_exits_total counter
+culvert_cp_grpc_serve_exits_total %d
+
+# HELP culvert_cp_grpc_listen_backoff_seconds Current Control Plane gRPC rebind backoff; 0 while the listener is serving
+# TYPE culvert_cp_grpc_listen_backoff_seconds gauge
+culvert_cp_grpc_listen_backoff_seconds %g
+`,
+			up,
+			unavailable,
+			cp.Total,
+			cp.Binds,
+			cp.ServeExits,
+			cp.Backoff.Seconds(),
+		)
+	}
+
 	// CHAOS-64: destination-host DNS resolution health. Emitted ONLY once this
 	// node has actually resolved something — resolution runs on the policy path
 	// only for a DestCountry rule on a node with a GeoIP database, and a block

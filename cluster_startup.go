@@ -92,9 +92,58 @@ func startControlPlaneWithHAResume(cfg clusterStartupConfig, ctx context.Context
 		return
 	}
 
+	// CHAOS-73: a CP gRPC listener that cannot come up must NOT terminate the
+	// proxy data plane, SOCKS5, the admin UI and every health endpoint with it.
+	// This line was `logFatalf("ControlPlane gRPC: %v", err)` and initCluster
+	// runs BEFORE startAdminUI and buildAndStartProxyServer, so an occupied
+	// :50051 or a half-written certificate pair was an unattended crash loop
+	// with nothing left serving — reproduced against the real binary (exit 1,
+	// proxy/adminui/health all http_code=000). Process death is not "fail
+	// closed": it delegates the posture to the topology (§33).
+	//
+	// noteCPGRPCConfigured/noteCPGRPCRequested run BEFORE the first attempt —
+	// the CHAOS-54/66 ordering rule — so a listener that never binds is
+	// reported against a CONFIGURED Control Plane rather than as "no cluster",
+	// which on a standalone proxy is the healthy steady state and would make
+	// the two indistinguishable on exactly the node being debugged.
+	noteCPGRPCConfigured(cfg.CPAddr)
+	noteCPGRPCRequested(cfg.CPAddr, cfg.CPCert, cfg.CPKey, cfg.CPCA)
 	if err := enableControlPlane(cfg.CPAddr, cfg.CPCert, cfg.CPKey, cfg.CPCA, cfg.ClusterDBPath); err != nil {
-		logFatalf("ControlPlane gRPC: %v", err)
+		reason := classifyCPGRPCListenError(err)
+		wait := jitterDuration(cpGRPCListenBackoffInitial, cpGRPCListenJitter)
+		noteCPGRPCListenFailure(reason, cpGRPCListenBackoffInitial, time.Now())
+		logErrorf("ControlPlane gRPC listener on %s could not start (%s): %v — retrying in %s; "+
+			"this node continues to serve proxy traffic and its admin UI, but no Data Plane can "+
+			"fetch config, enroll or renew certificates until the listener recovers",
+			cfg.CPAddr, reason, err, wait.Round(time.Millisecond))
+		// LEADERSHIP FOLLOWS THE LISTENER. The resume below is deferred, NOT
+		// dropped. Two wrong answers were considered and rejected:
+		//
+		//   - returning here and leaving it undone makes a restarted leader
+		//     that hit a port conflict never resume leadership even after the
+		//     port frees, so with auto-failover off (the default) the pair has
+		//     no leader at all — a silent ADR-0004 divergence;
+		//   - resuming it anyway asserts leadership, the fencing epoch and the
+		//     persisted role on a node NO Data Plane can reach, which is the
+		//     leader-nobody-can-reach hazard this file argues against for
+		//     promote(), and in a lease deployment it holds the fence that
+		//     stops anyone else leading.
+		//
+		// Deferring it is also the closest thing to the pre-change semantics:
+		// before this change a failed bind exited, so leadership was only ever
+		// asserted after a listener was actually up. It still is.
+		cpGRPCOnRecovered(func() { resumeCPLeadership(cfg, ctx, haCfg, haErr) })
+		armCPGRPCRecovery()
+		return
 	}
+	noteCPGRPCServing()
+	resumeCPLeadership(cfg, ctx, haCfg, haErr)
+}
+
+// resumeCPLeadership is the ADR-0004/ADR-0005 leadership resume, reached once a
+// CP gRPC listener is actually serving — on the boot path directly, or from the
+// recovery loop after a listener that failed its first attempt came up.
+func resumeCPLeadership(cfg clusterStartupConfig, ctx context.Context, haCfg *haConfig, haErr error) {
 	// ADR-0005 S4: record resync material BEFORE any leadership assertion —
 	// an unfenced resume (or a later self-fence) re-enters standby with it.
 	globalHA.SetResyncMaterial(ctx, cfg.CPAddr, cfg.CPCert, cfg.CPKey, cfg.CPCA)

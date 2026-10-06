@@ -79,10 +79,8 @@ package main
 import (
 	"errors"
 	"fmt"
-	"net"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"time"
 )
 
@@ -259,22 +257,12 @@ func noteAdminUIConfigured(port int) {
 // Matched via errors.As on syscall.Errno rather than by string, because net
 // wraps as *net.OpError{*os.SyscallError{syscall.Errno}} and the text is
 // platform-specific (the CHAOS-54 rule).
+// CHAOS-73 moved the socket half into classifyListenerSocketError, the
+// ONE copy shared by all three listener planes. Only the branch that is
+// genuinely this plane's own stays here.
 func classifyAdminUIListenError(err error) string {
-	if err == nil {
-		return "none"
-	}
-	var errno syscall.Errno
-	if errors.As(err, &errno) {
-		switch errno {
-		case syscall.EADDRINUSE:
-			return "port_in_use"
-		case syscall.EACCES, syscall.EPERM:
-			return "permission_denied"
-		case syscall.EADDRNOTAVAIL:
-			return "address_unavailable"
-		case syscall.EMFILE, syscall.ENFILE:
-			return "descriptors_exhausted"
-		}
+	if class, ok := classifyListenerSocketError(err); ok {
+		return class
 	}
 	if errors.Is(err, errAdminUITLSMaterial) {
 		return "tls_certificate"
@@ -288,8 +276,7 @@ func classifyAdminUIListenError(err error) string {
 	// `listen_failed` unreachable for any error the net package produced. The
 	// original gate passed only a bare errors.New, which is the one shape that
 	// does reach `listen_failed`, so the branch looked correct.
-	var ne net.Error
-	if errors.As(err, &ne) && ne.Timeout() {
+	if classifyListenerNetworkError(err) {
 		return "network_error"
 	}
 	return "listen_failed"

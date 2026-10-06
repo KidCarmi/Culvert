@@ -51,12 +51,9 @@ package main
 //   - alerts — `socks5_listener_down`.
 
 import (
-	"errors"
 	"fmt"
-	"net"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"time"
 )
 
@@ -442,22 +439,15 @@ func noteSOCKS5DownWithRecovery(reason string, recoveryPending bool) {
 // classifyAdminUIListenError's — it is the same fault on the same kind of
 // socket, and one vocabulary across both listeners is what lets an operator
 // read either runbook.
+// CHAOS-73 moved the switch into classifyListenerSocketError. The comment
+// above records the intent that makes one copy correct: this IS the same
+// fault on the same kind of socket as the admin UI's, and the vocabulary is
+// shared on purpose. It had also been got wrong in both copies at once (see
+// the network_error note below), which is the evidence that a third copy
+// would be a third place to fix it.
 func classifySOCKS5BindError(err error) string {
-	if err == nil {
-		return "none"
-	}
-	var errno syscall.Errno
-	if errors.As(err, &errno) {
-		switch errno {
-		case syscall.EADDRINUSE:
-			return "port_in_use"
-		case syscall.EACCES, syscall.EPERM:
-			return "permission_denied"
-		case syscall.EADDRNOTAVAIL:
-			return "address_unavailable"
-		case syscall.EMFILE, syscall.ENFILE:
-			return "descriptors_exhausted"
-		}
+	if class, ok := classifyListenerSocketError(err); ok {
+		return class
 	}
 	// `network_error` requires an actual TIMEOUT, not merely an error the net
 	// package wrapped. Every bind failure arrives as *net.OpError, which
@@ -469,8 +459,7 @@ func classifySOCKS5BindError(err error) string {
 	// listen error. classifyAdminUIListenError had exactly this shape and was
 	// narrowed in the same change; its test only ever passed a bare
 	// errors.New, which is why the branch looked correct.
-	var ne net.Error
-	if errors.As(err, &ne) && ne.Timeout() {
+	if classifyListenerNetworkError(err) {
 		return "network_error"
 	}
 	return "listen_failed"

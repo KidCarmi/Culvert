@@ -1371,6 +1371,31 @@
         "additionalProperties": true,
         "description": "Cluster node role and enrollment status (fields vary by role).",
         "properties": {
+          "cpGRPCListenFailures": {
+            "description": "Cumulative bind/serve failures since startup.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "cpGRPCReason": {
+            "description": "Bounded reason class for the current failure episode; absent while serving.",
+            "type": "string"
+          },
+          "cpGRPCServeExits": {
+            "description": "Serve-loop exits that were not a shutdown. Non-zero on an otherwise-ready listener means the accept loop died and was rebuilt.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "cpGRPCStatus": {
+            "description": "CHAOS-73: the Control Plane gRPC listener's real posture. Absent on a node that is not a Control Plane. `role` says what this node was asked to be; this says whether the fleet can reach it.",
+            "enum": [
+              "disabled",
+              "ready",
+              "degraded",
+              "unavailable",
+              "stopped"
+            ],
+            "type": "string"
+          },
           "grpcCompressionEnabled": {
             "description": "Resolved CULVERT_CLUSTER_GRPC_COMPRESSION value for this node (startup-scoped, read-only here).",
             "type": "boolean"
