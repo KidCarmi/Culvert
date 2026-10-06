@@ -8620,7 +8620,7 @@ TOCTOU-on-an-atomic had to be pinned structurally rather than behaviourally.
 
 ### Gates
 
-`cp_grpc_listener_chaos_test.go` (16). Thirteen mutations each verified failing
+`cp_grpc_listener_chaos_test.go` (20): 7 defect gates, 7 controls, 4 structural walls and 2 classifier differentials. Thirteen mutations each verified failing
 against the shape they target: the serve-exit observer gutted, the
 `network_error` branch unqualified (which fails for all **three** planes at once
 — the shared-copy payoff), the per-attempt announcement reinstated, the
@@ -8642,12 +8642,15 @@ recovery must require observed evidence; and the four diagnosable reason classes
 must carry **distinct** remedies (§36 round 3's lesson — *a bounded classifier is
 worth nothing if one remedy is printed for every class*).
 
-Three structural WALLS: no fatal gRPC listener path in the four files
-(behavioural coverage cannot reach a `logFatalf` — against that tree the test
-binary dies mid-run rather than reporting a failure), with a not-vacuous check
-requiring the HA-lease fatal to still be present, since **that** one is
-deliberately fatal; and one copy of the socket classifier, with its own
-not-vacuous check.
+Four structural WALLS, each with its own not-vacuous check. **No fatal gRPC
+listener path** in the four files — behavioural coverage cannot reach a
+`logFatalf`, since against that tree the test binary dies mid-run rather than
+reporting a failure — with a check requiring the HA-lease fatal to still be
+PRESENT, because **that** one is deliberately fatal. **One copy of the socket
+classifier.** **The transport announcement is not per-attempt and sits after the
+`Listen`** (the wall that replaced the vacuous gate above). And **health is
+recorded at the primitive**, which also fails when a FOURTH caller of
+`enableControlPlane` appears, since that is the shape of the gap it closed.
 
 ### Deliberately left, and recorded
 
