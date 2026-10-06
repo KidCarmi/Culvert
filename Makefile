@@ -32,6 +32,19 @@ api-lint:
 	$(GO) test . -run 'TestOpenAPI_Gate1|TestOpenAPI_Gate2' -count=1
 
 # Regenerate the canonical JSON + offline HTML from the YAML contract.
+#
+# NOT the whole story for a SCHEMA change: openapi.json feeds a SECOND
+# generator this target does not invoke — the frontend's API types
+# (frontend/src/api/types.gen.ts, via `cd frontend && npm run generate`). One
+# source, two generators, and only this one is wired here, so editing a schema
+# and running `make api-verify` can pass locally while the frontend drift gate
+# fails in CI (which is how PR #1571 found this). After changing a schema under
+# `components.schemas`, run the frontend generator too and commit its output.
+#
+# Deliberately not chained in: the frontend generator enforces an exact Node/npm
+# pin (frontend/.node-version, package.json engines), so invoking it from here
+# would make every `make api-verify` require that toolchain — a real cost for
+# Go-only contributors. Wiring it in properly is an owner decision.
 api-bundle:
 	$(GO) run ./cmd/apibundle -spec $(SPEC) -json api/openapi/openapi.json -html api/openapi/index.html -public-html api/openapi/index.public.html -manifest api/route-classification.yaml -inventory docs/api/API-INVENTORY.md
 

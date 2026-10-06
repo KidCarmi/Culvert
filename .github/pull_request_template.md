@@ -53,6 +53,7 @@ go test -race ./...
 - [ ] הוספתי/עדכנתי את ה-route ב-`uiRoutes` (ui_routes_meta.go) עם MinRole/Mutating/AuditExpected
 - [ ] תיעדתי את ה-operation ב-`api/openapi/openapi.yaml` **או** הוספתי exemption ב-`api/route-classification.yaml` (owner + reason + security_class + expiry)
 - [ ] הרצתי `make api-bundle` וה-commit כולל את `api/openapi/openapi.json` + `index.html` המעודכנים
+- [ ] אם שיניתי schema תחת `components.schemas` — הרצתי גם `cd frontend && npm run generate` וה-commit כולל את `frontend/src/api/types.gen.ts` / if I changed a schema under `components.schemas`, I also ran the frontend generator and committed `frontend/src/api/types.gen.ts` (the frontend drift gate fails otherwise — `make api-bundle` does not invoke it)
 - [ ] הרצתי `make api-verify` (validation + style-lint + route-coverage + conformance) בהצלחה
 - [ ] ה-`x-culvert-*` metadata (visibility/permission/stability/danger/audit) תואם להתנהגות ה-handler בפועל
 - [ ] אם זה שינוי לא-תואם לאחור — עקבתי אחר `docs/api/API-VERSIONING-POLICY.md`
