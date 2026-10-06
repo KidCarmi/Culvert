@@ -37,9 +37,13 @@ env:
   # Superseded candidate (historical; does not boot under BIOS, #1528 §3f).
   # Its guest-content fingerprint stays the comparison reference.
   ORIGINAL_OVA_SHA256: e24eb542f973fb70360bad5124ef81fdab8b6f8d67af601720613cbcca3700a4
-  # F-DISK-1 job input: the image the original qualification used.
-  SOURCE_IMAGE_RUN_ID: "37124197333"
-  SOURCE_IMAGE_TAR_SHA256: bb8a2c75369ca3397aaf84566eeee6222f30ca5c3b791de7d60bfecac9a8c3a4
+  # F-DISK-1 job input: the d698a69c candidate's image (Deep gate run
+  # 37397399171), which carries the badger/ristretto F-DISK-1 fixes. Run
+  # 37397680555 still reproduced the SIGBUS on the ORIGINAL image
+  # (37124197333, sha bb8a2c75…) — that was the pre-fix control; this is the
+  # fixed artifact, expected to report `survived` with the write refused.
+  SOURCE_IMAGE_RUN_ID: "37397399171"
+  SOURCE_IMAGE_TAR_SHA256: 3afadea02d751f1ecea10a7acd0efddee6640a32c8183602b664bca20784af6a
 
 jobs:
   guest-boot:
@@ -426,7 +430,7 @@ jobs:
           if-no-files-found: warn
 
   f-disk-1:
-    name: "Lab · F-DISK-1 on the bounded nested-Docker host (known failure)"
+    name: "Lab · F-DISK-1 on the bounded nested-Docker host"
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
