@@ -369,7 +369,17 @@ func retryControlPlaneGRPC() error {
 	// The heartbeat monitor is idempotent-by-intent here: on the boot path it
 	// never started, and on the rebind path it has been running all along (it
 	// watches enrolled-node liveness, which is independent of this listener).
-	globalClusterStore.StartHeartbeatMonitor(appLifecycleCtx.Done())
+	//
+	// resolveLifecycleCtx, NOT appLifecycleCtx directly. That global is wired by
+	// initLifecycleContext, which never runs in a one-shot command path or in
+	// the test binary, so the bare expression is a nil-interface method call —
+	// and here it would run on the SUPERVISOR goroutine, where a panic kills the
+	// listener and reports it terminal. `enableControlPlane`'s own call site is
+	// the identical expression and was safe only because it runs on the main
+	// goroutine of a normal boot, after the context is wired; moving the call
+	// onto a background goroutine is what makes it reachable. Credit to
+	// PR #1556, whose gates caught the same hazard in the same function.
+	globalClusterStore.StartHeartbeatMonitor(resolveLifecycleCtx().Done())
 	return nil
 }
 
