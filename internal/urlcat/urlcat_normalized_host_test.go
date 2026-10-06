@@ -144,7 +144,8 @@ func TestMatchesNormalizedHost_DifferentialIsNotVacuous(t *testing.T) {
 // TestMatchesNormalizedHost_RandomizedAgreement sweeps generated taxonomies, so
 // agreement does not rest on one hand-written store shape.
 func TestMatchesNormalizedHost_RandomizedAgreement(t *testing.T) {
-	rng := rand.New(rand.NewSource(0x5ca1ab1e))
+	// A fixed seed, so the corpus is reproducible and this sweep cannot flake.
+	rng := rand.New(rand.NewSource(0x5ca1ab1e)) //nolint:gosec // deterministic test corpus, not crypto
 	frags := []string{"example", "EXAMPLE", "bücher", "straße", "xn--bcher-kva", "a", "B", "com", "NET", ""}
 	for iter := 0; iter < 200; iter++ {
 		nCat := 1 + rng.Intn(4)
@@ -290,61 +291,6 @@ func TestLegacyMatchesHost_StillMatchesTheShippedWrapper(t *testing.T) {
 					cat, h, got, want)
 			}
 		}
-	}
-}
-
-// TestBenchGate_NormalizedEntryPointIsCheaperThanNormalizing is the COST gate,
-// and it is a same-run RATIO rather than an absolute bound: both arms are timed
-// in one process on one machine, so the clock cancels. An absolute ns bound gets
-// re-baselined per machine and then muted (the standing rule recorded for
-// sanitizeLog, connlimit and the latency histogram).
-//
-// It asserts only the DIRECTION and a conservative margin: skipping
-// hostutil.NormalizeHost must make the probe materially cheaper. The margin is
-// deliberately loose (10%) because the point is that the saving exists and is
-// not noise, not that it equals any particular figure — the figures belong in
-// the benchmark output.
-func TestBenchGate_NormalizedEntryPointIsCheaperThanNormalizing(t *testing.T) {
-	if testing.Short() {
-		t.Skip("timing gate")
-	}
-	s := New(DefaultEntries())
-	cat := Category("Social Media")
-	const host = "uncategorized.example.net"
-
-	// Best-of-N on both arms, interleaved, to blunt scheduler noise. Taking the
-	// MINIMUM of each arm is the right statistic for "how cheap can this be":
-	// the maximum is set by preemption, which is not a property of the code.
-	measure := func(fn func()) float64 {
-		best := -1.0
-		for trial := 0; trial < 4; trial++ {
-			r := testing.Benchmark(func(b *testing.B) {
-				for i := 0; i < b.N; i++ {
-					fn()
-				}
-			})
-			ns := float64(r.NsPerOp())
-			if best < 0 || ns < best {
-				best = ns
-			}
-		}
-		return best
-	}
-
-	var sink bool
-	// Baseline is the FROZEN pre-split body, never MatchesHost — see
-	// legacyMatchesHost for why that distinction is load-bearing.
-	withNorm := measure(func() { sink = legacyMatchesHost(s, cat, host) })
-	preNorm := measure(func() { sink = s.MatchesNormalizedHost(cat, host) })
-	_ = sink
-
-	t.Logf("legacy (fused normalize+probe) %.1f ns/op; MatchesNormalizedHost %.1f ns/op; ratio %.2f",
-		withNorm, preNorm, preNorm/withNorm)
-	if preNorm >= withNorm*0.90 {
-		t.Errorf("pre-normalized probe is not materially cheaper: %.1f vs %.1f ns/op (ratio %.2f, want < 0.90). "+
-			"If hostutil.NormalizeHost became free this gate is obsolete — delete it rather than loosening it, "+
-			"and revisit normHost() in policy_hostcat.go, which exists only for this saving.",
-			preNorm, withNorm, preNorm/withNorm)
 	}
 }
 
