@@ -339,7 +339,7 @@ func TestCPServerOption_NoTLS_NoInsecure(t *testing.T) {
 	defer func() { clusterInsecure = origInsecure }()
 	clusterInsecure = false
 
-	_, err := cpServerOption(":50051", "", "", "")
+	_, _, err := cpServerOption("", "", "")
 	if err == nil {
 		t.Fatal("expected error when no TLS and not insecure")
 	}
@@ -350,12 +350,17 @@ func TestCPServerOption_Insecure(t *testing.T) {
 	defer func() { clusterInsecure = origInsecure }()
 	clusterInsecure = true
 
-	opt, err := cpServerOption(":50051", "", "", "")
+	opt, mode, err := cpServerOption("", "", "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if opt == nil {
 		t.Fatal("option should not be nil")
+	}
+	// CHAOS-73: the transport mode is RETURNED rather than logged, so the
+	// caller can announce it once, after a successful bind.
+	if mode != "insecure" {
+		t.Errorf("mode = %q, want \"insecure\"", mode)
 	}
 }
 

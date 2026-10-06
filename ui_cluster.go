@@ -31,6 +31,21 @@ func apiClusterStatus(w http.ResponseWriter, r *http.Request) {
 		"ha":                     globalHA.Status(),
 		"grpcCompressionEnabled": clusterGRPCCompression,
 	}
+	// CHAOS-73: the listener's real posture, beside the role. `role` is set
+	// after a successful bind and never cleared, so before this field existed a
+	// Control Plane whose serve loop had died reported `role:"control-plane"`
+	// with its grpcAddr and its full enrolled-node list while no Data Plane
+	// could reach it. The role says what this node was ASKED to be; this says
+	// whether it can be reached (the Ready()/Usable() split CHAOS-28
+	// established for the CA).
+	if cp := cpGRPCListenerState(); cp.Configured {
+		result["cpGRPCStatus"] = cpGRPCListenerStatus()
+		result["cpGRPCServeExits"] = cp.ServeExits
+		result["cpGRPCListenFailures"] = cp.Total
+		if cp.Failing {
+			result["cpGRPCReason"] = cp.LastReason
+		}
+	}
 	if clusterRole.role == "control-plane" {
 		result["nodes"] = NodeMetricsList()
 		result["enrolledNodes"] = globalClusterStore.ListNodes()

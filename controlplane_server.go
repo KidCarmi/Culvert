@@ -871,25 +871,60 @@ var clusterInsecure bool
 
 // cpServerOption returns the gRPC server option for the Control Plane based on
 // available TLS certs or the --cluster-insecure flag.
-func cpServerOption(addr, certFile, keyFile, caFile string) (grpc.ServerOption, error) {
+// CHAOS-73 made this function SILENT and returns the transport mode instead of
+// logging it. Two reasons, both of which the pre-change shape got wrong in a
+// way that only became visible once the bind was retried.
+//
+// The line was emitted BEFORE the bind, so it announced a listener that did not
+// exist yet — "ControlPlane: gRPC :50051 (mTLS)" immediately above "bind:
+// address already in use". That is CHAOS-57's rule 6 verbatim ("the success log
+// moved to AFTER the bind — the pre-change line claimed a listener that never
+// existed"), reached independently in a second subsystem.
+//
+// And once a failed bind retries, a per-attempt line is one log line per retry
+// for the whole outage. Measured during the fix's own verification: six
+// "(insecure — all cluster data unencrypted!)" WARN lines in fifteen seconds,
+// against a recovery loop whose failure line is deliberately rate-limited to
+// one per minute. A mitigation for a silent-failure defect must not be a
+// log-amplification defect — this register's standing rule, which the fix
+// broke on its first run.
+//
+// The mode is therefore returned and logged ONCE, by the caller, after a
+// listener is actually bound. The insecure warning is security-relevant and
+// still appears — it just appears when it is true.
+//
+// `addr` was dropped with the log lines: it existed only to be interpolated
+// into them, so keeping it would be a parameter no branch reads (caught by
+// unparam, correctly). The caller already holds the address it is about to
+// bind, which is the only place it is now needed.
+func cpServerOption(certFile, keyFile, caFile string) (grpc.ServerOption, string, error) {
 	switch {
 	case certFile != "" && keyFile != "":
 		creds, err := buildServerTLS(certFile, keyFile, caFile)
 		if err != nil {
-			return nil, fmt.Errorf("gRPC TLS: %w", err)
+			// CHAOS-73: tagged with errCPGRPCCredentials so
+			// classifyCPGRPCListenError can name this class without matching
+			// on the crypto/tls error text, and so the recovery loop's log
+			// line is the only place the raw error appears. The pair is
+			// re-read on EVERY attempt, which is what makes a rotation window
+			// self-healing instead of a permanent crash loop (CHAOS-57 rule 4).
+			return nil, "", fmt.Errorf("gRPC TLS: %w: %w", errCPGRPCCredentials, err)
 		}
-		logger.Printf("ControlPlane: gRPC %s (mTLS)", strings.ReplaceAll(addr, "\n", ""))
-		return grpc.Creds(creds), nil
+		return grpc.Creds(creds), "mtls", nil
 	case clusterInsecure:
-		logWarnf("ControlPlane: gRPC %s (insecure — all cluster data unencrypted!)", strings.ReplaceAll(addr, "\n", ""))
-		return grpc.EmptyServerOption{}, nil
+		return grpc.EmptyServerOption{}, "insecure", nil
 	default:
-		return nil, fmt.Errorf("TLS certificates required for Control Plane (use --cluster-insecure to override for development)")
+		// CHAOS-73: tagged distinctly from a credentials FAILURE. This is a
+		// policy refusal, not an environmental fault — nothing on the host
+		// will change to make it succeed — so it earns its own reason class
+		// and its own operator action (supply the flags), rather than being
+		// reported as a listener that is about to rebind.
+		return nil, "", fmt.Errorf("%w: TLS certificates required for Control Plane (use --cluster-insecure to override for development)", errCPGRPCTLSRequired)
 	}
 }
 
 func StartControlPlaneGRPC(addr, certFile, keyFile, caFile string) error {
-	serverOpt, err := cpServerOption(addr, certFile, keyFile, caFile)
+	serverOpt, mode, err := cpServerOption(certFile, keyFile, caFile)
 	if err != nil {
 		return err
 	}
@@ -923,10 +958,52 @@ func StartControlPlaneGRPC(addr, certFile, keyFile, caFile string) error {
 	}
 	clusterRole.grpcSrv = srv
 
+	// Announced here, AFTER the listener is bound, and exactly once per bind
+	// (see the note on cpServerOption).
+	if mode == "insecure" {
+		logWarnf("ControlPlane: gRPC listening on %s (insecure — all cluster data unencrypted!)", strings.ReplaceAll(addr, "\n", ""))
+	} else {
+		logger.Printf("ControlPlane: gRPC listening on %s (mTLS)", strings.ReplaceAll(addr, "\n", ""))
+	}
+
 	go func() {
-		if err := srv.Serve(ln); err != nil {
-			logger.Printf("ControlPlane gRPC error: %v", err)
+		defer recoverGoroutine("cp-grpc-serve")
+		err := srv.Serve(ln)
+		if err == nil {
+			// grpc-go returns nil once Stop/GracefulStop has fired, so this is
+			// the clean teardown path and never a fault.
+			noteCPGRPCStopped()
+			return
 		}
+		// CHAOS-73: this branch used to be one logger.Printf and NOTHING else.
+		// grpc-go backs off on a TEMPORARY accept error and returns nil after
+		// a Stop, so reaching here with a non-nil error means the accept loop
+		// died on a non-temporary fault (EBADF, ENOTSOCK, EINVAL — the classes
+		// socks5AcceptFatal enumerates). When that happened the goroutine
+		// exited while clusterRole.role stayed "control-plane",
+		// clusterRole.grpcSrv stayed non-nil, /api/cluster/status kept
+		// reporting a healthy CP with its enrolled nodes, the heartbeat
+		// monitor kept running and config kept being published — and no Data
+		// Plane could fetch config, enroll, renew a certificate or push audit
+		// events. PX-18 in the control plane: every probe green on a dead
+		// listener.
+		//
+		// A shutdown that raced the stop flag must not rebind on the way out,
+		// so the stop request is checked explicitly rather than trusting
+		// grpc-go's nil (the CHAOS-56 rule about not resting a safety property
+		// on a library's internals).
+		if cpGRPCStopRequested() {
+			noteCPGRPCStopped()
+			return
+		}
+		noteCPGRPCServeExit()
+		reason := classifyCPGRPCListenError(err)
+		noteCPGRPCListenFailure(reason, cpGRPCListenBackoffInitial, time.Now())
+		logErrorf("ControlPlane gRPC serve loop exited on %s (%s): %v — the control plane is NOT serving; "+
+			"rebinding automatically. The proxy data plane is unaffected, but Data Plane nodes cannot fetch "+
+			"config, enroll or renew certificates until it recovers",
+			strings.ReplaceAll(addr, "\n", ""), reason, err)
+		armCPGRPCRecovery()
 	}()
 	return nil
 }
@@ -1010,6 +1087,15 @@ const cpGRPCGracefulStopBudget = 8 * time.Second
 // fleet of merely-unresponsive peers still drains gracefully; it is the
 // unbounded active-stream case the force-close exists for.
 func StopControlPlaneGRPC() {
+	// CHAOS-73: request the stop BEFORE touching the server, so the serve
+	// goroutine's exit is read as a teardown and the recovery loop can never
+	// rebind a listener on the way out — and so a loop currently sitting in a
+	// backoff is released rather than found mid-sleep by the shutdown budget.
+	// The ORDER is the correctness argument, exactly as it is for
+	// socks5Server.Stop closing `stopping` before ln.Close().
+	stopCPGRPCRecovery()
+	noteCPGRPCStopped()
+
 	srv := clusterRole.grpcSrv
 	if srv == nil {
 		return
