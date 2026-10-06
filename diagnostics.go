@@ -571,7 +571,7 @@ func checkOversizeConfiguredUsernames() OperatorContractCheck {
 		return OperatorContractCheck{
 			Code:    "admin_username_length",
 			Status:  diagOK,
-			Message: "all configured admin usernames are within the login length limit",
+			Message: fmt.Sprintf("all configured admin usernames are within the %d-byte account limit", adminUsernameAccountLimit),
 		}
 	}
 	plural := ""
