@@ -269,11 +269,19 @@ jobs:
         # disposable daemon's registry access goes to a dead proxy).
         run: |
           set -euo pipefail
-          # From the candidate's own source tree, not the lab checkout.
-          . appliance-src/appliance/build/manifest.env
+          # The manifest the build wrote into the image overlay: it carries the
+          # pinned inputs AND the ClamAV sidecar the build produced
+          # (CLAMAV_SIDECAR_REF, CLAMAV_SIDECAR_ID). Since the pcre2 fix the
+          # appliance ships that derivative, not the upstream clamav/clamav
+          # tag, so the archive holds the sidecar (run 37397680555 failed here
+          # looking for the upstream ref).
+          # The build ran as root; read the file through sudo.
+          . <(sudo cat "$LAB_ROOT/build/overlay/var/lib/culvert-appliance/manifest.env")
+          [ -n "${CLAMAV_SIDECAR_REF:-}" ] && [ -n "${CLAMAV_SIDECAR_ID:-}" ] \
+            || { echo "::error::the built manifest lacks CLAMAV_SIDECAR_REF/ID"; exit 1; }
           appliance-src/appliance/build/cold-load-check.sh --dind "$COLDLOAD_DIND_IMAGE" \
             --archive "$LAB_ROOT/build/overlay/var/lib/culvert-appliance/images/clamav.tar.gz" \
-            --ref "${CLAMAV_IMAGE_REPO#docker.io/}:${CLAMAV_IMAGE_TAG}" --id "$CLAMAV_IMAGE_INDEX_DIGEST" \
+            --ref "$CLAMAV_SIDECAR_REF" --id "$CLAMAV_SIDECAR_ID" \
             --run "clamd --version" --ready-clamav 900 2>&1 | tee "$LAB_ROOT/coldload-clamav-ready.txt"
       - name: Retain the built OVA (unpublished test artifact, before any boot)
         if: matrix.retained_run == ''
