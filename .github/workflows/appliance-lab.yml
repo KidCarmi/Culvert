@@ -49,36 +49,33 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Post-Codex closeout candidate — #1528 frozen head b579ca28 =
-        # 4f27d945 + ab5b7236 (netplan apply rollback) + 96381e47 (identity
-        # reset clears the console credential) + f0492528/18ef7ec1 (non-durable
-        # dispatch resume context + UI) + b579ca28 (yara test determinism).
-        # Image = that head's own Deep PR Gate tar (run 37234612592; every
-        # workflow on the head green); app, agent, console, access binary and
-        # provisioning from a clean checkout of the SAME commit. Image ID is the
-        # tar's OCI INDEX digest (containerd store). Built fresh, retained
-        # BEFORE boot.
+        # Production-readiness candidate — #1528 head d698a69c: the recovery-
+        # time fix (4 MiB read-ahead rule; cloud-init off after first boot,
+        # re-enabled by reset-identity) plus everything since b579 (F-DISK-1
+        # badger/ristretto fixes incl. purge-on-full-disk, av_unavailable=closed,
+        # recovery-secret reveal, grpc-gateway removed, backup-listing timing).
+        # Image = that head's own Deep PR Gate tar (run 37397399171); app,
+        # agent, console, access binary and provisioning from a clean checkout
+        # of the SAME commit. Built fresh, retained BEFORE boot. Image ID is
+        # the containerd target digest (verified by docker load: agent reports
+        # v1.0.260-candidate.gd698a69c5192).
         include:
-          - variant: candidate-b579ca28c9d9
+          - variant: candidate-d698a69c5192
             provisioning: source
-            source_sha: "b579ca28c9d936e9141292ce5ec564a26feeae86"
-            image_run: "37234612592"
-            image_tar_sha256: "ec9ae4071339f0f0dda103765ae7aae2667c1bad08e9996814dd2f12d45aef61"
-            expect_image_id: "sha256:24b37bc217691058e56a838821b86dfbd45b927b1c0ea8ea867a28c54d4bcc47"
-            # Recovery A/B: the EXACT OVA run 37342970308 built and retained
-            # (sha256 below) — nothing rebuilt, so variants differ only by the
-            # lab-only guest changes listed in recovery_variants.
-            retained_run: "37342970308"
-            retained_sha256: "a5e5b21b87f71310d292f418df5b9963872d51705f69fb992308e65d03dc620d"
-            # Raw disk behind device-mapper. Run 37342970308 measured recovery
-            # = 31 s + ~9.1 s per ms of injected read latency (fast 31 s, 110 ms
-            # 1036 s, same ~15k reads), which puts ASTRA's ESXi E0 (114-162 s)
-            # at ~9-14 ms: the calibrated proxy is 12 ms read / 3 ms write,
-            # judged against the real ESXi budget (120 s).
+            source_sha: "d698a69c5192588d5ed3a85a9f7cd9009fb59b31"
+            image_run: "37397399171"
+            image_tar_sha256: "3afadea02d751f1ecea10a7acd0efddee6640a32c8183602b664bca20784af6a"
+            expect_image_id: "sha256:2c03833c9641a1e24dc5a66b3faa4f0695ac44cdeac931018b9b744be301660e"
+            retained_run: ""
+            retained_sha256: ""
+            # The calibrated ESXi proxy (12 ms read / 3 ms write; run 37389977929
+            # measured the unchanged b579 OS at 146.6 s and the shipped changes'
+            # lab-only equivalent at 103.1 s). Only the base variant: the fix is
+            # now in the product, so nothing lab-only is applied.
             disk: dm
             recovery_reboots: "3"
             recovery_profiles: "esxi12:12:3:120"
-            recovery_variants: "base ra ra+svc ra+svc+ci ra+svc+ci+ird"
+            recovery_variants: "base"
     env:
       APPLIANCE_SOURCE_SHA: ${{ matrix.source_sha }}
       SOURCE_IMAGE_RUN_ID: ${{ matrix.image_run }}
