@@ -77,9 +77,16 @@ func benchArmView(tb testing.TB, armed bool) {
 	saasEffectiveView.Swap(newEffectiveView(entries, effectiveCategoryView{Source: sourceDownloaded}))
 }
 
-// runCategoryScan drives one scan: one scratch, n category probes — exactly the
-// shape Evaluate uses (newHostCatScratch once per request, matchesCategory once
-// per category-scoped rule).
+// runCategoryScanOn drives one scan against one host: one scratch, n category
+// probes — exactly the shape Evaluate uses (newHostCatScratch once per request,
+// matchesCategory once per category-scoped rule). runCategoryScanLegacyOn is the
+// same shape over the verbatim pre-hoist body.
+//
+// Both take the host EXPLICITLY. Single-host convenience wrappers existed here
+// and were removed: once the arms were parameterized over both host
+// representations the legacy wrapper had no callers (staticcheck U1000, which
+// failed this PR's Deep gate), and a wrapper carrying a default host is exactly
+// how a later arm drifts onto the shape that hides the allocation axis.
 func runCategoryScanOn(host string, cats []URLCategory) bool {
 	sc := newHostCatScratch(host)
 	hit := false
@@ -100,14 +107,6 @@ func runCategoryScanLegacyOn(host string, cats []URLCategory) bool {
 		}
 	}
 	return hit
-}
-
-func runCategoryScan(cats []URLCategory) bool {
-	return runCategoryScanOn(benchCategoryScanHost, cats)
-}
-
-func runCategoryScanLegacy(cats []URLCategory) bool {
-	return runCategoryScanLegacyOn(benchCategoryScanHost, cats)
 }
 
 func benchCategoryScan(b *testing.B, host string, armed, legacy bool) {
@@ -183,7 +182,7 @@ func BenchmarkCategoryScanNormHost_Parallel(b *testing.B) {
 		// Per-worker sink: a shared one makes false sharing the thing measured.
 		var sink bool
 		for pb.Next() {
-			sink = runCategoryScan(cats)
+			sink = runCategoryScanOn(benchCategoryScanHost, cats)
 		}
 		_ = sink
 	})
