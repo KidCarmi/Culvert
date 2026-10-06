@@ -272,11 +272,30 @@ func (v *effectiveCategoryView) LookupHost(host string) (string, bool) {
 // Category comparison is case-insensitive, matching MatchesHost's lowercased index.
 // This is the MEMBERSHIP query; LookupHost answers the separate CLASSIFICATION query
 // and is not a substitute for it.
+// It is a one-line wrapper over MatchesNormalizedCategory: the only work it
+// does itself is canonicalizing the host. The policy hot path calls the
+// normalized form directly — see MatchesNormalizedCategory.
 func (v *effectiveCategoryView) MatchesCategory(cat, host string) bool {
+	return v.MatchesNormalizedCategory(cat, hostutil.NormalizeHost(host))
+}
+
+// MatchesNormalizedCategory is MatchesCategory for a host the caller has
+// ALREADY canonicalized with hostutil.NormalizeHost — the mirror of
+// urlcat.Store.MatchesNormalizedHost, and split for the same reason: the
+// normalization depends on the REQUEST, this membership walk depends on the
+// CATEGORY, and hostCatScratch.matchesCategory runs the walk once per
+// category-scoped rule. On the view-ARMED branch it runs this AND
+// catStore.MatchesNormalizedHostAdmin per rule, so before the split that branch
+// normalized one request host twice per rule.
+//
+// Semantics are byte-identical to MatchesCategory (which now reaches them
+// through this method); passing an un-normalized host is the misuse to avoid,
+// for the fail-open reason recorded on urlcat.Store.MatchesNormalizedHost.
+func (v *effectiveCategoryView) MatchesNormalizedCategory(cat, host string) bool {
 	if cat == "" {
 		return false
 	}
-	h := hostutil.NormalizeHost(host)
+	h := host
 	if h == "" {
 		return false
 	}

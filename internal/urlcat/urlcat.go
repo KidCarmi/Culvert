@@ -1112,8 +1112,39 @@ func lowerASCIIInto(dst []byte, s string) bool {
 
 // MatchesHost checks whether host belongs to the named URL category.
 // Uses the pre-built index for O(labels) lookup instead of O(N×M) iteration.
+//
+// It is a one-line wrapper over MatchesNormalizedHost: the ONLY work it does
+// itself is canonicalizing the host. A caller that already holds the normalized
+// form — because it is scanning many categories against ONE request host — must
+// call MatchesNormalizedHost directly and pay that cost once instead of once
+// per category. See MatchesNormalizedHost for why the split exists.
 func (s *Store) MatchesHost(cat Category, host string) bool {
-	host = hostutil.NormalizeHost(host)
+	return s.MatchesNormalizedHost(cat, hostutil.NormalizeHost(host))
+}
+
+// MatchesNormalizedHost is MatchesHost for a host the caller has ALREADY
+// canonicalized with hostutil.NormalizeHost. It is the per-CATEGORY probe with
+// nothing request-scoped left in it.
+//
+// The split exists because normalization depends on the REQUEST and not on the
+// category, while this probe is called once per category-scoped policy rule per
+// proxied request (package main's hostCatScratch.matchesCategory). Folding it
+// into the probe therefore multiplied a fixed per-request cost by the rule
+// count — the same class of defect the scan-scoped hostCatScratch hoist and the
+// categoryKey fold both closed, applied to the HOST side.
+//
+// Measured on the shipped taxonomy: hostutil.NormalizeHost is ~50ns/0 allocs
+// against a ~124ns MatchesHost miss, i.e. the single largest removable term in
+// the probe, and it was being paid for a value every rule in one scan shares.
+//
+// The equivalence is exact and needs no idempotence argument: MatchesHost
+// normalizes once and calls this, so passing hostutil.NormalizeHost(host) here
+// computes the identical value from the identical input. Passing an
+// UN-normalized host is the one misuse to avoid — it does not merely cost more,
+// it can MISS a category whose index keys are canonical (a Unicode or
+// uppercase host), which for a Deny rule is a fail-open. Hence the two names:
+// the unsafe call does not typecheck as the safe one.
+func (s *Store) MatchesNormalizedHost(cat Category, host string) bool {
 	var keyBuf [maxInlineCategoryKey]byte
 	inlineKey, strKey, inlineOK := categoryKey(keyBuf[:], string(cat))
 
@@ -1149,7 +1180,16 @@ func (s *Store) MatchesHost(cat Category, host string) bool {
 // activation supersedes it. Same normalization + exact-then-suffix semantics as
 // MatchesHost.
 func (s *Store) MatchesHostAdmin(cat Category, host string) bool {
-	host = hostutil.NormalizeHost(host)
+	return s.MatchesNormalizedHostAdmin(cat, hostutil.NormalizeHost(host))
+}
+
+// MatchesNormalizedHostAdmin is MatchesHostAdmin for an already-normalized
+// host. See MatchesNormalizedHost for why the split exists and for the misuse
+// to avoid; this is the admin-index half of the same contract, and the
+// view-armed policy branch calls BOTH it and
+// effectiveCategoryView.MatchesNormalizedCategory per rule — so on that branch
+// the pre-split code normalized the same host TWICE per rule.
+func (s *Store) MatchesNormalizedHostAdmin(cat Category, host string) bool {
 	var keyBuf [maxInlineCategoryKey]byte
 	inlineKey, strKey, inlineOK := categoryKey(keyBuf[:], string(cat))
 
