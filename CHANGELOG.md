@@ -516,6 +516,50 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   egress-restricted deployment must allow the responder hosts named in its
   upstreams' certificates. See `docs/operator/ocsp-revocation-checking.md`.
 
+### Fixed
+
+- A Control Plane whose gRPC listener could not come up terminated the whole
+  appliance, and a Control Plane whose serve loop died reported itself healthy
+  (CHAOS-73). `initCluster` runs before `startAdminUI` and
+  `buildAndStartProxyServer`, and the boot path's only error branch was
+  `logFatalf` — so an occupied `-cp-grpc-addr`, or a `-cp-grpc-cert`/`-cp-grpc-key`
+  pair caught mid-rotation, took down the HTTP/HTTPS proxy, SOCKS5, the admin UI
+  and every health endpoint before any of them existed. Both triggers were
+  reproduced against the real binary: `exit 1` with the proxy, admin UI and
+  `/health` all unreachable, and under `restart: unless-stopped` an unattended
+  crash loop recoverable only with shell access. `validatePortCollisions`
+  compares Culvert's own three ports to each other only, so nothing else on the
+  host was visible to it.
+
+  The same error was already handled non-fatally by `enableControlPlane`'s two
+  other callers — the live admin API returns HTTP 500, and the HA promote path
+  stays standby and retries — which is what showed the fault to be survivable.
+
+  Separately, when the gRPC accept loop died on a non-recoverable fault the
+  goroutine logged one line and exited while `clusterRole.role` stayed
+  `"control-plane"`, `GET /api/cluster/status` kept reporting a healthy Control
+  Plane with its full enrolled-node list, and no Data Plane could fetch config,
+  enroll, renew a certificate or push audit events. The Data Plane side of that
+  link already reported `cp_poll`; the Control Plane side had nothing, so a
+  fleet in this state showed every DP failing and the CP perfectly healthy.
+
+  The listener now owns its lifecycle: no bind path is fatal, a bounded-rate
+  jittered rebind loop (1 s → 30 s, interruptible) retries, the certificate pair
+  is re-read on every attempt so a rotation self-heals with no restart, and a
+  serve-loop death is recorded and rebinds. `enableControlPlane` itself is
+  unchanged, because the HA promote path depends on its error to decide it is
+  not a leader. The ADR-0004 leadership resume is deferred behind the listener
+  rather than dropped or asserted early. New surfaces, all on the **proxy
+  port** because the gRPC port cannot report that it is unreachable: the
+  `cp_grpc_listener` diagnostics row with a per-class remedy, a report-only
+  `/ready cp_grpc` row, `/health cp_grpc`, `culvert_cp_grpc_*` metrics
+  (`serve_exits_total` among them), `cpGRPCStatus`/`cpGRPCServeExits` on
+  `GET /api/cluster/status`, and a new subscribable `cp_grpc_listener_down`
+  alert. Page on `culvert_cp_grpc_unavailable == 1`, not on `up == 0`. The one
+  state that still needs operator action is `tls_required` — no TLS material and
+  no `--cluster-insecure`, which nothing on the host will fix. See
+  `docs/operator/control-plane-grpc-listener.md`.
+
 ### Changed
 
 - The production image now cross-compiles the proxy and the bundled
