@@ -42,6 +42,7 @@ STACK_DIR="${CULVERT_FB_STACK_DIR:-/srv/culvert}"
 LOG="${CULVERT_FB_LOG:-/var/log/culvert-firstboot.log}"
 SUDOERS_DIR="${CULVERT_FB_SUDOERS_DIR:-/etc/sudoers.d}"
 MAINT_UNIT="${CULVERT_FB_MAINT_UNIT:-/etc/systemd/system/culvert-maint.service}"
+CLOUD_INIT_DISABLED="${CULVERT_FB_CLOUD_INIT_DISABLED:-/etc/cloud/cloud-init.disabled}"
 CONSOLE_USER="${CULVERT_FB_CONSOLE_USER:-culvert}"
 CONSOLE_HOME="${CULVERT_FB_CONSOLE_HOME:-/home/culvert}"
 BIN_DIR="${CULVERT_FB_BIN_DIR:-/opt/culvert-appliance/bin}"
@@ -391,6 +392,22 @@ step_finish() {
     console ""
   fi
   done_step complete
+  disable_cloud_init_after_firstboot
+}
+
+# cloud-init has done its per-instance work once first boot completes (user,
+# keys, password, hostname, network). On every later boot it still runs its
+# four stages and its datasource probe — about 13 s of a maintenance reboot
+# at ESXi-like disk latency (QEMU lab run 37389977929: 116.4 s -> 103.1 s).
+# Disable it from here on; culvert-appliance-reset-identity removes the marker
+# so a reset or a clone regenerates its identity through cloud-init again.
+# Best-effort: a failure costs boot time, never provisioning.
+disable_cloud_init_after_firstboot() {
+  if touch "$CLOUD_INIT_DISABLED" 2>/dev/null; then
+    log "cloud-init disabled for later boots ($CLOUD_INIT_DISABLED; reset-identity re-enables it)"
+  else
+    log "WARNING: could not write $CLOUD_INIT_DISABLED; cloud-init stays enabled (slower reboots)"
+  fi
 }
 
 # The local recovery credential (console) and the read-only operator key

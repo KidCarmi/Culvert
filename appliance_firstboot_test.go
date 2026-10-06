@@ -134,6 +134,7 @@ func (h *fbHarness) env() []string {
 		"CULVERT_FB_INSTALL_SH="+filepath.Join(h.root, "install.sh"),
 		"CULVERT_FB_LOG="+filepath.Join(h.root, "firstboot.log"),
 		"CULVERT_FB_MAINT_UNIT="+filepath.Join(h.root, "culvert-maint.service"),
+		"CULVERT_FB_CLOUD_INIT_DISABLED="+filepath.Join(h.root, "cloud-init.disabled"),
 		"APP_IMAGE_REPO=ghcr.io/kidcarmi/culvert", "APP_IMAGE_TAG=v0.0.0-test",
 	)
 }
@@ -1042,5 +1043,68 @@ func TestResetIdentity_ForgetsPerInstanceOperatorKeys(t *testing.T) {
 		if !strings.Contains(s, "rm -f") || !strings.Contains(s, m[1]) {
 			t.Errorf("reset does not remove %s (%s)", name, m[1])
 		}
+	}
+}
+
+// Boot time (ESXi recovery blocker): cloud-init has nothing left to do once
+// first boot completes, so step_finish disables it for later boots — after
+// the completion marker, never before (an unfinished first boot must keep
+// cloud-init for its retry).
+func TestFirstBoot_FinishDisablesCloudInitAfterCompletion(t *testing.T) {
+	h := newFBHarness(t)
+	marker := filepath.Join(h.root, "cloud-init.disabled")
+	out, code := h.run("step_finish")
+	if code != 0 {
+		t.Fatalf("step_finish failed (%d):\n%s", code, out)
+	}
+	if !h.exists("appliance/state/complete.done") {
+		t.Fatal("step_finish did not record completion")
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("cloud-init was not disabled after first boot completed: %v\n%s", err, out)
+	}
+	src, err := os.ReadFile(fbScript)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := string(src)
+	fin := body[strings.Index(body, "step_finish() {"):]
+	fin = fin[:strings.Index(fin, "\n}\n")]
+	if strings.Index(fin, "done_step complete") > strings.Index(fin, "disable_cloud_init_after_firstboot") {
+		t.Fatal("cloud-init must be disabled only AFTER the completion marker is written")
+	}
+}
+
+// An unwritable marker costs boot time only; it must never fail provisioning.
+func TestFirstBoot_CloudInitDisableFailureIsNotFatal(t *testing.T) {
+	h := newFBHarness(t)
+	out, code := h.run("CLOUD_INIT_DISABLED=" + filepath.Join(h.root, "missing-dir", "cloud-init.disabled") + "; step_finish")
+	if code != 0 {
+		t.Fatalf("an unwritable cloud-init marker failed first boot (%d):\n%s", code, out)
+	}
+	if !strings.Contains(out, "cloud-init stays enabled") {
+		t.Fatalf("the failure must be logged:\n%s", out)
+	}
+}
+
+// reset-identity must re-enable cloud-init, or a reset/cloned appliance would
+// boot with no identity regeneration (no host keys, no imported keys).
+func TestResetIdentity_ReenablesCloudInit(t *testing.T) {
+	b, err := os.ReadFile(filepath.Join(pkgSourceDir(), "appliance", "provision", "culvert-appliance-reset-identity"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(b)
+	rm := strings.Index(s, "rm -f /etc/cloud/cloud-init.disabled")
+	clean := strings.Index(s, "cloud-init clean")
+	if rm < 0 || clean < 0 || rm > clean {
+		t.Fatal("reset-identity must remove /etc/cloud/cloud-init.disabled before cloud-init clean")
+	}
+	fb, err := os.ReadFile(fbScript)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(fb), `CLOUD_INIT_DISABLED="${CULVERT_FB_CLOUD_INIT_DISABLED:-/etc/cloud/cloud-init.disabled}"`) {
+		t.Fatal("first boot and reset-identity must agree on the cloud-init marker path")
 	}
 }

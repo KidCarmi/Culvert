@@ -25,6 +25,9 @@ echo "CLEARS the local console password and re-arms the first-boot console/netwo
 echo "operator-key steps, then POWERS OFF. Application data is kept. The next boot"
 echo "(of this VM or of a clone) prints a new one-time console password."
 read -rp "Continue? [y/N] " a; [[ "${a,,}" == y ]] || exit 1
+# First boot disables cloud-init once provisioning completes (boot time); the
+# reset must re-enable it, or the next boot would regenerate no identity.
+rm -f /etc/cloud/cloud-init.disabled
 cloud-init clean --logs --machine-id 2>/dev/null || { truncate -s 0 /etc/machine-id; rm -rf /var/lib/cloud/instances /var/lib/cloud/instance; }
 rm -f /etc/ssh/ssh_host_*
 rm -f "$STATE/ovf.done" "$STATE/console.done" "$STATE/access.done" "$STATE/complete.done"

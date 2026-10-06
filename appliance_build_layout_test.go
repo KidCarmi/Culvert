@@ -82,3 +82,56 @@ func TestPrepareGuest_SSHPolicyValidationNeedsNoImageHostKey(t *testing.T) {
 		t.Fatalf("sshd -T with a throwaway key failed: %v %s", err, out)
 	}
 }
+
+// Boot time (ESXi recovery blocker): the image carries the measured 4 MiB
+// read-ahead for whole disks of every bus a supported hypervisor presents.
+func TestPrepareGuest_InstallsReadAheadRule(t *testing.T) {
+	ps, err := os.ReadFile("appliance/build/prepare-guest.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(ps), `install -m 0644 "$APPL/provision/60-culvert-readahead.rules" /etc/udev/rules.d/60-culvert-readahead.rules`) {
+		t.Fatal("prepare-guest.sh does not install the read-ahead rule")
+	}
+	rule, err := os.ReadFile("appliance/provision/60-culvert-readahead.rules")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := string(rule)
+	for _, want := range []string{`ENV{DEVTYPE}=="disk"`, `ATTR{queue/read_ahead_kb}="4096"`, "sd*", "vd*", "nvme*n*"} {
+		if !strings.Contains(r, want) {
+			t.Errorf("read-ahead rule lacks %q", want)
+		}
+	}
+}
+
+// Every provisioning file prepare-guest.sh installs from $APPL/provision must
+// be one build-ova.sh copies into the image, or the OVA build dies inside the
+// guest with "No such file".
+func TestBuildOVA_CopiesEveryProvisionFilePrepareGuestInstalls(t *testing.T) {
+	ps, err := os.ReadFile("appliance/build/prepare-guest.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bo, err := os.ReadFile("appliance/build/build-ova.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	copied := map[string]bool{}
+	loop := regexp.MustCompile(`(?s)for runtime_file in (.*?); do\s+\[\[ -f "\$REPO/appliance/provision/`).FindSubmatch(bo)
+	if loop == nil {
+		t.Fatal("build-ova.sh provisioning copy loop not found")
+	}
+	for _, f := range strings.Fields(strings.ReplaceAll(string(loop[1]), "\\", " ")) {
+		copied[f] = true
+	}
+	refs := regexp.MustCompile(`\$APPL/provision/([A-Za-z0-9._-]+)`).FindAllStringSubmatch(string(ps), -1)
+	if len(refs) < 3 {
+		t.Fatalf("found only %d provisioning references in prepare-guest.sh; the scan is not matching", len(refs))
+	}
+	for _, m := range refs {
+		if !copied[m[1]] {
+			t.Errorf("prepare-guest.sh installs %s but build-ova.sh does not copy it into the image", m[1])
+		}
+	}
+}

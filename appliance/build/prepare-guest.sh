@@ -198,6 +198,9 @@ install -m 0644 "$APPL/provision/sshd-50-culvert.conf" /etc/ssh/sshd_config.d/50
 # ones an appliance import can present, password SSH disabled.
 install -m 0644 "$APPL/provision/cloud-90-culvert.cfg" /etc/cloud/cloud.cfg.d/90-culvert-appliance.cfg
 
+# Boot/recovery time: 4 MiB read-ahead on whole disks (measured, see the rule).
+install -m 0644 "$APPL/provision/60-culvert-readahead.rules" /etc/udev/rules.d/60-culvert-readahead.rules
+
 # OS maintenance: security pocket only, no automatic reboot.
 install -m 0644 "$APPL/os-maintenance/50unattended-upgrades-culvert" /etc/apt/apt.conf.d/50unattended-upgrades-culvert
 install -m 0644 "$APPL/os-maintenance/20auto-upgrades-culvert"       /etc/apt/apt.conf.d/20auto-upgrades-culvert
