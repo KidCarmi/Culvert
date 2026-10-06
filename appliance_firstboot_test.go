@@ -1067,10 +1067,15 @@ func TestFirstBoot_FinishDisablesCloudInitAfterCompletion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	body := string(src)
-	fin := body[strings.Index(body, "step_finish() {"):]
-	fin = fin[:strings.Index(fin, "\n}\n")]
-	if strings.Index(fin, "done_step complete") > strings.Index(fin, "disable_cloud_init_after_firstboot") {
+	_, fin, ok := strings.Cut(string(src), "step_finish() {")
+	if ok {
+		fin, _, ok = strings.Cut(fin, "\n}\n")
+	}
+	if !ok {
+		t.Fatal("step_finish() not found in the first-boot script")
+	}
+	done, disable := strings.Index(fin, "done_step complete"), strings.Index(fin, "disable_cloud_init_after_firstboot")
+	if done < 0 || disable < 0 || done > disable {
 		t.Fatal("cloud-init must be disabled only AFTER the completion marker is written")
 	}
 }
