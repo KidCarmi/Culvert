@@ -182,6 +182,7 @@ func buildOperatorContract() OperatorContract {
 		checkSyslogFeed(),
 		checkMemoryBackstop(),
 		checkRewriteIdentity(),
+		checkReleaseVerifyPosture(),
 	}
 	// Cluster (enrollment) CA — CHAOS-50. Contributes nothing on a node with no
 	// cluster CA, so it never adds a row to a single-node appliance's report.
