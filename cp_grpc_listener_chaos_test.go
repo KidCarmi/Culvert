@@ -30,6 +30,7 @@ import (
 	"math/big"
 	"net"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -294,7 +295,7 @@ func TestChaos73_DefectCertificateIsReReadOnEveryAttempt(t *testing.T) {
 // reason to believe the defect cannot come back.
 func TestChaos73_WallTheTransportAnnouncementIsNotPerAttempt(t *testing.T) {
 	fset := token.NewFileSet()
-	f, err := parser.ParseFile(fset, "controlplane_server.go", nil, parser.ParseComments)
+	f, err := parser.ParseFile(fset, filepath.Join(pkgSourceDir(), "controlplane_server.go"), nil, parser.ParseComments)
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
@@ -405,6 +406,104 @@ func TestChaos73_DefectFailureLogIsRateLimited(t *testing.T) {
 	suppressed := noteCPGRPCServing()
 	if suppressed != 19 {
 		t.Errorf("suppressed count reported at recovery = %d, want 19", suppressed)
+	}
+}
+
+// TestChaos73_DefectServeExitDuringAnAttemptIsNotSwallowed pins a hole this
+// sweep found in its OWN fix, in self-review before the push.
+//
+// `armCPGRPCRecovery` returns false when a loop is already running — correct, to
+// stop two loops fighting over one listener. But a serve-loop exit that arrives
+// while the live loop is INSIDE an attempt was then dropped on the floor: the
+// loop returned on its own successful bind, and the exit that landed in between
+// left a listener whose serve loop is dead with every surface reporting ready.
+// That is this sweep's own headline finding (a dead serve loop reporting
+// healthy) reintroduced by the mechanism that fixes it — the class §30, §33 and
+// §36 each record hitting inside their own remedy.
+//
+// An arm request is therefore LATCHED (`pending`) rather than dropped, and the
+// loop re-checks it before returning.
+func TestChaos73_DefectServeExitDuringAnAttemptIsNotSwallowed(t *testing.T) {
+	cpChaosSetup(t)
+	noteCPGRPCConfigured("127.0.0.1:50051")
+
+	var attempts atomic.Int64
+	armedDuringAttempt := make(chan struct{}, 1)
+	cpGRPCRecoveryAttempt = func() error {
+		n := attempts.Add(1)
+		if n == 1 {
+			// Simulate the serve goroutine dying WHILE this first attempt is in
+			// flight: it calls armCPGRPCRecovery, which sees a loop already
+			// running and spawns nothing.
+			noteCPGRPCServeExit()
+			if armed := armCPGRPCRecovery(); armed {
+				t.Error("armCPGRPCRecovery spawned a SECOND loop while one was running")
+			}
+			select {
+			case armedDuringAttempt <- struct{}{}:
+			default:
+			}
+		}
+		return nil // both attempts "bind" successfully
+	}
+
+	if !armCPGRPCRecovery() {
+		t.Fatal("the first arm should have started a loop")
+	}
+	select {
+	case <-armedDuringAttempt:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the loop never ran its first attempt")
+	}
+
+	// The loop must NOT settle after one attempt: the latched request means it
+	// has to rebind. The backoff makes that a short wait, so poll.
+	deadline := time.Now().Add(20 * time.Second)
+	for time.Now().Before(deadline) {
+		if attempts.Load() >= 2 {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if got := attempts.Load(); got < 2 {
+		t.Fatalf("attempts = %d, want >= 2 — the serve exit that arrived during the first attempt was SWALLOWED, "+
+			"leaving a dead serve loop with every surface reporting ready", got)
+	}
+	if snap := cpGRPCListenerState(); snap.ServeExits != 1 {
+		t.Errorf("serve exits = %d, want 1", snap.ServeExits)
+	}
+}
+
+// TestChaos73_ControlNoOutstandingRequestMeansTheLoopSettles is the control for
+// the gate above: the cheapest way to pass it is to make the loop never return,
+// which would leave a goroutine rebinding forever on every healthy node.
+func TestChaos73_ControlNoOutstandingRequestMeansTheLoopSettles(t *testing.T) {
+	cpChaosSetup(t)
+	noteCPGRPCConfigured("127.0.0.1:50051")
+
+	var attempts atomic.Int64
+	cpGRPCRecoveryAttempt = func() error {
+		attempts.Add(1)
+		return nil
+	}
+	if !armCPGRPCRecovery() {
+		t.Fatal("expected a loop to start")
+	}
+
+	// Give it well past one backoff interval to prove it does NOT attempt again.
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if attempts.Load() > 1 {
+			t.Fatalf("the loop attempted %d times with no outstanding rebind request — it never settles, "+
+				"so a healthy node carries a goroutine rebinding forever", attempts.Load())
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if attempts.Load() != 1 {
+		t.Errorf("attempts = %d, want exactly 1", attempts.Load())
+	}
+	if cpGRPCRebindRequested() {
+		t.Error("a rebind request is still outstanding after a clean recovery")
 	}
 }
 
@@ -720,9 +819,14 @@ func TestChaos73_ClassifiersShareOneSocketVocabulary(t *testing.T) {
 // gateway that cannot serve must exit loudly rather than linger as a black
 // hole. That asymmetry is the whole finding.
 func TestChaos73_WallNoListenerPathIsFatal(t *testing.T) {
+	// Anchored to the package source dir, never CWD-relative: a concurrent
+	// os.Chdir in another test would otherwise make this wall read the wrong
+	// file and flake (pinned repo-wide by TestTestFileReadsAreCWDIndependent,
+	// which caught exactly this in the first version of this suite).
+	dir := pkgSourceDir()
 	files := []string{"cluster_startup.go", "controlplane_server.go", "cp_grpc_recovery.go", "cp_grpc_health.go"}
 	for _, f := range files {
-		src, err := os.ReadFile(f)
+		src, err := os.ReadFile(filepath.Join(dir, f))
 		if err != nil {
 			t.Fatalf("read %s: %v", f, err)
 		}
@@ -739,7 +843,7 @@ func TestChaos73_WallNoListenerPathIsFatal(t *testing.T) {
 	// NOT VACUOUS: the one remaining logFatalf in cluster_startup.go is the HA
 	// LEASE, which is deliberately fatal (a requested fence that cannot be
 	// built must not silently run legacy), so the file must still contain one.
-	src, err := os.ReadFile("cluster_startup.go")
+	src, err := os.ReadFile(filepath.Join(dir, "cluster_startup.go"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -758,7 +862,8 @@ func TestChaos73_WallNoListenerPathIsFatal(t *testing.T) {
 // of them drifted.
 func TestChaos73_WallOneCopyOfTheSocketClassifier(t *testing.T) {
 	fset := token.NewFileSet()
-	names, err := os.ReadDir(".")
+	dir := pkgSourceDir() // anchored, never CWD-relative (see the wall above)
+	names, err := os.ReadDir(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -768,7 +873,7 @@ func TestChaos73_WallOneCopyOfTheSocketClassifier(t *testing.T) {
 		if !strings.HasSuffix(n, ".go") || strings.HasSuffix(n, "_test.go") {
 			continue
 		}
-		f, err := parser.ParseFile(fset, n, nil, 0)
+		f, err := parser.ParseFile(fset, filepath.Join(dir, n), nil, 0)
 		if err != nil {
 			continue
 		}

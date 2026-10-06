@@ -186,6 +186,17 @@ behaviour predates CHAOS-73 and is deliberately untouched.
 
 ---
 
+## If a serve loop dies and comes back
+
+`culvert_cp_grpc_serve_exits_total` increments and the listener rebinds. A node
+whose listener dies immediately after each successful bind escalates its backoff
+monotonically rather than resetting it, so the pathological case is bounded at
+one bind attempt per 30 s rather than a tight bind-die-bind loop. The
+`/api/diagnostics` row keeps the serve-exit count visible after recovery, which
+is how you tell "one blip at 03:00" from "this has happened forty times".
+
+---
+
 ## What is still a real restart
 
 - `tls_required` — a configuration refusal. Nothing on the host will change to

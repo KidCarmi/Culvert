@@ -8568,17 +8568,49 @@ both halves: `cpServerOption` contains no logging call, and the announcement's
 source position is AFTER the `Listen`. **A gate that passes against the defect is
 worse than no gate** — it is the reason to believe the defect cannot come back.
 
+### TWO MORE DEFECTS, BOTH FOUND IN SELF-REVIEW OF THIS DIFF
+
+Found by re-reading the diff adversarially before the push, which is the step
+this register requires and which is the only reason neither is in the shipped
+change.
+
+**A swallowed serve exit — this sweep's own headline finding, reintroduced by
+the mechanism that fixes it.** `armCPGRPCRecovery` returns false when a loop is
+already running (correct — two loops fighting over one listener is worse). But a
+serve-loop exit arriving while the live loop is INSIDE an attempt was dropped on
+the floor: the loop returned on its own successful bind, and the exit that landed
+in between left a listener whose serve loop is dead with every surface reporting
+ready. That is CP-4 exactly, re-created by the remedy for CP-4 — the class §30,
+§33 and §36 each record hitting inside their own fix. An arm request is now
+LATCHED (`pending`) rather than dropped, and the loop re-checks it before
+returning. On that path the backoff is deliberately **not** reset, which is §36's
+rule: resetting on every successful bind lets a socket that dies immediately
+after each bind settle into a permanent one-bind-per-floor cadence, while
+monotonic escalation bounds the pathological case at one attempt per ceiling.
+Its CONTROL is the cheapest wrong fix — a loop that never returns, leaving every
+healthy node carrying a goroutine that rebinds forever.
+
+**A data race on `clusterRole.grpcSrv`.** `retryControlPlaneGRPC` compared the
+stale server against `clusterRole.grpcSrv` *after* releasing `clusterRoleMu`, on
+a field three paths write. The new server is now captured under the lock. Worth
+recording rather than silently fixing because `-race` would not have caught it:
+nothing in the test binary drives two concurrent CP listener transitions, so the
+race is real in production and invisible to the gates — the same reason §40's
+TOCTOU-on-an-atomic had to be pinned structurally rather than behaviourally.
+
 ### Gates
 
-`cp_grpc_listener_chaos_test.go` (13). Nine mutations each verified failing
+`cp_grpc_listener_chaos_test.go` (15). Twelve mutations each verified failing
 against the shape they target: the serve-exit observer gutted, the
 `network_error` branch unqualified (which fails for all **three** planes at once
 — the shared-copy payoff), the per-attempt announcement reinstated, the
 announcement moved before the `Listen`, a refuse-everything status, rows emitted
 on a non-CP node, one remedy printed for every reason class, recovery declared on
-elapsed time, and the fatal boot branch reinstated.
+elapsed time, the fatal boot branch reinstated, the pending-rebind latch
+dropped, the loop made never to settle, and the fatal branch re-checked after
+the structural walls were anchored to `pkgSourceDir()`.
 
-Six CONTROLS, because the cheapest way to pass every defect gate is to stop
+Seven CONTROLS, because the cheapest way to pass every defect gate is to stop
 asserting leadership and stop reporting anything, which would delete HA and the
 whole plane while leaving a green suite: a healthy CP must be silent; a non-CP
 node must grow no rows; the `/ready` row must not change the AGGREGATE verdict

@@ -74,6 +74,21 @@ var cpGRPCRecovery struct {
 	// the boot path AND from the serve-exit observer, which can both be live on
 	// a node that bound, fell over, and is now rebinding.
 	running bool
+	// pending is why `running` alone is not enough, and the hole it closes was
+	// found in self-review before the push.
+	//
+	// A serve-loop exit calls armCPGRPCRecovery. If a loop is already running
+	// — specifically, if it is INSIDE an attempt — the old code returned false
+	// and spawned nothing, the live loop then returned on its own successful
+	// bind, and the exit that arrived in between was SWALLOWED: no rebind, and
+	// the surfaces left describing a listener whose serve loop is dead. That is
+	// this sweep's own finding (a dead serve loop reporting healthy)
+	// reintroduced by the mechanism that fixes it, which is the class §30, §33
+	// and §36 each record hitting inside their own remedy.
+	//
+	// So an arm request is LATCHED rather than dropped, and the loop re-checks
+	// it before returning.
+	pending bool
 	// onRecovered is the run-once continuation described on cpGRPCOnRecovered.
 	onRecovered func()
 }
@@ -82,6 +97,9 @@ var cpGRPCRecovery struct {
 // Returns false when a loop was already live (the caller has nothing to do).
 func armCPGRPCRecovery() bool {
 	cpGRPCRecovery.mu.Lock()
+	// Latched unconditionally: a live loop that is mid-attempt must not be able
+	// to return while this request is outstanding (see the `pending` note).
+	cpGRPCRecovery.pending = true
 	if cpGRPCRecovery.running {
 		cpGRPCRecovery.mu.Unlock()
 		return false
@@ -121,7 +139,26 @@ func resetCPGRPCRecoveryForTest() {
 	cpGRPCRecovery.stopCh = nil
 	cpGRPCRecovery.closed = false
 	cpGRPCRecovery.running = false
+	cpGRPCRecovery.pending = false
 	cpGRPCRecovery.onRecovered = nil
+}
+
+// takeCPGRPCPending consumes the outstanding rebind request, returning whether
+// there was one. Called at the top of each iteration so a request that arrives
+// DURING an attempt is still visible after it.
+func takeCPGRPCPending() bool {
+	cpGRPCRecovery.mu.Lock()
+	defer cpGRPCRecovery.mu.Unlock()
+	had := cpGRPCRecovery.pending
+	cpGRPCRecovery.pending = false
+	return had
+}
+
+// cpGRPCRebindRequested reports an outstanding request without consuming it.
+func cpGRPCRebindRequested() bool {
+	cpGRPCRecovery.mu.Lock()
+	defer cpGRPCRecovery.mu.Unlock()
+	return cpGRPCRecovery.pending
 }
 
 // cpGRPCOnRecovered registers a continuation to run ONCE, on the recovery
@@ -206,6 +243,11 @@ func runCPGRPCRecoveryLoop(stop <-chan struct{}) {
 		default:
 		}
 
+		// Consume the outstanding request BEFORE attempting, so a serve exit
+		// that lands while this attempt is in flight re-arms it and is seen by
+		// the check below rather than being lost.
+		takeCPGRPCPending()
+
 		err := cpGRPCAttempt()
 		if err == nil {
 			// Recovery is declared on OBSERVED evidence — a listener that
@@ -220,7 +262,24 @@ func runCPGRPCRecoveryLoop(stop <-chan struct{}) {
 			if fn := takeCPGRPCOnRecovered(); fn != nil {
 				fn()
 			}
-			return
+			if !cpGRPCRebindRequested() {
+				return
+			}
+			// A serve exit landed during the attempt. Keep going — and do NOT
+			// reset the backoff, which is §36's rule: resetting on every
+			// successful bind lets a socket that dies immediately after each
+			// bind settle into a permanent one-bind-per-floor cadence, whereas
+			// monotonic escalation bounds that pathological case at one
+			// attempt per cpGRPCListenBackoffMax.
+			logger.Printf("ControlPlane gRPC: a serve-loop exit arrived while rebinding — continuing to rebind")
+			if !haSleepInterruptible(stop, jitterDuration(backoff, cpGRPCListenJitter)) {
+				noteCPGRPCStopped()
+				return
+			}
+			if backoff *= 2; backoff > cpGRPCListenBackoffMax {
+				backoff = cpGRPCListenBackoffMax
+			}
+			continue
 		}
 
 		reason := classifyCPGRPCListenError(err)
@@ -286,6 +345,12 @@ func retryControlPlaneGRPC() error {
 	// the life of the process.
 	stale := clusterRole.grpcSrv
 	err := StartControlPlaneGRPC(addr, certFile, keyFile, caFile)
+	// Captured UNDER the lock. Reading clusterRole.grpcSrv after the unlock to
+	// compare against `stale` would be a data race on a field three other
+	// paths write (enableControlPlane, this function, and the HA promote
+	// callback through the first) — found in self-review before the push,
+	// which is the only reason it is not in the shipped diff.
+	fresh := clusterRole.grpcSrv
 	if err == nil {
 		clusterRole.role = "control-plane"
 		clusterRole.grpcAddr = addr
@@ -295,7 +360,7 @@ func retryControlPlaneGRPC() error {
 	}
 	clusterRoleMu.Unlock()
 
-	if err == nil && stale != nil && stale != clusterRole.grpcSrv {
+	if err == nil && stale != nil && stale != fresh {
 		go stale.Stop()
 	}
 	if err != nil {
