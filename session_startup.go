@@ -32,7 +32,12 @@ func loadSession(cfg sessionStartupConfig) error {
 	}
 
 	if cfg.TimeoutHours > 0 {
-		SetSessionTTL(time.Duration(cfg.TimeoutHours) * time.Hour)
+		// Clamp BEFORE converting: a CLI value never passes FileConfig's 1-168
+		// check, and hours*time.Hour wraps int64 past ~2.5M hours, which would
+		// land on the 15-minute floor instead of the 168h ceiling.
+		const maxTimeoutHours = 168
+		hrs := min(cfg.TimeoutHours, maxTimeoutHours)
+		SetSessionTTL(time.Duration(hrs) * time.Hour)
 		logger.Printf("Session: timeout %dh", cfg.TimeoutHours)
 	}
 	return nil
