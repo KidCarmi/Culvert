@@ -41,12 +41,27 @@ import "strings"
 // category-group scope — the common deployment — computes nothing and the
 // scratch stays a zeroed stack value.
 //
-// The per-CATEGORY halves are deliberately NOT memoized. catStore.MatchesHost /
-// MatchesHostAdmin depend on the rule's category as well as the host, and they
-// are index lookups (O(labels)), not scans — memoizing them would trade a cheap
-// map probe for a map allocation.
+// The per-CATEGORY halves are deliberately NOT memoized, and that is still the
+// right call: the membership PROBE depends on the rule's category as well as the
+// host, and it is an index lookup (O(labels)), not a scan — memoizing it would
+// trade a cheap map probe for a map allocation.
+//
+// But "not memoizable" was true of the probe and NOT of everything the probe
+// did. Each of the three matchers normalized its own host argument, and the
+// normalized host depends only on the REQUEST — so the per-rule call carried a
+// request-invariant ~50ns (twice per rule on the view-armed branch) inside a
+// function correctly documented as having nothing left to hoist. The hoist is
+// normHost(); the probe itself is untouched.
+//
+// The transferable rule: "this value depends on the rule" is a claim about the
+// function's RESULT, and it does not license skipping the question for each
+// input the function derives on the way there. Decompose the callee before
+// concluding a per-rule call has no request-invariant work in it.
 type hostCatScratch struct {
 	host string
+
+	normHostSet bool
+	normHostVal string
 
 	viewSet bool
 	view    *effectiveCategoryView
@@ -69,6 +84,42 @@ type hostCatScratch struct {
 // request; the non-scan callers (matchDest, the admin URL-lookup API) build a
 // throwaway one and are byte-identical to the pre-hoist behaviour.
 func newHostCatScratch(host string) hostCatScratch { return hostCatScratch{host: host} }
+
+// normHost returns the IDNA-canonical form of the scratch's host, computed at
+// most once per scan.
+//
+// It is the HOST-side member of the same class as every other hoist in this
+// file: hostutil.NormalizeHost depends on the REQUEST, not on the rule, so
+// deriving it inside the rule loop multiplied a fixed cost by the rule count.
+// It was being derived there because the three membership matchers each
+// normalized their own argument — individually correct, and the right contract
+// for their other callers, which is why the fix is a second entry point on each
+// (MatchesNormalizedHost / MatchesNormalizedHostAdmin /
+// MatchesNormalizedCategory) rather than a change to what any existing caller
+// does.
+//
+// Measured against a marginal per-rule category-scan cost of ~88ns: ~50ns for a
+// CANONICAL authority, where NormalizeHost is a byte scan and allocates nothing.
+// For a NON-CANONICAL one (an uppercase authority or a trailing dot — both
+// legal) strings.ToLower must build a new string, so every per-rule
+// normalization was ALSO a heap allocation. On the view-ARMED branch the cost
+// was paid TWICE per rule (catStore admin index, then the effective view), so a
+// 200-rule armed scan charged 400 allocations and 12.8 KB to one request. See
+// policy_hostcat_normhost_bench_test.go, which benchmarks both host shapes
+// because each shows only one of the two axes.
+//
+// Lazy, like every other field here: a scan whose rules carry no category or
+// category-group scope — the common deployment — never calls this, and the
+// scratch stays a zeroed stack value. Memoizing the result is sound where
+// memoizing a per-category probe is not, precisely because this value does not
+// depend on the rule.
+func (sc *hostCatScratch) normHost() string {
+	if !sc.normHostSet {
+		sc.normHostVal = normalizeHost(sc.host)
+		sc.normHostSet = true
+	}
+	return sc.normHostVal
+}
 
 // effectiveView returns the signed-feed effective category view, loading the
 // atomic pointer at most once per scan. nil means the lifecycle is unarmed (the
@@ -139,14 +190,14 @@ func (sc *hostCatScratch) resolveFusion() (category, tier, matchedBy string) {
 			return name, "admin", pattern
 		}
 		if c, ok := sc.viewLookup(); ok {
-			return c, "saas", normalizeHost(sc.host)
+			return c, "saas", sc.normHost()
 		}
 	} else if name, pattern, ok := catStore.LookupHost(sc.host); ok {
 		return name, "admin", pattern
 	}
 
 	// Layer 2: community BadgerDB feed.
-	h := normalizeHost(sc.host)
+	h := sc.normHost()
 	if communityDB != nil {
 		if foundCat, ok := sc.communityLookup(); ok {
 			return foundCat, "community", h
@@ -161,7 +212,7 @@ func (sc *hostCatScratch) resolveFusion() (category, tier, matchedBy string) {
 // falls through to the UT1 layer.
 func (sc *hostCatScratch) matchesCategory(cat URLCategory) bool {
 	if view := sc.effectiveView(); view != nil {
-		if catStore.MatchesHostAdmin(cat, sc.host) {
+		if catStore.MatchesNormalizedHostAdmin(cat, sc.normHost()) {
 			return true
 		}
 		// MEMBERSHIP, not classification. sc.viewLookup answers "what is this
@@ -179,10 +230,10 @@ func (sc *hostCatScratch) matchesCategory(cat URLCategory) bool {
 		//
 		// Still not a short-circuit: a non-match must fall through to the UT1
 		// layer, matching the original cross-layer OR semantics.
-		if view.MatchesCategory(string(cat), sc.host) {
+		if view.MatchesNormalizedCategory(string(cat), sc.normHost()) {
 			return true
 		}
-	} else if catStore.MatchesHost(cat, sc.host) {
+	} else if catStore.MatchesNormalizedHost(cat, sc.normHost()) {
 		return true
 	}
 	// Layer 2: community BadgerDB feed — domain-walking point lookups.
