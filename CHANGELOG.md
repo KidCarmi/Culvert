@@ -573,6 +573,56 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Performance
 
+- The normalized destination host is now derived **once per rule scan** instead
+  of once per category-scoped rule. `hostCatScratch.matchesCategory` runs once
+  per category-scoped access rule per proxied request — from both the Stage-2
+  policy scan and Stage-1 auth matching — and reached up to three membership
+  matchers, each of which normalized its own host argument. On the
+  signed-feed-armed branch two of them run per rule, so that posture normalized
+  one request host **twice per rule**.
+
+  The normalized host depends on the request, not on the rule, so a fixed
+  per-request cost was being multiplied by the rule count. Each matcher
+  normalizing its own input is individually correct and is the right contract
+  for its other callers, so each gained a second entry point for an
+  already-canonical host (`urlcat.Store.MatchesNormalizedHost`,
+  `MatchesNormalizedHostAdmin`, `effectiveCategoryView.MatchesNormalizedCategory`)
+  and kept the raw-host method as a one-line wrapper. Behaviour is unchanged:
+  `MatchesHost` is now literally "normalize, then call the normalized form", so
+  the equivalence needs no idempotence argument.
+
+  The saving has **two axes and each host representation shows only one**, so
+  both are reported (4-core Xeon @2.80GHz, every pair timed in one run against a
+  verbatim frozen copy of the pre-hoist body, medians of n=3, at 10/50/200
+  category-scoped rules). With a **canonical** authority — the common shape,
+  where `NormalizeHost` is a byte scan that allocates nothing — the gain is CPU
+  only: **−28% / −45% / −54%** unarmed and **−36% / −45% / −45%** armed, 0
+  allocations on both sides. With a **non-canonical** authority (an uppercase
+  authority or a trailing dot, both legal, where `strings.ToLower` must build a
+  new string so every per-rule normalization was also a heap allocation):
+  **−48% / −71% / −74%** unarmed at 10/50/200 allocations → 1, and **−59% /
+  −70% / −72%** armed at 20/100/400 allocations → 1. At 200 armed rules that is
+  **400 allocations and 12.8 KB per request becoming 1 allocation and 32 B**, in
+  the request goroutine, on a gateway whose GC mark cost is per object.
+
+  A CPU profile is what made this reachable, and it **falsified the hypothesis
+  recorded for this path**: the note predicted `urlcat`'s per-call `RLock` was
+  the ceiling (by analogy with four subsystems where it genuinely is), but the
+  lock is ~9% of the pre-split miss path against ~31% for `NormalizeHost` and
+  ~38% for the suffix walk, and the parallel curve is flat rather than
+  ceilinged. That note is corrected in place; the lock remains a real
+  second-order residual and is deliberately left untouched.
+
+  Gates: differentials against the verbatim pre-hoist bodies in both view
+  postures (with not-vacuous checks requiring that the corpus changes under
+  normalization *and* that feeding raw input is observably different — that
+  misuse is a fail-open for a Deny rule), a structural proof that each of the
+  three call sites reads the hoisted value, an allocation gate asserting
+  flatness in rule count rather than a number, same-run ratio cost gates over
+  both host shapes, randomized sweeps and a fuzz target. Seven mutations were
+  each verified failing against the gate that targets them; three of them
+  exposed defects in the gates rather than the code.
+
 - The threat feed's full-URL check no longer re-parses a URL it was handed
   already parsed. `preDispatchBlocked` runs it on every forwarded plain-HTTP
   request, on the request goroutine, before the policy engine — and called it
