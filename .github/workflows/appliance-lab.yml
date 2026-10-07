@@ -53,7 +53,7 @@ jobs:
   guest-boot:
     name: "Lab · ${{ matrix.variant }} OVA: build + QEMU guest boot + qualify"
     # A push whose head commit says [fdisk-only] reruns F-DISK-1 alone.
-    if: ${{ !contains(github.event.head_commit.message, '[fdisk-only]') }}
+    if: ${{ !contains(github.event.head_commit.message, '[fdisk-only]') && !contains(github.event.head_commit.message, '[sidecar-scan]') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 240
     strategy:
@@ -436,6 +436,7 @@ jobs:
 
   f-disk-1:
     name: "Lab · F-DISK-1 on the bounded nested-Docker host"
+    if: ${{ !contains(github.event.head_commit.message, '[sidecar-scan]') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     steps:
@@ -520,4 +521,140 @@ jobs:
             ${{ runner.temp }}/fdisk1/**/checks.jsonl
             ${{ runner.temp }}/fdisk1/**/diagnose.log
           retention-days: 30
+          if-no-files-found: warn
+
+  # ASTRA (#1528): the Deep gate scans a sidecar it builds itself
+  # (config 3f6a669b…); the OVA ships the archive baked at OVA build time
+  # (config 098ca807…). Same tag, different bytes: a coverage gap. This job
+  # scans the EXACT archive inside the retained candidate OVA, never a
+  # rebuild: OVA sha → archive sha → OCI index → amd64 manifest → config,
+  # every link re-hashed, then the Deep gate's own Trivy gate plus a full
+  # all-severity record and an SBOM, bound to that config by Trivy's ImageID.
+  # Runs only when the head commit says [sidecar-scan].
+  ova-sidecar-scan:
+    name: "Lab · retained OVA's baked ClamAV sidecar: exact-byte scan + SBOM"
+    if: ${{ contains(github.event.head_commit.message, '[sidecar-scan]') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      OVA_ARTIFACT_ID: "11475581263"   # appliance-lab-ova-candidate-2e3bcc2a1095, run 37606237892
+      OVA_SHA256: 55e98116ba2c020789b3f5de4eabab7e29af611c83b9c972b82a6319a19f145e
+      SIDECAR_ARCHIVE_SHA256: 603c165c35141aed67667dffbc09132664feadd74dfcabbfc7e109b4dbecffa6
+      SIDECAR_INDEX: sha256:f3fcbf45d0a50da7e1880e498a030e38b1cd31d792a2737a881ebe8391b13ec3
+      SIDECAR_MANIFEST: sha256:be3827e2327c5e51c695c7fe934133f0433c8baa9a7b3ea03e2cdb9ea5d1331c
+      SIDECAR_CONFIG: sha256:098ca807895db86476681c9ad1aba7856261c787b87fe7c13aadc7f68c483302
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Workspace + libguestfs (read-only disk access)
+        run: |
+          set -euo pipefail
+          best=/; [ -d /mnt ] && [ "$(df -Pk /mnt | awk 'NR==2{print $4}')" -gt "$(df -Pk / | awk 'NR==2{print $4}')" ] && best=/mnt
+          sudo mkdir -p "$best/sidecar-scan" && sudo chown "$(id -u):$(id -g)" "$best/sidecar-scan"
+          echo "W=$best/sidecar-scan" >> "$GITHUB_ENV"
+          mkdir -p "$best/sidecar-scan/evidence"
+          for _ in 1 2; do
+            sudo apt-get update -q && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends libguestfs-tools qemu-utils && break
+            sleep 15
+          done
+          sudo chmod 0644 /boot/vmlinuz-*
+          if dpkg -s passt >/dev/null 2>&1; then sudo apt-get remove -y -q passt; fi
+      - name: Retained OVA → the baked sidecar archive (hash-checked at each step)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cd "$W"; E="$W/evidence"
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$OVA_ARTIFACT_ID/zip" > ova.zip
+          unzip -q ova.zip -d ova && rm -f ova.zip
+          ova="$(ls ova/*.ova)"; got="$(sha256sum "$ova" | cut -d' ' -f1)"
+          echo "$got  $(basename "$ova")" | tee "$E/ova.sha256"
+          [ "$got" = "$OVA_SHA256" ] || { echo "::error::OVA sha256 $got, expected $OVA_SHA256"; exit 1; }
+          mkdir x && tar -xf "$ova" -C x && rm -rf ova
+          (cd x && python3 -I - "$(ls *.mf)" <<'PY'
+          import hashlib, re, sys
+          bad = []
+          for line in open(sys.argv[1]):
+              m = re.match(r'SHA256\((.+)\)= ([0-9a-f]{64})', line.strip())
+              if m and hashlib.sha256(open(m.group(1), 'rb').read()).hexdigest() != m.group(2):
+                  bad.append(m.group(1))
+          sys.exit("OVA manifest mismatch: " + ",".join(bad) if bad else 0)
+          PY
+          )
+          cp x/*.mf "$E/"
+          disk="$(ls "$W"/x/*.vmdk)"
+          sudo env LIBGUESTFS_BACKEND=direct virt-copy-out -a "$disk" /var/lib/culvert-appliance/images/clamav.tar.gz "$W/"
+          sudo env LIBGUESTFS_BACKEND=direct virt-cat -a "$disk" /var/lib/culvert-appliance/manifest.env \
+            | grep -E '^CLAMAV_' | tee "$E/guest-manifest-clamav.env"
+          sudo chown "$(id -u):$(id -g)" "$W/clamav.tar.gz"; rm -rf x
+          got="$(sha256sum clamav.tar.gz | cut -d' ' -f1)"
+          echo "$got  /var/lib/culvert-appliance/images/clamav.tar.gz" | tee "$E/archive.sha256"
+          [ "$got" = "$SIDECAR_ARCHIVE_SHA256" ] || { echo "::error::archive sha256 $got, expected $SIDECAR_ARCHIVE_SHA256"; exit 1; }
+          gunzip -c clamav.tar.gz > clamav.tar
+      - name: Bind archive → index → amd64 manifest → config (every blob re-hashed)
+        run: |
+          set -euo pipefail
+          python3 -I - "$W/clamav.tar" "$W/evidence/binding.json" <<'PY'
+          import hashlib, json, os, sys, tarfile
+          t = tarfile.open(sys.argv[1])
+          names = set(t.getnames())
+          def blob(d):
+              b = t.extractfile("blobs/sha256/" + d.split(":")[1]).read()
+              assert "sha256:" + hashlib.sha256(b).hexdigest() == d, f"blob {d} does not hash to its name"
+              return b
+          exp = {k: os.environ[k] for k in ("SIDECAR_INDEX", "SIDECAR_MANIFEST", "SIDECAR_CONFIG")}
+          top = json.load(t.extractfile("index.json"))
+          (entry,) = top["manifests"]
+          assert entry["digest"] == exp["SIDECAR_INDEX"], f"index.json names {entry['digest']}"
+          idx = json.loads(blob(entry["digest"]))
+          amd = [m for m in idx["manifests"] if m.get("platform", {}).get("os") == "linux" and m["platform"].get("architecture") == "amd64"]
+          assert len(amd) == 1, f"{len(amd)} linux/amd64 manifests"
+          assert amd[0]["digest"] == exp["SIDECAR_MANIFEST"], f"amd64 manifest {amd[0]['digest']}"
+          man = json.loads(blob(amd[0]["digest"]))
+          assert man["config"]["digest"] == exp["SIDECAR_CONFIG"], f"config {man['config']['digest']}"
+          cfg = json.loads(blob(man["config"]["digest"]))
+          for l in man["layers"]:
+              blob(l["digest"])
+          legacy = json.load(t.extractfile("manifest.json"))
+          assert len(legacy) == 1 and legacy[0]["Config"].endswith(exp["SIDECAR_CONFIG"].split(":")[1]), "manifest.json names another config"
+          out = {"index": entry["digest"], "amd64_manifest": amd[0]["digest"], "config": man["config"]["digest"],
+                 "layers": [l["digest"] for l in man["layers"]], "diff_ids": cfg["rootfs"]["diff_ids"],
+                 "repo_tags": legacy[0].get("RepoTags"), "other_platform_entries": len(idx["manifests"]) - 1}
+          json.dump(out, open(sys.argv[2], "w"), indent=2)
+          print(json.dumps(out, indent=2))
+          PY
+      - uses: aquasecurity/setup-trivy@81e514348e19b6112ce2a7e3ecbafe19c1e1f567 # v0.2.0
+        with:
+          version: v0.69.3
+          cache: true
+      - name: Scan the exact archive (Deep gate policy) + full record + SBOM
+        run: |
+          set -uo pipefail
+          cd "$W" || exit 1; E="$W/evidence"
+          trivy image --download-db-only --db-repository mirror.gcr.io/aquasec/trivy-db:2 || exit 1
+          trivy --version > "$E/trivy-version.txt"
+          trivy image --skip-db-update --input clamav.tar --scanners vuln --format json --output "$E/trivy-all.json" || exit 1
+          img="$(jq -r '.Metadata.ImageID' "$E/trivy-all.json")"
+          [ "$img" = "$SIDECAR_CONFIG" ] || { echo "::error::Trivy scanned ImageID $img, expected $SIDECAR_CONFIG"; exit 1; }
+          trivy image --skip-db-update --input clamav.tar --format cyclonedx --output "$E/sbom.cdx.json" || exit 1
+          jq -r '[.Results[]?.Vulnerabilities[]? | {s: .Severity, f: ((.FixedVersion // "") != "")}]
+                 | group_by(.s) | map({severity: .[0].s, total: length, fixable: map(select(.f)) | length})' \
+            "$E/trivy-all.json" | tee "$E/severity-summary.json"
+          echo "components: $(jq '.components | length' "$E/sbom.cdx.json")" | tee "$E/sbom-summary.txt"
+          # The Deep gate's sidecar policy, unchanged: no fixable HIGH/CRITICAL.
+          trivy image --skip-db-update --input clamav.tar --scanners vuln --severity CRITICAL,HIGH --ignore-unfixed \
+            --format table --exit-code 1 | tee "$E/trivy-gate.txt"
+          gate="${PIPESTATUS[0]}"
+          echo "gate_exit=$gate" | tee -a "$E/trivy-gate.txt"
+          {
+            echo "### Baked ClamAV sidecar — exact-byte scan"
+            echo "OVA \`$OVA_SHA256\` → archive \`$SIDECAR_ARCHIVE_SHA256\` → index \`$SIDECAR_INDEX\` → amd64 manifest \`$SIDECAR_MANIFEST\` → config \`$SIDECAR_CONFIG\` (Trivy ImageID matches)"
+            echo; echo '```'; cat "$E/severity-summary.json"; cat "$E/sbom-summary.txt"; echo '```'
+            echo "Deep-gate policy (no fixable HIGH/CRITICAL): exit $gate"
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$gate"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: appliance-lab-sidecar-scan-2e3bcc2a1095
+          path: ${{ env.W }}/evidence/
           if-no-files-found: warn
