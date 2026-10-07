@@ -4,7 +4,10 @@ Description=Culvert early boot with native text diagnostics and system prompts
 ModuleName=ubuntu-text
 
 [ubuntu-text]
-title=C U L V E R T  |  Starting appliance  |  Esc: details
+# ubuntu-text draws the title at column (width-12)/2: a 13-character title is
+# centred on every even width; a longer one runs off-centre and wraps (owner
+# report, #1528). The Esc hint is a separate line (culvert-splash-message).
+title=C U L V E R T
 black=0x000000
 white=0x00dddd
 brown=0x008888

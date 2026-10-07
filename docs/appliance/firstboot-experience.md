@@ -16,32 +16,73 @@ or a boot-speed optimization; its native activity indicator is not a measured
 appliance completion percentage.
 
 The theme uses Ubuntu's packaged `ubuntu-text` renderer, including its existing
-system-prompt and Escape-to-details handling. No new service writes to tty1.
-Both the default and text fallback alternatives select the Culvert theme;
-package-owned themes and `/etc/os-release` remain unchanged. Ubuntu's packaged
-Plymouth quit/panic hooks and getty ordering control the handoff, with no new
-dependency on Docker, network availability or provisioning completion.
+system-prompt and Escape-to-details handling. Both the default and text
+fallback alternatives select the Culvert theme; package-owned themes and
+`/etc/os-release` remain unchanged. Ubuntu's packaged Plymouth quit/panic hooks
+and getty ordering control the handoff, with no new dependency on Docker,
+network availability or provisioning completion.
+
+The screen is `C U L V E R T`, the renderer's activity dots, and one line near
+the bottom: "Starting system services - Esc: boot messages" (an initramfs
+script, `culvert-splash-message`, sends it once Plymouth is up). It is true for
+the whole time the splash is shown: the splash ends when the console menu
+starts, and the menu reports provisioning and readiness itself. The title is 13
+characters because ubuntu-text draws it at column `(width-12)/2`; the first
+candidate's 50-character title therefore wrapped off-centre on every screen
+(owner report on #1528, reproduced in QEMU frames).
+
+Three things are owned explicitly so that nothing else is left on the screen:
+
+* **One display mode.** `nomodeset` keeps the console in the firmware's mode
+  (VGA text 80x25 on a BIOS VM) from GRUB to the menu. Without it, ESXi's
+  `vmwgfx` took the console over about a second after the splash started
+  (journal: `vmwgfx … deactivate vga console` at 5.2 s, Plymouth started at
+  4.6 s) and the earlier text stayed in the corner of a larger screen. The
+  console menu is an 80x25 text UI; nothing on the guest uses accelerated
+  graphics.
+* **Kernel messages on their own console.** `culvert-kernel-log-vt.service`
+  runs before the splash ends and routes the kernel's VT output to tty12
+  (`setlogcons 12`), seeding it with the kernel log so far. Alt+F12 shows it,
+  Alt+F1 returns. Nothing is suppressed: the log level is unchanged, the serial
+  console and the journal (`journalctl -k`) receive every message. Without it,
+  every kernel message after the splash is drawn over the console menu. The
+  residual: a kernel panic message is on tty12, serial and the hypervisor's
+  log, not on tty1.
+* **Kernel messages during the splash.** ubuntu-text holds kernel messages
+  back from all consoles while it is shown (`klogctl` console-off on show,
+  console-on on hide; noble `ubuntu-text.patch`), serial included. They stay
+  in the kernel log and journal; Esc shows the boot messages Plymouth has
+  captured. This is the packaged renderer's behaviour, not a Culvert setting.
+
+`/dev/console`: the kernel command line keeps the cloud image's
+`console=tty1 console=ttyS0`, so `/dev/console` is ttyS0. That holds on ESXi
+too, where the VM has no serial port: the 8250 driver registers the legacy
+port anyway (lab `/proc/consoles` with no serial device attached), so systemd
+status lines and unit console output are not drawn on tty1. Emergency and
+rescue shells use `sulogin`, which prompts on every console in
+`/proc/consoles`, tty1 included.
 
 Packages come from the existing pinned Ubuntu snapshot and enter the guest
 SBOM before cloning. A custom theme name makes Noble's initramfs hook include
 font support even for the native text renderer, so the build explicitly
 installs `plymouth-label` and `fontconfig` too. The installer rebuilds every
-installed initramfs and rejects one missing the Culvert theme or native
-renderer. The outer build independently compares both selected themes and
-the GRUB drop-in with source hashes.
+installed initramfs and rejects one missing the Culvert theme, the native
+renderer or the message script. The outer build independently compares the
+selected themes, the GRUB drop-in and the three console files with source
+hashes.
 
-Normal boot adds `splash plymouth.ignore-serial-consoles` to the existing GRUB
-default arguments: the Culvert screen appears on the VGA console only, and the
-serial console keeps full kernel and per-unit boot output. `quiet` is never
-added, and an inherited `quiet` is removed, because it lowers the kernel log
-level on every console including ttyS0, where boot failures are diagnosed.
-`GRUB_DISTRIBUTOR` is not changed: `grub-install` derives the UEFI bootloader
-directory from it and the signed shim/GRUB chain expects `/EFI/ubuntu`, so a
-routine GRUB package update must keep installing there. Existing root and
-serial-console arguments remain present. For recovery, use Escape for details,
-or edit the GRUB kernel entry to remove `splash` and add `plymouth.enable=0`.
-Normal recovery entries do not inherit `GRUB_CMDLINE_LINUX_DEFAULT`. Do not
-remove the serial console or suppress error reporting to hide boot failures.
+Normal boot adds `splash plymouth.ignore-serial-consoles nomodeset` to the
+existing GRUB default arguments: the Culvert screen appears on the VGA console
+only. `quiet` is never added, and an inherited `quiet` is removed, because it
+lowers the kernel log level on every console including ttyS0, where boot
+failures are diagnosed. `GRUB_DISTRIBUTOR` is not changed: `grub-install`
+derives the UEFI bootloader directory from it and the signed shim/GRUB chain
+expects `/EFI/ubuntu`, so a routine GRUB package update must keep installing
+there. Existing root and serial-console arguments remain present. For
+recovery, use Escape for details, or edit the GRUB kernel entry to remove
+`splash` and add `plymouth.enable=0`. Normal recovery entries do not inherit
+`GRUB_CMDLINE_LINUX_DEFAULT`. Do not remove the serial console or suppress
+error reporting to hide boot failures.
 
 Before calling this visually qualified, build a new OVA and verify BIOS and
 UEFI VGA startup, Escape details, serial login, a boot failure/emergency path,

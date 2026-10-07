@@ -1,0 +1,19 @@
+#!/bin/sh
+# Kernel messages belong to their own console, not to tty1. tty1 is the
+# appliance console (the menu and setup URL); a kernel line drawn over it is
+# left on screen around the menu. Route the kernel's VT output to tty12
+# (Alt+F12) instead. Nothing is suppressed: the log level is unchanged, the
+# serial console and the journal (journalctl -k) receive every message, and
+# tty12 starts with the kernel log so far.
+set -u
+vt=12
+# Opening the device allocates the VT; it stays allocated afterwards.
+exec 3>"/dev/tty$vt" || exit 0
+setlogcons "$vt" || exit 0
+{
+    printf '\033[2J\033[H'
+    printf 'Culvert kernel log (tty%s). Alt+F1 returns to the appliance console.\n' "$vt"
+    printf 'Also in: journalctl -k, and on the serial console when one is attached.\n\n'
+    dmesg --color=never 2>/dev/null | tail -n 300
+} >&3
+exit 0

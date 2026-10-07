@@ -11,6 +11,13 @@ install_boot_splash() (
     install -d -m 0755 "$root/usr/share/plymouth/themes/culvert" "$root/etc/default/grub.d"
     install -m 0644 "$source/culvert.plymouth" "$theme"
     install -m 0644 "$source/99-culvert-splash.cfg" "$root/etc/default/grub.d/99-culvert-splash.cfg"
+    # The splash's message line (initramfs) and the kernel-log console (tty12).
+    install -d -m 0755 "$root/etc/initramfs-tools/scripts/init-premount" "$root/opt/culvert-appliance/bin" \
+        "$root/etc/systemd/system/sysinit.target.wants"
+    install -m 0755 "$source/culvert-splash-message" "$root/etc/initramfs-tools/scripts/init-premount/culvert-splash-message"
+    install -m 0755 "$source/culvert-kernel-log-vt" "$root/opt/culvert-appliance/bin/culvert-kernel-log-vt"
+    install -m 0644 "$source/culvert-kernel-log-vt.service" "$root/etc/systemd/system/culvert-kernel-log-vt.service"
+    ln -sfn ../culvert-kernel-log-vt.service "$root/etc/systemd/system/sysinit.target.wants/culvert-kernel-log-vt.service"
     # Ubuntu's initramfs hook follows BOTH alternatives. Explicit --set also
     # replaces a base image's manual choice; package-owned themes remain intact.
     local name
@@ -29,6 +36,9 @@ install_boot_splash() (
         }
         grep -Eq '^(usr/)?lib/x86_64-linux-gnu/plymouth/ubuntu-text\.so$' <<< "$listing" || {
             echo 'Culvert boot splash: renderer absent from initramfs.' >&2; exit 1;
+        }
+        grep -qx 'scripts/init-premount/culvert-splash-message' <<< "$listing" || {
+            echo 'Culvert boot splash: message script absent from initramfs.' >&2; exit 1;
         }
     done
     update-grub

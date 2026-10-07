@@ -287,7 +287,8 @@ for runtime_file in 20auto-upgrades-culvert 50unattended-upgrades-culvert \
   install -m 0644 "$REPO/appliance/os-maintenance/$runtime_file" "$OV/opt/culvert-appliance/os-maintenance/$runtime_file"
 done
 mkdir -p "$OV/opt/culvert-appliance/boot-splash"
-for splash_file in install.sh install-lib.sh culvert.plymouth 99-culvert-splash.cfg; do
+for splash_file in install.sh install-lib.sh culvert.plymouth 99-culvert-splash.cfg \
+  culvert-splash-message culvert-kernel-log-vt culvert-kernel-log-vt.service; do
   cp "$REPO/appliance/boot-splash/$splash_file" "$OV/opt/culvert-appliance/boot-splash/$splash_file"
 done
 build_console_bundle "$REPO" "$OV/opt/culvert-appliance/console"
@@ -514,6 +515,13 @@ done
 SPLASH_GRUB_SHA="$(sha256sum "$REPO/appliance/boot-splash/99-culvert-splash.cfg" | cut -d' ' -f1)"
 installed_splash_sha="$(virt-cat -a "$DISK" /etc/default/grub.d/99-culvert-splash.cfg | sha256sum | cut -d' ' -f1)"
 [[ "$installed_splash_sha" == "$SPLASH_GRUB_SHA" ]] || die "boot presentation configuration differs from source"
+for splash_pair in culvert-splash-message:/etc/initramfs-tools/scripts/init-premount/culvert-splash-message \
+  culvert-kernel-log-vt:/opt/culvert-appliance/bin/culvert-kernel-log-vt \
+  culvert-kernel-log-vt.service:/etc/systemd/system/culvert-kernel-log-vt.service; do
+  installed_splash_sha="$(virt-cat -a "$DISK" "${splash_pair#*:}" | sha256sum | cut -d' ' -f1)"
+  [[ "$installed_splash_sha" == "$(sha256sum "$REPO/appliance/boot-splash/${splash_pair%%:*}" | cut -d' ' -f1)" ]] \
+    || die "boot console file differs from source: ${splash_pair#*:}"
+done
 virt-cat -a "$DISK" /var/lib/culvert-appliance/dpkg-list.txt       > "$OUT/dpkg-list.txt"
 virt-cat -a "$DISK" /var/lib/culvert-appliance/host-components.txt > "$OUT/host-components.txt"
 # Present only when manifest.env pins GUEST_APT_SNAPSHOT (prepare-guest.sh 1b).
