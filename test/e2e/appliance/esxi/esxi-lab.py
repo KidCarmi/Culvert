@@ -234,6 +234,8 @@ def verify_ova(path, expected):
 
 
 def validate_scope(c):
+    require(type(c.get('console_cell_width', 8)) is int and c.get('console_cell_width', 8) in (8, 9),
+            'explicit console cell width must be 8 or 9')
     required = ('endpoint', 'host', 'datastore', 'network', 'folder', 'pool', 'ova',
                 'ova_sha256', 'source_sha', 'image_id', 'run_dir', 'max_vms', 'max_vcpus',
                 'max_memory_mb', 'max_disk_gib', 'datastore_headroom_gib',

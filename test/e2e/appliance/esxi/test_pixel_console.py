@@ -43,20 +43,49 @@ class PixelConsoleTests(unittest.TestCase):
         self.font.write_bytes(data)
         pixel.FONT_SHA256 = hashlib.sha256(data).hexdigest()
 
-    def render(self, text=TEXT):
+    def render(self, text=TEXT, cell_width=8):
         rows = text.splitlines()
-        image = Image.new('RGB', (max(map(len, rows)) * 8, len(rows) * 16), 'black')
+        image = Image.new('RGB', (max(map(len, rows)) * cell_width, len(rows) * 16), 'black')
         for row, line in enumerate(rows):
             for column, character in enumerate(line):
                 for y, bits in enumerate(self.glyphs[ord(character)]):
                     for x in range(8):
                         if bits & (1 << (7 - x)):
-                            image.putpixel((column * 8 + x, row * 16 + y), (170, 170, 170))
+                            image.putpixel((column * cell_width + x, row * 16 + y), (170, 170, 170))
         return image
 
-    def decode(self, image):
+    def decode(self, image, cell_width=8):
         image.save(self.png)
-        return pixel.decode(self.png, self.font)
+        return pixel.decode(self.png, self.font, cell_width)
+
+    def test_explicit_nine_pixel_pitch_preserves_glyphs_and_never_repairs_ninth_column(self):
+        image = self.render(cell_width=9)
+        self.assertEqual(self.decode(image, 9), TEXT)
+        image.putpixel((8, 3 * 16 + 4), (170, 170, 170))
+        decoded = self.decode(image, 9)
+        self.assertIn('\ufffd', decoded.splitlines()[3])
+        self.assertIsNone(bootstrap.extract_initial(decoded))
+
+    def test_nine_pixel_pitch_keeps_global_font_and_ambiguity_rules(self):
+        other, data = self.second_font()
+        image = self.render(cell_width=9)
+        self.glyphs = [data[4+c*16:4+(c+1)*16] for c in range(256)]
+        alternate = self.render(cell_width=9)
+        image.paste(alternate.crop((0, 48, 9, 64)), (0, 48))
+        image.save(self.png)
+        decoded = pixel.decode(self.png, str(self.font) + os.pathsep + str(other), 9)
+        self.assertIn('\ufffd', decoded)
+        self.assertIsNone(bootstrap.extract_initial(decoded))
+
+    def test_geometry_never_guessed_and_invalid_pitch_refused(self):
+        image = self.render(cell_width=9)
+        for width in (0, 7, 10, '9', 9.0, True):
+            with self.assertRaises(ValueError): self.decode(image, width)
+        # A 720px row is divisible by both pitches. Explicit 8 remains 8 even
+        # when the actual glyph layout is 9: no auto-scoring interpretation.
+        wide = Image.new('RGB', (720, image.height), 'black'); wide.paste(image, (0, 0))
+        self.assertEqual(bootstrap.extract_initial(self.decode(wide, 9)), PASSWORD)
+        self.assertIsNone(bootstrap.extract_initial(self.decode(wide, 8)))
 
     def test_exact_glyphs_preserve_case_and_accept_only_complete_credential(self):
         decoded = self.decode(self.render())
@@ -154,6 +183,25 @@ class PixelConsoleTests(unittest.TestCase):
 
 
 class BootstrapObservationTests(unittest.TestCase):
+    def test_scope_geometry_reaches_shared_decoder_used_by_privileged_console(self):
+        with tempfile.TemporaryDirectory() as directory:
+            private = Path(directory)
+            def capture(*args, **kwargs):
+                Path(args[1].removeprefix('-capture=')).write_bytes(b'synthetic')
+            lab = SimpleNamespace(sec=private, c={'console_cell_width': 9}, state={'path': 'synthetic'},
+                                  vm=Mock(), gov=Mock(side_effect=capture))
+            flow = bootstrap.Bootstrap(lab, None)
+            decoder = SimpleNamespace(decode=Mock(return_value='Synthetic'))
+            spec = SimpleNamespace(loader=SimpleNamespace(exec_module=lambda module: None))
+            with patch.dict(bootstrap.os.environ, {'CULVERT_ESXI_CONSOLE_FONT': 'synthetic'}), \
+                    patch.object(bootstrap.importlib.util, 'spec_from_file_location', return_value=spec), \
+                    patch.object(bootstrap.importlib.util, 'module_from_spec', return_value=decoder):
+                self.assertEqual(flow.screen(flow.deadline), 'Synthetic')
+            self.assertEqual(decoder.decode.call_args.args[2], 9)
+            # console-priv's Console.screen delegates to this inherited method.
+            console = load('pixel_scope_console', 'console-priv.py')
+            self.assertIs(console.Console.__mro__[1], console.b.Bootstrap)
+
     def test_observation_and_capture_name_bounds(self):
         for seconds in (0, 1201):
             with self.subTest(seconds=seconds):
@@ -192,7 +240,7 @@ class BootstrapObservationTests(unittest.TestCase):
                     # A fake screenshot producer, never a hypervisor invocation.
                     Path(args[1].removeprefix('-capture=')).write_bytes(b'synthetic')
 
-                lab = SimpleNamespace(sec=private, state={'path': 'synthetic'},
+                lab = SimpleNamespace(sec=private, c={}, state={'path': 'synthetic'},
                                       vm=Mock(), gov=Mock(side_effect=capture))
                 flow = bootstrap.Bootstrap(lab, None)
                 decoder = SimpleNamespace(decode=lambda *args: '\ufffd' * 21846)

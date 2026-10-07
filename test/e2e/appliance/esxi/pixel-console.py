@@ -1,10 +1,12 @@
-"""Exact 8x16 console glyph decoding, with no OCR corrections or fuzzy matches.
+"""Exact 8x16 glyph decoding at explicitly selected 8- or 9-pixel cell pitch.
 
 The optional font is Ubuntu console-setup-linux 1.226ubuntu1.1's decompressed
 Uni2-Fixed16.psf.gz or Ethiopian-Goha16.psf.gz. A path-list may include both.
 A capture must have one globally consistent font; mixed fonts and ambiguous
 character mappings remain unknown. Each font is a controller dependency, never guest content.
 Unknown/ambiguous cells stay U+FFFD so credentials cannot be inferred.
+Nine-pixel VGA cells must have an empty ninth column for ASCII recognition.
+No resizing, pitch detection, shifted matching or character repair is allowed.
 """
 import hashlib
 import os
@@ -28,7 +30,9 @@ def font_table(font_path):
     return table
 
 
-def decode(image_path, font_path):
+def decode(image_path, font_path, cell_width=8):
+    if type(cell_width) is not int or cell_width not in (8, 9):
+        raise ValueError('explicit console cell width must be 8 or 9')
     paths = str(font_path).split(os.pathsep)
     if not 1 <= len(paths) <= 2 or any(not path for path in paths):
         raise ValueError('one or two pinned console fonts required')
@@ -36,7 +40,7 @@ def decode(image_path, font_path):
     with Image.open(image_path) as original:
         if original.width > 4096 or original.height > 4096 or original.width * original.height > 16777216:
             raise ValueError('console image exceeds bounds')
-        if original.width % 8 or original.height % 16:
+        if original.width % cell_width or original.height % 16:
             raise ValueError('console image contains partial glyph cells')
         pixels = original.convert('RGB')
         background = pixels.getpixel((0, 0))
@@ -45,12 +49,13 @@ def decode(image_path, font_path):
         rows = []
         for y in range(0, pixels.height - 15, 16):
             row = []
-            for x in range(0, pixels.width - 7, 8):
-                colors = {pixels.getpixel((x+i, y+j)) for j in range(16) for i in range(8)}
+            for x in range(0, pixels.width - cell_width + 1, cell_width):
+                colors = {pixels.getpixel((x+i, y+j)) for j in range(16) for i in range(cell_width)}
                 # Standard console glyphs are one flat foreground on black.
                 # Antialiasing, inversion or overlays are not interpreted.
                 foreground = colors - {background}
-                if len(foreground) > 1:
+                if len(foreground) > 1 or (cell_width == 9 and any(
+                        pixels.getpixel((x+8, y+j)) != background for j in range(16))):
                     row.append(None)
                     continue
                 glyph = bytes(sum(1 << (7-i) for i in range(8)

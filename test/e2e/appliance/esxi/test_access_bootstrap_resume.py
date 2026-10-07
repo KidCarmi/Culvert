@@ -146,8 +146,11 @@ class PreparationResumeTests(unittest.TestCase):
                 path.unlink()
 
     def test_observation_original_legacy_boundary_remains_exact(self):
+        self.lab.c['console_cell_width'] = 9
         self.marker.write_text(json.dumps(dict(self.original, stage='initial-capture')))
-        access.observation_continuation(self.lab, self.marker)
+        result = access.observation_continuation(self.lab, self.marker)
+        self.assertEqual(result['console_cell_width'], 9)
+        self.assertEqual(result['pixel_decoder_sha256'], hashlib.sha256((access.HERE / 'pixel-console.py').read_bytes()).hexdigest())
         self.write_blocked_observation()
         with self.assertRaises(access.bootstrap.Blocked):
             access.observation_continuation(self.lab, self.marker)

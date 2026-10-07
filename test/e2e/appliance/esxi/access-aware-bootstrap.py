@@ -53,8 +53,8 @@ def observation_continuation(lab, marker):
         raw = path.read_bytes()
         return raw, json.loads(raw)
 
-    bootstrap.ensure(not (lab.sec / 'bootstrap-console-password').exists(), 'authentication already started')
-    bootstrap.ensure(not (lab.sec / 'access-bootstrap-observation-extension.json').exists(),
+    bootstrap.ensure(not os.path.lexists(lab.sec / 'bootstrap-console-password'), 'authentication already started')
+    bootstrap.ensure(not os.path.lexists(lab.sec / 'access-bootstrap-observation-extension.json'),
                      'observation continuation already attempted')
     original, record = read_record(marker)
     exact = {'status': 'blocked', 'stage': 'initial-capture', 'uuid': lab.state['uuid']}
@@ -79,7 +79,9 @@ def observation_continuation(lab, marker):
     return {'prior_marker_sha256': hashlib.sha256(prior).hexdigest(),
             'original_marker_sha256': hashlib.sha256(original).hexdigest(),
             'bootstrap_helper_sha256': hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
-            'keyboard_source_sha256': hashlib.sha256((HERE / 'private-keystrokes.go').read_bytes()).hexdigest()}
+            'keyboard_source_sha256': hashlib.sha256((HERE / 'private-keystrokes.go').read_bytes()).hexdigest(),
+            'pixel_decoder_sha256': hashlib.sha256((HERE / 'pixel-console.py').read_bytes()).hexdigest(),
+            'console_cell_width': lab.c.get('console_cell_width', 8)}
 
 
 def main():

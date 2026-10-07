@@ -152,11 +152,14 @@ class Bootstrap:
                      json_output=False, timeout=self.budget(20, deadline))
         ensure(png.is_file() and 0 < png.stat().st_size <= 10 * 1024**2, 'private screenshot unavailable or oversized')
         font = os.environ.get('CULVERT_ESXI_CONSOLE_FONT')
+        cell_width = self.lab.c.get('console_cell_width', 8)
+        ensure(type(cell_width) is int and cell_width in (8, 9), 'explicit console cell width refused')
+        ensure(cell_width == 8 or font, 'nine-pixel console requires exact pinned font decoding')
         if font:
             decoder_spec = importlib.util.spec_from_file_location('pixel_console', HERE / 'pixel-console.py')
             decoder = importlib.util.module_from_spec(decoder_spec)
             decoder_spec.loader.exec_module(decoder)
-            text = decoder.decode(png, font)
+            text = decoder.decode(png, font, cell_width)
             self.budget(1, deadline)
             ensure(len(text.encode('utf-8')) <= 65536, 'private pixel text exceeded bounds')
             with ocr.open('x', encoding='utf-8') as out:
