@@ -443,6 +443,22 @@ jobs:
               LAB_ADOPT_OLD_REF="${{ matrix.adopt_old_ref }}" LAB_ADOPT_NEW_REF="${{ matrix.adopt_new_ref }}" LAB_ADOPT_PKGS="${{ matrix.adopt_pkgs }}"
           fi
           test/e2e/appliance/lab/appliance-lab.sh all
+      - name: "Boot console: VMware SVGA, no serial — frames through boot, reboots, Esc, Alt+F12, serial-only"
+        if: env.LAB_STAGE == 'full' && matrix.console == '1' && !cancelled()
+        run: |
+          set -euo pipefail
+          export LAB_DIR="$LAB_ROOT/console" LAB_ACCEL=kvm LAB_MIN_FREE_GB=15
+          export LAB_OVA="$(ls "$LAB_ROOT/ova/"*.ova)" LAB_OVA_SHA256="$(cut -d' ' -f1 "$LAB_ROOT/ova/"*.ova.sha256)"
+          sudo apt-get install -y -q --no-install-recommends imagemagick >/dev/null || true
+          test/e2e/appliance/lab/appliance-lab.sh preflight
+          test/e2e/appliance/lab/appliance-lab.sh console
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always() && matrix.console == '1'
+        with:
+          name: appliance-lab-console-${{ matrix.variant }}
+          path: ${{ env.LAB_ROOT }}/console/evidence
+          retention-days: 30
+          if-no-files-found: warn
       - name: Report
         if: always()
         run: |
