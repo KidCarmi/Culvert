@@ -41,6 +41,8 @@ and `docs/engineering/`.
 - [`ldap-directory-stalls.md`](ldap-directory-stalls.md) — what happens when a directory accepts a connection and then stops answering.
 - [`credential-verification-cost.md`](credential-verification-cost.md) — the bounded credential-verification governor and the `auth_verify_saturated` alert.
 - [`admin-login-input-bounds.md`](admin-login-input-bounds.md) — why the admin login endpoint bounds the submitted username, and what it protects.
+- [`admin-basic-auth.md`](admin-basic-auth.md) — HTTP Basic fallback on the admin API: the lockout, audit and username-bound controls it now shares with login, and why TOTP-enrolled accounts are refused.
+- [`admin-roster-durability.md`](admin-roster-durability.md) — admin account/credential changes are durable-or-refused (`500` with nothing changed), and the recommended alerting.
 
 ## TLS inspection, certificates, and decryption
 
@@ -50,11 +52,14 @@ and `docs/engineering/`.
 - [`http2-inspection.md`](http2-inspection.md) — native HTTP/2 SSL inspection.
 - [`ocsp-revocation-checking.md`](ocsp-revocation-checking.md) — what OCSP revocation checking covers, how it fails, and how to read its counters.
 - [`key-at-rest.md`](key-at-rest.md) — key-at-rest encryption for stored secrets and CA material.
+- [`dp-bootstrap-artifact-safety.md`](dp-bootstrap-artifact-safety.md) — why the Control Plane refuses to render a Data Plane bootstrap script or compose file for a non-`host[:port]` authority.
 
 ## Networking and traffic steering
 
 - [`upstream-proxies.md`](upstream-proxies.md) — parent-proxy chaining (upstream proxies): identity, credentials, and eligibility.
 - [`pac-traffic-steering.md`](pac-traffic-steering.md) — PAC-based traffic steering.
+- [`destination-host-bounds.md`](destination-host-bounds.md) — the bound on client-supplied destination hosts across HTTP, CONNECT and SOCKS5, what it refuses, and the log line you will see.
+- [`request-tracing-input-bounds.md`](request-tracing-input-bounds.md) — how client `X-Request-Id` / `Traceparent` headers are validated and replaced.
 - [`socks5-listener-health.md`](socks5-listener-health.md) — SOCKS5 listener accept-loop health, backoff, and degradation reporting.
 - [`admin-ui-listener-recovery.md`](admin-ui-listener-recovery.md) — why an admin-UI listener failure never takes down the data plane, and how it recovers.
 - [`dns-resolution-health.md`](dns-resolution-health.md) — destination-host DNS resolution health, bounding, and recovery.
