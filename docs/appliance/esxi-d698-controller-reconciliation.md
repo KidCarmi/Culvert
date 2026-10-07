@@ -90,3 +90,34 @@ including synthetic identity, custody, timing, PONG and ClamAV outage cases.
 PowerShell syntax and the actual isolated two-font launcher block passed with
 both approved fonts. Bash syntax checks passed for the refreshed shared library
 and access-aware wrapper. No VM calls were made during this reconciliation.
+
+## Explicit post-OS continuation
+
+The d698 run stopped after OS update and before reboot: its initial network fault
+exercise completed real apply, injected failure and rollback, then the immediate
+route assertion failed. The first controller and original failure stay frozen.
+A separate continuation controller admits only that exact candidate, completed
+prior lifecycle checks and the authenticated line-219 route-gap failure. It
+records hashes of the original transport, attempt and checks. A prior reboot,
+confirmation attempt, ambiguous transport or different failure refuses entry.
+
+Use the existing `candidate-run.ps1 -ResumePostOS` entrypoint with the new frozen
+controller scope pointing to the same owned run. Do not use
+`-ContinueUndispatched` for d698. Before any new fault injection the guest checks
+that source, boot ID, identity, network and netplan still match the original
+baseline and that the original trace proves real rollback. A distinct
+confirmation namespace records every route observation for at most 60 seconds;
+passing requires three consecutive matches spanning at least four seconds.
+This proves bounded convergence, not uninterrupted network availability.
+
+The extracted, exact-hash-bound shared tail runs only the pending maintenance
+reboot and step-8 persistence checks. It does not repeat setup, backup, actual
+restore, signed apply/rollback or OS update. Original checks remain in
+`checks.jsonl`; continuation checks and validation have separate filenames.
+This superseded d698 candidate supplies measurement evidence only and cannot
+establish acceptance of the pending replacement candidate.
+
+The fresh-recovery controller also keeps the selected source SHA separate from
+the old VM ownership record. Its regression executes the restore preparation
+with synthetic escrow through the console-dispatch boundary and verifies the
+payload retains the source string and archive hash; no VM is contacted.

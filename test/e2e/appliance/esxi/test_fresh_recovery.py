@@ -1,5 +1,7 @@
 """Offline guards only: no VM, account, credential, Docker or ESXi operations."""
 import hashlib
+import contextlib
+import ast
 import importlib.util
 import json
 from pathlib import Path
@@ -35,6 +37,38 @@ class RecoveryTests(unittest.TestCase):
 
     def transfer(self):
         return controller.Transfer('127.0.0.1', {'archive': self.root / 'archive'}, True, {'archive': 12})
+
+    def test_restore_keeps_candidate_sha_separate_from_source_owner_record(self):
+        identities = load('fresh_restore_identities', 'candidate-identities.py')
+        scope = dict(identities.source_profile(identities.D698), max_vms=1, endpoint='https://192.0.2.1')
+        escrow = self.root / 'escrow'; escrow.mkdir()
+        archive = escrow / 'recovery.tar.gz.enc'; archive.write_bytes(b'CVRTBK01synthetic')
+        metadata = {'archive_sha256': controller.file_hash(archive), 'archive_bytes': archive.stat().st_size,
+                    'source_sha': scope['source_sha'], 'image_id': scope['image_id']}
+        owner = {'uuid': 'old-owned-uuid'}
+        data = {'source-owned.json': owner, 'provenance.json': scope,
+                'archive-metadata.json': metadata, 'ledger.json': {}, 'deletion.json': {}}
+        (escrow / 'backup-passphrase').write_text('a' * 64)
+        lab = SimpleNamespace(c=scope, run=self.root, guest_ip=mock.Mock(return_value='192.0.2.2'), vm=mock.Mock())
+        args = SimpleNamespace(bind='192.0.2.1', scope=Path('synthetic'), escrow=escrow,
+                               source_ledger=Path('ledger.json'), deletion_receipt=Path('deletion.json'), mode='restore')
+        with mock.patch.object(controller.console.b.module, 'Lab', return_value=lab), \
+             mock.patch.object(controller.console.b.module, 'validate_scope'), \
+             mock.patch.object(controller.console.b.module, 'locked', return_value=contextlib.nullcontext()), \
+             mock.patch.object(controller, 'private_escrow', return_value=escrow), \
+             mock.patch.object(controller, 'verify_export'), \
+             mock.patch.object(controller, 'verify_source_absent') as absent, \
+             mock.patch.object(controller, 'read_json', side_effect=lambda path: data[path.name]), \
+             mock.patch.object(controller, 'endpoint', return_value=contextlib.nullcontext(('test-pin', {}))), \
+             mock.patch.object(controller.console, 'execute', side_effect=RuntimeError('offline-before-dispatch')) as execute:
+            with self.assertRaisesRegex(RuntimeError, 'offline-before-dispatch'):
+                controller.run(args)
+        self.assertIs(absent.call_args.args[1], owner)
+        payload = execute.call_args.args[2].decode()
+        cfg = ast.literal_eval(payload.rsplit('\nmain(', 1)[1].split(')\nCULVERT_FRESH_RECOVERY_PY', 1)[0])
+        self.assertEqual(cfg['source_sha'], identities.D698)
+        self.assertIsInstance(cfg['source_sha'], str)
+        self.assertEqual(cfg['archive_sha256'], metadata['archive_sha256'])
 
     def test_transfer_rejects_wrong_peer_path_method_size_and_overwrite(self):
         transfer = self.transfer()

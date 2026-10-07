@@ -79,8 +79,8 @@ class CandidateReconciliationTests(unittest.TestCase):
 
     def test_historical_mutation_campaigns_still_refuse_new_candidate(self):
         identities, resume = load('candidate-identities'), load('post-os-resume')
-        with self.assertRaisesRegex(ValueError, 'wrong candidate'):
-            resume.validate(identities.source_profile(identities.D698), Path('never-read'))
+        with self.assertRaisesRegex(ValueError, 'first explicit confirmation'):
+            resume.validate(identities.source_profile(identities.D698), Path('never-read'), continuation=True)
 
 
 if __name__ == '__main__':

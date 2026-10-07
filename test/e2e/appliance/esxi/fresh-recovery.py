@@ -224,8 +224,8 @@ def run(args):
         else:
             require(args.source_ledger and args.deletion_receipt)
             verify_export(escrow)
-            source = read_json(escrow / 'source-owned.json')
-            verify_source_absent(lab, source, read_json(args.source_ledger), read_json(args.deletion_receipt))
+            source_owned = read_json(escrow / 'source-owned.json')
+            verify_source_absent(lab, source_owned, read_json(args.source_ledger), read_json(args.deletion_receipt))
             provenance = read_json(escrow / 'provenance.json')
             require(all(provenance[k] == lab.c[k] for k in provenance))
             metadata = read_json(files['metadata'])
