@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -487,7 +488,15 @@ func loadFileConfig(path string) (*FileConfig, error) {
 	}
 	defer f.Close()
 
-	dec := yaml.NewDecoder(f, yaml.DisallowUnknownField())
+	// A file saved by a Windows editor starts with a UTF-8 byte-order mark,
+	// which the YAML decoder would read as part of the first key
+	// (unknown field "U+FEFFproxy"). Skip it; it is not content.
+	br := bufio.NewReader(f)
+	if b, perr := br.Peek(3); perr == nil && string(b) == "\xef\xbb\xbf" {
+		_, _ = br.Discard(3)
+	}
+
+	dec := yaml.NewDecoder(br, yaml.DisallowUnknownField())
 	var fc FileConfig
 	if err := dec.Decode(&fc); err != nil {
 		// An empty, whitespace-only, or comment-only document is not
