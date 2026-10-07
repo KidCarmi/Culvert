@@ -1,0 +1,348 @@
+{
+  "schema": 1,
+  "review_date": "2026-10-07",
+  "source_commit": "2e3bcc2a1095f3e26e4f0b73a6a5515bdd069ee2",
+  "handoff_comment": 6036306585,
+  "lab_run_id": 37606237892,
+  "lab_controller": "e96895c4b5ba4e4254f92d89038a57023daf365b",
+  "scope": "Read-only evidence and source inspection; no VM/ESXi/registry calls, no product edits, no fault injection or reproduction of partial purge.",
+  "verdict": "PASS exact-image binding and recorded QEMU/F-DISK scenarios; not full production closure. IdP replay and signed-update cases remain blocked; scan success is not zero alerts.",
+  "source_tree": {
+    "head": {
+      "sha": "2e3bcc2a1095f3e26e4f0b73a6a5515bdd069ee2",
+      "tree": "55d2a7019bca847db52707866e5b66b2d6043887"
+    },
+    "ci_merge": {
+      "sha": "6b33ccf6bd872fc9e4a655695269191208565da8",
+      "tree": "55d2a7019bca847db52707866e5b66b2d6043887"
+    },
+    "identical": true
+  },
+  "artifacts": [
+    {
+      "id": 11477120696,
+      "name": "appliance-lab-evidence-candidate-2e3bcc2a1095",
+      "size_in_bytes": 604377,
+      "digest": "sha256:58e6ffc792b30108f50e79d2ad3835f88ed65f09c295e4f4044ec9a2de7e50db",
+      "expires_at": "2026-11-06T10:45:03Z",
+      "downloaded_and_zip_sha_verified": true
+    },
+    {
+      "id": 11475581263,
+      "name": "appliance-lab-ova-candidate-2e3bcc2a1095",
+      "size_in_bytes": 1273277985,
+      "digest": "sha256:b994c8bafaedd279555dafc73aa0c7983ea236101b9fca80744707d79873be76",
+      "expires_at": "2026-10-21T10:22:14Z",
+      "downloaded_and_zip_sha_verified": false
+    },
+    {
+      "id": 11475570320,
+      "name": "lab-source-image-37604379502",
+      "size_in_bytes": 86719636,
+      "digest": "sha256:9f7833f103e86161b34b4b8efe3fa987ae7c2126f0d05676a0cca850774753fd",
+      "expires_at": "2026-11-06T10:16:54Z",
+      "downloaded_and_zip_sha_verified": true
+    },
+    {
+      "id": 11474899905,
+      "name": "appliance-lab-fdisk1-evidence",
+      "size_in_bytes": 7898,
+      "digest": "sha256:409b1dc2fc5eceedc2d75013c8ad7ba639cbae7c0089649b4e55214f1d6e51b0",
+      "expires_at": "2026-11-06T10:33:53Z",
+      "downloaded_and_zip_sha_verified": true
+    }
+  ],
+  "qemu": {
+    "job_id": 112742284424,
+    "counts": {
+      "pass": 79,
+      "info": 5,
+      "blocked": 2
+    },
+    "profile": "KVM QEMU, direct-I/O loop plus device-mapper +12ms read/+3ms write; not a physical ESXi result",
+    "recovery_seconds": [
+      100.60999099999992,
+      100.47672799999987,
+      100.523778
+    ],
+    "budget_seconds": 120,
+    "sample_verification": "All three TSVs independently parsed: final three consecutive samples require ready_clamav=ok,traffic=ok,eicar=av,phase=ok,counted=yes; last sample endpoint agrees with timeline within 2ms.",
+    "observed": [
+      "One-time console login and forced password change",
+      "Restricted operator SSH refusals",
+      "Token-gated setup and immediate demotion",
+      "Real allow/block/category enforcement",
+      "Agent version equals application",
+      "Backup and actual offline restore; live restore refused",
+      "Kernel 6.8.0-142-generic to 6.8.0-146-generic",
+      "CA/state/image/agent persistence",
+      "Recovery secret custody checks passed without retaining secret values in this report"
+    ],
+    "blocked": [
+      {
+        "step": "4b",
+        "check": "portal-cookie-replay",
+        "reason": "No IdP in this lab"
+      },
+      {
+        "step": "6c",
+        "check": "signed-update",
+        "reason": "No LAB_UPDATE_DIR fixture"
+      }
+    ],
+    "backup_fixture": {
+      "encrypted": false,
+      "size_bytes": 11607,
+      "first_listing_seconds": [
+        1.419,
+        1.428,
+        1.422
+      ],
+      "limitation": "Not an encrypted-backup restore qualification"
+    },
+    "diagnostic_fingerprint": "The [F] guest-content failure compares superseded4c4b772 in a separate LAB_DIR=fpcmp, expressly informational. e968 workflow confirms it is not a failure removed from qualification checks."
+  },
+  "fdisk": {
+    "job_id": 112742283989,
+    "counts": {
+      "pass": 19,
+      "survived": 1,
+      "info": 1
+    },
+    "pushed_manifest": "sha256:04827fc026c31f18f8a49bf41c10fc445792dd9bfba79e14bf44c4cde1a69e5b",
+    "image_binding": "Retained image-content-cur/pred rows re-hash pushed config, matching local source-tar config; pulled and running rows name pushed manifest. Config links uncompressed image content despite OCI export vs registry manifest digest difference.",
+    "scenario": "Active category bulk write on bounded 2GiB nested-Docker filesystem; fill lands while write is in flight, observed memtable fallocate ENOSPC.",
+    "status": "survived",
+    "restarts": 0,
+    "exit_code": 0,
+    "recovery": "Free space plus docker compose up -d, first escalation step sufficient",
+    "preserved_evidence": "Admin login, unchanged ui_users.json+ca.bundle digest, unchanged CA fingerprint, real allow200/block403",
+    "category": {
+      "available": 1,
+      "recovered": 0,
+      "quarantined_copies": 0,
+      "full_sync_domains": 2576609,
+      "convergence_seconds_after_recovery": 963,
+      "limitation": "Serving recovery precedes full category coverage; category closure is eventual, not immediate."
+    },
+    "limits": [
+      "Current and predecessor are the same 2e3 image; this mid-write case does not qualify a cross-version upgrade.",
+      "Category convergence oracle checks a fresh post-recovery successful sync marker/count; no exhaustive independent per-domain comparison.",
+      "This recorded scenario does not prove every ENOSPC path or unsupported filesystem. No destructive repro performed in review."
+    ],
+    "agent": "Workflow checks out2e3 into image-src and passes QUAL_AGENT_SRC; harness builds agent there. Health reports dev, so source binding comes from checkout/build evidence, not health version string."
+  },
+  "scanners": {
+    "snyk": {
+      "state": "success",
+      "url": "https://app.snyk.io/org/kidcarmi/pr-checks/7aaa4cf2-20ea-490f-8a0a-d397ee6ae6a8",
+      "limit": "Status only, detailed report not inspected"
+    },
+    "trivy": {
+      "job_id": 112737194810,
+      "run_id": 37604379502,
+      "state": "success",
+      "image_build_job_id": 112736271369,
+      "artifact_id": 11474785430,
+      "artifact_zip_sha256": "6a4f6cbd92b609e7f99c21716797c1aa7fbed5ee3b2fdeca333fdf6e452f0064",
+      "result": "0 selected findings for Alpine3.24.2, app/culvert, app/deploy/bin/culvert-maint",
+      "command": "trivy image --severity CRITICAL,HIGH --ignore-unfixed --ignorefile .trivyignore --exit-code 1 culvert:ci-smoke",
+      "binding": "Image build records exact7b3c9827 config ID, uploads artifact11474785430 ZIP6a4f6c..., scanner downloads same artifact/digest. Local OCI config and all rootfs diff_ids independently verified.",
+      "limits": "Only HIGH/CRITICAL, ignoring unfixed and ignorefile entries; not all-severity clear."
+    },
+    "govulncheck_gosec": {
+      "job_id": 112736487231,
+      "state": "success",
+      "result": "Three modules:0 called vulnerabilities;0 vulnerable imported packages;1 vulnerability in required modules but uncalled;gosec0issues."
+    },
+    "codeql": {
+      "check_id": 112737290301,
+      "state": "success",
+      "new_medium_annotations": 1,
+      "path": "proxy_tunnel.go",
+      "line": 832,
+      "start_column": 27,
+      "end_column": 39,
+      "rule": "go/log-injection",
+      "disposition": "Existing false positive on numeric firstByte[0], rendered as %02x. Other values sanitized and hostname quoted. Exact proxy.go/proxy_tunnel.go unchanged from d698; d698 comparison with main3fcc07e7 and exhaustive256byte formatting test retained in previous audit. No dismissals or risk acceptance.",
+      "correction": "Handoff 'CodeQL clean' is inaccurate if interpreted as zero findings; successful execution retains one medium annotation."
+    }
+  },
+  "ci": {
+    "listed_checks": 100,
+    "success": 59,
+    "skipped": 41,
+    "failures": 0,
+    "gate_checks": [
+      {
+        "id": 112741309535,
+        "name": "\u2705 Fast PR Gate \u2014 APPROVED",
+        "result": "success",
+        "url": "https://github.com/KidCarmi/Culvert/actions/runs/37604379503/job/112741309535"
+      },
+      {
+        "id": 112740572260,
+        "name": "\u2705 Deep PR Gate \u2014 APPROVED",
+        "result": "success",
+        "url": "https://github.com/KidCarmi/Culvert/actions/runs/37604379502/job/112740572260"
+      },
+      {
+        "id": 112736207257,
+        "name": "\u2705 QA Gate \u2014 APPROVED",
+        "result": "success",
+        "url": "https://github.com/KidCarmi/Culvert/actions/runs/37604379473/job/112736207257"
+      },
+      {
+        "id": 112736205561,
+        "name": "\u2705 Security Gate \u2014 APPROVED",
+        "result": "success",
+        "url": "https://github.com/KidCarmi/Culvert/actions/runs/37604379101/job/112736205561"
+      }
+    ],
+    "scope_note": "Many legacy QA/Security jobs skip; individual active Fast/Deep scanner jobs were inspected."
+  },
+  "oracle_limits": [
+    {
+      "check": "5 ready-rows",
+      "source": "test/e2e/appliance/lab/appliance-lab.sh at e96895c4",
+      "weakness": "Generic assertion does not require presence of each named row.",
+      "actual_evidence": "05-ready.json independently parsed: all11present rows ok, including ca,policy_loaded,policy_posture,clamav,setup_complete."
+    },
+    {
+      "check": "6 restore-dry-run",
+      "weakness": "Harness validates banners, not captured process exit status.",
+      "actual_evidence": "Retained output contains Validation:PASS and dry-run notice, no Validation:FAIL; actual offline restore also passed. No dry-runRC proof claimed."
+    },
+    {
+      "check": "8 firstboot-not-rerun",
+      "weakness": "Tail20 journal plus swallowed SSH error does not prove complete current-boot journal.",
+      "actual_evidence": "Retained journal shows ConditionPathExists skip; supports observed boot but is not a full-journal proof."
+    }
+  ],
+  "raw_material_handling": "Only sanitized/ is intended for publication. Original archives/extracted artifact folders may contain console transcripts; do not publish wholesale.",
+  "no_release_claim": true,
+  "independent_offline_verification": {
+    "tar_sha256": "db4f5ce8784e2a8e5145fdf59126a8e675a27f6628ac3b70e0d2ac16daf5ffff",
+    "manifest_digest": "sha256:536403fc9ba8a4bc15d229a12a7586ce6ccc35ba99148b71869a81596e0ea940",
+    "config_image_id": "sha256:7b3c98273c372b2875c140d4c678f415f3dda681e185e290c6b9b7234e1f1714",
+    "layers_verified": 12,
+    "uncompressed_diff_ids_verified": 12,
+    "os": "linux",
+    "architecture": "amd64",
+    "binaries": {
+      "app/culvert": {
+        "sha256": "12a18f4aef53769c0f01bb8f8fdb0c6d05cbd3315cb77f3798be283bde53c747",
+        "size": 42242210
+      },
+      "app/VERSION": {
+        "sha256": "8268734ebfcf8aa992bf29c638682f867cf5f421b1c7fa3d024d5b47c4f2afb1",
+        "size": 33
+      },
+      "app/deploy/bin/culvert-maint": {
+        "sha256": "8fce2d6e5ff1aac4151e949f4df2b30fd4ea4e39a39790fc1d4636097e0f0796",
+        "size": 19595426
+      }
+    },
+    "version": "v1.0.260-candidate.g2e3bcc2a1095",
+    "record_counts": {
+      "qemu": {
+        "pass": 79,
+        "info": 5,
+        "blocked": 2
+      },
+      "fdisk": {
+        "pass": 19,
+        "survived": 1,
+        "info": 1
+      }
+    },
+    "trials": [
+      {
+        "trial": 1,
+        "recovery_seconds": 100.60999099999992,
+        "joint_samples": 10,
+        "last_three_joint_pass": true
+      },
+      {
+        "trial": 2,
+        "recovery_seconds": 100.47672799999987,
+        "joint_samples": 10,
+        "last_three_joint_pass": true
+      },
+      {
+        "trial": 3,
+        "recovery_seconds": 100.523778,
+        "joint_samples": 10,
+        "last_three_joint_pass": true
+      }
+    ]
+  },
+  "codeql_annotation": [
+    {
+      "path": "proxy_tunnel.go",
+      "blob_href": "https://github.com/KidCarmi/Culvert/blob/2e3bcc2a1095f3e26e4f0b73a6a5515bdd069ee2/proxy_tunnel.go",
+      "start_line": 832,
+      "start_column": 27,
+      "end_line": 832,
+      "end_column": 39,
+      "annotation_level": "warning",
+      "title": "Log entries created from user input",
+      "message": "This log entry depends on a [user-provided value](1).\nThis log entry depends on a [user-provided value](2).",
+      "raw_details": null
+    }
+  ],
+  "build_info": {
+    "source": {
+      "git_commit": "2e3bcc2a1095f3e26e4f0b73a6a5515bdd069ee2",
+      "git_dirty": false,
+      "source_date_epoch": 1791367170,
+      "build_timestamp": "2026-10-07T09:59:30Z",
+      "build_wallclock": "2026-10-07T10:18:30Z",
+      "install_sh_sha256": "01233f340bf1b53cb838fe89df838baf3a55af886330cbc8b4adaefc239fcf04"
+    },
+    "console": {
+      "source_git_commit": "2e3bcc2a1095f3e26e4f0b73a6a5515bdd069ee2",
+      "source_git_dirty": false,
+      "go_compiler": "go1.26.8",
+      "binary_sha256": "22ef736c9f7bb18627fecc890f767ffd15fd0b15bf53da55279d42371fdfe4f7",
+      "target": "linux/amd64",
+      "cgo_enabled": false,
+      "origin": "built from this provisioning checkout; separate from the application image"
+    },
+    "application": {
+      "image": "culvert/candidate",
+      "tag": "sha-2e3bcc2a1095",
+      "index_digest": "sha256:536403fc9ba8a4bc15d229a12a7586ce6ccc35ba99148b71869a81596e0ea940",
+      "amd64_digest": "sha256:536403fc9ba8a4bc15d229a12a7586ce6ccc35ba99148b71869a81596e0ea940",
+      "app_version_file": "v1.0.260-candidate.g2e3bcc2a1095",
+      "cosign": "not applicable \u2014 CANDIDATE build from an unsigned CI artifact; provenance = image tar sha256:db4f5ce8784e2a8e5145fdf59126a8e675a27f6628ac3b70e0d2ac16daf5ffff, source 2e3bcc2a1095f3e26e4f0b73a6a5515bdd069ee2, CI run 37604379502",
+      "baked_tar_sha256": "41d51fa728da77cf41ec8dd1255f4318c646d70287790f83715fd6fb3119e011",
+      "clamav_image": "docker.io/clamav/clamav",
+      "clamav_tag": "1.4",
+      "clamav_index_digest": "sha256:57deb108fc4c72778aa83eafbca7bb7153e28c3f57c005afd38d31f16da86f23",
+      "clamav_amd64_digest": "sha256:da8463f630e2c9467c74f3da1dee6f096e61a71650e4e9f1ff9b5f687ba91aa0",
+      "clamav_baked_tar_sha256": "603c165c35141aed67667dffbc09132664feadd74dfcabbfc7e109b4dbecffa6",
+      "clamav_sidecar_ref": "culvert/clamav:1.4.6-pcre2-10.49",
+      "clamav_sidecar_image_id": "sha256:f3fcbf45d0a50da7e1880e498a030e38b1cd31d792a2737a881ebe8391b13ec3",
+      "clamav_sidecar_pcre2": "pcre2-10.49-r0"
+    },
+    "candidate": {
+      "candidate": true,
+      "not_for_production": true,
+      "image_source_git_commit": "2e3bcc2a1095f3e26e4f0b73a6a5515bdd069ee2",
+      "provisioning_git_commit": "2e3bcc2a1095f3e26e4f0b73a6a5515bdd069ee2",
+      "provisioning_drift": false,
+      "image_tar_sha256": "db4f5ce8784e2a8e5145fdf59126a8e675a27f6628ac3b70e0d2ac16daf5ffff",
+      "ci_run_id": "37604379502",
+      "image_signature": "none (unsigned CI artifact; release signature verification is not bypassed, it is inapplicable)",
+      "agent_trust": "culvert-firstboot exports CULVERT_MAINT_TRUST_UNVERIFIED_IMAGE=1 because the manifest carries CANDIDATE_BUILD=1 (candidate-scoped; a release OVA never sets it)"
+    },
+    "artifact": {
+      "ova": "culvert-appliance-1.0.260-candidate.g2e3bcc2a1095-ubuntu-24.04.ova",
+      "size_bytes": 1273272320,
+      "sha256": "55e98116ba2c020789b3f5de4eabab7e29af611c83b9c972b82a6319a19f145e"
+    },
+    "source_path": "artifact-11477120696/build/build-info.json",
+    "ova_locally_rehashed_by_this_reviewer": false
+  }
+}

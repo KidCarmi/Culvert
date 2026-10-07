@@ -1,0 +1,86 @@
+{"run":"20261007T102237Z","step":"P","check":"tools","result":"pass","detail":"qemu, qemu-img, ssh, curl, python3, openssl, iso tool present"}
+{"run":"20261007T102237Z","step":"P","check":"memory","result":"pass","detail":"14454 MiB available (need 6144)"}
+{"run":"20261007T102237Z","step":"P","check":"disk","result":"pass","detail":"77 GiB free at //culvert-lab/lab (need 20: OVA + VMDK + base + overlay growth)"}
+{"run":"20261007T102237Z","step":"P","check":"accel","result":"pass","detail":"accel=kvm (kvm usable: yes)"}
+{"run":"20261007T102237Z","step":"1","check":"ova-sha256","result":"pass","detail":"culvert-appliance-1.0.260-candidate.g2e3bcc2a1095-ubuntu-24.04.ova sha256 55e98116ba2c020789b3f5de4eabab7e29af611c83b9c972b82a6319a19f145e"}
+{"run":"20261007T102237Z","step":"1","check":"ova-manifest","result":"pass","detail":"every .mf digest matches"}
+{"run":"20261007T102237Z","step":"1","check":"disk-chain","result":"pass","detail":"disk.raw (disposable copy of the OVA's own VMDK) \u2192 direct-I/O loop /dev/loop0 \u2192 dm culvert-lab-4bb99689 (linear; latency injectable); QEMU cache=none"}
+{"run":"20261007T102237Z","step":"2","check":"boot-started","result":"pass","detail":"qemu pid 17465 accel=kvm"}
+{"run":"20261007T102237Z","step":"2","check":"kernel-started","result":"pass","detail":"[    0.000000] Linux version 6.8.0-142-generic (buildd@lcy02-amd64-049) (x86_64-linux-gnu- after 5s"}
+{"run":"20261007T102237Z","step":"2","check":"operator-ssh-up","result":"pass","detail":"culvert-operator SSH (OVF-delivered key, status-json) after 12s"}
+{"run":"20261007T102237Z","step":"2","check":"firstboot-complete","result":"pass","detail":"status-json: complete recorded, phase provisioned, 59s from power-on"}
+{"run":"20261007T102237Z","step":"3","check":"operator-observe","result":"pass","detail":"culvert-operator: help, status, status-json (valid JSON, version 1.0.260-candidate.g2e3bcc2a1095), diagnostics"}
+{"run":"20261007T102237Z","step":"3","check":"status-setup-pending","result":"pass","detail":"status-json setup_status=pending, phase=provisioned"}
+{"run":"20261007T102237Z","step":"3","check":"firstboot-steps","result":"pass","detail":"access agent complete console images install ovf"}
+{"run":"20261007T102237Z","step":"3a","check":"console-onetime-printed","result":"pass","detail":"first boot printed a one-time console password on the VM console (ttyS0)"}
+{"run":"20261007T102237Z","step":"3a","check":"console-login","result":"pass","detail":"PAM login as culvert with the one-time password \u2192 forced change \u2192 sudo with the new password \u2192 root"}
+{"run":"20261007T102237Z","step":"3a","check":"password-changed","result":"pass","detail":"chage: no change pending after the forced change"}
+{"run":"20261007T102237Z","step":"3","check":"culvert-status-setup-pending","result":"pass","detail":"  STATE:              services running \u2014 setup pending (create the first admin at https://10.0.2.15:9090)"}
+{"run":"20261007T102237Z","step":"3","check":"image-identity","result":"pass","detail":"culvert runs sha256:536403fc9ba8a4bc15d229a12a7586ce6ccc35ba99148b71869a81596e0ea940"}
+{"run":"20261007T102237Z","step":"3","check":"setup-token","result":"pass","detail":"32 characters, from culvert-status via the authenticated console; identical to the token first boot printed on the VM console"}
+{"run":"20261007T102237Z","step":"3c","check":"operator-commands-refused","result":"pass","detail":"'bash'\u21922 'status; id'\u21922 'sudo -n id'\u21922 '/bin/sh -c id'\u21922 'status-json --help'\u21922 'reboot'\u21922"}
+{"run":"20261007T102237Z","step":"3c","check":"forwarding-refused","result":"pass","detail":"local-forward:refused remote-forward:255 stdio-forward:255"}
+{"run":"20261007T102237Z","step":"3c","check":"file-transfer-refused","result":"pass","detail":"scp-legacy:1 scp-sftp:255 sftp:255"}
+{"run":"20261007T102237Z","step":"3c","check":"local-admin-ssh-refused","result":"pass","detail":"culvert@ with the imported key: exit 255"}
+{"run":"20261007T102237Z","step":"3c","check":"sshd-effective","result":"pass","detail":"AllowUsers culvert-operator, PasswordAuthentication no, DisableForwarding yes, ForceCommand culvert-access; operator has no sudo"}
+{"run":"20261007T102237Z","step":"3c","check":"local-admin-sudo-needs-password","result":"pass","detail":"culvert: sudo -n refused (a password is required)"}
+{"run":"20261007T102237Z","step":"3d","check":"boot-timing","result":"info","detail":"Startup finished in 3.000s (kernel) + 39.821s (userspace) = 42.822s ; slowest: 34.403s culvert-firstboot.service 1.974s systemd-networkd-wait-online.service 1.637s snapd.seeded.service"}
+{"run":"20261007T102237Z","step":"3e","check":"recovery-secrets","result":"pass","detail":"root reveal shows both .env passphrases exactly, no setup token, with custody guidance; unprivileged invocation refused"}
+{"run":"20261007T102237Z","step":"4a","check":"bootstrap-api-needs-token","result":"pass","detail":"POST /api/auth/users 403, PUT default-auth-outcome 403 without the token; status-json still setup_status=pending"}
+{"run":"20261007T102237Z","step":"4","check":"setup-without-token","result":"pass","detail":"403"}
+{"run":"20261007T102237Z","step":"4","check":"setup-with-token","result":"pass","detail":"200"}
+{"run":"20261007T102237Z","step":"4","check":"admin-login","result":"pass","detail":"200"}
+{"run":"20261007T102237Z","step":"4","check":"status-setup-complete","result":"pass","detail":"culvert-status: setup complete"}
+{"run":"20261007T102237Z","step":"4","check":"operator-setup-complete","result":"pass","detail":"status-json setup_status=completed, administrator_enrolled=True"}
+{"run":"20261007T102237Z","step":"4b","check":"demotion-immediate","result":"pass","detail":"labop admin session: GET /api/auth/users 200 \u2192 demoted to viewer \u2192 the same session 403"}
+{"run":"20261007T102237Z","step":"4b","check":"portal-cookie-replay","result":"blocked","detail":"needs an identity provider (none in this lab); covered by TestUISessionRole_RejectsReplayedPortalCookie and the proxy cookie-boundary tests in CI"}
+{"run":"20261007T102237Z","step":"5","check":"auth-exempt","result":"pass","detail":"200"}
+{"run":"20261007T102237Z","step":"5","check":"default-deny","result":"pass","detail":"{\"defaultAction\":\"deny\"}"}
+{"run":"20261007T102237Z","step":"5","check":"traffic","result":"pass","detail":"example.com 403 \u2192 rule \u2192 200; example.org 403 (real egress through the guest proxy)"}
+{"run":"20261007T102237Z","step":"5","check":"ready-rows","result":"pass","detail":"ca ok;policy_loaded ok;policy_posture ok;"}
+{"run":"20261007T102237Z","step":"5","check":"clamav-real","result":"pass","detail":"/ready clamav ok \u2014 the REAL clamav/clamav sidecar from the OVA, signatures fetched by the guest"}
+{"run":"20261007T102237Z","step":"5","check":"status-ready-to-enforce","result":"pass","detail":"culvert-status: ready to enforce"}
+{"run":"20261007T102237Z","step":"5","check":"ca-identity","result":"pass","detail":"root CA sha256 82:AF:E6:05:84:6F:2B:34:F0:4D:D5:16:4C:DF:93:16:CF:F3:45:72:E3:35:F3:89:C6:E2:DB:98:99:5A:45:98"}
+{"run":"20261007T102237Z","step":"5b","check":"category-data","result":"pass","detail":"UT1 sync complete (lastSync entries: 2026-10-07T10:23:43Z 2576609); 2 of 5 probe hosts resolve via the community tier"}
+{"run":"20261007T102237Z","step":"5c","check":"category-enforcement","result":"pass","detail":"thepiratebay.org (Malicious via UT1): category rule \u2192 403; without it \u2192 301"}
+{"run":"20261007T102237Z","step":"6","check":"agent-installed","result":"pass","detail":"culvert-maint active, version v1.0.260-candidate.g2e3bcc2a1095 = proxy v1.0.260-candidate.g2e3bcc2a1095, no agent.pending"}
+{"run":"20261007T102237Z","step":"6","check":"agent-reachable","result":"pass","detail":"agent v1.0.260-candidate.g2e3bcc2a1095 reachable over its socket, privilege_mode=sudoers, compose stack up"}
+{"run":"20261007T102237Z","step":"6","check":"agent-backup","result":"pass","detail":"op 01M4AYD89WJV32TFYTTAKM0FAV \u2192 culvert-backup-20261007-102638-523810.tar.gz succeeded (proxy \u2192 agent socket \u2192 sudoers \u2192 cli container)"}
+{"run":"20261007T102237Z","step":"6","check":"backup-listed","result":"pass","detail":"culvert-backup-20261007-102638-523810.tar.gz listed by /api/backups (available=true, one entry)"}
+{"run":"20261007T102237Z","step":"6","check":"restore-dry-run","result":"pass","detail":"Validation: PASS; dry run, no files written (Culvert version: v1.0.260-candidate.g2e3bcc2a1095)"}
+{"run":"20261007T102237Z","step":"6b","check":"restore-refused-while-running","result":"pass","detail":"commit against the running stack refused (Restore commit error: restore: data directory is locked by another Culvert process (is the proxy still running? stop the stack first)); the post-backup rule is untouched"}
+{"run":"20261007T102237Z","step":"6b","check":"restore-commit","result":"pass","detail":"down \u2192 restore --confirm \u2192 up: login 200, backup rules back (lab-allow-example), post-backup rule gone, example.com 200 / example.net 403"}
+{"run":"20261007T102237Z","step":"6c","check":"signed-update","result":"blocked","detail":"no LAB_UPDATE_DIR (registry + fixture evidence are prepared by the lab workflow)"}
+{"run":"20261007T102237Z","step":"7","check":"os-update","result":"pass","detail":"culvert-os-update os exit 0 (20 package actions)"}
+{"run":"20261007T102237Z","step":"7","check":"reboot","result":"pass","detail":"proxy /health and operator SSH back 31s after the reboot command"}
+{"run":"20261007T102237Z","step":"7","check":"kernel","result":"pass","detail":"kernel CHANGED 6.8.0-142-generic \u2192 6.8.0-146-generic"}
+{"run":"20261007T102237Z","step":"7","check":"docker-held","result":"pass","detail":"Docker packages still held; engine 29.8.2"}
+{"run":"20261007T102237Z","step":"8","check":"stack-resumed","result":"pass","detail":"culvert-stack-resume.service took the os-update + agent locks, started the stack and cleared its marker"}
+{"run":"20261007T102237Z","step":"8","check":"admin-login","result":"pass","detail":"200 after reboot"}
+{"run":"20261007T102237Z","step":"8","check":"policy-persisted","result":"pass","detail":"rules: lab-allow-example"}
+{"run":"20261007T102237Z","step":"8","check":"enforcement","result":"pass","detail":"example.com 200, example.org 403 (also proves Exempt auth survived)"}
+{"run":"20261007T102237Z","step":"8","check":"ready","result":"pass","detail":"/ready 200"}
+{"run":"20261007T102237Z","step":"8","check":"ca-identity","result":"pass","detail":"unchanged 82:AF:E6:05:84:6F:2B:34:F0:4D:D5:16:4C:DF:93:16:CF:F3:45:72:E3:35:F3:89:C6:E2:DB:98:99:5A:45:98"}
+{"run":"20261007T102237Z","step":"8","check":"category-data","result":"pass","detail":"category lookups identical before/after reboot"}
+{"run":"20261007T102237Z","step":"8","check":"backup-listed","result":"pass","detail":"culvert-backup-20261007-102638-523810.tar.gz still listed (available=true, one entry)"}
+{"run":"20261007T102237Z","step":"8","check":"agent-reachable","result":"pass","detail":"agent v1.0.260-candidate.g2e3bcc2a1095 reachable over its socket, privilege_mode=sudoers, compose stack up (after the maintenance reboot)"}
+{"run":"20261007T102237Z","step":"8","check":"firstboot-not-rerun","result":"pass","detail":"no first-boot step ran on the second boot"}
+{"run":"20261007T102237Z","step":"8","check":"state-files","result":"pass","detail":"first-boot state files unchanged"}
+{"run":"20261007T102237Z","step":"8","check":"restore-persisted","result":"pass","detail":"the restored policy (no lab-post-backup) survived the reboot"}
+{"run":"20261007T102237Z","step":"8","check":"image-identity","result":"pass","detail":"culvert runs sha256:536403fc9ba8a4bc15d229a12a7586ce6ccc35ba99148b71869a81596e0ea940 after the reboot"}
+{"run":"20261007T102237Z","step":"8","check":"operator-status","result":"pass","detail":"status-json after the reboot: setup_status=completed, phase=ready"}
+{"run":"20261007T102237Z","step":"8","check":"boot-timing","result":"info","detail":"Startup finished in 3.087s (kernel) + 16.423s (userspace) = 19.511s ; slowest: 13.093s culvert-stack-resume.service 2.036s systemd-networkd-wait-online.service 689ms docker.service"}
+{"run":"20261007T102237Z","step":"R","check":"io-accounting","result":"info","detail":"LAB-ONLY guest change for attribution: systemd DefaultIOAccounting=yes (DefaultIOAccounting=yes)"}
+{"run":"20261007T102237Z","step":"R","check":"clamav-evidence","result":"pass","detail":"a fresh EICAR body is answered '403 Blocked by CLAMAV scan' with clamd up, NOT with clamd stopped (403:Blocked: antivirus scanning is currently unavailable, so thi), and again after clamd restarts"}
+{"run":"20261007T102237Z","step":"R","check":"variant-base","result":"info","detail":"LAB-ONLY guest change set 'base' applied: base: no change "}
+{"run":"20261007T102237Z","step":"R","check":"profile-esxi12","result":"info","detail":"disk: read +12ms, write +3ms per I/O (0 83886080 delay 7:0 0 12 7:0 0 3 ); budget 120s; 3 maintenance reboots"}
+{"run":"20261007T102237Z","step":"R","check":"backup-list-esxi12-1","result":"pass","detail":"first listing http 200: culvert-backup-20261007-102638-523810.tar.gz (11607 bytes, encrypted=False) in 1.419s, count=1 (login 0.069s, not counted)"}
+{"run":"20261007T102237Z","step":"R","check":"recovery-esxi12-1","result":"pass","detail":"recovered in 100.6s (budget 120s; unrounded 100.60999099999992): kernel=+44.8s first_ready_clamav_ok=+90.3s first_traffic_allow_block=+90.4s first_eicar_blocked_by_clamav=+90.4s first_operator_phase_ready=+90.7s first_joint_sample=+90.7s third_consecutive_joint_sample=+100.6s; samples=10; host disk: 8739 reads/848.4 MiB, 2668 writes/31.5 MiB"}
+{"run":"20261007T102237Z","step":"R","check":"state-esxi12-1","result":"pass","detail":"admin login, normalized policy (persisted, not draft) + valid default action, CA, image and agent availability equal the pre-reboot baseline"}
+{"run":"20261007T102237Z","step":"R","check":"backup-list-esxi12-2","result":"pass","detail":"first listing http 200: culvert-backup-20261007-102638-523810.tar.gz (11607 bytes, encrypted=False) in 1.428s, count=1 (login 0.074s, not counted)"}
+{"run":"20261007T102237Z","step":"R","check":"recovery-esxi12-2","result":"pass","detail":"recovered in 100.5s (budget 120s; unrounded 100.47672799999987): kernel=+44.7s first_ready_clamav_ok=+90.1s first_traffic_allow_block=+90.2s first_eicar_blocked_by_clamav=+90.3s first_operator_phase_ready=+90.5s first_joint_sample=+90.5s third_consecutive_joint_sample=+100.5s; samples=10; host disk: 8780 reads/859.7 MiB, 2695 writes/31.4 MiB"}
+{"run":"20261007T102237Z","step":"R","check":"state-esxi12-2","result":"pass","detail":"admin login, normalized policy (persisted, not draft) + valid default action, CA, image and agent availability equal the pre-reboot baseline"}
+{"run":"20261007T102237Z","step":"R","check":"backup-list-esxi12-3","result":"pass","detail":"first listing http 200: culvert-backup-20261007-102638-523810.tar.gz (11607 bytes, encrypted=False) in 1.422s, count=1 (login 0.074s, not counted)"}
+{"run":"20261007T102237Z","step":"R","check":"recovery-esxi12-3","result":"pass","detail":"recovered in 100.5s (budget 120s; unrounded 100.523778): kernel=+44.8s first_ready_clamav_ok=+90.2s first_traffic_allow_block=+90.3s first_eicar_blocked_by_clamav=+90.4s first_operator_phase_ready=+90.6s first_joint_sample=+90.6s third_consecutive_joint_sample=+100.5s; samples=10; host disk: 8823 reads/875.0 MiB, 2678 writes/31.4 MiB"}
+{"run":"20261007T102237Z","step":"R","check":"state-esxi12-3","result":"pass","detail":"admin login, normalized policy (persisted, not draft) + valid default action, CA, image and agent availability equal the pre-reboot baseline"}
+{"run":"20261007T102237Z","step":"R","check":"recovery-cases","result":"pass","detail":"3 of 3 profile x reboot cases ran"}
