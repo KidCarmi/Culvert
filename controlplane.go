@@ -46,8 +46,6 @@ import (
 	"fmt"
 	"sync"
 	"time"
-
-	"google.golang.org/grpc"
 )
 
 // ─── gRPC service definition (no protoc needed) ───────────────────────────────
@@ -330,7 +328,15 @@ var (
 		role     string // "standalone", "control-plane", "data-plane"
 		grpcAddr string // gRPC listen address (CP) or connect-to address (DP)
 		nodeID   string // this node's identifier
-		grpcSrv  *grpc.Server
+		// CHAOS-71: the *grpc.Server handle used to live here and is now owned
+		// by cpGRPCSupervisor (cp_grpc_supervisor.go). The write here took no
+		// lock despite this struct's documented clusterRoleMu contract, which
+		// was harmless only while it happened exactly once at startup; a
+		// bind/serve/rebind loop writes it repeatedly from a background
+		// goroutine. It cannot be guarded by clusterRoleMu either, because
+		// enableControlPlane holds that lock across the first bind. Do not
+		// re-add it: a second handle is a second answer to "is the Control
+		// Plane serving?".
 		certFile string // TLS cert path (for HA deploy command)
 		keyFile  string // TLS key path (for HA deploy command)
 		caFile   string // CA cert path (for HA deploy command)

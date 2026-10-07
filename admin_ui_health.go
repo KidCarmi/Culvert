@@ -79,10 +79,8 @@ package main
 import (
 	"errors"
 	"fmt"
-	"net"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"time"
 )
 
@@ -263,36 +261,18 @@ func classifyAdminUIListenError(err error) string {
 	if err == nil {
 		return "none"
 	}
-	var errno syscall.Errno
-	if errors.As(err, &errno) {
-		switch errno {
-		case syscall.EADDRINUSE:
-			return "port_in_use"
-		case syscall.EACCES, syscall.EPERM:
-			return "permission_denied"
-		case syscall.EADDRNOTAVAIL:
-			return "address_unavailable"
-		case syscall.EMFILE, syscall.ENFILE:
-			return "descriptors_exhausted"
-		}
-	}
+	// The ONE plane-specific class, checked BEFORE the shared table: a
+	// certificate/key pair that will not load is an admin-UI fault with its
+	// own remedy, and it must not appear in any other listener's vocabulary.
 	if errors.Is(err, errAdminUITLSMaterial) {
 		return "tls_certificate"
 	}
-	// CHAOS-66 narrowed this branch. `network_error` requires an actual
-	// TIMEOUT, not merely an error the net package wrapped: a bind failure
-	// arrives as *net.OpError, which satisfies net.Error unconditionally
-	// (Timeout() false for, say, EINVAL), so the unqualified form reported
-	// every unrecognised errno as `network_error` — pointing the operator at
-	// network troubleshooting for a socket or permission fault — and made
-	// `listen_failed` unreachable for any error the net package produced. The
-	// original gate passed only a bare errors.New, which is the one shape that
-	// does reach `listen_failed`, so the branch looked correct.
-	var ne net.Error
-	if errors.As(err, &ne) && ne.Timeout() {
-		return "network_error"
-	}
-	return "listen_failed"
+	// CHAOS-71: the errno/timeout/fallback mapping is shared with the SOCKS5
+	// and Control Plane listeners (listener_fault_class.go) rather than copied.
+	// It is the same fault on the same kind of socket, and the copies already
+	// shared a defect: the `network_error` branch was unqualified in BOTH and
+	// had to be narrowed in BOTH — see that file's header.
+	return classifyListenerFault(err)
 }
 
 // errAdminUITLSMaterial tags a failure to load the operator-supplied admin UI

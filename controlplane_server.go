@@ -871,6 +871,22 @@ var clusterInsecure bool
 
 // cpServerOption returns the gRPC server option for the Control Plane based on
 // available TLS certs or the --cluster-insecure flag.
+//
+// CHAOS-71: this function NO LONGER LOGS, and that is load-bearing rather than
+// tidying. It used to emit the mTLS line (or the insecure WARN) itself, which
+// was correct exactly once because it was reached exactly once per boot. The
+// bind/serve/rebind loop reaches it on EVERY attempt, so a persistently
+// unbindable CP emitted one line per retry — forever, at one per 30 s at the
+// ceiling. That is this repository's own standing rule broken by the change
+// that introduced the loop: a mitigation for a crash loop must not itself be a
+// log flood (CHAOS-63, and the rate-limit discipline in storage_health.go).
+// Measured against the real binary before the fix: three WARN lines in the
+// first seven seconds of a failing bind.
+//
+// The second half of the same defect is CHAOS-66's: the line was emitted
+// BEFORE the bind, so it announced a listener that did not exist yet. The
+// supervisor now emits ONE line AFTER an observed successful bind, naming the
+// transport via cpTransportPosture.
 func cpServerOption(addr, certFile, keyFile, caFile string) (grpc.ServerOption, error) {
 	switch {
 	case certFile != "" && keyFile != "":
@@ -878,57 +894,79 @@ func cpServerOption(addr, certFile, keyFile, caFile string) (grpc.ServerOption, 
 		if err != nil {
 			return nil, fmt.Errorf("gRPC TLS: %w", err)
 		}
-		logger.Printf("ControlPlane: gRPC %s (mTLS)", strings.ReplaceAll(addr, "\n", ""))
 		return grpc.Creds(creds), nil
 	case clusterInsecure:
-		logWarnf("ControlPlane: gRPC %s (insecure — all cluster data unencrypted!)", strings.ReplaceAll(addr, "\n", ""))
 		return grpc.EmptyServerOption{}, nil
 	default:
 		return nil, fmt.Errorf("TLS certificates required for Control Plane (use --cluster-insecure to override for development)")
 	}
 }
 
-func StartControlPlaneGRPC(addr, certFile, keyFile, caFile string) error {
-	serverOpt, err := cpServerOption(addr, certFile, keyFile, caFile)
-	if err != nil {
-		return err
+// cpTransportPosture names the gRPC transport the Control Plane is using, for
+// the one log line the supervisor emits after an OBSERVED bind. It mirrors
+// cpServerOption's branches exactly; keep the two together.
+func cpTransportPosture(certFile, keyFile string) string {
+	switch {
+	case certFile != "" && keyFile != "":
+		return "mTLS"
+	case clusterInsecure:
+		return "insecure — all cluster data unencrypted!"
+	default:
+		return "no transport"
 	}
+}
 
-	srv := grpc.NewServer(
-		serverOpt,
-		// Match the DP client's frame budget so an enterprise-scale
-		// ConfigSnapshot (2 M blocked hosts + IP list + URL categories) fits
-		// uncompressed. gRPC's 4 MiB default receive limit is what capped the
-		// old snapshot at ~200 k hosts. Importing
-		// google.golang.org/grpc/encoding/gzip (blank import above) registers
-		// the codec so the server ALWAYS accepts gzip requests and echoes gzip
-		// on those responses — but never REQUIRES it. This is what makes the
-		// DP's opt-in compression (CULVERT_CLUSTER_GRPC_COMPRESSION) a safe,
-		// CP-first migration: an upgraded CP handles both compressed and
-		// uncompressed DPs, so enabling compression never depends on rollout
-		// order the way an unconditional client-side compressor would.
-		// Asymmetric by direction: the big config snapshot only flows OUTBOUND
-		// (GetConfig / HASync responses), so the server SENDS large but RECEIVES
-		// tight — every inbound RPC is small, so a 16 MiB recv cap shrinks the
-		// CP's inbound allocation surface instead of inheriting the 128 MiB frame.
-		grpc.MaxRecvMsgSize(maxClusterInboundMsgSize),
-		grpc.MaxSendMsgSize(maxClusterGRPCMsgSize),
-	)
-	registerConfigService(srv)
-
-	lc := net.ListenConfig{}
-	ln, err := lc.Listen(context.Background(), "tcp", addr)
+// StartControlPlaneGRPC binds and serves the Control Plane gRPC listener,
+// returning the FIRST bind attempt's error.
+//
+// CHAOS-71: the bind/serve/rebind lifecycle moved to cp_grpc_supervisor.go, but
+// this function's SIGNATURE AND SEMANTICS are deliberately unchanged — one
+// synchronous attempt, error returned — because two of its three callers depend
+// on that and would be wrong without it:
+//
+//   - the admin API (`enableControlPlane` via apiClusterCP) must answer the
+//     admin with the real error rather than a 200 and a background retry;
+//   - HA promotion (`onPromote`) treats an error as "stay standby", and a
+//     STANDBY MUST NEVER HOLD THE CP PORT — so a failed attempt from here
+//     stops the supervisor rather than leaving it retrying.
+//
+// The BOOT path wants the opposite (keep retrying, never exit) and therefore
+// calls startCPGRPCSupervisor directly — see startControlPlaneWithHAResume.
+//
+// What IS new even for these two callers: once a bind succeeds, a Serve that
+// later returns no longer leaves the Control Plane dark and unreported. The
+// supervisor rebinds, and cp_grpc_health.go makes the gap visible meanwhile.
+func StartControlPlaneGRPC(addr, certFile, keyFile, caFile string) error {
+	sup, err := startCPGRPCSupervisor(addr, certFile, keyFile, caFile)
 	if err != nil {
+		// Do not leave a supervisor retrying behind a returned error: see the
+		// contract note on startCPGRPCSupervisor for why this differs per
+		// caller, and why the standby case makes it a safety property rather
+		// than a preference.
+		sup.Stop()
 		return fmt.Errorf("gRPC listen: %w", err)
 	}
-	clusterRole.grpcSrv = srv
-
-	go func() {
-		if err := srv.Serve(ln); err != nil {
-			logger.Printf("ControlPlane gRPC error: %v", err)
-		}
-	}()
+	setGlobalCPGRPC(sup)
 	return nil
+}
+
+// setGlobalCPGRPC publishes sup as the process's Control Plane supervisor,
+// stopping any predecessor. Separate from the supervisor itself so the
+// shutdown hook has a single place to look.
+func setGlobalCPGRPC(sup *cpGRPCSupervisor) {
+	globalCPGRPCMu.Lock()
+	prev := globalCPGRPC
+	globalCPGRPC = sup
+	globalCPGRPCMu.Unlock()
+	if prev != nil && prev != sup {
+		prev.Stop()
+	}
+}
+
+// wrapCPGRPCTLSMaterial tags a TLS-material failure so
+// classifyCPGRPCListenError can name it without matching on error text.
+func wrapCPGRPCTLSMaterial(err error) error {
+	return fmt.Errorf("%w: %w", errCPGRPCTLSMaterial, err)
 }
 
 // registerConfigService registers the hand-rolled ConfigService (JSON over
@@ -1010,16 +1048,24 @@ const cpGRPCGracefulStopBudget = 8 * time.Second
 // fleet of merely-unresponsive peers still drains gracefully; it is the
 // unbounded active-stream case the force-close exists for.
 func StopControlPlaneGRPC() {
-	srv := clusterRole.grpcSrv
-	if srv == nil {
+	// CHAOS-71: the server handle lives on the supervisor rather than on
+	// clusterRole. The old `clusterRole.grpcSrv` write took no lock, which was
+	// harmless only while it happened exactly once at startup; a rebind loop
+	// writes it repeatedly from a background goroutine, and it cannot be
+	// guarded by clusterRoleMu because enableControlPlane holds that lock
+	// across the first bind (see the ownership note on cpGRPCSupervisor).
+	//
+	// Stop() carries the CHAOS-56 bound (gracefulStopBounded then force-close)
+	// and additionally halts the rebind loop, so a shutdown can never race a
+	// supervisor into binding a fresh listener on the way out.
+	globalCPGRPCMu.Lock()
+	sup := globalCPGRPC
+	globalCPGRPCMu.Unlock()
+	if sup == nil {
 		return
 	}
 	logger.Printf("ControlPlane: graceful gRPC shutdown...")
-	if gracefulStopBounded(srv, cpGRPCGracefulStopBudget) {
-		logger.Printf("ControlPlane: gRPC stopped")
-		return
-	}
-	logger.Printf("ControlPlane: gRPC drain exceeded %s — force-closed connections", cpGRPCGracefulStopBudget)
+	sup.Stop()
 }
 
 // gracefulStopBounded runs srv.GracefulStop under a budget and falls back to

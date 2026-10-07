@@ -1468,7 +1468,38 @@ func initClusterCA(clusterDBPath string) {
 // enableControlPlane activates Control Plane mode: starts the gRPC server,
 // initialises the cluster CA, and starts the heartbeat monitor.
 // Safe to call at runtime from the admin API (idempotent — returns error if already CP).
+//
+// ALL-OR-NOTHING: a listener that does not bind leaves the role unchanged and
+// returns the error. That is what the two RUNTIME callers require and it must
+// not be relaxed here — the admin API has to answer the admin with the real
+// error, and HA promotion treats an error as "stay standby", where a retained
+// supervisor would bind the CP port on a node that is not the leader. The BOOT
+// path wants the opposite and uses enableControlPlaneSupervised.
 func enableControlPlane(grpcAddr, certFile, keyFile, caFile, clusterDBPath string) error {
+	return activateControlPlane(grpcAddr, certFile, keyFile, caFile, clusterDBPath, false)
+}
+
+// enableControlPlaneSupervised is the BOOT path's form: it activates Control
+// Plane mode and, if the listener could not bind, STILL adopts the role and
+// leaves the supervisor retrying — returning the bind error for the caller to
+// log rather than to exit on.
+//
+// CHAOS-71. Adopting the role on a failed bind is deliberate and is CHAOS-66's
+// ordering rule: this node is configured and persisted as a Control Plane, so
+// reporting it as "standalone" because its socket is momentarily unavailable
+// would be indistinguishable from a node that was never a CP at all — on
+// exactly the node where an operator is trying to find out why the fleet is not
+// syncing. The honest answer is "a Control Plane whose listener is down", which
+// is what the role plus the cp_grpc_health.go surfaces together say.
+func enableControlPlaneSupervised(cfg clusterStartupConfig) error {
+	return activateControlPlane(cfg.CPAddr, cfg.CPCert, cfg.CPKey, cfg.CPCA, cfg.ClusterDBPath, true)
+}
+
+// activateControlPlane is the shared body. retainOnBindFailure selects between
+// the two contracts documented on the two wrappers above; it exists so the
+// difference between them is ONE named boolean rather than two divergent copies
+// of the activation sequence.
+func activateControlPlane(grpcAddr, certFile, keyFile, caFile, clusterDBPath string, retainOnBindFailure bool) error {
 	clusterRoleMu.Lock()
 	defer clusterRoleMu.Unlock()
 
@@ -1488,19 +1519,34 @@ func enableControlPlane(grpcAddr, certFile, keyFile, caFile, clusterDBPath strin
 	// the CP still serves locally, so boot continues.
 	_ = globalConfigStore.Update(CurrentConfigSnapshot())
 	initClusterCA(clusterDBPath)
-	if err := StartControlPlaneGRPC(grpcAddr, certFile, keyFile, caFile); err != nil {
+
+	// CHAOS-71: the supervisor is started directly on the retain path so a
+	// failed first attempt keeps retrying. StartControlPlaneGRPC is the
+	// all-or-nothing wrapper the runtime callers need (it stops the supervisor
+	// and returns the error), so routing the boot path through it would
+	// reintroduce the "one attempt and give up" behaviour this change removes.
+	var bindErr error
+	if retainOnBindFailure {
+		sup, err := startCPGRPCSupervisor(grpcAddr, certFile, keyFile, caFile)
+		setGlobalCPGRPC(sup)
+		bindErr = err
+	} else if err := StartControlPlaneGRPC(grpcAddr, certFile, keyFile, caFile); err != nil {
 		return err
 	}
 
-	// Only set role after gRPC is successfully started.
+	// Role is adopted here. On the all-or-nothing path this is still "only
+	// after gRPC started successfully", because that path has already returned
+	// on a bind error.
 	clusterRole.role = "control-plane"
 	clusterRole.grpcAddr = grpcAddr
 	clusterRole.certFile = certFile
 	clusterRole.keyFile = keyFile
 	clusterRole.caFile = caFile
 	globalClusterStore.StartHeartbeatMonitor(appLifecycleCtx.Done())
-	logger.Printf("ControlPlane: enabled via GUI (gRPC %s)", strings.ReplaceAll(grpcAddr, "\n", ""))
-	return nil
+	if bindErr == nil {
+		logger.Printf("ControlPlane: enabled (gRPC %s)", strings.ReplaceAll(grpcAddr, "\n", ""))
+	}
+	return bindErr
 }
 
 // atomicWriteFile writes data to path durably: unique temp in same dir,

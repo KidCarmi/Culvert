@@ -92,8 +92,35 @@ func startControlPlaneWithHAResume(cfg clusterStartupConfig, ctx context.Context
 		return
 	}
 
-	if err := enableControlPlane(cfg.CPAddr, cfg.CPCert, cfg.CPKey, cfg.CPCA, cfg.ClusterDBPath); err != nil {
-		logFatalf("ControlPlane gRPC: %v", err)
+	// CHAOS-71: this used to be `logFatalf("ControlPlane gRPC: %v", err)`, i.e.
+	// os.Exit(1) — and it is reached from initCluster, which main.go runs
+	// BEFORE startAdminUI and buildAndStartProxyServer. So every way the
+	// CLUSTER control plane's listener could fail to bind terminated the whole
+	// appliance, and this node's HTTP/HTTPS proxy, admin UI and health
+	// endpoints never started at all. Reproduced against the real binary with
+	// the CP port occupied: exit 1, proxy http_code=000, admin UI http_code=000,
+	// zero proxy/admin-UI startup log lines.
+	//
+	// It is the §33 (admin UI) and §36 (SOCKS5) finding on the plane §36's own
+	// note named as the closest unexamined analogue, and "it exits, so it fails
+	// closed" is wrong here for the reason both record: process death picks no
+	// posture, it delegates the choice to the topology.
+	//
+	// This is the ONE caller that keeps the supervisor retrying on a failed
+	// first attempt, because this node is configured and persisted as a Control
+	// Plane and is supposed to hold this port — the two runtime callers (the
+	// admin API and HA promotion) still get a synchronous error through
+	// enableControlPlane, and a STANDBY must never hold the CP port. See the
+	// contract note on startCPGRPCSupervisor.
+	if err := enableControlPlaneSupervised(cfg); err != nil {
+		// Loud, but not fatal. The supervisor keeps retrying at a bounded rate
+		// and the cp_grpc_health.go plane reports the gap on /health, /ready,
+		// /healthz, /metrics, /api/diagnostics and an alert — without which
+		// making this non-fatal would merely convert a loud crash loop into a
+		// silent dark control plane. Boot continues so the data plane serves.
+		logErrorf("ControlPlane: gRPC listener could not start (%v) — this node's proxy and admin UI "+
+			"are starting anyway and the listener keeps retrying; Data Plane nodes cannot sync "+
+			"configuration until it binds", err)
 	}
 	// ADR-0005 S4: record resync material BEFORE any leadership assertion —
 	// an unfenced resume (or a later self-fence) re-enters standby with it.

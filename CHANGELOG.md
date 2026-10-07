@@ -516,6 +516,60 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   egress-restricted deployment must allow the responder hosts named in its
   upstreams' certificates. See `docs/operator/ocsp-revocation-checking.md`.
 
+### Fixed
+
+- **A Control Plane node whose cluster gRPC listener could not bind terminated
+  the whole appliance, and one that bound and later died was reported by
+  nothing** (CHAOS-71). Two coupled findings; the second is why the first could
+  not be fixed alone.
+
+  The bind had exactly one error branch, `logFatalf` → `os.Exit(1)`, and it ran
+  **before the HTTP/HTTPS proxy and the admin UI started**. Reproduced against
+  the real binary with the Control Plane port held by another process: exit 1,
+  `proxy http_code=000`, `adminui http_code=000`, and zero proxy or admin-UI
+  startup lines — an unattended crash loop under `restart: unless-stopped`, on a
+  node that is also a production gateway. The triggers are routine and none is
+  visible to the existing port-collision check, which compares Culvert's own
+  three ports to each other only: a predecessor container still draining, a
+  second instance, a host service, an HA planned handoff that hands this very
+  port between two processes, a privileged port without
+  `CAP_NET_BIND_SERVICE` — and `EADDRNOTAVAIL`, because an HA pair is routinely
+  fronted by a floating/VIP address and binding before the interface carries it
+  is an ordinary host-boot race.
+
+  Separately, `Serve` returning left the Control Plane dark with no surface
+  reporting it: `/healthz` kept answering `status: ok`, `role: leader`,
+  `write_authority: true`, and the HA fencing lease kept renewing on a ticker
+  that knows nothing about the gRPC server — so a leader whose control plane was
+  unreachable went on holding the fence against its own standby while every Data
+  Plane sat frozen on its last synced configuration.
+
+  The listener is now supervised (bind → serve → rebind) at a bounded rate with
+  recovery declared only on an observed successful bind, and its state is
+  reported on five surfaces: a `control_plane_listener` diagnostics row with a
+  remedy per fault class, a `control_plane` field on `/health`, a **report-only**
+  `control_plane` row on `/ready` (a Control Plane whose cluster listener is down
+  is still proxying, so it must not be ejected from a load balancer),
+  `control_plane` + `control_plane_unavailable` on `/healthz`, and
+  `culvert_cp_grpc_{up,unavailable,bind_failures_total,binds_total,serve_exits_total,bind_backoff_seconds}`
+  on `/metrics`.
+
+  **New alert event: `control_plane_unavailable`.** Webhooks already configured
+  in the field are not subscribed to it — add it, or this condition will not
+  page. Data Plane nodes are unaffected and keep enforcing their last synced
+  configuration throughout; the risk while the listener is down is configuration
+  drift, not a traffic outage. See
+  `docs/operator/control-plane-listener-recovery.md`.
+
+  Unchanged on purpose: the admin API and HA promotion still fail
+  all-or-nothing when the listener cannot bind (a standby must never hold the
+  Control Plane port), the proxy's own listener failure is still fatal, the HA
+  fencing-lease arming is still fatal, and a dark leader still answers
+  `/healthz` 200 and does not surrender the fence — the last is a recorded
+  posture decision, since an automatic surrender would flap a healthy pair
+  during an ordinary planned handoff. Page on
+  `culvert_cp_grpc_unavailable == 1` together with write authority instead.
+
 ### Changed
 
 - The production image now cross-compiles the proxy and the bundled
