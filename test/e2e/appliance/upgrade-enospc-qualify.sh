@@ -89,6 +89,24 @@ push_digest(){ docker tag "$1" "$REPO:$2" >/dev/null; docker push -q "$REPO:$2" 
   echo "$REPO@$d"; }
 PRED_REF="$(push_digest "$PRED_IMAGE" pred)"; CUR_REF="$(push_digest "$CUR_IMAGE" cur)"
 log "pred=$PRED_REF cur=$CUR_REF"
+# Content identity, not a version stamp. A push re-serializes the manifest, so
+# the registry (and the nested daemon that pulls from it) names the image by a
+# NEW manifest digest. What a push cannot change is the config blob, whose
+# digest covers rootfs.diff_ids — the uncompressed layer content. When the
+# caller states the config digest of the verified source tar, the pushed
+# manifest's config is fetched, re-hashed here and required to match.
+registry_config(){ local m; m="$(curl -fsS -H 'Accept: application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json' --cacert "$CERTD/tls.crt" "https://$REGHOST/v2/culvert/manifests/${1##*@}")" || return 1
+  local c; c="$(printf '%s' "$m" | python3 -c 'import json,sys;print(json.load(sys.stdin)["config"]["digest"])')" || return 1
+  local h; h="sha256:$(curl -fsS --cacert "$CERTD/tls.crt" "https://$REGHOST/v2/culvert/blobs/$c" | sha256sum | cut -d' ' -f1)" || return 1
+  [[ "$h" == "$c" ]] || { echo "config blob hashes to $h, manifest names $c" >&2; return 1; }
+  echo "$c"; }
+if [[ -n "${EXPECT_CONFIG_DIGEST:-}" ]]; then
+  for pair in "cur:$CUR_REF" "pred:$PRED_REF"; do
+    got="$(registry_config "${pair#*:}" 2>&1)" || got="error: $got"
+    if [[ "$got" == "$EXPECT_CONFIG_DIGEST" ]]; then check E0 "image-content-${pair%%:*}" pass "pushed ${pair#*:} has config $got (re-hashed) = source tar config${EXPECT_SOURCE_NOTE:+; $EXPECT_SOURCE_NOTE}"
+    else check E0 "image-content-${pair%%:*}" fail "pushed ${pair#*:} config=$got, expected $EXPECT_CONFIG_DIGEST"; fi
+  done
+fi
 
 # The nested daemon: its own bridge range so the outer gateway (the registry)
 # stays routable from inside; every state directory on the loop filesystem.
@@ -115,6 +133,8 @@ check E0 dind-image pass "$DIND_IMAGE = $(docker image inspect -f '{{index .Repo
 docker save busybox:stable | docker exec -i "$DIND" docker load -q >/dev/null
 IN docker pull -q "$PRED_REF" >/dev/null; IN docker tag "$PRED_REF" "$PINNED"
 PRED_ID="$(IN docker image inspect -f '{{.Id}}' "$PINNED")"
+[[ "$PRED_ID" == "${PRED_REF##*@}" ]] && check E0 image-pulled pass "nested daemon runs $PRED_ID = the pushed manifest digest" \
+  || check E0 image-pulled fail "nested daemon image $PRED_ID, pushed ${PRED_REF##*@}"
 if [[ "$SCENARIO" == midwrite ]]; then :
 elif IN docker image inspect "$CUR_REF" >/dev/null 2>&1; then check E0 cur-absent fail "CUR already present inside the bounded host"; else check E0 cur-absent pass "CUR not present inside the bounded host — the apply must pull it"; fi
 
@@ -140,10 +160,13 @@ PRED_VER="$(health_version)"
 state_sum(){ IN docker exec culvert sh -c 'cd /data && sha256sum ui_users.json ca.bundle 2>/dev/null' | sha256sum | cut -c1-16; }
 STATE0="$(state_sum)"
 check E0 seeded-predecessor pass "running $PRED_VER image=$PRED_ID state=$STATE0"
+RUN_IMG="$(IN docker inspect -f '{{.Image}}' culvert 2>/dev/null || true)"
+[[ "$RUN_IMG" == "$PRED_ID" ]] && check E0 image-running pass "container culvert runs $RUN_IMG" || check E0 image-running fail "container culvert runs '$RUN_IMG', expected $PRED_ID"
 FP0="$(ca_fp)"; [[ -n "$FP0" ]] && check E0 ca-identity pass "root CA sha256 $FP0" || check E0 ca-identity fail "no CA certificate from /api/ca-cert"
 assert_enforcement E0
 
-( cd "$ROOT/cmd/culvert-maint" && CGO_ENABLED=0 go build -o "$EVID/culvert-maint" . )
+AGENT_SRC="${QUAL_AGENT_SRC:-$ROOT}"
+( cd "$AGENT_SRC/cmd/culvert-maint" && CGO_ENABLED=0 go build -o "$EVID/culvert-maint" . )
 docker cp "$EVID/culvert-maint" "$DIND:/usr/local/bin/culvert-maint" >/dev/null
 esc_reg="$(printf '%s' "$REGHOST" | sed 's/\./\\\\./g')"
 cat > "$MNT/culvert-maint/config.toml" <<CFG
@@ -203,7 +226,7 @@ write_report_and_exit(){
     echo "| artifact | reference |"; echo "|---|---|"
     echo "| image under qualification | \`$CUR_IMAGE\` → \`$CUR_REF\` |"; echo "| predecessor | \`$PRED_IMAGE\` → \`$PRED_REF\` |"
     echo "| bounded host | \`$DIND_IMAGE\`, data root + containerd + stack + agent state on one ${DISK_MB} MiB ext4 loop file (-m 0) |"
-    echo "| agent | built from \`cmd/culvert-maint\` at $(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown), privilege_mode=docker_group_lab, inside the bounded host |"
+    echo "| agent | built from \`cmd/culvert-maint\` at $(git -C "${AGENT_SRC:-$ROOT}" rev-parse --short HEAD 2>/dev/null || echo unknown), privilege_mode=docker_group_lab, inside the bounded host |"
     echo; echo "| scenario | check | result | detail |"; echo "|---|---|---|---|"
     python3 - "$JSONL" <<'PY'
 import json,sys
@@ -314,6 +337,7 @@ if [[ "$SCENARIO" == midwrite ]]; then
     check W recovered-serving fail "proxy not serving after every escalation step (compose up; force-recreate; dockerd restart) — see diagnose.log"
     write_report_and_exit
   fi
+  REC_AT="$(date -u +%FT%TZ)"
   v="$(health_version 2>/dev/null || echo unreachable)"
   [[ "$v" == "$PRED_VER" ]] && check W recovered-serving pass "/health 200 version=$v; recovered at step $recovered" || check W recovered-serving fail "version=$v after step $recovered"
   [[ "$recovered" == 1:* ]] && check W recovery-step-1-sufficient pass "free space + docker compose up -d" \
@@ -330,6 +354,23 @@ if [[ "$SCENARIO" == midwrite ]]; then
   # the next scheduled round. Record what the reopened store reports.
   fl="$(wlogs | grep -oE 'FeedSync: [^"]{0,160}' | tail -3 | tr '\n' ' ' || true)"
   check W category-coverage-after-recovery info "post-recovery feed log: ${fl:-none}"
+  # Convergence: the refused import is retried on the feed's failure backoff
+  # (15 min floor, internal/feedsync syncRetryMin) — the process survived, so
+  # no restart re-runs it sooner. With space back, that retry must complete
+  # and certify the whole feed. A disk-side failure is a FAIL; a download
+  # failure says nothing about the disk and is recorded as such.
+  conv="${QUAL_FEED_CONVERGE_SECS:-1800}"; t0=$SECONDS; res=""
+  while (( SECONDS - t0 < conv )); do
+    res="$(IN docker logs --since "$REC_AT" culvert 2>&1 | grep -oE 'FeedSync: (sync complete[^"]*|bulk write failed|could not begin the import|import written but could not be certified|download/parse failed)' | tail -1 || true)"
+    [[ -n "$res" ]] && break; sleep 15
+  done
+  waited=$((SECONDS - t0))
+  case "$res" in
+    "FeedSync: sync complete"*) check W category-import-converges pass "retry after recovery: ${res#FeedSync: } (${waited}s after recovery)";;
+    *"download/parse failed"*) check W category-import-converges info "retry after ${waited}s hit a download failure (network, not disk); convergence not observed";;
+    "") check W category-import-converges fail "no import retry finished within ${conv}s of recovery";;
+    *) check W category-import-converges fail "retry after recovery failed on the disk side: $res (${waited}s)";;
+  esac
   write_report_and_exit
 fi
 

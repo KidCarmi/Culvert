@@ -44,10 +44,15 @@ env:
   # fixed artifact, expected to report `survived` with the write refused.
   SOURCE_IMAGE_RUN_ID: "37397399171"
   SOURCE_IMAGE_TAR_SHA256: 3afadea02d751f1ecea10a7acd0efddee6640a32c8183602b664bca20784af6a
+  # The source those image bytes were built from; the F-DISK job builds its
+  # maintenance agent from here so no lab-branch binary stands in for it.
+  SOURCE_IMAGE_SHA: d698a69c5192588d5ed3a85a9f7cd9009fb59b31
 
 jobs:
   guest-boot:
     name: "Lab · ${{ matrix.variant }} OVA: build + QEMU guest boot + qualify"
+    # A push whose head commit says [fdisk-only] reruns F-DISK-1 alone.
+    if: ${{ !contains(github.event.head_commit.message, '[fdisk-only]') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 240
     strategy:
@@ -432,7 +437,7 @@ jobs:
   f-disk-1:
     name: "Lab · F-DISK-1 on the bounded nested-Docker host"
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/setup-go-cache
@@ -444,7 +449,34 @@ jobs:
         run: |
           set -euo pipefail
           test/e2e/appliance/lab/obtain-image.sh "$RUNNER_TEMP/in"
-          docker load -i "$RUNNER_TEMP/in/culvert-image.tar" && docker image inspect culvert:ci-smoke --format 'id={{.Id}}'
+          tar="$RUNNER_TEMP/in/culvert-image.tar"
+          # The tar's own identity chain, each link re-hashed: the OCI index names
+          # the manifest (the ID containerd — the OVA's store — reports), and that
+          # manifest names the config. The harness then requires the pushed
+          # image to carry this same config.
+          python3 -I - "$tar" > "$RUNNER_TEMP/in/identity.env" <<'PY'
+          import hashlib, json, sys, tarfile
+          t = tarfile.open(sys.argv[1])
+          blob = lambda d: t.extractfile("blobs/sha256/" + d.split(":")[1]).read()
+          def ok(d):
+              b = blob(d)
+              assert "sha256:" + hashlib.sha256(b).hexdigest() == d, d
+              return b
+          idx = json.load(t.extractfile("index.json"))
+          (m,) = idx["manifests"]
+          cfg = json.loads(ok(m["digest"]))["config"]["digest"]
+          ok(cfg)
+          assert json.load(t.extractfile("manifest.json"))[0]["Config"].endswith(cfg.split(":")[1])
+          print(f"EXPECT_MANIFEST_DIGEST={m['digest']}")
+          print(f"EXPECT_CONFIG_DIGEST={cfg}")
+          PY
+          cat "$RUNNER_TEMP/in/identity.env" | tee -a "$GITHUB_ENV"
+          docker load -i "$tar" && docker image inspect culvert:ci-smoke --format 'id={{.Id}}'
+      - name: Check out the image's source (agent build)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.SOURCE_IMAGE_SHA }}
+          path: image-src
       - name: Pre-pull harness images (retry)
         run: |
           set -euo pipefail
@@ -465,6 +497,8 @@ jobs:
           for attempt in 1 2 3; do
             sudo -E env "PATH=$PATH" "HOME=$HOME" "GOCACHE=$(go env GOCACHE)" "GOMODCACHE=$(go env GOMODCACHE)" "GOFLAGS=-mod=mod" \
               QUAL_ENOSPC_SCENARIO=midwrite CUR_IMAGE=culvert:ci-smoke PRED_IMAGE=culvert:ci-smoke \
+              QUAL_AGENT_SRC="$GITHUB_WORKSPACE/image-src" EXPECT_CONFIG_DIGEST="$EXPECT_CONFIG_DIGEST" \
+              EXPECT_SOURCE_NOTE="tar sha256 $SOURCE_IMAGE_TAR_SHA256, OCI manifest $EXPECT_MANIFEST_DIGEST (the OVA image ID), source $SOURCE_IMAGE_SHA" \
               EVID="$RUNNER_TEMP/fdisk1/attempt-$attempt" ./test/e2e/appliance/upgrade-enospc-qualify.sh
             rc=$?
             echo "attempt $attempt: exit $rc"
