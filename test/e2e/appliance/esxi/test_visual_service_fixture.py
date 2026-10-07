@@ -2,6 +2,7 @@
 import ast
 import importlib.util
 import json
+import hashlib
 from pathlib import Path
 from types import SimpleNamespace
 import unittest
@@ -12,8 +13,8 @@ f = importlib.util.module_from_spec(spec); spec.loader.exec_module(f)
 OWNER = '564d8756-3778-d981-d5b1-00a5c7cfef7a'
 
 
-def guest(action='install'):
-    script = f.generate(action, OWNER)
+def guest(action='install', campaign=None):
+    script = f.generate(action, OWNER, campaign)
     code = script.split("<<'CULVERT_VISUAL_FIXTURE'\n", 1)[1].rsplit('\nCULVERT_VISUAL_FIXTURE', 1)[0]
     tree = ast.parse(code)
     tree.body.pop()  # Leave the actual fixture callable, do not dispatch it.
@@ -22,6 +23,33 @@ def guest(action='install'):
 
 
 class FixtureTests(unittest.TestCase):
+    def test_default_bytes_unchanged_and_named_campaign_is_separate(self):
+        expected = {'culvert-lab-visual-delay.service': '353059325dc70784e94e07e774dae3c2652611bacf4a58da67a472e11cdfaa3f',
+                    'culvert-lab-visual-failure.service': 'f39589095414f075be0f831203300619582fd8256dfcafe1d43af3264f22f6e4'}
+        self.assertEqual({name: hashlib.sha256(raw.encode()).hexdigest() for name, raw in f.units().items()}, expected)
+        root, names = f.namespace('capture-followup')
+        self.assertEqual(root, f.ROOT + '-capture-followup')
+        self.assertFalse(set(names) & set(f.NAMES))
+        for name, raw in f.units('capture-followup').items():
+            self.assertIn('-capture-followup.service', name)
+            self.assertIn(root + '/delay-fired' if 'delay' in name else root + '/failure-fired', raw)
+            self.assertNotIn(f.ROOT + '/', raw)
+        install, _ = guest(campaign='capture-followup')
+        remove, _ = guest('remove', campaign='capture-followup')
+        self.assertEqual(install['config']['campaign'], 'capture-followup')
+        self.assertEqual(install['config']['units'], remove['config']['units'])
+        self.assertEqual(install['config']['fixture_root'], remove['config']['fixture_root'])
+
+    def test_campaign_paths_and_guest_namespace_mismatch_refused_before_identity(self):
+        for value in ('', '../escape', '/tmp/x', 'Upper', 'space name', 'a--b', 'a-', 'a_b', 'a' * 33, 9):
+            with self.assertRaises(ValueError): f.generate('install', OWNER, value)
+        for key, value in [('campaign', '../escape'), ('fixture_root', '/tmp/other'), ('units', f.units())]:
+            env, _ = guest(campaign='capture-followup')
+            env['config'][key] = value
+            env['identity'] = mock.Mock()
+            with self.assertRaises(ValueError): env['fixture']()
+            env['identity'].assert_not_called()
+
     def test_units_bounded_single_boot_and_no_product_overrides(self):
         units = f.units(); self.assertEqual(len(units), 2)
         for name, raw in units.items():
@@ -80,8 +108,9 @@ class FixtureTests(unittest.TestCase):
             env, unused = guest('remove')
             receipt = mock.MagicMock()
             receipt.read_bytes.return_value = json.dumps({} if changed == 'receipt' else {
-                k: env['config'][k] for k in ('source', 'owner_uuid', 'units', 'lock_source_sha256', 'generator_sha256')}).encode()
+                k: env['config'][k] for k in ('source', 'owner_uuid', 'campaign', 'fixture_root', 'units', 'lock_source_sha256', 'generator_sha256')}).encode()
             root = mock.MagicMock(); root.__truediv__.return_value = receipt
+            root.as_posix.return_value = f.ROOT
             env['Path'] = lambda unused: root
             locks = [mock.Mock(), mock.Mock()]
             regular = mock.Mock(side_effect=[None, ValueError('fixture file changed')]) if changed == 'unit' else mock.Mock()

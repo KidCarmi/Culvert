@@ -1,11 +1,16 @@
 #!/usr/bin/env python3
-"""Generate an authenticated-console-only, one-boot LAB visual service fixture."""
+"""Generate an authenticated-console-only, one-boot LAB visual service fixture.
+
+Generate install and removal with the same helper bytes and campaign. A new
+generator must not remove a prior-generator fixture; retain its original helper.
+"""
 import argparse
 import ast
 import base64
 import hashlib
 import json
 from pathlib import Path
+import re
 import uuid
 
 HERE = Path(__file__).resolve().parent
@@ -14,14 +19,22 @@ ROOT = '/var/lib/culvert-lab-visual-fixture'
 NAMES = ('culvert-lab-visual-delay.service', 'culvert-lab-visual-failure.service')
 
 
-def units():
+def namespace(campaign=None):
+    if campaign is None: return ROOT, NAMES
+    if not isinstance(campaign, str) or len(campaign) > 32 or not re.fullmatch(r'[a-z][a-z0-9]*(?:-[a-z0-9]+)*', campaign):
+        raise ValueError('bounded lowercase fixture campaign required')
+    return ROOT + '-' + campaign, tuple(name.removesuffix('.service') + '-' + campaign + '.service' for name in NAMES)
+
+
+def units(campaign=None):
+    root, names = namespace(campaign)
     result = {}
-    for name, action, marker in ((NAMES[0], '/usr/bin/sleep 45', 'delay-fired'),
-                                 (NAMES[1], '/usr/bin/false', 'failure-fired')):
+    for name, action, marker in ((names[0], '/usr/bin/sleep 45', 'delay-fired'),
+                                 (names[1], '/usr/bin/false', 'failure-fired')):
         result[name] = ('[Unit]\nDescription=Disposable LAB visual boot fixture\n'
-            'Before=multi-user.target plymouth-quit.service plymouth-quit-wait.service\nConditionPathExists=!' + ROOT + '/' + marker + '\n\n'
+            'Before=multi-user.target plymouth-quit.service plymouth-quit-wait.service\nConditionPathExists=!' + root + '/' + marker + '\n\n'
             '[Service]\nType=oneshot\nUser=root\nGroup=root\nUMask=0077\n'
-            'ExecStartPre=/usr/bin/touch ' + ROOT + '/' + marker + '\nExecStart=' + action + '\n'
+            'ExecStartPre=/usr/bin/touch ' + root + '/' + marker + '\nExecStart=' + action + '\n'
             'TimeoutStartSec=50s\nTimeoutStopSec=3s\nRestart=no\nNoNewPrivileges=yes\n'
             'StandardInput=null\nStandardOutput=journal\nStandardError=journal\n\n'
             '[Install]\nWantedBy=multi-user.target\n')
@@ -76,6 +89,14 @@ def identity():
     need(Path('/var/lib/culvert-appliance/state/complete.done').is_file(), 'first boot incomplete')
 
 def fixture():
+    campaign = config['campaign']
+    need(campaign is None or (isinstance(campaign, str) and len(campaign) <= 32
+         and re.fullmatch(r'[a-z][a-z0-9]*(?:-[a-z0-9]+)*', campaign)), 'fixture campaign refused')
+    suffix = '-' + campaign if campaign is not None else ''
+    root = Path('/var/lib/culvert-lab-visual-fixture' + suffix)
+    need(config['fixture_root'] == root.as_posix() and set(config['units']) == {
+         'culvert-lab-visual-delay' + suffix + '.service',
+         'culvert-lab-visual-failure' + suffix + '.service'}, 'fixture namespace differs')
     identity()
     locks = []
     try:
@@ -83,11 +104,10 @@ def fixture():
         for path in ('/run/culvert-os-update.lock', '/var/lib/culvert-maint/host-maintenance.lock'):
             locks.append(HeldLock(path, ids))
         maintenance_idle()
-        root = Path('/var/lib/culvert-lab-visual-fixture')
         system = Path('/etc/systemd/system'); wants = system / 'multi-user.target.wants'
         trusted(system); trusted(wants); trusted(root.parent)
         paths = [(system / name, wants / name, raw.encode()) for name, raw in config['units'].items()]
-        expected = {k: config[k] for k in ('source', 'owner_uuid', 'units', 'lock_source_sha256', 'generator_sha256')}
+        expected = {k: config[k] for k in ('source', 'owner_uuid', 'campaign', 'fixture_root', 'units', 'lock_source_sha256', 'generator_sha256')}
         if config['action'] == 'install':
             need(not os.path.lexists(root), 'fixture receipt already exists')
             for unit, link, raw in paths:
@@ -123,7 +143,7 @@ def fixture():
             for lock in locks: lock.check()
             save(root / 'removed.json', json.dumps(expected, sort_keys=True).encode())
         print(json.dumps({'fixture': config['action'], 'source': config['source'],
-            'owner_uuid': config['owner_uuid'], 'unit_sha256': {
+            'owner_uuid': config['owner_uuid'], 'campaign': campaign, 'unit_sha256': {
             name: hashlib.sha256(raw.encode()).hexdigest() for name, raw in config['units'].items()}}))
     finally:
         for lock in reversed(locks): lock.close()
@@ -131,13 +151,15 @@ fixture()
 '''
 
 
-def generate(action, owner):
+def generate(action, owner, campaign=None):
     if action not in ('install', 'remove') or str(uuid.UUID(owner)) != owner:
         raise ValueError('explicit action and canonical owned UUID required')
+    root, _ = namespace(campaign)
     locks, digest = lock_code()
-    config = {'action': action, 'source': SOURCE, 'owner_uuid': owner, 'units': units(),
+    config = {'action': action, 'source': SOURCE, 'owner_uuid': owner, 'units': units(campaign),
+              'campaign': campaign, 'fixture_root': root,
               'lock_source_sha256': digest, 'generator_sha256': hashlib.sha256(Path(__file__).read_bytes()).hexdigest()}
-    code = ('import hashlib,json,os,stat,subprocess,uuid\nfrom pathlib import Path\n'
+    code = ('import hashlib,json,os,re,stat,subprocess,uuid\nfrom pathlib import Path\n'
             + 'config = ' + repr(config) + '\n' + locks + '\n' + GUEST)
     compile(code, '<visual-service-fixture>', 'exec')
     return "#!/bin/sh\nset -eu\nexec python3 -B - <<'CULVERT_VISUAL_FIXTURE'\n" + code + '\nCULVERT_VISUAL_FIXTURE\n'
@@ -147,10 +169,11 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--action', choices=('install', 'remove'), required=True)
     parser.add_argument('--owner-uuid', required=True)
+    parser.add_argument('--campaign', help='New explicit fixture namespace; omission preserves original paths')
     parser.add_argument('--output', type=Path, required=True)
     args = parser.parse_args()
     with args.output.open('x', encoding='utf-8', newline='\n') as out:
-        out.write(generate(args.action, args.owner_uuid))
+        out.write(generate(args.action, args.owner_uuid, args.campaign))
 
 
 if __name__ == '__main__': main()
