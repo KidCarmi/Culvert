@@ -2969,6 +2969,10 @@ Firefox (all platforms):
             <strong>operator</strong> - manage policy/blocklist/filters &nbsp;·&nbsp;
             <strong>viewer</strong> - read-only
           </p>
+          <p class="hint" id="roster-persist-hint" style="display:none;color:var(--warn,#b8860b)">
+            <svg class="ico" aria-hidden="true"><use href="#i-alert-triangle"/></svg>
+            <span id="roster-persist-text"></span>
+          </p>
           <table>
             <thead><tr>
               <th>Username</th>
@@ -8558,6 +8562,30 @@ async function fetchStats() {
         oversizeHint.style.display = '';
       } else {
         oversizeHint.style.display = 'none';
+      }
+    }
+    // Admin-roster write failures (CHAOS-70): a refused change did NOT take
+    // effect; a degraded login-path write means a single-use credential or TOTP
+    // replay counter may not survive a restart. Both mean the data volume was
+    // not writable — shown on the Users panel where the change was attempted.
+    const rosterHint = document.getElementById('roster-persist-hint');
+    if (rosterHint) {
+      const failed = s.adminRosterPersistFailures || 0;
+      const degraded = s.adminRosterPersistDegraded || 0;
+      const parts = [];
+      if (failed > 0) {
+        parts.push(fmt(failed) + ' account change' + (failed === 1 ? ' was' : 's were') +
+          ' NOT applied because the roster could not be written to disk — verify the change took effect and retry once the data volume is writable.');
+      }
+      if (degraded > 0) {
+        parts.push(fmt(degraded) + ' login-time write' + (degraded === 1 ? '' : 's') +
+          ' (TOTP replay counter / backup-code use) failed to persist — a used code may be accepted again after a restart.');
+      }
+      if (parts.length) {
+        document.getElementById('roster-persist-text').textContent = parts.join(' ') + ' (counts since last restart)';
+        rosterHint.style.display = '';
+      } else {
+        rosterHint.style.display = 'none';
       }
     }
     // nav badge
