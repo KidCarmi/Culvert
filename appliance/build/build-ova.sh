@@ -289,7 +289,7 @@ done
 mkdir -p "$OV/opt/culvert-appliance/boot-splash"
 for splash_file in install.sh install-lib.sh culvert.plymouth 99-culvert-splash.cfg \
   culvert-splash-message culvert-kernel-log-vt culvert-kernel-log-vt.service plymouthd.conf \
-  culvert-has-display plymouth-start-headless.conf; do
+  culvert-has-display plymouth-headless.conf; do
   cp "$REPO/appliance/boot-splash/$splash_file" "$OV/opt/culvert-appliance/boot-splash/$splash_file"
 done
 build_console_bundle "$REPO" "$OV/opt/culvert-appliance/console"
@@ -521,7 +521,11 @@ for splash_pair in culvert-splash-message:/etc/initramfs-tools/scripts/init-prem
   culvert-kernel-log-vt.service:/etc/systemd/system/culvert-kernel-log-vt.service \
   plymouthd.conf:/etc/plymouth/plymouthd.conf \
   culvert-has-display:/opt/culvert-appliance/bin/culvert-has-display \
-  plymouth-start-headless.conf:/etc/systemd/system/plymouth-start.service.d/culvert-headless.conf; do
+  plymouth-headless.conf:/etc/systemd/system/plymouth-start.service.d/culvert-headless.conf \
+  plymouth-headless.conf:/etc/systemd/system/plymouth-reboot.service.d/culvert-headless.conf \
+  plymouth-headless.conf:/etc/systemd/system/plymouth-poweroff.service.d/culvert-headless.conf \
+  plymouth-headless.conf:/etc/systemd/system/plymouth-halt.service.d/culvert-headless.conf \
+  plymouth-headless.conf:/etc/systemd/system/plymouth-kexec.service.d/culvert-headless.conf; do
   installed_splash_sha="$(virt-cat -a "$DISK" "${splash_pair#*:}" | sha256sum | cut -d' ' -f1)"
   [[ "$installed_splash_sha" == "$(sha256sum "$REPO/appliance/boot-splash/${splash_pair%%:*}" | cut -d' ' -f1)" ]] \
     || die "boot console file differs from source: ${splash_pair#*:}"

@@ -269,7 +269,9 @@ log "installing Go boot console and local recovery worker"
 bash "$APPL/console/install.sh"
 
 # The packaged Plymouth lifecycle owns early boot and yields to getty/our Go
-# console. No custom daemon, unit-ordering overrides or readiness dependencies.
+# console. No custom daemon, unit-ordering overrides or readiness dependencies;
+# the one drop-in (ExecCondition=culvert-has-display on the Plymouth units)
+# only skips Plymouth on a machine with no display.
 log "installing Culvert early boot screen and rebuilding initramfs"
 bash "$APPL/boot-splash/install.sh"
 

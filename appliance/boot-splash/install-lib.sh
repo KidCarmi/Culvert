@@ -13,18 +13,21 @@ install_boot_splash() (
     install -m 0644 "$source/99-culvert-splash.cfg" "$root/etc/default/grub.d/99-culvert-splash.cfg"
     # The splash's message line (initramfs) and the kernel-log console (tty12).
     install -d -m 0755 "$root/etc/initramfs-tools/scripts/init-premount" "$root/opt/culvert-appliance/bin" \
-        "$root/etc/systemd/system/sysinit.target.wants" "$root/etc/plymouth" \
-        "$root/etc/systemd/system/plymouth-start.service.d"
+        "$root/etc/systemd/system/sysinit.target.wants" "$root/etc/plymouth"
     # Daemon settings: draw the text splash at once (see the file). Ubuntu's
     # plymouth hook copies this into the initramfs; verified below.
     install -m 0644 "$source/plymouthd.conf" "$root/etc/plymouth/plymouthd.conf"
     install -m 0755 "$source/culvert-splash-message" "$root/etc/initramfs-tools/scripts/init-premount/culvert-splash-message"
     install -m 0755 "$source/culvert-kernel-log-vt" "$root/opt/culvert-appliance/bin/culvert-kernel-log-vt"
     # No splash on a machine with no display controller (serial-only): the
-    # initramfs ends Plymouth (culvert-splash-message) and this keeps the real
-    # root from starting it again.
+    # initramfs ends Plymouth (culvert-splash-message) and these drop-ins keep
+    # the real root's boot and shutdown units from starting it again.
     install -m 0755 "$source/culvert-has-display" "$root/opt/culvert-appliance/bin/culvert-has-display"
-    install -m 0644 "$source/plymouth-start-headless.conf" "$root/etc/systemd/system/plymouth-start.service.d/culvert-headless.conf"
+    local unit
+    for unit in plymouth-start plymouth-reboot plymouth-poweroff plymouth-halt plymouth-kexec; do
+        install -d -m 0755 "$root/etc/systemd/system/$unit.service.d"
+        install -m 0644 "$source/plymouth-headless.conf" "$root/etc/systemd/system/$unit.service.d/culvert-headless.conf"
+    done
     install -m 0644 "$source/culvert-kernel-log-vt.service" "$root/etc/systemd/system/culvert-kernel-log-vt.service"
     ln -sfn ../culvert-kernel-log-vt.service "$root/etc/systemd/system/sysinit.target.wants/culvert-kernel-log-vt.service"
     # Ubuntu's initramfs hook follows BOTH alternatives. Explicit --set also

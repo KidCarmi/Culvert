@@ -8,23 +8,23 @@
 # ubuntu-text puts those four rows from the bottom.
 #
 # With no display controller (a serial-only VM): nobody can see the splash, but
-# while it is shown ubuntu-text switches kernel console output off for every
-# console, serial included, and Plymouth captures systemd's status lines. So
-# end Plymouth here and the serial console carries the whole boot. The kernel
-# registers its VGA text console even with no adapter, so the console driver
-# cannot tell the two apart; a PCI display-class device (0x03xxxx) can.
+# while Plymouth runs it holds back kernel messages from every console (serial
+# included) once the splash is shown, and it captures /dev/console (systemd's
+# status lines) from the moment it starts. So end Plymouth here and the serial
+# console carries the whole boot. "Display" is the test in culvert-has-display
+# (PCI class 0x0300xx or 0x0380xx); keep the two identical.
 #
-# Best-effort: never blocks the boot.
+# Best-effort: every failure is ignored. Like Ubuntu's own plymouth calls in the
+# initramfs, a wedged plymouthd could still stall the client.
 PREREQ="plymouth"
 prereqs() { echo "$PREREQ"; }
 case "$1" in prereqs) prereqs; exit 0 ;; esac
 command -v plymouth >/dev/null 2>&1 || exit 0
 plymouth --ping 2>/dev/null || exit 0
-sysfs="${CULVERT_SPLASH_SYSFS:-/sys}"
 display=0
-for class in "$sysfs"/bus/pci/devices/*/class; do
+for class in /sys/bus/pci/devices/*/class; do
     [ -r "$class" ] || continue
-    case "$(cat "$class" 2>/dev/null)" in 0x03*) display=1; break ;; esac
+    case "$(cat "$class" 2>/dev/null)" in 0x0300*|0x0380*) display=1; break ;; esac
 done
 if [ "$display" = 0 ]; then
     plymouth quit 2>/dev/null || true
