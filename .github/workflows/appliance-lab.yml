@@ -37,15 +37,15 @@ env:
   # Superseded candidate (historical; does not boot under BIOS, #1528 §3f).
   # Its guest-content fingerprint stays the comparison reference.
   ORIGINAL_OVA_SHA256: e24eb542f973fb70360bad5124ef81fdab8b6f8d67af601720613cbcca3700a4
-  # F-DISK-1 job input: the cd8e4450 candidate's image (Deep gate run
-  # 37664082485), which carries every badger/ristretto F-DISK-1 fix incl.
+  # F-DISK-1 job input: the 2a82320c candidate's image (Deep gate run
+  # 37703107207), which carries every badger/ristretto F-DISK-1 fix incl.
   # the in-place memtable emptying (5b389f38). The ORIGINAL image (run
   # 37124197333) reproduced the SIGBUS in 37397680555 (pre-fix control).
-  SOURCE_IMAGE_RUN_ID: "37664082485"
-  SOURCE_IMAGE_TAR_SHA256: 8a19dfce4562e0f15eb607229ae37153c1a21bdb839e5c4206a3f68cd0795819
+  SOURCE_IMAGE_RUN_ID: "37703107207"
+  SOURCE_IMAGE_TAR_SHA256: e347488710ee790519f9655e568fd563461455da947e1130660b99728f45fbf1
   # The source those image bytes were built from; the F-DISK job builds its
   # maintenance agent from here so no lab-branch binary stands in for it.
-  SOURCE_IMAGE_SHA: cd8e44505bd329e5de675592ad4c23f92a534d55
+  SOURCE_IMAGE_SHA: 2a82320c746a6d146df19a6f5af9676d76b72286
 
 jobs:
   guest-boot:
@@ -57,7 +57,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Production-readiness candidate — #1528 head cd8e4450: no Plymouth on a machine with no display (boot
+        # Production-readiness candidate — #1528 head 2a82320c: the browser's
+        # cross-site SAML POST is accepted at the ACS (2a82320c, found by the
+        # lab SAML replay), on top of cd8e4450: no Plymouth on a machine with no display (boot
         # and shutdown, 1a7ecb40 + f4429618), admin-UI test race fix (cd8e4450),
         # OVF credential labels (SSH is key-only; the
         # password is VM-console only) + the boot console
@@ -69,16 +71,16 @@ jobs:
         # host-component refresh (aefd400d: a re-run of the installer adopts the
         # image's bundle, building a new sidecar tag first) and the boot console
         # (813a3b4a: nomodeset, centred title, Esc line, kernel log on tty12).
-        # Image = that head's own Deep PR Gate tar (run 37664082485); app, agent,
+        # Image = that head's own Deep PR Gate tar (run 37703107207); app, agent,
         # console, access binary and provisioning from a clean checkout of the
         # SAME commit. Image ID is the tar's OCI manifest digest.
         include:
-          - variant: candidate-cd8e44505bd3
+          - variant: candidate-2a82320c746a
             provisioning: source
-            source_sha: "cd8e44505bd329e5de675592ad4c23f92a534d55"
-            image_run: "37664082485"
-            image_tar_sha256: "8a19dfce4562e0f15eb607229ae37153c1a21bdb839e5c4206a3f68cd0795819"
-            expect_image_id: "sha256:659258eee3fc609a8e95e0bc22c89cb57849887b0dcf2b92708ddbff0fb69b42"
+            source_sha: "2a82320c746a6d146df19a6f5af9676d76b72286"
+            image_run: "37703107207"
+            image_tar_sha256: "e347488710ee790519f9655e568fd563461455da947e1130660b99728f45fbf1"
+            expect_image_id: "sha256:1ccbd9246d0e4c219a9d0bae1a39b5a6fc0ae5ce75411468ec88514fe215eff9"
             retained_run: ""
             retained_sha256: ""
             # The calibrated ESXi proxy (12 ms read / 3 ms write).
@@ -89,8 +91,8 @@ jobs:
             console: "1"
           # Adoption (ASTRA, #1528): an appliance that already has the OLD
           # sidecar tag (the RETAINED 2e3bcc2a OVA, culvert/clamav:1.4.6-pcre2-10.49
-          # baked in) is upgraded to the cd8e4450 image; the host-component
-          # refresh then runs with the cd8e4450 installer put in place first
+          # baked in) is upgraded to the 2a82320c image; the host-component
+          # refresh then runs with the 2a82320c installer put in place first
           # (an appliance runs the installer its OVA baked, A1b).
           - variant: candidate-2e3bcc2a1095
             provisioning: source
@@ -101,10 +103,10 @@ jobs:
             retained_run: "37606237892"
             retained_sha256: "55e98116ba2c020789b3f5de4eabab7e29af611c83b9c972b82a6319a19f145e"
             recovery_reboots: "0"
-            adopt_image_run: "37664082485"
-            adopt_image_tar_sha256: "8a19dfce4562e0f15eb607229ae37153c1a21bdb839e5c4206a3f68cd0795819"
-            adopt_image_id: "sha256:659258eee3fc609a8e95e0bc22c89cb57849887b0dcf2b92708ddbff0fb69b42"
-            adopt_installer_sha: "cd8e44505bd329e5de675592ad4c23f92a534d55"
+            adopt_image_run: "37703107207"
+            adopt_image_tar_sha256: "e347488710ee790519f9655e568fd563461455da947e1130660b99728f45fbf1"
+            adopt_image_id: "sha256:1ccbd9246d0e4c219a9d0bae1a39b5a6fc0ae5ce75411468ec88514fe215eff9"
+            adopt_installer_sha: "2a82320c746a6d146df19a6f5af9676d76b72286"
             adopt_old_ref: "culvert/clamav:1.4.6-pcre2-10.49"
             adopt_new_ref: "culvert/clamav:1.4.6-culvert.2"
             adopt_pkgs: "nghttp2-libs-1.70.0-r0 pcre2-10.49-r0 zlib-1.3.2-r1"
@@ -466,6 +468,7 @@ jobs:
             fi
             export LAB_ADOPT_IMAGE_TAR="$LAB_ROOT/adopt/culvert-image.tar" LAB_ADOPT_IMAGE_ID="${{ matrix.adopt_image_id }}" \
               LAB_ADOPT_OLD_REF="${{ matrix.adopt_old_ref }}" LAB_ADOPT_NEW_REF="${{ matrix.adopt_new_ref }}" LAB_ADOPT_PKGS="${{ matrix.adopt_pkgs }}"
+            export LAB_ADOPTED_OUT="$LAB_ROOT/adopted"
           fi
           test/e2e/appliance/lab/appliance-lab.sh all
       - name: "Boot console: VMware SVGA, no serial — frames through boot, reboots, Esc, Alt+F12, serial-only"
@@ -482,6 +485,14 @@ jobs:
         with:
           name: appliance-lab-console-${{ matrix.variant }}
           path: ${{ env.LAB_ROOT }}/console/evidence
+          retention-days: 30
+          if-no-files-found: warn
+      # A5: the exact adopted sidecar the guest ran, for adopted-sidecar-scan.
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always() && matrix.adopt_image_run != ''
+        with:
+          name: appliance-lab-adopted-sidecar-${{ matrix.variant }}
+          path: ${{ env.LAB_ROOT }}/adopted
           retention-days: 30
           if-no-files-found: warn
       - name: Report
@@ -819,72 +830,16 @@ jobs:
       - name: Bind archive → index → amd64 manifest → config (every blob re-hashed)
         run: |
           set -euo pipefail
-          python3 -I - "$W/clamav.tar" "$W/evidence/binding.json" <<'PY'
-          import hashlib, json, os, sys, tarfile
-          t = tarfile.open(sys.argv[1])
-          names = set(t.getnames())
-          def blob(d):
-              b = t.extractfile("blobs/sha256/" + d.split(":")[1]).read()
-              assert "sha256:" + hashlib.sha256(b).hexdigest() == d, f"blob {d} does not hash to its name"
-              return b
-          exp = {k: os.environ.get(k, "") for k in ("SIDECAR_INDEX", "SIDECAR_MANIFEST", "SIDECAR_CONFIG")}
-          top = json.load(t.extractfile("index.json"))
-          (entry,) = top["manifests"]
-          assert entry["digest"] == exp["SIDECAR_INDEX"], f"index.json names {entry['digest']}"
-          idx = json.loads(blob(entry["digest"]))
-          amd = [m for m in idx["manifests"] if m.get("platform", {}).get("os") == "linux" and m["platform"].get("architecture") == "amd64"]
-          assert len(amd) == 1, f"{len(amd)} linux/amd64 manifests"
-          if exp["SIDECAR_MANIFEST"]:
-              assert amd[0]["digest"] == exp["SIDECAR_MANIFEST"], f"amd64 manifest {amd[0]['digest']}"
-          man = json.loads(blob(amd[0]["digest"]))
-          if exp["SIDECAR_CONFIG"]:
-              assert man["config"]["digest"] == exp["SIDECAR_CONFIG"], f"config {man['config']['digest']}"
-          exp["SIDECAR_CONFIG"] = man["config"]["digest"]
-          cfg = json.loads(blob(man["config"]["digest"]))
-          for l in man["layers"]:
-              blob(l["digest"])
-          legacy = json.load(t.extractfile("manifest.json"))
-          assert len(legacy) == 1 and legacy[0]["Config"].endswith(exp["SIDECAR_CONFIG"].split(":")[1]), "manifest.json names another config"
-          out = {"index": entry["digest"], "amd64_manifest": amd[0]["digest"], "config": man["config"]["digest"],
-                 "layers": [l["digest"] for l in man["layers"]], "diff_ids": cfg["rootfs"]["diff_ids"],
-                 "repo_tags": legacy[0].get("RepoTags"), "other_platform_entries": len(idx["manifests"]) - 1}
-          json.dump(out, open(sys.argv[2], "w"), indent=2)
+          cfg="$(test/e2e/appliance/lab/sidecar-scan.sh bind "$W/clamav.tar" "$SIDECAR_INDEX" top "$W/evidence/binding.json")"
+          cat "$W/evidence/binding.json"
           # Later steps check Trivy's ImageID against the bound config.
-          with open(os.environ["GITHUB_ENV"], "a") as env:
-              env.write(f"SIDECAR_MANIFEST={amd[0]['digest']}\nSIDECAR_CONFIG={man['config']['digest']}\n")
-          print(json.dumps(out, indent=2))
-          PY
+          echo "SIDECAR_CONFIG=$cfg" >> "$GITHUB_ENV"
+          echo "SIDECAR_MANIFEST=$(jq -r .amd64_manifest "$W/evidence/binding.json")" >> "$GITHUB_ENV"
       - name: Reachability of the MEDIUM findings in these exact bytes
         # CVE-2026-85091 (zlib): overflow in gz_vacate() reached only through
         # gzprintf()/gzvprintf() after a non-blocking gzwrite() stall.
         # CVE-2026-58055 (nghttp2): in the nghttpx PROXY program, not libnghttp2.
-        # Unpack the amd64 rootfs from the verified layers and record every
-        # ELF that imports a gz write-path symbol, and whether nghttpx exists.
-        run: |
-          set -euo pipefail
-          cd "$W"; E="$W/evidence"; mkdir -p rootfs
-          python3 -I - "$W/clamav.tar" "$W/evidence/binding.json" "$W/rootfs" <<'PY'
-          import json, sys, tarfile, io
-          t = tarfile.open(sys.argv[1]); b = json.load(open(sys.argv[2])); root = sys.argv[3]
-          for d in b["layers"]:
-              raw = t.extractfile("blobs/sha256/" + d.split(":")[1]).read()
-              with tarfile.open(fileobj=io.BytesIO(raw)) as lt:   # gzip/plain auto-detected
-                  members = [m for m in lt.getmembers() if not m.isdev() and ".wh." not in m.name]
-                  lt.extractall(root, members=members, filter="tar")
-          PY
-          : > "$E/reachability.txt"
-          n=0; hits=0
-          while IFS= read -r -d '' f; do
-            file -b "$f" | grep -q '^ELF' || continue
-            n=$((n+1))
-            s="$(readelf --dyn-syms -W "$f" 2>/dev/null | awk '$7=="UND"{print $8}' | sed 's/@.*//' | grep -E '^(gzprintf|gzvprintf|gzwrite|gzputs|gzputc|gzdopen|gzbuffer)$' | sort -u | tr '\n' ' ' || true)"
-            if [ -n "$s" ]; then hits=$((hits+1)); echo "IMPORTS ${f#"$W"/rootfs}: $s" | tee -a "$E/reachability.txt"; fi
-          done < <(find rootfs -type f -print0)
-          echo "elf_files_scanned=$n gz_write_importers=$hits" | tee -a "$E/reachability.txt"
-          nx="$(find rootfs -name nghttpx -o -name 'nghttp2*' | sed "s#^rootfs##" | sort | tr '\n' ' ')"
-          echo "nghttp2 files: ${nx:-none}" | tee -a "$E/reachability.txt"
-          if find rootfs -name nghttpx | grep -q .; then echo "nghttpx_present=yes" | tee -a "$E/reachability.txt"; else echo "nghttpx_present=no" | tee -a "$E/reachability.txt"; fi
-          [ "$n" -gt 10 ] || { echo "::error::only $n ELF files found — rootfs extraction failed"; exit 1; }
+        run: test/e2e/appliance/lab/sidecar-scan.sh reach "$W/clamav.tar" "$W/evidence/binding.json" "$W/rootfs" "$W/evidence"
       - uses: aquasecurity/setup-trivy@81e514348e19b6112ce2a7e3ecbafe19c1e1f567 # v0.2.0
         with:
           version: v0.69.3
@@ -892,26 +847,11 @@ jobs:
       - name: Scan the exact archive (Deep gate policy) + full record + SBOM
         run: |
           set -uo pipefail
-          cd "$W" || exit 1; E="$W/evidence"
-          trivy image --download-db-only --db-repository mirror.gcr.io/aquasec/trivy-db:2 || exit 1
-          trivy --version > "$E/trivy-version.txt"
-          trivy image --skip-db-update --input clamav.tar --scanners vuln --format json --output "$E/trivy-all.json" || exit 1
-          img="$(jq -r '.Metadata.ImageID' "$E/trivy-all.json")"
-          [ "$img" = "$SIDECAR_CONFIG" ] || { echo "::error::Trivy scanned ImageID $img, expected $SIDECAR_CONFIG"; exit 1; }
-          trivy image --skip-db-update --input clamav.tar --format cyclonedx --output "$E/sbom.cdx.json" || exit 1
-          jq -r '[.Results[]?.Vulnerabilities[]? | {s: .Severity, f: ((.FixedVersion // "") != "")}]
-                 | group_by(.s) | map({severity: .[0].s, total: length, fixable: map(select(.f)) | length})' \
-            "$E/trivy-all.json" | tee "$E/severity-summary.json"
-          echo "components: $(jq '.components | length' "$E/sbom.cdx.json")" | tee "$E/sbom-summary.txt"
-          # The Deep gate's sidecar policy, unchanged: no fixable HIGH/CRITICAL.
-          trivy image --skip-db-update --input clamav.tar --scanners vuln --severity CRITICAL,HIGH --ignore-unfixed \
-            --format table --exit-code 1 | tee "$E/trivy-gate.txt"
-          gate="${PIPESTATUS[0]}"
-          echo "gate_exit=$gate" | tee -a "$E/trivy-gate.txt"
+          gate=0; test/e2e/appliance/lab/sidecar-scan.sh trivy "$W/clamav.tar" "$SIDECAR_CONFIG" "$W/evidence" || gate=$?
           {
             echo "### Baked ClamAV sidecar — exact-byte scan"
             echo "OVA \`$OVA_SHA256\` → archive \`$SIDECAR_ARCHIVE_SHA256\` → index \`$SIDECAR_INDEX\` → amd64 manifest \`$SIDECAR_MANIFEST\` → config \`$SIDECAR_CONFIG\` (Trivy ImageID matches)"
-            echo; echo '```'; cat "$E/severity-summary.json"; cat "$E/sbom-summary.txt"; echo '```'
+            echo; echo '```'; cat "$W/evidence/severity-summary.json" "$W/evidence/sbom-summary.txt" 2>/dev/null; echo '```'
             echo "Deep-gate policy (no fixable HIGH/CRITICAL): exit $gate"
           } >> "$GITHUB_STEP_SUMMARY"
           exit "$gate"
@@ -919,5 +859,77 @@ jobs:
         if: always()
         with:
           name: appliance-lab-sidecar-scan-cd8e44505bd3
+          path: ${{ env.W }}/evidence/
+          if-no-files-found: warn
+
+  # ASTRA (#1528): the sidecar an appliance ADOPTS during a host-component
+  # refresh is BUILT on that host (apk at build time), so its bytes are not the
+  # OVA's baked archive and a scan of one says nothing about the other. The
+  # adoption variant's A5 step saved the image culvert-clamav was running and
+  # carried it out of the guest; this job scans those exact bytes with the
+  # same script as the baked scan. Runs whenever guest-boot runs.
+  adopted-sidecar-scan:
+    name: "Lab · ADOPTED ClamAV sidecar (built on the appliance): exact-byte scan + SBOM"
+    needs: guest-boot
+    if: ${{ !cancelled() && !contains(github.event.head_commit.message, '[fdisk-only]') && !contains(github.event.head_commit.message, '[sidecar-scan]') && !contains(github.event.head_commit.message, '[boot-console]') && !contains(github.event.head_commit.message, '[lab-skip]') && !contains(github.event.head_commit.message, '[saml-replay]') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      ADOPT_VARIANT: candidate-2e3bcc2a1095
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Workspace
+        run: |
+          set -euo pipefail
+          best=/; [ -d /mnt ] && [ "$(df -Pk /mnt | awk 'NR==2{print $4}')" -gt "$(df -Pk / | awk 'NR==2{print $4}')" ] && best=/mnt
+          sudo mkdir -p "$best/adopted-scan" && sudo chown "$(id -u):$(id -g)" "$best/adopted-scan"
+          echo "W=$best/adopted-scan" >> "$GITHUB_ENV"; mkdir -p "$best/adopted-scan/evidence"
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: appliance-lab-adopted-sidecar-${{ env.ADOPT_VARIANT }}
+          path: ${{ env.W }}/in
+      - name: The archive is the one the guest ran (A5 record, re-hashed here)
+        run: |
+          set -euo pipefail
+          cd "$W"; E="$W/evidence"; r="in/A5-adopted-sidecar.txt"
+          kv() { grep -m1 "^$1=" "$r" | cut -d= -f2- | tr -d '\r'; }
+          cp "$r" in/A5-adopted-sidecar.binding.json "$E/"
+          got="$(sha256sum in/adopted-sidecar.tar | cut -d' ' -f1)"
+          echo "$got  adopted-sidecar.tar" | tee "$E/archive.sha256"
+          if [ "$got" != "$(kv archive-sha256)" ] || [ "$got" != "$(kv host-sha256)" ]; then
+            echo "::error::archive $got != guest $(kv archive-sha256) / host $(kv host-sha256)"; exit 1; fi
+          id="$(kv running-id)"
+          if [ -z "$id" ] || [ "$id" != "$(kv ref-id)" ] || [ "$id" != "$(kv running-id-after)" ]; then
+            echo "::error::running/ref ids disagree"; exit 1; fi
+          { echo "ADOPTED_ID=$id"; echo "ADOPTED_SHA=$got"; echo "ADOPTED_REF=$(kv ref)"; } >> "$GITHUB_ENV"
+      - name: Bind archive → top entry → amd64 manifest → config (every blob re-hashed)
+        run: |
+          set -euo pipefail
+          cfg="$(test/e2e/appliance/lab/sidecar-scan.sh bind "$W/in/adopted-sidecar.tar" "$ADOPTED_ID" either "$W/evidence/binding.json")"
+          cat "$W/evidence/binding.json"
+          # The guest-side binding (A5) and this one must agree byte for byte.
+          cmp <(jq -S . "$W/evidence/binding.json") <(jq -S . "$W/evidence/A5-adopted-sidecar.binding.json")
+          echo "SIDECAR_CONFIG=$cfg" >> "$GITHUB_ENV"
+      - name: Reachability of the MEDIUM findings in these exact bytes
+        run: test/e2e/appliance/lab/sidecar-scan.sh reach "$W/in/adopted-sidecar.tar" "$W/evidence/binding.json" "$W/rootfs" "$W/evidence"
+      - uses: aquasecurity/setup-trivy@81e514348e19b6112ce2a7e3ecbafe19c1e1f567 # v0.2.0
+        with:
+          version: v0.69.3
+          cache: true
+      - name: Scan the exact adopted archive (Deep gate policy) + full record + SBOM
+        run: |
+          set -uo pipefail
+          gate=0; test/e2e/appliance/lab/sidecar-scan.sh trivy "$W/in/adopted-sidecar.tar" "$SIDECAR_CONFIG" "$W/evidence" || gate=$?
+          {
+            echo "### Adopted ClamAV sidecar ($ADOPTED_REF) — exact-byte scan"
+            echo "running id \`$ADOPTED_ID\` → archive \`$ADOPTED_SHA\` (guest = host = here) → config \`$SIDECAR_CONFIG\` (Trivy ImageID matches)"
+            echo; echo '```'; cat "$W/evidence/severity-summary.json" "$W/evidence/sbom-summary.txt" 2>/dev/null; echo '```'
+            echo "Deep-gate policy (no fixable HIGH/CRITICAL): exit $gate"
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$gate"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: appliance-lab-adopted-sidecar-scan-${{ env.ADOPT_VARIANT }}
           path: ${{ env.W }}/evidence/
           if-no-files-found: warn

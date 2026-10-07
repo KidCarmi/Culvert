@@ -1053,6 +1053,39 @@ rec_origin_start() {
 
   python3 -m http.server "$LAB_EICAR_PORT" --bind 127.0.0.1 --directory "$WORK/eicar-origin" > "$WORK/eicar-origin.log" 2>&1 &
   echo $! > "$WORK/eicar-origin.pid"; sleep 1; }
+# upload_rx_start — a host receiver the GUEST can PUT one file to (10.0.2.2 is
+# the host's loopback under QEMU user networking). Used to carry the exact
+# bytes of an image the guest built out of the VM: a serial console session
+# (gpriv) cannot carry binary. Basename only, length-checked, written beside
+# and renamed into place, so a short upload never looks like a file.
+LAB_UPLOAD_PORT="${LAB_UPLOAD_PORT:-18432}"
+upload_rx_start() {
+  mkdir -p "$WORK/upload"; rm -f "$WORK/upload/"* "$WORK/upload/".[!.]* 2>/dev/null || true
+  python3 -I -c '
+import http.server, os, sys
+port, root, limit = int(sys.argv[1]), sys.argv[2], 4 << 30
+class H(http.server.BaseHTTPRequestHandler):
+    def no(self, c):
+        self.send_response(c); self.send_header("Content-Length", "0"); self.end_headers()
+    def do_PUT(self):
+        name = os.path.basename(self.path)
+        n = int(self.headers.get("Content-Length") or -1)
+        if not name or name.startswith(".") or n < 0 or n > limit:
+            return self.no(400)
+        tmp = os.path.join(root, "." + name)
+        left = n
+        with open(tmp, "wb") as f:
+            while left:
+                b = self.rfile.read(min(left, 1 << 20))
+                if not b: break
+                f.write(b); left -= len(b)
+        if left:
+            os.unlink(tmp); return self.no(400)
+        os.replace(tmp, os.path.join(root, name)); self.no(201)
+http.server.ThreadingHTTPServer(("127.0.0.1", port), H).serve_forever()
+' "$LAB_UPLOAD_PORT" "$WORK/upload" > "$WORK/upload-rx.log" 2>&1 &
+  echo $! > "$WORK/upload-rx.pid"; sleep 1; }
+upload_rx_stop() { [[ -f "$WORK/upload-rx.pid" ]] && kill "$(cat "$WORK/upload-rx.pid")" 2>/dev/null; rm -f "$WORK/upload-rx.pid"; }
 rec_origin_stop() { [[ -f "$WORK/eicar-origin.pid" ]] && kill "$(cat "$WORK/eicar-origin.pid")" 2>/dev/null; rm -f "$WORK/eicar-origin.pid"; }
 # fresh_eicar — a NEW body per call: the 68-byte EICAR string followed by a
 # unique run of spaces/tabs (the EICAR spec permits trailing whitespace). The
@@ -1522,6 +1555,50 @@ adopt_wait_clam_healthy() { local f="$1" i
   for i in $(seq 1 60); do adopt_state "$f"; [[ "$(kv "$f" clam-state)" == running/healthy ]] && return 0; sleep 15; done; return 1; }
 adopt_compose_up() { printf '%s\n' 'cd /srv/culvert' \
   'if [ -f docker-compose.maint-agent.yml ] && grep -q "^CULVERT_MAINT_GID=" .env; then docker compose -f docker-compose.yml -f docker-compose.maint-agent.yml up -d; else docker compose up -d; fi'; }
+# adopt_export_sidecar RUNNING_ID A3_ID OLD_ID — the guest root saves the ref
+# culvert-clamav runs, after proving that ref resolves to the RUNNING image
+# id, and PUTs the archive to the host; the host re-hashes it and binds it
+# (archive → top entry → amd64 manifest → config) to the running id with the
+# same script the scan job uses. Output: $LAB_ADOPTED_OUT/adopted-sidecar.tar
+# plus $EV/A5-adopted-sidecar.{txt,binding.json}.
+adopt_export_sidecar() { local run="$1" a3="$2" old="$3" f="$EV/A5-adopted-sidecar.txt" out got sz
+  out="${LAB_ADOPTED_OUT:-$WORK/adopted}"; mkdir -p "$out"; rm -f "$out/adopted-sidecar.tar"
+  if [[ -z "$run" || "$run" != "$a3" || "$run" == "$old" ]]; then
+    check A5 adopted-sidecar-exported fail "BLOCKED: the running sidecar ($run) is not the adopted one (A3 $a3, old $old)"; return 0; fi
+  upload_rx_start
+  gpriv --timeout 1200 > "$f" 2>&1 <<EOS || true
+set -e
+id=\$(docker inspect culvert-clamav -f '{{.Image}}')
+rid=\$(docker image inspect '$LAB_ADOPT_NEW_REF' -f '{{.Id}}')
+echo "running-id=\$id"; echo "ref-id=\$rid"; echo "ref=$LAB_ADOPT_NEW_REF"
+echo "docker-server=\$(docker version -f '{{.Server.Version}}')"
+echo "driver-status=\$(docker info -f '{{.Driver}} {{.DriverStatus}}' | tr '\\n' ' ')"
+[ "\$id" = "\$rid" ]
+rm -f /var/tmp/.lab-adopted.tar
+docker save '$LAB_ADOPT_NEW_REF' -o /var/tmp/.lab-adopted.tar
+echo "archive-sha256=\$(sha256sum /var/tmp/.lab-adopted.tar | cut -d' ' -f1)"
+echo "archive-bytes=\$(stat -c %s /var/tmp/.lab-adopted.tar)"
+rc=0; curl -fsS -H 'Expect:' -T /var/tmp/.lab-adopted.tar "http://10.0.2.2:$LAB_UPLOAD_PORT/adopted-sidecar.tar" || rc=\$?
+echo "upload-rc=\$rc"
+rm -f /var/tmp/.lab-adopted.tar
+echo "running-id-after=\$(docker inspect culvert-clamav -f '{{.Image}}')"
+EOS
+  upload_rx_stop
+  got=""; sz=""
+  if [[ -f "$WORK/upload/adopted-sidecar.tar" ]]; then
+    mv "$WORK/upload/adopted-sidecar.tar" "$out/adopted-sidecar.tar"
+    got="$(sha256sum "$out/adopted-sidecar.tar" | cut -d' ' -f1)"; sz="$(stat -c %s "$out/adopted-sidecar.tar")"
+  fi
+  printf 'host-sha256=%s\nhost-bytes=%s\n' "$got" "$sz" >> "$f"
+  if [[ "$(kv "$f" running-id)" == "$run" && "$(kv "$f" ref-id)" == "$run" && "$(kv "$f" running-id-after)" == "$run" \
+        && "$(kv "$f" upload-rc)" == 0 && -n "$got" && "$got" == "$(kv "$f" archive-sha256)" && "$sz" == "$(kv "$f" archive-bytes)" ]] \
+     && "$HERE/sidecar-scan.sh" bind "$out/adopted-sidecar.tar" "$run" either "$EV/A5-adopted-sidecar.binding.json" > "$EV/A5-bind.txt" 2>&1; then
+    cp "$f" "$out/A5-adopted-sidecar.txt"; cp "$EV/A5-adopted-sidecar.binding.json" "$out/"
+    check A5 adopted-sidecar-exported pass "$LAB_ADOPT_NEW_REF = running $run (id matched the archive's $(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))["id_matched"])' "$EV/A5-adopted-sidecar.binding.json")); archive sha256 $got ($sz bytes), identical on guest and host; config $(cat "$EV/A5-bind.txt")"
+  else
+    check A5 adopted-sidecar-exported fail "$(tr '\n' ' ' < "$f" | head -c 500) bind: $(tail -n1 "$EV/A5-bind.txt" 2>/dev/null)"
+    rm -f "$out/adopted-sidecar.tar"
+  fi; }
 cmd_adoption() { local f old new rc c v t
   : "${LAB_ADOPT_IMAGE_TAR:?}" "${LAB_ADOPT_IMAGE_ID:?}" "${LAB_ADOPT_OLD_REF:?}" "${LAB_ADOPT_NEW_REF:?}" "${LAB_ADOPT_PKGS:?}"
   gate A adoption || { check A adoption fail "BLOCKED: an earlier gate did not pass"; return 0; }
@@ -1606,6 +1683,11 @@ EOS
   if [[ "$(kv "$f" clam-id)" == "$new" && -n "$new" && "$new" != "$old" && "$(kv "$f" clam-pkgs)" == "$LAB_ADOPT_PKGS" && "$(kv "$f" clam-state)" == running/healthy && "$(kv "$f" proxy-id)" == "$LAB_ADOPT_IMAGE_ID" && "$t" == "traffic=ok eicar=av" ]]; then
     check A4 reboot-keeps-new-sidecar pass "after culvert-os-update reboot: culvert-clamav $new healthy; proxy $LAB_ADOPT_IMAGE_ID; $t"
   else check A4 reboot-keeps-new-sidecar fail "$t; $(tr '\n' ' ' < "$f" | head -c 400)"; fi
+  # A5 (ASTRA): keep the EXACT adopted sidecar for the scan job. A refresh
+  # BUILDS the sidecar on the host (apk at build time), so its bytes differ
+  # from the OVA's baked archive and from any rebuild: only these bytes, taken
+  # from the host that runs them, may carry a scan result.
+  adopt_export_sidecar "$(kv "$f" clam-id)" "$new" "$old"
   rm -f "$WORK/eicar-origin/culvert-image.tar"; rec_origin_stop
   redact_tree
 }
