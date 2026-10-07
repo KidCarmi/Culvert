@@ -1,0 +1,2 @@
+culvert functions=41178 gateway_runtime=0 gateway_options=403 rekor=123 sigstore_verify=66
+culvert-maint functions=23722 gateway_runtime=0 gateway_options=403 rekor=123 sigstore_verify=66

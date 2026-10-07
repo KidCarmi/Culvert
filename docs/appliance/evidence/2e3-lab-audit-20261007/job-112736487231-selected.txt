@@ -1,0 +1,19 @@
+Selected lines from GitHub job log; raw logs intentionally omitted.
+2026-10-07T10:00:52.9326685Z No vulnerabilities found.
+2026-10-07T10:00:52.9327276Z Your code is affected by 0 vulnerabilities.
+2026-10-07T10:00:52.9327904Z This scan also found 0 vulnerabilities in packages you import and 1
+2026-10-07T10:00:52.9328750Z vulnerability in modules you require, but your code doesn't appear to call these
+2026-10-07T10:00:52.9329397Z vulnerabilities.
+2026-10-07T10:00:55.3823922Z No vulnerabilities found.
+2026-10-07T10:00:55.3824443Z Your code is affected by 0 vulnerabilities.
+2026-10-07T10:00:55.3825075Z This scan also found 0 vulnerabilities in packages you import and 1
+2026-10-07T10:00:55.3826201Z vulnerability in modules you require, but your code doesn't appear to call these
+2026-10-07T10:00:55.3826850Z vulnerabilities.
+2026-10-07T10:00:57.8188838Z No vulnerabilities found.
+2026-10-07T10:00:57.8189162Z Your code is affected by 0 vulnerabilities.
+2026-10-07T10:00:57.8189562Z This scan also found 0 vulnerabilities in packages you import and 1
+2026-10-07T10:00:57.8190060Z vulnerability in modules you require, but your code doesn't appear to call these
+2026-10-07T10:00:57.8190451Z vulnerabilities.
+2026-10-07T10:02:06.0809688Z   Issues : 0
+2026-10-07T10:02:07.8282198Z   Issues : 0
+2026-10-07T10:02:08.1268011Z   Issues : 0

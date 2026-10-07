@@ -1,0 +1,7 @@
+Selected lines from GitHub job log; raw logs intentionally omitted.
+2026-10-07T10:01:13.4235758Z #47 exporting config sha256:7b3c98273c372b2875c140d4c678f415f3dda681e185e290c6b9b7234e1f1714 done
+2026-10-07T10:01:54.9749929Z sha256:7b3c98273c372b2875c140d4c678f415f3dda681e185e290c6b9b7234e1f1714
+2026-10-07T10:01:54.9974735Z   "containerimage.config.digest": "sha256:7b3c98273c372b2875c140d4c678f415f3dda681e185e290c6b9b7234e1f1714",
+2026-10-07T10:01:58.4364632Z SHA256 digest of uploaded artifact is 6a4f6cbd92b609e7f99c21716797c1aa7fbed5ee3b2fdeca333fdf6e452f0064
+2026-10-07T10:01:58.7530186Z Artifact deep-gate-image successfully finalized. Artifact ID 11474785430
+2026-10-07T10:01:58.7530816Z Artifact deep-gate-image has been successfully uploaded! Final size is 36146525 bytes. Artifact ID is 11474785430

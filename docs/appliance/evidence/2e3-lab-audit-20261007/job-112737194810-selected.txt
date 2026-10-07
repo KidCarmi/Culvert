@@ -1,0 +1,10 @@
+Selected lines from GitHub job log; raw logs intentionally omitted.
+2026-10-07T10:02:21.7118945Z   name: deep-gate-image
+2026-10-07T10:02:21.9574035Z - deep-gate-image (ID: 11474785430, Size: 36146525, Expected Digest: sha256:6a4f6cbd92b609e7f99c21716797c1aa7fbed5ee3b2fdeca333fdf6e452f0064)
+2026-10-07T10:02:22.9667316Z SHA256 digest of downloaded artifact is 6a4f6cbd92b609e7f99c21716797c1aa7fbed5ee3b2fdeca333fdf6e452f0064
+2026-10-07T10:02:31.9770298Z [36;1m  --severity CRITICAL,HIGH \[0m
+2026-10-07T10:02:31.9770617Z [36;1m  --ignore-unfixed \[0m
+2026-10-07T10:02:31.9770907Z [36;1m  --ignorefile .trivyignore \[0m
+2026-10-07T10:02:35.5775450Z │ culvert:ci-smoke (alpine 3.24.2) │  alpine  │        0        │
+2026-10-07T10:02:35.5777276Z │ app/culvert                      │ gobinary │        0        │
+2026-10-07T10:02:35.5778163Z │ app/deploy/bin/culvert-maint     │ gobinary │        0        │
