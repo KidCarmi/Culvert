@@ -1,12 +1,13 @@
 #!/bin/sh
 # initramfs init-premount: the line under the Culvert splash. Truthful for the
 # whole time the splash is shown (it ends when the console menu starts), and it
-# names the key that shows the boot messages. ubuntu-text draws a "keys:"
-# message near the bottom of the screen. Best-effort: never blocks the boot.
+# names the key that shows the boot messages, under the title. Not a "keys:"
+# message: ubuntu-text draws those white near the bottom, off the theme palette.
+# Best-effort: never blocks the boot.
 PREREQ="plymouth"
 prereqs() { echo "$PREREQ"; }
 case "$1" in prereqs) prereqs; exit 0 ;; esac
 command -v plymouth >/dev/null 2>&1 || exit 0
 plymouth --ping 2>/dev/null || exit 0
-plymouth display-message --text="keys:Starting system services  -  Esc: boot messages" 2>/dev/null || true
+plymouth display-message --text="Starting system services  -  Esc: boot messages" 2>/dev/null || true
 exit 0

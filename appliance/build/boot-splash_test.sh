@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Mocked offline image installation only: no root, VM, initramfs or host writes.
 set -euo pipefail
+fail() { echo "FAIL: $*" >&2; exit 1; }
 HERE=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 REPO=$(cd "$HERE/../.." && pwd)
 SOURCE="$REPO/appliance/boot-splash"
@@ -53,15 +54,17 @@ lsinitramfs)
     if [[ $1 == *initrd.img-2 ]]; then
         [[ $BOOT_SPLASH_FAIL != listing-second ]] || exit 45
         case "$BOOT_SPLASH_FAIL" in
-        missing-theme-second) printf '%s\n' "$BOOT_SPLASH_MODULE/x86_64-linux-gnu/plymouth/ubuntu-text.so" scripts/init-premount/culvert-splash-message; exit 0 ;;
-        missing-module-second) printf '%s\n' usr/share/plymouth/themes/culvert/culvert.plymouth scripts/init-premount/culvert-splash-message; exit 0 ;;
-        missing-message-second) printf '%s\n' usr/share/plymouth/themes/culvert/culvert.plymouth "$BOOT_SPLASH_MODULE/x86_64-linux-gnu/plymouth/ubuntu-text.so"; exit 0 ;;
-        false-theme-second) printf '%s\n' usr/share/plymouth/themes/other/culvert.plymouth "$BOOT_SPLASH_MODULE/x86_64-linux-gnu/plymouth/ubuntu-text.so" scripts/init-premount/culvert-splash-message; exit 0 ;;
-        false-module-second) printf '%s\n' usr/share/plymouth/themes/culvert/culvert.plymouth "$BOOT_SPLASH_MODULE/x86_64-linux-gnu/plymouth/ubuntu-textXso" scripts/init-premount/culvert-splash-message; exit 0 ;;
-        false-message-second) printf '%s\n' usr/share/plymouth/themes/culvert/culvert.plymouth "$BOOT_SPLASH_MODULE/x86_64-linux-gnu/plymouth/ubuntu-text.so" scripts/init-premount/culvert-splash-message.orig; exit 0 ;;
+        missing-theme-second) printf '%s\n' "$BOOT_SPLASH_MODULE/x86_64-linux-gnu/plymouth/ubuntu-text.so" scripts/init-premount/culvert-splash-message etc/plymouth/plymouthd.conf; exit 0 ;;
+        missing-module-second) printf '%s\n' usr/share/plymouth/themes/culvert/culvert.plymouth scripts/init-premount/culvert-splash-message etc/plymouth/plymouthd.conf; exit 0 ;;
+        missing-message-second) printf '%s\n' usr/share/plymouth/themes/culvert/culvert.plymouth "$BOOT_SPLASH_MODULE/x86_64-linux-gnu/plymouth/ubuntu-text.so" etc/plymouth/plymouthd.conf; exit 0 ;;
+        missing-daemon-conf-second) printf '%s\n' usr/share/plymouth/themes/culvert/culvert.plymouth "$BOOT_SPLASH_MODULE/x86_64-linux-gnu/plymouth/ubuntu-text.so" scripts/init-premount/culvert-splash-message; exit 0 ;;
+        false-daemon-conf-second) printf '%s\n' usr/share/plymouth/themes/culvert/culvert.plymouth "$BOOT_SPLASH_MODULE/x86_64-linux-gnu/plymouth/ubuntu-text.so" scripts/init-premount/culvert-splash-message usr/share/plymouth/plymouthd.defaults; exit 0 ;;
+        false-theme-second) printf '%s\n' usr/share/plymouth/themes/other/culvert.plymouth "$BOOT_SPLASH_MODULE/x86_64-linux-gnu/plymouth/ubuntu-text.so" scripts/init-premount/culvert-splash-message etc/plymouth/plymouthd.conf; exit 0 ;;
+        false-module-second) printf '%s\n' usr/share/plymouth/themes/culvert/culvert.plymouth "$BOOT_SPLASH_MODULE/x86_64-linux-gnu/plymouth/ubuntu-textXso" scripts/init-premount/culvert-splash-message etc/plymouth/plymouthd.conf; exit 0 ;;
+        false-message-second) printf '%s\n' usr/share/plymouth/themes/culvert/culvert.plymouth "$BOOT_SPLASH_MODULE/x86_64-linux-gnu/plymouth/ubuntu-text.so" scripts/init-premount/culvert-splash-message.orig etc/plymouth/plymouthd.conf; exit 0 ;;
         esac
     fi
-    printf '%s\n' usr/share/plymouth/themes/culvert/culvert.plymouth "$BOOT_SPLASH_MODULE/x86_64-linux-gnu/plymouth/ubuntu-text.so" scripts/init-premount/culvert-splash-message
+    printf '%s\n' usr/share/plymouth/themes/culvert/culvert.plymouth "$BOOT_SPLASH_MODULE/x86_64-linux-gnu/plymouth/ubuntu-text.so" scripts/init-premount/culvert-splash-message etc/plymouth/plymouthd.conf
     ;;
 update-grub)
     [[ $# == 0 ]]
@@ -101,6 +104,7 @@ for BOOT_SPLASH_MODULE in lib usr/lib; do
     cmp "$SOURCE/culvert-splash-message" "$BOOT_SPLASH_ROOT/etc/initramfs-tools/scripts/init-premount/culvert-splash-message"
     cmp "$SOURCE/culvert-kernel-log-vt" "$BOOT_SPLASH_ROOT/opt/culvert-appliance/bin/culvert-kernel-log-vt"
     cmp "$SOURCE/culvert-kernel-log-vt.service" "$BOOT_SPLASH_ROOT/etc/systemd/system/culvert-kernel-log-vt.service"
+    cmp "$SOURCE/plymouthd.conf" "$BOOT_SPLASH_ROOT/etc/plymouth/plymouthd.conf"
     [[ -x "$BOOT_SPLASH_ROOT/etc/initramfs-tools/scripts/init-premount/culvert-splash-message" && -x "$BOOT_SPLASH_ROOT/opt/culvert-appliance/bin/culvert-kernel-log-vt" ]]
     [[ $(readlink "$BOOT_SPLASH_ROOT/etc/systemd/system/sysinit.target.wants/culvert-kernel-log-vt.service") == ../culvert-kernel-log-vt.service ]]
     {
@@ -116,7 +120,7 @@ for BOOT_SPLASH_MODULE in lib usr/lib; do
     cmp "$BOOT_SPLASH_TRACE" "$TEST_DIR/expected"
 done
 
-for BOOT_SPLASH_FAIL in missing-plugin no-initrds alternatives-install alternatives-set initramfs listing listing-second missing-theme-second missing-module-second missing-message-second false-theme-second false-module-second false-message-second grub; do
+for BOOT_SPLASH_FAIL in missing-plugin no-initrds alternatives-install alternatives-set initramfs listing listing-second missing-theme-second missing-module-second missing-message-second missing-daemon-conf-second false-daemon-conf-second false-theme-second false-module-second false-message-second grub; do
     export BOOT_SPLASH_FAIL
     reset_guest
     case "$BOOT_SPLASH_FAIL" in
@@ -127,14 +131,14 @@ for BOOT_SPLASH_FAIL in missing-plugin no-initrds alternatives-install alternati
         echo "FAIL: $BOOT_SPLASH_FAIL was accepted" >&2; exit 1
     fi
     if [[ $BOOT_SPLASH_FAIL != grub ]]; then
-        ! grep -q '^update-grub' "$BOOT_SPLASH_TRACE"
+        ! grep -q '^update-grub' "$BOOT_SPLASH_TRACE" || fail "$BOOT_SPLASH_FAIL still ran update-grub"
     fi
     case "$BOOT_SPLASH_FAIL" in
     missing-plugin)
         [[ ! -s $BOOT_SPLASH_TRACE && ! -e "$BOOT_SPLASH_ROOT/etc/default/grub.d/99-culvert-splash.cfg" ]]
         ;;
-    alternatives-*) ! grep -q '^update-initramfs' "$BOOT_SPLASH_TRACE" ;;
-    initramfs) ! grep -q '^lsinitramfs' "$BOOT_SPLASH_TRACE" ;;
+    alternatives-*) { ! grep -q '^update-initramfs' "$BOOT_SPLASH_TRACE" || fail "$BOOT_SPLASH_FAIL still rebuilt the initramfs"; } ;;
+    initramfs) { ! grep -q '^lsinitramfs' "$BOOT_SPLASH_TRACE" || fail "$BOOT_SPLASH_FAIL still listed the initramfs"; } ;;
     esac
 done
 unset BOOT_SPLASH_FAIL
@@ -175,7 +179,7 @@ sh -euc '
 # Execute only the actual overlay copy loop against a fixture repository, with
 # decoy docs/tests present. The guest installer and build are never executed.
 mkdir -p "$TEST_DIR/repo/appliance/boot-splash" "$TEST_DIR/overlay/opt/culvert-appliance/boot-splash"
-for asset in install.sh install-lib.sh culvert.plymouth 99-culvert-splash.cfg culvert-splash-message culvert-kernel-log-vt culvert-kernel-log-vt.service; do
+for asset in install.sh install-lib.sh culvert.plymouth 99-culvert-splash.cfg culvert-splash-message culvert-kernel-log-vt culvert-kernel-log-vt.service plymouthd.conf; do
     cp "$SOURCE/$asset" "$TEST_DIR/repo/appliance/boot-splash/$asset"
 done
 touch "$TEST_DIR/repo/appliance/boot-splash/README.md" "$TEST_DIR/repo/appliance/boot-splash/private_test.sh"
@@ -183,9 +187,9 @@ copy_loop=$(sed -n '/^for splash_file in /,/^done$/p' "$HERE/build-ova.sh")
 [[ -n $copy_loop ]]
 REPO="$TEST_DIR/repo" OV="$TEST_DIR/overlay" bash -euo pipefail -c "$copy_loop"
 actual=$(find "$TEST_DIR/overlay/opt/culvert-appliance/boot-splash" -type f -printf '%f\n' | sort)
-expected=$(printf '%s\n' install.sh install-lib.sh culvert.plymouth 99-culvert-splash.cfg culvert-splash-message culvert-kernel-log-vt culvert-kernel-log-vt.service | sort)
+expected=$(printf '%s\n' install.sh install-lib.sh culvert.plymouth 99-culvert-splash.cfg culvert-splash-message culvert-kernel-log-vt culvert-kernel-log-vt.service plymouthd.conf | sort)
 [[ $actual == "$expected" ]]
-for asset in install.sh install-lib.sh culvert.plymouth 99-culvert-splash.cfg culvert-splash-message culvert-kernel-log-vt culvert-kernel-log-vt.service; do
+for asset in install.sh install-lib.sh culvert.plymouth 99-culvert-splash.cfg culvert-splash-message culvert-kernel-log-vt culvert-kernel-log-vt.service plymouthd.conf; do
     cmp "$SOURCE/$asset" "$TEST_DIR/overlay/opt/culvert-appliance/boot-splash/$asset"
 done
 
@@ -198,5 +202,13 @@ evidence=$(line "$HERE/prepare-guest.sh" 'sort > "$STATE/dpkg-list.txt"')
 [[ -n $packages && -n $console && -n $splash && -n $evidence ]]
 ((packages < console && console < splash && splash < evidence))
 grep -qx 'ModuleName=ubuntu-text' "$SOURCE/culvert.plymouth"
+# nomodeset means no DRM device ever appears: plymouth must not wait for one
+# (Ubuntu's 8 s default leaves tty1 in graphics mode on a fast boot), the file
+# must not pick a theme (the alternative does), and no message is "keys:".
+[[ $(sed -n 's/^DeviceTimeout=//p' "$SOURCE/plymouthd.conf") == 0.1 ]]
+grep -qx '\[Daemon\]' "$SOURCE/plymouthd.conf"
+! grep -Eq '^(Theme|ThemeDir|ShowDelay)=' "$SOURCE/plymouthd.conf" || fail 'plymouthd.conf must not choose a theme or delay'
+! grep -q 'keys:' <(grep -v '^#' "$SOURCE/culvert-splash-message") || fail 'splash message uses a keys: prefix'
+grep -q -- '--text="Starting system services' "$SOURCE/culvert-splash-message"
 grep -qx 'install_boot_splash "$HERE" /' "$SOURCE/install.sh"
 echo 'PASS: splash staging, alternatives/initramfs/GRUB ordering, failure fences, GRUB preservation, runtime-only overlay'

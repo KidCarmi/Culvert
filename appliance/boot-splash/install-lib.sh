@@ -13,7 +13,10 @@ install_boot_splash() (
     install -m 0644 "$source/99-culvert-splash.cfg" "$root/etc/default/grub.d/99-culvert-splash.cfg"
     # The splash's message line (initramfs) and the kernel-log console (tty12).
     install -d -m 0755 "$root/etc/initramfs-tools/scripts/init-premount" "$root/opt/culvert-appliance/bin" \
-        "$root/etc/systemd/system/sysinit.target.wants"
+        "$root/etc/systemd/system/sysinit.target.wants" "$root/etc/plymouth"
+    # Daemon settings: draw the text splash at once (see the file). Ubuntu's
+    # plymouth hook copies this into the initramfs; verified below.
+    install -m 0644 "$source/plymouthd.conf" "$root/etc/plymouth/plymouthd.conf"
     install -m 0755 "$source/culvert-splash-message" "$root/etc/initramfs-tools/scripts/init-premount/culvert-splash-message"
     install -m 0755 "$source/culvert-kernel-log-vt" "$root/opt/culvert-appliance/bin/culvert-kernel-log-vt"
     install -m 0644 "$source/culvert-kernel-log-vt.service" "$root/etc/systemd/system/culvert-kernel-log-vt.service"
@@ -39,6 +42,9 @@ install_boot_splash() (
         }
         grep -qx 'scripts/init-premount/culvert-splash-message' <<< "$listing" || {
             echo 'Culvert boot splash: message script absent from initramfs.' >&2; exit 1;
+        }
+        grep -qx 'etc/plymouth/plymouthd.conf' <<< "$listing" || {
+            echo 'Culvert boot splash: plymouthd.conf absent from initramfs.' >&2; exit 1;
         }
     done
     update-grub

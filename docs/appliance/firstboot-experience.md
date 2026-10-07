@@ -22,9 +22,11 @@ fallback alternatives select the Culvert theme; package-owned themes and
 and getty ordering control the handoff, with no new dependency on Docker,
 network availability or provisioning completion.
 
-The screen is `C U L V E R T`, the renderer's activity dots, and one line near
-the bottom: "Starting system services - Esc: boot messages" (an initramfs
-script, `culvert-splash-message`, sends it once Plymouth is up). It is true for
+The screen is `C U L V E R T`, the renderer's activity dots, and one line
+under them in the theme colour: "Starting system services - Esc: boot
+messages" (an initramfs script, `culvert-splash-message`, sends it once
+Plymouth is up). It is deliberately not a `keys:` message, which ubuntu-text
+draws in white at the bottom of the screen, outside the theme palette. It is true for
 the whole time the splash is shown: the splash ends when the console menu
 starts, and the menu reports provisioning and readiness itself. The title is 13
 characters because ubuntu-text draws it at column `(width-12)/2`; the first
@@ -40,6 +42,18 @@ Three things are owned explicitly so that nothing else is left on the screen:
   4.6 s) and the earlier text stayed in the corner of a larger screen. The
   console menu is an 80x25 text UI; nothing on the guest uses accelerated
   graphics.
+* **Text mode on tty1.** Plymouth waits `DeviceTimeout` (Ubuntu default 8 s)
+  for a graphics device before it draws the text splash, holding tty1 in
+  graphics mode meanwhile. With `nomodeset` no such device ever appears, so
+  the first eight seconds were blank, and a boot that reached the console menu
+  inside that window left tty1 in graphics mode: the kernel then ignores
+  every write to it, and the menu ran behind a screen frozen on early boot
+  text (lab probe: `KDGETMODE` = graphics from 4.2 s to 37 s, Plymouth already
+  gone). Two independent fixes: `/etc/plymouth/plymouthd.conf` sets
+  `DeviceTimeout=0.1` (read before `plymouthd.defaults`, first value wins;
+  Ubuntu's initramfs hook copies it and the build checks it is there), and
+  `culvert-console --login` puts its VT back in text mode before drawing the
+  first menu frame, whatever left it in graphics mode.
 * **Kernel messages on their own console.** `culvert-kernel-log-vt.service`
   runs before the splash ends and routes the kernel's VT output to tty12
   (`setlogcons 12`), seeding it with the kernel log so far. Alt+F12 shows it,
@@ -53,6 +67,8 @@ Three things are owned explicitly so that nothing else is left on the screen:
   console-on on hide; noble `ubuntu-text.patch`), serial included. They stay
   in the kernel log and journal; Esc shows the boot messages Plymouth has
   captured. This is the packaged renderer's behaviour, not a Culvert setting.
+  So is the one-way toggle: a second Esc does not return to the splash (the
+  details view stays until the splash ends).
 
 `/dev/console`: the kernel command line keeps the cloud image's
 `console=tty1 console=ttyS0`, so `/dev/console` is ttyS0. That holds on ESXi
