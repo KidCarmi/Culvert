@@ -116,3 +116,105 @@ func BenchmarkStoreMatchesHost_Parallel(b *testing.B) {
 		_ = sink
 	})
 }
+
+// ---------------------------------------------------------------------------
+// forwardView: before/after arms, timed in ONE run.
+// ---------------------------------------------------------------------------
+//
+// The _Legacy arms call legacyMatchesHost / legacyMatchesHostAdmin
+// (urlcat_forward_view_test.go), which are VERBATIM copies of the pre-view
+// bodies — the s.mu.RLock'd probe of the live s.index. Keeping the old shape
+// in-tree and timing both arms in one process is the repo convention
+// (security_ratelimit_exempt_bench_test.go, checkrequesturl_bench_test.go) and
+// it is not optional here: this box has been observed to drift by half again
+// between rounds, so a cross-run pair of absolutes says nothing. Quote the
+// RATIO, and read the PARALLEL arms — the finding is a throughput ceiling, so
+// what matters is not ns/op at one core but how ns/op MOVES with core count.
+//
+//	go test -run '^$' -bench 'MatchesHostView' -benchmem -cpu 1,2,4 ./internal/urlcat/
+//
+// The same frozen oracle backs TestForwardView_DifferentialAgainstLegacy, so
+// the shape being measured can never drift from the shape being proved
+// equivalent.
+
+func BenchmarkMatchesHostView_Parallel(b *testing.B) {
+	s := benchMatchStore()
+	cat := benchCategoryName(b)
+	const host = "uncategorized.example.net"
+	b.ReportAllocs()
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		var sink bool // per-worker sink: a shared one makes false sharing the measurement
+		for pb.Next() {
+			sink = s.MatchesHost(cat, host)
+		}
+		_ = sink
+	})
+}
+
+func BenchmarkMatchesHostView_Parallel_Legacy(b *testing.B) {
+	s := benchMatchStore()
+	cat := benchCategoryName(b)
+	const host = "uncategorized.example.net"
+	b.ReportAllocs()
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		var sink bool
+		for pb.Next() {
+			sink = legacyMatchesHost(s, cat, host)
+		}
+		_ = sink
+	})
+}
+
+func BenchmarkMatchesHostView_Serial(b *testing.B) {
+	s := benchMatchStore()
+	cat := benchCategoryName(b)
+	const host = "uncategorized.example.net"
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if s.MatchesHost(cat, host) {
+			b.Fatal("unexpected match")
+		}
+	}
+}
+
+func BenchmarkMatchesHostView_Serial_Legacy(b *testing.B) {
+	s := benchMatchStore()
+	cat := benchCategoryName(b)
+	const host = "uncategorized.example.net"
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if legacyMatchesHost(s, cat, host) {
+			b.Fatal("unexpected match")
+		}
+	}
+}
+
+func BenchmarkMatchesHostAdminView_Parallel(b *testing.B) {
+	s := New([]*Entry{{Name: "Corp Internal", Hosts: []string{"intranet.corp.invalid"}}})
+	b.ReportAllocs()
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		var sink bool
+		for pb.Next() {
+			sink = s.MatchesHostAdmin("Corp Internal", "uncategorized.example.net")
+		}
+		_ = sink
+	})
+}
+
+func BenchmarkMatchesHostAdminView_Parallel_Legacy(b *testing.B) {
+	s := New([]*Entry{{Name: "Corp Internal", Hosts: []string{"intranet.corp.invalid"}}})
+	b.ReportAllocs()
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		var sink bool
+		for pb.Next() {
+			sink = legacyMatchesHostAdmin(s, "Corp Internal", "uncategorized.example.net")
+		}
+		_ = sink
+	})
+}
