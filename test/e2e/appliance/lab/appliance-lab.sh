@@ -1829,6 +1829,15 @@ EOS
   if grep -qa 'Linux version' "$EV/V5-serial.log" && grep -qaE 'OK .*(Started|Finished|Reached)' "$EV/V5-serial.log" && grep -qa 'login:' "$EV/V5-serial.log"; then
     vcheck V5 serial-only-boot pass "serial carries the kernel log ($(grep -ac '^\[ *[0-9]' "$EV/V5-serial.log") lines), systemd status and a login prompt"
   else vcheck V5 serial-only-boot fail "serial log incomplete (kernel=$(grep -ac 'Linux version' "$EV/V5-serial.log") ok=$(grep -acE 'OK .*(Started|Finished|Reached)' "$EV/V5-serial.log") login=$(grep -ac 'login:' "$EV/V5-serial.log"))"; fi
+  # Shutdown on serial: with no display no Plymouth shutdown splash either, so
+  # systemd's stop lines and the kernel's last line reach the serial console.
+  local off; off="$(wc -c < "$WORK/console.log")"
+  gpriv --nowait > "$EV/V5-poweroff.txt" 2>&1 <<<'systemctl poweroff' || true
+  for _ in $(seq 1 90); do qemu_alive || break; sleep 2; done
+  tail -c "+$((off + 1))" "$WORK/console.log" > "$EV/V5-shutdown.log" 2>/dev/null || true
+  if grep -qaE 'OK .*Stopped' "$EV/V5-shutdown.log" && grep -qa 'reboot: Power down' "$EV/V5-shutdown.log"; then
+    vcheck V5 serial-shutdown pass "serial carries $(grep -acE 'OK .*Stopped' "$EV/V5-shutdown.log") systemd stop lines and the kernel's power-down line"
+  else vcheck V5 serial-shutdown fail "serial shutdown log incomplete (stopped=$(grep -acE 'OK .*Stopped' "$EV/V5-shutdown.log") powerdown=$(grep -ac 'reboot: Power down' "$EV/V5-shutdown.log"); qemu $(qemu_alive && echo still running || echo exited))"; fi
   redact_tree
 }
 failures() { grep -c '"result":"fail"' "$JSONL" 2>/dev/null || true; }
