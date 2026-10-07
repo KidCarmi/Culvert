@@ -53,7 +53,7 @@ jobs:
   guest-boot:
     name: "Lab · ${{ matrix.variant }} OVA: build + QEMU guest boot + qualify"
     # A push whose head commit says [fdisk-only] reruns F-DISK-1 alone.
-    if: ${{ !contains(github.event.head_commit.message, '[fdisk-only]') && !contains(github.event.head_commit.message, '[sidecar-scan]') }}
+    if: ${{ !contains(github.event.head_commit.message, '[fdisk-only]') && !contains(github.event.head_commit.message, '[sidecar-scan]') && !contains(github.event.head_commit.message, '[boot-console]') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 240
     strategy:
@@ -465,7 +465,7 @@ jobs:
 
   f-disk-1:
     name: "Lab · F-DISK-1 on the bounded nested-Docker host"
-    if: ${{ !contains(github.event.head_commit.message, '[sidecar-scan]') }}
+    if: ${{ !contains(github.event.head_commit.message, '[sidecar-scan]') && !contains(github.event.head_commit.message, '[boot-console]') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     steps:
@@ -549,6 +549,69 @@ jobs:
             ${{ runner.temp }}/fdisk1/**/REPORT.md
             ${{ runner.temp }}/fdisk1/**/checks.jsonl
             ${{ runner.temp }}/fdisk1/**/diagnose.log
+          retention-days: 30
+          if-no-files-found: warn
+
+  # The boot screen as an operator sees it on ESXi (owner report on #1528:
+  # kernel text and a wrapped title left on the console). Boots a RETAINED OVA
+  # with VMware SVGA and no serial port and records every distinct VGA frame
+  # through cold first boot, a maintenance reboot with a slow and a failed
+  # unit, Esc, the kernel-log VT and a clean reboot, plus a serial-only boot
+  # (appliance-lab.sh "console"). A push whose head commit says
+  # [boot-console] runs this job alone.
+  boot-console:
+    name: "Lab · boot console (VMware SVGA, no serial) · ${{ matrix.variant }}"
+    if: ${{ contains(github.event.head_commit.message, '[boot-console]') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - variant: candidate-2e3bcc2a1095
+            retained_run: "37606237892"
+            retained_sha256: "55e98116ba2c020789b3f5de4eabab7e29af611c83b9c972b82a6319a19f145e"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: KVM, lab directory, tools
+        run: |
+          set -euo pipefail
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules >/dev/null
+          sudo udevadm control --reload-rules && sudo udevadm trigger --name-match=kvm || true
+          best=/; [ -d /mnt ] && [ "$(df -Pk /mnt | awk 'NR==2{print $4}')" -gt "$(df -Pk / | awk 'NR==2{print $4}')" ] && best=/mnt
+          sudo mkdir -p "$best/culvert-lab" && sudo chown "$(id -u):$(id -g)" "$best/culvert-lab"
+          echo "LAB_ROOT=$best/culvert-lab" >> "$GITHUB_ENV"
+          for i in 1 2; do
+            sudo apt-get update -q && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends \
+              qemu-utils qemu-system-x86 genisoimage imagemagick && break
+            sleep 15
+          done
+      - name: Fetch the RETAINED OVA (verified sha256)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$LAB_ROOT/ova"
+          gh run download "${{ matrix.retained_run }}" -R "$GITHUB_REPOSITORY" -n "appliance-lab-ova-${{ matrix.variant }}" -D "$LAB_ROOT/ova"
+          got="$(sha256sum "$LAB_ROOT/ova/"*.ova | cut -d' ' -f1)"
+          [ "$got" = "${{ matrix.retained_sha256 }}" ] || { echo "::error::retained OVA sha256 $got != ${{ matrix.retained_sha256 }}"; exit 1; }
+      - name: "Console: cold first boot, maintenance reboots, Esc, kernel-log VT, serial-only"
+        run: |
+          set -euo pipefail
+          export LAB_DIR="$LAB_ROOT/console" LAB_ACCEL=kvm LAB_MIN_FREE_GB=15
+          export LAB_OVA="$(ls "$LAB_ROOT/ova/"*.ova)" LAB_OVA_SHA256="${{ matrix.retained_sha256 }}"
+          test/e2e/appliance/lab/appliance-lab.sh preflight
+          test/e2e/appliance/lab/appliance-lab.sh console
+      - name: Report
+        if: always()
+        run: |
+          [ -f "$LAB_ROOT/console/evidence/REPORT.md" ] && cat "$LAB_ROOT/console/evidence/REPORT.md" >> "$GITHUB_STEP_SUMMARY" || true
+          grep -h '"check"' "$LAB_ROOT/console/evidence/"*.jsonl 2>/dev/null | tail -20 || true
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: appliance-lab-console-${{ matrix.variant }}
+          path: ${{ env.LAB_ROOT }}/console/evidence
           retention-days: 30
           if-no-files-found: warn
 

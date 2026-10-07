@@ -1588,10 +1588,169 @@ EOS
   f="$EV/A4-state.txt"; adopt_wait_clam_healthy "$f" || true
   v="$(for _ in $(seq 1 24); do x="$(eicar_verdict)"; [[ $x == av ]] && { echo av; break; }; sleep 5; done)"
   t="traffic=$(rec_traffic && echo ok || echo no) eicar=${v:-none}"
-  if [[ "$(kv "$f" clam-id)" == "$new" && -n "$new" && "$(kv "$f" clam-state)" == running/healthy && "$(kv "$f" proxy-id)" == "$LAB_ADOPT_IMAGE_ID" && "$t" == "traffic=ok eicar=av" ]]; then
+  # The NEW sidecar must be what comes back — never "whatever ran before the
+  # reboot" (run 37625917513 passed A4 on the old sidecar after A3 had failed).
+  if [[ "$(kv "$f" clam-id)" == "$new" && -n "$new" && "$new" != "$old" && "$(kv "$f" clam-pkgs)" == "$LAB_ADOPT_PKGS" && "$(kv "$f" clam-state)" == running/healthy && "$(kv "$f" proxy-id)" == "$LAB_ADOPT_IMAGE_ID" && "$t" == "traffic=ok eicar=av" ]]; then
     check A4 reboot-keeps-new-sidecar pass "after culvert-os-update reboot: culvert-clamav $new healthy; proxy $LAB_ADOPT_IMAGE_ID; $t"
   else check A4 reboot-keeps-new-sidecar fail "$t; $(tr '\n' ' ' < "$f" | head -c 400)"; fi
   rm -f "$WORK/eicar-origin/culvert-image.tar"; rec_origin_stop
+  redact_tree
+}
+# ── console: the boot screen as an operator sees it on ESXi ─────────────────
+# VMware SVGA (vmwgfx) and NO serial port, so /dev/console is tty1 exactly as on
+# an ESXi VM (the OVA's console=ttyS0 finds no UART). Privileged steps log in on
+# a virtio console (hvc0 getty) with the console password supplied through the
+# OVF `password` property. Every distinct VGA frame is kept (vga-capture.py)
+# through: cold first boot, a maintenance reboot with a slow and a failed unit,
+# Esc during the splash, the kernel-log VT, a clean maintenance reboot, and a
+# serial-only boot (no display adapter). Run in its own LAB_DIR after preflight.
+VGA_CMDS="$WORK/vga-cmds"; VGA_STOP="$WORK/vga-stop"
+vmark() { printf 'mark %s\n' "$*" >> "$VGA_CMDS"; log "console: $*"; }
+vkey()  { printf 'sendkey %s\n' "$1" >> "$VGA_CMDS"; }
+# tty1's text as the kernel holds it (/dev/vcs1): what is on the operator's screen.
+vtty() { groot "cat /proc/consoles; echo ---active; cat /sys/class/tty/console/active; echo ---printk; cat /proc/sys/kernel/printk
+w=\$(stty -F /dev/tty1 size 2>/dev/null | cut -d' ' -f2); echo \"---size \$(stty -F /dev/tty1 size 2>/dev/null)\"
+for v in 1 12; do echo \"---vcs\$v\"; [ -e /dev/vcs\$v ] && fold -w \"\${w:-80}\" /dev/vcs\$v | sed 's/[[:space:]]*\$//' | grep -v '^\$'; done
+echo ---journal; journalctl -b -o short-monotonic --no-pager 2>/dev/null | grep -E 'Console: switching|fbcon|vmwgfx|plymouth|Started getty@tty1|LAB-|Startup finished|lab-console' | head -80" 300 > "$1" 2>&1 || true; }
+# Lines on tty1 that are not the console UI: kernel log, systemd status lines,
+# unit output, the lab's own markers.
+vstray() { sed -n '/^---vcs1$/,/^---vcs12$/p' "$1" | grep -E '^\[ *[0-9]+\.[0-9]+\]|\[ *(OK|FAILED|DEPEND) *\]|LAB-|br-[0-9a-f]{6,}|veth[0-9a-f]|cloud-init|culvert-firstboot:|^ *Start(ing|ed) [A-Za-z].*\.(service|socket|target|mount|timer)' | head -20; }
+vwait_ready() { local deadline=$(( $(date +%s) + ${1:-1800} ))
+  until gop status-json > "$WORK/status-json.tmp" 2>/dev/null && [[ " $(recorded_steps "$WORK/status-json.tmp") " == *" complete "* ]] \
+        && curl -fsS -m 3 "$P/health" >/dev/null 2>&1; do
+    qemu_alive && (( $(date +%s) < deadline )) || return 1; sleep 5; done; }
+vqemu() { local acc=(-machine "pc,accel=tcg" -cpu max)
+  [[ "$ACCEL" == kvm ]] && acc=(-machine "pc,accel=kvm" -cpu host)
+  : > "$WORK/console.log"; rm -f "$SER_SOCK" "$MON_SOCK"
+  qemu-system-x86_64 -name culvert-console "${acc[@]}" -smp "$LAB_CPUS" -m "$LAB_MEM_MB" \
+    -drive "file=$WORK/coverlay.qcow2,if=none,id=d0,format=qcow2,cache=writeback" \
+    -device virtio-scsi-pci,id=scsi0 -device scsi-hd,drive=d0,bus=scsi0.0 \
+    -drive "file=$WORK/ovfenv.iso,if=none,id=cd0,media=cdrom,readonly=on" -device ide-cd,drive=cd0 \
+    -netdev "user,id=n0,hostfwd=tcp:127.0.0.1:$LAB_SSH_PORT-:22,hostfwd=tcp:127.0.0.1:$LAB_PROXY_PORT-:8080,hostfwd=tcp:127.0.0.1:$LAB_UI_PORT-:9090" \
+    -device e1000,netdev=n0 "$@" \
+    -monitor "unix:$MON_SOCK,server,nowait" -pidfile "$WORK/qemu.pid" -daemonize; }
+vcapture_start() { rm -f "$VGA_STOP"; : >> "$VGA_CMDS"
+  nohup python3 "$HERE/vga-capture.py" --mon "$MON_SOCK" --out "$EV/V-frames" --stop "$VGA_STOP" --cmds "$VGA_CMDS" \
+    --interval "${LAB_VGA_INTERVAL:-0.5}" > "$WORK/vga-capture.log" 2>&1 &
+  echo $! > "$WORK/vga-capture.pid"; }
+vcapture_stop() { local p; touch "$VGA_STOP"; p="$(cat "$WORK/vga-capture.pid" 2>/dev/null || true)"
+  for _ in $(seq 1 20); do [[ -n "$p" ]] && kill -0 "$p" 2>/dev/null || break; sleep 0.5; done; }
+# vsheet NAME FROM TO — contact sheet of every other frame captured in [FROM,TO) s.
+vsheet() { local name="$1" from="$2" to="$3" files=()
+  command -v montage >/dev/null || return 0
+  mapfile -t files < <(awk -F'\t' -v a="$from" -v b="$to" -v d="$EV/V-frames" \
+    '$2>=a && $2<b {printf "%s/%05d_%08.2f.png\n", d, $1, $2}' "$EV/V-frames/frames.tsv" | awk 'NR%2==1' | head -60)
+  (( ${#files[@]} )) || return 0
+  montage "${files[@]}" -tile 6x -geometry 360x200+3+3 -label '%t' -pointsize 9 "$EV/$name.png" 2>/dev/null || true; }
+vtime() { awk -F'\t' 'END{print $1+0}' "$EV/V-frames/events.tsv" 2>/dev/null || echo 0; }
+vstray_check() { local id="$1" name="$2" f="$3" s; s="$(vstray "$f")"
+  if [[ -z "$s" ]]; then check "$id" "$name" pass "tty1 ($(sed -n 's/^---size //p' "$f")) holds only the console UI"
+  else check "$id" "$name" fail "stray text on tty1: $(printf '%s' "$s" | head -5 | tr '\n' '|' | cut -c1-400)"; fi; }
+cmd_console() { local ova got vmdk f t1 t2 t3
+  [[ -n "${ACCEL:-}" ]] || die "run preflight first"
+  ova="${LAB_OVA:?LAB_OVA}"; got="$(sha256sum "$ova" | cut -d' ' -f1)"
+  [[ "$got" == "${LAB_OVA_SHA256:?LAB_OVA_SHA256}" ]] || { check V ova-sha256 fail "got $got want $LAB_OVA_SHA256"; return 1; }
+  rm -rf "$WORK/ova"; extract_ova "$ova" "$WORK/ova" || { check V ova-manifest fail ".mf mismatch"; return 1; }
+  vmdk="$(ls "$WORK/ova/"*.vmdk)"; qemu-img convert -O qcow2 "$vmdk" "$WORK/cbase.qcow2" >/dev/null; rm -f "$vmdk"; chmod 0444 "$WORK/cbase.qcow2"
+  qemu-img create -q -f qcow2 -F qcow2 -b "$WORK/cbase.qcow2" "$WORK/coverlay.qcow2"
+  rm -f "$SEC/id_ed25519"* "$SEC/console-pass"; ssh-keygen -q -t ed25519 -N '' -C "culvert-console-$RUN_ID" -f "$SEC/id_ed25519"
+  printf '%s-Lab9\n' "$(head -c 4096 /dev/urandom | tr -dc 'A-Za-z0-9' | cut -c1-20)" > "$SEC/console-pass"; chmod 0600 "$SEC/console-pass"
+  mkdir -p "$WORK/ovfenv"
+  python3 - "$WORK/ovfenv/ovf-env.xml" "console-$RUN_ID" "$(cat "$SEC/id_ed25519.pub")" "$(cat "$SEC/console-pass")" <<'OVFENV'
+import sys
+from xml.sax.saxutils import quoteattr
+props = {"instance-id": sys.argv[2], "hostname": "culvert-console", "public-keys": sys.argv[3],
+         "password": sys.argv[4], "culvert.net.mode": "dhcp"}
+p = "\n".join(f'    <Property oe:key={quoteattr(k)} oe:value={quoteattr(v)}/>' for k, v in props.items())
+with open(sys.argv[1], "w") as f:
+    f.write('<?xml version="1.0" encoding="UTF-8"?>\n'
+            '<Environment xmlns="http://schemas.dmtf.org/ovf/environment/1" '
+            'xmlns:oe="http://schemas.dmtf.org/ovf/environment/1" oe:id="">\n'
+            f'  <PropertySection>\n{p}\n  </PropertySection>\n</Environment>\n')
+OVFENV
+  if command -v genisoimage >/dev/null; then genisoimage -quiet -o "$WORK/ovfenv.iso" -V OVFENV -r -J "$WORK/ovfenv"
+  else xorriso -as mkisofs -quiet -o "$WORK/ovfenv.iso" -V OVFENV -r -J "$WORK/ovfenv"; fi
+  # shellcheck disable=SC2054 # QEMU option values contain commas
+  local esxi=(-vga vmware -display none -serial none -device virtio-serial-pci
+              -chardev "socket,id=hvc,path=$SER_SOCK,server=on,wait=off,logfile=$WORK/console.log,logappend=on"
+              -device virtconsole,chardev=hvc)
+  # V1 cold first boot.
+  vqemu "${esxi[@]}"; vcapture_start; vmark "power-on: cold first boot (VMware SVGA, no serial port)"
+  if ! vwait_ready "$LAB_FIRSTBOOT_TIMEOUT"; then
+    check V1 first-boot fail "not ready within ${LAB_FIRSTBOOT_TIMEOUT}s"; vcapture_stop; vsheet V1-first-boot 0 99999; return 1; fi
+  vmark "first boot complete (status-json complete, /health 200)"; sleep 30
+  f="$EV/V1-tty.txt"; vtty "$f"; t1="$(vtime)"
+  if sed -n '/^---active$/,/^---printk$/p' "$f" | grep -q 'tty' && ! sed -n '/^---active$/,/^---printk$/p' "$f" | grep -q 'ttyS'; then
+    check V1 esxi-console-topology pass "/dev/console is the VGA console, no serial console ($(sed -n '/^---active$/{n;p}' "$f"))"
+  else check V1 esxi-console-topology fail "not the ESXi topology: $(head -c 300 "$f" | tr '\n' ' ')"; fi
+  vstray_check V1 tty1-after-first-boot "$f"
+  # V2 maintenance reboot with a slow unit ahead of logins and a failing unit.
+  gpriv --timeout 120 > "$EV/V2-units.txt" 2>&1 <<'EOS' || true
+cat > /etc/systemd/system/lab-console-delay.service <<'U'
+[Unit]
+Description=Lab console qualification: a slow unit ahead of logins
+DefaultDependencies=no
+After=local-fs.target systemd-udevd.service
+Before=systemd-user-sessions.service plymouth-quit.service plymouth-quit-wait.service
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/sh -c 'echo LAB-SPLASH-WINDOW-START > /dev/hvc0; echo "<6>LAB-KMSG-INFO during the splash" > /dev/kmsg; echo "<3>LAB-KMSG-ERR during the splash" > /dev/kmsg; echo "LAB-CONSOLE-LINE written to /dev/console during the splash"; sleep 45; echo LAB-SPLASH-WINDOW-END > /dev/hvc0'
+StandardOutput=journal+console
+[Install]
+WantedBy=sysinit.target
+U
+cat > /etc/systemd/system/lab-console-fail.service <<'U'
+[Unit]
+Description=Lab console qualification: a unit that fails during boot
+Before=systemd-user-sessions.service
+[Service]
+Type=oneshot
+ExecStart=/bin/false
+[Install]
+WantedBy=multi-user.target
+U
+systemctl daemon-reload && systemctl enable lab-console-delay.service lab-console-fail.service
+EOS
+  : > "$WORK/console.log"; vmark "maintenance reboot requested (slow + failing unit installed)"
+  gpriv --nowait > "$EV/V2-reboot.txt" 2>&1 <<<'culvert-os-update reboot' || true
+  for _ in $(seq 1 600); do grep -qa LAB-SPLASH-WINDOW-START "$WORK/console.log" 2>/dev/null && break; sleep 0.5; done
+  if grep -qa LAB-SPLASH-WINDOW-START "$WORK/console.log"; then
+    vmark "slow unit running (splash window open)"; sleep 8; vmark "Esc pressed"; vkey esc; sleep 12
+    vmark "Esc pressed again"; vkey esc; sleep 8
+  else check V2 splash-window info "the slow unit's start marker never reached hvc0"; fi
+  vwait_ready 900 || check V2 maintenance-reboot fail "not ready after the maintenance reboot"
+  vmark "ready after maintenance reboot"; sleep 20
+  f="$EV/V2-tty.txt"; vtty "$f"; vstray_check V2 tty1-after-reboot-with-failures "$f"
+  # V3 after boot: kernel messages and /dev/console output while the console UI is up.
+  gpriv --timeout 300 > "$EV/V3-writes.txt" 2>&1 <<'EOS' || true
+echo "<6>LAB-KMSG-POSTBOOT info" > /dev/kmsg; echo "<3>LAB-KMSG-POSTBOOT err" > /dev/kmsg
+echo "LAB-CONSOLE-POSTBOOT line" > /dev/console
+docker restart culvert-clamav >/dev/null
+EOS
+  vmark "post-boot kernel + /dev/console writes, clamav restarted"; sleep 15
+  f="$EV/V3-tty.txt"; vtty "$f"; vstray_check V3 tty1-after-postboot-writes "$f"
+  vmark "Alt+F12"; vkey alt-f12; sleep 4; vmark "Alt+F1"; vkey alt-f1; sleep 4
+  # V4 clean maintenance reboot.
+  groot 'systemctl disable lab-console-delay.service lab-console-fail.service; rm -f /etc/systemd/system/lab-console-delay.service /etc/systemd/system/lab-console-fail.service; systemctl daemon-reload' 120 > /dev/null 2>&1 || true
+  t2="$(vtime)"; vmark "clean maintenance reboot requested"
+  gpriv --nowait > "$EV/V4-reboot.txt" 2>&1 <<<'culvert-os-update reboot' || true
+  sleep 20; vwait_ready 900 || check V4 maintenance-reboot fail "not ready after the clean maintenance reboot"
+  vmark "ready after clean maintenance reboot"; sleep 20
+  f="$EV/V4-tty.txt"; vtty "$f"; vstray_check V4 tty1-after-clean-reboot "$f"
+  t3="$(vtime)"; vcapture_stop
+  vsheet V1-first-boot 0 "$t1"; vsheet V2-V3-reboot-esc-postboot "$t1" "$t2"; vsheet V4-clean-reboot "$t2" "$t3"
+  check V frames info "$(wc -l < "$EV/V-frames/frames.tsv") distinct frames, $(grep -c . "$EV/V-frames/events.tsv") events (V-frames/, V*-*.png contact sheets)"
+  # V5 serial-only: no display adapter; the serial port is the only console.
+  groot 'systemctl poweroff' 60 > /dev/null 2>&1 || true
+  for _ in $(seq 1 60); do qemu_alive || break; sleep 2; done
+  if qemu_alive; then kill "$(cat "$WORK/qemu.pid")" 2>/dev/null || true; sleep 2; fi
+  vqemu -vga none -display none -chardev "socket,id=ser0,path=$SER_SOCK,server=on,wait=off,logfile=$WORK/console.log,logappend=on" -serial chardev:ser0
+  vwait_ready 900 || check V5 serial-only-boot fail "not ready without a display adapter"
+  sleep 10; cp "$WORK/console.log" "$EV/V5-serial.log"
+  if grep -qa 'Linux version' "$EV/V5-serial.log" && grep -qaE '\[ *OK *\]' "$EV/V5-serial.log" && grep -qa 'login:' "$EV/V5-serial.log"; then
+    check V5 serial-only-boot pass "serial carries the kernel log ($(grep -ac '^\[ *[0-9]' "$EV/V5-serial.log") lines), systemd status and a login prompt"
+  else check V5 serial-only-boot fail "serial log incomplete (kernel=$(grep -ac 'Linux version' "$EV/V5-serial.log") ok=$(grep -acE '\[ *OK *\]' "$EV/V5-serial.log") login=$(grep -ac 'login:' "$EV/V5-serial.log"))"; fi
   redact_tree
 }
 failures() { grep -c '"result":"fail"' "$JSONL" 2>/dev/null || true; }
@@ -1606,6 +1765,7 @@ case "${1:-}" in
   qualify) cmd_qualify; [[ "$(failures)" == 0 ]] ;;
   recovery) cmd_recovery; [[ "$(failures)" == 0 ]] ;;
   adoption) cmd_adoption; [[ "$(failures)" == 0 ]] ;;
+  console) trap 'cmd_collect || true; cmd_down || true' EXIT; cmd_console; [[ "$(failures)" == 0 ]] ;;
   collect) cmd_collect ;;
   down) cmd_down ;;
   all)
