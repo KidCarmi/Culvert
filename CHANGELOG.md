@@ -9,6 +9,38 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Security
 
+- A zero-value admission engine reported itself enabled and then panicked
+  instead of enforcing. ADR-0039 moved `IPFilter` and `RateLimiter` into
+  `internal/admission`, which made both types exported and therefore
+  constructible as composite literals — and the constructors (`NewIPFilter`,
+  `NewRateLimiter`) are what initialise the maps the write paths assign into.
+  `Configure` sets only limit, window and enabled and initialises nothing, so a
+  zero-value limiter was ONE ordinary call from `Enabled() == true` and a write
+  into a nil map: `r := &RateLimiter{}; r.Configure(100, time.Minute);
+  r.Allow(ip)` panics with `assignment to entry in nil map`.
+
+  Not reachable in the shipped binary — `admission.go` is the only production
+  construction site and uses both constructors — and on the request paths the
+  panic was CONTAINED (`recoverGoroutine` in `handleSOCKS5`, `net/http`'s own
+  per-request recovery) and so failed **closed**, admitting no traffic. This is
+  therefore availability hardening, not a bypass. The `IPFilter` half was the
+  sharper one: `addLocked` is reached from `applySnapshotAdmission` on the DP
+  config-apply path, and `controlplane_client.go` carries no panic guard, so a
+  nil-map panic there would have terminated proxy, admin UI and health
+  endpoints together — the outcome CHAOS-57/66 exist to prevent.
+
+  Both admission entry points now create buckets through ONE guarded helper
+  (`rlShard.bucketFor`) rather than duplicating the identical cold branch, the
+  divergence class CHAOS-69 round 5 and SEC-SOCKS5-LOG-1 each had to close
+  after the copies drifted — a guard added to one copy would have left the other
+  panicking. The helper inlines at both call sites, so the change is
+  structurally zero-cost and the allocation benchgates still measure 0
+  allocs/op. Behaviour for every properly constructed engine is unchanged,
+  pinned by two controls. Gates: `internal/admission/zero_value_safety_test.go`
+  (5, each verified failing against the unguarded shape individually, and the
+  defect gate plus its control verified failing against a permissive `Allow`).
+  Review: `docs/engineering/security-reviews/2026-10-07-admission-and-shutdown-extraction-window.md`.
+
 - Node-local key material was written with `os.WriteFile` on a predictable
   path, which follows a planted symlink and inherits a planted file's mode
   (SEC-SECRETWRITE-1). Four writers introduced in this window were affected:
