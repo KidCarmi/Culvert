@@ -1640,6 +1640,12 @@ vkdmode_check() { local m; m="$(sed -n 's/^---fg .* kdmode-tty1 \([0-9]*\).*/\1/
 vttyreset() { groot "systemctl show getty@tty1 -p TTYReset -p TTYVHangup -p TTYPath; echo ---devconsole; readlink -f /dev/console; cat /sys/class/tty/console/active
 s=\$(date +%s.%N); timeout 5 sh -c ': > /dev/console' 2>&1; rc=\$?; e=\$(date +%s.%N); echo \"open-rc=\$rc seconds=\$(awk -v a=\$s -v b=\$e 'BEGIN{printf \"%.2f\", b-a}')\"
 echo ---getty; journalctl -b -o short-monotonic --no-pager -u getty@tty1 -u plymouth-quit -u plymouth-quit-wait 2>/dev/null | head -40" 120 > "$1" 2>&1 || true; }
+# plymouth-start.service's verdict this boot: Result=success on a machine with a
+# display, Result=exec-condition (culvert-has-display) on one without.
+vplymouth() { groot "systemctl show plymouth-start.service -p ActiveState -p Result -p ExecCondition --no-pager; echo ---has-display; /opt/culvert-appliance/bin/culvert-has-display; echo rc=\$?; echo ---pci-display; grep -l '^0x03' /sys/bus/pci/devices/*/class 2>/dev/null; echo ---journal; journalctl -b -o short-monotonic --no-pager -u plymouth-start -u plymouth-quit -u plymouth-quit-wait 2>/dev/null | head -20" 120 > "$1" 2>&1 || true; }
+vplymouth_check() { local r; r="$(sed -n 's/^Result=//p' "$3" | head -1)"
+  if [[ "$r" == "$4" ]]; then vcheck "$1" "$2" pass "plymouth-start Result=$r ($(sed -n 's/^rc=//p' "$3" | head -1 | sed 's/^/has-display rc=/'))"
+  else vcheck "$1" "$2" fail "plymouth-start Result='${r:-unread}', want $4 ($(tr '\n' ' ' < "$3" | cut -c1-200))"; fi; }
 vstray() { sed -n '/^---vcs1$/,/^---vcs12$/p' "$1" | grep -E '^\[ *[0-9]+\.[0-9]+\]|\[ *(OK|FAILED|DEPEND) *\]|LAB-|br-[0-9a-f]{6,}|veth[0-9a-f]|cloud-init|culvert-firstboot:|^ *Start(ing|ed) [A-Za-z].*\.(service|socket|target|mount|timer)' | head -20; }
 vwait_ready() { local deadline=$(( $(date +%s) + ${1:-1800} ))
   until gop status-json > "$WORK/status-json.tmp" 2>/dev/null && [[ " $(recorded_steps "$WORK/status-json.tmp") " == *" complete "* ]] \
@@ -1712,6 +1718,7 @@ OVFENV
   vcheck V1 console-topology info "$(sed -n '1,/^---active$/p' "$f" | grep -v '^---' | tr -s ' ' | tr '\n' ';') printk=$(sed -n '/^---printk$/{n;p}' "$f" | tr '\t' ' ')"
   vstray_check V1 tty1-after-first-boot "$f"
   vkdmode_check V1 tty1-text-mode "$f"
+  vplymouth "$EV/V1-plymouth.txt"; vplymouth_check V1 splash-on-display "$EV/V1-plymouth.txt" success
   vttyreset "$EV/V1-ttyreset.txt"
   vcheck V1 getty-tty-reset info "$(grep -E '^(TTYReset|TTYVHangup)=|^open-rc=' "$EV/V1-ttyreset.txt" | tr '\n' ' ')(V1-ttyreset.txt)"
   # V2 maintenance reboot with a slow unit ahead of logins and a failing unit.
@@ -1818,6 +1825,7 @@ EOS
   vqemu -vga none -display none -chardev "socket,id=ser0,path=$SER_SOCK,server=on,wait=off,logfile=$WORK/console.log,logappend=on" -serial chardev:ser0
   vwait_ready 900 || vcheck V5 serial-only-boot fail "not ready without a display adapter"
   sleep 10; cp "$WORK/console.log" "$EV/V5-serial.log"
+  vplymouth "$EV/V5-plymouth.txt"; vplymouth_check V5 no-splash-without-display "$EV/V5-plymouth.txt" exec-condition
   if grep -qa 'Linux version' "$EV/V5-serial.log" && grep -qaE 'OK .*(Started|Finished|Reached)' "$EV/V5-serial.log" && grep -qa 'login:' "$EV/V5-serial.log"; then
     vcheck V5 serial-only-boot pass "serial carries the kernel log ($(grep -ac '^\[ *[0-9]' "$EV/V5-serial.log") lines), systemd status and a login prompt"
   else vcheck V5 serial-only-boot fail "serial log incomplete (kernel=$(grep -ac 'Linux version' "$EV/V5-serial.log") ok=$(grep -acE 'OK .*(Started|Finished|Reached)' "$EV/V5-serial.log") login=$(grep -ac 'login:' "$EV/V5-serial.log"))"; fi

@@ -365,6 +365,9 @@ jobs:
           got="sha256:$(skopeo inspect --raw --cert-dir /etc/docker/certs.d/127.0.0.1:443 docker://127.0.0.1:443/kidcarmi/culvert:lab-baseline | sha256sum | cut -d' ' -f1)"
           [ "$got" = "$B" ] || { echo "::error::registry baseline $got != the OVA's index digest $B"; exit 1; }
           # Target: the same image plus one label (a real, different digest).
+          # The OVA build runs `sudo -E` docker builds, which leave ~/.docker/buildx
+          # root-owned; reclaim it so this unprivileged build can take its lock.
+          [ ! -e "$HOME/.docker" ] || sudo chown -R "$(id -u):$(id -g)" "$HOME/.docker"
           printf 'FROM %s:%s\nLABEL org.culvert.lab-target="1"\n' "$REPO" "$TAG" | docker build --provenance=false --sbom=false -t 127.0.0.1:443/kidcarmi/culvert:lab-target -
           docker push -q 127.0.0.1:443/kidcarmi/culvert:lab-target
           T="sha256:$(skopeo inspect --raw --cert-dir /etc/docker/certs.d/127.0.0.1:443 docker://127.0.0.1:443/kidcarmi/culvert:lab-target | sha256sum | cut -d' ' -f1)"
