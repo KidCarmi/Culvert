@@ -7,6 +7,7 @@ The parent controls lifecycle ordering and exported backup/escrow verification.
 import argparse
 import base64
 import importlib.util
+import hashlib
 import json
 from pathlib import Path
 import re
@@ -270,15 +271,20 @@ def run(args, lab, boot, private):
         transport_module = load_module('p1_console_priv', HERE / 'console-priv.py')
         with boot.module.locked(lab.run):
             old = (private / 'old-console-password').read_bytes()
-            require((lab.sec / 'bootstrap-console-password').read_bytes() == old, 'old credential file changed')
-            # Preserve the actual old file; Bootstrap creates a fresh exclusive file.
-            (lab.sec / 'bootstrap-console-password').rename(private / 'old-console-password-original')
+            continuing = getattr(args, 'resume_identity_observation', False)
+            if continuing:
+                require(args.continuation == campaigns.identity_observation_binding(
+                    lab.sec, args.campaign, lab.state['uuid']), 'identity observation proof changed')
+            else:
+                require((lab.sec / 'bootstrap-console-password').read_bytes() == old, 'old credential file changed')
+                # Preserve the actual old file; Bootstrap creates a fresh exclusive file.
+                (lab.sec / 'bootstrap-console-password').rename(private / 'old-console-password-original')
             flow = boot.Bootstrap(lab, transport_module.Keyboard(lab), initial_timeout=900,
-                                  capture_prefix='p1-identity-fresh')
+                                  capture_prefix='p1-identity-observation-continuation' if continuing else 'p1-identity-fresh')
             password = flow.authenticate()
             require(password.encode('ascii') != old, 'fresh console password reused')
     elif action == 'identity-after':
-        require(read_record(private / 'identity-bootstrap.attempt.json')['status'] == 'pass', 'new PAM bootstrap incomplete')
+        campaigns.effective_stage(lab.sec, args.campaign, 'identity-bootstrap', lab.state['uuid'])
         encoded = base64.b64encode((private / 'old-console-password').read_bytes()).decode()
         observation = probe(args, action, encoded)
         save_new(private / 'identity-after.json', observation)
@@ -305,6 +311,7 @@ def main():
     parser.add_argument('--campaign', choices=tuple(campaigns.NAMES), default='initial')
     parser.add_argument('--continue-undispatched', action='store_true')
     parser.add_argument('--continuation-proof', type=Path)
+    parser.add_argument('--resume-identity-observation', action='store_true')
     parser.add_argument('action', choices=['network-before', 'network-after', 'identity-before', 'identity-reset',
                                          'identity-power-on', 'identity-bootstrap', 'identity-after'])
     args = parser.parse_args()
@@ -330,14 +337,19 @@ def main():
         stage_lock = private / 'stage.lock'
         stage_lock.mkdir()
         lock_owned = True
-        if args.continue_undispatched:
+        if args.resume_identity_observation:
+            require(args.action == 'identity-bootstrap' and not args.continue_undispatched
+                    and args.continuation_proof is None and lab.c.get('console_cell_width') == 9,
+                    'only explicit nine-pixel identity observation may continue')
+            args.continuation = campaigns.identity_observation_binding(lab.sec, args.campaign, lab.state['uuid'])
+        elif args.continue_undispatched:
             require(args.action == 'network-before' and args.continuation_proof is not None,
                     'only network-before supports verified undispatched continuation')
             args.continuation = campaigns.continuation_binding(lab.sec, args.campaign, lab.state['uuid'],
                                                                 args.continuation_proof)
         else:
             require(args.continuation_proof is None, 'proof requires explicit continuation flag')
-        marker = private / (args.action + ('.continuation-attempt.json' if args.continue_undispatched else '.attempt.json'))
+        marker = private / (args.action + ('.continuation-attempt.json' if args.continue_undispatched or args.resume_identity_observation else '.attempt.json'))
         require(not marker.exists(), 'prior stage attempt exists; no retry')
         save_new(marker, {'status': 'started', 'uuid': lab.state['uuid'], 'campaign': args.campaign,
                           'initial_failure': initial, 'continuation': args.continuation})
@@ -345,10 +357,14 @@ def main():
         run(args, lab, boot, private)
         current = read_record(marker)
         current['status'] = 'pass'
+        if args.resume_identity_observation:
+            current['new_credential_sha256'] = hashlib.sha256((lab.sec / 'bootstrap-console-password').read_bytes()).hexdigest()
         boot.module.atomic_json(marker, current)
         label = 'p1-' + ('confirmation-' if args.campaign == 'confirmation' else '') + args.action
         if args.continue_undispatched:
             label += '-undispatched-continuation'
+        if args.resume_identity_observation:
+            label += '-observation-continuation'
         lab.record(label, 'pass', 'one-shot real guest regression evidence retained privately')
         print('PASS: ' + args.campaign + ' ' + args.action)
         return 0
@@ -357,6 +373,7 @@ def main():
             save_new(private / ('controller-exception-' + str(time.time_ns()) + '.json'),
                      {'type': type(exc).__name__, 'error': str(exc), 'traceback': traceback.format_exc(),
                       'action': args.action, 'campaign': args.campaign,
+                      'identity_observation_continuation': args.resume_identity_observation,
                       'undispatched_continuation': args.continue_undispatched})
         if created:
             # Preserve an existing result when duplicate invocation was refused.

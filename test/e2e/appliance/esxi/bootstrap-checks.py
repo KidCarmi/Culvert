@@ -156,6 +156,22 @@ class Bootstrap:
         ensure(type(cell_width) is int and cell_width in (8, 9), 'explicit console cell width refused')
         ensure(cell_width == 8 or font, 'nine-pixel console requires exact pinned font decoding')
         if font:
+            # Console inherits this method for existing-password/sudo flows but
+            # does not use Bootstrap's stage transitions. Never relax it there.
+            if type(self) is Bootstrap and self.stage == 'initial-capture':
+                from PIL import Image
+                with Image.open(png) as image:
+                    width, height = image.size
+                    ensure(image.format == 'PNG' and 0 < width <= 4096 and 0 < height <= 4096,
+                           'private image dimensions refused')
+                    image.verify()
+                if width % cell_width or height % 16:
+                    with (self.lab.sec / (stem + '.geometry.json')).open('x', encoding='utf-8') as out:
+                        json.dump({'stage': self.stage, 'width': width, 'height': height,
+                                   'cell_width': cell_width, 'sha256': hashlib.sha256(png.read_bytes()).hexdigest(),
+                                   'result': 'initial-observation-only; no complete glyph grid'}, out)
+                    self.budget(1, deadline)
+                    return ''
             decoder_spec = importlib.util.spec_from_file_location('pixel_console', HERE / 'pixel-console.py')
             decoder = importlib.util.module_from_spec(decoder_spec)
             decoder_spec.loader.exec_module(decoder)

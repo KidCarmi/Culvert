@@ -187,7 +187,7 @@ class BootstrapObservationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             private = Path(directory)
             def capture(*args, **kwargs):
-                Path(args[1].removeprefix('-capture=')).write_bytes(b'synthetic')
+                Image.new('RGB', (720, 400), 'black').save(Path(args[1].removeprefix('-capture=')))
             lab = SimpleNamespace(sec=private, c={'console_cell_width': 9}, state={'path': 'synthetic'},
                                   vm=Mock(), gov=Mock(side_effect=capture))
             flow = bootstrap.Bootstrap(lab, None)
@@ -238,7 +238,7 @@ class BootstrapObservationTests(unittest.TestCase):
 
                 def capture(*args, **kwargs):
                     # A fake screenshot producer, never a hypervisor invocation.
-                    Path(args[1].removeprefix('-capture=')).write_bytes(b'synthetic')
+                    Image.new('RGB', (640, 400), 'black').save(Path(args[1].removeprefix('-capture=')))
 
                 lab = SimpleNamespace(sec=private, c={}, state={'path': 'synthetic'},
                                       vm=Mock(), gov=Mock(side_effect=capture))
