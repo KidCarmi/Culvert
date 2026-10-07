@@ -386,6 +386,17 @@ func (f *IPFilter) addLocked(entry string) error {
 		return nil
 	}
 	if ip := net.ParseIP(entry); ip != nil {
+		// Defence in depth, same reasoning as rlShard.bucketFor: NewIPFilter
+		// initialises this map, so it is nil only for a zero-value IPFilter.
+		// This write is reached from the admin API and from
+		// applySnapshotAdmission on the DP config-apply path — and that path
+		// runs in a goroutine with NO panic guard, so a nil-map panic there
+		// would terminate the whole appliance (proxy, admin UI and health
+		// endpoints alike), the outcome CHAOS-57/66 exist to prevent. Off the
+		// request path entirely, so it costs nothing measurable.
+		if f.single == nil {
+			f.single = map[string]bool{}
+		}
 		f.single[ip.String()] = true
 		return nil
 	}
@@ -897,6 +908,37 @@ func (r *RateLimiter) Enabled() bool {
 	return r.enabled.Load()
 }
 
+// bucketFor returns ip's sliding-window bucket in this shard, creating it on
+// first sight. Callers MUST hold s.mu.
+//
+// Both admission entry points (Allow and AllowClusterAware) go through this one
+// helper so they cannot disagree about bucket creation — two entry points
+// duplicating one decision is the divergence class CHAOS-69 and
+// SEC-SOCKS5-LOG-1 each had to close after the copies drifted.
+//
+// The nil-map guard is DEFENCE IN DEPTH, not a reachable fix: NewRateLimiter
+// initialises every shard, so s.clients is nil only for a ZERO-VALUE
+// RateLimiter. That shape is one Configure call from being live, because
+// Configure sets only the three atomics — limit, window, enabled — and
+// initialises no map, so a zero-value limiter reports Enabled() and reaches
+// this write, which on a nil map panics. On both request paths the panic is
+// contained (recoverGoroutine in handleSOCKS5, net/http's own per-request
+// recovery) and therefore fails CLOSED, but it costs the session and records a
+// crash where a rate-limit verdict belonged. One nil compare on the cold
+// branch, under a lock already held, keeps the limiter CORRECT rather than
+// merely safe: the caller's limit is still enforced against a real bucket.
+func (s *rlShard) bucketFor(ip string) *clientBucket {
+	b, ok := s.clients[ip]
+	if !ok {
+		if s.clients == nil {
+			s.clients = make(map[string]*clientBucket)
+		}
+		b = &clientBucket{}
+		s.clients[ip] = b
+	}
+	return b
+}
+
 // Allow returns true if the IP is within its rate limit or is exempt.
 func (r *RateLimiter) Allow(ip string) bool {
 	if !r.enabled.Load() {
@@ -914,11 +956,7 @@ func (r *RateLimiter) Allow(ip string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	b, ok := s.clients[ip]
-	if !ok {
-		b = &clientBucket{}
-		s.clients[ip] = b
-	}
+	b := s.bucketFor(ip)
 	b.lastSeen = now
 
 	// Evict old timestamps (amortized O(1) — see clientBucket).
@@ -1166,11 +1204,7 @@ func (r *RateLimiter) AllowClusterAware(ip string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	b, ok := s.clients[ip]
-	if !ok {
-		b = &clientBucket{}
-		s.clients[ip] = b
-	}
+	b := s.bucketFor(ip)
 	b.lastSeen = now
 
 	// Evict old timestamps (amortized O(1) — see clientBucket).
