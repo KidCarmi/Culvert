@@ -38,7 +38,7 @@ is listed under "replaces".
 | **Traffic** | The request stream (Monitor section) | "Live Feed", "Live Request Log", "Recent Requests" → "Traffic" (nav), "Live traffic" (panel), "Recent requests" (dashboard card) |
 | **Audit Log** | Admin configuration-change history (`/api/audit`) | never mix with request logs |
 | **Configuration versions** | Automatic config snapshots + rollback (`/api/config/versions`) | "Config Versions" ok in dense UI |
-| **Update** | Legacy Docker self-update path (`/api/update/*`) | — |
+| **Update** | Day-2 software upgrade, performed by the host Maintenance Agent and driven from Release management (`/api/releases*`). The legacy Docker `updater` sidecar and its `/api/update/*` endpoints no longer exist | do not surface "self-update"; say **Release** for the signed catalog and **Upgrade** for applying one |
 | **Release** | Signed-catalog release management (`/api/releases*`) | keep distinct from Update until the M3 "Software" merge |
 | **Administrator** | A console account (admin/operator/viewer role) | "Users & Roles" → "Administrators" (avoids collision with proxy users/identities) |
 | **Identity** | An authenticated proxy user (from IdP/local auth; `identity.go`) | never "user" alone when it could mean console account |
