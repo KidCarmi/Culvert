@@ -53,12 +53,12 @@
         <Description>Guest hostname.</Description>
       </Property>
       <Property ovf:key="public-keys" ovf:type="string" ovf:userConfigurable="true" ovf:value="">
-        <Label>SSH public key for the read-only 'culvert-operator'</Label>
-        <Description>Bare OpenSSH public key(s), one per line, without authorized_keys options. SSH provides read-only status and diagnostics; use the VM console for administration. Leave empty to disable remote SSH login.</Description>
+        <Label>SSH public key (key-only, read-only 'culvert-operator'; empty = SSH off)</Label>
+        <Description>The PUBLIC half of your SSH key pair (the .pub file, e.g. ssh-ed25519 AAAA...), one per line, without authorized_keys options; your private key never leaves your machine. Log in with: ssh culvert-operator@ADDRESS. SSH accepts keys only, never a password, and gives read-only status and diagnostics; administer through the web UI or the VM console. Leave empty to keep SSH disabled.</Description>
       </Property>
       <Property ovf:key="password" ovf:type="string" ovf:password="true" ovf:userConfigurable="true" ovf:value="">
-        <Label>Console password for 'culvert' (optional)</Label>
-        <Description>Initial local console password; a change is forced at first login. Leave empty to have a one-time password shown on the VM console, even when an SSH public key is supplied.</Description>
+        <Label>VM console password for 'culvert' (optional; not for SSH)</Label>
+        <Description>Password for logging in as 'culvert' on the hypervisor's VM console only; it is never accepted over SSH (SSH uses the public key above). A change is forced at first login. Leave empty to have a one-time password shown on the VM console, even when an SSH public key is supplied.</Description>
       </Property>
       <!-- Culvert keys (read by culvert-firstboot; a static address needs all of mode/address/gateway) -->
       <Property ovf:key="culvert.net.mode" ovf:type="string" ovf:userConfigurable="true" ovf:value="dhcp">

@@ -41,8 +41,8 @@ in-product backup (`docs/operator/docker-compose-backup-restore.md`).
    | Property | Meaning |
    |----------|---------|
    | `hostname` | guest hostname (default `culvert-appliance`) |
-   | `public-keys` | OpenSSH public key(s) for the `culvert` administrator — **this is how SSH access is granted**; SSH is key-only |
-   | `password` | optional initial console password for `culvert`; change forced at first login. Leave empty to get a one-time password printed on the VM console (only when no key is given either) |
+   | `public-keys` | the **public** half of your SSH key pair (`~/.ssh/id_ed25519.pub`) for the read-only `culvert-operator` — **the only way SSH access is granted**; SSH is key-only and never accepts a password. Connect with `ssh culvert-operator@<address>`. Empty ⇒ SSH stays disabled |
+   | `password` | optional initial **VM console** password for `culvert` (administration at the hypervisor console; never used over SSH); change forced at first login. Leave empty to get a one-time password printed on the VM console — also when a key is supplied |
    | `culvert.net.mode` | `dhcp` (default) or `static` |
    | `culvert.net.address` / `.gateway` / `.dns` / `.search` | static addressing (CIDR, gateway, comma-separated DNS/search) — used only with `static` |
    | `instance-id` | cloud-init instance id; change it on a clone to re-run identity steps |
@@ -96,5 +96,6 @@ Outbound: the appliance needs HTTPS egress to the hosts listed in
 The vSphere console (or any hypervisor console) is the fallback management
 path: user `culvert`. Its credential is per-instance — either the `password`
 property, or a one-time password printed on the console at first boot when no
-key and no password were supplied. There is **no shared administrator
+password was supplied (an SSH key does not change this: SSH is a separate,
+read-only `culvert-operator` login). There is **no shared administrator
 password** in the image and `root` cannot log in.
