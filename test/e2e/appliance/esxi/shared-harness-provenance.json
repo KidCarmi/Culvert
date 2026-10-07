@@ -1,0 +1,28 @@
+{
+  "schema": 1,
+  "upstream_revision": "5cae2d5df32980deec3234d681fe915e52d1337b",
+  "normalization": "LF bytes; controller freeze records runtime raw hashes",
+  "files": {
+    "test/e2e/appliance/lab/appliance-lab.sh": {
+      "upstream_sha256": "f898993df6878becf3aba069ac10089bae6d2b3fd203daed72977665fa4b85ea",
+      "controller_lf_sha256": "45dae2a8b04de0b46df9cd1c2f2a4ddb8002147944b011f250d49a66a674aa3e",
+      "local_changes": [
+        "guarded restore before signed lifecycle",
+        "pre-reboot ESXi observations",
+        "post-reboot ESXi observations"
+      ]
+    },
+    "test/e2e/appliance/lab/console-session.py": {
+      "upstream_sha256": "57db59cbb2395bb66f3920b262e602561d89cf74c78049ba9a31c4421ee4fef7",
+      "controller_lf_sha256": "adcbc6c830422375b448fb2cc66f304a37d501a83fae6f1990c505bbcb5b9630",
+      "local_changes": [
+        "preserve controlled Windows refusal when AF_UNIX is unavailable"
+      ]
+    },
+    "test/e2e/appliance/lab/recovery-timeline.py": {
+      "upstream_sha256": "26e9d9af45b8f8fa3142a76b172b5d0c16405c659dba6ef206c3ea931f31431d",
+      "controller_lf_sha256": "26e9d9af45b8f8fa3142a76b172b5d0c16405c659dba6ef206c3ea931f31431d",
+      "local_changes": []
+    }
+  }
+}

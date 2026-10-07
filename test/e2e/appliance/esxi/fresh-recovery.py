@@ -200,7 +200,10 @@ def endpoint(transfer, bind, tls_dir):
 def run(args):
     require(ipaddress.ip_address(args.bind).version == 4 and not ipaddress.ip_address(args.bind).is_unspecified)
     lab = console.b.module.Lab(args.scope)
-    require(lab.c['source_sha'] == SOURCE and lab.c['max_vms'] == 1)
+    profile_spec = importlib.util.spec_from_file_location('fresh_candidate_identities', HERE / 'candidate-identities.py')
+    identities = importlib.util.module_from_spec(profile_spec); profile_spec.loader.exec_module(identities)
+    source = identities.scope_profile(lab.c)['source_sha']
+    require(lab.c['source_sha'] == source and lab.c['max_vms'] == 1)
     console.b.module.validate_scope(lab.c)
     escrow = private_escrow(args.escrow, lab.run)
     files = {'archive': escrow / 'recovery.tar.gz.enc', 'secrets': escrow / 'recovery-secrets.json',
@@ -228,7 +231,7 @@ def run(args):
             metadata = read_json(files['metadata'])
             require(metadata['archive_sha256'] == file_hash(files['archive'])
                     and metadata['archive_bytes'] == files['archive'].stat().st_size <= MAX_ARCHIVE)
-            require(metadata['source_sha'] == SOURCE and metadata['image_id'] == lab.c['image_id'])
+            require(metadata['source_sha'] == source and metadata['image_id'] == lab.c['image_id'])
             password = (escrow / 'backup-passphrase').read_text(encoding='ascii')
             require(re.fullmatch(r'[a-f0-9]{64}', password))
             files.pop('metadata')
@@ -236,7 +239,7 @@ def run(args):
                             {k: MAX_ARCHIVE if k == 'archive' else MAX_METADATA for k in files})
         transport_dir = escrow / ('transfer-' + args.mode + '-' + secrets.token_hex(8))
         transport_dir.mkdir()
-        cfg = {'mode': args.mode, 'source_sha': SOURCE, 'image_id': lab.c['image_id'],
+        cfg = {'mode': args.mode, 'source_sha': source, 'image_id': lab.c['image_id'],
                'backup_password': password, 'archive_name': 'fresh-' + secrets.token_hex(12) + '.tar.gz.enc',
                'archive_limit': MAX_ARCHIVE, 'nonce': secrets.token_hex(12)}
         if args.mode == 'restore':

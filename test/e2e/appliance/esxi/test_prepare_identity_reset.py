@@ -65,6 +65,27 @@ class ResetReadinessTests(unittest.TestCase):
         self.assertNotIn('synthetic-admin-only', json.dumps(result))
         self.assertNotIn('synthetic-ca', json.dumps(result))
 
+    def test_d698_and_legacy_profiles_do_not_reuse_source_or_export_identity(self):
+        identities = reset.deletion.module('reset_test_identities', Path(__file__).with_name('candidate-identities.py'))
+        for source in (identities.D698, identities.B579, identities.D698):
+            profile = identities.source_profile(source)
+            self.scope.update({key: profile[key] for key in ('source_sha', 'ova_sha256', 'image_id')})
+            self.write_json('provenance.json', {key: self.scope[key] for key in ('source_sha', 'image_id', 'ova_sha256', 'endpoint')})
+            metadata = json.loads((self.escrow / 'archive-metadata.json').read_bytes())
+            metadata.update(source_sha=source, image_id=profile['image_id'])
+            self.write_json('archive-metadata.json', metadata)
+            self.seal()
+            result = self.ready()
+            self.assertEqual(result['source_sha'], source)
+            self.assertEqual(result['image_id'], profile['image_id'])
+            self.assertEqual(reset.deletion.campaigns.SOURCE, source)
+            other = identities.B579 if source == identities.D698 else identities.D698
+            metadata['source_sha'] = other
+            self.write_json('archive-metadata.json', metadata)
+            self.seal()
+            with self.assertRaisesRegex(ValueError, 'archive metadata mismatch'):
+                self.ready()
+
     def test_tampered_or_missing_export_is_refused(self):
         (self.escrow / 'admin-pass').write_text('changed')
         with self.assertRaises(ValueError):

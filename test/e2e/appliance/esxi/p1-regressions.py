@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""One-shot P1 regression stages on the single owned b579 LAB VM.
+"""One-shot P1 regression stages on the single explicitly approved LAB VM.
 
 No stage runs implicitly. Failed/ambiguous stages keep their attempt markers.
 The parent controls lifecycle ordering and exported backup/escrow verification.
@@ -22,6 +22,7 @@ HERE = Path(__file__).resolve().parent
 SOURCE = 'b579ca28c9d936e9141292ce5ec564a26feeae86'
 OVA = '1a713a9bedc4ee50ac4212c12048924e03abe6b8f04cb82d4d0ef95e33ef4775'
 RESET_HASH = 'fd53277fd2fc55afc79b70c8d00570b80e3ca938fc39edfa938fd81f8464d71a'
+NET_HASH = '1007fc7f5f140c6e946f1f34617b02820d8c78d8d9786d50045865e05d862ff3'
 
 
 def require(condition, message):
@@ -85,6 +86,7 @@ def probe(args, action, private_input=None):
     payload = (f"timeout --signal=TERM --kill-after=5s {guest_timeout}s python3 - <<'CULVERT_P1_PROBE'\nimport base64,json\n"
                "namespace={'__name__':'culvert_p1_guest'}\n"
                f"exec(compile(base64.b64decode({source!r}), 'p1-guest-checks.py', 'exec'), namespace)\n"
+               f"namespace.update(SOURCE={SOURCE!r}, NET_HASH={NET_HASH!r}, RESET_HASH={RESET_HASH!r})\n"
                f"print(json.dumps(namespace['main']({action!r}, {private_input!r}, {args.campaign!r})))\n"
                "CULVERT_P1_PROBE\n")
     observation = json.loads(transport(args, payload.encode()))
@@ -295,6 +297,7 @@ def run(args, lab, boot, private):
 
 
 def main():
+    global SOURCE, OVA, RESET_HASH, NET_HASH
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--scope', type=Path, required=True)
     parser.add_argument('--bind', required=True)
@@ -311,6 +314,10 @@ def main():
     marker, created, stage_lock, private, lock_owned = None, False, None, None, False
     try:
         boot.module.validate_scope(lab.c)
+        profile = load_module('p1_candidate_identities', HERE / 'candidate-identities.py').scope_profile(lab.c)
+        SOURCE, OVA = profile['source_sha'], profile['ova_sha256']
+        RESET_HASH, NET_HASH = profile['reset_helper_sha256'], profile['network_helper_sha256']
+        campaigns.SOURCE = SOURCE
         require(lab.c['source_sha'] == SOURCE and lab.c['ova_sha256'] == OVA
                 and lab.c.get('credential_mode') == 'none', 'exact default-import candidate required')
         boot.private_directory(lab)

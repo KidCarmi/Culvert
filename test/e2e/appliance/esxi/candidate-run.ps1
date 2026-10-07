@@ -48,7 +48,16 @@ foreach ($word in @($env:ESXI_PYTHON,$env:ESXI_SCOPE,$privPath,$Bind)) {
 $env:LAB_PRIV_CMD = "$($env:ESXI_PYTHON) $privPath --scope $($env:ESXI_SCOPE) --bind $Bind"
 $env:LAB_UPDATE_DIR = "$($env:LAB_DIR)/secrets/signed-update"
 $env:LAB_EXPECT_IMAGE_ID = $configuration.image_id
-$env:CULVERT_ESXI_CONSOLE_FONT = (Resolve-Path -LiteralPath $ConsoleFont).Path.Replace('\','/')
+$fontPaths = @($ConsoleFont.Split([IO.Path]::PathSeparator))
+if ($fontPaths.Count -lt 1 -or $fontPaths.Count -gt 2 -or @($fontPaths | Where-Object { -not $_ }).Count) {
+    throw 'Provide one or two approved console font paths separated by the platform path separator'
+}
+$resolvedFonts = @($fontPaths | ForEach-Object { (Resolve-Path -LiteralPath $_).Path.Replace('\','/') })
+# Validate both hashes before any console use. The decoder chooses one globally
+# consistent exact font per capture and never repairs uncertain credentials.
+& $Python -B -c 'import importlib.util,sys; s=importlib.util.spec_from_file_location("fonts",sys.argv[1]); m=importlib.util.module_from_spec(s); s.loader.exec_module(m); [m.font_table(p) for p in sys.argv[2:]]' (Join-Path $PSScriptRoot 'pixel-console.py') @resolvedFonts
+if ($LASTEXITCODE -ne 0) { throw 'Approved console font verification failed' }
+$env:CULVERT_ESXI_CONSOLE_FONT = $resolvedFonts -join [IO.Path]::PathSeparator
 Set-Location -LiteralPath $repoRoot
 $entrypoint = if ($ResumePostOS) { 'post-os-resume.sh' } else { 'access-aware-qualify.sh' }
 & $configuration.bash (Join-Path $PSScriptRoot $entrypoint)

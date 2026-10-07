@@ -21,8 +21,9 @@ require = deletion.require
 
 
 def readiness(escrow, scope, owned, private, campaign='initial'):
-    require(scope['source_sha'] == deletion.SOURCE and scope['ova_sha256'] == deletion.OVA
-            and scope['image_id'] == IMAGE and scope['max_vms'] == 1, 'exact one-VM candidate scope required')
+    profile = deletion.module('reset_candidate_identities', HERE / 'candidate-identities.py').scope_profile(scope)
+    require(scope['max_vms'] == 1, 'exact one-VM candidate scope required')
+    deletion.campaigns.SOURCE = profile['source_sha']
     require(owned.get('uuid') and owned.get('deleted') is not True
             and owned.get('endpoint') == scope['endpoint'], 'current owned source required')
     receipt = fresh.verify_export(escrow)  # Verify every exported file before reading its contents.

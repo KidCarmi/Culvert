@@ -194,6 +194,7 @@ def save_new(path, data):
 
 
 def main():
+    global SOURCE, OVA, BASELINE
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--scope', type=Path, required=True)
     parser.add_argument('--bind', required=True)
@@ -204,8 +205,10 @@ def main():
     try:
         boot.module.validate_scope(lab.c)
         boot.private_directory(lab)
+        profile = module('registry_candidate_identities', HERE / 'candidate-identities.py').scope_profile(lab.c)
+        SOURCE, OVA, BASELINE = (profile[k] for k in ('source_sha', 'ova_sha256', 'image_id'))
         require(lab.c['source_sha'] == SOURCE and lab.c['ova_sha256'] == OVA and lab.c['image_id'] == BASELINE,
-                'exact b579 OVA and image required')
+                'exact approved OVA and image required')
         lab.vm(timeout=15)
         output = lab.sec / 'signed-update'
         require(not output.exists() and not output.is_symlink(), 'fixture output exists; preserve prior attempt')
@@ -224,7 +227,7 @@ def main():
         save_new(output / 'ca.crt', certificate)
         save_new(output / 'target-digest', (target + '\n').encode())
         fixture = module('registry_signed_fixture', HERE / 'prepare-signed-fixture.py')
-        fixture.generate(output, REPO + '@' + BASELINE, REPO + '@' + target, '127.0.0.1')
+        fixture.generate(output, REPO + '@' + BASELINE, REPO + '@' + target, '127.0.0.1', source_revision=SOURCE)
         trust = {'schema': 1, 'uuid': lab.state['uuid'], 'source': SOURCE, 'ova_sha256': OVA,
                  'public_ca_sha256': ca_fingerprint, 'baseline_ref': REPO + '@' + BASELINE,
                  'target_ref': REPO + '@' + target, 'registry_address': '127.0.0.1',

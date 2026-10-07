@@ -46,11 +46,58 @@ def sample(second, healthy=True, outage=False):
 def observations():
     return [acceptance(), sample(110, False, True), sample(150), sample(155), sample(160),
             {'event': 'first_ready_backup', 'result': 'pass', 'available': True, 'archive_matches': True,
-             'trigger_sample_started_monotonic_ns': 150 * NS,
+             'trigger_sample_started_monotonic_ns': 150 * NS, 'fresh_login': True,
+             'attempt_started_monotonic_ns': 151 * NS, 'login_finished_monotonic_ns': 151 * NS, 'login_elapsed_ns': 0,
              'started_monotonic_ns': 151 * NS, 'ended_monotonic_ns': 152 * NS, 'elapsed_ns': NS}]
 
 
 class RecoveryProbeTests(unittest.TestCase):
+    def test_backup_uses_one_fresh_session_without_changing_observer_cookie(self):
+        client = p.Client('192.0.2.2', 'labadmin', 'private-test-password')
+        client.cookie = 'observer-cookie'
+        calls = []
+        def api(fresh, path, deadline, payload=None):
+            calls.append((fresh, path))
+            self.assertIsNot(fresh, client)
+            if path == '/api/auth/login':
+                self.assertEqual(fresh.cookie, '')
+                fresh.cookie, fresh.login_ns = 'isolated-cookie', p.time.monotonic_ns()
+                return {'ok': True}
+            self.assertEqual(fresh.cookie, 'isolated-cookie')
+            return {'available': True, 'count': 1, 'backups': [BASELINE['backup']]}
+        with mock.patch.object(p.Client, 'api', api):
+            row = client.backup(BASELINE['backup'])
+        self.assertEqual([path for _, path in calls], ['/api/auth/login', '/api/backups'])
+        self.assertEqual(client.cookie, 'observer-cookie')
+        self.assertTrue(row['fresh_login'])
+        self.assertEqual(row['result'], 'pass')
+        self.assertLessEqual(row['elapsed_ns'], 5 * NS)
+        self.assertNotIn('cookie', json.dumps(row))
+        self.assertNotIn('private-test-password', json.dumps(row))
+
+    def test_failed_fresh_login_never_attempts_or_retries_listing(self):
+        client = p.Client('192.0.2.2', 'labadmin', 'private-test-password')
+        with mock.patch.object(p.Client, 'api', side_effect=ValueError('private-test-password')) as api:
+            row = client.backup(BASELINE['backup'])
+        self.assertEqual(api.call_count, 1)
+        self.assertFalse(row['fresh_login'])
+        self.assertEqual(row['result'], 'fail')
+        self.assertIsNone(row['elapsed_ns'])
+        self.assertNotIn('private-test-password', json.dumps(row))
+
+    def test_backup_timing_counts_login_separately_without_loosening_first_trigger(self):
+        rows = observations()
+        rows[-1].update(login_finished_monotonic_ns=155 * NS, login_elapsed_ns=4 * NS,
+                        started_monotonic_ns=155 * NS, ended_monotonic_ns=160 * NS, elapsed_ns=5 * NS)
+        result = p.verify(rows, BASELINE, proof())
+        self.assertEqual(result['result'], 'pass')
+        self.assertEqual(result['first_backup_seconds'], 5)
+        self.assertEqual(result['first_backup_login_seconds'], 4)
+        for field, value in [('fresh_login', False), ('attempt_started_monotonic_ns', 153 * NS),
+                             ('login_elapsed_ns', 5 * NS + 1), ('elapsed_ns', 5 * NS + 1)]:
+            bad = copy.deepcopy(rows); bad[-1][field] = value
+            self.assertNotEqual(p.verify(bad, BASELINE, proof())['result'], 'pass', field)
+
     def test_verified_changed_boot_and_consecutive_oracles_pass(self):
         result = p.verify(observations(), BASELINE, proof(), confirmed_at={'monotonic_ns': 400 * NS})
         self.assertEqual(result['result'], 'pass')
@@ -138,7 +185,8 @@ class RecoveryProbeTests(unittest.TestCase):
         rows = observations()
         rows[2:5] = [sample(209), sample(214), sample(219)]
         rows[-1].update(trigger_sample_started_monotonic_ns=209 * NS,
-                        started_monotonic_ns=210 * NS, ended_monotonic_ns=211 * NS)
+                        started_monotonic_ns=210 * NS, ended_monotonic_ns=211 * NS,
+                        attempt_started_monotonic_ns=210 * NS, login_finished_monotonic_ns=210 * NS)
         self.assertEqual(p.verify(rows, BASELINE, proof())['result'], 'pass')
         rows[4]['ended_monotonic_ns'] += 1
         self.assertEqual(p.verify(rows, BASELINE, proof())['result'], 'fail')

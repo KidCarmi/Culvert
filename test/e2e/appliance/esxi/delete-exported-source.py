@@ -150,8 +150,9 @@ def main():
     started = False
     try:
         adapter.validate_scope(lab.c)
-        require(lab.c['source_sha'] == SOURCE and lab.c['ova_sha256'] == OVA and lab.c['max_vms'] == 1,
-                'exact one-VM b579 scope required')
+        profile = module('delete_candidate_identities', HERE / 'candidate-identities.py').scope_profile(lab.c)
+        require(lab.c['max_vms'] == 1, 'exact one-VM scope required')
+        campaigns.SOURCE = profile['source_sha']
         escrow = fresh.private_escrow(args.escrow, lab.run)
         require(not (escrow / 'source-deletion-receipt.json').exists()
                 and not (escrow / 'source-deletion-attempt.json').exists(), 'previous deletion attempt exists; no retry')
@@ -166,7 +167,7 @@ def main():
             require(record.get('status') == 'pass' and record.get('uuid') == lab.state['uuid'], 'P1 qualification incomplete')
             require(record.get('campaign', 'initial') == args.campaign, 'P1 campaign mismatch')
             rows.append({'check': 'p1-' + stage, 'result': 'pass', 'continuation': record.get('continuation')})
-        verdicts = {'schema': 1, 'source': SOURCE, 'ova_sha256': OVA, 'campaign': args.campaign,
+        verdicts = {'schema': 1, 'source': profile['source_sha'], 'ova_sha256': profile['ova_sha256'], 'campaign': args.campaign,
                     'results': rows, 'initial_failure': initial}
         # These survive lab.down's private run cleanup; raw credentials do not.
         atomic_new(escrow / 'source-p1-verdicts.json', verdicts)

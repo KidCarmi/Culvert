@@ -202,10 +202,23 @@ class Client:
         return {'ok': ok, 'http_status': code}
 
     def backup(self, expected):
-        start = time.monotonic_ns()
-        row = {'event': 'first_ready_backup', 'started_monotonic_ns': start}
+        attempt = time.monotonic_ns()
+        row = {'event': 'first_ready_backup', 'attempt_started_monotonic_ns': attempt,
+               'fresh_login': False}
         try:
-            value = self.api('/api/backups', time.monotonic() + 5)
+            # Process-local session keys can change at reboot. This single
+            # background attempt owns a separate fresh session, so observation
+            # resets cannot invalidate or replace the first listing's cookie.
+            fresh = Client(self.host, self.username, self.password, self.operator)
+            fresh.api('/api/auth/login', time.monotonic() + 5,
+                      {'user': fresh.username, 'pass': fresh.password})
+            row['login_finished_monotonic_ns'] = time.monotonic_ns()
+            row['login_elapsed_ns'] = row['login_finished_monotonic_ns'] - attempt
+            require(fresh.cookie and fresh.login_ns is not None and row['login_elapsed_ns'] <= INTERVAL_NS,
+                    'fresh backup login unavailable or exceeded bound')
+            row['fresh_login'] = True
+            row['started_monotonic_ns'] = time.monotonic_ns()
+            value = fresh.api('/api/backups', time.monotonic() + 5)
             row['available'] = value.get('available') is True
             rows = value.get('backups')
             require(isinstance(rows, list) and type(value.get('count')) is int and value['count'] == len(rows), 'backup listing malformed')
@@ -215,8 +228,9 @@ class Client:
         except Exception as exc:
             row.update(result='fail', error=type(exc).__name__)
         row['ended_monotonic_ns'] = time.monotonic_ns()
-        row['elapsed_ns'] = row['ended_monotonic_ns'] - start
-        if row['elapsed_ns'] > INTERVAL_NS:
+        row['elapsed_ns'] = (row['ended_monotonic_ns'] - row['started_monotonic_ns']
+                             if 'started_monotonic_ns' in row else None)
+        if row['elapsed_ns'] is None or row['elapsed_ns'] > INTERVAL_NS:
             row['result'] = 'fail'
         return row
 
@@ -330,7 +344,7 @@ def observe(client, baseline, marker, emit, clock=time.monotonic_ns, sleep=time.
             emit(row)
             if len(healthy) >= 3:
                 if backup_future is not None:
-                    emit(dict(backup_future.result(timeout=7), trigger_sample_started_monotonic_ns=backup_trigger))
+                    emit(dict(backup_future.result(timeout=12), trigger_sample_started_monotonic_ns=backup_trigger))
                     backup_future = None
                 late = budget_expired or healthy[-1]['ended_monotonic_ns'] > accepted['controller_monotonic_ns'] + BUDGET_NS
                 return {'result': 'fail' if late else 'blocked',
@@ -340,7 +354,7 @@ def observe(client, baseline, marker, emit, clock=time.monotonic_ns, sleep=time.
             next_tick += INTERVAL_NS
             sleep(max(0, min(next_tick - clock(), deadline - clock())) / 1e9)
         if backup_future is not None:
-            emit(dict(backup_future.result(timeout=7), trigger_sample_started_monotonic_ns=backup_trigger))
+            emit(dict(backup_future.result(timeout=12), trigger_sample_started_monotonic_ns=backup_trigger))
     return {'result': 'fail' if accepted is not None else 'blocked',
             'reason': 'not_recovered_within_900_seconds' if accepted is not None else 'acceptance_not_observed',
             'measurement_complete': False}
@@ -452,9 +466,13 @@ def verify(rows, baseline, proof, confirmed_at=None):
         backups = [row for row in rows if row.get('event') == 'first_ready_backup']
         require(len(backups) == 1, 'exactly one first post-ready backup attempt required')
         backup_pass = (backups[0].get('result') == 'pass' and backups[0].get('available') is True
-                and backups[0].get('archive_matches') is True and backups[0]['started_monotonic_ns'] > high
+                and backups[0].get('archive_matches') is True and backups[0].get('fresh_login') is True
+                and backups[0]['attempt_started_monotonic_ns'] > high
                 and backups[0].get('trigger_sample_started_monotonic_ns') == first_ready['started_monotonic_ns']
-                and 0 <= backups[0]['started_monotonic_ns'] - first_ready['ended_monotonic_ns'] <= 1_000_000_000
+                and 0 <= backups[0]['attempt_started_monotonic_ns'] - first_ready['ended_monotonic_ns'] <= 1_000_000_000
+                and backups[0]['login_finished_monotonic_ns'] - backups[0]['attempt_started_monotonic_ns'] == backups[0]['login_elapsed_ns']
+                and 0 <= backups[0]['login_elapsed_ns'] <= INTERVAL_NS
+                and 0 <= backups[0]['started_monotonic_ns'] - backups[0]['login_finished_monotonic_ns'] <= 1_000_000_000
                 and backups[0]['ended_monotonic_ns'] - backups[0]['started_monotonic_ns'] == backups[0]['elapsed_ns']
                 and 0 <= backups[0]['elapsed_ns'] <= INTERVAL_NS)
         if not backup_pass:
@@ -467,6 +485,7 @@ def verify(rows, baseline, proof, confirmed_at=None):
                 'controller_confirmed_at': confirmed_at or stamp(),
                 'seconds_to_three_healthy_samples': (winner['ended_monotonic_ns'] - accepted['controller_monotonic_ns']) / 1e9,
                 'first_backup_seconds': backups[0]['elapsed_ns'] / 1e9,
+                'first_backup_login_seconds': backups[0]['login_elapsed_ns'] / 1e9,
                 'boot_window_controller_monotonic_ns': [low, high],
                 'direct_clamav_coverage': clamav,
                 'note': 'Service timing only; guest lock/disk/unit/persistence evidence is qualified separately.'}

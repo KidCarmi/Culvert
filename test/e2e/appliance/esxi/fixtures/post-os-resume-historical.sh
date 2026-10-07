@@ -80,26 +80,6 @@ if [[ "$LAB_EXTERNAL" == 1 ]]; then dssh=22 dproxy=8080 dui=9090; else dssh=2222
 LAB_SSH_PORT="${LAB_SSH_PORT:-$dssh}"; LAB_PROXY_PORT="${LAB_PROXY_PORT:-$dproxy}"; LAB_UI_PORT="${LAB_UI_PORT:-$dui}"
 LAB_FIRSTBOOT_TIMEOUT="${LAB_FIRSTBOOT_TIMEOUT:-2400}"; LAB_KERNEL_TIMEOUT="${LAB_KERNEL_TIMEOUT:-}"; LAB_FEED_TIMEOUT="${LAB_FEED_TIMEOUT:-1500}"
 LAB_EXPECT_IMAGE_ID="${LAB_EXPECT_IMAGE_ID:-}"; LAB_UPDATE_DIR="${LAB_UPDATE_DIR:-}"
-# Disk model. overlay (default): qcow2 overlay over the read-only base, host page
-# cache on — the qualification lab. dm: a disposable raw copy of the OVA's VMDK
-# behind a device-mapper target, cache=none + a direct-I/O loop, so every guest
-# read reaches the device and latency can be injected (dm-delay) while the guest
-# runs. `recovery` requires dm.
-LAB_DISK="${LAB_DISK:-overlay}"
-# Maintenance-reboot recovery (cmd_recovery): N reboots per profile; a profile is
-# name:read_ms:write_ms:budget_s (the injected per-I/O latency and the recovery
-# budget each reboot of that profile must meet).
-LAB_RECOVERY_REBOOTS="${LAB_RECOVERY_REBOOTS:-0}"
-LAB_RECOVERY_PROFILES="${LAB_RECOVERY_PROFILES:-fast:0:0:60 esxi110:110:18:300}"
-# Diagnostic A/B (LAB-ONLY guest changes, cumulative, applied in order before
-# each variant's reboots; "base" changes nothing). Components joined by '+':
-#   ra   udev rule: read_ahead_kb=$LAB_RA_KB on whole disks (default 128)
-#   svc  mask services the appliance does not use (snapd, ModemManager, udisks2, multipathd, apport)
-#   ci   /etc/cloud/cloud-init.disabled (cloud-init skipped on later boots)
-#   ird  initramfs MODULES=dep (smaller initrd for the firmware/bootloader to read)
-LAB_RECOVERY_VARIANTS="${LAB_RECOVERY_VARIANTS:-base}"
-LAB_RA_KB="${LAB_RA_KB:-4096}"
-LAB_RECOVERY_TIMEOUT="${LAB_RECOVERY_TIMEOUT:-1800}"
 ADMIN_USER=labadmin
 
 log()  { printf '%s [lab] %s\n' "$(date -u +%H:%M:%S)" "$*" >&2; }
@@ -140,14 +120,9 @@ SSH_OPTS=(-i "$LAB_SSH_KEY" -p "$LAB_SSH_PORT" -o StrictHostKeyChecking=no -o "U
           -o ConnectTimeout=10 -o BatchMode=yes -o LogLevel=ERROR -o ServerAliveInterval=15 -o IdentitiesOnly=yes)
 # gop CMD — the read-only operator interface (exact command, nothing else).
 gop() { ssh "${SSH_OPTS[@]}" "culvert-operator@$LAB_HOST" "$@"; }
-# gop_within SECS ARGS — gop with a hard deadline. `timeout` executes a
-# PROGRAM, so it must wrap the ssh argv itself: `timeout 3 gop …` cannot run
-# a shell function and fails with 127 every time (ASTRA review of a4797481).
-gop_within() { local t="$1"; shift; timeout "$t" ssh "${SSH_OPTS[@]}" "culvert-operator@$LAB_HOST" "$@"; }
 # Serial console socket (QEMU chardev; its logfile is console.log). Short fixed
 # path: AF_UNIX paths are limited to 108 bytes.
 SER_SOCK="/tmp/culvert-lab-ser-$(printf '%s' "$WORK" | sha256sum | cut -c1-12).sock"
-DM_NAME="culvert-lab-$(printf '%s' "$WORK" | sha256sum | cut -c1-8)"
 # gpriv [--as-user] [--timeout N] [--nowait] < script — authenticated local
 # administration: PAM login as culvert on the console, then sudo (root).
 gpriv() {
@@ -225,34 +200,6 @@ cmd_selftest() { local d rc=0 got; d="$(mktemp -d)"
   # never guess or fall back to another account.
   local hrc=0; printf 'id\n' | python3 "$HERE/console-session.py" --sock "$d/none.sock" --secrets "$d" --console-log "$d/none.log" --timeout 5 >/dev/null 2>&1 || hrc=$?
   if [[ $hrc == 99 || $hrc == 91 ]]; then log "selftest ok: console-session without a console/credential -> exit $hrc"; else log "selftest FAILED: console-session exit $hrc"; rc=1; fi
-  # The bounded operator probe must EXECUTE ssh: against a closed port ssh
-  # fails (255); 127 would mean timeout could not run the command at all.
-  local prc=0; ( LAB_HOST=127.0.0.1; SSH_OPTS=(-p 1 -o ConnectTimeout=2 -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=QUIET); gop_within 5 status-json ) >/dev/null 2>&1 || prc=$?
-  if [[ $prc == 255 ]]; then log "selftest ok: bounded operator probe executes ssh (closed port -> 255)"; else log "selftest FAILED: bounded operator probe exit $prc (127 = the probe never ran)"; rc=1; fi
-  # The console-marks watcher runs in the background for up to an hour; the
-  # caller captures its pid with $(...), which must return at once (run
-  # 37363074909 lost ~60 min per reboot waiting for the watcher to exit).
-  # Bounded: a regression must fail in 2 s, not hang the selftest for an hour.
-  local cp n; : > "$d/console.log"
-  ( mp="$( WORK="$d" rec_console_marks "$(date +%s.%N)" "$d/marks.tsv" )"; echo "$mp" > "$d/marks.pid" ) & cp=$!
-  for n in $(seq 1 20); do [[ -s "$d/marks.pid" ]] && break; sleep 0.1; done
-  if [[ -s "$d/marks.pid" ]]; then log "selftest ok: console-marks pid capture returns at once"; kill "$(cat "$d/marks.pid")" 2>/dev/null || true
-  else log "selftest FAILED: console-marks pid capture blocked (the watcher holds the substitution pipe)"; rc=1; pkill -P "$cp" 2>/dev/null || true; kill "$cp" 2>/dev/null || true; fi
-  # The backup-listing oracle must reject what HTTP 200 + a filename grep
-  # accepted (ASTRA 6001710160), and accept the genuine listing.
-  printf '%s' '{"filename":"baseline.enc","path":"/backup/baseline.enc","size_bytes":4096,"encrypted":true}' > "$d/exp.json"
-  bl() { printf '%s' "$1" > "$d/b.json"; got="$(backup_listing_verdict "$d/b.json" "$d/exp.json" "$2")"
-    if [[ "${got%% *}" == "$3" ]]; then log "selftest ok: backup oracle $4 -> ${got%% *}"; else log "selftest FAILED: backup oracle $4 -> $got (want $3)"; rc=1; fi; }
-  local good='{"available":true,"count":1,"backups":[{"filename":"baseline.enc","path":"/backup/baseline.enc","size_bytes":4096,"encrypted":true}]}'
-  bl "$good" 0.8 PASS "genuine listing"
-  bl '{ "available": false, "reason": "could not read baseline.enc", "backups": [], "count": 0 }' 0.8 FAIL "available=false naming the file"
-  bl "$good" 5.000001 FAIL "measured just over 5 s"
-  bl '{"available":true,"count":2,"backups":[{"filename":"baseline.enc","path":"/backup/baseline.enc","size_bytes":4096,"encrypted":true}]}' 0.8 FAIL "count mismatch"
-  bl '{"available":true,"count":1,"backups":[{"filename":"baseline.enc","path":"/backup/baseline.enc","size_bytes":17,"encrypted":true}]}' 0.8 FAIL "size changed"
-  bl '{"available":true,"count":1,"backups":[{"filename":"baseline.enc","path":"/backup/baseline.enc","size_bytes":4096,"encrypted":false}]}' 0.8 FAIL "encryption changed"
-  bl '{"available":true,"count":2,"backups":[{"filename":"baseline.enc","path":"/backup/baseline.enc","size_bytes":4096,"encrypted":true},{"filename":"baseline.enc","path":"/backup/baseline.enc","size_bytes":4096,"encrypted":true}]}' 0.8 FAIL "duplicate entry"
-  bl '{"available":true,"count":0,"backups":[],"note":"baseline.enc"}' 0.8 FAIL "filename only in another field"
-  rm -f "$d/exp.json"; bl "$good" 0.8 FAIL "no pre-reboot baseline"
   rm -rf "$d"; return "$rc"; }
 through_proxy() { curl -sS -m 20 -x "$P" -o /dev/null -w '%{http_code}' "$1" 2>/dev/null || echo 000; }
 # Monitor socket: a short fixed path (AF_UNIX paths are limited to 108 bytes).
@@ -349,37 +296,6 @@ PY
 
 
 # ── up: verify → extract → immutable base + overlay → OVF ISO → boot ────────
-# ── device-mapper disk (LAB_DISK=dm) ─────────────────────────────────────────
-# The guest disk is a raw file on a direct-I/O loop device under a dm target, so
-# neither the host page cache nor QEMU's (cache=none) hides a read: what the guest
-# reads after a reboot is what the device serves, as on a hypervisor datastore.
-# set_disk_latency swaps the live table between `linear` and `delay` (dm-delay:
-# a fixed per-I/O delay, reads and writes separately, unlimited concurrency).
-dm_attach() { local loop sectors dev
-  sudo modprobe dm_delay 2>/dev/null || log "dm_delay module not loaded — latency injection will be unavailable"
-  loop="$(sudo losetup --find --show --direct-io=on "$1")" || return 1
-  sectors="$(sudo blockdev --getsz "$loop")" || return 1
-  echo "0 $sectors linear $loop 0" | sudo dmsetup create "$DM_NAME" || return 1
-  dev="$(readlink -f "/dev/mapper/$DM_NAME")"
-  sudo chown "$(id -u):$(id -g)" "$dev"
-  save_state DM_LOOP "$loop"; save_state DM_SECTORS "$sectors"; save_state DM_DEV "$(basename "$dev")"
-}
-set_disk_latency() { local r="$1" w="$2" t
-  if (( r == 0 && w == 0 )); then t="0 $DM_SECTORS linear $DM_LOOP 0"
-  else t="0 $DM_SECTORS delay $DM_LOOP 0 $r $DM_LOOP 0 $w"; fi
-  sudo dmsetup suspend "$DM_NAME" && echo "$t" | sudo dmsetup reload "$DM_NAME" && sudo dmsetup resume "$DM_NAME" || return 1
-  sudo dmsetup table "$DM_NAME"
-}
-dm_detach() {
-  [[ -n "${DM_LOOP:-}" ]] || return 0
-  sudo dmsetup remove "$DM_NAME" 2>/dev/null || true
-  sudo losetup -d "$DM_LOOP" 2>/dev/null || true
-}
-# Host-side view of the guest disk: /sys/block/<dm>/stat (reads, merged,
-# sectors, ms reading, writes, merged, sectors, ms writing, in flight, io ticks,
-# time in queue).
-host_disk_stat() { cat "/sys/block/${DM_DEV:?}/stat"; }
-
 cmd_up() {
   [[ -n "${ACCEL:-}" ]] || die "run preflight first"
   local ova="${LAB_OVA:?LAB_OVA=path to the .ova}" want="${LAB_OVA_SHA256:?LAB_OVA_SHA256=expected sha256}"
@@ -388,22 +304,12 @@ cmd_up() {
   save_state OVA_NAME "$(basename "$ova")"; save_state OVA_SHA256 "$got"
   rm -rf "$WORK/ova"; extract_ova "$ova" "$WORK/ova" && check 1 ova-manifest pass "every .mf digest matches" || { check 1 ova-manifest fail ".mf mismatch"; return 1; }
   grep -oE 'CANDIDATE[^<]*|<Version>[^<]*' "$WORK/ova/"*.ovf | head -3 > "$EV/01-ovf-head.txt" || true
-  local vmdk drive; vmdk="$(ls "$WORK/ova/"*.vmdk)"
-  if [[ "$LAB_DISK" == dm ]]; then
-    log "converting $(basename "$vmdk") → disposable raw disk behind device-mapper"
-    qemu-img convert -p -O raw "$vmdk" "$WORK/disk.raw" >/dev/null; rm -f "$vmdk"
-    qemu-img info "$WORK/disk.raw" > "$EV/01-base-qcow2-info.txt"
-    dm_attach "$WORK/disk.raw" || { check 1 disk-chain blocked "device-mapper disk unavailable (see log)"; return 1; }
-    drive="file=/dev/mapper/$DM_NAME,if=none,id=d0,format=raw,cache=none,aio=native"
-    check 1 disk-chain pass "disk.raw (disposable copy of the OVA's own VMDK) → direct-I/O loop $DM_LOOP → dm $DM_NAME (linear; latency injectable); QEMU cache=none"
-  else
-    log "converting $(basename "$vmdk") → immutable qcow2 base"
-    qemu-img convert -p -O qcow2 "$vmdk" "$WORK/base.qcow2" >/dev/null; rm -f "$vmdk"; chmod 0444 "$WORK/base.qcow2"
-    qemu-img create -q -f qcow2 -F qcow2 -b "$WORK/base.qcow2" "$WORK/overlay.qcow2"
-    qemu-img info "$WORK/base.qcow2" > "$EV/01-base-qcow2-info.txt"
-    drive="file=$WORK/overlay.qcow2,if=none,id=d0,format=qcow2,cache=writeback"
-    check 1 disk-chain pass "base.qcow2 (0444, from the OVA's own VMDK) ← overlay.qcow2 (disposable)"
-  fi
+  local vmdk; vmdk="$(ls "$WORK/ova/"*.vmdk)"
+  log "converting $(basename "$vmdk") → immutable qcow2 base"
+  qemu-img convert -p -O qcow2 "$vmdk" "$WORK/base.qcow2" >/dev/null; rm -f "$vmdk"; chmod 0444 "$WORK/base.qcow2"
+  qemu-img create -q -f qcow2 -F qcow2 -b "$WORK/base.qcow2" "$WORK/overlay.qcow2"
+  qemu-img info "$WORK/base.qcow2" > "$EV/01-base-qcow2-info.txt"
+  check 1 disk-chain pass "base.qcow2 (0444, from the OVA's own VMDK) ← overlay.qcow2 (disposable)"
   # Disposable credentials. No console password is supplied: first boot must
   # mint and print the one-time password (the default bootstrap under test).
   rm -f "$SEC/id_ed25519"* "$SEC/console-pass" "$SEC/console-onetime" "$SEC/console-events"
@@ -433,15 +339,15 @@ PY
   # ttyS0 is a socket (the authenticated console session attaches to it) whose
   # every byte is ALSO logged, client or not: console.log stays the boot record.
   qemu-system-x86_64 -name culvert-lab "${acc[@]}" -smp "$LAB_CPUS" -m "$LAB_MEM_MB" \
-    -drive "$drive" \
+    -drive "file=$WORK/overlay.qcow2,if=none,id=d0,format=qcow2,cache=writeback" \
     -device virtio-scsi-pci,id=scsi0 -device scsi-hd,drive=d0,bus=scsi0.0 \
     -drive "file=$WORK/ovfenv.iso,if=none,id=cd0,media=cdrom,readonly=on" -device ide-cd,drive=cd0 \
     -netdev "user,id=n0,hostfwd=tcp:127.0.0.1:$LAB_SSH_PORT-:22,hostfwd=tcp:127.0.0.1:$LAB_PROXY_PORT-:8080,hostfwd=tcp:127.0.0.1:$LAB_UI_PORT-:9090" \
     -device e1000,netdev=n0 -display none \
     -chardev "socket,id=ser0,path=$SER_SOCK,server=on,wait=off,logfile=$WORK/console.log,logappend=on" -serial chardev:ser0 \
     -monitor "unix:$MON_SOCK,server,nowait" -pidfile "$WORK/qemu.pid" -daemonize
-  printf 'qemu-system-x86_64 %s -smp %s -m %s virtio-scsi(%s) ide-cd(ovfenv.iso) e1000 user-net hostfwd 127.0.0.1:{%s,%s,%s} SeaBIOS serial=socket+logfile\n' \
-    "${acc[*]}" "$LAB_CPUS" "$LAB_MEM_MB" "$drive" "$LAB_SSH_PORT" "$LAB_PROXY_PORT" "$LAB_UI_PORT" > "$EV/02-qemu-command.txt"
+  printf 'qemu-system-x86_64 %s -smp %s -m %s virtio-scsi(overlay.qcow2) ide-cd(ovfenv.iso) e1000 user-net hostfwd 127.0.0.1:{%s,%s,%s} SeaBIOS serial=socket+logfile\n' \
+    "${acc[*]}" "$LAB_CPUS" "$LAB_MEM_MB" "$LAB_SSH_PORT" "$LAB_PROXY_PORT" "$LAB_UI_PORT" > "$EV/02-qemu-command.txt"
   save_state BOOT_STARTED "$(date +%s)"
   check 2 boot-started pass "qemu pid $(cat "$WORK/qemu.pid") accel=$ACCEL"
   # Bounded: kernel, operator SSH, then first boot to completion as the
@@ -609,24 +515,6 @@ EOS
     rc=0; printf 'sudo -k; sudo -n true 2>&1; echo "sudo-n-rc=$?"\n' | gpriv --as-user > "$EV/03c-culvert-sudo-n.txt" 2>&1 || rc=$?
     grep -qx 'sudo-n-rc=1' "$EV/03c-culvert-sudo-n.txt" && check 3c local-admin-sudo-needs-password pass "culvert: sudo -n refused (a password is required)" || check 3c local-admin-sudo-needs-password fail "$(tr '\n' ' ' < "$EV/03c-culvert-sudo-n.txt")"
     boot_timing 03d 3d
-    # Step 3e — recovery-secret custody: the root-only reveal prints exactly the
-    # stack .env passphrases. Compared INSIDE the guest; only booleans and key
-    # names reach the evidence, never a value.
-    gpriv > "$EV/03e-recovery-secrets.txt" 2>&1 <<'EOS' || true
-out="$(printf '\n' | /opt/culvert-appliance/bin/culvert-console --host=recovery-secrets 2>&1)"
-for k in CULVERT_CA_PASSPHRASE CULVERT_LOG_PASSPHRASE; do
-  v="$(sed -n "s/^$k=//p" /srv/culvert/.env | tail -1)"
-  if [ -n "$v" ] && printf '%s\n' "$out" | grep -qxF "$k=$v"; then echo "$k=shown-and-matches-env"; else echo "$k=MISMATCH-or-missing"; fi
-done
-printf '%s\n' "$out" | grep -q 'CULVERT_SETUP_TOKEN' && echo "setup-token=LEAKED" || echo "setup-token=not-shown"
-printf '%s\n' "$out" | grep -q 'A backup archive does NOT contain them' && echo "guidance=present" || echo "guidance=missing"
-EOS
-    printf '/opt/culvert-appliance/bin/culvert-console --host=recovery-secrets </dev/null >/dev/null 2>&1; echo "unprivileged-rc=$?"\n' | gpriv --as-user >> "$EV/03e-recovery-secrets.txt" 2>&1 || true
-    if grep -qx 'CULVERT_CA_PASSPHRASE=shown-and-matches-env' "$EV/03e-recovery-secrets.txt" && grep -qx 'CULVERT_LOG_PASSPHRASE=shown-and-matches-env' "$EV/03e-recovery-secrets.txt" \
-       && grep -qx 'setup-token=not-shown' "$EV/03e-recovery-secrets.txt" && grep -qx 'guidance=present' "$EV/03e-recovery-secrets.txt" \
-       && grep -qE '^unprivileged-rc=[1-9]' "$EV/03e-recovery-secrets.txt"; then
-      check 3e recovery-secrets pass "root reveal shows both .env passphrases exactly, no setup token, with custody guidance; unprivileged invocation refused"
-    else check 3e recovery-secrets fail "$(tr '\n' ' ' < "$EV/03e-recovery-secrets.txt")"; fi
   fi
   # Step 4 — first administrator; the token is REQUIRED.
   local pass c; pass="$(cat "$SEC/admin-pass")"
@@ -771,11 +659,7 @@ PY
     fi
     [[ "$st" == succeeded ]] && check 6 agent-backup pass "op $op → $fn succeeded (proxy → agent socket → sudoers → cli container)" || check 6 agent-backup fail "op=${op:-none} state=${st:-none}: $(body < "$EV/06-backup-trigger.txt" | head -c 300)"
     api GET /api/backups > "$EV/06-backups.txt" || true
-    if [[ -n "$fn" ]] && body < "$EV/06-backups.txt" | python3 -c 'import json,sys
-d=json.load(sys.stdin); b=d.get("backups")
-sys.exit(0 if d.get("available") is True and isinstance(b,list) and d.get("count")==len(b) and sum(1 for e in b if isinstance(e,dict) and e.get("filename")==sys.argv[1])==1 else 1)' "$fn" 2>/dev/null; then
-      check 6 backup-listed pass "$fn listed by /api/backups (available=true, one entry)"
-    else check 6 backup-listed fail "backup ${fn:-?} not listed by a valid listing: $(body < "$EV/06-backups.txt" | head -c 200)"; fi
+    [[ -n "$fn" ]] && grep -qF "$fn" "$EV/06-backups.txt" && check 6 backup-listed pass "$fn listed by /api/backups" || check 6 backup-listed fail "backup ${fn:-?} not listed"
     if [[ -n "$fn" ]]; then
       groot "cd /srv/culvert && docker compose --profile cli run --rm -T cli --restore /backup/$fn --mode full" 900 > "$EV/06-restore-dryrun.txt" 2>&1 || true
       # The CLI prints "Validation: PASS" (or FAIL) and, for a dry run, "No files
@@ -823,6 +707,7 @@ EOS
     else check 6b restore-commit fail "exit $rc login $c rules '$rules' traffic $ra ($(grep -E '^(down|commit|up)-rc=' "$EV/06b-restore-offline.txt" | tr '\n' ' '))"; STOP=1; fi
   elif [[ $STOP == 0 ]]; then check 6b restore-commit not-run "no backup file"; fi
 
+  # Optional controller hooks are defined before cmd_qualify starts.
   if declare -F lab_before_signed_update >/dev/null; then lab_before_signed_update; fi
 
   # Step 6c — signed update and rollback through the maintenance agent, with
@@ -846,6 +731,7 @@ EOS
       qemu_alive || { check 7 reboot fail "qemu exited during the reboot"; STOP=1; break; }
       (( $(date +%s) < deadline )) || { check 7 reboot fail "not back within ${LAB_FIRSTBOOT_TIMEOUT}s"; STOP=1; break; }
       sleep 10; done
+    if declare -F lab_after_reboot_observation >/dev/null; then lab_after_reboot_observation; fi
     if [[ $STOP == 0 ]]; then
       check 7 reboot pass "proxy /health and operator SSH back $(( $(date +%s) - t0 ))s after the reboot command"
       gpriv > "$EV/07-kernel-after.txt" 2>&1 <<<'uname -r; uname -v' || true
@@ -858,8 +744,6 @@ EOS
       [[ "$holds" -ge 4 ]] && check 7 docker-held pass "Docker packages still held; engine $(tail -1 "$EV/07-check-after-update.txt")" || check 7 docker-held fail "holds found: $holds"
     fi
   fi
-
-  if declare -F lab_after_reboot_observation >/dev/null; then lab_after_reboot_observation; fi
 
   # Step 8 — persistence and readiness after the reboot.
   if gate 8 persistence; then
@@ -896,12 +780,7 @@ EOS
     lookups > "$EV/08-lookups-after.txt"
     cmp -s "$EV/05b-lookups-before.txt" "$EV/08-lookups-after.txt" && check 8 category-data pass "category lookups identical before/after reboot" || check 8 category-data fail "$(diff "$EV/05b-lookups-before.txt" "$EV/08-lookups-after.txt" | tr '\n' ' ' | head -c 300)"
     api GET /api/backups > "$EV/08-backups.txt" || true
-    # Structured, like the recovery oracle: a grep also matches available=false.
-    if [[ -n "${BACKUP_FILE:-}" ]] && body < "$EV/08-backups.txt" | python3 -c 'import json,sys
-d=json.load(sys.stdin); b=d.get("backups")
-sys.exit(0 if d.get("available") is True and isinstance(b,list) and d.get("count")==len(b) and sum(1 for e in b if isinstance(e,dict) and e.get("filename")==sys.argv[1])==1 else 1)' "$BACKUP_FILE" 2>/dev/null; then
-      check 8 backup-listed pass "$BACKUP_FILE still listed (available=true, one entry)"
-    else check 8 backup-listed fail "backup ${BACKUP_FILE:-?} not listed by a valid listing: $(body < "$EV/08-backups.txt" | head -c 200)"; fi
+    [[ -n "${BACKUP_FILE:-}" ]] && grep -qF "$BACKUP_FILE" "$EV/08-backups.txt" && check 8 backup-listed pass "$BACKUP_FILE still listed" || check 8 backup-listed fail "backup ${BACKUP_FILE:-?} not listed"
     c="$(api GET /api/maintenance-agent | tee "$EV/08-agent-status.txt" | code)"
     local av8; av8="$(agent_status_verdict "$EV/08-agent-status.txt")"; check 8 agent-reachable "${av8%%|*}" "${av8#*|} (after the maintenance reboot)"
     gpriv > "$EV/08-firstboot-journal.txt" 2>&1 <<<'journalctl -b -u culvert-firstboot --no-pager | tail -20' || true
@@ -1025,409 +904,6 @@ print("%s category=%s tier=%s matchedBy=%s" % (h, d.get("category") or "", d.get
 
 
 # ── collect: guest diagnostics + identities → REPORT.md (redacted) ──────────
-# ── recovery: maintenance-reboot recovery time, per storage profile ──────────
-# Each reboot is the product's own maintenance reboot (`culvert-os-update
-# reboot`: stack stop + resume marker under both locks, then the boot-time
-# culvert-stack-resume). Definition (agreed with ASTRA, PR #1528):
-#   t0  = AUTHENTICATED acceptance: the root script prints LABACCEPT after the
-#         console PAM login and sudo succeeded, before the product's guard or
-#         stack stop; console-session returns the host clock at detection.
-#   end = completion of the THIRD of three consecutive joint samples started
-#         5 s apart. A joint sample passes only if, in that sample:
-#           /ready 200 with the clamav row ok; example.com 200 AND example.org
-#           403 through the proxy; an EICAR body from the host origin answered
-#           `403 Blocked by CLAMAV scan` (a LIVE clamd verdict — clamd down is
-#           fail-open, 200; the /ready row is cached up to 30 s); operator
-#           status-json phase=ready. Any failed sample resets the count.
-# Every probe is stamped when it COMPLETES (monotonic clock), never with the
-# sample's start time. After each reboot: the FIRST backup listing must answer
-# within 5 s (no retry), and the normalized persisted policy, default action,
-# CA identity, image identity and agent availability must equal the baseline
-# taken before the first reboot. Every expected profile x reboot case must run:
-# a BLOCKED case fails the run. Lab-only guest change: systemd
-# DefaultIOAccounting=yes, so per-unit read volume is recorded.
-LAB_EICAR_PORT="${LAB_EICAR_PORT:-18431}"
-mono() { python3 -c 'import time; print("%.3f" % time.monotonic())'; }
-mono_raw() { python3 -c 'import time; print("%.9f" % time.monotonic())'; }
-# since T — seconds from monotonic T to now (one decimal).
-since() { python3 -c 'import sys,time; print(round(time.monotonic()-float(sys.argv[1]),1))' "$1"; }
-rec_origin_start() {
-  mkdir -p "$WORK/eicar-origin"
-  # Built at run time, so no file in the repository carries the test signature.
-  printf '%s%s' 'X5O!P%@AP[4\PZX54(P^)7CC)7}$' 'EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*' > "$WORK/eicar-origin/eicar.txt"
-
-  python3 -m http.server "$LAB_EICAR_PORT" --bind 127.0.0.1 --directory "$WORK/eicar-origin" > "$WORK/eicar-origin.log" 2>&1 &
-  echo $! > "$WORK/eicar-origin.pid"; sleep 1; }
-rec_origin_stop() { [[ -f "$WORK/eicar-origin.pid" ]] && kill "$(cat "$WORK/eicar-origin.pid")" 2>/dev/null; rm -f "$WORK/eicar-origin.pid"; }
-# fresh_eicar — a NEW body per call: the 68-byte EICAR string followed by a
-# unique run of spaces/tabs (the EICAR spec permits trailing whitespace). The
-# proxy caches verdicts by body SHA-256, so a repeated body could be answered
-# from the cache while clamd is down; a fresh body must reach clamd.
-# (Called in a command substitution, so it keeps no shell state: the name and
-# the whitespace pattern both come from the nanosecond clock.)
-fresh_eicar() { local n
-  n="$(python3 -c 'import time; print(time.time_ns())')"
-  { cat "$WORK/eicar-origin/eicar.txt"; python3 -c 'import sys,hashlib
-h=int.from_bytes(hashlib.sha256(sys.argv[1].encode()).digest()[:8],"big")
-sys.stdout.write("".join(" \t"[(h>>i)&1] for i in range(56)))' "$n"; } > "$WORK/eicar-origin/e$n.txt"
-  echo "http://10.0.2.2:$LAB_EICAR_PORT/e$n.txt"; }
-# eicar_verdict — "av" when the proxy returned the ClamAV block for a FRESH
-# body, else code:body-head.
-eicar_verdict() { local out c u
-  u="$(fresh_eicar)"
-  out="$(curl -sS -m 4 -x "$P" -w '\n%{http_code}' "$u" 2>/dev/null || printf '\n000')"
-  c="$(tail -n1 <<<"$out")"
-  if [[ "$c" == 403 ]] && grep -q 'Blocked by CLAMAV scan' <<<"$out"; then echo av; else echo "$c:$(head -c 60 <<<"$out" | tr -d '\n')"; fi; }
-ready_clamav_ok() { local code cv
-  code="$(curl -sS -m 2 -o "$WORK/rec-ready.json" -w '%{http_code}' "$P/ready" 2>/dev/null || echo 000)"
-  cv="$(python3 -c 'import json,sys
-d=json.load(open(sys.argv[1])); c=d.get("checks",d).get("clamav",{})
-print(c.get("status") if isinstance(c,dict) else c)' "$WORK/rec-ready.json" 2>/dev/null || true)"
-  [[ "$code" == 200 && "$cv" == ok ]]; }
-# rec_state_snapshot FILE — normalized persisted state the reboots must preserve.
-rec_state_snapshot() { local out="$1" c pol f img ag
-  : > "$JAR"; c="$(api POST /api/auth/login "{\"user\":\"$ADMIN_USER\",\"pass\":\"$(cat "$SEC/admin-pass")\"}" | code)"
-  local da; da="$(api GET /api/default-action | body | python3 -c 'import json,sys
-a=json.load(sys.stdin).get("defaultAction"); print(a if a in ("allow","deny") else "INVALID:%r" % (a,))' 2>/dev/null || echo unreadable)"
-  pol="$(api GET /api/policy | body | python3 -c 'import json,sys
-d=json.load(sys.stdin); keys=("name","priority","action","enabled","destFQDN","destCategory","destCategoryGroup","destCountry","sslAction")
-rules=sorted(([r.get(k) for k in keys] for r in d.get("rules",[])), key=lambda r: (r[1] or 0, r[0] or ""))
-print(json.dumps({"default_action":sys.argv[1],"persisted":d.get("persisted"),"draft":d.get("draft"),"rules":rules},sort_keys=True))' "$da" 2>/dev/null || echo unreadable)"
-  f="$(api GET /api/ca-cert | body | openssl x509 -noout -fingerprint -sha256 2>/dev/null | cut -d= -f2 || true)"
-  img="$(gpriv 2>/dev/null <<<'docker inspect -f "{{.Image}}" culvert' | tr -d '\r' | grep -m1 '^sha256:' || true)"
-  ag="$(api GET /api/maintenance-agent | body | python3 -c 'import json,sys;print(json.load(sys.stdin).get("available"))' 2>/dev/null || echo unreadable)"
-  python3 -c 'import json,sys; print(json.dumps({"login":sys.argv[1],"policy":sys.argv[2],"ca":sys.argv[3],"image":sys.argv[4],"agent_available":sys.argv[5]},sort_keys=True))' \
-    "$c" "$pol" "$f" "$img" "$ag" > "$out"; }
-rec_traffic() { local a b
-  a="$(curl -sS -m 2 -x "$P" -o /dev/null -w '%{http_code}' http://example.com/ 2>/dev/null || echo 000)"
-  b="$(curl -sS -m 2 -x "$P" -o /dev/null -w '%{http_code}' http://example.org/ 2>/dev/null || echo 000)"
-  [[ "$a $b" == "200 403" ]]; }
-# rec_console_marks START_EPOCH OUT — timestamp boot-path console markers while
-# the reboot runs (shutdown, firmware, bootloader, kernel). Only lines matching
-# a fixed marker list are kept, so no console secret reaches the evidence.
-# Its stdout goes to /dev/null: called as marks_pid="$(rec_console_marks …)",
-# a backgrounded child still holding the substitution's pipe makes the
-# caller wait for the child to EXIT (its 3600 s deadline) — which is what
-# stretched every reboot cycle to ~64 minutes in run 37363074909.
-rec_console_marks() { python3 - "$WORK/console.log" "$2" "$1" > /dev/null 2>&1 <<'PY' &
-import os, re, sys, time
-log, out, t0 = sys.argv[1], sys.argv[2], float(sys.argv[3])
-pat = re.compile(r"(reboot: |Linux version|SeaBIOS|Booting from|iPXE|GRUB|Loading Linux|Loading initial ramdisk|Run /init|EXT4-fs \(sda1\): mounted|systemd\[1\]: (Reached target|Stopping|Stopped|Finished|Started) |Culvert|login:)")
-f = open(log, "rb"); f.seek(0, os.SEEK_END); buf = b""
-with open(out, "w") as o:
-    deadline = time.time() + 3600
-    while time.time() < deadline:
-        chunk = f.read()
-        if not chunk:
-            time.sleep(0.2); continue
-        now = time.time(); buf += chunk
-        *lines, buf = buf.split(b"\n")
-        for raw in lines:
-            line = raw.decode("utf-8", "replace").replace("\r", "")
-            m = pat.search(line)
-            if m:
-                o.write("%.2f\t%s\n" % (now - t0, re.sub(r"[^ -~]", "", line)[:140])); o.flush()
-PY
-echo $!; }
-recovery_once() { local name="$1" i="$2" budget="$3"; local tag="R-$name-$i"
-  local k0 acc t0 st0 st1 ok=0 samples=0 s_start s s_prev="" pr pt pa pp dur gap why marks_pid
-  local tk="" ts_ready="" ts_traffic="" ts_av="" ts_phase="" first_joint="" end="" bk_pid=""
-  k0="$(grep -ac 'Linux version' "$WORK/console.log" || true)"
-  st0="$(host_disk_stat)"
-  # Authenticate BEFORE the reboot for the pre-reboot baseline listing. The
-  # post-reboot listing cannot reuse this session: the session signing key is
-  # per-process unless CULVERT_SESSION_SECRET is set (documented in the
-  # state-and-key-custody matrix), so every pre-reboot cookie answers 401.
-  : > "$JAR"; api POST /api/auth/login "{\"user\":\"$ADMIN_USER\",\"pass\":\"$(cat "$SEC/admin-pass")\"}" > /dev/null
-  recovery_backup_baseline "$EV/$tag-backup-baseline.json"
-  marks_pid="$(rec_console_marks "$(date +%s.%N)" "$EV/$tag-console-marks.tsv")"
-  # The guest prints LABACCEPT after PAM login and sudo, then WAITS for the
-  # controller's go-ahead; the controller takes t0 before sending it.
-  printf 'echo "LABACCEPT $(date +%%s.%%N)"\nIFS= read -r -t 120 go || go=\n[[ "$go" == LABGO* ]] || { echo LABNOGO; exit 1; }\nexec culvert-os-update reboot\n' \
-    | gpriv --nowait --timeout 180 > "$EV/$tag-reboot.txt" 2>&1 || true
-  t0="$(mono)"
-  acc="$(grep -m1 -oE 'host_epoch=[0-9.]+' "$EV/$tag-reboot.txt" | cut -d= -f2 || true)"
-  if [[ -z "$acc" ]]; then kill "$marks_pid" 2>/dev/null; check R "recovery-$name-$i" fail "the maintenance reboot was not accepted (no authenticated acceptance marker): $(tail -c 300 "$EV/$tag-reboot.txt")"; return 1; fi
-  local lag; lag="$(python3 -c 'import sys,time; print("%.6f" % (time.time()-float(sys.argv[1])))' "$acc")"
-  t0="$(python3 -c 'import sys; print("%.6f" % (float(sys.argv[1]) - float(sys.argv[2])))' "$t0" "$lag")"
-  printf 'sample_start_s\tsample_end_s\tduration_s\tstart_gap_s\tready_clamav\ttraffic\teicar\tphase\tcounted\n' > "$EV/$tag-samples.tsv"
-  while :; do
-    qemu_alive || { kill "$marks_pid" 2>/dev/null; check R "recovery-$name-$i" fail "qemu exited during the reboot"; return 1; }
-    s_start="$(mono)"
-    python3 -c 'import sys; sys.exit(0 if float(sys.argv[1])-float(sys.argv[2]) < float(sys.argv[3]) else 1)' "$s_start" "$t0" "$LAB_RECOVERY_TIMEOUT" || break
-    if [[ -z "$tk" ]]; then
-      (( $(grep -ac 'Linux version' "$WORK/console.log" || true) > k0 )) && tk="$(mono)"
-      sleep 2; continue
-    fi
-    samples=$((samples+1))
-    if ready_clamav_ok; then pr=ok; else pr=no; fi; s="$(mono)"; [[ $pr == ok && -z "$ts_ready" ]] && ts_ready="$s"
-    if rec_traffic; then pt=ok; else pt=no; fi
-    s="$(mono)"; [[ $pt == ok && -z "$ts_traffic" ]] && ts_traffic="$s"
-    pa="$(eicar_verdict)"; s="$(mono)"; [[ $pa == av && -z "$ts_av" ]] && ts_av="$s"
-    if gop_within 3 status-json > "$WORK/rec-status.json" 2>/dev/null && [[ "$(status_field "$WORK/rec-status.json" phase)" == ready ]]; then pp=ok; else pp=no; fi
-    s="$(mono)"; [[ $pp == ok && -z "$ts_phase" ]] && ts_phase="$s"
-    # Declared cadence: a sample counts only if it completed within 5 s and
-    # started at most 5.5 s after the previous one. Overruns are retained in
-    # the TSV and reset the consecutive count (ASTRA review, item 4).
-    dur="$(python3 -c 'import sys;print("%.3f"%(float(sys.argv[1])-float(sys.argv[2])))' "$s" "$s_start")"
-    gap="$( [[ -n "$s_prev" ]] && python3 -c 'import sys;print("%.3f"%(float(sys.argv[1])-float(sys.argv[2])))' "$s_start" "$s_prev" || echo first)"
-    why=yes
-    python3 -c 'import sys; sys.exit(0 if float(sys.argv[1]) <= 5.0 else 1)' "$dur" || why=overrun-duration
-    [[ "$gap" == first ]] || python3 -c 'import sys; sys.exit(0 if float(sys.argv[1]) <= 5.5 else 1)' "$gap" || why=overrun-gap
-    [[ $pr == ok && $pt == ok && $pa == av && $pp == ok ]] || why=no
-    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$(python3 -c 'import sys;print("%.3f"%(float(sys.argv[1])-float(sys.argv[2])))' "$s_start" "$t0")" \
-      "$(python3 -c 'import sys;print("%.3f"%(float(sys.argv[1])-float(sys.argv[2])))' "$s" "$t0")" "$dur" "$gap" "$pr" "$pt" "$pa" "$pp" "$why" >> "$EV/$tag-samples.tsv"
-    s_prev="$s_start"
-    if [[ $why == yes ]]; then
-      ok=$((ok+1)); (( ok == 1 )) && first_joint="$s"
-      # The ONE backup-listing attempt starts at the FIRST healthy joint
-      # sample, on the session authenticated before the reboot, in the
-      # background so the sample cadence is not delayed; its outcome is kept
-      # even if a later sample resets the count (ASTRA review of a4797481).
-      if [[ -z "$bk_pid" ]]; then recovery_backup_first_list "$name" "$i" & bk_pid=$!; fi
-      if (( ok == 3 )); then end="$s"; break; fi
-    else ok=0; first_joint=""; fi
-    # The next sample starts 5 s after this one STARTED, never sooner.
-    python3 -c 'import sys,time; d=float(sys.argv[1])+5-time.monotonic(); time.sleep(d if d>0 else 0)' "$s_start"
-  done
-  [[ -n "$bk_pid" ]] && wait "$bk_pid"
-  [[ -n "$bk_pid" ]] || check R "backup-list-$name-$i" fail "no healthy joint sample, so the backup listing was never attempted"
-  kill "$marks_pid" 2>/dev/null || true
-  st1="$(host_disk_stat)"
-  local rec; rec="$(python3 "$HERE/recovery-timeline.py" "$t0" "$tk" "$ts_ready" "$ts_traffic" "$ts_av" "$ts_phase" "$first_joint" "$end" \
-    "$st0" "$st1" "$budget" "$acc" "$lag" "$samples" "$EV/$tag-timeline.json")"
-  local tl; tl="$(python3 "$HERE/recovery-timeline.py" --describe "$EV/$tag-timeline.json")"
-  if [[ "$rec" == none ]]; then check R "recovery-$name-$i" fail "not recovered (3 consecutive joint samples) within ${LAB_RECOVERY_TIMEOUT}s: $tl"; recovery_guest "$tag"; return 1; fi
-  local recd; recd="$(printf '%.1f' "$rec")"
-  if python3 -c 'import sys; sys.exit(0 if float(sys.argv[1]) <= float(sys.argv[2]) else 1)' "$rec" "$budget"; then
-    check R "recovery-$name-$i" pass "recovered in ${recd}s (budget ${budget}s; unrounded $rec): $tl"
-  else check R "recovery-$name-$i" fail "recovered in ${recd}s — OVER the ${budget}s budget (unrounded $rec): $tl"; fi
-  recovery_guest "$tag"
-  recovery_state "$name" "$i"
-  printf '%s\t%s\t%s\t%s\t%s\n' "${REC_VARIANT:-base}" "$name" "$i" "$rec" "$budget" >> "$EV/R-summary.tsv"
-}
-# The FIRST backup listing after the reboot must answer within 5 s, with the
-# baseline backup in it. Never retried: a slow first answer is the finding.
-# Sessions do not survive the restart (per-process signing key), so it logs in
-# on its own cookie jar first; the login is timed and reported separately and
-# only the listing itself is held to the 5 s limit.
-# The oracle is STRUCTURED (ASTRA review 6001710160): HTTP 200 alone, or the
-# filename appearing anywhere in the body, also matches
-# {"available":false,"reason":"could not read <file>",...}. It requires
-# available=true, count == len(backups), exactly one entry for the baseline
-# archive and that entry equal to the one listed before the reboot
-# (filename, path, size_bytes, encrypted). The 5 s limit is checked against
-# the MEASURED, unrounded elapsed time, not only enforced by curl's timeout.
-backup_listing_verdict() { python3 - "$1" "$2" "$3" <<'PY'
-import json, sys
-body, expected, elapsed = sys.argv[1], sys.argv[2], float(sys.argv[3])
-problems = []
-try:
-    d = json.load(open(body))
-except Exception as e:
-    print("FAIL body is not JSON: %s" % str(e)[:120]); sys.exit(0)
-try:
-    exp = json.load(open(expected))
-except Exception as e:
-    print("FAIL no pre-reboot baseline entry: %s" % str(e)[:120]); sys.exit(0)
-if not isinstance(d, dict):
-    print("FAIL body is not a JSON object"); sys.exit(0)
-if d.get("available") is not True:
-    problems.append("available=%r reason=%r" % (d.get("available"), str(d.get("reason", ""))[:160]))
-b = d.get("backups")
-if not isinstance(b, list):
-    problems.append("backups is %s, not a list" % type(b).__name__)
-    b = []
-if d.get("count") != len(b):
-    problems.append("count=%r but %d entries" % (d.get("count"), len(b)))
-m = [e for e in b if isinstance(e, dict) and e.get("filename") == exp.get("filename")]
-if len(m) != 1:
-    problems.append("%d entries named %r (want exactly 1)" % (len(m), exp.get("filename")))
-else:
-    for k in ("filename", "path", "size_bytes", "encrypted"):
-        if m[0].get(k) != exp.get(k):
-            problems.append("%s=%r, baseline %r" % (k, m[0].get(k), exp.get(k)))
-if elapsed > 5.0:
-    problems.append("measured %.3fs > 5s" % elapsed)
-if problems:
-    print("FAIL " + "; ".join(problems))
-else:
-    print("PASS %s (%d bytes, encrypted=%s) in %.3fs, count=%d" % (exp["filename"], exp["size_bytes"], exp["encrypted"], elapsed, len(b)))
-PY
-}
-# The pre-reboot baseline entry the post-reboot listing must reproduce. A
-# listing that is itself not structurally valid yields no baseline, and the
-# post-reboot check then fails rather than comparing against nothing.
-recovery_backup_baseline() { local out="$1" raw="$1.raw"
-  rm -f "$out"
-  [[ -n "${BACKUP_FILE:-}" ]] || return 0
-  curl -ksS -m 30 "$UI/api/backups" -H "Origin: $UI" -b "$JAR" -o "$raw" 2>/dev/null || return 0
-  python3 - "$raw" "$BACKUP_FILE" "$out" <<'PY'
-import json, sys
-d = json.load(open(sys.argv[1]))
-b = d.get("backups") if isinstance(d, dict) else None
-if not (isinstance(d, dict) and d.get("available") is True and isinstance(b, list) and d.get("count") == len(b)):
-    sys.exit(0)
-m = [e for e in b if isinstance(e, dict) and e.get("filename") == sys.argv[2]]
-if len(m) == 1 and all(k in m[0] for k in ("filename", "path", "size_bytes", "encrypted")):
-    json.dump({k: m[0][k] for k in ("filename", "path", "size_bytes", "encrypted")}, open(sys.argv[3], "w"))
-PY
-}
-recovery_backup_first_list() { local name="$1" i="$2" t1 t2 c dt v jar="$WORK/rec-backup-jar" l0 lc ldt
-  : > "$jar"
-  l0="$(mono_raw)"
-  lc="$(curl -ksS -m 30 -X POST "$UI/api/auth/login" -H "Origin: $UI" -H 'Content-Type: application/json' -c "$jar" \
-    -d "{\"user\":\"$ADMIN_USER\",\"pass\":\"$(cat "$SEC/admin-pass")\"}" -o /dev/null -w '%{http_code}' 2>/dev/null || echo 000)"
-  ldt="$(python3 -c 'import sys,time; print("%.3f" % (time.monotonic()-float(sys.argv[1])))' "$l0")"
-  if [[ "$lc" != 200 ]]; then
-    check R "backup-list-$name-$i" fail "could not log in for the first listing (http $lc in ${ldt}s)"; return 0
-  fi
-  t1="$(mono_raw)"
-  c="$(curl -ksS -m 5 "$UI/api/backups" -H "Origin: $UI" -b "$jar" -o "$EV/R-$name-$i-backups.json" -w '%{http_code}' 2>/dev/null || echo 000)"
-  t2="$(mono_raw)"
-  dt="$(python3 -c 'import sys; print("%.6f" % (float(sys.argv[2])-float(sys.argv[1])))' "$t1" "$t2")"
-  if [[ -z "${BACKUP_FILE:-}" ]]; then
-    check R "backup-list-$name-$i" fail "no baseline backup file recorded, so the listing cannot be verified (http $c in ${dt}s)"; return 0
-  fi
-  if [[ "$c" != 200 ]]; then
-    check R "backup-list-$name-$i" fail "first listing http $c in ${dt}s (limit 5 s, no retry); $BACKUP_FILE expected"; return 0
-  fi
-  v="$(backup_listing_verdict "$EV/R-$name-$i-backups.json" "$EV/R-$name-$i-backup-baseline.json" "$dt")"
-  if [[ "$v" == PASS* ]]; then check R "backup-list-$name-$i" pass "first listing http 200: ${v#PASS } (login ${ldt}s, not counted)"
-  else check R "backup-list-$name-$i" fail "first listing http 200 in ${dt}s (no retry): ${v#FAIL }"; fi
-}
-recovery_guest() {
-  gpriv --timeout 300 > "$EV/$1-guest.txt" 2>&1 <<'EOS' || true
-echo "--- clock: epoch uptime"; date -u +%s.%N; cat /proc/uptime
-systemd-analyze 2>&1
-echo '--- blame (top 40)'; systemd-analyze blame 2>&1 | head -40
-echo '--- critical-chain'; systemd-analyze critical-chain containerd.service docker.service culvert-stack-resume.service 2>&1 | head -80
-echo '--- unit timestamps (monotonic us since kernel start)'
-for u in cloud-init-local cloud-init cloud-config cloud-final systemd-networkd-wait-online snapd snapd.seeded ssh containerd docker culvert-maint culvert-stack-resume; do
-  systemctl show "$u.service" -p Id -p ExecMainStartTimestampMonotonic -p ActiveEnterTimestampMonotonic -p ExecMainExitTimestampMonotonic | paste -sd' '; done
-echo '--- per-unit I/O since boot (DefaultIOAccounting; services and container scopes)'
-for u in $(systemctl list-units --all --plain --no-legend --type=service,scope | awk '{print $1}'); do
-  printf '%s ' "$u"; systemctl show "$u" -p IOReadBytes -p IOReadOperations -p IOWriteBytes | paste -sd' '; done
-echo '--- guest disk counters since boot'; grep -E ' (sda|vda) ' /proc/diskstats
-echo '--- io pressure'; cat /proc/pressure/io
-echo '--- containers'; for c in culvert-clamav culvert; do docker inspect -f '{{.Name}} started={{.State.StartedAt}} health={{if .State.Health}}{{.State.Health.Status}}{{end}}' "$c"
-  docker inspect -f '{{if .State.Health}}{{range .State.Health.Log}}  probe {{.Start}} -> {{.End}} exit={{.ExitCode}}{{"\n"}}{{end}}{{end}}' "$c"; done
-echo '--- clamav container log (timestamps)'; docker logs -t culvert-clamav 2>&1 | head -80
-echo '--- proxy container log (first lines, timestamps)'; docker logs -t culvert 2>&1 | head -60
-echo '--- engine + resume journal (monotonic)'
-journalctl -b --no-pager -o short-monotonic -u containerd -u docker -u culvert-stack-resume 2>&1 | head -250
-echo '--- previous boot: shutdown tail (wall clock, us precision)'
-journalctl -b -1 --no-pager -o short-iso-precise 2>&1 | grep -E 'culvert-os-update|Stopping|Stopped|Reached target|reboot|Shutting|systemd-shutdown|Journal stopped' | tail -60
-echo '--- previous boot last entry / this boot first entry'
-journalctl -b -1 --no-pager -o short-iso-precise -n 1 2>&1 | tail -1; journalctl -b 0 --no-pager -o short-iso-precise 2>&1 | head -2 | tail -1
-echo '--- proxy container log since its start (timestamps)'; docker logs -t --since "$(docker inspect -f '{{.State.StartedAt}}' culvert)" culvert 2>&1 | head -80
-EOS
-}
-# rec_state_valid FILE — the snapshot itself is meaningful: login 200, a valid
-# default action from /api/default-action, the policy persisted and not a draft.
-rec_state_valid() { python3 -c 'import json,sys
-d=json.load(open(sys.argv[1])); p=json.loads(d["policy"]) if d["policy"].startswith("{") else {}
-ok = d["login"]=="200" and p.get("default_action") in ("allow","deny") and p.get("persisted") is True and p.get("draft") is False
-sys.exit(0 if ok else 1)' "$1"; }
-apply_variant() { local v="$1" c
-  [[ "$v" == base ]] && { echo "base: no change"; return 0; }
-  for c in ${v//+/ }; do
-    case "$c" in
-      ra) gpriv <<EOS || return 1
-printf '%s\n' 'ACTION=="add|change", SUBSYSTEM=="block", ENV{DEVTYPE}=="disk", KERNEL=="sd*|vd*|nvme*n*", ATTR{queue/read_ahead_kb}="$LAB_RA_KB"' > /etc/udev/rules.d/60-culvert-lab-readahead.rules
-udevadm control --reload && udevadm trigger --subsystem-match=block --action=change && udevadm settle
-echo "ra: \$(for q in /sys/block/sd*/queue/read_ahead_kb /sys/block/vd*/queue/read_ahead_kb; do [ -e "\$q" ] && echo "\$q=\$(cat \$q)"; done | paste -sd' ')"
-EOS
-      ;;
-      svc) gpriv <<'EOS' || return 1
-u="snapd.service snapd.socket snapd.seeded.service snapd.apparmor.service ModemManager.service udisks2.service multipathd.service multipathd.socket apport.service"
-for x in $u; do systemctl mask "$x" >/dev/null 2>&1 && echo -n "masked:$x "; done; echo
-EOS
-      ;;
-      ci) gpriv <<<'touch /etc/cloud/cloud-init.disabled && echo "ci: cloud-init disabled for later boots"' || return 1 ;;
-      ird) gpriv --timeout 900 <<'EOS' || return 1
-echo 'MODULES=dep' > /etc/initramfs-tools/conf.d/90-culvert-lab.conf
-before=$(stat -c %s "/boot/initrd.img-$(uname -r)")
-update-initramfs -u -k "$(uname -r)" >/dev/null 2>&1 || exit 1
-echo "ird: initrd $before -> $(stat -c %s "/boot/initrd.img-$(uname -r)") bytes"
-EOS
-      ;;
-      *) echo "unknown variant component: $c"; return 1 ;;
-    esac
-  done; }
-recovery_state() { local name="$1" i="$2"
-  rec_state_snapshot "$EV/R-$name-$i-state.json"
-  if rec_state_valid "$EV/R-$name-$i-state.json" && cmp -s "$EV/R-state-baseline.json" "$EV/R-$name-$i-state.json"; then
-    check R "state-$name-$i" pass "admin login, normalized policy (persisted, not draft) + valid default action, CA, image and agent availability equal the pre-reboot baseline"
-  else check R "state-$name-$i" fail "differs from the baseline: $(diff <(python3 -m json.tool "$EV/R-state-baseline.json") <(python3 -m json.tool "$EV/R-$name-$i-state.json") | head -c 600 | tr '\n' ' ')"; fi
-}
-cmd_recovery() { local prof name r w budget i expected=0 ran=0 v0
-  (( LAB_RECOVERY_REBOOTS > 0 )) || return 0
-  if [[ "$LAB_EXTERNAL" == 1 || "$LAB_DISK" != dm ]]; then check R recovery fail "BLOCKED: needs a QEMU guest with LAB_DISK=dm"; return 0; fi
-  gate R recovery || { check R recovery fail "BLOCKED: an earlier gate did not pass"; return 0; }
-  gpriv > "$EV/R-io-accounting.txt" 2>&1 <<'EOS' || true
-install -d /etc/systemd/system.conf.d
-printf '[Manager]\nDefaultIOAccounting=yes\n' > /etc/systemd/system.conf.d/90-culvert-lab-ioaccounting.conf
-systemctl daemon-reexec && echo "DefaultIOAccounting=$(systemctl show -p DefaultIOAccounting --value)"
-EOS
-  check R io-accounting info "LAB-ONLY guest change for attribution: systemd DefaultIOAccounting=yes ($(tail -1 "$EV/R-io-accounting.txt"))"
-  # ClamAV evidence path: an allow rule for the host origin, then prove the
-  # verdict is live BEFORE the first reboot (otherwise the gate measures nothing).
-  rec_origin_start
-  : > "$JAR"; api POST /api/auth/login "{\"user\":\"$ADMIN_USER\",\"pass\":\"$(cat "$SEC/admin-pass")\"}" > /dev/null
-  api POST /api/policy '{"name":"lab-allow-eicar-origin","priority":15,"action":"Allow","destFQDN":"10.0.2.2","sslAction":"Bypass","enabled":true}' > "$EV/R-eicar-rule.txt"
-  v0="$(eicar_verdict)"
-  if [[ "$v0" != av ]]; then check R clamav-evidence fail "BLOCKED: EICAR through the proxy did not draw a ClamAV block before any reboot ($v0)"; rec_origin_stop; return 0; fi
-  # Negative control: with clamd stopped a FRESH body must NOT draw the ClamAV
-  # block (fail-open 200, or a scan-unavailable refusal) — otherwise the
-  # sample is not live clamd evidence. Then clamd must come back.
-  local vdown vup=""
-  gpriv <<<'docker stop -t 10 culvert-clamav >/dev/null' > /dev/null 2>&1 || true
-  vdown="$(eicar_verdict)"
-  gpriv <<<'docker start culvert-clamav >/dev/null' > /dev/null 2>&1 || true
-  for _ in $(seq 1 60); do vup="$(eicar_verdict)"; [[ "$vup" == av ]] && break; sleep 5; done
-  if [[ "$vdown" == av || "$vup" != av ]]; then
-    check R clamav-evidence fail "BLOCKED: the EICAR sample is not live clamd evidence (clamd stopped -> $vdown; restarted -> $vup)"; rec_origin_stop; return 0; fi
-  check R clamav-evidence pass "a fresh EICAR body is answered '403 Blocked by CLAMAV scan' with clamd up, NOT with clamd stopped ($vdown), and again after clamd restarts"
-  rec_state_snapshot "$EV/R-state-baseline.json"
-  if ! rec_state_valid "$EV/R-state-baseline.json"; then
-    check R state-baseline fail "BLOCKED: the pre-reboot baseline is not a valid reference (login 200, valid default action, persisted, not draft): $(head -c 400 "$EV/R-state-baseline.json")"; rec_origin_stop; return 0; fi
-  # Boot-path inventory (fast disk, before any latency is injected).
-  gpriv --timeout 600 > "$EV/R-boot-files.txt" 2>&1 <<'EOS' || true
-ls -l /boot; echo '--- initramfs composition (KiB, top 25)'
-d=$(mktemp -d); unmkinitramfs "/boot/initrd.img-$(uname -r)" "$d" >/dev/null 2>&1 && (cd "$d" && du -sk */usr/lib/modules/*/kernel/* */usr/lib/firmware */usr/lib/modules */usr/lib/x86_64-linux-gnu */usr/share/plymouth 2>/dev/null | sort -rn | head -25; du -sk . ); rm -rf "$d"
-echo '--- read_ahead_kb'; for q in /sys/block/*/queue/read_ahead_kb; do echo "$q $(cat "$q")"; done
-echo '--- enabled units'; systemctl list-unit-files --state=enabled --no-legend | awk '{print $1}' | paste -sd' '
-EOS
-  printf 'variant\tprofile\treboot\trecovery_s\tbudget_s\n' > "$EV/R-summary.tsv"
-  local variant
-  for variant in $LAB_RECOVERY_VARIANTS; do
-  REC_VARIANT="$variant"
-  set_disk_latency 0 0 > /dev/null 2>&1 || true
-  if ! apply_variant "$variant" > "$EV/R-variant-$variant.txt" 2>&1; then
-    check R "variant-$variant" fail "BLOCKED: could not apply lab variant $variant: $(tail -c 300 "$EV/R-variant-$variant.txt")"
-    expected=$((expected + LAB_RECOVERY_REBOOTS * $(wc -w <<<"$LAB_RECOVERY_PROFILES"))); continue; fi
-  check R "variant-$variant" info "LAB-ONLY guest change set '$variant' applied: $(tr '\n' ' ' < "$EV/R-variant-$variant.txt" | head -c 300)"
-  for prof in $LAB_RECOVERY_PROFILES; do
-    IFS=: read -r name r w budget <<<"$prof"
-    [[ "$variant" == base ]] || name="$variant-$name"
-    expected=$((expected + LAB_RECOVERY_REBOOTS))
-    if ! set_disk_latency "$r" "$w" > "$EV/R-$name-dm-table.txt" 2>&1; then
-      check R "profile-$name" fail "BLOCKED: could not set the disk to read ${r}ms / write ${w}ms: $(tail -1 "$EV/R-$name-dm-table.txt")"; continue; fi
-    check R "profile-$name" info "disk: read +${r}ms, write +${w}ms per I/O ($(tr '\n' ' ' < "$EV/R-$name-dm-table.txt" | head -c 160)); budget ${budget}s; ${LAB_RECOVERY_REBOOTS} maintenance reboots"
-    for i in $(seq 1 "$LAB_RECOVERY_REBOOTS"); do
-      ran=$((ran+1))
-      recovery_once "$name" "$i" "$budget" || { check R "profile-$name" fail "stopped after reboot $i; the remaining reboots of this profile did not run"; break; }
-    done
-  done
-  done
-  set_disk_latency 0 0 > /dev/null 2>&1 || true
-  rec_origin_stop
-  if [[ $ran == "$expected" ]]; then check R recovery-cases pass "$ran of $expected profile x reboot cases ran"
-  else check R recovery-cases fail "only $ran of $expected profile x reboot cases ran"; fi
-  redact_tree
-}
-
 cmd_collect() {
   mkdir -p "$EV/guest"
   if { [[ "$LAB_EXTERNAL" == 1 ]] || qemu_alive; } && gop status-json > "$EV/guest/status-json.json" 2>/dev/null; then
@@ -1487,8 +963,7 @@ cmd_down() {
     qemu_alive && kill -9 "$(cat "$WORK/qemu.pid")" 2>/dev/null || true
   fi
   rm -f "$MON_SOCK" "$SER_SOCK"
-  dm_detach
-  [[ "${LAB_KEEP_DISKS:-0}" == 1 ]] || rm -rf "$WORK/overlay.qcow2" "$WORK/base.qcow2" "$WORK/disk.raw" "$WORK/ova" "$WORK/ovfenv" "$WORK/ovfenv.iso"
+  [[ "${LAB_KEEP_DISKS:-0}" == 1 ]] || rm -rf "$WORK/overlay.qcow2" "$WORK/base.qcow2" "$WORK/ova" "$WORK/ovfenv" "$WORK/ovfenv.iso"
   rm -rf "$SEC"; log "down: guest stopped, disposable disks and credentials removed (evidence kept in $EV)"
 }
 failures() { grep -c '"result":"fail"' "$JSONL" 2>/dev/null || true; }
@@ -1501,11 +976,10 @@ case "${1:-}" in
   compare) cmd_compare "${2:?REF}" "${3:?CAND}" ;;
   up) cmd_up ;;
   qualify) cmd_qualify; [[ "$(failures)" == 0 ]] ;;
-  recovery) cmd_recovery; [[ "$(failures)" == 0 ]] ;;
   collect) cmd_collect ;;
   down) cmd_down ;;
   all)
     trap 'cmd_collect || true; cmd_down || true' EXIT
-    cmd_preflight; cmd_up; cmd_qualify; cmd_recovery; n="$(failures)"; log "failures: $n"; [[ "$n" == 0 ]] ;;
+    cmd_preflight; cmd_up; cmd_qualify; n="$(failures)"; log "failures: $n"; [[ "$n" == 0 ]] ;;
   *) sed -n '2,32p' "$0"; exit 2 ;;
 esac

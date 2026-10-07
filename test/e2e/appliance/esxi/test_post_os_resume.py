@@ -11,14 +11,18 @@ spec.loader.exec_module(resume)
 
 class ResumeTests(unittest.TestCase):
     def test_exact_shared_tail_excludes_completed_mutations(self):
-        source = Path(__file__).parents[1] / 'lab/appliance-lab.sh'
-        body = resume.tail(source.read_bytes())
+        source = Path(__file__).with_name('fixtures') / 'post-os-resume-historical.sh'
+        historical = source.read_bytes().replace(b'\r\n', b'\n').replace(b'\n', b'\r\n')
+        body = resume.tail(historical)
         self.assertIn("culvert-os-update reboot", body)
         self.assertIn('api GET /api/backups', body)
         for forbidden in ('culvert-os-update os', 'signed_update_rollback', 'POST /api/setup'):
             self.assertNotIn(forbidden, body)
         with self.assertRaisesRegex(ValueError, 'unexpected shared'):
-            resume.tail(source.read_bytes() + b'\n')
+            resume.tail(historical + b'\n')
+        current = Path(__file__).parents[1] / 'lab/appliance-lab.sh'
+        with self.assertRaisesRegex(ValueError, 'unexpected shared'):
+            resume.tail(current.read_bytes())
 
     def test_reentry_after_reboot_dispatch_refused(self):
         with tempfile.TemporaryDirectory() as directory:

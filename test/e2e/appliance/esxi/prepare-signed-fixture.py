@@ -61,8 +61,12 @@ def private_parent(directory):
                     'fixture directory contains existing evidence or unexpected files')
 
 
-def verify_sources():
-    provenance = {'source_revision': SOURCE_REVISION, 'files': {}}
+def verify_sources(source_revision=SOURCE_REVISION):
+    spec = importlib.util.spec_from_file_location('fixture_candidate_identities', HERE / 'candidate-identities.py')
+    identities = importlib.util.module_from_spec(spec); spec.loader.exec_module(identities)
+    identities.source_profile(source_revision)
+    require(SOURCE_HASHES == identities.FIXTURE_HASHES, 'reviewed fixture pins differ')
+    provenance = {'source_revision': source_revision, 'files': {}}
     for name, expected in SOURCE_HASHES.items():
         require(hashlib.sha256((SOURCES / name).read_bytes()).hexdigest() == expected,
                 'fixture source bytes mismatch')
@@ -95,14 +99,14 @@ def signed_request(directory, request, prior=None):
     return raw
 
 
-def generate(directory, baseline, target, registry_address):
+def generate(directory, baseline, target, registry_address, source_revision=SOURCE_REVISION):
     directory = directory.absolute()
     validate_refs(baseline, target)
     address = ipaddress.ip_address(registry_address)
     require(address.version == 4 and str(address) == registry_address and not address.is_unspecified
             and not address.is_multicast, 'explicit IPv4 registry address required')
     private_parent(directory)
-    provenance = verify_sources()
+    provenance = verify_sources(source_revision)
     if (directory / 'target-digest').exists():
         observed = (directory / 'target-digest').read_text().strip().removeprefix('sha256:')
         require(observed == target.rsplit(':', 1)[1], 'prepared registry target digest mismatch')
@@ -127,7 +131,7 @@ def generate(directory, baseline, target, registry_address):
     proof = json.loads((directory / 'proof-baseline.json').read_text())
     index = json.loads(base64.b64decode(proof['index'], validate=True))
     report = ('TEST-ONLY ESXi signed lifecycle fixture; never part of the deliverable OVA.\n'
-              f'Source revision: {SOURCE_REVISION}\n'
+              f'Source revision: {source_revision}\n'
               'Source: test/e2e/release-proof-fixture/main.go and request.py (exact Git bytes).\n'
               'Compiler: go1.26.8; signing key generated freshly in memory and never saved.\n'
               f'Baseline: {baseline}\nTarget: {target}\nRegistry address: {registry_address}\n'
@@ -147,17 +151,18 @@ def generate(directory, baseline, target, registry_address):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--source-revision', default=SOURCE_REVISION)
     parser.add_argument('--directory', type=Path, required=True)
     parser.add_argument('--baseline', required=True)
     parser.add_argument('--target', required=True)
     parser.add_argument('--registry-address', required=True)
     args = parser.parse_args()
     try:
-        generate(args.directory, args.baseline, args.target, args.registry_address)
+        generate(args.directory, args.baseline, args.target, args.registry_address, args.source_revision)
     except Exception:
         print('Signed fixture preparation refused or incomplete; preserve output and inspect locally; no overwrite.', file=sys.stderr)
         return 90
-    print('TEST-ONLY signed fixture generated from ' + SOURCE_REVISION + '; registry CA must be supplied separately.')
+    print('TEST-ONLY signed fixture generated from ' + args.source_revision + '; registry CA must be supplied separately.')
     return 0
 
 
