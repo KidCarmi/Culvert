@@ -61,6 +61,17 @@ Three things are owned explicitly so that nothing else is left on the screen:
   case; the console's own repair does not depend on it.
   `DeviceTimeout=0.1` also means a graphics device that appears later (a boot
   entry without `nomodeset`) is ignored by the splash, which stays text.
+* **No splash without a display.** On a machine with no display controller (a
+  serial-only VM) nobody can see the splash, but while it is shown it would
+  hold back kernel messages from the serial console and capture systemd's
+  status lines. The initramfs message script ends Plymouth there, and
+  `plymouth-start.service` carries `ExecCondition=culvert-has-display` so the
+  real root does not start it again; the serial console then carries the
+  whole boot. "Display" means a PCI display-class device (`0x03xxxx`): the
+  kernel registers its VGA text console even with no adapter, so the console
+  driver cannot tell the two apart. With the old 8 s wait a fast serial-only
+  boot happened to finish before the splash appeared; the 0.1 s wait made the
+  case visible (lab: serial lost every `[ OK ]` line).
 * **Kernel messages on their own console.** `culvert-kernel-log-vt.service`
   runs before the splash ends and routes the kernel's VT output to tty12
   (`setlogcons 12`), seeding it with the kernel log so far. Alt+F12 shows it,
@@ -77,8 +88,11 @@ Three things are owned explicitly so that nothing else is left on the screen:
   console-on on hide; noble `ubuntu-text.patch`), serial included. They stay
   in the kernel log and journal; Esc shows the boot messages Plymouth has
   captured. This is the packaged renderer's behaviour, not a Culvert setting.
-  So is the one-way toggle: a second Esc does not return to the splash (the
-  details view stays until the splash ends).
+  It applies only while a splash is on screen: a machine with a display and a
+  serial port loses kernel lines on serial for that window; a serial-only
+  machine has no splash (see "No splash without a display"). So is the
+  one-way toggle: a second Esc does not return to the splash (the details
+  view stays until the splash ends).
 
 `/dev/console`: the kernel command line keeps the cloud image's
 `console=tty1 console=ttyS0`, so `/dev/console` is ttyS0. That holds on ESXi
@@ -95,7 +109,7 @@ installs `plymouth-label` and `fontconfig` too. The installer rebuilds every
 installed initramfs and rejects one missing the Culvert theme, the native
 renderer, the message script or `plymouthd.conf` (presence: Ubuntu's hook
 copies the file verbatim). The outer build independently compares the
-selected themes, the GRUB drop-in and the four console files with source
+selected themes, the GRUB drop-in and the six console files with source
 hashes.
 
 Normal boot adds `splash plymouth.ignore-serial-consoles nomodeset` to the

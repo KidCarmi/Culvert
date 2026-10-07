@@ -1,0 +1,15 @@
+#!/bin/sh
+# Exit 0 when the machine has a display controller (a PCI display-class device,
+# 0x03xxxx), 1 when it does not. A serial-only VM has none; ESXi's SVGA and any
+# emulated VGA are display class. The kernel's console driver cannot tell the
+# two apart (it registers its VGA text console even with no adapter).
+#
+# Used as ExecCondition= of plymouth-start.service: a splash nobody can see would
+# switch kernel console output off for every console, serial included. The same
+# test runs in the initramfs (culvert-splash-message); keep the two identical.
+sysfs="${CULVERT_SPLASH_SYSFS:-/sys}"
+for class in "$sysfs"/bus/pci/devices/*/class; do
+    [ -r "$class" ] || continue
+    case "$(cat "$class" 2>/dev/null)" in 0x03*) exit 0 ;; esac
+done
+exit 1

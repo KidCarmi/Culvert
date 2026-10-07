@@ -105,6 +105,9 @@ for BOOT_SPLASH_MODULE in lib usr/lib; do
     cmp "$SOURCE/culvert-kernel-log-vt" "$BOOT_SPLASH_ROOT/opt/culvert-appliance/bin/culvert-kernel-log-vt"
     cmp "$SOURCE/culvert-kernel-log-vt.service" "$BOOT_SPLASH_ROOT/etc/systemd/system/culvert-kernel-log-vt.service"
     cmp "$SOURCE/plymouthd.conf" "$BOOT_SPLASH_ROOT/etc/plymouth/plymouthd.conf"
+    cmp "$SOURCE/culvert-has-display" "$BOOT_SPLASH_ROOT/opt/culvert-appliance/bin/culvert-has-display"
+    [[ -x "$BOOT_SPLASH_ROOT/opt/culvert-appliance/bin/culvert-has-display" ]]
+    cmp "$SOURCE/plymouth-start-headless.conf" "$BOOT_SPLASH_ROOT/etc/systemd/system/plymouth-start.service.d/culvert-headless.conf"
     [[ -x "$BOOT_SPLASH_ROOT/etc/initramfs-tools/scripts/init-premount/culvert-splash-message" && -x "$BOOT_SPLASH_ROOT/opt/culvert-appliance/bin/culvert-kernel-log-vt" ]]
     [[ $(readlink "$BOOT_SPLASH_ROOT/etc/systemd/system/sysinit.target.wants/culvert-kernel-log-vt.service") == ../culvert-kernel-log-vt.service ]]
     {
@@ -179,7 +182,7 @@ sh -euc '
 # Execute only the actual overlay copy loop against a fixture repository, with
 # decoy docs/tests present. The guest installer and build are never executed.
 mkdir -p "$TEST_DIR/repo/appliance/boot-splash" "$TEST_DIR/overlay/opt/culvert-appliance/boot-splash"
-for asset in install.sh install-lib.sh culvert.plymouth 99-culvert-splash.cfg culvert-splash-message culvert-kernel-log-vt culvert-kernel-log-vt.service plymouthd.conf; do
+for asset in install.sh install-lib.sh culvert.plymouth 99-culvert-splash.cfg culvert-splash-message culvert-kernel-log-vt culvert-kernel-log-vt.service plymouthd.conf culvert-has-display plymouth-start-headless.conf; do
     cp "$SOURCE/$asset" "$TEST_DIR/repo/appliance/boot-splash/$asset"
 done
 touch "$TEST_DIR/repo/appliance/boot-splash/README.md" "$TEST_DIR/repo/appliance/boot-splash/private_test.sh"
@@ -187,9 +190,9 @@ copy_loop=$(sed -n '/^for splash_file in /,/^done$/p' "$HERE/build-ova.sh")
 [[ -n $copy_loop ]]
 REPO="$TEST_DIR/repo" OV="$TEST_DIR/overlay" bash -euo pipefail -c "$copy_loop"
 actual=$(find "$TEST_DIR/overlay/opt/culvert-appliance/boot-splash" -type f -printf '%f\n' | sort)
-expected=$(printf '%s\n' install.sh install-lib.sh culvert.plymouth 99-culvert-splash.cfg culvert-splash-message culvert-kernel-log-vt culvert-kernel-log-vt.service plymouthd.conf | sort)
+expected=$(printf '%s\n' install.sh install-lib.sh culvert.plymouth 99-culvert-splash.cfg culvert-splash-message culvert-kernel-log-vt culvert-kernel-log-vt.service plymouthd.conf culvert-has-display plymouth-start-headless.conf | sort)
 [[ $actual == "$expected" ]]
-for asset in install.sh install-lib.sh culvert.plymouth 99-culvert-splash.cfg culvert-splash-message culvert-kernel-log-vt culvert-kernel-log-vt.service plymouthd.conf; do
+for asset in install.sh install-lib.sh culvert.plymouth 99-culvert-splash.cfg culvert-splash-message culvert-kernel-log-vt culvert-kernel-log-vt.service plymouthd.conf culvert-has-display plymouth-start-headless.conf; do
     cmp "$SOURCE/$asset" "$TEST_DIR/overlay/opt/culvert-appliance/boot-splash/$asset"
 done
 
@@ -228,5 +231,43 @@ rm -f "$TEST_DIR/klvt/trace"
 sed "s|/dev/tty\$vt|$TEST_DIR/klvt/absent/tty\$vt|" "$SOURCE/culvert-kernel-log-vt" >"$TEST_DIR/klvt/closed.sh"
 PATH="$TEST_DIR/klvt/bin:$PATH" "$klvt_shell" "$TEST_DIR/klvt/closed.sh" 2>/dev/null || fail 'kernel-log VT script did not degrade when the VT cannot be opened'
 [[ ! -e "$TEST_DIR/klvt/trace" ]] || fail 'console routing changed although the VT could not be opened'
+
+# Headless boots get no splash. The message script (initramfs) and
+# culvert-has-display (real root, ExecCondition of plymouth-start) must reach the
+# same verdict on the same sysfs: a display-class PCI device present, absent,
+# only non-display devices, or no PCI tree at all.
+hd_shell=$(command -v dash || command -v sh)
+mkdir -p "$TEST_DIR/hd/bin"
+printf '#!/bin/sh\necho "plymouth $*" >>"%s/hd/trace"\n[ "$1" != --ping ] || exit "${HD_PING_RC:-0}"\n' "$TEST_DIR" >"$TEST_DIR/hd/bin/plymouth"
+chmod +x "$TEST_DIR/hd/bin/plymouth"
+hd_sysfs() { rm -rf "$TEST_DIR/hd/sys"; mkdir -p "$TEST_DIR/hd/sys/bus/pci/devices"; local dev cls
+    for dev in "$@"; do cls=${dev#*=}; mkdir -p "$TEST_DIR/hd/sys/bus/pci/devices/${dev%%=*}"
+        printf '%s\n' "$cls" >"$TEST_DIR/hd/sys/bus/pci/devices/${dev%%=*}/class"; done; }
+hd_case() { local want=$1 rc; shift; hd_sysfs "$@"; rm -f "$TEST_DIR/hd/trace"
+    rc=0; CULVERT_SPLASH_SYSFS="$TEST_DIR/hd/sys" "$hd_shell" "$SOURCE/culvert-has-display" || rc=$?
+    PATH="$TEST_DIR/hd/bin:$PATH" CULVERT_SPLASH_SYSFS="$TEST_DIR/hd/sys" "$hd_shell" "$SOURCE/culvert-splash-message" \
+        || fail "splash message script failed ($*)"
+    if [[ $want == display ]]; then
+        [[ $rc == 0 ]] || fail "culvert-has-display: no display reported for $*"
+        grep -q '^plymouth display-message --text=Starting system services' "$TEST_DIR/hd/trace" || fail "display boot did not get the splash line ($*)"
+        ! grep -q '^plymouth quit' "$TEST_DIR/hd/trace" || fail "display boot quit the splash ($*)"
+    else
+        [[ $rc == 1 ]] || fail "culvert-has-display: display reported (rc=$rc) for $*"
+        grep -q '^plymouth quit' "$TEST_DIR/hd/trace" || fail "headless boot kept the splash ($*)"
+        ! grep -q '^plymouth display-message' "$TEST_DIR/hd/trace" || fail "headless boot drew the splash line ($*)"
+    fi; }
+hd_case display 0000:00:02.0=0x030000                              # VGA (ESXi SVGA, QEMU std/vmware)
+hd_case display 0000:00:01.0=0x060100 0000:00:0f.0=0x038000        # other display class among bridges
+hd_case headless 0000:00:01.0=0x060100 0000:00:03.0=0x020000      # bridge + NIC only (serial-only VM)
+hd_case headless                                                   # no PCI devices at all
+rm -rf "$TEST_DIR/hd/sys"                                          # no PCI tree at all
+rc=0; CULVERT_SPLASH_SYSFS="$TEST_DIR/hd/sys" "$hd_shell" "$SOURCE/culvert-has-display" || rc=$?
+[[ $rc == 1 ]] || fail "culvert-has-display: display reported with no sysfs PCI tree"
+# Plymouth not running: the message script does nothing at all.
+hd_sysfs 0000:00:02.0=0x030000; rm -f "$TEST_DIR/hd/trace"
+HD_PING_RC=1 PATH="$TEST_DIR/hd/bin:$PATH" CULVERT_SPLASH_SYSFS="$TEST_DIR/hd/sys" "$hd_shell" "$SOURCE/culvert-splash-message" || fail 'message script failed without plymouth'
+[[ $(cat "$TEST_DIR/hd/trace") == 'plymouth --ping' ]] || fail 'message script acted although plymouth is not running'
+grep -qx 'ExecCondition=/opt/culvert-appliance/bin/culvert-has-display' "$SOURCE/plymouth-start-headless.conf" || fail 'plymouth-start drop-in lost its display condition'
+grep -qx '\[Service\]' "$SOURCE/plymouth-start-headless.conf" || fail 'plymouth-start drop-in has no [Service] section'
 
 echo 'PASS: splash staging, alternatives/initramfs/GRUB ordering, failure fences, GRUB preservation, runtime-only overlay'

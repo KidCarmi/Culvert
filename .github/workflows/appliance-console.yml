@@ -114,6 +114,7 @@ jobs:
           bash -n appliance/boot-splash/99-culvert-splash.cfg
           sh -n appliance/boot-splash/culvert-splash-message
           sh -n appliance/boot-splash/culvert-kernel-log-vt
+          sh -n appliance/boot-splash/culvert-has-display
           bash -n appliance/build/boot-splash_test.sh
           sudo bash appliance/console/install_test.sh
           bash appliance/os-maintenance/power_test.sh
