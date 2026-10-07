@@ -91,3 +91,39 @@ and actual generated guest-payload identity selection. Both approved fonts were
 provided. Shared/adapter Bash syntax, launcher PowerShell parsing, exact product
 blob hashes and real signed-fixture source verification passed. No VM calls were
 made during reconciliation.
+
+## Registry preparation firstboot precondition continuation
+
+The initial 0da controller imported and authenticated the replacement before
+firstboot had finished. Its registry script returned the exact `first boot
+incomplete` exception before acquiring locks or creating registry paths, trust or
+containers. This failed attempt remains unchanged. An authenticated read-only
+observation subsequently recorded complete.done, the same product and absence of
+registry paths and fixture containers.
+
+A separate controller can run only this proven precondition continuation:
+
+```powershell
+python test/e2e/appliance/esxi/prepare-lab-registry.py --scope NEW_SCOPE --bind CONTROLLER_IP --resume-firstboot-incomplete --original-controller-root D:/AI/Culvert-esxi-2e3-controller
+```
+
+The new scope points to the original owned run directory but its own new freeze
+manifest. `--original-controller-root` is required only for this continuation.
+The helper verifies the original 0da freeze, exact helper/payload/failure hashes,
+blocked marker and owned UUID, and unique authenticated results for both the
+failure and `.tools/private-operations/firstboot-registry-observation.out` in that
+original checkout. There is no general failed-operation retry flag.
+
+The separate `registry-preparation-firstboot-continuation-*` records preserve the
+original marker and transport. A read-only authenticated wait checks product,
+boot and absence of registry state, waits at most 900s for completion, then checks
+again before the unchanged registry payload can run. A missing/duplicate result,
+changed boot/source, changed original evidence or failed wait blocks mutation.
+The new continuation marker is exclusive even after wait failure; no automatic
+retry follows. Normal fresh registry preparation also waits before dispatch.
+
+The registry trust/dispatch receipts record the preparation controller and helper
+hash, its provisioning observation and original-failure binding. After successful
+preparation, lifecycle and the three measured boots may continue on unchanged 0da
+and its original scope. This change does not require reimport or alter the
+retained OVA, real fixture generator, access boundary or measurement controller.
