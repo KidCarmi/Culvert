@@ -148,7 +148,7 @@ func securityMiddleware(next http.Handler) http.Handler {
 		// doesn't match our Host header it's a cross-site forgery attempt.
 		// Requests without Origin (curl, API clients) are allowed through.
 		isMutating := r.Method == http.MethodPost || r.Method == http.MethodPut || r.Method == http.MethodDelete
-		if origin != "" && !isSameOrigin(r, origin) && isMutating {
+		if origin != "" && !isSameOrigin(r, origin) && isMutating && !isCrossSiteBindingEndpoint(r) {
 			http.Error(w, "Forbidden", http.StatusForbidden)
 			return
 		}
@@ -169,6 +169,19 @@ func securityMiddleware(next http.Handler) http.Handler {
 
 		next.ServeHTTP(w, r)
 	})
+}
+
+// isCrossSiteBindingEndpoint reports the one request whose legitimate caller
+// is a cross-site form POST: the SAML assertion consumer service. In the SAML
+// HTTP-POST binding the IdP's page posts the response to us, so the browser
+// sends the IdP's Origin (or "null" under a no-referrer policy); the same-origin
+// check above refused every such login with 403 (lab SAML replay, #1528). The
+// ACS does not rely on Origin: the assertion must carry a valid IdP signature,
+// answer an AuthnRequest this SP issued (InResponseTo), and redeem a
+// server-stored, single-use RelayState (authSAMLCallback, ExchangeAssertion).
+// Exact path and method only: every other endpoint keeps the Origin check.
+func isCrossSiteBindingEndpoint(r *http.Request) bool {
+	return r.Method == http.MethodPost && r.URL.Path == "/auth/saml/callback"
 }
 
 // isSameOrigin returns true when the Origin header matches the request's Host.
