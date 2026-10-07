@@ -51,7 +51,7 @@ jobs:
   guest-boot:
     name: "Lab · ${{ matrix.variant }} OVA: build + QEMU guest boot + qualify"
     # A push whose head commit says [fdisk-only] reruns F-DISK-1 alone.
-    if: ${{ !contains(github.event.head_commit.message, '[fdisk-only]') && !contains(github.event.head_commit.message, '[sidecar-scan]') && !contains(github.event.head_commit.message, '[boot-console]') && !contains(github.event.head_commit.message, '[lab-skip]') }}
+    if: ${{ !contains(github.event.head_commit.message, '[fdisk-only]') && !contains(github.event.head_commit.message, '[sidecar-scan]') && !contains(github.event.head_commit.message, '[boot-console]') && !contains(github.event.head_commit.message, '[lab-skip]') && !contains(github.event.head_commit.message, '[saml-replay]') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 240
     strategy:
@@ -506,7 +506,7 @@ jobs:
 
   f-disk-1:
     name: "Lab · F-DISK-1 on the bounded nested-Docker host"
-    if: ${{ !contains(github.event.head_commit.message, '[sidecar-scan]') && !contains(github.event.head_commit.message, '[boot-console]') && !contains(github.event.head_commit.message, '[lab-skip]') }}
+    if: ${{ !contains(github.event.head_commit.message, '[sidecar-scan]') && !contains(github.event.head_commit.message, '[boot-console]') && !contains(github.event.head_commit.message, '[lab-skip]') && !contains(github.event.head_commit.message, '[saml-replay]') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     steps:
@@ -664,6 +664,80 @@ jobs:
           retention-days: 30
           if-no-files-found: warn
 
+  # ASTRA (#1528): cookie-purpose replay through a REAL SAML login. The test
+  # (test/e2e/appliance/lab/go/) is copied into a checkout of the EXACT
+  # candidate source and drives the product's own handlers over real HTTP:
+  # /auth/select -> AuthnRequest + RelayState -> signed response POSTed to
+  # /auth/saml/callback with the IdP's Origin, as a browser does -> portal
+  # session; then each cookie is refused by the other plane, with positive
+  # controls. The IdP is an ephemeral in-process signer (key never written):
+  # SP flow and cookie purposes only, not vendor interoperability, not OIDC.
+  # cd8e4450 is the pre-fix head and MUST fail at the callback (403, the
+  # admin-plane Origin check); 2a82320c carries the fix and MUST pass.
+  # Runs only when the head commit says [saml-replay].
+  saml-cookie-purpose:
+    name: "Lab · SAML login + cookie-purpose replay · ${{ matrix.label }}"
+    if: ${{ contains(github.event.head_commit.message, '[saml-replay]') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: pre-fix-cd8e4450
+            candidate_sha: cd8e44505bd329e5de675592ad4c23f92a534d55
+            expect: fail
+          - label: fix-2a82320c
+            candidate_sha: 2a82320c746a6d146df19a6f5af9676d76b72286
+            expect: pass
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: lab
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ matrix.candidate_sha }}
+          path: candidate
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: candidate/go.mod
+          cache: false
+      - name: Run the replay against the exact candidate source
+        run: |
+          set -euo pipefail
+          ev="$RUNNER_TEMP/evidence"; mkdir -p "$ev"
+          cd candidate
+          got="$(git rev-parse HEAD)"
+          [ "$got" = "${{ matrix.candidate_sha }}" ] || { echo "::error::checkout $got != ${{ matrix.candidate_sha }}"; exit 1; }
+          cp ../lab/test/e2e/appliance/lab/go/lab_saml_cookie_purpose_test.go ./lab_saml_cookie_purpose_test.go
+          {
+            echo "candidate_sha=$got"
+            echo "test_sha256=$(sha256sum lab_saml_cookie_purpose_test.go | cut -d' ' -f1)"
+            echo "lab_sha=$(git -C ../lab rev-parse HEAD)"
+            go version
+          } | tee "$ev/binding.txt"
+          rc=0
+          go test -count=1 -run '^TestLabSAMLCookiePurposeReplay$' -v . > "$ev/replay.log" 2>&1 || rc=$?
+          cat "$ev/replay.log"
+          echo "go_test_exit=$rc expect=${{ matrix.expect }}" | tee -a "$ev/binding.txt"
+          rm -f lab_saml_cookie_purpose_test.go
+          if [ "${{ matrix.expect }}" = pass ]; then
+            [ "$rc" = 0 ] || { echo "::error::replay failed on the fixed candidate"; exit 1; }
+            grep -q -- '--- PASS: TestLabSAMLCookiePurposeReplay' "$ev/replay.log"
+            if grep -q 'FAIL | ' "$ev/replay.log"; then echo "::error::a cookie-purpose row failed"; exit 1; fi
+            [ "$(grep -c 'PASS | ' "$ev/replay.log")" -ge 8 ] || { echo "::error::fewer than 8 PASS rows"; exit 1; }
+          else
+            [ "$rc" != 0 ] || { echo "::error::pre-fix candidate passed; the defect did not reproduce"; exit 1; }
+            grep -q 'SAML callback: 403' "$ev/replay.log" || { echo "::error::pre-fix failure is not the callback 403"; exit 1; }
+          fi
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: appliance-lab-saml-replay-${{ matrix.label }}
+          path: ${{ runner.temp }}/evidence
+          retention-days: 30
+          if-no-files-found: warn
+
   # ASTRA (#1528): the Deep gate scans a sidecar it builds itself
   # (config 3f6a669b…); the OVA ships the archive baked at OVA build time
   # (config 098ca807…). Same tag, different bytes: a coverage gap. This job
@@ -674,7 +748,7 @@ jobs:
   # Runs only when the head commit says [sidecar-scan].
   ova-sidecar-scan:
     name: "Lab · candidate OVA's baked ClamAV sidecar: exact-byte scan + SBOM"
-    if: ${{ contains(github.event.head_commit.message, '[sidecar-scan]') }}
+    if: ${{ contains(github.event.head_commit.message, '[sidecar-scan]') && !contains(github.event.head_commit.message, '[saml-replay]') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     env:
