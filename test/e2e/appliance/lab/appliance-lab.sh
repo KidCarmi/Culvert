@@ -1751,9 +1751,9 @@ EOS
   vqemu -vga none -display none -chardev "socket,id=ser0,path=$SER_SOCK,server=on,wait=off,logfile=$WORK/console.log,logappend=on" -serial chardev:ser0
   vwait_ready 900 || vcheck V5 serial-only-boot fail "not ready without a display adapter"
   sleep 10; cp "$WORK/console.log" "$EV/V5-serial.log"
-  if grep -qa 'Linux version' "$EV/V5-serial.log" && grep -qaE '\[ *OK *\]' "$EV/V5-serial.log" && grep -qa 'login:' "$EV/V5-serial.log"; then
+  if grep -qa 'Linux version' "$EV/V5-serial.log" && grep -qaE 'OK .*(Started|Finished|Reached)' "$EV/V5-serial.log" && grep -qa 'login:' "$EV/V5-serial.log"; then
     vcheck V5 serial-only-boot pass "serial carries the kernel log ($(grep -ac '^\[ *[0-9]' "$EV/V5-serial.log") lines), systemd status and a login prompt"
-  else vcheck V5 serial-only-boot fail "serial log incomplete (kernel=$(grep -ac 'Linux version' "$EV/V5-serial.log") ok=$(grep -acE '\[ *OK *\]' "$EV/V5-serial.log") login=$(grep -ac 'login:' "$EV/V5-serial.log"))"; fi
+  else vcheck V5 serial-only-boot fail "serial log incomplete (kernel=$(grep -ac 'Linux version' "$EV/V5-serial.log") ok=$(grep -acE 'OK .*(Started|Finished|Reached)' "$EV/V5-serial.log") login=$(grep -ac 'login:' "$EV/V5-serial.log"))"; fi
   redact_tree
 }
 failures() { grep -c '"result":"fail"' "$JSONL" 2>/dev/null || true; }

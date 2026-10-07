@@ -53,7 +53,7 @@ jobs:
   guest-boot:
     name: "Lab · ${{ matrix.variant }} OVA: build + QEMU guest boot + qualify"
     # A push whose head commit says [fdisk-only] reruns F-DISK-1 alone.
-    if: ${{ !contains(github.event.head_commit.message, '[fdisk-only]') && !contains(github.event.head_commit.message, '[sidecar-scan]') && !contains(github.event.head_commit.message, '[boot-console]') }}
+    if: ${{ !contains(github.event.head_commit.message, '[fdisk-only]') && !contains(github.event.head_commit.message, '[sidecar-scan]') && !contains(github.event.head_commit.message, '[boot-console]') && !contains(github.event.head_commit.message, '[lab-skip]') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 240
     strategy:
@@ -481,7 +481,7 @@ jobs:
 
   f-disk-1:
     name: "Lab · F-DISK-1 on the bounded nested-Docker host"
-    if: ${{ !contains(github.event.head_commit.message, '[sidecar-scan]') && !contains(github.event.head_commit.message, '[boot-console]') }}
+    if: ${{ !contains(github.event.head_commit.message, '[sidecar-scan]') && !contains(github.event.head_commit.message, '[boot-console]') && !contains(github.event.head_commit.message, '[lab-skip]') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     steps:
