@@ -553,14 +553,25 @@ func TestForwardView_ConcurrentReadersAndMutators(t *testing.T) {
 		go func(n int) {
 			defer wg.Done()
 			cats := []Category{"Social Media", "Corp Internal", "News", "Churn"}
-			var sink bool
+			// Every verdict is CONSUMED, and with an `if` rather than three
+			// assignments to one variable: the latter are dead stores
+			// (staticcheck SA4006), and `||` would short-circuit past the
+			// later probes, which are the point — each reads a different
+			// index through the view while the mutators below replace them.
+			matched := 0
 			for !stop.Load() {
 				c := cats[n%len(cats)]
-				sink = s.MatchesHost(c, "a.b.example.com")
-				sink = s.MatchesHostAdmin(c, "intranet.corp.invalid")
-				sink = s.MatchesHost(c, "uncategorized.example.net")
+				if s.MatchesHost(c, "a.b.example.com") {
+					matched++
+				}
+				if s.MatchesHostAdmin(c, "intranet.corp.invalid") {
+					matched++
+				}
+				if s.MatchesHost(c, "uncategorized.example.net") {
+					matched++
+				}
 			}
-			_ = sink
+			_ = matched
 		}(i)
 	}
 
