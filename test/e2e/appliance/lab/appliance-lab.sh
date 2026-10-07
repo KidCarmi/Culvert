@@ -1486,6 +1486,114 @@ cmd_down() {
   [[ "${LAB_KEEP_DISKS:-0}" == 1 ]] || rm -rf "$WORK/overlay.qcow2" "$WORK/base.qcow2" "$WORK/disk.raw" "$WORK/ova" "$WORK/ovfenv" "$WORK/ovfenv.iso"
   rm -rf "$SEC"; log "down: guest stopped, disposable disks and credentials removed (evidence kept in $EV)"
 }
+# ── adoption: does an appliance with the OLD sidecar cached adopt a new one? ─
+# ASTRA (#1528): a sidecar content change ships under a NEW local tag, because
+# Compose builds the sidecar only when its tag is absent. An application
+# upgrade (what the maintenance agent does: retag culvert/proxy:pinned, then
+# `compose up`) does not touch host components (upgrade-runbook.md "Host
+# components"), so the old compose file and sidecar stay. The documented
+# refresh is re-running the installer (`culvert-firstboot --repair-agent` on
+# the appliance), which re-extracts the pinned image's bundle — compose file
+# AND appliance/clamav — and lets Compose build the new tag. Measured here on
+# a booted OVA that carries the old tag, against the new candidate image:
+#   A1 app-only upgrade → sidecar unchanged (documented)
+#   A2 refresh with outbound 80/443 blocked → old stack keeps serving; what
+#      the host compose file names afterwards is recorded
+#   A3 refresh online → new tag built and running with the fixed packages,
+#      proxy still the upgraded image, enforcement + ClamAV verdicts live
+#   A4 maintenance reboot → the new sidecar is what comes back
+# Inputs: LAB_ADOPT_IMAGE_TAR (docker-save tar of the new candidate, tagged
+# culvert:ci-smoke), LAB_ADOPT_IMAGE_ID, LAB_ADOPT_OLD_REF, LAB_ADOPT_NEW_REF,
+# LAB_ADOPT_PKGS (the new sidecar's sorted pcre2/zlib/nghttp2-libs versions).
+adopt_state() { local out="$1"
+  gpriv --timeout 300 > "$out" 2>&1 <<EOS || true
+cd /srv/culvert
+echo "compose-ref=\$(awk '/^  clamav:/{f=1} f&&/^    image:/{print \$2; exit}' docker-compose.yml)"
+echo "clam-image=\$(docker inspect culvert-clamav -f '{{.Config.Image}}' 2>/dev/null)"
+echo "clam-id=\$(docker inspect culvert-clamav -f '{{.Image}}' 2>/dev/null)"
+echo "clam-state=\$(docker inspect culvert-clamav -f '{{.State.Status}}/{{if .State.Health}}{{.State.Health.Status}}{{end}}' 2>/dev/null)"
+echo "clam-pkgs=\$(docker exec culvert-clamav sh -c "apk info -v 2>/dev/null | grep -E '^(pcre2|zlib|nghttp2-libs)-[0-9]' | sort | tr '\n' ' '" 2>/dev/null)"
+echo "proxy-id=\$(docker inspect culvert -f '{{.Image}}' 2>/dev/null)"
+echo "new-tag-present=\$(docker image inspect '$LAB_ADOPT_NEW_REF' >/dev/null 2>&1 && echo yes || echo no)"
+EOS
+}
+kv() { grep -m1 "^$2=" "$1" | cut -d= -f2- | tr -d '\r' | sed 's/[[:space:]]*$//'; }
+adopt_wait_clam_healthy() { local f="$1" i
+  for i in $(seq 1 60); do adopt_state "$f"; [[ "$(kv "$f" clam-state)" == running/healthy ]] && return 0; sleep 15; done; return 1; }
+adopt_compose_up() { printf '%s\n' 'cd /srv/culvert' \
+  'if [ -f docker-compose.maint-agent.yml ] && grep -q "^CULVERT_MAINT_GID=" .env; then docker compose -f docker-compose.yml -f docker-compose.maint-agent.yml up -d; else docker compose up -d; fi'; }
+cmd_adoption() { local f old new rc c v t
+  : "${LAB_ADOPT_IMAGE_TAR:?}" "${LAB_ADOPT_IMAGE_ID:?}" "${LAB_ADOPT_OLD_REF:?}" "${LAB_ADOPT_NEW_REF:?}" "${LAB_ADOPT_PKGS:?}"
+  gate A adoption || { check A adoption fail "BLOCKED: an earlier gate did not pass"; return 0; }
+  rec_origin_start; ln -sf "$LAB_ADOPT_IMAGE_TAR" "$WORK/eicar-origin/culvert-image.tar"
+  : > "$JAR"; api POST /api/auth/login "{\"user\":\"$ADMIN_USER\",\"pass\":\"$(cat "$SEC/admin-pass")\"}" > /dev/null
+  api POST /api/policy '{"name":"lab-allow-eicar-origin","priority":15,"action":"Allow","destFQDN":"10.0.2.2","sslAction":"Bypass","enabled":true}' > "$EV/A-eicar-rule.txt"
+  # A0 baseline: the OVA's own sidecar under the OLD tag.
+  f="$EV/A0-state.txt"; adopt_state "$f"; old="$(kv "$f" clam-id)"
+  if [[ "$(kv "$f" compose-ref)" == "$LAB_ADOPT_OLD_REF" && "$(kv "$f" clam-image)" == "$LAB_ADOPT_OLD_REF" && -n "$old" ]]; then
+    check A0 old-sidecar pass "compose names $LAB_ADOPT_OLD_REF; culvert-clamav runs it ($old; $(kv "$f" clam-pkgs)); $(kv "$f" clam-state)"
+  else check A0 old-sidecar fail "BLOCKED: not the old-tag baseline: $(tr '\n' ' ' < "$f" | head -c 400)"; rec_origin_stop; return 0; fi
+  # A1 application upgrade, exactly as the agent performs it.
+  rc=0; { printf '%s\n' 'set -e' "curl -fsS http://10.0.2.2:$LAB_EICAR_PORT/culvert-image.tar -o /tmp/.lab-adopt.tar" \
+      'docker load -q -i /tmp/.lab-adopt.tar; rm -f /tmp/.lab-adopt.tar' 'docker tag culvert:ci-smoke culvert/proxy:pinned'; adopt_compose_up; } \
+    | gpriv --timeout 900 > "$EV/A1-app-upgrade.txt" 2>&1 || rc=$?
+  for _ in $(seq 1 60); do curl -fsS -m 3 "$P/health" >/dev/null 2>&1 && break; sleep 5; done
+  f="$EV/A1-state.txt"; adopt_state "$f"
+  if [[ $rc == 0 && "$(kv "$f" proxy-id)" == "$LAB_ADOPT_IMAGE_ID" && "$(kv "$f" clam-id)" == "$old" && "$(kv "$f" compose-ref)" == "$LAB_ADOPT_OLD_REF" ]]; then
+    check A1 app-upgrade-keeps-host-components pass "proxy now $LAB_ADOPT_IMAGE_ID; compose file and sidecar unchanged ($LAB_ADOPT_OLD_REF, $old) — an application upgrade replaces the container image only (upgrade-runbook.md)"
+  else check A1 app-upgrade-keeps-host-components fail "exit $rc: $(tr '\n' ' ' < "$f" | head -c 400)"; rec_origin_stop; return 0; fi
+  # A2 host-component refresh with outbound HTTP(S) blocked (an appliance with no
+  # route to Docker Hub / the Alpine CDN): the gateway must keep serving.
+  rc=0; gpriv --timeout 1800 > "$EV/A2-refresh-offline.txt" 2>&1 <<'EOS' || rc=$?
+nft add table inet culvertlab
+nft 'add chain inet culvertlab out { type filter hook output priority -10; policy accept; }'
+nft 'add chain inet culvertlab fwd { type filter hook forward priority -10; policy accept; }'
+nft add rule inet culvertlab out ip daddr != '{ 127.0.0.0/8, 10.0.2.2 }' tcp dport '{ 80, 443 }' reject
+nft add rule inet culvertlab out meta nfproto ipv6 tcp dport '{ 80, 443 }' reject
+nft add rule inet culvertlab fwd ip daddr != 10.0.2.2 tcp dport '{ 80, 443 }' reject
+nft add rule inet culvertlab fwd meta nfproto ipv6 tcp dport '{ 80, 443 }' reject
+echo "egress-blocked"
+timeout 1500 culvert-firstboot --repair-agent; echo "repair-rc=$?"
+nft delete table inet culvertlab; echo "egress-restored"
+tail -n 40 /var/log/culvert-firstboot.log 2>/dev/null | sed 's/\(PASSPHRASE\|TOKEN\)=[^ ]*/\1=<redacted>/g'
+EOS
+  for _ in $(seq 1 30); do curl -fsS -m 3 "$P/health" >/dev/null 2>&1 && break; sleep 5; done
+  f="$EV/A2-state.txt"; adopt_state "$f"
+  t="traffic=$(rec_traffic && echo ok || echo no) health=$(curl -fsS -m 3 -o /dev/null -w '%{http_code}' "$P/health" 2>/dev/null || echo 000)"
+  check A2 refresh-offline info "repair $(grep -m1 '^repair-rc=' "$EV/A2-refresh-offline.txt" || echo 'repair-rc=?'); egress $(grep -c '^egress-' "$EV/A2-refresh-offline.txt")/2 marks"
+  if [[ "$(kv "$f" clam-id)" == "$old" && "$(kv "$f" clam-state)" == running/* && "$(kv "$f" proxy-id)" == "$LAB_ADOPT_IMAGE_ID" && "$t" == "traffic=ok health=200" ]]; then
+    check A2 offline-refresh-keeps-serving pass "old sidecar still running ($old, $(kv "$f" clam-state)); proxy unchanged; $t"
+  else check A2 offline-refresh-keeps-serving fail "$t; $(tr '\n' ' ' < "$f" | head -c 400)"; fi
+  if [[ "$(kv "$f" compose-ref)" == "$LAB_ADOPT_NEW_REF" && "$(kv "$f" new-tag-present)" == no ]]; then
+    check A2 compose-names-a-buildable-image fail "after the failed offline refresh the host compose file names $LAB_ADOPT_NEW_REF, which does not exist locally: the next stack start (maintenance reboot) must build it and cannot offline"
+  else check A2 compose-names-a-buildable-image pass "compose names $(kv "$f" compose-ref) (present locally: $(kv "$f" new-tag-present))"; fi
+  # A3 refresh online.
+  rc=0; gpriv --timeout 1800 > "$EV/A3-refresh-online.txt" 2>&1 <<'EOS' || rc=$?
+timeout 1500 culvert-firstboot --repair-agent; echo "repair-rc=$?"
+tail -n 40 /var/log/culvert-firstboot.log 2>/dev/null | sed 's/\(PASSPHRASE\|TOKEN\)=[^ ]*/\1=<redacted>/g'
+EOS
+  f="$EV/A3-state.txt"; adopt_wait_clam_healthy "$f" || true; new="$(kv "$f" clam-id)"
+  for _ in $(seq 1 60); do curl -fsS -m 3 "$P/health" >/dev/null 2>&1 && break; sleep 5; done
+  v="$(for _ in $(seq 1 24); do x="$(eicar_verdict)"; [[ $x == av ]] && { echo av; break; }; sleep 5; done)"
+  t="traffic=$(rec_traffic && echo ok || echo no) eicar=${v:-none}"
+  if [[ "$(kv "$f" compose-ref)" == "$LAB_ADOPT_NEW_REF" && "$(kv "$f" clam-image)" == "$LAB_ADOPT_NEW_REF" && -n "$new" && "$new" != "$old" \
+        && "$(kv "$f" clam-pkgs)" == "$LAB_ADOPT_PKGS" && "$(kv "$f" clam-state)" == running/healthy && "$(kv "$f" proxy-id)" == "$LAB_ADOPT_IMAGE_ID" && "$t" == "traffic=ok eicar=av" ]]; then
+    check A3 refresh-adopts-new-sidecar pass "$(grep -m1 '^repair-rc=' "$EV/A3-refresh-online.txt"); compose names $LAB_ADOPT_NEW_REF; culvert-clamav runs it ($new, was $old): $(kv "$f" clam-pkgs); healthy; proxy still $LAB_ADOPT_IMAGE_ID (not reseeded); $t"
+  else check A3 refresh-adopts-new-sidecar fail "exit $rc $(grep -m1 '^repair-rc=' "$EV/A3-refresh-online.txt"); $t; $(tr '\n' ' ' < "$f" | head -c 500)"; fi
+  # A4 maintenance reboot: the adopted sidecar is what comes back.
+  gpriv --nowait > "$EV/A4-reboot.txt" 2>&1 <<<'culvert-os-update reboot' || true
+  local deadline=$(( $(date +%s) + LAB_FIRSTBOOT_TIMEOUT )); sleep 20
+  until curl -fsS -m 3 "$P/health" >/dev/null 2>&1 && gop status-json >/dev/null 2>&1; do
+    qemu_alive && (( $(date +%s) < deadline )) || break; sleep 10; done
+  f="$EV/A4-state.txt"; adopt_wait_clam_healthy "$f" || true
+  v="$(for _ in $(seq 1 24); do x="$(eicar_verdict)"; [[ $x == av ]] && { echo av; break; }; sleep 5; done)"
+  t="traffic=$(rec_traffic && echo ok || echo no) eicar=${v:-none}"
+  if [[ "$(kv "$f" clam-id)" == "$new" && -n "$new" && "$(kv "$f" clam-state)" == running/healthy && "$(kv "$f" proxy-id)" == "$LAB_ADOPT_IMAGE_ID" && "$t" == "traffic=ok eicar=av" ]]; then
+    check A4 reboot-keeps-new-sidecar pass "after culvert-os-update reboot: culvert-clamav $new healthy; proxy $LAB_ADOPT_IMAGE_ID; $t"
+  else check A4 reboot-keeps-new-sidecar fail "$t; $(tr '\n' ' ' < "$f" | head -c 400)"; fi
+  rm -f "$WORK/eicar-origin/culvert-image.tar"; rec_origin_stop
+  redact_tree
+}
 failures() { grep -c '"result":"fail"' "$JSONL" 2>/dev/null || true; }
 # Transport adapters may reuse the guest checks without dispatching QEMU.
 [[ "${LAB_LIBRARY_ONLY:-0}" == 1 ]] && return 0
@@ -1497,10 +1605,11 @@ case "${1:-}" in
   up) cmd_up ;;
   qualify) cmd_qualify; [[ "$(failures)" == 0 ]] ;;
   recovery) cmd_recovery; [[ "$(failures)" == 0 ]] ;;
+  adoption) cmd_adoption; [[ "$(failures)" == 0 ]] ;;
   collect) cmd_collect ;;
   down) cmd_down ;;
   all)
     trap 'cmd_collect || true; cmd_down || true' EXIT
-    cmd_preflight; cmd_up; cmd_qualify; cmd_recovery; n="$(failures)"; log "failures: $n"; [[ "$n" == 0 ]] ;;
+    cmd_preflight; cmd_up; cmd_qualify; cmd_recovery; [[ -z "${LAB_ADOPT_IMAGE_TAR:-}" ]] || cmd_adoption; n="$(failures)"; log "failures: $n"; [[ "$n" == 0 ]] ;;
   *) sed -n '2,32p' "$0"; exit 2 ;;
 esac

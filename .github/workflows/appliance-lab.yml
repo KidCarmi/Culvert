@@ -37,17 +37,17 @@ env:
   # Superseded candidate (historical; does not boot under BIOS, #1528 §3f).
   # Its guest-content fingerprint stays the comparison reference.
   ORIGINAL_OVA_SHA256: e24eb542f973fb70360bad5124ef81fdab8b6f8d67af601720613cbcca3700a4
-  # F-DISK-1 job input: the 2e3bcc2a candidate's image (Deep gate run
-  # 37604379502), which carries every badger/ristretto F-DISK-1 fix incl.
+  # F-DISK-1 job input: the f8b6326e candidate's image (Deep gate run
+  # 37624989266), which carries every badger/ristretto F-DISK-1 fix incl.
   # the in-place memtable emptying (5b389f38). Run 37397680555 still
   # reproduced the SIGBUS on the ORIGINAL image (37124197333, sha
   # bb8a2c75…) — that was the pre-fix control; d698's image survived in
   # 37601275706. This is the replacement, expected to report `survived`.
-  SOURCE_IMAGE_RUN_ID: "37604379502"
-  SOURCE_IMAGE_TAR_SHA256: db4f5ce8784e2a8e5145fdf59126a8e675a27f6628ac3b70e0d2ac16daf5ffff
+  SOURCE_IMAGE_RUN_ID: "37624989266"
+  SOURCE_IMAGE_TAR_SHA256: d894b90a5e3ac16f99f5fa6fd2ffa4233483503723494d2a45ba2021a8501b70
   # The source those image bytes were built from; the F-DISK job builds its
   # maintenance agent from here so no lab-branch binary stands in for it.
-  SOURCE_IMAGE_SHA: 2e3bcc2a1095f3e26e4f0b73a6a5515bdd069ee2
+  SOURCE_IMAGE_SHA: f8b6326ec6307e143e3fb2cd6d8b19c59ba90e28
 
 jobs:
   guest-boot:
@@ -59,32 +59,47 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Production-readiness candidate — #1528 head 2e3bcc2a: d698a69c (the
-        # recovery-time fix, ESXi 68.8/72.7/70.4 s) plus 5b389f38 (DropAll
-        # empties memtables in place: no stale value pointer into a recreated
-        # value log) and 2e3bcc2a (culvert-net reports "restored" only once the
-        # default route is back). Image = that head's own Deep PR Gate tar
-        # (run 37604379502); app, agent, console, access binary and
-        # provisioning from a clean checkout of the SAME commit. Built fresh,
-        # retained BEFORE boot. Image ID is the tar's OCI manifest digest (the
-        # containerd target), config sha256:7b3c9827….
+        # Production-readiness candidate — #1528 head f8b6326e: 2e3bcc2a (ESXi
+        # 69.4/73.5/68.5 s) plus the ClamAV sidecar upgrade (zlib 1.3.2-r1,
+        # nghttp2-libs 1.70.0-r0) under the new local tag
+        # culvert/clamav:1.4.6-culvert.2. Image = that head's own Deep PR Gate
+        # tar (run 37604379502 → 37624989266); app, agent, console, access
+        # binary and provisioning from a clean checkout of the SAME commit.
+        # Image ID is the tar's OCI manifest digest, config sha256:5498aaff….
         include:
+          - variant: candidate-f8b6326ec630
+            provisioning: source
+            source_sha: "f8b6326ec6307e143e3fb2cd6d8b19c59ba90e28"
+            image_run: "37624989266"
+            image_tar_sha256: "d894b90a5e3ac16f99f5fa6fd2ffa4233483503723494d2a45ba2021a8501b70"
+            expect_image_id: "sha256:8568a94e2c2d62b24c901ab020426d6d39fe5ea084d21a82de66e4af6742b4fd"
+            retained_run: ""
+            retained_sha256: ""
+            # The calibrated ESXi proxy (12 ms read / 3 ms write).
+            disk: dm
+            recovery_reboots: "3"
+            recovery_profiles: "esxi12:12:3:120"
+            recovery_variants: "base"
+          # ASTRA (#1528): does an appliance that already has the OLD sidecar
+          # tag cached adopt the new one? The RETAINED 2e3bcc2a OVA (old tag
+          # culvert/clamav:1.4.6-pcre2-10.49 baked in) is qualified as before,
+          # then cmd_adoption upgrades it to the f8b6326e image and refreshes
+          # host components (appliance-lab.sh "adoption").
           - variant: candidate-2e3bcc2a1095
             provisioning: source
             source_sha: "2e3bcc2a1095f3e26e4f0b73a6a5515bdd069ee2"
             image_run: "37604379502"
             image_tar_sha256: "db4f5ce8784e2a8e5145fdf59126a8e675a27f6628ac3b70e0d2ac16daf5ffff"
             expect_image_id: "sha256:536403fc9ba8a4bc15d229a12a7586ce6ccc35ba99148b71869a81596e0ea940"
-            retained_run: ""
-            retained_sha256: ""
-            # The calibrated ESXi proxy (12 ms read / 3 ms write; run 37389977929
-            # measured the unchanged b579 OS at 146.6 s and the shipped changes'
-            # lab-only equivalent at 103.1 s). Only the base variant: the fix is
-            # now in the product, so nothing lab-only is applied.
-            disk: dm
-            recovery_reboots: "3"
-            recovery_profiles: "esxi12:12:3:120"
-            recovery_variants: "base"
+            retained_run: "37606237892"
+            retained_sha256: "55e98116ba2c020789b3f5de4eabab7e29af611c83b9c972b82a6319a19f145e"
+            recovery_reboots: "0"
+            adopt_image_run: "37624989266"
+            adopt_image_tar_sha256: "d894b90a5e3ac16f99f5fa6fd2ffa4233483503723494d2a45ba2021a8501b70"
+            adopt_image_id: "sha256:8568a94e2c2d62b24c901ab020426d6d39fe5ea084d21a82de66e4af6742b4fd"
+            adopt_old_ref: "culvert/clamav:1.4.6-pcre2-10.49"
+            adopt_new_ref: "culvert/clamav:1.4.6-culvert.2"
+            adopt_pkgs: "nghttp2-libs-1.70.0-r0 pcre2-10.49-r0 zlib-1.3.2-r1"
     env:
       APPLIANCE_SOURCE_SHA: ${{ matrix.source_sha }}
       SOURCE_IMAGE_RUN_ID: ${{ matrix.image_run }}
@@ -382,6 +397,16 @@ jobs:
           [ "$got" = "${{ matrix.retained_sha256 }}" ] || { echo "::error::retained OVA sha256 $got != ${{ matrix.retained_sha256 }}"; exit 1; }
           grep -q "$got" "$LAB_ROOT/ova/"*.ova.sha256
           echo "retained OVA $got from run ${{ matrix.retained_run }}"
+      - name: Fetch the adoption target image (verified sha256)
+        if: matrix.adopt_image_run != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_IMAGE_RUN_ID: ${{ matrix.adopt_image_run }}
+          SOURCE_IMAGE_TAR_SHA256: ${{ matrix.adopt_image_tar_sha256 }}
+        run: |
+          set -euo pipefail
+          test/e2e/appliance/lab/obtain-image.sh "$LAB_ROOT/adopt"
+          echo "$SOURCE_IMAGE_TAR_SHA256  $LAB_ROOT/adopt/culvert-image.tar" | sha256sum -c -
       - name: "Diagnostic: guest content vs the superseded candidate's fingerprint"
         if: env.LAB_STAGE == 'full'
         # Informational only (its own LAB_DIR, so it never counts as a lab
@@ -413,6 +438,10 @@ jobs:
           export LAB_OVA_SHA256="$(cut -d' ' -f1 "$LAB_ROOT/ova/"*.ova.sha256)"
           export LAB_EXPECT_IMAGE_ID="${{ matrix.expect_image_id }}" LAB_MIN_FREE_GB=20 LAB_ACCEL=kvm
           [ -f "$LAB_ROOT/update/READY" ] && export LAB_UPDATE_DIR="$LAB_ROOT/update" || echo "::warning::signed-update lab not prepared — step 6c will report BLOCKED"
+          if [ -n "${{ matrix.adopt_image_run }}" ]; then
+            export LAB_ADOPT_IMAGE_TAR="$LAB_ROOT/adopt/culvert-image.tar" LAB_ADOPT_IMAGE_ID="${{ matrix.adopt_image_id }}" \
+              LAB_ADOPT_OLD_REF="${{ matrix.adopt_old_ref }}" LAB_ADOPT_NEW_REF="${{ matrix.adopt_new_ref }}" LAB_ADOPT_PKGS="${{ matrix.adopt_pkgs }}"
+          fi
           test/e2e/appliance/lab/appliance-lab.sh all
       - name: Report
         if: always()
