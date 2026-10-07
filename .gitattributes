@@ -5,3 +5,6 @@ frontend/dist/** linguist-generated=true
 frontend/src/api/types.gen.ts linguist-generated=true
 frontend/package-lock.json linguist-generated=true
 frontend/tools/openapi-gen/package-lock.json linguist-generated=true
+
+# Preserve the independently reviewed cd8 scanner and intake evidence bytes.
+docs/appliance/evidence/cd8-intake-20261008/** -text -whitespace

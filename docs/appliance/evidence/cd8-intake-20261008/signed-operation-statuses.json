@@ -1,0 +1,27 @@
+{
+  "06c-apply-signed.txt": [
+    {
+      "state": "running",
+      "kind": "upgrades.apply"
+    },
+    {
+      "state": "succeeded",
+      "kind": "upgrades.apply"
+    }
+  ],
+  "06c-rollback-signed.txt": [
+    {
+      "state": "running",
+      "kind": "rollbacks.create"
+    },
+    {
+      "state": "succeeded",
+      "kind": "rollbacks.create"
+    }
+  ],
+  "06c-apply-unsigned.txt": [
+    {
+      "error": "release trust: signed release proof required"
+    }
+  ]
+}

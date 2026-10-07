@@ -40,7 +40,7 @@ func keys(input keyboardInput) ([]types.UsbScanCodeSpecKeyEvent, error) {
 		return nil, errors.New("invalid keyboard input")
 	}
 	if input.Code != "" {
-		codes := map[string]int32{"KEY_ENTER": 0x28, "KEY_F2": 0x3b, "KEY_0": 0x27, "KEY_1": 0x1e, "KEY_2": 0x1f, "KEY_3": 0x20, "KEY_4": 0x21, "KEY_Q": 0x14, "KEY_B": 0x05, "KEY_CTRL_L": 0x0f}
+		codes := map[string]int32{"KEY_ENTER": 0x28, "KEY_F2": 0x3b, "KEY_0": 0x27, "KEY_1": 0x1e, "KEY_2": 0x1f, "KEY_3": 0x20, "KEY_4": 0x21, "KEY_Q": 0x14, "KEY_B": 0x05, "KEY_CTRL_L": 0x0f, "KEY_ESC": 0x29, "KEY_ALT_F12": 0x45, "KEY_ALT_F1": 0x3a}
 		code, ok := codes[input.Code]
 		if !ok {
 			return nil, errors.New("key is not allowlisted")
@@ -49,6 +49,10 @@ func keys(input keyboardInput) ([]types.UsbScanCodeSpecKeyEvent, error) {
 		if input.Code == "KEY_CTRL_L" {
 			control := true
 			event.Modifiers.LeftControl = &control
+		}
+		if input.Code == "KEY_ALT_F12" || input.Code == "KEY_ALT_F1" {
+			alt := true
+			event.Modifiers.LeftAlt = &alt
 		}
 		return []types.UsbScanCodeSpecKeyEvent{event}, nil
 	}

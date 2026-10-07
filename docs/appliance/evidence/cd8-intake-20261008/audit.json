@@ -1,0 +1,552 @@
+{
+  "schema": 1,
+  "review_date": "2026-10-08",
+  "verdict": "PASS exact-image intake and recorded qualification scope; not full production or ESXi approval.",
+  "source_commit": "cd8e44505bd329e5de675592ad4c23f92a534d55",
+  "lab_run_id": 37684926209,
+  "lab_controller": "dcbe2f4026f46e394023d5aa68b52686758523dc",
+  "artifacts": [
+    {
+      "id": 11512384551,
+      "zip_sha256": "e7f54679689a8b2137b46a3e84655571054bb53f7149bc2a0b68f482d6670e88",
+      "downloaded_and_verified": true
+    },
+    {
+      "id": 11512115994,
+      "zip_sha256": "d10737d17ca8fc5ae7b73154daf3bdfd384fe43277e0deb4d181c95633d919d4",
+      "downloaded_and_verified": true
+    },
+    {
+      "id": 11511217743,
+      "zip_sha256": "0b59ae1b15da4a4b72a43003a54943472af5c3a70296304b18d141811fda0bd5",
+      "downloaded_and_verified": true
+    },
+    {
+      "id": 11514621022,
+      "zip_sha256": "da47574313958039a95d9430d25eac68548d5a7b14f9225f4d8854aefa81a924",
+      "downloaded_and_verified": true
+    },
+    {
+      "id": 11510254102,
+      "zip_sha256": "8de6bc797f30937b2f0da8505732ff72725c4e3836a9bb7e76e6e8b3548cd8d4",
+      "downloaded_and_verified": true
+    }
+  ],
+  "build_info": {
+    "schema": 1,
+    "appliance": {
+      "name": "culvert-appliance",
+      "version": "1.0.260-candidate.gcd8e44505bd3",
+      "arch": "x86_64",
+      "ova": "culvert-appliance-1.0.260-candidate.gcd8e44505bd3-ubuntu-24.04.ova",
+      "product": "Culvert Secure Web Gateway appliance (CANDIDATE \u2014 qualification build, not for production)"
+    },
+    "source": {
+      "git_commit": "cd8e44505bd329e5de675592ad4c23f92a534d55",
+      "git_dirty": false,
+      "source_date_epoch": 1791396294,
+      "build_timestamp": "2026-10-07T18:04:54Z",
+      "build_wallclock": "2026-10-07T20:51:59Z",
+      "install_sh_sha256": "c129bd60bb4a5491ae081fc8845b77542bdb11e2e16fdbcd8e5ba4f82c0c6441"
+    },
+    "console": {
+      "source_git_commit": "cd8e44505bd329e5de675592ad4c23f92a534d55",
+      "source_git_dirty": false,
+      "go_compiler": "go1.26.8",
+      "binary_sha256": "8fae2a46101e31676ce28dbf2911fbd3a741ffbc5192996ab30cbbdc92e14062",
+      "target": "linux/amd64",
+      "cgo_enabled": false,
+      "origin": "built from this provisioning checkout; separate from the application image"
+    },
+    "guest_os": {
+      "id": "ubuntu-24.04",
+      "name": "Ubuntu 24.04 LTS",
+      "codename": "noble",
+      "base_image_url": "https://cloud-images.ubuntu.com/releases/noble/release-20260926/ubuntu-24.04-server-cloudimg-amd64.img",
+      "base_image_sha256": "6a81c37564db9b1ee84e141922625e1d7c5b389b99bb3c572e0243607d5bb4d2",
+      "base_image_serial": "20260926",
+      "base_image_gpg": "verified (using RSA key D2EB44626FDDC30B513D5BB71A5D6C4C7DB87C81)",
+      "standard_support_until": "2029-04-30",
+      "esm_support_until": "2034-04-30",
+      "package_sources": [
+        "https://cloud-images.ubuntu.com/releases/noble/release-20260926/ubuntu-24.04-server-cloudimg-amd64.img (preinstalled)",
+        "https://download.docker.com/linux/ubuntu noble stable (key 9DC858229FC7DD38854AE2D88D81803C0EBFCD88)"
+      ]
+    },
+    "host_components_pinned": {
+      "docker-ce": "5:29.8.2-1~ubuntu.24.04~noble",
+      "docker-ce-cli": "5:29.8.2-1~ubuntu.24.04~noble",
+      "containerd.io": "2.3.6-1~ubuntu.24.04~noble",
+      "docker-compose-plugin": "5.5.1-1~ubuntu.24.04~noble",
+      "culvert-maint (from image deploy bundle)": "v1.0.260-candidate.gcd8e44505bd3"
+    },
+    "application": {
+      "image": "culvert/candidate",
+      "tag": "sha-cd8e44505bd3",
+      "index_digest": "sha256:659258eee3fc609a8e95e0bc22c89cb57849887b0dcf2b92708ddbff0fb69b42",
+      "amd64_digest": "sha256:659258eee3fc609a8e95e0bc22c89cb57849887b0dcf2b92708ddbff0fb69b42",
+      "app_version_file": "v1.0.260-candidate.gcd8e44505bd3",
+      "cosign": "not applicable \u2014 CANDIDATE build from an unsigned CI artifact; provenance = image tar sha256:8a19dfce4562e0f15eb607229ae37153c1a21bdb839e5c4206a3f68cd0795819, source cd8e44505bd329e5de675592ad4c23f92a534d55, CI run 37664082485",
+      "baked_tar_sha256": "23822fa5490854363f89699ce597cded40c6e222fc4fbeda8655df1b189f6348",
+      "clamav_image": "docker.io/clamav/clamav",
+      "clamav_tag": "1.4",
+      "clamav_index_digest": "sha256:57deb108fc4c72778aa83eafbca7bb7153e28c3f57c005afd38d31f16da86f23",
+      "clamav_amd64_digest": "sha256:da8463f630e2c9467c74f3da1dee6f096e61a71650e4e9f1ff9b5f687ba91aa0",
+      "clamav_baked_tar_sha256": "359cde5ff4265d223dd030abd73f45526e8af24bf562dd2ae216f97ccc260564",
+      "clamav_sidecar_ref": "culvert/clamav:1.4.6-culvert.2",
+      "clamav_sidecar_image_id": "sha256:7d4e1087e7b94ac37971d35bc831321ebb3e891d6b7d4af8524b7a45e7f1efc3",
+      "clamav_sidecar_pcre2": "pcre2-10.49-r0"
+    },
+    "virtual_hardware": {
+      "vcpus": 2,
+      "memory_mb": 4096,
+      "disk_gb": 40,
+      "hw_version": "vmx-13",
+      "nic": "E1000 x1",
+      "disk_format": "vmdk streamOptimized (thin)"
+    },
+    "build_tools": {
+      "qemu-img": "qemu-img version 8.2.2 (Debian 1:8.2.2+ds-0ubuntu1.18)",
+      "libguestfs": "virt-customize 1.52.0",
+      "docker": "29.6.2",
+      "containerd": "v2.3.6",
+      "cosign_image": "ghcr.io/sigstore/cosign/cosign:v3.0.6@sha256:de9c65609e6bde17e6b48de485ee788407c9502fa08b8f4459f595b21f56cd00",
+      "build_host": "Ubuntu 24.04.5 LTS",
+      "kvm": "yes"
+    },
+    "candidate": {
+      "candidate": true,
+      "not_for_production": true,
+      "image_source_git_commit": "cd8e44505bd329e5de675592ad4c23f92a534d55",
+      "provisioning_git_commit": "cd8e44505bd329e5de675592ad4c23f92a534d55",
+      "provisioning_drift": false,
+      "image_tar_sha256": "8a19dfce4562e0f15eb607229ae37153c1a21bdb839e5c4206a3f68cd0795819",
+      "ci_run_id": "37664082485",
+      "image_signature": "none (unsigned CI artifact; release signature verification is not bypassed, it is inapplicable)",
+      "agent_trust": "culvert-firstboot exports CULVERT_MAINT_TRUST_UNVERIFIED_IMAGE=1 because the manifest carries CANDIDATE_BUILD=1 (candidate-scoped; a release OVA never sets it)"
+    },
+    "artifact": {
+      "ova": "culvert-appliance-1.0.260-candidate.gcd8e44505bd3-ubuntu-24.04.ova",
+      "size_bytes": 1342576640,
+      "sha256": "46cb60078eb2adbc2f8704046268f68e56798bc2b37cd824ba70f8a919bd2ab1"
+    }
+  },
+  "independent_image_verification": {
+    "tar_sha256": "8a19dfce4562e0f15eb607229ae37153c1a21bdb839e5c4206a3f68cd0795819",
+    "manifest_digest": "sha256:659258eee3fc609a8e95e0bc22c89cb57849887b0dcf2b92708ddbff0fb69b42",
+    "config_image_id": "sha256:7afa4f49cc0d6c31d9a0b2a5a171862e6a618fb407ca6ca94f451d02efe6e3e9",
+    "layers_verified": 12,
+    "uncompressed_diff_ids_verified": 12,
+    "os": "linux",
+    "architecture": "amd64",
+    "binaries": {
+      "app/culvert": {
+        "sha256": "c685d2037243733e2a89ab146bcb0cab4e78892acf7ab9b27982e8161a9fd684",
+        "size": 42242210
+      },
+      "app/VERSION": {
+        "sha256": "a7a8f0d740938f70978ca1a980e17451cf4f92ff1fd2d72187005d8db30769d5",
+        "size": 33
+      },
+      "app/deploy/bin/culvert-maint": {
+        "sha256": "2708fc396300d3067d6648961a268936c49b568e868b3cb613dc74b4483449c0",
+        "size": 19595426
+      }
+    },
+    "version": "v1.0.260-candidate.gcd8e44505bd3",
+    "record_counts": {
+      "qemu": {
+        "pass": 83,
+        "info": 5,
+        "blocked": 1
+      },
+      "fdisk": {
+        "pass": 19,
+        "survived": 1,
+        "info": 1
+      }
+    },
+    "trials": [
+      {
+        "trial": 1,
+        "recovery_seconds": 103.27865099999985,
+        "joint_samples": 10,
+        "last_three_joint_pass": true
+      },
+      {
+        "trial": 2,
+        "recovery_seconds": 103.21044800000004,
+        "joint_samples": 10,
+        "last_three_joint_pass": true
+      },
+      {
+        "trial": 3,
+        "recovery_seconds": 103.19192199999975,
+        "joint_samples": 10,
+        "last_three_joint_pass": true
+      }
+    ]
+  },
+  "source_trees": [
+    {
+      "sha": "b5f0035519847bb96dd0049e697a082ff0f1391a",
+      "tree": "b15344b9e44843feae9e2cdfe0de8ef8c9bc6278"
+    },
+    {
+      "sha": "cd8e44505bd329e5de675592ad4c23f92a534d55",
+      "tree": "b15344b9e44843feae9e2cdfe0de8ef8c9bc6278"
+    }
+  ],
+  "source_tree_equal": true,
+  "qemu": {
+    "counts": {
+      "pass": 83,
+      "info": 5,
+      "blocked": 1
+    },
+    "blocked": [
+      {
+        "run": "20261007T210015Z",
+        "step": "4b",
+        "check": "portal-cookie-replay",
+        "result": "blocked",
+        "detail": "needs an identity provider (none in this lab); covered by TestUISessionRole_RejectsReplayedPortalCookie and the proxy cookie-boundary tests in CI"
+      }
+    ],
+    "signed_fixture": [
+      {
+        "run": "20261007T210015Z",
+        "step": "6c",
+        "check": "test-only-trust",
+        "result": "pass",
+        "detail": "registry CA, hosts entry, fixture keyring (public) installed; agent restarted; running image sha256:659258eee3fc609a8e95e0bc22c89cb57849887b0dcf2b92708ddbff0fb69b42 now carries ghcr.io/kidcarmi/culvert@sha256:659258eee3fc609a8e95e0bc22c89cb57849887b0dcf2b92708ddbff0fb69b42"
+      },
+      {
+        "run": "20261007T210015Z",
+        "step": "6c",
+        "check": "unsigned-apply-refused",
+        "result": "pass",
+        "detail": "apply without release evidence: 403 (\"error\":\"release trust: signed release proof required\"); still running the baseline"
+      },
+      {
+        "run": "20261007T210015Z",
+        "step": "6c",
+        "check": "signed-apply",
+        "result": "pass",
+        "detail": "agent apply with signed target + baseline evidence: succeeded; running sha256:4e4824d5692f09dacce2b22009fb7bd0419827725e892dc6b8531c5079af44f1 (lab-target label); enforcement after the swap: example.com 200, example.org 403"
+      },
+      {
+        "run": "20261007T210015Z",
+        "step": "6c",
+        "check": "signed-rollback",
+        "result": "pass",
+        "detail": "agent image rollback to the signed baseline: succeeded; running sha256:659258eee3fc609a8e95e0bc22c89cb57849887b0dcf2b92708ddbff0fb69b42 again; example.com 200, example.org 403; admin login 200"
+      }
+    ],
+    "scope": "KVM plus device-mapper 12ms read/3ms write delay; three authenticated acceptance-to-three-consecutive-joint-pass trials, not ESXi measurements.",
+    "backup_fixture": "Unencrypted backup; 11611bytes; not encrypted-backup qualification.",
+    "signed_limits": "Root-installed test Ed key/registry CA; target is same application plus distinct label digest. Exercises signature refusal/activation/rollback, not a cross-version data migration or vendor key distribution."
+  },
+  "fdisk": {
+    "counts": {
+      "pass": 19,
+      "survived": 1,
+      "info": 1
+    },
+    "identity": [
+      {
+        "run": "20261007T204942Z",
+        "scenario": "E0",
+        "check": "image-content-cur",
+        "result": "pass",
+        "detail": "pushed 172.17.0.1:5056/culvert@sha256:309a0406e68f4a74b3f994ef4d49e0b73cb2e7448595c9ef50390d7b1b7ef614 has config sha256:7afa4f49cc0d6c31d9a0b2a5a171862e6a618fb407ca6ca94f451d02efe6e3e9 (re-hashed) = source tar config; tar sha256 8a19dfce4562e0f15eb607229ae37153c1a21bdb839e5c4206a3f68cd0795819, OCI manifest sha256:659258eee3fc609a8e95e0bc22c89cb57849887b0dcf2b92708ddbff0fb69b42 (the OVA image ID), source cd8e44505bd329e5de675592ad4c23f92a534d55"
+      },
+      {
+        "run": "20261007T204942Z",
+        "scenario": "E0",
+        "check": "image-content-pred",
+        "result": "pass",
+        "detail": "pushed 172.17.0.1:5056/culvert@sha256:309a0406e68f4a74b3f994ef4d49e0b73cb2e7448595c9ef50390d7b1b7ef614 has config sha256:7afa4f49cc0d6c31d9a0b2a5a171862e6a618fb407ca6ca94f451d02efe6e3e9 (re-hashed) = source tar config; tar sha256 8a19dfce4562e0f15eb607229ae37153c1a21bdb839e5c4206a3f68cd0795819, OCI manifest sha256:659258eee3fc609a8e95e0bc22c89cb57849887b0dcf2b92708ddbff0fb69b42 (the OVA image ID), source cd8e44505bd329e5de675592ad4c23f92a534d55"
+      },
+      {
+        "run": "20261007T204942Z",
+        "scenario": "E0",
+        "check": "image-running",
+        "result": "pass",
+        "detail": "container culvert runs sha256:309a0406e68f4a74b3f994ef4d49e0b73cb2e7448595c9ef50390d7b1b7ef614"
+      }
+    ],
+    "outcomes": [
+      {
+        "run": "20261007T204942Z",
+        "scenario": "W",
+        "check": "filled-during-write",
+        "result": "pass",
+        "detail": "FeedSync: parsed 2579670 domain entries, writing to BadgerDB; write still in flight; filled to 6140KiB free"
+      },
+      {
+        "run": "20261007T204942Z",
+        "scenario": "W",
+        "check": "known-failure-reproduced",
+        "result": "survived",
+        "detail": "no crash: still running, no restart since the fill; status=running exit=0 restarts=0; /health version=v1.0.260-candidate.gcd8e44505bd3; the write then reported: FeedSync: bulk write failed (import NOT complete; it is retried, and redone at the next start): cannot create new mem table err: newMemTable err: While opening memtable: /data/catfeeddb/00002.mem err: while opening file: /data/catfeeddb/00002.mem err: fallocate /data/catfeeddb/00002.mem: no space left on device"
+      },
+      {
+        "run": "20261007T204942Z",
+        "scenario": "W",
+        "check": "recovered-serving",
+        "result": "pass",
+        "detail": "/health 200 version=v1.0.260-candidate.gcd8e44505bd3; recovered at step 1: docker compose up -d"
+      },
+      {
+        "run": "20261007T204942Z",
+        "scenario": "W",
+        "check": "recovery-step-1-sufficient",
+        "result": "pass",
+        "detail": "free space + docker compose up -d"
+      },
+      {
+        "run": "20261007T204942Z",
+        "scenario": "W",
+        "check": "state-intact",
+        "result": "pass",
+        "detail": "admin login http 200; ui_users.json+ca.bundle digest c0b0fdaa03c07248 unchanged"
+      },
+      {
+        "run": "20261007T204942Z",
+        "scenario": "W",
+        "check": "ca-identity-intact",
+        "result": "pass",
+        "detail": "root CA sha256 CC:65:66:D0:EA:F1:30:36:F0:EA:5A:81:A9:69:7F:08:0D:E9:36:E8:F6:3B:4E:FB:E9:40:D8:DF:21:A0:90:C2"
+      },
+      {
+        "run": "20261007T204942Z",
+        "scenario": "W",
+        "check": "enforcement",
+        "result": "pass",
+        "detail": "allowed=200 blocked=403 (default-deny + allow rule, real traffic through the proxy)"
+      },
+      {
+        "run": "20261007T204942Z",
+        "scenario": "W",
+        "check": "category-store-opens",
+        "result": "pass",
+        "detail": "culvert_catfeeddb_available 1 culvert_catfeeddb_recovered 0 culvert_catfeeddb_quarantined_copies 0 "
+      },
+      {
+        "run": "20261007T204942Z",
+        "scenario": "W",
+        "check": "category-coverage-after-recovery",
+        "result": "info",
+        "detail": "post-recovery feed log: FeedSync: starting UT1 sync from https://raw.githubusercontent.com/NethServer/toulouse-bl-mirror/master/blacklists.tar.gz FeedSync: parsed 2579670 domain entries, writing to BadgerDB\u2026 FeedSync: bulk write failed (import NOT complete; it is retried, and redone at the next start): cannot create new mem table err: newMemTable err: While opening memtable:  "
+      },
+      {
+        "run": "20261007T204942Z",
+        "scenario": "W",
+        "check": "category-import-converges",
+        "result": "pass",
+        "detail": "retry after recovery: sync complete: 2579670 domains in 10s (873s after recovery)"
+      }
+    ],
+    "scope": "Bounded 2GiB nested-Docker active write; current and predecessor are same cd8 image. No crash or restart; fallocate ENOSPC refusal observed. Serving restored at first recovery step; full category import completed873s later. Not all ENOSPC paths or filesystem qualification."
+  },
+  "adoption": {
+    "counts": {
+      "pass": 74,
+      "info": 4,
+      "blocked": 2
+    },
+    "blocked": [
+      {
+        "run": "20261007T205114Z",
+        "step": "4b",
+        "check": "portal-cookie-replay",
+        "result": "blocked",
+        "detail": "needs an identity provider (none in this lab); covered by TestUISessionRole_RejectsReplayedPortalCookie and the proxy cookie-boundary tests in CI"
+      },
+      {
+        "run": "20261007T205114Z",
+        "step": "6c",
+        "check": "signed-update",
+        "result": "blocked",
+        "detail": "no LAB_UPDATE_DIR (registry + fixture evidence are prepared by the lab workflow)"
+      }
+    ],
+    "outcomes": [
+      {
+        "run": "20261007T205114Z",
+        "step": "A0",
+        "check": "old-sidecar",
+        "result": "pass",
+        "detail": "compose names culvert/clamav:1.4.6-pcre2-10.49; culvert-clamav runs it (sha256:f3fcbf45d0a50da7e1880e498a030e38b1cd31d792a2737a881ebe8391b13ec3; nghttp2-libs-1.69.0-r0 pcre2-10.49-r0 zlib-1.3.2-r0); running/healthy"
+      },
+      {
+        "run": "20261007T205114Z",
+        "step": "A1",
+        "check": "app-upgrade-keeps-host-components",
+        "result": "pass",
+        "detail": "proxy now sha256:659258eee3fc609a8e95e0bc22c89cb57849887b0dcf2b92708ddbff0fb69b42; compose file and sidecar unchanged (culvert/clamav:1.4.6-pcre2-10.49, sha256:f3fcbf45d0a50da7e1880e498a030e38b1cd31d792a2737a881ebe8391b13ec3) \u2014 an application upgrade replaces the container image only (upgrade-runbook.md)"
+      },
+      {
+        "run": "20261007T205114Z",
+        "step": "A1b",
+        "check": "installer-under-test",
+        "result": "info",
+        "detail": "appliance installer replaced by scripts/install.sh@cd8e44505bd329e5de675592ad4c23f92a534d55 (sha256 c129bd60bb4a5491\u2026)"
+      },
+      {
+        "run": "20261007T205114Z",
+        "step": "A2",
+        "check": "refresh-offline",
+        "result": "info",
+        "detail": "repair repair-rc=3; egress 2/2 marks"
+      },
+      {
+        "run": "20261007T205114Z",
+        "step": "A2",
+        "check": "offline-refresh-keeps-serving",
+        "result": "pass",
+        "detail": "old sidecar still running (sha256:f3fcbf45d0a50da7e1880e498a030e38b1cd31d792a2737a881ebe8391b13ec3, running/healthy); proxy unchanged; traffic=ok health=200"
+      },
+      {
+        "run": "20261007T205114Z",
+        "step": "A2",
+        "check": "compose-names-a-buildable-image",
+        "result": "pass",
+        "detail": "compose names culvert/clamav:1.4.6-pcre2-10.49 (present locally: no)"
+      },
+      {
+        "run": "20261007T205114Z",
+        "step": "A3",
+        "check": "refresh-adopts-new-sidecar",
+        "result": "pass",
+        "detail": "repair-rc=0; compose names culvert/clamav:1.4.6-culvert.2; culvert-clamav runs it (sha256:0f241eeef79bc3de357ae0511ac171fb1f7d89a6e1d0ba59e91d680014fe9da4, was sha256:f3fcbf45d0a50da7e1880e498a030e38b1cd31d792a2737a881ebe8391b13ec3): nghttp2-libs-1.70.0-r0 pcre2-10.49-r0 zlib-1.3.2-r1; healthy; proxy still sha256:659258eee3fc609a8e95e0bc22c89cb57849887b0dcf2b92708ddbff0fb69b42 (not reseeded); traffic=ok eicar=av"
+      },
+      {
+        "run": "20261007T205114Z",
+        "step": "A4",
+        "check": "reboot-keeps-new-sidecar",
+        "result": "pass",
+        "detail": "after culvert-os-update reboot: culvert-clamav sha256:0f241eeef79bc3de357ae0511ac171fb1f7d89a6e1d0ba59e91d680014fe9da4 healthy; proxy sha256:659258eee3fc609a8e95e0bc22c89cb57849887b0dcf2b92708ddbff0fb69b42; traffic=ok eicar=av"
+      }
+    ],
+    "scope": "Retained2e3 OVA upgraded to cd8 application. Test intentionally stages current installer. Application-only upgrade leaves host components unchanged. Offline refresh preserves running old scanner; online refresh adopts rebuilt scanner, then reboot passes.",
+    "new_adopted_image": "sha256:0f241eeef79bc3de357ae0511ac171fb1f7d89a6e1d0ba59e91d680014fe9da4",
+    "limits": [
+      "This separately built adopted image is not the baked7d4e image scanned by exact-sidecar job. No exact adopted-image scan is claimed.",
+      "Offline failure proves current serving continuity, not an offline reboot.",
+      "Adoption signed-update check remains blocked; the separate fresh-cd8 signed fixture passes."
+    ]
+  },
+  "sidecar_scan": {
+    "run_id": 37693602079,
+    "job_id": 113039591853,
+    "artifact_id": 11514621022,
+    "binding": {
+      "index": "sha256:7d4e1087e7b94ac37971d35bc831321ebb3e891d6b7d4af8524b7a45e7f1efc3",
+      "amd64_manifest": "sha256:556e8b364c5aafa387c345264282dd125f7bebdb0804c4df2e8c00452d306743",
+      "config": "sha256:7d422f7c7dba76221399dfc8a8e290390f59fe5b2d1641e4cf704d20c733674a",
+      "layers": [
+        "sha256:e2de96513ba9eb53b431787ec8a65cdde380ac4772a3e4c4b714dcfde2a102b5",
+        "sha256:f521e3871fc1cb59e4bb2884e80bdb0b4f3a6bef53d0e5ca5d3f3525243d615b",
+        "sha256:57ca85041bd5c3608be33ec530ba38c32ff5bb1dd4c658b7f4f6591558e9f229",
+        "sha256:4eb587af903b26f91ef6be5bc819807fe08aba90c0ecfc172957f7ce027c8a98",
+        "sha256:6175c2b81f58ea01e7ef07a5d7e4970fe16b9e9b29c30a5f76607d0d01db29c5",
+        "sha256:f8f651a6b68f6bb2f34fcb2b4970d373a4c57a634eb19c513c9d9e10ac1e21c9",
+        "sha256:01d1c784b59e05a411a9c7ae8416808c48d1b05871b324dd0a0771238d886eed",
+        "sha256:5797eca0e1d12723fe286a9c9afcb3c7c0c4763c64cc900766c3917a45c9eccd"
+      ],
+      "diff_ids": [
+        "sha256:74d97c428c51a828f9051a7a40a53ff1fc99e54fc30323ce36760701b0b7f711",
+        "sha256:b684354d8de0c2ede9b26654f75adb50e74bce0832ff4f31196892aa6a17ae34",
+        "sha256:0ab5cc12c0218764d90d5f96ca8bec5ca8b7b5bd39c1e294971f250a784ebd2d",
+        "sha256:bb33160ecb29edddeada1a089a42b5f8ceba7a941d24ac09ad1008c6e9ffe64d",
+        "sha256:24db1b20b4ffbb55933cccfdec1ab38ccfa50251b3e68480d483914e6d00be53",
+        "sha256:5e8fb9fa4fc2fa8544976a51fafdeaf66ef5dd497404ab33a9c931668c2ee316",
+        "sha256:25e844d80c0b96f4758f9afed4dfa3760f95c01669a41debe2df3d15f6038844",
+        "sha256:dc2f4bd2c1e5c1b223309fa52b7d8b4c7ebca72af7a63277334ea1c2528aede3"
+      ],
+      "repo_tags": [
+        "culvert/clamav:1.4.6-culvert.2"
+      ],
+      "other_platform_entries": 1
+    },
+    "imageid_and_diffids_match": true,
+    "sbom_imageid_and_diffids_match": true,
+    "vulnerability_count": 0,
+    "package_count": 41,
+    "sbom_components": 42,
+    "created_at": "2026-10-07T22:04:58.188910236Z",
+    "version_and_db": "Version: 0.69.3\nVulnerability DB:\n  Version: 2\n  UpdatedAt: 2026-10-07 07:38:55.515026687 +0000 UTC\n  NextUpdate: 2026-10-08 07:38:55.515026457 +0000 UTC\n  DownloadedAt: 2026-10-07 22:04:57.060376744 +0000 UTC\n",
+    "full_command": "trivy image --skip-db-update --input clamav.tar --scanners vuln --format json --output trivy-all.json",
+    "gate_command": "trivy image --skip-db-update --input clamav.tar --scanners vuln --severity CRITICAL,HIGH --ignore-unfixed --format table --exit-code 1",
+    "limits": "All-findings invocation has no explicit severity/unfixed filtering and scans from isolated extraction directory, using recorded database timestamp. Zero reported findings is bounded by scanner coverage and that DB; not perpetual vulnerability absence. Main lab scan job was skipped; separate exact-byte scan job succeeded.",
+    "remediated_packages": [
+      {
+        "name": "libcurl",
+        "version": "8.22.0-r0"
+      },
+      {
+        "name": "nghttp2-libs",
+        "version": "1.70.0-r0"
+      },
+      {
+        "name": "pcre2",
+        "version": "10.49-r0"
+      },
+      {
+        "name": "zlib",
+        "version": "1.3.2-r1"
+      }
+    ]
+  },
+  "ci": {
+    "total": 102,
+    "counts": {
+      "success": 61,
+      "skipped": 41
+    },
+    "snyk": [
+      {
+        "context": "security/snyk (kidcarmi)",
+        "state": "success",
+        "url": "https://app.snyk.io/org/kidcarmi/pr-checks/dc28e774-682d-4820-afe5-84b33f3d076e"
+      }
+    ],
+    "main_trivy": {
+      "job_id": 112940628674,
+      "build_job_id": 112939258429,
+      "artifact_id": 11501499513,
+      "zip_sha256": "5a24d50d5db23f300c21661698c00a6b6a493fcc760eab40d4a14f9c7b3600bf",
+      "binding": "Build records config7afa4f49 matching local OCI config; scanner downloads matching uploaded artifact.",
+      "scope": "0 selected findings; HIGH/CRITICAL, ignore-unfixed and repository ignorefile."
+    },
+    "govulncheck_gosec": "Job112938943618 succeeds across3modules:0 called vulnerabilities,1 uncalled required-module vulnerability,0 gosec issues.",
+    "codeql": {
+      "check_id": 112939932917,
+      "annotation": [
+        {
+          "path": "proxy_tunnel.go",
+          "blob_href": "https://github.com/KidCarmi/Culvert/blob/cd8e44505bd329e5de675592ad4c23f92a534d55/proxy_tunnel.go",
+          "start_line": 832,
+          "start_column": 27,
+          "end_line": 832,
+          "end_column": 39,
+          "annotation_level": "warning",
+          "title": "Log entries created from user input",
+          "message": "This log entry depends on a [user-provided value](1).\nThis log entry depends on a [user-provided value](2).",
+          "raw_details": null
+        }
+      ],
+      "disposition": "Existing go/log-injection false positive on numeric firstByte[0] formatted as %02x. Exact proxy.go/proxy_tunnel.go unchanged from d698, whose sanitizer/source comparison and256byte test are retained. CodeQL successful execution still reports one medium; no dismissal or risk acceptance."
+    }
+  },
+  "oracle_limits": [
+    "Generic readiness-row oracle does not reject a missing named row; actual retained05-ready.json has all11rows ok.",
+    "Dry-run oracle checks banners without captured exit status; actual offline restore separately passed.",
+    "Firstboot-not-rerun uses tail20 and swallows transport errors; retained journal records condition-based skip, not a full-journal proof."
+  ],
+  "reviewer_actions": "Only GitHub/file reads, credential-assisted artifact downloads without printing credentials, archive hashing/parsing and generated local verification script. No downloaded scripts executed; no VM calls, fault injection, product edits or PR posts.",
+  "ova_hash_limit": "OVA SHA taken from build-info, qualification and exact-sidecar scan evidence. Parent owns independent OVA download/hash; this reviewer did not download OVA.",
+  "publication": "Publish sanitized/ only; raw extracted artifact transcripts outside it are not cleared for publication."
+}

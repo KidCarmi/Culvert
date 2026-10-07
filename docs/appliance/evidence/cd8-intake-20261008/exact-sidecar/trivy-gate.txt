@@ -1,0 +1,13 @@
+
+Report Summary
+
+┌────────────────────────────┬────────┬─────────────────┐
+│           Target           │  Type  │ Vulnerabilities │
+├────────────────────────────┼────────┼─────────────────┤
+│ clamav.tar (alpine 3.24.2) │ alpine │        0        │
+└────────────────────────────┴────────┴─────────────────┘
+Legend:
+- '-': Not scanned
+- '0': Clean (no security findings detected)
+
+gate_exit=0

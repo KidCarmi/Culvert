@@ -78,7 +78,7 @@ class D698ResumeTests(unittest.TestCase):
         return dict(identities.source_profile(identities.D698), max_vms=1)
 
     def test_d698_exact_tail_excludes_completed_phases_and_checks_raw_before_normalization(self):
-        raw = (Path(__file__).parents[1] / 'lab/appliance-lab.sh').read_bytes().replace(b'\r\n', b'\n')
+        raw = (Path(__file__).with_name('fixtures') / 'post-os-resume-d698.sh').read_bytes().replace(b'\r\n', b'\n')
         for source in (raw, raw.replace(b'\n', b'\r\n')):
             body = resume.tail(source, resume.D698)
             self.assertIn('culvert-os-update reboot', body)
@@ -90,6 +90,11 @@ class D698ResumeTests(unittest.TestCase):
                 resume.tail(source + b'\n', resume.D698)
         with self.assertRaises(ValueError):
             resume.tail(raw, resume.SOURCE)
+
+    def test_current_shared_library_cannot_resume_historical_d698_campaign(self):
+        raw = (Path(__file__).parents[1] / 'lab/appliance-lab.sh').read_bytes()
+        with self.assertRaisesRegex(ValueError, 'unexpected shared'):
+            resume.tail(raw, resume.D698)
 
     def test_retained_route_gap_is_required_and_never_replayed_after_dispatch(self):
         for change in ('none', 'wrong-image', 'earlier-fail', 'reboot', 'confirmation', 'second-transport', 'bad-result', 'wrong-error'):

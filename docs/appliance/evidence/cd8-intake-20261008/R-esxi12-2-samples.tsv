@@ -1,0 +1,11 @@
+sample_start_s	sample_end_s	duration_s	start_gap_s	ready_clamav	traffic	eicar	phase	counted
+49.172	62.377	13.205	first	no	no	000:000000	no	no
+62.507	62.709	0.202	13.335	no	no	000:000000	no	no
+67.529	70.743	3.214	5.022	no	no	000:000000	no	no
+72.551	75.612	3.061	5.022	no	no	000:000000	no	no
+77.573	78.095	0.522	5.022	no	no	000:000000	no	no
+82.593	83.137	0.544	5.020	no	no	000:000000	no	no
+87.615	88.129	0.514	5.022	no	no	000:000000	no	no
+92.636	93.202	0.566	5.021	ok	ok	av	ok	yes
+97.656	98.179	0.523	5.020	ok	ok	av	ok	yes
+102.676	103.210	0.534	5.020	ok	ok	av	ok	yes

@@ -67,7 +67,7 @@ class ResetReadinessTests(unittest.TestCase):
 
     def test_d698_and_legacy_profiles_do_not_reuse_source_or_export_identity(self):
         identities = reset.deletion.module('reset_test_identities', Path(__file__).with_name('candidate-identities.py'))
-        for source in (identities.E2E3, identities.D698, identities.B579, identities.E2E3):
+        for source in (identities.CD8, identities.E2E3, identities.D698, identities.B579, identities.CD8):
             profile = identities.source_profile(source)
             self.scope.update({key: profile[key] for key in ('source_sha', 'ova_sha256', 'image_id')})
             self.write_json('provenance.json', {key: self.scope[key] for key in ('source_sha', 'image_id', 'ova_sha256', 'endpoint')})

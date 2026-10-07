@@ -4,11 +4,21 @@ import copy
 B579 = 'b579ca28c9d936e9141292ce5ec564a26feeae86'
 D698 = 'd698a69c5192588d5ed3a85a9f7cd9009fb59b31'
 E2E3 = '2e3bcc2a1095f3e26e4f0b73a6a5515bdd069ee2'
+CD8 = 'cd8e44505bd329e5de675592ad4c23f92a534d55'
 FIXTURE_HASHES = {
     'main.go': '33034e5994cc9ae7a2b9e9f98a418ffd48165b2de39cfa26fbc620c25d80330e',
     'request.py': 'fbf7e9df27c190b47155ccbff93b3581cd0342f33cf8c8dbce943a57be49c771',
 }
 PROFILES = {
+    CD8: {
+        'source_sha': CD8,
+        'ova_sha256': '46cb60078eb2adbc2f8704046268f68e56798bc2b37cd824ba70f8a919bd2ab1',
+        'image_id': 'sha256:659258eee3fc609a8e95e0bc22c89cb57849887b0dcf2b92708ddbff0fb69b42',
+        'network_helper_sha256': '4cd5200c3cafba6d61dbc02f2cb6e0bc4318641aaf9d429d970442916dd7cee6',
+        'reset_helper_sha256': '602f3e5aad0818e0078de4dd87cfdac485f871a99779ef4dde0a0c6c55679391',
+        'clamav_sidecar_ref': 'culvert/clamav:1.4.6-culvert.2',
+        'clamav_sidecar_image_id': 'sha256:7d4e1087e7b94ac37971d35bc831321ebb3e891d6b7d4af8524b7a45e7f1efc3',
+    },
     B579: {
         'source_sha': B579,
         'ova_sha256': '1a713a9bedc4ee50ac4212c12048924e03abe6b8f04cb82d4d0ef95e33ef4775',

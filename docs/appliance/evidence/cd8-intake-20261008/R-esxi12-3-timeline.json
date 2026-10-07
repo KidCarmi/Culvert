@@ -1,0 +1,24 @@
+{
+ "t0": "authenticated acceptance (LABACCEPT; host clock taken BEFORE the go-ahead the guest waits for; host epoch 1791408021.308256; t0-to-harness lag 0.055922s subtracted)",
+ "seconds_after_acceptance": {
+  "kernel": 47.13992199999984,
+  "first_ready_clamav_ok": 92.66692199999989,
+  "first_traffic_allow_block": 92.74992199999997,
+  "first_eicar_blocked_by_clamav": 92.83092199999987,
+  "first_operator_phase_ready": 93.18292199999996,
+  "first_joint_sample": 93.18292199999996,
+  "third_consecutive_joint_sample": 103.19192199999975
+ },
+ "recovery_seconds": 103.19192199999975,
+ "budget_seconds": 120,
+ "joint_samples_taken": 10,
+ "host_device": {
+  "reads": 8850,
+  "read_mib": 872.7,
+  "read_ms": 107102,
+  "writes": 2936,
+  "write_mib": 33.3,
+  "write_ms": 9089,
+  "io_ticks_ms": 73918
+ }
+}

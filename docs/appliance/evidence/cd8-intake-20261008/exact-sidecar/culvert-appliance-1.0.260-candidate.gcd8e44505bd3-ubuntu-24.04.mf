@@ -1,0 +1,2 @@
+SHA256(culvert-appliance-1.0.260-candidate.gcd8e44505bd3-ubuntu-24.04.ovf)= 52fb913c28bf71d85427fb3bc29d20f62ac1c6463ed20b4db9130b9bc4cb8b9a
+SHA256(culvert-appliance-1.0.260-candidate.gcd8e44505bd3-ubuntu-24.04-disk1.vmdk)= 72333ee1f44cf275c8a1a6372ee98be37b28c3f9d5a04c187dce546f52c3430a

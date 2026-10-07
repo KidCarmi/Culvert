@@ -1,0 +1,697 @@
+{
+  "checks": [
+    {
+      "id": 112945426669,
+      "name": "\u2705 Deep PR Gate \u2014 APPROVED",
+      "conclusion": "success",
+      "url": "https://github.com/KidCarmi/Culvert/actions/runs/37664082485/job/112945426669"
+    },
+    {
+      "id": 112944539228,
+      "name": "\u2705 Fast PR Gate \u2014 APPROVED",
+      "conclusion": "success",
+      "url": "https://github.com/KidCarmi/Culvert/actions/runs/37664082988/job/112944539228"
+    },
+    {
+      "id": 112944314629,
+      "name": "Audit \u00b7 sharded vs unsharded",
+      "conclusion": "skipped",
+      "url": "https://github.com/KidCarmi/Culvert/actions/runs/37664082988/job/112944314629"
+    },
+    {
+      "id": 112944312876,
+      "name": "Gate \u00b7 coverage floors (global + per-file)",
+      "conclusion": "success",
+      "url": "https://github.com/KidCarmi/Culvert/actions/runs/37664082988/job/112944312876"
+    },
+    {
+      "id": 112943796446,
+      "name": "Gate \u00b7 go test -race (sharded) / Race \u00b7 verdict + coverage evidence",
+      "conclusion": "success",
+      "url": "https://github.com/KidCarmi/Culvert/actions/runs/37664082988/job/112943796446"
+    },
+    {
+      "id": 112940628774,
+      "name": "Deep \u00b7 appliance lifecycle (real images)",
+      "conclusion": "success",
+      "url": "https://github.com/KidCarmi/Culvert/actions/runs/37664082485/job/112940628774"
+    },
+    {
+      "id": 112940628757,
+      "name": "Deep \u00b7 compose validation",
+      "conclusion": "success",
+      "url": "https://github.com/KidCarmi/Culvert/actions/runs/37664082485/job/112940628757"
+    },
+    {
+      "id": 112940628709,
+      "name": "Deep \u00b7 appliance scenario A with real ClamAV",
+      "conclusion": "success",
+      "url": "https://github.com/KidCarmi/Culvert/actions/runs/37664082485/job/112940628709"
+    },
+    {
+      "id": 112940628674,
+      "name": "Deep \u00b7 trivy image scan",
+      "conclusion": "success",
+      "url": "https://github.com/KidCarmi/Culvert/actions/runs/37664082485/job/112940628674"
+    },
+    {
+      "id": 112940628564,
+      "name": "Deep \u00b7 appliance maintenance-agent flow",
+      "conclusion": "success",
+      "url": "https://github.com/KidCarmi/Culvert/actions/runs/37664082485/job/112940628564"
+    },
+    {
+      "id": 112940500625,
+      "name": "\u2705 Code Review \u2014 Complete",
+      "conclusion": "success",
+      "url": "https://github.com/KidCarmi/Culvert/actions/runs/37664082102/job/112940500625"
+    },
+    {
+      "id": 112940042119,
+      "name": "Gate \u00b7 go test -race (sharded) / Race \u00b7 root shard 0",
+      "conclusion": "success",
+      "url": "https://github.com/KidCarmi/Culvert/actions/runs/37664082988/job/112940042119"
+    },
+    {
+      "id": 112940041800,
+      "name": "Gate \u00b7 go test -race (sharded) / Race \u00b7 root shard 1",
+      "conclusion": "success",
+      "url": "https://github.com/KidCarmi/Culvert/actions/runs/37664082988/job/112940041800"
+    },
+    {
+      "id": 112940041730,
+      "name": "Gate \u00b7 go test -race (sharded) / Race \u00b7 root shard 2",
+      "conclusion": "success",
+      "url": "https://github.com/KidCarmi/Culvert/actions/runs/37664082988/job/112940041730"
+    },
+    {
+      "id": 112940041616,
+      "name": "Gate \u00b7 go test -race (sharded) / Race \u00b7 root shard 3",
+      "conclusion": "success",
+      "url": "https://github.com/KidCarmi/Culvert/actions/runs/37664082988/job/112940041616"
+    },
+    {
+      "id": 112940041575,
+      "name": "Gate \u00b7 go test -race (sharded) / Race \u00b7 privileged test (root)",
+      "conclusion": "success",
+      "url": "https://github.com/KidCarmi/Culvert/actions/runs/37664082988/job/112940041575"
+    },
+    {
+      "id": 112939932917,
+      "name": "CodeQL",
+      "conclusion": "success",
+      "url": "https://github.com/KidCarmi/Culvert/runs/112939932917",
+      "codeql_output": {
+        "title": "1 new alert including 1 medium severity security vulnerability",
+        "summary": "### New alerts in code changed by this pull request\n\nSecurity Alerts:\n * 1 medium\n\n\n_Alerts not introduced by this pull request might have been detected because the code changes were too large._\n\nSee annotations below for details.\n\n[View all branch alerts](/KidCarmi/Culvert/security/code-scanning?query=pr%3A1528+tool%3ACodeQL+is%3Aopen).",
+        "text": null,
+        "annotations_count": 1,
+        "annotations_url": "https://api.github.com/repos/KidCarmi/Culvert/check-runs/112939932917/annotations"
+      }
+    },
+    {
+      "id": 112939258712,
+      "name": "Deep \u00b7 appliance console + power/lifecycle regressions / console",
+      "conclusion": "success",
+      "url": "https://github.com/KidCarmi/Culvert/actions/runs/37664082485/job/112939258712"
+    },
+    {
+      "id": 112939258646,
+      "name": "Deep \u00b7 appliance console + power/lifecycle regressions / ssh-boundary",
+      "conclusion": "success",
+      "url": "https://github.com/KidCarmi/Culvert/actions/runs/37664082485/job/112939258646"
+    },
+    {
+      "id": 112939258531,
+      "name": "Deep \u00b7 hadolint",
+      "conclusion": "success",
+      "url": "https://github.com/KidCarmi/Culvert/actions/runs/37664082485/job/112939258531"
+    },
+    {
+      "id": 112939258485,
+      "name": "Deep \u00b7 F-DISK-1 full-filesystem stores (root tmpfs)",
+      "conclusion": "success",
+      "url": "https://github.com/KidCarmi/Culvert/actions/runs/37664082485/job/112939258485"
+    },
+    {
+      "id": 112939258429,
+      "name": "Deep \u00b7 build image (once) / Build proxy image (amd64, artifact-shared)",
+      "conclusion": "success",
+      "url": "https://github.com/KidCarmi/Culvert/actions/runs/37664082485/job/112939258429"
+    },
+    {
+      "id": 112939258274,
+      "name": "Deep \u00b7 terraform (fmt/validate)",
+      "conclusion": "success",
+      "url": "https://github.com/KidCarmi/Culvert/actions/runs/37664082485/job/112939258274"
+    },
+    {
+      "id": 112939258265,
+      "name": "Deep \u00b7 packaging (shellcheck/sudoers/systemd)",
+      "conclusion": "success",
+      "url": "https://github.com/KidCarmi/Culvert/actions/runs/37664082485/job/112939258265"
+    },
+    {
+      "id": 112939258092,
+      "name": "Deep \u00b7 go-licenses",
+      "conclusion": "success",
+      "url": "https://github.com/KidCarmi/Culvert/actions/runs/37664082485/job/112939258092"
+    },
+    {
+      "id": 112939258086,
+      "name": "Deep \u00b7 staticcheck",
+      "conclusion": "success",
+      "url": "https://github.com/KidCarmi/Culvert/actions/runs/37664082485/job/112939258086"
+    },
+    {
+      "id": 112939258082,
+      "name": "Deep \u00b7 determinism (shuffle, count=2)",
+      "conclusion": "success",
+      "url": "https://github.com/KidCarmi/Culvert/actions/runs/37664082485/job/112939258082"
+    },
+    {
+      "id": 112939188380,
+      "name": "Deep \u00b7 classify diff",
+      "conclusion": "success",
+      "url": "https://github.com/KidCarmi/Culvert/actions/runs/37664082485/job/112939188380"
+    },
+    {
+      "id": 112938944539,
+      "name": "Gate \u00b7 frontend / Frontend \u00b7 verify + determinism",
+      "conclusion": "success",
+      "url": "https://github.com/KidCarmi/Culvert/actions/runs/37664082988/job/112938944539"
+    },
+    {
+      "id": 112938944436,
+      "name": "Gate \u00b7 frontend / Frontend \u00b7 real-binary browser smoke",
+      "conclusion": "success",
+      "url": "https://github.com/KidCarmi/Culvert/actions/runs/37664082988/job/112938944436"
+    },
+    {
+      "id": 112938944405,
+      "name": "Gate \u00b7 go test -race (sharded) / Race \u00b7 lane coverage universe",
+      "conclusion": "success",
+      "url": "https://github.com/KidCarmi/Culvert/actions/runs/37664082988/job/112938944405"
+    },
+    {
+      "id": 112938944336,
+      "name": "Gate \u00b7 go test -race (sharded) / Race \u00b7 compile root once + partition",
+      "conclusion": "success",
+      "url": "https://github.com/KidCarmi/Culvert/actions/runs/37664082988/job/112938944336"
+    },
+    {
+      "id": 112938944316,
+      "name": "Gate \u00b7 go test -race (sharded) / Race \u00b7 non-root packages",
+      "conclusion": "success",
+      "url": "https://github.com/KidCarmi/Culvert/actions/runs/37664082988/job/112938944316"
+    },
+    {
+      "id": 112938944121,
+      "name": "Gate \u00b7 gitleaks",
+      "conclusion": "success",
+      "url": "https://github.com/KidCarmi/Culvert/actions/runs/37664082988/job/112938944121"
+    },
+    {
+      "id": 112938943866,
+      "name": "Gate \u00b7 proxy traffic smoke (advisory)",
+      "conclusion": "success",
+      "url": "https://github.com/KidCarmi/Culvert/actions/runs/37664082988/job/112938943866"
+    },
+    {
+      "id": 112938943860,
+      "name": "Gate \u00b7 perf-regression (allocs/op)",
+      "conclusion": "success",
+      "url": "https://github.com/KidCarmi/Culvert/actions/runs/37664082988/job/112938943860"
+    },
+    {
+      "id": 112938943847,
+      "name": "Gate \u00b7 MCP design predicates",
+      "conclusion": "success",
+      "url": "https://github.com/KidCarmi/Culvert/actions/runs/37664082988/job/112938943847"
+    },
+    {
+      "id": 112938943652,
+      "name": "Gate \u00b7 maint-agent (cmd/culvert-maint)",
+      "conclusion": "success",
+      "url": "https://github.com/KidCarmi/Culvert/actions/runs/37664082988/job/112938943652"
+    },
+    {
+      "id": 112938943618,
+      "name": "Gate \u00b7 govulncheck + gosec",
+      "conclusion": "success",
+      "url": "https://github.com/KidCarmi/Culvert/actions/runs/37664082988/job/112938943618"
+    },
+    {
+      "id": 112938943594,
+      "name": "Gate \u00b7 golangci-lint",
+      "conclusion": "success",
+      "url": "https://github.com/KidCarmi/Culvert/actions/runs/37664082988/job/112938943594"
+    },
+    {
+      "id": 112938943582,
+      "name": "Gate \u00b7 fmt + vet + build",
+      "conclusion": "success",
+      "url": "https://github.com/KidCarmi/Culvert/actions/runs/37664082988/job/112938943582"
+    },
+    {
+      "id": 112938873560,
+      "name": "Audit \u00b7 unsharded race reference",
+      "conclusion": "skipped",
+      "url": "https://github.com/KidCarmi/Culvert/actions/runs/37664082988/job/112938873560"
+    },
+    {
+      "id": 112938872162,
+      "name": "Gate \u00b7 classify diff",
+      "conclusion": "success",
+      "url": "https://github.com/KidCarmi/Culvert/actions/runs/37664082988/job/112938872162"
+    },
+    {
+      "id": 112938783550,
+      "name": "CVE \u00b7 trivy (source)",
+      "conclusion": "skipped",
+      "url": "https://github.com/KidCarmi/Culvert/actions/runs/37664082150/job/112938783550"
+    },
+    {
+      "id": 112938772936,
+      "name": "CVE \u00b7 trivy (Docker image)",
+      "conclusion": "skipped",
+      "url": "https://github.com/KidCarmi/Culvert/actions/runs/37664082150/job/112938772936"
+    },
+    {
+      "id": 112938770757,
+      "name": "QA \u00b7 Application logic (compile + vet)",
+      "conclusion": "skipped",
+      "url": "https://github.com/KidCarmi/Culvert/actions/runs/37664082824/job/112938770757"
+    },
+    {
+      "id": 112938769976,
+      "name": "QA \u00b7 Docker Compose (infra)",
+      "conclusion": "skipped",
+      "url": "https://github.com/KidCarmi/Culvert/actions/runs/37664082824/job/112938769976"
+    },
+    {
+      "id": 112938769893,
+      "name": "Tests \u00b7 race detector + coverage",
+      "conclusion": "skipped",
+      "url": "https://github.com/KidCarmi/Culvert/actions/runs/37664082150/job/112938769893"
+    },
+    {
+      "id": 112938769420,
+      "name": "QA \u00b7 On-disk contract",
+      "conclusion": "skipped",
+      "url": "https://github.com/KidCarmi/Culvert/actions/runs/37664082824/job/112938769420"
+    },
+    {
+      "id": 112938767078,
+      "name": "SAST \u00b7 staticcheck",
+      "conclusion": "skipped",
+      "url": "https://github.com/KidCarmi/Culvert/actions/runs/37664082150/job/112938767078"
+    },
+    {
+      "id": 112938759746,
+      "name": "QA \u00b7 Race + coverage (sharded)",
+      "conclusion": "skipped",
+      "url": "https://github.com/KidCarmi/Culvert/actions/runs/37664082824/job/112938759746"
+    },
+    {
+      "id": 112938758752,
+      "name": "Secrets \u00b7 gitleaks",
+      "conclusion": "skipped",
+      "url": "https://github.com/KidCarmi/Culvert/actions/runs/37664082150/job/112938758752"
+    },
+    {
+      "id": 112938758259,
+      "name": "Lab \u00b7 nightly canonical (49 behaviors)",
+      "conclusion": "skipped",
+      "url": "https://github.com/KidCarmi/Culvert/actions/runs/37664081933/job/112938758259"
+    },
+    {
+      "id": 112938754752,
+      "name": "CVE \u00b7 govulncheck",
+      "conclusion": "skipped",
+      "url": "https://github.com/KidCarmi/Culvert/actions/runs/37664082150/job/112938754752"
+    },
+    {
+      "id": 112938750994,
+      "name": "Audit \u00b7 unsharded race reference",
+      "conclusion": "skipped",
+      "url": "https://github.com/KidCarmi/Culvert/actions/runs/37664082824/job/112938750994"
+    },
+    {
+      "id": 112938725658,
+      "name": "Release \u00b7 Publish (post-evidence)",
+      "conclusion": "skipped",
+      "url": "https://github.com/KidCarmi/Culvert/actions/runs/37664083363/job/112938725658"
+    },
+    {
+      "id": 112938725241,
+      "name": "Release \u00b7 Promote version channels (tag)",
+      "conclusion": "skipped",
+      "url": "https://github.com/KidCarmi/Culvert/actions/runs/37664083363/job/112938725241"
+    },
+    {
+      "id": 112938724818,
+      "name": "Supply Chain \u00b7 Attach provenance to the draft",
+      "conclusion": "skipped",
+      "url": "https://github.com/KidCarmi/Culvert/actions/runs/37664083363/job/112938724818"
+    },
+    {
+      "id": 112938723194,
+      "name": "Supply Chain \u00b7 SLSA provenance",
+      "conclusion": "skipped",
+      "url": "https://github.com/KidCarmi/Culvert/actions/runs/37664083363/job/112938723194"
+    },
+    {
+      "id": 112938722395,
+      "name": "Supply Chain \u00b7 Verify reproducible build",
+      "conclusion": "skipped",
+      "url": "https://github.com/KidCarmi/Culvert/actions/runs/37664083363/job/112938722395"
+    },
+    {
+      "id": 112938720676,
+      "name": "Supply Chain \u00b7 Aggregate SLSA subjects",
+      "conclusion": "skipped",
+      "url": "https://github.com/KidCarmi/Culvert/actions/runs/37664083363/job/112938720676"
+    },
+    {
+      "id": 112938720158,
+      "name": "Release \u00b7 Promote moving channels (main)",
+      "conclusion": "skipped",
+      "url": "https://github.com/KidCarmi/Culvert/actions/runs/37664083363/job/112938720158"
+    },
+    {
+      "id": 112938719450,
+      "name": "Release",
+      "conclusion": "skipped",
+      "url": "https://github.com/KidCarmi/Culvert/actions/runs/37664083363/job/112938719450"
+    },
+    {
+      "id": 112938718496,
+      "name": "Supply Chain \u00b7 Release catalog gate",
+      "conclusion": "skipped",
+      "url": "https://github.com/KidCarmi/Culvert/actions/runs/37664083363/job/112938718496"
+    },
+    {
+      "id": 112938718206,
+      "name": "Auto-Tag Release",
+      "conclusion": "skipped",
+      "url": "https://github.com/KidCarmi/Culvert/actions/runs/37664083363/job/112938718206"
+    },
+    {
+      "id": 112938717846,
+      "name": "Release \u00b7 Qualify candidate image",
+      "conclusion": "skipped",
+      "url": "https://github.com/KidCarmi/Culvert/actions/runs/37664083363/job/112938717846"
+    },
+    {
+      "id": 112938716589,
+      "name": "Release \u00b7 Resolve candidate digest",
+      "conclusion": "skipped",
+      "url": "https://github.com/KidCarmi/Culvert/actions/runs/37664083363/job/112938716589"
+    },
+    {
+      "id": 112938714614,
+      "name": "Docker Build & Publish",
+      "conclusion": "skipped",
+      "url": "https://github.com/KidCarmi/Culvert/actions/runs/37664083363/job/112938714614"
+    },
+    {
+      "id": 112938714091,
+      "name": "Supply Chain \u00b7 Catalog re-sign (freshness)",
+      "conclusion": "skipped",
+      "url": "https://github.com/KidCarmi/Culvert/actions/runs/37664083363/job/112938714091"
+    },
+    {
+      "id": 112938713896,
+      "name": "Test & Build",
+      "conclusion": "skipped",
+      "url": "https://github.com/KidCarmi/Culvert/actions/runs/37664083363/job/112938713896"
+    },
+    {
+      "id": 112938713795,
+      "name": "Supply Chain \u00b7 Tag-dispatch guard",
+      "conclusion": "skipped",
+      "url": "https://github.com/KidCarmi/Culvert/actions/runs/37664083363/job/112938713795"
+    },
+    {
+      "id": 112938713412,
+      "name": "Audit \u00b7 sharded vs unsharded",
+      "conclusion": "skipped",
+      "url": "https://github.com/KidCarmi/Culvert/actions/runs/37664082824/job/112938713412"
+    },
+    {
+      "id": 112938712741,
+      "name": "QA \u00b7 Gate-critical coverage floor",
+      "conclusion": "skipped",
+      "url": "https://github.com/KidCarmi/Culvert/actions/runs/37664082824/job/112938712741"
+    },
+    {
+      "id": 112938712649,
+      "name": "QA \u00b7 Maintenance Agent (cmd/culvert-maint)",
+      "conclusion": "skipped",
+      "url": "https://github.com/KidCarmi/Culvert/actions/runs/37664082824/job/112938712649"
+    },
+    {
+      "id": 112938712562,
+      "name": "QA \u00b7 Bare-metal smoke (no Docker)",
+      "conclusion": "skipped",
+      "url": "https://github.com/KidCarmi/Culvert/actions/runs/37664082824/job/112938712562"
+    },
+    {
+      "id": 112938712350,
+      "name": "Lint \u00b7 Hadolint (Dockerfile)",
+      "conclusion": "skipped",
+      "url": "https://github.com/KidCarmi/Culvert/actions/runs/37664082150/job/112938712350"
+    },
+    {
+      "id": 112938712289,
+      "name": "Dependency Obituary",
+      "conclusion": "success",
+      "url": "https://github.com/KidCarmi/Culvert/actions/runs/37664083363/job/112938712289"
+    },
+    {
+      "id": 112938711720,
+      "name": "QA \u00b7 Perf-regression gate (allocs/op)",
+      "conclusion": "skipped",
+      "url": "https://github.com/KidCarmi/Culvert/actions/runs/37664082824/job/112938711720"
+    },
+    {
+      "id": 112938711457,
+      "name": "QA \u00b7 Determinism (shuffle + count=2)",
+      "conclusion": "skipped",
+      "url": "https://github.com/KidCarmi/Culvert/actions/runs/37664082824/job/112938711457"
+    },
+    {
+      "id": 112938711410,
+      "name": "\u2705 QA Gate \u2014 APPROVED",
+      "conclusion": "success",
+      "url": "https://github.com/KidCarmi/Culvert/actions/runs/37664082824/job/112938711410"
+    },
+    {
+      "id": 112938711405,
+      "name": "API \u00b7 client-generation (blocking)",
+      "conclusion": "success",
+      "url": "https://github.com/KidCarmi/Culvert/actions/runs/37664082085/job/112938711405"
+    },
+    {
+      "id": 112938711263,
+      "name": "SAST \u00b7 gosec",
+      "conclusion": "skipped",
+      "url": "https://github.com/KidCarmi/Culvert/actions/runs/37664082150/job/112938711263"
+    },
+    {
+      "id": 112938710960,
+      "name": "API \u00b7 breaking-change (blocking)",
+      "conclusion": "success",
+      "url": "https://github.com/KidCarmi/Culvert/actions/runs/37664082085/job/112938710960"
+    },
+    {
+      "id": 112938710842,
+      "name": "Licenses \u00b7 go-licenses",
+      "conclusion": "skipped",
+      "url": "https://github.com/KidCarmi/Culvert/actions/runs/37664082150/job/112938710842"
+    },
+    {
+      "id": 112938710195,
+      "name": "SBOM \u00b7 syft",
+      "conclusion": "skipped",
+      "url": "https://github.com/KidCarmi/Culvert/actions/runs/37664082150/job/112938710195"
+    },
+    {
+      "id": 112938709896,
+      "name": "\u2705 Security Gate \u2014 APPROVED",
+      "conclusion": "success",
+      "url": "https://github.com/KidCarmi/Culvert/actions/runs/37664082150/job/112938709896"
+    },
+    {
+      "id": 112938709704,
+      "name": "Lint \u00b7 golangci-lint",
+      "conclusion": "success",
+      "url": "https://github.com/KidCarmi/Culvert/actions/runs/37664082102/job/112938709704"
+    },
+    {
+      "id": 112938709676,
+      "name": "Review \u00b7 PR size",
+      "conclusion": "success",
+      "url": "https://github.com/KidCarmi/Culvert/actions/runs/37664082102/job/112938709676"
+    },
+    {
+      "id": 112938709197,
+      "name": "Review \u00b7 commit messages",
+      "conclusion": "success",
+      "url": "https://github.com/KidCarmi/Culvert/actions/runs/37664082102/job/112938709197"
+    },
+    {
+      "id": 112938709010,
+      "name": "Lab \u00b7 full campaign (215 scenarios)",
+      "conclusion": "skipped",
+      "url": "https://github.com/KidCarmi/Culvert/actions/runs/37664081933/job/112938709010"
+    },
+    {
+      "id": 112938708348,
+      "name": "SAST \u00b7 CodeQL",
+      "conclusion": "success",
+      "url": "https://github.com/KidCarmi/Culvert/actions/runs/37664081964/job/112938708348"
+    },
+    {
+      "id": 112938707392,
+      "name": "Lab \u00b7 PR smoke (14 scenarios + self-tests)",
+      "conclusion": "success",
+      "url": "https://github.com/KidCarmi/Culvert/actions/runs/37664081933/job/112938707392"
+    },
+    {
+      "id": 112938707240,
+      "name": "Agent-driven container update",
+      "conclusion": "success",
+      "url": "https://github.com/KidCarmi/Culvert/actions/runs/37664081801/job/112938707240"
+    },
+    {
+      "id": 112938707141,
+      "name": "Install fresh \u2192 update via catalog",
+      "conclusion": "success",
+      "url": "https://github.com/KidCarmi/Culvert/actions/runs/37664082091/job/112938707141"
+    },
+    {
+      "id": 112938707137,
+      "name": "Catalog E2E (Docker image)",
+      "conclusion": "success",
+      "url": "https://github.com/KidCarmi/Culvert/actions/runs/37664081767/job/112938707137"
+    },
+    {
+      "id": 112938707070,
+      "name": "Agent day-2 upgrade through real sudoers",
+      "conclusion": "success",
+      "url": "https://github.com/KidCarmi/Culvert/actions/runs/37664081755/job/112938707070"
+    },
+    {
+      "id": 112938706993,
+      "name": "Stack install + migrate + upgrade",
+      "conclusion": "success",
+      "url": "https://github.com/KidCarmi/Culvert/actions/runs/37664081755/job/112938706993"
+    },
+    {
+      "id": 112938706972,
+      "name": "API \u00b7 verify contract (Go-native, offline)",
+      "conclusion": "success",
+      "url": "https://github.com/KidCarmi/Culvert/actions/runs/37664082107/job/112938706972"
+    },
+    {
+      "id": 112938706925,
+      "name": "Agent-driven backup + upgrade",
+      "conclusion": "success",
+      "url": "https://github.com/KidCarmi/Culvert/actions/runs/37664081957/job/112938706925"
+    },
+    {
+      "id": 112938706851,
+      "name": "Catalog E2E (real VM)",
+      "conclusion": "success",
+      "url": "https://github.com/KidCarmi/Culvert/actions/runs/37664081767/job/112938706851"
+    },
+    {
+      "id": 112938706697,
+      "name": "Maintenance-agent installer lifecycle",
+      "conclusion": "success",
+      "url": "https://github.com/KidCarmi/Culvert/actions/runs/37664081755/job/112938706697"
+    },
+    {
+      "id": 112938705939,
+      "name": "Admin-UI RBAC (playwright-go, headless Chromium)",
+      "conclusion": "success",
+      "url": "https://github.com/KidCarmi/Culvert/actions/runs/37664081770/job/112938705939"
+    }
+  ],
+  "source_trees": [
+    {
+      "sha": "b5f0035519847bb96dd0049e697a082ff0f1391a",
+      "tree": "b15344b9e44843feae9e2cdfe0de8ef8c9bc6278"
+    },
+    {
+      "sha": "cd8e44505bd329e5de675592ad4c23f92a534d55",
+      "tree": "b15344b9e44843feae9e2cdfe0de8ef8c9bc6278"
+    }
+  ],
+  "snyk": [
+    {
+      "context": "security/snyk (kidcarmi)",
+      "state": "success",
+      "url": "https://app.snyk.io/org/kidcarmi/pr-checks/dc28e774-682d-4820-afe5-84b33f3d076e"
+    }
+  ],
+  "jobs": [
+    {
+      "run": 37684926209,
+      "jobs": [
+        {
+          "id": 113010170701,
+          "name": "Lab \u00b7 F-DISK-1 on the bounded nested-Docker host",
+          "conclusion": "success"
+        },
+        {
+          "id": 113010170946,
+          "name": "Lab \u00b7 candidate-2e3bcc2a1095 OVA: build + QEMU guest boot + qualify",
+          "conclusion": "success"
+        },
+        {
+          "id": 113010170963,
+          "name": "Lab \u00b7 candidate-cd8e44505bd3 OVA: build + QEMU guest boot + qualify",
+          "conclusion": "success"
+        },
+        {
+          "id": 113010172425,
+          "name": "Lab \u00b7 retained OVA's baked ClamAV sidecar: exact-byte scan + SBOM",
+          "conclusion": "skipped"
+        },
+        {
+          "id": 113010172854,
+          "name": "Lab \u00b7 boot console (VMware SVGA, no serial) \u00b7 ${{ matrix.variant }}",
+          "conclusion": "skipped"
+        }
+      ]
+    },
+    {
+      "run": 37693602079,
+      "jobs": [
+        {
+          "id": 113039591853,
+          "name": "Lab \u00b7 candidate OVA's baked ClamAV sidecar: exact-byte scan + SBOM",
+          "conclusion": "success"
+        },
+        {
+          "id": 113039593224,
+          "name": "Lab \u00b7 F-DISK-1 on the bounded nested-Docker host",
+          "conclusion": "skipped"
+        },
+        {
+          "id": 113039593987,
+          "name": "Lab \u00b7 ${{ matrix.variant }} OVA: build + QEMU guest boot + qualify",
+          "conclusion": "skipped"
+        },
+        {
+          "id": 113039593995,
+          "name": "Lab \u00b7 boot console (VMware SVGA, no serial) \u00b7 ${{ matrix.variant }}",
+          "conclusion": "skipped"
+        }
+      ]
+    }
+  ]
+}

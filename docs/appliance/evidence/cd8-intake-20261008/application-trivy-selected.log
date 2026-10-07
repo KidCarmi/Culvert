@@ -1,0 +1,8 @@
+2026-10-07T18:09:40.3170216Z   name: deep-gate-image
+2026-10-07T18:09:40.7079412Z - deep-gate-image (ID: 11501499513, Size: 36147221, Expected Digest: sha256:5a24d50d5db23f300c21661698c00a6b6a493fcc760eab40d4a14f9c7b3600bf)
+2026-10-07T18:09:54.8471336Z [36;1m  --severity CRITICAL,HIGH \[0m
+2026-10-07T18:09:54.8471631Z [36;1m  --ignore-unfixed \[0m
+2026-10-07T18:09:54.8471925Z [36;1m  --ignorefile .trivyignore \[0m
+2026-10-07T18:09:59.1565708Z │ culvert:ci-smoke (alpine 3.24.2) │  alpine  │        0        │
+2026-10-07T18:09:59.1567054Z │ app/culvert                      │ gobinary │        0        │
+2026-10-07T18:09:59.1568760Z │ app/deploy/bin/culvert-maint     │ gobinary │        0        │

@@ -1,0 +1,14 @@
+[
+  {
+    "path": "proxy_tunnel.go",
+    "blob_href": "https://github.com/KidCarmi/Culvert/blob/cd8e44505bd329e5de675592ad4c23f92a534d55/proxy_tunnel.go",
+    "start_line": 832,
+    "start_column": 27,
+    "end_line": 832,
+    "end_column": 39,
+    "annotation_level": "warning",
+    "title": "Log entries created from user input",
+    "message": "This log entry depends on a [user-provided value](1).\nThis log entry depends on a [user-provided value](2).",
+    "raw_details": null
+  }
+]

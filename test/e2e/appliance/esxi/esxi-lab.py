@@ -259,6 +259,9 @@ def validate_scope(c):
     if c['ova_sha256'] == ORIGINAL_SHA:
         require(c['source_sha'] == ORIGINAL_SOURCE and c['image_id'] == ORIGINAL_IMAGE,
                 'original candidate provenance does not match recorded identity')
+    if 'visual_capture_label' in c:
+        require(isinstance(c['visual_capture_label'], str) and re.fullmatch('[a-z][a-z0-9-]{0,47}', c['visual_capture_label']),
+                'bounded visual capture label required')
     ipaddress.ip_network(c['guest_cidr'])
     require(Path(c['run_dir']).is_absolute(), 'run_dir must be absolute')
     require(Path(c['ova']).is_absolute(), 'OVA path must be absolute')
@@ -305,6 +308,31 @@ def assert_owned(vm, state, c):
     require(vm.get('network') == [state['network_ref']], 'VM network changed')
     require(not vm.get('snapshot') and not vm.get('rootSnapshot'), 'unexpected snapshots; manual review required')
     return vm
+
+
+def wait_visual_capture(lab, clock=time.monotonic, pause=time.sleep):
+    """Optional pre-power-on observer rendezvous, never a VM-name fallback."""
+    label = lab.c.get('visual_capture_label')
+    if label is None: return
+    require(isinstance(label, str) and re.fullmatch('[a-z][a-z0-9-]{0,47}', label), 'invalid visual label')
+    directory = lab.sec / ('visual-' + label)
+    path = directory / 'armed.json'
+    deadline = clock() + 30
+    expected = {k: lab.state[k] for k in ('uuid', 'ref', 'owner', 'visual_capture_nonce')}
+    scope_sha = hashlib.sha256(lab.scope_path.read_bytes()).hexdigest()
+    while clock() < deadline:
+        if path.exists():
+            require(not directory.is_symlink() and not path.is_symlink()
+                    and path.is_file() and path.stat().st_size <= 8192, 'visual readiness file refused')
+            record = json.loads(path.read_bytes())
+            require(all(record.get(k) == v for k, v in expected.items())
+                    and record.get('scope_sha256') == scope_sha and record.get('power_state') == 'poweredOff',
+                    'visual observer identity or pre-power state differs')
+            age = time.monotonic_ns() - record['monotonic_ns']
+            require(0 <= age <= 5_000_000_000, 'visual observer readiness is stale')
+            return
+        pause(min(0.5, max(0, deadline - clock())))
+    raise Refused('visual observer not ready; imported VM remains powered off')
 
 
 class Lab:
@@ -467,8 +495,11 @@ class Lab:
                  '-pool=' + self.c['pool'], self.c['ova'], timeout=1800, json_output=False)
         vm = self.vm()
         self.state.update(uuid=vm['config']['uuid'], ref=vm['self'], phase='imported')
+        if self.c.get('visual_capture_label'):
+            self.state['visual_capture_nonce'] = secrets.token_hex(16)
         self.save()
         self.record('import', 'pass', 'owned VM imported powered off; VMware guestinfo injection enabled')
+        wait_visual_capture(self)
         self.gov('vm.power', '-on', self.state['path'], json_output=False)
         self.state['phase'] = 'powered-on'
         self.save()

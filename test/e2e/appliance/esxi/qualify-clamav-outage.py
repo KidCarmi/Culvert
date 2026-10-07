@@ -584,7 +584,7 @@ def prior_failure(sec, expected, owner):
 def attempt_context(sec, profile, attempt, previous_hash, owner):
     profiles = load('outage_attempt_profiles', 'candidate-identities.py')
     selected = profiles.scope_profile(profile)
-    if selected['source_sha'] == profiles.E2E3:
+    if selected['source_sha'] in (profiles.E2E3, profiles.CD8):
         need(attempt == 'initial' and previous_hash is None, 'fresh candidate requires initial attempt without prior failure')
         need(not list(sec.glob('clamav-outage*')), 'fresh candidate already has outage evidence; no retry')
         return sec / 'clamav-outage', {}
@@ -603,7 +603,7 @@ def run(args):
     console.b.private_directory(lab)
     console.b.module.validate_scope(lab.c)
     profile = profiles.scope_profile(lab.c)
-    need(profile['source_sha'] in (profiles.D698, profiles.E2E3)
+    need(profile['source_sha'] in (profiles.D698, profiles.E2E3, profiles.CD8)
          and 'clamav_sidecar_image_id' in profile, 'exact approved outage candidate required')
     manifest = freeze.verify(Path(lab.c['controller_manifest']))
     helper_sha = sha(Path(__file__).read_bytes())

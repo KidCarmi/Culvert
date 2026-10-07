@@ -1,0 +1,56 @@
+{
+  "tar_sha256": "8a19dfce4562e0f15eb607229ae37153c1a21bdb839e5c4206a3f68cd0795819",
+  "manifest_digest": "sha256:659258eee3fc609a8e95e0bc22c89cb57849887b0dcf2b92708ddbff0fb69b42",
+  "config_image_id": "sha256:7afa4f49cc0d6c31d9a0b2a5a171862e6a618fb407ca6ca94f451d02efe6e3e9",
+  "layers_verified": 12,
+  "uncompressed_diff_ids_verified": 12,
+  "os": "linux",
+  "architecture": "amd64",
+  "binaries": {
+    "app/culvert": {
+      "sha256": "c685d2037243733e2a89ab146bcb0cab4e78892acf7ab9b27982e8161a9fd684",
+      "size": 42242210
+    },
+    "app/VERSION": {
+      "sha256": "a7a8f0d740938f70978ca1a980e17451cf4f92ff1fd2d72187005d8db30769d5",
+      "size": 33
+    },
+    "app/deploy/bin/culvert-maint": {
+      "sha256": "2708fc396300d3067d6648961a268936c49b568e868b3cb613dc74b4483449c0",
+      "size": 19595426
+    }
+  },
+  "version": "v1.0.260-candidate.gcd8e44505bd3",
+  "record_counts": {
+    "qemu": {
+      "pass": 83,
+      "info": 5,
+      "blocked": 1
+    },
+    "fdisk": {
+      "pass": 19,
+      "survived": 1,
+      "info": 1
+    }
+  },
+  "trials": [
+    {
+      "trial": 1,
+      "recovery_seconds": 103.27865099999985,
+      "joint_samples": 10,
+      "last_three_joint_pass": true
+    },
+    {
+      "trial": 2,
+      "recovery_seconds": 103.21044800000004,
+      "joint_samples": 10,
+      "last_three_joint_pass": true
+    },
+    {
+      "trial": 3,
+      "recovery_seconds": 103.19192199999975,
+      "joint_samples": 10,
+      "last_three_joint_pass": true
+    }
+  ]
+}

@@ -1,11 +1,11 @@
 {
   "schema": 1,
-  "upstream_revision": "e96895c4b5ba4e4254f92d89038a57023daf365b",
+  "upstream_revision": "dcbe2f4026f46e394023d5aa68b52686758523dc",
   "normalization": "LF bytes; controller freeze records runtime raw hashes",
   "files": {
     "test/e2e/appliance/lab/appliance-lab.sh": {
-      "upstream_sha256": "f898993df6878becf3aba069ac10089bae6d2b3fd203daed72977665fa4b85ea",
-      "controller_lf_sha256": "45dae2a8b04de0b46df9cd1c2f2a4ddb8002147944b011f250d49a66a674aa3e",
+      "upstream_sha256": "60c399862262eb33a2fbc37f64baf3f236ddb05c3ef73d818e8a85557e80204c",
+      "controller_lf_sha256": "a3b70e586ab439562c25cd6d6adec485bac0047046029712ff22e2aef7528f91",
       "local_changes": [
         "guarded restore before signed lifecycle",
         "pre-reboot ESXi observations",
@@ -22,6 +22,11 @@
     "test/e2e/appliance/lab/recovery-timeline.py": {
       "upstream_sha256": "26e9d9af45b8f8fa3142a76b172b5d0c16405c659dba6ef206c3ea931f31431d",
       "controller_lf_sha256": "26e9d9af45b8f8fa3142a76b172b5d0c16405c659dba6ef206c3ea931f31431d",
+      "local_changes": []
+    },
+    "test/e2e/appliance/lab/vga-capture.py": {
+      "upstream_sha256": "7d0e4060680cb1f1208163484d0162dd930f42030f79427d077eab84699e96c9",
+      "controller_lf_sha256": "7d0e4060680cb1f1208163484d0162dd930f42030f79427d077eab84699e96c9",
       "local_changes": []
     }
   }

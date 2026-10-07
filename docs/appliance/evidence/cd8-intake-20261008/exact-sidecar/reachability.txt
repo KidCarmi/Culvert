@@ -1,0 +1,7 @@
+IMPORTS rootfs/usr/lib/libxml2.so.2.13.9: gzdopen gzwrite 
+IMPORTS rootfs/usr/lib/libclamav.so.12.0.3: gzdopen 
+IMPORTS rootfs/usr/lib/libfreshclam.so.3.0.2: gzwrite 
+IMPORTS rootfs/usr/bin/sigtool: gzwrite 
+elf_files_scanned=60 gz_write_importers=4
+nghttp2 files: none
+nghttpx_present=no

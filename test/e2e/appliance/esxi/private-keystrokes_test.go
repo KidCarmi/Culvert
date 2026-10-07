@@ -39,3 +39,31 @@ func TestRedrawDoesNotAllowOtherControlKeys(t *testing.T) {
 		}
 	}
 }
+
+func TestVisualKeysAreExactSingleEvents(t *testing.T) {
+	for _, item := range []struct {
+		name string
+		code int32
+		alt  bool
+	}{
+		{"KEY_ESC", 0x290007, false}, {"KEY_ALT_F12", 0x450007, true}, {"KEY_ALT_F1", 0x3a0007, true},
+	} {
+		events, err := keys(keyboardInput{Code: item.name})
+		if err != nil || len(events) != 1 {
+			t.Fatalf("key %s: %v", item.name, err)
+		}
+		e := events[0]
+		if e.UsbHidCode != item.code || e.Modifiers == nil {
+			t.Fatal("wrong event")
+		}
+		alt := e.Modifiers.LeftAlt != nil && *e.Modifiers.LeftAlt
+		if alt != item.alt || (e.Modifiers.LeftControl != nil && *e.Modifiers.LeftControl) || *e.Modifiers.LeftShift {
+			t.Fatal("wrong modifier")
+		}
+	}
+	for _, input := range []keyboardInput{{Code: "KEY_ALT_F2"}, {Code: "KEY_ESC", Text: "x"}} {
+		if _, err := keys(input); err == nil {
+			t.Fatal("unapproved visual input")
+		}
+	}
+}
