@@ -665,17 +665,20 @@ jobs:
   # all-severity record and an SBOM, bound to that config by Trivy's ImageID.
   # Runs only when the head commit says [sidecar-scan].
   ova-sidecar-scan:
-    name: "Lab · retained OVA's baked ClamAV sidecar: exact-byte scan + SBOM"
+    name: "Lab · candidate OVA's baked ClamAV sidecar: exact-byte scan + SBOM"
     if: ${{ contains(github.event.head_commit.message, '[sidecar-scan]') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     env:
-      OVA_ARTIFACT_ID: "11475581263"   # appliance-lab-ova-candidate-2e3bcc2a1095, run 37606237892
-      OVA_SHA256: 55e98116ba2c020789b3f5de4eabab7e29af611c83b9c972b82a6319a19f145e
-      SIDECAR_ARCHIVE_SHA256: 603c165c35141aed67667dffbc09132664feadd74dfcabbfc7e109b4dbecffa6
-      SIDECAR_INDEX: sha256:f3fcbf45d0a50da7e1880e498a030e38b1cd31d792a2737a881ebe8391b13ec3
-      SIDECAR_MANIFEST: sha256:be3827e2327c5e51c695c7fe934133f0433c8baa9a7b3ea03e2cdb9ea5d1331c
-      SIDECAR_CONFIG: sha256:098ca807895db86476681c9ad1aba7856261c787b87fe7c13aadc7f68c483302
+      # Candidate cd8e4450 OVA (lab run 37684926209). The archive and index pins
+      # are the OVA's own build record (build-info.json clamav_baked_tar_sha256
+      # and clamav_sidecar_image_id; on 2e3bcc2a these equalled the measured
+      # pins). The amd64 manifest and config are DERIVED from the re-hashed
+      # index (not pinned: derived and exported through GITHUB_ENV), so every link stays hash-bound.
+      OVA_ARTIFACT_ID: "11512150120"   # appliance-lab-ova-candidate-cd8e44505bd3, run 37684926209
+      OVA_SHA256: 46cb60078eb2adbc2f8704046268f68e56798bc2b37cd824ba70f8a919bd2ab1
+      SIDECAR_ARCHIVE_SHA256: 359cde5ff4265d223dd030abd73f45526e8af24bf562dd2ae216f97ccc260564
+      SIDECAR_INDEX: sha256:7d4e1087e7b94ac37971d35bc831321ebb3e891d6b7d4af8524b7a45e7f1efc3
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Workspace + libguestfs (read-only disk access)
@@ -738,16 +741,19 @@ jobs:
               b = t.extractfile("blobs/sha256/" + d.split(":")[1]).read()
               assert "sha256:" + hashlib.sha256(b).hexdigest() == d, f"blob {d} does not hash to its name"
               return b
-          exp = {k: os.environ[k] for k in ("SIDECAR_INDEX", "SIDECAR_MANIFEST", "SIDECAR_CONFIG")}
+          exp = {k: os.environ.get(k, "") for k in ("SIDECAR_INDEX", "SIDECAR_MANIFEST", "SIDECAR_CONFIG")}
           top = json.load(t.extractfile("index.json"))
           (entry,) = top["manifests"]
           assert entry["digest"] == exp["SIDECAR_INDEX"], f"index.json names {entry['digest']}"
           idx = json.loads(blob(entry["digest"]))
           amd = [m for m in idx["manifests"] if m.get("platform", {}).get("os") == "linux" and m["platform"].get("architecture") == "amd64"]
           assert len(amd) == 1, f"{len(amd)} linux/amd64 manifests"
-          assert amd[0]["digest"] == exp["SIDECAR_MANIFEST"], f"amd64 manifest {amd[0]['digest']}"
+          if exp["SIDECAR_MANIFEST"]:
+              assert amd[0]["digest"] == exp["SIDECAR_MANIFEST"], f"amd64 manifest {amd[0]['digest']}"
           man = json.loads(blob(amd[0]["digest"]))
-          assert man["config"]["digest"] == exp["SIDECAR_CONFIG"], f"config {man['config']['digest']}"
+          if exp["SIDECAR_CONFIG"]:
+              assert man["config"]["digest"] == exp["SIDECAR_CONFIG"], f"config {man['config']['digest']}"
+          exp["SIDECAR_CONFIG"] = man["config"]["digest"]
           cfg = json.loads(blob(man["config"]["digest"]))
           for l in man["layers"]:
               blob(l["digest"])
@@ -757,6 +763,9 @@ jobs:
                  "layers": [l["digest"] for l in man["layers"]], "diff_ids": cfg["rootfs"]["diff_ids"],
                  "repo_tags": legacy[0].get("RepoTags"), "other_platform_entries": len(idx["manifests"]) - 1}
           json.dump(out, open(sys.argv[2], "w"), indent=2)
+          # Later steps check Trivy's ImageID against the bound config.
+          with open(os.environ["GITHUB_ENV"], "a") as env:
+              env.write(f"SIDECAR_MANIFEST={amd[0]['digest']}\nSIDECAR_CONFIG={man['config']['digest']}\n")
           print(json.dumps(out, indent=2))
           PY
       - name: Reachability of the MEDIUM findings in these exact bytes
@@ -823,6 +832,6 @@ jobs:
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
-          name: appliance-lab-sidecar-scan-2e3bcc2a1095
+          name: appliance-lab-sidecar-scan-cd8e44505bd3
           path: ${{ env.W }}/evidence/
           if-no-files-found: warn
