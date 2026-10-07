@@ -1,0 +1,10 @@
+{
+  "schema": 1,
+  "files": 2412,
+  "encryption": "Windows DPAPI CurrentUser",
+  "ciphertext_sha256": "e5aeb21275a67300fdf7fdabbe563e87d908638bd9d3fde75f194b55e370f5d1",
+  "plaintext_zip_sha256": "8d708c22a185fb24ffded775a574662bc712168f39c93cf470b883f3d0d77b82",
+  "roundtrip_verified": true,
+  "source_cleanup": "private source files removed only after this verified encrypted snapshot",
+  "source_deletion_receipt_sha256": "e3232b463d8bc11f6428bc55ace8a467a9f0ff036b8225f27bd83eb057b9f26f"
+}

@@ -1,0 +1,245 @@
+{
+  "schema": 1,
+  "review_date": "2026-10-07",
+  "scope": "Read-only offline scanner disposition; no VM or endpoint access, product edits, PR posts, scanner dismissal, or risk acceptance.",
+  "source_commit": "d698a69c5192588d5ed3a85a9f7cd9009fb59b31",
+  "pr_head": "b7f5628fbdd1ffd4f1416ee18c9705f544d67f93",
+  "main_comparison_commit": "3fcc07e7ab5d1e3bd4d19e6cadc8bb63b682f3af",
+  "pr_url": "https://github.com/KidCarmi/Culvert/pull/1528",
+  "artifact": {
+    "local_image_path": ".tools/artifact-11384187225/culvert-image.tar",
+    "handoff_image_artifact_id": 11384187225,
+    "build_info_artifact_id": 11385371708,
+    "build_info_path": ".tools/artifact-11385371708/build/build-info.json",
+    "image_tar_sha256": "3afadea02d751f1ecea10a7acd0efddee6640a32c8183602b664bca20784af6a",
+    "oci_manifest_digest": "sha256:2c03833c9641a1e24dc5a66b3faa4f0695ac44cdeac931018b9b744be301660e",
+    "config_image_id": "sha256:f1dffbfbc452306845ddfbb0d038da47ad8e998543609cbca3b9ed88067c78d0",
+    "all_12_layer_blob_digests_verified": true,
+    "manifest_and_config_bytes_verified": true,
+    "image_platform": "linux/amd64",
+    "version": "v1.0.260-candidate.gd698a69c5192",
+    "version_file_sha256": "d8eb7f7a26943e813d19070ddc0b2682c8f355b4b1b1c94204d12260681525bf",
+    "baked_reexport_tar_sha256": "1321fe963a31deab3c79465b8ddd5b88203f235c19d3da72b770dc11d6c340dd",
+    "ova_sha256_build_info_only": "9e8e067db5f8ee3c6aa55ac3127b008a7fe612dcca89d1cf004ab3ac8b63d1aa",
+    "ova_hash_recomputed_by_this_review": false,
+    "console_sha256_build_info_only": "80643289f3e1e137d77b2d4a7f2abb0c9e45058b17da885f090ccd29db9bf7c6",
+    "signature": "Unsigned CI candidate; this review does not establish signed-release provenance"
+  },
+  "binaries": [
+    {
+      "path": "/app/culvert",
+      "bytes": 42238114,
+      "sha256": "42237b2e7df5d88e5cd6bb8704da3622cbb38fb8a52ee030a8c95d60a035f4d6",
+      "go_version": "go1.26.8",
+      "function_count": 41176,
+      "grpc_gateway_runtime_functions": 0,
+      "grpc_gateway_options_functions": 403,
+      "rekor_functions": 123,
+      "sigstore_verify_functions": 66
+    },
+    {
+      "path": "/app/deploy/bin/culvert-maint",
+      "bytes": 19595426,
+      "sha256": "eb433433a0966411d884933c4c3144165d208ddeef6e391036ef34519367c517",
+      "go_version": "go1.26.8",
+      "function_count": 23722,
+      "grpc_gateway_runtime_functions": 0,
+      "grpc_gateway_options_functions": 403,
+      "rekor_functions": 123,
+      "sigstore_verify_functions": 66
+    }
+  ],
+  "frontend": {
+    "disposition": "PASS: source-map-js is dev-only build dependency, 1.2.1 in d698 lockfile and 1.2.2 in b7f; no shipped frontend asset changes. Exact Git blob bytes, not CRLF checkout bytes, occur in d698 application binary.",
+    "assets": [
+      {
+        "name": "GalleryPage-BkNHC6bQ.js",
+        "sha256": "b7149868357090eaad7e2279b66fdf261273086a827d1c2a5a3f293690be6b9a",
+        "exact_blob_bytes_embedded": true
+      },
+      {
+        "name": "GalleryPage-CX8IVPpe.css",
+        "sha256": "eaa24e205852b40a40d6c09fa4ec821138233acbe5c347b568b2071fa682f810",
+        "exact_blob_bytes_embedded": true
+      },
+      {
+        "name": "index-C3yJCCUP.js",
+        "sha256": "0c61da6a698024ad34b208905b3eacdf3f9fb9bb49cf622026ee174e102ed250",
+        "exact_blob_bytes_embedded": true
+      },
+      {
+        "name": "index-rP_dbCju.css",
+        "sha256": "958065cc0905a681a6d21983de4d0dd280a899c3f61b254ac598035ee51b623f",
+        "exact_blob_bytes_embedded": true
+      },
+      {
+        "name": "index.html",
+        "sha256": "fc401e7393c81f0bf9394fcea3d00d29f378c1dcd775ac765b0ba8466d856d49",
+        "exact_blob_bytes_embedded": true
+      },
+      {
+        "name": "manifest.json",
+        "sha256": "675c151d1ef24f5807a062c47dc0beaec6b3bda5e1bb41f0df287733ff50741b",
+        "exact_blob_bytes_embedded": true
+      }
+    ]
+  },
+  "ci": {
+    "d698": {
+      "fast": {
+        "run_id": 37397397131,
+        "verdict_job_id": 112059613672,
+        "result": "failure",
+        "lint_job_id": 112056565374,
+        "notes": "Lint failed; some race jobs cancelled."
+      },
+      "deep": {
+        "run_id": 37397399171,
+        "verdict_job_id": 112059444703,
+        "result": "failure",
+        "notes": "Determinism cancelled; individual image/scanner jobs succeeded."
+      },
+      "image_build_job_id": 112056584975,
+      "full_disk_tmpfs_job_id": 112056584793
+    },
+    "b7f": {
+      "fast": {
+        "run_id": 37398748800,
+        "verdict_job_id": 112065124273,
+        "result": "success"
+      },
+      "deep": {
+        "run_id": 37398748651,
+        "verdict_job_id": 112064260491,
+        "result": "success"
+      },
+      "qa": {
+        "run_id": 37398748698,
+        "verdict_job_id": 112060866016,
+        "result": "success"
+      },
+      "security": {
+        "run_id": 37398748487,
+        "verdict_job_id": 112060865050,
+        "result": "success"
+      }
+    }
+  },
+  "scanners": {
+    "snyk": {
+      "result": "PASS status; detailed advisory report not inspected",
+      "d698_url": "https://app.snyk.io/org/kidcarmi/pr-checks/cd914659-c2a6-469a-a338-5694f06398bb",
+      "b7f_url": "https://app.snyk.io/org/kidcarmi/pr-checks/8a932b2a-eeec-4a61-8538-2b262d2c194f"
+    },
+    "trivy": {
+      "version": "0.69.3",
+      "command": "trivy image --severity CRITICAL,HIGH --ignore-unfixed --ignorefile .trivyignore --exit-code 1 culvert:ci-smoke",
+      "result": "PASS configured scope; Alpine/app/agent report 0 selected vulnerabilities",
+      "d698_job_id": 112057246422,
+      "d698_run_id": 37397399171,
+      "image_artifact_id": 11383506852,
+      "image_artifact_zip_sha256": "05f7d2b14552c7954b752075ce686e0576d1fd951a0c8fc2db9cce267e9abca6",
+      "binding": "Image build records the same f1dffbf... config/image ID as independently verified local OCI content; uploads artifact ZIP05f7d2..., downloaded by scanner. Docker export/reexport wrapper digests differ.",
+      "b7f_job_id": 112062004762,
+      "b7f_image_artifact_id": 11384442514,
+      "b7f_image_artifact_zip_sha256": "39f257501b216ae9b3f4ac6dd2a9f096742db1ff43fa7978349a45c38e45d626",
+      "limits": "HIGH/CRITICAL only; ignores unfixed and repository ignorefile; separate b7f image is not evidence of exact d698 bytes."
+    },
+    "govulncheck_gosec": {
+      "d698_job_id": 112056565353,
+      "result": "PASS configured scanner jobs across three modules",
+      "govulncheck_summary": "0 called vulnerabilities; 0 vulnerabilities in imported packages; 1 vulnerability in required modules whose code is not called. Advisory identifier was not printed by this summary.",
+      "gosec_issues": 0
+    },
+    "codeql": {
+      "result": "Successful execution with one medium annotation; source-backed false-positive disposition, not zero findings",
+      "d698": {
+        "check_id": 112057428962,
+        "source_url": "https://api.github.com/repos/KidCarmi/Culvert/check-runs/112057428962/annotations",
+        "path": "proxy_tunnel.go",
+        "start_line": 832,
+        "start_column": 27,
+        "end_line": 832,
+        "end_column": 39,
+        "annotation_level": "warning",
+        "title": "Log entries created from user input",
+        "message": "This log entry depends on a [user-provided value](1).\nThis log entry depends on a [user-provided value](2).",
+        "rule": "go/log-injection"
+      },
+      "b7f": {
+        "check_id": 112061931500,
+        "source_url": "https://api.github.com/repos/KidCarmi/Culvert/check-runs/112061931500/annotations",
+        "path": "proxy_tunnel.go",
+        "start_line": 832,
+        "start_column": 27,
+        "end_line": 832,
+        "end_column": 39,
+        "annotation_level": "warning",
+        "title": "Log entries created from user input",
+        "message": "This log entry depends on a [user-provided value](1).\nThis log entry depends on a [user-provided value](2).",
+        "rule": "go/log-injection"
+      },
+      "execution_jobs": [
+        {
+          "run_id": 37397397297,
+          "job_id": 112056522567
+        },
+        {
+          "run_id": 37398748494,
+          "job_id": 112060863570
+        }
+      ],
+      "check_title": "1 new alert including 1 medium severity security vulnerability",
+      "disposition": "Annotated firstByte[0] is a byte rendered using %02x, not inserted as raw characters. hostOnly uses sanitizeLog plus %q; proto is a fixed enum passed through sanitizeLog. Statement, detectProtocolName and sanitizer are unchanged relative to current main. All 256 inputs passed a bounded formatting test. No dismissal performed.",
+      "source_references": {
+        "log": "proxy_tunnel.go:831-832",
+        "enum": "proxy_tunnel.go:300-315",
+        "sanitizer": "proxy.go:1699-1723"
+      },
+      "blame": {
+        "statement": "5650a16da8, 2026-07-04",
+        "sanitized_arguments": "f228a3c1ef, 2026-07-23"
+      },
+      "baseline_limits": "No CodeQL check for current main returned by commit check listing; authenticated code-scanning alert inventory unavailable (401). Existing-code comparison is proven by source, not alert-history metadata. GitHub output warns large PRs can misclassify preexisting alerts."
+    }
+  },
+  "tests": [
+    {
+      "command": "$env:GOTOOLCHAIN='go1.26.8'; go test shipped_linkage_test.go -run '^TestNoModuleBuildsGrpcGatewayRuntime$' -count=1 -v",
+      "cwd": "D:/AI/Culvert-appliance-review-d698-b7f",
+      "result": "PASS",
+      "elapsed_seconds": 30.435,
+      "scope": "Root, maintenance agent and releaseproof module dependency graphs; non-vacuous expected importers and local replacements."
+    },
+    {
+      "command": "Python -B importlib load appliance/artifact-audit/verify_dependency_forks.py; verify_tree('rekor-tiles', Path('third_party/rekor-tiles'))",
+      "result": "PASS",
+      "output": {
+        "upstream_files_verified": 144,
+        "modified": [],
+        "added": []
+      },
+      "scope": "Pinned inventory and exact removed-file set; upstream zip was not re-downloaded this turn."
+    },
+    {
+      "command": "go run C:/Users/Orel/AppData/Local/Temp/culvert-d698-scanner-wyogmwhd/inspect.go C:/Users/Orel/AppData/Local/Temp/culvert-d698-scanner-wyogmwhd/culvert C:/Users/Orel/AppData/Local/Temp/culvert-d698-scanner-wyogmwhd/culvert-maint",
+      "result": "PASS",
+      "fixture": "fixtures/inspect.go",
+      "scope": "Read-only parsing of ELF Go .gopclntab; Linux binaries were never executed.",
+      "command_note": "Replay command normalized to absolute paths of the retained original fixture/binaries; original result preserved, no rerun during archival."
+    },
+    {
+      "command": "go run C:/Users/Orel/AppData/Local/Temp/culvert-codeql-format-u1agtxts/main.go",
+      "result": "PASS",
+      "fixture": "fixtures/codeql-log-format.go",
+      "output": "PASS all 256 first-byte and host-control values cannot inject control bytes into exact log formatting"
+    }
+  ],
+  "remaining_limits": [
+    "Does not close independent partial-purge data integrity finding.",
+    "Does not qualify live ESXi lifecycle or approve production.",
+    "Build-info OVA and console hashes were read, not independently recomputed from OVA in this review.",
+    "Unsigned candidate provenance is distinct from signed release authorization."
+  ],
+  "tracked_product_edits": false
+}

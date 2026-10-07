@@ -1,0 +1,2019 @@
+{
+  "schema": 1,
+  "scope": "superseded d698 measurement candidate; not production acceptance",
+  "source_sha": "d698a69c5192588d5ed3a85a9f7cd9009fb59b31",
+  "ova_sha256": "9e8e067db5f8ee3c6aa55ac3127b008a7fe612dcca89d1cf004ab3ac8b63d1aa",
+  "image_id": "sha256:2c03833c9641a1e24dc5a66b3faa4f0695ac44cdeac931018b9b744be301660e",
+  "controller_revision": "54fe64f135e6a1ef9fcefe4d76e80076ce90c42e",
+  "controller_freeze_sha256": "d597ebde3580b43119f6502592558d41de6b946b0545a1b5ad07b3b0af788870",
+  "recovery_budget_seconds": 120,
+  "required_consecutive_cycles": 3,
+  "three_cycle_result": "pass",
+  "cycles": [
+    {
+      "cycle": "d698-1",
+      "result": "pass",
+      "reason": null,
+      "seconds_to_three_healthy_samples": 68.813,
+      "backup": {
+        "result": "pass",
+        "exactly_one_attempt": true,
+        "strict_checks": {
+          "recorded_pass": true,
+          "fresh_login": true,
+          "available": true,
+          "archive_matches": true,
+          "after_new_boot": true,
+          "first_ready_trigger": true,
+          "prompt_dispatch": true,
+          "login_duration": true,
+          "login_bounded": true,
+          "listing_duration": true,
+          "listing_bounded": true
+        },
+        "listing_seconds": 0.812,
+        "fresh_login_seconds": 0.094
+      },
+      "current_container_clamav_coverage": {
+        "guest_interval_start_ns": 50101679657,
+        "guest_interval_end_ns": 70991679657,
+        "pong_samples": 12,
+        "maximum_sample_gap_ns": 2009100772,
+        "current_container_endpoint_verified": true
+      },
+      "boot_origin_after_acceptance_bounds_seconds": [
+        0.321320343,
+        5.914320343
+      ],
+      "first_healthy_completion_kernel_bounds_seconds": [
+        55.398679657,
+        60.991679657
+      ],
+      "third_healthy_completion_kernel_bounds_seconds": [
+        62.898679657,
+        68.491679657
+      ],
+      "phase_seconds": {
+        "before_containerd_exec": 14.75304,
+        "containerd_exec_to_active": 10.252421,
+        "docker_exec_to_active": 5.100031000000001,
+        "stack_resume_exec": 30.120928,
+        "stack_resume_exit": 45.674298,
+        "stack_resume_duration": 15.553370000000001
+      },
+      "service_timestamps": {
+        "unit_timestamps_kernel_relative_seconds": {
+          "local-fs.target": {
+            "InactiveExitTimestampMonotonic_seconds": 10.011314,
+            "ActiveEnterTimestampMonotonic_seconds": 10.011314
+          },
+          "sysinit.target": {
+            "InactiveExitTimestampMonotonic_seconds": 11.909112,
+            "ActiveEnterTimestampMonotonic_seconds": 11.909112
+          },
+          "basic.target": {
+            "InactiveExitTimestampMonotonic_seconds": 12.058444,
+            "ActiveEnterTimestampMonotonic_seconds": 12.058444
+          },
+          "network-online.target": {
+            "InactiveExitTimestampMonotonic_seconds": 11.788961,
+            "ActiveEnterTimestampMonotonic_seconds": 11.788961
+          },
+          "cloud-init-local.service": {
+            "InactiveExitTimestampMonotonic_seconds": 0.0,
+            "ExecMainStartTimestampMonotonic_seconds": 0.0,
+            "ExecMainExitTimestampMonotonic_seconds": 0.0,
+            "ActiveEnterTimestampMonotonic_seconds": 0.0
+          },
+          "cloud-init.service": {
+            "InactiveExitTimestampMonotonic_seconds": 0.0,
+            "ExecMainStartTimestampMonotonic_seconds": 0.0,
+            "ExecMainExitTimestampMonotonic_seconds": 0.0,
+            "ActiveEnterTimestampMonotonic_seconds": 0.0
+          },
+          "cloud-final.service": {
+            "InactiveExitTimestampMonotonic_seconds": 0.0,
+            "ExecMainStartTimestampMonotonic_seconds": 0.0,
+            "ExecMainExitTimestampMonotonic_seconds": 0.0,
+            "ActiveEnterTimestampMonotonic_seconds": 0.0
+          },
+          "systemd-journal-flush.service": {
+            "InactiveExitTimestampMonotonic_seconds": 6.405086,
+            "ExecMainStartTimestampMonotonic_seconds": 6.405057,
+            "ExecMainExitTimestampMonotonic_seconds": 7.795781,
+            "ActiveEnterTimestampMonotonic_seconds": 7.795876
+          },
+          "systemd-udev-settle.service": {
+            "InactiveExitTimestampMonotonic_seconds": 0.0,
+            "ExecMainStartTimestampMonotonic_seconds": 0.0,
+            "ExecMainExitTimestampMonotonic_seconds": 0.0,
+            "ActiveEnterTimestampMonotonic_seconds": 0.0
+          },
+          "containerd.service": {
+            "InactiveExitTimestampMonotonic_seconds": 14.420066,
+            "ExecMainStartTimestampMonotonic_seconds": 14.75304,
+            "ExecMainExitTimestampMonotonic_seconds": 0.0,
+            "ActiveEnterTimestampMonotonic_seconds": 25.005461
+          },
+          "docker.service": {
+            "InactiveExitTimestampMonotonic_seconds": 25.010191,
+            "ExecMainStartTimestampMonotonic_seconds": 25.010119,
+            "ExecMainExitTimestampMonotonic_seconds": 0.0,
+            "ActiveEnterTimestampMonotonic_seconds": 30.11015
+          },
+          "culvert-maint.service": {
+            "InactiveExitTimestampMonotonic_seconds": 30.12024,
+            "ExecMainStartTimestampMonotonic_seconds": 30.120151,
+            "ExecMainExitTimestampMonotonic_seconds": 0.0,
+            "ActiveEnterTimestampMonotonic_seconds": 30.12024
+          },
+          "culvert-stack-resume.service": {
+            "InactiveExitTimestampMonotonic_seconds": 30.120993,
+            "ExecMainStartTimestampMonotonic_seconds": 30.120928,
+            "ExecMainExitTimestampMonotonic_seconds": 45.674298,
+            "ActiveEnterTimestampMonotonic_seconds": 0.0
+          },
+          "culvert-lab-boot-sampler.service": {
+            "InactiveExitTimestampMonotonic_seconds": 10.126087,
+            "ExecMainStartTimestampMonotonic_seconds": 10.126061,
+            "ExecMainExitTimestampMonotonic_seconds": 0.0,
+            "ActiveEnterTimestampMonotonic_seconds": 10.126087
+          }
+        },
+        "first_daemon_log_kernel_seconds": {
+          "containerd": 18.397928,
+          "dockerd": 27.379622
+        },
+        "daemon_log_capture_complete": true
+      },
+      "first_sampled_clamav_PONG_kernel_seconds": 45.100158126,
+      "sampled_resume_locks": {
+        "sample_count": 6,
+        "edge_exclusion_seconds": 1,
+        "os_update_held": true,
+        "agent_held": true,
+        "scope": "Observed lock holdings during sampled interior of resume; no continuous-lock inference between samples."
+      },
+      "sampler_observation": {
+        "samples_through_readiness": 27,
+        "first_kernel_seconds": 15.08629053,
+        "iowait_ticks_delta": 3745,
+        "cpu_ticks_delta": 10336,
+        "sample_errors": 0
+      },
+      "metrics": {
+        "host-storage": {
+          "devices": [
+            {
+              "device_sha256": "2f3a491b196a81ac90f19791689a74162dc41a7990a1ed0dce9b1d540399fcbe",
+              "metrics": [
+                {
+                  "metric": "disk.deviceReadLatency.average",
+                  "unit": "millisecond",
+                  "selected_samples": 6,
+                  "valid_samples": 6,
+                  "missing_samples": 0,
+                  "values": [
+                    57,
+                    1,
+                    43,
+                    46,
+                    12,
+                    11
+                  ],
+                  "sample_mean": 28.3333,
+                  "maximum_sample": 57,
+                  "maximum_at": "2026-10-07T10:00:20+00:00"
+                },
+                {
+                  "metric": "disk.kernelReadLatency.average",
+                  "unit": "millisecond",
+                  "selected_samples": 6,
+                  "valid_samples": 6,
+                  "missing_samples": 0,
+                  "values": [
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0
+                  ],
+                  "sample_mean": 0.0,
+                  "maximum_sample": 0,
+                  "maximum_at": "2026-10-07T10:00:20+00:00"
+                },
+                {
+                  "metric": "disk.queueReadLatency.average",
+                  "unit": "millisecond",
+                  "selected_samples": 6,
+                  "valid_samples": 6,
+                  "missing_samples": 0,
+                  "values": [
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0
+                  ],
+                  "sample_mean": 0.0,
+                  "maximum_sample": 0,
+                  "maximum_at": "2026-10-07T10:00:20+00:00"
+                },
+                {
+                  "metric": "disk.deviceWriteLatency.average",
+                  "unit": "millisecond",
+                  "selected_samples": 6,
+                  "valid_samples": 6,
+                  "missing_samples": 0,
+                  "values": [
+                    24,
+                    13,
+                    9,
+                    14,
+                    11,
+                    1
+                  ],
+                  "sample_mean": 12.0,
+                  "maximum_sample": 24,
+                  "maximum_at": "2026-10-07T10:00:20+00:00"
+                },
+                {
+                  "metric": "disk.kernelWriteLatency.average",
+                  "unit": "millisecond",
+                  "selected_samples": 6,
+                  "valid_samples": 6,
+                  "missing_samples": 0,
+                  "values": [
+                    33,
+                    1,
+                    1,
+                    5,
+                    2,
+                    0
+                  ],
+                  "sample_mean": 7.0,
+                  "maximum_sample": 33,
+                  "maximum_at": "2026-10-07T10:00:20+00:00"
+                },
+                {
+                  "metric": "disk.queueWriteLatency.average",
+                  "unit": "millisecond",
+                  "selected_samples": 6,
+                  "valid_samples": 6,
+                  "missing_samples": 0,
+                  "values": [
+                    32,
+                    0,
+                    0,
+                    5,
+                    2,
+                    0
+                  ],
+                  "sample_mean": 6.5,
+                  "maximum_sample": 32,
+                  "maximum_at": "2026-10-07T10:00:20+00:00"
+                },
+                {
+                  "metric": "disk.read.average",
+                  "unit": "kiloBytesPerSecond",
+                  "selected_samples": 6,
+                  "valid_samples": 6,
+                  "missing_samples": 0,
+                  "values": [
+                    0,
+                    2970,
+                    14953,
+                    22771,
+                    4195,
+                    33
+                  ],
+                  "sample_mean": 7487.0,
+                  "maximum_sample": 22771,
+                  "maximum_at": "2026-10-07T10:01:20+00:00"
+                },
+                {
+                  "metric": "disk.write.average",
+                  "unit": "kiloBytesPerSecond",
+                  "selected_samples": 6,
+                  "valid_samples": 6,
+                  "missing_samples": 0,
+                  "values": [
+                    308,
+                    730,
+                    809,
+                    1044,
+                    745,
+                    194
+                  ],
+                  "sample_mean": 638.3333,
+                  "maximum_sample": 1044,
+                  "maximum_at": "2026-10-07T10:01:20+00:00"
+                },
+                {
+                  "metric": "disk.numberReadAveraged.average",
+                  "unit": "number",
+                  "selected_samples": 6,
+                  "valid_samples": 6,
+                  "missing_samples": 0,
+                  "values": [
+                    0,
+                    175,
+                    166,
+                    64,
+                    44,
+                    2
+                  ],
+                  "sample_mean": 75.1667,
+                  "maximum_sample": 175,
+                  "maximum_at": "2026-10-07T10:00:40+00:00"
+                },
+                {
+                  "metric": "disk.numberWriteAveraged.average",
+                  "unit": "number",
+                  "selected_samples": 6,
+                  "valid_samples": 6,
+                  "missing_samples": 0,
+                  "values": [
+                    58,
+                    84,
+                    40,
+                    69,
+                    89,
+                    15
+                  ],
+                  "sample_mean": 59.1667,
+                  "maximum_sample": 89,
+                  "maximum_at": "2026-10-07T10:01:40+00:00"
+                }
+              ],
+              "unavailable_metrics": [],
+              "returned_start": "2026-10-07T09:23:00+00:00",
+              "returned_end": "2026-10-07T10:02:40+00:00",
+              "selected_start": "2026-10-07T10:00:20+00:00",
+              "selected_end": "2026-10-07T10:02:00+00:00",
+              "sample_times": [
+                "2026-10-07T10:00:20+00:00",
+                "2026-10-07T10:00:40+00:00",
+                "2026-10-07T10:01:00+00:00",
+                "2026-10-07T10:01:20+00:00",
+                "2026-10-07T10:01:40+00:00",
+                "2026-10-07T10:02:00+00:00"
+              ],
+              "timestamp_gaps": [],
+              "requested_window_covered": true,
+              "empty_selected_window": false,
+              "interval_seconds": 20
+            }
+          ],
+          "metadata_unavailable": [],
+          "query_errors": {
+            "metadata_count": 0,
+            "device_count": 0
+          },
+          "window_start": "2026-10-07T10:00:20+00:00",
+          "window_end": "2026-10-07T10:02:00+00:00",
+          "requested_samples": 120,
+          "required_interval_seconds": 20,
+          "complete": true,
+          "note": "Shared physical backing-device counters, not per-VM attribution or proof of cause. Means/maxima summarize 20-second samples; missing values are null, never zero.",
+          "schema_version": 1,
+          "started_at": "2026-10-07T10:02:53.022906+00:00",
+          "finished_at": "2026-10-07T10:02:55.515445+00:00",
+          "raw_sha256": "891523ad8d20feea97d1b4b41f536488ba59808ae0f96c6a0a03c7be37019619"
+        },
+        "vm-performance": {
+          "schema_version": 1,
+          "started_at": "2026-10-07T10:02:53.077299+00:00",
+          "metrics": [
+            {
+              "metric": "virtualDisk.totalWriteLatency.average",
+              "unit": "millisecond",
+              "instance": "scsi0:0",
+              "selected_samples": 6,
+              "valid_samples": 4,
+              "missing_samples": 2,
+              "sample_mean": 2.75,
+              "maximum_sample": 8,
+              "maximum_at": "2026-10-07T10:01:20+00:00"
+            },
+            {
+              "metric": "virtualDisk.read.average",
+              "unit": "kiloBytesPerSecond",
+              "instance": "scsi0:0",
+              "selected_samples": 6,
+              "valid_samples": 5,
+              "missing_samples": 1,
+              "sample_mean": 8442.8,
+              "maximum_sample": 22768,
+              "maximum_at": "2026-10-07T10:01:20+00:00"
+            },
+            {
+              "metric": "virtualDisk.write.average",
+              "unit": "kiloBytesPerSecond",
+              "instance": "scsi0:0",
+              "selected_samples": 6,
+              "valid_samples": 5,
+              "missing_samples": 1,
+              "sample_mean": 274.4,
+              "maximum_sample": 770,
+              "maximum_at": "2026-10-07T10:01:20+00:00"
+            },
+            {
+              "metric": "cpu.maxlimited.summation",
+              "unit": "millisecond",
+              "instance": "0",
+              "selected_samples": 6,
+              "valid_samples": 6,
+              "missing_samples": 0,
+              "sample_mean": 0.0,
+              "maximum_sample": 0,
+              "maximum_at": "2026-10-07T10:00:20+00:00"
+            },
+            {
+              "metric": "virtualDisk.numberReadAveraged.average",
+              "unit": "number",
+              "instance": "scsi0:0",
+              "selected_samples": 6,
+              "valid_samples": 5,
+              "missing_samples": 1,
+              "sample_mean": 55.2,
+              "maximum_sample": 172,
+              "maximum_at": "2026-10-07T10:01:00+00:00"
+            },
+            {
+              "metric": "cpu.costop.summation",
+              "unit": "millisecond",
+              "instance": "1",
+              "selected_samples": 6,
+              "valid_samples": 6,
+              "missing_samples": 0,
+              "sample_mean": 0.0,
+              "maximum_sample": 0,
+              "maximum_at": "2026-10-07T10:00:20+00:00"
+            },
+            {
+              "metric": "virtualDisk.numberWriteAveraged.average",
+              "unit": "number",
+              "instance": "scsi0:0",
+              "selected_samples": 6,
+              "valid_samples": 5,
+              "missing_samples": 1,
+              "sample_mean": 16.2,
+              "maximum_sample": 37,
+              "maximum_at": "2026-10-07T10:01:20+00:00"
+            },
+            {
+              "metric": "mem.vmmemctl.average",
+              "unit": "kiloBytes",
+              "instance": "",
+              "selected_samples": 6,
+              "valid_samples": 6,
+              "missing_samples": 0,
+              "sample_mean": 0.0,
+              "maximum_sample": 0,
+              "maximum_at": "2026-10-07T10:00:20+00:00"
+            },
+            {
+              "metric": "cpu.maxlimited.summation",
+              "unit": "millisecond",
+              "instance": "1",
+              "selected_samples": 6,
+              "valid_samples": 6,
+              "missing_samples": 0,
+              "sample_mean": 0.0,
+              "maximum_sample": 0,
+              "maximum_at": "2026-10-07T10:00:20+00:00"
+            },
+            {
+              "metric": "cpu.costop.summation",
+              "unit": "millisecond",
+              "instance": "",
+              "selected_samples": 6,
+              "valid_samples": 6,
+              "missing_samples": 0,
+              "sample_mean": 0.0,
+              "maximum_sample": 0,
+              "maximum_at": "2026-10-07T10:00:20+00:00"
+            },
+            {
+              "metric": "cpu.costop.summation",
+              "unit": "millisecond",
+              "instance": "0",
+              "selected_samples": 6,
+              "valid_samples": 6,
+              "missing_samples": 0,
+              "sample_mean": 0.0,
+              "maximum_sample": 0,
+              "maximum_at": "2026-10-07T10:00:20+00:00"
+            },
+            {
+              "metric": "cpu.ready.summation",
+              "unit": "millisecond",
+              "instance": "",
+              "selected_samples": 6,
+              "valid_samples": 6,
+              "missing_samples": 0,
+              "sample_mean": 84.3333,
+              "maximum_sample": 102,
+              "maximum_at": "2026-10-07T10:01:00+00:00"
+            },
+            {
+              "metric": "cpu.maxlimited.summation",
+              "unit": "millisecond",
+              "instance": "",
+              "selected_samples": 6,
+              "valid_samples": 6,
+              "missing_samples": 0,
+              "sample_mean": 0.0,
+              "maximum_sample": 0,
+              "maximum_at": "2026-10-07T10:00:20+00:00"
+            },
+            {
+              "metric": "cpu.ready.summation",
+              "unit": "millisecond",
+              "instance": "1",
+              "selected_samples": 6,
+              "valid_samples": 6,
+              "missing_samples": 0,
+              "sample_mean": 40.8333,
+              "maximum_sample": 52,
+              "maximum_at": "2026-10-07T10:01:00+00:00"
+            },
+            {
+              "metric": "virtualDisk.totalReadLatency.average",
+              "unit": "millisecond",
+              "instance": "scsi0:0",
+              "selected_samples": 6,
+              "valid_samples": 4,
+              "missing_samples": 2,
+              "sample_mean": 30.5,
+              "maximum_sample": 57,
+              "maximum_at": "2026-10-07T10:00:20+00:00"
+            },
+            {
+              "metric": "virtualDisk.write.average",
+              "unit": "kiloBytesPerSecond",
+              "instance": "",
+              "selected_samples": 6,
+              "valid_samples": 5,
+              "missing_samples": 1,
+              "sample_mean": 274.4,
+              "maximum_sample": 770,
+              "maximum_at": "2026-10-07T10:01:20+00:00"
+            },
+            {
+              "metric": "mem.swapinRate.average",
+              "unit": "kiloBytesPerSecond",
+              "instance": "",
+              "selected_samples": 6,
+              "valid_samples": 6,
+              "missing_samples": 0,
+              "sample_mean": 0.0,
+              "maximum_sample": 0,
+              "maximum_at": "2026-10-07T10:00:20+00:00"
+            },
+            {
+              "metric": "virtualDisk.read.average",
+              "unit": "kiloBytesPerSecond",
+              "instance": "",
+              "selected_samples": 6,
+              "valid_samples": 5,
+              "missing_samples": 1,
+              "sample_mean": 8442.8,
+              "maximum_sample": 22768,
+              "maximum_at": "2026-10-07T10:01:20+00:00"
+            },
+            {
+              "metric": "cpu.ready.summation",
+              "unit": "millisecond",
+              "instance": "0",
+              "selected_samples": 6,
+              "valid_samples": 6,
+              "missing_samples": 0,
+              "sample_mean": 43.6667,
+              "maximum_sample": 50,
+              "maximum_at": "2026-10-07T10:01:20+00:00"
+            }
+          ],
+          "unavailable_metrics": [],
+          "intervals_seconds": [
+            20
+          ],
+          "returned_start": "2026-10-07T09:23:00+00:00",
+          "returned_end": "2026-10-07T10:02:40+00:00",
+          "window_start": "2026-10-07T10:00:20+00:00",
+          "window_end": "2026-10-07T10:02:00+00:00",
+          "note": "Means and maxima of available samples; missing samples excluded. Not per-I/O percentiles, guest readiness timestamps or causal proof.",
+          "complete": true,
+          "finished_at": "2026-10-07T10:02:53.336806+00:00"
+        }
+      },
+      "boot_id": "62810b2c-b7e1-4d94-aa99-92ba16a9ed4b",
+      "evidence": [
+        {
+          "path": "secrets/production-recovery-d698-1.jsonl",
+          "sha256": "39595da2b3ea309f7964e1a4f5dba367494ce123866a3b4df7502d0c97ad510e",
+          "bytes": 14695,
+          "private": true
+        },
+        {
+          "path": "evidence/production-recovery-d698-1-summary.json",
+          "sha256": "9f65133624977dfef189f20a7cbeb90088aea545071d2b5527c5a77d5913e9f1",
+          "bytes": 960,
+          "private": false
+        },
+        {
+          "path": "secrets/production-recovery/d698-1/acceptance.json",
+          "sha256": "dd7e14017320418e511b3a950b2106ea6503ece5c3fb668ddb461a02273f5a3b",
+          "bytes": 684,
+          "private": true
+        },
+        {
+          "path": "secrets/production-recovery/d698-1/full.json",
+          "sha256": "950d543776d228a65dcd0231a09fe83314c2900f795b6cdb58a2f8feeb8535d7",
+          "bytes": 279448,
+          "private": true
+        },
+        {
+          "path": "secrets/production-recovery/d698-1/full-receipt.json",
+          "sha256": "eea7755aac5da18df08713f5923919e90ab6e24b60af0cc8fe0c890ecc4c6e01",
+          "bytes": 559,
+          "private": true
+        },
+        {
+          "path": "secrets/production-recovery/d698-1/correlation.json",
+          "sha256": "4e3c3adb909408168ff4286c0aaedb1de7cf8e81ebf184ea688f55f93779d5b7",
+          "bytes": 451,
+          "private": true
+        },
+        {
+          "path": "secrets/production-recovery/d698-1/correlation-receipt.json",
+          "sha256": "8668c71ea0da3ba8d43b5101a79cdfc9673f5cb02be6d5fdd3ff6de75fd693b5",
+          "bytes": 566,
+          "private": true
+        },
+        {
+          "path": "secrets/production-recovery/d698-1/authenticated-boot-proof.json",
+          "sha256": "89741b8a71efd0057bd0528c434a78b677748af9e9db720562137bc8492ffe2f",
+          "bytes": 14782,
+          "private": true
+        },
+        {
+          "path": "evidence/host-storage-d698-1.json",
+          "sha256": "c9719ae0183ff416dc837b8bb7c7fc7eb139a981ca0e79ad22ceb2302cf84dd1",
+          "bytes": 6137,
+          "private": false
+        },
+        {
+          "path": "evidence/vm-performance-d698-1.json",
+          "sha256": "a793a6b846c4e83b5ed97e6a78776f6c199b10bfdcca607dab7d32b186b7ff54",
+          "bytes": 6485,
+          "private": false
+        }
+      ]
+    },
+    {
+      "cycle": "d698-2",
+      "result": "pass",
+      "reason": null,
+      "seconds_to_three_healthy_samples": 72.672,
+      "backup": {
+        "result": "pass",
+        "exactly_one_attempt": true,
+        "strict_checks": {
+          "recorded_pass": true,
+          "fresh_login": true,
+          "available": true,
+          "archive_matches": true,
+          "after_new_boot": true,
+          "first_ready_trigger": true,
+          "prompt_dispatch": true,
+          "login_duration": true,
+          "login_bounded": true,
+          "listing_duration": true,
+          "listing_bounded": true
+        },
+        "listing_seconds": 0.766,
+        "fresh_login_seconds": 0.094
+      },
+      "current_container_clamav_coverage": {
+        "guest_interval_start_ns": 53639583848,
+        "guest_interval_end_ns": 74702583848,
+        "pong_samples": 13,
+        "maximum_sample_gap_ns": 2009063668,
+        "current_container_endpoint_verified": true
+      },
+      "boot_origin_after_acceptance_bounds_seconds": [
+        0.469416152,
+        6.235416152
+      ],
+      "first_healthy_completion_kernel_bounds_seconds": [
+        56.389583848,
+        62.155583848
+      ],
+      "third_healthy_completion_kernel_bounds_seconds": [
+        66.436583848,
+        72.202583848
+      ],
+      "phase_seconds": {
+        "before_containerd_exec": 16.158109,
+        "containerd_exec_to_active": 7.188414000000002,
+        "docker_exec_to_active": 6.108184999999999,
+        "stack_resume_exec": 29.468914,
+        "stack_resume_exit": 46.256719,
+        "stack_resume_duration": 16.787804999999995
+      },
+      "service_timestamps": {
+        "unit_timestamps_kernel_relative_seconds": {
+          "local-fs.target": {
+            "InactiveExitTimestampMonotonic_seconds": 10.051342,
+            "ActiveEnterTimestampMonotonic_seconds": 10.051342
+          },
+          "sysinit.target": {
+            "InactiveExitTimestampMonotonic_seconds": 12.837813,
+            "ActiveEnterTimestampMonotonic_seconds": 12.837813
+          },
+          "basic.target": {
+            "InactiveExitTimestampMonotonic_seconds": 12.976516,
+            "ActiveEnterTimestampMonotonic_seconds": 12.976516
+          },
+          "network-online.target": {
+            "InactiveExitTimestampMonotonic_seconds": 12.221904,
+            "ActiveEnterTimestampMonotonic_seconds": 12.221904
+          },
+          "cloud-init-local.service": {
+            "InactiveExitTimestampMonotonic_seconds": 0.0,
+            "ExecMainStartTimestampMonotonic_seconds": 0.0,
+            "ExecMainExitTimestampMonotonic_seconds": 0.0,
+            "ActiveEnterTimestampMonotonic_seconds": 0.0
+          },
+          "cloud-init.service": {
+            "InactiveExitTimestampMonotonic_seconds": 0.0,
+            "ExecMainStartTimestampMonotonic_seconds": 0.0,
+            "ExecMainExitTimestampMonotonic_seconds": 0.0,
+            "ActiveEnterTimestampMonotonic_seconds": 0.0
+          },
+          "cloud-final.service": {
+            "InactiveExitTimestampMonotonic_seconds": 0.0,
+            "ExecMainStartTimestampMonotonic_seconds": 0.0,
+            "ExecMainExitTimestampMonotonic_seconds": 0.0,
+            "ActiveEnterTimestampMonotonic_seconds": 0.0
+          },
+          "systemd-journal-flush.service": {
+            "InactiveExitTimestampMonotonic_seconds": 6.728106,
+            "ExecMainStartTimestampMonotonic_seconds": 6.728078,
+            "ExecMainExitTimestampMonotonic_seconds": 8.20865,
+            "ActiveEnterTimestampMonotonic_seconds": 8.209161
+          },
+          "systemd-udev-settle.service": {
+            "InactiveExitTimestampMonotonic_seconds": 0.0,
+            "ExecMainStartTimestampMonotonic_seconds": 0.0,
+            "ExecMainExitTimestampMonotonic_seconds": 0.0,
+            "ActiveEnterTimestampMonotonic_seconds": 0.0
+          },
+          "containerd.service": {
+            "InactiveExitTimestampMonotonic_seconds": 15.729056,
+            "ExecMainStartTimestampMonotonic_seconds": 16.158109,
+            "ExecMainExitTimestampMonotonic_seconds": 0.0,
+            "ActiveEnterTimestampMonotonic_seconds": 23.346523
+          },
+          "docker.service": {
+            "InactiveExitTimestampMonotonic_seconds": 23.354189,
+            "ExecMainStartTimestampMonotonic_seconds": 23.354108,
+            "ExecMainExitTimestampMonotonic_seconds": 0.0,
+            "ActiveEnterTimestampMonotonic_seconds": 29.462293
+          },
+          "culvert-maint.service": {
+            "InactiveExitTimestampMonotonic_seconds": 29.468206,
+            "ExecMainStartTimestampMonotonic_seconds": 29.468117,
+            "ExecMainExitTimestampMonotonic_seconds": 0.0,
+            "ActiveEnterTimestampMonotonic_seconds": 29.468206
+          },
+          "culvert-stack-resume.service": {
+            "InactiveExitTimestampMonotonic_seconds": 29.468984,
+            "ExecMainStartTimestampMonotonic_seconds": 29.468914,
+            "ExecMainExitTimestampMonotonic_seconds": 46.256719,
+            "ActiveEnterTimestampMonotonic_seconds": 0.0
+          },
+          "culvert-lab-boot-sampler.service": {
+            "InactiveExitTimestampMonotonic_seconds": 10.1691,
+            "ExecMainStartTimestampMonotonic_seconds": 10.169076,
+            "ExecMainExitTimestampMonotonic_seconds": 0.0,
+            "ActiveEnterTimestampMonotonic_seconds": 10.1691
+          }
+        },
+        "first_daemon_log_kernel_seconds": {
+          "containerd": 19.064237,
+          "dockerd": 26.504019
+        },
+        "daemon_log_capture_complete": true
+      },
+      "first_sampled_clamav_PONG_kernel_seconds": 44.625123494,
+      "sampled_resume_locks": {
+        "sample_count": 8,
+        "edge_exclusion_seconds": 1,
+        "os_update_held": true,
+        "agent_held": true,
+        "scope": "Observed lock holdings during sampled interior of resume; no continuous-lock inference between samples."
+      },
+      "sampler_observation": {
+        "samples_through_readiness": 29,
+        "first_kernel_seconds": 14.607194045,
+        "iowait_ticks_delta": 3708,
+        "cpu_ticks_delta": 11131,
+        "sample_errors": 0
+      },
+      "metrics": {
+        "host-storage": {
+          "devices": [
+            {
+              "device_sha256": "2f3a491b196a81ac90f19791689a74162dc41a7990a1ed0dce9b1d540399fcbe",
+              "metrics": [
+                {
+                  "metric": "disk.deviceReadLatency.average",
+                  "unit": "millisecond",
+                  "selected_samples": 6,
+                  "valid_samples": 6,
+                  "missing_samples": 0,
+                  "values": [
+                    0,
+                    13,
+                    10,
+                    59,
+                    31,
+                    5
+                  ],
+                  "sample_mean": 19.6667,
+                  "maximum_sample": 59,
+                  "maximum_at": "2026-10-07T10:04:00+00:00"
+                },
+                {
+                  "metric": "disk.kernelReadLatency.average",
+                  "unit": "millisecond",
+                  "selected_samples": 6,
+                  "valid_samples": 6,
+                  "missing_samples": 0,
+                  "values": [
+                    0,
+                    0,
+                    0,
+                    1,
+                    0,
+                    0
+                  ],
+                  "sample_mean": 0.1667,
+                  "maximum_sample": 1,
+                  "maximum_at": "2026-10-07T10:04:00+00:00"
+                },
+                {
+                  "metric": "disk.queueReadLatency.average",
+                  "unit": "millisecond",
+                  "selected_samples": 6,
+                  "valid_samples": 6,
+                  "missing_samples": 0,
+                  "values": [
+                    0,
+                    0,
+                    0,
+                    1,
+                    0,
+                    0
+                  ],
+                  "sample_mean": 0.1667,
+                  "maximum_sample": 1,
+                  "maximum_at": "2026-10-07T10:04:00+00:00"
+                },
+                {
+                  "metric": "disk.deviceWriteLatency.average",
+                  "unit": "millisecond",
+                  "selected_samples": 6,
+                  "valid_samples": 6,
+                  "missing_samples": 0,
+                  "values": [
+                    19,
+                    7,
+                    9,
+                    13,
+                    21,
+                    7
+                  ],
+                  "sample_mean": 12.6667,
+                  "maximum_sample": 21,
+                  "maximum_at": "2026-10-07T10:04:20+00:00"
+                },
+                {
+                  "metric": "disk.kernelWriteLatency.average",
+                  "unit": "millisecond",
+                  "selected_samples": 6,
+                  "valid_samples": 6,
+                  "missing_samples": 0,
+                  "values": [
+                    8,
+                    0,
+                    1,
+                    2,
+                    14,
+                    0
+                  ],
+                  "sample_mean": 4.1667,
+                  "maximum_sample": 14,
+                  "maximum_at": "2026-10-07T10:04:20+00:00"
+                },
+                {
+                  "metric": "disk.queueWriteLatency.average",
+                  "unit": "millisecond",
+                  "selected_samples": 6,
+                  "valid_samples": 6,
+                  "missing_samples": 0,
+                  "values": [
+                    7,
+                    0,
+                    0,
+                    2,
+                    13,
+                    0
+                  ],
+                  "sample_mean": 3.6667,
+                  "maximum_sample": 13,
+                  "maximum_at": "2026-10-07T10:04:20+00:00"
+                },
+                {
+                  "metric": "disk.read.average",
+                  "unit": "kiloBytesPerSecond",
+                  "selected_samples": 6,
+                  "valid_samples": 6,
+                  "missing_samples": 0,
+                  "values": [
+                    0,
+                    14,
+                    11194,
+                    23070,
+                    11322,
+                    7
+                  ],
+                  "sample_mean": 7601.1667,
+                  "maximum_sample": 23070,
+                  "maximum_at": "2026-10-07T10:04:00+00:00"
+                },
+                {
+                  "metric": "disk.write.average",
+                  "unit": "kiloBytesPerSecond",
+                  "selected_samples": 6,
+                  "valid_samples": 6,
+                  "missing_samples": 0,
+                  "values": [
+                    310,
+                    144,
+                    1713,
+                    1333,
+                    776,
+                    370
+                  ],
+                  "sample_mean": 774.3333,
+                  "maximum_sample": 1713,
+                  "maximum_at": "2026-10-07T10:03:40+00:00"
+                },
+                {
+                  "metric": "disk.numberReadAveraged.average",
+                  "unit": "number",
+                  "selected_samples": 6,
+                  "valid_samples": 6,
+                  "missing_samples": 0,
+                  "values": [
+                    0,
+                    2,
+                    292,
+                    105,
+                    53,
+                    1
+                  ],
+                  "sample_mean": 75.5,
+                  "maximum_sample": 292,
+                  "maximum_at": "2026-10-07T10:03:40+00:00"
+                },
+                {
+                  "metric": "disk.numberWriteAveraged.average",
+                  "unit": "number",
+                  "selected_samples": 6,
+                  "valid_samples": 6,
+                  "missing_samples": 0,
+                  "values": [
+                    46,
+                    22,
+                    123,
+                    47,
+                    62,
+                    55
+                  ],
+                  "sample_mean": 59.1667,
+                  "maximum_sample": 123,
+                  "maximum_at": "2026-10-07T10:03:40+00:00"
+                }
+              ],
+              "unavailable_metrics": [],
+              "returned_start": "2026-10-07T09:26:20+00:00",
+              "returned_end": "2026-10-07T10:06:00+00:00",
+              "selected_start": "2026-10-07T10:03:00+00:00",
+              "selected_end": "2026-10-07T10:04:40+00:00",
+              "sample_times": [
+                "2026-10-07T10:03:00+00:00",
+                "2026-10-07T10:03:20+00:00",
+                "2026-10-07T10:03:40+00:00",
+                "2026-10-07T10:04:00+00:00",
+                "2026-10-07T10:04:20+00:00",
+                "2026-10-07T10:04:40+00:00"
+              ],
+              "timestamp_gaps": [],
+              "requested_window_covered": true,
+              "empty_selected_window": false,
+              "interval_seconds": 20
+            }
+          ],
+          "metadata_unavailable": [],
+          "query_errors": {
+            "metadata_count": 0,
+            "device_count": 0
+          },
+          "window_start": "2026-10-07T10:03:00+00:00",
+          "window_end": "2026-10-07T10:04:40+00:00",
+          "requested_samples": 120,
+          "required_interval_seconds": 20,
+          "complete": true,
+          "note": "Shared physical backing-device counters, not per-VM attribution or proof of cause. Means/maxima summarize 20-second samples; missing values are null, never zero.",
+          "schema_version": 1,
+          "started_at": "2026-10-07T10:06:09.315149+00:00",
+          "finished_at": "2026-10-07T10:06:11.732730+00:00",
+          "raw_sha256": "36b564b9091de24e499a1053566f576b09129bd70196a2fb5bbce3c4bf3478cd"
+        },
+        "vm-performance": {
+          "schema_version": 1,
+          "started_at": "2026-10-07T10:06:09.315149+00:00",
+          "metrics": [
+            {
+              "metric": "virtualDisk.totalWriteLatency.average",
+              "unit": "millisecond",
+              "instance": "scsi0:0",
+              "selected_samples": 6,
+              "valid_samples": 4,
+              "missing_samples": 2,
+              "sample_mean": 3.75,
+              "maximum_sample": 11,
+              "maximum_at": "2026-10-07T10:03:20+00:00"
+            },
+            {
+              "metric": "virtualDisk.read.average",
+              "unit": "kiloBytesPerSecond",
+              "instance": "scsi0:0",
+              "selected_samples": 6,
+              "valid_samples": 5,
+              "missing_samples": 1,
+              "sample_mean": 6877.6,
+              "maximum_sample": 23017,
+              "maximum_at": "2026-10-07T10:04:00+00:00"
+            },
+            {
+              "metric": "virtualDisk.write.average",
+              "unit": "kiloBytesPerSecond",
+              "instance": "scsi0:0",
+              "selected_samples": 6,
+              "valid_samples": 5,
+              "missing_samples": 1,
+              "sample_mean": 210.6,
+              "maximum_sample": 691,
+              "maximum_at": "2026-10-07T10:04:00+00:00"
+            },
+            {
+              "metric": "cpu.maxlimited.summation",
+              "unit": "millisecond",
+              "instance": "0",
+              "selected_samples": 6,
+              "valid_samples": 6,
+              "missing_samples": 0,
+              "sample_mean": 0.0,
+              "maximum_sample": 0,
+              "maximum_at": "2026-10-07T10:03:00+00:00"
+            },
+            {
+              "metric": "virtualDisk.numberReadAveraged.average",
+              "unit": "number",
+              "instance": "scsi0:0",
+              "selected_samples": 6,
+              "valid_samples": 5,
+              "missing_samples": 1,
+              "sample_mean": 30.4,
+              "maximum_sample": 103,
+              "maximum_at": "2026-10-07T10:04:00+00:00"
+            },
+            {
+              "metric": "cpu.costop.summation",
+              "unit": "millisecond",
+              "instance": "1",
+              "selected_samples": 6,
+              "valid_samples": 6,
+              "missing_samples": 0,
+              "sample_mean": 0.0,
+              "maximum_sample": 0,
+              "maximum_at": "2026-10-07T10:03:00+00:00"
+            },
+            {
+              "metric": "virtualDisk.numberWriteAveraged.average",
+              "unit": "number",
+              "instance": "scsi0:0",
+              "selected_samples": 6,
+              "valid_samples": 5,
+              "missing_samples": 1,
+              "sample_mean": 15.6,
+              "maximum_sample": 30,
+              "maximum_at": "2026-10-07T10:04:00+00:00"
+            },
+            {
+              "metric": "mem.vmmemctl.average",
+              "unit": "kiloBytes",
+              "instance": "",
+              "selected_samples": 6,
+              "valid_samples": 6,
+              "missing_samples": 0,
+              "sample_mean": 0.0,
+              "maximum_sample": 0,
+              "maximum_at": "2026-10-07T10:03:00+00:00"
+            },
+            {
+              "metric": "cpu.maxlimited.summation",
+              "unit": "millisecond",
+              "instance": "1",
+              "selected_samples": 6,
+              "valid_samples": 6,
+              "missing_samples": 0,
+              "sample_mean": 0.0,
+              "maximum_sample": 0,
+              "maximum_at": "2026-10-07T10:03:00+00:00"
+            },
+            {
+              "metric": "cpu.costop.summation",
+              "unit": "millisecond",
+              "instance": "",
+              "selected_samples": 6,
+              "valid_samples": 6,
+              "missing_samples": 0,
+              "sample_mean": 0.0,
+              "maximum_sample": 0,
+              "maximum_at": "2026-10-07T10:03:00+00:00"
+            },
+            {
+              "metric": "cpu.costop.summation",
+              "unit": "millisecond",
+              "instance": "0",
+              "selected_samples": 6,
+              "valid_samples": 6,
+              "missing_samples": 0,
+              "sample_mean": 0.0,
+              "maximum_sample": 0,
+              "maximum_at": "2026-10-07T10:03:00+00:00"
+            },
+            {
+              "metric": "cpu.ready.summation",
+              "unit": "millisecond",
+              "instance": "",
+              "selected_samples": 6,
+              "valid_samples": 6,
+              "missing_samples": 0,
+              "sample_mean": 74.0,
+              "maximum_sample": 104,
+              "maximum_at": "2026-10-07T10:04:00+00:00"
+            },
+            {
+              "metric": "cpu.maxlimited.summation",
+              "unit": "millisecond",
+              "instance": "",
+              "selected_samples": 6,
+              "valid_samples": 6,
+              "missing_samples": 0,
+              "sample_mean": 0.0,
+              "maximum_sample": 0,
+              "maximum_at": "2026-10-07T10:03:00+00:00"
+            },
+            {
+              "metric": "cpu.ready.summation",
+              "unit": "millisecond",
+              "instance": "1",
+              "selected_samples": 6,
+              "valid_samples": 6,
+              "missing_samples": 0,
+              "sample_mean": 33.6667,
+              "maximum_sample": 51,
+              "maximum_at": "2026-10-07T10:04:00+00:00"
+            },
+            {
+              "metric": "virtualDisk.totalReadLatency.average",
+              "unit": "millisecond",
+              "instance": "scsi0:0",
+              "selected_samples": 6,
+              "valid_samples": 4,
+              "missing_samples": 2,
+              "sample_mean": 8.5,
+              "maximum_sample": 29,
+              "maximum_at": "2026-10-07T10:04:20+00:00"
+            },
+            {
+              "metric": "virtualDisk.write.average",
+              "unit": "kiloBytesPerSecond",
+              "instance": "",
+              "selected_samples": 6,
+              "valid_samples": 5,
+              "missing_samples": 1,
+              "sample_mean": 210.6,
+              "maximum_sample": 691,
+              "maximum_at": "2026-10-07T10:04:00+00:00"
+            },
+            {
+              "metric": "mem.swapinRate.average",
+              "unit": "kiloBytesPerSecond",
+              "instance": "",
+              "selected_samples": 6,
+              "valid_samples": 6,
+              "missing_samples": 0,
+              "sample_mean": 0.0,
+              "maximum_sample": 0,
+              "maximum_at": "2026-10-07T10:03:00+00:00"
+            },
+            {
+              "metric": "virtualDisk.read.average",
+              "unit": "kiloBytesPerSecond",
+              "instance": "",
+              "selected_samples": 6,
+              "valid_samples": 5,
+              "missing_samples": 1,
+              "sample_mean": 6877.6,
+              "maximum_sample": 23017,
+              "maximum_at": "2026-10-07T10:04:00+00:00"
+            },
+            {
+              "metric": "cpu.ready.summation",
+              "unit": "millisecond",
+              "instance": "0",
+              "selected_samples": 6,
+              "valid_samples": 6,
+              "missing_samples": 0,
+              "sample_mean": 40.3333,
+              "maximum_sample": 53,
+              "maximum_at": "2026-10-07T10:04:00+00:00"
+            }
+          ],
+          "unavailable_metrics": [],
+          "intervals_seconds": [
+            20
+          ],
+          "returned_start": "2026-10-07T09:26:20+00:00",
+          "returned_end": "2026-10-07T10:06:00+00:00",
+          "window_start": "2026-10-07T10:03:00+00:00",
+          "window_end": "2026-10-07T10:04:40+00:00",
+          "note": "Means and maxima of available samples; missing samples excluded. Not per-I/O percentiles, guest readiness timestamps or causal proof.",
+          "complete": true,
+          "finished_at": "2026-10-07T10:06:09.549466+00:00"
+        }
+      },
+      "boot_id": "3d23e4d0-73ea-4d78-b1ff-d474cf61a4a2",
+      "evidence": [
+        {
+          "path": "secrets/production-recovery-d698-2.jsonl",
+          "sha256": "4273b88ee4b2053dd109eca09936211393da6ecaada3b24fb5af0fbf92437d61",
+          "bytes": 15533,
+          "private": true
+        },
+        {
+          "path": "evidence/production-recovery-d698-2-summary.json",
+          "sha256": "1ada5ee0298f6806dea154a2b447103309b1310554dc1e4749edeb42ec51a15a",
+          "bytes": 960,
+          "private": false
+        },
+        {
+          "path": "secrets/production-recovery/d698-2/acceptance.json",
+          "sha256": "8996f4d165417f3335c278b19c13eabcbea1b3726354a84949b6c472f74456dc",
+          "bytes": 684,
+          "private": true
+        },
+        {
+          "path": "secrets/production-recovery/d698-2/full.json",
+          "sha256": "cf809d53f4fa0e10889706a6ec226e26afbd1cfbbdbf0639a51172d007f4b39e",
+          "bytes": 281132,
+          "private": true
+        },
+        {
+          "path": "secrets/production-recovery/d698-2/full-receipt.json",
+          "sha256": "942f44a3d8dc2668291ea68f588b87aba4a7645e3c3d92b6d0db64e7bc7b1752",
+          "bytes": 559,
+          "private": true
+        },
+        {
+          "path": "secrets/production-recovery/d698-2/correlation.json",
+          "sha256": "c54be8da2ff5b2b1e8d5ca81ca392ea76e956727b76d0161c0461f2cbef0191e",
+          "bytes": 451,
+          "private": true
+        },
+        {
+          "path": "secrets/production-recovery/d698-2/correlation-receipt.json",
+          "sha256": "2b8fc6f3502a64ecafbef0a9ec1b3de8277d23a9927eb2acb99cb2d4617df27c",
+          "bytes": 566,
+          "private": true
+        },
+        {
+          "path": "secrets/production-recovery/d698-2/authenticated-boot-proof.json",
+          "sha256": "302c2adc89dc07b3aede9f09f6b235395771bf9779fbe8260a27252edb3173f8",
+          "bytes": 15486,
+          "private": true
+        },
+        {
+          "path": "evidence/host-storage-d698-2.json",
+          "sha256": "948ee400d3c102365a097d938018b506ee196e84751f975323edc855290363a6",
+          "bytes": 6150,
+          "private": false
+        },
+        {
+          "path": "evidence/vm-performance-d698-2.json",
+          "sha256": "7a91c12f35d15f47310843120fd91047056dc0d1add1f478f0c11e408c6966d2",
+          "bytes": 6482,
+          "private": false
+        }
+      ]
+    },
+    {
+      "cycle": "d698-3",
+      "result": "pass",
+      "reason": null,
+      "seconds_to_three_healthy_samples": 70.375,
+      "backup": {
+        "result": "pass",
+        "exactly_one_attempt": true,
+        "strict_checks": {
+          "recorded_pass": true,
+          "fresh_login": true,
+          "available": true,
+          "archive_matches": true,
+          "after_new_boot": true,
+          "first_ready_trigger": true,
+          "prompt_dispatch": true,
+          "login_duration": true,
+          "login_bounded": true,
+          "listing_duration": true,
+          "listing_bounded": true
+        },
+        "listing_seconds": 0.937,
+        "fresh_login_seconds": 0.094
+      },
+      "current_container_clamav_coverage": {
+        "guest_interval_start_ns": 51703538219,
+        "guest_interval_end_ns": 74328538219,
+        "pong_samples": 13,
+        "maximum_sample_gap_ns": 2008882690,
+        "current_container_endpoint_verified": true
+      },
+      "boot_origin_after_acceptance_bounds_seconds": [
+        -1.453538219,
+        5.858461781
+      ],
+      "first_healthy_completion_kernel_bounds_seconds": [
+        54.750538219,
+        62.062538219
+      ],
+      "third_healthy_completion_kernel_bounds_seconds": [
+        64.516538219,
+        71.828538219
+      ],
+      "phase_seconds": {
+        "before_containerd_exec": 16.40412,
+        "containerd_exec_to_active": 4.621394000000002,
+        "docker_exec_to_active": 8.449994,
+        "stack_resume_exec": 29.859736,
+        "stack_resume_exit": 49.144034,
+        "stack_resume_duration": 19.284297999999996
+      },
+      "service_timestamps": {
+        "unit_timestamps_kernel_relative_seconds": {
+          "local-fs.target": {
+            "InactiveExitTimestampMonotonic_seconds": 10.903525,
+            "ActiveEnterTimestampMonotonic_seconds": 10.903525
+          },
+          "sysinit.target": {
+            "InactiveExitTimestampMonotonic_seconds": 12.978233,
+            "ActiveEnterTimestampMonotonic_seconds": 12.978233
+          },
+          "basic.target": {
+            "InactiveExitTimestampMonotonic_seconds": 13.153356,
+            "ActiveEnterTimestampMonotonic_seconds": 13.153356
+          },
+          "network-online.target": {
+            "InactiveExitTimestampMonotonic_seconds": 21.399788,
+            "ActiveEnterTimestampMonotonic_seconds": 21.399788
+          },
+          "cloud-init-local.service": {
+            "InactiveExitTimestampMonotonic_seconds": 0.0,
+            "ExecMainStartTimestampMonotonic_seconds": 0.0,
+            "ExecMainExitTimestampMonotonic_seconds": 0.0,
+            "ActiveEnterTimestampMonotonic_seconds": 0.0
+          },
+          "cloud-init.service": {
+            "InactiveExitTimestampMonotonic_seconds": 0.0,
+            "ExecMainStartTimestampMonotonic_seconds": 0.0,
+            "ExecMainExitTimestampMonotonic_seconds": 0.0,
+            "ActiveEnterTimestampMonotonic_seconds": 0.0
+          },
+          "cloud-final.service": {
+            "InactiveExitTimestampMonotonic_seconds": 0.0,
+            "ExecMainStartTimestampMonotonic_seconds": 0.0,
+            "ExecMainExitTimestampMonotonic_seconds": 0.0,
+            "ActiveEnterTimestampMonotonic_seconds": 0.0
+          },
+          "systemd-journal-flush.service": {
+            "InactiveExitTimestampMonotonic_seconds": 7.498098,
+            "ExecMainStartTimestampMonotonic_seconds": 7.498071,
+            "ExecMainExitTimestampMonotonic_seconds": 8.893956,
+            "ActiveEnterTimestampMonotonic_seconds": 8.894101
+          },
+          "systemd-udev-settle.service": {
+            "InactiveExitTimestampMonotonic_seconds": 0.0,
+            "ExecMainStartTimestampMonotonic_seconds": 0.0,
+            "ExecMainExitTimestampMonotonic_seconds": 0.0,
+            "ActiveEnterTimestampMonotonic_seconds": 0.0
+          },
+          "containerd.service": {
+            "InactiveExitTimestampMonotonic_seconds": 15.892133,
+            "ExecMainStartTimestampMonotonic_seconds": 16.40412,
+            "ExecMainExitTimestampMonotonic_seconds": 0.0,
+            "ActiveEnterTimestampMonotonic_seconds": 21.025514
+          },
+          "docker.service": {
+            "InactiveExitTimestampMonotonic_seconds": 21.403131,
+            "ExecMainStartTimestampMonotonic_seconds": 21.403053,
+            "ExecMainExitTimestampMonotonic_seconds": 0.0,
+            "ActiveEnterTimestampMonotonic_seconds": 29.853047
+          },
+          "culvert-maint.service": {
+            "InactiveExitTimestampMonotonic_seconds": 29.859147,
+            "ExecMainStartTimestampMonotonic_seconds": 29.859055,
+            "ExecMainExitTimestampMonotonic_seconds": 0.0,
+            "ActiveEnterTimestampMonotonic_seconds": 29.859147
+          },
+          "culvert-stack-resume.service": {
+            "InactiveExitTimestampMonotonic_seconds": 29.8598,
+            "ExecMainStartTimestampMonotonic_seconds": 29.859736,
+            "ExecMainExitTimestampMonotonic_seconds": 49.144034,
+            "ActiveEnterTimestampMonotonic_seconds": 0.0
+          },
+          "culvert-lab-boot-sampler.service": {
+            "InactiveExitTimestampMonotonic_seconds": 11.056091,
+            "ExecMainStartTimestampMonotonic_seconds": 11.056063,
+            "ExecMainExitTimestampMonotonic_seconds": 0.0,
+            "ActiveEnterTimestampMonotonic_seconds": 11.056091
+          }
+        },
+        "first_daemon_log_kernel_seconds": {
+          "containerd": 17.827538,
+          "dockerd": 24.171937
+        },
+        "daemon_log_capture_complete": true
+      },
+      "first_sampled_clamav_PONG_kernel_seconds": 48.388186325,
+      "sampled_resume_locks": {
+        "sample_count": 8,
+        "edge_exclusion_seconds": 1,
+        "os_update_held": true,
+        "agent_held": true,
+        "scope": "Observed lock holdings during sampled interior of resume; no continuous-lock inference between samples."
+      },
+      "sampler_observation": {
+        "samples_through_readiness": 28,
+        "first_kernel_seconds": 16.370665009,
+        "iowait_ticks_delta": 3641,
+        "cpu_ticks_delta": 10741,
+        "sample_errors": 0
+      },
+      "metrics": {
+        "host-storage": {
+          "devices": [
+            {
+              "device_sha256": "2f3a491b196a81ac90f19791689a74162dc41a7990a1ed0dce9b1d540399fcbe",
+              "metrics": [
+                {
+                  "metric": "disk.deviceReadLatency.average",
+                  "unit": "millisecond",
+                  "selected_samples": 6,
+                  "valid_samples": 6,
+                  "missing_samples": 0,
+                  "values": [
+                    0,
+                    6,
+                    53,
+                    54,
+                    5,
+                    16
+                  ],
+                  "sample_mean": 22.3333,
+                  "maximum_sample": 54,
+                  "maximum_at": "2026-10-07T10:07:20+00:00"
+                },
+                {
+                  "metric": "disk.kernelReadLatency.average",
+                  "unit": "millisecond",
+                  "selected_samples": 6,
+                  "valid_samples": 6,
+                  "missing_samples": 0,
+                  "values": [
+                    0,
+                    0,
+                    0,
+                    5,
+                    0,
+                    0
+                  ],
+                  "sample_mean": 0.8333,
+                  "maximum_sample": 5,
+                  "maximum_at": "2026-10-07T10:07:20+00:00"
+                },
+                {
+                  "metric": "disk.queueReadLatency.average",
+                  "unit": "millisecond",
+                  "selected_samples": 6,
+                  "valid_samples": 6,
+                  "missing_samples": 0,
+                  "values": [
+                    0,
+                    0,
+                    0,
+                    4,
+                    0,
+                    0
+                  ],
+                  "sample_mean": 0.6667,
+                  "maximum_sample": 4,
+                  "maximum_at": "2026-10-07T10:07:20+00:00"
+                },
+                {
+                  "metric": "disk.deviceWriteLatency.average",
+                  "unit": "millisecond",
+                  "selected_samples": 6,
+                  "valid_samples": 6,
+                  "missing_samples": 0,
+                  "values": [
+                    6,
+                    17,
+                    5,
+                    24,
+                    3,
+                    14
+                  ],
+                  "sample_mean": 11.5,
+                  "maximum_sample": 24,
+                  "maximum_at": "2026-10-07T10:07:20+00:00"
+                },
+                {
+                  "metric": "disk.kernelWriteLatency.average",
+                  "unit": "millisecond",
+                  "selected_samples": 6,
+                  "valid_samples": 6,
+                  "missing_samples": 0,
+                  "values": [
+                    0,
+                    15,
+                    0,
+                    21,
+                    0,
+                    2
+                  ],
+                  "sample_mean": 6.3333,
+                  "maximum_sample": 21,
+                  "maximum_at": "2026-10-07T10:07:20+00:00"
+                },
+                {
+                  "metric": "disk.queueWriteLatency.average",
+                  "unit": "millisecond",
+                  "selected_samples": 6,
+                  "valid_samples": 6,
+                  "missing_samples": 0,
+                  "values": [
+                    0,
+                    15,
+                    0,
+                    20,
+                    0,
+                    2
+                  ],
+                  "sample_mean": 6.1667,
+                  "maximum_sample": 20,
+                  "maximum_at": "2026-10-07T10:07:20+00:00"
+                },
+                {
+                  "metric": "disk.read.average",
+                  "unit": "kiloBytesPerSecond",
+                  "selected_samples": 6,
+                  "valid_samples": 6,
+                  "missing_samples": 0,
+                  "values": [
+                    0,
+                    6964,
+                    20652,
+                    16640,
+                    1484,
+                    33
+                  ],
+                  "sample_mean": 7628.8333,
+                  "maximum_sample": 20652,
+                  "maximum_at": "2026-10-07T10:07:00+00:00"
+                },
+                {
+                  "metric": "disk.write.average",
+                  "unit": "kiloBytesPerSecond",
+                  "selected_samples": 6,
+                  "valid_samples": 6,
+                  "missing_samples": 0,
+                  "values": [
+                    138,
+                    1482,
+                    710,
+                    783,
+                    976,
+                    466
+                  ],
+                  "sample_mean": 759.1667,
+                  "maximum_sample": 1482,
+                  "maximum_at": "2026-10-07T10:06:40+00:00"
+                },
+                {
+                  "metric": "disk.numberReadAveraged.average",
+                  "unit": "number",
+                  "selected_samples": 6,
+                  "valid_samples": 6,
+                  "missing_samples": 0,
+                  "values": [
+                    0,
+                    253,
+                    117,
+                    41,
+                    30,
+                    2
+                  ],
+                  "sample_mean": 73.8333,
+                  "maximum_sample": 253,
+                  "maximum_at": "2026-10-07T10:06:40+00:00"
+                },
+                {
+                  "metric": "disk.numberWriteAveraged.average",
+                  "unit": "number",
+                  "selected_samples": 6,
+                  "valid_samples": 6,
+                  "missing_samples": 0,
+                  "values": [
+                    12,
+                    123,
+                    44,
+                    64,
+                    45,
+                    62
+                  ],
+                  "sample_mean": 58.3333,
+                  "maximum_sample": 123,
+                  "maximum_at": "2026-10-07T10:06:40+00:00"
+                }
+              ],
+              "unavailable_metrics": [],
+              "returned_start": "2026-10-07T09:28:20+00:00",
+              "returned_end": "2026-10-07T10:08:00+00:00",
+              "selected_start": "2026-10-07T10:06:20+00:00",
+              "selected_end": "2026-10-07T10:08:00+00:00",
+              "sample_times": [
+                "2026-10-07T10:06:20+00:00",
+                "2026-10-07T10:06:40+00:00",
+                "2026-10-07T10:07:00+00:00",
+                "2026-10-07T10:07:20+00:00",
+                "2026-10-07T10:07:40+00:00",
+                "2026-10-07T10:08:00+00:00"
+              ],
+              "timestamp_gaps": [],
+              "requested_window_covered": true,
+              "empty_selected_window": false,
+              "interval_seconds": 20
+            }
+          ],
+          "metadata_unavailable": [],
+          "query_errors": {
+            "metadata_count": 0,
+            "device_count": 0
+          },
+          "window_start": "2026-10-07T10:06:20+00:00",
+          "window_end": "2026-10-07T10:08:00+00:00",
+          "requested_samples": 120,
+          "required_interval_seconds": 20,
+          "complete": true,
+          "note": "Shared physical backing-device counters, not per-VM attribution or proof of cause. Means/maxima summarize 20-second samples; missing values are null, never zero.",
+          "schema_version": 1,
+          "started_at": "2026-10-07T10:08:05.225309+00:00",
+          "finished_at": "2026-10-07T10:08:07.571258+00:00",
+          "raw_sha256": "e34a085187e7e2b6b2ad4886aa8461397eef4f1eb0e5fbb257bff6e01d7bae41"
+        },
+        "vm-performance": {
+          "schema_version": 1,
+          "started_at": "2026-10-07T10:08:05.273257+00:00",
+          "metrics": [
+            {
+              "metric": "virtualDisk.totalWriteLatency.average",
+              "unit": "millisecond",
+              "instance": "scsi0:0",
+              "selected_samples": 6,
+              "valid_samples": 3,
+              "missing_samples": 3,
+              "sample_mean": 7.6667,
+              "maximum_sample": 10,
+              "maximum_at": "2026-10-07T10:06:20+00:00"
+            },
+            {
+              "metric": "virtualDisk.read.average",
+              "unit": "kiloBytesPerSecond",
+              "instance": "scsi0:0",
+              "selected_samples": 6,
+              "valid_samples": 5,
+              "missing_samples": 1,
+              "sample_mean": 7778.2,
+              "maximum_sample": 20802,
+              "maximum_at": "2026-10-07T10:07:00+00:00"
+            },
+            {
+              "metric": "virtualDisk.write.average",
+              "unit": "kiloBytesPerSecond",
+              "instance": "scsi0:0",
+              "selected_samples": 6,
+              "valid_samples": 5,
+              "missing_samples": 1,
+              "sample_mean": 240.0,
+              "maximum_sample": 417,
+              "maximum_at": "2026-10-07T10:07:00+00:00"
+            },
+            {
+              "metric": "cpu.maxlimited.summation",
+              "unit": "millisecond",
+              "instance": "0",
+              "selected_samples": 6,
+              "valid_samples": 6,
+              "missing_samples": 0,
+              "sample_mean": 0.0,
+              "maximum_sample": 0,
+              "maximum_at": "2026-10-07T10:06:20+00:00"
+            },
+            {
+              "metric": "virtualDisk.numberReadAveraged.average",
+              "unit": "number",
+              "instance": "scsi0:0",
+              "selected_samples": 6,
+              "valid_samples": 5,
+              "missing_samples": 1,
+              "sample_mean": 34.4,
+              "maximum_sample": 118,
+              "maximum_at": "2026-10-07T10:07:00+00:00"
+            },
+            {
+              "metric": "cpu.costop.summation",
+              "unit": "millisecond",
+              "instance": "1",
+              "selected_samples": 6,
+              "valid_samples": 6,
+              "missing_samples": 0,
+              "sample_mean": 0.0,
+              "maximum_sample": 0,
+              "maximum_at": "2026-10-07T10:06:20+00:00"
+            },
+            {
+              "metric": "virtualDisk.numberWriteAveraged.average",
+              "unit": "number",
+              "instance": "scsi0:0",
+              "selected_samples": 6,
+              "valid_samples": 5,
+              "missing_samples": 1,
+              "sample_mean": 17.6,
+              "maximum_sample": 31,
+              "maximum_at": "2026-10-07T10:07:00+00:00"
+            },
+            {
+              "metric": "mem.vmmemctl.average",
+              "unit": "kiloBytes",
+              "instance": "",
+              "selected_samples": 6,
+              "valid_samples": 6,
+              "missing_samples": 0,
+              "sample_mean": 0.0,
+              "maximum_sample": 0,
+              "maximum_at": "2026-10-07T10:06:20+00:00"
+            },
+            {
+              "metric": "cpu.maxlimited.summation",
+              "unit": "millisecond",
+              "instance": "1",
+              "selected_samples": 6,
+              "valid_samples": 6,
+              "missing_samples": 0,
+              "sample_mean": 0.0,
+              "maximum_sample": 0,
+              "maximum_at": "2026-10-07T10:06:20+00:00"
+            },
+            {
+              "metric": "cpu.costop.summation",
+              "unit": "millisecond",
+              "instance": "",
+              "selected_samples": 6,
+              "valid_samples": 6,
+              "missing_samples": 0,
+              "sample_mean": 0.0,
+              "maximum_sample": 0,
+              "maximum_at": "2026-10-07T10:06:20+00:00"
+            },
+            {
+              "metric": "cpu.costop.summation",
+              "unit": "millisecond",
+              "instance": "0",
+              "selected_samples": 6,
+              "valid_samples": 6,
+              "missing_samples": 0,
+              "sample_mean": 0.0,
+              "maximum_sample": 0,
+              "maximum_at": "2026-10-07T10:06:20+00:00"
+            },
+            {
+              "metric": "cpu.ready.summation",
+              "unit": "millisecond",
+              "instance": "",
+              "selected_samples": 6,
+              "valid_samples": 6,
+              "missing_samples": 0,
+              "sample_mean": 77.5,
+              "maximum_sample": 111,
+              "maximum_at": "2026-10-07T10:07:00+00:00"
+            },
+            {
+              "metric": "cpu.maxlimited.summation",
+              "unit": "millisecond",
+              "instance": "",
+              "selected_samples": 6,
+              "valid_samples": 6,
+              "missing_samples": 0,
+              "sample_mean": 0.0,
+              "maximum_sample": 0,
+              "maximum_at": "2026-10-07T10:06:20+00:00"
+            },
+            {
+              "metric": "cpu.ready.summation",
+              "unit": "millisecond",
+              "instance": "1",
+              "selected_samples": 6,
+              "valid_samples": 6,
+              "missing_samples": 0,
+              "sample_mean": 37.1667,
+              "maximum_sample": 55,
+              "maximum_at": "2026-10-07T10:07:00+00:00"
+            },
+            {
+              "metric": "virtualDisk.totalReadLatency.average",
+              "unit": "millisecond",
+              "instance": "scsi0:0",
+              "selected_samples": 6,
+              "valid_samples": 3,
+              "missing_samples": 3,
+              "sample_mean": 7.6667,
+              "maximum_sample": 16,
+              "maximum_at": "2026-10-07T10:08:00+00:00"
+            },
+            {
+              "metric": "virtualDisk.write.average",
+              "unit": "kiloBytesPerSecond",
+              "instance": "",
+              "selected_samples": 6,
+              "valid_samples": 5,
+              "missing_samples": 1,
+              "sample_mean": 240.0,
+              "maximum_sample": 417,
+              "maximum_at": "2026-10-07T10:07:00+00:00"
+            },
+            {
+              "metric": "mem.swapinRate.average",
+              "unit": "kiloBytesPerSecond",
+              "instance": "",
+              "selected_samples": 6,
+              "valid_samples": 6,
+              "missing_samples": 0,
+              "sample_mean": 0.0,
+              "maximum_sample": 0,
+              "maximum_at": "2026-10-07T10:06:20+00:00"
+            },
+            {
+              "metric": "virtualDisk.read.average",
+              "unit": "kiloBytesPerSecond",
+              "instance": "",
+              "selected_samples": 6,
+              "valid_samples": 5,
+              "missing_samples": 1,
+              "sample_mean": 7778.2,
+              "maximum_sample": 20802,
+              "maximum_at": "2026-10-07T10:07:00+00:00"
+            },
+            {
+              "metric": "cpu.ready.summation",
+              "unit": "millisecond",
+              "instance": "0",
+              "selected_samples": 6,
+              "valid_samples": 6,
+              "missing_samples": 0,
+              "sample_mean": 40.3333,
+              "maximum_sample": 55,
+              "maximum_at": "2026-10-07T10:07:00+00:00"
+            }
+          ],
+          "unavailable_metrics": [],
+          "intervals_seconds": [
+            20
+          ],
+          "returned_start": "2026-10-07T09:28:20+00:00",
+          "returned_end": "2026-10-07T10:08:00+00:00",
+          "window_start": "2026-10-07T10:06:20+00:00",
+          "window_end": "2026-10-07T10:08:00+00:00",
+          "note": "Means and maxima of available samples; missing samples excluded. Not per-I/O percentiles, guest readiness timestamps or causal proof.",
+          "complete": true,
+          "finished_at": "2026-10-07T10:08:05.517955+00:00"
+        }
+      },
+      "boot_id": "98342497-f842-4a83-8b09-3331c8607583",
+      "evidence": [
+        {
+          "path": "secrets/production-recovery-d698-3.jsonl",
+          "sha256": "e4c57fa6bfc250ab16cfbbf4e7d34cb2d74e01c3148ab39c5045034226398f84",
+          "bytes": 15136,
+          "private": true
+        },
+        {
+          "path": "evidence/production-recovery-d698-3-summary.json",
+          "sha256": "75fae1f8f18541dc6e9c159fad624954a4e965c65072b851890af14a068192bf",
+          "bytes": 960,
+          "private": false
+        },
+        {
+          "path": "secrets/production-recovery/d698-3/acceptance.json",
+          "sha256": "86a32590b3f7ecc4ebfcfbd84af1f76eda24a2ac8871f53518090202110e91ac",
+          "bytes": 684,
+          "private": true
+        },
+        {
+          "path": "secrets/production-recovery/d698-3/full.json",
+          "sha256": "490f492bbba2e73b79d76943474f85200d67723ba46bf5741440afec3f960376",
+          "bytes": 279732,
+          "private": true
+        },
+        {
+          "path": "secrets/production-recovery/d698-3/full-receipt.json",
+          "sha256": "557980f56bae7943bdbd3b9d58956a3b2eee16269824037b236a9b5a0503a12a",
+          "bytes": 559,
+          "private": true
+        },
+        {
+          "path": "secrets/production-recovery/d698-3/correlation.json",
+          "sha256": "44d45f50b370059f5a2265e191f40252dc708575d73e6508662596a97f809ac0",
+          "bytes": 451,
+          "private": true
+        },
+        {
+          "path": "secrets/production-recovery/d698-3/correlation-receipt.json",
+          "sha256": "a740ed1a55d4449c22439b2a31c93c157470b0072d3d9e7e7a4a6f426d9d1ac4",
+          "bytes": 566,
+          "private": true
+        },
+        {
+          "path": "secrets/production-recovery/d698-3/authenticated-boot-proof.json",
+          "sha256": "69cdbf3e4f34ee518b5c37d3d5d1ae62888dcf7971700be5db4ba6d5eee73ed8",
+          "bytes": 15873,
+          "private": true
+        },
+        {
+          "path": "evidence/host-storage-d698-3.json",
+          "sha256": "501692367870f0e2d19d4f4a74a5ab8b062942ba56293f8a8bd217f1b0b4c770",
+          "bytes": 6153,
+          "private": false
+        },
+        {
+          "path": "evidence/vm-performance-d698-3.json",
+          "sha256": "01c986956e2287c30be1b89e85fb352b7437b110fea227fa244f37709905c97a",
+          "bytes": 6487,
+          "private": false
+        }
+      ]
+    }
+  ],
+  "baseline_evidence": {
+    "path": "secrets/production-baseline.json",
+    "sha256": "7e0ef4c17dd0334a85ebd20ac5ec7f766bb5ffa2541b3e6fac1f89b1f6405de4",
+    "bytes": 617,
+    "private": true
+  },
+  "limitations": [
+    "First-install and preparation reboot are separate.",
+    "Shared ESXi storage samples are correlation, not causal attribution.",
+    "No replacement artifact or production release is qualified by this report.",
+    "Historical failures and initial network/ClamAV harness failures remain preserved.",
+    "Guest clock bounds include authenticated transport uncertainty; later proof time is not recovery time."
+  ]
+}
