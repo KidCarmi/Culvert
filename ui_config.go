@@ -202,6 +202,15 @@ func apiStats(w http.ResponseWriter, r *http.Request) {
 		// without this count the probing is invisible to an operator who has
 		// no metrics scraper or shell access to the log.
 		"tracingHeaderRejected": requestIDRejected.Load() + traceparentRejected.Load(),
+		// CHAOS-70: admin-roster writes that failed to reach ui_users.json.
+		// "Refused" = an account/role/password change was rolled back (the
+		// admin saw a 500 at the time); "Degraded" = a login-path write
+		// (TOTP replay counter, consumed backup code) failed while the login
+		// still proceeded. Previously only on /metrics, so an admin could not
+		// tell from the GUI that a revocation or password rotation had not
+		// stuck or that a single-use credential might survive a restart.
+		"adminRosterPersistFailures": rosterPersistRefused.Load(),
+		"adminRosterPersistDegraded": rosterPersistBestEffort.Load(),
 	})
 }
 
