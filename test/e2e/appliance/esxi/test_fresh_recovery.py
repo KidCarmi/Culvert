@@ -40,7 +40,7 @@ class RecoveryTests(unittest.TestCase):
 
     def test_restore_keeps_candidate_sha_separate_from_source_owner_record(self):
         identities = load('fresh_restore_identities', 'candidate-identities.py')
-        scope = dict(identities.source_profile(identities.D698), max_vms=1, endpoint='https://192.0.2.1')
+        scope = dict(identities.source_profile(identities.E2E3), max_vms=1, endpoint='https://192.0.2.1')
         escrow = self.root / 'escrow'; escrow.mkdir()
         archive = escrow / 'recovery.tar.gz.enc'; archive.write_bytes(b'CVRTBK01synthetic')
         metadata = {'archive_sha256': controller.file_hash(archive), 'archive_bytes': archive.stat().st_size,
@@ -66,7 +66,7 @@ class RecoveryTests(unittest.TestCase):
         self.assertIs(absent.call_args.args[1], owner)
         payload = execute.call_args.args[2].decode()
         cfg = ast.literal_eval(payload.rsplit('\nmain(', 1)[1].split(')\nCULVERT_FRESH_RECOVERY_PY', 1)[0])
-        self.assertEqual(cfg['source_sha'], identities.D698)
+        self.assertEqual(cfg['source_sha'], identities.E2E3)
         self.assertIsInstance(cfg['source_sha'], str)
         self.assertEqual(cfg['archive_sha256'], metadata['archive_sha256'])
 

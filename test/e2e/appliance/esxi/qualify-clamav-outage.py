@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Owned d698 LAB only: fresh-body ClamAV outage and recovery qualification.
+"""Explicitly approved LAB candidates only: fresh-body ClamAV outage and recovery qualification.
 
 Uses the existing PAM/sudo console boundary. No live action occurs on import.
 Temporarily adds one authenticated policy rule and stops the exact running
@@ -546,14 +546,17 @@ def load(name, filename):
     return module
 
 
-def payload(config):
+def payload(config, profile=None):
+    profiles = load('outage_payload_profiles', 'candidate-identities.py')
+    profile = profiles.scope_profile(profile or profiles.source_profile(profiles.D698))
     source = Path(__file__).read_text(encoding='utf-8').split('# CONTROLLER:')[0]
-    tail = '\nsys.exit(run_guest(json.loads(base64.b64decode(' + repr(base64.b64encode(json.dumps(config).encode()).decode()) + '))))\n'
+    binding = '\nSOURCE, IMAGE, SIDECAR = ' + repr((profile['source_sha'], profile['image_id'], profile['clamav_sidecar_image_id'])) + '\n'
+    tail = binding + '\nsys.exit(run_guest(json.loads(base64.b64decode(' + repr(base64.b64encode(json.dumps(config).encode()).decode()) + '))))\n'
     return ("set +x\nset -euo pipefail\npython3 - <<'CULVERT_AV_OUTAGE'\n" + source + tail + '\nCULVERT_AV_OUTAGE\n').encode()
 
 
 def prior_failure(sec, expected, owner):
-    need(bool(re.fullmatch('[0-9a-f]{64}', expected)), 'prior failure hash required')
+    need(isinstance(expected, str) and bool(re.fullmatch('[0-9a-f]{64}', expected)), 'prior failure hash required')
     directory = sec / 'clamav-outage'
     need(directory.is_dir() and not directory.is_symlink()
          and not (hasattr(directory, 'is_junction') and directory.is_junction()), 'retained original attempt required')
@@ -578,10 +581,21 @@ def prior_failure(sec, expected, owner):
     return {name: sha(raw) for name, raw in files.items()}
 
 
+def attempt_context(sec, profile, attempt, previous_hash, owner):
+    profiles = load('outage_attempt_profiles', 'candidate-identities.py')
+    selected = profiles.scope_profile(profile)
+    if selected['source_sha'] == profiles.E2E3:
+        need(attempt == 'initial' and previous_hash is None, 'fresh candidate requires initial attempt without prior failure')
+        need(not list(sec.glob('clamav-outage*')), 'fresh candidate already has outage evidence; no retry')
+        return sec / 'clamav-outage', {}
+    need(selected['source_sha'] == profiles.D698, 'outage candidate is not approved')
+    need(bool(re.fullmatch('[a-z][a-z0-9-]{0,47}', attempt)) and attempt != 'initial',
+         'explicit new continuation attempt required')
+    return sec / ('clamav-outage-' + attempt), prior_failure(sec, previous_hash, owner)
+
+
 def run(args):
     ipaddress.IPv4Address(args.bind)
-    need(bool(re.fullmatch('[a-z][a-z0-9-]{0,47}', args.attempt)) and args.attempt != 'initial',
-         'explicit new continuation attempt required')
     console = load('outage_console', 'console-priv.py')
     profiles = load('outage_profiles', 'candidate-identities.py')
     freeze = load('outage_freeze', 'controller-freeze.py')
@@ -589,24 +603,24 @@ def run(args):
     console.b.private_directory(lab)
     console.b.module.validate_scope(lab.c)
     profile = profiles.scope_profile(lab.c)
-    need(profile['source_sha'] == SOURCE and profile['clamav_sidecar_image_id'] == SIDECAR, 'd698 scope required')
+    need(profile['source_sha'] in (profiles.D698, profiles.E2E3)
+         and 'clamav_sidecar_image_id' in profile, 'exact approved outage candidate required')
     manifest = freeze.verify(Path(lab.c['controller_manifest']))
     helper_sha = sha(Path(__file__).read_bytes())
     need(manifest['files'].get('test/e2e/appliance/esxi/qualify-clamav-outage.py') == helper_sha, 'helper not frozen')
     with console.b.module.locked(lab.run):
         lab.vm(timeout=30)
-        prior = prior_failure(lab.sec, args.prior_failure_sha256, lab.state['uuid'])
-        directory = lab.sec / ('clamav-outage-' + args.attempt)
+        directory, prior = attempt_context(lab.sec, profile, args.attempt, args.prior_failure_sha256, lab.state['uuid'])
         directory.mkdir()  # One-shot; a failed attempt must be reviewed.
         initial = (lab.sec / 'admin-pass').read_text(encoding='utf-8').strip()
         need(1 <= len(initial) <= 256, 'private administrator credential unavailable')
         config = {'operation': secrets.token_hex(16), 'initial': initial, 'helper_sha256': helper_sha,
                   'prior_failure_sha256': args.prior_failure_sha256}
-        body = payload(config)
+        body = payload(config, profile)
         (directory / 'payload.sh').write_bytes(body)
         (directory / 'intent.json').write_text(json.dumps({'operation': config['operation'],
-            'owner_uuid': lab.state['uuid'], 'source_sha': SOURCE, 'image_id': IMAGE,
-            'sidecar_image_id': SIDECAR, 'payload_sha256': sha(body), 'controller_revision': manifest['revision'],
+            'owner_uuid': lab.state['uuid'], 'source_sha': profile['source_sha'], 'image_id': profile['image_id'],
+            'sidecar_image_id': profile['clamav_sidecar_image_id'], 'payload_sha256': sha(body), 'controller_revision': manifest['revision'],
             'attempt': args.attempt, 'prior_attempt_file_hashes': prior}) + '\n')
         output = io.BytesIO()
         writer = io.TextIOWrapper(output, encoding='utf-8', write_through=True)
@@ -619,8 +633,12 @@ def run(args):
         need(result.get('result') == 'pass' and result.get('operation') == config['operation']
              and result.get('helper_sha256') == helper_sha
              and result.get('prior_failure_sha256') == args.prior_failure_sha256, 'result binding differs')
-        need(prior_failure(lab.sec, args.prior_failure_sha256, lab.state['uuid']) == prior,
-             'original evidence changed')
+        identity = result.get('identity', {})
+        need(all(identity.get(k) == profile[p] for k, p in (('source_sha', 'source_sha'),
+             ('image_id', 'image_id'), ('sidecar_image_id', 'clamav_sidecar_image_id'))), 'guest identity binding differs')
+        if prior:
+            need(prior_failure(lab.sec, args.prior_failure_sha256, lab.state['uuid']) == prior,
+                 'original evidence changed')
         receipt = {'result': 'pass', 'operation': config['operation'], 'helper_sha256': helper_sha,
                    'payload_sha256': sha(body), 'guest_result_sha256': sha(raw), 'controller_revision': manifest['revision'],
                    'attempt': args.attempt, 'prior_failure_sha256': args.prior_failure_sha256}
@@ -632,8 +650,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--scope', type=Path, required=True)
     parser.add_argument('--bind', required=True)
-    parser.add_argument('--attempt', required=True, help='new one-shot private evidence label; original attempt remains intact')
-    parser.add_argument('--prior-failure-sha256', required=True, help='SHA-256 of original frozen4f17 pre-fixture guest result')
+    parser.add_argument('--attempt', required=True, help='initial for a fresh candidate; explicit new label for approved historical continuation')
+    parser.add_argument('--prior-failure-sha256', help='required only for the approved d698 pre-fixture failure continuation')
     try:
         run(parser.parse_args())
         return 0

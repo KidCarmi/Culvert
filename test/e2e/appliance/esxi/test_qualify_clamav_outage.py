@@ -339,5 +339,52 @@ class PriorAttemptTests(unittest.TestCase):
             self.assertEqual((directory / 'payload.sh').read_bytes(), payload)
 
 
+class ReplacementCandidateTests(unittest.TestCase):
+    def test_fresh_attempt_does_not_require_or_reuse_historical_failure(self):
+        profiles = m.load('outage_test_profiles', 'candidate-identities.py')
+        profile = profiles.source_profile(profiles.E2E3)
+        with tempfile.TemporaryDirectory() as temporary:
+            sec = Path(temporary)
+            self.assertEqual(m.attempt_context(sec, profile, 'initial', None, 'owned'),
+                             (sec / 'clamav-outage', {}))
+            for attempt, previous in [('followup', None), ('initial', 'a' * 64)]:
+                with self.assertRaises(m.CheckFailure):
+                    m.attempt_context(sec, profile, attempt, previous, 'owned')
+            (sec / 'clamav-outage').mkdir()
+            with self.assertRaises(m.CheckFailure):
+                m.attempt_context(sec, profile, 'initial', None, 'owned')
+            (sec / 'clamav-outage').rmdir()
+            (sec / 'clamav-outage-another-attempt').mkdir()
+            with self.assertRaises(m.CheckFailure):
+                m.attempt_context(sec, profile, 'initial', None, 'owned')
+        with tempfile.TemporaryDirectory() as temporary:
+            for source in (profiles.D698, profiles.B579):
+                with self.assertRaises(m.CheckFailure):
+                    m.attempt_context(Path(temporary), profiles.source_profile(source), 'initial', None, 'owned')
+            with self.assertRaises(m.CheckFailure):
+                m.attempt_context(Path(temporary), profiles.source_profile(profiles.D698), 'lockfix', None, 'owned')
+
+    def test_guest_payload_binds_selected_identity_without_contaminating_legacy(self):
+        profiles = m.load('outage_payload_test_profiles', 'candidate-identities.py')
+        cfg = {'operation': 'a' * 32, 'initial': 'SYNTHETIC_TEST_ONLY', 'helper_sha256': 'b' * 64,
+               'prior_failure_sha256': None}
+        original = (m.SOURCE, m.IMAGE, m.SIDECAR)
+        for candidate in (profiles.E2E3, profiles.D698, profiles.E2E3):
+            profile = profiles.source_profile(candidate)
+            script = m.payload(cfg, profile).decode()
+            code = script.split("python3 - <<'CULVERT_AV_OUTAGE'\n", 1)[1].rsplit('\nCULVERT_AV_OUTAGE', 1)[0]
+            compile(code, '<guest-payload>', 'exec')
+            namespace = {}
+            # Only definitions and constant bindings; never invoke guest operations.
+            exec(code.rsplit('\nsys.exit(run_guest', 1)[0], namespace)
+            self.assertEqual(namespace['SOURCE'], candidate)
+            self.assertEqual(namespace['IMAGE'], profile['image_id'])
+            self.assertEqual(namespace['SIDECAR'], profile['clamav_sidecar_image_id'])
+            self.assertEqual((m.SOURCE, m.IMAGE, m.SIDECAR), original)
+            profile['image_id'] = 'sha256:' + '0' * 64
+            with self.assertRaises(ValueError):
+                m.payload(cfg, profile)
+
+
 if __name__ == '__main__':
     unittest.main()

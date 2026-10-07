@@ -19,7 +19,7 @@ def load(name):
 class CandidateReconciliationTests(unittest.TestCase):
     def test_only_complete_reviewed_artifact_combinations_are_admitted(self):
         identities = load('candidate-identities')
-        for source in (identities.B579, identities.D698):
+        for source in (identities.B579, identities.D698, identities.E2E3):
             scope = identities.source_profile(source)
             self.assertEqual(identities.scope_profile(scope), scope)
             for field in ('source_sha', 'ova_sha256', 'image_id'):
@@ -33,7 +33,7 @@ class CandidateReconciliationTests(unittest.TestCase):
 
     def test_real_fixture_bytes_unchanged_and_provenance_names_selected_source(self):
         identities, fixture = load('candidate-identities'), load('prepare-signed-fixture')
-        for source in (identities.B579, identities.D698):
+        for source in (identities.B579, identities.D698, identities.E2E3):
             provenance = fixture.verify_sources(source)
             self.assertEqual(provenance['source_revision'], source)
             self.assertEqual({k: v['sha256'] for k, v in provenance['files'].items()}, identities.FIXTURE_HASHES)
@@ -42,7 +42,7 @@ class CandidateReconciliationTests(unittest.TestCase):
 
     def test_shared_library_contains_only_documented_delta_from_pinned_upstream(self):
         record = json.loads((HERE / 'shared-harness-provenance.json').read_bytes())
-        self.assertEqual(record['upstream_revision'], '5cae2d5df32980deec3234d681fe915e52d1337b')
+        self.assertEqual(record['upstream_revision'], 'e96895c4b5ba4e4254f92d89038a57023daf365b')
         root = HERE.parents[3]
         for name, hashes in record['files'].items():
             raw = (root / name).read_bytes().replace(b'\r\n', b'\n')
@@ -64,7 +64,7 @@ class CandidateReconciliationTests(unittest.TestCase):
         identities, fresh = load('candidate-identities'), load('fresh-recovery')
         original = fresh.SOURCE
         args = SimpleNamespace(bind='192.0.2.1', scope=Path('never-read'), escrow=Path('never-written'))
-        for source in (identities.D698, identities.B579, identities.D698):
+        for source in (identities.E2E3, identities.D698, identities.B579, identities.E2E3):
             scope = identities.source_profile(source); scope['max_vms'] = 1
             lab = SimpleNamespace(c=scope, run=Path('never-read'))
             with mock.patch.object(fresh.console.b.module, 'Lab', return_value=lab), \
@@ -81,6 +81,8 @@ class CandidateReconciliationTests(unittest.TestCase):
         identities, resume = load('candidate-identities'), load('post-os-resume')
         with self.assertRaisesRegex(ValueError, 'first explicit confirmation'):
             resume.validate(identities.source_profile(identities.D698), Path('never-read'), continuation=True)
+        with self.assertRaisesRegex(ValueError, 'wrong candidate'):
+            resume.validate(identities.source_profile(identities.E2E3), Path('never-read'))
 
 
 if __name__ == '__main__':
