@@ -128,8 +128,12 @@ jobs:
           sudo mkdir -p "$best/culvert-lab" && sudo chown "$(id -u):$(id -g)" "$best/culvert-lab"
           echo "LAB_ROOT=$best/culvert-lab" >> "$GITHUB_ENV"
       - name: Install build + lab tools
+        timeout-minutes: 25
         run: |
           set -euo pipefail
+          # A stalled Ubuntu mirror must fail fast and retry, not hang the job until
+          # its 4 h timeout (run 37666163268 sat 2 h in apt here).
+          printf 'Acquire::Retries "5";\nAcquire::http::Timeout "30";\nAcquire::https::Timeout "30";\n' | sudo tee /etc/apt/apt.conf.d/99-lab-net >/dev/null
           for i in 1 2; do
             sudo apt-get update -q && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends \
               libguestfs-tools qemu-utils qemu-system-x86 genisoimage ubuntu-cloudimage-keyring \
@@ -607,8 +611,12 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: KVM, lab directory, tools
+        timeout-minutes: 25
         run: |
           set -euo pipefail
+          # A stalled Ubuntu mirror must fail fast and retry, not hang the job until
+          # its 4 h timeout (run 37666163268 sat 2 h in apt here).
+          printf 'Acquire::Retries "5";\nAcquire::http::Timeout "30";\nAcquire::https::Timeout "30";\n' | sudo tee /etc/apt/apt.conf.d/99-lab-net >/dev/null
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules >/dev/null
           sudo udevadm control --reload-rules && sudo udevadm trigger --name-match=kvm || true
           best=/; [ -d /mnt ] && [ "$(df -Pk /mnt | awk 'NR==2{print $4}')" -gt "$(df -Pk / | awk 'NR==2{print $4}')" ] && best=/mnt
@@ -671,8 +679,12 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Workspace + libguestfs (read-only disk access)
+        timeout-minutes: 25
         run: |
           set -euo pipefail
+          # A stalled Ubuntu mirror must fail fast and retry, not hang the job until
+          # its 4 h timeout (run 37666163268 sat 2 h in apt here).
+          printf 'Acquire::Retries "5";\nAcquire::http::Timeout "30";\nAcquire::https::Timeout "30";\n' | sudo tee /etc/apt/apt.conf.d/99-lab-net >/dev/null
           best=/; [ -d /mnt ] && [ "$(df -Pk /mnt | awk 'NR==2{print $4}')" -gt "$(df -Pk / | awk 'NR==2{print $4}')" ] && best=/mnt
           sudo mkdir -p "$best/sidecar-scan" && sudo chown "$(id -u):$(id -g)" "$best/sidecar-scan"
           echo "W=$best/sidecar-scan" >> "$GITHUB_ENV"
