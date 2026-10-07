@@ -1542,6 +1542,19 @@ cmd_adoption() { local f old new rc c v t
   if [[ $rc == 0 && "$(kv "$f" proxy-id)" == "$LAB_ADOPT_IMAGE_ID" && "$(kv "$f" clam-id)" == "$old" && "$(kv "$f" compose-ref)" == "$LAB_ADOPT_OLD_REF" ]]; then
     check A1 app-upgrade-keeps-host-components pass "proxy now $LAB_ADOPT_IMAGE_ID; compose file and sidecar unchanged ($LAB_ADOPT_OLD_REF, $old) — an application upgrade replaces the container image only (upgrade-runbook.md)"
   else check A1 app-upgrade-keeps-host-components fail "exit $rc: $(tr '\n' ' ' < "$f" | head -c 400)"; rec_origin_stop; return 0; fi
+  # A1b (optional) the installer under test. An appliance runs the installer
+  # its OVA baked (/opt/culvert-appliance/bin/culvert-install.sh); the refresh
+  # logic lives there, so testing a NEW installer against an appliance that
+  # carries the OLD sidecar means putting that installer in place first.
+  if [[ -n "${LAB_ADOPT_INSTALLER:-}" ]]; then
+    cp "$LAB_ADOPT_INSTALLER" "$WORK/eicar-origin/culvert-install.sh"
+    rc=0; printf '%s\n' 'set -e' "curl -fsS http://10.0.2.2:$LAB_EICAR_PORT/culvert-install.sh -o /tmp/.lab-install.sh" \
+        'install -m 0755 /tmp/.lab-install.sh /opt/culvert-appliance/bin/culvert-install.sh; rm -f /tmp/.lab-install.sh' \
+        'sha256sum /opt/culvert-appliance/bin/culvert-install.sh' | gpriv --timeout 120 > "$EV/A1b-installer.txt" 2>&1 || rc=$?
+    if [[ $rc == 0 ]] && grep -q "$(sha256sum "$LAB_ADOPT_INSTALLER" | cut -d' ' -f1)" "$EV/A1b-installer.txt"; then
+      check A1b installer-under-test info "appliance installer replaced by ${LAB_ADOPT_INSTALLER_LABEL:-$LAB_ADOPT_INSTALLER} (sha256 $(sha256sum "$LAB_ADOPT_INSTALLER" | cut -c1-16)…)"
+    else check A1b installer-under-test fail "could not install the installer under test (exit $rc)"; rec_origin_stop; return 0; fi
+  fi
   # A2 host-component refresh with outbound HTTP(S) blocked (an appliance with no
   # route to Docker Hub / the Alpine CDN): the gateway must keep serving.
   rc=0; gpriv --timeout 1800 > "$EV/A2-refresh-offline.txt" 2>&1 <<'EOS' || rc=$?
