@@ -1624,6 +1624,7 @@ vmark() { printf 'mark %s\n' "$*" >> "$VGA_CMDS"; log "console: $*"; }
 vkey()  { printf 'sendkey %s\n' "$1" >> "$VGA_CMDS"; }
 # tty1's text as the kernel holds it (/dev/vcs1): what is on the operator's screen.
 vtty() { groot "cat /proc/consoles; echo ---active; cat /sys/class/tty/console/active; echo ---printk; cat /proc/sys/kernel/printk
+echo \"---fg \$(fgconsole 2>/dev/null) kdmode-tty1 \$(python3 -c 'import array,fcntl,os,sys;b=array.array(sys.argv[1],[0]);fcntl.ioctl(os.open(sys.argv[2],os.O_RDONLY),0x4B3B,b);print(b[0])' i /dev/tty1 2>/dev/null) (0=text 1=graphics)\"
 w=\$(stty -F /dev/tty1 size 2>/dev/null | cut -d' ' -f2); echo \"---size \$(stty -F /dev/tty1 size 2>/dev/null)\"
 for v in 1 12; do echo \"---vcs\$v\"; [ -e /dev/vcs\$v ] && fold -w \"\${w:-80}\" /dev/vcs\$v | sed 's/[[:space:]]*\$//' | grep -v '^\$'; done
 echo ---journal; journalctl -b -o short-monotonic --no-pager 2>/dev/null | grep -E 'Console: switching|fbcon|vmwgfx|plymouth|Started getty@tty1|LAB-|Startup finished|lab-console' | head -80" 300 > "$1" 2>&1 || true; }
@@ -1700,6 +1701,7 @@ OVFENV
   # 37631873993). Recorded, not judged: it is the topology ESXi has.
   vcheck V1 console-topology info "$(sed -n '1,/^---active$/p' "$f" | grep -v '^---' | tr -s ' ' | tr '\n' ';') printk=$(sed -n '/^---printk$/{n;p}' "$f" | tr '\t' ' ')"
   vstray_check V1 tty1-after-first-boot "$f"
+  vcheck V1 vt-state info "$(sed -n 's/^---fg //p' "$f")"
   # V2 maintenance reboot with a slow unit ahead of logins and a failing unit.
   gpriv --timeout 120 > "$EV/V2-units.txt" 2>&1 <<'EOS' || true
 cat > /etc/systemd/system/lab-console-delay.service <<'U'
@@ -1749,11 +1751,41 @@ EOS
   vmark "Alt+F12"; vkey alt-f12; sleep 4; vmark "Alt+F1"; vkey alt-f1; sleep 4
   # V4 clean maintenance reboot.
   groot 'systemctl disable lab-console-delay.service lab-console-fail.service; rm -f /etc/systemd/system/lab-console-delay.service /etc/systemd/system/lab-console-fail.service; systemctl daemon-reload' 120 > /dev/null 2>&1 || true
+  # Guest-side truth for the clean reboot's frames: the foreground VT and
+  # tty1's KD mode every 0.25 s from early boot (a frozen frame is either a
+  # VT left in graphics mode or the emulated display not refreshing).
+  gpriv --timeout 120 > "$EV/V4-probe-unit.txt" 2>&1 <<'EOS' || true
+cat > /usr/local/sbin/lab-console-probe <<'P'
+#!/bin/sh
+i=0
+while [ $i -lt 120 ]; do
+  m=$(python3 -c 'import array,fcntl,os,sys;b=array.array(sys.argv[1],[0]);fcntl.ioctl(os.open(sys.argv[2],os.O_RDONLY),0x4B3B,b);print(b[0])' i /dev/tty1 2>/dev/null)
+  echo "LAB-PROBE up=$(cut -d' ' -f1 /proc/uptime) fg=$(fgconsole 2>/dev/null) kdmode=$m plymouth=$(pidof plymouthd >/dev/null && echo up || echo down)" > /dev/hvc0
+  i=$((i+1)); sleep 0.25
+done
+P
+chmod 0755 /usr/local/sbin/lab-console-probe
+cat > /etc/systemd/system/lab-console-probe.service <<'U'
+[Unit]
+Description=Lab console qualification: VT/KD-mode probe (no ordering effect)
+DefaultDependencies=no
+After=local-fs.target systemd-udevd.service
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/lab-console-probe
+[Install]
+WantedBy=sysinit.target
+U
+systemctl daemon-reload && systemctl enable lab-console-probe.service
+EOS
   t2="$(vtime)"; vmark "clean maintenance reboot requested"
   gpriv --nowait > "$EV/V4-reboot.txt" 2>&1 <<<'culvert-os-update reboot' || true
   sleep 20; vwait_ready 900 || vcheck V4 maintenance-reboot fail "not ready after the clean maintenance reboot"
   vmark "ready after clean maintenance reboot"; sleep 20
   f="$EV/V4-tty.txt"; vtty "$f"; vstray_check V4 tty1-after-clean-reboot "$f"
+  grep -a 'LAB-PROBE' "$WORK/console.log" > "$EV/V4-probe.txt" 2>/dev/null || true
+  vcheck V4 vt-probe info "$(wc -l < "$EV/V4-probe.txt") samples; $(sed -n 's/^---fg //p' "$f"); first: $(head -1 "$EV/V4-probe.txt" | tr -d '\r'); last: $(tail -1 "$EV/V4-probe.txt" | tr -d '\r')"
+  groot 'systemctl disable lab-console-probe.service; rm -f /etc/systemd/system/lab-console-probe.service /usr/local/sbin/lab-console-probe; systemctl daemon-reload' 120 > /dev/null 2>&1 || true
   t3="$(vtime)"; vcapture_stop
   vsheet V1-first-boot 0 "$t1"; vsheet V2-V3-reboot-esc-postboot "$t1" "$t2"; vsheet V4-clean-reboot "$t2" "$t3"
   vcheck V frames info "$(wc -l < "$EV/V-frames/frames.tsv") distinct frames, $(grep -c . "$EV/V-frames/events.tsv") events (V-frames/, V*-*.png contact sheets)"
