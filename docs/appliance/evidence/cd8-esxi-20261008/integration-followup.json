@@ -1,0 +1,210 @@
+{
+  "schema": "culvert.integration-followup.v1",
+  "reviewed_at_utc": "2026-10-07T23:53:49.283527+00:00",
+  "disposition": "cd8 SAML callback defect confirmed; 2a source fixture PASS; replacement appliance qualification BLOCKED",
+  "additive_evidence": true,
+  "coordination_comment": {
+    "id": 6049116654,
+    "url": "https://github.com/KidCarmi/Culvert/pull/1528#issuecomment-6049116654",
+    "updated_at": "2026-10-07T23:45:00Z"
+  },
+  "workflow": {
+    "repository": "KidCarmi/Culvert",
+    "run_id": 37703421967,
+    "url": "https://github.com/KidCarmi/Culvert/actions/runs/37703421967",
+    "head_sha": "a982a9ccbe0d5a8733e8a88543bf15370875e684",
+    "branch": "test/appliance-lab",
+    "conclusion": "success",
+    "artifact_count": 2,
+    "ova_produced": false,
+    "skipped_jobs": [
+      {
+        "id": 113072024335,
+        "scope": "OVA"
+      },
+      {
+        "id": 113072024564,
+        "scope": "baked sidecar scan"
+      },
+      {
+        "id": 113072024802,
+        "scope": "boot console"
+      },
+      {
+        "id": 113072024843,
+        "scope": "F-DISK"
+      }
+    ]
+  },
+  "artifacts": [
+    {
+      "id": 11518796591,
+      "name": "appliance-lab-saml-replay-pre-fix-cd8e4450",
+      "zip_bytes": 2282,
+      "zip_sha256": "a7f4db8c428aa4d1fd36ddbb7e22a6d77e5f2c28209bb36ab0e97dfe6f6763ad",
+      "product_source": "cd8e44505bd329e5de675592ad4c23f92a534d55",
+      "job_id": 113072023430,
+      "job_conclusion": "success",
+      "test_exit_code": 1,
+      "expected_test_result": "fail",
+      "members": [
+        {
+          "path": "binding.txt",
+          "bytes": 240,
+          "sha256": "079da4e8c4de01ec716fdae337665f315f8e131ecd2c34c979a2c44ee9726c2e"
+        },
+        {
+          "path": "replay.log",
+          "bytes": 6500,
+          "sha256": "6546e255481ce82bc7f00742cd3e33c298f644055c25d34ddadf1e798bd964ea"
+        }
+      ]
+    },
+    {
+      "id": 11518098791,
+      "name": "appliance-lab-saml-replay-fix-2a82320c",
+      "zip_bytes": 2765,
+      "zip_sha256": "85b4ce6fb4cd7165d649553363130ca559f30a92906c262d5c6cae6f40af6d67",
+      "product_source": "2a82320c746a6d146df19a6f5af9676d76b72286",
+      "job_id": 113072023060,
+      "job_conclusion": "success",
+      "test_exit_code": 0,
+      "expected_test_result": "pass",
+      "members": [
+        {
+          "path": "binding.txt",
+          "bytes": 240,
+          "sha256": "9d0ddfaf344b47a7b20f84682d060678e91df2f4bb08d2727cb046e88d8b07b3"
+        },
+        {
+          "path": "replay.log",
+          "bytes": 8208,
+          "sha256": "da91b3561b4a00a4e5dfc8e859e17fabeeb324a20c7be1e566d1cb8d85060546"
+        }
+      ]
+    }
+  ],
+  "fixture": {
+    "path": "test/e2e/appliance/lab/go/lab_saml_cookie_purpose_test.go",
+    "source_commit": "a982a9ccbe0d5a8733e8a88543bf15370875e684",
+    "sha256": "908264ffc1533d68f09bf9ef26d80e975b0d0b2fcf0b7093ef6a3a9cdc64db97",
+    "compiler": "go1.26.8 linux/amd64",
+    "command": "go test -count=1 -run '^TestLabSAMLCookiePurposeReplay$' -v .",
+    "source_binding": "Workflow checks candidate HEAD, copies this same fixture into each exact candidate checkout and records its hash. Independently hashed git object matches both bindings. No independent rerun performed."
+  },
+  "pre_fix": {
+    "source": "cd8e44505bd329e5de675592ad4c23f92a534d55",
+    "result": "FAIL",
+    "callback_status": 403,
+    "portal_cookie_set": false,
+    "expected_negative_job_success": true,
+    "meaning": "Workflow success includes a deliberately failing cd8 reproduction; it is not cd8 SAML success."
+  },
+  "fixed": {
+    "source": "2a82320c746a6d146df19a6f5af9676d76b72286",
+    "result": "PASS",
+    "callback_status": 302,
+    "portal_cookie_set": true,
+    "same_response_replay_status": 401,
+    "same_response_replay_cookie_set": false,
+    "controls": [
+      {
+        "control": "proxy, no cookie (control)",
+        "http_status": 407,
+        "upstream_reached": false,
+        "result": "PASS"
+      },
+      {
+        "control": "proxy, SAML portal cookie as ps_session (positive control)",
+        "http_status": 200,
+        "upstream_reached": true,
+        "result": "PASS"
+      },
+      {
+        "control": "admin API, no cookie (control)",
+        "http_status": 401,
+        "upstream_reached": false,
+        "result": "PASS"
+      },
+      {
+        "control": "admin API, admin cookie as ps_ui_session (positive control)",
+        "http_status": 200,
+        "upstream_reached": false,
+        "result": "PASS"
+      },
+      {
+        "control": "admin API, SAML portal value renamed to ps_ui_session",
+        "http_status": 401,
+        "upstream_reached": false,
+        "result": "PASS"
+      },
+      {
+        "control": "admin API, SAML portal cookie under its own name",
+        "http_status": 401,
+        "upstream_reached": false,
+        "result": "PASS"
+      },
+      {
+        "control": "proxy, admin value renamed to ps_session",
+        "http_status": 407,
+        "upstream_reached": false,
+        "result": "PASS"
+      },
+      {
+        "control": "proxy, admin cookie under its own name",
+        "http_status": 407,
+        "upstream_reached": false,
+        "result": "PASS"
+      }
+    ],
+    "change": "Generic Origin guard exempts only POST /auth/saml/callback; SAML validation remains in callback handler."
+  },
+  "scope_limits": [
+    "Source-built Go HTTP-handler integration, not the built candidate image, OVA or ESXi guest.",
+    "Synthetic ephemeral SAML signer and direct in-memory provider registration; not vendor IdP interoperability or the persistent provider configuration API.",
+    "Actual production auth-select, callback and cookie issuers are exercised, but no real browser SameSite/Secure or cross-site cookie-delivery qualification.",
+    "Portal identity and local admin name do not collide; this fixture does not demonstrate same-name or viewer-specific cases.",
+    "Eight cookie-purpose controls and same-response replay rejection do not demonstrate browser-bound SAML/OIDC login initiation."
+  ],
+  "open_dispositions": [
+    {
+      "scope": "Browser-bound login state / login-CSRF",
+      "result": "BLOCKED",
+      "evidence": "Opus comment reports open finding. Source consumes SAML RelayState and OIDC state by state value; client key is not compared to an initiating-browser binding at callback. No independent browser exploit reproduction in this follow-up.",
+      "source_references": [
+        "auth_saml.go:186",
+        "auth_saml.go:207",
+        "auth_saml.go:216",
+        "auth_oidc_flow.go:721",
+        "auth_oidc_flow.go:753"
+      ],
+      "required": "Implement and test a browser-bound initiation proof for both SAML and OIDC, including unsolicited/cross-browser callback rejection and legitimate flows."
+    },
+    {
+      "scope": "Exact adopted ClamAV image scan",
+      "result": "BLOCKED",
+      "evidence": "Comment describes work on a new lab branch; this run contains no adoption scan or image artifact. Existing baked-image scan does not cover separately rebuilt adoption image.",
+      "required": "Provide retained exact adopted-image archive/config binding, SBOM, scan result and disposition."
+    },
+    {
+      "scope": "Replacement OVA",
+      "result": "BLOCKED",
+      "evidence": "This run produces only two source integration reports. No OVA or runtime image identity is present.",
+      "required": "Provide exact replacement artifact and source/image bindings, then qualify that artifact after relevant fixes."
+    },
+    {
+      "scope": "Historical encrypted logs and recovery custody",
+      "result": "BLOCKED",
+      "evidence": "Unchanged from published cd8 report; this SAML fixture supplies no historical-log export/restore or rotation-key custody evidence.",
+      "required": "Supported export/restore and key-rotation custody proof; omission from application backup is not closure."
+    }
+  ],
+  "historical_evidence": "The prior cd8 ESXi lifecycle and recovery observations remain historical evidence. This callback defect supersedes cd8 as a release candidate; 2a source-test success cannot transfer those observations to a replacement OVA.",
+  "handling": {
+    "vm_calls": false,
+    "product_edits": false,
+    "downloaded_code_executed": false,
+    "existing_evidence_or_checksums_modified": false,
+    "published_content": "Sanitized metadata and result summaries only; raw fixture logs remain in intake. No token, signed download URL, cookie value or signing key is included."
+  }
+}
