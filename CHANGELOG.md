@@ -7,6 +7,57 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ## [Unreleased]
 
+### Performance
+
+- The per-rule URL-category **membership** probe no longer takes a read lock.
+  `urlcat.Store.MatchesHost` / `MatchesHostAdmin` answer "is this host in
+  category C?" and are called once per category-scoped access rule per proxied
+  request (`hostCatScratch.matchesCategory`, deliberately not memoized — the
+  answer depends on the rule's category, not just the host). Each took
+  `s.mu.RLock` purely to read **one outer map entry**, and `RLock`/`RUnlock`
+  are two atomic read-modify-writes on one shared word — so every request in
+  the process wrote the same cache line once per category rule.
+
+  That is a throughput **ceiling**, not a constant cost. A 4-core CPU profile
+  of `BenchmarkStoreMatchesHost_Parallel` put **80.6% of all samples in the
+  `RLock`/`RUnlock` atomic** (41.1% + 39.8% cumulative) against ~15% doing the
+  real work, and the scaling curve is the finding: `MatchesHost` delivered
+  **0.56x** the throughput at four cores that it did at one — adding cores
+  *subtracted* throughput.
+
+  Both entry points now read an immutable view through an `atomic.Pointer`: a
+  single pointer load, with no read-modify-write on any shared word. Measured
+  on a 4-core Xeon @2.30GHz with **both arms timed in one run** (the `_Legacy`
+  benchmark arms call a verbatim copy of the pre-view body), medians of n=7:
+
+  | | 1 core | 2 cores | 4 cores | scaling 1→4 |
+  |---|---|---|---|---|
+  | `MatchesHost` before | 85.2 ns | 158.1 ns | 151.0 ns | **0.56x** |
+  | `MatchesHost` after | 83.7 ns | 43.0 ns | **21.3 ns** | **3.94x** |
+  | `MatchesHostAdmin` before | 97.1 ns | 109.7 ns | 154.6 ns | 0.63x |
+  | `MatchesHostAdmin` after | 95.1 ns | 47.4 ns | 23.8 ns | 4.00x |
+
+  End to end through the real policy scan
+  (`BenchmarkPolicyEvaluate_CategoryRulesParallel`, 50 `DestCategory` rules
+  over 12 categories / 480 patterns, uncategorized destination — the
+  clean-traffic case that cannot short-circuit): **8764 → 1025 ns/op at four
+  cores (8.55x)**, scaling **0.46x → 3.71x**, allocations unchanged at 0.
+
+  There is **no low-concurrency price and no gain either** — the serial arms
+  measure 1.007x / 0.991x / 1.020x, i.e. parity. An uncontended `RLock` is
+  cheap, so the entire win is the scaling, which is the axis the hardware this
+  appliance ships to actually runs on.
+
+  Semantics are unchanged exactly, which is the deliverable rather than the
+  speed: this is a policy membership matcher, so a divergence would be a
+  silently mis-enforced — or silently **unenforced** — Allow/Deny rule. The
+  equivalence is pinned by a differential against verbatim copies of the
+  pre-view bodies, and the publication contract three further ways (structurally
+  per writer, structurally as an inventory, and behaviourally through all twelve
+  public mutators), because a forgotten publish would leave the policy path
+  probing a stale view — a Deny rule keyed on a just-added category host would
+  fail **open**.
+
 ### Security
 
 - Node-local key material was written with `os.WriteFile` on a predictable
