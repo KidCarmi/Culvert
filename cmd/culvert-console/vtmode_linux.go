@@ -23,6 +23,12 @@ var (
 // every write to tty1: the menu would run but the screen would stay frozen on
 // the last frame. Setting KD_TEXT also unblanks and repaints the VT.
 //
+// systemd's TTYReset=yes (getty@tty1) normally does the same before ExecStart,
+// but it skips the whole reset when it cannot open /dev/console. On the
+// appliance /dev/console is ttyS0, which the 8250 driver registers even on a
+// VM with no serial port, so on ESXi this guard can be the only repair. Do not
+// remove it as redundant.
+//
 // It is a repair, not a gate: a descriptor that is not a VT reports an error
 // and nothing changes. It returns whether it changed the mode.
 func ensureTextMode(fd int) (bool, error) {

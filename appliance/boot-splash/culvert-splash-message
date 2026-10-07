@@ -1,8 +1,8 @@
 #!/bin/sh
 # initramfs init-premount: the line under the Culvert splash. Truthful for the
 # whole time the splash is shown (it ends when the console menu starts), and it
-# names the key that shows the boot messages, under the title. Not a "keys:"
-# message: ubuntu-text draws those white near the bottom, off the theme palette.
+# names the key that shows the boot messages, under the title in the theme's
+# blue. Not a "keys:" message: ubuntu-text puts those four rows from the bottom.
 # Best-effort: never blocks the boot.
 PREREQ="plymouth"
 prereqs() { echo "$PREREQ"; }

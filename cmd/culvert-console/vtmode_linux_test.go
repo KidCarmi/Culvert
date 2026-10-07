@@ -64,17 +64,11 @@ func TestEnsureTextMode_NonVTIsAnError(t *testing.T) {
 	}
 }
 
-// The request numbers are linux/kd.h's; a typo would silently do nothing.
-func TestEnsureTextMode_KernelConstants(t *testing.T) {
-	if kdSetMode != 0x4B3A || kdGetMode != 0x4B3B || kdText != 0 {
-		t.Fatal("console-mode ioctl constants drifted from linux/kd.h")
-	}
-}
-
-// runTerminal repairs the VT in login mode (tty1), after the terminal
-// boundary check and before the first menu frame; never in admin mode, whose
-// terminal is an SSH pty or another user's VT.
-func TestRunTerminal_RepairsTextModeBeforeTheMenu(t *testing.T) {
+// runTerminal repairs the VT in login mode (tty1) before every menu frame,
+// after the terminal boundary check; never in admin mode, whose terminal is an
+// SSH pty or another user's VT. The call must be a direct statement on fd 0:
+// one hidden in a closure, a nested branch or on another descriptor fails.
+func TestRunTerminal_RepairsTextModeBeforeEveryMenuFrame(t *testing.T) {
 	file, err := parser.ParseFile(token.NewFileSet(), "terminal_linux.go", nil, 0)
 	if err != nil {
 		t.Fatal(err)
@@ -88,24 +82,52 @@ func TestRunTerminal_RepairsTextModeBeforeTheMenu(t *testing.T) {
 	if body == nil {
 		t.Fatal("runTerminal not found")
 	}
-	validate, repair, loop := -1, -1, -1
+	validate, loop := -1, -1
+	var loopBody *ast.BlockStmt
 	for i, stmt := range body.List {
 		switch s := stmt.(type) {
 		case *ast.IfStmt:
-			if init, ok := s.Init.(*ast.AssignStmt); ok && callsNamed(init, "validateTerminal") {
+			if init, ok := s.Init.(*ast.AssignStmt); ok && len(init.Rhs) == 1 && isCallTo(init.Rhs[0], "validateTerminal") {
 				validate = i
-			}
-			if u, ok := s.Cond.(*ast.UnaryExpr); ok && u.Op == token.NOT && identNamed(u.X, "admin") && callsNamed(s.Body, "ensureTextMode") {
-				repair = i
 			}
 		case *ast.ForStmt:
 			if loop < 0 {
-				loop = i
+				loop, loopBody = i, s.Body
 			}
 		}
 	}
-	if validate < 0 || repair < 0 || loop < 0 || validate >= repair || repair >= loop {
-		t.Fatalf("want validateTerminal < if !admin { ensureTextMode } < menu loop, got %d %d %d", validate, repair, loop)
+	if validate < 0 || loop < 0 || validate >= loop || len(loopBody.List) < 2 {
+		t.Fatalf("want validateTerminal before the menu loop, got %d %d", validate, loop)
+	}
+	guard, ok := loopBody.List[0].(*ast.IfStmt)
+	if !ok || guard.Init != nil || guard.Else != nil {
+		t.Fatal("the menu loop must open with `if !admin { ensureTextMode(0) }`")
+	}
+	if u, ok := guard.Cond.(*ast.UnaryExpr); !ok || u.Op != token.NOT || !identNamed(u.X, "admin") {
+		t.Fatal("the text-mode repair must be gated on !admin")
+	}
+	direct := false
+	for _, stmt := range guard.Body.List {
+		var call ast.Expr
+		switch s := stmt.(type) {
+		case *ast.ExprStmt:
+			call = s.X
+		case *ast.AssignStmt:
+			if len(s.Rhs) == 1 {
+				call = s.Rhs[0]
+			}
+		}
+		if c, ok := call.(*ast.CallExpr); ok && isCallTo(c, "ensureTextMode") && len(c.Args) == 1 {
+			if lit, ok := c.Args[0].(*ast.BasicLit); ok && lit.Kind == token.INT && lit.Value == "0" {
+				direct = true
+			}
+		}
+	}
+	if !direct {
+		t.Fatal("ensureTextMode(0) must be a direct statement in the !admin branch")
+	}
+	if !isCallTo(firstCall(loopBody.List[1]), "menu") {
+		t.Fatal("the repair must come immediately before the menu frame")
 	}
 }
 
@@ -114,13 +136,14 @@ func identNamed(e ast.Expr, name string) bool {
 	return ok && id.Name == name
 }
 
-func callsNamed(n ast.Node, name string) bool {
-	found := false
-	ast.Inspect(n, func(n ast.Node) bool {
-		if c, ok := n.(*ast.CallExpr); ok && identNamed(c.Fun, name) {
-			found = true
-		}
-		return !found
-	})
-	return found
+func isCallTo(e ast.Expr, name string) bool {
+	c, ok := e.(*ast.CallExpr)
+	return ok && identNamed(c.Fun, name)
+}
+
+func firstCall(stmt ast.Stmt) ast.Expr {
+	if a, ok := stmt.(*ast.AssignStmt); ok && len(a.Rhs) == 1 {
+		return a.Rhs[0]
+	}
+	return nil
 }

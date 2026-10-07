@@ -26,7 +26,8 @@ The screen is `C U L V E R T`, the renderer's activity dots, and one line
 under them in the theme colour: "Starting system services - Esc: boot
 messages" (an initramfs script, `culvert-splash-message`, sends it once
 Plymouth is up). It is deliberately not a `keys:` message, which ubuntu-text
-draws in white at the bottom of the screen, outside the theme palette. It is true for
+draws four rows from the bottom in the theme's `white`; a plain message sits
+under the title, with the activity dots, in the theme's `blue`. It is true for
 the whole time the splash is shown: the splash ends when the console menu
 starts, and the menu reports provisioning and readiness itself. The title is 13
 characters because ubuntu-text draws it at column `(width-12)/2`; the first
@@ -44,7 +45,8 @@ Three things are owned explicitly so that nothing else is left on the screen:
   graphics.
 * **Text mode on tty1.** Plymouth waits `DeviceTimeout` (Ubuntu default 8 s)
   for a graphics device before it draws the text splash, holding tty1 in
-  graphics mode meanwhile. With `nomodeset` no such device ever appears, so
+  graphics mode meanwhile. With `nomodeset` on BIOS no such device ever
+  appears, so
   the first eight seconds were blank, and a boot that reached the console menu
   inside that window left tty1 in graphics mode: the kernel then ignores
   every write to it, and the menu ran behind a screen frozen on early boot
@@ -52,8 +54,13 @@ Three things are owned explicitly so that nothing else is left on the screen:
   gone). Two independent fixes: `/etc/plymouth/plymouthd.conf` sets
   `DeviceTimeout=0.1` (read before `plymouthd.defaults`, first value wins;
   Ubuntu's initramfs hook copies it and the build checks it is there), and
-  `culvert-console --login` puts its VT back in text mode before drawing the
-  first menu frame, whatever left it in graphics mode.
+  `culvert-console --login` puts its VT back in text mode before every menu
+  frame, whatever left it in graphics mode. systemd's `TTYReset=yes` on
+  `getty@tty1` would normally do this, but it skips its whole terminal reset
+  when it cannot open `/dev/console` (ttyS0, see below), which is the ESXi
+  case; the console's own repair does not depend on it.
+  `DeviceTimeout=0.1` also means a graphics device that appears later (a boot
+  entry without `nomodeset`) is ignored by the splash, which stays text.
 * **Kernel messages on their own console.** `culvert-kernel-log-vt.service`
   runs before the splash ends and routes the kernel's VT output to tty12
   (`setlogcons 12`), seeding it with the kernel log so far. Alt+F12 shows it,
@@ -61,7 +68,10 @@ Three things are owned explicitly so that nothing else is left on the screen:
   console and the journal (`journalctl -k`) receive every message. Without it,
   every kernel message after the splash is drawn over the console menu. The
   residual: a kernel panic message is on tty12, serial and the hypervisor's
-  log, not on tty1.
+  log, not on tty1. tty12 shows the boot kernel log (command line, hardware
+  identifiers, MAC addresses) to anyone at the hypervisor console without an
+  appliance login, while `dmesg` on the box is root-only; that is the same
+  audience that already saw these lines on tty1 before this console existed.
 * **Kernel messages during the splash.** ubuntu-text holds kernel messages
   back from all consoles while it is shown (`klogctl` console-off on show,
   console-on on hide; noble `ubuntu-text.patch`), serial included. They stay
@@ -83,8 +93,9 @@ SBOM before cloning. A custom theme name makes Noble's initramfs hook include
 font support even for the native text renderer, so the build explicitly
 installs `plymouth-label` and `fontconfig` too. The installer rebuilds every
 installed initramfs and rejects one missing the Culvert theme, the native
-renderer or the message script. The outer build independently compares the
-selected themes, the GRUB drop-in and the three console files with source
+renderer, the message script or `plymouthd.conf` (presence: Ubuntu's hook
+copies the file verbatim). The outer build independently compares the
+selected themes, the GRUB drop-in and the four console files with source
 hashes.
 
 Normal boot adds `splash plymouth.ignore-serial-consoles nomodeset` to the

@@ -211,4 +211,22 @@ grep -qx '\[Daemon\]' "$SOURCE/plymouthd.conf"
 ! grep -q 'keys:' <(grep -v '^#' "$SOURCE/culvert-splash-message") || fail 'splash message uses a keys: prefix'
 grep -q -- '--text="Starting system services' "$SOURCE/culvert-splash-message"
 grep -qx 'install_boot_splash "$HERE" /' "$SOURCE/install.sh"
+# The kernel-log VT script under the shell that runs it (/bin/sh is dash on
+# Ubuntu): routes to tty12 when the VT opens, and degrades to exit 0 without
+# touching the kernel's console routing when it cannot be opened.
+klvt_shell=$(command -v dash || command -v sh)
+mkdir -p "$TEST_DIR/klvt/bin"
+printf '#!/bin/sh\necho "setlogcons $*" >>"%s/klvt/trace"\n' "$TEST_DIR" >"$TEST_DIR/klvt/bin/setlogcons"
+printf '#!/bin/sh\necho kernel-line\n' >"$TEST_DIR/klvt/bin/dmesg"
+chmod +x "$TEST_DIR/klvt/bin/setlogcons" "$TEST_DIR/klvt/bin/dmesg"
+grep -qF '"/dev/tty$vt"' "$SOURCE/culvert-kernel-log-vt" || fail 'kernel-log VT path changed; update this test'
+sed "s|/dev/tty\$vt|$TEST_DIR/klvt/tty\$vt|" "$SOURCE/culvert-kernel-log-vt" >"$TEST_DIR/klvt/open.sh"
+PATH="$TEST_DIR/klvt/bin:$PATH" "$klvt_shell" "$TEST_DIR/klvt/open.sh" || fail 'kernel-log VT script failed with an openable VT'
+[[ $(cat "$TEST_DIR/klvt/trace") == 'setlogcons 12' ]] || fail 'kernel-log VT not routed to tty12'
+grep -qx kernel-line "$TEST_DIR/klvt/tty12" || fail 'kernel log not seeded on tty12'
+rm -f "$TEST_DIR/klvt/trace"
+sed "s|/dev/tty\$vt|$TEST_DIR/klvt/absent/tty\$vt|" "$SOURCE/culvert-kernel-log-vt" >"$TEST_DIR/klvt/closed.sh"
+PATH="$TEST_DIR/klvt/bin:$PATH" "$klvt_shell" "$TEST_DIR/klvt/closed.sh" 2>/dev/null || fail 'kernel-log VT script did not degrade when the VT cannot be opened'
+[[ ! -e "$TEST_DIR/klvt/trace" ]] || fail 'console routing changed although the VT could not be opened'
+
 echo 'PASS: splash staging, alternatives/initramfs/GRUB ordering, failure fences, GRUB preservation, runtime-only overlay'

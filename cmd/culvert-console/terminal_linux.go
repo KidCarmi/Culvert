@@ -351,12 +351,14 @@ func runTerminal(ctx context.Context, collector applianceconsole.Collector, acti
 	if err := validateTerminal(admin); err != nil {
 		return err
 	}
-	if !admin {
-		// Best effort: tty1 is a VT here (validateTerminal checked), and a
-		// failed repair still leaves the serial console and SSH usable.
-		_, _ = ensureTextMode(0)
-	}
 	for {
+		if !admin {
+			// Before every menu frame, not only the first: an action (the
+			// recovery shell, a host command) can leave the VT in graphics
+			// mode too. Best effort: tty1 is a VT here (validateTerminal
+			// checked), and a failed repair leaves serial and SSH usable.
+			_, _ = ensureTextMode(0)
+		}
 		choice, err := menu(ctx, collector, admin)
 		if ctx.Err() != nil {
 			return nil
