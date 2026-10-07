@@ -34,11 +34,36 @@ SOURCE = 'd698a69c5192588d5ed3a85a9f7cd9009fb59b31'
 IMAGE = 'sha256:2c03833c9641a1e24dc5a66b3faa4f0695ac44cdeac931018b9b744be301660e'
 SIDECAR = 'sha256:86d71850ea1a01fdbb9c06b82c929d4485718c1d80f19a0824c2c454c2bce97e'
 MAX_BODY = 1024 * 1024
+PRIOR_CONTROLLER = '4f17cd9392cc293d17e70c6f95eb1ca0b24a8685'
+PRIOR_HELPER = '7c016022b42de6d00aaf85e4fae9e1e6e9e6f2d5fcad1cceec276e5cf4e5bcab'
+STAGES = {'prepare', 'lock_os', 'lock_agent', 'maintenance_idle', 'source_identity',
+          'sidecar_build_identity', 'firstboot', 'proxy_identity', 'sidecar_identity',
+          'api_login', 'av_posture', 'policy_snapshot', 'default_deny', 'bridge_network',
+          'fixture', 'ready_before', 'probe_before', 'stop', 'ready_down', 'probe_down',
+          'restore', 'ready_recovered', 'probe_recovered', 'policy_cleanup'}
 
 
-def need(ok, reason):
+class CheckFailure(ValueError):
+    def __init__(self, reason, code):
+        super().__init__(reason)
+        self.code = code
+
+
+def need(ok, reason, code='condition_failed'):
     if not ok:
-        raise ValueError(reason)
+        raise CheckFailure(reason, code)
+
+
+def failure_detail(backend, error):
+    stage = getattr(backend, 'stage', 'prepare')
+    code = error.code if isinstance(error, CheckFailure) else 'unexpected_error'
+    if isinstance(error, (TimeoutError, subprocess.TimeoutExpired)):
+        code = 'timeout'
+    if isinstance(error, FileNotFoundError):
+        code = 'required_path_missing'
+    if isinstance(error, PermissionError):
+        code = 'permission_denied'
+    return {'stage': stage if stage in STAGES else 'prepare', 'code': code}
 
 
 def sha(data):
@@ -91,36 +116,50 @@ def observe(backend, phase, seen):
 
 def qualify(backend):
     result = {'schema': 1, 'result': 'fail', 'phases': {}, 'readiness': {}, 'errors': [],
-              'restored_running': False, 'policy_restored': False}
+              'failure_details': [], 'restored_running': False, 'policy_restored': False}
     seen = set()
     stop_attempted = False
     try:
+        backend.stage = 'prepare'
         result['identity'] = backend.prepare()
+        backend.stage = 'fixture'
         backend.install_fixture()
+        backend.stage = 'ready_before'
         result['readiness']['before'] = backend.wait_ready(True)
+        backend.stage = 'probe_before'
         result['phases']['before'] = observe(backend, 'before', seen)
         need(all(x['pass'] for x in result['phases']['before']), 'initial content verdict mismatch')
         stop_attempted = True  # stop may time out after it already changed state.
+        backend.stage = 'stop'
         backend.stop()
+        backend.stage = 'ready_down'
         result['readiness']['down'] = backend.wait_ready(False)
+        backend.stage = 'probe_down'
         result['phases']['down'] = observe(backend, 'down', seen)
         need(all(x['pass'] for x in result['phases']['down']), 'outage content verdict mismatch')
-    except Exception:
+    except Exception as error:
         result['errors'].append('qualification_failed')
+        result['failure_details'].append(failure_detail(backend, error))
     finally:
         if stop_attempted:
             try:
+                backend.stage = 'restore'
                 backend.restore()
                 result['restored_running'] = True
+                backend.stage = 'ready_recovered'
                 result['readiness']['recovered'] = backend.wait_ready(True)
+                backend.stage = 'probe_recovered'
                 result['phases']['recovered'] = observe(backend, 'recovered', seen)
                 need(all(x['pass'] for x in result['phases']['recovered']), 'recovered content verdict mismatch')
-            except Exception:
+            except Exception as error:
                 result['errors'].append('sidecar_recovery_failed')
+                result['failure_details'].append(failure_detail(backend, error))
         try:
+            backend.stage = 'policy_cleanup'
             result['policy_restored'] = backend.cleanup_fixture()
-        except Exception:
+        except Exception as error:
             result['errors'].append('policy_cleanup_failed')
+            result['failure_details'].append(failure_detail(backend, error))
         backend.close()
     if (not result['errors'] and result['restored_running'] and result['policy_restored']
             and set(result['phases']) == {'before', 'down', 'recovered'}):
@@ -145,23 +184,95 @@ def command(argv, timeout=15):
         process.stdout.close()
 
 
-def locked_file(path):
-    import fcntl
-    p = Path(path)
-    for ancestor in (p.parent, *p.parent.parents):
-        s = ancestor.lstat()
-        need(stat.S_ISDIR(s.st_mode) and s.st_uid == 0 and not s.st_mode & 0o022,
-             'untrusted lock ancestor')
-    fd = os.open(path, os.O_RDWR | os.O_CLOEXEC | os.O_NOFOLLOW)
-    try:
-        s = os.fstat(fd)
-        need(stat.S_ISREG(s.st_mode) and s.st_uid == 0 and s.st_nlink == 1
-             and not s.st_mode & 0o022, 'untrusted lock file')
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        return fd
-    except BaseException:
-        os.close(fd)
-        raise
+def trusted_directory(path, info, service_ids):
+    need(stat.S_ISDIR(info.st_mode), 'lock ancestor is not a directory', 'lock_directory_type')
+    if path == '/var/lib/culvert-maint':
+        need(info.st_uid == service_ids[0] and info.st_gid == service_ids[1]
+             and stat.S_IMODE(info.st_mode) == 0o750,
+             'dedicated maintenance directory owner or mode differs', 'maintenance_directory_identity')
+    else:
+        need(info.st_uid == 0 and not info.st_mode & 0o022,
+             'untrusted root lock ancestor', 'root_directory_identity')
+
+
+def trusted_lock(info):
+    need(stat.S_ISREG(info.st_mode) and info.st_uid == 0 and info.st_gid == 0
+         and info.st_nlink == 1 and not info.st_mode & 0o022,
+         'untrusted root lock file', 'lock_file_identity')
+
+
+def same_inode(opened, named):
+    need((opened.st_dev, opened.st_ino, stat.S_IFMT(opened.st_mode))
+         == (named.st_dev, named.st_ino, stat.S_IFMT(named.st_mode)),
+         'maintenance lock path replaced', 'lock_path_replaced')
+
+
+class HeldLock:
+    """Descriptor-relative acquisition, with the product's dedicated owner.
+
+    The service account is trusted to honour its cooperative lock protocol.
+    Holding a flock does not prevent that owner from renaming its own directory
+    entries; rechecks reject observed replacement rather than claiming otherwise.
+    """
+    def __init__(self, path, service_ids):
+        import fcntl
+        need(path in ('/run/culvert-os-update.lock', '/var/lib/culvert-maint/host-maintenance.lock'),
+             'unexpected maintenance lock path', 'lock_path_refused')
+        self.service_ids = service_ids
+        self.fds = []
+        self.links = []
+        self.directories = []
+        try:
+            flags = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW
+            parent = os.open('/', flags)
+            self.fds.append(parent)
+            self.directories.append(('/', parent))
+            trusted_directory('/', os.fstat(parent), service_ids)
+            current = ''
+            parts = path.split('/')[1:]
+            for name in parts[:-1]:
+                current += '/' + name
+                child = os.open(name, flags, dir_fd=parent)
+                self.fds.append(child)
+                self.links.append((parent, name, child))
+                self.directories.append((current, child))
+                trusted_directory(current, os.fstat(child), service_ids)
+                same_inode(os.fstat(child), os.stat(name, dir_fd=parent, follow_symlinks=False))
+                parent = child
+            self.fd = os.open(parts[-1], os.O_RDWR | os.O_CLOEXEC | os.O_NOFOLLOW, dir_fd=parent)
+            self.fds.append(self.fd)
+            self.links.append((parent, parts[-1], self.fd))
+            trusted_lock(os.fstat(self.fd))
+            try:
+                fcntl.flock(self.fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                raise CheckFailure('maintenance lock held', 'maintenance_busy') from None
+            self.check()
+        except BaseException:
+            self.close()
+            raise
+
+    def check(self):
+        for path, fd in self.directories:
+            trusted_directory(path, os.fstat(fd), self.service_ids)
+        trusted_lock(os.fstat(self.fd))
+        for parent, name, fd in self.links:
+            same_inode(os.fstat(fd), os.stat(name, dir_fd=parent, follow_symlinks=False))
+
+    def close(self):
+        for fd in reversed(self.fds):
+            os.close(fd)
+        self.fds = []
+
+
+def service_identity():
+    import grp
+    import pwd
+    account = pwd.getpwnam('culvert-maint')
+    group = grp.getgrnam('culvert-maint')
+    need(account.pw_uid > 0 and group.gr_gid > 0 and account.pw_gid == group.gr_gid,
+         'dedicated maintenance account differs', 'maintenance_account_identity')
+    return account.pw_uid, group.gr_gid
 
 
 def maintenance_idle(maint=Path('/var/lib/culvert-maint'), state=Path('/var/lib/culvert-appliance/state')):
@@ -222,7 +333,12 @@ class Guest:
             connection.close()
 
     def api(self, path, method='GET', payload=None):
+        changing_policy = method in ('POST', 'PUT', 'DELETE') and path.startswith('/api/policy')
+        if changing_policy:
+            self.check_locks()
         code, raw, headers = self.request(9090, path, method, payload, tls=True)
+        if changing_policy:
+            self.check_locks()
         need(code in (200, 201, 204), 'authenticated API failed')
         if path == '/api/auth/login':
             value = json.loads(raw)
@@ -244,26 +360,40 @@ class Guest:
 
     def prepare(self):
         need(os.geteuid() == 0, 'authenticated root required')
-        self.locks.append(locked_file('/run/culvert-os-update.lock'))
-        self.locks.append(locked_file('/var/lib/culvert-maint/host-maintenance.lock'))
+        ids = service_identity()
+        self.stage = 'lock_os'
+        self.locks.append(HeldLock('/run/culvert-os-update.lock', ids))
+        self.stage = 'lock_agent'
+        self.locks.append(HeldLock('/var/lib/culvert-maint/host-maintenance.lock', ids))
+        self.stage = 'maintenance_idle'
         maintenance_idle()
+        self.stage = 'source_identity'
         build = json.loads(Path('/var/lib/culvert-appliance/build-info.json').read_bytes())
         need(build['source']['git_commit'] == SOURCE and build['source']['git_dirty'] is False,
              'candidate source differs')
+        self.stage = 'sidecar_build_identity'
         need(build['application']['clamav_sidecar_image_id'] == SIDECAR, 'sidecar build differs')
+        self.stage = 'firstboot'
         need(Path('/var/lib/culvert-appliance/state/complete.done').is_file(), 'firstboot incomplete')
+        self.stage = 'proxy_identity'
         self.proxy_id, image, active = self.inspect('culvert')
         need(image == IMAGE and active is True, 'proxy identity or state differs')
+        self.stage = 'sidecar_identity'
         self.sidecar_id, image, active = self.inspect('culvert-clamav')
         need(image == SIDECAR and active is True, 'sidecar identity or initial state differs')
+        self.stage = 'api_login'
         self.api('/api/auth/login', 'POST', {'user': 'labadmin', 'pass': self.config['initial']})
+        self.stage = 'av_posture'
         mode = self.api('/api/security-scan/av-settings')
         need(mode.get('av_unavailable') == 'closed', 'fail-closed posture required')
+        self.stage = 'policy_snapshot'
         self.before = self.api('/api/policy')
         self.policy_sha = policy_identity(self.before)
         need(all(x.get('name') != self.rule_name for x in self.before['rules']), 'fixture exists')
+        self.stage = 'default_deny'
         self.default_before = self.api('/api/default-action')
         need(self.default_before.get('defaultAction') == 'deny', 'default deny required')
+        self.stage = 'bridge_network'
         networks = json.loads(command(['docker', 'inspect', '--format', '{{json .NetworkSettings.Networks}}', 'culvert']))
         gateways = {str(ipaddress.IPv4Address(x['Gateway'])) for x in networks.values() if x.get('Gateway')}
         need(len(gateways) == 1, 'unambiguous bridge gateway required')
@@ -274,6 +404,11 @@ class Guest:
         return {'source_sha': SOURCE, 'image_id': IMAGE, 'sidecar_image_id': SIDECAR,
                 'boot_id': self.boot,
                 'policy_sha256': self.policy_sha, 'av_unavailable': 'closed', 'both_locks_held': True}
+
+    def check_locks(self):
+        need(len(self.locks) == 2, 'both maintenance locks required', 'locks_incomplete')
+        for lock in self.locks:
+            lock.check()
 
     def install_fixture(self):
         owner = self
@@ -346,14 +481,18 @@ class Guest:
 
     def stop(self):
         need(self.sidecar_guard(), 'sidecar stopped externally')
+        self.check_locks()
         command(['docker', 'stop', '--time', '10', self.sidecar_id], timeout=20)
+        self.check_locks()
         need(self.sidecar_guard() is False, 'sidecar did not stop')
 
     def restore(self):
         # A proxy failure during the outage must not prevent restoration of the
         # exact sidecar we stopped. The final readiness/policy tests still fail.
         self.sidecar_guard(require_proxy=False)
+        self.check_locks()
         command(['docker', 'start', self.sidecar_id], timeout=20)
+        self.check_locks()
         need(self.sidecar_guard(require_proxy=False) is True, 'sidecar did not restart')
 
     def cleanup_fixture(self):
@@ -379,8 +518,8 @@ class Guest:
             self.server.server_close()
         if self.thread is not None:
             self.thread.join(timeout=5)
-        for fd in reversed(self.locks):
-            os.close(fd)
+        for lock in reversed(self.locks):
+            lock.close()
 
 
 def run_guest(config):
@@ -390,7 +529,8 @@ def run_guest(config):
         raise RuntimeError('interrupted')
     signal.signal(signal.SIGTERM, interrupted)
     result = qualify(Guest(config))
-    result.update(operation=config['operation'], helper_sha256=config['helper_sha256'])
+    result.update(operation=config['operation'], helper_sha256=config['helper_sha256'],
+                  prior_failure_sha256=config['prior_failure_sha256'])
     print(json.dumps(result, sort_keys=True))
     return 0 if result['result'] == 'pass' else 90
 
@@ -412,8 +552,36 @@ def payload(config):
     return ("set +x\nset -euo pipefail\npython3 - <<'CULVERT_AV_OUTAGE'\n" + source + tail + '\nCULVERT_AV_OUTAGE\n').encode()
 
 
+def prior_failure(sec, expected, owner):
+    need(bool(re.fullmatch('[0-9a-f]{64}', expected)), 'prior failure hash required')
+    directory = sec / 'clamav-outage'
+    need(directory.is_dir() and not directory.is_symlink()
+         and not (hasattr(directory, 'is_junction') and directory.is_junction()), 'retained original attempt required')
+    need(not (directory / 'complete.json').exists(), 'original attempt completed')
+    files = {}
+    for name, limit in [('guest-result.json', 128 * 1024), ('intent.json', 8192), ('payload.sh', 1024 * 1024)]:
+        path = directory / name
+        need(path.is_file() and not path.is_symlink() and path.stat().st_size <= limit,
+             'retained evidence file refused')
+        files[name] = path.read_bytes()
+    value = json.loads(files['guest-result.json'])
+    intent = json.loads(files['intent.json'])
+    need(sha(files['guest-result.json']) == expected and value.get('result') == 'fail'
+         and value.get('schema') == 1 and value.get('helper_sha256') == PRIOR_HELPER
+         and 'identity' not in value and value.get('phases') == {} and value.get('readiness') == {}
+         and value.get('restored_running') is False and value.get('policy_restored') is True
+         and value.get('errors') == ['qualification_failed'], 'original pre-fixture failure differs')
+    need(intent.get('owner_uuid') == owner and intent.get('controller_revision') == PRIOR_CONTROLLER
+         and intent.get('source_sha') == SOURCE and intent.get('image_id') == IMAGE
+         and intent.get('sidecar_image_id') == SIDECAR and intent.get('operation') == value.get('operation')
+         and intent.get('payload_sha256') == sha(files['payload.sh']), 'original attempt identity differs')
+    return {name: sha(raw) for name, raw in files.items()}
+
+
 def run(args):
     ipaddress.IPv4Address(args.bind)
+    need(bool(re.fullmatch('[a-z][a-z0-9-]{0,47}', args.attempt)) and args.attempt != 'initial',
+         'explicit new continuation attempt required')
     console = load('outage_console', 'console-priv.py')
     profiles = load('outage_profiles', 'candidate-identities.py')
     freeze = load('outage_freeze', 'controller-freeze.py')
@@ -427,16 +595,19 @@ def run(args):
     need(manifest['files'].get('test/e2e/appliance/esxi/qualify-clamav-outage.py') == helper_sha, 'helper not frozen')
     with console.b.module.locked(lab.run):
         lab.vm(timeout=30)
-        directory = lab.sec / 'clamav-outage'
+        prior = prior_failure(lab.sec, args.prior_failure_sha256, lab.state['uuid'])
+        directory = lab.sec / ('clamav-outage-' + args.attempt)
         directory.mkdir()  # One-shot; a failed attempt must be reviewed.
         initial = (lab.sec / 'admin-pass').read_text(encoding='utf-8').strip()
         need(1 <= len(initial) <= 256, 'private administrator credential unavailable')
-        config = {'operation': secrets.token_hex(16), 'initial': initial, 'helper_sha256': helper_sha}
+        config = {'operation': secrets.token_hex(16), 'initial': initial, 'helper_sha256': helper_sha,
+                  'prior_failure_sha256': args.prior_failure_sha256}
         body = payload(config)
         (directory / 'payload.sh').write_bytes(body)
         (directory / 'intent.json').write_text(json.dumps({'operation': config['operation'],
             'owner_uuid': lab.state['uuid'], 'source_sha': SOURCE, 'image_id': IMAGE,
-            'sidecar_image_id': SIDECAR, 'payload_sha256': sha(body), 'controller_revision': manifest['revision']}) + '\n')
+            'sidecar_image_id': SIDECAR, 'payload_sha256': sha(body), 'controller_revision': manifest['revision'],
+            'attempt': args.attempt, 'prior_attempt_file_hashes': prior}) + '\n')
         output = io.BytesIO()
         writer = io.TextIOWrapper(output, encoding='utf-8', write_through=True)
         with contextlib.redirect_stdout(writer):
@@ -446,9 +617,13 @@ def run(args):
         need(rc == 0 and len(raw) <= 128 * 1024, 'qualification or transport failed; inspect private evidence')
         result = json.loads(raw)
         need(result.get('result') == 'pass' and result.get('operation') == config['operation']
-             and result.get('helper_sha256') == helper_sha, 'result binding differs')
+             and result.get('helper_sha256') == helper_sha
+             and result.get('prior_failure_sha256') == args.prior_failure_sha256, 'result binding differs')
+        need(prior_failure(lab.sec, args.prior_failure_sha256, lab.state['uuid']) == prior,
+             'original evidence changed')
         receipt = {'result': 'pass', 'operation': config['operation'], 'helper_sha256': helper_sha,
-                   'payload_sha256': sha(body), 'guest_result_sha256': sha(raw), 'controller_revision': manifest['revision']}
+                   'payload_sha256': sha(body), 'guest_result_sha256': sha(raw), 'controller_revision': manifest['revision'],
+                   'attempt': args.attempt, 'prior_failure_sha256': args.prior_failure_sha256}
         (directory / 'complete.json').write_text(json.dumps(receipt, sort_keys=True) + '\n')
         print(json.dumps(receipt, sort_keys=True))
 
@@ -457,6 +632,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--scope', type=Path, required=True)
     parser.add_argument('--bind', required=True)
+    parser.add_argument('--attempt', required=True, help='new one-shot private evidence label; original attempt remains intact')
+    parser.add_argument('--prior-failure-sha256', required=True, help='SHA-256 of original frozen4f17 pre-fixture guest result')
     try:
         run(parser.parse_args())
         return 0
