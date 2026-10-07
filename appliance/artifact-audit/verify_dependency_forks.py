@@ -42,7 +42,7 @@ FORKS = {
         'tree_sha256': 'c8b3ad195cfb132f9f43c6ca9124bd8539474af672cb5025d4389ccaf8819485',
         'files': 161,
         'modified': {'db.go', 'value.go', 'memtable.go', 'table/table.go', 'logger.go', 'levels.go'},
-        'added': {'table/culvert_fileid_test.go', 'culvert_flushstop_test.go'},
+        'added': {'table/culvert_fileid_test.go', 'culvert_flushstop_test.go', 'culvert_dropall_vptr_test.go'},
         'markers': {
             'db.go': [b'CULVERT PATCH (F-DISK-1', b'next, err := db.newMemTable()', b'db.mt = next', b'next.DecrRef()',
                       b'case <-lc.HasBeenClosed():', b'db.keepUnflushed(mt)', b'memtable not flushed (kept in its WAL',

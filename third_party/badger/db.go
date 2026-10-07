@@ -1868,19 +1868,25 @@ func (db *DB) dropAll() (func(), error) {
 	db.lock.Lock()
 	defer db.lock.Unlock()
 
-	// CULVERT PATCH (F-DISK-1): FREE before allocating. DropAll is how an
-	// operator recovers a disk the store has filled, and the replacement
-	// memtable's WAL and the new value log are preallocated, so allocating
-	// them first made DropAll fail with ENOSPC before it had deleted anything
-	// (measured on a full tmpfs, internal/logstore fulldisk_purge_test.go).
-	// The immutable memtables (their WALs), the tables and the value logs go
-	// first; the replacement memtable is allocated last. A failed allocation
-	// still never leaves db.mt nil: the current memtable stays in place, its
-	// entries survive until DropAll is retried, and the error is returned.
-	for _, mt := range db.imm {
-		mt.DecrRef()
+	// CULVERT PATCH (F-DISK-1): DropAll allocates NOTHING before it frees, and
+	// no memtable that can still be read outlives the value log it points into.
+	//
+	// DropAll is how an operator recovers a disk the store has filled. Upstream
+	// allocated a replacement memtable (a preallocated WAL) first, which failed
+	// with ENOSPC on a full disk before anything was freed. Freeing first and
+	// allocating the replacement LAST (the previous form of this patch) fixed
+	// that, but on a failed allocation it kept the current memtable — whose
+	// out-of-line values are pointers into the value log it had just deleted
+	// and recreated from file 1, so a read could return ANOTHER key's bytes.
+	//
+	// So the memtables are emptied in place first (emptyMemTablesForDrop): every
+	// WAL is zeroed and synced, the current one is reused with a fresh IV, and
+	// no file is created. Only then are the tables and value logs deleted. A
+	// failure at any later step leaves nothing that references the value log
+	// outside the tables, and the value log is touched last.
+	if err := db.emptyMemTablesForDrop(); err != nil {
+		return resume, y.Wrapf(err, "cannot empty memtables")
 	}
-	db.imm = db.imm[:0]
 
 	num, err := db.lc.dropTree()
 	if err != nil {
@@ -1894,12 +1900,6 @@ func (db *DB) dropAll() (func(), error) {
 	}
 	db.lc.nextFileID.Store(1)
 
-	next, err := db.newMemTable() // Set it up for future writes.
-	if err != nil {
-		return resume, y.Wrapf(err, "cannot open new memtable")
-	}
-	db.mt.DecrRef()
-	db.mt = next
 	db.opt.Infof("Deleted %d value log files. DropAll done.\n", num)
 	db.blockCache.Clear()
 	db.indexCache.Clear()

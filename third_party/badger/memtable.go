@@ -151,6 +151,68 @@ func (db *DB) newMemTable() (*memTable, error) {
 	return nil, fmt.Errorf("File %s already exists", mt.wal.Fd.Name())
 }
 
+// CULVERT PATCH (F-DISK-1): emptyMemTablesForDrop empties every memtable for
+// DropAll without allocating disk. Each WAL is zeroed and synced before the
+// value log can be deleted, so neither a resumed read nor a replay after a
+// crash can follow a value pointer into a value log that DropAll recreated.
+// The current memtable keeps its (already preallocated) WAL file under a new
+// skiplist; the immutable ones are released, as upstream did.
+//
+// A failure (only a sync error) returns before anything is deleted; WALs
+// emptied by then have lost entries DropAll was about to drop anyway.
+func (db *DB) emptyMemTablesForDrop() error {
+	for _, mt := range db.imm {
+		if mt.wal != nil {
+			if err := mt.wal.emptyInPlace(); err != nil {
+				return err
+			}
+		}
+	}
+	if db.mt.wal != nil {
+		if err := db.mt.wal.emptyInPlace(); err != nil {
+			return err
+		}
+	}
+	for _, mt := range db.imm {
+		mt.DecrRef()
+	}
+	db.imm = db.imm[:0]
+
+	old := db.mt
+	next := &memTable{
+		sl:  skl.NewSkiplist(arenaSize(db.opt)),
+		wal: old.wal,
+		opt: db.opt,
+		buf: &bytes.Buffer{},
+	}
+	// The WAL now belongs to next: its skiplist deletes the file when it is
+	// released, and the old one must not.
+	next.sl.OnClose, old.sl.OnClose = old.sl.OnClose, nil
+	old.DecrRef()
+	db.mt = next
+	return nil
+}
+
+// CULVERT PATCH (F-DISK-1): emptyInPlace discards every entry of a WAL without
+// allocating: the entries are zeroed, the header gets a fresh base IV (the
+// file is written again from the start; reusing the old IV would encrypt new
+// entries under an already-used counter), and the file is synced. The data
+// key is kept, so no key-registry write is needed on a full disk.
+func (lf *logFile) emptyInPlace() error {
+	var iv [12]byte
+	if _, err := cryptorand.Read(iv[:]); err != nil {
+		return y.Wrapf(err, "new base IV for emptied WAL %s", lf.path)
+	}
+	z.ZeroOut(lf.Data, vlogHeaderSize, int(lf.writeAt)+maxHeaderSize)
+	y.AssertTrue(12 == copy(lf.Data[8:vlogHeaderSize], iv[:]))
+	lf.baseIV = append([]byte(nil), iv[:]...)
+	lf.writeAt = vlogHeaderSize
+	if err := lf.Sync(); err != nil {
+		return y.Wrapf(err, "while syncing emptied WAL %s", lf.path)
+	}
+	return nil
+}
+
 func (db *DB) mtFilePath(fid int) string {
 	return filepath.Join(db.opt.Dir, fmt.Sprintf("%05d%s", fid, memFileExt))
 }
