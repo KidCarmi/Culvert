@@ -1630,6 +1630,16 @@ for v in 1 12; do echo \"---vcs\$v\"; [ -e /dev/vcs\$v ] && fold -w \"\${w:-80}\
 echo ---journal; journalctl -b -o short-monotonic --no-pager 2>/dev/null | grep -E 'Console: switching|fbcon|vmwgfx|plymouth|Started getty@tty1|LAB-|Startup finished|lab-console' | head -80" 300 > "$1" 2>&1 || true; }
 # Lines on tty1 that are not the console UI: kernel log, systemd status lines,
 # unit output, the lab's own markers.
+# tty1 must be in text mode once the console owns it (0 = KD_TEXT): a VT left in
+# graphics mode shows a frozen frame however correct the console's output is.
+vkdmode_check() { local m; m="$(sed -n 's/^---fg .* kdmode-tty1 \([0-9]*\).*/\1/p' "$3")"
+  if [[ "$m" == 0 ]]; then vcheck "$1" "$2" pass "tty1 KD_TEXT; $(sed -n 's/^---fg //p' "$3")"
+  else vcheck "$1" "$2" fail "tty1 KD mode '${m:-unread}' (want 0); $(sed -n 's/^---fg //p' "$3")"; fi; }
+# Whether systemd's TTYReset could run for getty@tty1: it skips the whole reset
+# (KD_TEXT included) when it cannot open /dev/console within 1 s.
+vttyreset() { groot "systemctl show getty@tty1 -p TTYReset -p TTYVHangup -p TTYPath; echo ---devconsole; readlink -f /dev/console; cat /sys/class/tty/console/active
+s=\$(date +%s.%N); timeout 5 sh -c ': > /dev/console' 2>&1; rc=\$?; e=\$(date +%s.%N); echo \"open-rc=\$rc seconds=\$(awk -v a=\$s -v b=\$e 'BEGIN{printf \"%.2f\", b-a}')\"
+echo ---getty; journalctl -b -o short-monotonic --no-pager -u getty@tty1 -u plymouth-quit -u plymouth-quit-wait 2>/dev/null | head -40" 120 > "$1" 2>&1 || true; }
 vstray() { sed -n '/^---vcs1$/,/^---vcs12$/p' "$1" | grep -E '^\[ *[0-9]+\.[0-9]+\]|\[ *(OK|FAILED|DEPEND) *\]|LAB-|br-[0-9a-f]{6,}|veth[0-9a-f]|cloud-init|culvert-firstboot:|^ *Start(ing|ed) [A-Za-z].*\.(service|socket|target|mount|timer)' | head -20; }
 vwait_ready() { local deadline=$(( $(date +%s) + ${1:-1800} ))
   until gop status-json > "$WORK/status-json.tmp" 2>/dev/null && [[ " $(recorded_steps "$WORK/status-json.tmp") " == *" complete "* ]] \
@@ -1701,7 +1711,9 @@ OVFENV
   # 37631873993). Recorded, not judged: it is the topology ESXi has.
   vcheck V1 console-topology info "$(sed -n '1,/^---active$/p' "$f" | grep -v '^---' | tr -s ' ' | tr '\n' ';') printk=$(sed -n '/^---printk$/{n;p}' "$f" | tr '\t' ' ')"
   vstray_check V1 tty1-after-first-boot "$f"
-  vcheck V1 vt-state info "$(sed -n 's/^---fg //p' "$f")"
+  vkdmode_check V1 tty1-text-mode "$f"
+  vttyreset "$EV/V1-ttyreset.txt"
+  vcheck V1 getty-tty-reset info "$(grep -E '^(TTYReset|TTYVHangup)=|^open-rc=' "$EV/V1-ttyreset.txt" | tr '\n' ' ')(V1-ttyreset.txt)"
   # V2 maintenance reboot with a slow unit ahead of logins and a failing unit.
   gpriv --timeout 120 > "$EV/V2-units.txt" 2>&1 <<'EOS' || true
 cat > /etc/systemd/system/lab-console-delay.service <<'U'
@@ -1739,7 +1751,7 @@ EOS
   else vcheck V2 splash-window info "the slow unit's start marker never reached hvc0"; fi
   vwait_ready 900 || vcheck V2 maintenance-reboot fail "not ready after the maintenance reboot"
   vmark "ready after maintenance reboot"; sleep 20
-  f="$EV/V2-tty.txt"; vtty "$f"; vstray_check V2 tty1-after-reboot-with-failures "$f"
+  f="$EV/V2-tty.txt"; vtty "$f"; vstray_check V2 tty1-after-reboot-with-failures "$f"; vkdmode_check V2 tty1-text-mode "$f"
   # V3 after boot: kernel messages and /dev/console output while the console UI is up.
   gpriv --timeout 300 > "$EV/V3-writes.txt" 2>&1 <<'EOS' || true
 echo "<6>LAB-KMSG-POSTBOOT info" > /dev/kmsg; echo "<3>LAB-KMSG-POSTBOOT err" > /dev/kmsg
@@ -1782,9 +1794,19 @@ EOS
   gpriv --nowait > "$EV/V4-reboot.txt" 2>&1 <<<'culvert-os-update reboot' || true
   sleep 20; vwait_ready 900 || vcheck V4 maintenance-reboot fail "not ready after the clean maintenance reboot"
   vmark "ready after clean maintenance reboot"; sleep 20
-  f="$EV/V4-tty.txt"; vtty "$f"; vstray_check V4 tty1-after-clean-reboot "$f"
+  f="$EV/V4-tty.txt"; vtty "$f"; vstray_check V4 tty1-after-clean-reboot "$f"; vkdmode_check V4 tty1-text-mode "$f"
   grep -a 'LAB-PROBE' "$WORK/console.log" > "$EV/V4-probe.txt" 2>/dev/null || true
   vcheck V4 vt-probe info "$(wc -l < "$EV/V4-probe.txt") samples; $(sed -n 's/^---fg //p' "$f"); first: $(head -1 "$EV/V4-probe.txt" | tr -d '\r'); last: $(tail -1 "$EV/V4-probe.txt" | tr -d '\r')"
+  # Once plymouth has exited nothing may hold tty1 in graphics mode (the
+  # defect: KD mode 1 from 4.2 s to 37 s with plymouth gone).
+  local stuck; stuck="$(tr -d '\r' < "$EV/V4-probe.txt" | grep -c 'plymouth=down' || true)"
+  if [[ "${stuck:-0}" == 0 ]]; then vcheck V4 no-graphics-after-splash fail "no probe sample after plymouth exited"
+  elif tr -d '\r' < "$EV/V4-probe.txt" | grep 'plymouth=down' | grep -qv 'kdmode=0'; then
+    vcheck V4 no-graphics-after-splash fail "tty1 not in text mode after plymouth exited: $(tr -d '\r' < "$EV/V4-probe.txt" | grep 'plymouth=down' | grep -v 'kdmode=0' | head -2 | tr '\n' ' ')"
+  else vcheck V4 no-graphics-after-splash pass "$stuck samples after plymouth exited, all kdmode=0"; fi
+  # The text splash draws at once (DeviceTimeout=0.1): while plymouth is up
+  # tty1 is in graphics mode only briefly, never for Ubuntu's 8 s wait.
+  vcheck V4 splash-graphics-window info "$(tr -d '\r' < "$EV/V4-probe.txt" | grep 'plymouth=up' | grep -c 'kdmode=1' || true) samples (x0.25 s) in graphics mode while plymouth was up"
   groot 'systemctl disable lab-console-probe.service; rm -f /etc/systemd/system/lab-console-probe.service /usr/local/sbin/lab-console-probe; systemctl daemon-reload' 120 > /dev/null 2>&1 || true
   t3="$(vtime)"; vcapture_stop
   vsheet V1-first-boot 0 "$t1"; vsheet V2-V3-reboot-esc-postboot "$t1" "$t2"; vsheet V4-clean-reboot "$t2" "$t3"
