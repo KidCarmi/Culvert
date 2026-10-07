@@ -9,6 +9,8 @@ package main
 // drops a job, turns a red harness into a green gate silently.
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -223,10 +225,59 @@ func TestClamAVSidecar_DerivesFromThePinnedOfficialImage(t *testing.T) {
 	if len(froms) != 1 || string(froms[0][1]) != "docker.io/clamav/clamav@"+string(pin[1]) {
 		t.Fatalf("the sidecar must have exactly one FROM, the pinned official digest %s; got %q", pin[1], froms)
 	}
-	// One package, pinned to an exact version: a floating `apk upgrade` would
-	// make the evidence describe an image nobody can rebuild.
-	if !strings.Contains(string(df), "apk add --no-cache --upgrade 'pcre2=10.49-r0'") {
-		t.Fatal("the sidecar must upgrade exactly pcre2 to a pinned version")
+	// Exact versions only: a floating `apk upgrade` would make the evidence
+	// describe an image nobody can rebuild. pcre2 (CVE-2026-103111), zlib
+	// (CVE-2026-85091) and nghttp2-libs (CVE-2026-58055), each also asserted
+	// inside the build.
+	if !strings.Contains(string(df), "apk add --no-cache --upgrade 'pcre2=10.49-r0' 'zlib=1.3.2-r1' 'nghttp2-libs=1.70.0-r0'") {
+		t.Fatal("the sidecar must upgrade exactly pcre2, zlib and nghttp2-libs, each to a pinned version")
+	}
+	for _, want := range []string{"= 'pcre2-10.49-r0'", "= 'zlib-1.3.2-r1'", "= 'nghttp2-libs-1.70.0-r0'"} {
+		if !strings.Contains(string(df), want) {
+			t.Errorf("the sidecar build must assert the installed version %s", want)
+		}
+	}
+}
+
+// sidecarTagByContent maps each appliance/clamav/Dockerfile content (sha256)
+// to the ONE local tag it ships under. Compose builds the sidecar only when
+// its tag is absent locally, so new content under an old tag would never
+// reach an existing appliance. A Dockerfile change therefore fails here until
+// it is given a new, never-used tag in manifest.env and both compose files.
+var sidecarTagByContent = map[string]string{
+	"26a01bef80bc1cb6b6e89354f8b00944f04fa9424902f8af003b4fc016d817ab": "culvert/clamav:1.4.6-pcre2-10.49", // pcre2 only (retired)
+	"822f51c5f6bca0e4162d792932df487507f0f19c8cdef72074df25b91c2dbc1a": "culvert/clamav:1.4.6-culvert.2",   // + zlib, nghttp2-libs
+}
+
+func TestClamAVSidecar_EveryContentChangeGetsANewTag(t *testing.T) {
+	dir := pkgSourceDir()
+	df, err := os.ReadFile(filepath.Join(dir, "appliance", "clamav", "Dockerfile"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := os.ReadFile(filepath.Join(dir, "appliance", "build", "manifest.env"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := regexp.MustCompile(`(?m)^CLAMAV_SIDECAR_REF=(\S+)$`).FindSubmatch(manifest)
+	if m == nil {
+		t.Fatal("manifest.env must pin CLAMAV_SIDECAR_REF")
+	}
+	sum := sha256.Sum256(df)
+	h := hex.EncodeToString(sum[:])
+	want, ok := sidecarTagByContent[h]
+	if !ok {
+		t.Fatalf("appliance/clamav/Dockerfile changed (sha256 %s): give it a NEW tag (manifest.env CLAMAV_SIDECAR_REF and both compose files) and record the pair in sidecarTagByContent", h)
+	}
+	if string(m[1]) != want {
+		t.Fatalf("CLAMAV_SIDECAR_REF is %q; this Dockerfile content ships as %q", m[1], want)
+	}
+	seen := map[string]bool{}
+	for _, tag := range sidecarTagByContent {
+		if seen[tag] {
+			t.Fatalf("tag %q is recorded for two different sidecar contents", tag)
+		}
+		seen[tag] = true
 	}
 }
 
@@ -244,8 +295,8 @@ func TestClamAVSidecar_EveryShippedFileNamesTheSameLocalTag(t *testing.T) {
 		t.Fatal("manifest.env must pin CLAMAV_SIDECAR_REF")
 	}
 	ref := m[1]
-	if !strings.HasPrefix(ref, "culvert/clamav:") || !strings.Contains(ref, "pcre2-10.49") {
-		t.Fatalf("CLAMAV_SIDECAR_REF %q must be the local-only culvert/clamav tag naming the pcre2 fix", ref)
+	if !strings.HasPrefix(ref, "culvert/clamav:") {
+		t.Fatalf("CLAMAV_SIDECAR_REF %q must be a local-only culvert/clamav tag", ref)
 	}
 	for _, compose := range []string{"docker-compose.yml", "docker-compose.ha.yml"} {
 		c := read(compose)

@@ -327,6 +327,9 @@ func TestBuildOVA_SavesClamAVBeforeLoadingTheCandidate(t *testing.T) {
 	if !strings.Contains(src, `[[ "$CLAMAV_PCRE2" == "pcre2-10.49-r0" ]] || die`) {
 		t.Error("build-ova.sh must refuse a sidecar that does not carry pcre2 10.49 (CVE-2026-103111)")
 	}
+	if !strings.Contains(src, `[[ "$CLAMAV_FIXED" == "nghttp2-libs-1.70.0-r0 zlib-1.3.2-r1 " ]] || die`) {
+		t.Error("build-ova.sh must refuse a sidecar that does not carry zlib 1.3.2-r1 and nghttp2-libs 1.70.0-r0 (CVE-2026-85091, CVE-2026-58055)")
+	}
 	if !strings.Contains(src, `"containerd": E["BI_CONTAINERD"]`) {
 		t.Error("build-info.json must record the build host's containerd")
 	}
