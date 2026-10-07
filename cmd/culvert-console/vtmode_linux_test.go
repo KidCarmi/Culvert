@@ -69,35 +69,9 @@ func TestEnsureTextMode_NonVTIsAnError(t *testing.T) {
 // SSH pty or another user's VT. The call must be a direct statement on fd 0:
 // one hidden in a closure, a nested branch or on another descriptor fails.
 func TestRunTerminal_RepairsTextModeBeforeEveryMenuFrame(t *testing.T) {
-	file, err := parser.ParseFile(token.NewFileSet(), "terminal_linux.go", nil, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var body *ast.BlockStmt
-	for _, decl := range file.Decls {
-		if fn, ok := decl.(*ast.FuncDecl); ok && fn.Name.Name == "runTerminal" {
-			body = fn.Body
-		}
-	}
-	if body == nil {
-		t.Fatal("runTerminal not found")
-	}
-	validate, loop := -1, -1
-	var loopBody *ast.BlockStmt
-	for i, stmt := range body.List {
-		switch s := stmt.(type) {
-		case *ast.IfStmt:
-			if init, ok := s.Init.(*ast.AssignStmt); ok && len(init.Rhs) == 1 && isCallTo(init.Rhs[0], "validateTerminal") {
-				validate = i
-			}
-		case *ast.ForStmt:
-			if loop < 0 {
-				loop, loopBody = i, s.Body
-			}
-		}
-	}
-	if validate < 0 || loop < 0 || validate >= loop || len(loopBody.List) < 2 {
-		t.Fatalf("want validateTerminal before the menu loop, got %d %d", validate, loop)
+	validate, loopBody := runTerminalShape(t)
+	if validate < 0 || loopBody == nil || len(loopBody.List) < 2 {
+		t.Fatal("want validateTerminal before the menu loop")
 	}
 	guard, ok := loopBody.List[0].(*ast.IfStmt)
 	if !ok || guard.Init != nil || guard.Else != nil {
@@ -106,29 +80,56 @@ func TestRunTerminal_RepairsTextModeBeforeEveryMenuFrame(t *testing.T) {
 	if u, ok := guard.Cond.(*ast.UnaryExpr); !ok || u.Op != token.NOT || !identNamed(u.X, "admin") {
 		t.Fatal("the text-mode repair must be gated on !admin")
 	}
-	direct := false
-	for _, stmt := range guard.Body.List {
-		var call ast.Expr
-		switch s := stmt.(type) {
-		case *ast.ExprStmt:
-			call = s.X
-		case *ast.AssignStmt:
-			if len(s.Rhs) == 1 {
-				call = s.Rhs[0]
-			}
-		}
-		if c, ok := call.(*ast.CallExpr); ok && isCallTo(c, "ensureTextMode") && len(c.Args) == 1 {
-			if lit, ok := c.Args[0].(*ast.BasicLit); ok && lit.Kind == token.INT && lit.Value == "0" {
-				direct = true
-			}
-		}
-	}
-	if !direct {
+	if !hasDirectRepair(guard.Body) {
 		t.Fatal("ensureTextMode(0) must be a direct statement in the !admin branch")
 	}
 	if !isCallTo(firstCall(loopBody.List[1]), "menu") {
 		t.Fatal("the repair must come immediately before the menu frame")
 	}
+}
+
+// runTerminalShape returns the index of the validateTerminal check in
+// runTerminal (-1 if absent) and the body of the first loop after it.
+func runTerminalShape(t *testing.T) (validate int, loopBody *ast.BlockStmt) {
+	t.Helper()
+	file, err := parser.ParseFile(token.NewFileSet(), "terminal_linux.go", nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	validate = -1
+	for _, decl := range file.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if !ok || fn.Name.Name != "runTerminal" {
+			continue
+		}
+		for i, stmt := range fn.Body.List {
+			if s, ok := stmt.(*ast.IfStmt); ok && validate < 0 && isCallTo(firstCall(s.Init), "validateTerminal") {
+				validate = i
+			}
+			if s, ok := stmt.(*ast.ForStmt); ok && validate >= 0 && loopBody == nil {
+				loopBody = s.Body
+			}
+		}
+	}
+	return validate, loopBody
+}
+
+// hasDirectRepair reports a top-level `ensureTextMode(0)` statement.
+func hasDirectRepair(body *ast.BlockStmt) bool {
+	for _, stmt := range body.List {
+		call := firstCall(stmt)
+		if es, ok := stmt.(*ast.ExprStmt); ok {
+			call = es.X
+		}
+		c, ok := call.(*ast.CallExpr)
+		if !ok || !isCallTo(c, "ensureTextMode") || len(c.Args) != 1 {
+			continue
+		}
+		if lit, ok := c.Args[0].(*ast.BasicLit); ok && lit.Kind == token.INT && lit.Value == "0" {
+			return true
+		}
+	}
+	return false
 }
 
 func identNamed(e ast.Expr, name string) bool {
