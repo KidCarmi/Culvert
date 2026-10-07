@@ -741,6 +741,17 @@ jobs:
             [ "$rc" != 0 ] || { echo "::error::pre-fix candidate passed; the defect did not reproduce"; exit 1; }
             grep -q 'SAML callback: 403' "$ev/replay.log" || { echo "::error::pre-fix failure is not the callback 403"; exit 1; }
           fi
+      # Does a REAL browser ever present ps_session to the proxy on ordinary
+      # traffic? The replay above attaches the cookie by hand; this asks the
+      # browser. Same playwright pin as frontend/package.json.
+      - name: "Real Chromium: where does the browser send the portal session cookie?"
+        if: matrix.expect == 'pass'
+        run: |
+          set -euo pipefail
+          d="$RUNNER_TEMP/pw"; mkdir -p "$d"; cd "$d"
+          npm init -y >/dev/null && npm install --no-audit --no-fund playwright@1.62.1 >/dev/null
+          npx playwright install --with-deps chromium >/dev/null
+          NODE_PATH="$d/node_modules" node "$GITHUB_WORKSPACE/lab/test/e2e/appliance/lab/browser/sso-cookie-scope.js" | tee "$RUNNER_TEMP/evidence/sso-cookie-scope.txt"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
