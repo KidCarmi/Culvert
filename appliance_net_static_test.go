@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -41,8 +42,14 @@ func newNetHarnessFailing(t *testing.T, generateFails, applyFails bool) *netHarn
 		apply = candidateInstalled
 	}
 	for name, body := range map[string]string{
-		"id":      "echo 0",
-		"ip":      `case "$*" in *route*) echo "default via 10.0.10.1 dev ens192";; *) echo "ens192 UP";; esac`,
+		"id": "echo 0",
+		// The first route query is the interface detection; later ones are
+		// the settle wait, which sees no default route until route_after
+		// queries have passed (a DHCP lease arriving after netplan apply).
+		"ip": `case "$*" in *route*) n=$(( $(cat "` + filepath.Join(d, "route_calls") + `" 2>/dev/null || echo 0) + 1 )); echo "$n" > "` + filepath.Join(d, "route_calls") + `"
+  after=$(cat "` + filepath.Join(d, "route_after") + `" 2>/dev/null || echo 0)
+  if [ "$n" -eq 1 ] || [ "$n" -gt "$after" ]; then echo "default via 10.0.10.1 dev ens192"; fi;;
+*) echo "ens192 UP";; esac`,
 		"netplan": `echo "$1" >> "` + h.nl + `"; if [ "$1" = generate ]; then ` + gen + `; fi; if [ "$1" = apply ]; then ` + apply + `; fi`,
 	} {
 		p := filepath.Join(h.stubs, name)
@@ -61,7 +68,7 @@ func (h *netHarness) run(args ...string) (out string, code int) {
 	abs, _ := filepath.Abs(filepath.Join(pkgSourceDir(), "appliance", "provision", "culvert-net"))
 	// #nosec G204 -- program is the literal "bash"; abs is the checked-in script's path.
 	c := exec.CommandContext(h.t.Context(), "bash", append([]string{abs}, args...)...)
-	c.Env = append(os.Environ(), "PATH="+h.stubs+":"+os.Getenv("PATH"), "CULVERT_NET_NETPLAN_FILE="+h.np)
+	c.Env = append(os.Environ(), "PATH="+h.stubs+":"+os.Getenv("PATH"), "CULVERT_NET_NETPLAN_FILE="+h.np, "CULVERT_NET_SETTLE_SECS=3")
 	b, _ := c.CombinedOutput()
 	return string(b), c.ProcessState.ExitCode()
 }
@@ -180,5 +187,74 @@ func TestCulvertNetStatic_RestoresThePreviousFileWhenApplyFails(t *testing.T) {
 	}
 	if _, err := os.Stat(h2.np); !os.IsNotExist(err) {
 		t.Fatal("an unappliable configuration was left in place with no previous file to restore")
+	}
+}
+
+// routeAfter withholds the default route from the settle wait for n route
+// queries (two per poll: IPv4 and IPv6).
+func (h *netHarness) routeAfter(n int) {
+	h.t.Helper()
+	if err := os.WriteFile(filepath.Join(h.dir, "route_after"), []byte(strconv.Itoa(n)), 0o600); err != nil {
+		h.t.Fatal(err)
+	}
+}
+
+func (h *netHarness) routeQueries() int {
+	b, _ := os.ReadFile(filepath.Join(h.dir, "route_calls"))
+	n, _ := strconv.Atoi(strings.TrimSpace(string(b)))
+	return n
+}
+
+// ESXi qualification of #1528: after a failed apply the rollback said
+// "restored" while the interface had no default route yet (netplan apply
+// returns before the DHCP lease). It now waits for the route, and says so
+// when it does not come back.
+func TestCulvertNet_RollbackReportsRestoredOnlyOnceTheRouteIsBack(t *testing.T) {
+	h := newNetHarnessFailing(t, false, true)
+	h.routeAfter(6)
+	out, code := h.run("static", "10.0.10.9/24", "10.0.10.1")
+	if code != 1 || !strings.Contains(out, "previous network configuration was restored (default via 10.0.10.1 dev ens192)") {
+		t.Fatalf("exit %d:\n%s", code, out)
+	}
+	if q := h.routeQueries(); q <= 6 {
+		t.Fatalf("restored was reported after %d route queries; the route only returns after 6", q)
+	}
+
+	h2 := newNetHarnessFailing(t, false, true)
+	h2.routeAfter(1 << 20)
+	out, code = h2.run("static", "10.0.10.9/24", "10.0.10.1")
+	if code != 1 || strings.Contains(out, "was restored") || !strings.Contains(out, "re-applied, but ens192 has no default route after 3s") {
+		t.Fatalf("a rollback that never converged was reported as restored (exit %d):\n%s", code, out)
+	}
+}
+
+func TestCulvertNet_DHCPReportsRestoredOnlyWithALease(t *testing.T) {
+	h := newNetHarness(t, false)
+	h.routeAfter(4)
+	out, code := h.run("dhcp")
+	if code != 0 || !strings.Contains(out, "DHCP restored on ens192 (default via 10.0.10.1 dev ens192)") || h.routeQueries() <= 4 {
+		t.Fatalf("exit %d after %d route queries:\n%s", code, h.routeQueries(), out)
+	}
+
+	h2 := newNetHarness(t, false)
+	h2.routeAfter(1 << 20)
+	out, code = h2.run("dhcp")
+	if code != 1 || strings.Contains(out, "DHCP restored") || !strings.Contains(out, "no default route after 3s") {
+		t.Fatalf("exit %d:\n%s", code, out)
+	}
+}
+
+// A static configuration that applied stays applied, so first boot (which
+// reads a failure as "staying on DHCP") still gets exit 0 — with a warning
+// rather than a claim.
+func TestCulvertNetStatic_AppliedWithoutARouteWarnsButSucceeds(t *testing.T) {
+	h := newNetHarness(t, false)
+	h.routeAfter(1 << 20)
+	out, code := h.run("static", "10.0.10.9/24", "10.0.10.1")
+	if code != 0 || !strings.Contains(out, "applied on ens192, but it has no default route after 3s") {
+		t.Fatalf("exit %d:\n%s", code, out)
+	}
+	if b, _ := os.ReadFile(h.np); !strings.Contains(string(b), "10.0.10.9/24") {
+		t.Fatalf("the applied static file was not kept:\n%s", b)
 	}
 }

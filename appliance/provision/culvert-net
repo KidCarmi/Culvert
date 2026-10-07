@@ -60,6 +60,23 @@ valid_ip()   { [[ -n "$(ip_family "$1")" ]]; }
 # A search domain is interpolated into YAML: hostname characters only.
 valid_domain() { [[ "$1" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$ ]]; }
 
+# settled — `netplan apply` returns once systemd-networkd has the new
+# configuration, not once the interface is usable again: a DHCP lease and
+# its default route arrive after it (ESXi qualification of #1528 caught the
+# rollback reporting "restored" while the route was still missing). So a
+# restored or re-applied configuration is reported only once the interface
+# carries a default route again, waiting at most CULVERT_NET_SETTLE_SECS.
+SETTLE_SECS="${CULVERT_NET_SETTLE_SECS:-45}"
+default_route() { { ip -4 route show default dev "$iface"; ip -6 route show default dev "$iface"; } 2>/dev/null | head -1; }
+settled() {
+  local deadline=$((SECONDS + SETTLE_SECS))
+  while :; do
+    [[ -n "$(default_route)" ]] && return 0
+    (( SECONDS >= deadline )) && return 1
+    sleep 0.5
+  done
+}
+
 case "$cmd" in
   show)
     echo "interface: $iface"
@@ -70,7 +87,11 @@ case "$cmd" in
     need_root
     rm -f "$NP"
     netplan apply
-    echo "DHCP restored on $iface"
+    if ! settled; then
+      echo "DHCP configured on $iface, but it has no default route after ${SETTLE_SECS}s (no lease yet?); check: culvert-net show" >&2
+      exit 1
+    fi
+    echo "DHCP restored on $iface ($(default_route))"
     ;;
   static)
     need_root
@@ -127,11 +148,21 @@ case "$cmd" in
     if ! netplan apply; then
       restore_prev
       netplan apply || true
-      echo "netplan could not apply the static configuration; the previous network configuration was restored" >&2
+      if settled; then
+        echo "netplan could not apply the static configuration; the previous network configuration was restored ($(default_route))" >&2
+      else
+        echo "netplan could not apply the static configuration; the previous network configuration was re-applied, but $iface has no default route after ${SETTLE_SECS}s; check: culvert-net show" >&2
+      fi
       exit 1
     fi
     [[ -n "$prev" ]] && rm -f "$prev"
-    echo "static address $addr via $gw applied on $iface"
+    # Applied and persisted either way, so the exit stays 0 (first boot reads
+    # a failure here as "refused, staying on DHCP", which would be false).
+    if ! settled; then
+      echo "static address $addr via $gw applied on $iface, but it has no default route after ${SETTLE_SECS}s; check: culvert-net show" >&2
+    else
+      echo "static address $addr via $gw applied on $iface"
+    fi
     ;;
   *) echo "usage: culvert-net show|dhcp|static <addr/prefix> <gateway> [dns,dns] [search,search]" >&2; exit 2 ;;
 esac
