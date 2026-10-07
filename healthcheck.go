@@ -21,6 +21,11 @@ type healthReport struct {
 	ClusterCA     string `json:"cluster_ca" redact:"internal"`
 	SOCKS5        string `json:"socks5" redact:"internal"`
 	AdminUI       string `json:"admin_ui" redact:"internal"`
+	// ControlPlane is the cluster Control Plane gRPC listener's posture
+	// (CHAOS-71). Omitted entirely on a node that never requested a control
+	// plane: an always-present field would make every standalone appliance look
+	// like it has a broken cluster.
+	ControlPlane string `json:"control_plane,omitempty" redact:"internal"`
 	// MCP is the MCP Agent Security Gateway capability state (RISK-027). It is
 	// omitted entirely on a node that never requested MCP: an always-present field
 	// would make every node look like it has the capability.
@@ -98,7 +103,14 @@ func computeHealth() healthReport {
 		// nothing at all. Same fixed-enum discipline as the socks5 field: the
 		// posture is public, the resolution (attempt count, reason class) is
 		// not.
-		AdminUI:           adminUIListenerStatus(),
+		AdminUI: adminUIListenerStatus(),
+		// CHAOS-71. On the PROXY port for the same reason the admin_ui field
+		// is: this is the surface that SURVIVES the fault. Before this, nothing
+		// in the process reported whether the Control Plane listener was alive
+		// — /healthz answered `status: ok, role: leader` and the fencing lease
+		// kept renewing while every Data Plane was frozen on its last snapshot.
+		// Empty (and so omitted) on a node with no control plane configured.
+		ControlPlane:      cpGRPCHealthFieldValue(),
 		ThreatFeedEntries: tfEntries,
 	}
 }
@@ -459,6 +471,14 @@ func computeReadiness() (report readinessReport, code int) {
 	// management plane, turning a management outage into the traffic outage
 	// this row exists to make visible. Strict callers opt in via ?strict=1.
 	appendAdminUIReadinessCheck(checks)
+
+	// 9b''. Control Plane gRPC listener (CHAOS-71) — REPORT-ONLY, absent
+	// entirely when no control plane is configured. Same reasoning as the
+	// admin_ui row one line above: a CP node whose cluster listener cannot bind
+	// is still proxying, so gating the default verdict would turn a
+	// fleet-management outage into a traffic outage. Strict callers opt in via
+	// ?strict=1.
+	appendCPGRPCReadinessCheck(checks)
 
 	// 9c. MCP gateway (RISK-027) — REPORT-ONLY, absent entirely when MCP was never
 	// requested. It must NEVER gate the default verdict: MCP is an optional,

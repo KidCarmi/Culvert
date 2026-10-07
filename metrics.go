@@ -1364,6 +1364,70 @@ culvert_admin_ui_listen_backoff_seconds %g
 		)
 	}
 
+	// CHAOS-71: the cluster Control Plane gRPC listener. Emitted ONLY when a
+	// control plane was configured — the socks5/cluster_ca/dns rule, and it
+	// matters here as much as anywhere: `culvert_cp_grpc_up 0` on a standalone
+	// appliance that never asked for a control plane is indistinguishable from
+	// a CP whose listener is dead, and the documented paging rule is `== 0`.
+	//
+	// Before this block there was no CP-listener series at all. /metrics
+	// carried culvert_cluster_ratelimit_* — the DP-side view of the link — and
+	// nothing about the CP's own listener, so a dark control plane was
+	// invisible to every scrape while /healthz still answered `status: ok` and
+	// the fencing lease kept renewing against its own standby.
+	//
+	// The alertable pair is `culvert_cp_grpc_unavailable == 1` together with
+	// write_authority on /healthz: that combination is exactly "this node holds
+	// the fencing lease and cannot be reached", which is the condition no
+	// surface could express before. culvert_cp_grpc_serve_exits_total is kept
+	// separate from the bind failures because the two answer different
+	// questions — a bind failure says the socket could not be taken, a serve
+	// exit says a working socket went away.
+	//
+	// Every value is a plain total or a 0/1 gauge: /metrics is unauthenticated
+	// on the proxy port, so no bind address, reason class or error text may
+	// appear, and nothing here is a label.
+	if cp := cpGRPCListenerState(); cp.Configured {
+		cpUp, cpUnavailable := 0, 0
+		if cp.Serving {
+			cpUp = 1
+		}
+		if cp.Unavailable {
+			cpUnavailable = 1
+		}
+		_, _ = fmt.Fprintf(w, `# HELP culvert_cp_grpc_up 1 while the Control Plane gRPC listener is accepting connections; 0 while it is not
+# TYPE culvert_cp_grpc_up gauge
+culvert_cp_grpc_up %d
+
+# HELP culvert_cp_grpc_unavailable 1 while the Control Plane gRPC listener has been unusable for longer than the unavailability threshold
+# TYPE culvert_cp_grpc_unavailable gauge
+culvert_cp_grpc_unavailable %d
+
+# HELP culvert_cp_grpc_bind_failures_total Control Plane gRPC listener bind failures since startup
+# TYPE culvert_cp_grpc_bind_failures_total counter
+culvert_cp_grpc_bind_failures_total %d
+
+# HELP culvert_cp_grpc_binds_total Successful Control Plane gRPC listener binds since startup
+# TYPE culvert_cp_grpc_binds_total counter
+culvert_cp_grpc_binds_total %d
+
+# HELP culvert_cp_grpc_serve_exits_total Times a bound Control Plane gRPC listener stopped serving without a shutdown being requested
+# TYPE culvert_cp_grpc_serve_exits_total counter
+culvert_cp_grpc_serve_exits_total %d
+
+# HELP culvert_cp_grpc_bind_backoff_seconds Current Control Plane gRPC rebind backoff; 0 while the listener is serving
+# TYPE culvert_cp_grpc_bind_backoff_seconds gauge
+culvert_cp_grpc_bind_backoff_seconds %g
+`,
+			cpUp,
+			cpUnavailable,
+			cp.Total,
+			cp.Binds,
+			cp.ServeExits,
+			cp.Backoff.Seconds(),
+		)
+	}
+
 	// CHAOS-64: destination-host DNS resolution health. Emitted ONLY once this
 	// node has actually resolved something — resolution runs on the policy path
 	// only for a DestCountry rule on a node with a GeoIP database, and a block

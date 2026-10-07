@@ -1160,6 +1160,13 @@ func apiHealthz(w http.ResponseWriter, r *http.Request) {
 	// If HA is not enabled, this node is standalone — always healthy.
 	if !status.Enabled {
 		resp := map[string]any{"status": "ok", "role": "standalone", "leader": true, "write_authority": true, "version": version}
+		// CHAOS-71: a Control Plane does NOT require HA to be enabled, so the
+		// listener posture belongs on this branch too. A single-CP fleet (no
+		// standby, no fencing lease) is the common small deployment, and
+		// omitting the field here would leave exactly that topology with no
+		// /healthz signal for a dark control plane. No-op when no CP is
+		// configured.
+		cpGRPCHealthzFields(resp)
 		addRequestLogHealth(resp)
 		jsonOK(w, resp)
 		return
@@ -1177,6 +1184,13 @@ func apiHealthz(w http.ResponseWriter, r *http.Request) {
 			"version": version,
 		}
 		addLeaseHealth(resp, globalHA)
+		// CHAOS-71: a leader whose Control Plane gRPC listener is dark used to
+		// answer this endpoint byte-identically to a healthy one, while the
+		// fencing lease kept renewing against its own standby. The HTTP status
+		// and the `status` string are deliberately UNCHANGED — see
+		// cpGRPCHealthzFields for why that is a recorded owner posture
+		// decision rather than an oversight.
+		cpGRPCHealthzFields(resp)
 		addRequestLogHealth(resp)
 		jsonOK(w, resp)
 		return
