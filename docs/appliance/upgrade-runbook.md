@@ -120,14 +120,33 @@ State written by a newer build may be ignored or refused by an older one.
 ## Host components
 
 An application upgrade replaces the container image only. The compose
-files, the maintenance agent binary/unit/sudoers and `.env` are host
-components installed by `scripts/install.sh` from the image's
-`/app/deploy` bundle. Compatibility rule for the pilot: **the agent and
-compose files are forward-compatible within the supported transition
-window** (the agent's API and sudoers allowlist did not change across the
-qualified releases; the compose `command:` flags are checked by the
-installer's preflight). When a release note says host components changed,
-re-run `scripts/install.sh` (idempotent: re-extracts the bundle, upgrades
-the agent binary/unit/sudoers in place, never overwrites `.env` secrets).
+files, the ClamAV sidecar's build context, the maintenance agent
+binary/unit/sudoers and `.env` are host components installed by
+`scripts/install.sh` from the image's `/app/deploy` bundle. Compatibility
+rule for the pilot: **the agent and compose files are forward-compatible
+within the supported transition window** (the agent's API and sudoers
+allowlist did not change across the qualified releases; the compose
+`command:` flags are checked by the installer's preflight).
+
+When a release note says host components changed (for example a new ClamAV
+sidecar tag carrying a package security fix), adopt them after the upgrade:
+
+* appliance (OVA): `sudo culvert-firstboot --repair-agent`
+* quick-start host: re-run `scripts/install.sh`
+
+Both run the installer, which compares the running image's bundle with the
+installed files. When they differ it builds a new sidecar tag **first**
+(Docker Hub and the Alpine package CDN must be reachable, or the image
+loaded), then replaces the files, compose file last, keeps the previous one
+as `docker-compose.yml.pre-refresh`, and recreates the changed services; the
+ClamAV sidecar reloads its signatures, so scanning is unavailable for a
+minute or two (`scanning-outage-posture.md`). If the build or a write fails,
+nothing is replaced, the stack keeps running its previous compose file and
+sidecar, and the command exits non-zero (`install.sh` exit 3) — the compose
+file never names an image the host cannot produce. `.env` secrets are never
+overwritten. A source checkout used as the stack directory is never
+refreshed from the image. Lab evidence: appliance-lab.sh `adoption`
+(A2 offline, A3 online, A4 after a maintenance reboot).
+
 The agent socket mount (`docker-compose.maint-agent.yml`) survives
 container recreation because the directory, not the socket file, is mounted.

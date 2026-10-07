@@ -1208,36 +1208,39 @@ copy_bundle_file() {
   sudo install -m "$3" -o "$(id -un)" "$1" "$2"
 }
 
-# extract_deploy_bundle — pull the deployment files out of the pinned proxy
-# image's /app/deploy bundle into $INSTALL_DIR: the compose files and the
-# maintenance-agent packaging/ tree (installer, config example, systemd unit,
-# sudoers template). The agent BINARY in the bundle is deliberately NOT left
-# in the stack dir — install_maint_agent extracts it into a throwaway temp dir
-# when it needs it (extract_bundled_maint_bin). Fails cleanly (nothing written)
-# when the image predates the bundle, so the caller can fall back to git.
-extract_deploy_bundle() {
-  local tmp cid
-  tmp="$(mktemp -d)" || return 1
-  cid="$(sudo docker create "$PINNED_TAG" 2>/dev/null)" || { rm -rf "$tmp"; return 1; }
+# stage_deploy_bundle DIR — copy the pinned proxy image's /app/deploy bundle
+# into DIR (a fresh temp dir) and check it carries what a deployment needs.
+# Returns 1 when the image has no usable bundle (an older release). Writes
+# nothing under $INSTALL_DIR.
+stage_deploy_bundle() {
+  local tmp="$1" cid
+  cid="$(sudo docker create "$PINNED_TAG" 2>/dev/null)" || return 1
   if ! sudo docker cp "$cid:/app/deploy/." "$tmp/" >/dev/null 2>&1; then
     sudo docker rm -f "$cid" >/dev/null 2>&1 || true
-    sudo rm -rf "$tmp"
     return 1
   fi
   sudo docker rm -f "$cid" >/dev/null 2>&1 || true
-  if [[ ! -f "$tmp/docker-compose.yml" || ! -f "$tmp/docker-compose.maint-agent.yml" \
-     || ! -f "$tmp/packaging/culvert-maint/install.sh" ]]; then
-    sudo rm -rf "$tmp"
+  [[ -f "$tmp/docker-compose.yml" && -f "$tmp/docker-compose.maint-agent.yml" \
+     && -f "$tmp/packaging/culvert-maint/install.sh" ]] || return 1
+  # The ClamAV sidecar build context is required exactly when this bundle's
+  # compose file names it.
+  if ! sudo test -f "$tmp/appliance/clamav/Dockerfile" \
+     && sudo grep -q 'context: ./appliance/clamav' "$tmp/docker-compose.yml"; then
+    echo "deploy bundle names the ClamAV build context but does not carry appliance/clamav/Dockerfile" >&2
     return 1
   fi
-  # Install order matters for crash-safety: the packaging/ tree and the override
-  # compose file go in FIRST, and docker-compose.yml — the re-extraction sentinel
-  # that §6b and §5's reuse check key on — goes in LAST. So a copy that fails
-  # partway leaves NO sentinel (or we remove it below), and the next run
-  # re-extracts instead of treating an incomplete tree as a finished deployment.
-  # Every copy is checked; the previous version ignored the loop's failures and
-  # unconditionally returned 0, which permanently stranded a partial extract.
-  local ok=1 f rel
+  return 0
+}
+
+# install_staged_bundle DIR — install a staged bundle into $INSTALL_DIR: the
+# packaging/ tree, the override compose file and the ClamAV build context
+# FIRST, docker-compose.yml — the re-extraction sentinel that §6b and §5's
+# reuse check key on — LAST. Every copy is checked; returns 2 when a write
+# failed (disk full / permissions). The agent BINARY in the bundle is
+# deliberately NOT installed here — install_maint_agent extracts it into a
+# throwaway temp dir when it needs it (extract_bundled_maint_bin).
+install_staged_bundle() {
+  local tmp="$1" ok=1 f rel
   while IFS= read -r -d '' f; do
     rel="${f#"$tmp"/}"
     sudo mkdir -p "$INSTALL_DIR/$(dirname "$rel")" || { ok=0; break; }
@@ -1250,33 +1253,101 @@ extract_deploy_bundle() {
     copy_bundle_file "$tmp/docker-compose.maint-agent.yml" \
       "$INSTALL_DIR/docker-compose.maint-agent.yml" 0644 || ok=0
   fi
-  # The ClamAV sidecar build context (pinned official image + pcre2 fix):
-  # compose builds the local-only sidecar tag from it when the tag is absent.
-  # Required exactly when this bundle's compose file names that context.
-  if [[ "$ok" -eq 1 ]]; then
-    if sudo test -f "$tmp/appliance/clamav/Dockerfile"; then
-      sudo mkdir -p "$INSTALL_DIR/appliance/clamav" \
-        && copy_bundle_file "$tmp/appliance/clamav/Dockerfile" "$INSTALL_DIR/appliance/clamav/Dockerfile" 0644 || ok=0
-    elif sudo grep -q 'context: ./appliance/clamav' "$tmp/docker-compose.yml"; then
-      echo "deploy bundle names the ClamAV build context but does not carry appliance/clamav/Dockerfile" >&2
-      ok=0
-    fi
+  if [[ "$ok" -eq 1 ]] && sudo test -f "$tmp/appliance/clamav/Dockerfile"; then
+    sudo mkdir -p "$INSTALL_DIR/appliance/clamav" \
+      && copy_bundle_file "$tmp/appliance/clamav/Dockerfile" "$INSTALL_DIR/appliance/clamav/Dockerfile" 0644 || ok=0
   fi
   if [[ "$ok" -eq 1 ]]; then
-    # LAST — the sentinel. Only now is the deployment considered complete.
     copy_bundle_file "$tmp/docker-compose.yml" "$INSTALL_DIR/docker-compose.yml" 0644 || ok=0
   fi
+  [[ "$ok" -eq 1 ]] || return 2
+  return 0
+}
+
+# extract_deploy_bundle — install the pinned image's bundle into an install
+# dir that has no (complete) deployment yet. Returns 1 = no bundle in the
+# image (older release; nothing written), 2 = the bundle was present but
+# writing it failed. On 2 the sentinel is removed so a partial extract can't be
+# mistaken for a complete one on the next run (which re-extracts).
+extract_deploy_bundle() {
+  local tmp rc=0
+  tmp="$(mktemp -d)" || return 1
+  if ! stage_deploy_bundle "$tmp"; then
+    sudo rm -rf "$tmp"
+    return 1
+  fi
+  install_staged_bundle "$tmp" || rc=$?
   sudo rm -rf "$tmp"
-  if [[ "$ok" -ne 1 ]]; then
-    # Remove the sentinel so a partial extract can't be mistaken for a complete
-    # one on the next run (it may not have been written, but be certain).
+  if [[ "$rc" -ne 0 ]]; then
     sudo rm -f "$INSTALL_DIR/docker-compose.yml" 2>/dev/null || true
-    # Return 2 = the bundle WAS present but writing it into $INSTALL_DIR failed
-    # (disk full / permissions), distinct from return 1 = no bundle in the image
-    # (older release). The caller errors directly on 2 instead of attempting a
-    # git clone that would fail the same way.
     return 2
   fi
+  return 0
+}
+
+# sidecar_image_of COMPOSE_FILE — the locally built ClamAV sidecar tag the
+# compose file names (empty when it names none).
+sidecar_image_of() {
+  sudo sed -n 's/^[[:space:]]*image:[[:space:]]*\(culvert\/clamav:[^[:space:]#]*\).*/\1/p' "$1" | head -n 1
+}
+
+# staged_bundle_differs DIR — true when any host component the staged bundle
+# would install is missing from $INSTALL_DIR or differs from it.
+staged_bundle_differs() {
+  local tmp="$1" f rel
+  while IFS= read -r -d '' f; do
+    rel="${f#"$tmp"/}"
+    case "$rel" in
+      bin/*) continue ;;  # the agent binary is install_maint_agent's, not a stack file
+    esac
+    sudo cmp -s "$f" "$INSTALL_DIR/$rel" || return 0
+  done < <(sudo find "$tmp" -type f -print0)
+  return 1
+}
+
+# refresh_deploy_bundle — a re-run over an existing deployment adopts the
+# pinned image's host components (compose files, agent packaging, ClamAV
+# build context). An application upgrade replaces only the proxy image, so this
+# is how a changed sidecar (e.g. a package security fix, which always carries a
+# new tag) reaches an installed appliance. A new sidecar tag is BUILT before
+# any file is replaced: the compose file must never name an image this host
+# cannot produce, or the next `compose up` (an agent upgrade, a restart) would
+# fail. Returns 0 = current or refreshed, 3 = not refreshed (nothing replaced;
+# the stack keeps its previous components), 1 = the image has no bundle.
+refresh_deploy_bundle() {
+  local tmp tag rc=0
+  tmp="$(mktemp -d)" || return 3
+  if ! stage_deploy_bundle "$tmp"; then
+    sudo rm -rf "$tmp"
+    return 1
+  fi
+  if ! staged_bundle_differs "$tmp"; then
+    sudo rm -rf "$tmp"
+    info "Host components already match $PINNED_TAG's deploy bundle."
+    return 0
+  fi
+  tag="$(sidecar_image_of "$tmp/docker-compose.yml")"
+  if [[ -n "$tag" ]] && ! sudo docker image inspect "$tag" >/dev/null 2>&1; then
+    info "Building the ClamAV sidecar $tag from the new bundle (needs Docker Hub and the Alpine package CDN)..."
+    if ! sudo docker build -t "$tag" "$tmp/appliance/clamav"; then
+      sudo rm -rf "$tmp"
+      warn "Could not build $tag. Host components were NOT refreshed; the stack keeps its"
+      warn "previous compose file and sidecar. Restore egress to Docker Hub and the Alpine"
+      warn "package CDN (or load the image), then re-run."
+      return 3
+    fi
+  fi
+  sudo cp -a "$INSTALL_DIR/docker-compose.yml" "$INSTALL_DIR/docker-compose.yml.pre-refresh" || { sudo rm -rf "$tmp"; return 3; }
+  install_staged_bundle "$tmp" || rc=$?
+  sudo rm -rf "$tmp"
+  if [[ "$rc" -ne 0 ]]; then
+    # Keep a compose file that names images this host has: put the previous one back.
+    sudo cp -a "$INSTALL_DIR/docker-compose.yml.pre-refresh" "$INSTALL_DIR/docker-compose.yml" || true
+    warn "Writing the refreshed host components to $INSTALL_DIR failed (disk full or permissions);"
+    warn "the previous compose file was put back. Free space / fix permissions and re-run."
+    return 3
+  fi
+  info "Host components refreshed from $PINNED_TAG (previous compose: docker-compose.yml.pre-refresh)."
   return 0
 }
 
@@ -1327,6 +1398,17 @@ if [[ ! -f "$INSTALL_DIR/docker-compose.yml" \
   current signed release instead and re-run:
     CULVERT_PROXY_SEED_REF=$PROXY_REPO:<X.Y.Z> sudo bash scripts/install.sh"
   fi
+elif [[ -e "$INSTALL_DIR/.git" || -f "$INSTALL_DIR/go.mod" ]]; then
+  info "Source checkout at $INSTALL_DIR: its own compose files are used (not refreshed from the image)."
+else
+  step "Refreshing host components"
+  refresh_rc=0
+  refresh_deploy_bundle || refresh_rc=$?
+  case "$refresh_rc" in
+    0) ;;
+    1) warn "$PINNED_TAG carries no deploy bundle; host components left as installed." ;;
+    *) HOST_REFRESH_FAILED=1 ;;
+  esac
 fi
 
 ###############################################################################
@@ -2948,4 +3030,12 @@ if [[ "${MAINT_AGENT_INSTALLED:-0}" == "1" ]]; then
     echo "  for custom Docker, userns-remap, rootless, or remote-agent setups."
   fi
   echo ""
+fi
+# A re-run that could not adopt the image's host components (§6b) must not end
+# as a success: the stack still runs on its previous compose file and sidecar.
+if [[ "${HOST_REFRESH_FAILED:-0}" == "1" ]]; then
+  echo -e "${YELLOW}  ⚠ Host components were NOT refreshed (see the warning under${NC}"
+  echo -e "${YELLOW}    'Refreshing host components'). The stack runs its previous compose${NC}"
+  echo -e "${YELLOW}    file and ClamAV sidecar; re-run after fixing the cause.${NC}"
+  exit 3
 fi

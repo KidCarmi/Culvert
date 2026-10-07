@@ -22,8 +22,11 @@
 #
 # Modes:
 #   culvert-firstboot                 the systemd oneshot (all steps)
-#   culvert-firstboot --repair-agent  re-run the agent provisioning with the
-#                                     same environment the install step used,
+#   culvert-firstboot --repair-agent  re-run install.sh with the same
+#                                     environment the install step used: agent
+#                                     provisioning AND the host components
+#                                     (compose files, ClamAV sidecar) of the
+#                                     running image's deploy bundle,
 #                                     after fixing egress to Sigstore/GitHub
 #                                     (owner review, PR #1528: a plain service
 #                                     restart cannot reach a step that already
@@ -364,12 +367,19 @@ repair_agent() {
   local token
   token="$(persisted_setup_token)"
   log "repair-agent: re-running install.sh"
-  run_install_sh "$token"
+  local rc=0
+  run_install_sh "$token" || rc=$?
   rm -f "$STATE/agent.done"
   step_agent
   if step_done agent; then
-    log "repair-agent: maintenance agent installed"
     "$BIN_DIR/culvert-issue-update" >/dev/null 2>&1 || true
+    # install.sh also refreshes the host components (compose files, ClamAV
+    # sidecar) from the running image's bundle; exit 3 = not refreshed.
+    if (( rc != 0 )); then
+      log "repair-agent: maintenance agent installed, but install.sh exited $rc (host components may not be current) — see $LOG"
+      return 1
+    fi
+    log "repair-agent: maintenance agent installed; host components current"
     return 0
   fi
   log "repair-agent: still not installed — see $LOG for install.sh's trust-gate output"

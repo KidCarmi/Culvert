@@ -579,6 +579,37 @@ func TestFirstBoot_RepairAgent_TransientFailureThenRecovery(t *testing.T) {
 	}
 }
 
+// The repair verb is also the host-component refresh (install.sh compares the
+// running image's bundle with the installed files). A refresh that could not be
+// applied (install.sh exit 3: the new sidecar could not be built) must not be
+// reported as a successful repair just because the agent itself is fine — and
+// the agent is still verified (lab run 37625917513 found the refresh silently
+// doing nothing).
+func TestFirstBoot_RepairAgent_ReportsAFailedHostRefresh(t *testing.T) {
+	h := newFBHarness(t)
+	h.installSHStub(true)
+	_ = os.WriteFile(filepath.Join(h.root, "agent.available"), nil, 0o600)
+	if out, code := h.run("step_install && step_agent"); code != 0 {
+		t.Fatalf("first boot failed (%d):\n%s", code, out)
+	}
+	stub, err := os.ReadFile(filepath.Join(h.root, "install.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.writeExec(filepath.Join(h.root, "install.sh"), string(stub)+"exit 3\n")
+	out, code := h.run("main --repair-agent")
+	if code == 0 || !strings.Contains(out, "install.sh exited 3") {
+		t.Fatalf("a failed host refresh must fail the repair and say so (exit %d):\n%s", code, out)
+	}
+	if !h.exists("appliance/state/agent.done") {
+		t.Fatal("the agent is still verified and recorded when install.sh reports a refresh failure")
+	}
+	h.writeExec(filepath.Join(h.root, "install.sh"), string(stub))
+	if out, code := h.run("main --repair-agent"); code != 0 || !strings.Contains(out, "host components current") {
+		t.Fatalf("a clean re-run must succeed (exit %d):\n%s", code, out)
+	}
+}
+
 func TestFirstBoot_RepairAgent_RefusesBeforeInstallStep(t *testing.T) {
 	h := newFBHarness(t)
 	h.installSHStub(true)
