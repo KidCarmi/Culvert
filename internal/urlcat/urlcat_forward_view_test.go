@@ -9,6 +9,7 @@ import (
 	"math/rand"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 	"sync"
@@ -161,6 +162,7 @@ func TestForwardView_DifferentialAgainstLegacy(t *testing.T) {
 	}
 
 	// Randomized taxonomies, so the agreement does not rest on the shapes above.
+	// #nosec G404 -- deterministic seeded generator for reproducible test data
 	rng := rand.New(rand.NewSource(0xC0FFEE))
 	for iter := 0; iter < 200; iter++ {
 		n := 1 + rng.Intn(6)
@@ -245,40 +247,15 @@ func fvIndexWriters(t *testing.T, src string) (writers, publishers, inPlace []st
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
-	isForwardField := func(e ast.Expr) bool {
-		sel, ok := e.(*ast.SelectorExpr)
-		if !ok {
-			return false
-		}
-		if id, ok := sel.X.(*ast.Ident); !ok || id.Name != "s" {
-			return false
-		}
-		return sel.Sel.Name == "index" || sel.Sel.Name == "adminIndex"
-	}
 	for _, decl := range f.Decls {
 		fn, ok := decl.(*ast.FuncDecl)
 		if !ok || fn.Body == nil {
 			continue
 		}
-		var wrote, published bool
-		ast.Inspect(fn.Body, func(n ast.Node) bool {
-			switch x := n.(type) {
-			case *ast.AssignStmt:
-				for _, lhs := range x.Lhs {
-					if isForwardField(lhs) {
-						wrote = true
-					}
-					if ix, ok := lhs.(*ast.IndexExpr); ok && isForwardField(ix.X) {
-						inPlace = append(inPlace, fn.Name.Name)
-					}
-				}
-			case *ast.CallExpr:
-				if sel, ok := x.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "publishForwardLocked" {
-					published = true
-				}
-			}
-			return true
-		})
+		wrote, published, inPlaceHere := fvScanFuncBody(fn.Body)
+		if inPlaceHere {
+			inPlace = append(inPlace, fn.Name.Name)
+		}
 		if wrote {
 			writers = append(writers, fn.Name.Name)
 			if published {
@@ -290,6 +267,59 @@ func fvIndexWriters(t *testing.T, src string) (writers, publishers, inPlace []st
 	sort.Strings(publishers)
 	sort.Strings(inPlace)
 	return writers, publishers, inPlace
+}
+
+// fvScanFuncBody reports, for ONE function body, whether it replaces a forward
+// index wholesale (`s.index = …`), whether it publishes the view, and whether
+// it assigns INTO a published outer map (`s.index[k] = …`), which the view
+// forbids outright.
+func fvScanFuncBody(body *ast.BlockStmt) (wrote, published, inPlace bool) {
+	ast.Inspect(body, func(n ast.Node) bool {
+		switch x := n.(type) {
+		case *ast.AssignStmt:
+			w, ip := fvClassifyAssign(x)
+			wrote = wrote || w
+			inPlace = inPlace || ip
+		case *ast.CallExpr:
+			if fvIsPublishCall(x) {
+				published = true
+			}
+		}
+		return true
+	})
+	return wrote, published, inPlace
+}
+
+// fvClassifyAssign splits one assignment into the two shapes that matter.
+func fvClassifyAssign(a *ast.AssignStmt) (wrote, inPlace bool) {
+	for _, lhs := range a.Lhs {
+		if fvIsForwardField(lhs) {
+			wrote = true
+			continue
+		}
+		if ix, ok := lhs.(*ast.IndexExpr); ok && fvIsForwardField(ix.X) {
+			inPlace = true
+		}
+	}
+	return wrote, inPlace
+}
+
+// fvIsForwardField reports whether e names s.index or s.adminIndex.
+func fvIsForwardField(e ast.Expr) bool {
+	sel, ok := e.(*ast.SelectorExpr)
+	if !ok {
+		return false
+	}
+	if id, ok := sel.X.(*ast.Ident); !ok || id.Name != "s" {
+		return false
+	}
+	return sel.Sel.Name == "index" || sel.Sel.Name == "adminIndex"
+}
+
+// fvIsPublishCall reports whether c is a call to publishForwardLocked.
+func fvIsPublishCall(c *ast.CallExpr) bool {
+	sel, ok := c.Fun.(*ast.SelectorExpr)
+	return ok && sel.Sel.Name == "publishForwardLocked"
 }
 
 // TestForwardView_EveryWriterRepublishes is the structural half of the
@@ -384,16 +414,39 @@ func (s *Store) addHostToIndexes(ei int, e *Entry, key, host string) {
 // 2b. The republish contract — behaviourally, through every public mutator.
 // ---------------------------------------------------------------------------
 
+// fvMustSeed installs cat with one placeholder host, so a mutation under test
+// starts from a category that EXISTS. Every `if err != nil { t.Fatal }` inlined
+// into the table below counted against its cognitive complexity (gocognit, and
+// the _test.go exemptions in .golangci.yml deliberately do not cover it), so
+// the error handling lives in these two helpers instead of twelve copies.
+func fvMustSeed(t *testing.T, s *Store, cat, host string) {
+	t.Helper()
+	if err := s.Set(cat, []string{host}, false); err != nil {
+		t.Fatalf("seed %q: %v", cat, err)
+	}
+}
+
+// fvMust fails the test if a mutator returned an error.
+func fvMust(t *testing.T, what string, err error) {
+	t.Helper()
+	if err != nil {
+		t.Fatalf("%s: %v", what, err)
+	}
+}
+
+// fvRev returns the store's current revision, for the fenced durable primitives.
+func fvRev(s *Store) *string { r := s.ContentFingerprint(); return &r }
+
 // TestForwardView_EveryMutatorRepublishes drives each PUBLIC mutator and
 // requires its effect to be visible through the lock-free read path
 // immediately. This is the half that catches a writer which publishes a STALE
 // map (the right call, the wrong moment) — something the AST wall cannot see.
 func TestForwardView_EveryMutatorRepublishes(t *testing.T) {
 	const (
-		cat  = "Corp Internal"
-		host = "added.example.invalid"
+		cat   = "Corp Internal"
+		host  = "added.example.invalid"
+		other = "other.invalid"
 	)
-	rev := func(s *Store) *string { r := s.ContentFingerprint(); return &r }
 
 	cases := []struct {
 		name   string
@@ -401,89 +454,47 @@ func TestForwardView_EveryMutatorRepublishes(t *testing.T) {
 		want   bool // expected MatchesHost(cat, host) after the mutation
 	}{
 		{"Set", func(t *testing.T, s *Store) {
-			if err := s.Set(cat, []string{host}, false); err != nil {
-				t.Fatal(err)
-			}
+			fvMustSeed(t, s, cat, host)
 		}, true},
 		{"AddHost", func(t *testing.T, s *Store) {
-			if err := s.Set(cat, []string{"other.invalid"}, false); err != nil {
-				t.Fatal(err)
-			}
-			if err := s.AddHost(cat, host); err != nil {
-				t.Fatal(err)
-			}
+			fvMustSeed(t, s, cat, other)
+			fvMust(t, "AddHost", s.AddHost(cat, host))
 		}, true},
 		{"AddHostDurable", func(t *testing.T, s *Store) {
-			if err := s.Set(cat, []string{"other.invalid"}, false); err != nil {
-				t.Fatal(err)
-			}
-			if err := s.AddHostDurable(rev(s), cat, host); err != nil {
-				t.Fatal(err)
-			}
+			fvMustSeed(t, s, cat, other)
+			fvMust(t, "AddHostDurable", s.AddHostDurable(fvRev(s), cat, host))
 		}, true},
 		{"RemoveHost", func(t *testing.T, s *Store) {
-			if err := s.Set(cat, []string{host}, false); err != nil {
-				t.Fatal(err)
-			}
-			if err := s.RemoveHost(cat, host); err != nil {
-				t.Fatal(err)
-			}
+			fvMustSeed(t, s, cat, host)
+			fvMust(t, "RemoveHost", s.RemoveHost(cat, host))
 		}, false},
 		{"RemoveHostDurable", func(t *testing.T, s *Store) {
-			if err := s.Set(cat, []string{host}, false); err != nil {
-				t.Fatal(err)
-			}
-			if err := s.RemoveHostDurable(rev(s), cat, host); err != nil {
-				t.Fatal(err)
-			}
+			fvMustSeed(t, s, cat, host)
+			fvMust(t, "RemoveHostDurable", s.RemoveHostDurable(fvRev(s), cat, host))
 		}, false},
 		{"Delete", func(t *testing.T, s *Store) {
-			if err := s.Set(cat, []string{host}, false); err != nil {
-				t.Fatal(err)
-			}
-			if err := s.Delete(cat); err != nil {
-				t.Fatal(err)
-			}
+			fvMustSeed(t, s, cat, host)
+			fvMust(t, "Delete", s.Delete(cat))
 		}, false},
 		{"DeleteDurable", func(t *testing.T, s *Store) {
-			if err := s.Set(cat, []string{host}, false); err != nil {
-				t.Fatal(err)
-			}
-			if err := s.DeleteDurable(rev(s), cat); err != nil {
-				t.Fatal(err)
-			}
+			fvMustSeed(t, s, cat, host)
+			fvMust(t, "DeleteDurable", s.DeleteDurable(fvRev(s), cat))
 		}, false},
 		{"CreateDurable", func(t *testing.T, s *Store) {
-			if err := s.CreateDurable(rev(s), cat, []string{host}); err != nil {
-				t.Fatal(err)
-			}
+			fvMust(t, "CreateDurable", s.CreateDurable(fvRev(s), cat, []string{host}))
 		}, true},
 		{"ReplaceHostsDurable", func(t *testing.T, s *Store) {
-			if err := s.Set(cat, []string{"other.invalid"}, false); err != nil {
-				t.Fatal(err)
-			}
-			if err := s.ReplaceHostsDurable(rev(s), cat, []string{host}); err != nil {
-				t.Fatal(err)
-			}
+			fvMustSeed(t, s, cat, other)
+			fvMust(t, "ReplaceHostsDurable", s.ReplaceHostsDurable(fvRev(s), cat, []string{host}))
 		}, true},
 		{"ReplaceAll", func(t *testing.T, s *Store) {
 			s.ReplaceAll([]Entry{{Name: cat, Hosts: []string{host}}})
 		}, true},
 		{"ReplaceAllChecked", func(t *testing.T, s *Store) {
-			if err := s.ReplaceAllChecked([]Entry{{Name: cat, Hosts: []string{host}}}); err != nil {
-				t.Fatal(err)
-			}
+			fvMust(t, "ReplaceAllChecked", s.ReplaceAllChecked([]Entry{{Name: cat, Hosts: []string{host}}}))
 		}, true},
 		{"Load", func(t *testing.T, s *Store) {
-			p := filepath.Join(t.TempDir(), "cats.json")
-			seed := New([]*Entry{{Name: cat, Hosts: []string{host}}})
-			seed.SetPathForTest(p)
-			if err := seed.SaveErr(); err != nil {
-				t.Fatal(err)
-			}
-			if err := s.Load(p); err != nil {
-				t.Fatal(err)
-			}
+			fvMust(t, "Load", s.Load(fvSeedFile(t, cat, host)))
 		}, true},
 	}
 
@@ -504,6 +515,17 @@ func TestForwardView_EveryMutatorRepublishes(t *testing.T) {
 			fvAgree(t, s, "Seed", "seed.invalid", "untouched category after "+tc.name)
 		})
 	}
+}
+
+// fvSeedFile writes a one-category store to a temp file and returns its path,
+// so the Load case above has something on disk to load.
+func fvSeedFile(t *testing.T, cat, host string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "cats.json")
+	seed := New([]*Entry{{Name: cat, Hosts: []string{host}}})
+	seed.SetPathForTest(path)
+	fvMust(t, "seed SaveErr", seed.SaveErr())
+	return path
 }
 
 // TestForwardView_FailedPersistRollsBackTheView pins the rollback path. A
@@ -643,6 +665,66 @@ func TestBenchGate_MutatorsStillTakeTheLock(t *testing.T) {
 	<-done
 }
 
+// fvMapPtr returns the identity of a map's backing store, so a test can ask
+// whether two map values ARE the same map rather than merely equal.
+func fvMapPtr(m map[string]bool) uintptr { return reflect.ValueOf(m).Pointer() }
+
+// TestForwardView_PublishAliasesInnerSetsRatherThanCopyingThem is the
+// STRUCTURAL half of the write-amplification contract, and it is the one to
+// trust: the timing gate below measures the CONSEQUENCE of this property, while
+// this asserts the property itself — deterministically, on any hardware, at any
+// load, with or without -race.
+//
+// A publish must clone the OUTER map (one entry per category) and ALIAS every
+// inner host set. That is what makes it O(categories) rather than O(hosts), and
+// it is what lets the legacy SaaS feed sync call AddHost once per merged host
+// without the publish becoming the dominant cost.
+func TestForwardView_PublishAliasesInnerSetsRatherThanCopyingThem(t *testing.T) {
+	s := New([]*Entry{
+		{Name: "Feed", Hosts: []string{"a.invalid"}, BuiltIn: true},
+		{Name: "Other", Hosts: []string{"o.invalid"}},
+		{Name: "Third", Hosts: []string{"t.invalid"}},
+	})
+
+	before := make(map[string]uintptr, len(s.index))
+	for k, v := range s.index {
+		before[k] = fvMapPtr(v)
+	}
+	if len(before) < 3 {
+		t.Fatalf("not vacuous check: expected 3 categories to compare, got %d", len(before))
+	}
+
+	e := s.entries[0]
+	e.Hosts = append(e.Hosts, "b.invalid")
+	s.addHostToIndexes(0, e, "feed", "b.invalid")
+
+	v := s.forward()
+	if v == nil {
+		t.Fatal("the fold did not publish a view")
+	}
+	for k, ptr := range before {
+		if k == "feed" {
+			continue
+		}
+		if got := fvMapPtr(v.index[k]); got != ptr {
+			t.Errorf("category %q: its inner host set was COPIED by the publish "+
+				"(%#x -> %#x); inner sets must be ALIASED, or a publish becomes "+
+				"O(hosts) and the per-host SaaS feed loop becomes quadratic", k, ptr, got)
+		}
+	}
+	// The CONTROL half, in the same test: the touched category's set must have
+	// been REPLACED, never mutated in place — aliasing everything including the
+	// one being changed is the other way to pass the loop above, and it is a
+	// data race against concurrent readers.
+	if got := fvMapPtr(v.index["feed"]); got == before["feed"] {
+		t.Error("the touched category's inner set was mutated IN PLACE: " +
+			"concurrent readers hold that map through the published view")
+	}
+	if !s.MatchesHost("Feed", "b.invalid") {
+		t.Error("the folded host is not visible through the read path")
+	}
+}
+
 // legacyAddHostToIndexes is addHostToIndexes' pre-view body, VERBATIM: the
 // inner-set clone it has always done, plus the IN-PLACE outer assignment the
 // view forbids and no publish. It is the baseline for the gate below.
@@ -660,6 +742,8 @@ func legacyAddHostToIndexes(s *Store, ei int, e *Entry, key, host string) {
 	if !e.BuiltIn {
 		s.adminIndex[key] = set
 	}
+	// #nosec G115 -- slice indices: non-negative and bounded by len (the
+	// production body this copies carries the identical suppression)
 	ref := patternRef{entry: int32(ei), host: int32(len(e.Hosts) - 1)}
 	pk := strings.ToLower(host)
 	if cur, dup := s.hostIndex[pk]; !dup || ref.less(cur) {
@@ -724,18 +808,37 @@ func TestBenchGate_AddHostPublishCostsNoMoreThanTheCodeItReplaced(t *testing.T) 
 	}
 	current := func(s *Store, ei int, e *Entry, key, host string) { s.addHostToIndexes(ei, e, key, host) }
 
-	best := func(fold func(*Store, int, *Entry, string, string)) time.Duration {
-		b := time.Hour
-		for i := 0; i < 7; i++ {
-			// Interleave the arms within one process so neither sees a
-			// systematically warmer or colder box than the other.
-			if d := run(fold); d < b {
-				b = d
-			}
+	// GENUINELY INTERLEAVED, and ALTERNATING which arm goes first.
+	//
+	// An earlier draft ran all seven legacy samples and then all seven current
+	// ones while its comment claimed interleaving (Codex review, PR #1577). On a
+	// shared or thermally drifting runner a load change between those two
+	// batches can fail unchanged code OR conceal a regression — and this box
+	// was observed drifting by half again inside one session, which is the whole
+	// reason this file measures ratios instead of absolutes. Grouping the arms
+	// inside one process is not the same as interleaving them: it reintroduces
+	// the cross-run error the ratio exists to remove.
+	//
+	// Each iteration takes ONE sample of each arm, swapping the order on odd
+	// iterations so neither arm systematically pays for the other's cache
+	// warming, and the comparison is min-vs-min — the least noise-sensitive
+	// statistic for "how fast can this go", so a transient spike can only
+	// discard a sample, never inflate the verdict.
+	legacy, now := time.Hour, time.Hour
+	keepMin := func(dst *time.Duration, d time.Duration) {
+		if d < *dst {
+			*dst = d
 		}
-		return b
 	}
-	legacy, now := best(legacyAddHostToIndexes), best(current)
+	for i := 0; i < 7; i++ {
+		if i%2 == 0 {
+			keepMin(&legacy, run(legacyAddHostToIndexes))
+			keepMin(&now, run(current))
+			continue
+		}
+		keepMin(&now, run(current))
+		keepMin(&legacy, run(legacyAddHostToIndexes))
+	}
 	if legacy <= 0 {
 		t.Skip("timer resolution too coarse to measure")
 	}
@@ -787,16 +890,22 @@ func TestBenchGate_AddHostPublishGateIsNotVacuous(t *testing.T) {
 		}
 		return time.Since(start)
 	}
-	best := func(deep bool) time.Duration {
-		b := time.Hour
-		for i := 0; i < 5; i++ {
-			if d := run(deep); d < b {
-				b = d
-			}
+	// Interleaved and order-alternating, for the reason the gate above records.
+	shallow, deep := time.Hour, time.Hour
+	keepMin := func(dst *time.Duration, d time.Duration) {
+		if d < *dst {
+			*dst = d
 		}
-		return b
 	}
-	shallow, deep := best(false), best(true)
+	for i := 0; i < 5; i++ {
+		if i%2 == 0 {
+			keepMin(&shallow, run(false))
+			keepMin(&deep, run(true))
+			continue
+		}
+		keepMin(&deep, run(true))
+		keepMin(&shallow, run(false))
+	}
 	if shallow <= 0 {
 		t.Skip("timer resolution too coarse to measure")
 	}

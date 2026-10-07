@@ -141,24 +141,6 @@ type forwardView struct {
 	adminIndex map[string]map[string]bool
 }
 
-// publishForwardLocked installs the CURRENT s.index / s.adminIndex as the
-// lock-free read view. Caller must hold s.mu for writing (or be the sole owner
-// during construction).
-//
-// It ALIASES both maps rather than copying them, which is what makes it O(1)
-// here: every caller has just finished producing maps nothing else references,
-// so the aliasing is safe by construction and the whole cost of the view falls
-// on whoever had to produce a fresh outer map in the first place.
-func (s *Store) publishForwardLocked() {
-	s.fwd.Store(&forwardView{index: s.index, adminIndex: s.adminIndex})
-}
-
-// forward returns the published read view, or nil when nothing has been
-// published yet (a zero-value &Store{}). Callers treat nil as "no categories",
-// which is byte-identical to what the zero-value Store's nil maps answered
-// before the view existed — pinned by TestForwardView_ZeroValueStoreMatchesNothing.
-func (s *Store) forward() *forwardView { return s.fwd.Load() }
-
 // Store manages URL categories with thread-safe, file-backed persistence.
 // index maps lowercase(category-name) → set of lowercase host strings for O(1)
 // host membership checks during policy evaluation. adminIndex is the same,
@@ -228,6 +210,24 @@ type Store struct {
 // Revision returns the process-local semantic-mutation counter. Monotonic
 // within a process; resets on restart — a fence key, not an identity.
 func (s *Store) Revision() uint64 { return s.rev.Load() }
+
+// publishForwardLocked installs the CURRENT s.index / s.adminIndex as the
+// lock-free read view. Caller must hold s.mu for writing (or be the sole owner
+// during construction).
+//
+// It ALIASES both maps rather than copying them, which is what makes it O(1)
+// here: every caller has just finished producing maps nothing else references,
+// so the aliasing is safe by construction and the whole cost of the view falls
+// on whoever had to produce a fresh outer map in the first place.
+func (s *Store) publishForwardLocked() {
+	s.fwd.Store(&forwardView{index: s.index, adminIndex: s.adminIndex})
+}
+
+// forward returns the published read view, or nil when nothing has been
+// published yet (a zero-value &Store{}). Callers treat nil as "no categories",
+// which is byte-identical to what the zero-value Store's nil maps answered
+// before the view existed — pinned by TestForwardView_ZeroValueStoreMatchesNothing.
+func (s *Store) forward() *forwardView { return s.fwd.Load() }
 
 // patternRef locates one host pattern inside s.entries: entry position, then
 // position within that entry's Hosts. Positions — not the resolved strings —
