@@ -1,0 +1,40 @@
+{
+  "schema": 1,
+  "source": "cd8e44505bd329e5de675592ad4c23f92a534d55",
+  "controller": "7acb405c4e18e8fa8d77734e812b11bb91483208",
+  "initial_failure": {
+    "exit_code": 90,
+    "finished_utc": "2026-10-07T22:52:38.177434+00:00",
+    "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "stderr_sha256": "e0f1ca3e73906c3583c498b8815226b8486a0cb09532b338fb1c2d392771f5b6"
+  },
+  "prerequisite_resolution": {
+    "original_receipt_sha256": "d3935835a85f0b433894e171182d84c9cfd9d7e2e5e18e334bac4d3bd8834440",
+    "original_exit_code": 90,
+    "failed_before_guest_operation": true,
+    "observed_utc": "2026-10-07T22:56:08.8512734Z",
+    "basis": "Frozen helper validates existing escrow before VM lookup, export secret creation, or guest operation",
+    "escrow_absent": true
+  },
+  "successful_export": {
+    "exit_code": 0,
+    "finished_utc": "2026-10-07T22:56:32.273106+00:00",
+    "stdout_sha256": "a6b974081428abb7d71af77d64433d2c32ea6f984f8568876da8a80850a732a4",
+    "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "export_result": {
+    "phase": "export",
+    "result": "pass",
+    "archive_sha256": "6c3171d01583248e7162e8e37579ff49e132e131b6c934bf4442e7e431c810da",
+    "behavioral_recovery": "not-yet-run",
+    "historical_encrypted_log_recovery": "blocked: supported archive excludes logs"
+  },
+  "baseline_receipt": {
+    "exit_code": 0,
+    "finished_utc": "2026-10-07T22:56:34.417198+00:00",
+    "stdout_sha256": "8105d9e3fa619e9e1554e642a10c48c03d9c06bee159438239f01130b959be61",
+    "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "access_control": "Existing protected ACL verified by frozen helper; allow current Windows user and SYSTEM only; reparse paths refused",
+  "custody_limit": "Local private controller custody; no portable offsite escrow or source-absent restore claimed here"
+}

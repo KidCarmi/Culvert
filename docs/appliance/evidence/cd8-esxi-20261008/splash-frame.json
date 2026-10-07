@@ -1,0 +1,20 @@
+{
+  "source_sha": "cd8e44505bd329e5de675592ad4c23f92a534d55",
+  "ova_sha256": "46cb60078eb2adbc2f8704046268f68e56798bc2b37cd824ba70f8a919bd2ab1",
+  "capture_controller": "91fd17fba173c555d5ab275f0143d8a582993689",
+  "frame": {
+    "bytes": 1720,
+    "elapsed_seconds": 7.25,
+    "event": "frame",
+    "filename": "frame-0003.png",
+    "finished_monotonic_ns": 113801812000000,
+    "finished_realtime_ns": 1791411942566798900,
+    "height": 400,
+    "observed_powered_off_before_capture": true,
+    "sha256": "43bad8b09808f8682a458269aa3ed2f756348e6ea7bd73dd549c6c60ee99be74",
+    "started_monotonic_ns": 113801578000000,
+    "uuid": "564d06b7-2087-3a13-3a3e-6f00a8270b07",
+    "width": 720
+  },
+  "review": "Centering and clean background observed in this frame only; not complete boot qualification. Exact pixel text and visual inspection show no credentials."
+}

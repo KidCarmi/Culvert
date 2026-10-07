@@ -1,0 +1,16 @@
+{
+  "schema": 1,
+  "uuid": "564d06b7-2087-3a13-3a3e-6f00a8270b07",
+  "files": 3904,
+  "directories": 716,
+  "source_bytes": 226332927,
+  "encryption": "Windows DPAPI CurrentUser",
+  "ciphertext_sha256": "f9c6f221548a48717dea329cff7ad46ed48bff39167b0480f243788a22e40ba8",
+  "plaintext_zip_sha256": "aa720319bb4126ff266bd273a39100e327683c667d26b2e0010fd94c9d457abb",
+  "roundtrip_verified": true,
+  "every_file_verified": true,
+  "source_unchanged": true,
+  "original_retained_at_preservation": true,
+  "includes_operation_lock": true,
+  "utc": "2026-10-07T23:39:39.4832998Z"
+}

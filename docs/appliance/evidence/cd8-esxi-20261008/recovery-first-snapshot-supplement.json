@@ -1,0 +1,67 @@
+{
+  "schema": 1,
+  "reason": "original snapshot ended before uncertainty interval",
+  "original_files_sha256": {
+    "acceptance.json": "ad13af2faca35bbe6c740ab5ad4f1a05e52d186c47e6d0a83845440f78d5901a",
+    "authenticated-boot-proof.json": "bbf1617a4dc8164b2699d198ad291a3e93544ac9083a06cff01078304c1e38cb",
+    "correlation-receipt.json": "640198c3daf433312974e170b2a47b1e8eebfea1615eb70b4d621383098d7fe5",
+    "correlation.json": "29a509a41add9ed8e2632064521496802073c6304917489e6b222b354bdf3a68",
+    "correlation.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "dispatch-attempt.json": "c9dc55683d63fa99e73712f638d244f4bfe8ad3f9850d2c25474e0db8af8cea4",
+    "dispatch-stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "dispatch-stdout": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "full-receipt.json": "cd641e23a2e3002f0068081d947c0650c0072b2000363fe190e7c2916daa6382",
+    "full.json": "2a855ec9e6575eb1ba1df476cec0a2e60ce5d078c270c8258df0e6569b77eb58",
+    "full.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "same_boot": true,
+  "original_sampler_prefix_unchanged": true,
+  "original_rows": 31,
+  "supplement_rows": 88,
+  "orchestrator_sha256": "687ac177736202dca7dabf6aaf248b8fcf8b69d67e97dd6cd212e66933ad0f87",
+  "original_summary_sha256": "8dae03cff5282cb1cb49fe51dfaf5e5a519f7e448d3bf991bf19bdfd60e548b4",
+  "supplement_summary_sha256": "4fa0f05a27737033ae29b9de22ba68ba13b98a1a18f46586fd40ab5272a3616a",
+  "original_summary": {
+    "result": "blocked",
+    "reason": "direct ClamAV PONG coverage does not bracket readiness interval",
+    "controller_confirmed_at": {
+      "monotonic_ns": 115756468000000,
+      "realtime_ns": 1791413897232745900
+    },
+    "proof_sha256": "bbf1617a4dc8164b2699d198ad291a3e93544ac9083a06cff01078304c1e38cb",
+    "rows_sha256": "e8f51551d7e70ffeb166d45fb540162851ae721eceb55946d42431daa27b43aa"
+  },
+  "supplement_summary": {
+    "result": "pass",
+    "cycle_id": "rcd8-1",
+    "accepted_monotonic_ns": 115665281000000,
+    "observed_ready_monotonic_ns": 115734375000000,
+    "controller_confirmed_at": {
+      "monotonic_ns": 115859031000000,
+      "realtime_ns": 1791413999792221700
+    },
+    "seconds_to_three_healthy_samples": 69.094,
+    "first_backup_seconds": 1.453,
+    "first_backup_login_seconds": 0.11,
+    "boot_window_controller_monotonic_ns": [
+      115663989844306,
+      115670848844306
+    ],
+    "direct_clamav_coverage": {
+      "guest_interval_start_ns": 50744155694,
+      "guest_interval_end_ns": 72885155694,
+      "pong_samples": 13,
+      "maximum_sample_gap_ns": 2006020549,
+      "current_container_endpoint_verified": true
+    },
+    "note": "Service timing only; guest lock/disk/unit/persistence evidence is qualified separately.",
+    "proof_sha256": "96368a28f3618c240710e0987e9438e4c0351b0f196fe5b1795c4abb929499f9",
+    "rows_sha256": "e8f51551d7e70ffeb166d45fb540162851ae721eceb55946d42431daa27b43aa"
+  },
+  "required_guest_interval_seconds": [
+    50.744155694,
+    72.885155694
+  ],
+  "original_last_sample_seconds": 72.449164364,
+  "missing_tail_seconds": 0.43599133
+}

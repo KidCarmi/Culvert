@@ -1,0 +1,97 @@
+{
+  "schema": 1,
+  "result": "pass",
+  "source_sha": "cd8e44505bd329e5de675592ad4c23f92a534d55",
+  "source_uuid": "564d06b7-2087-3a13-3a3e-6f00a8270b07",
+  "fresh_machine_id": true,
+  "fresh_ssh_host_key": true,
+  "operator_keys_empty": true,
+  "old_console_password": {
+    "service": "login",
+    "pam_status": 7,
+    "password_prompts": 1
+  },
+  "old_operator_key_refused": true,
+  "automatic_poweroff": true,
+  "new_console_password_forced_change": "pass in bound one-shot continuation",
+  "original_bootstrap": "BLOCKED preauth 640x480 firmware frame; no credential submitted",
+  "controller_revision": "bf4ff8240d46a78985f96e9a1c5fceac043fef70",
+  "manifest_sha256": "56e34a8912587c9c0f13011558ab0aba45c5d5c186de72a677cfb93001eb5166",
+  "stage_results": {
+    "network-before": {
+      "result": "pass",
+      "supplemented": false
+    },
+    "network-after": {
+      "result": "pass",
+      "supplemented": false
+    },
+    "identity-before": {
+      "result": "pass",
+      "supplemented": false
+    },
+    "identity-reset": {
+      "result": "pass",
+      "supplemented": false
+    },
+    "identity-power-on": {
+      "result": "pass",
+      "supplemented": false
+    },
+    "identity-bootstrap": {
+      "result": "pass",
+      "supplemented": true
+    },
+    "identity-after": {
+      "result": "pass",
+      "supplemented": false
+    }
+  },
+  "receipts": {
+    "p1-identity-reset": {
+      "exit_code": 0,
+      "receipt_sha256": "13cfa0ff0c60c9cc235601a3dd70b95654c5c06394c820258a98aee3623fdf7a"
+    },
+    "p1-identity-power-on": {
+      "exit_code": 0,
+      "receipt_sha256": "00e3381c01be9c1270afc5ff453e35af53c106c2118aec7e2462801f2706d021"
+    },
+    "visual-final-postboot-inspect": {
+      "exit_code": 0,
+      "receipt_sha256": "782c6d44f29ea06c1dad809936295adafab4232c63bad3eab86d6f01b3048822"
+    },
+    "visual-fixture-remove": {
+      "exit_code": 0,
+      "receipt_sha256": "e2978fa2fda84d376aab3e901707fc2d8c5b158f8a852a17c7de0761cf3bb423"
+    },
+    "capture-followup-remove": {
+      "exit_code": 0,
+      "receipt_sha256": "19f7aa9a26c46e8e0230d11b723919c565ffd0ce62ab31864cc4c93f57461d80"
+    },
+    "sampler-remove": {
+      "exit_code": 0,
+      "receipt_sha256": "88cdcafda5deeb75b76472a7e7b9b7186db666eee3a2ddf6bcac27d03fe4a61b"
+    },
+    "export-after-escrow-prerequisite": {
+      "exit_code": 0,
+      "receipt_sha256": "3672348764e13d5d9fdf22a6c14304e3a8f06ef9045f2d006b86b3e77caaf06c"
+    },
+    "baseline-after-export": {
+      "exit_code": 0,
+      "receipt_sha256": "181802c38234e5461349dce9596a9fdaf51cb57ca4f201314a081b56b42c9fa1"
+    },
+    "identity-bootstrap-continuation": {
+      "exit_code": 0,
+      "receipt_sha256": "f3e217a38d60c611024068ab8d822c185d3911483ff7cf79697e1cb8a9519ea0"
+    },
+    "identity-after": {
+      "exit_code": 0,
+      "receipt_sha256": "0712f93ff869933357af85d79f63118809473402e4c78c55d5eac44c630a2145"
+    }
+  },
+  "observation_sha256": {
+    "before": "e77067e3626d65fa75164a236b70ca991c341c1d2f17a49eea9a956f0a946ac1",
+    "after": "aa29435bca2255d3965f027d5dac946933a24b7f5de30bd2f667fd4d40674bfb"
+  },
+  "scope": "same owned VM reset/poweroff/fresh boot; no cloned second VM under one-VM limit"
+}

@@ -1,0 +1,108 @@
+{
+  "schema": 1,
+  "result": "pass",
+  "identity": {
+    "av_unavailable": "closed",
+    "boot_id": "0b75b0b9-0a74-4716-93cb-8c256f5ab071",
+    "both_locks_held": true,
+    "image_id": "sha256:659258eee3fc609a8e95e0bc22c89cb57849887b0dcf2b92708ddbff0fb69b42",
+    "policy_sha256": "6cf9fb45dc0d1f54f410be6dac16971b5f49eb931bd66b7829f9bf686f299dfc",
+    "sidecar_image_id": "sha256:7d4e1087e7b94ac37971d35bc831321ebb3e891d6b7d4af8524b7a45e7f1efc3",
+    "source_sha": "cd8e44505bd329e5de675592ad4c23f92a534d55"
+  },
+  "readiness": {
+    "before": {
+      "clamav_status": "ok",
+      "ended_monotonic_ns": 226138252609,
+      "http_status": 200,
+      "pass": true,
+      "started_monotonic_ns": 226137529308
+    },
+    "down": {
+      "clamav_status": "fail",
+      "ended_monotonic_ns": 243476967754,
+      "http_status": 503,
+      "pass": true,
+      "started_monotonic_ns": 226448065847
+    },
+    "recovered": {
+      "clamav_status": "ok",
+      "ended_monotonic_ns": 273677118643,
+      "http_status": 200,
+      "pass": true,
+      "started_monotonic_ns": 243624057270
+    }
+  },
+  "phases": {
+    "before": [
+      {
+        "body_sha256": "73f409f5b3e1c12c1f5b265dec970e98dec1d0e7d0171b29b9d5bea9c57a0911",
+        "http_status": 200,
+        "kind": "clean",
+        "origin_fetched": true,
+        "pass": true,
+        "response_sha256": "73f409f5b3e1c12c1f5b265dec970e98dec1d0e7d0171b29b9d5bea9c57a0911"
+      },
+      {
+        "body_sha256": "f924651493dc6505364d7783527aa2d7b505a214c39894573b1f2760bebdae46",
+        "http_status": 403,
+        "kind": "eicar",
+        "origin_fetched": true,
+        "pass": true,
+        "response_sha256": "7c796b55101cf13e7be536eec50ab8f396f4d5ef96c0fc4bc4b732114ddd0622"
+      }
+    ],
+    "down": [
+      {
+        "body_sha256": "9da2c36a2c458120a7cb1d5cfe5e8bb9ba63068cfc2470d704897eff02e0dd08",
+        "http_status": 403,
+        "kind": "clean",
+        "origin_fetched": true,
+        "pass": true,
+        "response_sha256": "19c96ee9cf8b94e61cffb821e783e0fb08bcac05c110dcd08ddb6df91241636b"
+      },
+      {
+        "body_sha256": "cac66ca9618527ba65b6ad4a1ffab094a3ce1a5fa56cc61fbc2e3d084852fb8e",
+        "http_status": 403,
+        "kind": "eicar",
+        "origin_fetched": true,
+        "pass": true,
+        "response_sha256": "19c96ee9cf8b94e61cffb821e783e0fb08bcac05c110dcd08ddb6df91241636b"
+      }
+    ],
+    "recovered": [
+      {
+        "body_sha256": "17a89a208c022d38c097549d0828f3bfaebc938e40730f50915f05a638861f3b",
+        "http_status": 200,
+        "kind": "clean",
+        "origin_fetched": true,
+        "pass": true,
+        "response_sha256": "17a89a208c022d38c097549d0828f3bfaebc938e40730f50915f05a638861f3b"
+      },
+      {
+        "body_sha256": "c9cf0c7f7909201d7ed525e864ff597542e16dab5bcaa7562e6a9896ee93e4e3",
+        "http_status": 403,
+        "kind": "eicar",
+        "origin_fetched": true,
+        "pass": true,
+        "response_sha256": "7c796b55101cf13e7be536eec50ab8f396f4d5ef96c0fc4bc4b732114ddd0622"
+      }
+    ]
+  },
+  "restored_running": true,
+  "policy_restored": true,
+  "errors": [],
+  "guest_result_sha256": "e11d014e70ca3bfd5e34a4559d3ddcca25d31768b9bd691f8130f000411b7075",
+  "complete_receipt": {
+    "attempt": "initial",
+    "controller_revision": "7acb405c4e18e8fa8d77734e812b11bb91483208",
+    "guest_result_sha256": "e11d014e70ca3bfd5e34a4559d3ddcca25d31768b9bd691f8130f000411b7075",
+    "helper_sha256": "7fd7be63e59bff92620fce096645771d01c6101c49b348a0567dea3236a7e9f0",
+    "operation": "b06b7e941f457f6441a0d88c6bd00b32",
+    "payload_sha256": "bfb13dc53a286417e405f6e2ecd4d160985f8bfbafd60d51a1063a637c7b7489",
+    "prior_failure_sha256": null,
+    "result": "pass"
+  },
+  "post_outage_export_baseline_match": true,
+  "post_outage_observation_sha256": "8985512759309499ee4f52fb0221469c1a3f66192e1fe219fd51a1bb15d59055"
+}

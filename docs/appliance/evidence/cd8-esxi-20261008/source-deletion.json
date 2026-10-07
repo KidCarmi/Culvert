@@ -1,0 +1,20 @@
+{
+  "schema": 1,
+  "source_uuid": "564d06b7-2087-3a13-3a3e-6f00a8270b07",
+  "source_path": "/ha-datacenter/vm/culvert-esxi-b8b1e301bfbe",
+  "endpoint": "https://192.168.1.78",
+  "source_disks_deleted": true,
+  "source_disk_paths": [
+    "[DataStore2] culvert-esxi-b8b1e301bfbe/culvert-esxi-b8b1e301bfbe.vmdk"
+  ],
+  "one_vm_limit": 1,
+  "result": "pass",
+  "evidence_sha256": {
+    "source-deletion-receipt.json": "bbf6898800743df66cfd53919e38f69805eae178c69cb9432be79c05caa8f62e",
+    "source-deletion-before.json": "544d028a871e801721546a4366237812a858137fbe1693b622b1bd6f8dee9962",
+    "source-deletion-after.json": "b07125791ac2f19a94f9347cb9565a5991577e33b4f0eeefaff13f151a095735",
+    "source-deleted-owned.json": "df6e4d26c6d3ec44d2824063ea84ca691cb6debe649dbc709486dcb328a0ae2c",
+    "source-deletion-attempt.json": "2c7f98af6d3e8e21e452247145bc67ea3e6b48e3015dade65bcbdf25add2b5b0"
+  },
+  "controller_revision": "bf4ff8240d46a78985f96e9a1c5fceac043fef70"
+}

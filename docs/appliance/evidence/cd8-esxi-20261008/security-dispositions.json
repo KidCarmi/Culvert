@@ -1,0 +1,475 @@
+{
+  "schema": 1,
+  "status": "DRAFT_PARTIAL_QUALIFICATION_NOT_RELEASE_ACCEPTANCE",
+  "reviewed_at_utc": "2026-10-07T23:47:37.496702+00:00",
+  "method": "Offline review of retained source-run evidence and previously sanitized intake artifacts; no VM calls, no fault injection, no raw secrets read, no controller/scope edits.",
+  "identity": {
+    "source_commit": "cd8e44505bd329e5de675592ad4c23f92a534d55",
+    "source_dirty": false,
+    "ova_sha256": "46cb60078eb2adbc2f8704046268f68e56798bc2b37cd824ba70f8a919bd2ab1",
+    "application_manifest": "sha256:659258eee3fc609a8e95e0bc22c89cb57849887b0dcf2b92708ddbff0fb69b42",
+    "application_version": "v1.0.260-candidate.gcd8e44505bd3",
+    "application_provenance": "Unsigned candidate CI artifact; not a vendor-signed production release. Source/tar binding was independently audited during intake.",
+    "auth_controller_parent_reported": "7acb405c"
+  },
+  "dispositions": {
+    "F-DISK-1": {
+      "status": "PASS_BOUNDED_REGRESSION",
+      "evidence_run": 37684926209,
+      "artifact_id": 11512115994,
+      "counts": {
+        "pass": 19,
+        "survived": 1,
+        "info": 1
+      },
+      "observed": "Active category write at 6140 KiB free returned fallocate ENOSPC instead of SIGBUS; container remained running with zero restarts. Admin state, CA identity and allow/block enforcement survived. Category retry completed 2579670 domains 873 seconds after serving recovery.",
+      "binding": "Same cd8 source tar/config as candidate application; registry manifest rewrite was independently mapped to identical config.",
+      "limits": [
+        "Nested-Docker bounded 2 GiB active-write scenario, not an ESXi disk-fill test.",
+        "Current and predecessor are the same cd8 image; this is not a cross-version upgrade result.",
+        "Does not qualify every ENOSPC path, unsupported filesystem, quota behavior, or crash/power-loss boundary.",
+        "No fault injection was repeated by this review."
+      ]
+    },
+    "exact_baked_clamav": {
+      "status": "PASS_EXACT_ARTIFACT_SCAN_BINDING",
+      "reference": "culvert/clamav:1.4.6-culvert.2",
+      "archive_sha256": "359cde5ff4265d223dd030abd73f45526e8af24bf562dd2ae216f97ccc260564",
+      "index_digest": "sha256:7d4e1087e7b94ac37971d35bc831321ebb3e891d6b7d4af8524b7a45e7f1efc3",
+      "amd64_manifest": "sha256:556e8b364c5aafa387c345264282dd125f7bebdb0804c4df2e8c00452d306743",
+      "config_image_id": "sha256:7d422f7c7dba76221399dfc8a8e290390f59fe5b2d1641e4cf704d20c733674a",
+      "scan_run": 37693602079,
+      "scan_job": 113039591853,
+      "scan_artifact": 11514621022,
+      "imageid_and_diffids_match": true,
+      "sbom_imageid_and_diffids_match": true,
+      "packages": 41,
+      "sbom_components": 42,
+      "reported_vulnerabilities": 0,
+      "scanner": "Trivy 0.69.3",
+      "database_updated_at_utc": "2026-10-07T07:38:55.515026687Z",
+      "scan_created_at": "2026-10-07T22:04:58.188910236Z",
+      "full_scan_command": "trivy image --skip-db-update --input clamav.tar --scanners vuln --format json --output trivy-all.json",
+      "gate_command": "trivy image --skip-db-update --input clamav.tar --scanners vuln --severity CRITICAL,HIGH --ignore-unfixed --format table --exit-code 1",
+      "limits": "Scan extracted the retained baked archive without rebuilding. Zero reported vulnerabilities is bounded by recorded database and scanner coverage. It is not a perpetual clean claim; main lab scan was skipped and this separate exact-byte scan supplies the evidence."
+    },
+    "separately_rebuilt_adoption_sidecar": {
+      "status": "PASS_FUNCTIONAL_ADOPTION_EXACT_SCAN_NOT_PROVEN",
+      "artifact_id": 11511217743,
+      "counts": {
+        "pass": 74,
+        "info": 4,
+        "blocked": 2
+      },
+      "rebuilt_image_id": "sha256:0f241eeef79bc3de357ae0511ac171fb1f7d89a6e1d0ba59e91d680014fe9da4",
+      "distinct_from_baked_image": true,
+      "observed": "Retained 2e3 OVA application-only update preserved host components. Offline refresh failure preserved currently running old scanner and traffic. Online refresh adopted the rebuilt scanner and maintenance reboot preserved it; real EICAR/traffic checks passed.",
+      "limits": [
+        "This separately built adopted image is not the baked7d4e image scanned by exact-sidecar job. No exact adopted-image scan is claimed.",
+        "Offline failure proves current serving continuity, not an offline reboot.",
+        "Adoption signed-update check remains blocked; the separate fresh-cd8 signed fixture passes."
+      ],
+      "retention_investigation": {
+        "status": "NO_EXACT_ADOPTED_IMAGE_ARCHIVE_FOUND_IN_REVIEWED_ARTIFACTS",
+        "run_id": 37684926209,
+        "job_id": 113010170946,
+        "report_artifact": 11511217743,
+        "report_zip_bytes": 333862,
+        "run_artifact_count": 6,
+        "basis": "GitHub artifact inventory and extracted adoption reports contain no adopted tar or qcow/vmdk. Workflow retains preboot pristine OVA only; default cmd_down deletes disposable guest disks. No separately retained copy identified.",
+        "required_followup": "Opus must identify retained exact0f241 bytes and scan them; if unavailable, repeat same-source adoption A0-A4, retain exact running adopted image before teardown, bind archive/index/manifest/config/diffIDs and perform full Trivy plus SBOM on that archive. New digest is new functional+scan evidence, never relabeled historical0f241.",
+        "no_risk_acceptance": true
+      }
+    },
+    "recovery_secret_custody": {
+      "status": "PASS_SOURCE_ABSENT_APPLICATION_RECOVERY_AND_LOCAL_CUSTODY",
+      "independently_reviewed_source_check": "Root reveal matched both configured recovery passphrases, excluded setup token and displayed custody guidance; unprivileged reveal was refused. Only sanitized check result was read by reviewer.",
+      "scope_limit": "Exact supported encrypted application archive and separately held recovery material restored original application state on fresh same-OVA VM after source VM/disks were deleted. This does not recover excluded historical logs, prove log-key rotation continuity, or qualify portable offsite DPAPI recovery.",
+      "retained_failures": "Do not erase the initial failed prerequisite attempt or imply it mutated the source.",
+      "reviewed_sanitized_export_receipt": {
+        "path": "export-prerequisite-and-custody.json",
+        "sha256": "9b07952582b5147d5a2f19627d19964d91f5b193992a44502fe43a623806fc75",
+        "initial_failed_prerequisite_exit": 90,
+        "failed_before_guest_operation": true,
+        "successful_export_exit": 0,
+        "baseline_exit": 0,
+        "export_archive_sha256": "6c3171d01583248e7162e8e37579ff49e132e131b6c934bf4442e7e431c810da",
+        "access_control": "Existing protected ACL verified by frozen helper; allow current Windows user and SYSTEM only; reparse paths refused",
+        "evidence_level": "Sanitized receipt independently read; private archive contents and underlying ACL transport were not re-read by this reviewer.",
+        "custody_limit": "Local private controller custody; no portable offsite escrow or source-absent restore claimed here",
+        "behavioral_recovery": "Original export receipt said not-yet-run; now completed by separately reviewed fresh-recovery.json. Original receipt remains unchanged.",
+        "historical_encrypted_log_recovery": "blocked: supported archive excludes logs"
+      },
+      "full_source_run_custody": {
+        "status": "PASS_RECORDED_DPAPI_FULL_RUN_ROUNDTRIP",
+        "files": 3904,
+        "directories": 716,
+        "source_bytes": 226332927,
+        "encryption": "Windows DPAPI CurrentUser",
+        "ciphertext_sha256": "f9c6f221548a48717dea329cff7ad46ed48bff39167b0480f243788a22e40ba8",
+        "plaintext_zip_sha256": "aa720319bb4126ff266bd273a39100e327683c667d26b2e0010fd94c9d457abb",
+        "roundtrip_verified": true,
+        "every_file_verified": true,
+        "source_unchanged": true,
+        "includes_operation_lock": true,
+        "scope": "Same Windows account/profile custody of full lab evidence, not supported application restore or portable offsite escrow."
+      },
+      "source_retirement": {
+        "status": "PASS_SANITIZED_SOURCE_DELETION_RECEIPT",
+        "source_uuid": "564d06b7-2087-3a13-3a3e-6f00a8270b07",
+        "controller_revision": "bf4ff8240d46a78985f96e9a1c5fceac043fef70",
+        "evidence_level": "Sanitized source-deletion.json independently reviewed: frozen helper PASS, owned disk paths deleted, before/after inventory and deleted-owned ledger hashes retained. Raw unrelated datastore inventory stays private.",
+        "fresh_import": "PASS: fresh default same-OVA import and normal PAM forced password change; no web setup or operator enrollment before restore.",
+        "source_absent_restore": "PASS: independently reviewed sanitized fresh-recovery.json and stage receipt/hash bindings; no live operations in this review.",
+        "deletion_evidence_sha256": {
+          "source-deletion-receipt.json": "bbf6898800743df66cfd53919e38f69805eae178c69cb9432be79c05caa8f62e",
+          "source-deletion-before.json": "544d028a871e801721546a4366237812a858137fbe1693b622b1bd6f8dee9962",
+          "source-deletion-after.json": "b07125791ac2f19a94f9347cb9565a5991577e33b4f0eeefaff13f151a095735",
+          "source-deleted-owned.json": "df6e4d26c6d3ec44d2824063ea84ca691cb6debe649dbc709486dcb328a0ae2c",
+          "source-deletion-attempt.json": "2c7f98af6d3e8e21e452247145bc67ea3e6b48e3015dade65bcbdf25add2b5b0"
+        }
+      },
+      "fresh_recovery": {
+        "status": "PASS_RECORDED_SUPPORTED_APPLICATION_RESTORE",
+        "fresh_uuid": "564d4148-a850-bf2f-219b-327dd38fd82c",
+        "fresh_vm": "culvert-esxi-aa71c4145a02",
+        "source_absent_before_import": true,
+        "archive_sha256": "6c3171d01583248e7162e8e37579ff49e132e131b6c934bf4442e7e431c810da",
+        "archive_bytes": 11654,
+        "traffic": {
+          "example.com": 200,
+          "example.org": 403
+        },
+        "restored_rules_count": 1,
+        "category_test_hosts": 5,
+        "agent_version": "v1.0.260-candidate.gcd8e44505bd3",
+        "restored_admin_ca_policy_categories_agent_match": true,
+        "default_fresh_bootstrap": true,
+        "web_setup_or_operator_enrollment_before_restore": false,
+        "stage_receipts": {
+          "delete-source": {
+            "exit_code": 0,
+            "receipt_sha256": "daaf542cac4ab02c675d6cccc4ed57e1f765fe68854ea27aa431dc699ae2b38c"
+          },
+          "fresh-import": {
+            "exit_code": 0,
+            "receipt_sha256": "77c1382f27d36ad029632a2dc93b1a06bca76b31d506834e50e3ae329f68a5ae"
+          },
+          "fresh-bootstrap": {
+            "exit_code": 0,
+            "receipt_sha256": "1beaee9e7825af83c3e25ca17bbb681198b4bd8a7e247a1843483336c142c6a5"
+          },
+          "fresh-firstboot-preflight": {
+            "exit_code": 0,
+            "receipt_sha256": "fa71ed6e4dd8639ae0ff2cdb9ba2aed815a62d8de23e80ac412360cc080b2819"
+          },
+          "fresh-restore": {
+            "exit_code": 0,
+            "receipt_sha256": "8b9b5abc938c63b20db02e263cf103df88ec06fda533a7733d2cb70dcc8a759e"
+          }
+        },
+        "evidence_sha256": {
+          "source-deletion-receipt.json": "bbf6898800743df66cfd53919e38f69805eae178c69cb9432be79c05caa8f62e",
+          "export-receipt.json": "8e02ac5b3382bbdd26658930c443e5f325aac3ba632102ff3ee08993c1e0df7e",
+          "archive-metadata.json": "e3ebc97d776cf62267cfc20bd082e20c8027fba0555db2a6809204c0df78102d",
+          "restored-observation.json": "8985512759309499ee4f52fb0221469c1a3f66192e1fe219fd51a1bb15d59055",
+          "guest-result.json": "72828a5cdeb5d1ebd1b6e66151cd01566bb4174c75bedea79ed206fcd01bce19",
+          "fresh-bootstrap-attempt.json": "3662be8fb7f7d605743c0cbf1c2bbfd0c67d7de0d7aec926e5785360462012ef"
+        },
+        "access": {
+          "ui_url": "https://192.168.1.111:9090",
+          "browser_user": "labadmin",
+          "console_user": "culvert",
+          "console_entry": "L / Sign in",
+          "credentials": "Separate local private custody; no secret values published",
+          "operator_ssh": "No operator key enrolled on this default-import restored VM"
+        },
+        "historical_logs": {
+          "result": "blocked",
+          "reason": "Supported Tier-1/Tier-2 backup excludes Tier-3 historical logs; retaining the log passphrase alone cannot recover them."
+        },
+        "evidence_level": "Sanitized publication independently reviewed; its publisher verifies exit codes/output hashes, archive hash, source-deletion binding and restored baseline fields; root independently validated raw stage receipts. Private secrets/observations were not reopened here."
+      }
+    },
+    "IdP_portal_cookie_replay": {
+      "status": "BLOCKED",
+      "reason": "No identity provider in this lab; core/fresh-QEMU/adoption checks preserve the blocked result.",
+      "limits": "CI cookie-boundary regression tests do not substitute for the missing end-to-end IdP run. No waiver or risk acceptance is recorded.",
+      "minimum_fixture": {
+        "proposal": "Disposable Go SAML test IdP using supported inline MetadataXML and ephemeral signing key; obtain real SP AuthnRequest/RelayState and post correctly signed short-lived correlated assertion through actual callback.",
+        "positive_controls": [
+          "Genuine portal cookie authenticates a proxy request under non-exempt auth-required policy.",
+          "Normal local administrator UI session reaches admin route."
+        ],
+        "negative_controls": [
+          "Rename unchanged genuine ps_session to ps_ui_session, send no other credentials, require /api/auth/users HTTP401; use subject colliding with local administrator.",
+          "Rename real UI viewer cookie to ps_session; it must not satisfy proxy authentication."
+        ],
+        "cleanup": "Remove disposable provider/rules/user, verify prior baseline, keep private keys/cookies out of public evidence.",
+        "scope": "Proposed, not implemented or executed. Synthetic SAML cookie-purpose coverage is not OIDC or external-vendor interoperability. Existing CI Keycloak test is introspection-only."
+      }
+    },
+    "core_lifecycle": {
+      "status": "PASS_RECORDED_LIFECYCLE_WITH_EXPLICIT_GAPS",
+      "counts": {
+        "info": 4,
+        "pass": 69,
+        "blocked": 1,
+        "not-run": 2
+      },
+      "independent_counts": {
+        "pass": 12
+      },
+      "adapter_counts": {
+        "pass": 9,
+        "info": 2,
+        "blocked": 1
+      },
+      "observed": [
+        "Authenticated local PAM bootstrap and forced password change; setup token gating and immediate demotion checks.",
+        "Operator restrictions, forwarding/file-transfer refusal, local-admin SSH refusal and password-required sudo.",
+        "Real allow/block/category/ClamAV enforcement; maintenance agent reachability; backup and actual restore.",
+        "Signed fixture unsigned rejection, signed apply and signed rollback.",
+        "OS update, maintenance reboot, source image/agent/CA/policy/category persistence and independent current-boot checks."
+      ],
+      "signed_fixture_limit": "Locally installed test trust and label-only target; not vendor signing or cross-version migration qualification.",
+      "historical_not_run_rows": "Two deferred harness rows remain in the append-only record: restore-commit and restore-persisted. Later guarded actual-restore and restore-persisted PASS rows provide the completed evidence; retain the original rows rather than recounting them as failures or deleting them.",
+      "retained_bootstrap_block": "Adapter retains initial-capture BLOCKED at 2026-10-07T22:41:25Z, followed by authenticated forced-change bootstrap PASS at 22:42:01Z.",
+      "three_esxi_timing_cycles": {
+        "status": "PASS_THREE_STRICT_CYCLES",
+        "budget_seconds": 120,
+        "backup_budget_seconds": 5,
+        "cycle1_history": {
+          "original_result": "blocked",
+          "original_reason": "direct ClamAV PONG coverage does not bracket readiness interval",
+          "original_proof_sha256": "bbf1617a4dc8164b2699d198ad291a3e93544ac9083a06cff01078304c1e38cb",
+          "supplement_result": "pass",
+          "supplement_proof_sha256": "96368a28f3618c240710e0987e9438e4c0351b0f196fe5b1795c4abb929499f9",
+          "same_original_observer_sha256": "e8f51551d7e70ffeb166d45fb540162851ae721eceb55946d42431daa27b43aa",
+          "seconds_to_three_healthy_samples": 69.094,
+          "first_backup_seconds": 1.453,
+          "direct_clamav_coverage": {
+            "guest_interval_start_ns": 50744155694,
+            "guest_interval_end_ns": 72885155694,
+            "pong_samples": 13,
+            "maximum_sample_gap_ns": 2006020549,
+            "current_container_endpoint_verified": true
+          },
+          "disposition": "Append-only supplemental historical sampler capture closes original missing-tail coverage; original BLOCKED remains retained. No repeated traffic or replaced observer.",
+          "evidence_level": "Original and supplemental summaries plus sanitized prefix/correlation custody mapping independently read; no private sampler or traffic was replayed."
+        },
+        "cycles": [
+          {
+            "cycle_id": "rcd8-1",
+            "result": "pass",
+            "seconds_to_three_healthy_samples": 69.094,
+            "first_backup_seconds": 1.453,
+            "first_backup_login_seconds": 0.11,
+            "direct_clamav_coverage": {
+              "guest_interval_start_ns": 50744155694,
+              "guest_interval_end_ns": 72885155694,
+              "pong_samples": 13,
+              "maximum_sample_gap_ns": 2006020549,
+              "current_container_endpoint_verified": true
+            },
+            "observer_sha256": "e8f51551d7e70ffeb166d45fb540162851ae721eceb55946d42431daa27b43aa",
+            "proof_sha256": "96368a28f3618c240710e0987e9438e4c0351b0f196fe5b1795c4abb929499f9"
+          },
+          {
+            "cycle_id": "rcd8-2",
+            "result": "pass",
+            "seconds_to_three_healthy_samples": 69.078,
+            "first_backup_seconds": 0.859,
+            "first_backup_login_seconds": 0.078,
+            "direct_clamav_coverage": {
+              "guest_interval_start_ns": 49521463808,
+              "guest_interval_end_ns": 70521463808,
+              "pong_samples": 12,
+              "maximum_sample_gap_ns": 2006965255,
+              "current_container_endpoint_verified": true
+            },
+            "observer_sha256": "765dd4ef5fec5e6409ae1537fdedbc13587e41a4d89f2bd742bb5338c95d99fd",
+            "proof_sha256": "881541ff5c36e0f595c51b45318c8035a158f1e1d303b4ae8b79b3818ea8ebfe"
+          },
+          {
+            "cycle_id": "rcd8-3",
+            "result": "pass",
+            "seconds_to_three_healthy_samples": 71.625,
+            "first_backup_seconds": 0.765,
+            "first_backup_login_seconds": 0.094,
+            "direct_clamav_coverage": {
+              "guest_interval_start_ns": 49459160190,
+              "guest_interval_end_ns": 73944160190,
+              "pong_samples": 14,
+              "maximum_sample_gap_ns": 2006035461,
+              "current_container_endpoint_verified": true
+            },
+            "observer_sha256": "b778af35a02e0a6e6f494a2c5ef077c48abb7b2b54feecb44eedc5e43fb8b103",
+            "proof_sha256": "beb1b1a6cf9f752c8a57f3634345c78afc07a77e8738e939822c9c13beb507fa"
+          }
+        ],
+        "scope": "Three measured maintenance cycles on exact cd8; no general cold-boot latency or release readiness claim. Original cycle1 BLOCKED remains unchanged."
+      },
+      "limits": "Twelve independent checks strengthen shared harness oracles; three maintenance recoveries pass strict120s/5s gates and fresh source-absent supported application restore passes separately. IdP, adopted-image exact scan, historical-log recovery and retained visual capture/input limitations remain explicit; not complete enterprise readiness."
+    },
+    "scanner_annotation_context": {
+      "status": "SUCCESSFUL_SCAN_WITH_RETAINED_ANNOTATION",
+      "codeql_check": 112939932917,
+      "path": "proxy_tunnel.go",
+      "line": 832,
+      "annotation": "One medium log-injection warning retained; prior source review classified numeric firstByte[0] formatted with %02x as a false positive.",
+      "baseline": "Relevant source unchanged from previously reviewed d698; no alert dismissal or zero-annotation claim.",
+      "main_app_limits": "Main-application Trivy uses HIGH/CRITICAL and unfixed/ignorefile filtering. govulncheck reports zero called vulnerabilities but one uncalled required-module vulnerability."
+    },
+    "clamav_outage": {
+      "status": "PASS_RECORDED_FAIL_CLOSED_AND_RECOVERY",
+      "source": "cd8e44505bd329e5de675592ad4c23f92a534d55",
+      "sidecar_image_id": "sha256:7d4e1087e7b94ac37971d35bc831321ebb3e891d6b7d4af8524b7a45e7f1efc3",
+      "readiness_http": [
+        200,
+        503,
+        200
+      ],
+      "observed": "Real clean/EICAR requests before, while unavailable and after recovery; clean traffic blocked while scanner down, then restored; EICAR blocked. Current scanner and original policy restored; post-outage export baseline matches.",
+      "guest_result_sha256": "e11d014e70ca3bfd5e34a4559d3ddcca25d31768b9bd691f8130f000411b7075",
+      "errors": [],
+      "limits": "Configured av_unavailable=closed on this exact VM; not every alternative scanner policy or failure mode."
+    },
+    "visual_evidence": {
+      "status": "PASS_FUNCTIONAL_CHECKS_WITH_RETAINED_CAPTURE_AND_INPUT_LIMITS",
+      "evidence": "esxi-visual-followup.json",
+      "observed": "KD_TEXT80x25; inherited getty reset flags; bounded /dev/console opens; Alt+F12/back; two owned delayed/failed unit fixtures; final one-key Esc exposed early kernel/systemd diagnostics. Both fixture removals and sampler removal recorded.",
+      "esc": {
+        "status": "PASS",
+        "controller": "85de2c7f12addb62bf953d4b3e3b9d5c9b41def5",
+        "one_key_sent": true,
+        "no_continuous_coverage_claim": true
+      },
+      "unresolved": [
+        "Original cold/fixture/tail screenshot capture gaps and HTTP409 remain; later completed sequences are sampled coverage, not reconstruction.",
+        "First preauth F2 attempt remained at public menu and sent no credential; explicit L authenticated successfully. F2 transport cause unresolved.",
+        "Serial-only/headless ESXi behavior remains outside this VGA follow-up."
+      ],
+      "public_images_reviewed": 4
+    },
+    "P1_identity_and_network": {
+      "status": "PASS_SEVEN_EFFECTIVE_STAGES",
+      "source_sha": "cd8e44505bd329e5de675592ad4c23f92a534d55",
+      "source_uuid": "564d06b7-2087-3a13-3a3e-6f00a8270b07",
+      "controller_revision": "bf4ff8240d46a78985f96e9a1c5fceac043fef70",
+      "controller_manifest_sha256": "56e34a8912587c9c0f13011558ab0aba45c5d5c186de72a677cfb93001eb5166",
+      "stage_results": {
+        "network-before": {
+          "result": "pass",
+          "supplemented": false
+        },
+        "network-after": {
+          "result": "pass",
+          "supplemented": false
+        },
+        "identity-before": {
+          "result": "pass",
+          "supplemented": false
+        },
+        "identity-reset": {
+          "result": "pass",
+          "supplemented": false
+        },
+        "identity-power-on": {
+          "result": "pass",
+          "supplemented": false
+        },
+        "identity-bootstrap": {
+          "result": "pass",
+          "supplemented": true
+        },
+        "identity-after": {
+          "result": "pass",
+          "supplemented": false
+        }
+      },
+      "observed": {
+        "fresh_machine_id": true,
+        "fresh_ssh_host_key": true,
+        "operator_keys_empty": true,
+        "old_console_password_pam_status": 7,
+        "old_operator_key_refused": true,
+        "automatic_poweroff": true,
+        "new_console_password_forced_change": "pass in bound one-shot continuation"
+      },
+      "retained_failure": "BLOCKED preauth 640x480 firmware frame; no credential submitted",
+      "scope": "same owned VM reset/poweroff/fresh boot; no cloned second VM under one-VM limit",
+      "evidence_level": "Sanitized seven-stage/observation receipts independently reviewed; parent separately executed actual identity/network validators. No raw credentials or live VM inspected in this review."
+    },
+    "historical_encrypted_logs": {
+      "status": "BLOCKED_SUPPORTED_RECOVERY_NOT_DEMONSTRATED",
+      "problem": "Supported application archive excludes historical log records; holding the log passphrase alone cannot reconstruct missing records.",
+      "required_closeout": "Supported authenticated historical-record export/restore, possibly separate encrypted archive, with log-key custody across rotation and successful recovery while source volumes are unavailable; alternatively evidence of an already-supported external retention/recovery path.",
+      "coordination_comment": 6048730704,
+      "not_closure": [
+        "Documenting current omission",
+        "Retaining a passphrase without the records",
+        "DPAPI lab evidence custody",
+        "Unencrypted or application-only restore"
+      ],
+      "risk_acceptance_recorded": false
+    }
+  },
+  "evidence_hashes": {
+    "source-run/evidence/03-build-info.json": "e80a0e9839bdcdb6b6d1042f6cbde0d36f1285e9a35d465c36ebcbee66d3e057",
+    "source-run/evidence/checks.jsonl": "c98a54e7725aacb57ff527d59db57c90013e4e781d96aa6b980c106fa2842e33",
+    "source-run/evidence/independent-checks.jsonl": "b14bd93ab529a3ee07eeabcc6916bbe88ad154244e96f733c7b433935fd0e89c",
+    "source-run/evidence/adapter.jsonl": "e44b9996e5b54f95207b01af4e382ddda8d5f8bf5e869623aa8d8f865cfa0411",
+    "intake/sanitized/audit.json": "8953df44fc96a2f9fdb6ae50ed212895f8f8a0ecbe83c66d8c67b922fccb6c99",
+    "intake/sanitized/fdisk-checks.jsonl": "b90a2fc72fe43b8a448f522821ebd0fb651c18c377da95155c249368fe63f6a8",
+    "intake/sanitized/adoption-checks.jsonl": "dbafb9221cf4a84463bef6d43e6755805e4237cb75db5a872222e174b8ec1188",
+    "intake/sanitized/qemu-checks.jsonl": "7847dfc81c627c18d52dc4e5030c43e0a9331ae3bfab9ba14442b992bfbb3807",
+    "intake/sanitized/image-and-oracle-verification.json": "a4a45ef34c35088809501e861d7a4e5eaf22dbde779e75a3449b91db3b776d08",
+    "intake/sanitized/codeql-annotations.json": "37b52575e08d62f3a55b7a348dd319ed4644af67f8498cff9d05c5b16d232838",
+    "source-run/evidence/production-recovery-rcd8-1-summary.json": "8dae03cff5282cb1cb49fe51dfaf5e5a519f7e448d3bf991bf19bdfd60e548b4",
+    "source-run/evidence/production-recovery-rcd8-1-supplement-summary.json": "4fa0f05a27737033ae29b9de22ba68ba13b98a1a18f46586fd40ab5272a3616a",
+    "export-prerequisite-and-custody.json": "9b07952582b5147d5a2f19627d19964d91f5b193992a44502fe43a623806fc75",
+    "source-run/evidence/production-recovery-rcd8-2-summary.json": "6483880bab5538cea631aa4e82713437d169dee0903a3e233321d6c0c4260f5c",
+    "source-run/evidence/production-recovery-rcd8-3-summary.json": "f657bbc9d9921d0ba6a4918c02fc2fa75e0688ddd877134f99545871b9930354",
+    "esxi-recovery-timing.json": "733c7aad9cfa0099219a8b1d8ccc14714afd1002c5f421cba8cf835ac1e01c57",
+    "recovery-first-snapshot-supplement.json": "36b2522e9f74bbff6818116351a235398c6bfc7f12401edeb51a5ffe3a960304",
+    "clamav-outage.json": "a04cc2fbff4fcd55ccd2af0a0f3afcdc65f3cafa01e9065b4771f87f89651768",
+    "esxi-visual-followup.json": "c3a94e60e0412138c14745eb91604be84c338aabb29f1127b3a82f7c630ed842",
+    "lifecycle-checks-sanitized.json": "667d5af671c7e658bba48a13a94c56b8a71598daeab9138f0ada874cddb7efdd",
+    "p1-identity-and-network.json": "eaa48aed03626e48a392df2ef6230177045a0f418f71a19c32f05a82c75ade91",
+    "source-retirement-gates.json": "34ca972921827198672e392abdde7e7bfc7e0665badac35ed2e057e0af27092b",
+    "source-full-custody.json": "cb5fb91d72ab39511a8022da18f41733945f2c3bb5a9461bc0037f99077b0944",
+    "esxi-visual-followup.md": "043ff4676466d5e89b11249e945834106c7ba1311d3069943cead69f596a61d2",
+    "esxi-cd8-esc-diagnostics.png": "b823b5b6d365f602d5297437a4bee517c3eb578c67ee17ddf56e096f59c5b7ba",
+    "source-deletion.json": "d702b6a5c077ead6cb1db8f92fcec5042db6fde92e8856fa0d1fa9c50d8bf059",
+    "final-controller-run.py": "c2b710d83694d7cd3724405dd915f75770bf0df627f5813a55941596894dc087",
+    "fresh-firstboot-preflight.py": "d721f240beb745b1260cd39ddbbb2229848ea69416e0147e73f5632cc23fbd60",
+    "publish-fresh-result.py": "7ea5c217e9f3d132c6a0dbd0b9aebc9d67ccaa1a7d47d4e296ea2469ad5c7f3a",
+    "fresh-recovery.json": "bd1ea05eb3c726c886bf14722b4c89d10205e63d31e2c43921ec596e4e7a5ad7"
+  },
+  "coordination": {
+    "comment_url": "https://github.com/KidCarmi/Culvert/pull/1528#issuecomment-6048730704",
+    "comment_id": 6048730704,
+    "latest_reviewed_comment_id": 6048730704,
+    "opus_response_after_coordination_found": false,
+    "checked_at_utc": "2026-10-07T23:44:51.743779+00:00",
+    "interpretation": "No response/new closure evidence found in the current returned PR comments. Both requested follow-ups remain open; absence is not acceptance.",
+    "comment_updated_at": "2026-10-07T23:43:19Z",
+    "requested_open_actions": [
+      "Exact adopted-image scan",
+      "Live IdP cookie-purpose replay",
+      "Supported historical encrypted-log recovery and rotation custody"
+    ]
+  },
+  "publication_review": {
+    "status": "NO_CREDENTIAL_EXPOSURE_DETECTED_IN_REVIEWED_SUBSET",
+    "text_files_scanned": 18,
+    "public_pngs_visually_reviewed": 4,
+    "checks": "Private-key blocks, JWTs, GitHub token formats, bearer/session-cookie values, signed-download/screenshot URLs and credential-named JSON values; visible image text reviewed.",
+    "limits": "Bounded content review, not a proof that arbitrary future files are sanitized. Public files intentionally retain lab hostname/IP/UUID metadata; raw screenshot sequences, tokens, passphrases and DPAPI archives were not inspected or copied.",
+    "overclaim_check": "Three strict cycles remain separate from extra visual boots; cycle1 originalBLOCKED remains; full custody is separate from application restore; pre-deletion gate is not deletion proof.",
+    "additional_file_review": "source-deletion.json manually reviewed: exact owned VM/disk identifiers and hashes only, no unrelated inventory or credentials.",
+    "final_additions": "Fresh-recovery JSON and three final orchestration scripts reviewed: no actual credentials detected; scripts contain private-path references and environment forwarding, not secret literal values. Scripts archived as provenance only; not executed during review.",
+    "main_report_readonly": "esxi-cd8-20261008.md reviewed against retained fresh recovery, timing, P1, custody, visual and blocker facts; no factual contradiction identified. Production closeout remains BLOCKED."
+  }
+}

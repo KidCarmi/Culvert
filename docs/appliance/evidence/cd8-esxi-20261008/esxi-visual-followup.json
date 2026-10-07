@@ -1,0 +1,380 @@
+{
+  "schema": 1,
+  "source": "cd8e44505bd329e5de675592ad4c23f92a534d55",
+  "capture_controller": "91fd17fba173c555d5ab275f0143d8a582993689",
+  "authenticated_controller": "7acb405c4e18e8fa8d77734e812b11bb91483208",
+  "images": [
+    {
+      "file": "esxi-cd8-menu.png",
+      "sha256": "3f0f56233605b9678280b4d722bbcd0c1b74ec056054df1fcedf56607fdac56b",
+      "bytes": 9136,
+      "dimensions": [
+        720,
+        400
+      ],
+      "privacy_review": "explicitly approved by parent before copy"
+    },
+    {
+      "file": "esxi-cd8-kernel-vt.png",
+      "sha256": "adcbdc680009cd2588078189db6c0c09263f70b1ba1a77ab44713f7a541624de",
+      "bytes": 15164,
+      "dimensions": [
+        720,
+        400
+      ],
+      "privacy_review": "explicitly approved by parent before copy"
+    },
+    {
+      "file": "esxi-cd8-esc-diagnostics.png",
+      "sha256": "b823b5b6d365f602d5297437a4bee517c3eb578c67ee17ddf56e096f59c5b7ba",
+      "bytes": 17817,
+      "dimensions": [
+        720,
+        400
+      ],
+      "privacy_review": "explicitly reviewed and approved by parent; early kernel/systemd diagnostics only"
+    }
+  ],
+  "inspection": {
+    "before": {
+      "source": "cd8e44505bd329e5de675592ad4c23f92a534d55",
+      "tty_mode": 0,
+      "active_vt": "tty1",
+      "rows_columns": [
+        25,
+        80
+      ],
+      "tty_reset": "yes",
+      "efi_ubuntu_directory_exists": true,
+      "empty_console_open_exit": 0,
+      "empty_console_open_seconds": 0.002412567,
+      "observation_sha256": "63d59751ac494e963a69620f6ad77eaee8f1401df24fa773e7941644f032db76"
+    },
+    "after-fixture": {
+      "source": "cd8e44505bd329e5de675592ad4c23f92a534d55",
+      "tty_mode": 0,
+      "active_vt": "tty1",
+      "rows_columns": [
+        25,
+        80
+      ],
+      "tty_reset": "yes",
+      "efi_ubuntu_directory_exists": true,
+      "empty_console_open_exit": 0,
+      "empty_console_open_seconds": 0.00220249,
+      "observation_sha256": "6e708571406b5852c9f8f996f497067d1dbb596b4629177385b51c1c3d87ebfa"
+    },
+    "final-post-esc": {
+      "source": "cd8e44505bd329e5de675592ad4c23f92a534d55",
+      "tty_mode": 0,
+      "active_vt": "tty1",
+      "rows_columns": [
+        25,
+        80
+      ],
+      "tty_reset": "yes",
+      "tty_vhangup": "yes",
+      "tty_vt_disallocate": "yes",
+      "efi_ubuntu_directory_exists": true,
+      "empty_console_open_exit": 0,
+      "empty_console_open_seconds": 0.002052662,
+      "observation_sha256": "feec38bef598de64407fc4fb29e42b40980817739d4f23d92ab095d506e1931e"
+    }
+  },
+  "operations": {
+    "visual-fixture-install": {
+      "exit_code": 0,
+      "finished_utc": "2026-10-07T23:05:59.661090+00:00",
+      "stdout_sha256": "73403c956f8d89112b41e4de6f45156236492ecf4b485234c33c88f8a3bbaf7c",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "visual-fixture-remove": {
+      "exit_code": 0,
+      "finished_utc": "2026-10-07T23:09:49.456791+00:00",
+      "stdout_sha256": "7c829ea9baec0a598dbad1afbd13401910fa69665840e4febed2f37be1909ecb",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "visual-fixture-unit-evidence": {
+      "exit_code": 0,
+      "finished_utc": "2026-10-07T23:09:40.946519+00:00",
+      "stdout_sha256": "a63cec571d7ab0b7db27e2c1be3551c7c3a27c5306f34c5ad0ae1fa10e58ef96",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "visual-fixture-observer": {
+      "exit_code": 90,
+      "finished_utc": "2026-10-07T23:06:31.931133+00:00",
+      "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stderr_sha256": "fd588d13df571680e434fec3cd4fd43613be9c34f7ec57ff9de51f5edc70fa44"
+    },
+    "visual-fixture-tail-observer": {
+      "exit_code": 90,
+      "finished_utc": "2026-10-07T23:08:32.759394+00:00",
+      "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stderr_sha256": "fd588d13df571680e434fec3cd4fd43613be9c34f7ec57ff9de51f5edc70fa44"
+    },
+    "visual-kernel-vt": {
+      "exit_code": 0,
+      "finished_utc": "2026-10-07T23:08:19.805259+00:00",
+      "stdout_sha256": "7799e017462b7d48613e3f23c51e834cc5295c88b7609877d8203f07059ba3cf",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "visual-return-menu": {
+      "exit_code": 90,
+      "finished_utc": "2026-10-07T23:08:32.880407+00:00",
+      "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stderr_sha256": "399ee753b0bc12637cb5e0c479d488ed7a79d8c84825c796b31a532d3408b927"
+    },
+    "visual-return-menu-reviewed-cursor": {
+      "exit_code": 0,
+      "finished_utc": "2026-10-07T23:08:55.018371+00:00",
+      "stdout_sha256": "7799e017462b7d48613e3f23c51e834cc5295c88b7609877d8203f07059ba3cf",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "capture-followup-generate-install": {
+      "exit_code": 0,
+      "finished_utc": "2026-10-07T23:19:35.606033+00:00",
+      "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "receipt_sha256": "01d76d8353352587362974c4dd8eea1f0b11b3c7be16482c3225d8e4506d64b8"
+    },
+    "capture-followup-generate-remove": {
+      "exit_code": 0,
+      "finished_utc": "2026-10-07T23:19:35.692792+00:00",
+      "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "receipt_sha256": "424f2554de45969418efde771550b3b7b21185c61a28ae0cf2fd1a10354b0348"
+    },
+    "capture-followup-install-after-L": {
+      "exit_code": 0,
+      "finished_utc": "2026-10-07T23:23:19.189605+00:00",
+      "stdout_sha256": "eb5a73234ec72037fb8e3fccf306f0883ace33db2f28b6330dd3d036a4d42f23",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "receipt_sha256": "b6936cb3aade1652cea7960517b8dcfe2b0085dfbb5a39c66f1a246a9aeb44b8"
+    },
+    "capture-followup-install": {
+      "exit_code": 90,
+      "finished_utc": "2026-10-07T23:20:37.089672+00:00",
+      "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stderr_sha256": "4de0dd088fc5545b08d37c5231e310d668b30bfc997369e997bb3f6cbbcf0f15",
+      "receipt_sha256": "b31f6ba98f502cb937faff79794a11de90407d7f0e88987fe84cc54d7e3e8e80"
+    },
+    "capture-followup-post-inspect": {
+      "exit_code": 0,
+      "finished_utc": "2026-10-07T23:27:05.816535+00:00",
+      "stdout_sha256": "e0ec90d3099171d2acac893ee1f89a516b7383d71abd4f3c8a0848751081b458",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "receipt_sha256": "217596f37f43fea8823ae3b9cb54641c58cff6ebf871ebb8eb3b29642e9fdcd6"
+    },
+    "capture-followup-remove": {
+      "exit_code": 0,
+      "finished_utc": "2026-10-07T23:27:28.903668+00:00",
+      "stdout_sha256": "e3112cd2374788ba5190787d3149af87705f515ac58986bf0bc60078f1d72247",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "receipt_sha256": "19f7aa9a26c46e8e0230d11b723919c565ffd0ce62ab31864cc4c93f57461d80"
+    },
+    "capture-followup-unit-evidence": {
+      "exit_code": 0,
+      "finished_utc": "2026-10-07T23:27:17.410979+00:00",
+      "stdout_sha256": "600a085c594db8cd1cb736f126bfbb4bafc26cf254f6474eea3391297c3c974f",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "receipt_sha256": "7268c1ae75d466347aa273322a06f73c205d02a4efaf067ba13f671dd6521c00"
+    },
+    "visual-clean-esc-observer": {
+      "exit_code": 0,
+      "finished_utc": "2026-10-07T23:17:54.352835+00:00",
+      "stdout_sha256": "c5d441ee5bed4ca46577f54cfcfd855bd2d02f1b9b78abbb2f39cd56b1605598",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "receipt_sha256": "b11d15e24fb199793dc2e8a381aa84744d58e3837c15a8b139f59de4fb4a3d0b"
+    },
+    "visual-clean-splash-esc": {
+      "exit_code": 90,
+      "finished_utc": "2026-10-07T23:15:33.575926+00:00",
+      "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stderr_sha256": "399ee753b0bc12637cb5e0c479d488ed7a79d8c84825c796b31a532d3408b927",
+      "receipt_sha256": "fc6fbf4cdad3f0968d829f8288969f6274d26a2d0452d341b90c1ff75305fb59"
+    },
+    "visual-followup-early-observer": {
+      "exit_code": 0,
+      "finished_utc": "2026-10-07T23:24:13.817987+00:00",
+      "stdout_sha256": "7cad291c7ce967e7d8887f44dc4a4614d6081f09fbcec54387258309ffc50cb5",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "receipt_sha256": "992ce550ee56dceed0e07a307edf6e0a786c4c8a1fe7f34fda23001d98bdddcc"
+    },
+    "visual-followup-esc-reviewed": {
+      "exit_code": 90,
+      "finished_utc": "2026-10-07T23:24:59.625190+00:00",
+      "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stderr_sha256": "399ee753b0bc12637cb5e0c479d488ed7a79d8c84825c796b31a532d3408b927",
+      "receipt_sha256": "64e451b90d51395769881e6d8f449c647f7d1cc17f5ea278874b16fb75986946"
+    },
+    "visual-followup-esc": {
+      "exit_code": 90,
+      "finished_utc": "2026-10-07T23:24:41.536335+00:00",
+      "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stderr_sha256": "399ee753b0bc12637cb5e0c479d488ed7a79d8c84825c796b31a532d3408b927",
+      "receipt_sha256": "346a3496835d4835ad0dab39f0418a0e9be8afe206237efa4198ac63429f86bf"
+    },
+    "visual-reviewed-splash-esc": {
+      "exit_code": 0,
+      "finished_utc": "2026-10-07T23:28:39.842227+00:00",
+      "stdout_sha256": "c080b3f6416c1eae454f830a2e20e40e8301dfa71c27066e54368cfbcb7f67ac",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "receipt_sha256": "70a8836e6b8a36a4ca5418b5545614393995abc8ee779204532e9c651b453d21"
+    },
+    "visual-final-postboot-inspect": {
+      "exit_code": 0,
+      "finished_utc": "2026-10-07T23:32:28.855489+00:00",
+      "stdout_sha256": "feec38bef598de64407fc4fb29e42b40980817739d4f23d92ab095d506e1931e",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "receipt_sha256": "782c6d44f29ea06c1dad809936295adafab4232c63bad3eab86d6f01b3048822"
+    },
+    "sampler-remove": {
+      "exit_code": 0,
+      "finished_utc": "2026-10-07T23:32:33.411391+00:00",
+      "stdout_sha256": "dda728bf612e3facaf8acb6e558584abc4233aac1d93f14ad479538eb1b5b517",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "receipt_sha256": "88cdcafda5deeb75b76472a7e7b9b7186db666eee3a2ddf6bcac27d03fe4a61b"
+    }
+  },
+  "observers": {
+    "visual-fixture-boot": {
+      "frames": 9,
+      "completed": false,
+      "first_capture_monotonic_ns": 116229750000000,
+      "last_capture_monotonic_ns": 116248953000000,
+      "last_elapsed_seconds": 19.203,
+      "metadata_sha256": "a7394dab27778bdd4c55f2db3baf2adca5e651628f61bbd9ab974136ffb3ce9e"
+    },
+    "visual-fixture-tail": {
+      "frames": 24,
+      "completed": false,
+      "first_capture_monotonic_ns": 116315218000000,
+      "last_capture_monotonic_ns": 116369781000000,
+      "last_elapsed_seconds": 54.563,
+      "metadata_sha256": "5f611eb4519dff0b6345b5e41db71fa8871aa507e2c7137241654d1663e23d31"
+    },
+    "clean-boot-esc": {
+      "frames": 131,
+      "http409_gaps": 0,
+      "completed": true,
+      "continuous_coverage": false,
+      "metadata_sha256": "95cd33fb6c0b6711bf2df39b98d70dc64eeec8dc0666c401bb99d9a7d2187e8f",
+      "helper_sha256": "5fc9c772922f4e8fac516caecf14d35cfb0b6242a522d1177951f613ac749843"
+    },
+    "followup-early": {
+      "frames": 32,
+      "http409_gaps": 1,
+      "completed": true,
+      "continuous_coverage": false,
+      "metadata_sha256": "8d7f9c4d53002b6cb1c07818283dd09c620123db2c7c80e71b85c72cd4eccc3d",
+      "helper_sha256": "5fc9c772922f4e8fac516caecf14d35cfb0b6242a522d1177951f613ac749843"
+    }
+  },
+  "first_return_menu_intent_exists": false,
+  "final_return_menu_matches_reviewed_menu": true,
+  "esc": {
+    "status": "PASS",
+    "controller": "85de2c7f12addb62bf953d4b3e3b9d5c9b41def5",
+    "helper_sha256": "6e77bfdcd58e6c6d7108747f60c9fb36692a45e56471f97fe7856af025cb5de2",
+    "decoder_sha256": "ab5d053cbac05856fcb4e9efda034dfda88aa42f2b4809e693791085bdfda24d",
+    "font_sha256": [
+      "d9025175dcf18f8b7442009a1870837f6ae974fa9561e9d8dae5eb145566fee7",
+      "1b8ee210c00ee77a3781c1c10fa0d00520ec4b0bc4f30018e4f656e8049605bb"
+    ],
+    "reference_sha256": [
+      "29f24751af7db08fd64e759c6b27c8250749d16f521112c728296f5c89958606",
+      "dc2d98454739f69ac8176d9af4b409673cdb8114ae33e4cc88419b1f1244b8a6"
+    ],
+    "one_key_sent": true,
+    "post_key_review": "early kernel and systemd diagnostics visible",
+    "record_sha256": {
+      "begin.json": "bb5a5267ab859eb5a7cb1dfbe54588eefdd71edc53a5fdfda42383033a70a7b6",
+      "intent.json": "271d753eefb4f29c0bb7971b7a16ed70d7ab8cbb7d5f3f169ea45db334ded378",
+      "sent.json": "2879c7cf00161036095841020760ddeea80a98be0cca3f71996c3b4ad7a53f5a",
+      "complete.json": "42ca5ec86ddd5b52222ba9ceb452c202f3991e58c9362fda80cba3bfd6d22d85"
+    },
+    "no_continuous_coverage_claim": true
+  },
+  "fixture_units": {
+    "culvert-lab-visual-delay.service": {
+      "result": "success",
+      "exit_status": 0,
+      "start_guest_s": 13.012157,
+      "end_guest_s": 58.039502,
+      "active_state": "inactive"
+    },
+    "culvert-lab-visual-failure.service": {
+      "result": "exit-code",
+      "exit_status": 1,
+      "start_guest_s": 13.015015,
+      "end_guest_s": 13.356351,
+      "active_state": "failed"
+    }
+  },
+  "explicit_local_logins": {
+    "explicit-l-signin.json": {
+      "stage": "authenticated-recovery-shell",
+      "result": "pass",
+      "password_attempts": 1,
+      "evidence_sha256": "b169b9a08b94d563a97f5c2abb752abaaab5cd3c502bb89bdcc2755b023c64c4"
+    },
+    "explicit-l-followup-cleanup.json": {
+      "stage": "authenticated-recovery-shell",
+      "result": "pass",
+      "password_attempts": 1,
+      "evidence_sha256": "b169b9a08b94d563a97f5c2abb752abaaab5cd3c502bb89bdcc2755b023c64c4"
+    }
+  },
+  "preauth_f2_uncertainty": {
+    "status": "retained controller/input uncertainty; root cause not proven",
+    "fixture_install_dispatched": false,
+    "credential_sent": false,
+    "observed_public_menu_captures": 26,
+    "subsequent_explicit_l_login": "PASS; one password attempt",
+    "failed_receipt_sha256": "b31f6ba98f502cb937faff79794a11de90407d7f0e88987fe84cc54d7e3e8e80"
+  },
+  "refused_esc_probes": {
+    "clean-splash-esc": {
+      "intent_exists": false,
+      "key_sent": false,
+      "before_sha256": "0863ad491dfbb7af927b0a5496b035e60afc0f9bf8cf6541be7c25797157adfe",
+      "reason": "reviewed screenshot bytes changed before input; original failure retained"
+    },
+    "followup-esc": {
+      "intent_exists": false,
+      "key_sent": false,
+      "before_sha256": "8e7208d4d06fcae0adfe1da9155f0956de75574b3b9f300e0b0c214281bd765d",
+      "reason": "reviewed screenshot bytes changed before input; original failure retained"
+    },
+    "followup-esc-reviewed": {
+      "intent_exists": false,
+      "key_sent": false,
+      "before_sha256": "3f0f56233605b9678280b4d722bbcd0c1b74ec056054df1fcedf56607fdac56b",
+      "reason": "reviewed screenshot bytes changed before input; original failure retained"
+    }
+  },
+  "capture_followup_fixture": {
+    "campaign": "capture-followup",
+    "generator_sha256": "8da0318435c9a976561033d5ddd737308625f1be1b819419a9d4f359b6005253",
+    "install_after_explicit_l": "PASS",
+    "cleanup": "PASS",
+    "original_audit_preserved": true,
+    "units": {
+      "culvert-lab-visual-delay-capture-followup.service": {
+        "result": "success",
+        "start_guest_s": 13.244241,
+        "end_guest_s": 58.267918,
+        "exit_status": 0,
+        "active_state": "inactive"
+      },
+      "culvert-lab-visual-failure-capture-followup.service": {
+        "result": "exit-code",
+        "start_guest_s": 13.246052,
+        "end_guest_s": 13.294387,
+        "exit_status": 1,
+        "active_state": "failed"
+      }
+    },
+    "unit_evidence_sha256": "600a085c594db8cd1cb736f126bfbb4bafc26cf254f6474eea3391297c3c974f"
+  }
+}

@@ -1,0 +1,57 @@
+{
+  "source_sha": "cd8e44505bd329e5de675592ad4c23f92a534d55",
+  "ova_sha256": "46cb60078eb2adbc2f8704046268f68e56798bc2b37cd824ba70f8a919bd2ab1",
+  "original": {
+    "controller": "91fd17fba173c555d5ab275f0143d8a582993689",
+    "manifest_sha256": "f414e1325e007628862cdf6a367c6d0d56e53dded3fd393e1e83b7e4c7e3c26e",
+    "attempt": {
+      "status": "blocked",
+      "stage": "initial-capture",
+      "uuid": "564d06b7-2087-3a13-3a3e-6f00a8270b07"
+    },
+    "attempt_sha256": "940b366ef385dc485c728041af3899fc08054bbb52d7a42c316349298823c177",
+    "process_elapsed_seconds": 910.89128,
+    "credential_not_captured_before_continuation": true,
+    "disposition": "BLOCKED at initial capture; exact 8-pixel reader cannot decode 9-pixel cell pitch. Original outcome retained."
+  },
+  "continuation": {
+    "controller": "7acb405c4e18e8fa8d77734e812b11bb91483208",
+    "manifest_sha256": "0b5f72749e1a551046a40004b964c9b7ca7a4873e8fcaf43614d49e905f788ce",
+    "attempt": {
+      "status": "passed",
+      "uuid": "564d06b7-2087-3a13-3a3e-6f00a8270b07",
+      "prior_marker_sha256": "940b366ef385dc485c728041af3899fc08054bbb52d7a42c316349298823c177",
+      "original_marker_sha256": "940b366ef385dc485c728041af3899fc08054bbb52d7a42c316349298823c177",
+      "bootstrap_helper_sha256": "cd1757d49ea31a8774acc35ead863c15bb38f774cc98e82b1c55c34c5b5adbf7",
+      "keyboard_source_sha256": "54cdf5cc1eaf6cf77e7a0253065f72023af5414ec648acb4fe17d2dc9b208538",
+      "pixel_decoder_sha256": "ab5d053cbac05856fcb4e9efda034dfda88aa42f2b4809e693791085bdfda24d",
+      "console_cell_width": 9
+    },
+    "attempt_sha256": "42297bca294f10fa69da3c44fb927cbdeac6ab4ca4e540e7f5228358f4eddd8b",
+    "disposition": "PASS after existing bounded pre-authentication continuation; forced PAM password change completed."
+  },
+  "decoder_evidence": {
+    "image_sha256": "f07e308a5e2b665f38677763a4ec198b5ea5750f92cf2249e9ba12a9478991df",
+    "dimensions": [
+      720,
+      400
+    ],
+    "selected_cell_pitch": [
+      9,
+      16
+    ],
+    "cells": 2000,
+    "nonblank_matches": 635,
+    "blank_cells": 1365,
+    "all_ninth_columns_blank": true,
+    "font_sha256": "d9025175dcf18f8b7442009a1870837f6ae974fa9561e9d8dae5eb145566fee7",
+    "method": "Explicit scope; exact pinned global font; no OCR corrections or inferred credential characters."
+  },
+  "capture_gap": {
+    "frames": 95,
+    "last_elapsed_seconds": 222.391,
+    "requested_seconds": 420,
+    "result": "BLOCKED partial sequence; no completion event",
+    "cause": "Unestablished; original helper exported generic failure only. No full-sequence visual PASS."
+  }
+}

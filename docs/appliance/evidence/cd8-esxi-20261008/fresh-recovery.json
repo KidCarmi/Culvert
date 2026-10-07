@@ -1,0 +1,70 @@
+{
+  "schema": 1,
+  "result": "pass",
+  "source_sha": "cd8e44505bd329e5de675592ad4c23f92a534d55",
+  "ova_sha256": "46cb60078eb2adbc2f8704046268f68e56798bc2b37cd824ba70f8a919bd2ab1",
+  "image_id": "sha256:659258eee3fc609a8e95e0bc22c89cb57849887b0dcf2b92708ddbff0fb69b42",
+  "controller_revision": "bf4ff8240d46a78985f96e9a1c5fceac043fef70",
+  "controller_manifest_sha256": "56e34a8912587c9c0f13011558ab0aba45c5d5c186de72a677cfb93001eb5166",
+  "source_uuid": "564d06b7-2087-3a13-3a3e-6f00a8270b07",
+  "fresh_uuid": "564d4148-a850-bf2f-219b-327dd38fd82c",
+  "fresh_vm": "culvert-esxi-aa71c4145a02",
+  "source_vm_and_disk_folder_absent_before_import": true,
+  "single_vm_limit": 1,
+  "same_exact_ova": true,
+  "archive_sha256": "6c3171d01583248e7162e8e37579ff49e132e131b6c934bf4442e7e431c810da",
+  "archive_bytes": 11654,
+  "original_admin_ca_policy_categories_agent_and_traffic_match": true,
+  "traffic": {
+    "example.com": 200,
+    "example.org": 403
+  },
+  "restored_rules_count": 1,
+  "category_test_hosts": 5,
+  "agent_version": "v1.0.260-candidate.gcd8e44505bd3",
+  "default_fresh_bootstrap": true,
+  "web_setup_or_operator_enrollment_before_restore": false,
+  "historical_logs": {
+    "result": "blocked",
+    "reason": "Supported Tier-1/Tier-2 backup excludes Tier-3 historical logs; retaining the log passphrase alone cannot recover them."
+  },
+  "access": {
+    "ui_url": "https://192.168.1.111:9090",
+    "browser_user": "labadmin",
+    "console_user": "culvert",
+    "console_entry": "L / Sign in",
+    "credentials": "Separate local private custody; no secret values published",
+    "operator_ssh": "No operator key enrolled on this default-import restored VM"
+  },
+  "stage_receipts": {
+    "delete-source": {
+      "exit_code": 0,
+      "receipt_sha256": "daaf542cac4ab02c675d6cccc4ed57e1f765fe68854ea27aa431dc699ae2b38c"
+    },
+    "fresh-import": {
+      "exit_code": 0,
+      "receipt_sha256": "77c1382f27d36ad029632a2dc93b1a06bca76b31d506834e50e3ae329f68a5ae"
+    },
+    "fresh-bootstrap": {
+      "exit_code": 0,
+      "receipt_sha256": "1beaee9e7825af83c3e25ca17bbb681198b4bd8a7e247a1843483336c142c6a5"
+    },
+    "fresh-firstboot-preflight": {
+      "exit_code": 0,
+      "receipt_sha256": "fa71ed6e4dd8639ae0ff2cdb9ba2aed815a62d8de23e80ac412360cc080b2819"
+    },
+    "fresh-restore": {
+      "exit_code": 0,
+      "receipt_sha256": "8b9b5abc938c63b20db02e263cf103df88ec06fda533a7733d2cb70dcc8a759e"
+    }
+  },
+  "evidence_sha256": {
+    "source-deletion-receipt.json": "bbf6898800743df66cfd53919e38f69805eae178c69cb9432be79c05caa8f62e",
+    "export-receipt.json": "8e02ac5b3382bbdd26658930c443e5f325aac3ba632102ff3ee08993c1e0df7e",
+    "archive-metadata.json": "e3ebc97d776cf62267cfc20bd082e20c8027fba0555db2a6809204c0df78102d",
+    "restored-observation.json": "8985512759309499ee4f52fb0221469c1a3f66192e1fe219fd51a1bb15d59055",
+    "guest-result.json": "72828a5cdeb5d1ebd1b6e66151cd01566bb4174c75bedea79ed206fcd01bce19",
+    "fresh-bootstrap-attempt.json": "3662be8fb7f7d605743c0cbf1c2bbfd0c67d7de0d7aec926e5785360462012ef"
+  },
+  "publication_helper_sha256": "7ea5c217e9f3d132c6a0dbd0b9aebc9d67ccaa1a7d47d4e296ea2469ad5c7f3a"
+}

@@ -1,0 +1,21 @@
+{
+  "retired_source": "2e3bcc2a1095f3e26e4f0b73a6a5515bdd069ee2",
+  "retired_uuid": "564d4322-0759-624c-2f32-f8a5d63ba102",
+  "new_ova_sha256": "46cb60078eb2adbc2f8704046268f68e56798bc2b37cd824ba70f8a919bd2ab1",
+  "owned_vm_absent": true,
+  "owned_disk_folder_absent": true,
+  "unrelated_datastore_root_entries_preserved": true,
+  "custody": {
+    "files": 1595,
+    "directories": 272,
+    "source_bytes": 212051928,
+    "encryption": "Windows DPAPI CurrentUser",
+    "ciphertext_sha256": "cde8f7b28d2f1cbd9a83754a347c10a387c909db184e655a70ea3a943b7f214b",
+    "plaintext_zip_sha256": "8abf0b70b10603ee3f9295cd634d0e0eb7a6d3eb46a645a4a138ce5c7cdfb1c1",
+    "roundtrip_verified": true,
+    "every_file_verified": true,
+    "source_unchanged": true,
+    "utc": "2026-10-07T22:20:49.2719554Z"
+  },
+  "limitation": "DPAPI CurrentUser custody is account-bound; no portable backup, NTFS ACL, or ADS preservation claim."
+}
