@@ -756,163 +756,78 @@ func legacyAddHostToIndexes(s *Store, ei int, e *Entry, key, host string) {
 	}
 }
 
-// TestBenchGate_AddHostPublishCostsNoMoreThanTheCodeItReplaced bounds the write
-// amplification the view introduces on the ONE incremental writer.
+// WHY THERE IS NO WALL-CLOCK GATE ON THE PUBLISH'S COST, ONLY A BENCHMARK.
 //
-// AddHost is the writer that matters here: the legacy SaaS feed sync calls it
-// once per merged host (saas_feed.go), so anything the publish adds is paid per
-// host with s.mu held. What the view adds is an O(categories) clone of the
-// OUTER map, with the inner sets ALIASED — and this gate is what pins the
-// aliasing, because a publish that deep-copied the inner sets instead would
-// multiply a cost that is already the dominant term.
+// This file carried one for a while — a same-run ratio of the shipped fold
+// against legacyAddHostToIndexes, bounded at 1.25x — and the lane killed it.
+// Under the race detector, coverage instrumentation and ~115 packages running
+// at once (`cmd/rootshard run-lane`, which is how CI runs every non-root
+// package) it measured the SHIPPED implementation at 1.453x and, in the same
+// run, the deep-copy DEFECT it existed to catch at 1.43x.
 //
-// IT IS A SAME-RUN RATIO AGAINST THE FROZEN PREDECESSOR, NOT AN ABSOLUTE OR A
-// LINEARITY BOUND, and the first draft of it got that wrong in a way worth
-// recording. Written as "4x the hosts must cost no more than 8x" it failed at
-// 15.9x — and measured against main the pre-change body scores 15.93x, i.e.
-// IDENTICAL. The quadratic is PRE-EXISTING (the inner-set clone addHostToIndexes
-// has always done, O(hosts in category) per call) and is not this change's to
-// carry or to fix: it is recorded as a separate finding. A gate that fails for
-// a cost its change did not introduce is worse than no gate, because the only
-// way to make it pass is to widen the change until it is two changes.
+// The two had converged: at that point the gate could not separate a healthy
+// publish from the pathology it was asserting against, so it was failing CI
+// while proving nothing. Race instrumentation adds a large fixed cost to every
+// map access, which inflates both arms and compresses the very difference the
+// ratio is built on — the bound was no longer measuring the quantity its own
+// error message named.
 //
-// So the property asserted is the repo's standing one — an optimisation must be
-// no worse than what it replaces — timed in ONE run so it is machine-independent
-// (the sanitizeLog / IsExempt / categoryKey convention: never quote a cross-run
-// absolute on this box, which has been observed to drift by half again between
-// rounds).
-func TestBenchGate_AddHostPublishCostsNoMoreThanTheCodeItReplaced(t *testing.T) {
-	const hosts = 1500
+// So the cost claim lives in BenchmarkAddHostPublishOverhead below, where it is
+// reproducible on demand and gates nothing, and the INVARIANT is asserted
+// structurally instead, by map identity, in
+// TestForwardView_PublishAliasesInnerSetsRatherThanCopyingThem. That gate is
+// strictly stronger here: it catches the deep-copy defect deterministically on
+// any hardware, at any load, AND under -race — verified in exactly the
+// condition that broke the timing form.
+//
+// This is the repo's standing rule arriving from a third direction in one
+// change (a Codex review first flagged that the arms were grouped rather than
+// interleaved; interleaving them was necessary and not sufficient): a hot-path
+// gate is structural, because a gate that can flake gets muted — and a timing
+// gate that flakes under the instrumentation CI actually uses was never
+// measuring what it claimed. Do not reintroduce a wall-clock bound here.
+//
+//	go test -run '^$' -bench 'AddHostPublishOverhead' -benchmem ./internal/urlcat/
 
-	// run drives one bulk load of `hosts` hosts into a single category through
-	// `fold`, and returns the elapsed time. Persistence stays off: Save() would
-	// dominate and hide the index cost entirely.
-	run := func(fold func(s *Store, ei int, e *Entry, key, host string)) time.Duration {
+// benchAddHostFold drives one bulk fold of n hosts into a single category
+// through `fold`, which is the shape the legacy SaaS feed sync produces: it
+// calls AddHost once per merged host. Persistence stays off — Save() would
+// dominate and hide the index cost entirely.
+func benchAddHostFold(b *testing.B, n int, fold func(*Store, int, *Entry, string, string)) {
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		b.StopTimer()
 		s := New([]*Entry{
 			{Name: "Feed", Hosts: []string{"seed.invalid"}, BuiltIn: true},
 			{Name: "Other", Hosts: []string{"o.invalid"}},
 			{Name: "Third", Hosts: []string{"t.invalid"}},
 		})
-		names := make([]string, hosts)
-		for i := range names {
-			names[i] = fmt.Sprintf("h%d.feed.invalid", i)
+		names := make([]string, n)
+		for j := range names {
+			names[j] = fmt.Sprintf("h%d.feed.invalid", j)
 		}
 		e := s.entries[0]
-		const key = "feed"
-		start := time.Now()
+		b.StartTimer()
 		for _, h := range names {
 			e.Hosts = append(e.Hosts, h)
-			fold(s, 0, e, key, h)
+			fold(s, 0, e, "feed", h)
 		}
-		return time.Since(start)
-	}
-	current := func(s *Store, ei int, e *Entry, key, host string) { s.addHostToIndexes(ei, e, key, host) }
-
-	// GENUINELY INTERLEAVED, and ALTERNATING which arm goes first.
-	//
-	// An earlier draft ran all seven legacy samples and then all seven current
-	// ones while its comment claimed interleaving (Codex review, PR #1577). On a
-	// shared or thermally drifting runner a load change between those two
-	// batches can fail unchanged code OR conceal a regression — and this box
-	// was observed drifting by half again inside one session, which is the whole
-	// reason this file measures ratios instead of absolutes. Grouping the arms
-	// inside one process is not the same as interleaving them: it reintroduces
-	// the cross-run error the ratio exists to remove.
-	//
-	// Each iteration takes ONE sample of each arm, swapping the order on odd
-	// iterations so neither arm systematically pays for the other's cache
-	// warming, and the comparison is min-vs-min — the least noise-sensitive
-	// statistic for "how fast can this go", so a transient spike can only
-	// discard a sample, never inflate the verdict.
-	legacy, now := time.Hour, time.Hour
-	keepMin := func(dst *time.Duration, d time.Duration) {
-		if d < *dst {
-			*dst = d
-		}
-	}
-	for i := 0; i < 7; i++ {
-		if i%2 == 0 {
-			keepMin(&legacy, run(legacyAddHostToIndexes))
-			keepMin(&now, run(current))
-			continue
-		}
-		keepMin(&now, run(current))
-		keepMin(&legacy, run(legacyAddHostToIndexes))
-	}
-	if legacy <= 0 {
-		t.Skip("timer resolution too coarse to measure")
-	}
-	ratio := float64(now) / float64(legacy)
-	t.Logf("addHostToIndexes bulk fold of %d hosts: pre-view %v, with publish %v, ratio %.3fx",
-		hosts, legacy, now, ratio)
-
-	// 1.25x of a cost whose dominant term is the pre-existing inner-set clone.
-	// A publish that deep-copied the inner sets would roughly double it.
-	if ratio > 1.25 {
-		t.Errorf("publishing the forward view made AddHost %.3fx the pre-view cost (bound 1.25x): "+
-			"a publish must be O(categories) with the inner sets ALIASED — check cloneOuter is not copying them", ratio)
 	}
 }
 
-// TestBenchGate_AddHostPublishGateIsNotVacuous is the CONTROL for the gate
-// above: it measures a publish that DEEP-COPIES the inner sets — the mistake
-// the gate exists to catch — and requires that shape to blow the same bound.
-// Without it, a `current` that had quietly stopped publishing, or a bound set
-// too loose to matter, would pass forever.
-func TestBenchGate_AddHostPublishGateIsNotVacuous(t *testing.T) {
-	const hosts = 1500
-	run := func(deepCopy bool) time.Duration {
-		s := New([]*Entry{{Name: "Feed", Hosts: []string{"seed.invalid"}, BuiltIn: true}, {Name: "Other"}, {Name: "Third"}})
-		names := make([]string, hosts)
-		for i := range names {
-			names[i] = fmt.Sprintf("h%d.feed.invalid", i)
-		}
-		e := s.entries[0]
-		start := time.Now()
-		for _, h := range names {
-			e.Hosts = append(e.Hosts, h)
-			if deepCopy {
-				legacyAddHostToIndexes(s, 0, e, "feed", h)
-				// The defect: clone the outer map AND every inner set.
-				idx := make(map[string]map[string]bool, len(s.index))
-				for k, v := range s.index {
-					inner := make(map[string]bool, len(v))
-					for h2 := range v {
-						inner[h2] = true
-					}
-					idx[k] = inner
-				}
-				s.index = idx
-				s.publishForwardLocked()
-			} else {
-				s.addHostToIndexes(0, e, "feed", h)
-			}
-		}
-		return time.Since(start)
-	}
-	// Interleaved and order-alternating, for the reason the gate above records.
-	shallow, deep := time.Hour, time.Hour
-	keepMin := func(dst *time.Duration, d time.Duration) {
-		if d < *dst {
-			*dst = d
-		}
-	}
-	for i := 0; i < 5; i++ {
-		if i%2 == 0 {
-			keepMin(&shallow, run(false))
-			keepMin(&deep, run(true))
-			continue
-		}
-		keepMin(&deep, run(true))
-		keepMin(&shallow, run(false))
-	}
-	if shallow <= 0 {
-		t.Skip("timer resolution too coarse to measure")
-	}
-	ratio := float64(deep) / float64(shallow)
-	t.Logf("control: deep-copying inner sets on publish costs %.2fx the shipped publish", ratio)
-	if ratio <= 1.25 {
-		t.Errorf("control: a publish that deep-copies every inner host set measured only %.2fx "+
-			"the shipped one, so the 1.25x bound in the gate above cannot see that defect", ratio)
-	}
+// BenchmarkAddHostPublishOverhead measures what publishing the forward view
+// adds to the one incremental writer. Read it against the _Legacy arm below,
+// which is the verbatim pre-view fold; on a quiet 4-core box the two are within
+// noise of each other (~1.0x), because the publish clones only the OUTER map
+// (one entry per category) and ALIASES every inner host set.
+func BenchmarkAddHostPublishOverhead(b *testing.B) {
+	benchAddHostFold(b, 1500, func(s *Store, ei int, e *Entry, key, host string) {
+		s.addHostToIndexes(ei, e, key, host)
+	})
+}
+
+// BenchmarkAddHostPublishOverhead_Legacy is the pre-view baseline — the fold as
+// it read before forwardView, with no publish and an in-place outer assignment.
+func BenchmarkAddHostPublishOverhead_Legacy(b *testing.B) {
+	benchAddHostFold(b, 1500, legacyAddHostToIndexes)
 }

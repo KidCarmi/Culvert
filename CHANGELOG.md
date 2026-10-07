@@ -58,6 +58,15 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   probing a stale view — a Deny rule keyed on a just-added category host would
   fail **open**.
 
+  The publish's cost is a **benchmark, not a gate**. A wall-clock ratio bounded
+  at 1.25x was tried and removed: run the way CI runs every non-root package
+  (race detector + coverage + ~115 packages at once) it measured the shipped
+  implementation at 1.453x and, in the same run, the deep-copy defect it existed
+  to catch at 1.43x — converged, so it failed CI while no longer able to
+  distinguish health from the pathology it asserted against. The invariant is
+  asserted structurally instead, by map identity, which catches that defect
+  deterministically including under `-race`.
+
 ### Security
 
 - Node-local key material was written with `os.WriteFile` on a predictable
