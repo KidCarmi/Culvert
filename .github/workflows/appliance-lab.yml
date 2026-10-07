@@ -622,6 +622,37 @@ jobs:
           json.dump(out, open(sys.argv[2], "w"), indent=2)
           print(json.dumps(out, indent=2))
           PY
+      - name: Reachability of the MEDIUM findings in these exact bytes
+        # CVE-2026-85091 (zlib): overflow in gz_vacate() reached only through
+        # gzprintf()/gzvprintf() after a non-blocking gzwrite() stall.
+        # CVE-2026-58055 (nghttp2): in the nghttpx PROXY program, not libnghttp2.
+        # Unpack the amd64 rootfs from the verified layers and record every
+        # ELF that imports a gz write-path symbol, and whether nghttpx exists.
+        run: |
+          set -euo pipefail
+          cd "$W"; E="$W/evidence"; mkdir -p rootfs
+          python3 -I - "$W/clamav.tar" "$W/evidence/binding.json" "$W/rootfs" <<'PY'
+          import json, sys, tarfile, io
+          t = tarfile.open(sys.argv[1]); b = json.load(open(sys.argv[2])); root = sys.argv[3]
+          for d in b["layers"]:
+              raw = t.extractfile("blobs/sha256/" + d.split(":")[1]).read()
+              with tarfile.open(fileobj=io.BytesIO(raw)) as lt:   # gzip/plain auto-detected
+                  members = [m for m in lt.getmembers() if not m.isdev() and ".wh." not in m.name]
+                  lt.extractall(root, members=members, filter="tar")
+          PY
+          : > "$E/reachability.txt"
+          n=0; hits=0
+          while IFS= read -r -d '' f; do
+            file -b "$f" | grep -q '^ELF' || continue
+            n=$((n+1))
+            s="$(readelf --dyn-syms -W "$f" 2>/dev/null | awk '$7=="UND"{print $8}' | sed 's/@.*//' | grep -E '^(gzprintf|gzvprintf|gzwrite|gzputs|gzputc|gzdopen|gzbuffer)$' | sort -u | tr '\n' ' ' || true)"
+            if [ -n "$s" ]; then hits=$((hits+1)); echo "IMPORTS ${f#"$W"/rootfs}: $s" | tee -a "$E/reachability.txt"; fi
+          done < <(find rootfs -type f -print0)
+          echo "elf_files_scanned=$n gz_write_importers=$hits" | tee -a "$E/reachability.txt"
+          nx="$(find rootfs -name nghttpx -o -name 'nghttp2*' | sed "s#^rootfs##" | sort | tr '\n' ' ')"
+          echo "nghttp2 files: ${nx:-none}" | tee -a "$E/reachability.txt"
+          if find rootfs -name nghttpx | grep -q .; then echo "nghttpx_present=yes" | tee -a "$E/reachability.txt"; else echo "nghttpx_present=no" | tee -a "$E/reachability.txt"; fi
+          [ "$n" -gt 10 ] || { echo "::error::only $n ELF files found — rootfs extraction failed"; exit 1; }
       - uses: aquasecurity/setup-trivy@81e514348e19b6112ce2a7e3ecbafe19c1e1f567 # v0.2.0
         with:
           version: v0.69.3
