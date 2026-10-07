@@ -37,16 +37,17 @@ env:
   # Superseded candidate (historical; does not boot under BIOS, #1528 §3f).
   # Its guest-content fingerprint stays the comparison reference.
   ORIGINAL_OVA_SHA256: e24eb542f973fb70360bad5124ef81fdab8b6f8d67af601720613cbcca3700a4
-  # F-DISK-1 job input: the d698a69c candidate's image (Deep gate run
-  # 37397399171), which carries the badger/ristretto F-DISK-1 fixes. Run
-  # 37397680555 still reproduced the SIGBUS on the ORIGINAL image
-  # (37124197333, sha bb8a2c75…) — that was the pre-fix control; this is the
-  # fixed artifact, expected to report `survived` with the write refused.
-  SOURCE_IMAGE_RUN_ID: "37397399171"
-  SOURCE_IMAGE_TAR_SHA256: 3afadea02d751f1ecea10a7acd0efddee6640a32c8183602b664bca20784af6a
+  # F-DISK-1 job input: the 2e3bcc2a candidate's image (Deep gate run
+  # 37604379502), which carries every badger/ristretto F-DISK-1 fix incl.
+  # the in-place memtable emptying (5b389f38). Run 37397680555 still
+  # reproduced the SIGBUS on the ORIGINAL image (37124197333, sha
+  # bb8a2c75…) — that was the pre-fix control; d698's image survived in
+  # 37601275706. This is the replacement, expected to report `survived`.
+  SOURCE_IMAGE_RUN_ID: "37604379502"
+  SOURCE_IMAGE_TAR_SHA256: db4f5ce8784e2a8e5145fdf59126a8e675a27f6628ac3b70e0d2ac16daf5ffff
   # The source those image bytes were built from; the F-DISK job builds its
   # maintenance agent from here so no lab-branch binary stands in for it.
-  SOURCE_IMAGE_SHA: d698a69c5192588d5ed3a85a9f7cd9009fb59b31
+  SOURCE_IMAGE_SHA: 2e3bcc2a1095f3e26e4f0b73a6a5515bdd069ee2
 
 jobs:
   guest-boot:
@@ -58,23 +59,22 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Production-readiness candidate — #1528 head d698a69c: the recovery-
-        # time fix (4 MiB read-ahead rule; cloud-init off after first boot,
-        # re-enabled by reset-identity) plus everything since b579 (F-DISK-1
-        # badger/ristretto fixes incl. purge-on-full-disk, av_unavailable=closed,
-        # recovery-secret reveal, grpc-gateway removed, backup-listing timing).
-        # Image = that head's own Deep PR Gate tar (run 37397399171); app,
-        # agent, console, access binary and provisioning from a clean checkout
-        # of the SAME commit. Built fresh, retained BEFORE boot. Image ID is
-        # the containerd target digest (verified by docker load: agent reports
-        # v1.0.260-candidate.gd698a69c5192).
+        # Production-readiness candidate — #1528 head 2e3bcc2a: d698a69c (the
+        # recovery-time fix, ESXi 68.8/72.7/70.4 s) plus 5b389f38 (DropAll
+        # empties memtables in place: no stale value pointer into a recreated
+        # value log) and 2e3bcc2a (culvert-net reports "restored" only once the
+        # default route is back). Image = that head's own Deep PR Gate tar
+        # (run 37604379502); app, agent, console, access binary and
+        # provisioning from a clean checkout of the SAME commit. Built fresh,
+        # retained BEFORE boot. Image ID is the tar's OCI manifest digest (the
+        # containerd target), config sha256:7b3c9827….
         include:
-          - variant: candidate-d698a69c5192
+          - variant: candidate-2e3bcc2a1095
             provisioning: source
-            source_sha: "d698a69c5192588d5ed3a85a9f7cd9009fb59b31"
-            image_run: "37397399171"
-            image_tar_sha256: "3afadea02d751f1ecea10a7acd0efddee6640a32c8183602b664bca20784af6a"
-            expect_image_id: "sha256:2c03833c9641a1e24dc5a66b3faa4f0695ac44cdeac931018b9b744be301660e"
+            source_sha: "2e3bcc2a1095f3e26e4f0b73a6a5515bdd069ee2"
+            image_run: "37604379502"
+            image_tar_sha256: "db4f5ce8784e2a8e5145fdf59126a8e675a27f6628ac3b70e0d2ac16daf5ffff"
+            expect_image_id: "sha256:536403fc9ba8a4bc15d229a12a7586ce6ccc35ba99148b71869a81596e0ea940"
             retained_run: ""
             retained_sha256: ""
             # The calibrated ESXi proxy (12 ms read / 3 ms write; run 37389977929
