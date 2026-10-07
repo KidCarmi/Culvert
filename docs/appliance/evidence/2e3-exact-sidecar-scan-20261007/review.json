@@ -1,0 +1,48 @@
+{
+  "schema": 1,
+  "source_sha": "2e3bcc2a1095f3e26e4f0b73a6a5515bdd069ee2",
+  "ova_sha256": "55e98116ba2c020789b3f5de4eabab7e29af611c83b9c972b82a6319a19f145e",
+  "scan_run": 37622491925,
+  "lab_revision": "c2e96c3f9593cb2a8bf4d2a1068dd8ae7a6966ce",
+  "artifact_id": 11482536911,
+  "artifact_sha256": "9a66ec41ada05c3e2d050e3d5caa8142a2b2cef387e7b87edd79b6561ecbbe71",
+  "scan_deliverable_binding": "pass: exact archive/index/amd64 manifest/config/layers/diff_ids match independently captured guest metadata",
+  "configured_gate": "pass: no fixable HIGH/CRITICAL under recorded Trivy policy",
+  "all_severity_findings": [
+    {
+      "VulnerabilityID": "CVE-2026-58055",
+      "PkgName": "nghttp2-libs",
+      "InstalledVersion": "1.69.0-r0",
+      "FixedVersion": "1.70.0-r0",
+      "Severity": "MEDIUM",
+      "PrimaryURL": "https://avd.aquasec.com/nvd/cve-2026-58055"
+    },
+    {
+      "VulnerabilityID": "CVE-2026-85091",
+      "PkgName": "zlib",
+      "InstalledVersion": "1.3.2-r0",
+      "FixedVersion": "1.3.2-r1",
+      "Severity": "MEDIUM",
+      "PrimaryURL": "https://avd.aquasec.com/nvd/cve-2026-85091"
+    }
+  ],
+  "sbom_components": 42,
+  "applicability": {
+    "CVE-2026-58055": "Upstream flaw is in nghttpx proxy code; exact-rootfs inspection reports nghttpx absent. Not affected by this proxy-program flaw under the recorded image contents.",
+    "CVE-2026-85091": "No dynamic gzprintf/gzvprintf imports among59 ELF files; supports absence of the reported trigger through those imported APIs. This is not a complete proof covering static or dynamically resolved calls. Final scoped disposition requested from Opus; finding is retained, not ignored or risk-accepted."
+  },
+  "severity_caveat": "Trivy reports MEDIUM for zlib; the CNA advisory reports HIGH. Scanner gate outcome is not a universal severity determination.",
+  "scope_limits": [
+    "Linux amd64 only; extra index platform entry has no retained blobs and is not scanned.",
+    "Local digest cross-check verifies retained evidence binding, not independent re-execution of Trivy.",
+    "No product image rebuild, live guest mutation, scanner ignore entry or alert dismissal."
+  ],
+  "upstream_references": [
+    "https://github.com/nghttp2/nghttp2/commit/ab28105c4a0197da24f8bfc414bc116055249e1e",
+    "https://www.vulncheck.com/advisories/zlib-1.3.1.2-through-1.3.2-heap-buffer-overflow-via-gz-vacate",
+    "https://github.com/madler/zlib/blob/v1.3.2/gzwrite.c"
+  ],
+  "verifier_sha256": "7f88fef84073cfea72d04d466e0bfbe9b5eb4666bb1856e3c341fe8f29e1dba8",
+  "pcre2_remediation": "pcre2 10.49-r0 present in exact SBOM",
+  "production_disposition": "BLOCKED pending focused zlib/nghttp2 package update and new sidecar tag, replacement exact-byte qualification and review; Opus confirmed implementation in comment6038126758. Existing 2e3 scanner findings remain retained."
+}

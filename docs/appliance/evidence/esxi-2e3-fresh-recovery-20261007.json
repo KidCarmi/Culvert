@@ -1,0 +1,50 @@
+{
+  "schema": 1,
+  "result": "pass",
+  "source_sha": "2e3bcc2a1095f3e26e4f0b73a6a5515bdd069ee2",
+  "ova_sha256": "55e98116ba2c020789b3f5de4eabab7e29af611c83b9c972b82a6319a19f145e",
+  "controller_revision": "0da471bf0e24ced91118478303254d4f3d6d8168",
+  "source_uuid": "564d8756-3778-d981-d5b1-00a5c7cfef7a",
+  "fresh_uuid": "564d4322-0759-624c-2f32-f8a5d63ba102",
+  "source_disks_absent": true,
+  "single_vm_limit": 1,
+  "same_exact_ova": true,
+  "archive_sha256": "0fe2ed3816395a747cc9c482e275cca134b8048c34cf053e83fb795ec0f84664",
+  "archive_bytes": 11626,
+  "original_admin_ca_policy_categories_agent_and_traffic_match": true,
+  "default_fresh_bootstrap": true,
+  "web_setup_or_operator_enrollment_before_restore": false,
+  "secrets_custody": "encrypted backup and separately held CA/log/session secrets and backup password; no secret values published",
+  "historical_logs": "excluded: supported archive omits historical log files; passphrase alone cannot restore missing files",
+  "stage_receipts": {
+    "source-deletion": {
+      "exit_code": 0,
+      "receipt_sha256": "87ec7c51853525105573ff5f516ef6d43c237cff36afe3b2ee7b2baed4f148c9"
+    },
+    "fresh-import": {
+      "exit_code": 0,
+      "receipt_sha256": "fa72f089cb38e4d4434ab1ef19b24b45c7294d5917dc69881185e5c71ae3f31f"
+    },
+    "fresh-bootstrap": {
+      "exit_code": 0,
+      "receipt_sha256": "45cbba3f719e0ca5788411bcdf0830848ee913923355e7d6cad648589a5d86e5"
+    },
+    "fresh-firstboot-preflight": {
+      "exit_code": 0,
+      "receipt_sha256": "91e99d0b889a3537a62bb30a2ad03472a376d2fe6f2782aa5320628fe2b76879"
+    },
+    "fresh-restore": {
+      "exit_code": 0,
+      "receipt_sha256": "9a1657e0f8f55ee56ceef9a0b38b4d740611e076665044ff24f3c71220a15b1b"
+    }
+  },
+  "evidence_sha256": {
+    "source-deletion-receipt.json": "f5ed6a27a612b0eaf6c4e2fdf7f67addc52f77cd3248aa9c7daa6d49c032a198",
+    "source-deleted-owned.json": "8e9944c89cc0ffc34b549fdf9093952d1cd8dce3340721c890517d40ed345698",
+    "archive-metadata.json": "ef82211bec881b14a43895a5616012ea71f7eca2beea4035f22d8a9578a15cf9",
+    "export-receipt.json": "5e6f4343645c98fce16a328e4b26b62bbacd076e4e8ecff11f54f5b3c56a4c08",
+    "transfer-restore-bdbac19b2c83b492/guest-result.json": "72828a5cdeb5d1ebd1b6e66151cd01566bb4174c75bedea79ed206fcd01bce19",
+    "transfer-restore-bdbac19b2c83b492/restored-observation.json": "52b71ff28226f55048c03ebc38768c50291b2cb9879ca2eef335909c4da33067"
+  },
+  "fresh_bootstrap_receipt_sha256": "5081f0e962da1a75620ec640bdb1bd7c3361c541369b19bb0c0421381c06300c"
+}

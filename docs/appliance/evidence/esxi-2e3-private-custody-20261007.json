@@ -1,0 +1,10 @@
+{
+  "plaintext_zip_sha256": "dcb631e3eeab6681e654594aa96dbba1a62c4329b5b735ef9df3761a549b00a2",
+  "original_retained": true,
+  "roundtrip_verified": true,
+  "schema": 1,
+  "encryption": "Windows DPAPI CurrentUser",
+  "ciphertext_sha256": "2efe7474eb1528b39edaeaf21fafe4a669e6b66cf3681a690c9b8daa89c1e46b",
+  "files": 2384,
+  "source_disposition": "owned source VM and disk folder deleted after preservation; private export/secrets retained separately"
+}

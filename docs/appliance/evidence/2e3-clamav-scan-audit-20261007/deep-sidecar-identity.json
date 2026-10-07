@@ -1,0 +1,22 @@
+[
+  {
+    "check": "image-identity",
+    "result": "pass",
+    "detail": "clamav=sha256:3f6a669b9b7eeb87ef8ad86cc44ab7f23e9c084a067541ec03e7975b2fa0e0c5 proxy=sha256:7b3c98273c372b2875c140d4c678f415f3dda681e185e290c6b9b7234e1f1714"
+  },
+  {
+    "check": "pcre2-version",
+    "result": "pass",
+    "detail": "pcre2-10.49-r0"
+  },
+  {
+    "check": "pcre2-jit-unused",
+    "result": "pass",
+    "detail": "/usr/lib/libclamav.so.12.0.3 imports 16 pcre2 symbols, 0 pcre2_jit, no pcre2_jit name for dlsym"
+  },
+  {
+    "check": "clamd-up",
+    "result": "pass",
+    "detail": "clamd answered PING"
+  }
+]

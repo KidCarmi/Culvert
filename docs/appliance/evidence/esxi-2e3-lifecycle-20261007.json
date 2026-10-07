@@ -1,0 +1,769 @@
+{
+  "schema": 1,
+  "source_sha": "2e3bcc2a1095f3e26e4f0b73a6a5515bdd069ee2",
+  "ova_sha256": "55e98116ba2c020789b3f5de4eabab7e29af611c83b9c972b82a6319a19f145e",
+  "controller_revision": "0da471bf0e24ced91118478303254d4f3d6d8168",
+  "check_counts": {
+    "checks.jsonl": {
+      "info": 4,
+      "pass": 69,
+      "blocked": 1,
+      "not-run": 2
+    },
+    "independent-checks.jsonl": {
+      "pass": 12
+    }
+  },
+  "lifecycle_checks": [
+    {
+      "file": "checks.jsonl",
+      "step": "ESXi",
+      "check": "access-aware-harness",
+      "result": "info"
+    },
+    {
+      "file": "checks.jsonl",
+      "step": "2",
+      "check": "target",
+      "result": "info"
+    },
+    {
+      "file": "checks.jsonl",
+      "step": "3",
+      "check": "operator-observe",
+      "result": "pass"
+    },
+    {
+      "file": "checks.jsonl",
+      "step": "3",
+      "check": "status-setup-pending",
+      "result": "pass"
+    },
+    {
+      "file": "checks.jsonl",
+      "step": "3",
+      "check": "firstboot-steps",
+      "result": "pass"
+    },
+    {
+      "file": "checks.jsonl",
+      "step": "3a",
+      "check": "console-login",
+      "result": "pass"
+    },
+    {
+      "file": "checks.jsonl",
+      "step": "3a",
+      "check": "password-changed",
+      "result": "pass"
+    },
+    {
+      "file": "checks.jsonl",
+      "step": "3",
+      "check": "culvert-status-setup-pending",
+      "result": "pass"
+    },
+    {
+      "file": "checks.jsonl",
+      "step": "3",
+      "check": "image-identity",
+      "result": "pass"
+    },
+    {
+      "file": "checks.jsonl",
+      "step": "3",
+      "check": "setup-token",
+      "result": "pass"
+    },
+    {
+      "file": "checks.jsonl",
+      "step": "3c",
+      "check": "operator-commands-refused",
+      "result": "pass"
+    },
+    {
+      "file": "checks.jsonl",
+      "step": "3c",
+      "check": "forwarding-refused",
+      "result": "pass"
+    },
+    {
+      "file": "checks.jsonl",
+      "step": "3c",
+      "check": "file-transfer-refused",
+      "result": "pass"
+    },
+    {
+      "file": "checks.jsonl",
+      "step": "3c",
+      "check": "local-admin-ssh-refused",
+      "result": "pass"
+    },
+    {
+      "file": "checks.jsonl",
+      "step": "3c",
+      "check": "sshd-effective",
+      "result": "pass"
+    },
+    {
+      "file": "checks.jsonl",
+      "step": "3c",
+      "check": "local-admin-sudo-needs-password",
+      "result": "pass"
+    },
+    {
+      "file": "checks.jsonl",
+      "step": "3d",
+      "check": "boot-timing",
+      "result": "info"
+    },
+    {
+      "file": "checks.jsonl",
+      "step": "3e",
+      "check": "recovery-secrets",
+      "result": "pass"
+    },
+    {
+      "file": "checks.jsonl",
+      "step": "4a",
+      "check": "bootstrap-api-needs-token",
+      "result": "pass"
+    },
+    {
+      "file": "checks.jsonl",
+      "step": "4",
+      "check": "setup-without-token",
+      "result": "pass"
+    },
+    {
+      "file": "checks.jsonl",
+      "step": "4",
+      "check": "setup-with-token",
+      "result": "pass"
+    },
+    {
+      "file": "checks.jsonl",
+      "step": "4",
+      "check": "admin-login",
+      "result": "pass"
+    },
+    {
+      "file": "checks.jsonl",
+      "step": "4",
+      "check": "status-setup-complete",
+      "result": "pass"
+    },
+    {
+      "file": "checks.jsonl",
+      "step": "4",
+      "check": "operator-setup-complete",
+      "result": "pass"
+    },
+    {
+      "file": "checks.jsonl",
+      "step": "4b",
+      "check": "demotion-immediate",
+      "result": "pass"
+    },
+    {
+      "file": "checks.jsonl",
+      "step": "4b",
+      "check": "portal-cookie-replay",
+      "result": "blocked"
+    },
+    {
+      "file": "checks.jsonl",
+      "step": "5",
+      "check": "auth-exempt",
+      "result": "pass"
+    },
+    {
+      "file": "checks.jsonl",
+      "step": "5",
+      "check": "default-deny",
+      "result": "pass"
+    },
+    {
+      "file": "checks.jsonl",
+      "step": "5",
+      "check": "traffic",
+      "result": "pass"
+    },
+    {
+      "file": "checks.jsonl",
+      "step": "5",
+      "check": "ready-rows",
+      "result": "pass"
+    },
+    {
+      "file": "checks.jsonl",
+      "step": "5",
+      "check": "clamav-real",
+      "result": "pass"
+    },
+    {
+      "file": "checks.jsonl",
+      "step": "5",
+      "check": "status-ready-to-enforce",
+      "result": "pass"
+    },
+    {
+      "file": "checks.jsonl",
+      "step": "5",
+      "check": "ca-identity",
+      "result": "pass"
+    },
+    {
+      "file": "checks.jsonl",
+      "step": "5b",
+      "check": "category-data",
+      "result": "pass"
+    },
+    {
+      "file": "checks.jsonl",
+      "step": "5c",
+      "check": "category-enforcement",
+      "result": "pass"
+    },
+    {
+      "file": "checks.jsonl",
+      "step": "6",
+      "check": "agent-installed",
+      "result": "pass"
+    },
+    {
+      "file": "checks.jsonl",
+      "step": "6",
+      "check": "agent-reachable",
+      "result": "pass"
+    },
+    {
+      "file": "checks.jsonl",
+      "step": "6",
+      "check": "agent-backup",
+      "result": "pass"
+    },
+    {
+      "file": "checks.jsonl",
+      "step": "6",
+      "check": "backup-listed",
+      "result": "pass"
+    },
+    {
+      "file": "checks.jsonl",
+      "step": "6",
+      "check": "restore-dry-run",
+      "result": "pass"
+    },
+    {
+      "file": "checks.jsonl",
+      "step": "6b",
+      "check": "restore-commit",
+      "result": "not-run"
+    },
+    {
+      "file": "checks.jsonl",
+      "step": "9",
+      "check": "post-backup-mutation",
+      "result": "pass"
+    },
+    {
+      "file": "checks.jsonl",
+      "step": "9",
+      "check": "actual-restore",
+      "result": "pass"
+    },
+    {
+      "file": "checks.jsonl",
+      "step": "9",
+      "check": "restore-admin-login",
+      "result": "pass"
+    },
+    {
+      "file": "checks.jsonl",
+      "step": "9",
+      "check": "restore-enforcement",
+      "result": "pass"
+    },
+    {
+      "file": "checks.jsonl",
+      "step": "9",
+      "check": "restore-ca",
+      "result": "pass"
+    },
+    {
+      "file": "checks.jsonl",
+      "step": "9",
+      "check": "restore-feed-rehydrated",
+      "result": "pass"
+    },
+    {
+      "file": "checks.jsonl",
+      "step": "9",
+      "check": "restore-categories",
+      "result": "pass"
+    },
+    {
+      "file": "checks.jsonl",
+      "step": "9",
+      "check": "restore-agent",
+      "result": "pass"
+    },
+    {
+      "file": "checks.jsonl",
+      "step": "9",
+      "check": "restore-complete",
+      "result": "pass"
+    },
+    {
+      "file": "checks.jsonl",
+      "step": "6c",
+      "check": "test-only-trust",
+      "result": "pass"
+    },
+    {
+      "file": "checks.jsonl",
+      "step": "6c",
+      "check": "unsigned-apply-refused",
+      "result": "pass"
+    },
+    {
+      "file": "checks.jsonl",
+      "step": "6c",
+      "check": "signed-apply",
+      "result": "pass"
+    },
+    {
+      "file": "checks.jsonl",
+      "step": "6c",
+      "check": "signed-rollback",
+      "result": "pass"
+    },
+    {
+      "file": "checks.jsonl",
+      "step": "7",
+      "check": "os-update",
+      "result": "pass"
+    },
+    {
+      "file": "checks.jsonl",
+      "step": "7",
+      "check": "reboot",
+      "result": "pass"
+    },
+    {
+      "file": "checks.jsonl",
+      "step": "7",
+      "check": "kernel",
+      "result": "pass"
+    },
+    {
+      "file": "checks.jsonl",
+      "step": "7",
+      "check": "docker-held",
+      "result": "pass"
+    },
+    {
+      "file": "checks.jsonl",
+      "step": "ESXi",
+      "check": "independent-reboot-timing",
+      "result": "pass"
+    },
+    {
+      "file": "checks.jsonl",
+      "step": "8",
+      "check": "stack-resumed",
+      "result": "pass"
+    },
+    {
+      "file": "checks.jsonl",
+      "step": "8",
+      "check": "admin-login",
+      "result": "pass"
+    },
+    {
+      "file": "checks.jsonl",
+      "step": "8",
+      "check": "policy-persisted",
+      "result": "pass"
+    },
+    {
+      "file": "checks.jsonl",
+      "step": "8",
+      "check": "enforcement",
+      "result": "pass"
+    },
+    {
+      "file": "checks.jsonl",
+      "step": "8",
+      "check": "ready",
+      "result": "pass"
+    },
+    {
+      "file": "checks.jsonl",
+      "step": "8",
+      "check": "ca-identity",
+      "result": "pass"
+    },
+    {
+      "file": "checks.jsonl",
+      "step": "8",
+      "check": "category-data",
+      "result": "pass"
+    },
+    {
+      "file": "checks.jsonl",
+      "step": "8",
+      "check": "backup-listed",
+      "result": "pass"
+    },
+    {
+      "file": "checks.jsonl",
+      "step": "8",
+      "check": "agent-reachable",
+      "result": "pass"
+    },
+    {
+      "file": "checks.jsonl",
+      "step": "8",
+      "check": "firstboot-not-rerun",
+      "result": "pass"
+    },
+    {
+      "file": "checks.jsonl",
+      "step": "8",
+      "check": "state-files",
+      "result": "pass"
+    },
+    {
+      "file": "checks.jsonl",
+      "step": "8",
+      "check": "restore-persisted",
+      "result": "not-run"
+    },
+    {
+      "file": "checks.jsonl",
+      "step": "8",
+      "check": "image-identity",
+      "result": "pass"
+    },
+    {
+      "file": "checks.jsonl",
+      "step": "8",
+      "check": "operator-status",
+      "result": "pass"
+    },
+    {
+      "file": "checks.jsonl",
+      "step": "8",
+      "check": "boot-timing",
+      "result": "info"
+    },
+    {
+      "file": "checks.jsonl",
+      "step": "7",
+      "check": "esxi-boot-id-changed",
+      "result": "pass"
+    },
+    {
+      "file": "checks.jsonl",
+      "step": "8",
+      "check": "restore-persisted",
+      "result": "pass"
+    },
+    {
+      "file": "independent-checks.jsonl",
+      "step": "independent",
+      "check": "postcheck-command-integrity",
+      "result": "pass"
+    },
+    {
+      "file": "independent-checks.jsonl",
+      "step": "independent",
+      "check": "root-observation",
+      "result": "pass"
+    },
+    {
+      "file": "independent-checks.jsonl",
+      "step": "independent",
+      "check": "reboot-identity",
+      "result": "pass"
+    },
+    {
+      "file": "independent-checks.jsonl",
+      "step": "independent",
+      "check": "kernel-observation",
+      "result": "pass"
+    },
+    {
+      "file": "independent-checks.jsonl",
+      "step": "independent",
+      "check": "source-image-identity",
+      "result": "pass"
+    },
+    {
+      "file": "independent-checks.jsonl",
+      "step": "independent",
+      "check": "agent-version-active",
+      "result": "pass"
+    },
+    {
+      "file": "independent-checks.jsonl",
+      "step": "independent",
+      "check": "firstboot-not-rerun",
+      "result": "pass"
+    },
+    {
+      "file": "independent-checks.jsonl",
+      "step": "independent",
+      "check": "locked-stack-resume",
+      "result": "pass"
+    },
+    {
+      "file": "independent-checks.jsonl",
+      "step": "independent",
+      "check": "docker-package-holds",
+      "result": "pass"
+    },
+    {
+      "file": "independent-checks.jsonl",
+      "step": "independent",
+      "check": "restored-policy-persistence",
+      "result": "pass"
+    },
+    {
+      "file": "independent-checks.jsonl",
+      "step": "independent",
+      "check": "ca-identity",
+      "result": "pass"
+    },
+    {
+      "file": "independent-checks.jsonl",
+      "step": "independent",
+      "check": "meaningful-category-persistence",
+      "result": "pass"
+    }
+  ],
+  "network": {
+    "initial_rollback": "pass",
+    "post_reboot_pass": true,
+    "helper_exit": 1,
+    "confirmation_retry_used": false,
+    "scope": "Injected static-apply failure restores prior persisted configuration, address and usable default route before returning; authenticated and external checks repeated after reboot."
+  },
+  "identity": {
+    "stages": {
+      "identity-after.attempt.json": "pass",
+      "identity-before.attempt.json": "pass",
+      "identity-bootstrap.attempt.json": "pass",
+      "identity-power-on.attempt.json": "pass",
+      "identity-reset.attempt.json": "pass",
+      "network-after.attempt.json": "pass",
+      "network-before.attempt.json": "pass"
+    },
+    "machine_id_changed": true,
+    "ssh_host_key_changed": true,
+    "boot_id_changed": true,
+    "old_password_pam": {
+      "service": "login",
+      "pam_status": 7,
+      "password_prompts": 1
+    },
+    "operator_keys_empty": true,
+    "old_operator_key_refused": true,
+    "new_console_credential": "distinct; forced PAM change passed",
+    "scope": "same owned VM fresh boot after automatic poweroff; no simultaneous-clone claim"
+  },
+  "clamav": {
+    "errors": [],
+    "failure_details": [],
+    "helper_sha256": "faa1889668baff2d3bb8d04d04e01601cd21c876da6873436d3882445bff2322",
+    "identity": {
+      "av_unavailable": "closed",
+      "boot_id": "29e9d82a-7c0b-4786-893b-dfa85db91403",
+      "both_locks_held": true,
+      "image_id": "sha256:536403fc9ba8a4bc15d229a12a7586ce6ccc35ba99148b71869a81596e0ea940",
+      "policy_sha256": "35c3e9df30c12e7fccf5b7b405f2c7f6fbaccddaaf00e5899372ec356cc2b4b7",
+      "sidecar_image_id": "sha256:f3fcbf45d0a50da7e1880e498a030e38b1cd31d792a2737a881ebe8391b13ec3",
+      "source_sha": "2e3bcc2a1095f3e26e4f0b73a6a5515bdd069ee2"
+    },
+    "operation": "890b095984def43d2c0fee11f41f5340",
+    "phases": {
+      "before": [
+        {
+          "body_sha256": "ef9c2b69713dd9de520d9746db81c45d21d4874af3a21558959ca49ab26909d7",
+          "http_status": 200,
+          "kind": "clean",
+          "origin_fetched": true,
+          "pass": true,
+          "response_sha256": "ef9c2b69713dd9de520d9746db81c45d21d4874af3a21558959ca49ab26909d7"
+        },
+        {
+          "body_sha256": "4d54f37a0b1f3d1b0974cef3142b2f3baa203f77a7c7fdd91602f8eb92b8bb98",
+          "http_status": 403,
+          "kind": "eicar",
+          "origin_fetched": true,
+          "pass": true,
+          "response_sha256": "7c796b55101cf13e7be536eec50ab8f396f4d5ef96c0fc4bc4b732114ddd0622"
+        }
+      ],
+      "down": [
+        {
+          "body_sha256": "3a041667115cc5f965238ca9c8af05771a81e2b7d85de3c7ed212a6cdf13f47f",
+          "http_status": 403,
+          "kind": "clean",
+          "origin_fetched": true,
+          "pass": true,
+          "response_sha256": "19c96ee9cf8b94e61cffb821e783e0fb08bcac05c110dcd08ddb6df91241636b"
+        },
+        {
+          "body_sha256": "116b99dc2c9fa0e66c389d485133a0fb89f52966a7f4bd06694d804a04da3de2",
+          "http_status": 403,
+          "kind": "eicar",
+          "origin_fetched": true,
+          "pass": true,
+          "response_sha256": "19c96ee9cf8b94e61cffb821e783e0fb08bcac05c110dcd08ddb6df91241636b"
+        }
+      ],
+      "recovered": [
+        {
+          "body_sha256": "47c71b46a0536adedd8857428d74793de579b575474bfbf39fa6b0782278480a",
+          "http_status": 200,
+          "kind": "clean",
+          "origin_fetched": true,
+          "pass": true,
+          "response_sha256": "47c71b46a0536adedd8857428d74793de579b575474bfbf39fa6b0782278480a"
+        },
+        {
+          "body_sha256": "afd6c049a513fc30d887e2b7826ac905d84d4507c78b4ae6539b45469f4a70c2",
+          "http_status": 403,
+          "kind": "eicar",
+          "origin_fetched": true,
+          "pass": true,
+          "response_sha256": "7c796b55101cf13e7be536eec50ab8f396f4d5ef96c0fc4bc4b732114ddd0622"
+        }
+      ]
+    },
+    "policy_restored": true,
+    "prior_failure_sha256": null,
+    "readiness": {
+      "before": {
+        "clamav_status": "ok",
+        "ended_monotonic_ns": 133591964244,
+        "http_status": 200,
+        "pass": true,
+        "started_monotonic_ns": 133591302428
+      },
+      "down": {
+        "clamav_status": "fail",
+        "ended_monotonic_ns": 153921912075,
+        "http_status": 503,
+        "pass": true,
+        "started_monotonic_ns": 133881830823
+      },
+      "recovered": {
+        "clamav_status": "ok",
+        "ended_monotonic_ns": 184108346563,
+        "http_status": 200,
+        "pass": true,
+        "started_monotonic_ns": 154056507074
+      }
+    },
+    "restored_running": true,
+    "result": "pass",
+    "schema": 1
+  },
+  "exported_baseline_after_reboots_and_outage": "matches original admin/CA/policy/categories/agent and live 200/403 traffic",
+  "evidence": [
+    {
+      "path": "evidence/checks.jsonl",
+      "sha256": "b87ffe8529f90a09ba85211fbadcde931b9949a3ec2d47a606adc59174e0aef1",
+      "private": false
+    },
+    {
+      "path": "evidence/independent-checks.jsonl",
+      "sha256": "b14bd93ab529a3ee07eeabcc6916bbe88ad154244e96f733c7b433935fd0e89c",
+      "private": false
+    },
+    {
+      "path": "secrets/p1-regressions/network-before.json",
+      "sha256": "d5bc7c7632a6cf25c697dfbaab89259c2f024d72ab99e1fb5eeb2d388b1d3726",
+      "private": true
+    },
+    {
+      "path": "secrets/p1-regressions/network-after.json",
+      "sha256": "1a111dde130a65b63439cc53aaeb37f00c5c6b645e19b8d0fcf80129081bcf88",
+      "private": true
+    },
+    {
+      "path": "secrets/p1-regressions/identity-before.json",
+      "sha256": "ca096e8e555bafe78ea92a24994cd36dfb8e51730b43072b9f0da50b908b1f10",
+      "private": true
+    },
+    {
+      "path": "secrets/p1-regressions/identity-after.json",
+      "sha256": "36712a64c1f6dec0aa63bd73720af958ce37ff402911fa0b0fa4144471013678",
+      "private": true
+    },
+    {
+      "path": "secrets/p1-regressions/poweroff-observed.json",
+      "sha256": "2a31d2f22c5ef491fac078f28356a52981f085a1b4f4be78dd3a25292c6ee78d",
+      "private": true
+    },
+    {
+      "path": "secrets/p1-regressions/network-before.attempt.json",
+      "sha256": "c4445d9f1517d0233b39d56fd957237c45c96f54e14abda745696a1fd75343ed",
+      "private": true
+    },
+    {
+      "path": "secrets/p1-regressions/network-after.attempt.json",
+      "sha256": "c4445d9f1517d0233b39d56fd957237c45c96f54e14abda745696a1fd75343ed",
+      "private": true
+    },
+    {
+      "path": "secrets/p1-regressions/identity-before.attempt.json",
+      "sha256": "c4445d9f1517d0233b39d56fd957237c45c96f54e14abda745696a1fd75343ed",
+      "private": true
+    },
+    {
+      "path": "secrets/p1-regressions/identity-reset.attempt.json",
+      "sha256": "c4445d9f1517d0233b39d56fd957237c45c96f54e14abda745696a1fd75343ed",
+      "private": true
+    },
+    {
+      "path": "secrets/p1-regressions/identity-power-on.attempt.json",
+      "sha256": "c4445d9f1517d0233b39d56fd957237c45c96f54e14abda745696a1fd75343ed",
+      "private": true
+    },
+    {
+      "path": "secrets/p1-regressions/identity-bootstrap.attempt.json",
+      "sha256": "c4445d9f1517d0233b39d56fd957237c45c96f54e14abda745696a1fd75343ed",
+      "private": true
+    },
+    {
+      "path": "secrets/p1-regressions/identity-after.attempt.json",
+      "sha256": "c4445d9f1517d0233b39d56fd957237c45c96f54e14abda745696a1fd75343ed",
+      "private": true
+    },
+    {
+      "path": "secrets/clamav-outage/guest-result.json",
+      "sha256": "f9a8b1cfc219ca308db3785a9b4053138cbd9521897204127848503dcec8e437",
+      "private": true
+    },
+    {
+      "path": "secrets/clamav-outage/complete.json",
+      "sha256": "163866bbf62bae57d05c74f7b96e8c44e4b2d7bdbe7ab2fdb0ee669af0916218",
+      "private": true
+    },
+    {
+      "path": "secrets/post-series-escrow-state.json",
+      "sha256": "52b71ff28226f55048c03ebc38768c50291b2cb9879ca2eef335909c4da33067",
+      "private": true
+    }
+  ],
+  "limitations": [
+    "IdP portal-cookie replay blocked without IdP.",
+    "Shared NOT-RUN restore rows retained; guarded ESXi actual restore and persistence separately pass.",
+    "Fresh-appliance disaster recovery reported separately; historical log files are excluded by the supported archive."
+  ]
+}

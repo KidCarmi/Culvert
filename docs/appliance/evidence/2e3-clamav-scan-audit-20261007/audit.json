@@ -1,0 +1,153 @@
+{
+  "schema": 1,
+  "source_commit": "2e3bcc2a1095f3e26e4f0b73a6a5515bdd069ee2",
+  "verdict": "BLOCKED: exact baked-sidecar vulnerability/SBOM evidence not found in inspected retained materials. Remediation version and runnable archive closure are proven; scanner result-to-image binding remains unproven.",
+  "exact_baked": {
+    "run_id": 37606237892,
+    "artifact_id": 11477120696,
+    "ova_sha256": "55e98116ba2c020789b3f5de4eabab7e29af611c83b9c972b82a6319a19f145e",
+    "ref": "culvert/clamav:1.4.6-pcre2-10.49",
+    "oci_index_image_id": "sha256:f3fcbf45d0a50da7e1880e498a030e38b1cd31d792a2737a881ebe8391b13ec3",
+    "linux_amd64_manifest": "sha256:be3827e2327c5e51c695c7fe934133f0433c8baa9a7b3ea03e2cdb9ea5d1331c",
+    "archive_in_ova": "/var/lib/culvert-appliance/images/clamav.tar.gz",
+    "archive_sha256": "603c165c35141aed67667dffbc09132664feadd74dfcabbfc7e109b4dbecffa6",
+    "pcre2": "pcre2-10.49-r0",
+    "clamav": "1.4.6/28136/Sun Sep 27 06:26:12 2026",
+    "confirmed": [
+      "Build-info and build log tie archive and image ID to replacement OVA.",
+      "Archive closure reports complete pinned index -> amd64 manifest -> config/layers.",
+      "Cold load in disposable Docker store with registry fallback disabled creates/executes image and clamdscan --ping succeeds after12s.",
+      "QEMU runtime readiness and EICAR prove running scanner behavior.",
+      "Parent performed authenticated read-only metadata extraction: exact archive hash and metadata chain verified; exit0 with receipt stdout SHA256 a81f49727e0f87a7f490127cc7327316fe4af173b0c901a493a18216dd18a22e."
+    ],
+    "missing": [
+      "Exact-image SBOM/full package inventory or package/rootfs equivalence proof to independently built CI image.",
+      "Exact-image vulnerability scan with scanner/DB version and scope."
+    ],
+    "config_digest": "sha256:098ca807895db86476681c9ad1aba7856261c787b87fe7c13aadc7f68c483302",
+    "rootfs_diff_ids": [
+      "sha256:74d97c428c51a828f9051a7a40a53ff1fc99e54fc30323ce36760701b0b7f711",
+      "sha256:b684354d8de0c2ede9b26654f75adb50e74bce0832ff4f31196892aa6a17ae34",
+      "sha256:0ab5cc12c0218764d90d5f96ca8bec5ca8b7b5bd39c1e294971f250a784ebd2d",
+      "sha256:bb33160ecb29edddeada1a089a42b5f8ceba7a941d24ac09ad1008c6e9ffe64d",
+      "sha256:24db1b20b4ffbb55933cccfdec1ab38ccfa50251b3e68480d483914e6d00be53",
+      "sha256:5e8fb9fa4fc2fa8544976a51fafdeaf66ef5dd497404ab33a9c931668c2ee316",
+      "sha256:25e844d80c0b96f4758f9afed4dfa3760f95c01669a41debe2df3d15f6038844",
+      "sha256:2f885cef3e6b537b75f3268ce88d18c93436fe282379873553bcb557ddfddc30"
+    ],
+    "layer_descriptors": [
+      {
+        "digest": "sha256:e2de96513ba9eb53b431787ec8a65cdde380ac4772a3e4c4b714dcfde2a102b5",
+        "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+        "size": 3849738
+      },
+      {
+        "digest": "sha256:f521e3871fc1cb59e4bb2884e80bdb0b4f3a6bef53d0e5ca5d3f3525243d615b",
+        "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+        "size": 4859039
+      },
+      {
+        "digest": "sha256:57ca85041bd5c3608be33ec530ba38c32ff5bb1dd4c658b7f4f6591558e9f229",
+        "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+        "size": 30984107
+      },
+      {
+        "digest": "sha256:4eb587af903b26f91ef6be5bc819807fe08aba90c0ecfc172957f7ce027c8a98",
+        "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+        "size": 343
+      },
+      {
+        "digest": "sha256:6175c2b81f58ea01e7ef07a5d7e4970fe16b9e9b29c30a5f76607d0d01db29c5",
+        "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+        "size": 1562
+      },
+      {
+        "digest": "sha256:f8f651a6b68f6bb2f34fcb2b4970d373a4c57a634eb19c513c9d9e10ac1e21c9",
+        "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+        "size": 1225
+      },
+      {
+        "digest": "sha256:01d1c784b59e05a411a9c7ae8416808c48d1b05871b324dd0a0771238d886eed",
+        "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+        "size": 112817254
+      },
+      {
+        "digest": "sha256:4332ae6d8c6358aba4b73a7a9a19d65aeea7c5a8774cad5c4024f4fc5995c9c0",
+        "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+        "size": 3407058
+      }
+    ],
+    "archive_bytes": 155719050
+  },
+  "current_ci_scan": {
+    "run_id": 37604379502,
+    "job_id": 112737194591,
+    "artifact_id": 11473694704,
+    "artifact_zip_sha256": "076a5a919f61bf6dbf3b6c29708d3e69e6ebf3b113f79c66e01d3ca1f2cd99b4",
+    "archive_locally_verified": true,
+    "source_ref": "culvert/clamav:1.4.6-pcre2-10.49",
+    "docker_image_id": "sha256:3f6a669b9b7eeb87ef8ad86cc44ab7f23e9c084a067541ec03e7975b2fa0e0c5",
+    "pcre2": "pcre2-10.49-r0",
+    "trivy_version": "0.69.3",
+    "command": "trivy image --skip-db-update --scanners vuln --severity CRITICAL,HIGH --ignore-unfixed --format table --exit-code 1 \"$CLAMAV_SIDECAR_REF\"",
+    "result": "0 selected vulnerabilities in Alpine3.24.2",
+    "scope": "Separate docker build in Deep job; table output and functional image-identity evidence retained; no JSON SBOM/config/layer archive retained in this artifact.",
+    "id_caveat": "Parent metadata resolves baked f3 index to config098ca807..., which differs from scanned3f6a669b... image ID. Current Deep artifact includes only table+functional checks, no config/rootfs DiffIDs, so filesystem/package equivalence cannot be compared. Config inequality alone is not a demonstrated package vulnerability."
+  },
+  "stale_committed_scan": {
+    "path": "appliance/sbom/evidence/clamav-candidate-pcre2.trivy.json",
+    "CreatedAt": "2026-10-03T09:10:28.597159189Z",
+    "image_id": "sha256:5fe4144098cc38dd0c0dd8a528b46512530b903bf446a90d8f030fb36e561f21",
+    "disposition": "Older image evidence. Does not directly scan f3; d69886d71850 evidence also cannot transfer without binding."
+  },
+  "source_references": [
+    {
+      "path": "appliance/clamav/Dockerfile",
+      "lines": "19-21",
+      "finding": "Pinned official base plus apk pcre2=10.49-r0 assertion."
+    },
+    {
+      "path": "appliance/build/build-ova.sh",
+      "lines": "179-187",
+      "finding": "Independent local build; captures image ID and pcre2 version; saves archive."
+    },
+    {
+      "path": "appliance/build/build-ova.sh",
+      "lines": "361-373",
+      "finding": "Archive closure and cold-load validation, not vulnerability scan."
+    },
+    {
+      "path": ".github/workflows/pr-deep-gate.yml",
+      "lines": "602-630",
+      "finding": "Separate sidecar build, functional checks, selected-severity Trivy; uploads table/functional evidence."
+    },
+    {
+      "path": "appliance/build/archive-identity.sh",
+      "lines": "44-104",
+      "finding": "Traverses pinned OCI index to platform manifest; closure log's right digest is a platform manifest, not config."
+    }
+  ],
+  "limits": [
+    "This reviewer made no live calls. Parent supplied authenticated read-only guest metadata and receipt; these were inspected and copied unchanged.",
+    "No vulnerability research or broad new scanner runs performed.",
+    "Current gap is evidence binding, not a demonstrated vulnerability or proof the patched pcre2 is missing.",
+    "Main app Trivy scan does not cover the separately built ClamAV sidecar."
+  ],
+  "rootfs_comparison": {
+    "current_scanned_3f6a": "Not possible from retained artifact11473694704: no config JSON or rootfs DiffIDs.",
+    "older_committed_5fe4": {
+      "common_prefix_layers": 7,
+      "total_layers": 8,
+      "old_final_diff_id": "sha256:2e58864e540b113c5aa11b6b41d88cfaca75083c7f820010f17f43285eab6079",
+      "baked_final_diff_id": "sha256:2f885cef3e6b537b75f3268ce88d18c93436fe282379873553bcb557ddfddc30",
+      "all_layers_equal": false,
+      "interpretation": "Same seven base layers; derivative final layer differs. This does not itself prove different package versions or a vulnerability."
+    }
+  },
+  "parent_read_receipt": {
+    "exit_code": 0,
+    "finished_utc": "2026-10-07T12:30:23.420832+00:00",
+    "stdout_sha256": "a81f49727e0f87a7f490127cc7327316fe4af173b0c901a493a18216dd18a22e",
+    "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  }
+}

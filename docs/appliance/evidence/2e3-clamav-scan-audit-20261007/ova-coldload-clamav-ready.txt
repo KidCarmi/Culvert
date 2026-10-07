@@ -1,0 +1,7 @@
+cold-load: disposable store: 29.6.2 overlayfs [[driver-type io.containerd.snapshotter.v1]]
+cold-load: registry fallback disabled (a pull fails)
+cold-load: Loaded image: culvert/clamav:1.4.6-pcre2-10.49
+cold-load: culvert/clamav:1.4.6-pcre2-10.49 = sha256:f3fcbf45d0a50da7e1880e498a030e38b1cd31d792a2737a881ebe8391b13ec3 linux/amd64
+cold-load: ran 'clamd --version': ClamAV 1.4.6/28136/Sun Sep 27 06:26:12 2026
+cold-load: ClamAV ready (clamdscan --ping) after 12s
+cold-load: PASS culvert/clamav:1.4.6-pcre2-10.49
