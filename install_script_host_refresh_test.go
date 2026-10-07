@@ -17,6 +17,7 @@ package main
 // docker whose `cp` serves a fixture bundle.
 
 import (
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -93,12 +94,13 @@ func (h *hostRefreshHarness) read(rel string) string {
 func (h *hostRefreshHarness) snapshot() map[string]string {
 	h.t.Helper()
 	out := map[string]string{}
-	err := filepath.Walk(h.install, func(p string, info os.FileInfo, err error) error {
-		if err != nil || info.IsDir() {
+	fsys := os.DirFS(h.install)
+	err := fs.WalkDir(fsys, ".", func(p string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
 			return err
 		}
-		b, rerr := os.ReadFile(p)
-		out[strings.TrimPrefix(p, h.install)] = string(b)
+		b, rerr := fs.ReadFile(fsys, p)
+		out[p] = string(b)
 		return rerr
 	})
 	if err != nil {
