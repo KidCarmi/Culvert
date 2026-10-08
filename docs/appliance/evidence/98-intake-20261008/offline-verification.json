@@ -1,0 +1,37 @@
+{
+  "schema": 1,
+  "result": "pass",
+  "scope": "retained ZIP/OVA/internal manifest/hardware plus reconciled producer provenance",
+  "source": "98cf41c0d82fedbadaa515fc6e13c4d29ec2e476",
+  "artifact_id": 11530788479,
+  "run_id": 37730220212,
+  "attempt": 2,
+  "ova_sha256": "048ba7c604306641f370c851c4924779efd92e2e572ff1a3eb2160d7c718aa44",
+  "ova_bytes": 1308334080,
+  "zip_sha256": "c3791557e6a85554e0b6adb350968203f0b63998674b34bb3b1e5ba32723d86c",
+  "image": "sha256:68d73d5dd88634468f8cb005b510863272de66928d593f456bcb26a20522f66a",
+  "artifact": {
+    "ova_sha256": "048ba7c604306641f370c851c4924779efd92e2e572ff1a3eb2160d7c718aa44",
+    "disk_bytes": 42949672960,
+    "cpus": 2,
+    "memory_mb": 4096,
+    "manifest": {
+      "culvert-appliance-1.0.260-candidate.g98cf41c0d82f-ubuntu-24.04.ovf": "fdecb9419d9ee9fdb8612cfc1bb5c8cf25da993b615c868b0f93521cf6e37767",
+      "culvert-appliance-1.0.260-candidate.g98cf41c0d82f-ubuntu-24.04-disk1.vmdk": "fe456833d3f477763152ca42cc97b160027cb3e6414bf8e34ef64f6e9e968d6c"
+    },
+    "hardware": "vmx-13",
+    "networks": [
+      "VM Network"
+    ]
+  },
+  "controller": {
+    "controller_revision": "ee5e04b8fcfc4d662d96dc1239e029a77425c281",
+    "manifest_sha256": "ed2ed55a80c2e894b832b29d8df4c6eeae2c64f47392878a056e1ab36238296c",
+    "helper_files": 132,
+    "esxi_operations_performed": false,
+    "scope_sha256": "63d705644b3caf58833a1c800e670b1dee821249fbd2650850f063aa465e79c9"
+  },
+  "new_esxi_imported": false,
+  "new_esxi_booted": false,
+  "production_ready": false
+}
