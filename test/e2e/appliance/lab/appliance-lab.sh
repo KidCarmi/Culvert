@@ -1629,6 +1629,54 @@ PY
   log "evidence: $EV/REPORT.md"
 }
 
+# ── engine-surface: who can reach the container engine on the booted guest ──
+# Evidence for the Docker/containerd/runc scanner dispositions. govulncheck in
+# binary mode reports a vulnerable function as soon as it is LINKED; whether an
+# attacker can feed it input depends on how the daemons are exposed here. Each
+# check below is a claim a disposition rests on, and it FAILS if the booted
+# appliance contradicts it.
+cmd_engine_surface() { local f="$EV/E-engine-surface.txt" v
+  gpriv --timeout 300 > "$f" 2>&1 <<'EOS' || true
+echo "=== kernel"; echo "running=$(uname -r)"; for k in /boot/vmlinuz-*; do echo "installed=${k#/boot/vmlinuz-}"; done
+echo "=== snapd"; echo "snapd-status=$(dpkg-query -W -f='${db:Status-Status}' snapd 2>/dev/null || echo absent)"; echo "snap-dir=$( [ -e /snap ] || [ -e /var/lib/snapd ] && echo present || echo absent)"
+echo "=== versions"; for p in docker-ce containerd.io docker-compose-plugin; do echo "$p=$(dpkg-query -W -f='${Version}' "$p")"; done
+echo "=== tcp listeners"; ss -Hltnp | sed 's/^/listen /'
+echo "=== sockets"; for s in /run/containerd/containerd.sock /run/docker.sock; do echo "sock $s $(stat -c '%U:%G %a' "$s" 2>/dev/null || echo missing)"; done
+echo "docker-group=$(getent group docker | cut -d: -f4)"
+echo "=== dockerd argv"; ps -o args= -C dockerd | sed 's/^/dockerd-argv /'
+echo "=== daemon.json"; cat /etc/docker/daemon.json 2>/dev/null | sed 's/^/daemon.json /'
+echo "=== containerd plugins"; ctr plugins ls 2>/dev/null | awk '{print "plugin "$1" "$2" "$NF}'
+echo "disabled-plugins $(grep -E '^[[:space:]]*disabled_plugins' /etc/containerd/config.toml 2>/dev/null)"
+echo "=== containerd tracing"; containerd config dump 2>/dev/null | grep -iE 'otlp|tracing|endpoint' | sed 's/^/tracing /'
+EOS
+  v="$(sed -n 's/^running=//p' "$f")"
+  [[ -n "$v" && "$(grep -c '^installed=' "$f")" == 1 && "$(grep '^installed=' "$f")" == "installed=$v" ]] \
+    && check E kernel-is-the-only-installed pass "running=$v" || check E kernel-is-the-only-installed fail "$(grep -E '^(running|installed)=' "$f" | tr '\n' ' ')"
+  grep -q '^snapd-status=absent' "$f" && grep -q '^snap-dir=absent' "$f" \
+    && check E snapd-absent pass "package and state removed" || check E snapd-absent fail "$(grep -E '^snap' "$f" | tr '\n' ' ')"
+  # No engine process listens on TCP: the gRPC and API surfaces are local sockets only.
+  if grep -E '^listen ' "$f" | grep -qE '"(dockerd|containerd|containerd-shim[^"]*|runc|docker-proxy)"'; then
+    check E engine-no-tcp-listener fail "$(grep -E '^listen ' "$f" | grep -E 'dockerd|containerd|runc|docker-proxy' | tr '\n' ' ')"
+  else check E engine-no-tcp-listener pass "$(grep -c '^listen ' "$f") listener(s), none owned by dockerd/containerd/shim/runc/docker-proxy"; fi
+  grep -q '^sock /run/containerd/containerd.sock root:root 660$' "$f" \
+    && check E containerd-socket-root-only pass "root:root 0660" || check E containerd-socket-root-only fail "$(grep 'containerd.sock' "$f")"
+  if grep -qE '^sock /run/docker.sock root:(root|docker) 660$' "$f" && grep -qx 'docker-group=' "$f"; then
+    check E docker-socket-root-only pass "$(grep '^sock /run/docker.sock' "$f" | cut -d' ' -f3-), docker group has no members"
+  else check E docker-socket-root-only fail "$(grep -E '^sock /run/docker.sock|^docker-group=' "$f" | tr '\n' ' ')"; fi
+  if grep -E '^(dockerd-argv|daemon\.json) ' "$f" | grep -qiE 'tcp://|-H +tcp|--host[= ]+tcp'; then
+    check E dockerd-no-tcp-host fail "$(grep -E '^(dockerd-argv|daemon\.json) ' "$f" | tr '\n' ' ')"
+  else check E dockerd-no-tcp-host pass "no tcp host in dockerd argv or daemon.json"; fi
+  # CRI is the only containerd service that serves untrusted pod specs; Docker's
+  # containerd.io package disables it.
+  if grep -E '^plugin ' "$f" | grep -E 'grpc\.v1 +cri|cri ' | grep -qw ok; then
+    check E containerd-cri-disabled fail "$(grep -E '^plugin .*cri' "$f" | tr '\n' ' ')"
+  elif grep -qE '^plugin ' "$f"; then check E containerd-cri-disabled pass "CRI gRPC service not serving ($(grep -E '^(plugin .*cri|disabled-plugins)' "$f" | tr '\n' ' ' | sed 's/ $//'))"
+  else check E containerd-cri-disabled fail "ctr plugins ls produced nothing"; fi
+  grep -qiE '^tracing .*endpoint *= *"[^"]+"' "$f" && check E containerd-tracing-off fail "$(grep '^tracing' "$f" | tr '\n' ' ')" \
+    || check E containerd-tracing-off pass "no OTLP endpoint configured"
+  log "engine surface: $f"
+}
+
 # ── down: stop the guest, remove the disposable disks (evidence stays) ──────
 cmd_down() {
   if [[ "$LAB_EXTERNAL" == 1 ]]; then
@@ -2063,11 +2111,12 @@ case "${1:-}" in
   recovery) cmd_recovery; [[ "$(failures)" == 0 ]] ;;
   history) cmd_history; [[ "$(failures)" == 0 ]] ;;
   adoption) cmd_adoption; [[ "$(failures)" == 0 ]] ;;
+  engine-surface) cmd_engine_surface; [[ "$(failures)" == 0 ]] ;;
   console) trap 'cmd_collect || true; cmd_down || true' EXIT; cmd_console; [[ "$(failures)" == 0 ]] ;;
   collect) cmd_collect ;;
   down) cmd_down ;;
   all)
     trap 'cmd_collect || true; cmd_down || true' EXIT
-    cmd_preflight; cmd_up; cmd_qualify; cmd_recovery; [[ -z "${LAB_ADOPT_IMAGE_TAR:-}" ]] || cmd_adoption; cmd_history; n="$(failures)"; log "failures: $n"; [[ "$n" == 0 ]] ;;
+    cmd_preflight; cmd_up; cmd_qualify; [[ "${LAB_ENGINE_SURFACE:-0}" != 1 ]] || cmd_engine_surface; cmd_recovery; [[ -z "${LAB_ADOPT_IMAGE_TAR:-}" ]] || cmd_adoption; cmd_history; n="$(failures)"; log "failures: $n"; [[ "$n" == 0 ]] ;;
   *) sed -n '2,32p' "$0"; exit 2 ;;
 esac
