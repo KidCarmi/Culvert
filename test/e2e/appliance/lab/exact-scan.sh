@@ -43,7 +43,11 @@ cmd_gobins() {
   : > "$ev/go-binaries.tsv"
   for spec in "$@"; do
     name="${spec%%=*}"; path="${spec#*=}"
-    if ! go version "$path" > "$ev/govulncheck/$name.version.txt" 2>&1; then
+    # `go version` exits 0 on a non-Go file ("could not read Go build info"),
+    # so a Go binary is recognised by the "PATH: goX" line it prints.
+    go version "$path" > "$ev/govulncheck/$name.version.txt" 2>&1 || true
+    if ! grep -qE ': go1\.[0-9]' "$ev/govulncheck/$name.version.txt"; then
+      rm -f "$ev/govulncheck/$name.version.txt"
       printf '%s\t%s\tnot-a-go-binary\t-\n' "$name" "$path" >> "$ev/go-binaries.tsv"; continue
     fi
     go version -m "$path" > "$ev/govulncheck/$name.buildinfo.txt" 2>&1 || true
@@ -87,8 +91,19 @@ cmd_engsrc() {
     mod="$(awk '$1=="mod"{print $2; exit}' <<<"$bi")"; ver="$(awk '$1=="mod"{print $3; exit}' <<<"$bi")"
     rev="$(sed -n 's/^[[:space:]]*build[[:space:]]*vcs\.revision=//p' <<<"$bi" | head -1)"
     tags="$(sed -n 's/^[[:space:]]*build[[:space:]]*-tags=//p' <<<"$bi" | head -1)"
-    if [[ -z "$ver" || "$ver" == "(devel)" ]]; then
-      local short; short="$(sed -n 's/.*GitCommit=\([0-9a-f]\{7,40\}\).*/\1/p' <<<"$bi" | head -1)"
+    local short; short="$(sed -n 's/.*GitCommit=\([0-9a-f]\{7,40\}\).*/\1/p' <<<"$bi" | head -1)"
+    local note=""
+    if [[ -z "$mod" ]]; then
+      # Built without module information (GOPATH/vendor build, e.g. the docker
+      # CLI): binary mode sees no dependency list at all, so its "no
+      # vulnerabilities" is blind. Take the module from the main package path
+      # and the release from the version ldflag; the proxy commit must still
+      # equal the GitCommit ldflag.
+      mod="${main%%/cmd/*}"
+      local rel; rel="$(sed -n 's/.*version\.Version=\([0-9][0-9A-Za-z.+-]*\).*/\1/p' <<<"$bi" | head -1)"
+      ver="v$rel"; rev="$short"; note=" no-module-info"
+      (cd "$work" && GOFLAGS=-mod=mod go mod download -json "$mod@$ver" >/dev/null 2>&1) || ver="v$rel+incompatible"
+    elif [[ -z "$ver" || "$ver" == "(devel)" ]]; then
       ver="${rev:-$short}"
     fi
     got="$(cd "$work" && GOFLAGS=-mod=mod go mod download -json "$mod@$ver" 2>&1)" || { printf '%s\t%s@%s\tdownload-failed\n' "$name" "$mod" "$ver" >> "$ev/engsrc/index.tsv"; continue; }
@@ -98,10 +113,13 @@ cmd_engsrc() {
       printf '%s\t%s@%s\trevision-mismatch binary=%s proxy=%s\n' "$name" "$mod" "$ver" "${rev:-?}" "${hash:-?}" >> "$ev/engsrc/index.tsv"; continue
     fi
     rm -rf "$work/src"; cp -r "$dir" "$work/src"; chmod -R u+w "$work/src"
+    if [[ ! -f "$work/src/go.mod" && -f "$work/src/vendor.mod" ]]; then
+      cp "$work/src/vendor.mod" "$work/src/go.mod"; cp "$work/src/vendor.sum" "$work/src/go.sum"; note+=" go.mod=vendor.mod"
+    fi
     local pkg="./${main#"$mod"/}"; [[ "$main" == "$mod" ]] && pkg=.
     rc=0
     (cd "$work/src" && GOFLAGS=-mod=mod CGO_ENABLED=1 govulncheck ${tags:+-tags "$tags"} -format json "$pkg") > "$ev/engsrc/$name.json" 2> "$ev/engsrc/$name.stderr" || rc=$?
-    printf '%s\t%s@%s\tcommit=%s tags=%s rc=%s\n' "$name" "$mod" "$ver" "$hash" "${tags:--}" "$rc" >> "$ev/engsrc/index.tsv"
+    printf '%s\t%s@%s\tcommit=%s tags=%s rc=%s%s\n' "$name" "$mod" "$ver" "$hash" "${tags:--}" "$rc" "$note" >> "$ev/engsrc/index.tsv"
   done
   rm -rf "$work"
 }

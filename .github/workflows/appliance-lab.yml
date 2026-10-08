@@ -1322,7 +1322,7 @@ jobs:
           set -euo pipefail
           args=(app-culvert="$W/appbin/app-culvert" app-deploy-culvert-maint="$W/appbin/app-deploy-culvert-maint")
           while IFS= read -r f; do
-            go version "$f" >/dev/null 2>&1 || continue
+            go version "$f" 2>/dev/null | grep -qE ': go1\.[0-9]' || continue   # exits 0 on non-Go files
             n="host$(echo "${f#"$W/rootfs"}" | tr '/' '-')"
             args+=("$n=$f")
           done < <(find "$W/rootfs" -xdev \( -path "$W/rootfs/proc" -o -path "$W/rootfs/var/lib/culvert-appliance/images" \) -prune -o -type f -size +1M -perm -u+x -print)
