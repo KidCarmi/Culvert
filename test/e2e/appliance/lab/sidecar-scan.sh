@@ -102,6 +102,16 @@ PY
 
 cmd_trivy() {
   local tar="$1" config="$2" ev="$3" img gate
+  # Trivy reads a docker-save archive as a file but an OCI layout only as a
+  # DIRECTORY. The reproducible sidecar is a pure OCI archive, so unpack it:
+  # the same blobs bind re-hashed, and Trivy's ImageID must still equal the
+  # bound config below.
+  if ! tar -tf "$tar" | grep -qx 'manifest.json'; then
+    local dir="${tar%.tar}.oci"
+    rm -rf "$dir"; mkdir -p "$dir"; tar -xf "$tar" -C "$dir"
+    echo "OCI layout archive: scanning its unpacked layout $dir" | tee "$ev/trivy-input.txt"
+    tar="$dir"
+  fi
   trivy image --download-db-only --db-repository mirror.gcr.io/aquasec/trivy-db:2
   trivy --version > "$ev/trivy-version.txt"
   trivy image --skip-db-update --input "$tar" --scanners vuln --format json --output "$ev/trivy-all.json"
