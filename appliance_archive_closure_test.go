@@ -300,6 +300,57 @@ func TestBuildOVA_ColdLoadsBothArchivesBeforeBaking(t *testing.T) {
 	}
 }
 
+// Two OVA builds of one source baked sidecars with different image IDs whose
+// packages and libraries were byte-identical: only file mtimes and apk's
+// install log differed (#1528, retained-OVA comparison, lab run 37761732512).
+// The sidecar must now be reproducible, and the build must PROVE it on every
+// OVA: two independent --no-cache builds with timestamps clamped to
+// SOURCE_DATE_EPOCH, and a refusal when their image IDs differ.
+func TestBuildOVA_ClamAVSidecarIsReproducible(t *testing.T) {
+	b, err := os.ReadFile(buildOVAScript)
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := string(b)
+	for _, want := range []string{
+		`docker buildx build -q --no-cache --platform linux/amd64 --provenance=false --sbom=false`,
+		`--build-arg SOURCE_DATE_EPOCH="$SOURCE_DATE_EPOCH"`,
+		`--output "type=docker,name=$1,rewrite-timestamp=true" "$REPO/appliance/clamav"`,
+		`build_clamav_sidecar "$CLAMAV_SIDECAR_REF" ||`,
+		`build_clamav_sidecar "${CLAMAV_SIDECAR_REF}-rebuild" ||`,
+		`if [[ "$CLAMAV_SIDECAR_REBUILD_ID" != "$CLAMAV_SIDECAR_ID" ]]; then`,
+		`die "ClamAV sidecar is not reproducible`,
+		// a refusal keeps its evidence: config, history, packages, both images
+		`ev="$OUT/clamav-repro-failure"`,
+		`docker save "$r" | gzip -n -6 > "$ev/$n.tar.gz"`,
+		`apk info -v 2>/dev/null | sort' > "$ev/$n.apk.txt"`,
+	} {
+		if !strings.Contains(src, want) {
+			t.Errorf("build-ova.sh must contain %q", want)
+		}
+	}
+	// The first build is the one that is saved and baked; the rebuild only
+	// proves it. The identity recorded for first boot is the first build's.
+	first := strings.Index(src, `build_clamav_sidecar "$CLAMAV_SIDECAR_REF" ||`)
+	id := strings.Index(src, `CLAMAV_SIDECAR_ID="$(docker image inspect "$CLAMAV_SIDECAR_REF"`)
+	rebuild := strings.Index(src, `build_clamav_sidecar "${CLAMAV_SIDECAR_REF}-rebuild" ||`)
+	check := strings.Index(src, `if [[ "$CLAMAV_SIDECAR_REBUILD_ID" != "$CLAMAV_SIDECAR_ID" ]]; then`)
+	save := strings.Index(src, `docker save "${CLAMAV_SIDECAR_REF}" | gzip -n -6`)
+	if first < 0 || first > id || id > rebuild || rebuild > check || check > save {
+		t.Fatalf("order must be build → record ID → rebuild → compare → save (build=%d id=%d rebuild=%d check=%d save=%d)", first, id, rebuild, check, save)
+	}
+	if strings.Contains(src, `docker build -q --platform linux/amd64 -t "$CLAMAV_SIDECAR_REF"`) {
+		t.Error("the non-reproducible single docker build must not come back")
+	}
+	df, err := os.ReadFile(filepath.Join(pkgSourceDir(), "appliance", "clamav", "Dockerfile"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(df), "&& rm -rf /var/log/apk.log /var/cache/apk/*\n") {
+		t.Error("the sidecar Dockerfile must remove apk's install log and index cache in the install RUN (they record the build time)")
+	}
+}
+
 // F-OVA-CLAMAV-1's cause, bisected in fresh disposable stores (lab run
 // 37154350794): once the candidate image archive had been loaded into the
 // store, every later save of the pulled ClamAV image was hollow (index and
@@ -314,7 +365,7 @@ func TestBuildOVA_SavesClamAVBeforeLoadingTheCandidate(t *testing.T) {
 	}
 	src := string(b)
 	pull := strings.Index(src, `pull_by_digest "$CLAMAV_IMAGE_REPO" "$CLAMAV_IMAGE_INDEX_DIGEST" "$CLAMAV_IMAGE_AMD64_DIGEST" "$CLAMAV_IMAGE_TAG"`)
-	build := strings.Index(src, `docker build -q --platform linux/amd64 -t "$CLAMAV_SIDECAR_REF" "$REPO/appliance/clamav"`)
+	build := strings.Index(src, `build_clamav_sidecar "$CLAMAV_SIDECAR_REF" ||`)
 	save := strings.Index(src, `docker save "${CLAMAV_SIDECAR_REF}" | gzip -n -6 > "$WORK/clamav.tar.gz"`)
 	load := strings.Index(src, `docker load -q -i "$CANDIDATE_TAR"`)
 	bake := strings.Index(src, `mv "$WORK/clamav.tar.gz" "$OV/var/lib/culvert-appliance/images/clamav.tar.gz"`)

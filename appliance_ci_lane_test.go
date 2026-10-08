@@ -246,7 +246,8 @@ func TestClamAVSidecar_DerivesFromThePinnedOfficialImage(t *testing.T) {
 // it is given a new, never-used tag in manifest.env and both compose files.
 var sidecarTagByContent = map[string]string{
 	"26a01bef80bc1cb6b6e89354f8b00944f04fa9424902f8af003b4fc016d817ab": "culvert/clamav:1.4.6-pcre2-10.49", // pcre2 only (retired)
-	"822f51c5f6bca0e4162d792932df487507f0f19c8cdef72074df25b91c2dbc1a": "culvert/clamav:1.4.6-culvert.2",   // + zlib, nghttp2-libs
+	"822f51c5f6bca0e4162d792932df487507f0f19c8cdef72074df25b91c2dbc1a": "culvert/clamav:1.4.6-culvert.2",   // + zlib, nghttp2-libs (retired)
+	"bca8f40f93b375602b2a55ea1977ebb34724fec34bcd4b5b0e898813176f7db6": "culvert/clamav:1.4.6-culvert.3",   // reproducible: no apk.log / index cache
 }
 
 func TestClamAVSidecar_EveryContentChangeGetsANewTag(t *testing.T) {

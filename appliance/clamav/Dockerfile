@@ -26,10 +26,19 @@
 # absent; Compose never pulls that name from a registry. Switch back to the
 # official image once upstream ships a build with pcre2 >= 10.49.
 #
+# 2026-10-08 (#1528, retained-OVA comparison): two OVA builds of the same
+# source baked sidecars with different image IDs. Every package and library
+# was byte-identical; the layer differed only in file mtimes and in
+# /var/log/apk.log (an install log that records the build time). The log and
+# apk's index cache are removed here, and build-ova.sh builds with
+# rewrite-timestamp and refuses an OVA whose sidecar does not rebuild to the
+# same image ID — so the same source bakes the same sidecar.
+#
 # The FROM digest must equal manifest.env CLAMAV_IMAGE_INDEX_DIGEST
 # (pinned by TestClamAVSidecar_DerivesFromThePinnedOfficialImage).
 FROM docker.io/clamav/clamav@sha256:57deb108fc4c72778aa83eafbca7bb7153e28c3f57c005afd38d31f16da86f23
 RUN apk add --no-cache --upgrade 'pcre2=10.49-r0' 'zlib=1.3.2-r1' 'nghttp2-libs=1.70.0-r0' \
  && test "$(apk info -v 2>/dev/null | grep '^pcre2-[0-9]')" = 'pcre2-10.49-r0' \
  && test "$(apk info -v 2>/dev/null | grep '^zlib-[0-9]')" = 'zlib-1.3.2-r1' \
- && test "$(apk info -v 2>/dev/null | grep '^nghttp2-libs-[0-9]')" = 'nghttp2-libs-1.70.0-r0'
+ && test "$(apk info -v 2>/dev/null | grep '^nghttp2-libs-[0-9]')" = 'nghttp2-libs-1.70.0-r0' \
+ && rm -rf /var/log/apk.log /var/cache/apk/*

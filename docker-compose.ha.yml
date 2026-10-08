@@ -44,7 +44,7 @@ services:
     # never is REQUIRED: without it Compose tries the registry first when the
     # tag is absent (measured on v5.3.1) and would run whatever answered for
     # this name instead of building the pinned derivative.
-    image: culvert/clamav:1.4.6-culvert.2
+    image: culvert/clamav:1.4.6-culvert.3
     pull_policy: never
     build:
       context: ./appliance/clamav
