@@ -573,6 +573,41 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Performance
 
+- The forward category index is now read **lock-free**.
+  `urlcat.MatchesHost`/`MatchesHostAdmin` are the per-RULE half of
+  destination-category resolution — `hostCatScratch.matchesCategory` calls one
+  of them once per category-scoped access rule per proxied request — and each
+  took `s.mu.RLock` purely to snapshot ONE pointer out of a map that in steady
+  state never changes. `RLock`/`RUnlock` are two atomic read-modify-writes on
+  one shared word, so this was a throughput CEILING rather than a constant
+  cost: measured on a 4-core Xeon @2.10GHz, four cores delivered **0.78x** the
+  throughput of ONE, i.e. adding cores SUBTRACTED throughput.
+
+  The attribution is what justified acting: a pure-CPU control scaled 3.73x on
+  the same box (ruling out "the box does not scale"), the identical body with
+  the lock removed scaled 3.81x, and a bare `RLock`/`RUnlock` pair alone cost
+  15.3 ns serial against 64.3 ns at four cores — so ~110 of the call's 138 ns
+  at four cores was the lock.
+
+  End to end through the real policy engine, a 50-rule category posture goes
+  **9295 → 1288 ns at four cores (7.22x)** and 5302 → 4742 ns serially (1.12x
+  — fifty removed lock acquisitions outweigh fifty added pointer chases), with
+  1→4-core scaling going from 0.57x to 3.68x. 0 allocs/op throughout.
+
+  The read view holds a swappable SLOT per category rather than the host sets
+  directly, because the first shape had the incremental `AddHost` fold
+  republish the whole view and that regressed the one writer that may not
+  regress — AddHost went from flat in category count to 4.14x across a 40x
+  range, since the SaaS feed merge calls it once per merged host while holding
+  the write lock `LookupHost` and every admin read still contend on.
+
+  Honest limits: the single probe is ~7-10% slower at `GOMAXPROCS=1` from the
+  extra pointer chase (recorded rather than papered over, the
+  `internal/connlimit` precedent; the rule count amortises it away), and
+  `DestCategoryGroup` rules are NOT improved — they additionally expand
+  through `internal/catgroup`, whose own per-rule `RLock` is now the dominant
+  ceiling on that path.
+
 - The threat feed's full-URL check no longer re-parses a URL it was handed
   already parsed. `preDispatchBlocked` runs it on every forwarded plain-HTTP
   request, on the request goroutine, before the policy engine — and called it
