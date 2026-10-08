@@ -86,8 +86,10 @@ jobs:
             image_run: "37829233536"
             image_tar_sha256: "284c28f3f1eef0e699c89a359efa2cb2c59a0e25b6deb151ea4dec0ecb695ccd"
             expect_image_id: "sha256:0fdc5513b8b8ccc6b2998f0786f4a7304601887f522a023416562006f98033eb"
-            retained_run: ""
-            retained_sha256: ""
+            # Re-qualifies the OVA run 37831230971 built (no rebuild) with the
+            # corrected engine-surface probe.
+            retained_run: "37831230971"
+            retained_sha256: "fdf5b8003fc748e3fe0b32b1b95f31b2ddbb19195a4d663544e525704b6afe6a"
             # The calibrated ESXi proxy (12 ms read / 3 ms write).
             disk: dm
             recovery_reboots: "3"
