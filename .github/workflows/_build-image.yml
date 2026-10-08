@@ -96,6 +96,10 @@ jobs:
             type=gha,scope=pr-image
             type=gha
           cache-to: type=gha,mode=max,scope=pr-image
+          # The runtime stage is never replayed from cache: its `apk upgrade`
+          # must see today's Alpine security fixes (a cached layer shipped
+          # zlib 1.3.2-r0 after r1 was published — 7e53720d exact-byte scan).
+          no-cache-filters: runtime
 
       - name: Save image tarball
         run: docker save "${{ inputs.image-tag }}" -o culvert-image.tar

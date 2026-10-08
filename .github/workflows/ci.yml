@@ -343,6 +343,9 @@ jobs:
             VERSION=${{ steps.chan.outputs.version }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+          # Never replay the runtime stage from cache: its `apk upgrade` must
+          # see today's Alpine security fixes (see Dockerfile).
+          no-cache-filters: runtime
           # Embed provenance + SBOM attestations directly in the image manifest.
           provenance: true
           sbom: true

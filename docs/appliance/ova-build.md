@@ -171,10 +171,18 @@ verifies on import.
   `GUEST_APT_SNAPSHOT` in `manifest.env` (`apt -o Acquire::Snapshot`,
   snapshot.ubuntu.com), so the base image's packages ship at a reviewed,
   dated state instead of the serial's — same manifest, same versions — and
-  `build-upgrades.txt` next to the OVA lists what moved. `upgrade`, never
-  `dist-upgrade`: no new kernel ABI is installed at build time; the kernel
-  moves through `culvert-os-update os` after deployment. Raising the
-  snapshot is a pin change like any other.
+  `build-upgrades.txt` next to the OVA lists what moved. The upgrade runs
+  with `--with-new-pkgs`, so the kernel moves to the snapshot's newest ABI at
+  build time (a plain `upgrade` kept it back: the 7e53720d OVA booted
+  6.8.0-142 while its own snapshot carried 6.8.0-146); the superseded
+  kernel's packages are purged and the build refuses unless exactly one
+  kernel is in `/boot`. After deployment the kernel moves through
+  `culvert-os-update os`; the build also refuses a kernel metapackage that is
+  not at the snapshot's candidate (a held kernel). `snapd` is purged (no snap
+  is used; `ubuntu-server` only recommends it) and an apt pin keeps it out;
+  `lxd-installer` stays, because `ubuntu-server` depends on it, and the build
+  refuses if `ubuntu-server`, `open-vm-tools` or `unattended-upgrades` is gone
+  afterwards. Raising the snapshot is a pin change like any other.
 
 ## Candidate builds (qualification of an unpublished image — never for customers)
 

@@ -247,7 +247,7 @@ func TestDockerfileCrossBuild_RejectsHostArchMutations(t *testing.T) {
 		maintEnv    = "CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -buildvcs=false \\\n      -ldflags=\"-s -w -X culvert-maint"
 		maintArgs   = "ARG VERSION=\nARG TARGETOS\nARG TARGETARCH\nRUN VER="
 		proxyEnv    = "CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -buildvcs=false -ldflags=\"-s -w -X main.version"
-		runtimeFrom = "FROM alpine:3.24\n"
+		runtimeFrom = "FROM alpine:3.24 AS runtime\n"
 	)
 
 	mutations := []struct {
@@ -271,7 +271,7 @@ func TestDockerfileCrossBuild_RejectsHostArchMutations(t *testing.T) {
 			strings.Replace(proxyEnv, "GOOS=${TARGETOS}", "GOOS=linux", 1)},
 		{"agent cgo re-enabled", maintEnv,
 			strings.Replace(maintEnv, "CGO_ENABLED=0", "CGO_ENABLED=1", 1)},
-		{"final stage moved to the build platform", runtimeFrom, "FROM --platform=$BUILDPLATFORM alpine:3.24\n"},
+		{"final stage moved to the build platform", runtimeFrom, "FROM --platform=$BUILDPLATFORM alpine:3.24 AS runtime\n"},
 		{"agent build moved out of view (vacuous wall)", maintEnv,
 			strings.Replace(maintEnv, "go build", "./build.sh", 1)},
 	}

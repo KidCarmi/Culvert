@@ -240,6 +240,20 @@ jobs:
             --exit-code 1 \
             culvert:ci-smoke
 
+      # A stale image is caught at ANY severity: the runtime stage runs
+      # `apk upgrade`, so a FIXABLE Alpine package finding means that
+      # upgrade did not happen (a cached layer shipped zlib 1.3.2-r0 after r1,
+      # rated MEDIUM, passed the gate above). No ignore file applies here.
+      - name: Scan image OS packages (any fixable finding, any severity)
+        run: |
+          trivy image \
+            --scanners vuln \
+            --pkg-types os \
+            --ignore-unfixed \
+            --ignorefile /dev/null \
+            --exit-code 1 \
+            culvert:ci-smoke
+
   # ─── 3. Dockerfile lint ────────────────────────────────────────────────────
   hadolint:
     name: "Deep · hadolint"

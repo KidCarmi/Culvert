@@ -110,16 +110,57 @@ apt-mark hold docker-ce docker-ce-cli containerd.io docker-compose-plugin >/dev/
 # their own network — but from an archive snapshot pinned in manifest.env
 # (GUEST_APT_SNAPSHOT, snapshot.ubuntu.com), so the input-pinning contract
 # holds: same manifest ⇒ same package versions, and the SBOM/CVE evidence
-# describes exactly what shipped. `upgrade` (not dist-upgrade) never installs
-# new packages, so a new kernel ABI is NOT pulled in here — the kernel moves
-# only through culvert-os-update os (+ reboot) after deployment, which is a
-# deliberate, documented operator step. Docker is held above and cannot move.
+# describes exactly what shipped. `--with-new-pkgs` lets the kernel
+# metapackages move to the snapshot's newest kernel ABI (a plain `upgrade`
+# keeps them back, because a new ABI is a NEW package): the 7e53720d
+# exact-byte scan found the OVA booting 6.8.0-142 while the pinned snapshot
+# already carried 6.8.0-146 and its security fixes. The superseded kernel's
+# packages are then purged, so exactly one kernel ships. Docker is held above
+# and cannot move.
 if [[ -n "${GUEST_APT_SNAPSHOT:-}" ]]; then
   log "applying guest security updates from the Ubuntu archive snapshot ${GUEST_APT_SNAPSHOT}"
   apt-get -qq -o Acquire::Snapshot="${GUEST_APT_SNAPSHOT}" update
   before="$(dpkg-query -W -f='${binary:Package}=${Version}\n' | sort)"
   DEBIAN_FRONTEND=noninteractive apt-get -y -qq -o Acquire::Snapshot="${GUEST_APT_SNAPSHOT}" \
-    -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold upgrade
+    -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold --with-new-pkgs upgrade
+  # Exactly one kernel ships: purge every kernel-versioned package of an older
+  # ABI than the newest installed image.
+  newest_kver="$(dpkg-query -W -f='${Package}\n' 'linux-image-[0-9]*' | sed -n 's/^linux-image-\([0-9][0-9.]*-[0-9]*\)-.*/\1/p' | sort -V | tail -1)"
+  [[ -n "$newest_kver" ]] || { echo "no kernel image installed" >&2; exit 1; }
+  stale_kpkgs="$(dpkg-query -W -f='${Package}\n' 'linux-image-[0-9]*' 'linux-modules-[0-9]*' 'linux-modules-extra-[0-9]*' \
+    'linux-headers-[0-9]*' 'linux-tools-[0-9]*' 'linux-cloud-tools-[0-9]*' 2>/dev/null \
+    | grep -vE -- "-${newest_kver//./\\.}(-|\$)" || true)"
+  if [[ -n "$stale_kpkgs" ]]; then
+    log "purging the superseded kernel: $(echo "$stale_kpkgs" | tr '\n' ' ')"
+    # shellcheck disable=SC2086 # one package name per word
+    DEBIAN_FRONTEND=noninteractive apt-get -y -qq purge $stale_kpkgs
+  fi
+  [[ "$(find /boot -maxdepth 1 -name 'vmlinuz-*' | wc -l)" == 1 ]] || { ls -l /boot >&2; echo "expected exactly one kernel in /boot" >&2; exit 1; }
+  # ... and that one is the snapshot's newest: a held or phased kernel would
+  # otherwise pass the one-kernel check on the old ABI.
+  for meta in linux-image-virtual linux-image-generic; do
+    inst="$(dpkg-query -W -f='${Version}' "$meta" 2>/dev/null || true)"
+    [[ -z "$inst" ]] && continue
+    cand="$(apt-cache -o Acquire::Snapshot="${GUEST_APT_SNAPSHOT}" policy "$meta" | awk '/Candidate:/{print $2}')"
+    [[ "$inst" == "$cand" ]] || { echo "$meta is $inst, the snapshot's candidate is $cand (kernel held back)" >&2; exit 1; }
+  done
+  log "kernel: $(find /boot -maxdepth 1 -name 'vmlinuz-*' -printf '%f')"
+  # snapd: a root daemon and 16 Go binaries the appliance never uses (no snap
+  # is installed or needed); the exact-byte scan attributed most host-binary
+  # findings to it. Only ubuntu-server RECOMMENDS snapd, so its purge removes
+  # nothing else. lxd-installer (a shell stub, no Go) stays: ubuntu-server
+  # DEPENDS on it, and purging it would remove ubuntu-server and leave its
+  # dependencies (open-vm-tools, unattended-upgrades, …) to the next
+  # `autoremove` in culvert-os-update. The pin keeps an upgrade from bringing
+  # snapd back; the check below refuses a purge that took anything with it.
+  log "purging snapd (unused root daemon)"
+  DEBIAN_FRONTEND=noninteractive apt-get -y -qq purge snapd
+  rm -rf /var/lib/snapd /var/cache/snapd /snap
+  printf 'Package: snapd\nPin: release *\nPin-Priority: -1\n' > /etc/apt/preferences.d/culvert-no-snapd
+  for keep in ubuntu-server open-vm-tools unattended-upgrades; do
+    [[ "$(dpkg-query -W -f='${db:Status-Status}' "$keep" 2>/dev/null)" == installed ]] \
+      || { echo "$keep is no longer installed after the snapd purge" >&2; exit 1; }
+  done
   after="$(dpkg-query -W -f='${binary:Package}=${Version}\n' | sort)"
   # Shipped as evidence: exactly which packages the snapshot upgrade moved.
   # comm, not diff: diff exits 1 whenever the lists differ, which under

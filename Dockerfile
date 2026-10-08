@@ -146,7 +146,12 @@ RUN apk add --no-cache wget && \
 #       (see deploy/seccomp.json)
 #   • Drop all Linux capabilities: --cap-drop=ALL
 #   • No new privileges: --security-opt no-new-privileges
-FROM alpine:3.24
+# Named so the image builds can exclude it from the layer cache
+# (no-cache-filters: runtime): `apk upgrade` below must fetch today's Alpine
+# security fixes, and a cached layer silently replays an old package set — the
+# 7e53720d exact-byte scan found zlib 1.3.2-r0 shipped while r1 (CVE-2026-85091)
+# had been published.
+FROM alpine:3.24 AS runtime
 
 # /data and /backup are pre-created + chowned to proxy so that a FRESH named
 # volume mounted over them (proxy-data:/data, culvert-backups:/backup) inherits
