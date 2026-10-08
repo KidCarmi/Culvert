@@ -54,7 +54,13 @@ cmd_gobins() {
     # Linked-function count per vulnerable package, read from this binary's
     # pclntab: binary mode cannot tell a wildcard OSV symbol ("pkg/*") from a
     # linked one, so the table reports what is actually in the bytes.
+    # What govulncheck itself extracted from the binary (hash-bound), and an
+    # independent package inventory from pclntab: a non-empty inventory with
+    # main/runtime present is the positive control that an absent package is
+    # truly absent rather than unreadable.
+    govulncheck -mode extract "$path" > "$ev/govulncheck/$name.extract" 2>>"$ev/govulncheck/$name.stderr" || true
     if [[ -n "${PCLNFUNCS:-}" ]]; then
+      "$PCLNFUNCS" "$path" -inventory > "$ev/govulncheck/$name.inventory.tsv" 2>&1 || true
       local pkgs; pkgs="$(osv_pkgs "$ev/govulncheck/$name.json")"
       # shellcheck disable=SC2086 # one argument per package path
       [[ -z "$pkgs" ]] || "$PCLNFUNCS" "$path" $pkgs > "$ev/govulncheck/$name.pcln.tsv" 2>&1 || true
@@ -156,18 +162,42 @@ for f in sorted(glob.glob(os.path.join(ev, "govulncheck", "*.json"))):
             parts = ln.rstrip("\n").split("\t")
             if len(parts) == 3 and parts[1].isdigit():
                 pcln[parts[0]] = int(parts[1])
+    rank = {"symbol": 0, "package": 1, "module": 2}
     for vid, levels in found.items():
         paths = sorted({i["path"] + "." for a in (osv.get(vid, {}).get("affected") or [])
                         for i in (a.get("ecosystem_specific") or {}).get("imports") or [] if i.get("path")})
         linked = "?" if not pcln else str(sum(pcln.get(x, 0) for x in paths))
-        for level, mod, ver, fixed in sorted(levels):
-            rows.append(("govulncheck:" + name, name, "gobinary-" + level, mod, ver, fixed, "-", level + "/linked=" + linked, vid))
+        # one row per binary and finding, at the most precise level reported
+        level, mod, ver, fixed = min(levels, key=lambda x: (rank.get(x[0], 9), x[1:]))
+        rows.append(("govulncheck:" + name, name, "gobinary", mod, ver, fixed, "-", level + "/linked=" + linked, vid))
+# engsrc: source-mode reachability on the exact upstream revision
+for f in sorted(glob.glob(os.path.join(ev, "engsrc", "*.json"))):
+    name = os.path.basename(f)[:-5]
+    osv, best = {}, {}
+    text, pos, dec = open(f).read(), 0, json.JSONDecoder()
+    rank = {"called": 0, "imported": 1, "required": 2}
+    while True:
+        while pos < len(text) and text[pos].isspace():
+            pos += 1
+        if pos >= len(text):
+            break
+        m, pos = dec.raw_decode(text, pos)
+        if "osv" in m:
+            osv[m["osv"]["id"]] = m["osv"]
+        if "finding" in m:
+            fd = m["finding"]; tr = fd.get("trace") or [{}]
+            lvl = "called" if tr[0].get("function") else ("imported" if tr[0].get("package") else "required")
+            cur = best.get(fd["osv"])
+            if cur is None or rank[lvl] < rank[cur[0]]:
+                best[fd["osv"]] = (lvl, tr[0].get("module", ""), tr[0].get("version", ""), fd.get("fixed_version", "") or "-")
+    for vid, (lvl, mod, ver, fixed) in best.items():
+        rows.append(("engsrc:" + name, name, "source", mod, ver, fixed, "-", lvl, vid))
 rows.sort()
 with open(os.path.join(ev, "findings.tsv"), "w") as o:
     o.write("source\ttarget\ttype\tpackage\tinstalled\tfixed\tseverity\tstatus\tid\n")
     for r in rows:
         o.write("\t".join(r) + "\n")
-summ = collections.Counter((r[0], r[6], "fixable" if r[5] != "-" else "no-fix") for r in rows)
+summ = collections.Counter((r[0], r[6] if not r[0].startswith("engsrc:") else r[7], "fixable" if r[5] != "-" else "no-fix") for r in rows)
 with open(os.path.join(ev, "counts.txt"), "w") as o:
     for k in sorted(summ):
         o.write("%-34s %-9s %-8s %d\n" % (k[0], k[1], k[2], summ[k]))

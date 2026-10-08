@@ -1326,6 +1326,18 @@ jobs:
           done < <(find "$W/rootfs" -xdev \( -path "$W/rootfs/proc" -o -path "$W/rootfs/var/lib/culvert-appliance/images" \) -prune -o -type f -size +1M -perm -u+x -print)
           test/e2e/appliance/lab/exact-scan.sh gobins "$W/evidence" "${args[@]}"
           column -t "$W/evidence/go-binaries.tsv" | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Engine reachability — govulncheck SOURCE mode on the exact upstream revision of each engine binary
+        run: |
+          set -euo pipefail
+          # cgo packages of runc (seccomp) and dockerd (journald) need headers to type-check
+          sudo apt-get install -y -qq libseccomp-dev libsystemd-dev pkg-config >/dev/null
+          args=()
+          for b in usr/bin/containerd usr/bin/ctr usr/bin/containerd-shim-runc-v2 usr/bin/runc usr/bin/dockerd usr/bin/docker usr/libexec/docker/cli-plugins/docker-compose; do
+            [ -f "$W/rootfs/$b" ] && args+=("$(echo "$b" | tr '/' '-')=$W/rootfs/$b")
+          done
+          GOTOOLCHAIN=local test/e2e/appliance/lab/exact-scan.sh engsrc "$W/evidence" "${args[@]}"
+          column -t -s $'\t' "$W/evidence/engsrc/index.tsv" | tee -a "$GITHUB_STEP_SUMMARY"
+          ! grep -qE 'mismatch|download-failed' "$W/evidence/engsrc/index.tsv"
       - name: The kernel noble offers today, against the one the OVA ships
         run: |
           set -euo pipefail
