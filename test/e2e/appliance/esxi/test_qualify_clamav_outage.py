@@ -1,5 +1,7 @@
 """Synthetic only: no console, guest, Docker or hypervisor calls."""
 import importlib.util
+import contextlib
+import io
 import json
 from pathlib import Path
 import tempfile
@@ -340,6 +342,75 @@ class PriorAttemptTests(unittest.TestCase):
 
 
 class ReplacementCandidateTests(unittest.TestCase):
+    def test_7e_initial_attempt_is_exact_and_one_shot(self):
+        profiles = m.load('outage_7e_profiles', 'candidate-identities.py')
+        profile = profiles.source_profile(profiles.E7E)
+        with tempfile.TemporaryDirectory() as temporary:
+            sec = Path(temporary)
+            self.assertEqual(m.attempt_context(sec, profile, 'initial', None, 'owned'),
+                             (sec / 'clamav-outage', {}))
+            for field in ('source_sha', 'ova_sha256', 'image_id'):
+                changed = dict(profile, **{field: '0' * 64})
+                with self.subTest(field=field), self.assertRaises(ValueError):
+                    m.attempt_context(sec, changed, 'initial', None, 'owned')
+            for attempt, previous in [('lockfix', None), ('retry', 'a' * 64), ('initial', 'a' * 64)]:
+                with self.subTest(attempt=attempt, previous=previous), self.assertRaises(m.CheckFailure):
+                    m.attempt_context(sec, profile, attempt, previous, 'owned')
+            for name in ('clamav-outage', 'clamav-outage-previous'):
+                (sec / name).mkdir()
+                with self.assertRaises(m.CheckFailure):
+                    m.attempt_context(sec, profile, 'initial', None, 'owned')
+                (sec / name).rmdir()
+
+    def test_7e_dispatch_requires_frozen_helper_and_exact_guest_identity(self):
+        profiles = m.load('outage_7e_run_profiles', 'candidate-identities.py')
+        profile = profiles.source_profile(profiles.E7E)
+        real_load = m.load
+        helper_sha = m.sha(Path(m.__file__).read_bytes())
+        for change in (None, 'scope_ova', 'scope_image', 'helper', 'source_sha', 'image_id', 'sidecar_image_id'):
+            with self.subTest(change=change), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                sec = root / 'secrets'; sec.mkdir()
+                (sec / 'admin-pass').write_text('SYNTHETIC ONLY', encoding='utf-8')
+                scope = dict(profile, controller_manifest=str(root / 'freeze.json'))
+                if change == 'scope_ova': scope['ova_sha256'] = '0' * 64
+                if change == 'scope_image': scope['image_id'] = 'sha256:' + '0' * 64
+                lab = SimpleNamespace(c=scope, run=root, sec=sec, state={'uuid': 'owned'}, vm=mock.Mock())
+                boot = SimpleNamespace(module=SimpleNamespace(Lab=mock.Mock(return_value=lab),
+                    validate_scope=mock.Mock(), locked=lambda path: contextlib.nullcontext()), private_directory=mock.Mock())
+                def execute(unused_lab, unused_args, body):
+                    self.assertEqual(unused_lab, lab)
+                    intent = json.loads((sec / 'clamav-outage/intent.json').read_bytes())
+                    self.assertEqual(intent['payload_sha256'], m.sha(body))
+                    self.assertEqual(intent['sidecar_image_id'], profile['clamav_sidecar_image_id'])
+                    identity = {'source_sha': profile['source_sha'], 'image_id': profile['image_id'],
+                                'sidecar_image_id': profile['clamav_sidecar_image_id']}
+                    if change in identity: identity[change] = 'sha256:' + '0' * 64
+                    print(json.dumps({'result': 'pass', 'operation': intent['operation'],
+                        'helper_sha256': helper_sha, 'prior_failure_sha256': None, 'identity': identity}))
+                    return 0
+                dispatch = mock.Mock(side_effect=execute)
+                console = SimpleNamespace(b=boot, execute=dispatch)
+                freeze = SimpleNamespace(verify=mock.Mock(return_value={'revision': 'f' * 40,
+                    'files': {'test/e2e/appliance/esxi/qualify-clamav-outage.py': '0' * 64 if change == 'helper' else helper_sha}}))
+                def load(name, file):
+                    return {'console-priv.py': console, 'controller-freeze.py': freeze}.get(file) or real_load(name, file)
+                args = SimpleNamespace(bind='192.0.2.1', scope=Path('unused'), attempt='initial', prior_failure_sha256=None)
+                with mock.patch.object(m, 'load', side_effect=load), contextlib.redirect_stdout(io.StringIO()):
+                    if change is None:
+                        m.run(args)
+                    else:
+                        with self.assertRaises(ValueError): m.run(args)
+                before_dispatch = change in ('scope_ova', 'scope_image', 'helper')
+                self.assertEqual(dispatch.call_count, 0 if before_dispatch else 1)
+                self.assertEqual((sec / 'clamav-outage').exists(), not before_dispatch)
+                self.assertEqual((sec / 'clamav-outage/complete.json').exists(), change is None)
+                if change is None:
+                    # A successful first dispatch cannot silently become another attempt.
+                    with mock.patch.object(m, 'load', side_effect=load), self.assertRaises(m.CheckFailure):
+                        m.run(args)
+                    self.assertEqual(dispatch.call_count, 1)
+
     def test_fresh_attempt_does_not_require_or_reuse_historical_failure(self):
         profiles = m.load('outage_test_profiles', 'candidate-identities.py')
         profile = profiles.source_profile(profiles.E2E3)
@@ -393,7 +464,7 @@ class ReplacementCandidateTests(unittest.TestCase):
         cfg = {'operation': 'a' * 32, 'initial': 'SYNTHETIC_TEST_ONLY', 'helper_sha256': 'b' * 64,
                'prior_failure_sha256': None}
         original = (m.SOURCE, m.IMAGE, m.SIDECAR)
-        for candidate in (profiles.CD8, profiles.E2E3, profiles.D698, profiles.CD8):
+        for candidate in (profiles.CD8, profiles.E2E3, profiles.D698, profiles.E7E, profiles.CD8):
             profile = profiles.source_profile(candidate)
             script = m.payload(cfg, profile).decode()
             code = script.split("python3 - <<'CULVERT_AV_OUTAGE'\n", 1)[1].rsplit('\nCULVERT_AV_OUTAGE', 1)[0]
