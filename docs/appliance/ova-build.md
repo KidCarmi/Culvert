@@ -184,10 +184,13 @@ verifies on import.
   refuses if `ubuntu-server`, `open-vm-tools` or `unattended-upgrades` is gone
   afterwards. Raising the snapshot is a pin change like any other.
   `/etc/modprobe.d/culvert-unused.conf` makes `sctp`, `nfsd`, `kvm`,
-  `kvm_amd`, `kvm_intel`, `dccp` and `tipc` unloadable (`install … /bin/false`,
-  verified with `modprobe -n` at build): the appliance uses none of them, and
-  the shipped kernel's open CRITICAL CVEs in SCTP, NFSD and KVM-SEV have no
-  fixed 6.8.0 package yet. The other two open CRITICALs (nvmet-tcp, RDMA
+  `kvm_amd`, `kvm_intel`, `ksmbd`, `cifs`, the `can*` family, `pppoe`, `pppox`,
+  the RDMA stack (`ib_core` and the `rdma`/`ib` modules on it), `dccp` and
+  `tipc` unloadable (`install … /bin/false`, verified with
+  `modprobe -n` at build): the appliance uses none of them, and the shipped
+  kernel's open CRITICAL CVEs (SCTP, NFSD, KVM-SEV) and many of its open HIGH
+  ones are in them, with no fixed 6.8.0 package yet. `vsock` stays loadable
+  (VMware Tools). The other two open CRITICALs (nvmet-tcp, RDMA
   srpt) are in `linux-modules-extra`, which the OVA does not install.
 
 ## Candidate builds (qualification of an unpublished image — never for customers)

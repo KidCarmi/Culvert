@@ -127,7 +127,9 @@ func TestDeepGate_FailsOnAnyFixableOSPackageFinding(t *testing.T) {
 // and two unused protocols are made unloadable here.
 func TestPrepareGuest_UnusedKernelModulesCannotLoad(t *testing.T) {
 	conf := readSource(t, "appliance/provision/modprobe-culvert-unused.conf")
-	for _, m := range []string{"sctp", "nfsd", "kvm", "kvm_amd", "kvm_intel", "dccp", "tipc"} {
+	for _, m := range []string{"sctp", "nfsd", "kvm", "kvm_amd", "kvm_intel", "ksmbd", "cifs",
+		"can", "can_raw", "can_bcm", "can_gw", "can_isotp", "can_j1939", "pppoe", "pppox",
+		"ib_core", "ib_cm", "iw_cm", "rdma_cm", "ib_uverbs", "rdma_ucm", "ib_umad", "dccp", "tipc"} {
 		for _, want := range []string{"\nblacklist " + m + "\n", "\ninstall " + m + " /bin/false\n"} {
 			if !strings.Contains(conf, want) {
 				t.Errorf("modprobe-culvert-unused.conf must contain %q", strings.TrimSpace(want))
@@ -137,14 +139,18 @@ func TestPrepareGuest_UnusedKernelModulesCannotLoad(t *testing.T) {
 	src := readSource(t, "appliance/build/prepare-guest.sh")
 	for _, want := range []string{
 		`install -m 0644 "$APPL/provision/modprobe-culvert-unused.conf" /etc/modprobe.d/culvert-unused.conf`,
-		`for m in sctp nfsd kvm kvm_amd kvm-amd kvm_intel dccp tipc; do`,
+		`for m in sctp nfsd kvm kvm_amd kvm-amd kvm_intel ksmbd cifs can can_raw can-raw can_bcm can_gw can_isotp can_j1939 pppoe pppox ib_core ib_cm iw_cm rdma_cm ib_uverbs rdma_ucm ib_umad dccp tipc; do`,
 		`modprobe -n -v "$m" 2>&1 | grep -qE '^install /bin/false[[:space:]]*$' || { echo "modprobe would still load $m" >&2; exit 1; }`,
 	} {
 		if !strings.Contains(src, want) {
 			t.Errorf("prepare-guest.sh must contain %q", want)
 		}
 	}
-	// linux-modules-extra carries the other three CRITICAL subsystems; the
+	// VMware Tools needs vsock: it must never be denied.
+	if regexp.MustCompile(`(?m)^(install|blacklist) (vsock|vmw_vsock\w*)\b`).MatchString(conf) {
+		t.Error("vsock must stay loadable: open-vm-tools uses it")
+	}
+	// linux-modules-extra carries the other two CRITICAL subsystems; the
 	// build must not start installing it.
 	if regexp.MustCompile(`apt-get[^\n]*install[^\n]*linux-modules-extra`).MatchString(src) {
 		t.Error("prepare-guest.sh must not install linux-modules-extra (nvmet-tcp, ib_srpt)")
