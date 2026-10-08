@@ -51,7 +51,7 @@ jobs:
   guest-boot:
     name: "Lab · ${{ matrix.variant }} OVA: build + QEMU guest boot + qualify"
     # A push whose head commit says [fdisk-only] reruns F-DISK-1 alone.
-    if: ${{ !contains(github.event.head_commit.message, '[fdisk-only]') && !contains(github.event.head_commit.message, '[sidecar-scan]') && !contains(github.event.head_commit.message, '[boot-console]') && !contains(github.event.head_commit.message, '[lab-skip]') && !contains(github.event.head_commit.message, '[saml-replay]') }}
+    if: ${{ !contains(github.event.head_commit.message, '[fdisk-only]') && !contains(github.event.head_commit.message, '[sidecar-scan]') && !contains(github.event.head_commit.message, '[boot-console]') && !contains(github.event.head_commit.message, '[lab-skip]') && !contains(github.event.head_commit.message, '[saml-replay]') && !contains(github.event.head_commit.message, '[recovery-ab]') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 240
     strategy:
@@ -526,7 +526,7 @@ jobs:
 
   f-disk-1:
     name: "Lab · F-DISK-1 on the bounded nested-Docker host"
-    if: ${{ !contains(github.event.head_commit.message, '[sidecar-scan]') && !contains(github.event.head_commit.message, '[boot-console]') && !contains(github.event.head_commit.message, '[lab-skip]') && !contains(github.event.head_commit.message, '[saml-replay]') }}
+    if: ${{ !contains(github.event.head_commit.message, '[sidecar-scan]') && !contains(github.event.head_commit.message, '[boot-console]') && !contains(github.event.head_commit.message, '[lab-skip]') && !contains(github.event.head_commit.message, '[saml-replay]') && !contains(github.event.head_commit.message, '[recovery-ab]') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     steps:
@@ -899,7 +899,7 @@ jobs:
   adopted-sidecar-scan:
     name: "Lab · ADOPTED ClamAV sidecar (built on the appliance): exact-byte scan + SBOM"
     needs: guest-boot
-    if: ${{ !cancelled() && !contains(github.event.head_commit.message, '[fdisk-only]') && !contains(github.event.head_commit.message, '[sidecar-scan]') && !contains(github.event.head_commit.message, '[boot-console]') && !contains(github.event.head_commit.message, '[lab-skip]') && !contains(github.event.head_commit.message, '[saml-replay]') }}
+    if: ${{ !cancelled() && !contains(github.event.head_commit.message, '[fdisk-only]') && !contains(github.event.head_commit.message, '[sidecar-scan]') && !contains(github.event.head_commit.message, '[boot-console]') && !contains(github.event.head_commit.message, '[lab-skip]') && !contains(github.event.head_commit.message, '[saml-replay]') && !contains(github.event.head_commit.message, '[recovery-ab]') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     env:
@@ -960,4 +960,144 @@ jobs:
         with:
           name: appliance-lab-adopted-sidecar-scan-${{ env.ADOPT_VARIANT }}
           path: ${{ env.W }}/evidence/
+          if-no-files-found: warn
+
+  # ASTRA (#1528, comment 6057505670): attempt 1 (126.9/120.1/116.0 s) and
+  # attempt 2 (103.2/103.1/103.1 s) of run 37730220212 booted DIFFERENT OVA
+  # builds of the same source: same app image and console, but a separately
+  # built baked ClamAV derivative (48e4342b… vs f31673ae…). This job separates
+  # the bytes from the runner: both RETAINED OVAs, one runner, interleaved
+  # A B B A (so a monotonic runner drift cancels), 3 maintenance reboots each
+  # on the calibrated esxi12 profile, plus a file-level diff of the two baked
+  # sidecars read out of each OVA's own disk. Runs only on [recovery-ab].
+  recovery-ab:
+    name: "Lab · recovery A/B on RETAINED OVAs (one runner, A B B A) + baked-sidecar diff"
+    if: ${{ contains(github.event.head_commit.message, '[recovery-ab]') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 345
+    env:
+      # A = the handoff OVA (run 37730220212 attempt 2). B = attempt 1.
+      OVA_A_ARTIFACT: "11530788479"
+      OVA_A_SHA256: 048ba7c604306641f370c851c4924779efd92e2e572ff1a3eb2160d7c718aa44
+      OVA_B_ARTIFACT: "11529682625"
+      OVA_B_SHA256: d89a96b889f675f1fe749aa12107cf7332488971aa5f7ce7ee25e5571705b3b4
+      EXPECT_IMAGE_ID: sha256:68d73d5dd88634468f8cb005b510863272de66928d593f456bcb26a20522f66a
+      AB_ORDER: "A B B A"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Host preflight (KVM, RAM, disk) and lab directory
+        run: |
+          set -euo pipefail
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules >/dev/null
+          sudo udevadm control --reload-rules && sudo udevadm trigger --name-match=kvm || true
+          ls -l /dev/kvm || echo "no /dev/kvm"
+          nproc; free -m; df -h / /mnt 2>/dev/null || df -h /
+          # Put the lab on the filesystem with the most free space.
+          best=/; [ -d /mnt ] && [ "$(df -Pk /mnt | awk 'NR==2{print $4}')" -gt "$(df -Pk / | awk 'NR==2{print $4}')" ] && best=/mnt
+          sudo mkdir -p "$best/culvert-lab" && sudo chown "$(id -u):$(id -g)" "$best/culvert-lab"
+          echo "LAB_ROOT=$best/culvert-lab" >> "$GITHUB_ENV"
+      - name: Install build + lab tools
+        timeout-minutes: 25
+        run: |
+          set -euo pipefail
+          # A stalled Ubuntu mirror must fail fast, not hang the job (run 37666163268
+          # sat 2 h in apt). The runner's Azure mirror stopped answering (run
+          # 37690516749: every request Ign, then a slow fallback), so use Ubuntu's
+          # own archive directly; few retries, since each one waits the timeout.
+          if [ -f /etc/apt/apt-mirrors.txt ]; then sudo sed -i '/azure\.archive\.ubuntu\.com/d' /etc/apt/apt-mirrors.txt; fi
+          sudo sed -i 's#http://azure\.archive\.ubuntu\.com/ubuntu#https://archive.ubuntu.com/ubuntu#g' /etc/apt/sources.list /etc/apt/sources.list.d/*.sources /etc/apt/sources.list.d/*.list 2>/dev/null || true
+          printf 'Acquire::Retries "2";\nAcquire::http::Timeout "20";\nAcquire::https::Timeout "20";\n' | sudo tee /etc/apt/apt.conf.d/99-lab-net >/dev/null
+          for i in 1 2; do
+            sudo apt-get update -q && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends \
+              libguestfs-tools qemu-utils qemu-system-x86 genisoimage ubuntu-cloudimage-keyring \
+              isc-dhcp-client && break  # isc-dhcp-client: the libguestfs appliance brings its network up with it (as on the qualification host)
+            sleep 15
+          done
+          # supermin (libguestfs) reads the host kernel; Ubuntu ships it 0600.
+          sudo chmod 0644 /boot/vmlinuz-*
+          # The runner image ships passt (podman); libguestfs prefers it, and as
+          # root it exits ("passt exited with status 1", run 37138404641). The
+          # recorded build host has no passt, so libguestfs uses QEMU's own
+          # user-mode network there — match it.
+          if dpkg -s passt >/dev/null 2>&1; then sudo apt-get remove -y -q passt; fi
+          ! command -v passt
+          # The libguestfs build guest inherits the host's resolv.conf; the
+          # runner's is systemd-resolved's stub (127.0.0.53), unreachable from
+          # inside that guest ("Could not resolve host", run 37138601142). Point
+          # it at the real upstream resolvers. Host environment only.
+          # Mirror the qualification host: a plain resolv.conf with public
+          # resolvers (the Azure platform resolver did not answer the build
+          # guest either, run 37138969586).
+          sudo rm -f /etc/resolv.conf
+          printf 'nameserver 8.8.8.8\nnameserver 1.1.1.1\noptions timeout:2 attempts:3\n' | sudo tee /etc/resolv.conf >/dev/null
+          getent hosts download.docker.com
+      - name: Fetch both RETAINED OVAs by artifact id (verified sha256)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          for X in A B; do
+            id_var="OVA_${X}_ARTIFACT"; sha_var="OVA_${X}_SHA256"
+            d="$LAB_ROOT/ova-$X"; mkdir -p "$d"
+            gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/${!id_var}/zip" > "$d/a.zip"
+            (cd "$d" && unzip -q a.zip && rm a.zip)
+            got="$(sha256sum "$d"/*.ova | cut -d' ' -f1)"
+            [ "$got" = "${!sha_var}" ] || { echo "::error::OVA $X sha256 $got != ${!sha_var}"; exit 1; }
+            echo "OVA $X $got (artifact ${!id_var})"
+          done
+          mkdir -p "$LAB_ROOT/ab-evidence"
+      - name: Baked ClamAV sidecar diff, read from each OVA's own disk
+        run: |
+          set -euo pipefail
+          E="$LAB_ROOT/ab-evidence/sidecar"; mkdir -p "$E"
+          for X in A B; do
+            d="$LAB_ROOT/sc-$X"; mkdir -p "$d"
+            tar -xf "$LAB_ROOT/ova-$X/"*.ova -C "$d" --wildcards '*.vmdk'
+            sudo env LIBGUESTFS_BACKEND=direct virt-cat -a "$(ls "$d"/*.vmdk)" /var/lib/culvert-appliance/images/clamav.tar.gz > "$d/clamav.tar.gz"
+            sudo env LIBGUESTFS_BACKEND=direct virt-cat -a "$(ls "$d"/*.vmdk)" /var/lib/culvert-appliance/build-info.json > "$E/build-info-$X.json"
+            echo "$X $(sha256sum "$d/clamav.tar.gz" | cut -d' ' -f1) clamav.tar.gz" | tee -a "$E/archives.txt"
+            gunzip -c "$d/clamav.tar.gz" > "$d/clamav.tar"; rm -f "$d"/*.vmdk "$d/clamav.tar.gz"
+          done
+          diff <(python3 -c 'import json,sys;print(json.dumps(json.load(open(sys.argv[1])),indent=1,sort_keys=True))' "$E/build-info-A.json") \
+               <(python3 -c 'import json,sys;print(json.dumps(json.load(open(sys.argv[1])),indent=1,sort_keys=True))' "$E/build-info-B.json") > "$E/build-info.diff" || true
+          python3 -I test/e2e/appliance/lab/sidecar-diff.py "$LAB_ROOT/sc-A/clamav.tar" "$LAB_ROOT/sc-B/clamav.tar" "$E"
+          rm -rf "$LAB_ROOT/sc-A" "$LAB_ROOT/sc-B"
+          { echo "### Baked sidecar: A (handoff) vs B (attempt 1)"; echo '```'; cat "$E/archives.txt" "$E/build-info.diff"; tail -40 "$E/sidecar-diff.txt"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+      - name: "Recovery lab: device-mapper delay target available"
+        run: |
+          set -euo pipefail
+          sudo modprobe dm_delay 2>/dev/null || { sudo apt-get install -y -q "linux-modules-extra-$(uname -r)" && sudo modprobe dm_delay; }
+          lsmod | grep -E '^dm_delay' && sudo dmsetup targets | grep -E '^(delay|linear) '
+      - name: "A B B A: up → qualify → 3 maintenance reboots (esxi12), each on its own lab dir"
+        run: |
+          set -uo pipefail
+          n=0; rc=0
+          printf 'order\tova\treboot\trecovery_s\tfirmware_gap_s\tkernel_to_ready_s\n' > "$LAB_ROOT/ab-evidence/ab-summary.tsv"
+          for X in $AB_ORDER; do
+            n=$((n+1)); tag="$n-$X"
+            export LAB_DIR="$LAB_ROOT/ab-$tag" LAB_DISK=dm LAB_RECOVERY_REBOOTS=3 LAB_RECOVERY_PROFILES="esxi12:12:3:120" \
+              LAB_RECOVERY_VARIANTS=base LAB_HISTORY=0 LAB_EXPECT_IMAGE_ID="$EXPECT_IMAGE_ID" LAB_MIN_FREE_GB=20 LAB_ACCEL=kvm
+            export LAB_OVA="$(ls "$LAB_ROOT/ova-$X/"*.ova)" LAB_OVA_SHA256="$(cut -d' ' -f1 "$LAB_ROOT/ova-$X/"*.ova.sha256)"
+            echo "::group::$tag ($LAB_OVA_SHA256)"
+            test/e2e/appliance/lab/appliance-lab.sh all || rc=1
+            echo "::endgroup::"
+            ev="$LAB_DIR/evidence"; dst="$LAB_ROOT/ab-evidence/$tag"; mkdir -p "$dst"
+            cp "$ev"/checks.jsonl "$ev"/REPORT.md "$ev"/R-* "$ev"/preflight.json "$dst/" 2>/dev/null || true
+            for i in 1 2 3; do
+              rec="$(awk -F'\t' -v i="$i" '$3==i{print $4}' "$ev/R-summary.tsv" 2>/dev/null)"
+              gap="$(awk '/Restarting system/{a=$1} /Linux version/{print $1-a; exit}' "$ev/R-esxi12-$i-console-marks.tsv" 2>/dev/null)"
+              k2r="$(python3 -c 'import json,sys;t=json.load(open(sys.argv[1]))["seconds_after_acceptance"];print(round(t["first_ready_clamav_ok"]-t["kernel"],1))' "$ev/R-esxi12-$i-timeline.json" 2>/dev/null)"
+              printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$tag" "$LAB_OVA_SHA256" "$i" "${rec:-none}" "${gap:-?}" "${k2r:-?}" >> "$LAB_ROOT/ab-evidence/ab-summary.tsv"
+            done
+            sudo rm -rf "$LAB_DIR/work"
+          done
+          { echo "### Recovery A/B (one runner; budget 120 s)"; echo '```'; column -t -s$'\t' "$LAB_ROOT/ab-evidence/ab-summary.tsv"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          cat "$LAB_ROOT/ab-evidence/ab-summary.tsv"
+          exit "$rc"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: appliance-lab-recovery-ab-98cf41c0d82f
+          path: ${{ env.LAB_ROOT }}/ab-evidence/
+          retention-days: 30
           if-no-files-found: warn
