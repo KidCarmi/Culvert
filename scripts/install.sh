@@ -1466,7 +1466,10 @@ is_fresh_deployment() {
 secret_already_set() {
   local var="$1" envfile="$2"
   [[ -n "${!var:-}" ]] && return 0
-  [[ -f "$envfile" ]] && grep -Eq "^${var}=.+" "$envfile" 2>/dev/null
+  # Require a non-whitespace char: a CRLF-saved .env with an empty placeholder
+  # (`VAR=\r`) would otherwise satisfy `.+` via the CR while compose resolves
+  # it to empty. (No pipe: under pipefail grep -q's early exit can SIGPIPE.)
+  [[ -f "$envfile" ]] && grep -Eq "^${var}=.*[^[:space:]]" "$envfile" 2>/dev/null
 }
 
 # env_put VAR VALUE FILE — set/replace VAR=VALUE in FILE (mode 600).
