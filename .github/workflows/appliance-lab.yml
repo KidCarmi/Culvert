@@ -51,7 +51,7 @@ jobs:
   guest-boot:
     name: "Lab · ${{ matrix.variant }} OVA: build + QEMU guest boot + qualify"
     # A push whose head commit says [fdisk-only] reruns F-DISK-1 alone.
-    if: ${{ !contains(github.event.head_commit.message, '[fdisk-only]') && !contains(github.event.head_commit.message, '[sidecar-scan]') && !contains(github.event.head_commit.message, '[boot-console]') && !contains(github.event.head_commit.message, '[lab-skip]') && !contains(github.event.head_commit.message, '[saml-replay]') && !contains(github.event.head_commit.message, '[recovery-ab]') && !contains(github.event.head_commit.message, '[sidecar-repro]') }}
+    if: ${{ !contains(github.event.head_commit.message, '[fdisk-only]') && !contains(github.event.head_commit.message, '[sidecar-scan]') && !contains(github.event.head_commit.message, '[boot-console]') && !contains(github.event.head_commit.message, '[lab-skip]') && !contains(github.event.head_commit.message, '[saml-replay]') && !contains(github.event.head_commit.message, '[recovery-ab]') && !contains(github.event.head_commit.message, '[sidecar-repro]') && !contains(github.event.head_commit.message, '[scan-candidate]') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 240
     strategy:
@@ -526,7 +526,7 @@ jobs:
 
   f-disk-1:
     name: "Lab · F-DISK-1 on the bounded nested-Docker host"
-    if: ${{ !contains(github.event.head_commit.message, '[sidecar-scan]') && !contains(github.event.head_commit.message, '[boot-console]') && !contains(github.event.head_commit.message, '[lab-skip]') && !contains(github.event.head_commit.message, '[saml-replay]') && !contains(github.event.head_commit.message, '[recovery-ab]') && !contains(github.event.head_commit.message, '[sidecar-repro]') }}
+    if: ${{ !contains(github.event.head_commit.message, '[sidecar-scan]') && !contains(github.event.head_commit.message, '[boot-console]') && !contains(github.event.head_commit.message, '[lab-skip]') && !contains(github.event.head_commit.message, '[saml-replay]') && !contains(github.event.head_commit.message, '[recovery-ab]') && !contains(github.event.head_commit.message, '[sidecar-repro]') && !contains(github.event.head_commit.message, '[scan-candidate]') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     steps:
@@ -899,7 +899,7 @@ jobs:
   adopted-sidecar-scan:
     name: "Lab · ADOPTED ClamAV sidecar (built on the appliance): exact-byte scan + SBOM"
     needs: guest-boot
-    if: ${{ !cancelled() && !contains(github.event.head_commit.message, '[fdisk-only]') && !contains(github.event.head_commit.message, '[sidecar-scan]') && !contains(github.event.head_commit.message, '[boot-console]') && !contains(github.event.head_commit.message, '[lab-skip]') && !contains(github.event.head_commit.message, '[saml-replay]') && !contains(github.event.head_commit.message, '[recovery-ab]') && !contains(github.event.head_commit.message, '[sidecar-repro]') }}
+    if: ${{ !cancelled() && !contains(github.event.head_commit.message, '[fdisk-only]') && !contains(github.event.head_commit.message, '[sidecar-scan]') && !contains(github.event.head_commit.message, '[boot-console]') && !contains(github.event.head_commit.message, '[lab-skip]') && !contains(github.event.head_commit.message, '[saml-replay]') && !contains(github.event.head_commit.message, '[recovery-ab]') && !contains(github.event.head_commit.message, '[sidecar-repro]') && !contains(github.event.head_commit.message, '[scan-candidate]') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     env:
@@ -1194,5 +1194,148 @@ jobs:
             evidence/block.sh
             evidence/*.apk.txt
             evidence/out*/
+          retention-days: 30
+          if-no-files-found: warn
+
+  # ASTRA (#1528, 6066207789): exact-byte, current-database vulnerability
+  # evidence for the candidate ASTRA is qualifying — the OVA's whole guest
+  # filesystem (Ubuntu packages, kernel, every host binary) and the
+  # application image, every severity, unfixed included, NO ignore file —
+  # plus govulncheck in BINARY mode on every Go binary shipped (with its
+  # compiler), and the kernel candidate noble-updates offers at scan time.
+  # Records, never filters: dispositions are made against this record.
+  # Runs only on a commit whose message carries the scan-candidate tag.
+  scan-candidate:
+    name: "Lab · exact-byte scan of the candidate (guest OS + host binaries + app image, all severities) + govulncheck"
+    if: ${{ contains(github.event.head_commit.message, '[scan-candidate]') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      OVA_ARTIFACT_ID: "11562703124"   # appliance-lab-ova-candidate-7e53720d06f5, run 37805385811
+      OVA_SHA256: 578ea6b83b450b91bccc10ac80058db42d157e2161a45aa23fc8a23a2def7c65
+      SOURCE_IMAGE_RUN_ID: "37803241045"
+      SOURCE_IMAGE_TAR_SHA256: 1e29ed3117c382c3e5a19067e66d58ddfbafcf6e310cf24302251737fdd31c11
+      IMAGE_ID: sha256:2a355d7a8930b12581c0f42c273bc3357cbefa36d9382ab7071d2c187dda0554
+      SRC_SHA: 7e53720d06f525f4e5fdbfec42f52840d5b734e2
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Workspace + libguestfs
+        timeout-minutes: 25
+        run: |
+          set -euo pipefail
+          if [ -f /etc/apt/apt-mirrors.txt ]; then sudo sed -i '/azure\.archive\.ubuntu\.com/d' /etc/apt/apt-mirrors.txt; fi
+          sudo sed -i 's#http://azure\.archive\.ubuntu\.com/ubuntu#https://archive.ubuntu.com/ubuntu#g' /etc/apt/sources.list /etc/apt/sources.list.d/*.sources /etc/apt/sources.list.d/*.list 2>/dev/null || true
+          printf 'Acquire::Retries "2";\nAcquire::http::Timeout "20";\nAcquire::https::Timeout "20";\n' | sudo tee /etc/apt/apt.conf.d/99-lab-net >/dev/null
+          best=/; [ -d /mnt ] && [ "$(df -Pk /mnt | awk 'NR==2{print $4}')" -gt "$(df -Pk / | awk 'NR==2{print $4}')" ] && best=/mnt
+          sudo mkdir -p "$best/scan" && sudo chown "$(id -u):$(id -g)" "$best/scan"
+          echo "W=$best/scan" >> "$GITHUB_ENV"; mkdir -p "$best/scan/evidence"
+          for _ in 1 2; do
+            sudo apt-get update -q && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends libguestfs-tools qemu-utils && break
+            sleep 15
+          done
+          sudo chmod 0644 /boot/vmlinuz-*
+          if dpkg -s passt >/dev/null 2>&1; then sudo apt-get remove -y -q passt; fi
+      - name: The candidate OVA → its guest root filesystem (hash-checked)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cd "$W"; E="$W/evidence"
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$OVA_ARTIFACT_ID/zip" > ova.zip && unzip -q ova.zip && rm ova.zip
+          got="$(sha256sum ./*.ova | cut -d' ' -f1)"; [ "$got" = "$OVA_SHA256" ] || { echo "::error::OVA $got != $OVA_SHA256"; exit 1; }
+          echo "$got  $(ls ./*.ova)" | tee "$E/ova.sha256"
+          mkdir ovax && tar -xf ./*.ova -C ovax && rm -f ./*.ova
+          (cd ovax && python3 -c '
+          import hashlib,re,sys
+          bad=[]
+          for l in open([f for f in __import__("os").listdir(".") if f.endswith(".mf")][0]):
+              m=re.match(r"SHA256\((.+)\)= ([0-9a-f]{64})",l.strip())
+              if m and hashlib.sha256(open(m.group(1),"rb").read()).hexdigest()!=m.group(2): bad.append(m.group(1))
+          sys.exit("mf mismatch "+",".join(bad) if bad else 0)')
+          sudo mkdir -p rootfs
+          sudo env LIBGUESTFS_BACKEND=direct virt-tar-out -a "$(ls ovax/*.vmdk)" / - | sudo tar -x -C rootfs --numeric-owner
+          rm -rf ovax
+          # a throwaway copy for scanning: readable by the runner user, so no
+          # scanner runs as root (no root-owned scanner cache)
+          sudo chmod -R a+rX rootfs
+          cp rootfs/var/lib/culvert-appliance/build-info.json "$E/build-info.json"
+          sudo du -sh rootfs | tee "$E/rootfs-size.txt"
+      - name: The application image (verified sha256) and its Go binaries
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          src="$(test/e2e/appliance/lab/obtain-image.sh "$W/img")"
+          echo "image tar $SOURCE_IMAGE_TAR_SHA256 from $src (run $SOURCE_IMAGE_RUN_ID), id $IMAGE_ID" | tee "$W/evidence/image.txt"
+          mkdir -p "$W/appbin"
+          python3 -I - "$W/img/culvert-image.tar" "$W/appbin" "$IMAGE_ID" <<'PY'
+          import gzip, io, json, os, sys, tarfile
+          tar, out, want = sys.argv[1:4]
+          t = tarfile.open(tar)
+          idx = json.load(t.extractfile("index.json"))
+          assert idx["manifests"][0]["digest"] == want, "image tar does not carry the pinned image id"
+          def blob(d): return t.extractfile("blobs/sha256/" + d.split(":")[1]).read()
+          top = json.loads(blob(want))
+          if "manifests" in top:
+              top = json.loads(blob(next(m for m in top["manifests"] if m.get("platform", {}).get("architecture") == "amd64")["digest"]))
+          wanted = {"app/culvert": "app-culvert", "app/deploy/bin/culvert-maint": "app-deploy-culvert-maint"}
+          for l in top["layers"]:
+              raw = blob(l["digest"])
+              if raw[:2] == b"\x1f\x8b": raw = gzip.decompress(raw)
+              with tarfile.open(fileobj=io.BytesIO(raw)) as lt:
+                  for m in lt.getmembers():
+                      if m.isfile() and m.name.lstrip("./") in wanted:
+                          open(os.path.join(out, wanted[m.name.lstrip("./")]), "wb").write(lt.extractfile(m).read())
+          print(sorted(os.listdir(out)))
+          PY
+      - uses: aquasecurity/setup-trivy@81e514348e19b6112ce2a7e3ecbafe19c1e1f567 # v0.2.0
+        with:
+          version: v0.69.3
+          cache: true
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version: "1.26.8"
+          cache: false
+      - name: Trivy DB (current) + govulncheck
+        run: |
+          set -euo pipefail
+          trivy image --download-db-only --db-repository mirror.gcr.io/aquasec/trivy-db:2
+          trivy --version | tee "$W/evidence/trivy-version.txt"
+          GOTOOLCHAIN=local go install golang.org/x/vuln/cmd/govulncheck@v1.8.0
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+      - name: Scan the guest root filesystem (every severity, unfixed included, no ignore file)
+        run: |
+          set -euo pipefail
+          test/e2e/appliance/lab/exact-scan.sh rootfs "$W/rootfs" "$W/evidence"
+      - name: Scan the application image (every severity, unfixed included, no ignore file)
+        run: test/e2e/appliance/lab/exact-scan.sh image "$W/img/culvert-image.tar" "$W/evidence"
+      - name: govulncheck (binary mode) on every Go binary the candidate ships
+        run: |
+          set -euo pipefail
+          args=(app-culvert="$W/appbin/app-culvert" app-deploy-culvert-maint="$W/appbin/app-deploy-culvert-maint")
+          while IFS= read -r f; do
+            go version "$f" >/dev/null 2>&1 || continue
+            n="host$(echo "${f#"$W/rootfs"}" | tr '/' '-')"
+            args+=("$n=$f")
+          done < <(find "$W/rootfs" -xdev \( -path "$W/rootfs/proc" -o -path "$W/rootfs/var/lib/culvert-appliance/images" \) -prune -o -type f -size +1M -perm -u+x -print)
+          test/e2e/appliance/lab/exact-scan.sh gobins "$W/evidence" "${args[@]}"
+          column -t "$W/evidence/go-binaries.tsv" | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: The kernel noble offers today, against the one the OVA ships
+        run: |
+          set -euo pipefail
+          { echo "shipped: $(cat "$W/evidence/rootfs-kernels.txt" | tr '\n' ' ')"
+            grep -E '^linux-(image|modules)-[0-9]' "$W/evidence/rootfs-dpkg.tsv" || true
+            docker run --rm ubuntu:24.04 bash -c 'apt-get update -qq >/dev/null && apt-cache policy linux-image-generic linux-image-virtual linux-generic' ; } | tee "$W/evidence/kernel-candidates.txt"
+      - name: Findings table + counts
+        if: always()
+        run: |
+          set -euo pipefail
+          test/e2e/appliance/lab/exact-scan.sh table "$W/evidence" | tee "$W/evidence/counts-print.txt"
+          { echo '### Candidate exact-byte scan'; echo '```'; cat "$W/evidence/ova.sha256" "$W/evidence/image.txt" "$W/evidence/trivy-version.txt" "$W/evidence/counts.txt"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: appliance-lab-exact-scan-7e53720d06f5
+          path: ${{ env.W }}/evidence/
           retention-days: 30
           if-no-files-found: warn
