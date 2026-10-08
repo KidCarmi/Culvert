@@ -75,7 +75,9 @@ def readiness(escrow, scope, owned, private, campaign='initial'):
             'archive_sha256': receipt['sha256'][archive.name],
             'campaign': campaign, 'initial_failure': initial,
             'network_continuation': network.get('continuation') if network is not None else None,
-            'historical_encrypted_log_recovery': 'blocked: supported archive excludes logs'}
+            'historical_encrypted_log_recovery': ('separate encrypted history export verified; recovery not yet run'
+                                                  if receipt.get('history') is True else
+                                                  'blocked: supported archive excludes logs')}
 
 
 def main():

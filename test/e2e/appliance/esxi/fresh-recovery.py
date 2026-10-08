@@ -32,6 +32,10 @@ observe_spec.loader.exec_module(observation)
 MAX_ARCHIVE = 512 * 1024 * 1024
 MAX_METADATA = 64 * 1024
 SOURCE = 'b579ca28c9d936e9141292ce5ec564a26feeae86'
+HISTORY_SOURCE = '7e53720d06f525f4e5fdbfec42f52840d5b734e2'
+EXPORT_NAMES = ('recovery.tar.gz.enc', 'recovery-secrets.json', 'archive-metadata.json',
+                'backup-passphrase', 'admin-pass', 'source-owned.json', 'provenance.json', 'source-observation.json')
+HISTORY_NAMES = ('history.cvst', 'history-passphrase', 'rotated-log-passphrase')
 
 
 def require(value, message='Fresh recovery prerequisite refused; inspect private evidence.'):
@@ -89,13 +93,14 @@ def read_private_text(path, limit=4096):
 def verify_export(escrow):
     receipt = read_json(escrow / 'export-receipt.json')
     require(receipt.get('schema') == 1 and receipt.get('result') == 'pass')
-    names = ('recovery.tar.gz.enc', 'recovery-secrets.json', 'archive-metadata.json',
-             'backup-passphrase', 'admin-pass', 'source-owned.json', 'provenance.json', 'source-observation.json')
+    names = EXPORT_NAMES + (HISTORY_NAMES if receipt.get('history') is True else ())
     require(set(receipt['sha256']) == set(names))
     for name in names:
         path = escrow / name
-        require(path.is_file() and not path.is_symlink() and path.stat().st_size <= (MAX_ARCHIVE if name.endswith('.enc') else MAX_METADATA))
+        require(path.is_file() and not path.is_symlink() and path.stat().st_size <= (MAX_ARCHIVE if name.endswith(('.enc', '.cvst')) else MAX_METADATA))
         require(file_hash(path) == receipt['sha256'][name])
+    if receipt.get('history') is True:
+        verify_history_metadata(read_json(escrow / 'archive-metadata.json'), escrow / 'history.cvst')
     return receipt
 
 
@@ -203,11 +208,15 @@ def run(args):
     profile_spec = importlib.util.spec_from_file_location('fresh_candidate_identities', HERE / 'candidate-identities.py')
     identities = importlib.util.module_from_spec(profile_spec); profile_spec.loader.exec_module(identities)
     source = identities.scope_profile(lab.c)['source_sha']
+    history = getattr(args, 'history', False)
+    require(not history or source == HISTORY_SOURCE, 'History qualification requires the reviewed 7e candidate.')
     require(lab.c['source_sha'] == source and lab.c['max_vms'] == 1)
     console.b.module.validate_scope(lab.c)
     escrow = private_escrow(args.escrow, lab.run)
     files = {'archive': escrow / 'recovery.tar.gz.enc', 'secrets': escrow / 'recovery-secrets.json',
              'metadata': escrow / 'archive-metadata.json'}
+    if history:
+        files['history'] = escrow / 'history.cvst'
     with console.b.module.locked(lab.run):
         lab.vm(timeout=30)
         if args.mode == 'export':
@@ -216,6 +225,9 @@ def run(args):
             write_new(escrow / 'backup-passphrase', password.encode('ascii'))
             admin_password = read_private_text(lab.sec / 'admin-pass')
             write_new(escrow / 'admin-pass', admin_password.encode('utf-8'))
+            if history:
+                for name in ('history-passphrase', 'rotated-log-passphrase'):
+                    write_new(escrow / name, secrets.token_hex(32).encode('ascii'))
             write_new(escrow / 'source-owned.json', json.dumps(lab.state).encode())
             provenance = {k: lab.c[k] for k in ('source_sha', 'image_id', 'ova_sha256', 'endpoint')}
             write_new(escrow / 'provenance.json', json.dumps(provenance).encode())
@@ -223,7 +235,8 @@ def run(args):
             write_new(escrow / 'source-observation.json', json.dumps(observed).encode())
         else:
             require(args.source_ledger and args.deletion_receipt)
-            verify_export(escrow)
+            receipt = verify_export(escrow)
+            require((receipt.get('history') is True) == history, 'History mode must match the preserved export.')
             source_owned = read_json(escrow / 'source-owned.json')
             verify_source_absent(lab, source_owned, read_json(args.source_ledger), read_json(args.deletion_receipt))
             provenance = read_json(escrow / 'provenance.json')
@@ -232,11 +245,13 @@ def run(args):
             require(metadata['archive_sha256'] == file_hash(files['archive'])
                     and metadata['archive_bytes'] == files['archive'].stat().st_size <= MAX_ARCHIVE)
             require(metadata['source_sha'] == source and metadata['image_id'] == lab.c['image_id'])
+            if history:
+                verify_history_metadata(metadata, files['history'])
             password = (escrow / 'backup-passphrase').read_text(encoding='ascii')
             require(re.fullmatch(r'[a-f0-9]{64}', password))
             files.pop('metadata')
         transfer = Transfer(lab.guest_ip(timeout=30), files, args.mode == 'export',
-                            {k: MAX_ARCHIVE if k == 'archive' else MAX_METADATA for k in files})
+                            {k: MAX_ARCHIVE if k in ('archive', 'history') else MAX_METADATA for k in files})
         transport_dir = escrow / ('transfer-' + args.mode + '-' + secrets.token_hex(8))
         transport_dir.mkdir()
         cfg = {'mode': args.mode, 'source_sha': source, 'image_id': lab.c['image_id'],
@@ -244,6 +259,15 @@ def run(args):
                'archive_limit': MAX_ARCHIVE, 'nonce': secrets.token_hex(12)}
         if args.mode == 'restore':
             cfg.update(archive_sha256=metadata['archive_sha256'], archive_bytes=metadata['archive_bytes'])
+        if history:
+            cfg['history'] = {'password': read_private_text(escrow / 'history-passphrase'),
+                              'rotated_log_password': read_private_text(escrow / 'rotated-log-passphrase'),
+                              'admin_password': read_private_text(escrow / 'admin-pass'),
+                              'tag': 'freshhist' + secrets.token_hex(8)}
+            require(all(re.fullmatch(r'[a-f0-9]{64}', cfg['history'][k])
+                        for k in ('password', 'rotated_log_password')))
+            if args.mode == 'restore':
+                cfg['history'].update(metadata['history'])
         with endpoint(transfer, args.bind, transport_dir) as (pin, urls):
             cfg.update(pin=pin, urls=urls)
             guest = (HERE / 'fresh-recovery-guest.py').read_text(encoding='utf-8')
@@ -262,17 +286,37 @@ def run(args):
             require(metadata['archive_bytes'] == files['archive'].stat().st_size
                     and metadata['archive_sha256'] == file_hash(files['archive']))
             require(set(read_json(files['secrets'])) == {'CULVERT_CA_PASSPHRASE', 'CULVERT_LOG_PASSPHRASE', 'CULVERT_SESSION_SECRET'})
-            names = ('recovery.tar.gz.enc', 'recovery-secrets.json', 'archive-metadata.json',
-                     'backup-passphrase', 'admin-pass', 'source-owned.json', 'provenance.json', 'source-observation.json')
+            if history:
+                verify_history_metadata(metadata, files['history'])
+            names = EXPORT_NAMES + (HISTORY_NAMES if history else ())
             receipt = {'schema': 1, 'result': 'pass', 'sha256': {name: file_hash(escrow / name) for name in names}}
+            if history:
+                receipt['history'] = True
             write_new(escrow / 'export-receipt.json', json.dumps(receipt).encode())
         else:
             observed = observation.observe(lab.guest_ip(timeout=30), 'labadmin', read_private_text(escrow / 'admin-pass'),
                                            baseline=read_json(escrow / 'source-observation.json'))
+            if history:
+                checked = observation.observe_history(lab.guest_ip(timeout=30), 'labadmin',
+                    read_private_text(escrow / 'admin-pass'), metadata['history'])
+                write_new(transport_dir / 'restored-history.json', json.dumps(checked).encode())
+                observed['historical_encrypted_log_recovery'] = checked
             write_new(transport_dir / 'restored-observation.json', json.dumps(observed).encode())
         print(json.dumps({'phase': args.mode, 'result': 'pass', 'archive_sha256': metadata['archive_sha256'],
                           'behavioral_recovery': 'pass' if args.mode == 'restore' else 'not-yet-run',
-                          'historical_encrypted_log_recovery': 'blocked: supported archive excludes logs'}))
+                          'historical_encrypted_log_recovery': ('pass' if args.mode == 'restore' else 'exported-and-validated')
+                          if history else 'blocked: supported archive excludes logs'}))
+
+
+def verify_history_metadata(metadata, archive):
+    h = metadata['history']
+    require(set(h) == {'archive_sha256', 'archive_bytes', 'tag', 'markers', 'dry_run_verified', 'source_encrypted'})
+    require(h['archive_sha256'] == file_hash(archive) and
+            0 < h['archive_bytes'] == archive.stat().st_size <= MAX_ARCHIVE)
+    require(h.get('dry_run_verified') is True and h.get('source_encrypted') is True)
+    observation.validate_history(h['markers'], h['tag'], expected_count=12)
+    with archive.open('rb') as stream:
+        require(stream.read(8) == b'CVRTST01')
 
 
 def main():
@@ -283,6 +327,7 @@ def main():
     parser.add_argument('--bind', required=True)
     parser.add_argument('--source-ledger', type=Path)
     parser.add_argument('--deletion-receipt', type=Path)
+    parser.add_argument('--history', action='store_true', help='Qualify separately encrypted history export and fresh recovery with a rotated log key (7e only).')
     args = parser.parse_args()
     try:
         run(args)

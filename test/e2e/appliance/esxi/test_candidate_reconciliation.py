@@ -19,7 +19,7 @@ def load(name):
 class CandidateReconciliationTests(unittest.TestCase):
     def test_only_complete_reviewed_artifact_combinations_are_admitted(self):
         identities = load('candidate-identities')
-        for source in (identities.B579, identities.D698, identities.E2E3, identities.CD8):
+        for source in (identities.B579, identities.D698, identities.E2E3, identities.CD8, identities.E7E):
             scope = identities.source_profile(source)
             self.assertEqual(identities.scope_profile(scope), scope)
             for field in ('source_sha', 'ova_sha256', 'image_id'):
@@ -33,7 +33,7 @@ class CandidateReconciliationTests(unittest.TestCase):
 
     def test_real_fixture_bytes_unchanged_and_provenance_names_selected_source(self):
         identities, fixture = load('candidate-identities'), load('prepare-signed-fixture')
-        for source in (identities.B579, identities.D698, identities.E2E3, identities.CD8):
+        for source in (identities.B579, identities.D698, identities.E2E3, identities.CD8, identities.E7E):
             provenance = fixture.verify_sources(source)
             self.assertEqual(provenance['source_revision'], source)
             self.assertEqual({k: v['sha256'] for k, v in provenance['files'].items()}, identities.FIXTURE_HASHES)
@@ -42,7 +42,7 @@ class CandidateReconciliationTests(unittest.TestCase):
 
     def test_shared_library_contains_only_documented_delta_from_pinned_upstream(self):
         record = json.loads((HERE / 'shared-harness-provenance.json').read_bytes())
-        self.assertEqual(record['upstream_revision'], 'dcbe2f4026f46e394023d5aa68b52686758523dc')
+        self.assertEqual(record['upstream_revision'], '442cb87420c2d9dc523a536afe5878e6d2bb5a9d')
         root = HERE.parents[3]
         for name, hashes in record['files'].items():
             raw = (root / name).read_bytes().replace(b'\r\n', b'\n')

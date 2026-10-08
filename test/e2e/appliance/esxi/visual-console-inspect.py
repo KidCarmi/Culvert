@@ -15,7 +15,7 @@ import struct
 import subprocess
 import time
 
-SOURCE = 'cd8e44505bd329e5de675592ad4c23f92a534d55'
+SOURCE = '7e53720d06f525f4e5fdbfec42f52840d5b734e2'
 
 
 def command(argv, timeout=8):

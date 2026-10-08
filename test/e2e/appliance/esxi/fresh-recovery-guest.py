@@ -5,12 +5,18 @@ are accepted in argv, printed, or passed through shell evaluation.
 """
 import fcntl
 import hashlib
+import http.client
+import http.cookiejar
 import json
 import os
 from pathlib import Path
 import re
 import subprocess
 import tempfile
+import ssl
+import time
+import urllib.error
+import urllib.request
 
 STACK = Path('/srv/culvert')
 SECRET_NAMES = ('CULVERT_CA_PASSPHRASE', 'CULVERT_LOG_PASSPHRASE', 'CULVERT_SESSION_SECRET')
@@ -63,6 +69,162 @@ class Guest:
         args += ['--data-binary', '@' + str(file)] if upload else ['--output', str(file)]
         self.run(args + [self.cfg['urls'][resource]], timeout=310)
 
+    def history_client(self):
+        # Credentials stay in memory on the authenticated local console path.
+        class NoRedirect(urllib.request.HTTPRedirectHandler):
+            def redirect_request(self, *unused):
+                return None
+        self.history_http = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect(),
+            urllib.request.HTTPSHandler(context=ssl._create_unverified_context()),
+            urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
+        started = time.monotonic()
+        deadline = started + 300
+        first_unavailable = None
+        while True:
+            remaining = deadline - time.monotonic()
+            require(remaining > 0)
+            try:
+                self.history_api('/api/auth/login', {'user': 'labadmin', 'pass': self.cfg['history']['admin_password']},
+                                 timeout=min(30, remaining))
+                return
+            except urllib.error.HTTPError as exc:
+                # Authentication failures and throttling are terminal. Never
+                # repeatedly submit the password after 401/403/429 or hide a
+                # different API error behind a readiness timeout.
+                if exc.code not in (502, 503, 504):
+                    raise
+                failure = {'kind': 'http-unavailable', 'http_status': exc.code}
+                exc.close()
+            except (urllib.error.URLError, TimeoutError, ConnectionError,
+                    http.client.RemoteDisconnected, http.client.IncompleteRead):
+                failure = {'kind': 'transport-unavailable'}
+            if first_unavailable is None:
+                first_unavailable = dict(failure, schema=1, phase=self.phase,
+                    first_failure_elapsed_seconds=round(time.monotonic() - started, 6), retry_budget_seconds=300)
+                if not hasattr(self, 'history_login_unavailable'):
+                    self.history_login_unavailable = []
+                self.history_login_unavailable.append(first_unavailable)
+                # Immutable, bounded, secret-free evidence: never serialize an
+                # exception, request, URL, header, response body or credential.
+                path = self.work / ('history-login-unavailable-%03d.json' % len(self.history_login_unavailable))
+                with path.open('x', encoding='utf-8') as stream:
+                    json.dump(first_unavailable, stream)
+                    stream.flush(); os.fsync(stream.fileno())
+            require(time.monotonic() < deadline)
+            time.sleep(min(5, max(0, deadline - time.monotonic())))
+
+    def history_api(self, path, payload=None, method=None, archive=None, timeout=None):
+        origin = 'https://127.0.0.1:9090'
+        request = urllib.request.Request(origin + path,
+            data=None if payload is None else json.dumps(payload).encode(), method=method,
+            headers={'Origin': origin, 'Content-Type': 'application/json'})
+        with self.history_http.open(request, timeout=timeout if timeout is not None else (300 if archive else 30)) as response:
+            require(response.status == 200 and response.url == origin + path)
+            if archive is not None:
+                total = 0
+                with archive.open('xb') as stream:
+                    while True:
+                        chunk = response.read(65536)
+                        if not chunk:
+                            break
+                        total += len(chunk)
+                        require(total <= self.cfg['archive_limit'])
+                        stream.write(chunk)
+                    stream.flush(); os.fsync(stream.fileno())
+                require(total > 8)
+                return
+            data = response.read(4 * 1024 * 1024 + 1)
+            require(len(data) <= 4 * 1024 * 1024)
+            return json.loads(data)
+
+    def history_markers(self):
+        tag = self.cfg['history']['tag']
+        require(re.fullmatch(r'freshhist[a-f0-9]{16}', tag))
+        data = self.history_api('/api/logs?source=store&filter=' + tag + '&limit=500')
+        return {'history': data.get('history'), 'total': data.get('total'),
+                'rows': sorted([[e.get(k) for k in ('ts', 'host', 'status', 'method')]
+                                for e in data.get('logs') or []])}
+
+    def history_cli(self, archive, phrase, confirm=False, allowed=(0,)):
+        env = dict(os.environ, CULVERT_HISTORY_PASSPHRASE=phrase)
+        args = ['--profile', 'cli', 'run', '--rm', '-T', '--no-deps',
+                '-e', 'CULVERT_HISTORY_PASSPHRASE', 'cli', '--history-import', '/backup/' + archive.name]
+        if confirm:
+            args.append('--confirm')
+        return self.dc(*args, env=env, allowed=allowed)
+
+    def export_history(self):
+        self.phase = 'history-export'
+        h = self.cfg['history']
+        require(self.environment.get('CULVERT_LOG_PASSPHRASE'))
+        require(h['rotated_log_password'] != self.environment['CULVERT_LOG_PASSPHRASE'])
+        self.history_client()
+        retention = self.history_api('/api/logs/retention', {'enabled': True, 'retentionDays': 30}, method='PUT')
+        require(retention.get('enabled') is True and retention.get('encrypted') is True)
+        for number in range(1, 13):
+            host = h['tag'] + '-' + str(number) + '.invalid'
+            connection = http.client.HTTPConnection('127.0.0.1', 8080, timeout=30)
+            try:
+                connection.request('GET', 'http://' + host + '/', headers={'Host': host})
+                require(connection.getresponse().status == 403)
+            finally:
+                connection.close()
+        deadline = time.monotonic() + 60
+        while True:
+            markers = self.history_markers()
+            if markers['history'] is True and markers['total'] == 12 and len(markers['rows']) == 12:
+                break
+            require(time.monotonic() < deadline)
+            time.sleep(2)
+        archive = self.backup / ('history-' + self.cfg['nonce'] + '.cvst')
+        self.history_api('/api/logs/history/export', {'archivePhrase': h['password']}, archive=archive)
+        with archive.open('rb') as stream:
+            require(stream.read(8) == b'CVRTST01')
+        os.chown(archive, self.uid, self.gid); os.chmod(archive, 0o600)
+        _, out = self.history_cli(archive, h['password'])
+        require(b'history archive OK:' in out and b'0 skipped at export' in out and b'dry-run: nothing written' in out)
+        self.history_result = {'result': 'exported-and-validated', 'records': 12,
+                               'archive_sha256': sha(archive), 'source_encrypted': True}
+        self.transfer('history', archive, True)
+        return {'archive_sha256': sha(archive), 'archive_bytes': archive.stat().st_size,
+                'tag': h['tag'], 'markers': markers, 'dry_run_verified': True, 'source_encrypted': True}
+
+    def restore_history(self, archive):
+        self.phase = 'history-live-refusal'
+        h = self.cfg['history']
+        self.history_client()
+        before = self.history_markers()
+        require(before == {'history': True, 'total': 0, 'rows': []})
+        retention = self.history_api('/api/logs/retention')
+        require(retention.get('enabled') is True and retention.get('encrypted') is True)
+        runtime = json.loads(self.run(['docker', 'inspect', 'culvert'])[1])[0]
+        environment = dict(v.split('=', 1) for v in runtime['Config']['Env'] if '=' in v)
+        require(environment.get('CULVERT_LOG_PASSPHRASE') == h['rotated_log_password'])
+        rc, out = self.history_cli(archive, h['password'], True, tuple(range(256)))
+        require(rc != 0 and b'locked by another Culvert process' in out and b'imported=' not in out)
+        require(self.history_markers() == before)
+        self.dc('stop')
+        require(self.run(['docker', 'inspect', '-f', '{{.State.Running}}', 'culvert'])[1].strip() == b'false')
+        self.phase = 'history-wrong-passphrase'
+        rc, out = self.history_cli(archive, 'deliberately-wrong-' + self.cfg['nonce'], True, tuple(range(256)))
+        require(rc != 0 and b'invalid passphrase or tampered' in out and b'imported=' not in out)
+        self.phase = 'history-dry-run'
+        _, out = self.history_cli(archive, h['password'])
+        require(b'history archive OK:' in out and b'0 skipped at export' in out and b'dry-run: nothing written' in out)
+        self.phase = 'history-import'
+        _, out = self.history_cli(archive, h['password'], True)
+        match = re.search(rb'(?m)^imported=(\d+) duplicate=(\d+) rekeyed=(\d+) expired=(\d+) invalid=(\d+)$', out)
+        require(match and int(match[1]) >= 12 and all(int(match[i]) == 0 for i in range(2, 6)))
+        require(b'history archive verified:' in out and b'(0 skipped at export)' in out)
+        require(sha(archive) == h['archive_sha256'])
+        self.dc('up', '-d')
+        self.history_client()
+        require(self.history_markers() == h['markers'])
+        self.history_result = {'result': 'pass', 'records': 12, 'identical': True,
+            'source_history_absent_before_import': True, 'live_lock_refusal': True,
+            'wrong_passphrase_refusal': True, 'dry_run_verified': True, 'rotated_log_key': True,
+            'archive_sha256': h['archive_sha256']}
+
     def preflight(self):
         for name in ('docker-compose.yml', 'docker-compose.maint-agent.yml', '.env'):
             regular(STACK / name)
@@ -107,6 +269,7 @@ class Guest:
         require(build['source']['git_commit'] == self.cfg['source_sha'] and build['source']['git_dirty'] is False)
 
     def export(self):
+        history = self.export_history() if self.cfg.get('history') else None
         self.phase = 'encrypted-backup'
         archive = self.backup / self.cfg['archive_name']
         require(not os.path.lexists(archive))
@@ -131,6 +294,8 @@ class Guest:
         metadata = {'schema': 1, 'archive_sha256': sha(archive), 'archive_bytes': archive.stat().st_size,
                     'image_id': self.cfg['image_id'], 'source_sha': self.cfg['source_sha'],
                     'source_data_volume': self.data_name, 'source_backup_volume': self.backup_name}
+        if history is not None:
+            metadata['history'] = history
         meta_file = self.work / 'metadata.json'
         meta_file.write_text(json.dumps(metadata))
         self.phase = 'export'
@@ -158,6 +323,19 @@ class Guest:
         # requiring dotenv quoting instead of silently changing their bytes.
         require(all(isinstance(v, str) and re.fullmatch(r'[A-Za-z0-9_+/.=@:-]{0,4096}', v) for v in secrets.values()))
         require(secrets['CULVERT_CA_PASSPHRASE'])
+        history_archive = None
+        if self.cfg.get('history'):
+            h = self.cfg['history']
+            require(secrets['CULVERT_LOG_PASSPHRASE'] and
+                    h['rotated_log_password'] != secrets['CULVERT_LOG_PASSPHRASE'])
+            require(re.fullmatch(r'[a-f0-9]{64}', h['rotated_log_password']))
+            history_archive = self.backup / ('history-' + self.cfg['nonce'] + '.cvst')
+            self.transfer('history', history_archive, False)
+            regular(history_archive)
+            require(history_archive.stat().st_size == h['archive_bytes'] <= self.cfg['archive_limit'] and
+                    sha(history_archive) == h['archive_sha256'])
+            os.chown(history_archive, self.uid, self.gid); os.chmod(history_archive, 0o600)
+            secrets['CULVERT_LOG_PASSPHRASE'] = h['rotated_log_password']
         self.phase = 'stop'
         self.dc('stop')
         require(self.run(['docker', 'inspect', '-f', '{{.State.Running}}', 'culvert'])[1].strip() == b'false')
@@ -192,6 +370,8 @@ class Guest:
         self.phase = 'start'
         self.dc('up', '-d')
         require(self.run(['docker', 'inspect', '-f', '{{.Image}}', 'culvert'])[1].strip().decode() == self.cfg['image_id'])
+        if history_archive is not None:
+            self.restore_history(history_archive)
 
 
 def main(cfg):
@@ -199,7 +379,11 @@ def main(cfg):
     try:
         guest.preflight()
         getattr(guest, cfg['mode'])()
-        print(json.dumps({'schema': 1, 'phase': cfg['mode'], 'result': 'pass'}))
+        result = {'schema': 1, 'phase': cfg['mode'], 'result': 'pass'}
+        if cfg.get('history'):
+            result['history'] = guest.history_result
+            result['history_login_unavailable'] = getattr(guest, 'history_login_unavailable', [])
+        print(json.dumps(result))
     except Exception:
         print(json.dumps({'schema': 1, 'phase': guest.phase, 'result': 'fail',
                           'detail': 'Inspect private guest work directory; no automatic recovery or retry.'}))

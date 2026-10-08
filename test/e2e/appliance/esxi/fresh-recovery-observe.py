@@ -1,7 +1,7 @@
 """Supported API/traffic oracles for the owned fresh-recovery fixture.
 
 Called by fresh-recovery.py; no credentials on argv and no infrastructure
-mutation. Historical logs are intentionally excluded by the backup format.
+mutation. Historical logs use a separately encrypted supported export.
 """
 import hashlib
 import http.client
@@ -76,6 +76,34 @@ class Client:
 def normalized_rules(policy):
     require(policy.get('draft') is False and policy.get('persisted') is True and policy.get('rules'))
     return [{k: v for k, v in rule.items() if k not in ('hitCount', 'lastHit')} for rule in policy['rules']]
+
+
+def validate_history(markers, tag, expected_count=12):
+    require(re.fullmatch(r'freshhist[a-f0-9]{16}', tag))
+    require(markers.get('history') is True and markers.get('total') == expected_count)
+    rows = markers.get('rows')
+    require(isinstance(rows, list) and len(rows) == expected_count)
+    expected = {tag + '-' + str(n) + '.invalid' for n in range(1, expected_count + 1)}
+    require(all(isinstance(row, list) and len(row) == 4 and type(row[0]) is int and row[0] > 0
+                and row[2:] == ['POLICY_DEFAULT_DENY', 'GET'] for row in rows))
+    require({row[1] for row in rows} == expected)
+
+
+def observe_history(guest, admin, password, baseline):
+    validate_history(baseline['markers'], baseline['tag'])
+    client = Client(guest)
+    client.api('/api/auth/login', {'user': admin, 'pass': password})
+    retention = client.api('/api/logs/retention')
+    require(retention.get('enabled') is True and retention.get('encrypted') is True)
+    data = client.api('/api/logs?source=store&filter=' + baseline['tag'] + '&limit=500')
+    markers = {'history': data.get('history'), 'total': data.get('total'),
+               'rows': sorted([[e.get(k) for k in ('ts', 'host', 'status', 'method')]
+                               for e in data.get('logs') or []])}
+    validate_history(markers, baseline['tag'])
+    require(markers == baseline['markers'])
+    require(client.traffic('example.com') == 200 and client.traffic('example.org') == 403)
+    return {'schema': 1, 'result': 'pass', 'records': 12, 'identical': True,
+            'archive_sha256': baseline['archive_sha256'], 'traffic': {'allow': 200, 'block': 403}}
 
 
 def observe(guest, admin, password, baseline=None):

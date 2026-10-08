@@ -56,7 +56,7 @@ class RecoveryTests(unittest.TestCase):
              mock.patch.object(controller.console.b.module, 'validate_scope'), \
              mock.patch.object(controller.console.b.module, 'locked', return_value=contextlib.nullcontext()), \
              mock.patch.object(controller, 'private_escrow', return_value=escrow), \
-             mock.patch.object(controller, 'verify_export'), \
+             mock.patch.object(controller, 'verify_export', return_value={}), \
              mock.patch.object(controller, 'verify_source_absent') as absent, \
              mock.patch.object(controller, 'read_json', side_effect=lambda path: data[path.name]), \
              mock.patch.object(controller, 'endpoint', return_value=contextlib.nullcontext(('test-pin', {}))), \
@@ -191,6 +191,134 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual(normalize({'draft': False, 'persisted': True, 'rules': [{'name': 'rule', 'hitCount': 4, 'lastHit': 'now'}]}), [{'name': 'rule'}])
         for bad in ({'draft': True, 'persisted': True, 'rules': [{}]}, {'draft': False, 'persisted': False, 'rules': [{}]}):
             with self.assertRaises(ValueError): normalize(bad)
+
+    def history_fixture(self):
+        tag = 'freshhist' + 'a' * 16
+        markers = {'history': True, 'total': 12, 'rows': [
+            [1791477115000 + n, tag + '-' + str(n) + '.invalid', 'POLICY_DEFAULT_DENY', 'GET']
+            for n in range(1, 13)]}
+        archive = self.root / 'history.cvst'; archive.write_bytes(b'CVRTST01synthetic')
+        metadata = {'history': {'archive_sha256': controller.file_hash(archive),
+            'archive_bytes': archive.stat().st_size, 'tag': tag, 'markers': markers,
+            'dry_run_verified': True, 'source_encrypted': True}}
+        return archive, metadata
+
+    def test_history_metadata_refuses_corrupt_incomplete_or_unvalidated_export(self):
+        archive, metadata = self.history_fixture()
+        controller.verify_history_metadata(metadata, archive)
+        for field, value in [('dry_run_verified', False), ('source_encrypted', False),
+                             ('archive_bytes', 1), ('archive_sha256', '0' * 64), ('password', 'unexpected')]:
+            changed = json.loads(json.dumps(metadata)); changed['history'][field] = value
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                controller.verify_history_metadata(changed, archive)
+        archive.write_bytes(b'CVRTST01tampered')
+        with self.assertRaises(ValueError): controller.verify_history_metadata(metadata, archive)
+
+    def test_history_oracle_refuses_duplicate_missing_or_changed_markers(self):
+        _, metadata = self.history_fixture(); h = metadata['history']
+        controller.observation.validate_history(h['markers'], h['tag'])
+        for variant in ('missing', 'duplicate', 'unexpected-status', 'wrong-method', 'bad-time', 'disabled'):
+            markers = json.loads(json.dumps(h['markers']))
+            if variant == 'missing': markers['rows'].pop()
+            elif variant == 'duplicate': markers['rows'][-1] = markers['rows'][0]
+            elif variant == 'unexpected-status': markers['rows'][0][2] = 'AUTH_FAIL'
+            elif variant == 'wrong-method': markers['rows'][0][3] = 'POST'
+            elif variant == 'bad-time': markers['rows'][0][0] = True
+            else: markers['history'] = False
+            with self.subTest(variant=variant), self.assertRaises(ValueError):
+                controller.observation.validate_history(markers, h['tag'])
+
+    def restore_history_fixture(self):
+        archive, metadata = self.history_fixture()
+        value = guest.Guest.__new__(guest.Guest)
+        h = dict(metadata['history'], password='private-archive', rotated_log_password='private-new-log')
+        value.cfg = {'history': h, 'nonce': 'synthetic'}
+        value.history_client = mock.Mock()
+        empty = {'history': True, 'total': 0, 'rows': []}
+        value.history_markers = mock.Mock(side_effect=[empty, empty, h['markers']])
+        value.history_api = mock.Mock(return_value={'enabled': True, 'encrypted': True})
+        value.run = mock.Mock(side_effect=[(0, json.dumps([{'Config': {'Env': [
+            'CULVERT_LOG_PASSPHRASE=private-new-log']}}]).encode()), (0, b'false\n')])
+        value.dc = mock.Mock()
+        value.history_cli = mock.Mock(side_effect=[
+            (1, b'History import error: data directory is locked by another Culvert process'),
+            (1, b'backup decrypt failed (invalid passphrase or tampered backup)'),
+            (0, b'history archive OK: 12 records, 0 skipped at export\ndry-run: nothing written'),
+            (0, b'imported=12 duplicate=0 rekeyed=0 expired=0 invalid=0\nhistory archive verified: 12 records (0 skipped at export)')])
+        return value, archive
+
+    def test_history_restore_requires_specific_refusals_and_restores_exact_markers(self):
+        value, archive = self.restore_history_fixture()
+        value.restore_history(archive)
+        self.assertEqual(value.dc.call_args_list, [mock.call('stop'), mock.call('up', '-d')])
+        self.assertEqual(value.history_result['records'], 12)
+        self.assertTrue(value.history_result['rotated_log_key'])
+
+    def test_history_unrelated_live_failure_never_stops_or_imports(self):
+        value, archive = self.restore_history_fixture()
+        value.history_cli.side_effect = [(1, b'archive file unreadable')]
+        with self.assertRaises(RuntimeError): value.restore_history(archive)
+        value.dc.assert_not_called()
+        self.assertEqual(value.history_cli.call_count, 1)
+
+    def test_history_unrelated_wrong_password_failure_never_imports_or_restarts(self):
+        value, archive = self.restore_history_fixture()
+        value.history_cli.side_effect = [(1, b'locked by another Culvert process'), (1, b'archive file unreadable')]
+        with self.assertRaises(RuntimeError): value.restore_history(archive)
+        self.assertEqual(value.history_cli.call_count, 2)
+        value.dc.assert_called_once_with('stop')
+
+    def test_history_rotation_must_be_effective_before_import(self):
+        value, archive = self.restore_history_fixture()
+        value.run.side_effect = [(0, json.dumps([{'Config': {'Env': [
+            'CULVERT_LOG_PASSPHRASE=old-key']}}]).encode())]
+        with self.assertRaises(RuntimeError): value.restore_history(archive)
+        value.history_cli.assert_not_called()
+        value.dc.assert_not_called()
+
+    def history_login_fixture(self):
+        value = guest.Guest.__new__(guest.Guest)
+        value.cfg = {'history': {'admin_password': 'SYNTHETIC-SECRET'}}
+        value.phase = 'history-live-refusal'
+        value.work = self.root
+        value.history_api = mock.Mock()
+        return value
+
+    def test_history_login_terminal_auth_response_is_never_retried(self):
+        for code in (400, 401, 403, 404, 429, 500):
+            value = self.history_login_fixture()
+            value.history_api.side_effect = urllib.error.HTTPError('https://127.0.0.1:9090/private', code,
+                'SYNTHETIC-SECRET', {}, None)
+            with self.subTest(code=code), mock.patch.object(guest.time, 'sleep') as sleep:
+                with self.assertRaises(urllib.error.HTTPError): value.history_client()
+                self.assertEqual(value.history_api.call_count, 1)
+                sleep.assert_not_called()
+        self.assertEqual(list(self.root.iterdir()), [])
+
+    def test_history_login_retries_unavailable_and_preserves_first_failure_without_secrets(self):
+        value = self.history_login_fixture()
+        value.history_api.side_effect = [
+            urllib.error.HTTPError('https://127.0.0.1/private', 503, 'SYNTHETIC-SECRET', {}, None),
+            urllib.error.URLError('SYNTHETIC-SECRET'), {}]
+        with mock.patch.object(guest.time, 'sleep') as sleep, mock.patch.object(guest.time, 'monotonic', return_value=0):
+            value.history_client()
+        self.assertEqual(value.history_api.call_count, 3)
+        self.assertEqual(sleep.call_count, 2)
+        evidence = self.root / 'history-login-unavailable-001.json'
+        self.assertEqual(len(value.history_login_unavailable), 1)
+        self.assertEqual(json.loads(evidence.read_text(encoding='utf-8'))['http_status'], 503)
+        self.assertNotIn('SYNTHETIC-SECRET', evidence.read_text(encoding='utf-8'))
+        self.assertNotIn('https:', evidence.read_text(encoding='utf-8'))
+
+    def test_history_login_retry_budget_expires_without_another_attempt(self):
+        value = self.history_login_fixture()
+        value.history_api.side_effect = TimeoutError('SYNTHETIC-SECRET')
+        with mock.patch.object(guest.time, 'sleep') as sleep, \
+             mock.patch.object(guest.time, 'monotonic', side_effect=[0, 0, 0, 301]):
+            with self.assertRaises(RuntimeError): value.history_client()
+        self.assertEqual(value.history_api.call_count, 1)
+        sleep.assert_not_called()
+        self.assertTrue((self.root / 'history-login-unavailable-001.json').is_file())
 
 
 if __name__ == '__main__':

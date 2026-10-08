@@ -19,7 +19,7 @@ import time
 import uuid
 
 HERE = Path(__file__).resolve().parent
-SOURCE = 'cd8e44505bd329e5de675592ad4c23f92a534d55'
+SOURCE = '7e53720d06f525f4e5fdbfec42f52840d5b734e2'
 MAX_IMAGE = 16 * 1024 * 1024
 MAX_TOTAL = 128 * 1024 * 1024
 PHASES = ('imported', 'powered-on', 'baseline-verified', 'qualification-started',
