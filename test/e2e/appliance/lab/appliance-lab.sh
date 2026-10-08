@@ -1648,6 +1648,13 @@ echo "=== dockerd argv"; ps -o args= -C dockerd | sed 's/^/dockerd-argv /'
 echo "=== daemon.json"; cat /etc/docker/daemon.json 2>/dev/null | sed 's/^/daemon.json /'
 echo "=== containerd plugins"; ctr plugins ls 2>/dev/null | awk '{print "plugin "$1" "$2" "$NF}'
 echo "disabled-plugins $(grep -E '^[[:space:]]*disabled_plugins' /etc/containerd/config.toml 2>/dev/null)"
+echo "=== kernel modules"; for m in sctp nfsd dccp tipc; do echo "module $m modprobe=$(modprobe -n -v "$m" 2>&1 | tr -s ' ' | tr '\n' ' ') loaded=$(grep -c "^$m " /proc/modules)"; done
+echo "sctp-socket=$(python3 -c 'import socket
+try:
+    socket.socket(socket.AF_INET, socket.SOCK_STREAM, 132); print("opened")
+except OSError as e:
+    print("refused:" + (e.strerror or str(e)))' 2>&1) loaded-after=$(grep -c '^sctp ' /proc/modules)"
+for m in kvm_amd nvmet_tcp ib_srpt; do echo "module-file $m $(find /lib/modules/"$(uname -r)" -name "$m.ko*" | wc -l)"; done
 echo "=== containerd tracing"; containerd config dump 2>/dev/null | grep -iE 'otlp|tracing|endpoint' | sed 's/^/tracing /'
 EOS
   v="$(sed -n 's/^running=//p' "$f")"
@@ -1685,6 +1692,16 @@ EOS
     check E containerd-cri-disabled fail "$(grep -E '^plugin .*cri' "$f" | tr '\n' ' ')"
   elif grep -qE '^plugin ' "$f"; then check E containerd-cri-disabled pass "io.containerd.grpc.v1 cri (the CRI API) not loaded; $(grep -E '^disabled-plugins' "$f" | cut -d' ' -f2-)"
   else check E containerd-cri-disabled fail "ctr plugins ls produced nothing"; fi
+  # Unused kernel modules: denied by modprobe.d, not loaded, and an actual
+  # SCTP socket (which would autoload the module) is refused.
+  if ! grep -qE '^module ' "$f"; then check E kernel-modules-denied fail "no module lines (old OVA without the denylist?)"
+  elif grep -E '^module ' "$f" | grep -vqE 'modprobe=install /bin/false *loaded=0$'; then
+    check E kernel-modules-denied fail "$(grep -E '^module ' "$f" | grep -vE 'modprobe=install /bin/false *loaded=0$' | tr '\n' ' ')"
+  elif ! grep -qE '^sctp-socket=refused:.* loaded-after=0$' "$f"; then
+    check E kernel-modules-denied fail "$(grep '^sctp-socket=' "$f")"
+  else check E kernel-modules-denied pass "sctp/nfsd/dccp/tipc: modprobe resolves to /bin/false, none loaded; a real SCTP socket is $(sed -n 's/^sctp-socket=\(refused:.*\) loaded-after.*/\1/p' "$f") and sctp stays unloaded"; fi
+  if grep -E '^module-file ' "$f" | grep -vq ' 0$'; then check E extra-modules-absent fail "$(grep '^module-file' "$f" | tr '\n' ' ')"
+  else check E extra-modules-absent pass "kvm_amd, nvmet_tcp, ib_srpt not on the disk (linux-modules-extra not installed)"; fi
   grep -qiE '^tracing .*endpoint *= *"[^"]+"' "$f" && check E containerd-tracing-off fail "$(grep '^tracing' "$f" | tr '\n' ' ')" \
     || check E containerd-tracing-off pass "no OTLP endpoint configured"
   log "engine surface: $f"
