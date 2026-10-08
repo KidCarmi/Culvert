@@ -65,7 +65,7 @@ func TestBenchGate_RateLimitWindowIsFlatInConfiguredLimit(t *testing.T) {
 	if ratio > maxRatio {
 		t.Fatalf("rate-limit window cost scales with the configured limit: %.2fx from limit %d to %d "+
 			"(bound %.1fx) — the sliding window is walking the bucket again instead of dropping an "+
-			"expired prefix (see clientBucket in security.go)", ratio, smallLimit, largeLimit, maxRatio)
+			"expired prefix (see clientBucket in engine.go)", ratio, smallLimit, largeLimit, maxRatio)
 	}
 }
 
