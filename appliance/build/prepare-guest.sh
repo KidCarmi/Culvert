@@ -242,6 +242,12 @@ install -m 0644 "$APPL/provision/cloud-90-culvert.cfg" /etc/cloud/cloud.cfg.d/90
 # Boot/recovery time: 4 MiB read-ahead on whole disks (measured, see the rule).
 install -m 0644 "$APPL/provision/60-culvert-readahead.rules" /etc/udev/rules.d/60-culvert-readahead.rules
 
+# Kernel modules the appliance never uses, made unloadable (see the file).
+install -m 0644 "$APPL/provision/modprobe-culvert-unused.conf" /etc/modprobe.d/culvert-unused.conf
+for m in sctp nfsd dccp tipc; do
+  modprobe -n -v "$m" 2>&1 | grep -qE '^install /bin/false[[:space:]]*$' || { echo "modprobe would still load $m" >&2; exit 1; }
+done
+
 # OS maintenance: security pocket only, no automatic reboot.
 install -m 0644 "$APPL/os-maintenance/50unattended-upgrades-culvert" /etc/apt/apt.conf.d/50unattended-upgrades-culvert
 install -m 0644 "$APPL/os-maintenance/20auto-upgrades-culvert"       /etc/apt/apt.conf.d/20auto-upgrades-culvert

@@ -183,6 +183,12 @@ verifies on import.
   `lxd-installer` stays, because `ubuntu-server` depends on it, and the build
   refuses if `ubuntu-server`, `open-vm-tools` or `unattended-upgrades` is gone
   afterwards. Raising the snapshot is a pin change like any other.
+  `/etc/modprobe.d/culvert-unused.conf` makes `sctp`, `nfsd`, `dccp` and
+  `tipc` unloadable (`install … /bin/false`, verified with `modprobe -n` at
+  build): the appliance uses none of them, and the shipped kernel's open
+  CRITICAL CVEs in SCTP and NFSD have no fixed 6.8.0 package yet. The other
+  open CRITICALs (KVM-SEV, nvmet-tcp, RDMA srpt) are in
+  `linux-modules-extra`, which the OVA does not install.
 
 ## Candidate builds (qualification of an unpublished image — never for customers)
 
