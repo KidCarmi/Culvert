@@ -117,7 +117,7 @@ check() { local st="$1" n="$2" r="$3" d="${4:-}"
   log "$r [$st] $n: $d"; }
 
 # Every secret this run holds, replaced wherever it appears.
-SECRET_FILES=(setup-token admin-pass console-pass console-onetime)
+SECRET_FILES=(setup-token admin-pass console-pass console-onetime history-phrase log-pass-new)
 redact_str() { local s="$1" v f
   for f in "${SECRET_FILES[@]}"; do
     [[ -s "$SEC/$f" ]] || continue; v="$(cat "$SEC/$f")"; s="${s//"$v"/[REDACTED]}"
@@ -1456,6 +1456,125 @@ EOS
   redact_tree
 }
 
+# ── history: encrypted request-history recovery (ASTRA item 3, #1528) ───────
+# The backup deliberately omits the history store and its key is node-local,
+# so the supported recovery is the encrypted history export. Proven here on the
+# real appliance with the SOURCE GONE: history on → marker traffic → export via
+# the admin API to the RUNNER (never kept in the guest) → backup → stack down →
+# the data VOLUME is deleted → restore into a fresh volume with a NEW log
+# passphrase (key rotation) → the markers are absent → offline import of the
+# runner's archive → the exact exported records are back. Runs LAST: deleting
+# the volume also drops the category feed DB, which re-syncs on its own and
+# must not disturb the other steps' oracles.
+hist_markers() { api GET "/api/logs?source=store&filter=$HIST_TAG&limit=500" | body | python3 -c 'import json,sys
+d=json.load(sys.stdin); rows=sorted((e.get("ts"),e.get("host"),e.get("status"),e.get("method")) for e in d.get("logs") or [])
+print(json.dumps({"history":d.get("history"),"total":d.get("total"),"rows":rows}))' 2>/dev/null || echo '{}'; }
+hist_total() { python3 -c 'import json,sys;print(json.loads(sys.argv[1]).get("total",-1))' "$1" 2>/dev/null || echo -1; }
+hist_login() { : > "$JAR"; api POST /api/auth/login "{\"user\":\"$ADMIN_USER\",\"pass\":\"$(cat "$SEC/admin-pass")\"}" | code; }
+hist_wait_up() { local deadline=$(( $(date +%s) + 600 ))
+  until curl -fsS -m 3 "$P/health" >/dev/null 2>&1; do (( $(date +%s) < deadline )) || return 1; sleep 5; done; }
+hist_upload() { local src="$1" dst="$2" chunk
+  { echo "set -e; rm -f $dst.b64"
+    base64 -w 1000 "$src" | while read -r chunk; do echo "echo '$chunk' >> $dst.b64"; done
+    echo "base64 -d $dst.b64 > $dst; rm -f $dst.b64; chmod 0600 $dst; sha256sum $dst"; } | gpriv --timeout 900; }
+cmd_history() { local c n tot before after fn op st rc arch="$WORK/history-archive.cvst"
+  [[ "${LAB_HISTORY:-1}" == 1 ]] || return 0
+  if [[ "$LAB_EXTERNAL" == 1 ]]; then check H history-recovery fail "BLOCKED: needs a QEMU guest"; return 0; fi
+  HIST_TAG="hist$(head -c 6 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+  [[ -s "$SEC/history-phrase" ]] || { head -c 4096 /dev/urandom | tr -dc 'A-Za-z0-9' | cut -c1-28 > "$SEC/history-phrase"; chmod 0600 "$SEC/history-phrase"; }
+  [[ -s "$SEC/log-pass-new" ]] || { head -c 4096 /dev/urandom | tr -dc 'A-Za-z0-9' | cut -c1-32 > "$SEC/log-pass-new"; chmod 0600 "$SEC/log-pass-new"; }
+  c="$(hist_login)"; [[ $c == 200 ]] || { check H history-recovery fail "BLOCKED: admin login $c"; return 0; }
+  # 1. history on, marker traffic (one allowed, the rest default-denied).
+  c="$(api PUT /api/logs/retention '{"enabled":true,"retentionDays":30}' | tee "$EV/H-01-enable.txt" | code)"
+  [[ $c == 200 ]] || { check H history-enable fail "PUT /api/logs/retention enabled=true: $c $(body < "$EV/H-01-enable.txt" | head -c 200)"; return 0; }
+  for n in $(seq 1 12); do through_proxy "http://$HIST_TAG-$n.example.org/p$n" > /dev/null; done
+  for _ in $(seq 1 30); do before="$(hist_markers)"; [[ "$(hist_total "$before")" -ge 12 ]] && break; sleep 2; done
+  printf '%s\n' "$before" > "$EV/H-02-markers-before.json"
+  tot="$(hist_total "$before")"
+  [[ "$tot" -ge 12 ]] && check H history-recorded pass "$tot marker requests ($HIST_TAG-*) in the history store" \
+    || { check H history-recorded fail "only $tot of 12 marker requests reached the history store"; return 0; }
+  # 2. export through the admin API, to the RUNNER.
+  c="$(curl -ksS -m 300 -X POST "$UI/api/logs/history/export" -H "Origin: $UI" -H 'Content-Type: application/json' -b "$JAR" \
+        --data-binary @<(printf '{"archivePhrase":"%s"}' "$(cat "$SEC/history-phrase")") -o "$arch" -D "$EV/H-03-export-headers.txt" -w '%{http_code}')"
+  if [[ $c == 200 && -s "$arch" && "$(head -c 8 "$arch")" == CVRTST01 ]]; then
+    check H history-export pass "POST /api/logs/history/export → $(stat -c %s "$arch") bytes, encrypted stream (CVRTST01), sha256 $(sha256sum "$arch" | cut -c1-16)…, held on the runner"
+  else check H history-export fail "http $c, $(stat -c %s "$arch" 2>/dev/null || echo 0) bytes"; return 0; fi
+  if strings "$arch" | grep -q "$HIST_TAG"; then check H history-export-opaque fail "marker host readable in the archive"
+  else check H history-export-opaque pass "no marker host is readable in the archive bytes"; fi
+  # 3. backup (it omits the history store by design).
+  op="$(api POST /api/backups '{"encrypt":false}' | tee "$EV/H-04-backup.txt" | body)"
+  fn="$(printf '%s' "$op" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("filename",""))' 2>/dev/null || true)"
+  op="$(printf '%s' "$op" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("opId",""))' 2>/dev/null || true)"
+  st=""; for _ in $(seq 1 90); do st="$(api GET "/api/backups/operations/$op" | body | python3 -c 'import json,sys;print(json.load(sys.stdin).get("state",""))' 2>/dev/null || true)"
+    case "$st" in succeeded|failed) break ;; esac; sleep 2; done
+  [[ "$st" == succeeded && -n "$fn" ]] || { check H history-backup fail "backup op=${op:-none} state=${st:-none}"; return 0; }
+  check H history-backup pass "$fn"
+  # 4. the source is DESTROYED: stack down, the data volume deleted; restore
+  #    into a fresh volume; the log passphrase ROTATED.
+  rc=0; gpriv --timeout 1800 > "$EV/H-05-destroy-restore.txt" 2>&1 <<EOS || rc=$?
+cd /srv/culvert || exit 90
+docker compose down 2>&1; echo "down-rc=\$?"
+vol=\$(docker volume ls -q | grep -E '(^|_)proxy-data\$' | head -1); echo "volume=\$vol"
+docker volume rm "\$vol" 2>&1; echo "volume-rm-rc=\$?"
+docker volume inspect "\$vol" >/dev/null 2>&1 && echo VOLUME-STILL-PRESENT || echo VOLUME-GONE
+cp -p .env .env.lab-history-orig
+sed -i '/^CULVERT_LOG_PASSPHRASE=/d' .env; echo "CULVERT_LOG_PASSPHRASE=$(cat "$SEC/log-pass-new")" >> .env; echo "log-passphrase-rotated"
+docker compose --profile cli run --rm -T cli --restore /backup/$fn --mode full --confirm 2>&1; r=\$?; echo "commit-rc=\$r"
+docker compose up -d 2>&1; echo "up-rc=\$?"
+exit \$r
+EOS
+  hist_wait_up || true
+  if [[ $rc == 0 ]] && grep -qx VOLUME-GONE "$EV/H-05-destroy-restore.txt" && grep -q '^up-rc=0' "$EV/H-05-destroy-restore.txt"; then
+    check H history-source-destroyed pass "data volume deleted ($(grep -m1 '^volume=' "$EV/H-05-destroy-restore.txt")), restored from $fn into a fresh volume, CULVERT_LOG_PASSPHRASE rotated"
+  else check H history-source-destroyed fail "rc $rc: $(grep -E '^(down|volume|volume-rm|commit|up)-rc=|VOLUME-' "$EV/H-05-destroy-restore.txt" | tr '\n' ' ')"; return 0; fi
+  c="$(hist_login)"
+  after="$(hist_markers)"; printf '%s\n' "$after" > "$EV/H-06-markers-after-restore.json"
+  local hon; hon="$(python3 -c 'import json,sys;print(json.loads(sys.argv[1]).get("history"))' "$after" 2>/dev/null)"
+  if [[ $c == 200 && "$hon" == True && "$(hist_total "$after")" == 0 ]]; then check H history-gone-after-restore pass "after the restore the history store is ON (new key) and holds 0 marker records — the backup does not carry history"
+  else check H history-gone-after-restore fail "login $c, history=$hon, markers $(hist_total "$after") (want history=True, 0)"; return 0; fi
+  # 5. import the RUNNER's archive. Refused while the proxy holds the store;
+  #    a wrong archive passphrase writes nothing; then offline: verify, import.
+  hist_upload "$arch" /srv/culvert/lab-history.cvst > "$EV/H-07-upload.txt" 2>&1 || true
+  grep -q "$(sha256sum "$arch" | cut -d' ' -f1)" "$EV/H-07-upload.txt" || { check H history-upload fail "archive hash differs in the guest"; return 0; }
+  local imp="docker compose --profile cli run --rm -T -v /srv/culvert/lab-history.cvst:/backup/lab-history.cvst:ro -e CULVERT_HISTORY_PASSPHRASE cli --history-import /backup/lab-history.cvst"
+  rc=0; gpriv --timeout 900 > "$EV/H-08-import-live.txt" 2>&1 <<EOS || rc=$?
+cd /srv/culvert || exit 90
+CULVERT_HISTORY_PASSPHRASE='$(cat "$SEC/history-phrase")' $imp --confirm 2>&1; echo "import-live-rc=\$?"
+EOS
+  if grep -qE '^import-live-rc=[1-9]' "$EV/H-08-import-live.txt" && ! grep -q '^imported=' "$EV/H-08-import-live.txt"; then
+    check H history-import-refused-while-running pass "refused against the running proxy: $(grep -m1 -iE 'lock|running|stop' "$EV/H-08-import-live.txt" | head -c 160)"
+  else check H history-import-refused-while-running fail "$(tail -3 "$EV/H-08-import-live.txt" | tr '\n' ' ')"; fi
+  rc=0; gpriv --timeout 1800 > "$EV/H-09-import-offline.txt" 2>&1 <<EOS || rc=$?
+cd /srv/culvert || exit 90
+docker compose down 2>&1; echo "down-rc=\$?"
+echo "--- wrong archive passphrase"
+CULVERT_HISTORY_PASSPHRASE='wrong-passphrase-0000' $imp --confirm 2>&1; echo "wrong-rc=\$?"
+echo "--- dry run"
+CULVERT_HISTORY_PASSPHRASE='$(cat "$SEC/history-phrase")' $imp 2>&1; echo "dry-rc=\$?"
+echo "--- import"
+CULVERT_HISTORY_PASSPHRASE='$(cat "$SEC/history-phrase")' $imp --confirm 2>&1; r=\$?; echo "import-rc=\$r"
+rm -f /srv/culvert/lab-history.cvst
+docker compose up -d 2>&1; echo "up-rc=\$?"
+exit \$r
+EOS
+  hist_wait_up || true
+  grep -qE '^wrong-rc=[1-9]' "$EV/H-09-import-offline.txt" && ! sed -n '/wrong archive/,/dry run/p' "$EV/H-09-import-offline.txt" | grep -q '^imported=' \
+    && check H history-wrong-passphrase pass "wrong archive passphrase refused, nothing imported" \
+    || check H history-wrong-passphrase fail "$(sed -n '/wrong archive/,/dry run/p' "$EV/H-09-import-offline.txt" | tail -3 | tr '\n' ' ')"
+  grep -q '^dry-rc=0' "$EV/H-09-import-offline.txt" && grep -q 'nothing written' "$EV/H-09-import-offline.txt" \
+    && check H history-import-dry-run pass "$(grep -m1 'history archive OK' "$EV/H-09-import-offline.txt")" \
+    || check H history-import-dry-run fail "$(grep -E '^dry-rc=' "$EV/H-09-import-offline.txt")"
+  c="$(hist_login)"
+  after="$(hist_markers)"; printf '%s\n' "$after" > "$EV/H-10-markers-after-import.json"
+  local same; same="$(python3 -c 'import json,sys;a=json.loads(sys.argv[1]);b=json.loads(sys.argv[2]);print(int(bool(a.get("rows")) and a.get("rows")==b.get("rows")))' "$before" "$after" 2>/dev/null || echo 0)"
+  if [[ $rc == 0 && $c == 200 && "$same" == 1 ]]; then
+    check H history-recovered pass "$(grep -m1 '^imported=' "$EV/H-09-import-offline.txt"); the $(hist_total "$after") marker records read back identical (ts, host, status, method) under the ROTATED log key"
+  else check H history-recovered fail "import rc $rc, login $c, markers $(hist_total "$after") of $(hist_total "$before"), identical=$same ($(grep -E '^(imported|import-rc|up-rc)=' "$EV/H-09-import-offline.txt" | tr '\n' ' '))"; fi
+  local ok; ok="$(through_proxy http://example.com/)"
+  [[ "$ok" == 200 ]] && check H history-enforcement pass "example.com 200 through the proxy after the recovery" || check H history-enforcement fail "example.com $ok"
+  redact_tree
+}
+
 cmd_collect() {
   mkdir -p "$EV/guest"
   if { [[ "$LAB_EXTERNAL" == 1 ]] || qemu_alive; } && gop status-json > "$EV/guest/status-json.json" 2>/dev/null; then
@@ -1933,12 +2052,13 @@ case "${1:-}" in
   up) cmd_up ;;
   qualify) cmd_qualify; [[ "$(failures)" == 0 ]] ;;
   recovery) cmd_recovery; [[ "$(failures)" == 0 ]] ;;
+  history) cmd_history; [[ "$(failures)" == 0 ]] ;;
   adoption) cmd_adoption; [[ "$(failures)" == 0 ]] ;;
   console) trap 'cmd_collect || true; cmd_down || true' EXIT; cmd_console; [[ "$(failures)" == 0 ]] ;;
   collect) cmd_collect ;;
   down) cmd_down ;;
   all)
     trap 'cmd_collect || true; cmd_down || true' EXIT
-    cmd_preflight; cmd_up; cmd_qualify; cmd_recovery; [[ -z "${LAB_ADOPT_IMAGE_TAR:-}" ]] || cmd_adoption; n="$(failures)"; log "failures: $n"; [[ "$n" == 0 ]] ;;
+    cmd_preflight; cmd_up; cmd_qualify; cmd_recovery; [[ -z "${LAB_ADOPT_IMAGE_TAR:-}" ]] || cmd_adoption; cmd_history; n="$(failures)"; log "failures: $n"; [[ "$n" == 0 ]] ;;
   *) sed -n '2,32p' "$0"; exit 2 ;;
 esac
