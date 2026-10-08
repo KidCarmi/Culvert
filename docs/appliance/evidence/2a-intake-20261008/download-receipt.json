@@ -1,0 +1,16 @@
+{
+  "schema": 1,
+  "artifact_id": 11519101999,
+  "run_id": 37703962783,
+  "zip_sha256": "23e79e4777a1b26275017d1dad32eb6e03aad0500d40ff085100f3bc9ba3463c",
+  "ova_sha256": "0f44483d3fc9a3c7017d7324cc21e36dd770ddec57699db3c84f8dd16fb01569",
+  "ova_bytes": 1313740800,
+  "expected_source": "2a82320c746a6d146df19a6f5af9676d76b72286",
+  "producer_handoff_verified": false,
+  "qemu_qualification_verified": false,
+  "esxi_operations_performed": false,
+  "status": "retained for offline intake only",
+  "ova_filename": "culvert-appliance-1.0.260-candidate.g2a82320c746a-ubuntu-24.04.ova",
+  "local_ova_retained": true,
+  "observed_utc": "2026-10-08T00:03:36.487943+00:00"
+}

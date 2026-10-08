@@ -1,0 +1,181 @@
+{
+  "schema": "culvert.browser-followup.v1",
+  "reviewed_at_utc": "2026-10-07T23:56:18.963318+00:00",
+  "disposition": "BLOCKED: browser SSO identity transport is not established; retained Chromium evidence demonstrates host-only cookie is absent on other-destination proxy requests",
+  "workflow": {
+    "run_id": 37704245895,
+    "url": "https://github.com/KidCarmi/Culvert/actions/runs/37704245895",
+    "lab_head": "fdae20b6924b261eba6f37d77c73ff1b0324dd03",
+    "conclusion": "success",
+    "artifact_count": 2,
+    "browser_step": "Real Chromium: where does the browser send the portal session cookie?",
+    "browser_step_fixed": "success",
+    "browser_step_prefixed": "skipped",
+    "ova_produced_in_this_run": false,
+    "skipped_jobs": {
+      "F-DISK": 113074717444,
+      "console": 113074717493,
+      "adopted_sidecar_scan": 113074717671,
+      "OVA": 113074717684,
+      "baked_sidecar_scan": 113074766475
+    }
+  },
+  "artifacts": [
+    {
+      "id": 11519275271,
+      "zip_bytes": 2297,
+      "zip_sha256": "8480b3b18e2b69f33cfe14e491b17ea6078b78c0939f0a80200a144e21d43086",
+      "product_sha": "cd8e44505bd329e5de675592ad4c23f92a534d55",
+      "job_id": 113074716497,
+      "job_result": "success",
+      "source_fixture_exit": 1,
+      "members": [
+        {
+          "name": "binding.txt",
+          "bytes": 240,
+          "sha256": "f38e19e3168fd40edf002b7b1c97de0bda997d686b29fbef20cc102fced3b160"
+        },
+        {
+          "name": "replay.log",
+          "bytes": 6500,
+          "sha256": "d6a625baa9662c07acba9de56b40079686cf2c8375859b666ea4f5591a6628c2"
+        }
+      ]
+    },
+    {
+      "id": 11518164020,
+      "zip_bytes": 3031,
+      "zip_sha256": "177d9e47eaff699f66591a462438a2525247008e1b5544c7c6d3435116f9ac2f",
+      "product_sha": "2a82320c746a6d146df19a6f5af9676d76b72286",
+      "job_id": 113074716203,
+      "job_result": "success",
+      "source_fixture_exit": 0,
+      "members": [
+        {
+          "name": "binding.txt",
+          "bytes": 240,
+          "sha256": "696d0fe83c87c47eebfc9f49905c528b88419a08f088faba1dd01a0d65306eea"
+        },
+        {
+          "name": "replay.log",
+          "bytes": 8208,
+          "sha256": "2c837c51bafefdbd561d863d57af8848fdd988105c47e6834c34cd0cf32dc9ad"
+        },
+        {
+          "name": "sso-cookie-scope.txt",
+          "bytes": 381,
+          "sha256": "af76d19b84a7a26f615d64c646d0148e74f8d7e3ff2ef8b1c2c347898dbc4476"
+        }
+      ]
+    }
+  ],
+  "source_bindings": {
+    "product": "2a82320c746a6d146df19a6f5af9676d76b72286",
+    "go_fixture": {
+      "path": "test/e2e/appliance/lab/go/lab_saml_cookie_purpose_test.go",
+      "sha256": "908264ffc1533d68f09bf9ef26d80e975b0d0b2fcf0b7093ef6a3a9cdc64db97",
+      "compiler": "go1.26.8 linux/amd64",
+      "command": "go test -count=1 -run '^TestLabSAMLCookiePurposeReplay$' -v ."
+    },
+    "browser_fixture": {
+      "path": "test/e2e/appliance/lab/browser/sso-cookie-scope.js",
+      "sha256": "17813d4350778a04af711f70ff1e2e73bbc3ea0630decd2a4875879a1ec61757",
+      "lab_commit": "fdae20b6924b261eba6f37d77c73ff1b0324dd03",
+      "playwright_pin": "1.62.1",
+      "engine": "Chromium",
+      "exact_browser_version_retained": false,
+      "command": "NODE_PATH=\"$d/node_modules\" node \"$GITHUB_WORKSPACE/lab/test/e2e/appliance/lab/browser/sso-cookie-scope.js\"",
+      "binding_limit": "Browser file hash independently derived from exact workflow checkout; artifact binding.txt records Go fixture hash, not browser hash. Browser fixture itself does not load the candidate application."
+    },
+    "workflow_sha256": "a900cbc8f84dfa6f53959d5e6952dd3cfd69a134e5129459fa50d825559b491e"
+  },
+  "source_fixture_results": {
+    "cd8": "expected FAIL: callback403/no cookie",
+    "fixed": "PASS: callback302/portal cookie; identical response replay401/no cookie;8 cookie-purpose controls",
+    "limitation": "Go HTTP client manually attaches signed cookie to proxy request; this does not model browser destination-cookie selection."
+  },
+  "browser_results": {
+    "rows": [
+      {
+        "kind": "http",
+        "destination": "ui.test",
+        "portal_cookie_presented": false
+      },
+      {
+        "kind": "http",
+        "destination": "dest.test",
+        "portal_cookie_presented": false
+      },
+      {
+        "kind": "http",
+        "destination": "dest.test",
+        "portal_cookie_presented": false
+      },
+      {
+        "kind": "http",
+        "destination": "ui.test",
+        "portal_cookie_presented": true
+      },
+      {
+        "kind": "CONNECT",
+        "destination": "dest.test:443",
+        "portal_cookie_presented": false
+      }
+    ],
+    "ui_host_positive_control": true,
+    "other_destination_request_count": 3,
+    "other_destination_cookie_presented": false,
+    "result": "PASS for browser cookie-scope demonstration; not PASS for Culvert SSO traffic",
+    "mechanism": "Real Chromium stores a synthetic host-only HttpOnly SameSite=Lax cookie from a Node recording forward proxy acting as ui.test, follows a redirect to dest.test, browses HTTP dest.test and returns to ui.test, then attempts HTTPS CONNECT. No cookie header is manually injected into Chromium requests."
+  },
+  "finding": {
+    "priority": "P1 functional release blocker for advertised browser SSO proxy traffic",
+    "status": "Source-backed, browser-cookie behavior reproduced in retained CI; complete application browser flow not independently run",
+    "trigger": "Browser completes SAML or OIDC at the UI origin, then accesses a different origin through the explicit proxy without separate Basic credentials.",
+    "cause": "setSessionCookie creates a host-only UI cookie. resolveRequestAuth reads the destination request Cookie for SSO identity; no cookie means it takes no-credential handling. Chromium does not attach the UI cookie to unrelated HTTP destinations or their CONNECT request.",
+    "impact": "SSO login cannot by itself establish identity for ordinary different-origin proxy traffic. Depending on configured policy the request is challenged/redirected or treated as unauthenticated, rather than using the signed-in user identity. This is a functional identity-transport gap, not evidence of a cookie leak or authorization bypass.",
+    "product_source": "2a82320c746a6d146df19a6f5af9676d76b72286",
+    "references": [
+      "session.go:133",
+      "session.go:147",
+      "session.go:161",
+      "session.go:162",
+      "proxy.go:301",
+      "proxy.go:355",
+      "proxy.go:478",
+      "proxy.go:497",
+      "ui_auth.go:974",
+      "ui_auth.go:1007",
+      "proxy.go:372"
+    ],
+    "applies_to": "Both SAML and OIDC issuance through shared setSessionCookie; only synthetic SAML handler flow was exercised in source fixture.",
+    "minimum_closure": "Select a supported browser-to-proxy authentication transport; exercise actual browser login through real Culvert, then HTTP and HTTPS/CONNECT to distinct destinations and verify the authenticated subject/groups and policy allow/deny behavior. Do not establish closure by manually adding Cookie headers or simply broadening cookie scope to destination origins.",
+    "alternate_flow_review": {
+      "callbacks": "ui_auth.go:974 and ui_auth.go:1007 call setSessionCookie, then redirect. Full success paths inspected: no post-login IP/session cache registration or Proxy-Authorization issuance.",
+      "resolution": "proxy.go:355 reads the signed Cookie, proxy.go:372 parses separate Proxy-Authorization Basic credentials; then no-credential resolution redirects/challenges/denies. Full resolveRequestAuth inspected; no IP-to-SSO-principal fallback.",
+      "lookup_search": "No ClientSessionGate, AuthenticateByIP, sessionByIP, byClientIP or ipToIdentity matches in exact product production Go source. Broader IP/session/principal search did not identify callback-to-proxy binding.",
+      "qualification": "This supports the source inference for browser-only login without separately configured proxy credentials; it is not a full live application-browser reproduction."
+    }
+  },
+  "limitations": [
+    "No Culvert process, genuine SAML assertion or actual IdP in the Chromium script; its cookie is a synthetic fixed value.",
+    "Recording proxy terminates CONNECT with502; no TLS tunnel or HTTPS destination content is loaded. It still records that actual CONNECT request lacks the UI cookie.",
+    "The synthetic cookie is plain HTTP without Secure; production Secure flag is dynamic. The fixture proves destination scoping, not TLS cookie behavior.",
+    "Browser script allows expected navigation failure and broadly ignores uncaught exceptions; recorded successful UI control and three destination requests support the bounded observation, not a general browser reliability claim.",
+    "No exact Chromium version retained in the tiny artifacts.",
+    "No new tests, OVA import, endpoint calls or VM actions performed in this audit."
+  ],
+  "remaining": [
+    "Browser-bound SAML/OIDC state (login-CSRF) remains open; this cookie-scope exercise does not address it.",
+    "Exact adopted-sidecar scan and replacement appliance qualification are outside this two-artifact run. Parent separately reported a replacement OVA artifact appearing; that builder is not audited here.",
+    "No conclusions transferred from the historical cd8 ESXi lifecycle to the new candidate."
+  ],
+  "next_esxi_target": "2a may be used as a clearly labeled diagnostic candidate; the callback fix and successful source fixture do not close browser SSO or justify production-ready signoff. Record IdP/browser identity transport as BLOCKED until the supported complete flow passes.",
+  "handling": {
+    "prior_report_modified": false,
+    "downloaded_code_executed": false,
+    "vm_calls": false,
+    "raw_logs_published": false,
+    "credentials_or_cookie_values_published": false
+  }
+}

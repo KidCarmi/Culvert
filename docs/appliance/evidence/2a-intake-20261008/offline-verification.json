@@ -1,0 +1,36 @@
+{
+  "schema": 1,
+  "result": "pass",
+  "scope": "offline archive integrity and declared hardware only",
+  "artifact_id": 11519101999,
+  "run_id": 37703962783,
+  "expected_source": "2a82320c746a6d146df19a6f5af9676d76b72286",
+  "zip_sha256": "23e79e4777a1b26275017d1dad32eb6e03aad0500d40ff085100f3bc9ba3463c",
+  "ova_sha256": "0f44483d3fc9a3c7017d7324cc21e36dd770ddec57699db3c84f8dd16fb01569",
+  "ova_bytes": 1313740800,
+  "artifact": {
+    "ova_sha256": "0f44483d3fc9a3c7017d7324cc21e36dd770ddec57699db3c84f8dd16fb01569",
+    "disk_bytes": 42949672960,
+    "cpus": 2,
+    "memory_mb": 4096,
+    "manifest": {
+      "culvert-appliance-1.0.260-candidate.g2a82320c746a-ubuntu-24.04.ovf": "17ae021f25a7bcc0b7abb8c71942b46d85c3872a8f252aa7fdb63e97183ab0f9",
+      "culvert-appliance-1.0.260-candidate.g2a82320c746a-ubuntu-24.04-disk1.vmdk": "dd7b50aa0c264a849f84a5fc3f6edc45cc9a96c6bade324d832ebe9187f19820"
+    },
+    "hardware": "vmx-13",
+    "networks": [
+      "VM Network"
+    ]
+  },
+  "helper_sha256": "0ea09d5f0e1e643035d9fef20d12b0acb01e8de04cdd217c7bffc677cf32d1dc",
+  "producer_full_handoff_verified": false,
+  "qemu_qualification_verified": false,
+  "esxi_operations_performed": false,
+  "production_ready": false,
+  "open_items": [
+    "browser-bound SAML/OIDC state",
+    "browser proxy identity transport qualification",
+    "exact adopted-sidecar scan",
+    "supported historical-log recovery"
+  ]
+}
