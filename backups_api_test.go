@@ -222,7 +222,7 @@ func TestAPIBackupsCreate_NotConfigured(t *testing.T) {
 // TestAPIBackupsCreate_Success drives the full happy path: the agent sees a
 // generated, validator-shaped filename and no passphrase_ref for an
 // unencrypted request; the handler reports triggered:true with the op fields;
-// and a "backup.trigger" audit entry is recorded (content-matched per the
+// and a "backup.create" audit entry is recorded (content-matched per the
 // audit-ring-saturation note in CLAUDE.md, not a length delta).
 func TestAPIBackupsCreate_Success(t *testing.T) {
 	resetBackupsCache(t)
@@ -279,8 +279,8 @@ func TestAPIBackupsCreate_Success(t *testing.T) {
 	if gotReq.PassphraseRef != "" {
 		t.Fatalf("agent request PassphraseRef = %q, want empty for an unencrypted trigger", gotReq.PassphraseRef)
 	}
-	if !hasMatchingAuditEntry(auditGet(), "198.51.100.60", "backup.trigger", filename, baselineTS) {
-		t.Fatalf("no audit entry recorded with Actor=198.51.100.60 Action=backup.trigger Object=%q", filename)
+	if !hasMatchingAuditEntry(auditGet(), "198.51.100.60", "backup.create", filename, baselineTS) {
+		t.Fatalf("no audit entry recorded with Actor=198.51.100.60 Action=backup.create Object=%q", filename)
 	}
 	backupsCache.mu.Lock()
 	stillCached := backupsCache.payload != nil
