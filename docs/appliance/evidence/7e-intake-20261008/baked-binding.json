@@ -1,0 +1,34 @@
+{
+  "archive_sha256": "33da27e721a213907a8257ba975c949a6272747818dcc1a78a14c10d8ff44afe",
+  "expected_id": "sha256:1cf6b7e347c2b14b14cbcdf5d9e5de1cb8de8e3b97c44508874178315b563787",
+  "id_matched": "top",
+  "top": "sha256:1cf6b7e347c2b14b14cbcdf5d9e5de1cb8de8e3b97c44508874178315b563787",
+  "top_is_index": false,
+  "amd64_manifest": "sha256:1cf6b7e347c2b14b14cbcdf5d9e5de1cb8de8e3b97c44508874178315b563787",
+  "config": "sha256:875acc8472ba725aa58d3a7ea990fece7c5da0519f5a6200b7f976587fddd739",
+  "layers": [
+    "sha256:e2de96513ba9eb53b431787ec8a65cdde380ac4772a3e4c4b714dcfde2a102b5",
+    "sha256:f521e3871fc1cb59e4bb2884e80bdb0b4f3a6bef53d0e5ca5d3f3525243d615b",
+    "sha256:57ca85041bd5c3608be33ec530ba38c32ff5bb1dd4c658b7f4f6591558e9f229",
+    "sha256:4eb587af903b26f91ef6be5bc819807fe08aba90c0ecfc172957f7ce027c8a98",
+    "sha256:6175c2b81f58ea01e7ef07a5d7e4970fe16b9e9b29c30a5f76607d0d01db29c5",
+    "sha256:f8f651a6b68f6bb2f34fcb2b4970d373a4c57a634eb19c513c9d9e10ac1e21c9",
+    "sha256:01d1c784b59e05a411a9c7ae8416808c48d1b05871b324dd0a0771238d886eed",
+    "sha256:634d01c4f62bfbf3fe6e25598032f08e52b0120a3af4495f7ea7eb183ce62b83"
+  ],
+  "diff_ids": [
+    "sha256:74d97c428c51a828f9051a7a40a53ff1fc99e54fc30323ce36760701b0b7f711",
+    "sha256:b684354d8de0c2ede9b26654f75adb50e74bce0832ff4f31196892aa6a17ae34",
+    "sha256:0ab5cc12c0218764d90d5f96ca8bec5ca8b7b5bd39c1e294971f250a784ebd2d",
+    "sha256:bb33160ecb29edddeada1a089a42b5f8ceba7a941d24ac09ad1008c6e9ffe64d",
+    "sha256:24db1b20b4ffbb55933cccfdec1ab38ccfa50251b3e68480d483914e6d00be53",
+    "sha256:5e8fb9fa4fc2fa8544976a51fafdeaf66ef5dd497404ab33a9c931668c2ee316",
+    "sha256:25e844d80c0b96f4758f9afed4dfa3760f95c01669a41debe2df3d15f6038844",
+    "sha256:374b39e5249f39dda001817775ebfe27d6628b002efbd23ef2fa902bf22fe9fd"
+  ],
+  "repo_tags": [
+    "docker.io/culvert/clamav:1.4.6-culvert.3"
+  ],
+  "archive_layout": "oci",
+  "other_platform_entries": 0
+}

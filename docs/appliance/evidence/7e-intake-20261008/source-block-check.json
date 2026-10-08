@@ -1,0 +1,8 @@
+{
+  "source": "7e53720d06f525f4e5fdbfec42f52840d5b734e2",
+  "path": "appliance/build/build-ova.sh",
+  "extracted_block_sha256": "1f3d39adc77bb003e47d3e4efadb0cfd913d60a10abe24c376a55b06ed0789cc",
+  "block_exactly_present_once": true,
+  "independent_no_cache_builds": true,
+  "scope": "source extraction and recorded probe/build evidence, not complete OVA reproducibility"
+}

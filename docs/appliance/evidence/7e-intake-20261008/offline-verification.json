@@ -1,0 +1,41 @@
+{
+  "result": "pass",
+  "scope": "offline retained archive, hardware, producer provenance and recorded QEMU rows",
+  "source": "7e53720d06f525f4e5fdbfec42f52840d5b734e2",
+  "ova_sha256": "578ea6b83b450b91bccc10ac80058db42d157e2161a45aa23fc8a23a2def7c65",
+  "ova_bytes": 1308221440,
+  "zip_sha256": "2a7830e6fa8c7d868e2775e03eea53380060f02476cf9ca8b5a11fcd97a22e63",
+  "artifact_id": 11562703124,
+  "run_id": 37805385811,
+  "image_id": "sha256:2a355d7a8930b12581c0f42c273bc3357cbefa36d9382ab7071d2c187dda0554",
+  "image_tar_sha256": "1e29ed3117c382c3e5a19067e66d58ddfbafcf6e310cf24302251737fdd31c11",
+  "console_sha256": "8d30bbf5af9f43438129429ba77971eebb4e5f055c7a937f171da65547dbbe1d",
+  "archive": {
+    "ova_sha256": "578ea6b83b450b91bccc10ac80058db42d157e2161a45aa23fc8a23a2def7c65",
+    "disk_bytes": 42949672960,
+    "cpus": 2,
+    "memory_mb": 4096,
+    "manifest": {
+      "culvert-appliance-1.0.260-candidate.g7e53720d06f5-ubuntu-24.04.ovf": "2fd53fc2e4566c4b06c6d3fc8716d85f4ceb24d86ca03fb7ecff4c0568426455",
+      "culvert-appliance-1.0.260-candidate.g7e53720d06f5-ubuntu-24.04-disk1.vmdk": "8585a61647984f76682b756d8bd71733c728ebe85560b22bdcc267d7dd7011a8"
+    },
+    "hardware": "vmx-13",
+    "networks": [
+      "VM Network"
+    ]
+  },
+  "helper_sha256": "0ea09d5f0e1e643035d9fef20d12b0acb01e8de04cdd217c7bffc677cf32d1dc",
+  "qemu_counts": {
+    "info": 5,
+    "pass": 94,
+    "blocked": 1
+  },
+  "qemu_recovery_seconds": [
+    103.33533899999998,
+    103.10910399999989,
+    103.11288400000012
+  ],
+  "new_esxi_imported": false,
+  "new_esxi_booted": false,
+  "production_ready": false
+}

@@ -1,0 +1,12 @@
+block sha256 1f3d39adc77bb003e47d3e4efadb0cfd913d60a10abe24c376a55b06ed0789cc from build-ova.sh@7e53720d06f525f4e5fdbfec42f52840d5b734e2 (49 lines)
+run1 first=sha256:1cf6b7e347c2b14b14cbcdf5d9e5de1cb8de8e3b97c44508874178315b563787 rebuild=sha256:1cf6b7e347c2b14b14cbcdf5d9e5de1cb8de8e3b97c44508874178315b563787 loaded=sha256:1cf6b7e347c2b14b14cbcdf5d9e5de1cb8de8e3b97c44508874178315b563787
+run1 baked ae9c66c28ce7272ceeafc0e652ede4b704c3fa85ee89000ccc8267c2eae8d161  /home/runner/work/_temp/w1/clamav.tar.gz
+run1 closure OK
+run2 first=sha256:1cf6b7e347c2b14b14cbcdf5d9e5de1cb8de8e3b97c44508874178315b563787 rebuild=sha256:1cf6b7e347c2b14b14cbcdf5d9e5de1cb8de8e3b97c44508874178315b563787 loaded=sha256:1cf6b7e347c2b14b14cbcdf5d9e5de1cb8de8e3b97c44508874178315b563787
+run2 baked ae9c66c28ce7272ceeafc0e652ede4b704c3fa85ee89000ccc8267c2eae8d161  /home/runner/work/_temp/w2/clamav.tar.gz
+run2 closure OK
+nghttp2-libs-1.70.0-r0
+pcre2-10.49-r0
+zlib-1.3.2-r1
+package sets identical across runs (41)
+VERDICT reproducible across 2 invocations x 2 builds: sha256:1cf6b7e347c2b14b14cbcdf5d9e5de1cb8de8e3b97c44508874178315b563787
