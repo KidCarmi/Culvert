@@ -185,6 +185,12 @@ var uiRoutes = []uiRouteMetadata{
 		Methods: []uiRouteMethod{
 			{Method: "POST", MinRole: RoleAdmin, Mutating: true, AuditExpected: true},
 		}},
+	// POST (not GET) so the archive passphrase travels in the body. It changes
+	// no state; Mutating follows the POST convention the C1.5 gate pins.
+	{Path: "/api/logs/history/export", Handler: "apiLogsHistoryExport", Domain: "dashboard", Public: false,
+		Methods: []uiRouteMethod{
+			{Method: "POST", MinRole: RoleAdmin, Mutating: true, AuditExpected: true},
+		}},
 	{Path: "/api/top-hosts", Handler: "apiTopHosts", Domain: "dashboard", Public: false,
 		Methods: []uiRouteMethod{{Method: MethodAny, MinRole: RoleViewer}}},
 	{Path: "/api/audit", Handler: "apiAudit", Domain: "dashboard", Public: false,

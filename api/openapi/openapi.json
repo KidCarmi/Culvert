@@ -15300,6 +15300,88 @@
         "x-culvert-visibility": "admin-supported"
       }
     },
+    "/api/logs/history/export": {
+      "post": {
+        "description": "Streams every record of the stored request history, sealed in the CVRTST01 streaming envelope (PBKDF2-SHA256 + chunked AES-256-GCM) under the supplied archive passphrase — a key the operator holds, independent of this node's history-store key. Import it offline with `culvert --history-import <file> --confirm` (CULVERT_HISTORY_PASSPHRASE). A failure after streaming starts leaves an archive with no final chunk, which never authenticates, and aborts the response. Stored entries larger than 4 MiB are skipped and counted (archive trailer and audit detail). One export at a time. The admin UI posts a form so the browser streams the download to disk.",
+        "operationId": "exportRequestHistory",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "archivePhrase": {
+                    "description": "Passphrase the archive is sealed under. Keep it with the archive's custody record; it is not stored.",
+                    "minLength": 12,
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "archivePhrase"
+                ],
+                "type": "object"
+              }
+            },
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "properties": {
+                  "archivePhrase": {
+                    "minLength": 12,
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "archivePhrase"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/octet-stream": {
+                "schema": {
+                  "format": "binary",
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The encrypted archive."
+          },
+          "400": {
+            "$ref": "#/components/responses/PlainBadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          },
+          "409": {
+            "$ref": "#/components/responses/PlainConflict"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Export request history (encrypted archive)",
+        "tags": [
+          "dashboard"
+        ],
+        "x-culvert-audit-event": "logstore.export",
+        "x-culvert-danger-level": "medium",
+        "x-culvert-idempotency": "idempotent",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "admin",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
     "/api/logs/purge": {
       "post": {
         "description": "Purge logs.",

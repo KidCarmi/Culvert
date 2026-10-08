@@ -23,6 +23,86 @@ size. Losing it does not affect traffic, policy enforcement, the request log, or
 the audit log. That is why every failure below **degrades** rather than stopping
 the gateway.
 
+The history store is **not part of the configuration backup** (it is
+retention data, and its key — passphrase + `<dir>.salt` — is node-local). To
+keep the history across a full restore, a replacement appliance, or a change of
+log passphrase, export it — see the next section.
+
+---
+
+## Export, import, and changing the log passphrase
+
+The history moves between stores in an **encrypted archive under a passphrase
+you choose** — independent of any appliance's log passphrase. Import writes the
+records into the target store under **that** store's current key, so the
+records outlive the key they were written under.
+
+**Export (online, admin):** Logs → Retention → **Export history (encrypted)**,
+or the API:
+
+```bash
+curl -fsS -b cookies -H "Origin: https://<appliance>:9090" -H 'Content-Type: application/json' \
+  -d '{"archivePhrase":"<12+ characters>"}' \
+  https://<appliance>:9090/api/logs/history/export -o history.cvst
+```
+
+The archive (`CVRTST01`: PBKDF2-SHA256, 600 000 iterations, chunked
+AES-256-GCM) authenticates every chunk and its end, and carries a trailer with
+the record count and a hash of every record. An export that fails midway aborts
+the download and leaves a file that never imports. The export is audited
+(`logstore.export`, with the record count). The GUI asks for the passphrase
+twice. Store it with the archive's custody record — it is not stored anywhere,
+and without it the archive cannot be read.
+
+A stored entry larger than 4 MiB (possible only for an inspected request with a
+very long URI under a "log full URI" rule) is left out of the archive and
+**counted** — in the audit detail and the archive trailer, shown at import as
+`N skipped at export` — so one oversized record can never make the whole
+archive unimportable.
+
+**Import (offline, like a restore commit — the running proxy holds the store's
+lock):**
+
+```bash
+docker compose stop proxy
+docker compose --profile cli run --rm -v "$PWD/history.cvst:/backup/history.cvst:ro" \
+  -e CULVERT_HISTORY_PASSPHRASE cli --history-import /backup/history.cvst            # dry-run: verify only
+docker compose --profile cli run --rm -v "$PWD/history.cvst:/backup/history.cvst:ro" \
+  -e CULVERT_HISTORY_PASSPHRASE cli --history-import /backup/history.cvst --confirm  # write
+docker compose up -d
+```
+
+- **Nothing is written until the whole archive verified**: every chunk
+  authenticated, keys in order, trailer count and hash matched. An incomplete
+  or tampered archive writes nothing.
+- `--confirm` takes the same data-directory lock the running proxy holds, so it
+  refuses while the proxy is up (`data directory is locked by another Culvert
+  process`) — whether or not history saving is on. The dry-run is allowed at
+  any time.
+- The target store's key is the one the proxy uses (`CULVERT_LOG_PASSPHRASE`,
+  else `CULVERT_CA_PASSPHRASE`, forwarded to the `cli` service from `.env`). An
+  import into an unencrypted store is refused; a wrong passphrase is reported
+  as such.
+- The target store and retention are resolved as the proxy resolves them and
+  printed by both runs (`target: store …, keep … days, max … GB [retention
+  from …]`). If your deployment mounts a `config.yaml`, pass the same file with
+  `--config` (or name the store with `--history-store`).
+- Records keep their original timestamps; the target's **Keep for (days)** is
+  applied from each record's own time, and **Max size (GB)** is a hard stop.
+- Importing the same archive again adds nothing (`duplicate=N`): an
+  interrupted import is completed by running it again. A record whose
+  timestamp collides with a different record already in the store is written
+  beside it (`rekeyed=N`), never over it.
+
+**Recovery when the source volumes are gone:** export regularly (the archive is
+the only copy of the history outside the appliance), restore the configuration
+backup on the new appliance, then import the archive.
+
+**Changing the log passphrase (re-keying the history):** the store cannot be
+re-keyed in place, so: export → **Purge all** → stop the stack → change
+`CULVERT_LOG_PASSPHRASE` in `/srv/culvert/.env` → `--history-import --confirm`
+→ start the stack. Keep the old `.env` until the import is verified.
+
 ---
 
 ## What happens when the store is damaged

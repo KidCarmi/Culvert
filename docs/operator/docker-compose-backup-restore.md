@@ -113,6 +113,12 @@ What this does:
 `/data`; mid-rotation log files are excluded (Tier 3) and the manifest
 captures point-in-time content.
 
+**Saved request history is NOT in this archive** (`logstore/` is retention
+data under a node-local key). Keep it with its own encrypted export — Logs →
+Retention → Export history, or `POST /api/logs/history/export` — and bring it
+back after a restore with `--history-import` (§10;
+`docs/operator/request-history-recovery.md`).
+
 ### Common variations
 
 | Goal | Flag |
@@ -549,6 +555,8 @@ So after restoring onto a host that does not have the original
 | `--list-restore-leftovers` | **Runtime** | Read-only Lstat walk of `/data`'s siblings. |
 | `--cleanup-restore-leftovers` (dry-run) | **Runtime** | Read-only. |
 | `--cleanup-restore-leftovers --confirm` | **Runtime** | Operates on siblings of `/data` only. The proxy holds no descriptors there. |
+| `--history-import <file>` (dry-run) | **Runtime** | Decrypts and verifies the archive only; the store is not opened. |
+| `--history-import <file> --confirm` | **Offline (mandatory)** | Writes the history store, whose lock the running proxy holds while history saving is on. |
 
 ---
 

@@ -10979,6 +10979,62 @@ paths:
               schema: { $ref: '#/components/schemas/UpstreamRefusal' }
         '400': { $ref: '#/components/responses/PlainBadRequest' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
+  /api/logs/history/export:
+    post:
+      operationId: exportRequestHistory
+      tags: [dashboard]
+      summary: Export request history (encrypted archive)
+      description: >-
+        Streams every record of the stored request history, sealed in the
+        CVRTST01 streaming envelope (PBKDF2-SHA256 + chunked AES-256-GCM) under
+        the supplied archive passphrase — a key the operator holds, independent
+        of this node's history-store key. Import it offline with
+        `culvert --history-import <file> --confirm` (CULVERT_HISTORY_PASSPHRASE).
+        A failure after streaming starts leaves an archive with no final chunk,
+        which never authenticates, and aborts the response. Stored entries
+        larger than 4 MiB are skipped and counted (archive trailer and audit
+        detail). One export at a time. The admin UI posts a form so the browser
+        streams the download to disk.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: admin
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: medium
+      x-culvert-audit-event: logstore.export
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [archivePhrase]
+              properties:
+                archivePhrase:
+                  type: string
+                  minLength: 12
+                  description: Passphrase the archive is sealed under. Keep it with the archive's custody record; it is not stored.
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              required: [archivePhrase]
+              properties:
+                archivePhrase:
+                  type: string
+                  minLength: 12
+      responses:
+        '200':
+          description: The encrypted archive.
+          content:
+            application/octet-stream:
+              schema: { type: string, format: binary }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+        '409': { $ref: '#/components/responses/PlainConflict' }
   /api/logs/purge:
     post:
       operationId: purgeLogs

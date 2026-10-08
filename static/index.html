@@ -1281,7 +1281,9 @@ table.mcpx-cat-tbl td{padding:6px 10px;border-bottom:1px solid var(--border)}
               </div>
               <button class="btn" data-click="saveRetention">Save</button>
               <button class="btn ghost" data-click="purgeHistory" style="color:var(--red)">Purge all</button>
+              <button class="btn ghost" data-click="exportHistory" title="Encrypted archive of all saved history, under a passphrase you choose">Export history (encrypted)</button>
             </div>
+            <div style="font-size:.72rem;color:var(--muted);margin-top:6px">Saved history is not part of the configuration backup. Export it to keep it across a restore, a new appliance or a change of log passphrase; import with <code>culvert --history-import</code> (proxy stopped).</div>
             <div id="ret-estimate" style="font-size:.78rem;color:var(--muted);margin-top:12px"></div>
             <div id="ret-encryption" style="font-size:.8rem;margin-top:8px"></div>
             <div id="log-retention-usage" style="font-size:.82rem;color:var(--muted);margin-top:8px">Loading…</div>
@@ -5603,6 +5605,7 @@ document.addEventListener('click', e => {
     case 'saveRetention':     saveRetention(); break;
     case 'saveDiskThreshold': saveDiskThreshold(); break;
     case 'purgeHistory':      purgeHistory(); break;
+    case 'exportHistory':     exportHistory(); break;
     case 'setLogTab':         setLogTab(arg || ''); break;
 
     // ── Blocklist ──
@@ -9011,6 +9014,47 @@ async function purgeHistory() {
     loadRetention();
     if (logSource === 'store') fetchLogs();
   } catch(e) { toast('Error: ' + e.message, 'error'); }
+}
+
+// exportHistory downloads the saved history as an encrypted archive. The
+// passphrase is typed twice into a password field (one typo would make the
+// archive permanently unimportable), sent in the POST body only, and never
+// stored. A hidden form post lets the browser stream a multi-gigabyte archive
+// to disk; a download never fires the iframe's load event, so a load means the
+// server answered with an error page, which is shown.
+async function askHistoryPhrase(title, msg) {
+  const input = document.getElementById('confirm-dialog-input');
+  const pending = promptAction({title, msg, label: 'Archive passphrase', okLabel: 'Continue'});
+  input.type = 'password';
+  try { return await pending; } finally { input.type = 'text'; input.value = ''; }
+}
+async function exportHistory() {
+  const phrase = await askHistoryPhrase('Export saved history',
+    'Choose an archive passphrase (12+ characters). Keep it with the archive: it is not stored anywhere and the archive cannot be imported without it.');
+  if (!phrase) return;
+  if (phrase.length < 12) { toast('Passphrase must be at least 12 characters', 'error'); return; }
+  const again = await askHistoryPhrase('Confirm passphrase', 'Type the archive passphrase again.');
+  if (again !== phrase) { toast('The passphrases do not match — nothing was exported', 'error'); return; }
+  let frame = document.getElementById('history-export-frame');
+  if (!frame) {
+    frame = document.createElement('iframe');
+    frame.id = 'history-export-frame'; frame.name = 'history-export-frame'; frame.style.display = 'none';
+    frame.addEventListener('load', () => {
+      let msg = '';
+      try { msg = (frame.contentDocument && frame.contentDocument.body && frame.contentDocument.body.textContent || '').trim(); } catch (e) { msg = ''; }
+      if (msg) toast('Export failed: ' + msg, 'error');
+    });
+    document.body.appendChild(frame);
+  }
+  const form = document.createElement('form');
+  form.method = 'POST'; form.action = BASE + '/api/logs/history/export'; form.target = frame.name; form.style.display = 'none';
+  const field = document.createElement('input');
+  field.type = 'hidden'; field.name = 'archivePhrase'; field.value = phrase;
+  form.appendChild(field);
+  document.body.appendChild(form);
+  form.submit();
+  form.remove();
+  toast('Export started — your browser will save the encrypted archive', 'success');
 }
 
 function renderLogs() {

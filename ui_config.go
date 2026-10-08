@@ -2406,6 +2406,7 @@ func registerDashboardRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/logs", apiLogs)
 	mux.HandleFunc("/api/logs/retention", apiLogsRetention)
 	mux.HandleFunc("/api/logs/purge", apiLogsPurge)
+	mux.HandleFunc("/api/logs/history/export", apiLogsHistoryExport)
 	mux.HandleFunc("/api/top-hosts", apiTopHosts)
 	mux.HandleFunc("/api/audit", apiAudit)
 	mux.HandleFunc("/api/events", apiEvents) // SSE live dashboard

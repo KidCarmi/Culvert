@@ -279,6 +279,9 @@ services:
       # restore validation — dry-run and commit alike — hard-fails without
       # it (docs/operator/docker-compose-backup-restore.md §4-6).
       - CULVERT_CA_PASSPHRASE=${CULVERT_CA_PASSPHRASE:-}
+      # --history-import opens the request-history store under the SAME key
+      # the proxy uses (CULVERT_LOG_PASSPHRASE, else the CA passphrase).
+      - CULVERT_LOG_PASSPHRASE=${CULVERT_LOG_PASSPHRASE:-}
     volumes:
       - proxy-data:/data
       - culvert-backups:/backup

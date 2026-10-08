@@ -120,6 +120,8 @@ type startupState struct {
 	backupOut                 *string
 	backupEncrypt             *bool
 	restoreIn                 *string
+	historyImportIn           *string
+	historyStoreDir           *string
 	restoreMode               *string
 	restoreConfirm            *confirmFlag
 	recoverRestore            *bool
@@ -360,6 +362,10 @@ func parseFlags(s *startupState) {
 	s.backupOut = flag.String("backup", "", "Pack /data into a tar.gz at the given path and exit (D1.3a)")
 	s.backupEncrypt = flag.Bool("encrypt", false, "Encrypt the --backup tarball with AES-256-GCM (D1.4); requires "+backupPassphraseEnv+" env var. Lose the passphrase, lose the backup.")
 	s.restoreIn = flag.String("restore", "", "Validate a backup tarball and print restore plan (dry-run; D1.3b.1)")
+	// Offline by design, like a restore commit: a running proxy holds the
+	// history store's lock. The export half is the admin API/GUI.
+	s.historyImportIn = flag.String("history-import", "", "Verify a request-history archive (from POST /api/logs/history/export) and, with --confirm, import it into the history store; archive passphrase from CULVERT_HISTORY_PASSPHRASE, store key from CULVERT_LOG_PASSPHRASE (or CULVERT_CA_PASSPHRASE). Stop the proxy first.")
+	s.historyStoreDir = flag.String("history-store", "", "History store directory for --history-import (default <data dir>/logstore)")
 	s.restoreMode = flag.String("mode", "", "Restore mode: full | trust-root-only | state-only (D1.3b.2a; default: full)")
 	s.restoreConfirm = &confirmFlag{}
 	flag.Var(s.restoreConfirm, "confirm", "Commit the restore destructively (D1.3b.2b) or the leftover cleanup; for --prepare-downgrade, --confirm <word> carries the Tier-3 confirmation word printed by the dry-run. Without --confirm every one of these is a dry-run.")
@@ -408,6 +414,19 @@ func handleOneShotCommands(s *startupState) {
 	if *s.backupOut != "" {
 		if err := runBackupCommand(s); err != nil {
 			fmt.Fprintf(os.Stderr, "Backup error: %v\n", err)
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
+	// ── One-shot: request-history import — dry-run unless --confirm ──────
+	if *s.historyImportIn != "" {
+		target, err := resolveHistoryImportTarget(dataDir, *s.configPath, *s.historyStoreDir,
+			os.Getenv(logStorePassphraseEnv), os.Getenv(caPassphraseEnv))
+		if err == nil {
+			err = runHistoryImportCommand(*s.historyImportIn, target, dataDir, os.Getenv(historyPassphraseEnv), s.restoreConfirm.Bool(), os.Stdout)
+		}
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "History import error: %v\n", err)
 			os.Exit(1)
 		}
 		os.Exit(0)
