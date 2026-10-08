@@ -701,6 +701,14 @@ jobs:
           - label: fix-2a82320c
             candidate_sha: 2a82320c746a6d146df19a6f5af9676d76b72286
             expect: pass
+          # ba93fdcb: browser-bound login (29dae9f2) — the two-step SAML
+          # completion with the binding cookie, plus the login-CSRF row
+          # (completion without the starting browser's binding → 403, no
+          # session) — and IP-bound sign-in (off by default; this replay uses
+          # /auth/select directly and is unaffected by it).
+          - label: bound-ba93fdcb
+            candidate_sha: ba93fdcbd2c3e1c54e7b8cfaa3609995ab2b394a
+            expect: pass
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
