@@ -63,7 +63,16 @@ archive unimportable.
 **Import (offline, like a restore commit — the running proxy holds the store's
 lock):**
 
+The `cli` container runs as the image's unprivileged `proxy` user, so the
+archive file must be readable by it. A file saved `0600` by root (for example
+`curl -o` under `umask 077`) fails with `open /backup/history.cvst: permission
+denied` and imports nothing. Make it readable first: `chmod 0644 history.cvst`.
+The archive is encrypted under the archive passphrase, so the passphrase, not
+the file mode, is what protects it. Delete the file once the import has
+succeeded.
+
 ```bash
+chmod 0644 history.cvst
 docker compose stop proxy
 docker compose --profile cli run --rm -v "$PWD/history.cvst:/backup/history.cvst:ro" \
   -e CULVERT_HISTORY_PASSPHRASE cli --history-import /backup/history.cvst            # dry-run: verify only
