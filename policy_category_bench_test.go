@@ -116,3 +116,43 @@ func BenchmarkPolicyEvaluate_CategoryGroupRulesParallel(b *testing.B) {
 		}
 	})
 }
+
+// BenchmarkPolicyEvaluate_CategoryRulesParallel is the END-TO-END instrument
+// for the per-RULE half of category resolution under concurrency, i.e. the
+// path urlcat's forward read view (Store.catIndex) serves.
+//
+// It is deliberately distinct from BenchmarkPolicyEvaluate_CategoryRules
+// above, which is SERIAL — its -cpu variants only change how many Ps the
+// runtime may use, not how many goroutines evaluate, so it cannot observe
+// lock contention at all and is flat across -cpu by construction. A per-rule
+// read lock is a throughput CEILING rather than a constant cost, so measuring
+// it needs several goroutines evaluating at once.
+//
+// It is also deliberately distinct from
+// BenchmarkPolicyEvaluate_CategoryGroupRulesParallel, which exercises
+// DestCategoryGroup rules: those additionally expand the group through
+// internal/catgroup, whose own per-rule RLock is the dominant remaining
+// ceiling on THAT path (measured 1657 ns at GOMAXPROCS=1 against 7620 ns at
+// four cores — 0.22x scaling — unchanged by the urlcat view, because the
+// bottleneck simply moved to the next contended component, the
+// hostCounter lesson). Keeping the two apart is what makes either number
+// attributable.
+//
+//	go test -run '^$' -bench 'BenchmarkPolicyEvaluate_CategoryRulesParallel' -benchmem -cpu 1,2,4 .
+func BenchmarkPolicyEvaluate_CategoryRulesParallel(b *testing.B) {
+	seedCategoryTaxonomy(b, 12, 40)
+	for _, n := range []int{10, 50} {
+		ps := buildCategoryPolicyStore(n)
+		b.Run(fmt.Sprintf("rules=%d", n), func(b *testing.B) {
+			b.ReportAllocs()
+			b.ResetTimer()
+			b.RunParallel(func(pb *testing.PB) {
+				for pb.Next() {
+					if m := ps.Evaluate("203.0.113.7", "", "unauth", "uncategorized.example.net", nil); m != nil {
+						b.Fatalf("expected no match, got %q", m.Rule.Name)
+					}
+				}
+			})
+		})
+	}
+}
