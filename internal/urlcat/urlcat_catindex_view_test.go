@@ -385,60 +385,76 @@ func TestBenchGate_AddHostStaysIncrementalUnderPublication(t *testing.T) {
 //
 // It carries its own not-vacuous check: if the selector stops matching the
 // writers it is meant to find, the gate fails rather than passing forever.
+// catIndexWriterPublishers are the two ways a writer may satisfy the republish
+// contract: the O(categories) key-set publish, or the O(1) single-category slot
+// swap (which exists so the incremental fold can stay incremental — see
+// hostSetSlot).
+var catIndexWriterPublishers = map[string]bool{
+	"publishCatIndexLocked": true,
+	"swapHostSetLocked":     true,
+}
+
+// writesForwardIndex reports whether fn assigns to s.index / s.adminIndex —
+// either wholesale (s.index = x) or per key (s.index[k] = x).
+//
+// Extracted to package scope rather than left as a closure inside the wall: as
+// closures the two predicates pushed that test's cognitive complexity to 39
+// against the repo's bound of 30, and a wall nobody can read is a wall nobody
+// maintains.
+func writesForwardIndex(fn *ast.FuncDecl) bool {
+	found := false
+	ast.Inspect(fn, func(n ast.Node) bool {
+		as, ok := n.(*ast.AssignStmt)
+		if !ok {
+			return true
+		}
+		for _, lhs := range as.Lhs {
+			if forwardIndexSelector(lhs) {
+				found = true
+			}
+		}
+		return true
+	})
+	return found
+}
+
+// forwardIndexSelector reports whether an assignment target names s.index or
+// s.adminIndex, unwrapping one level of index expression so a per-key write is
+// recognised as well as a wholesale one.
+func forwardIndexSelector(lhs ast.Expr) bool {
+	target := lhs
+	if ix, isIndex := lhs.(*ast.IndexExpr); isIndex {
+		target = ix.X
+	}
+	sel, isSel := target.(*ast.SelectorExpr)
+	if !isSel {
+		return false
+	}
+	return sel.Sel.Name == "index" || sel.Sel.Name == "adminIndex"
+}
+
+// callsCatIndexPublisher reports whether fn publishes the forward read view by
+// either accepted mechanism.
+func callsCatIndexPublisher(fn *ast.FuncDecl) bool {
+	found := false
+	ast.Inspect(fn, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		if sel, isSel := call.Fun.(*ast.SelectorExpr); isSel && catIndexWriterPublishers[sel.Sel.Name] {
+			found = true
+		}
+		return true
+	})
+	return found
+}
+
 func TestCatIndexView_EveryWriterRepublishes(t *testing.T) {
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(fset, "urlcat.go", nil, 0)
 	if err != nil {
 		t.Fatalf("parse urlcat.go: %v", err)
-	}
-
-	// writesIndex reports whether fn assigns to s.index / s.adminIndex —
-	// either wholesale (s.index = x) or per key (s.index[k] = x).
-	writesIndex := func(fn *ast.FuncDecl) bool {
-		found := false
-		ast.Inspect(fn, func(n ast.Node) bool {
-			as, ok := n.(*ast.AssignStmt)
-			if !ok {
-				return true
-			}
-			for _, lhs := range as.Lhs {
-				target := lhs
-				if ix, isIndex := lhs.(*ast.IndexExpr); isIndex {
-					target = ix.X
-				}
-				sel, isSel := target.(*ast.SelectorExpr)
-				if !isSel {
-					continue
-				}
-				if sel.Sel.Name == "index" || sel.Sel.Name == "adminIndex" {
-					found = true
-				}
-			}
-			return true
-		})
-		return found
-	}
-
-	// Either publish mechanism satisfies the contract: the O(categories)
-	// key-set publish, or the O(1) single-category slot swap (which exists so
-	// the incremental fold can stay incremental — see hostSetSlot).
-	publishers := map[string]bool{
-		"publishCatIndexLocked": true,
-		"swapHostSetLocked":     true,
-	}
-	callsPublish := func(fn *ast.FuncDecl) bool {
-		found := false
-		ast.Inspect(fn, func(n ast.Node) bool {
-			call, ok := n.(*ast.CallExpr)
-			if !ok {
-				return true
-			}
-			if sel, isSel := call.Fun.(*ast.SelectorExpr); isSel && publishers[sel.Sel.Name] {
-				found = true
-			}
-			return true
-		})
-		return found
 	}
 
 	var writers []string
@@ -447,16 +463,16 @@ func TestCatIndexView_EveryWriterRepublishes(t *testing.T) {
 		if !ok || fn.Body == nil {
 			continue
 		}
-		// The publisher itself builds the view; it does not write the
+		// The publishers themselves build the view; they do not write the
 		// authoritative maps and must not recurse.
-		if fn.Name.Name == "publishCatIndexLocked" || fn.Name.Name == "swapHostSetLocked" {
+		if catIndexWriterPublishers[fn.Name.Name] {
 			continue
 		}
-		if !writesIndex(fn) {
+		if !writesForwardIndex(fn) {
 			continue
 		}
 		writers = append(writers, fn.Name.Name)
-		if !callsPublish(fn) {
+		if !callsCatIndexPublisher(fn) {
 			t.Errorf("REGRESSION: %s assigns to s.index/s.adminIndex but never publishes "+
 				"(publishCatIndexLocked or swapHostSetLocked).\n"+
 				"MatchesHost/MatchesHostAdmin read those maps through the published view with NO lock, so an "+

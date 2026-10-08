@@ -1332,41 +1332,70 @@ func lowerASCIIInto(dst []byte, s string) bool {
 	return true
 }
 
+// forwardHostSet / adminForwardHostSet resolve a category's host set from the
+// published forward view with NO lock, falling back to the mu-guarded
+// authoritative map only for a Store that has never published (the zero value;
+// New always publishes). They are the per-index halves of the lock-free probe
+// described on Store.catIndex.
+//
+// THE FALLBACK IS NOT DEAD CODE AND MUST NOT BECOME A nil RETURN: a membership
+// answer may never be invented from a missing view, in EITHER direction, since
+// a false suppresses a category deny rule and lets the traffic through. It is
+// the one branch that still takes s.mu, and only a Store that bypassed New can
+// reach it.
+//
+// PASSING THE KEY SCRATCH DOWN ONE CALL IS DELIBERATE AND VERIFIED. The probe
+// is spelled idx[string(inlineKey)] on an array the CALLER owns, and handing a
+// []byte to a callee that only uses it as a map index keeps that array on the
+// stack — exactly as categoryKey's own buf parameter already does. It is
+// checked rather than assumed: -gcflags=-m reports "string(inlineKey) does not
+// escape" at every probe site and never moves keyBuf to the heap, and
+// TestBenchGate_MatchesHostIsStillAllocationFree pins 0 allocs/op across the
+// view path, the admin path and this fallback. Do not store or return the
+// slice, or every category-scoped rule allocates on every proxied request.
+//
+// Two near-identical methods rather than one with an index selector: the whole
+// content of the difference is WHICH index is consulted, and a bool argument at
+// the call site would hide the one thing a reader needs to see. The grammar
+// they feed is shared (hostSetMatches), so the part that could drift is not
+// duplicated.
+func (s *Store) forwardHostSet(inlineKey []byte, strKey string, inlineOK bool) map[string]bool {
+	if v := s.catIndex.Load(); v != nil {
+		if inlineOK {
+			return v.index[string(inlineKey)].load()
+		}
+		return v.index[strKey].load()
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if inlineOK {
+		return s.index[string(inlineKey)]
+	}
+	return s.index[strKey]
+}
+
+func (s *Store) adminForwardHostSet(inlineKey []byte, strKey string, inlineOK bool) map[string]bool {
+	if v := s.catIndex.Load(); v != nil {
+		if inlineOK {
+			return v.adminIndex[string(inlineKey)].load()
+		}
+		return v.adminIndex[strKey].load()
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if inlineOK {
+		return s.adminIndex[string(inlineKey)]
+	}
+	return s.adminIndex[strKey]
+}
+
 // MatchesHost checks whether host belongs to the named URL category.
 // Uses the pre-built index for O(labels) lookup instead of O(N×M) iteration.
 func (s *Store) MatchesHost(cat Category, host string) bool {
 	host = hostutil.NormalizeHost(host)
 	var keyBuf [maxInlineCategoryKey]byte
 	inlineKey, strKey, inlineOK := categoryKey(keyBuf[:], string(cat))
-
-	// Lock-free: the published view is immutable and its inner sets are never
-	// mutated after publication (see Store.catIndex). The map probe stays
-	// INLINE here rather than moving behind a shared helper — handing the key
-	// scratch to another function risks keyBuf escaping to the heap, which
-	// would reintroduce the per-rule allocation categoryKey exists to remove.
-	var hostSet map[string]bool
-	if v := s.catIndex.Load(); v != nil {
-		if inlineOK {
-			hostSet = v.index[string(inlineKey)].load()
-		} else {
-			hostSet = v.index[strKey].load()
-		}
-	} else {
-		// Unpublished Store (the zero value; New always publishes). Fall back
-		// to the authoritative map under the lock rather than reporting "no
-		// such category" — a membership answer must never be invented from a
-		// missing view, in EITHER direction: false suppresses a category deny
-		// rule and lets the traffic through.
-		s.mu.RLock()
-		if inlineOK {
-			hostSet = s.index[string(inlineKey)]
-		} else {
-			hostSet = s.index[strKey]
-		}
-		s.mu.RUnlock()
-	}
-
-	return hostSetMatches(hostSet, host)
+	return hostSetMatches(s.forwardHostSet(inlineKey, strKey, inlineOK), host)
 }
 
 // MatchesHostAdmin is MatchesHost restricted to admin-created (BuiltIn=false)
@@ -1379,27 +1408,7 @@ func (s *Store) MatchesHostAdmin(cat Category, host string) bool {
 	host = hostutil.NormalizeHost(host)
 	var keyBuf [maxInlineCategoryKey]byte
 	inlineKey, strKey, inlineOK := categoryKey(keyBuf[:], string(cat))
-
-	// Lock-free, with the same inline-probe and unpublished-fallback reasoning
-	// as MatchesHost.
-	var hostSet map[string]bool
-	if v := s.catIndex.Load(); v != nil {
-		if inlineOK {
-			hostSet = v.adminIndex[string(inlineKey)].load()
-		} else {
-			hostSet = v.adminIndex[strKey].load()
-		}
-	} else {
-		s.mu.RLock()
-		if inlineOK {
-			hostSet = s.adminIndex[string(inlineKey)]
-		} else {
-			hostSet = s.adminIndex[strKey]
-		}
-		s.mu.RUnlock()
-	}
-
-	return hostSetMatches(hostSet, host)
+	return hostSetMatches(s.adminForwardHostSet(inlineKey, strKey, inlineOK), host)
 }
 
 // LookupHostAdmin is LookupHost restricted to admin-created (BuiltIn=false)
