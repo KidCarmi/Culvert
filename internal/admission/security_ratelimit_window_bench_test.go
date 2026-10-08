@@ -8,7 +8,7 @@ import (
 )
 
 // security_ratelimit_window_bench_test.go — the cost measurement behind the
-// ring-buffer sliding window (see clientBucket in security.go).
+// ring-buffer sliding window (see clientBucket in engine.go).
 //
 // RateLimiter.Allow runs on EVERY proxied request (handleRequest, socks5.go),
 // and its window maintenance used to be a filter-and-copy over the whole
