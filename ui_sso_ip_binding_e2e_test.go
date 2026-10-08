@@ -334,13 +334,19 @@ func TestUIE2E_SSOIPBinding_BrowserThroughCulvert(t *testing.T) {
 	rt, _ := resolveSSOSurrogateSettings(ssoSurrogateSettings{Enabled: false})
 	applySSOSurrogate(rt)
 	before = originHits.Load()
-	// Chromium answers a 407 Basic challenge it has no credentials for with
-	// net::ERR_INVALID_AUTH_CREDENTIALS rather than rendering the body: that
-	// failure IS the browser-side evidence of a challenge instead of a
-	// sign-in redirect.
-	_, gerr := page.Goto(origin)
-	if gerr == nil || !strings.Contains(gerr.Error(), "ERR_INVALID_AUTH_CREDENTIALS") || strings.HasPrefix(page.URL(), idpIssuer) || originHits.Load() != before {
-		t.Fatalf("5: off: goto err %v at %s, origin hits %d→%d", gerr, page.URL(), before, originHits.Load())
+	// A 407 Basic challenge the browser has no credentials for is surfaced
+	// either as net::ERR_INVALID_AUTH_CREDENTIALS (some Chromium builds) or
+	// as the rendered 407 page (others, e.g. the CI driver's). Either is the
+	// browser-side evidence of a challenge instead of a sign-in redirect.
+	presp, gerr := page.Goto(origin)
+	challenged := (gerr != nil && strings.Contains(gerr.Error(), "ERR_INVALID_AUTH_CREDENTIALS")) ||
+		(gerr == nil && presp != nil && presp.Status() == http.StatusProxyAuthRequired)
+	if !challenged || strings.HasPrefix(page.URL(), idpIssuer) || originHits.Load() != before {
+		st := 0
+		if presp != nil {
+			st = presp.Status()
+		}
+		t.Fatalf("5: off: goto err %v status %d at %s, origin hits %d→%d", gerr, st, page.URL(), before, originHits.Load())
 	}
 	// The challenge body, from the same proxy for the same client address.
 	pu, _ := url.Parse("http://" + proxyAddr)
@@ -358,7 +364,7 @@ func TestUIE2E_SSOIPBinding_BrowserThroughCulvert(t *testing.T) {
 	if resp.StatusCode != http.StatusProxyAuthRequired || resp.Header.Get("Location") != "" || !strings.Contains(string(b), "IP-bound sign-in is disabled") || originHits.Load() != before {
 		t.Fatalf("5: off: %d %q %q", resp.StatusCode, resp.Header.Get("Location"), b)
 	}
-	t.Logf("PASS 5 transport off → the browser is challenged (ERR_INVALID_AUTH_CREDENTIALS), not sent to sign in; the 407 says %q; origin not reached", strings.TrimSpace(string(b)))
+	t.Logf("PASS 5 transport off → the browser is challenged (407), not sent to sign in; the 407 says %q; origin not reached", strings.TrimSpace(string(b)))
 }
 
 func resetPKCEStoreForE2E(t *testing.T) {
