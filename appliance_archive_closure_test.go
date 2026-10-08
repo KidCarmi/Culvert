@@ -315,32 +315,44 @@ func TestBuildOVA_ClamAVSidecarIsReproducible(t *testing.T) {
 	for _, want := range []string{
 		`docker buildx build -q --no-cache --platform linux/amd64 --provenance=false --sbom=false`,
 		`--build-arg SOURCE_DATE_EPOCH="$SOURCE_DATE_EPOCH"`,
-		`--output "type=docker,name=$1,rewrite-timestamp=true" "$REPO/appliance/clamav"`,
-		`build_clamav_sidecar "$CLAMAV_SIDECAR_REF" ||`,
-		`build_clamav_sidecar "${CLAMAV_SIDECAR_REF}-rebuild" ||`,
-		`if [[ "$CLAMAV_SIDECAR_REBUILD_ID" != "$CLAMAV_SIDECAR_ID" ]]; then`,
+		// an OCI archive, never a direct load: BuildKit refuses
+		// rewrite-timestamp together with the store's unpack (run 37799698749)
+		`--output "type=oci,dest=$1,name=$CLAMAV_SIDECAR_REF,rewrite-timestamp=true" "$REPO/appliance/clamav"`,
+		`build_clamav_sidecar "$SIDECAR_BUILD/first.tar" ||`,
+		`build_clamav_sidecar "$SIDECAR_BUILD/rebuild.tar" ||`,
+		`if [[ "$CLAMAV_SIDECAR_REBUILD" != "$CLAMAV_SIDECAR_FIRST" ]]; then`,
 		`die "ClamAV sidecar is not reproducible`,
-		// a refusal keeps its evidence: config, history, packages, both images
+		// a refusal keeps both images
 		`ev="$OUT/clamav-repro-failure"`,
-		`docker save "$r" | gzip -n -6 > "$ev/$n.tar.gz"`,
-		`apk info -v 2>/dev/null | sort' > "$ev/$n.apk.txt"`,
+		`cp "$SIDECAR_BUILD/first.tar" "$SIDECAR_BUILD/rebuild.tar" "$ev/"`,
+		// the loaded image IS the compared build, found by the archive's own name
+		`[[ "$CLAMAV_SIDECAR_ID" == "$CLAMAV_SIDECAR_FIRST" ]]`,
+		`|| die "the ClamAV sidecar archive does not name $CLAMAV_SIDECAR_REF"`,
+		// the baked bytes are the compared archive
+		`gzip -n -6 < "$SIDECAR_BUILD/first.tar" > "$WORK/clamav.tar.gz"`,
 	} {
 		if !strings.Contains(src, want) {
 			t.Errorf("build-ova.sh must contain %q", want)
 		}
 	}
-	// The first build is the one that is saved and baked; the rebuild only
-	// proves it. The identity recorded for first boot is the first build's.
-	first := strings.Index(src, `build_clamav_sidecar "$CLAMAV_SIDECAR_REF" ||`)
-	id := strings.Index(src, `CLAMAV_SIDECAR_ID="$(docker image inspect "$CLAMAV_SIDECAR_REF"`)
-	rebuild := strings.Index(src, `build_clamav_sidecar "${CLAMAV_SIDECAR_REF}-rebuild" ||`)
-	check := strings.Index(src, `if [[ "$CLAMAV_SIDECAR_REBUILD_ID" != "$CLAMAV_SIDECAR_ID" ]]; then`)
-	save := strings.Index(src, `docker save "${CLAMAV_SIDECAR_REF}" | gzip -n -6`)
-	if first < 0 || first > id || id > rebuild || rebuild > check || check > save {
-		t.Fatalf("order must be build → record ID → rebuild → compare → save (build=%d id=%d rebuild=%d check=%d save=%d)", first, id, rebuild, check, save)
+	first := strings.Index(src, `build_clamav_sidecar "$SIDECAR_BUILD/first.tar" ||`)
+	rebuild := strings.Index(src, `build_clamav_sidecar "$SIDECAR_BUILD/rebuild.tar" ||`)
+	check := strings.Index(src, `if [[ "$CLAMAV_SIDECAR_REBUILD" != "$CLAMAV_SIDECAR_FIRST" ]]; then`)
+	load := strings.Index(src, `docker load -q -i "$SIDECAR_BUILD/first.tar"`)
+	bake := strings.Index(src, `gzip -n -6 < "$SIDECAR_BUILD/first.tar" > "$WORK/clamav.tar.gz"`)
+	if first < 0 || first > rebuild || rebuild > check || check > load || load > bake {
+		t.Fatalf("order must be build → rebuild → compare → load → bake (build=%d rebuild=%d compare=%d load=%d bake=%d)", first, rebuild, check, load, bake)
 	}
-	if strings.Contains(src, `docker build -q --platform linux/amd64 -t "$CLAMAV_SIDECAR_REF"`) {
-		t.Error("the non-reproducible single docker build must not come back")
+	if strings.Contains(src, `docker tag "$CLAMAV_SIDECAR_FIRST"`) {
+		t.Error("the sidecar must not be re-tagged: first boot finds it by the name its archive carries")
+	}
+	for _, gone := range []string{
+		`docker build -q --platform linux/amd64 -t "$CLAMAV_SIDECAR_REF"`,
+		`type=docker,name=$1,rewrite-timestamp=true`,
+	} {
+		if strings.Contains(src, gone) {
+			t.Errorf("build-ova.sh must not contain %q", gone)
+		}
 	}
 	df, err := os.ReadFile(filepath.Join(pkgSourceDir(), "appliance", "clamav", "Dockerfile"))
 	if err != nil {
@@ -365,15 +377,18 @@ func TestBuildOVA_SavesClamAVBeforeLoadingTheCandidate(t *testing.T) {
 	}
 	src := string(b)
 	pull := strings.Index(src, `pull_by_digest "$CLAMAV_IMAGE_REPO" "$CLAMAV_IMAGE_INDEX_DIGEST" "$CLAMAV_IMAGE_AMD64_DIGEST" "$CLAMAV_IMAGE_TAG"`)
-	build := strings.Index(src, `build_clamav_sidecar "$CLAMAV_SIDECAR_REF" ||`)
-	save := strings.Index(src, `docker save "${CLAMAV_SIDECAR_REF}" | gzip -n -6 > "$WORK/clamav.tar.gz"`)
+	build := strings.Index(src, `build_clamav_sidecar "$SIDECAR_BUILD/first.tar" ||`)
+	save := strings.Index(src, `gzip -n -6 < "$SIDECAR_BUILD/first.tar" > "$WORK/clamav.tar.gz"`)
 	load := strings.Index(src, `docker load -q -i "$CANDIDATE_TAR"`)
 	bake := strings.Index(src, `mv "$WORK/clamav.tar.gz" "$OV/var/lib/culvert-appliance/images/clamav.tar.gz"`)
 	if pull < 0 || build < 0 || save < 0 || load < 0 || bake < 0 || pull > build || build > save || save > load || bake < load {
 		t.Fatalf("build-ova.sh must pull the ClamAV base, build and save the sidecar before loading the candidate archive, and bake that save (pull=%d build=%d save=%d load=%d bake=%d)", pull, build, save, load, bake)
 	}
-	if strings.Count(src, `pull_by_digest "$CLAMAV_IMAGE_REPO"`) != 1 || strings.Count(src, `docker save "${CLAMAV_SIDECAR_REF}"`) != 1 {
-		t.Error("the ClamAV base must be pulled, and the sidecar saved, exactly once, before the load")
+	if strings.Count(src, `pull_by_digest "$CLAMAV_IMAGE_REPO"`) != 1 || strings.Count(src, `> "$WORK/clamav.tar.gz"`) != 1 {
+		t.Error("the ClamAV base must be pulled, and the sidecar archive written, exactly once, before the load")
+	}
+	if strings.Contains(src, `docker save "${CLAMAV_SIDECAR_REF}"`) {
+		t.Error("the sidecar must be baked from the reproduced archive, not re-saved after a load (F-OVA-CLAMAV-1)")
 	}
 	if !strings.Contains(src, `[[ "$CLAMAV_PCRE2" == "pcre2-10.49-r0" ]] || die`) {
 		t.Error("build-ova.sh must refuse a sidecar that does not carry pcre2 10.49 (CVE-2026-103111)")

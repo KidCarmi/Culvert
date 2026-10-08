@@ -179,48 +179,65 @@ pull_by_digest "$CLAMAV_IMAGE_REPO" "$CLAMAV_IMAGE_INDEX_DIGEST" "$CLAMAV_IMAGE_
 log "building the ClamAV sidecar $CLAMAV_SIDECAR_REF from appliance/clamav (pinned base + pcre2 fix)"
 # Reproducible: two INDEPENDENT builds (--no-cache: the RUN layer is never
 # reused from the first build; both start from the pinned base pulled above).
-# SOURCE_DATE_EPOCH pins the config's created time and
-# rewrite-timestamp clamps every file mtime in the new layer to it (the
-# Dockerfile removes apk's install log and index cache, the only content that
-# recorded the build time). Two independent --no-cache builds must give the
-# same image ID, or the OVA is refused: two builds of one source once baked
-# sidecars that differed only in mtimes and apk.log (#1528, run 37761732512),
-# which made "same source, same bytes" unverifiable. No attestations: default
-# min provenance records the build's invocation ID and start/finish times,
-# which would differ on every build; this image is local-only and is
-# identified by its ID and scanned as exact bytes instead.
+# SOURCE_DATE_EPOCH pins the config's created time and rewrite-timestamp clamps
+# every file mtime in the new layer to it (the Dockerfile removes apk's install
+# log and index cache, the only content that recorded the build time). Two
+# builds of one source once baked sidecars that differed only in mtimes and
+# apk.log (#1528, run 37761732512), which made "same source, same bytes"
+# unverifiable; now the two builds must give the same manifest digest, or the
+# OVA is refused. No attestations: default min provenance records the build's
+# invocation ID and start/finish times, which would differ on every build; this
+# image is local-only, identified by its ID and scanned as exact bytes instead.
+# Each build is exported as an OCI archive and only the first is loaded:
+# loading straight into the containerd store unpacks the image, and BuildKit
+# refuses rewrite-timestamp together with unpack (lab run 37799698749).
+SIDECAR_BUILD="$WORK/clamav-build"
+rm -rf "$SIDECAR_BUILD"; mkdir -p "$SIDECAR_BUILD"
 build_clamav_sidecar() {
   docker buildx build -q --no-cache --platform linux/amd64 --provenance=false --sbom=false \
     --build-arg SOURCE_DATE_EPOCH="$SOURCE_DATE_EPOCH" \
-    --output "type=docker,name=$1,rewrite-timestamp=true" "$REPO/appliance/clamav" >/dev/null
+    --output "type=oci,dest=$1,name=$CLAMAV_SIDECAR_REF,rewrite-timestamp=true" "$REPO/appliance/clamav" >/dev/null
 }
-build_clamav_sidecar "$CLAMAV_SIDECAR_REF" || die "building the ClamAV sidecar failed (needs BuildKit with rewrite-timestamp: Docker Engine 26+)"
-CLAMAV_SIDECAR_ID="$(docker image inspect "$CLAMAV_SIDECAR_REF" --format '{{.Id}}')"
-build_clamav_sidecar "${CLAMAV_SIDECAR_REF}-rebuild" || die "rebuilding the ClamAV sidecar failed"
-CLAMAV_SIDECAR_REBUILD_ID="$(docker image inspect "${CLAMAV_SIDECAR_REF}-rebuild" --format '{{.Id}}')"
-if [[ "$CLAMAV_SIDECAR_REBUILD_ID" != "$CLAMAV_SIDECAR_ID" ]]; then
-  # Keep what a reviewer needs to see WHY (config, history, packages, and both
-  # images as archives for test/e2e/appliance/lab/sidecar-diff.py) before the
-  # refusal; nothing is baked.
+# The archive's single top-level entry: the digest the store reports as .Id.
+oci_top_digest() {
+  tar -xOf "$1" index.json | python3 -c '
+import json, sys
+m = json.load(sys.stdin).get("manifests", [])
+if len(m) != 1:
+    sys.exit("want exactly one top-level manifest, got %d" % len(m))
+print(m[0]["digest"])'
+}
+build_clamav_sidecar "$SIDECAR_BUILD/first.tar" || die "building the ClamAV sidecar failed (needs BuildKit with rewrite-timestamp and the containerd image store)"
+build_clamav_sidecar "$SIDECAR_BUILD/rebuild.tar" || die "rebuilding the ClamAV sidecar failed"
+CLAMAV_SIDECAR_FIRST="$(oci_top_digest "$SIDECAR_BUILD/first.tar")" || die "the first sidecar build's archive has no single manifest"
+CLAMAV_SIDECAR_REBUILD="$(oci_top_digest "$SIDECAR_BUILD/rebuild.tar")" || die "the sidecar rebuild's archive has no single manifest"
+if [[ "$CLAMAV_SIDECAR_REBUILD" != "$CLAMAV_SIDECAR_FIRST" ]]; then
+  # Keep both images (OCI archives: test/e2e/appliance/lab/sidecar-diff.py
+  # diffs them layer by layer and file by file) before the refusal; nothing
+  # is baked.
   ev="$OUT/clamav-repro-failure"; mkdir -p "$ev"
-  for r in "$CLAMAV_SIDECAR_REF" "${CLAMAV_SIDECAR_REF}-rebuild"; do
-    n="${r##*:}"
-    docker image inspect "$r" > "$ev/$n.inspect.json" 2>&1 || true
-    docker history --no-trunc "$r" > "$ev/$n.history.txt" 2>&1 || true
-    docker run --rm --network none --entrypoint sh "$r" -c 'apk info -v 2>/dev/null | sort' > "$ev/$n.apk.txt" 2>&1 || true
-    docker save "$r" | gzip -n -6 > "$ev/$n.tar.gz" || true
-  done
-  die "ClamAV sidecar is not reproducible: two builds gave $CLAMAV_SIDECAR_ID and $CLAMAV_SIDECAR_REBUILD_ID (evidence in $ev)"
+  cp "$SIDECAR_BUILD/first.tar" "$SIDECAR_BUILD/rebuild.tar" "$ev/"
+  die "ClamAV sidecar is not reproducible: two builds gave $CLAMAV_SIDECAR_FIRST and $CLAMAV_SIDECAR_REBUILD (both archives in $ev)"
 fi
-docker image rm "${CLAMAV_SIDECAR_REF}-rebuild" >/dev/null 2>&1 || true
+docker load -q -i "$SIDECAR_BUILD/first.tar" >/dev/null || die "loading the ClamAV sidecar archive failed"
+# No re-tag: first boot and the cold-load check find the sidecar by the name
+# the archive itself carries, so the build must see that name too.
+CLAMAV_SIDECAR_ID="$(docker image inspect "$CLAMAV_SIDECAR_REF" --format '{{.Id}}' 2>/dev/null)" \
+  || die "the ClamAV sidecar archive does not name $CLAMAV_SIDECAR_REF"
+[[ "$CLAMAV_SIDECAR_ID" == "$CLAMAV_SIDECAR_FIRST" ]] \
+  || die "loaded ClamAV sidecar is $CLAMAV_SIDECAR_ID, the reproduced build is $CLAMAV_SIDECAR_FIRST"
 CLAMAV_PCRE2="$(docker run --rm --network none --entrypoint sh "$CLAMAV_SIDECAR_REF" -c "apk info -v 2>/dev/null | grep '^pcre2-[0-9]'")"
 [[ "$CLAMAV_PCRE2" == "pcre2-10.49-r0" ]] || die "ClamAV sidecar carries $CLAMAV_PCRE2, want pcre2-10.49-r0 (CVE-2026-103111)"
 CLAMAV_FIXED="$(docker run --rm --network none --entrypoint sh "$CLAMAV_SIDECAR_REF" -c "apk info -v 2>/dev/null | grep -E '^(zlib|nghttp2-libs)-[0-9]' | sort | tr '\n' ' '")"
 [[ "$CLAMAV_FIXED" == "nghttp2-libs-1.70.0-r0 zlib-1.3.2-r1 " ]] || die "ClamAV sidecar carries $CLAMAV_FIXED, want nghttp2-libs-1.70.0-r0 zlib-1.3.2-r1 (CVE-2026-58055, CVE-2026-85091)"
 log "ClamAV sidecar $CLAMAV_SIDECAR_REF = $CLAMAV_SIDECAR_ID, reproduced by an independent rebuild ($CLAMAV_PCRE2 ${CLAMAV_FIXED% })"
 mkdir -p "$WORK"
-log "docker save ${CLAMAV_SIDECAR_REF} (before any archive is loaded)"
-docker save "${CLAMAV_SIDECAR_REF}" | gzip -n -6 > "$WORK/clamav.tar.gz"
+# Bake the reproduced archive itself, not a re-save of the loaded image: the
+# baked bytes are the bytes whose digest two builds agreed on, and nothing is
+# saved after a load (F-OVA-CLAMAV-1). Still before the candidate is loaded.
+log "baking the reproduced ClamAV sidecar archive ${CLAMAV_SIDECAR_FIRST}"
+gzip -n -6 < "$SIDECAR_BUILD/first.tar" > "$WORK/clamav.tar.gz"
+rm -rf "$SIDECAR_BUILD"
 CANDIDATE=0
 CANDIDATE_TAR_SHA=""
 if [[ -n "$CANDIDATE_TAR" ]]; then
