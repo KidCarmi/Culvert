@@ -1242,13 +1242,13 @@ func registerAuthRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/auth/lockouts", apiAuthLockouts)              // list/clear active login lockouts (admin unlock)
 
 	// ── Generic IdP Framework ─────────────────────────────────────────────
-	mux.HandleFunc("/api/idp", apiIdPList)                                // GET list / POST create
-	mux.HandleFunc("/api/idp/discover", apiIdPDiscover)                   // POST: run OIDC discovery (must be before /api/idp/)
-	mux.HandleFunc("/api/idp/test", apiIdPTest)                           // POST: candidate-based LDAP directory test (ADR-0027)
-	mux.HandleFunc("/api/idp/legacy-ldap", apiIdPLegacyLDAP)              // GET: legacy YAML ldap summary
-	mux.HandleFunc("/api/idp/legacy-ldap/import", apiIdPLegacyLDAPImport) // POST: explicit legacy import
-	mux.HandleFunc("/api/idp/", apiIdPRouter)                             // GET|PUT|DELETE /api/idp/{id} + /api/idp/{id}/groups
-	mux.HandleFunc("/api/sso-ip-binding", apiSSOSurrogate)                // GET status / PUT settings (F-SSO-SCOPE-1)
+	mux.HandleFunc("/api/idp", apiIdPList)                                  // GET list / POST create
+	mux.HandleFunc("/api/idp/discover", apiIdPDiscover)                     // POST: run OIDC discovery (must be before /api/idp/)
+	mux.HandleFunc("/api/idp/test", apiIdPTest)                             // POST: candidate-based LDAP directory test (ADR-0027)
+	mux.HandleFunc("/api/idp/legacy-ldap", apiIdPLegacyLDAP)                // GET: legacy YAML ldap summary
+	mux.HandleFunc("/api/idp/legacy-ldap/import", apiIdPLegacyLDAPImport)   // POST: explicit legacy import
+	mux.HandleFunc("/api/idp/", apiIdPRouter)                               // GET|PUT|DELETE /api/idp/{id} + /api/idp/{id}/groups
+	mux.HandleFunc("/api/sso-ip-binding", apiSSOSurrogate)                  // GET status / PUT settings (F-SSO-SCOPE-1)
 	mux.HandleFunc("/api/sso-ip-binding/bindings", apiSSOSurrogateBindings) // GET list / DELETE revoke (admin)
 
 	// ── Auth callbacks (not behind UI auth middleware) ────────────────────
