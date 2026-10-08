@@ -794,15 +794,15 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     env:
-      # Final candidate 7e53720d OVA (lab run 37805385811). The archive and index pins
+      # Replacement candidate 3a025d06 OVA (lab run 37831230971). The archive and index pins
       # are the OVA's own build record (build-info.json clamav_baked_tar_sha256
       # and clamav_sidecar_image_id; on 2e3bcc2a these equalled the measured
       # pins). The amd64 manifest and config are DERIVED from the re-hashed
       # index (not pinned: derived and exported through GITHUB_ENV), so every link stays hash-bound.
-      OVA_ARTIFACT_ID: "11562703124"   # appliance-lab-ova-candidate-7e53720d06f5, run 37805385811
-      OVA_SHA256: 578ea6b83b450b91bccc10ac80058db42d157e2161a45aa23fc8a23a2def7c65
-      SIDECAR_ARCHIVE_SHA256: ae9c66c28ce7272ceeafc0e652ede4b704c3fa85ee89000ccc8267c2eae8d161
-      SIDECAR_INDEX: sha256:1cf6b7e347c2b14b14cbcdf5d9e5de1cb8de8e3b97c44508874178315b563787
+      OVA_ARTIFACT_ID: "11574475530"   # appliance-lab-ova-candidate-3a025d06eb6a, run 37831230971
+      OVA_SHA256: fdf5b8003fc748e3fe0b32b1b95f31b2ddbb19195a4d663544e525704b6afe6a
+      SIDECAR_ARCHIVE_SHA256: b95b7096677b01438cd3c4d35605c3eee338d08d17e2e5ca46adc46bf5c7d556
+      SIDECAR_INDEX: sha256:3f8db57b49d42d9a541a661ae4a376679fbd88202ffe47e52e2a702913779fc5
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Workspace + libguestfs (read-only disk access)
@@ -889,7 +889,7 @@ jobs:
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
-          name: appliance-lab-sidecar-scan-7e53720d06f5
+          name: appliance-lab-sidecar-scan-3a025d06eb6a
           path: ${{ env.W }}/evidence/
           if-no-files-found: warn
 
@@ -1214,12 +1214,12 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     env:
-      OVA_ARTIFACT_ID: "11562703124"   # appliance-lab-ova-candidate-7e53720d06f5, run 37805385811
-      OVA_SHA256: 578ea6b83b450b91bccc10ac80058db42d157e2161a45aa23fc8a23a2def7c65
-      SOURCE_IMAGE_RUN_ID: "37803241045"
-      SOURCE_IMAGE_TAR_SHA256: 1e29ed3117c382c3e5a19067e66d58ddfbafcf6e310cf24302251737fdd31c11
-      IMAGE_ID: sha256:2a355d7a8930b12581c0f42c273bc3357cbefa36d9382ab7071d2c187dda0554
-      SRC_SHA: 7e53720d06f525f4e5fdbfec42f52840d5b734e2
+      OVA_ARTIFACT_ID: "11574475530"   # appliance-lab-ova-candidate-3a025d06eb6a, run 37831230971
+      OVA_SHA256: fdf5b8003fc748e3fe0b32b1b95f31b2ddbb19195a4d663544e525704b6afe6a
+      SOURCE_IMAGE_RUN_ID: "37829233536"
+      SOURCE_IMAGE_TAR_SHA256: 284c28f3f1eef0e699c89a359efa2cb2c59a0e25b6deb151ea4dec0ecb695ccd
+      IMAGE_ID: sha256:0fdc5513b8b8ccc6b2998f0786f4a7304601887f522a023416562006f98033eb
+      SRC_SHA: 3a025d06eb6a0b025ad9c61371949e3d9bdd90e7
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Workspace + libguestfs
@@ -1332,7 +1332,7 @@ jobs:
           # cgo packages of runc (seccomp) and dockerd (journald) need headers to type-check
           sudo apt-get install -y -qq libseccomp-dev libsystemd-dev pkg-config >/dev/null
           args=()
-          for b in usr/bin/containerd usr/bin/ctr usr/bin/containerd-shim-runc-v2 usr/bin/runc usr/bin/dockerd usr/bin/docker usr/libexec/docker/cli-plugins/docker-compose; do
+          for b in usr/bin/containerd usr/bin/ctr usr/bin/containerd-shim-runc-v2 usr/bin/runc usr/bin/dockerd usr/bin/docker-proxy usr/bin/docker usr/libexec/docker/cli-plugins/docker-compose; do
             [ -f "$W/rootfs/$b" ] && args+=("$(echo "$b" | tr '/' '-')=$W/rootfs/$b")
           done
           GOTOOLCHAIN=local test/e2e/appliance/lab/exact-scan.sh engsrc "$W/evidence" "${args[@]}"
@@ -1353,7 +1353,7 @@ jobs:
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
-          name: appliance-lab-exact-scan-7e53720d06f5
+          name: appliance-lab-exact-scan-3a025d06eb6a
           path: ${{ env.W }}/evidence/
           retention-days: 30
           if-no-files-found: warn

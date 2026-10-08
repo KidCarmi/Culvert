@@ -1641,6 +1641,7 @@ echo "=== kernel"; echo "running=$(uname -r)"; for k in /boot/vmlinuz-*; do echo
 echo "=== snapd"; echo "snapd-status=$(dpkg-query -W -f='${db:Status-Status}' snapd 2>/dev/null || echo absent)"; echo "snap-dir=$( [ -e /snap ] || [ -e /var/lib/snapd ] && echo present || echo absent)"
 echo "=== versions"; for p in docker-ce containerd.io docker-compose-plugin; do echo "$p=$(dpkg-query -W -f='${Version}' "$p")"; done
 echo "=== tcp listeners"; ss -Hltnp | sed 's/^/listen /'
+echo "=== published ports"; docker ps --format '{{.Names}} {{.Ports}}' | sed 's/^/published /'
 echo "=== sockets"; for s in /run/containerd/containerd.sock /run/docker.sock; do echo "sock $s $(stat -c '%U:%G %a' "$s" 2>/dev/null || echo missing)"; done
 echo "docker-group=$(getent group docker | cut -d: -f4)"
 echo "=== dockerd argv"; ps -o args= -C dockerd | sed 's/^/dockerd-argv /'
@@ -1652,12 +1653,24 @@ EOS
   v="$(sed -n 's/^running=//p' "$f")"
   [[ -n "$v" && "$(grep -c '^installed=' "$f")" == 1 && "$(grep '^installed=' "$f")" == "installed=$v" ]] \
     && check E kernel-is-the-only-installed pass "running=$v" || check E kernel-is-the-only-installed fail "$(grep -E '^(running|installed)=' "$f" | tr '\n' ' ')"
-  grep -q '^snapd-status=absent' "$f" && grep -q '^snap-dir=absent' "$f" \
+  # a purged package is "not-installed" to dpkg while the pin keeps it known
+  grep -qE '^snapd-status=(absent|not-installed)$' "$f" && grep -q '^snap-dir=absent' "$f" \
     && check E snapd-absent pass "package and state removed" || check E snapd-absent fail "$(grep -E '^snap' "$f" | tr '\n' ' ')"
-  # No engine process listens on TCP: the gRPC and API surfaces are local sockets only.
-  if grep -E '^listen ' "$f" | grep -qE '"(dockerd|containerd|containerd-shim[^"]*|runc|docker-proxy)"'; then
-    check E engine-no-tcp-listener fail "$(grep -E '^listen ' "$f" | grep -E 'dockerd|containerd|runc|docker-proxy' | tr '\n' ' ')"
-  else check E engine-no-tcp-listener pass "$(grep -c '^listen ' "$f") listener(s), none owned by dockerd/containerd/shim/runc/docker-proxy"; fi
+  # No engine process listens on TCP: the gRPC and API surfaces are local
+  # sockets only. docker-proxy is the userland forwarder for a container's
+  # PUBLISHED port (the appliance's own proxy/UI ports), so it may listen
+  # only on a port a running container publishes.
+  local pub bad=""
+  pub="$(grep -E '^published ' "$f" | grep -oE ':[0-9]+->' | tr -d ':>-' | sort -u | tr '\n' ' ')"
+  if grep -E '^listen ' "$f" | grep -qE '"(dockerd|containerd|containerd-shim[^"]*|runc)"'; then
+    bad="$(grep -E '^listen ' "$f" | grep -E '"(dockerd|containerd|containerd-shim[^"]*|runc)"' | tr '\n' ' ')"
+  fi
+  while read -r port; do
+    [[ -n "$port" ]] || continue
+    [[ " $pub " == *" $port "* ]] || bad+="docker-proxy on unpublished port $port "
+  done < <(grep -E '^listen .*"docker-proxy"' "$f" | awk '{print $5}' | sed 's/.*://' | sort -u)
+  if [[ -n "$bad" ]]; then check E engine-no-tcp-listener fail "$bad"
+  else check E engine-no-tcp-listener pass "dockerd/containerd/shim/runc: no TCP listener; docker-proxy only on published ports (${pub% })"; fi
   grep -q '^sock /run/containerd/containerd.sock root:root 660$' "$f" \
     && check E containerd-socket-root-only pass "root:root 0660" || check E containerd-socket-root-only fail "$(grep 'containerd.sock' "$f")"
   if grep -qE '^sock /run/docker.sock root:(root|docker) 660$' "$f" && grep -qx 'docker-group=' "$f"; then
@@ -1670,7 +1683,7 @@ EOS
   # containerd.io package disables it.
   if grep -E '^plugin ' "$f" | grep -E 'grpc\.v1 +cri|cri ' | grep -qw ok; then
     check E containerd-cri-disabled fail "$(grep -E '^plugin .*cri' "$f" | tr '\n' ' ')"
-  elif grep -qE '^plugin ' "$f"; then check E containerd-cri-disabled pass "CRI gRPC service not serving ($(grep -E '^(plugin .*cri|disabled-plugins)' "$f" | tr '\n' ' ' | sed 's/ $//'))"
+  elif grep -qE '^plugin ' "$f"; then check E containerd-cri-disabled pass "io.containerd.grpc.v1 cri (the CRI API) not loaded; $(grep -E '^disabled-plugins' "$f" | cut -d' ' -f2-)"
   else check E containerd-cri-disabled fail "ctr plugins ls produced nothing"; fi
   grep -qiE '^tracing .*endpoint *= *"[^"]+"' "$f" && check E containerd-tracing-off fail "$(grep '^tracing' "$f" | tr '\n' ' ')" \
     || check E containerd-tracing-off pass "no OTLP endpoint configured"
