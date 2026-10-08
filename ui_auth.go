@@ -976,6 +976,9 @@ func authOIDCCallback(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "session error", http.StatusInternalServerError)
 		return
 	}
+	if ssoSurrogateBindRefused(w, r, id) {
+		return
+	}
 	// Redirect to the original URL the user was trying to reach.
 	relayURL := entry.relayURL
 	if relayURL == "" || !isSafeRedirectURL(relayURL) {
@@ -1027,7 +1030,7 @@ func uiBasePathPrefix() string {
 		return ""
 	}
 	p := strings.TrimRight(u.EscapedPath(), "/")
-	if !strings.HasPrefix(p, "/") || strings.HasPrefix(p, "//") {
+	if !strings.HasPrefix(p, "/") || strings.HasPrefix(p, "//") || strings.HasPrefix(p, "/\\") {
 		return ""
 	}
 	return p
@@ -1060,6 +1063,9 @@ func authSAMLComplete(w http.ResponseWriter, r *http.Request) {
 	id := ex.id
 	if err := setSessionCookie(w, r, id); err != nil {
 		http.Error(w, "session error", http.StatusInternalServerError)
+		return
+	}
+	if ssoSurrogateBindRefused(w, r, id) {
 		return
 	}
 	// Inline guard for static-analysis visibility: parse the stored relay,
@@ -1209,6 +1215,7 @@ background:#2563eb;color:#fff;text-decoration:none;text-align:center}a.btn:hover
 
 // POST /auth/logout — clear session cookie.
 func authLogout(w http.ResponseWriter, r *http.Request) {
+	ssoSurrogateRevokeAtLogout(r) // logout ends the user's IP-bound sign-in everywhere
 	clearSessionCookie(w, r)
 	http.Redirect(w, r, "/", http.StatusFound)
 }
@@ -1241,6 +1248,8 @@ func registerAuthRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/idp/legacy-ldap", apiIdPLegacyLDAP)              // GET: legacy YAML ldap summary
 	mux.HandleFunc("/api/idp/legacy-ldap/import", apiIdPLegacyLDAPImport) // POST: explicit legacy import
 	mux.HandleFunc("/api/idp/", apiIdPRouter)                             // GET|PUT|DELETE /api/idp/{id} + /api/idp/{id}/groups
+	mux.HandleFunc("/api/sso-ip-binding", apiSSOSurrogate)                // GET status / PUT settings (F-SSO-SCOPE-1)
+	mux.HandleFunc("/api/sso-ip-binding/bindings", apiSSOSurrogateBindings) // GET list / DELETE revoke (admin)
 
 	// ── Auth callbacks (not behind UI auth middleware) ────────────────────
 	// These are reached by browser redirects from IdPs (not admin UI calls).

@@ -133,6 +133,18 @@ var uiRoutes = []uiRouteMetadata{
 			{Method: "GET", MinRole: RoleViewer},
 			{Method: "POST", MinRole: RoleAdmin, Mutating: true, AuditExpected: true},
 		}},
+	// IP-bound sign-in (F-SSO-SCOPE-1): settings readable by viewers; the
+	// binding list names users and their addresses, so it is admin-only.
+	{Path: "/api/sso-ip-binding", Handler: "apiSSOSurrogate", Domain: "auth", Public: false,
+		Methods: []uiRouteMethod{
+			{Method: "GET", MinRole: RoleViewer},
+			{Method: "PUT", MinRole: RoleAdmin, Mutating: true, AuditExpected: true},
+		}},
+	{Path: "/api/sso-ip-binding/bindings", Handler: "apiSSOSurrogateBindings", Domain: "auth", Public: false,
+		Methods: []uiRouteMethod{
+			{Method: "GET", MinRole: RoleAdmin},
+			{Method: "DELETE", MinRole: RoleAdmin, Mutating: true, AuditExpected: true},
+		}},
 	{Path: "/api/idp/discover", Handler: "apiIdPDiscover", Domain: "auth", Public: false,
 		Methods: []uiRouteMethod{{Method: "POST", MinRole: RoleAdmin, Mutating: true}}},
 	{Path: "/api/idp/test", Handler: "apiIdPTest", Domain: "auth", Public: false,

@@ -415,7 +415,25 @@ func resolveRequestAuth(w http.ResponseWriter, r *http.Request, clientIP, reqID 
 				// A switch (not an if-else chain) keeps gocritic happy; cases 3a/3a'
 				// fall through to Stage-2, 3b/3c/Default write a response and return.
 				d := resolveNoCredAuthOutcome(r, clientIP, effectiveDefault)
+				// IP-bound sign-in (F-SSO-SCOPE-1) is consulted AFTER the Stage-1
+				// rule match, so a binding can never satisfy a rule it must not:
+				// never a CredentialRequired rule, and an SSORequired rule's
+				// providerRefs bind it to those providers (sso_surrogate.go).
+				sid, viaBinding := ssoSurrogateLookupFor(r, clientIP, d)
 				switch {
+				case viaBinding:
+					// ── 2b. IP-bound sign-in (opt-in) ──────────────────────────
+					// This client address completed an interactive SSO login on
+					// the admin UI host within the binding lifetime. The source is
+					// "sso-ip:<provider>" — distinct from the provider itself, so
+					// logs show the identity was inferred from an address, and a
+					// rule scoped to the provider (AuthSource) does not accept it.
+					authenticatedIdentity = sid.Sub
+					if authenticatedIdentity == "" {
+						authenticatedIdentity = sid.Email
+					}
+					authenticatedGroups = sid.Groups
+					authenticatedSource = "sso-ip:" + sid.Provider
 				case d.Outcome == OutcomeExempt && d.Rule != nil:
 					// ── 3a. No credentials — SCOPED Exempt rule (Rule != nil) ────
 					// An explicitly matched auth/exempt rule waives the challenge
@@ -514,7 +532,11 @@ func resolveRequestAuth(w http.ResponseWriter, r *http.Request, clientIP, reqID 
 					recordRequestAuth(clientIP, r.Method, r.Host, "SSO_DENIED", d.Rule.Name, "", "", authLog)
 					logger.Printf("AUTH_SSO rule=%q id=%q %s -> %q {req_id=%s action=deny}",
 						sanitizeLog(d.Rule.Name), sanitizeLog(d.Rule.ID), clientIP, sanitizeLog(r.Host), reqID)
-					http.Error(w, "Forbidden: destination requires interactive SSO", http.StatusForbidden)
+					msg := "Forbidden: destination requires interactive SSO"
+					if why := ssoSignInWithheld(clientIP); why != "" {
+						msg += ". " + ssoSignInExplanation(why)
+					}
+					http.Error(w, msg, http.StatusForbidden)
 					return authOutcome{}, false
 				default:
 					// ── 3. No credentials ────────────────────────────────────────
@@ -564,7 +586,27 @@ func resolveRequestAuth(w http.ResponseWriter, r *http.Request, clientIP, reqID 
 					if u := cfg.OIDCLoginURL(); u != "" {
 						w.Header().Set("Link", `<`+u+`>; rel="authorization_endpoint"`)
 					}
-					http.Error(w, "Proxy Authentication Required", http.StatusProxyAuthRequired)
+					msg := "Proxy Authentication Required"
+					if ssoCapable {
+						if why := ssoSignInWithheld(clientIP); why != "" {
+							if !credCapable && r.Header.Get("Proxy-Authorization") == "" {
+								// Nothing a browser could PRESENT would be accepted (no
+								// credential-capable backend) and sign-in is withheld:
+								// a Basic challenge would re-prompt forever. Refuse,
+								// and say why. (A client that DID present credentials
+								// keeps the 407 contract — they were refused, not absent.)
+								w.Header().Del("Proxy-Authenticate")
+								w.Header().Del("Link")
+								atomic.AddInt64(&statAuthFail, 1)
+								http.Error(w, "Forbidden. "+ssoSignInExplanation(why), http.StatusForbidden)
+								recordRequest(clientIP, r.Method, r.Host, "AUTH_FAIL", "", "", "", "")
+								logger.Printf("AUTH_FAIL (no-credentials, sign-in withheld: %s) %s {req_id=%s action=block}", why, clientIP, reqID)
+								return authOutcome{}, false
+							}
+							msg += ". " + ssoSignInExplanation(why)
+						}
+					}
+					http.Error(w, msg, http.StatusProxyAuthRequired)
 					recordRequest(clientIP, r.Method, r.Host, "AUTH_FAIL", "", "", "", "")
 					logger.Printf("AUTH_FAIL (no-credentials) %s {req_id=%s action=block}", clientIP, reqID)
 					return authOutcome{}, false

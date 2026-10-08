@@ -50,6 +50,10 @@ func setupAuthGateTest(t *testing.T) {
 	prevBase := cfg.ProxyBaseURL()
 	SetProxyBaseURL("https://culvert-ui.test")
 	t.Cleanup(func() { SetProxyBaseURL(prevBase) })
+	// ...and IP-bound sign-in, the only transport through which a browser
+	// sign-in can authenticate proxied traffic (sso_surrogate.go); with it
+	// off the redirect is withheld.
+	withSSOSurrogate(t, ssoSurrogateSettings{Enabled: true})
 }
 
 func exemptCount() int64 { return atomic.LoadInt64(&statAuthExempt) }

@@ -492,6 +492,18 @@ var configSurfaces = []configSurfaceRow{
 	// hazard (the learned/tunable-state-is-node-local precedent). The node-local
 	// learning STATE (sessions/aggregates/recommendations + subject key) is off every
 	// config surface entirely — it is engine-owned files, not configuration.
+	// IP-bound sign-in (F-SSO-SCOPE-1). AdminDurable-only: node-local identity
+	// transport whose bindings are volatile and node-local; OFF export/import,
+	// rollback and CP→DP so no restore, rollback or sync can switch an identity
+	// transport on. Gated by sso_ip_binding_saved.
+	{ID: "sso_ip_binding_enabled", Kind: kindConfig, Owner: "ssoSurrogate", AdminDurable: true,
+		Note:     "gated by sso_ip_binding_saved sentinel; OFF by default — with it off the proxy withholds SSO sign-in redirects (a browser SSO session authenticates no proxied traffic)",
+		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "SSOSurrogateEnabled"}}},
+	{ID: "sso_ip_binding_ttl_minutes", Kind: kindConfig, Owner: "ssoSurrogate", AdminDurable: true,
+		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "SSOSurrogateTTLMinutes"}}},
+	{ID: "sso_ip_binding_exclude_cidrs", Kind: kindConfig, Owner: "ssoSurrogate", AdminDurable: true,
+		Note:     "no omitempty: an explicitly empty exclusion list survives the round trip",
+		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "SSOSurrogateExcludeCIDRs"}}},
 	{ID: "policy_learning_enabled", Kind: kindConfig, Owner: "policyLearn", AdminDurable: true,
 		Note:     "gated by policy_learning_saved sentinel; enable ≠ start learning (observation arms only via an explicit session start)",
 		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "PolicyLearningEnabled"}}},
@@ -566,6 +578,8 @@ var configSurfaces = []configSurfaceRow{
 		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "AVUnavailableSaved"}}},
 	{ID: "autoexclude_tunables_saved", Kind: kindSentinel, AdminDurable: true,
 		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "AutoExcludeTunablesSaved"}}},
+	{ID: "sso_ip_binding_saved", Kind: kindSentinel, AdminDurable: true,
+		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "SSOSurrogateSaved"}}},
 	{ID: "policy_learning_saved", Kind: kindSentinel, AdminDurable: true,
 		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "PolicyLearningSaved"}}},
 	{ID: "support_retention_saved", Kind: kindSentinel, AdminDurable: true,

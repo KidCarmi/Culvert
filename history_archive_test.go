@@ -49,10 +49,10 @@ func haSeededStore(t *testing.T, dir, phrase string, n int) *logStore {
 		key := make([]byte, 12)
 		ts := uint64(e.TS) // #nosec G115 -- positive test ts
 		for j := 0; j < 8; j++ {
-			key[j] = byte(ts >> (56 - 8*j))
+			key[j] = byte(ts >> (56 - 8*j)) //nolint:gosec // test fixture: big-endian key bytes from small positive values
 		}
-		key[11] = byte(i)
-		key[10] = byte(i >> 8)
+		key[11] = byte(i)      //nolint:gosec // test fixture: big-endian key bytes from small positive values
+		key[10] = byte(i >> 8) //nolint:gosec // test fixture: big-endian key bytes from small positive values
 		recs = append(recs, logstore.ExportRecord{Key: fmt.Sprintf("%x", key), Entry: b})
 	}
 	i := 0
@@ -335,9 +335,9 @@ func TestHistoryImport_CollisionNeverOverwritesALiveRecord(t *testing.T) {
 		b, _ := json.Marshal(LogEntry{TS: ts, Host: host, Method: "GET", Level: "INFO", Status: "OK"})
 		key := make([]byte, 12)
 		for j := 0; j < 8; j++ {
-			key[j] = byte(uint64(ts) >> (56 - 8*j)) // #nosec G115 -- positive test ts
+			key[j] = byte(uint64(ts) >> (56 - 8*j)) //nolint:gosec // test fixture: big-endian key bytes from small positive values
 		}
-		key[11] = byte(seq)
+		key[11] = byte(seq) //nolint:gosec // test fixture: big-endian key bytes from small positive values
 		return logstore.ExportRecord{Key: fmt.Sprintf("%x", key), Entry: b}
 	}
 	one := func(r ...logstore.ExportRecord) func() (logstore.ExportRecord, bool, error) {
@@ -407,7 +407,7 @@ func TestHistoryArchive_OversizeRecordsAreSkippedAndCounted(t *testing.T) {
 	big, _ := json.Marshal(LogEntry{TS: ts, Host: "big", URI: strings.Repeat("a", historyMaxRecord+1)})
 	key := make([]byte, 12)
 	for j := 0; j < 8; j++ {
-		key[j] = byte(uint64(ts) >> (56 - 8*j)) // #nosec G115 -- positive test ts
+		key[j] = byte(uint64(ts) >> (56 - 8*j)) //nolint:gosec // test fixture: big-endian key bytes from small positive values
 	}
 	done := false
 	if _, err := s.Import(func() (logstore.ExportRecord, bool, error) {

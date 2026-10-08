@@ -8557,6 +8557,123 @@ paths:
           content:
             text/plain: { schema: { type: string } }
 
+  /api/sso-ip-binding:
+    get:
+      operationId: getSSOIPBinding
+      tags: [auth]
+      summary: IP-bound sign-in status
+      description: "IP-bound sign-in (F-SSO-SCOPE-1): the settings plus node-local counters. A browser SSO session is a cookie on the admin UI host and identifies no proxied traffic on its own; when this is enabled a completed sign-in binds the browser's client address to its identity for the configured lifetime. Off by default."
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: beta
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      responses:
+        '200':
+          description: Settings, live binding count, bind outcomes and hits.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+    put:
+      operationId: setSSOIPBinding
+      tags: [auth]
+      summary: Set IP-bound sign-in
+      description: "Full replacement (validate → persist → apply; a persist failure is a 500 with the running settings unchanged). Turning it off removes every binding. Node-local AdminSettings-durable; outside export/import, config-version rollback and CP→DP sync."
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: admin
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: beta
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: high
+      x-culvert-audit-event: auth.sso_ip_binding.settings
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                enabled: { type: boolean }
+                ttlMinutes: { type: integer, minimum: 0, maximum: 1440, description: "0 = default (60); otherwise 5–1440" }
+                excludeCidrs: { type: array, maxItems: 256, items: { type: string }, description: "Client ranges (CIDR or address) never bound: NAT gateways, terminal servers, shared hosts" }
+      responses:
+        '200':
+          description: The installed settings and counters.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+        '500':
+          description: The durable write failed — the running settings are unchanged. Body is plain text.
+          content:
+            text/plain: { schema: { type: string } }
+
+  /api/sso-ip-binding/bindings:
+    get:
+      operationId: listSSOIPBindings
+      tags: [auth]
+      summary: List IP-bound sign-in bindings
+      description: The live bindings on this node (client address, subject, provider, groups, bound/expiry times). Admin-only — it names users and their addresses.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: admin
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: beta
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      responses:
+        '200':
+          description: Live bindings.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+    delete:
+      operationId: revokeSSOIPBindings
+      tags: [auth]
+      summary: Revoke IP-bound sign-in bindings
+      description: "Removes one binding (addr=<ip>) or every binding (all=1). The browsers concerned must sign in again."
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: admin
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: beta
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: medium
+      x-culvert-audit-event: auth.sso_ip_binding.revoke
+      parameters:
+        - name: addr
+          in: query
+          required: false
+          schema: { type: string }
+        - name: all
+          in: query
+          required: false
+          schema: { type: string, enum: ["1"] }
+      responses:
+        '200':
+          description: "{removed: N}"
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+
   /api/policy-learning:
     get:
       operationId: getPolicyLearningStatus

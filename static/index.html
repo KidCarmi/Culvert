@@ -1827,6 +1827,18 @@ table.mcpx-cat-tbl td{padding:6px 10px;border-bottom:1px solid var(--border)}
       </div>
       <div id="idp-legacy-ldap-banner" style="display:none;background:rgba(245,158,11,.08);border:1px solid rgba(245,158,11,.3);color:var(--text);border-radius:8px;padding:12px 14px;margin:0 0 16px;font-size:.82rem;line-height:1.6"></div>
       <div id="idp-list" style="display:flex;flex-direction:column;gap:10px"></div>
+      <div id="sso-ipb" style="margin-top:24px;background:var(--surface1);border:1px solid var(--border);border-radius:10px;padding:16px 18px">
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:6px"><h3 style="margin:0;font-size:1rem">IP-bound sign-in</h3><span id="sso-ipb-state" style="font-size:.72rem;padding:2px 8px;border-radius:10px;background:var(--surface2);color:var(--muted)"></span></div>
+        <p style="color:var(--muted);font-size:.8rem;margin:0 0 12px;line-height:1.6">
+          A browser sign-in sets a cookie on this admin UI host only, so <strong>on its own it identifies none of the browser's web traffic through the proxy</strong>. IP-bound sign-in lets a completed sign-in identify the browser's network address for a limited time. Everyone behind one address (NAT, a terminal server, a shared jump host) becomes the same user — exclude such ranges. Bindings live on this node only and are cleared by a restart, by sign-out and when this is turned off. While it is off the proxy does not send browsers to sign in; they get the challenge with an explanation.
+        </p>
+        <label style="display:flex;align-items:center;gap:8px;font-size:.85rem;margin-bottom:10px"><input type="checkbox" id="sso-ipb-enabled"> Enable IP-bound sign-in</label>
+        <label style="display:block;font-size:.8rem;color:var(--muted);margin-bottom:10px">Binding lifetime (minutes, 5–1440)<br><input type="number" id="sso-ipb-ttl" min="5" max="1440" style="width:120px"></label>
+        <label style="display:block;font-size:.8rem;color:var(--muted);margin-bottom:10px">Never bind these sources (one CIDR or address per line)<br><textarea id="sso-ipb-exclude" rows="3" style="width:100%;font-family:monospace"></textarea></label>
+        <div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn" data-click="saveSSOIPBinding">Save</button><button class="btn btn-secondary" data-click="loadSSOIPBindings">Show bindings</button><button class="btn btn-secondary" data-click="revokeAllSSOIPBindings">Revoke all bindings</button></div>
+        <div id="sso-ipb-stats" style="font-size:.78rem;color:var(--muted);margin-top:10px"></div>
+        <div id="sso-ipb-bindings" style="margin-top:10px"></div>
+      </div>
     </div>
 
     <!-- ── IdP MODAL (wizard) ──────────────────────────────────────────────── -->
@@ -5654,6 +5666,10 @@ document.addEventListener('click', e => {
 
     // ── IdP / auth ──
     case 'openIdPModal':      openIdPModal(); break;
+    case 'saveSSOIPBinding':  saveSSOIPBinding(); break;
+    case 'loadSSOIPBindings': loadSSOIPBindings(); break;
+    case 'revokeSSOIPBinding': revokeSSOIPBinding(arg); break;
+    case 'revokeAllSSOIPBindings': revokeAllSSOIPBindings(); break;
     case 'closeIdPModal':     closeIdPModal(); break;
     case 'selectIdPTemplate': selectIdPTemplate(arg); break;
     case 'discoverOIDC':      discoverOIDC(); break;
@@ -14030,8 +14046,59 @@ function idpProviderMeta(p) {
   return { label: p.type === 'saml' ? 'SAML 2.0' : 'OIDC',  color: '#14b8a6' };
 }
 
+// ── IP-bound sign-in (F-SSO-SCOPE-1) ─────────────────────────────────────
+async function loadSSOIPBinding() {
+  const res = await apiFetch('/api/sso-ip-binding');
+  if (!res.ok) return;
+  const d = await res.json();
+  const s = d.settings || {};
+  document.getElementById('sso-ipb-enabled').checked = !!s.enabled;
+  document.getElementById('sso-ipb-ttl').value = s.ttlMinutes || 60;
+  document.getElementById('sso-ipb-exclude').value = (s.excludeCidrs || []).join('\n');
+  const st = document.getElementById('sso-ipb-state');
+  st.textContent = s.enabled ? 'ON' : 'OFF';
+  st.style.color = s.enabled ? 'var(--success, #22c55e)' : 'var(--muted)';
+  const b = d.binds || {};
+  document.getElementById('sso-ipb-stats').textContent = s.enabled
+    ? `${d.bindings} live binding(s) of ${d.maxBindings} · logins bound ${b.bound||0}, not bound: excluded ${b.excluded||0}, local ${b.local||0}, full ${b.full||0} · requests identified ${d.hits||0} · ${d.scope}`
+    : 'Off: browser sign-in identifies no proxied traffic.';
+}
+async function saveSSOIPBinding() {
+  const enabled = document.getElementById('sso-ipb-enabled').checked;
+  if (enabled && !window.confirm('Enable IP-bound sign-in? After a browser signs in, every request from its network address is attributed to that user until the binding expires. Exclude NAT and shared-host ranges first.')) return;
+  const body = {
+    enabled,
+    ttlMinutes: parseInt(document.getElementById('sso-ipb-ttl').value, 10) || 0,
+    excludeCidrs: document.getElementById('sso-ipb-exclude').value.split('\n').map(x => x.trim()).filter(Boolean),
+  };
+  try { await api('/api/sso-ip-binding', {method: 'PUT', body}); toast('IP-bound sign-in saved'); }
+  catch (e) { toast('Save failed: ' + e.message, 'error'); }
+  loadSSOIPBinding();
+}
+async function loadSSOIPBindings() {
+  const el = document.getElementById('sso-ipb-bindings');
+  const res = await apiFetch('/api/sso-ip-binding/bindings');
+  if (!res.ok) { el.textContent = 'Could not load bindings (admin only).'; return; }
+  const list = (await res.json()).bindings || [];
+  if (!list.length) { el.textContent = 'No live bindings.'; return; }
+  el.innerHTML = '<table class="tbl" style="width:100%;font-size:.78rem"><tr><th>Address</th><th>User</th><th>Provider</th><th>Groups</th><th>Expires</th><th></th></tr>' +
+    list.map(b => `<tr><td>${escHtml(b.addr)}</td><td>${escHtml(b.subject)}</td><td>${escHtml(b.provider)}</td><td>${escHtml((b.groups||[]).join(', '))}</td><td>${escHtml(b.expires)}</td><td><button class="btn btn-secondary" data-click="revokeSSOIPBinding" data-arg="${escHtml(b.addr)}">Revoke</button></td></tr>`).join('') + '</table>';
+}
+async function revokeSSOIPBinding(addr) {
+  try { await api('/api/sso-ip-binding/bindings?addr=' + encodeURIComponent(addr), {method: 'DELETE'}); toast('Binding revoked'); }
+  catch (e) { toast('Revoke failed: ' + e.message, 'error'); }
+  loadSSOIPBindings(); loadSSOIPBinding();
+}
+async function revokeAllSSOIPBindings() {
+  if (!window.confirm('Revoke every IP-bound sign-in? Those browsers must sign in again.')) return;
+  try { await api('/api/sso-ip-binding/bindings?all=1', {method: 'DELETE'}); toast('All bindings revoked'); }
+  catch (e) { toast('Revoke failed: ' + e.message, 'error'); }
+  loadSSOIPBindings(); loadSSOIPBinding();
+}
+
 async function loadIdPList() {
   loadLegacyLDAPBanner();
+  loadSSOIPBinding();
   const res = await apiFetch('/api/idp');
   if (!res.ok) return;
   const data = await res.json();

@@ -1183,6 +1183,46 @@ routes:
     audit_expected: true
     danger_level: medium
     documented: true
+  - route: "/api/sso-ip-binding"
+    method: "GET"
+    handler: "apiSSOSurrogate"
+    domain: "auth"
+    visibility: admin-supported
+    min_role: "viewer"
+    mutating: false
+    audit_expected: false
+    danger_level: none
+    documented: true
+  - route: "/api/sso-ip-binding"
+    method: "PUT"
+    handler: "apiSSOSurrogate"
+    domain: "auth"
+    visibility: admin-supported
+    min_role: "admin"
+    mutating: true
+    audit_expected: true
+    danger_level: high
+    documented: true
+  - route: "/api/sso-ip-binding/bindings"
+    method: "GET"
+    handler: "apiSSOSurrogateBindings"
+    domain: "auth"
+    visibility: admin-supported
+    min_role: "admin"
+    mutating: false
+    audit_expected: false
+    danger_level: none
+    documented: true
+  - route: "/api/sso-ip-binding/bindings"
+    method: "DELETE"
+    handler: "apiSSOSurrogateBindings"
+    domain: "auth"
+    visibility: admin-supported
+    min_role: "admin"
+    mutating: true
+    audit_expected: true
+    danger_level: medium
+    documented: true
   - route: "/api/policy-learning"
     method: "GET"
     handler: "apiPolicyLearningStatus"

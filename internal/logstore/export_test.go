@@ -50,7 +50,7 @@ func unixU64(t *testing.T, tm time.Time) uint64 {
 	if u <= 0 {
 		t.Fatalf("time %v before the epoch", tm)
 	}
-	return uint64(u)
+	return uint64(u) //nolint:gosec // negative values are rejected above
 }
 
 func genRecord(ts int64, seq uint32, host string, exp uint64) ExportRecord {

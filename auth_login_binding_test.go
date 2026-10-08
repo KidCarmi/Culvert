@@ -84,7 +84,7 @@ func TestOIDCCallback_RequiresTheStartingBrowser(t *testing.T) {
 	callback := func(state, cookie string) *http.Request {
 		r := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/auth/oidc/callback?code=c&state="+state, nil)
 		if cookie != "" {
-			r.AddCookie(&http.Cookie{Name: loginBindCookieName, Value: cookie})
+			r.AddCookie(&http.Cookie{Name: loginBindCookieName, Value: cookie}) //nolint:gosec // request-side fixture: Secure/HttpOnly/SameSite are response attributes
 		}
 		return r
 	}
@@ -141,7 +141,7 @@ func TestAuthSelect_BindsTheStateItMints(t *testing.T) {
 	}
 	// A browser that already holds a well-formed binding keeps it.
 	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/auth/select?relay=/", nil)
-	req.AddCookie(&http.Cookie{Name: loginBindCookieName, Value: testLoginBindValue})
+	req.AddCookie(&http.Cookie{Name: loginBindCookieName, Value: testLoginBindValue}) //nolint:gosec // request-side fixture: Secure/HttpOnly/SameSite are response attributes
 	rec = httptest.NewRecorder()
 	authSelectProvider(rec, req)
 	for _, c := range rec.Result().Cookies() {

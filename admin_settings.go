@@ -271,6 +271,18 @@ type AdminSettings struct {
 	PolicyLearningSaved                   bool     `json:"policy_learning_saved"`
 	PolicyLearningEnabled                 bool     `json:"policy_learning_enabled"`
 	PolicyLearningRecommendableCategories []string `json:"policy_learning_recommendable_categories"`
+
+	// IP-bound sign-in (F-SSO-SCOPE-1, sso_surrogate.go). Sentinel-gated like
+	// the fields above: a file predating the feature keeps it OFF. Node-local
+	// and AdminDurable-only — OFF export/import, version-rollback and CP→DP:
+	// the bindings it governs are node-local and volatile, and a rollback or
+	// sync that silently switched an identity transport ON would widen who is
+	// attributed to whom. No omitempty on the list: an explicitly empty
+	// exclusion list must survive the round trip.
+	SSOSurrogateSaved        bool     `json:"sso_ip_binding_saved"`
+	SSOSurrogateEnabled      bool     `json:"sso_ip_binding_enabled"`
+	SSOSurrogateTTLMinutes   int      `json:"sso_ip_binding_ttl_minutes,omitempty"`
+	SSOSurrogateExcludeCIDRs []string `json:"sso_ip_binding_exclude_cidrs"`
 }
 
 var (
@@ -320,6 +332,7 @@ func snapshotOverriddenSurfaces(s AdminSettings) {
 	add(s.YARASettingsSaved, "YARA engine settings")
 	add(s.AVUnavailableSaved, "AV-unavailable scan posture")
 	add(s.AutoExcludeTunablesSaved, "decryption auto-exclusion tunables")
+	add(s.SSOSurrogateSaved, "IP-bound sign-in")
 	add(s.SupportRetentionSaved, "support-bundle retention")
 	adminSettingsOverriddenSurfaces.Store(&out)
 }
@@ -420,6 +433,7 @@ func LoadAdminSettings(path string) {
 	applyAdminAutoExcludeTunables(&s)
 	applyAdminSupportRetention(&s)             // Slice B: configurable support-bundle retention caps
 	applyAdminPolicyLearning(&s)               // ADR-0025 M5A: record governed desired state (materialized by loadPolicyLearning)
+	applyAdminSSOSurrogate(&s)                 // F-SSO-SCOPE-1: IP-bound sign-in (off unless governed)
 	setDecRedactHosts(s.DecryptionRedactHosts) // ADR-0011 §4 host/SNI redaction posture
 
 	snapshotOverriddenSurfaces(s)
@@ -870,6 +884,9 @@ type adminSaveOverrides struct {
 	autoExclude      *autoExcludeTunables
 	supportRetention *supportRetentionConfig
 	policyLearning   *policyLearnSettings
+	// ssoSurrogate carries the TARGET IP-bound sign-in settings for the
+	// persist-before-apply PUT (applyOnSuccess publishes them after the write).
+	ssoSurrogate *ssoSurrogateRuntime
 	// yaraSettings carries the TARGET YARA engine posture for the 2E-A
 	// persist-before-apply settings PUT: the durable file records these
 	// target values while the live engine still runs the old ones;
@@ -1203,6 +1220,7 @@ func saveAdminSettingsWithOverrides(ov adminSaveOverrides) error {
 	snapshotAutoExcludeTunables(&s, ov.autoExclude)
 	snapshotSupportRetention(&s, ov.supportRetention) // Slice B: configurable retention caps
 	snapshotPolicyLearning(&s, ov.policyLearning)     // ADR-0025 M5A: governed enablement + recommendable guardrail
+	snapshotSSOSurrogate(&s, ov.ssoSurrogate)         // F-SSO-SCOPE-1: IP-bound sign-in settings
 	snapshotDecRedaction(&s, ov.decRedaction)
 
 	data, err := json.MarshalIndent(s, "", "  ")

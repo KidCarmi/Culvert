@@ -41,12 +41,12 @@ func TestLoginBinding_HTTPSUsesHostPrefixAndIgnoresPlantedCookies(t *testing.T) 
 	}
 	want := sha256.Sum256([]byte(testLoginBindValue))
 	planted := lbHTTPS(lbReq("/auth/oidc/callback"))
-	planted.AddCookie(&http.Cookie{Name: loginBindCookieName, Value: testLoginBindValue})
+	planted.AddCookie(&http.Cookie{Name: loginBindCookieName, Value: testLoginBindValue}) //nolint:gosec // request-side fixture: Secure/HttpOnly/SameSite are response attributes
 	if loginBindingMatches(want, planted) {
 		t.Fatal("HTTPS accepted a plain-named (plantable) binding cookie")
 	}
 	genuine := lbHTTPS(lbReq("/auth/oidc/callback"))
-	genuine.AddCookie(&http.Cookie{Name: loginBindSecureCookieName, Value: testLoginBindValue})
+	genuine.AddCookie(&http.Cookie{Name: loginBindSecureCookieName, Value: testLoginBindValue}) //nolint:gosec // request-side fixture: Secure/HttpOnly/SameSite are response attributes
 	if !loginBindingMatches(want, genuine) {
 		t.Fatal("HTTPS refused the genuine __Host- binding cookie")
 	}
@@ -65,14 +65,14 @@ func TestLoginBinding_HTTPSUsesHostPrefixAndIgnoresPlantedCookies(t *testing.T) 
 func TestLoginBinding_JunkCopyDoesNotBlockTheGenuineOne(t *testing.T) {
 	want := sha256.Sum256([]byte(testLoginBindValue))
 	r := lbReq("/auth/saml/complete")
-	r.AddCookie(&http.Cookie{Name: loginBindCookieName, Value: "junk"})
-	r.AddCookie(&http.Cookie{Name: loginBindCookieName, Value: "b3RoZXItYnJvd3Nlci1iaW5kaW5nLXZhbHVlLTAxMjM"})
-	r.AddCookie(&http.Cookie{Name: loginBindCookieName, Value: testLoginBindValue})
+	r.AddCookie(&http.Cookie{Name: loginBindCookieName, Value: "junk"})                                        //nolint:gosec // request-side fixture: Secure/HttpOnly/SameSite are response attributes
+	r.AddCookie(&http.Cookie{Name: loginBindCookieName, Value: "b3RoZXItYnJvd3Nlci1iaW5kaW5nLXZhbHVlLTAxMjM"}) //nolint:gosec // request-side fixture: Secure/HttpOnly/SameSite are response attributes
+	r.AddCookie(&http.Cookie{Name: loginBindCookieName, Value: testLoginBindValue})                            //nolint:gosec // request-side fixture: Secure/HttpOnly/SameSite are response attributes
 	if !loginBindingMatches(want, r) {
 		t.Fatal("a junk or foreign copy ahead of the genuine binding blocked the login")
 	}
 	r = lbReq("/auth/saml/complete")
-	r.AddCookie(&http.Cookie{Name: loginBindCookieName, Value: "junk"})
+	r.AddCookie(&http.Cookie{Name: loginBindCookieName, Value: "junk"}) //nolint:gosec // request-side fixture: Secure/HttpOnly/SameSite are response attributes
 	if loginBindingMatches(want, r) {
 		t.Fatal("junk alone matched")
 	}
@@ -133,7 +133,8 @@ func TestAuthSelect_UnsignedRelayIsNotAnOpenRedirect(t *testing.T) {
 	if got := relayOf("/auth/select?relay=" + url.QueryEscape("https://evil.example/")); got != "/" {
 		t.Fatalf("hand-made link kept relay %q", got)
 	}
-	sel := uiSelectURL("http://app.example/page", nil)
+	withSSOSurrogate(t, ssoSurrogateSettings{Enabled: true}) // captive redirects need IP-bound sign-in (sso_surrogate.go)
+	sel := uiSelectURL(lbReq("http://app.example/page"), "http://app.example/page", nil)
 	u, err := url.Parse(sel)
 	if err != nil || u.Host != "culvert-ui.test" {
 		t.Fatalf("captive select URL %q", sel)

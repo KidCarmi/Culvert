@@ -22,7 +22,14 @@ const maxUsernameLen = 256
 // is no UI origin to send the browser to (the request's own Host is the
 // destination site), so the redirect is withheld and the caller falls back to
 // its 407/403 — loudly, rate-limited.
-func uiSelectURL(relay string, providerIDs []string) string {
+func uiSelectURL(r *http.Request, relay string, providerIDs []string) string {
+	// Sign-in can authenticate this client's proxied traffic only through
+	// IP-bound sign-in (sso_surrogate.go): with it off — or for an address it
+	// will not bind — a redirect could only end in a sign-in loop.
+	if ssoSignInWithheld(peerHost(r.RemoteAddr)) != "" {
+		noteCaptiveNoTransport()
+		return ""
+	}
 	base := strings.TrimRight(cfg.ProxyBaseURL(), "/")
 	if base == "" {
 		noteCaptiveNoBaseURL()
@@ -36,7 +43,19 @@ func uiSelectURL(relay string, providerIDs []string) string {
 	return base + "/auth/select?" + q.Encode()
 }
 
-var captiveNoBaseURLLast atomic.Int64
+var captiveNoBaseURLLast, captiveNoTransportLast atomic.Int64
+
+// noteCaptiveNoTransport logs at most once a minute that sign-in redirects
+// are withheld because sign-in cannot authenticate the client's proxied
+// traffic (IP-bound sign-in off, or the client is excluded/local).
+func noteCaptiveNoTransport() {
+	now := time.Now().Unix()
+	last := captiveNoTransportLast.Load()
+	if (now >= last && now-last < 60) || !captiveNoTransportLast.CompareAndSwap(last, now) {
+		return
+	}
+	logger.Printf("WARN SSO sign-in redirect withheld: a browser SSO session cannot authenticate proxied traffic unless IP-bound sign-in is enabled for the client's address (Settings → Identity Providers); browsers get the challenge with an explanation instead of a sign-in loop")
+}
 
 // noteCaptiveNoBaseURL logs at most once a minute that captive SSO redirects
 // are withheld because proxy.base_url is unset.
@@ -74,7 +93,7 @@ func resolveCaptivePortalURL(r *http.Request) string {
 	if emailHint != "" {
 		if at := strings.LastIndex(emailHint, "@"); at >= 0 {
 			if prov := idpRegistry.RouteByDomain(emailHint[at+1:]); prov != nil {
-				return uiSelectURL(relayURL, []string{stripIdPPrefix(prov.Name())})
+				return uiSelectURL(r, relayURL, []string{stripIdPPrefix(prov.Name())})
 			}
 		}
 	}
@@ -82,7 +101,7 @@ func resolveCaptivePortalURL(r *http.Request) string {
 	// INTERACTIVE providers only (ADR-0027): a credential-only provider
 	// (LDAP) cannot fulfil a captive redirect and must not swallow it.
 	if idpRegistry.HasEnabledInteractiveProvider() {
-		return uiSelectURL(relayURL, nil)
+		return uiSelectURL(r, relayURL, nil)
 	}
 
 	// Legacy single OIDC provider.
@@ -110,7 +129,7 @@ func resolveSSOPortalURL(r *http.Request, providerRefs []string) (portalURL stri
 	for i := range elig {
 		ids = append(ids, elig[i].id)
 	}
-	return uiSelectURL(ssoRelayURL(r), ids), len(elig)
+	return uiSelectURL(r, ssoRelayURL(r), ids), len(elig)
 }
 
 // ssoEligibleProvider pairs an IdP profile ID with its live provider.

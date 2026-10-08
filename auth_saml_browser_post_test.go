@@ -64,7 +64,7 @@ func samlComplete(t *testing.T, srv *httptest.Server, location, cookie string) (
 		t.Fatal(err)
 	}
 	if cookie != "" {
-		req.AddCookie(&http.Cookie{Name: loginBindCookieName, Value: cookie})
+		req.AddCookie(&http.Cookie{Name: loginBindCookieName, Value: cookie}) //nolint:gosec // request-side fixture: Secure/HttpOnly/SameSite are response attributes
 	}
 	status, _, cookies := samlDo(t, req)
 	return status, cookies

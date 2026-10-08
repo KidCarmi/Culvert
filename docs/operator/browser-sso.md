@@ -80,9 +80,78 @@ again from the sign-in page.
 The session cookie is set on the admin UI host. A browser presents it only on
 requests to that host — never on requests to other sites, and never inside an
 HTTPS (CONNECT) tunnel. **On its own, a browser SSO sign-in therefore does not
-authenticate a user's ordinary proxied traffic.** Proxy authentication for
-general traffic uses a credential-capable provider (local users, LDAP, OIDC
-token introspection via `Proxy-Authorization`).
+authenticate a user's ordinary proxied traffic** (F-SSO-SCOPE-1, #1528). Proxy
+authentication for general traffic uses a credential-capable provider (local
+users, LDAP, OIDC token introspection via `Proxy-Authorization`), or IP-bound
+sign-in below.
 
-Tracked as F-SSO-SCOPE-1 (#1528). A defined browser-to-proxy identity transport
-is being added as an opt-in; this section will document it when it lands.
+### IP-bound sign-in (opt-in, off by default)
+
+Settings → Identity Providers → **IP-bound sign-in**
+(`GET/PUT /api/sso-ip-binding`, bindings at `/api/sso-ip-binding/bindings`).
+
+When enabled, a **completed** interactive sign-in (OIDC or SAML, after the
+browser-binding check above) binds the client address the admin UI saw to the
+signed-in identity for the binding lifetime (default 60 minutes, 5–1440). The
+proxy then attributes requests from that address to that identity — groups
+included, so group-scoped policy rules apply — for every request that presents
+no credential of its own.
+
+**The trade-off is the address itself.** Everyone behind one address — a NAT
+gateway, a terminal server, a shared jump host, a VPN concentrator that does
+not preserve client addresses — becomes the same user. Before enabling:
+
+- list those ranges under **Never bind these sources**; their logins are not
+  bound, and the proxy does not send their browsers to sign in (they get the
+  challenge with an explanation, not a sign-in loop);
+- make sure the admin UI sees real client addresses: behind a reverse proxy,
+  configure it as a trusted proxy so `X-Forwarded-For` is honoured, or every
+  login binds the reverse proxy's address.
+
+- the admin UI host and the IdP must be reached **directly**, not through the
+  proxy (PAC/bypass list) — a sign-in that arrives from the appliance's own
+  address identifies no browser and is not bound;
+- the trusted-proxy ranges become part of identity: a host inside a trusted
+  range talking to the admin UI directly can name the address bound to its
+  sign-in through `X-Forwarded-For`. Keep that list to the reverse proxies
+  themselves.
+
+Rules:
+
+| | |
+|---|---|
+| What a binding is | Evidence of an earlier browser sign-in on that address — weaker than a credential on the request. |
+| Presented credentials | Always win. A wrong `Proxy-Authorization` from a bound address is refused. |
+| CredentialRequired rules | Never satisfied by a binding — they demand a credential on the request itself. |
+| SSORequired rules | Satisfied only when the sign-in came from one of the rule's `providerRefs` (any provider when none are listed). |
+| Policy and logs | Attributed requests carry the user and groups, with auth source **`sso-ip:<provider>`** (not `<provider>`): logs and SIEM show the identity was inferred from an address, and a rule scoped to `authSource: <provider>` does not accept it. |
+| Same address, another user | The newest sign-in wins and takes the address over — counted as `rebound` and logged as a WARN naming both users. On a NAT or shared host that is the signal to exclude the address. A re-leased DHCP address works the same way: the next device to sign in on it takes it over. Until then, a device that receives a departed user's address is attributed to that user for the rest of the lifetime — keep the lifetime short on networks with fast address reuse. |
+| Lifetime | The configured lifetime, never longer than the sign-in session (8 h by default), so a binding cannot outlive what sign-out revokes. |
+| Sign-out | `POST /auth/logout` removes **every** binding of that user (provider + subject). |
+| IdP disabled or deleted | Its bindings stop counting immediately. |
+| Settings change | Bindings inside a newly excluded range are removed and every expiry is shortened to a newly lowered lifetime. |
+| Turning it off | Takes effect immediately and removes every binding — even if saving the setting fails (the API then says it was not saved). Re-enabling starts from an empty table. |
+| Own / loopback addresses | Never bound. |
+| Capacity | 65,536 live bindings. A full table refuses new bindings; it never evicts a live one. |
+| Restart | Bindings are volatile — users sign in again. |
+| Cluster | Node-local: a binding exists on the node that served the sign-in (the `proxy.base_url` node). Traffic through another node is not identified by it. |
+| SOCKS5 | Not consulted — SOCKS5 clients authenticate with their own credentials. |
+| Persistence | Settings are saved in `admin_settings.json` on this node; they are not exported, rolled back or synced to data-plane nodes. |
+
+A login that cannot be bound while the transport is on (excluded or loopback
+address, full table) gets a page that says so, instead of a redirect back
+into a challenge.
+
+**With it off (the default)** the proxy does not redirect browsers to sign in
+at all — a redirect could only end in a loop. Browsers get the ordinary
+challenge (407), or a 403 for a rule that requires SSO, with a body that says
+browser sign-in cannot authenticate the connection. When no credential-capable
+provider exists at all (for example SAML only), the answer is a 403 rather
+than a Basic prompt that could never succeed.
+
+Evidence: `ui_sso_ip_binding_e2e_test.go` (real Chromium through Culvert's
+proxy: sign-in, policy allow/deny by group, sign-out, transport off) and
+`sso_surrogate_test.go`.
+
+Metrics (enabled gauge always; the rest only while enabled):
+`culvert_sso_ip_binding_{enabled,bindings,binds_total{outcome},hits_total}`.
