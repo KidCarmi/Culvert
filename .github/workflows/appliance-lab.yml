@@ -51,7 +51,7 @@ jobs:
   guest-boot:
     name: "Lab · ${{ matrix.variant }} OVA: build + QEMU guest boot + qualify"
     # A push whose head commit says [fdisk-only] reruns F-DISK-1 alone.
-    if: ${{ !contains(github.event.head_commit.message, '[fdisk-only]') && !contains(github.event.head_commit.message, '[sidecar-scan]') && !contains(github.event.head_commit.message, '[boot-console]') && !contains(github.event.head_commit.message, '[lab-skip]') && !contains(github.event.head_commit.message, '[saml-replay]') && !contains(github.event.head_commit.message, '[recovery-ab]') }}
+    if: ${{ !contains(github.event.head_commit.message, '[fdisk-only]') && !contains(github.event.head_commit.message, '[sidecar-scan]') && !contains(github.event.head_commit.message, '[boot-console]') && !contains(github.event.head_commit.message, '[lab-skip]') && !contains(github.event.head_commit.message, '[saml-replay]') && !contains(github.event.head_commit.message, '[recovery-ab]') && !contains(github.event.head_commit.message, '[sidecar-repro]') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 240
     strategy:
@@ -526,7 +526,7 @@ jobs:
 
   f-disk-1:
     name: "Lab · F-DISK-1 on the bounded nested-Docker host"
-    if: ${{ !contains(github.event.head_commit.message, '[sidecar-scan]') && !contains(github.event.head_commit.message, '[boot-console]') && !contains(github.event.head_commit.message, '[lab-skip]') && !contains(github.event.head_commit.message, '[saml-replay]') && !contains(github.event.head_commit.message, '[recovery-ab]') }}
+    if: ${{ !contains(github.event.head_commit.message, '[sidecar-scan]') && !contains(github.event.head_commit.message, '[boot-console]') && !contains(github.event.head_commit.message, '[lab-skip]') && !contains(github.event.head_commit.message, '[saml-replay]') && !contains(github.event.head_commit.message, '[recovery-ab]') && !contains(github.event.head_commit.message, '[sidecar-repro]') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     steps:
@@ -899,7 +899,7 @@ jobs:
   adopted-sidecar-scan:
     name: "Lab · ADOPTED ClamAV sidecar (built on the appliance): exact-byte scan + SBOM"
     needs: guest-boot
-    if: ${{ !cancelled() && !contains(github.event.head_commit.message, '[fdisk-only]') && !contains(github.event.head_commit.message, '[sidecar-scan]') && !contains(github.event.head_commit.message, '[boot-console]') && !contains(github.event.head_commit.message, '[lab-skip]') && !contains(github.event.head_commit.message, '[saml-replay]') && !contains(github.event.head_commit.message, '[recovery-ab]') }}
+    if: ${{ !cancelled() && !contains(github.event.head_commit.message, '[fdisk-only]') && !contains(github.event.head_commit.message, '[sidecar-scan]') && !contains(github.event.head_commit.message, '[boot-console]') && !contains(github.event.head_commit.message, '[lab-skip]') && !contains(github.event.head_commit.message, '[saml-replay]') && !contains(github.event.head_commit.message, '[recovery-ab]') && !contains(github.event.head_commit.message, '[sidecar-repro]') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     env:
@@ -1099,5 +1099,100 @@ jobs:
         with:
           name: appliance-lab-recovery-ab-98cf41c0d82f
           path: ${{ env.LAB_ROOT }}/ab-evidence/
+          retention-days: 30
+          if-no-files-found: warn
+
+  # #1528: the reproducible ClamAV sidecar build (build-ova.sh) proved on the
+  # build host's own Docker in minutes, before a full OVA cycle. Runs the REAL
+  # block cut out of build-ova.sh by its markers (not a copy), twice in
+  # separate work dirs: two invocations of two builds each must all give one
+  # manifest digest; the loaded image must carry the archive's own name and
+  # the pinned packages; the baked archive must pass the repo's closure check.
+  # Runs only on a commit whose message carries the sidecar-repro tag.
+  sidecar-repro:
+    name: "Lab · reproducible ClamAV sidecar build (real build-ova.sh block, 2 × 2 builds)"
+    if: ${{ contains(github.event.head_commit.message, '[sidecar-repro]') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    env:
+      SRC_SHA: 7e53720d06f525f4e5fdbfec42f52840d5b734e2
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.SRC_SHA }}
+          path: src
+          persist-credentials: false
+      - name: Match the recorded build host's Docker engine (29.6.2)
+        # The original OVA's build-info.json records Docker 29.6.2 on the
+        # containerd image store. The runner ships Docker 28, whose containerd
+        # store reports an empty platform for an index-digest reference, so
+        # build-ova.sh's amd64 assertion refuses the pinned ClamAV image (run
+        # 37138298441). Match the build host instead of changing the build.
+        run: |
+          set -euo pipefail
+          sudo install -m 0755 -d /etc/apt/keyrings
+          curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor --yes -o /etc/apt/keyrings/docker.gpg
+          echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu noble stable" | sudo tee /etc/apt/sources.list.d/docker-lab.list >/dev/null
+          sudo apt-get update -q
+          v="$(apt-cache madison docker-ce | awk '$3 ~ /^5:29\.6\.2-/{print $3; exit}')"
+          [ -n "$v" ] || { echo "::error::docker-ce 29.6.2 not available"; exit 1; }
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q --allow-downgrades "docker-ce=$v" "docker-ce-cli=$v" containerd.io
+          docker version --format 'client={{.Client.Version}} server={{.Server.Version}}'
+      - name: Use the containerd image store (the build's archive-identity guard requires it)
+        # Under Docker's classic store a loaded image's ID is its CONFIG digest,
+        # so the saved archive cannot carry the manifest digest first boot pins
+        # (build-ova.sh refuses it — PR #1528 K16). Same requirement as the
+        # qualification host; the guard is not relaxed.
+        run: |
+          set -euo pipefail
+          sudo mkdir -p /etc/docker
+          [ -s /etc/docker/daemon.json ] || echo '{}' | sudo tee /etc/docker/daemon.json >/dev/null
+          sudo python3 -c 'import json; p="/etc/docker/daemon.json"; d=json.load(open(p)); d.setdefault("features",{})["containerd-snapshotter"]=True; json.dump(d,open(p,"w"))'
+          sudo systemctl restart docker
+          for i in $(seq 1 30); do docker info >/dev/null 2>&1 && break; sleep 2; done
+          docker info --format 'server={{.ServerVersion}} driver={{.Driver}} {{.DriverStatus}}' | tee /dev/stderr | grep -q 'server=29.6.2 .*io.containerd.snapshotter.v1'
+      - name: Run the real sidecar block twice; compare all four builds
+        run: |
+          set -euo pipefail
+          E="$PWD/evidence"; mkdir -p "$E"
+          cd src; REPO="$PWD"
+          sed -n '/^# Reproducible: two INDEPENDENT builds/,/^  || die "loaded ClamAV sidecar is/p' appliance/build/build-ova.sh > "$E/block.sh"
+          grep -q 'type=oci,dest=' "$E/block.sh" && grep -q 'oci_top_digest' "$E/block.sh"
+          printf 'block sha256 %s from build-ova.sh@%s (%s lines)\n' "$(sha256sum "$E/block.sh" | cut -d' ' -f1)" "$SRC_SHA" "$(wc -l < "$E/block.sh")" | tee "$E/summary.txt"
+          bake="$(grep -F 'gzip -n -6 < "$SIDECAR_BUILD/first.tar" > "$WORK/clamav.tar.gz"' appliance/build/build-ova.sh)"
+          # shellcheck disable=SC1091
+          . appliance/build/archive-identity.sh
+          CLAMAV_SIDECAR_REF="$(sed -n 's/^CLAMAV_SIDECAR_REF=//p' appliance/build/manifest.env)"
+          SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)"; export SOURCE_DATE_EPOCH
+          die() { echo "DIE: $*" | tee -a "$E/summary.txt"; exit 1; }
+          log() { echo "[build] $*"; }
+          for run in 1 2; do
+            WORK="$RUNNER_TEMP/w$run"; OUT="$E/out$run"; mkdir -p "$WORK" "$OUT"
+            docker image rm "$CLAMAV_SIDECAR_REF" >/dev/null 2>&1 || true
+            ( set -euo pipefail
+              # shellcheck disable=SC1090
+              . "$E/block.sh"
+              echo "run$run first=$CLAMAV_SIDECAR_FIRST rebuild=$CLAMAV_SIDECAR_REBUILD loaded=$CLAMAV_SIDECAR_ID" | tee -a "$E/summary.txt"
+              docker run --rm --network none --entrypoint sh "$CLAMAV_SIDECAR_REF" -c 'apk info -v 2>/dev/null | sort' > "$E/run$run.apk.txt"
+              eval "$bake"
+              sha256sum "$WORK/clamav.tar.gz" | sed "s#^#run$run baked #" | tee -a "$E/summary.txt"
+              archive_platform_closure "$WORK/clamav.tar.gz" linux/amd64 "$CLAMAV_SIDECAR_ID" "$CLAMAV_SIDECAR_ID" && echo "run$run closure OK" | tee -a "$E/summary.txt"
+              echo "$CLAMAV_SIDECAR_ID" > "$E/run$run.id" )
+          done
+          grep -E '^(pcre2|zlib|nghttp2-libs)-[0-9]' "$E/run1.apk.txt" | tee -a "$E/summary.txt"
+          cmp -s "$E/run1.apk.txt" "$E/run2.apk.txt" && echo "package sets identical across runs ($(wc -l < "$E/run1.apk.txt"))" | tee -a "$E/summary.txt"
+          if cmp -s "$E/run1.id" "$E/run2.id"; then echo "VERDICT reproducible across 2 invocations x 2 builds: $(cat "$E/run1.id")" | tee -a "$E/summary.txt"
+          else echo "VERDICT NOT reproducible across invocations: $(cat "$E/run1.id") vs $(cat "$E/run2.id")" | tee -a "$E/summary.txt"; exit 1; fi
+          { echo '### Reproducible sidecar probe'; echo '```'; cat "$E/summary.txt"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: appliance-lab-sidecar-repro-7e53720d06f5
+          path: |
+            evidence/summary.txt
+            evidence/block.sh
+            evidence/*.apk.txt
+            evidence/out*/
           retention-days: 30
           if-no-files-found: warn
