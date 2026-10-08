@@ -791,15 +791,15 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     env:
-      # Final candidate 98cf41c0 OVA (lab run 37730220212 attempt 2). The archive and index pins
+      # Final candidate 7e53720d OVA (lab run 37805385811). The archive and index pins
       # are the OVA's own build record (build-info.json clamav_baked_tar_sha256
       # and clamav_sidecar_image_id; on 2e3bcc2a these equalled the measured
       # pins). The amd64 manifest and config are DERIVED from the re-hashed
       # index (not pinned: derived and exported through GITHUB_ENV), so every link stays hash-bound.
-      OVA_ARTIFACT_ID: "11530788479"   # appliance-lab-ova-candidate-98cf41c0d82f, run 37730220212 attempt 2
-      OVA_SHA256: 048ba7c604306641f370c851c4924779efd92e2e572ff1a3eb2160d7c718aa44
-      SIDECAR_ARCHIVE_SHA256: 0fa334a4581f36f8b128208be6f08dc46c6f936fa551ee3818e59476db40649b
-      SIDECAR_INDEX: sha256:f31673ae3524cc9e64da4d277584cc6ddaa6453ef747532cc1f3d2eaae368ba7
+      OVA_ARTIFACT_ID: "11562703124"   # appliance-lab-ova-candidate-7e53720d06f5, run 37805385811
+      OVA_SHA256: 578ea6b83b450b91bccc10ac80058db42d157e2161a45aa23fc8a23a2def7c65
+      SIDECAR_ARCHIVE_SHA256: ae9c66c28ce7272ceeafc0e652ede4b704c3fa85ee89000ccc8267c2eae8d161
+      SIDECAR_INDEX: sha256:1cf6b7e347c2b14b14cbcdf5d9e5de1cb8de8e3b97c44508874178315b563787
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Workspace + libguestfs (read-only disk access)
@@ -886,7 +886,7 @@ jobs:
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
-          name: appliance-lab-sidecar-scan-98cf41c0d82f
+          name: appliance-lab-sidecar-scan-7e53720d06f5
           path: ${{ env.W }}/evidence/
           if-no-files-found: warn
 
