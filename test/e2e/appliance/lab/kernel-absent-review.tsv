@@ -46,3 +46,6 @@
 ^wifi: wilc1000	WILC1000	wilc1000
 ^zram	ZRAM	zram
 ^ALSA: usb-audio	SND_USB_AUDIO	snd-usb-audio
+^l2tp	L2TP	l2tp_core
+^s390	S390	s390
+^RDMA/rtrs	INFINIBAND_RTRS_SERVER	rtrs-server

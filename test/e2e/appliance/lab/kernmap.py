@@ -58,7 +58,9 @@ for line in open(review_f):
     val = config.get(sym, "unset")
     ok = norm(mod) not in ondisk_stems and (val == "unset" or (val == "m" and norm(mod) in order_stems))
     review.append((re.compile(rx), sym, mod, val, ok))
-DENY_MAP = [(r"^sctp\b", "sctp"), (r"^NFSD\b|^nfsd\b", "nfsd"), (r"^KVM\b", "kvm"), (r"^tipc\b", "tipc"), (r"^dccp\b", "dccp")]
+DENY_MAP = [(r"^sctp\b", "sctp"), (r"^NFSD\b|^nfsd\b", "nfsd"), (r"^KVM\b", "kvm"), (r"^tipc\b", "tipc"),
+            (r"^dccp\b", "dccp"), (r"^ksmbd\b|^smb: server\b", "ksmbd"), (r"^smb: client\b|^cifs\b", "cifs"),
+            (r"^can\b", "can"), (r"^pppoe\b", "pppoe"), (r"^RDMA$|^RDMA/(core|nldev|cma|uverbs|umad)\b", "ib_core")]
 GENERIC = {"core", "main", "common", "api", "base", "ops", "sys", "dev", "lib", "util", "utils",
            "debug", "fix", "net", "fs", "mm", "block", "driver", "drivers"}
 pcomps = {}
