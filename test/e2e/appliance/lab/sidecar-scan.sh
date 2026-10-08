@@ -51,8 +51,16 @@ cfg = json.loads(blob(config))
 assert cfg.get("os") == "linux" and cfg.get("architecture") == "amd64", f"config is {cfg.get('os')}/{cfg.get('architecture')}"
 for l in man["layers"]:
     blob(l["digest"])
-legacy = json.load(t.extractfile("manifest.json"))
-assert len(legacy) == 1 and legacy[0]["Config"].endswith(config.split(":")[1]), "manifest.json names another config"
+names = set(t.getnames())
+if "manifest.json" in names:  # docker save archive: cross-check its legacy manifest
+    legacy = json.load(t.extractfile("manifest.json"))
+    assert len(legacy) == 1 and legacy[0]["Config"].endswith(config.split(":")[1]), "manifest.json names another config"
+    repo_tags, layout = legacy[0].get("RepoTags"), "docker-save"
+else:  # a pure OCI layout (the reproducible sidecar build exports one)
+    assert "oci-layout" in names, "archive has neither manifest.json nor an oci-layout marker"
+    assert json.load(t.extractfile("oci-layout")).get("imageLayoutVersion") == "1.0.0", "unexpected oci-layout version"
+    ann = entry.get("annotations", {})
+    repo_tags, layout = [ann["io.containerd.image.name"]] if "io.containerd.image.name" in ann else [], "oci"
 matched = "top" if expect == entry["digest"] else ("config" if expect == config else "")
 assert matched == "top" or (kind == "either" and matched == "config"), \
     f"expected id {expect} is neither the top entry {entry['digest']} nor (allowed: {kind == 'either'}) the config {config}"
@@ -60,7 +68,7 @@ res = {"archive_sha256": hashlib.sha256(open(tar, "rb").read()).hexdigest(),
        "expected_id": expect, "id_matched": matched, "top": entry["digest"], "top_is_index": man_digest != entry["digest"],
        "amd64_manifest": man_digest, "config": config,
        "layers": [l["digest"] for l in man["layers"]], "diff_ids": cfg["rootfs"]["diff_ids"],
-       "repo_tags": legacy[0].get("RepoTags"), "other_platform_entries": others}
+       "repo_tags": repo_tags, "archive_layout": layout, "other_platform_entries": others}
 json.dump(res, open(out, "w"), indent=2)
 print(config)
 PY
