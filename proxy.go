@@ -488,12 +488,12 @@ func resolveRequestAuth(w http.ResponseWriter, r *http.Request, clientIP, reqID 
 					// Proxy-Authorization header is present).
 					authLog = authLogFieldsFor(d)
 					authLog.AuthSource = authenticatedSource // F5: server-side source (still "unauth" pre-credential)
-					// Only a browser can complete an interactive SSO flow. Resolving the
-					// portal URL can ALLOCATE IdP callback state (PKCE / SAML stores) as a
-					// side effect, so it is done ONLY for browser clients: a non-browser or
-					// CONNECT request fails closed WITHOUT touching those capped stores
-					// (otherwise a stream of denied requests could churn / evict legitimate
-					// in-flight browser logins). classifyClient is consulted ONLY here.
+					// Only a browser can complete an interactive SSO flow, so only a
+					// browser is redirected; a non-browser or CONNECT request fails
+					// closed. The redirect targets the sign-in page on the UI host
+					// (uiSelectURL) — no IdP state is minted on the proxy path (login
+					// state is minted only there, bound to the browser:
+					// auth_login_binding.go). classifyClient is consulted ONLY here.
 					if classifyClient(r) == clientBrowser {
 						if portalURL, eligible := resolveSSOPortalURL(r, d.Rule.Auth.ProviderRefs); eligible > 0 && portalURL != "" && isSafeCaptiveRedirect(portalURL) {
 							// Browser + ≥1 eligible IdP → 302 to the captive portal /
@@ -545,16 +545,17 @@ func resolveRequestAuth(w http.ResponseWriter, r *http.Request, clientIP, reqID 
 						// Route browser to appropriate IdP based on email domain hint.
 						loginURL := resolveCaptivePortalURL(r)
 						// Inline guard for static-analysis visibility:
-						// resolveCaptivePortalURL returns either a same-origin
-						// path ("/auth/select?relay=...") or an admin-configured
-						// absolute http(s) IdP URL. isSafeCaptiveRedirect rejects
+						// resolveCaptivePortalURL returns the sign-in page on the
+						// UI host (<proxy.base_url>/auth/select?…, signed relay)
+						// or an admin-configured legacy http(s) login URL; "" when
+						// neither applies. isSafeCaptiveRedirect rejects
 						// protocol-relative ("//evil"), data:/javascript:, and
 						// any other shape (covered by TestIsSafeCaptiveRedirect).
 						if loginURL != "" && isSafeCaptiveRedirect(loginURL) {
 							// gosec G710's SSA pass cannot follow the
 							// isSafeCaptiveRedirect predicate; the guard above is
 							// the actual safety check.
-							http.Redirect(w, r, loginURL, http.StatusFound) // #nosec G710 -- loginURL passed isSafeCaptiveRedirect (same-origin path or admin-configured http(s) URL)
+							http.Redirect(w, r, loginURL, http.StatusFound) // #nosec G710 -- loginURL passed isSafeCaptiveRedirect (base_url sign-in page or admin-configured http(s) URL)
 							return authOutcome{}, false
 						}
 					}

@@ -5,9 +5,10 @@
 // # Why this is its own engine
 //
 // The state it holds is created SPECULATIVELY, on an UNAUTHENTICATED request.
-// Culvert mints an entry every time it resolves a captive-portal login URL for
-// a client that has not authenticated yet — that resolution happens on the
-// proxy's no-credentials path (proxy.go) and on the public /auth/select page.
+// Culvert mints an entry every time the public /auth/select sign-in page
+// resolves a login URL for a client that has not authenticated yet (the
+// proxy's no-credentials path only redirects there; until #1528 it minted
+// entries itself).
 // So the population of this store is driven by whoever can send the gateway a
 // request, not by whoever can log in.
 //

@@ -3,21 +3,62 @@ package main
 import (
 	"encoding/base64"
 	"errors"
-	"fmt"
 	"net"
 	"net/http"
 	"net/url"
 	"strings"
+	"sync/atomic"
+	"time"
 )
 
 const maxUsernameLen = 256
 
-// resolveCaptivePortalURL picks the best IdP login URL for an unauthenticated
-// browser request.  Resolution priority:
-//  1. Email domain hint from "X-Proxy-Email-Hint" header or "email" query param.
-//  2. First enabled IdP in registry (if exactly one — skips selection screen).
-//  3. Proxy selection page (/auth/select) when multiple providers are registered.
-//  4. Legacy OIDCLoginURL from single-provider config.
+// uiSelectURL is the ONLY captive-portal target: the sign-in page on the UI
+// host (<proxy.base_url>/auth/select), which sets the browser's login-binding
+// cookie before any login state is minted (auth_login_binding.go). The proxy
+// never mints IdP state itself any more — on the proxy path the browser is on
+// some OTHER host, where a UI-host cookie cannot be set, so state minted there
+// could be finished by any browser (login CSRF). Without proxy.base_url there
+// is no UI origin to send the browser to (the request's own Host is the
+// destination site), so the redirect is withheld and the caller falls back to
+// its 407/403 — loudly, rate-limited.
+func uiSelectURL(relay string, providerIDs []string) string {
+	base := strings.TrimRight(cfg.ProxyBaseURL(), "/")
+	if base == "" {
+		noteCaptiveNoBaseURL()
+		return ""
+	}
+	q := url.Values{"relay": {relay}}
+	if len(providerIDs) > 0 {
+		q.Set("providers", strings.Join(providerIDs, ","))
+	}
+	signSelectQuery(q, time.Now()) // the page honours only a relay Culvert chose (auth_select_relay.go)
+	return base + "/auth/select?" + q.Encode()
+}
+
+var captiveNoBaseURLLast atomic.Int64
+
+// noteCaptiveNoBaseURL logs at most once a minute that captive SSO redirects
+// are withheld because proxy.base_url is unset.
+func noteCaptiveNoBaseURL() {
+	now := time.Now().Unix()
+	last := captiveNoBaseURLLast.Load()
+	// A clock that moved backwards re-arms the gate (now < last) instead of
+	// silencing the warning until the clock catches up.
+	if (now >= last && now-last < 60) || !captiveNoBaseURLLast.CompareAndSwap(last, now) {
+		return
+	}
+	logger.Printf("WARN SSO captive redirect withheld: proxy.base_url is not set, so there is no admin-UI origin to send the browser to for sign-in (set it in Settings → Network)")
+}
+
+// resolveCaptivePortalURL picks the sign-in target for an unauthenticated
+// browser request (the Default no-credentials path):
+//  1. Email domain hint ("X-Proxy-Email-Hint" header or "email" query param)
+//     → the sign-in page scoped to the provider routed for that domain.
+//  2. Any enabled interactive IdP → the sign-in page (it continues straight
+//     to the IdP when exactly one is eligible).
+//  3. Legacy OIDCLoginURL from single-provider config (an admin-configured
+//     external URL; no Culvert login state involved).
 func resolveCaptivePortalURL(r *http.Request) string {
 	// Determine the original URL the browser was trying to reach (relay URL).
 	relayURL := r.URL.String()
@@ -32,23 +73,16 @@ func resolveCaptivePortalURL(r *http.Request) string {
 	}
 	if emailHint != "" {
 		if at := strings.LastIndex(emailHint, "@"); at >= 0 {
-			domain := emailHint[at+1:]
-			if prov := idpRegistry.RouteByDomain(domain); prov != nil {
-				return prov.CaptiveLoginURL(relayURL, r)
+			if prov := idpRegistry.RouteByDomain(emailHint[at+1:]); prov != nil {
+				return uiSelectURL(relayURL, []string{stripIdPPrefix(prov.Name())})
 			}
 		}
 	}
 
-	// Single provider — redirect directly without selection screen.
 	// INTERACTIVE providers only (ADR-0027): a credential-only provider
 	// (LDAP) cannot fulfil a captive redirect and must not swallow it.
-	providers := idpRegistry.EnabledInteractiveProviders()
-	if len(providers) == 1 {
-		return providers[0].CaptiveLoginURL(relayURL, r)
-	}
-	// Multiple providers — send to selection page.
-	if len(providers) > 1 {
-		return fmt.Sprintf("/auth/select?relay=%s", url.QueryEscape(relayURL))
+	if idpRegistry.HasEnabledInteractiveProvider() {
+		return uiSelectURL(relayURL, nil)
 	}
 
 	// Legacy single OIDC provider.
@@ -63,25 +97,20 @@ func resolveCaptivePortalURL(r *http.Request) string {
 //   - non-empty → only refs that resolve to an enabled interactive provider;
 //     disabled/deleted/non-interactive refs are ignored at runtime (DR-4).
 //
-// By eligible-set cardinality:
-//   - 0  → ("", 0): the caller fails closed (403).
-//   - 1  → that provider's CaptiveLoginURL (direct redirect).
-//   - >1 → "/auth/select?relay=…&providers=<ids>" (scoped selection page).
+// 0 eligible → ("", 0): the caller fails closed (403). Otherwise the sign-in
+// page scoped to the eligible IDs (it continues straight to the IdP when
+// exactly one is eligible); "" with a non-zero count when proxy.base_url is
+// unset (the caller then fails closed too).
 func resolveSSOPortalURL(r *http.Request, providerRefs []string) (portalURL string, eligibleCount int) {
 	elig := eligibleSSOProviders(providerRefs)
-	switch len(elig) {
-	case 0:
+	if len(elig) == 0 {
 		return "", 0
-	case 1:
-		return elig[0].prov.CaptiveLoginURL(ssoRelayURL(r), r), 1
-	default:
-		ids := make([]string, 0, len(elig))
-		for i := range elig {
-			ids = append(ids, elig[i].id)
-		}
-		return fmt.Sprintf("/auth/select?relay=%s&providers=%s",
-			url.QueryEscape(ssoRelayURL(r)), url.QueryEscape(strings.Join(ids, ","))), len(elig)
 	}
+	ids := make([]string, 0, len(elig))
+	for i := range elig {
+		ids = append(ids, elig[i].id)
+	}
+	return uiSelectURL(ssoRelayURL(r), ids), len(elig)
 }
 
 // ssoEligibleProvider pairs an IdP profile ID with its live provider.

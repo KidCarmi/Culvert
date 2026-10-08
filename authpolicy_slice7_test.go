@@ -45,6 +45,11 @@ func setupAuthGateTest(t *testing.T) {
 	}
 	setAuthExemptDisabled(false)
 	t.Cleanup(func() { setAuthExemptDisabled(false) })
+	// Captive SSO redirects target the UI-host sign-in page, which needs the
+	// externally reachable UI origin (auth_login_binding.go).
+	prevBase := cfg.ProxyBaseURL()
+	SetProxyBaseURL("https://culvert-ui.test")
+	t.Cleanup(func() { SetProxyBaseURL(prevBase) })
 }
 
 func exemptCount() int64 { return atomic.LoadInt64(&statAuthExempt) }
@@ -379,7 +384,7 @@ func TestSlice7_BrowserRedirect_PreservedAndBypassed(t *testing.T) {
 	if w.Code != http.StatusFound {
 		t.Fatalf("browser with no exempt match must still get the SSO redirect: got %d, want 302", w.Code)
 	}
-	if loc := w.Header().Get("Location"); !strings.HasPrefix(loc, "/auth/test-idp") {
+	if loc := w.Header().Get("Location"); !strings.HasPrefix(loc, "https://culvert-ui.test/auth/select?") {
 		t.Errorf("unexpected redirect target %q", loc)
 	}
 

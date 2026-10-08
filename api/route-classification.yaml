@@ -3410,6 +3410,21 @@ routes:
       reason: browser SAML callback (public redirect); not a JSON admin API
       security_class: non-rest-surface
       expires: *baseline
+  - route: "/auth/saml/complete"
+    method: "GET"
+    handler: "authSAMLComplete"
+    domain: "auth"
+    visibility: intentionally-undocumented
+    min_role: "public"
+    mutating: false
+    audit_expected: false
+    danger_level: medium
+    documented: false
+    exemption:
+      owner: platform-team
+      reason: browser SAML login completion (binding check + session); not a JSON admin API
+      security_class: non-rest-surface
+      expires: *baseline
   - route: "/auth/saml/metadata"
     method: "GET"
     handler: "authSAMLMetadata"

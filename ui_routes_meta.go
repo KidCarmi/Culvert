@@ -153,6 +153,11 @@ var uiRoutes = []uiRouteMetadata{
 		Methods: []uiRouteMethod{{Method: MethodAny, MinRole: RolePublic, Note: "IdP redirect target; method varies"}}},
 	{Path: "/auth/saml/callback", Handler: "authSAMLCallback", Domain: "auth", Public: true,
 		Methods: []uiRouteMethod{{Method: "POST", MinRole: RolePublic, Mutating: true, Note: "SAML POST binding"}}},
+	// Second half of a SAML login: the browser-binding check, then the
+	// session (auth_login_binding.go). Public: the browser arrives here from
+	// the ACS's 303 before it has any session.
+	{Path: "/auth/saml/complete", Handler: "authSAMLComplete", Domain: "auth", Public: true,
+		Methods: []uiRouteMethod{{Method: "GET", MinRole: RolePublic}}},
 	{Path: "/auth/saml/metadata", Handler: "authSAMLMetadata", Domain: "auth", Public: true,
 		Methods: []uiRouteMethod{{Method: "GET", MinRole: RolePublic, Note: "SP metadata import endpoint for IdP setup"}}},
 	{Path: "/auth/select", Handler: "authSelectProvider", Domain: "auth", Public: true,

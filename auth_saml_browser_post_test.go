@@ -30,8 +30,8 @@ func samlBrowserPostServer(t *testing.T) (*httptest.Server, signedSAMLFixture) {
 	return srv, fixture
 }
 
-// samlBrowserPost returns the status and cookies; the body is closed here.
-func samlBrowserPost(t *testing.T, target, origin, method string, form url.Values) (int, []*http.Cookie) {
+// samlBrowserPost returns the status, Location and cookies; the body is closed here.
+func samlBrowserPost(t *testing.T, target, origin, method string, form url.Values) (status int, location string, cookies []*http.Cookie) {
 	t.Helper()
 	req, err := http.NewRequestWithContext(context.Background(), method, target, strings.NewReader(form.Encode()))
 	if err != nil {
@@ -41,32 +41,91 @@ func samlBrowserPost(t *testing.T, target, origin, method string, form url.Value
 	if origin != "" {
 		req.Header.Set("Origin", origin)
 	}
+	return samlDo(t, req)
+}
+
+func samlDo(t *testing.T, req *http.Request) (status int, location string, cookies []*http.Cookie) {
+	t.Helper()
 	client := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	resp, err := client.Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer resp.Body.Close()
-	return resp.StatusCode, resp.Cookies()
+	return resp.StatusCode, resp.Header.Get("Location"), resp.Cookies()
 }
 
+// samlComplete follows the ACS's 303 to /auth/saml/complete, presenting
+// cookie (the browser's ps_login_bind) when non-empty.
+func samlComplete(t *testing.T, srv *httptest.Server, location, cookie string) (int, []*http.Cookie) {
+	t.Helper()
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, srv.URL+location, http.NoBody)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cookie != "" {
+		req.AddCookie(&http.Cookie{Name: loginBindCookieName, Value: cookie})
+	}
+	status, _, cookies := samlDo(t, req)
+	return status, cookies
+}
+
+func hasSession(cookies []*http.Cookie) bool {
+	for _, c := range cookies {
+		if c.Name == sessionCookieName && c.Value != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// The ACS accepts the browser's cross-site POST, issues NO session itself, and
+// hands off to /auth/saml/complete, which the starting browser completes.
 func TestSAMLCallback_AcceptsTheBrowsersCrossSitePost(t *testing.T) {
 	for _, origin := range []string{"https://idp.example", "null", ""} {
 		t.Run("origin="+origin, func(t *testing.T) {
 			srv, fixture := samlBrowserPostServer(t)
 			form := url.Values{"RelayState": {fixture.state}, "SAMLResponse": {fixture.samlResponse}}
-			status, cookies := samlBrowserPost(t, srv.URL+"/auth/saml/callback", origin, http.MethodPost, form)
-			if status != http.StatusFound {
-				t.Fatalf("SAML callback with Origin %q: %d, want 302", origin, status)
+			status, loc, cookies := samlBrowserPost(t, srv.URL+"/auth/saml/callback", origin, http.MethodPost, form)
+			if status != http.StatusSeeOther || !strings.HasPrefix(loc, "/auth/saml/complete?t=") {
+				t.Fatalf("SAML callback with Origin %q: %d %q, want 303 to /auth/saml/complete", origin, status, loc)
 			}
-			var got bool
-			for _, c := range cookies {
-				got = got || (c.Name == sessionCookieName && c.Value != "")
+			if hasSession(cookies) {
+				t.Fatal("the ACS issued a session before the browser binding was checked")
 			}
-			if !got {
-				t.Fatalf("SAML callback with Origin %q set no %s cookie", origin, sessionCookieName)
+			status, cookies = samlComplete(t, srv, loc, testLoginBindValue)
+			if status != http.StatusFound || !hasSession(cookies) {
+				t.Fatalf("completion by the starting browser: %d, session %v", status, hasSession(cookies))
 			}
 		})
+	}
+}
+
+// Login CSRF: a login another browser started is never completed here.
+func TestSAMLComplete_RequiresTheStartingBrowser(t *testing.T) {
+	other := "b3RoZXItYnJvd3Nlci1iaW5kaW5nLXZhbHVlLTAxMjM"
+	if !loginBindValueOK(other) {
+		t.Fatal("bad fixture value")
+	}
+	for name, cookie := range map[string]string{"no cookie": "", "another browser": other, "malformed": "x"} {
+		t.Run(name, func(t *testing.T) {
+			srv, fixture := samlBrowserPostServer(t)
+			form := url.Values{"RelayState": {fixture.state}, "SAMLResponse": {fixture.samlResponse}}
+			_, loc, _ := samlBrowserPost(t, srv.URL+"/auth/saml/callback", "https://idp.example", http.MethodPost, form)
+			status, cookies := samlComplete(t, srv, loc, cookie)
+			if status != http.StatusForbidden || hasSession(cookies) {
+				t.Fatalf("%s: %d, session %v — want 403 and no session", name, status, hasSession(cookies))
+			}
+			// The token was consumed: even the right browser cannot reuse it.
+			if status, cookies := samlComplete(t, srv, loc, testLoginBindValue); status != http.StatusBadRequest || hasSession(cookies) {
+				t.Fatalf("token reuse after a refusal: %d, session %v", status, hasSession(cookies))
+			}
+		})
+	}
+	// An unknown or missing token is refused.
+	srv, _ := samlBrowserPostServer(t)
+	if status, cookies := samlComplete(t, srv, "/auth/saml/complete?t=deadbeef", testLoginBindValue); status != http.StatusBadRequest || hasSession(cookies) {
+		t.Fatalf("unknown token: %d", status)
 	}
 }
 
@@ -81,16 +140,17 @@ func TestSAMLCallback_OriginExemptionIsExact(t *testing.T) {
 		{http.MethodPost, "/auth/saml/callbackx"},
 		{http.MethodPut, "/auth/saml/callback"},
 		{http.MethodDelete, "/auth/saml/callback"},
+		{http.MethodPost, "/auth/saml/complete"},
 		{http.MethodPost, "/api/auth/users"},
 	} {
-		status, _ := samlBrowserPost(t, srv.URL+tc.path, "https://idp.example", tc.method, form)
+		status, _, _ := samlBrowserPost(t, srv.URL+tc.path, "https://idp.example", tc.method, form)
 		if status != http.StatusForbidden {
 			t.Errorf("%s %s from a foreign origin: %d, want 403", tc.method, tc.path, status)
 		}
 	}
 	// The response the refused requests carried is still unredeemed: the
 	// genuine callback succeeds afterwards (nothing above consumed it).
-	if status, _ := samlBrowserPost(t, srv.URL+"/auth/saml/callback", "https://idp.example", http.MethodPost, form); status != http.StatusFound {
-		t.Fatalf("genuine callback after the refused ones: %d, want 302", status)
+	if status, _, _ := samlBrowserPost(t, srv.URL+"/auth/saml/callback", "https://idp.example", http.MethodPost, form); status != http.StatusSeeOther {
+		t.Fatalf("genuine callback after the refused ones: %d, want 303", status)
 	}
 }

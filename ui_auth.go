@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/KidCarmi/Culvert/internal/authstate"
 	"github.com/KidCarmi/Culvert/internal/totp"
 	"github.com/crewjam/saml"
 )
@@ -985,7 +986,11 @@ func authOIDCCallback(w http.ResponseWriter, r *http.Request) {
 }
 
 // POST /auth/saml/callback
-// Called by the IdP's POST binding after SAML authentication.
+// Called by the IdP's POST binding after SAML authentication. The POST is
+// cross-site, so it does not carry the browser's Lax login-binding cookie:
+// the validated assertion is parked under a one-time token and the browser is
+// sent (303, a top-level GET that DOES carry the cookie) to
+// /auth/saml/complete, which checks the binding before issuing any session.
 func authSAMLCallback(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -999,38 +1004,82 @@ func authSAMLCallback(w http.ResponseWriter, r *http.Request) {
 		if !ok {
 			continue
 		}
-		id, relayURL, err := samlProv.ExchangeAssertion(r)
+		ex, err := samlProv.ExchangeAssertion(r)
 		if err != nil {
 			logger.Printf("SAML callback rejected by provider=%q: %s", sanitizeLog(samlProv.profile.ID), sanitizeLog(err.Error()))
 			continue // try next provider
 		}
-		if err := setSessionCookie(w, r, id); err != nil {
-			http.Error(w, "session error", http.StatusInternalServerError)
-			return
-		}
-		// Inline guard for static-analysis visibility: parse the IdP-supplied
-		// RelayState, require an absolute http(s) URL pointing at a public
-		// host, and otherwise fall back to "/". This mirrors
-		// isSafeRedirectURL — duplicated here so the validation is visible
-		// at the http.Redirect call site (covered by
-		// TestSAMLRelayStateInlineGuard).
-		safeRelay := "/"
-		if relayURL != "" {
-			if u, err := url.Parse(relayURL); err == nil &&
-				u.IsAbs() && (u.Scheme == "http" || u.Scheme == "https") &&
-				isPrivateHost(u.Host) == nil {
-				safeRelay = u.String()
-			}
-		}
-		logger.Printf("SAML login OK: user=%q email=%q provider=%q", sanitizeLog(id.Sub), sanitizeLog(id.Email), sanitizeLog(id.Provider))
-		// gosec G710 cannot follow validation through url.Parse + multiple
-		// boolean operators; the inline guard above and isSafeRedirectURL
-		// are the actual safety check. Suppression is the last resort, per
-		// the project convention used elsewhere (e.g. ca.go:175, cdr.go:301).
-		http.Redirect(w, r, safeRelay, http.StatusFound) // #nosec G710 -- safeRelay is "/" or an absolute http(s) URL whose host passed isPrivateHost; see inline guard above
+		token := mustRandHex(16)
+		pendingSAMLLogins.Set(token, authStateClientKey(r), &ex)
+		http.Redirect(w, r, uiBasePathPrefix()+"/auth/saml/complete?t="+token, http.StatusSeeOther)
 		return
 	}
 	http.Error(w, "SAML authentication failed", http.StatusUnauthorized)
+}
+
+// uiBasePathPrefix is proxy.base_url's path (e.g. "/culvert" behind a
+// prefix-stripping reverse proxy), so a redirect to another /auth/ page stays
+// under the prefix the browser actually uses. Only the PATH is taken — never
+// the request's Host — so the redirect cannot be steered by a header.
+func uiBasePathPrefix() string {
+	u, err := url.Parse(cfg.ProxyBaseURL())
+	if err != nil {
+		return ""
+	}
+	p := strings.TrimRight(u.EscapedPath(), "/")
+	if !strings.HasPrefix(p, "/") || strings.HasPrefix(p, "//") {
+		return ""
+	}
+	return p
+}
+
+// pendingSAMLLogins holds validated-but-not-yet-bound SAML logins between the
+// ACS and /auth/saml/complete: one-time, short-lived, and fair-share bounded
+// like the other pre-authentication stores (internal/authstate).
+var pendingSAMLLogins = authstate.New[*samlExchange](samlPendingTTL, samlStateStoreMax)
+
+const samlPendingTTL = 2 * time.Minute
+
+// GET /auth/saml/complete?t=... — the second half of the SAML login: the
+// browser binding is checked here, then the session is issued.
+func authSAMLComplete(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	ex, ok := pendingSAMLLogins.Pop(r.URL.Query().Get("t"))
+	if !ok || ex == nil {
+		http.Error(w, "invalid or expired login", http.StatusBadRequest)
+		return
+	}
+	if !loginBindingMatches(ex.bind, r) {
+		logger.Printf("SAML login refused: %v (provider=%q)", errLoginNotBound, sanitizeLog(ex.id.Provider))
+		http.Error(w, "login was not started by this browser — start again from the sign-in page", http.StatusForbidden)
+		return
+	}
+	id := ex.id
+	if err := setSessionCookie(w, r, id); err != nil {
+		http.Error(w, "session error", http.StatusInternalServerError)
+		return
+	}
+	// Inline guard for static-analysis visibility: parse the stored relay,
+	// require an absolute http(s) URL pointing at a public host, and
+	// otherwise fall back to "/". This mirrors isSafeRedirectURL — duplicated
+	// here so the validation is visible at the http.Redirect call site
+	// (covered by TestSAMLRelayStateInlineGuard).
+	safeRelay := "/"
+	if ex.relayURL != "" {
+		if u, err := url.Parse(ex.relayURL); err == nil &&
+			u.IsAbs() && (u.Scheme == "http" || u.Scheme == "https") &&
+			isPrivateHost(u.Host) == nil {
+			safeRelay = u.String()
+		}
+	}
+	logger.Printf("SAML login OK: user=%q email=%q provider=%q", sanitizeLog(id.Sub), sanitizeLog(id.Email), sanitizeLog(id.Provider))
+	// gosec G710 cannot follow validation through url.Parse + multiple
+	// boolean operators; the inline guard above and isSafeRedirectURL are the
+	// actual safety check.
+	http.Redirect(w, r, safeRelay, http.StatusFound) // #nosec G710 -- safeRelay is "/" or an absolute http(s) URL whose host passed isPrivateHost; see inline guard above
 }
 
 // GET /auth/saml/metadata
@@ -1112,16 +1161,31 @@ func filterProvidersByID(providers []IdentityProvider, want string) []IdentityPr
 }
 
 func authSelectProvider(w http.ResponseWriter, r *http.Request) {
-	relay := r.URL.Query().Get("relay")
-	if relay == "" {
-		relay = "/"
-	}
+	// Only a relay the proxy's captive redirect signed is honoured; anything
+	// else (a hand-made or tampered link) signs in and lands on "/", so this
+	// public page is not an open redirect (auth_select_relay.go).
+	relay := selectRelayFromQuery(r.URL.Query(), time.Now())
 	// Optional providers= filter (Phase 3 Slice 4) scopes the selection to a set
 	// of bare IdP profile IDs (used by an SSORequired rule's providerRefs); absent
 	// → all enabled providers (backward-compatible; Default flow unaffected).
 	// INTERACTIVE providers only (ADR-0027): the sign-in selector must never
 	// offer a credential-only provider (LDAP) — it has no browser flow.
 	providers := filterProvidersByID(idpRegistry.EnabledInteractiveProviders(), r.URL.Query().Get("providers"))
+	// Every login state is minted here, bound to this browser
+	// (auth_login_binding.go).
+	r, err := ensureLoginBinding(w, r)
+	if err != nil {
+		http.Error(w, "cannot start login", http.StatusInternalServerError)
+		return
+	}
+	// One eligible provider: continue straight to it (no selection screen),
+	// as the captive portal used to do from the proxy.
+	if len(providers) == 1 {
+		if loginURL := providers[0].CaptiveLoginURL(relay, r); loginURL != "" && isSafeCaptiveRedirect(loginURL) {
+			http.Redirect(w, r, loginURL, http.StatusFound) // #nosec G710 -- loginURL passed isSafeCaptiveRedirect (provider-built absolute http(s) IdP URL)
+			return
+		}
+	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	fmt.Fprintf(w, `<!DOCTYPE html><html><head>
 <meta charset="utf-8"><title>Culvert — Sign In</title>
@@ -1183,6 +1247,7 @@ func registerAuthRoutes(mux *http.ServeMux) {
 	// They are registered on the same UI port; the proxy port handles traffic.
 	mux.HandleFunc("/auth/oidc/callback", authOIDCCallback)
 	mux.HandleFunc("/auth/saml/callback", authSAMLCallback)
+	mux.HandleFunc("/auth/saml/complete", authSAMLComplete)
 	mux.HandleFunc("/auth/saml/metadata", authSAMLMetadata)
 	mux.HandleFunc("/auth/select", authSelectProvider) // IdP selection screen
 	mux.HandleFunc("/auth/logout", authLogout)
