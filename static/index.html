@@ -2963,6 +2963,10 @@ Firefox (all platforms):
           <button class="btn" data-click="openUserModal">+ Add User</button>
         </div>
         <div class="panel-body">
+          <p class="hint" id="roster-role-clamp-hint" style="display:none;color:var(--warn,#b8860b)">
+            <svg class="ico" aria-hidden="true"><use href="#i-alert-triangle"/></svg>
+            <span id="roster-role-clamp-text"></span>
+          </p>
           <p class="hint">
             Manage who can access this dashboard and what they can do.
             <strong>admin</strong> - full access &nbsp;·&nbsp;
@@ -8558,6 +8562,24 @@ async function fetchStats() {
         oversizeHint.style.display = '';
       } else {
         oversizeHint.style.display = 'none';
+      }
+    }
+    // Roster accounts held at viewer (SEC-RBAC-ROLE-1): ui_users.json named a
+    // role this build does not know (typically a backup restored from a newer
+    // build), so the account was lowered to read-only at load. The server
+    // already reports the count; without this note the admin only sees an
+    // account that mysteriously lost its authority.
+    const rcHint = document.getElementById('roster-role-clamp-hint');
+    if (rcHint) {
+      const rc = s.uiRosterRoleClamped || 0;
+      if (rc > 0) {
+        document.getElementById('roster-role-clamp-text').textContent =
+          fmt(rc) + ' account' + (rc === 1 ? ' is' : 's are') +
+          ' held at the viewer role: the saved user file names a role this version does not recognise ' +
+          '(for example after restoring a backup from a newer version). Edit the account and choose a role to restore its access.';
+        rcHint.style.display = '';
+      } else {
+        rcHint.style.display = 'none';
       }
     }
     // nav badge
