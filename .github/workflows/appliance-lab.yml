@@ -1313,6 +1313,11 @@ jobs:
         run: |
           set -euo pipefail
           test/e2e/appliance/lab/exact-scan.sh rootfs "$W/rootfs" "$W/evidence"
+      - name: Kernel CRITICAL/HIGH → absent / denied / present on this exact disk
+        run: |
+          set -euo pipefail
+          test/e2e/appliance/lab/exact-scan.sh kernmap "$W/evidence/rootfs-all.json" "$W/rootfs" "$W/evidence/kernel-cves.tsv" | tee "$W/evidence/kernel-cves-summary.txt"
+          ! grep -q 'REVIEW ENTRIES NOT HOLDING' "$W/evidence/kernel-cves-summary.txt"
       - name: Scan the application image (every severity, unfixed included, no ignore file)
         run: test/e2e/appliance/lab/exact-scan.sh image "$W/img/culvert-image.tar" "$W/evidence"
       - name: govulncheck (binary mode) on every Go binary the candidate ships

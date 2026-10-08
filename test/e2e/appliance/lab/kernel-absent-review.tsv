@@ -1,0 +1,48 @@
+# Kernel subsystems whose code the OVA does NOT carry. A CVE is classed
+# "absent" ONLY through this table, and only if the scanned disk agrees: the
+# CONFIG symbol is =m (and the build produced the module, modules.order) or
+# unset, and the module file is not under /lib/modules. Reviewed by hand
+# against 6.8.0-146 (config + linux-modules file list); anything not listed
+# here is "present".
+# subsystem-prefix(regex)	CONFIG symbol	module (file stem)
+^Bluetooth	BT	bluetooth
+^RDMA/rxe	RDMA_RXE	rdma_rxe
+^RDMA/siw	RDMA_SIW	siw
+^RDMA/irdma	INFINIBAND_IRDMA	irdma
+^RDMA/srpt	INFINIBAND_SRPT	ib_srpt
+^USB: serial: io_ti	USB_SERIAL_TI	io_ti
+^afs	AFS_FS	kafs
+^batman-adv	BATMAN_ADV	batman-adv
+^bcachefs	BCACHEFS_FS	bcachefs
+^drm/amd	DRM_AMDGPU	amdgpu
+^drm/i915	DRM_I915	i915
+^drm/nouveau	DRM_NOUVEAU	nouveau
+^drm/vkms	DRM_VKMS	vkms
+^f2fs	F2FS_FS	f2fs
+^fs/ntfs3	NTFS3_FS	ntfs3
+^hfs/hfsplus	HFSPLUS_FS	hfsplus
+^hpfs	HPFS_FS	hpfs
+^i2c: stub	I2C_STUB	i2c-stub
+^idpf	IDPF	idpf
+^mac802154	MAC802154	mac802154
+^media: chips-media: wave5	VIDEO_WAVE5_VPU	wave5
+^media: vivid	VIDEO_VIVID	vivid
+^(net/)?smc	SMC	smc
+^net: hsr	HSR	hsr
+^net: kcm	AF_KCM	kcm
+^net: qualcomm: rmnet	RMNET	rmnet
+^nvmet-tcp	NVME_TARGET_TCP	nvmet-tcp
+^ocfs2	OCFS2_FS	ocfs2
+^scsi: scsi_debug	SCSI_DEBUG	scsi_debug
+^staging: rtl8723bs	RTL8723BS	r8723bs
+^thunderbolt	USB4	thunderbolt
+^ublk	BLK_DEV_UBLK	ublk_drv
+^wifi: ath6kl	ATH6KL	ath6kl_core
+^wifi: mac80211	MAC80211	mac80211
+^wifi: mt76	MT76_CORE	mt76
+^wifi: nl80211	CFG80211	cfg80211
+^wifi: rtw89	RTW89	rtw89_core
+^wifi: wcn36xx	WCN36XX	wcn36xx
+^wifi: wilc1000	WILC1000	wilc1000
+^zram	ZRAM	zram
+^ALSA: usb-audio	SND_USB_AUDIO	snd-usb-audio

@@ -11,6 +11,8 @@
 #                         (+ linked functions per vulnerable package when
 #                          PCLNFUNCS points at the built pclnfuncs tool)
 #   exact-scan.sh table   EVIDENCE_DIR                 findings.tsv + counts
+#   exact-scan.sh kernmap ROOTFS_JSON ROOTFS OUT_TSV   kernel CRITICAL/HIGH CVEs → absent /
+#                         denied / present on this exact disk (kernmap.py)
 #   exact-scan.sh engsrc  EVIDENCE_DIR NAME=PATH...    govulncheck SOURCE mode on the
 #                         exact upstream revision each third-party binary records
 #
@@ -230,5 +232,6 @@ case "${1:-}" in
   gobins) shift; cmd_gobins "$@" ;;
   table)  cmd_table "${2:?EVIDENCE}" ;;
   engsrc) shift; cmd_engsrc "$@" ;;
+  kernmap) python3 -I "$(dirname "$0")/kernmap.py" "${2:?TRIVY_ROOTFS_JSON}" "${3:?ROOTFS}" "$(dirname "$0")/kernel-absent-review.tsv" "${4:?OUT_TSV}" ;;
   *) sed -n '2,15p' "$0"; exit 2 ;;
 esac
