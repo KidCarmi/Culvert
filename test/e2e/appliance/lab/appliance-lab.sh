@@ -1476,7 +1476,10 @@ hist_wait_up() { local deadline=$(( $(date +%s) + 600 ))
 hist_upload() { local src="$1" dst="$2" chunk
   { echo "set -e; rm -f $dst.b64"
     base64 -w 1000 "$src" | while read -r chunk; do echo "echo '$chunk' >> $dst.b64"; done
-    echo "base64 -d $dst.b64 > $dst; rm -f $dst.b64; chmod 0600 $dst; sha256sum $dst"; } | gpriv --timeout 900; }
+    # 0644: the cli container runs as the image's unprivileged `proxy`
+    # user, which a root-owned 0600 file locks out (the archive is
+    # passphrase-encrypted; the passphrase, not the mode, protects it).
+    echo "base64 -d $dst.b64 > $dst; rm -f $dst.b64; chmod 0644 $dst; sha256sum $dst"; } | gpriv --timeout 900; }
 cmd_history() { local c n tot before after fn op st rc arch="$WORK/history-archive.cvst"
   [[ "${LAB_HISTORY:-1}" == 1 ]] || return 0
   if [[ "$LAB_EXTERNAL" == 1 ]]; then check H history-recovery fail "BLOCKED: needs a QEMU guest"; return 0; fi
@@ -1541,8 +1544,12 @@ EOS
 cd /srv/culvert || exit 90
 CULVERT_HISTORY_PASSPHRASE='$(cat "$SEC/history-phrase")' $imp --confirm 2>&1; echo "import-live-rc=\$?"
 EOS
-  if grep -qE '^import-live-rc=[1-9]' "$EV/H-08-import-live.txt" && ! grep -q '^imported=' "$EV/H-08-import-live.txt"; then
-    check H history-import-refused-while-running pass "refused against the running proxy: $(grep -m1 -iE 'lock|running|stop' "$EV/H-08-import-live.txt" | head -c 160)"
+  # The oracle names the LOCK refusal, not just a non-zero exit: any other
+  # failure (an unreadable archive, a bad mount) also exits non-zero and must
+  # not read as "refused while running".
+  if grep -qE '^import-live-rc=[1-9]' "$EV/H-08-import-live.txt" && ! grep -q '^imported=' "$EV/H-08-import-live.txt" \
+     && grep -q 'locked by another Culvert process' "$EV/H-08-import-live.txt"; then
+    check H history-import-refused-while-running pass "refused against the running proxy: $(grep -m1 'locked by another Culvert process' "$EV/H-08-import-live.txt" | head -c 160)"
   else check H history-import-refused-while-running fail "$(tail -3 "$EV/H-08-import-live.txt" | tr '\n' ' ')"; fi
   rc=0; gpriv --timeout 1800 > "$EV/H-09-import-offline.txt" 2>&1 <<EOS || rc=$?
 cd /srv/culvert || exit 90
@@ -1558,8 +1565,10 @@ docker compose up -d 2>&1; echo "up-rc=\$?"
 exit \$r
 EOS
   hist_wait_up || true
+  # Same rule: the refusal must be the DECRYPT failure, not any failure.
   grep -qE '^wrong-rc=[1-9]' "$EV/H-09-import-offline.txt" && ! sed -n '/wrong archive/,/dry run/p' "$EV/H-09-import-offline.txt" | grep -q '^imported=' \
-    && check H history-wrong-passphrase pass "wrong archive passphrase refused, nothing imported" \
+    && sed -n '/wrong archive/,/dry run/p' "$EV/H-09-import-offline.txt" | grep -q 'invalid passphrase or tampered' \
+    && check H history-wrong-passphrase pass "wrong archive passphrase refused ($(sed -n '/wrong archive/,/dry run/p' "$EV/H-09-import-offline.txt" | grep -m1 -o 'backup decrypt failed[^)]*)')), nothing imported" \
     || check H history-wrong-passphrase fail "$(sed -n '/wrong archive/,/dry run/p' "$EV/H-09-import-offline.txt" | tail -3 | tr '\n' ' ')"
   grep -q '^dry-rc=0' "$EV/H-09-import-offline.txt" && grep -q 'nothing written' "$EV/H-09-import-offline.txt" \
     && check H history-import-dry-run pass "$(grep -m1 'history archive OK' "$EV/H-09-import-offline.txt")" \
