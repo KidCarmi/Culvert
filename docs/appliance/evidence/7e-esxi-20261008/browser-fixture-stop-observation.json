@@ -1,0 +1,8 @@
+{
+  "pid_absent": true,
+  "schema": 1,
+  "listener_18443_absent": true,
+  "scope": "post-cleanup absence observation; stop command preceded this receipt",
+  "checked_utc": "2026-10-08T18:55:11.3449728Z",
+  "pid": 76308
+}

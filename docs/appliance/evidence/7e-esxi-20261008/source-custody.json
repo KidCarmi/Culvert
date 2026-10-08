@@ -1,0 +1,19 @@
+{
+  "schema": 1,
+  "utc": "2026-10-08T18:56:31.0637527Z",
+  "encryption": "Windows DPAPI CurrentUser",
+  "roundtrip_verified": true,
+  "every_file_verified": true,
+  "source_unchanged": true,
+  "original_retained_at_preservation": true,
+  "files": 2948,
+  "directories": 629,
+  "source_bytes": 224536818,
+  "ciphertext_sha256": "736b3400191eb63fb20276d084a044bebdcea6a253c4e9d6f8e7958361850899",
+  "plaintext_zip_sha256": "00cf0dc626ae5919754c0929b86edefbe0e0f24c085a77bd6b465ff33cee3056",
+  "includes_operation_lock": true,
+  "result": "PASS preservation at recorded time; source deletion/fresh restore are separate",
+  "ciphertext_bytes": 56309526,
+  "custody_receipt_sha256": "ec86907ba9ab392e95c612561626ab0a598222b59ac12fc40572380a64539175",
+  "privacy": "Archive path, key material and contents omitted; custody is Windows CurrentUser DPAPI and is not a portability claim."
+}

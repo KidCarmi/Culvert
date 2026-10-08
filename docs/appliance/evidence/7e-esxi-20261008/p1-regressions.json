@@ -1,0 +1,185 @@
+{
+  "schema": 1,
+  "result": "PASS for seven P1 stages",
+  "source_sha": "7e53720d06f525f4e5fdbfec42f52840d5b734e2",
+  "ova_sha256": "578ea6b83b450b91bccc10ac80058db42d157e2161a45aa23fc8a23a2def7c65",
+  "controller_revision": "3d57784a4b88b827651c0380279b4a7a51f3b144",
+  "stages": [
+    {
+      "stage": "network-before",
+      "result": "pass",
+      "campaign": "initial",
+      "continuation": null
+    },
+    {
+      "stage": "network-after",
+      "result": "pass",
+      "campaign": "initial",
+      "continuation": null
+    },
+    {
+      "stage": "identity-before",
+      "result": "pass",
+      "campaign": "initial",
+      "continuation": null
+    },
+    {
+      "stage": "identity-reset",
+      "result": "pass",
+      "campaign": "initial",
+      "continuation": null
+    },
+    {
+      "stage": "identity-power-on",
+      "result": "pass",
+      "campaign": "initial",
+      "continuation": null
+    },
+    {
+      "stage": "identity-bootstrap",
+      "result": "pass",
+      "campaign": "initial",
+      "continuation": null
+    },
+    {
+      "stage": "identity-after",
+      "result": "pass",
+      "campaign": "initial",
+      "continuation": null
+    }
+  ],
+  "identity_changes": {
+    "boot_id": true,
+    "machine_id": true,
+    "ssh_public": true
+  },
+  "new_console_password_differs": true,
+  "old_console_password_refused": {
+    "service": "login",
+    "pam_status": 7,
+    "password_prompts": 1
+  },
+  "superseded_operator_key_refused": {
+    "exit": 255,
+    "timed_out": false,
+    "expected_refusal": true
+  },
+  "operator_keys_empty": true,
+  "automatic_poweroff": {
+    "uuid": "564d6806-6e99-7aff-6f61-f72935832f58",
+    "state": "poweredOff"
+  },
+  "evidence_bindings": [
+    {
+      "evidence": ".tools/esxi-7e-source/secrets/p1-regressions/console-transport-1791483903438601400.json",
+      "bytes": 1813,
+      "sha256": "0cfa7535b3bd824321931678c1d35f6c446c7ea0bcdaf212ea21060f1aaa976e"
+    },
+    {
+      "evidence": ".tools/esxi-7e-source/secrets/p1-regressions/console-transport-1791483994167516400.json",
+      "bytes": 1549,
+      "sha256": "b289b1ed1605dc4b9a629caf347eb6f29662329372e8af321cd5d4701e4bcd2b"
+    },
+    {
+      "evidence": ".tools/esxi-7e-source/secrets/p1-regressions/console-transport-1791485584970555900.json",
+      "bytes": 792,
+      "sha256": "a4129a483f0f9327a7e504de17d8f7dc185c1f5afa42ba3c5a2d1acef4f4ea78"
+    },
+    {
+      "evidence": ".tools/esxi-7e-source/secrets/p1-regressions/console-transport-1791485610576079400.json",
+      "bytes": 206,
+      "sha256": "1934afee890025dbb8fb3c7cf2ac43beab16e4a1c604c87e3bd3a8419a38ac29"
+    },
+    {
+      "evidence": ".tools/esxi-7e-source/secrets/p1-regressions/console-transport-1791485758398606000.json",
+      "bytes": 812,
+      "sha256": "5f42cbaf68fb3f3af21a67feef6f665d615e0b3acadbbce74cc1fa23a3a1c9d5"
+    },
+    {
+      "evidence": ".tools/esxi-7e-source/secrets/p1-regressions/export-readiness.json",
+      "bytes": 860,
+      "sha256": "0427b71a566171ded6ead57231077154d67566bc3e0a518dd60308ae76f5cea2"
+    },
+    {
+      "evidence": ".tools/esxi-7e-source/secrets/p1-regressions/identity-after.attempt.json",
+      "bytes": 156,
+      "sha256": "803b5a09389f67c9755340efd1366d54b84e39b44bd5a0b64cbaa87f9dca5a38"
+    },
+    {
+      "evidence": ".tools/esxi-7e-source/secrets/p1-regressions/identity-after.json",
+      "bytes": 514,
+      "sha256": "348f40643648bb27ed19fe4c64e2c78864bed148abc22d39552866c5ebaa7bed"
+    },
+    {
+      "evidence": ".tools/esxi-7e-source/secrets/p1-regressions/identity-before.attempt.json",
+      "bytes": 156,
+      "sha256": "803b5a09389f67c9755340efd1366d54b84e39b44bd5a0b64cbaa87f9dca5a38"
+    },
+    {
+      "evidence": ".tools/esxi-7e-source/secrets/p1-regressions/identity-before.json",
+      "bytes": 477,
+      "sha256": "13321ccbf9267e396a7345dc964c111c71d4cb4794657046f1dde8bfa08a25c3"
+    },
+    {
+      "evidence": ".tools/esxi-7e-source/secrets/p1-regressions/identity-bootstrap.attempt.json",
+      "bytes": 156,
+      "sha256": "803b5a09389f67c9755340efd1366d54b84e39b44bd5a0b64cbaa87f9dca5a38"
+    },
+    {
+      "evidence": ".tools/esxi-7e-source/secrets/p1-regressions/identity-power-on.attempt.json",
+      "bytes": 156,
+      "sha256": "803b5a09389f67c9755340efd1366d54b84e39b44bd5a0b64cbaa87f9dca5a38"
+    },
+    {
+      "evidence": ".tools/esxi-7e-source/secrets/p1-regressions/identity-reset.attempt.json",
+      "bytes": 156,
+      "sha256": "803b5a09389f67c9755340efd1366d54b84e39b44bd5a0b64cbaa87f9dca5a38"
+    },
+    {
+      "evidence": ".tools/esxi-7e-source/secrets/p1-regressions/network-after.attempt.json",
+      "bytes": 156,
+      "sha256": "803b5a09389f67c9755340efd1366d54b84e39b44bd5a0b64cbaa87f9dca5a38"
+    },
+    {
+      "evidence": ".tools/esxi-7e-source/secrets/p1-regressions/network-after.json",
+      "bytes": 1220,
+      "sha256": "fef49e63941c882eff3e0e78286a302ce697e18479138f1dc12a24114321f20d"
+    },
+    {
+      "evidence": ".tools/esxi-7e-source/secrets/p1-regressions/network-before.attempt.json",
+      "bytes": 156,
+      "sha256": "803b5a09389f67c9755340efd1366d54b84e39b44bd5a0b64cbaa87f9dca5a38"
+    },
+    {
+      "evidence": ".tools/esxi-7e-source/secrets/p1-regressions/network-before.json",
+      "bytes": 1465,
+      "sha256": "c59026ac86eda30f1f6afc079f56a4a4dea17c582f5d13ce875fa49f0dbe7039"
+    },
+    {
+      "evidence": ".tools/esxi-7e-source/secrets/p1-regressions/operator-probe-1791483893590662600.json",
+      "bytes": 5075,
+      "sha256": "b0b1677a900ddc9eab57a26e541d5c19f503f350b2fbae39e82de071c915716c"
+    },
+    {
+      "evidence": ".tools/esxi-7e-source/secrets/p1-regressions/operator-probe-1791483904336813900.json",
+      "bytes": 5075,
+      "sha256": "ee4f5a359a5e26023ec70a6d5754b63e192006edfa0b23b64b0304a5452bb07e"
+    },
+    {
+      "evidence": ".tools/esxi-7e-source/secrets/p1-regressions/operator-probe-1791483995037199000.json",
+      "bytes": 5503,
+      "sha256": "6b7ea0de011edc0dc74970844b8917131307ee66c7709f673fa370aed8fee001"
+    },
+    {
+      "evidence": ".tools/esxi-7e-source/secrets/p1-regressions/operator-probe-1791485759438556700.json",
+      "bytes": 464,
+      "sha256": "3b8a69a424967f21012dd4781c73fe130227f2ca82b87dc14262e6bc0f593859"
+    },
+    {
+      "evidence": ".tools/esxi-7e-source/secrets/p1-regressions/poweroff-observed.json",
+      "bytes": 80,
+      "sha256": "d600f789bcddf07b5024334a2bddd071230464a820960720a7d0cf3260a1c19b"
+    }
+  ],
+  "privacy": "Password and public/private key contents omitted; secret credential files are not included in the hash manifest."
+}

@@ -1,0 +1,1623 @@
+{
+  "schema": 1,
+  "status": "Production BLOCKED; replacement required. Enumerated 7e ESXi lifecycle, maintenance recovery, P1, ClamAV outage, bounded browser SAML, custody and fresh recovery checks PASS with retained limitations and original failures.",
+  "snapshot_utc": "2026-10-08T19:09:11.439231+00:00",
+  "source_sha": "7e53720d06f525f4e5fdbfec42f52840d5b734e2",
+  "ova_sha256": "578ea6b83b450b91bccc10ac80058db42d157e2161a45aa23fc8a23a2def7c65",
+  "image_id": "sha256:2a355d7a8930b12581c0f42c273bc3357cbefa36d9382ab7071d2c187dda0554",
+  "controller_revision": "3d57784a4b88b827651c0380279b4a7a51f3b144",
+  "outage_continuation_revision": "e56a29866e1f97a2bea4561b94cc1ac4356f572d",
+  "recovery_budget_seconds": 120,
+  "lifecycle": {
+    "counts": {
+      "info": 4,
+      "pass": 69,
+      "blocked": 1,
+      "not-run": 2
+    },
+    "rows": [
+      {
+        "step": "ESXi",
+        "check": "access-aware-harness",
+        "result": "info"
+      },
+      {
+        "step": "2",
+        "check": "target",
+        "result": "info"
+      },
+      {
+        "step": "3",
+        "check": "operator-observe",
+        "result": "pass"
+      },
+      {
+        "step": "3",
+        "check": "status-setup-pending",
+        "result": "pass"
+      },
+      {
+        "step": "3",
+        "check": "firstboot-steps",
+        "result": "pass"
+      },
+      {
+        "step": "3a",
+        "check": "console-login",
+        "result": "pass"
+      },
+      {
+        "step": "3a",
+        "check": "password-changed",
+        "result": "pass"
+      },
+      {
+        "step": "3",
+        "check": "culvert-status-setup-pending",
+        "result": "pass"
+      },
+      {
+        "step": "3",
+        "check": "image-identity",
+        "result": "pass"
+      },
+      {
+        "step": "3",
+        "check": "setup-token",
+        "result": "pass"
+      },
+      {
+        "step": "3c",
+        "check": "operator-commands-refused",
+        "result": "pass"
+      },
+      {
+        "step": "3c",
+        "check": "forwarding-refused",
+        "result": "pass"
+      },
+      {
+        "step": "3c",
+        "check": "file-transfer-refused",
+        "result": "pass"
+      },
+      {
+        "step": "3c",
+        "check": "local-admin-ssh-refused",
+        "result": "pass"
+      },
+      {
+        "step": "3c",
+        "check": "sshd-effective",
+        "result": "pass"
+      },
+      {
+        "step": "3c",
+        "check": "local-admin-sudo-needs-password",
+        "result": "pass"
+      },
+      {
+        "step": "3d",
+        "check": "boot-timing",
+        "result": "info"
+      },
+      {
+        "step": "3e",
+        "check": "recovery-secrets",
+        "result": "pass"
+      },
+      {
+        "step": "4a",
+        "check": "bootstrap-api-needs-token",
+        "result": "pass"
+      },
+      {
+        "step": "4",
+        "check": "setup-without-token",
+        "result": "pass"
+      },
+      {
+        "step": "4",
+        "check": "setup-with-token",
+        "result": "pass"
+      },
+      {
+        "step": "4",
+        "check": "admin-login",
+        "result": "pass"
+      },
+      {
+        "step": "4",
+        "check": "status-setup-complete",
+        "result": "pass"
+      },
+      {
+        "step": "4",
+        "check": "operator-setup-complete",
+        "result": "pass"
+      },
+      {
+        "step": "4b",
+        "check": "demotion-immediate",
+        "result": "pass"
+      },
+      {
+        "step": "4b",
+        "check": "portal-cookie-replay",
+        "result": "blocked"
+      },
+      {
+        "step": "5",
+        "check": "auth-exempt",
+        "result": "pass"
+      },
+      {
+        "step": "5",
+        "check": "default-deny",
+        "result": "pass"
+      },
+      {
+        "step": "5",
+        "check": "traffic",
+        "result": "pass"
+      },
+      {
+        "step": "5",
+        "check": "ready-rows",
+        "result": "pass"
+      },
+      {
+        "step": "5",
+        "check": "clamav-real",
+        "result": "pass"
+      },
+      {
+        "step": "5",
+        "check": "status-ready-to-enforce",
+        "result": "pass"
+      },
+      {
+        "step": "5",
+        "check": "ca-identity",
+        "result": "pass"
+      },
+      {
+        "step": "5b",
+        "check": "category-data",
+        "result": "pass"
+      },
+      {
+        "step": "5c",
+        "check": "category-enforcement",
+        "result": "pass"
+      },
+      {
+        "step": "6",
+        "check": "agent-installed",
+        "result": "pass"
+      },
+      {
+        "step": "6",
+        "check": "agent-reachable",
+        "result": "pass"
+      },
+      {
+        "step": "6",
+        "check": "agent-backup",
+        "result": "pass"
+      },
+      {
+        "step": "6",
+        "check": "backup-listed",
+        "result": "pass"
+      },
+      {
+        "step": "6",
+        "check": "restore-dry-run",
+        "result": "pass"
+      },
+      {
+        "step": "6b",
+        "check": "restore-commit",
+        "result": "not-run"
+      },
+      {
+        "step": "9",
+        "check": "post-backup-mutation",
+        "result": "pass"
+      },
+      {
+        "step": "9",
+        "check": "actual-restore",
+        "result": "pass"
+      },
+      {
+        "step": "9",
+        "check": "restore-admin-login",
+        "result": "pass"
+      },
+      {
+        "step": "9",
+        "check": "restore-enforcement",
+        "result": "pass"
+      },
+      {
+        "step": "9",
+        "check": "restore-ca",
+        "result": "pass"
+      },
+      {
+        "step": "9",
+        "check": "restore-feed-rehydrated",
+        "result": "pass"
+      },
+      {
+        "step": "9",
+        "check": "restore-categories",
+        "result": "pass"
+      },
+      {
+        "step": "9",
+        "check": "restore-agent",
+        "result": "pass"
+      },
+      {
+        "step": "9",
+        "check": "restore-complete",
+        "result": "pass"
+      },
+      {
+        "step": "6c",
+        "check": "test-only-trust",
+        "result": "pass"
+      },
+      {
+        "step": "6c",
+        "check": "unsigned-apply-refused",
+        "result": "pass"
+      },
+      {
+        "step": "6c",
+        "check": "signed-apply",
+        "result": "pass"
+      },
+      {
+        "step": "6c",
+        "check": "signed-rollback",
+        "result": "pass"
+      },
+      {
+        "step": "7",
+        "check": "os-update",
+        "result": "pass"
+      },
+      {
+        "step": "7",
+        "check": "reboot",
+        "result": "pass"
+      },
+      {
+        "step": "7",
+        "check": "kernel",
+        "result": "pass"
+      },
+      {
+        "step": "7",
+        "check": "docker-held",
+        "result": "pass"
+      },
+      {
+        "step": "ESXi",
+        "check": "independent-reboot-timing",
+        "result": "pass"
+      },
+      {
+        "step": "8",
+        "check": "stack-resumed",
+        "result": "pass"
+      },
+      {
+        "step": "8",
+        "check": "admin-login",
+        "result": "pass"
+      },
+      {
+        "step": "8",
+        "check": "policy-persisted",
+        "result": "pass"
+      },
+      {
+        "step": "8",
+        "check": "enforcement",
+        "result": "pass"
+      },
+      {
+        "step": "8",
+        "check": "ready",
+        "result": "pass"
+      },
+      {
+        "step": "8",
+        "check": "ca-identity",
+        "result": "pass"
+      },
+      {
+        "step": "8",
+        "check": "category-data",
+        "result": "pass"
+      },
+      {
+        "step": "8",
+        "check": "backup-listed",
+        "result": "pass"
+      },
+      {
+        "step": "8",
+        "check": "agent-reachable",
+        "result": "pass"
+      },
+      {
+        "step": "8",
+        "check": "firstboot-not-rerun",
+        "result": "pass"
+      },
+      {
+        "step": "8",
+        "check": "state-files",
+        "result": "pass"
+      },
+      {
+        "step": "8",
+        "check": "restore-persisted",
+        "result": "not-run"
+      },
+      {
+        "step": "8",
+        "check": "image-identity",
+        "result": "pass"
+      },
+      {
+        "step": "8",
+        "check": "operator-status",
+        "result": "pass"
+      },
+      {
+        "step": "8",
+        "check": "boot-timing",
+        "result": "info"
+      },
+      {
+        "step": "7",
+        "check": "esxi-boot-id-changed",
+        "result": "pass"
+      },
+      {
+        "step": "8",
+        "check": "restore-persisted",
+        "result": "pass"
+      }
+    ],
+    "independent_postchecks": [
+      {
+        "check": "postcheck-command-integrity",
+        "result": "pass"
+      },
+      {
+        "check": "root-observation",
+        "result": "pass"
+      },
+      {
+        "check": "reboot-identity",
+        "result": "pass"
+      },
+      {
+        "check": "kernel-observation",
+        "result": "pass"
+      },
+      {
+        "check": "source-image-identity",
+        "result": "pass"
+      },
+      {
+        "check": "agent-version-active",
+        "result": "pass"
+      },
+      {
+        "check": "firstboot-not-rerun",
+        "result": "pass"
+      },
+      {
+        "check": "locked-stack-resume",
+        "result": "pass"
+      },
+      {
+        "check": "docker-package-holds",
+        "result": "pass"
+      },
+      {
+        "check": "restored-policy-persistence",
+        "result": "pass"
+      },
+      {
+        "check": "ca-identity",
+        "result": "pass"
+      },
+      {
+        "check": "meaningful-category-persistence",
+        "result": "pass"
+      }
+    ],
+    "deferred_restore_rows_preserved": true,
+    "later_guarded_actual_restore_and_post_reboot_persistence": "PASS"
+  },
+  "maintenance_recovery": [
+    {
+      "cycle_id": "r7e-1",
+      "original_verdict": {
+        "result": "pass",
+        "cycle_id": "r7e-1",
+        "accepted_monotonic_ns": 185973890000000,
+        "observed_ready_monotonic_ns": 186044062000000,
+        "controller_confirmed_at": {
+          "monotonic_ns": 186072562000000,
+          "realtime_ns": 1791484213327435900
+        },
+        "seconds_to_three_healthy_samples": 70.172,
+        "first_backup_seconds": 0.828,
+        "first_backup_login_seconds": 0.063,
+        "boot_window_controller_monotonic_ns": [
+          185973015745808,
+          185981421745808
+        ],
+        "direct_clamav_coverage": {
+          "guest_interval_start_ns": 49890254192,
+          "guest_interval_end_ns": 73546254192,
+          "pong_samples": 13,
+          "maximum_sample_gap_ns": 2005041499,
+          "current_container_endpoint_verified": true
+        },
+        "note": "Service timing only; guest lock/disk/unit/persistence evidence is qualified separately.",
+        "proof_sha256": "ba57cefd7cb7bbb324b2631b63a63464b077484c5f77dde27507936212e8479b",
+        "rows_sha256": "ca352907669b2c331cc6b764ef8a655efcfbf68260f192266dbad9d6401e73cf"
+      }
+    },
+    {
+      "cycle_id": "r7e-2",
+      "original_verdict": {
+        "result": "blocked",
+        "reason": "direct ClamAV PONG coverage does not bracket readiness interval",
+        "controller_confirmed_at": {
+          "monotonic_ns": 186208531000000,
+          "realtime_ns": 1791484349290432400
+        },
+        "proof_sha256": "f19b4e1f3013a355ee226cffb814a5c430762513a09761b48d7c557d5456ff7d",
+        "rows_sha256": "abcbcd1ba59f1cf3b6576e730b0332f3e8173c6d2577e47454e904d61654f848"
+      },
+      "supplement_verdict": {
+        "result": "pass",
+        "cycle_id": "r7e-2",
+        "accepted_monotonic_ns": 186108484000000,
+        "observed_ready_monotonic_ns": 186173703000000,
+        "controller_confirmed_at": {
+          "monotonic_ns": 186337953000000,
+          "realtime_ns": 1791484478709584900
+        },
+        "seconds_to_three_healthy_samples": 65.219,
+        "first_backup_seconds": 0.813,
+        "first_backup_login_seconds": 0.078,
+        "boot_window_controller_monotonic_ns": [
+          186097410033558,
+          186114426033558
+        ],
+        "direct_clamav_coverage": {
+          "guest_interval_start_ns": 46494966442,
+          "guest_interval_end_ns": 78792966442,
+          "pong_samples": 18,
+          "maximum_sample_gap_ns": 2009005700,
+          "current_container_endpoint_verified": true
+        },
+        "note": "Service timing only; guest lock/disk/unit/persistence evidence is qualified separately.",
+        "proof_sha256": "468ff7e7cf369e729275dc9bcf282c1f32c0ffb6efb061997674652bb8dc10fc",
+        "rows_sha256": "abcbcd1ba59f1cf3b6576e730b0332f3e8173c6d2577e47454e904d61654f848"
+      },
+      "supplement_continuity": {
+        "reason": "original snapshot ended before uncertainty interval",
+        "same_boot": true,
+        "original_sampler_prefix_unchanged": true,
+        "original_rows": 30,
+        "supplement_rows": 105,
+        "orchestrator_sha256": "ed9f16a4646c153ea20301884e3c0334a181222d499232ace15cca32c3b47ad6",
+        "boot_and_original_clock_correlation_checked": true
+      }
+    },
+    {
+      "cycle_id": "r7e-3",
+      "original_verdict": {
+        "result": "pass",
+        "cycle_id": "r7e-3",
+        "accepted_monotonic_ns": 186374421000000,
+        "observed_ready_monotonic_ns": 186449015000000,
+        "controller_confirmed_at": {
+          "monotonic_ns": 186475781000000,
+          "realtime_ns": 1791484616533932300
+        },
+        "seconds_to_three_healthy_samples": 74.594,
+        "first_backup_seconds": 0.829,
+        "first_backup_login_seconds": 0.093,
+        "boot_window_controller_monotonic_ns": [
+          186371170191673,
+          186380404191673
+        ],
+        "direct_clamav_coverage": {
+          "guest_interval_start_ns": 55829808327,
+          "guest_interval_end_ns": 80344808327,
+          "pong_samples": 14,
+          "maximum_sample_gap_ns": 2006044611,
+          "current_container_endpoint_verified": true
+        },
+        "note": "Service timing only; guest lock/disk/unit/persistence evidence is qualified separately.",
+        "proof_sha256": "6a35746c7461c3ba198abd43254480092abc138d8ba3eb75ad7bf15cdbca1c32",
+        "rows_sha256": "df6938236540a9296000add04e05e75ea4ee5198712265bc04a834209fbfe38c"
+      }
+    }
+  ],
+  "kernel": {
+    "baked": "6.8.0-142-generic",
+    "runtime_after_authorized_lifecycle_update": "6.8.0-146-generic",
+    "formal_cycles_on_runtime_kernel": true
+  },
+  "network_rollback": {
+    "before_reboot": "PASS",
+    "after_reboot": "PASS"
+  },
+  "visual": {
+    "result": "PARTIAL",
+    "capture_campaigns": [
+      {
+        "campaign": "visual-cold7e",
+        "frame_count": 178,
+        "capture_completed": true,
+        "coverage": "sampled only; raw frames retained privately"
+      },
+      {
+        "campaign": "visual-delayed7e",
+        "frame_count": 10,
+        "capture_completed": false,
+        "coverage": "sampled only; raw frames retained privately"
+      },
+      {
+        "campaign": "visual-delayed7e-aftergap",
+        "frame_count": 135,
+        "capture_completed": true,
+        "coverage": "sampled only; raw frames retained privately"
+      },
+      {
+        "campaign": "visual-key-delayed7e-esc",
+        "result": "BLOCKED before key input",
+        "only_before_frame_present": true,
+        "esc_sent": false,
+        "basis": "exact-frame guard refused; no intent/result/after capture"
+      },
+      {
+        "campaign": "visual-key-delayed7e-esc-second-review",
+        "result": "BLOCKED before key input",
+        "only_before_frame_present": true,
+        "esc_sent": false,
+        "basis": "exact-frame guard refused; no intent/result/after capture"
+      }
+    ],
+    "inspection": {
+      "active_vt": "tty1",
+      "efi_ubuntu_directory_exists": true,
+      "tty1_mode": {
+        "mode": 0,
+        "status": "observed"
+      },
+      "console_size": "25 80"
+    },
+    "http409_gap_preserved": true,
+    "http409_basis": "operator-reviewed capture failure; capture receipts hash-bound; original gap not replaced",
+    "fixture_removal_receipt": {
+      "exit_code": 0,
+      "finished_utc": "2026-10-08T18:46:01.566834+00:00",
+      "stdout_sha256": "72fdafd9211c6cc95ddb1835a718fd6723c2b1d64dcb9866186656cec49779f9",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "post_delay_console_open": {
+      "elapsed_ns": 2362915,
+      "exit": 0,
+      "status": "observed"
+    },
+    "fixture_guest_monotonic_seconds": {
+      "failed_unit_exit": 14.329648,
+      "delay_finished": 59.291278,
+      "plymouth_quit_finished": 59.32602
+    }
+  },
+  "scanner_outage": {
+    "original_attempt": "BLOCKED before guest dispatch",
+    "original_receipt": {
+      "exit_code": 90,
+      "finished_utc": "2026-10-08T18:37:30.409667+00:00",
+      "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stderr_sha256": "0e5dd2b263b4d35ca5bca836e354412e3b7a2179e414be7c66fe333002dfc2b5"
+    },
+    "reason": "E7E missing from explicit controller allowlists",
+    "continuation": "PASS",
+    "result": {
+      "result": "pass",
+      "policy_restored": true,
+      "restored_running": true,
+      "helper_sha256": "5bbee46f2269feb5d21cce23926f308093de2cfc40643fd1bcfac4bdd6921e81",
+      "identity": {
+        "source_sha": "7e53720d06f525f4e5fdbfec42f52840d5b734e2",
+        "image_id": "sha256:2a355d7a8930b12581c0f42c273bc3357cbefa36d9382ab7071d2c187dda0554",
+        "sidecar_image_id": "sha256:1cf6b7e347c2b14b14cbcdf5d9e5de1cb8de8e3b97c44508874178315b563787",
+        "both_locks_held": true,
+        "av_unavailable": "closed"
+      },
+      "readiness": {
+        "before": {
+          "http_status": 200,
+          "clamav_status": "ok",
+          "pass": true
+        },
+        "down": {
+          "http_status": 503,
+          "clamav_status": "fail",
+          "pass": true
+        },
+        "recovered": {
+          "http_status": 200,
+          "clamav_status": "ok",
+          "pass": true
+        }
+      },
+      "traffic": {
+        "before": [
+          {
+            "kind": "clean",
+            "http_status": 200,
+            "origin_fetched": true,
+            "pass": true
+          },
+          {
+            "kind": "eicar",
+            "http_status": 403,
+            "origin_fetched": true,
+            "pass": true
+          }
+        ],
+        "down": [
+          {
+            "kind": "clean",
+            "http_status": 403,
+            "origin_fetched": true,
+            "pass": true
+          },
+          {
+            "kind": "eicar",
+            "http_status": 403,
+            "origin_fetched": true,
+            "pass": true
+          }
+        ],
+        "recovered": [
+          {
+            "kind": "clean",
+            "http_status": 200,
+            "origin_fetched": true,
+            "pass": true
+          },
+          {
+            "kind": "eicar",
+            "http_status": 403,
+            "origin_fetched": true,
+            "pass": true
+          }
+        ]
+      }
+    },
+    "completion": {
+      "attempt": "initial",
+      "controller_revision": "e56a29866e1f97a2bea4561b94cc1ac4356f572d",
+      "guest_result_sha256": "115fe7ea72ba6218bc0dc1a68faf1dff632fa424ad197c56a84715279d6d53dc",
+      "helper_sha256": "5bbee46f2269feb5d21cce23926f308093de2cfc40643fd1bcfac4bdd6921e81",
+      "operation": "2c5a7be00d9998bc834cec2c8b24315e",
+      "payload_sha256": "659fb277eded6f4fa8f7fbe2b76eef7638f5d667f331ab439a11872866bac80c",
+      "prior_failure_sha256": null,
+      "result": "pass"
+    },
+    "continuation_receipt": {
+      "controller_revision": "e56a29866e1f97a2bea4561b94cc1ac4356f572d",
+      "provenance_sha256": "6367199cb629bb439fe0781e444d8eb21a433405043bda45c9659166a02962ab",
+      "exit_code": 0,
+      "finished_utc": "2026-10-08T18:48:58.050699+00:00",
+      "out_sha256": "d26d39486b9cb72a285f77f55e5f3a24bcd2e291d755fa6705ba9cbb4cd22afc",
+      "err_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    }
+  },
+  "remaining": {
+    "fresh_appliance_source_unavailable_recovery": "PASS: exact OVA reimport after source VM/disks deleted; actual backup restore and rotated-key twelve-record history equality",
+    "identity_reset_and_old_credentials_refused": "PASS seven P1 stages; same VM reset/poweroff/fresh boot; not separate clone coverage",
+    "browser_https_saml_groups_logout_off_excluded": "PASS bounded synthetic private HTTP SAML fixture; successful browser CONNECT plus HTTPS origin response and correlated appliance activity; seven checks; not vendor interoperability/TLS interception/OIDC",
+    "local_oidc": "BLOCKED by supported production private-address restrictions; no bypass",
+    "recovery_secret_custody": "PASS: root-only reveal boundary, separate private backup/CA/log recovery material and successful use without source VM/volumes; source-run DPAPI custody verified",
+    "F_DISK_1": "Bounded 2 GiB nested-Docker result retained from exact-candidate intake; full appliance/datastore and migration not established",
+    "scanner_dispositions": "Exact artifact audit verified; replacement and complete per-finding remediation/dispositions remain required"
+  },
+  "scanner_correction": {
+    "url": "https://github.com/KidCarmi/Culvert/pull/1528#issuecomment-6066613505",
+    "reported_exact_scan_run": 37824263306,
+    "reported_artifact": 11570597891,
+    "confirmed_findings_reported_by_opus": [
+      "Baked kernel ABI 142 lags snapshot ABI 146",
+      "App zlib 1.3.2-r0 has r1 fix",
+      "Compose 5.5.1 vendors vulnerable containerd dependencies"
+    ],
+    "additional_remediation_reported": "Remove unused snapd; disposition remaining host-binary findings",
+    "independently_audited_in_this_report": true,
+    "risk_acceptance": false,
+    "audit_scope": "Root qualification audit verified artifact ZIP and job binding; this additive report also hashes original local scan inputs and checks OVA/image identity and OpenPGP text",
+    "audit_correction_url": "https://github.com/KidCarmi/Culvert/pull/1528#issuecomment-6066852119",
+    "artifact_zip_sha256": "9a266e5d3c96ec6ff108b598bc3c915e1520561969f93785eb460eb737e46f1a",
+    "job_id": 113472887307,
+    "count_semantics": "35 CRITICAL and 1204 HIGH rootfs entries are package rows, not unique CVEs or exploitability/reachability proof. counts.txt repeats finding levels; non-Go scanner errors are not vulnerability counts.",
+    "openpgp_discrepancy": "Original Symbol Results retained. govulncheck v1.8.0 can synthesize advisory symbols when extraction is absent. These records do not establish binary linkage or calls; source non-linking evidence alone does not prove exact shipped-binary absence.",
+    "codeql": "Root independently retrieved job 113402830259 annotation; sanitized strings and %02x single-byte formatting support its documented disposition.",
+    "fallback_audit": {
+      "file": "govulncheck-binary-fallback-audit.json",
+      "sha256": "33eee09200952b1f38ccf6a771b93219f8322ca186f74f67a238ff44bfa6907a",
+      "status": "fallback identified; exact-binary OpenPGP absence BLOCKED pending artifact-bound proof",
+      "correction_url": "https://github.com/KidCarmi/Culvert/pull/1528#issuecomment-6067055725"
+    },
+    "binary_reachability": "Do not call Compose/Docker/containerd findings called based solely on binary-mode Symbol Results; verify extraction quality and artifact-bound evidence. Affected dependency versions and available fixes still justify remediation."
+  },
+  "evidence_bindings": [
+    {
+      "evidence": ".tools/esxi-7e-source/evidence/production-recovery-r7e-1-summary.json",
+      "sha256": "71e02afb992ea9cea109636613e9adccb3fa227720e16df7e0ad25c374669c87",
+      "bytes": 964
+    },
+    {
+      "evidence": ".tools/esxi-7e-source/secrets/production-recovery/r7e-1/acceptance.json",
+      "sha256": "67fe026044b62c82e773b9414b0be0432360097c3f86d3c3164842652dbf0496",
+      "bytes": 684
+    },
+    {
+      "evidence": ".tools/esxi-7e-source/secrets/production-recovery/r7e-1/authenticated-boot-proof.json",
+      "sha256": "ba57cefd7cb7bbb324b2631b63a63464b077484c5f77dde27507936212e8479b",
+      "bytes": 12688
+    },
+    {
+      "evidence": ".tools/esxi-7e-source/secrets/production-recovery/r7e-1/full-receipt.json",
+      "sha256": "3223e68dbac0ba000413f708a7c94e5811ca264dcccd17da80a7e8e625197575",
+      "bytes": 560
+    },
+    {
+      "evidence": ".tools/esxi-7e-source/secrets/production-recovery/r7e-1/correlation-receipt.json",
+      "sha256": "b07eba142e9cfd09afa8918604332cfbbefbace18731b829a7b36e9532ca4c76",
+      "bytes": 567
+    },
+    {
+      "evidence": ".tools/esxi-7e-source/secrets/production-recovery-r7e-1.jsonl",
+      "sha256": "ca352907669b2c331cc6b764ef8a655efcfbf68260f192266dbad9d6401e73cf",
+      "bytes": 13022
+    },
+    {
+      "evidence": ".tools/esxi-7e-source/evidence/host-storage-r7e-1.json",
+      "sha256": "f3993ce812e324cb86994b54f524e2d2ff8891bc2e716d475220b333147a9a98",
+      "bytes": 6156
+    },
+    {
+      "evidence": ".tools/esxi-7e-source/evidence/vm-performance-r7e-1.json",
+      "sha256": "151163525b6fc52065b8c810a28504e29f57e3c0262c4cdcf7861b849e93b67d",
+      "bytes": 6499
+    },
+    {
+      "evidence": ".tools/esxi-7e-source/evidence/production-recovery-r7e-2-summary.json",
+      "sha256": "3ac36ab859fffd42d28328e5353d81594e0e14838f2a9d02eb0d5da4b3581f38",
+      "bytes": 387
+    },
+    {
+      "evidence": ".tools/esxi-7e-source/evidence/production-recovery-r7e-2-supplement-summary.json",
+      "sha256": "7ea6ccdad33a2d1ffd825626e97826f93d1e9bcc27ea0025226a5d0a31e7e78b",
+      "bytes": 964
+    },
+    {
+      "evidence": ".tools/esxi-7e-source/secrets/production-recovery/r7e-2-snapshot-supplement/supplement-provenance.json",
+      "sha256": "75ab8617c5534068f07c565158dbffbf4116274b7a3835062b78798c4b1f7dc3",
+      "bytes": 1953
+    },
+    {
+      "evidence": ".tools/esxi-7e-source/secrets/production-recovery/r7e-2/acceptance.json",
+      "sha256": "2d3cc363f2af30d51c78a704dc9fef3195c116f22259c0056cff288476548876",
+      "bytes": 684
+    },
+    {
+      "evidence": ".tools/esxi-7e-source/secrets/production-recovery/r7e-2/authenticated-boot-proof.json",
+      "sha256": "f19b4e1f3013a355ee226cffb814a5c430762513a09761b48d7c557d5456ff7d",
+      "bytes": 11270
+    },
+    {
+      "evidence": ".tools/esxi-7e-source/secrets/production-recovery/r7e-2/full-receipt.json",
+      "sha256": "45f09c37e99f9b5574a9b10d6a188f63bd0d1192bdac392e9e1e82ad033a767b",
+      "bytes": 560
+    },
+    {
+      "evidence": ".tools/esxi-7e-source/secrets/production-recovery/r7e-2/correlation-receipt.json",
+      "sha256": "89178b6eaf161f9ed9644e4bcaaccccf2053550bf593bae1540bb55ca45046d1",
+      "bytes": 567
+    },
+    {
+      "evidence": ".tools/esxi-7e-source/secrets/production-recovery-r7e-2.jsonl",
+      "sha256": "abcbcd1ba59f1cf3b6576e730b0332f3e8173c6d2577e47454e904d61654f848",
+      "bytes": 12421
+    },
+    {
+      "evidence": ".tools/esxi-7e-source/evidence/host-storage-r7e-2.json",
+      "sha256": "d346ab3ea8a97ee564c1d01cb465061df9ba59629b545008e219922fcb52fc93",
+      "bytes": 6551
+    },
+    {
+      "evidence": ".tools/esxi-7e-source/evidence/vm-performance-r7e-2.json",
+      "sha256": "cbebb84547b8720a8832c1b63ef27ec1d302393ed34bfe585d98cd3b7c1b1a7b",
+      "bytes": 6505
+    },
+    {
+      "evidence": ".tools/esxi-7e-source/evidence/production-recovery-r7e-3-summary.json",
+      "sha256": "077c200707e46088337058f4cd2e299843864d3e06f53c48197057fa813ecacf",
+      "bytes": 964
+    },
+    {
+      "evidence": ".tools/esxi-7e-source/secrets/production-recovery/r7e-3/acceptance.json",
+      "sha256": "4cce61f1861c08a3aa2207afc215efecd90482d04caefa21f5a686e327f4f7a4",
+      "bytes": 684
+    },
+    {
+      "evidence": ".tools/esxi-7e-source/secrets/production-recovery/r7e-3/authenticated-boot-proof.json",
+      "sha256": "6a35746c7461c3ba198abd43254480092abc138d8ba3eb75ad7bf15cdbca1c32",
+      "bytes": 13040
+    },
+    {
+      "evidence": ".tools/esxi-7e-source/secrets/production-recovery/r7e-3/full-receipt.json",
+      "sha256": "b527416e7d147ee93a14ce5d8ec86d7a407a34098dfeaa173929284c4222c086",
+      "bytes": 560
+    },
+    {
+      "evidence": ".tools/esxi-7e-source/secrets/production-recovery/r7e-3/correlation-receipt.json",
+      "sha256": "3dad98406f15ead4115276fb5936a9b3a645d216990392f97aea35e31399ca77",
+      "bytes": 567
+    },
+    {
+      "evidence": ".tools/esxi-7e-source/secrets/production-recovery-r7e-3.jsonl",
+      "sha256": "df6938236540a9296000add04e05e75ea4ee5198712265bc04a834209fbfe38c",
+      "bytes": 12753
+    },
+    {
+      "evidence": ".tools/esxi-7e-source/evidence/host-storage-r7e-3.json",
+      "sha256": "78749173ea0d76efbc1bb5435c9bd0b87d6c0d1881e56e9856ab134376ab0a8c",
+      "bytes": 6171
+    },
+    {
+      "evidence": ".tools/esxi-7e-source/evidence/vm-performance-r7e-3.json",
+      "sha256": "02496bf67c40472c9f44a86baebeb44cf315e313be30a4c452eb3a2a46f4c645",
+      "bytes": 6496
+    },
+    {
+      "evidence": ".tools/esxi-7e-source/secrets/visual-cold7e/frames.jsonl",
+      "sha256": "50ece714c70b26d8317abe67e1955259b82204309e9a0376f2c21d02402675b0",
+      "bytes": 76043
+    },
+    {
+      "evidence": ".tools/esxi-7e-source/secrets/visual-delayed7e/frames.jsonl",
+      "sha256": "893d8d36f3a09db0157c0856cfe313b12a59de2be34e100b0fe71f127dede38f",
+      "bytes": 5031
+    },
+    {
+      "evidence": ".tools/esxi-7e-source/secrets/visual-delayed7e-aftergap/frames.jsonl",
+      "sha256": "0225fb3a032a9f437f6ff19cc9131604800aa7a6db75a8c02f9adebf7e645695",
+      "bytes": 57811
+    },
+    {
+      "evidence": ".tools/esxi-7e-source/secrets/visual-key-delayed7e-esc/before.png",
+      "sha256": "4785a1a599a86a22979fd87bc1f8ae1fa4bac4d40f6737f8b41c2500310b2865",
+      "bytes": 1100
+    },
+    {
+      "evidence": ".tools/esxi-7e-source/secrets/visual-key-delayed7e-esc-second-review/before.png",
+      "sha256": "480a7b87a12af23446d6afc41430361e7a5a7231351fdb78792cf504e94035c2",
+      "bytes": 9182
+    },
+    {
+      "evidence": ".tools/private-operations/scanner-outage.started",
+      "sha256": "ee15c21b2720121a6525f3644755ddaff2be161dfde60a44e44569f73a816915",
+      "bytes": 32
+    },
+    {
+      "evidence": ".tools/private-operations/scanner-outage.out",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0
+    },
+    {
+      "evidence": ".tools/private-operations/scanner-outage.err",
+      "sha256": "0e5dd2b263b4d35ca5bca836e354412e3b7a2179e414be7c66fe333002dfc2b5",
+      "bytes": 101
+    },
+    {
+      "evidence": ".tools/private-operations/scanner-outage.receipt.json",
+      "sha256": "527449e8ccd8b783c781f1cf2c0e31b98f3603e06cc46675fa6a9442302d0d58",
+      "bytes": 239
+    },
+    {
+      "evidence": ".tools/private-operations/visual-delayed-capture.receipt.json",
+      "sha256": "b40797aaba3f76004cea22b3585656bff8b70acdc612d55f230d3363f25957cf",
+      "bytes": 239
+    },
+    {
+      "evidence": ".tools/private-operations/visual-aftergap-capture.receipt.json",
+      "sha256": "09108508f5c6146c748c9390c1ae956121daab54530fb87fe74f3093cde3f1e8",
+      "bytes": 238
+    },
+    {
+      "evidence": ".tools/private-operations/visual-esc-reviewed.receipt.json",
+      "sha256": "6c1a974c81a2a9b265f5ac40ca819d5c8e281fbb5117a66783072872440aa0cb",
+      "bytes": 239
+    },
+    {
+      "evidence": ".tools/private-operations/visual-esc-reviewed-2.receipt.json",
+      "sha256": "eb28bb46d482a0da6a47d8d6a8f8432619c3b1d2816340236927bbf7da10c256",
+      "bytes": 239
+    },
+    {
+      "evidence": ".tools/private-operations/visual-fixture-remove.receipt.json",
+      "sha256": "1f89df4a52e55e4f6112996528e8e8b94712539bc051d94c9fe0c000cabcfd29",
+      "bytes": 238
+    },
+    {
+      "evidence": ".tools/private-operations/visual-fixture-remove-generate.receipt.json",
+      "sha256": "c3aa43badd32c5715b9a681aae7f31b749524efde643cac0f3f051913b2baaac",
+      "bytes": 238
+    },
+    {
+      "evidence": ".tools/private-operations/lifecycle.receipt.json",
+      "sha256": "6cbf5877df5a6638ac79e31ff57aa3e418c16d35e796b3cdef4eb4282559adb8",
+      "bytes": 238
+    },
+    {
+      "evidence": ".tools/private-operations/export.receipt.json",
+      "sha256": "3f6435c3cfe6d40947bab81024c73d3b6760b6a126ceae694032912e617467c7",
+      "bytes": 238
+    },
+    {
+      "evidence": ".tools/private-operations/independent-postcheck.receipt.json",
+      "sha256": "7705b3c7e401b578e995b902f6835995832787c128203f6f1a65801b8db6353e",
+      "bytes": 238
+    },
+    {
+      "evidence": ".tools/esxi-7e-source/evidence/checks.jsonl",
+      "sha256": "c85c6acad3114f0c1ae052da6bd744d2e3043687b80bf725e85db2d72e1f0a6a",
+      "bytes": 13393
+    },
+    {
+      "evidence": ".tools/esxi-7e-source/evidence/independent-checks.jsonl",
+      "sha256": "b14bd93ab529a3ee07eeabcc6916bbe88ad154244e96f733c7b433935fd0e89c",
+      "bytes": 1552
+    },
+    {
+      "evidence": ".tools/esxi-7e-source/evidence/03-kernel-before.txt",
+      "sha256": "ee6d4e37c22c616a3d922fce2adc6c370f669accda35cc49f281702fa02e555f",
+      "bytes": 79
+    },
+    {
+      "evidence": ".tools/esxi-7e-source/evidence/07-kernel-after.txt",
+      "sha256": "4afe8df03983ed01e624d1de270787cd84b1a06570fc46c2459fd4ab8ba3bdea",
+      "bytes": 79
+    },
+    {
+      "evidence": ".tools/controller-freeze.json",
+      "sha256": "a669b2db68d7760a8c7e7343077531a847e12437ab1cec1e8e0ccf778989bce7",
+      "bytes": 19223
+    },
+    {
+      "evidence": ".tools/scope-7e-source.json",
+      "sha256": "3d5ec0129c9f10ee8b7df3a108efd35e4196bcf8098be0b43af1c8a6a6b1161c",
+      "bytes": 1869
+    },
+    {
+      "evidence": ".tools/esxi-7e-source/secrets/p1-regressions/network-before.attempt.json",
+      "sha256": "803b5a09389f67c9755340efd1366d54b84e39b44bd5a0b64cbaa87f9dca5a38",
+      "bytes": 156
+    },
+    {
+      "evidence": ".tools/esxi-7e-source/secrets/p1-regressions/network-before.json",
+      "sha256": "c59026ac86eda30f1f6afc079f56a4a4dea17c582f5d13ce875fa49f0dbe7039",
+      "bytes": 1465
+    },
+    {
+      "evidence": ".tools/esxi-7e-source/secrets/p1-regressions/network-after.attempt.json",
+      "sha256": "803b5a09389f67c9755340efd1366d54b84e39b44bd5a0b64cbaa87f9dca5a38",
+      "bytes": 156
+    },
+    {
+      "evidence": ".tools/esxi-7e-source/secrets/p1-regressions/network-after.json",
+      "sha256": "fef49e63941c882eff3e0e78286a302ce697e18479138f1dc12a24114321f20d",
+      "bytes": 1220
+    },
+    {
+      "evidence": "outage-continuation/controller-freeze.json",
+      "sha256": "88579eed3883fe312cf939c39945f0aee1593b6bde05a5bf6007b51d2d24fd03",
+      "bytes": 20493
+    },
+    {
+      "evidence": "outage-continuation/outage-continuation-provenance.json",
+      "sha256": "6367199cb629bb439fe0781e444d8eb21a433405043bda45c9659166a02962ab",
+      "bytes": 2095
+    },
+    {
+      "evidence": ".tools/private-operations/visual-inspect.out",
+      "sha256": "6524986270f200f1ee68823b902daf85b4b813f57b82f16b26a969f38c81db96",
+      "bytes": 36982
+    },
+    {
+      "evidence": ".tools/private-operations/visual-post-delay-inspect.out",
+      "sha256": "6e4fb678bce14281f468c889c41f0d0ec30cfbf15b3ac1c8d3f877f066eefe60",
+      "bytes": 39140
+    },
+    {
+      "evidence": ".tools/esxi-7e-source/secrets/clamav-outage/guest-result.json",
+      "sha256": "115fe7ea72ba6218bc0dc1a68faf1dff632fa424ad197c56a84715279d6d53dc",
+      "bytes": 2705
+    },
+    {
+      "evidence": ".tools/esxi-7e-source/secrets/clamav-outage/complete.json",
+      "sha256": "d26d39486b9cb72a285f77f55e5f3a24bcd2e291d755fa6705ba9cbb4cd22afc",
+      "bytes": 450
+    },
+    {
+      "evidence": ".tools/esxi-7e-source/secrets/clamav-outage/intent.json",
+      "sha256": "de5a908ecd1cebc0c4edc1de284b25200d8316458d1c88e696af3226f8aaf8bb",
+      "bytes": 553
+    },
+    {
+      "evidence": "outage-continuation/private-operations/scanner-outage.receipt.json",
+      "sha256": "e4cd4ad764dc4c66da606596e7d2df4ebd5c306a14cc7e78e79440db175a057d",
+      "bytes": 409
+    },
+    {
+      "evidence": "outage-continuation/private-operations/scanner-outage.out",
+      "sha256": "d26d39486b9cb72a285f77f55e5f3a24bcd2e291d755fa6705ba9cbb4cd22afc",
+      "bytes": 450
+    },
+    {
+      "evidence": "outage-continuation/private-operations/scanner-outage.err",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0
+    },
+    {
+      "evidence": ".tools/private-operations/sampler-remove.receipt.json",
+      "sha256": "eb24e243c2dd476e1e4a7e4f2fe702bae2b60f14ba1f0a29cc4b6279669273f2",
+      "bytes": 238
+    },
+    {
+      "evidence": "exact-scan-11570597891/ova.sha256",
+      "sha256": "06a8a663aecbd71d7c532f26a1408eb22d9c5de30b77fce372b84a895dcfcc50",
+      "bytes": 135
+    },
+    {
+      "evidence": "exact-scan-11570597891/image.txt",
+      "sha256": "5916ec54c36271b1872c906ea793fac5959affb27a0327c836c9d123a35aa50f",
+      "bytes": 185
+    },
+    {
+      "evidence": "exact-scan-11570597891/trivy-version.txt",
+      "sha256": "d196c2de8151be9443bc553fc8ac36df7861b4e1ba6dc09231da9be37c97f0fb",
+      "bytes": 210
+    },
+    {
+      "evidence": "exact-scan-11570597891/rootfs-kernels.txt",
+      "sha256": "93cf72a6151ab814803948642dbade7a819cd75314873314d1cc79ae87147c54",
+      "bytes": 26
+    },
+    {
+      "evidence": "exact-scan-11570597891/kernel-candidates.txt",
+      "sha256": "9192d1c805f4b6974a1368cb426be7627494fd5b857eaf1bdc733e4d4c0be112",
+      "bytes": 1212
+    },
+    {
+      "evidence": "exact-scan-11570597891/image-all.json",
+      "sha256": "cef53838751354a9c4207ee442fea61feaab5372b733bccd792b51714d161efd",
+      "bytes": 171188
+    },
+    {
+      "evidence": "exact-scan-11570597891/rootfs-all.json",
+      "sha256": "8d11e9b341c70f90330c01e90e118a19b3b85dd14affc872bc69d195d7f70e31",
+      "bytes": 114858249
+    },
+    {
+      "evidence": "exact-scan-11570597891/govulncheck/app-culvert.txt",
+      "sha256": "225fd025662b99baa32368a83c38f76db50cb7b546c8befa0b1b546181a5ccdb",
+      "bytes": 5473
+    },
+    {
+      "evidence": "exact-scan-11570597891/govulncheck/host-usr-libexec-docker-cli-plugins-docker-compose.txt",
+      "sha256": "dab4c59eb4c0e9b4e1f84690e433b0f71cf68b43bafecdb52e5854bd70137ab7",
+      "bytes": 7374
+    },
+    {
+      "evidence": "browser-independent-audit/browser-campaign-2-aggregate.json",
+      "sha256": "ad1bb9fac0fdfe5e6f4da06437ad5b248bc7abfafe30d661386dc6f46af8817a",
+      "bytes": 31737
+    },
+    {
+      "evidence": ".tools/private-operations/output/playwright/campaign-2/fixture-stop-observation.json",
+      "sha256": "59231408bca555465cd6458716331f6d9050e8c15ad3522f0e540ded9e58118f",
+      "bytes": 227
+    },
+    {
+      "evidence": ".tools/esxi-7e-source/secrets/p1-regressions/console-transport-1791483903438601400.json",
+      "bytes": 1813,
+      "sha256": "0cfa7535b3bd824321931678c1d35f6c446c7ea0bcdaf212ea21060f1aaa976e"
+    },
+    {
+      "evidence": ".tools/esxi-7e-source/secrets/p1-regressions/console-transport-1791483994167516400.json",
+      "bytes": 1549,
+      "sha256": "b289b1ed1605dc4b9a629caf347eb6f29662329372e8af321cd5d4701e4bcd2b"
+    },
+    {
+      "evidence": ".tools/esxi-7e-source/secrets/p1-regressions/console-transport-1791485584970555900.json",
+      "bytes": 792,
+      "sha256": "a4129a483f0f9327a7e504de17d8f7dc185c1f5afa42ba3c5a2d1acef4f4ea78"
+    },
+    {
+      "evidence": ".tools/esxi-7e-source/secrets/p1-regressions/console-transport-1791485610576079400.json",
+      "bytes": 206,
+      "sha256": "1934afee890025dbb8fb3c7cf2ac43beab16e4a1c604c87e3bd3a8419a38ac29"
+    },
+    {
+      "evidence": ".tools/esxi-7e-source/secrets/p1-regressions/console-transport-1791485758398606000.json",
+      "bytes": 812,
+      "sha256": "5f42cbaf68fb3f3af21a67feef6f665d615e0b3acadbbce74cc1fa23a3a1c9d5"
+    },
+    {
+      "evidence": ".tools/esxi-7e-source/secrets/p1-regressions/export-readiness.json",
+      "bytes": 860,
+      "sha256": "0427b71a566171ded6ead57231077154d67566bc3e0a518dd60308ae76f5cea2"
+    },
+    {
+      "evidence": ".tools/esxi-7e-source/secrets/p1-regressions/identity-after.attempt.json",
+      "bytes": 156,
+      "sha256": "803b5a09389f67c9755340efd1366d54b84e39b44bd5a0b64cbaa87f9dca5a38"
+    },
+    {
+      "evidence": ".tools/esxi-7e-source/secrets/p1-regressions/identity-after.json",
+      "bytes": 514,
+      "sha256": "348f40643648bb27ed19fe4c64e2c78864bed148abc22d39552866c5ebaa7bed"
+    },
+    {
+      "evidence": ".tools/esxi-7e-source/secrets/p1-regressions/identity-before.attempt.json",
+      "bytes": 156,
+      "sha256": "803b5a09389f67c9755340efd1366d54b84e39b44bd5a0b64cbaa87f9dca5a38"
+    },
+    {
+      "evidence": ".tools/esxi-7e-source/secrets/p1-regressions/identity-before.json",
+      "bytes": 477,
+      "sha256": "13321ccbf9267e396a7345dc964c111c71d4cb4794657046f1dde8bfa08a25c3"
+    },
+    {
+      "evidence": ".tools/esxi-7e-source/secrets/p1-regressions/identity-bootstrap.attempt.json",
+      "bytes": 156,
+      "sha256": "803b5a09389f67c9755340efd1366d54b84e39b44bd5a0b64cbaa87f9dca5a38"
+    },
+    {
+      "evidence": ".tools/esxi-7e-source/secrets/p1-regressions/identity-power-on.attempt.json",
+      "bytes": 156,
+      "sha256": "803b5a09389f67c9755340efd1366d54b84e39b44bd5a0b64cbaa87f9dca5a38"
+    },
+    {
+      "evidence": ".tools/esxi-7e-source/secrets/p1-regressions/identity-reset.attempt.json",
+      "bytes": 156,
+      "sha256": "803b5a09389f67c9755340efd1366d54b84e39b44bd5a0b64cbaa87f9dca5a38"
+    },
+    {
+      "evidence": ".tools/esxi-7e-source/secrets/p1-regressions/operator-probe-1791483893590662600.json",
+      "bytes": 5075,
+      "sha256": "b0b1677a900ddc9eab57a26e541d5c19f503f350b2fbae39e82de071c915716c"
+    },
+    {
+      "evidence": ".tools/esxi-7e-source/secrets/p1-regressions/operator-probe-1791483904336813900.json",
+      "bytes": 5075,
+      "sha256": "ee4f5a359a5e26023ec70a6d5754b63e192006edfa0b23b64b0304a5452bb07e"
+    },
+    {
+      "evidence": ".tools/esxi-7e-source/secrets/p1-regressions/operator-probe-1791483995037199000.json",
+      "bytes": 5503,
+      "sha256": "6b7ea0de011edc0dc74970844b8917131307ee66c7709f673fa370aed8fee001"
+    },
+    {
+      "evidence": ".tools/esxi-7e-source/secrets/p1-regressions/operator-probe-1791485759438556700.json",
+      "bytes": 464,
+      "sha256": "3b8a69a424967f21012dd4781c73fe130227f2ca82b87dc14262e6bc0f593859"
+    },
+    {
+      "evidence": ".tools/esxi-7e-source/secrets/p1-regressions/poweroff-observed.json",
+      "bytes": 80,
+      "sha256": "d600f789bcddf07b5024334a2bddd071230464a820960720a7d0cf3260a1c19b"
+    },
+    {
+      "evidence": ".tools/source-custody/custody.json",
+      "sha256": "ec86907ba9ab392e95c612561626ab0a598222b59ac12fc40572380a64539175",
+      "bytes": 792
+    },
+    {
+      "evidence": ".tools/private-escrow-7e/transfer-restore-4d32ef69b84fd301/guest-result.json",
+      "bytes": 691,
+      "sha256": "e66137aa440fb5e0580796c9c63c7193113f86353e64b32df9e7d7ec5ada748c"
+    },
+    {
+      "evidence": ".tools/private-escrow-7e/transfer-restore-4d32ef69b84fd301/restored-observation.json",
+      "bytes": 1476,
+      "sha256": "b8c8f19fe1dede37741f14fdc57a98bfb70dd701d8b1ef0706da2969110dcd2f"
+    },
+    {
+      "evidence": ".tools/private-escrow-7e/transfer-restore-4d32ef69b84fd301/restored-history.json",
+      "bytes": 192,
+      "sha256": "65f1f0affd85e3a6dc3b7cdca6965531be4a29e9fe99bbb4aea68f2bf6cfaafb"
+    },
+    {
+      "evidence": ".tools/private-escrow-7e/source-deletion-receipt.json",
+      "bytes": 336,
+      "sha256": "bba98c882c2209d61cef3517678dda3018f94f0efb4f80e9c36aa83e01c53ae8"
+    },
+    {
+      "evidence": ".tools/private-escrow-7e/source-deleted-owned.json",
+      "bytes": 664,
+      "sha256": "d9731f2598c18bbd7d316147aa69bb1cbb467d26403718c71f17341fc83ceea4"
+    },
+    {
+      "evidence": ".tools/private-escrow-7e/source-deletion-after.json",
+      "bytes": 2101,
+      "sha256": "b07125791ac2f19a94f9347cb9565a5991577e33b4f0eeefaff13f151a095735"
+    },
+    {
+      "evidence": ".tools/private-escrow-7e/source-deletion-before.json",
+      "bytes": 2477,
+      "sha256": "dd5c6f0a49fc66c6589f3bd6d359204ae7bdca16f88591796e68f8e96ff5dd0c"
+    },
+    {
+      "evidence": ".tools/private-escrow-7e/source-deletion-attempt.json",
+      "bytes": 100,
+      "sha256": "44b7f1172b1ad3cba394fc33228db33f9d6579f3ab8d7194f41da550874311c4"
+    },
+    {
+      "evidence": ".tools/private-escrow-7e/provenance.json",
+      "bytes": 263,
+      "sha256": "80d4ba179cf08987d7f85ecdb846cdefb6fa5633113d721e40b975f9f206adfe"
+    },
+    {
+      "evidence": ".tools/private-escrow-7e/archive-metadata.json",
+      "bytes": 1661,
+      "sha256": "34ae31f6a429a080de1e4c44d1437ba48100cac6fc266fb6e980eaff342628e6"
+    },
+    {
+      "evidence": ".tools/private-escrow-7e/export-receipt.json",
+      "bytes": 1047,
+      "sha256": "f2882cd58b69697cef37f55d72ee809d343b52c58acf5101c198c394ae6d3006"
+    },
+    {
+      "evidence": ".tools/private-escrow-7e/source-observation.json",
+      "bytes": 1438,
+      "sha256": "653474076a317eec92a0354b2a1ef17bc4011b1d654dc9f83f0e91a347a32394"
+    },
+    {
+      "evidence": ".tools/private-operations/source-delete.receipt.json",
+      "bytes": 238,
+      "sha256": "0a837578ac8ea4f7d20e5917b7eb0d7e796688d5c848aa7258e9ed411e50f846"
+    },
+    {
+      "evidence": ".tools/private-operations/fresh-import.receipt.json",
+      "bytes": 238,
+      "sha256": "a6a854b38954952db4c8e63ce7e554fb4c0e559ceff2a6b2c6105d5607ffbd59"
+    },
+    {
+      "evidence": ".tools/private-operations/fresh-bootstrap.out",
+      "bytes": 631,
+      "sha256": "327d7b13daef28410952f902e8664a3d38c01a37f6ec33b98c7eb2c5362b32d8"
+    },
+    {
+      "evidence": ".tools/private-operations/fresh-bootstrap.receipt.json",
+      "bytes": 238,
+      "sha256": "e3267ae30e3ce8b6cb4d6aecb9e5f29d729c6cf3b011f7c3c1f2b1407c123e34"
+    },
+    {
+      "evidence": ".tools/private-operations/fresh-firstboot-readonly.out",
+      "bytes": 343,
+      "sha256": "385dcf0ba2392c8575a175773c36a06683baa105bd4ef24f8bf600deed6112b0"
+    },
+    {
+      "evidence": ".tools/private-operations/fresh-firstboot-readonly.receipt.json",
+      "bytes": 238,
+      "sha256": "bdb31686d92c52215df90b8d98dc642b88ecb3a0ab2c663c2df404eb33a82365"
+    },
+    {
+      "evidence": ".tools/private-operations/fresh-restore.out",
+      "bytes": 202,
+      "sha256": "01d584850bdb461d37dea7a639686d1cae0c84e24bdbc280ff5ccdb9ec87f315"
+    },
+    {
+      "evidence": ".tools/private-operations/fresh-restore.receipt.json",
+      "bytes": 238,
+      "sha256": "575815fbfc785edcdaf7e4ef9e21d066aba676f3eb7a3dc27a0e9d53ae250d1b"
+    },
+    {
+      "evidence": ".tools/esxi-7e-fresh/owned.json",
+      "bytes": 610,
+      "sha256": "ada147caf675f7013d85132d574dcd0601b36a3c4f0b20de53486c5a8c6ae99a"
+    },
+    {
+      "evidence": ".tools/esxi-7e-fresh/secrets/access-bootstrap-attempt.json",
+      "bytes": 79,
+      "sha256": "205cc313497e3f78febc3b50fad1ceb962bb5043668086cbd9680b4569eadad5"
+    },
+    {
+      "evidence": ".tools/esxi-7e-fresh/secrets/bootstrap-pixels-002.txt",
+      "bytes": 779,
+      "sha256": "4bbefee59965ced4953e766b6df8e1bd8388644f314e7646fe83522e4c6a1315"
+    },
+    {
+      "evidence": ".tools/esxi-7e-fresh/secrets/bootstrap-pixels-003.txt",
+      "bytes": 779,
+      "sha256": "4bbefee59965ced4953e766b6df8e1bd8388644f314e7646fe83522e4c6a1315"
+    },
+    {
+      "evidence": "scanner-independent-audit/govulncheck-binary-fallback-audit.json",
+      "sha256": "33eee09200952b1f38ccf6a771b93219f8322ca186f74f67a238ff44bfa6907a",
+      "bytes": 5453
+    },
+    {
+      "evidence": ".tools/private-operations/retained-console-logout.json",
+      "sha256": "6f87ded8eb9cb1d0a3489292d91e26c2ec4c22225ec0e6c329bd76eb22d4e6da",
+      "bytes": 373
+    },
+    {
+      "evidence": ".tools/private-operations/retained-console-logout-intent.json",
+      "sha256": "1cb5de6646e8b5d39d3f3c101f62f3a76f57f9e661f4bc72fa0a4aba1fab582a",
+      "bytes": 124
+    },
+    {
+      "evidence": ".tools/private-operations/fresh-final-visual.receipt.json",
+      "sha256": "b23f8ca278cfc3f096a75c37c2f09f592978ef677b26be8fbfce5644b3ce3013",
+      "bytes": 238
+    },
+    {
+      "evidence": ".tools/private-operations/fresh-alt-f1.receipt.json",
+      "sha256": "3f0597a80e91822859221310ae3aaef01e0cbd675cd718db9338d36a7aa3fdef",
+      "bytes": 239
+    },
+    {
+      "evidence": ".tools/private-operations/fresh-alt-f1-reviewed.receipt.json",
+      "sha256": "916afcc72fdbd6f000320767ada9b804c5a4a435ed34f1c8e1f5f7f3b297747c",
+      "bytes": 238
+    },
+    {
+      "evidence": ".tools/private-operations/fresh-alt-f12.receipt.json",
+      "sha256": "d9a5d20d029fa206c964fbc0c857d3dd0f9fc6c79b4b15b3c33d1c6f6954784d",
+      "bytes": 238
+    },
+    {
+      "evidence": ".tools/esxi-7e-fresh/secrets/visual-fresh-final/frames.jsonl",
+      "sha256": "4c1f06b304489fdcd4ddc7fa069c7294068c5237d142cc55ee9bc85a0d5067b8",
+      "bytes": 3595
+    },
+    {
+      "evidence": ".tools/esxi-7e-fresh/secrets/visual-fresh-final/frame-0000.png",
+      "sha256": "b3bb69a23c524fe6fb2141eb193ea9d42640a9cb09f4bec1c00a31d54242e39b",
+      "bytes": 9142
+    },
+    {
+      "evidence": ".tools/esxi-7e-fresh/secrets/visual-fresh-final/frame-0001.png",
+      "sha256": "b3bb69a23c524fe6fb2141eb193ea9d42640a9cb09f4bec1c00a31d54242e39b",
+      "bytes": 9142
+    },
+    {
+      "evidence": ".tools/esxi-7e-fresh/secrets/visual-fresh-final/frame-0002.png",
+      "sha256": "b3bb69a23c524fe6fb2141eb193ea9d42640a9cb09f4bec1c00a31d54242e39b",
+      "bytes": 9142
+    },
+    {
+      "evidence": ".tools/esxi-7e-fresh/secrets/visual-fresh-final/frame-0003.png",
+      "sha256": "b3bb69a23c524fe6fb2141eb193ea9d42640a9cb09f4bec1c00a31d54242e39b",
+      "bytes": 9142
+    },
+    {
+      "evidence": ".tools/esxi-7e-fresh/secrets/visual-fresh-final/frame-0004.png",
+      "sha256": "b3bb69a23c524fe6fb2141eb193ea9d42640a9cb09f4bec1c00a31d54242e39b",
+      "bytes": 9142
+    },
+    {
+      "evidence": ".tools/esxi-7e-fresh/secrets/visual-fresh-final/frame-0005.png",
+      "sha256": "b3bb69a23c524fe6fb2141eb193ea9d42640a9cb09f4bec1c00a31d54242e39b",
+      "bytes": 9142
+    },
+    {
+      "evidence": ".tools/esxi-7e-fresh/secrets/visual-key-fresh-alt-f1/before.png",
+      "sha256": "7d401a5f15cd9d8bc61cda8e6f0576ded1ebbfffe6561143632ec6e5c753b2ef",
+      "bytes": 19365
+    },
+    {
+      "evidence": ".tools/esxi-7e-fresh/secrets/visual-key-fresh-alt-f12/complete.json",
+      "sha256": "fc58385ded99a747ae43e7790c945e90d58fac58053e0018220934fed8f3b1a7",
+      "bytes": 430
+    },
+    {
+      "evidence": ".tools/esxi-7e-fresh/secrets/visual-key-fresh-alt-f12/intent.json",
+      "sha256": "346dc6468c69ff204252a193c24ff78eb8af029e4d315fd16e78ba907eb5628b",
+      "bytes": 348
+    },
+    {
+      "evidence": ".tools/esxi-7e-fresh/secrets/visual-key-fresh-alt-f12/before.png",
+      "sha256": "b3bb69a23c524fe6fb2141eb193ea9d42640a9cb09f4bec1c00a31d54242e39b",
+      "bytes": 9142
+    },
+    {
+      "evidence": ".tools/esxi-7e-fresh/secrets/visual-key-fresh-alt-f12/after.png",
+      "sha256": "1437324867bdf3f4ac47bdc13126dab41ef0a95cf2c4cf9f5c0b931a13212f64",
+      "bytes": 19377
+    },
+    {
+      "evidence": ".tools/esxi-7e-fresh/secrets/visual-key-fresh-alt-f1-reviewed/complete.json",
+      "sha256": "162c65ee2ada51d4667f1b13840be71a90b2c9f012e78d58c9dfae4c40346bc3",
+      "bytes": 429
+    },
+    {
+      "evidence": ".tools/esxi-7e-fresh/secrets/visual-key-fresh-alt-f1-reviewed/intent.json",
+      "sha256": "9fb8c28a4a4bd96eeeb0fec07405dbc6e0ae5d91f094ba0124492ead313e0016",
+      "bytes": 348
+    },
+    {
+      "evidence": ".tools/esxi-7e-fresh/secrets/visual-key-fresh-alt-f1-reviewed/before.png",
+      "sha256": "7d401a5f15cd9d8bc61cda8e6f0576ded1ebbfffe6561143632ec6e5c753b2ef",
+      "bytes": 19365
+    },
+    {
+      "evidence": ".tools/esxi-7e-fresh/secrets/visual-key-fresh-alt-f1-reviewed/after.png",
+      "sha256": "b3bb69a23c524fe6fb2141eb193ea9d42640a9cb09f4bec1c00a31d54242e39b",
+      "bytes": 9142
+    },
+    {
+      "evidence": "retained-console-external-scripts/logout-retained-console.py",
+      "sha256": "2c3cb5d1d38f1c5b75517d5d742700cfdb38bedc626f935cd12062b11a6d6a19",
+      "bytes": 2932
+    },
+    {
+      "evidence": "retained-console-external-scripts/logout-retained-console-observe.py",
+      "sha256": "9f4fac6929b5ab0fb82d2bf3ec6c3862f9c7f2e09e788a22ad47de69468556ce",
+      "bytes": 2946
+    }
+  ],
+  "privacy": "Only enumerated verdicts, timings, names and hashes published; no raw capture, cookie, recovery secret, credential, or raw journal included; hashes reference privately retained originals.",
+  "diagnostic_sampler_cleanup": {
+    "result": "PASS",
+    "receipt": {
+      "exit_code": 0,
+      "finished_utc": "2026-10-08T18:52:38.895734+00:00",
+      "stdout_sha256": "f486b1db6030b5b83623e8141ea357ad257a9e49f5d6306d631e4df6adfd8511",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    }
+  },
+  "browser_campaign": {
+    "result": "PASS for seven bounded synthetic SAML browser checks",
+    "aggregate": "browser-campaign-2-aggregate.json",
+    "aggregate_sha256": "ad1bb9fac0fdfe5e6f4da06437ad5b248bc7abfafe30d661386dc6f46af8817a",
+    "checks": [
+      {
+        "check": "Alice real SAML redirect and HTTP origin",
+        "result": "PASS",
+        "http_status": 200,
+        "group": "engineering",
+        "auth_source": "sso-ip:<generated provider>",
+        "policy": "exact scoped allow rule"
+      },
+      {
+        "check": "Alice browser HTTPS origin through credential-free CONNECT",
+        "result": "PASS",
+        "connect_status": 200,
+        "origin_status": 200,
+        "url_request_source": 138,
+        "stream_job_source": 141,
+        "socket_source": 137,
+        "rendered_title": "Example Domain"
+      },
+      {
+        "check": "Logout revokes binding and new-browser tunnel",
+        "result": "PASS",
+        "connect_status": 403,
+        "bindings": 0
+      },
+      {
+        "check": "Bob finance policy isolation",
+        "result": "PASS",
+        "http_status": 403,
+        "connect_status": 403,
+        "activity": "POLICY_BLOCK, exact scoped deny rule"
+      },
+      {
+        "check": "IP binding disabled",
+        "result": "PASS",
+        "http_status": 403,
+        "connect_status": 403,
+        "bindings": 0
+      },
+      {
+        "check": "Excluded client still refused after actual SAML login",
+        "result": "PASS",
+        "http_status": 403,
+        "connect_status": 403,
+        "bindings": 0
+      },
+      {
+        "check": "Baseline settings, rules, IdP and draft restored",
+        "result": "PASS"
+      }
+    ],
+    "limits": [
+      "Synthetic signed SAML fixture on private HTTP IdP; not vendor IdP interoperability or production IdP transport qualification.",
+      "Public HTTPS target uses CONNECT bypass; this does not qualify TLS interception.",
+      "OIDC remains BLOCKED: no supported external IdP fixture was exercised.",
+      "Alice request-list command omitted --static; origin status is proven independently by same-source NetLog URL segments and response headers, plus browser title and appliance activity.",
+      "Initial campaign empty-response capture AttributeError was reported before mutation; campaign2 script is separately hashed. This audit did not erase that failure.",
+      "Fixture stop is reported by root; campaign2 contains no immutable stop receipt independently verifiable by this offline audit."
+    ],
+    "fixture_stop_addendum": {
+      "file": "browser-fixture-stop-observation.json",
+      "sha256": "59231408bca555465cd6458716331f6d9050e8c15ad3522f0e540ded9e58118f",
+      "meaning": "Later post-cleanup observation of absent PID and listener; not contemporaneous stop receipt and does not rewrite original independent audit"
+    }
+  },
+  "p1_regressions": {
+    "result": "PASS for seven stages",
+    "aggregate": "p1-regressions.json",
+    "sha256": "0eb4914a43c0141b03500805a70ea61547a363c2f4262cbde8d27312eeefc956",
+    "automatic_poweroff_then_fresh_boot": true,
+    "new_console_os_ssh_identity": true,
+    "old_password_and_operator_key_refused": true
+  },
+  "source_custody": {
+    "result": "PASS",
+    "aggregate": "source-custody.json",
+    "sha256": "34cf468ed0f7743e236f1e44f969eba38895c9ead133eea59bfe1bdb3f4343d1",
+    "source_bytes": 224536818,
+    "ciphertext_bytes": 56309526,
+    "ciphertext_sha256": "736b3400191eb63fb20276d084a044bebdcea6a253c4e9d6f8e7958361850899"
+  },
+  "fresh_recovery": {
+    "result": "PASS",
+    "aggregate": "fresh-recovery.json",
+    "sha256": "607733455739d2bc69f718c2b561a6f6ae9bd2f1f29692f30610a5d50f4f6ae8",
+    "source_vm_and_volumes_unavailable": true,
+    "history_records": 12,
+    "first_transport_unavailable_observations": [
+      {
+        "kind": "transport-unavailable",
+        "schema": 1,
+        "phase": "history-live-refusal",
+        "first_failure_elapsed_seconds": 0.083833,
+        "retry_budget_seconds": 300
+      },
+      {
+        "kind": "transport-unavailable",
+        "schema": 1,
+        "phase": "history-import",
+        "first_failure_elapsed_seconds": 0.002448,
+        "retry_budget_seconds": 300
+      }
+    ]
+  },
+  "retained_console": {
+    "aggregate": "retained-console.json",
+    "sha256": "5c010dba4b672c7a2bb2fa510d1a0269dbb599ba7f30b400037f219b3be29be9",
+    "result": "PASS for retained public console, actual Alt-F12 kernel VT and reviewed Alt-F1 return; Esc still unproved",
+    "guest": "192.168.1.191",
+    "public_menu_sha256": "b3bb69a23c524fe6fb2141eb193ea9d42640a9cb09f4bec1c00a31d54242e39b"
+  }
+}

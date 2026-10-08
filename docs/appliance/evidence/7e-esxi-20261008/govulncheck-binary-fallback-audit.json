@@ -1,0 +1,86 @@
+{
+  "schema": 1,
+  "verdict": "Scanner fallback identified; exact-binary OpenPGP absence still requires independent evidence",
+  "source": "7e53720d06f525f4e5fdbfec42f52840d5b734e2",
+  "ova_sha256": "578ea6b83b450b91bccc10ac80058db42d157e2161a45aa23fc8a23a2def7c65",
+  "scan_artifact": 11570597891,
+  "scan_zip_sha256": "9a266e5d3c96ec6ff108b598bc3c915e1520561969f93785eb460eb737e46f1a",
+  "govulncheck_version": "v1.8.0",
+  "primary_sources": [
+    {
+      "url": "https://github.com/golang/vuln/blob/v1.8.0/internal/vulncheck/binary.go#L105-L114",
+      "meaning": "When PkgSymbols is empty, fallback synthesizes known vulnerable symbols at module precision."
+    },
+    {
+      "url": "https://github.com/golang/vuln/blob/v1.8.0/internal/vulncheck/binary.go#L178-L205",
+      "meaning": "Advisory imports lacking explicit symbols become package-path wildcard placeholders."
+    },
+    {
+      "url": "https://github.com/golang/vuln/blob/v1.8.0/internal/vulncheck/binary.go#L115-L133",
+      "meaning": "Fallback data then proceeds through package and symbol finding emission."
+    },
+    {
+      "url": "https://github.com/golang/vuln/blob/v1.8.0/internal/vulncheck/binary.go#L34-L43",
+      "meaning": "Binary symbol results are emitted from the resulting records."
+    },
+    {
+      "url": "https://pkg.go.dev/golang.org/x/vuln@v1.8.0/cmd/govulncheck#hdr-Limitations",
+      "meaning": "Documentation warns that unavailable symbol extraction reports dependencies at module granularity, and binary mode does not establish call graphs."
+    }
+  ],
+  "primary_source_binary_go_sha256": "7e5be5475cabd7870de581bf603650be8fbcf69e8f9f4160a8874a228b6de6b0",
+  "exact_binary_records": [
+    {
+      "name": "app-culvert",
+      "binary_sha256": "d5973b37e1b9454059e1c485bc12e98e0f81af335346e38322920411181f90af",
+      "go_version": "go1.26.8",
+      "raw_scanner_json_sha256": "191a6ed55649e41523315b56e22bca8bcf0a4ea9c4d79f43ccc2b81ad0c92e78",
+      "openpgp_trace_levels": {
+        "module": 1,
+        "package": 7,
+        "symbol": 7
+      },
+      "all_reported_symbols_are_wildcard_placeholders": true
+    },
+    {
+      "name": "app-deploy-culvert-maint",
+      "binary_sha256": "384bf44077e17db01d39259ee55f0791dd3bed4434be053f5152e38026730a7f",
+      "go_version": "go1.26.8",
+      "raw_scanner_json_sha256": "b45a95591a476f083b86ce6bc809e2232aacb134ec5574eea5836e46219af03f",
+      "openpgp_trace_levels": {
+        "module": 1,
+        "package": 7,
+        "symbol": 7
+      },
+      "all_reported_symbols_are_wildcard_placeholders": true
+    },
+    {
+      "name": "host-opt-culvert-appliance-bin-culvert-access",
+      "binary_sha256": "f03fb78dcd9000fccfe64db6ab9d5d6cee017aa23bde77bc8cd267444bb95e83",
+      "go_version": "go1.26.8",
+      "raw_scanner_json_sha256": "ce1122a3e9ce57cbbbed27d6d6a60f153a8ce813a388548a5d5da5cbca86a625",
+      "openpgp_trace_levels": {
+        "module": 1,
+        "package": 0,
+        "symbol": 0
+      },
+      "all_reported_symbols_are_wildcard_placeholders": null
+    }
+  ],
+  "analysis": [
+    "The advisory lists seven affected OpenPGP package paths and no concrete symbols.",
+    "The app and maintenance binary JSON contain fabricated package/* functions, split by the formatter into receiver golang and function org/x/crypto/.../*. These are not actual extracted Go function names.",
+    "The exact Dockerfile strips both binaries using -s -w, consistent with the documented symbol-extraction fallback.",
+    "Therefore Symbol Results/affected/called wording is not proof of binary linkage or executed vulnerable paths for this fallback.",
+    "Source-graph non-linking gates support absence in the verified source configuration but are not, alone, direct proof of absence from the final shipped binary.",
+    "Apply the same extraction-quality check before describing Docker, Compose, containerd, shim, runc or snapd findings as called. Some concrete-looking names can also be synthesized from advisory symbol lists.",
+    "Actual affected dependency versions and available fixed versions remain valid remediation inputs. Continue the authorized package upgrades/removals; do not substitute unproven reachability or risk acceptance."
+  ],
+  "required_closeout_evidence": [
+    "Retain govulncheck v1.8.0 -mode extract output per exact SHA256 binary to record whether PkgSymbols is absent/empty; empty extraction is coverage loss, not absence proof.",
+    "For culvert, bundled culvert-maint and culvert-access, inspect exact extracted ELF bytes with a Go-version-compatible independent pclntab/package/function inventory. Hash the inventory; require nonzero expected main and x/crypto symbols plus no golang.org/x/crypto/openpgp or descendants.",
+    "If independent extraction cannot support these stripped binaries, use a pinned exact-source/build-configuration reproducible comparison: unstripped companion with proven package inventory, and demonstrable derivation/equality to the shipped stripped artifact. A fresh rebuild merely from the same source is insufficient without byte binding.",
+    "Include Linux amd64 CGO=0/build-tags/module replacements and final binary hashes with source graph gate results; preserve the original scanner result and document the fallback instead of suppressing it.",
+    "Until that artifact-bound proof is present, mark OpenPGP final shipped-binary disposition BLOCKED, with scanner fallback identified and source non-linking evidence available."
+  ]
+}

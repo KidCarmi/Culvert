@@ -1,0 +1,197 @@
+{
+  "schema": 1,
+  "result": "PASS for source-unavailable fresh-appliance and encrypted historical-log recovery",
+  "source_sha": "7e53720d06f525f4e5fdbfec42f52840d5b734e2",
+  "ova_sha256": "578ea6b83b450b91bccc10ac80058db42d157e2161a45aa23fc8a23a2def7c65",
+  "image_id": "sha256:2a355d7a8930b12581c0f42c273bc3357cbefa36d9382ab7071d2c187dda0554",
+  "controller_revision": "3d57784a4b88b827651c0380279b4a7a51f3b144",
+  "source_absence": {
+    "source_uuid": "564d6806-6e99-7aff-6f61-f72935832f58",
+    "source_vm_deleted": true,
+    "source_disks_deleted": true,
+    "one_vm_limit": 1
+  },
+  "fresh_vm": {
+    "uuid": "564d3386-3675-b17c-9a26-90de6e6acb93",
+    "name": "culvert-esxi-bdd3119515c3",
+    "bootstrap_recorded_url": "https://192.168.1.191:9090",
+    "url_basis": "Fresh-bootstrap observations plus retained-console logout receipt confirms guest address after restore"
+  },
+  "fresh_bootstrap": "PASS local PAM forced password change",
+  "firstboot_readonly_observation": {
+    "result": "pass",
+    "complete_last_sample": true,
+    "seconds_observed_until_complete": 15.000561777000001,
+    "scope": "wait started after bootstrap; not full first-install duration"
+  },
+  "backup": {
+    "archive_sha256": "e5307a523e843177a4639baee07dd73fee67bbd3e2e83c9b5ba1be54bafd3ed3",
+    "archive_bytes": 11674,
+    "behavioral_recovery": "PASS",
+    "separately_retained_recovery_material_used": true
+  },
+  "history": {
+    "result": "pass",
+    "records": 12,
+    "identical": true,
+    "source_history_absent_before_import": true,
+    "live_lock_refusal": true,
+    "wrong_passphrase_refusal": true,
+    "dry_run_verified": true,
+    "rotated_log_key": true,
+    "archive_sha256": "5fd366cb66c92a1d22b67d3ac271cb530ca93f0d58d0da9bb0bea72962ffbdbe"
+  },
+  "first_transport_unavailable_observations": [
+    {
+      "kind": "transport-unavailable",
+      "schema": 1,
+      "phase": "history-live-refusal",
+      "first_failure_elapsed_seconds": 0.083833,
+      "retry_budget_seconds": 300
+    },
+    {
+      "kind": "transport-unavailable",
+      "schema": 1,
+      "phase": "history-import",
+      "first_failure_elapsed_seconds": 0.002448,
+      "retry_budget_seconds": 300
+    }
+  ],
+  "transport_observation_meaning": "First failure observation elapsed times during expected restart, not sustained outage durations; bounded 300-second retry budget subsequently completed. Both first failures retained.",
+  "restored_behavior": {
+    "admin_login": "pass",
+    "ca_decryption": "pass",
+    "ca_fingerprint_unchanged": true,
+    "policy_identical": true,
+    "category_observations_identical": true,
+    "agent": "pass",
+    "agent_version": "v1.0.260-candidate.g7e53720d06f5",
+    "traffic": {
+      "example.com": 200,
+      "example.org": 403
+    }
+  },
+  "evidence_bindings": [
+    {
+      "evidence": ".tools/private-escrow-7e/transfer-restore-4d32ef69b84fd301/guest-result.json",
+      "bytes": 691,
+      "sha256": "e66137aa440fb5e0580796c9c63c7193113f86353e64b32df9e7d7ec5ada748c"
+    },
+    {
+      "evidence": ".tools/private-escrow-7e/transfer-restore-4d32ef69b84fd301/restored-observation.json",
+      "bytes": 1476,
+      "sha256": "b8c8f19fe1dede37741f14fdc57a98bfb70dd701d8b1ef0706da2969110dcd2f"
+    },
+    {
+      "evidence": ".tools/private-escrow-7e/transfer-restore-4d32ef69b84fd301/restored-history.json",
+      "bytes": 192,
+      "sha256": "65f1f0affd85e3a6dc3b7cdca6965531be4a29e9fe99bbb4aea68f2bf6cfaafb"
+    },
+    {
+      "evidence": ".tools/private-escrow-7e/source-deletion-receipt.json",
+      "bytes": 336,
+      "sha256": "bba98c882c2209d61cef3517678dda3018f94f0efb4f80e9c36aa83e01c53ae8"
+    },
+    {
+      "evidence": ".tools/private-escrow-7e/source-deleted-owned.json",
+      "bytes": 664,
+      "sha256": "d9731f2598c18bbd7d316147aa69bb1cbb467d26403718c71f17341fc83ceea4"
+    },
+    {
+      "evidence": ".tools/private-escrow-7e/source-deletion-after.json",
+      "bytes": 2101,
+      "sha256": "b07125791ac2f19a94f9347cb9565a5991577e33b4f0eeefaff13f151a095735"
+    },
+    {
+      "evidence": ".tools/private-escrow-7e/source-deletion-before.json",
+      "bytes": 2477,
+      "sha256": "dd5c6f0a49fc66c6589f3bd6d359204ae7bdca16f88591796e68f8e96ff5dd0c"
+    },
+    {
+      "evidence": ".tools/private-escrow-7e/source-deletion-attempt.json",
+      "bytes": 100,
+      "sha256": "44b7f1172b1ad3cba394fc33228db33f9d6579f3ab8d7194f41da550874311c4"
+    },
+    {
+      "evidence": ".tools/private-escrow-7e/provenance.json",
+      "bytes": 263,
+      "sha256": "80d4ba179cf08987d7f85ecdb846cdefb6fa5633113d721e40b975f9f206adfe"
+    },
+    {
+      "evidence": ".tools/private-escrow-7e/archive-metadata.json",
+      "bytes": 1661,
+      "sha256": "34ae31f6a429a080de1e4c44d1437ba48100cac6fc266fb6e980eaff342628e6"
+    },
+    {
+      "evidence": ".tools/private-escrow-7e/export-receipt.json",
+      "bytes": 1047,
+      "sha256": "f2882cd58b69697cef37f55d72ee809d343b52c58acf5101c198c394ae6d3006"
+    },
+    {
+      "evidence": ".tools/private-escrow-7e/source-observation.json",
+      "bytes": 1438,
+      "sha256": "653474076a317eec92a0354b2a1ef17bc4011b1d654dc9f83f0e91a347a32394"
+    },
+    {
+      "evidence": ".tools/private-operations/source-delete.receipt.json",
+      "bytes": 238,
+      "sha256": "0a837578ac8ea4f7d20e5917b7eb0d7e796688d5c848aa7258e9ed411e50f846"
+    },
+    {
+      "evidence": ".tools/private-operations/fresh-import.receipt.json",
+      "bytes": 238,
+      "sha256": "a6a854b38954952db4c8e63ce7e554fb4c0e559ceff2a6b2c6105d5607ffbd59"
+    },
+    {
+      "evidence": ".tools/private-operations/fresh-bootstrap.out",
+      "bytes": 631,
+      "sha256": "327d7b13daef28410952f902e8664a3d38c01a37f6ec33b98c7eb2c5362b32d8"
+    },
+    {
+      "evidence": ".tools/private-operations/fresh-bootstrap.receipt.json",
+      "bytes": 238,
+      "sha256": "e3267ae30e3ce8b6cb4d6aecb9e5f29d729c6cf3b011f7c3c1f2b1407c123e34"
+    },
+    {
+      "evidence": ".tools/private-operations/fresh-firstboot-readonly.out",
+      "bytes": 343,
+      "sha256": "385dcf0ba2392c8575a175773c36a06683baa105bd4ef24f8bf600deed6112b0"
+    },
+    {
+      "evidence": ".tools/private-operations/fresh-firstboot-readonly.receipt.json",
+      "bytes": 238,
+      "sha256": "bdb31686d92c52215df90b8d98dc642b88ecb3a0ab2c663c2df404eb33a82365"
+    },
+    {
+      "evidence": ".tools/private-operations/fresh-restore.out",
+      "bytes": 202,
+      "sha256": "01d584850bdb461d37dea7a639686d1cae0c84e24bdbc280ff5ccdb9ec87f315"
+    },
+    {
+      "evidence": ".tools/private-operations/fresh-restore.receipt.json",
+      "bytes": 238,
+      "sha256": "575815fbfc785edcdaf7e4ef9e21d066aba676f3eb7a3dc27a0e9d53ae250d1b"
+    },
+    {
+      "evidence": ".tools/esxi-7e-fresh/owned.json",
+      "bytes": 610,
+      "sha256": "ada147caf675f7013d85132d574dcd0601b36a3c4f0b20de53486c5a8c6ae99a"
+    },
+    {
+      "evidence": ".tools/esxi-7e-fresh/secrets/access-bootstrap-attempt.json",
+      "bytes": 79,
+      "sha256": "205cc313497e3f78febc3b50fad1ceb962bb5043668086cbd9680b4569eadad5"
+    },
+    {
+      "evidence": ".tools/esxi-7e-fresh/secrets/bootstrap-pixels-002.txt",
+      "bytes": 779,
+      "sha256": "4bbefee59965ced4953e766b6df8e1bd8388644f314e7646fe83522e4c6a1315"
+    },
+    {
+      "evidence": ".tools/esxi-7e-fresh/secrets/bootstrap-pixels-003.txt",
+      "bytes": 779,
+      "sha256": "4bbefee59965ced4953e766b6df8e1bd8388644f314e7646fe83522e4c6a1315"
+    }
+  ],
+  "privacy": "No secret values, secret-file hashes, cookie contents, history rows or raw console captures are published. Raw evidence remains in private escrow/custody."
+}

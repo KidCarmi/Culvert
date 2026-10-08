@@ -1,0 +1,212 @@
+{
+  "schema": 1,
+  "result": "PASS for retained public console, actual Alt-F12 kernel VT and reviewed Alt-F1 return; Esc still unproved",
+  "fresh_uuid": "564d3386-3675-b17c-9a26-90de6e6acb93",
+  "guest": "192.168.1.191",
+  "url": "https://192.168.1.191:9090",
+  "console_logout": {
+    "result": "pass",
+    "stage": "public-menu",
+    "uuid": "564d3386-3675-b17c-9a26-90de6e6acb93",
+    "helper_sha256": "9f4fac6929b5ab0fb82d2bf3ec6c3862f9c7f2e09e788a22ad47de69468556ce",
+    "guest": "192.168.1.191",
+    "screenshot_sha256": "b3bb69a23c524fe6fb2141eb193ea9d42640a9cb09f4bec1c00a31d54242e39b",
+    "text_sha256": "01bc6b49367e0955bacc75f091aa08b6b28f050e4e492d7b4cbe32fafd63293c"
+  },
+  "passive_frames": {
+    "count": 6,
+    "all_sha256": "b3bb69a23c524fe6fb2141eb193ea9d42640a9cb09f4bec1c00a31d54242e39b"
+  },
+  "alt_f12": {
+    "key": "alt-f12",
+    "uuid": "564d3386-3675-b17c-9a26-90de6e6acb93",
+    "frames": [
+      {
+        "phase": "before",
+        "monotonic_ns": 188301359000000,
+        "bytes": 9142,
+        "sha256": "b3bb69a23c524fe6fb2141eb193ea9d42640a9cb09f4bec1c00a31d54242e39b",
+        "width": 720,
+        "height": 400
+      },
+      {
+        "phase": "after",
+        "monotonic_ns": 188302890000000,
+        "bytes": 19377,
+        "sha256": "1437324867bdf3f4ac47bdc13126dab41ef0a95cf2c4cf9f5c0b931a13212f64",
+        "width": 720,
+        "height": 400
+      }
+    ]
+  },
+  "initial_alt_f1": {
+    "result": "BLOCKED before intent/key input",
+    "original_receipt": {
+      "exit_code": 90,
+      "finished_utc": "2026-10-08T19:07:35.956955+00:00",
+      "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stderr_sha256": "399ee753b0bc12637cb5e0c479d488ed7a79d8c84825c796b31a532d3408b927"
+    },
+    "image_difference_bbox": [
+      0,
+      397,
+      9,
+      399
+    ],
+    "basis": "Pixel comparison confined to cursor rectangle; no intent/complete files"
+  },
+  "reviewed_alt_f1": {
+    "key": "alt-f1",
+    "uuid": "564d3386-3675-b17c-9a26-90de6e6acb93",
+    "frames": [
+      {
+        "phase": "before",
+        "monotonic_ns": 188341796000000,
+        "bytes": 19365,
+        "sha256": "7d401a5f15cd9d8bc61cda8e6f0576ded1ebbfffe6561143632ec6e5c753b2ef",
+        "width": 720,
+        "height": 400
+      },
+      {
+        "phase": "after",
+        "monotonic_ns": 188343296000000,
+        "bytes": 9142,
+        "sha256": "b3bb69a23c524fe6fb2141eb193ea9d42640a9cb09f4bec1c00a31d54242e39b",
+        "width": 720,
+        "height": 400
+      }
+    ]
+  },
+  "initial_logout_guard": {
+    "result": "BLOCKED before input",
+    "basis": "Qualification operator report: single-frame cursor guard refused; external original and bounded-observation scripts retained by hash",
+    "continuation": "unchanged console.wait_shell bounded recapture then authenticated logout PASS; not blanket input retry"
+  },
+  "limits": [
+    "No raw frame is published",
+    "Esc remains unproved",
+    "Actual kernel-VT content was reviewed by root; this reporting step verifies frame identities and the Alt-F1 cursor-only difference"
+  ],
+  "evidence_bindings": [
+    {
+      "evidence": ".tools/private-operations/retained-console-logout.json",
+      "sha256": "6f87ded8eb9cb1d0a3489292d91e26c2ec4c22225ec0e6c329bd76eb22d4e6da",
+      "bytes": 373
+    },
+    {
+      "evidence": ".tools/private-operations/retained-console-logout-intent.json",
+      "sha256": "1cb5de6646e8b5d39d3f3c101f62f3a76f57f9e661f4bc72fa0a4aba1fab582a",
+      "bytes": 124
+    },
+    {
+      "evidence": ".tools/private-operations/fresh-final-visual.receipt.json",
+      "sha256": "b23f8ca278cfc3f096a75c37c2f09f592978ef677b26be8fbfce5644b3ce3013",
+      "bytes": 238
+    },
+    {
+      "evidence": ".tools/private-operations/fresh-alt-f1.receipt.json",
+      "sha256": "3f0597a80e91822859221310ae3aaef01e0cbd675cd718db9338d36a7aa3fdef",
+      "bytes": 239
+    },
+    {
+      "evidence": ".tools/private-operations/fresh-alt-f1-reviewed.receipt.json",
+      "sha256": "916afcc72fdbd6f000320767ada9b804c5a4a435ed34f1c8e1f5f7f3b297747c",
+      "bytes": 238
+    },
+    {
+      "evidence": ".tools/private-operations/fresh-alt-f12.receipt.json",
+      "sha256": "d9a5d20d029fa206c964fbc0c857d3dd0f9fc6c79b4b15b3c33d1c6f6954784d",
+      "bytes": 238
+    },
+    {
+      "evidence": ".tools/esxi-7e-fresh/secrets/visual-fresh-final/frames.jsonl",
+      "sha256": "4c1f06b304489fdcd4ddc7fa069c7294068c5237d142cc55ee9bc85a0d5067b8",
+      "bytes": 3595
+    },
+    {
+      "evidence": ".tools/esxi-7e-fresh/secrets/visual-fresh-final/frame-0000.png",
+      "sha256": "b3bb69a23c524fe6fb2141eb193ea9d42640a9cb09f4bec1c00a31d54242e39b",
+      "bytes": 9142
+    },
+    {
+      "evidence": ".tools/esxi-7e-fresh/secrets/visual-fresh-final/frame-0001.png",
+      "sha256": "b3bb69a23c524fe6fb2141eb193ea9d42640a9cb09f4bec1c00a31d54242e39b",
+      "bytes": 9142
+    },
+    {
+      "evidence": ".tools/esxi-7e-fresh/secrets/visual-fresh-final/frame-0002.png",
+      "sha256": "b3bb69a23c524fe6fb2141eb193ea9d42640a9cb09f4bec1c00a31d54242e39b",
+      "bytes": 9142
+    },
+    {
+      "evidence": ".tools/esxi-7e-fresh/secrets/visual-fresh-final/frame-0003.png",
+      "sha256": "b3bb69a23c524fe6fb2141eb193ea9d42640a9cb09f4bec1c00a31d54242e39b",
+      "bytes": 9142
+    },
+    {
+      "evidence": ".tools/esxi-7e-fresh/secrets/visual-fresh-final/frame-0004.png",
+      "sha256": "b3bb69a23c524fe6fb2141eb193ea9d42640a9cb09f4bec1c00a31d54242e39b",
+      "bytes": 9142
+    },
+    {
+      "evidence": ".tools/esxi-7e-fresh/secrets/visual-fresh-final/frame-0005.png",
+      "sha256": "b3bb69a23c524fe6fb2141eb193ea9d42640a9cb09f4bec1c00a31d54242e39b",
+      "bytes": 9142
+    },
+    {
+      "evidence": ".tools/esxi-7e-fresh/secrets/visual-key-fresh-alt-f1/before.png",
+      "sha256": "7d401a5f15cd9d8bc61cda8e6f0576ded1ebbfffe6561143632ec6e5c753b2ef",
+      "bytes": 19365
+    },
+    {
+      "evidence": ".tools/esxi-7e-fresh/secrets/visual-key-fresh-alt-f12/complete.json",
+      "sha256": "fc58385ded99a747ae43e7790c945e90d58fac58053e0018220934fed8f3b1a7",
+      "bytes": 430
+    },
+    {
+      "evidence": ".tools/esxi-7e-fresh/secrets/visual-key-fresh-alt-f12/intent.json",
+      "sha256": "346dc6468c69ff204252a193c24ff78eb8af029e4d315fd16e78ba907eb5628b",
+      "bytes": 348
+    },
+    {
+      "evidence": ".tools/esxi-7e-fresh/secrets/visual-key-fresh-alt-f12/before.png",
+      "sha256": "b3bb69a23c524fe6fb2141eb193ea9d42640a9cb09f4bec1c00a31d54242e39b",
+      "bytes": 9142
+    },
+    {
+      "evidence": ".tools/esxi-7e-fresh/secrets/visual-key-fresh-alt-f12/after.png",
+      "sha256": "1437324867bdf3f4ac47bdc13126dab41ef0a95cf2c4cf9f5c0b931a13212f64",
+      "bytes": 19377
+    },
+    {
+      "evidence": ".tools/esxi-7e-fresh/secrets/visual-key-fresh-alt-f1-reviewed/complete.json",
+      "sha256": "162c65ee2ada51d4667f1b13840be71a90b2c9f012e78d58c9dfae4c40346bc3",
+      "bytes": 429
+    },
+    {
+      "evidence": ".tools/esxi-7e-fresh/secrets/visual-key-fresh-alt-f1-reviewed/intent.json",
+      "sha256": "9fb8c28a4a4bd96eeeb0fec07405dbc6e0ae5d91f094ba0124492ead313e0016",
+      "bytes": 348
+    },
+    {
+      "evidence": ".tools/esxi-7e-fresh/secrets/visual-key-fresh-alt-f1-reviewed/before.png",
+      "sha256": "7d401a5f15cd9d8bc61cda8e6f0576ded1ebbfffe6561143632ec6e5c753b2ef",
+      "bytes": 19365
+    },
+    {
+      "evidence": ".tools/esxi-7e-fresh/secrets/visual-key-fresh-alt-f1-reviewed/after.png",
+      "sha256": "b3bb69a23c524fe6fb2141eb193ea9d42640a9cb09f4bec1c00a31d54242e39b",
+      "bytes": 9142
+    },
+    {
+      "evidence": "retained-console-external-scripts/logout-retained-console.py",
+      "sha256": "2c3cb5d1d38f1c5b75517d5d742700cfdb38bedc626f935cd12062b11a6d6a19",
+      "bytes": 2932
+    },
+    {
+      "evidence": "retained-console-external-scripts/logout-retained-console-observe.py",
+      "sha256": "9f4fac6929b5ab0fb82d2bf3ec6c3862f9c7f2e09e788a22ad47de69468556ce",
+      "bytes": 2946
+    }
+  ]
+}
