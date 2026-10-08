@@ -1,0 +1,31 @@
+A config sha256:0cbf245ab047bc0979177e71102e455e6eb5ddb64f28b92808942e75fe5ba16e
+B config sha256:74611ffb7e631c2dce247d31404c94f2c7966e301c0d36c21d53347c23b5bfed
+layers: A=8 B=8
+  layer 0: identical sha256:74d97c428c51a828f9051a7a40a53ff1fc99e54fc30323ce36760701b0b7f711
+  layer 1: identical sha256:b684354d8de0c2ede9b26654f75adb50e74bce0832ff4f31196892aa6a17ae34
+  layer 2: identical sha256:0ab5cc12c0218764d90d5f96ca8bec5ca8b7b5bd39c1e294971f250a784ebd2d
+  layer 3: identical sha256:bb33160ecb29edddeada1a089a42b5f8ceba7a941d24ac09ad1008c6e9ffe64d
+  layer 4: identical sha256:24db1b20b4ffbb55933cccfdec1ab38ccfa50251b3e68480d483914e6d00be53
+  layer 5: identical sha256:5e8fb9fa4fc2fa8544976a51fafdeaf66ef5dd497404ab33a9c931668c2ee316
+  layer 6: identical sha256:25e844d80c0b96f4758f9afed4dfa3760f95c01669a41debe2df3d15f6038844
+  layer 7: DIFFERS A=sha256:c2cad54c34376c844a9b1892382cbb36ea783b9040cd9beaecdc8e7583de8cd6 B=sha256:8e1e5f9ba05363d667feeb4420ffddc1f984fdaeb94b1a457a4ee9c407c18885
+    mtime-only etc mtime:1791438352->1791435735
+    mtime-only etc/apk mtime:1791438353->1791435735
+    mtime-only etc/apk/world mtime:1791438353->1791435735
+    mtime-only lib/apk/db mtime:1791438353->1791435735
+    mtime-only lib/apk/db/installed mtime:1791438353->1791435735
+    mtime-only lib/apk/db/scripts.tar.gz mtime:1791438353->1791435735
+    mtime-only lib/apk/db/triggers mtime:1791438353->1791435735
+    mtime-only usr/lib mtime:1791438353->1791435735
+    mtime-only usr/lib/libnghttp2.so.14 mtime:1791438353->1791435735
+    mtime-only usr/lib/libpcre2-8.so.0 mtime:1791438353->1791435735
+    mtime-only usr/lib/libpcre2-posix.so.3 mtime:1791438353->1791435735
+    mtime-only usr/lib/libz.so.1 mtime:1791438353->1791435735
+    mtime-only var/cache/apk mtime:1791438353->1791435735
+    mtime-only var/cache/apk/APKINDEX.630cb808.tar.gz mtime:1791438353->1791435735
+    mtime-only var/cache/apk/APKINDEX.9c5ff2cc.tar.gz mtime:1791438353->1791435735
+    CONTENT    var/log/apk.log sha:69cf3dffc688cdb2->af6947dda8537ad7 mtime:1791438353->1791435735
+history (created_by) identical
+created: A=2026-10-08T04:19:53Z B=2026-10-08T04:19:53Z
+apk packages: A=41 B=41; differing=0
+VERDICT files_with_content_change=1 packages_changed=0

@@ -1,0 +1,72 @@
+{
+  "artifact_id": 11547867460,
+  "zip_sha256": "54079d0e684ada99cbb5c1ab58ec1df7f8358bc7a680269d618534e770d651b5",
+  "run": 37761732512,
+  "controller": "ce1967151b49254504c1ba24338de79ded26ce11",
+  "slots": [
+    {
+      "slot": "1-A",
+      "seconds": [
+        100.565112,
+        100.52402299999994,
+        100.48862600000007
+      ],
+      "checks_by_result": {
+        "blocked": 2,
+        "info": 5,
+        "pass": 79
+      }
+    },
+    {
+      "slot": "2-B",
+      "seconds": [
+        100.48775100000012,
+        100.4605660000002,
+        100.44651699999986
+      ],
+      "checks_by_result": {
+        "blocked": 2,
+        "info": 5,
+        "pass": 79
+      }
+    },
+    {
+      "slot": "3-B",
+      "seconds": [
+        100.50925199999983,
+        100.55530699999963,
+        100.55923900000016
+      ],
+      "checks_by_result": {
+        "blocked": 2,
+        "info": 5,
+        "pass": 79
+      }
+    },
+    {
+      "slot": "4-A",
+      "seconds": [
+        100.59809399999995,
+        100.48401999999987,
+        100.44830000000002
+      ],
+      "checks_by_result": {
+        "blocked": 2,
+        "info": 5,
+        "pass": 79
+      }
+    }
+  ],
+  "range_seconds": [
+    100.44651699999986,
+    100.59809399999995
+  ],
+  "means": {
+    "A": 100.51802916666664,
+    "B": 100.5031053333333
+  },
+  "result": "pass within controlled QEMU profile",
+  "esxi_qualified": false,
+  "original_failures_preserved": true,
+  "specific_storage_causation_established": false
+}
