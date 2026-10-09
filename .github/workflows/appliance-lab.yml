@@ -86,10 +86,13 @@ jobs:
             image_run: "37948225581"
             image_tar_sha256: "74c44b59f99ea0ea090929852e5891813276c22c3ae5dc3c63851210c3775447"
             expect_image_id: "sha256:4db3e5c9d492fe9056a4a607aa0c861daeaec30e3a6657532743e16bde34610b"
-            # Built from source (new bytes: HWE kernel, 44-module denylist,
-            # root-only DRM nodes); 7c7b29ee's retained OVA stays in run 37908313475.
-            retained_run: ""
-            retained_sha256: ""
+            # RE-QUALIFIES the exact OVA run 37948667525 built from this commit
+            # (no rebuild: a rebuild is a different artifact) with the harness
+            # fixes from that run's pressure phase (tmpfs console staging,
+            # backup opId, nomodeset-aware DRM check). Its signed-update
+            # fixture is cut from the OVA's own disk (step below).
+            retained_run: "37948667525"
+            retained_sha256: "855b4a09d46e80b3325d529d58436ea2c0cb145814add50e4a5c2e66eecccac9"
             # Disk-pressure scenario (block + inode exhaustion, backup/update
             # under pressure, recovery) on this disposable guest, after history.
             pressure: "1"
@@ -253,7 +256,8 @@ jobs:
           done 2>&1 | tee "$LAB_ROOT/save-replay.txt"
           echo "builder daemon has no ClamAV image before the build: $(docker image ls -q --filter reference='*clamav*' | wc -l) found"
       - name: Check out the appliance source the candidate is built from
-        if: matrix.retained_run == ''
+        # a retained OVA needs it only for the pressure leg's signed-update fixture
+        if: matrix.retained_run == '' || matrix.pressure == '1'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ env.APPLIANCE_SOURCE_SHA }}
@@ -278,7 +282,8 @@ jobs:
       # build-ova.sh compiles the appliance console (#1540) and refuses any
       # compiler other than the source commit's go.mod toolchain line.
       - name: Go toolchain pinned by the appliance source
-        if: matrix.retained_run == ''
+        # a retained OVA needs it only for the pressure leg's signed-update fixture
+        if: matrix.retained_run == '' || matrix.pressure == '1'
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
           go-version-file: appliance-src/go.mod
@@ -372,6 +377,40 @@ jobs:
           retention-days: 14
           compression-level: 0
           if-no-files-found: error
+      - name: Fetch the RETAINED OVA (re-qualification of an existing artifact; verified sha256)
+        # Re-qualifies the exact bytes a previous run built and retained, with
+        # the current harness. Nothing is rebuilt: a rebuild would be a
+        # different artifact.
+        if: matrix.retained_run != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$LAB_ROOT/ova"
+          gh run download "${{ matrix.retained_run }}" -R "$GITHUB_REPOSITORY" -n "appliance-lab-ova-${{ matrix.variant }}" -D "$LAB_ROOT/ova"
+          got="$(sha256sum "$LAB_ROOT/ova/"*.ova | cut -d' ' -f1)"
+          [ "$got" = "${{ matrix.retained_sha256 }}" ] || { echo "::error::retained OVA sha256 $got != ${{ matrix.retained_sha256 }}"; exit 1; }
+          grep -q "$got" "$LAB_ROOT/ova/"*.ova.sha256
+          echo "retained OVA $got from run ${{ matrix.retained_run }}"
+      - name: "Retained OVA: its own application archive + manifest for the signed-update fixture (read-only)"
+        # The fixture's baseline must be the archive baked into THIS OVA, byte
+        # for byte. Build mode reads it from the build overlay; a retained OVA
+        # has no overlay here, so it is read out of the OVA's own disk with
+        # libguestfs, read-only. Nothing in the OVA changes.
+        if: matrix.retained_run != '' && matrix.pressure == '1' && env.LAB_STAGE == 'full'
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          X="$LAB_ROOT/ova-x"; rm -rf "$X"; mkdir -p "$X"
+          tar -xf "$LAB_ROOT/ova/"*.ova -C "$X"
+          D="$(ls "$X"/*.vmdk | head -1)"
+          O="$LAB_ROOT/build/overlay/var/lib/culvert-appliance"; mkdir -p "$O/images"
+          sudo env LIBGUESTFS_BACKEND=direct guestfish --ro -a "$D" -i \
+            download /var/lib/culvert-appliance/manifest.env "$O/manifest.env" : \
+            download /var/lib/culvert-appliance/images/culvert.tar.gz "$O/images/culvert.tar.gz"
+          sudo chown -R "$(id -u):$(id -g)" "$LAB_ROOT/build"; rm -rf "$X"
+          grep -E '^APP_IMAGE_(INDEX_DIGEST|REPO|TAG)=' "$O/manifest.env"
+          sha256sum "$O/images/culvert.tar.gz"
       - name: "TEST-ONLY signed-update lab: disposable TLS registry (as ghcr.io) + fixture release evidence"
         # Outside the OVA: a registry the guest reaches as ghcr.io (its cert names
         # ghcr.io; the guest is told to trust its CA at qualification time), the
@@ -380,7 +419,7 @@ jobs:
         # from the source revision's release-proof fixture (ephemeral ed25519
         # key, never written; only the PUBLIC keyring reaches the guest). Any
         # failure leaves step 6c BLOCKED with the reason, never a fake pass.
-        if: env.LAB_STAGE == 'full' && matrix.retained_run == ''
+        if: env.LAB_STAGE == 'full' && (matrix.retained_run == '' || matrix.pressure == '1')
         continue-on-error: true
         run: |
           set -euo pipefail
@@ -411,6 +450,9 @@ jobs:
           # The OVA build runs `sudo -E` docker builds, which leave ~/.docker/buildx
           # root-owned; reclaim it so this unprivileged build can take its lock.
           [ ! -e "$HOME/.docker" ] || sudo chown -R "$(id -u):$(id -g)" "$HOME/.docker"
+          # A retained OVA was not built on this runner: take its own archive
+          # back from the registry it was just pushed to (same digest).
+          docker image inspect "$REPO:$TAG" >/dev/null 2>&1 || { docker pull -q "127.0.0.1:443/kidcarmi/culvert@$B" && docker tag "127.0.0.1:443/kidcarmi/culvert@$B" "$REPO:$TAG"; }
           printf 'FROM %s:%s\nLABEL org.culvert.lab-target="1"\n' "$REPO" "$TAG" | docker build --provenance=false --sbom=false -t 127.0.0.1:443/kidcarmi/culvert:lab-target -
           docker push -q 127.0.0.1:443/kidcarmi/culvert:lab-target
           T="sha256:$(skopeo inspect --raw --cert-dir /etc/docker/certs.d/127.0.0.1:443 docker://127.0.0.1:443/kidcarmi/culvert:lab-target | sha256sum | cut -d' ' -f1)"
@@ -441,21 +483,6 @@ jobs:
             echo "guest changes made by the harness: /etc/hosts ghcr.io entry, /etc/docker/certs.d/ghcr.io/ca.crt, /etc/culvert-maint/lab-fixture-keyring.json, release_trust_keys in /etc/culvert-maint/config.toml"
           } > "$U/fixture.txt"
           cat "$U/fixture.txt"; touch "$U/READY"
-      - name: Fetch the RETAINED OVA (re-qualification of an existing artifact; verified sha256)
-        # Re-qualifies the exact bytes a previous run built and retained, with
-        # the current harness. Nothing is rebuilt: a rebuild would be a
-        # different artifact.
-        if: matrix.retained_run != ''
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          mkdir -p "$LAB_ROOT/ova"
-          gh run download "${{ matrix.retained_run }}" -R "$GITHUB_REPOSITORY" -n "appliance-lab-ova-${{ matrix.variant }}" -D "$LAB_ROOT/ova"
-          got="$(sha256sum "$LAB_ROOT/ova/"*.ova | cut -d' ' -f1)"
-          [ "$got" = "${{ matrix.retained_sha256 }}" ] || { echo "::error::retained OVA sha256 $got != ${{ matrix.retained_sha256 }}"; exit 1; }
-          grep -q "$got" "$LAB_ROOT/ova/"*.ova.sha256
-          echo "retained OVA $got from run ${{ matrix.retained_run }}"
       - name: Fetch the adoption target image (verified sha256)
         if: matrix.adopt_image_run != ''
         env:
@@ -832,7 +859,7 @@ jobs:
       # and clamav_sidecar_image_id; on 2e3bcc2a these equalled the measured
       # pins). The amd64 manifest and config are DERIVED from the re-hashed
       # index (not pinned: derived and exported through GITHUB_ENV), so every link stays hash-bound.
-      OVA_ARTIFACT_ID: "11605618137"   # appliance-lab-ova-candidate-7c7b29ee3be4, run 37908313475
+      OVA_ARTIFACT_ID: "11625975699"   # appliance-lab-ova-candidate-dc57bd76c201, run 37948667525
       OVA_SHA256: 4b8ae484fd8b9bda8dfc12512e9e0b489edcc96c7590824f22276a19dc6b7a05
       SIDECAR_ARCHIVE_SHA256: e2489709f236f2726316d5a6fbdd9187a8714cc6475df5d8d00fde18d4a106c4
       SIDECAR_INDEX: sha256:45dbf00306ef19a9c8f9a90a078d73e8131cc6dc03e08d829acdd16816afc94e
@@ -1247,12 +1274,12 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     env:
-      OVA_ARTIFACT_ID: "11605618137"   # appliance-lab-ova-candidate-7c7b29ee3be4, run 37908313475
-      OVA_SHA256: 4b8ae484fd8b9bda8dfc12512e9e0b489edcc96c7590824f22276a19dc6b7a05
-      SOURCE_IMAGE_RUN_ID: "37904532038"
-      SOURCE_IMAGE_TAR_SHA256: d56cb3070addaf080e5500d92523a58462be5a95ff3e49af1b98755f3df0b63d
-      IMAGE_ID: sha256:398ffaf2090ec32cb9ff0506dd2e92bfd2414d689719373fc00cf96a5c58f906
-      SRC_SHA: 7c7b29ee3be40af6a0809c73ad04d4337303263d
+      OVA_ARTIFACT_ID: "11625975699"   # appliance-lab-ova-candidate-dc57bd76c201, run 37948667525
+      OVA_SHA256: 855b4a09d46e80b3325d529d58436ea2c0cb145814add50e4a5c2e66eecccac9
+      SOURCE_IMAGE_RUN_ID: "37948225581"
+      SOURCE_IMAGE_TAR_SHA256: 74c44b59f99ea0ea090929852e5891813276c22c3ae5dc3c63851210c3775447
+      IMAGE_ID: sha256:4db3e5c9d492fe9056a4a607aa0c861daeaec30e3a6657532743e16bde34610b
+      SRC_SHA: dc57bd76c201db11874d08a8d37accba8646b458
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Workspace + libguestfs
@@ -1391,7 +1418,7 @@ jobs:
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
-          name: appliance-lab-exact-scan-7c7b29ee3be4
+          name: appliance-lab-exact-scan-dc57bd76c201
           path: ${{ env.W }}/evidence/
           retention-days: 30
           if-no-files-found: warn
