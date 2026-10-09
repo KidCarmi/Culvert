@@ -123,6 +123,24 @@ if [[ -n "${GUEST_APT_SNAPSHOT:-}" ]]; then
   before="$(dpkg-query -W -f='${binary:Package}=${Version}\n' | sort)"
   DEBIAN_FRONTEND=noninteractive apt-get -y -qq -o Acquire::Snapshot="${GUEST_APT_SNAPSHOT}" \
     -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold --with-new-pkgs upgrade
+  # The kernel series is Ubuntu's supported HWE kernel (manifest.env
+  # GUEST_KERNEL_META, see there for why). Install its image metapackage from
+  # the same snapshot, then remove the GA metapackage chain the cloud image
+  # ships: left in place it would keep the 6.8 ABI installed and pull every
+  # later 6.8 kernel back in. Removing a metapackage removes no kernel; the
+  # purge below drops the superseded 6.8 packages.
+  [[ -n "${GUEST_KERNEL_META:-}" ]] || { echo "manifest.env: GUEST_KERNEL_META is not set" >&2; exit 1; }
+  DEBIAN_FRONTEND=noninteractive apt-get -y -qq -o Acquire::Snapshot="${GUEST_APT_SNAPSHOT}" \
+    install --no-install-recommends "$GUEST_KERNEL_META"
+  ga_meta="$(dpkg-query -W -f='${Package} ${Status}\n' linux-virtual linux-image-virtual linux-headers-virtual \
+    linux-generic linux-image-generic linux-headers-generic 2>/dev/null | awk '$NF=="installed"{print $1}' || true)"
+  if [[ -n "$ga_meta" ]]; then
+    log "removing the GA kernel metapackages: $(echo "$ga_meta" | tr '\n' ' ')"
+    # shellcheck disable=SC2086 # one package name per word
+    DEBIAN_FRONTEND=noninteractive apt-get -y -qq purge $ga_meta
+  fi
+  dpkg-query -W -f='${Status}' "$GUEST_KERNEL_META" 2>/dev/null | grep -q ' installed$' \
+    || { echo "$GUEST_KERNEL_META is not installed after the GA metapackage purge" >&2; exit 1; }
   # Exactly one kernel ships: purge every kernel-versioned package of an older
   # ABI than the newest installed image.
   newest_kver="$(dpkg-query -W -f='${Package}\n' 'linux-image-[0-9]*' | sed -n 's/^linux-image-\([0-9][0-9.]*-[0-9]*\)-.*/\1/p' | sort -V | tail -1)"
@@ -138,12 +156,18 @@ if [[ -n "${GUEST_APT_SNAPSHOT:-}" ]]; then
   [[ "$(find /boot -maxdepth 1 -name 'vmlinuz-*' | wc -l)" == 1 ]] || { ls -l /boot >&2; echo "expected exactly one kernel in /boot" >&2; exit 1; }
   # ... and that one is the snapshot's newest: a held or phased kernel would
   # otherwise pass the one-kernel check on the old ABI.
-  for meta in linux-image-virtual linux-image-generic; do
-    inst="$(dpkg-query -W -f='${Version}' "$meta" 2>/dev/null || true)"
-    [[ -z "$inst" ]] && continue
-    cand="$(apt-cache -o Acquire::Snapshot="${GUEST_APT_SNAPSHOT}" policy "$meta" | awk '/Candidate:/{print $2}')"
-    [[ "$inst" == "$cand" ]] || { echo "$meta is $inst, the snapshot's candidate is $cand (kernel held back)" >&2; exit 1; }
-  done
+  meta="$GUEST_KERNEL_META"
+  inst="$(dpkg-query -W -f='${Version}' "$meta" 2>/dev/null || true)"
+  [[ -n "$inst" ]] || { echo "$meta is not installed" >&2; exit 1; }
+  cand="$(apt-cache -o Acquire::Snapshot="${GUEST_APT_SNAPSHOT}" policy "$meta" | awk '/Candidate:/{print $2}')"
+  [[ "$inst" == "$cand" ]] || { echo "$meta is $inst, the snapshot's candidate is $cand (kernel held back)" >&2; exit 1; }
+  # ... and the one kernel in /boot is the one that metapackage depends on.
+  want_img="$(apt-cache -o Acquire::Snapshot="${GUEST_APT_SNAPSHOT}" depends "$meta" | sed -n 's/^ *Depends: \(linux-image-[0-9][^ ]*\)$/\1/p' | head -1)"
+  [[ -n "$want_img" && -e "/boot/vmlinuz-${want_img#linux-image-}" ]] \
+    || { echo "$meta wants ${want_img:-?}, /boot has $(find /boot -maxdepth 1 -name 'vmlinuz-*' -printf '%f ')" >&2; exit 1; }
+  if dpkg-query -W -f='${Package} ${Status}\n' linux-image-virtual linux-image-generic 2>/dev/null | grep -q ' installed$'; then
+    echo "a GA kernel metapackage is installed again" >&2; exit 1
+  fi
   log "kernel: $(find /boot -maxdepth 1 -name 'vmlinuz-*' -printf '%f')"
   # snapd: a root daemon and 16 Go binaries the appliance never uses (no snap
   # is installed or needed); the exact-byte scan attributed most host-binary
@@ -242,9 +266,17 @@ install -m 0644 "$APPL/provision/cloud-90-culvert.cfg" /etc/cloud/cloud.cfg.d/90
 # Boot/recovery time: 4 MiB read-ahead on whole disks (measured, see the rule).
 install -m 0644 "$APPL/provision/60-culvert-readahead.rules" /etc/udev/rules.d/60-culvert-readahead.rules
 
+# DRM device nodes root-only: removes the unprivileged prerequisite of the open
+# vmwgfx ioctl CVEs (see the rule).
+install -m 0644 "$APPL/provision/72-culvert-drm.rules" /etc/udev/rules.d/72-culvert-drm.rules
+
 # Kernel modules the appliance never uses, made unloadable (see the file).
 install -m 0644 "$APPL/provision/modprobe-culvert-unused.conf" /etc/modprobe.d/culvert-unused.conf
-for m in sctp nfsd kvm kvm_amd kvm-amd kvm_intel ksmbd cifs can can_raw can-raw can_bcm can_gw can_isotp can_j1939 pppoe pppox ib_core ib_cm iw_cm rdma_cm ib_uverbs rdma_ucm ib_umad dccp tipc; do
+# Every module the file denies is checked (the list is read from the file, so
+# the two cannot disagree), plus the "-" spellings modprobe treats as equal.
+denied_mods="$(awk '$1=="install" && $3=="/bin/false"{print $2}' /etc/modprobe.d/culvert-unused.conf)"
+[[ "$(wc -w <<<"$denied_mods")" -ge 44 ]] || { echo "culvert-unused.conf denies only $(wc -w <<<"$denied_mods") modules" >&2; exit 1; }
+for m in $denied_mods kvm-amd can-raw; do
   # The FINAL step decides: a dependency's own `install /bin/false` line must
   # not satisfy the check for the module that depends on it.
   modprobe -n -v "$m" 2>&1 | tail -n 1 | grep -qE '^install /bin/false[[:space:]]*$' || { echo "modprobe would still load $m" >&2; exit 1; }

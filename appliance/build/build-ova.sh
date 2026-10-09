@@ -91,7 +91,7 @@ set -a
 set +a
 for v in BASE_IMAGE_URL BASE_IMAGE_SHA256 APP_IMAGE_REPO APP_IMAGE_TAG APP_IMAGE_INDEX_DIGEST \
          APP_IMAGE_AMD64_DIGEST CLAMAV_IMAGE_REPO CLAMAV_IMAGE_TAG CLAMAV_IMAGE_INDEX_DIGEST \
-         CLAMAV_IMAGE_AMD64_DIGEST CLAMAV_SIDECAR_REF COLDLOAD_DIND_IMAGE DOCKER_CE_VERSION VM_DISK_GB VM_VCPUS VM_MEMORY_MB VM_HW_VERSION; do
+         CLAMAV_IMAGE_AMD64_DIGEST CLAMAV_SIDECAR_REF COLDLOAD_DIND_IMAGE DOCKER_CE_VERSION GUEST_KERNEL_META VM_DISK_GB VM_VCPUS VM_MEMORY_MB VM_HW_VERSION; do
   [[ -n "${!v:-}" ]] || die "manifest.env: $v is not set"
 done
 
@@ -323,7 +323,7 @@ rm -rf "$OV"; mkdir -p "$OV/opt/culvert-appliance" "$OV/var/lib/culvert-applianc
 # Copy only runtime inputs. Recursive directory copies also shipped host test
 # scripts and could pick up ignored local material from a developer checkout.
 mkdir -p "$OV/opt/culvert-appliance/provision" "$OV/opt/culvert-appliance/os-maintenance"
-for runtime_file in 60-culvert-readahead.rules modprobe-culvert-unused.conf cloud-90-culvert.cfg culvert-appliance-reset-identity \
+for runtime_file in 60-culvert-readahead.rules 72-culvert-drm.rules modprobe-culvert-unused.conf cloud-90-culvert.cfg culvert-appliance-reset-identity \
   culvert-firstboot.service culvert-firstboot.sh culvert-issue-update \
   culvert-issue.service culvert-issue.timer culvert-net culvert-status \
   culvert-sudo-policy nftables.conf sshd-50-culvert.conf; do
@@ -586,6 +586,22 @@ virt-cat -a "$DISK" /var/lib/culvert-appliance/host-components.txt > "$OUT/host-
 # Present only when manifest.env pins GUEST_APT_SNAPSHOT (prepare-guest.sh 1b).
 virt-cat -a "$DISK" /var/lib/culvert-appliance/build-upgrades.txt > "$OUT/build-upgrades.txt" 2>/dev/null || rm -f "$OUT/build-upgrades.txt"
 grep -q "^docker-ce	${DOCKER_CE_VERSION}	amd64$" "$OUT/dpkg-list.txt" || die "docker-ce is not the pinned version in the guest"
+# The kernel is the HWE series the manifest names, exactly one image ships, and
+# no GA kernel metapackage came back (prepare-guest.sh 1b).
+grep -q "^${GUEST_KERNEL_META}	" "$OUT/dpkg-list.txt" || die "$GUEST_KERNEL_META is not installed in the guest"
+[[ "$(grep -cE '^linux-image-[0-9]' "$OUT/dpkg-list.txt")" == 1 ]] || die "expected exactly one linux-image-<abi> in the guest"
+if grep -qE '^linux-image-(virtual|generic)	' "$OUT/dpkg-list.txt"; then die "a GA kernel metapackage is installed in the guest"; fi
+# CVE-2025-40190 (ext4 EA-inode refcount underflow) is reachable only on an ext4
+# filesystem with the ea_inode feature: the kernel rejects any xattr entry that
+# names an EA inode on a filesystem without it ("ea_inode specified without
+# ea_inode feature enabled"). No filesystem the appliance ships may have it.
+for fs in $(LIBGUESTFS_BACKEND="${LIBGUESTFS_BACKEND:-direct}" guestfish --ro -a "$DISK" run : list-filesystems | awk -F': ' '$2=="ext4"{print $1}'); do
+  feats="$(LIBGUESTFS_BACKEND="${LIBGUESTFS_BACKEND:-direct}" guestfish --ro -a "$DISK" run : tune2fs-l "$fs" | awk -F': *' '$1=="Filesystem features"{print $2}')"
+  [[ -n "$feats" ]] || die "could not read the ext4 features of $fs"
+  if grep -qw ea_inode <<<"$feats"; then die "ext4 filesystem $fs has the ea_inode feature (CVE-2025-40190 prerequisite)"; fi
+  echo "$fs ext4 features: $feats" >> "$OUT/ext4-features.txt"
+done
+[[ -s "$OUT/ext4-features.txt" ]] || die "no ext4 filesystem found in the image (features not checked)"
 [[ "$(virt-cat -a "$DISK" /etc/machine-id | wc -c)" -eq 0 ]] || die "machine-id not empty"
 if virt-ls -a "$DISK" /etc/ssh/ | grep -q '^ssh_host_'; then die "ssh host keys present in image"; fi
 if virt-ls -a "$DISK" /etc/apt/apt.conf.d/ | grep -qi proxy; then die "apt proxy config leaked into image"; fi

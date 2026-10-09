@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -36,8 +37,10 @@ func TestPrepareGuest_ShipsTheSnapshotsNewestKernelOnly(t *testing.T) {
 		`apt-get -y -qq purge $stale_kpkgs`,
 		// ... and the build refuses unless exactly one kernel remains
 		`[[ "$(find /boot -maxdepth 1 -name 'vmlinuz-*' | wc -l)" == 1 ]] ||`,
-		// ... and it is the snapshot's candidate, not a held-back kernel
-		`for meta in linux-image-virtual linux-image-generic; do`,
+		// ... and it is the snapshot's candidate of the HWE image meta, not a
+		// held-back kernel, and the kernel that meta depends on
+		`meta="$GUEST_KERNEL_META"`,
+		`[[ -n "$want_img" && -e "/boot/vmlinuz-${want_img#linux-image-}" ]]`,
 		`[[ "$inst" == "$cand" ]] || { echo "$meta is $inst, the snapshot's candidate is $cand (kernel held back)"`,
 	} {
 		if !strings.Contains(src, want) {
@@ -54,6 +57,90 @@ func TestPrepareGuest_ShipsTheSnapshotsNewestKernelOnly(t *testing.T) {
 	after := strings.Index(src, `after="$(dpkg-query -W`)
 	if up < 0 || one < up || after < one {
 		t.Fatalf("order must be upgrade → purge old kernel → one-kernel check → evidence (upgrade=%d check=%d evidence=%d)", up, one, after)
+	}
+}
+
+// The GA 24.04 kernel (6.8.0) carried 5 CRITICAL and 138 HIGH CVEs open in
+// Canonical's tracker with no fixed 6.8.0 package; the supported HWE kernel in
+// the same pinned snapshot carried 0 CRITICAL and 23 HIGH. The build installs
+// the HWE IMAGE metapackage the manifest names, removes the GA metapackage
+// chain so it cannot pull the 6.8 ABI back, and refuses an image where any of
+// that does not hold.
+func TestPrepareGuest_ShipsTheHWEKernel(t *testing.T) {
+	man := readSource(t, "appliance/build/manifest.env")
+	if !regexp.MustCompile(`(?m)^GUEST_KERNEL_META=linux-image-virtual-hwe-24\.04$`).MatchString(man) {
+		t.Error("manifest.env must pin GUEST_KERNEL_META=linux-image-virtual-hwe-24.04 (the image meta, no headers)")
+	}
+	src := readSource(t, "appliance/build/prepare-guest.sh")
+	for _, want := range []string{
+		`install --no-install-recommends "$GUEST_KERNEL_META"`,
+		`linux-virtual linux-image-virtual linux-headers-virtual \`,
+		`DEBIAN_FRONTEND=noninteractive apt-get -y -qq purge $ga_meta`,
+		`"$GUEST_KERNEL_META is not installed after the GA metapackage purge"`,
+		`echo "a GA kernel metapackage is installed again" >&2; exit 1`,
+	} {
+		if !strings.Contains(src, want) {
+			t.Errorf("prepare-guest.sh must contain %q", want)
+		}
+	}
+	// HWE install and GA removal happen before the one-kernel purge.
+	inst := strings.Index(src, `install --no-install-recommends "$GUEST_KERNEL_META"`)
+	purge := strings.Index(src, `apt-get -y -qq purge $stale_kpkgs`)
+	if inst < 0 || purge < inst {
+		t.Fatalf("the HWE kernel must be installed before the superseded kernel is purged (install=%d purge=%d)", inst, purge)
+	}
+	ova := readSource(t, "appliance/build/build-ova.sh")
+	for _, want := range []string{
+		`DOCKER_CE_VERSION GUEST_KERNEL_META VM_DISK_GB`,
+		`grep -q "^${GUEST_KERNEL_META}	" "$OUT/dpkg-list.txt" || die`,
+		`[[ "$(grep -cE '^linux-image-[0-9]' "$OUT/dpkg-list.txt")" == 1 ]] || die`,
+		`die "a GA kernel metapackage is installed in the guest"`,
+	} {
+		if !strings.Contains(ova, want) {
+			t.Errorf("build-ova.sh must contain %q", want)
+		}
+	}
+}
+
+// CVE-2025-40190 (ext4 EA-inode refcount underflow) needs an ext4 filesystem
+// with the ea_inode feature: the kernel rejects an xattr entry naming an EA
+// inode on a filesystem without it. The build refuses an image where any ext4
+// filesystem carries the feature, and records what it read.
+func TestBuildOVA_NoExt4FilesystemHasEAInode(t *testing.T) {
+	ova := readSource(t, "appliance/build/build-ova.sh")
+	for _, want := range []string{
+		`guestfish --ro -a "$DISK" run : list-filesystems | awk -F': ' '$2=="ext4"{print $1}'`,
+		`run : tune2fs-l "$fs" | awk -F': *' '$1=="Filesystem features"{print $2}'`,
+		`if grep -qw ea_inode <<<"$feats"; then die`,
+		`[[ -s "$OUT/ext4-features.txt" ]] || die "no ext4 filesystem found in the image (features not checked)"`,
+	} {
+		if !strings.Contains(ova, want) {
+			t.Errorf("build-ova.sh must contain %q", want)
+		}
+	}
+}
+
+// vmwgfx's open ioctl CVEs need a process that can open a DRM node. Plymouth
+// (root) is the only DRM client on the appliance, so every DRM node is
+// root:root 0600 and logind's uaccess tag is dropped before 73-seat-late
+// applies it.
+func TestPrepareGuest_DRMNodesAreRootOnly(t *testing.T) {
+	rule := readSource(t, "appliance/provision/72-culvert-drm.rules")
+	want := `SUBSYSTEM=="drm", KERNEL=="card[0-9]*|renderD[0-9]*|controlD[0-9]*", GROUP="root", MODE="0600", TAG-="uaccess"`
+	if !strings.Contains(rule, want) {
+		t.Errorf("72-culvert-drm.rules must contain %q", want)
+	}
+	src := readSource(t, "appliance/build/prepare-guest.sh")
+	if !strings.Contains(src, `install -m 0644 "$APPL/provision/72-culvert-drm.rules" /etc/udev/rules.d/72-culvert-drm.rules`) {
+		t.Error("prepare-guest.sh must install 72-culvert-drm.rules")
+	}
+	// udev orders rules files by name: the rule must sort after
+	// 70-uaccess.rules (which adds the tag) and before 73-seat-late.rules
+	// (which applies it), so the installed name must keep its 72- prefix.
+	rules := []string{"73-seat-late.rules", "72-culvert-drm.rules", "70-uaccess.rules"}
+	sort.Strings(rules)
+	if rules[1] != "72-culvert-drm.rules" {
+		t.Errorf("udev order is %v; the DRM rule must sit between 70-uaccess and 73-seat-late", rules)
 	}
 }
 
@@ -129,7 +216,11 @@ func TestPrepareGuest_UnusedKernelModulesCannotLoad(t *testing.T) {
 	conf := readSource(t, "appliance/provision/modprobe-culvert-unused.conf")
 	for _, m := range []string{"sctp", "nfsd", "kvm", "kvm_amd", "kvm_intel", "ksmbd", "cifs",
 		"can", "can_raw", "can_bcm", "can_gw", "can_isotp", "can_j1939", "pppoe", "pppox",
-		"ib_core", "ib_cm", "iw_cm", "rdma_cm", "ib_uverbs", "rdma_ucm", "ib_umad", "dccp", "tipc"} {
+		"ib_core", "ib_cm", "iw_cm", "rdma_cm", "ib_uverbs", "rdma_ucm", "ib_umad", "dccp", "tipc",
+		// residual HIGH CVEs on the HWE kernel (see the file)
+		"ip_vs", "openvswitch", "vxlan", "target_core_mod", "target_core_iblock", "snd", "snd_pcm", "soundcore",
+		"bluetooth", "btusb", "hci_vhci", "rfcomm", "bnep", "hidp", "bluetooth_6lowpan", "rxrpc", "kafs",
+		"amdgpu", "idpf", "scsi_debug"} {
 		for _, want := range []string{"\nblacklist " + m + "\n", "\ninstall " + m + " /bin/false\n", "\nsoftdep " + m + " pre: post:\n"} {
 			if !strings.Contains(conf, want) {
 				t.Errorf("modprobe-culvert-unused.conf must contain %q", strings.TrimSpace(want))
@@ -139,7 +230,10 @@ func TestPrepareGuest_UnusedKernelModulesCannotLoad(t *testing.T) {
 	src := readSource(t, "appliance/build/prepare-guest.sh")
 	for _, want := range []string{
 		`install -m 0644 "$APPL/provision/modprobe-culvert-unused.conf" /etc/modprobe.d/culvert-unused.conf`,
-		`for m in sctp nfsd kvm kvm_amd kvm-amd kvm_intel ksmbd cifs can can_raw can-raw can_bcm can_gw can_isotp can_j1939 pppoe pppox ib_core ib_cm iw_cm rdma_cm ib_uverbs rdma_ucm ib_umad dccp tipc; do`,
+		// the check reads its module list from the installed file itself
+		`denied_mods="$(awk '$1=="install" && $3=="/bin/false"{print $2}' /etc/modprobe.d/culvert-unused.conf)"`,
+		`[[ "$(wc -w <<<"$denied_mods")" -ge 44 ]] ||`,
+		`for m in $denied_mods kvm-amd can-raw; do`,
 		`modprobe -n -v "$m" 2>&1 | tail -n 1 | grep -qE '^install /bin/false[[:space:]]*$' || { echo "modprobe would still load $m" >&2; exit 1; }`,
 	} {
 		if !strings.Contains(src, want) {

@@ -176,26 +176,47 @@ verifies on import.
   build time (a plain `upgrade` kept it back: the 7e53720d OVA booted
   6.8.0-142 while its own snapshot carried 6.8.0-146); the superseded
   kernel's packages are purged and the build refuses unless exactly one
-  kernel is in `/boot`. After deployment the kernel moves through
-  `culvert-os-update os`; the build also refuses a kernel metapackage that is
+  kernel is in `/boot`. The kernel series is Ubuntu's supported **HWE
+  kernel** (`GUEST_KERNEL_META=linux-image-virtual-hwe-24.04`, 7.0.0-38 in
+  the current snapshot — the 26.04 kernel backported to 24.04 and supported
+  for the rest of 24.04's life). Against Canonical's CVE tracker the GA 6.8.0
+  kernel had 5 CRITICAL and 138 HIGH CVEs open with no fixed 6.8.0 package;
+  the HWE kernel has 0 CRITICAL and 23 HIGH. The build installs the HWE image
+  metapackage (image only, no headers), removes the GA metapackage chain so it
+  cannot pull the 6.8 ABI back, and refuses an image where the HWE meta is
+  missing, a GA meta is present, more than one kernel image ships, or the
+  kernel in `/boot` is not the one the meta depends on. After deployment the
+  kernel moves through `culvert-os-update os` (HWE updates are published in
+  the security pocket); the build also refuses a kernel metapackage that is
   not at the snapshot's candidate (a held kernel). `snapd` is purged (no snap
   is used; `ubuntu-server` only recommends it) and an apt pin keeps it out;
   `lxd-installer` stays, because `ubuntu-server` depends on it, and the build
   refuses if `ubuntu-server`, `open-vm-tools` or `unattended-upgrades` is gone
   afterwards. Raising the snapshot is a pin change like any other.
-  `/etc/modprobe.d/culvert-unused.conf` makes `sctp`, `nfsd`, `kvm`,
-  `kvm_amd`, `kvm_intel`, `ksmbd`, `cifs`, the `can*` family, `pppoe`, `pppox`,
-  the RDMA stack (`ib_core` and the `rdma`/`ib` modules on it), `dccp` and
-  `tipc` unloadable (`install … /bin/false`, verified with
-  `modprobe -n` at build): the appliance uses none of them, and the shipped
-  kernel's open CRITICAL CVEs (SCTP, NFSD, KVM-SEV) and many of its open HIGH
-  ones are in them, with no fixed 6.8.0 package yet. `vsock` stays loadable
+  `/etc/modprobe.d/culvert-unused.conf` makes 44 modules unloadable
+  (`install … /bin/false`, verified with `modprobe -n` at build for every
+  module the file denies): `sctp`, `nfsd`, `kvm`, `kvm_amd`, `kvm_intel`,
+  `ksmbd`, `cifs`, the `can*` family, `pppoe`, `pppox`, the RDMA stack
+  (`ib_core` and the `rdma`/`ib` modules on it), `dccp`, `tipc`, and — for the
+  HIGH CVEs still open on the HWE kernel — `ip_vs`, `openvswitch`, `vxlan`,
+  the LIO target (`target_core_mod`, `target_core_iblock`), sound (`snd`,
+  `snd_pcm`, `soundcore`), Bluetooth (`bluetooth` and its drivers/protocols),
+  `rxrpc`/`kafs`, `amdgpu`, `idpf` and `scsi_debug`. The appliance uses none
+  of them, and several autoload on demand from any process, a container
+  included (SCTP/TIPC/RxRPC/Bluetooth sockets). `vsock` stays loadable
   (VMware Tools). Each denied module also carries an empty `softdep <m> pre:
   post:` line: kmod ignores a module's `install` command when its own soft
   dependencies resolve to real modules (`ksmbd` did, and loaded despite the
   rule), and the build judges the FINAL step of each module's resolution, so
   a dependency's own deny cannot satisfy the check for the module above it. The other two open CRITICALs (nvmet-tcp, RDMA
   srpt) are in `linux-modules-extra`, which the OVA does not install.
+  `/etc/udev/rules.d/72-culvert-drm.rules` makes every DRM node root:root
+  0600 and drops logind's `uaccess` tag, so the open vmwgfx ioctl CVEs (the
+  ESXi display driver, which cannot be denied without losing the console)
+  have no unprivileged caller; plymouth (root) is the only DRM client. The
+  build also refuses an image whose ext4 filesystems carry the `ea_inode`
+  feature (`ext4-features.txt` next to the OVA): CVE-2025-40190 is reachable
+  only on such a filesystem.
 
 ## Candidate builds (qualification of an unpublished image — never for customers)
 
