@@ -136,15 +136,29 @@ cmd_engsrc() {
       GOTOOLCHAIN="$gov" GOBIN="$gvc" go install "golang.org/x/vuln/cmd/govulncheck@${GOVULNCHECK_VERSION:-v1.8.0}" 2>>"$ev/engsrc/$name.stderr" || {
         printf '%s\t%s@%s\tgovulncheck-build-failed go=%s\n' "$name" "$mod" "$ver" "$gov" >> "$ev/engsrc/index.tsv"; continue; }
     fi
+    # Every build setting that decides WHICH FILES are compiled is taken from the
+    # binary's own build info, never assumed: CGO_ENABLED selects cgo vs pure-Go
+    # files (docker-compose and containerd-shim-runc-v2 ship CGO_ENABLED=0; the
+    # scan used to force 1 for every binary), GOOS/GOARCH/GOAMD64 select
+    # platform files, -tags (above) selects tagged files. A missing setting is
+    # refused rather than defaulted.
+    local cgo goos goarch goamd64
+    cgo="$(sed -n 's/^[[:space:]]*build[[:space:]]*CGO_ENABLED=//p' <<<"$bi" | head -1)"
+    goos="$(sed -n 's/^[[:space:]]*build[[:space:]]*GOOS=//p' <<<"$bi" | head -1)"
+    goarch="$(sed -n 's/^[[:space:]]*build[[:space:]]*GOARCH=//p' <<<"$bi" | head -1)"
+    goamd64="$(sed -n 's/^[[:space:]]*build[[:space:]]*GOAMD64=//p' <<<"$bi" | head -1)"
+    if [[ ! "$cgo" =~ ^[01]$ || -z "$goos" || -z "$goarch" ]]; then
+      printf '%s\t%s@%s\tbuild-settings-unknown cgo=%s goos=%s goarch=%s\n' "$name" "$mod" "$ver" "${cgo:-?}" "${goos:-?}" "${goarch:-?}" >> "$ev/engsrc/index.tsv"; continue
+    fi
     rc=0
-    (cd "$work/src" && GOTOOLCHAIN="$gov" GOFLAGS=-mod=mod CGO_ENABLED=1 "$gvc/govulncheck" ${tags:+-tags "$tags"} -format json "$pkg") > "$ev/engsrc/$name.json" 2> "$ev/engsrc/$name.stderr" || rc=$?
+    (cd "$work/src" && env GOTOOLCHAIN="$gov" GOFLAGS=-mod=mod CGO_ENABLED="$cgo" GOOS="$goos" GOARCH="$goarch" ${goamd64:+GOAMD64="$goamd64"} "$gvc/govulncheck" ${tags:+-tags "$tags"} -format json "$pkg") > "$ev/engsrc/$name.json" 2> "$ev/engsrc/$name.stderr" || rc=$?
     local used; used="$(python3 -I -c 'import json,sys
 d=json.JSONDecoder();t=open(sys.argv[1]).read().lstrip()
 print(d.raw_decode(t)[0].get("config",{}).get("go_version","") if t else "")' "$ev/engsrc/$name.json" 2>/dev/null)"
     if [[ "$used" != "$gov" ]]; then
       printf '%s\t%s@%s\ttoolchain-mismatch binary=%s scanned=%s\n' "$name" "$mod" "$ver" "$gov" "${used:-?}" >> "$ev/engsrc/index.tsv"; continue
     fi
-    printf '%s\t%s@%s\tcommit=%s tags=%s go=%s rc=%s%s\n' "$name" "$mod" "$ver" "$hash" "${tags:--}" "$gov" "$rc" "$note" >> "$ev/engsrc/index.tsv"
+    printf '%s\t%s@%s\tcommit=%s tags=%s go=%s cgo=%s target=%s/%s%s rc=%s%s\n' "$name" "$mod" "$ver" "$hash" "${tags:--}" "$gov" "$cgo" "$goos" "$goarch" "${goamd64:+/$goamd64}" "$rc" "$note" >> "$ev/engsrc/index.tsv"
   done
   rm -rf "$work"
 }

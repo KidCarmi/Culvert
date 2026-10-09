@@ -186,6 +186,20 @@ bad = [f"{k}: {v[2]}" for k, v in sorted(idx.items())
        if len(v) < 3 or not v[2].startswith("commit=") or " rc=0" not in " " + v[2]]
 if bad:
     sys.exit("source mode did not complete for: " + "; ".join(bad))
+# The source-mode run must use the binary's OWN build settings (cgo vs pure-Go
+# files, target platform): checked against the build info binary mode recorded
+# from the exact bytes.
+for k, v in sorted(idx.items()):
+    bi = os.path.join(ev, "govulncheck", "host-" + k + ".buildinfo.txt")
+    if not os.path.exists(bi):
+        sys.exit(f"no build info for {k}")
+    want = dict(l.split("\t")[2].strip().split("=", 1) for l in open(bi)
+                if l.startswith("\tbuild\t") and "=" in l.split("\t")[2] and l.split("\t")[2].split("=", 1)[0] in ("CGO_ENABLED", "GOOS", "GOARCH"))
+    got = dict(x.split("=", 1) for x in v[2].split() if "=" in x)
+    exp_target = f"{want.get('GOOS')}/{want.get('GOARCH')}"
+    if got.get("cgo") != want.get("CGO_ENABLED") or not got.get("target", "").startswith(exp_target):
+        sys.exit(f"{k}: source mode ran with cgo={got.get('cgo')} target={got.get('target')}, binary was built with "
+                 f"CGO_ENABLED={want.get('CGO_ENABLED')} {exp_target}")
 gv = collections.defaultdict(list)
 for r in rows:
     if r["source"].startswith("govulncheck:host-"):
