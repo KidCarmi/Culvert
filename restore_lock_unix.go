@@ -32,7 +32,7 @@ var errDataDirLocked = errors.New("data directory is locked by another Culvert p
 //     (acquireOfflineDataDirLock).
 func acquireDataDirLock(dataDir string) (release func(), err error) {
 	path := filepath.Join(dataDir, dataDirLockName)
-	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o600) // #nosec G304 -- operator-controlled data dir
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o600) // #nosec G304 G703 -- operator-controlled data dir
 	if err != nil {
 		return nil, fmt.Errorf("open data-dir lock %s: %w", path, err)
 	}

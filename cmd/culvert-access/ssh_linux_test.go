@@ -418,7 +418,7 @@ func runFixtureCommand(parent context.Context, binary string, args ...string) (s
 // memory, FD contents or syscall arguments (which could reference secret data).
 func fixtureProcessMetadata(procRoot string, pid int) string {
 	read := func(path string) string {
-		f, err := os.Open(path)
+		f, err := os.Open(path) // #nosec G703 -- read-only open of an allowlisted /proc/<int pid>/ metadata file
 		if err != nil {
 			return "unavailable"
 		}
@@ -461,7 +461,7 @@ func fixtureProcessMetadata(procRoot string, pid int) string {
 }
 
 func appendFixtureFDMetadata(out *strings.Builder, base string) {
-	fds, err := os.Open(filepath.Join(base, "fd"))
+	fds, err := os.Open(filepath.Join(base, "fd")) // #nosec G703 -- read-only listing of /proc/<int pid>/fd; the pid is an integer from /proc
 	if err != nil {
 		return
 	}

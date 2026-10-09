@@ -260,7 +260,7 @@ func removeRestoreJournal(dataDir string) error {
 // directory fsync is unsupported on some filesystems, so a failure to open or
 // sync is tolerated (the renames themselves are durable on the next sync).
 func fsyncDirBestEffort(dir string) error {
-	d, err := os.Open(dir) // #nosec G304 -- operator-controlled data dir
+	d, err := os.Open(dir) // #nosec G304 G703 -- operator-controlled data dir
 	if err != nil {
 		return nil
 	}
