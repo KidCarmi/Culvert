@@ -100,9 +100,17 @@ func BenchmarkPolicyEvaluate_CategoryGroupRulesSynthetic(b *testing.B) {
 }
 
 // BenchmarkPolicyEvaluate_CategoryGroupRulesParallel measures the same scan
-// under concurrency. The fusion takes catStore's RLock once per rule, so a
-// per-rule lookup also multiplies lock traffic by the rule count on every
-// core serving traffic.
+// under concurrency.
+//
+// Its original comment read "the fusion takes catStore's RLock once per rule",
+// which has been stale twice over: hostCatScratch memoizes the fusion, so a
+// category-GROUP scan reaches LookupHost once per SCAN, not once per rule; and
+// the per-RULE lock traffic lived in MatchesHost/MatchesHostAdmin, which a
+// DestCategory rulebase reaches (BenchmarkPolicyEvaluate_CategoryRules) and
+// which are now lock-free behind urlcat's catIndexView read view. What this
+// benchmark still measures honestly is the rest of the scan under contention —
+// keep it as the category-GROUP arm, and read CategoryRules for the per-rule
+// probe.
 func BenchmarkPolicyEvaluate_CategoryGroupRulesParallel(b *testing.B) {
 	seedCategoryTaxonomy(b, 12, 40)
 	ps := buildCategoryGroupPolicyStore(50)
