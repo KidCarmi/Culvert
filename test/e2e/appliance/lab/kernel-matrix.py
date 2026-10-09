@@ -1,0 +1,111 @@
+"""Disposition matrix for the kernel HIGH CVEs ASTRA's 7c round left open.
+
+kernel-matrix.py BASELINE_KERNEL_CVES UCT_ACTIVE_DIR PREREQS OUT_MD [CANDIDATE.json]
+
+BASELINE_KERNEL_CVES  kernel-cves.tsv of the scanned baseline (7c7b29ee, GA
+                      6.8.0-146): the "present" HIGH rows are the population.
+UCT_ACTIVE_DIR        ubuntu-cve-tracker/active at a recorded commit.
+PREREQS               kernel-cve-prereqs.tsv (hand-reviewed prerequisites and
+                      the residual dispositions with their evidence).
+CANDIDATE.json        optional: {"source", "kernel_version" (dpkg version of the
+                      shipped HWE image), "kernel_cves" (the corrected
+                      candidate's own kernel-cves.tsv), "checks" (its lab
+                      checks.jsonl), "uct_commit", "scan_run", "lab_run", "ova"}.
+
+A CVE's disposition on the corrected candidate is:
+  FIXED          Canonical lists it released in linux-hwe-7.0 at a version
+                 <= the shipped one (dpkg comparison, not the word "released")
+  NOT AFFECTED   Canonical lists linux-hwe-7.0 not-affected; or, for a residual,
+                 a configuration determination recorded in PREREQS
+  MITIGATED      residual whose prerequisite the candidate removes (PREREQS)
+  OPEN / UNDETERMINED  residual PREREQS leaves so
+Fails if: a population CVE has no PREREQS row; a residual has no disposition;
+with a candidate, a FIXED/vendor-NOT-AFFECTED CVE still appears in the
+candidate's own scan, or a lab check a disposition cites did not pass.
+"""
+import csv, json, os, re, subprocess, sys
+
+base_f, uct, pre_f, out = sys.argv[1:5]
+cand = json.load(open(sys.argv[5])) if len(sys.argv) > 5 else None
+GA, HWE = "noble_linux", "noble_linux-hwe-7.0"
+shipped = cand["kernel_version"] if cand else "7.0.0-38.38~24.04.4"
+
+pop = [l.split("\t") for l in open(base_f) if l.startswith("CVE-")]
+pop = sorted(r[0] for r in pop if r[1] == "HIGH" and r[3] == "present")
+pre = {r["cve"]: r for r in csv.DictReader((l for l in open(pre_f) if not l.startswith("#")), delimiter="\t")}
+missing = [c for c in pop if c not in pre]
+if missing:
+    sys.exit("no prerequisite row for: " + ", ".join(missing))
+extra = sorted(set(pre) - set(pop))
+if extra:
+    sys.exit("prerequisite rows outside the population: " + ", ".join(extra))
+
+def vle(a, b):
+    return subprocess.run(["dpkg", "--compare-versions", a, "le", b]).returncode == 0
+
+def status(text, pkg):
+    m = re.search(r"^" + re.escape(pkg) + r": (\S+)(?: \(([^)]*)\))?", text, re.M)
+    return (m.group(1), m.group(2) or "") if m else ("DNE", "")
+
+checks = {}
+if cand:
+    for l in open(cand["checks"]):
+        d = json.loads(l)
+        checks[f'{d["step"]}/{d["check"]}'] = d["result"]
+    cscan = {l.split("\t")[0]: l.rstrip("\n").split("\t") for l in open(cand["kernel_cves"]) if l.startswith("CVE-")}
+
+rows, bad = [], []
+for c in pop:
+    t = open(os.path.join(uct, c), errors="replace").read()
+    title = next((x.strip() for x in t.split("Description:\n", 1)[1].split("\n")[1:]
+                  if x.strip() and "following vulnerability" not in x), "")
+    fix = re.findall(r"break-fix: \S+ (\S+)", t)
+    ga, gav = status(t, GA)
+    hw, hwv = status(t, HWE)
+    p = pre[c]
+    if hw == "released" and hwv and vle(hwv, shipped):
+        disp, ev = "FIXED", f"Canonical: {HWE} released ({hwv}) <= shipped {shipped}"
+    elif hw == "not-affected":
+        disp, ev = "NOT AFFECTED", f"Canonical: {HWE} not-affected ({hwv})"
+    else:
+        if p["residual"] in ("", "-"):
+            bad.append(f"{c}: Canonical {HWE} is '{hw} {hwv}' but no residual disposition is recorded")
+            disp, ev = "UNDETERMINED", "no disposition recorded"
+        else:
+            disp, ev = p["residual"].split("|", 1)
+            ev = f"Canonical: {HWE} {hw} {('(' + hwv + ')') if hwv else ''}; " + ev
+    if cand:
+        if disp in ("FIXED",) or (disp == "NOT AFFECTED" and hw == "not-affected"):
+            if c in cscan:
+                bad.append(f"{c}: {disp} by Canonical, yet the candidate's own scan still lists it ({cscan[c][3]})")
+        for cid in re.findall(r"lab ([A-Z0-9]+/[a-z0-9-]+)", ev):
+            if checks.get(cid) != "pass":
+                bad.append(f"{c}: cites lab check {cid}, which is {checks.get(cid, 'absent')} on the candidate")
+        if c in cscan:
+            ev += f"; candidate scan class: {cscan[c][3]}"
+    rows.append((c, p["group"], title, f"{ga} {('(' + gav + ')') if gav else ''}".strip(),
+                 f"{hw} {('(' + hwv + ')') if hwv else ''}".strip(), p["prereq"], p["appliance"], disp, ev,
+                 ", ".join(f"[{x[:12]}](https://git.kernel.org/linus/{x})" for x in fix) or "-"))
+if bad:
+    sys.exit("matrix refused:\n  " + "\n  ".join(bad))
+
+from collections import Counter
+cnt = Counter(r[7] for r in rows)
+L = [f"# Kernel HIGH CVE dispositions — {len(rows)} findings present on the GA kernel 6.8.0-146 (7c7b29ee)", "",
+     "Generated by `test/e2e/appliance/lab/kernel-matrix.py`. Population: every HIGH kernel CVE the 7c7b29ee exact-byte scan",
+     "classed `present` (ASTRA's 7c round, remaining work item 1). Canonical status is read from `ubuntu-cve-tracker/active`",
+     f"(commit `{cand['uct_commit'] if cand else '?'}`) for the GA source (`{GA}`) and the HWE source the corrected candidate ships",
+     f"(`{HWE}`, shipped version `{shipped}`). \"Released\" counts only at a version <= the shipped one (dpkg comparison).", ""]
+if cand:
+    L += [f"Corrected candidate: source `{cand['source']}`, OVA `{cand['ova']}`, lab run {cand['lab_run']}, scan run {cand['scan_run']}.", ""]
+L += ["| disposition | count |", "|---|---|"] + [f"| {k} | {v} |" for k, v in sorted(cnt.items())] + [""]
+L += ["Dispositions: FIXED = Canonical's fixed package is the shipped kernel; NOT AFFECTED = Canonical's determination for",
+      "linux-hwe-7.0, or a configuration determination with the evidence named; MITIGATED = the prerequisite is removed on the",
+      "candidate (not a patch: the code is still present and the fix still arrives through the kernel update path). No row is",
+      "risk-accepted.", "",
+      "| CVE | group | title | Canonical GA 6.8 | Canonical HWE 7.0 | prerequisites | on the appliance | disposition | evidence | fix |",
+      "|---|---|---|---|---|---|---|---|---|---|"]
+for r in rows:
+    L.append("| " + " | ".join(x.replace("|", "/") for x in r) + " |")
+open(out, "w").write("\n".join(L) + "\n")
+print(f"wrote {out}: " + ", ".join(f"{k} {v}" for k, v in sorted(cnt.items())))

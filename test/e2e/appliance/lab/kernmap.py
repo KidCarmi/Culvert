@@ -60,7 +60,12 @@ for line in open(review_f):
     review.append((re.compile(rx), sym, mod, val, ok))
 DENY_MAP = [(r"^sctp\b", "sctp"), (r"^NFSD\b|^nfsd\b", "nfsd"), (r"^KVM\b", "kvm"), (r"^tipc\b", "tipc"),
             (r"^dccp\b", "dccp"), (r"^ksmbd\b|^smb: server\b", "ksmbd"), (r"^smb: client\b|^cifs\b", "cifs"),
-            (r"^can\b", "can"), (r"^pppoe\b", "pppoe"), (r"^RDMA$|^RDMA/(core|nldev|cma|uverbs|umad)\b", "ib_core")]
+            (r"^can\b", "can"), (r"^pppoe\b", "pppoe"), (r"^RDMA$|^RDMA/(core|nldev|cma|uverbs|umad)\b", "ib_core"),
+            # residual HIGH CVEs on the HWE kernel; each module is in culvert-unused.conf
+            (r"^ipvs\b|^IPVS\b", "ip_vs"), (r"^(net: )?openvswitch\b", "openvswitch"), (r"^vxlan\b", "vxlan"),
+            (r"^scsi: target\b", "target_core_mod"), (r"^ALSA\b", "snd"), (r"^Bluetooth\b", "bluetooth"),
+            (r"^afs\b", "kafs"), (r"^rxrpc\b", "rxrpc"), (r"^drm/amd(gpu|kfd)\b", "amdgpu"),
+            (r"^idpf\b", "idpf"), (r"^scsi: scsi_debug\b", "scsi_debug")]
 GENERIC = {"core", "main", "common", "api", "base", "ops", "sys", "dev", "lib", "util", "utils",
            "debug", "fix", "net", "fs", "mm", "block", "driver", "drivers"}
 pcomps = {}
