@@ -130,7 +130,7 @@ func TestPrepareGuest_UnusedKernelModulesCannotLoad(t *testing.T) {
 	for _, m := range []string{"sctp", "nfsd", "kvm", "kvm_amd", "kvm_intel", "ksmbd", "cifs",
 		"can", "can_raw", "can_bcm", "can_gw", "can_isotp", "can_j1939", "pppoe", "pppox",
 		"ib_core", "ib_cm", "iw_cm", "rdma_cm", "ib_uverbs", "rdma_ucm", "ib_umad", "dccp", "tipc"} {
-		for _, want := range []string{"\nblacklist " + m + "\n", "\ninstall " + m + " /bin/false\n"} {
+		for _, want := range []string{"\nblacklist " + m + "\n", "\ninstall " + m + " /bin/false\n", "\nsoftdep " + m + " pre: post:\n"} {
 			if !strings.Contains(conf, want) {
 				t.Errorf("modprobe-culvert-unused.conf must contain %q", strings.TrimSpace(want))
 			}
@@ -140,7 +140,7 @@ func TestPrepareGuest_UnusedKernelModulesCannotLoad(t *testing.T) {
 	for _, want := range []string{
 		`install -m 0644 "$APPL/provision/modprobe-culvert-unused.conf" /etc/modprobe.d/culvert-unused.conf`,
 		`for m in sctp nfsd kvm kvm_amd kvm-amd kvm_intel ksmbd cifs can can_raw can-raw can_bcm can_gw can_isotp can_j1939 pppoe pppox ib_core ib_cm iw_cm rdma_cm ib_uverbs rdma_ucm ib_umad dccp tipc; do`,
-		`modprobe -n -v "$m" 2>&1 | grep -qE '^install /bin/false[[:space:]]*$' || { echo "modprobe would still load $m" >&2; exit 1; }`,
+		`modprobe -n -v "$m" 2>&1 | tail -n 1 | grep -qE '^install /bin/false[[:space:]]*$' || { echo "modprobe would still load $m" >&2; exit 1; }`,
 	} {
 		if !strings.Contains(src, want) {
 			t.Errorf("prepare-guest.sh must contain %q", want)

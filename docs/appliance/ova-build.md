@@ -190,7 +190,11 @@ verifies on import.
   `modprobe -n` at build): the appliance uses none of them, and the shipped
   kernel's open CRITICAL CVEs (SCTP, NFSD, KVM-SEV) and many of its open HIGH
   ones are in them, with no fixed 6.8.0 package yet. `vsock` stays loadable
-  (VMware Tools). The other two open CRITICALs (nvmet-tcp, RDMA
+  (VMware Tools). Each denied module also carries an empty `softdep <m> pre:
+  post:` line: kmod ignores a module's `install` command when its own soft
+  dependencies resolve to real modules (`ksmbd` did, and loaded despite the
+  rule), and the build judges the FINAL step of each module's resolution, so
+  a dependency's own deny cannot satisfy the check for the module above it. The other two open CRITICALs (nvmet-tcp, RDMA
   srpt) are in `linux-modules-extra`, which the OVA does not install.
 
 ## Candidate builds (qualification of an unpublished image — never for customers)
