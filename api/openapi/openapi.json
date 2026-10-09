@@ -7980,7 +7980,7 @@
         "tags": [
           "support"
         ],
-        "x-culvert-audit-event": "backup.trigger",
+        "x-culvert-audit-event": "backup.create",
         "x-culvert-danger-level": "medium",
         "x-culvert-idempotency": "non-idempotent",
         "x-culvert-introduced-version": "1.0.0",
