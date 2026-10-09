@@ -1037,12 +1037,16 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 345
     env:
-      # A = the handoff OVA (run 37730220212 attempt 2). B = attempt 1.
-      OVA_A_ARTIFACT: "11530788479"
-      OVA_A_SHA256: 048ba7c604306641f370c851c4924779efd92e2e572ff1a3eb2160d7c718aa44
-      OVA_B_ARTIFACT: "11529682625"
-      OVA_B_SHA256: d89a96b889f675f1fe749aa12107cf7332488971aa5f7ce7ee25e5571705b3b4
-      EXPECT_IMAGE_ID: sha256:68d73d5dd88634468f8cb005b510863272de66928d593f456bcb26a20522f66a
+      # A = the 91e05872 candidate OVA (run 37966305990: recovery 124-139 s,
+      # over budget). B = the dc57bd76 OVA (built in run 37948667525: 115-116 s;
+      # requalified in run 37957097250: 107.7 s). The only product difference is
+      # the ClamAV readiness probe; one runner, A B B A, attributes the change.
+      OVA_A_ARTIFACT: "11634023092"
+      OVA_A_SHA256: 060a3dc6c79164265a241af5d91b4d6b2464a52340b3a42c461f72ee2889c07e
+      OVA_A_IMAGE_ID: sha256:d2a3377400f07ac0a6ceac54df729773b2983d6a4a5f871219ff891cb1e65fb4
+      OVA_B_ARTIFACT: "11625975699"
+      OVA_B_SHA256: 855b4a09d46e80b3325d529d58436ea2c0cb145814add50e4a5c2e66eecccac9
+      OVA_B_IMAGE_ID: sha256:4db3e5c9d492fe9056a4a607aa0c861daeaec30e3a6657532743e16bde34610b
       AB_ORDER: "A B B A"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -1137,7 +1141,8 @@ jobs:
           for X in $AB_ORDER; do
             n=$((n+1)); tag="$n-$X"
             export LAB_DIR="$LAB_ROOT/ab-$tag" LAB_DISK=dm LAB_RECOVERY_REBOOTS=3 LAB_RECOVERY_PROFILES="esxi12:12:3:120" \
-              LAB_RECOVERY_VARIANTS=base LAB_HISTORY=0 LAB_EXPECT_IMAGE_ID="$EXPECT_IMAGE_ID" LAB_MIN_FREE_GB=20 LAB_ACCEL=kvm
+              LAB_RECOVERY_VARIANTS=base LAB_HISTORY=0 LAB_MIN_FREE_GB=20 LAB_ACCEL=kvm
+            img_var="OVA_${X}_IMAGE_ID"; export LAB_EXPECT_IMAGE_ID="${!img_var}"
             export LAB_OVA="$(ls "$LAB_ROOT/ova-$X/"*.ova)" LAB_OVA_SHA256="$(cut -d' ' -f1 "$LAB_ROOT/ova-$X/"*.ova.sha256)"
             echo "::group::$tag ($LAB_OVA_SHA256)"
             test/e2e/appliance/lab/appliance-lab.sh all || rc=1
@@ -1158,7 +1163,7 @@ jobs:
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
-          name: appliance-lab-recovery-ab-98cf41c0d82f
+          name: appliance-lab-recovery-ab-91e05872-vs-dc57bd76
           path: ${{ env.LAB_ROOT }}/ab-evidence/
           retention-days: 30
           if-no-files-found: warn
@@ -1272,12 +1277,12 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     env:
-      OVA_ARTIFACT_ID: "11625975699"   # appliance-lab-ova-candidate-dc57bd76c201, run 37948667525
-      OVA_SHA256: 855b4a09d46e80b3325d529d58436ea2c0cb145814add50e4a5c2e66eecccac9
-      SOURCE_IMAGE_RUN_ID: "37948225581"
-      SOURCE_IMAGE_TAR_SHA256: 74c44b59f99ea0ea090929852e5891813276c22c3ae5dc3c63851210c3775447
-      IMAGE_ID: sha256:4db3e5c9d492fe9056a4a607aa0c861daeaec30e3a6657532743e16bde34610b
-      SRC_SHA: dc57bd76c201db11874d08a8d37accba8646b458
+      OVA_ARTIFACT_ID: "11634023092"   # appliance-lab-ova-candidate-91e05872dfe5, run 37966305990
+      OVA_SHA256: 060a3dc6c79164265a241af5d91b4d6b2464a52340b3a42c461f72ee2889c07e
+      SOURCE_IMAGE_RUN_ID: "37964407987"
+      SOURCE_IMAGE_TAR_SHA256: ef489550e18f10209ea05e03fedab8c14180a7e0f29242c087462a8afad721ae
+      IMAGE_ID: sha256:d2a3377400f07ac0a6ceac54df729773b2983d6a4a5f871219ff891cb1e65fb4
+      SRC_SHA: 91e05872dfe5f96c94ec725b8b2dc2b1002116ab
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Workspace + libguestfs
@@ -1426,7 +1431,7 @@ jobs:
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
-          name: appliance-lab-exact-scan-dc57bd76c201
+          name: appliance-lab-exact-scan-91e05872dfe5
           path: ${{ env.W }}/evidence/
           retention-days: 30
           if-no-files-found: warn
