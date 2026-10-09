@@ -3,6 +3,8 @@ from pathlib import Path
 import socket
 import struct
 import unittest
+import tempfile
+from unittest.mock import Mock, patch
 
 spec = importlib.util.spec_from_file_location('pressure_observe', Path(__file__).with_name('disk-pressure-observe.py'))
 m = importlib.util.module_from_spec(spec)
@@ -32,6 +34,19 @@ class ReplyTests(unittest.TestCase):
         for value in (packet(source='172.18.0.2', target='172.18.0.3'),
                       packet(target='172.18.0.1'), packet(port=80), packet(payload=b'')):
             self.assertIsNone(self.parse(value))
+
+    def test_socket_uses_prebridge_all_protocol_tap_but_parser_stays_narrow(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            capture = m.ReplyCapture('172.18.0.3', '172.18.0.2', Path(temporary)/'capture.jsonl')
+            with patch.object(m.socket, 'AF_PACKET', 17, create=True), \
+                    patch.object(m.socket, 'socket', return_value=Mock()) as socket_call, \
+                    patch.object(m.os, 'O_NOFOLLOW', 0, create=True), \
+                    patch.object(m.threading, 'Thread', return_value=Mock()):
+                capture.start()
+                socket_call.assert_called_once_with(17, m.socket.SOCK_RAW, m.socket.htons(0x0003))
+                capture.close()
+        for frame in (packet(source='172.18.0.4'), packet(port=9090), b'\0'*12+b'\x08\x06'+b'\0'*80):
+            self.assertIsNone(self.parse(frame))
 
     def test_observations_do_not_widen_request_window(self):
         capture = m.ReplyCapture('172.18.0.3', '172.18.0.2', Path('unused'))

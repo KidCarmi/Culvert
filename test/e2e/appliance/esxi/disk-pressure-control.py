@@ -28,6 +28,7 @@ HERE = Path(__file__).resolve().parent
 GIB = 1024 ** 3
 RESERVE = 64 * GIB
 HEADROOM = RESERVE + 40 * GIB + 2 * GIB
+V2_PRESSURE_RESULT = 'beabb48a3c145a0adcdd3bacc6244d23f3e8d31068ea1ab6a299130c0bc031f8'
 ORIGINAL_PRESSURE_RESULT = '695934c6111638c6a2838f17bf3112153a2cf8aebdd4533932056aeecb6e6ed1'
 
 
@@ -160,7 +161,10 @@ def payload(config, profile):
                     'modules[' + repr(name) + '] = module']
     program += ["b = modules['qualify-clamav-outage.py']", 'b.SOURCE,b.IMAGE,b.SIDECAR = ' + bindings,
                 'config = json.loads(base64.b64decode(' + repr(base64.b64encode(json.dumps(config).encode()).decode()) + '))',
-                "result = modules['disk-pressure-guest.py'].run(config,b.Guest(config),b,modules['disk-pressure-worker.py'],",
+                "if config.get('mode') == 'capture_only':",
+                " result = modules['disk-pressure-guest.py'].run_capture(config,b.Guest(config),b,modules['disk-pressure-worker.py'],modules['disk-pressure-observe.py'].ReplyCapture)",
+                "else:",
+                " result = modules['disk-pressure-guest.py'].run(config,b.Guest(config),b,modules['disk-pressure-worker.py'],",
                 'base64.b64decode(' + repr(base64.b64encode(sources['disk-pressure-worker.py']).decode()) + '),',
                 "modules['disk-pressure-observe.py'].ReplyCapture)",
                 'result["helper_hashes"] = config["helper_hashes"]',
@@ -190,6 +194,108 @@ def regular_bytes(path, limit=None):
     return path.read_bytes()
 
 
+def frozen_external(manifest, path, digest):
+    need(any(Path(item['path']).resolve() == path.resolve() and item['sha256'] == digest
+             for item in manifest.get('external_inputs', [])), 'evidence is not frozen')
+
+
+def attempt_records(lab, name, manifest):
+    directory = lab.sec / name
+    records, hashes = {}, {}
+    for key in ('intent', 'complete', 'guest-result'):
+        path = directory / (key + '.json')
+        data = regular_bytes(path, 7*1024**2)
+        hashes[key] = sha(data)
+        frozen_external(manifest, path, hashes[key])
+        records[key] = json.loads(data)
+    intent, complete, guest = (records[k] for k in ('intent', 'complete', 'guest-result'))
+    need(intent['owner_uuid'] == lab.state['uuid'] and intent['source_sha'] == lab.c['source_sha']
+         and intent['operation'] == complete['operation'] == guest['operation']
+         and complete['guest_result_sha256'] == hashes['guest-result']
+         and complete['helper_hashes'] == intent['helper_hashes'] == guest['helper_hashes'], 'attempt evidence binding')
+    for key in ('owner_uuid', 'source_sha', 'image_id', 'controller_revision', 'helper_hashes'):
+        need(complete.get(key) == intent.get(key), 'attempt completion identity differs')
+    return records, hashes
+
+
+def prior_capture_failure(lab, manifest):
+    records, hashes = attempt_records(lab, 'disk-pressure-proof-v2', manifest)
+    intent, complete, guest = (records[k] for k in ('intent', 'complete', 'guest-result'))
+    need(hashes['guest-result'] == V2_PRESSURE_RESULT and guest['result'] == complete['result'] == 'fail'
+         and guest.get('policy_restored') is True and guest.get('no_restart') is True, 'not reviewed capture refusal')
+    phases = guest.get('phases', [])
+    need(len(phases) == 1, 'capture refusal phase differs')
+    phase = phases[0]
+    need(phase.get('allocation_started') is False and phase.get('fill') is None
+         and phase.get('released') is True and phase.get('root_pressure_directory_absent') is True
+         and phase.get('no_restart') is True and phase.get('recovered', {}).get('pass') is True
+         and phase.get('capture_positive_control', {}).get('pass') is False
+         and phase['capture_positive_control']['sample']['pass'] is True
+         and phase.get('capture', {}).get('fragments') == 0, 'v2 is not a clean pre-allocation capture refusal')
+    return hashes
+
+
+def capture_gate(lab, manifest, admission):
+    v2_hashes = prior_capture_failure(lab, manifest)
+    records, hashes = attempt_records(lab, 'disk-pressure-capture-preflight', manifest)
+    intent, complete, guest = (records[k] for k in ('intent', 'complete', 'guest-result'))
+    need(guest['result'] == complete['result'] == 'pass' and guest.get('scope') == 'healthy_capture_only'
+         and guest.get('allocation_started') is False and guest.get('policy_restored') is True
+         and guest.get('no_restart') is True and guest.get('capture_positive_control', {}).get('pass') is True
+         and guest.get('capture', {}).get('packet_protocol') == 'ETH_P_ALL'
+         and guest['capture']['collection_verdict'] == 'BOUNDED_FRAGMENTS_RETAINED', 'healthy capture unproven')
+    for name, digest in intent['helper_hashes'].items():
+        need(manifest['files'].get('test/e2e/appliance/esxi/' + name) == digest, 'capture-tested helper changed')
+    need(intent.get('prior_capture_failure') == v2_hashes and intent.get('allocation_permitted') is False,
+         'preflight was not bound to capture refusal')
+    expected = {'v2': v2_hashes, 'preflight': hashes}
+    need(admission.get('capture_gate') == expected, 'capture gate admission differs')
+    return expected
+
+
+def capture_preflight(lab, args, profile, manifest, hashes, console, bind):
+    need(args.attempt == 'disk-pressure' and args.prior_admission is None, 'capture-only uses fixed separate attempt')
+    previous = prior_capture_failure(lab, manifest)
+    directory = lab.sec / 'disk-pressure-capture-preflight'
+    directory.mkdir()  # Exclusive: no repeat of ambiguous authenticated execution.
+    config = {'mode': 'capture_only', 'operation': secrets.token_hex(16), 'helper_hashes': hashes,
+              'initial': (lab.sec / 'admin-pass').read_text().strip()}
+    need(1 <= len(config['initial']) <= 256, 'admin credential unavailable')
+    body = payload(config, profile)
+    (directory / 'payload.sh').write_bytes(body)
+    intent = {'schema': 1, 'scope': 'healthy_capture_only', 'operation': config['operation'],
+              'owner_uuid': lab.state['uuid'], 'source_sha': profile['source_sha'], 'image_id': profile['image_id'],
+              'sidecar_image_id': profile['clamav_sidecar_image_id'], 'controller_revision': manifest['revision'],
+              'helper_hashes': hashes, 'payload_sha256': sha(body), 'prior_capture_failure': previous,
+              'allocation_permitted': False}
+    with (directory / 'intent.json').open('x') as out:
+        json.dump(intent, out, sort_keys=True)
+        out.flush()
+        import os
+        os.fsync(out.fileno())
+    output = io.BytesIO()
+    writer = io.TextIOWrapper(output, encoding='utf-8', write_through=True)
+    try:
+        with contextlib.redirect_stdout(writer):
+            rc = console.execute(lab, SimpleNamespace(bind=bind, timeout=180, nowait=False, as_user=False), body)
+    finally:
+        (directory / 'guest-result.json').write_bytes(output.getvalue())
+    raw = output.getvalue()
+    need(len(raw) <= 7*1024**2, 'capture result limit')
+    value = json.loads(raw)
+    need(value['operation'] == config['operation'] and value['helper_hashes'] == hashes
+         and value.get('scope') == 'healthy_capture_only' and value.get('allocation_started') is False,
+         'capture result identity differs')
+    status = value['result']
+    need(status in ('pass', 'fail') and (rc == 0) == (status == 'pass'), 'capture result/exit mismatch')
+    summary = dict(intent, result=status, guest_result_sha256=sha(raw),
+                   policy_restored=value.get('policy_restored'), no_restart=value.get('no_restart'))
+    with (directory / 'complete.json').open('x') as out:
+        json.dump(summary, out, sort_keys=True)
+    print(json.dumps({'result': status, 'scope': 'healthy_capture_only', 'guest_result_sha256': sha(raw)}))
+    return 0 if status == 'pass' else 90
+
+
 def attempt_admission(lab, args, profile, manifest):
     attempt = getattr(args, 'attempt', 'disk-pressure')
     admission_path = getattr(args, 'prior_admission', None)
@@ -198,7 +304,7 @@ def attempt_admission(lab, args, profile, manifest):
     if attempt == 'disk-pressure':
         need(admission_path is None, 'original attempt cannot be continuation')
         return attempt, None
-    need(attempt == 'disk-pressure-proof-v2', 'only reviewed accounting retry is admitted')
+    need(attempt in ('disk-pressure-proof-v2', 'disk-pressure-proof-v3'), 'only reviewed pressure attempts admitted')
     need(admission_path is not None, 'named attempt requires prior-failure custody admission')
     raw = regular_bytes(admission_path, 65536)
     need(any(Path(item['path']).resolve() == admission_path.resolve() and item['sha256'] == sha(raw)
@@ -249,7 +355,8 @@ def attempt_admission(lab, args, profile, manifest):
          and custody.get('ciphertext_sha256') == admission['custody_archive']['sha256']
          and all(custody.get(key) is True for key in ('roundtrip_verified', 'source_unchanged',
                     'every_file_verified', 'original_retained_at_preservation')), 'custody verification incomplete')
-    return attempt, {'admission_sha256': sha(raw), 'prior_operation': intent['operation'],
+    additional = capture_gate(lab, manifest, admission) if attempt == 'disk-pressure-proof-v3' else None
+    return attempt, {'capture_gate': additional, 'admission_sha256': sha(raw), 'prior_operation': intent['operation'],
                      'prior_guest_result_sha256': admission['prior_guest_result_sha256'],
                      'custody_archive_sha256': admission['custody_archive']['sha256']}
 
@@ -273,6 +380,8 @@ def run(args):
         need(manifest['files'].get('test/e2e/appliance/esxi/' + name) == hashes[name], 'helper not frozen')
     with console.b.module.locked(lab.run):
         hardware_guard(lab.vm(timeout=20))
+        if getattr(args, 'capture_only', False):
+            return capture_preflight(lab, args, profile, manifest, hashes, console, bind)
         reserve = required_reserve(lab.c)
         need(capacity(lab) >= reserve + 40 * GIB + 2 * GIB, 'reserve plus entire owned disk growth unavailable')
         escrow = args.escrow.resolve()
@@ -335,6 +444,7 @@ if __name__ == '__main__':
     parser.add_argument('--escrow', required=True, type=Path)
     parser.add_argument('--attempt', default='disk-pressure')
     parser.add_argument('--prior-admission', type=Path)
+    parser.add_argument('--capture-only', action='store_true')
     try:
         sys.exit(run(parser.parse_args()))
     except Exception:

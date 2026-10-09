@@ -183,6 +183,69 @@ class SampleBracketingTests(unittest.TestCase):
                 self.assertEqual(result['capture']['collection_verdict'], 'NO_PRESSURE_FRAGMENT_OBSERVED_WITH_PREFILL_CONTROL')
 
 
+class CaptureOnlyTests(unittest.TestCase):
+    def test_healthy_capture_has_no_pressure_or_worker_execution_and_restores_policy(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            backend, backend_module, worker, capture = Mock(), Mock(), Mock(), Mock()
+            backend.cleanup_fixture.return_value = True
+            worker.safe_directory.return_value = 123
+            capture.close.return_value = {'available': True, 'fragments': 3, 'packet_protocol': 'ETH_P_ALL'}
+            with patch.object(g.signal, 'signal'), patch.object(g, 'Path', return_value=Path(temporary)), \
+                    patch.object(g, 'container_state', return_value={'fixed': 'identity'}), \
+                    patch.object(g, 'network_pair', return_value=('192.0.2.1', '192.0.2.2')), \
+                    patch.object(g, 'prefill_control', return_value={'pass': True}), \
+                    patch.object(g, 'phase') as phase, patch.object(g.subprocess, 'Popen') as popen, \
+                    patch.object(g.os, 'close', side_effect=lambda fd, close=g.os.close: None if fd == 123 else close(fd)):
+                result = g.run_capture({'operation':'a'*32}, backend, backend_module, worker, Mock(return_value=capture))
+            self.assertEqual(result['result'], 'pass')
+            self.assertFalse(result['allocation_started'])
+            self.assertTrue(result['policy_restored'])
+            phase.assert_not_called();popen.assert_not_called();worker.paths.assert_not_called()
+            worker.supervise.assert_not_called();worker.fill.assert_not_called()
+            backend.cleanup_fixture.assert_called_once()
+            backend.close.assert_called_once()
+
+    def test_capture_termination_runs_policy_cleanup_without_claiming_success(self):
+        backend, backend_module, worker = Mock(), Mock(), Mock()
+        backend.cleanup_fixture.return_value = True
+        handlers = []
+        def register(sig, handler):
+            handlers.append(handler)
+        backend.install_fixture.side_effect = lambda: handlers[0]()
+        with patch.object(g.signal, 'signal', side_effect=register), \
+                patch.object(g, 'container_state', return_value={'fixed':'identity'}), \
+                patch.object(g.subprocess, 'Popen') as launched:
+            result = g.run_capture({'operation':'a'*32},backend,backend_module,worker,Mock())
+        self.assertEqual(result['result'],'fail')
+        self.assertEqual(handlers[1],g.signal.SIG_IGN)
+        backend.cleanup_fixture.assert_called_once()
+        backend.close.assert_called_once()
+        launched.assert_not_called()
+
+    def test_v3_requires_successful_identical_capture_helpers_and_exact_admission(self):
+        hashes = {'intent':'i','complete':'c','guest-result':'g'}
+        helper_hashes = {'disk-pressure-observe.py':'h'}
+        intent = {'helper_hashes':helper_hashes,'prior_capture_failure':hashes,'allocation_permitted':False}
+        guest = {'result':'pass','scope':'healthy_capture_only','allocation_started':False,
+                 'policy_restored':True,'no_restart':True,'capture_positive_control':{'pass':True},
+                 'capture':{'packet_protocol':'ETH_P_ALL','collection_verdict':'BOUNDED_FRAGMENTS_RETAINED'}}
+        records = {'intent':intent,'complete':{'result':'pass'},'guest-result':guest}
+        manifest = {'files':{'test/e2e/appliance/esxi/disk-pressure-observe.py':'h'}}
+        admission = {'capture_gate':{'v2':hashes,'preflight':hashes}}
+        with patch.object(c, 'prior_capture_failure', return_value=hashes), \
+                patch.object(c, 'attempt_records', return_value=(records,hashes)):
+            self.assertEqual(c.capture_gate(Mock(),manifest,admission),admission['capture_gate'])
+            for change in ({'allocation_started':True},{'result':'fail'},{'policy_restored':False}):
+                old = dict(guest)
+                guest.update(change)
+                with self.subTest(change=change), self.assertRaises(ValueError):
+                    c.capture_gate(Mock(),manifest,admission)
+                guest.clear();guest.update(old)
+            with self.assertRaises(ValueError):c.capture_gate(Mock(),manifest,{})
+            manifest['files']['test/e2e/appliance/esxi/disk-pressure-observe.py']='changed'
+            with self.assertRaises(ValueError):c.capture_gate(Mock(),manifest,admission)
+
+
 class AdmissionTests(unittest.TestCase):
     def test_original_default_compatible_named_requires_admission(self):
         self.assertEqual(c.attempt_admission(Mock(), SimpleNamespace(), {}, {}), ('disk-pressure', None))

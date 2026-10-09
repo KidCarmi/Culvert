@@ -196,6 +196,29 @@ def prefill_control(capture, backend, fresh, seen):
     return result
 
 
+def capture_evidence(capture, control, result):
+    if capture is not None:
+        result['capture'] = capture.close()
+        result['capture']['evidence_status'] = ('fragments_captured' if result['capture'].get('fragments', 0)
+                                                 else 'NO_RESPONSE_FRAGMENT_OBSERVED')
+        positive = result.get('capture_positive_control', {}).get('pass') is True
+        capture_ok = positive and capture_healthy(result['capture'])
+        start = result.get('pressure_capture_start', {}).get('fragments')
+        pressure_fragments = result['capture'].get('fragments', 0) - start if start is not None else None
+        result['capture']['pressure_fragments'] = pressure_fragments
+        result['capture']['collection_verdict'] = (
+            'NO_PRESSURE_FRAGMENT_OBSERVED_WITH_PREFILL_CONTROL' if capture_ok and pressure_fragments == 0
+            else 'BOUNDED_FRAGMENTS_RETAINED' if capture_ok else 'CAPTURE_INCOMPLETE')
+        if not capture_ok:
+            result['result'] = 'fail'
+        result['capture']['causal_stream_completeness'] = 'NOT_PROVEN_passive_fragments_only'
+        capture_path = control / 'clamd-response-fragments.jsonl'
+        if capture_path.exists():
+            raw = capture_path.read_bytes()
+            need(len(raw) <= 1024 ** 2, 'capture_limit')
+            result['capture'].update(sha256=sha(raw), bytes=len(raw), private_base64=base64.b64encode(raw).decode())
+
+
 def phase(config, mode, backend, source, worker, capture_type, fresh, seen):
     root, control = worker.paths(config['operation'], mode)
     control.mkdir(mode=0o700)
@@ -283,30 +306,58 @@ def phase(config, mode, backend, source, worker, capture_type, fresh, seen):
             result['allocation_started'] = True
         if not result['released']:
             result['result'] = 'fail'
-        if capture is not None:
-            result['capture'] = capture.close()
-            result['capture']['evidence_status'] = ('fragments_captured' if result['capture'].get('fragments', 0)
-                                                     else 'NO_RESPONSE_FRAGMENT_OBSERVED')
-            positive = result.get('capture_positive_control', {}).get('pass') is True
-            capture_ok = positive and capture_healthy(result['capture'])
-            start = result.get('pressure_capture_start', {}).get('fragments')
-            pressure_fragments = result['capture'].get('fragments', 0) - start if start is not None else None
-            result['capture']['pressure_fragments'] = pressure_fragments
-            result['capture']['collection_verdict'] = (
-                'NO_PRESSURE_FRAGMENT_OBSERVED_WITH_PREFILL_CONTROL' if capture_ok and pressure_fragments == 0
-                else 'BOUNDED_FRAGMENTS_RETAINED' if capture_ok else 'CAPTURE_INCOMPLETE')
-            if not capture_ok:
-                result['result'] = 'fail'
-            result['capture']['causal_stream_completeness'] = 'NOT_PROVEN_passive_fragments_only'
-            capture_path = control / 'clamd-response-fragments.jsonl'
-            if capture_path.exists():
-                raw = capture_path.read_bytes()
-                need(len(raw) <= 1024 ** 2, 'capture_limit')
-                result['capture'].update(sha256=sha(raw), bytes=len(raw), private_base64=base64.b64encode(raw).decode())
+        capture_evidence(capture, control, result)
         # Retain only bounded tmpfs records. Root filler directory must be gone.
         result['root_pressure_directory_absent'] = not root.exists()
         if not result['root_pressure_directory_absent']:
             result['result'] = 'fail'
+    return result
+
+
+def run_capture(config, backend, backend_module, worker, capture_type):
+    """Healthy capture proof only: this path never invokes a pressure worker."""
+    def interrupted(*unused):
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        raise RuntimeError('guest_interrupted')
+    signal.signal(signal.SIGTERM, interrupted)
+    bind_response_evidence(backend)
+    backend.command = backend_module.command
+    result = {'schema': 1, 'operation': config['operation'], 'result': 'fail',
+              'scope': 'healthy_capture_only', 'allocation_started': False, 'policy_restored': False}
+    before, capture, control = None, None, None
+    try:
+        result['identity'] = backend.prepare()
+        before = container_state(backend_module.command)
+        backend.install_fixture()
+        control = Path('/run') / ('culvert-lab-capture-' + config['operation'])
+        control.mkdir(mode=0o700)
+        worker.tmpfs_guard(control)
+        os.close(worker.safe_directory(control))
+        sidecar, proxy = network_pair(backend.command)
+        result['capture_pair'] = {'sidecar': sidecar, 'proxy': proxy, 'server_port': 3310}
+        capture = capture_type(sidecar, proxy, control / 'clamd-response-fragments.jsonl')
+        capture.start()
+        result['capture_positive_control'] = prefill_control(capture, backend, backend_module.fresh_body, set())
+        need(result['capture_positive_control']['pass'], 'healthy_capture_control_failed')
+        result['result'] = 'pass'
+    except Exception:
+        result['error_category'] = 'healthy_capture_unproven'
+    finally:
+        try:
+            capture_evidence(capture, control, result)
+        finally:
+            try:
+                result['policy_restored'] = backend.cleanup_fixture()
+            except Exception:
+                result['policy_cleanup_error'] = True
+            if before is not None:
+                try:
+                    result['no_restart'] = container_state(backend_module.command) == before
+                except Exception:
+                    result['no_restart'] = False
+            backend.close()
+    if not result['policy_restored'] or not result.get('no_restart'):
+        result['result'] = 'fail'
     return result
 
 

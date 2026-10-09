@@ -51,10 +51,14 @@ class ReplyCapture:
         self.records = []
         self.summary = {'available': False, 'fragments': 0, 'scan_found_fragments': 0, 'scan_ok_fragments': 0, 'packets_examined': 0,
                         'output_limit': False, 'packet_limit': False, 'error': None,
+                        'packet_protocol': 'ETH_P_ALL',
                         'semantics': 'passive response fragments; duplicates, missing packets and missing stream reassembly are possible'}
 
     def start(self):
-        self.socket = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(0x0800))
+        # Protocol-specific taps run after the Linux bridge receive handler and
+        # can miss forwarded container frames. ETH_P_ALL is the pre-bridge tap;
+        # response_fragment still accepts only IPv4 replies for the exact pair.
+        self.socket = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(0x0003))
         self.socket.settimeout(0.5)
         fd = os.open(self.path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
         self.output = os.fdopen(fd, 'wb', buffering=0)
