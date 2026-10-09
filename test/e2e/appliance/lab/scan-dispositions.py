@@ -31,7 +31,7 @@ CALLED = {
     ("usr-bin-ctr", "GO-2026-6061"): "`ctr` is an operator CLI talking to the root-only containerd socket; nothing on the appliance runs it.",
     ("usr-bin-ctr", "GO-2026-6348"): "`ctr` CLI client path (`Subscribe`); not run by anything on the appliance; peer is the root-only socket.",
     ("usr-bin-runc", "GO-2026-6238"): "`btf.LoadKernelSpec`: parses the running kernel's own BTF (root-owned kernel data), not attacker input.",
-    # containerd.io 2.4.1 (go1.27.2) still vendors golang.org/x/net v0.55.0; the
+    # containerd.io 2.4.1 (go1.27.2) still vendors golang.org/x/net v0.58.0; the
     # x/net v0.60.0 HTTP/2 advisories on its real call paths.
     ("usr-bin-containerd", "GO-2026-6603"): "x/net HTTP/2 framer in grpc-go's server writer (`loopyWriter.writeHeader`); the trailer-header flood needs an HTTP/2 client to send it. Peers are local root processes on the root-only socket `/run/containerd/containerd.sock` (root:root 0660, empty docker group — engine probe); dockerd is its only client.",
     ("usr-bin-containerd", "GO-2026-6610"): "x/net HTTP/2 CLIENT transport (`http2.Transport.RoundTrip`); malformed framing headers must come from a remote HTTP/2 server. The only remote servers on the appliance are its pinned registries, reached over TLS and pulled by digest; CRI is not loaded (engine probe).",

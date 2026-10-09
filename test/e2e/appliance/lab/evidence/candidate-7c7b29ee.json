@@ -1,0 +1,18 @@
+{
+ "source": "7c7b29ee3be40af6a0809c73ad04d4337303263d",
+ "ova_artifact": "11605618137",
+ "ova_run": "37908313475",
+ "image_id": "sha256:398ffaf2090ec32cb9ff0506dd2e92bfd2414d689719373fc00cf96a5c58f906",
+ "image_tar": "d56cb3070addaf080e5500d92523a58462be5a95ff3e49af1b98755f3df0b63d",
+ "image_run": "37904532038",
+ "scan_run": "37914496496",
+ "scan_artifact": "11609291527",
+ "sidecar": "`culvert/clamav:1.4.6-culvert.3`, image `sha256:45dbf00306ef19a9c8f9a90a078d73e8131cc6dc03e08d829acdd16816afc94e` (archive `e2489709\u2026`): exact-byte Trivy scan of the baked archive, **0 findings** at any severity (lab run 37912972366, artifact 11607875170)",
+ "engine_latest": {
+  "docker-ce": "5:29.9.0-1~ubuntu.24.04~noble",
+  "docker-ce-cli": "5:29.9.0-1~ubuntu.24.04~noble",
+  "containerd.io": "2.4.1-2~ubuntu.24.04~noble",
+  "docker-compose-plugin": "5.6.0-1~ubuntu.24.04~noble"
+ },
+ "engine_latest_measured": "Docker apt repository noble/stable, measured 2026-10-09T09:56Z"
+}
