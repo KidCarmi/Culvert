@@ -236,7 +236,10 @@ last step is the one that matters, and it costs a few seconds of proxy
 downtime:
 
 ```bash
-$SSH 'cd /srv/culvert && sudo docker compose up -d --force-recreate proxy && sleep 20 && sudo culvert-status --brief' | tee "$EV/09-recovery-rehearsal.txt"
+# Both compose files: the second mounts the maintenance agent's socket into the
+# proxy; recreating with docker-compose.yml alone leaves Release Management
+# "Agent unreachable" (backups and updates) afterwards.
+$SSH 'cd /srv/culvert && sudo docker compose -f docker-compose.yml -f docker-compose.maint-agent.yml up -d --force-recreate proxy && sleep 20 && sudo culvert-status --brief' | tee "$EV/09-recovery-rehearsal.txt"
 curl -sS -m 15 -x "$P" -o /dev/null -w 'after-recreate allowed http=%{http_code}\n' http://example.com/ | tee -a "$EV/09-recovery-rehearsal.txt"   # expect 200
 ```
 

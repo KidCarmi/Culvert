@@ -46,6 +46,15 @@ counted (it predates them).
 
 ## 2. Restore persistent state (offline, in place)
 
+**Bringing the stack back up on the appliance always names both compose
+files** (`-f docker-compose.yml -f docker-compose.maint-agent.yml`). The
+second one mounts the maintenance agent's socket into the proxy; a plain
+`docker compose up -d` recreates the proxy WITHOUT it, and Release
+Management then reads "Agent unreachable" (backups, updates) until the
+stack is brought up again with both files. Nothing else is lost.
+`culvert-os-update` already does this; the commands below are written out
+in full.
+
 Prerequisites in separate custody: the backup archive, `CULVERT_BACKUP_PASSPHRASE`,
 and `/srv/culvert/.env` (holds `CULVERT_CA_PASSPHRASE`; without it the
 archived `ca.bundle` cannot be validated or used). See
@@ -56,7 +65,7 @@ cd /srv/culvert
 docker compose --profile cli run --rm -e CULVERT_BACKUP_PASSPHRASE cli --restore /backup/<archive> --mode full      # dry-run (runtime-OK)
 docker compose down                                                                                                   # quiesce (enforced by the data-dir lock)
 docker compose --profile cli run --rm -e CULVERT_BACKUP_PASSPHRASE cli --restore /backup/<archive> --mode full --confirm
-docker compose up -d
+docker compose -f docker-compose.yml -f docker-compose.maint-agent.yml up -d
 ```
 
 Guards (each names its flag): cluster CA change with enrolled DPs
@@ -79,7 +88,7 @@ prints the exact commands:
 ```bash
 docker compose --profile cli run --rm cli --recover-restore                      # inspect
 docker compose --profile cli run --rm cli --recover-restore --confirm=revert     # or: --confirm=complete
-docker compose up -d
+docker compose -f docker-compose.yml -f docker-compose.maint-agent.yml up -d
 ```
 
 Both directions are deterministic, and an interrupted recovery is resumed by
