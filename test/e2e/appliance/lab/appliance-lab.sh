@@ -1662,7 +1662,7 @@ p_backup() { local out="$1" op st jar; api POST /api/backups '{"encrypt":false}'
     case "$st" in succeeded|failed|cancelled) break ;; esac; sleep 5; done; api GET "/api/backups/operations/$op" >> "$out" 2>&1 || true; fi
   echo "op=${op:-none} state=${st:-none} http=$(code < "$out" | head -1)"; }
 p_login() { : > "$JAR"; api POST /api/auth/login "{\"user\":\"$ADMIN_USER\",\"pass\":\"$(cat "$SEC/admin-pass")\"}" | code; }
-p_os_update() { groot 'culvert-os-update os > /run/culvert-lab-osu.log 2>&1; echo "osu-rc=$?"; tail -n 15 /run/culvert-lab-osu.log; echo "dpkg-audit=[$(dpkg --audit 2>&1 | head -c 300)]"; echo "not-installed-ok=$(dpkg -l | awk "NR>5 && \$1 !~ /^(ii|hi|rc)\$/" | wc -l)"; echo "holds=$(apt-mark showhold | tr "\n" " ")"' 1800 2>&1; }
+p_os_update() { groot 'culvert-os-update os > /run/culvert-lab-osu.log 2>&1; echo "osu-rc=$?"; tail -n 15 /run/culvert-lab-osu.log; echo "dpkg-audit=[$(dpkg --audit 2>&1 | head -c 300)]"; echo "not-installed-ok=$(dpkg -l | awk "NR>5 && \$1 !~ /^(ii|hi|rc)\$/" | wc -l)"; echo "holds=$(dpkg-query -W -f="\${Package} \${db:Status-Want}\n" 2>/dev/null | awk "\$2==\"hold\"{print \$1}" | tr "\n" " ")"' 1800 2>&1; }
 p_app_update() { local U="$LAB_UPDATE_DIR" ph="$1" rc=0
   { printf '%s' "$AGENT_LIB"; embed apply.json "$U/apply-pressure-$ph.json"
     printf '%s\n' 'running' 'r=$(agent -X POST --data-binary @/run/culvert-lab-upd/apply.json http://agent/v1/upgrades/apply); echo "$r" | tail -c 1500' \
@@ -1704,6 +1704,30 @@ rows=[json.loads(l) for l in open(sys.argv[1])]; rows=[d for d in rows if d["pha
 c=collections.Counter((d["eicar"][:3] if d["eicar"]!="av" else "av", d["clean"][:3]) for d in rows)
 print(len(rows), "samples; eicar/clean:", ", ".join(f"{e}/{k} x{n}" for (e,k),n in sorted(c.items())))' "$EV/P-samples.jsonl" "$name")); admin login $lc" \
     || check P "$name-enforcement" fail "$fails (see P-$name-logs.txt)"
+  # Readiness truth: a sample whose clean body was refused as AV-unavailable
+  # must have /ready non-200 with the clamav row failing (operators are told
+  # to watch /ready for this outage; PING-only readiness said ok throughout
+  # the inode phase of lab run 37957097250).
+  local rt; rt="$(python3 - "$EV/P-samples.jsonl" "$name" <<'PY2'
+import json, sys
+n = bad = 0; out = []
+refused = lambda d: "antivirus scanning is currently unavailable" in d["clean"]
+rows = [d for d in map(json.loads, open(sys.argv[1]))
+        if d["phase"] == sys.argv[2] and (d["tag"].startswith("+") or d["tag"].startswith("b0."))]
+# judged only while the outage outlasts the /ready read: the NEXT sample is
+# still refused (a 1 s transient can legitimately be over by the read)
+for d, nxt in zip(rows, rows[1:]):
+    if not (refused(d) and refused(nxt)): continue
+    n += 1
+    if d["ready"] == "200" or "clamav=" not in d["not_ok_rows"]:
+        bad += 1; out.append(f"{d['tag']}:ready={d['ready']}[{d['not_ok_rows']}]")
+print(f"{n} {bad} " + " ".join(out[:6]))
+PY2
+)"
+  set -- $rt
+  if [[ "${1:-0}" == 0 ]]; then check P "$name-readiness-truth" info "no sample refused content as AV-unavailable"
+  elif [[ "$2" == 0 ]]; then check P "$name-readiness-truth" pass "$1 sample(s) refused content as AV-unavailable; /ready was non-200 with the clamav row failing in every one"
+  else check P "$name-readiness-truth" fail "$2 of $1 AV-unavailable sample(s) had /ready reporting clamav ok: ${*:3}"; fi
   # backup under pressure: must fail cleanly
   bk="$(p_backup "$EV/P-$name-backup.txt")"; inv1="$(p_backup_inventory)"; printf '%s\n' "$inv1" > "$EV/P-$name-backups-after.txt"
   if grep -q '\.tmp ' <<<"$inv1"; then check P "$name-backup-clean" fail "$bk; a .tmp archive was left behind"
@@ -1742,8 +1766,12 @@ print(len(rows), "samples; eicar/clean:", ", ".join(f"{e}/{k} x{n}" for (e,k),n 
   grep -q 'released=yes' "$EV/P-$name-release.txt" || check P "$name-release" fail "the release over SSH did not complete (see P-$name-release.txt); the guest's backstop timer frees the space"
   ok=0; for _ in $(seq 1 60); do ready_clamav_ok && rec_traffic && [[ "$(eicar_verdict)" == av ]] && { ok=1; break; }; sleep 5; done
   s="$(p_sample "$name" recovered)"
-  [[ $ok == 1 ]] && check P "$name-recovered" pass "space released; /ready 200 with clamav ok, enforcement, EICAR blocked by ClamAV ($s)" \
-    || check P "$name-recovered" fail "within 300 s of release: $s"
+  # Docker must still be held once space is back (a failed OS update must
+  # never leave the engine unheld); read from dpkg's status, no temp file.
+  local hh; hh="$(groot 'dpkg-query -W -f="\${Package} \${db:Status-Want}\n" | awk "\$2==\"hold\"{print \$1}" | tr "\n" " "' 120 2>/dev/null)"
+  [[ "$hh" == *docker-ce\ * ]] || ok=0
+  [[ $ok == 1 ]] && check P "$name-recovered" pass "space released; /ready 200 with clamav ok, enforcement, EICAR blocked by ClamAV ($s); held: $hh" \
+    || check P "$name-recovered" fail "within 300 s of release: $s; held: [$hh]"
   if [[ "${P_APP_APPLIED:-0}" == 1 ]]; then P_APP_APPLIED=0; local rb rc=0
     rb="$({ printf '%s' "$AGENT_LIB"; embed rollback.json "$LAB_UPDATE_DIR/rollback-pressure-$name.json"
            printf '%s\n' 'r=$(agent -X POST --data-binary @/run/culvert-lab-upd/rollback.json http://agent/v1/rollbacks); echo "$r" | tail -c 1500' \

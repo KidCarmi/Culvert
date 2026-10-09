@@ -37,15 +37,15 @@ env:
   # Superseded candidate (historical; does not boot under BIOS, #1528 §3f).
   # Its guest-content fingerprint stays the comparison reference.
   ORIGINAL_OVA_SHA256: e24eb542f973fb70360bad5124ef81fdab8b6f8d67af601720613cbcca3700a4
-  # F-DISK-1 job input: the dc57bd76 candidate's image (Deep gate run
-  # 37948225581), which carries every badger/ristretto F-DISK-1 fix incl.
+  # F-DISK-1 job input: the 91e05872 candidate's image (Deep gate run
+  # 37964407987), which carries every badger/ristretto F-DISK-1 fix incl.
   # the in-place memtable emptying (5b389f38). The ORIGINAL image (run
   # 37124197333) reproduced the SIGBUS in 37397680555 (pre-fix control).
-  SOURCE_IMAGE_RUN_ID: "37948225581"
-  SOURCE_IMAGE_TAR_SHA256: 74c44b59f99ea0ea090929852e5891813276c22c3ae5dc3c63851210c3775447
+  SOURCE_IMAGE_RUN_ID: "37964407987"
+  SOURCE_IMAGE_TAR_SHA256: ef489550e18f10209ea05e03fedab8c14180a7e0f29242c087462a8afad721ae
   # The source those image bytes were built from; the F-DISK job builds its
   # maintenance agent from here so no lab-branch binary stands in for it.
-  SOURCE_IMAGE_SHA: dc57bd76c201db11874d08a8d37accba8646b458
+  SOURCE_IMAGE_SHA: 91e05872dfe5f96c94ec725b8b2dc2b1002116ab
 
 jobs:
   guest-boot:
@@ -57,7 +57,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Production-readiness candidate — #1528 head dc57bd76 (= df46c26f + ClamAV multi-reply fix (a clamd spool ERROR followed by OK is a fault, never clean: EICAR was delivered on a full disk), HWE initramfs trimmed to a local-disk boot (57 MB -> back near GA; ~19 s per reboot), nvmet/nvmet_tcp denied (67), runbooks keep the agent compose override; df46c26f = 41bd1193 + the 21 network-autoloadable modules the GA 6.8 disk did not carry denied (65 total) and a build check that refuses any unreviewed one, + docs; 41bd1193 = 7c7b29ee + the supported Ubuntu HWE kernel linux-image-virtual-hwe-24.04 7.0.0-38 replacing GA 6.8.0-146, 20 more unused modules denied (44: ipvs, openvswitch, vxlan, LIO target, ALSA, Bluetooth, rxrpc/kafs, amdgpu, idpf, scsi_debug), DRM nodes root-only (72-culvert-drm.rules), build refuses ext4 ea_inode; 7c7b29ee = 13c1f80c + Docker Engine 29.9.0 / containerd.io 2.4.1, the go1.26.9 / go1.27.2 builds; 13c1f80c = 3a025d06 + unused kernel modules made unloadable, softdep-proof: sctp, nfsd, kvm*, ksmbd, cifs, can*, pppoe/pppox, RDMA core, dccp, tipc; x/net v0.60.0; Go 1.26.9; expired trivy mask retired; 3a025d06 = 7e53720d + the exact-byte scan closeout: the snapshot kernel 6.8.0-146 only, snapd purged, compose 5.6.0, runtime apk layer never cached; 7e53720d = 98cf41c0 + reproducible ClamAV sidecar culvert.3): SSO login state
+        # Production-readiness candidate — #1528 head 91e05872 (= dc57bd76 + /ready reports a ClamAV that answers PING but cannot scan (probe scan through INSTREAM; inode exhaustion left /ready ok while every scanned body was refused); dc57bd76 = df46c26f + ClamAV multi-reply fix (a clamd spool ERROR followed by OK is a fault, never clean: EICAR was delivered on a full disk), HWE initramfs trimmed to a local-disk boot (57 MB -> back near GA; ~19 s per reboot), nvmet/nvmet_tcp denied (67), runbooks keep the agent compose override; df46c26f = 41bd1193 + the 21 network-autoloadable modules the GA 6.8 disk did not carry denied (65 total) and a build check that refuses any unreviewed one, + docs; 41bd1193 = 7c7b29ee + the supported Ubuntu HWE kernel linux-image-virtual-hwe-24.04 7.0.0-38 replacing GA 6.8.0-146, 20 more unused modules denied (44: ipvs, openvswitch, vxlan, LIO target, ALSA, Bluetooth, rxrpc/kafs, amdgpu, idpf, scsi_debug), DRM nodes root-only (72-culvert-drm.rules), build refuses ext4 ea_inode; 7c7b29ee = 13c1f80c + Docker Engine 29.9.0 / containerd.io 2.4.1, the go1.26.9 / go1.27.2 builds; 13c1f80c = 3a025d06 + unused kernel modules made unloadable, softdep-proof: sctp, nfsd, kvm*, ksmbd, cifs, can*, pppoe/pppox, RDMA core, dccp, tipc; x/net v0.60.0; Go 1.26.9; expired trivy mask retired; 3a025d06 = 7e53720d + the exact-byte scan closeout: the snapshot kernel 6.8.0-146 only, snapd purged, compose 5.6.0, runtime apk layer never cached; 7e53720d = 98cf41c0 + reproducible ClamAV sidecar culvert.3): SSO login state
         # bound to the starting browser (29dae9f2: login CSRF; __Host- cookie on
         # HTTPS; signed sign-in relay), opt-in IP-bound sign-in (ba93fdcb,
         # F-SSO-SCOPE-1; off by default), encrypted request-history export/
@@ -76,23 +76,21 @@ jobs:
         # host-component refresh (aefd400d: a re-run of the installer adopts the
         # image's bundle, building a new sidecar tag first) and the boot console
         # (813a3b4a: nomodeset, centred title, Esc line, kernel log on tty12).
-        # Image = that head's own Deep PR Gate tar (run 37948225581); app, agent,
+        # Image = that head's own Deep PR Gate tar (run 37964407987); app, agent,
         # console, access binary and provisioning from a clean checkout of the
         # SAME commit. Image ID is the tar's OCI manifest digest.
         include:
-          - variant: candidate-dc57bd76c201
+          - variant: candidate-91e05872dfe5
             provisioning: source
-            source_sha: "dc57bd76c201db11874d08a8d37accba8646b458"
-            image_run: "37948225581"
-            image_tar_sha256: "74c44b59f99ea0ea090929852e5891813276c22c3ae5dc3c63851210c3775447"
-            expect_image_id: "sha256:4db3e5c9d492fe9056a4a607aa0c861daeaec30e3a6657532743e16bde34610b"
-            # RE-QUALIFIES the exact OVA run 37948667525 built from this commit
-            # (no rebuild: a rebuild is a different artifact) with the harness
-            # fixes from that run's pressure phase (tmpfs console staging,
-            # backup opId, nomodeset-aware DRM check). Its signed-update
-            # fixture is cut from the OVA's own disk (step below).
-            retained_run: "37948667525"
-            retained_sha256: "855b4a09d46e80b3325d529d58436ea2c0cb145814add50e4a5c2e66eecccac9"
+            source_sha: "91e05872dfe5f96c94ec725b8b2dc2b1002116ab"
+            image_run: "37964407987"
+            image_tar_sha256: "ef489550e18f10209ea05e03fedab8c14180a7e0f29242c087462a8afad721ae"
+            expect_image_id: "sha256:d2a3377400f07ac0a6ceac54df729773b2983d6a4a5f871219ff891cb1e65fb4"
+            # Built from source: a new candidate (readiness probe). dc57bd76's
+            # OVA stays retained in run 37948667525 (sha256 855b4a09…) and was
+            # re-qualified under pressure in run 37957097250.
+            retained_run: ""
+            retained_sha256: ""
             # Disk-pressure scenario (block + inode exhaustion, backup/update
             # under pressure, recovery) on this disposable guest, after history.
             pressure: "1"
@@ -106,8 +104,8 @@ jobs:
             engine_surface: "1"
           # Adoption (ASTRA, #1528): an appliance that already has the OLD
           # sidecar tag (the RETAINED 2e3bcc2a OVA, culvert/clamav:1.4.6-pcre2-10.49
-          # baked in) is upgraded to the dc57bd76 image; the host-component
-          # refresh then runs with the dc57bd76 installer put in place first
+          # baked in) is upgraded to the 91e05872 image; the host-component
+          # refresh then runs with the 91e05872 installer put in place first
           # (an appliance runs the installer its OVA baked, A1b).
           - variant: candidate-2e3bcc2a1095
             provisioning: source
@@ -118,10 +116,10 @@ jobs:
             retained_run: "37606237892"
             retained_sha256: "55e98116ba2c020789b3f5de4eabab7e29af611c83b9c972b82a6319a19f145e"
             recovery_reboots: "0"
-            adopt_image_run: "37948225581"
-            adopt_image_tar_sha256: "74c44b59f99ea0ea090929852e5891813276c22c3ae5dc3c63851210c3775447"
-            adopt_image_id: "sha256:4db3e5c9d492fe9056a4a607aa0c861daeaec30e3a6657532743e16bde34610b"
-            adopt_installer_sha: "dc57bd76c201db11874d08a8d37accba8646b458"
+            adopt_image_run: "37964407987"
+            adopt_image_tar_sha256: "ef489550e18f10209ea05e03fedab8c14180a7e0f29242c087462a8afad721ae"
+            adopt_image_id: "sha256:d2a3377400f07ac0a6ceac54df729773b2983d6a4a5f871219ff891cb1e65fb4"
+            adopt_installer_sha: "91e05872dfe5f96c94ec725b8b2dc2b1002116ab"
             # The history step needs the candidate's own CLI and compose; this
             # leg runs the RETAINED 2e3bcc2a appliance (only the image is new).
             history: "0"
