@@ -161,10 +161,39 @@ def read_json(path):
     return json.loads(raw)
 
 
-def pressure_present(mode, value):
-    # Product cleanup can free storage after the filler saw ENOSPC. Never count
-    # such an unpressured sample as a sustained-pressure qualification sample.
-    return value['bytes_free'] <= 65536 if mode == 'blocks' else value['inodes_free'] == 0
+def capture_healthy(value):
+    return (value.get('available') is True
+            and not any(value.get(k) for k in ('error', 'output_limit', 'packet_limit')))
+
+
+def correlate_control(capture, row):
+    expected = b' FOUND' if row['kind'] == 'eicar' else b': OK'
+    unique = {}
+    for fragment in capture.observations(row['started_ns'], row['ended_ns']):
+        raw = bytes.fromhex(fragment['response_fragment_hex'])
+        if fragment.get('fragment_truncated') or not any(expected + terminator in raw for terminator in (b'\0', b'\n')):
+            continue
+        key = (fragment['destination_port'], fragment['sequence'], fragment['payload_sha256'])
+        unique[key] = {k: fragment[k] for k in ('destination_port', 'sequence', 'payload_sha256', 'monotonic_ns')}
+    ports = {key[0] for key in unique}
+    return {'pass': bool(unique) and len(ports) == 1, 'fragments': list(unique.values()),
+            'request_body_sha256': row['body_sha256'], 'private_origin_url': row['private_origin_url'],
+            'started_ns': row['started_ns'], 'ended_ns': row['ended_ns'],
+            'semantics': 'deduplicated response fragments inside fresh request window; not complete TCP transactions'}
+
+
+def prefill_control(capture, backend, fresh, seen):
+    before = capture.snapshot()
+    result = {'before': before, 'sample': sample(backend, fresh, seen, strict=True)}
+    after = capture.snapshot()
+    result['after'] = after
+    rows = result['sample'].get('probes', [])
+    result['correlations'] = [correlate_control(capture, row) for row in rows]
+    ports = {fragment['destination_port'] for row in result['correlations'] for fragment in row['fragments']}
+    result['pass'] = (result['sample']['pass'] and capture_healthy(before) and capture_healthy(after)
+                      and len(result['correlations']) == 3 and len(ports) == 3
+                      and all(row['pass'] for row in result['correlations']))
+    return result
 
 
 def phase(config, mode, backend, source, worker, capture_type, fresh, seen):
@@ -182,7 +211,11 @@ def phase(config, mode, backend, source, worker, capture_type, fresh, seen):
     try:
         sidecar, proxy = network_pair(backend.command)
         capture = capture_type(sidecar, proxy, control / 'clamd-response-fragments.jsonl')
-        capture.start()  # Capture inability blocks the reproduction BEFORE fill.
+        capture.start()
+        result['capture_positive_control'] = prefill_control(capture, backend, fresh, seen)
+        need(result['capture_positive_control']['pass'], 'prefill_capture_control_failed')
+        result['pressure_capture_start'] = capture.snapshot()
+        result['pressure_started_ns'] = time.monotonic_ns()
         supervisor = subprocess.Popen([sys.executable, str(script), '--supervise'], stdin=subprocess.PIPE,
                                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                                       close_fds=True, start_new_session=True)
@@ -204,16 +237,21 @@ def phase(config, mode, backend, source, worker, capture_type, fresh, seen):
                 if filled['result'] != 'exhausted':
                     result['result'] = 'blocked'
                     break
+            armed = read_json(control / 'armed.json')
             filesystem_before = worker.root_guard(root)
+            allocation_before = worker.pressure_probe(root, armed, filled, mode) if filled else None
             row = sample(backend, fresh, seen, strict=False)
             result['samples'].append(row)  # Preserve a delivered body even if watchdog just removed root.
             row['fill_complete_at_start'] = filled is not None
             row['filesystem_before'] = filesystem_before
+            row['allocation_before'] = allocation_before
             if not row['pass']:
                 raise ValueError('enforcement_or_readiness_failed')
             row['filesystem'] = worker.root_guard(root)
-            row['pressure_present_across_sample'] = (pressure_present(mode, filesystem_before)
-                                                      and pressure_present(mode, row['filesystem']))
+            row['allocation_after'] = worker.pressure_probe(root, armed, filled, mode) if filled else None
+            row['pressure_present_across_sample'] = (filled is not None
+                                                      and allocation_before['exhausted'] is True
+                                                      and row['allocation_after']['exhausted'] is True)
             if filled is not None and row['pressure_present_across_sample']:
                 exhausted_samples += 1
                 if exhausted_samples >= 3:
@@ -238,15 +276,27 @@ def phase(config, mode, backend, source, worker, capture_type, fresh, seen):
         if (control / 'released.json').exists():
             result['release'] = read_json(control / 'released.json')
             result['released'] = result['release'].get('released') is True
+        if supervisor is None:
+            result['allocation_started'] = False
+            result['released'] = not root.exists()
+        else:
+            result['allocation_started'] = True
         if not result['released']:
             result['result'] = 'fail'
         if capture is not None:
             result['capture'] = capture.close()
             result['capture']['evidence_status'] = ('fragments_captured' if result['capture'].get('fragments', 0)
                                                      else 'NO_RESPONSE_FRAGMENT_OBSERVED')
-            capture_ok = (result['capture'].get('available') and result['capture'].get('fragments', 0) > 0
-                          and not any(result['capture'].get(k) for k in ('error', 'output_limit', 'packet_limit')))
-            result['capture']['collection_verdict'] = ('BOUNDED_FRAGMENTS_RETAINED' if capture_ok else 'CAPTURE_INCOMPLETE')
+            positive = result.get('capture_positive_control', {}).get('pass') is True
+            capture_ok = positive and capture_healthy(result['capture'])
+            start = result.get('pressure_capture_start', {}).get('fragments')
+            pressure_fragments = result['capture'].get('fragments', 0) - start if start is not None else None
+            result['capture']['pressure_fragments'] = pressure_fragments
+            result['capture']['collection_verdict'] = (
+                'NO_PRESSURE_FRAGMENT_OBSERVED_WITH_PREFILL_CONTROL' if capture_ok and pressure_fragments == 0
+                else 'BOUNDED_FRAGMENTS_RETAINED' if capture_ok else 'CAPTURE_INCOMPLETE')
+            if not capture_ok:
+                result['result'] = 'fail'
             result['capture']['causal_stream_completeness'] = 'NOT_PROVEN_passive_fragments_only'
             capture_path = control / 'clamd-response-fragments.jsonl'
             if capture_path.exists():

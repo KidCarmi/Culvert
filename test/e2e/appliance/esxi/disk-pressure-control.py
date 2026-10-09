@@ -16,6 +16,8 @@ import ipaddress
 import json
 from pathlib import Path
 import secrets
+import re
+import stat
 import ssl
 import sys
 import threading
@@ -26,6 +28,7 @@ HERE = Path(__file__).resolve().parent
 GIB = 1024 ** 3
 RESERVE = 64 * GIB
 HEADROOM = RESERVE + 40 * GIB + 2 * GIB
+ORIGINAL_PRESSURE_RESULT = '695934c6111638c6a2838f17bf3112153a2cf8aebdd4533932056aeecb6e6ed1'
 
 
 def need(ok, reason):
@@ -176,6 +179,81 @@ def payload(config, profile):
             + '\nCULVERT_PRESSURE\n').encode()
 
 
+def regular_bytes(path, limit=None):
+    for parent in [path, *path.parents]:
+        st = parent.lstat()
+        need(not stat.S_ISLNK(st.st_mode) and not getattr(st, 'st_file_attributes', 0) & 0x400,
+             'redirected admission evidence')
+    need(path.is_file(), 'admission evidence not regular')
+    if limit is not None:
+        need(path.stat().st_size <= limit, 'admission evidence limit')
+    return path.read_bytes()
+
+
+def attempt_admission(lab, args, profile, manifest):
+    attempt = getattr(args, 'attempt', 'disk-pressure')
+    admission_path = getattr(args, 'prior_admission', None)
+    need(re.fullmatch(r'disk-pressure(?:-[a-z0-9]+(?:-[a-z0-9]+)*)?', attempt)
+         and len(attempt) <= 64, 'invalid attempt name')
+    if attempt == 'disk-pressure':
+        need(admission_path is None, 'original attempt cannot be continuation')
+        return attempt, None
+    need(attempt == 'disk-pressure-proof-v2', 'only reviewed accounting retry is admitted')
+    need(admission_path is not None, 'named attempt requires prior-failure custody admission')
+    raw = regular_bytes(admission_path, 65536)
+    need(any(Path(item['path']).resolve() == admission_path.resolve() and item['sha256'] == sha(raw)
+             for item in manifest.get('external_inputs', [])), 'admission is not frozen')
+    admission = json.loads(raw)
+    need(admission.get('prior_guest_result_sha256') == ORIGINAL_PRESSURE_RESULT, 'not the reviewed original failure')
+    need(admission.get('schema') == 1 and admission.get('attempt') == attempt
+         and admission.get('decision') == 'allow_prospective_pressure'
+         and admission.get('custody_verified') is True
+         and admission.get('owner_uuid') == lab.state['uuid']
+         and admission.get('source_sha') == profile['source_sha'], 'retry admission identity')
+    prior = Path(admission['prior_directory'])
+    need(prior.resolve() == (lab.sec / 'disk-pressure').resolve(), 'only original failed attempt admissible')
+    values = {}
+    for name in ('intent', 'complete', 'guest-result'):
+        data = regular_bytes(prior / (name + '.json'), 7 * 1024 ** 2)
+        need(sha(data) == admission['prior_' + name.replace('-', '_') + '_sha256'], 'prior evidence hash differs')
+        values[name] = json.loads(data)
+    intent, complete, guest = (values[k] for k in ('intent', 'complete', 'guest-result'))
+    need(intent['owner_uuid'] == lab.state['uuid'] and intent['source_sha'] == profile['source_sha']
+         and intent['operation'] == complete['operation'] == guest['operation']
+         and complete['result'] == guest['result'] == 'fail'
+         and complete['guest_result_sha256'] == admission['prior_guest_result_sha256'], 'prior failed attempt binding')
+    phases = guest.get('phases', [])
+    need(guest.get('policy_restored') is True and guest.get('no_restart') is True
+         and len(phases) == 1, 'prior cleanup or failure scope differs')
+    phase = phases[0]
+    need(phase.get('mode') == 'blocks' and phase.get('result') == 'fail'
+         and phase.get('fill', {}).get('result') == 'exhausted'
+         and phase.get('fill', {}).get('errno') == 'ENOSPC'
+         and phase.get('released') is True and phase.get('root_pressure_directory_absent') is True
+         and phase.get('recovered', {}).get('pass') is True and phase.get('no_restart') is True,
+         'prior failure not released accounting/capture attempt')
+    rows = phase.get('samples', [])
+    need(len(rows) == 64 and all(row.get('pass') is True and row.get('readiness_truthful') is True
+         and row.get('pressure_present_across_sample') is False
+         and len(row.get('probes', [])) == 3
+         and all(p.get('verdict') in ('av_unavailable', 'clean_delivered', 'eicar_blocked')
+                 and not (p.get('kind') == 'eicar' and 200 <= p.get('http_status', 0) < 300)
+                 for p in row['probes']) for row in rows), 'prior enforcement failure cannot be retried unchanged')
+    for field in ('custody_receipt', 'custody_archive'):
+        item = admission[field]
+        need(sha(regular_bytes(Path(item['path']))) == item['sha256'], 'custody bytes differ')
+    custody = json.loads(regular_bytes(Path(admission['custody_receipt']['path']), 65536))
+    need(custody.get('schema') == 1 and custody.get('uuid') == lab.state['uuid']
+         and Path(custody['run']).resolve() == lab.run.resolve()
+         and Path(custody['archive']).resolve() == Path(admission['custody_archive']['path']).resolve()
+         and custody.get('ciphertext_sha256') == admission['custody_archive']['sha256']
+         and all(custody.get(key) is True for key in ('roundtrip_verified', 'source_unchanged',
+                    'every_file_verified', 'original_retained_at_preservation')), 'custody verification incomplete')
+    return attempt, {'admission_sha256': sha(raw), 'prior_operation': intent['operation'],
+                     'prior_guest_result_sha256': admission['prior_guest_result_sha256'],
+                     'custody_archive_sha256': admission['custody_archive']['sha256']}
+
+
 def run(args):
     bind = str(ipaddress.IPv4Address(args.bind))
     address = ipaddress.IPv4Address(bind)
@@ -202,7 +280,8 @@ def run(args):
         owned = recovery.read_json(escrow / 'source-owned.json')
         need(owned.get('uuid') == lab.state['uuid'] and owned.get('endpoint') == lab.state['endpoint'],
              'prior backup belongs to another guest')
-        directory = lab.sec / 'disk-pressure'
+        attempt, admission = attempt_admission(lab, args, profile, manifest)
+        directory = lab.sec / attempt
         directory.mkdir()  # one-shot; prior failures require separate reviewed continuation
         tls_context, _ = console.make_tls(directory)
         certificate = ssl.PEM_cert_to_DER_cert((directory / 'controller.crt').read_text())
@@ -217,7 +296,7 @@ def run(args):
             need(1 <= len(config['initial']) <= 256, 'admin credential unavailable')
             body = payload(config, profile)
             (directory / 'payload.sh').write_bytes(body)
-            intent = {'schema': 1, 'operation': config['operation'], 'owner_uuid': lab.state['uuid'],
+            intent = {'schema': 1, 'attempt': attempt, 'prior_admission': admission, 'operation': config['operation'], 'owner_uuid': lab.state['uuid'],
                       'controller_revision': manifest['revision'], 'helper_hashes': hashes,
                       'payload_sha256': sha(body), 'prior_export_receipt_sha256': sha((escrow / 'export-receipt.json').read_bytes()),
                       'source_sha': profile['source_sha'], 'image_id': profile['image_id'],
@@ -254,6 +333,8 @@ if __name__ == '__main__':
     parser.add_argument('--scope', required=True, type=Path)
     parser.add_argument('--bind', required=True)
     parser.add_argument('--escrow', required=True, type=Path)
+    parser.add_argument('--attempt', default='disk-pressure')
+    parser.add_argument('--prior-admission', type=Path)
     try:
         sys.exit(run(parser.parse_args()))
     except Exception:

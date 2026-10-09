@@ -51,7 +51,83 @@ def root_guard(path):
     st = os.statvfs(path)
     require(os.stat(path).st_dev == os.stat('/').st_dev, 'not root filesystem')
     require(2 * GIB <= st.f_blocks * st.f_frsize <= MAX_ROOT, 'root size differs')
-    return {'bytes_free': st.f_bfree * st.f_frsize, 'inodes_free': st.f_ffree}
+    return {'bytes_free': st.f_bfree * st.f_frsize,
+            'bytes_available': st.f_bavail * st.f_frsize,
+            'f_bfree': st.f_bfree, 'f_bavail': st.f_bavail, 'block_bytes': st.f_frsize,
+            'unavailable_free_bytes': (st.f_bfree - st.f_bavail) * st.f_frsize,
+            'accounting_note': 'free-minus-available; may include filesystem internal reserve; not changed',
+            'inodes_free': st.f_ffree}
+
+
+def identity(st):
+    return {'device': st.st_dev, 'inode': st.st_ino}
+
+
+def regular(st):
+    require(stat.S_ISREG(st.st_mode) and st.st_uid == 0 and st.st_nlink == 1
+            and st.st_mode & 0o077 == 0, 'unsafe pressure file')
+
+
+def pressure_probe(root, armed, filled, mode):
+    """A fresh single-block allocation test, never a free-byte threshold.
+
+    Only our pre-created empty file may be touched. Re-check directory, probe
+    and retained filler identity on both sides; freed/truncated filler is not
+    evidence of sustained exhaustion. A successful probe is freed immediately.
+    """
+    require(filled['result'] == 'exhausted' and filled['binding'] == armed['binding'], 'fill binding')
+    directory = safe_directory(root)
+    data = None
+    try:
+        def bound():
+            require(identity(os.fstat(directory)) == armed['binding']['root']
+                    == identity(root.lstat()), 'pressure directory changed')
+            root_guard(root)
+            st = os.stat('probe', dir_fd=directory, follow_symlinks=False)
+            regular(st)
+            require(identity(st) == armed['binding']['probe'], 'pressure probe changed')
+            if data is not None:
+                require(identity(os.fstat(data)) == identity(st), 'probe descriptor changed')
+            if mode == 'blocks':
+                blocks = os.stat('blocks', dir_fd=directory, follow_symlinks=False)
+                regular(blocks)
+                require(identity(blocks) == filled['blocks_identity']
+                        and blocks.st_size >= filled['allocated_bytes']
+                        and blocks.st_blocks * 512 >= filled['allocated_bytes'], 'filler removed or truncated')
+        bound()
+        data = os.open('probe', os.O_RDWR | os.O_NOFOLLOW, dir_fd=directory)
+        regular(os.fstat(data))
+        bound()
+        require(os.fstat(data).st_size == 0 and os.fstat(data).st_blocks == 0, 'probe is not empty')
+        before = root_guard(root)
+        require(before['block_bytes'] == 4096, 'unsupported allocation unit')
+        result = {'started_ns': time.monotonic_ns(), 'allocation_bytes': 4096,
+                  'filesystem_before': before, 'binding': armed['binding']}
+        try:
+            os.posix_fallocate(data, 0, 4096)
+            result['errno'] = None
+            result['exhausted'] = False
+        except OSError as error:
+            if error.errno != errno.ENOSPC:
+                raise
+            result['errno'] = 'ENOSPC'
+            result['exhausted'] = mode == 'blocks'
+        finally:
+            os.ftruncate(data, 0)
+        bound()
+        result['filesystem_after'] = root_guard(root)
+        # Inode exhaustion is independently proven by f_ffree==0. An existing
+        # file cannot test inode creation; never label block ENOSPC as inodes.
+        if mode == 'inodes':
+            result['exhausted'] = (before['inodes_free'] == 0
+                                   and result['filesystem_after']['inodes_free'] == 0)
+            result['inode_evidence'] = 'filled_create_ENOSPC_and_zero_free_inodes'
+        result['ended_ns'] = time.monotonic_ns()
+        return result
+    finally:
+        if data is not None:
+            os.close(data)
+        os.close(directory)
 
 
 def tmpfs_guard(path):
@@ -126,9 +202,9 @@ def fill_inodes(directory_fd, free, clock=time.monotonic):
 
 def validate_entries(directory_fd):
     names = os.listdir(directory_fd)
-    require(len(names) <= MAX_INODES + 2, 'cleanup entry limit')
+    require(len(names) <= MAX_INODES + 3, 'cleanup entry limit')
     for name in names:
-        require(name in ('blocks', 'reserve') or re.fullmatch('i[0-9]{6}', name), 'unexpected entry')
+        require(name in ('blocks', 'reserve', 'probe') or re.fullmatch('i[0-9]{6}', name), 'unexpected entry')
         st = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
         require(stat.S_ISREG(st.st_mode) and st.st_uid == 0 and st.st_nlink == 1, 'unsafe cleanup entry')
     return names
@@ -152,10 +228,12 @@ def fill(operation, mode):
                            0o600, dir_fd=fd)
             try:
                 result = fill_blocks(data)
+                result['blocks_identity'] = identity(os.fstat(data))
             finally:
                 os.close(data)
         else:
             result = fill_inodes(fd, initial['inodes_free'])
+        result['binding'] = json.loads((control / 'binding.json').read_bytes())
         result['after'] = root_guard(root)
         if mode == 'inodes' and result['result'] == 'exhausted' and result['after']['inodes_free'] != 0:
             result['result'] = 'blocks_exhausted_not_inodes'
@@ -189,11 +267,18 @@ def supervise(config):
             os.posix_fallocate(reserve, 0, 32 * 1024 ** 2)
         finally:
             os.close(reserve)
+        probe = os.open('probe', os.O_CREAT | os.O_EXCL | os.O_RDWR | os.O_NOFOLLOW,
+                        0o600, dir_fd=fd)
+        try:
+            binding = {'root': identity(os.fstat(fd)), 'probe': identity(os.fstat(probe))}
+        finally:
+            os.close(probe)
+        atomic_json(control / 'binding.json', binding)
         worker = subprocess.Popen([sys.executable, str(Path(__file__).resolve()), '--fill',
                                    config['operation'], config['mode']], stdin=subprocess.DEVNULL,
                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                                   close_fds=True, start_new_session=True)
-        atomic_json(control / 'armed.json', {'worker_pid': worker.pid, 'max_seconds': MAX_SECONDS})
+        atomic_json(control / 'armed.json', {'worker_pid': worker.pid, 'max_seconds': MAX_SECONDS, 'binding': binding})
         end = time.monotonic() + MAX_SECONDS
         while time.monotonic() < end:
             if (control / 'release').exists():

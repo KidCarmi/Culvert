@@ -33,6 +33,11 @@ class ReplyTests(unittest.TestCase):
                       packet(target='172.18.0.1'), packet(port=80), packet(payload=b'')):
             self.assertIsNone(self.parse(value))
 
+    def test_observations_do_not_widen_request_window(self):
+        capture = m.ReplyCapture('172.18.0.3', '172.18.0.2', Path('unused'))
+        capture.records = [{'monotonic_ns': value} for value in (9, 10, 15, 16)]
+        self.assertEqual(capture.observations(10, 15), [{'monotonic_ns': 10}, {'monotonic_ns': 15}])
+
     def test_truncation_is_explicit_no_unbounded_payload(self):
         result = self.parse(packet(payload=b'x' * 1000))
         self.assertTrue(result['fragment_truncated'])

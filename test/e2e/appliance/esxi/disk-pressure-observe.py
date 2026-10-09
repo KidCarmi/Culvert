@@ -48,7 +48,8 @@ class ReplyCapture:
         self.path = path
         self.limit = max_bytes
         self.stop_event = threading.Event()
-        self.summary = {'available': False, 'fragments': 0, 'packets_examined': 0,
+        self.records = []
+        self.summary = {'available': False, 'fragments': 0, 'scan_found_fragments': 0, 'scan_ok_fragments': 0, 'packets_examined': 0,
                         'output_limit': False, 'packet_limit': False, 'error': None,
                         'semantics': 'passive response fragments; duplicates, missing packets and missing stream reassembly are possible'}
 
@@ -82,10 +83,23 @@ class ReplyCapture:
                     self.summary['output_limit'] = True
                     break
                 self.output.write(data)
+                self.records.append(row)
                 written += len(data)
                 self.summary['fragments'] += 1
+                fragment = bytes.fromhex(row['response_fragment_hex'])
+                # Positive control only; no TCP stream completeness claim.
+                if b' FOUND\0' in fragment or b' FOUND\n' in fragment:
+                    self.summary['scan_found_fragments'] += 1
+                if b': OK\0' in fragment or b': OK\n' in fragment:
+                    self.summary['scan_ok_fragments'] += 1
         except Exception:
             self.summary['error'] = 'capture_failed'
+
+    def observations(self, start_ns, end_ns):
+        return [dict(row) for row in list(self.records) if start_ns <= row['monotonic_ns'] <= end_ns]
+
+    def snapshot(self):
+        return dict(self.summary)
 
     def close(self):
         self.stop_event.set()

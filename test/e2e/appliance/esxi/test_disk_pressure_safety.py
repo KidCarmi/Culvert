@@ -107,6 +107,7 @@ class WorkerTests(unittest.TestCase):
                 patch.object(w.os, 'O_NOFOLLOW', 0x20000, create=True), \
                 patch.object(w.os, 'close'), patch.object(w.os, 'open', return_value=124), \
                 patch.object(w.os, 'posix_fallocate', create=True), \
+                patch.object(w.os, 'fstat', return_value=types.SimpleNamespace(st_dev=1, st_ino=2)), \
                 patch.object(w.subprocess, 'Popen', return_value=worker), \
                 patch.object(w, 'atomic_json'), \
                 patch.object(w, 'release', side_effect=lambda fd: order.append('release')):
@@ -126,12 +127,6 @@ class VerdictTests(unittest.TestCase):
         original.assert_called_once_with(8080, 'http://192.0.2.1/nonce', 'GET', None, False)
         self.assertTrue(backend.last_response_evidence['headers_truncated'])
         self.assertNotIn('secret-canary', str(backend.last_response_evidence))
-
-    def test_exhaustion_must_still_be_present_at_samples(self):
-        self.assertTrue(g.pressure_present('blocks', {'bytes_free': 4096}))
-        self.assertFalse(g.pressure_present('blocks', {'bytes_free': 1024 ** 2}))
-        self.assertTrue(g.pressure_present('inodes', {'inodes_free': 0}))
-        self.assertFalse(g.pressure_present('inodes', {'inodes_free': 1}))
 
     def test_actual_delivery_is_fatal_even_if_origin_indicator_missing(self):
         self.assertEqual(g.classify('eicar', 200, b'body', b'body', False), 'eicar_delivered')
@@ -195,7 +190,8 @@ class VerdictTests(unittest.TestCase):
             supervisor = Mock()
             supervisor.poll.return_value = None
             capture = Mock()
-            capture.close.return_value = {'fragments': 1}
+            capture.close.return_value = {'available': True, 'fragments': 1}
+            capture.snapshot.return_value = {'available': True, 'fragments': 0}
             def launched(*unused, **kwargs):
                 (control / 'armed.json').write_text('{}')
                 return supervisor
@@ -207,6 +203,7 @@ class VerdictTests(unittest.TestCase):
             actual_close = g.os.close
             with patch.object(g, 'network_pair', return_value=('192.0.2.1', '192.0.2.2')), \
                     patch.object(g.subprocess, 'Popen', side_effect=launched), \
+                    patch.object(g, 'prefill_control', return_value={'pass': True}), \
                     patch.object(g.os, 'close', side_effect=lambda fd: None if fd == 123 else actual_close(fd)):
                 value = g.phase({'operation': 'a' * 32, 'lease': {}}, 'blocks', backend, b'# fixture',
                                 worker, Mock(return_value=capture), lambda kind: b'body', set())
