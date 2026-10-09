@@ -2136,6 +2136,17 @@ EOS
   redact_tree
 }
 failures() { grep -c '"result":"fail"' "$JSONL" 2>/dev/null || true; }
+# LAB_FAIL_FAST=1 (iteration runs only): after each phase, stop as soon as any
+# check has failed. The EXIT trap still collects evidence and tears the guest
+# down, so a red iteration run ends ~20 min sooner with the same evidence up to
+# the failure. A FINAL qualification run must leave it unset so every phase is
+# recorded even when one fails.
+fail_fast_after() {
+  [[ "${LAB_FAIL_FAST:-0}" == 1 ]] || return 0
+  local n; n="$(failures)"; [[ "$n" == 0 ]] && return 0
+  check F fail-fast info "LAB_FAIL_FAST=1: stopped after phase '$1' with $n failure(s); later phases did not run (iteration run, not a qualification)"
+  log "failures: $n"; exit 1
+}
 # Transport adapters may reuse the guest checks without dispatching QEMU.
 [[ "${LAB_LIBRARY_ONLY:-0}" == 1 ]] && return 0
 case "${1:-}" in
@@ -2154,6 +2165,10 @@ case "${1:-}" in
   down) cmd_down ;;
   all)
     trap 'cmd_collect || true; cmd_down || true' EXIT
-    cmd_preflight; cmd_up; cmd_qualify; [[ "${LAB_ENGINE_SURFACE:-0}" != 1 ]] || cmd_engine_surface; cmd_recovery; [[ -z "${LAB_ADOPT_IMAGE_TAR:-}" ]] || cmd_adoption; cmd_history; n="$(failures)"; log "failures: $n"; [[ "$n" == 0 ]] ;;
+    cmd_preflight; cmd_up; cmd_qualify; fail_fast_after qualify
+    if [[ "${LAB_ENGINE_SURFACE:-0}" == 1 ]]; then cmd_engine_surface; fail_fast_after engine-surface; fi
+    cmd_recovery; fail_fast_after recovery
+    if [[ -n "${LAB_ADOPT_IMAGE_TAR:-}" ]]; then cmd_adoption; fail_fast_after adoption; fi
+    cmd_history; n="$(failures)"; log "failures: $n"; [[ "$n" == 0 ]] ;;
   *) sed -n '2,32p' "$0"; exit 2 ;;
 esac

@@ -254,6 +254,19 @@ jobs:
           ref: ${{ env.APPLIANCE_SOURCE_SHA }}
           path: appliance-src
           persist-credentials: false
+      # Seconds, not a booted guest: the denylist this source ships must make
+      # every listed module's FINAL modprobe step `install /bin/false` against
+      # the real module tree of the kernel its pinned snapshot installs (snapshot
+      # signature, index and package hashes verified). A broken denylist fails
+      # here instead of ~17 min into qualification.
+      - name: Kernel-module denylist resolves to /bin/false on the real module tree (offline)
+        if: matrix.retained_run == ''
+        run: |
+          set -euo pipefail
+          conf=appliance-src/appliance/provision/modprobe-culvert-unused.conf
+          if [ ! -f "$conf" ]; then echo "no denylist in this source; nothing to check"; exit 0; fi
+          snap="$(sed -n 's/^GUEST_APT_SNAPSHOT=//p' appliance-src/appliance/build/manifest.env)"
+          test/e2e/appliance/lab/kmod-denylist-check.sh "$conf" "$snap" | tee -a "$GITHUB_STEP_SUMMARY"
       # build-ova.sh compiles the appliance console (#1540) and refuses any
       # compiler other than the source commit's go.mod toolchain line.
       - name: Go toolchain pinned by the appliance source
@@ -472,6 +485,10 @@ jobs:
           export LAB_EXPECT_IMAGE_ID="${{ matrix.expect_image_id }}" LAB_MIN_FREE_GB=20 LAB_ACCEL=kvm
           export LAB_HISTORY="${{ matrix.history || '1' }}"
           export LAB_ENGINE_SURFACE="${{ matrix.engine_surface || '0' }}"
+          # [fail-fast] in the commit message: an ITERATION run stops at the
+          # first phase with a failed check (evidence still collected). Never
+          # use it for the run whose evidence is handed off.
+          export LAB_FAIL_FAST="${{ contains(github.event.head_commit.message, '[fail-fast]') && '1' || '0' }}"
           [ -f "$LAB_ROOT/update/READY" ] && export LAB_UPDATE_DIR="$LAB_ROOT/update" || echo "::warning::signed-update lab not prepared — step 6c will report BLOCKED"
           if [ -n "${{ matrix.adopt_image_run }}" ]; then
             if [ -n "${{ matrix.adopt_installer_sha }}" ]; then
