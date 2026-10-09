@@ -13,6 +13,7 @@ import (
 	"github.com/KidCarmi/Culvert/internal/logstore"
 	"github.com/KidCarmi/Culvert/internal/reqlog"
 	"github.com/KidCarmi/Culvert/internal/secscan"
+	"github.com/KidCarmi/Culvert/internal/session"
 	"github.com/KidCarmi/Culvert/internal/sse"
 )
 
@@ -321,6 +322,36 @@ func liveFeedWritePrometheus(w *strings.Builder) {
 	fmt.Fprintf(w, "\n# HELP culvert_admin_roster_persist_degraded_total Login-path admin-roster writes that failed while the login was allowed to proceed (TOTP replay counter, backup-code consumption). Non-zero means a single-use credential or replay counter may not survive a restart\n")
 	fmt.Fprintf(w, "# TYPE culvert_admin_roster_persist_degraded_total counter\nculvert_admin_roster_persist_degraded_total %d\n",
 		rosterPersistBestEffort.Load())
+
+	// CHAOS-73: the session-revocation plane. `/api/auth/logout` is PUBLIC by
+	// design, and it used to insert whatever cookie it was handed into the
+	// revocation list — key bytes, key length and expiry all chosen by an
+	// unauthenticated caller, then persisted and gossiped fleet-wide. The
+	// cookie must now carry a valid HMAC; a refusal is otherwise INVISIBLE
+	// (the caller still gets its 200 and its cleared cookie, because a
+	// refusal must not tell a prober whether the cookie was genuine), so
+	// this counter is the operator's only signal that the endpoint is being
+	// probed.
+	//
+	// Always emitted: there is no configuration to gate it on, so a flat zero
+	// means "nothing has been probed" and never "the feature is off" — the
+	// same rule as culvert_proxy_oversize_host_rejected_total above, and the
+	// inverse of the armed-only gauges elsewhere in this file.
+	fmt.Fprintf(w, "\n# HELP culvert_session_revoke_refused_total Logout requests whose session cookie was refused before anything was retained because this appliance did not sign it (bad signature or malformed). Ordinary traffic cannot produce one — a genuine expired cookie and a replayed logout are both excluded — so sustained growth means an unauthenticated source is probing /api/auth/logout\n")
+	fmt.Fprintf(w, "# TYPE culvert_session_revoke_refused_total counter\nculvert_session_revoke_refused_total %d\n",
+		sessionRevocationRefusedTotal())
+	fmt.Fprintf(w, "\n# HELP culvert_session_revoke_rejected_total Revocation entries rejected by reason. unsigned/malformed/expired are the public logout endpoint; oversize/capacity are the UNTRUSTED-origin paths (cluster gossip, the on-disk revocations file), where a rejection means cluster-wide revocation is incomplete on this node\n")
+	fmt.Fprintf(w, "# TYPE culvert_session_revoke_rejected_total counter\n")
+	for _, reason := range []session.RevokeReason{
+		session.RevokeUnsigned, session.RevokeMalformed, session.RevokeExpired,
+		session.RevokeOversize, session.RevokeCapacity,
+	} {
+		fmt.Fprintf(w, "culvert_session_revoke_rejected_total{reason=%q} %d\n", string(reason), session.Refused(reason))
+	}
+	fmt.Fprintf(w, "\n# HELP culvert_session_revocations_tracked Session revocation entries currently held. Bounded by real logins inside one session TTL; a value tracking request rate rather than login rate means something is inserting entries that are not sessions\n")
+	fmt.Fprintf(w, "# TYPE culvert_session_revocations_tracked gauge\nculvert_session_revocations_tracked %d\n", sessionRevoked.Tracked())
+	fmt.Fprintf(w, "\n# HELP culvert_cluster_revocation_drops_total Revocation entries the Control Plane refused to retain from a Data Plane node (over-long key, or past the per-node cap). Non-zero means a session an operator revoked may still authenticate on other nodes\n")
+	fmt.Fprintf(w, "# TYPE culvert_cluster_revocation_drops_total counter\nculvert_cluster_revocation_drops_total %d\n", clusterRevocationDropTotal())
 
 	// SEC-REQID-1: client-supplied tracing headers replaced because they were
 	// over-long or carried bytes that must not reach a log line. The request

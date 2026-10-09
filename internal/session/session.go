@@ -112,6 +112,13 @@ type RevocationList struct {
 	mu     sync.Mutex
 	tokens map[string]time.Time // b64 payload → session expiry
 	users  map[string]time.Time // username → revocation expiry (all sessions for this user)
+
+	// sinceSweep counts insertions since the last expired-entry sweep.
+	// CHAOS-73: eviction used to be lazy-on-read only, which never fires for
+	// the one key that is guaranteed never to be presented again — the cookie
+	// that just logged out — so an un-clustered node had no evictor at all.
+	// See revocation_bounds.go.
+	sinceSweep int
 }
 
 // NewRevocationList returns an empty list (used by tests to swap the
@@ -127,10 +134,24 @@ func NewRevocationList() *RevocationList {
 var Revoked = NewRevocationList()
 
 // Revoke marks a token (its b64 payload) as revoked until exp.
-func (r *RevocationList) Revoke(token string, exp time.Time) {
+//
+// It reports whether the list actually changed, so a caller that persists
+// after revoking does not rewrite the whole file for a no-op. Callers that
+// do not care may ignore the result.
+//
+// CHAOS-73: this is the UNVERIFIED primitive and it is now internal to the
+// package's own trusted callers plus tests. The logout path must use
+// RevokeVerified, which authenticates the cookie first — see
+// revocation_bounds.go for why the MAC check is the whole security property.
+func (r *RevocationList) Revoke(token string, exp time.Time) bool {
 	r.mu.Lock()
+	defer r.mu.Unlock()
+	if prev, exists := r.tokens[token]; exists && !prev.Before(exp) {
+		return false
+	}
 	r.tokens[token] = exp
-	r.mu.Unlock()
+	r.sweepIfDueLocked(time.Now())
+	return true
 }
 
 // IsRevoked reports whether the token is currently revoked, lazily
@@ -184,12 +205,11 @@ func (r *RevocationList) ExportRevocations() []RevocationEntry {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	now := time.Now()
+	// One shared sweep rather than a second inline copy of the eviction rule
+	// (CHAOS-73: two dialects for one question inside one struct is the trap).
+	r.sweepLocked(now)
 	entries := make([]RevocationEntry, 0, len(r.tokens))
 	for tok, exp := range r.tokens {
-		if now.After(exp) {
-			delete(r.tokens, tok)
-			continue
-		}
 		entries = append(entries, RevocationEntry{Token: tok, Expiry: exp.Unix()})
 	}
 	return entries
@@ -197,20 +217,23 @@ func (r *RevocationList) ExportRevocations() []RevocationEntry {
 
 // MergeRevocations imports remote revocation entries (from other cluster nodes).
 // Only adds entries that are not yet expired and not already present.
+// CHAOS-73: this is an UNTRUSTED-ORIGIN path — a peer node chooses the key
+// bytes, the key length and the entry count — so every entry goes through
+// admitUntrustedLocked (key-size bound, entry cap, counted refusal). The list
+// is swept first so the cap is measured against LIVE entries rather than
+// against expired ones nobody has read since they died.
 func (r *RevocationList) MergeRevocations(entries []RevocationEntry) int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	now := time.Now()
+	r.sweepLocked(now)
 	added := 0
 	for _, e := range entries {
-		exp := time.Unix(e.Expiry, 0)
-		if now.After(exp) {
-			continue // already expired
+		if !r.admitUntrustedLocked(e, now) {
+			continue
 		}
-		if _, exists := r.tokens[e.Token]; !exists {
-			r.tokens[e.Token] = exp
-			added++
-		}
+		r.tokens[e.Token] = time.Unix(e.Expiry, 0)
+		added++
 	}
 	return added
 }
@@ -227,14 +250,16 @@ func (r *RevocationList) Count() int {
 // tests that touch shared revocation state.
 func (r *RevocationList) SwapForTest() (restore func()) {
 	r.mu.Lock()
-	prevTokens, prevUsers := r.tokens, r.users
+	prevTokens, prevUsers, prevSweep := r.tokens, r.users, r.sinceSweep
 	r.tokens = map[string]time.Time{}
 	r.users = map[string]time.Time{}
+	r.sinceSweep = 0
 	r.mu.Unlock()
 	return func() {
 		r.mu.Lock()
 		r.tokens = prevTokens
 		r.users = prevUsers
+		r.sinceSweep = prevSweep
 		r.mu.Unlock()
 	}
 }
