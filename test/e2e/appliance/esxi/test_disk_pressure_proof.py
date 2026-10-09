@@ -1,5 +1,6 @@
 import errno
 import contextlib
+import copy
 import importlib.util
 import json
 from pathlib import Path
@@ -91,6 +92,87 @@ class AllocationProofTests(unittest.TestCase):
         self.assertEqual(result['unavailable_free_bytes'], 16777216)
         self.assertEqual(result['bytes_available'], 0)
         self.assertEqual(result['f_bfree'], 4096)
+
+
+class ReplenishmentTests(unittest.TestCase):
+    def test_capacity_freed_after_initial_enospc_is_replenished_in_same_fd(self):
+        now, free, pauses, calls, checks, reports = [0], [0], [0], [], [], []
+        def allocate(fd, offset, count):
+            calls.append((fd,offset,count));now[0]+=.001
+            if count>free[0]:raise OSError(errno.ENOSPC,'synthetic')
+            free[0]-=count
+        def pause(seconds):
+            pauses[0]+=1
+            if pauses[0]==1:free[0]=794624
+            else:now[0]=11
+        result=w.maintain_blocks(77,8192,10,checks.append,reports.append,allocate,
+                                 clock=lambda:now[0],pause=pause)
+        self.assertEqual(result['added_bytes'],794624)
+        self.assertGreaterEqual(result['enospc_checks'],2)
+        self.assertEqual(result['state'],'deadline')
+        self.assertTrue(all(row[0]==77 for row in calls))
+        self.assertEqual(len(checks),len(calls))
+        self.assertTrue(all(row[1]+row[2]<=40*w.GIB for row in calls))
+
+    def test_deadline_and_cumulative_cap_prevent_late_allocation(self):
+        allocate, check, publish = Mock(), Mock(), Mock()
+        result=w.maintain_blocks(77,8192,0,check,publish,allocate,clock=lambda:1)
+        allocate.assert_not_called();check.assert_not_called()
+        self.assertEqual(result['state'],'deadline')
+        result=w.maintain_blocks(77,40*w.GIB-4096,10,check,publish,allocate,clock=lambda:1)
+        allocate.assert_called_once_with(77,40*w.GIB-4096,4096)
+        self.assertEqual(result['allocated_bytes'],40*w.GIB)
+        self.assertEqual(result['state'],'allocation_cap')
+
+    def test_unexpected_errors_or_changed_binding_stop_without_retry(self):
+        for code in (errno.EDQUOT,errno.EIO,errno.EROFS):
+            allocate=Mock(side_effect=OSError(code,'synthetic'))
+            with self.subTest(code=code), self.assertRaises(OSError):
+                w.maintain_blocks(77,8192,10,Mock(),Mock(),allocate,clock=lambda:1)
+            self.assertEqual(allocate.call_count,1)
+        allocate=Mock()
+        with self.assertRaises(ValueError):
+            w.maintain_blocks(77,8192,10,Mock(side_effect=ValueError('changed inode')),Mock(),allocate,clock=lambda:1)
+        allocate.assert_not_called()
+
+    def test_fixed_call_bound_cannot_reset_with_returning_capacity(self):
+        allocate=Mock()
+        with patch.object(w,'MAX_REFILL_CALLS',3):
+            result=w.maintain_blocks(77,8192,10,Mock(),Mock(),allocate,clock=lambda:1)
+        self.assertEqual(result['state'],'call_limit')
+        self.assertEqual(allocate.call_count,3)
+        self.assertEqual(result['added_bytes'],3*65536)
+
+    def test_fill_retains_original_descriptor_and_checks_path_identity_during_refill(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            control=Path(temporary)
+            binding={'root':{'device':1,'inode':2},'probe':{'device':1,'inode':3}}
+            (control/'binding.json').write_text(json.dumps(binding))
+            root=Mock();root.lstat.return_value=SimpleNamespace(st_dev=1,st_ino=2)
+            opened=SimpleNamespace(st_dev=1,st_ino=4,st_uid=0,st_mode=stat.S_IFREG|0o600,
+                                   st_nlink=1,st_size=8192,st_blocks=16)
+            observed=SimpleNamespace(**vars(opened))
+            def maintain(fd,total,deadline,check,publish):
+                self.assertEqual(fd,11);self.assertEqual(total,8192)
+                closed.assert_not_called()
+                check(total)
+                observed.st_ino=99
+                with self.assertRaises(ValueError):check(total)
+            with patch.object(w,'paths',return_value=(root,control)), \
+                    patch.object(w,'safe_directory',return_value=10), \
+                    patch.object(w,'root_guard',return_value={'inodes_free':100}), \
+                    patch.object(w.os,'O_NOFOLLOW',0,create=True), \
+                    patch.object(w.os,'open',return_value=11) as opening, \
+                    patch.object(w.os,'fstat',side_effect=lambda fd:root.lstat() if fd==10 else opened), \
+                    patch.object(w.os,'stat',return_value=observed), \
+                    patch.object(w.os,'close') as closed, \
+                    patch.object(w,'fill_blocks',return_value={'result':'exhausted','allocated_bytes':8192}), \
+                    patch.object(w,'atomic_json') as publish, \
+                    patch.object(w,'maintain_blocks',side_effect=maintain):
+                w.fill('a'*32,'blocks')
+            self.assertEqual(opening.call_count,1)
+            self.assertEqual([call.args[0] for call in closed.call_args_list],[11,10])
+            self.assertEqual(publish.call_args_list[0].args[0],control/'filled.json')
 
 
 class CaptureProofTests(unittest.TestCase):
@@ -244,6 +326,57 @@ class CaptureOnlyTests(unittest.TestCase):
             with self.assertRaises(ValueError):c.capture_gate(Mock(),manifest,{})
             manifest['files']['test/e2e/appliance/esxi/disk-pressure-observe.py']='changed'
             with self.assertRaises(ValueError):c.capture_gate(Mock(),manifest,admission)
+
+
+class ReplenishmentAdmissionTests(unittest.TestCase):
+    def safe_prior(self):
+        probes=[{'kind':kind,'http_status':403 if kind=='eicar' else 200,
+                 'verdict':'eicar_blocked' if kind=='eicar' else 'clean_delivered'}
+                for kind in ('eicar','clean','clean')]
+        rows=[{'pass':True,'readiness_truthful':True,'pressure_present_across_sample':index==0,
+               'probes':copy.deepcopy(probes)} for index in range(64)]
+        guest={'result':'fail','policy_restored':True,'no_restart':True,'phases':[
+            {'mode':'blocks','result':'fail','fill':{'result':'exhausted','errno':'ENOSPC'},
+             'released':True,'root_pressure_directory_absent':True,'no_restart':True,
+             'recovered':{'pass':True},'capture_positive_control':{'pass':True},
+             'capture':{'collection_verdict':'BOUNDED_FRAGMENTS_RETAINED'},'samples':rows}]}
+        return {'complete':{'result':'fail'},'guest-result':guest}
+
+    def test_only_exact_safe_unsustained_failure_can_admit_v4(self):
+        original=self.safe_prior()
+        hashes={'guest-result':c.V3_PRESSURE_RESULT}
+        mutations=[None,lambda g:g.update(policy_restored=False),
+                   lambda g:g['phases'][0]['samples'][1].update(**{'pass':False}),
+                   lambda g:g['phases'][0]['samples'][1]['probes'][0].update(http_status=200,verdict='eicar_delivered'),
+                   lambda g:g['phases'][0]['samples'][1].update(pressure_present_across_sample=True)]
+        for mutation in mutations:
+            records=copy.deepcopy(original)
+            if mutation:mutation(records['guest-result'])
+            with self.subTest(mutation=mutation), patch.object(c,'attempt_records',return_value=(records,hashes)):
+                if mutation:
+                    with self.assertRaises(ValueError):c.prior_replenishment_failure(Mock(),{})
+                else:self.assertEqual(c.prior_replenishment_failure(Mock(),{}),hashes)
+        with patch.object(c,'attempt_records',return_value=(original,{'guest-result':'changed'})):
+            with self.assertRaises(ValueError):c.prior_replenishment_failure(Mock(),{})
+
+    def test_v4_gate_requires_new_preflight_name_and_current_full_helper_hashes(self):
+        hashes={'intent':'i','complete':'c','guest-result':'g'}
+        records={'intent':{'helper_hashes':{'disk-pressure-worker.py':'new-worker'},
+                           'prior_capture_failure':hashes,'allocation_permitted':False},
+                 'complete':{'result':'pass'},'guest-result':{'result':'pass','scope':'healthy_capture_only',
+                 'allocation_started':False,'policy_restored':True,'no_restart':True,
+                 'capture_positive_control':{'pass':True},
+                 'capture':{'packet_protocol':'ETH_P_ALL','collection_verdict':'BOUNDED_FRAGMENTS_RETAINED'}}}
+        manifest={'files':{'test/e2e/appliance/esxi/disk-pressure-worker.py':'new-worker'}}
+        lab=Mock();admission={'capture_gate':{'v3':hashes,'preflight':hashes}}
+        with patch.object(c,'prior_replenishment_failure',return_value=hashes), \
+                patch.object(c,'prior_capture_failure') as old_gate, \
+                patch.object(c,'attempt_records',return_value=(records,hashes)) as record_loader:
+            self.assertEqual(c.capture_gate(lab,manifest,admission,'v4'),admission['capture_gate'])
+            record_loader.assert_called_with(lab,'disk-pressure-capture-preflight-v4',manifest)
+            old_gate.assert_not_called()
+            records['intent']['helper_hashes']['disk-pressure-worker.py']='old-worker'
+            with self.assertRaises(ValueError):c.capture_gate(lab,manifest,admission,'v4')
 
 
 class AdmissionTests(unittest.TestCase):

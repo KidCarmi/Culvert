@@ -268,6 +268,7 @@ def phase(config, mode, backend, source, worker, capture_type, fresh, seen):
             row['fill_complete_at_start'] = filled is not None
             row['filesystem_before'] = filesystem_before
             row['allocation_before'] = allocation_before
+            row['maintenance'] = read_json(control / 'maintenance.json') if (control / 'maintenance.json').exists() else None
             if not row['pass']:
                 raise ValueError('enforcement_or_readiness_failed')
             row['filesystem'] = worker.root_guard(root)

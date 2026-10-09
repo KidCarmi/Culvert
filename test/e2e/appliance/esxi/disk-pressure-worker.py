@@ -23,6 +23,7 @@ import time
 GIB = 1024 ** 3
 MAX_INODES = 100000
 MAX_SECONDS = 150
+MAX_REFILL_CALLS = 100000
 MAX_ROOT = 41 * GIB  # 40-GiB virtual disk, tolerance only for statvfs accounting
 
 
@@ -182,6 +183,50 @@ def fill_blocks(fd, allocate=os.posix_fallocate if hasattr(os, 'posix_fallocate'
     return {'result': 'bounded_not_exhausted', 'allocated_bytes': total}
 
 
+def maintain_blocks(fd, total, deadline, check, publish,
+                    allocate=os.posix_fallocate if hasattr(os, 'posix_fallocate') else None,
+                    clock=time.monotonic, pause=time.sleep):
+    """Same child/FD only; replenish freed blocks until its fixed deadline.
+
+    File offsets only grow, so 40 GiB bounds cumulative successful allocation,
+    even when product cleanup frees other files. No deletion, reserve change,
+    reopened pathname or second allocator is used here.
+    """
+    require(allocate is not None and 0 <= total <= 40 * GIB and total % 4096 == 0,
+            'invalid maintenance allocation')
+    initial, chunk, successes, exhausted, last_report, calls = total, 65536, 0, 0, -1, 0
+    while clock() < deadline and total + 4096 <= 40 * GIB and calls < MAX_REFILL_CALLS:
+        check(total)
+        count = min(chunk, 40 * GIB - total)
+        calls += 1
+        try:
+            allocate(fd, total, count)
+            total += count
+            successes += 1
+        except OSError as error:
+            if error.errno != errno.ENOSPC:
+                raise
+            if chunk > 4096:
+                chunk = 4096
+                continue
+            exhausted += 1
+            now = clock()
+            if now - last_report >= 1:
+                publish({'state': 'maintaining', 'initial_bytes': initial, 'allocated_bytes': total,
+                         'added_bytes': total-initial, 'successful_allocations': successes,
+                         'enospc_checks': exhausted, 'observed_ns': time.monotonic_ns(),
+                         'max_file_bytes': 40*GIB, 'allocation_calls': calls})
+                last_report = now
+            pause(.05)
+            chunk = 65536
+    value = {'state': ('deadline' if clock() >= deadline else 'call_limit' if calls >= MAX_REFILL_CALLS else 'allocation_cap'),
+             'initial_bytes': initial, 'allocated_bytes': total, 'added_bytes': total-initial,
+             'successful_allocations': successes, 'enospc_checks': exhausted, 'max_file_bytes': 40*GIB,
+             'allocation_calls': calls}
+    publish(value)
+    return value
+
+
 def fill_inodes(directory_fd, free, clock=time.monotonic):
     if free > MAX_INODES:
         return {'result': 'bounded_not_exhausted', 'reason': 'inode_safety_cap', 'created': 0}
@@ -221,24 +266,41 @@ def release(directory_fd):
 def fill(operation, mode):
     root, control = paths(operation, mode)
     fd = safe_directory(root)
+    data = None
+    deadline = time.monotonic() + 140  # Original supervisor independently stops at 150s.
     try:
         initial = root_guard(root)
+        binding = json.loads((control / 'binding.json').read_bytes())
         if mode == 'blocks':
             data = os.open('blocks', os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
                            0o600, dir_fd=fd)
-            try:
-                result = fill_blocks(data)
-                result['blocks_identity'] = identity(os.fstat(data))
-            finally:
-                os.close(data)
+            result = fill_blocks(data)
+            result['blocks_identity'] = identity(os.fstat(data))
+            result['maintenance_mode'] = 'same_child_same_fd_bounded_replenishment'
         else:
             result = fill_inodes(fd, initial['inodes_free'])
-        result['binding'] = json.loads((control / 'binding.json').read_bytes())
+        result['binding'] = binding
         result['after'] = root_guard(root)
         if mode == 'inodes' and result['result'] == 'exhausted' and result['after']['inodes_free'] != 0:
             result['result'] = 'blocks_exhausted_not_inodes'
         atomic_json(control / 'filled.json', result)
+        if mode == 'blocks' and result['result'] == 'exhausted':
+            def check(total):
+                require(identity(os.fstat(fd)) == binding['root'] == identity(root.lstat()),
+                        'maintenance directory changed')
+                root_guard(root)
+                observed = os.stat('blocks', dir_fd=fd, follow_symlinks=False)
+                opened = os.fstat(data)
+                regular(observed)
+                regular(opened)
+                require(identity(observed) == identity(opened) == result['blocks_identity']
+                        and opened.st_size >= total and opened.st_blocks*512 >= total,
+                        'maintenance filler changed')
+            maintain_blocks(data, result['allocated_bytes'], deadline, check,
+                            lambda value: atomic_json(control / 'maintenance.json', value))
     finally:
+        if data is not None:
+            os.close(data)
         os.close(fd)
 
 

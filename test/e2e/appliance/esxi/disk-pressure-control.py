@@ -28,6 +28,7 @@ HERE = Path(__file__).resolve().parent
 GIB = 1024 ** 3
 RESERVE = 64 * GIB
 HEADROOM = RESERVE + 40 * GIB + 2 * GIB
+V3_PRESSURE_RESULT = 'ad947abb336bd5a7f2fd3e357e12b3df2bf160dd4c7da9a19855a2ba8fcac67c'
 V2_PRESSURE_RESULT = 'beabb48a3c145a0adcdd3bacc6244d23f3e8d31068ea1ab6a299130c0bc031f8'
 ORIGINAL_PRESSURE_RESULT = '695934c6111638c6a2838f17bf3112153a2cf8aebdd4533932056aeecb6e6ed1'
 
@@ -235,9 +236,40 @@ def prior_capture_failure(lab, manifest):
     return hashes
 
 
-def capture_gate(lab, manifest, admission):
-    v2_hashes = prior_capture_failure(lab, manifest)
-    records, hashes = attempt_records(lab, 'disk-pressure-capture-preflight', manifest)
+def prior_replenishment_failure(lab, manifest):
+    records, hashes = attempt_records(lab, 'disk-pressure-proof-v3', manifest)
+    complete, guest = records['complete'], records['guest-result']
+    need(hashes['guest-result'] == V3_PRESSURE_RESULT and guest['result'] == complete['result'] == 'fail'
+         and guest.get('policy_restored') is True and guest.get('no_restart') is True,
+         'not reviewed replenishment failure')
+    phases = guest.get('phases', [])
+    need(len(phases) == 1, 'replenishment failure phase differs')
+    phase = phases[0]
+    need(phase.get('mode') == 'blocks' and phase.get('result') == 'fail'
+         and phase.get('fill', {}).get('result') == 'exhausted' and phase['fill'].get('errno') == 'ENOSPC'
+         and phase.get('released') is True and phase.get('root_pressure_directory_absent') is True
+         and phase.get('no_restart') is True and phase.get('recovered', {}).get('pass') is True
+         and phase.get('capture_positive_control', {}).get('pass') is True
+         and phase.get('capture', {}).get('collection_verdict') == 'BOUNDED_FRAGMENTS_RETAINED',
+         'v3 cleanup or capture differs')
+    rows = phase.get('samples', [])
+    need(len(rows) == 64 and sum(row.get('pressure_present_across_sample') is True for row in rows) == 1
+         and all(row.get('pass') is True and row.get('readiness_truthful') is True
+                 and len(row.get('probes', [])) == 3
+                 and all(p.get('verdict') in ('av_unavailable', 'clean_delivered', 'eicar_blocked')
+                         and not (p.get('kind') == 'eicar' and 200 <= p.get('http_status', 0) < 300)
+                         for p in row['probes']) for row in rows),
+         'v3 actual enforcement failure cannot be retried unchanged')
+    return hashes
+
+
+def capture_gate(lab, manifest, admission, version='v3'):
+    need(version in ('v3', 'v4'), 'capture gate version')
+    prior_key = 'v3' if version == 'v4' else 'v2'
+    previous_hashes = (prior_replenishment_failure(lab, manifest) if version == 'v4'
+                       else prior_capture_failure(lab, manifest))
+    name = 'disk-pressure-capture-preflight-v4' if version == 'v4' else 'disk-pressure-capture-preflight'
+    records, hashes = attempt_records(lab, name, manifest)
     intent, complete, guest = (records[k] for k in ('intent', 'complete', 'guest-result'))
     need(guest['result'] == complete['result'] == 'pass' and guest.get('scope') == 'healthy_capture_only'
          and guest.get('allocation_started') is False and guest.get('policy_restored') is True
@@ -246,17 +278,21 @@ def capture_gate(lab, manifest, admission):
          and guest['capture']['collection_verdict'] == 'BOUNDED_FRAGMENTS_RETAINED', 'healthy capture unproven')
     for name, digest in intent['helper_hashes'].items():
         need(manifest['files'].get('test/e2e/appliance/esxi/' + name) == digest, 'capture-tested helper changed')
-    need(intent.get('prior_capture_failure') == v2_hashes and intent.get('allocation_permitted') is False,
+    need(intent.get('prior_capture_failure') == previous_hashes and intent.get('allocation_permitted') is False,
          'preflight was not bound to capture refusal')
-    expected = {'v2': v2_hashes, 'preflight': hashes}
+    expected = {prior_key: previous_hashes, 'preflight': hashes}
     need(admission.get('capture_gate') == expected, 'capture gate admission differs')
     return expected
 
 
 def capture_preflight(lab, args, profile, manifest, hashes, console, bind):
     need(args.attempt == 'disk-pressure' and args.prior_admission is None, 'capture-only uses fixed separate attempt')
-    previous = prior_capture_failure(lab, manifest)
-    directory = lab.sec / 'disk-pressure-capture-preflight'
+    version = getattr(args, 'capture_attempt', 'initial')
+    need(version in ('initial', 'v4'), 'capture preflight attempt differs')
+    previous = (prior_replenishment_failure(lab, manifest) if version == 'v4'
+                else prior_capture_failure(lab, manifest))
+    directory = lab.sec / ('disk-pressure-capture-preflight-v4' if version == 'v4'
+                           else 'disk-pressure-capture-preflight')
     directory.mkdir()  # Exclusive: no repeat of ambiguous authenticated execution.
     config = {'mode': 'capture_only', 'operation': secrets.token_hex(16), 'helper_hashes': hashes,
               'initial': (lab.sec / 'admin-pass').read_text().strip()}
@@ -304,7 +340,7 @@ def attempt_admission(lab, args, profile, manifest):
     if attempt == 'disk-pressure':
         need(admission_path is None, 'original attempt cannot be continuation')
         return attempt, None
-    need(attempt in ('disk-pressure-proof-v2', 'disk-pressure-proof-v3'), 'only reviewed pressure attempts admitted')
+    need(attempt in ('disk-pressure-proof-v2', 'disk-pressure-proof-v3', 'disk-pressure-proof-v4'), 'only reviewed pressure attempts admitted')
     need(admission_path is not None, 'named attempt requires prior-failure custody admission')
     raw = regular_bytes(admission_path, 65536)
     need(any(Path(item['path']).resolve() == admission_path.resolve() and item['sha256'] == sha(raw)
@@ -355,7 +391,8 @@ def attempt_admission(lab, args, profile, manifest):
          and custody.get('ciphertext_sha256') == admission['custody_archive']['sha256']
          and all(custody.get(key) is True for key in ('roundtrip_verified', 'source_unchanged',
                     'every_file_verified', 'original_retained_at_preservation')), 'custody verification incomplete')
-    additional = capture_gate(lab, manifest, admission) if attempt == 'disk-pressure-proof-v3' else None
+    additional = (capture_gate(lab, manifest, admission, attempt.rsplit('-', 1)[1])
+                  if attempt in ('disk-pressure-proof-v3', 'disk-pressure-proof-v4') else None)
     return attempt, {'capture_gate': additional, 'admission_sha256': sha(raw), 'prior_operation': intent['operation'],
                      'prior_guest_result_sha256': admission['prior_guest_result_sha256'],
                      'custody_archive_sha256': admission['custody_archive']['sha256']}
@@ -382,6 +419,7 @@ def run(args):
         hardware_guard(lab.vm(timeout=20))
         if getattr(args, 'capture_only', False):
             return capture_preflight(lab, args, profile, manifest, hashes, console, bind)
+        need(getattr(args, 'capture_attempt', 'initial') == 'initial', 'capture attempt applies only to capture-only')
         reserve = required_reserve(lab.c)
         need(capacity(lab) >= reserve + 40 * GIB + 2 * GIB, 'reserve plus entire owned disk growth unavailable')
         escrow = args.escrow.resolve()
@@ -445,6 +483,7 @@ if __name__ == '__main__':
     parser.add_argument('--attempt', default='disk-pressure')
     parser.add_argument('--prior-admission', type=Path)
     parser.add_argument('--capture-only', action='store_true')
+    parser.add_argument('--capture-attempt', choices=('initial', 'v4'), default='initial')
     try:
         sys.exit(run(parser.parse_args()))
     except Exception:
