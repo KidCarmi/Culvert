@@ -337,6 +337,11 @@ def wait_visual_capture(lab, clock=time.monotonic, pause=time.sleep):
     raise Refused('visual observer not ready; imported VM remains powered off')
 
 
+_capture_spec = importlib.util.spec_from_file_location('esxi_capture_coordination', HERE / 'capture-coordination.py')
+capture = importlib.util.module_from_spec(_capture_spec)
+_capture_spec.loader.exec_module(capture)
+
+
 class Lab:
     def __init__(self, scope):
         self.scope_path = scope.resolve()
@@ -350,6 +355,7 @@ class Lab:
         self.run = Path(run).resolve()
         self.ev = self.run / 'evidence'
         self.sec = self.run / 'secrets'
+        self.private_diagnostics = self.sec
         self.state_file = self.run / 'owned.json'
         for p in (self.run, self.ev, self.sec):
             p.mkdir(parents=True, exist_ok=True)
@@ -386,15 +392,29 @@ class Lab:
             r = subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=timeout,
                                encoding='utf-8', errors='replace')
         except subprocess.TimeoutExpired:
-            raise Refused(f'govc {args[0]} timed out; reconcile owned state before retry') from None
+            self.gov_error(args[0], {'timeout': True})
+            error = capture.ReadFailure if args[0] in ('vm.info', 'vm.console') else Refused
+            raise error(f'govc {args[0]} timed out; evidence retained') from None
         # Raw stderr can contain endpoint credentials or OVF properties: never export.
         # After up has created the restricted key directory, preserve failure
         # diagnostics privately so an import can be reconciled without guessing.
-        if r.returncode and self.state and (self.sec / 'id_ed25519').is_file():
-            atomic_json(self.sec / 'govc-error.json', dict(command=args[0],
-                        returncode=r.returncode, stdout=r.stdout, stderr=r.stderr))
-        require(r.returncode == 0, f'govc {args[0]} failed (exit {r.returncode}); no mutation retry')
+        if r.returncode:
+            self.gov_error(args[0], dict(returncode=r.returncode, stdout=r.stdout, stderr=r.stderr))
+            transient = re.search(r'(?i)(?:unexpected EOF|connection (?:reset|refused|closed)|context deadline exceeded|(?:http[^\n]{0,40})?\b50[234]\b|i/o timeout|TLS handshake timeout)', r.stderr)
+            error = capture.ReadFailure if args[0] in ('vm.info', 'vm.console') and transient else Refused
+            raise error(f'govc {args[0]} failed (exit {r.returncode}); evidence retained')
         return json.loads(r.stdout) if json_output else r.stdout.strip()
+
+    def gov_error(self, command, details):
+        private = getattr(self, 'private_diagnostics', self.sec)
+        if self.state and (private / 'id_ed25519').is_file():
+            # Unique private receipts preserve the first failure and never depend
+            # on the temporary per-image output directory used by Console.screen.
+            atomic_json(private / ('govc-error-' + secrets.token_hex(12) + '.json'),
+                        dict(command=command, time_ns=time.time_ns(), **details))
+
+    def capture_snapshot(self, path, deadline):
+        return capture.snapshot(self, path, deadline)
 
     def vm(self, timeout=120):
         require(self.state and not self.state.get('deleted'), 'no active owned VM')

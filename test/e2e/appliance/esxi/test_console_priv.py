@@ -2,6 +2,7 @@
 import base64
 import importlib.util
 import io
+import json
 from pathlib import Path
 import tempfile
 from types import SimpleNamespace
@@ -146,6 +147,33 @@ class ConsoleTransportTests(unittest.TestCase):
         self.assertTrue(captured['password_entered'])
         self.assertNotIn(prompt, captured['command'])
         self.assertIn(base64.b64encode((prompt + ' ').encode()).decode(), captured['command'])
+
+    def test_partial_credential_input_failure_is_durable_and_never_retried(self):
+        holder={};inputs=[]
+        class Server:
+            server_port=12345
+            def __init__(self,address,handler):holder['handler']=handler
+            def serve_forever(self):pass
+            def shutdown(self):pass
+            def server_close(self):pass
+        def enter(value):
+            inputs.append(value)
+            if len(inputs)==1:
+                request(holder['handler'],'GET')
+                return
+            rows=[json.loads(line) for line in (self.sec/'transport-synthetic/events.jsonl').read_text().splitlines()]
+            self.assertEqual(rows[-1]['stage'],'credential-input-intent')
+            self.assertTrue(rows[-1]['credential_intent'])
+            raise RuntimeError('synthetic Enter failed after text')
+        console=SimpleNamespace(shell=lambda password:None,enter=enter,screen=lambda deadline:'LAB AUTH SYNTHETIC:')
+        self.args.as_user=False
+        with patch.object(transport,'HTTPServer',Server), patch.object(transport,'Console',return_value=console), \
+             patch.object(transport.threading,'Thread'):
+            with self.assertRaisesRegex(RuntimeError,'Enter failed'):transport.execute(self.lab,self.args,b'true\n')
+        self.assertEqual(len(inputs),2)
+        rows=[json.loads(line) for line in (self.sec/'transport-synthetic/events.jsonl').read_text().splitlines()]
+        self.assertEqual(rows[-1]['stage'],'blocked');self.assertTrue(rows[-1]['credential_intent'])
+        self.assertFalse(rows[-1]['result_received'])
 
     def test_password_is_refused_before_fetch_or_after_result(self):
         for completed in (False, True):

@@ -156,9 +156,7 @@ def capture(lab, args, private_directory, clock=time.monotonic, pause=time.sleep
             need(frames < 900 and total < MAX_TOTAL, 'capture count/byte budget exhausted')
             begin = time.monotonic_ns()
             path = directory / ('frame-%04d.png' % frames)
-            lab.gov('vm.console', '-capture=' + str(path), pinned['path'], timeout=10, json_output=False)
-            # A screenshot cannot be assigned to a replaced/reconfigured VM.
-            lab.vm(timeout=10)
+            path = lab.capture_snapshot(path, time.monotonic() + 30)
             metadata = image_metadata(path, MAX_TOTAL - total)
             total += metadata['bytes']; frames += 1
             emit({'event': 'frame', 'filename': path.name, **metadata, 'uuid': pinned['uuid'],

@@ -190,6 +190,8 @@ class BootstrapObservationTests(unittest.TestCase):
                 Image.new('RGB', (720, 400), 'black').save(Path(args[1].removeprefix('-capture=')))
             lab = SimpleNamespace(sec=private, c={'console_cell_width': 9}, state={'path': 'synthetic'},
                                   vm=Mock(), gov=Mock(side_effect=capture))
+            lab.run = lab.sec; lab.private_diagnostics = lab.sec
+            lab.capture_snapshot = lambda path,deadline: bootstrap.module.capture.snapshot(lab,path,deadline)
             flow = bootstrap.Bootstrap(lab, None)
             decoder = SimpleNamespace(decode=Mock(return_value='Synthetic'))
             spec = SimpleNamespace(loader=SimpleNamespace(exec_module=lambda module: None))
@@ -242,10 +244,12 @@ class BootstrapObservationTests(unittest.TestCase):
 
                 lab = SimpleNamespace(sec=private, c={}, state={'path': 'synthetic'},
                                       vm=Mock(), gov=Mock(side_effect=capture))
+                lab.run = lab.sec; lab.private_diagnostics = lab.sec
+                lab.capture_snapshot = lambda path,deadline: bootstrap.module.capture.snapshot(lab,path,deadline)
                 flow = bootstrap.Bootstrap(lab, None)
                 decoder = SimpleNamespace(decode=lambda *args: '\ufffd' * 21846)
                 spec = SimpleNamespace(loader=SimpleNamespace(exec_module=lambda module: None))
-                budgets = [15, 20, bootstrap.Blocked('bounded bootstrap observation expired')]
+                budgets = [bootstrap.Blocked('bounded bootstrap observation expired')]
                 with patch.dict(bootstrap.os.environ, {'CULVERT_ESXI_CONSOLE_FONT': 'synthetic'}), \
                         patch.object(bootstrap.importlib.util, 'spec_from_file_location', return_value=spec), \
                         patch.object(bootstrap.importlib.util, 'module_from_spec', return_value=decoder):

@@ -13,6 +13,7 @@ import hashlib
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import importlib.util
 import json
+import os
 from pathlib import Path
 import re
 import secrets
@@ -214,6 +215,13 @@ def execute(lab, args, script):
     directory.mkdir()
     ctx, pin = make_tls(directory)
     state = {'fetched': False, 'result': None}
+    audit = {'command_intent': False, 'credential_intent': False, 'stage': 'prepared'}
+    def record(stage):
+        audit['stage'] = stage
+        with (directory / 'events.jsonl').open('a', encoding='utf-8') as output:
+            json.dump(dict(audit, fetched=state['fetched'], result_received=state['result'] is not None, time_ns=time.time_ns()), output)
+            output.write('\n'); output.flush(); os.fsync(output.fileno())
+    record('prepared')
     event = threading.Event()
 
     class Handler(BaseHTTPRequestHandler):
@@ -284,13 +292,21 @@ def execute(lab, args, script):
                ' && { ' + run + ' >"$f.out" 2>&1; r=$?; { printf "%s\\n" "$r"; cat "$f.out"; } >"$f.result"; ' +
                curl + ' --data-binary @"$f.result" ' + shlex.quote(url + '/result') + '; }' + finish)
     try:
+        audit['command_intent'] = True
+        record('command-input-intent')
         console.enter(command)
+        record('waiting-sudo' if not args.as_user else 'waiting-result')
         if not args.as_user:
             deadline = time.monotonic() + 45
             while time.monotonic() < deadline:
                 observed = console.screen(deadline)
                 if state['fetched'] and state['result'] is None and sudo_prompt_ready(observed, prompt):
+                    # Persist BEFORE text injection: Enter may fail after the
+                    # password text reached the guest. Never resend either.
+                    audit['credential_intent'] = True
+                    record('credential-input-intent')
                     console.enter(password)
+                    record('waiting-result')
                     break
                 time.sleep(1)
             else:
@@ -300,8 +316,12 @@ def execute(lab, args, script):
         (directory / 'result').write_bytes(raw)
         code, sep, output = raw.partition(b'\n')
         b.ensure(sep and code.isdigit() and 0 <= int(code) <= 255, 'invalid command result')
+        record('complete')
         sys.stdout.buffer.write(output)
         return int(code)
+    except Exception:
+        record('blocked')
+        raise
     finally:
         server.shutdown()
         server.server_close()

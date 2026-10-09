@@ -91,6 +91,8 @@ class InitialGeometryTests(unittest.TestCase):
             lab=SimpleNamespace(sec=Path(tmp),c={'console_cell_width':9},state={'path':'owned'},vm=Mock())
             def gov(*args,**kwargs):Image.new('RGB',(720,400)).save(Path(args[1].split('=',1)[1]))
             lab.gov=gov
+            lab.run = lab.sec; lab.private_diagnostics = lab.sec
+            lab.capture_snapshot = lambda path,deadline: b.module.capture.snapshot(lab,path,deadline)
             flow=b.Bootstrap(lab,Mock())
             decoder=SimpleNamespace(decode=Mock(return_value='unknown \ufffd'))
             spec=SimpleNamespace(loader=SimpleNamespace(exec_module=lambda module:None))
@@ -108,6 +110,8 @@ class InitialGeometryTests(unittest.TestCase):
             lab=SimpleNamespace(sec=sec,c={'console_cell_width':9},state={'path':'owned'},vm=Mock())
             def gov(*args,**kwargs):Image.new('RGB',(640,480)).save(Path(args[1].split('=',1)[1]))
             lab.gov=gov
+            lab.run = lab.sec; lab.private_diagnostics = lab.sec
+            lab.capture_snapshot = lambda path,deadline: b.module.capture.snapshot(lab,path,deadline)
             flow=b.Bootstrap(lab,Mock())
             # Supply an actual pinned font if configured; geometry refusal occurs
             # before glyph decoding for the initial-only case.

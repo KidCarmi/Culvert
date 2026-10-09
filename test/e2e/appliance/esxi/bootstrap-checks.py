@@ -147,9 +147,7 @@ class Bootstrap:
         ensure(self.sequence <= self.capture_limit, 'private capture count exhausted')
         stem = self.capture_prefix + '-' + str(self.sequence).zfill(3)
         png, ocr = self.lab.sec / (stem + '.png'), self.lab.sec / (stem + '.txt')
-        self.lab.vm(timeout=self.budget(15, deadline))
-        self.lab.gov('vm.console', '-capture=' + str(png), self.lab.state['path'],
-                     json_output=False, timeout=self.budget(20, deadline))
+        png = self.lab.capture_snapshot(png, min(self.deadline, deadline))
         ensure(png.is_file() and 0 < png.stat().st_size <= 10 * 1024**2, 'private screenshot unavailable or oversized')
         font = os.environ.get('CULVERT_ESXI_CONSOLE_FONT')
         cell_width = self.lab.c.get('console_cell_width', 8)

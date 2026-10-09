@@ -34,6 +34,8 @@ class VisualTests(unittest.TestCase):
         self.lab = SimpleNamespace(run=root, sec=sec, ev=ev, c=cfg, scope_path=scope,
                                    state_file=root / 'owned.json', state={}, vm=mock.Mock(return_value={'runtime': {'powerState': 'poweredOn'}}))
         self.lab.gov = mock.Mock(side_effect=self.capture_png)
+        adapter = v.load().module
+        self.lab.capture_snapshot = lambda path,deadline: adapter.capture.snapshot(self.lab,path,deadline)
         self.args = SimpleNamespace(label='cold', seconds=3, interval=1, wait_owned_seconds=5)
         self.acl = mock.Mock()
 
@@ -87,7 +89,7 @@ class VisualTests(unittest.TestCase):
                 self.assertEqual(len(list((self.lab.sec / ('visual-' + what)).glob('*.png'))), 1)
 
     def test_maintenance_poweroff_is_observed_without_power_commands(self):
-        self.ledger(); states = iter(['poweredOn', 'poweredOn', 'poweredOff', 'poweredOn', 'poweredOn', 'poweredOn', 'poweredOn'])
+        self.ledger(); states = iter(['poweredOn'] * 3 + ['poweredOff'] + ['poweredOn'] * 30)
         self.lab.vm.side_effect = lambda **unused: {'runtime': {'powerState': next(states)}}
         result = self.run_capture()
         self.assertTrue(result['observed_powered_off_before_capture'])
@@ -187,7 +189,7 @@ class VisualTests(unittest.TestCase):
     def test_observer_arms_gate_after_owned_poweroff_and_private_acl(self):
         self.lab.c['visual_capture_label'] = 'cold'; self.state['visual_capture_nonce'] = 'a' * 32
         self.lab.scope_path.write_text(json.dumps(self.lab.c)); self.ledger()
-        states = iter(['poweredOff', 'poweredOn', 'poweredOn', 'poweredOn', 'poweredOn', 'poweredOn', 'poweredOn'])
+        states = iter(['poweredOff'] + ['poweredOn'] * 30)
         self.lab.vm.side_effect = lambda **unused: {'runtime': {'powerState': next(states)}}
         result = self.run_capture()
         self.assertTrue(result['observed_powered_off_before_capture']); self.acl.assert_called_once()
