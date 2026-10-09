@@ -58,11 +58,26 @@ dpkg-deb -x "$w/m.deb" "$w/root"
 depmod -b "$w/root" "$abi"
 mkdir "$w/conf"; cp "$conf" "$w/conf/culvert.conf"
 echo "kernel $abi (linux-modules $(plan VERSION), snapshot $snap; signature, index and package hashes verified)"
+# modprobe -n prints NOTHING for a module already loaded on the machine running
+# it (it reads /sys/module/<m>/initstate), so on a host that has kvm, kvm_amd,
+# ib_core or ib_uverbs loaded -- a GitHub runner on an Azure AMD host has all
+# four -- the check would read the RUNNER's state, not the OVA's. The loop runs
+# in a private mount namespace with an empty tmpfs over /sys/module, so only
+# the OVA's module tree and the conf decide the verdict.
+mods="$(awk '$1=="install" && $3=="/bin/false"{print $2}' "$conf")"
+as_root=(); [[ "$(id -u)" == 0 ]] || as_root=(sudo -n)
+"${as_root[@]}" unshare -m --propagation private bash -s "$w/root" "$abi" "$w/conf" "$mods" <<'NS'
+set -uo pipefail
+root="$1" abi="$2" conf="$3" mods="$4"
+mount -t tmpfs none /sys/module || { echo "cannot hide /sys/module" >&2; exit 2; }
+[[ -z "$(ls -A /sys/module)" ]] || { echo "/sys/module is not empty inside the namespace" >&2; exit 2; }
 fail=0
-while read -r m; do
-  last="$(modprobe -d "$w/root" -S "$abi" -C "$w/conf" -n -v "$m" 2>&1 | tail -n1)"
+for m in $mods; do
+  last="$(modprobe -d "$root" -S "$abi" -C "$conf" -n -v "$m" 2>&1 | tail -n1)"
   if [[ "$last" =~ ^install\ /bin/false[[:space:]]*$ ]]; then echo "denied  $m"
   elif [[ "$last" == *"not found"* ]]; then echo "absent  $m (not in linux-modules)"
+  elif [[ -z "$last" ]]; then echo "ERROR   $m -> modprobe printed nothing (treated as a failure, never as denied)"; fail=1
   else echo "LOADS   $m -> $last"; fail=1; fi
-done < <(awk '$1=="install" && $3=="/bin/false"{print $2}' "$conf")
+done
 exit "$fail"
+NS
