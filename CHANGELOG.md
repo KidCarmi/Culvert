@@ -7,6 +7,16 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ## [Unreleased]
 
+### Changed
+
+- The audit action recorded when an admin starts an on-demand backup from the
+  Support panel is now `backup.create` (was `backup.trigger`), matching the
+  maintenance agent's operation kind and the `<noun>.create` convention used by
+  every other creating action (`support.bundle.create`, `alert.webhook.create`).
+  The action shipped two weeks earlier in #1468; a SIEM rule keyed on the old
+  name should be updated. The `POST /api/backups` contract is unchanged except
+  for its `x-culvert-audit-event`.
+
 ### Security
 
 - Node-local key material was written with `os.WriteFile` on a predictable
