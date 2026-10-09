@@ -1,0 +1,144 @@
+# kernel 6.8.0-146-generic
+id	severity	subsystem	class	evidence	hint
+CVE-2026-74394	CRITICAL	RDMA/srpt	absent	CONFIG_INFINIBAND_SRPT=m; ib_srpt.ko not on disk	not-on-disk:kernel/drivers/infiniband/ulp/srpt/ib_srpt.ko
+CVE-2026-64535	CRITICAL	nvmet-tcp	absent	CONFIG_NVME_TARGET_TCP=m; nvmet-tcp.ko not on disk	not-on-disk:kernel/drivers/nvme/target/nvmet-tcp.ko
+CVE-2026-63940	CRITICAL	KVM: SEV	denied	kvm: install /bin/false in culvert-unused.conf	on-disk:kernel/arch/x86/kvm/kvm-amd.ko(+2)
+CVE-2026-53398	CRITICAL	NFSD	denied	nfsd: install /bin/false in culvert-unused.conf	on-disk:kernel/fs/nfsd/nfsd.ko
+CVE-2026-64564	CRITICAL	sctp	denied	sctp: install /bin/false in culvert-unused.conf	on-disk:kernel/net/sctp/sctp.ko(+1)
+CVE-2026-23208	HIGH	ALSA: usb-audio	absent	CONFIG_SND_USB_AUDIO=m; snd-usb-audio.ko not on disk	not-on-disk:kernel/drivers/media/usb/cx231xx/cx231xx-alsa.ko(+4)
+CVE-2026-74534	HIGH	Bluetooth: ISO	absent	CONFIG_BT=m; bluetooth.ko not on disk	not-on-disk:kernel/drivers/bluetooth/ath3k.ko(+30)
+CVE-2026-74535	HIGH	Bluetooth: ISO	absent	CONFIG_BT=m; bluetooth.ko not on disk	not-on-disk:kernel/drivers/bluetooth/ath3k.ko(+30)
+CVE-2026-80721	HIGH	Bluetooth: ISO	absent	CONFIG_BT=m; bluetooth.ko not on disk	not-on-disk:kernel/drivers/bluetooth/ath3k.ko(+30)
+CVE-2026-64557	HIGH	Bluetooth: L2CAP	absent	CONFIG_BT=m; bluetooth.ko not on disk	not-on-disk:kernel/drivers/bluetooth/ath3k.ko(+30)
+CVE-2024-56591	HIGH	Bluetooth: hci_conn	absent	CONFIG_BT=m; bluetooth.ko not on disk	not-on-disk:kernel/drivers/bluetooth/hci_bcm4377.ko(+3)
+CVE-2025-68304	HIGH	Bluetooth: hci_core	absent	CONFIG_BT=m; bluetooth.ko not on disk	not-on-disk:kernel/drivers/bluetooth/hci_bcm4377.ko(+3)
+CVE-2026-68189	HIGH	Bluetooth: hci_sync	absent	CONFIG_BT=m; bluetooth.ko not on disk	not-on-disk:kernel/drivers/bluetooth/hci_bcm4377.ko(+3)
+CVE-2026-80692	HIGH	Bluetooth: hci_sync	absent	CONFIG_BT=m; bluetooth.ko not on disk	not-on-disk:kernel/drivers/bluetooth/hci_bcm4377.ko(+3)
+CVE-2026-68085	HIGH	Bluetooth: hci_uart	absent	CONFIG_BT=m; bluetooth.ko not on disk	not-on-disk:kernel/drivers/bluetooth/hci_uart.ko
+CVE-2026-74510	HIGH	Bluetooth: mgmt	absent	CONFIG_BT=m; bluetooth.ko not on disk	not-on-disk:kernel/drivers/bluetooth/ath3k.ko(+30)
+CVE-2026-74390	HIGH	RDMA/irdma	absent	CONFIG_INFINIBAND_IRDMA=m; irdma.ko not on disk	not-on-disk:kernel/drivers/infiniband/hw/irdma/irdma.ko
+CVE-2026-64269	HIGH	RDMA/rtrs-srv	absent	CONFIG_INFINIBAND_RTRS_SERVER=m; rtrs-server.ko not on disk	not-on-disk:kernel/drivers/infiniband/ulp/rtrs/rtrs-client.ko(+2)
+CVE-2026-74378	HIGH	RDMA/rxe	absent	CONFIG_RDMA_RXE=m; rdma_rxe.ko not on disk	not-on-disk:kernel/drivers/infiniband/sw/rxe/rdma_rxe.ko
+CVE-2024-57857	HIGH	RDMA/siw	absent	CONFIG_RDMA_SIW=m; siw.ko not on disk	not-on-disk:kernel/drivers/infiniband/sw/siw/siw.ko
+CVE-2026-74427	HIGH	afs	absent	CONFIG_AFS_FS=m; kafs.ko not on disk	not-on-disk:kernel/fs/afs/kafs.ko
+CVE-2026-74506	HIGH	afs	absent	CONFIG_AFS_FS=m; kafs.ko not on disk	not-on-disk:kernel/fs/afs/kafs.ko
+CVE-2024-35948	HIGH	bcachefs	absent	CONFIG_BCACHEFS_FS=m; bcachefs.ko not on disk	not-on-disk:kernel/fs/bcachefs/bcachefs.ko
+CVE-2026-68236	HIGH	drm/amd/display	absent	CONFIG_DRM_AMDGPU=m; amdgpu.ko not on disk	not-on-disk:kernel/drivers/gpu/drm/amd/amdgpu/amdgpu.ko(+2)
+CVE-2024-38581	HIGH	drm/amdgpu/mes	absent	CONFIG_DRM_AMDGPU=m; amdgpu.ko not on disk	not-on-disk:kernel/drivers/gpu/drm/amd/amdgpu/amdgpu.ko
+CVE-2026-68257	HIGH	drm/amdkfd	absent	CONFIG_DRM_AMDGPU=m; amdgpu.ko not on disk	on-disk:kernel/drivers/gpu/drm/ast/ast.ko(+63)
+CVE-2026-74446	HIGH	drm/amdkfd	absent	CONFIG_DRM_AMDGPU=m; amdgpu.ko not on disk	on-disk:kernel/drivers/gpu/drm/ast/ast.ko(+63)
+CVE-2025-38187	HIGH	drm/nouveau	absent	CONFIG_DRM_NOUVEAU=m; nouveau.ko not on disk	not-on-disk:kernel/drivers/gpu/drm/nouveau/nouveau.ko
+CVE-2025-71315	HIGH	drm/vkms	absent	CONFIG_DRM_VKMS=m; vkms.ko not on disk	not-on-disk:kernel/drivers/gpu/drm/vkms/vkms.ko
+CVE-2025-40025	HIGH	f2fs	absent	CONFIG_F2FS_FS=m; f2fs.ko not on disk	not-on-disk:kernel/fs/f2fs/f2fs.ko
+CVE-2026-63815	HIGH	f2fs	absent	CONFIG_F2FS_FS=m; f2fs.ko not on disk	not-on-disk:kernel/fs/f2fs/f2fs.ko
+CVE-2024-52560	HIGH	fs/ntfs3	absent	CONFIG_NTFS3_FS=m; ntfs3.ko not on disk	not-on-disk:kernel/fs/ntfs3/ntfs3.ko
+CVE-2026-64432	HIGH	fs/ntfs3	absent	CONFIG_NTFS3_FS=m; ntfs3.ko not on disk	not-on-disk:kernel/fs/ntfs3/ntfs3.ko
+CVE-2026-72195	HIGH	fs/ntfs3	absent	CONFIG_NTFS3_FS=m; ntfs3.ko not on disk	not-on-disk:kernel/fs/ntfs3/ntfs3.ko
+CVE-2026-72478	HIGH	fs/ntfs3	absent	CONFIG_NTFS3_FS=m; ntfs3.ko not on disk	not-on-disk:kernel/fs/ntfs3/ntfs3.ko
+CVE-2026-64361	HIGH	hfs/hfsplus	absent	CONFIG_HFSPLUS_FS=m; hfsplus.ko not on disk	not-on-disk:kernel/fs/hfs/hfs.ko(+1)
+CVE-2026-64191	HIGH	i2c: stub	absent	CONFIG_I2C_STUB=m; i2c-stub.ko not on disk	not-on-disk:kernel/drivers/i2c/i2c-stub.ko
+CVE-2024-44964	HIGH	idpf	absent	CONFIG_IDPF=m; idpf.ko not on disk	not-on-disk:kernel/drivers/net/ethernet/intel/idpf/idpf.ko
+CVE-2026-80693	HIGH	idpf	absent	CONFIG_IDPF=m; idpf.ko not on disk	not-on-disk:kernel/drivers/net/ethernet/intel/idpf/idpf.ko
+CVE-2026-72024	HIGH	mac802154	absent	CONFIG_MAC802154=m; mac802154.ko not on disk	not-on-disk:kernel/net/mac802154/mac802154.ko
+CVE-2026-43263	HIGH	media: chips-media: wave5	absent	CONFIG_VIDEO_WAVE5_VPU=unset; wave5.ko not on disk	not-on-disk:kernel/drivers/media/cec/core/cec.ko(+722)
+CVE-2026-68204	HIGH	media: vivid	absent	CONFIG_VIDEO_VIVID=m; vivid.ko not on disk	not-on-disk:kernel/drivers/media/test-drivers/vivid/vivid.ko
+CVE-2025-38717	HIGH	net: kcm	absent	CONFIG_AF_KCM=m; kcm.ko not on disk	not-on-disk:kernel/net/kcm/kcm.ko
+CVE-2026-64188	HIGH	net: qualcomm: rmnet	absent	CONFIG_RMNET=m; rmnet.ko not on disk	not-on-disk:kernel/drivers/net/ethernet/qualcomm/rmnet/rmnet.ko
+CVE-2026-74350	HIGH	ocfs2	absent	CONFIG_OCFS2_FS=m; ocfs2.ko not on disk	not-on-disk:kernel/fs/ocfs2/cluster/ocfs2_nodemanager.ko(+6)
+CVE-2026-80644	HIGH	ocfs2	absent	CONFIG_OCFS2_FS=m; ocfs2.ko not on disk	not-on-disk:kernel/fs/ocfs2/cluster/ocfs2_nodemanager.ko(+6)
+CVE-2026-80710	HIGH	s390/dasd	absent	CONFIG_S390=unset; s390.ko not on disk	-
+CVE-2026-68451	HIGH	s390/zcrypt	absent	CONFIG_S390=unset; s390.ko not on disk	-
+CVE-2026-74470	HIGH	scsi: scsi_debug	absent	CONFIG_SCSI_DEBUG=m; scsi_debug.ko not on disk	not-on-disk:kernel/drivers/scsi/scsi_debug.ko
+CVE-2025-40064	HIGH	smc	absent	CONFIG_SMC=m; smc.ko not on disk	not-on-disk:kernel/net/smc/smc.ko(+1)
+CVE-2026-64440	HIGH	staging: rtl8723bs	absent	CONFIG_RTL8723BS=m; r8723bs.ko not on disk	not-on-disk:kernel/drivers/staging/rtl8723bs/r8723bs.ko
+CVE-2026-64441	HIGH	staging: rtl8723bs	absent	CONFIG_RTL8723BS=m; r8723bs.ko not on disk	not-on-disk:kernel/drivers/staging/rtl8723bs/r8723bs.ko
+CVE-2026-64442	HIGH	staging: rtl8723bs	absent	CONFIG_RTL8723BS=m; r8723bs.ko not on disk	not-on-disk:kernel/drivers/staging/rtl8723bs/r8723bs.ko
+CVE-2026-53178	HIGH	staging: rtl8723bs: rtw_mlme	absent	CONFIG_RTL8723BS=m; r8723bs.ko not on disk	not-on-disk:kernel/drivers/staging/rtl8723bs/r8723bs.ko
+CVE-2025-37906	HIGH	ublk	absent	CONFIG_BLK_DEV_UBLK=m; ublk_drv.ko not on disk	not-on-disk:kernel/drivers/block/ublk_drv.ko
+CVE-2026-68198	HIGH	wifi: ath6kl	absent	CONFIG_ATH6KL=m; ath6kl_core.ko not on disk	not-on-disk:kernel/drivers/net/wireless/ath/ath6kl/ath6kl_core.ko(+2)
+CVE-2026-68199	HIGH	wifi: ath6kl	absent	CONFIG_ATH6KL=m; ath6kl_core.ko not on disk	not-on-disk:kernel/drivers/net/wireless/ath/ath6kl/ath6kl_core.ko(+2)
+CVE-2026-68470	HIGH	wifi: mac80211	absent	CONFIG_MAC80211=m; mac80211.ko not on disk	not-on-disk:kernel/net/mac80211/mac80211.ko
+CVE-2025-68360	HIGH	wifi: mt76: wed	absent	CONFIG_MT76_CORE=m; mt76.ko not on disk	not-on-disk:kernel/drivers/net/wireless/mediatek/mt76/mt76-connac-lib.ko(+28)
+CVE-2026-74411	HIGH	wifi: rtw89	absent	CONFIG_RTW89=m; rtw89_core.ko not on disk	not-on-disk:kernel/drivers/net/wireless/realtek/rtw89/rtw89_8851b.ko(+9)
+CVE-2026-74341	HIGH	wifi: wcn36xx	absent	CONFIG_WCN36XX=m; wcn36xx.ko not on disk	not-on-disk:kernel/drivers/net/wireless/ath/wcn36xx/wcn36xx.ko
+CVE-2026-68196	HIGH	wifi: wilc1000	absent	CONFIG_WILC1000=m; wilc1000.ko not on disk	not-on-disk:kernel/drivers/net/wireless/microchip/wilc1000/wilc1000-sdio.ko(+2)
+CVE-2026-72288	HIGH	KVM: arm64: vgic	denied	kvm: install /bin/false in culvert-unused.conf	on-disk:kernel/arch/x86/kvm/kvm-amd.ko(+2)
+CVE-2026-64562	HIGH	KVM: nVMX	denied	kvm: install /bin/false in culvert-unused.conf	on-disk:kernel/arch/x86/kvm/kvm-amd.ko(+2)
+CVE-2026-74334	HIGH	RDMA/nldev	denied	ib_core: install /bin/false in culvert-unused.conf	on-disk:kernel/drivers/infiniband/core/rdma_cm.ko(+6)
+CVE-2026-72123	HIGH	can: bcm	denied	can: install /bin/false in culvert-unused.conf	on-disk:kernel/net/can/can-bcm.ko
+CVE-2026-72124	HIGH	can: isotp	denied	can: install /bin/false in culvert-unused.conf	on-disk:kernel/net/can/can-isotp.ko
+CVE-2026-43379	HIGH	ksmbd	denied	ksmbd: install /bin/false in culvert-unused.conf	on-disk:kernel/fs/smb/server/ksmbd.ko
+CVE-2026-64390	HIGH	ksmbd	denied	ksmbd: install /bin/false in culvert-unused.conf	on-disk:kernel/fs/smb/server/ksmbd.ko
+CVE-2026-64393	HIGH	ksmbd	denied	ksmbd: install /bin/false in culvert-unused.conf	on-disk:kernel/fs/smb/server/ksmbd.ko
+CVE-2026-64396	HIGH	ksmbd	denied	ksmbd: install /bin/false in culvert-unused.conf	on-disk:kernel/fs/smb/server/ksmbd.ko
+CVE-2026-68098	HIGH	ksmbd	denied	ksmbd: install /bin/false in culvert-unused.conf	on-disk:kernel/fs/smb/server/ksmbd.ko
+CVE-2026-53399	HIGH	nfsd	denied	nfsd: install /bin/false in culvert-unused.conf	on-disk:kernel/fs/nfsd/nfsd.ko
+CVE-2026-68121	HIGH	pppoe	denied	pppoe: install /bin/false in culvert-unused.conf	on-disk:kernel/drivers/net/ppp/pppoe.ko
+CVE-2026-68162	HIGH	sctp	denied	sctp: install /bin/false in culvert-unused.conf	on-disk:kernel/net/sctp/sctp.ko(+1)
+CVE-2026-64380	HIGH	smb: client	denied	cifs: install /bin/false in culvert-unused.conf	on-disk:kernel/fs/smb/client/cifs.ko
+CVE-2026-64383	HIGH	smb: client	denied	cifs: install /bin/false in culvert-unused.conf	on-disk:kernel/fs/smb/client/cifs.ko
+CVE-2026-64385	HIGH	smb: client	denied	cifs: install /bin/false in culvert-unused.conf	on-disk:kernel/fs/smb/client/cifs.ko
+CVE-2026-64386	HIGH	smb: client	denied	cifs: install /bin/false in culvert-unused.conf	on-disk:kernel/fs/smb/client/cifs.ko
+CVE-2026-64387	HIGH	smb: client	denied	cifs: install /bin/false in culvert-unused.conf	on-disk:kernel/fs/smb/client/cifs.ko
+CVE-2026-64597	HIGH	smb: client	denied	cifs: install /bin/false in culvert-unused.conf	on-disk:kernel/fs/smb/client/cifs.ko
+CVE-2026-31536	HIGH	smb: server	denied	ksmbd: install /bin/false in culvert-unused.conf	on-disk:kernel/fs/smb/server/ksmbd.ko
+CVE-2026-63801	HIGH	tipc	denied	tipc: install /bin/false in culvert-unused.conf	on-disk:kernel/net/tipc/diag.ko(+1)
+CVE-2026-64543	HIGH	tipc	denied	tipc: install /bin/false in culvert-unused.conf	on-disk:kernel/net/tipc/diag.ko(+1)
+CVE-2026-68117	HIGH	tipc	denied	tipc: install /bin/false in culvert-unused.conf	on-disk:kernel/net/tipc/diag.ko(+1)
+CVE-2026-68323	HIGH	tipc	denied	tipc: install /bin/false in culvert-unused.conf	on-disk:kernel/net/tipc/diag.ko(+1)
+CVE-2026-46330	HIGH	-	present		-
+CVE-2026-64548	HIGH	-	present		-
+CVE-2026-68284	HIGH	-	present		-
+CVE-2026-72110	HIGH	-	present		-
+CVE-2026-80716	HIGH	ALSA: pcm	present		on-disk:kernel/sound/core/snd-pcm-dmaengine.ko(+12)
+CVE-2025-71073	HIGH	Input	present		on-disk:kernel/drivers/input/evbug.ko(+263)
+CVE-2026-64276	HIGH	Input	present		on-disk:kernel/drivers/input/evbug.ko(+263)
+CVE-2026-43009	HIGH	bpf	present		built-in:kernel/drivers/hid/bpf/hid_bpf.ko
+CVE-2026-53090	HIGH	bpf	present		built-in:kernel/drivers/hid/bpf/hid_bpf.ko
+CVE-2026-63809	HIGH	bpf	present		built-in:kernel/drivers/hid/bpf/hid_bpf.ko
+CVE-2026-68399	HIGH	bpf	present		built-in:kernel/drivers/hid/bpf/hid_bpf.ko
+CVE-2026-72111	HIGH	bpf	present		built-in:kernel/drivers/hid/bpf/hid_bpf.ko
+CVE-2026-74363	HIGH	bpf	present		built-in:kernel/drivers/hid/bpf/hid_bpf.ko
+CVE-2026-23393	HIGH	bridge: cfm	present		on-disk:kernel/net/bridge/br_netfilter.ko(+27)
+CVE-2026-64567	HIGH	btrfs	present		on-disk:kernel/fs/btrfs/btrfs.ko
+CVE-2026-68442	HIGH	btrfs	present		on-disk:kernel/fs/btrfs/btrfs.ko
+CVE-2026-80631	HIGH	btrfs: lzo	present		on-disk:kernel/fs/btrfs/btrfs.ko(+3)
+CVE-2026-74438	HIGH	crypto	present		on-disk:kernel/arch/x86/crypto/aegis128-aesni.ko(+186)
+CVE-2026-80700	HIGH	drm/vmwgfx	present		on-disk:kernel/drivers/gpu/drm/vmwgfx/vmwgfx.ko
+CVE-2026-80702	HIGH	drm/vmwgfx	present		on-disk:kernel/drivers/gpu/drm/vmwgfx/vmwgfx.ko
+CVE-2026-68446	HIGH	drm/vmwgfx: Validate vmw_surface_metadata	present		on-disk:kernel/drivers/gpu/drm/vmwgfx/vmwgfx.ko
+CVE-2025-40190	HIGH	ext4	present		built-in:kernel/fs/ext4/ext4.ko
+CVE-2026-68147	HIGH	fscrypt	present		-
+CVE-2026-53388	HIGH	fuse	present		on-disk:kernel/fs/fuse/cuse.ko(+2)
+CVE-2026-64266	HIGH	fuse	present		on-disk:kernel/fs/fuse/cuse.ko(+2)
+CVE-2026-68329	HIGH	iommu/amd	present		on-disk:kernel/drivers/iommu/iommufd/iommufd.ko(+55)
+CVE-2026-52909	HIGH	ip6_vti	present		on-disk:kernel/net/ipv6/ip6_vti.ko
+CVE-2026-64423	HIGH	ipv4: igmp	present		on-disk:kernel/net/ipv4/ah4.ko(+58)
+CVE-2025-40158	HIGH	ipv6	present		on-disk:kernel/net/ipv6/ah6.ko(+40)
+CVE-2026-53362	HIGH	ipv6	present		on-disk:kernel/net/ipv6/ah6.ko(+40)
+CVE-2026-80714	HIGH	ipvs	present		on-disk:kernel/net/netfilter/ipvs/ip_vs.ko(+16)
+CVE-2026-74317	HIGH	ixgbe	present		on-disk:kernel/drivers/net/ethernet/intel/ixgbe/ixgbe.ko
+CVE-2026-63823	HIGH	keys	present		built-in:kernel/security/keys/encrypted-keys/encrypted-keys.ko(+1)
+CVE-2026-80718	HIGH	mm/percpu-km	present		-
+CVE-2024-40954	HIGH	net	present		-
+CVE-2026-72338	HIGH	net/sched: act_pedit	present		on-disk:kernel/net/sched/act_pedit.ko
+CVE-2026-72390	HIGH	net/sched: sch_teql	present		on-disk:kernel/net/sched/sch_teql.ko
+CVE-2026-80725	HIGH	net: gro	present		-
+CVE-2024-46833	HIGH	net: hns3	present		-
+CVE-2026-74465	HIGH	net: openvswitch	present		on-disk:kernel/net/openvswitch/openvswitch.ko(+3)
+CVE-2026-64554	HIGH	netfilter: bridge	present		on-disk:kernel/net/bridge/netfilter/ebt_802_3.ko(+23)
+CVE-2026-80634	HIGH	netfilter: flowtable	present		on-disk:kernel/net/bridge/netfilter/ebt_802_3.ko(+243)
+CVE-2026-80668	HIGH	netfilter: nf_conntrack_expect	present		on-disk:kernel/net/bridge/netfilter/nf_conntrack_bridge.ko(+13)
+CVE-2026-80637	HIGH	netfilter: synproxy	present		on-disk:kernel/net/ipv4/netfilter/ipt_SYNPROXY.ko(+3)
+CVE-2026-72472	HIGH	nfs	present		on-disk:kernel/fs/nfs/blocklayout/blocklayoutdriver.ko(+6)
+CVE-2026-80671	HIGH	perf sched	present		on-disk:kernel/net/sched/act_bpf.ko(+66)
+CVE-2025-38563	HIGH	perf/core	present		not-on-disk:kernel/drivers/perf/cxl_pmu.ko(+1)
+CVE-2026-80691	HIGH	scsi: target: iblock	present		on-disk:kernel/drivers/target/target_core_iblock.ko
+CVE-2024-46742	HIGH	smb/server	present		on-disk:kernel/fs/smb/server/ksmbd.ko
+CVE-2026-74268	HIGH	tcp	present		on-disk:kernel/drivers/scsi/iscsi_tcp.ko(+22)
+CVE-2025-40075	HIGH	tcp_metrics	present		on-disk:kernel/drivers/scsi/iscsi_tcp.ko(+22)
+CVE-2026-23240	HIGH	tls	present		on-disk:kernel/net/tls/tls.ko
+CVE-2026-72135	HIGH	tpm	present		built-in:kernel/drivers/char/tpm/tpm.ko(+17)
+CVE-2026-53365	HIGH	vsock/virtio	present		on-disk:kernel/drivers/gpu/drm/virtio/virtio-gpu.ko(+15)
+CVE-2026-80681	HIGH	vxlan	present		on-disk:kernel/drivers/net/vxlan/vxlan.ko
+CVE-2026-53250	HIGH	xsk	present		not-on-disk:kernel/net/xdp/xsk_diag.ko

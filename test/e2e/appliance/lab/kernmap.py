@@ -14,6 +14,19 @@ one class, decided only from the scanned disk:
   present  everything else, i.e. the kernel image or a loadable module may
            contain the vulnerable code.
 
+Only findings against the SHIPPED KERNEL's own packages (names carrying the
+running version, e.g. linux-modules-<kver>, linux-image-<kver>) are kernel
+findings. Trivy also reports kernel CVEs against userspace packages built from
+the GA `linux` source (linux-libc-dev: UAPI headers; linux-tools-common:
+version-dispatch wrappers that exec /usr/lib/linux-tools/$(uname -r)/<tool>).
+Those carry no kernel code; a CVE seen ONLY there goes to OUT_TSV's sibling
+<out>-userspace.tsv, classed "no-kernel-code" when the disk proves it (every
+file of linux-libc-dev under /usr/include or /usr/share; every executable of
+linux-tools-common a text wrapper and no tools for <kver> installed) and
+"unverified" otherwise. Before this split (scan run 37956950928) 83 of the 88
+"present" findings on the HWE disk were attributed to the kernel from those
+two packages alone.
+
 The "hint" column is a heuristic location (module/directory whose path best
 matches the advisory's subsystem prefix). It is informational only and never
 decides "absent".
@@ -89,13 +102,45 @@ def hint(label):
     pick = sorted(on or hits & builtin or hits)[0]
     where = "on-disk" if on else ("built-in" if hits & builtin else "not-on-disk")
     return f"{where}:{pick}" + ("" if len(hits) == 1 else f"(+{len(hits) - 1})")
+def dpkg_list(pkg):
+    for n in (pkg + ":amd64.list", pkg + ".list", pkg + ":all.list"):
+        f = os.path.join(root, "var", "lib", "dpkg", "info", n)
+        if os.path.exists(f):
+            return [l.strip() for l in open(f) if l.strip()]
+    return None
+def userspace_evidence(pkg):
+    """(proven, why): does this disk prove PKG carries no kernel code?"""
+    files = dpkg_list(pkg)
+    if files is None:
+        return False, f"{pkg}: no dpkg file list on the disk"
+    regular = [f for f in files if os.path.isfile(os.path.join(root, f.lstrip("/"))) and not os.path.islink(os.path.join(root, f.lstrip("/")))]
+    if pkg == "linux-libc-dev":
+        bad = [f for f in regular if not f.startswith(("/usr/include/", "/usr/share/"))]
+        return (not bad, f"{pkg}: {len(regular)} files, all under /usr/include or /usr/share (UAPI headers)" if not bad else f"{pkg}: files outside /usr/include: {bad[:3]}")
+    if pkg == "linux-tools-common":
+        bad = []
+        for f in regular:
+            if f.startswith("/usr/share/"):
+                continue
+            head = open(os.path.join(root, f.lstrip("/")), "rb").read(65536)
+            if head[:4] == b"\x7fELF" or b"linux-tools" not in head:
+                bad.append(f)
+        tools = sorted(glob.glob(os.path.join(root, "usr", "lib", "linux-tools", "*")))
+        if bad or tools:
+            return False, f"{pkg}: non-wrapper files {bad[:3]} / installed tools {[os.path.basename(t) for t in tools]}"
+        return True, f"{pkg}: every executable is a text wrapper dispatching to /usr/lib/linux-tools/$(uname -r); no tools for any kernel are installed"
+    return False, f"{pkg}: no rule proves it carries no kernel code"
 seen = {}
+user = {}
 d = json.load(open(src))
 for r in d.get("Results") or []:
     for v in r.get("Vulnerabilities") or []:
         if not v.get("PkgName", "").startswith("linux-") or v["Severity"] not in ("CRITICAL", "HIGH"):
             continue
         vid = v["VulnerabilityID"]
+        if kver not in v["PkgName"]:
+            user.setdefault(vid, [v["Severity"], set()])[1].add(v["PkgName"])
+            continue
         if vid in seen:
             continue
         desc = (v.get("Description") or "").replace("\n", " ")
@@ -123,6 +168,20 @@ with open(out, "w") as o:
         o.write("\t".join((vid,) + seen[vid]) + "\n")
 c = collections.Counter((s[0], s[2]) for s in seen.values())
 print(f"kernel {kver}: " + ", ".join(f"{k[0]} {k[1]} {c[k]}" for k in sorted(c)))
+# a CVE also reported against the kernel's own packages is a kernel finding
+user = {k: u for k, u in user.items() if k not in seen}
+proof = {}
+uout = out[:-4] + "-userspace.tsv" if out.endswith(".tsv") else out + "-userspace"
+with open(uout, "w") as o:
+    o.write(f"# kernel CVEs reported ONLY against userspace packages from a kernel source (running kernel {kver})\n"
+            "id\tseverity\tpackages\tclass\tevidence\n")
+    for vid in sorted(user, key=lambda k: (user[k][0] != "CRITICAL", k)):
+        sev, pkgs = user[vid]
+        ev = [proof.setdefault(p, userspace_evidence(p)) for p in sorted(pkgs)]
+        cls = "no-kernel-code" if all(e[0] for e in ev) else "unverified"
+        o.write("\t".join((vid, sev, ",".join(sorted(pkgs)), cls, "; ".join(e[1] for e in ev))) + "\n")
+cu = collections.Counter((u[0], "no-kernel-code" if all(proof[p][0] for p in u[1]) else "unverified") for u in user.values())
+print(f"userspace-only (not the running kernel): " + (", ".join(f"{k[0]} {k[1]} {cu[k]}" for k in sorted(cu)) or "none"))
 broken = [x for x in review if not x[4]]
 if broken:
     print("REVIEW ENTRIES NOT HOLDING ON THIS DISK: " + ", ".join(x[2] for x in broken))

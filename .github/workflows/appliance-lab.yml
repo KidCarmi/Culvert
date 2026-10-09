@@ -1322,6 +1322,10 @@ jobs:
           # scanner runs as root (no root-owned scanner cache)
           sudo chmod -R a+rX rootfs
           cp rootfs/var/lib/culvert-appliance/build-info.json "$E/build-info.json"
+          # The shipped kernel's own config: configuration-based kernel CVE
+          # closures (kernel-cve-prereqs.tsv "config:" tokens) are checked
+          # against THIS file by kernel-matrix.py, not against prose.
+          cp rootfs/boot/config-* "$E/"
           sudo du -sh rootfs | tee "$E/rootfs-size.txt"
       - name: The application image (verified sha256) and its Go binaries
         env:
