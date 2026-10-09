@@ -95,6 +95,17 @@ everything else is triaged below with a suggested PR and required tests for foll
 > in a committed placeholder row at the START of a sweep), and at six
 > occurrences it is well past overdue.
 
+**2026-10-09 — `CHAOS-73` CLAIMED (placeholder, commit one). Domain: the
+session-revocation plane — the public `/api/auth/logout` endpoint, the
+process-wide `internal/session` revocation list, and the cluster revocation
+gossip that carries it to every node.** Id 73 is taken deliberately rather
+than "the next free number": 67, 68, 71 and 72 were allocated across open
+sweeps in the 2026-09-22 pass below and no merged code references them, so
+reusing one would reproduce the exact collision this row exists to prevent.
+This row is committed before any code is written — the remedy the header
+above reaches twice independently after ten collisions, and which §35, §36
+and §39 each applied first. Findings and gates are written up in §41 below.
+
 **2026-09-22 — CHAOS-70 sweep (the admin roster as a durability surface).**
 Written up as `CHAOS-66` and renumbered to `CHAOS-70` (§40) when main was merged
 in, because the SOCKS5-bind sweep below had taken 66 first — another
