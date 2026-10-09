@@ -1850,7 +1850,7 @@ findmnt -rn -t ext4 -o SOURCE,TARGET | while read -r dev tgt; do
   echo "ext4 $tgt $(dumpe2fs -h "$dev" 2>/dev/null | sed -n 's/^Filesystem features: *//p')"; done
 echo "=== kernel attack surface"
 # Assumptions the kernel CVE dispositions rely on (kernel-cve-prereqs.tsv).
-for k in kernel.unprivileged_bpf_disabled kernel.perf_event_paranoid kernel.apparmor_restrict_unprivileged_userns kernel.kptr_restrict kernel.dmesg_restrict; do
+for k in kernel.unprivileged_bpf_disabled kernel.perf_event_paranoid kernel.apparmor_restrict_unprivileged_userns kernel.kptr_restrict kernel.dmesg_restrict dev.tty.ldisc_autoload; do
   echo "sysctl $k=$(sysctl -n "$k" 2>/dev/null || echo unset)"; done
 for c in $(docker ps -q); do
   docker inspect -f 'container {{.Name}} privileged={{.HostConfig.Privileged}} capadd={{.HostConfig.CapAdd}} devices={{len .HostConfig.Devices}} seccomp={{.HostConfig.SecurityOpt}} userns={{.HostConfig.UsernsMode}} pid={{.HostConfig.PidMode}} net={{.HostConfig.NetworkMode}}' "$c"
@@ -1859,6 +1859,17 @@ echo "nic-drivers $(for i in /sys/class/net/*/device/driver; do basename "$(read
 echo "tpm $(ls -l /dev/tpm* 2>/dev/null | awk '{print $1, $3":"$4, $NF}' | tr '\n' ';' || true)"
 echo "fuse-mounts $(findmnt -rn -t fuse,fuseblk,fuse.* 2>/dev/null | wc -l) btrfs-mounts $(findmnt -rn -t btrfs 2>/dev/null | wc -l) nfs-mounts $(findmnt -rn -t nfs,nfs4 2>/dev/null | wc -l)"
 echo "perf-tool $(command -v perf >/dev/null && echo present || echo absent)"
+# Unprivileged network autoload surface (the HWE kernel ships every module):
+# each module a socket family / genl family / sock_diag / TCP ULP alias can
+# load must be denied or in the shipped reviewed list.
+ma="/lib/modules/$(uname -r)/modules.alias"; rv=/opt/culvert-appliance/provision/net-autoload-reviewed.txt
+if [ -f "$ma" ] && [ -f "$rv" ]; then
+  nl="$(awk '$1=="alias" && $2 ~ /^(net-pf-[0-9]+$|net-pf-[0-9]+-proto-|tcp-ulp-)/ {print $3}' "$ma" | tr - _ | sort -u)"
+  dn="$(awk '$1=="install" && $3=="/bin/false"{print $2}' /etc/modprobe.d/culvert-unused.conf | tr - _ | sort -u)"
+  rl="$(awk '!/^#/ && NF {print $1}' "$rv" | tr - _ | sort -u)"
+  echo "net-autoload total=$(printf '%s\n' "$nl" | grep -c .) denied=$(comm -12 <(printf '%s\n' "$nl") <(printf '%s\n' "$dn") | grep -c .) reviewed=$(comm -12 <(printf '%s\n' "$nl") <(printf '%s\n' "$rl") | grep -c .)"
+  echo "net-autoload-unreviewed=[$(comm -23 <(printf '%s\n' "$nl") <(sort -u <(printf '%s\n' "$dn" "$rl")) | tr '\n' ' ' | sed 's/ $//')]"
+else echo "net-autoload-unreviewed=[no reviewed list or modules.alias: $ma $rv]"; fi
 echo "=== kernel modules"
 denied_mods="$(awk '$1=="install" && $3=="/bin/false"{print $2}' /etc/modprobe.d/culvert-unused.conf)"
 echo "denied-count $(wc -w <<<"$denied_mods")"
@@ -1937,9 +1948,9 @@ EOS
     check E kernel-modules-denied fail "$bad"
   elif ! grep -qE '^sctp-socket=refused:.* loaded-after=0$' "$f"; then
     check E kernel-modules-denied fail "$(grep '^sctp-socket=' "$f")"
-  elif [[ "$(sed -n 's/^denied-count //p' "$f")" -lt 44 ]]; then
-    check E kernel-modules-denied fail "the installed denylist names only $(sed -n 's/^denied-count //p' "$f") modules (expected >= 44)"
-  else check E kernel-modules-denied pass "$(grep -c '^module ' "$f") denied modules (sctp, nfsd, kvm*, ksmbd, cifs, can*, pppoe, pppox, RDMA core, dccp, tipc, ip_vs, openvswitch, vxlan, LIO target, sound, Bluetooth, rxrpc/kafs, amdgpu, idpf, scsi_debug): for each, the effective modprobe -c rules carry install /bin/false + an empty softdep override, /bin/false is the final step of its own resolution, and a real load attempt exits non-zero, refused by a denied module's install rule ($(awk '$1=="module"{by=$7; sub(/^refused-by=/,"",by); if(by==$2) s++; else d++} END{print s+0" by their own rule, "d+0" by a denied dependency first"}' "$f")), unloaded before and after; a real SCTP socket is $(sed -n 's/^sctp-socket=\(refused:.*\) loaded-after.*/\1/p' "$f") and sctp stays unloaded"; fi
+  elif [[ "$(sed -n 's/^denied-count //p' "$f")" -lt 65 ]]; then
+    check E kernel-modules-denied fail "the installed denylist names only $(sed -n 's/^denied-count //p' "$f") modules (expected >= 65)"
+  else check E kernel-modules-denied pass "$(grep -c '^module ' "$f") denied modules (sctp, nfsd, kvm*, ksmbd, cifs, can*, pppoe, pppox, RDMA core, dccp, tipc, ip_vs, openvswitch, vxlan, LIO target, sound, Bluetooth, rxrpc/kafs, amdgpu, idpf, scsi_debug, and the 21 network-autoloadable modules the GA disk did not carry): for each, the effective modprobe -c rules carry install /bin/false + an empty softdep override, /bin/false is the final step of its own resolution, and a real load attempt exits non-zero, refused by a denied module's install rule ($(awk '$1=="module"{by=$7; sub(/^refused-by=/,"",by); if(by==$2) s++; else d++} END{print s+0" by their own rule, "d+0" by a denied dependency first"}' "$f")), unloaded before and after; a real SCTP socket is $(sed -n 's/^sctp-socket=\(refused:.*\) loaded-after.*/\1/p' "$f") and sctp stays unloaded"; fi
   # The kernel is Ubuntu's HWE series, exactly one image, no GA meta, and the
   # running kernel is that image.
   krun="$(sed -n 's/^kernel-running=//p' "$f")"; kimgs="$(sed -n 's/^kernel-images=//p' "$f" | xargs)"
@@ -1964,8 +1975,11 @@ EOS
   [[ -z "$bad_c" ]] || asf+="container with privileges/caps/devices: $bad_c; "
   grep -q '^perf-tool absent' "$f" || asf+="perf tool installed; "
   grep -qE '^fuse-mounts 0 btrfs-mounts 0 nfs-mounts 0$' "$f" || asf+="$(grep '^fuse-mounts' "$f"); "
+  [[ "$(sed -n 's/^sysctl kernel.apparmor_restrict_unprivileged_userns=//p' "$f")" == 1 ]] || asf+="unprivileged user namespaces not restricted; "
+  [[ "$(sed -n 's/^sysctl dev.tty.ldisc_autoload=//p' "$f")" == 0 ]] || asf+="unprivileged tty line-discipline autoload enabled; "
+  grep -qx 'net-autoload-unreviewed=\[\]' "$f" || asf+="unprivileged network autoload neither denied nor reviewed: $(grep '^net-autoload-unreviewed=' "$f"); "
   if [[ -n "$asf" ]]; then check E kernel-cve-assumptions fail "$asf"
-  else check E kernel-cve-assumptions pass "unprivileged BPF disabled ($(sed -n 's/^sysctl kernel.unprivileged_bpf_disabled=//p' "$f")), perf_event_paranoid $(sed -n 's/^sysctl kernel.perf_event_paranoid=//p' "$f"), $(grep -c '^container ' "$f") containers unprivileged with no added caps or devices, no perf tool, no FUSE/btrfs/NFS mounts; NICs: $(sed -n 's/^nic-drivers //p' "$f")"; fi
+  else check E kernel-cve-assumptions pass "unprivileged BPF disabled ($(sed -n 's/^sysctl kernel.unprivileged_bpf_disabled=//p' "$f")), perf_event_paranoid $(sed -n 's/^sysctl kernel.perf_event_paranoid=//p' "$f"), $(grep -c '^container ' "$f") containers unprivileged with no added caps or devices, no perf tool, no FUSE/btrfs/NFS mounts, unprivileged userns restricted, ldisc autoload off, network autoload $(sed -n 's/^net-autoload //p' "$f") (none unreviewed); NICs: $(sed -n 's/^nic-drivers //p' "$f")"; fi
   # CVE-2025-40190: no mounted ext4 filesystem carries ea_inode.
   if ! grep -q '^ext4 ' "$f"; then check E ext4-no-ea-inode fail "no ext4 mount listed"
   elif grep '^ext4 ' "$f" | grep -qw ea_inode; then check E ext4-no-ea-inode fail "$(grep '^ext4 ' "$f" | grep -w ea_inode | tr '\n' ' ')"

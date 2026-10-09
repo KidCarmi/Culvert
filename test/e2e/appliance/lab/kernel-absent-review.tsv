@@ -4,6 +4,12 @@
 # unset, and the module file is not under /lib/modules. Reviewed by hand
 # against 6.8.0-146 (config + linux-modules file list); anything not listed
 # here is "present".
+#
+# The HWE kernel (7.0.0-38, candidate 41bd1193 onwards) ships EVERY module in
+# linux-modules, so most rows below no longer hold on its disk: kernmap.py
+# then reports "REVIEW ENTRIES NOT HOLDING" and classes those CVEs present or
+# denied, never absent. The rows stay because they are still correct for any
+# disk on which they hold (s390 does: CONFIG_S390 is unset on x86_64).
 # subsystem-prefix(regex)	CONFIG symbol	module (file stem)
 ^Bluetooth	BT	bluetooth
 ^RDMA/rxe	RDMA_RXE	rdma_rxe
