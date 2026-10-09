@@ -224,7 +224,9 @@ func TestPrepareGuest_UnusedKernelModulesCannotLoad(t *testing.T) {
 		// unprivileged network autoload the GA 6.8 disk did not carry
 		"batman_adv", "caif_socket", "cfg80211", "gtp", "kcm", "l2tp_core", "l2tp_ip", "l2tp_ip6",
 		"l2tp_netlink", "l2tp_ppp", "macsec", "mpls_router", "mptcp_diag", "nfc", "ovpn", "qrtr",
-		"rds", "smc", "smc_diag", "tipc_diag", "xsk_diag"} {
+		"rds", "smc", "smc_diag", "tipc_diag", "xsk_diag",
+		// the NVMe-over-Fabrics target (CVE-2026-64535 on the GA kernel) ships with HWE
+		"nvmet", "nvmet_tcp"} {
 		for _, want := range []string{"\nblacklist " + m + "\n", "\ninstall " + m + " /bin/false\n", "\nsoftdep " + m + " pre: post:\n"} {
 			if !strings.Contains(conf, want) {
 				t.Errorf("modprobe-culvert-unused.conf must contain %q", strings.TrimSpace(want))
@@ -236,7 +238,7 @@ func TestPrepareGuest_UnusedKernelModulesCannotLoad(t *testing.T) {
 		`install -m 0644 "$APPL/provision/modprobe-culvert-unused.conf" /etc/modprobe.d/culvert-unused.conf`,
 		// the check reads its module list from the installed file itself
 		`denied_mods="$(awk '$1=="install" && $3=="/bin/false"{print $2}' /etc/modprobe.d/culvert-unused.conf)"`,
-		`[[ "$(wc -w <<<"$denied_mods")" -ge 65 ]] ||`,
+		`[[ "$(wc -w <<<"$denied_mods")" -ge 67 ]] ||`,
 		`for m in $denied_mods kvm-amd can-raw; do`,
 		`modprobe -n -v "$m" 2>&1 | tail -n 1 | grep -qE '^install /bin/false[[:space:]]*$' || { echo "modprobe would still load $m" >&2; exit 1; }`,
 	} {

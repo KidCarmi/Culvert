@@ -275,7 +275,7 @@ install -m 0644 "$APPL/provision/modprobe-culvert-unused.conf" /etc/modprobe.d/c
 # Every module the file denies is checked (the list is read from the file, so
 # the two cannot disagree), plus the "-" spellings modprobe treats as equal.
 denied_mods="$(awk '$1=="install" && $3=="/bin/false"{print $2}' /etc/modprobe.d/culvert-unused.conf)"
-[[ "$(wc -w <<<"$denied_mods")" -ge 65 ]] || { echo "culvert-unused.conf denies only $(wc -w <<<"$denied_mods") modules" >&2; exit 1; }
+[[ "$(wc -w <<<"$denied_mods")" -ge 67 ]] || { echo "culvert-unused.conf denies only $(wc -w <<<"$denied_mods") modules" >&2; exit 1; }
 for m in $denied_mods kvm-amd can-raw; do
   # The FINAL step decides: a dependency's own `install /bin/false` line must
   # not satisfy the check for the module that depends on it.
@@ -368,6 +368,10 @@ bash "$APPL/console/install.sh"
 # console. No custom daemon, unit-ordering overrides or readiness dependencies;
 # the one drop-in (ExecCondition=culvert-has-display on the Plymouth units)
 # only skips Plymouth on a machine with no display.
+# Keep the initramfs to a local-disk VM boot (see the hook): installed BEFORE
+# the boot-screen step below, whose update-initramfs -u -k all builds the one
+# initramfs that ships; every later kernel update runs it again.
+install -m 0755 "$APPL/provision/initramfs-culvert-trim" /etc/initramfs-tools/hooks/zz-culvert-trim
 log "installing Culvert early boot screen and rebuilding initramfs"
 bash "$APPL/boot-splash/install.sh"
 

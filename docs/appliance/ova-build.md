@@ -193,7 +193,7 @@ verifies on import.
   `lxd-installer` stays, because `ubuntu-server` depends on it, and the build
   refuses if `ubuntu-server`, `open-vm-tools` or `unattended-upgrades` is gone
   afterwards. Raising the snapshot is a pin change like any other.
-  `/etc/modprobe.d/culvert-unused.conf` makes 65 modules unloadable
+  `/etc/modprobe.d/culvert-unused.conf` makes 67 modules unloadable
   (`install … /bin/false`, verified with `modprobe -n` at build for every
   module the file denies): `sctp`, `nfsd`, `kvm`, `kvm_amd`, `kvm_intel`,
   `ksmbd`, `cifs`, the `can*` family, `pppoe`, `pppox`, the RDMA stack
@@ -232,8 +232,10 @@ verifies on import.
   Ubuntu restricts those, `kernel.apparmor_restrict_unprivileged_userns=1`,
   and Docker's seccomp profile refuses them in containers), and tty line
   disciplines, whose unprivileged autoload this kernel does not compile in
-  (`CONFIG_LDISC_AUTOLOAD` unset). `nvmet-tcp` is not built for this kernel;
-  `ib_srpt` is on the disk but depends on the denied `ib_core`.
+  (`CONFIG_LDISC_AUTOLOAD` unset). The NVMe-over-Fabrics target (`nvmet`, `nvmet_tcp`; CVE-2026-64535
+  was CRITICAL on the GA kernel, where the module was not on the disk) ships
+  with the HWE kernel and is denied; `ib_srpt` ships too and depends on the
+  denied `ib_core`.
   `/etc/udev/rules.d/72-culvert-drm.rules` makes every DRM node root:root
   0600 and drops logind's `uaccess` tag, so the open vmwgfx ioctl CVEs (the
   ESXi display driver, which cannot be denied without losing the console)

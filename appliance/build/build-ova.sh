@@ -95,7 +95,7 @@ for v in BASE_IMAGE_URL BASE_IMAGE_SHA256 APP_IMAGE_REPO APP_IMAGE_TAG APP_IMAGE
   [[ -n "${!v:-}" ]] || die "manifest.env: $v is not set"
 done
 
-for t in qemu-img guestfish virt-customize virt-cat virt-ls docker curl gzip tar sha256sum python3 go; do
+for t in qemu-img guestfish virt-customize virt-cat virt-ls lsinitramfs docker curl gzip tar sha256sum python3 go; do
   command -v "$t" >/dev/null 2>&1 || die "required tool missing: $t"
 done
 CONSOLE_GO_VERSION="$(console_go_version "$REPO")"
@@ -323,7 +323,7 @@ rm -rf "$OV"; mkdir -p "$OV/opt/culvert-appliance" "$OV/var/lib/culvert-applianc
 # Copy only runtime inputs. Recursive directory copies also shipped host test
 # scripts and could pick up ignored local material from a developer checkout.
 mkdir -p "$OV/opt/culvert-appliance/provision" "$OV/opt/culvert-appliance/os-maintenance"
-for runtime_file in 60-culvert-readahead.rules 72-culvert-drm.rules modprobe-culvert-unused.conf net-autoload-reviewed.txt cloud-90-culvert.cfg culvert-appliance-reset-identity \
+for runtime_file in 60-culvert-readahead.rules 72-culvert-drm.rules modprobe-culvert-unused.conf net-autoload-reviewed.txt initramfs-culvert-trim cloud-90-culvert.cfg culvert-appliance-reset-identity \
   culvert-firstboot.service culvert-firstboot.sh culvert-issue-update \
   culvert-issue.service culvert-issue.timer culvert-net culvert-status \
   culvert-sudo-policy nftables.conf sshd-50-culvert.conf; do
@@ -602,6 +602,26 @@ for fs in $(LIBGUESTFS_BACKEND="${LIBGUESTFS_BACKEND:-direct}" guestfish --ro -a
   echo "$fs ext4 features: $feats" >> "$OUT/ext4-features.txt"
 done
 [[ -s "$OUT/ext4-features.txt" ]] || die "no ext4 filesystem found in the image (features not checked)"
+# The initramfs GRUB loads at every boot: storage the supported hypervisors
+# present must be in it (or built in), the trimmed groups must not be, and it
+# must stay near the GA kernel's size, because firmware-speed reads of a bigger
+# one cost ~1 s per MB on ESXi-like storage (initramfs-culvert-trim).
+kver_boot="$(virt-ls -a "$DISK" /boot | sed -n 's/^vmlinuz-//p' | sort -V | tail -1)"
+[[ -n "$kver_boot" ]] || die "no kernel in /boot"
+virt-cat -a "$DISK" "/boot/initrd.img-$kver_boot" > "$WORK/initrd.img" || die "could not read the initramfs"
+virt-cat -a "$DISK" "/lib/modules/$kver_boot/modules.builtin" > "$WORK/modules.builtin" || die "could not read modules.builtin"
+initrd_bytes="$(stat -c %s "$WORK/initrd.img")"
+lsinitramfs "$WORK/initrd.img" > "$WORK/initrd.list" || die "lsinitramfs failed on the shipped initramfs"
+{ echo "kernel=$kver_boot initrd_bytes=$initrd_bytes modules=$(grep -c '\.ko' "$WORK/initrd.list")"
+  for m in vmw_pvscsi mptspi mptsas ahci nvme virtio_scsi virtio_blk sd_mod ext4 ata_piix; do
+    if grep -qE "/${m}\.ko(\.zst|\.xz)?$" "$WORK/initrd.list"; then echo "$m initramfs"
+    elif grep -qE "/${m}\.ko$" "$WORK/modules.builtin"; then echo "$m built-in"
+    else echo "$m MISSING"; fi
+  done; } > "$OUT/initrd-modules.txt"
+if grep -q ' MISSING$' "$OUT/initrd-modules.txt"; then die "the initramfs lacks a boot storage driver: $(grep ' MISSING$' "$OUT/initrd-modules.txt" | tr '\n' ' ')"; fi
+if grep -qE '/kernel/drivers/(net|infiniband|thunderbolt|usb/typec|mmc)/' "$WORK/initrd.list"; then die "initramfs-culvert-trim did not run: network/RDMA/Thunderbolt/Type-C/MMC drivers are in the initramfs"; fi
+(( initrd_bytes <= 45000000 )) || die "initramfs is ${initrd_bytes} bytes (> 45 MB): boot time on high-latency storage regresses"
+rm -f "$WORK/initrd.img" "$WORK/initrd.list" "$WORK/modules.builtin"
 [[ "$(virt-cat -a "$DISK" /etc/machine-id | wc -c)" -eq 0 ]] || die "machine-id not empty"
 if virt-ls -a "$DISK" /etc/ssh/ | grep -q '^ssh_host_'; then die "ssh host keys present in image"; fi
 if virt-ls -a "$DISK" /etc/apt/apt.conf.d/ | grep -qi proxy; then die "apt proxy config leaked into image"; fi
