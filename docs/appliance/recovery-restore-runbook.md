@@ -104,8 +104,27 @@ Details: `docs/operator/release-management-agent.md` §"Interrupted operations".
 
 ## 5. Disaster recovery (new appliance)
 
-1. Import the OVA, first boot (`first-boot.md`) up to the point where the
-   stack is running — do NOT complete the setup wizard.
+1. Import the OVA and let first boot (`first-boot.md`) **finish** — do NOT
+   complete the setup wizard. "The stack is running" is NOT enough: first
+   boot keeps working after the proxy first answers (its agent step re-runs
+   the installer and recreates the stack, then the finish step), and a
+   restore commit needs the stack down for its whole duration. A restore
+   started before first boot finishes races those steps. Wait for:
+
+   ```bash
+   sudo culvert-status --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["provisioning"])'
+   # complete            -> go on (state file /var/lib/culvert-appliance/state/complete.done)
+   # running/incomplete  -> wait and poll again
+   # FAILED (...)        -> stop; fix first boot (journalctl -u culvert-firstboot) before any restore
+   ```
+
+   This is a prerequisite of the procedure, not something the product
+   detects for you: nothing prevents an operator from starting a restore
+   early. An automated controller (for example a qualification harness)
+   must poll this field with a timeout and refuse to proceed on anything but
+   `complete`. ASTRA's 7c7b29ee ESXi round hit exactly this: its first fresh
+   restore was refused by the controller's own preflight because first boot
+   was still incomplete, and passed once completion was established.
 2. Copy the archive to the `culvert-backups` volume (or mount it at
    `/backup`), put the ORIGINAL `.env` back (CA/log passphrases), restore
    with `--mode full --accept-dp-reenrollment --accept-root-ca-change`

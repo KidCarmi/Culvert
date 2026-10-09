@@ -60,7 +60,11 @@ guest; vCenter delivers them without it.
 
 Open the VM console. Within 3–8 minutes the banner moves from
 `provisioning (running)` to `services running — setup pending` and prints
-the **setup token**. With DHCP, read the address from the banner and
+the **setup token**. Every later step — above all a restore or a
+fresh-appliance recovery — assumes first boot has FINISHED: an automated
+controller polls `sudo culvert-status --json` until `provisioning` is
+`complete` and refuses to proceed on `FAILED` (see
+`recovery-restore-runbook.md` §5 step 1). With DHCP, read the address from the banner and
 `export ADDR=<it>`. Photograph or copy the banner into `$EV/02-console.txt`.
 
 ## 3. First-boot evidence and kernel BEFORE
