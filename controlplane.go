@@ -45,9 +45,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"google.golang.org/grpc"
+
+	"github.com/KidCarmi/Culvert/internal/session"
 )
 
 // ─── gRPC service definition (no protoc needed) ───────────────────────────────
@@ -235,12 +238,61 @@ var globalRevAggregator = &revocationAggregator{
 	perNode: map[string][]RevocationEntry{},
 }
 
-// Update stores the latest revocation entries from a node.
+// maxRevocationsPerNode caps how many revocation entries the Control Plane
+// retains from ONE Data Plane node.
+//
+// CHAOS-73: this aggregator is the DP→CP push direction, and it bounded
+// nothing — neither the entry count nor the key length — while
+// MergedExcluding walks the union of EVERY node's entries and allocates a
+// dedup map over it on EVERY SyncRevocations call, which each node makes
+// every 3 s. So one node's oversized push cost the CP O(total) CPU and
+// allocation per node per tick, and was then fanned back out to every other
+// node in the fleet to be merged and persisted.
+//
+// internal/audit's DP→CP queue already caps this same direction at 1000 with
+// a drops counter on the explicit reasoning that a DP which cannot reach its
+// CP must not grow unbounded; the identical argument applies in reverse to a
+// CP aggregating from its fleet. The cap is deliberately far above any real
+// deployment (a node holds one entry per logout inside one session TTL) so
+// reaching it means a node is malfunctioning or hostile, not busy.
+const maxRevocationsPerNode = 4096
+
+// Update stores the latest revocation entries from a node, bounded.
+//
+// Entries are DROPPED rather than the push being refused: a refusal would
+// also discard the node's legitimate entries, and the honest degradation is
+// that cluster-wide revocation is incomplete for the overflow — which is
+// counted, because a dropped revocation means a session an operator killed
+// may still authenticate on other nodes.
 func (a *revocationAggregator) Update(nodeID string, entries []RevocationEntry) {
+	kept := make([]RevocationEntry, 0, len(entries))
+	dropped := 0
+	for _, e := range entries {
+		if len(e.Token) > session.MaxRevocationTokenLen {
+			dropped++
+			continue
+		}
+		if len(kept) >= maxRevocationsPerNode {
+			dropped++
+			continue
+		}
+		kept = append(kept, e)
+	}
+	if dropped > 0 {
+		clusterRevocationDrops.Add(int64(dropped))
+	}
 	a.mu.Lock()
-	a.perNode[nodeID] = entries
+	a.perNode[nodeID] = kept
 	a.mu.Unlock()
 }
+
+// clusterRevocationDrops counts revocation entries the Control Plane refused
+// to retain from a Data Plane node (over-long key, or past the per-node cap).
+// Non-zero means cluster-wide session revocation is incomplete.
+var clusterRevocationDrops atomic.Int64
+
+// clusterRevocationDropTotal reports the count for the metrics surface.
+func clusterRevocationDropTotal() int64 { return clusterRevocationDrops.Load() }
 
 // MergedExcluding returns all revocation entries from other nodes.
 func (a *revocationAggregator) MergedExcluding(nodeID string) []RevocationEntry {

@@ -95,6 +95,17 @@ everything else is triaged below with a suggested PR and required tests for foll
 > in a committed placeholder row at the START of a sweep), and at six
 > occurrences it is well past overdue.
 
+**2026-10-09 — `CHAOS-73` CLAIMED (placeholder, commit one). Domain: the
+session-revocation plane — the public `/api/auth/logout` endpoint, the
+process-wide `internal/session` revocation list, and the cluster revocation
+gossip that carries it to every node.** Id 73 is taken deliberately rather
+than "the next free number": 67, 68, 71 and 72 were allocated across open
+sweeps in the 2026-09-22 pass below and no merged code references them, so
+reusing one would reproduce the exact collision this row exists to prevent.
+This row is committed before any code is written — the remedy the header
+above reaches twice independently after ten collisions, and which §35, §36
+and §39 each applied first. Findings and gates are written up in §41 below.
+
 **2026-09-22 — CHAOS-70 sweep (the admin roster as a durability surface).**
 Written up as `CHAOS-66` and renumbered to `CHAOS-70` (§40) when main was merged
 in, because the SOCKS5-bind sweep below had taken 66 first — another
@@ -8281,3 +8292,263 @@ the sweep happens to be editing.
   from the local-account delete path, which the roster backstop already covers;
   it becomes live the moment user-level revocation is wired to anything else.
   Recorded as **AU-19**, not fixed inside a sweep about durability.
+
+---
+
+## 41. CHAOS-73 — The public logout endpoint as an unauthenticated writer of durable, fleet-wide state
+
+**Status:** Shipped. **Id:** claimed in a committed placeholder row (§0) as
+commit one, before any code was written.
+
+**Domain:** the session-revocation plane — `/api/auth/logout`,
+`internal/session`'s process-wide revocation list, the on-disk revocations
+file, and the cluster revocation gossip that carries it between nodes.
+
+### 41.1 Executive summary
+
+`/api/auth/logout` is on `uiAuthMiddleware`'s **public** allowlist. That is
+correct and must stay: a session that has expired or already been revoked
+cannot authenticate a request, and it must still be able to clear its own
+cookie. What was not correct is what the handler did with the cookie it was
+handed.
+
+`revokeSessionCookie` base64-decoded the cookie, read the expiry out of the
+decoded payload, inserted the payload bytes into the revocation list as the
+key, and rewrote the whole revocations file. **The HMAC was never checked**,
+and the call site's own comment asserted the opposite — *"Decode just to get
+the expiry (HMAC already verified by decodeSession)"*. That is true of
+`Decode` and false here, because `apiAuthLogout` calls `revokeSessionCookie`
+**unconditionally**: the `sess != nil` guard immediately above it covers only
+the audit entry.
+
+So an **unauthenticated** caller chose the retained key, its **length**, and
+its **expiry**. Every one of the three is load-bearing:
+
+* the **key** is retained in a process-global map and written to disk;
+* the **length** is bounded only by `net/http`'s 1 MiB header budget;
+* the **expiry** is what the evictor keys on, so a far-future value makes the
+  entry permanently unreclaimable.
+
+### 41.2 Measured, against the real handler
+
+All figures from `session_revocation_chaos_test.go` on the pre-fix tree.
+
+| Property | Measurement |
+|---|---|
+| Reachability over the wire | A **524,389-byte** forged cookie answered **HTTP 200** through a real `net/http` server and was retained. (Driven through a real server deliberately: `httptest.NewRequest` can set a Cookie header the wire could never deliver — the SEC-BOOTSTRAP-HOST-1 lesson.) |
+| Retention | 5 unauthenticated POSTs → 5 entries, each with a **100-year** expiry. |
+| Disk write amplification | 200 requests carrying 16 KiB each (**3.2 MB in**) wrote **441 MB**. The curve is **17.4x → 34.2x → 67.7x → 134.8x** as n doubled 25 → 50 → 100 → 200: **quadratic in request count**, because each insert rewrites the entire file. |
+| Fleet propagation | One request's entry (273,154 bytes of key) appeared in `ExportRevocations` — i.e. in the payload the DP pushes to the CP **every 3 s** — and a peer's `MergeRevocations` accepted it, durably. |
+| Remote feed | `MergeRevocations` accepted **50,000** peer-supplied entries with no cap of any kind. |
+
+**This is CHAOS-63's finding one endpoint over, and strictly worse on three
+axes.** §32 bounded `/api/auth/login`'s username, which reached the lockout
+maps and the durable audit log — a **linear** amplifier rated on 4.2 MB from 8
+requests. Here the amplifier is **quadratic**, the state is **durable across
+restarts** (persisted, then re-merged at boot by `LoadRevocations`), and in a
+cluster it is **fleet-wide**: one unauthenticated request to one node's admin
+port becomes state on every node. §32's sweep bounded the login endpoint and
+did not look at the sibling public route beside it on the same allowlist.
+
+### 41.3 Why it survived
+
+Three tests already covered `revokeSessionCookie`
+(`TestRevokeSessionCookie_MalformedCookie`, `_NoCookie`, `_InvalidValue`).
+**All three assert only that it does not panic.** None asserts what it
+*retained*, which is the only interesting thing the function does. That is the
+same class of vacuity this document has recorded repeatedly — a gate whose
+assertion is weaker than the property it is believed to protect — and it is
+why §41.6 pins retention and bytes-written rather than absence of a crash.
+
+The comment is the second half. It named the exact invariant that mattered
+(*the HMAC has been verified*) and attributed it to a function that is not on
+this path. A stated invariant with no enforcement reads, in review, exactly
+like an enforced one.
+
+### 41.4 The fix: authenticate, do not bound
+
+A revocation key is the payload half of a cookie **this appliance signed**. A
+cookie it did not sign cannot name a session of its own, so there is nothing
+for it to revoke, and **refusing it loses nothing**.
+
+That is the sharp difference from CHAOS-63. §32 could not simply refuse: an
+over-long *configured* username was a real admin, so the bound needed an
+exemption (`cfg.LoginNameConfigured`) to avoid locking that operator out.
+Here there is no legitimate caller on the far side of the check at all.
+
+**Verification costs nothing for the case the public route exists to serve.**
+`Decode` checks the MAC **before** the expiry, so a genuine but expired cookie
+still verifies, still logs out, and is deliberately **not** charged to the
+probe counter — a user returning the next day and clicking Log out is ordinary
+traffic, and counting it would bury the one signal an operator has.
+
+**A bound alone would have missed almost all of it**, and it was the first fix
+considered. Capping the cookie length bounds the bytes per request and leaves
+every other property intact: the caller still chooses the key and the expiry,
+so the entries are still immortal, still persisted, still gossiped fleet-wide,
+and the amplification is still quadratic with a smaller constant.
+
+#### The structural half, and its exemption
+
+Authentication cannot reach two of the three writers, so those keep bounds
+(`internal/session/revocation_bounds.go`):
+
+* **cluster gossip** — a peer chooses the key bytes and the entry count;
+* **the persistence file** — which may have been written by a build predating
+  this one, or hand-edited.
+
+Both get `MaxRevocationTokenLen` (8192) and `MaxRevocationEntries` (65536),
+with counted refusals. **The MAC-verified local path gets neither**, so a real
+session is always revocable however large its cookie grew — the same shape as
+§32's configured-username exemption, for the same reason: *a bound must never
+refuse the real thing.* `TestChaos73_ControlVerifiedRevocationIsExemptFromTheKeyBound`
+pins it and was verified failing against a build that applies the bound on the
+local path too.
+
+**There is deliberately no cap on the local path.** Evicting a revocation
+entry resurrects a revoked session — a fail-**open** failure of a security
+control, so a cap here is not free the way a cap on a cache is. With the MAC
+check in place the local count is bounded by **real logins inside one session
+TTL** (max 7 days), each of which already costs a credential verification
+governed by `internal/authcost`. That is the bound, and it is a *consequence of
+authentication* rather than a second mechanism. §32 reached the same conclusion
+about the lockout maps and recorded it as AU-17.
+
+#### The write is gated on an actual change
+
+The quadratic term is (bytes retained) × (writes). Removing the unauthenticated
+insert removes most of it; persisting **only when the list actually changed**
+removes the rest. A replayed logout of an already-revoked cookie now writes
+nothing — and that half applies to **authenticated** callers too, so
+authentication alone does not close it. This is CHAOS-70's rule — *a mutation
+reporting no change issues no write* — applied one plane over.
+
+#### The Control Plane half, because fixing one surface does not fix the call
+
+`revocationAggregator.Update` retained whatever a node pushed, uncapped in both
+count and key size, while `MergedExcluding` walks the union of **every** node's
+entries and allocates a dedup map over it on **every** `SyncRevocations` call
+from **every** node, each of which syncs every 3 s. `internal/audit` already
+caps this same DP→CP direction at 1000 with a drops counter, on the explicit
+reasoning that a DP which cannot reach its CP must not grow unbounded; the
+identical argument applies in reverse to a CP aggregating from its fleet.
+
+Bounding the DP while leaving the CP uncapped would have been exactly the
+*"fixing one surface does not fix the call"* error SEC-SOCKS5-LOG-1 records.
+Entries are **dropped rather than the push refused** (a refusal would also
+discard the node's legitimate entries) and the drops are counted, because a
+dropped revocation means a session an operator killed may still authenticate
+elsewhere.
+
+#### A refusal must not be an oracle
+
+The handler still answers `200` and still clears the cookie. If a forged cookie
+produced a different status, body or `Set-Cookie` than a genuine one, logout
+would become an oracle an unauthenticated caller could use to test whether a
+captured cookie is still valid — pinned by
+`TestChaos73_ControlRefusalIsNotAnOracle`.
+
+### 41.5 Surfaces
+
+Reusing existing vocabulary throughout — no new alert event (a new name is
+silently unsubscribed on every configured webhook) and no `/readyz` row (a node
+being probed is a fully serving gateway; failing readiness would convert it
+into the traffic outage the change exists to prevent).
+
+* `culvert_session_revoke_refused_total` — **always emitted**: there is no
+  configuration to gate it on, so a flat zero means *nothing has been probed*
+  and never *the feature is off* (the `culvert_proxy_oversize_host_rejected_total`
+  rule, and the inverse of the armed-only gauges).
+* `culvert_session_revoke_rejected_total{reason}` — five **fixed** series over a
+  closed set, never a label derived from caller bytes (the WK-12/RS-5 defect).
+* `culvert_session_revocations_tracked`, `culvert_cluster_revocation_drops_total`.
+* `/api/diagnostics` → the `session_revocation` row. **WARN-only**, counts
+  only — never a client address, a cookie, or any prefix of one, because that
+  is a viewer-role surface and the bytes are attacker-chosen.
+* `SESSION_REVOKE_REFUSED` in the process log, rate-limited to one line per
+  minute with the cumulative count on every line (*a mitigation for a
+  write-amplification defect must not be one itself*), via a **CAS** claim
+  rather than a mutex: read/compare/store lets every concurrent caller observe
+  the same expired stamp and all emit, which is the TOCTOU CHAOS-70 round 1 had
+  to fix on this exact pattern, and a mutex would serialise an unauthenticated
+  endpoint on one process-wide lock. The client address is resolved **behind**
+  the rate gate, because arguments evaluate eagerly and `realClientIP` joins
+  and splits the whole `X-Forwarded-For` header — the correction
+  `request_tracing_bounds.go` and `proxy_host_bounds.go` each needed.
+* Runbook: `docs/operator/session-revocation-plane.md`.
+
+### 41.6 Gates
+
+`session_revocation_chaos_test.go` — 21 functions: a **defect proof**
+(`preFixRevokeSessionCookie` keeps the pre-fix body verbatim, so a change that
+made the forgery inert cannot turn the suite green while the defect stands),
+9 defect gates, 6 controls, the per-reason diagnostic gate, 2 structural wall
+functions and 2 runbook walls.
+
+**Ten mutations, each verified failing its gate:**
+
+| Mutation | Gates that must fail |
+|---|---|
+| Pre-fix `revokeSessionCookie` restored | D1–D5 |
+| Key-size bound removed | D6 |
+| Entry cap removed | D7 |
+| `sweepLocked` made a no-op | D8 |
+| CP aggregator bound removed | D9 |
+| `RevokeVerified` refuses everything | C1, C2, C5 |
+| Key bound applied to the local path | C5 |
+| `MergeRevocations` refuses everything | C4 |
+| Unverified primitive re-called from production | the wall |
+| Wall selector run against a synthetic offender | not-vacuous check |
+
+Two methodology points worth carrying forward.
+
+**A control that fails against the pre-fix tree is a defect gate wearing a
+control's label, and it costs the control its whole purpose.** The first draft
+of `ControlExpiredGenuineCookieStillLogsOutQuietly` asserted the new
+per-reason counter alongside the availability property. The counter did not
+exist pre-fix, so the "control" failed there — meaning it could no longer do
+the one job a control has, which is to pass on both trees and fail only
+against the cheapest wrong fix. The counter assertion is now its own gate.
+
+**The structural wall is scoped to the PRIMITIVE, not to the file.** CHAOS-70's
+wall AST-walked one file and its own note records the consequence: *"the claim
+was broader than the wall and the mutator that escaped both lived in another
+file. Enumerate such a class from the PRIMITIVE, not from the file being
+edited."* This wall therefore walks every non-test file of package `main` for
+any call to the unverified `sessionRevoked.Revoke`, with a not-vacuous check on
+the file count and a second function proving the selector matches the shape it
+forbids.
+
+### 41.7 Risk and impact
+
+| Axis | Pre-fix | Post-fix |
+|---|---|---|
+| Likelihood | **High** — one unauthenticated POST, no special position, no knowledge of the deployment | — |
+| Availability | **High** — immortal heap growth; quadratic disk writes filling the data volume; `MergedExcluding` CPU/allocation on the CP per node per 3 s | Bounded by real logins; refused requests retain and write nothing |
+| Security | **Medium** — durable corruption of a security control's state, fleet-wide, from an unauthenticated caller. Not a session-forging vector: the key requires a victim's exact payload and `Jti` is 128 random bits | Only cookies this appliance signed are retained |
+| Data integrity | **Medium** — the revocations file is attacker-extensible and reloaded at boot | File content is limited to verified sessions and bounded remote entries |
+| Monitoring | **None** — no counter, metric, log line or health row existed on this plane | Four series, a contract row, a rate-limited log line, a runbook |
+
+### 41.8 Residual risk, recorded and not fixed
+
+* **Revocation persistence is opt-in** (`--revocations-file`, default empty), so
+  on the shipped configuration revocations are lost on restart and a revoked
+  session becomes valid again until its natural expiry. Pre-existing and
+  unchanged by this sweep; it is also why the quadratic disk amplification
+  needed an operator to have enabled persistence, while the memory and gossip
+  halves applied to every deployment.
+* **The revocations file is not in the backup allowlist** (F-18 in
+  `PRODUCTION-FAILURE-MODE-AUDIT.md`). Unchanged.
+* **User-level revocation is still node-local and non-persistent** — `RevokeUser`
+  is neither written to disk nor gossiped, while token-level revocation is both.
+  Register row **AU-19**, recorded by §40 and still open: two mechanisms for one
+  question, one of which survives a restart.
+* **`MergedExcluding` is still O(total entries) per call.** It is now bounded by
+  the caps rather than by a peer's generosity, which removes the unbounded
+  failure mode, but the CP still does that work once per node per 3 s. A
+  revision-stamped diff would remove it; that is a cost change, not a
+  resilience one, and belongs in its own PR.
+* **An entry refused on an untrusted-origin path fails open for that one remote
+  session.** This is the honest trade and the reason it is counted and
+  surfaced: refusing to admit is better than evicting a local entry, and a
+  silent drop would be worse than either.
