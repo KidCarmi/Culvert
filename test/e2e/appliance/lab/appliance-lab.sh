@@ -1648,7 +1648,13 @@ echo "=== dockerd argv"; ps -o args= -C dockerd | sed 's/^/dockerd-argv /'
 echo "=== daemon.json"; cat /etc/docker/daemon.json 2>/dev/null | sed 's/^/daemon.json /'
 echo "=== containerd plugins"; ctr plugins ls 2>/dev/null | awk '{print "plugin "$1" "$2" "$NF}'
 echo "disabled-plugins $(grep -E '^[[:space:]]*disabled_plugins' /etc/containerd/config.toml 2>/dev/null)"
-echo "=== kernel modules"; for m in sctp nfsd kvm kvm_amd kvm_intel ksmbd cifs can can_raw can_bcm can_gw can_isotp can_j1939 pppoe pppox ib_core ib_cm iw_cm rdma_cm ib_uverbs rdma_ucm ib_umad dccp tipc; do echo "module $m modprobe=$(modprobe -n -v "$m" 2>&1 | tr -s ' ' | tr '\n' ' ') loaded=$(grep -c "^$m " /proc/modules)"; done
+echo "=== kernel modules"; for m in sctp nfsd kvm kvm_amd kvm_intel ksmbd cifs can can_raw can_bcm can_gw can_isotp can_j1939 pppoe pppox ib_core ib_cm iw_cm rdma_cm ib_uverbs rdma_ucm ib_umad dccp tipc; do
+  # FINAL step of the module's own resolution (a dependency's deny must not
+  # count), then a REAL load attempt: it must fail and leave the module out.
+  final="$(modprobe -n -v "$m" 2>&1 | tail -n 1 | tr -s ' ')"
+  if modprobe "$m" >/dev/null 2>&1; then real=loaded; else real=refused; fi
+  echo "module $m final=${final% } real=$real loaded=$(grep -c "^$m " /proc/modules)"
+done
 echo "sctp-socket=$(python3 -c 'import socket
 try:
     socket.socket(socket.AF_INET, socket.SOCK_STREAM, 132); print("opened")
@@ -1696,11 +1702,11 @@ EOS
   # Unused kernel modules: denied by modprobe.d, not loaded, and an actual
   # SCTP socket (which would autoload the module) is refused.
   if ! grep -qE '^module ' "$f"; then check E kernel-modules-denied fail "no module lines (old OVA without the denylist?)"
-  elif grep -E '^module ' "$f" | grep -vqE 'modprobe=install /bin/false *loaded=0$'; then
-    check E kernel-modules-denied fail "$(grep -E '^module ' "$f" | grep -vE 'modprobe=install /bin/false *loaded=0$' | tr '\n' ' ')"
+  elif grep -E '^module ' "$f" | grep -vqE 'final=install /bin/false real=refused loaded=0$'; then
+    check E kernel-modules-denied fail "$(grep -E '^module ' "$f" | grep -vE 'final=install /bin/false real=refused loaded=0$' | tr '\n' ' ')"
   elif ! grep -qE '^sctp-socket=refused:.* loaded-after=0$' "$f"; then
     check E kernel-modules-denied fail "$(grep '^sctp-socket=' "$f")"
-  else check E kernel-modules-denied pass "$(grep -c '^module ' "$f") denied modules (sctp, nfsd, kvm*, ksmbd, cifs, can*, pppoe, pppox, RDMA core, dccp, tipc): modprobe resolves to /bin/false, none loaded; a real SCTP socket is $(sed -n 's/^sctp-socket=\(refused:.*\) loaded-after.*/\1/p' "$f") and sctp stays unloaded"; fi
+  else check E kernel-modules-denied pass "$(grep -c '^module ' "$f") denied modules (sctp, nfsd, kvm*, ksmbd, cifs, can*, pppoe, pppox, RDMA core, dccp, tipc): each one's final modprobe step is /bin/false, a real load attempt is refused and none is loaded; a real SCTP socket is $(sed -n 's/^sctp-socket=\(refused:.*\) loaded-after.*/\1/p' "$f") and sctp stays unloaded"; fi
   if grep -E '^module-file ' "$f" | grep -vq ' 0$'; then check E extra-modules-absent fail "$(grep '^module-file' "$f" | tr '\n' ' ')"
   else check E extra-modules-absent pass "nvmet-tcp, ib_srpt not on the disk (linux-modules-extra not installed)"; fi
   grep -qiE '^tracing .*endpoint *= *"[^"]+"' "$f" && check E containerd-tracing-off fail "$(grep '^tracing' "$f" | tr '\n' ' ')" \
