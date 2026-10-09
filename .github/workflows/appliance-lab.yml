@@ -811,15 +811,15 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     env:
-      # Replacement candidate 3a025d06 OVA (lab run 37831230971). The archive and index pins
+      # Replacement candidate 13c1f80c OVA (lab run 37899050114). The archive and index pins
       # are the OVA's own build record (build-info.json clamav_baked_tar_sha256
       # and clamav_sidecar_image_id; on 2e3bcc2a these equalled the measured
       # pins). The amd64 manifest and config are DERIVED from the re-hashed
       # index (not pinned: derived and exported through GITHUB_ENV), so every link stays hash-bound.
-      OVA_ARTIFACT_ID: "11574475530"   # appliance-lab-ova-candidate-3a025d06eb6a, run 37831230971
-      OVA_SHA256: fdf5b8003fc748e3fe0b32b1b95f31b2ddbb19195a4d663544e525704b6afe6a
-      SIDECAR_ARCHIVE_SHA256: b95b7096677b01438cd3c4d35605c3eee338d08d17e2e5ca46adc46bf5c7d556
-      SIDECAR_INDEX: sha256:3f8db57b49d42d9a541a661ae4a376679fbd88202ffe47e52e2a702913779fc5
+      OVA_ARTIFACT_ID: "11602165996"   # appliance-lab-ova-candidate-13c1f80c0e4c, run 37899050114
+      OVA_SHA256: 575f2dc2e250075bb2884e64680ead34a314a1f7f62ec603d42bbd837e0dd873
+      SIDECAR_ARCHIVE_SHA256: 9b96b1cfaf74e65fc8852b793ecff8f8e9717171d0b1ad55096b20fde79cee2e
+      SIDECAR_INDEX: sha256:64eb9cc4e326d08b483e6b445c5bef8e0c4aec63deb575dd6559828b4a06f23f
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Workspace + libguestfs (read-only disk access)
@@ -906,7 +906,7 @@ jobs:
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
-          name: appliance-lab-sidecar-scan-3a025d06eb6a
+          name: appliance-lab-sidecar-scan-13c1f80c0e4c
           path: ${{ env.W }}/evidence/
           if-no-files-found: warn
 
@@ -1231,12 +1231,12 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     env:
-      OVA_ARTIFACT_ID: "11574475530"   # appliance-lab-ova-candidate-3a025d06eb6a, run 37831230971
-      OVA_SHA256: fdf5b8003fc748e3fe0b32b1b95f31b2ddbb19195a4d663544e525704b6afe6a
-      SOURCE_IMAGE_RUN_ID: "37829233536"
-      SOURCE_IMAGE_TAR_SHA256: 284c28f3f1eef0e699c89a359efa2cb2c59a0e25b6deb151ea4dec0ecb695ccd
-      IMAGE_ID: sha256:0fdc5513b8b8ccc6b2998f0786f4a7304601887f522a023416562006f98033eb
-      SRC_SHA: 3a025d06eb6a0b025ad9c61371949e3d9bdd90e7
+      OVA_ARTIFACT_ID: "11602165996"   # appliance-lab-ova-candidate-13c1f80c0e4c, run 37899050114
+      OVA_SHA256: 575f2dc2e250075bb2884e64680ead34a314a1f7f62ec603d42bbd837e0dd873
+      SOURCE_IMAGE_RUN_ID: "37897530805"
+      SOURCE_IMAGE_TAR_SHA256: 8dc1f40188a2a116efa036e6eec74c2111e879354d08d3cb79b3b3865e0b8885
+      IMAGE_ID: sha256:f8e1a033f2512e029b93b0850c491c4ebba23a39db15992e45bb02baf477924d
+      SRC_SHA: 13c1f80c0e4c07ef7ed893033d17d6ead5df33b0
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Workspace + libguestfs
@@ -1375,7 +1375,7 @@ jobs:
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
-          name: appliance-lab-exact-scan-3a025d06eb6a
+          name: appliance-lab-exact-scan-13c1f80c0e4c
           path: ${{ env.W }}/evidence/
           retention-days: 30
           if-no-files-found: warn
