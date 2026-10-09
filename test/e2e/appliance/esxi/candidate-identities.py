@@ -6,11 +6,21 @@ D698 = 'd698a69c5192588d5ed3a85a9f7cd9009fb59b31'
 E2E3 = '2e3bcc2a1095f3e26e4f0b73a6a5515bdd069ee2'
 CD8 = 'cd8e44505bd329e5de675592ad4c23f92a534d55'
 E7E = '7e53720d06f525f4e5fdbfec42f52840d5b734e2'
+E7C = '7c7b29ee3be40af6a0809c73ad04d4337303263d'
 FIXTURE_HASHES = {
     'main.go': '33034e5994cc9ae7a2b9e9f98a418ffd48165b2de39cfa26fbc620c25d80330e',
     'request.py': 'fbf7e9df27c190b47155ccbff93b3581cd0342f33cf8c8dbce943a57be49c771',
 }
 PROFILES = {
+    E7C: {
+        'source_sha': E7C,
+        'ova_sha256': '4b8ae484fd8b9bda8dfc12512e9e0b489edcc96c7590824f22276a19dc6b7a05',
+        'image_id': 'sha256:398ffaf2090ec32cb9ff0506dd2e92bfd2414d689719373fc00cf96a5c58f906',
+        'network_helper_sha256': '4cd5200c3cafba6d61dbc02f2cb6e0bc4318641aaf9d429d970442916dd7cee6',
+        'reset_helper_sha256': '602f3e5aad0818e0078de4dd87cfdac485f871a99779ef4dde0a0c6c55679391',
+        'clamav_sidecar_ref': 'culvert/clamav:1.4.6-culvert.3',
+        'clamav_sidecar_image_id': 'sha256:45dbf00306ef19a9c8f9a90a078d73e8131cc6dc03e08d829acdd16816afc94e',
+    },
     E7E: {
         'source_sha': E7E,
         'ova_sha256': '578ea6b83b450b91bccc10ac80058db42d157e2161a45aa23fc8a23a2def7c65',

@@ -1634,6 +1634,108 @@ PY
   log "evidence: $EV/REPORT.md"
 }
 
+# ── engine-surface: who can reach the container engine on the booted guest ──
+# Evidence for the Docker/containerd/runc scanner dispositions. govulncheck in
+# binary mode reports a vulnerable function as soon as it is LINKED; whether an
+# attacker can feed it input depends on how the daemons are exposed here. Each
+# check below is a claim a disposition rests on, and it FAILS if the booted
+# appliance contradicts it.
+cmd_engine_surface() { local f="$EV/E-engine-surface.txt" v
+  gpriv --timeout 300 > "$f" 2>&1 <<'EOS' || true
+echo "=== kernel"; echo "running=$(uname -r)"; for k in /boot/vmlinuz-*; do echo "installed=${k#/boot/vmlinuz-}"; done
+echo "=== snapd"; echo "snapd-status=$(dpkg-query -W -f='${db:Status-Status}' snapd 2>/dev/null || echo absent)"; echo "snap-dir=$( [ -e /snap ] || [ -e /var/lib/snapd ] && echo present || echo absent)"
+echo "=== versions"; for p in docker-ce containerd.io docker-compose-plugin; do echo "$p=$(dpkg-query -W -f='${Version}' "$p")"; done
+echo "=== tcp listeners"; ss -Hltnp | sed 's/^/listen /'
+echo "=== published ports"; docker ps --format '{{.Names}} {{.Ports}}' | sed 's/^/published /'
+echo "=== sockets"; for s in /run/containerd/containerd.sock /run/docker.sock; do echo "sock $s $(stat -c '%U:%G %a' "$s" 2>/dev/null || echo missing)"; done
+echo "docker-group=$(getent group docker | cut -d: -f4)"
+echo "=== dockerd argv"; ps -o args= -C dockerd | sed 's/^/dockerd-argv /'
+echo "=== daemon.json"; cat /etc/docker/daemon.json 2>/dev/null | sed 's/^/daemon.json /'
+echo "=== containerd plugins"; ctr plugins ls 2>/dev/null | awk '{print "plugin "$1" "$2" "$NF}'
+echo "disabled-plugins $(grep -E '^[[:space:]]*disabled_plugins' /etc/containerd/config.toml 2>/dev/null)"
+echo "=== kernel modules"; for m in sctp nfsd kvm kvm_amd kvm_intel ksmbd cifs can can_raw can_bcm can_gw can_isotp can_j1939 pppoe pppox ib_core ib_cm iw_cm rdma_cm ib_uverbs rdma_ucm ib_umad dccp tipc; do
+  # FINAL step of the module's own resolution (a dependency's deny must not
+  # count), then a REAL load attempt: it must fail and leave the module out.
+  # The real attempt records its exit code and WHICH module's install rule
+  # kmod reports refusing it. kmod inserts hard dependencies first and stops
+  # at the first refusal, so a target whose dependency is itself denied (ksmbd
+  # needs ib_core when built with SMB Direct) is refused by THAT rule before
+  # its own is reached; the target's own rule is proven by the effective
+  # config and by being the final step of its own resolution (above).
+  before="$(grep -c "^$m " /proc/modules)"
+  final="$(modprobe -n -v "$m" 2>&1 | tail -n 1 | tr -s ' ')"
+  err="$(modprobe "$m" 2>&1)"; rc=$?
+  by="$(sed -n "s/.*Error running install command '\/bin\/false' for module \([a-z0-9_]*\):.*/\1/p" <<<"$err" | head -n 1)"
+  echo "module $m before=$before final=${final% } rc=$rc refused-by=${by:-none} after=$(grep -c "^$m " /proc/modules)"
+  echo "module-err $m $(tr '\n' ' ' <<<"$err" | tr -s ' ')"
+done
+# The EFFECTIVE configuration kmod applies (all of /etc/modprobe.d, /lib/
+# modprobe.d and the built-in defaults), for every denied module, plus the
+# shipped file's own digest.
+echo "denylist-file $(sha256sum /etc/modprobe.d/culvert-unused.conf | cut -d' ' -f1)"
+modprobe -c 2>/dev/null | awk '($1=="install"||$1=="softdep"||$1=="blacklist"||$1=="remove"||$1=="options") && $2 ~ /^(sctp|nfsd|kvm|kvm_amd|kvm_intel|ksmbd|cifs|can|can_raw|can_bcm|can_gw|can_isotp|can_j1939|pppoe|pppox|ib_core|ib_cm|iw_cm|rdma_cm|ib_uverbs|rdma_ucm|ib_umad|dccp|tipc)$/ {print "effective "$0}'
+echo "sctp-socket=$(python3 -c 'import socket
+try:
+    socket.socket(socket.AF_INET, socket.SOCK_STREAM, 132); print("opened")
+except OSError as e:
+    print("refused:" + (e.strerror or str(e)))' 2>&1) loaded-after=$(grep -c '^sctp ' /proc/modules)"
+# module file names may use "-" where the module name has "_" (kvm-amd.ko)
+for m in nvmet_tcp ib_srpt; do echo "module-file $m $(find /lib/modules/"$(uname -r)" \( -name "$m.ko*" -o -name "${m//_/-}.ko*" \) | wc -l)"; done
+echo "=== containerd tracing"; containerd config dump 2>/dev/null | grep -iE 'otlp|tracing|endpoint' | sed 's/^/tracing /'
+EOS
+  v="$(sed -n 's/^running=//p' "$f")"
+  [[ -n "$v" && "$(grep -c '^installed=' "$f")" == 1 && "$(grep '^installed=' "$f")" == "installed=$v" ]] \
+    && check E kernel-is-the-only-installed pass "running=$v" || check E kernel-is-the-only-installed fail "$(grep -E '^(running|installed)=' "$f" | tr '\n' ' ')"
+  # a purged package is "not-installed" to dpkg while the pin keeps it known
+  grep -qE '^snapd-status=(absent|not-installed)$' "$f" && grep -q '^snap-dir=absent' "$f" \
+    && check E snapd-absent pass "package and state removed" || check E snapd-absent fail "$(grep -E '^snap' "$f" | tr '\n' ' ')"
+  # No engine process listens on TCP: the gRPC and API surfaces are local
+  # sockets only. docker-proxy is the userland forwarder for a container's
+  # PUBLISHED port (the appliance's own proxy/UI ports), so it may listen
+  # only on a port a running container publishes.
+  local pub bad=""
+  pub="$(grep -E '^published ' "$f" | grep -oE ':[0-9]+->' | tr -d ':>-' | sort -u | tr '\n' ' ')"
+  if grep -E '^listen ' "$f" | grep -qE '"(dockerd|containerd|containerd-shim[^"]*|runc)"'; then
+    bad="$(grep -E '^listen ' "$f" | grep -E '"(dockerd|containerd|containerd-shim[^"]*|runc)"' | tr '\n' ' ')"
+  fi
+  while read -r port; do
+    [[ -n "$port" ]] || continue
+    [[ " $pub " == *" $port "* ]] || bad+="docker-proxy on unpublished port $port "
+  done < <(grep -E '^listen .*"docker-proxy"' "$f" | awk '{print $5}' | sed 's/.*://' | sort -u)
+  if [[ -n "$bad" ]]; then check E engine-no-tcp-listener fail "$bad"
+  else check E engine-no-tcp-listener pass "dockerd/containerd/shim/runc: no TCP listener; docker-proxy only on published ports (${pub% })"; fi
+  grep -q '^sock /run/containerd/containerd.sock root:root 660$' "$f" \
+    && check E containerd-socket-root-only pass "root:root 0660" || check E containerd-socket-root-only fail "$(grep 'containerd.sock' "$f")"
+  if grep -qE '^sock /run/docker.sock root:(root|docker) 660$' "$f" && grep -qx 'docker-group=' "$f"; then
+    check E docker-socket-root-only pass "$(grep '^sock /run/docker.sock' "$f" | cut -d' ' -f3-), docker group has no members"
+  else check E docker-socket-root-only fail "$(grep -E '^sock /run/docker.sock|^docker-group=' "$f" | tr '\n' ' ')"; fi
+  if grep -E '^(dockerd-argv|daemon\.json) ' "$f" | grep -qiE 'tcp://|-H +tcp|--host[= ]+tcp'; then
+    check E dockerd-no-tcp-host fail "$(grep -E '^(dockerd-argv|daemon\.json) ' "$f" | tr '\n' ' ')"
+  else check E dockerd-no-tcp-host pass "no tcp host in dockerd argv or daemon.json"; fi
+  # CRI is the only containerd service that serves untrusted pod specs; Docker's
+  # containerd.io package disables it.
+  if grep -E '^plugin ' "$f" | grep -E 'grpc\.v1 +cri|cri ' | grep -qw ok; then
+    check E containerd-cri-disabled fail "$(grep -E '^plugin .*cri' "$f" | tr '\n' ' ')"
+  elif grep -qE '^plugin ' "$f"; then check E containerd-cri-disabled pass "io.containerd.grpc.v1 cri (the CRI API) not loaded; $(grep -E '^disabled-plugins' "$f" | cut -d' ' -f2-)"
+  else check E containerd-cri-disabled fail "ctr plugins ls produced nothing"; fi
+  # Unused kernel modules: denied by modprobe.d, not loaded, and an actual
+  # SCTP socket (which would autoload the module) is refused.
+  if ! grep -qE '^module ' "$f"; then check E kernel-modules-denied fail "no module lines (old OVA without the denylist?)"
+  elif bad="$(awk '$1=="module"{split($0,a," "); m=$2; ok=($3=="before=0" && $4=="final=install" && $5=="/bin/false" && $6 ~ /^rc=[1-9][0-9]*$/ && $8=="after=0"); by=$7; sub(/^refused-by=/,"",by); den[m]=1; if(!ok) print m; rb[m]=by}
+         $1=="effective" && $2=="install" && $4=="/bin/false"{inst[$3]=1}
+         $1=="effective" && $2=="softdep" && NF==3{emp[$3]=1}
+         END{for(m in den){ if(!(rb[m] in den)) print m" (refused-by="rb[m]")"; if(!inst[m]) print m" (no effective install /bin/false)"; if(!emp[m]) print m" (no effective empty softdep)"}}' "$f" | sort -u | tr '\n' ' ')"; [[ -n "$bad" ]]; then
+    check E kernel-modules-denied fail "$bad"
+  elif ! grep -qE '^sctp-socket=refused:.* loaded-after=0$' "$f"; then
+    check E kernel-modules-denied fail "$(grep '^sctp-socket=' "$f")"
+  else check E kernel-modules-denied pass "$(grep -c '^module ' "$f") denied modules (sctp, nfsd, kvm*, ksmbd, cifs, can*, pppoe, pppox, RDMA core, dccp, tipc): for each, the effective modprobe -c rules carry install /bin/false + an empty softdep override, /bin/false is the final step of its own resolution, and a real load attempt exits non-zero, refused by a denied module's install rule ($(awk '$1=="module"{by=$7; sub(/^refused-by=/,"",by); if(by==$2) s++; else d++} END{print s+0" by their own rule, "d+0" by a denied dependency first"}' "$f")), unloaded before and after; a real SCTP socket is $(sed -n 's/^sctp-socket=\(refused:.*\) loaded-after.*/\1/p' "$f") and sctp stays unloaded"; fi
+  if grep -E '^module-file ' "$f" | grep -vq ' 0$'; then check E extra-modules-absent fail "$(grep '^module-file' "$f" | tr '\n' ' ')"
+  else check E extra-modules-absent pass "nvmet-tcp, ib_srpt not on the disk (linux-modules-extra not installed)"; fi
+  grep -qiE '^tracing .*endpoint *= *"[^"]+"' "$f" && check E containerd-tracing-off fail "$(grep '^tracing' "$f" | tr '\n' ' ')" \
+    || check E containerd-tracing-off pass "no OTLP endpoint configured"
+  log "engine surface: $f"
+}
+
 # ── down: stop the guest, remove the disposable disks (evidence stays) ──────
 cmd_down() {
   if [[ "$LAB_EXTERNAL" == 1 ]]; then
@@ -2056,6 +2158,17 @@ EOS
   redact_tree
 }
 failures() { grep -c '"result":"fail"' "$JSONL" 2>/dev/null || true; }
+# LAB_FAIL_FAST=1 (iteration runs only): after each phase, stop as soon as any
+# check has failed. The EXIT trap still collects evidence and tears the guest
+# down, so a red iteration run ends ~20 min sooner with the same evidence up to
+# the failure. A FINAL qualification run must leave it unset so every phase is
+# recorded even when one fails.
+fail_fast_after() {
+  [[ "${LAB_FAIL_FAST:-0}" == 1 ]] || return 0
+  local n; n="$(failures)"; [[ "$n" == 0 ]] && return 0
+  check F fail-fast info "LAB_FAIL_FAST=1: stopped after phase '$1' with $n failure(s); later phases did not run (iteration run, not a qualification)"
+  log "failures: $n"; exit 1
+}
 # Transport adapters may reuse the guest checks without dispatching QEMU.
 [[ "${LAB_LIBRARY_ONLY:-0}" == 1 ]] && return 0
 case "${1:-}" in
@@ -2068,11 +2181,16 @@ case "${1:-}" in
   recovery) cmd_recovery; [[ "$(failures)" == 0 ]] ;;
   history) cmd_history; [[ "$(failures)" == 0 ]] ;;
   adoption) cmd_adoption; [[ "$(failures)" == 0 ]] ;;
+  engine-surface) cmd_engine_surface; [[ "$(failures)" == 0 ]] ;;
   console) trap 'cmd_collect || true; cmd_down || true' EXIT; cmd_console; [[ "$(failures)" == 0 ]] ;;
   collect) cmd_collect ;;
   down) cmd_down ;;
   all)
     trap 'cmd_collect || true; cmd_down || true' EXIT
-    cmd_preflight; cmd_up; cmd_qualify; cmd_recovery; [[ -z "${LAB_ADOPT_IMAGE_TAR:-}" ]] || cmd_adoption; cmd_history; n="$(failures)"; log "failures: $n"; [[ "$n" == 0 ]] ;;
+    cmd_preflight; cmd_up; cmd_qualify; fail_fast_after qualify
+    if [[ "${LAB_ENGINE_SURFACE:-0}" == 1 ]]; then cmd_engine_surface; fail_fast_after engine-surface; fi
+    cmd_recovery; fail_fast_after recovery
+    if [[ -n "${LAB_ADOPT_IMAGE_TAR:-}" ]]; then cmd_adoption; fail_fast_after adoption; fi
+    cmd_history; n="$(failures)"; log "failures: $n"; [[ "$n" == 0 ]] ;;
   *) sed -n '2,32p' "$0"; exit 2 ;;
 esac

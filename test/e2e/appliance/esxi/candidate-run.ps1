@@ -29,6 +29,7 @@ $env:ESXI_HOST_KEY_ALIAS = $owned.name
 $env:ESXI_OPERATOR_ENROLLED = '1'
 $env:ESXI_HOST_KEY_PINNED = '1'
 $env:ESXI_EXTENDED_CAMPAIGN = '1'
+$env:ESXI_ENGINE_SURFACE = if ($configuration.source_sha -eq '7c7b29ee3be40af6a0809c73ad04d4337303263d') { '1' } else { '0' }
 $env:ESXI_BIND = $Bind
 if ($ContinueUndispatched) {
     if (-not $ResumePostOS) { throw 'Continuation requires the explicit post-OS resume' }

@@ -51,6 +51,7 @@ export LAB_EXTERNAL=1 LAB_LIBRARY_ONLY=1
 source "$ESXI_SHARED_LAB"
 SECRET_FILES+=(bootstrap-console-password)
 source "$ADAPTER_HERE/restore-checks.sh"
+source "$ADAPTER_HERE/engine-surface-check.sh"
 
 # OpenSSH uses the first value supplied for these options. Prefixing the pins
 # protects even the shared function-local SCP_OPTS, which otherwise says "no".
@@ -128,6 +129,7 @@ if [[ -s $EV/esxi-boot-id-before.txt && -s $EV/esxi-boot-id-after.txt ]] &&
   check 7 esxi-boot-id-changed pass 'guest boot ID changed'
 else check 7 esxi-boot-id-changed fail 'reboot not proven by a changed boot ID'; fi
 esxi_restore_persistence
+esxi_engine_surface
 # Shared signed-update stays BLOCKED unless LAB_UPDATE_DIR contains a real
 # separately prepared registry/evidence fixture. Never manufacture a PASS.
 redact_tree

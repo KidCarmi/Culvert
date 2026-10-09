@@ -42,7 +42,7 @@ class CandidateReconciliationTests(unittest.TestCase):
 
     def test_shared_library_contains_only_documented_delta_from_pinned_upstream(self):
         record = json.loads((HERE / 'shared-harness-provenance.json').read_bytes())
-        self.assertEqual(record['upstream_revision'], '442cb87420c2d9dc523a536afe5878e6d2bb5a9d')
+        self.assertEqual(record['upstream_revision'], '337b4b5b64b4315d3a36b1d1cffe73148be54166')
         root = HERE.parents[3]
         for name, hashes in record['files'].items():
             raw = (root / name).read_bytes().replace(b'\r\n', b'\n')
