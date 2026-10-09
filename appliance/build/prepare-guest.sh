@@ -275,12 +275,27 @@ install -m 0644 "$APPL/provision/modprobe-culvert-unused.conf" /etc/modprobe.d/c
 # Every module the file denies is checked (the list is read from the file, so
 # the two cannot disagree), plus the "-" spellings modprobe treats as equal.
 denied_mods="$(awk '$1=="install" && $3=="/bin/false"{print $2}' /etc/modprobe.d/culvert-unused.conf)"
-[[ "$(wc -w <<<"$denied_mods")" -ge 44 ]] || { echo "culvert-unused.conf denies only $(wc -w <<<"$denied_mods") modules" >&2; exit 1; }
+[[ "$(wc -w <<<"$denied_mods")" -ge 65 ]] || { echo "culvert-unused.conf denies only $(wc -w <<<"$denied_mods") modules" >&2; exit 1; }
 for m in $denied_mods kvm-amd can-raw; do
   # The FINAL step decides: a dependency's own `install /bin/false` line must
   # not satisfy the check for the module that depends on it.
   modprobe -n -v "$m" 2>&1 | tail -n 1 | grep -qE '^install /bin/false[[:space:]]*$' || { echo "modprobe would still load $m" >&2; exit 1; }
 done
+# Unprivileged network autoload surface: the HWE kernel ships every module,
+# so any module a socket family, generic-netlink family, sock_diag request or
+# TCP ULP can load must be denied above or reviewed in net-autoload-reviewed.txt
+# (and a reviewed module the kernel no longer ships fails too: the list must
+# describe this disk). A kernel update that adds such a module stops the build.
+kmods=(/lib/modules/*/modules.alias)
+[[ ${#kmods[@]} -eq 1 && -f "${kmods[0]}" ]] || { echo "expected exactly one kernel's modules.alias, found: ${kmods[*]}" >&2; exit 1; }
+netload="$(awk '$1=="alias" && $2 ~ /^(net-pf-[0-9]+$|net-pf-[0-9]+-proto-|tcp-ulp-)/ {print $3}' "${kmods[0]}" | tr - _ | sort -u)"
+reviewed="$(awk '!/^#/ && NF {print $1}' "$APPL/provision/net-autoload-reviewed.txt" | tr - _ | sort -u)"
+denied_norm="$(tr ' -' '\n_' <<<"$denied_mods" | awk NF | sort -u)"
+unreviewed="$(comm -23 <(printf '%s\n' "$netload") <(sort -u <(printf '%s\n' "$denied_norm" "$reviewed")))"
+[[ -z "$unreviewed" ]] || { echo "unprivileged-autoloadable modules neither denied nor reviewed: $(tr '\n' ' ' <<<"$unreviewed")" >&2; exit 1; }
+stale="$(comm -13 <(printf '%s\n' "$netload") <(printf '%s\n' "$reviewed"))"
+[[ -z "$stale" ]] || { echo "net-autoload-reviewed.txt lists modules this kernel does not ship with such an alias: $(tr '\n' ' ' <<<"$stale")" >&2; exit 1; }
+echo "net autoload surface: $(wc -l <<<"$netload") modules, $(comm -12 <(printf '%s\n' "$netload") <(printf '%s\n' "$denied_norm") | wc -l) denied, $(wc -l <<<"$reviewed") reviewed"
 
 # OS maintenance: security pocket only, no automatic reboot.
 install -m 0644 "$APPL/os-maintenance/50unattended-upgrades-culvert" /etc/apt/apt.conf.d/50unattended-upgrades-culvert

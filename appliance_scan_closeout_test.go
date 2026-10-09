@@ -208,10 +208,10 @@ func TestDeepGate_FailsOnAnyFixableOSPackageFinding(t *testing.T) {
 	}
 }
 
-// The replacement's exact-byte scan left five CRITICAL kernel CVEs with no
-// fixed 6.8.0 package. Two are in modules not on the disk (nvmet-tcp and
-// ib_srpt ship in linux-modules-extra); the other three (sctp, nfsd, kvm_amd)
-// and two unused protocols are made unloadable here.
+// Unused kernel modules are made unloadable: the CRITICAL/HIGH residuals of
+// the exact-byte scans (sctp, nfsd, kvm_amd, ...), and — because the HWE
+// kernel's linux-modules carries every module — each module an unprivileged
+// process could autoload over the network API that the GA disk did not carry.
 func TestPrepareGuest_UnusedKernelModulesCannotLoad(t *testing.T) {
 	conf := readSource(t, "appliance/provision/modprobe-culvert-unused.conf")
 	for _, m := range []string{"sctp", "nfsd", "kvm", "kvm_amd", "kvm_intel", "ksmbd", "cifs",
@@ -220,7 +220,11 @@ func TestPrepareGuest_UnusedKernelModulesCannotLoad(t *testing.T) {
 		// residual HIGH CVEs on the HWE kernel (see the file)
 		"ip_vs", "openvswitch", "vxlan", "target_core_mod", "target_core_iblock", "snd", "snd_pcm", "soundcore",
 		"bluetooth", "btusb", "hci_vhci", "rfcomm", "bnep", "hidp", "bluetooth_6lowpan", "rxrpc", "kafs",
-		"amdgpu", "idpf", "scsi_debug"} {
+		"amdgpu", "idpf", "scsi_debug",
+		// unprivileged network autoload the GA 6.8 disk did not carry
+		"batman_adv", "caif_socket", "cfg80211", "gtp", "kcm", "l2tp_core", "l2tp_ip", "l2tp_ip6",
+		"l2tp_netlink", "l2tp_ppp", "macsec", "mpls_router", "mptcp_diag", "nfc", "ovpn", "qrtr",
+		"rds", "smc", "smc_diag", "tipc_diag", "xsk_diag"} {
 		for _, want := range []string{"\nblacklist " + m + "\n", "\ninstall " + m + " /bin/false\n", "\nsoftdep " + m + " pre: post:\n"} {
 			if !strings.Contains(conf, want) {
 				t.Errorf("modprobe-culvert-unused.conf must contain %q", strings.TrimSpace(want))
@@ -232,7 +236,7 @@ func TestPrepareGuest_UnusedKernelModulesCannotLoad(t *testing.T) {
 		`install -m 0644 "$APPL/provision/modprobe-culvert-unused.conf" /etc/modprobe.d/culvert-unused.conf`,
 		// the check reads its module list from the installed file itself
 		`denied_mods="$(awk '$1=="install" && $3=="/bin/false"{print $2}' /etc/modprobe.d/culvert-unused.conf)"`,
-		`[[ "$(wc -w <<<"$denied_mods")" -ge 44 ]] ||`,
+		`[[ "$(wc -w <<<"$denied_mods")" -ge 65 ]] ||`,
 		`for m in $denied_mods kvm-amd can-raw; do`,
 		`modprobe -n -v "$m" 2>&1 | tail -n 1 | grep -qE '^install /bin/false[[:space:]]*$' || { echo "modprobe would still load $m" >&2; exit 1; }`,
 	} {
@@ -244,9 +248,32 @@ func TestPrepareGuest_UnusedKernelModulesCannotLoad(t *testing.T) {
 	if regexp.MustCompile(`(?m)^(install|blacklist) (vsock|vmw_vsock\w*)\b`).MatchString(conf) {
 		t.Error("vsock must stay loadable: open-vm-tools uses it")
 	}
-	// linux-modules-extra carries the other two CRITICAL subsystems; the
-	// build must not start installing it.
-	if regexp.MustCompile(`apt-get[^\n]*install[^\n]*linux-modules-extra`).MatchString(src) {
-		t.Error("prepare-guest.sh must not install linux-modules-extra (nvmet-tcp, ib_srpt)")
+	// Every other unprivileged-autoloadable module is reviewed, and the build
+	// refuses a disk where that does not hold (in both directions).
+	for _, want := range []string{
+		`netload="$(awk '$1=="alias" && $2 ~ /^(net-pf-[0-9]+$|net-pf-[0-9]+-proto-|tcp-ulp-)/ {print $3}' "${kmods[0]}" | tr - _ | sort -u)"`,
+		`reviewed="$(awk '!/^#/ && NF {print $1}' "$APPL/provision/net-autoload-reviewed.txt" | tr - _ | sort -u)"`,
+		`[[ -z "$unreviewed" ]] || { echo "unprivileged-autoloadable modules neither denied nor reviewed:`,
+		`[[ -z "$stale" ]] || { echo "net-autoload-reviewed.txt lists modules this kernel does not ship with such an alias:`,
+	} {
+		if !strings.Contains(src, want) {
+			t.Errorf("prepare-guest.sh must contain %q", want)
+		}
+	}
+	reviewed := readSource(t, "appliance/provision/net-autoload-reviewed.txt")
+	for _, line := range strings.Split(reviewed, "\n") {
+		f := strings.Fields(line)
+		if len(f) == 0 || strings.HasPrefix(f[0], "#") {
+			continue
+		}
+		if strings.Contains(conf, "\ninstall "+f[0]+" /bin/false\n") {
+			t.Errorf("%s is both denied and reviewed as loadable", f[0])
+		}
+		if len(f) < 2 {
+			t.Errorf("net-autoload-reviewed.txt: %s has no reason", f[0])
+		}
+	}
+	if !strings.Contains(readSource(t, "appliance/build/build-ova.sh"), " net-autoload-reviewed.txt ") {
+		t.Error("build-ova.sh must copy net-autoload-reviewed.txt into the guest")
 	}
 }

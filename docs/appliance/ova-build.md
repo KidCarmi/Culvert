@@ -193,7 +193,7 @@ verifies on import.
   `lxd-installer` stays, because `ubuntu-server` depends on it, and the build
   refuses if `ubuntu-server`, `open-vm-tools` or `unattended-upgrades` is gone
   afterwards. Raising the snapshot is a pin change like any other.
-  `/etc/modprobe.d/culvert-unused.conf` makes 44 modules unloadable
+  `/etc/modprobe.d/culvert-unused.conf` makes 65 modules unloadable
   (`install … /bin/false`, verified with `modprobe -n` at build for every
   module the file denies): `sctp`, `nfsd`, `kvm`, `kvm_amd`, `kvm_intel`,
   `ksmbd`, `cifs`, the `can*` family, `pppoe`, `pppox`, the RDMA stack
@@ -201,15 +201,39 @@ verifies on import.
   HIGH CVEs still open on the HWE kernel — `ip_vs`, `openvswitch`, `vxlan`,
   the LIO target (`target_core_mod`, `target_core_iblock`), sound (`snd`,
   `snd_pcm`, `soundcore`), Bluetooth (`bluetooth` and its drivers/protocols),
-  `rxrpc`/`kafs`, `amdgpu`, `idpf` and `scsi_debug`. The appliance uses none
+  `rxrpc`/`kafs`, `amdgpu`, `idpf` and `scsi_debug`, and the 21 modules
+  described next. The appliance uses none
   of them, and several autoload on demand from any process, a container
   included (SCTP/TIPC/RxRPC/Bluetooth sockets). `vsock` stays loadable
   (VMware Tools). Each denied module also carries an empty `softdep <m> pre:
   post:` line: kmod ignores a module's `install` command when its own soft
   dependencies resolve to real modules (`ksmbd` did, and loaded despite the
   rule), and the build judges the FINAL step of each module's resolution, so
-  a dependency's own deny cannot satisfy the check for the module above it. The other two open CRITICALs (nvmet-tcp, RDMA
-  srpt) are in `linux-modules-extra`, which the OVA does not install.
+  a dependency's own deny cannot satisfy the check for the module above it.
+  **The HWE kernel ships every module.** Its `linux-modules` package carries
+  all 6,900 modules of 7.0.0-38; the GA 6.8 `linux-modules` carried 1,011 and
+  left the rest to `linux-modules-extra`, which the OVA never installed. Of
+  the newly present modules, 21 can be made to load by an unprivileged
+  process (a container included) through the network API — a socket family,
+  a generic-netlink family lookup, or a sock_diag request: `batman_adv`,
+  `caif_socket`, `cfg80211`, `gtp`, `kcm`, the `l2tp_*` modules, `macsec`,
+  `mpls_router`, `mptcp_diag`, `nfc`, `ovpn`, `qrtr`, `rds`, `smc`,
+  `smc_diag`, `tipc_diag`, `xsk_diag`. They are denied, which restores the GA
+  disk's unprivileged network autoload surface exactly (no module of the GA
+  working set depends on any of them). The build then refuses any module
+  with such an alias that is neither denied nor listed in
+  `appliance/provision/net-autoload-reviewed.txt` (32 entries, each already on
+  the GA disk, each with its reason), and refuses a listed module the kernel
+  no longer ships — a kernel update that adds a socket family stops the build
+  until someone reviews it. The other new modules are hardware drivers (they
+  load only when the hypervisor presents that device), filesystems (mounting
+  needs root; none of them is mountable in a user namespace), link types and
+  qdiscs (CAP_NET_ADMIN — an unprivileged user namespace would grant it, but
+  Ubuntu restricts those, `kernel.apparmor_restrict_unprivileged_userns=1`,
+  and Docker's seccomp profile refuses them in containers), and tty line
+  disciplines, whose unprivileged autoload this kernel does not compile in
+  (`CONFIG_LDISC_AUTOLOAD` unset). `nvmet-tcp` is not built for this kernel;
+  `ib_srpt` is on the disk but depends on the denied `ib_core`.
   `/etc/udev/rules.d/72-culvert-drm.rules` makes every DRM node root:root
   0600 and drops logind's `uaccess` tag, so the open vmwgfx ioctl CVEs (the
   ESXi display driver, which cannot be denied without losing the console)
