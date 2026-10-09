@@ -206,6 +206,23 @@ fill_bounded(){ local avail fill
   avail="$(df -k --output=avail "$MNT" | tail -1 | tr -d ' ')"; fill=$(( avail - LEAVE_KB ))
   (( fill > 0 )) || { echo "only ${avail}KiB available"; return 1; }
   fallocate -l "$((fill * 1024))" "$MNT/.qual-fill"; }
+# hold_full SECS LOG: keep the loop fs at QUAL_ENOSPC_LEAVE_KB for SECS. Space
+# measured once is not space that stays used: something on the filesystem
+# released ~134 MiB right after the midwrite fill landed (Deep 37938628725),
+# the write fitted in it and completed, and the check read that as "not
+# refused". Every release is re-filled within 0.2 s and logged, so the run
+# shows the disk stayed full for the whole window.
+hold_full(){ local end=$((SECONDS + $1)) avail n=0
+  while (( SECONDS < end )); do
+    avail="$(df -k --output=avail "$MNT" | tail -1 | tr -d ' ')"
+    if (( avail > LEAVE_KB + 1024 )); then
+      n=$((n + 1))
+      if fallocate -l "$(( (avail - LEAVE_KB) * 1024 ))" "$MNT/.qual-fill.$n" 2>/dev/null; then
+        echo "$(date -u +%T.%N | cut -c1-12) top-up $n: ${avail}KiB free -> $(df -k --output=avail "$MNT" | tail -1 | tr -d ' ')KiB"
+      else echo "$(date -u +%T.%N | cut -c1-12) top-up $n: ${avail}KiB free, fallocate refused (space taken meanwhile)"; fi
+    fi
+    sleep 0.2
+  done >> "$2"; }
 
 write_report_and_exit(){
   IN cat /var/lib/culvert-maint/agent.log > "$EVID/agent.log" 2>/dev/null || true
@@ -263,7 +280,9 @@ if [[ "$SCENARIO" == midwrite ]]; then
     check W write-in-flight inconclusive "the write finished while the fill was being placed; nothing was tested"
     INCONCLUSIVE=1; write_report_and_exit; fi
   check W filled-during-write pass "$wline; write still in flight; filled to $(df -k --output=avail "$MNT" | tail -1 | tr -d ' ')KiB free"
-  sleep 30
+  : > "$EVID/hold-full.log"; hold_full 30 "$EVID/hold-full.log"
+  check W disk-held-full "$( [[ "$(df -k --output=avail "$MNT" | tail -1 | tr -d ' ')" -le $((LEAVE_KB + 1024)) ]] && echo pass || echo fail)" \
+    "kept at <= $((LEAVE_KB + 1024))KiB free for 30 s: $(grep -c 'top-up' "$EVID/hold-full.log") top-up(s) of released space ($(tail -1 "$EVID/hold-full.log" 2>/dev/null || echo none)); now $(df -k --output=avail "$MNT" | tail -1 | tr -d ' ')KiB free"
   after="$(IN docker logs culvert 2>&1 | grep -m1 -oE "$wdone" || echo 'no completion line')"
   st="$(IN docker inspect -f 'status={{.State.Status}} exit={{.State.ExitCode}} restarts={{.RestartCount}}' culvert 2>&1 || true)"
   # The verdict comes from the CONTAINER, not from its log: on a full disk
@@ -297,7 +316,7 @@ if [[ "$SCENARIO" == midwrite ]]; then
   # proxy back — that, not an assumption, is what the runbook may document.
   # Every command's output is kept; nothing here may abort the run before the
   # report is written.
-  rm -f "$MNT/.qual-fill"
+  rm -f "$MNT"/.qual-fill*
   up_within(){ local i; for i in $(seq 1 "$1"); do curl -fsS -m 3 http://127.0.0.1:18080/health >/dev/null 2>&1 && return 0; sleep 2; done; return 1; }
   rstep(){ local label="$1"; shift
     { echo "== recovery step: $label $(date -u +%FT%TZ)"; "$@" 2>&1 | tail -20; } >> "$EVID/diagnose.log" 2>&1 || true; }
@@ -400,7 +419,7 @@ ag http://unix/v1/status > "$EVID/status-after-enospc.json" 2>&1 || true
 check E1 agent-status pass "$(python3 -c 'import json,sys;d=json.load(open(sys.argv[1]));print("attention_required=%s interrupted=%d"%(d.get("attention_required"),len(d.get("interrupted_operations") or [])))' "$EVID/status-after-enospc.json" 2>/dev/null || echo unreadable)"
 
 # ── E2: space freed, retry ───────────────────────────────────────────────────
-rm -f "${MNT:?}/.qual-fill"
+rm -f "${MNT:?}"/.qual-fill*
 check E2 space-freed pass "free $(df -k --output=avail "$MNT" | tail -1 | tr -d ' ')KiB"
 # If the full disk took the proxy down, Docker cannot restart it while the
 # disk is full and does not retry afterwards; an operator runs `up`. That
