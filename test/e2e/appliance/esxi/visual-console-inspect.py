@@ -16,6 +16,7 @@ import subprocess
 import time
 
 SOURCE = '7e53720d06f525f4e5fdbfec42f52840d5b734e2'
+SOURCES = (SOURCE, '7c7b29ee3be40af6a0809c73ad04d4337303263d')
 
 
 def command(argv, timeout=8):
@@ -53,12 +54,13 @@ def vt_mode():
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--test-console-open', action='store_true')
+    parser.add_argument('--source', choices=SOURCES, default=SOURCE)
     args = parser.parse_args()
     if os.geteuid() != 0: raise ValueError('authenticated root required')
     build = json.loads(Path('/var/lib/culvert-appliance/build-info.json').read_bytes())
-    if build['source']['git_commit'] != SOURCE or build['source']['git_dirty'] is not False:
+    if build['source']['git_commit'] != args.source or build['source']['git_dirty'] is not False:
         raise ValueError('exact candidate source required')
-    value = {'schema': 1, 'source': SOURCE, 'boot_id': Path('/proc/sys/kernel/random/boot_id').read_text().strip(),
+    value = {'schema': 1, 'source': args.source, 'boot_id': Path('/proc/sys/kernel/random/boot_id').read_text().strip(),
              'monotonic_ns': time.monotonic_ns(), 'realtime_ns': time.time_ns(), 'tty1_mode': vt_mode(),
              'active_vt': Path('/sys/class/tty/tty0/active').read_text().strip(),
              'getty': command(['systemctl', 'show', 'getty@tty1.service', '-p', 'TTYReset', '-p', 'TTYVHangup',

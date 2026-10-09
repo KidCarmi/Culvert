@@ -36,6 +36,14 @@ def load():
     return value
 
 
+def candidate_profile(scope):
+    spec = importlib.util.spec_from_file_location('visual_candidates', HERE / 'candidate-identities.py')
+    profiles = importlib.util.module_from_spec(spec); spec.loader.exec_module(profiles)
+    profile = profiles.scope_profile(scope)
+    need(profile['source_sha'] in (profiles.E7E, profiles.E7C), 'reviewed visual candidate required')
+    return profile
+
+
 def read_json(path):
     need(path.is_file() and not path.is_symlink() and path.stat().st_size <= 1024 * 1024, 'bounded regular evidence required')
     return json.loads(path.read_bytes())
@@ -57,9 +65,15 @@ def no_identity_reset(lab):
 
 
 def preflight(lab):
+    candidate_profile(lab.c)
+    if lab.c.get('visual_import_continuation'):
+        spec = importlib.util.spec_from_file_location('visual_import_binding', HERE / 'import-observer-continuation.py')
+        continuation = importlib.util.module_from_spec(spec); spec.loader.exec_module(continuation)
+        continuation.validate_binding(lab)
+        return
     value = read_json(lab.ev / 'preflight.json')
     freeze = read_json(Path(lab.c['controller_manifest']))
-    need(value['expected_source'] == lab.c['source_sha'] == SOURCE
+    need(value['expected_source'] == lab.c['source_sha']
          and value['expected_image'] == lab.c['image_id']
          and value['artifact']['ova_sha256'] == lab.c['ova_sha256']
          and value['harness_sha'] == freeze['revision'] and value['harness_dirty'] is False
@@ -172,7 +186,8 @@ def main():
     try:
         boot = load(); lab = boot.module.Lab(args.scope)
         boot.module.validate_scope(lab.c)
-        need(lab.c['source_sha'] == SOURCE and lab.c.get('controller_manifest'), 'exact frozen visual candidate required')
+        candidate_profile(lab.c)
+        need(lab.c.get('controller_manifest'), 'exact frozen visual candidate required')
         with passive_lock(lab.run):
             result = capture(lab, args, boot.private_directory)
         print('Captured %d private frames; visual acceptance requires review.' % result['frames'])

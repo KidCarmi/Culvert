@@ -9,6 +9,7 @@ import ast
 import base64
 import hashlib
 import json
+import importlib.util
 from pathlib import Path
 import re
 import uuid
@@ -151,12 +152,16 @@ fixture()
 '''
 
 
-def generate(action, owner, campaign=None):
+def generate(action, owner, campaign=None, source=SOURCE):
     if action not in ('install', 'remove') or str(uuid.UUID(owner)) != owner:
         raise ValueError('explicit action and canonical owned UUID required')
     root, _ = namespace(campaign)
     locks, digest = lock_code()
-    config = {'action': action, 'source': SOURCE, 'owner_uuid': owner, 'units': units(campaign),
+    spec = importlib.util.spec_from_file_location('visual_fixture_profiles', HERE / 'candidate-identities.py')
+    profiles = importlib.util.module_from_spec(spec); spec.loader.exec_module(profiles)
+    if source not in (profiles.E7E, profiles.E7C): raise ValueError('reviewed visual candidate required')
+    profiles.source_profile(source)
+    config = {'action': action, 'source': source, 'owner_uuid': owner, 'units': units(campaign),
               'campaign': campaign, 'fixture_root': root,
               'lock_source_sha256': digest, 'generator_sha256': hashlib.sha256(Path(__file__).read_bytes()).hexdigest()}
     code = ('import hashlib,json,os,re,stat,subprocess,uuid\nfrom pathlib import Path\n'
@@ -171,9 +176,10 @@ def main():
     parser.add_argument('--owner-uuid', required=True)
     parser.add_argument('--campaign', help='New explicit fixture namespace; omission preserves original paths')
     parser.add_argument('--output', type=Path, required=True)
+    parser.add_argument('--source', default=SOURCE, help='Exact reviewed candidate revision')
     args = parser.parse_args()
     with args.output.open('x', encoding='utf-8', newline='\n') as out:
-        out.write(generate(args.action, args.owner_uuid, args.campaign))
+        out.write(generate(args.action, args.owner_uuid, args.campaign, args.source))
 
 
 if __name__ == '__main__': main()

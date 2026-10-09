@@ -464,7 +464,7 @@ class ReplacementCandidateTests(unittest.TestCase):
         cfg = {'operation': 'a' * 32, 'initial': 'SYNTHETIC_TEST_ONLY', 'helper_sha256': 'b' * 64,
                'prior_failure_sha256': None}
         original = (m.SOURCE, m.IMAGE, m.SIDECAR)
-        for candidate in (profiles.CD8, profiles.E2E3, profiles.D698, profiles.E7E, profiles.CD8):
+        for candidate in (profiles.CD8, profiles.E2E3, profiles.D698, profiles.E7E, profiles.E7C, profiles.CD8):
             profile = profiles.source_profile(candidate)
             script = m.payload(cfg, profile).decode()
             code = script.split("python3 - <<'CULVERT_AV_OUTAGE'\n", 1)[1].rsplit('\nCULVERT_AV_OUTAGE', 1)[0]

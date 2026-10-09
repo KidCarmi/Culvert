@@ -36,7 +36,8 @@ def main():
         console = load('visual_console', 'console-priv.py')
         lab = console.b.module.Lab(args.scope)
         console.b.module.validate_scope(lab.c)
-        visual.need(lab.c['source_sha'] == visual.SOURCE and re.fullmatch('[a-z][a-z0-9-]{0,47}', args.label), 'exact visual scope/label required')
+        visual.candidate_profile(lab.c)
+        visual.need(re.fullmatch('[a-z][a-z0-9-]{0,47}', args.label), 'exact visual scope/label required')
         visual.need(re.fullmatch('[a-f0-9]{64}', args.expected_screen_sha256), 'reviewed screen hash required')
         console.b.private_directory(lab)
         with console.b.module.locked(lab.run):

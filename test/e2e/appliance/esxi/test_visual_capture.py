@@ -24,8 +24,9 @@ class VisualTests(unittest.TestCase):
                       'owner': 'LOCAL-ESXI:fixture', 'name': 'culvert-esxi-fixture', 'path': '/lab/vm/fixture',
                       'endpoint': 'https://192.0.2.1', 'host_ref': 'host', 'ds_ref': 'ds', 'network_ref': 'net', 'phase': 'imported'}
         manifest = root / 'freeze.json'; manifest.write_text(json.dumps({'revision': 'a' * 40}))
-        cfg = {'source_sha': v.SOURCE, 'image_id': 'sha256:' + 'b' * 64, 'ova_sha256': 'c' * 64,
-               'controller_manifest': str(manifest)}
+        profiles = importlib.util.spec_from_file_location('visual_test_profiles', Path(__file__).with_name('candidate-identities.py'))
+        ids = importlib.util.module_from_spec(profiles); profiles.loader.exec_module(ids)
+        cfg = dict(ids.source_profile(ids.E7E), controller_manifest=str(manifest))
         scope = root / 'scope.json'; scope.write_text(json.dumps(cfg))
         (ev / 'preflight.json').write_text(json.dumps({'expected_source': v.SOURCE, 'expected_image': cfg['image_id'],
             'artifact': {'ova_sha256': cfg['ova_sha256']}, 'harness_sha': 'a' * 40, 'harness_dirty': False,
@@ -68,7 +69,7 @@ class VisualTests(unittest.TestCase):
 
     def test_candidate_preflight_mismatch_refuses_before_capture(self):
         self.ledger(); self.lab.c['ova_sha256'] = '0' * 64
-        with self.assertRaisesRegex(ValueError, 'mismatch'): self.run_capture()
+        with self.assertRaisesRegex(ValueError, 'mismatch|differs'): self.run_capture()
         self.lab.vm.assert_not_called(); self.lab.gov.assert_not_called()
 
     def test_owned_vm_change_and_scope_change_stop_capture(self):
