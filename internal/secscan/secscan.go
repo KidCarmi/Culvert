@@ -371,7 +371,10 @@ func (ss *Scanner) MaxBytes() int64 {
 	return ss.maxBytes
 }
 
-// ClamAVStatus returns a human-readable daemon connectivity string.
+// ClamAVStatus returns a human-readable daemon status string: "disabled",
+// "connected" (PING answered AND a probe scan came back clean), or a failure
+// starting "unreachable" (PING failed) or ClamStatusScanFailingPrefix (PING
+// answered, the probe scan did not complete).
 // Tier 2.3: Result is cached for clamStatusTTL to avoid hammering the ClamAV
 // daemon on every admin dashboard poll. Cache is invalidated on Init().
 func (ss *Scanner) ClamAVStatus() string {
@@ -398,6 +401,8 @@ func (ss *Scanner) ClamAVStatus() string {
 	var val string
 	if err := clam.Ping(); err != nil {
 		val = fmt.Sprintf("unreachable: %v", err)
+	} else if err := probeClamScan(clam); err != nil {
+		val = fmt.Sprintf("%s: %v", ClamStatusScanFailingPrefix, err)
 	} else {
 		val = "connected"
 	}
@@ -406,6 +411,43 @@ func (ss *Scanner) ClamAVStatus() string {
 	ss.clamStatusExpiry = time.Now().Add(clamStatusTTL)
 	ss.mu.Unlock()
 	return val
+}
+
+// ClamStatusScanFailingPrefix starts the ClamAVStatus value for a daemon that
+// answers PING but cannot complete a scan.
+const ClamStatusScanFailingPrefix = "scan_failing"
+
+// clamReadinessProbe is the body the status check scans. It is fixed, tiny
+// and clean: a verdict on it proves the daemon can take a stream into its
+// temporary directory and answer, which PING does not.
+var clamReadinessProbe = []byte("culvert clamav readiness probe\n")
+
+// clamProbeTimeout bounds the probe scan so a slow daemon cannot hold a
+// readiness read.
+const clamProbeTimeout = 5 * time.Second
+
+// probeClamScan scans clamReadinessProbe and reports why it could not be
+// judged clean.
+//
+// Readiness used to be PING alone. PING needs no temporary file, so a daemon
+// whose temporary directory cannot take a file (a full disk or exhausted
+// inodes, measured on the appliance) answered PONG while every INSTREAM scan
+// failed: under av_unavailable=closed every scanned body was refused for the
+// whole outage while /ready reported clamav ok (lab run 37957097250, inode
+// phase). The probe exercises the same INSTREAM path a request does. It
+// deliberately bypasses the request path's accounting (no counter, alert or
+// stale mark): it is the status read, not a scan anyone asked for.
+func probeClamScan(clam ClamScanner) error {
+	ctx, cancel := context.WithTimeout(context.Background(), clamProbeTimeout)
+	defer cancel()
+	name, found, err := runClam(ctx, clam, clamReadinessProbe)
+	switch {
+	case err != nil:
+		return err
+	case found:
+		return fmt.Errorf("probe body reported as %q", name)
+	}
+	return nil
 }
 
 // ClamAVVersion returns the ClamAV engine + signature database version, so

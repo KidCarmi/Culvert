@@ -3,9 +3,11 @@ package main
 import (
 	"encoding/json"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/KidCarmi/Culvert/internal/geoip"
+	"github.com/KidCarmi/Culvert/internal/secscan"
 )
 
 // healthReport is the liveness + posture snapshot served by /healthz and
@@ -409,10 +411,13 @@ func computeReadiness() (report readinessReport, code int) {
 		case "connected":
 			checks["clamav"] = &readinessCheck{Status: "ok"}
 		default:
-			checks["clamav"] = &readinessCheck{
-				Status: "fail",
-				Detail: "ClamAV unreachable — see Security Scanning status in the admin UI",
+			detail := "ClamAV unreachable — see Security Scanning status in the admin UI"
+			if strings.HasPrefix(st, secscan.ClamStatusScanFailingPrefix) {
+				// Fixed text: the daemon answers but cannot scan (e.g. its
+				// temporary directory is out of space or inodes).
+				detail = "ClamAV answers but cannot scan — see Security Scanning status in the admin UI"
 			}
+			checks["clamav"] = &readinessCheck{Status: "fail", Detail: detail}
 			allOK = false
 		}
 	}

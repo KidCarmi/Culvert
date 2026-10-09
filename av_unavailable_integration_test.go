@@ -359,3 +359,37 @@ func TestAVUnavailableIT_DaemonTempFullIsAFaultNotClean(t *testing.T) {
 		})
 	}
 }
+
+// TestAVUnavailableIT_ReadinessReportsADaemonThatCannotScan: readiness truth
+// for the outage PING cannot see. Under inode exhaustion on the appliance
+// (lab run 37957097250) clamd answered PONG while every INSTREAM failed, so
+// /ready said clamav ok for the whole phase while every scanned body was
+// refused. The status read now scans a probe through the same INSTREAM path.
+func TestAVUnavailableIT_ReadinessReportsADaemonThatCannotScan(t *testing.T) {
+	clamd, origin := avIntegrationSetup(t, secscan.AVUnavailableClosed)
+	if st := clamavReadinessStatus(t); st != "ok" {
+		t.Fatalf("healthy daemon: /ready clamav row %q", st)
+	}
+	clamd.setMode(clamdTempFull)
+	if w := proxyGet(t, origin, "/cannot-scan"); w.Code != http.StatusForbidden {
+		t.Fatalf("closed posture under a spool failure: want 403, got %d", w.Code)
+	}
+	report, code := computeReadiness()
+	c := report.Checks["clamav"]
+	if c == nil || c.Status != "fail" || code != http.StatusServiceUnavailable {
+		t.Fatalf("a daemon that answers PING but cannot scan must fail /ready: row %+v code %d", c, code)
+	}
+	if !strings.Contains(c.Detail, "cannot scan") || strings.Contains(c.Detail, clamd.addr) {
+		t.Fatalf("detail must be the fixed cannot-scan text without the daemon address: %q", c.Detail)
+	}
+	if h := computeHealth(); coarseClamAVStatus(h.ClamAV) != "unreachable" {
+		t.Fatalf("/health keeps its enum: a daemon that cannot scan is %q, want unreachable", coarseClamAVStatus(h.ClamAV))
+	}
+	// Recovery on evidence: once clamd can spool again, a fresh status read
+	// (Init drops the cached entry, as the 30 s TTL would) reports ok.
+	clamd.setMode(clamdClean)
+	globalSecScanner.Init("tcp:"+clamd.addr, 0, newHashCache(256, time.Hour))
+	if st := clamavReadinessStatus(t); st != "ok" {
+		t.Fatalf("after recovery: /ready clamav row %q", st)
+	}
+}

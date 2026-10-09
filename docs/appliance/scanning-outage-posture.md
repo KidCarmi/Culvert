@@ -31,6 +31,18 @@ posture is documented in `docs/operator/scan-capacity-and-timeouts.md` §6.2.
 * `/ready` turns its `clamav` row `fail` on the next read after a request
   first hits the outage (the cached daemon status is invalidated), not up to
   30 s later.
+* `/ready` also fails the `clamav` row when clamd **answers but cannot scan**
+  (detail: "ClamAV answers but cannot scan"). The status read sends PING and
+  then scans a fixed, tiny, clean probe body through the same INSTREAM path a
+  request uses. PING alone needs no temporary file, so before this a daemon
+  whose temporary directory was out of space or inodes answered PONG while
+  every scan failed: on the appliance under inode exhaustion every scanned
+  body was refused (`closed`) for the whole phase while `/ready` reported
+  `clamav ok` (lab run 37957097250). `/health` keeps its public enum (this
+  state reads `unreachable` there); the cause (`scan_failing: …`) is on
+  `GET /api/security-scan/status`. The row recovers on the first status read
+  whose probe gets a clean verdict (at most the 30 s status cache after the
+  daemon can scan again).
 * Admin UI → Security Scanning shows the posture (*When ClamAV Is
   Unavailable*) and the *Refused: AV unavailable* counter;
   `GET /api/security-scan/status` carries `av_unavailable`.
