@@ -11,3 +11,6 @@ docs/appliance/evidence/cd8-intake-20261008/** -text -whitespace
 
 # Keep the published 7e evidence byte-identical to its SHA256 manifest.
 docs/appliance/evidence/7e-esxi-20261008/** -text -whitespace
+
+# Keep the published 7c evidence byte-identical to its SHA256 manifest.
+docs/appliance/evidence/7c-esxi-20261009/** -text -whitespace

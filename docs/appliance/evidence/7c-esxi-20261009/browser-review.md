@@ -1,0 +1,15 @@
+# Independent 7c browser review
+
+**PASS within the observed scope**, with one explicit coverage limit. Exact source7c7b29ee / OVA4b8ae484… / controllera0981722. Raw browser, NetLog, binding, activity and cleanup evidence independently checked;204 source files are hash-bound in the companion JSON.
+
+- Alice: actual marked HTTP302 sign-in followed by HTTP200/Example Domain; real signed SAML flow; engineering binding. Fresh isolated browser HTTPS origin200/Example Domain, credential-free CONNECT200 and appliance Alice/`sso-ip:<provider>`/exact allow-rule activity jointly pass.
+- Bob: finance binding; actual HTTP403/Access Denied and new CONNECT403; appliance Bob/exact deny-rule POLICY_BLOCK activity. The recorded body-check booleanfalse is retained: its case-sensitive literal `Access denied` did not match `Access Denied`.
+- Logout: actual same-context POST `/auth/logout`, empty binding and a fresh CONNECT403. The preceding guessed GET `/auth/complete` returned404; it served only as same-origin context and is not treated as a successful route.
+- Disabled and excluded binding: empty bindings and separate fresh CONNECT403 proofs. A direct excluded Alice sign-in subsequently completed a real signed callback and rendered **Signed in, but not for web access**, with explicit excluded-address explanation and no binding.
+- Coverage limit: no new proxy request was sent AFTER that direct excluded sign-in. The excluded CONNECT403 proof predates it. The empty binding and explicit completion-page denial are observed; post-login proxy rejection is not claimed.
+- Cookie boundary: portal session has Secure/HttpOnly/Lax flags; admin endpoint401 with the portal session. Replaying the actual issued portal cookie under the UI-cookie name also returned401. This supplies additive SAML evidence for the lifecycle's preserved IdP-dependent BLOCKED row.
+- Cleanup: independent baseline comparison passed for network fields, binding settings, IdP profiles and both rule sets; no bindings remain. Recorded fixture PID stopped; only its known executable was targeted.
+
+Other execution corrections remain explicit: guessed `/auth/saml/login` GET404 was corrected to verified `/auth/select`; trailing `python312.exe` typo occurred after successful Alice HTTPS browser close (root reports no appliance action); first fixture-stop comparison refused because the JSON date was a DateTime rather than the compared string, then the same PID/path/binary was stopped after exact timestamp verification. Those errors do not substitute for any oracle or disappear from the evidence.
+
+Public HTTPS origin certificate checking stayed enabled; only the appliance UI SPKI received the authorized exception. No admin cookie was used for the ordinary browser/proxy journey; deliberate portal-to-admin cookie replay was the separate negative test. Production private-IdP restrictions were unchanged. This is synthetic SAML/browser transport evidence, not OIDC/vendor interoperability, shared-NAT identity isolation or HTTPS inspection/scanning qualification.

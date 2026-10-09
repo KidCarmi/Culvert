@@ -1,0 +1,1418 @@
+{
+  "schema": 1,
+  "draft": false,
+  "snapshot_utc": "2026-10-09T11:58:30.378459+00:00",
+  "production_ready": false,
+  "no_merge_or_release_authorization": true,
+  "source": "7c7b29ee3be40af6a0809c73ad04d4337303263d",
+  "ova_sha256": "4b8ae484fd8b9bda8dfc12512e9e0b489edcc96c7590824f22276a19dc6b7a05",
+  "ova_bytes": 1537863680,
+  "ova_artifact": 11605618137,
+  "ova_run": 37908313475,
+  "image_id": "sha256:398ffaf2090ec32cb9ff0506dd2e92bfd2414d689719373fc00cf96a5c58f906",
+  "image_tar_sha256": "d56cb3070addaf080e5500d92523a58462be5a95ff3e49af1b98755f3df0b63d",
+  "controllers": {
+    "original_controller": "76125c09ecd3e4858402e30f3639e1923b8c8316",
+    "continuation_controller": "a098172270d6492e8c9626f342f600fe7df1f4d7",
+    "continuation_freeze_sha256": "ebc439ba5076181a28ae486c80e582fc7dcf2891534b608a832c9ef7e0825685"
+  },
+  "lifecycle": {
+    "counts": {
+      "info": 5,
+      "pass": 79,
+      "blocked": 1,
+      "not-run": 2
+    },
+    "checks": [
+      {
+        "step": "ESXi",
+        "check": "access-aware-harness",
+        "result": "info"
+      },
+      {
+        "step": "2",
+        "check": "target",
+        "result": "info"
+      },
+      {
+        "step": "3",
+        "check": "operator-observe",
+        "result": "pass"
+      },
+      {
+        "step": "3",
+        "check": "status-setup-pending",
+        "result": "pass"
+      },
+      {
+        "step": "3",
+        "check": "firstboot-steps",
+        "result": "pass"
+      },
+      {
+        "step": "3a",
+        "check": "console-login",
+        "result": "pass"
+      },
+      {
+        "step": "3a",
+        "check": "password-changed",
+        "result": "pass"
+      },
+      {
+        "step": "3",
+        "check": "culvert-status-setup-pending",
+        "result": "pass"
+      },
+      {
+        "step": "3",
+        "check": "image-identity",
+        "result": "pass"
+      },
+      {
+        "step": "3",
+        "check": "setup-token",
+        "result": "pass"
+      },
+      {
+        "step": "3c",
+        "check": "operator-commands-refused",
+        "result": "pass"
+      },
+      {
+        "step": "3c",
+        "check": "forwarding-refused",
+        "result": "pass"
+      },
+      {
+        "step": "3c",
+        "check": "file-transfer-refused",
+        "result": "pass"
+      },
+      {
+        "step": "3c",
+        "check": "local-admin-ssh-refused",
+        "result": "pass"
+      },
+      {
+        "step": "3c",
+        "check": "sshd-effective",
+        "result": "pass"
+      },
+      {
+        "step": "3c",
+        "check": "local-admin-sudo-needs-password",
+        "result": "pass"
+      },
+      {
+        "step": "3d",
+        "check": "boot-timing",
+        "result": "info"
+      },
+      {
+        "step": "3e",
+        "check": "recovery-secrets",
+        "result": "pass"
+      },
+      {
+        "step": "4a",
+        "check": "bootstrap-api-needs-token",
+        "result": "pass"
+      },
+      {
+        "step": "4",
+        "check": "setup-without-token",
+        "result": "pass"
+      },
+      {
+        "step": "4",
+        "check": "setup-with-token",
+        "result": "pass"
+      },
+      {
+        "step": "4",
+        "check": "admin-login",
+        "result": "pass"
+      },
+      {
+        "step": "4",
+        "check": "status-setup-complete",
+        "result": "pass"
+      },
+      {
+        "step": "4",
+        "check": "operator-setup-complete",
+        "result": "pass"
+      },
+      {
+        "step": "4b",
+        "check": "demotion-immediate",
+        "result": "pass"
+      },
+      {
+        "step": "4b",
+        "check": "portal-cookie-replay",
+        "result": "blocked"
+      },
+      {
+        "step": "5",
+        "check": "auth-exempt",
+        "result": "pass"
+      },
+      {
+        "step": "5",
+        "check": "default-deny",
+        "result": "pass"
+      },
+      {
+        "step": "5",
+        "check": "traffic",
+        "result": "pass"
+      },
+      {
+        "step": "5",
+        "check": "ready-rows",
+        "result": "pass"
+      },
+      {
+        "step": "5",
+        "check": "clamav-real",
+        "result": "pass"
+      },
+      {
+        "step": "5",
+        "check": "status-ready-to-enforce",
+        "result": "pass"
+      },
+      {
+        "step": "5",
+        "check": "ca-identity",
+        "result": "pass"
+      },
+      {
+        "step": "5b",
+        "check": "category-data",
+        "result": "pass"
+      },
+      {
+        "step": "5c",
+        "check": "category-enforcement",
+        "result": "pass"
+      },
+      {
+        "step": "6",
+        "check": "agent-installed",
+        "result": "pass"
+      },
+      {
+        "step": "6",
+        "check": "agent-reachable",
+        "result": "pass"
+      },
+      {
+        "step": "6",
+        "check": "agent-backup",
+        "result": "pass"
+      },
+      {
+        "step": "6",
+        "check": "backup-listed",
+        "result": "pass"
+      },
+      {
+        "step": "6",
+        "check": "restore-dry-run",
+        "result": "pass"
+      },
+      {
+        "step": "6b",
+        "check": "restore-commit",
+        "result": "not-run"
+      },
+      {
+        "step": "9",
+        "check": "post-backup-mutation",
+        "result": "pass"
+      },
+      {
+        "step": "9",
+        "check": "actual-restore",
+        "result": "pass"
+      },
+      {
+        "step": "9",
+        "check": "restore-admin-login",
+        "result": "pass"
+      },
+      {
+        "step": "9",
+        "check": "restore-enforcement",
+        "result": "pass"
+      },
+      {
+        "step": "9",
+        "check": "restore-ca",
+        "result": "pass"
+      },
+      {
+        "step": "9",
+        "check": "restore-feed-rehydrated",
+        "result": "pass"
+      },
+      {
+        "step": "9",
+        "check": "restore-categories",
+        "result": "pass"
+      },
+      {
+        "step": "9",
+        "check": "restore-agent",
+        "result": "pass"
+      },
+      {
+        "step": "9",
+        "check": "restore-complete",
+        "result": "pass"
+      },
+      {
+        "step": "6c",
+        "check": "test-only-trust",
+        "result": "pass"
+      },
+      {
+        "step": "6c",
+        "check": "unsigned-apply-refused",
+        "result": "pass"
+      },
+      {
+        "step": "6c",
+        "check": "signed-apply",
+        "result": "pass"
+      },
+      {
+        "step": "6c",
+        "check": "signed-rollback",
+        "result": "pass"
+      },
+      {
+        "step": "7",
+        "check": "os-update",
+        "result": "pass"
+      },
+      {
+        "step": "7",
+        "check": "reboot",
+        "result": "pass"
+      },
+      {
+        "step": "7",
+        "check": "kernel",
+        "result": "info"
+      },
+      {
+        "step": "7",
+        "check": "docker-held",
+        "result": "pass"
+      },
+      {
+        "step": "ESXi",
+        "check": "independent-reboot-timing",
+        "result": "pass"
+      },
+      {
+        "step": "8",
+        "check": "stack-resumed",
+        "result": "pass"
+      },
+      {
+        "step": "8",
+        "check": "admin-login",
+        "result": "pass"
+      },
+      {
+        "step": "8",
+        "check": "policy-persisted",
+        "result": "pass"
+      },
+      {
+        "step": "8",
+        "check": "enforcement",
+        "result": "pass"
+      },
+      {
+        "step": "8",
+        "check": "ready",
+        "result": "pass"
+      },
+      {
+        "step": "8",
+        "check": "ca-identity",
+        "result": "pass"
+      },
+      {
+        "step": "8",
+        "check": "category-data",
+        "result": "pass"
+      },
+      {
+        "step": "8",
+        "check": "backup-listed",
+        "result": "pass"
+      },
+      {
+        "step": "8",
+        "check": "agent-reachable",
+        "result": "pass"
+      },
+      {
+        "step": "8",
+        "check": "firstboot-not-rerun",
+        "result": "pass"
+      },
+      {
+        "step": "8",
+        "check": "state-files",
+        "result": "pass"
+      },
+      {
+        "step": "8",
+        "check": "restore-persisted",
+        "result": "not-run"
+      },
+      {
+        "step": "8",
+        "check": "image-identity",
+        "result": "pass"
+      },
+      {
+        "step": "8",
+        "check": "operator-status",
+        "result": "pass"
+      },
+      {
+        "step": "8",
+        "check": "boot-timing",
+        "result": "info"
+      },
+      {
+        "step": "7",
+        "check": "esxi-boot-id-changed",
+        "result": "pass"
+      },
+      {
+        "step": "8",
+        "check": "restore-persisted",
+        "result": "pass"
+      },
+      {
+        "step": "E",
+        "check": "kernel-is-the-only-installed",
+        "result": "pass"
+      },
+      {
+        "step": "E",
+        "check": "snapd-absent",
+        "result": "pass"
+      },
+      {
+        "step": "E",
+        "check": "engine-no-tcp-listener",
+        "result": "pass"
+      },
+      {
+        "step": "E",
+        "check": "containerd-socket-root-only",
+        "result": "pass"
+      },
+      {
+        "step": "E",
+        "check": "docker-socket-root-only",
+        "result": "pass"
+      },
+      {
+        "step": "E",
+        "check": "dockerd-no-tcp-host",
+        "result": "pass"
+      },
+      {
+        "step": "E",
+        "check": "containerd-cri-disabled",
+        "result": "pass"
+      },
+      {
+        "step": "E",
+        "check": "kernel-modules-denied",
+        "result": "pass"
+      },
+      {
+        "step": "E",
+        "check": "extra-modules-absent",
+        "result": "pass"
+      },
+      {
+        "step": "E",
+        "check": "containerd-tracing-off",
+        "result": "pass"
+      },
+      {
+        "step": "E",
+        "check": "engine-evidence-complete",
+        "result": "pass"
+      }
+    ]
+  },
+  "independent_postchecks": {
+    "counts": {
+      "pass": 12
+    },
+    "checks": [
+      {
+        "check": "postcheck-command-integrity",
+        "result": "pass"
+      },
+      {
+        "check": "root-observation",
+        "result": "pass"
+      },
+      {
+        "check": "reboot-identity",
+        "result": "pass"
+      },
+      {
+        "check": "kernel-observation",
+        "result": "pass"
+      },
+      {
+        "check": "source-image-identity",
+        "result": "pass"
+      },
+      {
+        "check": "agent-version-active",
+        "result": "pass"
+      },
+      {
+        "check": "firstboot-not-rerun",
+        "result": "pass"
+      },
+      {
+        "check": "locked-stack-resume",
+        "result": "pass"
+      },
+      {
+        "check": "docker-package-holds",
+        "result": "pass"
+      },
+      {
+        "check": "restored-policy-persistence",
+        "result": "pass"
+      },
+      {
+        "check": "ca-identity",
+        "result": "pass"
+      },
+      {
+        "check": "meaningful-category-persistence",
+        "result": "pass"
+      }
+    ]
+  },
+  "maintenance_recovery": [
+    {
+      "result": "pass",
+      "cycle_id": "r7c-1",
+      "accepted_monotonic_ns": 247101109000000,
+      "observed_ready_monotonic_ns": 247164734000000,
+      "controller_confirmed_at": {
+        "monotonic_ns": 247206312000000,
+        "realtime_ns": 1791545347062909200
+      },
+      "seconds_to_three_healthy_samples": 63.625,
+      "first_backup_seconds": 0.859,
+      "first_backup_login_seconds": 0.094,
+      "boot_window_controller_monotonic_ns": [
+        247095008071339,
+        247106430071339
+      ],
+      "direct_clamav_coverage": {
+        "guest_interval_start_ns": 45553928661,
+        "guest_interval_end_ns": 72225928661,
+        "pong_samples": 15,
+        "maximum_sample_gap_ns": 2008017398,
+        "current_container_endpoint_verified": true
+      },
+      "note": "Service timing only; guest lock/disk/unit/persistence evidence is qualified separately.",
+      "proof_sha256": "fa105125be4d46e716f2ef1282b81bbdd131ae5fce89bc169c3c4d76fcc2f891",
+      "rows_sha256": "decc31ff23dfec90cdc456585e6c09c6d07819351fc1f668772f2cd14cf2ea8e",
+      "controller_confirmation_lag_seconds": 41.578,
+      "budget_seconds": 120,
+      "proof_and_rows_hashes_independently_verified": true
+    },
+    {
+      "result": "pass",
+      "cycle_id": "r7c-2",
+      "accepted_monotonic_ns": 247231984000000,
+      "observed_ready_monotonic_ns": 247298671000000,
+      "controller_confirmed_at": {
+        "monotonic_ns": 247330750000000,
+        "realtime_ns": 1791545471504412300
+      },
+      "seconds_to_three_healthy_samples": 66.687,
+      "first_backup_seconds": 0.75,
+      "first_backup_login_seconds": 0.078,
+      "boot_window_controller_monotonic_ns": [
+        247233390965302,
+        247237452965302
+      ],
+      "direct_clamav_coverage": {
+        "guest_interval_start_ns": 48468034698,
+        "guest_interval_end_ns": 67780034698,
+        "pong_samples": 12,
+        "maximum_sample_gap_ns": 2004998386,
+        "current_container_endpoint_verified": true
+      },
+      "note": "Service timing only; guest lock/disk/unit/persistence evidence is qualified separately.",
+      "proof_sha256": "a35765d6498b23da201d3c2ee7c34c9969d89b7b92a631cd402e01c7aefd85b4",
+      "rows_sha256": "bad29b4ced99fc4e311b9e0dd4b8a9aac9cdee4bedb193ec31a604a18bb72cac",
+      "controller_confirmation_lag_seconds": 32.079,
+      "budget_seconds": 120,
+      "proof_and_rows_hashes_independently_verified": true
+    },
+    {
+      "result": "pass",
+      "cycle_id": "r7c-3",
+      "accepted_monotonic_ns": 247361109000000,
+      "observed_ready_monotonic_ns": 247430640000000,
+      "controller_confirmed_at": {
+        "monotonic_ns": 247461671000000,
+        "realtime_ns": 1791545602434337700
+      },
+      "seconds_to_three_healthy_samples": 69.531,
+      "first_backup_seconds": 0.828,
+      "first_backup_login_seconds": 0.078,
+      "boot_window_controller_monotonic_ns": [
+        247361852953748,
+        247366446953748
+      ],
+      "direct_clamav_coverage": {
+        "guest_interval_start_ns": 51412046252,
+        "guest_interval_end_ns": 71287046252,
+        "pong_samples": 12,
+        "maximum_sample_gap_ns": 2008026671,
+        "current_container_endpoint_verified": true
+      },
+      "note": "Service timing only; guest lock/disk/unit/persistence evidence is qualified separately.",
+      "proof_sha256": "22b13344d220931be3a3d02f66d25e7da5ea8714ca6012422e627531dd8edd52",
+      "rows_sha256": "2666203186d522a06f6dc8f07178c06bc21f914d76af21154ff4778f1cf5cdf6",
+      "controller_confirmation_lag_seconds": 31.031,
+      "budget_seconds": 120,
+      "proof_and_rows_hashes_independently_verified": true
+    }
+  ],
+  "scanner_outage": {
+    "result": "pass",
+    "policy_restored": true,
+    "restored_running": true,
+    "both_maintenance_locks_held": true,
+    "readiness": {
+      "before": {
+        "http_status": 200,
+        "clamav_status": "ok",
+        "pass": true
+      },
+      "down": {
+        "http_status": 503,
+        "clamav_status": "fail",
+        "pass": true
+      },
+      "recovered": {
+        "http_status": 200,
+        "clamav_status": "ok",
+        "pass": true
+      }
+    },
+    "traffic": {
+      "before": [
+        {
+          "kind": "clean",
+          "http_status": 200,
+          "origin_fetched": true,
+          "pass": true
+        },
+        {
+          "kind": "eicar",
+          "http_status": 403,
+          "origin_fetched": true,
+          "pass": true
+        }
+      ],
+      "down": [
+        {
+          "kind": "clean",
+          "http_status": 403,
+          "origin_fetched": true,
+          "pass": true
+        },
+        {
+          "kind": "eicar",
+          "http_status": 403,
+          "origin_fetched": true,
+          "pass": true
+        }
+      ],
+      "recovered": [
+        {
+          "kind": "clean",
+          "http_status": 200,
+          "origin_fetched": true,
+          "pass": true
+        },
+        {
+          "kind": "eicar",
+          "http_status": 403,
+          "origin_fetched": true,
+          "pass": true
+        }
+      ]
+    }
+  },
+  "historical_refusals": {
+    "capacity": {
+      "result": "blocked",
+      "host_free_mb": 7708,
+      "required_free_mb": 8192,
+      "shortfall_mb": 484,
+      "datastore_free_gib": 390.89,
+      "lab_vms": "",
+      "no_new_import": true
+    },
+    "original_observer": {
+      "result": "blocked",
+      "vm_imported_powered_off": true,
+      "subsequent_controller_continuation": true,
+      "no_reimport": true
+    },
+    "export_acl": {
+      "utc": "2026-10-09T11:26:43.344846+00:00",
+      "original_receipt_sha256": "4639216fc2b095fdb174753806ef6bf597b9547dd7ed193535c4561b17363f13",
+      "original_escrow_empty": true,
+      "original_failure": "Escrow ACL verification failed: inherited owner/System-only ACL lacked required explicit protection",
+      "guest_export_dispatched_before_fix": false,
+      "change": "Explicit protected owner/System-only ACL on same empty escrow; no frozen source changes"
+    }
+  },
+  "console_initial_observations": {
+    "source": "7c7b29ee3be40af6a0809c73ad04d4337303263d",
+    "scope": "passive first-boot console observations, not traffic readiness or maintenance timing",
+    "first_observed": {
+      "first_start": {
+        "elapsed_seconds": 42.828,
+        "frame_sha256": "36717f08a49dcb1462d49f1a44748a95d8e4785f4e3f031a2311f3e145721b34",
+        "filename": "frame-0018.png"
+      },
+      "management_url": {
+        "elapsed_seconds": 42.828,
+        "frame_sha256": "36717f08a49dcb1462d49f1a44748a95d8e4785f4e3f031a2311f3e145721b34",
+        "filename": "frame-0018.png"
+      },
+      "separate_browser_credential": {
+        "elapsed_seconds": 42.828,
+        "frame_sha256": "36717f08a49dcb1462d49f1a44748a95d8e4785f4e3f031a2311f3e145721b34",
+        "filename": "frame-0018.png"
+      },
+      "secret_reminder": {
+        "elapsed_seconds": 42.828,
+        "frame_sha256": "36717f08a49dcb1462d49f1a44748a95d8e4785f4e3f031a2311f3e145721b34",
+        "filename": "frame-0018.png"
+      },
+      "checkpoints7": {
+        "elapsed_seconds": 110.61,
+        "frame_sha256": "8039764d3565cf5e4f089b57adaafbd646d2e4018ad86f4039260ba7bdc1927a",
+        "filename": "frame-0047.png"
+      }
+    },
+    "unique_frames_reviewed": 17,
+    "credentials_omitted": true
+  },
+  "p1_static_network": {
+    "controller_before": "pass",
+    "controller_after_reboot": "pass",
+    "source_binding_only_in_this_draft": true
+  },
+  "producer_scanner_dispositions": {
+    "artifact": 11609291527,
+    "application_os_findings": 0,
+    "app_openpgp_linked_functions": 0,
+    "kernel_critical_absent": 2,
+    "kernel_critical_denied": 3,
+    "kernel_high_present": 56,
+    "kernel_high_present_disposition": "BLOCKED for production closure: blanket no-fixed-package statement does not establish individual exposure/mitigation",
+    "source_scan_cgo_mismatch": "BLOCKED evidence correction: script usesCGO_ENABLED=1 but shipped Compose and containerd-shim record0; rerun matching binary settings",
+    "clamav_exact_scan_artifact": 11607875170,
+    "clamav_findings": 0
+  },
+  "fixture_binary_build_provenance": {
+    "original_sha256": "a9557cf1d6de9e70e8a8fd1889be27ab96a85ffe132359a8fa09a192f397d363",
+    "rebuilt_sha256": "a9557cf1d6de9e70e8a8fd1889be27ab96a85ffe132359a8fa09a192f397d363",
+    "main_sha256": "a8d208e6f40b106cebc28b0fd2f7df76b28d0772b65397c00f3f33b925232a5b",
+    "go": "go1.26.8 windows/amd64",
+    "byte_identical": true,
+    "command": "go build -trimpath -buildvcs=false; CGO_ENABLED=0",
+    "source_revision": "a098172270d6492e8c9626f342f600fe7df1f4d7"
+  },
+  "fresh_import_observer": {
+    "visual_capture_label_present": false,
+    "continuation_binding_present": false,
+    "rendezvous_required": false,
+    "fresh_cold_boot_capture_automatic": false
+  },
+  "pending": [
+    "Concrete per-path mitigation or supported replacement for 56 present HIGH kernel CVEs",
+    "Source reachability scans matching shipped CGO settings for Compose and shim",
+    "Whole-appliance bounded root/inode and backup/update-under-pressure qualification; no shared datastore exhaustion",
+    "Correct stale readiness/scanner/pilot-risk documentation",
+    "OIDC/vendor interoperability and separately declared untested browser/visual scope"
+  ],
+  "source_bindings": [
+    {
+      "label": "lifecycle-checks",
+      "bytes": 15534,
+      "sha256": "9c396eb13c7af6b756fd9da3c79a4f14877bb794f19dd082b4d33435f0c135d6"
+    },
+    {
+      "label": "independent-checks",
+      "bytes": 1552,
+      "sha256": "b14bd93ab529a3ee07eeabcc6916bbe88ad154244e96f733c7b433935fd0e89c"
+    },
+    {
+      "label": "adapter-checks",
+      "bytes": 2564,
+      "sha256": "75c50d8b7ac826ad1fee998057c254494b0dfcb1203499768dca0e3ff61bde9a"
+    },
+    {
+      "label": "offline-verification.json",
+      "bytes": 1643,
+      "sha256": "83f7f09aee96f3c302b40dec8a5097400d53077281d2511e84a22f2d1896f49e"
+    },
+    {
+      "label": "execution-start.json",
+      "bytes": 626,
+      "sha256": "ca35fb9c6df3ac1bc049dd4a1c96b19c86ebcd788eabdcaac397bf5a567e3ed5"
+    },
+    {
+      "label": "capacity-blocker.json",
+      "bytes": 182,
+      "sha256": "fed1e75d7accd561488d10cde87fe8277dcb380ee6c2304f50547130beb4cdf6"
+    },
+    {
+      "label": "firstboot-console-observations.json",
+      "bytes": 1232,
+      "sha256": "a5f8b63306d168013558cf2091777e55240860073edb2a888f2fb5800ac12d71"
+    },
+    {
+      "label": "r7c-1-summary",
+      "bytes": 964,
+      "sha256": "d1ea33a120cc21531aa6e215afcafaef83a41cebbf30eecab0cf488e4270aec0"
+    },
+    {
+      "label": "r7c-1-proof",
+      "bytes": 13726,
+      "sha256": "fa105125be4d46e716f2ef1282b81bbdd131ae5fce89bc169c3c4d76fcc2f891"
+    },
+    {
+      "label": "r7c-1-rows",
+      "bytes": 12416,
+      "sha256": "decc31ff23dfec90cdc456585e6c09c6d07819351fc1f668772f2cd14cf2ea8e"
+    },
+    {
+      "label": "r7c-1-host-storage",
+      "bytes": 5923,
+      "sha256": "a1158022991834318f1e1e99a320977dd1aa928f793128e48ce3222e75da3aaf"
+    },
+    {
+      "label": "r7c-1-vm-performance",
+      "bytes": 6497,
+      "sha256": "727f14cb87ae4a2607cf9c7ac4eb304c52962480ad9aa7235b17177e3cb25b56"
+    },
+    {
+      "label": "r7c-2-summary",
+      "bytes": 963,
+      "sha256": "dd0366e8927b2a671cd4a77da95dfab676a4f8f4e0ee57c2181c347b424df20b"
+    },
+    {
+      "label": "r7c-2-proof",
+      "bytes": 13726,
+      "sha256": "a35765d6498b23da201d3c2ee7c34c9969d89b7b92a631cd402e01c7aefd85b4"
+    },
+    {
+      "label": "r7c-2-rows",
+      "bytes": 12106,
+      "sha256": "bad29b4ced99fc4e311b9e0dd4b8a9aac9cdee4bedb193ec31a604a18bb72cac"
+    },
+    {
+      "label": "r7c-2-host-storage",
+      "bytes": 5928,
+      "sha256": "488d5dbce4fee24c67c48dbcaf603aacbf354dfaa7a3f8fb6cc6cfffc84fdf7a"
+    },
+    {
+      "label": "r7c-2-vm-performance",
+      "bytes": 6494,
+      "sha256": "014c2c150317da2034307cad1832e269d5fa520b83fa8f821188d306fe2da9a3"
+    },
+    {
+      "label": "r7c-3-summary",
+      "bytes": 964,
+      "sha256": "98bb9ab3f3e0c2e2c1aafdf268c9a03375b8d1e49ddcf28e40056fd34e89a289"
+    },
+    {
+      "label": "r7c-3-proof",
+      "bytes": 14071,
+      "sha256": "22b13344d220931be3a3d02f66d25e7da5ea8714ca6012422e627531dd8edd52"
+    },
+    {
+      "label": "r7c-3-rows",
+      "bytes": 12420,
+      "sha256": "2666203186d522a06f6dc8f07178c06bc21f914d76af21154ff4778f1cf5cdf6"
+    },
+    {
+      "label": "r7c-3-host-storage",
+      "bytes": 5928,
+      "sha256": "1dc89fadfdb8da52eaa566f48de90406215c59eaa3d03741374d695642476259"
+    },
+    {
+      "label": "r7c-3-vm-performance",
+      "bytes": 6500,
+      "sha256": "d2096149b30dd3cb90dfe51c0991f6958ab8ed66c687a94b09cb31eeb81314d5"
+    },
+    {
+      "label": "original-import.receipt.json",
+      "bytes": 238,
+      "sha256": "f21dab06abfa88365788056c48a7f867f7a2339fb2eb8332faf072784b8aa6d5"
+    },
+    {
+      "label": "original-import.out",
+      "bytes": 238,
+      "sha256": "ccbb63e64b8518f784bb9fe8304949433313b104965cc08dfdcebb3aa3532f32"
+    },
+    {
+      "label": "original-cold-capture.err",
+      "bytes": 85,
+      "sha256": "fd588d13df571680e434fec3cd4fd43613be9c34f7ec57ff9de51f5edc70fa44"
+    },
+    {
+      "label": "continuation-observer-prepare.receipt.json",
+      "bytes": 238,
+      "sha256": "481c6a2b65d930f215a2e3006a94acee282d9768dd6467095ff942e6f2a3d436"
+    },
+    {
+      "label": "continuation-observer-power-on.receipt.json",
+      "bytes": 238,
+      "sha256": "03678cbadb9c3db64c9fff26ceee54648e4e2bf4e5f5a58da3a6b1a9c5eeee99"
+    },
+    {
+      "label": "continuation-export.receipt.json",
+      "bytes": 239,
+      "sha256": "4639216fc2b095fdb174753806ef6bf597b9547dd7ed193535c4561b17363f13"
+    },
+    {
+      "label": "continuation-export.err",
+      "bytes": 91,
+      "sha256": "e0f1ca3e73906c3583c498b8815226b8486a0cb09532b338fb1c2d392771f5b6"
+    },
+    {
+      "label": "continuation-export-acl-corrected.receipt.json",
+      "bytes": 238,
+      "sha256": "60c02ff9e7192ac16fb8c0182f402efa051edb09700bd5f10196991de2fac79c"
+    },
+    {
+      "label": "continuation-lifecycle.receipt.json",
+      "bytes": 238,
+      "sha256": "b528cf7ecc75ca01b0e5cdfaff51b25369d7e5d0a76c97b1ab770e175f7ac11e"
+    },
+    {
+      "label": "continuation-independent-postcheck.receipt.json",
+      "bytes": 238,
+      "sha256": "1a168d827af91d2c95f838c13a753a1e4678caf23e00c466c55bf2e85b99acb4"
+    },
+    {
+      "label": "export-acl-continuation.json",
+      "bytes": 438,
+      "sha256": "3ac2d72af020e61b64cc6da960e8d193d1627e56701f09aa625b0682e7a63ffc"
+    },
+    {
+      "label": "scanner-outage-complete",
+      "bytes": 450,
+      "sha256": "35b435906fdfa73d5b42d93121b807fd49ff0900f69dcb57b88a5a297e67966c"
+    },
+    {
+      "label": "scanner-outage-guest-result",
+      "bytes": 2705,
+      "sha256": "3548c88cdfb21209ce1b66d4e64a9ea952204baf78f898d38c3a383df4dbe81d"
+    },
+    {
+      "label": "p1-network-before",
+      "bytes": 1465,
+      "sha256": "2ee314497ff5449c01a695b9d57f62b164d1aee3937f949b9ac5a94babc097cb"
+    },
+    {
+      "label": "p1-network-after",
+      "bytes": 1220,
+      "sha256": "abb105c202a8c74cb8755ac00e91402750049b1bfa7897102771f829402a9393"
+    },
+    {
+      "label": "saml-fixture-build-receipt.json",
+      "bytes": 465,
+      "sha256": "44c34cc7537b5897687631540b2efe8cc02bc5ea2949cbed279e4323dabb65c9"
+    },
+    {
+      "label": "fresh-scope",
+      "bytes": 1835,
+      "sha256": "079d5477775556fe9e09e3bfc446c3bee01a05dd8dd09bfec3cd6ee912c086a4"
+    },
+    {
+      "label": "browser-independent-review",
+      "bytes": 41790,
+      "sha256": "286ef9cee4b00993a332fdf0fa14ec1d9636129bc32c62b5241006de3b9f0747"
+    },
+    {
+      "label": "identity-independent-review",
+      "bytes": 3397,
+      "sha256": "24d7c9d175206ae749c34497d8c3866ce755f0a0892c5ce0a70f5438663a48ec"
+    }
+  ],
+  "privacy": "Whitelisted results, counts and SHA256 bindings only; no credentials, cookies, recovery secrets, certificate/private keys or raw browser/console content.",
+  "browser": {
+    "result": "pass-with-explicit-coverage-limit",
+    "scope": "Exact-OVA SAML synthetic IdP and real browser/proxy transport; not OIDC/vendor interoperability or HTTPS inspection",
+    "checks": {
+      "alice_http": {
+        "result": "pass",
+        "marked_http_responses": [
+          302,
+          200
+        ],
+        "rendered_example_domain": true
+      },
+      "alice_https_joint_oracle": {
+        "result": "pass",
+        "origin_status": 200,
+        "origin_title": "Example Domain",
+        "body_marker": true,
+        "connect": {
+          "result": "pass",
+          "status": 200,
+          "exchanges": 1,
+          "all_exchanges_credential_free": true,
+          "netlog_sha256": "32463ac581fecd998c8420f3a3cf05f30e0bf9b2809ac6473d5fc1f6331e504d"
+        },
+        "identity_and_exact_allow_rule": true
+      },
+      "bob_http_https_denial": {
+        "result": "pass",
+        "http_status": 403,
+        "false_body_literal_preserved": true,
+        "connect": {
+          "result": "pass",
+          "status": 403,
+          "exchanges": 2,
+          "all_exchanges_credential_free": true,
+          "netlog_sha256": "7f42515058324e42e8b204b20e0214bef82aff82e6f4a88064305b368b4672eb"
+        },
+        "identity_and_exact_deny_rule": true
+      },
+      "logout": {
+        "result": "pass",
+        "binding_empty": true,
+        "fresh_connect": {
+          "result": "pass",
+          "status": 403,
+          "exchanges": 2,
+          "all_exchanges_credential_free": true,
+          "netlog_sha256": "cc47c169574a9e6f2e9a8b6afa06bb291da4231bd1103cbaeb8a4e66a1e466af"
+        }
+      },
+      "disabled": {
+        "result": "pass",
+        "binding_empty": true,
+        "connect": {
+          "result": "pass",
+          "status": 403,
+          "exchanges": 2,
+          "all_exchanges_credential_free": true,
+          "netlog_sha256": "b95ed8eb6d68110d0c6eaed7f7696106f3906ee29ac84a0b104a610c32ef3061"
+        }
+      },
+      "excluded": {
+        "result": "pass",
+        "binding_empty": true,
+        "connect_before_direct_login": {
+          "result": "pass",
+          "status": 403,
+          "exchanges": 2,
+          "all_exchanges_credential_free": true,
+          "netlog_sha256": "89da9f5c2a16b19b33572a71c06cc64318513baa46380f4882eb4b6802d5003e"
+        },
+        "direct_signed_callback_and_completion": true,
+        "signed_but_excluded_page_observed": true,
+        "post_direct_login_proxy_request": "not-run"
+      },
+      "portal_admin_boundary": {
+        "direct_admin_status": 401,
+        "issued_portal_cookie_replayed_as_ui_cookie_status": 401,
+        "cookie_flags": [
+          {
+            "name": "__Host-ps_login_bind",
+            "secure": true,
+            "httpOnly": true,
+            "sameSite": "Lax"
+          },
+          {
+            "name": "ps_session",
+            "secure": true,
+            "httpOnly": true,
+            "sameSite": "Lax"
+          }
+        ]
+      },
+      "cleanup": {
+        "result": "pass",
+        "baseline_network_binding_rules_profiles_restored": true,
+        "bindings_empty": true,
+        "recorded_fixture_pid_stopped": true
+      }
+    },
+    "caveats": [
+      {
+        "event": "guessed /auth/complete GET404",
+        "disposition": "Preserved. Same-origin page was sufficient for actual POST/auth/logout; empty binding and later new CONNECT403 independently prove logout."
+      },
+      {
+        "event": "guessed /auth/saml/login GET404",
+        "disposition": "Preserved. Corrected to verified /auth/select; actual signed callback and completion recorded."
+      },
+      {
+        "event": "Bob denied=false body probe",
+        "disposition": "Case-sensitive literal Access denied missed actual Access Denied. Browser HTTP403/title and rule-attributed POLICY_BLOCK independently establish denial."
+      },
+      {
+        "event": "trailing python312.exe shell typo after Alice HTTPS browser close",
+        "disposition": "Reported execution error retained by root; Alice browser close/origin/netlog proof already completed. No appliance action attributed to typo."
+      },
+      {
+        "event": "first fixture-stop comparison refusal",
+        "disposition": "JSON timestamp deserialized as DateTime; string comparison refused; ticks/path/binary hash verified for corrected stop"
+      },
+      {
+        "event": "no proxy request after direct excluded sign-in",
+        "disposition": "Explicit coverage limit: signed success/denial page, empty binding and admin401/replay401 are observed; excluded CONNECT403 occurred before this login. Do not claim a post-login proxy request."
+      }
+    ]
+  },
+  "coverage_limits": [
+    "No fresh proxy request after direct excluded sign-in; preceding excluded CONNECT403, empty binding, signed denial page and admin401/replay401 observed.",
+    "OIDC/vendor interoperability unqualified; production SSRF restrictions unchanged."
+  ],
+  "identity_reset": {
+    "schema": 1,
+    "result": "pass",
+    "source": "7c7b29ee3be40af6a0809c73ad04d4337303263d",
+    "snapshot_utc": "2026-10-09T11:43:54.332450+00:00",
+    "stage_statuses": {
+      "network-before": "pass",
+      "network-after": "pass",
+      "identity-before": "pass",
+      "identity-reset": "pass",
+      "identity-power-on": "pass",
+      "identity-bootstrap": "pass",
+      "identity-after": "pass"
+    },
+    "automatic_poweroff_observed": true,
+    "identity_changed": {
+      "boot_id": true,
+      "machine_id": true,
+      "ssh_public": true
+    },
+    "new_console_credential_differs": true,
+    "superseded_console_credential": {
+      "service": "login",
+      "pam_status": 7,
+      "password_prompts": 1
+    },
+    "operator_keys_empty": true,
+    "old_operator_key_refusal": {
+      "result": "pass",
+      "expected_refusal": true,
+      "exit": 255,
+      "timed_out": false,
+      "permission_denied_publickey": true,
+      "probe_sha256": "2e37eb738887d128489332872da6b6dbcb2a6c77f1b6d8f564358956cbee2742"
+    }
+  },
+  "result": "Enumerated exact-OVA runtime checks passed, including fresh recovery through preserved preflight continuation; production BLOCKED",
+  "fresh_recovery": {
+    "schema": 1,
+    "result": "pass-with-preserved-initial-failures",
+    "source": "7c7b29ee3be40af6a0809c73ad04d4337303263d",
+    "ova_sha256": "4b8ae484fd8b9bda8dfc12512e9e0b489edcc96c7590824f22276a19dc6b7a05",
+    "image_id": "sha256:398ffaf2090ec32cb9ff0506dd2e92bfd2414d689719373fc00cf96a5c58f906",
+    "controller": "a098172270d6492e8c9626f342f600fe7df1f4d7",
+    "source_absence": {
+      "deleted_vm_uuid": "564d554e-498d-3787-0173-62dba5125204",
+      "source_disks_deleted": true,
+      "source_disk_folder_absent_from_postdelete_listing": true,
+      "one_vm_limit": 1
+    },
+    "fresh_appliance": {
+      "uuid": "564d4d81-0e2b-1ba4-0fb0-3b45df07ad25",
+      "different_from_source": true,
+      "management_url": "https://192.168.1.221:9090",
+      "local_bootstrap": "passed",
+      "final_console": "public-menu logged out",
+      "screenshot_sha256": "43bdcf7059c18a84b76bbdc28fc8f50f88f5b7661a30a408ac75d74888b528b0"
+    },
+    "archive": {
+      "sha256": "524563e6c5610175ca98f4912ddddb95cd0ad3ebffe1a090747a3f421a864c08",
+      "bytes": 11673,
+      "independently_hashed": true
+    },
+    "restored_state": {
+      "baseline_equality": {
+        "ca_sha256": true,
+        "rules": true,
+        "categories": true
+      },
+      "admin_login": "pass",
+      "ca_decryption": "pass",
+      "traffic": {
+        "example.com": 200,
+        "example.org": 403
+      },
+      "agent_version": "v1.0.260-candidate.g7c7b29ee3be4"
+    },
+    "history": {
+      "sha256": "e41d49f46ed57caae618e5098a56274095c0e260dd947744e38783cdc9b67cf9",
+      "bytes": 3529,
+      "independently_hashed": true,
+      "records": 12,
+      "identical": true,
+      "source_history_absent_before_import": true,
+      "live_lock_refusal": true,
+      "wrong_passphrase_refusal": true,
+      "dry_run_verified": true,
+      "rotated_log_key": true,
+      "post_import_traffic": {
+        "allow": 200,
+        "block": 403
+      }
+    },
+    "separate_secret_custody": {
+      "required_files_present": true,
+      "secret_values_and_digests_omitted": true,
+      "functional_secret_use_proved_by_restore_ca_decryption_and_history_import": true
+    },
+    "preserved_failures": {
+      "first_restore": {
+        "result": "fail",
+        "phase": "preflight",
+        "controller_exit": 90,
+        "prior_guest_work_empty": true,
+        "explicit_continuation_proof_hashes_verified": true,
+        "complete_marker_minus_failure_receipt_wall_seconds": 34.174078,
+        "timing_caveat": "Guest filemtime versus controller receipt wall clocks; approximately34seconds, not a calibrated monotonic latency."
+      },
+      "history_first_transport_unavailable": [
+        {
+          "kind": "transport-unavailable",
+          "schema": 1,
+          "phase": "history-live-refusal",
+          "first_failure_elapsed_seconds": 0.043047,
+          "retry_budget_seconds": 300
+        },
+        {
+          "kind": "transport-unavailable",
+          "schema": 1,
+          "phase": "history-import",
+          "first_failure_elapsed_seconds": 0.001532,
+          "retry_budget_seconds": 300
+        }
+      ],
+      "meaning": "Later successes do not erase the first refusal or transport availability observations; no silent automatic replay of ambiguous restore."
+    },
+    "source_bindings": [
+      {
+        "file": "private-escrow-7c/archive-metadata.json",
+        "bytes": 1661,
+        "sha256": "dbe1455b37361ef3029ca416376d801fc50f409074226a0de1b055805e5a3bad"
+      },
+      {
+        "file": "private-escrow-7c/source-observation.json",
+        "bytes": 1438,
+        "sha256": "e0c20abc24d543a5f659d21f75b5ef3805bab7eec5050b7be17dd7abf4bb03e7"
+      },
+      {
+        "file": "private-escrow-7c/source-deletion-receipt.json",
+        "bytes": 336,
+        "sha256": "693cde4c0ee675a505087f4a265f04c801af0a925a0f64e00c834f0c05b7f182"
+      },
+      {
+        "file": "private-escrow-7c/source-deleted-owned.json",
+        "bytes": 664,
+        "sha256": "13c5bbdf8ebbbb09921366c66fe2643d710d26deef1c1e7de13c1fc869ea7b28"
+      },
+      {
+        "file": "private-escrow-7c/source-deletion-after.json",
+        "bytes": 2101,
+        "sha256": "6923850db8696d9d8a4e5ab12ee9eb3ed6dfde9b6b749d98e8c65203413ced5b"
+      },
+      {
+        "file": "esxi-7c-fresh/owned.json",
+        "bytes": 610,
+        "sha256": "3ec5b4254bcd4c791b50cd589b18b958d243da9e0dabba0f52c70138b1959e5d"
+      },
+      {
+        "file": "esxi-7c-fresh/evidence/preflight.json",
+        "bytes": 40816,
+        "sha256": "6c349b89a67634170f986a15c38c107a985e920297c6938b1105f5f2e043add2"
+      },
+      {
+        "file": "private-escrow-7c/recovery.tar.gz.enc",
+        "bytes": 11673,
+        "sha256": "524563e6c5610175ca98f4912ddddb95cd0ad3ebffe1a090747a3f421a864c08"
+      },
+      {
+        "file": "private-escrow-7c/history.cvst",
+        "bytes": 3529,
+        "sha256": "e41d49f46ed57caae618e5098a56274095c0e260dd947744e38783cdc9b67cf9"
+      },
+      {
+        "file": "private-escrow-7c/transfer-restore-5f9f8baddf91951b/guest-result.json",
+        "bytes": 137,
+        "sha256": "2e8eb0daaf6a7146a22446c17625d375066c416e06cb8dd668d6faca7d0afb1e"
+      },
+      {
+        "file": "private-escrow-7c/transfer-restore-5e82bc8e2cd9b54d/guest-result.json",
+        "bytes": 691,
+        "sha256": "253494f0a98ecd4dbbe59981dc7460ba0dd7a1689467dbdca887f6bd2f62fdad"
+      },
+      {
+        "file": "private-escrow-7c/transfer-restore-5e82bc8e2cd9b54d/restored-observation.json",
+        "bytes": 1476,
+        "sha256": "29261d23cf87c2bc82dea0beba9599de151aac8df810cddd73e0dbda8cf256b8"
+      },
+      {
+        "file": "private-escrow-7c/transfer-restore-5e82bc8e2cd9b54d/restored-history.json",
+        "bytes": 192,
+        "sha256": "f12b2c7707df39574b07106afabb800effb3d5fdc714bce81d16f687d4933b38"
+      },
+      {
+        "file": "private-operations/fresh-preflight-readonly.out",
+        "bytes": 888,
+        "sha256": "1e9aa22c5a3b8c29b08a32b76118ffa66899320cba0ea074a11a840c37e0e1f9"
+      },
+      {
+        "file": "private-operations/fresh-restore-firstboot-continuation-proof.json",
+        "bytes": 967,
+        "sha256": "228e6dc1af32413eb766116807f837a1fab1f1f21f7230c1852e1e2ade03e92c"
+      },
+      {
+        "file": "private-operations/fresh-restore.receipt.json",
+        "bytes": 239,
+        "sha256": "08e7f521c2e8fd68fe5f18f806a639939380c99ab6627ca8a5bf4f44138f3bb0"
+      },
+      {
+        "file": "private-operations/fresh-import.receipt.json",
+        "bytes": 238,
+        "sha256": "64f968c101dae7b93f9870b8571bebeb79a7fef2b1bc1fdd6196573ac2d0ace5"
+      },
+      {
+        "file": "private-operations/fresh-import.out",
+        "bytes": 235,
+        "sha256": "ad2e66614026f1895860f1f908e90533d9ea22782e590a325c08f4a882e2d2c7"
+      },
+      {
+        "file": "private-operations/fresh-import.err",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "file": "private-operations/fresh-bootstrap.receipt.json",
+        "bytes": 238,
+        "sha256": "c54d723887ce82eb21362a59af606d94487263fc0c4baa5b7da1a98d534a6323"
+      },
+      {
+        "file": "private-operations/fresh-bootstrap.out",
+        "bytes": 631,
+        "sha256": "93def0ee3d9f2b9b4a921e2bd82e08c86dd9ae1fdcb5424e112827508cff0005"
+      },
+      {
+        "file": "private-operations/fresh-bootstrap.err",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "file": "private-operations/fresh-restore-firstboot-continuation.receipt.json",
+        "bytes": 238,
+        "sha256": "b9d3bd826f397317a1d93bafeb739f4bf9ab87bbe5f073c0fc1ff3c37756a1b2"
+      },
+      {
+        "file": "private-operations/fresh-restore-firstboot-continuation.out",
+        "bytes": 202,
+        "sha256": "3519cf861bb7abc74f64de200c95c803f73c9de2be7150b9e7edc01d83ecf5c4"
+      },
+      {
+        "file": "private-operations/fresh-restore-firstboot-continuation.err",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "file": "esxi-7c-fresh/secrets/access-bootstrap-attempt.json",
+        "bytes": 79,
+        "sha256": "0f03d9e621b7d70007e91d2e5188eb79034abebb5bf1449f56bc0b3256ec3e1a"
+      },
+      {
+        "file": "private-operations/retained-console-logout.json",
+        "bytes": 373,
+        "sha256": "45a116df6946ebc9f2202e8c6cb55b7d8ac4e8e76543eb738ddd9970111980c5"
+      },
+      {
+        "file": "private-operations/retained-console-public.png",
+        "bytes": 9151,
+        "sha256": "43bdcf7059c18a84b76bbdc28fc8f50f88f5b7661a30a408ac75d74888b528b0"
+      }
+    ],
+    "privacy": "Only whitelisted states, archive hashes and proofbindings. No credential values, key material, cookies, recoverysecret digests or raw screenshots."
+  },
+  "f_disk_1": {
+    "bounded_original_database_failure": "pass",
+    "artifact": 11605634977,
+    "zero_restarts": true,
+    "category_entries": 2575820,
+    "category_convergence_seconds": 813,
+    "whole_appliance_pressure": "blocked: broader coverage missing; no risk acceptance",
+    "continuous_enforcement_during_pressure": "not qualified"
+  },
+  "source_evidence_custody": {
+    "schema": 1,
+    "uuid": "564d554e-498d-3787-0173-62dba5125204",
+    "files": 2906,
+    "directories": 602,
+    "source_bytes": 228175764,
+    "encryption": "Windows DPAPI CurrentUser",
+    "ciphertext_sha256": "aac8ca7ba821c556bd05ab1f9fe5d38ebafd4e241c94918f1ac669c22f8b7106",
+    "roundtrip_verified": true,
+    "every_file_verified": true,
+    "source_unchanged": true,
+    "utc": "2026-10-09T11:43:07.6992126Z",
+    "scope": "Controller-bound DPAPI preservation; not independently portable escrow"
+  },
+  "current_access": {
+    "result": "pass",
+    "stage": "public-menu",
+    "uuid": "564d4d81-0e2b-1ba4-0fb0-3b45df07ad25",
+    "helper_sha256": "5a4e8785e00f2ff5e014e91409adadb0e62ff17d071f7b6b28604c84be5acdf8",
+    "guest": "192.168.1.221",
+    "screenshot_sha256": "43bdcf7059c18a84b76bbdc28fc8f50f88f5b7661a30a408ac75d74888b528b0",
+    "text_sha256": "0bda95363718301cc800dff4d12ee44388fc335da5086f8d5c1cf8197dcb92a5",
+    "management_url": "https://192.168.1.221:9090",
+    "credentials": "Protected local escrow and distinct console credential; no values published"
+  }
+}

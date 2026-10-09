@@ -1,0 +1,108 @@
+{
+  "schema": 1,
+  "result": "pass",
+  "source": "7c7b29ee3be40af6a0809c73ad04d4337303263d",
+  "snapshot_utc": "2026-10-09T11:43:54.332450+00:00",
+  "stage_statuses": {
+    "network-before": "pass",
+    "network-after": "pass",
+    "identity-before": "pass",
+    "identity-reset": "pass",
+    "identity-power-on": "pass",
+    "identity-bootstrap": "pass",
+    "identity-after": "pass"
+  },
+  "automatic_poweroff_observed": true,
+  "identity_changed": {
+    "boot_id": true,
+    "machine_id": true,
+    "ssh_public": true
+  },
+  "new_console_credential_differs": true,
+  "superseded_console_credential": {
+    "service": "login",
+    "pam_status": 7,
+    "password_prompts": 1
+  },
+  "operator_keys_empty": true,
+  "old_operator_key_refusal": {
+    "result": "pass",
+    "expected_refusal": true,
+    "exit": 255,
+    "timed_out": false,
+    "permission_denied_publickey": true,
+    "probe_sha256": "2e37eb738887d128489332872da6b6dbcb2a6c77f1b6d8f564358956cbee2742"
+  },
+  "source_bindings": [
+    {
+      "file": "identity-before.json",
+      "bytes": 477,
+      "sha256": "c5852ff04d5547866e85d4769930b77e1237e367bd09010187c95cfe5836d26d"
+    },
+    {
+      "file": "identity-after.json",
+      "bytes": 514,
+      "sha256": "465065eafdf6de179c3cd25fee015759fe8ba521beb63edd15e6f5dd0914509f"
+    },
+    {
+      "file": "poweroff-observed.json",
+      "bytes": 80,
+      "sha256": "fae916c941bce4e4a23dbaf7138b10ef57f64fafedecd7f78abe43bb4d3788a2"
+    },
+    {
+      "file": "network-before.attempt.json",
+      "bytes": 156,
+      "sha256": "2f1eee07f5f3591383542089de5c3892f9dfdbf402e911ed8ca28e6b578a0727"
+    },
+    {
+      "file": "network-after.attempt.json",
+      "bytes": 156,
+      "sha256": "2f1eee07f5f3591383542089de5c3892f9dfdbf402e911ed8ca28e6b578a0727"
+    },
+    {
+      "file": "identity-before.attempt.json",
+      "bytes": 156,
+      "sha256": "2f1eee07f5f3591383542089de5c3892f9dfdbf402e911ed8ca28e6b578a0727"
+    },
+    {
+      "file": "identity-reset.attempt.json",
+      "bytes": 156,
+      "sha256": "2f1eee07f5f3591383542089de5c3892f9dfdbf402e911ed8ca28e6b578a0727"
+    },
+    {
+      "file": "identity-power-on.attempt.json",
+      "bytes": 156,
+      "sha256": "2f1eee07f5f3591383542089de5c3892f9dfdbf402e911ed8ca28e6b578a0727"
+    },
+    {
+      "file": "identity-bootstrap.attempt.json",
+      "bytes": 156,
+      "sha256": "2f1eee07f5f3591383542089de5c3892f9dfdbf402e911ed8ca28e6b578a0727"
+    },
+    {
+      "file": "identity-after.attempt.json",
+      "bytes": 156,
+      "sha256": "2f1eee07f5f3591383542089de5c3892f9dfdbf402e911ed8ca28e6b578a0727"
+    },
+    {
+      "file": "operator-probe-1791544947616190500.json",
+      "bytes": 5075,
+      "sha256": "0d0f1eed118e3a17d904d4ccfaed818944cc80dd12835b59a177cfd16a5bdbc5"
+    },
+    {
+      "file": "operator-probe-1791544958382065300.json",
+      "bytes": 5075,
+      "sha256": "74c1f7f339beee6819f4bb712b3616648b1be22e4057af513477a0feaa4e2c78"
+    },
+    {
+      "file": "operator-probe-1791545052716156600.json",
+      "bytes": 5503,
+      "sha256": "5265b93e34ab5106301de699e9da953b412f875e9ea3ed4100f49463c8dd5a4b"
+    },
+    {
+      "file": "operator-probe-1791546169952473400.json",
+      "bytes": 462,
+      "sha256": "2e37eb738887d128489332872da6b6dbcb2a6c77f1b6d8f564358956cbee2742"
+    }
+  ]
+}

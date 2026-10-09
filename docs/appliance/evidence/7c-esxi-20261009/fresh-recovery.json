@@ -1,0 +1,233 @@
+{
+  "schema": 1,
+  "result": "pass-with-preserved-initial-failures",
+  "source": "7c7b29ee3be40af6a0809c73ad04d4337303263d",
+  "ova_sha256": "4b8ae484fd8b9bda8dfc12512e9e0b489edcc96c7590824f22276a19dc6b7a05",
+  "image_id": "sha256:398ffaf2090ec32cb9ff0506dd2e92bfd2414d689719373fc00cf96a5c58f906",
+  "controller": "a098172270d6492e8c9626f342f600fe7df1f4d7",
+  "source_absence": {
+    "deleted_vm_uuid": "564d554e-498d-3787-0173-62dba5125204",
+    "source_disks_deleted": true,
+    "source_disk_folder_absent_from_postdelete_listing": true,
+    "one_vm_limit": 1
+  },
+  "fresh_appliance": {
+    "uuid": "564d4d81-0e2b-1ba4-0fb0-3b45df07ad25",
+    "different_from_source": true,
+    "management_url": "https://192.168.1.221:9090",
+    "local_bootstrap": "passed",
+    "final_console": "public-menu logged out",
+    "screenshot_sha256": "43bdcf7059c18a84b76bbdc28fc8f50f88f5b7661a30a408ac75d74888b528b0"
+  },
+  "archive": {
+    "sha256": "524563e6c5610175ca98f4912ddddb95cd0ad3ebffe1a090747a3f421a864c08",
+    "bytes": 11673,
+    "independently_hashed": true
+  },
+  "restored_state": {
+    "baseline_equality": {
+      "ca_sha256": true,
+      "rules": true,
+      "categories": true
+    },
+    "admin_login": "pass",
+    "ca_decryption": "pass",
+    "traffic": {
+      "example.com": 200,
+      "example.org": 403
+    },
+    "agent_version": "v1.0.260-candidate.g7c7b29ee3be4"
+  },
+  "history": {
+    "sha256": "e41d49f46ed57caae618e5098a56274095c0e260dd947744e38783cdc9b67cf9",
+    "bytes": 3529,
+    "independently_hashed": true,
+    "records": 12,
+    "identical": true,
+    "source_history_absent_before_import": true,
+    "live_lock_refusal": true,
+    "wrong_passphrase_refusal": true,
+    "dry_run_verified": true,
+    "rotated_log_key": true,
+    "post_import_traffic": {
+      "allow": 200,
+      "block": 403
+    }
+  },
+  "separate_secret_custody": {
+    "required_files_present": true,
+    "secret_values_and_digests_omitted": true,
+    "functional_secret_use_proved_by_restore_ca_decryption_and_history_import": true
+  },
+  "preserved_failures": {
+    "first_restore": {
+      "result": "fail",
+      "phase": "preflight",
+      "controller_exit": 90,
+      "prior_guest_work_empty": true,
+      "explicit_continuation_proof_hashes_verified": true,
+      "complete_marker_minus_failure_receipt_wall_seconds": 34.174078,
+      "timing_caveat": "Guest filemtime versus controller receipt wall clocks; approximately34seconds, not a calibrated monotonic latency."
+    },
+    "history_first_transport_unavailable": [
+      {
+        "kind": "transport-unavailable",
+        "schema": 1,
+        "phase": "history-live-refusal",
+        "first_failure_elapsed_seconds": 0.043047,
+        "retry_budget_seconds": 300
+      },
+      {
+        "kind": "transport-unavailable",
+        "schema": 1,
+        "phase": "history-import",
+        "first_failure_elapsed_seconds": 0.001532,
+        "retry_budget_seconds": 300
+      }
+    ],
+    "meaning": "Later successes do not erase the first refusal or transport availability observations; no silent automatic replay of ambiguous restore."
+  },
+  "source_bindings": [
+    {
+      "file": "private-escrow-7c/archive-metadata.json",
+      "bytes": 1661,
+      "sha256": "dbe1455b37361ef3029ca416376d801fc50f409074226a0de1b055805e5a3bad"
+    },
+    {
+      "file": "private-escrow-7c/source-observation.json",
+      "bytes": 1438,
+      "sha256": "e0c20abc24d543a5f659d21f75b5ef3805bab7eec5050b7be17dd7abf4bb03e7"
+    },
+    {
+      "file": "private-escrow-7c/source-deletion-receipt.json",
+      "bytes": 336,
+      "sha256": "693cde4c0ee675a505087f4a265f04c801af0a925a0f64e00c834f0c05b7f182"
+    },
+    {
+      "file": "private-escrow-7c/source-deleted-owned.json",
+      "bytes": 664,
+      "sha256": "13c5bbdf8ebbbb09921366c66fe2643d710d26deef1c1e7de13c1fc869ea7b28"
+    },
+    {
+      "file": "private-escrow-7c/source-deletion-after.json",
+      "bytes": 2101,
+      "sha256": "6923850db8696d9d8a4e5ab12ee9eb3ed6dfde9b6b749d98e8c65203413ced5b"
+    },
+    {
+      "file": "esxi-7c-fresh/owned.json",
+      "bytes": 610,
+      "sha256": "3ec5b4254bcd4c791b50cd589b18b958d243da9e0dabba0f52c70138b1959e5d"
+    },
+    {
+      "file": "esxi-7c-fresh/evidence/preflight.json",
+      "bytes": 40816,
+      "sha256": "6c349b89a67634170f986a15c38c107a985e920297c6938b1105f5f2e043add2"
+    },
+    {
+      "file": "private-escrow-7c/recovery.tar.gz.enc",
+      "bytes": 11673,
+      "sha256": "524563e6c5610175ca98f4912ddddb95cd0ad3ebffe1a090747a3f421a864c08"
+    },
+    {
+      "file": "private-escrow-7c/history.cvst",
+      "bytes": 3529,
+      "sha256": "e41d49f46ed57caae618e5098a56274095c0e260dd947744e38783cdc9b67cf9"
+    },
+    {
+      "file": "private-escrow-7c/transfer-restore-5f9f8baddf91951b/guest-result.json",
+      "bytes": 137,
+      "sha256": "2e8eb0daaf6a7146a22446c17625d375066c416e06cb8dd668d6faca7d0afb1e"
+    },
+    {
+      "file": "private-escrow-7c/transfer-restore-5e82bc8e2cd9b54d/guest-result.json",
+      "bytes": 691,
+      "sha256": "253494f0a98ecd4dbbe59981dc7460ba0dd7a1689467dbdca887f6bd2f62fdad"
+    },
+    {
+      "file": "private-escrow-7c/transfer-restore-5e82bc8e2cd9b54d/restored-observation.json",
+      "bytes": 1476,
+      "sha256": "29261d23cf87c2bc82dea0beba9599de151aac8df810cddd73e0dbda8cf256b8"
+    },
+    {
+      "file": "private-escrow-7c/transfer-restore-5e82bc8e2cd9b54d/restored-history.json",
+      "bytes": 192,
+      "sha256": "f12b2c7707df39574b07106afabb800effb3d5fdc714bce81d16f687d4933b38"
+    },
+    {
+      "file": "private-operations/fresh-preflight-readonly.out",
+      "bytes": 888,
+      "sha256": "1e9aa22c5a3b8c29b08a32b76118ffa66899320cba0ea074a11a840c37e0e1f9"
+    },
+    {
+      "file": "private-operations/fresh-restore-firstboot-continuation-proof.json",
+      "bytes": 967,
+      "sha256": "228e6dc1af32413eb766116807f837a1fab1f1f21f7230c1852e1e2ade03e92c"
+    },
+    {
+      "file": "private-operations/fresh-restore.receipt.json",
+      "bytes": 239,
+      "sha256": "08e7f521c2e8fd68fe5f18f806a639939380c99ab6627ca8a5bf4f44138f3bb0"
+    },
+    {
+      "file": "private-operations/fresh-import.receipt.json",
+      "bytes": 238,
+      "sha256": "64f968c101dae7b93f9870b8571bebeb79a7fef2b1bc1fdd6196573ac2d0ace5"
+    },
+    {
+      "file": "private-operations/fresh-import.out",
+      "bytes": 235,
+      "sha256": "ad2e66614026f1895860f1f908e90533d9ea22782e590a325c08f4a882e2d2c7"
+    },
+    {
+      "file": "private-operations/fresh-import.err",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "file": "private-operations/fresh-bootstrap.receipt.json",
+      "bytes": 238,
+      "sha256": "c54d723887ce82eb21362a59af606d94487263fc0c4baa5b7da1a98d534a6323"
+    },
+    {
+      "file": "private-operations/fresh-bootstrap.out",
+      "bytes": 631,
+      "sha256": "93def0ee3d9f2b9b4a921e2bd82e08c86dd9ae1fdcb5424e112827508cff0005"
+    },
+    {
+      "file": "private-operations/fresh-bootstrap.err",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "file": "private-operations/fresh-restore-firstboot-continuation.receipt.json",
+      "bytes": 238,
+      "sha256": "b9d3bd826f397317a1d93bafeb739f4bf9ab87bbe5f073c0fc1ff3c37756a1b2"
+    },
+    {
+      "file": "private-operations/fresh-restore-firstboot-continuation.out",
+      "bytes": 202,
+      "sha256": "3519cf861bb7abc74f64de200c95c803f73c9de2be7150b9e7edc01d83ecf5c4"
+    },
+    {
+      "file": "private-operations/fresh-restore-firstboot-continuation.err",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "file": "esxi-7c-fresh/secrets/access-bootstrap-attempt.json",
+      "bytes": 79,
+      "sha256": "0f03d9e621b7d70007e91d2e5188eb79034abebb5bf1449f56bc0b3256ec3e1a"
+    },
+    {
+      "file": "private-operations/retained-console-logout.json",
+      "bytes": 373,
+      "sha256": "45a116df6946ebc9f2202e8c6cb55b7d8ac4e8e76543eb738ddd9970111980c5"
+    },
+    {
+      "file": "private-operations/retained-console-public.png",
+      "bytes": 9151,
+      "sha256": "43bdcf7059c18a84b76bbdc28fc8f50f88f5b7661a30a408ac75d74888b528b0"
+    }
+  ],
+  "privacy": "Only whitelisted states, archive hashes and proofbindings. No credential values, key material, cookies, recoverysecret digests or raw screenshots."
+}
