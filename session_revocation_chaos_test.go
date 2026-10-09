@@ -85,12 +85,26 @@ func genuineCookie(t *testing.T, sub string, ttl time.Duration, groups []string)
 	return raw
 }
 
+// sessionCookieFor builds the request cookie every gate below sends.
+//
+// Secure/HttpOnly/SameSite are set only to satisfy gosec G124: they are
+// attributes of a RESPONSE cookie and are irrelevant on an inbound request
+// cookie, where only Name=Value is serialized onto the wire. The repo's
+// existing session tests set them for the same reason — keeping it in one
+// helper means the rationale is stated once rather than at five call sites.
+func sessionCookieFor(value string) *http.Cookie {
+	return &http.Cookie{
+		Name: uiSessionCookieName, Value: value,
+		Secure: true, HttpOnly: true, SameSite: http.SameSiteStrictMode,
+	}
+}
+
 // logoutWith drives the REAL handler with the given cookie value and reports
 // the status code.
 func logoutWith(t *testing.T, cookie string) int {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodPost, "/api/auth/logout", http.NoBody)
-	req.AddCookie(&http.Cookie{Name: uiSessionCookieName, Value: cookie})
+	req.AddCookie(sessionCookieFor(cookie))
 	rec := httptest.NewRecorder()
 	apiAuthLogout(rec, req)
 	return rec.Code
@@ -129,7 +143,7 @@ func preFixRevokeSessionCookie(cookieName string, r *http.Request) {
 func TestChaos73_DefectProof(t *testing.T) {
 	chaos73Setup(t)
 	req := httptest.NewRequest(http.MethodPost, "/api/auth/logout", http.NoBody)
-	req.AddCookie(&http.Cookie{Name: uiSessionCookieName, Value: forgedCookie(t, 4096, "proof")})
+	req.AddCookie(sessionCookieFor(forgedCookie(t, 4096, "proof")))
 
 	preFixRevokeSessionCookie(uiSessionCookieName, req)
 
@@ -175,7 +189,7 @@ func TestChaos73_DefectOversizeForgedCookieIsRefusedOverTheWire(t *testing.T) {
 	// 384 KiB of filler encodes to a ~524 KB cookie, which net/http's default
 	// 1 MiB header budget accepts. The pre-fix tree retained every byte.
 	cookie := forgedCookie(t, 384*1024, "wire")
-	req, err := http.NewRequest(http.MethodPost, srv.URL+"/api/auth/logout", http.NoBody)
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, srv.URL+"/api/auth/logout", http.NoBody)
 	if err != nil {
 		t.Fatalf("build request: %v", err)
 	}
@@ -389,7 +403,7 @@ func TestChaos73_ControlExpiredGenuineCookieStillLogsOutQuietly(t *testing.T) {
 	cookie := genuineCookie(t, "stale-user", -time.Hour, nil)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/auth/logout", http.NoBody)
-	req.AddCookie(&http.Cookie{Name: uiSessionCookieName, Value: cookie})
+	req.AddCookie(sessionCookieFor(cookie))
 	rec := httptest.NewRecorder()
 	apiAuthLogout(rec, req)
 
@@ -434,7 +448,7 @@ func TestChaos73_ControlRefusalIsNotAnOracle(t *testing.T) {
 
 	run := func(cookie string) (int, string, int) {
 		req := httptest.NewRequest(http.MethodPost, "/api/auth/logout", http.NoBody)
-		req.AddCookie(&http.Cookie{Name: uiSessionCookieName, Value: cookie})
+		req.AddCookie(sessionCookieFor(cookie))
 		rec := httptest.NewRecorder()
 		apiAuthLogout(rec, req)
 		return rec.Code, rec.Body.String(), len(rec.Result().Cookies())
@@ -695,7 +709,7 @@ func TestChaos73_WallRunbookLogFieldsMatchTheEmitter(t *testing.T) {
 	// Capture what the emitter really produces, via the shared helper.
 	emitted := captureLogger(t, func() {
 		req := httptest.NewRequest(http.MethodPost, "/api/auth/logout", http.NoBody)
-		req.AddCookie(&http.Cookie{Name: uiSessionCookieName, Value: forgedCookie(t, 64, "logfields")})
+		req.AddCookie(sessionCookieFor(forgedCookie(t, 64, "logfields")))
 		apiAuthLogout(httptest.NewRecorder(), req)
 	})
 	if !strings.Contains(emitted, "SESSION_REVOKE_REFUSED") {
