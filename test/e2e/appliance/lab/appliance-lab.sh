@@ -948,10 +948,12 @@ wait_op() { local st="" i
 running() { local img; img=$(docker inspect culvert -f "{{.Image}}"); echo "running-image=$img"
   echo "running-label=$(docker inspect culvert -f "{{index .Config.Labels \"org.culvert.lab-target\"}}")"
   echo "repo-digests=$(docker image inspect "$img" -f "{{json .RepoDigests}}")"; }
-install -d -m 0755 /tmp/.lab-upd
+install -d -m 0755 /run/culvert-lab-upd
 '
-# embed NAME FILE — a guest line that recreates FILE at /tmp/.lab-upd/NAME (0644).
-embed() { printf "echo '%s' | base64 -d > /tmp/.lab-upd/%s; chmod 0644 /tmp/.lab-upd/%s\n" "$(base64 -w0 "$2")" "$1" "$1"; }
+# embed NAME FILE — a guest line that recreates FILE at /run/culvert-lab-upd/NAME (0644).
+# /run is tmpfs: the pressure phases fill the root disk, and a fixture staged
+# there could not be written (lab run 37948667525).
+embed() { printf "echo '%s' | base64 -d > /run/culvert-lab-upd/%s; chmod 0644 /run/culvert-lab-upd/%s\n" "$(base64 -w0 "$2")" "$1" "$1"; }
 signed_update_rollback() {
   local U="$LAB_UPDATE_DIR" BASELINE_REF TARGET_REF REGISTRY_ADDR rc
   # shellcheck source=/dev/null
@@ -963,9 +965,9 @@ signed_update_rollback() {
   rc=0; { printf '%s' "$AGENT_LIB"; embed ca.crt "$U/ca.crt"; embed keyring.json "$U/keyring.json"; cat <<EOS; } | gpriv --timeout 600 > "$EV/06c-test-only-trust.txt" 2>&1 || rc=$?
 set -e
 echo "TEST-ONLY lab trust (never part of the OVA):"
-install -d -m 0755 /etc/docker/certs.d/ghcr.io && install -m 0644 -o root -g root /tmp/.lab-upd/ca.crt /etc/docker/certs.d/ghcr.io/ca.crt && echo "  /etc/docker/certs.d/ghcr.io/ca.crt (disposable registry CA)"
+install -d -m 0755 /etc/docker/certs.d/ghcr.io && install -m 0644 -o root -g root /run/culvert-lab-upd/ca.crt /etc/docker/certs.d/ghcr.io/ca.crt && echo "  /etc/docker/certs.d/ghcr.io/ca.crt (disposable registry CA)"
 grep -qE '[[:space:]]ghcr\.io\$' /etc/hosts || echo "$REGISTRY_ADDR ghcr.io  # culvert lab TEST-ONLY" >> /etc/hosts; echo "  /etc/hosts: \$(grep -E '[[:space:]]ghcr\.io' /etc/hosts)"
-install -m 0644 -o root -g root /tmp/.lab-upd/keyring.json /etc/culvert-maint/lab-fixture-keyring.json && echo "  /etc/culvert-maint/lab-fixture-keyring.json (fixture PUBLIC key)"
+install -m 0644 -o root -g root /run/culvert-lab-upd/keyring.json /etc/culvert-maint/lab-fixture-keyring.json && echo "  /etc/culvert-maint/lab-fixture-keyring.json (fixture PUBLIC key)"
 [ -e "\$CONF.lab-orig" ] || cp -p "\$CONF" "\$CONF.lab-orig"
 grep -q '^release_trust_keys' "\$CONF" || sed -i '1i release_trust_keys = "/etc/culvert-maint/lab-fixture-keyring.json"' "\$CONF"
 echo "  \$CONF:"; diff -u "\$CONF.lab-orig" "\$CONF" || true
@@ -980,14 +982,14 @@ EOS
     check 6c test-only-trust pass "registry CA, hosts entry, fixture keyring (public) installed; agent restarted; running image $bdig now carries $BASELINE_REF"
   else check 6c test-only-trust fail "exit $rc: $(tail -5 "$EV/06c-test-only-trust.txt" | tr '\n' ' ' | head -c 300)"; return 0; fi
   # 2. an unsigned request is refused before anything changes
-  rc=0; { printf '%s' "$AGENT_LIB"; embed unsigned.json "$U/apply-unsigned.json"; printf '%s\n' 'agent -X POST --data-binary @/tmp/.lab-upd/unsigned.json http://agent/v1/upgrades/apply' 'running'; } \
+  rc=0; { printf '%s' "$AGENT_LIB"; embed unsigned.json "$U/apply-unsigned.json"; printf '%s\n' 'agent -X POST --data-binary @/run/culvert-lab-upd/unsigned.json http://agent/v1/upgrades/apply' 'running'; } \
     | gpriv --timeout 300 > "$EV/06c-apply-unsigned.txt" 2>&1 || rc=$?
   grep -qx 'HTTP 403' "$EV/06c-apply-unsigned.txt" && grep -qx "running-image=$bdig" "$EV/06c-apply-unsigned.txt" \
     && check 6c unsigned-apply-refused pass "apply without release evidence: 403 ($(grep -o '"error":"[^"]*"' "$EV/06c-apply-unsigned.txt" | head -1 | head -c 140)); still running the baseline" \
     || check 6c unsigned-apply-refused fail "$(grep -E '^HTTP|running-image' "$EV/06c-apply-unsigned.txt" | tr '\n' ' ')"
   # 3. signed apply baseline → target
   rc=0; { printf '%s' "$AGENT_LIB"; embed apply.json "$U/apply-signed.json"
-          printf '%s\n' 'r=$(agent -X POST --data-binary @/tmp/.lab-upd/apply.json http://agent/v1/upgrades/apply); echo "$r" | tail -c 2000' \
+          printf '%s\n' 'r=$(agent -X POST --data-binary @/run/culvert-lab-upd/apply.json http://agent/v1/upgrades/apply); echo "$r" | tail -c 2000' \
                         'op=$(printf "%s" "$r" | opid); echo "op=$op"; [ -n "$op" ] && wait_op "$op"' 'running'; } \
     | gpriv --timeout 2100 > "$EV/06c-apply-signed.txt" 2>&1 || rc=$?
   local a1 a2 a3
@@ -998,7 +1000,7 @@ EOS
   else check 6c signed-apply fail "$a1 $a2 $a3 traffic $t1/$t2 (want succeeded, $tdig)"; return 0; fi
   # 4. signed rollback target → baseline (the agent's ledger holds the captured prior)
   rc=0; { printf '%s' "$AGENT_LIB"; embed rollback.json "$U/rollback-signed.json"
-          printf '%s\n' 'r=$(agent -X POST --data-binary @/tmp/.lab-upd/rollback.json http://agent/v1/rollbacks); echo "$r" | tail -c 2000' \
+          printf '%s\n' 'r=$(agent -X POST --data-binary @/run/culvert-lab-upd/rollback.json http://agent/v1/rollbacks); echo "$r" | tail -c 2000' \
                         'op=$(printf "%s" "$r" | opid); echo "op=$op"; [ -n "$op" ] && wait_op "$op"' 'running'; } \
     | gpriv --timeout 2100 > "$EV/06c-rollback-signed.txt" 2>&1 || rc=$?
   a1="$(grep -m1 '^op-state=' "$EV/06c-rollback-signed.txt" || echo op-state=none)"; a2="$(grep -m1 '^running-image=' "$EV/06c-rollback-signed.txt" | tail -1)"; a3="$(grep -m1 '^running-label=' "$EV/06c-rollback-signed.txt")"
@@ -1628,7 +1630,8 @@ p_proxy_identity() { groot 'docker inspect -f "{{.RestartCount}} {{.State.Starte
 p_sample() { local ph="$1" tag="$2" a b e c rc hc row
   a="$(through_proxy http://example.com/)"; b="$(through_proxy http://example.org/)"
   e="$(eicar_verdict)"
-  c="$(curl -sS -m 6 -x "$P" -o /dev/null -w '%{http_code}' "$(p_clean_url)" 2>/dev/null || echo 000)"
+  c="$(curl -sS -m 6 -x "$P" -o "$WORK/p-clean.body" -w '%{http_code}' "$(p_clean_url)" 2>/dev/null || echo 000)"
+  [[ "$c" == 2* ]] || c="$c:$(head -c 60 "$WORK/p-clean.body" 2>/dev/null | tr -d '\n')"
   rc="$(curl -sS -m 4 -o "$WORK/p-ready.json" -w '%{http_code}' "$P/ready" 2>/dev/null || echo 000)"
   hc="$(curl -sS -m 4 -o /dev/null -w '%{http_code}' "$P/health" 2>/dev/null || echo 000)"
   row="$(python3 -c 'import json,sys
@@ -1641,21 +1644,32 @@ print(" ".join(bad))' "$WORK/p-ready.json" 2>/dev/null || echo unreadable)"
 k=("phase","tag","t","allowed","blocked","eicar","clean","ready","not_ok_rows","health")
 print(json.dumps(dict(zip(k,sys.argv[1:]))))' "$ph" "$tag" "$(date -u +%FT%TZ)" "$a" "$b" "$e" "$c" "$rc" "$row" "$hc" >> "$EV/P-samples.jsonl"
   # space-free for `set --`: the EICAR verdict carries a body head
-  echo "$a $b ${e%%:*} $c $rc $hc"; }
+  echo "$a $b ${e%%:*} ${c%%:*} $rc $hc"; }
+# p_burst PHASE TAG N — N back-to-back EICAR + clean pairs right after a fill,
+# so a transient verdict is observed rather than sampled past.
+p_burst() { local i; for i in $(seq 1 "$3"); do p_sample "$1" "$2.$i" > /dev/null; done; }
+# p_logs NAME SINCE — the proxy's scan/AV lines and the sidecar's log for the
+# phase. Read through the tmpfs-staged console transport, so it works while
+# the root disk is full; the output is evidence, not a verdict.
+p_logs() { groot "docker logs --since '$2' culvert 2>&1 | grep -E 'SCAN|AV_|av_unavailable|ClamAV|clamav|SecurityScan|antivirus|BLOCKED|ENOSPC|no space|10[.]0[.]2[.]2' | tail -n 600; echo '=== culvert-clamav'; docker logs --since '$2' culvert-clamav 2>&1 | tail -n 300; echo '=== df'; df -B1 / | tail -1; df -i / | tail -1" 300 > "$EV/P-$1-logs.txt" 2>&1 || true; }
 p_backup_inventory() { groot 'mp=$(docker volume inspect -f "{{.Mountpoint}}" "$(docker volume ls -q | grep -m1 -E "(^|_)culvert-backups$")"); echo "mp=$mp"; cd "$mp" && find . -maxdepth 1 -type f -printf "%f %s\n" | sort; echo ---; find . -maxdepth 1 -type f ! -name "*.tmp" -exec sha256sum {} + | sort' 120 2>/dev/null; }
 p_backup() { local out="$1" op st jar; api POST /api/backups '{"encrypt":false}' > "$out" 2>&1 || true
-  op="$(body < "$out" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("op_id",""))' 2>/dev/null || true)"; st=""
+  # POST /api/backups answers {"opId": …} (camelCase; the agent's own record
+  # says op_id). Reading only op_id never polled, and a backup that finished
+  # in the background read as "archive set changed" (run 37948667525).
+  op="$(body < "$out" | python3 -c 'import json,sys;d=json.load(sys.stdin);print(d.get("opId") or d.get("op_id") or "")' 2>/dev/null || true)"; st=""
   if [[ -n "$op" ]]; then for _ in $(seq 1 90); do st="$(api GET "/api/backups/operations/$op" | body | python3 -c 'import json,sys;print(json.load(sys.stdin).get("state",""))' 2>/dev/null || true)"
     case "$st" in succeeded|failed|cancelled) break ;; esac; sleep 5; done; api GET "/api/backups/operations/$op" >> "$out" 2>&1 || true; fi
   echo "op=${op:-none} state=${st:-none} http=$(code < "$out" | head -1)"; }
 p_login() { : > "$JAR"; api POST /api/auth/login "{\"user\":\"$ADMIN_USER\",\"pass\":\"$(cat "$SEC/admin-pass")\"}" | code; }
-p_os_update() { groot 'culvert-os-update os > /tmp/p-osu.log 2>&1; echo "osu-rc=$?"; tail -n 15 /tmp/p-osu.log; echo "dpkg-audit=[$(dpkg --audit 2>&1 | head -c 300)]"; echo "not-installed-ok=$(dpkg -l | awk "NR>5 && \$1 !~ /^(ii|hi|rc)\$/" | wc -l)"; echo "holds=$(apt-mark showhold | tr "\n" " ")"' 1800 2>&1; }
+p_os_update() { groot 'culvert-os-update os > /run/culvert-lab-osu.log 2>&1; echo "osu-rc=$?"; tail -n 15 /run/culvert-lab-osu.log; echo "dpkg-audit=[$(dpkg --audit 2>&1 | head -c 300)]"; echo "not-installed-ok=$(dpkg -l | awk "NR>5 && \$1 !~ /^(ii|hi|rc)\$/" | wc -l)"; echo "holds=$(apt-mark showhold | tr "\n" " ")"' 1800 2>&1; }
 p_app_update() { local U="$LAB_UPDATE_DIR" ph="$1" rc=0
   { printf '%s' "$AGENT_LIB"; embed apply.json "$U/apply-pressure-$ph.json"
-    printf '%s\n' 'running' 'r=$(agent -X POST --data-binary @/tmp/.lab-upd/apply.json http://agent/v1/upgrades/apply); echo "$r" | tail -c 1500' \
+    printf '%s\n' 'running' 'r=$(agent -X POST --data-binary @/run/culvert-lab-upd/apply.json http://agent/v1/upgrades/apply); echo "$r" | tail -c 1500' \
                   'op=$(printf "%s" "$r" | opid); echo "op=$op"; [ -n "$op" ] && wait_op "$op"' 'echo "after:"' 'running'; } | gpriv --timeout 2100 2>&1 || rc=$?; echo "rc=$rc"; }
 # p_phase NAME FILLCMD — fill, observe, exercise backup/updates, release, recover.
 p_phase() { local name="$1" fill="$2" s id0 id1 inv0 inv1 bk osu up ok lc
+  local since; since="$(date -u -d '-2 min' +%FT%TZ)"
   id0="$(p_proxy_identity)"; inv0="$(p_backup_inventory)"; printf '%s\n' "$inv0" > "$EV/P-$name-backups-before.txt"
   # Backstop: a transient timer (state in /run, tmpfs) frees the space even if
   # the full disk takes the SSH path with it; cancelled by the normal release.
@@ -1665,20 +1679,40 @@ p_phase() { local name="$1" fill="$2" s id0 id1 inv0 inv1 bk osu up ok lc
   check P "$name-filled" info "$(grep -E '^(filled|files)' "$EV/P-$name-fill.txt" | tr '\n' ' ') host disk file +$(( $(p_host_alloc_mb) - P_ALLOC0 )) MiB"
   p_bounded || return 1
   groot 'df -B1 / | tail -1; df -i / | tail -1' 60 > "$EV/P-$name-df.txt" 2>&1 || true
-  # observations right after the fill and after the stack has had time to hit it
-  local fails=""; for t in 0 60 120; do (( t == 0 )) || sleep 60; s="$(p_sample "$name" "+$t")"; set -- $s
-    # blocked must stay blocked; EICAR must never be DELIVERED (av, a 403
-    # refusal, a 5xx or no answer all keep the body away from the client)
-    [[ "$2" == 403 ]] || fails+="blocked=$2@+$t "; [[ "$3" == 2* ]] && fails+="eicar-delivered=$3@+$t "; done
+  # Observations: a burst right after the fill (a transient verdict must be
+  # seen, not sampled past), then once the stack has had time to hit it.
+  # Every row of the phase counts: blocked must stay 403 and EICAR must never
+  # be DELIVERED (av, a 403 refusal, a 5xx or no answer all keep the body
+  # away from the client).
+  p_burst "$name" b0 6
+  for t in 0 60 120; do (( t == 0 )) || sleep 60; p_sample "$name" "+$t" > /dev/null; done
+  p_logs "$name" "$since"
+  local fails; fails="$(python3 - "$EV/P-samples.jsonl" "$name" <<'PY2'
+import json, sys
+out = []
+for l in open(sys.argv[1]):
+    d = json.loads(l)
+    if d["phase"] != sys.argv[2] or not (d["tag"].startswith("+") or d["tag"].startswith("b0.")): continue
+    if d["blocked"] != "403": out.append(f"blocked={d['blocked']}@{d['tag']}")
+    if d["eicar"].startswith("2"): out.append(f"eicar-delivered={d['eicar'][:3]}@{d['tag']}")
+print(" ".join(out))
+PY2
+)"
   lc="$(p_login)"
-  [[ -z "$fails" ]] && check P "$name-enforcement" pass "blocked 403 throughout, EICAR never delivered ($(tail -3 "$EV/P-samples.jsonl" | python3 -c 'import json,sys
-for l in sys.stdin: d=json.loads(l); print(d["tag"], "allowed",d["allowed"],"eicar",d["eicar"][:12],"clean",d["clean"],"ready",d["ready"],"["+d["not_ok_rows"]+"]")' | tr '\n' ';')); admin login $lc" \
-    || check P "$name-enforcement" fail "$fails"
+  [[ -z "$fails" ]] && check P "$name-enforcement" pass "blocked 403 throughout, EICAR never delivered ($(python3 -c 'import json,sys,collections
+rows=[json.loads(l) for l in open(sys.argv[1])]; rows=[d for d in rows if d["phase"]==sys.argv[2] and (d["tag"][0]=="+" or d["tag"].startswith("b0."))]
+c=collections.Counter((d["eicar"][:3] if d["eicar"]!="av" else "av", d["clean"][:3]) for d in rows)
+print(len(rows), "samples; eicar/clean:", ", ".join(f"{e}/{k} x{n}" for (e,k),n in sorted(c.items())))' "$EV/P-samples.jsonl" "$name")); admin login $lc" \
+    || check P "$name-enforcement" fail "$fails (see P-$name-logs.txt)"
   # backup under pressure: must fail cleanly
   bk="$(p_backup "$EV/P-$name-backup.txt")"; inv1="$(p_backup_inventory)"; printf '%s\n' "$inv1" > "$EV/P-$name-backups-after.txt"
   if grep -q '\.tmp ' <<<"$inv1"; then check P "$name-backup-clean" fail "$bk; a .tmp archive was left behind"
   elif [[ "$(sed -n '/^---$/,$p' <<<"$inv0")" != "$(sed -n '/^---$/,$p' <<<"$inv1")" ]]; then
-    if [[ "$bk" == *state=succeeded* ]]; then check P "$name-backup-clean" info "$bk: the backup SUCCEEDED under pressure (a new archive exists); existing archives: $(diff <(sed -n '/^---$/,$p' <<<"$inv0") <(sed -n '/^---$/,$p' <<<"$inv1") | grep -c '^<') changed"
+    if [[ "$bk" == *state=succeeded* ]]; then
+      local pv; pv="$(groot "mp=\$(docker volume inspect -f '{{.Mountpoint}}' \"\$(docker volume ls -q | grep -m1 -E '(^|_)culvert-backups\$')\"); f=\$(ls -t \$mp | grep -E '^culvert-backup-.*[.]tar[.]gz\$' | head -1); echo \"newest=\$f\"; tar -tzf \"\$mp/\$f\" > /dev/null 2>&1 && echo archive=valid || echo archive=INVALID" 300 2>&1 | grep -E '^(newest|archive)=' | tr '\n' ' ')"
+      if [[ "$pv" == *archive=valid* && "$(diff <(sed -n '/^---$/,$p' <<<"$inv0") <(sed -n '/^---$/,$p' <<<"$inv1") | grep -c '^<')" == 0 ]]; then
+        check P "$name-backup-clean" info "$bk: the backup SUCCEEDED under pressure and the new archive is complete ($pv); every existing archive byte-identical"
+      else check P "$name-backup-clean" fail "$bk: reported success under pressure but $pv; existing archives changed: $(diff <(sed -n '/^---$/,$p' <<<"$inv0") <(sed -n '/^---$/,$p' <<<"$inv1") | grep -c '^<')"; fi
     else check P "$name-backup-clean" fail "$bk; archive set changed: $(diff <(sed -n '/^---$/,$p' <<<"$inv0") <(sed -n '/^---$/,$p' <<<"$inv1") | tr '\n' ' ' | head -c 300)"; fi
   else check P "$name-backup-clean" pass "$bk; no new archive, no .tmp, $(sed -n '/^---$/,$p' <<<"$inv0" | grep -c ' ') existing archive(s) byte-identical"; fi
   # app update under pressure (signed fixture only exists in build mode)
@@ -1712,7 +1746,7 @@ for l in sys.stdin: d=json.loads(l); print(d["tag"], "allowed",d["allowed"],"eic
     || check P "$name-recovered" fail "within 300 s of release: $s"
   if [[ "${P_APP_APPLIED:-0}" == 1 ]]; then P_APP_APPLIED=0; local rb rc=0
     rb="$({ printf '%s' "$AGENT_LIB"; embed rollback.json "$LAB_UPDATE_DIR/rollback-pressure-$name.json"
-           printf '%s\n' 'r=$(agent -X POST --data-binary @/tmp/.lab-upd/rollback.json http://agent/v1/rollbacks); echo "$r" | tail -c 1500' \
+           printf '%s\n' 'r=$(agent -X POST --data-binary @/run/culvert-lab-upd/rollback.json http://agent/v1/rollbacks); echo "$r" | tail -c 1500' \
                          'op=$(printf "%s" "$r" | opid); echo "op=$op"; [ -n "$op" ] && wait_op "$op"' 'running'; } | gpriv --timeout 2100 2>&1)" || rc=$?
     printf '%s\n' "$rb" > "$EV/P-$name-app-rollback.txt"
     check P "$name-app-rollback" "$(grep -qx 'op-state=succeeded' <<<"$rb" && echo pass || echo fail)" "$(grep -m1 '^op-state=' <<<"$rb") $(grep '^running-image=' <<<"$rb" | tail -1) rc=$rc"; fi
@@ -1851,6 +1885,10 @@ try: os.getxattr(sys.argv[1], "system.posix_acl_access"); print("present")
 except OSError: pass' "$n")"; done
 echo "drm-rule $(sha256sum /etc/udev/rules.d/72-culvert-drm.rules 2>/dev/null | cut -d' ' -f1 || echo missing)"
 echo "drm-driver $(basename "$(readlink -f /sys/class/drm/card0/device/driver 2>/dev/null)" 2>/dev/null || echo none)"
+# The shipped cmdline carries nomodeset (boot console); with it vmwgfx refuses
+# to bind (drm_firmware_drivers_only), so there may be no DRM node at all.
+echo "drm-nomodeset $(grep -qw nomodeset /proc/cmdline && echo yes || echo no)"
+echo "drm-vmwgfx-loaded $(grep -c '^vmwgfx ' /proc/modules)"
 echo "=== ext4 features"
 # CVE-2025-40190 needs ea_inode on a mounted ext4 filesystem.
 findmnt -rn -t ext4 -o SOURCE,TARGET | while read -r dev tgt; do
@@ -1959,9 +1997,9 @@ EOS
     check E kernel-modules-denied fail "$bad"
   elif ! grep -qE '^sctp-socket=refused:.* loaded-after=0$' "$f"; then
     check E kernel-modules-denied fail "$(grep '^sctp-socket=' "$f")"
-  elif [[ "$(sed -n 's/^denied-count //p' "$f")" -lt 65 ]]; then
-    check E kernel-modules-denied fail "the installed denylist names only $(sed -n 's/^denied-count //p' "$f") modules (expected >= 65)"
-  else check E kernel-modules-denied pass "$(grep -c '^module ' "$f") denied modules (sctp, nfsd, kvm*, ksmbd, cifs, can*, pppoe, pppox, RDMA core, dccp, tipc, ip_vs, openvswitch, vxlan, LIO target, sound, Bluetooth, rxrpc/kafs, amdgpu, idpf, scsi_debug, and the 21 network-autoloadable modules the GA disk did not carry): for each, the effective modprobe -c rules carry install /bin/false + an empty softdep override, /bin/false is the final step of its own resolution, and a real load attempt exits non-zero, refused by a denied module's install rule ($(awk '$1=="module"{by=$7; sub(/^refused-by=/,"",by); if(by==$2) s++; else d++} END{print s+0" by their own rule, "d+0" by a denied dependency first"}' "$f")), unloaded before and after; a real SCTP socket is $(sed -n 's/^sctp-socket=\(refused:.*\) loaded-after.*/\1/p' "$f") and sctp stays unloaded"; fi
+  elif [[ "$(sed -n 's/^denied-count //p' "$f")" -lt 67 ]]; then
+    check E kernel-modules-denied fail "the installed denylist names only $(sed -n 's/^denied-count //p' "$f") modules (expected >= 67)"
+  else check E kernel-modules-denied pass "$(grep -c '^module ' "$f") denied modules (sctp, nfsd, kvm*, ksmbd, cifs, can*, pppoe, pppox, RDMA core, dccp, tipc, ip_vs, openvswitch, vxlan, LIO target, sound, Bluetooth, rxrpc/kafs, amdgpu, idpf, scsi_debug, the 21 network-autoloadable modules the GA disk did not carry, and the NVMe-oF target nvmet/nvmet_tcp): for each, the effective modprobe -c rules carry install /bin/false + an empty softdep override, /bin/false is the final step of its own resolution, and a real load attempt exits non-zero, refused by a denied module's install rule ($(awk '$1=="module"{by=$7; sub(/^refused-by=/,"",by); if(by==$2) s++; else d++} END{print s+0" by their own rule, "d+0" by a denied dependency first"}' "$f")), unloaded before and after; a real SCTP socket is $(sed -n 's/^sctp-socket=\(refused:.*\) loaded-after.*/\1/p' "$f") and sctp stays unloaded"; fi
   # The kernel is Ubuntu's HWE series, exactly one image, no GA meta, and the
   # running kernel is that image.
   krun="$(sed -n 's/^kernel-running=//p' "$f")"; kimgs="$(sed -n 's/^kernel-images=//p' "$f" | xargs)"
@@ -1973,7 +2011,12 @@ EOS
     check E kernel-hwe fail "running $krun, installed images: $kimgs"
   else check E kernel-hwe pass "running $krun = the one installed image; $(sed -n 's/^kernel-meta=//p' "$f"); no GA metapackage"; fi
   # vmwgfx ioctl CVEs: no DRM node may be openable by anyone but root.
-  if ! grep -q '^drm ' "$f"; then check E drm-root-only fail "no DRM node (the lab VM has a VMware SVGA adapter; vmwgfx should bind)"
+  local drule; drule="$(sed -n 's/^drm-rule //p' "$f")"
+  if [[ -z "$drule" || "$drule" == missing ]]; then check E drm-root-only fail "72-culvert-drm.rules is not installed"
+  elif ! grep -q '^drm ' "$f"; then
+    if [[ "$(sed -n 's/^drm-nomodeset //p' "$f")" == yes ]]; then
+      check E drm-root-only pass "no DRM node exists: the shipped kernel cmdline carries nomodeset, so vmwgfx does not bind (module loaded: $(sed -n 's/^drm-vmwgfx-loaded //p' "$f")); 72-culvert-drm.rules (${drule:0:12}) stays installed for a node that ever appears"
+    else check E drm-root-only fail "no DRM node and no nomodeset on the cmdline (the lab VM has a VMware SVGA adapter; vmwgfx should bind)"; fi
   elif grep '^drm ' "$f" | grep -vqE '^drm \S+ root:root 600 acl=$'; then check E drm-root-only fail "$(grep '^drm ' "$f" | grep -vE ' root:root 600 acl=$' | tr '\n' ' ')"
   else check E drm-root-only pass "$(grep -c '^drm ' "$f") DRM node(s) on driver $(sed -n 's/^drm-driver //p' "$f"), each root:root 0600 with no ACL entry ($(grep '^drm ' "$f" | awk '{print $2}' | tr '\n' ' '))"; fi
   # Assumptions the kernel CVE dispositions rely on (kernel-cve-prereqs.tsv).
