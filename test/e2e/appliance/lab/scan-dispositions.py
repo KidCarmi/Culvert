@@ -31,6 +31,18 @@ CALLED = {
     ("usr-bin-ctr", "GO-2026-6061"): "`ctr` is an operator CLI talking to the root-only containerd socket; nothing on the appliance runs it.",
     ("usr-bin-ctr", "GO-2026-6348"): "`ctr` CLI client path (`Subscribe`); not run by anything on the appliance; peer is the root-only socket.",
     ("usr-bin-runc", "GO-2026-6238"): "`btf.LoadKernelSpec`: parses the running kernel's own BTF (root-owned kernel data), not attacker input.",
+    # containerd.io 2.4.1 (go1.27.2) still vendors golang.org/x/net v0.55.0; the
+    # x/net v0.60.0 HTTP/2 advisories on its real call paths.
+    ("usr-bin-containerd", "GO-2026-6603"): "x/net HTTP/2 framer in grpc-go's server writer (`loopyWriter.writeHeader`); the trailer-header flood needs an HTTP/2 client to send it. Peers are local root processes on the root-only socket `/run/containerd/containerd.sock` (root:root 0660, empty docker group — engine probe); dockerd is its only client.",
+    ("usr-bin-containerd", "GO-2026-6610"): "x/net HTTP/2 CLIENT transport (`http2.Transport.RoundTrip`); malformed framing headers must come from a remote HTTP/2 server. The only remote servers on the appliance are its pinned registries, reached over TLS and pulled by digest; CRI is not loaded (engine probe).",
+    ("usr-bin-containerd", "GO-2026-6611"): "x/net HTTP/2 window updates in grpc-go's server transport (`grpc.Serve` → `NewServerTransport`); the CPU cost needs a peer sending repeated SETTINGS. Peers are local root processes on the root-only socket `/run/containerd/containerd.sock` (root:root 0660, empty docker group — engine probe).",
+    ("usr-bin-containerd", "GO-2026-6612"): "x/net HTTP/2 SETTINGS handling in grpc-go's server writer; the double refund needs a hostile client. Peers are local root processes on the root-only socket `/run/containerd/containerd.sock` (root:root 0660, empty docker group — engine probe).",
+    ("usr-bin-containerd", "GO-2026-6617"): "Reached only through `FrameHeader.String` (formatting a frame for a log line); the HPACK encoder race is in an HTTP/2 SERVER under concurrent writers, and the peers are root. Peers are local root processes on the root-only socket `/run/containerd/containerd.sock` (root:root 0660, empty docker group — engine probe).",
+    ("usr-bin-ctr", "GO-2026-6603"): "`ctr` is an operator CLI (gRPC client: `loopyWriter.pingHandler`); nothing on the appliance runs it, and its server is the root-only containerd socket.",
+    ("usr-bin-ctr", "GO-2026-6610"): "`ctr` HTTP/2 client transport (remote fetch); `ctr` is not run by anything on the appliance.",
+    ("usr-bin-ctr", "GO-2026-6611"): "Reached only through `pseudoHeaderError.Error` (error formatting) in the `ctr` CLI; not run by anything on the appliance.",
+    ("usr-bin-ctr", "GO-2026-6612"): "`ctr` gRPC client reader (`http2Client.reader`); the advisory concerns SERVER streams; `ctr` is not run by anything on the appliance.",
+    ("usr-bin-ctr", "GO-2026-6617"): "`ctr` gRPC client SETTINGS write; the race is in an HTTP/2 SERVER; `ctr` is not run by anything on the appliance.",
     # docker-compose 5.6.0 is the newest docker-compose-plugin in Docker's apt
     # repository and is built with go1.26.8; these are the go1.26.9 stdlib and
     # x/net v0.60.0 advisories on its real call paths.
@@ -165,6 +177,15 @@ w("")
 w("## Host Go binaries")
 w("")
 idx = {l.split("\t")[0]: l.rstrip("\n").split("\t") for l in open(os.path.join(ev, "engsrc", "index.tsv"))}
+# A row that is not a completed source-mode run (download failure, revision
+# or toolchain mismatch) would otherwise read as "not reported in source
+# mode" — i.e. as unreachable. Refuse it instead.
+# govulncheck -format json exits 0 with or without findings; anything else is
+# a failed analysis (e.g. a source tree its type checker cannot load).
+bad = [f"{k}: {v[2]}" for k, v in sorted(idx.items())
+       if len(v) < 3 or not v[2].startswith("commit=") or " rc=0" not in " " + v[2]]
+if bad:
+    sys.exit("source mode did not complete for: " + "; ".join(bad))
 gv = collections.defaultdict(list)
 for r in rows:
     if r["source"].startswith("govulncheck:host-"):

@@ -108,7 +108,9 @@ cmd_engsrc() {
     elif [[ -z "$ver" || "$ver" == "(devel)" ]]; then
       ver="${rev:-$short}"
     fi
-    got="$(cd "$work" && GOFLAGS=-mod=mod go mod download -json "$mod@$ver" 2>&1)" || { printf '%s\t%s@%s\tdownload-failed\n' "$name" "$mod" "$ver" >> "$ev/engsrc/index.tsv"; continue; }
+    # stderr kept apart: a toolchain-switch notice ("go: ... switching to
+    # go1.26.9") would otherwise land in front of the JSON.
+    got="$(cd "$work" && GOFLAGS=-mod=mod go mod download -json "$mod@$ver" 2>"$work/download.err")" || { printf '%s\t%s@%s\tdownload-failed\n' "$name" "$mod" "$ver" >> "$ev/engsrc/index.tsv"; continue; }
     dir="$(python3 -I -c 'import json,sys;print(json.load(sys.stdin)["Dir"])' <<<"$got")"
     local hash; hash="$(python3 -I -c 'import json,sys;print((json.load(sys.stdin).get("Origin") or {}).get("Hash",""))' <<<"$got")"
     if [[ -n "$rev" && "$hash" != "$rev"* && "$rev" != "$hash"* ]] || [[ -z "$hash" ]]; then
@@ -119,9 +121,30 @@ cmd_engsrc() {
       cp "$work/src/vendor.mod" "$work/src/go.mod"; cp "$work/src/vendor.sum" "$work/src/go.sum"; note+=" go.mod=vendor.mod"
     fi
     local pkg="./${main#"$mod"/}"; [[ "$main" == "$mod" ]] && pkg=.
+    # govulncheck judges the STANDARD LIBRARY by the Go it runs under, not by
+    # the binary's: run on the scanner's own Go, a go1.26.9 dockerd was charged
+    # with go1.26.8's stdlib advisories (and a go1.27.2 containerd with them
+    # too). Source mode therefore runs on the binary's exact toolchain, and the
+    # row is refused unless govulncheck's own config reports that version.
+    # govulncheck's type checker is the go/types of the Go that COMPILED it, so
+    # a go1.26-built govulncheck cannot load go1.27 sources (containerd 2.4.1:
+    # "file requires newer Go version go1.27", rc=1, no findings). Build the
+    # same pinned govulncheck with the binary's toolchain, once per version.
+    local gov; gov="$(go version "$path" | awk '{print $2}')"
+    local gvc="$work/govulncheck-$gov"
+    if [[ ! -x "$gvc/govulncheck" ]]; then
+      GOTOOLCHAIN="$gov" GOBIN="$gvc" go install "golang.org/x/vuln/cmd/govulncheck@${GOVULNCHECK_VERSION:-v1.8.0}" 2>>"$ev/engsrc/$name.stderr" || {
+        printf '%s\t%s@%s\tgovulncheck-build-failed go=%s\n' "$name" "$mod" "$ver" "$gov" >> "$ev/engsrc/index.tsv"; continue; }
+    fi
     rc=0
-    (cd "$work/src" && GOFLAGS=-mod=mod CGO_ENABLED=1 govulncheck ${tags:+-tags "$tags"} -format json "$pkg") > "$ev/engsrc/$name.json" 2> "$ev/engsrc/$name.stderr" || rc=$?
-    printf '%s\t%s@%s\tcommit=%s tags=%s rc=%s%s\n' "$name" "$mod" "$ver" "$hash" "${tags:--}" "$rc" "$note" >> "$ev/engsrc/index.tsv"
+    (cd "$work/src" && GOTOOLCHAIN="$gov" GOFLAGS=-mod=mod CGO_ENABLED=1 "$gvc/govulncheck" ${tags:+-tags "$tags"} -format json "$pkg") > "$ev/engsrc/$name.json" 2> "$ev/engsrc/$name.stderr" || rc=$?
+    local used; used="$(python3 -I -c 'import json,sys
+d=json.JSONDecoder();t=open(sys.argv[1]).read().lstrip()
+print(d.raw_decode(t)[0].get("config",{}).get("go_version","") if t else "")' "$ev/engsrc/$name.json" 2>/dev/null)"
+    if [[ "$used" != "$gov" ]]; then
+      printf '%s\t%s@%s\ttoolchain-mismatch binary=%s scanned=%s\n' "$name" "$mod" "$ver" "$gov" "${used:-?}" >> "$ev/engsrc/index.tsv"; continue
+    fi
+    printf '%s\t%s@%s\tcommit=%s tags=%s go=%s rc=%s%s\n' "$name" "$mod" "$ver" "$hash" "${tags:--}" "$gov" "$rc" "$note" >> "$ev/engsrc/index.tsv"
   done
   rm -rf "$work"
 }
