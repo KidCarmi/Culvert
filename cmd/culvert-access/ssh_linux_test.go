@@ -239,7 +239,7 @@ func (f *sshBoundaryFixture) installKeys(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(f.home, ".ssh", "authorized_keys"), otherPublic, 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(f.home, ".ssh", "authorized_keys"), otherPublic, 0o600); err != nil { // #nosec G703 -- f.home is the fixture's fixed operator home (/home/culvert-operator), not input
 		t.Fatal(err)
 	}
 	if err := os.Chown(filepath.Join(f.home, ".ssh", "authorized_keys"), uid, gid); err != nil {

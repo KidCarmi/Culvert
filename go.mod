@@ -9,7 +9,7 @@ go 1.26.6
 // disagreement. The `go` line above is the module's minimum language version,
 // not the build compiler, and is not raised to match. Upgrade procedure:
 // roadmap/CI-REDESIGN.md §20.
-toolchain go1.26.8
+toolchain go1.26.9
 
 // Upstream v0.5.1 with only its public fuzz fixture excluded from normal builds.
 // Exact upstream provenance and patch are recorded beside the local module.

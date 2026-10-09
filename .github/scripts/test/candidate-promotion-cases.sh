@@ -27,6 +27,12 @@ set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 SCRIPTS="${REPO_ROOT}/.github/scripts"
+# The compiler a candidate record names is compared with the commit's go.mod
+# pin (candidate-plan-tag.sh), so the fixture reads the pin rather than
+# hardcoding one: a hardcoded version made every toolchain bump fail the
+# reuse cases for a reason that had nothing to do with promotion.
+GO_PIN="$(sed -n 's/^toolchain //p' "${REPO_ROOT}/go.mod")"
+[ -n "$GO_PIN" ] || { echo "no toolchain line in go.mod" >&2; exit 1; }
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
@@ -225,12 +231,13 @@ statement() { # statement <file> <type> <digest> <predicate-json>
   jq -n --arg t "$2" --arg d "${3#sha256:}" --argjson p "$4" \
     '{_type:"https://in-toto.io/Statement/v1", subject:[{name:"ghcr.io/kidcarmi/culvert", digest:{sha256:$d}}], predicateType:$t, predicate:$p}' > "$1"
 }
-record_pred() { # record_pred <digest> <sha> <version> [platforms-json]
+record_pred() { # record_pred <digest> <sha> <version> [platforms-json] [go-toolchain]
   jq -n --arg d "$1" --arg s "$2" --arg v "$3" --argjson pl "${4:-$(live_json "$1")}" --arg img "$IMG" \
+    --arg tc "${5:-$GO_PIN}" \
     '{schema:"culvert.release-candidate/v1", repository:"KidCarmi/Culvert", workflow:".github/workflows/ci.yml",
       ref:"refs/heads/main", event:"push", source_sha:$s, version:$v, image:$img, index_digest:$d,
       platforms:$pl, producer:{run_id:"111", run_attempt:"1", job:"docker"},
-      build_inputs:{go_toolchain:"go1.26.8", builder_image:"golang:1.26.8-alpine@sha256:x"}}'
+      build_inputs:{go_toolchain:$tc, builder_image:("golang:" + ($tc | ltrimstr("go")) + "-alpine@sha256:x")}}'
 }
 qual_pred() { # qual_pred <digest> <sha> <version> [result]
   jq -n --arg d "$1" --arg s "$2" --arg v "$3" --arg r "${4:-pass}" --argjson pl "$(live_json "$1")" \
@@ -242,10 +249,10 @@ attest() { # attest <type> <digest> <sha> <predicate-json> [identity] [subject-d
   statement "$f" "$1" "${6:-$2}" "$4"
   printf '%s|%s|%s|%s|%s|%s|%s|%s\n' "$1" "$2" "${5:-$CANDIDATE_IDENTITY}" "$CANDIDATE_REF" push "$CANDIDATE_REPOSITORY" "$3" "$f" >> "$WORK/att"
 }
-main_candidate() { # main_candidate <digest> <sha> <version> — pointer + record + qualification
+main_candidate() { # main_candidate <digest> <sha> <version> [go-toolchain] — pointer + record + qualification
   index "$1"; printf '%s|%s\n' "$1" "$2" >> "$WORK/labels"
   printf 'candidate-commit-%s|%s\n' "$2" "$1" >> "$WORK/tags"
-  attest "$CANDIDATE_RECORD_TYPE" "$1" "$2" "$(record_pred "$1" "$2" "$3")"
+  attest "$CANDIDATE_RECORD_TYPE" "$1" "$2" "$(record_pred "$1" "$2" "$3" "" "${4:-}")"
   attest "$CANDIDATE_QUALIFICATION_TYPE" "$1" "$2" "$(qual_pred "$1" "$2" "$3")"
 }
 plan_main() { bash "$SCRIPTS/candidate-plan-main.sh" "$IMG" "$@" >"$WORK/log" 2>&1; }
@@ -341,6 +348,11 @@ reset; main_candidate "$D1" "$SHA" v1.0.5
 if plan_tag v1.0.5 "$SHA" && [ "$(out source)" = main-candidate ] && [ "$(out digest)" = "$D1" ] && [ "$(out build)" = false ]; then
   ok "handoff: the tag run reuses the qualified main candidate"
 else bad "handoff: the tag run reuses the qualified main candidate" "source=$(out source) $(cat "$WORK/log")"; fi
+
+reset; main_candidate "$D1" "$SHA" v1.0.5 go1.0.0
+if ! plan_tag v1.0.5 "$SHA" && log_has "built with go1.0.0" && log_has "pins ${GO_PIN}"; then
+  ok "a main candidate built with another compiler is never reused (names both compilers)"
+else bad "a main candidate built with another compiler is never reused (names both compilers)" "source=$(out source) $(cat "$WORK/log")"; fi
 
 reset; main_candidate "$D1" "$SHA" v1.0.5; index "$D2"; printf 'candidate-v1.0.5|%s\n' "$D2" >> "$WORK/tags"
 if plan_tag v1.0.5 "$SHA" && [ "$(out source)" = binding ] && [ "$(out digest)" = "$D2" ]; then
