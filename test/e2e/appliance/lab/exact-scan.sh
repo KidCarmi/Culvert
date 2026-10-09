@@ -244,11 +244,20 @@ for f in sorted(glob.glob(os.path.join(ev, "engsrc", "*.json"))):
         if "finding" in m:
             fd = m["finding"]; tr = fd.get("trace") or [{}]
             lvl = "called" if tr[0].get("function") else ("imported" if tr[0].get("package") else "required")
+            # One advisory can be found in several shipped modules (net/http's
+            # bundled HTTP/2 in stdlib AND golang.org/x/net): keep EVERY module
+            # seen at the most precise level, so the row does not depend on
+            # which trace govulncheck happens to report first.
+            ent = (tr[0].get("module", ""), tr[0].get("version", ""), fd.get("fixed_version", "") or "-")
             cur = best.get(fd["osv"])
             if cur is None or rank[lvl] < rank[cur[0]]:
-                best[fd["osv"]] = (lvl, tr[0].get("module", ""), tr[0].get("version", ""), fd.get("fixed_version", "") or "-")
-    for vid, (lvl, mod, ver, fixed) in best.items():
-        rows.append(("engsrc:" + name, name, "source", mod, ver, fixed, "-", lvl, vid))
+                best[fd["osv"]] = (lvl, {ent})
+            elif lvl == cur[0]:
+                cur[1].add(ent)
+    for vid, (lvl, ents) in best.items():
+        ents = sorted(ents)
+        rows.append(("engsrc:" + name, name, "source", "+".join(e[0] for e in ents), "+".join(e[1] for e in ents),
+                     "+".join(e[2] for e in ents), "-", lvl, vid))
 rows.sort()
 with open(os.path.join(ev, "findings.tsv"), "w") as o:
     o.write("source\ttarget\ttype\tpackage\tinstalled\tfixed\tseverity\tstatus\tid\n")
