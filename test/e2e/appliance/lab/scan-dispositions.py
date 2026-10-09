@@ -31,6 +31,19 @@ CALLED = {
     ("usr-bin-ctr", "GO-2026-6061"): "`ctr` is an operator CLI talking to the root-only containerd socket; nothing on the appliance runs it.",
     ("usr-bin-ctr", "GO-2026-6348"): "`ctr` CLI client path (`Subscribe`); not run by anything on the appliance; peer is the root-only socket.",
     ("usr-bin-runc", "GO-2026-6238"): "`btf.LoadKernelSpec`: parses the running kernel's own BTF (root-owned kernel data), not attacker input.",
+    # docker-compose 5.6.0 is the newest docker-compose-plugin in Docker's apt
+    # repository and is built with go1.26.8; these are the go1.26.9 stdlib and
+    # x/net v0.60.0 advisories on its real call paths.
+    ("usr-libexec-docker-cli-plugins-docker-compose", "GO-2026-6603"): "HTTP/2 framer reached from the gRPC client transport (`http2Client.readServerPreface`) — the advisory's server-side trailer flood needs compose to SERVE HTTP/2, which it never does; compose runs only as root (`install.sh`, the maintenance agent, `culvert-os-update`) and opens no listener; its HTTP and gRPC peers are the root-only local Docker socket and the daemon's own BuildKit.",
+    ("usr-libexec-docker-cli-plugins-docker-compose", "GO-2026-6604"): "`os.Root.Mkdir` in go-archive's untar (`createImpliedDirectories`), used by `compose cp` and build-context handling; the appliance never runs `compose cp`, and its only build context is the ClamAV sidecar directory from the verified deploy bundle.",
+    ("usr-libexec-docker-cli-plugins-docker-compose", "GO-2026-6605"): "`http.Get` for a REMOTE build context (`build.GetContextFromURL`); the appliance's compose files build only from a local directory, and the desync needs an HTTP proxy rejecting CONNECT.",
+    ("usr-libexec-docker-cli-plugins-docker-compose", "GO-2026-6607"): "TLS client handshake in `http.Transport.dialConn`; the advisory concerns ECH outer-extension references, which a client meets only when it is configured for ECH — compose is not, and its daemon connection is a Unix socket without TLS.",
+    ("usr-libexec-docker-cli-plugins-docker-compose", "GO-2026-6608"): "MIME-header parsing of response trailers (`http.body.readTrailer`); the only servers compose reads responses from are the local root-only daemon and BuildKit (compose runs only as root (`install.sh`, the maintenance agent, `culvert-os-update`) and opens no listener; its HTTP and gRPC peers are the root-only local Docker socket and the daemon's own BuildKit).",
+    ("usr-libexec-docker-cli-plugins-docker-compose", "GO-2026-6610"): "HTTP/2 transport reached from the Docker Desktop feature probe (`desktop.IsFeatureActive`); there is no Docker Desktop endpoint on the appliance, and the malformed headers must come from the server compose talks to.",
+    ("usr-libexec-docker-cli-plugins-docker-compose", "GO-2026-6611"): "x/net HTTP/2 transport (`transportResponseBody.Close`); the CPU cost needs a hostile HTTP/2 SERVER as the peer — compose's peers are the local daemon and BuildKit (compose runs only as root (`install.sh`, the maintenance agent, `culvert-os-update`) and opens no listener; its HTTP and gRPC peers are the root-only local Docker socket and the daemon's own BuildKit).",
+    ("usr-libexec-docker-cli-plugins-docker-compose", "GO-2026-6612"): "x/net HTTP/2 flow-control refund on SERVER streams; reached only through the client transport (`http2transportResponseBody.Read`) — compose serves no HTTP/2.",
+    ("usr-libexec-docker-cli-plugins-docker-compose", "GO-2026-6613"): "HTTP/1 SERVER desync after a 2xx CONNECT; reached through `Request.UserAgent` in the client's otelhttp transport (`ContainerAttach`) — compose runs no HTTP server.",
+    ("usr-libexec-docker-cli-plugins-docker-compose", "GO-2026-6617"): "HPACK encoder race in an HTTP/2 SERVER; reached through `http.Client.Do` to the local daemon — compose runs no HTTP/2 server.",
 }
 
 def dist(sel):
@@ -171,8 +184,19 @@ for name in sorted(set(gv) | set(src) | set(idx)):
                  ", ".join(f"{k} {v}" for k, v in sorted(sl.items())) or ("0" if name in idx else "n/a")])
 L.extend(table(["binary", "exact source (proxy commit = binary vcs.revision)", "binary mode (by level)", "source mode (call graph)"], body))
 w("")
+# The engine packages must be the newest in Docker's apt repository: a vendor
+# fix that exists and is not taken is not dispositioned here, it is a pin bump.
+# The newest versions are measured at handoff (candidate JSON engine_latest,
+# from the repository's signed Packages index); the shipped ones come from the
+# OVA's own build record.
+shipped = json.load(open(os.path.join(ev, "build-info.json")))["host_components_pinned"]
+latest = cand["engine_latest"]
+stale = [f"{p} {shipped.get(p)} < {v}" for p, v in sorted(latest.items()) if shipped.get(p) != v]
+if stale:
+    sys.exit("engine package older than the newest in Docker's repository: " + ", ".join(stale))
 w("Binary mode reports a vulnerable function as soon as it is linked; source mode on the exact upstream revision, with the shipped build tags, tells whether a call path from `main` reaches it. "
-  "Docker's apt repository has no newer `containerd.io` or `docker-ce` than the shipped ones, so no vendor fix can be applied today.")
+  f"Every engine package is the newest in Docker's apt repository at handoff ({cand['engine_latest_measured']}: "
+  + ", ".join(f"`{p}` {v}" for p, v in sorted(latest.items())) + "), so no vendor fix exists to apply; what remains is dispositioned below.")
 w("")
 w("### Findings on a real call path")
 w("")
