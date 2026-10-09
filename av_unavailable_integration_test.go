@@ -43,6 +43,10 @@ const (
 	clamdFound
 	clamdReset
 	clamdStall
+	// clamdTempFull answers the way the pinned clamav/clamav 1.4 daemon does
+	// when it cannot spool the stream (its temporary directory is on a full
+	// disk): an ERROR reply, then a verdict for the empty stream it scanned.
+	clamdTempFull
 )
 
 // fakeClamd is a minimal clamd speaking the two commands the client sends
@@ -173,6 +177,8 @@ func (f *fakeClamd) handle(c net.Conn) {
 		_, _ = io.Copy(io.Discard, br)
 	case clamdFound:
 		_, _ = c.Write([]byte("stream: Eicar-Test-Signature FOUND\x00"))
+	case clamdTempFull:
+		_, _ = c.Write([]byte("Error writing to temporary file ERROR\x00stream: OK\x00"))
 	default:
 		_, _ = c.Write([]byte("stream: OK\x00"))
 	}
@@ -317,5 +323,39 @@ func TestAVUnavailableIT_OpenForwardsOnStopAndCrash(t *testing.T) {
 	clamd.setMode(clamdStall)
 	if w := proxyGet(t, origin, "/open-stalled"); w.Code != http.StatusForbidden {
 		t.Fatalf("stalled daemon, open posture: the budget still refuses (want 403), got %d", w.Code)
+	}
+}
+
+// A full disk under clamd (appliance lab 41bd1193, pressure phase "blocks"):
+// the daemon reports the spool error AND an OK for what it scanned. That is a
+// daemon fault, never a clean verdict — closed refuses, open forwards counted
+// as an engine error. Before the fix EICAR was delivered under closed.
+func TestAVUnavailableIT_DaemonTempFullIsAFaultNotClean(t *testing.T) {
+	for _, posture := range []string{secscan.AVUnavailableClosed, secscan.AVUnavailableOpen} {
+		t.Run(posture, func(t *testing.T) {
+			clamd, origin := avIntegrationSetup(t, posture)
+			clamd.setMode(clamdTempFull)
+			errBefore := secscan.Counters().ClamScanError
+			refusedBefore := secscan.AVUnavailableRefusedTotal()
+			w := proxyGet(t, origin, "/temp-full-"+posture)
+			if d := secscan.Counters().ClamScanError - errBefore; d != 1 {
+				t.Fatalf("the spool error must count as a ClamAV engine error (moved by %d)", d)
+			}
+			if posture == secscan.AVUnavailableClosed {
+				if w.Code != http.StatusForbidden || strings.Contains(w.Body.String(), "payload-for:") {
+					t.Fatalf("closed posture: want 403 with no content, got %d %q", w.Code, w.Body.String())
+				}
+				if d := secscan.AVUnavailableRefusedTotal() - refusedBefore; d != 1 {
+					t.Fatalf("closed posture: refusal counter moved by %d, want 1", d)
+				}
+			} else if w.Code != http.StatusOK {
+				t.Fatalf("open posture: the content is forwarded (counted), got %d", w.Code)
+			}
+			// Recovery: the same object is scanned again, not served from a cache.
+			clamd.setMode(clamdFound)
+			if w := proxyGet(t, origin, "/temp-full-"+posture); w.Code != http.StatusForbidden || !strings.Contains(w.Body.String(), "Blocked by CLAMAV scan") {
+				t.Fatalf("after the disk recovers the object must be rescanned and detected, got %d %q", w.Code, w.Body.String())
+			}
+		})
 	}
 }
