@@ -573,6 +573,38 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Performance
 
+- The per-rule URL-category membership probe is lock-free.
+  `urlcat.MatchesHost`/`MatchesHostAdmin` are the per-*rule* half of
+  destination-category resolution: the policy scan calls one of them **once per
+  category-scoped access rule on every proxied request**, and deliberately does
+  not memoize them (they depend on the rule's category, not just the host).
+  Each call took the store's read lock, and `RLock`/`RUnlock` are two atomic
+  read-modify-writes on **one shared word**, so every rule of every request
+  wrote the same cache line purely to read maps that in steady state never
+  change. That is a throughput *ceiling*, not a constant cost: a CPU profile
+  under 4-way concurrency attributed **68.6% of all samples to the reader
+  counter itself**, against ~26% for the real work. Both arms timed in one run
+  on a 4-core Xeon (medians of n=5), `MatchesHost` goes **91.7 / 123.6 / 119.6
+  → 89.9 / 45.2 / 22.7 ns/op at 1 / 2 / 4 cores** — 1.02× / 2.74× / **5.27×** —
+  and the *shape* is the finding: the old form scaled **0.77×** from one core to
+  four (adding cores **subtracted** throughput) where the new one scales
+  **3.96×**. `MatchesHostAdmin` is **6.22×** at four cores. Through the real
+  policy scan, 50 category rules go **3947 → 1042 ns at four cores (6.36×)** and
+  200 rules **20471 → 3436 ns (5.96×)**, and the scan now gets faster with cores
+  instead of slower. There is **no low-concurrency price** (the serial control
+  is 1.00–1.02× at every core count) and both paths remain allocation-free.
+  Verdicts are unchanged and the equivalence is pinned by a differential
+  against a frozen copy of the previous implementation, re-run after every
+  mutator. Only deployments with category-scoped access rules are affected;
+  without them the probe was never reached.
+
+  The trade is on the *writer*: the incremental single-host fold now clones the
+  category map, going from `O(hosts in that category)` to `O(categories)` —
+  1.05 → 2.80 µs at 27 categories, 1.04 → 154 µs at 2 000. Its only caller,
+  `AddHost`, already marshals the entire taxonomy to JSON and fsyncs an atomic
+  rename on every call (886 µs and 11.7 ms at those sizes), so the clone is
+  0.20% and 1.3% of the operation it sits inside.
+
 - The threat feed's full-URL check no longer re-parses a URL it was handed
   already parsed. `preDispatchBlocked` runs it on every forwarded plain-HTTP
   request, on the request goroutine, before the policy engine — and called it
