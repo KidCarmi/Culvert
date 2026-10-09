@@ -56,6 +56,19 @@ redact_str 'archive=synthetic-history-secret log=synthetic-rotated-log-secret'
 ''')
         self.assertEqual(output, 'archive=[REDACTED] log=[REDACTED]')
 
+    def test_external_pressure_refuses_before_credentials_origin_or_disk_observation(self):
+        output, secrets = self.run_library('''
+check() { printf '%s|%s|%s|%s\\n' "$@"; }
+gpriv() { exit 91; }
+ensure_admin_pass() { exit 92; }
+rec_origin_start() { exit 93; }
+p_host_free_gb() { exit 94; }
+p_host_alloc_mb() { exit 95; }
+cmd_pressure
+''')
+        self.assertEqual(output, 'P|disk-pressure|fail|BLOCKED: bounded QEMU disk-pressure fixture cannot run on ESXi\n')
+        self.assertEqual(secrets, [])
+
     def test_unsupported_console_transport_refuses_before_socket_creation(self):
         spec = importlib.util.spec_from_file_location('shared_console_boundary', LAB / 'console-session.py')
         module = importlib.util.module_from_spec(spec)

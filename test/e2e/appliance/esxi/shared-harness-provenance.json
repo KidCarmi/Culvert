@@ -1,20 +1,21 @@
 {
   "schema": 1,
-  "upstream_revision": "337b4b5b64b4315d3a36b1d1cffe73148be54166",
+  "upstream_revision": "4eabd8d4f3eee7d4d305163bd48786a340019cff",
   "normalization": "LF bytes; controller freeze records runtime raw hashes",
   "files": {
     "test/e2e/appliance/lab/appliance-lab.sh": {
-      "upstream_sha256": "aa7881aef1fd322b65f191a50076bedf8ba86cadc08fc5ca634065baa9ab7bbc",
-      "controller_lf_sha256": "6128776c1412e05b745eb1377d54004d87a2d2ed44a7c14be359e1eeddb868a9",
+      "upstream_sha256": "bbb9c1d456c9d39215647070442b8cf187e62e1dfdaa2be398cf7be0cb20007c",
+      "controller_lf_sha256": "2358a7ff41c51167419cb3fbf16458ca0a9dc7de1c1b76c412bafa9088a90fe0",
       "local_changes": [
         "guarded restore before signed lifecycle",
         "pre-reboot ESXi observations",
-        "post-reboot ESXi observations"
+        "post-reboot ESXi observations",
+        "refuse QEMU-only disk-pressure fixture for external ESXi"
       ]
     },
     "test/e2e/appliance/lab/console-session.py": {
-      "upstream_sha256": "57db59cbb2395bb66f3920b262e602561d89cf74c78049ba9a31c4421ee4fef7",
-      "controller_lf_sha256": "adcbc6c830422375b448fb2cc66f304a37d501a83fae6f1990c505bbcb5b9630",
+      "upstream_sha256": "ea74e6bc5b970c878ff64d4445b0494e2c435f3530077c4c369391f387699604",
+      "controller_lf_sha256": "517c46d8d5a21c627f3ea47cec97cdb00e00595d9716379d8ed6f41ab591bf13",
       "local_changes": [
         "preserve controlled Windows refusal when AF_UNIX is unavailable"
       ]

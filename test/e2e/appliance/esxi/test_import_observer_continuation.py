@@ -119,10 +119,10 @@ class ContinuationTests(unittest.TestCase):
             self.lab.gov.assert_not_called()
         path.write_bytes(original)
 
-    def test_observer_refuses_mixed_source_image_and_allows_exact_7e_and_7c(self):
+    def test_observer_refuses_mixed_source_image_and_allows_reviewed_candidates(self):
         visual=c.module('test_visual_profiles',HERE/'visual-capture.py')
         profiles=c.module('test_profiles_pair',HERE/'candidate-identities.py')
-        for source in (profiles.E7E,profiles.E7C):
+        for source in (profiles.E7E,profiles.E7C,profiles.E91):
             scope=profiles.source_profile(source)
             self.assertEqual(visual.candidate_profile(scope)['source_sha'],source)
             scope['image_id']='sha256:'+'0'*64
@@ -144,11 +144,11 @@ class ContinuationTests(unittest.TestCase):
                          (self.lab.sec/'clamav-outage',{}))
         with self.assertRaises(outage.CheckFailure): outage.attempt_context(self.lab.sec,profile,'followup',None,'owned')
 
-    def test_history_admission_is_exact_7e_or_7c_without_dispatch(self):
+    def test_history_admits_reviewed_candidates_without_dispatch(self):
         profiles=c.module('test_history_profiles',HERE/'candidate-identities.py')
         fresh=c.module('test_history_controller',HERE/'fresh-recovery.py')
         args=SimpleNamespace(bind='192.0.2.1',scope=Path('not-read'),escrow=Path('not-written'),history=True)
-        for source in (profiles.E7E,profiles.E7C,profiles.CD8):
+        for source in (profiles.E7E,profiles.E7C,profiles.E91,profiles.CD8):
             lab=SimpleNamespace(c=dict(profiles.source_profile(source),max_vms=1),run=Path('not-read'))
             with mock.patch.object(fresh.console.b.module,'Lab',return_value=lab), \
                  mock.patch.object(fresh.console.b.module,'validate_scope'), \

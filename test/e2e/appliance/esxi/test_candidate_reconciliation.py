@@ -2,6 +2,7 @@
 import hashlib
 import importlib.util
 import json
+import subprocess
 from pathlib import Path
 import unittest
 from unittest import mock
@@ -17,9 +18,34 @@ def load(name):
 
 
 class CandidateReconciliationTests(unittest.TestCase):
+    def test_91_profile_helpers_and_kernel_controls_match_exact_source(self):
+        ids=load('candidate-identities')
+        profile=ids.source_profile(ids.E91)
+        engine=load('engine-surface-proof').PROFILES[ids.E91]
+        files={'appliance/provision/culvert-net':profile['network_helper_sha256'],
+               'appliance/provision/culvert-appliance-reset-identity':profile['reset_helper_sha256'],
+               'appliance/provision/modprobe-culvert-unused.conf':engine['denylist_sha256'],
+               'appliance/provision/72-culvert-drm.rules':engine['drm_rule_sha256'],
+               'appliance/provision/net-autoload-reviewed.txt':engine['net_reviewed_sha256']}
+        for path,digest in files.items():
+            raw=subprocess.check_output(['git','show',ids.E91+':'+path],cwd=HERE.parents[3])
+            self.assertEqual(hashlib.sha256(raw).hexdigest(),digest)
+            if path.endswith('unused.conf'):
+                names=[line.split()[1] for line in raw.decode().splitlines() if line.startswith('install ')]
+                self.assertEqual(names,engine['modules']);self.assertEqual(len(names),67)
+
+    def test_current_helpers_admit_91_while_historical_continuation_remains_bound(self):
+        ids=load('candidate-identities');scope=ids.source_profile(ids.E91)
+        self.assertEqual(load('visual-capture').candidate_profile(scope),scope)
+        self.assertEqual(load('qualify-clamav-outage').attempt_context(Path('unused'),scope,'initial',None,'owner'),
+                         (Path('unused/clamav-outage'),{}))
+        fixture=load('visual-service-fixture')
+        script=fixture.generate('install','11111111-1111-4111-8111-111111111111','nine-one',ids.E91)
+        self.assertIn(ids.E91,script)
+        self.assertNotEqual(load('import-observer-continuation').SOURCE,ids.E91)
     def test_only_complete_reviewed_artifact_combinations_are_admitted(self):
         identities = load('candidate-identities')
-        for source in (identities.B579, identities.D698, identities.E2E3, identities.CD8, identities.E7E):
+        for source in (identities.B579, identities.D698, identities.E2E3, identities.CD8, identities.E7E, identities.E7C, identities.E91):
             scope = identities.source_profile(source)
             self.assertEqual(identities.scope_profile(scope), scope)
             for field in ('source_sha', 'ova_sha256', 'image_id'):
@@ -33,7 +59,7 @@ class CandidateReconciliationTests(unittest.TestCase):
 
     def test_real_fixture_bytes_unchanged_and_provenance_names_selected_source(self):
         identities, fixture = load('candidate-identities'), load('prepare-signed-fixture')
-        for source in (identities.B579, identities.D698, identities.E2E3, identities.CD8, identities.E7E):
+        for source in (identities.B579, identities.D698, identities.E2E3, identities.CD8, identities.E7E, identities.E7C, identities.E91):
             provenance = fixture.verify_sources(source)
             self.assertEqual(provenance['source_revision'], source)
             self.assertEqual({k: v['sha256'] for k, v in provenance['files'].items()}, identities.FIXTURE_HASHES)
@@ -42,7 +68,7 @@ class CandidateReconciliationTests(unittest.TestCase):
 
     def test_shared_library_contains_only_documented_delta_from_pinned_upstream(self):
         record = json.loads((HERE / 'shared-harness-provenance.json').read_bytes())
-        self.assertEqual(record['upstream_revision'], '337b4b5b64b4315d3a36b1d1cffe73148be54166')
+        self.assertEqual(record['upstream_revision'], '4eabd8d4f3eee7d4d305163bd48786a340019cff')
         root = HERE.parents[3]
         for name, hashes in record['files'].items():
             raw = (root / name).read_bytes().replace(b'\r\n', b'\n')
@@ -55,6 +81,7 @@ class CandidateReconciliationTests(unittest.TestCase):
                                 + ('\n' if extra_line else '')).encode()
                     self.assertEqual(raw.count(addition), 1)
                     raw = raw.replace(addition, b'')
+                raw = raw.replace(b'  if [[ "$LAB_EXTERNAL" == 1 ]]; then check P disk-pressure fail "BLOCKED: bounded QEMU disk-pressure fixture cannot run on ESXi"; return 0; fi\n', b'')
             elif name.endswith('console-session.py'):
                 raw = raw.replace(b'        if not hasattr(socket, "AF_UNIX"):\n'
                                   b'            raise OSError("Unix console transport is unavailable on this controller")\n', b'')

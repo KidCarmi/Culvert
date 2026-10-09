@@ -38,6 +38,39 @@ class RecoveryTests(unittest.TestCase):
     def transfer(self):
         return controller.Transfer('127.0.0.1', {'archive': self.root / 'archive'}, True, {'archive': 12})
 
+    def test_provisioning_wait_is_bounded_same_boot_and_precedes_restore(self):
+        now=[0.0]
+        pauses=[]
+        def pause(seconds):
+            pauses.append(seconds);now[0]+=seconds
+        result=guest.wait_provisioned(lambda: now[0]>=15,lambda:'boot-a',clock=lambda:now[0],pause=pause)
+        self.assertEqual(result,{'firstboot_complete':True,'boot_id':'boot-a','wait_seconds':15.0,'budget_seconds':900})
+        self.assertEqual(pauses,[5,5,5])
+        now[0]=0
+        with self.assertRaises(RuntimeError):
+            guest.wait_provisioned(lambda:False,lambda:'boot-a',clock=lambda:now[0],pause=pause)
+        self.assertEqual(now[0],900)
+        now[0]=0
+        with self.assertRaises(RuntimeError):
+            guest.wait_provisioned(lambda:False,lambda:'boot-a' if now[0]==0 else 'boot-b',clock=lambda:now[0],pause=pause)
+        self.assertEqual(now[0],5)
+
+    def test_unfinished_or_wrong_candidate_provisioning_dispatches_no_restore_work(self):
+        operation=SimpleNamespace(cfg={'source_sha':'source','image_id':'image'},run=mock.Mock(),dc=mock.Mock())
+        build=mock.Mock()
+        build.read_text.return_value=json.dumps({'source':{'git_commit':'source','git_dirty':False},
+                                                'application':{'index_digest':'image'}})
+        with mock.patch.object(guest,'Path',return_value=build), \
+             mock.patch.object(guest,'wait_provisioned',side_effect=RuntimeError('firstboot unavailable')) as wait, \
+             mock.patch.object(guest,'regular') as regular:
+            with self.assertRaisesRegex(RuntimeError,'firstboot unavailable'): guest.Guest.preflight(operation)
+            self.assertEqual(operation.phase,'provisioning-wait')
+            operation.run.assert_not_called();operation.dc.assert_not_called();regular.assert_not_called()
+            wait.reset_mock()
+            operation.cfg['source_sha']='different'
+            with self.assertRaises(RuntimeError): guest.Guest.preflight(operation)
+            wait.assert_not_called()
+
     def test_restore_keeps_candidate_sha_separate_from_source_owner_record(self):
         identities = load('fresh_restore_identities', 'candidate-identities.py')
         scope = dict(identities.source_profile(identities.CD8), max_vms=1, endpoint='https://192.0.2.1')

@@ -37,6 +37,16 @@ CURRENT = re.compile(r"Current password:\s*$")
 NEW = re.compile(r"New password:\s*$")
 RETYPE = re.compile(r"Retype new password:\s*$")
 SUDO = "LABSUDO:"
+# Where the shipped script and its captured output live on the guest: tmpfs
+# (the login's runtime dir, else /dev/shm), never the root filesystem. The
+# disk-pressure phases fill / on purpose; staging there made every privileged
+# step after the fill fail with "base64: write error: No space left on device"
+# (lab run 37948667525), including the release of the fill itself. TMPDIR
+# keeps bash's here-document spill files off the root disk too.
+WORKDIR_SETUP = ('if ! { [ -n "${L:-}" ] && [ -d "$L" ] && [ ! -L "$L" ] && [ -O "$L" ]; }; then '
+                 'if [ -n "${XDG_RUNTIME_DIR:-}" ] && [ -d "$XDG_RUNTIME_DIR" ] && [ -O "$XDG_RUNTIME_DIR" ]; '
+                 'then L="$XDG_RUNTIME_DIR/.lab"; mkdir -p "$L"; else L=$(mktemp -d /dev/shm/.lab.XXXXXX); fi; fi; '
+                 'export TMPDIR="$L"')
 
 
 class Console:
@@ -167,7 +177,7 @@ def login(c, args):
         c.read_for(4)
     # Quiet, wide, history-free shell; nothing typed afterwards is echoed.
     c.send("stty -echo cols 400 rows 50; export TERM=dumb LANG=C.UTF-8 HISTFILE=/dev/null; "
-           "PS1=; PS2=; PROMPT_COMMAND=; unset TMOUT; umask 077; mkdir -p /tmp/.lab\r")
+           "PS1=; PS2=; PROMPT_COMMAND=; unset TMOUT; umask 077; " + WORKDIR_SETUP + "\r")
     if not sync(c, 20):
         raise SystemExit(95)
     with open(secret_path(args.secrets, "console-events"), "a", encoding="utf-8") as f:
@@ -198,16 +208,19 @@ def run(c, args, script, timeout, root, quiet=False, nowait=False):
     tag = secrets.token_hex(5)
     b64 = base64.b64encode(script.encode()).decode()
     c.take()
-    c.send("base64 -d > /tmp/.lab/c%s <<'LABEOF'\r" % tag)
+    # Re-asserted per script: a session that predates this helper (or a
+    # cleared runtime dir) still lands in tmpfs, never on the root disk.
+    c.send(WORKDIR_SETUP + "\r")
+    c.send("base64 -d > \"$L/c%s\" <<'LABEOF'\r" % tag)
     for i in range(0, len(b64), 76):
         c.send(b64[i:i + 76] + "\r")
     c.send("LABEOF\r")
     runner = ("sudo -p '%s' bash" % SUDO) if root else "bash"
     if nowait:
-        c.send("%s /tmp/.lab/c%s\r" % (runner, tag))
+        c.send("%s \"$L/c%s\"\r" % (runner, tag))
     else:
-        c.send(("%s /tmp/.lab/c%s > /tmp/.lab/o%s 2>&1 < /dev/null; r=$?; printf 'LAB%%s%%s\\n' BEGIN %s; "
-                "base64 -w 76 /tmp/.lab/o%s; printf 'LAB%%s%%s %%s\\n' END %s \"$r\"; rm -f /tmp/.lab/c%s /tmp/.lab/o%s\r")
+        c.send(("%s \"$L/c%s\" > \"$L/o%s\" 2>&1 < /dev/null; r=$?; printf 'LAB%%s%%s\\n' BEGIN %s; "
+                "base64 -w 76 \"$L/o%s\"; printf 'LAB%%s%%s %%s\\n' END %s \"$r\"; rm -f \"$L/c%s\" \"$L/o%s\"\r")
                % (runner, tag, tag, tag, tag, tag, tag, tag))
     end_re = re.compile(r"LABEND%s (\d+)" % tag)
     # A --nowait script that prints LABACCEPT <guest epoch> (as root, i.e.

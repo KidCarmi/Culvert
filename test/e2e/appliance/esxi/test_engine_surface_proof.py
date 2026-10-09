@@ -14,15 +14,18 @@ proof = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(proof)
 
 
-def fixture():
+E91 = '91e05872dfe5f96c94ec725b8b2dc2b1002116ab'
+
+
+def fixture(source=proof.LEGACY):
+    profile = proof.PROFILES[source]
     lines = []
-    for name in sorted(proof.MODULES):
+    for name in sorted(profile['modules']):
         by = 'ib_core' if name == 'ksmbd' else name
         lines += [f'module {name} before=0 final=install /bin/false rc=1 refused-by={by} after=0',
                   f'effective install {name} /bin/false', f'effective softdep {name}',
                   f'effective blacklist {name}']
-    lines += ['denylist-file ' + proof.DENYLIST_SHA256,
-              'module-file nvmet_tcp 0', 'module-file ib_srpt 0',
+    lines += ['denylist-file ' + profile['denylist_sha256'],
               'sctp-socket=refused:Protocol not supported loaded-after=0',
               'running=6.8.0-146-generic', 'installed=6.8.0-146-generic',
               'snapd-status=not-installed', 'snap-dir=absent',
@@ -31,6 +34,25 @@ def fixture():
               'sock /run/docker.sock root:docker 660', 'docker-group=',
               'dockerd-argv /usr/bin/dockerd -H fd://', 'disabled-plugins ["cri"]',
               'listen example', 'published culvert 0.0.0.0:8080->8080/tcp', 'plugin example', '=== containerd tracing', 'tracing endpoint = ""']
+    if source == proof.LEGACY:
+        lines += ['module-file nvmet_tcp 0', 'module-file ib_srpt 0']
+    else:
+        lines = [line.replace('6.8.0-146-generic', profile['kernel']) for line in lines]
+        lines += ['extra-module nvmet_tcp files=1 rc=1 loaded-after=0 refused-by=nvmet',
+                  'extra-module ib_srpt files=1 rc=1 loaded-after=0 refused-by=ib_cm',
+                  'denied-count 67', 'kernel-running=' + profile['kernel'],
+                  'kernel-images=linux-image-' + profile['kernel'], 'kernel-ga-meta=',
+                  'kernel-meta=linux-image-virtual-hwe-24.04=7.0.0-38.38~24.04.4',
+                  'drm-rule ' + profile['drm_rule_sha256'], 'drm-nomodeset yes', 'drm-vmwgfx-loaded 0',
+                  'net-reviewed-file ' + profile['net_reviewed_sha256'],
+                  'sysctl kernel.unprivileged_bpf_disabled=2', 'sysctl kernel.perf_event_paranoid=4',
+                  'sysctl kernel.apparmor_restrict_unprivileged_userns=1', 'sysctl kernel.kptr_restrict=1',
+                  'sysctl kernel.dmesg_restrict=1', 'sysctl dev.tty.ldisc_autoload=0',
+                  'container /culvert privileged=false capadd=[] devices=0 seccomp=[]',
+                  'container /culvert-clamav privileged=false capadd=[] devices=0 seccomp=[]',
+                  'perf-tool absent', 'fuse-mounts 0 btrfs-mounts 0 nfs-mounts 0',
+                  'net-autoload total=61 denied=29 reviewed=32', 'net-autoload-unreviewed=[]',
+                  'ext4 / has_journal ext_attr']
     return '\n'.join(lines) + '\n'
 
 
@@ -41,10 +63,12 @@ class EngineSurfaceProofTests(unittest.TestCase):
             self.skipTest('Bash required for transport dispatch regression')
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            (root / 'fixture.txt').write_text(fixture(), encoding='utf-8')
+            (root / 'fixture.txt').write_text('\n'.join(line for line in fixture(E91).splitlines()
+                if not line.startswith('net-reviewed-file ')), encoding='utf-8')
+            (root / 'inventory.txt').write_text('net-reviewed-file ' + proof.PROFILES[E91]['net_reviewed_sha256'] + '\n')
             env = {k: v for k, v in os.environ.items() if not k.startswith(('LAB_', 'ESXI_'))}
             env.update(LAB_DIR=root.as_posix(), LAB_EXTERNAL='1', LAB_LIBRARY_ONLY='1',
-                       ESXI_ENGINE_SURFACE='1', TEST_PYTHON=sys.executable,
+                       ESXI_ENGINE_SURFACE='1', ESXI_ENGINE_SOURCE=E91, TEST_PYTHON=sys.executable,
                        ADAPTER_HERE=HERE.as_posix())
             script = '''
 source "$1"
@@ -52,6 +76,10 @@ source "$ADAPTER_HERE/engine-surface-check.sh"
 python3() { "$TEST_PYTHON" "$@"; }
 # No SSH or guest exists. Capture exactly what authenticated gpriv receives.
 gpriv() {
+  if [[ "$*" == '--timeout 30' ]]; then
+    cat > "$LAB_DIR/captured-inventory.sh"
+    cat "$LAB_DIR/inventory.txt"; return
+  fi
   [[ "$*" == '--timeout 300' ]] || return 90
   cat > "$LAB_DIR/captured-payload.sh"
   cat "$LAB_DIR/fixture.txt"
@@ -74,6 +102,7 @@ cmp "$EV/E-engine-surface.txt" "$LAB_DIR/original.txt"
             self.assertIn("socket.socket(socket.AF_INET, socket.SOCK_STREAM, 132)", payload)
             self.assertIn('modprobe -c', payload)
             self.assertNotIn('sudo -n', payload)
+            self.assertIn('net-autoload-reviewed.txt', (root / 'captured-inventory.sh').read_text())
 
     def test_denied_dependency_is_valid_only_with_target_final_rule(self):
         self.assertEqual(proof.verify(fixture()), 24)
@@ -123,7 +152,40 @@ cmp "$EV/E-engine-surface.txt" "$LAB_DIR/original.txt"
                         script.index('\ncmd_qualify\n'))
         self.assertIn('\nesxi_restore_persistence\nesxi_engine_surface\n', script)
         runner = (HERE / 'candidate-run.ps1').read_text()
-        self.assertIn("$env:ESXI_ENGINE_SURFACE = if ($configuration.source_sha -eq '7c7b29ee3be40af6a0809c73ad04d4337303263d')", runner)
+        self.assertIn(E91, runner)
+        self.assertIn('$env:ESXI_ENGINE_SOURCE = $configuration.source_sha', runner)
+
+    def test_hwe_proof_has_67_exact_modules_and_never_accepts_ga_absence(self):
+        self.assertEqual(proof.verify(fixture(E91), E91), 67)
+        mutations = [
+            ('extra-module nvmet_tcp files=1 rc=1 loaded-after=0 refused-by=nvmet', 'module-file nvmet_tcp 0'),
+            ('denied-count 67', 'denied-count 66'),
+            ('drm-vmwgfx-loaded 0', 'drm-vmwgfx-loaded 1'),
+            ('drm-vmwgfx-loaded 0', ''),
+            (proof.PROFILES[E91]['net_reviewed_sha256'], '0'*64),
+            ('container /culvert-clamav privileged=false capadd=[] devices=0 seccomp=[]', ''),
+            ('kernel-running=7.0.0-38-generic', 'kernel-running=6.8.0-146-generic'),
+            ('module nvmet before=0 final=install /bin/false rc=1 refused-by=nvmet after=0', ''),
+            ('ext4 / has_journal ext_attr', 'ext4 /'),
+            ('ext4 / has_journal ext_attr', 'ext4 / ea_inode'),
+            ('drm-nomodeset yes', 'drm-nomodeset no'),
+            (proof.PROFILES[E91]['drm_rule_sha256'], '0'*64),
+            ('sysctl kernel.unprivileged_bpf_disabled=2', 'sysctl kernel.unprivileged_bpf_disabled=0'),
+            ('sysctl dev.tty.ldisc_autoload=0', 'sysctl dev.tty.ldisc_autoload=1'),
+            ('net-autoload-unreviewed=[]', 'net-autoload-unreviewed=[newmodule]'),
+            ('privileged=false', 'privileged=true'),
+            ('seccomp=[]', 'seccomp=[unconfined]')]
+        for old,new in mutations:
+            with self.subTest(old=old), self.assertRaises(ValueError):
+                proof.verify(fixture(E91).replace(old,new), E91)
+        with self.assertRaises(ValueError): proof.verify(fixture(), E91)
+        with self.assertRaises(ValueError): proof.verify(fixture(E91))
+
+    def test_drm_nodes_need_root_mode_and_no_acl(self):
+        text=fixture(E91)+'drm /dev/dri/card0 root:root 600 acl=\n'
+        self.assertEqual(proof.verify(text,E91),67)
+        for original,replacement in [('root:root 600','root:video 660'),('acl=\n','acl=present\n')]:
+            with self.assertRaises(ValueError): proof.verify(text.replace(original,replacement),E91)
 
 
 if __name__ == '__main__':

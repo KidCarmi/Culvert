@@ -437,10 +437,12 @@ PY
     -device virtio-scsi-pci,id=scsi0 -device scsi-hd,drive=d0,bus=scsi0.0 \
     -drive "file=$WORK/ovfenv.iso,if=none,id=cd0,media=cdrom,readonly=on" -device ide-cd,drive=cd0 \
     -netdev "user,id=n0,hostfwd=tcp:127.0.0.1:$LAB_SSH_PORT-:22,hostfwd=tcp:127.0.0.1:$LAB_PROXY_PORT-:8080,hostfwd=tcp:127.0.0.1:$LAB_UI_PORT-:9090" \
-    -device e1000,netdev=n0 -display none \
+    -device e1000,netdev=n0 -vga vmware -display none \
     -chardev "socket,id=ser0,path=$SER_SOCK,server=on,wait=off,logfile=$WORK/console.log,logappend=on" -serial chardev:ser0 \
     -monitor "unix:$MON_SOCK,server,nowait" -pidfile "$WORK/qemu.pid" -daemonize
-  printf 'qemu-system-x86_64 %s -smp %s -m %s virtio-scsi(%s) ide-cd(ovfenv.iso) e1000 user-net hostfwd 127.0.0.1:{%s,%s,%s} SeaBIOS serial=socket+logfile\n' \
+  # -vga vmware: ESXi's SVGA adapter, so the guest binds vmwgfx (the driver
+  # the DRM-node mitigation exists for) and the drm-root-only check tests it.
+  printf 'qemu-system-x86_64 %s -smp %s -m %s virtio-scsi(%s) ide-cd(ovfenv.iso) e1000 vga=vmware user-net hostfwd 127.0.0.1:{%s,%s,%s} SeaBIOS serial=socket+logfile\n' \
     "${acc[*]}" "$LAB_CPUS" "$LAB_MEM_MB" "$drive" "$LAB_SSH_PORT" "$LAB_PROXY_PORT" "$LAB_UI_PORT" > "$EV/02-qemu-command.txt"
   save_state BOOT_STARTED "$(date +%s)"
   check 2 boot-started pass "qemu pid $(cat "$WORK/qemu.pid") accel=$ACCEL"
@@ -809,7 +811,7 @@ sys.exit(0 if d.get("available") is True and isinstance(b,list) and d.get("count
 cd /srv/culvert || exit 90
 docker compose down 2>&1; echo "down-rc=\$?"
 docker compose --profile cli run --rm -T cli --restore /backup/$BACKUP_FILE --mode full --confirm 2>&1; r=\$?; echo "commit-rc=\$r"
-docker compose up -d 2>&1; echo "up-rc=\$?"
+docker compose -f docker-compose.yml \$([ -f docker-compose.maint-agent.yml ] && echo -f docker-compose.maint-agent.yml) up -d 2>&1; echo "up-rc=\$?"  # both files, as the runbook says: the second mounts the agent socket
 exit \$r
 EOS
     local deadline=$(( $(date +%s) + 600 ))
@@ -951,10 +953,12 @@ wait_op() { local st="" i
 running() { local img; img=$(docker inspect culvert -f "{{.Image}}"); echo "running-image=$img"
   echo "running-label=$(docker inspect culvert -f "{{index .Config.Labels \"org.culvert.lab-target\"}}")"
   echo "repo-digests=$(docker image inspect "$img" -f "{{json .RepoDigests}}")"; }
-install -d -m 0755 /tmp/.lab-upd
+install -d -m 0755 /run/culvert-lab-upd
 '
-# embed NAME FILE — a guest line that recreates FILE at /tmp/.lab-upd/NAME (0644).
-embed() { printf "echo '%s' | base64 -d > /tmp/.lab-upd/%s; chmod 0644 /tmp/.lab-upd/%s\n" "$(base64 -w0 "$2")" "$1" "$1"; }
+# embed NAME FILE — a guest line that recreates FILE at /run/culvert-lab-upd/NAME (0644).
+# /run is tmpfs: the pressure phases fill the root disk, and a fixture staged
+# there could not be written (lab run 37948667525).
+embed() { printf "echo '%s' | base64 -d > /run/culvert-lab-upd/%s; chmod 0644 /run/culvert-lab-upd/%s\n" "$(base64 -w0 "$2")" "$1" "$1"; }
 signed_update_rollback() {
   local U="$LAB_UPDATE_DIR" BASELINE_REF TARGET_REF REGISTRY_ADDR rc
   # shellcheck source=/dev/null
@@ -966,9 +970,9 @@ signed_update_rollback() {
   rc=0; { printf '%s' "$AGENT_LIB"; embed ca.crt "$U/ca.crt"; embed keyring.json "$U/keyring.json"; cat <<EOS; } | gpriv --timeout 600 > "$EV/06c-test-only-trust.txt" 2>&1 || rc=$?
 set -e
 echo "TEST-ONLY lab trust (never part of the OVA):"
-install -d -m 0755 /etc/docker/certs.d/ghcr.io && install -m 0644 -o root -g root /tmp/.lab-upd/ca.crt /etc/docker/certs.d/ghcr.io/ca.crt && echo "  /etc/docker/certs.d/ghcr.io/ca.crt (disposable registry CA)"
+install -d -m 0755 /etc/docker/certs.d/ghcr.io && install -m 0644 -o root -g root /run/culvert-lab-upd/ca.crt /etc/docker/certs.d/ghcr.io/ca.crt && echo "  /etc/docker/certs.d/ghcr.io/ca.crt (disposable registry CA)"
 grep -qE '[[:space:]]ghcr\.io\$' /etc/hosts || echo "$REGISTRY_ADDR ghcr.io  # culvert lab TEST-ONLY" >> /etc/hosts; echo "  /etc/hosts: \$(grep -E '[[:space:]]ghcr\.io' /etc/hosts)"
-install -m 0644 -o root -g root /tmp/.lab-upd/keyring.json /etc/culvert-maint/lab-fixture-keyring.json && echo "  /etc/culvert-maint/lab-fixture-keyring.json (fixture PUBLIC key)"
+install -m 0644 -o root -g root /run/culvert-lab-upd/keyring.json /etc/culvert-maint/lab-fixture-keyring.json && echo "  /etc/culvert-maint/lab-fixture-keyring.json (fixture PUBLIC key)"
 [ -e "\$CONF.lab-orig" ] || cp -p "\$CONF" "\$CONF.lab-orig"
 grep -q '^release_trust_keys' "\$CONF" || sed -i '1i release_trust_keys = "/etc/culvert-maint/lab-fixture-keyring.json"' "\$CONF"
 echo "  \$CONF:"; diff -u "\$CONF.lab-orig" "\$CONF" || true
@@ -983,14 +987,14 @@ EOS
     check 6c test-only-trust pass "registry CA, hosts entry, fixture keyring (public) installed; agent restarted; running image $bdig now carries $BASELINE_REF"
   else check 6c test-only-trust fail "exit $rc: $(tail -5 "$EV/06c-test-only-trust.txt" | tr '\n' ' ' | head -c 300)"; return 0; fi
   # 2. an unsigned request is refused before anything changes
-  rc=0; { printf '%s' "$AGENT_LIB"; embed unsigned.json "$U/apply-unsigned.json"; printf '%s\n' 'agent -X POST --data-binary @/tmp/.lab-upd/unsigned.json http://agent/v1/upgrades/apply' 'running'; } \
+  rc=0; { printf '%s' "$AGENT_LIB"; embed unsigned.json "$U/apply-unsigned.json"; printf '%s\n' 'agent -X POST --data-binary @/run/culvert-lab-upd/unsigned.json http://agent/v1/upgrades/apply' 'running'; } \
     | gpriv --timeout 300 > "$EV/06c-apply-unsigned.txt" 2>&1 || rc=$?
   grep -qx 'HTTP 403' "$EV/06c-apply-unsigned.txt" && grep -qx "running-image=$bdig" "$EV/06c-apply-unsigned.txt" \
     && check 6c unsigned-apply-refused pass "apply without release evidence: 403 ($(grep -o '"error":"[^"]*"' "$EV/06c-apply-unsigned.txt" | head -1 | head -c 140)); still running the baseline" \
     || check 6c unsigned-apply-refused fail "$(grep -E '^HTTP|running-image' "$EV/06c-apply-unsigned.txt" | tr '\n' ' ')"
   # 3. signed apply baseline → target
   rc=0; { printf '%s' "$AGENT_LIB"; embed apply.json "$U/apply-signed.json"
-          printf '%s\n' 'r=$(agent -X POST --data-binary @/tmp/.lab-upd/apply.json http://agent/v1/upgrades/apply); echo "$r" | tail -c 2000' \
+          printf '%s\n' 'r=$(agent -X POST --data-binary @/run/culvert-lab-upd/apply.json http://agent/v1/upgrades/apply); echo "$r" | tail -c 2000' \
                         'op=$(printf "%s" "$r" | opid); echo "op=$op"; [ -n "$op" ] && wait_op "$op"' 'running'; } \
     | gpriv --timeout 2100 > "$EV/06c-apply-signed.txt" 2>&1 || rc=$?
   local a1 a2 a3
@@ -1001,7 +1005,7 @@ EOS
   else check 6c signed-apply fail "$a1 $a2 $a3 traffic $t1/$t2 (want succeeded, $tdig)"; return 0; fi
   # 4. signed rollback target → baseline (the agent's ledger holds the captured prior)
   rc=0; { printf '%s' "$AGENT_LIB"; embed rollback.json "$U/rollback-signed.json"
-          printf '%s\n' 'r=$(agent -X POST --data-binary @/tmp/.lab-upd/rollback.json http://agent/v1/rollbacks); echo "$r" | tail -c 2000' \
+          printf '%s\n' 'r=$(agent -X POST --data-binary @/run/culvert-lab-upd/rollback.json http://agent/v1/rollbacks); echo "$r" | tail -c 2000' \
                         'op=$(printf "%s" "$r" | opid); echo "op=$op"; [ -n "$op" ] && wait_op "$op"' 'running'; } \
     | gpriv --timeout 2100 > "$EV/06c-rollback-signed.txt" 2>&1 || rc=$?
   a1="$(grep -m1 '^op-state=' "$EV/06c-rollback-signed.txt" || echo op-state=none)"; a2="$(grep -m1 '^running-image=' "$EV/06c-rollback-signed.txt" | tail -1)"; a3="$(grep -m1 '^running-label=' "$EV/06c-rollback-signed.txt")"
@@ -1528,7 +1532,7 @@ docker volume inspect "\$vol" >/dev/null 2>&1 && echo VOLUME-STILL-PRESENT || ec
 cp -p .env .env.lab-history-orig
 sed -i '/^CULVERT_LOG_PASSPHRASE=/d' .env; echo "CULVERT_LOG_PASSPHRASE=$(cat "$SEC/log-pass-new")" >> .env; echo "log-passphrase-rotated"
 docker compose --profile cli run --rm -T cli --restore /backup/$fn --mode full --confirm 2>&1; r=\$?; echo "commit-rc=\$r"
-docker compose up -d 2>&1; echo "up-rc=\$?"
+docker compose -f docker-compose.yml \$([ -f docker-compose.maint-agent.yml ] && echo -f docker-compose.maint-agent.yml) up -d 2>&1; echo "up-rc=\$?"  # both files, as the runbook says: the second mounts the agent socket
 exit \$r
 EOS
   hist_wait_up || true
@@ -1566,7 +1570,7 @@ CULVERT_HISTORY_PASSPHRASE='$(cat "$SEC/history-phrase")' $imp 2>&1; echo "dry-r
 echo "--- import"
 CULVERT_HISTORY_PASSPHRASE='$(cat "$SEC/history-phrase")' $imp --confirm 2>&1; r=\$?; echo "import-rc=\$r"
 rm -f /srv/culvert/lab-history.cvst
-docker compose up -d 2>&1; echo "up-rc=\$?"
+docker compose -f docker-compose.yml \$([ -f docker-compose.maint-agent.yml ] && echo -f docker-compose.maint-agent.yml) up -d 2>&1; echo "up-rc=\$?"  # both files, as the runbook says: the second mounts the agent socket
 exit \$r
 EOS
   hist_wait_up || true
@@ -1589,6 +1593,253 @@ EOS
   redact_tree
 }
 
+# ── Disk pressure (ASTRA 7c round, item 3) ───────────────────────────────────
+# Root-filesystem BLOCK exhaustion, then INODE exhaustion, on the disposable
+# lab guest, each followed by recovery. The expected behaviour is the product's
+# own contract, not an assumption:
+#   enforcement  policy is in memory: allowed stays 200, blocked stays 403;
+#                a blocked destination answering 200 is a FAIL (fail-open)
+#   ClamAV       appliance posture av_unavailable=closed (scanning-outage-
+#                posture.md): a body clamd cannot scan is REFUSED (403), never
+#                forwarded unscanned — EICAR answering 200 is a FAIL; a clean
+#                body may be 200 or a 403 refusal (recorded, not judged)
+#   proxy        no crash: the container's restart count and start time do not
+#                change (F-DISK-1)
+#   backup       backup.go writes <out>.tmp and renames on success, removing the
+#                temp file on failure: a failed backup leaves NO new file, no
+#                .tmp, and every existing archive byte-identical
+#   app update   the agent refuses before any pull when space is short
+#                (preflight_space), or fails and rolls back; never a stopped
+#                stack or a half-applied image
+#   OS update    culvert-os-update fails cleanly: stack serving, dpkg --audit
+#                empty, Docker packages still held
+#   recovery     once space returns, without a restart: /ready 200 with clamav
+#                ok, enforcement, EICAR blocked by ClamAV, a backup succeeds and
+#                is a valid archive
+# Bounded: the fill is posix_fallocate (real ext4 blocks, no data written), so
+# the host's sparse disk file barely grows; the phase aborts if the host has
+# less than LAB_PRESSURE_MIN_HOST_FREE_GB free or the disk file grows more than
+# LAB_PRESSURE_MAX_HOST_GROWTH_MB. Never pointed at a shared datastore: the
+# guest disk is the lab's own disposable copy.
+LAB_PRESSURE_MIN_HOST_FREE_GB="${LAB_PRESSURE_MIN_HOST_FREE_GB:-10}"
+LAB_PRESSURE_MAX_HOST_GROWTH_MB="${LAB_PRESSURE_MAX_HOST_GROWTH_MB:-3072}"
+p_host_alloc_mb() { local f; for f in "$WORK/disk.raw" "$WORK/overlay.qcow2"; do [[ -e "$f" ]] && { du -B1M "$f" | cut -f1; return; }; done; echo 0; }
+p_host_free_gb() { df -BG --output=avail "$WORK" | tail -1 | tr -dc 0-9; }
+p_bounded() { local grown=$(( $(p_host_alloc_mb) - P_ALLOC0 ))
+  if (( grown > LAB_PRESSURE_MAX_HOST_GROWTH_MB )) || (( $(p_host_free_gb) < LAB_PRESSURE_MIN_HOST_FREE_GB / 2 )); then
+    check P host-bound fail "host disk file grew ${grown} MiB (cap $LAB_PRESSURE_MAX_HOST_GROWTH_MB) or host free $(p_host_free_gb) GiB; aborting the pressure phase"; return 1; fi; }
+p_clean_url() { local n; n="$(python3 -c 'import time; print(time.time_ns())')"
+  printf 'culvert pressure clean body %s\n' "$n" > "$WORK/eicar-origin/c$n.txt"; echo "http://10.0.2.2:$LAB_EICAR_PORT/c$n.txt"; }
+p_proxy_identity() { groot 'docker inspect -f "{{.RestartCount}} {{.State.StartedAt}} {{.State.Status}}" culvert; docker inspect -f "{{.State.Status}} {{.State.Health.Status}}" culvert-clamav' 60 2>/dev/null | tr '\r' ' ' | grep -E '^[0-9]+ |^(running|exited|restarting)' | tr '\n' ' '; }
+# p_sample PHASE TAG — one observation: traffic, AV verdicts, readiness, health.
+p_sample() { local ph="$1" tag="$2" a b e c rc hc row
+  a="$(through_proxy http://example.com/)"; b="$(through_proxy http://example.org/)"
+  e="$(eicar_verdict)"
+  c="$(curl -sS -m 6 -x "$P" -o "$WORK/p-clean.body" -w '%{http_code}' "$(p_clean_url)" 2>/dev/null || echo 000)"
+  [[ "$c" == 2* ]] || c="$c:$(head -c 60 "$WORK/p-clean.body" 2>/dev/null | tr -d '\n')"
+  rc="$(curl -sS -m 4 -o "$WORK/p-ready.json" -w '%{http_code}' "$P/ready" 2>/dev/null || echo 000)"
+  hc="$(curl -sS -m 4 -o /dev/null -w '%{http_code}' "$P/health" 2>/dev/null || echo 000)"
+  row="$(python3 -c 'import json,sys
+d=json.load(open(sys.argv[1])); c=d.get("checks",d); bad=[]
+for k,v in sorted(c.items()):
+    st=v.get("status") if isinstance(v,dict) else v
+    if st!="ok": bad.append(k+"="+str(st))
+print(" ".join(bad))' "$WORK/p-ready.json" 2>/dev/null || echo unreadable)"
+  python3 -c 'import json,sys
+k=("phase","tag","t","allowed","blocked","eicar","clean","ready","not_ok_rows","health")
+print(json.dumps(dict(zip(k,sys.argv[1:]))))' "$ph" "$tag" "$(date -u +%FT%TZ)" "$a" "$b" "$e" "$c" "$rc" "$row" "$hc" >> "$EV/P-samples.jsonl"
+  # space-free for `set --`: the EICAR verdict carries a body head
+  echo "$a $b ${e%%:*} ${c%%:*} $rc $hc"; }
+# p_burst PHASE TAG N — N back-to-back EICAR + clean pairs right after a fill,
+# so a transient verdict is observed rather than sampled past.
+p_burst() { local i; for i in $(seq 1 "$3"); do p_sample "$1" "$2.$i" > /dev/null; done; }
+# p_logs NAME SINCE — the proxy's scan/AV lines and the sidecar's log for the
+# phase. Read through the tmpfs-staged console transport, so it works while
+# the root disk is full; the output is evidence, not a verdict.
+p_logs() { groot "docker logs --since '$2' culvert 2>&1 | grep -E 'SCAN|AV_|av_unavailable|ClamAV|clamav|SecurityScan|antivirus|BLOCKED|ENOSPC|no space|10[.]0[.]2[.]2' | tail -n 600; echo '=== culvert-clamav'; docker logs --since '$2' culvert-clamav 2>&1 | tail -n 300; echo '=== df'; df -B1 / | tail -1; df -i / | tail -1" 300 > "$EV/P-$1-logs.txt" 2>&1 || true; }
+p_backup_inventory() { groot 'mp=$(docker volume inspect -f "{{.Mountpoint}}" "$(docker volume ls -q | grep -m1 -E "(^|_)culvert-backups$")"); echo "mp=$mp"; cd "$mp" && find . -maxdepth 1 -type f -printf "%f %s\n" | sort; echo ---; find . -maxdepth 1 -type f ! -name "*.tmp" -exec sha256sum {} + | sort' 120 2>/dev/null; }
+p_backup() { local out="$1" op st jar; api POST /api/backups '{"encrypt":false}' > "$out" 2>&1 || true
+  # POST /api/backups answers {"opId": …} (camelCase; the agent's own record
+  # says op_id). Reading only op_id never polled, and a backup that finished
+  # in the background read as "archive set changed" (run 37948667525).
+  op="$(body < "$out" | python3 -c 'import json,sys;d=json.load(sys.stdin);print(d.get("opId") or d.get("op_id") or "")' 2>/dev/null || true)"; st=""
+  if [[ -n "$op" ]]; then for _ in $(seq 1 90); do st="$(api GET "/api/backups/operations/$op" | body | python3 -c 'import json,sys;print(json.load(sys.stdin).get("state",""))' 2>/dev/null || true)"
+    case "$st" in succeeded|failed|cancelled) break ;; esac; sleep 5; done; api GET "/api/backups/operations/$op" >> "$out" 2>&1 || true; fi
+  echo "op=${op:-none} state=${st:-none} http=$(code < "$out" | head -1)"; }
+p_login() { : > "$JAR"; api POST /api/auth/login "{\"user\":\"$ADMIN_USER\",\"pass\":\"$(cat "$SEC/admin-pass")\"}" | code; }
+p_os_update() { groot 'culvert-os-update os > /run/culvert-lab-osu.log 2>&1; echo "osu-rc=$?"; tail -n 15 /run/culvert-lab-osu.log; echo "dpkg-audit=[$(dpkg --audit 2>&1 | head -c 300)]"; echo "not-installed-ok=$(dpkg -l | awk "NR>5 && \$1 !~ /^(ii|hi|rc)\$/" | wc -l)"; echo "holds=$(dpkg-query -W -f="\${Package} \${db:Status-Want}\n" 2>/dev/null | awk "\$2==\"hold\"{print \$1}" | tr "\n" " ")"' 1800 2>&1; }
+p_app_update() { local U="$LAB_UPDATE_DIR" ph="$1" rc=0
+  { printf '%s' "$AGENT_LIB"; embed apply.json "$U/apply-pressure-$ph.json"
+    printf '%s\n' 'running' 'r=$(agent -X POST --data-binary @/run/culvert-lab-upd/apply.json http://agent/v1/upgrades/apply); echo "$r" | tail -c 1500' \
+                  'op=$(printf "%s" "$r" | opid); echo "op=$op"; [ -n "$op" ] && wait_op "$op"' 'echo "after:"' 'running'; } | gpriv --timeout 2100 2>&1 || rc=$?; echo "rc=$rc"; }
+# p_phase NAME FILLCMD — fill, observe, exercise backup/updates, release, recover.
+p_phase() { local name="$1" fill="$2" s id0 id1 inv0 inv1 bk osu up ok lc
+  local since; since="$(date -u -d '-2 min' +%FT%TZ)"
+  id0="$(p_proxy_identity)"; inv0="$(p_backup_inventory)"; printf '%s\n' "$inv0" > "$EV/P-$name-backups-before.txt"
+  # Backstop: a transient timer (state in /run, tmpfs) frees the space even if
+  # the full disk takes the SSH path with it; cancelled by the normal release.
+  groot 'systemctl stop culvert-pressure-release.timer 2>/dev/null; systemd-run --quiet --unit=culvert-pressure-release --on-active=5400 /bin/rm -rf /var/lib/culvert-pressure && echo backstop=armed' 60 > "$EV/P-$name-backstop.txt" 2>&1 || true
+  grep -q backstop=armed "$EV/P-$name-backstop.txt" || { check P "$name-filled" blocked "release backstop timer could not be armed; phase not run"; return 1; }
+  groot "$fill" 3600 > "$EV/P-$name-fill.txt" 2>&1 || true
+  check P "$name-filled" info "$(grep -E '^(filled|files)' "$EV/P-$name-fill.txt" | tr '\n' ' ') host disk file +$(( $(p_host_alloc_mb) - P_ALLOC0 )) MiB"
+  p_bounded || return 1
+  groot 'df -B1 / | tail -1; df -i / | tail -1' 60 > "$EV/P-$name-df.txt" 2>&1 || true
+  # Observations: a burst right after the fill (a transient verdict must be
+  # seen, not sampled past), then once the stack has had time to hit it.
+  # Every row of the phase counts: blocked must stay 403 and EICAR must never
+  # be DELIVERED (av, a 403 refusal, a 5xx or no answer all keep the body
+  # away from the client).
+  p_burst "$name" b0 6
+  for t in 0 60 120; do (( t == 0 )) || sleep 60; p_sample "$name" "+$t" > /dev/null; done
+  p_logs "$name" "$since"
+  local fails; fails="$(python3 - "$EV/P-samples.jsonl" "$name" <<'PY2'
+import json, sys
+out = []
+for l in open(sys.argv[1]):
+    d = json.loads(l)
+    if d["phase"] != sys.argv[2] or not (d["tag"].startswith("+") or d["tag"].startswith("b0.")): continue
+    if d["blocked"] != "403": out.append(f"blocked={d['blocked']}@{d['tag']}")
+    if d["eicar"].startswith("2"): out.append(f"eicar-delivered={d['eicar'][:3]}@{d['tag']}")
+print(" ".join(out))
+PY2
+)"
+  lc="$(p_login)"
+  [[ -z "$fails" ]] && check P "$name-enforcement" pass "blocked 403 throughout, EICAR never delivered ($(python3 -c 'import json,sys,collections
+rows=[json.loads(l) for l in open(sys.argv[1])]; rows=[d for d in rows if d["phase"]==sys.argv[2] and (d["tag"][0]=="+" or d["tag"].startswith("b0."))]
+c=collections.Counter((d["eicar"][:3] if d["eicar"]!="av" else "av", d["clean"][:3]) for d in rows)
+print(len(rows), "samples; eicar/clean:", ", ".join(f"{e}/{k} x{n}" for (e,k),n in sorted(c.items())))' "$EV/P-samples.jsonl" "$name")); admin login $lc" \
+    || check P "$name-enforcement" fail "$fails (see P-$name-logs.txt)"
+  # Readiness truth: a sample whose clean body was refused as AV-unavailable
+  # must have /ready non-200 with the clamav row failing (operators are told
+  # to watch /ready for this outage; PING-only readiness said ok throughout
+  # the inode phase of lab run 37957097250).
+  local rt; rt="$(python3 - "$EV/P-samples.jsonl" "$name" <<'PY2'
+import json, sys
+n = bad = 0; out = []
+refused = lambda d: "antivirus scanning is currently unavailable" in d["clean"]
+rows = [d for d in map(json.loads, open(sys.argv[1]))
+        if d["phase"] == sys.argv[2] and (d["tag"].startswith("+") or d["tag"].startswith("b0."))]
+# judged only while the outage outlasts the /ready read: the NEXT sample is
+# still refused (a 1 s transient can legitimately be over by the read)
+for d, nxt in zip(rows, rows[1:]):
+    if not (refused(d) and refused(nxt)): continue
+    n += 1
+    if d["ready"] == "200" or "clamav=" not in d["not_ok_rows"]:
+        bad += 1; out.append(f"{d['tag']}:ready={d['ready']}[{d['not_ok_rows']}]")
+print(f"{n} {bad} " + " ".join(out[:6]))
+PY2
+)"
+  set -- $rt
+  if [[ "${1:-0}" == 0 ]]; then check P "$name-readiness-truth" info "no sample refused content as AV-unavailable"
+  elif [[ "$2" == 0 ]]; then check P "$name-readiness-truth" pass "$1 sample(s) refused content as AV-unavailable; /ready was non-200 with the clamav row failing in every one"
+  else check P "$name-readiness-truth" fail "$2 of $1 AV-unavailable sample(s) had /ready reporting clamav ok: ${*:3}"; fi
+  # backup under pressure: must fail cleanly
+  bk="$(p_backup "$EV/P-$name-backup.txt")"; inv1="$(p_backup_inventory)"; printf '%s\n' "$inv1" > "$EV/P-$name-backups-after.txt"
+  if grep -q '\.tmp ' <<<"$inv1"; then check P "$name-backup-clean" fail "$bk; a .tmp archive was left behind"
+  elif [[ "$(sed -n '/^---$/,$p' <<<"$inv0")" != "$(sed -n '/^---$/,$p' <<<"$inv1")" ]]; then
+    if [[ "$bk" == *state=succeeded* ]]; then
+      local pv; pv="$(groot "mp=\$(docker volume inspect -f '{{.Mountpoint}}' \"\$(docker volume ls -q | grep -m1 -E '(^|_)culvert-backups\$')\"); f=\$(ls -t \$mp | grep -E '^culvert-backup-.*[.]tar[.]gz\$' | head -1); echo \"newest=\$f\"; tar -tzf \"\$mp/\$f\" > /dev/null 2>&1 && echo archive=valid || echo archive=INVALID" 300 2>&1 | grep -E '^(newest|archive)=' | tr '\n' ' ')"
+      if [[ "$pv" == *archive=valid* && "$(diff <(sed -n '/^---$/,$p' <<<"$inv0") <(sed -n '/^---$/,$p' <<<"$inv1") | grep -c '^<')" == 0 ]]; then
+        check P "$name-backup-clean" info "$bk: the backup SUCCEEDED under pressure and the new archive is complete ($pv); every existing archive byte-identical"
+      else check P "$name-backup-clean" fail "$bk: reported success under pressure but $pv; existing archives changed: $(diff <(sed -n '/^---$/,$p' <<<"$inv0") <(sed -n '/^---$/,$p' <<<"$inv1") | grep -c '^<')"; fi
+    else check P "$name-backup-clean" fail "$bk; archive set changed: $(diff <(sed -n '/^---$/,$p' <<<"$inv0") <(sed -n '/^---$/,$p' <<<"$inv1") | tr '\n' ' ' | head -c 300)"; fi
+  else check P "$name-backup-clean" pass "$bk; no new archive, no .tmp, $(sed -n '/^---$/,$p' <<<"$inv0" | grep -c ' ') existing archive(s) byte-identical"; fi
+  # app update under pressure (signed fixture only exists in build mode)
+  if [[ -n "${LAB_UPDATE_DIR:-}" && -f "${LAB_UPDATE_DIR}/apply-pressure-$name.json" ]]; then
+    up="$(p_app_update "$name")"
+    if grep -q '"deduped":true' <<<"$up"; then check P "$name-app-update" fail "the agent returned an EARLIER operation (deduped): nothing was exercised under pressure"; fi; printf '%s\n' "$up" > "$EV/P-$name-app-update.txt"
+    local st0 img_b img_a; st0="$(grep -m1 '^op-state=' <<<"$up" || echo op-state=none)"
+    img_b="$(grep -m1 '^running-image=' <<<"$up")"; img_a="$(grep '^running-image=' <<<"$up" | tail -1)"
+    s="$(p_sample "$name" after-app-update)"; set -- $s
+    local why; why="$(grep -oE 'preflight_space[^"]{0,120}|no space left[^"]{0,80}|"error":"[^"]{0,120}' <<<"$up" | head -1)"
+    if [[ "$st0" == op-state=failed && "$img_b" == "$img_a" && "$1 $2" == "200 403" ]]; then
+      check P "$name-app-update" pass "failed with nothing changed: $st0 ($why); $img_a; traffic $1/$2"
+    elif [[ "$st0" == op-state=none ]] && grep -qE '^HTTP [45][0-9][0-9]$' <<<"$up" && [[ "$img_b" == "$img_a" && "$1 $2" == "200 403" ]]; then
+      check P "$name-app-update" pass "refused before any change: $(grep -m1 -E '^HTTP ' <<<"$up") ($why); $img_a; traffic $1/$2"
+    elif [[ "$st0" == op-state=succeeded && "$1 $2" == "200 403" ]]; then
+      P_APP_APPLIED=1; check P "$name-app-update" info "the update SUCCEEDED under pressure ($img_b -> $img_a); traffic $1/$2; rolled back after recovery"
+    else check P "$name-app-update" fail "$st0 $img_b -> $img_a traffic $1/$2 (a failed update must leave the running image and enforcement unchanged)"; fi
+  else check P "$name-app-update" blocked "no per-phase signed-update fixture in this leg (built only with the OVA build)"; fi
+  # OS update under pressure
+  osu="$(p_os_update)"; printf '%s\n' "$osu" > "$EV/P-$name-os-update.txt"
+  s="$(p_sample "$name" after-os-update)"; set -- $s
+  if grep -q '^dpkg-audit=\[\]$' <<<"$osu" && grep -q '^not-installed-ok=0$' <<<"$osu" && grep -q 'docker-ce' <<<"$(grep '^holds=' <<<"$osu")" && [[ "$1 $2" == "200 403" ]]; then
+    check P "$name-os-update" pass "$(grep -m1 '^osu-rc=' <<<"$osu"); dpkg consistent (audit empty, no half-installed package), Docker still held, traffic $1/$2"
+  else check P "$name-os-update" fail "$(grep -E '^(osu-rc|dpkg-audit|not-installed-ok|holds)=' <<<"$osu" | tr '\n' ' ') traffic $1/$2"; fi
+  # release and recover without a restart
+  groot 'systemctl stop culvert-pressure-release.timer 2>/dev/null; rm -rf /var/lib/culvert-pressure; sync; df -B1 / | tail -1; df -i / | tail -1; echo released=$([ -e /var/lib/culvert-pressure ] && echo no || echo yes)' 3600 > "$EV/P-$name-release.txt" 2>&1 || true
+  grep -q 'released=yes' "$EV/P-$name-release.txt" || check P "$name-release" fail "the release over SSH did not complete (see P-$name-release.txt); the guest's backstop timer frees the space"
+  ok=0; for _ in $(seq 1 60); do ready_clamav_ok && rec_traffic && [[ "$(eicar_verdict)" == av ]] && { ok=1; break; }; sleep 5; done
+  s="$(p_sample "$name" recovered)"
+  # Docker must still be held once space is back (a failed OS update must
+  # never leave the engine unheld); read from dpkg's status, no temp file.
+  local hh; hh="$(groot 'dpkg-query -W -f="\${Package} \${db:Status-Want}\n" | awk "\$2==\"hold\"{print \$1}" | tr "\n" " "' 120 2>/dev/null)"
+  [[ "$hh" == *docker-ce\ * ]] || ok=0
+  [[ $ok == 1 ]] && check P "$name-recovered" pass "space released; /ready 200 with clamav ok, enforcement, EICAR blocked by ClamAV ($s); held: $hh" \
+    || check P "$name-recovered" fail "within 300 s of release: $s; held: [$hh]"
+  if [[ "${P_APP_APPLIED:-0}" == 1 ]]; then P_APP_APPLIED=0; local rb rc=0
+    rb="$({ printf '%s' "$AGENT_LIB"; embed rollback.json "$LAB_UPDATE_DIR/rollback-pressure-$name.json"
+           printf '%s\n' 'r=$(agent -X POST --data-binary @/run/culvert-lab-upd/rollback.json http://agent/v1/rollbacks); echo "$r" | tail -c 1500' \
+                         'op=$(printf "%s" "$r" | opid); echo "op=$op"; [ -n "$op" ] && wait_op "$op"' 'running'; } | gpriv --timeout 2100 2>&1)" || rc=$?
+    printf '%s\n' "$rb" > "$EV/P-$name-app-rollback.txt"
+    check P "$name-app-rollback" "$(grep -qx 'op-state=succeeded' <<<"$rb" && echo pass || echo fail)" "$(grep -m1 '^op-state=' <<<"$rb") $(grep '^running-image=' <<<"$rb" | tail -1) rc=$rc"; fi
+  lc="$(p_login)"; bk="$(p_backup "$EV/P-$name-backup-after.txt")"
+  local fn; fn="$(body < "$EV/P-$name-backup-after.txt" | python3 -c 'import json,sys
+for l in sys.stdin.read().split("\n"):
+  try: d=json.loads(l)
+  except Exception: continue
+  r=d.get("result") or {}; f=r.get("filename") or d.get("filename")
+  if f: print(f); break' 2>/dev/null || true)"
+  local valid; valid="$(groot "mp=\$(docker volume inspect -f '{{.Mountpoint}}' \"\$(docker volume ls -q | grep -m1 -E '(^|_)culvert-backups\$')\"); f=\$(ls -t \$mp | grep -E '^culvert-backup-.*[.]tar[.]gz\$' | head -1); echo \"newest=\$f\"; tar -tzf \"\$mp/\$f\" > /dev/null 2>&1 && echo archive=valid || echo archive=INVALID" 300 2>&1 | grep -E '^(newest|archive)=' | tr '\n' ' ')"
+  [[ "$bk" == *state=succeeded* && "$valid" == *archive=valid* ]] && check P "$name-backup-after" pass "$bk; $valid (gzip tar readable end to end); admin login $lc" \
+    || check P "$name-backup-after" fail "$bk; $valid; admin login $lc"
+  id1="$(p_proxy_identity)"
+  [[ "$(awk '{print $1, $2}' <<<"$id0")" == "$(awk '{print $1, $2}' <<<"$id1")" ]] \
+    && check P "$name-no-crash" pass "proxy restart count and start time unchanged across the phase ($(awk '{print $1, $2}' <<<"$id1"))" \
+    || check P "$name-no-crash" fail "proxy identity changed: [$id0] -> [$id1]"; }
+cmd_pressure() { local free
+  if [[ "$LAB_EXTERNAL" == 1 ]]; then check P disk-pressure fail "BLOCKED: bounded QEMU disk-pressure fixture cannot run on ESXi"; return 0; fi
+  ensure_admin_pass; [[ -f "$WORK/eicar-origin.pid" ]] || rec_origin_start
+  free="$(p_host_free_gb)"; P_ALLOC0="$(p_host_alloc_mb)"
+  if (( free < LAB_PRESSURE_MIN_HOST_FREE_GB )); then check P host-bound blocked "host has $free GiB free (< $LAB_PRESSURE_MIN_HOST_FREE_GB); pressure phase not run"; return 0; fi
+  check P host-bound pass "host free $free GiB; disk file allocated ${P_ALLOC0} MiB; caps: growth <= $LAB_PRESSURE_MAX_HOST_GROWTH_MB MiB, abort below $(( LAB_PRESSURE_MIN_HOST_FREE_GB / 2 )) GiB free"
+  : > "$EV/P-samples.jsonl"; p_sample baseline 0 > /dev/null
+  p_phase blocks 'python3 - <<"PY"
+import os, errno
+d="/var/lib/culvert-pressure"; os.makedirs(d, exist_ok=True)
+fd=os.open(d+"/fill", os.O_CREAT|os.O_WRONLY, 0o600)
+st=os.statvfs("/"); off=0
+try:
+    os.posix_fallocate(fd, 0, max(st.f_bfree*st.f_frsize-(16<<20), 0)); off=os.fstat(fd).st_size
+except OSError as e: print("bulk:", e)
+for step in (1<<20, 1<<16, 4096):
+    while True:
+        try: os.posix_fallocate(fd, off, step); off+=step
+        except OSError as e:
+            if e.errno==errno.ENOSPC: break
+            raise
+os.fsync(fd); os.close(fd)
+st=os.statvfs("/"); print(f"filled bytes={off} free_root={st.f_bfree*st.f_frsize} free_user={st.f_bavail*st.f_frsize}")
+PY' || return 0
+  p_phase inodes 'python3 - <<"PY"
+import os, errno, time
+d="/var/lib/culvert-pressure/inodes"; os.makedirs(d, exist_ok=True)
+t=time.time(); n=0; sub=None
+def full(e): return e.errno==errno.ENOSPC
+while True:
+    if n%10000==0:
+        sub=f"{d}/{n//10000}"
+        try: os.mkdir(sub)
+        except OSError as e:
+            if full(e): break
+            raise
+    try: os.close(os.open(f"{sub}/{n}", os.O_CREAT|os.O_WRONLY, 0o600)); n+=1
+    except OSError as e:
+        if full(e): break
+        raise
+st=os.statvfs("/"); print(f"files={n} free_inodes={st.f_ffree} free_blocks_bytes={st.f_bfree*st.f_frsize} secs={time.time()-t:.0f}")
+PY' || return 0
+}
 cmd_collect() {
   mkdir -p "$EV/guest"
   if { [[ "$LAB_EXTERNAL" == 1 ]] || qemu_alive; } && gop status-json > "$EV/guest/status-json.json" 2>/dev/null; then
@@ -1653,7 +1904,55 @@ echo "=== dockerd argv"; ps -o args= -C dockerd | sed 's/^/dockerd-argv /'
 echo "=== daemon.json"; cat /etc/docker/daemon.json 2>/dev/null | sed 's/^/daemon.json /'
 echo "=== containerd plugins"; ctr plugins ls 2>/dev/null | awk '{print "plugin "$1" "$2" "$NF}'
 echo "disabled-plugins $(grep -E '^[[:space:]]*disabled_plugins' /etc/containerd/config.toml 2>/dev/null)"
-echo "=== kernel modules"; for m in sctp nfsd kvm kvm_amd kvm_intel ksmbd cifs can can_raw can_bcm can_gw can_isotp can_j1939 pppoe pppox ib_core ib_cm iw_cm rdma_cm ib_uverbs rdma_ucm ib_umad dccp tipc; do
+echo "=== kernel identity"
+echo "kernel-running=$(uname -r)"
+echo "kernel-meta=$(dpkg-query -W -f='${Package}=${Version}' linux-image-virtual-hwe-24.04 2>/dev/null || echo none)"
+echo "kernel-ga-meta=$(dpkg-query -W -f='${Package} ' linux-image-virtual linux-image-generic linux-virtual linux-generic 2>/dev/null | tr -s ' ' || true)"
+echo "kernel-images=$(dpkg-query -W -f='${Package}\n' 'linux-image-[0-9]*' 2>/dev/null | tr '\n' ' ')"
+echo "=== drm nodes"
+# Root-only DRM nodes (72-culvert-drm.rules): owner, mode and any POSIX ACL.
+# The acl package (getfacl) is not on the appliance, so the ACL is read as the
+# xattr logind's uaccess would set: present means someone else was granted it.
+for n in /dev/dri/card* /dev/dri/renderD*; do [ -e "$n" ] || continue
+  echo "drm $n $(stat -c '%U:%G %a' "$n") acl=$(python3 -c 'import os,sys
+try: os.getxattr(sys.argv[1], "system.posix_acl_access"); print("present")
+except OSError: pass' "$n")"; done
+echo "drm-rule $(sha256sum /etc/udev/rules.d/72-culvert-drm.rules 2>/dev/null | cut -d' ' -f1 || echo missing)"
+echo "drm-driver $(basename "$(readlink -f /sys/class/drm/card0/device/driver 2>/dev/null)" 2>/dev/null || echo none)"
+# The shipped cmdline carries nomodeset (boot console); with it vmwgfx refuses
+# to bind (drm_firmware_drivers_only), so there may be no DRM node at all.
+echo "drm-nomodeset $(grep -qw nomodeset /proc/cmdline && echo yes || echo no)"
+echo "drm-vmwgfx-loaded $(grep -c '^vmwgfx ' /proc/modules)"
+echo "=== ext4 features"
+# CVE-2025-40190 needs ea_inode on a mounted ext4 filesystem.
+findmnt -rn -t ext4 -o SOURCE,TARGET | while read -r dev tgt; do
+  echo "ext4 $tgt $(dumpe2fs -h "$dev" 2>/dev/null | sed -n 's/^Filesystem features: *//p')"; done
+echo "=== kernel attack surface"
+# Assumptions the kernel CVE dispositions rely on (kernel-cve-prereqs.tsv).
+for k in kernel.unprivileged_bpf_disabled kernel.perf_event_paranoid kernel.apparmor_restrict_unprivileged_userns kernel.kptr_restrict kernel.dmesg_restrict dev.tty.ldisc_autoload; do
+  echo "sysctl $k=$(sysctl -n "$k" 2>/dev/null || echo unset)"; done
+for c in $(docker ps -q); do
+  docker inspect -f 'container {{.Name}} privileged={{.HostConfig.Privileged}} capadd={{.HostConfig.CapAdd}} devices={{len .HostConfig.Devices}} seccomp={{.HostConfig.SecurityOpt}} userns={{.HostConfig.UsernsMode}} pid={{.HostConfig.PidMode}} net={{.HostConfig.NetworkMode}}' "$c"
+done
+echo "nic-drivers $(for i in /sys/class/net/*/device/driver; do basename "$(readlink -f "$i")"; done 2>/dev/null | sort -u | tr '\n' ' ')"
+echo "tpm $(ls -l /dev/tpm* 2>/dev/null | awk '{print $1, $3":"$4, $NF}' | tr '\n' ';' || true)"
+echo "fuse-mounts $(findmnt -rn -t fuse,fuseblk,fuse.* 2>/dev/null | wc -l) btrfs-mounts $(findmnt -rn -t btrfs 2>/dev/null | wc -l) nfs-mounts $(findmnt -rn -t nfs,nfs4 2>/dev/null | wc -l)"
+echo "perf-tool $(command -v perf >/dev/null && echo present || echo absent)"
+# Unprivileged network autoload surface (the HWE kernel ships every module):
+# each module a socket family / genl family / sock_diag / TCP ULP alias can
+# load must be denied or in the shipped reviewed list.
+ma="/lib/modules/$(uname -r)/modules.alias"; rv=/opt/culvert-appliance/provision/net-autoload-reviewed.txt
+if [ -f "$ma" ] && [ -f "$rv" ]; then
+  nl="$(awk '$1=="alias" && $2 ~ /^(net-pf-[0-9]+$|net-pf-[0-9]+-proto-|tcp-ulp-)/ {print $3}' "$ma" | tr - _ | sort -u)"
+  dn="$(awk '$1=="install" && $3=="/bin/false"{print $2}' /etc/modprobe.d/culvert-unused.conf | tr - _ | sort -u)"
+  rl="$(awk '!/^#/ && NF {print $1}' "$rv" | tr - _ | sort -u)"
+  echo "net-autoload total=$(printf '%s\n' "$nl" | grep -c .) denied=$(comm -12 <(printf '%s\n' "$nl") <(printf '%s\n' "$dn") | grep -c .) reviewed=$(comm -12 <(printf '%s\n' "$nl") <(printf '%s\n' "$rl") | grep -c .)"
+  echo "net-autoload-unreviewed=[$(comm -23 <(printf '%s\n' "$nl") <(sort -u <(printf '%s\n' "$dn" "$rl")) | tr '\n' ' ' | sed 's/ $//')]"
+else echo "net-autoload-unreviewed=[no reviewed list or modules.alias: $ma $rv]"; fi
+echo "=== kernel modules"
+denied_mods="$(awk '$1=="install" && $3=="/bin/false"{print $2}' /etc/modprobe.d/culvert-unused.conf)"
+echo "denied-count $(wc -w <<<"$denied_mods")"
+for m in $denied_mods; do
   # FINAL step of the module's own resolution (a dependency's deny must not
   # count), then a REAL load attempt: it must fail and leave the module out.
   # The real attempt records its exit code and WHICH module's install rule
@@ -1673,14 +1972,18 @@ done
 # modprobe.d and the built-in defaults), for every denied module, plus the
 # shipped file's own digest.
 echo "denylist-file $(sha256sum /etc/modprobe.d/culvert-unused.conf | cut -d' ' -f1)"
-modprobe -c 2>/dev/null | awk '($1=="install"||$1=="softdep"||$1=="blacklist"||$1=="remove"||$1=="options") && $2 ~ /^(sctp|nfsd|kvm|kvm_amd|kvm_intel|ksmbd|cifs|can|can_raw|can_bcm|can_gw|can_isotp|can_j1939|pppoe|pppox|ib_core|ib_cm|iw_cm|rdma_cm|ib_uverbs|rdma_ucm|ib_umad|dccp|tipc)$/ {print "effective "$0}'
+modprobe -c 2>/dev/null | awk -v list=" $(tr '\n' ' ' <<<"$denied_mods")" '($1=="install"||$1=="softdep"||$1=="blacklist"||$1=="remove"||$1=="options") && index(list, " "$2" ") {print "effective "$0}'
 echo "sctp-socket=$(python3 -c 'import socket
 try:
     socket.socket(socket.AF_INET, socket.SOCK_STREAM, 132); print("opened")
 except OSError as e:
     print("refused:" + (e.strerror or str(e)))' 2>&1) loaded-after=$(grep -c '^sctp ' /proc/modules)"
 # module file names may use "-" where the module name has "_" (kvm-amd.ko)
-for m in nvmet_tcp ib_srpt; do echo "module-file $m $(find /lib/modules/"$(uname -r)" \( -name "$m.ko*" -o -name "${m//_/-}.ko*" \) | wc -l)"; done
+# The GA kernel's two other CRITICALs (nvmet-tcp, ib_srpt) were "absent" there;
+# the HWE kernel ships both, so a REAL load attempt must fail and leave them out.
+for m in nvmet_tcp ib_srpt; do
+  err="$(modprobe "$m" 2>&1)"; rc=$?
+  echo "extra-module $m files=$(find /lib/modules/"$(uname -r)" \( -name "$m.ko*" -o -name "${m//_/-}.ko*" \) | wc -l) rc=$rc loaded-after=$(grep -c "^$m " /proc/modules) refused-by=$(sed -n "s/.*install command '\/bin\/false' for module \([a-z0-9_]*\).*/\1/p" <<<"$err" | head -n 1)"; done
 echo "=== containerd tracing"; containerd config dump 2>/dev/null | grep -iE 'otlp|tracing|endpoint' | sed 's/^/tracing /'
 EOS
   v="$(sed -n 's/^running=//p' "$f")"
@@ -1728,9 +2031,49 @@ EOS
     check E kernel-modules-denied fail "$bad"
   elif ! grep -qE '^sctp-socket=refused:.* loaded-after=0$' "$f"; then
     check E kernel-modules-denied fail "$(grep '^sctp-socket=' "$f")"
-  else check E kernel-modules-denied pass "$(grep -c '^module ' "$f") denied modules (sctp, nfsd, kvm*, ksmbd, cifs, can*, pppoe, pppox, RDMA core, dccp, tipc): for each, the effective modprobe -c rules carry install /bin/false + an empty softdep override, /bin/false is the final step of its own resolution, and a real load attempt exits non-zero, refused by a denied module's install rule ($(awk '$1=="module"{by=$7; sub(/^refused-by=/,"",by); if(by==$2) s++; else d++} END{print s+0" by their own rule, "d+0" by a denied dependency first"}' "$f")), unloaded before and after; a real SCTP socket is $(sed -n 's/^sctp-socket=\(refused:.*\) loaded-after.*/\1/p' "$f") and sctp stays unloaded"; fi
-  if grep -E '^module-file ' "$f" | grep -vq ' 0$'; then check E extra-modules-absent fail "$(grep '^module-file' "$f" | tr '\n' ' ')"
-  else check E extra-modules-absent pass "nvmet-tcp, ib_srpt not on the disk (linux-modules-extra not installed)"; fi
+  elif [[ "$(sed -n 's/^denied-count //p' "$f")" -lt 67 ]]; then
+    check E kernel-modules-denied fail "the installed denylist names only $(sed -n 's/^denied-count //p' "$f") modules (expected >= 67)"
+  else check E kernel-modules-denied pass "$(grep -c '^module ' "$f") denied modules (sctp, nfsd, kvm*, ksmbd, cifs, can*, pppoe, pppox, RDMA core, dccp, tipc, ip_vs, openvswitch, vxlan, LIO target, sound, Bluetooth, rxrpc/kafs, amdgpu, idpf, scsi_debug, the 21 network-autoloadable modules the GA disk did not carry, and the NVMe-oF target nvmet/nvmet_tcp): for each, the effective modprobe -c rules carry install /bin/false + an empty softdep override, /bin/false is the final step of its own resolution, and a real load attempt exits non-zero, refused by a denied module's install rule ($(awk '$1=="module"{by=$7; sub(/^refused-by=/,"",by); if(by==$2) s++; else d++} END{print s+0" by their own rule, "d+0" by a denied dependency first"}' "$f")), unloaded before and after; a real SCTP socket is $(sed -n 's/^sctp-socket=\(refused:.*\) loaded-after.*/\1/p' "$f") and sctp stays unloaded"; fi
+  # The kernel is Ubuntu's HWE series, exactly one image, no GA meta, and the
+  # running kernel is that image.
+  krun="$(sed -n 's/^kernel-running=//p' "$f")"; kimgs="$(sed -n 's/^kernel-images=//p' "$f" | xargs)"
+  if [[ "$(sed -n 's/^kernel-meta=//p' "$f")" != linux-image-virtual-hwe-24.04=* ]]; then
+    check E kernel-hwe fail "linux-image-virtual-hwe-24.04 not installed ($(grep '^kernel-meta=' "$f"))"
+  elif [[ -n "$(sed -n 's/^kernel-ga-meta=//p' "$f" | xargs)" ]]; then
+    check E kernel-hwe fail "GA kernel metapackage installed: $(sed -n 's/^kernel-ga-meta=//p' "$f")"
+  elif [[ "$kimgs" != "linux-image-$krun" ]]; then
+    check E kernel-hwe fail "running $krun, installed images: $kimgs"
+  else check E kernel-hwe pass "running $krun = the one installed image; $(sed -n 's/^kernel-meta=//p' "$f"); no GA metapackage"; fi
+  # vmwgfx ioctl CVEs: no DRM node may be openable by anyone but root.
+  local drule; drule="$(sed -n 's/^drm-rule //p' "$f")"
+  if [[ -z "$drule" || "$drule" == missing ]]; then check E drm-root-only fail "72-culvert-drm.rules is not installed"
+  elif ! grep -q '^drm ' "$f"; then
+    if [[ "$(sed -n 's/^drm-nomodeset //p' "$f")" == yes ]]; then
+      check E drm-root-only pass "no DRM node exists: the shipped kernel cmdline carries nomodeset, so vmwgfx does not bind (module loaded: $(sed -n 's/^drm-vmwgfx-loaded //p' "$f")); 72-culvert-drm.rules (${drule:0:12}) stays installed for a node that ever appears"
+    else check E drm-root-only fail "no DRM node and no nomodeset on the cmdline (the lab VM has a VMware SVGA adapter; vmwgfx should bind)"; fi
+  elif grep '^drm ' "$f" | grep -vqE '^drm \S+ root:root 600 acl=$'; then check E drm-root-only fail "$(grep '^drm ' "$f" | grep -vE ' root:root 600 acl=$' | tr '\n' ' ')"
+  else check E drm-root-only pass "$(grep -c '^drm ' "$f") DRM node(s) on driver $(sed -n 's/^drm-driver //p' "$f"), each root:root 0600 with no ACL entry ($(grep '^drm ' "$f" | awk '{print $2}' | tr '\n' ' '))"; fi
+  # Assumptions the kernel CVE dispositions rely on (kernel-cve-prereqs.tsv).
+  asf=""
+  [[ "$(sed -n 's/^sysctl kernel.unprivileged_bpf_disabled=//p' "$f")" =~ ^[12]$ ]] || asf+="unprivileged BPF not disabled; "
+  [[ "$(sed -n 's/^sysctl kernel.perf_event_paranoid=//p' "$f")" =~ ^[0-9]+$ && "$(sed -n 's/^sysctl kernel.perf_event_paranoid=//p' "$f")" -ge 2 ]] || asf+="perf_event_paranoid < 2; "
+  grep -q '^container ' "$f" || asf+="no container listed; "
+  bad_c="$(grep '^container ' "$f" | grep -vE ' privileged=false capadd=(\[\]|<no value>) devices=0 ' || true)"
+  [[ -z "$bad_c" ]] || asf+="container with privileges/caps/devices: $bad_c; "
+  grep -q '^perf-tool absent' "$f" || asf+="perf tool installed; "
+  grep -qE '^fuse-mounts 0 btrfs-mounts 0 nfs-mounts 0$' "$f" || asf+="$(grep '^fuse-mounts' "$f"); "
+  [[ "$(sed -n 's/^sysctl kernel.apparmor_restrict_unprivileged_userns=//p' "$f")" == 1 ]] || asf+="unprivileged user namespaces not restricted; "
+  [[ "$(sed -n 's/^sysctl dev.tty.ldisc_autoload=//p' "$f")" == 0 ]] || asf+="unprivileged tty line-discipline autoload enabled; "
+  grep -qx 'net-autoload-unreviewed=\[\]' "$f" || asf+="unprivileged network autoload neither denied nor reviewed: $(grep '^net-autoload-unreviewed=' "$f"); "
+  if [[ -n "$asf" ]]; then check E kernel-cve-assumptions fail "$asf"
+  else check E kernel-cve-assumptions pass "unprivileged BPF disabled ($(sed -n 's/^sysctl kernel.unprivileged_bpf_disabled=//p' "$f")), perf_event_paranoid $(sed -n 's/^sysctl kernel.perf_event_paranoid=//p' "$f"), $(grep -c '^container ' "$f") containers unprivileged with no added caps or devices, no perf tool, no FUSE/btrfs/NFS mounts, unprivileged userns restricted, ldisc autoload off, network autoload $(sed -n 's/^net-autoload //p' "$f") (none unreviewed); NICs: $(sed -n 's/^nic-drivers //p' "$f")"; fi
+  # CVE-2025-40190: no mounted ext4 filesystem carries ea_inode.
+  if ! grep -q '^ext4 ' "$f"; then check E ext4-no-ea-inode fail "no ext4 mount listed"
+  elif grep '^ext4 ' "$f" | grep -qw ea_inode; then check E ext4-no-ea-inode fail "$(grep '^ext4 ' "$f" | grep -w ea_inode | tr '\n' ' ')"
+  else check E ext4-no-ea-inode pass "$(grep -c '^ext4 ' "$f") ext4 mount(s) without ea_inode: $(grep '^ext4 ' "$f" | awk '{print $2}' | tr '\n' ' ')"; fi
+  if ! grep -q '^extra-module ' "$f"; then check E extra-modules-unloadable fail "no extra-module lines recorded"
+  elif grep '^extra-module ' "$f" | grep -vqE ' rc=[1-9][0-9]* loaded-after=0 refused-by=[a-z0-9_]+$'; then check E extra-modules-unloadable fail "$(grep '^extra-module' "$f" | tr '\n' ' ')"
+  else check E extra-modules-unloadable pass "$(grep '^extra-module' "$f" | tr '\n' ' ')"; fi
   grep -qiE '^tracing .*endpoint *= *"[^"]+"' "$f" && check E containerd-tracing-off fail "$(grep '^tracing' "$f" | tr '\n' ' ')" \
     || check E containerd-tracing-off pass "no OTLP endpoint configured"
   log "engine surface: $f"
@@ -2191,6 +2534,8 @@ case "${1:-}" in
     if [[ "${LAB_ENGINE_SURFACE:-0}" == 1 ]]; then cmd_engine_surface; fail_fast_after engine-surface; fi
     cmd_recovery; fail_fast_after recovery
     if [[ -n "${LAB_ADOPT_IMAGE_TAR:-}" ]]; then cmd_adoption; fail_fast_after adoption; fi
-    cmd_history; n="$(failures)"; log "failures: $n"; [[ "$n" == 0 ]] ;;
+    cmd_history
+    if [[ "${LAB_PRESSURE:-0}" == 1 ]]; then cmd_pressure; fi
+    n="$(failures)"; log "failures: $n"; [[ "$n" == 0 ]] ;;
   *) sed -n '2,32p' "$0"; exit 2 ;;
 esac

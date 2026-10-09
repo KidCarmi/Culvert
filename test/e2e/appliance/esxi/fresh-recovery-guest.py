@@ -31,6 +31,22 @@ def regular(path):
     require(path.is_file() and not path.is_symlink())
 
 
+def wait_provisioned(ready, boot_id, clock=time.monotonic, pause=time.sleep):
+    """Wait read-only before locks, Docker commands or recovery transfers."""
+    first_boot = boot_id()
+    started = clock()
+    deadline = started + 900
+    while True:
+        require(boot_id() == first_boot and clock() <= deadline)
+        if ready():
+            require(boot_id() == first_boot)
+            return {'firstboot_complete': True, 'boot_id': first_boot,
+                    'wait_seconds': round(clock() - started, 3), 'budget_seconds': 900}
+        remaining = deadline - clock()
+        require(remaining > 0)
+        pause(min(5, remaining))
+
+
 def sha(path):
     h = hashlib.sha256()
     with path.open('rb') as f:
@@ -226,6 +242,17 @@ class Guest:
             'archive_sha256': h['archive_sha256']}
 
     def preflight(self):
+        self.phase = 'provisioning-wait'
+        build = json.loads(Path('/var/lib/culvert-appliance/build-info.json').read_text())
+        require(build['source']['git_commit'] == self.cfg['source_sha'] and build['source']['git_dirty'] is False)
+        require(build['application']['index_digest'] == self.cfg['image_id'])
+        marker = Path('/var/lib/culvert-appliance/state/complete.done')
+        def ready():
+            require(not marker.is_symlink())
+            return marker.is_file()
+        self.provisioning = wait_provisioned(ready,
+            lambda: Path('/proc/sys/kernel/random/boot_id').read_text().strip())
+        self.phase = 'preflight'
         for name in ('docker-compose.yml', 'docker-compose.maint-agent.yml', '.env'):
             regular(STACK / name)
         regular(Path('/var/lib/culvert-appliance/state/complete.done'))
@@ -379,7 +406,7 @@ def main(cfg):
     try:
         guest.preflight()
         getattr(guest, cfg['mode'])()
-        result = {'schema': 1, 'phase': cfg['mode'], 'result': 'pass'}
+        result = {'schema': 1, 'phase': cfg['mode'], 'result': 'pass', 'provisioning': guest.provisioning}
         if cfg.get('history'):
             result['history'] = guest.history_result
             result['history_login_unavailable'] = getattr(guest, 'history_login_unavailable', [])
