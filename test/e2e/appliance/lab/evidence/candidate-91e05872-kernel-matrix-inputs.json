@@ -1,0 +1,12 @@
+{
+ "source": "91e05872dfe5f96c94ec725b8b2dc2b1002116ab",
+ "kernel_version": "7.0.0-38.38~24.04.4",
+ "kernel_cves": "scan run 37973308933 artifact appliance-lab-exact-scan-91e05872dfe5: kernel-cves.tsv",
+ "kernel_cves_userspace": "scan run 37973308933 artifact appliance-lab-exact-scan-91e05872dfe5: kernel-cves-userspace.tsv",
+ "kernel_config": "scan run 37973308933 artifact appliance-lab-exact-scan-91e05872dfe5: config-7.0.0-38-generic",
+ "checks": "lab run 37966305990 artifact appliance-lab-evidence-candidate-91e05872dfe5: checks.jsonl",
+ "uct_commit": "23a7c5ffaa35aebbcfa31f83228c218a884be2d1",
+ "scan_run": "37973308933",
+ "lab_run": "37966305990",
+ "ova": "culvert-appliance-1.0.260-candidate.g91e05872dfe5-ubuntu-24.04.ova sha256 060a3dc6c79164265a241af5d91b4d6b2464a52340b3a42c461f72ee2889c07e"
+}
