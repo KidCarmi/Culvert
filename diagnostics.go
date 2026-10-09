@@ -146,6 +146,7 @@ func buildOperatorContract() OperatorContract {
 		checkRootCA(),
 		checkSessionSecret(),
 		checkOversizeConfiguredUsernames(),
+		checkAdminRosterPersistence(),
 		checkCDR(),
 		checkClusterPosture(),
 		checkDPLastGoodConfigSnapshot(),
@@ -544,6 +545,31 @@ func checkSessionSecret() OperatorContractCheck {
 // the dashboard sign-in field (maxlength=64), setup, and the admin user APIs
 // (ui_auth.go) all cap names at 64 bytes.
 const adminUsernameAccountLimit = 64
+
+// checkAdminRosterPersistence surfaces the "no roster file" posture that was
+// previously visible only as a startup log line (warnRosterNotDurable) and a
+// rate-limited per-mutation warning. Without a roster file every admin account
+// delete, role change and password rotation applies in memory and silently
+// reverts at the next restart. Report-only: it changes no auth behavior.
+func checkAdminRosterPersistence() OperatorContractCheck {
+	const code = "admin_roster_persistence"
+	if cfg == nil || !cfg.AuthEnabled() {
+		return OperatorContractCheck{Code: code, Status: diagOK, Message: "no admin accounts configured"}
+	}
+	if cfg.UIUsersFilePersisted() {
+		return OperatorContractCheck{Code: code, Status: diagOK, Message: "admin roster changes are persisted to the roster file"}
+	}
+	msg := "no roster file configured — admin account deletes, role changes and password rotations are in-memory only and revert on restart"
+	if n := rosterNotDurable.Load(); n > 0 {
+		msg += fmt.Sprintf(" (%d such change(s) applied since boot)", n)
+	}
+	return OperatorContractCheck{
+		Code:           code,
+		Status:         diagWarn,
+		Message:        msg,
+		OperatorAction: "Set -ui-users-file (for example /data/ui_users.json) and restart, then re-apply any admin changes made since boot.",
+	}
+}
 
 func checkOversizeConfiguredUsernames() OperatorContractCheck {
 	if cfg == nil {
