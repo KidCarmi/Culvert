@@ -1651,10 +1651,24 @@ echo "disabled-plugins $(grep -E '^[[:space:]]*disabled_plugins' /etc/containerd
 echo "=== kernel modules"; for m in sctp nfsd kvm kvm_amd kvm_intel ksmbd cifs can can_raw can_bcm can_gw can_isotp can_j1939 pppoe pppox ib_core ib_cm iw_cm rdma_cm ib_uverbs rdma_ucm ib_umad dccp tipc; do
   # FINAL step of the module's own resolution (a dependency's deny must not
   # count), then a REAL load attempt: it must fail and leave the module out.
+  # The real attempt records its exit code and WHICH module's install rule
+  # kmod reports refusing it. kmod inserts hard dependencies first and stops
+  # at the first refusal, so a target whose dependency is itself denied (ksmbd
+  # needs ib_core when built with SMB Direct) is refused by THAT rule before
+  # its own is reached; the target's own rule is proven by the effective
+  # config and by being the final step of its own resolution (above).
+  before="$(grep -c "^$m " /proc/modules)"
   final="$(modprobe -n -v "$m" 2>&1 | tail -n 1 | tr -s ' ')"
-  if modprobe "$m" >/dev/null 2>&1; then real=loaded; else real=refused; fi
-  echo "module $m final=${final% } real=$real loaded=$(grep -c "^$m " /proc/modules)"
+  err="$(modprobe "$m" 2>&1)"; rc=$?
+  by="$(sed -n "s/.*Error running install command '\/bin\/false' for module \([a-z0-9_]*\):.*/\1/p" <<<"$err" | head -n 1)"
+  echo "module $m before=$before final=${final% } rc=$rc refused-by=${by:-none} after=$(grep -c "^$m " /proc/modules)"
+  echo "module-err $m $(tr '\n' ' ' <<<"$err" | tr -s ' ')"
 done
+# The EFFECTIVE configuration kmod applies (all of /etc/modprobe.d, /lib/
+# modprobe.d and the built-in defaults), for every denied module, plus the
+# shipped file's own digest.
+echo "denylist-file $(sha256sum /etc/modprobe.d/culvert-unused.conf | cut -d' ' -f1)"
+modprobe -c 2>/dev/null | awk '($1=="install"||$1=="softdep"||$1=="blacklist"||$1=="remove"||$1=="options") && $2 ~ /^(sctp|nfsd|kvm|kvm_amd|kvm_intel|ksmbd|cifs|can|can_raw|can_bcm|can_gw|can_isotp|can_j1939|pppoe|pppox|ib_core|ib_cm|iw_cm|rdma_cm|ib_uverbs|rdma_ucm|ib_umad|dccp|tipc)$/ {print "effective "$0}'
 echo "sctp-socket=$(python3 -c 'import socket
 try:
     socket.socket(socket.AF_INET, socket.SOCK_STREAM, 132); print("opened")
@@ -1702,11 +1716,14 @@ EOS
   # Unused kernel modules: denied by modprobe.d, not loaded, and an actual
   # SCTP socket (which would autoload the module) is refused.
   if ! grep -qE '^module ' "$f"; then check E kernel-modules-denied fail "no module lines (old OVA without the denylist?)"
-  elif grep -E '^module ' "$f" | grep -vqE 'final=install /bin/false real=refused loaded=0$'; then
-    check E kernel-modules-denied fail "$(grep -E '^module ' "$f" | grep -vE 'final=install /bin/false real=refused loaded=0$' | tr '\n' ' ')"
+  elif bad="$(awk '$1=="module"{split($0,a," "); m=$2; ok=($3=="before=0" && $4=="final=install" && $5=="/bin/false" && $6 ~ /^rc=[1-9][0-9]*$/ && $8=="after=0"); by=$7; sub(/^refused-by=/,"",by); den[m]=1; if(!ok) print m; rb[m]=by}
+         $1=="effective" && $2=="install" && $4=="/bin/false"{inst[$3]=1}
+         $1=="effective" && $2=="softdep" && NF==3{emp[$3]=1}
+         END{for(m in den){ if(!(rb[m] in den)) print m" (refused-by="rb[m]")"; if(!inst[m]) print m" (no effective install /bin/false)"; if(!emp[m]) print m" (no effective empty softdep)"}}' "$f" | sort -u | tr '\n' ' ')"; [[ -n "$bad" ]]; then
+    check E kernel-modules-denied fail "$bad"
   elif ! grep -qE '^sctp-socket=refused:.* loaded-after=0$' "$f"; then
     check E kernel-modules-denied fail "$(grep '^sctp-socket=' "$f")"
-  else check E kernel-modules-denied pass "$(grep -c '^module ' "$f") denied modules (sctp, nfsd, kvm*, ksmbd, cifs, can*, pppoe, pppox, RDMA core, dccp, tipc): each one's final modprobe step is /bin/false, a real load attempt is refused and none is loaded; a real SCTP socket is $(sed -n 's/^sctp-socket=\(refused:.*\) loaded-after.*/\1/p' "$f") and sctp stays unloaded"; fi
+  else check E kernel-modules-denied pass "$(grep -c '^module ' "$f") denied modules (sctp, nfsd, kvm*, ksmbd, cifs, can*, pppoe, pppox, RDMA core, dccp, tipc): for each, the effective modprobe -c rules carry install /bin/false + an empty softdep override, /bin/false is the final step of its own resolution, and a real load attempt exits non-zero, refused by a denied module's install rule ($(awk '$1=="module"{by=$7; sub(/^refused-by=/,"",by); if(by==$2) s++; else d++} END{print s+0" by their own rule, "d+0" by a denied dependency first"}' "$f")), unloaded before and after; a real SCTP socket is $(sed -n 's/^sctp-socket=\(refused:.*\) loaded-after.*/\1/p' "$f") and sctp stays unloaded"; fi
   if grep -E '^module-file ' "$f" | grep -vq ' 0$'; then check E extra-modules-absent fail "$(grep '^module-file' "$f" | tr '\n' ' ')"
   else check E extra-modules-absent pass "nvmet-tcp, ib_srpt not on the disk (linux-modules-extra not installed)"; fi
   grep -qiE '^tracing .*endpoint *= *"[^"]+"' "$f" && check E containerd-tracing-off fail "$(grep '^tracing' "$f" | tr '\n' ' ')" \

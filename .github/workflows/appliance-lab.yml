@@ -86,8 +86,11 @@ jobs:
             image_run: "37904532038"
             image_tar_sha256: "d56cb3070addaf080e5500d92523a58462be5a95ff3e49af1b98755f3df0b63d"
             expect_image_id: "sha256:398ffaf2090ec32cb9ff0506dd2e92bfd2414d689719373fc00cf96a5c58f906"
-            retained_run: ""
-            retained_sha256: ""
+            # Requalify the EXACT OVA built and qualified in lab run 37908313475
+            # (no rebuild): the module probe now records effective modprobe -c
+            # rules and each real attempt's exit code + refusing rule.
+            retained_run: "37908313475"
+            retained_sha256: "4b8ae484fd8b9bda8dfc12512e9e0b489edcc96c7590824f22276a19dc6b7a05"
             # The calibrated ESXi proxy (12 ms read / 3 ms write).
             disk: dm
             recovery_reboots: "3"
