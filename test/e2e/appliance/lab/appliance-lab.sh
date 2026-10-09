@@ -811,7 +811,7 @@ sys.exit(0 if d.get("available") is True and isinstance(b,list) and d.get("count
 cd /srv/culvert || exit 90
 docker compose down 2>&1; echo "down-rc=\$?"
 docker compose --profile cli run --rm -T cli --restore /backup/$BACKUP_FILE --mode full --confirm 2>&1; r=\$?; echo "commit-rc=\$r"
-docker compose up -d 2>&1; echo "up-rc=\$?"
+docker compose -f docker-compose.yml \$([ -f docker-compose.maint-agent.yml ] && echo -f docker-compose.maint-agent.yml) up -d 2>&1; echo "up-rc=\$?"  # both files, as the runbook says: the second mounts the agent socket
 exit \$r
 EOS
     local deadline=$(( $(date +%s) + 600 ))
@@ -1525,7 +1525,7 @@ docker volume inspect "\$vol" >/dev/null 2>&1 && echo VOLUME-STILL-PRESENT || ec
 cp -p .env .env.lab-history-orig
 sed -i '/^CULVERT_LOG_PASSPHRASE=/d' .env; echo "CULVERT_LOG_PASSPHRASE=$(cat "$SEC/log-pass-new")" >> .env; echo "log-passphrase-rotated"
 docker compose --profile cli run --rm -T cli --restore /backup/$fn --mode full --confirm 2>&1; r=\$?; echo "commit-rc=\$r"
-docker compose up -d 2>&1; echo "up-rc=\$?"
+docker compose -f docker-compose.yml \$([ -f docker-compose.maint-agent.yml ] && echo -f docker-compose.maint-agent.yml) up -d 2>&1; echo "up-rc=\$?"  # both files, as the runbook says: the second mounts the agent socket
 exit \$r
 EOS
   hist_wait_up || true
@@ -1563,7 +1563,7 @@ CULVERT_HISTORY_PASSPHRASE='$(cat "$SEC/history-phrase")' $imp 2>&1; echo "dry-r
 echo "--- import"
 CULVERT_HISTORY_PASSPHRASE='$(cat "$SEC/history-phrase")' $imp --confirm 2>&1; r=\$?; echo "import-rc=\$r"
 rm -f /srv/culvert/lab-history.cvst
-docker compose up -d 2>&1; echo "up-rc=\$?"
+docker compose -f docker-compose.yml \$([ -f docker-compose.maint-agent.yml ] && echo -f docker-compose.maint-agent.yml) up -d 2>&1; echo "up-rc=\$?"  # both files, as the runbook says: the second mounts the agent socket
 exit \$r
 EOS
   hist_wait_up || true
@@ -1632,8 +1632,11 @@ p_sample() { local ph="$1" tag="$2" a b e c rc hc row
   rc="$(curl -sS -m 4 -o "$WORK/p-ready.json" -w '%{http_code}' "$P/ready" 2>/dev/null || echo 000)"
   hc="$(curl -sS -m 4 -o /dev/null -w '%{http_code}' "$P/health" 2>/dev/null || echo 000)"
   row="$(python3 -c 'import json,sys
-d=json.load(open(sys.argv[1])); c=d.get("checks",d)
-print(" ".join(f"{k}={(v.get(\"status\") if isinstance(v,dict) else v)}" for k,v in sorted(c.items()) if (v.get("status") if isinstance(v,dict) else v)!="ok"))' "$WORK/p-ready.json" 2>/dev/null || echo unreadable)"
+d=json.load(open(sys.argv[1])); c=d.get("checks",d); bad=[]
+for k,v in sorted(c.items()):
+    st=v.get("status") if isinstance(v,dict) else v
+    if st!="ok": bad.append(k+"="+str(st))
+print(" ".join(bad))' "$WORK/p-ready.json" 2>/dev/null || echo unreadable)"
   python3 -c 'import json,sys
 k=("phase","tag","t","allowed","blocked","eicar","clean","ready","not_ok_rows","health")
 print(json.dumps(dict(zip(k,sys.argv[1:]))))' "$ph" "$tag" "$(date -u +%FT%TZ)" "$a" "$b" "$e" "$c" "$rc" "$row" "$hc" >> "$EV/P-samples.jsonl"
@@ -1647,8 +1650,8 @@ p_backup() { local out="$1" op st jar; api POST /api/backups '{"encrypt":false}'
   echo "op=${op:-none} state=${st:-none} http=$(code < "$out" | head -1)"; }
 p_login() { : > "$JAR"; api POST /api/auth/login "{\"user\":\"$ADMIN_USER\",\"pass\":\"$(cat "$SEC/admin-pass")\"}" | code; }
 p_os_update() { groot 'culvert-os-update os > /tmp/p-osu.log 2>&1; echo "osu-rc=$?"; tail -n 15 /tmp/p-osu.log; echo "dpkg-audit=[$(dpkg --audit 2>&1 | head -c 300)]"; echo "not-installed-ok=$(dpkg -l | awk "NR>5 && \$1 !~ /^(ii|hi|rc)\$/" | wc -l)"; echo "holds=$(apt-mark showhold | tr "\n" " ")"' 1800 2>&1; }
-p_app_update() { local U="$LAB_UPDATE_DIR" rc=0
-  { printf '%s' "$AGENT_LIB"; embed apply.json "$U/apply-signed.json"
+p_app_update() { local U="$LAB_UPDATE_DIR" ph="$1" rc=0
+  { printf '%s' "$AGENT_LIB"; embed apply.json "$U/apply-pressure-$ph.json"
     printf '%s\n' 'running' 'r=$(agent -X POST --data-binary @/tmp/.lab-upd/apply.json http://agent/v1/upgrades/apply); echo "$r" | tail -c 1500' \
                   'op=$(printf "%s" "$r" | opid); echo "op=$op"; [ -n "$op" ] && wait_op "$op"' 'echo "after:"' 'running'; } | gpriv --timeout 2100 2>&1 || rc=$?; echo "rc=$rc"; }
 # p_phase NAME FILLCMD — fill, observe, exercise backup/updates, release, recover.
@@ -1679,8 +1682,9 @@ for l in sys.stdin: d=json.loads(l); print(d["tag"], "allowed",d["allowed"],"eic
     else check P "$name-backup-clean" fail "$bk; archive set changed: $(diff <(sed -n '/^---$/,$p' <<<"$inv0") <(sed -n '/^---$/,$p' <<<"$inv1") | tr '\n' ' ' | head -c 300)"; fi
   else check P "$name-backup-clean" pass "$bk; no new archive, no .tmp, $(sed -n '/^---$/,$p' <<<"$inv0" | grep -c ' ') existing archive(s) byte-identical"; fi
   # app update under pressure (signed fixture only exists in build mode)
-  if [[ -n "${LAB_UPDATE_DIR:-}" && -f "${LAB_UPDATE_DIR}/apply-signed.json" ]]; then
-    up="$(p_app_update)"; printf '%s\n' "$up" > "$EV/P-$name-app-update.txt"
+  if [[ -n "${LAB_UPDATE_DIR:-}" && -f "${LAB_UPDATE_DIR}/apply-pressure-$name.json" ]]; then
+    up="$(p_app_update "$name")"
+    if grep -q '"deduped":true' <<<"$up"; then check P "$name-app-update" fail "the agent returned an EARLIER operation (deduped): nothing was exercised under pressure"; fi; printf '%s\n' "$up" > "$EV/P-$name-app-update.txt"
     local st0 img_b img_a; st0="$(grep -m1 '^op-state=' <<<"$up" || echo op-state=none)"
     img_b="$(grep -m1 '^running-image=' <<<"$up")"; img_a="$(grep '^running-image=' <<<"$up" | tail -1)"
     s="$(p_sample "$name" after-app-update)"; set -- $s
@@ -1692,7 +1696,7 @@ for l in sys.stdin: d=json.loads(l); print(d["tag"], "allowed",d["allowed"],"eic
     elif [[ "$st0" == op-state=succeeded && "$1 $2" == "200 403" ]]; then
       P_APP_APPLIED=1; check P "$name-app-update" info "the update SUCCEEDED under pressure ($img_b -> $img_a); traffic $1/$2; rolled back after recovery"
     else check P "$name-app-update" fail "$st0 $img_b -> $img_a traffic $1/$2 (a failed update must leave the running image and enforcement unchanged)"; fi
-  else check P "$name-app-update" blocked "no signed-update fixture in this leg (built only with the OVA build)"; fi
+  else check P "$name-app-update" blocked "no per-phase signed-update fixture in this leg (built only with the OVA build)"; fi
   # OS update under pressure
   osu="$(p_os_update)"; printf '%s\n' "$osu" > "$EV/P-$name-os-update.txt"
   s="$(p_sample "$name" after-os-update)"; set -- $s
@@ -1707,7 +1711,7 @@ for l in sys.stdin: d=json.loads(l); print(d["tag"], "allowed",d["allowed"],"eic
   [[ $ok == 1 ]] && check P "$name-recovered" pass "space released; /ready 200 with clamav ok, enforcement, EICAR blocked by ClamAV ($s)" \
     || check P "$name-recovered" fail "within 300 s of release: $s"
   if [[ "${P_APP_APPLIED:-0}" == 1 ]]; then P_APP_APPLIED=0; local rb rc=0
-    rb="$({ printf '%s' "$AGENT_LIB"; embed rollback.json "$LAB_UPDATE_DIR/rollback-signed.json"
+    rb="$({ printf '%s' "$AGENT_LIB"; embed rollback.json "$LAB_UPDATE_DIR/rollback-pressure-$name.json"
            printf '%s\n' 'r=$(agent -X POST --data-binary @/tmp/.lab-upd/rollback.json http://agent/v1/rollbacks); echo "$r" | tail -c 1500' \
                          'op=$(printf "%s" "$r" | opid); echo "op=$op"; [ -n "$op" ] && wait_op "$op"' 'running'; } | gpriv --timeout 2100 2>&1)" || rc=$?
     printf '%s\n' "$rb" > "$EV/P-$name-app-rollback.txt"
@@ -1719,7 +1723,7 @@ for l in sys.stdin.read().split("\n"):
   except Exception: continue
   r=d.get("result") or {}; f=r.get("filename") or d.get("filename")
   if f: print(f); break' 2>/dev/null || true)"
-  local valid; valid="$(groot "mp=\$(docker volume inspect -f '{{.Mountpoint}}' \"\$(docker volume ls -q | grep -m1 -E '(^|_)culvert-backups\$')\"); f=\$(ls -t \$mp | grep -v '\\.tmp\$' | head -1); echo \"newest=\$f\"; tar -tzf \"\$mp/\$f\" > /dev/null 2>&1 && echo archive=valid || echo archive=INVALID" 300 2>&1 | grep -E '^(newest|archive)=' | tr '\n' ' ')"
+  local valid; valid="$(groot "mp=\$(docker volume inspect -f '{{.Mountpoint}}' \"\$(docker volume ls -q | grep -m1 -E '(^|_)culvert-backups\$')\"); f=\$(ls -t \$mp | grep -E '^culvert-backup-.*[.]tar[.]gz\$' | head -1); echo \"newest=\$f\"; tar -tzf \"\$mp/\$f\" > /dev/null 2>&1 && echo archive=valid || echo archive=INVALID" 300 2>&1 | grep -E '^(newest|archive)=' | tr '\n' ' ')"
   [[ "$bk" == *state=succeeded* && "$valid" == *archive=valid* ]] && check P "$name-backup-after" pass "$bk; $valid (gzip tar readable end to end); admin login $lc" \
     || check P "$name-backup-after" fail "$bk; $valid; admin login $lc"
   id1="$(p_proxy_identity)"
@@ -1838,10 +1842,13 @@ echo "kernel-meta=$(dpkg-query -W -f='${Package}=${Version}' linux-image-virtual
 echo "kernel-ga-meta=$(dpkg-query -W -f='${Package} ' linux-image-virtual linux-image-generic linux-virtual linux-generic 2>/dev/null | tr -s ' ' || true)"
 echo "kernel-images=$(dpkg-query -W -f='${Package}\n' 'linux-image-[0-9]*' 2>/dev/null | tr '\n' ' ')"
 echo "=== drm nodes"
-echo "getfacl=$(command -v getfacl >/dev/null && echo present || echo missing)"
-# Root-only DRM nodes (72-culvert-drm.rules): owner, mode and any ACL entry.
+# Root-only DRM nodes (72-culvert-drm.rules): owner, mode and any POSIX ACL.
+# The acl package (getfacl) is not on the appliance, so the ACL is read as the
+# xattr logind's uaccess would set: present means someone else was granted it.
 for n in /dev/dri/card* /dev/dri/renderD*; do [ -e "$n" ] || continue
-  echo "drm $n $(stat -c '%U:%G %a' "$n") acl=$(getfacl -cp "$n" 2>/dev/null | grep -E '^(user|group):[^:]+:' | tr '\n' ',' )"; done
+  echo "drm $n $(stat -c '%U:%G %a' "$n") acl=$(python3 -c 'import os,sys
+try: os.getxattr(sys.argv[1], "system.posix_acl_access"); print("present")
+except OSError: pass' "$n")"; done
 echo "drm-rule $(sha256sum /etc/udev/rules.d/72-culvert-drm.rules 2>/dev/null | cut -d' ' -f1 || echo missing)"
 echo "drm-driver $(basename "$(readlink -f /sys/class/drm/card0/device/driver 2>/dev/null)" 2>/dev/null || echo none)"
 echo "=== ext4 features"
@@ -1900,7 +1907,11 @@ try:
 except OSError as e:
     print("refused:" + (e.strerror or str(e)))' 2>&1) loaded-after=$(grep -c '^sctp ' /proc/modules)"
 # module file names may use "-" where the module name has "_" (kvm-amd.ko)
-for m in nvmet_tcp ib_srpt; do echo "module-file $m $(find /lib/modules/"$(uname -r)" \( -name "$m.ko*" -o -name "${m//_/-}.ko*" \) | wc -l)"; done
+# The GA kernel's two other CRITICALs (nvmet-tcp, ib_srpt) were "absent" there;
+# the HWE kernel ships both, so a REAL load attempt must fail and leave them out.
+for m in nvmet_tcp ib_srpt; do
+  err="$(modprobe "$m" 2>&1)"; rc=$?
+  echo "extra-module $m files=$(find /lib/modules/"$(uname -r)" \( -name "$m.ko*" -o -name "${m//_/-}.ko*" \) | wc -l) rc=$rc loaded-after=$(grep -c "^$m " /proc/modules) refused-by=$(sed -n "s/.*install command '\/bin\/false' for module \([a-z0-9_]*\).*/\1/p" <<<"$err" | head -n 1)"; done
 echo "=== containerd tracing"; containerd config dump 2>/dev/null | grep -iE 'otlp|tracing|endpoint' | sed 's/^/tracing /'
 EOS
   v="$(sed -n 's/^running=//p' "$f")"
@@ -1962,8 +1973,7 @@ EOS
     check E kernel-hwe fail "running $krun, installed images: $kimgs"
   else check E kernel-hwe pass "running $krun = the one installed image; $(sed -n 's/^kernel-meta=//p' "$f"); no GA metapackage"; fi
   # vmwgfx ioctl CVEs: no DRM node may be openable by anyone but root.
-  if ! grep -q '^getfacl=present' "$f"; then check E drm-root-only fail "getfacl missing: ACLs cannot be checked"
-  elif ! grep -q '^drm ' "$f"; then check E drm-root-only fail "no DRM node (the lab VM has a VMware SVGA adapter; vmwgfx should bind)"
+  if ! grep -q '^drm ' "$f"; then check E drm-root-only fail "no DRM node (the lab VM has a VMware SVGA adapter; vmwgfx should bind)"
   elif grep '^drm ' "$f" | grep -vqE '^drm \S+ root:root 600 acl=$'; then check E drm-root-only fail "$(grep '^drm ' "$f" | grep -vE ' root:root 600 acl=$' | tr '\n' ' ')"
   else check E drm-root-only pass "$(grep -c '^drm ' "$f") DRM node(s) on driver $(sed -n 's/^drm-driver //p' "$f"), each root:root 0600 with no ACL entry ($(grep '^drm ' "$f" | awk '{print $2}' | tr '\n' ' '))"; fi
   # Assumptions the kernel CVE dispositions rely on (kernel-cve-prereqs.tsv).
@@ -1984,8 +1994,9 @@ EOS
   if ! grep -q '^ext4 ' "$f"; then check E ext4-no-ea-inode fail "no ext4 mount listed"
   elif grep '^ext4 ' "$f" | grep -qw ea_inode; then check E ext4-no-ea-inode fail "$(grep '^ext4 ' "$f" | grep -w ea_inode | tr '\n' ' ')"
   else check E ext4-no-ea-inode pass "$(grep -c '^ext4 ' "$f") ext4 mount(s) without ea_inode: $(grep '^ext4 ' "$f" | awk '{print $2}' | tr '\n' ' ')"; fi
-  if grep -E '^module-file ' "$f" | grep -vq ' 0$'; then check E extra-modules-absent fail "$(grep '^module-file' "$f" | tr '\n' ' ')"
-  else check E extra-modules-absent pass "nvmet-tcp, ib_srpt not on the disk (linux-modules-extra not installed)"; fi
+  if ! grep -q '^extra-module ' "$f"; then check E extra-modules-unloadable fail "no extra-module lines recorded"
+  elif grep '^extra-module ' "$f" | grep -vqE ' rc=[1-9][0-9]* loaded-after=0 refused-by=[a-z0-9_]+$'; then check E extra-modules-unloadable fail "$(grep '^extra-module' "$f" | tr '\n' ' ')"
+  else check E extra-modules-unloadable pass "$(grep '^extra-module' "$f" | tr '\n' ' ')"; fi
   grep -qiE '^tracing .*endpoint *= *"[^"]+"' "$f" && check E containerd-tracing-off fail "$(grep '^tracing' "$f" | tr '\n' ' ')" \
     || check E containerd-tracing-off pass "no OTLP endpoint configured"
   log "engine surface: $f"

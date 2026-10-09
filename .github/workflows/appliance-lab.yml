@@ -421,6 +421,13 @@ jobs:
           printf '{"image_ref":"%s","pre_backup":false,"rollback_on_failure":true,"idempotency_key":"lab-unsigned-%s"}' "$TREF" "$GITHUB_RUN_ID" > "$U/apply-unsigned.json"
           printf '{"image_ref":"%s","pre_backup":false,"rollback_on_failure":true,"idempotency_key":"lab-apply-%s"}' "$TREF" "$GITHUB_RUN_ID" | python3 "$REQ" --proofs "$U/fixture/proofs.json" --prior "$BREF" > "$U/apply-signed.json"
           printf '{"mode":"image","image_ref":"%s","idempotency_key":"lab-rollback-%s"}' "$BREF" "$GITHUB_RUN_ID" | python3 "$REQ" --proofs "$U/fixture/proofs.json" > "$U/rollback-signed.json"
+          # Disk-pressure phases submit their OWN operations: reusing the keys
+          # above makes the agent return the step-6c operation (deduped) and
+          # nothing under pressure is exercised.
+          for ph in blocks inodes; do
+            printf '{"image_ref":"%s","pre_backup":false,"rollback_on_failure":true,"idempotency_key":"lab-apply-%s-%s"}' "$TREF" "$ph" "$GITHUB_RUN_ID" | python3 "$REQ" --proofs "$U/fixture/proofs.json" --prior "$BREF" > "$U/apply-pressure-$ph.json"
+            printf '{"mode":"image","image_ref":"%s","idempotency_key":"lab-rollback-%s-%s"}' "$BREF" "$ph" "$GITHUB_RUN_ID" | python3 "$REQ" --proofs "$U/fixture/proofs.json" > "$U/rollback-pressure-$ph.json"
+          done
           cp "$U/fixture/keyring.json" "$U/keyring.json"
           printf 'BASELINE_REF=%s\nTARGET_REF=%s\nREGISTRY_ADDR=10.0.2.2\n' "$BREF" "$TREF" > "$U/refs.env"
           {
