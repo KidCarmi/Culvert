@@ -178,7 +178,7 @@ type spanClam struct {
 }
 
 func (g *spanClam) Ping() error { return nil }
-func (g *spanClam) Scan([]byte) (string, bool, error) {
+func (g *spanClam) Scan([]byte) (name string, found bool, err error) {
 	if g.calls.Add(1) == 1 {
 		g.entered <- struct{}{}
 		<-g.release
