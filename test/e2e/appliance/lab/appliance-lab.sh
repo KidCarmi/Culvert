@@ -1920,6 +1920,86 @@ PY" || true
     p_pkg_teardown
   fi
 }
+# F-P2 controlled reproduction (ASTRA, #1528 item 1). One EICAR was DELIVERED
+# at "+0" of the blocks phase in run 37948667525 (dc57bd76, parser fix
+# present, /ready 200), with no log surviving the full disk. A reading of
+# both sides found no path where clamd answers a plain OK on a write fault,
+# and none where Culvert skips ClamAV — so it is reproduced here with the
+# clamd conversation itself on record: clamd-tap.py on the ClamAV
+# container's host veth, writing to tmpfs, logs what Culvert sent (bytes,
+# EICAR or not) and clamd's verbatim reply for every connection. Cycles of
+# fill -> immediate EICAR/clean burst -> release, with the headroom left at the
+# fill varied from 0 to 4 MiB, since the moment of filling is where it was
+# seen. A delivered EICAR is then attributed by its own stream: clamd said
+# OK to the EICAR bytes (clamd), or no EICAR stream carries an OK (Culvert).
+LAB_FP2_CYCLES="${LAB_FP2_CYCLES:-14}"; LAB_FP2_BURST="${LAB_FP2_BURST:-10}"
+cmd_fp2() { local free k h hs rc
+  ensure_admin_pass; [[ -f "$WORK/eicar-origin.pid" ]] || rec_origin_start
+  free="$(p_host_free_gb)"; P_ALLOC0="$(p_host_alloc_mb)"
+  (( free >= LAB_PRESSURE_MIN_HOST_FREE_GB )) || { check F2 host-bound blocked "host has $free GiB free"; return 0; }
+  : > "$EV/P-samples.jsonl"; p_login > /dev/null
+  groot "mkdir -p /run/culvert-fp2; echo '$(base64 -w0 "$HERE/clamd-tap.py")' | base64 -d > /run/culvert-fp2/tap.py
+i=\$(docker exec culvert-clamav cat /sys/class/net/eth0/iflink); v=\$(grep -lx \"\$i\" /sys/class/net/*/ifindex | cut -d/ -f5); echo veth=\$v
+systemctl stop culvert-fp2-tap 2>/dev/null; systemd-run --quiet --unit=culvert-fp2-tap python3 -I /run/culvert-fp2/tap.py \"\$v\" /run/culvert-fp2/streams.jsonl && echo tap=started" 120 > "$EV/F2-tap-start.txt" 2>&1 || true
+  sleep 2; p_sample fp2 baseline > /dev/null; sleep 2
+  groot 'cat /run/culvert-fp2/streams.jsonl' 60 > "$EV/F2-tap-baseline.jsonl" 2>/dev/null || true
+  if grep -q '"eicar": true' "$EV/F2-tap-baseline.jsonl" && grep -q 'FOUND' "$EV/F2-tap-baseline.jsonl"; then
+    check F2 tap pass "clamd conversations recorded on $(grep -m1 -o 'veth=[^ ]*' "$EV/F2-tap-start.txt"); baseline EICAR stream seen with a FOUND reply"
+  else check F2 tap fail "the tap did not record the baseline EICAR conversation ($(tr '\n' ' ' < "$EV/F2-tap-start.txt" | head -c 200)); attribution would be blind"; return 0; fi
+  hs=(0 4096 16384 65536 262144 1048576 4194304)
+  for k in $(seq 1 "$LAB_FP2_CYCLES"); do h="${hs[$(( (k - 1) % ${#hs[@]} ))]}"
+    groot 'systemctl stop culvert-pressure-release.timer 2>/dev/null; systemd-run --quiet --unit=culvert-pressure-release --on-active=1800 /bin/rm -rf /var/lib/culvert-pressure && echo backstop=armed' 60 2>&1 | grep -q backstop=armed \
+      || { check F2 "cycle-$k" blocked "release backstop could not be armed; stopping"; break; }
+    groot "python3 - <<\"PY\"
+import os, errno
+d='/var/lib/culvert-pressure'; os.makedirs(d, exist_ok=True)
+fd=os.open(d+'/fill', os.O_CREAT|os.O_WRONLY, 0o600); keep=$h
+st=os.statvfs('/'); off=max(st.f_bfree*st.f_frsize-keep-(16<<20), 0)
+try: os.posix_fallocate(fd, 0, off)
+except OSError: off=os.fstat(fd).st_size
+for step in (1<<20, 1<<16, 4096):
+    while os.statvfs('/').f_bfree*os.statvfs('/').f_frsize > keep:
+        try: os.posix_fallocate(fd, off, step); off+=step
+        except OSError as e:
+            if e.errno==errno.ENOSPC: break
+            raise
+os.close(fd); st=os.statvfs('/'); print(f'filled headroom={keep} free_root={st.f_bfree*st.f_frsize}')
+PY" 1800 >> "$EV/F2-fills.txt" 2>&1 || true
+    p_bounded || break
+    p_burst fp2 "c$k-h$h" "$LAB_FP2_BURST"
+    groot 'systemctl stop culvert-pressure-release.timer 2>/dev/null; rm -rf /var/lib/culvert-pressure; sync; echo released' 1800 > /dev/null 2>&1 || true
+    rc=0; for _ in $(seq 1 60); do ready_clamav_ok && [[ "$(eicar_verdict)" == av ]] && { rc=1; break; }; sleep 5; done
+    [[ $rc == 1 ]] || check F2 "cycle-$k" fail "not recovered within 300 s of release (headroom $h)"
+  done
+  groot 'systemctl stop culvert-fp2-tap 2>/dev/null; cat /run/culvert-fp2/streams.jsonl' 120 > "$EV/F2-clamd-streams.jsonl" 2>/dev/null || true
+  grep -E '^filled' "$EV/F2-fills.txt" | sort | uniq -c > "$EV/F2-fills-summary.txt" || true
+  local res; res="$(python3 - "$EV/P-samples.jsonl" "$EV/F2-clamd-streams.jsonl" <<'PY2'
+import json, sys, collections
+rows = [d for d in map(json.loads, open(sys.argv[1])) if d["phase"] == "fp2" and d["tag"] != "baseline"]
+deliv = [d for d in rows if d["eicar"].startswith("2")]
+st = []
+for l in open(sys.argv[2]):
+    try: st.append(json.loads(l))
+    except Exception: pass
+def cls(r):
+    parts = [p.strip() for p in r["reply"].split("\x00") if p.strip()]
+    if not parts: return "empty"
+    if any(p.endswith(" FOUND") for p in parts): return "FOUND"
+    if any(p.endswith(" ERROR") for p in parts): return "ERROR" + ("+OK" if any(p.endswith(" OK") for p in parts) else "")
+    if parts == ["stream: OK"]: return "OK"
+    return "other:" + "|".join(parts)[:60]
+ec = collections.Counter(cls(r) for r in st if r["eicar"])
+cc = collections.Counter(cls(r) for r in st if r["cmd"] == "zINSTREAM" and not r["eicar"])
+full = len(set(r["up"] for r in st if r["eicar"]))
+print(len(rows), len(deliv), ec.get("OK", 0), "eicar_streams=" + ",".join(f"{k}:{v}" for k, v in sorted(ec.items())),
+      "other_streams=" + ",".join(f"{k}:{v}" for k, v in sorted(cc.items())), f"eicar_stream_sizes={full}")
+PY2
+)"
+  set -- $res
+  printf '%s\n' "$res" > "$EV/F2-summary.txt"
+  if [[ "$2" == 0 && "$3" == 0 ]]; then check F2 eicar-never-delivered pass "$1 at-fill samples over $LAB_FP2_CYCLES fill cycles (headroom 0..4 MiB): EICAR never delivered and clamd never answered OK to an EICAR stream; ${*:4}"
+  elif [[ "$3" != 0 ]]; then check F2 eicar-never-delivered fail "REPRODUCED — clamd answered a plain OK to $3 EICAR stream(s) (Culvert delivered $2 of $1): clamd attribution; ${*:4} (F2-clamd-streams.jsonl)"
+  else check F2 eicar-never-delivered fail "REPRODUCED — $2 of $1 EICAR delivered with NO clamd OK on any EICAR stream: Culvert attribution; ${*:4} (F2-clamd-streams.jsonl)"; fi; }
 cmd_collect() {
   mkdir -p "$EV/guest"
   if { [[ "$LAB_EXTERNAL" == 1 ]] || qemu_alive; } && gop status-json > "$EV/guest/status-json.json" 2>/dev/null; then
@@ -2606,11 +2686,13 @@ case "${1:-}" in
   adoption) cmd_adoption; [[ "$(failures)" == 0 ]] ;;
   engine-surface) cmd_engine_surface; [[ "$(failures)" == 0 ]] ;;
   console) trap 'cmd_collect || true; cmd_down || true' EXIT; cmd_console; [[ "$(failures)" == 0 ]] ;;
+  fp2) cmd_fp2; [[ "$(failures)" == 0 ]] ;;
   collect) cmd_collect ;;
   down) cmd_down ;;
   all)
     trap 'cmd_collect || true; cmd_down || true' EXIT
     cmd_preflight; cmd_up; cmd_qualify; fail_fast_after qualify
+    if [[ "${LAB_FP2:-0}" == 1 ]]; then cmd_fp2; n="$(failures)"; log "failures: $n"; [[ "$n" == 0 ]]; exit; fi
     if [[ "${LAB_ENGINE_SURFACE:-0}" == 1 ]]; then cmd_engine_surface; fail_fast_after engine-surface; fi
     cmd_recovery; fail_fast_after recovery
     if [[ -n "${LAB_ADOPT_IMAGE_TAR:-}" ]]; then cmd_adoption; fail_fast_after adoption; fi

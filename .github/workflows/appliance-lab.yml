@@ -80,24 +80,32 @@ jobs:
         # console, access binary and provisioning from a clean checkout of the
         # SAME commit. Image ID is the tar's OCI manifest digest.
         include:
+          # F-P2 CONTROLLED REPRODUCTION (ASTRA #1528 item 1): both RETAINED
+          # OVAs — dc57bd76, where one EICAR was delivered at the moment of a
+          # disk fill (run 37948667525), and the candidate 91e05872 — booted,
+          # qualified, then cycled through fills with clamd's conversations
+          # recorded on tmpfs (cmd_fp2, clamd-tap.py). Nothing is rebuilt.
+          # The pressure-only leg of commit ca7e29b4 is restored after this.
+          - variant: candidate-dc57bd76c201
+            provisioning: source
+            source_sha: "dc57bd76c201db11874d08a8d37accba8646b458"
+            image_run: "37948225581"
+            image_tar_sha256: "74c44b59f99ea0ea090929852e5891813276c22c3ae5dc3c63851210c3775447"
+            expect_image_id: "sha256:4db3e5c9d492fe9056a4a607aa0c861daeaec30e3a6657532743e16bde34610b"
+            retained_run: "37948667525"
+            retained_sha256: "855b4a09d46e80b3325d529d58436ea2c0cb145814add50e4a5c2e66eecccac9"
+            recovery_reboots: "0"
+            fp2: "1"
           - variant: candidate-91e05872dfe5
             provisioning: source
             source_sha: "91e05872dfe5f96c94ec725b8b2dc2b1002116ab"
             image_run: "37964407987"
             image_tar_sha256: "ef489550e18f10209ea05e03fedab8c14180a7e0f29242c087462a8afad721ae"
             expect_image_id: "sha256:d2a3377400f07ac0a6ceac54df729773b2983d6a4a5f871219ff891cb1e65fb4"
-            # RETAINED: the exact OVA ASTRA qualified on ESXi (run 37966305990,
-            # sha256 060a3dc6…), not a rebuild. This run adds the package-write
-            # qualification (ASTRA #1528 item 2): a real pending package under
-            # block/inode exhaustion and under headroom just short of its
-            # payload. Recovery timing, console and engine surface were
-            # evidenced in runs 37966305990 / 37973308933 and are not repeated.
             retained_run: "37966305990"
             retained_sha256: "060a3dc6c79164265a241af5d91b4d6b2464a52340b3a42c461f72ee2889c07e"
-            # Disk-pressure scenario (block + inode exhaustion, backup/update
-            # under pressure, recovery) on this disposable guest, after history.
-            pressure: "1"
             recovery_reboots: "0"
+            fp2: "1"
           # The adoption leg (retained 2e3bcc2a appliance upgraded to the
           # 91e05872 image) PASSED in run 37966305990 and is not part of this
           # package-write run; restore it from commit e3d9b4bc for the next
@@ -501,7 +509,7 @@ jobs:
           export LAB_EXPECT_IMAGE_ID="${{ matrix.expect_image_id }}" LAB_MIN_FREE_GB=20 LAB_ACCEL=kvm
           export LAB_HISTORY="${{ matrix.history || '1' }}"
           export LAB_ENGINE_SURFACE="${{ matrix.engine_surface || '0' }}"
-          export LAB_PRESSURE="${{ matrix.pressure || '0' }}"
+          export LAB_PRESSURE="${{ matrix.pressure || '0' }}" LAB_FP2="${{ matrix.fp2 || '0' }}"
           # [fail-fast] in the commit message: an ITERATION run stops at the
           # first phase with a failed check (evidence still collected). Never
           # use it for the run whose evidence is handed off.
@@ -563,7 +571,7 @@ jobs:
 
   f-disk-1:
     name: "Lab · F-DISK-1 on the bounded nested-Docker host"
-    if: ${{ !contains(github.event.head_commit.message, '[sidecar-scan]') && !contains(github.event.head_commit.message, '[boot-console]') && !contains(github.event.head_commit.message, '[lab-skip]') && !contains(github.event.head_commit.message, '[saml-replay]') && !contains(github.event.head_commit.message, '[recovery-ab]') && !contains(github.event.head_commit.message, '[sidecar-repro]') && !contains(github.event.head_commit.message, '[scan-candidate]') && !contains(github.event.head_commit.message, '[pressure-only]') }}
+    if: ${{ !contains(github.event.head_commit.message, '[sidecar-scan]') && !contains(github.event.head_commit.message, '[boot-console]') && !contains(github.event.head_commit.message, '[lab-skip]') && !contains(github.event.head_commit.message, '[saml-replay]') && !contains(github.event.head_commit.message, '[recovery-ab]') && !contains(github.event.head_commit.message, '[sidecar-repro]') && !contains(github.event.head_commit.message, '[scan-candidate]') && !contains(github.event.head_commit.message, '[pressure-only]') && !contains(github.event.head_commit.message, '[fp2-repro]') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     steps:
@@ -938,7 +946,7 @@ jobs:
   adopted-sidecar-scan:
     name: "Lab · ADOPTED ClamAV sidecar (built on the appliance): exact-byte scan + SBOM"
     needs: guest-boot
-    if: ${{ !cancelled() && !contains(github.event.head_commit.message, '[fdisk-only]') && !contains(github.event.head_commit.message, '[sidecar-scan]') && !contains(github.event.head_commit.message, '[boot-console]') && !contains(github.event.head_commit.message, '[lab-skip]') && !contains(github.event.head_commit.message, '[saml-replay]') && !contains(github.event.head_commit.message, '[recovery-ab]') && !contains(github.event.head_commit.message, '[sidecar-repro]') && !contains(github.event.head_commit.message, '[scan-candidate]') && !contains(github.event.head_commit.message, '[pressure-only]') }}
+    if: ${{ !cancelled() && !contains(github.event.head_commit.message, '[fdisk-only]') && !contains(github.event.head_commit.message, '[sidecar-scan]') && !contains(github.event.head_commit.message, '[boot-console]') && !contains(github.event.head_commit.message, '[lab-skip]') && !contains(github.event.head_commit.message, '[saml-replay]') && !contains(github.event.head_commit.message, '[recovery-ab]') && !contains(github.event.head_commit.message, '[sidecar-repro]') && !contains(github.event.head_commit.message, '[scan-candidate]') && !contains(github.event.head_commit.message, '[pressure-only]') && !contains(github.event.head_commit.message, '[fp2-repro]') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     env:
