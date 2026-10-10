@@ -1,0 +1,5 @@
+mkdir failures logged by stock: 0
+mkdir failures logged by patched: 0
+control EICAR: stock {'FOUND': 40}, patched {'FOUND': 40}
+edge (4 KiB free) EICAR: stock {'OK': 60}, patched {'ERROR': 60}
+VERDICT: CAUSAL — the one line turns every unscanned clean into ERROR

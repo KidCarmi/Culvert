@@ -1,0 +1,12 @@
+diff -ru stock/libclamav/scanners.c patched/libclamav/scanners.c
+--- stock/libclamav/scanners.c	2026-08-06 21:12:04.000000000 +0000
++++ patched/libclamav/scanners.c	2026-10-10 12:55:30.455913150 +0000
+@@ -5488,7 +5488,7 @@
+ 
+     if (mkdir(ctx.sub_tmpdir, 0700)) {
+         cli_errmsg("Can't create temporary directory for scan: %s.\n", ctx.sub_tmpdir);
+-        status = CL_EACCES;
++        status = CL_ETMPDIR;
+         goto done;
+     }
+ 

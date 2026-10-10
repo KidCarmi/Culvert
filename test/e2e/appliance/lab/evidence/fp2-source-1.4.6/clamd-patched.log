@@ -1,0 +1,242 @@
+Sat Oct 10 13:00:31 2026 -> +++ Started at Sat Oct 10 13:00:31 2026
+Sat Oct 10 13:00:31 2026 -> Received 0 file descriptor(s) from systemd.
+Sat Oct 10 13:00:31 2026 -> clamd daemon 1.4.6 (OS: Linux, ARCH: x86_64, CPU: x86_64)
+Sat Oct 10 13:00:31 2026 -> Log file size limited to 1048576 bytes.
+Sat Oct 10 13:00:31 2026 -> Reading databases from /mnt/fp2src/db-patched
+Sat Oct 10 13:00:31 2026 -> Not loading PUA signatures.
+Sat Oct 10 13:00:31 2026 -> Bytecode: Security mode set to "TrustSigned".
+Sat Oct 10 13:00:31 2026 -> Loaded 1 signatures.
+Sat Oct 10 13:00:31 2026 -> TCP: Bound to [127.0.0.1]:3312
+Sat Oct 10 13:00:31 2026 -> TCP: Setting connection queue length to 200
+Sat Oct 10 13:00:31 2026 -> Limits: Global time limit set to 120000 milliseconds.
+Sat Oct 10 13:00:31 2026 -> Limits: Global size limit set to 419430400 bytes.
+Sat Oct 10 13:00:31 2026 -> Limits: File size limit set to 104857600 bytes.
+Sat Oct 10 13:00:31 2026 -> Limits: Recursion level limit set to 17.
+Sat Oct 10 13:00:31 2026 -> Limits: Files limit set to 10000.
+Sat Oct 10 13:00:31 2026 -> Limits: MaxEmbeddedPE limit set to 41943040 bytes.
+Sat Oct 10 13:00:31 2026 -> Limits: MaxHTMLNormalize limit set to 41943040 bytes.
+Sat Oct 10 13:00:31 2026 -> Limits: MaxHTMLNoTags limit set to 8388608 bytes.
+Sat Oct 10 13:00:31 2026 -> Limits: MaxScriptNormalize limit set to 20971520 bytes.
+Sat Oct 10 13:00:31 2026 -> Limits: MaxZipTypeRcg limit set to 1048576 bytes.
+Sat Oct 10 13:00:31 2026 -> Limits: MaxPartitions limit set to 50.
+Sat Oct 10 13:00:31 2026 -> Limits: MaxIconsPE limit set to 100.
+Sat Oct 10 13:00:31 2026 -> Limits: MaxRecHWP3 limit set to 16.
+Sat Oct 10 13:00:31 2026 -> Limits: PCREMatchLimit limit set to 100000.
+Sat Oct 10 13:00:31 2026 -> Limits: PCRERecMatchLimit limit set to 2000.
+Sat Oct 10 13:00:31 2026 -> Limits: PCREMaxFileSize limit set to 104857600.
+Sat Oct 10 13:00:31 2026 -> Archive support enabled.
+Sat Oct 10 13:00:31 2026 -> Image (graphics) scanning support enabled.
+Sat Oct 10 13:00:31 2026 -> Detection using image fuzzy hash enabled.
+Sat Oct 10 13:00:31 2026 -> AlertExceedsMax heuristic detection disabled.
+Sat Oct 10 13:00:31 2026 -> Heuristic alerts enabled.
+Sat Oct 10 13:00:31 2026 -> Portable Executable support enabled.
+Sat Oct 10 13:00:31 2026 -> ELF support enabled.
+Sat Oct 10 13:00:31 2026 -> Mail files support enabled.
+Sat Oct 10 13:00:31 2026 -> OLE2 support enabled.
+Sat Oct 10 13:00:31 2026 -> PDF support enabled.
+Sat Oct 10 13:00:31 2026 -> SWF support enabled.
+Sat Oct 10 13:00:31 2026 -> HTML support enabled.
+Sat Oct 10 13:00:31 2026 -> XMLDOCS support enabled.
+Sat Oct 10 13:00:31 2026 -> HWP3 support enabled.
+Sat Oct 10 13:00:31 2026 -> OneNote support enabled.
+Sat Oct 10 13:00:31 2026 -> Self checking every 600 seconds.
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@49672): Lab.EICAR.UNOFFICIAL FOUND
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@49694): Lab.EICAR.UNOFFICIAL FOUND
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@49720): Lab.EICAR.UNOFFICIAL FOUND
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@49732): Lab.EICAR.UNOFFICIAL FOUND
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@49750): Lab.EICAR.UNOFFICIAL FOUND
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@49766): Lab.EICAR.UNOFFICIAL FOUND
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@49772): Lab.EICAR.UNOFFICIAL FOUND
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@49786): Lab.EICAR.UNOFFICIAL FOUND
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@49810): Lab.EICAR.UNOFFICIAL FOUND
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@49830): Lab.EICAR.UNOFFICIAL FOUND
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@49860): Lab.EICAR.UNOFFICIAL FOUND
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@49882): Lab.EICAR.UNOFFICIAL FOUND
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@49908): Lab.EICAR.UNOFFICIAL FOUND
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@49916): Lab.EICAR.UNOFFICIAL FOUND
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@49946): Lab.EICAR.UNOFFICIAL FOUND
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@49960): Lab.EICAR.UNOFFICIAL FOUND
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@49984): Lab.EICAR.UNOFFICIAL FOUND
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@50008): Lab.EICAR.UNOFFICIAL FOUND
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@50014): Lab.EICAR.UNOFFICIAL FOUND
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@50038): Lab.EICAR.UNOFFICIAL FOUND
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@50062): Lab.EICAR.UNOFFICIAL FOUND
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@50078): Lab.EICAR.UNOFFICIAL FOUND
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@50096): Lab.EICAR.UNOFFICIAL FOUND
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@50124): Lab.EICAR.UNOFFICIAL FOUND
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@50134): Lab.EICAR.UNOFFICIAL FOUND
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@50146): Lab.EICAR.UNOFFICIAL FOUND
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@50162): Lab.EICAR.UNOFFICIAL FOUND
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@50192): Lab.EICAR.UNOFFICIAL FOUND
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@50216): Lab.EICAR.UNOFFICIAL FOUND
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@50242): Lab.EICAR.UNOFFICIAL FOUND
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@50270): Lab.EICAR.UNOFFICIAL FOUND
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@50292): Lab.EICAR.UNOFFICIAL FOUND
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@50312): Lab.EICAR.UNOFFICIAL FOUND
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@50332): Lab.EICAR.UNOFFICIAL FOUND
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@50358): Lab.EICAR.UNOFFICIAL FOUND
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@50370): Lab.EICAR.UNOFFICIAL FOUND
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@50382): Lab.EICAR.UNOFFICIAL FOUND
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@50404): Lab.EICAR.UNOFFICIAL FOUND
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@50430): Lab.EICAR.UNOFFICIAL FOUND
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@50448): Lab.EICAR.UNOFFICIAL FOUND
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@50474): Can't create temporary directory ERROR
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@50480): Can't create temporary directory ERROR
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@50496): Can't create temporary directory ERROR
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@50508): Can't create temporary directory ERROR
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@50512): Can't create temporary directory ERROR
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@50518): Can't create temporary directory ERROR
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@50532): Can't create temporary directory ERROR
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@50548): Can't create temporary directory ERROR
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@50556): Can't create temporary directory ERROR
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@50558): Can't create temporary directory ERROR
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@50568): Can't create temporary directory ERROR
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@50574): Can't create temporary directory ERROR
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@50584): Can't create temporary directory ERROR
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@50586): Can't create temporary directory ERROR
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@50602): Can't create temporary directory ERROR
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@50610): Can't create temporary directory ERROR
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@50612): Can't create temporary directory ERROR
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@50616): Can't create temporary directory ERROR
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@50628): Can't create temporary directory ERROR
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@50644): Can't create temporary directory ERROR
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@50658): Can't create temporary directory ERROR
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@50674): Can't create temporary directory ERROR
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@50684): Can't create temporary directory ERROR
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@50700): Can't create temporary directory ERROR
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@50706): Can't create temporary directory ERROR
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@50716): Can't create temporary directory ERROR
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@50730): Can't create temporary directory ERROR
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@50740): Can't create temporary directory ERROR
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@50744): Can't create temporary directory ERROR
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@50760): Can't create temporary directory ERROR
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@50772): Can't create temporary directory ERROR
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@50784): Can't create temporary directory ERROR
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@50788): Can't create temporary directory ERROR
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@50802): Can't create temporary directory ERROR
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@50818): Can't create temporary directory ERROR
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@50822): Can't create temporary directory ERROR
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@50832): Can't create temporary directory ERROR
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@50842): Can't create temporary directory ERROR
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@50846): Can't create temporary directory ERROR
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@50862): Can't create temporary directory ERROR
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@50878): Can't create temporary directory ERROR
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@50884): Can't create temporary directory ERROR
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@50892): Can't create temporary directory ERROR
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@50896): Can't create temporary directory ERROR
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@50902): Can't create temporary directory ERROR
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@50904): Can't create temporary directory ERROR
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@50910): Can't create temporary directory ERROR
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@50914): Can't create temporary directory ERROR
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@50928): Can't create temporary directory ERROR
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@50940): Can't create temporary directory ERROR
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@50946): Can't create temporary directory ERROR
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@50950): Can't create temporary directory ERROR
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@50962): Can't create temporary directory ERROR
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@50974): Can't create temporary directory ERROR
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@50982): Can't create temporary directory ERROR
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@50998): Can't create temporary directory ERROR
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@51002): Can't create temporary directory ERROR
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@51018): Can't create temporary directory ERROR
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@51024): Can't create temporary directory ERROR
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@51040): Can't create temporary directory ERROR
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@51050): Can't create temporary directory ERROR
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@51058): Can't create temporary directory ERROR
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@51074): Can't create temporary directory ERROR
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@51080): Can't create temporary directory ERROR
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@51086): Can't create temporary directory ERROR
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@51094): Can't create temporary directory ERROR
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@51108): Can't create temporary directory ERROR
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@51118): Can't create temporary directory ERROR
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@51134): Can't create temporary directory ERROR
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@51142): Can't create temporary directory ERROR
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@51148): Can't create temporary directory ERROR
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@51152): Can't create temporary directory ERROR
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@51160): Can't create temporary directory ERROR
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@51168): Can't create temporary directory ERROR
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@51172): Can't create temporary directory ERROR
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@51176): Can't create temporary directory ERROR
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@51192): Can't create temporary directory ERROR
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@51202): Can't create temporary directory ERROR
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@51212): Can't create temporary directory ERROR
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@51228): Can't create temporary directory ERROR
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@51240): Can't create temporary directory ERROR
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@51242): Can't create temporary directory ERROR
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@51254): Can't create temporary directory ERROR
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@51260): Can't create temporary directory ERROR
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@51276): Can't create temporary directory ERROR
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@51290): Can't create temporary directory ERROR
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@51294): Can't create temporary directory ERROR
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@51298): Can't create temporary directory ERROR
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@51306): Can't create temporary directory ERROR
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@51316): Can't create temporary directory ERROR
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@51318): Can't create temporary directory ERROR
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@51324): Can't create temporary directory ERROR
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@51330): Can't create temporary directory ERROR
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@51334): Can't create temporary directory ERROR
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@51342): Can't create temporary directory ERROR
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@51358): Can't create temporary directory ERROR
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@51364): Can't create temporary directory ERROR
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@51372): Can't create temporary directory ERROR
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@51388): Can't create temporary directory ERROR
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@51400): Can't create temporary directory ERROR
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@51408): Can't create temporary directory ERROR
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@51412): Can't create temporary directory ERROR
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@51428): Can't create temporary directory ERROR
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@51442): Can't create temporary directory ERROR
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@51454): Can't create temporary directory ERROR
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@51456): Can't create temporary directory ERROR
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@51468): Can't create temporary directory ERROR
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@51470): Can't create temporary directory ERROR
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@51478): Can't create temporary directory ERROR
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@51488): Can't create temporary directory ERROR
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@51492): Can't create temporary directory ERROR
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@51496): Can't create temporary directory ERROR
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@51510): Can't create temporary directory ERROR
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@51518): Can't create temporary directory ERROR
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@51524): Can't create temporary directory ERROR
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@51526): Can't create temporary directory ERROR
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@51530): Can't create temporary directory ERROR
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@51532): Can't create temporary directory ERROR
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@51544): Can't create temporary directory ERROR
+Sat Oct 10 13:00:35 2026 -> instream(127.0.0.1@51550): Can't create temporary directory ERROR
+Sat Oct 10 13:00:35 2026 -> ERROR: INSTREAM: Can't write to temporary file.
+Sat Oct 10 13:00:35 2026 -> ERROR: INSTREAM: Can't write to temporary file.
+Sat Oct 10 13:00:35 2026 -> ERROR: INSTREAM: Can't write to temporary file.
+Sat Oct 10 13:00:35 2026 -> ERROR: INSTREAM: Can't write to temporary file.
+Sat Oct 10 13:00:35 2026 -> ERROR: INSTREAM: Can't write to temporary file.
+Sat Oct 10 13:00:35 2026 -> ERROR: INSTREAM: Can't write to temporary file.
+Sat Oct 10 13:00:35 2026 -> ERROR: INSTREAM: Can't write to temporary file.
+Sat Oct 10 13:00:35 2026 -> ERROR: INSTREAM: Can't write to temporary file.
+Sat Oct 10 13:00:35 2026 -> ERROR: INSTREAM: Can't write to temporary file.
+Sat Oct 10 13:00:35 2026 -> ERROR: INSTREAM: Can't write to temporary file.
+Sat Oct 10 13:00:35 2026 -> ERROR: INSTREAM: Can't write to temporary file.
+Sat Oct 10 13:00:35 2026 -> ERROR: INSTREAM: Can't write to temporary file.
+Sat Oct 10 13:00:35 2026 -> ERROR: INSTREAM: Can't write to temporary file.
+Sat Oct 10 13:00:35 2026 -> ERROR: INSTREAM: Can't write to temporary file.
+Sat Oct 10 13:00:35 2026 -> ERROR: INSTREAM: Can't write to temporary file.
+Sat Oct 10 13:00:35 2026 -> ERROR: INSTREAM: Can't write to temporary file.
+Sat Oct 10 13:00:35 2026 -> ERROR: INSTREAM: Can't write to temporary file.
+Sat Oct 10 13:00:35 2026 -> ERROR: INSTREAM: Can't write to temporary file.
+Sat Oct 10 13:00:35 2026 -> ERROR: INSTREAM: Can't write to temporary file.
+Sat Oct 10 13:00:35 2026 -> ERROR: INSTREAM: Can't write to temporary file.
+Sat Oct 10 13:00:35 2026 -> ERROR: INSTREAM: Can't write to temporary file.
+Sat Oct 10 13:00:35 2026 -> ERROR: INSTREAM: Can't write to temporary file.
+Sat Oct 10 13:00:35 2026 -> ERROR: INSTREAM: Can't write to temporary file.
+Sat Oct 10 13:00:35 2026 -> ERROR: INSTREAM: Can't write to temporary file.
+Sat Oct 10 13:00:35 2026 -> ERROR: INSTREAM: Can't write to temporary file.
+Sat Oct 10 13:00:35 2026 -> ERROR: INSTREAM: Can't write to temporary file.
+Sat Oct 10 13:00:35 2026 -> ERROR: INSTREAM: Can't write to temporary file.
+Sat Oct 10 13:00:35 2026 -> ERROR: INSTREAM: Can't write to temporary file.
+Sat Oct 10 13:00:35 2026 -> ERROR: INSTREAM: Can't write to temporary file.
+Sat Oct 10 13:00:35 2026 -> ERROR: INSTREAM: Can't write to temporary file.
+Sat Oct 10 13:00:35 2026 -> ERROR: INSTREAM: Can't write to temporary file.
+Sat Oct 10 13:00:35 2026 -> ERROR: INSTREAM: Can't write to temporary file.
+Sat Oct 10 13:00:35 2026 -> ERROR: INSTREAM: Can't write to temporary file.
+Sat Oct 10 13:00:35 2026 -> ERROR: INSTREAM: Can't write to temporary file.
+Sat Oct 10 13:00:35 2026 -> ERROR: INSTREAM: Can't write to temporary file.
+Sat Oct 10 13:00:35 2026 -> ERROR: INSTREAM: Can't write to temporary file.
+Sat Oct 10 13:00:35 2026 -> ERROR: INSTREAM: Can't write to temporary file.
+Sat Oct 10 13:00:35 2026 -> ERROR: INSTREAM: Can't write to temporary file.
+Sat Oct 10 13:00:35 2026 -> ERROR: INSTREAM: Can't write to temporary file.
+Sat Oct 10 13:00:35 2026 -> ERROR: INSTREAM: Can't write to temporary file.

@@ -1,0 +1,122 @@
+Sat Oct 10 13:00:26 2026 -> +++ Started at Sat Oct 10 13:00:26 2026
+Sat Oct 10 13:00:26 2026 -> Received 0 file descriptor(s) from systemd.
+Sat Oct 10 13:00:26 2026 -> clamd daemon 1.4.6 (OS: Linux, ARCH: x86_64, CPU: x86_64)
+Sat Oct 10 13:00:26 2026 -> Log file size limited to 1048576 bytes.
+Sat Oct 10 13:00:26 2026 -> Reading databases from /mnt/fp2src/db-stock
+Sat Oct 10 13:00:26 2026 -> Not loading PUA signatures.
+Sat Oct 10 13:00:26 2026 -> Bytecode: Security mode set to "TrustSigned".
+Sat Oct 10 13:00:26 2026 -> Loaded 1 signatures.
+Sat Oct 10 13:00:26 2026 -> TCP: Bound to [127.0.0.1]:3311
+Sat Oct 10 13:00:26 2026 -> TCP: Setting connection queue length to 200
+Sat Oct 10 13:00:26 2026 -> Limits: Global time limit set to 120000 milliseconds.
+Sat Oct 10 13:00:26 2026 -> Limits: Global size limit set to 419430400 bytes.
+Sat Oct 10 13:00:26 2026 -> Limits: File size limit set to 104857600 bytes.
+Sat Oct 10 13:00:26 2026 -> Limits: Recursion level limit set to 17.
+Sat Oct 10 13:00:26 2026 -> Limits: Files limit set to 10000.
+Sat Oct 10 13:00:26 2026 -> Limits: MaxEmbeddedPE limit set to 41943040 bytes.
+Sat Oct 10 13:00:26 2026 -> Limits: MaxHTMLNormalize limit set to 41943040 bytes.
+Sat Oct 10 13:00:26 2026 -> Limits: MaxHTMLNoTags limit set to 8388608 bytes.
+Sat Oct 10 13:00:26 2026 -> Limits: MaxScriptNormalize limit set to 20971520 bytes.
+Sat Oct 10 13:00:26 2026 -> Limits: MaxZipTypeRcg limit set to 1048576 bytes.
+Sat Oct 10 13:00:26 2026 -> Limits: MaxPartitions limit set to 50.
+Sat Oct 10 13:00:26 2026 -> Limits: MaxIconsPE limit set to 100.
+Sat Oct 10 13:00:26 2026 -> Limits: MaxRecHWP3 limit set to 16.
+Sat Oct 10 13:00:26 2026 -> Limits: PCREMatchLimit limit set to 100000.
+Sat Oct 10 13:00:26 2026 -> Limits: PCRERecMatchLimit limit set to 2000.
+Sat Oct 10 13:00:26 2026 -> Limits: PCREMaxFileSize limit set to 104857600.
+Sat Oct 10 13:00:26 2026 -> Archive support enabled.
+Sat Oct 10 13:00:26 2026 -> Image (graphics) scanning support enabled.
+Sat Oct 10 13:00:26 2026 -> Detection using image fuzzy hash enabled.
+Sat Oct 10 13:00:26 2026 -> AlertExceedsMax heuristic detection disabled.
+Sat Oct 10 13:00:26 2026 -> Heuristic alerts enabled.
+Sat Oct 10 13:00:26 2026 -> Portable Executable support enabled.
+Sat Oct 10 13:00:26 2026 -> ELF support enabled.
+Sat Oct 10 13:00:26 2026 -> Mail files support enabled.
+Sat Oct 10 13:00:26 2026 -> OLE2 support enabled.
+Sat Oct 10 13:00:26 2026 -> PDF support enabled.
+Sat Oct 10 13:00:26 2026 -> SWF support enabled.
+Sat Oct 10 13:00:26 2026 -> HTML support enabled.
+Sat Oct 10 13:00:26 2026 -> XMLDOCS support enabled.
+Sat Oct 10 13:00:26 2026 -> HWP3 support enabled.
+Sat Oct 10 13:00:26 2026 -> OneNote support enabled.
+Sat Oct 10 13:00:26 2026 -> Self checking every 600 seconds.
+Sat Oct 10 13:00:31 2026 -> instream(127.0.0.1@43118): Lab.EICAR.UNOFFICIAL FOUND
+Sat Oct 10 13:00:31 2026 -> instream(127.0.0.1@43136): Lab.EICAR.UNOFFICIAL FOUND
+Sat Oct 10 13:00:31 2026 -> instream(127.0.0.1@43162): Lab.EICAR.UNOFFICIAL FOUND
+Sat Oct 10 13:00:31 2026 -> instream(127.0.0.1@43180): Lab.EICAR.UNOFFICIAL FOUND
+Sat Oct 10 13:00:31 2026 -> instream(127.0.0.1@43202): Lab.EICAR.UNOFFICIAL FOUND
+Sat Oct 10 13:00:31 2026 -> instream(127.0.0.1@43224): Lab.EICAR.UNOFFICIAL FOUND
+Sat Oct 10 13:00:31 2026 -> instream(127.0.0.1@43244): Lab.EICAR.UNOFFICIAL FOUND
+Sat Oct 10 13:00:31 2026 -> instream(127.0.0.1@43266): Lab.EICAR.UNOFFICIAL FOUND
+Sat Oct 10 13:00:31 2026 -> instream(127.0.0.1@43282): Lab.EICAR.UNOFFICIAL FOUND
+Sat Oct 10 13:00:31 2026 -> instream(127.0.0.1@43310): Lab.EICAR.UNOFFICIAL FOUND
+Sat Oct 10 13:00:31 2026 -> instream(127.0.0.1@43328): Lab.EICAR.UNOFFICIAL FOUND
+Sat Oct 10 13:00:31 2026 -> instream(127.0.0.1@43346): Lab.EICAR.UNOFFICIAL FOUND
+Sat Oct 10 13:00:31 2026 -> instream(127.0.0.1@43374): Lab.EICAR.UNOFFICIAL FOUND
+Sat Oct 10 13:00:31 2026 -> instream(127.0.0.1@43386): Lab.EICAR.UNOFFICIAL FOUND
+Sat Oct 10 13:00:31 2026 -> instream(127.0.0.1@43398): Lab.EICAR.UNOFFICIAL FOUND
+Sat Oct 10 13:00:31 2026 -> instream(127.0.0.1@43422): Lab.EICAR.UNOFFICIAL FOUND
+Sat Oct 10 13:00:31 2026 -> instream(127.0.0.1@43436): Lab.EICAR.UNOFFICIAL FOUND
+Sat Oct 10 13:00:31 2026 -> instream(127.0.0.1@43452): Lab.EICAR.UNOFFICIAL FOUND
+Sat Oct 10 13:00:31 2026 -> instream(127.0.0.1@43474): Lab.EICAR.UNOFFICIAL FOUND
+Sat Oct 10 13:00:31 2026 -> instream(127.0.0.1@43498): Lab.EICAR.UNOFFICIAL FOUND
+Sat Oct 10 13:00:31 2026 -> instream(127.0.0.1@43514): Lab.EICAR.UNOFFICIAL FOUND
+Sat Oct 10 13:00:31 2026 -> instream(127.0.0.1@43528): Lab.EICAR.UNOFFICIAL FOUND
+Sat Oct 10 13:00:31 2026 -> instream(127.0.0.1@43548): Lab.EICAR.UNOFFICIAL FOUND
+Sat Oct 10 13:00:31 2026 -> instream(127.0.0.1@43570): Lab.EICAR.UNOFFICIAL FOUND
+Sat Oct 10 13:00:31 2026 -> instream(127.0.0.1@43580): Lab.EICAR.UNOFFICIAL FOUND
+Sat Oct 10 13:00:31 2026 -> instream(127.0.0.1@43594): Lab.EICAR.UNOFFICIAL FOUND
+Sat Oct 10 13:00:31 2026 -> instream(127.0.0.1@43606): Lab.EICAR.UNOFFICIAL FOUND
+Sat Oct 10 13:00:31 2026 -> instream(127.0.0.1@43620): Lab.EICAR.UNOFFICIAL FOUND
+Sat Oct 10 13:00:31 2026 -> instream(127.0.0.1@43640): Lab.EICAR.UNOFFICIAL FOUND
+Sat Oct 10 13:00:31 2026 -> instream(127.0.0.1@43662): Lab.EICAR.UNOFFICIAL FOUND
+Sat Oct 10 13:00:31 2026 -> instream(127.0.0.1@43686): Lab.EICAR.UNOFFICIAL FOUND
+Sat Oct 10 13:00:31 2026 -> instream(127.0.0.1@43704): Lab.EICAR.UNOFFICIAL FOUND
+Sat Oct 10 13:00:31 2026 -> instream(127.0.0.1@43712): Lab.EICAR.UNOFFICIAL FOUND
+Sat Oct 10 13:00:31 2026 -> instream(127.0.0.1@43738): Lab.EICAR.UNOFFICIAL FOUND
+Sat Oct 10 13:00:31 2026 -> instream(127.0.0.1@43752): Lab.EICAR.UNOFFICIAL FOUND
+Sat Oct 10 13:00:31 2026 -> instream(127.0.0.1@43770): Lab.EICAR.UNOFFICIAL FOUND
+Sat Oct 10 13:00:31 2026 -> instream(127.0.0.1@43786): Lab.EICAR.UNOFFICIAL FOUND
+Sat Oct 10 13:00:31 2026 -> instream(127.0.0.1@43802): Lab.EICAR.UNOFFICIAL FOUND
+Sat Oct 10 13:00:31 2026 -> instream(127.0.0.1@43822): Lab.EICAR.UNOFFICIAL FOUND
+Sat Oct 10 13:00:31 2026 -> instream(127.0.0.1@43826): Lab.EICAR.UNOFFICIAL FOUND
+Sat Oct 10 13:00:31 2026 -> ERROR: INSTREAM: Can't write to temporary file.
+Sat Oct 10 13:00:31 2026 -> ERROR: INSTREAM: Can't write to temporary file.
+Sat Oct 10 13:00:31 2026 -> ERROR: INSTREAM: Can't write to temporary file.
+Sat Oct 10 13:00:31 2026 -> ERROR: INSTREAM: Can't write to temporary file.
+Sat Oct 10 13:00:31 2026 -> ERROR: INSTREAM: Can't write to temporary file.
+Sat Oct 10 13:00:31 2026 -> ERROR: INSTREAM: Can't write to temporary file.
+Sat Oct 10 13:00:31 2026 -> ERROR: INSTREAM: Can't write to temporary file.
+Sat Oct 10 13:00:31 2026 -> ERROR: INSTREAM: Can't write to temporary file.
+Sat Oct 10 13:00:31 2026 -> ERROR: INSTREAM: Can't write to temporary file.
+Sat Oct 10 13:00:31 2026 -> ERROR: INSTREAM: Can't write to temporary file.
+Sat Oct 10 13:00:31 2026 -> ERROR: INSTREAM: Can't write to temporary file.
+Sat Oct 10 13:00:31 2026 -> ERROR: INSTREAM: Can't write to temporary file.
+Sat Oct 10 13:00:31 2026 -> ERROR: INSTREAM: Can't write to temporary file.
+Sat Oct 10 13:00:31 2026 -> ERROR: INSTREAM: Can't write to temporary file.
+Sat Oct 10 13:00:31 2026 -> ERROR: INSTREAM: Can't write to temporary file.
+Sat Oct 10 13:00:31 2026 -> ERROR: INSTREAM: Can't write to temporary file.
+Sat Oct 10 13:00:31 2026 -> ERROR: INSTREAM: Can't write to temporary file.
+Sat Oct 10 13:00:31 2026 -> ERROR: INSTREAM: Can't write to temporary file.
+Sat Oct 10 13:00:31 2026 -> ERROR: INSTREAM: Can't write to temporary file.
+Sat Oct 10 13:00:31 2026 -> ERROR: INSTREAM: Can't write to temporary file.
+Sat Oct 10 13:00:31 2026 -> ERROR: INSTREAM: Can't write to temporary file.
+Sat Oct 10 13:00:31 2026 -> ERROR: INSTREAM: Can't write to temporary file.
+Sat Oct 10 13:00:31 2026 -> ERROR: INSTREAM: Can't write to temporary file.
+Sat Oct 10 13:00:31 2026 -> ERROR: INSTREAM: Can't write to temporary file.
+Sat Oct 10 13:00:31 2026 -> ERROR: INSTREAM: Can't write to temporary file.
+Sat Oct 10 13:00:31 2026 -> ERROR: INSTREAM: Can't write to temporary file.
+Sat Oct 10 13:00:31 2026 -> ERROR: INSTREAM: Can't write to temporary file.
+Sat Oct 10 13:00:31 2026 -> ERROR: INSTREAM: Can't write to temporary file.
+Sat Oct 10 13:00:31 2026 -> ERROR: INSTREAM: Can't write to temporary file.
+Sat Oct 10 13:00:31 2026 -> ERROR: INSTREAM: Can't write to temporary file.
+Sat Oct 10 13:00:31 2026 -> ERROR: INSTREAM: Can't write to temporary file.
+Sat Oct 10 13:00:31 2026 -> ERROR: INSTREAM: Can't write to temporary file.
+Sat Oct 10 13:00:31 2026 -> ERROR: INSTREAM: Can't write to temporary file.
+Sat Oct 10 13:00:31 2026 -> ERROR: INSTREAM: Can't write to temporary file.
+Sat Oct 10 13:00:31 2026 -> ERROR: INSTREAM: Can't write to temporary file.
+Sat Oct 10 13:00:31 2026 -> ERROR: INSTREAM: Can't write to temporary file.
+Sat Oct 10 13:00:31 2026 -> ERROR: INSTREAM: Can't write to temporary file.
+Sat Oct 10 13:00:31 2026 -> ERROR: INSTREAM: Can't write to temporary file.
+Sat Oct 10 13:00:31 2026 -> ERROR: INSTREAM: Can't write to temporary file.
+Sat Oct 10 13:00:31 2026 -> ERROR: INSTREAM: Can't write to temporary file.

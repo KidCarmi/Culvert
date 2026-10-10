@@ -82,8 +82,15 @@ and does NOT need an earlier error.
 
 ClamAV 1.4.6 built from the release source twice on one host, stock and
 with only the line above changed to `CL_ETMPDIR`, with the same config, a
-one-signature database and the same 4 KiB edge state. Result: PENDING
-(`fp2-source-1.4.6/verdict.txt` once the run completes).
+one-signature database and the same 4 KiB edge state (release tarball
+sha256 `06dbc7adf96e2f6a27c548a841ce83c95360d1e121b106a6f7cf56f282a3c61b`):
+
+| build | control (no pressure) | edge (4 KiB free) | full (0 free) |
+|---|---|---|---|
+| stock | 40/40 EICAR `FOUND` | **60/60 EICAR bare `OK`**, no earlier error | `ERROR` + `OK` |
+| one-line patch | 40/40 EICAR `FOUND` | **60/60 `... Can't create temporary directory ERROR`** | `ERROR` + `OK` |
+
+The patch is the only difference between the two builds (`patch.diff`).
 
 ## Attachments
 

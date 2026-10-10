@@ -45,7 +45,37 @@ before any fill, and the tap recorded that conversation with its FOUND reply.
   reserved clusters, which even root cannot allocate. All 14 cycles were the
   same full-disk state.
 
-## Disposition: MITIGATED on the product (reactive), root cause OPEN upstream
+## Root cause (2026-10-10, owner follow-up 6097484537)
+
+**libclamav 1.4.6 returns CLEAN for a file it never scanned when it cannot
+create its per-scan temp directory.** `scan_common()` (`libclamav/scanners.c`)
+sets `status = CL_EACCES` when `mkdir(ctx.sub_tmpdir)` fails and jumps to
+`done`; the done-path filter `result_should_goto_done()` does not list
+`CL_EACCES` among the halting codes and rewrites it to `CL_SUCCESS`, so
+clamd replies `stream: OK`. The client receives no error.
+
+* **Deterministic and fault-free** (`fp2-isolated-bad788e5/`, run 38053156677):
+  the exact sidecar from the retained bad788e5 OVA, stock clamd.conf,
+  scripted client, clamd's /tmp alone on a 256 MiB ext4. With exactly
+  4096 bytes free — room for the spooled body, none for the directory —
+  every EICAR (40/40, serial) was answered a bare OK in a median 0.61 ms
+  (FOUND: 4.45 ms) with NO earlier error in its cycle; clamd logged 118
+  "Can't create temporary directory for scan". With 8-way concurrency the
+  same happens at 16–64 KiB free (concurrent spools consume the headroom).
+* **Causal** (`fp2-source-1.4.6/`, run 38053729565): 1.4.6 built from the
+  release source twice; stock answers 60/60 EICAR OK at the edge, the
+  one-line patch (`CL_EACCES` → `CL_ETMPDIR`) answers 60/60 ERROR. Controls
+  40/40 FOUND on both.
+* **Attribution:** scanner, not Culvert's client (scripted client), not
+  concurrency (serial), not the harness (both builds, same harness).
+
+**Consequence for the product:** the Culvert quarantine is armed by a fault
+reply; this failure emits none, so the quarantine cannot catch it. In the
+appliance the edge is reachable by host-disk pressure (clamd's /tmp is on
+the guest root filesystem) and, with concurrency, from more headroom than a
+single request needs. F-P2 stays OPEN and blocks production readiness.
+
+## Disposition: MITIGATED on the product (reactive), root cause FOUND upstream (report not filed)
 
 Owner decision (2026-10-10): options 2 + 3 below; option 1 not taken without
 lab-proven size caps.
