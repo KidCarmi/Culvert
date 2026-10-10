@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bufio"
+	"bytes"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -487,7 +489,13 @@ func loadFileConfig(path string) (*FileConfig, error) {
 	}
 	defer f.Close()
 
-	dec := yaml.NewDecoder(f, yaml.DisallowUnknownField())
+	// Skip a leading UTF-8 BOM (Windows editors write one): the decoder would
+	// otherwise fold it into the first key and reject it as an unknown field.
+	br := bufio.NewReader(f)
+	if b, err := br.Peek(3); err == nil && bytes.Equal(b, []byte{0xEF, 0xBB, 0xBF}) {
+		_, _ = br.Discard(3)
+	}
+	dec := yaml.NewDecoder(br, yaml.DisallowUnknownField())
 	var fc FileConfig
 	if err := dec.Decode(&fc); err != nil {
 		// An empty, whitespace-only, or comment-only document is not
