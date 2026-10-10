@@ -898,7 +898,7 @@ jobs:
           echo "$got  /var/lib/culvert-appliance/images/clamav.tar.gz" | tee "$E/archive.sha256"
           [ "$got" = "$SIDECAR_ARCHIVE_SHA256" ] || { echo "::error::archive sha256 $got, expected $SIDECAR_ARCHIVE_SHA256"; exit 1; }
           gunzip -c clamav.tar.gz > clamav.tar
-          cfg="$(test/e2e/appliance/lab/sidecar-scan.sh bind "$W/clamav.tar" "$SIDECAR_INDEX" top "$E/binding.json")"
+          cfg="$("$GITHUB_WORKSPACE/test/e2e/appliance/lab/sidecar-scan.sh" bind "$W/clamav.tar" "$SIDECAR_INDEX" top "$E/binding.json")"
           docker load -i clamav.tar | tee "$E/docker-load.txt"
           ref="$(sed -n 's/^Loaded image: //p; s/^Loaded image ID: //p' "$E/docker-load.txt" | head -1)"
           id="$(docker image inspect -f '{{.Id}}' "$ref")"
