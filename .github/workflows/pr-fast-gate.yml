@@ -88,6 +88,7 @@ jobs:
       agent: ${{ steps.classify.outputs.agent }}
       mcp_docs: ${{ steps.classify.outputs.mcp_docs }}
       frontend: ${{ steps.classify.outputs.frontend }}
+      guidance: ${{ steps.classify.outputs.guidance }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -117,6 +118,7 @@ jobs:
                 echo "agent=true"    >> "$GITHUB_OUTPUT"
                 echo "mcp_docs=true" >> "$GITHUB_OUTPUT"
                 echo "frontend=true" >> "$GITHUB_OUTPUT"
+                echo "guidance=true" >> "$GITHUB_OUTPUT"
                 echo "Manual run — all jobs enabled."
                 exit 0 ;;
             esac
@@ -144,6 +146,7 @@ jobs:
           agent=false
           mcp_docs=false
           frontend=false
+          guidance=false
           while IFS= read -r f; do
             case "$f" in
               # Load-bearing docs: docs_saml_test.go reads this file at test
@@ -182,12 +185,29 @@ jobs:
               .github/workflows/pr-fast-gate.yml) frontend=true ;;
               .gitattributes|.gitignore|.dockerignore) frontend=true ;;
             esac
+            # Agent guidance surface (docs/agent-context/check.py). Its OWN
+            # `case`, same rationale as mcp_docs: to the docs/code classifier
+            # above these are documentation (code stays false, so a guidance-
+            # only PR never pays for the race suite), but the integrity job
+            # must run whenever a registered guidance path, a guidance-SHAPED
+            # path the checker must refuse (a nested AGENTS.md, a stray skill,
+            # a .claude/rules file), the checker itself or this workflow
+            # changes. `*` matches `/` in a bash case, so `*/AGENTS.md` sees
+            # every nested adapter and `docs/agent-context/*` every depth.
+            case "$f" in
+              AGENTS.md|CLAUDE.md|AGENTS.override.md) guidance=true ;;
+              */AGENTS.md|*/CLAUDE.md|*/AGENTS.override.md) guidance=true ;;
+              .agents/skills/*|.claude/skills/*|.claude/rules/*) guidance=true ;;
+              docs/agent-context/*) guidance=true ;;
+              .github/workflows/pr-fast-gate.yml) guidance=true ;;
+            esac
           done < changed.txt
           echo "code=$code"         >> "$GITHUB_OUTPUT"
           echo "agent=$agent"       >> "$GITHUB_OUTPUT"
           echo "mcp_docs=$mcp_docs" >> "$GITHUB_OUTPUT"
           echo "frontend=$frontend" >> "$GITHUB_OUTPUT"
-          echo "code=$code agent=$agent mcp_docs=$mcp_docs frontend=$frontend"
+          echo "guidance=$guidance" >> "$GITHUB_OUTPUT"
+          echo "code=$code agent=$agent mcp_docs=$mcp_docs frontend=$frontend guidance=$guidance"
 
   # ─── 1. Hygiene: fmt + vet + build (incl. arm64 compile + static assert) ──
   hygiene:
@@ -240,7 +260,9 @@ jobs:
   lint:
     name: "Gate · golangci-lint"
     runs-on: ubuntu-latest
-    timeout-minutes: 12
+    # The job bound stays above golangci-lint's own --timeout below, so a slow
+    # analysis is reported by the linter, never by a job kill.
+    timeout-minutes: 15
     needs: changes
     if: needs.changes.outputs.code == 'true'
     steps:
@@ -261,15 +283,13 @@ jobs:
         # (reviewdog filter_mode: diff_context in code-review.yml) only
         # fails on issues in the PR's changed lines. --new-from-rev is the
         # native equivalent: fail only on issues introduced vs the merge base.
-        #
-        # --timeout is the ANALYSIS budget, not a finding: --new-from-rev
-        # filters issues but still type-checks and analyses the whole module,
-        # so the cost tracks the size of the root package, not the diff. It
-        # measured 265 s and then 312 s against a 300 s budget on consecutive
-        # runs of the same tree (PR #1528), i.e. runner variance alone decided
-        # pass or fail with "0 issues" reported. 10m keeps the step inside the
-        # job's 12-minute limit (setup + install take ~90 s) and changes no
-        # linter, scope or finding.
+        # --timeout=10m is the analysis budget, not a lint rule: --new-from-rev
+        # filters issues but still type-checks and analyses the whole module, so
+        # the cost tracks the root package, not the diff. Measured: 265 s then
+        # 312 s on consecutive runs of the same tree (PR #1528), and 4m26s warm
+        # vs over 5m cold with 0 issues (run 38039945922) — 5m measured runner
+        # speed. 10m stays inside the job's limit and changes no linter, scope
+        # or finding.
         run: |
           BASE_REF="${GITHUB_BASE_REF:-main}"
           git fetch --no-tags origin "$BASE_REF"
@@ -527,6 +547,81 @@ jobs:
       - name: Run MCP design-document predicates
         run: .github/scripts/mcp-doc-predicates.sh
 
+  # ─── 8b. Agent guidance integrity — gated on the guidance surface ─────────
+  # docs/agent-context/check.py is the static wall for the decomposed agent
+  # guidance (AGENTS.md + Claude adapters + docs/agent-context + native skills):
+  # the lossless reconstruction of the pre-decomposition CLAUDE.md (108 pinned
+  # blocks, byte and blob identity), every declared task-route→block edge, the
+  # exact eager-import allowlist of the Claude adapters (transitive imports
+  # refused), parity of the two native skill copies, the registered-guidance
+  # inventory (an unregistered nested AGENTS.md or skill fails), and the load
+  # budgets. Without this job it ran only when a contributor remembered to.
+  #
+  # --self-test additionally proves the checker can FAIL, by corrupting copies
+  # (a wrong hash, a retargeted route, an extra import, skill drift, an oversize
+  # root) and requiring each to be rejected — a gate that cannot fail is not a
+  # gate. --diff-base applies the per-PR scope rule: every changed guidance-
+  # shaped path must be one the checker registers. The base is resolved per
+  # event below and its ABSENCE is a failure, never a silent skip of the rule.
+  #
+  # Stdlib Python + Git only: no installs, no network, no document mutation.
+  docs-guidance:
+    name: "Gate · agent guidance (routes + preservation)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: changes
+    if: needs.changes.outputs.guidance == 'true'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0    # the comparison base must be a resolvable commit, whatever the event
+
+      - name: Python version
+        run: python3 --version
+
+      - name: Resolve the comparison base
+        id: base
+        env:
+          EVENT: ${{ github.event_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          BASE_REF: ${{ github.base_ref || 'main' }}
+        run: |
+          set -euo pipefail
+          case "$EVENT" in
+            pull_request)
+              # The checkout is the PR merge commit; its first parent is the
+              # base tip the merge was computed against, so the diff against
+              # it is exactly this PR's change set (the classifier's own rule).
+              [ -n "$PR_BASE_SHA" ] || { echo "::error::pull_request event carries no base SHA — cannot scope the guidance check"; exit 1; }
+              parents=$(git rev-list --parents -n1 HEAD | wc -w)
+              [ "$parents" -eq 3 ] || { echo "::error::HEAD is not a merge commit ($((parents - 1)) parent(s)); cannot derive the PR base"; exit 1; }
+              base=$(git rev-parse --verify HEAD^1)
+              if [ "$base" != "$PR_BASE_SHA" ]; then
+                echo "::notice::base branch moved since the event: event base $PR_BASE_SHA, merge-commit base $base (using the merge-commit base)"
+              fi
+              ;;
+            workflow_dispatch)
+              # A dispatch checks out the branch head, not a merge commit: the
+              # change set is everything since it forked from the base branch.
+              git fetch --no-tags origin "$BASE_REF"
+              base=$(git merge-base "origin/$BASE_REF" HEAD) || { echo "::error::no merge base between HEAD and origin/$BASE_REF"; exit 1; }
+              ;;
+            *)
+              echo "::error::unsupported event '$EVENT': no comparison-base rule is defined for it"
+              exit 1 ;;
+          esac
+          git cat-file -e "${base}^{commit}" || { echo "::error::comparison base $base is not present in the checkout"; exit 1; }
+          echo "base=$base" >> "$GITHUB_OUTPUT"
+          echo "comparison base for $EVENT: $base"
+
+      - name: Guidance integrity, self-test and PR-scope check
+        env:
+          BASE: ${{ steps.base.outputs.base }}
+        run: |
+          set -euo pipefail
+          [ -n "$BASE" ] || { echo "::error::comparison base was not resolved"; exit 1; }
+          python3 docs/agent-context/check.py --self-test --diff-base "$BASE"
+
   # ─── 9. Proxy traffic smoke — ADVISORY (promotion criteria in doc) ────────
   # Hermetic in-process traffic-plane e2e (HTTP forward, CONNECT relay,
   # SOCKS5, policy allow/block/default-deny). Advisory until it shows a
@@ -742,6 +837,7 @@ jobs:
       - gitleaks
       - agent
       - mcp-predicates
+      - docs-guidance
       - frontend
       - race-unsharded-audit
       - race-unsharded-audit-compare
@@ -752,10 +848,14 @@ jobs:
         with:
           needs-json: ${{ toJSON(needs) }}
           title: "✅ Fast PR Gate — APPROVED"
+          # A guidance diff requires docs-guidance to be exactly `success` for
+          # the same reason a code diff requires the race path: a gate that was
+          # skipped for any reason other than the classifier must not read green.
           require-success: >-
-            ${{ format('changes{0}{1}',
+            ${{ format('changes{0}{1}{2}',
                 needs.changes.outputs.code == 'true' && ',test-race,coverage-floors' || '',
-                inputs.unsharded_audit && ',race-unsharded-audit,race-unsharded-audit-compare' || '') }}
+                inputs.unsharded_audit && ',race-unsharded-audit,race-unsharded-audit-compare' || '',
+                needs.changes.outputs.guidance == 'true' && ',docs-guidance' || '') }}
 
       - name: Qualification runs never approve
         if: github.event_name == 'workflow_dispatch' && inputs.fault != 'none'

@@ -606,6 +606,24 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Changed
 
+- The pinned Go compiler moves from 1.26.8 to **1.26.9** (`go.mod` `toolchain`
+  line and the digest-pinned `golang:1.26.9-alpine` builder images, index
+  `sha256:cdfd4fe2…`, verified against Docker Hub), and `golang.org/x/net`
+  from v0.59.0 to v0.60.0. Both are the fixes govulncheck named for twelve
+  standard-library advisories (`html/template`, among others, fixed in
+  1.26.9) and GO-2026-6617 (an HTTP/2 HPACK encoder race reachable from the
+  inspected-HTTP/2 tunnel and the control-plane gRPC server); the Fast gate's
+  `govulncheck` job was red on every code-classified PR until both moved.
+  The candidate-promotion test fixtures now read the compiler from `go.mod`
+  instead of repeating the literal. The frontend lockfile takes the semver-
+  compatible `npm audit fix` for four dev-tree advisories
+  (`http-cache-semantics`, `ip-address`, `postcss-selector-parser`,
+  `source-map-js`); the committed `frontend/dist` is byte-identical.
+- The Fast gate's agent-guidance checker (`docs/agent-context/check.py`) now
+  runs as the `docs-guidance` job on every pull request that touches a
+  guidance path, and root `CLAUDE.md` eagerly imports
+  `docs/agent-context/conventions.md`. The golangci-lint analysis budget is
+  10 minutes (it exceeded 5 with 0 issues on a cold runner).
 - The production image now cross-compiles the proxy and the bundled
   maintenance agent on the build platform instead of compiling them under QEMU
   for arm64. The shipped binaries are byte-identical to before; only the build

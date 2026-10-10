@@ -42,6 +42,8 @@ const (
 	fastAuditJob           = "race-unsharded-audit"
 	fastAuditCompareJob    = "race-unsharded-audit-compare"
 	fastAggregateJob       = "fast-gate-approved"
+	fastGuidanceJob        = "docs-guidance"
+	fastGuidanceChecker    = "docs/agent-context/check.py"
 	fastAggregateName      = "✅ Fast PR Gate — APPROVED"
 	fastCoverageArtifact   = "fast-gate-coverage"
 	fastPrivilegedTest     = "TestRestoreCommit_DataDirIsMountPoint_Commits"
@@ -261,7 +263,7 @@ func TestFastGateRace_AggregateRefusesAnIncompleteRacePath(t *testing.T) {
 		needs[toStr(n)] = true
 	}
 	for _, want := range []string{"changes", "hygiene", "lint", fastRaceJob, fastFloorsJob, "benchgate", "security-fast",
-		"gitleaks", "agent", "mcp-predicates", "frontend", fastAuditJob, fastAuditCompareJob} {
+		"gitleaks", "agent", "mcp-predicates", fastGuidanceJob, "frontend", fastAuditJob, fastAuditCompareJob} {
 		if !needs[want] {
 			t.Errorf("the aggregate must need %q", want)
 		}
@@ -281,9 +283,10 @@ func TestFastGateRace_AggregateRefusesAnIncompleteRacePath(t *testing.T) {
 	}
 	req := normaliseExpr(toStr(asMap(verdict["with"])["require-success"]))
 	for _, want := range []string{
-		"format('changes{0}{1}'",
+		"format('changes{0}{1}{2}'",
 		"needs.changes.outputs.code == 'true' && '," + fastRaceJob + "," + fastFloorsJob + "'",
 		"inputs.unsharded_audit && '," + fastAuditJob + "," + fastAuditCompareJob + "'",
+		"needs.changes.outputs.guidance == 'true' && '," + fastGuidanceJob + "'",
 	} {
 		if !strings.Contains(req, want) {
 			t.Errorf("require-success must contain %q — a skipped migrated race path must not read as green on a code diff (got %q)", want, req)
@@ -379,6 +382,48 @@ func TestFastGateRace_AuditMatchesTheQAAudit(t *testing.T) {
 	for _, n := range uploadedArtifacts(t, fastGateWorkflowPath, fastAuditJob, fastAuditCompareJob) {
 		if !strings.HasPrefix(n, "fast-audit-") {
 			t.Errorf("Fast audit artifact %q lacks the fast-audit- prefix", n)
+		}
+	}
+}
+
+// TestFastGateGuidance_JobContract pins the agent-guidance gate: it runs exactly
+// when the classifier saw the guidance surface, it runs the checker's self-test
+// (a gate that cannot fail is not a gate) under the per-PR scope rule, and the
+// comparison base is resolved per event with a missing base as an explicit
+// failure — never a silent run without the scope rule.
+func TestFastGateGuidance_JobContract(t *testing.T) {
+	j := asMap(fastJobs(t)[fastGuidanceJob])
+	if j == nil {
+		t.Fatalf("the Fast gate must carry the %q job", fastGuidanceJob)
+	}
+	if got := normaliseExpr(toStr(j["if"])); got != "needs.changes.outputs.guidance == 'true'" {
+		t.Errorf("%s must run exactly when the classifier says guidance (got if: %q)", fastGuidanceJob, got)
+	}
+	var base, check string
+	for _, st := range jobSteps(j) {
+		s := asMap(st)
+		run := shellCodeOnly(toStr(s["run"]))
+		if toStr(s["id"]) == "base" {
+			base = run
+		}
+		if strings.Contains(run, fastGuidanceChecker) {
+			check = run
+		}
+	}
+	if base == "" {
+		t.Fatal("the guidance job must resolve the comparison base in a step with id: base")
+	}
+	for _, want := range []string{"pull_request)", "workflow_dispatch)", "exit 1", "git cat-file -e", `base=$base`} {
+		if !strings.Contains(base, want) {
+			t.Errorf("base resolution must contain %q — each supported event gets a rule and a missing base fails (got %q)", want, base)
+		}
+	}
+	if check == "" {
+		t.Fatalf("the guidance job must run %s", fastGuidanceChecker)
+	}
+	for _, want := range []string{"--self-test", `--diff-base "$BASE"`, `[ -n "$BASE" ]`} {
+		if !strings.Contains(check, want) {
+			t.Errorf("the checker invocation must contain %q (got %q)", want, check)
 		}
 	}
 }
@@ -487,7 +532,27 @@ func TestFastGateRace_ClassifierBehaviour(t *testing.T) {
 		want               map[string]string
 	}{
 		{"PR docs-only skips code", "pull_request", "none", touch("README.md", "docs/operator/x.md", "roadmap/y.md"),
-			map[string]string{"code": "false", "agent": "false", "mcp_docs": "false", "frontend": "false"}},
+			map[string]string{"code": "false", "agent": "false", "mcp_docs": "false", "frontend": "false", "guidance": "false"}},
+		// Every registered guidance path class, plus the checker and its
+		// metadata: documentation to the code classifier (no race suite), but
+		// the guidance gate must run. A nested adapter under internal/ is the
+		// case most easily lost — it is still Markdown, not package code.
+		{"PR guidance-only diff skips code and runs the guidance gate", "pull_request", "none",
+			touch("AGENTS.md", "CLAUDE.md", "internal/admission/AGENTS.md", "internal/admission/CLAUDE.md",
+				"docs/agent-context/check.py", "docs/agent-context/preservation-map.json",
+				"docs/agent-context/domains/admission.md", "docs/agent-context/history/scanning.md",
+				"docs/agent-context/workflows/verification.md",
+				".agents/skills/culvert-verify/SKILL.md", ".claude/skills/culvert-verify/SKILL.md"),
+			map[string]string{"code": "false", "agent": "false", "mcp_docs": "false", "frontend": "false", "guidance": "true"}},
+		// Guidance-SHAPED paths the checker exists to refuse must reach it too.
+		{"PR stray nested guide or rules file runs the guidance gate", "pull_request", "none",
+			touch("internal/connlimit/AGENTS.md", ".claude/rules/x.md", "AGENTS.override.md"),
+			map[string]string{"code": "false", "guidance": "true"}},
+		// An ancillary file beside a registered skill, in either tree: the
+		// checker refuses it, so the gate must see it.
+		{"PR ancillary skill-tree file runs the guidance gate", "pull_request", "none",
+			touch(".agents/skills/culvert-verify/reference.md"),
+			map[string]string{"code": "false", "guidance": "true"}},
 		{"PR code change runs code", "pull_request", "none", touch("proxy.go"),
 			map[string]string{"code": "true", "agent": "false", "mcp_docs": "false", "frontend": "false"}},
 		{"PR admission engine and tests run code", "pull_request", "none", touch("internal/admission/engine.go", "internal/admission/security_test.go"),
@@ -496,8 +561,8 @@ func TestFastGateRace_ClassifierBehaviour(t *testing.T) {
 			map[string]string{"code": "true"}},
 		{"PR agent change", "pull_request", "none", touch("cmd/culvert-maint/main.go"),
 			map[string]string{"code": "true", "agent": "true"}},
-		{"PR workflow change runs code, MCP and frontend gates", "pull_request", "none", touch(".github/workflows/pr-fast-gate.yml"),
-			map[string]string{"code": "true", "mcp_docs": "true", "frontend": "true"}},
+		{"PR workflow change runs code, MCP, frontend and guidance gates", "pull_request", "none", touch(".github/workflows/pr-fast-gate.yml"),
+			map[string]string{"code": "true", "mcp_docs": "true", "frontend": "true", "guidance": "true"}},
 		{"PR move out of the MCP surface is still classified", "pull_request", "none", moveOut,
 			map[string]string{"mcp_docs": "true"}},
 		// A pull request never sees a fault (no inputs); even if the env
@@ -505,9 +570,9 @@ func TestFastGateRace_ClassifierBehaviour(t *testing.T) {
 		{"PR ignores a stray fault value", "pull_request", "docs-only", touch("proxy.go"),
 			map[string]string{"code": "true"}},
 		{"dispatch runs everything", "workflow_dispatch", "none", touch("README.md"),
-			map[string]string{"code": "true", "agent": "true", "mcp_docs": "true", "frontend": "true"}},
+			map[string]string{"code": "true", "agent": "true", "mcp_docs": "true", "frontend": "true", "guidance": "true"}},
 		{"dispatch docs-only simulation", "workflow_dispatch", "docs-only", touch("proxy.go"),
-			map[string]string{"code": "false", "agent": "false", "mcp_docs": "false", "frontend": "false"}},
+			map[string]string{"code": "false", "agent": "false", "mcp_docs": "false", "frontend": "false", "guidance": "false"}},
 		{"dispatch engine fault still runs everything", "workflow_dispatch", "shard-evidence-missing", touch("README.md"),
 			map[string]string{"code": "true"}},
 	}
